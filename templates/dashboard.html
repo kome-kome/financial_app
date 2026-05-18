@@ -193,6 +193,8 @@ function esc(s){return String(s??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').
 function showNotif(msg, type='error'){
   const el = document.createElement('div');
   el.textContent = msg;
+  el.setAttribute('role', type==='error' ? 'alert' : 'status');
+  el.setAttribute('aria-live', type==='error' ? 'assertive' : 'polite');
   const bg = type==='error' ? '#ef4444' : type==='success' ? '#10b981' : '#3b82f6';
   el.style.cssText = `position:fixed;bottom:20px;right:20px;z-index:9999;padding:10px 16px;border-radius:6px;font-size:13px;color:#fff;max-width:420px;background:${bg};box-shadow:0 4px 12px rgba(0,0,0,.4)`;
   document.body.appendChild(el);

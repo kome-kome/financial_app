@@ -163,7 +163,7 @@ tr:hover td{background:#1e2235}
         <span class="spinner"></span>
         <span class="text-sm" id="smart-progress-label">判定中...</span>
       </div>
-      <div class="progress-bar"><div class="progress-fill" id="smart-progress-fill" style="width:0%;background:linear-gradient(90deg,#6d28d9,#a78bfa)"></div></div>
+      <div class="progress-bar" role="progressbar" aria-valuemin="0" aria-valuemax="100"><div class="progress-fill" id="smart-progress-fill" style="width:0%;background:linear-gradient(90deg,#6d28d9,#a78bfa)"></div></div>
     </div>
   </div>
 
@@ -197,7 +197,7 @@ tr:hover td{background:#1e2235}
           <span class="spinner"></span>
           <span class="text-sm" id="progress-label">収集中...</span>
         </div>
-        <div class="progress-bar"><div class="progress-fill" id="progress-fill" style="width:0%"></div></div>
+        <div class="progress-bar" role="progressbar" aria-valuemin="0" aria-valuemax="100"><div class="progress-fill" id="progress-fill" style="width:0%"></div></div>
       </div>
     </div>
 
@@ -237,7 +237,7 @@ tr:hover td{background:#1e2235}
         <button class="btn btn-secondary btn-sm" onclick="checkJobStatus()">最新ジョブ確認</button>
       </div>
     </div>
-    <div class="log-box" id="log-box" style="margin-top:10px"></div>
+    <div class="log-box" id="log-box" style="margin-top:10px" role="log" aria-live="polite" aria-label="ジョブ実行ログ"></div>
   </div>
 
   <!-- 個別企業リフレッシュ（折りたたみ） -->
@@ -363,13 +363,13 @@ tr:hover td{background:#1e2235}
             <span class="spinner"></span>
             <span class="text-sm" id="jq-progress-label">収集中...</span>
           </div>
-          <div class="progress-bar"><div class="progress-fill" id="jq-progress-fill" style="width:0%;background:#7c3aed"></div></div>
+          <div class="progress-bar" role="progressbar" aria-valuemin="0" aria-valuemax="100"><div class="progress-fill" id="jq-progress-fill" style="width:0%;background:#7c3aed"></div></div>
         </div>
         <div class="flex-between" style="margin-top:12px;margin-bottom:6px">
           <div style="font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:.5px">収集ログ</div>
           <button class="btn btn-secondary btn-sm" onclick="document.getElementById('jq-log').innerHTML=''">クリア</button>
         </div>
-        <div class="log-box" id="jq-log"></div>
+        <div class="log-box" id="jq-log" role="log" aria-live="polite" aria-label="J-Quants 収集ログ"></div>
       </div>
       <div class="card" style="border-color:#312e81">
         <div class="section-title" style="color:#a78bfa">J-Quants の特徴</div>
@@ -427,13 +427,13 @@ tr:hover td{background:#1e2235}
               <span class="spinner"></span>
               <span class="text-sm" id="market-progress-label">更新中...</span>
             </div>
-            <div class="progress-bar"><div class="progress-fill" id="market-progress-fill" style="width:0%"></div></div>
+            <div class="progress-bar" role="progressbar" aria-valuemin="0" aria-valuemax="100"><div class="progress-fill" id="market-progress-fill" style="width:0%"></div></div>
           </div>
           <div class="flex-between" style="margin-top:12px;margin-bottom:6px">
             <div style="font-size:11px;color:#475569;text-transform:uppercase;letter-spacing:.5px">更新ログ</div>
             <button class="btn btn-secondary btn-sm" onclick="clearMarketLog()">クリア</button>
           </div>
-          <div class="log-box" id="market-log-box"></div>
+          <div class="log-box" id="market-log-box" role="log" aria-live="polite" aria-label="市場データ更新ログ"></div>
         </div>
 
         <!-- 株価履歴収集（stooq） -->
@@ -485,13 +485,13 @@ tr:hover td{background:#1e2235}
               <span class="spinner"></span>
               <span class="text-sm" id="history-progress-label">収集中...</span>
             </div>
-            <div class="progress-bar"><div class="progress-fill" id="history-progress-fill" style="width:0%"></div></div>
+            <div class="progress-bar" role="progressbar" aria-valuemin="0" aria-valuemax="100"><div class="progress-fill" id="history-progress-fill" style="width:0%"></div></div>
           </div>
           <div class="flex-between" style="margin-top:12px;margin-bottom:6px">
             <div style="font-size:11px;color:#475569;text-transform:uppercase;letter-spacing:.5px">収集ログ</div>
             <button class="btn btn-secondary btn-sm" onclick="document.getElementById('history-log').innerHTML=''">クリア</button>
           </div>
-          <div class="log-box" id="history-log"></div>
+          <div class="log-box" id="history-log" role="log" aria-live="polite" aria-label="株価履歴収集ログ"></div>
         </div>
       </div>
     </div>
@@ -736,7 +736,7 @@ async function loadEdinetCoverage(){
         <div style="display:flex;justify-content:space-between;font-size:11px;color:#64748b;margin-bottom:3px">
           <span>収録率</span><span>${pct}%</span>
         </div>
-        <div class="progress-bar"><div class="progress-fill" style="width:${pct}%;background:${barColor}"></div></div>
+        <div class="progress-bar" role="progressbar" aria-valuemin="0" aria-valuemax="100"><div class="progress-fill" style="width:${pct}%;background:${barColor}"></div></div>
       </div>`;
     if(d.year_coverage && d.year_coverage.length){
       html += '<div style="font-size:11px;color:#64748b;margin-bottom:4px">年度別収録社数（2019年以降）</div>';
@@ -777,7 +777,7 @@ async function loadMarketCoverage(){
         <div style="display:flex;justify-content:space-between;font-size:11px;color:#64748b;margin-bottom:3px">
           <span>取得率</span><span>${pct}%</span>
         </div>
-        <div class="progress-bar"><div class="progress-fill" style="width:${pct}%;background:${barColor}"></div></div>
+        <div class="progress-bar" role="progressbar" aria-valuemin="0" aria-valuemax="100"><div class="progress-fill" style="width:${pct}%;background:${barColor}"></div></div>
       </div>
       <div class="text-sm">最終更新: ${esc(d.latest_update || '未取得')}</div>`;
   }catch(e){ el.innerHTML = `<p class="text-sm" style="color:#ef4444;text-align:center;padding:10px">取得失敗: ${esc(e.message)}</p>`; }
