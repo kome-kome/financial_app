@@ -215,10 +215,24 @@ async def health_check():
 SMART_CHUNK_SIZE     = 200   # スマート収集: 1チャンクあたりの企業数増分
 SMART_FULL_THRESHOLD = 3500  # この企業数以上は「全社収集完了」と判定し差分収集に切り替え
 
-_job_status: dict = {"running": False, "log": [], "progress": 0, "total": 0, "job_type": "", "cancel_requested": False}
-_market_status: dict = {"running": False, "progress": 0, "total": 0, "log": [], "cancel_requested": False}
-_history_status: dict  = {"running": False, "progress": 0, "total": 0, "log": [], "cancel_requested": False}
-_jquants_status: dict  = {"running": False, "progress": 0, "total": 0, "log": [], "cancel_requested": False}
+# 注意: 以下のステータス辞書はシングル Worker 運用前提（VISION.md 参照）。
+# asyncio 単一イベントループ内では mutations が await を跨がないため、
+# 同一プロセス内の競合は発生しない。複数 Worker 環境では各プロセスが独立した
+# 状態を持つため Redis 等の外部ストアへの移行が必要。
+_LOG_MAX = 500
+
+_job_status: dict = {"running": False, "log": [], "log_seq": 0, "progress": 0, "total": 0, "job_type": "", "cancel_requested": False}
+_market_status: dict = {"running": False, "progress": 0, "total": 0, "log": [], "log_seq": 0, "cancel_requested": False}
+_history_status: dict  = {"running": False, "progress": 0, "total": 0, "log": [], "log_seq": 0, "cancel_requested": False}
+_jquants_status: dict  = {"running": False, "progress": 0, "total": 0, "log": [], "log_seq": 0, "cancel_requested": False}
+
+def _append_log(status: dict, msg: str) -> None:
+    """ステータス辞書にログを追加。log_seq は累積カウンタとして単調増加し、
+    SSE 消費者が切り捨て後も正しい差分を計算できるようにする。"""
+    status["log"].append(msg)
+    status["log_seq"] = status.get("log_seq", 0) + 1
+    if len(status["log"]) > _LOG_MAX:
+        status["log"] = status["log"][-_LOG_MAX:]
 
 class CollectRequest(BaseModel):
     years_back: int = Field(default=1, ge=1, le=5)
@@ -259,9 +273,7 @@ async def _run_collection_bg(years: int, max_co: Optional[int], log_id: int, ski
     def on_progress(current, total, msg):
         _job_status["progress"] = current
         _job_status["total"]    = total
-        _job_status["log"].append(msg)
-        if len(_job_status["log"]) > 500:
-            _job_status["log"] = _job_status["log"][-500:]
+        _append_log(_job_status, msg)
         _prog_ticks[0] += 1
         if _prog_ticks[0] % 10 == 0:
             try:
@@ -309,9 +321,7 @@ async def _run_smart_collection_bg(log_id: int, years: int):
     def on_progress(current, total, msg):
         _job_status["progress"] = current
         _job_status["total"]    = total
-        _job_status["log"].append(msg)
-        if len(_job_status["log"]) > 500:
-            _job_status["log"] = _job_status["log"][-500:]
+        _append_log(_job_status, msg)
         _prog_ticks[0] += 1
         if _prog_ticks[0] % 10 == 0:
             try:
@@ -329,7 +339,7 @@ async def _run_smart_collection_bg(log_id: int, years: int):
         company_count = db.query(Company).count()
 
         if company_count >= SMART_FULL_THRESHOLD:
-            _job_status["log"].append(
+            _append_log(_job_status,
                 f"[スマート判定] DB企業数={company_count}社 → 差分収集モード（過去{years}年）"
             )
             cancelled = await run_full_collection(
@@ -337,7 +347,7 @@ async def _run_smart_collection_bg(log_id: int, years: int):
                 skip_existing=True, cancel_check=cancel_check
             )
         elif company_count == 0:
-            _job_status["log"].append(
+            _append_log(_job_status,
                 f"[スマート判定] DB企業数=0社 → 初回チャンク収集（先着{SMART_CHUNK_SIZE}社）"
             )
             cancelled = await run_full_collection(
@@ -347,7 +357,7 @@ async def _run_smart_collection_bg(log_id: int, years: int):
         else:
             chunk_no = (company_count // SMART_CHUNK_SIZE) + 1
             target   = chunk_no * SMART_CHUNK_SIZE
-            _job_status["log"].append(
+            _append_log(_job_status,
                 f"[スマート判定] DB企業数={company_count}社 → "
                 f"チャンク{chunk_no}（先着{target}社のうち未収集を処理）"
             )
@@ -515,7 +525,7 @@ async def start_market_data_update(req: MarketDataRequest, background_tasks: Bac
     def on_progress(current, total, msg):
         _market_status["progress"] = current
         _market_status["total"]    = total
-        _market_status["log"].append(msg)
+        _append_log(_market_status, msg)
 
     def cancel_check():
         return _market_status.get("cancel_requested", False)
@@ -525,7 +535,7 @@ async def start_market_data_update(req: MarketDataRequest, background_tasks: Bac
             await update_market_data(req.max_companies, on_progress=on_progress, cancel_check=cancel_check)
         except Exception as e:
             log.error("市場データ更新エラー: %s", e, exc_info=True)
-            _market_status["log"].append("[エラー] 市場データ更新中に問題が発生しました（詳細はサーバーログを確認）")
+            _append_log(_market_status, "[エラー] 市場データ更新中に問題が発生しました（詳細はサーバーログを確認）")
         finally:
             _market_status["running"] = False
             _market_status["cancel_requested"] = False
@@ -561,7 +571,7 @@ async def start_history_collection(req: HistoryCollectRequest, background_tasks:
     def on_progress(current, total, msg):
         _history_status["progress"] = current
         _history_status["total"]    = total
-        _history_status["log"].append(msg)
+        _append_log(_history_status, msg)
 
     def cancel_check():
         return _history_status.get("cancel_requested", False)
@@ -576,7 +586,7 @@ async def start_history_collection(req: HistoryCollectRequest, background_tasks:
             )
         except Exception as e:
             log.error("株価履歴収集エラー: %s", e, exc_info=True)
-            _history_status["log"].append("[エラー] 株価履歴収集中に問題が発生しました（詳細はサーバーログを確認）")
+            _append_log(_history_status, "[エラー] 株価履歴収集中に問題が発生しました（詳細はサーバーログを確認）")
         finally:
             _history_status["running"] = False
             _history_status["cancel_requested"] = False
@@ -639,11 +649,20 @@ async def get_stock_history(edinet_code: str, days: int = 365, db: Session = Dep
 
 
 async def _sse_stream(status: dict):
-    """SSE共通ジェネレータ。status辞書を監視してリアルタイム配信する"""
-    sent = 0
+    """SSE共通ジェネレータ。status辞書を監視してリアルタイム配信する。
+
+    log_seq（累積カウンタ）を使って差分計算するため、内部リストが切り捨てされても
+    ログの取りこぼしを最小化できる（切り捨て分は復元不可だが、以降は連続配信可能）。
+    """
+    last_seq = 0
     while True:
-        new_logs = status["log"][sent:]
-        sent += len(new_logs)
+        log_list = status["log"]
+        cur_seq = status.get("log_seq", 0)
+        # log_list[-1] の seq == cur_seq、log_list[0] の seq == cur_seq - len(log_list) + 1
+        oldest_seq = cur_seq - len(log_list) + 1
+        start = max(0, last_seq - oldest_seq + 1) if log_list else 0
+        new_logs = log_list[start:]
+        last_seq = cur_seq
         data = {
             "running":  status["running"],
             "progress": status["progress"],
@@ -685,7 +704,7 @@ async def start_jquants_collection(req: JQuantsCollectRequest, background_tasks:
     def on_progress(current, total, msg):
         _jquants_status["progress"] = current
         _jquants_status["total"]    = total
-        _jquants_status["log"].append(msg)
+        _append_log(_jquants_status, msg)
 
     def cancel_check():
         return _jquants_status.get("cancel_requested", False)
@@ -697,10 +716,10 @@ async def start_jquants_collection(req: JQuantsCollectRequest, background_tasks:
                 db, req.days_back, on_progress=on_progress, cancel_check=cancel_check,
             )
         except ValueError as e:
-            _jquants_status["log"].append(f"[設定エラー] {e}")
+            _append_log(_jquants_status, f"[設定エラー] {e}")
         except Exception as e:
             log.error("J-Quants収集エラー: %s", e, exc_info=True)
-            _jquants_status["log"].append(f"[エラー] 収集中に問題が発生しました")
+            _append_log(_jquants_status, "[エラー] 収集中に問題が発生しました")
         finally:
             _jquants_status["running"] = False
             _jquants_status["cancel_requested"] = False
