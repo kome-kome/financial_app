@@ -1,0 +1,37 @@
+# 仮想環境
+venv/
+.venv/
+
+# Python キャッシュ
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.pdb
+
+# ログ・一時ファイル
+*.log
+*.tmp
+
+# 秘密情報
+.env
+*.db
+*.sqlite3
+
+# IDE
+.vscode/
+.idea/
+*.code-workspace
+
+# OS
+.DS_Store
+Thumbs.db
+
+# ビルド成果物
+dist/
+build/
+*.egg-info/
+
+# Claude Code ローカル設定（共有不要）
+.claude/settings.local.json
+.claude/scheduled_tasks.lock

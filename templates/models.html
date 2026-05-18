@@ -1,0 +1,531 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>モデル解説</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'Segoe UI',sans-serif;background:#0f1117;color:#e2e8f0;min-height:100vh;line-height:1.7}
+.header{background:#1a1d2e;border-bottom:1px solid #2d3154;padding:14px 24px;display:flex;align-items:center;gap:14px;position:sticky;top:0;z-index:100}
+.header h1{font-size:17px;font-weight:600;color:#a78bfa}
+.badge{background:#312e81;color:#c4b5fd;font-size:11px;padding:3px 8px;border-radius:12px}
+.nav-link{padding:8px 14px;font-size:13px;color:#64748b;text-decoration:none;display:inline-flex;align-items:center;gap:5px;border-radius:6px;margin-left:auto}
+.nav-link:hover{background:#1e293b;color:#94a3b8}
+.layout{display:flex;max-width:1400px;margin:0 auto;padding:24px;gap:28px}
+.sidebar{width:230px;flex-shrink:0}
+.toc{background:#1a1d2e;border:1px solid #2d3154;border-radius:10px;padding:16px;position:sticky;top:80px}
+.toc-title{font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:.5px;margin-bottom:12px}
+.toc a{display:block;font-size:12px;color:#64748b;text-decoration:none;padding:5px 8px;border-radius:5px;transition:all .15s;border-left:2px solid transparent}
+.toc a:hover{background:#1e293b;color:#a78bfa;border-left-color:#7c3aed}
+.toc a.active{background:#1e293b;color:#a78bfa;border-left-color:#7c3aed}
+.toc .toc-sub{padding-left:16px}
+.content{flex:1;min-width:0}
+.model-section{background:#1a1d2e;border:1px solid #2d3154;border-radius:10px;padding:24px;margin-bottom:20px}
+.model-section:target{border-color:#7c3aed;box-shadow:0 0 0 2px rgba(124,58,237,.2)}
+h2{font-size:18px;font-weight:700;color:#a78bfa;margin-bottom:4px;display:flex;align-items:center;gap:10px}
+h2 .model-tag{font-size:10px;background:#1e293b;border:1px solid #334155;color:#64748b;padding:2px 8px;border-radius:10px;font-weight:400}
+h3{font-size:14px;font-weight:600;color:#c4b5fd;margin:18px 0 8px;border-bottom:1px solid #2d3154;padding-bottom:6px}
+h4{font-size:13px;font-weight:600;color:#94a3b8;margin:12px 0 6px}
+p{font-size:13px;color:#cbd5e1;margin-bottom:10px}
+.file-tag{font-size:11px;background:#0f172a;border:1px solid #1e2235;color:#67e8f9;padding:2px 9px;border-radius:4px;font-family:monospace;margin-bottom:14px;display:inline-block}
+.formula-block{background:#0a0c14;border:1px solid #1e2235;border-left:3px solid #7c3aed;border-radius:6px;padding:14px 16px;margin:10px 0;font-family:'Courier New',monospace;font-size:12px;color:#e2e8f0;overflow-x:auto;white-space:pre;line-height:1.6}
+.formula-block .comment{color:#64748b}
+.formula-block .var{color:#67e8f9}
+.formula-block .val{color:#a78bfa}
+.formula-block .sym{color:#f59e0b}
+table{width:100%;border-collapse:collapse;font-size:12px;margin:10px 0}
+th{text-align:left;padding:8px 10px;color:#64748b;font-weight:500;border-bottom:1px solid #2d3154;background:#141722;white-space:nowrap}
+td{padding:8px 10px;border-bottom:1px solid #1e2235;color:#cbd5e1}
+tr:hover td{background:#1a1f35}
+td code{background:#0f172a;border:1px solid #1e2235;padding:1px 5px;border-radius:3px;font-size:11px;color:#67e8f9;font-family:monospace}
+.warn-box{background:#451a03;border:1px solid #92400e;border-radius:8px;padding:12px 14px;font-size:12px;color:#fcd34d;margin:10px 0}
+.warn-box strong{color:#fbbf24}
+.info-box{background:#1e2235;border:1px solid #2d3154;border-radius:8px;padding:12px 14px;font-size:12px;color:#94a3b8;margin:10px 0;border-left:3px solid #7c3aed;line-height:1.6}
+.refs{margin-top:14px;padding-top:14px;border-top:1px solid #2d3154}
+.refs h4{font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px}
+.ref-item{font-size:12px;color:#94a3b8;padding:5px 0;border-bottom:1px solid #1e2235;line-height:1.6}
+.ref-item:last-child{border-bottom:none}
+.ref-item a{color:#7c3aed;text-decoration:none;word-break:break-all}
+.ref-item a:hover{color:#a78bfa;text-decoration:underline}
+.ref-item .ref-title{color:#e2e8f0;font-style:italic}
+.tag{display:inline-block;padding:2px 7px;border-radius:10px;font-size:10px;font-weight:500}
+.tag-green{background:#052e16;color:#86efac}
+.tag-red{background:#450a0a;color:#fca5a5}
+.tag-amber{background:#451a03;color:#fcd34d}
+.tag-purple{background:#2e1065;color:#c4b5fd}
+.tag-blue{background:#1e3a5f;color:#93c5fd}
+.common-section{background:#1a1d2e;border:1px solid #2d3154;border-radius:10px;padding:20px;margin-bottom:20px}
+.toc-section-title{font-size:10px;color:#4b5563;text-transform:uppercase;letter-spacing:.5px;margin:12px 0 4px 8px}
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div style="width:30px;height:30px;background:#312e81;border-radius:8px;display:flex;align-items:center;justify-content:center">
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#a78bfa" stroke-width="2"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>
+  </div>
+  <h1>モデル解説</h1>
+  <span class="badge">Docs</span>
+  <a href="/analysis" class="nav-link">
+    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>
+    分析へ戻る
+  </a>
+  <a href="/" class="nav-link" style="margin-left:0">
+    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
+    ホーム
+  </a>
+</div>
+
+<div class="layout">
+
+<aside class="sidebar">
+  <nav class="toc">
+    <div class="toc-title">目次</div>
+    <div class="toc-section-title">共通事項</div>
+    <a href="#common">外れ値処理・次元整合性</a>
+    <div class="toc-section-title">モデル</div>
+    <a href="#m1">1. 総合リターン予測</a>
+    <div class="toc-sub"><a href="#m1">Ohlsonモデル型OLS</a></div>
+    <a href="#m2">2. 業種別OLS回帰</a>
+    <a href="#m3">3. 乖離分析</a>
+    <div class="toc-sub"><a href="#m3">OU過程ヒューリスティック</a></div>
+    <a href="#m4">4. 株価リターン予測</a>
+    <div class="toc-sub"><a href="#m4">月次WF-CV</a></div>
+    <a href="#m5">5. 横断的Zスコア正規化</a>
+    <a href="#m6">6. Zスコアスコアリング</a>
+    <div class="toc-sub"><a href="#m6">おすすめ銘柄</a></div>
+    <a href="#m7">7. バックテスト</a>
+  </nav>
+</aside>
+
+<main class="content">
+
+<div class="common-section" id="common">
+  <h2>共通事項 <span class="model-tag">全モデル適用</span></h2>
+
+  <h3>外れ値処理（全モデル必須）</h3>
+  <div class="formula-block"><span class="var">winsorize</span>(X, lo=<span class="val">p1</span>, hi=<span class="val">p99</span>)
+  → X を [第1百分位, 第99百分位] の範囲にクリップ</div>
+  <p>日本株データは BPS・EPS に p99 の数百倍の外れ値が存在し、無処理では OLS の行列反転が数値的に破綻する（R² が −10³² になる等）。実装: <code>plugins/utils.py</code> の <code>winsorize()</code></p>
+
+  <h3>次元整合性の原則</h3>
+  <p>OLS 係数が経済的に解釈できるためには、説明変数と被説明変数の次元が一致していなければならない。</p>
+  <table>
+    <thead><tr><th>✅ 正しい例</th><th>❌ 誤った例</th></tr></thead>
+    <tbody>
+      <tr><td>EPS/BPS [円/株] → 株価 [円/株]</td><td>ROE [%] → 時価総額 [百万円]</td></tr>
+      <tr><td>ログリターン [無次元] → ログリターン [無次元]</td><td>自己資本比率 [%] → 株価 [円]</td></tr>
+    </tbody>
+  </table>
+
+  <h3>OLS実装（Pure Python）</h3>
+  <div class="formula-block"><span class="var">β</span> = (<span class="var">X</span>'<span class="var">X</span>)⁻¹ <span class="var">X</span>'<span class="var">y</span>  <span class="comment"># 正規方程式</span>
+逆行列: Gauss-Jordan 消去法（numpy 不使用）
+返り値: beta, yhat, r2, adj_r2, rmse, mae</div>
+</div>
+
+<!-- ── Model 1 ── -->
+<div class="model-section" id="m1">
+  <h2>1. 総合リターン予測 <span class="model-tag">Ohlsonモデル型OLS</span></h2>
+  <span class="file-tag">plugins/total_return.py</span>
+
+  <p>Ohlson (1995) が提唱した残余利益モデルの OLS 近似。1株当たりの財務金額から理論株価を推定し、現在株価との乖離（上昇余地）と配当利回りを合算して総合リターンを予測する。</p>
+
+  <h3>モデル定式化</h3>
+  <div class="formula-block"><span class="comment"># 目的変数</span>
+<span class="var">y</span> = stock_price  <span class="sym">[円/株]</span>
+
+<span class="comment"># 説明変数（全て [円/株] — 次元整合）</span>
+<span class="var">X</span> = [EPS,  BPS,  OPS_CF,  DPS]
+
+<span class="comment"># cf_ops_ps の推計</span>
+発行株式数 ≈ bs_total_equity / bs_bps
+cf_ops_ps  = cf_operating_cf / 発行株式数
+
+<span class="comment"># 前処理</span>
+X_raw → winsorize(p1–p99) → z-score正規化 → X_norm
+y_raw → log変換 → z-score正規化 → y_norm
+
+<span class="comment"># OLS</span>
+<span class="var">ŷ_norm</span> = β₀ + β₁·EPS_norm + β₂·BPS_norm + β₃·CF_norm + β₄·DPS_norm
+
+<span class="comment"># 逆変換（exp上限: exp(15) ≈ 3.3百万円/株）</span>
+<span class="var">ŷ</span> = exp( min(ŷ_norm·σ_y + μ_y, <span class="val">15.0</span>) )  <span class="sym">[円/株]</span>
+
+<span class="comment"># 総合リターン</span>
+上昇余地   = (ŷ − 実際株価) / 実際株価 × 100  <span class="sym">[%]</span>
+総合リターン = 上昇余地 + 配当利回り          <span class="sym">[%]</span></div>
+
+  <h3>係数の経済的解釈</h3>
+  <table>
+    <thead><tr><th>係数</th><th>解釈</th><th>単位</th></tr></thead>
+    <tbody>
+      <tr><td><code>β₁</code> (EPS)</td><td>implied P/E 倍率</td><td>無次元</td></tr>
+      <tr><td><code>β₂</code> (BPS)</td><td>implied P/B 倍率</td><td>無次元</td></tr>
+      <tr><td><code>β₃</code> (CF)</td><td>implied Price/CF 倍率</td><td>無次元</td></tr>
+      <tr><td><code>β₄</code> (DPS)</td><td>implied 配当割引倍率</td><td>無次元</td></tr>
+    </tbody>
+  </table>
+  <p>係数が経済的に意味を持つのは、説明変数と被説明変数の次元が全て [円/株] で一致しているため。</p>
+
+  <h3>主要パラメータ</h3>
+  <table>
+    <thead><tr><th>パラメータ</th><th>デフォルト</th><th>説明</th></tr></thead>
+    <tbody>
+      <tr><td><code>n_folds</code></td><td>5</td><td>横断的 k-fold 分割数</td></tr>
+      <tr><td><code>top_n</code></td><td>20</td><td>上位表示件数</td></tr>
+      <tr><td><code>LOG_PRED_CAP</code></td><td>15.0</td><td>予測値の log-space 上限（≈ 3.3百万円）</td></tr>
+    </tbody>
+  </table>
+
+  <div class="warn-box">
+    <strong>限界:</strong> 業種固定効果なし — 全業種一括回帰のため横断的 R² は構造的に低い（−0.1 〜 0.4 程度）。R² &lt; 0 はモデルが無価値であることを意味しない。発行株式数の推計は近似値（IFRS/JGAAP 混在時に精度低下）。
+  </div>
+
+  <div class="refs">
+    <h4>参考文献</h4>
+    <div class="ref-item">
+      Ohlson, J.A. (1995). <span class="ref-title">"Earnings, Book Values, and Dividends in Equity Valuation."</span><br>
+      <em>Contemporary Accounting Research</em>, 11(2), 661–687.<br>
+      <a href="https://doi.org/10.1111/j.1911-3846.1995.tb00461.x" target="_blank" rel="noopener">https://doi.org/10.1111/j.1911-3846.1995.tb00461.x</a>
+    </div>
+    <div class="ref-item">
+      Feltham, G.A. & Ohlson, J.A. (1995). <span class="ref-title">"Valuation and Clean Surplus Accounting for Operating and Financial Activities."</span><br>
+      <em>Contemporary Accounting Research</em>, 11(2), 689–731.<br>
+      <a href="https://doi.org/10.1111/j.1911-3846.1995.tb00462.x" target="_blank" rel="noopener">https://doi.org/10.1111/j.1911-3846.1995.tb00462.x</a>
+    </div>
+  </div>
+</div>
+
+<!-- ── Model 2 ── -->
+<div class="model-section" id="m2">
+  <h2>2. 業種別OLS回帰</h2>
+  <span class="file-tag">plugins/sector_ols.py</span>
+
+  <p>業種ごとに独立して OLS 回帰を実行し、理論的な時価総額（または株価）を推定する。業種内でモデルを構築することで、業種間の P/E・P/B 構造差の影響を排除する。</p>
+
+  <h3>モデル定式化</h3>
+  <div class="formula-block"><span class="comment"># 業種 s 内で独立に実行</span>
+<span class="var">ŷₛ_norm</span> = β₀ + Σⱼ βⱼ · Xₛⱼ_norm
+
+<span class="comment"># 業種内でのwinsorize + z-score正規化</span>
+Xₛⱼ_norm = (Xₛⱼ_winsorized − μₛⱼ) / σₛⱼ
+
+<span class="comment"># 乖離率（gap_ratio）</span>
+gap_ratio = (ŷ − y_actual) / y_actual × 100  <span class="sym">[%]</span>
+  gap_ratio > 0: 割安（市場が過小評価）
+  gap_ratio &lt; 0: 割高（市場が過大評価）</div>
+
+  <h3>ターゲット別の変数設計</h3>
+  <table>
+    <thead><tr><th>ターゲット</th><th>説明変数</th><th>次元</th></tr></thead>
+    <tbody>
+      <tr><td><code>market_cap</code>（百万円）</td><td>revenue, op_profit, net_income, equity, op_cf</td><td>円（絶対額）</td></tr>
+      <tr><td><code>stock_price</code>（円/株）</td><td>EPS, BPS, DPS</td><td>円/株</td></tr>
+    </tbody>
+  </table>
+  <p>業種最小サンプル数（デフォルト: 10社）を満たさない業種はスキップ。</p>
+
+  <div class="warn-box">
+    <strong>注意:</strong> 乖離分析（gap_analysis）は本プラグインの実行後でなければ利用不可。gap_ratio の収束予測には統計的根拠がない（→ モデル 3 参照）。
+  </div>
+
+  <div class="refs">
+    <h4>参考文献</h4>
+    <div class="ref-item">
+      Fama, E.F. & French, K.R. (1992). <span class="ref-title">"The Cross-Section of Expected Stock Returns."</span><br>
+      <em>Journal of Finance</em>, 47(2), 427–465.<br>
+      <a href="https://doi.org/10.1111/j.1540-6261.1992.tb04398.x" target="_blank" rel="noopener">https://doi.org/10.1111/j.1540-6261.1992.tb04398.x</a>
+    </div>
+    <div class="ref-item">
+      Greene, W.H. (2018). <span class="ref-title"><em>Econometric Analysis</em></span> (8th ed.). Pearson Education.
+    </div>
+  </div>
+</div>
+
+<!-- ── Model 3 ── -->
+<div class="model-section" id="m3">
+  <h2>3. 乖離分析 <span class="model-tag">OU過程ヒューリスティック</span></h2>
+  <span class="file-tag">plugins/gap_analysis.py</span>
+
+  <p>業種別OLSが推定した理論値と実際の時価総額の乖離率を表示し、OU過程を単純化した収束予測を付加する。</p>
+
+  <div class="warn-box">
+    <strong>重要:</strong> 収束予測部分は統計的根拠のないヒューリスティックであり、UI 上は「参考値」として表示する。投資判断の主要根拠として使用すべきでない。
+  </div>
+
+  <h3>収束予測のヒューリスティック</h3>
+  <div class="formula-block"><span class="comment"># half-life の決定（ヒューリスティック）</span>
+half_life = max(<span class="val">6</span>, min(<span class="val">24</span>, |gap| / <span class="val">2</span>))  <span class="sym">[ヶ月]</span>
+
+<span class="comment"># n ヶ月後の期待乖離率（指数減衰）</span>
+<span class="var">gap_t</span> = gap₀ × exp(−ln(2) / half_life × t)
+
+<span class="comment"># 収束スコア（参考値、0–100スケール）</span>
+conv_score₁₂ₘ = max(<span class="val">5</span>, min(<span class="val">95</span>, 50 + gap₀ × 0.8))</div>
+
+  <h3>本来のOU過程（参考）</h3>
+  <div class="formula-block">dX_t = κ(θ − X_t) dt + σ dW_t
+
+<span class="var">θ</span>: 長期均衡値（= 0 と仮定）
+<span class="var">κ</span>: 平均回帰速度  →  half_life = ln(2) / κ
+<span class="var">σ</span>: ボラティリティ
+
+<span class="comment"># 本実装では κ を |gap|/2 から簡易算出（ML推定なし）</span></div>
+
+  <div class="info-box">
+    <strong>改善余地:</strong> gap_ratio の時系列が十分に蓄積されれば、κ・σ の最尤推定に置き換え可能。現状は参考値にとどまる。
+  </div>
+
+  <div class="refs">
+    <h4>参考文献</h4>
+    <div class="ref-item">
+      Ornstein, L.S. & Uhlenbeck, G.E. (1930). <span class="ref-title">"On the Theory of the Brownian Motion."</span><br>
+      <em>Physical Review</em>, 36(5), 823–841.<br>
+      <a href="https://doi.org/10.1103/PhysRev.36.823" target="_blank" rel="noopener">https://doi.org/10.1103/PhysRev.36.823</a>
+    </div>
+    <div class="ref-item">
+      Elliott, R.J., van der Hoek, J., & Malcolm, W.P. (2005). <span class="ref-title">"Pairs trading."</span><br>
+      <em>Quantitative Finance</em>, 5(3), 271–276.<br>
+      <a href="https://doi.org/10.1080/14697680500149370" target="_blank" rel="noopener">https://doi.org/10.1080/14697680500149370</a>
+    </div>
+    <div class="ref-item">
+      Vasicek, O. (1977). <span class="ref-title">"An equilibrium characterization of the term structure."</span><br>
+      <em>Journal of Financial Economics</em>, 5(2), 177–188.<br>
+      <a href="https://doi.org/10.1016/0304-405X(77)90016-2" target="_blank" rel="noopener">https://doi.org/10.1016/0304-405X(77)90016-2</a>
+    </div>
+  </div>
+</div>
+
+<!-- ── Model 4 ── -->
+<div class="model-section" id="m4">
+  <h2>4. 株価リターン予測 <span class="model-tag">月次WF-CV</span></h2>
+  <span class="file-tag">plugins/price_predictor.py</span>
+
+  <p>日次株価履歴（OHLCV）と年次財務指標を組み合わせ、N 日先の株価対数リターンを OLS で予測する。月次ウォークフォワード CV（ルックアヘッドバイアスなし）で評価する。</p>
+
+  <h3>目的変数</h3>
+  <div class="formula-block"><span class="var">y</span> = log(C_{t+N} / C_t)  <span class="sym">[無次元対数リターン]</span>
+N ∈ {<span class="val">5</span>, <span class="val">20</span>, <span class="val">60</span>} 日（ユーザー選択）</div>
+
+  <h3>特徴量（全て無次元 — 次元整合）</h3>
+  <table>
+    <thead><tr><th>変数</th><th>定義</th><th>範囲</th></tr></thead>
+    <tbody>
+      <tr><td><code>ma20_dev</code></td><td>(C − MA20) / MA20</td><td>(−1, +∞)</td></tr>
+      <tr><td><code>vol60</code></td><td>過去60日ログリターンの標準偏差</td><td>[0, +∞)</td></tr>
+      <tr><td><code>rsi14</code></td><td>RSI(14) — 下記参照</td><td>[0, 100]</td></tr>
+      <tr><td><code>atr_ratio</code></td><td>ATR(14) / C_t</td><td>[0, +∞)</td></tr>
+      <tr><td><code>per</code>, <code>pbr</code>, <code>roe</code>, <code>equity_ratio</code></td><td>財務比率</td><td>無次元</td></tr>
+      <tr><td><code>z_op_margin</code>, <code>z_roe</code>, <code>z_cf_ratio</code></td><td>年度別Zスコア</td><td>無次元</td></tr>
+      <tr><td><code>gap_ratio</code></td><td>業種別OLS乖離率 [%]</td><td>無次元</td></tr>
+    </tbody>
+  </table>
+
+  <h3>RSI(14) の計算</h3>
+  <div class="formula-block">changes    = [C_i − C_{i-1}  for i in (t−14, t)]
+avg_gain   = mean([max(c, 0)  for c in changes])
+avg_loss   = mean([abs(min(c, 0))  for c in changes])
+RS         = avg_gain / avg_loss
+<span class="var">RSI</span>        = 100 − 100 / (1 + RS)</div>
+
+  <h3>ATR(14) の計算</h3>
+  <div class="formula-block">TR_i = max(H_i − L_i,  |H_i − C_{i-1}|,  |L_i − C_{i-1}|)
+<span class="var">ATR(14)</span>  = mean(TR_i  for i in (t−14, t))
+atr_ratio = ATR(14) / C_t</div>
+
+  <h3>月次ウォークフォワードCV</h3>
+  <div class="formula-block">全月度 = ["YYYY-MM", ...]  （昇順）
+
+For i = min_train_months to len(全月度)−1, step = step_months:
+  test_month   = 全月度[i]
+  train_months = 全月度[:i]  <span class="comment"># i 未満の全月</span>
+
+  学習: train_months の全企業 × 全スナップショット
+  テスト: test_month のスナップショットのみ
+  正規化パラメータ: 学習データのみから計算
+
+min_train_months = <span class="val">18</span>（データ不足時は <span class="val">6</span> に緩和）
+step_months      = <span class="val">3</span>
+決算ラグ補正      = <span class="val">45</span> 日（period_end から利用可能とみなす日数）</div>
+
+  <div class="warn-box">
+    <strong>限界:</strong> 線形 OLS のため RSI の U 字型効果等の非線形関係を捉えられない。財務データは年 1 回更新のため、月次スナップショットで同じ値が繰り返し使用される。gap_ratio が NULL の場合は財務特徴量が欠損になる。
+  </div>
+
+  <div class="refs">
+    <h4>参考文献</h4>
+    <div class="ref-item">
+      Wilder, J.W. (1978). <span class="ref-title"><em>New Concepts in Technical Trading Systems.</em></span> Trend Research.
+      （RSI・ATR の原典）
+    </div>
+    <div class="ref-item">
+      Bergmeir, C. & Benítez, J.M. (2012). <span class="ref-title">"On the use of cross-validation for time series predictor evaluation."</span><br>
+      <em>Information Sciences</em>, 191, 192–213.<br>
+      <a href="https://doi.org/10.1016/j.ins.2011.12.028" target="_blank" rel="noopener">https://doi.org/10.1016/j.ins.2011.12.028</a>
+    </div>
+    <div class="ref-item">
+      Hyndman, R.J. & Athanasopoulos, G. (2021). <span class="ref-title"><em>Forecasting: Principles and Practice</em></span> (3rd ed.). OTexts.<br>
+      <a href="https://otexts.com/fpp3/" target="_blank" rel="noopener">https://otexts.com/fpp3/</a>（オープンアクセス）
+    </div>
+  </div>
+</div>
+
+<!-- ── Model 5 ── -->
+<div class="model-section" id="m5">
+  <h2>5. 横断的Zスコア正規化</h2>
+  <span class="file-tag">database.py — calc_zscore_normalization()</span>
+
+  <p>財務指標を年度別に横断的な Zスコアに変換し、異なる企業間で指標の相対的な優劣を比較可能にする。</p>
+
+  <div class="warn-box">
+    <strong>Altman の Z スコアとは別概念。</strong> ここでの「Zスコア」は標準化スコア（standard score）であり、倒産予測モデルである Altman (1968) の Z スコアとは無関係。
+  </div>
+
+  <h3>数式</h3>
+  <div class="formula-block"><span class="comment"># 年度 y、企業 i に対して</span>
+<span class="var">z_field_i</span> = (field_i − μ_y) / σ_y
+
+μ_y = mean({ field_j : field_j ≠ NULL, year(j) = y })
+σ_y = stdev({ field_j : field_j ≠ NULL, year(j) = y })</div>
+
+  <h3>正規化対象フィールド</h3>
+  <table>
+    <thead><tr><th>元フィールド</th><th>Zスコアフィールド</th><th>内容</th></tr></thead>
+    <tbody>
+      <tr><td><code>pl_revenue</code></td><td><code>z_revenue</code></td><td>売上高</td></tr>
+      <tr><td><code>op_margin</code></td><td><code>z_op_margin</code></td><td>営業利益率</td></tr>
+      <tr><td><code>roe</code></td><td><code>z_roe</code></td><td>ROE</td></tr>
+      <tr><td><code>equity_ratio</code></td><td><code>z_equity_ratio</code></td><td>自己資本比率</td></tr>
+      <tr><td><code>cf_ratio</code></td><td><code>z_cf_ratio</code></td><td>営業CF/売上比</td></tr>
+      <tr><td><code>pl_eps</code></td><td><code>z_eps</code></td><td>EPS</td></tr>
+      <tr><td><code>de_ratio</code></td><td><code>z_de_ratio</code></td><td>D/Eレシオ</td></tr>
+    </tbody>
+  </table>
+
+  <h3>年度別計算の理由</h3>
+  <p>異なるマクロ環境（金融緩和期・引き締め期等）の年度を混在させると比較が無意味になる。年度をまたいで計算すると、例えば低金利期の高 PER 水準が正常値として紛れ込む。</p>
+
+  <div class="refs">
+    <h4>参考文献（Altman との区別）</h4>
+    <div class="ref-item">
+      Altman, E.I. (1968). <span class="ref-title">"Financial Ratios, Discriminant Analysis and the Prediction of Corporate Bankruptcy."</span><br>
+      <em>Journal of Finance</em>, 23(4), 589–609. — <strong>本アプリの Zスコアとは別概念</strong><br>
+      <a href="https://doi.org/10.1111/j.1540-6261.1968.tb00843.x" target="_blank" rel="noopener">https://doi.org/10.1111/j.1540-6261.1968.tb00843.x</a>
+    </div>
+  </div>
+</div>
+
+<!-- ── Model 6 ── -->
+<div class="model-section" id="m6">
+  <h2>6. Zスコア重み付けスコアリング <span class="model-tag">おすすめ銘柄</span></h2>
+  <span class="file-tag">plugins/recommend.py</span>
+
+  <p>各指標の Zスコアを重み付け線形結合してスコアを計算し、企業をランキングする。</p>
+
+  <h3>スコア計算式</h3>
+  <div class="formula-block"><span class="var">score_i</span> = Σⱼ (weight_j × z_metric_j_i)
+
+weight_j    : 指標 j の重み（ユーザー設定）
+z_metric_j_i: 企業 i の指標 j の Zスコア（年度別正規化済み）</div>
+
+  <h3>プリセット定義</h3>
+  <table>
+    <thead><tr><th>プリセット</th><th>z_roe</th><th>z_op_margin</th><th>z_revenue</th><th>z_cf_ratio</th><th>z_equity_ratio</th><th>gap_ratio</th></tr></thead>
+    <tbody>
+      <tr><td><span class="tag tag-purple">バランス型</span></td><td>1.0</td><td>1.0</td><td>0.8</td><td>0.8</td><td>0.5</td><td>0.5</td></tr>
+      <tr><td><span class="tag tag-green">成長重視</span></td><td>1.0</td><td>0.5</td><td>2.0</td><td>0.5</td><td>—</td><td>0.3</td></tr>
+      <tr><td><span class="tag tag-amber">割安重視</span></td><td>1.0</td><td>1.0</td><td>—</td><td>—</td><td>0.5</td><td>2.0</td></tr>
+      <tr><td><span class="tag tag-red">高収益重視</span></td><td>2.0</td><td>2.0</td><td>—</td><td>1.0</td><td>0.5</td><td>—</td></tr>
+    </tbody>
+  </table>
+  <p><code>gap_ratio</code> は業種別OLS乖離率であり、正値 = 割安の指標として機能する。</p>
+
+  <div class="warn-box">
+    <strong>限界:</strong> ウェイト設定に数学的根拠はなく直感的なヒューリスティック。モデルの有効性はバックテストで検証すること。
+  </div>
+
+  <div class="refs">
+    <h4>参考文献</h4>
+    <div class="ref-item">
+      Fama, E.F. & French, K.R. (1993). <span class="ref-title">"Common risk factors in the returns on stocks and bonds."</span><br>
+      <em>Journal of Financial Economics</em>, 33(1), 3–56.<br>
+      <a href="https://doi.org/10.1016/0304-405X(93)90023-5" target="_blank" rel="noopener">https://doi.org/10.1016/0304-405X(93)90023-5</a>
+    </div>
+    <div class="ref-item">
+      Asness, C., Frazzini, A., Israel, R., & Moskowitz, T. (2015). <span class="ref-title">"Fact, Fiction, and Value Investing."</span><br>
+      <em>Journal of Portfolio Management</em>, 42(1), 34–52.<br>
+      <a href="https://doi.org/10.3905/jpm.2015.42.1.034" target="_blank" rel="noopener">https://doi.org/10.3905/jpm.2015.42.1.034</a>
+    </div>
+  </div>
+</div>
+
+<!-- ── Model 7 ── -->
+<div class="model-section" id="m7">
+  <h2>7. バックテスト</h2>
+  <span class="file-tag">api.py — GET /api/backtest</span>
+
+  <p>過去 N ヶ月前の時点で確定していた財務データを使いスコアリングし、その後の実際の株価リターンを計算することでモデルの有効性を事後的に検証する。</p>
+
+  <h3>計算ロジック</h3>
+  <div class="formula-block">start_date = today − months_ago × 30日
+
+1. start_date 以前に period_end が確定しているレコードで
+   各社の最新年度データを取得
+
+2. recommend.py と同じ重み付きスコアで全社をランキング
+
+3. 上位 top_n 社について:
+   始値 = start_date 以降の最初の終値
+   終値 = 最新の終値
+
+4. 実績リターン = (終値 − 始値) / 始値 × 100  <span class="sym">[%]</span>
+
+<span class="comment"># ベンチマーク</span>
+benchmark    = スコアリング対象企業（最大500社）の平均リターン
+超過収益      = 上位N社平均リターン − ベンチマーク平均</div>
+
+  <div class="warn-box">
+    <strong>バイアスに注意:</strong>
+    <br>• <strong>生存バイアス</strong>: 現在 DB に存在する企業のみ対象（過去に上場廃止した企業は含まれない）
+    <br>• <strong>決算ラグ</strong>: period_end ≤ start_date の制約のみで、実際の報告書公開日（+45–60日）は未考慮
+    <br>• <strong>ベンチマーク</strong>: 全上場銘柄ではなくDBに収録された企業の部分集合
+  </div>
+
+  <div class="refs">
+    <h4>参考文献</h4>
+    <div class="ref-item">
+      López de Prado, M. (2018). <span class="ref-title"><em>Advances in Financial Machine Learning.</em></span> Wiley.<br>
+      （第11章: バックテストの統計的有意性、生存バイアス・ルックアヘッドバイアスの解説）<br>
+      <a href="https://www.wiley.com/en-us/Advances+in+Financial+Machine+Learning-p-9781119482086" target="_blank" rel="noopener">wiley.com – Advances in Financial Machine Learning</a>
+    </div>
+    <div class="ref-item">
+      Bailey, D.H. & López de Prado, M. (2012). <span class="ref-title">"The Sharpe Ratio Efficient Frontier."</span><br>
+      <em>Journal of Risk</em>, 15(2), 3–44.<br>
+      <a href="https://doi.org/10.21314/JOR.2012.255" target="_blank" rel="noopener">https://doi.org/10.21314/JOR.2012.255</a>
+    </div>
+  </div>
+</div>
+
+</main>
+</div>
+
+<script>
+// アクティブなTOCリンクをハイライト
+const sections = document.querySelectorAll('[id]');
+const tocLinks = document.querySelectorAll('.toc a');
+function updateToc() {
+  let current = '';
+  sections.forEach(s => {
+    if (window.scrollY + 100 >= s.offsetTop) current = s.id;
+  });
+  tocLinks.forEach(a => {
+    a.classList.toggle('active', a.getAttribute('href') === '#' + current);
+  });
+}
+window.addEventListener('scroll', updateToc);
+updateToc();
+</script>
+</body>
+</html>

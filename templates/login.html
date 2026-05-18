@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ログイン — 財務分析ツール</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'Segoe UI',sans-serif;background:#0f1117;color:#e2e8f0;min-height:100vh;display:flex;align-items:center;justify-content:center}
+.card{background:#1a1d2e;border:1px solid #2d3154;border-radius:12px;padding:36px 40px;width:360px}
+.logo{display:flex;align-items:center;gap:12px;margin-bottom:28px}
+.logo-icon{width:36px;height:36px;background:#312e81;border-radius:10px;display:flex;align-items:center;justify-content:center;flex-shrink:0}
+h1{font-size:18px;font-weight:600;color:#a78bfa}
+.sub{font-size:12px;color:#64748b;margin-top:2px}
+label{display:block;font-size:12px;color:#94a3b8;margin-bottom:6px;margin-top:20px}
+input[type=password]{width:100%;background:#0f1117;border:1px solid #334155;border-radius:6px;padding:10px 12px;color:#e2e8f0;font-size:14px;outline:none;transition:border-color .2s}
+input[type=password]:focus{border-color:#7c3aed}
+.btn{width:100%;margin-top:24px;padding:11px;background:#7c3aed;color:#fff;border:none;border-radius:6px;font-size:14px;font-weight:600;cursor:pointer;transition:background .2s}
+.btn:hover{background:#6d28d9}
+.btn:disabled{background:#4a4a6a;cursor:not-allowed}
+.btn-secondary{width:100%;margin-top:10px;padding:9px;background:transparent;color:#7c3aed;border:1px solid #7c3aed;border-radius:6px;font-size:13px;font-weight:500;cursor:pointer;transition:all .2s}
+.btn-secondary:hover{background:#1e1b3a}
+.error{color:#f87171;font-size:12px;margin-top:12px;text-align:center;display:none}
+.success{color:#4ade80;font-size:12px;margin-top:12px;text-align:center;display:none}
+.forgot-link{display:block;text-align:center;margin-top:16px;font-size:12px;color:#64748b;cursor:pointer;text-decoration:underline}
+.forgot-link:hover{color:#94a3b8}
+.panel{display:none}
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="logo">
+    <div class="logo-icon">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#a78bfa" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+    </div>
+    <div>
+      <h1>財務分析ツール</h1>
+      <div class="sub">個人用 · 限定アクセス</div>
+    </div>
+  </div>
+  <!-- ログインパネル -->
+  <div id="login-panel">
+    <label for="pw">パスワード</label>
+    <input type="password" id="pw" placeholder="パスワードを入力" autocomplete="current-password"
+           onkeydown="if(event.key==='Enter')login()">
+    <button class="btn" id="login-btn" onclick="login()">ログイン</button>
+    <div class="error" id="err">パスワードが違います</div>
+    <span class="forgot-link" onclick="showReset()">パスワードを忘れた場合</span>
+  </div>
+
+  <!-- パスワードリセットパネル -->
+  <div id="reset-panel" class="panel">
+    <label for="rk">回復キー（APP_RECOVERY_KEY）</label>
+    <input type="password" id="rk" placeholder="回復キーを入力" autocomplete="off"
+           onkeydown="if(event.key==='Enter')document.getElementById('np').focus()">
+    <label for="np">新しいパスワード</label>
+    <input type="password" id="np" placeholder="新しいパスワードを入力" autocomplete="new-password"
+           onkeydown="if(event.key==='Enter')resetPassword()">
+    <button class="btn" id="reset-btn" onclick="resetPassword()">パスワードをリセット</button>
+    <div class="error" id="reset-err"></div>
+    <div class="success" id="reset-ok">パスワードを更新しました。ログインしてください。</div>
+    <button class="btn-secondary" onclick="showLogin()">← ログインに戻る</button>
+  </div>
+</div>
+
+<script>
+const _nextRaw = new URLSearchParams(location.search).get('next') || '/';
+const _next = /^\/[^/\\]/.test(_nextRaw) || _nextRaw === '/' ? _nextRaw : '/';
+if(localStorage.getItem('auth_token')) location.href = _next;
+
+function showReset(){
+  document.getElementById('login-panel').style.display = 'none';
+  document.getElementById('reset-panel').style.display = 'block';
+  document.getElementById('rk').focus();
+}
+function showLogin(){
+  document.getElementById('reset-panel').style.display = 'none';
+  document.getElementById('login-panel').style.display = 'block';
+  document.getElementById('pw').focus();
+}
+
+async function login(){
+  const pw  = document.getElementById('pw').value;
+  const err = document.getElementById('err');
+  const btn = document.getElementById('login-btn');
+  err.style.display = 'none';
+  btn.disabled = true;
+  btn.textContent = 'ログイン中...';
+  try {
+    const r = await fetch('/api/auth/login', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({password: pw})
+    });
+    if(!r.ok){
+      err.textContent = 'パスワードが違います';
+      err.style.display = 'block';
+      document.getElementById('pw').focus();
+      return;
+    }
+    const d = await r.json();
+    localStorage.setItem('auth_token', d.token);
+    location.href = _next;
+  } catch(e) {
+    err.textContent = 'エラー: ' + e.message;
+    err.style.display = 'block';
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'ログイン';
+  }
+}
+
+async function resetPassword(){
+  const rk  = document.getElementById('rk').value;
+  const np  = document.getElementById('np').value;
+  const err = document.getElementById('reset-err');
+  const ok  = document.getElementById('reset-ok');
+  const btn = document.getElementById('reset-btn');
+  err.style.display = 'none';
+  ok.style.display  = 'none';
+  btn.disabled = true;
+  btn.textContent = '更新中...';
+  try {
+    const r = await fetch('/api/auth/reset-password', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({recovery_key: rk, new_password: np})
+    });
+    const d = await r.json();
+    if(!r.ok){
+      err.textContent = d.detail || 'エラーが発生しました';
+      err.style.display = 'block';
+      return;
+    }
+    ok.style.display = 'block';
+    document.getElementById('rk').value = '';
+    document.getElementById('np').value = '';
+    setTimeout(showLogin, 2000);
+  } catch(e) {
+    err.textContent = 'エラー: ' + e.message;
+    err.style.display = 'block';
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'パスワードをリセット';
+  }
+}
+</script>
+</body>
+</html>

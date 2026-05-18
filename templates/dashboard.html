@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>財務分析ダッシュボード</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'Segoe UI',sans-serif;background:#0f1117;color:#e2e8f0;min-height:100vh}
+.header{background:#1a1d2e;border-bottom:1px solid #2d3154;padding:14px 24px;display:flex;align-items:center;gap:14px}
+.header h1{font-size:17px;font-weight:600;color:#a78bfa}
+.badge{background:#312e81;color:#c4b5fd;font-size:11px;padding:3px 8px;border-radius:12px}
+.dot{width:8px;height:8px;border-radius:50%;display:inline-block}
+.dot-green{background:#10b981}.dot-amber{background:#f59e0b}.dot-red{background:#ef4444}
+.api-status{margin-left:auto;display:flex;align-items:center;gap:8px;font-size:12px;color:#64748b}
+.container{padding:28px 24px;max-width:1100px;margin:0 auto}
+.section-title{font-size:13px;font-weight:600;color:#64748b;text-transform:uppercase;letter-spacing:.8px;margin-bottom:14px}
+.stats-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-bottom:28px}
+.stat-card{background:#1a1d2e;border:1px solid #2d3154;border-radius:10px;padding:20px;text-align:center}
+.stat-label{font-size:11px;color:#64748b;margin-bottom:8px;text-transform:uppercase;letter-spacing:.5px}
+.stat-value{font-size:28px;font-weight:700}
+.stat-sub{font-size:11px;color:#64748b;margin-top:4px}
+.nav-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:28px}
+.nav-card{background:#1a1d2e;border:1px solid #2d3154;border-radius:12px;padding:24px;display:flex;flex-direction:column;gap:14px;transition:border-color .2s}
+.nav-card:hover{border-color:#7c3aed}
+.nav-card-title{font-size:16px;font-weight:600;color:#e2e8f0;display:flex;align-items:center;gap:10px}
+.nav-card-icon{width:36px;height:36px;border-radius:8px;display:flex;align-items:center;justify-content:center}
+.icon-blue{background:#1e3a5f}
+.icon-purple{background:#2e1065}
+.nav-card-desc{font-size:12px;color:#64748b;line-height:1.7}
+.feature-list{list-style:none;display:flex;flex-direction:column;gap:6px}
+.feature-list li{font-size:12px;color:#94a3b8;display:flex;align-items:center;gap:6px}
+.feature-list li::before{content:'';width:4px;height:4px;border-radius:50%;background:#7c3aed;flex-shrink:0}
+.nav-btn{display:inline-flex;align-items:center;gap:6px;padding:9px 18px;background:#7c3aed;color:#fff;border-radius:6px;text-decoration:none;font-size:13px;font-weight:500;margin-top:auto;transition:background .15s;border:none;cursor:pointer;width:fit-content}
+.nav-btn:hover{background:#6d28d9}
+.nav-btn-outline{background:transparent;border:1px solid #334155;color:#94a3b8}
+.nav-btn-outline:hover{background:#1e293b;color:#e2e8f0}
+.scheduler-card{background:#1a1d2e;border:1px solid #2d3154;border-radius:12px;padding:20px}
+.sched-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin-top:14px}
+.sched-item{background:#0f1117;border-radius:8px;padding:14px}
+.sched-item-label{font-size:10px;color:#64748b;text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px}
+.sched-item-value{font-size:14px;font-weight:600}
+.tag{display:inline-block;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:500}
+.tag-green{background:#052e16;color:#86efac}
+.tag-amber{background:#451a03;color:#fcd34d}
+.tag-blue{background:#1e3a5f;color:#93c5fd}
+.tag-gray{background:#1e293b;color:#64748b}
+.spinner{width:14px;height:14px;border:2px solid #334155;border-top-color:#a78bfa;border-radius:50%;animation:spin .7s linear infinite;display:inline-block}
+@keyframes spin{to{transform:rotate(360deg)}}
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div style="width:32px;height:32px;background:#312e81;border-radius:8px;display:flex;align-items:center;justify-content:center">
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#a78bfa" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+  </div>
+  <h1>財務分析ダッシュボード</h1>
+  <span class="badge">ホーム</span>
+  <div class="api-status">
+    <span class="dot dot-amber" id="api-dot"></span>
+    <span id="api-label">接続確認中...</span>
+  </div>
+</div>
+
+<div class="container">
+
+  <!-- ステータスカード -->
+  <div class="section-title">データベース概要</div>
+  <div class="stats-grid">
+    <div class="stat-card">
+      <div class="stat-label">収録企業数</div>
+      <div class="stat-value" id="stat-companies" style="color:#a78bfa">—</div>
+      <div class="stat-sub">社</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">財務レコード数</div>
+      <div class="stat-value" id="stat-records" style="color:#60a5fa">—</div>
+      <div class="stat-sub">件</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">最新年度</div>
+      <div class="stat-value" id="stat-year" style="color:#10b981">—</div>
+      <div class="stat-sub">年度</div>
+    </div>
+  </div>
+
+  <!-- ナビゲーションカード -->
+  <div class="section-title">ページへ移動</div>
+  <div class="nav-grid">
+    <!-- 収集 & スクリーニング -->
+    <div class="nav-card">
+      <div class="nav-card-title">
+        <div class="nav-card-icon icon-blue">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#93c5fd" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+        </div>
+        収集 & スクリーニング
+      </div>
+      <div class="nav-card-desc">
+        EDINETから財務データを収集し、条件でスクリーニングします。
+      </div>
+      <ul class="feature-list">
+        <li>EDINET / stooq からの財務・株価データ収集</li>
+        <li>財務指標によるスクリーニング</li>
+        <li>財務レコードのDB閲覧</li>
+        <li>Zスコア正規化ビュー</li>
+      </ul>
+      <a href="/collection" class="nav-btn">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
+        収集ページを開く
+      </a>
+    </div>
+
+    <!-- 分析 -->
+    <div class="nav-card">
+      <div class="nav-card-title">
+        <div class="nav-card-icon icon-purple">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#c4b5fd" stroke-width="2"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"/><polyline points="17 6 23 6 23 12"/></svg>
+        </div>
+        分析
+      </div>
+      <div class="nav-card-desc">
+        収集した財務データを使って回帰分析・乖離分析・スコアリングを行います。
+      </div>
+      <ul class="feature-list">
+        <li>OLS 重回帰分析（理論時価総額の算出）</li>
+        <li>乖離分析（割安・割高スクリーニング）</li>
+        <li>★ おすすめ銘柄スコアリング</li>
+        <li>市場データ（株価・バリュエーション）更新</li>
+      </ul>
+      <a href="/analysis" class="nav-btn">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
+        分析ページを開く
+      </a>
+    </div>
+    <!-- モデル解説 -->
+    <div class="nav-card" style="grid-column:1/-1">
+      <div class="nav-card-title">
+        <div class="nav-card-icon" style="background:#1e1b4b">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#a78bfa" stroke-width="2"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg>
+        </div>
+        モデル解説・参考文献
+      </div>
+      <div class="nav-card-desc">
+        アプリで使用している統計・ファイナンスモデルの数式・パラメータ・ソース論文をまとめたドキュメントです。
+      </div>
+      <ul class="feature-list">
+        <li>Ohlson(1995) 型 OLS 回帰・セクター OLS・OU プロセス乖離分析</li>
+        <li>月次ウォークフォワード CV・Zスコア正規化・加重スコアリング・バックテスト</li>
+        <li>各モデルの数式・仮定・既知問題と参考文献 DOI リンク</li>
+      </ul>
+      <a href="/models" class="nav-btn" style="background:#312e81">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
+        モデル解説を開く
+      </a>
+    </div>
+  </div>
+
+  <!-- スケジューラー状況 -->
+  <div class="section-title">自動更新スケジューラー</div>
+  <div class="scheduler-card">
+    <div style="display:flex;align-items:center;justify-content:space-between">
+      <div style="display:flex;align-items:center;gap:10px">
+        <span class="dot" id="sched-dot" style="background:#f59e0b"></span>
+        <span style="font-size:13px;color:#94a3b8" id="sched-label">確認中...</span>
+      </div>
+      <button onclick="toggleScheduler()" id="sched-toggle-btn"
+        style="padding:5px 14px;background:#1e293b;border:1px solid #334155;border-radius:6px;color:#94a3b8;font-size:12px;cursor:pointer">
+        切り替え
+      </button>
+    </div>
+    <div class="sched-grid">
+      <div class="sched-item">
+        <div class="sched-item-label">次回実行予定</div>
+        <div class="sched-item-value" id="sched-next">—</div>
+      </div>
+      <div class="sched-item">
+        <div class="sched-item-label">前回実行日時</div>
+        <div class="sched-item-value" id="sched-last">—</div>
+      </div>
+      <div class="sched-item">
+        <div class="sched-item-label">前回結果</div>
+        <div class="sched-item-value" id="sched-status">—</div>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<script>
+function esc(s){return String(s??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');}
+
+function showNotif(msg, type='error'){
+  const el = document.createElement('div');
+  el.textContent = msg;
+  const bg = type==='error' ? '#ef4444' : type==='success' ? '#10b981' : '#3b82f6';
+  el.style.cssText = `position:fixed;bottom:20px;right:20px;z-index:9999;padding:10px 16px;border-radius:6px;font-size:13px;color:#fff;max-width:420px;background:${bg};box-shadow:0 4px 12px rgba(0,0,0,.4)`;
+  document.body.appendChild(el);
+  setTimeout(()=>el.remove(), 4000);
+}
+
+function apiBase() { return ''; }
+
+async function apiFetch(path) {
+  const token = localStorage.getItem('auth_token') || '';
+  const heads = {'Content-Type': 'application/json'};
+  if (token) heads['Authorization'] = 'Bearer ' + token;
+  const r = await fetch(apiBase() + path, {headers: heads});
+  if (r.status === 401) { location.href = '/login?next=/'; return null; }
+  if (!r.ok) throw new Error(await r.text());
+  return r.json();
+}
+
+async function loadStats() {
+  try {
+    const d = await apiFetch('/api/stats');
+    if (!d) return;
+    document.getElementById('stat-companies').textContent = d.companies.toLocaleString();
+    document.getElementById('stat-records').textContent = d.records.toLocaleString();
+    document.getElementById('stat-year').textContent = d.latest_year ?? '—';
+    document.getElementById('api-dot').className = 'dot dot-green';
+    document.getElementById('api-label').textContent = 'API接続中';
+  } catch(e) {
+    document.getElementById('api-dot').className = 'dot dot-red';
+    document.getElementById('api-label').textContent = 'API未接続';
+  }
+}
+
+async function loadScheduler() {
+  try {
+    const d = await apiFetch('/api/scheduler/status');
+    if (!d) return;
+    const dot = document.getElementById('sched-dot');
+    const label = document.getElementById('sched-label');
+    if (d.enabled) {
+      dot.className = 'dot dot-green';
+      label.textContent = '自動更新: 有効（毎日 3:00 に差分収集を実行）';
+    } else {
+      dot.className = 'dot dot-red';
+      label.textContent = '自動更新: 無効';
+    }
+    document.getElementById('sched-next').textContent = d.next_run ?? '—';
+    document.getElementById('sched-last').textContent = d.last_run ?? '（未実行）';
+    const st = d.last_status;
+    const statusEl = document.getElementById('sched-status');
+    if (!st) { statusEl.innerHTML = '<span class="tag tag-gray">未実行</span>'; }
+    else if (st === '成功') { statusEl.innerHTML = '<span class="tag tag-green">成功</span>'; }
+    else if (st === '実行中') { statusEl.innerHTML = '<span class="tag tag-blue">実行中</span>'; }
+    else { statusEl.innerHTML = `<span class="tag tag-amber" title="${esc(st)}">エラー</span>`; }
+  } catch(e) { /* ignore */ }
+}
+
+async function toggleScheduler() {
+  try {
+    await fetch(apiBase() + '/api/scheduler/toggle', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json',
+        ...(localStorage.getItem('auth_token') ? {'Authorization': 'Bearer ' + localStorage.getItem('auth_token')} : {})}
+    });
+    loadScheduler();
+  } catch(e) { showNotif('切り替え失敗: ' + e.message); }
+}
+
+async function initAuth() {
+  try {
+    const r = await fetch(apiBase() + '/api/auth/status');
+    const d = await r.json();
+    if (d.auth_required && !localStorage.getItem('auth_token')) {
+      location.href = '/login?next=/';
+    }
+  } catch(e) { /* API未起動時はスキップ */ }
+}
+
+initAuth();
+loadStats();
+loadScheduler();
+</script>
+</body>
+</html>
