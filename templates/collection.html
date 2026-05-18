@@ -1626,7 +1626,17 @@ initAuth();
 showTab('collect');
 checkApi();
 loadSchedulerStatus();
-setInterval(loadSchedulerStatus, 30000);  // 30秒ごとに自動更新
+const _schedulerTimer = setInterval(loadSchedulerStatus, 30000);  // 30秒ごとに自動更新
+
+// 画面離脱時にタイマー・SSE・debounce タイマーをまとめてクリーンアップ
+// （SPA 的なタブ切替はしていないので beforeunload のみで十分）
+window.addEventListener('beforeunload', () => {
+  clearInterval(_schedulerTimer);
+  if (searchTimer) clearTimeout(searchTimer);
+  for (const sse of [_smartSSE, _collectSSE, _historySSE, _jqSSE, marketSSE]) {
+    if (sse) { try { sse.close(); } catch(_) {} }
+  }
+});
 </script>
 </body>
 </html>
