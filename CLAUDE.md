@@ -2,6 +2,52 @@
 
 日本株財務分析ツール。Claude Codeへの動作指示ファイル。プロジェクト目的・方針は [VISION.md](docs/VISION.md) を参照。
 
+## GitHub 協調ワークフロー
+
+**デスクトップ版 Claude Code（ここ）とWeb版（claude.ai/code）が `kome-kome/financial_app` を介して協調する。**
+
+### ブランチ戦略
+
+| 規模 | ブランチ | 手順 |
+|---|---|---|
+| バグ修正・小改善 | `main` 直接 | commit → push |
+| 機能追加・大きな変更 | `feature/xxx` | branch → commit → push → PR |
+
+### セッション終了時の必須手順（最重要）
+
+作業完了後は **必ず** 以下を実行してからセッションを終了すること。
+Web版 Claude Code は GitHub のコードを参照するため、push しないと変更が共有されない。
+
+```powershell
+# 変更を確認
+git status
+
+# ステージング（変更ファイルを個別に指定。.env や機密ファイルを含めないこと）
+git add [変更ファイル]
+
+# コミット（変更内容を端的に記述）
+git commit -m "変更内容の説明"
+
+# プッシュ
+git push origin main          # main の場合
+git push origin feature/xxx   # feature ブランチの場合
+```
+
+### feature ブランチ → PR のフロー
+
+```powershell
+git checkout -b feature/xxx   # ブランチ作成
+# ...実装...
+git add [ファイル]
+git commit -m "..."
+git push origin feature/xxx
+gh pr create --title "タイトル" --body "説明"  # PR 作成
+```
+
+PR はWeb版 Claude Code でレビュー → コメント → main へマージ。
+
+---
+
 ## 動作設定
 - 日本語応答
 - **ツール実行前（必須・最重要）**: 許可ダイアログが出る可能性があるコマンドを実行する前に、
