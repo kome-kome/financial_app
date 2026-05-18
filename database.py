@@ -27,11 +27,19 @@ DATABASE_URL = os.environ.get(
 if DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 
+# ローカル以外（クラウドDB）は SSL を強制し、コネクション数を抑える
+_is_local = "localhost" in DATABASE_URL or "127.0.0.1" in DATABASE_URL
+_connect_args = {} if _is_local else {"sslmode": "require"}
+_pool_size    = 10 if _is_local else 3
+_max_overflow = 20 if _is_local else 5
+
 engine = create_engine(
     DATABASE_URL,
-    pool_size=10,
-    max_overflow=20,
+    pool_size=_pool_size,
+    max_overflow=_max_overflow,
     pool_pre_ping=True,
+    pool_recycle=300,
+    connect_args=_connect_args,
     echo=False,
 )
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
