@@ -605,7 +605,7 @@ flowchart TD
 
     F["📈 株価取得\nstooq API\n─────────────────\n株価 → PER = 株価÷EPS\n株価 → PBR = 株価÷BPS\n時価総額 = 株価×（純資産÷BPS）"]
 
-    G["📐 前期比成長率\ncalc_growth_rates()\n─────────────────\n(edinet_code, year)でソートし\n前期値と比較\n売上成長率・営業利益成長率・EPS成長率"]
+    G["📐 前期比成長率\ncalc_growth_rates()\n─────────────────\nPostgreSQL の LAG() window function で\nedinet_code 単位の前期値と比較\n（DB 側で完結、大規模データでも OOM 回避）\n売上成長率・営業利益成長率・EPS成長率"]
 
     H["📊 Zスコア正規化\ncalc_zscore_normalization()\n─────────────────\n年度ごとに計算（年度混在禁止）\nZ = (値 - 年度内平均) ÷ 年度内標準偏差\nROE・営業利益率・自己資本比率など7指標"]
 
