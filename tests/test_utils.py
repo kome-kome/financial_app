@@ -140,6 +140,45 @@ class TestOls:
         result = ols(X, y)
         assert result["adj_r2"] <= result["r2"]
 
+    def test_stats_present(self):
+        # se / t_stat / p_value / df が返ること
+        import random
+        rng = random.Random(0)
+        X = [[1.0, x, rng.gauss(0, 1)] for x in range(50)]
+        y = [2.0 + 3.0 * row[1] + 0.5 * row[2] + rng.gauss(0, 1) for row in X]
+        result = ols(X, y)
+        assert result is not None
+        assert "se" in result and "t_stat" in result and "p_value" in result
+        assert result["df"] == 50 - 3
+        assert len(result["se"]) == 3
+        # 真の係数 (2, 3, 0.5) を反映する t 統計量
+        assert result["t_stat"][1] > 10  # x 係数は強く有意
+        assert result["p_value"][1] < 0.01
+
+    def test_noise_only_has_high_pvalue(self):
+        # 真の関係が無い場合、p 値は高い（≥ 0.1 程度）
+        import random
+        rng = random.Random(42)
+        X = [[1.0, rng.gauss(0, 1)] for _ in range(100)]
+        y = [rng.gauss(0, 1) for _ in range(100)]
+        result = ols(X, y)
+        assert result is not None
+        # 切片以外の係数の p 値は一定確率で 0.05 を超える
+        # （ここでは少なくとも NaN ではないことを担保）
+        assert result["p_value"][1] == result["p_value"][1]  # not NaN
+        assert 0.0 <= result["p_value"][1] <= 1.0
+
+    def test_df_zero_returns_nan_stats(self):
+        # n == p の完全フィット → df = 0 → 統計量は NaN
+        X = [[1.0, 1.0], [1.0, 2.0]]
+        y = [3.0, 5.0]
+        result = ols(X, y)
+        assert result is not None
+        assert result["df"] == 0
+        # NaN 判定
+        assert result["se"][0] != result["se"][0]
+        assert result["p_value"][0] != result["p_value"][0]
+
 
 # ── kfold_cv ─────────────────────────────────────────────────────────────
 

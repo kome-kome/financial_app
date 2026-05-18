@@ -253,12 +253,21 @@ class SectorOLSPlugin(AnalysisPlugin):
                 sector_preds[idx]["sector_rank"] = rank
 
             all_predictions.extend(sector_preds)
+            # 説明変数の有意性カウント（切片を除く、p < 0.05 を有意とみなす）
+            p_values = result.get("p_value", [])
+            n_significant = sum(
+                1 for pv in p_values[1:] if pv == pv and pv < 0.05
+            )
             sector_stats.append({
                 "industry": sector,
                 "n":        len(samples),
                 "r2":       round(result["r2"], 4),
                 "adj_r2":   round(result["adj_r2"], 4),
                 "rmse":     round(result["rmse"] * y_sd, 2),
+                "df":       result.get("df"),
+                "n_significant_features": n_significant,
+                "p_values": [round(pv, 4) if pv == pv else None for pv in p_values],
+                "t_stats":  [round(t, 4) if t == t else None for t in result.get("t_stat", [])],
             })
 
         if not sector_stats:

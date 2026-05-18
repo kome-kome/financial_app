@@ -122,7 +122,15 @@ td code{background:#0f172a;border:1px solid #1e2235;padding:1px 5px;border-radiu
   <h3>OLS実装（Pure Python）</h3>
   <div class="formula-block"><span class="var">β</span> = (<span class="var">X</span>'<span class="var">X</span>)⁻¹ <span class="var">X</span>'<span class="var">y</span>  <span class="comment"># 正規方程式</span>
 逆行列: Gauss-Jordan 消去法（numpy 不使用）
-返り値: beta, yhat, r2, adj_r2, rmse, mae</div>
+返り値: beta, yhat, r2, adj_r2, rmse, mae, se, t_stat, p_value, df</div>
+
+  <h3>係数の有意性（標準誤差・t統計量・p値）</h3>
+  <div class="formula-block"><span class="var">σ²</span> = SSE / (n - p)                 <span class="comment"># 残差分散</span>
+Var(<span class="var">β</span><span class="sym">ᵢ</span>) = <span class="var">σ²</span> × [(X'X)⁻¹]<span class="sym">ᵢᵢ</span>          <span class="comment"># 係数の分散</span>
+SE(<span class="var">β</span><span class="sym">ᵢ</span>)  = √Var(<span class="var">β</span><span class="sym">ᵢ</span>)                <span class="comment"># 標準誤差</span>
+<span class="var">tᵢ</span>      = <span class="var">β</span><span class="sym">ᵢ</span> / SE(<span class="var">β</span><span class="sym">ᵢ</span>)               <span class="comment"># t統計量</span>
+<span class="var">pᵢ</span>      = 2 × (1 - Φ(|<span class="var">tᵢ</span>|))            <span class="comment"># 両側p値（df ≥ 30）</span></div>
+  <p>df = n − p。df &lt; 30 は t 分布の裾を反映する簡易補正を適用するが「参考値」扱い。慣例的に p &lt; 0.05 を有意とみなす。</p>
 </div>
 
 <!-- ── Model 1 ── -->

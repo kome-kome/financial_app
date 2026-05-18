@@ -40,8 +40,35 @@ def normalize(vals: list, method: str) -> tuple[list, float, float]:
     return [(v - mu) / sd for v in vals], mu, sd
 
 
+def _normal_cdf(x: float) -> float:
+    """標準正規分布の累積分布関数 Φ(x)。Pure Python の math.erf を利用。"""
+    return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
+
+
+def _two_sided_pvalue(t: float, df: int) -> float:
+    """両側 p 値。df ≥ 30 なら正規近似、それ未満は t 分布の係数で補正。
+
+    完全な t 分布 CDF は無依存実装が複雑なため、有限自由度では Cornish-Fisher 風の
+    粗い補正のみを行う（小サンプル時は「参考値」扱いとする想定）。
+    """
+    if df <= 0:
+        return float("nan")
+    z = abs(t)
+    if df >= 30:
+        return 2.0 * (1.0 - _normal_cdf(z))
+    # 小自由度: t 分布は正規より裾が厚いため p 値が大きくなる方向に補正
+    # 近似式: 正規 p × (1 + (z^2 + 1) / (4 df))（Hill 1970 系統の簡易補正）
+    p_norm = 2.0 * (1.0 - _normal_cdf(z))
+    correction = 1.0 + (z * z + 1.0) / (4.0 * df)
+    return min(1.0, p_norm * correction)
+
+
 def ols(X: list, y: list) -> dict | None:
-    """Pure-Python OLS。beta, yhat, r2, adj_r2, rmse, mae を返す。"""
+    """Pure-Python OLS。beta, yhat, r2, adj_r2, rmse, mae, se, t_stat, p_value を返す。
+
+    se / t_stat / p_value は各係数（切片含む）に対する配列。p_value は df ≥ 30 で
+    正規近似、それ未満は簡易補正（小サンプルでは「参考値」扱い）。
+    """
     n, p = len(X), len(X[0])
 
     def dot(a, b):
@@ -85,7 +112,28 @@ def ols(X: list, y: list) -> dict | None:
     adj_r2 = 1 - (1 - r2) * (n - 1) / (n - p - 1) if n > p + 1 else r2
     rmse = math.sqrt(sse / n)
     mae = sum(abs(v - yhat[i]) for i, v in enumerate(y)) / n
-    return {"beta": beta, "yhat": yhat, "r2": r2, "adj_r2": adj_r2, "rmse": rmse, "mae": mae}
+
+    # 標準誤差・t統計量・p値（df = n - p）。
+    # df ≤ 0 は推定不能（過剰フィット）として全て NaN を返す。
+    df = n - p
+    se = [float("nan")] * p
+    t_stat = [float("nan")] * p
+    p_value = [float("nan")] * p
+    if df > 0:
+        sigma2 = sse / df
+        for i in range(p):
+            var_i = sigma2 * inv[i][i]
+            if var_i >= 0:
+                se[i] = math.sqrt(var_i)
+                if se[i] > 0:
+                    t_stat[i] = beta[i] / se[i]
+                    p_value[i] = _two_sided_pvalue(t_stat[i], df)
+
+    return {
+        "beta": beta, "yhat": yhat, "r2": r2, "adj_r2": adj_r2,
+        "rmse": rmse, "mae": mae,
+        "se": se, "t_stat": t_stat, "p_value": p_value, "df": df,
+    }
 
 
 def normalize_transform(val: float, param1: float, param2: float, method: str = "zscore") -> float:
