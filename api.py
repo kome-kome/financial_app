@@ -20,7 +20,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, FileResponse, JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 from pydantic import BaseModel, Field
-from sqlalchemy import func
+from sqlalchemy import func, text
 from sqlalchemy.orm import Session
 import io, csv
 
@@ -185,6 +185,30 @@ def get_db():
         yield db
     finally:
         db.close()
+
+# ── ヘルスチェック ────────────────────────────────────────────────────────
+
+@app.get("/health")
+async def health_check():
+    """死活監視用エンドポイント。DB 接続を含む基本疎通を確認する。
+
+    認証ミドルウェアは `/api/*` のみ保護するため、本エンドポイントは認証不要。
+    """
+    db_ok = False
+    try:
+        db = SessionLocal()
+        try:
+            db.execute(text("SELECT 1"))
+            db_ok = True
+        finally:
+            db.close()
+    except Exception as e:
+        log.error("ヘルスチェック DB エラー: %s", e, exc_info=True)
+    status_code = 200 if db_ok else 503
+    return JSONResponse(
+        {"status": "ok" if db_ok else "degraded", "db": "ok" if db_ok else "error"},
+        status_code=status_code,
+    )
 
 # ── 収集ジョブ管理 ────────────────────────────────────────────────────────
 

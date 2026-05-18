@@ -730,6 +730,10 @@ graph LR
         P5["GET /models\nmodels.html を返す\n（モデル解説・参考文献）"]
     end
 
+    subgraph OPS["🩺 運用"]
+        H1["GET /health\n死活監視（DB疎通確認、認証不要）\n200=ok / 503=degraded"]
+    end
+
     subgraph AUTH["🔐 認証 /api/auth/"]
         A1["POST /api/auth/login\nパスワード認証 → Bearerトークン発行"]
         A2["POST /api/auth/reset-password\n回復キーでパスワード変更"]
