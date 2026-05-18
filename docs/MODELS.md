@@ -485,11 +485,24 @@ z_field_i = (field_i − μ_y) / σ_y
 ### スコア計算式
 
 ```
-score_i = Σⱼ (weight_j × z_metric_j_i)
+score_i = Σⱼ∈present (weight_j × z_metric_j_i) / Σⱼ∈present |weight_j|
 
 z_metric_j_i : 企業 i の指標 j の Zスコア（年度別正規化済み）
 weight_j      : 指標 j の重み（ユーザー設定）
+present       : 企業 i において値が NULL でない指標の集合
 ```
+
+**weighted mean** で計算するため、指標カバレッジが異なる銘柄を公平に比較できる
+（旧実装の単純和では値が揃った銘柄が有利だった）。
+
+### カバレッジフィルタ
+
+```
+coverage_i = Σⱼ∈present |weight_j| / Σⱼ |weight_j|
+```
+
+`min_coverage`（デフォルト 0.5）未満の企業はランキングから除外する。
+`min_coverage = 1.0` を指定すれば全指標が揃った企業のみが対象になる。
 
 ### デフォルトプリセット
 

@@ -438,10 +438,16 @@ step_months      = <span class="val">3</span>
   <p>各指標の Zスコアを重み付け線形結合してスコアを計算し、企業をランキングする。</p>
 
   <h3>スコア計算式</h3>
-  <div class="formula-block"><span class="var">score_i</span> = Σⱼ (weight_j × z_metric_j_i)
+  <div class="formula-block"><span class="var">score_i</span> = Σⱼ∈present (weight_j × z_metric_j_i) / Σⱼ∈present |weight_j|
 
+present     : 企業 i において値が NULL でない指標の集合
 weight_j    : 指標 j の重み（ユーザー設定）
 z_metric_j_i: 企業 i の指標 j の Zスコア（年度別正規化済み）</div>
+  <p><strong>weighted mean</strong> で計算するため、指標カバレッジが異なる銘柄を公平に比較できる。</p>
+
+  <h3>カバレッジフィルタ</h3>
+  <div class="formula-block"><span class="var">coverage_i</span> = Σⱼ∈present |weight_j| / Σⱼ |weight_j|</div>
+  <p><code>min_coverage</code>（デフォルト 0.5）未満の企業はランキングから除外する。<code>1.0</code> 指定で全指標が揃った企業のみ対象。</p>
 
   <h3>プリセット定義</h3>
   <table>
