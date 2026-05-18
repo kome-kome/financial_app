@@ -222,16 +222,27 @@ async def start_collection(req: CollectRequest, background_tasks: BackgroundTask
 
 async def _run_collection_bg(years: int, max_co: Optional[int], log_id: int, skip_existing: bool = False):
     _job_status["cancel_requested"] = False
+    _prog_ticks = [0]
+
+    db = SessionLocal()
 
     def on_progress(current, total, msg):
         _job_status["progress"] = current
         _job_status["total"]    = total
         _job_status["log"].append(msg)
+        _prog_ticks[0] += 1
+        if _prog_ticks[0] % 10 == 0:
+            try:
+                obj = db.get(CollectionLog, log_id)
+                if obj:
+                    obj.companies_processed = current
+                    db.commit()
+            except Exception:
+                db.rollback()
 
     def cancel_check():
         return _job_status.get("cancel_requested", False)
 
-    db = SessionLocal()
     try:
         cancelled = await run_full_collection(years, max_co, on_progress=on_progress,
                                               skip_existing=skip_existing, cancel_check=cancel_check)
