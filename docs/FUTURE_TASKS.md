@@ -35,6 +35,12 @@
 - **改善案**: `/api/collect/data-quality` か `checker.py` に会計基準別の統計を追加
 - **実装場所**: `checker.py`、`api.py`
 
+#### G. 発行済株式数の正規ソース取得
+- **問題**: `plugins/total_return.py` の `shares_outstanding` は `bs_total_equity / bs_bps` で推計しているが、IFRS/JGAAP 混在・期中増資・優先株存在時に精度が低下する
+- **改善案**: J-Quants `/markets/listed/info` の `IssuedShares` フィールドから正規の発行済株式数を取得し、`companies` テーブルに `issued_shares` カラム追加 + `cf_ops_ps` 計算に直接利用
+- **前提**: `JQUANTS_API_KEY` が設定済みであること（プレミアムプラン要否は要確認）
+- **実装場所**: `collector.py` の `collect_stock_price_history_jquants` 拡張、`database.py` のスキーマ更新、`plugins/total_return.py` の置換
+
 ---
 
 ### Tier 3 — 機能追加

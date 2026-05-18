@@ -111,7 +111,16 @@ class TotalReturnPlugin(AnalysisPlugin):
             )
 
         def shares_outstanding(r) -> float | None:
-            """発行済株式数を推計（純資産 ÷ BPS）"""
+            """発行済株式数を推計（純資産 ÷ BPS）。
+
+            精度低下が起こる条件（CLAUDE.md 既知事項を補強）:
+              - IFRS と JGAAP で「純資産」「BPS」の定義が微妙に異なる場合
+                （IFRS は親会社株主帰属持分、JGAAP は連結純資産が分母）
+              - 期中の増資・自己株消却で BPS と純資産の比が日次でずれている場合
+              - 優先株・転換社債が存在し普通株数と乖離する場合
+            根本対応案（FUTURE_TASKS.md）: J-Quants `/markets/listed/info` の
+            IssuedShares フィールドから正規の発行済株式数を取得して直接利用する。
+            """
             eq = r.bs_total_equity
             bps = r.bs_bps
             if eq and bps and bps > 0:
