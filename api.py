@@ -188,6 +188,9 @@ def get_db():
 
 # ── 収集ジョブ管理 ────────────────────────────────────────────────────────
 
+SMART_CHUNK_SIZE     = 200   # スマート収集: 1チャンクあたりの企業数増分
+SMART_FULL_THRESHOLD = 3500  # この企業数以上は「全社収集完了」と判定し差分収集に切り替え
+
 _job_status: dict = {"running": False, "log": [], "progress": 0, "total": 0, "job_type": "", "cancel_requested": False}
 _market_status: dict = {"running": False, "progress": 0, "total": 0, "log": [], "cancel_requested": False}
 _history_status: dict  = {"running": False, "progress": 0, "total": 0, "log": [], "cancel_requested": False}
@@ -204,6 +207,9 @@ class HistoryCollectRequest(BaseModel):
     skip_existing: bool          = True   # True=差分収集（収集済み企業をスキップ）
     backfill:      bool          = False  # True=前方差分に加え後方欠損（years_back起点→最古前日）も補完
     force:         bool          = False  # True=実行中フラグを無視して強制再起動
+
+class SmartCollectRequest(BaseModel):
+    years_back: int = Field(default=3, ge=1, le=5)
 
 class JQuantsCollectRequest(BaseModel):
     days_back: int  = Field(default=14, ge=1, le=730)
@@ -230,6 +236,8 @@ async def _run_collection_bg(years: int, max_co: Optional[int], log_id: int, ski
         _job_status["progress"] = current
         _job_status["total"]    = total
         _job_status["log"].append(msg)
+        if len(_job_status["log"]) > 500:
+            _job_status["log"] = _job_status["log"][-500:]
         _prog_ticks[0] += 1
         if _prog_ticks[0] % 10 == 0:
             try:
@@ -267,6 +275,100 @@ async def _run_collection_bg(years: int, max_co: Optional[int], log_id: int, ski
         _job_status["running"] = False
         _job_status["cancel_requested"] = False
         db.close()
+
+async def _run_smart_collection_bg(log_id: int, years: int):
+    _job_status["cancel_requested"] = False
+    _prog_ticks = [0]
+    db = SessionLocal()
+
+    def on_progress(current, total, msg):
+        _job_status["progress"] = current
+        _job_status["total"]    = total
+        _job_status["log"].append(msg)
+        if len(_job_status["log"]) > 500:
+            _job_status["log"] = _job_status["log"][-500:]
+        _prog_ticks[0] += 1
+        if _prog_ticks[0] % 10 == 0:
+            try:
+                obj = db.get(CollectionLog, log_id)
+                if obj:
+                    obj.companies_processed = current
+                    db.commit()
+            except Exception:
+                db.rollback()
+
+    def cancel_check():
+        return _job_status.get("cancel_requested", False)
+
+    try:
+        company_count = db.query(Company).count()
+
+        if company_count >= SMART_FULL_THRESHOLD:
+            _job_status["log"].append(
+                f"[スマート判定] DB企業数={company_count}社 → 差分収集モード（過去{years}年）"
+            )
+            cancelled = await run_full_collection(
+                years, None, on_progress=on_progress,
+                skip_existing=True, cancel_check=cancel_check
+            )
+        elif company_count == 0:
+            _job_status["log"].append(
+                f"[スマート判定] DB企業数=0社 → 初回チャンク収集（先着{SMART_CHUNK_SIZE}社）"
+            )
+            cancelled = await run_full_collection(
+                years, SMART_CHUNK_SIZE, on_progress=on_progress,
+                skip_existing=False, cancel_check=cancel_check
+            )
+        else:
+            chunk_no = (company_count // SMART_CHUNK_SIZE) + 1
+            target   = chunk_no * SMART_CHUNK_SIZE
+            _job_status["log"].append(
+                f"[スマート判定] DB企業数={company_count}社 → "
+                f"チャンク{chunk_no}（先着{target}社のうち未収集を処理）"
+            )
+            cancelled = await run_full_collection(
+                years, target, on_progress=on_progress,
+                skip_existing=True, cancel_check=cancel_check
+            )
+
+        if not cancelled:
+            calc_growth_rates(db)
+            calc_zscore_normalization(db)
+
+        log_obj = db.get(CollectionLog, log_id)
+        if log_obj:
+            log_obj.status      = "done"
+            log_obj.finished_at = datetime.utcnow()
+            if cancelled:
+                log_obj.message = "ユーザーにより停止"
+            db.commit()
+
+    except Exception as e:
+        log.error("スマート収集エラー: %s", e, exc_info=True)
+        log_obj = db.get(CollectionLog, log_id)
+        if log_obj:
+            log_obj.status      = "error"
+            log_obj.message     = str(e)
+            log_obj.finished_at = datetime.utcnow()
+            db.commit()
+    finally:
+        _job_status["running"]          = False
+        _job_status["cancel_requested"] = False
+        db.close()
+
+@app.post("/api/collect/smart-start")
+async def start_smart_collection(
+    req: SmartCollectRequest,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+):
+    if _job_status["running"]:
+        raise HTTPException(400, "収集ジョブが既に実行中です")
+    log_obj = CollectionLog(job_type="smart", status="running")
+    db.add(log_obj); db.commit(); db.refresh(log_obj)
+    _job_status.update({"running": True, "log": [], "progress": 0, "log_id": log_obj.id, "job_type": "smart"})
+    background_tasks.add_task(_run_smart_collection_bg, log_obj.id, req.years_back)
+    return {"message": "スマート収集ジョブを開始しました", "log_id": log_obj.id}
 
 @app.get("/api/scheduler/status")
 async def get_scheduler_status():
