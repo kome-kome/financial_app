@@ -41,6 +41,21 @@
 - **前提**: `JQUANTS_API_KEY` が設定済みであること（プレミアムプラン要否は要確認）
 - **実装場所**: `collector.py` の `collect_stock_price_history_jquants` 拡張、`database.py` のスキーマ更新、`plugins/total_return.py` の置換
 
+#### H. `period_end` を VARCHAR から DATE 型へ移行
+- **問題**: 現状 `String(20)` で `"YYYY-MM-DD"` を格納。期間比較は辞書順依存、JOIN や範囲インデックスの効率が悪い
+- **改善案**: PostgreSQL の DATE 型へ移行
+  ```sql
+  ALTER TABLE financial_records
+    ALTER COLUMN period_end TYPE DATE
+    USING NULLIF(period_end, '')::DATE;
+  ```
+- **リスク**:
+  - 非 ISO 形式値や空文字が含まれていた場合に移行失敗
+  - `upsert_financial` のキー検索条件・各クエリで `String` → `date` 変換が必要
+  - `calc_growth_rates` の `ORDER BY period_end` は型変更後も動くが要動作確認
+- **前提**: マイグレーション前に `SELECT DISTINCT period_end FROM financial_records WHERE period_end !~ '^\d{4}-\d{2}-\d{2}$'` で異常値が無いことを確認
+- **実装場所**: `database.py`（スキーマ・upsert）、`collector.py`（doc.get("periodEnd") の値変換）
+
 ---
 
 ### Tier 3 — 機能追加
