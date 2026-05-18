@@ -8,6 +8,7 @@ FastAPI バックエンド
 
 import asyncio, json, logging, re
 import hmac, hashlib, base64, time as _time, os
+import httpx
 
 log = logging.getLogger(__name__)
 from contextlib import asynccontextmanager
@@ -60,7 +61,7 @@ from database import (
     Company, FinancialRecord, CollectionLog, StockPriceHistory,
     calc_growth_rates, calc_zscore_normalization,
 )
-from collector import run_full_collection, refresh_company, update_market_data, collect_stock_price_history, collect_stock_price_history_jquants
+from collector import run_full_collection, refresh_company, update_market_data, collect_stock_price_history, collect_stock_price_history_jquants, update_industry_from_jpx
 import plugins as plugin_registry
 
 
@@ -506,6 +507,12 @@ async def market_progress_stream():
 @app.get("/api/collect/history/stream")
 async def history_progress_stream():
     return StreamingResponse(_sse_stream(_history_status), media_type="text/event-stream", headers=_SSE_HEADERS)
+
+@app.post("/api/collect/industry")
+async def collect_industry(db: Session = Depends(get_db)):
+    async with httpx.AsyncClient() as client:
+        updated_co, updated_fr = await update_industry_from_jpx(client, db)
+    return {"updated_companies": updated_co, "updated_records": updated_fr}
 
 
 @app.post("/api/collect/jquants/start")

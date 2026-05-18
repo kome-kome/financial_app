@@ -247,8 +247,10 @@ async def update_industry_from_jpx(client: httpx.AsyncClient, db,
         log.info(f"業種更新完了: Company {updated_co}件, FinancialRecord {updated_fr}件")
         if on_progress:
             on_progress(1, 1, f"[業種更新完了] Company {updated_co}件, FR {updated_fr}件")
+        return updated_co, updated_fr
     except Exception as e:
         log.warning(f"JPX業種更新失敗: {e}")
+        return 0, 0
 
 
 async def fetch_doc_list(client: httpx.AsyncClient, target_date: date) -> list:

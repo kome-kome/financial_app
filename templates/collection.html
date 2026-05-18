@@ -462,6 +462,7 @@ tr:hover td{background:#1e2235}
         <select id="db-industry" style="width:140px" onchange="loadDB()">
           <option value="">全業種</option>
         </select>
+        <button class="btn btn-secondary btn-sm" id="btn-update-industry" onclick="updateIndustryData()">業種を更新</button>
         <button class="btn btn-secondary btn-sm" onclick="exportCSV()">CSV出力</button>
       </div>
     </div>
@@ -964,6 +965,21 @@ function updatePager(total, page, limit) {
   next.disabled = (page + 1) >= totalPages;
   next.onclick = () => { dbPage++; loadDB(); };
   pager.append(prev, info, next);
+}
+
+async function updateIndustryData(){
+  const btn = document.getElementById('btn-update-industry');
+  btn.disabled = true; btn.textContent = '更新中...';
+  try{
+    const d = await apiFetch('/api/collect/industry', {method:'POST'});
+    log(`業種更新完了: 企業 ${d.updated_companies}件, 財務レコード ${d.updated_records}件`, 'success');
+    await loadIndustries();
+    await loadDB();
+  }catch(e){
+    log('業種更新失敗: '+e.message, 'error');
+  }finally{
+    btn.disabled = false; btn.textContent = '業種を更新';
+  }
 }
 
 async function loadIndustries(){

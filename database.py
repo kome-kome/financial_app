@@ -23,6 +23,9 @@ DATABASE_URL = os.environ.get(
     "DATABASE_URL",
     "postgresql://edinet:edinet@localhost:5432/financial_db"
 )
+# Supabase/Heroku は "postgres://" を返すが SQLAlchemy 2.x は "postgresql://" が必要
+if DATABASE_URL.startswith("postgres://"):
+    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 
 engine = create_engine(
     DATABASE_URL,

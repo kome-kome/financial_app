@@ -1,0 +1,24 @@
+services:
+  - type: web
+    name: financial-app
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn api:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.13.7
+      - key: DATABASE_URL
+        sync: false          # Supabase の接続URLを Render ダッシュボードで設定
+      - key: EDINET_API_KEY
+        sync: false          # 金融庁 EDINET API キー
+      - key: APP_PASSWORD
+        sync: false          # ログインパスワード（本番環境では必須）
+      - key: APP_SECRET_KEY
+        generateValue: true  # Render が自動生成
+      - key: APP_RECOVERY_KEY
+        sync: false          # パスワードリセット用回復キー
+      - key: ALLOWED_ORIGIN
+        sync: false          # 例: https://financial-app.onrender.com
+      - key: JQUANTS_API_KEY
+        sync: false          # J-Quants API キー（任意）

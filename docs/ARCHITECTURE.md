@@ -766,6 +766,7 @@ graph LR
         C15["GET /api/collect/edinet-coverage\nEDINET収録状況"]
         C16["GET /api/collect/market-coverage\n株価データ収録状況"]
         C17["GET /api/collect/data-quality\nNULL率・外れ値チェック"]
+        C18["POST /api/collect/industry\nJPX Excelから業種データを更新"]
     end
 
     subgraph SCHED["⏰ スケジューラー /api/scheduler/"]
