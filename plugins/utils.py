@@ -147,6 +147,90 @@ def normalize_transform(val: float, param1: float, param2: float, method: str = 
     return max(-5.0, min(5.0, z))
 
 
+def check_collinearity(X_cols: list[list[float]], feature_names: list[str],
+                       corr_threshold: float = 0.9,
+                       vif_threshold: float = 10.0) -> dict:
+    """多重共線性チェック。Pearson 相関行列と VIF を計算する。
+
+    X_cols: 列指向の特徴量行列 [feature1_vals, feature2_vals, ...]
+    feature_names: 各列の名前。len(X_cols) と一致する必要がある。
+
+    Returns:
+        {
+            "correlation": [[float]],          # k×k 行列（対称、対角=1）
+            "vif": [float],                    # 各特徴量の VIF（計算不能なら NaN）
+            "high_corr_pairs": [(i, j, r)],    # |r| > corr_threshold の組
+            "high_vif": [(i, vif)],            # vif > vif_threshold の特徴量
+        }
+
+    VIF (Variance Inflation Factor) は特徴量 i を他の特徴量で回帰した R² から
+    VIF_i = 1 / (1 - R²_i) で求める。VIF > 10 で多重共線性ありと判断するのが
+    慣例（Kutner et al. 2005）。
+    """
+    k = len(X_cols)
+    if k == 0 or len(X_cols[0]) < 3 or len(feature_names) != k:
+        return {"correlation": [], "vif": [], "high_corr_pairs": [], "high_vif": []}
+
+    n = len(X_cols[0])
+    means = [statistics.mean(c) for c in X_cols]
+    sds = [statistics.stdev(c) if len(c) > 1 else 0.0 for c in X_cols]
+
+    # ── Pearson 相関行列 ───────────────────────────────────────────────
+    corr = [[1.0 if i == j else 0.0 for j in range(k)] for i in range(k)]
+    high_corr_pairs: list[tuple] = []
+    for i in range(k):
+        for j in range(i + 1, k):
+            if sds[i] == 0 or sds[j] == 0:
+                corr[i][j] = corr[j][i] = float("nan")
+                continue
+            cov = sum(
+                (X_cols[i][r] - means[i]) * (X_cols[j][r] - means[j])
+                for r in range(n)
+            ) / (n - 1)
+            r = cov / (sds[i] * sds[j])
+            r = max(-1.0, min(1.0, r))
+            corr[i][j] = corr[j][i] = r
+            if abs(r) > corr_threshold:
+                high_corr_pairs.append((i, j, round(r, 4)))
+
+    # ── VIF（各特徴量を他の特徴量で OLS 回帰）───────────────────────
+    vif: list[float] = []
+    high_vif: list[tuple] = []
+    if k < 2:
+        # 特徴量が 1 つしかない場合、VIF は定義できない（常に 1）
+        vif = [1.0]
+    else:
+        for i in range(k):
+            # 特徴量 i を目的変数、その他を説明変数として OLS
+            y_i = X_cols[i]
+            X_others = [
+                [1.0] + [X_cols[j][r] for j in range(k) if j != i]
+                for r in range(n)
+            ]
+            res = ols(X_others, y_i)
+            if res is None or res["r2"] >= 0.9999:
+                # 完全共線（行列特異 or R²≈1）→ VIF は無限大相当
+                vif_i = float("inf")
+            else:
+                vif_i = 1.0 / max(1.0 - res["r2"], 1e-12)
+            vif.append(vif_i)
+            if vif_i > vif_threshold:
+                high_vif.append((i, round(vif_i, 2) if math.isfinite(vif_i) else None))
+
+    return {
+        "correlation": [[round(v, 4) if v == v else None for v in row] for row in corr],
+        "vif": [round(v, 2) if math.isfinite(v) else None for v in vif],
+        "high_corr_pairs": [
+            {"feature_a": feature_names[i], "feature_b": feature_names[j], "r": r}
+            for i, j, r in high_corr_pairs
+        ],
+        "high_vif": [
+            {"feature": feature_names[i], "vif": v}
+            for i, v in high_vif
+        ],
+    }
+
+
 def kfold_cv(samples: list, n_folds: int = 5,
              y_norm_method: str = "log") -> list[dict]:
     """

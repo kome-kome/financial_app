@@ -131,6 +131,11 @@ SE(<span class="var">β</span><span class="sym">ᵢ</span>)  = √Var(<span clas
 <span class="var">tᵢ</span>      = <span class="var">β</span><span class="sym">ᵢ</span> / SE(<span class="var">β</span><span class="sym">ᵢ</span>)               <span class="comment"># t統計量</span>
 <span class="var">pᵢ</span>      = 2 × (1 - Φ(|<span class="var">tᵢ</span>|))            <span class="comment"># 両側p値（df ≥ 30）</span></div>
   <p>df = n − p。df &lt; 30 は t 分布の裾を反映する簡易補正を適用するが「参考値」扱い。慣例的に p &lt; 0.05 を有意とみなす。</p>
+
+  <h3>多重共線性チェック（VIF・Pearson相関）</h3>
+  <div class="formula-block">VIF<span class="sym">ᵢ</span> = 1 / (1 - R²<span class="sym">ᵢ</span>)
+  <span class="comment"># R²ᵢ は特徴量 i を残りで回帰したときの決定係数</span></div>
+  <p>慣例: <strong>VIF &gt; 10</strong> または <strong>|Pearson r| &gt; 0.9</strong> で多重共線性ありと判断。業種別OLS結果に <code>collinearity_warnings</code> として併記される。</p>
 </div>
 
 <!-- ── Model 1 ── -->

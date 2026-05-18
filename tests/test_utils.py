@@ -17,6 +17,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from plugins.utils import (
     LOG_PRED_CAP,
+    check_collinearity,
     kfold_cv,
     normalize,
     normalize_transform,
@@ -256,6 +257,53 @@ class TestWalkForwardCvMonthly:
             test_idx = all_yms.index(r["test_ym"])
             assert test_idx >= 18
             assert r["n_train"] > 0
+
+
+# ── check_collinearity ──────────────────────────────────────────────────
+
+class TestCheckCollinearity:
+    def test_independent_features(self):
+        # 完全独立なら相関は低く VIF は ~1
+        import random
+        rng = random.Random(0)
+        n = 100
+        f1 = [rng.gauss(0, 1) for _ in range(n)]
+        f2 = [rng.gauss(0, 1) for _ in range(n)]
+        f3 = [rng.gauss(0, 1) for _ in range(n)]
+        result = check_collinearity([f1, f2, f3], ["a", "b", "c"])
+        assert len(result["high_corr_pairs"]) == 0
+        assert len(result["high_vif"]) == 0
+        # VIF は全て 1 付近
+        for v in result["vif"]:
+            assert 0.5 < v < 2.0
+
+    def test_perfect_collinearity_detected(self):
+        # f2 = 2 * f1 → 相関 1.0、VIF 無限大
+        f1 = list(range(1, 51))
+        f2 = [2.0 * v for v in f1]
+        f3 = [3.0 + 0.1 * v + (v % 7) for v in f1]
+        result = check_collinearity([f1, f2, f3], ["x", "y", "z"])
+        # |r(x,y)| == 1.0 で高相関ペアとして検出
+        assert any(
+            {p["feature_a"], p["feature_b"]} == {"x", "y"}
+            for p in result["high_corr_pairs"]
+        )
+        # VIF は無限大相当 → None として記録
+        assert any(v["vif"] is None for v in result["high_vif"])
+
+    def test_correlation_matrix_diagonal_is_one(self):
+        f1 = [1.0, 2.0, 3.0, 4.0, 5.0]
+        f2 = [5.0, 4.0, 3.0, 2.0, 1.0]
+        result = check_collinearity([f1, f2], ["a", "b"])
+        assert result["correlation"][0][0] == 1.0
+        assert result["correlation"][1][1] == 1.0
+        # f2 = -f1 + 6 → 完全負相関
+        assert result["correlation"][0][1] == pytest.approx(-1.0, abs=1e-6)
+
+    def test_empty_input(self):
+        result = check_collinearity([], [])
+        assert result["correlation"] == []
+        assert result["vif"] == []
 
 
 # ── LOG_PRED_CAP ─────────────────────────────────────────────────────────

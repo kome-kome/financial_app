@@ -70,6 +70,21 @@ p_i      = 2 × (1 − Φ(|t_i|))           ← 両側p値（df ≥ 30）
 慣例的に p < 0.05 を「有意」とみなす。業種別OLSの結果には
 `n_significant_features`（p < 0.05 の説明変数数）が併記される。
 
+#### 多重共線性チェック（VIF・Pearson相関）
+
+実装: `plugins/utils.py` の `check_collinearity()`
+
+```
+VIF_i = 1 / (1 - R²_i)
+  ここで R²_i は特徴量 i を残りの特徴量で回帰したときの決定係数
+```
+
+慣例的に **VIF > 10** または **|Pearson r| > 0.9** で多重共線性ありと判断
+（Kutner et al. 2005, *Applied Linear Regression Models*）。
+
+業種別OLS結果に `collinearity_warnings.high_corr_pairs` /
+`high_vif` が含まれる。閾値超過があれば変数の削減・主成分化を検討する。
+
 ---
 
 ## 1. 総合リターン予測（Ohlsonモデル型OLS）

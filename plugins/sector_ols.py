@@ -18,7 +18,7 @@ from collections import defaultdict
 from typing import Any
 
 from .base import AnalysisPlugin
-from .utils import normalize, ols, winsorize
+from .utils import check_collinearity, normalize, ols, winsorize
 
 
 # 絶対額特徴量 [円] — market_cap ターゲット向け
@@ -258,6 +258,10 @@ class SectorOLSPlugin(AnalysisPlugin):
             n_significant = sum(
                 1 for pv in p_values[1:] if pv == pv and pv < 0.05
             )
+
+            # 多重共線性チェック（winsorize 後・正規化前の列で実施）
+            collinearity = check_collinearity(X_win_cols, list(features))
+
             sector_stats.append({
                 "industry": sector,
                 "n":        len(samples),
@@ -268,6 +272,10 @@ class SectorOLSPlugin(AnalysisPlugin):
                 "n_significant_features": n_significant,
                 "p_values": [round(pv, 4) if pv == pv else None for pv in p_values],
                 "t_stats":  [round(t, 4) if t == t else None for t in result.get("t_stat", [])],
+                "collinearity_warnings": {
+                    "high_corr_pairs": collinearity["high_corr_pairs"],
+                    "high_vif":        collinearity["high_vif"],
+                },
             })
 
         if not sector_stats:
