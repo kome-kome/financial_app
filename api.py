@@ -289,10 +289,11 @@ async def _run_collection_bg(years: int, max_co: Optional[int], log_id: int, ski
                 log_obj.message = "ユーザーにより停止"
             db.commit()
     except Exception as e:
+        log.error("収集ジョブエラー (log_id=%s): %s", log_id, e, exc_info=True)
         log_obj = db.get(CollectionLog, log_id)
         if log_obj:
             log_obj.status = "error"
-            log_obj.message = str(e)
+            log_obj.message = "収集処理でエラーが発生しました（詳細はサーバーログを確認）"
             log_obj.finished_at = datetime.utcnow()
             db.commit()
     finally:
@@ -372,7 +373,7 @@ async def _run_smart_collection_bg(log_id: int, years: int):
         log_obj = db.get(CollectionLog, log_id)
         if log_obj:
             log_obj.status      = "error"
-            log_obj.message     = str(e)
+            log_obj.message     = "スマート収集でエラーが発生しました（詳細はサーバーログを確認）"
             log_obj.finished_at = datetime.utcnow()
             db.commit()
     finally:
@@ -522,6 +523,9 @@ async def start_market_data_update(req: MarketDataRequest, background_tasks: Bac
     async def _run():
         try:
             await update_market_data(req.max_companies, on_progress=on_progress, cancel_check=cancel_check)
+        except Exception as e:
+            log.error("市場データ更新エラー: %s", e, exc_info=True)
+            _market_status["log"].append("[エラー] 市場データ更新中に問題が発生しました（詳細はサーバーログを確認）")
         finally:
             _market_status["running"] = False
             _market_status["cancel_requested"] = False
@@ -571,8 +575,8 @@ async def start_history_collection(req: HistoryCollectRequest, background_tasks:
                 skip_existing=req.skip_existing, backfill=req.backfill,
             )
         except Exception as e:
-            log.error(f"株価履歴収集エラー: {e}")
-            _history_status["log"].append(f"[エラー] {e}")
+            log.error("株価履歴収集エラー: %s", e, exc_info=True)
+            _history_status["log"].append("[エラー] 株価履歴収集中に問題が発生しました（詳細はサーバーログを確認）")
         finally:
             _history_status["running"] = False
             _history_status["cancel_requested"] = False
@@ -695,7 +699,7 @@ async def start_jquants_collection(req: JQuantsCollectRequest, background_tasks:
         except ValueError as e:
             _jquants_status["log"].append(f"[設定エラー] {e}")
         except Exception as e:
-            log.error(f"J-Quants収集エラー: {e}")
+            log.error("J-Quants収集エラー: %s", e, exc_info=True)
             _jquants_status["log"].append(f"[エラー] 収集中に問題が発生しました")
         finally:
             _jquants_status["running"] = False
