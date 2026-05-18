@@ -88,8 +88,13 @@ async def _daily_scheduler():
         if not _scheduler_status["enabled"]:
             continue
 
+        if _job_status["running"]:
+            _scheduler_status["last_status"] = "スキップ（手動収集が実行中）"
+            continue
+
         _scheduler_status["last_run"]    = datetime.now().strftime("%Y-%m-%d %H:%M")
         _scheduler_status["last_status"] = "実行中"
+        _job_status.update({"running": True, "log": [], "progress": 0, "job_type": "incremental"})
         try:
             await run_full_collection(years_back=1, skip_existing=True)
             db = SessionLocal()
@@ -101,10 +106,25 @@ async def _daily_scheduler():
         except Exception as e:
             log.error("スケジューラーエラー: %s", e, exc_info=True)
             _scheduler_status["last_status"] = "エラー（詳細はサーバーログを確認）"
+        finally:
+            _job_status["running"] = False
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
+    # サーバー再起動時: 前回クラッシュで残った "running" ジョブを "error" にリセット
+    db = SessionLocal()
+    try:
+        stuck = db.query(CollectionLog).filter(CollectionLog.status == "running").all()
+        for job in stuck:
+            job.status = "error"
+            job.message = "サーバー再起動により中断"
+            job.finished_at = datetime.utcnow()
+        if stuck:
+            db.commit()
+            log.warning("起動時に %d 件のスタックジョブを error にリセットしました", len(stuck))
+    finally:
+        db.close()
     scheduler_task = asyncio.create_task(_daily_scheduler())
     yield
     scheduler_task.cancel()
