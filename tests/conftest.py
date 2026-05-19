@@ -118,3 +118,27 @@ def make_record(db, edinet_code="E000001", year=2024, period_end="2024-03-31",
     db.commit()
     db.refresh(r)
     return r
+
+
+def make_price_history(db, edinet_code, sec_code, start_date="2024-01-01",
+                       n_days=120, base_close=1000.0, drift_per_day=0.0):
+    """テスト用 StockPriceHistory を n_days 日分作成（土日含む単純な連続日付）。
+
+    base_close + i * drift_per_day で価格を生成。
+    """
+    from datetime import date, timedelta
+    from database import StockPriceHistory
+
+    start = date.fromisoformat(start_date)
+    rows = []
+    for i in range(n_days):
+        d = (start + timedelta(days=i)).isoformat()
+        close = base_close + i * drift_per_day
+        rows.append(StockPriceHistory(
+            edinet_code=edinet_code, sec_code=sec_code, trade_date=d,
+            open=close, high=close * 1.01, low=close * 0.99,
+            close=close, volume=10000.0,
+        ))
+    db.add_all(rows)
+    db.commit()
+    return rows
