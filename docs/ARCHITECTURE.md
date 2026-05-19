@@ -660,10 +660,10 @@ classDiagram
 
     class TotalReturnPlugin {
         +name = "total_return"
-        +label = "トータルリターン分析"
+        +label = "総合リターン予測"
         +depends_on = []
-        +params_schema() 期間・業種フィルタ
-        +execute() 配当込みリターン計算
+        +params_schema() use_cf / use_sector_fe / n_folds / top_n
+        +execute() Ohlson 型 OLS + 業種固定効果（オプション）
     }
 
     class SectorOLSPlugin {
@@ -769,7 +769,7 @@ graph LR
         C14e["GET /api/collect/jquants/status\nJ-Quants収集の状態"]
         C15["GET /api/collect/edinet-coverage\nEDINET収録状況"]
         C16["GET /api/collect/market-coverage\n株価データ収録状況"]
-        C17["GET /api/collect/data-quality\nNULL率・外れ値チェック"]
+        C17["GET /api/collect/data-quality\nNULL率・外れ値チェック\n会計基準別サマリ（JGAAP/IFRS/US-GAAP）"]
         C18["POST /api/collect/industry\nJPX Excelから業種データを更新"]
     end
 
