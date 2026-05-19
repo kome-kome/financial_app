@@ -23,6 +23,7 @@ from plugins.utils import (
     normalize_transform,
     ols,
     ols_with_diagnostics,
+    ridge_regression,
     walk_forward_cv,
     walk_forward_cv_monthly,
     winsorize,
@@ -388,6 +389,43 @@ class TestCheckCollinearity:
         result = check_collinearity([], [])
         assert result["correlation"] == []
         assert result["vif"] == []
+
+
+# ── Ridge 回帰 ───────────────────────────────────────────────────────
+
+class TestRidgeRegression:
+    def test_ridge_basic_recovery(self):
+        # ノイズの少ない y = 2 + 3x で Ridge も近い係数を出す（小 α）
+        import random
+        rng = random.Random(0)
+        X = [[1.0, float(i)] for i in range(50)]
+        y = [2.0 + 3.0 * X[i][1] + rng.gauss(0, 0.5) for i in range(50)]
+        result = ridge_regression(X, y)
+        assert result is not None
+        assert result["method"] == "ridge"
+        # 切片 ≈ 2, 傾き ≈ 3
+        assert abs(result["beta"][0] - 2.0) < 0.5
+        assert abs(result["beta"][1] - 3.0) < 0.1
+        assert result["r2"] > 0.95
+        # SE / t / p は Ridge では NaN
+        assert result["se"][0] != result["se"][0]
+
+    def test_ridge_stable_under_collinearity(self):
+        # 完全共線な特徴量を含めても Ridge は爆発しない（OLS の対比）
+        import random
+        rng = random.Random(1)
+        n = 80
+        x1 = [float(i) for i in range(n)]
+        x2 = [v * 2.0 + rng.gauss(0, 0.001) for v in x1]  # x1 とほぼ完全相関
+        X = [[1.0, x1[i], x2[i]] for i in range(n)]
+        y = [10.0 + 1.5 * x1[i] + rng.gauss(0, 1.0) for i in range(n)]
+        result = ridge_regression(X, y)
+        assert result is not None
+        # 係数の大きさが暴れない（Ridge の本領）
+        max_coef = max(abs(b) for b in result["beta"])
+        assert max_coef < 100.0
+        # alpha が選択されている
+        assert result["alpha"] > 0
 
 
 # ── 価格特徴量（numpy ベースの動作確認） ─────────────────────────────────

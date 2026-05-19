@@ -18,7 +18,7 @@ from collections import defaultdict
 from typing import Any
 
 from .base import AnalysisPlugin
-from .utils import check_collinearity, normalize, ols, ols_with_diagnostics, winsorize
+from .utils import check_collinearity, normalize, ols, ols_with_diagnostics, ridge_regression, winsorize
 
 
 # 絶対額特徴量 [円] — market_cap ターゲット向け
@@ -120,6 +120,19 @@ class SectorOLSPlugin(AnalysisPlugin):
                 "default": None,
                 "optional": True,
             },
+            "regularization": {
+                "type": "select",
+                "label": "正則化（多重共線性対策）",
+                "options": [
+                    {"value": "none",  "label": "なし（OLS）"},
+                    {"value": "ridge", "label": "Ridge（L2 正則化、α は CV で自動選択）"},
+                ],
+                "default": "none",
+                "description": (
+                    "VIF > 10 や |相関| > 0.9 の特徴量がある業種では Ridge を推奨。"
+                    "Ridge は係数の解釈は OLS と異なるが、予測安定性が高い。"
+                ),
+            },
         }
 
     async def execute(self, params: dict, db: Any) -> dict:
@@ -131,6 +144,7 @@ class SectorOLSPlugin(AnalysisPlugin):
         if isinstance(features, str):
             features = [f.strip() for f in features.split(",") if f.strip()]
         min_samples = max(5, int(params.get("min_samples") or 10))
+        regularization = params.get("regularization", "none")
         year        = params.get("year")
 
         if not features:
@@ -208,7 +222,11 @@ class SectorOLSPlugin(AnalysisPlugin):
                         X_norm[ri].append(v)
             y_normed, y_mu, y_sd = normalize(raw_y_win, "zscore")
 
-            result = ols(X_norm, y_normed)
+            # 回帰モデル選択: OLS（デフォルト） or Ridge（L2 正則化）
+            if regularization == "ridge":
+                result = ridge_regression(X_norm, y_normed)
+            else:
+                result = ols(X_norm, y_normed)
             if not result:
                 n_skipped += 1
                 continue
@@ -254,20 +272,23 @@ class SectorOLSPlugin(AnalysisPlugin):
 
             all_predictions.extend(sector_preds)
             # 説明変数の有意性カウント（切片を除く、p < 0.05 を有意とみなす）
+            # Ridge は p 値を返さないため n_significant も NaN（None）
             p_values = result.get("p_value", [])
             n_significant = sum(
                 1 for pv in p_values[1:] if pv == pv and pv < 0.05
-            )
+            ) if regularization != "ridge" else None
 
             # 多重共線性チェック（winsorize 後・正規化前の列で実施）
             collinearity = check_collinearity(X_win_cols, list(features))
 
             # 詳細統計診断（statsmodels: Durbin-Watson・Jarque-Bera・F検定）
-            # 失敗しても本処理は続行（fallback は None）
-            try:
-                diag = ols_with_diagnostics(X_norm, y_normed, cov_type="HC3")
-            except Exception:
-                diag = None
+            # OLS のみ実施。Ridge は伝統的な統計推論が定義されないためスキップ
+            diag = None
+            if regularization != "ridge":
+                try:
+                    diag = ols_with_diagnostics(X_norm, y_normed, cov_type="HC3")
+                except Exception:
+                    diag = None
 
             stat_entry = {
                 "industry": sector,
@@ -277,6 +298,8 @@ class SectorOLSPlugin(AnalysisPlugin):
                 "rmse":     round(result["rmse"] * y_sd, 2),
                 "df":       result.get("df"),
                 "rank":     result.get("rank"),
+                "method":   result.get("method", "ols"),
+                "alpha":    result.get("alpha"),  # Ridge のみ非 None
                 "condition_number": (
                     round(result["condition_number"], 2)
                     if result.get("condition_number") is not None

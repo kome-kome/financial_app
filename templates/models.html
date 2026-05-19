@@ -145,6 +145,11 @@ HC3 SE:          不均一分散に対応したロバスト標準誤差</div>
   <div class="formula-block">VIF<span class="sym">ᵢ</span> = 1 / (1 - R²<span class="sym">ᵢ</span>)
   <span class="comment"># R²ᵢ は特徴量 i を残りで回帰したときの決定係数</span></div>
   <p>慣例: <strong>VIF &gt; 10</strong> または <strong>|Pearson r| &gt; 0.9</strong> で多重共線性ありと判断。業種別OLS結果に <code>collinearity_warnings</code> として併記される。</p>
+
+  <h3>Ridge 回帰（L2 正則化）</h3>
+  <div class="formula-block"><span class="var">β</span><span class="sym">ridge</span> = arg min ‖<span class="var">X</span><span class="var">β</span> - <span class="var">y</span>‖² + <span class="var">α</span>‖<span class="var">β</span>‖²
+  <span class="comment"># 最適 α は CV で自動選択</span></div>
+  <p>業種別 OLS の <code>regularization="ridge"</code> パラメータで切替可能。多重共線性が顕著な業種では予測安定性が向上するが、SE / t / p 値は定義されない（NaN）。実装は <code>sklearn.linear_model.RidgeCV</code>。</p>
 </div>
 
 <!-- ── Model 1 ── -->

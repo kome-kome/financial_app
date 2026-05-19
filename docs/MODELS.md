@@ -96,7 +96,20 @@ VIF_i = 1 / (1 - R²_i)
 （Kutner et al. 2005, *Applied Linear Regression Models*）。
 
 業種別OLS結果に `collinearity_warnings.high_corr_pairs` /
-`high_vif` が含まれる。閾値超過があれば変数の削減・主成分化を検討する。
+`high_vif` が含まれる。閾値超過があれば変数の削減・正則化（Ridge 等）を検討する。
+
+#### Ridge 回帰（L2 正則化）
+
+実装: `plugins/utils.py` の `ridge_regression()`（`sklearn.linear_model.RidgeCV` 経由）
+
+```
+β_ridge = arg min ‖Xβ - y‖² + α‖β‖²
+```
+
+最適 α は CV（クロスバリデーション）で `[1e-3, 1e-2, 0.1, 1, 10, 100, 1000]` から選択。
+業種別 OLS の `regularization="ridge"` パラメータで切替可能。多重共線性が顕著な業種
+（VIF > 10 や |相関| > 0.9）では予測安定性が向上する反面、係数の統計推論
+（SE / t / p 値）は伝統的に定義されないため NaN を返す。
 
 ---
 

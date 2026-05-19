@@ -202,6 +202,73 @@ def ols_with_diagnostics(X: list, y: list, cov_type: str = "nonrobust") -> dict 
     }
 
 
+def ridge_regression(X: list, y: list,
+                     alphas: list[float] | None = None,
+                     cv_folds: int = 5) -> dict | None:
+    """Ridge 回帰（L2 正則化）。多重共線性が高い特徴量で OLS が不安定な場合の代替。
+
+    `sklearn.linear_model.RidgeCV` で `alphas` から GCV 経由で最適 α を選択する。
+    返り値は `ols()` と同じスキーマ（beta, yhat, r2, adj_r2, rmse, mae, df,
+    rank, condition_number）。SE / t / p 値は Ridge では伝統的に定義されないため
+    NaN を返す（推論より予測精度を重視する場合に適切）。
+    追加で `alpha`（選択された正則化パラメータ）を返す。
+
+    Args:
+        X: 設計行列（切片列を含む）
+        y: 目的変数
+        alphas: 探索する α 候補（None なら `[1e-3, 1e-2, 0.1, 1, 10, 100, 1000]`）
+        cv_folds: alpha 選択時の CV fold 数（≥ 2）
+    """
+    from sklearn.linear_model import RidgeCV
+
+    X_np = np.asarray(X, dtype=float)
+    y_np = np.asarray(y, dtype=float)
+    if X_np.ndim != 2 or len(X_np) == 0:
+        return None
+    n, p = X_np.shape
+
+    if alphas is None:
+        alphas = [1e-3, 1e-2, 0.1, 1.0, 10.0, 100.0, 1000.0]
+
+    # 切片は X に含めて RidgeCV(fit_intercept=False) とする（既存呼び出しと一貫）
+    try:
+        model = RidgeCV(
+            alphas=alphas,
+            fit_intercept=False,
+            cv=min(cv_folds, max(2, n // 5)) if n >= 10 else None,
+            scoring="neg_mean_squared_error",
+        )
+        model.fit(X_np, y_np)
+    except Exception:
+        return None
+
+    beta_np = np.asarray(model.coef_)
+    yhat_np = X_np @ beta_np
+    resid = y_np - yhat_np
+    sse = float((resid ** 2).sum())
+    ymean = float(y_np.mean())
+    sst = float(((y_np - ymean) ** 2).sum())
+    r2 = 1.0 - sse / sst if sst > 0 else 0.0
+    adj_r2 = 1.0 - (1.0 - r2) * (n - 1) / (n - p - 1) if n > p + 1 else r2
+    rmse = math.sqrt(sse / n)
+    mae = float(np.abs(resid).mean())
+
+    return {
+        "beta":  [float(b) for b in beta_np],
+        "yhat":  [float(v) for v in yhat_np],
+        "r2": r2, "adj_r2": adj_r2,
+        "rmse": rmse, "mae": mae,
+        "se":      [float("nan")] * p,
+        "t_stat":  [float("nan")] * p,
+        "p_value": [float("nan")] * p,
+        "df": n - p,
+        "rank": p,
+        "condition_number": float("nan"),
+        "alpha": float(model.alpha_),
+        "method": "ridge",
+    }
+
+
 def normalize_transform(val: float, param1: float, param2: float, method: str = "zscore") -> float:
     """学習データから求めたパラメータでスカラー値を変換する。z-score は ±5 にクリップ。"""
     if method == "log":
