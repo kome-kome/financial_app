@@ -118,7 +118,7 @@ SSEエンドポイント: 収集=`/api/collect/stream`、市場データ=`/api/c
 ## 設計制約（変えてはいけないこと）
 
 - `upsert_financial` の入力: `{bs,pl,cf,derived,val}`。bs/pl/cfは`bs_`等プレフィックス付きでDBカラムにマップ、derived/valはそのまま。XBRL項目追加時は`XBRL_MAP`（collector.py）と`FinancialRecord`（database.py）の両方を更新。
-- `ols()`（`plugins/utils.py`）はPython単体実装。numpy/scipy不使用。
+- `ols()`（`plugins/utils.py`）は現状 Pure Python 実装だが、numpy/scipy/statsmodels/scikit-learn 等の成熟ライブラリの利用は **許可** されている（`docs/VISION.md` 「サードパーティーライブラリ採用基準」参照）。新規導入時は同基準に従い、PyPI DL 数・GitHub Stars・CVE 履歴を WebSearch で評価しユーザー承認を得ること。
 - CORS は `ALLOWED_ORIGIN` 環境変数で制御（デフォルト: `http://localhost:8000`）。本番は `.env` に正しいオリジンを設定すること。
 - `/api/gap-analysis` は `/api/regression` 実行後でないと404になる。
 - 認証ミドルウェアは `/api/auth/` プレフィックスを常に通過させる（ログインAPI自体を守ると詰まる）。
