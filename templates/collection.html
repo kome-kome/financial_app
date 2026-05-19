@@ -849,6 +849,38 @@ async function loadQualityReport(){
       </div>
     </div>`;
 
+    // 会計基準別の NULL率・外れ値率（JGAAP / IFRS / US-GAAP の差を可視化）
+    if(d.accounting_standard && d.accounting_standard.length){
+      html += `<div class="card" style="margin-top:12px">
+        <div class="section-title">会計基準別の品質サマリー</div>
+        <p class="text-sm" style="color:#64748b;margin-bottom:8px">IFRS と JGAAP では純資産・営業利益・1株指標の定義に差があるため、両者を混在して回帰すると係数が歪む可能性があります。</p>`;
+      d.accounting_standard.forEach(grp=>{
+        html += `<div style="background:#0f1117;border-radius:6px;padding:10px;margin-bottom:8px">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+            <span style="font-weight:600;color:#a78bfa">${esc(grp.standard)}</span>
+            <span class="text-sm" style="color:#64748b">${Number(grp.total).toLocaleString()} 件（全体の ${grp.share_pct}%）</span>
+          </div>
+          <div style="overflow-x:auto"><table><thead><tr>
+            <th>フィールド</th><th>NULL 率</th><th>外れ値 率</th>
+          </tr></thead><tbody>`;
+        grp.fields.forEach(f=>{
+          const nullColor = f.null_pct < 10 ? '#10b981' : f.null_pct < 30 ? '#f59e0b' : '#ef4444';
+          const hasOutlier = (f.outlier_pct !== undefined);
+          const outColor = hasOutlier ? (f.outlier_pct < 1 ? '#10b981' : f.outlier_pct < 5 ? '#f59e0b' : '#ef4444') : '#64748b';
+          const outCell = hasOutlier
+            ? `<span style="color:${outColor}">${Number(f.outlier_pct).toFixed(2)}% (${Number(f.outlier_count).toLocaleString()})</span>`
+            : '<span style="color:#64748b">—</span>';
+          html += `<tr>
+            <td>${esc(f.label)}</td>
+            <td><span style="color:${nullColor}">${Number(f.null_pct)}% (${Number(f.null_count).toLocaleString()})</span></td>
+            <td>${outCell}</td>
+          </tr>`;
+        });
+        html += '</tbody></table></div></div>';
+      });
+      html += '</div>';
+    }
+
     el.innerHTML = html;
   }catch(e){ el.innerHTML = `<p class="text-sm" style="color:#ef4444;text-align:center;padding:20px">チェック失敗: ${esc(e.message)}</p>`; }
 }
