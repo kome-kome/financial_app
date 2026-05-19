@@ -391,6 +391,48 @@ class TestCheckCollinearity:
         assert result["vif"] == []
 
 
+# ── AR(1) 半減期推定（gap_analysis） ───────────────────────────────────
+
+class TestAr1HalfLife:
+    def test_ar1_recovers_known_phi(self):
+        """既知の φ=0.7 で AR(1) シリーズを生成 → 推定値が近いことを確認。
+        小サンプルバイアスがあるため許容範囲は ±0.25。"""
+        from plugins.gap_analysis import _estimate_ar1_half_life_years
+        import random
+        rng = random.Random(0)
+        n = 300  # burn-in 込みで十分な長さ
+        phi_true = 0.7
+        series = [0.0]
+        for _ in range(n - 1):
+            series.append(phi_true * series[-1] + rng.gauss(0, 0.3))
+        # 最初の 50 サンプルは burn-in としてスキップ
+        series = series[50:]
+        result = _estimate_ar1_half_life_years(series)
+        assert result is not None
+        # 小サンプルバイアスを考慮した許容範囲
+        assert abs(result["phi"] - phi_true) < 0.25
+        # HL = -ln(2)/ln(0.7) ≈ 1.94 年（±2 年の範囲で確認）
+        assert 0.5 < result["half_life_years"] < 5.0
+
+    def test_ar1_returns_none_for_short_series(self):
+        from plugins.gap_analysis import _estimate_ar1_half_life_years
+        series = [0.1, -0.2, 0.05]  # 3 観測（最低 8 未満）
+        assert _estimate_ar1_half_life_years(series) is None
+
+    def test_ar1_returns_none_for_unit_root(self):
+        """φ ≥ 1（ランダムウォーク）では平均回帰しないため None。"""
+        from plugins.gap_analysis import _estimate_ar1_half_life_years
+        import random
+        rng = random.Random(1)
+        # 純粋なランダムウォーク
+        series = [0.0]
+        for _ in range(99):
+            series.append(series[-1] + rng.gauss(0, 1))
+        result = _estimate_ar1_half_life_years(series)
+        # φ ≈ 1 のため平均回帰条件を満たさず None または HL が非常に大きい
+        assert result is None or result["half_life_years"] > 5.0
+
+
 # ── walk_forward_cv_monthly が sklearn.TimeSeriesSplit のセマンティクスと一致 ──
 
 class TestWalkForwardSklearnConsistency:

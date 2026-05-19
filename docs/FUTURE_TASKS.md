@@ -24,11 +24,13 @@
 - **期待効果**: R²の向上、ランキング精度の改善
 - **実装場所**: `plugins/total_return.py`、`plugins/utils.py`
 
-#### B. gap_analysis の収束予測の改善
-- **問題**: `half_life = abs(gap)/2`、`conv_score = 50 + gap×0.8` はヒューリスティック（統計的根拠なし）
-- **改善案**: 過去の乖離率時系列から OU過程のパラメータ（平均回帰速度 κ）をMLE推定する
-- **前提**: `stock_price_history` に十分な期間のデータがあること
-- **実装場所**: `plugins/gap_analysis.py`、`plugins/utils.py`
+#### B. gap_analysis の収束予測の改善 ✅ **対応済み**
+- ~~**問題**: `half_life = abs(gap)/2`、`conv_score = 50 + gap×0.8` はヒューリスティック（統計的根拠なし）~~
+- **対応 (2026-05)**: `plugins/gap_analysis.py:_estimate_ar1_half_life_years()` で
+  `statsmodels.tsa.arima.model.ARIMA(1,0,0)` による AR(1) MLE を実装。各銘柄の年次
+  `gap_ratio` 履歴（≥ 8 観測）から `φ` を推定し、`half_life = -ln(2)/ln(φ)` を計算。
+  履歴不足の銘柄は旧ヒューリスティックにフォールバック。詳細は `docs/IMPROVEMENTS.md` の
+  P2-7 セクションおよび `docs/MODELS.md` のモデル 3 を参照。
 
 #### C. 会計基準別の外れ値統計の可視化
 - **問題**: `winsorize(p1-p99)` で対応済みだが「IFRS/JGAAP混在時に精度が下がる」ケースを可視化できていない
