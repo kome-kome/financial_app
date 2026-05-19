@@ -866,6 +866,7 @@ graph TB
 | `tests/test_plugin_total_return.py` | テスト | 総合リターン予測プラグイン execute() テスト・MECEグループ検証（9件） | plugins/total_return.py |
 | `tests/test_plugin_price_predictor.py` | テスト | 株価リターン予測プラグイン execute() テスト・ヘルパー関数（MA/RSI/ATR/log_vol）の純粋関数テスト（17件） | plugins/price_predictor.py |
 | `tests/test_rate_limit.py` | テスト | slowapi レート制限の 429 動作・カウンタ独立性・無効化モードテスト（8件） | api.py, slowapi |
+| `tests/test_csp.py` | テスト | CSP nonce 動作（per-request 乱数・unsafe-inline 不在・テンプレート埋め込み）と全テンプレートからのインラインハンドラ削除を保証する回帰防止テスト（11件） | api.py, templates/ |
 | `.env` | 設定 | APIキー・DB接続・認証情報（UTF-8 BOMなし） | — |
 | `ARCHITECTURE.md` | ドキュメント | 本ファイル。コード変更時は必ず更新する | — |
 | `MODELS.md` | ドキュメント | 分析モデルの数式・パラメータ・参考文献（Markdown版）。モデル変更時は `models.html` とセットで更新する。 | — |

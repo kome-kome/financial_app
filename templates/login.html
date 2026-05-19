@@ -41,25 +41,22 @@ input[type=password]:focus{border-color:#7c3aed}
   <!-- ログインパネル -->
   <div id="login-panel">
     <label for="pw">パスワード</label>
-    <input type="password" id="pw" placeholder="パスワードを入力" autocomplete="current-password"
-           onkeydown="if(event.key==='Enter')login()">
-    <button class="btn" id="login-btn" onclick="login()">ログイン</button>
+    <input type="password" id="pw" placeholder="パスワードを入力" autocomplete="current-password">
+    <button class="btn" id="login-btn">ログイン</button>
     <div class="error" id="err">パスワードが違います</div>
-    <span class="forgot-link" onclick="showReset()">パスワードを忘れた場合</span>
+    <span class="forgot-link" id="show-reset-link">パスワードを忘れた場合</span>
   </div>
 
   <!-- パスワードリセットパネル -->
   <div id="reset-panel" class="panel">
     <label for="rk">回復キー（APP_RECOVERY_KEY）</label>
-    <input type="password" id="rk" placeholder="回復キーを入力" autocomplete="off"
-           onkeydown="if(event.key==='Enter')document.getElementById('np').focus()">
+    <input type="password" id="rk" placeholder="回復キーを入力" autocomplete="off">
     <label for="np">新しいパスワード</label>
-    <input type="password" id="np" placeholder="新しいパスワードを入力" autocomplete="new-password"
-           onkeydown="if(event.key==='Enter')resetPassword()">
-    <button class="btn" id="reset-btn" onclick="resetPassword()">パスワードをリセット</button>
+    <input type="password" id="np" placeholder="新しいパスワードを入力" autocomplete="new-password">
+    <button class="btn" id="reset-btn">パスワードをリセット</button>
     <div class="error" id="reset-err"></div>
     <div class="success" id="reset-ok">パスワードを更新しました。ログインしてください。</div>
-    <button class="btn-secondary" onclick="showLogin()">← ログインに戻る</button>
+    <button class="btn-secondary" id="show-login-btn">← ログインに戻る</button>
   </div>
 </div>
 
@@ -144,6 +141,17 @@ async function resetPassword(){
     btn.textContent = 'パスワードをリセット';
   }
 }
+
+// インラインイベントハンドラの代わりに addEventListener で配線（CSP nonce 対応）
+document.getElementById('pw').addEventListener('keydown', e => { if(e.key === 'Enter') login(); });
+document.getElementById('login-btn').addEventListener('click', login);
+document.getElementById('show-reset-link').addEventListener('click', showReset);
+document.getElementById('rk').addEventListener('keydown', e => {
+  if(e.key === 'Enter') document.getElementById('np').focus();
+});
+document.getElementById('np').addEventListener('keydown', e => { if(e.key === 'Enter') resetPassword(); });
+document.getElementById('reset-btn').addEventListener('click', resetPassword);
+document.getElementById('show-login-btn').addEventListener('click', showLogin);
 </script>
 </body>
 </html>

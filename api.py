@@ -7,7 +7,7 @@ FastAPI バックエンド
 """
 
 import asyncio, json, logging, re
-import hmac, hashlib, base64, time as _time, os
+import hmac, hashlib, base64, secrets, time as _time, os
 import httpx
 
 log = logging.getLogger(__name__)
@@ -162,13 +162,19 @@ app.add_middleware(
 )
 
 class _SecurityHeadersMiddleware(BaseHTTPMiddleware):
-    """セキュリティ関連レスポンスヘッダーを全レスポンスに付与する"""
+    """セキュリティ関連レスポンスヘッダーを全レスポンスに付与する。
+    request.state.csp_nonce に per-request の暗号学的乱数を格納し、
+    CSP の script-src/style-src に nonce-XXX として埋め込む。
+    エンドポイント側は request.state.csp_nonce を読んでテンプレートに反映する。
+    """
     async def dispatch(self, request, call_next):
+        nonce = secrets.token_urlsafe(16)
+        request.state.csp_nonce = nonce
         response = await call_next(request)
         response.headers["Content-Security-Policy"] = (
             "default-src 'self'; "
-            "script-src 'self' 'unsafe-inline'; "
-            "style-src 'self' 'unsafe-inline'; "
+            f"script-src 'self' 'nonce-{nonce}'; "
+            f"style-src 'self' 'nonce-{nonce}'; "
             "connect-src 'self'; "
             "img-src 'self' data:; "
             "frame-ancestors 'none'"
@@ -1259,26 +1265,41 @@ async def export_csv(year: Optional[int] = None, db: Session = Depends(get_db)):
     )
 
 _NO_CACHE = {"Cache-Control": "no-cache, no-store, must-revalidate"}
+_TEMPLATE_DIR = BASE_DIR / "templates"
+
+
+def _serve_html_with_nonce(request: Request, template_name: str) -> "HTMLResponse":
+    """テンプレートを読み、`<script>` / `<style>` タグに CSP nonce を埋め込んで返す。
+    nonce は middleware が request.state.csp_nonce に格納している。
+    """
+    from fastapi.responses import HTMLResponse
+    nonce = getattr(request.state, "csp_nonce", None) or secrets.token_urlsafe(16)
+    html = (_TEMPLATE_DIR / template_name).read_text(encoding="utf-8")
+    # 各テンプレートにつき <script> / <style> は1組ずつなので単純置換でOK
+    html = html.replace("<script>", f'<script nonce="{nonce}">', 1)
+    html = html.replace("<style>",  f'<style nonce="{nonce}">',  1)
+    return HTMLResponse(html, headers=_NO_CACHE)
+
 
 @app.get("/")
-async def serve_dashboard():
-    return FileResponse(BASE_DIR / "templates" / "dashboard.html", headers=_NO_CACHE)
+async def serve_dashboard(request: Request):
+    return _serve_html_with_nonce(request, "dashboard.html")
 
 @app.get("/collection")
-async def serve_collection():
-    return FileResponse(BASE_DIR / "templates" / "collection.html", headers=_NO_CACHE)
+async def serve_collection(request: Request):
+    return _serve_html_with_nonce(request, "collection.html")
 
 @app.get("/analysis")
-async def serve_analysis():
-    return FileResponse(BASE_DIR / "templates" / "analysis.html", headers=_NO_CACHE)
+async def serve_analysis(request: Request):
+    return _serve_html_with_nonce(request, "analysis.html")
 
 @app.get("/models")
-async def serve_models():
-    return FileResponse(BASE_DIR / "templates" / "models.html", headers=_NO_CACHE)
+async def serve_models(request: Request):
+    return _serve_html_with_nonce(request, "models.html")
 
 @app.get("/login")
-async def serve_login():
-    return FileResponse(BASE_DIR / "templates" / "login.html", headers=_NO_CACHE)
+async def serve_login(request: Request):
+    return _serve_html_with_nonce(request, "login.html")
 
 def _update_env_file(key: str, value: str):
     env_path = BASE_DIR / ".env"

@@ -87,14 +87,14 @@ tr:hover td{background:#1e2235}
     <span class="dot" id="api-dot" style="background:#f59e0b"></span>
     <span style="font-size:11px">API:</span>
     <input type="text" id="api-base" value="" placeholder="http://localhost:8000">
-    <button class="btn btn-sm" style="padding:3px 8px;background:#1e293b;border:1px solid #334155;color:#94a3b8;border-radius:4px" onclick="preflight()">接続確認</button>
+    <button id="btn-preflight" class="btn btn-sm" style="padding:3px 8px;background:#1e293b;border:1px solid #334155;color:#94a3b8;border-radius:4px">接続確認</button>
   </div>
-  <button id="logout-btn" onclick="logout()" style="display:none;margin-left:8px;padding:5px 12px;background:transparent;border:1px solid #4a5568;border-radius:4px;color:#94a3b8;font-size:12px;cursor:pointer">ログアウト</button>
+  <button id="logout-btn" style="display:none;margin-left:8px;padding:5px 12px;background:transparent;border:1px solid #4a5568;border-radius:4px;color:#94a3b8;font-size:12px;cursor:pointer">ログアウト</button>
 </div>
 
 <div class="nav" id="plugin-nav">
   <!-- 分析プラグインのタブは initPlugins() が動的に挿入する -->
-  <button class="nav-btn" data-tab="backtest" onclick="showTab('backtest')">バックテスト</button>
+  <button class="nav-btn" data-tab="backtest">バックテスト</button>
   <a href="/" class="nav-link" style="color:#64748b">
     <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>
     ホーム
@@ -136,7 +136,7 @@ tr:hover td{background:#1e2235}
           <option value="gap_desc">乖離率 高い順（割安）</option>
           <option value="gap_asc">乖離率 低い順（割高）</option>
         </select>
-        <button class="btn btn-primary btn-sm" id="btn-gap-analysis" onclick="runGapAnalysis()">分析を実行</button>
+        <button class="btn btn-primary btn-sm" id="btn-gap-analysis">分析を実行</button>
       </div>
     </div>
     <div class="info-box" style="margin-top:12px">
@@ -153,7 +153,7 @@ tr:hover td{background:#1e2235}
       <div class="section-title" style="margin-bottom:0">
         結果 <span id="gap-count" class="tag tag-purple">-</span>
       </div>
-      <button class="btn btn-secondary btn-sm" onclick="exportGapCSV()">CSV出力</button>
+      <button id="btn-export-gap-csv" class="btn btn-secondary btn-sm">CSV出力</button>
     </div>
     <div style="overflow-x:auto;margin-top:12px">
       <table>
@@ -186,10 +186,10 @@ tr:hover td{background:#1e2235}
       ★ 業種別OLS分析を先に実行すると「割安度」指標が使えるようになります。
     </div>
     <div class="flex" style="margin-bottom:16px">
-      <button class="btn btn-secondary" onclick="applyPreset('バランス型')">⚖ バランス型</button>
-      <button class="btn btn-secondary" onclick="applyPreset('成長重視')">↑ 成長重視</button>
-      <button class="btn btn-secondary" onclick="applyPreset('割安重視')">◆ 割安重視</button>
-      <button class="btn btn-secondary" onclick="applyPreset('高収益重視')">★ 高収益重視</button>
+      <button class="btn btn-secondary preset-btn" data-preset="バランス型">⚖ バランス型</button>
+      <button class="btn btn-secondary preset-btn" data-preset="成長重視">↑ 成長重視</button>
+      <button class="btn btn-secondary preset-btn" data-preset="割安重視">◆ 割安重視</button>
+      <button class="btn btn-secondary preset-btn" data-preset="高収益重視">★ 高収益重視</button>
     </div>
     <div class="section-title" style="font-size:12px;margin-bottom:10px">指標ウェイト（スライダー）</div>
     <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:8px" id="weight-grid"></div>
@@ -216,7 +216,7 @@ tr:hover td{background:#1e2235}
         <input type="number" id="rec-min-cap" placeholder="例: 10000">
       </div>
     </div>
-    <button class="btn btn-primary" id="btn-recommend" onclick="runRecommend()">
+    <button class="btn btn-primary" id="btn-recommend">
       <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
       おすすめ銘柄を分析
     </button>
@@ -225,7 +225,7 @@ tr:hover td{background:#1e2235}
   <div class="card" id="rec-result-card" style="display:none">
     <div class="flex-between">
       <div class="section-title" style="margin-bottom:0" id="rec-result-title">分析結果</div>
-      <button class="btn btn-secondary btn-sm" onclick="dlRecCsv()">CSVダウンロード</button>
+      <button id="btn-dl-rec-csv" class="btn btn-secondary btn-sm">CSVダウンロード</button>
     </div>
     <div style="overflow-x:auto;margin-top:12px">
       <table>
@@ -263,7 +263,6 @@ tr:hover td{background:#1e2235}
         <label>CVフォールド数</label>
         <div style="display:flex;align-items:center;gap:8px">
           <input type="range" id="tr-n-folds" min="3" max="10" step="1" value="5"
-            oninput="document.getElementById('tr-n-folds-val').textContent=this.value"
             style="flex:1;accent-color:#7c3aed">
           <span id="tr-n-folds-val" style="color:#a78bfa;font-weight:600;min-width:24px">5</span>
         </div>
@@ -272,7 +271,6 @@ tr:hover td{background:#1e2235}
         <label>表示件数</label>
         <div style="display:flex;align-items:center;gap:8px">
           <input type="range" id="tr-top-n" min="10" max="50" step="5" value="20"
-            oninput="document.getElementById('tr-top-n-val').textContent=this.value"
             style="flex:1;accent-color:#7c3aed">
           <span id="tr-top-n-val" style="color:#a78bfa;font-weight:600;min-width:24px">20</span>
         </div>
@@ -281,7 +279,7 @@ tr:hover td{background:#1e2235}
         <label>最低配当利回り（%、0=フィルタなし）</label>
         <input type="number" id="tr-min-div" value="0" min="0" max="10" step="0.5">
       </div>
-      <button class="btn btn-primary" id="btn-total-return" onclick="runTotalReturn()" style="margin-top:8px">
+      <button class="btn btn-primary" id="btn-total-return" style="margin-top:8px">
         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/><polyline points="17 6 23 6 23 12"/></svg>
         総合リターン予測を実行
       </button>
@@ -341,7 +339,7 @@ tr:hover td{background:#1e2235}
       </div>
       <div class="flex">
         <span class="text-sm" style="font-size:11px">期待リターン = 株価上昇余地 + 配当利回り（参考値）</span>
-        <button class="btn btn-secondary btn-sm" onclick="exportTotalReturnCSV()">CSV出力</button>
+        <button id="btn-export-tr-csv" class="btn btn-secondary btn-sm">CSV出力</button>
       </div>
     </div>
     <div style="overflow-x:auto;margin-top:12px">
@@ -404,11 +402,11 @@ tr:hover td{background:#1e2235}
       </div>
     </div>
     <div style="display:flex;gap:10px;flex-wrap:wrap">
-      <button class="btn btn-primary" id="btn-backtest" onclick="runBacktest()">
+      <button class="btn btn-primary" id="btn-backtest">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
         バックテストを実行
       </button>
-      <button class="btn btn-secondary" id="btn-bt-multi" onclick="runBtMulti()">
+      <button class="btn btn-secondary" id="btn-bt-multi">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>
         マルチピリオド比較（3〜24ヶ月）
       </button>
@@ -421,7 +419,7 @@ tr:hover td{background:#1e2235}
         <div class="section-title" style="margin-bottom:4px">バックテスト結果</div>
         <div class="text-sm" id="bt-period-label"></div>
       </div>
-      <button class="btn btn-secondary btn-sm" onclick="exportBtCSV()">CSV出力</button>
+      <button id="btn-export-bt-csv" class="btn btn-secondary btn-sm">CSV出力</button>
     </div>
     <div class="grid4" style="margin-bottom:8px" id="bt-summary-grid"></div>
     <div id="bt-percentile" style="margin-bottom:14px;padding:12px;background:#0f1117;border-radius:8px;border:1px solid #1e293b"></div>
@@ -438,7 +436,7 @@ tr:hover td{background:#1e2235}
             <th>スコア</th>
             <th style="text-align:right">始値(円)</th>
             <th style="text-align:right">終値(円)</th>
-            <th class="sortable" style="text-align:right" onclick="btSort()">リターン ↕</th>
+            <th id="bt-sort-header" class="sortable" style="text-align:right">リターン ↕</th>
             <th>始値日</th>
           </tr>
         </thead>
@@ -642,7 +640,7 @@ function renderWeightGrid() {
         <div style="display:flex;align-items:center;gap:8px">
           <input type="range" min="-2" max="3" step="0.1" value="${def}"
             style="flex:1;accent-color:#7c3aed;cursor:pointer"
-            oninput="document.getElementById('w-val-${key}').textContent=parseFloat(this.value).toFixed(1)"
+            data-weight-key="${key}"
             id="range-${key}">
           <span id="w-val-${key}" style="font-size:14px;font-weight:600;color:#a78bfa;min-width:32px;text-align:right">${def.toFixed(1)}</span>
         </div>
@@ -1155,7 +1153,8 @@ function _createDynamicTab(plugin, tabId) {
       ${plugin.description ? `<div class="info-box" style="margin-bottom:14px">${esc(plugin.description)}</div>` : ''}
       ${plugin.depends_on.length ? `<div class="info-box" style="border-color:#f59e0b;margin-bottom:14px">⚠ 事前実行が必要: ${esc(plugin.depends_on.join('、'))}</div>` : ''}
       <div id="form-${esc(tabId)}">${_renderParamsForm(plugin.params_schema, tabId)}</div>
-      <button class="btn btn-primary" style="margin-top:16px" onclick="runDynamicPlugin('${esc(plugin.name)}','${esc(tabId)}')">
+      <button class="btn btn-primary" style="margin-top:16px"
+              data-plugin-run="${esc(plugin.name)}" data-plugin-tab="${esc(tabId)}">
         ${esc(plugin.label)}を実行
       </button>
     </div>
@@ -1186,7 +1185,7 @@ function _renderParamsForm(schema, tabId) {
     } else if (field.type === 'slider') {
       html += `<div style="display:flex;align-items:center;gap:8px">
         <input type="range" id="param-${tabId}-${key}" min="${field.min}" max="${field.max}" step="${field.step}" value="${field.default}"
-          oninput="document.getElementById('val-${tabId}-${key}').textContent=this.value" style="flex:1;accent-color:#7c3aed">
+          data-slider-target="val-${tabId}-${key}" style="flex:1;accent-color:#7c3aed">
         <span id="val-${tabId}-${key}" style="color:#a78bfa;font-weight:600;min-width:36px">${field.default}</span>
       </div>`;
     } else {
@@ -1258,6 +1257,54 @@ function dl(content, name) {
   a.download = name;
   a.click();
 }
+
+// ── CSP nonce 対応: インラインイベントハンドラの代わりに addEventListener で配線 ──
+// 静的ボタンは直接バインド、動的生成要素は body へのイベント委譲で対応する
+document.getElementById('btn-preflight')?.addEventListener('click', preflight);
+document.getElementById('logout-btn')?.addEventListener('click', logout);
+document.getElementById('btn-gap-analysis')?.addEventListener('click', runGapAnalysis);
+document.getElementById('btn-export-gap-csv')?.addEventListener('click', exportGapCSV);
+document.getElementById('btn-recommend')?.addEventListener('click', runRecommend);
+document.getElementById('btn-dl-rec-csv')?.addEventListener('click', dlRecCsv);
+document.getElementById('btn-total-return')?.addEventListener('click', runTotalReturn);
+document.getElementById('btn-export-tr-csv')?.addEventListener('click', exportTotalReturnCSV);
+document.getElementById('btn-backtest')?.addEventListener('click', runBacktest);
+document.getElementById('btn-bt-multi')?.addEventListener('click', runBtMulti);
+document.getElementById('btn-export-bt-csv')?.addEventListener('click', exportBtCSV);
+document.getElementById('bt-sort-header')?.addEventListener('click', btSort);
+// 静的 nav-btn（backtest）
+document.querySelectorAll('#plugin-nav .nav-btn[data-tab]').forEach(b => {
+  b.addEventListener('click', () => showTab(b.dataset.tab));
+});
+// プリセットボタン
+document.querySelectorAll('.preset-btn[data-preset]').forEach(b => {
+  b.addEventListener('click', () => applyPreset(b.dataset.preset));
+});
+// 静的スライダー（合計リターン）
+const _trN = document.getElementById('tr-n-folds');
+if (_trN) _trN.addEventListener('input', () => {
+  document.getElementById('tr-n-folds-val').textContent = _trN.value;
+});
+const _trTop = document.getElementById('tr-top-n');
+if (_trTop) _trTop.addEventListener('input', () => {
+  document.getElementById('tr-top-n-val').textContent = _trTop.value;
+});
+// 動的生成要素のイベント委譲
+document.body.addEventListener('input', e => {
+  const t = e.target;
+  if (t.matches('input[data-weight-key]')) {
+    const k = t.dataset.weightKey;
+    const lbl = document.getElementById(`w-val-${k}`);
+    if (lbl) lbl.textContent = parseFloat(t.value).toFixed(1);
+  } else if (t.matches('input[data-slider-target]')) {
+    const lbl = document.getElementById(t.dataset.sliderTarget);
+    if (lbl) lbl.textContent = t.value;
+  }
+});
+document.body.addEventListener('click', e => {
+  const btn = e.target.closest('button[data-plugin-run]');
+  if (btn) runDynamicPlugin(btn.dataset.pluginRun, btn.dataset.pluginTab);
+});
 
 // 初期化
 initAuth();

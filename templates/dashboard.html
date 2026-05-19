@@ -164,7 +164,7 @@ body{font-family:'Segoe UI',sans-serif;background:#0f1117;color:#e2e8f0;min-heig
         <span class="dot" id="sched-dot" style="background:#f59e0b"></span>
         <span style="font-size:13px;color:#94a3b8" id="sched-label">確認中...</span>
       </div>
-      <button onclick="toggleScheduler()" id="sched-toggle-btn"
+      <button id="sched-toggle-btn"
         style="padding:5px 14px;background:#1e293b;border:1px solid #334155;border-radius:6px;color:#94a3b8;font-size:12px;cursor:pointer">
         切り替え
       </button>
@@ -278,6 +278,9 @@ async function initAuth() {
 initAuth();
 loadStats();
 loadScheduler();
+
+// インラインイベントハンドラの代わりに addEventListener で配線（CSP nonce 対応）
+document.getElementById('sched-toggle-btn').addEventListener('click', toggleScheduler);
 </script>
 </body>
 </html>

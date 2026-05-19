@@ -80,9 +80,9 @@ tr:hover td{background:#1e2235}
     <span class="dot" id="api-dot" style="background:#f59e0b"></span>
     <span style="font-size:11px">API:</span>
     <input type="text" id="api-base" value="" placeholder="http://localhost:8000">
-    <button class="btn btn-sm" style="padding:3px 8px;background:#1e293b;border:1px solid #334155;color:#94a3b8;border-radius:4px" onclick="checkApi()">接続確認</button>
+    <button id="btn-check-api" class="btn btn-sm" style="padding:3px 8px;background:#1e293b;border:1px solid #334155;color:#94a3b8;border-radius:4px">接続確認</button>
   </div>
-  <button id="logout-btn" onclick="logout()" style="display:none;margin-left:8px;padding:5px 12px;background:transparent;border:1px solid #4a5568;border-radius:4px;color:#94a3b8;font-size:12px;cursor:pointer">ログアウト</button>
+  <button id="logout-btn" style="display:none;margin-left:8px;padding:5px 12px;background:transparent;border:1px solid #4a5568;border-radius:4px;color:#94a3b8;font-size:12px;cursor:pointer">ログアウト</button>
 </div>
 
 <div class="nav">
@@ -90,10 +90,10 @@ tr:hover td{background:#1e2235}
     <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>
     ホーム
   </a>
-  <button class="nav-btn active" data-tab="collect"      onclick="showTab('collect')">財務データ収集</button>
-  <button class="nav-btn"        data-tab="stockmarket"  onclick="showTab('stockmarket')">株価・市場データ</button>
-  <button class="nav-btn"        data-tab="dataview"     onclick="showTab('dataview')">データ確認</button>
-  <button class="nav-btn"        data-tab="screen"       onclick="showTab('screen')">スクリーニング</button>
+  <button class="nav-btn active" data-tab="collect"     >財務データ収集</button>
+  <button class="nav-btn"        data-tab="stockmarket" >株価・市場データ</button>
+  <button class="nav-btn"        data-tab="dataview"    >データ確認</button>
+  <button class="nav-btn"        data-tab="screen"      >スクリーニング</button>
   <a href="/analysis" class="nav-link">
     分析
     <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
@@ -118,7 +118,7 @@ tr:hover td{background:#1e2235}
       <div class="section-title" style="margin-bottom:0">自動更新スケジューラー</div>
       <div style="display:flex;align-items:center;gap:10px">
         <span id="sched-status-badge" style="font-size:11px;padding:3px 10px;border-radius:10px;background:#052e16;color:#86efac">有効</span>
-        <button class="btn btn-secondary btn-sm" onclick="toggleScheduler()" id="btn-sched-toggle">停止する</button>
+        <button class="btn btn-secondary btn-sm" id="btn-sched-toggle">停止する</button>
       </div>
     </div>
     <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;font-size:12px">
@@ -149,11 +149,11 @@ tr:hover td{background:#1e2235}
     </div>
     <div id="smart-mode-badge" style="display:none;font-size:12px;margin-bottom:10px;padding:4px 10px;border-radius:6px;background:#1e293b"></div>
     <div class="flex" style="margin-bottom:12px">
-      <button class="btn btn-primary" id="btn-smart" onclick="startSmartCollection()" style="background:#6d28d9;border:1px solid #7c3aed">
+      <button class="btn btn-primary" id="btn-smart" style="background:#6d28d9;border:1px solid #7c3aed">
         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M4.22 4.22l2.12 2.12M17.66 17.66l2.12 2.12M2 12h3M19 12h3M4.22 19.78l2.12-2.12M17.66 6.34l2.12-2.12"/></svg>
         スマート収集を実行
       </button>
-      <button class="btn btn-secondary btn-sm" id="btn-smart-stop" onclick="stopCollection()" style="display:none;border-color:#ef4444;color:#ef4444">
+      <button class="btn btn-secondary btn-sm" id="btn-smart-stop" style="display:none;border-color:#ef4444;color:#ef4444">
         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/></svg>
         停止
       </button>
@@ -183,11 +183,11 @@ tr:hover td{background:#1e2235}
         過去1年分のEDINET書類のうち、まだ取り込んでいないものだけを取得します。定期実行に最適です。
       </div>
       <div class="flex" style="margin-bottom:12px">
-        <button class="btn btn-primary" id="btn-incremental" onclick="startIncremental()">
+        <button class="btn btn-primary" id="btn-incremental">
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 11-2.12-9.36L23 10"/></svg>
           差分収集を実行
         </button>
-        <button class="btn btn-secondary btn-sm" id="btn-stop" onclick="stopCollection()" style="display:none;border-color:#ef4444;color:#ef4444">
+        <button class="btn btn-secondary btn-sm" id="btn-stop" style="display:none;border-color:#ef4444;color:#ef4444">
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/></svg>
           停止
         </button>
@@ -219,7 +219,7 @@ tr:hover td{background:#1e2235}
       <div style="background:#1c1400;border:1px solid #78350f;border-radius:6px;padding:10px 12px;font-size:12px;color:#fcd34d;margin-bottom:12px">
         ⚠️ 全社収集は<strong>数時間</strong>かかります。サーバーを停止しないでください。
       </div>
-      <button class="btn btn-primary" id="btn-collect" onclick="startFullCollection()">
+      <button class="btn btn-primary" id="btn-collect">
         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg>
         全社収集開始
       </button>
@@ -233,8 +233,8 @@ tr:hover td{background:#1e2235}
     <div class="flex-between">
       <div class="section-title" style="margin-bottom:0">収集ログ</div>
       <div class="flex">
-        <button class="btn btn-secondary btn-sm" onclick="clearLog()">クリア</button>
-        <button class="btn btn-secondary btn-sm" onclick="checkJobStatus()">最新ジョブ確認</button>
+        <button id="btn-clear-log" class="btn btn-secondary btn-sm">クリア</button>
+        <button id="btn-check-job-status" class="btn btn-secondary btn-sm">最新ジョブ確認</button>
       </div>
     </div>
     <div class="log-box" id="log-box" style="margin-top:10px"></div>
@@ -251,7 +251,7 @@ tr:hover td{background:#1e2235}
         <label>EDINETコードを指定して単体企業の財務データを再取得します</label>
         <div class="flex">
           <input type="text" id="refresh-code" placeholder="例: E02167" style="flex:1">
-          <button class="btn btn-secondary btn-sm" onclick="refreshSingle()">再取得</button>
+          <button id="btn-refresh-single" class="btn btn-secondary btn-sm">再取得</button>
         </div>
       </div>
     </div>
@@ -261,7 +261,7 @@ tr:hover td{background:#1e2235}
   <div class="card">
     <div class="flex-between" style="margin-bottom:10px">
       <div class="section-title" style="margin-bottom:0">財務データ収録状況（EDINET）</div>
-      <button class="btn btn-secondary btn-sm" onclick="loadEdinetCoverage()">更新</button>
+      <button id="btn-load-edinet-coverage" class="btn btn-secondary btn-sm">更新</button>
     </div>
     <div id="edinet-coverage-body">
       <p class="text-sm" style="text-align:center;padding:20px 0">「更新」ボタンを押して取得</p>
@@ -277,7 +277,7 @@ tr:hover td{background:#1e2235}
     <div style="padding-top:12px">
       <div class="flex-between" style="margin-bottom:12px">
         <div></div>
-        <button class="btn btn-primary btn-sm" onclick="loadQualityReport()">
+        <button id="btn-load-quality" class="btn btn-primary btn-sm">
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 102.13-9.36L1 10"/></svg>
           品質チェックを実行
         </button>
@@ -302,7 +302,7 @@ tr:hover td{background:#1e2235}
     <div class="card">
       <div class="flex-between" style="margin-bottom:10px">
         <div class="section-title" style="margin-bottom:0">市場データ収録状況</div>
-        <button class="btn btn-secondary btn-sm" onclick="loadMarketCoverage()">更新</button>
+        <button id="btn-load-market-coverage" class="btn btn-secondary btn-sm">更新</button>
       </div>
       <div id="market-coverage-body">
         <p class="text-sm" style="text-align:center;padding:20px 0">「更新」ボタンを押して取得</p>
@@ -311,7 +311,7 @@ tr:hover td{background:#1e2235}
     <div class="card">
       <div class="flex-between" style="margin-bottom:10px">
         <div class="section-title" style="margin-bottom:0">株価履歴データ収録状況</div>
-        <button class="btn btn-secondary btn-sm" onclick="loadHistoryCoverage()">更新</button>
+        <button id="btn-load-history-coverage" class="btn btn-secondary btn-sm">更新</button>
       </div>
       <div id="history-coverage-body">
         <p class="text-sm" style="text-align:center;padding:20px 0">「更新」ボタンを押して取得</p>
@@ -346,14 +346,14 @@ tr:hover td{background:#1e2235}
           </select>
         </div>
         <div class="flex" style="margin-bottom:8px">
-          <button class="btn btn-primary" id="btn-jq-start" onclick="startJQuantsCollection()">
+          <button class="btn btn-primary" id="btn-jq-start">
             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg>
             収集開始
           </button>
-          <button class="btn btn-secondary btn-sm" id="btn-jq-force" onclick="startJQuantsCollection(true)" style="display:none;border-color:#f59e0b;color:#f59e0b">
+          <button class="btn btn-secondary btn-sm" id="btn-jq-force" style="display:none;border-color:#f59e0b;color:#f59e0b">
             強制再開
           </button>
-          <button class="btn btn-secondary btn-sm" id="btn-jq-stop" onclick="stopJQuantsCollection()" style="display:none;border-color:#ef4444;color:#ef4444">
+          <button class="btn btn-secondary btn-sm" id="btn-jq-stop" style="display:none;border-color:#ef4444;color:#ef4444">
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/></svg>
             停止
           </button>
@@ -367,7 +367,7 @@ tr:hover td{background:#1e2235}
         </div>
         <div class="flex-between" style="margin-top:12px;margin-bottom:6px">
           <div style="font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:.5px">収集ログ</div>
-          <button class="btn btn-secondary btn-sm" onclick="document.getElementById('jq-log').innerHTML=''">クリア</button>
+          <button id="btn-jq-clear" class="btn btn-secondary btn-sm">クリア</button>
         </div>
         <div class="log-box" id="jq-log"></div>
       </div>
@@ -409,18 +409,18 @@ tr:hover td{background:#1e2235}
             <input type="number" id="mkt-max" placeholder="例: 100（テスト用）">
           </div>
           <div class="flex">
-            <button class="btn btn-secondary" id="btn-market" onclick="startMarketUpdate()">
+            <button class="btn btn-secondary" id="btn-market">
               <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 102.13-9.36L1 10"/></svg>
               市場データ更新開始
             </button>
-            <button class="btn btn-secondary btn-sm" id="btn-market-force" onclick="startMarketUpdate(true)" style="display:none;border-color:#f59e0b;color:#f59e0b" title="既に実行中のジョブを停止して再起動します">
+            <button class="btn btn-secondary btn-sm" id="btn-market-force" style="display:none;border-color:#f59e0b;color:#f59e0b" title="既に実行中のジョブを停止して再起動します">
               強制再開
             </button>
-            <button class="btn btn-secondary btn-sm" id="btn-market-stop" onclick="stopMarketUpdate()" style="display:none;border-color:#ef4444;color:#ef4444">
+            <button class="btn btn-secondary btn-sm" id="btn-market-stop" style="display:none;border-color:#ef4444;color:#ef4444">
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/></svg>
               停止
             </button>
-            <button class="btn btn-secondary btn-sm" onclick="checkMarketStatus()">ステータス確認</button>
+            <button id="btn-check-market" class="btn btn-secondary btn-sm">ステータス確認</button>
           </div>
           <div id="market-progress" class="hidden progress-wrap">
             <div class="flex" style="margin-bottom:6px">
@@ -431,7 +431,7 @@ tr:hover td{background:#1e2235}
           </div>
           <div class="flex-between" style="margin-top:12px;margin-bottom:6px">
             <div style="font-size:11px;color:#475569;text-transform:uppercase;letter-spacing:.5px">更新ログ</div>
-            <button class="btn btn-secondary btn-sm" onclick="clearMarketLog()">クリア</button>
+            <button id="btn-clear-market-log" class="btn btn-secondary btn-sm">クリア</button>
           </div>
           <div class="log-box" id="market-log-box"></div>
         </div>
@@ -457,7 +457,7 @@ tr:hover td{background:#1e2235}
           </div>
           <div class="form-group">
             <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
-              <input type="checkbox" id="history-skip-existing" checked style="width:14px;height:14px;cursor:pointer" onchange="document.getElementById('history-backfill-row').style.display=this.checked?'':'none'">
+              <input type="checkbox" id="history-skip-existing" checked style="width:14px;height:14px;cursor:pointer">
               <span>差分収集（収集済みをスキップ）</span>
             </label>
           </div>
@@ -468,14 +468,14 @@ tr:hover td{background:#1e2235}
             </label>
           </div>
           <div class="flex" style="margin-bottom:8px">
-            <button class="btn btn-secondary" id="btn-history-start" onclick="startHistoryCollection()">
+            <button class="btn btn-secondary" id="btn-history-start">
               <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg>
               収集開始
             </button>
-            <button class="btn btn-secondary btn-sm" id="btn-history-force" onclick="startHistoryCollection(true)" style="display:none;border-color:#f59e0b;color:#f59e0b" title="既に実行中のジョブを停止して再起動します">
+            <button class="btn btn-secondary btn-sm" id="btn-history-force" style="display:none;border-color:#f59e0b;color:#f59e0b" title="既に実行中のジョブを停止して再起動します">
               強制再開
             </button>
-            <button class="btn btn-secondary btn-sm" id="btn-history-stop" onclick="stopHistoryCollection()" style="display:none;border-color:#ef4444;color:#ef4444">
+            <button class="btn btn-secondary btn-sm" id="btn-history-stop" style="display:none;border-color:#ef4444;color:#ef4444">
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/></svg>
               停止
             </button>
@@ -489,7 +489,7 @@ tr:hover td{background:#1e2235}
           </div>
           <div class="flex-between" style="margin-top:12px;margin-bottom:6px">
             <div style="font-size:11px;color:#475569;text-transform:uppercase;letter-spacing:.5px">収集ログ</div>
-            <button class="btn btn-secondary btn-sm" onclick="document.getElementById('history-log').innerHTML=''">クリア</button>
+            <button id="btn-history-clear" class="btn btn-secondary btn-sm">クリア</button>
           </div>
           <div class="log-box" id="history-log"></div>
         </div>
@@ -505,12 +505,12 @@ tr:hover td{background:#1e2235}
     <div class="flex-between">
       <div class="section-title" style="margin-bottom:0">DBブラウザ</div>
       <div class="flex">
-        <input type="text" id="db-search" placeholder="企業名・証券コード" style="width:200px" oninput="debounceSearch()">
-        <select id="db-industry" style="width:140px" onchange="loadDB()">
+        <input type="text" id="db-search" placeholder="企業名・証券コード" style="width:200px">
+        <select id="db-industry" style="width:140px">
           <option value="">全業種</option>
         </select>
-        <button class="btn btn-secondary btn-sm" id="btn-update-industry" onclick="updateIndustryData()">業種を更新</button>
-        <button class="btn btn-secondary btn-sm" onclick="exportCSV()">CSV出力</button>
+        <button class="btn btn-secondary btn-sm" id="btn-update-industry">業種を更新</button>
+        <button id="btn-export-csv" class="btn btn-secondary btn-sm">CSV出力</button>
       </div>
     </div>
     <div style="overflow-x:auto;margin-top:12px">
@@ -531,8 +531,8 @@ tr:hover td{background:#1e2235}
       <div class="flex-between">
         <div class="section-title" style="margin-bottom:0">BS / PL / CF 再分類ビュー</div>
         <div class="flex">
-          <select id="norm-company" style="width:220px" onchange="loadNormYears()"><option value="">企業を選択</option></select>
-          <select id="norm-year" style="width:110px" onchange="renderNorm()"><option value="">年度</option></select>
+          <select id="norm-company" style="width:220px"><option value="">企業を選択</option></select>
+          <select id="norm-year" style="width:110px"><option value="">年度</option></select>
         </div>
       </div>
       <div id="norm-content" style="margin-top:16px">
@@ -548,7 +548,7 @@ tr:hover td{background:#1e2235}
     <div class="flex-between">
       <div class="section-title" style="margin-bottom:0">スクリーニング条件</div>
       <div class="flex">
-        <button class="btn btn-primary btn-sm" onclick="runScreen()">実行</button>
+        <button id="btn-run-screen" class="btn btn-primary btn-sm">実行</button>
       </div>
     </div>
     <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:16px;margin-top:12px">
@@ -581,19 +581,19 @@ tr:hover td{background:#1e2235}
   <div class="card">
     <div class="flex-between">
       <div class="section-title" style="margin-bottom:0">結果 <span id="screen-count" class="tag tag-purple" style="margin-left:6px">0社</span></div>
-      <button class="btn btn-secondary btn-sm" onclick="exportScreenCSV()">CSV出力</button>
+      <button id="btn-export-screen" class="btn btn-secondary btn-sm">CSV出力</button>
     </div>
     <div style="overflow-x:auto;margin-top:12px">
       <table>
         <thead><tr>
           <th>コード</th><th>企業名</th><th>業種</th>
-          <th class="sortable" onclick="sortScreen('per')">PER ↕</th>
-          <th class="sortable" onclick="sortScreen('pbr')">PBR ↕</th>
-          <th class="sortable" onclick="sortScreen('roe')">ROE% ↕</th>
-          <th class="sortable" onclick="sortScreen('op_margin')">営業利益率% ↕</th>
-          <th class="sortable" onclick="sortScreen('equity_ratio')">自己資本比率% ↕</th>
-          <th class="sortable" onclick="sortScreen('div_yield')">配当利回% ↕</th>
-          <th class="sortable" onclick="sortScreen('score')">スコア ↕</th>
+          <th class="sortable" data-sort-col="per">PER ↕</th>
+          <th class="sortable" data-sort-col="pbr">PBR ↕</th>
+          <th class="sortable" data-sort-col="roe">ROE% ↕</th>
+          <th class="sortable" data-sort-col="op_margin">営業利益率% ↕</th>
+          <th class="sortable" data-sort-col="equity_ratio">自己資本比率% ↕</th>
+          <th class="sortable" data-sort-col="div_yield">配当利回% ↕</th>
+          <th class="sortable" data-sort-col="score">スコア ↕</th>
         </tr></thead>
         <tbody id="screen-tbody"></tbody>
       </table>
@@ -609,7 +609,7 @@ tr:hover td{background:#1e2235}
   <div class="modal">
     <div style="font-size:15px;font-weight:600;color:#a78bfa;margin-bottom:14px" id="modal-title"></div>
     <div id="modal-body"></div>
-    <button class="btn btn-secondary" style="margin-top:16px" onclick="closeModal()">閉じる</button>
+    <button id="btn-close-modal" class="btn btn-secondary" style="margin-top:16px">閉じる</button>
   </div>
 </div>
 
@@ -1049,7 +1049,7 @@ async function loadDB(){
         <td>${latest?.val.pbr!=null?Number(latest.val.pbr):'-'}</td>
         <td>${latest?.bs.equity_ratio!=null?Number(latest.bs.equity_ratio)+'%':'-'}</td>
         <td>${latest ? fmt0((latest.val.market_cap||0)/1e6) : '-'}</td>
-        <td><button class="btn btn-secondary btn-sm" onclick="showDetail('${esc(c.edinet_code)}','${esc(c.name)}')">詳細</button></td>
+        <td><button class="btn btn-secondary btn-sm" data-detail-code="${esc(c.edinet_code)}" data-detail-name="${esc(c.name)}">詳細</button></td>
       `;
       tbody.appendChild(tr);
     }
@@ -1371,7 +1371,7 @@ function renderScreenResults(){
     const score = calcScore(r);
     return `<tr>
       <td><span class="tag tag-blue">${esc(r.sec_code||r.edinet_code)}</span></td>
-      <td style="cursor:pointer;color:#a78bfa;font-weight:500" onclick="showDetail('${esc(r.edinet_code)}','${esc(r.company_name)}')">${esc(r.company_name)}</td>
+      <td style="cursor:pointer;color:#a78bfa;font-weight:500" data-detail-code="${esc(r.edinet_code)}" data-detail-name="${esc(r.company_name)}">${esc(r.company_name)}</td>
       <td><span class="tag tag-amber" style="font-size:10px">${esc(r.industry)||'-'}</span></td>
       <td>${r.val?.per!=null?Number(r.val.per):'-'}</td>
       <td>${r.val?.pbr!=null?Number(r.val.pbr):'-'}</td>
@@ -1620,6 +1620,69 @@ function log(msg,type='info'){
   el.textContent=`[${ts}] ${msg}`; box.appendChild(el); box.scrollTop=box.scrollHeight;
 }
 function clearLog(){ document.getElementById('log-box').innerHTML=''; }
+
+// ── CSP nonce 対応: インラインイベントハンドラの代わりに addEventListener で配線 ──
+// 静的ボタン
+document.getElementById('btn-check-api')?.addEventListener('click', checkApi);
+document.getElementById('logout-btn')?.addEventListener('click', logout);
+document.getElementById('btn-sched-toggle')?.addEventListener('click', toggleScheduler);
+document.getElementById('btn-smart')?.addEventListener('click', startSmartCollection);
+document.getElementById('btn-smart-stop')?.addEventListener('click', stopCollection);
+document.getElementById('btn-incremental')?.addEventListener('click', startIncremental);
+document.getElementById('btn-stop')?.addEventListener('click', stopCollection);
+document.getElementById('btn-collect')?.addEventListener('click', startFullCollection);
+document.getElementById('btn-clear-log')?.addEventListener('click', clearLog);
+document.getElementById('btn-check-job-status')?.addEventListener('click', checkJobStatus);
+document.getElementById('btn-refresh-single')?.addEventListener('click', refreshSingle);
+document.getElementById('btn-load-edinet-coverage')?.addEventListener('click', loadEdinetCoverage);
+document.getElementById('btn-load-quality')?.addEventListener('click', loadQualityReport);
+document.getElementById('btn-load-market-coverage')?.addEventListener('click', loadMarketCoverage);
+document.getElementById('btn-load-history-coverage')?.addEventListener('click', loadHistoryCoverage);
+document.getElementById('btn-jq-start')?.addEventListener('click', () => startJQuantsCollection());
+document.getElementById('btn-jq-force')?.addEventListener('click', () => startJQuantsCollection(true));
+document.getElementById('btn-jq-stop')?.addEventListener('click', stopJQuantsCollection);
+document.getElementById('btn-jq-clear')?.addEventListener('click', () => {
+  document.getElementById('jq-log').innerHTML = '';
+});
+document.getElementById('btn-market')?.addEventListener('click', () => startMarketUpdate());
+document.getElementById('btn-market-force')?.addEventListener('click', () => startMarketUpdate(true));
+document.getElementById('btn-market-stop')?.addEventListener('click', stopMarketUpdate);
+document.getElementById('btn-check-market')?.addEventListener('click', checkMarketStatus);
+document.getElementById('btn-clear-market-log')?.addEventListener('click', clearMarketLog);
+document.getElementById('btn-history-start')?.addEventListener('click', () => startHistoryCollection());
+document.getElementById('btn-history-force')?.addEventListener('click', () => startHistoryCollection(true));
+document.getElementById('btn-history-stop')?.addEventListener('click', stopHistoryCollection);
+document.getElementById('btn-history-clear')?.addEventListener('click', () => {
+  document.getElementById('history-log').innerHTML = '';
+});
+document.getElementById('btn-update-industry')?.addEventListener('click', updateIndustryData);
+document.getElementById('btn-export-csv')?.addEventListener('click', exportCSV);
+document.getElementById('btn-run-screen')?.addEventListener('click', runScreen);
+document.getElementById('btn-export-screen')?.addEventListener('click', exportScreenCSV);
+document.getElementById('btn-close-modal')?.addEventListener('click', closeModal);
+// 履歴収集チェックボックス: backfill 行の表示切替
+const _histSkip = document.getElementById('history-skip-existing');
+if (_histSkip) _histSkip.addEventListener('change', () => {
+  document.getElementById('history-backfill-row').style.display = _histSkip.checked ? '' : 'none';
+});
+// 検索・フィルタ
+document.getElementById('db-search')?.addEventListener('input', debounceSearch);
+document.getElementById('db-industry')?.addEventListener('change', loadDB);
+document.getElementById('norm-company')?.addEventListener('change', loadNormYears);
+document.getElementById('norm-year')?.addEventListener('change', renderNorm);
+// タブ切替（nav-btn data-tab）
+document.querySelectorAll('.nav-btn[data-tab]').forEach(b => {
+  b.addEventListener('click', () => showTab(b.dataset.tab));
+});
+// スクリーニング表ソート（data-sort-col）
+document.querySelectorAll('th.sortable[data-sort-col]').forEach(th => {
+  th.addEventListener('click', () => sortScreen(th.dataset.sortCol));
+});
+// 動的生成要素（テーブル行の詳細ボタン・名前セル）はイベント委譲
+document.body.addEventListener('click', e => {
+  const el = e.target.closest('[data-detail-code]');
+  if (el) showDetail(el.dataset.detailCode, el.dataset.detailName);
+});
 
 // 初期化
 initAuth();
