@@ -855,6 +855,11 @@ graph TB
 | `login.html` | フロントエンド | 認証ログイン画面（`/login`） | api.py |
 | `models.html` | フロントエンド | モデル解説・参考文献ページ（`/models`）。7モデルの数式・パラメータ・DOIリンクをインラインHTMLで表示。 | — |
 | `check.py` | ユーティリティ | EDINET API 疎通確認ワンショット | EDINET API |
+| `pytest.ini` | 設定 | pytest設定（testpaths=tests, asyncio_mode=auto） | — |
+| `tests/conftest.py` | テスト | SQLite in-memory DB差し替え・TestClient/dbフィクスチャ・ファクトリ関数 | pytest, sqlalchemy |
+| `tests/test_utils.py` | テスト | plugins/utils.py の純粋関数テスト（OLS/winsorize/CV、24件） | plugins/utils.py |
+| `tests/test_database.py` | テスト | ORM・upsert・成長率・Zスコア計算テスト（16件） | database.py |
+| `tests/test_api.py` | テスト | FastAPI主要エンドポイント統合テスト（33件） | api.py |
 | `.env` | 設定 | APIキー・DB接続・認証情報（UTF-8 BOMなし） | — |
 | `ARCHITECTURE.md` | ドキュメント | 本ファイル。コード変更時は必ず更新する | — |
 | `MODELS.md` | ドキュメント | 分析モデルの数式・パラメータ・参考文献（Markdown版）。モデル変更時は `models.html` とセットで更新する。 | — |
