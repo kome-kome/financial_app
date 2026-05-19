@@ -19,13 +19,14 @@ python -m pytest tests/ -v
 
 | ファイル | 対象 | 外部依存 |
 |---|---|---|
-| `test_utils.py` | `plugins/utils.py`（OLS・winsorize・kfold/walk-forward CV） | なし（Pure Python） |
+| `test_utils.py` | `plugins/utils.py`（OLS・winsorize・kfold/walk-forward CV・統計診断） | numpy / scipy / statsmodels |
 
 ## 設計方針
 
-- **Pure Python の純関数のみテスト対象**: DB やネットワークに依存するコード（`api.py`/`collector.py`/`database.py`）は今のところテスト対象外。フィクスチャ整備を要する。
-- **外部依存ゼロ**: `test_utils.py` は numpy/scipy/SQLAlchemy 等を必要としないため、venv なしでも実行可能。
-- **回帰検出を優先**: 「OLS が Pure Python 単体実装である」「winsorize が p1-p99 を切る」等の CLAUDE.md に明記された制約を担保する。
+- **純関数を優先してテスト対象に**: DB やネットワークに依存するコード（`api.py`/`collector.py`/`database.py`）は今のところテスト対象外。フィクスチャ整備を要する。
+- **科学計算ライブラリは利用可**: VISION.md「サードパーティーライブラリ採用基準」に従い、numpy / scipy / statsmodels / scikit-learn は利用許可（requirements.txt 参照）。
+- **回帰検出を優先**: 「OLS の数値安定性」「winsorize が p1-p99 を切る」等の CLAUDE.md に明記された制約を担保する。
+- **scipy 参照値との一致検証**: p 値計算は `scipy.stats.t.sf` の値と一致することをテストで担保（旧 Pure Python 近似からの移行）。
 
 ## 将来の拡張候補
 

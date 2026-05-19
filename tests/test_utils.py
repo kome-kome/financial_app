@@ -22,6 +22,7 @@ from plugins.utils import (
     normalize,
     normalize_transform,
     ols,
+    ols_with_diagnostics,
     walk_forward_cv,
     walk_forward_cv_monthly,
     winsorize,
@@ -257,6 +258,89 @@ class TestWalkForwardCvMonthly:
             test_idx = all_yms.index(r["test_ym"])
             assert test_idx >= 18
             assert r["n_train"] > 0
+
+
+# ── scipy.stats.t による正確な p 値 ────────────────────────────────────
+
+class TestScipyPvalue:
+    def test_pvalue_matches_scipy_reference_small_df(self):
+        # df=10 で t=2.5 のとき真の両側 p 値は scipy.stats.t.sf(2.5, 10)*2 ≈ 0.03133
+        from scipy.stats import t as scipy_t
+        # サンプル: y = 2 + 3 x + noise（n=12 → df=10）
+        import random
+        rng = random.Random(7)
+        X = [[1.0, float(i)] for i in range(12)]
+        y = [2.0 + 3.0 * X[i][1] + rng.gauss(0, 1.0) for i in range(12)]
+        result = ols(X, y)
+        # x の係数の p 値（result["p_value"][1]）が scipy 標準 sf×2 と一致
+        ref = 2.0 * float(scipy_t.sf(abs(result["t_stat"][1]), result["df"]))
+        assert result["p_value"][1] == pytest.approx(ref, abs=1e-10)
+
+    def test_pvalue_consistent_with_two_tailed(self):
+        # t = 0 → p ≈ 1
+        import random
+        rng = random.Random(1)
+        X = [[1.0, float(i)] for i in range(50)]
+        y = [rng.gauss(0, 1.0) for _ in range(50)]  # x との相関ゼロ
+        result = ols(X, y)
+        # x の係数 t はほぼ 0 → p はほぼ 1
+        if abs(result["t_stat"][1]) < 0.1:
+            assert result["p_value"][1] > 0.8
+
+
+# ── ols 新機能: rank / condition_number ────────────────────────────────
+
+class TestOlsExtras:
+    def test_rank_reported(self):
+        # rank-full の場合 rank == p
+        X = [[1.0, x, x ** 2] for x in [1, 2, 3, 4, 5]]
+        y = [1.0, 4.0, 9.0, 16.0, 25.0]
+        result = ols(X, y)
+        assert result["rank"] == 3
+        assert result["condition_number"] > 0
+
+    def test_rank_deficient_singular(self):
+        # 完全共線な列を含む → rank < p、se は NaN
+        X = [[1.0, 1.0, 2.0], [1.0, 2.0, 4.0], [1.0, 3.0, 6.0], [1.0, 4.0, 8.0]]
+        y = [1.0, 2.0, 3.0, 4.0]
+        result = ols(X, y)
+        assert result["rank"] < 3
+        # se は NaN（rank < p のため）
+        assert result["se"][0] != result["se"][0]
+
+
+# ── ols_with_diagnostics ───────────────────────────────────────────────
+
+class TestOlsWithDiagnostics:
+    def test_basic_diagnostics_present(self):
+        import random
+        rng = random.Random(11)
+        X = [[1.0, float(i), rng.gauss(0, 1)] for i in range(40)]
+        y = [2.0 + 3.0 * row[1] + 0.5 * row[2] + rng.gauss(0, 1) for row in X]
+        result = ols_with_diagnostics(X, y)
+        assert result is not None
+        assert "durbin_watson" in result
+        assert "jarque_bera" in result
+        assert "f_stat" in result and "f_pvalue" in result
+        # F 検定はモデル全体として有意 (p < 0.05)
+        assert result["f_pvalue"] < 0.05
+        # 残差ランダムノイズ → DW は 2 付近
+        assert 1.0 < result["durbin_watson"] < 3.0
+
+    def test_robust_se_hc3_differs_from_nonrobust(self):
+        # 異分散ノイズで HC3 SE が非頑健 SE と異なる
+        import random
+        rng = random.Random(3)
+        X = [[1.0, float(i)] for i in range(60)]
+        # y の分散が x に比例する（不均一分散）
+        y = [2.0 + 1.5 * row[1] + rng.gauss(0, abs(row[1]) + 0.1) for row in X]
+        r_nonrobust = ols_with_diagnostics(X, y, cov_type="nonrobust")
+        r_hc3 = ols_with_diagnostics(X, y, cov_type="HC3")
+        assert r_nonrobust is not None and r_hc3 is not None
+        # 異分散があるので HC3 の係数 SE は通常異なる
+        assert r_nonrobust["se"][1] != pytest.approx(r_hc3["se"][1])
+        # β は両者で同一
+        assert r_nonrobust["beta"][1] == pytest.approx(r_hc3["beta"][1])
 
 
 # ── check_collinearity ──────────────────────────────────────────────────

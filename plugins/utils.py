@@ -1,7 +1,17 @@
-"""プラグイン共通ユーティリティ（Pure Python、numpy/scipy不使用）"""
+"""プラグイン共通ユーティリティ。
+
+VISION.md「サードパーティーライブラリ採用基準」に従い、統計推論および数値計算は
+numpy / scipy / statsmodels を利用する（旧 Pure Python 実装からの移行済み）。
+- OLS は numpy.linalg.lstsq（SVD ベース、数値安定）
+- p 値は scipy.stats.t.sf（df < 30 でも正確）
+- 詳細診断は statsmodels.OLS（Durbin-Watson・Jarque-Bera・F検定）
+"""
 import math
 import statistics
 from typing import Any
+
+import numpy as np
+from scipy import stats as scipy_stats
 
 # 予測値の log-space 上限（exp(LOG_PRED_CAP) ≈ 3.3 百万円/株）
 LOG_PRED_CAP = 15.0
@@ -40,99 +50,155 @@ def normalize(vals: list, method: str) -> tuple[list, float, float]:
     return [(v - mu) / sd for v in vals], mu, sd
 
 
-def _normal_cdf(x: float) -> float:
-    """標準正規分布の累積分布関数 Φ(x)。Pure Python の math.erf を利用。"""
-    return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
-
-
 def _two_sided_pvalue(t: float, df: int) -> float:
-    """両側 p 値。df ≥ 30 なら正規近似、それ未満は t 分布の係数で補正。
+    """両側 p 値。scipy.stats.t.sf による正確な計算（df < 30 でも正しい裾確率）。
 
-    完全な t 分布 CDF は無依存実装が複雑なため、有限自由度では Cornish-Fisher 風の
-    粗い補正のみを行う（小サンプル時は「参考値」扱いとする想定）。
+    sf(x, df) = 1 - cdf(x, df) は |t| が大きい時に数値的に安定（cdf ≈ 1 の桁落ち回避）。
     """
-    if df <= 0:
+    if df <= 0 or not math.isfinite(t):
         return float("nan")
-    z = abs(t)
-    if df >= 30:
-        return 2.0 * (1.0 - _normal_cdf(z))
-    # 小自由度: t 分布は正規より裾が厚いため p 値が大きくなる方向に補正
-    # 近似式: 正規 p × (1 + (z^2 + 1) / (4 df))（Hill 1970 系統の簡易補正）
-    p_norm = 2.0 * (1.0 - _normal_cdf(z))
-    correction = 1.0 + (z * z + 1.0) / (4.0 * df)
-    return min(1.0, p_norm * correction)
+    return float(2.0 * scipy_stats.t.sf(abs(t), df))
 
 
 def ols(X: list, y: list) -> dict | None:
-    """Pure-Python OLS。beta, yhat, r2, adj_r2, rmse, mae, se, t_stat, p_value を返す。
+    """OLS 回帰（numpy.linalg.lstsq + scipy.stats.t）。
 
-    se / t_stat / p_value は各係数（切片含む）に対する配列。p_value は df ≥ 30 で
-    正規近似、それ未満は簡易補正（小サンプルでは「参考値」扱い）。
+    SVD ベースの最小二乗法を用いるため、条件数の悪い行列でも数値的に安定。
+    返り値: {beta, yhat, r2, adj_r2, rmse, mae, se, t_stat, p_value, df, rank,
+            condition_number}。rank < p の場合は se / t_stat / p_value が NaN。
+    詳細統計診断（Durbin-Watson・Jarque-Bera・F検定）が必要な場合は
+    `ols_with_diagnostics()` を使用すること。
     """
-    n, p = len(X), len(X[0])
+    X_np = np.asarray(X, dtype=float)
+    y_np = np.asarray(y, dtype=float)
+    if X_np.ndim != 2 or len(X_np) == 0:
+        return None
+    n, p = X_np.shape
 
-    def dot(a, b):
-        return sum(ai * bi for ai, bi in zip(a, b))
-
-    def mat_mul(A, B):
-        r, c, k = len(A), len(B[0]), len(B)
-        return [[sum(A[i][l] * B[l][j] for l in range(k)) for j in range(c)] for i in range(r)]
-
-    def transpose(M):
-        return [[M[i][j] for i in range(len(M))] for j in range(len(M[0]))]
-
-    def mat_inv(M):
-        n2 = len(M)
-        aug = [row[:] + [1 if i == j else 0 for j in range(n2)] for i, row in enumerate(M)]
-        for i in range(n2):
-            pivot_row = max(range(i, n2), key=lambda r: abs(aug[r][i]))
-            aug[i], aug[pivot_row] = aug[pivot_row], aug[i]
-            piv = aug[i][i] or 1e-12
-            aug[i] = [v / piv for v in aug[i]]
-            for k in range(n2):
-                if k != i:
-                    f = aug[k][i]
-                    aug[k] = [aug[k][j] - f * aug[i][j] for j in range(2 * n2)]
-        return [row[n2:] for row in aug]
-
-    Xt = transpose(X)
-    XtX = mat_mul(Xt, X)
+    # SVD ベースの最小二乗解（rcond=None で機械イプシロン × max(n,p) × max(sv)）
     try:
-        inv = mat_inv(XtX)
+        beta_np, _residuals, rank, sv = np.linalg.lstsq(X_np, y_np, rcond=None)
+    except np.linalg.LinAlgError:
+        return None
+    rank = int(rank)
+
+    yhat_np = X_np @ beta_np
+    resid = y_np - yhat_np
+    sse = float((resid ** 2).sum())
+    ymean = float(y_np.mean())
+    sst = float(((y_np - ymean) ** 2).sum())
+    r2 = 1.0 - sse / sst if sst > 0 else 0.0
+    adj_r2 = 1.0 - (1.0 - r2) * (n - 1) / (n - p - 1) if n > p + 1 else r2
+    rmse = math.sqrt(sse / n)
+    mae = float(np.abs(resid).mean())
+
+    # 標準誤差・t統計量・p値（df = n - p）。
+    # df ≤ 0 または rank < p は推定不能として NaN。
+    df = n - p
+    se: list[float] = [float("nan")] * p
+    t_stat: list[float] = [float("nan")] * p
+    p_value: list[float] = [float("nan")] * p
+    if df > 0 and rank == p:
+        sigma2 = sse / df
+        try:
+            XtX_inv = np.linalg.inv(X_np.T @ X_np)
+            for i in range(p):
+                var_i = float(sigma2 * XtX_inv[i, i])
+                if var_i >= 0:
+                    se[i] = math.sqrt(var_i)
+                    if se[i] > 0:
+                        t_stat[i] = float(beta_np[i]) / se[i]
+                        p_value[i] = _two_sided_pvalue(t_stat[i], df)
+        except np.linalg.LinAlgError:
+            pass  # 数値特異 — NaN のまま
+
+    # 条件数（特異値の最大 / 最小）。大きいほど数値的に不安定
+    cond_number = float(sv[0] / sv[-1]) if len(sv) > 0 and sv[-1] > 0 else float("inf")
+
+    return {
+        "beta": [float(b) for b in beta_np],
+        "yhat": [float(v) for v in yhat_np],
+        "r2": r2, "adj_r2": adj_r2,
+        "rmse": rmse, "mae": mae,
+        "se": se, "t_stat": t_stat, "p_value": p_value, "df": df,
+        "rank": rank,
+        "condition_number": cond_number,
+    }
+
+
+def ols_with_diagnostics(X: list, y: list, cov_type: str = "nonrobust") -> dict | None:
+    """statsmodels.OLS を用いた詳細統計診断付き OLS。
+
+    cov_type:
+        - "nonrobust": 標準 (homoskedastic) 標準誤差
+        - "HC3": White の不均一分散頑健 SE（推奨：金融データは異分散が多い）
+        - "HC0", "HC1", "HC2": 他の HC 系
+    返り値は ols() に以下を追加:
+        - durbin_watson: 残差自己相関の検定統計量（1.5〜2.5 なら問題なし）
+        - jarque_bera: {stat, pvalue, skew, kurtosis} — 残差正規性
+        - f_stat: モデル全体の F 統計量
+        - f_pvalue: F 検定の p 値（モデルが意味あるかどうか）
+        - cov_type: 使用した共分散行列タイプ
+    """
+    import statsmodels.api as sm
+    from statsmodels.stats.stattools import durbin_watson, jarque_bera
+
+    X_np = np.asarray(X, dtype=float)
+    y_np = np.asarray(y, dtype=float)
+    if X_np.ndim != 2 or len(X_np) == 0:
+        return None
+    n, p = X_np.shape
+
+    try:
+        model = sm.OLS(y_np, X_np)
+        if cov_type == "nonrobust":
+            res = model.fit()
+        else:
+            res = model.fit(cov_type=cov_type)
     except Exception:
         return None
 
-    Xty = [dot(row, y) for row in Xt]
-    beta = [sum(inv[i][j] * Xty[j] for j in range(p)) for i in range(p)]
-    yhat = [dot(row, beta) for row in X]
-    ymean = statistics.mean(y)
-    sst = sum((v - ymean) ** 2 for v in y)
-    sse = sum((v - yhat[i]) ** 2 for i, v in enumerate(y))
-    r2 = 1 - sse / sst if sst else 0
-    adj_r2 = 1 - (1 - r2) * (n - 1) / (n - p - 1) if n > p + 1 else r2
-    rmse = math.sqrt(sse / n)
-    mae = sum(abs(v - yhat[i]) for i, v in enumerate(y)) / n
+    df = int(res.df_resid)
+    yhat_np = np.asarray(res.fittedvalues)
+    resid = np.asarray(res.resid)
 
-    # 標準誤差・t統計量・p値（df = n - p）。
-    # df ≤ 0 は推定不能（過剰フィット）として全て NaN を返す。
-    df = n - p
-    se = [float("nan")] * p
-    t_stat = [float("nan")] * p
-    p_value = [float("nan")] * p
-    if df > 0:
-        sigma2 = sse / df
-        for i in range(p):
-            var_i = sigma2 * inv[i][i]
-            if var_i >= 0:
-                se[i] = math.sqrt(var_i)
-                if se[i] > 0:
-                    t_stat[i] = beta[i] / se[i]
-                    p_value[i] = _two_sided_pvalue(t_stat[i], df)
+    # JB は残差サンプル数が少なすぎると意味がない（n < 8 はスキップ）
+    if n >= 8:
+        try:
+            jb_stat, jb_p, skew, kurt = jarque_bera(resid)
+            jb = {
+                "stat": float(jb_stat), "pvalue": float(jb_p),
+                "skew": float(skew), "kurtosis": float(kurt),
+            }
+        except Exception:
+            jb = None
+    else:
+        jb = None
+
+    try:
+        dw = float(durbin_watson(resid))
+    except Exception:
+        dw = float("nan")
 
     return {
-        "beta": beta, "yhat": yhat, "r2": r2, "adj_r2": adj_r2,
-        "rmse": rmse, "mae": mae,
-        "se": se, "t_stat": t_stat, "p_value": p_value, "df": df,
+        "beta": [float(b) for b in res.params],
+        "yhat": [float(v) for v in yhat_np],
+        "r2": float(res.rsquared),
+        "adj_r2": float(res.rsquared_adj),
+        "rmse": math.sqrt(float((resid ** 2).mean())),
+        "mae": float(np.abs(resid).mean()),
+        "se": [float(s) for s in res.bse],
+        "t_stat": [float(t) for t in res.tvalues],
+        "p_value": [float(pv) for pv in res.pvalues],
+        "df": df,
+        "rank": int(res.df_model) + 1,  # +1 for intercept-or-not (statsmodels 流儀)
+        "condition_number": float(res.condition_number) if hasattr(res, "condition_number") else float("nan"),
+        # 追加診断
+        "durbin_watson": dw,
+        "jarque_bera": jb,
+        "f_stat": float(res.fvalue) if res.fvalue is not None else float("nan"),
+        "f_pvalue": float(res.f_pvalue) if res.f_pvalue is not None else float("nan"),
+        "cov_type": cov_type,
     }
 
 

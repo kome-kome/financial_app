@@ -18,7 +18,7 @@ from collections import defaultdict
 from typing import Any
 
 from .base import AnalysisPlugin
-from .utils import check_collinearity, normalize, ols, winsorize
+from .utils import check_collinearity, normalize, ols, ols_with_diagnostics, winsorize
 
 
 # 絶対額特徴量 [円] — market_cap ターゲット向け
@@ -262,13 +262,27 @@ class SectorOLSPlugin(AnalysisPlugin):
             # 多重共線性チェック（winsorize 後・正規化前の列で実施）
             collinearity = check_collinearity(X_win_cols, list(features))
 
-            sector_stats.append({
+            # 詳細統計診断（statsmodels: Durbin-Watson・Jarque-Bera・F検定）
+            # 失敗しても本処理は続行（fallback は None）
+            try:
+                diag = ols_with_diagnostics(X_norm, y_normed, cov_type="HC3")
+            except Exception:
+                diag = None
+
+            stat_entry = {
                 "industry": sector,
                 "n":        len(samples),
                 "r2":       round(result["r2"], 4),
                 "adj_r2":   round(result["adj_r2"], 4),
                 "rmse":     round(result["rmse"] * y_sd, 2),
                 "df":       result.get("df"),
+                "rank":     result.get("rank"),
+                "condition_number": (
+                    round(result["condition_number"], 2)
+                    if result.get("condition_number") is not None
+                    and math.isfinite(result.get("condition_number", float("inf")))
+                    else None
+                ),
                 "n_significant_features": n_significant,
                 "p_values": [round(pv, 4) if pv == pv else None for pv in p_values],
                 "t_stats":  [round(t, 4) if t == t else None for t in result.get("t_stat", [])],
@@ -276,7 +290,26 @@ class SectorOLSPlugin(AnalysisPlugin):
                     "high_corr_pairs": collinearity["high_corr_pairs"],
                     "high_vif":        collinearity["high_vif"],
                 },
-            })
+            }
+            if diag is not None:
+                stat_entry["diagnostics"] = {
+                    "durbin_watson": round(diag["durbin_watson"], 3),
+                    "jarque_bera": (
+                        {
+                            "stat":   round(diag["jarque_bera"]["stat"], 3),
+                            "pvalue": round(diag["jarque_bera"]["pvalue"], 4),
+                            "skew":   round(diag["jarque_bera"]["skew"], 3),
+                            "kurtosis": round(diag["jarque_bera"]["kurtosis"], 3),
+                        }
+                        if diag.get("jarque_bera") is not None
+                        else None
+                    ),
+                    "f_stat":   round(diag["f_stat"], 3) if math.isfinite(diag.get("f_stat", float("nan"))) else None,
+                    "f_pvalue": round(diag["f_pvalue"], 6) if math.isfinite(diag.get("f_pvalue", float("nan"))) else None,
+                    "se_hc3":   [round(s, 4) if math.isfinite(s) else None for s in diag["se"]],
+                    "cov_type": diag["cov_type"],
+                }
+            sector_stats.append(stat_entry)
 
         if not sector_stats:
             raise ValueError(
