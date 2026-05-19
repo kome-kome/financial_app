@@ -480,7 +480,8 @@ async function initAuth(){
     const r = await fetch('/api/auth/status');
     const d = await r.json();
     if(d.auth_required){
-      if(!localStorage.getItem('auth_token')){
+      // Cookie 認証: csrf_token Cookie の存在をログイン状態の代理指標とする
+      if(!/(?:^|; )csrf_token=/.test(document.cookie)){
         location.href = '/login?next=' + encodeURIComponent(location.pathname);
         return;
       }
@@ -488,7 +489,10 @@ async function initAuth(){
     }
   } catch(e){ /* API 未起動時はスキップ */ }
 }
-function logout(){ localStorage.removeItem('auth_token'); location.href='/login'; }
+async function logout(){
+  try { await fetch('/api/auth/logout', { method: 'POST', credentials: 'include' }); } catch(e){}
+  location.href='/login';
+}
 
 function showNotif(msg, type='error'){
   const el = document.createElement('div');
@@ -513,12 +517,20 @@ let _pluginMeta = {};
 
 function apiBase() { return document.getElementById('api-base').value.trim().replace(/\/$/,''); }
 
+function _getCsrfToken(){
+  const m = document.cookie.match(/(?:^|; )csrf_token=([^;]+)/);
+  return m ? decodeURIComponent(m[1]) : '';
+}
+
 async function apiFetch(path, opts={}) {
-  const token = localStorage.getItem('auth_token') || '';
-  const heads = {'Content-Type':'application/json'};
-  if(token) heads['Authorization'] = 'Bearer ' + token;
-  const r = await fetch(apiBase()+path, {headers:heads,...opts});
-  if(r.status===401){ localStorage.removeItem('auth_token'); location.href='/login'; return; }
+  const method = (opts.method || 'GET').toUpperCase();
+  const heads = {'Content-Type':'application/json', ...(opts.headers || {})};
+  if (method !== 'GET' && method !== 'HEAD') {
+    const csrf = _getCsrfToken();
+    if (csrf) heads['X-CSRF-Token'] = csrf;
+  }
+  const r = await fetch(apiBase()+path, {...opts, headers:heads, credentials:'include'});
+  if(r.status===401){ location.href='/login'; return; }
   if(!r.ok){
     if(r.status===502||r.status===503||r.status===504)
       throw new Error(`サーバー再起動中 (${r.status})。しばらく待ってから再試行してください`);

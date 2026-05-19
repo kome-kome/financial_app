@@ -54,6 +54,15 @@ if not APP_SECRET_KEY:
     )
 _TOKEN_TTL      = 30 * 24 * 3600  # トークン有効期限: 30日
 
+# Cookie 設定（HttpOnly Cookie + CSRF Double-Submit パターン）
+_AUTH_COOKIE   = "auth_token"
+_CSRF_COOKIE   = "csrf_token"
+# COOKIE_SECURE=true で Secure 属性を付与（本番 HTTPS 環境用）
+_COOKIE_SECURE = os.getenv("COOKIE_SECURE", "false").lower() == "true"
+# 認証不要のパスは prefix で判定。CSRF も同じ集合を免除する
+_AUTH_EXEMPT_PREFIXES = ("/api/auth/",)
+_CSRF_UNSAFE_METHODS  = ("POST", "PUT", "DELETE", "PATCH")
+
 def _create_token() -> str:
     ts  = str(int(_time.time()))
     sig = hmac.new(APP_SECRET_KEY.encode(), ts.encode(), hashlib.sha256).hexdigest()
@@ -157,8 +166,9 @@ _ALLOWED_ORIGINS = [o.strip() for o in os.getenv("ALLOWED_ORIGIN", "http://local
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_ALLOWED_ORIGINS,
+    allow_credentials=True,  # HttpOnly cookie 送信のため必須
     allow_methods=["GET", "POST", "OPTIONS"],
-    allow_headers=["Authorization", "Content-Type"],
+    allow_headers=["Content-Type", "X-CSRF-Token"],
 )
 
 class _SecurityHeadersMiddleware(BaseHTTPMiddleware):
@@ -188,18 +198,31 @@ app.add_middleware(_SecurityHeadersMiddleware)
 
 @app.middleware("http")
 async def _auth_middleware(request: Request, call_next):
-    """APP_PASSWORD が設定されている場合、/api/* を Bearer トークンで保護する"""
+    """APP_PASSWORD が設定されている場合、/api/* を HttpOnly Cookie で保護し、
+    非冪等メソッドには CSRF Double-Submit を要求する。
+    """
     if not APP_PASSWORD:
         return await call_next(request)
+    # CORS プリフライト (OPTIONS) は素通し → CORSMiddleware が処理する
+    if request.method == "OPTIONS":
+        return await call_next(request)
     path = request.url.path
-    if path == "/login" or path.startswith("/api/auth/"):
+    if path == "/login" or any(path.startswith(p) for p in _AUTH_EXEMPT_PREFIXES):
         return await call_next(request)
     if path.startswith("/api/"):
-        auth = request.headers.get("Authorization", "")
-        if not auth.startswith("Bearer "):
+        token = request.cookies.get(_AUTH_COOKIE)
+        if not token or not _verify_token(token):
             return JSONResponse({"detail": "認証が必要です"}, status_code=401)
-        if not _verify_token(auth[7:]):
-            return JSONResponse({"detail": "トークンが無効または期限切れです"}, status_code=401)
+        # CSRF: 非冪等メソッドは X-CSRF-Token header == csrf_token cookie を要求
+        if request.method in _CSRF_UNSAFE_METHODS:
+            header_tok = request.headers.get("X-CSRF-Token", "")
+            cookie_tok = request.cookies.get(_CSRF_COOKIE, "")
+            if not header_tok or not cookie_tok \
+               or not hmac.compare_digest(header_tok, cookie_tok):
+                return JSONResponse(
+                    {"detail": "CSRF トークンが無効です"},
+                    status_code=403,
+                )
     return await call_next(request)
 
 # DB セッション依存性
@@ -1323,14 +1346,47 @@ class ResetPasswordRequest(BaseModel):
     recovery_key: str
     new_password: str
 
+def _set_auth_cookies(response: JSONResponse, token: str, csrf: str) -> None:
+    """HttpOnly 認証 Cookie と JS から読める CSRF Cookie をセットする"""
+    response.set_cookie(
+        _AUTH_COOKIE, token,
+        max_age=_TOKEN_TTL, httponly=True,
+        secure=_COOKIE_SECURE, samesite="strict", path="/",
+    )
+    response.set_cookie(
+        _CSRF_COOKIE, csrf,
+        max_age=_TOKEN_TTL, httponly=False,  # JS が読めるよう httponly=False
+        secure=_COOKIE_SECURE, samesite="strict", path="/",
+    )
+
+
 @app.post("/api/auth/login")
 @limiter.limit(RATELIMIT_AUTH)
 async def auth_login(request: Request, req: LoginRequest):
     if not APP_PASSWORD:
-        return {"token": "dev-mode"}
+        # 開発モード（パスワード未設定）でも Cookie は発行する（フロントの apiFetch が
+        # 一貫して動くように）
+        token = "dev-mode"
+        csrf = secrets.token_urlsafe(32)
+        resp = JSONResponse({"ok": True, "dev_mode": True})
+        _set_auth_cookies(resp, token, csrf)
+        return resp
     if not hmac.compare_digest(req.password.encode(), APP_PASSWORD.encode()):
         raise HTTPException(401, "パスワードが違います")
-    return {"token": _create_token()}
+    token = _create_token()
+    csrf = secrets.token_urlsafe(32)
+    resp = JSONResponse({"ok": True})
+    _set_auth_cookies(resp, token, csrf)
+    return resp
+
+
+@app.post("/api/auth/logout")
+async def auth_logout():
+    resp = JSONResponse({"ok": True})
+    resp.delete_cookie(_AUTH_COOKIE, path="/")
+    resp.delete_cookie(_CSRF_COOKIE, path="/")
+    return resp
+
 
 @app.post("/api/auth/reset-password")
 @limiter.limit(RATELIMIT_RESET)

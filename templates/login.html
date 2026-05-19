@@ -63,7 +63,15 @@ input[type=password]:focus{border-color:#7c3aed}
 <script>
 const _nextRaw = new URLSearchParams(location.search).get('next') || '/';
 const _next = /^\/[^/\\]/.test(_nextRaw) || _nextRaw === '/' ? _nextRaw : '/';
-if(localStorage.getItem('auth_token')) location.href = _next;
+
+// Cookie 認証への移行で localStorage は廃止。
+// 既にログイン済みなら認証必須エンドポイントへの GET が 200 を返すので遷移する。
+(async () => {
+  try {
+    const r = await fetch('/api/stats', { credentials: 'include' });
+    if (r.ok) location.href = _next;
+  } catch(e) { /* ネットワークエラーはスルー */ }
+})();
 
 function showReset(){
   document.getElementById('login-panel').style.display = 'none';
@@ -87,6 +95,7 @@ async function login(){
     const r = await fetch('/api/auth/login', {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
+      credentials: 'include',  // Set-Cookie を受け取るため必須
       body: JSON.stringify({password: pw})
     });
     if(!r.ok){
@@ -95,8 +104,7 @@ async function login(){
       document.getElementById('pw').focus();
       return;
     }
-    const d = await r.json();
-    localStorage.setItem('auth_token', d.token);
+    // Cookie (auth_token, csrf_token) はサーバーが設定済み。次画面へ遷移
     location.href = _next;
   } catch(e) {
     err.textContent = 'エラー: ' + e.message;

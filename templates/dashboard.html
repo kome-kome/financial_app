@@ -201,11 +201,19 @@ function showNotif(msg, type='error'){
 
 function apiBase() { return ''; }
 
-async function apiFetch(path) {
-  const token = localStorage.getItem('auth_token') || '';
-  const heads = {'Content-Type': 'application/json'};
-  if (token) heads['Authorization'] = 'Bearer ' + token;
-  const r = await fetch(apiBase() + path, {headers: heads});
+function _getCsrfToken() {
+  const m = document.cookie.match(/(?:^|; )csrf_token=([^;]+)/);
+  return m ? decodeURIComponent(m[1]) : '';
+}
+
+async function apiFetch(path, opts = {}) {
+  const method = (opts.method || 'GET').toUpperCase();
+  const heads = {'Content-Type': 'application/json', ...(opts.headers || {})};
+  if (method !== 'GET' && method !== 'HEAD') {
+    const csrf = _getCsrfToken();
+    if (csrf) heads['X-CSRF-Token'] = csrf;
+  }
+  const r = await fetch(apiBase() + path, {...opts, headers: heads, credentials: 'include'});
   if (r.status === 401) { location.href = '/login?next=/'; return null; }
   if(!r.ok){
     if(r.status===502||r.status===503||r.status===504)
@@ -256,20 +264,19 @@ async function loadScheduler() {
 
 async function toggleScheduler() {
   try {
-    await fetch(apiBase() + '/api/scheduler/toggle', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json',
-        ...(localStorage.getItem('auth_token') ? {'Authorization': 'Bearer ' + localStorage.getItem('auth_token')} : {})}
-    });
+    await apiFetch('/api/scheduler/toggle', { method: 'POST' });
     loadScheduler();
   } catch(e) { showNotif('切り替え失敗: ' + e.message); }
 }
 
 async function initAuth() {
+  // Cookie 認証: auth_token は HttpOnly のため JS からは読めない。
+  // ログイン状態の代理指標として csrf_token Cookie の有無を使う（ログイン時に同時に発行される）。
   try {
     const r = await fetch(apiBase() + '/api/auth/status');
     const d = await r.json();
-    if (d.auth_required && !localStorage.getItem('auth_token')) {
+    if (!d.auth_required) return;
+    if (!/(?:^|; )csrf_token=/.test(document.cookie)) {
       location.href = '/login?next=/';
     }
   } catch(e) { /* API未起動時はスキップ */ }

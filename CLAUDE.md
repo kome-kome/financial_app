@@ -229,7 +229,7 @@ asyncio.run(test())
 - ~~【Tier2 既知リスク・要対応】 `edinet_code` パスパラメータの形式検証なし。~~ → **対応済み**（`^E\d{6}$` 正規表現バリデーション追加）
 - ~~【Tier2 既知リスク・要対応】 パスワードリセット時の最低文字数チェックなし。~~ → **対応済み**（8文字以上を要求）
 - ~~【Tier2 既知リスク・要対応】 スケジューラーエラーの `str(e)` をAPIレスポンスにそのまま含める。~~ → **対応済み**（汎用メッセージに差し替え、詳細はサーバーログのみ）
-- **【Tier3 将来対応】** 認証トークンを `localStorage` に保存している（XSS時に盗難リスク）。HttpOnly Cookie 方式への移行は認証フロー全体の再設計が必要。
-- **【Tier3 将来対応】** POST リクエストに CSRF トークンなし。Cookie 認証移行後に実施。
+- ~~【Tier3 将来対応】 認証トークンを `localStorage` に保存している（XSS時に盗難リスク）。HttpOnly Cookie 方式への移行は認証フロー全体の再設計が必要。~~ → **対応済み**（`auth_token` Cookie に HttpOnly + SameSite=Strict を付与。`COOKIE_SECURE` 環境変数で Secure 属性を制御。フロント側は `credentials: 'include'` で送受信）
+- ~~【Tier3 将来対応】 POST リクエストに CSRF トークンなし。Cookie 認証移行後に実施。~~ → **対応済み**（Double-Submit Cookie パターン: `csrf_token` Cookie（JS 可読）と `X-CSRF-Token` ヘッダを照合。POST/PUT/DELETE/PATCH に必須、GET と `/api/auth/*` は免除）
 - ~~【Tier3 将来対応】 重い処理（収集・分析）にレート制限なし。`slowapi` 等の導入が必要。~~ → **対応済み**（`slowapi` 導入。収集系=3/min、分析=20/min、ログイン=10/min、リセット=3/min。`RATELIMIT_ENABLED=false` で無効化可能）
 - ~~【Tier3 将来対応】 CSP の `unsafe-inline` を削除するには全テンプレートのインラインJS/CSSを外部ファイル化が必要。~~ → **対応済み**（CSP nonce 方式を採用。`secrets.token_urlsafe(16)` で per-request nonce を生成し、`<script>`/`<style>` タグに埋め込む。インラインイベントハンドラ計81箇所を `addEventListener` に書き換え、動的生成要素は `data-*` 属性＋イベント委譲で対応）

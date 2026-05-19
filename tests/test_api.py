@@ -52,10 +52,17 @@ class TestAuthAPI:
         # conftest で APP_PASSWORD="" にしているので auth_required=False
         assert body["auth_required"] is False
 
-    def test_login_in_dev_mode_returns_dev_token(self, client):
+    def test_login_in_dev_mode_sets_cookies(self, client):
+        """開発モード（APP_PASSWORD 未設定）でも Cookie は発行され、フロントが
+        統一的に Cookie 認証で動作できるようにする"""
         r = client.post("/api/auth/login", json={"password": "anything"})
         assert r.status_code == 200
-        assert r.json()["token"] == "dev-mode"
+        body = r.json()
+        assert body["ok"] is True
+        assert body.get("dev_mode") is True
+        # HttpOnly auth_token と JS が読める csrf_token の両方が発行される
+        assert "auth_token" in r.cookies
+        assert "csrf_token" in r.cookies
 
 
 # ─── /api/stats ──────────────────────────────────────────────────────
