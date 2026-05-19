@@ -36,5 +36,7 @@ jobs:
           APP_PASSWORD: ""
           APP_SECRET_KEY: "ci-secret"
           EDINET_API_KEY: "dummy"
+          # レート制限は conftest.py でも無効化されるが、念のため env でも指定
+          RATELIMIT_ENABLED: "false"
         run: |
           python -m pytest tests/ -v --tb=short

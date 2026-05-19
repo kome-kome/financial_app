@@ -865,6 +865,7 @@ graph TB
 | `tests/test_plugin_sector_ols.py` | テスト | 業種別OLSプラグイン execute() テスト・predicted_market_cap書き込み検証（9件） | plugins/sector_ols.py |
 | `tests/test_plugin_total_return.py` | テスト | 総合リターン予測プラグイン execute() テスト・MECEグループ検証（9件） | plugins/total_return.py |
 | `tests/test_plugin_price_predictor.py` | テスト | 株価リターン予測プラグイン execute() テスト・ヘルパー関数（MA/RSI/ATR/log_vol）の純粋関数テスト（17件） | plugins/price_predictor.py |
+| `tests/test_rate_limit.py` | テスト | slowapi レート制限の 429 動作・カウンタ独立性・無効化モードテスト（8件） | api.py, slowapi |
 | `.env` | 設定 | APIキー・DB接続・認証情報（UTF-8 BOMなし） | — |
 | `ARCHITECTURE.md` | ドキュメント | 本ファイル。コード変更時は必ず更新する | — |
 | `MODELS.md` | ドキュメント | 分析モデルの数式・パラメータ・参考文献（Markdown版）。モデル変更時は `models.html` とセットで更新する。 | — |

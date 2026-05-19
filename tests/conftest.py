@@ -21,6 +21,7 @@ os.environ["DATABASE_URL"] = "postgresql://localhost/dummy"
 os.environ["APP_PASSWORD"] = ""              # 認証無し（テスト用）
 os.environ["APP_SECRET_KEY"] = "test-secret"
 os.environ["ALLOWED_ORIGIN"] = "http://testserver"
+os.environ["RATELIMIT_ENABLED"] = "false"    # 既存テストへの影響を避ける（個別テストで有効化）
 os.environ.setdefault("EDINET_API_KEY", "dummy")
 
 import pytest
@@ -68,12 +69,18 @@ def db():
 
 @pytest.fixture
 def client():
-    """FastAPI TestClient。lifespan は呼ばない（init_db は既に実行済み）。"""
+    """FastAPI TestClient。lifespan は呼ばない（init_db は既に実行済み）。
+    レート制限は明示的に無効化し、カウンタもリセットする（テスト間のリーク防止）。
+    """
     from fastapi.testclient import TestClient
     import api as _api
 
     # api.SessionLocal が古い参照を持つので差し替え
     _api.SessionLocal = _TestSessionLocal
+
+    # レート制限を明示的に無効化（他テストで True にされた状態が残らないように）
+    _api.limiter.enabled = False
+    _api.limiter.reset()
 
     with TestClient(_api.app) as c:
         yield c

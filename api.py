@@ -22,7 +22,21 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from pydantic import BaseModel, Field
 from sqlalchemy import func
 from sqlalchemy.orm import Session
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.util import get_remote_address
 import io, csv
+
+# ── レート制限設定 ────────────────────────────────────────────────────────
+# RATELIMIT_ENABLED=false でテスト時等に無効化可能（デフォルトは有効）
+RATELIMIT_ENABLED = os.getenv("RATELIMIT_ENABLED", "true").lower() == "true"
+RATELIMIT_COLLECT  = "3/minute"   # 収集ジョブ起動（重い I/O、内部 _job_status と二重防御）
+RATELIMIT_ANALYSIS = "20/minute"  # スクリーニング・分析プラグイン・推薦
+RATELIMIT_REFRESH  = "10/minute"  # 単一企業更新
+RATELIMIT_AUTH     = "10/minute"  # ログイン（ブルートフォース対策）
+RATELIMIT_RESET    = "3/minute"   # パスワードリセット（アカウント乗っ取り対策）
+
+limiter = Limiter(key_func=get_remote_address, enabled=RATELIMIT_ENABLED)
 
 BASE_DIR = Path(__file__).parent
 
@@ -135,6 +149,10 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="EDINET Financial API", version="2.0", lifespan=lifespan)
 
+# slowapi: Limiter を state に登録し、429 ハンドラを設定
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
 _ALLOWED_ORIGINS = [o.strip() for o in os.getenv("ALLOWED_ORIGIN", "http://localhost:8000").split(",") if o.strip()]
 app.add_middleware(
     CORSMiddleware,
@@ -216,7 +234,8 @@ class JQuantsCollectRequest(BaseModel):
     force:     bool = False
 
 @app.post("/api/collect/start")
-async def start_collection(req: CollectRequest, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+@limiter.limit(RATELIMIT_COLLECT)
+async def start_collection(request: Request, req: CollectRequest, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
     if _job_status["running"]:
         raise HTTPException(400, "収集ジョブが既に実行中です")
     job_type = "incremental" if req.skip_existing else "full"
@@ -357,7 +376,9 @@ async def _run_smart_collection_bg(log_id: int, years: int):
         db.close()
 
 @app.post("/api/collect/smart-start")
+@limiter.limit(RATELIMIT_COLLECT)
 async def start_smart_collection(
+    request: Request,
     req: SmartCollectRequest,
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
@@ -380,7 +401,8 @@ async def toggle_scheduler():
     return {"enabled": _scheduler_status["enabled"]}
 
 @app.post("/api/scheduler/run-now")
-async def scheduler_run_now(background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+@limiter.limit(RATELIMIT_COLLECT)
+async def scheduler_run_now(request: Request, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
     """スケジューラーと同じ差分収集を即時実行"""
     if _job_status["running"]:
         raise HTTPException(400, "収集ジョブが既に実行中です")
@@ -470,7 +492,8 @@ async def data_quality(db: Session = Depends(get_db)):
 _EDINET_CODE_RE = re.compile(r"^E\d{6}$")
 
 @app.post("/api/collect/refresh/{edinet_code}")
-async def refresh_single(edinet_code: str, background_tasks: BackgroundTasks):
+@limiter.limit(RATELIMIT_REFRESH)
+async def refresh_single(request: Request, edinet_code: str, background_tasks: BackgroundTasks):
     if not _EDINET_CODE_RE.match(edinet_code):
         raise HTTPException(400, "edinet_code の形式が不正です（例: E123456）")
     background_tasks.add_task(refresh_company, edinet_code)
@@ -482,7 +505,8 @@ class MarketDataRequest(BaseModel):
     force: bool = False  # True=実行中フラグを無視して強制再起動
 
 @app.post("/api/collect/market-data")
-async def start_market_data_update(req: MarketDataRequest, background_tasks: BackgroundTasks):
+@limiter.limit(RATELIMIT_COLLECT)
+async def start_market_data_update(request: Request, req: MarketDataRequest, background_tasks: BackgroundTasks):
     if _market_status["running"] and not req.force:
         raise HTTPException(400, "市場データ更新ジョブが既に実行中です")
     _market_status.update({"running": True, "progress": 0, "total": 0, "log": [], "cancel_requested": False})
@@ -525,7 +549,8 @@ async def market_data_status():
 # ── 株価履歴収集 ──────────────────────────────────────────────────────────
 
 @app.post("/api/collect/history/start")
-async def start_history_collection(req: HistoryCollectRequest, background_tasks: BackgroundTasks):
+@limiter.limit(RATELIMIT_COLLECT)
+async def start_history_collection(request: Request, req: HistoryCollectRequest, background_tasks: BackgroundTasks):
     if _history_status["running"] and not req.force:
         raise HTTPException(400, "株価履歴収集ジョブが既に実行中です")
     _history_status.update({"running": True, "progress": 0, "total": 0, "log": [], "cancel_requested": False})
@@ -642,14 +667,16 @@ async def history_progress_stream():
     return StreamingResponse(_sse_stream(_history_status), media_type="text/event-stream", headers=_SSE_HEADERS)
 
 @app.post("/api/collect/industry")
-async def collect_industry(db: Session = Depends(get_db)):
+@limiter.limit(RATELIMIT_COLLECT)
+async def collect_industry(request: Request, db: Session = Depends(get_db)):
     async with httpx.AsyncClient() as client:
         updated_co, updated_fr = await update_industry_from_jpx(client, db)
     return {"updated_companies": updated_co, "updated_records": updated_fr}
 
 
 @app.post("/api/collect/jquants/start")
-async def start_jquants_collection(req: JQuantsCollectRequest, background_tasks: BackgroundTasks):
+@limiter.limit(RATELIMIT_COLLECT)
+async def start_jquants_collection(request: Request, req: JQuantsCollectRequest, background_tasks: BackgroundTasks):
     if _jquants_status["running"] and not req.force:
         raise HTTPException(400, "J-Quants収集ジョブが既に実行中です")
     _jquants_status.update({"running": True, "progress": 0, "total": 0, "log": [], "cancel_requested": False})
@@ -860,7 +887,8 @@ class ScreenRequest(BaseModel):
     limit: int = 200
 
 @app.post("/api/screen")
-async def screening(req: ScreenRequest, db: Session = Depends(get_db)):
+@limiter.limit(RATELIMIT_ANALYSIS)
+async def screening(request: Request, req: ScreenRequest, db: Session = Depends(get_db)):
     # 最新年度のレコードのみ対象
     subq = (db.query(FinancialRecord.edinet_code,
                      func.max(FinancialRecord.year).label("max_year"))
@@ -911,7 +939,8 @@ async def list_plugins():
     return {"plugins": [p.to_meta() for p in plugin_registry.list_plugins()]}
 
 @app.post("/api/plugins/{plugin_name}/run", response_model=None)
-async def run_plugin(plugin_name: str, params: dict, db: Session = Depends(get_db)):
+@limiter.limit(RATELIMIT_ANALYSIS)
+async def run_plugin(request: Request, plugin_name: str, params: dict, db: Session = Depends(get_db)):
     """指定プラグインを実行する"""
     p = plugin_registry.get_plugin(plugin_name)
     if p is None:
@@ -925,7 +954,8 @@ async def run_plugin(plugin_name: str, params: dict, db: Session = Depends(get_d
         raise HTTPException(500, "分析エラーが発生しました。")
 
 @app.get("/api/gap-analysis")
-async def gap_analysis(year: Optional[int] = None, sort: str = "asc", db: Session = Depends(get_db)):
+@limiter.limit(RATELIMIT_ANALYSIS)
+async def gap_analysis(request: Request, year: Optional[int] = None, sort: str = "asc", db: Session = Depends(get_db)):
     p = plugin_registry.get_plugin("gap_analysis")
     try:
         return await p.execute({"year": year, "sort": sort}, db)
@@ -941,7 +971,8 @@ async def get_recommend_presets():
     return {"presets": PRESETS, "metrics": METRICS}
 
 @app.post("/api/recommend")
-async def recommend_stocks(req: dict, db: Session = Depends(get_db)):
+@limiter.limit(RATELIMIT_ANALYSIS)
+async def recommend_stocks(request: Request, req: dict, db: Session = Depends(get_db)):
     p = plugin_registry.get_plugin("recommend")
     try:
         return await p.execute(req, db)
@@ -1272,7 +1303,8 @@ class ResetPasswordRequest(BaseModel):
     new_password: str
 
 @app.post("/api/auth/login")
-async def auth_login(req: LoginRequest):
+@limiter.limit(RATELIMIT_AUTH)
+async def auth_login(request: Request, req: LoginRequest):
     if not APP_PASSWORD:
         return {"token": "dev-mode"}
     if not hmac.compare_digest(req.password.encode(), APP_PASSWORD.encode()):
@@ -1280,7 +1312,8 @@ async def auth_login(req: LoginRequest):
     return {"token": _create_token()}
 
 @app.post("/api/auth/reset-password")
-async def reset_password(req: ResetPasswordRequest):
+@limiter.limit(RATELIMIT_RESET)
+async def reset_password(request: Request, req: ResetPasswordRequest):
     global APP_PASSWORD
     if not APP_RECOVERY_KEY:
         raise HTTPException(503, "回復キーが設定されていません（APP_RECOVERY_KEY を .env に設定してください）")
