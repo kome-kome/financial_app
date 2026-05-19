@@ -45,27 +45,30 @@
 - **毎日の自動データ更新** ✅ — スケジューラー導入済み
 - **認証機能の追加** ✅ — HMAC-SHA256 署名トークン実装済み
 - **分析手法のプラグイン化** ✅ — `plugins/` ディレクトリ、自動検出方式
+- **外部サーバーへのデプロイ** ✅ — **Render にデプロイ済み**（[docs/DEPLOYMENT.md](DEPLOYMENT.md) 参照）。DB は Supabase PostgreSQL
+- **業種別回帰モデル** ✅ — `sector_ols` プラグイン + `total_return` の業種固定効果
 
 ### その次（長期）
 - **外部市場環境データの取り込み** — 金利・為替・マクロ指標等を投資モデルに組み込む
-- **外部サーバーへのデプロイ** — Linux サーバー上で本番稼働（常時起動・認証あり）
-- **業種別回帰モデル** — 業種内でのOLS比較でP/E・P/Bの同業種内割安スクリーニング
+- **スピンダウン対策** — 無料プランの 15 分アイドルで停止する制約への対応（外部 ping or 有料プラン）
 
 ---
 
-## デプロイに向けて解決が必要な課題
+## デプロイ運用状況
 
-公開前に必ず対処する技術的な負債。
+**現状**: Render（Free Web Service）+ Supabase（PostgreSQL）で稼働中。
+詳細な運用ガイドと制約は [docs/DEPLOYMENT.md](DEPLOYMENT.md) を参照。
 
-| 課題 | 現状 | 対応方針 |
+| 課題 | 状態 | 対応 |
 |---|---|---|
-| **認証なし** | ~~誰でも API にアクセス可能~~ | HMAC-SHA256 署名トークン実装済み（`APP_PASSWORD` 環境変数で有効化） |
-| **CORS 全許可** | `allow_origins=["*"]` | `api.py:108` の `allow_origins` を `[os.getenv("ALLOWED_ORIGIN", "http://localhost:8000")]` に変更。`.env` に `ALLOWED_ORIGIN=https://your-domain.com` を設定。 |
-| **自動更新の仕組みがない** | 手動でコマンド実行が必要 | cron ジョブ等のスケジューラー導入 |
-| **ジョブ管理がメモリ内** | プロセス再起動で消え、複数 Worker 非対応 | シングル Worker 運用を明示、または Redis キュー導入 |
-| **環境分離なし** | dev/prod の設定が同じ | `.env.production` の分離、機密値の外部化 |
-| **DB が接続先固定前提** | ローカル PostgreSQL を想定 | `DATABASE_URL` 環境変数で制御（コードは対応済み） |
-| **EDINET API キー管理** | `.env` ファイルのみ | 本番では環境変数 or シークレット管理サービスへ |
+| **認証なし** | ✅ 解決 | HMAC-SHA256 署名トークン実装済み（`APP_PASSWORD` 環境変数で有効化） |
+| **CORS 全許可** | ✅ 解決 | `ALLOWED_ORIGIN` 環境変数で制限。Render ダッシュボードで設定 |
+| **自動更新の仕組み** | ✅ 解決 | `_daily_scheduler` 実装済み。ただし Free プランの 15 分アイドル時は停止 |
+| **環境分離** | ✅ 解決 | Render 環境変数 + `.env` ローカル開発のみ |
+| **DB が接続先固定前提** | ✅ 解決 | `DATABASE_URL` 環境変数で制御 → Supabase に接続 |
+| **EDINET / J-Quants API キー** | ✅ 解決 | Render の環境変数（`sync: false`）で管理 |
+| **スピンダウン回避** | 🔄 未対応 | Free プランは 15 分アイドルで停止 → 深夜の自動収集が動かない。外部 ping か有料プラン |
+| **DB バックアップ運用** | 🔄 未対応 | Supabase は自動バックアップ機能あり、運用ポリシー未確定 |
 
 ---
 

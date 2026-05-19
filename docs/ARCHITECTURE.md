@@ -794,7 +794,8 @@ graph LR
 
 ## 9. デプロイ構成図
 
-> 本番環境への展開時の構成イメージです（現在はローカル開発環境）。
+> **稼働中の本番環境**: Render（Web Service）+ Supabase（PostgreSQL）。
+> 詳細な運用ガイドは [docs/DEPLOYMENT.md](DEPLOYMENT.md) を参照。
 
 ```mermaid
 graph TB
@@ -802,37 +803,47 @@ graph TB
         USER["👤 ユーザー（ブラウザ）"]
     end
 
-    subgraph CLOUD["☁️ クラウドサーバー（本番想定）"]
-        subgraph PROXY["リバースプロキシ"]
-            NGINX["Nginx / Caddy\n・HTTPS終端\n・静的ファイル配信\n・ヘッダー付与"]
+    subgraph RENDER["☁️ Render（Free Plan）"]
+        subgraph EDGE["エッジ"]
+            EDGE_NODE["Render Edge\n・HTTPS終端（自動）\n・カスタムドメイン対応"]
         end
+        subgraph APP["Web Service"]
+            UV["uvicorn api:app\n--host 0.0.0.0 --port $PORT\n（512MB / 0.1 vCPU）\n15分アイドルでスピンダウン"]
+        end
+        subgraph CONFIG["設定"]
+            ENV["Render 環境変数\n・DATABASE_URL\n・EDINET_API_KEY / JQUANTS_API_KEY\n・APP_PASSWORD / SECRET / RECOVERY\n・ALLOWED_ORIGIN"]
+            YAML["render.yaml\n（IaC 定義）"]
+        end
+    end
 
-        subgraph APP["アプリケーション"]
-            UV["uvicorn\napi.py\n（FastAPIアプリ）"]
-        end
-
-        subgraph DATA["データ"]
-            PG[("PostgreSQL\nfinancial_db")]
-            ENV[".env\n・EDINET_API_KEY\n・DATABASE_URL\n・APP_PASSWORD\n・APP_SECRET_KEY\n・APP_RECOVERY_KEY"]
-        end
+    subgraph SUPABASE["☁️ Supabase"]
+        PG[("PostgreSQL\nfinancial_db\nSSL 必須\n自動バックアップ")]
     end
 
     subgraph EXT["🌍 外部サービス"]
         EDINET["EDINET API\n金融庁"]
         STOOQ["stooq API\n株価"]
         JPX["JPX Excel\n東証"]
+        JQUANTS["J-Quants API\n（任意）"]
     end
 
-    USER   -->|"HTTPS"| NGINX
-    NGINX  -->|"HTTP（内部）"| UV
-    UV     <-->|"SQL"| PG
+    subgraph CICD["🔁 CI/CD"]
+        GH["GitHub main\nブランチ"]
+    end
+
+    USER   -->|"HTTPS"| EDGE_NODE
+    EDGE_NODE -->|"HTTP（内部）"| UV
+    UV     <-->|"SQL / TLS"| PG
     UV     -->|"HTTPS"| EXT
     ENV    -.->|"環境変数"| UV
+    YAML   -.->|"インフラ定義"| ENV
+    GH     -->|"push で自動デプロイ"| UV
 
     style ENV fill:#1c1400,color:#fcd34d
+    style YAML fill:#1c1400,color:#fcd34d
 
-    note1["⚠️ 本番デプロイ前の必須対応\n1. allow_origins を ALLOWED_ORIGIN 環境変数で制限（api.py:116）\n2. APP_PASSWORD / APP_SECRET_KEY / APP_RECOVERY_KEY を設定\n3. Tier3課題: HttpOnly Cookie 認証・CSRF対策・レート制限"]
-    style note1 fill:#450a0a,color:#fca5a5
+    note1["📌 Render Free 制約\n・15分アイドルでスピンダウン\n（深夜の自動収集には外部 ping or 有料プラン）\n・SSH 不可 → ログは Render ダッシュボードのみ\n・永続ディスクなし → 永続化は Supabase のみ"]
+    style note1 fill:#0c1a3a,color:#93c5fd
 ```
 
 ---

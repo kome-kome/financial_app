@@ -2,6 +2,19 @@
 
 日本株財務分析ツール。Claude Codeへの動作指示ファイル。プロジェクト目的・方針は [VISION.md](docs/VISION.md) を参照。
 
+## デプロイ環境（最重要）
+
+**本プロジェクトは [Render](https://render.com/) にデプロイ済みで稼働中**。DB は **Supabase PostgreSQL**（外部）。
+新機能・改修は必ず Render Free プランの制約を前提に設計すること（メモリ 512MB・スピンダウン 15 分・SSH 不可）。
+詳細は [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) を **必読**。
+
+主要ポイント（うっかり破らないために）:
+- マイグレーションは `init_db()` 内で **冪等** に実装（起動時に自動実行）
+- 永続化はすべて Supabase。ローカルファイル書き込みは再デプロイで消える
+- 長時間処理は `BackgroundTasks` + SSE 進捗配信（30 秒で HTTP タイムアウト）
+- 環境変数は `render.yaml` の `envVars` に追記し Render ダッシュボードで値を設定
+- 設定変更は GitHub `main` への push で自動デプロイ。ロールバックは Render ダッシュボードから可能
+
 ## GitHub 協調ワークフロー
 
 **デスクトップ版 Claude Code（ここ）とWeb版（claude.ai/code）が `kome-kome/financial_app` を介して協調する。**
@@ -101,6 +114,9 @@ python check.py                         # EDINET API接続テスト
 | `templates/collection.html` | 収集・スクリーニング画面（`/collection`） |
 | `templates/analysis.html` | 回帰・乖離分析画面（`/analysis`） |
 | `check.py` | EDINET API疎通確認用ワンショット |
+| `render.yaml` | Render デプロイ定義（IaC） |
+| `Procfile` | Render の起動コマンド（uvicorn 起動） |
+| `docs/DEPLOYMENT.md` | **Render デプロイ運用ガイド（必読）** |
 
 ## 収集フロー別進捗仕様
 

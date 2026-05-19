@@ -45,6 +45,7 @@
 - **問題**: `plugins/total_return.py` の `shares_outstanding` は `bs_total_equity / bs_bps` で推計しているが、IFRS/JGAAP 混在・期中増資・優先株存在時に精度が低下する
 - **改善案**: J-Quants `/markets/listed/info` の `IssuedShares` フィールドから正規の発行済株式数を取得し、`companies` テーブルに `issued_shares` カラム追加 + `cf_ops_ps` 計算に直接利用
 - **前提**: `JQUANTS_API_KEY` が設定済みであること（プレミアムプラン要否は要確認）
+- **Render 適合**: コード変更のみ。`init_db()` で `ALTER TABLE companies ADD COLUMN IF NOT EXISTS issued_shares` を冪等実装すれば起動時に自動マイグレーション
 - **実装場所**: `collector.py` の `collect_stock_price_history_jquants` 拡張、`database.py` のスキーマ更新、`plugins/total_return.py` の置換
 
 #### H. `period_end` を VARCHAR から DATE 型へ移行
@@ -59,8 +60,9 @@
   - 非 ISO 形式値や空文字が含まれていた場合に移行失敗
   - `upsert_financial` のキー検索条件・各クエリで `String` → `date` 変換が必要
   - `calc_growth_rates` の `ORDER BY period_end` は型変更後も動くが要動作確認
-- **前提**: マイグレーション前に `SELECT DISTINCT period_end FROM financial_records WHERE period_end !~ '^\d{4}-\d{2}-\d{2}$'` で異常値が無いことを確認
-- **実装場所**: `database.py`（スキーマ・upsert）、`collector.py`（doc.get("periodEnd") の値変換）
+- **前提**: Supabase ダッシュボードで `SELECT DISTINCT period_end FROM financial_records WHERE period_end !~ '^\d{4}-\d{2}-\d{2}$'` で異常値が無いことを確認 → 自動バックアップを取ってからマイグレーション
+- **Render 適合**: マイグレーションを `init_db()` 内に冪等な `DO $$ ... $$` ブロックで書き、起動時に 1 度だけ実行。失敗時に環境変数 `SKIP_PERIOD_END_MIGRATION=1` で skip できるフェールセーフを用意
+- **実装場所**: `database.py`（スキーマ・upsert・init_db）、`collector.py`（doc.get("periodEnd") の値変換）
 
 ---
 
@@ -72,18 +74,19 @@
   パーセンタイル・勝率）を `stock_price_history` から計算
 - `templates/analysis.html` の「バックテスト」タブで結果表示
 
-#### E. 本番デプロイ対応
-- **問題**: 現在はローカル専用構成（`localhost:5432`、開発用シークレット）
-- **改善案**:
-  - Nginx リバースプロキシ設定
-  - `APP_SECRET_KEY` 等の秘密情報をシークレット管理（AWS Secrets Manager 等）
-  - DB バックアップ自動化
-- **参照**: `docs/ARCHITECTURE.md` セクション9（デプロイ構成図）
+#### E. 本番デプロイ対応 ✅ **大部分対応済み（Render + Supabase）**
+- **現状**: Render（Web Service）+ Supabase（PostgreSQL）で稼働中。HTTPS / Secrets / CORS 設定済み
+- **詳細**: [docs/DEPLOYMENT.md](DEPLOYMENT.md) を参照
+- **残課題**:
+  - **スピンダウン回避**: Free プラン 15 分アイドルで停止する。外部 ping（cron-job.org 等を 14 分間隔）か有料プラン化
+  - **DB バックアップ運用ポリシー**: Supabase の自動バックアップ機能を利用しつつ、復旧手順を文書化
+  - **監視**: Render ダッシュボード + UptimeRobot 等の外形監視追加検討
 
 #### F. 認証の HttpOnly Cookie 化（セキュリティ強化）
 - **問題**: 認証トークンを `localStorage` に保存（XSS時に盗難リスク）
 - **改善案**: HttpOnly Cookie 方式へ移行
 - **前提**: 認証フロー全体の再設計が必要（CSRF対策も同時実施）
+- **Render 適合**: Render は HTTPS 提供のため `Secure` / `SameSite=Strict` 属性を付けられる。`ALLOWED_ORIGIN` が同一オリジンなら CSRF リスクも限定的
 - **参照**: `CLAUDE.md` の Tier3 既知リスク
 
 ---
@@ -97,3 +100,4 @@
 3. **Zスコアは年度別に計算**（年度を跨いで計算しない）
 4. **科学計算ライブラリ採用基準**: numpy/scipy/statsmodels/scikit-learn は採用可（`docs/VISION.md` の採用基準参照）。新規ライブラリ追加時は同基準と CLAUDE.md「パッケージ管理方針」に従う
 5. **`docs/ARCHITECTURE.md` を同じ作業内で更新**
+6. **Render デプロイ前提**: メモリ 512MB・スピンダウン 15 分・SSH 不可・永続ディスクなし。スキーマ変更は `init_db()` の冪等マイグレーションで対応。詳細は `docs/DEPLOYMENT.md`
