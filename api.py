@@ -210,6 +210,7 @@ class HistoryCollectRequest(BaseModel):
 
 class SmartCollectRequest(BaseModel):
     years_back: int = Field(default=3, ge=1, le=5)
+    force:      bool = False   # True=実行中フラグを無視して強制再起動
 
 class JQuantsCollectRequest(BaseModel):
     days_back: int  = Field(default=14, ge=1, le=730)
@@ -231,6 +232,7 @@ async def _run_collection_bg(years: int, max_co: Optional[int], log_id: int, ski
     _prog_ticks = [0]
 
     db = SessionLocal()
+    baseline_records = db.query(FinancialRecord).count()
 
     def on_progress(current, total, msg):
         _job_status["progress"] = current
@@ -261,6 +263,7 @@ async def _run_collection_bg(years: int, max_co: Optional[int], log_id: int, ski
         if log_obj:
             log_obj.status = "done"
             log_obj.finished_at = datetime.utcnow()
+            log_obj.records_saved = max(0, db.query(FinancialRecord).count() - baseline_records)
             if cancelled:
                 log_obj.message = "ユーザーにより停止"
             db.commit()
@@ -270,6 +273,7 @@ async def _run_collection_bg(years: int, max_co: Optional[int], log_id: int, ski
             log_obj.status = "error"
             log_obj.message = str(e)
             log_obj.finished_at = datetime.utcnow()
+            log_obj.records_saved = max(0, db.query(FinancialRecord).count() - baseline_records)
             db.commit()
     finally:
         _job_status["running"] = False
@@ -280,6 +284,7 @@ async def _run_smart_collection_bg(log_id: int, years: int):
     _job_status["cancel_requested"] = False
     _prog_ticks = [0]
     db = SessionLocal()
+    baseline_records = db.query(FinancialRecord).count()
 
     def on_progress(current, total, msg):
         _job_status["progress"] = current
@@ -339,6 +344,7 @@ async def _run_smart_collection_bg(log_id: int, years: int):
         if log_obj:
             log_obj.status      = "done"
             log_obj.finished_at = datetime.utcnow()
+            log_obj.records_saved = max(0, db.query(FinancialRecord).count() - baseline_records)
             if cancelled:
                 log_obj.message = "ユーザーにより停止"
             db.commit()
@@ -350,6 +356,7 @@ async def _run_smart_collection_bg(log_id: int, years: int):
             log_obj.status      = "error"
             log_obj.message     = str(e)
             log_obj.finished_at = datetime.utcnow()
+            log_obj.records_saved = max(0, db.query(FinancialRecord).count() - baseline_records)
             db.commit()
     finally:
         _job_status["running"]          = False
@@ -362,13 +369,34 @@ async def start_smart_collection(
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
 ):
-    if _job_status["running"]:
+    if _job_status["running"] and not req.force:
         raise HTTPException(400, "収集ジョブが既に実行中です")
+    if req.force:
+        _reset_stuck_jobs(db, message="ユーザーによる強制再開で上書き")
     log_obj = CollectionLog(job_type="smart", status="running")
     db.add(log_obj); db.commit(); db.refresh(log_obj)
     _job_status.update({"running": True, "log": [], "progress": 0, "log_id": log_obj.id, "job_type": "smart"})
     background_tasks.add_task(_run_smart_collection_bg, log_obj.id, req.years_back)
     return {"message": "スマート収集ジョブを開始しました", "log_id": log_obj.id}
+
+def _reset_stuck_jobs(db: Session, message: str = "ユーザーによる強制リセット") -> int:
+    """in-memory フラグと DB の running ジョブを強制 error 扱いに戻す。リセット件数を返す。"""
+    _job_status["running"]          = False
+    _job_status["cancel_requested"] = False
+    stuck = db.query(CollectionLog).filter(CollectionLog.status == "running").all()
+    for job in stuck:
+        job.status      = "error"
+        job.message     = message
+        job.finished_at = datetime.utcnow()
+    if stuck:
+        db.commit()
+    return len(stuck)
+
+@app.post("/api/collect/reset-stuck")
+async def reset_stuck_collection(db: Session = Depends(get_db)):
+    """スタックした収集ジョブを強制リセット（実行中フラグと DB 上の running ステータスを解除）"""
+    count = _reset_stuck_jobs(db)
+    return {"reset_jobs": count, "message": f"{count}件のジョブをリセットしました"}
 
 @app.get("/api/scheduler/status")
 async def get_scheduler_status():

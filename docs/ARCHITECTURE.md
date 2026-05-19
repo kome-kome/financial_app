@@ -517,6 +517,15 @@ sequenceDiagram
     BGT -->> API : running = False
     API -->> UI  : SSEイベント（running=false）
     UI  -->> User: エラー状態を表示
+
+    Note over User,DB: ケース④ ジョブのスタック → 強制リセット
+    Note over BGT: finally到達前にプロセス強制終了等で<br/>running フラグが残ったケース
+    User ->> UI  : 「強制リセット」ボタンをクリック<br/>または スマート収集再試行時の確認ダイアログで承諾
+    UI   ->> API : POST /api/collect/reset-stuck<br/>または smart-start { force: true }
+    API  ->> API : _job_status["running"] = False
+    API  ->> DB  : running の collection_logs を error 化<br/>message = "ユーザーによる強制リセット"
+    API -->> UI  : 200 { "reset_jobs": N }
+    UI  -->> User: 「N件のジョブをリセットしました」を表示
 ```
 
 ---
@@ -767,6 +776,8 @@ graph LR
         C16["GET /api/collect/market-coverage\n株価データ収録状況"]
         C17["GET /api/collect/data-quality\nNULL率・外れ値チェック"]
         C18["POST /api/collect/industry\nJPX Excelから業種データを更新"]
+        C19["POST /api/collect/smart-start\nスマート収集（DB状態から自動判定）"]
+        C20["POST /api/collect/reset-stuck\nスタックしたrunningジョブを強制リセット"]
     end
 
     subgraph SCHED["⏰ スケジューラー /api/scheduler/"]
