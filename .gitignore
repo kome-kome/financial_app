@@ -8,6 +8,7 @@ __pycache__/
 *.pyo
 *.pyd
 *.pdb
+.pytest_cache/
 
 # ログ・一時ファイル
 *.log

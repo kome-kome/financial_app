@@ -1,0 +1,40 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch: {}
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest pytest-asyncio
+
+      - name: Run pytest
+        env:
+          # SQLite in-memory に差し替えるが、database.py の engine 初期化を
+          # 通過させるためダミーの postgres URL を渡す（conftest.py 参照）
+          DATABASE_URL: "postgresql://localhost/dummy"
+          APP_PASSWORD: ""
+          APP_SECRET_KEY: "ci-secret"
+          EDINET_API_KEY: "dummy"
+        run: |
+          python -m pytest tests/ -v --tb=short
