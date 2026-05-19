@@ -1002,16 +1002,14 @@ async def recommend_stocks(req: dict, db: Session = Depends(get_db)):
 # ── バックテスト共通ロジック ────────────────────────────────────────────
 
 def _bt_percentile(sorted_arr: list, p: float) -> float:
-    """pパーセンタイル値（0〜100）を線形補間で返す"""
+    """pパーセンタイル値（0〜100）。numpy.percentile（線形補間）を使用。"""
     n = len(sorted_arr)
     if n == 0:
         return 0.0
     if n == 1:
         return float(sorted_arr[0])
-    idx = (n - 1) * p / 100
-    lo = int(idx)
-    hi = min(lo + 1, n - 1)
-    return float(sorted_arr[lo] + (sorted_arr[hi] - sorted_arr[lo]) * (idx - lo))
+    import numpy as np
+    return float(np.percentile(sorted_arr, p, method="linear"))
 
 
 def _backtest_single(
@@ -1160,11 +1158,13 @@ def _backtest_single(
 
     valid = [r["return_pct"] for r in results if r["return_pct"] is not None]
     if valid:
+        import numpy as np
         n = len(valid)
-        avg = sum(valid) / n
+        arr = np.asarray(valid, dtype=float)
+        avg = float(arr.mean())
         srt = sorted(valid)
-        std = (sum((x - avg) ** 2 for x in valid) / n) ** 0.5
-        b_avg = sum(bench_returns) / len(bench_returns) if bench_returns else None
+        std = float(arr.std(ddof=0))
+        b_avg = float(np.mean(bench_returns)) if bench_returns else None
         summary = {
             "avg_return_pct":    round(avg, 2),
             "median_return_pct": round(_bt_percentile(srt, 50), 2),
