@@ -128,7 +128,7 @@ SSEエンドポイント: 収集=`/api/collect/stream`、市場データ=`/api/c
 ## 分析手法の既知問題・制約
 
 - **Zスコアは年度別に計算すること**。`calc_zscore_normalization` は年度を跨いで計算しない（異なるマクロ環境の年を混在させると比較が無意味になる）。内部的に `_calc_zscore_for_year(db, year)` を年度ごとに呼ぶ。
-- **gap_analysis の収束予測はヒューリスティック**。`half_life = abs(gap)/2`・`conv_score = 50 + gap×0.8` は統計的根拠なし。UIに「参考値」と必ず明示すること。
+- **gap_analysis の収束予測**: 履歴 ≥ 8 観測の銘柄は `statsmodels` ARIMA(1,0,0) による AR(1) MLE で半減期を推定（`HL = -ln(2)/ln(φ)`）。履歴不足の銘柄はヒューリスティック（`half_life = |gap|/2`）にフォールバックする。`conv_score = 50 + gap×0.8` は引き続きヒューリスティックなので「参考値」として扱うこと。出力の `method` フィールドで AR(1) / ヒューリスティックの判別が可能。
 - **成長率計算は (edinet_code, year, period_end) で副ソート**済み。同年複数レコードがある企業の前期比が不定にならないようにしている。
 - **フリーCF = 営業CF + 投資CF**（設備投資以外の投資活動も含む近似値）。
 - **市場データの株数推計** = `total_equity / bps`（発行済株式数の近似）。IFRS・JGAAP混在時に精度が下がる場合あり。
