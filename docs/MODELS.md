@@ -14,6 +14,7 @@
 5. [横断的Zスコア正規化](#5-横断的zスコア正規化)
 6. [Zスコア重み付けスコアリング（おすすめ銘柄）](#6-zスコア重み付けスコアリングおすすめ銘柄)
 7. [バックテスト](#7-バックテスト)
+8. [ネットキャッシュ分析（清原達郎式）](#8-ネットキャッシュ分析清原達郎式)
 
 ---
 
@@ -508,6 +509,7 @@ z_field_i = (field_i − μ_y) / σ_y
 | `cf_ratio` | `z_cf_ratio` | 営業CF/売上比 |
 | `pl_eps` | `z_eps` | EPS |
 | `de_ratio` | `z_de_ratio` | D/Eレシオ |
+| `nc_ratio` | `z_nc_ratio` | ネットキャッシュ比率（清原式、モデル 8 参照）|
 
 ### 年度別計算の理由
 
@@ -645,8 +647,93 @@ start_date = today − months_ago × 30日
 
 ---
 
+## 8. ネットキャッシュ分析（清原達郎式）
+
+**実装ファイル**: `plugins/net_cash_analysis.py`
+
+### 概要
+
+清原達郎『わが投資術』（2024）で提唱された **ネットキャッシュ** および **ネットキャッシュ比率** で割安株をスクリーニングする。OLS・回帰モデルを介さず会計値からの直接計算であるため、推定誤差が混入せず堅牢である点が特徴。
+
+### 数式
+
+```
+ネットキャッシュ NC  = 流動資産 + 投資有価証券 × 0.7 − 総負債      [円]
+ネットキャッシュ比率 = NC / 時価総額                              [無次元]
+```
+
+実装では `market_cap` が百万円単位のため、`NC / (market_cap × 1_000_000)` で単位を整える。
+
+### 投資有価証券に 0.7 を乗じる理由
+
+清原氏の経験則。投資有価証券は
+
+1. 時価評価のブレで簿価との乖離が大きい
+2. 売却時に含み益課税（法人実効税率 ≈ 30%）が発生する
+
+ため、保守的に簿価の 70% でカウントする。`INVESTMENT_DISCOUNT = 0.7` は
+`plugins/net_cash_analysis.py` の定数として外出ししている。
+
+### 銘柄選別基準（清原氏）
+
+| 比率 | 意味 |
+|---|---|
+| `nc_ratio ≥ 1.0` | 時価総額より多くのネットキャッシュを保有。理屈上は **現金で会社を買える**水準 |
+| `nc_ratio ≥ 0.5` | 半額バーゲン。時価総額の半分以上をネットキャッシュで保有 |
+| `nc_ratio ≤ 0` | ネットキャッシュがマイナス（実質負債超過）|
+
+### 計算フロー
+
+```
+1. collector.py の calc_derived() で
+     net_cash = current_assets + investment_securities × 0.7 − total_liabilities
+   を計算し、`FinancialRecord.net_cash` カラムに書き込む（BS データのみ依存）
+
+2. update_market_data_only() で stock_price 取得後に
+     nc_ratio = net_cash / (market_cap × 1_000_000)
+   を計算し、`FinancialRecord.nc_ratio` カラムに書き込む
+
+3. database.py の _calc_zscore_for_year() で
+     z_nc_ratio = (nc_ratio − μ_year) / σ_year
+   を年度内 Zスコアとして算出（モデル 5 と統合）
+```
+
+### 投資有価証券の取得対応
+
+| 会計基準 | XBRL 要素（`XBRL_MAP` に登録） |
+|---|---|
+| JGAAP | `InvestmentSecurities` / `InvestmentsInSecurities` / `ShortTermInvestmentSecurities` |
+| IFRS | `OtherFinancialAssetsNonCurrentIFRS`（近似値）|
+
+IFRS には完全に対応する科目がないため、「非流動その他金融資産」で近似する。
+収集前の古いレコードは `bs_investment_securities = NULL` となり、内部計算では **0 として扱う** ことで簡易 NCAV (Net Current Asset Value, Graham 1934) 相当の値を返す。
+
+### 仮定・限界
+
+- **投資有価証券の評価**: 簿価 × 0.7 は単純化された経験則。個別銘柄の含み益・含み損や、政策保有株のように売却制約のある銘柄は実態を反映しない。
+- **特別損失リスク**: 流動資産に含まれる売掛金・棚卸資産は将来貸倒れ・評価減の可能性がある。NC が正でも実際に資産が現金化できる保証はない。
+- **IFRS 採用企業**: 「投資有価証券」に厳密に対応する科目がないため、`OtherFinancialAssetsNonCurrentIFRS` で近似する。区分が異なる場合は値が過大・過少になる。
+- **古いレコード**: 2026 年 5 月の本機能リリース前のデータは投資有価証券が未収集（NULL）。プラグインは内部的に 0 として扱い、NCAV 相当の値を返すため過小評価方向のバイアスがかかる。再収集することで清原式精度に到達する。
+- **会計のクセ**: 商社・金融・REIT 等は BS 構造が特殊で、本指標がうまく機能しない業種がある。業種フィルタで除外することを推奨。
+- **株価のタイミング**: `market_cap` は最新の `stock_price` × 推計発行株式数。決算日と現在株価の時点ズレがある。
+
+### 参考文献
+
+- **清原達郎 (2024)**. 『わが投資術 — 市場は誰に微笑むか』. 講談社.
+  → https://bookclub.kodansha.co.jp/product?item=0000392773
+  （ネットキャッシュ比率と投資有価証券 0.7 倍ルールの一次出典）
+- **Graham, B. (1934)**. *Security Analysis*. McGraw-Hill.
+  → https://www.mheducation.com/highered/product/security-analysis-graham-dodd/M9780071592536.html
+  （Net Current Asset Value (NCAV) = 流動資産 − 総負債 の原典。投資有価証券補正のない基本形）
+- **Oppenheimer, H.R. (1986)**. "Ben Graham's Net Current Asset Values: A Performance Update." *Financial Analysts Journal*, 42(6), 40–47.
+  → https://doi.org/10.2469/faj.v42.n6.40
+  （NCAV 戦略の超過収益の学術的検証）
+
+---
+
 ## 改訂履歴
 
 | 日付 | 内容 |
 |---|---|
 | 2026-05-14 | 初版作成（モデル 1–7 を記述）|
+| 2026-05-21 | モデル 8（ネットキャッシュ分析・清原達郎式）を追加 |

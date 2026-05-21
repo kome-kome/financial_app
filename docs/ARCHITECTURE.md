@@ -191,15 +191,19 @@ erDiagram
         float   bs_retained_earnings   "利益剰余金（円）"
         float   bs_total_equity        "純資産（円）"
         float   bs_bps                 "BPS 1株純資産（円）"
+        float   bs_investment_securities "投資有価証券（円・清原式NC用）"
         float   cf_operating_cf        "営業キャッシュフロー（円）"
         float   cf_free_cf             "フリーCF=営業CF+投資CF（円）"
         float   op_margin              "営業利益率（%）"
         float   roe                    "ROE 自己資本利益率（%）"
         float   equity_ratio           "自己資本比率（%）"
         float   de_ratio               "D/Eレシオ"
+        float   net_cash               "ネットキャッシュ（円・清原式）"
+        float   nc_ratio               "ネットキャッシュ比率=net_cash/時価総額"
         float   rev_growth             "売上高成長率（%）"
         float   z_roe                  "ROEのZスコア（年度内正規化）"
         float   z_op_margin            "営業利益率のZスコア"
+        float   z_nc_ratio             "NC比率のZスコア（年度内正規化）"
         float   stock_price            "株価（収集時点）"
         float   market_cap             "時価総額（百万円）※単位注意"
         float   per                    "PER 株価収益率"
@@ -718,6 +722,14 @@ classDiagram
         +execute() 月次スナップショット×OLS→期待リターンランキング
     }
 
+    class NetCashAnalysisPlugin {
+        +name = "net_cash_analysis"
+        +label = "ネットキャッシュ分析"
+        +depends_on = []
+        +params_schema() 最低NC比率・業種・最低時価総額・年度
+        +execute() 清原式NC・NC比率でランキング生成（OLS不使用）
+    }
+
     class PluginRegistry {
         -dict _registry
         +_load() プラグインファイルを自動スキャン
@@ -738,6 +750,7 @@ classDiagram
     AnalysisPlugin <|-- TotalReturnPlugin
     AnalysisPlugin <|-- SectorOLSPlugin
     AnalysisPlugin <|-- PricePredictorPlugin
+    AnalysisPlugin <|-- NetCashAnalysisPlugin
 
     PluginRegistry --> AnalysisPlugin : 管理・呼び出し
 
@@ -747,6 +760,7 @@ classDiagram
 
     note for GapAnalysisPlugin "業種別OLS分析の実行後でないと\npredicted_market_capが空のため404になる"
     note for PricePredictorPlugin "StockPriceHistory + FinancialRecord を結合\n月次スナップショット × 全企業でパネルデータ構築\nルックアヘッドバイアス禁止: period_end + 45日ラグ厳守"
+    note for NetCashAnalysisPlugin "清原達郎『わが投資術』式\nNC = 流動資産 + 投資有価証券×0.7 − 総負債\nOLS不使用・会計値からの直接計算"
     note for Utils "numpy / scipy は使用しない\n（純Python実装のみ）\nwalk_forward_cv_monthly() を含む"
 ```
 
@@ -920,12 +934,13 @@ graph TB
 | `plugins/total_return.py` | バックエンド | 配当込みトータルリターン分析 | plugins/utils.py |
 | `plugins/sector_ols.py` | バックエンド | 業種別OLS回帰分析（次元整合・winsorize+z-score前処理） | plugins/utils.py |
 | `plugins/price_predictor.py` | バックエンド | 株価リターン予測（価格×財務特徴量OLS・月次WFV） | plugins/utils.py |
+| `plugins/net_cash_analysis.py` | バックエンド | ネットキャッシュ分析（清原達郎『わが投資術』式）。NC = 流動資産 + 投資有価証券×0.7 − 総負債 | database.py |
 | `plugins/utils.py` | バックエンド | ols()・normalize()・winsorize()・walk_forward_cv()・walk_forward_cv_monthly() | — |
 | `dashboard.html` | フロントエンド | トップページ・全体サマリー（`/`） | api.py |
 | `collection.html` | フロントエンド | 収集管理・スクリーニング・DBブラウザ（`/collection`） | api.py |
 | `analysis.html` | フロントエンド | 回帰分析・乖離分析・プラグイン（`/analysis`） | api.py |
 | `login.html` | フロントエンド | 認証ログイン画面（`/login`） | api.py |
-| `models.html` | フロントエンド | モデル解説・参考文献ページ（`/models`）。7モデルの数式・パラメータ・DOIリンクをインラインHTMLで表示。 | — |
+| `models.html` | フロントエンド | モデル解説・参考文献ページ（`/models`）。8モデルの数式・パラメータ・DOIリンクをインラインHTMLで表示。 | — |
 | `db.html` | フロントエンド | DBビューア（`/db`）。4テーブルのスキーマ・プレビュー・統計サマリー・ER 風リレーション・企業ドリルダウン・CSV エクスポート。 | api.py |
 | `check.py` | ユーティリティ | EDINET API 疎通確認ワンショット | EDINET API |
 | `.env` | 設定 | APIキー・DB接続・認証情報（UTF-8 BOMなし） | — |
