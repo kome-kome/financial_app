@@ -14,6 +14,7 @@
 - 長時間処理は `BackgroundTasks` + SSE 進捗配信（30 秒で HTTP タイムアウト）
 - 環境変数は `render.yaml` の `envVars` に追記し Render ダッシュボードで値を設定
 - 設定変更は GitHub `main` への push で自動デプロイ。ロールバックは Render ダッシュボードから可能
+- **定時スケジューラ (`_daily_scheduler`) は Free プランでは走らない**。15 分アイドルで停止するため、毎日3時に起動している保証がない。代わりに `_startup_catchup` がスピンアップ時に「最終自動収集から 22h 以上経過していたら差分収集を非同期実行」する。新規の定期処理を追加する場合は同じパターン（startup hook + 経過時間判定）で実装すること
 
 ## GitHub 協調ワークフロー
 
