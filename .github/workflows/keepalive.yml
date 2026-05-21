@@ -1,0 +1,34 @@
+name: Keepalive ping (Render Free spindown 対策)
+
+on:
+  schedule:
+    # 10 分間隔で /health を叩く。
+    # GitHub Actions の scheduled workflow は実行が遅延することがあるため、
+    # Render の 15 分スピンダウンに引っかからないよう間隔を短めに設定している。
+    - cron: '*/10 * * * *'
+  workflow_dispatch:  # 手動実行可能
+
+permissions:
+  contents: read
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Ping /health
+        run: |
+          URL="${PING_URL:-https://financial-app.onrender.com/health}"
+          echo "Pinging $URL"
+          # コールドスタートを考慮して接続/応答に長めの猶予を取る
+          # -f: HTTP エラー時に exit 1 / -s: 静音 / -S: エラーは表示
+          # --max-time 60: コールドスタート分の最大待ち時間
+          response=$(curl -fsS --max-time 60 -w "\n%{http_code}\n" "$URL")
+          status=$?
+          echo "$response"
+          if [ $status -ne 0 ]; then
+            echo "::warning::ping failed (exit $status). Render が起動中の可能性があるため次回試行で回復見込み"
+            exit 0  # 失敗でもワークフロー自体は成功扱い (一時的な失敗で通知を飛ばさない)
+          fi
+        env:
+          PING_URL: ${{ vars.PING_URL }}
