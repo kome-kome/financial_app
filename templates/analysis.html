@@ -24,6 +24,17 @@ body{font-family:'Segoe UI',sans-serif;background:#0f1117;color:#e2e8f0;min-heig
 .grid4{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:16px}
 .grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:16px}
 .grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px}
+@media (max-width: 768px){
+  .container{padding:12px}
+  .grid4{grid-template-columns:repeat(2,1fr)}
+  .grid3{grid-template-columns:repeat(2,1fr)}
+}
+@media (max-width: 480px){
+  .grid4{grid-template-columns:1fr}
+  .grid3{grid-template-columns:1fr}
+  .grid2{grid-template-columns:1fr}
+  .card{padding:12px}
+}
 .card-title{font-size:11px;color:#64748b;margin-bottom:6px;text-transform:uppercase;letter-spacing:.5px}
 .card-value{font-size:22px;font-weight:700}
 .card-sub{font-size:11px;color:#64748b;margin-top:3px}
@@ -495,6 +506,8 @@ function logout(){ localStorage.removeItem('auth_token'); location.href='/login'
 function showNotif(msg, type='error'){
   const el = document.createElement('div');
   el.textContent = msg;
+  el.setAttribute('role', type==='error' ? 'alert' : 'status');
+  el.setAttribute('aria-live', type==='error' ? 'assertive' : 'polite');
   const bg = type==='error' ? '#ef4444' : type==='success' ? '#10b981' : '#3b82f6';
   el.style.cssText = `position:fixed;bottom:20px;right:20px;z-index:9999;padding:10px 16px;border-radius:6px;font-size:13px;color:#fff;max-width:420px;background:${bg};box-shadow:0 4px 12px rgba(0,0,0,.4)`;
   document.body.appendChild(el);

@@ -337,22 +337,54 @@ def upsert_financial(db, data: dict) -> FinancialRecord:
 
 
 def calc_growth_rates(db):
-    """前期比成長率を全レコードに対して計算・更新"""
-    records = db.query(FinancialRecord).order_by(
-        FinancialRecord.edinet_code, FinancialRecord.year, FinancialRecord.period_end
-    ).all()
-    prev = {}
-    for r in records:
-        key = r.edinet_code
-        if key in prev:
-            p = prev[key]
-            if p.pl_revenue and r.pl_revenue:
-                r.rev_growth = round((r.pl_revenue / p.pl_revenue - 1) * 100, 2)
-            if p.pl_operating_profit and r.pl_operating_profit:
-                r.op_growth = round((r.pl_operating_profit / p.pl_operating_profit - 1) * 100, 2)
-            if p.pl_eps and r.pl_eps:
-                r.eps_growth = round((r.pl_eps / p.pl_eps - 1) * 100, 2)
-        prev[key] = r
+    """前期比成長率を全レコードに対して計算・更新（PostgreSQL window function 版）。
+
+    旧実装は全レコードをメモリに展開してループしていたため、件数が増えると OOM の
+    リスクがあった。本実装は LAG() OVER (PARTITION BY edinet_code ORDER BY year,
+    period_end) で SQL 側に処理を押し込み、DB の効率的なソート・スキャンを活用する。
+
+    セマンティクス（旧実装との一致点）:
+      - 前期と当期の両方が NULL でなく 0 でもないときのみ更新する
+      - rev_growth / op_growth / eps_growth は各 % で小数 2 桁丸め
+      - 順序は (edinet_code, year, period_end) で副ソート（CLAUDE.md 既知事項）
+    """
+    sql = text("""
+        WITH lagged AS (
+            SELECT
+                id,
+                pl_revenue           AS curr_rev,
+                LAG(pl_revenue) OVER w           AS prev_rev,
+                pl_operating_profit  AS curr_op,
+                LAG(pl_operating_profit) OVER w  AS prev_op,
+                pl_eps               AS curr_eps,
+                LAG(pl_eps) OVER w               AS prev_eps
+            FROM financial_records
+            WINDOW w AS (PARTITION BY edinet_code ORDER BY year, period_end)
+        )
+        UPDATE financial_records fr
+        SET
+            rev_growth = CASE
+                WHEN l.curr_rev IS NOT NULL AND l.curr_rev <> 0
+                 AND l.prev_rev IS NOT NULL AND l.prev_rev <> 0
+                THEN ROUND(((l.curr_rev / l.prev_rev - 1) * 100)::numeric, 2)
+                ELSE fr.rev_growth
+            END,
+            op_growth = CASE
+                WHEN l.curr_op IS NOT NULL AND l.curr_op <> 0
+                 AND l.prev_op IS NOT NULL AND l.prev_op <> 0
+                THEN ROUND(((l.curr_op / l.prev_op - 1) * 100)::numeric, 2)
+                ELSE fr.op_growth
+            END,
+            eps_growth = CASE
+                WHEN l.curr_eps IS NOT NULL AND l.curr_eps <> 0
+                 AND l.prev_eps IS NOT NULL AND l.prev_eps <> 0
+                THEN ROUND(((l.curr_eps / l.prev_eps - 1) * 100)::numeric, 2)
+                ELSE fr.eps_growth
+            END
+        FROM lagged l
+        WHERE fr.id = l.id
+    """)
+    db.execute(sql)
     db.commit()
 
 

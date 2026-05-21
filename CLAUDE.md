@@ -2,6 +2,19 @@
 
 日本株財務分析ツール。Claude Codeへの動作指示ファイル。プロジェクト目的・方針は [VISION.md](docs/VISION.md) を参照。
 
+## デプロイ環境（最重要）
+
+**本プロジェクトは [Render](https://render.com/) にデプロイ済みで稼働中**。DB は **Supabase PostgreSQL**（外部）。
+新機能・改修は必ず Render Free プランの制約を前提に設計すること（メモリ 512MB・スピンダウン 15 分・SSH 不可）。
+詳細は [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) を **必読**。
+
+主要ポイント（うっかり破らないために）:
+- マイグレーションは `init_db()` 内で **冪等** に実装（起動時に自動実行）
+- 永続化はすべて Supabase。ローカルファイル書き込みは再デプロイで消える
+- 長時間処理は `BackgroundTasks` + SSE 進捗配信（30 秒で HTTP タイムアウト）
+- 環境変数は `render.yaml` の `envVars` に追記し Render ダッシュボードで値を設定
+- 設定変更は GitHub `main` への push で自動デプロイ。ロールバックは Render ダッシュボードから可能
+
 ## GitHub 協調ワークフロー
 
 **デスクトップ版 Claude Code（ここ）とWeb版（claude.ai/code）が `kome-kome/financial_app` を介して協調する。**
@@ -101,6 +114,9 @@ python check.py                         # EDINET API接続テスト
 | `templates/collection.html` | 収集・スクリーニング画面（`/collection`） |
 | `templates/analysis.html` | 回帰・乖離分析画面（`/analysis`） |
 | `check.py` | EDINET API疎通確認用ワンショット |
+| `render.yaml` | Render デプロイ定義（IaC） |
+| `Procfile` | Render の起動コマンド（uvicorn 起動） |
+| `docs/DEPLOYMENT.md` | **Render デプロイ運用ガイド（必読）** |
 
 ## 収集フロー別進捗仕様
 
@@ -118,7 +134,7 @@ SSEエンドポイント: 収集=`/api/collect/stream`、市場データ=`/api/c
 ## 設計制約（変えてはいけないこと）
 
 - `upsert_financial` の入力: `{bs,pl,cf,derived,val}`。bs/pl/cfは`bs_`等プレフィックス付きでDBカラムにマップ、derived/valはそのまま。XBRL項目追加時は`XBRL_MAP`（collector.py）と`FinancialRecord`（database.py）の両方を更新。
-- `ols()`（`plugins/utils.py`）はPython単体実装。numpy/scipy不使用。
+- `ols()`（`plugins/utils.py`）は現状 Pure Python 実装だが、numpy/scipy/statsmodels/scikit-learn 等の成熟ライブラリの利用は **許可** されている（`docs/VISION.md` 「サードパーティーライブラリ採用基準」参照）。新規導入時は同基準に従い、PyPI DL 数・GitHub Stars・CVE 履歴を WebSearch で評価しユーザー承認を得ること。
 - CORS は `ALLOWED_ORIGIN` 環境変数で制御（デフォルト: `http://localhost:8000`）。本番は `.env` に正しいオリジンを設定すること。
 - `/api/gap-analysis` は `/api/regression` 実行後でないと404になる。
 - 認証ミドルウェアは `/api/auth/` プレフィックスを常に通過させる（ログインAPI自体を守ると詰まる）。
@@ -128,7 +144,7 @@ SSEエンドポイント: 収集=`/api/collect/stream`、市場データ=`/api/c
 ## 分析手法の既知問題・制約
 
 - **Zスコアは年度別に計算すること**。`calc_zscore_normalization` は年度を跨いで計算しない（異なるマクロ環境の年を混在させると比較が無意味になる）。内部的に `_calc_zscore_for_year(db, year)` を年度ごとに呼ぶ。
-- **gap_analysis の収束予測はヒューリスティック**。`half_life = abs(gap)/2`・`conv_score = 50 + gap×0.8` は統計的根拠なし。UIに「参考値」と必ず明示すること。
+- **gap_analysis の収束予測**: 履歴 ≥ 8 観測の銘柄は `statsmodels` ARIMA(1,0,0) による AR(1) MLE で半減期を推定（`HL = -ln(2)/ln(φ)`）。履歴不足の銘柄はヒューリスティック（`half_life = |gap|/2`）にフォールバックする。`conv_score = 50 + gap×0.8` は引き続きヒューリスティックなので「参考値」として扱うこと。出力の `method` フィールドで AR(1) / ヒューリスティックの判別が可能。
 - **成長率計算は (edinet_code, year, period_end) で副ソート**済み。同年複数レコードがある企業の前期比が不定にならないようにしている。
 - **フリーCF = 営業CF + 投資CF**（設備投資以外の投資活動も含む近似値）。
 - **市場データの株数推計** = `total_equity / bps`（発行済株式数の近似）。IFRS・JGAAP混在時に精度が下がる場合あり。

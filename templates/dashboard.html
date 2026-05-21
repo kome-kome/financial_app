@@ -16,6 +16,15 @@ body{font-family:'Segoe UI',sans-serif;background:#0f1117;color:#e2e8f0;min-heig
 .container{padding:28px 24px;max-width:1100px;margin:0 auto}
 .section-title{font-size:13px;font-weight:600;color:#64748b;text-transform:uppercase;letter-spacing:.8px;margin-bottom:14px}
 .stats-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:28px}
+@media (max-width: 768px){
+  .stats-grid{grid-template-columns:1fr 1fr}
+  .nav-grid{grid-template-columns:1fr}
+  .sched-grid{grid-template-columns:1fr 1fr}
+}
+@media (max-width: 480px){
+  .stats-grid{grid-template-columns:1fr}
+  .sched-grid{grid-template-columns:1fr}
+}
 .stat-card{background:#1a1d2e;border:1px solid #2d3154;border-radius:10px;padding:18px;text-align:center;position:relative;display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:128px}
 .stat-card.warn{border-color:#92400e}
 .stat-card.alert{border-color:#991b1b}
@@ -244,6 +253,8 @@ function esc(s){return String(s??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').
 function showNotif(msg, type='error'){
   const el = document.createElement('div');
   el.textContent = msg;
+  el.setAttribute('role', type==='error' ? 'alert' : 'status');
+  el.setAttribute('aria-live', type==='error' ? 'assertive' : 'polite');
   const bg = type==='error' ? '#ef4444' : type==='success' ? '#10b981' : '#3b82f6';
   el.style.cssText = `position:fixed;bottom:20px;right:20px;z-index:9999;padding:10px 16px;border-radius:6px;font-size:13px;color:#fff;max-width:420px;background:${bg};box-shadow:0 4px 12px rgba(0,0,0,.4)`;
   document.body.appendChild(el);

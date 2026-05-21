@@ -8,20 +8,24 @@
     - BS 系  : bs_bps     (BPS = 純資産     ÷ 発行株数)
     - CF 系  : cf_ops_ps  (営業CF ÷ 発行株数 ← 計算カラム)
     - 配当   : dps        (1株配当)
+    - 業種固定効果（オプション）: One-hot ダミー変数（k-1 個、最初の業種を基準）
 
   OLS 係数の意味
     β_eps ≈ implied P/E 倍率
     β_bps ≈ implied P/B 倍率（簿価 1 円が株価何円に反映されるか）
     β_cf  ≈ implied Price/CF 倍率
     β_dps ≈ implied 配当割引倍率
+    β_sector_i ≈ 業種 i の基準業種に対する超過 log 価格水準（業種定数項）
 
   MECE 分類
     フロー (PL/CF) : pl_eps, cf_ops_ps
     ストック (BS)  : bs_bps
     配当           : dps
+    業種定数項     : 業種固定効果（FUTURE_TASKS Tier 2-A）
 """
 import math
 import statistics
+from collections import Counter
 from typing import Any
 from .base import AnalysisPlugin
 from .utils import normalize, normalize_transform, ols, kfold_cv, winsorize, LOG_PRED_CAP
@@ -45,6 +49,9 @@ FEATURE_LABELS = {
 # NULL を 0 で補完するフィールド（ゼロが経済的に自然）
 NULLABLE_AS_ZERO = {"dps", "cf_ops_ps"}
 
+# 業種ダミーを採用する最低サンプル数（小規模業種は基準に統合する過学習対策）
+SECTOR_FE_MIN_SAMPLES = 5
+
 
 class TotalReturnPlugin(AnalysisPlugin):
     name = "total_return"
@@ -61,6 +68,15 @@ class TotalReturnPlugin(AnalysisPlugin):
                 "type": "bool",
                 "label": "CF因子を使用（1株営業CF）",
                 "default": True,
+            },
+            "use_sector_fe": {
+                "type": "bool",
+                "label": "業種固定効果を使用（業種ダミー変数）",
+                "default": True,
+                "description": (
+                    f"業種別の P/E・P/B 水準差を捉える。サンプル数 {SECTOR_FE_MIN_SAMPLES} 未満の"
+                    "業種は基準業種に統合（過学習防止）。"
+                ),
             },
             "n_folds": {
                 "type": "slider",
@@ -86,6 +102,7 @@ class TotalReturnPlugin(AnalysisPlugin):
         from database import FinancialRecord
 
         use_cf        = params.get("use_cf", True)
+        use_sector_fe = params.get("use_sector_fe", True)
         n_folds       = int(params.get("n_folds", 5))
         top_n         = int(params.get("top_n", 20))
         min_div_yield = float(params.get("min_div_yield") or 0.0)
@@ -111,7 +128,16 @@ class TotalReturnPlugin(AnalysisPlugin):
             )
 
         def shares_outstanding(r) -> float | None:
-            """発行済株式数を推計（純資産 ÷ BPS）"""
+            """発行済株式数を推計（純資産 ÷ BPS）。
+
+            精度低下が起こる条件（CLAUDE.md 既知事項を補強）:
+              - IFRS と JGAAP で「純資産」「BPS」の定義が微妙に異なる場合
+                （IFRS は親会社株主帰属持分、JGAAP は連結純資産が分母）
+              - 期中の増資・自己株消却で BPS と純資産の比が日次でずれている場合
+              - 優先株・転換社債が存在し普通株数と乖離する場合
+            根本対応案（FUTURE_TASKS.md）: J-Quants `/markets/listed/info` の
+            IssuedShares フィールドから正規の発行済株式数を取得して直接利用する。
+            """
             eq = r.bs_total_equity
             bps = r.bs_bps
             if eq and bps and bps > 0:
@@ -158,8 +184,41 @@ class TotalReturnPlugin(AnalysisPlugin):
                 "財務データ収集を先に実行してください。"
             )
 
+        # ─── 業種固定効果（One-hot ダミー）─────────────────────────────────
+        # サンプル数 ≥ SECTOR_FE_MIN_SAMPLES の業種のみダミー化。
+        # 最初の業種を基準（dropped baseline）として OLS の多重共線性を避ける。
+        sector_dummies: list[str] = []
+        sector_baseline: str | None = None
+        if use_sector_fe:
+            industry_counts = Counter(
+                (r.industry or "未分類") for _, _, r in valid_records
+            )
+            eligible = sorted(
+                ind for ind, c in industry_counts.items()
+                if c >= SECTOR_FE_MIN_SAMPLES
+            )
+            if len(eligible) >= 2:
+                sector_baseline = eligible[0]
+                sector_dummies = eligible[1:]
+
+        def encode_sector(r) -> list[float]:
+            """業種ダミーベクトル。基準業種は全ゼロ、それ以外はその業種のみ 1。"""
+            if not sector_dummies:
+                return []
+            ind = r.industry or "未分類"
+            return [1.0 if ind == d else 0.0 for d in sector_dummies]
+
+        # 各サンプルに業種ダミーを追加
+        valid_records_extended = []
+        for row, sp, rec in valid_records:
+            sec_row = encode_sector(rec)
+            valid_records_extended.append((row + sec_row, sp, rec))
+        valid_records = valid_records_extended
+
         samples = [(vr[0], vr[1]) for vr in valid_records]
-        n_feat = len(features)
+        # 特徴量名一覧（係数表示用）
+        all_feature_names = list(features) + [f"sector_{d}" for d in sector_dummies]
+        n_feat = len(all_feature_names)
 
         # ─── k-fold CV ───────────────────────────────────────────────────────
         # 株価も対数正規分布に近い（分布の裾が重い）ため log 正規化を使用
@@ -243,7 +302,7 @@ class TotalReturnPlugin(AnalysisPlugin):
         for i, item in enumerate(ranking):
             item["rank"] = i + 1
 
-        # 係数の解釈（implied 倍率として表示）
+        # 係数の解釈（implied 倍率として表示。業種ダミーは別出力）
         feature_weights = {}
         for fi, feat in enumerate(features):
             b = beta[fi + 1]
@@ -266,8 +325,21 @@ class TotalReturnPlugin(AnalysisPlugin):
                 "interpretation": interp,
             }
 
+        # 業種固定効果の係数（基準業種に対する log 価格水準の差）
+        sector_effects: list[dict] = []
+        offset = len(features) + 1  # 切片 + 財務特徴量
+        for si, d in enumerate(sector_dummies):
+            sector_effects.append({
+                "industry": d,
+                "log_premium": round(beta[offset + si], 4),
+            })
+
         mean_r2   = round(statistics.mean(f["r2"] for f in cv_results), 4) if cv_results else None
         mean_rmse = round(statistics.mean(f["rmse_pct"] for f in cv_results), 2) if cv_results else None
+
+        model_note = "目的変数=株価[円/株]、説明変数=EPS/BPS/CF/DPS[円/株]"
+        if sector_dummies:
+            model_note += f" + 業種ダミー {len(sector_dummies)} 個（基準: {sector_baseline}）"
 
         return {
             "cv_metrics": {
@@ -276,7 +348,7 @@ class TotalReturnPlugin(AnalysisPlugin):
                 "mean_rmse_pct": mean_rmse,
                 "n_samples":     len(samples),
                 "cv_type":       "k-fold 横断的CV（銘柄間バイアス除去）",
-                "model_note":    "目的変数=株価[円/株]、説明変数=EPS/BPS/CF/DPS[円/株]",
+                "model_note":    model_note,
             },
             "feature_weights": feature_weights,
             "feature_groups": {
@@ -284,6 +356,12 @@ class TotalReturnPlugin(AnalysisPlugin):
                 "cf":  [f for f in features if f in CF_FEATURES],
                 "bs":  [f for f in features if f in BS_FEATURES],
                 "div": [f for f in features if f in DIV_FEATURES],
+            },
+            "sector_fixed_effects": {
+                "enabled":   bool(sector_dummies),
+                "baseline":  sector_baseline,
+                "effects":   sector_effects,
+                "n_dummies": len(sector_dummies),
             },
             "ranking":         ranking,
             "n_total_samples": len(samples),

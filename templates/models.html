@@ -89,7 +89,7 @@ td code{background:#0f172a;border:1px solid #1e2235;padding:1px 5px;border-radiu
     <div class="toc-sub"><a href="#m1">Ohlsonモデル型OLS</a></div>
     <a href="#m2">2. 業種別OLS回帰</a>
     <a href="#m3">3. 乖離分析</a>
-    <div class="toc-sub"><a href="#m3">OU過程ヒューリスティック</a></div>
+    <div class="toc-sub"><a href="#m3">AR(1) MLE + フォールバック</a></div>
     <a href="#m4">4. 株価リターン予測</a>
     <div class="toc-sub"><a href="#m4">月次WF-CV</a></div>
     <a href="#m5">5. 横断的Zスコア正規化</a>
@@ -119,10 +119,37 @@ td code{background:#0f172a;border:1px solid #1e2235;padding:1px 5px;border-radiu
     </tbody>
   </table>
 
-  <h3>OLS実装（Pure Python）</h3>
+  <h3>OLS実装（numpy + scipy + statsmodels）</h3>
   <div class="formula-block"><span class="var">β</span> = (<span class="var">X</span>'<span class="var">X</span>)⁻¹ <span class="var">X</span>'<span class="var">y</span>  <span class="comment"># 正規方程式</span>
-逆行列: Gauss-Jordan 消去法（numpy 不使用）
-返り値: beta, yhat, r2, adj_r2, rmse, mae</div>
+最小二乗法: numpy.linalg.lstsq（SVD ベース、数値安定）
+p値計算:    scipy.stats.t.sf（df &lt; 30 でも正確）
+詳細診断:   statsmodels.OLS（Durbin-Watson・Jarque-Bera・F検定・HC3 SE）
+返り値: beta, yhat, r2, adj_r2, rmse, mae, se, t_stat, p_value, df, rank, condition_number</div>
+
+  <h3>係数の有意性（標準誤差・t統計量・p値）</h3>
+  <div class="formula-block"><span class="var">σ²</span> = SSE / (n - p)                 <span class="comment"># 残差分散</span>
+Var(<span class="var">β</span><span class="sym">ᵢ</span>) = <span class="var">σ²</span> × [(X'X)⁻¹]<span class="sym">ᵢᵢ</span>          <span class="comment"># 係数の分散</span>
+SE(<span class="var">β</span><span class="sym">ᵢ</span>)  = √Var(<span class="var">β</span><span class="sym">ᵢ</span>)                <span class="comment"># 標準誤差</span>
+<span class="var">tᵢ</span>      = <span class="var">β</span><span class="sym">ᵢ</span> / SE(<span class="var">β</span><span class="sym">ᵢ</span>)               <span class="comment"># t統計量</span>
+<span class="var">pᵢ</span>      = 2 × (1 - Φ(|<span class="var">tᵢ</span>|))            <span class="comment"># 両側p値（df ≥ 30）</span></div>
+  <p>df = n − p。p 値は <code>scipy.stats.t.sf</code> による正確な計算で、df &lt; 30 の小サンプルでも信頼できる。慣例的に p &lt; 0.05 を有意とみなす。</p>
+
+  <h3>詳細統計診断（statsmodels）</h3>
+  <div class="formula-block">Durbin-Watson:  残差自己相関の検定（1.5〜2.5 なら問題なし）
+Jarque-Bera:    残差正規性（歪度・尖度）
+F統計量・p値:    モデル全体の有意性検定
+HC3 SE:          不均一分散に対応したロバスト標準誤差</div>
+  <p>業種別 OLS の結果に <code>diagnostics</code> フィールドとして含まれる。</p>
+
+  <h3>多重共線性チェック（VIF・Pearson相関）</h3>
+  <div class="formula-block">VIF<span class="sym">ᵢ</span> = 1 / (1 - R²<span class="sym">ᵢ</span>)
+  <span class="comment"># R²ᵢ は特徴量 i を残りで回帰したときの決定係数</span></div>
+  <p>慣例: <strong>VIF &gt; 10</strong> または <strong>|Pearson r| &gt; 0.9</strong> で多重共線性ありと判断。業種別OLS結果に <code>collinearity_warnings</code> として併記される。</p>
+
+  <h3>Ridge 回帰（L2 正則化）</h3>
+  <div class="formula-block"><span class="var">β</span><span class="sym">ridge</span> = arg min ‖<span class="var">X</span><span class="var">β</span> - <span class="var">y</span>‖² + <span class="var">α</span>‖<span class="var">β</span>‖²
+  <span class="comment"># 最適 α は CV で自動選択</span></div>
+  <p>業種別 OLS の <code>regularization="ridge"</code> パラメータで切替可能。多重共線性が顕著な業種では予測安定性が向上するが、SE / t / p 値は定義されない（NaN）。実装は <code>sklearn.linear_model.RidgeCV</code>。</p>
 </div>
 
 <!-- ── Model 1 ── -->
@@ -165,14 +192,21 @@ y_raw → log変換 → z-score正規化 → y_norm
       <tr><td><code>β₂</code> (BPS)</td><td>implied P/B 倍率</td><td>無次元</td></tr>
       <tr><td><code>β₃</code> (CF)</td><td>implied Price/CF 倍率</td><td>無次元</td></tr>
       <tr><td><code>β₄</code> (DPS)</td><td>implied 配当割引倍率</td><td>無次元</td></tr>
+      <tr><td><code>β_sector_i</code></td><td>業種 i の基準業種に対する log 価格水準差</td><td>log 単位</td></tr>
     </tbody>
   </table>
   <p>係数が経済的に意味を持つのは、説明変数と被説明変数の次元が全て [円/株] で一致しているため。</p>
+
+  <h3>業種固定効果（オプション・デフォルト ON）</h3>
+  <div class="formula-block"><span class="var">ŷ</span> = <span class="var">β</span>₀ + <span class="var">β</span>₁·EPS + <span class="var">β</span>₂·BPS + <span class="var">β</span>₃·CF + <span class="var">β</span>₄·DPS + Σⱼ <span class="var">β</span><span class="sym">sector_j</span> · 1{industry = j}</div>
+  <p>業種ごとの P/E・P/B 水準差を One-hot ダミー変数（最初の業種を基準としてドロップ）で吸収。サンプル数 ≥ 5 の業種のみダミー化（過学習防止）。シミュレーション検証で R² 0.83 → 0.97 に改善。</p>
 
   <h3>主要パラメータ</h3>
   <table>
     <thead><tr><th>パラメータ</th><th>デフォルト</th><th>説明</th></tr></thead>
     <tbody>
+      <tr><td><code>use_cf</code></td><td>True</td><td>CF因子（1株営業CF）を使用するか</td></tr>
+      <tr><td><code>use_sector_fe</code></td><td>True</td><td>業種固定効果（ダミー変数）を使用するか</td></tr>
       <tr><td><code>n_folds</code></td><td>5</td><td>横断的 k-fold 分割数</td></tr>
       <tr><td><code>top_n</code></td><td>20</td><td>上位表示件数</td></tr>
       <tr><td><code>LOG_PRED_CAP</code></td><td>15.0</td><td>予測値の log-space 上限（≈ 3.3百万円）</td></tr>
@@ -180,7 +214,7 @@ y_raw → log変換 → z-score正規化 → y_norm
   </table>
 
   <div class="warn-box">
-    <strong>限界:</strong> 業種固定効果なし — 全業種一括回帰のため横断的 R² は構造的に低い（−0.1 〜 0.4 程度）。R² &lt; 0 はモデルが無価値であることを意味しない。発行株式数の推計は近似値（IFRS/JGAAP 混在時に精度低下）。
+    <strong>限界:</strong> 発行株式数の推計は近似値（IFRS/JGAAP 混在時に精度低下）。J-Quants の <code>IssuedShares</code> 取得は FUTURE_TASKS Tier 2-G として残課題。
   </div>
 
   <div class="refs">
@@ -246,37 +280,41 @@ gap_ratio = (ŷ − y_actual) / y_actual × 100  <span class="sym">[%]</span>
 
 <!-- ── Model 3 ── -->
 <div class="model-section" id="m3">
-  <h2>3. 乖離分析 <span class="model-tag">OU過程ヒューリスティック</span></h2>
+  <h2>3. 乖離分析 <span class="model-tag">AR(1) MLE + フォールバック</span></h2>
   <span class="file-tag">plugins/gap_analysis.py</span>
 
-  <p>業種別OLSが推定した理論値と実際の時価総額の乖離率を表示し、OU過程を単純化した収束予測を付加する。</p>
+  <p>業種別OLSが推定した理論値と実際の時価総額の乖離率を表示し、各銘柄の年次 gap_ratio 履歴に対して <code>statsmodels</code> の AR(1) モデルを MLE 推定して半減期を計算する。履歴が 8 観測未満の銘柄はヒューリスティックにフォールバック。</p>
 
-  <div class="warn-box">
-    <strong>重要:</strong> 収束予測部分は統計的根拠のないヒューリスティックであり、UI 上は「参考値」として表示する。投資判断の主要根拠として使用すべきでない。
-  </div>
+  <h3>AR(1) MLE による半減期推定（推奨パス）</h3>
+  <div class="formula-block"><span class="var">x</span><span class="sym">t</span> = c + <span class="var">φ</span> <span class="var">x</span><span class="sym">t-1</span> + <span class="var">ε</span><span class="sym">t</span>,   <span class="var">ε</span><span class="sym">t</span> ~ N(0, σ²)
 
-  <h3>収束予測のヒューリスティック</h3>
-  <div class="formula-block"><span class="comment"># half-life の決定（ヒューリスティック）</span>
-half_life = max(<span class="val">6</span>, min(<span class="val">24</span>, |gap| / <span class="val">2</span>))  <span class="sym">[ヶ月]</span>
+<span class="comment"># 平均回帰条件</span>
+0 &lt; <span class="var">φ</span> &lt; 1
 
-<span class="comment"># n ヶ月後の期待乖離率（指数減衰）</span>
+<span class="comment"># 半減期</span>
+half_life = −ln(2) / ln(<span class="var">φ</span>)  <span class="sym">[年]</span></div>
+
+  <h3>フォールバック: ヒューリスティック（履歴不足時）</h3>
+  <div class="formula-block"><span class="comment"># 履歴 &lt; 8 観測または AR(1) 推定失敗時のみ使用</span>
+half_life = max(<span class="val">6</span>, min(<span class="val">24</span>, |gap| / <span class="val">2</span>))  <span class="sym">[ヶ月]</span></div>
+
+  <h3>共通: 期待乖離率と収束スコア</h3>
+  <div class="formula-block"><span class="comment"># n ヶ月後の期待乖離率（指数減衰）</span>
 <span class="var">gap_t</span> = gap₀ × exp(−ln(2) / half_life × t)
 
 <span class="comment"># 収束スコア（参考値、0–100スケール）</span>
 conv_score₁₂ₘ = max(<span class="val">5</span>, min(<span class="val">95</span>, 50 + gap₀ × 0.8))</div>
 
-  <h3>本来のOU過程（参考）</h3>
-  <div class="formula-block">dX_t = κ(θ − X_t) dt + σ dW_t
-
-<span class="var">θ</span>: 長期均衡値（= 0 と仮定）
-<span class="var">κ</span>: 平均回帰速度  →  half_life = ln(2) / κ
-<span class="var">σ</span>: ボラティリティ
-
-<span class="comment"># 本実装では κ を |gap|/2 から簡易算出（ML推定なし）</span></div>
-
   <div class="info-box">
-    <strong>改善余地:</strong> gap_ratio の時系列が十分に蓄積されれば、κ・σ の最尤推定に置き換え可能。現状は参考値にとどまる。
+    <strong>出力:</strong> 各レコードに <code>method</code>（"ar1" / "heuristic"）、<code>ar1_phi</code>、<code>n_history</code> を併記。レスポンス全体に <code>n_ar1_estimated</code> / <code>n_heuristic_fallback</code> のサマリを返す。
   </div>
+
+  <h3>OU過程との対応</h3>
+  <div class="formula-block">dX_t = κ(θ − X_t) dt + σ dW_t   <span class="comment"># 連続時間 OU</span>
+
+<span class="comment"># 離散時間 AR(1) との対応（Δt = 1 年）</span>
+<span class="var">φ</span> = exp(−κ Δt)
+κ = −ln(<span class="var">φ</span>)</div>
 
   <div class="refs">
     <h4>参考文献</h4>
@@ -425,10 +463,16 @@ step_months      = <span class="val">3</span>
   <p>各指標の Zスコアを重み付け線形結合してスコアを計算し、企業をランキングする。</p>
 
   <h3>スコア計算式</h3>
-  <div class="formula-block"><span class="var">score_i</span> = Σⱼ (weight_j × z_metric_j_i)
+  <div class="formula-block"><span class="var">score_i</span> = Σⱼ∈present (weight_j × z_metric_j_i) / Σⱼ∈present |weight_j|
 
+present     : 企業 i において値が NULL でない指標の集合
 weight_j    : 指標 j の重み（ユーザー設定）
 z_metric_j_i: 企業 i の指標 j の Zスコア（年度別正規化済み）</div>
+  <p><strong>weighted mean</strong> で計算するため、指標カバレッジが異なる銘柄を公平に比較できる。</p>
+
+  <h3>カバレッジフィルタ</h3>
+  <div class="formula-block"><span class="var">coverage_i</span> = Σⱼ∈present |weight_j| / Σⱼ |weight_j|</div>
+  <p><code>min_coverage</code>（デフォルト 0.5）未満の企業はランキングから除外する。<code>1.0</code> 指定で全指標が揃った企業のみ対象。</p>
 
   <h3>プリセット定義</h3>
   <table>
