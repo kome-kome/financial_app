@@ -40,10 +40,13 @@ Render ダッシュボードで管理。
 - 15 分間アクセスがないとインスタンスが停止する
 - 次回アクセス時に **コールドスタート**（数秒〜数十秒）が発生
 - バックグラウンドのスケジューラー（`api.py:_daily_scheduler`）は
-  **スピンダウンすると停止する**。深夜の自動収集を確実に動かすには:
-  - **(A)** 有料プラン（$7/月で常時稼働）にアップグレード
-  - **(B)** Render Cron Jobs（別 service として定義）で起こす
-  - **(C)** 外部の cron-as-a-service（cron-job.org 等）で 14 分おきに `/health` を叩く
+  **スピンダウンすると停止する**。深夜の自動収集を補完する仕組みとして:
+  - **`_startup_catchup` (実装済み)**: スピンアップ時に「最終自動収集から 22h 以上経過していたら
+    差分収集を非同期実行」する。詳細は `api.py:_startup_catchup`
+  - **GitHub Actions keepalive (実装済み)**: `.github/workflows/keepalive.yml` が 10 分間隔で
+    `/health` を叩いてスピンダウンを防ぐ。実装詳細は本ファイル下の「スピンダウン対策」セクション
+  - **代替案**: 有料プラン($7/月で常時稼働) / Render Cron Jobs (別 service として定義) /
+    外部 cron-as-a-service (cron-job.org・UptimeRobot 等)
 
 ### 3. シェルアクセスなし
 - SSH 接続は不可。デバッグは **Render ダッシュボードのログ閲覧** のみ
@@ -113,9 +116,41 @@ Render ダッシュボードで管理。
 ## 既知の運用 Tips
 
 ### スピンダウン対策
-無料プランでバックグラウンドジョブを確実に動かしたい場合、外部の cron-job.org 等から
-`/health` を 14 分おきに叩いて起き続けさせる方法が現実的。コストゼロ。
-ただし無料プランの 750 時間 / 月 を消費する点に注意（常時稼働で 720 時間/月）。
+
+#### A. GitHub Actions keepalive（採用中）
+
+`.github/workflows/keepalive.yml` が `*/10 * * * *`（10 分間隔）で `/health` に GET を投げる。
+リポジトリ内で完結し外部サービスのアカウント不要。コストはパブリックリポジトリなら無料、
+プライベートでも月 60 分 / 月 程度の Actions 時間しか消費しない。
+
+**動作確認:**
+1. GitHub リポジトリの `Actions` タブ → `Keepalive ping` ワークフローを選択
+2. 「Run workflow」ボタンで手動実行できる（`workflow_dispatch` 対応済み）
+3. 実行履歴で HTTP 200 が返っていれば成功
+
+**本番 URL の変更:**
+リポジトリの `Settings` → `Secrets and variables` → `Actions` → `Variables` タブで
+`PING_URL` を追加すると上書きできる。未設定時は `https://financial-app.onrender.com/health` を使用。
+
+**注意点:**
+- GitHub Actions の scheduled workflow は実行が遅延することがある
+  （公式: "can be delayed during periods of high loads"）。10 分間隔で運用していれば
+  最悪 25 分程度の間隔になっても許容範囲だが、スピンダウンに引っかかる可能性はゼロではない。
+  確実性が必要なら有料プランまたは外部 cron に切り替える
+- リポジトリに 60 日間 push がないと scheduled workflow が自動無効化される。
+  この場合 Actions タブから「Enable workflow」ボタンで再有効化が必要
+- 無料プランの 750 時間 / 月 を消費するため、常時稼働で 720 時間/月を超えない設計
+
+#### B. 外部 cron-as-a-service（代替案）
+
+GitHub Actions の遅延が許容できない場合、cron-job.org / UptimeRobot 等の外部サービスを使う:
+
+1. アカウント作成（無料プラン）
+2. ジョブ追加: URL = `https://financial-app.onrender.com/health` / Schedule = `*/14 * * * *`
+3. タイムアウト 60 秒（コールドスタート分の余裕）
+4. 失敗通知をメール等で受け取る設定
+
+cron-job.org は最小 1 分間隔、UptimeRobot は最小 5 分間隔の HTTPS チェックが無料で可能。
 
 ### ログ閲覧
 Render ダッシュボード → 該当サービス → "Logs" タブで stdout/stderr をストリーミング閲覧。
