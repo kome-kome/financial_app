@@ -55,6 +55,7 @@ graph LR
         CO[("companies\n企業マスタ\n約4,000社")]
         FR[("financial_records\n財務データ\nBS / PL / CF")]
         SPH[("stock_price_history\n日次株価履歴\nOHLCV")]
+        MD[("macro_data\n為替・金利・指数\nコモディティ")]
         CL[("collection_logs\n収集ジョブログ")]
     end
 
@@ -97,6 +98,7 @@ graph TD
         C4["収集を途中で停止"]
         C5["個別企業の再取得"]
         C6["自動スケジューラーの\nON/OFF切替"]
+        C7["マクロデータ収集\n為替・金利・指数・コモディティ"]
     end
 
     subgraph VIEW["🗃️ データ閲覧"]
@@ -142,8 +144,9 @@ graph TD
 
 ## 3. データベース設計（ER図）
 
-> 4つのテーブルの構造と主要カラム、テーブル間の関係を示します。
+> 5つのテーブルの構造と主要カラム、テーブル間の関係を示します。
 > `||--o{` は「1対多」（1社に対して複数の財務レコードが存在する）を意味します。
+> `macro_data` は企業に紐づかない独立テーブル（マクロ環境データ）です。
 
 ```mermaid
 erDiagram
@@ -230,6 +233,20 @@ erDiagram
         int      records_saved        "保存レコード数"
         int      errors_count         "エラー件数"
         text     message              "補足メッセージ"
+    }
+
+    macro_data {
+        int      id           PK "自動採番ID"
+        string   series_code     "系列コード（USDJPY/US10Y/NIKKEI225 等）"
+        string   series_name     "表示名"
+        string   category        "fx / rate / equity / commodity"
+        string   trade_date      "取引日（YYYY-MM-DD）"
+        float    open            "始値"
+        float    high            "高値"
+        float    low             "安値"
+        float    close           "終値（NOT NULL）"
+        float    volume          "出来高（FX/金利系は NULL）"
+        datetime created_at      "登録日時"
     }
 
     companies         ||--o{  financial_records    : "1社 → 複数年度の財務データ"
@@ -787,6 +804,15 @@ graph LR
         C16["GET /api/collect/market-coverage\n株価データ収録状況"]
         C17["GET /api/collect/data-quality\nNULL率・外れ値チェック"]
         C18["POST /api/collect/industry\nJPX Excelから業種データを更新"]
+        C19["POST /api/collect/macro/start\nマクロデータ収集（為替・金利・指数・コモディティ）"]
+        C20["POST /api/collect/macro/stop\nマクロ収集を停止"]
+        C21["GET /api/collect/macro/status\nマクロ収集の状態"]
+        C22["GET /api/collect/macro/stream\nSSE: マクロ収集進捗"]
+    end
+
+    subgraph MACRO["🌐 マクロデータ /api/macro/"]
+        MA1["GET /api/macro/series\n系列カバレッジ一覧（件数・最古日・最新日）"]
+        MA2["GET /api/macro/data/{series_code}\n指定系列の日次データ（OHLCV）"]
     end
 
     subgraph SCHED["⏰ スケジューラー /api/scheduler/"]
@@ -869,8 +895,8 @@ graph TB
 | ファイル | 種別 | 役割 | 主な依存先 |
 |---|---|---|---|
 | `api.py` | バックエンド | REST API窓口・認証・SSE・スケジューラー | database.py, collector.py, plugins/ |
-| `database.py` | バックエンド | DBテーブル定義・upsert・成長率/Zスコア計算 | PostgreSQL |
-| `collector.py` | バックエンド | EDINET/stooq/JPXからデータ収集→DB保存 | EDINET API, stooq, JPX |
+| `database.py` | バックエンド | DBテーブル定義・upsert・成長率/Zスコア計算。5テーブル（Company / FinancialRecord / StockPriceHistory / MacroData / CollectionLog） | PostgreSQL |
+| `collector.py` | バックエンド | EDINET/stooq/JPX/マクロデータからデータ収集→DB保存。`MACRO_SERIES` で為替・金利・指数・コモディティ9系列を定義 | EDINET API, stooq, JPX |
 | `checker.py` | バックエンド | データ品質チェック（NULL率・外れ値・収録状況） | database.py |
 | `plugins/base.py` | バックエンド | 分析プラグインの抽象基底クラス | — |
 | `plugins/__init__.py` | バックエンド | プラグインを自動スキャン・レジストリ管理 | plugins/*.py |

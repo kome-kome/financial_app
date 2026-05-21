@@ -217,7 +217,29 @@ class CollectionLog(Base):
     message      = Column(Text)
 
 
-# ── 5. DB初期化 ────────────────────────────────────────────────────────────
+# ── 5. マクロデータ（為替・金利・指数・コモディティ） ──────────────────────
+
+class MacroData(Base):
+    __tablename__ = "macro_data"
+    __table_args__ = (
+        UniqueConstraint("series_code", "trade_date", name="uq_macro_series_date"),
+        Index("ix_macro_series_date", "series_code", "trade_date"),
+    )
+
+    id          = Column(Integer, primary_key=True, autoincrement=True)
+    series_code = Column(String(20), nullable=False)  # "USDJPY" / "TNX10Y" / "NIKKEI225" 等
+    series_name = Column(String(50))                  # 表示名（"USD/JPY"・"米10年金利" 等）
+    category    = Column(String(20))                  # "fx" / "rate" / "equity" / "commodity"
+    trade_date  = Column(String(10), nullable=False)  # "YYYY-MM-DD"
+    open        = Column(Float)
+    high        = Column(Float)
+    low         = Column(Float)
+    close       = Column(Float, nullable=False)
+    volume      = Column(Float)
+    created_at  = Column(DateTime, default=datetime.utcnow)
+
+
+# ── 6. DB初期化 ────────────────────────────────────────────────────────────
 
 def init_db():
     """テーブル作成・インデックス構築・カラムマイグレーション"""
@@ -243,7 +265,7 @@ def init_db():
         conn.commit()
 
 
-# ── 6. Upsert 処理 ─────────────────────────────────────────────────────────
+# ── 7. Upsert 処理 ─────────────────────────────────────────────────────────
 
 def upsert_company(db, data: dict) -> Company:
     obj = db.query(Company).filter_by(edinet_code=data["edinet_code"]).first()

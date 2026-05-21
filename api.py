@@ -58,10 +58,10 @@ def _verify_token(token: str) -> bool:
 
 from database import (
     SessionLocal, init_db,
-    Company, FinancialRecord, CollectionLog, StockPriceHistory,
+    Company, FinancialRecord, CollectionLog, StockPriceHistory, MacroData,
     calc_growth_rates, calc_zscore_normalization,
 )
-from collector import run_full_collection, refresh_company, update_market_data, collect_stock_price_history, collect_stock_price_history_jquants, update_industry_from_jpx
+from collector import run_full_collection, refresh_company, update_market_data, collect_stock_price_history, collect_stock_price_history_jquants, update_industry_from_jpx, collect_macro_data, MACRO_SERIES
 import plugins as plugin_registry
 
 
@@ -102,6 +102,12 @@ async def _daily_scheduler():
             calc_zscore_normalization(db)
             db.close()
             await update_market_data()
+            # マクロデータ（為替・金利・指数・コモディティ）も毎日更新
+            db2 = SessionLocal()
+            try:
+                await collect_macro_data(db2, years_back=5)
+            finally:
+                db2.close()
             _scheduler_status["last_status"] = "成功"
         except Exception as e:
             log.error("スケジューラーエラー: %s", e, exc_info=True)
@@ -195,6 +201,7 @@ _job_status: dict = {"running": False, "log": [], "progress": 0, "total": 0, "jo
 _market_status: dict = {"running": False, "progress": 0, "total": 0, "log": [], "cancel_requested": False}
 _history_status: dict  = {"running": False, "progress": 0, "total": 0, "log": [], "cancel_requested": False}
 _jquants_status: dict  = {"running": False, "progress": 0, "total": 0, "log": [], "cancel_requested": False}
+_macro_status:   dict  = {"running": False, "progress": 0, "total": 0, "log": [], "cancel_requested": False}
 
 class CollectRequest(BaseModel):
     years_back: int = Field(default=1, ge=1, le=5)
@@ -702,6 +709,120 @@ async def jquants_progress_stream():
     return StreamingResponse(_sse_stream(_jquants_status), media_type="text/event-stream", headers=_SSE_HEADERS)
 
 
+# ── マクロデータ収集（為替・金利・指数・コモディティ）─────────────────
+
+class MacroCollectRequest(BaseModel):
+    years_back: int  = Field(default=5, ge=1, le=20)
+    force:      bool = False
+
+@app.post("/api/collect/macro/start")
+async def start_macro_collection(req: MacroCollectRequest, background_tasks: BackgroundTasks):
+    if _macro_status["running"] and not req.force:
+        raise HTTPException(400, "マクロ収集ジョブが既に実行中です")
+    _macro_status.update({"running": True, "progress": 0, "total": 0, "log": [], "cancel_requested": False})
+
+    def on_progress(current, total, msg):
+        _macro_status["progress"] = current
+        _macro_status["total"]    = total
+        _macro_status["log"].append(msg)
+
+    def cancel_check():
+        return _macro_status.get("cancel_requested", False)
+
+    async def _run():
+        db = SessionLocal()
+        try:
+            await collect_macro_data(
+                db, req.years_back, on_progress=on_progress, cancel_check=cancel_check,
+            )
+        except Exception as e:
+            log.error(f"マクロ収集エラー: {e}")
+            _macro_status["log"].append(f"[エラー] {e}")
+        finally:
+            _macro_status["running"] = False
+            _macro_status["cancel_requested"] = False
+            db.close()
+
+    background_tasks.add_task(_run)
+    return {"message": "マクロデータ収集を開始しました"}
+
+@app.post("/api/collect/macro/stop")
+async def stop_macro_collection():
+    if not _macro_status["running"]:
+        raise HTTPException(400, "実行中のマクロ収集ジョブがありません")
+    _macro_status["cancel_requested"] = True
+    return {"message": "マクロ収集の停止リクエストを送信しました"}
+
+@app.get("/api/collect/macro/status")
+async def macro_collection_status():
+    return {
+        "running":     _macro_status["running"],
+        "progress":    _macro_status["progress"],
+        "total":       _macro_status["total"],
+        "recent_logs": _macro_status["log"][-20:],
+    }
+
+@app.get("/api/collect/macro/stream")
+async def macro_progress_stream():
+    return StreamingResponse(_sse_stream(_macro_status), media_type="text/event-stream", headers=_SSE_HEADERS)
+
+
+@app.get("/api/macro/series")
+async def list_macro_series(db: Session = Depends(get_db)):
+    """マクロ系列のカバレッジ一覧（系列ごとの件数・最新日・最古日）"""
+    rows = (
+        db.query(
+            MacroData.series_code,
+            MacroData.series_name,
+            MacroData.category,
+            func.count(MacroData.id).label("rows"),
+            func.min(MacroData.trade_date).label("oldest"),
+            func.max(MacroData.trade_date).label("newest"),
+        )
+        .group_by(MacroData.series_code, MacroData.series_name, MacroData.category)
+        .all()
+    )
+    by_code = {r.series_code: r for r in rows}
+    items = []
+    for s in MACRO_SERIES:
+        r = by_code.get(s["code"])
+        items.append({
+            "code":     s["code"],
+            "name":     s["name"],
+            "category": s["category"],
+            "ticker":   s["ticker"],
+            "rows":     int(r.rows) if r else 0,
+            "oldest":   r.oldest if r else None,
+            "newest":   r.newest if r else None,
+        })
+    return {"series": items}
+
+
+@app.get("/api/macro/data/{series_code}")
+async def get_macro_data(series_code: str, days: int = 365, db: Session = Depends(get_db)):
+    """指定系列の日次データを最新 days 日分返す"""
+    # ホワイトリスト検証（MACRO_SERIES に定義されたコードのみ受理）
+    if series_code not in {s["code"] for s in MACRO_SERIES}:
+        raise HTTPException(404, "未知の系列コードです")
+    if not (1 <= days <= 10000):
+        raise HTTPException(400, "days は 1〜10000 の範囲で指定してください")
+    rows = (
+        db.query(MacroData)
+        .filter(MacroData.series_code == series_code)
+        .order_by(MacroData.trade_date.desc())
+        .limit(days)
+        .all()
+    )
+    return {
+        "series_code": series_code,
+        "rows": [
+            {"trade_date": r.trade_date, "open": r.open, "high": r.high,
+             "low": r.low, "close": r.close, "volume": r.volume}
+            for r in reversed(rows)
+        ],
+    }
+
+
 # ── 統計サマリー ─────────────────────────────────────────────────────────
 
 @app.get("/api/stats")
@@ -1201,6 +1322,7 @@ _DB_VIEWER_TABLES = {
     "companies":           Company,
     "financial_records":   FinancialRecord,
     "stock_price_history": StockPriceHistory,
+    "macro_data":          MacroData,
     "collection_logs":     CollectionLog,
 }
 

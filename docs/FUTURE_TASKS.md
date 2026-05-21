@@ -12,6 +12,19 @@
 | ルックアヘッドバイアスなし設計 | `plugins/price_predictor.py` |
 | プラグインとして `/api/plugins/price-predictor` で実行可能 | `api.py` + `plugins/price_predictor.py` |
 
+### マクロデータ取り込み基盤（外部市場環境データ）
+
+| 項目 | 実装場所 |
+|---|---|
+| `macro_data` テーブル（series_code+trade_date でユニーク） | `database.py` |
+| 9系列（USD/JPY・EUR/JPY・米日10年金利・日経/TOPIX/S&P500・WTI/金） | `collector.py` の `MACRO_SERIES` |
+| stooq から日次OHLCV取得 | `collector.py` の `fetch_stooq_history()` / `collect_macro_data()` |
+| 収集・停止・進捗API（SSE） | `/api/collect/macro/{start,stop,status,stream}` |
+| 系列カバレッジ・時系列取得API | `/api/macro/series` / `/api/macro/data/{series_code}` |
+| スケジューラ統合（毎日3時に自動取得） | `api.py` の `_daily_scheduler` |
+| `collection.html`「株価・市場データ」タブ内のマクロ収集UI | `templates/collection.html` |
+| DBビューア（`/db`）にも `macro_data` を統合 | `api.py` の `_DB_VIEWER_TABLES` |
+
 ---
 
 ## 未実装の課題
@@ -38,6 +51,15 @@
 ---
 
 ### Tier 3 — 機能追加
+
+#### Macro. マクロ要因を組み込んだ分析モデル
+- **問題**: マクロデータ（金利・為替）取り込み基盤は完成したが、これを使った分析モデルがまだない
+- **改善案**: 既存プラグイン（`recommend.py` / `total_return.py` / `price_predictor.py`）に
+  マクロ特徴量を追加（例: 10年金利水準・USDJPY変動率を特徴量として）
+- **前提**: 過去5年のマクロデータがDB蓄積されていること（`/api/collect/macro/start` で取得）
+- **実装場所**: `plugins/utils.py`（マクロ特徴量取得関数）、各プラグイン
+- **設計留意**: マクロ系列は財務データと頻度が違う（日次 vs 年次）。決算月の前後Nヶ月の
+  値や前年同月比などに変換してから OLS 特徴量に投入する必要がある
 
 #### D. バックテスト機能
 - **問題**: `recommend.py` / `total_return.py` のランキングが「将来パフォーマンスで評価する」と
