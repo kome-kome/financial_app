@@ -44,7 +44,7 @@ graph LR
 
     subgraph SERVER["🖥️ サーバー（Python / FastAPI）"]
         direction TB
-        API["⚡ api.py\nFastAPI\n・REST API 窓口\n・収集ジョブ管理\n・認証（Bearer Token）\n・SSEリアルタイム配信\n・スケジューラー（毎日3時）"]
+        API["⚡ api.py\nFastAPI\n・REST API 窓口\n・収集ジョブ管理\n・認証（Bearer Token）\n・SSEリアルタイム配信\n・スケジューラー（毎日3時）\n・起動時キャッチアップ（Render Free 対策）"]
         COL["🔄 collector.py\nデータ収集エンジン\n・EDINET書類取得・解析\n・stooq株価取得\n・株価履歴（日次OHLCV）収集\n・JPX業種補完"]
         CHK["🔍 checker.py\nデータ品質チェック\n・NULL率集計\n・外れ値検出\n・収録状況確認"]
         PLG["🧩 plugins/\n分析プラグイン群\n・OLS回帰分析\n・乖離分析\n・Zスコア推薦\n・業種別OLS"]

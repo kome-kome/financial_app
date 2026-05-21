@@ -115,6 +115,60 @@ async def _daily_scheduler():
         finally:
             _job_status["running"] = False
 
+# ── 起動時キャッチアップ（Render Free スピンダウン対策） ─────────────────────
+# Render Free プランは 15 分アイドルで停止するため _daily_scheduler が固定時刻
+# (毎日3時) に走っている保証がない。ユーザーアクセスでスピンアップしたタイミングで
+# 「最終自動収集から STARTUP_CATCHUP_HOURS 以上経過していたら差分収集を走らせる」。
+STARTUP_CATCHUP_HOURS = 22
+
+async def _startup_catchup():
+    """起動時に最終自動収集からの経過時間を見て、必要なら差分収集を非同期実行する。"""
+    await asyncio.sleep(5)  # init_db / 他の初期化が落ち着くまで待つ
+
+    if not _scheduler_status["enabled"]:
+        log.info("起動時キャッチアップ: スケジューラ無効のためスキップ")
+        return
+    if _job_status["running"] or _market_status["running"] or _macro_status["running"]:
+        log.info("起動時キャッチアップ: 他ジョブ実行中のためスキップ")
+        return
+
+    last_run_str = _scheduler_status.get("last_run", "") or ""
+    if last_run_str:
+        try:
+            last_run_dt = datetime.strptime(last_run_str[:16], "%Y-%m-%d %H:%M")
+            hours_since = (datetime.now() - last_run_dt).total_seconds() / 3600
+            if hours_since < STARTUP_CATCHUP_HOURS:
+                log.info("起動時キャッチアップ: 直近 %.1fh 内に実行済み、スキップ", hours_since)
+                return
+        except ValueError:
+            pass
+
+    log.info("起動時キャッチアップ開始（Render スピンダウン対策）")
+    _scheduler_status["last_run"]    = datetime.now().strftime("%Y-%m-%d %H:%M") + "（起動時キャッチアップ）"
+    _scheduler_status["last_status"] = "実行中（起動時キャッチアップ）"
+    _job_status.update({"running": True, "log": [], "progress": 0, "job_type": "startup_catchup"})
+    try:
+        await run_full_collection(years_back=1, skip_existing=True)
+        db = SessionLocal()
+        try:
+            calc_growth_rates(db)
+            calc_zscore_normalization(db)
+        finally:
+            db.close()
+        await update_market_data()
+        db2 = SessionLocal()
+        try:
+            await collect_macro_data(db2, years_back=5)
+        finally:
+            db2.close()
+        _scheduler_status["last_status"] = "成功（起動時キャッチアップ）"
+        log.info("起動時キャッチアップ完了")
+    except Exception as e:
+        log.error("起動時キャッチアップエラー: %s", e, exc_info=True)
+        _scheduler_status["last_status"] = "エラー（起動時キャッチアップ・詳細はサーバーログ）"
+    finally:
+        _job_status["running"] = False
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
@@ -132,12 +186,15 @@ async def lifespan(app: FastAPI):
     finally:
         db.close()
     scheduler_task = asyncio.create_task(_daily_scheduler())
+    catchup_task   = asyncio.create_task(_startup_catchup())
     yield
     scheduler_task.cancel()
-    try:
-        await scheduler_task
-    except asyncio.CancelledError:
-        pass
+    catchup_task.cancel()
+    for t in (scheduler_task, catchup_task):
+        try:
+            await t
+        except asyncio.CancelledError:
+            pass
 
 app = FastAPI(title="EDINET Financial API", version="2.0", lifespan=lifespan)
 
