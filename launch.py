@@ -32,7 +32,7 @@ def _is_running() -> bool:
 def _start_server():
     log_path = os.path.join(BASE_DIR, "server.log")
     log_file = open(log_path, "w", encoding="utf-8")
-    return subprocess.Popen(
+    proc = subprocess.Popen(
         [PYTHON, "-m", "uvicorn", "api:app",
          "--host", "127.0.0.1", "--port", str(PORT)],
         cwd=BASE_DIR,
@@ -40,6 +40,8 @@ def _start_server():
         stderr=log_file,
         creationflags=subprocess.CREATE_NO_WINDOW,
     )
+    proc._log_file = log_file  # type: ignore[attr-defined]
+    return proc
 
 
 def _make_icon_png() -> bytes:
@@ -188,6 +190,12 @@ def main():
 def _shutdown(proc, root):
     if proc is not None:
         proc.terminate()
+        log_file = getattr(proc, "_log_file", None)
+        if log_file is not None:
+            try:
+                log_file.close()
+            except Exception:
+                pass
     root.destroy()
 
 

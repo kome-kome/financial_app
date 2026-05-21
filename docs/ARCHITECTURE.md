@@ -605,7 +605,7 @@ flowchart TD
 
     F["📈 株価取得\nstooq API\n─────────────────\n株価 → PER = 株価÷EPS\n株価 → PBR = 株価÷BPS\n時価総額 = 株価×（純資産÷BPS）"]
 
-    G["📐 前期比成長率\ncalc_growth_rates()\n─────────────────\n(edinet_code, year)でソートし\n前期値と比較\n売上成長率・営業利益成長率・EPS成長率"]
+    G["📐 前期比成長率\ncalc_growth_rates()\n─────────────────\nPostgreSQL の LAG() window function で\nedinet_code 単位の前期値と比較\n（DB 側で完結、大規模データでも OOM 回避）\n売上成長率・営業利益成長率・EPS成長率"]
 
     H["📊 Zスコア正規化\ncalc_zscore_normalization()\n─────────────────\n年度ごとに計算（年度混在禁止）\nZ = (値 - 年度内平均) ÷ 年度内標準偏差\nROE・営業利益率・自己資本比率など7指標"]
 
@@ -660,10 +660,10 @@ classDiagram
 
     class TotalReturnPlugin {
         +name = "total_return"
-        +label = "トータルリターン分析"
+        +label = "総合リターン予測"
         +depends_on = []
-        +params_schema() 期間・業種フィルタ
-        +execute() 配当込みリターン計算
+        +params_schema() use_cf / use_sector_fe / n_folds / top_n
+        +execute() Ohlson 型 OLS + 業種固定効果（オプション）
     }
 
     class SectorOLSPlugin {
@@ -730,6 +730,10 @@ graph LR
         P5["GET /models\nmodels.html を返す\n（モデル解説・参考文献）"]
     end
 
+    subgraph OPS["🩺 運用"]
+        H1["GET /health\n死活監視（DB疎通確認、認証不要）\n200=ok / 503=degraded"]
+    end
+
     subgraph AUTH["🔐 認証 /api/auth/"]
         A1["POST /api/auth/login\nパスワード認証 → Bearerトークン発行"]
         A2["POST /api/auth/reset-password\n回復キーでパスワード変更"]
@@ -765,7 +769,7 @@ graph LR
         C14e["GET /api/collect/jquants/status\nJ-Quants収集の状態"]
         C15["GET /api/collect/edinet-coverage\nEDINET収録状況"]
         C16["GET /api/collect/market-coverage\n株価データ収録状況"]
-        C17["GET /api/collect/data-quality\nNULL率・外れ値チェック"]
+        C17["GET /api/collect/data-quality\nNULL率・外れ値チェック\n会計基準別サマリ（JGAAP/IFRS/US-GAAP）"]
         C18["POST /api/collect/industry\nJPX Excelから業種データを更新"]
     end
 
@@ -790,7 +794,8 @@ graph LR
 
 ## 9. デプロイ構成図
 
-> 本番環境への展開時の構成イメージです（現在はローカル開発環境）。
+> **稼働中の本番環境**: Render（Web Service）+ Supabase（PostgreSQL）。
+> 詳細な運用ガイドは [docs/DEPLOYMENT.md](DEPLOYMENT.md) を参照。
 
 ```mermaid
 graph TB
@@ -798,37 +803,47 @@ graph TB
         USER["👤 ユーザー（ブラウザ）"]
     end
 
-    subgraph CLOUD["☁️ クラウドサーバー（本番想定）"]
-        subgraph PROXY["リバースプロキシ"]
-            NGINX["Nginx / Caddy\n・HTTPS終端\n・静的ファイル配信\n・ヘッダー付与"]
+    subgraph RENDER["☁️ Render（Free Plan）"]
+        subgraph EDGE["エッジ"]
+            EDGE_NODE["Render Edge\n・HTTPS終端（自動）\n・カスタムドメイン対応"]
         end
+        subgraph APP["Web Service"]
+            UV["uvicorn api:app\n--host 0.0.0.0 --port $PORT\n（512MB / 0.1 vCPU）\n15分アイドルでスピンダウン"]
+        end
+        subgraph CONFIG["設定"]
+            ENV["Render 環境変数\n・DATABASE_URL\n・EDINET_API_KEY / JQUANTS_API_KEY\n・APP_PASSWORD / SECRET / RECOVERY\n・ALLOWED_ORIGIN"]
+            YAML["render.yaml\n（IaC 定義）"]
+        end
+    end
 
-        subgraph APP["アプリケーション"]
-            UV["uvicorn\napi.py\n（FastAPIアプリ）"]
-        end
-
-        subgraph DATA["データ"]
-            PG[("PostgreSQL\nfinancial_db")]
-            ENV[".env\n・EDINET_API_KEY\n・DATABASE_URL\n・APP_PASSWORD\n・APP_SECRET_KEY\n・APP_RECOVERY_KEY"]
-        end
+    subgraph SUPABASE["☁️ Supabase"]
+        PG[("PostgreSQL\nfinancial_db\nSSL 必須\n自動バックアップ")]
     end
 
     subgraph EXT["🌍 外部サービス"]
         EDINET["EDINET API\n金融庁"]
         STOOQ["stooq API\n株価"]
         JPX["JPX Excel\n東証"]
+        JQUANTS["J-Quants API\n（任意）"]
     end
 
-    USER   -->|"HTTPS"| NGINX
-    NGINX  -->|"HTTP（内部）"| UV
-    UV     <-->|"SQL"| PG
+    subgraph CICD["🔁 CI/CD"]
+        GH["GitHub main\nブランチ"]
+    end
+
+    USER   -->|"HTTPS"| EDGE_NODE
+    EDGE_NODE -->|"HTTP（内部）"| UV
+    UV     <-->|"SQL / TLS"| PG
     UV     -->|"HTTPS"| EXT
     ENV    -.->|"環境変数"| UV
+    YAML   -.->|"インフラ定義"| ENV
+    GH     -->|"push で自動デプロイ"| UV
 
     style ENV fill:#1c1400,color:#fcd34d
+    style YAML fill:#1c1400,color:#fcd34d
 
-    note1["⚠️ 本番デプロイ前の必須対応\n1. allow_origins を ALLOWED_ORIGIN 環境変数で制限（api.py:116）\n2. APP_PASSWORD / APP_SECRET_KEY / APP_RECOVERY_KEY を設定\n3. Tier3課題: HttpOnly Cookie 認証・CSRF対策・レート制限"]
-    style note1 fill:#450a0a,color:#fca5a5
+    note1["📌 Render Free 制約\n・15分アイドルでスピンダウン\n（深夜の自動収集には外部 ping or 有料プラン）\n・SSH 不可 → ログは Render ダッシュボードのみ\n・永続ディスクなし → 永続化は Supabase のみ"]
+    style note1 fill:#0c1a3a,color:#93c5fd
 ```
 
 ---
