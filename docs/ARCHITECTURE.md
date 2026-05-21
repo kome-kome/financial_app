@@ -39,6 +39,7 @@ graph LR
         C["📦 収集管理\ncollection.html\n財務収集/株価収集/市場データ更新/DB閲覧\n（4タブ構成・ウィザードUX）"]
         A["📊 分析画面\nanalysis.html\n乖離分析/プラグイン/バックテスト\n（4タブ構成・ステータスバー・ウィザードUX）"]
         M["📖 モデル解説\nmodels.html\n数式・参考文献・DOIリンク"]
+        DB["🗃️ DB ビューア\ndb.html\nスキーマ/プレビュー/統計/リレーション/ドリルダウン"]
     end
 
     subgraph SERVER["🖥️ サーバー（Python / FastAPI）"]
@@ -104,6 +105,8 @@ graph TD
         V3["株価履歴の確認\n直近30日のOHLCV"]
         V4["BS/PL/CF 再分類ビュー"]
         V5["CSVエクスポート"]
+        V6["DBビューア\nスキーマ・プレビュー・統計・リレーション"]
+        V7["企業横断ドリルダウン\nedinet_code → 全テーブル"]
     end
 
     subgraph SCREEN["🔍 スクリーニング"]
@@ -574,15 +577,31 @@ stateDiagram-v2
         ModelDoc : 📖 モデル解説\nmodels.html\n・数式・パラメータ表\n・参考文献DOIリンク\n（7モデル）
     }
 
+    state DBViewer {
+        direction TB
+        [*] --> DBTables
+        DBTables    : 🗃️ テーブル一覧\n4テーブル行数・カラム数・最終更新
+        DBSchema    : 📋 スキーマ\nカラム定義・NULL率・PK/FK
+        DBPreview   : 🔍 プレビュー\nページネーション・ソート・フィルタ・CSV
+        DBStats     : 📊 統計サマリー\nmin/max/avg/p50/p99（数値）・distinct（文字列）
+        DBER        : 🔗 リレーション図\nFK 関係を ER 風に可視化
+        DBDrill     : 🎯 企業ドリルダウン\nedinet_code → 全テーブル横断
+        DBTables    --> DBSchema  : 切替
+        DBTables    --> DBPreview : 切替
+        DBTables    --> DBStats   : 切替
+    }
+
     [*]        --> Dashboard  : APP_PASSWORD未設定時\n（開発モード）
     Dashboard  --> Collection : 「収集ページへ」
     Dashboard  --> Analysis   : 「分析ページへ」
     Dashboard  --> Models     : 「モデル解説を開く」
+    Dashboard  --> DBViewer   : 「DB を開く」
     Collection --> Dashboard  : 「ホーム」
     Analysis   --> Dashboard  : 「ホーム」
     Analysis   --> Models     : 「モデル解説」リンク
     Collection --> Analysis   : 「分析」リンク
     Analysis   --> Collection : 「← データ収集ページへ」リンク
+    DBViewer   --> Dashboard  : 「← ホーム」
 ```
 
 ---
@@ -728,6 +747,7 @@ graph LR
         P3["GET /analysis\nanalysis.html を返す"]
         P4["GET /login\nlogin.html を返す"]
         P5["GET /models\nmodels.html を返す\n（モデル解説・参考文献）"]
+        P6["GET /db\ndb.html を返す\n（DBビューア）"]
     end
 
     subgraph OPS["🩺 運用"]
@@ -788,6 +808,17 @@ graph LR
         AN7["POST /api/recommend\n推薦スクリーニング実行"]
         AN8["GET /api/backtest\n過去スコアリングの実績リターン検証\n?preset&months_ago&top_n / summary+percentiles"]
         AN9["GET /api/backtest/multi\n複数保有期間（3/6/12/18/24ヶ月）一括比較\n?preset&top_n"]
+    end
+
+    subgraph DBV["🗃️ DBビューア /api/db/"]
+        DB1["GET /api/db/tables\n全テーブルの行数・カラム数・最終更新"]
+        DB2["GET /api/db/schema/{table}\nカラム定義・NULL率・PK/FK"]
+        DB3["GET /api/db/preview/{table}\n行プレビュー（ページネーション・ソート・フィルタ）"]
+        DB4["GET /api/db/stats/{table}\n統計サマリー（min/max/avg/p50/p99/distinct）"]
+        DB5["GET /api/db/relations\nテーブル間FKリレーション一覧"]
+        DB6["GET /api/db/company/{edinet_code}\n企業別ドリルダウン（全テーブル横断）"]
+        DB7["GET /api/db/export/{table}\nテーブルをCSVでダウンロード（フィルタ対応）"]
+    end
 ```
 
 ---
@@ -869,6 +900,7 @@ graph TB
 | `analysis.html` | フロントエンド | 回帰分析・乖離分析・プラグイン（`/analysis`） | api.py |
 | `login.html` | フロントエンド | 認証ログイン画面（`/login`） | api.py |
 | `models.html` | フロントエンド | モデル解説・参考文献ページ（`/models`）。7モデルの数式・パラメータ・DOIリンクをインラインHTMLで表示。 | — |
+| `db.html` | フロントエンド | DBビューア（`/db`）。4テーブルのスキーマ・プレビュー・統計サマリー・ER 風リレーション・企業ドリルダウン・CSV エクスポート。 | api.py |
 | `check.py` | ユーティリティ | EDINET API 疎通確認ワンショット | EDINET API |
 | `.env` | 設定 | APIキー・DB接続・認証情報（UTF-8 BOMなし） | — |
 | `ARCHITECTURE.md` | ドキュメント | 本ファイル。コード変更時は必ず更新する | — |

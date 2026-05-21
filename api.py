@@ -1240,6 +1240,309 @@ async def backtest_multi(
     return {"periods": periods, "preset": preset, "top_n": top_n}
 
 
+# ── DB ビューア API ─────────────────────────────────────────────────────
+# DB内部を画面から確認するためのメタデータ・プレビュー・統計・リレーション API。
+# テーブル名・カラム名はホワイトリストで厳格に検証する（SQL インジェクション対策）。
+
+_DB_VIEWER_TABLES = {
+    "companies":           Company,
+    "financial_records":   FinancialRecord,
+    "stock_price_history": StockPriceHistory,
+    "collection_logs":     CollectionLog,
+}
+
+_DB_VIEWER_RELATIONS = [
+    # (from_table, from_column, to_table, to_column, label)
+    ("financial_records",   "edinet_code", "companies", "edinet_code", "1社:N年度"),
+    ("stock_price_history", "edinet_code", "companies", "edinet_code", "1社:N日次"),
+]
+
+
+def _column_meta(col):
+    """SQLAlchemy カラム→ {name, type, nullable, pk, fk, numeric} の辞書"""
+    py_type = getattr(col.type, "python_type", None)
+    try:
+        py_name = py_type.__name__ if py_type else str(col.type)
+    except NotImplementedError:
+        py_name = str(col.type)
+    is_numeric = py_name in ("int", "float")
+    fks = [f"{fk.column.table.name}.{fk.column.name}" for fk in col.foreign_keys]
+    return {
+        "name":     col.name,
+        "type":     py_name,
+        "nullable": bool(col.nullable),
+        "pk":       bool(col.primary_key),
+        "fk":       fks[0] if fks else None,
+        "numeric":  is_numeric,
+    }
+
+
+@app.get("/api/db/tables")
+async def db_tables(db: Session = Depends(get_db)):
+    """全テーブルの行数・カラム数・最終更新時刻を返す"""
+    items = []
+    for name, model in _DB_VIEWER_TABLES.items():
+        row_count = db.query(func.count()).select_from(model).scalar() or 0
+        cols = list(model.__table__.columns)
+        last_updated = None
+        if hasattr(model, "updated_at"):
+            last_updated = db.query(func.max(model.updated_at)).scalar()
+        elif hasattr(model, "created_at"):
+            last_updated = db.query(func.max(model.created_at)).scalar()
+        items.append({
+            "name":         name,
+            "row_count":    row_count,
+            "column_count": len(cols),
+            "last_updated": str(last_updated)[:19] if last_updated else None,
+        })
+    return {"tables": items}
+
+
+@app.get("/api/db/schema/{table}")
+async def db_schema(table: str, db: Session = Depends(get_db)):
+    """指定テーブルのカラム定義 + NULL率を返す"""
+    if table not in _DB_VIEWER_TABLES:
+        raise HTTPException(404, "テーブルが見つかりません")
+    model = _DB_VIEWER_TABLES[table]
+    row_count = db.query(func.count()).select_from(model).scalar() or 0
+    cols = []
+    for col in model.__table__.columns:
+        meta = _column_meta(col)
+        if row_count > 0:
+            null_count = db.query(func.count()).select_from(model).filter(col.is_(None)).scalar() or 0
+            meta["null_rate"] = round(null_count / row_count * 100, 1)
+            meta["null_count"] = null_count
+        else:
+            meta["null_rate"] = None
+            meta["null_count"] = 0
+        cols.append(meta)
+    return {"table": table, "row_count": row_count, "columns": cols}
+
+
+def _normalize_row(row) -> dict:
+    """SQLAlchemy 行 → JSON 可能な dict（datetime/dict は文字列化）"""
+    out = {}
+    for col in row.__table__.columns:
+        v = getattr(row, col.name)
+        if isinstance(v, datetime):
+            v = v.strftime("%Y-%m-%d %H:%M:%S")
+        elif isinstance(v, (dict, list)):
+            v = json.dumps(v, ensure_ascii=False)[:200]  # raw_xbrl_json は長いので切る
+        out[col.name] = v
+    return out
+
+
+@app.get("/api/db/preview/{table}")
+async def db_preview(
+    table: str,
+    limit:  int = 50,
+    offset: int = 0,
+    sort:   Optional[str] = None,
+    order:  str = "desc",
+    filter_col: Optional[str] = None,
+    filter_val: Optional[str] = None,
+    db: Session = Depends(get_db),
+):
+    """テーブルプレビュー（ページネーション・ソート・簡易フィルタ）"""
+    if table not in _DB_VIEWER_TABLES:
+        raise HTTPException(404, "テーブルが見つかりません")
+    if not (1 <= limit <= 500):
+        raise HTTPException(400, "limit は 1〜500 の範囲で指定してください")
+    if offset < 0:
+        raise HTTPException(400, "offset は 0 以上で指定してください")
+    if order not in ("asc", "desc"):
+        raise HTTPException(400, "order は asc / desc のいずれか")
+
+    model    = _DB_VIEWER_TABLES[table]
+    col_map  = {c.name: c for c in model.__table__.columns}
+
+    query = db.query(model)
+    if filter_col and filter_val:
+        if filter_col not in col_map:
+            raise HTTPException(400, "filter_col が不正です")
+        query = query.filter(col_map[filter_col] == filter_val)
+    total = query.count()
+
+    if sort:
+        if sort not in col_map:
+            raise HTTPException(400, "sort カラムが不正です")
+        sort_col = col_map[sort]
+        query = query.order_by(sort_col.desc() if order == "desc" else sort_col.asc())
+    else:
+        pk_cols = [c for c in model.__table__.columns if c.primary_key]
+        if pk_cols:
+            query = query.order_by(pk_cols[0].desc())
+
+    rows = query.offset(offset).limit(limit).all()
+    return {
+        "table":   table,
+        "total":   total,
+        "limit":   limit,
+        "offset":  offset,
+        "columns": [c.name for c in model.__table__.columns],
+        "rows":    [_normalize_row(r) for r in rows],
+    }
+
+
+@app.get("/api/db/stats/{table}")
+async def db_stats(table: str, db: Session = Depends(get_db)):
+    """テーブルの統計サマリー（数値カラムは min/max/avg/p50/p99、文字列カラムはユニーク数）"""
+    if table not in _DB_VIEWER_TABLES:
+        raise HTTPException(404, "テーブルが見つかりません")
+    model = _DB_VIEWER_TABLES[table]
+    row_count = db.query(func.count()).select_from(model).scalar() or 0
+
+    stats = []
+    for col in model.__table__.columns:
+        meta = _column_meta(col)
+        s = {
+            "name":    col.name,
+            "type":    meta["type"],
+            "numeric": meta["numeric"],
+        }
+        if row_count == 0:
+            stats.append(s)
+            continue
+
+        if meta["numeric"]:
+            agg = db.query(
+                func.min(col), func.max(col), func.avg(col), func.count(col)
+            ).first()
+            mn, mx, avg, cnt = agg
+            s["min"]   = float(mn) if mn is not None else None
+            s["max"]   = float(mx) if mx is not None else None
+            s["avg"]   = round(float(avg), 4) if avg is not None else None
+            s["count"] = int(cnt or 0)
+            # PostgreSQL の percentile_cont を生 SQL で利用（パーセンタイル分布）
+            try:
+                sql = text(
+                    f"SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY {col.name}) AS p50, "
+                    f"       percentile_cont(0.99) WITHIN GROUP (ORDER BY {col.name}) AS p99 "
+                    f"FROM {table} WHERE {col.name} IS NOT NULL"
+                )
+                p = db.execute(sql).first()
+                s["p50"] = round(float(p.p50), 4) if p and p.p50 is not None else None
+                s["p99"] = round(float(p.p99), 4) if p and p.p99 is not None else None
+            except Exception:
+                s["p50"] = None
+                s["p99"] = None
+        else:
+            # 文字列・列挙系: ユニーク数のみ（カーディナリティ目安）
+            try:
+                distinct_cnt = db.query(func.count(func.distinct(col))).scalar() or 0
+                s["distinct"] = int(distinct_cnt)
+            except Exception:
+                s["distinct"] = None
+        stats.append(s)
+    return {"table": table, "row_count": row_count, "stats": stats}
+
+
+@app.get("/api/db/relations")
+async def db_relations():
+    """テーブル間のリレーション一覧（Mermaid 描画用）"""
+    return {
+        "tables": [
+            {
+                "name":        name,
+                "columns":     [c.name for c in model.__table__.columns],
+                "pk":          [c.name for c in model.__table__.columns if c.primary_key],
+            }
+            for name, model in _DB_VIEWER_TABLES.items()
+        ],
+        "relations": [
+            {
+                "from_table":  ft, "from_column": fc,
+                "to_table":    tt, "to_column":   tc,
+                "label":       lbl,
+            }
+            for (ft, fc, tt, tc, lbl) in _DB_VIEWER_RELATIONS
+        ],
+    }
+
+
+@app.get("/api/db/company/{edinet_code}")
+async def db_company_drilldown(edinet_code: str, db: Session = Depends(get_db)):
+    """企業別ドリルダウン: 1企業に紐づく全テーブルのレコードを横断取得"""
+    if not _EDINET_CODE_RE.match(edinet_code):
+        raise HTTPException(400, "edinet_code の形式が不正です（例: E123456）")
+    company = db.query(Company).filter_by(edinet_code=edinet_code).first()
+    if not company:
+        raise HTTPException(404, "企業が見つかりません")
+
+    fr_rows = (
+        db.query(FinancialRecord)
+        .filter_by(edinet_code=edinet_code)
+        .order_by(FinancialRecord.year.desc())
+        .all()
+    )
+    sph_count = db.query(func.count(StockPriceHistory.id)).filter_by(edinet_code=edinet_code).scalar() or 0
+    sph_oldest = db.query(func.min(StockPriceHistory.trade_date)).filter_by(edinet_code=edinet_code).scalar()
+    sph_newest = db.query(func.max(StockPriceHistory.trade_date)).filter_by(edinet_code=edinet_code).scalar()
+    sph_recent = (
+        db.query(StockPriceHistory)
+        .filter_by(edinet_code=edinet_code)
+        .order_by(StockPriceHistory.trade_date.desc())
+        .limit(30).all()
+    )
+
+    return {
+        "company":           _normalize_row(company),
+        "financial_records": [_normalize_row(r) for r in fr_rows],
+        "stock_price_history": {
+            "total":       sph_count,
+            "oldest_date": sph_oldest,
+            "newest_date": sph_newest,
+            "recent":      [_normalize_row(r) for r in sph_recent],
+        },
+    }
+
+
+@app.get("/api/db/export/{table}")
+async def db_export_table(
+    table: str,
+    limit:      int = 10000,
+    filter_col: Optional[str] = None,
+    filter_val: Optional[str] = None,
+    db: Session = Depends(get_db),
+):
+    """指定テーブルを CSV でダウンロード（最大 limit 行）"""
+    if table not in _DB_VIEWER_TABLES:
+        raise HTTPException(404, "テーブルが見つかりません")
+    if not (1 <= limit <= 100000):
+        raise HTTPException(400, "limit は 1〜100000 の範囲で指定してください")
+
+    model   = _DB_VIEWER_TABLES[table]
+    col_map = {c.name: c for c in model.__table__.columns}
+    cols    = list(model.__table__.columns)
+
+    query = db.query(model)
+    if filter_col and filter_val:
+        if filter_col not in col_map:
+            raise HTTPException(400, "filter_col が不正です")
+        query = query.filter(col_map[filter_col] == filter_val)
+    rows = query.limit(limit).all()
+
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow([c.name for c in cols])
+    for r in rows:
+        row_vals = []
+        for c in cols:
+            v = getattr(r, c.name)
+            if isinstance(v, datetime):
+                v = v.strftime("%Y-%m-%d %H:%M:%S")
+            elif isinstance(v, (dict, list)):
+                v = json.dumps(v, ensure_ascii=False)
+            row_vals.append(v)
+        writer.writerow(row_vals)
+    output.seek(0)
+    return StreamingResponse(
+        iter([output.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": f"attachment; filename={table}.csv"},
+    )
+
+
 # ── CSV エクスポート ────────────────────────────────────────────────────
 
 @app.get("/api/export/csv")
@@ -1291,6 +1594,10 @@ async def serve_analysis():
 @app.get("/models")
 async def serve_models():
     return FileResponse(BASE_DIR / "templates" / "models.html", headers=_NO_CACHE)
+
+@app.get("/db")
+async def serve_db_viewer():
+    return FileResponse(BASE_DIR / "templates" / "db.html", headers=_NO_CACHE)
 
 @app.get("/login")
 async def serve_login():
