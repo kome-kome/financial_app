@@ -15,6 +15,8 @@
 - 環境変数は `render.yaml` の `envVars` に追記し Render ダッシュボードで値を設定
 - 設定変更は GitHub `main` への push で自動デプロイ。ロールバックは Render ダッシュボードから可能
 - **定時スケジューラ (`_daily_scheduler`) は Free プランでは走らない**。15 分アイドルで停止するため、毎日3時に起動している保証がない。代わりに `_startup_catchup` がスピンアップ時に「最終自動収集から 22h 以上経過していたら差分収集を非同期実行」する。新規の定期処理を追加する場合は同じパターン（startup hook + 経過時間判定）で実装すること
+- **scheduler は JST 固定**: `api.py:_now_jst()` ヘルパで Render の OS TZ (UTC) に依存させない。新しい時間帯固定処理 (○時に実行 等) は `datetime.now()` ではなく `_now_jst()` を使うこと
+- **GitHub Actions keepalive (`.github/workflows/keepalive.yml`)** が JST 2:50-3:10 と業務時間 9-23 JST に `/health` を叩く。月稼働時間は約 475h で Render Free 750h 無料枠内。cron 変更時は枠を超えないか確認
 
 ## GitHub 協調ワークフロー
 

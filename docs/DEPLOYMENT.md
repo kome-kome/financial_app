@@ -119,9 +119,25 @@ Render ダッシュボードで管理。
 
 #### A. GitHub Actions keepalive（採用中）
 
-`.github/workflows/keepalive.yml` が `*/10 * * * *`（10 分間隔）で `/health` に GET を投げる。
+`.github/workflows/keepalive.yml` が以下のタイミングで `/health` に GET を投げる:
+
+| 時間帯 (JST) | cron (UTC) | 目的 |
+|---|---|---|
+| 2:50, 2:55 | `50,55 17 * * *` | scheduler 直前にスピンアップ |
+| 3:00, 3:05, 3:10 | `0,5,10 18 * * *` | scheduler 実行中の追い ping |
+| 9:00-23:30 (30 分間隔) | `*/30 0-14 * * *` | 業務時間中のコールドスタート回避 |
+
 リポジトリ内で完結し外部サービスのアカウント不要。コストはパブリックリポジトリなら無料、
 プライベートでも月 60 分 / 月 程度の Actions 時間しか消費しない。
+
+**Render Free 750h/月 への適合**:
+- 3 時前後: 約 0.75h/日
+- 業務時間 (9:00-23:30 + spindown 15 分): 約 14.75h/日
+- 合計: 約 **15.5h/日 = 475h/月（31 日月）** → 無料枠の 63%、275h の余裕
+
+**深夜帯 (0-9 JST) はスピンダウンを許容**: ユーザーがアクセスしない時間帯のため、コール
+ドスタートが起きても影響が小さい。scheduler の自動収集だけは 3 時前後の集中 ping で確実に
+起こせるよう設計している。
 
 **動作確認:**
 1. GitHub リポジトリの `Actions` タブ → `Keepalive ping` ワークフローを選択
@@ -134,12 +150,13 @@ Render ダッシュボードで管理。
 
 **注意点:**
 - GitHub Actions の scheduled workflow は実行が遅延することがある
-  （公式: "can be delayed during periods of high loads"）。10 分間隔で運用していれば
-  最悪 25 分程度の間隔になっても許容範囲だが、スピンダウンに引っかかる可能性はゼロではない。
-  確実性が必要なら有料プランまたは外部 cron に切り替える
+  （公式: "can be delayed during periods of high loads"）。3 時前後は 5 分間隔で 5 回 ping
+  しているので 1〜2 回失敗しても scheduler 起動には十分余裕がある
 - リポジトリに 60 日間 push がないと scheduled workflow が自動無効化される。
   この場合 Actions タブから「Enable workflow」ボタンで再有効化が必要
-- 無料プランの 750 時間 / 月 を消費するため、常時稼働で 720 時間/月を超えない設計
+- `api.py:_daily_scheduler` は **JST 3 時** に動作する設計（`api.py:_now_jst()` で TZ 固定）。
+  Render の OS TZ (UTC) に依存しない。新しい時間帯固定の処理を追加する場合も `_now_jst()`
+  を使うこと
 
 #### B. 外部 cron-as-a-service（代替案）
 

@@ -1,11 +1,21 @@
 name: Keepalive ping (Render Free spindown 対策)
 
+# GitHub Actions の cron は UTC 基準で評価される。本プロジェクトの自動収集
+# スケジューラ (api.py:_daily_scheduler) は JST 3 時に動くため、本ワークフローは
+# JST 表記でいうと「scheduler が走る 3 時前後」と「業務時間 (9-23 JST)」だけ
+# /health を叩く設計。これにより:
+#   - 深夜の自動収集を確実に起こせる (3 時前後で 5 回 ping)
+#   - 業務時間中はコールドスタートを回避できる (30 分間隔)
+#   - Render Free の 750h/月 無料枠に余裕を持って収まる (~470h/月)
+
 on:
   schedule:
-    # 10 分間隔で /health を叩く。
-    # GitHub Actions の scheduled workflow は実行が遅延することがあるため、
-    # Render の 15 分スピンダウンに引っかからないよう間隔を短めに設定している。
-    - cron: '*/10 * * * *'
+    # JST 2:50, 2:55 (UTC 17:50, 17:55) — scheduler 直前にスピンアップ
+    - cron: '50,55 17 * * *'
+    # JST 3:00, 3:05, 3:10 (UTC 18:00, 18:05, 18:10) — scheduler 実行中の追い ping
+    - cron: '0,5,10 18 * * *'
+    # JST 9:00-23:30 (UTC 0:00-14:30) — 業務時間中は 30 分間隔
+    - cron: '*/30 0-14 * * *'
   workflow_dispatch:  # 手動実行可能
 
 permissions:

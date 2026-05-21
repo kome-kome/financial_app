@@ -15,6 +15,14 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
 from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
+
+# 自動収集スケジューラは Render の OS TZ (UTC) に依存させず JST 固定で動かす。
+# 表示・比較ともに「JST のナイーブ datetime」で統一する。
+JST = ZoneInfo("Asia/Tokyo")
+
+def _now_jst() -> datetime:
+    return datetime.now(JST).replace(tzinfo=None)
 from fastapi import FastAPI, BackgroundTasks, Depends, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, FileResponse, JSONResponse
@@ -75,15 +83,15 @@ _scheduler_status: dict = {
 }
 
 async def _daily_scheduler():
-    """毎日指定時刻に差分収集＋株価更新を自動実行するバックグラウンドタスク"""
+    """毎日指定時刻 (JST) に差分収集＋株価更新を自動実行するバックグラウンドタスク"""
     while True:
-        now      = datetime.now()
+        now      = _now_jst()
         next_run = now.replace(hour=SCHEDULER_RUN_HOUR, minute=0, second=0, microsecond=0)
         if next_run <= now:
             next_run += timedelta(days=1)
-        _scheduler_status["next_run"] = next_run.strftime("%Y-%m-%d %H:%M")
+        _scheduler_status["next_run"] = next_run.strftime("%Y-%m-%d %H:%M JST")
 
-        await asyncio.sleep((next_run - datetime.now()).total_seconds())
+        await asyncio.sleep((next_run - _now_jst()).total_seconds())
 
         if not _scheduler_status["enabled"]:
             continue
@@ -92,7 +100,7 @@ async def _daily_scheduler():
             _scheduler_status["last_status"] = "スキップ（手動収集が実行中）"
             continue
 
-        _scheduler_status["last_run"]    = datetime.now().strftime("%Y-%m-%d %H:%M")
+        _scheduler_status["last_run"]    = _now_jst().strftime("%Y-%m-%d %H:%M JST")
         _scheduler_status["last_status"] = "実行中"
         _job_status.update({"running": True, "log": [], "progress": 0, "job_type": "incremental"})
         try:
@@ -135,8 +143,9 @@ async def _startup_catchup():
     last_run_str = _scheduler_status.get("last_run", "") or ""
     if last_run_str:
         try:
+            # "YYYY-MM-DD HH:MM" 部分のみ取り出して JST naive として比較
             last_run_dt = datetime.strptime(last_run_str[:16], "%Y-%m-%d %H:%M")
-            hours_since = (datetime.now() - last_run_dt).total_seconds() / 3600
+            hours_since = (_now_jst() - last_run_dt).total_seconds() / 3600
             if hours_since < STARTUP_CATCHUP_HOURS:
                 log.info("起動時キャッチアップ: 直近 %.1fh 内に実行済み、スキップ", hours_since)
                 return
@@ -144,7 +153,7 @@ async def _startup_catchup():
             pass
 
     log.info("起動時キャッチアップ開始（Render スピンダウン対策）")
-    _scheduler_status["last_run"]    = datetime.now().strftime("%Y-%m-%d %H:%M") + "（起動時キャッチアップ）"
+    _scheduler_status["last_run"]    = _now_jst().strftime("%Y-%m-%d %H:%M JST") + "（起動時キャッチアップ）"
     _scheduler_status["last_status"] = "実行中（起動時キャッチアップ）"
     _job_status.update({"running": True, "log": [], "progress": 0, "job_type": "startup_catchup"})
     try:
