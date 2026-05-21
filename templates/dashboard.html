@@ -15,11 +15,24 @@ body{font-family:'Segoe UI',sans-serif;background:#0f1117;color:#e2e8f0;min-heig
 .api-status{margin-left:auto;display:flex;align-items:center;gap:8px;font-size:12px;color:#64748b}
 .container{padding:28px 24px;max-width:1100px;margin:0 auto}
 .section-title{font-size:13px;font-weight:600;color:#64748b;text-transform:uppercase;letter-spacing:.8px;margin-bottom:14px}
-.stats-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-bottom:28px}
-.stat-card{background:#1a1d2e;border:1px solid #2d3154;border-radius:10px;padding:20px;text-align:center}
-.stat-label{font-size:11px;color:#64748b;margin-bottom:8px;text-transform:uppercase;letter-spacing:.5px}
-.stat-value{font-size:28px;font-weight:700}
+.stats-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:28px}
+.stat-card{background:#1a1d2e;border:1px solid #2d3154;border-radius:10px;padding:18px;text-align:center;position:relative;display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:128px}
+.stat-card.warn{border-color:#92400e}
+.stat-card.alert{border-color:#991b1b}
+.stat-label{font-size:11px;color:#64748b;margin-bottom:6px;text-transform:uppercase;letter-spacing:.5px}
+.stat-value{font-size:26px;font-weight:700;line-height:1.1}
 .stat-sub{font-size:11px;color:#64748b;margin-top:4px}
+.stat-meta{font-size:10px;color:#475569;margin-top:6px;line-height:1.45}
+.freshness-badge{display:inline-block;padding:2px 8px;border-radius:10px;font-size:10px;font-weight:600;margin-top:6px}
+.fr-fresh{background:#052e16;color:#86efac}
+.fr-ok{background:#1e3a5f;color:#93c5fd}
+.fr-stale{background:#451a03;color:#fcd34d}
+.fr-outdated{background:#450a0a;color:#fca5a5}
+.fr-empty{background:#1e293b;color:#64748b}
+.update-banner{background:#1e1b3a;border:1px solid #7c3aed;border-radius:10px;padding:14px 18px;margin-bottom:20px;display:none;align-items:center;gap:14px;font-size:13px;color:#c4b5fd}
+.update-banner.show{display:flex}
+.update-banner a{color:#a78bfa;font-weight:600;text-decoration:none;border:1px solid #7c3aed;padding:5px 12px;border-radius:6px;font-size:12px;margin-left:auto;flex-shrink:0}
+.update-banner a:hover{background:#7c3aed;color:#fff}
 .nav-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:28px}
 .nav-card{background:#1a1d2e;border:1px solid #2d3154;border-radius:12px;padding:24px;display:flex;flex-direction:column;gap:14px;transition:border-color .2s}
 .nav-card:hover{border-color:#7c3aed}
@@ -65,6 +78,15 @@ body{font-family:'Segoe UI',sans-serif;background:#0f1117;color:#e2e8f0;min-heig
 
 <div class="container">
 
+  <!-- 鮮度バナー（古い場合だけ表示） -->
+  <div class="update-banner" id="update-banner">
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#a78bfa" stroke-width="2" style="flex-shrink:0">
+      <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>
+    </svg>
+    <span id="update-banner-msg">データが古い可能性があります。差分収集を実行して最新化してください。</span>
+    <a href="/collection">収集ページへ</a>
+  </div>
+
   <!-- ステータスカード -->
   <div class="section-title">データベース概要</div>
   <div class="stats-grid">
@@ -78,10 +100,16 @@ body{font-family:'Segoe UI',sans-serif;background:#0f1117;color:#e2e8f0;min-heig
       <div class="stat-value" id="stat-records" style="color:#60a5fa">—</div>
       <div class="stat-sub">件</div>
     </div>
-    <div class="stat-card">
+    <div class="stat-card" id="card-year">
       <div class="stat-label">最新年度</div>
       <div class="stat-value" id="stat-year" style="color:#10b981">—</div>
-      <div class="stat-sub">年度</div>
+      <div class="stat-meta" id="stat-year-meta">—</div>
+    </div>
+    <div class="stat-card" id="card-freshness">
+      <div class="stat-label">データ鮮度</div>
+      <div class="stat-value" id="stat-fresh-days" style="color:#10b981;font-size:22px">—</div>
+      <div class="stat-meta" id="stat-fresh-meta">最終更新: —</div>
+      <span class="freshness-badge fr-empty" id="stat-fresh-badge">未取得</span>
     </div>
   </div>
 
@@ -243,8 +271,78 @@ async function loadStats() {
     const d = await apiFetch('/api/stats');
     if (!d) return;
     document.getElementById('stat-companies').textContent = d.companies.toLocaleString();
-    document.getElementById('stat-records').textContent = d.records.toLocaleString();
-    document.getElementById('stat-year').textContent = d.latest_year ?? '—';
+    document.getElementById('stat-records').textContent   = d.records.toLocaleString();
+
+    // 最新年度カード
+    const yearEl = document.getElementById('stat-year');
+    yearEl.textContent = d.latest_year ?? '—';
+    const yearCard = document.getElementById('card-year');
+    const yearMeta = document.getElementById('stat-year-meta');
+    if (d.latest_year != null && d.expected_latest_year != null) {
+      const behind = d.expected_latest_year - d.latest_year;
+      const periodStr = d.latest_period_end ? `期末: ${d.latest_period_end}` : '';
+      if (behind <= 0) {
+        yearEl.style.color = '#10b981';
+        yearMeta.innerHTML = `${periodStr}<br><span style="color:#86efac">✓ 最新年度を取得済み</span>`;
+        yearCard.classList.remove('warn','alert');
+      } else if (behind === 1) {
+        yearEl.style.color = '#fcd34d';
+        yearMeta.innerHTML = `${periodStr}<br><span style="color:#fcd34d">期待: ${d.expected_latest_year}（${behind}年遅れ）</span>`;
+        yearCard.classList.add('warn'); yearCard.classList.remove('alert');
+      } else {
+        yearEl.style.color = '#fca5a5';
+        yearMeta.innerHTML = `${periodStr}<br><span style="color:#fca5a5">期待: ${d.expected_latest_year}（${behind}年遅れ）</span>`;
+        yearCard.classList.add('alert'); yearCard.classList.remove('warn');
+      }
+    } else {
+      yearMeta.textContent = 'データなし';
+    }
+
+    // データ鮮度カード
+    const FRESH_LABELS = {
+      fresh:    {text: '最新',     cls: 'fr-fresh',    color: '#86efac'},
+      ok:       {text: '良好',     cls: 'fr-ok',       color: '#93c5fd'},
+      stale:    {text: 'やや古い', cls: 'fr-stale',    color: '#fcd34d'},
+      outdated: {text: '古い',     cls: 'fr-outdated', color: '#fca5a5'},
+      empty:    {text: 'データなし', cls: 'fr-empty',  color: '#64748b'},
+    };
+    const f = FRESH_LABELS[d.freshness] || FRESH_LABELS.empty;
+    const freshDaysEl  = document.getElementById('stat-fresh-days');
+    const freshMetaEl  = document.getElementById('stat-fresh-meta');
+    const freshBadgeEl = document.getElementById('stat-fresh-badge');
+    const freshCard    = document.getElementById('card-freshness');
+    freshDaysEl.style.color = f.color;
+    if (d.days_since_update == null) {
+      freshDaysEl.textContent = '—';
+    } else if (d.days_since_update === 0) {
+      freshDaysEl.textContent = '本日';
+    } else {
+      freshDaysEl.textContent = `${d.days_since_update}日前`;
+    }
+    freshMetaEl.innerHTML = d.last_db_update
+      ? `最終更新:<br>${esc(d.last_db_update)}`
+      : '最終更新: —';
+    freshBadgeEl.textContent = f.text;
+    freshBadgeEl.className = 'freshness-badge ' + f.cls;
+    freshCard.classList.remove('warn','alert');
+    if (d.freshness === 'stale')    freshCard.classList.add('warn');
+    if (d.freshness === 'outdated') freshCard.classList.add('alert');
+
+    // 鮮度バナー（古い・遅れている場合だけ表示）
+    const banner = document.getElementById('update-banner');
+    const bmsg   = document.getElementById('update-banner-msg');
+    const yearBehind = (d.latest_year != null && d.expected_latest_year != null)
+      ? (d.expected_latest_year - d.latest_year) : 0;
+    if (d.freshness === 'outdated' || yearBehind >= 2) {
+      bmsg.textContent = `最新年度が${yearBehind}年遅れています（DB: ${d.latest_year ?? '—'} / 期待: ${d.expected_latest_year ?? '—'}）。差分収集を実行して最新化してください。`;
+      banner.classList.add('show');
+    } else if (d.freshness === 'stale' || yearBehind === 1) {
+      bmsg.textContent = `最新の財務レコードから${d.days_since_update ?? '?'}日経過しています。差分収集の実行を検討してください。`;
+      banner.classList.add('show');
+    } else {
+      banner.classList.remove('show');
+    }
+
     document.getElementById('api-dot').className = 'dot dot-green';
     document.getElementById('api-label').textContent = 'API接続中';
   } catch(e) {

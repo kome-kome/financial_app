@@ -774,7 +774,7 @@ graph LR
     end
 
     subgraph STATS["📊 統計 /api/stats"]
-        S1["GET /api/stats\n企業数・レコード数・最新年度"]
+        S1["GET /api/stats\n企業数・レコード数・最新年度\n+ データ鮮度（最終更新日時・経過日数・期待最新年度・freshness判定）"]
         S2["GET /api/companies\n企業一覧（検索・業種・市場フィルタ）"]
         S3["GET /api/financials/{edinet_code}\n指定企業の全年度財務データ"]
         S4["GET /api/stock/history/{edinet_code}\n日次株価履歴（OHLCVリスト）"]

@@ -137,14 +137,15 @@ tr:hover td{background:#1e2235}
     </div>
     <div style="background:#130d24;border-radius:8px;padding:10px 12px;font-size:12px;color:#c4b5fd;border-left:3px solid #7c3aed;margin-bottom:14px">
       DB状態を自動判定し、初回は200社ずつ分割収集（チャンク収集）、全社収集完了後は差分収集に切り替えます。<br>
-      <span style="color:#64748b">Render無料プラン（512MB）でも安全に動作します。ボタンを繰り返しクリックするだけで全社収集が完了します。</span>
+      <span style="color:#64748b">Render無料プラン（512MB）でも安全に動作します。ボタンを繰り返しクリックするだけで全社収集が完了します。</span><br>
+      <span style="color:#64748b">EDINETに保管されている過去5年分が取得可能な最大範囲です。最新の有価証券報告書（直近の決算）も含まれます。</span>
     </div>
-    <div class="form-group" style="max-width:200px;margin-bottom:12px">
+    <div class="form-group" style="max-width:240px;margin-bottom:12px">
       <label>遡及年数</label>
       <select id="smart-years-back">
         <option value="1">1年</option>
-        <option value="3" selected>3年（推奨）</option>
-        <option value="5">5年</option>
+        <option value="3">3年</option>
+        <option value="5" selected>5年（EDINET上限・推奨）</option>
       </select>
     </div>
     <div id="smart-mode-badge" style="display:none;font-size:12px;margin-bottom:10px;padding:4px 10px;border-radius:6px;background:#1e293b"></div>
@@ -211,10 +212,10 @@ tr:hover td{background:#1e2235}
         <label>遡及年数</label>
         <select id="years-back">
           <option value="1">1年</option>
-          <option value="3" selected>3年</option>
-          <option value="5">5年（上限）</option>
+          <option value="3">3年</option>
+          <option value="5" selected>5年（EDINET保管上限・推奨）</option>
         </select>
-        <div style="font-size:11px;color:#64748b;margin-top:4px">※ EDINET API は2019年以降のデータのみ提供しています</div>
+        <div style="font-size:11px;color:#64748b;margin-top:4px">※ EDINET API は最大5年分を保管。5年指定で取得可能な最大範囲をカバーします。</div>
       </div>
       <div style="background:#1c1400;border:1px solid #78350f;border-radius:6px;padding:10px 12px;font-size:12px;color:#fcd34d;margin-bottom:12px">
         ⚠️ 全社収集は<strong>数時間</strong>かかります。サーバーを停止しないでください。

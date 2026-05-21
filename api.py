@@ -830,12 +830,50 @@ async def get_stats(db: Session = Depends(get_db)):
     n_companies   = db.query(Company).count()
     n_records     = db.query(FinancialRecord).count()
     n_stock_price = db.query(func.count(StockPriceHistory.id)).scalar() or 0
-    latest_year   = db.query(FinancialRecord.year).order_by(FinancialRecord.year.desc()).first()
+
+    # 最新の財務レコード（year → period_end の降順で1件）
+    latest_fr = (
+        db.query(FinancialRecord.year, FinancialRecord.period_end, FinancialRecord.updated_at)
+        .order_by(FinancialRecord.year.desc(), FinancialRecord.period_end.desc())
+        .first()
+    )
+    # DB全体の最新更新時刻（株価・市場データ更新を含む）
+    last_db_update = db.query(func.max(FinancialRecord.updated_at)).scalar()
+
+    # 「今日から見て期待できる最新の決算年度」推定
+    # 日本企業の多くは3月決算で、有価証券報告書は決算後3ヶ月以内（6月末）に提出される。
+    # 提出から EDINET に反映されるラグも考慮し、7月以降を「当年3月期が揃っている」と判定。
+    today = date.today()
+    if today.month >= 7:
+        expected_year = today.year
+    else:
+        expected_year = today.year - 1
+
+    # データ鮮度判定（最終DB更新からの経過日数）
+    days_since: Optional[int] = None
+    if last_db_update:
+        days_since = (datetime.utcnow() - last_db_update).days
+    if days_since is None:
+        freshness = "empty"
+    elif days_since <= 2:
+        freshness = "fresh"
+    elif days_since <= 14:
+        freshness = "ok"
+    elif days_since <= 60:
+        freshness = "stale"
+    else:
+        freshness = "outdated"
+
     return {
-        "companies":           n_companies,
-        "records":             n_records,
-        "stock_price_records": n_stock_price,
-        "latest_year":         latest_year[0] if latest_year else None,
+        "companies":            n_companies,
+        "records":              n_records,
+        "stock_price_records":  n_stock_price,
+        "latest_year":          latest_fr.year       if latest_fr else None,
+        "latest_period_end":    latest_fr.period_end if latest_fr else None,
+        "last_db_update":       str(last_db_update)[:19] if last_db_update else None,
+        "days_since_update":    days_since,
+        "expected_latest_year": expected_year,
+        "freshness":            freshness,
     }
 
 
