@@ -12,7 +12,7 @@ from typing import Optional, Callable
 from dotenv import load_dotenv
 import httpx
 import pandas as pd
-from database import SessionLocal, Company, FinancialRecord, upsert_company, upsert_financial
+from database import SessionLocal, Company, FinancialRecord, MacroData, upsert_company, upsert_financial
 
 load_dotenv()
 
@@ -1054,6 +1054,129 @@ async def refresh_company(edinet_code: str, years_back: int = 5,
         db.close()
 
 
+# ── マクロデータ（為替・金利・指数・コモディティ）─────────────────────────
+
+# stooq ティッカー定義。category は 'fx' / 'rate' / 'equity' / 'commodity'。
+MACRO_SERIES: list[dict] = [
+    {"code": "USDJPY",    "name": "USD/JPY",      "category": "fx",        "ticker": "usdjpy"},
+    {"code": "EURJPY",    "name": "EUR/JPY",      "category": "fx",        "ticker": "eurjpy"},
+    {"code": "US10Y",     "name": "米10年金利",   "category": "rate",      "ticker": "10usy.b"},
+    {"code": "JP10Y",     "name": "日10年金利",   "category": "rate",      "ticker": "10jpy.b"},
+    {"code": "NIKKEI225", "name": "日経225",      "category": "equity",    "ticker": "^nkx"},
+    {"code": "TOPIX",     "name": "TOPIX",        "category": "equity",    "ticker": "^tpx"},
+    {"code": "SP500",     "name": "S&P500",       "category": "equity",    "ticker": "^spx"},
+    {"code": "WTI",       "name": "WTI原油",      "category": "commodity", "ticker": "cl.f"},
+    {"code": "GOLD",      "name": "金",           "category": "commodity", "ticker": "gc.f"},
+]
+
+
+async def fetch_stooq_history(
+    session: httpx.AsyncClient,
+    ticker:  str,
+    date_from: str,   # "YYYYMMDD"
+    date_to:   str,   # "YYYYMMDD"
+) -> list:
+    """stooq 日次 OHLCV（汎用ティッカー）を取得して [{trade_date, open, high, low, close, volume}] で返す"""
+    url = f"https://stooq.com/q/d/l/?s={ticker}&d1={date_from}&d2={date_to}&i=d"
+    try:
+        r = await session.get(url, timeout=30)
+        r.raise_for_status()
+        text = r.text
+    except Exception as e:
+        log.debug(f"stooq マクロ取得失敗 {ticker}: {e}")
+        return []
+
+    rows = []
+    lines = text.strip().splitlines()
+    if len(lines) < 2:
+        return []
+    # ヘッダー（"Date,Open,High,Low,Close,Volume"）以外を解析
+    for line in lines[1:]:
+        parts = line.split(",")
+        if len(parts) < 5:
+            continue
+        try:
+            close = float(parts[4])
+        except ValueError:
+            continue
+        def _f(s):
+            try: return float(s)
+            except ValueError: return None
+        rows.append({
+            "trade_date": parts[0],
+            "open":       _f(parts[1]),
+            "high":       _f(parts[2]),
+            "low":        _f(parts[3]),
+            "close":      close,
+            "volume":     _f(parts[5]) if len(parts) > 5 else None,
+        })
+    return rows
+
+
+async def collect_macro_data(
+    db,
+    years_back: int = 5,
+    on_progress: Optional[Callable[[int, int, str], None]] = None,
+    cancel_check: Optional[Callable[[], bool]] = None,
+):
+    """MACRO_SERIES の全系列について stooq から日次データを取得し macro_data に upsert する。
+    既存レコードがあれば close 等を上書き（最新値で更新）。"""
+    today    = date.today()
+    start    = today - timedelta(days=int(years_back * 365.25))
+    d1       = start.strftime("%Y%m%d")
+    d2       = today.strftime("%Y%m%d")
+    total    = len(MACRO_SERIES)
+    saved    = 0
+
+    async with httpx.AsyncClient() as session:
+        for i, series in enumerate(MACRO_SERIES, 1):
+            if cancel_check and cancel_check():
+                if on_progress:
+                    on_progress(i-1, total, "[マクロ収集] ユーザー停止")
+                return saved
+
+            if on_progress:
+                on_progress(i-1, total, f"[マクロ {i}/{total}] {series['name']} ({series['ticker']}) 取得中")
+
+            rows = await fetch_stooq_history(session, series["ticker"], d1, d2)
+            if not rows:
+                if on_progress:
+                    on_progress(i, total, f"[マクロ {i}/{total}] {series['name']} データ無し")
+                continue
+
+            # 既存行のキー集合を一度に取得し、無いものだけ INSERT、有るものは UPDATE
+            existing_dates = {
+                d for (d,) in db.query(MacroData.trade_date)
+                                .filter(MacroData.series_code == series["code"]).all()
+            }
+            ins, upd = 0, 0
+            for r in rows:
+                if r["trade_date"] in existing_dates:
+                    db.query(MacroData).filter_by(
+                        series_code=series["code"], trade_date=r["trade_date"]
+                    ).update({
+                        "open": r["open"], "high": r["high"], "low": r["low"],
+                        "close": r["close"], "volume": r["volume"],
+                    })
+                    upd += 1
+                else:
+                    db.add(MacroData(
+                        series_code = series["code"],
+                        series_name = series["name"],
+                        category    = series["category"],
+                        trade_date  = r["trade_date"],
+                        open=r["open"], high=r["high"], low=r["low"],
+                        close=r["close"], volume=r["volume"],
+                    ))
+                    ins += 1
+            db.commit()
+            saved += ins + upd
+            if on_progress:
+                on_progress(i, total, f"[マクロ {i}/{total}] {series['name']}: {ins}件新規, {upd}件更新")
+
+    return saved
+
+
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="EDINET全上場企業収集")
@@ -1061,11 +1184,22 @@ if __name__ == "__main__":
     parser.add_argument("--max",         type=int, default=None)
     parser.add_argument("--company",     type=str, default=None)
     parser.add_argument("--market",      action="store_true", help="市場データのみ更新")
+    parser.add_argument("--macro",       action="store_true", help="マクロデータのみ収集")
     parser.add_argument("--incremental", action="store_true", help="収集済みをスキップ（差分収集）")
     args = parser.parse_args()
 
     if args.market:
         asyncio.run(update_market_data(args.max))
+    elif args.macro:
+        async def _run():
+            db = SessionLocal()
+            try:
+                n = await collect_macro_data(db, args.years,
+                    on_progress=lambda c, t, m: print(m))
+                print(f"完了: {n} 件更新")
+            finally:
+                db.close()
+        asyncio.run(_run())
     elif args.company:
         asyncio.run(refresh_company(args.company, args.years))
     else:

@@ -146,14 +146,15 @@ tr:hover td{background:#1e2235}
     </div>
     <div style="background:#130d24;border-radius:8px;padding:10px 12px;font-size:12px;color:#c4b5fd;border-left:3px solid #7c3aed;margin-bottom:14px">
       DB状態を自動判定し、初回は200社ずつ分割収集（チャンク収集）、全社収集完了後は差分収集に切り替えます。<br>
-      <span style="color:#64748b">Render無料プラン（512MB）でも安全に動作します。ボタンを繰り返しクリックするだけで全社収集が完了します。</span>
+      <span style="color:#64748b">Render無料プラン（512MB）でも安全に動作します。ボタンを繰り返しクリックするだけで全社収集が完了します。</span><br>
+      <span style="color:#64748b">EDINETに保管されている過去5年分が取得可能な最大範囲です。最新の有価証券報告書（直近の決算）も含まれます。</span>
     </div>
-    <div class="form-group" style="max-width:200px;margin-bottom:12px">
+    <div class="form-group" style="max-width:240px;margin-bottom:12px">
       <label>遡及年数</label>
       <select id="smart-years-back">
         <option value="1">1年</option>
-        <option value="3" selected>3年（推奨）</option>
-        <option value="5">5年</option>
+        <option value="3">3年</option>
+        <option value="5" selected>5年（EDINET上限・推奨）</option>
       </select>
     </div>
     <div id="smart-mode-badge" style="display:none;font-size:12px;margin-bottom:10px;padding:4px 10px;border-radius:6px;background:#1e293b"></div>
@@ -220,10 +221,10 @@ tr:hover td{background:#1e2235}
         <label>遡及年数</label>
         <select id="years-back">
           <option value="1">1年</option>
-          <option value="3" selected>3年</option>
-          <option value="5">5年（上限）</option>
+          <option value="3">3年</option>
+          <option value="5" selected>5年（EDINET保管上限・推奨）</option>
         </select>
-        <div style="font-size:11px;color:#64748b;margin-top:4px">※ EDINET API は2019年以降のデータのみ提供しています</div>
+        <div style="font-size:11px;color:#64748b;margin-top:4px">※ EDINET API は最大5年分を保管。5年指定で取得可能な最大範囲をカバーします。</div>
       </div>
       <div style="background:#1c1400;border:1px solid #78350f;border-radius:6px;padding:10px 12px;font-size:12px;color:#fcd34d;margin-bottom:12px">
         ⚠️ 全社収集は<strong>数時間</strong>かかります。サーバーを停止しないでください。
@@ -505,6 +506,61 @@ tr:hover td{background:#1e2235}
       </div>
     </div>
   </details>
+
+  <!-- マクロデータ（為替・金利・指数・コモディティ） -->
+  <div class="card" style="margin-top:16px">
+    <div class="flex-between" style="margin-bottom:6px">
+      <div style="font-size:14px;font-weight:600;color:#86efac">マクロデータ（為替・金利・指数・コモディティ）</div>
+      <div style="font-size:11px;color:#64748b">stooq 経由 / 9系列・日次OHLCV</div>
+    </div>
+    <div style="font-size:12px;color:#64748b;margin-bottom:14px">
+      USD/JPY・米日10年金利・日経/TOPIX/S&P500・WTI/金 の日次データを取得します。<br>
+      <span style="color:#475569">※ 既存日付は上書き更新。スケジューラON時は毎日3時に自動取得されます。</span>
+    </div>
+
+    <div class="form-group" style="max-width:280px">
+      <label>取得年数（過去〜現在）</label>
+      <select id="macro-years">
+        <option value="1">1年</option>
+        <option value="3">3年</option>
+        <option value="5" selected>5年（推奨）</option>
+        <option value="10">10年</option>
+      </select>
+    </div>
+    <div class="flex" style="margin-bottom:8px">
+      <button class="btn btn-secondary" id="btn-macro-start" onclick="startMacroCollection()">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg>
+        マクロ収集開始
+      </button>
+      <button class="btn btn-secondary btn-sm" id="btn-macro-stop" onclick="stopMacroCollection()" style="display:none;border-color:#ef4444;color:#ef4444">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/></svg>
+        停止
+      </button>
+    </div>
+    <div id="macro-progress" class="hidden progress-wrap">
+      <div class="flex" style="margin-bottom:6px">
+        <span class="spinner"></span>
+        <span class="text-sm" id="macro-progress-label">収集中...</span>
+      </div>
+      <div class="progress-bar"><div class="progress-fill" id="macro-progress-fill" style="width:0%"></div></div>
+    </div>
+
+    <div class="section-title" style="margin-top:16px">系列カバレッジ</div>
+    <div style="overflow-x:auto">
+      <table>
+        <thead>
+          <tr><th>系列</th><th>カテゴリ</th><th>件数</th><th>最古日</th><th>最新日</th></tr>
+        </thead>
+        <tbody id="macro-coverage-tbody"></tbody>
+      </table>
+    </div>
+
+    <div class="flex-between" style="margin-top:12px;margin-bottom:6px">
+      <div style="font-size:11px;color:#475569;text-transform:uppercase;letter-spacing:.5px">収集ログ</div>
+      <button class="btn btn-secondary btn-sm" onclick="document.getElementById('macro-log').innerHTML=''">クリア</button>
+    </div>
+    <div class="log-box" id="macro-log"></div>
+  </div>
 </div>
 
 <!-- データ確認 -->
@@ -1381,6 +1437,91 @@ function _jqLog(msg,type='info'){
   el.textContent = `[${ts}] ${msg}`; box.appendChild(el); box.scrollTop=box.scrollHeight;
 }
 
+// ── マクロデータ収集（為替・金利・指数・コモディティ）───────────────
+let _macroSSE = null;
+
+async function loadMacroCoverage(){
+  try{
+    const d = await apiFetch('/api/macro/series');
+    if(!d) return;
+    const tbody = document.getElementById('macro-coverage-tbody');
+    const catLabel = {fx:'FX', rate:'金利', equity:'株価指数', commodity:'コモディティ'};
+    const catColor = {fx:'tag-blue', rate:'tag-amber', equity:'tag-purple', commodity:'tag-amber'};
+    tbody.innerHTML = d.series.map(s => `
+      <tr>
+        <td><strong>${esc(s.name)}</strong><br><span style="font-size:10px;color:#64748b">${esc(s.code)} / ${esc(s.ticker)}</span></td>
+        <td><span class="tag ${catColor[s.category]||'tag-gray'}" style="font-size:10px">${catLabel[s.category]||s.category}</span></td>
+        <td>${s.rows.toLocaleString()}</td>
+        <td>${s.oldest||'<span style="color:#475569">—</span>'}</td>
+        <td>${s.newest||'<span style="color:#475569">—</span>'}</td>
+      </tr>
+    `).join('');
+  }catch(e){ /* ignore */ }
+}
+
+async function startMacroCollection(){
+  const years = parseInt(document.getElementById('macro-years').value);
+  try{
+    await apiFetch('/api/collect/macro/start', {
+      method:'POST',
+      body: JSON.stringify({years_back: years})
+    });
+    _macroLog(`マクロ収集を開始しました（${years}年分）`,'success');
+    document.getElementById('macro-progress').classList.remove('hidden');
+    document.getElementById('btn-macro-start').disabled = true;
+    document.getElementById('btn-macro-stop').style.display = '';
+    _startMacroSSE();
+  }catch(e){
+    _macroLog('収集開始失敗: '+e.message,'error');
+  }
+}
+
+function _startMacroSSE(){
+  if(_macroSSE){ _macroSSE.close(); }
+  _macroSSE = new EventSource(apiBase()+'/api/collect/macro/stream');
+  _macroSSE.onmessage = function(e){
+    const d = JSON.parse(e.data);
+    if(d.total > 0){
+      const pct = Math.round(d.progress / d.total * 100);
+      document.getElementById('macro-progress-fill').style.width = pct+'%';
+    }
+    if(d.new_logs && d.new_logs.length > 0){
+      const last = d.new_logs[d.new_logs.length-1];
+      document.getElementById('macro-progress-label').textContent = last;
+      d.new_logs.forEach(msg => _macroLog(msg,'info'));
+    }
+    if(!d.running && d.progress > 0){
+      _macroSSE.close();
+      _onMacroComplete();
+    }
+  };
+  _macroSSE.onerror = function(){ _macroSSE.close(); _onMacroComplete(); };
+}
+
+function _onMacroComplete(){
+  document.getElementById('macro-progress').classList.add('hidden');
+  document.getElementById('btn-macro-start').disabled = false;
+  document.getElementById('btn-macro-stop').style.display = 'none';
+  document.getElementById('btn-macro-stop').disabled = false;
+  _macroLog('マクロ収集完了','success');
+  loadMacroCoverage();
+}
+
+async function stopMacroCollection(){
+  try{
+    await apiFetch('/api/collect/macro/stop',{method:'POST'});
+    _macroLog('停止リクエストを送信しました','info');
+    document.getElementById('btn-macro-stop').disabled = true;
+  }catch(e){ _macroLog('停止失敗: '+e.message,'error'); }
+}
+
+function _macroLog(msg,type='info'){
+  const box = document.getElementById('macro-log');
+  const ts = new Date().toTimeString().slice(0,8);
+  const el = document.createElement('div'); el.className='log-entry '+type;
+  el.textContent = `[${ts}] ${msg}`; box.appendChild(el); box.scrollTop=box.scrollHeight;
+}
+
 // ── スクリーニング ──────────────────────────────────────────────────
 async function runScreen(){
   const body = {
@@ -1548,6 +1689,7 @@ function showTab(t){
   _TABS.forEach(x=>document.getElementById('tab-'+x).classList.toggle('hidden',x!==t));
   document.querySelectorAll('.nav-btn[data-tab]').forEach(b=>b.classList.toggle('active',b.dataset.tab===t));
   if(t==='dataview') loadDB();
+  if(t==='stockmarket') loadMacroCoverage();
 }
 
 // ── 市場データ更新 ────────────────────────────────────────────────────
