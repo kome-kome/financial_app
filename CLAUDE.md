@@ -8,6 +8,11 @@
 新機能・改修は必ず Render Free プランの制約を前提に設計すること（メモリ 512MB・スピンダウン 15 分・SSH 不可）。
 詳細は [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) を **必読**。
 
+> **🔄 進行中の構造改修**: ローカル PG → Supabase への一本化、および XBRL 生データ
+> 中間テーブル追加を進行中。設計書 [docs/REFACTORING.md](docs/REFACTORING.md) を参照。
+> 移行用スクリプトは `scripts/compare_db_counts.py`、`scripts/migrate_local_to_supabase.py`
+> （後者は実装予定）。実 DB 操作は手元 PC から行う（Web 版 Claude Code は到達不可）。
+
 主要ポイント（うっかり破らないために）:
 - マイグレーションは `init_db()` 内で **冪等** に実装（起動時に自動実行）
 - 永続化はすべて Supabase。ローカルファイル書き込みは再デプロイで消える

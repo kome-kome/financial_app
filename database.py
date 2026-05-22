@@ -102,6 +102,7 @@ class FinancialRecord(Base):
     bs_machinery            = Column(Float)   # 機械装置及び運搬具
     bs_intangible_assets    = Column(Float)   # 無形固定資産
     bs_cash                 = Column(Float)   # 現金・預金
+    bs_investment_securities = Column(Float)  # 投資有価証券（清原式ネットキャッシュ用）
     bs_total_liabilities    = Column(Float)   # 総負債
     bs_current_liabilities  = Column(Float)   # 流動負債
     bs_payables             = Column(Float)   # 買掛金（仕入債務）
@@ -145,6 +146,8 @@ class FinancialRecord(Base):
     equity_ratio            = Column(Float)   # 自己資本比率 %
     de_ratio                = Column(Float)   # D/Eレシオ
     cf_ratio                = Column(Float)   # 営業CF/売上比率 %
+    net_cash                = Column(Float)   # ネットキャッシュ（円・清原式）
+    nc_ratio                = Column(Float)   # ネットキャッシュ比率 = net_cash / 時価総額（百万円換算）
 
     # ── 市場データ（株価・バリュエーション）─────────────────────────────
     stock_price             = Column(Float)   # 株価（収集時点）
@@ -162,6 +165,7 @@ class FinancialRecord(Base):
     z_cf_ratio              = Column(Float)
     z_eps                   = Column(Float)
     z_de_ratio              = Column(Float)
+    z_nc_ratio              = Column(Float)   # ネットキャッシュ比率のZスコア
 
     # ── 前期比成長率 ─────────────────────────────────────────────────────
     rev_growth              = Column(Float)   # 売上高成長率 %
@@ -257,6 +261,8 @@ def init_db():
             "bs_buildings", "bs_machinery", "bs_intangible_assets",
             "bs_payables", "bs_bonds_payable",
             "bs_paid_in_capital", "bs_retained_earnings",
+            "bs_investment_securities",
+            "net_cash", "nc_ratio", "z_nc_ratio",
         ]
         for col in _new_cols:
             conn.execute(text(
@@ -414,8 +420,8 @@ def _calc_zscore_for_year(db, year: int):
     if not records:
         return
 
-    fields = ["pl_revenue", "op_margin", "roe", "equity_ratio", "cf_ratio", "pl_eps", "de_ratio"]
-    z_cols  = ["z_revenue",  "z_op_margin", "z_roe", "z_equity_ratio", "z_cf_ratio", "z_eps", "z_de_ratio"]
+    fields = ["pl_revenue", "op_margin", "roe", "equity_ratio", "cf_ratio", "pl_eps", "de_ratio", "nc_ratio"]
+    z_cols  = ["z_revenue",  "z_op_margin", "z_roe", "z_equity_ratio", "z_cf_ratio", "z_eps", "z_de_ratio", "z_nc_ratio"]
 
     for src, dst in zip(fields, z_cols):
         vals = [getattr(r, src) for r in records if getattr(r, src) is not None]

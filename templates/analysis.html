@@ -370,6 +370,112 @@ tr:hover td{background:#1e2235}
   </div>
 </div>
 
+<!-- ネットキャッシュ分析（清原達郎『わが投資術』） -->
+<div id="tab-net_cash" class="hidden">
+  <div class="card">
+    <div class="section-title">ネットキャッシュ分析 — 清原達郎『わが投資術』</div>
+    <div class="info-box" style="margin-bottom:14px">
+      <strong style="color:#10b981">ネットキャッシュ</strong> = 流動資産 + 投資有価証券 × 0.7 − 総負債&nbsp;<span style="color:#64748b">[円]</span><br>
+      <strong style="color:#10b981">ネットキャッシュ比率</strong> = ネットキャッシュ ÷ 時価総額&nbsp;<span style="color:#64748b">[無次元]</span><br>
+      <span style="color:#fcd34d">比率 ≥ 1.0</span>: 時価総額より多くのネットキャッシュを保有（現金で買える）&nbsp;|&nbsp;
+      <span style="color:#a7f3d0">比率 ≥ 0.5</span>: 半額バーゲン水準<br>
+      <span style="color:#f59e0b;font-size:11px">⚠ 投資有価証券の 0.7 倍は含み益課税（約30%）を考慮した清原式の経験則。実態の換金価値は市況・銘柄構成で変動するため参考値です。</span>
+    </div>
+    <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:14px">
+      <div class="form-group" style="margin-bottom:0">
+        <label>最低ネットキャッシュ比率</label>
+        <input type="number" id="nc-min-ratio" value="0.5" min="-5" max="5" step="0.1">
+        <div class="text-sm" style="margin-top:4px;color:#64748b">0.5=半額バーゲン、1.0=現金で買える水準</div>
+      </div>
+      <div class="form-group" style="margin-bottom:0">
+        <label>最低時価総額（百万円、空=制限なし）</label>
+        <input type="number" id="nc-min-cap" value="5000" min="0" step="1000">
+      </div>
+      <div class="form-group" style="margin-bottom:0">
+        <label>業種（空欄=全業種）</label>
+        <input type="text" id="nc-industry" placeholder="例: 電気機器">
+      </div>
+      <div class="form-group" style="margin-bottom:0">
+        <label>対象年度（空=各社の最新）</label>
+        <input type="number" id="nc-year" placeholder="例: 2024">
+      </div>
+      <div class="form-group" style="margin-bottom:0">
+        <label>表示件数</label>
+        <select id="nc-top-n">
+          <option value="20">上位20社</option>
+          <option value="50" selected>上位50社</option>
+          <option value="100">上位100社</option>
+          <option value="200">上位200社</option>
+        </select>
+      </div>
+      <div class="form-group" style="margin-bottom:0">
+        <label>ソート順</label>
+        <select id="nc-sort">
+          <option value="nc_ratio_desc" selected>NC比率 高い順（割安）</option>
+          <option value="nc_ratio_asc">NC比率 低い順</option>
+          <option value="net_cash_desc">NC額 大きい順</option>
+        </select>
+      </div>
+    </div>
+    <button class="btn btn-primary" id="btn-net-cash" onclick="runNetCash()">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
+      ネットキャッシュ分析を実行
+    </button>
+  </div>
+
+  <div class="card hidden" id="nc-summary-card">
+    <div class="section-title">サマリー</div>
+    <div class="grid3" style="margin-bottom:8px">
+      <div class="stat-card">
+        <div class="stat-label">現金で買える銘柄（NC比率 ≥ 1.0）</div>
+        <div class="stat-value" id="nc-stat-very-cheap" style="color:#fbbf24">-</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">半額バーゲン（NC比率 ≥ 0.5）</div>
+        <div class="stat-value" id="nc-stat-cheap" style="color:#86efac">-</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">投資有価証券データ保有</div>
+        <div class="stat-value" id="nc-stat-inv-sec" style="color:#a78bfa">-</div>
+      </div>
+    </div>
+    <div id="nc-industry-summary" style="margin-top:10px;font-size:11px;color:#94a3b8"></div>
+  </div>
+
+  <div class="card hidden" id="nc-results-card">
+    <div class="flex-between">
+      <div class="section-title" style="margin-bottom:0">
+        結果 <span id="nc-count" class="tag tag-purple" style="margin-left:6px">-</span>
+      </div>
+      <button class="btn btn-secondary btn-sm" onclick="exportNetCashCSV()">CSV出力</button>
+    </div>
+    <div style="overflow-x:auto;margin-top:12px">
+      <table>
+        <thead>
+          <tr>
+            <th>順位</th>
+            <th>証券コード</th>
+            <th>企業名</th>
+            <th>業種</th>
+            <th>年度</th>
+            <th title="清原式: 流動資産 + 投資有価証券×0.7 − 総負債">NC(億円) ⓘ</th>
+            <th title="ネットキャッシュ ÷ 時価総額">NC比率 ⓘ</th>
+            <th>時価総額(億)</th>
+            <th>流動資産(億)</th>
+            <th title="0=取得未対応の古いレコード">投資有価証券(億) ⓘ</th>
+            <th>総負債(億)</th>
+            <th>PER</th>
+            <th>PBR</th>
+            <th>配当利回り%</th>
+            <th>ROE%</th>
+          </tr>
+        </thead>
+        <tbody id="nc-tbody"></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
 <!-- バックテスト -->
 <div id="tab-backtest" class="hidden">
   <div class="card">
@@ -518,9 +624,10 @@ let gapResults  = [];
 
 // プラグインシステム
 const PLUGIN_TAB_MAP = {
-  'gap_analysis':   'gap',
-  'recommend':      'recommend',
-  'total_return':   'total_return',
+  'gap_analysis':       'gap',
+  'recommend':          'recommend',
+  'total_return':       'total_return',
+  'net_cash_analysis':  'net_cash',
 };
 let _allTabs   = ['backtest'];
 let _pluginMeta = {};
@@ -849,6 +956,89 @@ function exportTotalReturnCSV() {
   dl('﻿'+h+b, 'total_return_ranking.csv');
 }
 
+// ── ネットキャッシュ分析（清原達郎） ────────────────────────────────────
+let ncResults = [];
+
+async function runNetCash() {
+  const params = {
+    min_nc_ratio:    parseFloat(document.getElementById('nc-min-ratio').value || '0'),
+    min_market_cap:  document.getElementById('nc-min-cap').value ? parseFloat(document.getElementById('nc-min-cap').value) : null,
+    industry:        document.getElementById('nc-industry').value.trim() || null,
+    year:            document.getElementById('nc-year').value ? parseInt(document.getElementById('nc-year').value, 10) : null,
+    top_n:           parseInt(document.getElementById('nc-top-n').value, 10),
+    sort:            document.getElementById('nc-sort').value,
+  };
+  const btn = document.getElementById('btn-net-cash');
+  btn.disabled = true;
+  btn.textContent = '実行中...';
+  try {
+    const d = await apiFetch('/api/plugins/net_cash_analysis/run', {
+      method:'POST', body:JSON.stringify(params)
+    });
+    ncResults = d.results || [];
+
+    document.getElementById('nc-stat-very-cheap').textContent = (d.n_very_cheap ?? 0) + '社';
+    document.getElementById('nc-stat-cheap').textContent      = (d.n_cheap      ?? 0) + '社';
+    document.getElementById('nc-stat-inv-sec').textContent    = (d.n_inv_securities ?? 0) + '社 / ' + (d.count ?? 0) + '社';
+
+    const indSummary = (d.industry_summary || []).slice(0, 8)
+      .map(s => `${esc(s.industry)} (${s.n})`).join('  /  ');
+    document.getElementById('nc-industry-summary').textContent =
+      indSummary ? '業種分布（上位8業種）: ' + indSummary : '';
+
+    document.getElementById('nc-summary-card').classList.remove('hidden');
+    document.getElementById('nc-results-card').classList.remove('hidden');
+    document.getElementById('nc-count').textContent = (d.count ?? 0) + '社 / 候補 ' + (d.n_total_candidates ?? 0) + '社';
+    renderNetCash();
+  } catch(e) {
+    showNotif('ネットキャッシュ分析失敗: ' + e.message);
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg> ネットキャッシュ分析を実行';
+  }
+}
+
+function renderNetCash() {
+  const tbody = document.getElementById('nc-tbody');
+  tbody.innerHTML = ncResults.map(r => {
+    const ratioColor = r.nc_ratio >= 1.0 ? '#fbbf24'
+                     : r.nc_ratio >= 0.5 ? '#86efac'
+                     : r.nc_ratio >= 0   ? '#94a3b8'
+                                          : '#fca5a5';
+    const ncColor = r.net_cash_oku >= 0 ? '#86efac' : '#fca5a5';
+    const invNote = r.has_investment_sec ? '' : '<span style="color:#64748b" title="投資有価証券データ未取得（古いレコード）"> *</span>';
+    return `<tr>
+      <td>${r.rank}</td>
+      <td><code style="color:#67e8f9">${esc(r.sec_code || '')}</code></td>
+      <td>${esc(r.company_name || '')}</td>
+      <td style="color:#94a3b8">${esc(r.industry || '')}</td>
+      <td>${r.year ?? '-'}</td>
+      <td style="text-align:right;color:${ncColor};font-weight:600">${Number(r.net_cash_oku).toLocaleString()}</td>
+      <td style="text-align:right;color:${ratioColor};font-weight:600">${Number(r.nc_ratio).toFixed(3)}</td>
+      <td style="text-align:right">${Number(r.market_cap_oku).toLocaleString()}</td>
+      <td style="text-align:right;color:#94a3b8">${Number(r.current_assets_oku).toLocaleString()}</td>
+      <td style="text-align:right;color:#94a3b8">${Number(r.investment_sec_oku).toLocaleString()}${invNote}</td>
+      <td style="text-align:right;color:#94a3b8">${Number(r.total_liabilities_oku).toLocaleString()}</td>
+      <td style="text-align:right">${r.per ?? '-'}</td>
+      <td style="text-align:right">${r.pbr ?? '-'}</td>
+      <td style="text-align:right">${r.div_yield ?? '-'}</td>
+      <td style="text-align:right">${r.roe ?? '-'}</td>
+    </tr>`;
+  }).join('');
+}
+
+function exportNetCashCSV() {
+  if (!ncResults.length) return;
+  const h = '順位,証券コード,企業名,業種,年度,ネットキャッシュ(億円),NC比率,時価総額(億),流動資産(億),投資有価証券(億),総負債(億),PER,PBR,配当利回り%,ROE%\n';
+  const b = ncResults.map(r => [
+    r.rank, r.sec_code, r.company_name, r.industry, r.year,
+    r.net_cash_oku, r.nc_ratio, r.market_cap_oku, r.current_assets_oku,
+    r.investment_sec_oku, r.total_liabilities_oku, r.per ?? '', r.pbr ?? '',
+    r.div_yield ?? '', r.roe ?? ''
+  ].join(',')).join('\n');
+  dl('﻿' + h + b, 'net_cash_ranking.csv');
+}
+
 // ── バックテスト ─────────────────────────────────────────────────────
 let btResults = [];
 let btSortAsc = false;
@@ -1125,6 +1315,9 @@ async function initPlugins() {
       } else if (plugin.name === 'total_return') {
         btn.style.color = '#f59e0b';
         btn.textContent = '◆ ' + plugin.label;
+      } else if (plugin.name === 'net_cash_analysis') {
+        btn.style.color = '#fbbf24';
+        btn.textContent = '¥ ' + plugin.label;
       } else {
         btn.textContent = plugin.label;
       }

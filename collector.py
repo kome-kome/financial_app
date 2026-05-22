@@ -96,6 +96,10 @@ XBRL_MAP = {
     "CurrentLiabilities":                              ("bs", "current_liabilities"),
     "NoncurrentLiabilities":                           ("bs", "noncurrent_liabilities"),
     "CashAndCashEquivalents":                          ("bs", "cash"),
+    # BS 投資有価証券（清原式ネットキャッシュ用・JGAAP）
+    "InvestmentSecurities":                            ("bs", "investment_securities"),
+    "InvestmentsInSecurities":                         ("bs", "investment_securities"),
+    "ShortTermInvestmentSecurities":                   ("bs", "investment_securities"),
     # BS 流動資産 詳細（JGAAP）
     "NotesAndAccountsReceivableTrade":                 ("bs", "receivables"),
     "AccountsReceivableTrade":                         ("bs", "receivables"),
@@ -127,6 +131,8 @@ XBRL_MAP = {
     "CurrentLiabilitiesIFRS":                          ("bs", "current_liabilities"),
     "NoncurrentLiabilitiesIFRS":                       ("bs", "noncurrent_liabilities"),
     "CashAndCashEquivalentsIFRS":                      ("bs", "cash"),
+    # BS 投資有価証券（IFRS — 非流動その他金融資産で近似。流動性の高い金融資産は別科目のため除外）
+    "OtherFinancialAssetsNonCurrentIFRS":              ("bs", "investment_securities"),
     # BS 詳細（IFRS）
     "TradeAndOtherReceivablesCurrentIFRS":             ("bs", "receivables"),
     "InventoriesIFRS":                                 ("bs", "inventory"),
@@ -406,6 +412,13 @@ def calc_derived(rec: dict) -> dict:
     # 営業外損益（純額）= 経常利益 - 営業利益。pl セクションに置くことで pl_ プレフィックスが付く
     if op and ord_p:
         pl["nonoperating_income"] = round(ord_p - op, 0)
+    # 清原達郎式ネットキャッシュ = 流動資産 + 投資有価証券×0.7 − 総負債
+    # 投資有価証券が未取得の古いレコードは 0 として扱う（簡易NCAV式相当）。
+    # nc_ratio は market_cap 確定後に update_market_data_only で計算する。
+    ca   = bs.get("current_assets", 0) or 0
+    inv  = bs.get("investment_securities", 0) or 0
+    tl   = bs.get("total_liabilities", 0) or 0
+    net_cash = ca + inv * 0.7 - tl if (ca or tl) else None
     rec["derived"] = {
         "op_margin":    round(op / rev * 100, 2) if rev else None,
         "net_margin":   round(net / rev * 100, 2) if rev else None,
@@ -414,6 +427,7 @@ def calc_derived(rec: dict) -> dict:
         "equity_ratio": round(eq / asset * 100, 2) if asset else None,
         "de_ratio":     round(debt / eq, 4) if eq else None,
         "cf_ratio":     round(ocf / rev * 100, 2) if rev else None,
+        "net_cash":     round(net_cash, 0) if net_cash is not None else None,
     }
     return rec
 
@@ -853,6 +867,13 @@ async def update_market_data(max_companies: Optional[int] = None,
                     latest.market_cap = round(price * shares / 1_000_000, 2)
                 if latest.dps and latest.dps > 0 and price > 0:
                     latest.div_yield = round(latest.dps / price * 100, 2)
+                # ネットキャッシュ比率 = net_cash[円] / (market_cap[百万円] × 1e6)
+                # 清原氏の銘柄選別基準: nc_ratio > 1.0 で「時価総額を上回るネットキャッシュ」
+                if (latest.net_cash is not None
+                        and latest.market_cap and latest.market_cap > 0):
+                    latest.nc_ratio = round(
+                        latest.net_cash / (latest.market_cap * 1_000_000), 4
+                    )
 
                 updated += 1
                 if updated % 50 == 0:
