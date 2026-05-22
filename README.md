@@ -88,20 +88,23 @@ python -m venv venv
 .\venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 
-# .env を作成（UTF-8 BOMなし）
-# EDINET_API_KEY=...
-# DATABASE_URL=postgresql://...
-# APP_PASSWORD=...
-# APP_SECRET_KEY=...
-# APP_RECOVERY_KEY=...
-# ALLOWED_ORIGIN=http://localhost:8000
-# JQUANTS_API_KEY=...  (任意)
+# .env を作成（UTF-8 BOMなし。.env.example を参照）
+#   EDINET_API_KEY=...
+#   DATABASE_URL=postgresql://postgres:[PASSWORD]@db.[PROJECT].supabase.co:5432/postgres?sslmode=require
+#   APP_PASSWORD=...
+#   APP_SECRET_KEY=...
+#   APP_RECOVERY_KEY=...
+#   ALLOWED_ORIGIN=http://localhost:8000
+#   JQUANTS_API_KEY=...  (任意)
 
 # 起動
 uvicorn api:app --reload
 ```
 
 ブラウザで `http://localhost:8000/` を開く。初回は `/collection` から「全件収集」を実行してデータベースを構築する。
+
+> **DB は Supabase に一本化**（移行進行中）。詳細・移行手順は [`docs/REFACTORING.md`](docs/REFACTORING.md) を参照。
+> 移行が完了するまでは `DATABASE_URL` をローカル PostgreSQL（`localhost:5432`）に向けることも可能。
 
 ### よく使うコマンド
 
