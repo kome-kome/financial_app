@@ -400,21 +400,18 @@ tr:hover td{background:#1e2235}
     </div>
   </div>
 
-  <!-- stooq（補足・フォールバック） -->
-  <details style="margin-bottom:0">
-    <summary style="cursor:pointer;padding:10px 16px;background:#141722;border:1px solid #1e293b;border-radius:8px;font-size:13px;color:#475569;list-style:none;display:flex;align-items:center;gap:8px">
-      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
-      stooq データ収集
-      <span style="font-size:11px;background:#1e293b;color:#475569;padding:2px 8px;border-radius:10px;margin-left:4px">補足 / APIキー不要</span>
-    </summary>
-    <div style="padding-top:12px">
-      <div style="font-size:12px;color:#475569;background:#0f1117;border:1px solid #1e293b;border-radius:6px;padding:8px 12px;margin-bottom:12px">
-        J-Quants APIキーが未設定の場合や、過去5年分のデータが必要な場合のフォールバックとして使用します。
-        stooq のデータは J-Quants に上書きされます。
+  <!-- 市場データ更新（stooq専用・スクリーニングに必須） -->
+  <div style="margin-bottom:16px">
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px">
+      <div style="width:6px;height:6px;border-radius:50%;background:#64748b"></div>
+      <div style="font-size:14px;font-weight:600;color:#94a3b8">市場データ（株価・バリュエーション）更新</div>
+      <span style="font-size:11px;background:#1e293b;color:#64748b;padding:2px 8px;border-radius:10px;font-weight:500">stooq / APIキー不要</span>
+    </div>
+    <div class="card" style="border-color:#1e293b">
+      <div style="background:#0d1120;border-radius:8px;padding:10px 12px;font-size:12px;color:#64748b;border-left:3px solid #334155;margin-bottom:14px">
+        スクリーニングで使う <strong style="color:#94a3b8">現在株価・PER・PBR・時価総額・配当利回り</strong> を stooq から取得して financial_records に書き込みます。<br>
+        <span style="color:#475569">J-Quants（OHLCV履歴）とは別の役割で、このデータは stooq が唯一のソースです。スクリーニング前に実行してください。</span>
       </div>
-      <div class="grid2" style="margin-bottom:0">
-        <!-- 市場データ更新 -->
-        <div class="card" style="border-color:#1e293b">
           <div class="section-title" style="color:#64748b">市場データ（株価・バリュエーション）更新</div>
           <div style="font-size:12px;color:#475569;margin-bottom:14px">
             stooq.com から現在株価を取得し、PER・PBR・時価総額・配当利回りを計算します。
@@ -450,12 +447,25 @@ tr:hover td{background:#1e2235}
           </div>
           <div class="log-box" id="market-log-box" role="log" aria-live="polite" aria-label="市場データ更新ログ"></div>
         </div>
+    </div>
+  </div>
 
-        <!-- 株価履歴収集（stooq） -->
-        <div class="card" style="border-color:#1e293b">
+  <!-- 株価履歴収集（stooq フォールバック） -->
+  <details style="margin-bottom:0">
+    <summary style="cursor:pointer;padding:10px 16px;background:#141722;border:1px solid #1e293b;border-radius:8px;font-size:13px;color:#475569;list-style:none;display:flex;align-items:center;gap:8px">
+      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+      株価履歴収集（stooq）
+      <span style="font-size:11px;background:#1e293b;color:#475569;padding:2px 8px;border-radius:10px;margin-left:4px">フォールバック / APIキー不要 / 最大5年</span>
+    </summary>
+    <div style="padding-top:12px">
+      <div style="font-size:12px;color:#475569;background:#0f1117;border:1px solid #1e293b;border-radius:6px;padding:8px 12px;margin-bottom:12px">
+        J-Quants API キーが未設定の場合、または2年超の履歴（最大5年）が必要な場合のフォールバックです。<br>
+        stooq で収集した OHLCV は J-Quants が収集済みの日付については J-Quants データに上書きされます（J-Quants が正データ）。
+      </div>
+      <div class="card" style="border-color:#1e293b">
           <div class="section-title" style="color:#64748b">株価履歴収集（OHLCV）</div>
           <div style="font-size:12px;color:#475569;margin-bottom:14px">
-            stooq から日次 OHLCV を取得します。最大5年対応（J-Quants は2年まで）。
+            stooq から日次 OHLCV を取得します。最大5年対応（J-Quants 無料プランは2年まで）。
           </div>
           <div class="form-group">
             <label>取得年数（最大5年）</label>
@@ -508,11 +518,11 @@ tr:hover td{background:#1e2235}
           </div>
           <div class="log-box" id="history-log" role="log" aria-live="polite" aria-label="株価履歴収集ログ"></div>
         </div>
-      </div>
     </div>
   </details>
 
   <!-- マクロデータ（為替・金利・指数・コモディティ） -->
+
   <div class="card" style="margin-top:16px">
     <div class="flex-between" style="margin-bottom:6px">
       <div style="font-size:14px;font-weight:600;color:#86efac">マクロデータ（為替・金利・指数・コモディティ）</div>
