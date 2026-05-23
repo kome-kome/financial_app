@@ -7,13 +7,13 @@ PostgreSQL スキーマ定義・ORM・upsert処理
   collection_logs   — 収集ジョブログ
 """
 
-import os
+import os, gzip, json
 from datetime import datetime
 from typing import Optional
 from dotenv import load_dotenv
 from sqlalchemy import (
     create_engine, Column, String, Integer, Float, DateTime,
-    Text, UniqueConstraint, Index, JSON, ForeignKey, text
+    Text, UniqueConstraint, Index, JSON, LargeBinary, ForeignKey, text
 )
 from sqlalchemy.orm import declarative_base, sessionmaker, relationship
 
@@ -243,7 +243,51 @@ class MacroData(Base):
     created_at  = Column(DateTime, default=datetime.utcnow)
 
 
-# ── 6. DB初期化 ────────────────────────────────────────────────────────────
+# ── 6. XBRL 生データ中間テーブル ──────────────────────────────────────────
+
+class XbrlRawDocument(Base):
+    """EDINET XBRL CSV の生データ。新指標追加時に再 parse する用。1 書類 = 1 レコード。"""
+    __tablename__ = "xbrl_raw_documents"
+    __table_args__ = (
+        UniqueConstraint("doc_id", name="uq_xbrl_raw_doc_id"),
+        Index("ix_xbrl_raw_edinet_period", "edinet_code", "period_end"),
+    )
+
+    id              = Column(Integer, primary_key=True, autoincrement=True)
+    doc_id          = Column(String(20), nullable=False, index=True)
+    edinet_code     = Column(String(10), nullable=False, index=True)
+    period_end      = Column(String(20))
+    elements_gz     = Column(LargeBinary, nullable=False)
+    elements_format = Column(String(10), default="gzip+json")
+    n_rows          = Column(Integer)
+    fetched_at      = Column(DateTime, default=datetime.utcnow)
+
+
+def pack_elements(rows: list) -> bytes:
+    """[{element, context, value}, ...] を gzip(JSON) に圧縮"""
+    return gzip.compress(json.dumps(rows, ensure_ascii=False).encode("utf-8"))
+
+
+def unpack_elements(blob: bytes) -> list:
+    return json.loads(gzip.decompress(blob).decode("utf-8"))
+
+
+def upsert_xbrl_raw(db, doc_id: str, edinet_code: str, period_end: str, rows: list):
+    blob = pack_elements(rows)
+    obj = db.query(XbrlRawDocument).filter_by(doc_id=doc_id).first()
+    if obj is None:
+        obj = XbrlRawDocument(
+            doc_id=doc_id, edinet_code=edinet_code, period_end=period_end,
+            elements_gz=blob, n_rows=len(rows),
+        )
+        db.add(obj)
+    else:
+        obj.elements_gz = blob
+        obj.n_rows      = len(rows)
+        obj.fetched_at  = datetime.utcnow()
+
+
+# ── 7. DB初期化 ────────────────────────────────────────────────────────────
 
 def init_db():
     """テーブル作成・インデックス構築・カラムマイグレーション"""
@@ -268,6 +312,11 @@ def init_db():
             conn.execute(text(
                 f"ALTER TABLE financial_records ADD COLUMN IF NOT EXISTS {col} DOUBLE PRECISION"
             ))
+        # xbrl_raw_documents インデックス（テーブル自体は create_all で作成済み）
+        conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS ix_xbrl_raw_edinet_period "
+            "ON xbrl_raw_documents (edinet_code, period_end)"
+        ))
         conn.commit()
 
 

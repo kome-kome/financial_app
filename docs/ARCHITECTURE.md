@@ -257,8 +257,20 @@ erDiagram
         datetime created_at      "登録日時"
     }
 
+    xbrl_raw_documents {
+        int      id              PK "自動採番ID"
+        string   doc_id          UK "EDINET書類管理番号（UNIQUE）"
+        string   edinet_code        "EDINETコード（インデックス）"
+        string   period_end         "決算期末日（YYYY-MM-DD）"
+        bytes    elements_gz        "XBRL全行をgzip圧縮したJSON（BYTEA）"
+        string   elements_format    "圧縮方式（gzip+json）"
+        int      n_rows             "圧縮前の行数（健全性チェック用）"
+        datetime fetched_at         "raw保存日時"
+    }
+
     companies         ||--o{  financial_records    : "1社 → 複数年度の財務データ"
     companies         ||--o{  stock_price_history  : "1社 → 複数日分の株価履歴"
+    xbrl_raw_documents }o--|| financial_records   : "doc_id で紐付け（再解析用）"
 ```
 
 ---
@@ -830,6 +842,9 @@ graph LR
         C20["POST /api/collect/macro/stop\nマクロ収集を停止"]
         C21["GET /api/collect/macro/status\nマクロ収集の状態"]
         C22["GET /api/collect/macro/stream\nSSE: マクロ収集進捗"]
+        C23["POST /api/collect/reparse/start\nxbrl_raw_documentsから再解析（EDINET通信なし）\nRender可・年度/EDINETコードフィルタ対応"]
+        C24["POST /api/collect/reparse/cancel\n再解析を停止"]
+        C25["GET /api/collect/reparse/stream\nSSE: 再解析進捗"]
     end
 
     subgraph MACRO["🌐 マクロデータ /api/macro/"]
@@ -928,7 +943,7 @@ graph TB
 | ファイル | 種別 | 役割 | 主な依存先 |
 |---|---|---|---|
 | `api.py` | バックエンド | REST API窓口・認証・SSE・スケジューラー | database.py, collector.py, plugins/ |
-| `database.py` | バックエンド | DBテーブル定義・upsert・成長率/Zスコア計算。5テーブル（Company / FinancialRecord / StockPriceHistory / MacroData / CollectionLog） | PostgreSQL |
+| `database.py` | バックエンド | DBテーブル定義・upsert・成長率/Zスコア計算。6テーブル（Company / FinancialRecord / StockPriceHistory / MacroData / CollectionLog / XbrlRawDocument）。`pack_elements`/`unpack_elements`/`upsert_xbrl_raw` ヘルパを含む | PostgreSQL |
 | `collector.py` | バックエンド | EDINET/stooq/JPX/マクロデータからデータ収集→DB保存。`MACRO_SERIES` で為替・金利・指数・コモディティ9系列を定義 | EDINET API, stooq, JPX |
 | `checker.py` | バックエンド | データ品質チェック（NULL率・外れ値・収録状況） | database.py |
 | `plugins/base.py` | バックエンド | 分析プラグインの抽象基底クラス | — |

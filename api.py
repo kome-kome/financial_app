@@ -70,7 +70,7 @@ from database import (
     Company, FinancialRecord, CollectionLog, StockPriceHistory, MacroData,
     calc_growth_rates, calc_zscore_normalization,
 )
-from collector import run_full_collection, refresh_company, update_market_data, collect_stock_price_history, collect_stock_price_history_jquants, update_industry_from_jpx, collect_macro_data, MACRO_SERIES
+from collector import run_full_collection, refresh_company, update_market_data, collect_stock_price_history, collect_stock_price_history_jquants, update_industry_from_jpx, collect_macro_data, MACRO_SERIES, reparse_from_raw
 import plugins as plugin_registry
 
 
@@ -304,6 +304,7 @@ _market_status: dict = {"running": False, "progress": 0, "total": 0, "log": [], 
 _history_status: dict  = {"running": False, "progress": 0, "total": 0, "log": [], "log_seq": 0, "cancel_requested": False}
 _jquants_status: dict  = {"running": False, "progress": 0, "total": 0, "log": [], "log_seq": 0, "cancel_requested": False}
 _macro_status:   dict  = {"running": False, "progress": 0, "total": 0, "log": [], "log_seq": 0, "cancel_requested": False}
+_reparse_status: dict  = {"running": False, "progress": 0, "total": 0, "log": [], "log_seq": 0, "cancel_requested": False}
 
 def _append_log(status: dict, msg: str) -> None:
     """ステータス辞書にログを追加。log_seq は累積カウンタとして単調増加し、
@@ -770,6 +771,53 @@ async def market_progress_stream():
 @app.get("/api/collect/history/stream")
 async def history_progress_stream():
     return StreamingResponse(_sse_stream(_history_status), media_type="text/event-stream", headers=_SSE_HEADERS)
+
+class ReparseRequest(BaseModel):
+    year:        Optional[int] = None
+    edinet_code: Optional[str] = None
+
+@app.post("/api/collect/reparse/start")
+async def start_reparse(req: ReparseRequest, background_tasks: BackgroundTasks):
+    """xbrl_raw_documents から financial_records を再構築する（EDINET 通信なし）。
+    RENDER_LIGHT_MODE でも許可（軽量処理のため）。"""
+    if _reparse_status["running"]:
+        raise HTTPException(400, "再解析ジョブが既に実行中です")
+    _reparse_status.update({"running": True, "progress": 0, "total": 0, "log": [], "cancel_requested": False})
+
+    def on_progress(current, total, msg):
+        _reparse_status["progress"] = current
+        _reparse_status["total"]    = total
+        _append_log(_reparse_status, msg)
+
+    def cancel_check():
+        return _reparse_status.get("cancel_requested", False)
+
+    async def _run():
+        try:
+            await reparse_from_raw(
+                year=req.year,
+                edinet_code=req.edinet_code,
+                on_progress=on_progress,
+                cancel_check=cancel_check,
+            )
+        except Exception as e:
+            log.error("再解析エラー: %s", e, exc_info=True)
+            _append_log(_reparse_status, "[エラー] 再解析中に問題が発生しました")
+        finally:
+            _reparse_status["running"] = False
+            _reparse_status["cancel_requested"] = False
+
+    background_tasks.add_task(_run)
+    return {"message": "再解析ジョブを開始しました"}
+
+@app.post("/api/collect/reparse/cancel")
+async def cancel_reparse():
+    _reparse_status["cancel_requested"] = True
+    return {"message": "停止リクエストを送信しました"}
+
+@app.get("/api/collect/reparse/stream")
+async def reparse_progress_stream():
+    return StreamingResponse(_sse_stream(_reparse_status), media_type="text/event-stream", headers=_SSE_HEADERS)
 
 @app.post("/api/collect/industry")
 async def collect_industry(db: Session = Depends(get_db)):

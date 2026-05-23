@@ -576,6 +576,38 @@ tr:hover td{background:#1e2235}
     </div>
     <div class="log-box" id="macro-log"></div>
   </div>
+
+  <!-- XBRL 再解析 -->
+  <div class="card" style="margin-top:16px">
+    <div class="flex-between" style="margin-bottom:6px">
+      <div style="font-size:14px;font-weight:600;color:#93c5fd">XBRL 再解析（Re-parse from Raw）</div>
+      <div style="font-size:11px;color:#64748b">EDINET 通信なし / Render でも利用可</div>
+    </div>
+    <div style="font-size:12px;color:#64748b;margin-bottom:14px">
+      収集時に保存した XBRL 生データ（<code style="color:#93c5fd">xbrl_raw_documents</code>）から
+      <code style="color:#93c5fd">financial_records</code> を再構築します。<br>
+      新しい財務指標を <code>XBRL_MAP</code> に追加した後、EDINET への再ダウンロードなしで全件更新できます。<br>
+      <span style="color:#475569">※ raw データが蓄積されている書類のみ対象（新規収集分から順次蓄積）。</span>
+    </div>
+    <div style="display:flex;gap:12px;margin-bottom:14px;align-items:flex-end">
+      <div class="form-group" style="margin:0;max-width:140px">
+        <label style="font-size:11px">年度フィルタ（任意）</label>
+        <input type="number" id="reparse-year" placeholder="例: 2024" min="2015" max="2030"
+               style="width:100%;background:#1e293b;border:1px solid #334155;color:#f1f5f9;border-radius:6px;padding:6px 10px;font-size:13px">
+      </div>
+      <div class="form-group" style="margin:0;flex:1;max-width:220px">
+        <label style="font-size:11px">EDINET コード（任意）</label>
+        <input type="text" id="reparse-edinet" placeholder="例: E00000（空欄=全社）"
+               style="width:100%;background:#1e293b;border:1px solid #334155;color:#f1f5f9;border-radius:6px;padding:6px 10px;font-size:13px">
+      </div>
+    </div>
+    <div style="display:flex;gap:8px;margin-bottom:12px;align-items:center">
+      <button class="btn btn-primary" id="btn-reparse-start" onclick="startReparse()">再解析を実行</button>
+      <button class="btn btn-secondary btn-sm" id="btn-reparse-stop" onclick="stopReparse()" style="display:none;border-color:#ef4444;color:#ef4444">停止</button>
+      <button class="btn btn-secondary btn-sm" onclick="document.getElementById('reparse-log').innerHTML=''">ログクリア</button>
+    </div>
+    <div class="log-box" id="reparse-log" role="log" aria-live="polite"></div>
+  </div>
 </div>
 
 <!-- データ確認 -->
@@ -1535,6 +1567,63 @@ function _macroLog(msg,type='info'){
   const ts = new Date().toTimeString().slice(0,8);
   const el = document.createElement('div'); el.className='log-entry '+type;
   el.textContent = `[${ts}] ${msg}`; box.appendChild(el); box.scrollTop=box.scrollHeight;
+}
+
+// ── XBRL 再解析 ─────────────────────────────────────────────────────
+let _reparseSSE = null;
+
+async function startReparse(){
+  const year   = document.getElementById('reparse-year').value.trim();
+  const edinet = document.getElementById('reparse-edinet').value.trim();
+  const body   = {};
+  if(year)   body.year        = parseInt(year);
+  if(edinet) body.edinet_code = edinet;
+  try{
+    await apiFetch('/api/collect/reparse/start', {method:'POST', body: JSON.stringify(body)});
+    _reparseLog('再解析ジョブを開始しました', 'success');
+    document.getElementById('btn-reparse-start').disabled = true;
+    document.getElementById('btn-reparse-stop').style.display = '';
+    _startReparseSSE();
+  }catch(e){
+    _reparseLog('開始失敗: '+e.message, 'error');
+  }
+}
+
+function _startReparseSSE(){
+  if(_reparseSSE){ _reparseSSE.close(); }
+  _reparseSSE = new EventSource(apiBase()+'/api/collect/reparse/stream');
+  _reparseSSE.onmessage = function(e){
+    const d = JSON.parse(e.data);
+    if(d.new_logs && d.new_logs.length > 0){
+      d.new_logs.forEach(msg => _reparseLog(msg, 'info'));
+    }
+    if(!d.running && d.progress > 0){
+      _reparseSSE.close();
+      _onReparseComplete();
+    }
+  };
+  _reparseSSE.onerror = function(){ _reparseSSE.close(); _onReparseComplete(); };
+}
+
+function _onReparseComplete(){
+  document.getElementById('btn-reparse-start').disabled = false;
+  document.getElementById('btn-reparse-stop').style.display = 'none';
+  _reparseLog('再解析完了', 'success');
+}
+
+async function stopReparse(){
+  try{
+    await apiFetch('/api/collect/reparse/cancel', {method:'POST'});
+    _reparseLog('停止リクエストを送信しました', 'info');
+    document.getElementById('btn-reparse-stop').disabled = true;
+  }catch(e){ _reparseLog('停止失敗: '+e.message, 'error'); }
+}
+
+function _reparseLog(msg, type='info'){
+  const box = document.getElementById('reparse-log');
+  const ts  = new Date().toTimeString().slice(0,8);
+  const el  = document.createElement('div'); el.className = 'log-entry '+type;
+  el.textContent = `[${ts}] ${msg}`; box.appendChild(el); box.scrollTop = box.scrollHeight;
 }
 
 // ── スクリーニング ──────────────────────────────────────────────────

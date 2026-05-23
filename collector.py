@@ -12,7 +12,11 @@ from typing import Optional, Callable
 from dotenv import load_dotenv
 import httpx
 import pandas as pd
-from database import SessionLocal, Company, FinancialRecord, MacroData, upsert_company, upsert_financial
+from database import (
+    SessionLocal, Company, FinancialRecord, MacroData,
+    XbrlRawDocument, upsert_company, upsert_financial,
+    upsert_xbrl_raw, pack_elements, unpack_elements,
+)
 
 load_dotenv()
 
@@ -343,17 +347,72 @@ async def fetch_xbrl_csv(client: httpx.AsyncClient, doc_id: str):
         return None
 
 
+def _detect_xbrl_columns(df) -> dict:
+    """XBRL CSV の列名マップ {element, context, value} を検出して返す"""
+    col_map = {}
+    for c in df.columns:
+        lc = c.lower()
+        if "要素" in c or "element" in lc:          col_map["element"] = c
+        elif "コンテキスト" in c or "context" in lc: col_map["context"] = c
+        elif "値" in c and "id" not in lc:            col_map["value"] = c
+    return col_map
+
+
+def df_to_raw_rows(df) -> list:
+    """XBRL CSV DataFrame を [{element, context, value}, ...] に変換（raw 保存用）"""
+    col_map = _detect_xbrl_columns(df)
+    if not {"element", "value"}.issubset(col_map):
+        return []
+    rows = []
+    for _, row in df.iterrows():
+        raw_elem = str(row[col_map["element"]])
+        elem = raw_elem.split(":")[-1] if ":" in raw_elem else raw_elem
+        rows.append({
+            "element": elem,
+            "context": str(row.get(col_map.get("context", ""), "")),
+            "value":   str(row[col_map["value"]]),
+        })
+    return rows
+
+
+def parse_raw_rows(rows: list) -> dict:
+    """[{element, context, value}, ...] から {bs, pl, cf, meta} を抽出（再解析用）"""
+    result = {"bs": {}, "pl": {}, "cf": {}, "val": {}, "meta": {}}
+    _priority: dict = {}
+    for row in rows:
+        elem = row.get("element", "")
+        category_field = XBRL_MAP.get(elem)
+        if not category_field:
+            continue
+        cat, field = category_field
+        ctx = row.get("context", "")
+        if "Prior" in ctx and "CurrentYear" not in ctx:
+            continue
+        is_consol  = any(k in ctx for k in CONSOLIDATED_KEYS) and "NonConsolidated" not in ctx
+        has_member = "_Member" in ctx or "NonConsolidated" in ctx
+        priority   = 2 if is_consol else (1 if not has_member else 0)
+        try:
+            val = float(str(row.get("value", "")).replace(",", ""))
+        except (ValueError, TypeError):
+            continue
+        if cat == "meta":
+            code_str = str(int(val)).zfill(4)
+            result["meta"]["tse_industry_code"] = code_str
+            result["meta"]["industry_name"] = TSE_INDUSTRY.get(code_str, "")
+        else:
+            key = f"{cat}_{field}"
+            if priority > _priority.get(key, -1):
+                result[cat][field] = val
+                _priority[key] = priority
+    return result
+
+
 def parse_xbrl_csv(df, edinet_code: str, period_end: str) -> dict:
     result = {"bs": {}, "pl": {}, "cf": {}, "val": {}, "meta": {}}
     if df is None or df.empty:
         return result
     df.columns = [c.strip() for c in df.columns]
-    col_map = {}
-    for c in df.columns:
-        lc = c.lower()
-        if "要素" in c or "element" in lc:         col_map["element"] = c
-        elif "コンテキスト" in c or "context" in lc: col_map["context"] = c
-        elif "値" in c and "id" not in lc:           col_map["value"] = c
+    col_map = _detect_xbrl_columns(df)
     if not {"element", "value"}.issubset(col_map):
         return result
 
@@ -887,6 +946,66 @@ async def update_market_data(max_companies: Optional[int] = None,
     return False
 
 
+# ── XBRL 再解析 ───────────────────────────────────────────────────────────
+
+async def reparse_from_raw(year: Optional[int] = None,
+                            edinet_code: Optional[str] = None,
+                            on_progress: Optional[Callable] = None,
+                            cancel_check: Optional[Callable] = None):
+    """xbrl_raw_documents の生データから financial_records を再構築する。
+    EDINET への通信は行わないため Render Free プランでも実行可能。
+    """
+    db = SessionLocal()
+    try:
+        q = db.query(XbrlRawDocument)
+        if year:
+            q = q.filter(XbrlRawDocument.period_end.like(f"{year}%"))
+        if edinet_code:
+            q = q.filter(XbrlRawDocument.edinet_code == edinet_code)
+        docs = q.order_by(XbrlRawDocument.period_end.desc()).all()
+        total = len(docs)
+        log.info(f"XBRL 再解析開始: {total} 書類")
+
+        for i, doc in enumerate(docs, 1):
+            if cancel_check and cancel_check():
+                if on_progress:
+                    on_progress(i, total, f"[停止] ユーザーによる停止（{i}/{total}件処理済み）")
+                db.commit()
+                return True
+
+            rows   = unpack_elements(doc.elements_gz)
+            parsed = parse_raw_rows(rows)
+            if not any(parsed.get(cat) for cat in ("bs", "pl", "cf")):
+                continue
+
+            rec = calc_derived(parsed)
+            co  = db.query(Company).filter_by(edinet_code=doc.edinet_code).first()
+            xbrl_industry = rec.get("meta", {}).get("industry_name", "")
+            rec.update({
+                "edinet_code":  doc.edinet_code,
+                "sec_code":     co.sec_code if co else "",
+                "company_name": co.name if co else "",
+                "industry":     xbrl_industry or (co.industry if co else ""),
+                "year":         int(doc.period_end[:4]) if doc.period_end else 0,
+                "period_end":   doc.period_end,
+                "doc_id":       doc.doc_id,
+                "source":       "EDINET_XBRL",
+            })
+            upsert_financial(db, rec)
+
+            if on_progress:
+                on_progress(i, total, f"[再解析 {i}/{total}] {doc.edinet_code} {doc.period_end}")
+            if i % 100 == 0:
+                db.commit()
+                log.info(f"再解析 commit ({i}/{total})")
+
+        db.commit()
+        log.info(f"再解析完了: {total} 書類")
+    finally:
+        db.close()
+    return False
+
+
 # ── フル収集 ──────────────────────────────────────────────────────────────
 
 async def run_full_collection(years_back: int = 5,
@@ -1001,6 +1120,12 @@ async def run_full_collection(years_back: int = 5,
 
                 xbrl_df = await fetch_xbrl_csv(client, doc_id)
                 await asyncio.sleep(RATE_SLEEP)
+
+                # XBRL 全行を raw テーブルに保存（新指標追加時の再解析用）
+                if xbrl_df is not None and not xbrl_df.empty:
+                    raw_rows = df_to_raw_rows(xbrl_df)
+                    if raw_rows:
+                        upsert_xbrl_raw(db, doc_id, edinet_code, period_end, raw_rows)
 
                 raw = parse_xbrl_csv(xbrl_df, edinet_code, period_end)
                 if not any(raw.get(cat) for cat in ("bs", "pl", "cf")):
@@ -1207,9 +1332,17 @@ if __name__ == "__main__":
     parser.add_argument("--market",      action="store_true", help="市場データのみ更新")
     parser.add_argument("--macro",       action="store_true", help="マクロデータのみ収集")
     parser.add_argument("--incremental", action="store_true", help="収集済みをスキップ（差分収集）")
+    parser.add_argument("--reparse",     action="store_true", help="xbrl_raw_documents から financial_records を再構築")
+    parser.add_argument("--year",        type=int, default=None, help="再解析対象年度（--reparse と組み合わせ）")
     args = parser.parse_args()
 
-    if args.market:
+    if args.reparse:
+        asyncio.run(reparse_from_raw(
+            year=args.year,
+            edinet_code=args.company,
+            on_progress=lambda c, t, m: print(m),
+        ))
+    elif args.market:
         asyncio.run(update_market_data(args.max))
     elif args.macro:
         async def _run():
