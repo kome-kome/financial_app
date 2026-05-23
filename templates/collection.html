@@ -111,6 +111,11 @@ tr:hover td{background:#1e2235}
 
 <div class="container">
 
+<!-- 軽量モードバナー（Render環境時のみ表示） -->
+<div id="light-mode-banner" style="display:none;background:#2d2100;border:1px solid #78350f;border-radius:8px;padding:10px 16px;margin-bottom:16px;font-size:13px;color:#fcd34d">
+  ⚠️ <strong>Render 環境（軽量モード）</strong>: 全件収集・株価履歴再構築・J-Quants 収集はローカル PC から実行してください。差分収集・市場データ更新・分析は通常どおり利用できます。
+</div>
+
 <!-- 収集管理 -->
 <div id="tab-collect">
   <!-- サマリーカード -->
@@ -1804,8 +1809,32 @@ function log(msg,type='info'){
 }
 function clearLog(){ document.getElementById('log-box').innerHTML=''; }
 
+// ── 軽量モード初期化 ────────────────────────────────────────────────────
+async function initLightMode(){
+  try{
+    const r = await fetch('/api/system/info');
+    const d = await r.json();
+    if(!d.render_light_mode) return;
+    document.getElementById('light-mode-banner').style.display = '';
+    // 全件収集ボタン
+    const btnCollect = document.getElementById('btn-collect');
+    if(btnCollect){ btnCollect.disabled = true; btnCollect.title = 'Render環境ではローカルPCから実行してください'; btnCollect.style.opacity = '0.4'; }
+    // 株価履歴収集ボタン
+    const btnHist = document.getElementById('btn-history-start');
+    if(btnHist){ btnHist.disabled = true; btnHist.title = 'Render環境ではローカルPCから実行してください'; btnHist.style.opacity = '0.4'; }
+    const btnHistF = document.getElementById('btn-history-force');
+    if(btnHistF){ btnHistF.disabled = true; btnHistF.style.opacity = '0.4'; }
+    // J-Quants 収集ボタン
+    const btnJq = document.getElementById('btn-jq-start');
+    if(btnJq){ btnJq.disabled = true; btnJq.title = 'Render環境ではローカルPCから実行してください'; btnJq.style.opacity = '0.4'; }
+    const btnJqF = document.getElementById('btn-jq-force');
+    if(btnJqF){ btnJqF.disabled = true; btnJqF.style.opacity = '0.4'; }
+  }catch(e){ /* 取得失敗は無視 */ }
+}
+
 // 初期化
 initAuth();
+initLightMode();
 showTab('collect');
 checkApi();
 loadSchedulerStatus();

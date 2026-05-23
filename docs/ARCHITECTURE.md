@@ -29,6 +29,7 @@
 ## 1. 全体構成図（コンポーネント図）
 
 > ブラウザ・サーバー・DB・外部APIの全体像と接続関係を示します。
+> ローカルと Render は同一 Supabase DB を共有し、役割で使い分けます。
 
 ```mermaid
 graph LR
@@ -42,20 +43,24 @@ graph LR
         DB["🗃️ DB ビューア\ndb.html\nスキーマ/プレビュー/統計/リレーション/ドリルダウン"]
     end
 
-    subgraph SERVER["🖥️ サーバー（Python / FastAPI）"]
+    subgraph LOCAL["💻 ローカル PC（制限なし）"]
         direction TB
-        API["⚡ api.py\nFastAPI\n・REST API 窓口\n・収集ジョブ管理\n・認証（Bearer Token）\n・SSEリアルタイム配信\n・スケジューラー（毎日3時）\n・起動時キャッチアップ（Render Free 対策）"]
-        COL["🔄 collector.py\nデータ収集エンジン\n・EDINET書類取得・解析\n・stooq株価取得\n・株価履歴（日次OHLCV）収集\n・JPX業種補完"]
-        CHK["🔍 checker.py\nデータ品質チェック\n・NULL率集計\n・外れ値検出\n・収録状況確認"]
-        PLG["🧩 plugins/\n分析プラグイン群\n・OLS回帰分析\n・乖離分析\n・Zスコア推薦\n・業種別OLS"]
+        API_L["⚡ api.py\n全操作可能\n・全件収集\n・株価履歴再構築\n・J-Quants大量収集\n・分析・スクリーニング"]
+        COL_L["🔄 collector.py\n・EDINET全社XBRL収集\n・stooq株価取得\n・JPX業種補完"]
     end
 
-    subgraph DB["🗄️ データベース（PostgreSQL）"]
+    subgraph RENDER["☁️ Render（軽量モード RENDER_LIGHT_MODE=true）"]
+        direction TB
+        API_R["⚡ api.py\n・差分収集のみ許可\n・全件収集はブロック（403）\n・株価履歴・J-Quantsはブロック（403）\n・スクリーニング・分析は通常通り\n・startup_catchup（差分・自動）"]
+        COL_R["🔄 collector.py\n差分収集・市場データ更新"]
+    end
+
+    subgraph SUPABASE["🗄️ Supabase PostgreSQL（共有DB）"]
         direction TB
         CO[("companies\n企業マスタ\n約4,000社")]
         FR[("financial_records\n財務データ\nBS / PL / CF")]
         SPH[("stock_price_history\n日次株価履歴\nOHLCV")]
-        MD[("macro_data\n為替・金利・指数\nコモディティ")]
+        MD[("macro_data\n為替・金利・指数")]
         CL[("collection_logs\n収集ジョブログ")]
     end
 
@@ -66,13 +71,12 @@ graph LR
         JPX["🏢 JPX（東証）\n上場会社一覧Excel\nTSE33業種コード"]
     end
 
-    USER -->|"HTTP / REST / SSE\n（Bearer Token認証）"| API
-    API --> COL
-    API --> CHK
-    API --> PLG
-    API <-->|"SQL"| DB
-    COL -->|"HTTPリクエスト"| EXT
-    COL -->|"INSERT / UPDATE"| DB
+    USER -->|"HTTP / REST / SSE"| LOCAL
+    USER -->|"HTTP / REST / SSE"| RENDER
+    LOCAL <-->|"SQL (Supabase)"| SUPABASE
+    RENDER <-->|"SQL (Supabase)"| SUPABASE
+    COL_L -->|"HTTPリクエスト"| EXT
+    COL_R -->|"HTTPリクエスト"| EXT
 ```
 
 ---

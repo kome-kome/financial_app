@@ -12,6 +12,25 @@ Render の制約と運用形態に合わせて設計すること。
 
 ---
 
+## ローカル / Render 役割分担
+
+両環境が同一の **Supabase DB** を共有し、重さに応じて作業を分担する。
+
+| 操作 | ローカル PC | Render（Web） |
+|---|---|---|
+| 全件収集（初回・全社XBRL） | ✅ 推奨 | ❌ ブロック（OOM リスク） |
+| 株価履歴再構築 | ✅ 推奨 | ❌ ブロック |
+| J-Quants 大量収集 | ✅ 推奨 | ❌ ブロック |
+| 差分収集（`skip_existing=True`） | ✅ 可 | ✅ 可（startup_catchup で自動実行） |
+| 市場データ更新 | ✅ 可 | ✅ 可 |
+| スクリーニング・分析・UI 閲覧 | ✅ 可 | ✅ 可 |
+
+**`RENDER_LIGHT_MODE=true`**（`render.yaml` に設定済み）を Render に設定することで、
+重い操作を API レベルでブロックし、UI 上でもボタンを無効化する。
+ローカル `.env` にはこの変数を設定しない（制限なし）。
+
+---
+
 ## 現在の構成
 
 | 項目 | 値 |
@@ -79,6 +98,7 @@ Render ダッシュボードで管理。
 | `APP_SECRET_KEY` | トークン署名キー（HMAC） | Render 自動生成 |
 | `APP_RECOVERY_KEY` | パスワードリセット用 | 手動設定 |
 | `ALLOWED_ORIGIN` | CORS 許可オリジン | 手動設定（例: `https://financial-app.onrender.com`） |
+| `RENDER_LIGHT_MODE` | 重い操作をブロック（`"true"` 固定） | `render.yaml` に設定済み |
 
 新規環境変数を追加するときは:
 1. `render.yaml` の `envVars` に追記

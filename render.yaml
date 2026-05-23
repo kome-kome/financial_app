@@ -22,3 +22,5 @@ services:
         sync: false          # 例: https://financial-app.onrender.com
       - key: JQUANTS_API_KEY
         sync: false          # J-Quants API キー（任意）
+      - key: RENDER_LIGHT_MODE
+        value: "true"        # 重い処理をブロック（OOM・502対策）

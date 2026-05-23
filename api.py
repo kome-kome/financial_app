@@ -47,6 +47,7 @@ if not APP_SECRET_KEY:
         stacklevel=1,
     )
 _TOKEN_TTL      = 30 * 24 * 3600  # トークン有効期限: 30日
+RENDER_LIGHT_MODE = os.environ.get("RENDER_LIGHT_MODE", "").lower() in ("1", "true", "yes")
 
 def _create_token() -> str:
     ts  = str(int(_time.time()))
@@ -282,6 +283,11 @@ async def health_check():
         status_code=status_code,
     )
 
+@app.get("/api/system/info")
+async def system_info():
+    """実行環境情報を返す。認証不要（UI が起動時に参照する）。"""
+    return {"render_light_mode": RENDER_LIGHT_MODE}
+
 # ── 収集ジョブ管理 ────────────────────────────────────────────────────────
 
 SMART_CHUNK_SIZE     = 200   # スマート収集: 1チャンクあたりの企業数増分
@@ -328,6 +334,8 @@ class JQuantsCollectRequest(BaseModel):
 
 @app.post("/api/collect/start")
 async def start_collection(req: CollectRequest, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+    if RENDER_LIGHT_MODE and not req.skip_existing:
+        raise HTTPException(403, "全件収集はローカル環境から実行してください（Render Free プラン制限）")
     if _job_status["running"]:
         raise HTTPException(400, "収集ジョブが既に実行中です")
     job_type = "incremental" if req.skip_existing else "full"
@@ -637,6 +645,8 @@ async def market_data_status():
 
 @app.post("/api/collect/history/start")
 async def start_history_collection(req: HistoryCollectRequest, background_tasks: BackgroundTasks):
+    if RENDER_LIGHT_MODE:
+        raise HTTPException(403, "株価履歴収集はローカル環境から実行してください（Render Free プラン制限）")
     if _history_status["running"] and not req.force:
         raise HTTPException(400, "株価履歴収集ジョブが既に実行中です")
     _history_status.update({"running": True, "progress": 0, "total": 0, "log": [], "cancel_requested": False})
@@ -770,6 +780,8 @@ async def collect_industry(db: Session = Depends(get_db)):
 
 @app.post("/api/collect/jquants/start")
 async def start_jquants_collection(req: JQuantsCollectRequest, background_tasks: BackgroundTasks):
+    if RENDER_LIGHT_MODE:
+        raise HTTPException(403, "J-Quants収集はローカル環境から実行してください（Render Free プラン制限）")
     if _jquants_status["running"] and not req.force:
         raise HTTPException(400, "J-Quants収集ジョブが既に実行中です")
     _jquants_status.update({"running": True, "progress": 0, "total": 0, "log": [], "cancel_requested": False})
