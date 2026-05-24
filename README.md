@@ -39,28 +39,18 @@
 │ ブラウザ    │ ─────────────────→ │ FastAPI       │ ─────────→ │ EDINET  │
 │ (6 画面)    │                    │ api.py        │            │ stooq   │
 └────────────┘                    │ collector.py  │            │ JPX     │
-                                  │ checker.py    │            │ J-Quants│
-                                  │ plugins/      │            └─────────┘
-                                  └───────┬──────┘
+                                  │ plugins/      │            │ J-Quants│
+                                  └───────┬──────┘            └─────────┘
                                           │ SQLAlchemy
                                           ▼
                                   ┌──────────────────┐
                                   │ Supabase         │
                                   │ PostgreSQL       │
-                                  │ 5 テーブル        │
                                   └──────────────────┘
 ```
 
-| ファイル | 役割 |
-|---|---|
-| `api.py` | FastAPI REST・SSE・回帰分析・スケジューラ |
-| `collector.py` | EDINET / stooq / J-Quants / JPX から収集 → DB 保存 |
-| `database.py` | テーブル定義・upsert・成長率/Zスコア計算 |
-| `checker.py` | データ品質チェック（NULL 率・外れ値・会計基準別） |
-| `plugins/` | 分析プラグイン群（OLS・乖離・推薦・業種別） |
-| `templates/` | フロントエンド HTML（ダッシュボード・収集・分析・DB ビューア・モデル解説・ログイン） |
-
-詳細な ER 図・シーケンス図・API 一覧は [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) を参照。
+コンポーネント図・ER 図・シーケンス図・全 API エンドポイント一覧・ファイル役割表は
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) に集約。
 
 ---
 
@@ -103,8 +93,7 @@ uvicorn api:app --reload
 
 ブラウザで `http://localhost:8000/` を開く。初回は `/collection` から「全件収集」を実行してデータベースを構築する。
 
-> **DB は Supabase に一本化**（移行進行中）。詳細・移行手順は [`docs/REFACTORING.md`](docs/REFACTORING.md) を参照。
-> 移行が完了するまでは `DATABASE_URL` をローカル PostgreSQL（`localhost:5432`）に向けることも可能。
+> **DB は Supabase に一本化済み**。Render 本番もローカル開発も同じ Supabase インスタンスを参照する設計に統一されている（移行設計の経緯は [`docs/REFACTORING.md`](docs/REFACTORING.md) を参照）。
 
 ### よく使うコマンド
 
