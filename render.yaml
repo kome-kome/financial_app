@@ -6,21 +6,23 @@ services:
     buildCommand: pip install -r requirements.txt
     startCommand: uvicorn api:app --host 0.0.0.0 --port $PORT
     envVars:
+      # sync:false の値は Render ダッシュボードの Environment タブで個別に設定する
+      # （秘密情報を IaC にコミットしないため）
       - key: PYTHON_VERSION
         value: 3.13.7
       - key: DATABASE_URL
-        sync: false          # Supabase の接続URLを Render ダッシュボードで設定
+        sync: false          # Supabase の接続URL  例: postgresql://postgres:[PW]@db.[PROJ].supabase.co:5432/postgres?sslmode=require
       - key: EDINET_API_KEY
-        sync: false          # 金融庁 EDINET API キー
+        sync: false          # 金融庁 EDINET API キー  取得: https://disclosure.edinet-fsa.go.jp/
       - key: APP_PASSWORD
-        sync: false          # ログインパスワード（本番環境では必須）
+        sync: false          # ログインパスワード  生成: python -c "import secrets;print(secrets.token_urlsafe(24))"
       - key: APP_SECRET_KEY
-        generateValue: true  # Render が自動生成
+        generateValue: true  # Render が自動生成（JWT 署名キー）
       - key: APP_RECOVERY_KEY
-        sync: false          # パスワードリセット用回復キー
+        sync: false          # パスワードリセット用  生成: python -c "import secrets;print(secrets.token_urlsafe(24))"
       - key: ALLOWED_ORIGIN
-        sync: false          # 例: https://financial-app.onrender.com
+        sync: false          # CORS 許可オリジン  例: https://financial-app.onrender.com
       - key: JQUANTS_API_KEY
-        sync: false          # J-Quants API キー（任意）
+        sync: false          # J-Quants API キー（任意）  取得: https://jpx-jquants.com/ の「API Keys」
       - key: RENDER_LIGHT_MODE
         value: "true"        # 重い処理をブロック（OOM・502対策）
