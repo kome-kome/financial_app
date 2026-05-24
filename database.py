@@ -16,6 +16,7 @@ from sqlalchemy import (
     Text, UniqueConstraint, Index, JSON, LargeBinary, ForeignKey, text
 )
 from sqlalchemy.orm import declarative_base, sessionmaker, relationship
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 load_dotenv()
 
@@ -274,17 +275,15 @@ def unpack_elements(blob: bytes) -> list:
 
 def upsert_xbrl_raw(db, doc_id: str, edinet_code: str, period_end: str, rows: list):
     blob = pack_elements(rows)
-    obj = db.query(XbrlRawDocument).filter_by(doc_id=doc_id).first()
-    if obj is None:
-        obj = XbrlRawDocument(
-            doc_id=doc_id, edinet_code=edinet_code, period_end=period_end,
-            elements_gz=blob, n_rows=len(rows),
-        )
-        db.add(obj)
-    else:
-        obj.elements_gz = blob
-        obj.n_rows      = len(rows)
-        obj.fetched_at  = datetime.utcnow()
+    now  = datetime.utcnow()
+    stmt = pg_insert(XbrlRawDocument).values(
+        doc_id=doc_id, edinet_code=edinet_code, period_end=period_end,
+        elements_gz=blob, elements_format="gzip+json", n_rows=len(rows), fetched_at=now,
+    ).on_conflict_do_update(
+        index_elements=["doc_id"],
+        set_={"elements_gz": blob, "n_rows": len(rows), "fetched_at": now},
+    )
+    db.execute(stmt)
 
 
 # ── 7. DB初期化 ────────────────────────────────────────────────────────────
