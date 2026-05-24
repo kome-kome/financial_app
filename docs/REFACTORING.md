@@ -1,13 +1,12 @@
 # リファクタリング設計書 — DB 一本化と XBRL 生データ保存
 
-> **ステータス**: ドラフト（実装前のレビュー用）
-> **作成日**: 2026-05-22
-> **対象ブランチ**: `claude/net-cash-analysis-metrics-LkubW`
+> **ステータス**: ✅ **全 Phase 実装完了（2026-05）**
+> **作成日**: 2026-05-22 / 完了: 2026-05-25
 >
-> 本書は以下の 2 つの構造改善の設計提案である。実装は本書のレビュー承認後に着手する。
+> 本書は以下 2 つの構造改善の設計記録である。**P1〜P7 すべて完了済み**。設計判断・採択しなかった代替案は将来の参照のため残置。
 >
-> 1. **DB 一本化** — ローカル PostgreSQL を廃止し、Supabase に統合する
-> 2. **XBRL 生データ保存** — 新指標追加時の EDINET 再ダウンロードを不要にする中間テーブルを追加する
+> 1. **DB 一本化** — ローカル PostgreSQL を廃止し、Supabase に統合する（完了）
+> 2. **XBRL 生データ保存** — 新指標追加時の EDINET 再ダウンロードを不要にする中間テーブルを追加する（完了）
 
 ---
 
@@ -428,15 +427,15 @@ def reparse_from_raw(db, year=None, edinet_code=None, on_progress=None):
 
 ## 5. 段階的な実装計画
 
-| Phase | 内容 | 後方互換 | 想定工数 |
-|---|---|---|---|
-| **P1** | DB 一本化のドキュメント整備（`CLAUDE.md` / `DEPLOYMENT.md` / `README.md`）+ 件数比較レポート出力 | 完全互換 | 半日 |
-| **P2** | `migrate_local_to_supabase.py` 実装（dry-run・件数比較・全置換戦略）→ **ローカル → Supabase へ同期アップロード実行** | データ追加あり | 1 日 |
-| **P3** | 同期後の Zスコア・成長率の再計算 + 整合性チェック + Render での動作確認 | 完全互換 | 半日 |
-| **P4** | `XbrlRawDocument` テーブル追加 + `collector.py` で raw 保存（**ここから新規収集分に raw が蓄積**）| **完全互換**（既存 financial_records も同時に書く）| 1 日 |
-| **P5** | `reparse_from_raw` の CLI + `templates/collection.html` に「再 parse」ボタン追加 | 完全互換 | 1 日 |
-| **P6** | 1〜2 週間運用観察後、ローカル PostgreSQL 停止 + `.env` から削除（**データボリュームは即削除しない**）| 互換破壊（ローカル DB が使えなくなる）| 半日 |
-| **P7** | `financial_records.raw_xbrl_json` カラム drop（drop migration、`xbrl_raw_documents` で代替可能になってから）| 互換破壊（小） | 半日 |
+| Phase | 内容 | 後方互換 | 想定工数 | 状態 |
+|---|---|---|---|---|
+| **P1** | DB 一本化のドキュメント整備（`CLAUDE.md` / `DEPLOYMENT.md` / `README.md`）+ 件数比較レポート出力 | 完全互換 | 半日 | ✅ |
+| **P2** | `migrate_local_to_supabase.py` 実装（dry-run・件数比較・全置換戦略）→ **ローカル → Supabase へ同期アップロード実行** | データ追加あり | 1 日 | ✅ |
+| **P3** | 同期後の Zスコア・成長率の再計算 + 整合性チェック + Render での動作確認 | 完全互換 | 半日 | ✅ |
+| **P4** | `XbrlRawDocument` テーブル追加 + `collector.py` で raw 保存（**ここから新規収集分に raw が蓄積**）| **完全互換**（既存 financial_records も同時に書く）| 1 日 | ✅ |
+| **P5** | `reparse_from_raw` の CLI + `templates/collection.html` に「再 parse」ボタン追加 | 完全互換 | 1 日 | ✅ |
+| **P6** | 1〜2 週間運用観察後、ローカル PostgreSQL 停止 + `.env` から削除（**データボリュームは即削除しない**）| 互換破壊（ローカル DB が使えなくなる）| 半日 | ✅ |
+| **P7** | `financial_records.raw_xbrl_json` カラム drop（drop migration、`xbrl_raw_documents` で代替可能になってから）| 互換破壊（小） | 半日 | ✅ |
 
 各 Phase は独立した PR とし、PR 単位で動作確認 → マージする。
 
@@ -512,3 +511,4 @@ def reparse_from_raw(db, year=None, edinet_code=None, on_progress=None):
 | 日付 | 内容 |
 |---|---|
 | 2026-05-22 | 初版作成（ドラフト・レビュー待ち）|
+| 2026-05-25 | 全 Phase (P1〜P7) 実装完了。ステータスを「実装完了」に更新 |
