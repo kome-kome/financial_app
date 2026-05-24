@@ -23,6 +23,12 @@ JST = ZoneInfo("Asia/Tokyo")
 
 def _now_jst() -> datetime:
     return datetime.now(JST).replace(tzinfo=None)
+
+def _utc_to_jst_str(dt: Optional[datetime]) -> Optional[str]:
+    """DB に UTC 保存された naive datetime を 'YYYY-MM-DD HH:MM:SS JST' に整形"""
+    if dt is None:
+        return None
+    return (dt + timedelta(hours=9)).strftime("%Y-%m-%d %H:%M:%S") + " JST"
 from fastapi import FastAPI, BackgroundTasks, Depends, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, FileResponse, JSONResponse
@@ -513,7 +519,7 @@ async def collection_status(db: Session = Depends(get_db)):
     return {
         "running": _job_status["running"],
         "recent_jobs": [
-            {"id": l.id, "status": l.status, "started": str(l.started_at),
+            {"id": l.id, "status": l.status, "started": _utc_to_jst_str(l.started_at),
              "companies": l.companies_processed, "records": l.records_saved}
             for l in logs
         ]
@@ -570,7 +576,7 @@ async def market_coverage(db: Session = Depends(get_db)):
         "with_market_data":  with_market,
         "without_market_data": max(total_with_sec - with_market, 0),
         "coverage_pct":      round(with_market / total_with_sec * 100, 1) if total_with_sec else 0,
-        "latest_update":     str(latest_update)[:19] if latest_update else None,
+        "latest_update":     _utc_to_jst_str(latest_update),
     }
 
 @app.get("/api/collect/data-quality")
@@ -1043,7 +1049,7 @@ async def get_stats(db: Session = Depends(get_db)):
         "stock_price_records":  n_stock_price,
         "latest_year":          latest_fr.year       if latest_fr else None,
         "latest_period_end":    latest_fr.period_end if latest_fr else None,
-        "last_db_update":       str(last_db_update)[:19] if last_db_update else None,
+        "last_db_update":       _utc_to_jst_str(last_db_update),
         "days_since_update":    days_since,
         "expected_latest_year": expected_year,
         "freshness":            freshness,
@@ -1579,7 +1585,7 @@ async def db_tables(db: Session = Depends(get_db)):
             "name":         name,
             "row_count":    row_count,
             "column_count": len(cols),
-            "last_updated": str(last_updated)[:19] if last_updated else None,
+            "last_updated": _utc_to_jst_str(last_updated),
         })
     return {"tables": items}
 
