@@ -22,6 +22,7 @@
 - **定時スケジューラ (`_daily_scheduler`) は Free プランでは走らない**。15 分アイドルで停止するため、毎日3時に起動している保証がない。代わりに `_startup_catchup` がスピンアップ時に「最終自動収集から 22h 以上経過していたら差分収集を非同期実行」する。新規の定期処理を追加する場合は同じパターン（startup hook + 経過時間判定）で実装すること
 - **scheduler は JST 固定**: `api.py:_now_jst()` ヘルパで Render の OS TZ (UTC) に依存させない。新しい時間帯固定処理 (○時に実行 等) は `datetime.now()` ではなく `_now_jst()` を使うこと
 - **GitHub Actions keepalive (`.github/workflows/keepalive.yml`)** が JST 2:50-3:10 と業務時間 9-23 JST に `/health` を叩く。月稼働時間は約 475h で Render Free 750h 無料枠内。cron 変更時は枠を超えないか確認
+- **全件収集は GitHub Actions runner で実行**（Render Free の 30秒タイムアウト・512MB メモリでは完走しない）。`.github/workflows/full-pipeline.yml` を `workflow_dispatch` で起動 → `_pipeline_gh.py` が Supabase に直接書き込む。ログは Artifact (`pipeline-log`, 7日保存)。差分収集など軽量処理だけ Render 側の `_startup_catchup` に残す方針
 
 ## GitHub 協調ワークフロー
 
@@ -194,6 +195,8 @@ SSEエンドポイント: 収集=`/api/collect/stream`、市場データ=`/api/c
    - 総合判定：✅ 低リスク / ⚠️ 要注意 / ❌ 高リスク
 3. **ユーザーの明示的な承認を得てから実行** — 評価提示後、承認の返答があるまで `pip install` を実行しない
 
+**バージョン pin**: `requirements.txt` は完全 pin（`==`）。numpy/pandas/scipy/scikit-learn/statsmodels も特定バージョンで固定済み（科学計算系の break change を避けるため）。アップグレードは単独 PR で行い、`pytest` と主要画面の動作確認をセットで実施すること。
+
 ## リファクタリング方針
 
 - ファイル名・URL：機能名で命名（フェーズ番号禁止）
@@ -234,6 +237,17 @@ os.environ['DATABASE_URL'] = '...'
 sys.path.insert(0, '.')
 asyncio.run(test())
 "@ 2>&1 | Select-String -Pattern "テスト|FAIL|ERROR|companies|records"
+```
+
+### pytest（プラグイン・ユーティリティの単体テスト）
+
+`tests/` 配下は `pytest.ini` で `testpaths=tests` に固定。プラグイン追加時は `tests/test_<plugin>.py` を作成すること。
+
+```powershell
+.\venv\Scripts\Activate.ps1
+pytest                                              # 全件
+pytest tests/test_utils.py                          # 単一ファイル
+pytest tests/test_utils.py::test_winsorize_basic    # 単一関数
 ```
 
 ## 既知の注意事項

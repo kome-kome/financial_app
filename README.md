@@ -74,7 +74,7 @@
 | データベース | Supabase PostgreSQL |
 | 起動コマンド | `uvicorn api:app --host 0.0.0.0 --port $PORT` |
 | 自動デプロイ | `main` への push でトリガ |
-| keepalive | GitHub Actions が 10 分間隔で `/health` に ping |
+| keepalive | GitHub Actions が JST 2:50-3:10（深夜収集の起こし）と 9-23 時帯（30 分間隔）に `/health` を ping |
 
 運用ガイド・制約・既知の落とし穴は [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) に集約。
 

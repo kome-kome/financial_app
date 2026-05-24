@@ -9,5 +9,8 @@ __pycache__/
 # ログファイル
 *.log
 
+# DB 移行用ダンプ（pg_dump 生成物・サイズ大）
+migration_dumps/
+
 # 環境変数ファイル（機密情報）
 .env
