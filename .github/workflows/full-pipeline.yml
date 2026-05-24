@@ -1,0 +1,42 @@
+name: Full Pipeline (XBRL収集・財務データ更新)
+
+on:
+  workflow_dispatch:
+    inputs:
+      years_back:
+        description: '収集年数（デフォルト5年）'
+        required: false
+        default: '5'
+
+jobs:
+  pipeline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360  # 最大6時間
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run pipeline
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          EDINET_API_KEY: ${{ secrets.EDINET_API_KEY }}
+          JQUANTS_API_KEY: ${{ secrets.JQUANTS_API_KEY }}
+        run: python _pipeline_gh.py
+
+      - name: Upload log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pipeline-log
+          path: pipeline_gh.log
+          retention-days: 7

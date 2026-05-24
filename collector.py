@@ -1012,6 +1012,7 @@ async def run_full_collection(years_back: int = 5,
                               max_companies: Optional[int] = None,
                               on_progress: Optional[Callable] = None,
                               skip_existing: bool = False,
+                              skip_if_raw_exists: bool = False,
                               cancel_check: Optional[Callable] = None):
     db = SessionLocal()
     try:
@@ -1047,6 +1048,10 @@ async def run_full_collection(years_back: int = 5,
                 rows = db.query(FinancialRecord.doc_id).filter(FinancialRecord.doc_id.isnot(None)).all()
                 existing_doc_ids = {r[0] for r in rows}
                 log.info(f"差分収集モード: {len(existing_doc_ids)}件の収集済みdoc_idをスキップ対象として読み込み")
+            elif skip_if_raw_exists:
+                rows = db.query(XbrlRawDocument.doc_id).all()
+                existing_doc_ids = {r[0] for r in rows}
+                log.info(f"raw_skip モード: xbrl_raw_documents に保存済みの {len(existing_doc_ids)} 件をスキップ")
 
             # company_name と industry を参照できるよう辞書化（全CSVデータを保持）
             company_info = {
@@ -1107,57 +1112,65 @@ async def run_full_collection(years_back: int = 5,
 
                 log.info(f"[{i+1}/{total}] {filer_name}({sec_code}) {period_end}")
 
-                # 書類から発見した未登録企業を都度upsert（FK制約エラー防止）
-                if edinet_code not in known_edinet:
-                    upsert_company(db, {
+                try:
+                    # 書類から発見した未登録企業を都度upsert（FK制約エラー防止）
+                    if edinet_code not in known_edinet:
+                        upsert_company(db, {
+                            "edinet_code":  edinet_code,
+                            "sec_code":     sec_code,
+                            "name":         filer_name,
+                            "industry":     "",
+                        })
+                        db.flush()
+                        known_edinet.add(edinet_code)
+
+                    xbrl_df = await fetch_xbrl_csv(client, doc_id)
+                    await asyncio.sleep(RATE_SLEEP)
+
+                    # XBRL 全行を raw テーブルに保存（新指標追加時の再解析用）
+                    # xbrl_raw_documents への書き込みは即コミットしてロックを解放する
+                    # （financial_records との間でデッドロックが起きるのを防ぐため）
+                    if xbrl_df is not None and not xbrl_df.empty:
+                        raw_rows = df_to_raw_rows(xbrl_df)
+                        if raw_rows:
+                            upsert_xbrl_raw(db, doc_id, edinet_code, period_end, raw_rows)
+                            db.commit()
+
+                    raw = parse_xbrl_csv(xbrl_df, edinet_code, period_end)
+                    if not any(raw.get(cat) for cat in ("bs", "pl", "cf")):
+                        log.warning(f"財務データなし（スキップ）: {filer_name} {doc_id}")
+                        continue
+                    rec = calc_derived(raw)
+
+                    # XBRLから業種が取れた場合は優先、なければマスタの業種
+                    xbrl_industry = rec.get("meta", {}).get("industry_name", "")
+                    master_industry = company_info.get(edinet_code, {}).get("industry", "")
+                    industry = xbrl_industry or master_industry
+
+                    rec.update({
                         "edinet_code":  edinet_code,
                         "sec_code":     sec_code,
-                        "name":         filer_name,
-                        "industry":     "",
+                        "company_name": filer_name,
+                        "industry":     industry,
+                        "year":         year,
+                        "period_end":   period_end,
+                        "doc_id":       doc_id,
+                        "source":       "EDINET_XBRL",
                     })
-                    db.flush()
-                    known_edinet.add(edinet_code)
+                    upsert_financial(db, rec)
 
-                xbrl_df = await fetch_xbrl_csv(client, doc_id)
-                await asyncio.sleep(RATE_SLEEP)
-
-                # XBRL 全行を raw テーブルに保存（新指標追加時の再解析用）
-                # xbrl_raw_documents への書き込みは即コミットしてロックを解放する
-                # （financial_records との間でデッドロックが起きるのを防ぐため）
-                if xbrl_df is not None and not xbrl_df.empty:
-                    raw_rows = df_to_raw_rows(xbrl_df)
-                    if raw_rows:
-                        upsert_xbrl_raw(db, doc_id, edinet_code, period_end, raw_rows)
+                    if (i + 1) % 50 == 0:
                         db.commit()
+                        log.info("DB commit (50件)")
+                    if (i + 1) % 100 == 0:
+                        await asyncio.sleep(BATCH_PAUSE)
 
-                raw = parse_xbrl_csv(xbrl_df, edinet_code, period_end)
-                if not any(raw.get(cat) for cat in ("bs", "pl", "cf")):
-                    log.warning(f"財務データなし（スキップ）: {filer_name} {doc_id}")
-                    continue
-                rec = calc_derived(raw)
-
-                # XBRLから業種が取れた場合は優先、なければマスタの業種
-                xbrl_industry = rec.get("meta", {}).get("industry_name", "")
-                master_industry = company_info.get(edinet_code, {}).get("industry", "")
-                industry = xbrl_industry or master_industry
-
-                rec.update({
-                    "edinet_code":  edinet_code,
-                    "sec_code":     sec_code,
-                    "company_name": filer_name,
-                    "industry":     industry,
-                    "year":         year,
-                    "period_end":   period_end,
-                    "doc_id":       doc_id,
-                    "source":       "EDINET_XBRL",
-                })
-                upsert_financial(db, rec)
-
-                if (i + 1) % 50 == 0:
-                    db.commit()
-                    log.info("DB commit (50件)")
-                if (i + 1) % 100 == 0:
-                    await asyncio.sleep(BATCH_PAUSE)
+                except Exception as e:
+                    log.error(f"書類処理エラー（スキップ）: {doc_id} {filer_name} — {e}")
+                    try:
+                        db.rollback()
+                    except Exception:
+                        pass
 
             db.commit()
             log.info(f"全収集完了（スキップ: {skipped}件 / 取得: {total - skipped}件）")
