@@ -1122,10 +1122,13 @@ async def run_full_collection(years_back: int = 5,
                 await asyncio.sleep(RATE_SLEEP)
 
                 # XBRL 全行を raw テーブルに保存（新指標追加時の再解析用）
+                # xbrl_raw_documents への書き込みは即コミットしてロックを解放する
+                # （financial_records との間でデッドロックが起きるのを防ぐため）
                 if xbrl_df is not None and not xbrl_df.empty:
                     raw_rows = df_to_raw_rows(xbrl_df)
                     if raw_rows:
                         upsert_xbrl_raw(db, doc_id, edinet_code, period_end, raw_rows)
+                        db.commit()
 
                 raw = parse_xbrl_csv(xbrl_df, edinet_code, period_end)
                 if not any(raw.get(cat) for cat in ("bs", "pl", "cf")):
