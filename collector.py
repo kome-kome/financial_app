@@ -1026,6 +1026,9 @@ async def run_full_collection(years_back: int = 5,
             log.info(f"企業マスタをDBに保存中... ({master_total}社)")
             if on_progress:
                 on_progress(0, master_total, f"[企業マスタ保存] {master_total}社をDBに登録中...")
+            # 3978 社の dirty を 1 トランザクションに溜めると Supabase が read-only
+            # に切り替わるため、BATCH 件ごとに commit + expire_all してトランザクションを短く保つ
+            MASTER_BATCH = 200
             for i, (_, row) in enumerate(df_master.iterrows()):
                 upsert_company(db, {
                     "edinet_code":  row["edinet_code"],
@@ -1034,6 +1037,9 @@ async def run_full_collection(years_back: int = 5,
                     "industry":     row.get("industry", ""),
                     "fiscal_month": int(row["fiscal_month"]) if str(row.get("fiscal_month", "")).isdigit() else None,
                 })
+                if (i + 1) % MASTER_BATCH == 0:
+                    db.commit()
+                    db.expire_all()
                 if on_progress and (i + 1) % 500 == 0:
                     on_progress(i + 1, master_total,
                                 f"[企業マスタ保存] {i+1}/{master_total}社完了")

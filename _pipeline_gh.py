@@ -9,6 +9,8 @@ from datetime import datetime
 from dotenv import load_dotenv
 load_dotenv()
 
+from sqlalchemy.exc import InternalError, OperationalError
+
 from collector import run_full_collection, update_market_data, collect_macro_data, reparse_from_raw, MACRO_SERIES
 from database import SessionLocal, calc_growth_rates, calc_zscore_normalization
 
@@ -21,6 +23,27 @@ def log(msg: str):
     with open(LOG_FILE, "a", encoding="utf-8") as f:
         f.write(line + "\n")
 
+
+def _is_readonly_error(exc: BaseException) -> bool:
+    msg = str(exc).lower()
+    return "read-only" in msg or "readonlysqltransaction" in msg
+
+
+async def _run_with_retry(coro_factory, label: str,
+                         max_retry: int = 2, wait_sec: int = 90):
+    """Supabase が一時的に read-only に切り替わる事象に対する単純なリトライ。
+    本来想定外の例外は即時上げる(リトライしない)。"""
+    for attempt in range(max_retry + 1):
+        try:
+            return await coro_factory()
+        except (InternalError, OperationalError) as e:
+            if not _is_readonly_error(e):
+                raise
+            if attempt >= max_retry:
+                raise
+            log(f"[{label}] ReadOnly エラー検出 (attempt {attempt+1}/{max_retry+1}) — {wait_sec}秒待機して再試行: {e.__class__.__name__}")
+            await asyncio.sleep(wait_sec)
+
 async def main():
     t0 = time.time()
     log("=" * 60)
@@ -29,11 +52,14 @@ async def main():
 
     # ─── Phase 1: XBRL raw 収集（xbrl_raw_documents に未保存分のみ）────
     log("[1/5] XBRL raw 収集 開始（保存済みdocはスキップ）")
-    cancelled = await run_full_collection(
-        years_back=5,
-        skip_existing=False,
-        skip_if_raw_exists=True,  # xbrl_raw_documents に既存の doc はスキップ
-        on_progress=lambda c, t, m: log(m) if c % 50 == 0 or "[完了]" in m or "[企業マスタ" in m else None,
+    cancelled = await _run_with_retry(
+        lambda: run_full_collection(
+            years_back=5,
+            skip_existing=False,
+            skip_if_raw_exists=True,  # xbrl_raw_documents に既存の doc はスキップ
+            on_progress=lambda c, t, m: log(m) if c % 50 == 0 or "[完了]" in m or "[企業マスタ" in m else None,
+        ),
+        label="1/5",
     )
     if cancelled:
         log("[1/5] 収集が停止されました")
@@ -42,8 +68,11 @@ async def main():
 
     # ─── Phase 2: raw から financial_records を全件再解析 ───────────────
     log("[2/5] reparse_from_raw 開始（全 xbrl_raw_documents → financial_records）")
-    await reparse_from_raw(
-        on_progress=lambda c, t, m: log(m) if c % 200 == 0 or "完了" in m else None,
+    await _run_with_retry(
+        lambda: reparse_from_raw(
+            on_progress=lambda c, t, m: log(m) if c % 200 == 0 or "完了" in m else None,
+        ),
+        label="2/5",
     )
     log(f"[2/5] reparse_from_raw 完了 ({(time.time()-t0)/60:.1f}分経過)")
 
