@@ -11,7 +11,7 @@ load_dotenv()
 
 from sqlalchemy.exc import InternalError, OperationalError
 
-from collector import run_full_collection, update_market_data, collect_macro_data, reparse_from_raw, MACRO_SERIES
+from collector import run_full_collection, update_market_data, collect_macro_data, reparse_from_raw, MACRO_SERIES, SKIP_XBRL_RAW
 from database import SessionLocal, calc_growth_rates, calc_zscore_normalization
 
 LOG_FILE = "pipeline_gh.log"
@@ -67,14 +67,19 @@ async def main():
     log(f"[1/5] XBRL raw 収集 完了 ({(time.time()-t0)/60:.1f}分経過)")
 
     # ─── Phase 2: raw から financial_records を全件再解析 ───────────────
-    log("[2/5] reparse_from_raw 開始（全 xbrl_raw_documents → financial_records）")
-    await _run_with_retry(
-        lambda: reparse_from_raw(
-            on_progress=lambda c, t, m: log(m) if c % 200 == 0 or "完了" in m else None,
-        ),
-        label="2/5",
-    )
-    log(f"[2/5] reparse_from_raw 完了 ({(time.time()-t0)/60:.1f}分経過)")
+    # SKIP_XBRL_RAW=true のとき xbrl_raw_documents は空なので reparse 不要
+    # （Phase 1 で run_full_collection が直接 financial_records を書いている）
+    if SKIP_XBRL_RAW:
+        log("[2/5] reparse_from_raw 省略（SKIP_XBRL_RAW=true）")
+    else:
+        log("[2/5] reparse_from_raw 開始（全 xbrl_raw_documents → financial_records）")
+        await _run_with_retry(
+            lambda: reparse_from_raw(
+                on_progress=lambda c, t, m: log(m) if c % 200 == 0 or "完了" in m else None,
+            ),
+            label="2/5",
+        )
+        log(f"[2/5] reparse_from_raw 完了 ({(time.time()-t0)/60:.1f}分経過)")
 
     # ─── Phase 3: 成長率・Zスコア再計算 ─────────────────────────────────
     log("[3/5] 成長率・Zスコア再計算 開始")
