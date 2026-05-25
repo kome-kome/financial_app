@@ -83,7 +83,8 @@ import plugins as plugin_registry
 SCHEDULER_RUN_HOUR = 3  # 毎日この時刻（サーバーローカル時刻）に自動実行
 
 _scheduler_status: dict = {
-    "enabled":     True,
+    # AUTO_COLLECT_ENABLED=false で起動時から無効化できる（GitHub Actions 全件収集中など）
+    "enabled":     os.environ.get("AUTO_COLLECT_ENABLED", "true").lower() not in ("false", "0", "no"),
     "next_run":    None,
     "last_run":    None,
     "last_status": None,
