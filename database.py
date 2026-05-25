@@ -39,7 +39,7 @@ engine = create_engine(
     pool_size=_pool_size,
     max_overflow=_max_overflow,
     pool_pre_ping=True,
-    pool_recycle=300,
+    pool_recycle=180,
     connect_args=_connect_args,
     echo=False,
 )
@@ -326,11 +326,21 @@ def upsert_company(db, data: dict) -> Company:
     if obj is None:
         obj = Company(**{k: v for k, v in data.items() if hasattr(Company, k)})
         db.add(obj)
-    else:
-        for k, v in data.items():
-            if hasattr(Company, k) and v is not None:
-                setattr(obj, k, v)
-    obj.updated_at = datetime.utcnow()
+        obj.updated_at = datetime.utcnow()
+        return obj
+    # 既存: 実値が変わるフィールドだけ更新する（空文字/None で実値を潰さない）。
+    # 3500+ 社の dirty UPDATE が一気に流れると Supabase が read-only に転ぶため
+    changed = False
+    for k, v in data.items():
+        if not hasattr(Company, k):
+            continue
+        if v in (None, ""):
+            continue
+        if getattr(obj, k) != v:
+            setattr(obj, k, v)
+            changed = True
+    if changed:
+        obj.updated_at = datetime.utcnow()
     return obj
 
 
