@@ -12,7 +12,7 @@ load_dotenv()
 from sqlalchemy.exc import InternalError, OperationalError
 
 from collector import run_full_collection, update_market_data, collect_macro_data, reparse_from_raw, MACRO_SERIES, SKIP_XBRL_RAW
-from database import SessionLocal, calc_growth_rates, calc_zscore_normalization
+from database import SessionLocal, init_db, calc_growth_rates, calc_zscore_normalization
 
 LOG_FILE = "pipeline_gh.log"
 
@@ -49,6 +49,11 @@ async def main():
     log("=" * 60)
     log("GitHub Actions パイプライン 開始")
     log("=" * 60)
+
+    # 新規 Supabase プロジェクト等で workflow が Render より先に到達した場合
+    # でもテーブル未存在エラーにならないよう、冪等な init_db() を毎回先頭で実行
+    log("[init] init_db() でスキーマ冪等マイグレーションを実行")
+    init_db()
 
     # ─── Phase 1: XBRL raw 収集（xbrl_raw_documents に未保存分のみ）────
     log("[1/5] XBRL raw 収集 開始（保存済みdocはスキップ）")
