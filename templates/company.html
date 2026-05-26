@@ -63,6 +63,19 @@ a{color:inherit}
 .chart-box.tall{height:380px}
 
 .stats-grid.s8{grid-template-columns:repeat(4,1fr)}
+
+/* 同業比較テーブル */
+table.cmp{width:100%;border-collapse:collapse;font-size:12px;margin-top:4px}
+table.cmp th{text-align:right;padding:8px 10px;color:#64748b;font-weight:500;border-bottom:1px solid #2d3154;white-space:nowrap}
+table.cmp th:nth-child(1),table.cmp th:nth-child(2){text-align:left}
+table.cmp td{padding:8px 10px;border-bottom:1px solid #1e2235;white-space:nowrap}
+table.cmp td.num{text-align:right;font-family:'Consolas','Menlo',monospace}
+table.cmp tr.me{background:#1e1b3a}
+table.cmp tr.me td{color:#e2e8f0;font-weight:600}
+table.cmp a{color:#38bdf8;text-decoration:none}
+table.cmp a:hover{text-decoration:underline}
+table.cmp tbody tr:hover td{background:#1e2235}
+
 @media (max-width:768px){
   .stats-grid{grid-template-columns:1fr 1fr}
   .search-wrap{max-width:none}
@@ -112,6 +125,7 @@ a{color:inherit}
       <button class="tab" data-tab="price" role="tab">株価</button>
       <button class="tab" data-tab="zscore" role="tab">業種内</button>
       <button class="tab" data-tab="nc" role="tab">ネットキャッシュ</button>
+      <button class="tab" data-tab="peer" role="tab">同業比較</button>
     </div>
 
     <div class="panel active" id="panel-perf">
@@ -195,6 +209,23 @@ a{color:inherit}
         <div class="chart-box tall"><canvas id="chart-nc"></canvas></div>
       </div>
     </div>
+
+    <div class="panel" id="panel-peer">
+      <div class="chart-card">
+        <div class="chart-title">同業比較（同一業種）</div>
+        <div class="chart-note" id="peer-note">同一業種の企業を横断比較します。指標は最新年度ベース。</div>
+        <div id="peer-table-wrap" style="overflow-x:auto"></div>
+      </div>
+      <div class="chart-card">
+        <div class="chart-title">営業利益率の比較</div>
+        <div class="chart-note">色付き＝表示中の企業</div>
+        <div class="chart-box tall"><canvas id="chart-peer-opm"></canvas></div>
+      </div>
+      <div class="chart-card">
+        <div class="chart-title">ROE の比較</div>
+        <div class="chart-box tall"><canvas id="chart-peer-roe"></canvas></div>
+      </div>
+    </div>
   </div>
 </div>
 
@@ -246,6 +277,8 @@ if (window.Chart){
 }
 const charts = {};
 function destroyCharts(){ for (const k in charts){ if (charts[k]){ charts[k].destroy(); delete charts[k]; } } }
+let curCompany = {code:null, industry:null};
+let peersLoaded = false;
 
 const baseOpts = (extra={}) => ({
   responsive:true, maintainAspectRatio:false,
@@ -310,6 +343,7 @@ document.querySelectorAll('.tab').forEach(t => {
     document.querySelectorAll('.panel').forEach(x => x.classList.remove('active'));
     t.classList.add('active');
     document.getElementById('panel-' + t.dataset.tab).classList.add('active');
+    if (t.dataset.tab === 'peer' && !peersLoaded) loadPeers();
   });
 });
 
@@ -343,6 +377,7 @@ async function loadCompany(code){
   const recs = d.records;                 // year 昇順（API 側でソート済み）
   const latest = recs[recs.length - 1];
   const labels = recs.map(r => r.year);
+  curCompany = { code: code, industry: latest.industry };
 
   // ヘッダ
   document.getElementById('co-name').textContent = latest.company_name || code;
@@ -565,6 +600,76 @@ function renderNC(labels, recs){
       x:{ ticks:{color:'#94a3b8'}, grid:{color:'#1e2235'} },
       y:{ title:{display:true, text:'億円', color:'#64748b'}, ticks:{color:'#94a3b8'}, grid:{color:'#1e2235'} },
       y1:{ position:'right', title:{display:true, text:'NC比率（倍）', color:'#64748b'}, ticks:{color:'#f59e0b'}, grid:{drawOnChartArea:false} },
+    }})
+  });
+}
+
+// ── 同業比較（遅延ロード） ───────────────────────────────────
+async function loadPeers(){
+  peersLoaded = true;
+  const note = document.getElementById('peer-note');
+  const wrap = document.getElementById('peer-table-wrap');
+  if (!curCompany.industry){
+    note.textContent = '業種データが無いため同業比較を表示できません。';
+    wrap.innerHTML = '';
+    return;
+  }
+  let d;
+  try{
+    d = await apiFetch('/api/companies?include_latest=true&limit=40&industry=' + encodeURIComponent(curCompany.industry));
+  }catch(e){
+    peersLoaded = false;
+    note.textContent = '同業データの取得に失敗しました: ' + e.message;
+    return;
+  }
+  if (!d) return;
+  let peers = (d.items || []).filter(it => it.latest);   // 財務データのある企業のみ
+  if (peers.length === 0){
+    note.textContent = `業種「${curCompany.industry}」に財務データを持つ企業が見つかりません。`;
+    wrap.innerHTML = '';
+    return;
+  }
+  // 時価総額の降順、上位15社。表示中の企業は必ず含める
+  peers.sort((a, b) => (b.latest.val.market_cap || 0) - (a.latest.val.market_cap || 0));
+  let top = peers.slice(0, 15);
+  if (!top.some(p => p.edinet_code === curCompany.code)){
+    const me = peers.find(p => p.edinet_code === curCompany.code);
+    if (me) top.push(me);
+  }
+  note.textContent = `業種「${curCompany.industry}」の上位${top.length}社を比較（時価総額順・最新年度）。色付きが表示中の企業。`;
+
+  const rows = top.map(p => {
+    const L = p.latest, isMe = p.edinet_code === curCompany.code;
+    return `<tr class="${isMe ? 'me' : ''}">
+      <td>${esc(p.sec_code || '-')}</td>
+      <td><a href="/company/${esc(p.edinet_code)}">${esc(p.name)}</a></td>
+      <td class="num">${fmtNum(toOku(L.pl.revenue))}</td>
+      <td class="num">${fmtPct(L.pl.op_margin)}</td>
+      <td class="num">${fmtPct(L.val.roe)}</td>
+      <td class="num">${fmtPct(L.bs.equity_ratio)}</td>
+      <td class="num">${fmtX(L.val.per)}</td>
+      <td class="num">${fmtX(L.val.pbr)}</td>
+      <td class="num">${fmtNum(mnToOku(L.val.market_cap))}</td>
+    </tr>`;
+  }).join('');
+  wrap.innerHTML = `<table class="cmp">
+    <thead><tr><th>コード</th><th>企業名</th><th>売上(億)</th><th>営業益率</th><th>ROE</th><th>自己資本比率</th><th>PER</th><th>PBR</th><th>時価総額(億)</th></tr></thead>
+    <tbody>${rows}</tbody></table>`;
+
+  const names = top.map(p => p.name.length > 8 ? p.name.slice(0, 8) + '…' : p.name);
+  const colors = top.map(p => p.edinet_code === curCompany.code ? '#a78bfa' : '#475569');
+  peerBar('chart-peer-opm', names, top.map(p => p.latest.pl.op_margin), colors, '営業利益率(%)');
+  peerBar('chart-peer-roe', names, top.map(p => p.latest.val.roe), colors, 'ROE(%)');
+}
+
+function peerBar(canvasId, names, data, colors, label){
+  if (charts[canvasId]){ charts[canvasId].destroy(); }
+  charts[canvasId] = new Chart(document.getElementById(canvasId), {
+    type:'bar',
+    data:{ labels:names, datasets:[{ label, data, backgroundColor:colors, borderRadius:3 }] },
+    options: baseOpts({ indexAxis:'y', plugins:{ legend:{display:false} }, scales:{
+      x:{ title:{display:true, text:'%', color:'#64748b'}, ticks:{color:'#94a3b8'}, grid:{color:'#1e2235'} },
+      y:{ ticks:{color:'#94a3b8'}, grid:{color:'#1e2235'} },
     }})
   });
 }
