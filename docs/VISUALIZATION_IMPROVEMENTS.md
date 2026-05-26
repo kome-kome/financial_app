@@ -2,7 +2,7 @@
 
 | 項目 | 内容 |
 |---|---|
-| ステータス | 📝 **提案（実装前）** |
+| ステータス | 🔄 **Phase 1 実装済み**（F1〜F4：企業詳細ページ＋業績/BS/CFチャート）／Phase 2 以降は提案 |
 | 作成日 | 2026-05-26 |
 | ベンチマーク | [バフェット・コード](https://www.buffett-code.com/) |
 | 関連 | [VISION.md](VISION.md)（完成定義#2「投資情報サイトのような操作感」）/ [ARCHITECTURE.md](ARCHITECTURE.md) / [FUTURE_TASKS.md](FUTURE_TASKS.md) |
@@ -160,10 +160,17 @@ graph LR
 
 | Phase | 内容 |
 |---|---|
-| **1** | 企業詳細ページ骨格（F1）＋ F2/F3/F4（業績・BS・CF） |
+| **1** ✅ | 企業詳細ページ骨格（F1）＋ F2/F3/F4（業績・BS・CF）— **実装済み** |
 | **2** | F5/F6/F7/F8（per-share・配当・株価＋理論株価バンド・8 軸Zスコア・ネットキャッシュ＝**独自価値**） |
 | **3** | F9/F10（同業比較・横断分布） |
 | **4** | 仕上げ（ツールチップ・レスポンシブ・CSV/画像エクスポート） |
+
+### Phase 1 実装メモ（2026-05-26）
+- 追加: `templates/company.html`（単一ファイル・インライン）、`api.py` に `GET /company` と `GET /company/{edinet_code}`、`dashboard.html` にナビカード。
+- データは既存の `GET /api/financials/{edinet_code}` をそのまま利用（バックエンドのデータ変更なし）。
+- Chart.js は **CDN 読込（`cdn.jsdelivr.net`、4.4.1 ピン留め）**＋ CSP `script-src` に追加。実行環境のネットワーク制約で同梱は見送り（将来、`static/` 同梱＋SRI 付与を推奨）。
+- 入口: ダッシュボードのナビカード＋ページ内検索（`/api/companies`）。**スクリーニング結果表からの遷移リンクは未実装**（次段で追加予定）。
+- 検証: `python -m py_compile api.py`・ルート登録確認・インラインJSの `node --check` は通過。**DB/ブラウザ非搭載環境のためグラフ描画の目視確認は未実施** → Render 上での確認が必要。
 
 ---
 

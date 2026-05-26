@@ -106,7 +106,7 @@ class _SecurityHeadersMiddleware(BaseHTTPMiddleware):
         response = await call_next(request)
         response.headers["Content-Security-Policy"] = (
             "default-src 'self'; "
-            "script-src 'self' 'unsafe-inline'; "
+            "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
             "style-src 'self' 'unsafe-inline'; "
             "connect-src 'self'; "
             "img-src 'self' data:; "
@@ -1759,6 +1759,16 @@ async def serve_models():
 @app.get("/db")
 async def serve_db_viewer():
     return FileResponse(BASE_DIR / "templates" / "db.html", headers=_NO_CACHE)
+
+@app.get("/company")
+async def serve_company_search():
+    return FileResponse(BASE_DIR / "templates" / "company.html", headers=_NO_CACHE)
+
+@app.get("/company/{edinet_code}")
+async def serve_company(edinet_code: str):
+    # ページ自体は静的 HTML。edinet_code は URL 用で、実データ取得は
+    # フロントの /api/financials/{edinet_code} 側でバリデーション・404 処理する。
+    return FileResponse(BASE_DIR / "templates" / "company.html", headers=_NO_CACHE)
 
 @app.get("/login")
 async def serve_login():
