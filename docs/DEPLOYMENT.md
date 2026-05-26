@@ -63,14 +63,11 @@ Render ダッシュボードで管理。
 ### 2. アイドル時のスピンダウン
 - 15 分間アクセスがないとインスタンスが停止する
 - 次回アクセス時に **コールドスタート**（数秒〜数十秒）が発生
-- バックグラウンドのスケジューラー（`api.py:_daily_scheduler`）は
-  **スピンダウンすると停止する**。深夜の自動収集を補完する仕組みとして:
-  - **`_startup_catchup` (実装済み)**: スピンアップ時に「最終自動収集から 22h 以上経過していたら
-    差分収集を非同期実行」する。詳細は `api.py:_startup_catchup`
-  - **GitHub Actions keepalive (実装済み)**: `.github/workflows/keepalive.yml` が 10 分間隔で
-    `/health` を叩いてスピンダウンを防ぐ。実装詳細は本ファイル下の「スピンダウン対策」セクション
-  - **代替案**: 有料プラン($7/月で常時稼働) / Render Cron Jobs (別 service として定義) /
-    外部 cron-as-a-service (cron-job.org・UptimeRobot 等)
+- 自動収集は **GitHub Actions に統一済み** のため Render の常時稼働は不要:
+  - 差分収集: `.github/workflows/daily-incremental.yml` が UTC 18:00 (JST 03:00) に実行
+  - 全件収集: `.github/workflows/full-pipeline.yml` を `workflow_dispatch` で手動起動
+  - Render 側の `_daily_scheduler` / `_startup_catchup` および keepalive ワークフローは廃止済み
+  - ユーザーが Web UI を開いたときのコールドスタートは許容する設計
 
 ### 3. シェルアクセスなし
 - SSH 接続は不可。デバッグは **Render ダッシュボードのログ閲覧** のみ
@@ -142,57 +139,22 @@ Render ダッシュボードで管理。
 
 ### スピンダウン対策
 
-#### A. GitHub Actions keepalive（採用中）
+**現状: 対策なし（許容）**
 
-`.github/workflows/keepalive.yml` が以下のタイミングで `/health` に GET を投げる:
+収集を `.github/workflows/daily-incremental.yml`（差分・自動）と `full-pipeline.yml`（全件・手動）
+に統一したため、Render を常時起動させる必要がなくなった。ユーザーが Web UI を開いた
+ときだけスピンアップする運用で、コールドスタート（数秒〜数十秒）は許容する。
 
-| 時間帯 (JST) | cron (UTC) | 目的 |
-|---|---|---|
-| 2:50, 2:55 | `50,55 17 * * *` | scheduler 直前にスピンアップ |
-| 3:00, 3:05, 3:10 | `0,5,10 18 * * *` | scheduler 実行中の追い ping |
-| 9:00-23:30 (30 分間隔) | `*/30 0-14 * * *` | 業務時間中のコールドスタート回避 |
+**過去の対策（廃止済み、参考）:**
+- `.github/workflows/keepalive.yml` で `/health` を定期 ping し Render を起こす方式
+- `api.py:_startup_catchup` でスピンアップ時に最終収集から 22h 経過していたら差分収集を走らせる方式
+- `api.py:_daily_scheduler` で JST 3 時に Render 上で差分収集を走らせる方式
 
-リポジトリ内で完結し外部サービスのアカウント不要。コストはパブリックリポジトリなら無料、
-プライベートでも月 60 分 / 月 程度の Actions 時間しか消費しない。
+いずれも Render Free のメモリ/タイムアウト制約と相性が悪く、本格運用に耐えなかった。
 
-**Render Free 750h/月 への適合**:
-- 3 時前後: 約 0.75h/日
-- 業務時間 (9:00-23:30 + spindown 15 分): 約 14.75h/日
-- 合計: 約 **15.5h/日 = 475h/月（31 日月）** → 無料枠の 63%、275h の余裕
-
-**深夜帯 (0-9 JST) はスピンダウンを許容**: ユーザーがアクセスしない時間帯のため、コール
-ドスタートが起きても影響が小さい。scheduler の自動収集だけは 3 時前後の集中 ping で確実に
-起こせるよう設計している。
-
-**動作確認:**
-1. GitHub リポジトリの `Actions` タブ → `Keepalive ping` ワークフローを選択
-2. 「Run workflow」ボタンで手動実行できる（`workflow_dispatch` 対応済み）
-3. 実行履歴で HTTP 200 が返っていれば成功
-
-**本番 URL の変更:**
-リポジトリの `Settings` → `Secrets and variables` → `Actions` → `Variables` タブで
-`PING_URL` を追加すると上書きできる。未設定時は `https://financial-app.onrender.com/health` を使用。
-
-**注意点:**
-- GitHub Actions の scheduled workflow は実行が遅延することがある
-  （公式: "can be delayed during periods of high loads"）。3 時前後は 5 分間隔で 5 回 ping
-  しているので 1〜2 回失敗しても scheduler 起動には十分余裕がある
-- リポジトリに 60 日間 push がないと scheduled workflow が自動無効化される。
-  この場合 Actions タブから「Enable workflow」ボタンで再有効化が必要
-- `api.py:_daily_scheduler` は **JST 3 時** に動作する設計（`api.py:_now_jst()` で TZ 固定）。
-  Render の OS TZ (UTC) に依存しない。新しい時間帯固定の処理を追加する場合も `_now_jst()`
-  を使うこと
-
-#### B. 外部 cron-as-a-service（代替案）
-
-GitHub Actions の遅延が許容できない場合、cron-job.org / UptimeRobot 等の外部サービスを使う:
-
-1. アカウント作成（無料プラン）
-2. ジョブ追加: URL = `https://financial-app.onrender.com/health` / Schedule = `*/14 * * * *`
-3. タイムアウト 60 秒（コールドスタート分の余裕）
-4. 失敗通知をメール等で受け取る設定
-
-cron-job.org は最小 1 分間隔、UptimeRobot は最小 5 分間隔の HTTPS チェックが無料で可能。
+**将来、Web UI のコールドスタートを避けたい場合の選択肢:**
+1. 有料プラン ($7/月) で常時稼働
+2. 外部 cron-as-a-service (cron-job.org / UptimeRobot 等) で `/health` を定期 ping
 
 ### ログ閲覧
 Render ダッシュボード → 該当サービス → "Logs" タブで stdout/stderr をストリーミング閲覧。
