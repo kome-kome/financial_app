@@ -110,7 +110,7 @@ uvicorn api:app --reload                # サーバー起動
 
 python collector.py --years 5           # 全件収集（5年分）
 python collector.py --years 1 --max 10  # テスト用（10社）
-python collector.py --company E000001   # 特定企業更新
+python collector.py --company E02167    # 特定企業更新（EDINETコードは E+5桁）
 python collector.py --market            # 株価のみ更新
 python collector.py --incremental      # 差分収集（収集済みをスキップ）
 python check.py                         # EDINET API接続テスト
