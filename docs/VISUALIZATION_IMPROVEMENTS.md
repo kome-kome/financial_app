@@ -2,7 +2,7 @@
 
 | 項目 | 内容 |
 |---|---|
-| ステータス | 🔄 **Phase 1 実装済み**（F1〜F4：企業詳細ページ＋業績/BS/CFチャート）／Phase 2 以降は提案 |
+| ステータス | 🔄 **Phase 1・2 実装済み**（F1〜F8＋株価：企業詳細ページの全タブ）／Phase 3 以降は提案 |
 | 作成日 | 2026-05-26 |
 | ベンチマーク | [バフェット・コード](https://www.buffett-code.com/) |
 | 関連 | [VISION.md](VISION.md)（完成定義#2「投資情報サイトのような操作感」）/ [ARCHITECTURE.md](ARCHITECTURE.md) / [FUTURE_TASKS.md](FUTURE_TASKS.md) |
@@ -161,7 +161,7 @@ graph LR
 | Phase | 内容 |
 |---|---|
 | **1** ✅ | 企業詳細ページ骨格（F1）＋ F2/F3/F4（業績・BS・CF）— **実装済み** |
-| **2** | F5/F6/F7/F8（per-share・配当・株価＋理論株価バンド・8 軸Zスコア・ネットキャッシュ＝**独自価値**） |
+| **2** ✅ | F5/F6/F7/F8（per-share・配当・株価・理論時価総額乖離・8 軸Zスコア・ネットキャッシュ＝**独自価値**）— **実装済み** |
 | **3** | F9/F10（同業比較・横断分布） |
 | **4** | 仕上げ（ツールチップ・レスポンシブ・CSV/画像エクスポート） |
 
@@ -171,6 +171,14 @@ graph LR
 - Chart.js は **CDN 読込（`cdn.jsdelivr.net`、4.4.1 ピン留め）**＋ CSP `script-src` に追加。実行環境のネットワーク制約で同梱は見送り（将来、`static/` 同梱＋SRI 付与を推奨）。
 - 入口: ダッシュボードのナビカード＋ページ内検索（`/api/companies`）。**スクリーニング結果表からの遷移リンクは未実装**（次段で追加予定）。
 - 検証: `python -m py_compile api.py`・ルート登録確認・インラインJSの `node --check` は通過。**DB/ブラウザ非搭載環境のためグラフ描画の目視確認は未実施** → Render 上での確認が必要。
+
+### Phase 2 実装メモ（2026-05-26）
+- 企業詳細ページに 5 タブ追加（per-share・配当 / バリュエーション / 株価 / 業種内 / ネットキャッシュ）。全 8 タブ・11 グラフ構成に。
+- `api.py` の `_record_to_dict` に既存カラムを追加公開（`dps`・`de_ratio`・`net_cash`・`nc_ratio`・`z_de_ratio`・`z_nc_ratio`）。**追加のみで既存レスポンスは非破壊**。
+- F5: EPS/DPS（棒）＋BPS（右軸）、配当利回り・配当性向。F6: `/api/stock/history`（日次終値）。F7: 8 軸 Zスコアのレーダー（年度別・0=業種平均）。F8: ネットキャッシュ（億円）＋NC比率（倍）。
+- **独自価値**: バリュエーションタブに「理論時価総額 vs 実績時価総額＋乖離率」を追加（`predicted_market_cap`/`gap_ratio`。業種別OLS回帰の実行後に表示）。
+- 単位の注意（CLAUDE.md 準拠で実装）: `market_cap`/`predicted_market_cap` は**百万円**（÷100 で億円）、`net_cash` は**円**（÷1e8）、`nc_ratio` は**無次元の倍率**（%ではない）、`gap_ratio` は **%**。
+- 検証: `py_compile`・タブ/パネル/canvas 整合・`node --check` 通過。**描画の目視確認は Render 上で要実施**。
 
 ---
 

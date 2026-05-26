@@ -1028,7 +1028,13 @@ def _record_to_dict(r: FinancialRecord) -> dict:
             "stock_price": r.stock_price,
             "per": r.per, "pbr": r.pbr,
             "div_yield": r.div_yield,
+            "dps": r.dps,
+            "de_ratio": r.de_ratio,
             "roe": r.roe, "roa": r.roa,
+        },
+        "nc": {
+            "net_cash": r.net_cash,
+            "nc_ratio": r.nc_ratio,
         },
         "zscore": {
             "z_revenue": r.z_revenue,
@@ -1037,6 +1043,8 @@ def _record_to_dict(r: FinancialRecord) -> dict:
             "z_equity_ratio": r.z_equity_ratio,
             "z_cf_ratio": r.z_cf_ratio,
             "z_eps": r.z_eps,
+            "z_de_ratio": r.z_de_ratio,
+            "z_nc_ratio": r.z_nc_ratio,
         },
         "predicted_market_cap": r.predicted_market_cap,
         "gap_ratio": r.gap_ratio,

@@ -107,6 +107,11 @@ a{color:inherit}
       <button class="tab active" data-tab="perf" role="tab">業績</button>
       <button class="tab" data-tab="bs" role="tab">財務(BS)</button>
       <button class="tab" data-tab="cf" role="tab">キャッシュフロー</button>
+      <button class="tab" data-tab="psh" role="tab">per-share・配当</button>
+      <button class="tab" data-tab="val" role="tab">バリュエーション</button>
+      <button class="tab" data-tab="price" role="tab">株価</button>
+      <button class="tab" data-tab="zscore" role="tab">業種内</button>
+      <button class="tab" data-tab="nc" role="tab">ネットキャッシュ</button>
     </div>
 
     <div class="panel active" id="panel-perf">
@@ -135,6 +140,59 @@ a{color:inherit}
         <div class="chart-title">キャッシュフローの推移</div>
         <div class="chart-note">棒＝営業／投資／財務CF（億円）／折れ線＝フリーCF（営業CF＋投資CF）</div>
         <div class="chart-box tall"><canvas id="chart-cf"></canvas></div>
+      </div>
+    </div>
+
+    <div class="panel" id="panel-psh">
+      <div class="chart-card">
+        <div class="chart-title">1株当たり指標（EPS・DPS・BPS）</div>
+        <div class="chart-note">棒＝EPS・DPS（円）／折れ線＝BPS（右軸・円）</div>
+        <div class="chart-box tall"><canvas id="chart-psh"></canvas></div>
+      </div>
+      <div class="chart-card">
+        <div class="chart-title">配当利回り・配当性向</div>
+        <div class="chart-note">配当利回り＝DPS÷株価／配当性向＝DPS÷EPS（％）</div>
+        <div class="chart-box"><canvas id="chart-div"></canvas></div>
+      </div>
+    </div>
+
+    <div class="panel" id="panel-val">
+      <div class="chart-card">
+        <div class="chart-title">バリュエーション（PER・PBR）の推移</div>
+        <div class="chart-note">PER・PBR（倍）。収集時点の株価ベース</div>
+        <div class="chart-box"><canvas id="chart-valratio"></canvas></div>
+      </div>
+      <div class="chart-card">
+        <div class="chart-title">理論時価総額 vs 実績時価総額・乖離率 <span style="color:#a78bfa">（本ツール独自）</span></div>
+        <div class="chart-note">棒＝実績／理論時価総額（億円）／折れ線＝乖離率（右軸・％）。理論値は業種別OLS回帰の実行後に表示されます（未実行なら空）。</div>
+        <div class="chart-box tall"><canvas id="chart-mcap"></canvas></div>
+      </div>
+    </div>
+
+    <div class="panel" id="panel-price">
+      <div class="chart-card">
+        <div class="chart-title">株価（日次終値）</div>
+        <div class="chart-note">直近最大5年程度の日次終値（円）。出典: J-Quants / stooq</div>
+        <div class="chart-box tall">
+          <canvas id="chart-price"></canvas>
+          <div id="price-empty" style="display:none;position:absolute;top:50%;left:0;right:0;transform:translateY(-50%);text-align:center;color:#64748b">株価データがありません（株価履歴の収集が必要です）</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel" id="panel-zscore">
+      <div class="chart-card">
+        <div class="chart-title">業種内ポジション（Zスコア・最新年度） <span style="color:#a78bfa">（本ツール独自）</span></div>
+        <div class="chart-note">同一業種・同一年度内での標準化偏差。0＝業種平均、外側ほど高い（D/Eレシオは高いほど負債が多い点に注意）。</div>
+        <div class="chart-box tall"><canvas id="chart-zscore"></canvas></div>
+      </div>
+    </div>
+
+    <div class="panel" id="panel-nc">
+      <div class="chart-card">
+        <div class="chart-title">清原式ネットキャッシュ <span style="color:#a78bfa">（本ツール独自）</span></div>
+        <div class="chart-note">NC＝流動資産＋投資有価証券×0.7−総負債（億円）／NC比率＝NC÷時価総額（倍。1.0超で時価総額を上回るネットキャッシュ）</div>
+        <div class="chart-box tall"><canvas id="chart-nc"></canvas></div>
       </div>
     </div>
   </div>
@@ -173,7 +231,8 @@ async function apiFetch(path){
 
 // ── 数値フォーマット ──────────────────────────────────────────
 const OKU = 1e8;
-function toOku(v){ return (v==null || isNaN(v)) ? null : v/OKU; }
+function toOku(v){ return (v==null || isNaN(v)) ? null : v/OKU; }       // 円 → 億円
+function mnToOku(v){ return (v==null || isNaN(v)) ? null : v/100; }     // 百万円 → 億円（market_cap 系）
 function fmtNum(v, digits=1){ return (v==null || isNaN(v)) ? '—' : Number(v).toLocaleString('ja-JP',{maximumFractionDigits:digits}); }
 function fmtPct(v){ return (v==null || isNaN(v)) ? '—' : Number(v).toFixed(1) + '%'; }
 function fmtX(v){ return (v==null || isNaN(v)) ? '—' : Number(v).toFixed(2) + '倍'; }
@@ -317,9 +376,23 @@ async function loadCompany(code){
   renderMargin(labels, recs);
   renderBS(labels, recs);
   renderCF(labels, recs);
+  renderPsh(labels, recs);
+  renderDiv(labels, recs);
+  renderValRatio(labels, recs);
+  renderMcap(labels, recs);
+  renderZscore(latest);
+  renderNC(labels, recs);
 
   empty.style.display = 'none';
   view.style.display = 'block';
+
+  // 株価（別ソース・取得失敗してもページは表示する）
+  try {
+    const hist = await apiFetch('/api/stock/history/' + encodeURIComponent(code) + '?days=1825');
+    renderPrice(hist || []);
+  } catch(e) {
+    renderPrice([]);
+  }
 }
 
 function renderPerf(labels, recs){
@@ -385,6 +458,113 @@ function renderCF(labels, recs){
     options: baseOpts({ scales:{
       x:{ ticks:{color:'#94a3b8'}, grid:{color:'#1e2235'} },
       y:{ title:{display:true, text:'億円', color:'#64748b'}, ticks:{color:'#94a3b8'}, grid:{color:'#1e2235'} },
+    }})
+  });
+}
+
+function renderPsh(labels, recs){
+  charts.psh = new Chart(document.getElementById('chart-psh'), {
+    type:'bar',
+    data:{ labels, datasets:[
+      {label:'EPS(円)', data:recs.map(r=>r.pl.eps), backgroundColor:'#34d399', borderRadius:3},
+      {label:'DPS(円)', data:recs.map(r=>r.val.dps), backgroundColor:'#f59e0b', borderRadius:3},
+      {label:'BPS(円)', type:'line', data:recs.map(r=>r.bs.bps), yAxisID:'y1',
+       borderColor:'#60a5fa', backgroundColor:'#60a5fa', tension:.3, pointRadius:3},
+    ]},
+    options: baseOpts({ scales:{
+      x:{ ticks:{color:'#94a3b8'}, grid:{color:'#1e2235'} },
+      y:{ title:{display:true, text:'EPS・DPS（円）', color:'#64748b'}, ticks:{color:'#94a3b8'}, grid:{color:'#1e2235'} },
+      y1:{ position:'right', title:{display:true, text:'BPS（円）', color:'#64748b'}, ticks:{color:'#60a5fa'}, grid:{drawOnChartArea:false} },
+    }})
+  });
+}
+
+function renderDiv(labels, recs){
+  charts.div = new Chart(document.getElementById('chart-div'), {
+    type:'line',
+    data:{ labels, datasets:[
+      {label:'配当利回り(%)', data:recs.map(r=>r.val.div_yield), borderColor:'#f59e0b', backgroundColor:'#f59e0b', tension:.3, pointRadius:3},
+      {label:'配当性向(%)', data:recs.map(r=>(r.val.dps!=null && r.pl.eps && r.pl.eps>0) ? r.val.dps/r.pl.eps*100 : null),
+       borderColor:'#a78bfa', backgroundColor:'#a78bfa', tension:.3, pointRadius:3},
+    ]},
+    options: baseOpts()
+  });
+}
+
+function renderValRatio(labels, recs){
+  charts.valratio = new Chart(document.getElementById('chart-valratio'), {
+    type:'line',
+    data:{ labels, datasets:[
+      {label:'PER(倍)', data:recs.map(r=>r.val.per), borderColor:'#60a5fa', backgroundColor:'#60a5fa', tension:.3, pointRadius:3},
+      {label:'PBR(倍)', data:recs.map(r=>r.val.pbr), borderColor:'#34d399', backgroundColor:'#34d399', tension:.3, pointRadius:3},
+    ]},
+    options: baseOpts()
+  });
+}
+
+function renderMcap(labels, recs){
+  charts.mcap = new Chart(document.getElementById('chart-mcap'), {
+    type:'bar',
+    data:{ labels, datasets:[
+      {label:'実績時価総額', data:recs.map(r=>mnToOku(r.val.market_cap)), backgroundColor:'#3b82f6', borderRadius:3},
+      {label:'理論時価総額', data:recs.map(r=>mnToOku(r.predicted_market_cap)), backgroundColor:'#a78bfa', borderRadius:3},
+      {label:'乖離率(%)', type:'line', data:recs.map(r=>r.gap_ratio), yAxisID:'y1',
+       borderColor:'#f59e0b', backgroundColor:'#f59e0b', tension:.3, pointRadius:3},
+    ]},
+    options: baseOpts({ scales:{
+      x:{ ticks:{color:'#94a3b8'}, grid:{color:'#1e2235'} },
+      y:{ title:{display:true, text:'億円', color:'#64748b'}, ticks:{color:'#94a3b8'}, grid:{color:'#1e2235'} },
+      y1:{ position:'right', title:{display:true, text:'乖離率 %', color:'#64748b'}, ticks:{color:'#f59e0b'}, grid:{drawOnChartArea:false} },
+    }})
+  });
+}
+
+function renderPrice(hist){
+  const box = document.getElementById('price-empty');
+  if (charts.price){ charts.price.destroy(); delete charts.price; }
+  if (!hist || hist.length === 0){ if (box) box.style.display = 'block'; return; }
+  if (box) box.style.display = 'none';
+  charts.price = new Chart(document.getElementById('chart-price'), {
+    type:'line',
+    data:{ labels:hist.map(h=>h.trade_date), datasets:[
+      {label:'終値(円)', data:hist.map(h=>h.close), borderColor:'#38bdf8', backgroundColor:'rgba(56,189,248,.12)',
+       fill:true, pointRadius:0, borderWidth:1.5, tension:.1},
+    ]},
+    options: baseOpts({ scales:{
+      x:{ ticks:{color:'#94a3b8', maxTicksLimit:12, autoSkip:true, maxRotation:0}, grid:{color:'#1e2235'} },
+      y:{ title:{display:true, text:'円', color:'#64748b'}, ticks:{color:'#94a3b8'}, grid:{color:'#1e2235'} },
+    }})
+  });
+}
+
+function renderZscore(latest){
+  const z = latest.zscore || {};
+  const keys = ['z_revenue','z_op_margin','z_roe','z_equity_ratio','z_cf_ratio','z_eps','z_de_ratio','z_nc_ratio'];
+  const vals = keys.map(k => (z[k]==null || isNaN(z[k])) ? 0 : z[k]);
+  charts.zscore = new Chart(document.getElementById('chart-zscore'), {
+    type:'radar',
+    data:{ labels:['売上','営業利益率','ROE','自己資本比率','CF比率','EPS','D/Eレシオ','ネットキャッシュ'],
+      datasets:[{ label:`業種内Zスコア (${latest.year})`, data:vals,
+        borderColor:'#a78bfa', backgroundColor:'rgba(167,139,250,.2)', pointBackgroundColor:'#a78bfa', borderWidth:2 }] },
+    options:{ responsive:true, maintainAspectRatio:false,
+      plugins:{ legend:{labels:{color:'#cbd5e1'}}, tooltip:{backgroundColor:'#0f1117', borderColor:'#2d3154', borderWidth:1} },
+      scales:{ r:{ min:-2.5, max:2.5, ticks:{stepSize:1, color:'#64748b', backdropColor:'transparent'},
+        grid:{color:'#2d3154'}, angleLines:{color:'#2d3154'}, pointLabels:{color:'#cbd5e1', font:{size:11}} } } }
+  });
+}
+
+function renderNC(labels, recs){
+  charts.nc = new Chart(document.getElementById('chart-nc'), {
+    type:'bar',
+    data:{ labels, datasets:[
+      {label:'ネットキャッシュ(億円)', data:recs.map(r=>toOku(r.nc.net_cash)), backgroundColor:'#34d399', borderRadius:3},
+      {label:'NC比率(倍)', type:'line', data:recs.map(r=>r.nc.nc_ratio), yAxisID:'y1',
+       borderColor:'#f59e0b', backgroundColor:'#f59e0b', tension:.3, pointRadius:3},
+    ]},
+    options: baseOpts({ scales:{
+      x:{ ticks:{color:'#94a3b8'}, grid:{color:'#1e2235'} },
+      y:{ title:{display:true, text:'億円', color:'#64748b'}, ticks:{color:'#94a3b8'}, grid:{color:'#1e2235'} },
+      y1:{ position:'right', title:{display:true, text:'NC比率（倍）', color:'#64748b'}, ticks:{color:'#f59e0b'}, grid:{drawOnChartArea:false} },
     }})
   });
 }

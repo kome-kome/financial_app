@@ -126,7 +126,7 @@ python check.py                         # EDINET API接続テスト
 | `templates/dashboard.html` | トップページ・ダッシュボード（`/`） |
 | `templates/collection.html` | 収集・スクリーニング画面（`/collection`） |
 | `templates/analysis.html` | 回帰・乖離分析画面（`/analysis`） |
-| `templates/company.html` | 企業詳細画面（`/company`・`/company/{edinet_code}`）。業績・財務・CF を Chart.js で可視化 |
+| `templates/company.html` | 企業詳細画面（`/company`・`/company/{edinet_code}`）。業績・財務・CF・per-share/配当・バリュエーション（理論時価総額乖離）・日次株価・業種内Zスコア・清原式ネットキャッシュを Chart.js で可視化 |
 | `_pipeline_gh.py` | GitHub Actions 用・全件収集パイプライン（workflow_dispatch 手動起動） |
 | `_pipeline_incremental.py` | GitHub Actions 用・差分収集パイプライン（daily-incremental.yml で毎日自動実行） |
 | `check.py` | EDINET API疎通確認用ワンショット |
