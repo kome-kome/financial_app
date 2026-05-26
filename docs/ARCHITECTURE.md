@@ -649,6 +649,9 @@ stateDiagram-v2
     Analysis   --> Collection : 「← データ収集ページへ」リンク
     DBViewer   --> Dashboard  : 「← ホーム」
     Company    --> Dashboard  : 「ダッシュボード」
+    Collection --> Company    : 企業名クリック（スクリーニング/DB一覧）
+    Analysis   --> Company    : 企業名クリック（乖離/推薦/総合/NC/BT）
+    DBViewer   --> Company    : ドリルダウンの「企業ページを開く」
 ```
 
 ---

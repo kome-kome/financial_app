@@ -75,6 +75,8 @@ tr:hover td{background:#1e2235}
 .modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:100;display:flex;align-items:center;justify-content:center}
 .modal{background:#1a1d2e;border:1px solid #2d3154;border-radius:12px;padding:24px;width:520px;max-width:95vw;max-height:90vh;overflow-y:auto}
 .btn:disabled{opacity:.4;cursor:not-allowed}
+.co-link{color:#a78bfa;text-decoration:none}
+.co-link:hover{text-decoration:underline}
 </style>
 </head>
 <body>
@@ -1149,7 +1151,7 @@ async function loadDB(){
       const tr = document.createElement('tr');
       tr.innerHTML = `
         <td><span class="tag tag-blue">${esc(c.sec_code)||'-'}</span></td>
-        <td style="font-weight:500">${esc(c.name)}</td>
+        <td>${c.edinet_code ? `<a href="/company/${esc(c.edinet_code)}" class="co-link" style="font-weight:500">${esc(c.name)}</a>` : esc(c.name)}</td>
         <td><span class="tag tag-amber" style="font-size:10px">${esc(c.industry)||'-'}</span></td>
         <td>${latest?.year!=null?Number(latest.year):'-'}</td>
         <td>${latest ? fmt0(latest.pl.revenue/1e6) : '-'}</td>
@@ -1622,7 +1624,7 @@ function renderScreenResults(){
     const score = calcScore(r);
     return `<tr>
       <td><span class="tag tag-blue">${esc(r.sec_code||r.edinet_code)}</span></td>
-      <td style="cursor:pointer;color:#a78bfa;font-weight:500" onclick="showDetail('${esc(r.edinet_code)}','${esc(r.company_name)}')">${esc(r.company_name)}</td>
+      <td>${r.edinet_code ? `<a href="/company/${esc(r.edinet_code)}" class="co-link" style="font-weight:500">${esc(r.company_name)}</a>` : esc(r.company_name)}</td>
       <td><span class="tag tag-amber" style="font-size:10px">${esc(r.industry)||'-'}</span></td>
       <td>${r.val?.per!=null?Number(r.val.per):'-'}</td>
       <td>${r.val?.pbr!=null?Number(r.val.pbr):'-'}</td>
