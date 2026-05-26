@@ -459,12 +459,12 @@ async def data_quality(db: Session = Depends(get_db)):
         log.error(f"データ品質チェック失敗: {e}")
         raise HTTPException(500, "データ品質チェックに失敗しました")
 
-_EDINET_CODE_RE = re.compile(r"^E\d{6}$")
+_EDINET_CODE_RE = re.compile(r"^E\d{5,6}$")
 
 @app.post("/api/collect/refresh/{edinet_code}")
 async def refresh_single(edinet_code: str, background_tasks: BackgroundTasks):
     if not _EDINET_CODE_RE.match(edinet_code):
-        raise HTTPException(400, "edinet_code の形式が不正です（例: E123456）")
+        raise HTTPException(400, "edinet_code の形式が不正です（例: E02167）")
     background_tasks.add_task(refresh_company, edinet_code)
     return {"message": f"{edinet_code} の再取得を開始しました"}
 
@@ -1633,7 +1633,7 @@ async def db_relations():
 async def db_company_drilldown(edinet_code: str, db: Session = Depends(get_db)):
     """企業別ドリルダウン: 1企業に紐づく全テーブルのレコードを横断取得"""
     if not _EDINET_CODE_RE.match(edinet_code):
-        raise HTTPException(400, "edinet_code の形式が不正です（例: E123456）")
+        raise HTTPException(400, "edinet_code の形式が不正です（例: E02167）")
     company = db.query(Company).filter_by(edinet_code=edinet_code).first()
     if not company:
         raise HTTPException(404, "企業が見つかりません")

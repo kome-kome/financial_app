@@ -292,8 +292,10 @@ const baseOpts = (extra={}) => ({
 
 // ── 企業コードを URL から取得 ────────────────────────────────
 function currentCode(){
-  const m = location.pathname.match(/^\/company\/(E\d{6})/i);
-  return m ? m[1].toUpperCase() : null;
+  // /company/{edinet_code} の {edinet_code} を抽出。
+  // EDINET コードは E+数字（実データは E+5桁、例: E02167）。桁数を固定せずパスセグメントをそのまま取得する。
+  const m = location.pathname.match(/^\/company\/([^\/?#]+)/);
+  return m ? decodeURIComponent(m[1]) : null;
 }
 
 // ── 検索 ──────────────────────────────────────────────────────
