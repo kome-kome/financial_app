@@ -967,7 +967,7 @@ graph TB
 | `plugins/utils.py` | バックエンド | ols()・normalize()・winsorize()・walk_forward_cv()・walk_forward_cv_monthly() | — |
 | `dashboard.html` | フロントエンド | トップページ・全体サマリー（`/`） | api.py |
 | `collection.html` | フロントエンド | 収集管理・スクリーニング・DBブラウザ（`/collection`） | api.py |
-| `analysis.html` | フロントエンド | 回帰分析・乖離分析・プラグイン（`/analysis`） | api.py |
+| `analysis.html` | フロントエンド | 回帰分析・乖離分析・プラグイン（`/analysis`）。乖離分析タブに横断分布（理論vs実績の散布図・乖離率ヒストグラム）を Chart.js で表示 | api.py, Chart.js (CDN) |
 | `login.html` | フロントエンド | 認証ログイン画面（`/login`） | api.py |
 | `models.html` | フロントエンド | モデル解説・参考文献ページ（`/models`）。8モデルの数式・パラメータ・DOIリンクをインラインHTMLで表示。 | — |
 | `db.html` | フロントエンド | DBビューア（`/db`）。4テーブルのスキーマ・プレビュー・統計サマリー・ER 風リレーション・企業ドリルダウン・CSV エクスポート。 | api.py |
