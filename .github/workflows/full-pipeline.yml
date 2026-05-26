@@ -11,7 +11,7 @@ on:
 jobs:
   pipeline:
     runs-on: ubuntu-latest
-    timeout-minutes: 360  # 最大6時間
+    timeout-minutes: 355  # GitHub Actions 上限6時間。余裕を5分持たせる
 
     steps:
       - name: Checkout
@@ -31,7 +31,7 @@ jobs:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           EDINET_API_KEY: ${{ secrets.EDINET_API_KEY }}
           JQUANTS_API_KEY: ${{ secrets.JQUANTS_API_KEY }}
-        run: python _pipeline_gh.py
+        run: python _pipeline_gh.py --years-back ${{ inputs.years_back }}
 
       - name: Upload log
         if: always()
