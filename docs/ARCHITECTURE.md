@@ -563,7 +563,7 @@ sequenceDiagram
 
 ## 5. 画面遷移図
 
-> 4画面とその中のタブ構成、遷移ルートを示します。
+> 5画面とその中のタブ構成、遷移ルートを示します。
 
 ```mermaid
 stateDiagram-v2
@@ -628,9 +628,18 @@ stateDiagram-v2
         DBTables    --> DBStats   : 切替
     }
 
+    state Company {
+        direction TB
+        [*] --> CoSearch
+        CoSearch : 🔎 企業検索\ncompany.html\n企業名・証券コードで検索
+        CoDetail : 🏢 企業詳細\n業績 / 財務(BS) / CF タブ\nChart.js 時系列グラフ
+        CoSearch --> CoDetail : 企業選択（/company/{edinet_code}）
+    }
+
     [*]        --> Dashboard  : APP_PASSWORD未設定時\n（開発モード）
     Dashboard  --> Collection : 「収集ページへ」
     Dashboard  --> Analysis   : 「分析ページへ」
+    Dashboard  --> Company    : 「企業を検索して開く」
     Dashboard  --> Models     : 「モデル解説を開く」
     Dashboard  --> DBViewer   : 「DB を開く」
     Collection --> Dashboard  : 「ホーム」
@@ -639,6 +648,7 @@ stateDiagram-v2
     Collection --> Analysis   : 「分析」リンク
     Analysis   --> Collection : 「← データ収集ページへ」リンク
     DBViewer   --> Dashboard  : 「← ホーム」
+    Company    --> Dashboard  : 「ダッシュボード」
 ```
 
 ---
@@ -795,6 +805,8 @@ graph LR
         P4["GET /login\nlogin.html を返す"]
         P5["GET /models\nmodels.html を返す\n（モデル解説・参考文献）"]
         P6["GET /db\ndb.html を返す\n（DBビューア）"]
+        P7["GET /company\ncompany.html を返す\n（企業検索）"]
+        P8["GET /company/{edinet_code}\ncompany.html を返す\n（個別企業の業績・財務・CF可視化）"]
     end
 
     subgraph OPS["🩺 運用"]
@@ -959,6 +971,7 @@ graph TB
 | `login.html` | フロントエンド | 認証ログイン画面（`/login`） | api.py |
 | `models.html` | フロントエンド | モデル解説・参考文献ページ（`/models`）。8モデルの数式・パラメータ・DOIリンクをインラインHTMLで表示。 | — |
 | `db.html` | フロントエンド | DBビューア（`/db`）。4テーブルのスキーマ・プレビュー・統計サマリー・ER 風リレーション・企業ドリルダウン・CSV エクスポート。 | api.py |
+| `company.html` | フロントエンド | 企業詳細（`/company`・`/company/{edinet_code}`）。個別企業の業績・財務(BS)・CF を Chart.js の時系列グラフで可視化。企業名・証券コード検索付き。 | api.py, Chart.js (CDN) |
 | `_pipeline_gh.py` | GitHub Actions | 全件収集パイプライン（full-pipeline.yml から workflow_dispatch 手動起動） | collector.py, database.py |
 | `_pipeline_incremental.py` | GitHub Actions | 差分収集パイプライン（daily-incremental.yml で毎日 JST 03:00 自動実行） | collector.py, database.py |
 | `check.py` | ユーティリティ | EDINET API 疎通確認ワンショット | EDINET API |
@@ -966,5 +979,6 @@ graph TB
 | `ARCHITECTURE.md` | ドキュメント | 本ファイル。コード変更時は必ず更新する | — |
 | `MODELS.md` | ドキュメント | 分析モデルの数式・パラメータ・参考文献（Markdown版）。モデル変更時は `models.html` とセットで更新する。 | — |
 | `FUTURE_TASKS.md` | ドキュメント | 今後実装予定の機能仕様（時系列予測モデルなど） | — |
+| `VISUALIZATION_IMPROVEMENTS.md` | ドキュメント | 企業データ可視化強化の改善案（バフェット・コード型・Chart.js・企業詳細ページ） | — |
 | `VISION.md` | ドキュメント | プロジェクトの目的・方針 | — |
 | `CLAUDE.md` | 設定 | Claude Codeへの動作指示 | — |
