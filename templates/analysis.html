@@ -84,6 +84,8 @@ tr:hover td{background:#1e2235}
 .stat-value{font-size:20px;font-weight:700}
 .info-box{background:#1e2235;border-radius:8px;padding:12px;font-size:12px;color:#94a3b8;border-left:3px solid #7c3aed;line-height:1.6}
 .btn:disabled{opacity:.4;cursor:not-allowed}
+.co-link{color:#a78bfa;text-decoration:none}
+.co-link:hover{text-decoration:underline}
 </style>
 </head>
 <body>
@@ -733,7 +735,7 @@ function renderGap(rows) {
     const gapCls = gap > 0 ? 'gap-positive' : 'gap-negative';
     return `<tr>
       <td><span class="tag tag-blue">${esc(r.sec_code||r.edinet_code)}</span></td>
-      <td style="font-weight:500">${esc(r.company_name)}</td>
+      <td>${r.edinet_code ? `<a href="/company/${esc(r.edinet_code)}" class="co-link" style="font-weight:500">${esc(r.company_name)}</a>` : esc(r.company_name)}</td>
       <td><span class="tag tag-amber" style="font-size:10px">${esc(r.industry||'-')}</span></td>
       <td style="text-align:right;font-family:monospace">${fmt0((r.actual_market_cap||0)/100)}</td>
       <td style="text-align:right;font-family:monospace">${fmt0((r.predicted_market_cap||0)/100)}</td>
@@ -903,7 +905,7 @@ async function runRecommend() {
         <tr>
           <td style="font-weight:700;color:${rankColor};font-size:15px">${Number(r.rank)}</td>
           <td style="color:#38bdf8;font-weight:600">${esc(r.sec_code || '-')}</td>
-          <td style="font-weight:600">${esc(r.company_name)}</td>
+          <td>${r.edinet_code ? `<a href="/company/${esc(r.edinet_code)}" class="co-link" style="font-weight:600">${esc(r.company_name)}</a>` : esc(r.company_name)}</td>
           <td style="color:#94a3b8;font-size:11px">${esc(r.industry || '-')}</td>
           <td style="font-weight:700;color:${scoreColor}">${r.score.toFixed(2)}</td>
           <td>${r.roe != null ? r.roe.toFixed(1) + '%' : '-'}</td>
@@ -1014,7 +1016,7 @@ function renderTotalReturn(d) {
     return `<tr>
       <td style="font-weight:700;color:${rankColor};font-size:15px">${Number(r.rank)}</td>
       <td><span class="tag tag-blue">${esc(r.sec_code||'-')}</span></td>
-      <td style="font-weight:500">${esc(r.name)}</td>
+      <td>${r.edinet_code ? `<a href="/company/${esc(r.edinet_code)}" class="co-link" style="font-weight:500">${esc(r.name)}</a>` : esc(r.name)}</td>
       <td><span class="tag tag-amber" style="font-size:10px">${esc(r.industry||'-')}</span></td>
       <td>${fmtPct(r.total_return_pct, retColor)}</td>
       <td>${fmtPct(r.upside_pct, upColor)}</td>
@@ -1091,7 +1093,7 @@ function renderNetCash() {
     return `<tr>
       <td>${r.rank}</td>
       <td><code style="color:#67e8f9">${esc(r.sec_code || '')}</code></td>
-      <td>${esc(r.company_name || '')}</td>
+      <td>${r.edinet_code ? `<a href="/company/${esc(r.edinet_code)}" class="co-link">${esc(r.company_name || '')}</a>` : esc(r.company_name || '')}</td>
       <td style="color:#94a3b8">${esc(r.industry || '')}</td>
       <td>${r.year ?? '-'}</td>
       <td style="text-align:right;color:${ncColor};font-weight:600">${Number(r.net_cash_oku).toLocaleString()}</td>
@@ -1236,7 +1238,7 @@ function _renderBtTable(rows) {
     return `<tr>
       <td>${r.rank}</td>
       <td><span class="tag tag-blue">${esc(r.sec_code||r.edinet_code)}</span></td>
-      <td style="font-weight:500">${esc(r.company_name)}</td>
+      <td>${r.edinet_code ? `<a href="/company/${esc(r.edinet_code)}" class="co-link" style="font-weight:500">${esc(r.company_name)}</a>` : esc(r.company_name)}</td>
       <td><span class="tag tag-amber" style="font-size:10px">${esc(r.industry||'-')}</span></td>
       <td style="font-family:monospace;color:#a78bfa">${r.score}</td>
       <td style="text-align:right;font-family:monospace">${r.start_price != null ? '&yen;' + Math.round(r.start_price).toLocaleString() : '-'}</td>

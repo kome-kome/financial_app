@@ -105,6 +105,8 @@ body{font-family:'Segoe UI',sans-serif;background:#0f1117;color:#e2e8f0;min-heig
 .empty-msg{padding:32px;text-align:center;color:#64748b;font-size:13px}
 .loading{padding:24px;text-align:center;color:#64748b;font-size:12px}
 .error{padding:12px;background:#450a0a;color:#fca5a5;border-radius:6px;font-size:12px;margin:8px 0}
+.co-link{color:#a78bfa;text-decoration:none}
+.co-link:hover{text-decoration:underline}
 </style>
 </head>
 <body>
@@ -525,8 +527,8 @@ async function loadStats(name){
 async function runDrilldown(){
   const code = document.getElementById('drill-code').value.trim();
   const res  = document.getElementById('drill-result');
-  if(!/^E\d{6}$/.test(code)){
-    res.innerHTML = '<div class="error">EDINETコードは E + 6桁数字（例: E000001）の形式で入力してください</div>';
+  if(!/^E\d{5,6}$/.test(code)){
+    res.innerHTML = '<div class="error">EDINETコードは E + 5桁数字（例: E02167）の形式で入力してください</div>';
     return;
   }
   res.innerHTML = '<div class="loading">読み込み中...</div>';
@@ -535,6 +537,9 @@ async function runDrilldown(){
     if(!d) return;
     const co = d.company;
     res.innerHTML = `
+      <div style="margin-bottom:14px">
+        <a href="/company/${esc(code)}" class="co-link" style="font-weight:600">→ この企業の詳細ページ（グラフ表示）を開く</a>
+      </div>
       <div class="drilldown-section">
         <h3>📋 companies</h3>
         <div class="kv-grid">
