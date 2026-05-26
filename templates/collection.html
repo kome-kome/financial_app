@@ -126,21 +126,16 @@ tr:hover td{background:#1e2235}
     <div class="card"><div class="card-title">API接続</div><div class="card-value" id="s-api" style="font-size:14px;color:#f59e0b">未確認</div></div>
   </div>
 
-  <!-- 自動更新スケジューラー -->
+  <!-- 差分収集（手動実行） -->
   <div class="card" style="border-color:#1e3a5f">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
-      <div class="section-title" style="margin-bottom:0">自動更新スケジューラー</div>
-      <div style="display:flex;align-items:center;gap:10px">
-        <span id="sched-status-badge" style="font-size:11px;padding:3px 10px;border-radius:10px;background:#052e16;color:#86efac">有効</span>
-        <button class="btn btn-secondary btn-sm" onclick="toggleScheduler()" id="btn-sched-toggle">停止する</button>
-      </div>
+      <div class="section-title" style="margin-bottom:0">差分収集（手動実行）</div>
+      <button class="btn btn-primary btn-sm" onclick="runNow()">今すぐ実行</button>
     </div>
-    <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;font-size:12px">
-      <div><div style="color:#64748b;margin-bottom:2px">次回自動実行</div><div id="sched-next" style="color:#38bdf8;font-weight:600">-</div></div>
-      <div><div style="color:#64748b;margin-bottom:2px">前回実行</div><div id="sched-last" style="color:#94a3b8">-</div></div>
-      <div><div style="color:#64748b;margin-bottom:2px">前回結果</div><div id="sched-result" style="color:#94a3b8">-</div></div>
+    <div style="font-size:12px;color:#64748b;line-height:1.6">
+      過去1年・収集済みスキップ＋成長率/Zスコア＋市場・マクロデータを一括更新します。<br>
+      <span style="color:#38bdf8">🔄 自動収集は GitHub Actions（毎日 03:00 JST）で実行されます。</span>
     </div>
-    <div style="margin-top:8px;font-size:11px;color:#475569">毎日 03:00 に差分収集（過去1年・収集済みスキップ）を自動実行します。</div>
   </div>
 
   <!-- スマート収集（推奨） -->
@@ -530,7 +525,7 @@ tr:hover td{background:#1e2235}
     </div>
     <div style="font-size:12px;color:#64748b;margin-bottom:14px">
       USD/JPY・米日10年金利・日経/TOPIX/S&P500・WTI/金 の日次データを取得します。<br>
-      <span style="color:#475569">※ 既存日付は上書き更新。スケジューラON時は毎日3時に自動取得されます。</span>
+      <span style="color:#475569">※ 既存日付は上書き更新。自動取得は GitHub Actions（毎日 03:00 JST）で実行されます。</span>
     </div>
 
     <div class="form-group" style="max-width:280px">
@@ -785,36 +780,6 @@ async function checkApi(){
     document.getElementById('s-api').style.color='#ef4444';
     log('API接続失敗: '+e.message,'error');
   }
-}
-
-// ── スケジューラー ──────────────────────────────────────────────────
-async function loadSchedulerStatus(){
-  try{
-    const d = await apiFetch('/api/scheduler/status');
-    const badge = document.getElementById('sched-status-badge');
-    const toggleBtn = document.getElementById('btn-sched-toggle');
-    if(d.enabled){
-      badge.textContent='有効'; badge.style.background='#052e16'; badge.style.color='#86efac';
-      toggleBtn.textContent='停止する';
-    } else {
-      badge.textContent='停止中'; badge.style.background='#1c0a0a'; badge.style.color='#fca5a5';
-      toggleBtn.textContent='有効にする';
-    }
-    document.getElementById('sched-next').textContent = d.next_run || '-';
-    document.getElementById('sched-last').textContent = d.last_run || '未実行';
-    const result = d.last_status;
-    const resEl = document.getElementById('sched-result');
-    resEl.textContent = result || '-';
-    resEl.style.color = result === '成功' ? '#10b981' : result?.startsWith('エラー') ? '#ef4444' : '#94a3b8';
-  }catch(e){ log('スケジューラー状態取得失敗: '+e.message,'error'); }
-}
-
-async function toggleScheduler(){
-  try{
-    const d = await apiFetch('/api/scheduler/toggle',{method:'POST'});
-    log(d.enabled ? 'スケジューラーを有効にしました' : 'スケジューラーを停止しました', 'info');
-    await loadSchedulerStatus();
-  }catch(e){ log('切替失敗: '+e.message,'error'); }
 }
 
 async function runNow(){
@@ -1936,13 +1901,10 @@ initAuth();
 initLightMode();
 showTab('collect');
 checkApi();
-loadSchedulerStatus();
-const _schedulerTimer = setInterval(loadSchedulerStatus, 30000);  // 30秒ごとに自動更新
 
 // 画面離脱時にタイマー・SSE・debounce タイマーをまとめてクリーンアップ
 // （SPA 的なタブ切替はしていないので beforeunload のみで十分）
 window.addEventListener('beforeunload', () => {
-  clearInterval(_schedulerTimer);
   if (searchTimer) clearTimeout(searchTimer);
   for (const sse of [_smartSSE, _collectSSE, _historySSE, _jqSSE, marketSSE]) {
     if (sse) { try { sse.close(); } catch(_) {} }

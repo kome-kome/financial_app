@@ -1,0 +1,43 @@
+name: Daily Incremental (差分収集・毎日自動実行)
+
+# JST 03:00 = UTC 18:00
+# 差分収集（過去1年・skip_existing）＋成長率/Zスコア＋市場データ＋マクロデータ
+# Render 側には自動収集を持たせない設計。定時自動収集はこのワークフローが担う。
+
+on:
+  schedule:
+    - cron: '0 18 * * *'   # UTC 18:00 = JST 03:00
+  workflow_dispatch:        # 手動トリガーも可
+
+jobs:
+  incremental:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120    # 差分のみなので最大2時間
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13.7'  # render.yaml の PYTHON_VERSION と一致させる
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run incremental pipeline
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          EDINET_API_KEY: ${{ secrets.EDINET_API_KEY }}
+          JQUANTS_API_KEY: ${{ secrets.JQUANTS_API_KEY }}
+        run: python _pipeline_incremental.py
+
+      - name: Upload log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: incremental-log
+          path: pipeline_incremental.log
+          retention-days: 7

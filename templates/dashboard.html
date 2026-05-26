@@ -216,31 +216,25 @@ body{font-family:'Segoe UI',sans-serif;background:#0f1117;color:#e2e8f0;min-heig
     </div>
   </div>
 
-  <!-- スケジューラー状況 -->
-  <div class="section-title">自動更新スケジューラー</div>
+  <!-- 自動収集: GitHub Actions -->
+  <div class="section-title">自動収集</div>
   <div class="scheduler-card">
-    <div style="display:flex;align-items:center;justify-content:space-between">
-      <div style="display:flex;align-items:center;gap:10px">
-        <span class="dot" id="sched-dot" style="background:#f59e0b"></span>
-        <span style="font-size:13px;color:#94a3b8" id="sched-label">確認中...</span>
-      </div>
-      <button onclick="toggleScheduler()" id="sched-toggle-btn"
-        style="padding:5px 14px;background:#1e293b;border:1px solid #334155;border-radius:6px;color:#94a3b8;font-size:12px;cursor:pointer">
-        切り替え
-      </button>
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">
+      <span class="dot dot-green"></span>
+      <span style="font-size:13px;color:#94a3b8">GitHub Actions で毎日 03:00 JST に差分収集を自動実行</span>
     </div>
     <div class="sched-grid">
       <div class="sched-item">
-        <div class="sched-item-label">次回実行予定</div>
-        <div class="sched-item-value" id="sched-next">—</div>
+        <div class="sched-item-label">自動収集スケジュール</div>
+        <div class="sched-item-value" style="color:#38bdf8">毎日 03:00 JST</div>
       </div>
       <div class="sched-item">
-        <div class="sched-item-label">前回実行日時</div>
-        <div class="sched-item-value" id="sched-last">—</div>
+        <div class="sched-item-label">ワークフロー</div>
+        <div class="sched-item-value">daily-incremental.yml</div>
       </div>
       <div class="sched-item">
-        <div class="sched-item-label">前回結果</div>
-        <div class="sched-item-value" id="sched-status">—</div>
+        <div class="sched-item-label">手動差分収集</div>
+        <div class="sched-item-value"><a href="/collection" style="color:#38bdf8;text-decoration:none">収集画面から実行</a></div>
       </div>
     </div>
   </div>
@@ -362,40 +356,6 @@ async function loadStats() {
   }
 }
 
-async function loadScheduler() {
-  try {
-    const d = await apiFetch('/api/scheduler/status');
-    if (!d) return;
-    const dot = document.getElementById('sched-dot');
-    const label = document.getElementById('sched-label');
-    if (d.enabled) {
-      dot.className = 'dot dot-green';
-      label.textContent = '自動更新: 有効（毎日 3:00 に差分収集を実行）';
-    } else {
-      dot.className = 'dot dot-red';
-      label.textContent = '自動更新: 無効';
-    }
-    document.getElementById('sched-next').textContent = d.next_run ?? '—';
-    document.getElementById('sched-last').textContent = d.last_run ?? '（未実行）';
-    const st = d.last_status;
-    const statusEl = document.getElementById('sched-status');
-    if (!st) { statusEl.innerHTML = '<span class="tag tag-gray">未実行</span>'; }
-    else if (st === '成功') { statusEl.innerHTML = '<span class="tag tag-green">成功</span>'; }
-    else if (st === '実行中') { statusEl.innerHTML = '<span class="tag tag-blue">実行中</span>'; }
-    else { statusEl.innerHTML = `<span class="tag tag-amber" title="${esc(st)}">エラー</span>`; }
-  } catch(e) { /* ignore */ }
-}
-
-async function toggleScheduler() {
-  try {
-    await fetch(apiBase() + '/api/scheduler/toggle', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json',
-        ...(localStorage.getItem('auth_token') ? {'Authorization': 'Bearer ' + localStorage.getItem('auth_token')} : {})}
-    });
-    loadScheduler();
-  } catch(e) { showNotif('切り替え失敗: ' + e.message); }
-}
 
 async function initAuth() {
   try {
@@ -409,7 +369,6 @@ async function initAuth() {
 
 initAuth();
 loadStats();
-loadScheduler();
 </script>
 </body>
 </html>

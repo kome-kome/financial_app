@@ -19,14 +19,14 @@
 - 長時間処理は `BackgroundTasks` + SSE 進捗配信（30 秒で HTTP タイムアウト）
 - 環境変数は `render.yaml` の `envVars` に追記し Render ダッシュボードで値を設定
 - 設定変更は GitHub `main` への push で自動デプロイ。ロールバックは Render ダッシュボードから可能
-- **定時スケジューラ (`_daily_scheduler`) は Free プランでは走らない**。15 分アイドルで停止するため、毎日3時に起動している保証がない。代わりに `_startup_catchup` がスピンアップ時に「最終自動収集から 22h 以上経過していたら差分収集を非同期実行」する。新規の定期処理を追加する場合は同じパターン（startup hook + 経過時間判定）で実装すること
-- **scheduler は JST 固定**: `api.py:_now_jst()` ヘルパで Render の OS TZ (UTC) に依存させない。新しい時間帯固定処理 (○時に実行 等) は `datetime.now()` ではなく `_now_jst()` を使うこと
+- **Render 側に自動収集は持たない**。`_daily_scheduler` / `_startup_catchup` は廃止済み。Render は手動収集（UI ボタン / `/api/scheduler/run-now`）のみ。
+- **自動収集はすべて GitHub Actions で実行**:
+  - 差分収集（毎日自動）: `.github/workflows/daily-incremental.yml` が UTC 18:00（JST 03:00）に `_pipeline_incremental.py` を実行
+  - 全件収集（手動）: `.github/workflows/full-pipeline.yml` を `workflow_dispatch` で起動 → `_pipeline_gh.py` が Supabase に直接書き込む
+  - ログは Artifact（7日保存）
 - **時刻系の使い分け（重要）**:
   - **DB 書き込み**は `datetime.utcnow()` で UTC 統一（`Company.created_at` / `FinancialRecord.updated_at` / `CollectionLog.started_at` / `CollectionLog.finished_at` 全て UTC）。同じテーブル内で UTC / JST が混在すると `started_at < finished_at` 等の比較が壊れる。
-  - **スケジューラ判定**（毎日 3 時に実行 等）は `_now_jst()` で JST。
   - **API レスポンスでの表示**は UTC → JST 変換（DB 値を `+ timedelta(hours=9)` で換算）。`/api/stats` の `last_db_update` や `/api/collection-logs` の `started_at` 等が該当。フロントエンドで「JST」と明示する
-- **GitHub Actions keepalive (`.github/workflows/keepalive.yml`)** が JST 2:50-3:10 と業務時間 9-23 JST に `/health` を叩く。月稼働時間は約 475h で Render Free 750h 無料枠内。cron 変更時は枠を超えないか確認
-- **全件収集は GitHub Actions runner で実行**（Render Free の 30秒タイムアウト・512MB メモリでは完走しない）。`.github/workflows/full-pipeline.yml` を `workflow_dispatch` で起動 → `_pipeline_gh.py` が Supabase に直接書き込む。ログは Artifact (`pipeline-log`, 7日保存)。差分収集など軽量処理だけ Render 側の `_startup_catchup` に残す方針
 
 ## GitHub 協調ワークフロー
 
@@ -126,6 +126,8 @@ python check.py                         # EDINET API接続テスト
 | `templates/dashboard.html` | トップページ・ダッシュボード（`/`） |
 | `templates/collection.html` | 収集・スクリーニング画面（`/collection`） |
 | `templates/analysis.html` | 回帰・乖離分析画面（`/analysis`） |
+| `_pipeline_gh.py` | GitHub Actions 用・全件収集パイプライン（workflow_dispatch 手動起動） |
+| `_pipeline_incremental.py` | GitHub Actions 用・差分収集パイプライン（daily-incremental.yml で毎日自動実行） |
 | `check.py` | EDINET API疎通確認用ワンショット |
 | `render.yaml` | Render デプロイ定義（IaC） |
 | `Procfile` | Render の起動コマンド（uvicorn 起動） |

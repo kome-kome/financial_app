@@ -15,14 +15,6 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
 from datetime import date, datetime, timedelta
-from zoneinfo import ZoneInfo
-
-# 自動収集スケジューラは Render の OS TZ (UTC) に依存させず JST 固定で動かす。
-# 表示・比較ともに「JST のナイーブ datetime」で統一する。
-JST = ZoneInfo("Asia/Tokyo")
-
-def _now_jst() -> datetime:
-    return datetime.now(JST).replace(tzinfo=None)
 
 def _utc_to_jst_str(dt: Optional[datetime]) -> Optional[str]:
     """DB に UTC 保存された naive datetime を 'YYYY-MM-DD HH:MM:SS JST' に整形"""
@@ -80,112 +72,6 @@ from collector import run_full_collection, refresh_company, update_market_data, 
 import plugins as plugin_registry
 
 
-SCHEDULER_RUN_HOUR = 3  # 毎日この時刻（サーバーローカル時刻）に自動実行
-
-_scheduler_status: dict = {
-    # AUTO_COLLECT_ENABLED=false で起動時から無効化できる（GitHub Actions 全件収集中など）
-    "enabled":     os.environ.get("AUTO_COLLECT_ENABLED", "true").lower() not in ("false", "0", "no"),
-    "next_run":    None,
-    "last_run":    None,
-    "last_status": None,
-}
-
-async def _daily_scheduler():
-    """毎日指定時刻 (JST) に差分収集＋株価更新を自動実行するバックグラウンドタスク"""
-    while True:
-        now      = _now_jst()
-        next_run = now.replace(hour=SCHEDULER_RUN_HOUR, minute=0, second=0, microsecond=0)
-        if next_run <= now:
-            next_run += timedelta(days=1)
-        _scheduler_status["next_run"] = next_run.strftime("%Y-%m-%d %H:%M JST")
-
-        await asyncio.sleep((next_run - _now_jst()).total_seconds())
-
-        if not _scheduler_status["enabled"]:
-            continue
-
-        if _job_status["running"]:
-            _scheduler_status["last_status"] = "スキップ（手動収集が実行中）"
-            continue
-
-        _scheduler_status["last_run"]    = _now_jst().strftime("%Y-%m-%d %H:%M JST")
-        _scheduler_status["last_status"] = "実行中"
-        _job_status.update({"running": True, "log": [], "progress": 0, "job_type": "incremental"})
-        try:
-            await run_full_collection(years_back=1, skip_existing=True)
-            db = SessionLocal()
-            calc_growth_rates(db)
-            calc_zscore_normalization(db)
-            db.close()
-            await update_market_data()
-            # マクロデータ（為替・金利・指数・コモディティ）も毎日更新
-            db2 = SessionLocal()
-            try:
-                await collect_macro_data(db2, years_back=5)
-            finally:
-                db2.close()
-            _scheduler_status["last_status"] = "成功"
-        except Exception as e:
-            log.error("スケジューラーエラー: %s", e, exc_info=True)
-            _scheduler_status["last_status"] = "エラー（詳細はサーバーログを確認）"
-        finally:
-            _job_status["running"] = False
-
-# ── 起動時キャッチアップ（Render Free スピンダウン対策） ─────────────────────
-# Render Free プランは 15 分アイドルで停止するため _daily_scheduler が固定時刻
-# (毎日3時) に走っている保証がない。ユーザーアクセスでスピンアップしたタイミングで
-# 「最終自動収集から STARTUP_CATCHUP_HOURS 以上経過していたら差分収集を走らせる」。
-STARTUP_CATCHUP_HOURS = 22
-
-async def _startup_catchup():
-    """起動時に最終自動収集からの経過時間を見て、必要なら差分収集を非同期実行する。"""
-    await asyncio.sleep(5)  # init_db / 他の初期化が落ち着くまで待つ
-
-    if not _scheduler_status["enabled"]:
-        log.info("起動時キャッチアップ: スケジューラ無効のためスキップ")
-        return
-    if _job_status["running"] or _market_status["running"] or _macro_status["running"]:
-        log.info("起動時キャッチアップ: 他ジョブ実行中のためスキップ")
-        return
-
-    last_run_str = _scheduler_status.get("last_run", "") or ""
-    if last_run_str:
-        try:
-            # "YYYY-MM-DD HH:MM" 部分のみ取り出して JST naive として比較
-            last_run_dt = datetime.strptime(last_run_str[:16], "%Y-%m-%d %H:%M")
-            hours_since = (_now_jst() - last_run_dt).total_seconds() / 3600
-            if hours_since < STARTUP_CATCHUP_HOURS:
-                log.info("起動時キャッチアップ: 直近 %.1fh 内に実行済み、スキップ", hours_since)
-                return
-        except ValueError:
-            pass
-
-    log.info("起動時キャッチアップ開始（Render スピンダウン対策）")
-    _scheduler_status["last_run"]    = _now_jst().strftime("%Y-%m-%d %H:%M JST") + "（起動時キャッチアップ）"
-    _scheduler_status["last_status"] = "実行中（起動時キャッチアップ）"
-    _job_status.update({"running": True, "log": [], "progress": 0, "job_type": "startup_catchup"})
-    try:
-        await run_full_collection(years_back=1, skip_existing=True)
-        db = SessionLocal()
-        try:
-            calc_growth_rates(db)
-            calc_zscore_normalization(db)
-        finally:
-            db.close()
-        await update_market_data()
-        db2 = SessionLocal()
-        try:
-            await collect_macro_data(db2, years_back=5)
-        finally:
-            db2.close()
-        _scheduler_status["last_status"] = "成功（起動時キャッチアップ）"
-        log.info("起動時キャッチアップ完了")
-    except Exception as e:
-        log.error("起動時キャッチアップエラー: %s", e, exc_info=True)
-        _scheduler_status["last_status"] = "エラー（起動時キャッチアップ・詳細はサーバーログ）"
-    finally:
-        _job_status["running"] = False
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
@@ -202,16 +88,7 @@ async def lifespan(app: FastAPI):
             log.warning("起動時に %d 件のスタックジョブを error にリセットしました", len(stuck))
     finally:
         db.close()
-    scheduler_task = asyncio.create_task(_daily_scheduler())
-    catchup_task   = asyncio.create_task(_startup_catchup())
     yield
-    scheduler_task.cancel()
-    catchup_task.cancel()
-    for t in (scheduler_task, catchup_task):
-        try:
-            await t
-        except asyncio.CancelledError:
-            pass
 
 app = FastAPI(title="EDINET Financial API", version="2.0", lifespan=lifespan)
 
@@ -494,18 +371,9 @@ async def start_smart_collection(
     background_tasks.add_task(_run_smart_collection_bg, log_obj.id, req.years_back)
     return {"message": "スマート収集ジョブを開始しました", "log_id": log_obj.id}
 
-@app.get("/api/scheduler/status")
-async def get_scheduler_status():
-    return _scheduler_status
-
-@app.post("/api/scheduler/toggle")
-async def toggle_scheduler():
-    _scheduler_status["enabled"] = not _scheduler_status["enabled"]
-    return {"enabled": _scheduler_status["enabled"]}
-
 @app.post("/api/scheduler/run-now")
 async def scheduler_run_now(background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
-    """スケジューラーと同じ差分収集を即時実行"""
+    """手動差分収集: 過去1年・収集済みスキップ＋成長率/Zスコア＋市場・マクロ更新"""
     if _job_status["running"]:
         raise HTTPException(400, "収集ジョブが既に実行中です")
     log_obj = CollectionLog(job_type="incremental", status="running")

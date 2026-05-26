@@ -51,7 +51,7 @@ graph LR
 
     subgraph RENDER["☁️ Render（軽量モード RENDER_LIGHT_MODE=true）"]
         direction TB
-        API_R["⚡ api.py\n・差分収集のみ許可\n・全件収集はブロック（403）\n・株価履歴・J-Quantsはブロック（403）\n・スクリーニング・分析は通常通り\n・startup_catchup（差分・自動）"]
+        API_R["⚡ api.py\n・差分収集のみ許可\n・全件収集はブロック（403）\n・株価履歴・J-Quantsはブロック（403）\n・スクリーニング・分析は通常通り\n・自動収集なし（手動のみ）"]
         COL_R["🔄 collector.py\n差分収集・市場データ更新"]
     end
 
@@ -101,7 +101,7 @@ graph TD
         C3["株価履歴収集\n日次OHLCVを保存"]
         C4["収集を途中で停止"]
         C5["個別企業の再取得"]
-        C6["自動スケジューラーの\nON/OFF切替"]
+        C6["手動差分収集\n過去1年・skip_existing"]
         C7["マクロデータ収集\n為替・金利・指数・コモディティ"]
     end
 
@@ -852,10 +852,8 @@ graph LR
         MA2["GET /api/macro/data/{series_code}\n指定系列の日次データ（OHLCV）"]
     end
 
-    subgraph SCHED["⏰ スケジューラー /api/scheduler/"]
-        SC1["GET /api/scheduler/status\n次回実行時刻・前回結果"]
-        SC2["POST /api/scheduler/toggle\nON/OFF切替"]
-        SC3["POST /api/scheduler/run-now\n即時差分収集を実行"]
+    subgraph SCHED["🖱️ 手動差分収集 /api/scheduler/"]
+        SC3["POST /api/scheduler/run-now\n差分収集を手動実行\n（過去1年・skip_existing）"]
     end
 
     subgraph ANALYSIS["📊 分析 /api/"]
@@ -932,7 +930,7 @@ graph TB
     style ENV fill:#1c1400,color:#fcd34d
     style YAML fill:#1c1400,color:#fcd34d
 
-    note1["📌 Render Free 制約\n・15分アイドルでスピンダウン\n（深夜の自動収集には外部 ping or 有料プラン）\n・SSH 不可 → ログは Render ダッシュボードのみ\n・永続ディスクなし → 永続化は Supabase のみ"]
+    note1["📌 Render Free 制約\n・15分アイドルでスピンダウン\n（自動収集は GitHub Actions が担うため問題なし）\n・SSH 不可 → ログは Render ダッシュボードのみ\n・永続ディスクなし → 永続化は Supabase のみ"]
     style note1 fill:#0c1a3a,color:#93c5fd
 ```
 
@@ -942,7 +940,7 @@ graph TB
 
 | ファイル | 種別 | 役割 | 主な依存先 |
 |---|---|---|---|
-| `api.py` | バックエンド | REST API窓口・認証・SSE・スケジューラー | database.py, collector.py, plugins/ |
+| `api.py` | バックエンド | REST API窓口・認証・SSE・手動収集トリガー（自動収集は GitHub Actions が担当） | database.py, collector.py, plugins/ |
 | `database.py` | バックエンド | DBテーブル定義・upsert・成長率/Zスコア計算。6テーブル（Company / FinancialRecord / StockPriceHistory / MacroData / CollectionLog / XbrlRawDocument）。`pack_elements`/`unpack_elements`/`upsert_xbrl_raw` ヘルパを含む | PostgreSQL |
 | `collector.py` | バックエンド | EDINET/stooq/JPX/マクロデータからデータ収集→DB保存。`MACRO_SERIES` で為替・金利・指数・コモディティ9系列を定義 | EDINET API, stooq, JPX |
 | `checker.py` | バックエンド | データ品質チェック（NULL率・外れ値・収録状況） | database.py |
@@ -961,6 +959,8 @@ graph TB
 | `login.html` | フロントエンド | 認証ログイン画面（`/login`） | api.py |
 | `models.html` | フロントエンド | モデル解説・参考文献ページ（`/models`）。8モデルの数式・パラメータ・DOIリンクをインラインHTMLで表示。 | — |
 | `db.html` | フロントエンド | DBビューア（`/db`）。4テーブルのスキーマ・プレビュー・統計サマリー・ER 風リレーション・企業ドリルダウン・CSV エクスポート。 | api.py |
+| `_pipeline_gh.py` | GitHub Actions | 全件収集パイプライン（full-pipeline.yml から workflow_dispatch 手動起動） | collector.py, database.py |
+| `_pipeline_incremental.py` | GitHub Actions | 差分収集パイプライン（daily-incremental.yml で毎日 JST 03:00 自動実行） | collector.py, database.py |
 | `check.py` | ユーティリティ | EDINET API 疎通確認ワンショット | EDINET API |
 | `.env` | 設定 | APIキー・DB接続・認証情報（UTF-8 BOMなし） | — |
 | `ARCHITECTURE.md` | ドキュメント | 本ファイル。コード変更時は必ず更新する | — |
