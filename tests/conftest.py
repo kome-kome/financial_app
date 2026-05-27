@@ -11,6 +11,7 @@ import sys
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
 
 # プロジェクトルートを import パスに追加（database / plugins を import するため）
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -20,8 +21,17 @@ from database import Base, Company, FinancialRecord, StockPriceHistory  # noqa: 
 
 @pytest.fixture
 def db():
-    """各テスト独立の in-memory SQLite Session。"""
-    engine = create_engine("sqlite:///:memory:")
+    """各テスト独立の in-memory SQLite Session。
+
+    StaticPool + check_same_thread=False により、FastAPI TestClient が
+    エンドポイントを別スレッド（anyio portal）で実行しても同一の in-memory DB を
+    共有できる（接続を 1 本に固定）。
+    """
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
     Base.metadata.create_all(bind=engine)
     Session = sessionmaker(bind=engine, autoflush=False, autocommit=False)
     session = Session()

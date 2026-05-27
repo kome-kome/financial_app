@@ -968,7 +968,7 @@ graph TB
 | `plugins/price_predictor.py` | バックエンド | 株価リターン予測（価格×財務特徴量OLS・月次WFV） | plugins/utils.py |
 | `plugins/net_cash_analysis.py` | バックエンド | ネットキャッシュ分析（清原達郎『わが投資術』式）。NC = 流動資産 + 投資有価証券×0.7 − 総負債 | database.py |
 | `plugins/utils.py` | バックエンド | ols()・normalize()・winsorize()・walk_forward_cv()・walk_forward_cv_monthly() | — |
-| `tests/` | テスト | pytest 回帰テスト（165件）。プラグイン7個＋utils＋`database.py`（upsert・年度別Zスコア）＋`collector.py`（XBRLパース・派生指標）＋`api.py`（純関数・DB不要エンドポイント）をカバー。純粋関数＋in-memory SQLite fixture／FastAPI TestClient で検証。共通 fixture は `tests/conftest.py`（`db`/`make_fin` 等） | pytest, sqlalchemy, fastapi |
+| `tests/` | テスト | pytest 回帰テスト（188件）。プラグイン7個＋utils＋`database.py`（upsert・年度別Zスコア）＋`collector.py`（XBRLパース・派生指標＋ネットワーク取得を httpx MockTransport でモック）＋`api.py`（純関数・`/health`・DB-backed 読取エンドポイント）をカバー。in-memory SQLite fixture（StaticPool）／FastAPI TestClient／httpx MockTransport で検証。共通 fixture は `tests/conftest.py`（`db`/`make_fin` 等） | pytest, sqlalchemy, fastapi, httpx |
 | `requirements-dev.txt` | 設定 | 開発・テスト専用依存（`pytest`）。本番 `requirements.txt` と分離（Render メモリ節約） | — |
 | `dashboard.html` | フロントエンド | トップページ・全体サマリー（`/`） | api.py |
 | `collection.html` | フロントエンド | 収集管理・スクリーニング・DBブラウザ（`/collection`） | api.py |
