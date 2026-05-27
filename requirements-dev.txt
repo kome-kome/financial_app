@@ -1,0 +1,3 @@
+# 開発・テスト専用の依存（Render 本番には入れない＝メモリ節約のため requirements.txt と分離）
+# インストール: pip install -r requirements.txt -r requirements-dev.txt
+pytest==9.0.3
