@@ -859,17 +859,152 @@ async def collect_stock_price_history_jquants(
     return {"cancelled": False, "upserted": upserted_total, "days": total}
 
 
-def update_market_data_from_history(db) -> int:
-    """stock_price_history の最新終値を financial_records.stock_price に反映する。
+def update_market_data_from_history(db, point_in_time: bool = False) -> int:
+    """stock_price_history の終値を financial_records.stock_price に反映する。
     stooq が GitHub Actions IP でブロックされる問題を回避するため、
     J-Quants 由来の stock_price_history を使ってバリュエーション指標を計算する。
+
+    point_in_time=False（デフォルト・日次差分向け）:
+        各社の最新レコードのみ、最新株価で更新する。高速。
+    point_in_time=True（全件収集 finalize 向け）:
+        全財務レコードを period_end 最近傍の株価で更新する。
+        J-Quants カバレッジ外（データなし）のレコードはスキップし既存値を保持する。
+        最新レコードは常に最新株価で上書きする。
+
     戻り値: 更新した財務レコード数
     """
-    from database import StockPriceHistory, FinancialRecord, Company
-
-    # 企業ごとに最新 trade_date の close を取得
+    from database import StockPriceHistory, FinancialRecord
     from sqlalchemy import func as sqlfunc
-    subq = (
+
+    if not point_in_time:
+        # ── 最新レコードのみ・最新株価 ─────────────────────────────────────
+        subq = (
+            db.query(
+                StockPriceHistory.edinet_code,
+                sqlfunc.max(StockPriceHistory.trade_date).label("max_date"),
+            )
+            .group_by(StockPriceHistory.edinet_code)
+            .subquery()
+        )
+        latest_prices = (
+            db.query(StockPriceHistory.edinet_code, StockPriceHistory.close)
+            .join(
+                subq,
+                (StockPriceHistory.edinet_code == subq.c.edinet_code)
+                & (StockPriceHistory.trade_date == subq.c.max_date),
+            )
+            .all()
+        )
+
+        updated = 0
+        for edinet_code, price in latest_prices:
+            if price is None or price <= 0:
+                continue
+            latest = (
+                db.query(FinancialRecord)
+                .filter_by(edinet_code=edinet_code)
+                .order_by(FinancialRecord.year.desc())
+                .first()
+            )
+            if not latest:
+                continue
+            _apply_price_to_record(latest, price)
+            updated += 1
+            if updated % 200 == 0:
+                db.commit()
+
+        db.commit()
+        log.info(f"update_market_data_from_history: {updated}社を更新")
+        return updated
+
+    # ── point_in_time=True: 全レコードを period_end 近傍の株価で更新 ─────────
+    # メモリに全 stock_price_history を読み込んで edinet_code 別に整理する
+    all_rows = db.query(
+        StockPriceHistory.edinet_code,
+        StockPriceHistory.trade_date,
+        StockPriceHistory.close,
+    ).all()
+
+    if not all_rows:
+        log.info("update_market_data_from_history(point_in_time): stock_price_history が空のためスキップ")
+        return 0
+
+    # {edinet_code: sorted list of (trade_date_str, close)}
+    from collections import defaultdict
+    history: dict = defaultdict(list)
+    for ec, td, cl in all_rows:
+        if cl and cl > 0:
+            history[ec].append((td, cl))
+    for ec in history:
+        history[ec].sort()  # trade_date の昇順
+
+    MAX_GAP_DAYS = 30  # period_end から±30日以内の株価のみ採用
+
+    all_records = db.query(FinancialRecord).all()
+    updated = 0
+    for rec in all_records:
+        prices = history.get(rec.edinet_code)
+        if not prices:
+            continue
+        if not rec.period_end:
+            continue
+
+        # period_end を date に変換（"YYYY-MM-DD" 形式を前提）
+        try:
+            target = date.fromisoformat(rec.period_end[:10])
+        except (ValueError, TypeError):
+            continue
+
+        # 最近傍の trade_date を二分探索
+        dates = [p[0] for p in prices]
+        pos = _bisect_left(dates, target.isoformat())
+        best_price = None
+        best_gap = MAX_GAP_DAYS + 1
+
+        for idx in (pos - 1, pos):
+            if 0 <= idx < len(prices):
+                td_str, cl = prices[idx]
+                try:
+                    td = date.fromisoformat(td_str[:10])
+                except ValueError:
+                    continue
+                gap = abs((td - target).days)
+                if gap < best_gap:
+                    best_gap = gap
+                    best_price = cl
+
+        if best_price is None:
+            continue
+
+        _apply_price_to_record(rec, best_price)
+        updated += 1
+        if updated % 200 == 0:
+            db.commit()
+
+    # 最新レコードは最新株価で上書き（スクリーニング用の現在株価を保証）
+    latest_rows = (
+        db.query(
+            StockPriceHistory.edinet_code,
+            StockPriceHistory.close,
+        )
+        .join(
+            db.query(
+                StockPriceHistory.edinet_code,
+                sqlfunc.max(StockPriceHistory.trade_date).label("max_date"),
+            )
+            .group_by(StockPriceHistory.edinet_code)
+            .subquery(),
+            (StockPriceHistory.edinet_code ==
+             db.query(
+                 StockPriceHistory.edinet_code,
+                 sqlfunc.max(StockPriceHistory.trade_date).label("max_date"),
+             ).group_by(StockPriceHistory.edinet_code).subquery().c.edinet_code),
+        )
+        .all()
+    )
+
+    # 最新株価の上書き処理（サブクエリ再利用）
+    subq2 = (
         db.query(
             StockPriceHistory.edinet_code,
             sqlfunc.max(StockPriceHistory.trade_date).label("max_date"),
@@ -877,52 +1012,62 @@ def update_market_data_from_history(db) -> int:
         .group_by(StockPriceHistory.edinet_code)
         .subquery()
     )
-    latest_prices = (
+    for ec, price in (
         db.query(StockPriceHistory.edinet_code, StockPriceHistory.close)
         .join(
-            subq,
-            (StockPriceHistory.edinet_code == subq.c.edinet_code)
-            & (StockPriceHistory.trade_date == subq.c.max_date),
+            subq2,
+            (StockPriceHistory.edinet_code == subq2.c.edinet_code)
+            & (StockPriceHistory.trade_date == subq2.c.max_date),
         )
         .all()
-    )
-
-    updated = 0
-    for edinet_code, price in latest_prices:
+    ):
         if price is None or price <= 0:
             continue
         latest = (
             db.query(FinancialRecord)
-            .filter_by(edinet_code=edinet_code)
+            .filter_by(edinet_code=ec)
             .order_by(FinancialRecord.year.desc())
             .first()
         )
-        if not latest:
-            continue
-
-        latest.stock_price = price
-        if latest.pl_eps and latest.pl_eps > 0:
-            latest.per = round(price / latest.pl_eps, 2)
-        if latest.bs_bps and latest.bs_bps > 0:
-            latest.pbr = round(price / latest.bs_bps, 2)
-        if (latest.bs_bps and latest.bs_bps > 0
-                and latest.bs_total_equity and latest.bs_total_equity > 0):
-            shares = latest.bs_total_equity / latest.bs_bps
-            latest.market_cap = round(price * shares / 1_000_000, 2)
-        if latest.dps and latest.dps > 0 and price > 0:
-            latest.div_yield = round(latest.dps / price * 100, 2)
-        if (latest.net_cash is not None
-                and latest.market_cap and latest.market_cap > 0):
-            latest.nc_ratio = round(
-                latest.net_cash / (latest.market_cap * 1_000_000), 4
-            )
-        updated += 1
-        if updated % 200 == 0:
-            db.commit()
+        if latest:
+            _apply_price_to_record(latest, price)
 
     db.commit()
-    log.info(f"update_market_data_from_history: {updated}社を更新")
+    log.info(f"update_market_data_from_history(point_in_time): {updated}レコードを更新")
     return updated
+
+
+def _apply_price_to_record(rec, price: float) -> None:
+    """財務レコードに株価・バリュエーション指標を書き込む（内部ヘルパー）"""
+    rec.stock_price = price
+    if rec.pl_eps and rec.pl_eps > 0:
+        rec.per = round(price / rec.pl_eps, 2)
+    if rec.bs_bps and rec.bs_bps > 0:
+        rec.pbr = round(price / rec.bs_bps, 2)
+    if (rec.bs_bps and rec.bs_bps > 0
+            and rec.bs_total_equity and rec.bs_total_equity > 0):
+        shares = rec.bs_total_equity / rec.bs_bps
+        rec.market_cap = round(price * shares / 1_000_000, 2)
+    if rec.dps and rec.dps > 0 and price > 0:
+        rec.div_yield = round(rec.dps / price * 100, 2)
+    if (rec.net_cash is not None
+            and rec.market_cap and rec.market_cap > 0):
+        rec.nc_ratio = round(
+            rec.net_cash / (rec.market_cap * 1_000_000), 4
+        )
+
+
+def _bisect_left(sorted_list: list, value: str) -> int:
+    """文字列リストの bisect_left（stdlib bisect と同等）"""
+    lo, hi = 0, len(sorted_list)
+    while lo < hi:
+        mid = (lo + hi) // 2
+        if sorted_list[mid] < value:
+            lo = mid + 1
+        else:
+            hi = mid
+    return lo
+
 
 
 async def update_market_data(max_companies: Optional[int] = None,

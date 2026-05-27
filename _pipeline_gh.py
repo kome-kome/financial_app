@@ -122,16 +122,19 @@ async def main(years_back: int, collect_only: bool = False, finalize_only: bool 
 
         # ─── Phase 5: 市場データ更新（J-Quants → stock_price_history → financial_records）
         # stooq は GitHub Actions の Azure IP からブロックされるため J-Quants を使用。
-        log("[5/5] 市場データ更新 開始（J-Quants → stock_price_history → financial_records）")
+        # days_back=180（6ヶ月）でゴールデンウィーク等の長期連休と2025年3月期決算の
+        # period_end 近傍株価を取得する。point_in_time=True で全財務レコードに
+        # period_end 最近傍株価を設定し、最新レコードは現在株価で上書きする。
+        log("[5/5] 市場データ更新 開始（J-Quants days_back=180, point_in_time=True）")
         db5 = SessionLocal()
         try:
             result = await collect_stock_price_history_jquants(
-                db5, days_back=14,
-                on_progress=lambda c, t, m: log(m) if c % 3 == 0 or "完了" in m else None,
+                db5, days_back=180,
+                on_progress=lambda c, t, m: log(m) if c % 10 == 0 or "完了" in m else None,
             )
             log(f"  stock_price_history: {result.get('upserted', 0)}件 upsert")
-            n_updated = update_market_data_from_history(db5)
-            log(f"  financial_records.stock_price: {n_updated}社 更新")
+            n_updated = update_market_data_from_history(db5, point_in_time=True)
+            log(f"  financial_records.stock_price: {n_updated}レコード 更新")
         finally:
             db5.close()
         log(f"[5/5] 市場データ 完了 ({(time.time()-t0)/60:.1f}分経過)")
