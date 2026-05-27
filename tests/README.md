@@ -5,6 +5,13 @@
 
 ## 実行方法
 
+テスト実行には本番依存（numpy/scipy/statsmodels 等）に加え `pytest` が必要。
+`pytest` は本番には載せないため `requirements-dev.txt` に分離している。
+
+```bash
+pip install -r requirements.txt -r requirements-dev.txt
+```
+
 ### Windows（プロジェクトの venv）
 ```powershell
 .\venv\Scripts\python.exe -m pytest tests/ -v
@@ -19,19 +26,33 @@ python -m pytest tests/ -v
 
 | ファイル | 対象 | 外部依存 |
 |---|---|---|
+| `conftest.py` | 共通 fixture（in-memory SQLite の `db` セッション・データファクトリ `make_fin`/`make_company`/`make_price`） | sqlalchemy |
 | `test_utils.py` | `plugins/utils.py`（OLS・winsorize・kfold/walk-forward CV・統計診断） | numpy / scipy / statsmodels |
+| `test_net_cash_analysis.py` | `plugins/net_cash_analysis.py`（清原式ネットキャッシュ計算） | なし（純関数） |
+| `test_recommend.py` | `plugins/recommend.py`（Zスコア重み付けスコアリング） | SQLite fixture |
+| `test_gap_analysis.py` | `plugins/gap_analysis.py`（AR(1) 半減期推定・乖離分析） | statsmodels / SQLite fixture |
+| `test_sector_ols.py` | `plugins/sector_ols.py`（業種別OLS回帰・予測値書き込み） | numpy / SQLite fixture |
+| `test_total_return.py` | `plugins/total_return.py`（per-share OLS 総合リターン） | numpy / SQLite fixture |
+| `test_price_predictor.py` | `plugins/price_predictor.py`（価格特徴量・N日先リターン予測） | numpy / SQLite fixture |
 
 ## 設計方針
 
-- **純関数を優先してテスト対象に**: DB やネットワークに依存するコード（`api.py`/`collector.py`/`database.py`）は今のところテスト対象外。フィクスチャ整備を要する。
+- **2 層構成**:
+  - *純粋関数・定数テスト* — DB 不要。スコア式・AR(1) 推定・価格特徴量・MECE/次元整合性の定数を直接検証。
+  - *execute() 挙動テスト* — `conftest.py` の in-memory SQLite fixture（`db`）に合成データを投入し、
+    ランキング順・カバレッジフィルタ・予測値書き込み・`ValueError` ガード（空DB/サンプル不足）を検証。
+- **本番コードは無改変**: プラグインのロジックを抽出・変更せず、`execute()` を `asyncio.run()` で直接呼ぶ
+  （`execute()` は async だが内部に実 I/O await が無いため pytest-asyncio は不要）。
+- **SQLite fixture の注意**: `init_db()` は Postgres 専用 SQL（gin / DOUBLE PRECISION）を含むため呼ばず、
+  `Base.metadata.create_all()` でテーブル生成する。モデルは SQLite 互換の型のみ。
 - **科学計算ライブラリは利用可**: VISION.md「サードパーティーライブラリ採用基準」に従い、numpy / scipy / statsmodels / scikit-learn は利用許可（requirements.txt 参照）。
 - **回帰検出を優先**: 「OLS の数値安定性」「winsorize が p1-p99 を切る」等の CLAUDE.md に明記された制約を担保する。
-- **scipy 参照値との一致検証**: p 値計算は `scipy.stats.t.sf` の値と一致することをテストで担保（旧 Pure Python 近似からの移行）。
 
 ## 将来の拡張候補
 
 - `test_database.py`: SQLite in-memory で `upsert_financial`・`calc_growth_rates`・`calc_zscore_normalization` を検証
-- `test_plugins.py`: 各プラグインの `params_schema` / `execute` の境界値チェック（モック DB）
 - `test_api.py`: `httpx.AsyncClient` で主要エンドポイントの 200/401/404 を検証
+
+> プラグイン 7 個（utils 含む）は本セッションで全てテスト追加済み。残る穴は `database.py` / `api.py` / `collector.py`。
 
 これらは `docs/IMPROVEMENTS.md` で追跡する。

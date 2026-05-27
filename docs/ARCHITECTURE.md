@@ -968,6 +968,8 @@ graph TB
 | `plugins/price_predictor.py` | バックエンド | 株価リターン予測（価格×財務特徴量OLS・月次WFV） | plugins/utils.py |
 | `plugins/net_cash_analysis.py` | バックエンド | ネットキャッシュ分析（清原達郎『わが投資術』式）。NC = 流動資産 + 投資有価証券×0.7 − 総負債 | database.py |
 | `plugins/utils.py` | バックエンド | ols()・normalize()・winsorize()・walk_forward_cv()・walk_forward_cv_monthly() | — |
+| `tests/` | テスト | pytest 回帰テスト。プラグイン7個＋utils をカバー（純粋関数＋in-memory SQLite fixture で `execute()` を検証）。共通 fixture は `tests/conftest.py`（`db`/`make_fin` 等） | pytest, sqlalchemy |
+| `requirements-dev.txt` | 設定 | 開発・テスト専用依存（`pytest`）。本番 `requirements.txt` と分離（Render メモリ節約） | — |
 | `dashboard.html` | フロントエンド | トップページ・全体サマリー（`/`） | api.py |
 | `collection.html` | フロントエンド | 収集管理・スクリーニング・DBブラウザ（`/collection`） | api.py |
 | `analysis.html` | フロントエンド | 回帰分析・乖離分析・プラグイン（`/analysis`）。乖離分析タブに横断分布（理論vs実績の散布図・乖離率ヒストグラム）を Chart.js で表示 | api.py, Chart.js (CDN) |
