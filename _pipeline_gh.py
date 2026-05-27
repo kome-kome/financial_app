@@ -7,10 +7,8 @@ SKIP_XBRL_RAW=true（デフォルト）の運用前提:
 - reparse_from_raw は使用しない
 
 --years-back N で収集年数を指定（デフォルト 5）。
-6時間タイムアウト対策として years-back=1 を複数回実行する使い方を推奨:
-  1回目: --years-back 1  (直近1年、~4,000件、~4h で完了見込み)
-  2回目: --years-back 2  (直近2年、2回目はスキップで ~3,700件追加、~3.5h)
-  3回目: --years-back 5  (全期間、残余を収集)
+--collect-only: Phase 1-2 のみ実行（XBRL収集）。チェーン実行の収集ステップ用。
+--finalize-only: Phase 3-5 のみ実行（成長率/Zスコア/マクロ/市場）。チェーン実行の集計ステップ用。
 """
 import argparse, asyncio, sys, time
 from datetime import datetime
@@ -19,7 +17,10 @@ load_dotenv()
 
 from sqlalchemy.exc import InternalError, OperationalError
 
-from collector import run_full_collection, update_market_data, collect_macro_data, reparse_from_raw, SKIP_XBRL_RAW
+from collector import (
+    run_full_collection, update_market_data, collect_macro_data, reparse_from_raw,
+    collect_stock_price_history_jquants, update_market_data_from_history, SKIP_XBRL_RAW,
+)
 from database import SessionLocal, init_db, calc_growth_rates, calc_zscore_normalization
 
 LOG_FILE = "pipeline_gh.log"
@@ -51,77 +52,92 @@ async def _run_with_retry(coro_factory, label: str,
             log(f"[{label}] ReadOnly エラー検出 (attempt {attempt+1}/{max_retry+1}) — {wait_sec}秒待機して再試行: {e.__class__.__name__}")
             await asyncio.sleep(wait_sec)
 
-async def main(years_back: int):
+async def main(years_back: int, collect_only: bool = False, finalize_only: bool = False):
     t0 = time.time()
     log("=" * 60)
-    log(f"GitHub Actions パイプライン 開始 (years_back={years_back})")
+    mode = "collect-only" if collect_only else "finalize-only" if finalize_only else "full"
+    log(f"GitHub Actions パイプライン 開始 (years_back={years_back}, mode={mode})")
     log("=" * 60)
 
     log("[init] init_db() でスキーマ冪等マイグレーションを実行")
     init_db()
 
-    # ─── Phase 1: XBRL 収集（financial_records.doc_id でスキップ）──────────
-    # SKIP_XBRL_RAW=true（デフォルト）のため xbrl_raw_documents は使わない。
-    # skip_existing=True で financial_records に収録済みの doc_id をスキップする。
-    log(f"[1/5] XBRL 収集 開始（skip_existing=True, years_back={years_back}）")
-    cancelled = await _run_with_retry(
-        lambda: run_full_collection(
-            years_back=years_back,
-            skip_existing=True,       # financial_records.doc_id でスキップ
-            skip_if_raw_exists=False, # xbrl_raw_documents は使わない（常に空）
-            on_progress=lambda c, t, m: log(m) if c % 50 == 0 or "[完了]" in m or "[企業マスタ" in m else None,
-        ),
-        label="1/5",
-    )
-    if cancelled:
-        log("[1/5] 収集が停止されました")
-        return
-    log(f"[1/5] XBRL 収集 完了 ({(time.time()-t0)/60:.1f}分経過)")
-
-    # ─── Phase 2: raw 再解析（SKIP_XBRL_RAW=true の場合は省略）─────────────
-    if SKIP_XBRL_RAW:
-        log("[2/5] reparse_from_raw 省略（SKIP_XBRL_RAW=true）")
-    else:
-        log("[2/5] reparse_from_raw 開始（全 xbrl_raw_documents → financial_records）")
-        await _run_with_retry(
-            lambda: reparse_from_raw(
-                on_progress=lambda c, t, m: log(m) if c % 200 == 0 or "完了" in m else None,
+    if not finalize_only:
+        # ─── Phase 1: XBRL 収集（financial_records.doc_id でスキップ）──────────
+        # SKIP_XBRL_RAW=true（デフォルト）のため xbrl_raw_documents は使わない。
+        # skip_existing=True で financial_records に収録済みの doc_id をスキップする。
+        log(f"[1/5] XBRL 収集 開始（skip_existing=True, years_back={years_back}）")
+        cancelled = await _run_with_retry(
+            lambda: run_full_collection(
+                years_back=years_back,
+                skip_existing=True,       # financial_records.doc_id でスキップ
+                skip_if_raw_exists=False, # xbrl_raw_documents は使わない（常に空）
+                on_progress=lambda c, t, m: log(m) if c % 50 == 0 or "[完了]" in m or "[企業マスタ" in m else None,
             ),
-            label="2/5",
+            label="1/5",
         )
-        log(f"[2/5] reparse_from_raw 完了 ({(time.time()-t0)/60:.1f}分経過)")
+        if cancelled:
+            log("[1/5] 収集が停止されました")
+            return
+        log(f"[1/5] XBRL 収集 完了 ({(time.time()-t0)/60:.1f}分経過)")
 
-    # ─── Phase 3: 成長率・Zスコア再計算 ─────────────────────────────────────
-    log("[3/5] 成長率・Zスコア再計算 開始")
-    db = SessionLocal()
-    try:
-        calc_growth_rates(db)
-        log("  成長率 計算完了")
-        calc_zscore_normalization(db)
-        log("  Zスコア 計算完了")
-    finally:
-        db.close()
-    log(f"[3/5] 成長率・Zスコア 完了 ({(time.time()-t0)/60:.1f}分経過)")
+        # ─── Phase 2: raw 再解析（SKIP_XBRL_RAW=true の場合は省略）─────────────
+        if SKIP_XBRL_RAW:
+            log("[2/5] reparse_from_raw 省略（SKIP_XBRL_RAW=true）")
+        else:
+            log("[2/5] reparse_from_raw 開始（全 xbrl_raw_documents → financial_records）")
+            await _run_with_retry(
+                lambda: reparse_from_raw(
+                    on_progress=lambda c, t, m: log(m) if c % 200 == 0 or "完了" in m else None,
+                ),
+                label="2/5",
+            )
+            log(f"[2/5] reparse_from_raw 完了 ({(time.time()-t0)/60:.1f}分経過)")
 
-    # ─── Phase 4: マクロデータ収集 ───────────────────────────────────────────
-    log("[4/5] マクロデータ収集 開始")
-    db = SessionLocal()
-    try:
-        n = await collect_macro_data(
-            db, years_back=5,
-            on_progress=lambda c, t, m: log(m) if c % 10 == 0 or "完了" in m else None,
-        )
-        log(f"  マクロデータ {n} 件更新")
-    finally:
-        db.close()
-    log(f"[4/5] マクロデータ 完了 ({(time.time()-t0)/60:.1f}分経過)")
+    if not collect_only:
+        # ─── Phase 3: 成長率・Zスコア再計算 ─────────────────────────────────────
+        log("[3/5] 成長率・Zスコア再計算 開始")
+        db = SessionLocal()
+        try:
+            calc_growth_rates(db)
+            log("  成長率 計算完了")
+            calc_zscore_normalization(db)
+            log("  Zスコア 計算完了")
+        finally:
+            db.close()
+        log(f"[3/5] 成長率・Zスコア 完了 ({(time.time()-t0)/60:.1f}分経過)")
 
-    # ─── Phase 5: 市場データ更新 ─────────────────────────────────────────────
-    log("[5/5] 市場データ更新 開始（stooq）")
-    await update_market_data(
-        on_progress=lambda c, t, m: log(m) if c % 200 == 0 or "完了" in m else None,
-    )
-    log(f"[5/5] 市場データ 完了 ({(time.time()-t0)/60:.1f}分経過)")
+        # ─── Phase 4: マクロデータ収集 ───────────────────────────────────────────
+        log("[4/5] マクロデータ収集 開始")
+        db = SessionLocal()
+        try:
+            n = await collect_macro_data(
+                db, years_back=5,
+                on_progress=lambda c, t, m: log(m) if c % 10 == 0 or "完了" in m else None,
+            )
+            log(f"  マクロデータ {n} 件更新")
+        finally:
+            db.close()
+        log(f"[4/5] マクロデータ 完了 ({(time.time()-t0)/60:.1f}分経過)")
+
+        # ─── Phase 5: 市場データ更新（J-Quants → stock_price_history → financial_records）
+        # stooq は GitHub Actions の Azure IP からブロックされるため J-Quants を使用。
+        # days_back=180（6ヶ月）でゴールデンウィーク等の長期連休と2025年3月期決算の
+        # period_end 近傍株価を取得する。point_in_time=True で全財務レコードに
+        # period_end 最近傍株価を設定し、最新レコードは現在株価で上書きする。
+        log("[5/5] 市場データ更新 開始（J-Quants days_back=180, point_in_time=True）")
+        db5 = SessionLocal()
+        try:
+            result = await collect_stock_price_history_jquants(
+                db5, days_back=180,
+                on_progress=lambda c, t, m: log(m) if c % 10 == 0 or "完了" in m else None,
+            )
+            log(f"  stock_price_history: {result.get('upserted', 0)}件 upsert")
+            n_updated = update_market_data_from_history(db5, point_in_time=True)
+            log(f"  financial_records.stock_price: {n_updated}レコード 更新")
+        finally:
+            db5.close()
+        log(f"[5/5] 市場データ 完了 ({(time.time()-t0)/60:.1f}分経過)")
 
     log("=" * 60)
     log(f"パイプライン完了  総所要時間: {(time.time()-t0)/60:.1f}分")
@@ -131,8 +147,12 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--years-back", type=int, default=5,
                         help="収集年数（デフォルト5）。6h制限対策には1〜2を推奨")
+    parser.add_argument("--collect-only", action="store_true",
+                        help="Phase 1-2 のみ実行（XBRL収集）。チェーン実行の収集ステップ用")
+    parser.add_argument("--finalize-only", action="store_true",
+                        help="Phase 3-5 のみ実行（成長率/Zスコア/マクロ/市場）。チェーン実行の集計ステップ用")
     args = parser.parse_args()
 
     with open(LOG_FILE, "w", encoding="utf-8") as f:
-        f.write(f"パイプライン開始: {datetime.now()}  years_back={args.years_back}\n")
-    asyncio.run(main(args.years_back))
+        f.write(f"パイプライン開始: {datetime.now()}  years_back={args.years_back}  collect_only={args.collect_only}  finalize_only={args.finalize_only}\n")
+    asyncio.run(main(args.years_back, collect_only=args.collect_only, finalize_only=args.finalize_only))

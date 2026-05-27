@@ -859,6 +859,217 @@ async def collect_stock_price_history_jquants(
     return {"cancelled": False, "upserted": upserted_total, "days": total}
 
 
+def update_market_data_from_history(db, point_in_time: bool = False) -> int:
+    """stock_price_history の終値を financial_records.stock_price に反映する。
+    stooq が GitHub Actions IP でブロックされる問題を回避するため、
+    J-Quants 由来の stock_price_history を使ってバリュエーション指標を計算する。
+
+    point_in_time=False（デフォルト・日次差分向け）:
+        各社の最新レコードのみ、最新株価で更新する。高速。
+    point_in_time=True（全件収集 finalize 向け）:
+        全財務レコードを period_end 最近傍の株価で更新する。
+        J-Quants カバレッジ外（データなし）のレコードはスキップし既存値を保持する。
+        最新レコードは常に最新株価で上書きする。
+
+    戻り値: 更新した財務レコード数
+    """
+    from database import StockPriceHistory, FinancialRecord
+    from sqlalchemy import func as sqlfunc
+
+    if not point_in_time:
+        # ── 最新レコードのみ・最新株価 ─────────────────────────────────────
+        subq = (
+            db.query(
+                StockPriceHistory.edinet_code,
+                sqlfunc.max(StockPriceHistory.trade_date).label("max_date"),
+            )
+            .group_by(StockPriceHistory.edinet_code)
+            .subquery()
+        )
+        latest_prices = (
+            db.query(StockPriceHistory.edinet_code, StockPriceHistory.close)
+            .join(
+                subq,
+                (StockPriceHistory.edinet_code == subq.c.edinet_code)
+                & (StockPriceHistory.trade_date == subq.c.max_date),
+            )
+            .all()
+        )
+
+        updated = 0
+        for edinet_code, price in latest_prices:
+            if price is None or price <= 0:
+                continue
+            latest = (
+                db.query(FinancialRecord)
+                .filter_by(edinet_code=edinet_code)
+                .order_by(FinancialRecord.year.desc())
+                .first()
+            )
+            if not latest:
+                continue
+            _apply_price_to_record(latest, price)
+            updated += 1
+            if updated % 200 == 0:
+                db.commit()
+
+        db.commit()
+        log.info(f"update_market_data_from_history: {updated}社を更新")
+        return updated
+
+    # ── point_in_time=True: 全レコードを period_end 近傍の株価で更新 ─────────
+    # メモリに全 stock_price_history を読み込んで edinet_code 別に整理する
+    all_rows = db.query(
+        StockPriceHistory.edinet_code,
+        StockPriceHistory.trade_date,
+        StockPriceHistory.close,
+    ).all()
+
+    if not all_rows:
+        log.info("update_market_data_from_history(point_in_time): stock_price_history が空のためスキップ")
+        return 0
+
+    # {edinet_code: sorted list of (trade_date_str, close)}
+    from collections import defaultdict
+    history: dict = defaultdict(list)
+    for ec, td, cl in all_rows:
+        if cl and cl > 0:
+            history[ec].append((td, cl))
+    for ec in history:
+        history[ec].sort()  # trade_date の昇順
+
+    MAX_GAP_DAYS = 30  # period_end から±30日以内の株価のみ採用
+
+    all_records = db.query(FinancialRecord).all()
+    updated = 0
+    for rec in all_records:
+        prices = history.get(rec.edinet_code)
+        if not prices:
+            continue
+        if not rec.period_end:
+            continue
+
+        # period_end を date に変換（"YYYY-MM-DD" 形式を前提）
+        try:
+            target = date.fromisoformat(rec.period_end[:10])
+        except (ValueError, TypeError):
+            continue
+
+        # 最近傍の trade_date を二分探索
+        dates = [p[0] for p in prices]
+        pos = _bisect_left(dates, target.isoformat())
+        best_price = None
+        best_gap = MAX_GAP_DAYS + 1
+
+        for idx in (pos - 1, pos):
+            if 0 <= idx < len(prices):
+                td_str, cl = prices[idx]
+                try:
+                    td = date.fromisoformat(td_str[:10])
+                except ValueError:
+                    continue
+                gap = abs((td - target).days)
+                if gap < best_gap:
+                    best_gap = gap
+                    best_price = cl
+
+        if best_price is None:
+            continue
+
+        _apply_price_to_record(rec, best_price)
+        updated += 1
+        if updated % 200 == 0:
+            db.commit()
+
+    # 最新レコードは最新株価で上書き（スクリーニング用の現在株価を保証）
+    latest_rows = (
+        db.query(
+            StockPriceHistory.edinet_code,
+            StockPriceHistory.close,
+        )
+        .join(
+            db.query(
+                StockPriceHistory.edinet_code,
+                sqlfunc.max(StockPriceHistory.trade_date).label("max_date"),
+            )
+            .group_by(StockPriceHistory.edinet_code)
+            .subquery(),
+            (StockPriceHistory.edinet_code ==
+             db.query(
+                 StockPriceHistory.edinet_code,
+                 sqlfunc.max(StockPriceHistory.trade_date).label("max_date"),
+             ).group_by(StockPriceHistory.edinet_code).subquery().c.edinet_code),
+        )
+        .all()
+    )
+
+    # 最新株価の上書き処理（サブクエリ再利用）
+    subq2 = (
+        db.query(
+            StockPriceHistory.edinet_code,
+            sqlfunc.max(StockPriceHistory.trade_date).label("max_date"),
+        )
+        .group_by(StockPriceHistory.edinet_code)
+        .subquery()
+    )
+    for ec, price in (
+        db.query(StockPriceHistory.edinet_code, StockPriceHistory.close)
+        .join(
+            subq2,
+            (StockPriceHistory.edinet_code == subq2.c.edinet_code)
+            & (StockPriceHistory.trade_date == subq2.c.max_date),
+        )
+        .all()
+    ):
+        if price is None or price <= 0:
+            continue
+        latest = (
+            db.query(FinancialRecord)
+            .filter_by(edinet_code=ec)
+            .order_by(FinancialRecord.year.desc())
+            .first()
+        )
+        if latest:
+            _apply_price_to_record(latest, price)
+
+    db.commit()
+    log.info(f"update_market_data_from_history(point_in_time): {updated}レコードを更新")
+    return updated
+
+
+def _apply_price_to_record(rec, price: float) -> None:
+    """財務レコードに株価・バリュエーション指標を書き込む（内部ヘルパー）"""
+    rec.stock_price = price
+    if rec.pl_eps and rec.pl_eps > 0:
+        rec.per = round(price / rec.pl_eps, 2)
+    if rec.bs_bps and rec.bs_bps > 0:
+        rec.pbr = round(price / rec.bs_bps, 2)
+    if (rec.bs_bps and rec.bs_bps > 0
+            and rec.bs_total_equity and rec.bs_total_equity > 0):
+        shares = rec.bs_total_equity / rec.bs_bps
+        rec.market_cap = round(price * shares / 1_000_000, 2)
+    if rec.dps and rec.dps > 0 and price > 0:
+        rec.div_yield = round(rec.dps / price * 100, 2)
+    if (rec.net_cash is not None
+            and rec.market_cap and rec.market_cap > 0):
+        rec.nc_ratio = round(
+            rec.net_cash / (rec.market_cap * 1_000_000), 4
+        )
+
+
+def _bisect_left(sorted_list: list, value: str) -> int:
+    """文字列リストの bisect_left（stdlib bisect と同等）"""
+    lo, hi = 0, len(sorted_list)
+    while lo < hi:
+        mid = (lo + hi) // 2
+        if sorted_list[mid] < value:
+            lo = mid + 1
+        else:
+            hi = mid
+    return lo
+
+
+
 async def update_market_data(max_companies: Optional[int] = None,
                              on_progress: Optional[Callable] = None,
                              cancel_check: Optional[Callable] = None):
@@ -1231,16 +1442,75 @@ async def refresh_company(edinet_code: str, years_back: int = 5,
 
 # stooq ティッカー定義。category は 'fx' / 'rate' / 'equity' / 'commodity'。
 MACRO_SERIES: list[dict] = [
-    {"code": "USDJPY",    "name": "USD/JPY",      "category": "fx",        "ticker": "usdjpy"},
-    {"code": "EURJPY",    "name": "EUR/JPY",      "category": "fx",        "ticker": "eurjpy"},
-    {"code": "US10Y",     "name": "米10年金利",   "category": "rate",      "ticker": "10usy.b"},
-    {"code": "JP10Y",     "name": "日10年金利",   "category": "rate",      "ticker": "10jpy.b"},
-    {"code": "NIKKEI225", "name": "日経225",      "category": "equity",    "ticker": "^nkx"},
-    {"code": "TOPIX",     "name": "TOPIX",        "category": "equity",    "ticker": "^tpx"},
-    {"code": "SP500",     "name": "S&P500",       "category": "equity",    "ticker": "^spx"},
-    {"code": "WTI",       "name": "WTI原油",      "category": "commodity", "ticker": "cl.f"},
-    {"code": "GOLD",      "name": "金",           "category": "commodity", "ticker": "gc.f"},
+    {"code": "USDJPY",    "name": "USD/JPY",      "category": "fx",        "ticker": "usdjpy",   "yf_ticker": "USDJPY=X"},
+    {"code": "EURJPY",    "name": "EUR/JPY",      "category": "fx",        "ticker": "eurjpy",   "yf_ticker": "EURJPY=X"},
+    {"code": "US10Y",     "name": "米10年金利",   "category": "rate",      "ticker": "10usy.b",  "yf_ticker": "^TNX"},
+    {"code": "JP10Y",     "name": "日10年金利",   "category": "rate",      "ticker": "10jpy.b",  "yf_ticker": "^JGB"},
+    {"code": "NIKKEI225", "name": "日経225",      "category": "equity",    "ticker": "^nkx",     "yf_ticker": "^N225"},
+    {"code": "TOPIX",     "name": "TOPIX",        "category": "equity",    "ticker": "^tpx",     "yf_ticker": "^TPX"},
+    {"code": "SP500",     "name": "S&P500",       "category": "equity",    "ticker": "^spx",     "yf_ticker": "^GSPC"},
+    {"code": "WTI",       "name": "WTI原油",      "category": "commodity", "ticker": "cl.f",     "yf_ticker": "CL=F"},
+    {"code": "GOLD",      "name": "金",           "category": "commodity", "ticker": "gc.f",     "yf_ticker": "GC=F"},
 ]
+
+
+async def fetch_yahoo_history(
+    session: httpx.AsyncClient,
+    yf_ticker: str,
+    date_from: str,   # "YYYYMMDD"
+    date_to:   str,   # "YYYYMMDD"
+) -> list:
+    """Yahoo Finance v8 API から日次 OHLCV を取得する。
+    GitHub Actions（Azure IP）からも動作する。stooq の代替として使用。"""
+    import calendar
+    try:
+        # date → Unix timestamp（JST 00:00 = UTC 前日15:00、余裕を持って+1日）
+        y1, m1, d1_ = int(date_from[:4]), int(date_from[4:6]), int(date_from[6:8])
+        y2, m2, d2_ = int(date_to[:4]),   int(date_to[4:6]),   int(date_to[6:8])
+        period1 = int(calendar.timegm((y1, m1, d1_, 0, 0, 0)))
+        period2 = int(calendar.timegm((y2, m2, d2_, 23, 59, 59)))
+    except (ValueError, IndexError) as e:
+        log.debug(f"Yahoo Finance 日付変換失敗 {yf_ticker}: {e}")
+        return []
+
+    url = (f"https://query1.finance.yahoo.com/v8/finance/chart/{yf_ticker}"
+           f"?interval=1d&period1={period1}&period2={period2}")
+    try:
+        r = await session.get(url, timeout=30,
+                              headers={"User-Agent": "Mozilla/5.0",
+                                       "Accept": "application/json"})
+        r.raise_for_status()
+        data = r.json()
+    except Exception as e:
+        log.debug(f"Yahoo Finance 取得失敗 {yf_ticker}: {e}")
+        return []
+
+    try:
+        result = data["chart"]["result"][0]
+        timestamps = result["timestamp"]
+        quote = result["indicators"]["quote"][0]
+    except (KeyError, IndexError, TypeError) as e:
+        log.debug(f"Yahoo Finance レスポンス解析失敗 {yf_ticker}: {e}")
+        return []
+
+    def _sf(lst, i):
+        v = lst[i] if i < len(lst) else None
+        return float(v) if v is not None else None
+
+    rows = []
+    for i, ts in enumerate(timestamps):
+        close = _sf(quote.get("close", []), i)
+        if close is None:
+            continue
+        rows.append({
+            "trade_date": date.fromtimestamp(ts).strftime("%Y-%m-%d"),
+            "open":   _sf(quote.get("open",   []), i),
+            "high":   _sf(quote.get("high",   []), i),
+            "low":    _sf(quote.get("low",    []), i),
+            "close":  close,
+            "volume": _sf(quote.get("volume", []), i),
+        })
+    return rows
 
 
 async def fetch_stooq_history(
@@ -1292,7 +1562,9 @@ async def collect_macro_data(
     on_progress: Optional[Callable[[int, int, str], None]] = None,
     cancel_check: Optional[Callable[[], bool]] = None,
 ):
-    """MACRO_SERIES の全系列について stooq から日次データを取得し macro_data に upsert する。
+    """MACRO_SERIES の全系列について日次データを取得し macro_data に upsert する。
+    Yahoo Finance を優先して使用し（GitHub Actions Azure IP でも動作）、
+    取得失敗時は stooq にフォールバックする。
     既存レコードがあれば close 等を上書き（最新値で更新）。"""
     today    = date.today()
     start    = today - timedelta(days=int(years_back * 365.25))
@@ -1308,10 +1580,14 @@ async def collect_macro_data(
                     on_progress(i-1, total, "[マクロ収集] ユーザー停止")
                 return saved
 
+            # Yahoo Finance 優先（GitHub Actions Azure IP 対応）→ stooq フォールバック
+            rows = await fetch_yahoo_history(session, series["yf_ticker"], d1, d2)
+            src = "Yahoo Finance"
+            if not rows:
+                rows = await fetch_stooq_history(session, series["ticker"], d1, d2)
+                src = "stooq"
             if on_progress:
-                on_progress(i-1, total, f"[マクロ {i}/{total}] {series['name']} ({series['ticker']}) 取得中")
-
-            rows = await fetch_stooq_history(session, series["ticker"], d1, d2)
+                on_progress(i-1, total, f"[マクロ {i}/{total}] {series['name']} ({src}) 取得中")
             if not rows:
                 if on_progress:
                     on_progress(i, total, f"[マクロ {i}/{total}] {series['name']} データ無し")

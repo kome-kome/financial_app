@@ -3,13 +3,18 @@ name: Full Pipeline (XBRL収集・財務データ更新)
 on:
   workflow_dispatch:
     inputs:
-      years_back:
-        description: '収集年数（デフォルト5年）'
+      year_steps:
+        description: 'years_back を昇順に逐次実行する配列（JSON）'
         required: false
-        default: '5'
+        default: '[1, 2, 3, 4, 5]'
 
 jobs:
-  pipeline:
+  collect:
+    strategy:
+      max-parallel: 1      # 順次実行（各ジョブが独立した6時間枠を持つ）
+      fail-fast: false     # 1ステップ失敗でも後続続行（skip_existingで補完）
+      matrix:
+        years_back: ${{ fromJSON(inputs.year_steps) }}
     runs-on: ubuntu-latest
     timeout-minutes: 355  # GitHub Actions 上限6時間。余裕を5分持たせる
 
@@ -26,17 +31,51 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Run pipeline
+      - name: Run collection (years_back=${{ matrix.years_back }})
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           EDINET_API_KEY: ${{ secrets.EDINET_API_KEY }}
           JQUANTS_API_KEY: ${{ secrets.JQUANTS_API_KEY }}
-        run: python _pipeline_gh.py --years-back ${{ inputs.years_back }}
+        run: python _pipeline_gh.py --years-back ${{ matrix.years_back }} --collect-only
 
       - name: Upload log
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: pipeline-log
+          name: collect-log-yb${{ matrix.years_back }}
+          path: pipeline_gh.log
+          retention-days: 7
+
+  finalize:
+    needs: collect
+    if: ${{ !cancelled() }}   # collect が一部失敗/タイムアウトしても集計は実行
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13.7'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run finalize (成長率/Zスコア/マクロ/市場データ)
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          EDINET_API_KEY: ${{ secrets.EDINET_API_KEY }}
+          JQUANTS_API_KEY: ${{ secrets.JQUANTS_API_KEY }}
+        run: python _pipeline_gh.py --finalize-only
+
+      - name: Upload log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: finalize-log
           path: pipeline_gh.log
           retention-days: 7

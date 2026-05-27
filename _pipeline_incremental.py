@@ -11,7 +11,10 @@ from datetime import datetime
 from dotenv import load_dotenv
 load_dotenv()
 
-from collector import run_full_collection, update_market_data, collect_macro_data
+from collector import (
+    run_full_collection, collect_macro_data,
+    collect_stock_price_history_jquants, update_market_data_from_history,
+)
 from database import SessionLocal, init_db, calc_growth_rates, calc_zscore_normalization
 
 LOG_FILE = "pipeline_incremental.log"
@@ -70,11 +73,21 @@ async def main():
         db.close()
     log(f"[3/4] マクロデータ 完了 ({(time.time()-t0)/60:.1f}分経過)")
 
-    # ─── Phase 4: 市場データ更新（株価・J-Quants）──────────────────────────
-    log("[4/4] 市場データ更新 開始")
-    await update_market_data(
-        on_progress=lambda c, t, m: log(m) if c % 200 == 0 or "完了" in m else None,
-    )
+    # ─── Phase 4: 市場データ更新（J-Quants → stock_price_history → financial_records）
+    # stooq は GitHub Actions の Azure IP からブロックされるため J-Quants を使用。
+    # days_back=14 でゴールデンウィーク等の長期連休にも対応。
+    log("[4/4] 市場データ更新 開始（J-Quants → stock_price_history → financial_records）")
+    db4 = SessionLocal()
+    try:
+        result = await collect_stock_price_history_jquants(
+            db4, days_back=14,
+            on_progress=lambda c, t, m: log(m) if c % 3 == 0 or "完了" in m else None,
+        )
+        log(f"  stock_price_history: {result.get('upserted', 0)}件 upsert")
+        n_updated = update_market_data_from_history(db4)
+        log(f"  financial_records.stock_price: {n_updated}社 更新")
+    finally:
+        db4.close()
     log(f"[4/4] 市場データ 完了 ({(time.time()-t0)/60:.1f}分経過)")
 
     log("=" * 60)
