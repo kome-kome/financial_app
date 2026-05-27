@@ -126,7 +126,7 @@ async def main(years_back: int, collect_only: bool = False, finalize_only: bool 
         db5 = SessionLocal()
         try:
             result = await collect_stock_price_history_jquants(
-                db5, days_back=7,
+                db5, days_back=14,
                 on_progress=lambda c, t, m: log(m) if c % 3 == 0 or "完了" in m else None,
             )
             log(f"  stock_price_history: {result.get('upserted', 0)}件 upsert")
