@@ -1442,16 +1442,75 @@ async def refresh_company(edinet_code: str, years_back: int = 5,
 
 # stooq ティッカー定義。category は 'fx' / 'rate' / 'equity' / 'commodity'。
 MACRO_SERIES: list[dict] = [
-    {"code": "USDJPY",    "name": "USD/JPY",      "category": "fx",        "ticker": "usdjpy"},
-    {"code": "EURJPY",    "name": "EUR/JPY",      "category": "fx",        "ticker": "eurjpy"},
-    {"code": "US10Y",     "name": "米10年金利",   "category": "rate",      "ticker": "10usy.b"},
-    {"code": "JP10Y",     "name": "日10年金利",   "category": "rate",      "ticker": "10jpy.b"},
-    {"code": "NIKKEI225", "name": "日経225",      "category": "equity",    "ticker": "^nkx"},
-    {"code": "TOPIX",     "name": "TOPIX",        "category": "equity",    "ticker": "^tpx"},
-    {"code": "SP500",     "name": "S&P500",       "category": "equity",    "ticker": "^spx"},
-    {"code": "WTI",       "name": "WTI原油",      "category": "commodity", "ticker": "cl.f"},
-    {"code": "GOLD",      "name": "金",           "category": "commodity", "ticker": "gc.f"},
+    {"code": "USDJPY",    "name": "USD/JPY",      "category": "fx",        "ticker": "usdjpy",   "yf_ticker": "USDJPY=X"},
+    {"code": "EURJPY",    "name": "EUR/JPY",      "category": "fx",        "ticker": "eurjpy",   "yf_ticker": "EURJPY=X"},
+    {"code": "US10Y",     "name": "米10年金利",   "category": "rate",      "ticker": "10usy.b",  "yf_ticker": "^TNX"},
+    {"code": "JP10Y",     "name": "日10年金利",   "category": "rate",      "ticker": "10jpy.b",  "yf_ticker": "^JGB"},
+    {"code": "NIKKEI225", "name": "日経225",      "category": "equity",    "ticker": "^nkx",     "yf_ticker": "^N225"},
+    {"code": "TOPIX",     "name": "TOPIX",        "category": "equity",    "ticker": "^tpx",     "yf_ticker": "^TPX"},
+    {"code": "SP500",     "name": "S&P500",       "category": "equity",    "ticker": "^spx",     "yf_ticker": "^GSPC"},
+    {"code": "WTI",       "name": "WTI原油",      "category": "commodity", "ticker": "cl.f",     "yf_ticker": "CL=F"},
+    {"code": "GOLD",      "name": "金",           "category": "commodity", "ticker": "gc.f",     "yf_ticker": "GC=F"},
 ]
+
+
+async def fetch_yahoo_history(
+    session: httpx.AsyncClient,
+    yf_ticker: str,
+    date_from: str,   # "YYYYMMDD"
+    date_to:   str,   # "YYYYMMDD"
+) -> list:
+    """Yahoo Finance v8 API から日次 OHLCV を取得する。
+    GitHub Actions（Azure IP）からも動作する。stooq の代替として使用。"""
+    import calendar
+    try:
+        # date → Unix timestamp（JST 00:00 = UTC 前日15:00、余裕を持って+1日）
+        y1, m1, d1_ = int(date_from[:4]), int(date_from[4:6]), int(date_from[6:8])
+        y2, m2, d2_ = int(date_to[:4]),   int(date_to[4:6]),   int(date_to[6:8])
+        period1 = int(calendar.timegm((y1, m1, d1_, 0, 0, 0)))
+        period2 = int(calendar.timegm((y2, m2, d2_, 23, 59, 59)))
+    except (ValueError, IndexError) as e:
+        log.debug(f"Yahoo Finance 日付変換失敗 {yf_ticker}: {e}")
+        return []
+
+    url = (f"https://query1.finance.yahoo.com/v8/finance/chart/{yf_ticker}"
+           f"?interval=1d&period1={period1}&period2={period2}")
+    try:
+        r = await session.get(url, timeout=30,
+                              headers={"User-Agent": "Mozilla/5.0",
+                                       "Accept": "application/json"})
+        r.raise_for_status()
+        data = r.json()
+    except Exception as e:
+        log.debug(f"Yahoo Finance 取得失敗 {yf_ticker}: {e}")
+        return []
+
+    try:
+        result = data["chart"]["result"][0]
+        timestamps = result["timestamp"]
+        quote = result["indicators"]["quote"][0]
+    except (KeyError, IndexError, TypeError) as e:
+        log.debug(f"Yahoo Finance レスポンス解析失敗 {yf_ticker}: {e}")
+        return []
+
+    def _sf(lst, i):
+        v = lst[i] if i < len(lst) else None
+        return float(v) if v is not None else None
+
+    rows = []
+    for i, ts in enumerate(timestamps):
+        close = _sf(quote.get("close", []), i)
+        if close is None:
+            continue
+        rows.append({
+            "trade_date": date.fromtimestamp(ts).strftime("%Y-%m-%d"),
+            "open":   _sf(quote.get("open",   []), i),
+            "high":   _sf(quote.get("high",   []), i),
+            "low":    _sf(quote.get("low",    []), i),
+            "close":  close,
+            "volume": _sf(quote.get("volume", []), i),
+        })
+    return rows
 
 
 async def fetch_stooq_history(
@@ -1503,7 +1562,9 @@ async def collect_macro_data(
     on_progress: Optional[Callable[[int, int, str], None]] = None,
     cancel_check: Optional[Callable[[], bool]] = None,
 ):
-    """MACRO_SERIES の全系列について stooq から日次データを取得し macro_data に upsert する。
+    """MACRO_SERIES の全系列について日次データを取得し macro_data に upsert する。
+    Yahoo Finance を優先して使用し（GitHub Actions Azure IP でも動作）、
+    取得失敗時は stooq にフォールバックする。
     既存レコードがあれば close 等を上書き（最新値で更新）。"""
     today    = date.today()
     start    = today - timedelta(days=int(years_back * 365.25))
@@ -1519,10 +1580,14 @@ async def collect_macro_data(
                     on_progress(i-1, total, "[マクロ収集] ユーザー停止")
                 return saved
 
+            # Yahoo Finance 優先（GitHub Actions Azure IP 対応）→ stooq フォールバック
+            rows = await fetch_yahoo_history(session, series["yf_ticker"], d1, d2)
+            src = "Yahoo Finance"
+            if not rows:
+                rows = await fetch_stooq_history(session, series["ticker"], d1, d2)
+                src = "stooq"
             if on_progress:
-                on_progress(i-1, total, f"[マクロ {i}/{total}] {series['name']} ({series['ticker']}) 取得中")
-
-            rows = await fetch_stooq_history(session, series["ticker"], d1, d2)
+                on_progress(i-1, total, f"[マクロ {i}/{total}] {series['name']} ({src}) 取得中")
             if not rows:
                 if on_progress:
                     on_progress(i, total, f"[マクロ {i}/{total}] {series['name']} データ無し")
