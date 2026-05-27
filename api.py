@@ -106,7 +106,7 @@ class _SecurityHeadersMiddleware(BaseHTTPMiddleware):
         response = await call_next(request)
         response.headers["Content-Security-Policy"] = (
             "default-src 'self'; "
-            "script-src 'self' 'unsafe-inline'; "
+            "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
             "style-src 'self' 'unsafe-inline'; "
             "connect-src 'self'; "
             "img-src 'self' data:; "
@@ -459,12 +459,12 @@ async def data_quality(db: Session = Depends(get_db)):
         log.error(f"データ品質チェック失敗: {e}")
         raise HTTPException(500, "データ品質チェックに失敗しました")
 
-_EDINET_CODE_RE = re.compile(r"^E\d{6}$")
+_EDINET_CODE_RE = re.compile(r"^E\d{5,6}$")
 
 @app.post("/api/collect/refresh/{edinet_code}")
 async def refresh_single(edinet_code: str, background_tasks: BackgroundTasks):
     if not _EDINET_CODE_RE.match(edinet_code):
-        raise HTTPException(400, "edinet_code の形式が不正です（例: E123456）")
+        raise HTTPException(400, "edinet_code の形式が不正です（例: E02167）")
     background_tasks.add_task(refresh_company, edinet_code)
     return {"message": f"{edinet_code} の再取得を開始しました"}
 
@@ -1028,7 +1028,13 @@ def _record_to_dict(r: FinancialRecord) -> dict:
             "stock_price": r.stock_price,
             "per": r.per, "pbr": r.pbr,
             "div_yield": r.div_yield,
+            "dps": r.dps,
+            "de_ratio": r.de_ratio,
             "roe": r.roe, "roa": r.roa,
+        },
+        "nc": {
+            "net_cash": r.net_cash,
+            "nc_ratio": r.nc_ratio,
         },
         "zscore": {
             "z_revenue": r.z_revenue,
@@ -1037,6 +1043,8 @@ def _record_to_dict(r: FinancialRecord) -> dict:
             "z_equity_ratio": r.z_equity_ratio,
             "z_cf_ratio": r.z_cf_ratio,
             "z_eps": r.z_eps,
+            "z_de_ratio": r.z_de_ratio,
+            "z_nc_ratio": r.z_nc_ratio,
         },
         "predicted_market_cap": r.predicted_market_cap,
         "gap_ratio": r.gap_ratio,
@@ -1625,7 +1633,7 @@ async def db_relations():
 async def db_company_drilldown(edinet_code: str, db: Session = Depends(get_db)):
     """企業別ドリルダウン: 1企業に紐づく全テーブルのレコードを横断取得"""
     if not _EDINET_CODE_RE.match(edinet_code):
-        raise HTTPException(400, "edinet_code の形式が不正です（例: E123456）")
+        raise HTTPException(400, "edinet_code の形式が不正です（例: E02167）")
     company = db.query(Company).filter_by(edinet_code=edinet_code).first()
     if not company:
         raise HTTPException(404, "企業が見つかりません")
@@ -1759,6 +1767,16 @@ async def serve_models():
 @app.get("/db")
 async def serve_db_viewer():
     return FileResponse(BASE_DIR / "templates" / "db.html", headers=_NO_CACHE)
+
+@app.get("/company")
+async def serve_company_search():
+    return FileResponse(BASE_DIR / "templates" / "company.html", headers=_NO_CACHE)
+
+@app.get("/company/{edinet_code}")
+async def serve_company(edinet_code: str):
+    # ページ自体は静的 HTML。edinet_code は URL 用で、実データ取得は
+    # フロントの /api/financials/{edinet_code} 側でバリデーション・404 処理する。
+    return FileResponse(BASE_DIR / "templates" / "company.html", headers=_NO_CACHE)
 
 @app.get("/login")
 async def serve_login():

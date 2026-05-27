@@ -84,6 +84,8 @@ tr:hover td{background:#1e2235}
 .stat-value{font-size:20px;font-weight:700}
 .info-box{background:#1e2235;border-radius:8px;padding:12px;font-size:12px;color:#94a3b8;border-left:3px solid #7c3aed;line-height:1.6}
 .btn:disabled{opacity:.4;cursor:not-allowed}
+.co-link{color:#a78bfa;text-decoration:none}
+.co-link:hover{text-decoration:underline}
 </style>
 </head>
 <body>
@@ -183,6 +185,24 @@ tr:hover td{background:#1e2235}
         </thead>
         <tbody id="gap-tbody"></tbody>
       </table>
+    </div>
+  </div>
+
+  <div class="card" id="gap-charts-card" style="display:none">
+    <div class="section-title">横断分布（理論 vs 実績）</div>
+    <div class="info-box" style="margin-bottom:12px">
+      散布図: 対角線より上＝理論＞実際（モデル上は割安寄り）、下＝割高寄り。両軸は対数（億円）。<br>
+      ヒストグラム: 乖離率の分布。<span class="gap-positive">正（緑）</span>＝割安側、<span class="gap-negative">負（赤）</span>＝割高側。
+    </div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:16px">
+      <div>
+        <div style="font-size:12px;color:#94a3b8;margin-bottom:6px">理論 vs 実際 時価総額（億円・対数軸）</div>
+        <div style="position:relative;height:340px"><canvas id="chart-gap-scatter"></canvas></div>
+      </div>
+      <div>
+        <div style="font-size:12px;color:#94a3b8;margin-bottom:6px">乖離率の分布（社数）</div>
+        <div style="position:relative;height:340px"><canvas id="chart-gap-hist"></canvas></div>
+      </div>
     </div>
   </div>
 </div>
@@ -590,6 +610,7 @@ tr:hover td{background:#1e2235}
 
 </div><!-- container -->
 
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 <script>
 function esc(s){return String(s??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');}
 
@@ -621,6 +642,12 @@ function showNotif(msg, type='error'){
 }
 
 let gapResults  = [];
+let _gapScatter = null, _gapHist = null;
+if (window.Chart){
+  Chart.defaults.color = '#94a3b8';
+  Chart.defaults.borderColor = '#1e2235';
+  Chart.defaults.font.family = "'Segoe UI', sans-serif";
+}
 
 // プラグインシステム
 const PLUGIN_TAB_MAP = {
@@ -690,6 +717,7 @@ async function runGapAnalysis() {
     document.getElementById('gap-count').textContent = d.count + '社';
     document.getElementById('gap-results-card').style.display = 'block';
     renderGap(gapResults);
+    renderGapCharts(gapResults);
   } catch(e) {
     showNotif('乖離分析失敗: ' + e.message + '（先に業種別OLS分析を実行してください）');
   }
@@ -707,10 +735,10 @@ function renderGap(rows) {
     const gapCls = gap > 0 ? 'gap-positive' : 'gap-negative';
     return `<tr>
       <td><span class="tag tag-blue">${esc(r.sec_code||r.edinet_code)}</span></td>
-      <td style="font-weight:500">${esc(r.company_name)}</td>
+      <td>${r.edinet_code ? `<a href="/company/${esc(r.edinet_code)}" class="co-link" style="font-weight:500">${esc(r.company_name)}</a>` : esc(r.company_name)}</td>
       <td><span class="tag tag-amber" style="font-size:10px">${esc(r.industry||'-')}</span></td>
-      <td style="text-align:right;font-family:monospace">${fmt0((r.actual_market_cap||0)/1e6)}</td>
-      <td style="text-align:right;font-family:monospace">${fmt0((r.predicted_market_cap||0)/1e6)}</td>
+      <td style="text-align:right;font-family:monospace">${fmt0((r.actual_market_cap||0)/100)}</td>
+      <td style="text-align:right;font-family:monospace">${fmt0((r.predicted_market_cap||0)/100)}</td>
       <td class="${gapCls}" style="text-align:right;font-family:monospace">${gap>0?'+':''}${gap}%</td>
       <td style="text-align:right;font-family:monospace;color:#94a3b8">${Number(r.expected_gap_6m)}%</td>
       <td style="text-align:right;font-family:monospace;color:#94a3b8">${Number(r.expected_gap_12m)}%</td>
@@ -719,6 +747,61 @@ function renderGap(rows) {
       </td>
     </tr>`;
   }).join('');
+}
+
+// 横断分布: 理論 vs 実際 の散布図 ＋ 乖離率ヒストグラム
+function renderGapCharts(rows) {
+  const card = document.getElementById('gap-charts-card');
+  if (!window.Chart) { return; }   // CDN 未読込時は静かにスキップ
+
+  // 散布図（対数軸・億円）。market_cap は百万円 → /100 で億円
+  const pts = rows.filter(r => (r.actual_market_cap||0) > 0 && (r.predicted_market_cap||0) > 0);
+  const scatterData = pts.map(r => ({ x: r.actual_market_cap/100, y: r.predicted_market_cap/100 }));
+  const ptColors = pts.map(r => (r.predicted_market_cap >= r.actual_market_cap) ? 'rgba(16,185,129,.6)' : 'rgba(239,68,68,.6)');
+  let mn = Infinity, mx = -Infinity;
+  scatterData.forEach(p => { mn = Math.min(mn, p.x, p.y); mx = Math.max(mx, p.x, p.y); });
+  if (!isFinite(mn) || !isFinite(mx) || mn <= 0) { mn = 1; mx = 10; }
+  if (_gapScatter) _gapScatter.destroy();
+  _gapScatter = new Chart(document.getElementById('chart-gap-scatter'), {
+    type:'scatter',
+    data:{ datasets:[
+      { label:'企業', data:scatterData, pointBackgroundColor:ptColors, pointRadius:3, pointHoverRadius:5 },
+      { label:'理論＝実際（基準線）', type:'line', data:[{x:mn,y:mn},{x:mx,y:mx}], showLine:true,
+        borderColor:'#64748b', borderDash:[5,4], pointRadius:0, fill:false },
+    ]},
+    options:{ responsive:true, maintainAspectRatio:false,
+      plugins:{ legend:{labels:{color:'#cbd5e1'}},
+        tooltip:{ callbacks:{ label:(c)=>`実際 ${fmt0(c.parsed.x)} / 理論 ${fmt0(c.parsed.y)} 億円` } } },
+      scales:{
+        x:{ type:'logarithmic', title:{display:true, text:'実際時価総額（億円）', color:'#64748b'}, ticks:{color:'#94a3b8'}, grid:{color:'#1e2235'} },
+        y:{ type:'logarithmic', title:{display:true, text:'理論時価総額（億円）', color:'#64748b'}, ticks:{color:'#94a3b8'}, grid:{color:'#1e2235'} },
+      }}
+  });
+
+  // 乖離率ヒストグラム
+  const BINS = [
+    {lo:-Infinity, hi:-50, label:'< -50%'},
+    {lo:-50, hi:-30, label:'-50〜-30'},
+    {lo:-30, hi:-10, label:'-30〜-10'},
+    {lo:-10, hi:0,   label:'-10〜0'},
+    {lo:0,   hi:10,  label:'0〜10'},
+    {lo:10,  hi:30,  label:'10〜30'},
+    {lo:30,  hi:50,  label:'30〜50'},
+    {lo:50,  hi:Infinity, label:'> 50%'},
+  ];
+  const counts = BINS.map(b => rows.filter(r => { const g = r.gap_ratio; return g != null && g >= b.lo && g < b.hi; }).length);
+  const histColors = BINS.map(b => b.lo >= 0 ? '#10b981' : '#ef4444');
+  if (_gapHist) _gapHist.destroy();
+  _gapHist = new Chart(document.getElementById('chart-gap-hist'), {
+    type:'bar',
+    data:{ labels:BINS.map(b=>b.label), datasets:[{ label:'社数', data:counts, backgroundColor:histColors, borderRadius:3 }] },
+    options:{ responsive:true, maintainAspectRatio:false,
+      plugins:{ legend:{display:false} },
+      scales:{ x:{ ticks:{color:'#94a3b8'}, grid:{color:'#1e2235'} },
+               y:{ title:{display:true, text:'社数', color:'#64748b'}, ticks:{color:'#94a3b8'}, grid:{color:'#1e2235'}, beginAtZero:true } }}
+  });
+
+  card.style.display = 'block';
 }
 
 function exportGapCSV() {
@@ -822,7 +905,7 @@ async function runRecommend() {
         <tr>
           <td style="font-weight:700;color:${rankColor};font-size:15px">${Number(r.rank)}</td>
           <td style="color:#38bdf8;font-weight:600">${esc(r.sec_code || '-')}</td>
-          <td style="font-weight:600">${esc(r.company_name)}</td>
+          <td>${r.edinet_code ? `<a href="/company/${esc(r.edinet_code)}" class="co-link" style="font-weight:600">${esc(r.company_name)}</a>` : esc(r.company_name)}</td>
           <td style="color:#94a3b8;font-size:11px">${esc(r.industry || '-')}</td>
           <td style="font-weight:700;color:${scoreColor}">${r.score.toFixed(2)}</td>
           <td>${r.roe != null ? r.roe.toFixed(1) + '%' : '-'}</td>
@@ -933,7 +1016,7 @@ function renderTotalReturn(d) {
     return `<tr>
       <td style="font-weight:700;color:${rankColor};font-size:15px">${Number(r.rank)}</td>
       <td><span class="tag tag-blue">${esc(r.sec_code||'-')}</span></td>
-      <td style="font-weight:500">${esc(r.name)}</td>
+      <td>${r.edinet_code ? `<a href="/company/${esc(r.edinet_code)}" class="co-link" style="font-weight:500">${esc(r.name)}</a>` : esc(r.name)}</td>
       <td><span class="tag tag-amber" style="font-size:10px">${esc(r.industry||'-')}</span></td>
       <td>${fmtPct(r.total_return_pct, retColor)}</td>
       <td>${fmtPct(r.upside_pct, upColor)}</td>
@@ -1010,7 +1093,7 @@ function renderNetCash() {
     return `<tr>
       <td>${r.rank}</td>
       <td><code style="color:#67e8f9">${esc(r.sec_code || '')}</code></td>
-      <td>${esc(r.company_name || '')}</td>
+      <td>${r.edinet_code ? `<a href="/company/${esc(r.edinet_code)}" class="co-link">${esc(r.company_name || '')}</a>` : esc(r.company_name || '')}</td>
       <td style="color:#94a3b8">${esc(r.industry || '')}</td>
       <td>${r.year ?? '-'}</td>
       <td style="text-align:right;color:${ncColor};font-weight:600">${Number(r.net_cash_oku).toLocaleString()}</td>
@@ -1155,7 +1238,7 @@ function _renderBtTable(rows) {
     return `<tr>
       <td>${r.rank}</td>
       <td><span class="tag tag-blue">${esc(r.sec_code||r.edinet_code)}</span></td>
-      <td style="font-weight:500">${esc(r.company_name)}</td>
+      <td>${r.edinet_code ? `<a href="/company/${esc(r.edinet_code)}" class="co-link" style="font-weight:500">${esc(r.company_name)}</a>` : esc(r.company_name)}</td>
       <td><span class="tag tag-amber" style="font-size:10px">${esc(r.industry||'-')}</span></td>
       <td style="font-family:monospace;color:#a78bfa">${r.score}</td>
       <td style="text-align:right;font-family:monospace">${r.start_price != null ? '&yen;' + Math.round(r.start_price).toLocaleString() : '-'}</td>

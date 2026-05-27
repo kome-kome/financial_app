@@ -27,12 +27,16 @@
 - **依存**: 4-1 (完了) で `_utc_to_jst_str()` も追加済み。両方まとめて共通化するのが効率的
 - **ファイル**: `api.py`, `collector.py`, `database.py`, 移動先のユーティリティモジュール
 
-### 4-3. プラグインの単体テスト追加  【L・優先度: 中】
+### 4-3. プラグインの単体テスト追加  【L・優先度: 中】 ✅ 完了
 
-- **現状**: `plugins/` 7 個中、テストがあるのは [tests/test_net_cash_analysis.py](../tests/test_net_cash_analysis.py) と [tests/test_utils.py](../tests/test_utils.py) のみ
-- **未テスト**: `sector_ols.py`, `recommend.py`, `total_return.py`, `gap_analysis.py`, `price_predictor.py`
-- **対応**: `tests/test_<plugin>.py` を順次追加。各プラグインの `execute()` を最小データで呼べるダミー DB fixture を用意
-- **前提**: `pytest` が現状 venv に未インストール → 先に `pip install pytest` をユーザー承認の上で実施が必要（CLAUDE.md「パッケージ管理方針」参照）
+- **対応済み**: 未テストだった 5 プラグイン（`sector_ols` / `recommend` / `total_return` / `gap_analysis` /
+  `price_predictor`）に `tests/test_<plugin>.py` を追加。プラグイン 7 個（utils 含む）すべてカバー。
+- **方式**: 「純粋関数・定数テスト」＋「in-memory SQLite fixture（[tests/conftest.py](../tests/conftest.py) の
+  `db` / `make_fin` 等）で `execute()` の挙動テスト」の 2 層。本番プラグインコードは無改変。
+  `execute()` は `asyncio.run()` で直接呼ぶ（内部に実 I/O await が無いため pytest-asyncio 不要）。
+  `init_db()` は Postgres 専用 SQL のため呼ばず `Base.metadata.create_all()` で SQLite にテーブル生成。
+- **依存**: `pytest==9.0.3` を新設 `requirements-dev.txt` に pin（本番 `requirements.txt` とは分離＝Render メモリ節約）。
+- **結果**: `pytest` 全 111 件パス（新規 50 件 + 既存 61 件）。各プラグインで正常系・異常系・空DB を網羅。
 
 ### 4-4. XBRL パース関数の重複統合  【L・優先度: 中】
 
