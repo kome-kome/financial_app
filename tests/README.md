@@ -34,6 +34,9 @@ python -m pytest tests/ -v
 | `test_sector_ols.py` | `plugins/sector_ols.py`（業種別OLS回帰・予測値書き込み） | numpy / SQLite fixture |
 | `test_total_return.py` | `plugins/total_return.py`（per-share OLS 総合リターン） | numpy / SQLite fixture |
 | `test_price_predictor.py` | `plugins/price_predictor.py`（価格特徴量・N日先リターン予測） | numpy / SQLite fixture |
+| `test_database.py` | `database.py`（pack/unpack・upsert_company・upsert_financial・年度別Zスコア） | SQLite fixture |
+| `test_collector.py` | `collector.py`（XBRL パース・連結優先・派生指標 calc_derived・列検出・定数＋ネットワーク系：書類一覧/XBRL ZIP/stooq/J-Quants） | pandas / httpx MockTransport |
+| `test_api.py` | `api.py`（JST変換・edinet_code 検証・トークン署名/検証・`/health`・DB-backed 読取エンドポイント） | fastapi TestClient |
 
 ## 設計方針
 
@@ -48,11 +51,24 @@ python -m pytest tests/ -v
 - **科学計算ライブラリは利用可**: VISION.md「サードパーティーライブラリ採用基準」に従い、numpy / scipy / statsmodels / scikit-learn は利用許可（requirements.txt 参照）。
 - **回帰検出を優先**: 「OLS の数値安定性」「winsorize が p1-p99 を切る」等の CLAUDE.md に明記された制約を担保する。
 
-## 将来の拡張候補
+## ネットワーク・DB のモック方針
 
-- `test_database.py`: SQLite in-memory で `upsert_financial`・`calc_growth_rates`・`calc_zscore_normalization` を検証
-- `test_api.py`: `httpx.AsyncClient` で主要エンドポイントの 200/401/404 を検証
+- **HTTP**: `httpx` 組み込みの `MockTransport` でレスポンスを擬似（新規依存なし）。`client: httpx.AsyncClient`
+  を引数に取る関数（`fetch_doc_list`/`fetch_xbrl_csv`/`fetch_stock_price_stooq`/`fetch_stock_history_stooq`/
+  `_jquants_fetch_date`）にモック client を渡す。レート制限の `asyncio.sleep` は `monkeypatch` で無効化。
+- **DB エンドポイント**: FastAPI `app.dependency_overrides[get_db]` を `conftest.py` の SQLite `db` に差し替え。
+  TestClient は別スレッドで実行するため `db` fixture は `StaticPool`＋`check_same_thread=False`。
+  `/health` は `SessionLocal` を直接呼ぶため `monkeypatch.setattr(api, "SessionLocal", ...)` で差し替える。
 
-> プラグイン 7 個（utils 含む）は本セッションで全てテスト追加済み。残る穴は `database.py` / `api.py` / `collector.py`。
+## カバレッジの現状と残課題
+
+- **カバー済み**: プラグイン 7 個（utils 含む）、`database.py`（upsert・年度別Zスコア・pack/unpack）、
+  `collector.py`（XBRL パース・派生指標などの純関数＋ネットワーク取得をモック）、
+  `api.py`（純関数＋`/health`＋DB-backed 読取エンドポイント）。
+- **未カバー（テストしにくい部分）**:
+  - `database.py` の `calc_growth_rates` — PostgreSQL 専用 SQL（`LAG() OVER`・`::numeric`）で SQLite では検証不可。
+  - `api.py` の SSE ストリーミング・バックグラウンドジョブを起動する重い収集/分析 POST。
+  - `collector.py` の大きな統合フロー（`run_full_collection`/`update_market_data`/400日スキャンループ）と
+    `update_industry_from_jpx`（JPX Excel 解析）。
 
 これらは `docs/IMPROVEMENTS.md` で追跡する。
