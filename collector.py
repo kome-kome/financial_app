@@ -859,6 +859,72 @@ async def collect_stock_price_history_jquants(
     return {"cancelled": False, "upserted": upserted_total, "days": total}
 
 
+def update_market_data_from_history(db) -> int:
+    """stock_price_history の最新終値を financial_records.stock_price に反映する。
+    stooq が GitHub Actions IP でブロックされる問題を回避するため、
+    J-Quants 由来の stock_price_history を使ってバリュエーション指標を計算する。
+    戻り値: 更新した財務レコード数
+    """
+    from database import StockPriceHistory, FinancialRecord, Company
+
+    # 企業ごとに最新 trade_date の close を取得
+    from sqlalchemy import func as sqlfunc
+    subq = (
+        db.query(
+            StockPriceHistory.edinet_code,
+            sqlfunc.max(StockPriceHistory.trade_date).label("max_date"),
+        )
+        .group_by(StockPriceHistory.edinet_code)
+        .subquery()
+    )
+    latest_prices = (
+        db.query(StockPriceHistory.edinet_code, StockPriceHistory.close)
+        .join(
+            subq,
+            (StockPriceHistory.edinet_code == subq.c.edinet_code)
+            & (StockPriceHistory.trade_date == subq.c.max_date),
+        )
+        .all()
+    )
+
+    updated = 0
+    for edinet_code, price in latest_prices:
+        if price is None or price <= 0:
+            continue
+        latest = (
+            db.query(FinancialRecord)
+            .filter_by(edinet_code=edinet_code)
+            .order_by(FinancialRecord.year.desc())
+            .first()
+        )
+        if not latest:
+            continue
+
+        latest.stock_price = price
+        if latest.pl_eps and latest.pl_eps > 0:
+            latest.per = round(price / latest.pl_eps, 2)
+        if latest.bs_bps and latest.bs_bps > 0:
+            latest.pbr = round(price / latest.bs_bps, 2)
+        if (latest.bs_bps and latest.bs_bps > 0
+                and latest.bs_total_equity and latest.bs_total_equity > 0):
+            shares = latest.bs_total_equity / latest.bs_bps
+            latest.market_cap = round(price * shares / 1_000_000, 2)
+        if latest.dps and latest.dps > 0 and price > 0:
+            latest.div_yield = round(latest.dps / price * 100, 2)
+        if (latest.net_cash is not None
+                and latest.market_cap and latest.market_cap > 0):
+            latest.nc_ratio = round(
+                latest.net_cash / (latest.market_cap * 1_000_000), 4
+            )
+        updated += 1
+        if updated % 200 == 0:
+            db.commit()
+
+    db.commit()
+    log.info(f"update_market_data_from_history: {updated}社を更新")
+    return updated
+
+
 async def update_market_data(max_companies: Optional[int] = None,
                              on_progress: Optional[Callable] = None,
                              cancel_check: Optional[Callable] = None):
