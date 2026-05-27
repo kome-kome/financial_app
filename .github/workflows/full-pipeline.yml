@@ -4,12 +4,18 @@ on:
   workflow_dispatch:
     inputs:
       year_steps:
-        description: 'years_back を昇順に逐次実行する配列（JSON）'
+        description: 'years_back を昇順に逐次実行する配列（JSON）。finalize_only=true の場合は無視'
         required: false
         default: '[1, 2, 3, 4, 5]'
+      finalize_only:
+        description: 'collect をスキップして finalize のみ実行する（タイムアウト後の再実行等）'
+        type: boolean
+        required: false
+        default: false
 
 jobs:
   collect:
+    if: ${{ !inputs.finalize_only }}
     strategy:
       max-parallel: 1      # 順次実行（各ジョブが独立した6時間枠を持つ）
       fail-fast: false     # 1ステップ失敗でも後続続行（skip_existingで補完）
