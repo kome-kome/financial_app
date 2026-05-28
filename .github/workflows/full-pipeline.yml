@@ -56,7 +56,7 @@ jobs:
     needs: collect
     if: ${{ !cancelled() }}   # collect が一部失敗/タイムアウトしても集計は実行
     runs-on: ubuntu-latest
-    timeout-minutes: 150  # Phase5 J-Quants（days_back=180, 20秒間隔×約128営業日≈43分）+ Phase3-4 に余裕を持たせる
+    timeout-minutes: 240  # Phase5 J-Quants（days_back=730, 20秒間隔×約490営業日≈163分）+ Phase3(2分)+Phase4(27分) ≈ 195分。余裕を持って240分
 
     steps:
       - name: Checkout

@@ -1,0 +1,50 @@
+name: Backfill Stock Price History (Yahoo Finance)
+
+on:
+  workflow_dispatch:
+
+# 目的:
+#   J-Quants 無料プランの取得上限（過去2年）より前の期間（FY2021〜FY2023相当）について、
+#   stock_price が NULL の financial_records を Yahoo Finance から補完する。
+#   stock_price_history には書き込まず、financial_records.stock_price を直接更新する
+#   （Supabase Free 500MB ストレージ節約のため）。
+#
+# 実行タイミング:
+#   - 初回フル収集後に1回
+#   - 新年度の XBRL 収集後（古い年度レコードに NULL 株価が増えた場合）
+#
+# 所要時間の目安:
+#   ~3800社 × 0.5秒スリープ = 約32分（+ ネットワーク時間で 60〜90分）
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13.7'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run Yahoo Finance backfill
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          EDINET_API_KEY: ${{ secrets.EDINET_API_KEY }}
+          JQUANTS_API_KEY: ${{ secrets.JQUANTS_API_KEY }}
+        run: python _pipeline_gh.py --backfill-yahoo
+
+      - name: Upload log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backfill-log
+          path: pipeline_gh.log
+          retention-days: 7

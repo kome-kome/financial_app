@@ -32,6 +32,10 @@ STOOQ_CONCURRENCY      = 30    # stooq 現在株価の同時接続数
 STOOQ_HIST_CONCURRENCY = 20    # stooq 履歴の同時接続数（1リクエストが重いため控えめ）
 JQUANTS_ENDPOINT       = "https://api.jquants.com/v2/equities/bars/daily"
 JQUANTS_RATE_SLEEP     = 20.0  # リクエスト開始間隔の最低値（秒）。
+JQUANTS_BACKFILL_DAYS  = 730   # J-Quants 無料プランの最大取得可能期間（2年分）
+YAHOO_STOCK_RATE_SLEEP = 0.5   # Yahoo Finance 銘柄別取得のリクエスト間隔（秒）
+                               # 銘柄ごとに1リクエスト。3800社×0.5s ≈ 32分
+MAX_GAP_DAYS           = 30    # period_end から±30日以内の株価のみ採用（point_in_time マッチ）
                                # 実測：データ日は約8s、非営業日は約3s で応答。
                                # 無料プランの上限が約5リクエスト/60秒のため20s を確保して安全マージンを持たせる。
                                # データ日はダウンロードに~8秒かかるため追加待機ほぼゼロ。
@@ -938,7 +942,7 @@ def update_market_data_from_history(db, point_in_time: bool = False) -> int:
     for ec in history:
         history[ec].sort()  # trade_date の昇順
 
-    MAX_GAP_DAYS = 30  # period_end から±30日以内の株価のみ採用
+
 
     all_records = db.query(FinancialRecord).all()
     updated = 0
@@ -1013,6 +1017,181 @@ def update_market_data_from_history(db, point_in_time: bool = False) -> int:
     db.commit()
     log.info(f"update_market_data_from_history(point_in_time): {updated}レコードを更新")
     return updated
+
+
+async def backfill_historical_stock_prices_yahoo(
+    db,
+    on_progress: Optional[Callable[[int, int, str], None]] = None,
+    cancel_check: Optional[Callable[[], bool]] = None,
+) -> int:
+    """J-Quants カバー範囲外（JQUANTS_BACKFILL_DAYS 日より前）の financial_records で
+    stock_price が NULL のレコードに対し、Yahoo Finance から period_end 近傍の
+    株価を取得して financial_records.stock_price を直接更新する。
+
+    stock_price_history には書き込まない（Supabase 500MB ストレージ節約のため）。
+    J-Quants 由来の既存 stock_price は上書きしない（NULL のみ補完）。
+    GitHub Actions（Azure IP）から動作する。
+    """
+    from database import FinancialRecord, Company as _Company
+    from collections import defaultdict
+
+    cutoff = (date.today() - timedelta(days=JQUANTS_BACKFILL_DAYS)).isoformat()
+
+    # 対象: stock_price が NULL かつ period_end が J-Quants カバー外
+    target_records = (
+        db.query(FinancialRecord)
+        .filter(
+            FinancialRecord.stock_price.is_(None),
+            FinancialRecord.period_end.isnot(None),
+            FinancialRecord.period_end < cutoff,
+        )
+        .all()
+    )
+    if not target_records:
+        log.info("backfill_historical_stock_prices_yahoo: 対象レコードなし")
+        return 0
+
+    # edinet_code → sec_code マッピング
+    sec_map = {
+        c.edinet_code: c.sec_code
+        for c in db.query(_Company.edinet_code, _Company.sec_code)
+        .filter(_Company.sec_code.isnot(None))
+        .all()
+    }
+
+    # 企業ごとにグループ化（1企業=1 Yahoo リクエストで複数 period_end をカバー）
+    by_company: dict = defaultdict(list)
+    for rec in target_records:
+        sec_code = sec_map.get(rec.edinet_code)
+        if sec_code and sec_code.strip():
+            by_company[sec_code].append(rec)
+
+    total   = len(by_company)
+    updated = 0
+
+    async with httpx.AsyncClient() as session:
+        for i, (sec_code, recs) in enumerate(sorted(by_company.items()), 1):
+            if cancel_check and cancel_check():
+                db.commit()
+                if on_progress:
+                    on_progress(i - 1, total, f"[Yahoo backfill] 停止（{updated}件更新済み）")
+                return updated
+
+            # この企業の全 period_end をカバーする日付範囲（±MAX_GAP_DAYS の余裕を持たせる）
+            period_ends = sorted(r.period_end[:10] for r in recs)
+            d_from = (date.fromisoformat(period_ends[0])  - timedelta(days=MAX_GAP_DAYS)).strftime("%Y%m%d")
+            d_to   = (date.fromisoformat(period_ends[-1]) + timedelta(days=MAX_GAP_DAYS)).strftime("%Y%m%d")
+
+            # Yahoo Finance ティッカー（東証: {sec_code}.T）
+            ticker = f"{sec_code}.T"
+            rows = await fetch_yahoo_history(session, ticker, d_from, d_to)
+
+            if rows:
+                # {trade_date_str: close} の辞書
+                price_dict = {r["trade_date"]: r["close"] for r in rows if r["close"]}
+                price_dates = sorted(price_dict.keys())
+
+                for rec in recs:
+                    target_str = rec.period_end[:10]
+                    pos = _bisect_left(price_dates, target_str)
+                    best_price, best_gap = None, MAX_GAP_DAYS + 1
+                    for idx in (pos - 1, pos):
+                        if 0 <= idx < len(price_dates):
+                            td = price_dates[idx]
+                            gap = abs((date.fromisoformat(td) - date.fromisoformat(target_str)).days)
+                            if gap < best_gap:
+                                best_gap, best_price = gap, price_dict[td]
+                    if best_price and best_price > 0:
+                        _apply_price_to_record(rec, best_price)
+                        updated += 1
+
+                if updated % 200 == 0:
+                    db.commit()
+
+            if on_progress and (i % 200 == 0 or i == total):
+                on_progress(i, total, f"[Yahoo backfill {i}/{total}] {sec_code}  累計{updated}件更新")
+
+            # レート制限対策
+            elapsed = 0.0  # fetch_yahoo_history 内の処理時間は含まれるため短めのスリープ
+            if YAHOO_STOCK_RATE_SLEEP > 0:
+                await asyncio.sleep(YAHOO_STOCK_RATE_SLEEP)
+
+    db.commit()
+    log.info(f"backfill_historical_stock_prices_yahoo: {updated}件の financial_records を更新")
+    return updated
+
+
+async def fill_recent_stock_price_gap_yahoo(
+    db,
+    gap_days: int = 7,
+    on_progress: Optional[Callable[[int, int, str], None]] = None,
+) -> dict:
+    """stock_price_history の最新日が gap_days 日以上古い場合に、
+    Yahoo Finance から不足期間を補完して stock_price_history に追記する。
+    差分収集（incremental）後のフォールバックとして使用。
+    J-Quants データが存在する行は上書きしない（ON CONFLICT DO NOTHING）。
+    """
+    from database import StockPriceHistory, Company as _Company
+    from sqlalchemy import func as sqlfunc
+    from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+    latest_row = db.query(sqlfunc.max(StockPriceHistory.trade_date)).scalar()
+    if not latest_row:
+        log.info("fill_recent_stock_price_gap_yahoo: stock_price_history が空のためスキップ")
+        return {"skipped": True, "reason": "empty"}
+
+    latest_date = date.fromisoformat(latest_row)
+    gap = (date.today() - latest_date).days
+    if gap <= gap_days:
+        log.info(f"fill_recent_stock_price_gap_yahoo: 最新日 {latest_date}（{gap}日前）→ ギャップなし")
+        return {"skipped": True, "reason": "no_gap", "latest": str(latest_date)}
+
+    log.info(f"fill_recent_stock_price_gap_yahoo: 最新日 {latest_date}（{gap}日前）→ Yahoo で補完")
+    d_from = (latest_date + timedelta(days=1)).strftime("%Y%m%d")
+    d_to   = date.today().strftime("%Y%m%d")
+
+    # sec_code → edinet_code マッピング
+    companies = [
+        (row.sec_code, row.edinet_code)
+        for row in db.query(_Company.sec_code, _Company.edinet_code)
+        .filter(_Company.sec_code.isnot(None))
+        .all()
+    ]
+    total      = len(companies)
+    upserted   = 0
+
+    async with httpx.AsyncClient() as session:
+        for i, (sec_code, edinet_code) in enumerate(companies, 1):
+            ticker = f"{sec_code}.T"
+            rows = await fetch_yahoo_history(session, ticker, d_from, d_to)
+            if rows:
+                records = [
+                    {
+                        "edinet_code": edinet_code,
+                        "sec_code":    sec_code,
+                        "trade_date":  r["trade_date"],
+                        "open":  r["open"], "high": r["high"],
+                        "low":   r["low"],  "close": r["close"],
+                        "volume": r["volume"],
+                    }
+                    for r in rows if r["close"]
+                ]
+                if records:
+                    ins  = pg_insert(StockPriceHistory).values(records)
+                    stmt = ins.on_conflict_do_nothing(constraint="uq_sph_edinet_date")
+                    result = db.execute(stmt)
+                    upserted += result.rowcount
+                    if upserted % 500 == 0:
+                        db.commit()
+
+            if on_progress and i % 500 == 0:
+                on_progress(i, total, f"[Yahoo gap-fill {i}/{total}] {upserted}件追加")
+
+            await asyncio.sleep(YAHOO_STOCK_RATE_SLEEP)
+
+    db.commit()
+    log.info(f"fill_recent_stock_price_gap_yahoo: {upserted}件を stock_price_history に追加")
+    return {"skipped": False, "upserted": upserted, "from": d_from, "to": d_to}
 
 
 def _apply_price_to_record(rec, price: float) -> None:
