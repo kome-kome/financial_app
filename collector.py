@@ -942,9 +942,15 @@ def update_market_data_from_history(db, point_in_time: bool = False) -> int:
     for ec in history:
         history[ec].sort()  # trade_date の昇順
 
-
-
     all_records = db.query(FinancialRecord).all()
+
+    # 最新レコード（year最大）を社別にメモリ上でインデックス（最後の上書きステップで使用）
+    latest_by_ec: dict = {}
+    for rec in all_records:
+        ec = rec.edinet_code
+        if ec not in latest_by_ec or (rec.year or 0) > (latest_by_ec[ec].year or 0):
+            latest_by_ec[ec] = rec
+
     updated = 0
     for rec in all_records:
         prices = history.get(rec.edinet_code)
@@ -986,33 +992,15 @@ def update_market_data_from_history(db, point_in_time: bool = False) -> int:
             db.commit()
 
     # 最新レコードは最新株価で上書き（スクリーニング用の現在株価を保証）
-    subq2 = (
-        db.query(
-            StockPriceHistory.edinet_code,
-            sqlfunc.max(StockPriceHistory.trade_date).label("max_date"),
-        )
-        .group_by(StockPriceHistory.edinet_code)
-        .subquery()
-    )
-    for ec, price in (
-        db.query(StockPriceHistory.edinet_code, StockPriceHistory.close)
-        .join(
-            subq2,
-            (StockPriceHistory.edinet_code == subq2.c.edinet_code)
-            & (StockPriceHistory.trade_date == subq2.c.max_date),
-        )
-        .all()
-    ):
-        if price is None or price <= 0:
+    # history は昇順ソート済みのため最後の要素が最新取引日
+    for ec, prices in history.items():
+        if not prices:
             continue
-        latest = (
-            db.query(FinancialRecord)
-            .filter_by(edinet_code=ec)
-            .order_by(FinancialRecord.year.desc())
-            .first()
-        )
-        if latest:
-            _apply_price_to_record(latest, price)
+        _, latest_price = prices[-1]
+        if not latest_price or latest_price <= 0:
+            continue
+        if ec in latest_by_ec:
+            _apply_price_to_record(latest_by_ec[ec], latest_price)
 
     db.commit()
     log.info(f"update_market_data_from_history(point_in_time): {updated}レコードを更新")
