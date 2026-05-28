@@ -55,17 +55,29 @@
 
 ### finalize ジョブの所要時間見積もり（設計参考値）
 
-`full-pipeline.yml` の `finalize` ジョブ（Phase 3〜5）は **90分を超えることがある**。
-`timeout-minutes: 150` を設定済み（PR #19 で変更）。
+`full-pipeline.yml` の `finalize` ジョブ（Phase 3〜5）は **200分前後かかる**。
+`timeout-minutes: 240` を設定済み。
 
 | Phase | 処理 | 実測値 |
 |---|---|---|
 | 3 | 成長率・Zスコア再計算（全銘柄） | 約2分 |
 | 4 | マクロデータ（Yahoo Finance × 9系列） | 約27分 |
-| 5 | J-Quants 株価収集（days_back=180、約128営業日 × 20秒） | 約43〜70分 |
-| 合計 | — | 約70〜100分 |
+| 5 | J-Quants 株価収集（`JQUANTS_BACKFILL_DAYS=730`、約490営業日 × 20秒） | 約163〜200分 |
+| 合計 | — | 約195〜230分 |
 
-`days_back` を変更する場合は必ずこの見積もりを再計算し、`timeout-minutes` が十分かを確認すること。
+`JQUANTS_BACKFILL_DAYS` を変更する場合は必ずこの見積もりを再計算し、`timeout-minutes` が十分かを確認すること。
+`timeout-minutes` は GitHub Actions 上限6時間（360分）以内であれば引き上げ可。
+
+### backfill-stock-history ジョブの所要時間見積もり
+
+`backfill-stock-history.yml`（Yahoo Finance 過去株価バックフィル）の目安:
+
+| 処理 | 内容 | 目安 |
+|---|---|---|
+| 対象企業数 | stock_price が NULL かつ period_end が 730日超前 | 初回: 約3,800社 |
+| リクエスト間隔 | `YAHOO_STOCK_RATE_SLEEP = 0.5秒` | 3,800 × 0.5s ≈ 32分 |
+| ネットワーク | 1社 1リクエスト（日付範囲まとめて取得） | 約60〜90分 |
+| `timeout-minutes` | 150 | — |
 
 ---
 
