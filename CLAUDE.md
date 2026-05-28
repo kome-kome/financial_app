@@ -2,6 +2,115 @@
 
 日本株財務分析ツール。Claude Codeへの動作指示ファイル。プロジェクト目的・方針は [VISION.md](docs/VISION.md) を参照。
 
+## 外部サービス制約一覧（設計時に必ず参照すること）
+
+新機能・改修・データ収集ロジックを設計する際は、**必ずこの表を参照**し、
+各サービスの無料プラン制約に違反しない方式を選ぶこと。
+「動けばいい」ではなく「無料枠で持続的に動き続けられるか」を基準にする。
+
+### GitHub Actions（無料アカウント）
+
+| 項目 | 制約値 | 設計への影響 |
+|---|---|---|
+| 月間利用上限 | **2,000 分/月**（パブリックリポジトリは無制限） | **通常運用は Private**。Actions 月2,000分を使い切ったら一時的に Public 化し、翌月1日のリセット後に Private へ戻す。詳細は下記「リポジトリ可視性の運用方針」参照 |
+| 1ジョブの最大実行時間 | **6時間（360分）** | 長時間処理は matrix で分割（collect × N年分）し、各ジョブを6時間枠内に収める |
+| 同時実行数（無料） | **20並列**（ただし `max-parallel: 1` で逐次化） | full-pipeline は `max-parallel: 1` で順次実行。並列化すると Supabase 接続数上限に当たる |
+| Runner の IP | **Azure クラウド IP** | stooq は Azure IP をブロック（実証済み）。Yahoo Finance は GitHub Actions からは動作するが Claude Code リモート環境からはブロックされる。**外部データ取得は必ずクラウドIP対応を確認すること** |
+| Artifact 保存期間 | デフォルト 90日（設定で7日に短縮済み） | ログ Artifact は `retention-days: 7` に統一 |
+
+#### リポジトリ可視性の運用方針（重要）
+
+| 状態 | 用途 | Actions 上限 |
+|---|---|---|
+| **Private（デフォルト）** | 通常運用 | 月 2,000 分 |
+| **Public（一時退避）** | Actions 上限到達時のみ | 無制限 |
+
+**Public 化が必要になる典型シナリオ**:
+- フル収集（`full-pipeline` 約 195〜230分）を月に数回実行
+- バックフィル（`backfill-stock-history` 60〜90分）を実行
+- これらの組み合わせで月2,000分を超過
+
+**Public ↔ Private 切替手順**:
+1. GitHub UI: `Settings` → 最下部 `Danger Zone` → `Change repository visibility`
+2. リポジトリ名を入力して確定
+
+**Private 復帰前のチェックリスト（次回の戻し作業時に必読）**:
+- [ ] GitHub Billing ページで Actions 残量をチェック（`Settings → Billing & plans → Plans and usage`）。リセットは毎月1日
+- [ ] 残量が十分（例: 1,500分以上）あることを確認してから Private 化
+- [ ] Private 化直後に軽量ワークフロー（`daily-incremental` 等）を1本走らせて課金が始まらないことを確認
+- [ ] Public 期間中に GitHub Issue / PR が外部からつかなかったか確認（Star/Fork は気にしないでよい）
+- [ ] secrets（DATABASE_URL, EDINET_API_KEY, JQUANTS_API_KEY 等）はリポジトリ可視性と独立して保護されるため、切替時に何もする必要はない
+
+**月次の運用フロー（参考）**:
+```
+月初〜中旬: Private で運用、差分収集（daily-incremental, ~5分/日）のみ
+中旬〜下旬: フル収集が必要なら、まず Billing で残量チェック
+            残量 < 必要分なら Public 化 → 実行 → 翌月1日後に Private 復帰
+```
+
+**IP ブロック実績（2026年5月時点）**:
+- stooq: GitHub Actions（Azure）から **完全ブロック**（403）
+- Yahoo Finance v8 API: GitHub Actions からは **動作する**。Claude Code リモート環境からは `Host not in allowlist`（403）でブロック
+- J-Quants: GitHub Actions から **動作する**（JPX 公式 API）
+- EDINET: GitHub Actions から **動作する**（金融庁公式 API）
+
+### Supabase（無料プラン）
+
+| 項目 | 制約値 | 設計への影響 |
+|---|---|---|
+| DB ストレージ | **500 MB** | `xbrl_raw_documents` の大量書き込みを避けるため `SKIP_XBRL_RAW=true` を維持 |
+| 行数上限 | なし（ストレージ制約のみ） | — |
+| 接続数 | **最大60接続**（pgbouncer 経由） | 並列パイプライン実行は接続数を消費するため `max-parallel: 1` を維持 |
+| 一時的 read-only 移行 | トランザクションが長すぎると自動で read-only に | `run_full_collection` は `MASTER_BATCH=200` 件ごとに commit。長い dirty を溜めない |
+| プロジェクト停止 | **1週間アクセスなしで自動停止** | `keepalive.yml` で定期ウォームアップ（現在 disabled）。長期不使用時は要注意 |
+
+### Render（無料プラン）
+
+| 項目 | 制約値 | 設計への影響 |
+|---|---|---|
+| メモリ | **512 MB** | 大量データのオンメモリ処理禁止。バッチ分割・ストリーミングを使うこと |
+| スピンダウン | **15分無通信で停止** | API レスポンスのキャッシュや keepalive 不要。SSE で長時間接続する処理は timeout 設計が必要 |
+| HTTP タイムアウト | **30秒** | 長時間処理は `BackgroundTasks` + SSE 進捗配信。同期レスポンスで30秒を超えない |
+| デプロイ | `main` push で自動デプロイ | 動作確認前に main へ push しないこと（破壊的変更は feature ブランチ→PR） |
+| SSH | **不可** | 本番環境への直接接続不可。ログは Render ダッシュボードから確認 |
+
+### J-Quants API（無料プラン）
+
+| 項目 | 制約値 | 設計への影響 |
+|---|---|---|
+| レート制限 | **約5リクエスト/60秒** | `JQUANTS_RATE_SLEEP = 20.0` 秒間隔を維持 |
+| 取得可能期間 | **過去2年分** | `days_back ≤ 730`。それ以上は有料プランが必要 |
+| 429 リトライ | 指数バックオフ禁止 | **90秒待機→1回のみ再試行**。失敗したら skip（リトライがクォータを食う） |
+| 営業日データのみ | 土日祝は空レスポンス | 土日スキップ済み。ただし日本の祝日は `weekday < 5` では判定不可（空レスポンスを skip として扱う） |
+
+### finalize ジョブの所要時間見積もり（設計参考値）
+
+`full-pipeline.yml` の `finalize` ジョブ（Phase 3〜5）は **200分前後かかる**。
+`timeout-minutes: 240` を設定済み。
+
+| Phase | 処理 | 実測値 |
+|---|---|---|
+| 3 | 成長率・Zスコア再計算（全銘柄） | 約2分 |
+| 4 | マクロデータ（Yahoo Finance × 9系列） | 約27分 |
+| 5 | J-Quants 株価収集（`JQUANTS_BACKFILL_DAYS=730`、約490営業日 × 20秒） | 約163〜200分 |
+| 合計 | — | 約195〜230分 |
+
+`JQUANTS_BACKFILL_DAYS` を変更する場合は必ずこの見積もりを再計算し、`timeout-minutes` が十分かを確認すること。
+`timeout-minutes` は GitHub Actions 上限6時間（360分）以内であれば引き上げ可。
+
+### backfill-stock-history ジョブの所要時間見積もり
+
+`backfill-stock-history.yml`（Yahoo Finance 過去株価バックフィル）の目安:
+
+| 処理 | 内容 | 目安 |
+|---|---|---|
+| 対象企業数 | stock_price が NULL かつ period_end が 730日超前 | 初回: 約3,800社 |
+| リクエスト間隔 | `YAHOO_STOCK_RATE_SLEEP = 0.5秒` | 3,800 × 0.5s ≈ 32分 |
+| ネットワーク | 1社 1リクエスト（日付範囲まとめて取得） | 約60〜90分 |
+| `timeout-minutes` | 150 | — |
+
+---
+
 ## デプロイ環境（最重要）
 
 **本プロジェクトは [Render](https://render.com/) にデプロイ済みで稼働中**。DB は **Supabase PostgreSQL**（外部）。

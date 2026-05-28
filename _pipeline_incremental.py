@@ -14,6 +14,7 @@ load_dotenv()
 from collector import (
     run_full_collection, collect_macro_data,
     collect_stock_price_history_jquants, update_market_data_from_history,
+    fill_recent_stock_price_gap_yahoo,
 )
 from database import SessionLocal, init_db, calc_growth_rates, calc_zscore_normalization
 
@@ -73,17 +74,27 @@ async def main():
         db.close()
     log(f"[3/4] マクロデータ 完了 ({(time.time()-t0)/60:.1f}分経過)")
 
-    # ─── Phase 4: 市場データ更新（J-Quants → stock_price_history → financial_records）
-    # stooq は GitHub Actions の Azure IP からブロックされるため J-Quants を使用。
-    # days_back=14 でゴールデンウィーク等の長期連休にも対応。
-    log("[4/4] 市場データ更新 開始（J-Quants → stock_price_history → financial_records）")
+    # ─── Phase 4: 市場データ更新（J-Quants 優先 → Yahoo Finance ギャップ補完）────
+    # J-Quants: days_back=14 で直近2週分を取得。
+    # J-Quants のデータが7日以上古い場合（APIラグ等）は Yahoo Finance で補完。
+    log("[4/4] 市場データ更新 開始（J-Quants 優先 → Yahoo Finance フォールバック）")
     db4 = SessionLocal()
     try:
         result = await collect_stock_price_history_jquants(
             db4, days_back=14,
             on_progress=lambda c, t, m: log(m) if c % 3 == 0 or "完了" in m else None,
         )
-        log(f"  stock_price_history: {result.get('upserted', 0)}件 upsert")
+        log(f"  J-Quants: stock_price_history {result.get('upserted', 0)}件 upsert")
+
+        # J-Quants の最新日が7日以上古い場合は Yahoo Finance で直近ギャップを補完
+        gap_result = await fill_recent_stock_price_gap_yahoo(
+            db4, gap_days=7,
+            on_progress=lambda c, t, m: log(m) if c % 500 == 0 or "完了" in m else None,
+        )
+        if not gap_result.get("skipped"):
+            log(f"  Yahoo Finance gap-fill: {gap_result.get('upserted', 0)}件 追加"
+                f"（{gap_result.get('from')} 〜 {gap_result.get('to')}）")
+
         n_updated = update_market_data_from_history(db4)
         log(f"  financial_records.stock_price: {n_updated}社 更新")
     finally:
