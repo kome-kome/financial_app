@@ -425,19 +425,21 @@ sequenceDiagram
     participant GAP   as 🧩 plugins/gap_analysis.py
     participant DB    as 🗄️ PostgreSQL
 
-    Note over User,DB: ① 業種別OLS分析の実行
-    User ->> UI  : 目的変数・説明変数・業種最低サンプル数を選択して「実行」
-    UI   ->> API : POST /api/plugins/sector_ols/run { target, features, min_samples }
+    Note over User,DB: ① 業種別OLS分析の実行（target=stock_price 固定・per-share 説明変数）
+    User ->> UI  : 説明変数（per-share[円/株]）・業種最低サンプル数・正則化を選択して「実行」
+    UI   ->> API : POST /api/plugins/sector_ols/run { target=stock_price, features:[ps_*...], min_samples }
     API  ->> PLG : plugin.execute(params, db)
 
     PLG  ->> DB  : SELECT financial_records（最新年度）
     DB  -->> PLG : 全レコード
 
     loop 各業種
+        PLG  ->> PLG : 各 record で shares = bs_total_equity / bs_bps を計算<br/>bs_bps NULL/0 の銘柄はスキップ
+        PLG  ->> PLG : 派生 per-share (ps_*) を「絶対額 / shares」で実行時計算
         PLG  ->> PLG : winsorize() で外れ値を p1-p99 にクリッピング
         PLG  ->> PLG : normalize() で特徴量を z-score 正規化（業種内）
-        PLG  ->> PLG : ols() で純Python最小二乗法を実行<br/>β = (X'X)⁻¹ X'y
-        PLG  ->> DB  : predicted_market_cap / gap_ratio を書き戻し
+        PLG  ->> PLG : ols() / ridge_regression() で β を推定
+        PLG  ->> DB  : predicted_market_cap（円/株 → 百万円換算）/ gap_ratio を書き戻し
     end
 
     PLG -->> API : { sector_stats, results }

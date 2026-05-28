@@ -234,14 +234,17 @@ fold_size = n // n_folds
 
 ### 概要
 
-業種ごとに独立して OLS 回帰を実行し、理論的な時価総額（または株価）を推定する。全業種一括ではなく業種内でモデルを構築することで、業種間の P/E・P/B 構造差の影響を排除する。
+業種ごとに独立して OLS 回帰を実行し、Ohlson モデル拡張型で**株価（円/株）を推定**する。全業種一括ではなく業種内でモデルを構築することで、業種間の P/E・P/B 構造差の影響を排除する。
+
+**次元整合性の構造的強制（CLAUDE.md 制約）**: 目的変数は `stock_price [円/株]` 単一に固定、説明変数は per-share [円/株] のみ。UI/API レベルで他の組み合わせを選べないようにすることで、係数 β を「implied 倍率」として経済的に解釈可能な状態に保つ。
 
 ### モデル定式化
 
-業種 s 内で独立に実行:
+業種 s 内で独立に実行（Ohlson 拡張型）:
 
 ```
-ŷₛ_norm = β₀ + Σⱼ βⱼ · Xₛⱼ_norm
+ŷₛ_norm = β₀ + Σⱼ βⱼ · Xₛⱼ_norm        y = stock_price [円/株]
+                                         Xⱼ = per-share 財務金額 [円/株]
 ```
 
 各変数は業種内で個別に winsorize & z-score 正規化:
@@ -259,35 +262,65 @@ gap_ratio > 0: 予測 > 実際 → 割安（市場が過小評価）
 gap_ratio < 0: 予測 < 実際 → 割高（市場が過大評価）
 ```
 
-### ターゲット別の変数選択
+### 説明変数（全項目 [円/株] per-share）
 
-**ターゲット = `market_cap`（百万円）** — デフォルト
+説明変数のキーは 2 系統:
 
-| 説明変数 | 次元 |
-|---|---|
-| `pl_revenue` | 円（絶対額） |
-| `pl_operating_profit` | 円（絶対額） |
-| `pl_net_income` | 円（絶対額） |
-| `bs_total_equity` | 円（絶対額） |
-| `cf_operating_cf` | 円（絶対額） |
+- **DB永続 per-share**（公式開示値・株数除算不要）: `pl_eps`, `bs_bps`, `dps`
+- **派生 per-share（`ps_*` プレフィックス）**: 絶対額カラム ÷ 発行株数 を実行時計算
 
-説明変数が絶対額、被説明変数も百万円（絶対額）— 次元整合。
+**発行株数の推計式**:
 
-**ターゲット = `stock_price`（円/株）**
+```
+shares = bs_total_equity / bs_bps     （plugins/utils.py の shares_outstanding）
+ps_<feat> = <絶対額カラム> / shares     [円/株]
+```
 
-| 説明変数 | 次元 |
-|---|---|
-| `pl_eps` | 円/株 |
-| `bs_bps` | 円/株 |
-| `dps` | 円/株 |
+`bs_bps` または `bs_total_equity` が NULL/0 の銘柄は株数推計不能のため、業種別 OLS の集計対象から自動的に除外される。
+
+**デフォルト10項目**（PL/BS/CF を網羅）:
+
+| カテゴリ | キー | 元カラム / 説明 |
+|---|---|---|
+| PL（公式） | `pl_eps` | EPS 公式値 |
+| BS（公式） | `bs_bps` | BPS 公式値 — Ohlson モデル中核 |
+| 還元（公式） | `dps` | 1株配当 公式値 |
+| PL（派生） | `ps_revenue` | `pl_revenue / shares` 売上トップライン |
+| PL（派生） | `ps_gross_profit` | `pl_gross_profit / shares` 粗利 |
+| PL（派生） | `ps_operating_profit` | `pl_operating_profit / shares` 本業収益 |
+| BS（派生） | `ps_total_assets` | `bs_total_assets / shares` 企業規模 |
+| BS（派生） | `ps_total_liabilities` | `bs_total_liabilities / shares` 負債規模 |
+| CF（派生） | `ps_operating_cf` | `cf_operating_cf / shares` 実キャッシュ創出力 |
+| CF（派生） | `ps_free_cf` | `cf_free_cf / shares` 株主還元原資 |
+
+**派生 per-share の全選択肢**（PL/BS/CF の絶対額カラムを網羅、`ps_*` プレフィックス）:
+
+- PL: `ps_revenue`, `ps_cost_of_sales`, `ps_gross_profit`, `ps_sga`, `ps_operating_profit`, `ps_nonoperating_income`, `ps_ordinary_profit`, `ps_net_income`
+- BS資産: `ps_total_assets`, `ps_current_assets`, `ps_receivables`, `ps_inventory`, `ps_cash`, `ps_noncurrent_assets`, `ps_buildings`, `ps_machinery`, `ps_intangible_assets`, `ps_investment_securities`
+- BS負債: `ps_total_liabilities`, `ps_current_liabilities`, `ps_payables`, `ps_noncurrent_liabilities`, `ps_short_term_debt`, `ps_long_term_debt`, `ps_bonds_payable`
+- BS純資産: `ps_total_equity`, `ps_paid_in_capital`, `ps_retained_earnings`
+- CF: `ps_operating_cf`, `ps_investing_cf`, `ps_financing_cf`, `ps_free_cf`, `ps_net_change_cash`, `ps_capex`
+
+### 予測値の DB 書き込み
+
+OLS で予測した株価 `ŷ_pred [円/株]` を、互換性のため `predicted_market_cap [百万円]` へ換算保存:
+
+```
+predicted_market_cap = ŷ_pred / stock_price × market_cap     [百万円]
+```
+
+`stock_price` または `market_cap` が欠損している銘柄は `predicted_market_cap` を上書きしない（DB に NULL のまま、または旧値保持）。`gap_ratio` は `ŷ_pred` と実 `stock_price` の比較で常に算出される。
 
 ### 実行条件
 
 - 業種内のサンプル数 ≥ `min_samples`（デフォルト: 10社）でなければスキップ
+- 各銘柄について `bs_bps > 0` かつ `bs_total_equity > 0` が必須（株数推計のため）
 
 ### 仮定・限界
 
 - 業種分類はJPX上場会社一覧（TSE 33業種）による。分類の粒度が粗いため、同業種内でもビジネスモデルの差異が大きい場合がある
+- 株数推計は IFRS/JGAAP 定義差、期中増資、優先株・転換社債存在時に誤差が生じる（FUTURE_TASKS の J-Quants `IssuedShares` 取得で根本解決予定）
+- per-share 10項目以上選択時は PL同士・BS同士の比例関係から VIF>10 が頻発する。`check_collinearity` の警告が出た業種では Ridge への切替を強く推奨
 - `gap_ratio` の収束予測には統計的根拠がない（→ [乖離分析](#3-乖離分析ou過程ヒューリスティック) を参照）
 - 乖離分析（gap_analysis）は本プラグインの実行後でなければ利用不可
 
