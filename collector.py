@@ -982,28 +982,6 @@ def update_market_data_from_history(db, point_in_time: bool = False) -> int:
             db.commit()
 
     # 最新レコードは最新株価で上書き（スクリーニング用の現在株価を保証）
-    latest_rows = (
-        db.query(
-            StockPriceHistory.edinet_code,
-            StockPriceHistory.close,
-        )
-        .join(
-            db.query(
-                StockPriceHistory.edinet_code,
-                sqlfunc.max(StockPriceHistory.trade_date).label("max_date"),
-            )
-            .group_by(StockPriceHistory.edinet_code)
-            .subquery(),
-            (StockPriceHistory.edinet_code ==
-             db.query(
-                 StockPriceHistory.edinet_code,
-                 sqlfunc.max(StockPriceHistory.trade_date).label("max_date"),
-             ).group_by(StockPriceHistory.edinet_code).subquery().c.edinet_code),
-        )
-        .all()
-    )
-
-    # 最新株価の上書き処理（サブクエリ再利用）
     subq2 = (
         db.query(
             StockPriceHistory.edinet_code,
