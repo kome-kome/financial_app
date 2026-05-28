@@ -878,6 +878,13 @@ async def get_stats(db: Session = Depends(get_db)):
     n_companies   = db.query(Company).count()
     n_records     = db.query(FinancialRecord).count()
     n_stock_price = db.query(func.count(StockPriceHistory.id)).scalar() or 0
+    # 業種別OLS実行済み判定用: 予測値（gap_ratio）が書き込まれたレコード数。
+    # 乖離分析は gap_ratio が必須のため、0 件なら未実行（UIで乖離分析タブをロック）。
+    n_predicted = (
+        db.query(func.count(FinancialRecord.id))
+        .filter(FinancialRecord.gap_ratio.isnot(None))
+        .scalar()
+    ) or 0
 
     # 最新の財務レコード（year → period_end の降順で1件）
     latest_fr = (
@@ -916,6 +923,7 @@ async def get_stats(db: Session = Depends(get_db)):
         "companies":            n_companies,
         "records":              n_records,
         "stock_price_records":  n_stock_price,
+        "records_with_prediction": n_predicted,
         "latest_year":          latest_fr.year       if latest_fr else None,
         "latest_period_end":    latest_fr.period_end if latest_fr else None,
         "last_db_update":       _utc_to_jst_str(last_db_update),

@@ -17,6 +17,7 @@ body{font-family:'Segoe UI',sans-serif;background:#0f1117;color:#e2e8f0;min-heig
 .nav{display:flex;border-bottom:1px solid #2d3154;background:#1a1d2e;padding:0 24px;gap:4px}
 .nav-btn{padding:11px 18px;font-size:13px;color:#94a3b8;background:none;border:none;border-bottom:2px solid transparent;cursor:pointer;transition:all .2s}
 .nav-btn.active{color:#a78bfa;border-bottom-color:#a78bfa}
+.nav-btn.locked{color:#64748b;opacity:.7}
 .nav-link{padding:11px 18px;font-size:13px;color:#64748b;text-decoration:none;display:inline-flex;align-items:center;gap:5px;margin-left:auto}
 .nav-link:hover{color:#94a3b8}
 .container{padding:20px;max-width:1400px;margin:0 auto}
@@ -140,6 +141,20 @@ tr:hover td{background:#1e2235}
 
 <!-- 乖離分析 -->
 <div id="tab-gap" class="hidden">
+
+  <!-- ロック状態: 業種別OLS 未実行時に表示 -->
+  <div class="card" id="gap-locked" style="display:none">
+    <div class="section-title">乖離分析（割安・割高スクリーニング）</div>
+    <div class="info-box" style="border-color:#f59e0b;margin-bottom:14px">
+      🔒 この分析を表示するには、先に <strong>業種別OLS</strong> を実行してください。<br>
+      業種別OLSが各銘柄の理論株価（予測時価総額）と乖離率を業種内で計算し、その結果をここで
+      割安・割高ランキングとして表示します。乖離率データがまだDBに無いため、現在は実行できません。
+    </div>
+    <button class="btn btn-primary" onclick="showTab('sector_ols')">→ 業種別OLSを実行する</button>
+  </div>
+
+  <!-- 利用可能状態: 業種別OLS 実行済み（DBに予測値あり）の時に表示 -->
+  <div id="gap-ready" style="display:none">
   <div class="card">
     <div class="flex-between">
       <div class="section-title" style="margin-bottom:0">乖離分析（割安・割高スクリーニング）</div>
@@ -205,6 +220,7 @@ tr:hover td{background:#1e2235}
       </div>
     </div>
   </div>
+  </div><!-- /gap-ready -->
 </div>
 
 <!-- おすすめ銘柄 -->
@@ -643,6 +659,28 @@ function showNotif(msg, type='error'){
 
 let gapResults  = [];
 let _gapScatter = null, _gapHist = null;
+
+// 乖離分析の利用可否（業種別OLS の実行に依存）
+let _gapDataExists    = false;  // /api/stats: 過去にOLSを実行しDBに予測値が残っている
+let _olsRanThisSession = false; // このセッションで業種別OLSを実行した
+
+// 乖離分析タブのロック/解除を画面に反映する。
+// 利用可能条件: DBに予測値あり（過去実行）または このセッションでOLS実行済み。
+function refreshGapAvailability() {
+  const available = _gapDataExists || _olsRanThisSession;
+  const locked = document.getElementById('gap-locked');
+  const ready  = document.getElementById('gap-ready');
+  if (locked) locked.style.display = available ? 'none' : 'block';
+  if (ready)  ready.style.display  = available ? 'block' : 'none';
+  // ナビゲーションボタンにロック表示（業種別OLS未実行時は 🔒 + グレーアウト）
+  const btn = document.querySelector('.nav-btn[data-tab="gap"]');
+  if (btn) {
+    const baseLabel = (_pluginMeta['gap_analysis'] && _pluginMeta['gap_analysis'].label) || '乖離分析';
+    btn.classList.toggle('locked', !available);
+    btn.textContent = (available ? '' : '🔒 ') + baseLabel;
+    btn.title = available ? '' : '業種別OLSの実行後に利用できます';
+  }
+}
 if (window.Chart){
   Chart.defaults.color = '#94a3b8';
   Chart.defaults.borderColor = '#1e2235';
@@ -684,6 +722,9 @@ async function preflight() {
     _preflight = d;
     const finOk = d.records > 0;
     const prOk  = (d.stock_price_records ?? 0) > 0;
+    // 過去の業種別OLS実行でDBに予測値が残っていれば乖離分析を解放
+    _gapDataExists = (d.records_with_prediction ?? 0) > 0;
+    refreshGapAvailability();
     document.getElementById('status-fin-dot').style.background  = finOk ? '#10b981' : '#ef4444';
     document.getElementById('status-fin-text').textContent       = `${d.companies.toLocaleString()}社 / ${d.records.toLocaleString()}件`;
     document.getElementById('status-fin-text').style.color       = finOk ? '#10b981' : '#ef4444';
@@ -1432,6 +1473,8 @@ async function initPlugins() {
   }
   // 最初のタブを表示
   showTab(_allTabs[0]);
+  // 乖離分析タブのロック状態を反映（preflight と initPlugins の競合に備え両方で呼ぶ）
+  refreshGapAvailability();
 }
 
 function _createDynamicTab(plugin, tabId) {
@@ -1507,8 +1550,20 @@ async function runDynamicPlugin(pluginName, tabId) {
   try {
     const d = await apiFetch(`/api/plugins/${pluginName}/run`, {method:'POST', body:JSON.stringify(params)});
     const card = document.getElementById(`dynresult-${tabId}`);
-    document.getElementById(`dynresult-content-${tabId}`).innerHTML = _renderGenericResult(d);
+    const content = document.getElementById(`dynresult-content-${tabId}`);
+    content.innerHTML = _renderGenericResult(d);
     card.classList.remove('hidden');
+    // 業種別OLS が完了したら乖離分析を解放し、結果に導線を出す
+    if (pluginName === 'sector_ols') {
+      _olsRanThisSession = true;
+      refreshGapAvailability();
+      content.insertAdjacentHTML('afterbegin',
+        `<div class="info-box" style="border-color:#10b981;margin-bottom:14px">
+          ✓ 業種別OLSが完了しました。各銘柄の理論株価と乖離率を計算しDBに保存しました。
+          <button class="btn btn-primary btn-sm" style="margin-left:12px" onclick="showTab('gap')">→ 乖離分析を見る</button>
+        </div>`);
+      showNotif('乖離分析が利用可能になりました', 'success');
+    }
   } catch(e) { showNotif(`実行失敗: ${e.message}`); }
 }
 

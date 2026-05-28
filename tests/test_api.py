@@ -136,6 +136,17 @@ class TestStatsEndpoint:
         assert body["records"] == 1
         assert body["latest_year"] == 2023
         assert "freshness" in body
+        # 予測値（gap_ratio）が無いので 0（乖離分析はUIでロック）
+        assert body["records_with_prediction"] == 0
+
+    def test_records_with_prediction_counts_gap_ratio(self, db, make_fin):
+        # gap_ratio が書き込まれたレコードのみカウント（業種別OLS実行済み判定）
+        db.add(make_fin(edinet_code="E00001", year=2023, gap_ratio=12.3))
+        db.add(make_fin(edinet_code="E00002", year=2023, gap_ratio=None))
+        db.commit()
+        api.app.dependency_overrides[api.get_db] = lambda: db
+        body = client.get("/api/stats").json()
+        assert body["records_with_prediction"] == 1
 
 
 class TestCompaniesEndpoint:
