@@ -12,11 +12,41 @@
 
 | 項目 | 制約値 | 設計への影響 |
 |---|---|---|
-| 月間利用上限 | **2,000 分/月**（パブリックリポジトリは無制限） | パブリックリポジトリで運用しているため現状は無制限だが、プライベート化した場合は月2,000分以内に収める設計が必要 |
+| 月間利用上限 | **2,000 分/月**（パブリックリポジトリは無制限） | **通常運用は Private**。Actions 月2,000分を使い切ったら一時的に Public 化し、翌月1日のリセット後に Private へ戻す。詳細は下記「リポジトリ可視性の運用方針」参照 |
 | 1ジョブの最大実行時間 | **6時間（360分）** | 長時間処理は matrix で分割（collect × N年分）し、各ジョブを6時間枠内に収める |
 | 同時実行数（無料） | **20並列**（ただし `max-parallel: 1` で逐次化） | full-pipeline は `max-parallel: 1` で順次実行。並列化すると Supabase 接続数上限に当たる |
 | Runner の IP | **Azure クラウド IP** | stooq は Azure IP をブロック（実証済み）。Yahoo Finance は GitHub Actions からは動作するが Claude Code リモート環境からはブロックされる。**外部データ取得は必ずクラウドIP対応を確認すること** |
 | Artifact 保存期間 | デフォルト 90日（設定で7日に短縮済み） | ログ Artifact は `retention-days: 7` に統一 |
+
+#### リポジトリ可視性の運用方針（重要）
+
+| 状態 | 用途 | Actions 上限 |
+|---|---|---|
+| **Private（デフォルト）** | 通常運用 | 月 2,000 分 |
+| **Public（一時退避）** | Actions 上限到達時のみ | 無制限 |
+
+**Public 化が必要になる典型シナリオ**:
+- フル収集（`full-pipeline` 約 195〜230分）を月に数回実行
+- バックフィル（`backfill-stock-history` 60〜90分）を実行
+- これらの組み合わせで月2,000分を超過
+
+**Public ↔ Private 切替手順**:
+1. GitHub UI: `Settings` → 最下部 `Danger Zone` → `Change repository visibility`
+2. リポジトリ名を入力して確定
+
+**Private 復帰前のチェックリスト（次回の戻し作業時に必読）**:
+- [ ] GitHub Billing ページで Actions 残量をチェック（`Settings → Billing & plans → Plans and usage`）。リセットは毎月1日
+- [ ] 残量が十分（例: 1,500分以上）あることを確認してから Private 化
+- [ ] Private 化直後に軽量ワークフロー（`daily-incremental` 等）を1本走らせて課金が始まらないことを確認
+- [ ] Public 期間中に GitHub Issue / PR が外部からつかなかったか確認（Star/Fork は気にしないでよい）
+- [ ] secrets（DATABASE_URL, EDINET_API_KEY, JQUANTS_API_KEY 等）はリポジトリ可視性と独立して保護されるため、切替時に何もする必要はない
+
+**月次の運用フロー（参考）**:
+```
+月初〜中旬: Private で運用、差分収集（daily-incremental, ~5分/日）のみ
+中旬〜下旬: フル収集が必要なら、まず Billing で残量チェック
+            残量 < 必要分なら Public 化 → 実行 → 翌月1日後に Private 復帰
+```
 
 **IP ブロック実績（2026年5月時点）**:
 - stooq: GitHub Actions（Azure）から **完全ブロック**（403）
