@@ -587,6 +587,10 @@ async def history_coverage(db: Session = Depends(get_db)):
 @app.get("/api/stock/history/{edinet_code}")
 async def get_stock_history(edinet_code: str, days: int = 365, db: Session = Depends(get_db)):
     """指定企業の日次 OHLCV を最新 days 日分返す"""
+    if not _EDINET_CODE_RE.match(edinet_code):
+        raise HTTPException(400, "edinet_code の形式が不正です（例: E02167）")
+    if not 1 <= days <= 3650:
+        raise HTTPException(400, "days は 1〜3650 の範囲で指定してください")
     rows = (
         db.query(StockPriceHistory)
         .filter(StockPriceHistory.edinet_code == edinet_code)
@@ -981,6 +985,8 @@ async def list_companies(
 
 @app.get("/api/financials/{edinet_code}")
 async def get_financials(edinet_code: str, db: Session = Depends(get_db)):
+    if not _EDINET_CODE_RE.match(edinet_code):
+        raise HTTPException(400, "edinet_code の形式が不正です（例: E02167）")
     records = (db.query(FinancialRecord)
                .filter_by(edinet_code=edinet_code)
                .order_by(FinancialRecord.year)

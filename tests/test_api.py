@@ -178,6 +178,32 @@ class TestFinancialsEndpoint:
         api.app.dependency_overrides[api.get_db] = lambda: db
         assert client.get("/api/financials/E99999").status_code == 404
 
+    def test_400_when_invalid_edinet_code(self, db):
+        api.app.dependency_overrides[api.get_db] = lambda: db
+        assert client.get("/api/financials/INVALID").status_code == 400
+
+
+class TestStockHistoryEndpoint:
+    def test_returns_rows_date_ascending(self, db, make_price):
+        # DB からは trade_date 降順で取得し、reversed で昇順に整列して返す
+        db.add(make_price(edinet_code="E00001", trade_date="2023-01-04", close=1000.0))
+        db.add(make_price(edinet_code="E00001", trade_date="2023-01-05", close=1010.0))
+        db.commit()
+        api.app.dependency_overrides[api.get_db] = lambda: db
+        r = client.get("/api/stock/history/E00001")
+        assert r.status_code == 200
+        rows = r.json()
+        assert [row["trade_date"] for row in rows] == ["2023-01-04", "2023-01-05"]
+
+    def test_400_when_invalid_edinet_code(self, db):
+        api.app.dependency_overrides[api.get_db] = lambda: db
+        assert client.get("/api/stock/history/INVALID").status_code == 400
+
+    def test_400_when_days_out_of_range(self, db):
+        api.app.dependency_overrides[api.get_db] = lambda: db
+        assert client.get("/api/stock/history/E00001", params={"days": 0}).status_code == 400
+        assert client.get("/api/stock/history/E00001", params={"days": 99999}).status_code == 400
+
 
 class TestCollectStatusEndpoint:
     def test_recent_jobs(self, db):
