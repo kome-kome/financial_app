@@ -380,7 +380,7 @@ pytest tests/test_utils.py::test_winsorize_basic    # 単一関数
 - ~~【Tier2 既知リスク・要対応】 CORS `allow_origins=["*"]`。~~ → **対応済み**（`ALLOWED_ORIGIN` 環境変数で制御、デフォルト `http://localhost:8000`）
 - ~~【Tier2 既知リスク・要対応】 `login.html` の `next` パラメータが未検証リダイレクト。~~ → **対応済み**（正規表現で相対パスのみ許可）
 - ~~【Tier2 既知リスク・要対応】 EDINET ZIP の展開サイズ無制限（ZIP爆弾リスク）。~~ → **対応済み**（`collector.py` で200MB上限チェック）
-- ~~【Tier2 既知リスク・要対応】 `edinet_code` パスパラメータの形式検証なし。~~ → **対応済み**（`^E\d{6}$` 正規表現バリデーション追加）
+- ~~【Tier2 既知リスク・要対応】 `edinet_code` パスパラメータの形式検証なし。~~ → **対応済み**（`^E\d{5,6}$` 正規表現バリデーションを全パスパラメータ（`/api/collect/refresh`・`/api/db/company`・`/api/financials`・`/api/stock/history`）に適用）
 - ~~【Tier2 既知リスク・要対応】 パスワードリセット時の最低文字数チェックなし。~~ → **対応済み**（8文字以上を要求）
 - ~~【Tier2 既知リスク・要対応】 スケジューラーエラーの `str(e)` をAPIレスポンスにそのまま含める。~~ → **対応済み**（汎用メッセージに差し替え、詳細はサーバーログのみ）
 - **【Tier3 将来対応】** 認証トークンを `localStorage` に保存している（XSS時に盗難リスク）。HttpOnly Cookie 方式への移行は認証フロー全体の再設計が必要。
