@@ -239,11 +239,22 @@ y_raw → log変換 → z-score正規化 → y_norm
   <h2>2. 業種別OLS回帰</h2>
   <span class="file-tag">plugins/sector_ols.py</span>
 
-  <p>業種ごとに独立して OLS 回帰を実行し、理論的な時価総額（または株価）を推定する。業種内でモデルを構築することで、業種間の P/E・P/B 構造差の影響を排除する。</p>
+  <p>業種ごとに独立して OLS 回帰を実行し、Ohlson モデル拡張型で<strong>株価（円/株）</strong>を推定する。業種内でモデルを構築することで、業種間の P/E・P/B 構造差の影響を排除する。</p>
+
+  <div class="warn-box">
+    <strong>次元整合性の構造的強制（CLAUDE.md 制約）:</strong>
+    目的変数は <code>stock_price [円/株]</code> 単一に固定、説明変数は per-share [円/株] のみ。
+    UI/API レベルで他の組み合わせを選べないようにすることで、係数 β を「implied 倍率」として経済的に解釈可能な状態に保つ。
+  </div>
 
   <h3>モデル定式化</h3>
-  <div class="formula-block"><span class="comment"># 業種 s 内で独立に実行</span>
-<span class="var">ŷₛ_norm</span> = β₀ + Σⱼ βⱼ · Xₛⱼ_norm
+  <div class="formula-block"><span class="comment"># 業種 s 内で独立に実行（Ohlson 拡張型）</span>
+<span class="var">ŷₛ_norm</span> = β₀ + Σⱼ βⱼ · Xₛⱼ_norm     <span class="sym">y = stock_price [円/株]</span>
+                                <span class="sym">Xⱼ = per-share 財務金額 [円/株]</span>
+
+<span class="comment"># 派生 per-share キー (ps_*) はランタイム計算</span>
+shares       = bs_total_equity / bs_bps      <span class="sym">[株]</span>
+ps_&lt;feat&gt;    = &lt;絶対額カラム&gt; / shares          <span class="sym">[円/株]</span>
 
 <span class="comment"># 業種内でのwinsorize + z-score正規化</span>
 Xₛⱼ_norm = (Xₛⱼ_winsorized − μₛⱼ) / σₛⱼ
@@ -251,20 +262,43 @@ Xₛⱼ_norm = (Xₛⱼ_winsorized − μₛⱼ) / σₛⱼ
 <span class="comment"># 乖離率（gap_ratio）</span>
 gap_ratio = (ŷ − y_actual) / y_actual × 100  <span class="sym">[%]</span>
   gap_ratio > 0: 割安（市場が過小評価）
-  gap_ratio &lt; 0: 割高（市場が過大評価）</div>
+  gap_ratio &lt; 0: 割高（市場が過大評価）
 
-  <h3>ターゲット別の変数設計</h3>
+<span class="comment"># 予測値の DB 書き込み（互換のため百万円へ換算）</span>
+predicted_market_cap = ŷ_pred / stock_price × market_cap   <span class="sym">[百万円]</span></div>
+
+  <h3>説明変数（全項目 [円/株] per-share）</h3>
+  <p>説明変数のキーは <strong>DB永続 per-share</strong>（<code>pl_eps</code>, <code>bs_bps</code>, <code>dps</code> — 公式開示値）と <strong>派生 per-share</strong>（<code>ps_*</code> — 絶対額カラムを発行株数で割って実行時計算）の 2 系統。</p>
+
+  <p><strong>デフォルト10項目（PL/BS/CF を網羅）:</strong></p>
   <table>
-    <thead><tr><th>ターゲット</th><th>説明変数</th><th>次元</th></tr></thead>
+    <thead><tr><th>カテゴリ</th><th>キー</th><th>説明</th></tr></thead>
     <tbody>
-      <tr><td><code>market_cap</code>（百万円）</td><td>revenue, op_profit, net_income, equity, op_cf</td><td>円（絶対額）</td></tr>
-      <tr><td><code>stock_price</code>（円/株）</td><td>EPS, BPS, DPS</td><td>円/株</td></tr>
+      <tr><td>PL（公式）</td><td><code>pl_eps</code></td><td>EPS 公式値</td></tr>
+      <tr><td>BS（公式）</td><td><code>bs_bps</code></td><td>BPS 公式値 — Ohlson モデル中核</td></tr>
+      <tr><td>還元（公式）</td><td><code>dps</code></td><td>1株配当 公式値</td></tr>
+      <tr><td>PL（派生）</td><td><code>ps_revenue</code></td><td>売上トップライン</td></tr>
+      <tr><td>PL（派生）</td><td><code>ps_gross_profit</code></td><td>粗利・コスト構造</td></tr>
+      <tr><td>PL（派生）</td><td><code>ps_operating_profit</code></td><td>本業収益</td></tr>
+      <tr><td>BS（派生）</td><td><code>ps_total_assets</code></td><td>企業規模</td></tr>
+      <tr><td>BS（派生）</td><td><code>ps_total_liabilities</code></td><td>負債規模</td></tr>
+      <tr><td>CF（派生）</td><td><code>ps_operating_cf</code></td><td>実キャッシュ創出力</td></tr>
+      <tr><td>CF（派生）</td><td><code>ps_free_cf</code></td><td>株主還元原資</td></tr>
     </tbody>
   </table>
-  <p>業種最小サンプル数（デフォルト: 10社）を満たさない業種はスキップ。</p>
+
+  <p>派生 per-share の全選択肢は PL/BS/CF の絶対額カラムを網羅（約30項目、<code>ps_*</code> プレフィックス）。</p>
+
+  <p><strong>実行条件:</strong> 業種最小サンプル数（デフォルト: 10社）を満たさない業種はスキップ。各銘柄について <code>bs_bps &gt; 0</code> かつ <code>bs_total_equity &gt; 0</code> が必須（株数推計のため）。</p>
 
   <div class="warn-box">
-    <strong>注意:</strong> 乖離分析（gap_analysis）は本プラグインの実行後でなければ利用不可。gap_ratio の収束予測には統計的根拠がない（→ モデル 3 参照）。
+    <strong>注意:</strong>
+    <ul style="margin: 6px 0 0 18px; padding: 0;">
+      <li><code>bs_bps</code> または <code>bs_total_equity</code> が NULL/0 の銘柄は集計対象から自動除外</li>
+      <li>per-share 10項目以上選択時は PL同士・BS同士の比例関係から VIF&gt;10 が頻発する。<code>check_collinearity</code> の警告が出た業種では <strong>Ridge への切替を強く推奨</strong></li>
+      <li>株数推計は IFRS/JGAAP 定義差・期中増資・優先株・転換社債存在時に誤差あり（FUTURE_TASKS の J-Quants <code>IssuedShares</code> 取得で根本解決予定）</li>
+      <li>乖離分析（gap_analysis）は本プラグインの実行後でなければ利用不可。gap_ratio の収束予測には統計的根拠がない（→ モデル 3 参照）</li>
+    </ul>
   </div>
 
   <div class="refs">

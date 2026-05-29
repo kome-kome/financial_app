@@ -274,7 +274,7 @@ SSEエンドポイント: 収集=`/api/collect/stream`、市場データ=`/api/c
 - **フリーCF = 営業CF + 投資CF**（設備投資以外の投資活動も含む近似値）。
 - **市場データの株数推計** = `total_equity / bps`（発行済株式数の近似）。IFRS・JGAAP混在時に精度が下がる場合あり。
 - **単位の例外**: `market_cap` のみ百万円。`pl_revenue` 等は円。直接比較・演算しないこと。
-- **分析モデルの次元整合性（必須）**: 説明変数と被説明変数は同一次元で設計すること。無次元量（比率・マージン等）で絶対額（株価・時価総額）を予測するのは次元的に不整合でOLS係数が経済的に解釈できなくなる。✅ 正しい例: per-share財務金額[円/株]（EPS/BPS/DPS）→ 株価[円/株]（Ohlsonモデル型）　❌ 誤った例: op_margin[%]・equity_ratio[%] → market_cap[百万円]
+- **分析モデルの次元整合性（必須）**: 説明変数と被説明変数は同一次元で設計すること。無次元量（比率・マージン等）で絶対額（株価・時価総額）を予測するのは次元的に不整合でOLS係数が経済的に解釈できなくなる。✅ 正しい例: per-share財務金額[円/株]（EPS/BPS/DPS）→ 株価[円/株]（Ohlsonモデル型）　❌ 誤った例: op_margin[%]・equity_ratio[%] → market_cap[百万円]　**業種別OLS（`plugins/sector_ols.py`）は target=stock_price 固定 + 説明変数 per-share 固定（DB永続 `pl_eps/bs_bps/dps` + 派生 `ps_*` プレフィックス）により UI/API レベルで強制。派生 per-share は `bs_total_equity / bs_bps` で推計した株数で除算（`plugins/utils.shares_outstanding`）。**
 - **財務データの外れ値処理（必須）**: OLS学習前に各特徴量を winsorize（p1-p99クリッピング）すること。日本株データはBPS・EPSにp99の数百倍の外れ値が存在し、無処理ではOLS（行列反転）が数値的に破綻する（R²が-10³²になる等）。実装は `plugins/utils.py` の `winsorize()` を使用。
 - **横断的R²の解釈**: プラグインが返す `cv_metrics.mean_r2` は横断的OLSの評価指標。全業種一括回帰では業種間のP/E・P/Bの構造差により構造的に低くなる（-0.1〜0.4程度）。R² < 0 はモデルが無価値ではなく「業種固定効果なしの一括回帰の限界」を反映している。ランキングの有用性はR²ではなく銘柄選択の将来パフォーマンスで評価する。
 
