@@ -24,6 +24,7 @@ def _utc_to_jst_str(dt: Optional[datetime]) -> Optional[str]:
 from fastapi import FastAPI, BackgroundTasks, Depends, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
 from pydantic import BaseModel, Field
 from sqlalchemy import func, text
@@ -119,13 +120,24 @@ class _SecurityHeadersMiddleware(BaseHTTPMiddleware):
 
 app.add_middleware(_SecurityHeadersMiddleware)
 
+# 静的アセット配信（/static/css/*, /static/js/*）— 共通 CSS/JS をここから配信
+class _CachedStaticFiles(StaticFiles):
+    """静的アセットに 1日キャッシュを付与（HTML は別途 _NO_CACHE を使用）"""
+    async def get_response(self, path: str, scope):
+        response = await super().get_response(path, scope)
+        if 200 <= response.status_code < 400:
+            response.headers["Cache-Control"] = "public, max-age=86400"
+        return response
+
+app.mount("/static", _CachedStaticFiles(directory=BASE_DIR / "static"), name="static")
+
 @app.middleware("http")
 async def _auth_middleware(request: Request, call_next):
     """APP_PASSWORD が設定されている場合、/api/* を Bearer トークンで保護する"""
     if not APP_PASSWORD:
         return await call_next(request)
     path = request.url.path
-    if path == "/login" or path.startswith("/api/auth/"):
+    if path == "/login" or path.startswith("/api/auth/") or path.startswith("/static/"):
         return await call_next(request)
     if path.startswith("/api/"):
         auth = request.headers.get("Authorization", "")

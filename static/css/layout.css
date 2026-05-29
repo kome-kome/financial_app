@@ -1,0 +1,141 @@
+/* Layout: 全画面共通の二段ナビと container */
+
+/* ── App Header（上部ナビ：ページ遷移） ─────────────────────────────── */
+.app-header {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+  height: var(--header-h);
+  padding: 0 var(--sp-5);
+  background: var(--bg-surface);
+  border-bottom: 1px solid var(--border);
+  position: sticky;
+  top: 0;
+  z-index: 50;
+}
+
+.app-header .brand {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  font-weight: 600;
+  font-size: var(--fs-lg);
+  color: var(--text-primary);
+  letter-spacing: -.01em;
+}
+.app-header .brand:hover { color: var(--text-primary); }
+.app-header .brand svg {
+  width: 22px; height: 22px;
+  color: var(--accent);
+}
+
+.primary-nav {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+  margin-left: var(--sp-4);
+}
+.primary-nav a {
+  padding: 6px 12px;
+  font-size: var(--fs-md);
+  color: var(--text-muted);
+  border-radius: var(--r-sm);
+  transition: color .15s, background .15s;
+}
+.primary-nav a:hover { color: var(--text-primary); background: var(--bg-elevated); }
+.primary-nav a[aria-current="page"] {
+  color: var(--accent);
+  background: var(--accent-bg);
+}
+
+.app-header .api-status {
+  display: flex; align-items: center; gap: var(--sp-2);
+  margin-left: auto;
+  font-size: var(--fs-xs);
+  color: var(--text-muted);
+}
+.app-header .api-status input[type="text"] {
+  width: 200px;
+  padding: 4px 8px;
+  font-size: var(--fs-xs);
+}
+
+/* ── Page Tabs（下部ナビ：画面内機能切替） ──────────────────────────── */
+.page-tabs {
+  display: flex;
+  align-items: stretch;
+  gap: 0;
+  height: var(--tabs-h);
+  padding: 0 var(--sp-5);
+  background: var(--bg-base);
+  border-bottom: 1px solid var(--border);
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+.page-tabs:empty,
+.page-tabs.is-empty {
+  display: none;
+}
+
+.page-tabs [role="tab"], .tab {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  padding: 0 var(--sp-4);
+  font-size: var(--fs-md);
+  color: var(--text-muted);
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  cursor: pointer;
+  transition: color .15s, border-color .15s;
+  white-space: nowrap;
+}
+.page-tabs [role="tab"]:hover,
+.tab:hover { color: var(--text-primary); }
+.page-tabs [role="tab"][aria-selected="true"],
+.tab.active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+/* OLS未実行などで利用不可なタブ */
+.page-tabs [role="tab"].locked {
+  color: var(--text-muted);
+  opacity: .7;
+}
+.page-tabs [role="tab"].locked::before { content: "🔒 "; }
+
+/* ── Status Bar（任意：データ鮮度などの帯） ──────────────────────────── */
+.status-bar {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-5);
+  padding: 8px var(--sp-5);
+  background: var(--bg-sunken);
+  border-bottom: 1px solid var(--border);
+  font-size: var(--fs-xs);
+  color: var(--text-muted);
+}
+
+/* ── Container ───────────────────────────────────────────────────────── */
+.container {
+  max-width: var(--container-max);
+  margin: 0 auto;
+  padding: var(--sp-5);
+}
+
+/* ── Grids ───────────────────────────────────────────────────────────── */
+.grid-2 { display: grid; grid-template-columns: repeat(2, 1fr); gap: var(--sp-4); }
+.grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: var(--sp-4); }
+.grid-auto { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: var(--sp-4); }
+
+@media (max-width: 768px) {
+  .grid-2, .grid-3 { grid-template-columns: 1fr; }
+  .app-header { flex-wrap: wrap; height: auto; padding: var(--sp-2) var(--sp-3); }
+  .app-header .api-status input[type="text"] { width: 130px; }
+  .primary-nav { margin-left: 0; flex-wrap: wrap; }
+}
+
+/* ── Tabpanel ────────────────────────────────────────────────────────── */
+[role="tabpanel"] { outline: none; }
+[role="tabpanel"].hidden { display: none; }

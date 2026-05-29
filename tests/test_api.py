@@ -36,6 +36,67 @@ def _clear_overrides():
 
 # ── 純粋関数 ─────────────────────────────────────────────────────────────────
 
+class TestHtmlRoutes:
+    """全画面が共通レイアウト（app-header-mount）を含むことを確認。"""
+    def test_dashboard_uses_common_header(self):
+        r = client.get('/')
+        assert r.status_code == 200 and 'app-header-mount' in r.text
+
+    def test_collection_uses_page_tabs(self):
+        r = client.get('/collection')
+        assert r.status_code == 200
+        assert 'page-tabs' in r.text and 'app-header-mount' in r.text
+
+    def test_analysis_uses_page_tabs(self):
+        # /analysis のナビ混在解消: page-tabs が role="tablist" で存在し、
+        # 旧 plugin-nav の混在マークアップは残っていない
+        r = client.get('/analysis')
+        assert r.status_code == 200
+        assert 'id="page-tabs"' in r.text and 'role="tablist"' in r.text
+        assert 'id="plugin-nav"' not in r.text
+
+    def test_models_uses_common_header(self):
+        r = client.get('/models')
+        assert r.status_code == 200 and 'app-header-mount' in r.text
+
+    def test_company_uses_common_header(self):
+        r = client.get('/company')
+        assert r.status_code == 200 and 'app-header-mount' in r.text
+
+    def test_db_uses_common_header(self):
+        r = client.get('/db')
+        assert r.status_code == 200 and 'app-header-mount' in r.text
+
+    def test_login_loads_app_css(self):
+        r = client.get('/login')
+        assert r.status_code == 200 and '/static/css/app.css' in r.text
+
+
+class TestStaticAssets:
+    """共通 CSS/JS が StaticFiles 経由で配信されることを確認。"""
+    def test_app_css_served(self):
+        r = client.get("/static/css/app.css")
+        assert r.status_code == 200
+        assert r.headers["content-type"].startswith("text/css")
+        # 1日キャッシュが付与される
+        assert "max-age=86400" in r.headers.get("cache-control", "")
+
+    def test_core_js_served(self):
+        r = client.get("/static/js/core.js")
+        assert r.status_code == 200
+        ct = r.headers["content-type"]
+        # text/javascript or application/javascript 両方許容
+        assert "javascript" in ct
+
+    def test_nav_js_served(self):
+        assert client.get("/static/js/nav.js").status_code == 200
+
+    def test_static_unauthenticated_when_password_set(self, monkeypatch):
+        # APP_PASSWORD が設定されていても /static/* はトークン不要で配信される
+        monkeypatch.setattr(api, "APP_PASSWORD", "secret-pw")
+        assert client.get("/static/css/app.css").status_code == 200
+
+
 class TestUtcToJstStr:
     def test_none_returns_none(self):
         assert api._utc_to_jst_str(None) is None

@@ -4,78 +4,54 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>モデル解説</title>
+<link rel="stylesheet" href="/static/css/app.css?v=20260529">
 <style>
-*{box-sizing:border-box;margin:0;padding:0}
-body{font-family:'Segoe UI',sans-serif;background:#0f1117;color:#e2e8f0;min-height:100vh;line-height:1.7}
-.header{background:#1a1d2e;border-bottom:1px solid #2d3154;padding:14px 24px;display:flex;align-items:center;gap:14px;position:sticky;top:0;z-index:100}
-.header h1{font-size:17px;font-weight:600;color:#a78bfa}
-.badge{background:#312e81;color:#c4b5fd;font-size:11px;padding:3px 8px;border-radius:12px}
-.nav-link{padding:8px 14px;font-size:13px;color:#64748b;text-decoration:none;display:inline-flex;align-items:center;gap:5px;border-radius:6px;margin-left:auto}
-.nav-link:hover{background:#1e293b;color:#94a3b8}
-.layout{display:flex;max-width:1400px;margin:0 auto;padding:24px;gap:28px}
-.sidebar{width:230px;flex-shrink:0}
-.toc{background:#1a1d2e;border:1px solid #2d3154;border-radius:10px;padding:16px;position:sticky;top:80px}
-.toc-title{font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:.5px;margin-bottom:12px}
-.toc a{display:block;font-size:12px;color:#64748b;text-decoration:none;padding:5px 8px;border-radius:5px;transition:all .15s;border-left:2px solid transparent}
-.toc a:hover{background:#1e293b;color:#a78bfa;border-left-color:#7c3aed}
-.toc a.active{background:#1e293b;color:#a78bfa;border-left-color:#7c3aed}
-.toc .toc-sub{padding-left:16px}
-.content{flex:1;min-width:0}
-.model-section{background:#1a1d2e;border:1px solid #2d3154;border-radius:10px;padding:24px;margin-bottom:20px}
-.model-section:target{border-color:#7c3aed;box-shadow:0 0 0 2px rgba(124,58,237,.2)}
-h2{font-size:18px;font-weight:700;color:#a78bfa;margin-bottom:4px;display:flex;align-items:center;gap:10px}
-h2 .model-tag{font-size:10px;background:#1e293b;border:1px solid #334155;color:#64748b;padding:2px 8px;border-radius:10px;font-weight:400}
-h3{font-size:14px;font-weight:600;color:#c4b5fd;margin:18px 0 8px;border-bottom:1px solid #2d3154;padding-bottom:6px}
-h4{font-size:13px;font-weight:600;color:#94a3b8;margin:12px 0 6px}
-p{font-size:13px;color:#cbd5e1;margin-bottom:10px}
-.file-tag{font-size:11px;background:#0f172a;border:1px solid #1e2235;color:#67e8f9;padding:2px 9px;border-radius:4px;font-family:monospace;margin-bottom:14px;display:inline-block}
-.formula-block{background:#0a0c14;border:1px solid #1e2235;border-left:3px solid #7c3aed;border-radius:6px;padding:14px 16px;margin:10px 0;font-family:'Courier New',monospace;font-size:12px;color:#e2e8f0;overflow-x:auto;white-space:pre;line-height:1.6}
-.formula-block .comment{color:#64748b}
-.formula-block .var{color:#67e8f9}
-.formula-block .val{color:#a78bfa}
-.formula-block .sym{color:#f59e0b}
-table{width:100%;border-collapse:collapse;font-size:12px;margin:10px 0}
-th{text-align:left;padding:8px 10px;color:#64748b;font-weight:500;border-bottom:1px solid #2d3154;background:#141722;white-space:nowrap}
-td{padding:8px 10px;border-bottom:1px solid #1e2235;color:#cbd5e1}
-tr:hover td{background:#1a1f35}
-td code{background:#0f172a;border:1px solid #1e2235;padding:1px 5px;border-radius:3px;font-size:11px;color:#67e8f9;font-family:monospace}
-.warn-box{background:#451a03;border:1px solid #92400e;border-radius:8px;padding:12px 14px;font-size:12px;color:#fcd34d;margin:10px 0}
-.warn-box strong{color:#fbbf24}
-.info-box{background:#1e2235;border:1px solid #2d3154;border-radius:8px;padding:12px 14px;font-size:12px;color:#94a3b8;margin:10px 0;border-left:3px solid #7c3aed;line-height:1.6}
-.refs{margin-top:14px;padding-top:14px;border-top:1px solid #2d3154}
-.refs h4{font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px}
-.ref-item{font-size:12px;color:#94a3b8;padding:5px 0;border-bottom:1px solid #1e2235;line-height:1.6}
-.ref-item:last-child{border-bottom:none}
-.ref-item a{color:#7c3aed;text-decoration:none;word-break:break-all}
-.ref-item a:hover{color:#a78bfa;text-decoration:underline}
-.ref-item .ref-title{color:#e2e8f0;font-style:italic}
-.tag{display:inline-block;padding:2px 7px;border-radius:10px;font-size:10px;font-weight:500}
-.tag-green{background:#052e16;color:#86efac}
-.tag-red{background:#450a0a;color:#fca5a5}
-.tag-amber{background:#451a03;color:#fcd34d}
-.tag-purple{background:#2e1065;color:#c4b5fd}
-.tag-blue{background:#1e3a5f;color:#93c5fd}
-.common-section{background:#1a1d2e;border:1px solid #2d3154;border-radius:10px;padding:20px;margin-bottom:20px}
-.toc-section-title{font-size:10px;color:#4b5563;text-transform:uppercase;letter-spacing:.5px;margin:12px 0 4px 8px}
+/* models.html 固有スタイル */
+body { line-height: 1.7; }
+.layout { display: flex; max-width: var(--container-max); margin: 0 auto; padding: var(--sp-5); gap: var(--sp-6); }
+.sidebar { width: 230px; flex-shrink: 0; }
+.toc { background: var(--bg-surface); border: 1px solid var(--border); border-radius: var(--r-md); padding: var(--sp-4); position: sticky; top: calc(var(--header-h) + var(--sp-3)); }
+.toc-title { font-size: var(--fs-xs); color: var(--text-muted); text-transform: uppercase; letter-spacing: .5px; margin-bottom: var(--sp-3); }
+.toc a { display: block; font-size: var(--fs-sm); color: var(--text-muted); padding: 5px 8px; border-radius: var(--r-sm); transition: all .15s; border-left: 2px solid transparent; }
+.toc a:hover { background: var(--bg-elevated); color: var(--link); border-left-color: var(--link); }
+.toc a.active { background: var(--bg-elevated); color: var(--link); border-left-color: var(--link); }
+.toc .toc-sub { padding-left: var(--sp-4); }
+.content { flex: 1; min-width: 0; }
+.model-section { background: var(--bg-surface); border: 1px solid var(--border); border-radius: var(--r-md); padding: var(--sp-5); margin-bottom: var(--sp-4); }
+.model-section:target { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-bg); }
+.model-section h2 { font-size: var(--fs-xl); color: var(--link); margin-bottom: 4px; display: flex; align-items: center; gap: 10px; }
+.model-section h2 .model-tag { font-size: 10px; background: var(--bg-elevated); border: 1px solid var(--border); color: var(--text-muted); padding: 2px 8px; border-radius: 10px; font-weight: 400; }
+.model-section h3 { font-size: var(--fs-md); font-weight: 600; color: var(--text-primary); margin: var(--sp-4) 0 var(--sp-2); border-bottom: 1px solid var(--border); padding-bottom: 6px; }
+.model-section h4 { font-size: var(--fs-md); font-weight: 600; color: var(--text-secondary); margin: var(--sp-3) 0 6px; }
+.model-section p { font-size: var(--fs-md); color: var(--text-secondary); margin-bottom: 10px; }
+.file-tag { font-size: var(--fs-xs); background: var(--bg-sunken); border: 1px solid var(--border); color: var(--accent); padding: 2px 9px; border-radius: var(--r-sm); font-family: var(--ff-mono); margin-bottom: var(--sp-3); display: inline-block; }
+.formula-block { background: var(--bg-sunken); border: 1px solid var(--border); border-left: 3px solid var(--accent); border-radius: var(--r-sm); padding: 14px 16px; margin: 10px 0; font-family: var(--ff-mono); font-size: var(--fs-sm); color: var(--text-primary); overflow-x: auto; white-space: pre; line-height: 1.6; }
+.formula-block .comment { color: var(--text-muted); }
+.formula-block .var { color: var(--accent); }
+.formula-block .val { color: var(--link); }
+.formula-block .sym { color: var(--warning); }
+.model-section td code { background: var(--bg-sunken); border: 1px solid var(--border); padding: 1px 5px; border-radius: 3px; font-size: var(--fs-xs); color: var(--accent); font-family: var(--ff-mono); }
+.warn-box { background: var(--warning-bg); border: 1px solid var(--warning); border-radius: var(--r-sm); padding: 12px 14px; font-size: var(--fs-sm); color: var(--warning); margin: 10px 0; }
+.warn-box strong { color: var(--warning); }
+.refs { margin-top: var(--sp-3); padding-top: var(--sp-3); border-top: 1px solid var(--border); }
+.refs h4 { font-size: var(--fs-xs); color: var(--text-muted); text-transform: uppercase; letter-spacing: .5px; margin-bottom: var(--sp-2); }
+.ref-item { font-size: var(--fs-sm); color: var(--text-secondary); padding: 5px 0; border-bottom: 1px solid var(--border); line-height: 1.6; }
+.ref-item:last-child { border-bottom: none; }
+.ref-item a { word-break: break-all; }
+.ref-item .ref-title { color: var(--text-primary); font-style: italic; }
+.common-section { background: var(--bg-surface); border: 1px solid var(--border); border-radius: var(--r-md); padding: var(--sp-4); margin-bottom: var(--sp-4); }
+.toc-section-title { font-size: 10px; color: var(--text-muted); text-transform: uppercase; letter-spacing: .5px; margin: 12px 0 4px 8px; }
+
+@media (max-width: 900px) {
+  .layout { flex-direction: column; }
+  .sidebar { width: 100%; }
+  .toc { position: static; }
+}
 </style>
 </head>
 <body>
 
-<div class="header">
-  <div style="width:30px;height:30px;background:#312e81;border-radius:8px;display:flex;align-items:center;justify-content:center">
-    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#a78bfa" stroke-width="2"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>
-  </div>
-  <h1>モデル解説</h1>
-  <span class="badge">Docs</span>
-  <a href="/analysis" class="nav-link">
-    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>
-    分析へ戻る
-  </a>
-  <a href="/" class="nav-link" style="margin-left:0">
-    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
-    ホーム
-  </a>
-</div>
+<div id="app-header-mount"></div>
 
 <div class="layout">
 
@@ -677,21 +653,26 @@ z_nc_ratio = (nc_ratio − μ_year) / σ_year
 </main>
 </div>
 
-<script>
+<script type="module">
+import '/static/js/core.js';
+import '/static/js/header.js';
+import '/static/js/auth.js';
+import '/static/js/nav.js';
+
 // アクティブなTOCリンクをハイライト
-const sections = document.querySelectorAll('[id]');
+const sections = document.querySelectorAll('.model-section[id], .common-section[id]');
 const tocLinks = document.querySelectorAll('.toc a');
 function updateToc() {
   let current = '';
   sections.forEach(s => {
-    if (window.scrollY + 100 >= s.offsetTop) current = s.id;
+    if (window.scrollY + 120 >= s.offsetTop) current = s.id;
   });
   tocLinks.forEach(a => {
     a.classList.toggle('active', a.getAttribute('href') === '#' + current);
   });
 }
-window.addEventListener('scroll', updateToc);
-updateToc();
+window.addEventListener('scroll', updateToc, { passive: true });
+window.addEventListener('DOMContentLoaded', updateToc);
 </script>
 </body>
 </html>

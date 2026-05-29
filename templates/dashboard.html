@@ -4,253 +4,194 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>財務分析ダッシュボード</title>
+<link rel="stylesheet" href="/static/css/app.css?v=20260529">
 <style>
-*{box-sizing:border-box;margin:0;padding:0}
-body{font-family:'Segoe UI',sans-serif;background:#0f1117;color:#e2e8f0;min-height:100vh}
-.header{background:#1a1d2e;border-bottom:1px solid #2d3154;padding:14px 24px;display:flex;align-items:center;gap:14px}
-.header h1{font-size:17px;font-weight:600;color:#a78bfa}
-.badge{background:#312e81;color:#c4b5fd;font-size:11px;padding:3px 8px;border-radius:12px}
-.dot{width:8px;height:8px;border-radius:50%;display:inline-block}
-.dot-green{background:#10b981}.dot-amber{background:#f59e0b}.dot-red{background:#ef4444}
-.api-status{margin-left:auto;display:flex;align-items:center;gap:8px;font-size:12px;color:#64748b}
-.container{padding:28px 24px;max-width:1100px;margin:0 auto}
-.section-title{font-size:13px;font-weight:600;color:#64748b;text-transform:uppercase;letter-spacing:.8px;margin-bottom:14px}
-.stats-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:28px}
-@media (max-width: 768px){
-  .stats-grid{grid-template-columns:1fr 1fr}
-  .nav-grid{grid-template-columns:1fr}
-  .sched-grid{grid-template-columns:1fr 1fr}
+/* dashboard 固有 */
+.stats-grid { display:grid; grid-template-columns:repeat(4,1fr); gap:var(--sp-3); margin-bottom:var(--sp-5); }
+.stat-card { background:var(--bg-surface); border:1px solid var(--border); border-radius:var(--r-md); padding:var(--sp-4); text-align:center; display:flex; flex-direction:column; align-items:center; justify-content:center; min-height:128px; }
+.stat-card.warn  { border-color:var(--warning); }
+.stat-card.alert { border-color:var(--danger);  }
+.stat-label { font-size:var(--fs-xs); color:var(--text-muted); margin-bottom:6px; text-transform:uppercase; letter-spacing:.5px; }
+.stat-value { font-size:26px; font-weight:700; line-height:1.1; color:var(--accent); }
+.stat-sub   { font-size:var(--fs-xs); color:var(--text-muted); margin-top:4px; }
+.stat-meta  { font-size:10px; color:var(--text-muted); margin-top:6px; line-height:1.45; }
+.freshness-badge { display:inline-block; padding:2px 8px; border-radius:10px; font-size:10px; font-weight:600; margin-top:6px; }
+.fr-fresh    { background:var(--success-bg); color:var(--success); }
+.fr-ok       { background:var(--info-bg);    color:var(--info);    }
+.fr-stale    { background:var(--warning-bg); color:var(--warning); }
+.fr-outdated { background:var(--danger-bg);  color:var(--danger);  }
+.fr-empty    { background:var(--bg-elevated); color:var(--text-muted); }
+
+.update-banner { background:var(--info-bg); border:1px solid var(--info); border-radius:var(--r-md); padding:14px 18px; margin-bottom:var(--sp-4); display:none; align-items:center; gap:var(--sp-3); font-size:var(--fs-md); color:var(--info); }
+.update-banner.show { display:flex; }
+.update-banner a { color:var(--info); font-weight:600; border:1px solid var(--info); padding:5px 12px; border-radius:var(--r-sm); font-size:var(--fs-sm); margin-left:auto; flex-shrink:0; }
+.update-banner a:hover { background:var(--info); color:var(--bg-base); }
+
+.nav-grid { display:grid; grid-template-columns:1fr 1fr; gap:var(--sp-4); margin-bottom:var(--sp-5); }
+.nav-card { background:var(--bg-surface); border:1px solid var(--border); border-radius:var(--r-lg); padding:var(--sp-5); display:flex; flex-direction:column; gap:var(--sp-3); transition:border-color .2s, transform .2s; }
+.nav-card:hover { border-color:var(--accent); transform:translateY(-2px); }
+.nav-card-title { font-size:var(--fs-lg); font-weight:600; color:var(--text-primary); display:flex; align-items:center; gap:10px; }
+.nav-card-icon { width:36px; height:36px; border-radius:var(--r-md); display:flex; align-items:center; justify-content:center; background:var(--bg-elevated); color:var(--accent); }
+.nav-card-icon svg { width:18px; height:18px; }
+.nav-card-desc { font-size:var(--fs-sm); color:var(--text-muted); line-height:1.7; }
+.feature-list { list-style:none; display:flex; flex-direction:column; gap:6px; padding:0; margin:0; }
+.feature-list li { font-size:var(--fs-sm); color:var(--text-secondary); display:flex; align-items:center; gap:6px; }
+.feature-list li::before { content:''; width:4px; height:4px; border-radius:50%; background:var(--accent); flex-shrink:0; }
+.nav-card .btn { width:fit-content; margin-top:auto; }
+
+.scheduler-card { background:var(--bg-surface); border:1px solid var(--border); border-radius:var(--r-lg); padding:var(--sp-4); }
+.sched-grid { display:grid; grid-template-columns:repeat(3,1fr); gap:var(--sp-3); margin-top:var(--sp-3); }
+.sched-item { background:var(--bg-sunken); border-radius:var(--r-md); padding:14px; }
+.sched-item-label { font-size:10px; color:var(--text-muted); text-transform:uppercase; letter-spacing:.5px; margin-bottom:6px; }
+.sched-item-value { font-size:var(--fs-md); font-weight:600; color:var(--text-primary); }
+
+@media (max-width: 768px) {
+  .stats-grid { grid-template-columns:1fr 1fr; }
+  .nav-grid   { grid-template-columns:1fr; }
+  .sched-grid { grid-template-columns:1fr 1fr; }
 }
-@media (max-width: 480px){
-  .stats-grid{grid-template-columns:1fr}
-  .sched-grid{grid-template-columns:1fr}
+@media (max-width: 480px) {
+  .stats-grid { grid-template-columns:1fr; }
+  .sched-grid { grid-template-columns:1fr; }
 }
-.stat-card{background:#1a1d2e;border:1px solid #2d3154;border-radius:10px;padding:18px;text-align:center;position:relative;display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:128px}
-.stat-card.warn{border-color:#92400e}
-.stat-card.alert{border-color:#991b1b}
-.stat-label{font-size:11px;color:#64748b;margin-bottom:6px;text-transform:uppercase;letter-spacing:.5px}
-.stat-value{font-size:26px;font-weight:700;line-height:1.1}
-.stat-sub{font-size:11px;color:#64748b;margin-top:4px}
-.stat-meta{font-size:10px;color:#475569;margin-top:6px;line-height:1.45}
-.freshness-badge{display:inline-block;padding:2px 8px;border-radius:10px;font-size:10px;font-weight:600;margin-top:6px}
-.fr-fresh{background:#052e16;color:#86efac}
-.fr-ok{background:#1e3a5f;color:#93c5fd}
-.fr-stale{background:#451a03;color:#fcd34d}
-.fr-outdated{background:#450a0a;color:#fca5a5}
-.fr-empty{background:#1e293b;color:#64748b}
-.update-banner{background:#1e1b3a;border:1px solid #7c3aed;border-radius:10px;padding:14px 18px;margin-bottom:20px;display:none;align-items:center;gap:14px;font-size:13px;color:#c4b5fd}
-.update-banner.show{display:flex}
-.update-banner a{color:#a78bfa;font-weight:600;text-decoration:none;border:1px solid #7c3aed;padding:5px 12px;border-radius:6px;font-size:12px;margin-left:auto;flex-shrink:0}
-.update-banner a:hover{background:#7c3aed;color:#fff}
-.nav-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:28px}
-.nav-card{background:#1a1d2e;border:1px solid #2d3154;border-radius:12px;padding:24px;display:flex;flex-direction:column;gap:14px;transition:border-color .2s}
-.nav-card:hover{border-color:#7c3aed}
-.nav-card-title{font-size:16px;font-weight:600;color:#e2e8f0;display:flex;align-items:center;gap:10px}
-.nav-card-icon{width:36px;height:36px;border-radius:8px;display:flex;align-items:center;justify-content:center}
-.icon-blue{background:#1e3a5f}
-.icon-purple{background:#2e1065}
-.nav-card-desc{font-size:12px;color:#64748b;line-height:1.7}
-.feature-list{list-style:none;display:flex;flex-direction:column;gap:6px}
-.feature-list li{font-size:12px;color:#94a3b8;display:flex;align-items:center;gap:6px}
-.feature-list li::before{content:'';width:4px;height:4px;border-radius:50%;background:#7c3aed;flex-shrink:0}
-.nav-btn{display:inline-flex;align-items:center;gap:6px;padding:9px 18px;background:#7c3aed;color:#fff;border-radius:6px;text-decoration:none;font-size:13px;font-weight:500;margin-top:auto;transition:background .15s;border:none;cursor:pointer;width:fit-content}
-.nav-btn:hover{background:#6d28d9}
-.nav-btn-outline{background:transparent;border:1px solid #334155;color:#94a3b8}
-.nav-btn-outline:hover{background:#1e293b;color:#e2e8f0}
-.scheduler-card{background:#1a1d2e;border:1px solid #2d3154;border-radius:12px;padding:20px}
-.sched-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin-top:14px}
-.sched-item{background:#0f1117;border-radius:8px;padding:14px}
-.sched-item-label{font-size:10px;color:#64748b;text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px}
-.sched-item-value{font-size:14px;font-weight:600}
-.tag{display:inline-block;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:500}
-.tag-green{background:#052e16;color:#86efac}
-.tag-amber{background:#451a03;color:#fcd34d}
-.tag-blue{background:#1e3a5f;color:#93c5fd}
-.tag-gray{background:#1e293b;color:#64748b}
-.spinner{width:14px;height:14px;border:2px solid #334155;border-top-color:#a78bfa;border-radius:50%;animation:spin .7s linear infinite;display:inline-block}
-@keyframes spin{to{transform:rotate(360deg)}}
 </style>
 </head>
 <body>
 
-<div class="header">
-  <div style="width:32px;height:32px;background:#312e81;border-radius:8px;display:flex;align-items:center;justify-content:center">
-    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#a78bfa" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
-  </div>
-  <h1>財務分析ダッシュボード</h1>
-  <span class="badge">ホーム</span>
-  <div class="api-status">
-    <span class="dot dot-amber" id="api-dot"></span>
-    <span id="api-label">接続確認中...</span>
-  </div>
-</div>
+<div id="app-header-mount"></div>
 
 <div class="container">
 
-  <!-- 鮮度バナー（古い場合だけ表示） -->
   <div class="update-banner" id="update-banner">
-    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#a78bfa" stroke-width="2" style="flex-shrink:0">
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
       <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>
     </svg>
     <span id="update-banner-msg">データが古い可能性があります。差分収集を実行して最新化してください。</span>
     <a href="/collection">収集ページへ</a>
   </div>
 
-  <!-- ステータスカード -->
   <div class="section-title">データベース概要</div>
   <div class="stats-grid">
     <div class="stat-card">
       <div class="stat-label">収録企業数</div>
-      <div class="stat-value" id="stat-companies" style="color:#a78bfa">—</div>
+      <div class="stat-value" id="stat-companies">—</div>
       <div class="stat-sub">社</div>
     </div>
     <div class="stat-card">
       <div class="stat-label">財務レコード数</div>
-      <div class="stat-value" id="stat-records" style="color:#60a5fa">—</div>
+      <div class="stat-value" id="stat-records">—</div>
       <div class="stat-sub">件</div>
     </div>
     <div class="stat-card" id="card-year">
       <div class="stat-label">最新年度</div>
-      <div class="stat-value" id="stat-year" style="color:#10b981">—</div>
+      <div class="stat-value" id="stat-year">—</div>
       <div class="stat-meta" id="stat-year-meta">—</div>
     </div>
     <div class="stat-card" id="card-freshness">
       <div class="stat-label">データ鮮度</div>
-      <div class="stat-value" id="stat-fresh-days" style="color:#10b981;font-size:22px">—</div>
+      <div class="stat-value" id="stat-fresh-days" style="font-size:22px">—</div>
       <div class="stat-meta" id="stat-fresh-meta">最終更新: —</div>
       <span class="freshness-badge fr-empty" id="stat-fresh-badge">未取得</span>
     </div>
   </div>
 
-  <!-- ナビゲーションカード -->
   <div class="section-title">ページへ移動</div>
   <div class="nav-grid">
-    <!-- 収集 & スクリーニング -->
     <div class="nav-card">
       <div class="nav-card-title">
-        <div class="nav-card-icon icon-blue">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#93c5fd" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+        <div class="nav-card-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
         </div>
-        収集 & スクリーニング
+        収集 &amp; スクリーニング
       </div>
-      <div class="nav-card-desc">
-        EDINETから財務データを収集し、条件でスクリーニングします。
-      </div>
+      <div class="nav-card-desc">EDINETから財務データを収集し、条件でスクリーニングします。</div>
       <ul class="feature-list">
         <li>EDINET / stooq からの財務・株価データ収集</li>
         <li>財務指標によるスクリーニング</li>
         <li>財務レコードのDB閲覧</li>
         <li>Zスコア正規化ビュー</li>
       </ul>
-      <a href="/collection" class="nav-btn">
-        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
-        収集ページを開く
-      </a>
+      <a href="/collection" class="btn btn-primary">収集ページを開く →</a>
     </div>
 
-    <!-- 分析 -->
     <div class="nav-card">
       <div class="nav-card-title">
-        <div class="nav-card-icon icon-purple">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#c4b5fd" stroke-width="2"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"/><polyline points="17 6 23 6 23 12"/></svg>
+        <div class="nav-card-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"/><polyline points="17 6 23 6 23 12"/></svg>
         </div>
         分析
       </div>
-      <div class="nav-card-desc">
-        収集した財務データを使って回帰分析・乖離分析・スコアリングを行います。
-      </div>
+      <div class="nav-card-desc">収集した財務データを使って回帰分析・乖離分析・スコアリングを行います。</div>
       <ul class="feature-list">
-        <li>OLS 重回帰分析（理論時価総額の算出）</li>
+        <li>業種別OLS 回帰分析（Ohlson モデル拡張）</li>
         <li>乖離分析（割安・割高スクリーニング）</li>
         <li>★ おすすめ銘柄スコアリング</li>
         <li>市場データ（株価・バリュエーション）更新</li>
       </ul>
-      <a href="/analysis" class="nav-btn">
-        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
-        分析ページを開く
-      </a>
+      <a href="/analysis" class="btn btn-primary">分析ページを開く →</a>
     </div>
 
-    <!-- 企業詳細（個別銘柄） -->
     <div class="nav-card">
       <div class="nav-card-title">
-        <div class="nav-card-icon" style="background:#164e63">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#67e8f9" stroke-width="2"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
+        <div class="nav-card-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
         </div>
         企業詳細（個別銘柄）
       </div>
-      <div class="nav-card-desc">
-        個別企業の業績・財務・キャッシュフローを時系列グラフで可視化します。
-      </div>
+      <div class="nav-card-desc">個別企業の業績・財務・キャッシュフローを時系列グラフで可視化します。</div>
       <ul class="feature-list">
         <li>売上・営業/経常/純利益・利益率の推移グラフ</li>
         <li>財務(BS)構成・自己資本比率の推移</li>
         <li>営業/投資/財務CF・フリーCFの推移</li>
         <li>企業名・証券コードで検索して表示</li>
       </ul>
-      <a href="/company" class="nav-btn" style="background:#0e7490">
-        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
-        企業を検索して開く
-      </a>
+      <a href="/company" class="btn btn-primary">企業を検索して開く →</a>
     </div>
 
-    <!-- DB ビューア -->
     <div class="nav-card">
       <div class="nav-card-title">
-        <div class="nav-card-icon" style="background:#052e16">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#86efac" stroke-width="2"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/><path d="M3 12c0 1.66 4 3 9 3s9-1.34 9-3"/></svg>
+        <div class="nav-card-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/><path d="M3 12c0 1.66 4 3 9 3s9-1.34 9-3"/></svg>
         </div>
         DB ビューア
       </div>
-      <div class="nav-card-desc">
-        DB の中身をブラウザから直接確認します。スキーマ・統計・リレーション・企業横断検索を1画面で。
-      </div>
+      <div class="nav-card-desc">DB の中身をブラウザから直接確認します。スキーマ・統計・リレーション・企業横断検索を1画面で。</div>
       <ul class="feature-list">
         <li>4テーブルの行数・カラム定義・NULL率</li>
         <li>テーブル間リレーション（ER）可視化</li>
         <li>統計サマリー（min/max/avg/p50/p99）</li>
         <li>企業別ドリルダウン・CSV エクスポート</li>
       </ul>
-      <a href="/db" class="nav-btn" style="background:#15803d">
-        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
-        DB を開く
-      </a>
+      <a href="/db" class="btn btn-primary">DB を開く →</a>
     </div>
 
-    <!-- モデル解説 -->
     <div class="nav-card">
       <div class="nav-card-title">
-        <div class="nav-card-icon" style="background:#1e1b4b">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#a78bfa" stroke-width="2"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg>
+        <div class="nav-card-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg>
         </div>
         モデル解説・参考文献
       </div>
-      <div class="nav-card-desc">
-        アプリで使用している統計・ファイナンスモデルの数式・パラメータ・ソース論文をまとめたドキュメントです。
-      </div>
+      <div class="nav-card-desc">アプリで使用している統計・ファイナンスモデルの数式・パラメータ・ソース論文をまとめたドキュメントです。</div>
       <ul class="feature-list">
-        <li>Ohlson(1995) 型 OLS 回帰・セクター OLS・OU プロセス乖離分析</li>
+        <li>Ohlson(1995) 型 OLS 回帰・業種別 OLS・OU プロセス乖離分析</li>
         <li>月次ウォークフォワード CV・Zスコア正規化・加重スコアリング・バックテスト</li>
         <li>各モデルの数式・仮定・既知問題と参考文献 DOI リンク</li>
       </ul>
-      <a href="/models" class="nav-btn" style="background:#312e81">
-        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
-        モデル解説を開く
-      </a>
+      <a href="/models" class="btn btn-primary">モデル解説を開く →</a>
     </div>
   </div>
 
-  <!-- 自動収集: GitHub Actions -->
   <div class="section-title">自動収集</div>
   <div class="scheduler-card">
-    <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">
-      <span class="dot dot-green"></span>
-      <span style="font-size:13px;color:#94a3b8">GitHub Actions で毎日 03:00 JST に差分収集を自動実行</span>
+    <div class="flex" style="margin-bottom:10px">
+      <span class="dot" style="background:var(--success)"></span>
+      <span style="font-size:var(--fs-md);color:var(--text-secondary)">GitHub Actions で毎日 03:00 JST に差分収集を自動実行</span>
     </div>
     <div class="sched-grid">
       <div class="sched-item">
         <div class="sched-item-label">自動収集スケジュール</div>
-        <div class="sched-item-value" style="color:#38bdf8">毎日 03:00 JST</div>
+        <div class="sched-item-value" style="color:var(--accent)">毎日 03:00 JST</div>
       </div>
       <div class="sched-item">
         <div class="sched-item-label">ワークフロー</div>
@@ -258,42 +199,18 @@ body{font-family:'Segoe UI',sans-serif;background:#0f1117;color:#e2e8f0;min-heig
       </div>
       <div class="sched-item">
         <div class="sched-item-label">手動差分収集</div>
-        <div class="sched-item-value"><a href="/collection" style="color:#38bdf8;text-decoration:none">収集画面から実行</a></div>
+        <div class="sched-item-value"><a href="/collection">収集画面から実行</a></div>
       </div>
     </div>
   </div>
 
 </div>
 
-<script>
-function esc(s){return String(s??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');}
-
-function showNotif(msg, type='error'){
-  const el = document.createElement('div');
-  el.textContent = msg;
-  el.setAttribute('role', type==='error' ? 'alert' : 'status');
-  el.setAttribute('aria-live', type==='error' ? 'assertive' : 'polite');
-  const bg = type==='error' ? '#ef4444' : type==='success' ? '#10b981' : '#3b82f6';
-  el.style.cssText = `position:fixed;bottom:20px;right:20px;z-index:9999;padding:10px 16px;border-radius:6px;font-size:13px;color:#fff;max-width:420px;background:${bg};box-shadow:0 4px 12px rgba(0,0,0,.4)`;
-  document.body.appendChild(el);
-  setTimeout(()=>el.remove(), 4000);
-}
-
-function apiBase() { return ''; }
-
-async function apiFetch(path) {
-  const token = localStorage.getItem('auth_token') || '';
-  const heads = {'Content-Type': 'application/json'};
-  if (token) heads['Authorization'] = 'Bearer ' + token;
-  const r = await fetch(apiBase() + path, {headers: heads});
-  if (r.status === 401) { location.href = '/login?next=/'; return null; }
-  if(!r.ok){
-    if(r.status===502||r.status===503||r.status===504)
-      throw new Error(`サーバー再起動中 (${r.status})。しばらく待ってから再試行してください`);
-    throw new Error(await r.text());
-  }
-  return r.json();
-}
+<script type="module">
+import { apiFetch, esc } from '/static/js/core.js';
+import '/static/js/header.js';
+import '/static/js/auth.js';
+import '/static/js/nav.js';
 
 async function loadStats() {
   try {
@@ -302,7 +219,6 @@ async function loadStats() {
     document.getElementById('stat-companies').textContent = d.companies.toLocaleString();
     document.getElementById('stat-records').textContent   = d.records.toLocaleString();
 
-    // 最新年度カード
     const yearEl = document.getElementById('stat-year');
     yearEl.textContent = d.latest_year ?? '—';
     const yearCard = document.getElementById('card-year');
@@ -311,29 +227,28 @@ async function loadStats() {
       const behind = d.expected_latest_year - d.latest_year;
       const periodStr = d.latest_period_end ? `期末: ${d.latest_period_end}` : '';
       if (behind <= 0) {
-        yearEl.style.color = '#10b981';
-        yearMeta.innerHTML = `${periodStr}<br><span style="color:#86efac">✓ 最新年度を取得済み</span>`;
+        yearEl.style.color = 'var(--success)';
+        yearMeta.innerHTML = `${esc(periodStr)}<br><span style="color:var(--success)">✓ 最新年度を取得済み</span>`;
         yearCard.classList.remove('warn','alert');
       } else if (behind === 1) {
-        yearEl.style.color = '#fcd34d';
-        yearMeta.innerHTML = `${periodStr}<br><span style="color:#fcd34d">期待: ${d.expected_latest_year}（${behind}年遅れ）</span>`;
+        yearEl.style.color = 'var(--warning)';
+        yearMeta.innerHTML = `${esc(periodStr)}<br><span style="color:var(--warning)">期待: ${d.expected_latest_year}（${behind}年遅れ）</span>`;
         yearCard.classList.add('warn'); yearCard.classList.remove('alert');
       } else {
-        yearEl.style.color = '#fca5a5';
-        yearMeta.innerHTML = `${periodStr}<br><span style="color:#fca5a5">期待: ${d.expected_latest_year}（${behind}年遅れ）</span>`;
+        yearEl.style.color = 'var(--danger)';
+        yearMeta.innerHTML = `${esc(periodStr)}<br><span style="color:var(--danger)">期待: ${d.expected_latest_year}（${behind}年遅れ）</span>`;
         yearCard.classList.add('alert'); yearCard.classList.remove('warn');
       }
     } else {
       yearMeta.textContent = 'データなし';
     }
 
-    // データ鮮度カード
     const FRESH_LABELS = {
-      fresh:    {text: '最新',     cls: 'fr-fresh',    color: '#86efac'},
-      ok:       {text: '良好',     cls: 'fr-ok',       color: '#93c5fd'},
-      stale:    {text: 'やや古い', cls: 'fr-stale',    color: '#fcd34d'},
-      outdated: {text: '古い',     cls: 'fr-outdated', color: '#fca5a5'},
-      empty:    {text: 'データなし', cls: 'fr-empty',  color: '#64748b'},
+      fresh:    { text: '最新',     cls: 'fr-fresh',    color: 'var(--success)' },
+      ok:       { text: '良好',     cls: 'fr-ok',       color: 'var(--info)'    },
+      stale:    { text: 'やや古い', cls: 'fr-stale',    color: 'var(--warning)' },
+      outdated: { text: '古い',     cls: 'fr-outdated', color: 'var(--danger)'  },
+      empty:    { text: 'データなし', cls: 'fr-empty',  color: 'var(--text-muted)' },
     };
     const f = FRESH_LABELS[d.freshness] || FRESH_LABELS.empty;
     const freshDaysEl  = document.getElementById('stat-fresh-days');
@@ -341,23 +256,16 @@ async function loadStats() {
     const freshBadgeEl = document.getElementById('stat-fresh-badge');
     const freshCard    = document.getElementById('card-freshness');
     freshDaysEl.style.color = f.color;
-    if (d.days_since_update == null) {
-      freshDaysEl.textContent = '—';
-    } else if (d.days_since_update === 0) {
-      freshDaysEl.textContent = '本日';
-    } else {
-      freshDaysEl.textContent = `${d.days_since_update}日前`;
-    }
-    freshMetaEl.innerHTML = d.last_db_update
-      ? `最終更新:<br>${esc(d.last_db_update)}`
-      : '最終更新: —';
+    freshDaysEl.textContent = d.days_since_update == null ? '—'
+      : d.days_since_update === 0 ? '本日'
+      : `${d.days_since_update}日前`;
+    freshMetaEl.innerHTML = d.last_db_update ? `最終更新:<br>${esc(d.last_db_update)}` : '最終更新: —';
     freshBadgeEl.textContent = f.text;
     freshBadgeEl.className = 'freshness-badge ' + f.cls;
     freshCard.classList.remove('warn','alert');
     if (d.freshness === 'stale')    freshCard.classList.add('warn');
     if (d.freshness === 'outdated') freshCard.classList.add('alert');
 
-    // 鮮度バナー（古い・遅れている場合だけ表示）
     const banner = document.getElementById('update-banner');
     const bmsg   = document.getElementById('update-banner-msg');
     const yearBehind = (d.latest_year != null && d.expected_latest_year != null)
@@ -371,28 +279,12 @@ async function loadStats() {
     } else {
       banner.classList.remove('show');
     }
-
-    document.getElementById('api-dot').className = 'dot dot-green';
-    document.getElementById('api-label').textContent = 'API接続中';
-  } catch(e) {
-    document.getElementById('api-dot').className = 'dot dot-red';
-    document.getElementById('api-label').textContent = 'API未接続';
+  } catch (e) {
+    /* preflight 側で api-dot を更新 */
   }
 }
 
-
-async function initAuth() {
-  try {
-    const r = await fetch(apiBase() + '/api/auth/status');
-    const d = await r.json();
-    if (d.auth_required && !localStorage.getItem('auth_token')) {
-      location.href = '/login?next=/';
-    }
-  } catch(e) { /* API未起動時はスキップ */ }
-}
-
-initAuth();
-loadStats();
+window.addEventListener('DOMContentLoaded', loadStats);
 </script>
 </body>
 </html>

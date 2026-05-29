@@ -1,0 +1,76 @@
+/* Design Tokens
+   背景 var(--bg-base) #0d0f15 上で全テキスト WCAG AA（4.5:1）以上を満たすパレット。
+   役割分離:
+     - --accent  (cyan):  タブ・ボタンのアクティブ状態専用
+     - --link    (violet): ページ内リンク・サブナビ専用
+   配色を意味別に固定し、ユーザーが「色＝意味」を覚えられるようにする。
+*/
+:root {
+  /* Surfaces */
+  --bg-base:        #0d0f15;
+  --bg-surface:     #171a26;
+  --bg-elevated:    #1f2336;
+  --bg-sunken:      #0a0c12;
+  --border:         #2a2f45;
+  --border-strong:  #3b4163;
+
+  /* Text */
+  --text-primary:   #e8ecf5;  /* 13.1:1 */
+  --text-secondary: #b8c0d2;  /* 7.5:1 */
+  --text-muted:     #8b94aa;  /* 4.7:1 — AA達成 */
+
+  /* Accent: ACTIVE 状態専用（cyan） */
+  --accent:         #22d3ee;
+  --accent-hover:   #67e8f9;
+  --accent-bg:      #062a33;
+
+  /* Link: ページ内リンク・サブナビ専用（violet） */
+  --link:           #a78bfa;
+  --link-hover:     #c4b5fd;
+
+  /* Semantic */
+  --success:        #34d399;
+  --success-bg:     #062e1a;
+  --warning:        #fbbf24;
+  --warning-bg:     #3a2a05;
+  --danger:         #fb7185;
+  --danger-bg:      #450a18;
+  --info:           #7dd3fc;
+  --info-bg:        #0c2840;
+
+  /* Spacing (8の倍数基調) */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 24px;
+  --sp-6: 32px;
+  --sp-7: 40px;
+  --sp-8: 48px;
+
+  /* Typography */
+  --ff-base: 'Inter', 'Hiragino Sans', 'Yu Gothic UI', system-ui, sans-serif;
+  --ff-mono: ui-monospace, 'SF Mono', 'Cascadia Code', 'Consolas', monospace;
+  --fs-xs:   11px;
+  --fs-sm:   12px;
+  --fs-md:   13px;
+  --fs-lg:   16px;
+  --fs-xl:   20px;
+  --fs-h1:   24px;
+  --lh-tight: 1.3;
+  --lh-base:  1.5;
+
+  /* Radius */
+  --r-sm: 4px;
+  --r-md: 8px;
+  --r-lg: 12px;
+
+  /* Shadow */
+  --shadow-card: 0 1px 2px rgba(0,0,0,.3), 0 2px 6px rgba(0,0,0,.2);
+  --shadow-pop:  0 4px 12px rgba(0,0,0,.4), 0 10px 30px rgba(0,0,0,.3);
+
+  /* Layout */
+  --header-h:    52px;
+  --tabs-h:      44px;
+  --container-max: 1400px;
+}

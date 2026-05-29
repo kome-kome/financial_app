@@ -1,0 +1,5 @@
+/* Application stylesheet entry — 全画面共通の単一エントリポイント */
+@import url("./tokens.css");
+@import url("./base.css");
+@import url("./components.css");
+@import url("./layout.css");
