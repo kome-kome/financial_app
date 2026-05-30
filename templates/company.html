@@ -140,9 +140,18 @@ table.cmp tbody tr:hover td{background:#1e2235}
 
     <div class="panel active" id="panel-perf">
       <div class="chart-card">
-        <div class="chart-title">売上高・利益の推移</div>
-        <div class="chart-note">棒＝金額（億円）／折れ線＝営業利益率（右軸・％）。出典: EDINET 有価証券報告書（年次）</div>
-        <div class="chart-box tall"><canvas id="chart-perf"></canvas></div>
+        <div class="bs-head">
+          <div>
+            <div class="chart-title">損益計算書（PL）の構成 — 売上高の分解</div>
+            <div class="chart-note">各年の積み上げ棒＝<b style="color:#3b82f6">売上高</b>（億円）を費用と利益に分解（最上部の<b style="color:#34d399">緑＝純利益</b>）。折れ線＝営業利益率（右軸・％）。粒度を切り替えると内訳の細かさが変わります。出典: EDINET 有価証券報告書（年次）</div>
+          </div>
+          <div class="seg" id="pl-gran" role="group" aria-label="表示粒度">
+            <button class="seg-btn" data-gran="coarse" type="button">粗</button>
+            <button class="seg-btn active" data-gran="medium" type="button">中</button>
+            <button class="seg-btn" data-gran="fine" type="button">細</button>
+          </div>
+        </div>
+        <div class="chart-box xtall"><canvas id="chart-perf"></canvas></div>
       </div>
       <div class="chart-card">
         <div class="chart-title">利益率の推移</div>
@@ -170,8 +179,17 @@ table.cmp tbody tr:hover td{background:#1e2235}
 
     <div class="panel" id="panel-cf">
       <div class="chart-card">
-        <div class="chart-title">キャッシュフローの推移</div>
-        <div class="chart-note">棒＝営業／投資／財務CF（億円）／折れ線＝フリーCF（営業CF＋投資CF）</div>
+        <div class="bs-head">
+          <div>
+            <div class="chart-title">キャッシュフローの推移</div>
+            <div class="chart-note" id="cf-note">棒＝CF区分（億円）／折れ線＝フリーCF（営業CF＋投資CF）。粒度で内訳の細かさが変わります。</div>
+          </div>
+          <div class="seg" id="cf-gran" role="group" aria-label="表示粒度">
+            <button class="seg-btn" data-gran="coarse" type="button">粗</button>
+            <button class="seg-btn active" data-gran="medium" type="button">中</button>
+            <button class="seg-btn" data-gran="fine" type="button">細</button>
+          </div>
+        </div>
         <div class="chart-box tall"><canvas id="chart-cf"></canvas></div>
       </div>
     </div>
@@ -368,16 +386,21 @@ document.querySelectorAll('.tab').forEach(t => {
   });
 });
 
-// ── BS 粒度セレクタ（粗 / 中 / 細）─────────────────────────────
-document.querySelectorAll('#bs-gran .seg-btn').forEach(btn => {
-  btn.addEventListener('click', () => {
-    if (btn.dataset.gran === bsGran) return;
-    document.querySelectorAll('#bs-gran .seg-btn').forEach(b => b.classList.remove('active'));
-    btn.classList.add('active');
-    bsGran = btn.dataset.gran;
-    drawBS();
+// ── 粒度セレクタ（粗 / 中 / 細）共通配線。BS・PL・CF で再利用 ──────────
+function wireGran(sel, onPick){
+  const btns = document.querySelectorAll(sel + ' .seg-btn');
+  btns.forEach(btn => {
+    btn.addEventListener('click', () => {
+      if (btn.classList.contains('active')) return;
+      btns.forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      onPick(btn.dataset.gran);
+    });
   });
-});
+}
+wireGran('#bs-gran', g => { bsGran = g; drawBS(); });
+wireGran('#pl-gran', g => { plGran = g; drawPL(); });
+wireGran('#cf-gran', g => { cfGran = g; drawCF(); });
 
 // ── 企業データ読み込み・描画 ─────────────────────────────────
 async function loadCompany(code){
@@ -462,22 +485,85 @@ async function loadCompany(code){
   }
 }
 
+// ── PL：売上高を費用・利益に分解した積み上げ棒（BS と同じ手法）──
+//  信頼できる revenue / operating_profit / net_income / cost_of_sales / sga を軸に分解。
+//  stored gross_profit は IFRS で不正値があるため使わない。どの粒度でも棒の合計＝売上高。
+let plState = { labels:null, recs:null };
+let plGran  = 'medium';
+
+function plDatasets(recs, level){
+  const num = v => { const x = toOku(v); return (x==null || isNaN(x)) ? 0 : x; };
+  const rev = r => num(r.pl.revenue);
+  const cos = r => num(r.pl.cost_of_sales);
+  const sga = r => num(r.pl.sga);
+  const op  = r => num(r.pl.operating_profit);
+  const profit = r => Math.max(0, num(r.pl.net_income));   // 純利益（損失は0クランプ）
+  // 残差は非負クランプ。profit を基準に各段を算出し、合計が売上高になるよう補正。
+  const costTotal = r => Math.max(0, rev(r) - profit(r));                       // 粗: 総費用
+  const otherToNi = r => Math.max(0, rev(r) - cos(r) - sga(r) - profit(r));     // 中: その他費用・税金等
+  const otherOpEx = r => Math.max(0, rev(r) - cos(r) - sga(r) - op(r));         // 細: その他営業費用
+  const nonOpTax  = r => Math.max(0, op(r) - profit(r));                        // 細: 営業外・特別・税金等
+
+  const C = { cos:'#475569', sga:'#f59e0b', other:'#94a3b8', nonop:'#fb923c', profit:'#34d399', cost:'#64748b' };
+  const bar = (label, color, fn) =>
+    ({ label, backgroundColor:color, stack:'pl', borderRadius:2, data:recs.map(fn) });
+
+  // 下→上の順。費用を底に積み、純利益を最上部に置く。
+  if (level === 'coarse'){
+    return [ bar('総費用', C.cost, costTotal), bar('純利益', C.profit, profit) ];
+  }
+  if (level === 'fine'){
+    return [
+      bar('売上原価',             C.cos,    cos),
+      bar('販管費',               C.sga,    sga),
+      bar('その他営業費用',       C.other,  otherOpEx),
+      bar('営業外・特別・税金等', C.nonop,  nonOpTax),
+      bar('純利益',               C.profit, profit),
+    ];
+  }
+  // medium
+  return [
+    bar('売上原価',         C.cos,    cos),
+    bar('販管費',           C.sga,    sga),
+    bar('その他費用・税金等', C.other,  otherToNi),
+    bar('純利益',           C.profit, profit),
+  ];
+}
+
 function renderPerf(labels, recs){
-  const ctx = document.getElementById('chart-perf');
-  charts.perf = new Chart(ctx, {
+  plState = { labels, recs };
+  drawPL();
+}
+
+function drawPL(){
+  const { labels, recs } = plState;
+  if (!recs) return;
+  if (charts.perf){ charts.perf.destroy(); }
+  const datasets = plDatasets(recs, plGran);
+  datasets.push({ label:'営業利益率(%)', type:'line', data:recs.map(r=>r.pl.op_margin), yAxisID:'y1',
+    borderColor:'#f59e0b', backgroundColor:'#f59e0b', tension:.3, pointRadius:3, order:0 });
+
+  charts.perf = new Chart(document.getElementById('chart-perf'), {
     type:'bar',
-    data:{ labels, datasets:[
-      {label:'売上高', data:recs.map(r=>toOku(r.pl.revenue)), backgroundColor:'#3b82f6', borderRadius:3, order:3},
-      {label:'営業利益', data:recs.map(r=>toOku(r.pl.operating_profit)), backgroundColor:'#a78bfa', borderRadius:3, order:2},
-      {label:'純利益', data:recs.map(r=>toOku(r.pl.net_income)), backgroundColor:'#34d399', borderRadius:3, order:1},
-      {label:'営業利益率(%)', type:'line', data:recs.map(r=>r.pl.op_margin), yAxisID:'y1',
-       borderColor:'#f59e0b', backgroundColor:'#f59e0b', tension:.3, pointRadius:3, order:0},
-    ]},
-    options: baseOpts({ scales:{
-      x:{ ticks:{color:'#94a3b8'}, grid:{color:'#1e2235'} },
-      y:{ title:{display:true, text:'億円', color:'#64748b'}, ticks:{color:'#94a3b8'}, grid:{color:'#1e2235'} },
-      y1:{ position:'right', title:{display:true, text:'%', color:'#64748b'}, ticks:{color:'#f59e0b'}, grid:{drawOnChartArea:false} },
-    }})
+    data:{ labels, datasets },
+    options: baseOpts({
+      plugins:{
+        legend:{ labels:{ color:'#cbd5e1', boxWidth:12, padding:10 } },
+        tooltip:{ backgroundColor:'#0f1117', borderColor:'#2d3154', borderWidth:1, padding:10,
+          callbacks:{ label:(ctx)=>{
+            const ds = ctx.dataset, v = ctx.parsed.y;
+            if (ds.yAxisID === 'y1') return ` ${ds.label}: ${fmtNum(v)}%`;
+            const rev = toOku(plState.recs[ctx.dataIndex].pl.revenue) || 0;
+            const pct = rev > 0 ? (v / rev * 100) : null;
+            return ` ${ds.label}: ${fmtNum(v)} 億円` + (pct!=null ? `（${fmtNum(pct)}%）` : '');
+          }}}
+      },
+      scales:{
+        x:{ stacked:true, ticks:{color:'#94a3b8'}, grid:{color:'#1e2235'} },
+        y:{ stacked:true, title:{display:true, text:'億円', color:'#64748b'}, ticks:{color:'#94a3b8'}, grid:{color:'#1e2235'} },
+        y1:{ position:'right', title:{display:true, text:'%', color:'#64748b'}, ticks:{color:'#f59e0b'}, grid:{drawOnChartArea:false} },
+      }
+    })
   });
 }
 
@@ -595,17 +681,76 @@ function drawBS(){
   });
 }
 
+// ── CF：営業／投資／財務CF を粒度別に表示。データ未収集時はメッセージ表示 ──
+//  粗: フリーCF+財務CF ／ 中: 営業/投資/財務 ／ 細: 営業/設備投資/その他投資/財務
+//  フリーCF は 営業CF+投資CF を実値から再計算（投資CF が無ければ null＝非表示）。
+let cfState = { labels:null, recs:null };
+let cfGran  = 'medium';
+
 function renderCF(labels, recs){
-  const ctx = document.getElementById('chart-cf');
-  charts.cf = new Chart(ctx, {
+  cfState = { labels, recs };
+  drawCF();
+}
+
+function drawCF(){
+  const { labels, recs } = cfState;
+  if (!recs) return;
+  if (charts.cf){ charts.cf.destroy(); charts.cf = null; }
+  const canvas = document.getElementById('chart-cf');
+  const box = canvas.parentElement;
+  const note = document.getElementById('cf-note');
+  let emptyEl = box.querySelector('.cf-empty');
+  if (emptyEl) emptyEl.remove();
+
+  // 営業/投資/財務のいずれかが非null ならデータあり
+  const hasAny = recs.some(r => r.cf.operating_cf!=null || r.cf.investing_cf!=null || r.cf.financing_cf!=null);
+  if (!hasAny){
+    canvas.style.display = 'none';
+    const d = document.createElement('div');
+    d.className = 'cf-empty';
+    d.style.cssText = 'display:flex;align-items:center;justify-content:center;height:100%;color:#64748b;font-size:13px;text-align:center;padding:20px';
+    d.textContent = 'この企業のキャッシュフローデータは未収集です（再収集で取得できます）。';
+    box.appendChild(d);
+    note.textContent = '棒＝CF区分（億円）／折れ線＝フリーCF（営業CF＋投資CF）。';
+    return;
+  }
+  canvas.style.display = '';
+
+  const numN = v => { const x = toOku(v); return (x==null || isNaN(x)) ? null : x; };
+  const op  = r => numN(r.cf.operating_cf);
+  const inv = r => numN(r.cf.investing_cf);
+  const fin = r => numN(r.cf.financing_cf);
+  const free = r => { const o = op(r), i = inv(r); return (o!=null && i!=null) ? o + i : null; };
+  // 設備投資（支出＝負で統一）とその他投資CF（合計＝投資CF）
+  const capexOut = r => { const c = toOku(r.cf.capex); return (c==null || isNaN(c)) ? null : -Math.abs(c); };
+  const otherInv = r => { const i = inv(r); if (i==null) return null; const c = capexOut(r); return (c==null) ? i : (i - c); };
+
+  const bar = (label, color, fn) => ({ label, backgroundColor:color, borderRadius:3, data:recs.map(fn) });
+  let datasets;
+  if (cfGran === 'coarse'){
+    datasets = [ bar('フリーCF（営業+投資）', '#34d399', free), bar('財務CF', '#60a5fa', fin) ];
+  } else if (cfGran === 'fine'){
+    datasets = [ bar('営業CF', '#34d399', op), bar('設備投資', '#f87171', capexOut),
+                 bar('その他投資CF', '#fbbf24', otherInv), bar('財務CF', '#60a5fa', fin) ];
+  } else {
+    datasets = [ bar('営業CF', '#34d399', op), bar('投資CF', '#f87171', inv), bar('財務CF', '#60a5fa', fin) ];
+  }
+  if (cfGran !== 'coarse'){
+    datasets.push({ label:'フリーCF', type:'line', data:recs.map(free), spanGaps:true,
+      borderColor:'#a78bfa', backgroundColor:'#a78bfa', tension:.3, pointRadius:3 });
+  }
+
+  // データ品質の注記（投資CF・設備投資が未収集なら明示）
+  const invMissing   = !recs.some(r => r.cf.investing_cf != null);
+  const capexMissing = !recs.some(r => r.cf.capex != null);
+  let warn = '';
+  if (invMissing) warn = ' <b style="color:#f59e0b">※投資CFが未収集のため、フリーCFを表示できません（再収集が必要です）。</b>';
+  else if (cfGran === 'fine' && capexMissing) warn = ' <b style="color:#f59e0b">※設備投資が未収集のため「その他投資CF」に投資CF全額を表示しています。</b>';
+  note.innerHTML = '棒＝CF区分（億円）／折れ線＝フリーCF（営業CF＋投資CF）。粒度で内訳の細かさが変わります。' + warn;
+
+  charts.cf = new Chart(canvas, {
     type:'bar',
-    data:{ labels, datasets:[
-      {label:'営業CF', data:recs.map(r=>toOku(r.cf.operating_cf)), backgroundColor:'#34d399', borderRadius:3},
-      {label:'投資CF', data:recs.map(r=>toOku(r.cf.investing_cf)), backgroundColor:'#f87171', borderRadius:3},
-      {label:'財務CF', data:recs.map(r=>toOku(r.cf.financing_cf)), backgroundColor:'#60a5fa', borderRadius:3},
-      {label:'フリーCF', type:'line', data:recs.map(r=>toOku(r.cf.free_cf)),
-       borderColor:'#a78bfa', backgroundColor:'#a78bfa', tension:.3, pointRadius:3},
-    ]},
+    data:{ labels, datasets },
     options: baseOpts({ scales:{
       x:{ ticks:{color:'#94a3b8'}, grid:{color:'#1e2235'} },
       y:{ title:{display:true, text:'億円', color:'#64748b'}, ticks:{color:'#94a3b8'}, grid:{color:'#1e2235'} },

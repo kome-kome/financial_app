@@ -1018,7 +1018,9 @@ def _record_to_dict(r: FinancialRecord) -> dict:
         },
         "pl": {
             "revenue": r.pl_revenue,
+            "cost_of_sales": r.pl_cost_of_sales,
             "gross_profit": r.pl_gross_profit,
+            "sga": r.pl_sga,
             "operating_profit": r.pl_operating_profit,
             "ordinary_profit": r.pl_ordinary_profit,
             "net_income": r.pl_net_income,

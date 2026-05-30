@@ -155,15 +155,26 @@ XBRL_MAP = {
     "IssuedCapitalIFRS":                               ("bs", "paid_in_capital"),
     "RetainedEarningsIFRS":                            ("bs", "retained_earnings"),
     # ── CF（JGAAP/共通）──────────────────────────────────────────────────
+    # 注意: EDINET 標準要素は "InvestmentActivities"（Investment）。
+    # "InvestingActivities"（Investing）は誤りで全件 NULL になっていた（旧バグ）。
+    # 念のため両綴りを候補に残す（同一 field への複数候補マッピングは安全・連結優先で先勝ち）。
     "NetCashProvidedByUsedInOperatingActivities":      ("cf", "operating_cf"),
-    "NetCashProvidedByUsedInInvestingActivities":      ("cf", "investing_cf"),
+    "NetCashProvidedByUsedInInvestmentActivities":     ("cf", "investing_cf"),
+    "NetCashProvidedByUsedInInvestingActivities":      ("cf", "investing_cf"),  # 旧綴り（fallback）
     "NetCashProvidedByUsedInFinancingActivities":      ("cf", "financing_cf"),
+    "CashAndCashEquivalentsIncreaseDecrease":          ("cf", "net_change_cash"),
     "CashAndCashEquivalentsPeriodIncreaseDecrease":    ("cf", "net_change_cash"),
-    "CapitalExpendituresForTangibleAssets":            ("cf", "capex"),
+    # 設備投資（CF 投資活動の主要支出）。EDINET の主要綴りを複数候補で対応。
+    "PurchaseOfPropertyPlantAndEquipmentInvestmentCF": ("cf", "capex"),
+    "PaymentsForPurchaseOfPropertyPlantAndEquipment":  ("cf", "capex"),
+    "PurchaseOfPropertyPlantAndEquipment":             ("cf", "capex"),
+    "CapitalExpendituresForTangibleAssets":            ("cf", "capex"),  # 旧候補（fallback）
     # ── CF（IFRS）────────────────────────────────────────────────────────
     "CashFlowsFromUsedInOperatingActivitiesIFRS":      ("cf", "operating_cf"),
-    "CashFlowsFromUsedInInvestingActivitiesIFRS":      ("cf", "investing_cf"),
+    "CashFlowsFromUsedInInvestmentActivitiesIFRS":     ("cf", "investing_cf"),
+    "CashFlowsFromUsedInInvestingActivitiesIFRS":      ("cf", "investing_cf"),  # 綴り揺れ対応
     "CashFlowsFromUsedInFinancingActivitiesIFRS":      ("cf", "financing_cf"),
+    "PurchaseOfPropertyPlantAndEquipmentIFRS":         ("cf", "capex"),
     # ── バリュエーション・配当 ────────────────────────────────────────────
     "DividendPaidPerShare":                            ("val", "dps"),
     "DividendPaidPerShareSummaryOfBusinessResults":    ("val", "dps"),    # 経営指標等セクション
