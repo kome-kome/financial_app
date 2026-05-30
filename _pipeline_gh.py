@@ -26,7 +26,7 @@ from collector import (
     run_full_collection, update_market_data, collect_macro_data, reparse_from_raw,
     collect_stock_price_history_jquants, update_market_data_from_history,
     backfill_historical_stock_prices_yahoo, fill_recent_stock_price_gap_yahoo,
-    refill_cf_from_xbrl,
+    refill_cf_from_xbrl, diagnose_cf_labels,
     SKIP_XBRL_RAW, JQUANTS_BACKFILL_DAYS,
 )
 from database import SessionLocal, init_db, calc_growth_rates, calc_zscore_normalization
@@ -63,11 +63,15 @@ async def _run_with_retry(coro_factory, label: str,
 
 async def main(years_back: int, collect_only: bool = False,
                finalize_only: bool = False, backfill_yahoo: bool = False,
-               refill_cf: bool = False, refill_cf_limit: int = 3000):
+               refill_cf: bool = False, refill_cf_limit: int = 3000,
+               refill_cf_sleep: float = 0.5, refill_capex_only: bool = False,
+               diagnose_cf: bool = False, diagnose_cf_limit: int = 20):
     t0 = time.time()
     log("=" * 60)
-    if refill_cf:
-        mode = "refill-cf"
+    if diagnose_cf:
+        mode = "diagnose-cf"
+    elif refill_cf:
+        mode = "refill-capex-only" if refill_capex_only else "refill-cf"
     elif backfill_yahoo:
         mode = "backfill-yahoo"
     elif collect_only:
@@ -82,18 +86,38 @@ async def main(years_back: int, collect_only: bool = False,
     log("[init] init_db() でスキーマ冪等マイグレーションを実行")
     init_db()
 
+    # ─── 診断モード: CF ラベルのサンプル出力（単独モード）──────────────────────
+    if diagnose_cf:
+        log(f"[diagnose] CF ラベル診断 開始（サンプル {diagnose_cf_limit}件）")
+        dbd = SessionLocal()
+        try:
+            found = await diagnose_cf_labels(dbd, limit=diagnose_cf_limit)
+            log(f"[diagnose] 完了: ユニーク要素 {len(found)}種（詳細は上記ログ参照）")
+        finally:
+            dbd.close()
+        log("=" * 60)
+        log(f"診断完了  総所要時間: {(time.time()-t0)/60:.1f}分")
+        log("=" * 60)
+        return
+
     # ─── Phase 7: CF NULL 補完（単独モード）──────────────────────────────────
     if refill_cf:
-        log(f"[7/7] CF NULL 補完 開始（limit={refill_cf_limit}）")
-        log(f"  対象: cf_capex IS NULL かつ cf_operating_cf IS NOT NULL")
+        target_desc = ("cf_capex IS NULL かつ cf_net_change_cash IS NOT NULL（capex のみ補完）"
+                       if refill_capex_only
+                       else "cf_net_change_cash IS NULL（投資CF/現金増減/capex を補完）")
+        log(f"[7/7] CF NULL 補完 開始（limit={refill_cf_limit}, capex_only={refill_capex_only}）")
+        log(f"  対象: {target_desc}")
         db7 = SessionLocal()
         try:
             result = await refill_cf_from_xbrl(
                 db7,
                 limit=refill_cf_limit,
+                capex_only=refill_capex_only,
+                sleep_sec=refill_cf_sleep,
                 on_progress=lambda c, t, m: log(m) if c % 100 == 0 or t - c < 10 else None,
             )
-            log(f"  CF 補完完了: updated={result['updated']}, skipped={result['skipped']}, failed={result['failed']}")
+            log(f"  CF 補完完了: updated={result['updated']}, skipped={result['skipped']}, "
+                f"failed={result['failed']}, remaining={result.get('remaining', '?')}")
         finally:
             db7.close()
         log(f"[7/7] CF NULL 補完 完了 ({(time.time()-t0)/60:.1f}分経過)")
@@ -211,9 +235,17 @@ if __name__ == "__main__":
     parser.add_argument("--backfill-yahoo", action="store_true",
                         help="Phase 6: Yahoo Finance で過去株価をバックフィル（J-Quants カバー外の旧年度を補完）")
     parser.add_argument("--refill-cf", action="store_true",
-                        help="Phase 7: CF NULL 補完（capex/net_change_cash を XBRL 再取得で補完）")
-    parser.add_argument("--refill-cf-limit", type=int, default=3000,
-                        help="CF 補完の上限件数（デフォルト 3000・約90分）")
+                        help="Phase 7: CF NULL 補完（投資CF/現金増減/capex を XBRL 再取得で補完）")
+    parser.add_argument("--refill-cf-limit", type=int, default=6000,
+                        help="CF 補完の上限件数（デフォルト 6000・約3〜4時間）")
+    parser.add_argument("--refill-cf-sleep", type=float, default=0.5,
+                        help="CF 補完の1件あたりスリープ秒（デフォルト 0.5）")
+    parser.add_argument("--refill-capex-only", action="store_true",
+                        help="capex のみ補完（net_change_cash 補完済みレコードの設備投資を一度だけ補完。手動ワンショット専用）")
+    parser.add_argument("--diagnose-cf", action="store_true",
+                        help="診断モード: サンプル書類の CF ラベル/要素IDを出力（capex ラベル照合の検証用）")
+    parser.add_argument("--diagnose-cf-limit", type=int, default=20,
+                        help="診断モードのサンプル件数（デフォルト 20）")
     args = parser.parse_args()
 
     with open(LOG_FILE, "w", encoding="utf-8") as f:
@@ -224,7 +256,9 @@ if __name__ == "__main__":
             f"  finalize_only={args.finalize_only}"
             f"  backfill_yahoo={args.backfill_yahoo}"
             f"  refill_cf={args.refill_cf}"
-            f"  refill_cf_limit={args.refill_cf_limit}\n"
+            f"  refill_cf_limit={args.refill_cf_limit}"
+            f"  refill_capex_only={args.refill_capex_only}"
+            f"  diagnose_cf={args.diagnose_cf}\n"
         )
     asyncio.run(main(
         args.years_back,
@@ -233,4 +267,8 @@ if __name__ == "__main__":
         backfill_yahoo=args.backfill_yahoo,
         refill_cf=args.refill_cf,
         refill_cf_limit=args.refill_cf_limit,
+        refill_cf_sleep=args.refill_cf_sleep,
+        refill_capex_only=args.refill_capex_only,
+        diagnose_cf=args.diagnose_cf,
+        diagnose_cf_limit=args.diagnose_cf_limit,
     ))

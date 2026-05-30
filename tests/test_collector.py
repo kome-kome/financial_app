@@ -152,6 +152,48 @@ class TestParseXbrlCsv:
         })
         assert parse_xbrl_csv(df, "E00001", "2023-03-31")["pl"]["operating_profit"] == 321.0
 
+    def test_capex_extracted_by_label_for_extension_element(self):
+        """設備投資は企業独自の拡張要素IDでタグ付けされるため、項目名（ラベル）で捕捉する。
+        値は支出＝負（アウトフロー）に統一される。"""
+        df = pd.DataFrame({
+            "要素ID": [
+                "jppfs_cor:NetCashProvidedByUsedInInvestmentActivities",
+                "jpcrp030000-asr_E99999-000:PurchaseOfPPEExtension",  # 拡張要素（要素IDでは不一致）
+            ],
+            "項目名": ["投資活動によるキャッシュ・フロー", "有形固定資産の取得による支出"],
+            "コンテキストID": ["CurrentYearConsolidatedDuration", "CurrentYearConsolidatedDuration"],
+            "値": ["-5000", "3000"],
+        })
+        cf = parse_xbrl_csv(df, "E99999", "2025-03-31")["cf"]
+        assert cf["investing_cf"] == -5000.0
+        assert cf["capex"] == -3000.0  # 支出＝負に統一（絶対値3000）
+
+    def test_capex_label_does_not_match_sale_proceeds(self):
+        """「有形固定資産の売却による収入」を capex に誤マッチしないこと。"""
+        df = pd.DataFrame({
+            "要素ID": ["jpcrp030000-asr_E99999-000:ProceedsExt"],
+            "項目名": ["有形固定資産の売却による収入"],
+            "コンテキストID": ["CurrentYearConsolidatedDuration"],
+            "値": ["200"],
+        })
+        assert "capex" not in parse_xbrl_csv(df, "E99999", "2025-03-31")["cf"]
+
+
+class TestMatchCapexByLabel:
+    @pytest.mark.parametrize("label,expected", [
+        ("有形固定資産の取得による支出", True),
+        ("有形固定資産及び無形固定資産の取得による支出", True),
+        ("有形固定資産の購入による支出", True),
+        ("有形固定資産の売却による収入", False),
+        ("無形固定資産の取得による支出", False),
+        ("投資有価証券の取得による支出", False),
+        ("有形固定資産の除却による減少", False),
+        ("", False),
+    ])
+    def test_label_matching(self, label, expected):
+        from collector import _match_capex_by_label
+        assert _match_capex_by_label(label) is expected
+
 
 # ── calc_derived ─────────────────────────────────────────────────────────────
 
