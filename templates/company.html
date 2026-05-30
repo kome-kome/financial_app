@@ -277,7 +277,7 @@ if (window.Chart){
 }
 const charts = {};
 function destroyCharts(){ for (const k in charts){ if (charts[k]){ charts[k].destroy(); delete charts[k]; } } }
-let curCompany = {code:null, industry:null};
+let curCompany = {code:null, industry:null, sec_code:null, name:null, latest:null};
 let peersLoaded = false;
 
 const baseOpts = (extra={}) => ({
@@ -379,7 +379,7 @@ async function loadCompany(code){
   const recs = d.records;                 // year 昇順（API 側でソート済み）
   const latest = recs[recs.length - 1];
   const labels = recs.map(r => r.year);
-  curCompany = { code: code, industry: latest.industry };
+  curCompany = { code: code, industry: latest.industry, sec_code: latest.sec_code, name: latest.company_name, latest: latest };
 
   // ヘッダ
   document.getElementById('co-name').textContent = latest.company_name || code;
@@ -618,7 +618,7 @@ async function loadPeers(){
   }
   let d;
   try{
-    d = await apiFetch('/api/companies?include_latest=true&limit=40&industry=' + encodeURIComponent(curCompany.industry));
+    d = await apiFetch('/api/companies?include_latest=true&limit=300&industry=' + encodeURIComponent(curCompany.industry));
   }catch(e){
     peersLoaded = false;
     note.textContent = '同業データの取得に失敗しました: ' + e.message;
@@ -631,18 +631,35 @@ async function loadPeers(){
     wrap.innerHTML = '';
     return;
   }
-  // 時価総額の降順、上位15社。表示中の企業は必ず含める
+  // 時価総額の降順でソート
   peers.sort((a, b) => (b.latest.val.market_cap || 0) - (a.latest.val.market_cap || 0));
+
+  // 業種内順位を記録
+  const rankMap = {};
+  peers.forEach((p, i) => { rankMap[p.edinet_code] = i + 1; });
+
+  // 上位15社。表示中の企業は必ず含める
   let top = peers.slice(0, 15);
   if (!top.some(p => p.edinet_code === curCompany.code)){
     const me = peers.find(p => p.edinet_code === curCompany.code);
-    if (me) top.push(me);
+    if (me){
+      top.push(me);
+    } else if (curCompany.latest){
+      // APIの件数上限外の場合、保持データでフォールバック
+      top.push({ edinet_code: curCompany.code, sec_code: curCompany.sec_code, name: curCompany.name, latest: curCompany.latest });
+      rankMap[curCompany.code] = peers.length + 1; // 正確な順位不明
+    }
   }
-  note.textContent = `業種「${curCompany.industry}」の上位${top.length}社を比較（時価総額順・最新年度）。色付きが表示中の企業。`;
 
-  const rows = top.map(p => {
+  const myRank = rankMap[curCompany.code];
+  const rankText = myRank ? `（業種内 第${myRank}位 / ${peers.length}社）` : '';
+  note.textContent = `業種「${curCompany.industry}」の上位${Math.min(15, peers.length)}社を比較${rankText}（時価総額順・最新年度）。色付きが表示中の企業。`;
+
+  const rows = top.map((p, idx) => {
     const L = p.latest, isMe = p.edinet_code === curCompany.code;
+    const rank = rankMap[p.edinet_code] || (idx + 1);
     return `<tr class="${isMe ? 'me' : ''}">
+      <td class="num" style="color:#64748b">${rank}</td>
       <td>${esc(p.sec_code || '-')}</td>
       <td><a href="/company/${esc(p.edinet_code)}">${esc(p.name)}</a></td>
       <td class="num">${fmtNum(toOku(L.pl.revenue))}</td>
@@ -655,7 +672,7 @@ async function loadPeers(){
     </tr>`;
   }).join('');
   wrap.innerHTML = `<table class="cmp">
-    <thead><tr><th>コード</th><th>企業名</th><th>売上(億)</th><th>営業益率</th><th>ROE</th><th>自己資本比率</th><th>PER</th><th>PBR</th><th>時価総額(億)</th></tr></thead>
+    <thead><tr><th>順位</th><th>コード</th><th>企業名</th><th>売上(億)</th><th>営業益率</th><th>ROE</th><th>自己資本比率</th><th>PER</th><th>PBR</th><th>時価総額(億)</th></tr></thead>
     <tbody>${rows}</tbody></table>`;
 
   const names = top.map(p => p.name.length > 8 ? p.name.slice(0, 8) + '…' : p.name);
