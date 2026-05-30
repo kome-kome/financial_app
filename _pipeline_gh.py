@@ -12,6 +12,8 @@ SKIP_XBRL_RAW=true（デフォルト）の運用前提:
   --finalize-only     Phase 3-5 のみ（成長率/Zスコア/マクロ/J-Quants株価）
   --backfill-yahoo    Phase 6: Yahoo Finance で過去株価をバックフィル
                       （J-Quants カバー外の FY2021〜FY2023 等を補完）
+  --refill-cf         Phase 7: CF NULL 補完（capex/net_change_cash を XBRL 再取得で補完）
+  --refill-cf-limit N CF 補完の上限件数（デフォルト 3000・約90分）
 """
 import argparse, asyncio, sys, time
 from datetime import datetime
@@ -24,6 +26,7 @@ from collector import (
     run_full_collection, update_market_data, collect_macro_data, reparse_from_raw,
     collect_stock_price_history_jquants, update_market_data_from_history,
     backfill_historical_stock_prices_yahoo, fill_recent_stock_price_gap_yahoo,
+    refill_cf_from_xbrl,
     SKIP_XBRL_RAW, JQUANTS_BACKFILL_DAYS,
 )
 from database import SessionLocal, init_db, calc_growth_rates, calc_zscore_normalization
@@ -59,10 +62,13 @@ async def _run_with_retry(coro_factory, label: str,
 
 
 async def main(years_back: int, collect_only: bool = False,
-               finalize_only: bool = False, backfill_yahoo: bool = False):
+               finalize_only: bool = False, backfill_yahoo: bool = False,
+               refill_cf: bool = False, refill_cf_limit: int = 3000):
     t0 = time.time()
     log("=" * 60)
-    if backfill_yahoo:
+    if refill_cf:
+        mode = "refill-cf"
+    elif backfill_yahoo:
         mode = "backfill-yahoo"
     elif collect_only:
         mode = "collect-only"
@@ -75,6 +81,26 @@ async def main(years_back: int, collect_only: bool = False,
 
     log("[init] init_db() でスキーマ冪等マイグレーションを実行")
     init_db()
+
+    # ─── Phase 7: CF NULL 補完（単独モード）──────────────────────────────────
+    if refill_cf:
+        log(f"[7/7] CF NULL 補完 開始（limit={refill_cf_limit}）")
+        log(f"  対象: cf_capex IS NULL かつ cf_operating_cf IS NOT NULL")
+        db7 = SessionLocal()
+        try:
+            result = await refill_cf_from_xbrl(
+                db7,
+                limit=refill_cf_limit,
+                on_progress=lambda c, t, m: log(m) if c % 100 == 0 or t - c < 10 else None,
+            )
+            log(f"  CF 補完完了: updated={result['updated']}, skipped={result['skipped']}, failed={result['failed']}")
+        finally:
+            db7.close()
+        log(f"[7/7] CF NULL 補完 完了 ({(time.time()-t0)/60:.1f}分経過)")
+        log("=" * 60)
+        log(f"パイプライン完了  総所要時間: {(time.time()-t0)/60:.1f}分")
+        log("=" * 60)
+        return
 
     # ─── Phase 6: Yahoo Finance 過去株価バックフィル（単独モード）────────────────
     if backfill_yahoo:
@@ -184,6 +210,10 @@ if __name__ == "__main__":
                         help="Phase 3-5 のみ実行（成長率/Zスコア/マクロ/J-Quants株価）")
     parser.add_argument("--backfill-yahoo", action="store_true",
                         help="Phase 6: Yahoo Finance で過去株価をバックフィル（J-Quants カバー外の旧年度を補完）")
+    parser.add_argument("--refill-cf", action="store_true",
+                        help="Phase 7: CF NULL 補完（capex/net_change_cash を XBRL 再取得で補完）")
+    parser.add_argument("--refill-cf-limit", type=int, default=3000,
+                        help="CF 補完の上限件数（デフォルト 3000・約90分）")
     args = parser.parse_args()
 
     with open(LOG_FILE, "w", encoding="utf-8") as f:
@@ -192,11 +222,15 @@ if __name__ == "__main__":
             f"  years_back={args.years_back}"
             f"  collect_only={args.collect_only}"
             f"  finalize_only={args.finalize_only}"
-            f"  backfill_yahoo={args.backfill_yahoo}\n"
+            f"  backfill_yahoo={args.backfill_yahoo}"
+            f"  refill_cf={args.refill_cf}"
+            f"  refill_cf_limit={args.refill_cf_limit}\n"
         )
     asyncio.run(main(
         args.years_back,
         collect_only=args.collect_only,
         finalize_only=args.finalize_only,
         backfill_yahoo=args.backfill_yahoo,
+        refill_cf=args.refill_cf,
+        refill_cf_limit=args.refill_cf_limit,
     ))

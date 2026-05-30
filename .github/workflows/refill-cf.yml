@@ -1,0 +1,44 @@
+name: CF NULL 補完（capex・net_change_cash の再取得）
+
+on:
+  workflow_dispatch:
+    inputs:
+      refill_cf_limit:
+        description: '1回の実行で補完する上限件数（デフォルト 3000・約90分）'
+        required: false
+        default: '3000'
+
+jobs:
+  refill-cf:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150  # 3000件 × ~1秒 + 余裕 = 約90分。150分で上限設定
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13.7'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run CF refill
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          EDINET_API_KEY: ${{ secrets.EDINET_API_KEY }}
+        run: |
+          python _pipeline_gh.py \
+            --refill-cf \
+            --refill-cf-limit ${{ inputs.refill_cf_limit }}
+
+      - name: Upload log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: refill-cf-log
+          path: pipeline_gh.log
+          retention-days: 7

@@ -155,26 +155,34 @@ XBRL_MAP = {
     "IssuedCapitalIFRS":                               ("bs", "paid_in_capital"),
     "RetainedEarningsIFRS":                            ("bs", "retained_earnings"),
     # ── CF（JGAAP/共通）──────────────────────────────────────────────────
-    # 注意: EDINET 標準要素は "InvestmentActivities"（Investment）。
-    # "InvestingActivities"（Investing）は誤りで全件 NULL になっていた（旧バグ）。
-    # 念のため両綴りを候補に残す（同一 field への複数候補マッピングは安全・連結優先で先勝ち）。
+    # EDINET XBRL ZIP には複数 CSV ファイルが含まれ、CF 合計は概要ファイル、
+    # CF 明細（capex 等）は別の CF 専用ファイルに存在する。
+    # fetch_xbrl_csv は全 CSV を concat して返すため、両方のファイルが対象になる。
+    #
+    # CF 合計: J-GAAP は CashFlowsFrom... 系、IFRS/共通は NetCashProvidedByUsedIn... 系
     "NetCashProvidedByUsedInOperatingActivities":      ("cf", "operating_cf"),
+    "CashFlowsFromOperatingActivities":                ("cf", "operating_cf"),   # J-GAAP 別名
     "NetCashProvidedByUsedInInvestmentActivities":     ("cf", "investing_cf"),
-    "NetCashProvidedByUsedInInvestingActivities":      ("cf", "investing_cf"),  # 旧綴り（fallback）
+    "NetCashProvidedByUsedInInvestingActivities":      ("cf", "investing_cf"),   # 旧綴り fallback
+    "CashFlowsFromInvestingActivities":                ("cf", "investing_cf"),   # J-GAAP 別名
     "NetCashProvidedByUsedInFinancingActivities":      ("cf", "financing_cf"),
+    "CashFlowsFromFinancingActivities":                ("cf", "financing_cf"),   # J-GAAP 別名
+    "NetIncreaseDecreaseInCashAndCashEquivalents":     ("cf", "net_change_cash"),
     "CashAndCashEquivalentsIncreaseDecrease":          ("cf", "net_change_cash"),
     "CashAndCashEquivalentsPeriodIncreaseDecrease":    ("cf", "net_change_cash"),
-    # 設備投資（CF 投資活動の主要支出）。EDINET の主要綴りを複数候補で対応。
+    # 設備投資（CF 投資活動の主要支出）。CF 明細ファイルに存在する要素名。
+    "PurchaseOfPropertyPlantAndEquipment":             ("cf", "capex"),
+    "PurchaseOfPropertyPlantAndEquipmentAndIntangibleAssets": ("cf", "capex"),   # PPE+無形固定合算
     "PurchaseOfPropertyPlantAndEquipmentInvestmentCF": ("cf", "capex"),
     "PaymentsForPurchaseOfPropertyPlantAndEquipment":  ("cf", "capex"),
-    "PurchaseOfPropertyPlantAndEquipment":             ("cf", "capex"),
-    "CapitalExpendituresForTangibleAssets":            ("cf", "capex"),  # 旧候補（fallback）
+    "CapitalExpendituresForTangibleAssets":            ("cf", "capex"),          # 旧候補 fallback
     # ── CF（IFRS）────────────────────────────────────────────────────────
     "CashFlowsFromUsedInOperatingActivitiesIFRS":      ("cf", "operating_cf"),
     "CashFlowsFromUsedInInvestmentActivitiesIFRS":     ("cf", "investing_cf"),
-    "CashFlowsFromUsedInInvestingActivitiesIFRS":      ("cf", "investing_cf"),  # 綴り揺れ対応
+    "CashFlowsFromUsedInInvestingActivitiesIFRS":      ("cf", "investing_cf"),   # 綴り揺れ対応
     "CashFlowsFromUsedInFinancingActivitiesIFRS":      ("cf", "financing_cf"),
     "PurchaseOfPropertyPlantAndEquipmentIFRS":         ("cf", "capex"),
+    "PurchaseOfPropertyPlantAndEquipmentAndIntangibleAssetsIFRS": ("cf", "capex"),
     # ── バリュエーション・配当 ────────────────────────────────────────────
     "DividendPaidPerShare":                            ("val", "dps"),
     "DividendPaidPerShareSummaryOfBusinessResults":    ("val", "dps"),    # 経営指標等セクション
@@ -349,16 +357,27 @@ async def fetch_xbrl_csv(client: httpx.AsyncClient, doc_id: str):
             if total_uncompressed > _ZIP_MAX_BYTES:
                 log.warning(f"ZIPサイズ超過（{total_uncompressed // 1024 // 1024}MB）: {doc_id}")
                 return None
-            biggest = max(csv_files, key=lambda n: z.getinfo(n).file_size)
-            with z.open(biggest) as f:
-                raw = f.read()
-        try:
-            df = pd.read_csv(io.BytesIO(raw), encoding="utf-8", low_memory=False)
-        except UnicodeDecodeError:
-            # EDINET の XBRL CSV は UTF-16 LE (BOM付き) + タブ区切りの場合がある
-            content = raw.decode("utf-16", errors="replace")
-            df = pd.read_csv(io.StringIO(content), sep="\t", low_memory=False)
-        return df
+            # EDINET XBRL ZIP には概要ファイルと詳細（CF 明細等）の複数 CSV が存在する。
+            # 最大ファイルだけでは CF 明細（capex 等）を取り逃がすため全 CSV を結合する。
+            all_dfs = []
+            for fname in csv_files:
+                with z.open(fname) as f:
+                    raw = f.read()
+                try:
+                    df_part = pd.read_csv(io.BytesIO(raw), encoding="utf-8", low_memory=False)
+                except UnicodeDecodeError:
+                    # EDINET の XBRL CSV は UTF-16 LE (BOM付き) + タブ区切りの場合がある
+                    content = raw.decode("utf-16", errors="replace")
+                    df_part = pd.read_csv(io.StringIO(content), sep="\t", low_memory=False)
+                except Exception:
+                    continue
+                if df_part is not None and not df_part.empty:
+                    all_dfs.append(df_part)
+        if not all_dfs:
+            return None
+        if len(all_dfs) == 1:
+            return all_dfs[0]
+        return pd.concat(all_dfs, ignore_index=True, sort=False)
     except zipfile.BadZipFile:
         log.warning(f"ZIPエラー: {doc_id}")
         return None
@@ -1191,6 +1210,103 @@ async def fill_recent_stock_price_gap_yahoo(
     db.commit()
     log.info(f"fill_recent_stock_price_gap_yahoo: {upserted}件を stock_price_history に追加")
     return {"skipped": False, "upserted": upserted, "from": d_from, "to": d_to}
+
+
+async def refill_cf_from_xbrl(
+    db,
+    limit: int = 3000,
+    on_progress: Optional[Callable[[int, int, str], None]] = None,
+) -> dict:
+    """CF フィールドが NULL の既存レコードを EDINET XBRL から再取得して補完する。
+
+    対象: cf_capex IS NULL かつ cf_operating_cf IS NOT NULL かつ doc_id IS NOT NULL
+    （operating_cf が取れているので XBRL は存在するが、CF 明細ファイルを読んでいなかったため capex が取れていなかったレコード）
+
+    fetch_xbrl_csv の全 CSV concat 修正後に実行することで、capex / net_change_cash を補完する。
+    """
+    from database import FinancialRecord
+    from sqlalchemy import text
+
+    log.info(f"refill_cf_from_xbrl 開始 (limit={limit})")
+
+    # 対象レコードを取得
+    targets = (
+        db.query(FinancialRecord)
+        .filter(
+            FinancialRecord.cf_capex.is_(None),
+            FinancialRecord.cf_operating_cf.isnot(None),
+            FinancialRecord.doc_id.isnot(None),
+        )
+        .order_by(FinancialRecord.period_end.desc())
+        .limit(limit)
+        .all()
+    )
+
+    total = len(targets)
+    log.info(f"  対象レコード: {total}件")
+    if total == 0:
+        return {"updated": 0, "skipped": 0, "failed": 0}
+
+    updated = skipped = failed = 0
+    SLEEP_SEC = 1.0  # EDINET API レート制限対策
+
+    async with httpx.AsyncClient(timeout=60) as client:
+        for i, rec in enumerate(targets, 1):
+            msg = f"[CF補完 {i}/{total}] {rec.company_name} {rec.period_end}"
+            if on_progress:
+                on_progress(i, total, msg)
+            if i % 100 == 0:
+                log.info(msg)
+
+            try:
+                df = await fetch_xbrl_csv(client, rec.doc_id)
+                if df is None or df.empty:
+                    skipped += 1
+                    continue
+
+                parsed = parse_xbrl_csv(df, rec.edinet_code, str(rec.period_end))
+                cf = parsed.get("cf", {})
+                if not cf:
+                    skipped += 1
+                    continue
+
+                changed = False
+                # CF フィールドが NULL の場合のみ書き込む（既存値を保護）
+                for field, col in [
+                    ("capex",           "cf_capex"),
+                    ("net_change_cash", "cf_net_change_cash"),
+                    ("investing_cf",    "cf_investing_cf"),
+                    ("operating_cf",    "cf_operating_cf"),
+                    ("financing_cf",    "cf_financing_cf"),
+                ]:
+                    val = cf.get(field)
+                    if val is not None and getattr(rec, col) is None:
+                        setattr(rec, col, val)
+                        changed = True
+
+                if changed:
+                    # free_cf = 営業CF + 投資CF
+                    if rec.cf_operating_cf is not None and rec.cf_investing_cf is not None:
+                        rec.cf_free_cf = rec.cf_operating_cf + rec.cf_investing_cf
+                    db.add(rec)
+                    updated += 1
+                else:
+                    skipped += 1
+
+                # 100件ごとに commit（長時間トランザクション対策）
+                if updated % 100 == 0 and updated > 0:
+                    db.commit()
+
+            except Exception as e:
+                log.warning(f"  CF補完失敗 {rec.edinet_code} {rec.doc_id}: {e}")
+                failed += 1
+
+            await asyncio.sleep(SLEEP_SEC)
+
+    db.commit()
+    result = {"updated": updated, "skipped": skipped, "failed": failed}
+    log.info(f"refill_cf_from_xbrl 完了: {result}")
+    return result
 
 
 def _apply_price_to_record(rec, price: float) -> None:

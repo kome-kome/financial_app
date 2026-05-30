@@ -370,7 +370,7 @@ pytest tests/test_utils.py::test_winsorize_basic    # 単一関数
 
 - **EDINET XBRL CSV** は UTF-8 と UTF-16 LE（タブ区切り）が混在。`fetch_xbrl_csv` で両方対応済み。
 - **XBRL要素選択**: 連結優先判定は `"NonConsolidated" not in ctx` を必ず含めること。含めないと非連結が連結を上書きする。優先度：連結=2 > 非メンバー=1 > メンバー付き=0。
-- **CF要素名（重要・要再収集）**: 投資CFのEDINET標準要素は `NetCashProvidedByUsedIn**Investment**Activities`（Investment）。旧 `XBRL_MAP` は `**Investing**Activities`（Investing）と誤っており、`cf_investing_cf` が**全レコードNULL**になっていた（営業/財務CFは正しく取得できていたため気付きにくい）。副作用として `free_cf = 営業CF + 投資CF` が営業CFと同値になっていた。`capex`（`CapitalExpendituresForTangibleAssets`）・`net_change_cash`（`CashAndCashEquivalentsPeriodIncreaseDecrease`）も0%で、要素名候補を追加済み。**既存データは再収集（full-pipeline）するまで投資CF/設備投資がNULLのまま**。`company.html` のCFタブは投資CF未収集を注記表示し、CFが全くない企業（IFRS等）には「未収集」メッセージを出す。
+- **CF要素名・XBRL ZIP 構造（重要）**: EDINET XBRL type=5 ZIP には**複数の CSV ファイル**が含まれ、CF 合計（`NetCashProvidedByUsedIn*`）は概要ファイルに、CF 明細（`PurchaseOfPropertyPlantAndEquipment` 等）は**別の CF 専用ファイル**に存在する。旧実装は最大ファイル1件のみ読んでいたため `capex` / `net_change_cash` が全件 NULL だった。修正後は ZIP 内の全 CSV を concat して parse する（`fetch_xbrl_csv`）。また投資CF の EDINET 標準要素は `NetCashProvidedByUsedIn**Investment**Activities`（Investment）であり、旧 `XBRL_MAP` の `**Investing**Activities` は誤りで全件 NULL の原因だった（修正済み）。既存 NULL データは `refill-cf.yml`（workflow_dispatch）→ `_pipeline_gh.py --refill-cf --refill-cf-limit 3000` で補完可能（3000件/回、約90分。複数回実行で全件補完）。`company.html` の CF タブは投資CF 未収集時に注記を表示する。
 - **`check.py` の日付**は自動計算（祝日は非対応、祝日前後は失敗する場合あり）。
 - **URLとHTMLファイル名の対応**を崩さない：`/` ↔ `dashboard.html`、`/collection` ↔ `collection.html`、`/analysis` ↔ `analysis.html`。
 - **`CollectionLog.status`** の値: `running` / `done` / `error` / `resolved`（修正済みエラー）。UIは `resolved` を緑扱い。
