@@ -191,6 +191,34 @@ XBRL_MAP = {
 # 連結データ優先判定キー。"Prior1Year" は含めない（前期連結データが当期データを上書きするバグを防ぐ）
 CONSOLIDATED_KEYS = ["Consolidated"]
 
+# ── capex（設備投資）のラベル照合 ─────────────────────────────────────────
+# 設備投資の CF 明細行は企業独自の拡張要素IDでタグ付けされることが多く、要素ID照合では
+# 捕捉できない（実証: 標準要素 PurchaseOfPropertyPlantAndEquipment は0件）。
+# EDINET CSV の「項目名」列（日本語標準ラベル）で照合することで拡張要素も捕捉する。
+# INCLUDE 条件（いずれかを含む）かつ EXCLUDE 条件（いずれも含まない）で判定する。
+CAPEX_LABEL_INCLUDE = ["取得による支出", "購入による支出"]   # 取得＝支出（アウトフロー）
+CAPEX_LABEL_REQUIRE = ["有形固定資産"]                         # 有形固定資産を必ず含む（無形のみ除外、有形及び無形は可）
+CAPEX_LABEL_EXCLUDE = ["売却", "収入", "減少"]                 # 売却収入・回収は capex ではない
+
+
+def _match_capex_by_label(label: str) -> bool:
+    """項目名（日本語ラベル）が設備投資（有形固定資産の取得による支出）に該当するか判定。
+
+    例: "有形固定資産の取得による支出" → True
+        "有形固定資産及び無形固定資産の取得による支出" → True
+        "有形固定資産の売却による収入" → False（売却収入）
+        "無形固定資産の取得による支出" → False（有形を含まない）
+    """
+    if not label:
+        return False
+    if not any(kw in label for kw in CAPEX_LABEL_REQUIRE):
+        return False
+    if not any(kw in label for kw in CAPEX_LABEL_INCLUDE):
+        return False
+    if any(kw in label for kw in CAPEX_LABEL_EXCLUDE):
+        return False
+    return True
+
 
 async def fetch_edinet_code_list(client: httpx.AsyncClient) -> pd.DataFrame:
     """書類一覧APIをスキャンして上場企業リストを構築する（直近400日分・週末スキップ）。
@@ -387,12 +415,13 @@ async def fetch_xbrl_csv(client: httpx.AsyncClient, doc_id: str):
 
 
 def _detect_xbrl_columns(df) -> dict:
-    """XBRL CSV の列名マップ {element, context, value} を検出して返す"""
+    """XBRL CSV の列名マップ {element, context, value, label} を検出して返す"""
     col_map = {}
     for c in df.columns:
         lc = c.lower()
         if "要素" in c or "element" in lc:          col_map["element"] = c
         elif "コンテキスト" in c or "context" in lc: col_map["context"] = c
+        elif "項目名" in c or "label" in lc:          col_map["label"] = c   # 日本語標準ラベル（capex 照合用）
         elif "値" in c and "id" not in lc:            col_map["value"] = c
     return col_map
 
@@ -459,12 +488,21 @@ def parse_xbrl_csv(df, edinet_code: str, period_end: str) -> dict:
     # これにより CSV 内の行順序に依存せず正しい値を採用できる
     _priority: dict = {}
 
+    label_col = col_map.get("label")
+
     for _, row in df.iterrows():
         raw_elem = str(row[col_map["element"]])
         elem = raw_elem.split(":")[-1] if ":" in raw_elem else raw_elem
         category_field = XBRL_MAP.get(elem)
+
+        # 要素ID照合で外れた行は capex のラベル照合を試みる（拡張要素ID対策）。
+        # 設備投資は企業独自要素でタグ付けされるため項目名（日本語ラベル）で捕捉する。
         if not category_field:
-            continue
+            if label_col is not None and _match_capex_by_label(str(row.get(label_col, ""))):
+                category_field = ("cf", "capex")
+            else:
+                continue
+
         cat, field = category_field
         ctx = str(row.get(col_map.get("context", ""), ""))
 
@@ -481,6 +519,10 @@ def parse_xbrl_csv(df, edinet_code: str, period_end: str) -> dict:
             val = float(str(val_raw).replace(",", ""))
         except (ValueError, TypeError):
             continue
+
+        # capex は支出＝負（アウトフロー）で統一する（UI の符号ロバスト実装と整合）
+        if field == "capex":
+            val = -abs(val)
 
         if cat == "meta":
             # 業種コード: 数値 → 4桁ゼロ埋め文字列 → 業種名に変換
@@ -1215,40 +1257,51 @@ async def fill_recent_stock_price_gap_yahoo(
 async def refill_cf_from_xbrl(
     db,
     limit: int = 3000,
+    capex_only: bool = False,
+    sleep_sec: float = 0.5,
     on_progress: Optional[Callable[[int, int, str], None]] = None,
 ) -> dict:
     """CF フィールドが NULL の既存レコードを EDINET XBRL から再取得して補完する。
 
-    対象: cf_capex IS NULL かつ cf_operating_cf IS NOT NULL かつ doc_id IS NOT NULL
-    （operating_cf が取れているので XBRL は存在するが、CF 明細ファイルを読んでいなかったため capex が取れていなかったレコード）
+    通常モード（capex_only=False）:
+      対象 = cf_net_change_cash IS NULL かつ cf_operating_cf IS NOT NULL かつ doc_id IS NOT NULL
+      net_change_cash は標準要素で充足率100%のため「未補完」マーカーとして使う。
+      補完されると net_change_cash が埋まり対象から外れるため、繰り返し実行で自然終了する
+      （capex を対象マーカーにすると、設備投資が存在しない企業を永久に再取得してしまう）。
 
-    fetch_xbrl_csv の全 CSV concat 修正後に実行することで、capex / net_change_cash を補完する。
+    capex_only モード:
+      対象 = cf_capex IS NULL かつ cf_net_change_cash IS NOT NULL かつ cf_operating_cf IS NOT NULL
+      通常モードで net_change_cash 等は補完済みだが capex だけ未取得のレコード（ラベル照合追加前の
+      旧バッチ分）を一度だけ補完する。手動ワンショット専用（スケジュールには載せない）。
+
+    fetch_xbrl_csv の全 CSV concat 修正 + capex ラベル照合により capex/net_change_cash を補完する。
     """
     from database import FinancialRecord
-    from sqlalchemy import text
 
-    log.info(f"refill_cf_from_xbrl 開始 (limit={limit})")
+    mode = "capex_only" if capex_only else "normal"
+    log.info(f"refill_cf_from_xbrl 開始 (mode={mode}, limit={limit}, sleep={sleep_sec})")
 
     # 対象レコードを取得
-    targets = (
-        db.query(FinancialRecord)
-        .filter(
-            FinancialRecord.cf_capex.is_(None),
-            FinancialRecord.cf_operating_cf.isnot(None),
-            FinancialRecord.doc_id.isnot(None),
-        )
-        .order_by(FinancialRecord.period_end.desc())
-        .limit(limit)
-        .all()
+    q = db.query(FinancialRecord).filter(
+        FinancialRecord.cf_operating_cf.isnot(None),
+        FinancialRecord.doc_id.isnot(None),
     )
+    if capex_only:
+        q = q.filter(
+            FinancialRecord.cf_capex.is_(None),
+            FinancialRecord.cf_net_change_cash.isnot(None),
+        )
+    else:
+        q = q.filter(FinancialRecord.cf_net_change_cash.is_(None))
+    targets = q.order_by(FinancialRecord.period_end.desc()).limit(limit).all()
 
     total = len(targets)
     log.info(f"  対象レコード: {total}件")
     if total == 0:
-        return {"updated": 0, "skipped": 0, "failed": 0}
+        return {"updated": 0, "skipped": 0, "failed": 0, "remaining": 0}
 
     updated = skipped = failed = 0
-    SLEEP_SEC = 1.0  # EDINET API レート制限対策
+    SLEEP_SEC = sleep_sec  # EDINET API レート制限対策
 
     async with httpx.AsyncClient(timeout=60) as client:
         for i, rec in enumerate(targets, 1):
@@ -1304,9 +1357,77 @@ async def refill_cf_from_xbrl(
             await asyncio.sleep(SLEEP_SEC)
 
     db.commit()
-    result = {"updated": updated, "skipped": skipped, "failed": failed}
+
+    # 残件数を集計（スケジュール実行の終了判定に使う）
+    rq = db.query(FinancialRecord).filter(
+        FinancialRecord.cf_operating_cf.isnot(None),
+        FinancialRecord.doc_id.isnot(None),
+    )
+    if capex_only:
+        rq = rq.filter(
+            FinancialRecord.cf_capex.is_(None),
+            FinancialRecord.cf_net_change_cash.isnot(None),
+        )
+    else:
+        rq = rq.filter(FinancialRecord.cf_net_change_cash.is_(None))
+    remaining = rq.count()
+
+    result = {"updated": updated, "skipped": skipped, "failed": failed, "remaining": remaining}
     log.info(f"refill_cf_from_xbrl 完了: {result}")
     return result
+
+
+async def diagnose_cf_labels(db, limit: int = 20) -> dict:
+    """診断モード: サンプル書類の CF 関連ファクト（要素ID・項目名・値）をログに出力する。
+
+    capex のラベル照合パターンを実データで検証するために使う。
+    cf_operating_cf IS NOT NULL のレコードから先着 limit 件をサンプリングし、
+    項目名に固定資産/設備/取得/支出 を含む、または要素IDに Purchase/Property/Capital/
+    Acquisition/Tangible を含むファクトを全て出力する。
+    """
+    from database import FinancialRecord
+
+    KW_LABEL = ["固定資産", "設備", "取得", "支出", "購入"]
+    KW_ELEM  = ["Purchase", "Property", "Capital", "Acquisition", "Tangible", "PaymentsFor"]
+
+    targets = (
+        db.query(FinancialRecord)
+        .filter(
+            FinancialRecord.cf_operating_cf.isnot(None),
+            FinancialRecord.doc_id.isnot(None),
+        )
+        .order_by(FinancialRecord.period_end.desc())
+        .limit(limit)
+        .all()
+    )
+    log.info(f"diagnose_cf_labels: {len(targets)}件をサンプリング")
+
+    found: dict = {}
+    async with httpx.AsyncClient(timeout=60) as client:
+        for rec in targets:
+            df = await fetch_xbrl_csv(client, rec.doc_id)
+            if df is None or df.empty:
+                continue
+            df.columns = [c.strip() for c in df.columns]
+            col_map = _detect_xbrl_columns(df)
+            ecol = col_map.get("element"); lcol = col_map.get("label"); vcol = col_map.get("value")
+            if not ecol:
+                continue
+            log.info(f"--- {rec.company_name} ({rec.edinet_code}) {rec.period_end} doc={rec.doc_id} ---")
+            log.info(f"    検出列: element={ecol}, label={lcol}, value={vcol}")
+            for _, row in df.iterrows():
+                raw_elem = str(row[ecol])
+                elem = raw_elem.split(":")[-1] if ":" in raw_elem else raw_elem
+                label = str(row.get(lcol, "")) if lcol else ""
+                if any(k in label for k in KW_LABEL) or any(k in elem for k in KW_ELEM):
+                    val = row.get(vcol, "") if vcol else ""
+                    matched = "★capex一致" if _match_capex_by_label(label) else ""
+                    log.info(f"    [{elem}] 「{label}」 = {val} {matched}")
+                    found[elem] = label
+            await asyncio.sleep(0.5)
+
+    log.info(f"diagnose_cf_labels 完了: ユニーク要素 {len(found)}種")
+    return found
 
 
 def _apply_price_to_record(rec, price: float) -> None:

@@ -1,17 +1,39 @@
-name: CF NULL 補完（capex・net_change_cash の再取得）
+name: CF NULL 補完（投資CF・現金増減・設備投資の再取得）
+
+# 自動繰り返しスケジュール:
+#   毎日 UTC 16:00（JST 01:00）に実行。1回 refill_cf_limit 件ずつ補完する。
+#   未補完（cf_net_change_cash IS NULL）が無くなると各実行は即終了（数十秒の no-op）。
+#   全件補完が完了したらこのスケジュールは無効化/削除してよい（ログ artifact の remaining=0 で判断）。
+# 手動起動:
+#   workflow_dispatch で件数・モードを指定して即時実行。
 
 on:
+  schedule:
+    - cron: '0 16 * * *'   # 毎日 UTC 16:00 = JST 01:00（daily-incremental の 18:00 と重複回避）
   workflow_dispatch:
     inputs:
-      refill_cf_limit:
-        description: '1回の実行で補完する上限件数（デフォルト 3000・約90分）'
+      mode:
+        description: '実行モード'
+        type: choice
+        required: true
+        default: 'refill'
+        options:
+          - refill          # 通常補完（投資CF/現金増減/capex）
+          - capex-only      # capex のみ補完（補完済みレコードの設備投資を一度だけ）
+          - diagnose        # 診断モード（サンプルの CF ラベルを出力。本補完しない）
+      limit:
+        description: '補完件数の上限（refill/capex-only 用。診断時は無視）'
         required: false
-        default: '3000'
+        default: '6000'
+      diagnose_limit:
+        description: '診断モードのサンプル件数（diagnose 時のみ使用）'
+        required: false
+        default: '20'
 
 jobs:
   refill-cf:
     runs-on: ubuntu-latest
-    timeout-minutes: 150  # 3000件 × ~1秒 + 余裕 = 約90分。150分で上限設定
+    timeout-minutes: 330  # 6000件 × (~1.5s 取得 + 0.5s sleep) ≈ 3.3h。余裕を持って 330 分
 
     steps:
       - name: Checkout
@@ -26,14 +48,22 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Run CF refill
+      - name: Run (mode=${{ github.event_name == 'schedule' && 'refill' || inputs.mode }})
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           EDINET_API_KEY: ${{ secrets.EDINET_API_KEY }}
         run: |
-          python _pipeline_gh.py \
-            --refill-cf \
-            --refill-cf-limit ${{ inputs.refill_cf_limit }}
+          MODE="${{ github.event_name == 'schedule' && 'refill' || inputs.mode }}"
+          LIMIT="${{ github.event_name == 'schedule' && '6000' || inputs.limit }}"
+          DIAG_LIMIT="${{ github.event_name == 'schedule' && '20' || inputs.diagnose_limit }}"
+          echo "MODE=$MODE LIMIT=$LIMIT"
+          if [ "$MODE" = "diagnose" ]; then
+            python _pipeline_gh.py --diagnose-cf --diagnose-cf-limit "$DIAG_LIMIT"
+          elif [ "$MODE" = "capex-only" ]; then
+            python _pipeline_gh.py --refill-cf --refill-capex-only --refill-cf-limit "$LIMIT"
+          else
+            python _pipeline_gh.py --refill-cf --refill-cf-limit "$LIMIT"
+          fi
 
       - name: Upload log
         if: always()
