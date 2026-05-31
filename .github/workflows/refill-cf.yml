@@ -1,15 +1,14 @@
 name: CF NULL 補完（投資CF・現金増減・設備投資の再取得）
 
 # 自動繰り返しスケジュール:
-#   毎日 UTC 16:00（JST 01:00）に実行。1回 refill_cf_limit 件ずつ補完する。
-#   未補完（cf_net_change_cash IS NULL）が無くなると各実行は即終了（数十秒の no-op）。
-#   全件補完が完了したらこのスケジュールは無効化/削除してよい（ログ artifact の remaining=0 で判断）。
+#   【完了】通常補完（cf_net_change_cash IS NULL）は remaining=0 で完了（2026-05-31）。
+#   スケジュールは無効化済み。capex-only は手動 workflow_dispatch で随時実行可能。
 # 手動起動:
 #   workflow_dispatch で件数・モードを指定して即時実行。
 
 on:
-  schedule:
-    - cron: '0 16 * * *'   # 毎日 UTC 16:00 = JST 01:00（daily-incremental の 18:00 と重複回避）
+  # schedule:           # 通常補完完了（remaining=0）のため停止（2026-05-31）
+  #   - cron: '0 16 * * *'
   workflow_dispatch:
     inputs:
       mode:
