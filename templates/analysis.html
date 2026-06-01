@@ -84,6 +84,10 @@ tr:hover td{background:#1e2235}
 .stat-label{font-size:10px;color:#64748b;margin-bottom:4px;text-transform:uppercase;letter-spacing:.5px}
 .stat-value{font-size:20px;font-weight:700}
 .info-box{background:#1e2235;border-radius:8px;padding:12px;font-size:12px;color:#94a3b8;border-left:3px solid #7c3aed;line-height:1.6}
+/* 用語ツールチップ（マウスオーバーで解説を表示） */
+.gloss{border-bottom:1px dotted #8b9bb4;cursor:help;position:relative}
+.gloss::after{content:attr(data-tip);position:absolute;left:0;top:calc(100% + 7px);z-index:60;width:max-content;max-width:280px;white-space:normal;text-align:left;text-transform:none;letter-spacing:normal;background:#0a0c14;color:#cbd5e1;border:1px solid #3b4263;border-radius:7px;padding:9px 11px;font-size:11px;font-weight:400;line-height:1.6;box-shadow:0 10px 30px rgba(0,0,0,.5);opacity:0;visibility:hidden;transform:translateY(-4px);transition:opacity .13s ease,transform .13s ease;pointer-events:none}
+.gloss:hover::after{opacity:1;visibility:visible;transform:translateY(0)}
 .btn:disabled{opacity:.4;cursor:not-allowed}
 .co-link{color:#a78bfa;text-decoration:none}
 .co-link:hover{text-decoration:underline}
@@ -411,14 +415,14 @@ tr:hover td{background:#1e2235}
   <div class="card">
     <div class="section-title">ネットキャッシュ分析 — 清原達郎『わが投資術』</div>
     <div class="info-box" style="margin-bottom:14px">
-      <strong style="color:#10b981">ネットキャッシュ</strong> = 流動資産 + 投資有価証券 × 0.7 − 総負債&nbsp;<span style="color:#64748b">[円]（清原式）</span><br>
-      <strong style="color:#10b981">ネットキャッシュ比率</strong> = ネットキャッシュ ÷ 時価総額&nbsp;<span style="color:#64748b">[無次元]</span><br>
-      <strong style="color:#67e8f9">NCAV</strong> = 流動資産 − 総負債&nbsp;<span style="color:#64748b">[円]（グレアム1934・より保守的）</span> &nbsp;/&nbsp; <strong style="color:#67e8f9">NCAV比率</strong> = NCAV ÷ 時価総額<br>
+      <strong style="color:#10b981" class="gloss" data-tip="すぐ換金できる資産から全負債を引いた、実質的な手元現金。流動資産＋投資有価証券×0.7−総負債で計算する清原達郎式の指標。">ネットキャッシュ</strong> = 流動資産 + 投資有価証券 × 0.7 − 総負債&nbsp;<span style="color:#64748b">[円]（清原式）</span><br>
+      <strong style="color:#10b981" class="gloss" data-tip="ネットキャッシュ÷時価総額。1.0で会社をまるごと買える現金を保有、0.5で時価総額の半分が現金。大きいほど割安。">ネットキャッシュ比率</strong> = ネットキャッシュ ÷ 時価総額&nbsp;<span style="color:#64748b">[無次元]</span><br>
+      <strong style="color:#67e8f9" class="gloss" data-tip="Net Current Asset Value＝純流動資産価値。流動資産−総負債。投資有価証券の0.7補正をしない、ベンジャミン・グレアム(1934)の古典的で保守的な割安指標。">NCAV</strong> = 流動資産 − 総負債&nbsp;<span style="color:#64748b">[円]（グレアム1934・より保守的）</span> &nbsp;/&nbsp; <strong style="color:#67e8f9" class="gloss" data-tip="NCAV÷時価総額。大きいほど割安で、1.5以上が『ネットネット』水準。">NCAV比率</strong> = NCAV ÷ 時価総額<br>
       <span style="color:#fcd34d">NC比率 ≥ 1.0</span>: 現金で買える&nbsp;|&nbsp;
       <span style="color:#a7f3d0">NC比率 ≥ 0.5</span>: 半額バーゲン&nbsp;|&nbsp;
-      <span style="color:#67e8f9">NCAV比率 ≥ 1.5</span>: グレアムのネットネット（時価総額 &lt; NCAV×2/3）<br>
-      <span style="color:#f59e0b;font-size:11px">⚠ 投資有価証券の 0.7 倍は含み益課税（約30%）を考慮した清原式の経験則。実態の換金価値は市況・銘柄構成で変動するため参考値です。</span><br>
-      <span style="color:#94a3b8;font-size:11px">ℹ 時価総額は推計株数（純資産÷BPS）ベースの概算です。推計が壊れると比率が異常値になるため、<strong>NC比率の上限</strong>（データ品質ガード）で自動除外します。一律の時価総額下限は設けず、小型バーゲンを取りこぼしません。</span>
+      <span style="color:#67e8f9">NCAV比率 ≥ 1.5</span>: <span class="gloss" data-tip="時価総額がNCAV(純流動資産価値)の3分の2未満＝NCAV比率1.5以上の超割安株。グレアムが好んだ、解散価値を大きく下回る銘柄群。これがグレアムの『2/3ルール』。">グレアムのネットネット</span>（時価総額 &lt; NCAV×2/3）<br>
+      <span style="color:#f59e0b;font-size:11px">⚠ 投資有価証券の 0.7 倍は<span class="gloss" data-tip="保有株を売って利益が出ると約30%課税される。これを見込み、投資有価証券は簿価の0.7倍で保守的に評価する。">含み益課税</span>（約30%）を考慮した清原式の経験則。実態の換金価値は市況・銘柄構成で変動するため参考値です。</span><br>
+      <span style="color:#94a3b8;font-size:11px">ℹ 時価総額は<span class="gloss" data-tip="発行株式数を 純資産÷1株純資産(BPS) で概算した値。実測ではないため誤差が出ることがある。">推計株数</span>（純資産÷BPS）ベースの概算です。推計が壊れると比率が異常値になるため、<strong>NC比率の上限</strong>（<span class="gloss" data-tip="時価総額は推計値のため、計算が壊れると比率が異常な大きさ(数千倍など)になることがある。その異常値を自動で除外する安全装置(サニティ＝妥当性チェック)。既定はNC比率5.0超を除外。">データ品質ガード</span>）で自動除外します。一律の時価総額下限は設けず、小型バーゲンを取りこぼしません。</span>
     </div>
     <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:10px">
       <div class="form-group" style="margin-bottom:0">
@@ -427,9 +431,9 @@ tr:hover td{background:#1e2235}
         <div class="text-sm" style="margin-top:4px;color:#64748b">0=NCプラスの全銘柄、0.5=半額バーゲン、1.0=現金で買える</div>
       </div>
       <div class="form-group" style="margin-bottom:0">
-        <label>NC比率の上限（データ品質ガード）</label>
+        <label>NC比率の上限（<span class="gloss" data-tip="時価総額は推計値のため、計算が壊れると比率が異常な大きさ(数千倍など)になることがある。その異常値を自動で除外する安全装置(サニティ＝妥当性チェック)。既定はNC比率5.0超を除外。">データ品質ガード</span>）</label>
         <input type="number" id="nc-max-ratio" value="5" min="0" step="0.5">
-        <div class="text-sm" style="margin-top:4px;color:#64748b">推計時価総額の崩れによる異常値を除外。空/0=無効</div>
+        <div class="text-sm" style="margin-top:4px;color:#64748b"><span class="gloss" data-tip="正気・妥当性の意味。常識的にありえない大きさの比率を『計算ミス・データ崩れ』とみなして弾くための上限値。">サニティ上限</span>。推計時価総額の崩れによる異常値を除外。空/0=無効</div>
       </div>
       <div class="form-group" style="margin-bottom:0">
         <label>最低時価総額（百万円・任意）</label>
@@ -437,9 +441,9 @@ tr:hover td{background:#1e2235}
         <div class="text-sm" style="margin-top:4px;color:#64748b">任意で小型株を除外。空=制限なし（推奨）</div>
       </div>
       <div class="form-group" style="margin-bottom:0">
-        <label>最低NCAV比率（任意・グレアム）</label>
+        <label>最低<span class="gloss" data-tip="Net Current Asset Value＝純流動資産価値（流動資産−総負債）÷時価総額。投資有価証券の0.7補正をしないグレアム流の保守的な割安指標。">NCAV比率</span>（任意・グレアム）</label>
         <input type="number" id="nc-min-ncav" placeholder="例: 1.5" min="-5" max="5" step="0.1">
-        <div class="text-sm" style="margin-top:4px;color:#64748b">1.5=グレアムのネットネットに限定。空=制限なし</div>
+        <div class="text-sm" style="margin-top:4px;color:#64748b">1.5=<span class="gloss" data-tip="時価総額がNCAVの3分の2未満の超割安株。グレアムが好んだ解散価値を大きく下回る銘柄群。">グレアムのネットネット</span>に限定。空=制限なし</div>
       </div>
       <div class="form-group" style="margin-bottom:0">
         <label>業種（空欄=全業種）</label>
@@ -469,7 +473,7 @@ tr:hover td{background:#1e2235}
       </div>
     </div>
     <div style="display:flex;gap:20px;align-items:center;margin-bottom:14px;flex-wrap:wrap">
-      <span class="text-sm" style="color:#94a3b8">バリュートラップ除外（任意）:</span>
+      <span class="text-sm" style="color:#94a3b8"><span class="gloss" data-tip="割安に見えても、業績悪化や現金の垂れ流しで株価が上がらない『万年割安』の罠。営業CFや純利益のプラスを条件にして避ける。">バリュートラップ</span>除外（任意）:</span>
       <label class="text-sm" style="display:flex;align-items:center;gap:6px;cursor:pointer;color:#cbd5e1">
         <input type="checkbox" id="nc-require-ocf"> 営業CF&gt;0 の企業のみ
       </label>
@@ -495,7 +499,7 @@ tr:hover td{background:#1e2235}
         <div class="stat-value" id="nc-stat-cheap" style="color:#86efac">-</div>
       </div>
       <div class="stat-card">
-        <div class="stat-label">グレアム ネットネット（NCAV比率 ≥ 1.5）</div>
+        <div class="stat-label"><span class="gloss" data-tip="時価総額がNCAV(純流動資産価値)の3分の2未満＝NCAV比率1.5以上の超割安株。グレアムが好んだ、解散価値を大きく下回る銘柄群（グレアムの2/3ルール）。">グレアム ネットネット</span>（NCAV比率 ≥ 1.5）</div>
         <div class="stat-value" id="nc-stat-netnet" style="color:#67e8f9">-</div>
       </div>
       <div class="stat-card">
