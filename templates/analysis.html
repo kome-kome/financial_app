@@ -411,21 +411,35 @@ tr:hover td{background:#1e2235}
   <div class="card">
     <div class="section-title">ネットキャッシュ分析 — 清原達郎『わが投資術』</div>
     <div class="info-box" style="margin-bottom:14px">
-      <strong style="color:#10b981">ネットキャッシュ</strong> = 流動資産 + 投資有価証券 × 0.7 − 総負債&nbsp;<span style="color:#64748b">[円]</span><br>
+      <strong style="color:#10b981">ネットキャッシュ</strong> = 流動資産 + 投資有価証券 × 0.7 − 総負債&nbsp;<span style="color:#64748b">[円]（清原式）</span><br>
       <strong style="color:#10b981">ネットキャッシュ比率</strong> = ネットキャッシュ ÷ 時価総額&nbsp;<span style="color:#64748b">[無次元]</span><br>
-      <span style="color:#fcd34d">比率 ≥ 1.0</span>: 時価総額より多くのネットキャッシュを保有（現金で買える）&nbsp;|&nbsp;
-      <span style="color:#a7f3d0">比率 ≥ 0.5</span>: 半額バーゲン水準<br>
-      <span style="color:#f59e0b;font-size:11px">⚠ 投資有価証券の 0.7 倍は含み益課税（約30%）を考慮した清原式の経験則。実態の換金価値は市況・銘柄構成で変動するため参考値です。</span>
+      <strong style="color:#67e8f9">NCAV</strong> = 流動資産 − 総負債&nbsp;<span style="color:#64748b">[円]（グレアム1934・より保守的）</span> &nbsp;/&nbsp; <strong style="color:#67e8f9">NCAV比率</strong> = NCAV ÷ 時価総額<br>
+      <span style="color:#fcd34d">NC比率 ≥ 1.0</span>: 現金で買える&nbsp;|&nbsp;
+      <span style="color:#a7f3d0">NC比率 ≥ 0.5</span>: 半額バーゲン&nbsp;|&nbsp;
+      <span style="color:#67e8f9">NCAV比率 ≥ 1.5</span>: グレアムのネットネット（時価総額 &lt; NCAV×2/3）<br>
+      <span style="color:#f59e0b;font-size:11px">⚠ 投資有価証券の 0.7 倍は含み益課税（約30%）を考慮した清原式の経験則。実態の換金価値は市況・銘柄構成で変動するため参考値です。</span><br>
+      <span style="color:#94a3b8;font-size:11px">ℹ 時価総額は推計株数（純資産÷BPS）ベースの概算です。推計が壊れると比率が異常値になるため、<strong>NC比率の上限</strong>（データ品質ガード）で自動除外します。一律の時価総額下限は設けず、小型バーゲンを取りこぼしません。</span>
     </div>
-    <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:14px">
+    <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:10px">
       <div class="form-group" style="margin-bottom:0">
-        <label>最低ネットキャッシュ比率</label>
-        <input type="number" id="nc-min-ratio" value="0.5" min="-5" max="5" step="0.1">
-        <div class="text-sm" style="margin-top:4px;color:#64748b">0.5=半額バーゲン、1.0=現金で買える水準</div>
+        <label>最低ネットキャッシュ比率（任意）</label>
+        <input type="number" id="nc-min-ratio" value="0" min="-5" max="5" step="0.1">
+        <div class="text-sm" style="margin-top:4px;color:#64748b">0=NCプラスの全銘柄、0.5=半額バーゲン、1.0=現金で買える</div>
       </div>
       <div class="form-group" style="margin-bottom:0">
-        <label>最低時価総額（百万円、空=制限なし）</label>
-        <input type="number" id="nc-min-cap" value="5000" min="0" step="1000">
+        <label>NC比率の上限（データ品質ガード）</label>
+        <input type="number" id="nc-max-ratio" value="5" min="0" step="0.5">
+        <div class="text-sm" style="margin-top:4px;color:#64748b">推計時価総額の崩れによる異常値を除外。空/0=無効</div>
+      </div>
+      <div class="form-group" style="margin-bottom:0">
+        <label>最低時価総額（百万円・任意）</label>
+        <input type="number" id="nc-min-cap" placeholder="空=制限なし" min="0" step="1000">
+        <div class="text-sm" style="margin-top:4px;color:#64748b">任意で小型株を除外。空=制限なし（推奨）</div>
+      </div>
+      <div class="form-group" style="margin-bottom:0">
+        <label>最低NCAV比率（任意・グレアム）</label>
+        <input type="number" id="nc-min-ncav" placeholder="例: 1.5" min="-5" max="5" step="0.1">
+        <div class="text-sm" style="margin-top:4px;color:#64748b">1.5=グレアムのネットネットに限定。空=制限なし</div>
       </div>
       <div class="form-group" style="margin-bottom:0">
         <label>業種（空欄=全業種）</label>
@@ -450,8 +464,18 @@ tr:hover td{background:#1e2235}
           <option value="nc_ratio_desc" selected>NC比率 高い順（割安）</option>
           <option value="nc_ratio_asc">NC比率 低い順</option>
           <option value="net_cash_desc">NC額 大きい順</option>
+          <option value="ncav_ratio_desc">NCAV比率 高い順（グレアム割安）</option>
         </select>
       </div>
+    </div>
+    <div style="display:flex;gap:20px;align-items:center;margin-bottom:14px;flex-wrap:wrap">
+      <span class="text-sm" style="color:#94a3b8">バリュートラップ除外（任意）:</span>
+      <label class="text-sm" style="display:flex;align-items:center;gap:6px;cursor:pointer;color:#cbd5e1">
+        <input type="checkbox" id="nc-require-ocf"> 営業CF&gt;0 の企業のみ
+      </label>
+      <label class="text-sm" style="display:flex;align-items:center;gap:6px;cursor:pointer;color:#cbd5e1">
+        <input type="checkbox" id="nc-require-ni"> 純利益&gt;0 の企業のみ
+      </label>
     </div>
     <button class="btn btn-primary" id="btn-net-cash" onclick="runNetCash()">
       <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
@@ -461,9 +485,9 @@ tr:hover td{background:#1e2235}
 
   <div class="card hidden" id="nc-summary-card">
     <div class="section-title">サマリー</div>
-    <div class="grid3" style="margin-bottom:8px">
+    <div class="grid4" style="margin-bottom:8px">
       <div class="stat-card">
-        <div class="stat-label">現金で買える銘柄（NC比率 ≥ 1.0）</div>
+        <div class="stat-label">現金で買える（NC比率 ≥ 1.0）</div>
         <div class="stat-value" id="nc-stat-very-cheap" style="color:#fbbf24">-</div>
       </div>
       <div class="stat-card">
@@ -471,11 +495,16 @@ tr:hover td{background:#1e2235}
         <div class="stat-value" id="nc-stat-cheap" style="color:#86efac">-</div>
       </div>
       <div class="stat-card">
+        <div class="stat-label">グレアム ネットネット（NCAV比率 ≥ 1.5）</div>
+        <div class="stat-value" id="nc-stat-netnet" style="color:#67e8f9">-</div>
+      </div>
+      <div class="stat-card">
         <div class="stat-label">投資有価証券データ保有</div>
         <div class="stat-value" id="nc-stat-inv-sec" style="color:#a78bfa">-</div>
       </div>
     </div>
-    <div id="nc-industry-summary" style="margin-top:10px;font-size:11px;color:#94a3b8"></div>
+    <div id="nc-excluded-note" style="margin-top:6px;font-size:11px;color:#f59e0b"></div>
+    <div id="nc-industry-summary" style="margin-top:6px;font-size:11px;color:#94a3b8"></div>
   </div>
 
   <div class="card hidden" id="nc-results-card">
@@ -496,10 +525,13 @@ tr:hover td{background:#1e2235}
             <th>年度</th>
             <th title="清原式: 流動資産 + 投資有価証券×0.7 − 総負債">NC(億円) ⓘ</th>
             <th title="ネットキャッシュ ÷ 時価総額">NC比率 ⓘ</th>
+            <th title="グレアム流: 流動資産 − 総負債">NCAV(億) ⓘ</th>
+            <th title="NCAV ÷ 時価総額。1.5以上でグレアムのネットネット">NCAV比率 ⓘ</th>
             <th>時価総額(億)</th>
             <th>流動資産(億)</th>
             <th title="0=取得未対応の古いレコード">投資有価証券(億) ⓘ</th>
             <th>総負債(億)</th>
+            <th title="営業キャッシュフロー">営業CF(億) ⓘ</th>
             <th>PER</th>
             <th>PBR</th>
             <th>配当利回り%</th>
@@ -1085,12 +1117,16 @@ let ncResults = [];
 
 async function runNetCash() {
   const params = {
-    min_nc_ratio:    parseFloat(document.getElementById('nc-min-ratio').value || '0'),
-    min_market_cap:  document.getElementById('nc-min-cap').value ? parseFloat(document.getElementById('nc-min-cap').value) : null,
-    industry:        document.getElementById('nc-industry').value.trim() || null,
-    year:            document.getElementById('nc-year').value ? parseInt(document.getElementById('nc-year').value, 10) : null,
-    top_n:           parseInt(document.getElementById('nc-top-n').value, 10),
-    sort:            document.getElementById('nc-sort').value,
+    min_nc_ratio:        parseFloat(document.getElementById('nc-min-ratio').value || '0'),
+    max_nc_ratio:        document.getElementById('nc-max-ratio').value ? parseFloat(document.getElementById('nc-max-ratio').value) : null,
+    min_market_cap:      document.getElementById('nc-min-cap').value ? parseFloat(document.getElementById('nc-min-cap').value) : null,
+    min_ncav_ratio:      document.getElementById('nc-min-ncav').value ? parseFloat(document.getElementById('nc-min-ncav').value) : null,
+    require_positive_ocf: document.getElementById('nc-require-ocf').checked,
+    require_positive_ni:  document.getElementById('nc-require-ni').checked,
+    industry:            document.getElementById('nc-industry').value.trim() || null,
+    year:                document.getElementById('nc-year').value ? parseInt(document.getElementById('nc-year').value, 10) : null,
+    top_n:               parseInt(document.getElementById('nc-top-n').value, 10),
+    sort:                document.getElementById('nc-sort').value,
   };
   const btn = document.getElementById('btn-net-cash');
   btn.disabled = true;
@@ -1103,7 +1139,13 @@ async function runNetCash() {
 
     document.getElementById('nc-stat-very-cheap').textContent = (d.n_very_cheap ?? 0) + '社';
     document.getElementById('nc-stat-cheap').textContent      = (d.n_cheap      ?? 0) + '社';
+    document.getElementById('nc-stat-netnet').textContent     = (d.n_graham_netnet ?? 0) + '社';
     document.getElementById('nc-stat-inv-sec').textContent    = (d.n_inv_securities ?? 0) + '社 / ' + (d.count ?? 0) + '社';
+
+    const exParts = [];
+    if (d.n_excluded_sanity) exParts.push(`データ品質ガードで ${d.n_excluded_sanity} 社を除外（推計時価総額の崩れによる異常比率）`);
+    if (d.n_excluded_trap)   exParts.push(`バリュートラップ除外で ${d.n_excluded_trap} 社を除外（営業CF/純利益マイナス）`);
+    document.getElementById('nc-excluded-note').textContent = exParts.length ? '⚠ ' + exParts.join(' / ') : '';
 
     const indSummary = (d.industry_summary || []).slice(0, 8)
       .map(s => `${esc(s.industry)} (${s.n})`).join('  /  ');
@@ -1124,25 +1166,37 @@ async function runNetCash() {
 
 function renderNetCash() {
   const tbody = document.getElementById('nc-tbody');
+  const fmt = v => (v === null || v === undefined) ? '-' : Number(v).toLocaleString();
   tbody.innerHTML = ncResults.map(r => {
     const ratioColor = r.nc_ratio >= 1.0 ? '#fbbf24'
                      : r.nc_ratio >= 0.5 ? '#86efac'
                      : r.nc_ratio >= 0   ? '#94a3b8'
                                           : '#fca5a5';
     const ncColor = r.net_cash_oku >= 0 ? '#86efac' : '#fca5a5';
+    const ncavRatioColor = (r.ncav_ratio === null || r.ncav_ratio === undefined) ? '#64748b'
+                         : r.ncav_ratio >= 1.5 ? '#67e8f9'
+                         : r.ncav_ratio >= 1.0 ? '#86efac'
+                         : r.ncav_ratio >= 0   ? '#94a3b8'
+                                                : '#fca5a5';
+    const ocfColor = (r.operating_cf_oku === null || r.operating_cf_oku === undefined) ? '#64748b'
+                   : r.operating_cf_oku >= 0 ? '#94a3b8' : '#fca5a5';
     const invNote = r.has_investment_sec ? '' : '<span style="color:#64748b" title="投資有価証券データ未取得（古いレコード）"> *</span>';
+    const netnetBadge = r.is_graham_netnet ? '<span title="グレアムのネットネット（時価総額 < NCAV×2/3）" style="color:#67e8f9"> ★</span>' : '';
     return `<tr>
       <td>${r.rank}</td>
       <td><code style="color:#67e8f9">${esc(r.sec_code || '')}</code></td>
       <td>${r.edinet_code ? `<a href="/company/${esc(r.edinet_code)}" class="co-link">${esc(r.company_name || '')}</a>` : esc(r.company_name || '')}</td>
       <td style="color:#94a3b8">${esc(r.industry || '')}</td>
       <td>${r.year ?? '-'}</td>
-      <td style="text-align:right;color:${ncColor};font-weight:600">${Number(r.net_cash_oku).toLocaleString()}</td>
+      <td style="text-align:right;color:${ncColor};font-weight:600">${fmt(r.net_cash_oku)}</td>
       <td style="text-align:right;color:${ratioColor};font-weight:600">${Number(r.nc_ratio).toFixed(3)}</td>
-      <td style="text-align:right">${Number(r.market_cap_oku).toLocaleString()}</td>
-      <td style="text-align:right;color:#94a3b8">${Number(r.current_assets_oku).toLocaleString()}</td>
-      <td style="text-align:right;color:#94a3b8">${Number(r.investment_sec_oku).toLocaleString()}${invNote}</td>
-      <td style="text-align:right;color:#94a3b8">${Number(r.total_liabilities_oku).toLocaleString()}</td>
+      <td style="text-align:right;color:#cbd5e1">${fmt(r.ncav_oku)}</td>
+      <td style="text-align:right;color:${ncavRatioColor};font-weight:600">${(r.ncav_ratio === null || r.ncav_ratio === undefined) ? '-' : Number(r.ncav_ratio).toFixed(3)}${netnetBadge}</td>
+      <td style="text-align:right">${fmt(r.market_cap_oku)}</td>
+      <td style="text-align:right;color:#94a3b8">${fmt(r.current_assets_oku)}</td>
+      <td style="text-align:right;color:#94a3b8">${fmt(r.investment_sec_oku)}${invNote}</td>
+      <td style="text-align:right;color:#94a3b8">${fmt(r.total_liabilities_oku)}</td>
+      <td style="text-align:right;color:${ocfColor}">${fmt(r.operating_cf_oku)}</td>
       <td style="text-align:right">${r.per ?? '-'}</td>
       <td style="text-align:right">${r.pbr ?? '-'}</td>
       <td style="text-align:right">${r.div_yield ?? '-'}</td>
@@ -1153,12 +1207,13 @@ function renderNetCash() {
 
 function exportNetCashCSV() {
   if (!ncResults.length) return;
-  const h = '順位,証券コード,企業名,業種,年度,ネットキャッシュ(億円),NC比率,時価総額(億),流動資産(億),投資有価証券(億),総負債(億),PER,PBR,配当利回り%,ROE%\n';
+  const h = '順位,証券コード,企業名,業種,年度,ネットキャッシュ(億円),NC比率,NCAV(億円),NCAV比率,グレアムネットネット,時価総額(億),流動資産(億),投資有価証券(億),総負債(億),営業CF(億),純利益(億),PER,PBR,配当利回り%,ROE%\n';
   const b = ncResults.map(r => [
     r.rank, r.sec_code, r.company_name, r.industry, r.year,
-    r.net_cash_oku, r.nc_ratio, r.market_cap_oku, r.current_assets_oku,
-    r.investment_sec_oku, r.total_liabilities_oku, r.per ?? '', r.pbr ?? '',
-    r.div_yield ?? '', r.roe ?? ''
+    r.net_cash_oku, r.nc_ratio, r.ncav_oku ?? '', r.ncav_ratio ?? '', r.is_graham_netnet ? '★' : '',
+    r.market_cap_oku, r.current_assets_oku,
+    r.investment_sec_oku, r.total_liabilities_oku, r.operating_cf_oku ?? '', r.net_income_oku ?? '',
+    r.per ?? '', r.pbr ?? '', r.div_yield ?? '', r.roe ?? ''
   ].join(',')).join('\n');
   dl('﻿' + h + b, 'net_cash_ranking.csv');
 }

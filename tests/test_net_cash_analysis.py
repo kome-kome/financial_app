@@ -13,6 +13,10 @@ from plugins.net_cash_analysis import (
     INVESTMENT_DISCOUNT,
     NC_RATIO_CHEAP,
     NC_RATIO_VERY_CHEAP,
+    NCAV_BARGAIN_RATIO,
+    SANITY_MAX_NC_RATIO,
+    compute_ncav,
+    compute_ncav_ratio,
     compute_net_cash,
     compute_nc_ratio,
 )
@@ -87,6 +91,45 @@ class TestComputeNcRatio:
         assert r < 0
 
 
+class TestComputeNcav:
+    def test_basic_formula(self):
+        # NCAV = 流動資産 1000億 − 総負債 600億 = 400億（投資有価証券の0.7補正なし）
+        ncav = compute_ncav(1000e8, 600e8)
+        assert ncav == pytest.approx(400e8)
+
+    def test_ncav_ignores_investment_securities(self):
+        # compute_ncav は投資有価証券を引数に取らない＝清原式より保守的
+        ncav = compute_ncav(500e8, 500e8)
+        nc = compute_net_cash(500e8, 1000e8, 500e8)
+        assert ncav == pytest.approx(0)
+        # 同じ BS でも清原式は投資有価証券×0.7 を上乗せするため NCAV ≤ net_cash
+        assert ncav < nc
+
+    def test_only_current_assets(self):
+        ncav = compute_ncav(500e8, None)
+        assert ncav == pytest.approx(500e8)
+
+    def test_both_none_returns_none(self):
+        assert compute_ncav(None, None) is None
+
+    def test_negative_when_liabilities_exceed_assets(self):
+        ncav = compute_ncav(100e8, 800e8)
+        assert ncav == pytest.approx(-700e8)
+
+
+class TestComputeNcavRatio:
+    def test_basic_ratio(self):
+        # ncav=750億円, market_cap=500億円(=50000百万円) → 1.5（グレアムのネットネット境界）
+        r = compute_ncav_ratio(750e8, 50_000)
+        assert r == pytest.approx(1.5)
+
+    def test_none_ncav_returns_none(self):
+        assert compute_ncav_ratio(None, 50_000) is None
+
+    def test_zero_market_cap_returns_none(self):
+        assert compute_ncav_ratio(100e8, 0) is None
+
+
 class TestThresholds:
     def test_very_cheap_threshold(self):
         # 清原氏の「現金で買える」水準
@@ -99,3 +142,11 @@ class TestThresholds:
     def test_thresholds_ordered(self):
         # very_cheap > cheap であること（割安度の階段が崩れないように）
         assert NC_RATIO_VERY_CHEAP > NC_RATIO_CHEAP
+
+    def test_ncav_bargain_is_graham_two_thirds_rule(self):
+        # グレアムの2/3ルール: price < 2/3×NCAV ⟺ NCAV/price > 1.5
+        assert NCAV_BARGAIN_RATIO == 1.5
+
+    def test_sanity_cap_default(self):
+        # データ品質ガードの既定上限
+        assert SANITY_MAX_NC_RATIO == 5.0

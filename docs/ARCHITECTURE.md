@@ -757,8 +757,8 @@ classDiagram
         +name = "net_cash_analysis"
         +label = "ネットキャッシュ分析"
         +depends_on = []
-        +params_schema() 最低NC比率・業種・最低時価総額・年度
-        +execute() 清原式NC・NC比率でランキング生成（OLS不使用）
+        +params_schema() NC比率下限/上限・NCAV比率・営業CF/純利益フィルタ・時価総額・業種・年度
+        +execute() 清原式NC比率＋グレアムNCAV比率でランキング生成（OLS不使用・品質ガード/トラップ除外付き）
     }
 
     class PluginRegistry {
@@ -968,7 +968,7 @@ graph TB
 | `plugins/total_return.py` | バックエンド | 配当込みトータルリターン分析 | plugins/utils.py |
 | `plugins/sector_ols.py` | バックエンド | 業種別OLS回帰分析（次元整合・winsorize+z-score前処理） | plugins/utils.py |
 | `plugins/price_predictor.py` | バックエンド | 株価リターン予測（価格×財務特徴量OLS・月次WFV） | plugins/utils.py |
-| `plugins/net_cash_analysis.py` | バックエンド | ネットキャッシュ分析（清原達郎『わが投資術』式）。NC = 流動資産 + 投資有価証券×0.7 − 総負債 | database.py |
+| `plugins/net_cash_analysis.py` | バックエンド | ネットキャッシュ分析（清原達郎『わが投資術』式）＋グレアムNCAV。NC = 流動資産 + 投資有価証券×0.7 − 総負債、NCAV = 流動資産 − 総負債。推計時価総額の崩れによる異常比率はサニティ上限で自動除外し、任意で営業CF>0等のバリュートラップ除外も可能 | database.py |
 | `plugins/utils.py` | バックエンド | ols()・normalize()・winsorize()・walk_forward_cv()・walk_forward_cv_monthly() | — |
 | `tests/` | テスト | pytest 回帰テスト（188件）。プラグイン7個＋utils＋`database.py`（upsert・年度別Zスコア）＋`collector.py`（XBRLパース・派生指標＋ネットワーク取得を httpx MockTransport でモック）＋`api.py`（純関数・`/health`・DB-backed 読取エンドポイント）をカバー。in-memory SQLite fixture（StaticPool）／FastAPI TestClient／httpx MockTransport で検証。共通 fixture は `tests/conftest.py`（`db`/`make_fin` 等） | pytest, sqlalchemy, fastapi, httpx |
 | `requirements-dev.txt` | 設定 | 開発・テスト専用依存（`pytest`）。本番 `requirements.txt` と分離（Render メモリ節約） | — |
