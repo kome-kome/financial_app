@@ -559,6 +559,15 @@ sequenceDiagram
     BGT -->> API : running = False
     API -->> UI  : SSEイベント（running=false）
     UI  -->> User: エラー状態を表示
+
+    Note over User,DB: ケース④ ジョブのスタック → 強制リセット
+    Note over BGT: finally到達前にプロセス強制終了等で<br/>running フラグが残ったケース
+    User ->> UI  : 「強制リセット」ボタンをクリック<br/>または スマート収集再試行時の確認ダイアログで承諾
+    UI   ->> API : POST /api/collect/reset-stuck<br/>または smart-start { force: true }
+    API  ->> API : _job_status["running"] = False
+    API  ->> DB  : running の collection_logs を error 化<br/>message = "ユーザーによる強制リセット"
+    API -->> UI  : 200 { "reset_jobs": N }
+    UI  -->> User: 「N件のジョブをリセットしました」を表示
 ```
 
 ---
@@ -862,6 +871,8 @@ graph LR
         C23["POST /api/collect/reparse/start\nxbrl_raw_documentsから再解析（EDINET通信なし）\nRender可・年度/EDINETコードフィルタ対応"]
         C24["POST /api/collect/reparse/cancel\n再解析を停止"]
         C25["GET /api/collect/reparse/stream\nSSE: 再解析進捗"]
+        C26["POST /api/collect/smart-start\nスマート収集（DB状態から自動判定）"]
+        C27["POST /api/collect/reset-stuck\nスタックしたrunningジョブを強制リセット"]
     end
 
     subgraph MACRO["🌐 マクロデータ /api/macro/"]
