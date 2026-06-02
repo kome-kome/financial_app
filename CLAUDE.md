@@ -287,7 +287,7 @@ SSEエンドポイント: 収集=`/api/collect/stream`、市場データ=`/api/c
 ## リファクタリング方針
 
 - ファイル名・URL: 機能名で命名（フェーズ番号禁止）
-- HTML: CSS/JSインライン1ファイル維持（分割禁止）
+- HTML: **CSS はインライン1ファイル維持**（分割禁止）。**JS は CSP 対応のため `static/js/<page>.js` に外部化**（各テンプレ1ファイル対応、`/static` で配信）。インラインのイベントハンドラ（`onclick=` 等）は現状維持で、将来 addEventListener 化して `script-src 'unsafe-inline'` を除去する
 - 定数: ファイル冒頭に集約（コード中にハードコード禁止）
 - **`docs/ARCHITECTURE.md` の随時更新（必須）**: コード変更と同じ作業内で更新すること。
   - DBテーブル追加・変更 → ER図（セクション3）
