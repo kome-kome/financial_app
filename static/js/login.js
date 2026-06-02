@@ -1,6 +1,10 @@
 const _nextRaw = new URLSearchParams(location.search).get('next') || '/';
 const _next = /^\/[^/\\]/.test(_nextRaw) || _nextRaw === '/' ? _nextRaw : '/';
-if(localStorage.getItem('auth_token')) location.href = _next;
+function _getCookie(name){
+  const m = document.cookie.match('(^|; )' + name + '=([^;]*)');
+  return m ? decodeURIComponent(m[2]) : '';
+}
+if(_getCookie('csrf_token')) location.href = _next;
 
 function showReset(){
   document.getElementById('login-panel').style.display = 'none';
@@ -23,6 +27,7 @@ async function login(){
   try {
     const r = await fetch('/api/auth/login', {
       method: 'POST',
+      credentials: 'same-origin',
       headers: {'Content-Type':'application/json'},
       body: JSON.stringify({password: pw})
     });
@@ -32,8 +37,6 @@ async function login(){
       document.getElementById('pw').focus();
       return;
     }
-    const d = await r.json();
-    localStorage.setItem('auth_token', d.token);
     location.href = _next;
   } catch(e) {
     err.textContent = 'エラー: ' + e.message;
@@ -78,3 +81,23 @@ async function resetPassword(){
     btn.textContent = 'パスワードをリセット';
   }
 }
+
+// インラインハンドラを CSP 対応で addEventListener 化（script-src 'unsafe-inline' 除去のため）。
+function _wireLogin(){
+  const pw = document.getElementById('pw');
+  if (pw) pw.addEventListener('keydown', e => { if (e.key === 'Enter') login(); });
+  const loginBtn = document.getElementById('login-btn');
+  if (loginBtn) loginBtn.addEventListener('click', () => login());
+  const forgot = document.getElementById('forgot-link');
+  if (forgot) forgot.addEventListener('click', () => showReset());
+  const rk = document.getElementById('rk');
+  if (rk) rk.addEventListener('keydown', e => { if (e.key === 'Enter') document.getElementById('np').focus(); });
+  const np = document.getElementById('np');
+  if (np) np.addEventListener('keydown', e => { if (e.key === 'Enter') resetPassword(); });
+  const resetBtn = document.getElementById('reset-btn');
+  if (resetBtn) resetBtn.addEventListener('click', () => resetPassword());
+  const backBtn = document.getElementById('back-btn');
+  if (backBtn) backBtn.addEventListener('click', () => showLogin());
+}
+if (document.readyState !== 'loading') _wireLogin();
+else document.addEventListener('DOMContentLoaded', _wireLogin);

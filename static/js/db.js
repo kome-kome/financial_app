@@ -9,11 +9,13 @@ function fmt(v){
 }
 function apiBase(){ return ''; }
 
+function _getCookie(name){
+  const m = document.cookie.match('(^|; )' + name + '=([^;]*)');
+  return m ? decodeURIComponent(m[2]) : '';
+}
 async function apiFetch(path){
-  const token = localStorage.getItem('auth_token') || '';
   const heads = {'Content-Type':'application/json'};
-  if(token) heads['Authorization'] = 'Bearer ' + token;
-  const r = await fetch(apiBase()+path, {headers: heads});
+  const r = await fetch(apiBase()+path, {headers: heads, credentials: 'same-origin'});
   if(r.status===401){ location.href='/login?next=/db'; return null; }
   if(!r.ok) throw new Error(await r.text());
   return r.json();
@@ -427,10 +429,9 @@ document.getElementById('download-csv').onclick = () => {
     qs.set('filter_col', state.filterCol);
     qs.set('filter_val', state.filterVal);
   }
-  const token = localStorage.getItem('auth_token') || '';
-  // 認証ヘッダ付きで CSV をフェッチして blob 化（直接 location は Authorization を付与できないため）
+  // Cookie 認証のため Authorization 不要。GET なので CSRF も不要（cookie 自動送信）
   fetch(`/api/db/export/${state.selectedTable}?${qs}`, {
-    headers: token ? {'Authorization': 'Bearer ' + token} : {}
+    credentials: 'same-origin'
   }).then(r => r.blob()).then(blob => {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -449,7 +450,7 @@ async function initAuth(){
   try{
     const r = await fetch('/api/auth/status');
     const d = await r.json();
-    if(d.auth_required && !localStorage.getItem('auth_token')){
+    if(d.auth_required && !_getCookie('csrf_token')){
       location.href = '/login?next=/db';
     }
   }catch(e){}

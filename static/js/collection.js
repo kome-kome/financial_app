@@ -7,12 +7,16 @@ let normData = {};
 let searchTimer = null;
 
 // ── 認証 ────────────────────────────────────────────────────────────
+function _getCookie(name){
+  const m = document.cookie.match('(^|; )' + name + '=([^;]*)');
+  return m ? decodeURIComponent(m[2]) : '';
+}
 async function initAuth(){
   try {
     const r = await fetch('/api/auth/status');
     const d = await r.json();
     if(d.auth_required){
-      if(!localStorage.getItem('auth_token')){
+      if(!_getCookie('csrf_token')){
         location.href = '/login?next=' + encodeURIComponent(location.pathname);
         return;
       }
@@ -20,17 +24,20 @@ async function initAuth(){
     }
   } catch(e){ /* API 未起動時はスキップ */ }
 }
-function logout(){ localStorage.removeItem('auth_token'); location.href='/login'; }
+async function logout(){
+  try { await fetch('/api/auth/logout', {method:'POST', credentials:'same-origin'}); } catch(e){}
+  location.href = '/login';
+}
 
 // ── API ────────────────────────────────────────────────────────────
 function apiBase(){ return document.getElementById('api-base').value.trim().replace(/\/$/,'') }
 
 async function apiFetch(path, opts={}){
-  const token = localStorage.getItem('auth_token') || '';
   const heads = {'Content-Type':'application/json'};
-  if(token) heads['Authorization'] = 'Bearer ' + token;
-  const r = await fetch(apiBase()+path, {headers:heads,...opts});
-  if(r.status===401){ localStorage.removeItem('auth_token'); location.href='/login'; return; }
+  const _m = (opts.method || 'GET').toUpperCase();
+  if(_m !== 'GET' && _m !== 'HEAD') heads['X-CSRF-Token'] = _getCookie('csrf_token');
+  const r = await fetch(apiBase()+path, {credentials:'same-origin', ...opts, headers:{...heads, ...(opts.headers||{})}});
+  if(r.status===401){ location.href='/login'; return; }
   if(!r.ok){
     if(r.status===502||r.status===503||r.status===504)
       throw new Error(`サーバー再起動中 (${r.status})。しばらく待ってから再試行してください`);
@@ -454,7 +461,7 @@ async function loadDB(){
         <td>${latest?.val.pbr!=null?Number(latest.val.pbr):'-'}</td>
         <td>${latest?.bs.equity_ratio!=null?Number(latest.bs.equity_ratio)+'%':'-'}</td>
         <td>${latest ? fmt0((latest.val.market_cap||0)/1e6) : '-'}</td>
-        <td><button class="btn btn-secondary btn-sm" onclick="showDetail('${esc(c.edinet_code)}','${esc(c.name)}')">詳細</button></td>
+        <td><button class="btn btn-secondary btn-sm" data-click="showDetail" data-arg="${esc(c.edinet_code)}" data-arg2="${esc(c.name)}">詳細</button></td>
       `;
       tbody.appendChild(tr);
     }
@@ -1206,3 +1213,27 @@ window.addEventListener('beforeunload', () => {
     if (sse) { try { sse.close(); } catch(_) {} }
   }
 });
+
+// data 属性ハンドラ用ヘルパ（this=対象要素）
+function clearById(){ const el=document.getElementById(this.dataset.target); if(el) el.innerHTML=''; }
+function toggleDisplay(){ const el=document.getElementById(this.dataset.target); if(el) el.style.display = this.checked ? '' : 'none'; }
+
+
+// ===== CSP: インラインハンドラ撤廃のためのイベント委譲ディスパッチャ =====
+// 要素の data-click / data-change / data-input / data-keydown = 呼び出す関数名、
+// data-arg / data-arg2 = 引数（'true'/'false' は真偽値に変換）。委譲のため動的生成要素にも有効。
+// fn.apply(el, args) により this=要素 を保存する（インラインハンドラ互換）。
+function _coerceArg(v){ if(v===undefined) return undefined; if(v==='true') return true; if(v==='false') return false; return v; }
+function _wireDelegate(eventType, key){
+  document.addEventListener(eventType, function(e){
+    const el = e.target.closest('[data-'+key+']');
+    if(!el) return;
+    const fn = window[el.dataset[key]];
+    if(typeof fn !== 'function') return;
+    const args=[];
+    if('arg' in el.dataset)  args.push(_coerceArg(el.dataset.arg));
+    if('arg2' in el.dataset) args.push(_coerceArg(el.dataset.arg2));
+    fn.apply(el, args);
+  });
+}
+['click','change','input','keydown'].forEach(function(ev){ _wireDelegate(ev, ev); });
