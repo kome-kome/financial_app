@@ -42,8 +42,8 @@
 
 ### 実装済み（中期完了）
 - **おすすめ銘柄の提示機能** ✅ — `total_return` プラグイン（EPS/BPS/DPS[円/株]→株価OLS、期待リターンランキング）
-- **毎日の自動データ更新** ✅ — スケジューラー導入済み
-- **認証機能の追加** ✅ — HMAC-SHA256 署名トークン実装済み
+- **毎日の自動データ更新** ✅ — GitHub Actions `daily-incremental.yml` で毎日自動収集
+- **認証機能の追加** ✅ — HttpOnly Cookie + CSRF Double-Submit（Tier3-3）
 - **分析手法のプラグイン化** ✅ — `plugins/` ディレクトリ、自動検出方式
 - **外部サーバーへのデプロイ** ✅ — **Render にデプロイ済み**（[docs/DEPLOYMENT.md](DEPLOYMENT.md) 参照）。DB は Supabase PostgreSQL
 - **業種別回帰モデル** ✅ — `sector_ols` プラグイン + `total_return` の業種固定効果
@@ -61,13 +61,13 @@
 
 | 課題 | 状態 | 対応 |
 |---|---|---|
-| **認証なし** | ✅ 解決 | HMAC-SHA256 署名トークン実装済み（`APP_PASSWORD` 環境変数で有効化） |
+| **認証なし** | ✅ 解決 | HttpOnly Cookie + CSRF Double-Submit（Tier3-3、`APP_PASSWORD` で有効化） |
 | **CORS 全許可** | ✅ 解決 | `ALLOWED_ORIGIN` 環境変数で制限。Render ダッシュボードで設定 |
-| **自動更新の仕組み** | ✅ 解決 | `_daily_scheduler` 実装済み。ただし Free プランの 15 分アイドル時は停止 |
+| **自動更新の仕組み** | ✅ 解決 | GitHub Actions `daily-incremental.yml` で毎日自動収集（Render 側スケジューラは廃止） |
 | **環境分離** | ✅ 解決 | Render 環境変数 + `.env` ローカル開発のみ |
 | **DB が接続先固定前提** | ✅ 解決 | `DATABASE_URL` 環境変数で制御 → Supabase に接続 |
 | **EDINET / J-Quants API キー** | ✅ 解決 | Render の環境変数（`sync: false`）で管理 |
-| **スピンダウン回避** | 🔄 未対応 | Free プランは 15 分アイドルで停止 → 深夜の自動収集が動かない。外部 ping か有料プラン |
+| **スピンダウン回避** | ✅ 解決 | 自動収集は GitHub Actions に移行済みのため Render 停止は収集に無影響。UI コールドスタートのみ許容 |
 | **DB バックアップ運用** | 🔄 未対応 | Supabase は自動バックアップ機能あり、運用ポリシー未確定 |
 
 ---
@@ -79,7 +79,7 @@
 | ~~OLS 回帰を Pure Python で実装~~ → **成熟した科学計算ライブラリの利用を許可** | 統計解析の拡張性を優先。numpy/scipy/statsmodels/scikit-learn 等、広く使われ査読者が多く安全性の信頼度が高いサードパーティーライブラリは積極的に利用する。詳細は下記「サードパーティーライブラリ採用基準」を参照 |
 | HTML を単一ファイル構成 | ビルドステップ不要でデプロイが簡単。現状維持 |
 | EDINET CSV ダウンロード → API フォールバック | 主経路が失敗しても書類一覧 API で継続できる二重化 |
-| stooq で株価取得 | 無料・API キー不要。精度や安定性が問題になれば要再検討 |
+| ~~stooq で株価取得~~ → **J-Quants（JPX公式）へ移行** | GitHub Actions Runner（Azure IP）から stooq が完全ブロックされるため。J-Quants は JPX 公式で精度も高い |
 | 不特定多数への公開は行わない | 自分専用ツール。認証は最小限で十分 |
 | 分析モデルは次元を揃えて設計（Ohlsonモデル型） | 無次元比率→絶対株価は次元不整合でOLS係数が解釈不能。per-share財務金額[円/株]→株価[円/株]とすることでβが implied P/E・P/B として経済的に解釈できる |
 
