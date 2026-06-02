@@ -13,6 +13,10 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
+# テストではレート制限（slowapi）を既定で無効化し、テスト間の誤発火を防ぐ。
+# 個別検証は tests/test_rate_limit.py で limiter.enabled を実行時に切り替えて行う。
+os.environ.setdefault("APP_RATELIMIT_ENABLED", "false")
+
 # プロジェクトルートを import パスに追加（database / plugins を import するため）
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 

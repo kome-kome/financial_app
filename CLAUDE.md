@@ -328,5 +328,5 @@ SSEエンドポイント: 収集=`/api/collect/stream`、市場データ=`/api/c
 - 本番運用前に `APP_PASSWORD`・`APP_SECRET_KEY`・`APP_RECOVERY_KEY` を必ず設定する。
 - **【Tier3 将来対応】** 認証トークンを `localStorage` に保存している（XSS時に盗難リスク）。HttpOnly Cookie 方式への移行は認証フロー全体の再設計が必要。
 - **【Tier3 将来対応】** POST リクエストに CSRF トークンなし。Cookie 認証移行後に実施。
-- **【Tier3 将来対応】** 重い処理（収集・分析）にレート制限なし。`slowapi` 等の導入が必要。
+- **【実装済み（Tier3-1）】** 重い処理（収集・分析）と認証に `slowapi` でレート制限を導入（収集 3/分・分析 20/分・ログイン 10/分・リセット 3/分・単一更新 10/分）。IP単位（`get_remote_address`）。`APP_RATELIMIT_ENABLED=false` で無効化可能（テスト時等）。環境変数名は slowapi 予約キー `RATELIMIT_*` との衝突を避けるため `APP_` 接頭辞必須。
 - **【Tier3 将来対応】** CSP の `unsafe-inline` を削除するには全テンプレートのインラインJS/CSSを外部ファイル化が必要。
