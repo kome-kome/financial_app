@@ -410,6 +410,21 @@ sequenceDiagram
     AUTH -->> User : 200 { "message": "パスワードを更新しました" }
 ```
 
+### セキュリティレスポンスヘッダ（`_SecurityHeadersMiddleware`）
+
+全レスポンスに以下を付与する（`api.py`）。
+
+| ヘッダ | 値 | 目的 |
+|---|---|---|
+| `Content-Security-Policy` | `default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'self'; form-action 'self'; frame-src 'none'; frame-ancestors 'none'` | XSS・クリックジャッキング・フォーム乗っ取り等の緩和 |
+| `X-Content-Type-Options` | `nosniff` | MIME スニッフィング防止 |
+| `X-Frame-Options` | `DENY` | クリックジャッキング防止（`frame-ancestors 'none'` と併用） |
+| `Referrer-Policy` | `strict-origin-when-cross-origin` | リファラ漏洩抑制 |
+| `Permissions-Policy` | `geolocation=(), camera=(), microphone=(), payment=(), usb=()` | 不使用ブラウザ機能の無効化 |
+| `Strict-Transport-Security` | `max-age=31536000`（**HTTPS 応答時のみ**。`X-Forwarded-Proto: https` で判定） | プロトコルダウングレード防止 |
+
+> ⚠️ `script-src`/`style-src` の `'unsafe-inline'` は現状維持（インラインJS/イベントハンドラの外部ファイル化が前提のため別対応）。Chart.js は jsdelivr CDN から読み込む。
+
 ---
 
 ## 4-4. 業種別OLS分析フロー
