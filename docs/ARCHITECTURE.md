@@ -331,41 +331,19 @@ sequenceDiagram
 ## 4-2. 株価履歴収集フロー
 
 > 株価の日次OHLCV（始値・高値・安値・終値・出来高）を取得して保存するフローです。
->
-> **現在の主経路は J-Quants（JPX公式）**。GitHub Actions Runner（Azure IP）からは stooq が完全ブロックされるため、本番収集は J-Quants のみを使用する。下図は stooq 版（ローカル補助経路）だが、J-Quants も「日付単位で全銘柄一括取得 → `ON CONFLICT DO UPDATE`」という同型のフローで、レート制限は 20秒/リクエスト（[CONSTRAINTS.md](CONSTRAINTS.md) 参照）。
 
-```mermaid
-sequenceDiagram
-    actor       User  as 👤 ユーザー
-    participant UI    as 🌐 collection.html（株価履歴タブ）
-    participant API   as ⚡ api.py
-    participant BGT   as 🔄 バックグラウンドタスク
-    participant STQ   as 📈 stooq API
-    participant DB    as 🗄️ PostgreSQL
+**現在の主経路**: J-Quants（JPX公式）。GitHub Actions Runner（Azure IP）からは stooq が完全ブロック。
 
-    User ->> UI  : 「収集開始」をクリック（取得年数・最大社数を指定）
-    UI   ->> API : POST /api/collect/history/start { years_back, max_companies }
-    API  ->> BGT : バックグラウンドタスクを起動
-    API -->> UI  : 200 { "message": "開始しました" }
-    UI   ->> API : GET /api/collect/history/stream（SSE接続開始）
+**フロー概要**（4-1 の財務収集と同じ起動パターン）:
+1. `POST /api/collect/history/start { years_back, max_companies }` → バックグラウンドタスク起動 → 200 即返し
+2. UI が `GET /api/collect/history/stream` で SSE 接続
+3. BGT が `SELECT edinet_code, sec_code FROM companies WHERE sec_code IS NOT NULL` で企業一覧取得
+4. 全企業ループ（J-Quants: 日付単位で全銘柄一括取得・`JQUANTS_RATE_SLEEP=20秒`; stooq ローカル補助: 1社1リクエスト・1.5秒）
+5. `stock_price_history` へ `ON CONFLICT DO UPDATE`（J-Quants）または `ON CONFLICT DO NOTHING`（stooq）
+6. `on_progress` → SSE で進捗配信 → 完了後 `running=false`
+7. UI が `GET /api/collect/history/coverage` で収録状況を更新表示
 
-    Note over BGT,DB: DBから sec_code を持つ企業一覧を取得
-    BGT  ->> DB  : SELECT edinet_code, sec_code, name FROM companies WHERE sec_code IS NOT NULL
-
-    loop 全企業を1社ずつ（レート制限: 1.5秒/社）
-        BGT  ->> STQ : GET stooq.com/q/d/l/?s={code}.jp&d1=...&d2=...&i=d
-        STQ -->> BGT : CSV形式の日次OHLCV（日付,始値,高値,安値,終値,出来高）
-        BGT  ->> BGT : CSVをパース → レコードリスト化
-        BGT  ->> DB  : stock_price_history へ INSERT ... ON CONFLICT DO NOTHING<br/>（同じ日のデータは重複保存しない）
-        BGT -->> API : on_progress → "[X/Y] 企業名(コード) 株価履歴取得中"
-        API -->> UI  : SSEイベント（進捗%・ログ更新）
-    end
-
-    BGT -->> API : 完了通知 { inserted: N件 }
-    API -->> UI  : SSEイベント（running=false）
-    UI  ->> User : 「収集完了」を表示
-    UI   ->> API : GET /api/collect/history/coverage（収録状況を更新表示）
-```
+制約値・優先度ルールは [DEPLOYMENT.md「外部サービス制約」](DEPLOYMENT.md) 参照。
 
 ---
 
@@ -514,32 +492,14 @@ sequenceDiagram
 
 ## 4-6. Zスコア正規化フロー
 
-> 年度ごとに業界内での相対位置（偏差値に近い概念）を計算するフローです。
+> 年度ごとに業界内での相対位置（偏差値に近い概念）を計算するフローです。収集完了後・または手動実行時に自動呼び出し。
 
-```mermaid
-sequenceDiagram
-    participant API   as ⚡ api.py
-    participant BGT   as 🔄 収集完了後の後処理
-    participant DB    as 🗄️ PostgreSQL
-
-    Note over API,BGT: 収集完了後・または手動実行時に自動的に呼ばれる
-
-    BGT  ->> DB  : SELECT DISTINCT year FROM financial_records
-    DB  -->> BGT : [2019, 2020, 2021, 2022, 2023, 2024]
-
-    loop 各年度を個別に処理（年度をまたいで混ぜない）
-        BGT  ->> DB  : SELECT * FROM financial_records WHERE year = {year}
-        DB  -->> BGT : その年度の全レコード
-
-        Note over BGT: 年度内の平均(μ)と標準偏差(σ)を計算
-        loop 各指標（pl_revenue, op_margin, roe, equity_ratio, cf_ratio, pl_eps, de_ratio）
-            BGT  ->> BGT : values = [各社の値]<br/>μ = mean(values)<br/>σ = stdev(values)<br/>Z = (値 - μ) / σ
-            BGT  ->> DB  : UPDATE financial_records<br/>SET z_{field} = Z WHERE year={year}
-        end
-    end
-
-    BGT -->> API : 正規化完了
-```
+**処理手順**:
+1. `SELECT DISTINCT year FROM financial_records` で年度一覧を取得
+2. 年度ごとに個別処理（**年度をまたいで混ぜない**こと）:
+   - `SELECT * FROM financial_records WHERE year = {year}` で該当年度の全レコード取得
+   - 対象指標（`pl_revenue`, `op_margin`, `roe`, `equity_ratio`, `cf_ratio`, `pl_eps`, `de_ratio`）ごとに μ/σ を計算し Z = (値 − μ) / σ を算出
+   - `UPDATE financial_records SET z_{field} = Z WHERE year={year}` で書き戻し
 
 ---
 
@@ -547,49 +507,12 @@ sequenceDiagram
 
 > 収集中にエラーが発生した場合、またはユーザーが停止ボタンを押した場合の挙動です。
 
-```mermaid
-sequenceDiagram
-    actor       User  as 👤 ユーザー
-    participant UI    as 🌐 collection.html
-    participant API   as ⚡ api.py
-    participant BGT   as 🔄 バックグラウンドタスク
-    participant DB    as 🗄️ PostgreSQL
-
-    Note over User,BGT: ケース① ユーザーによる手動停止
-    User ->> UI  : 「停止」ボタンをクリック
-    UI   ->> API : POST /api/collect/stop
-    API  ->> API : _job_status["cancel_requested"] = True
-    API -->> UI  : 200 { "message": "停止リクエストを送信..." }
-
-    Note over BGT: 次のループ先頭で cancel_check() を確認
-    BGT  ->> BGT : if cancel_check(): return True（cancelled）
-    BGT  ->> DB  : DB.commit()（処理済み分は保存）
-    BGT  ->> DB  : collection_logs.status = "done"<br/>message = "ユーザーにより停止"
-    BGT -->> API : running = False
-    API -->> UI  : SSEイベント（running=false）
-    UI  -->> User: 「収集停止」を表示
-
-    Note over User,BGT: ケース② EDINET APIエラー（1件単位でスキップ）
-    BGT  ->> BGT : try: XBRL取得・パース
-    BGT  ->> BGT : except: log.warning(f"スキップ: {doc_id}")
-    Note over BGT: エラーでも収集ループは継続（次の書類へ）
-
-    Note over User,BGT: ケース③ 重大エラー（ループ全体が止まる）
-    BGT  ->> BGT : 予期しない例外が発生
-    BGT  ->> DB  : collection_logs.status = "error"<br/>message = str(e)
-    BGT -->> API : running = False
-    API -->> UI  : SSEイベント（running=false）
-    UI  -->> User: エラー状態を表示
-
-    Note over User,DB: ケース④ ジョブのスタック → 強制リセット
-    Note over BGT: finally到達前にプロセス強制終了等で<br/>running フラグが残ったケース
-    User ->> UI  : 「強制リセット」ボタンをクリック<br/>または スマート収集再試行時の確認ダイアログで承諾
-    UI   ->> API : POST /api/collect/reset-stuck<br/>または smart-start { force: true }
-    API  ->> API : _job_status["running"] = False
-    API  ->> DB  : running の collection_logs を error 化<br/>message = "ユーザーによる強制リセット"
-    API -->> UI  : 200 { "reset_jobs": N }
-    UI  -->> User: 「N件のジョブをリセットしました」を表示
-```
+| ケース | 発生条件 | 動作 |
+|---|---|---|
+| **① 手動停止** | ユーザーが「停止」ボタン | `POST /api/collect/stop` → `_job_status["cancel_requested"]=True` → BGT が次ループ先頭の `cancel_check()` で検出 → 処理済み分を `DB.commit()` → `collection_logs.status="done"` → `running=False` → SSE → UI 表示 |
+| **② 1件単位エラー** | EDINET API / XBRL パースの例外 | `except` でスキップしてループ継続（`log.warning`）。収集自体は止まらない |
+| **③ 重大エラー** | 予期しない例外でループ全体停止 | `collection_logs.status="error"`・`message=str(e)` → `running=False` → SSE → UI にエラー状態表示 |
+| **④ ジョブスタック** | `finally` 未到達（強制終了等）で `running` フラグが残った | `POST /api/collect/reset-stuck`（または `smart-start { force:true }`）→ `_job_status["running"]=False`・DB の running ログを error 化 → 200 `{ reset_jobs: N }` |
 
 ---
 
@@ -1019,7 +942,9 @@ graph TB
 | `.env` | 設定 | APIキー・DB接続・認証情報（UTF-8 BOMなし） | — |
 | `ARCHITECTURE.md` | ドキュメント | 本ファイル。コード変更時は必ず更新する | — |
 | `MODELS.md` | ドキュメント | 分析モデルの数式・パラメータ・参考文献（Markdown版）。モデル変更時は `models.html` とセットで更新する。 | — |
-| `FUTURE_TASKS.md` | ドキュメント | 今後実装予定の機能仕様（時系列予測モデルなど） | — |
-| `VISUALIZATION_IMPROVEMENTS.md` | ドキュメント | 企業データ可視化強化の改善案（バフェット・コード型・Chart.js・企業詳細ページ） | — |
+| `FUTURE_TASKS.md` | ドキュメント | 未実装の課題・改善案（発行株式数の正規化・period_end の DATE 型化・マクロ要因モデル等、Tier 別） | — |
+| `docs/archive/` | ドキュメント | 完了済み作業記録（REFACTORING・IMPROVEMENTS・VISUALIZATION_IMPROVEMENTS）。現行参照には使わない | — |
 | `VISION.md` | ドキュメント | プロジェクトの目的・方針 | — |
-| `CLAUDE.md` | 設定 | Claude Codeへの動作指示 | — |
+| `CLAUDE.md` | 設定 | Claude Codeへの動作指示（索引＋必須ルール） | — |
+| `.claude/agents/financial-app-explorer.md` | 設定 | read-only 探索サブエージェント定義（多ファイル調査・大ドキュメント精読をトークン節約で委譲） | — |
+| `.claude/skills/tidy/SKILL.md` | 設定 | `/tidy` 軽量化点検 Skill（デッドファイル・壊れリンク・doc⇔code 乖離を調査→整理） | — |

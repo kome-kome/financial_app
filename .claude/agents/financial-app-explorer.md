@@ -20,7 +20,7 @@ model: sonnet
 
 - `CLAUDE.md` — 動作指示の索引（必須ルール）。
 - `docs/ARCHITECTURE.md` — 全体構成・ER図・フロー図・APIエンドポイント・ファイル役割。
-- `docs/CONSTRAINTS.md` — 外部サービス無料プラン制約（GitHub Actions/Supabase/Render/J-Quants）。
+- `docs/DEPLOYMENT.md` — Render 運用＋外部サービス無料プラン制約（GitHub Actions/Supabase/J-Quants）を統合。
 - `docs/GOTCHAS.md` — XBRL/CF/capex/時刻/業種/認証等のハマりどころ。
 - `docs/MODELS.md` — 分析モデルの理論。
 - `docs/DEPLOYMENT.md` — Render 運用・データ収集（自動/手動）の仕組み。

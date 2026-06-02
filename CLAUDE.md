@@ -8,12 +8,11 @@
 |---|---|---|
 | [VISION.md](docs/VISION.md) | プロジェクト目的・ロードマップ・ライブラリ採用基準 | 方針・採用判断時 |
 | [ARCHITECTURE.md](docs/ARCHITECTURE.md) | 全体構成・ER図・各種フロー図・APIエンドポイント・ファイル役割 | 設計詳細が必要なとき |
-| [CONSTRAINTS.md](docs/CONSTRAINTS.md) | 外部サービス制約（GitHub Actions / Supabase / Render / J-Quants） | データ収集・インフラ設計時 |
 | [GOTCHAS.md](docs/GOTCHAS.md) | 既知のハマりどころ（XBRL / CF / capex / 時刻 / 業種 / 認証実装メモ / 進捗仕様） | 収集・分析の実装時 |
-| [DEPLOYMENT.md](docs/DEPLOYMENT.md) | Render デプロイ運用＋データ収集の自動/手動の仕組み | デプロイ・収集運用時 |
+| [DEPLOYMENT.md](docs/DEPLOYMENT.md) | Render デプロイ運用＋データ収集の自動/手動の仕組み＋外部サービス制約（GitHub Actions / Supabase / J-Quants） | デプロイ・収集・インフラ設計時 |
 | [MODELS.md](docs/MODELS.md) | 分析モデル解説＋モデル固有の制約 | 分析モデル変更時 |
 
-> **設計の前に [CONSTRAINTS.md](docs/CONSTRAINTS.md) を必ず参照**：無料プラン制約（stooq ブロック・Supabase 500MB・J-Quants レート制限等）に違反しない方式を選ぶこと。
+> **設計の前に [DEPLOYMENT.md](docs/DEPLOYMENT.md) の「外部サービス制約」節を必ず参照**：無料プラン制約（stooq ブロック・Supabase 500MB・J-Quants レート制限等）に違反しない方式を選ぶこと。
 
 ---
 
@@ -113,6 +112,7 @@ pytest tests/test_utils.py  # 単一ファイル
 - **MODELS.md** と `templates/models.html`: 分析モデル追加・変更時に更新。参考文献は原著論文の DOI / 公式 URL（Wikipedia不可）。
 - **HTML 構成**: CSS はインライン1ファイル維持（分割禁止）。JS は CSP 対応で `static/js/<page>.js` に外部化（インラインイベントハンドラは `data-*`＋イベント委譲）。
 - ファイル名・URL は機能名で命名（フェーズ番号禁止）。定数はファイル冒頭に集約。
+- **軽量化の継続**: 機能追加・リファクタ後は `/tidy` を叩いてデッドファイル・壊れリンク・doc⇔code 乖離を点検すること。
 
 ---
 

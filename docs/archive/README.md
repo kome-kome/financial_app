@@ -7,8 +7,7 @@
 |---|---|---|
 | `IMPROVEMENTS.md` | コードベース改善トラッキング（全項目完了） | ✅ 完了 |
 | `VISUALIZATION_IMPROVEMENTS.md` | 企業データ可視化強化（Phase1-4 実装済み） | ✅ 完了 |
-| `REFACTORING.md` | DB 一本化・XBRL 生データ保存の設計書 | ✅ 完了 |
-| `REFACTORING_PHASE2.md` | リファクタリング第2弾 | ✅ 完了 |
+| `REFACTORING.md` | DB 一本化・XBRL 生データ保存の設計書 ＋ 付録: コード品質改善 (Phase 2) | ✅ 完了 |
 
 各ファイルの変更履歴は git で追える（`git log --follow docs/archive/<file>`）。
 
