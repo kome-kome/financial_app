@@ -13,7 +13,7 @@ from typing import Optional
 from dotenv import load_dotenv
 from sqlalchemy import (
     create_engine, Column, String, Integer, Float, DateTime,
-    Text, UniqueConstraint, Index, JSON, LargeBinary, ForeignKey, text
+    Text, UniqueConstraint, PrimaryKeyConstraint, Index, JSON, LargeBinary, ForeignKey, text
 )
 from sqlalchemy.orm import declarative_base, sessionmaker, relationship
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -189,14 +189,12 @@ class FinancialRecord(Base):
 class StockPriceHistory(Base):
     __tablename__ = "stock_price_history"
     __table_args__ = (
-        UniqueConstraint("edinet_code", "trade_date", name="uq_sph_edinet_date"),
-        Index("ix_sph_edinet_date", "edinet_code", "trade_date"),
-        Index("ix_sph_sec_date",    "sec_code",    "trade_date"),
+        PrimaryKeyConstraint("edinet_code", "trade_date", name="uq_sph_edinet_date"),
+        Index("ix_sph_sec_date", "sec_code", "trade_date"),
     )
 
-    id          = Column(Integer, primary_key=True, autoincrement=True)
     edinet_code = Column(String(10), ForeignKey("companies.edinet_code"), nullable=False)
-    sec_code    = Column(String(6),  nullable=False, index=True)
+    sec_code    = Column(String(6),  nullable=False)
     trade_date  = Column(String(10), nullable=False)   # "YYYY-MM-DD"
     open        = Column(Float)
     high        = Column(Float)

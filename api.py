@@ -671,7 +671,7 @@ async def history_collection_status():
 async def history_coverage(db: Session = Depends(get_db)):
     """収集済み株価履歴の社数・レコード数・最古日付を返す"""
     total_companies = db.query(StockPriceHistory.edinet_code).distinct().count()
-    total_records   = db.query(func.count(StockPriceHistory.id)).scalar() or 0
+    total_records   = db.query(func.count(StockPriceHistory.edinet_code)).scalar() or 0
     oldest_date     = db.query(func.min(StockPriceHistory.trade_date)).scalar()
     newest_date     = db.query(func.max(StockPriceHistory.trade_date)).scalar()
     return {
@@ -981,7 +981,7 @@ async def get_macro_data(series_code: str, days: int = 365, db: Session = Depend
 async def get_stats(db: Session = Depends(get_db)):
     n_companies   = db.query(Company).count()
     n_records     = db.query(FinancialRecord).count()
-    n_stock_price = db.query(func.count(StockPriceHistory.id)).scalar() or 0
+    n_stock_price = db.query(func.count(StockPriceHistory.edinet_code)).scalar() or 0
     # 業種別OLS実行済み判定用: 予測値（gap_ratio）が書き込まれたレコード数。
     # 乖離分析は gap_ratio が必須のため、0 件なら未実行（UIで乖離分析タブをロック）。
     n_predicted = (
@@ -1763,7 +1763,7 @@ async def db_company_drilldown(edinet_code: str, db: Session = Depends(get_db)):
         .order_by(FinancialRecord.year.desc())
         .all()
     )
-    sph_count = db.query(func.count(StockPriceHistory.id)).filter_by(edinet_code=edinet_code).scalar() or 0
+    sph_count = db.query(func.count(StockPriceHistory.edinet_code)).filter_by(edinet_code=edinet_code).scalar() or 0
     sph_oldest = db.query(func.min(StockPriceHistory.trade_date)).filter_by(edinet_code=edinet_code).scalar()
     sph_newest = db.query(func.max(StockPriceHistory.trade_date)).filter_by(edinet_code=edinet_code).scalar()
     sph_recent = (
