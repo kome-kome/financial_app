@@ -46,12 +46,7 @@
 - **DB バックアップ運用ポリシー**: Supabase の自動バックアップ機能を利用しつつ、復旧手順を文書化
 - **監視**: Render ダッシュボード + UptimeRobot 等の外形監視追加検討
 
-### F. 認証の HttpOnly Cookie 化（セキュリティ強化）
-- **問題**: 認証トークンを `localStorage` に保存（XSS時に盗難リスク）
-- **改善案**: HttpOnly Cookie 方式へ移行
-- **前提**: 認証フロー全体の再設計が必要（CSRF対策も同時実施）
-- **Render 適合**: Render は HTTPS 提供のため `Secure` / `SameSite=Strict` 属性を付けられる。`ALLOWED_ORIGIN` が同一オリジンなら CSRF リスクも限定的
-- **参照**: `CLAUDE.md` の Tier3 既知リスク
+> **完了済み**: 認証の HttpOnly Cookie 化（旧項目 F）は実装済み（Tier3-3）。`auth_token`（HttpOnly）＋`csrf_token` の2 Cookie + CSRF Double-Submit。詳細は [GOTCHAS.md](GOTCHAS.md) を参照。
 
 ---
 

@@ -330,7 +330,9 @@ sequenceDiagram
 
 ## 4-2. 株価履歴収集フロー
 
-> stooq から日次OHLCV（始値・高値・安値・終値・出来高）を取得して保存するフローです。
+> 株価の日次OHLCV（始値・高値・安値・終値・出来高）を取得して保存するフローです。
+>
+> **現在の主経路は J-Quants（JPX公式）**。GitHub Actions Runner（Azure IP）からは stooq が完全ブロックされるため、本番収集は J-Quants のみを使用する。下図は stooq 版（ローカル補助経路）だが、J-Quants も「日付単位で全銘柄一括取得 → `ON CONFLICT DO UPDATE`」という同型のフローで、レート制限は 20秒/リクエスト（[CONSTRAINTS.md](CONSTRAINTS.md) 参照）。
 
 ```mermaid
 sequenceDiagram
@@ -990,7 +992,7 @@ graph TB
 |---|---|---|---|
 | `api.py` | バックエンド | REST API窓口・認証・SSE・手動収集トリガー（自動収集は GitHub Actions が担当） | database.py, collector.py, plugins/ |
 | `database.py` | バックエンド | DBテーブル定義・upsert・成長率/Zスコア計算。6テーブル（Company / FinancialRecord / StockPriceHistory / MacroData / CollectionLog / XbrlRawDocument）。`pack_elements`/`unpack_elements`/`upsert_xbrl_raw` ヘルパを含む | PostgreSQL |
-| `collector.py` | バックエンド | EDINET/stooq/JPX/マクロデータからデータ収集→DB保存。`MACRO_SERIES` で為替・金利・指数・コモディティ9系列を定義 | EDINET API, stooq, JPX |
+| `collector.py` | バックエンド | EDINET/J-Quants/JPX/マクロデータからデータ収集→DB保存。株価は J-Quants が主経路（stooq は Azure IP ブロックのためローカル補助のみ）。`MACRO_SERIES` で為替・金利・指数・コモディティ9系列を定義 | EDINET API, J-Quants, JPX |
 | `checker.py` | バックエンド | データ品質チェック（NULL率・外れ値・収録状況） | database.py |
 | `plugins/base.py` | バックエンド | 分析プラグインの抽象基底クラス | — |
 | `plugins/__init__.py` | バックエンド | プラグインを自動スキャン・レジストリ管理 | plugins/*.py |
