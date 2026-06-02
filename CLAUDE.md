@@ -287,7 +287,7 @@ SSEエンドポイント: 収集=`/api/collect/stream`、市場データ=`/api/c
 ## リファクタリング方針
 
 - ファイル名・URL: 機能名で命名（フェーズ番号禁止）
-- HTML: **CSS はインライン1ファイル維持**（分割禁止）。**JS は CSP 対応のため `static/js/<page>.js` に外部化**（各テンプレ1ファイル対応、`/static` で配信）。インラインのイベントハンドラ（`onclick=` 等）は現状維持で、将来 addEventListener 化して `script-src 'unsafe-inline'` を除去する
+- HTML: **CSS はインライン1ファイル維持**（分割禁止）。**JS は CSP 対応のため `static/js/<page>.js` に外部化**（各テンプレ1ファイル対応、`/static` で配信）。インラインのイベントハンドラ（`onclick=` 等）は `data-click`/`data-change`/`data-input` 属性＋イベント委譲（各JS末尾の `_wireDelegate`）へ移行済みで、`script-src 'unsafe-inline'` は除去済み（`style-src` は `<style>`/`style=` が残るため維持）
 - 定数: ファイル冒頭に集約（コード中にハードコード禁止）
 - **`docs/ARCHITECTURE.md` の随時更新（必須）**: コード変更と同じ作業内で更新すること。
   - DBテーブル追加・変更 → ER図（セクション3）
@@ -329,4 +329,4 @@ SSEエンドポイント: 収集=`/api/collect/stream`、市場データ=`/api/c
 - **【Tier3 将来対応】** 認証トークンを `localStorage` に保存している（XSS時に盗難リスク）。HttpOnly Cookie 方式への移行は認証フロー全体の再設計が必要。
 - **【Tier3 将来対応】** POST リクエストに CSRF トークンなし。Cookie 認証移行後に実施。
 - **【実装済み（Tier3-1）】** 重い処理（収集・分析）と認証に `slowapi` でレート制限を導入（収集 3/分・分析 20/分・ログイン 10/分・リセット 3/分・単一更新 10/分）。IP単位（`get_remote_address`）。`APP_RATELIMIT_ENABLED=false` で無効化可能（テスト時等）。環境変数名は slowapi 予約キー `RATELIMIT_*` との衝突を避けるため `APP_` 接頭辞必須。
-- **【Tier3 将来対応】** CSP の `unsafe-inline` を削除するには全テンプレートのインラインJS/CSSを外部ファイル化が必要。
+- **【実装済み（Tier3-2）】** CSP の `script-src` から `'unsafe-inline'` を除去済み（インライン `<script>` を `static/js/` へ外部化＋インラインイベントハンドラを `data-*` 属性＋イベント委譲へ移行）。`style-src 'unsafe-inline'` はインライン `<style>`/`style=` 属性が残るため維持（script-src より低リスク）。

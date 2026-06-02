@@ -454,7 +454,7 @@ async function loadDB(){
         <td>${latest?.val.pbr!=null?Number(latest.val.pbr):'-'}</td>
         <td>${latest?.bs.equity_ratio!=null?Number(latest.bs.equity_ratio)+'%':'-'}</td>
         <td>${latest ? fmt0((latest.val.market_cap||0)/1e6) : '-'}</td>
-        <td><button class="btn btn-secondary btn-sm" onclick="showDetail('${esc(c.edinet_code)}','${esc(c.name)}')">詳細</button></td>
+        <td><button class="btn btn-secondary btn-sm" data-click="showDetail" data-arg="${esc(c.edinet_code)}" data-arg2="${esc(c.name)}">詳細</button></td>
       `;
       tbody.appendChild(tr);
     }
@@ -1206,3 +1206,27 @@ window.addEventListener('beforeunload', () => {
     if (sse) { try { sse.close(); } catch(_) {} }
   }
 });
+
+// data 属性ハンドラ用ヘルパ（this=対象要素）
+function clearById(){ const el=document.getElementById(this.dataset.target); if(el) el.innerHTML=''; }
+function toggleDisplay(){ const el=document.getElementById(this.dataset.target); if(el) el.style.display = this.checked ? '' : 'none'; }
+
+
+// ===== CSP: インラインハンドラ撤廃のためのイベント委譲ディスパッチャ =====
+// 要素の data-click / data-change / data-input / data-keydown = 呼び出す関数名、
+// data-arg / data-arg2 = 引数（'true'/'false' は真偽値に変換）。委譲のため動的生成要素にも有効。
+// fn.apply(el, args) により this=要素 を保存する（インラインハンドラ互換）。
+function _coerceArg(v){ if(v===undefined) return undefined; if(v==='true') return true; if(v==='false') return false; return v; }
+function _wireDelegate(eventType, key){
+  document.addEventListener(eventType, function(e){
+    const el = e.target.closest('[data-'+key+']');
+    if(!el) return;
+    const fn = window[el.dataset[key]];
+    if(typeof fn !== 'function') return;
+    const args=[];
+    if('arg' in el.dataset)  args.push(_coerceArg(el.dataset.arg));
+    if('arg2' in el.dataset) args.push(_coerceArg(el.dataset.arg2));
+    fn.apply(el, args);
+  });
+}
+['click','change','input','keydown'].forEach(function(ev){ _wireDelegate(ev, ev); });

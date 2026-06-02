@@ -256,7 +256,7 @@ function renderWeightGrid() {
         <div style="display:flex;align-items:center;gap:8px">
           <input type="range" min="-2" max="3" step="0.1" value="${def}"
             style="flex:1;accent-color:#7c3aed;cursor:pointer"
-            oninput="document.getElementById('w-val-${key}').textContent=parseFloat(this.value).toFixed(1)"
+            data-input="syncWVal" data-target="w-val-${key}"
             id="range-${key}">
           <span id="w-val-${key}" style="font-size:14px;font-weight:600;color:#a78bfa;min-width:32px;text-align:right">${def.toFixed(1)}</span>
         </div>
@@ -880,7 +880,7 @@ function _createDynamicTab(plugin, tabId) {
       ${plugin.description ? `<div class="info-box" style="margin-bottom:14px">${esc(plugin.description)}</div>` : ''}
       ${plugin.depends_on.length ? `<div class="info-box" style="border-color:#f59e0b;margin-bottom:14px">⚠ 事前実行が必要: ${esc(plugin.depends_on.join('、'))}</div>` : ''}
       <div id="form-${esc(tabId)}">${_renderParamsForm(plugin.params_schema, tabId)}</div>
-      <button class="btn btn-primary" style="margin-top:16px" onclick="runDynamicPlugin('${esc(plugin.name)}','${esc(tabId)}')">
+      <button class="btn btn-primary" style="margin-top:16px" data-click="runDynamicPlugin" data-arg="${esc(plugin.name)}" data-arg2="${esc(tabId)}">
         ${esc(plugin.label)}を実行
       </button>
     </div>
@@ -911,7 +911,7 @@ function _renderParamsForm(schema, tabId) {
     } else if (field.type === 'slider') {
       html += `<div style="display:flex;align-items:center;gap:8px">
         <input type="range" id="param-${tabId}-${key}" min="${field.min}" max="${field.max}" step="${field.step}" value="${field.default}"
-          oninput="document.getElementById('val-${tabId}-${key}').textContent=this.value" style="flex:1;accent-color:#7c3aed">
+          data-input="syncVal" data-target="val-${tabId}-${key}" style="flex:1;accent-color:#7c3aed">
         <span id="val-${tabId}-${key}" style="color:#a78bfa;font-weight:600;min-width:36px">${field.default}</span>
       </div>`;
     } else {
@@ -953,7 +953,7 @@ async function runDynamicPlugin(pluginName, tabId) {
       content.insertAdjacentHTML('afterbegin',
         `<div class="info-box" style="border-color:#10b981;margin-bottom:14px">
           ✓ 業種別OLSが完了しました。各銘柄の理論株価と乖離率を計算しDBに保存しました。
-          <button class="btn btn-primary btn-sm" style="margin-left:12px" onclick="showTab('gap')">→ 乖離分析を見る</button>
+          <button class="btn btn-primary btn-sm" style="margin-left:12px" data-click="showTab" data-arg="gap">→ 乖離分析を見る</button>
         </div>`);
       showNotif('乖離分析が利用可能になりました', 'success');
     }
@@ -1001,3 +1001,27 @@ initAuth();
 initRecommend();  // おすすめ銘柄タブのプリセット取得（既存タブ用）
 initPlugins();    // プラグイン一覧取得 → nav生成・動的タブ追加・最初のタブ表示
 preflight();
+
+// data 属性ハンドラ用ヘルパ（this=対象要素）
+function syncVal(){ const el=document.getElementById(this.dataset.target); if(el) el.textContent = this.value; }
+function syncWVal(){ const el=document.getElementById(this.dataset.target); if(el) el.textContent = parseFloat(this.value).toFixed(1); }
+
+
+// ===== CSP: インラインハンドラ撤廃のためのイベント委譲ディスパッチャ =====
+// 要素の data-click / data-change / data-input / data-keydown = 呼び出す関数名、
+// data-arg / data-arg2 = 引数（'true'/'false' は真偽値に変換）。委譲のため動的生成要素にも有効。
+// fn.apply(el, args) により this=要素 を保存する（インラインハンドラ互換）。
+function _coerceArg(v){ if(v===undefined) return undefined; if(v==='true') return true; if(v==='false') return false; return v; }
+function _wireDelegate(eventType, key){
+  document.addEventListener(eventType, function(e){
+    const el = e.target.closest('[data-'+key+']');
+    if(!el) return;
+    const fn = window[el.dataset[key]];
+    if(typeof fn !== 'function') return;
+    const args=[];
+    if('arg' in el.dataset)  args.push(_coerceArg(el.dataset.arg));
+    if('arg2' in el.dataset) args.push(_coerceArg(el.dataset.arg2));
+    fn.apply(el, args);
+  });
+}
+['click','change','input','keydown'].forEach(function(ev){ _wireDelegate(ev, ev); });

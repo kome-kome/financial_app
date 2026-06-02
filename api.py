@@ -129,7 +129,9 @@ class _SecurityHeadersMiddleware(BaseHTTPMiddleware):
         response = await call_next(request)
         response.headers["Content-Security-Policy"] = (
             "default-src 'self'; "
-            "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
+            # インラインJS/イベントハンドラは全て static/js へ外部化＋addEventListener化済みのため 'unsafe-inline' は不要
+            "script-src 'self' https://cdn.jsdelivr.net; "
+            # style-src の 'unsafe-inline' は据え置き（インライン <style>/style= 属性が残るため。script-src と違い XSS リスクは低い）
             "style-src 'self' 'unsafe-inline'; "
             "connect-src 'self'; "
             "img-src 'self' data:; "

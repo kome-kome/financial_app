@@ -78,3 +78,23 @@ async function resetPassword(){
     btn.textContent = 'パスワードをリセット';
   }
 }
+
+// インラインハンドラを CSP 対応で addEventListener 化（script-src 'unsafe-inline' 除去のため）。
+function _wireLogin(){
+  const pw = document.getElementById('pw');
+  if (pw) pw.addEventListener('keydown', e => { if (e.key === 'Enter') login(); });
+  const loginBtn = document.getElementById('login-btn');
+  if (loginBtn) loginBtn.addEventListener('click', () => login());
+  const forgot = document.getElementById('forgot-link');
+  if (forgot) forgot.addEventListener('click', () => showReset());
+  const rk = document.getElementById('rk');
+  if (rk) rk.addEventListener('keydown', e => { if (e.key === 'Enter') document.getElementById('np').focus(); });
+  const np = document.getElementById('np');
+  if (np) np.addEventListener('keydown', e => { if (e.key === 'Enter') resetPassword(); });
+  const resetBtn = document.getElementById('reset-btn');
+  if (resetBtn) resetBtn.addEventListener('click', () => resetPassword());
+  const backBtn = document.getElementById('back-btn');
+  if (backBtn) backBtn.addEventListener('click', () => showLogin());
+}
+if (document.readyState !== 'loading') _wireLogin();
+else document.addEventListener('DOMContentLoaded', _wireLogin);

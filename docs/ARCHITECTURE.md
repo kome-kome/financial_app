@@ -416,14 +416,14 @@ sequenceDiagram
 
 | ヘッダ | 値 | 目的 |
 |---|---|---|
-| `Content-Security-Policy` | `default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'self'; form-action 'self'; frame-src 'none'; frame-ancestors 'none'` | XSS・クリックジャッキング・フォーム乗っ取り等の緩和 |
+| `Content-Security-Policy` | `default-src 'self'; script-src 'self' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'self'; form-action 'self'; frame-src 'none'; frame-ancestors 'none'` | XSS・クリックジャッキング・フォーム乗っ取り等の緩和 |
 | `X-Content-Type-Options` | `nosniff` | MIME スニッフィング防止 |
 | `X-Frame-Options` | `DENY` | クリックジャッキング防止（`frame-ancestors 'none'` と併用） |
 | `Referrer-Policy` | `strict-origin-when-cross-origin` | リファラ漏洩抑制 |
 | `Permissions-Policy` | `geolocation=(), camera=(), microphone=(), payment=(), usb=()` | 不使用ブラウザ機能の無効化 |
 | `Strict-Transport-Security` | `max-age=31536000`（**HTTPS 応答時のみ**。`X-Forwarded-Proto: https` で判定） | プロトコルダウングレード防止 |
 
-> ⚠️ `script-src`/`style-src` の `'unsafe-inline'` は現状維持（インラインJS/イベントハンドラの外部ファイル化が前提のため別対応）。Chart.js は jsdelivr CDN から読み込む。
+> `script-src` は `'unsafe-inline'` を除去済み（インライン `<script>` を `static/js/` へ外部化、インラインイベントハンドラを `data-*` 属性＋イベント委譲へ移行）。`style-src` の `'unsafe-inline'` はインライン `<style>`/`style=` 属性が残るため維持。Chart.js は jsdelivr CDN から読み込む。
 
 ---
 
