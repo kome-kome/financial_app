@@ -93,7 +93,7 @@ uvicorn api:app --reload
 
 ブラウザで `http://localhost:8000/` を開く。初回は `/collection` から「全件収集」を実行してデータベースを構築する。
 
-> **DB は Supabase に一本化済み**。Render 本番もローカル開発も同じ Supabase インスタンスを参照する設計に統一されている（移行設計の経緯は [`docs/REFACTORING.md`](docs/REFACTORING.md) を参照）。
+> **DB は Supabase に一本化済み**。Render 本番もローカル開発も同じ Supabase インスタンスを参照する設計に統一されている（移行設計の経緯は [`docs/archive/REFACTORING.md`](docs/archive/REFACTORING.md) を参照）。
 
 ### よく使うコマンド
 
@@ -117,7 +117,7 @@ pytest                                   # テスト実行
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | コンポーネント図・ER 図・シーケンス図・API エンドポイント一覧 |
 | [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) | Render + Supabase 運用ガイド・既知の制約 |
 | [`docs/MODELS.md`](docs/MODELS.md) | 分析モデルの数式・パラメータ・参考文献（DOI 付き） |
-| [`docs/IMPROVEMENTS.md`](docs/IMPROVEMENTS.md) | これまでの改善履歴と検証ノート |
+| [`docs/archive/IMPROVEMENTS.md`](docs/archive/IMPROVEMENTS.md) | これまでの改善履歴と検証ノート（archive） |
 | [`docs/FUTURE_TASKS.md`](docs/FUTURE_TASKS.md) | 未実装の課題・改善案（Tier 別） |
 | [`CLAUDE.md`](CLAUDE.md) | Claude Code（AI コーディングエージェント）向けの動作指示 |
 

@@ -71,4 +71,4 @@ python -m pytest tests/ -v
   - `collector.py` の大きな統合フロー（`run_full_collection`/`update_market_data`/400日スキャンループ）と
     `update_industry_from_jpx`（JPX Excel 解析）。
 
-これらは `docs/IMPROVEMENTS.md` で追跡する。
+これらは `docs/archive/IMPROVEMENTS.md` で追跡する。

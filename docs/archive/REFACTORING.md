@@ -512,3 +512,23 @@ def reparse_from_raw(db, year=None, edinet_code=None, on_progress=None):
 |---|---|
 | 2026-05-22 | 初版作成（ドラフト・レビュー待ち）|
 | 2026-05-25 | 全 Phase (P1〜P7) 実装完了。ステータスを「実装完了」に更新 |
+| 2026-06-03 | `REFACTORING_PHASE2.md`（コード品質改善）を本書に統合（archive 整理）|
+
+---
+
+# 付録: コード品質改善 (Phase 2)
+
+> 2026-05-25 のリポジトリ整理セッションで実施したコード品質改善の記録。**DB 一本化（上記）とは別文脈**。元は独立ファイル `REFACTORING_PHASE2.md` だったが、archive 整理で本書へ統合した。
+
+## 完了済み
+- **整理**: `migration_dumps/`(420MB) を `.gitignore`＋削除、`_check_state.py`→`scripts/check_db_state.py`、`_full_pipeline.py` 削除
+- **設定**: `.env.example` に `RENDER_LIGHT_MODE`、GitHub Actions Python 3.13.7 統一、`render.yaml` コメント整備
+- **時刻**: API レスポンスの DB タイムスタンプを JST 表示に統一（`_utc_to_jst_str()`）
+- **4-3 プラグイン単体テスト**: 未テストだった 5 プラグインに `tests/test_<plugin>.py` 追加（pytest 全件パス）。`pytest` は `requirements-dev.txt` に分離 pin（Render メモリ節約）
+
+## 当時の残タスク（低〜中優先・継続候補）
+- **4-2 `_now_jst()` 共通化**【低】: `api.py` 定義を `plugins/utils.py` 等へ移し全モジュールから import
+- **4-4 XBRL パース重複統合**【中】: `collector.py` の `parse_raw_rows()` と `parse_xbrl_csv()` で抽出ロジック重複（要直接確認）。前後で `financial_records` 件数一致を検証
+- **4-5 `api.py`/`collector.py` の分割**【低】: 責務単位分割（`api_collection.py` 等）。大きな diff になるため必要性を再評価
+- **4-6 `walk_forward_cv()` の採否**【低】: `plugins/utils.py` 定義済みだが未使用（テストのみ）。採用 or 削除を判断
+- **4-7 `check.py`/`checker.py` 改名**【低】: `edinet_ping.py`/`data_quality.py` 等へ。import 全書換と CLAUDE.md 更新が伴う

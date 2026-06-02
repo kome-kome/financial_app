@@ -27,7 +27,9 @@ Render の制約と運用形態に合わせて設計すること。
 3. 成長率・Zスコアを再計算
 4. 所要時間: 約 5〜15分（差分量による）
 
-**重要**: GitHub Actions の Runner は Azure IP のため **stooq は完全ブロック**（403）。株価取得は J-Quants のみ使用。Claude Code リモート環境からも Yahoo Finance はブロックされる。外部サービスの制約値は [CONSTRAINTS.md](CONSTRAINTS.md) を参照。
+> **注（運用パターン）**: 全件収集（`full-pipeline.yml`）を回している間は、Supabase 接続上限での同時実行を避けるため、本ワークフローを一時的に `daily-incremental.yml.disabled` へリネームして停止する（例: コミット `4764d96`「全件収集中の同時実行回避」）。全件収集が終わったら `.yml` に戻して再有効化する。**現在ファイル名が `.disabled` の場合は自動の定時収集が止まっている状態**なので、UI / 手動収集で補う。
+
+**重要**: GitHub Actions の Runner は Azure IP のため **stooq は完全ブロック**（403）。株価取得は J-Quants のみ使用。Claude Code リモート環境からも Yahoo Finance はブロックされる。外部サービスの制約値は本ファイル「外部サービス制約（無料プラン）」節を参照。
 
 ### CF補完の完了状態（2026-05-31 完了）
 
@@ -106,6 +108,54 @@ Render ダッシュボードで管理。
 - `main` ブランチに push すると Render が自動的にビルド＆デプロイ
 - ビルド失敗は Render ダッシュボードでログ確認
 - ロールバックは Render ダッシュボードの "Manual Deploy" → 過去コミット選択
+
+---
+
+## 外部サービス制約（無料プラン）
+
+> 新機能・改修・データ収集ロジックを設計する際は **必ずこの節を参照**し、各サービスの無料プラン制約に違反しない方式を選ぶこと（旧 `CONSTRAINTS.md` を統合）。Render 自体の制約は上記「Render Free プランの制約」節を参照。
+
+### GitHub Actions（無料アカウント）
+
+| 項目 | 制約値 | 設計への影響 |
+|---|---|---|
+| 月間利用上限 | **2,000 分/月**（パブリックリポジトリは無制限） | 通常運用は Private。上限到達時は一時的に Public 化し、翌月1日のリセット後に Private 復帰 |
+| 1ジョブの最大実行時間 | **6時間（360分）** | 長時間処理は各ジョブを6時間枠内に収める |
+| 同時実行数 | **20並列**（`max-parallel: 1` で逐次化） | full-pipeline は逐次実行。並列化すると Supabase 接続数上限に当たる |
+| Runner の IP | **Azure クラウド IP** | stooq: 完全ブロック。Yahoo Finance: GitHub Actions からは動作。J-Quants / EDINET: 動作 |
+| Artifact 保存期間 | `retention-days: 7` に統一 | — |
+
+**Private ↔ Public 切替**: 通常は Private。月 2,000 分を使い切ったら Public 化 → Actions 実行 → 翌月1日リセット後に Private 復帰（GitHub UI → `Settings → Danger Zone → Change repository visibility`）。secrets は可視性と独立して保護されるため切替時の操作不要。
+
+**ジョブ所要時間（設計参考値）**:
+- `full-pipeline.yml` finalize（Phase 3〜5）: **200分前後**（`timeout-minutes: 240`）。内訳 = 成長率/Zスコア再計算 約2分 ／ マクロ9系列 約27分 ／ J-Quants 株価（`JQUANTS_BACKFILL_DAYS=730`）約163〜200分。`JQUANTS_BACKFILL_DAYS` 変更時は再計算。
+- `backfill-stock-history.yml`: 対象＝stock_price NULL かつ period_end 730日超前（初回 約3,800社）。`YAHOO_STOCK_RATE_SLEEP=0.5秒`・1社1リクエストで **約60〜90分**（`timeout-minutes: 150`）。
+
+### Supabase（無料プラン）
+
+| 項目 | 制約値 | 設計への影響 |
+|---|---|---|
+| DB ストレージ | **500 MB** | `SKIP_XBRL_RAW=true` を維持（xbrl_raw_documents の大量書き込みを避ける） |
+| 接続数 | **最大60接続**（pgbouncer 経由） | 並列パイプライン実行を禁止。`max-parallel: 1` を維持 |
+| 一時的 read-only 移行 | トランザクションが長すぎると自動移行 | `run_full_collection` は `MASTER_BATCH=200` 件ごとに commit |
+| プロジェクト停止 | **1週間アクセスなしで自動停止** | 長期不使用時は要注意 |
+
+### J-Quants API（無料プラン）
+
+| 項目 | 制約値 | 設計への影響 |
+|---|---|---|
+| レート制限 | **約5リクエスト/60秒** | `JQUANTS_RATE_SLEEP = 20.0` 秒間隔を維持 |
+| 取得可能期間 | **過去2年分** | `days_back ≤ 730`。UI の選択肢もこれに合わせること |
+| 429 リトライ | 指数バックオフ禁止 | 429 発生時は **90秒待機→1回のみ再試行**。失敗したら skip |
+| 営業日データのみ | 土日祝は空レスポンス | 空レスポンスを skip として扱う |
+
+**設計制約（実装時の必須ルール）**:
+- **認証情報**: `.env` に `JQUANTS_API_KEY` を設定。未設定時は `ValueError` で明示エラー。
+- **データ優先度**: J-Quants = JPX公式 → stooq より正確。`ON CONFLICT DO UPDATE` で上書き（stooq は `ON CONFLICT DO NOTHING`）。
+- **コード変換**: J-Quants は5桁コード（例 `"13010"`）。先頭4桁が証券コード（`code[:4]`）。
+- **取得単位**: 日付単位で全銘柄を一括取得。1営業日 = 1〜数リクエスト（ページネーション対応済み）。
+- **`close` は nullable=False**: `Close` が `None` の行はスキップ（停止銘柄等）。
+- **CardinalityViolation 対策**: 5桁コードが同じ4桁 sec_code にマップされる場合がある。INSERT前に edinet_code で重複排除（先着1件採用）。
 
 ---
 
