@@ -94,7 +94,9 @@ class TestEndpoints:
     def test_auth_login_devmode(self):
         r = client.post("/api/auth/login", json={"password": "x"})
         assert r.status_code == 200
-        assert r.json()["token"] == "dev-mode"
+        d = r.json()
+        # Cookie 認証移行後: dev モード（APP_PASSWORD 未設定）は token を返さず ok/dev_mode を返す
+        assert d["ok"] is True and d.get("dev_mode") is True
 
     def test_refresh_invalid_edinet_code_returns_400(self):
         r = client.post("/api/collect/refresh/INVALID")

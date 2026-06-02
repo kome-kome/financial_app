@@ -7,12 +7,16 @@ let normData = {};
 let searchTimer = null;
 
 // ── 認証 ────────────────────────────────────────────────────────────
+function _getCookie(name){
+  const m = document.cookie.match('(^|; )' + name + '=([^;]*)');
+  return m ? decodeURIComponent(m[2]) : '';
+}
 async function initAuth(){
   try {
     const r = await fetch('/api/auth/status');
     const d = await r.json();
     if(d.auth_required){
-      if(!localStorage.getItem('auth_token')){
+      if(!_getCookie('csrf_token')){
         location.href = '/login?next=' + encodeURIComponent(location.pathname);
         return;
       }
@@ -20,17 +24,20 @@ async function initAuth(){
     }
   } catch(e){ /* API 未起動時はスキップ */ }
 }
-function logout(){ localStorage.removeItem('auth_token'); location.href='/login'; }
+async function logout(){
+  try { await fetch('/api/auth/logout', {method:'POST', credentials:'same-origin'}); } catch(e){}
+  location.href = '/login';
+}
 
 // ── API ────────────────────────────────────────────────────────────
 function apiBase(){ return document.getElementById('api-base').value.trim().replace(/\/$/,'') }
 
 async function apiFetch(path, opts={}){
-  const token = localStorage.getItem('auth_token') || '';
   const heads = {'Content-Type':'application/json'};
-  if(token) heads['Authorization'] = 'Bearer ' + token;
-  const r = await fetch(apiBase()+path, {headers:heads,...opts});
-  if(r.status===401){ localStorage.removeItem('auth_token'); location.href='/login'; return; }
+  const _m = (opts.method || 'GET').toUpperCase();
+  if(_m !== 'GET' && _m !== 'HEAD') heads['X-CSRF-Token'] = _getCookie('csrf_token');
+  const r = await fetch(apiBase()+path, {credentials:'same-origin', ...opts, headers:{...heads, ...(opts.headers||{})}});
+  if(r.status===401){ location.href='/login'; return; }
   if(!r.ok){
     if(r.status===502||r.status===503||r.status===504)
       throw new Error(`サーバー再起動中 (${r.status})。しばらく待ってから再試行してください`);

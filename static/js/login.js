@@ -1,6 +1,10 @@
 const _nextRaw = new URLSearchParams(location.search).get('next') || '/';
 const _next = /^\/[^/\\]/.test(_nextRaw) || _nextRaw === '/' ? _nextRaw : '/';
-if(localStorage.getItem('auth_token')) location.href = _next;
+function _getCookie(name){
+  const m = document.cookie.match('(^|; )' + name + '=([^;]*)');
+  return m ? decodeURIComponent(m[2]) : '';
+}
+if(_getCookie('csrf_token')) location.href = _next;
 
 function showReset(){
   document.getElementById('login-panel').style.display = 'none';
@@ -23,6 +27,7 @@ async function login(){
   try {
     const r = await fetch('/api/auth/login', {
       method: 'POST',
+      credentials: 'same-origin',
       headers: {'Content-Type':'application/json'},
       body: JSON.stringify({password: pw})
     });
@@ -32,8 +37,6 @@ async function login(){
       document.getElementById('pw').focus();
       return;
     }
-    const d = await r.json();
-    localStorage.setItem('auth_token', d.token);
     location.href = _next;
   } catch(e) {
     err.textContent = 'エラー: ' + e.message;

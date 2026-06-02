@@ -386,24 +386,28 @@ sequenceDiagram
     User ->> UI   : パスワードを入力して「ログイン」
     UI   ->> AUTH : POST /api/auth/login { "password": "***" }
     AUTH ->> AUTH : hmac.compare_digest() でパスワードを検証<br/>（タイミング攻撃対策）
-    AUTH ->> AUTH : トークン生成: base64( timestamp + ":" + HMAC-SHA256(timestamp) )
-    AUTH -->> UI  : 200 { "token": "xxxx" }
-    UI   ->> UI   : localStorage に token を保存
-    UI  -->> User : /collection にリダイレクト
+    AUTH ->> AUTH : 認証トークン base64( ts + ":" + HMAC-SHA256(ts) ) と CSRF トークンを生成
+    AUTH -->> UI  : 200 + Set-Cookie: auth_token(HttpOnly, SameSite=Lax) / csrf_token(JS可読)
+    UI  -->> User : /collection にリダイレクト（localStorage には保存しない）
 
-    Note over User,AUTH: ③ API呼び出し時（毎回）
-    User ->> MW   : GET/POST /api/... ヘッダー: Authorization: Bearer {token}
-    MW   ->> MW   : トークンを base64 デコード
-    MW   ->> MW   : HMAC-SHA256 で署名を検証
-    MW   ->> MW   : タイムスタンプで有効期限を確認（30日）
-    alt 検証OK
+    Note over User,AUTH: ③ API呼び出し時（Cookie を自動送信）
+    User ->> MW   : GET /api/...（Cookie: auth_token を自動送信）
+    User ->> MW   : POST 等 /api/...（Cookie + ヘッダー X-CSRF-Token: csrf_token 値）
+    MW   ->> MW   : auth_token を base64 デコード→HMAC 署名・期限（30日）を検証
+    MW   ->> MW   : 非冪等メソッドは X-CSRF-Token == csrf_token Cookie を検証（Double-Submit）
+    alt 認証・CSRF OK
         MW -->> User : 200 正常レスポンス
-    else 検証NG / 期限切れ
-        MW -->> User : 401 Unauthorized
-        UI  -->> User : /login にリダイレクト
+    else 認証NG / 期限切れ
+        MW -->> User : 401 → UI が /login にリダイレクト
+    else CSRF NG
+        MW -->> User : 403 CSRF トークンが無効です
     end
 
-    Note over User,AUTH: ④ パスワードリセット（APP_RECOVERY_KEY使用）
+    Note over User,AUTH: ④ ログアウト
+    User ->> AUTH : POST /api/auth/logout
+    AUTH -->> User : 200 + Set-Cookie 削除（auth_token / csrf_token）
+
+    Note over User,AUTH: ⑤ パスワードリセット（APP_RECOVERY_KEY使用）
     User ->> AUTH : POST /api/auth/reset-password { recovery_key, new_password }
     AUTH ->> AUTH : hmac.compare_digest() で回復キーを検証
     AUTH ->> AUTH : .env ファイルの APP_PASSWORD を更新
@@ -843,9 +847,10 @@ graph LR
     end
 
     subgraph AUTH["🔐 認証 /api/auth/"]
-        A1["POST /api/auth/login\nパスワード認証 → Bearerトークン発行"]
+        A1["POST /api/auth/login\nパスワード認証 → HttpOnly Cookie + CSRF Cookie 発行"]
         A2["POST /api/auth/reset-password\n回復キーでパスワード変更"]
         A3["GET /api/auth/status\n認証が必要かどうかを返す"]
+        A4["POST /api/auth/logout\n認証Cookieを削除"]
     end
 
     subgraph STATS["📊 統計 /api/stats"]

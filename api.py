@@ -7,7 +7,7 @@ FastAPI バックエンド
 """
 
 import asyncio, json, logging, re
-import hmac, hashlib, base64, time as _time, os
+import hmac, hashlib, base64, secrets, time as _time, os
 import httpx
 
 log = logging.getLogger(__name__)
@@ -21,7 +21,7 @@ def _utc_to_jst_str(dt: Optional[datetime]) -> Optional[str]:
     if dt is None:
         return None
     return (dt + timedelta(hours=9)).strftime("%Y-%m-%d %H:%M:%S") + " JST"
-from fastapi import FastAPI, BackgroundTasks, Depends, HTTPException, Request
+from fastapi import FastAPI, BackgroundTasks, Depends, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -66,6 +66,28 @@ def _verify_token(token: str) -> bool:
         return hmac.compare_digest(sig, expected) and _time.time() - int(ts) < _TOKEN_TTL
     except Exception:
         return False
+
+# ── Cookie / CSRF 認証（HttpOnly Cookie + Double-Submit CSRF）──────────────────
+_AUTH_COOKIE   = "auth_token"
+_CSRF_COOKIE   = "csrf_token"
+# 本番（HTTPS）では Render 環境変数で COOKIE_SECURE=true を設定し Secure 属性を付与する。
+# ローカル HTTP 開発では false（既定）。Secure=true だと HTTP では Cookie が送られないため。
+_COOKIE_SECURE = os.getenv("COOKIE_SECURE", "").lower() in ("1", "true", "yes")
+_CSRF_UNSAFE_METHODS = ("POST", "PUT", "DELETE", "PATCH")
+
+def _create_csrf() -> str:
+    return secrets.token_urlsafe(32)
+
+def _set_auth_cookies(response, token: str, csrf: str) -> None:
+    """HttpOnly 認証 Cookie（JS から読めない＝XSS 盗難不可）と、JS から読める CSRF Cookie を付与する。"""
+    response.set_cookie(_AUTH_COOKIE, token, max_age=_TOKEN_TTL, httponly=True,
+                        secure=_COOKIE_SECURE, samesite="lax", path="/")
+    response.set_cookie(_CSRF_COOKIE, csrf, max_age=_TOKEN_TTL, httponly=False,
+                        secure=_COOKIE_SECURE, samesite="lax", path="/")
+
+def _clear_auth_cookies(response) -> None:
+    response.delete_cookie(_AUTH_COOKIE, path="/")
+    response.delete_cookie(_CSRF_COOKIE, path="/")
 
 from database import (
     SessionLocal, init_db,
@@ -119,8 +141,9 @@ _ALLOWED_ORIGINS = [o.strip() for o in os.getenv("ALLOWED_ORIGIN", "http://local
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_ALLOWED_ORIGINS,
+    allow_credentials=True,  # Cookie 認証のため必須。allow_origins に "*" は使えない（明示オリジンのみ）
     allow_methods=["GET", "POST", "OPTIONS"],
-    allow_headers=["Authorization", "Content-Type"],
+    allow_headers=["Content-Type", "X-CSRF-Token"],
 )
 
 class _SecurityHeadersMiddleware(BaseHTTPMiddleware):
@@ -157,18 +180,22 @@ app.add_middleware(_SecurityHeadersMiddleware)
 
 @app.middleware("http")
 async def _auth_middleware(request: Request, call_next):
-    """APP_PASSWORD が設定されている場合、/api/* を Bearer トークンで保護する"""
+    """APP_PASSWORD 設定時、/api/* を HttpOnly Cookie で保護し、非冪等メソッドには
+    CSRF Double-Submit（X-CSRF-Token ヘッダ == csrf_token Cookie）を要求する。"""
     if not APP_PASSWORD:
         return await call_next(request)
     path = request.url.path
     if path == "/login" or path.startswith("/api/auth/"):
         return await call_next(request)
     if path.startswith("/api/"):
-        auth = request.headers.get("Authorization", "")
-        if not auth.startswith("Bearer "):
+        if not _verify_token(request.cookies.get(_AUTH_COOKIE, "")):
             return JSONResponse({"detail": "認証が必要です"}, status_code=401)
-        if not _verify_token(auth[7:]):
-            return JSONResponse({"detail": "トークンが無効または期限切れです"}, status_code=401)
+        # CSRF: 非冪等メソッドは X-CSRF-Token ヘッダ == csrf_token Cookie を要求（Double-Submit）
+        if request.method in _CSRF_UNSAFE_METHODS:
+            header_tok = request.headers.get("X-CSRF-Token", "")
+            cookie_tok = request.cookies.get(_CSRF_COOKIE, "")
+            if not header_tok or not cookie_tok or not hmac.compare_digest(header_tok, cookie_tok):
+                return JSONResponse({"detail": "CSRF トークンが無効です"}, status_code=403)
     return await call_next(request)
 
 # DB セッション依存性
@@ -1898,12 +1925,13 @@ class ResetPasswordRequest(BaseModel):
 
 @app.post("/api/auth/login")
 @limiter.limit(RATELIMIT_AUTH)
-async def auth_login(request: Request, req: LoginRequest):
+async def auth_login(request: Request, req: LoginRequest, response: Response):
     if not APP_PASSWORD:
-        return {"token": "dev-mode"}
+        return {"ok": True, "dev_mode": True}
     if not hmac.compare_digest(req.password.encode(), APP_PASSWORD.encode()):
         raise HTTPException(401, "パスワードが違います")
-    return {"token": _create_token()}
+    _set_auth_cookies(response, _create_token(), _create_csrf())
+    return {"ok": True}
 
 @app.post("/api/auth/reset-password")
 @limiter.limit(RATELIMIT_RESET)
@@ -1925,3 +1953,9 @@ async def reset_password(request: Request, req: ResetPasswordRequest):
 @app.get("/api/auth/status")
 async def auth_status():
     return {"auth_required": bool(APP_PASSWORD), "recovery_available": bool(APP_RECOVERY_KEY)}
+
+@app.post("/api/auth/logout")
+async def auth_logout(response: Response):
+    """認証 Cookie を削除する。/api/auth/ 配下のため CSRF/認証チェックは免除。"""
+    _clear_auth_cookies(response)
+    return {"ok": True}

@@ -12,11 +12,13 @@ function showNotif(msg, type='error'){
   setTimeout(()=>el.remove(), 4000);
 }
 
+function _getCookie(name){
+  const m = document.cookie.match('(^|; )' + name + '=([^;]*)');
+  return m ? decodeURIComponent(m[2]) : '';
+}
 async function apiFetch(path){
-  const token = localStorage.getItem('auth_token') || '';
   const heads = {'Content-Type':'application/json'};
-  if (token) heads['Authorization'] = 'Bearer ' + token;
-  const r = await fetch(apiBase() + path, {headers: heads});
+  const r = await fetch(apiBase() + path, {headers: heads, credentials: 'same-origin'});
   if (r.status === 401){ location.href = '/login?next=' + encodeURIComponent(location.pathname); return null; }
   if (!r.ok){
     if (r.status===502||r.status===503||r.status===504)
@@ -687,7 +689,7 @@ async function init(){
   try{
     const r = await fetch(apiBase() + '/api/auth/status');
     const d = await r.json();
-    if (d.auth_required && !localStorage.getItem('auth_token')){
+    if (d.auth_required && !_getCookie('csrf_token')){
       location.href = '/login?next=' + encodeURIComponent(location.pathname); return;
     }
   }catch(e){ /* API 未起動時はスキップ */ }
