@@ -24,6 +24,7 @@ def _utc_to_jst_str(dt: Optional[datetime]) -> Optional[str]:
 from fastapi import FastAPI, BackgroundTasks, Depends, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
 from pydantic import BaseModel, Field
 from sqlalchemy import func, text
@@ -110,6 +111,9 @@ app = FastAPI(title="EDINET Financial API", version="2.0", lifespan=lifespan)
 # slowapi: Limiter を state に登録し、429 ハンドラを設定
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+# 外部化した JS（static/js/*.js）の配信。/api/* 認証ミドルウェアの対象外（公開取得可）。
+app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
 
 _ALLOWED_ORIGINS = [o.strip() for o in os.getenv("ALLOWED_ORIGIN", "http://localhost:8000").split(",") if o.strip()]
 app.add_middleware(
