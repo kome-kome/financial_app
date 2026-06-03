@@ -21,7 +21,7 @@ services:
       - key: APP_RECOVERY_KEY
         sync: false          # パスワードリセット用  生成: python -c "import secrets;print(secrets.token_urlsafe(24))"
       - key: ALLOWED_ORIGIN
-        sync: false          # CORS 許可オリジン  例: https://financial-app.onrender.com
+        sync: false          # CORS 許可オリジン  例: https://<your-service>.onrender.com
       - key: JQUANTS_API_KEY
         sync: false          # J-Quants API キー（任意）  取得: https://jpx-jquants.com/ の「API Keys」
       - key: RENDER_LIGHT_MODE

@@ -172,7 +172,7 @@ Render ダッシュボードで管理。
 | `APP_PASSWORD` | ログインパスワード | 手動設定（必須） |
 | `APP_SECRET_KEY` | トークン署名キー（HMAC） | Render 自動生成 |
 | `APP_RECOVERY_KEY` | パスワードリセット用 | 手動設定 |
-| `ALLOWED_ORIGIN` | CORS 許可オリジン | 手動設定（例: `https://financial-app.onrender.com`） |
+| `ALLOWED_ORIGIN` | CORS 許可オリジン | 手動設定（例: `https://<your-service>.onrender.com`） |
 | `RENDER_LIGHT_MODE` | 重い操作をブロック（`"true"` 固定） | `render.yaml` に設定済み |
 
 新規環境変数を追加するときは:
