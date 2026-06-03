@@ -68,6 +68,14 @@ XBRL_MAP = {
     "NetRevenues":                                     ("pl", "revenue"),
     "OperatingRevenues":                               ("pl", "revenue"),
     "Revenue":                                         ("pl", "revenue"),
+    # 「売上高」ではなく「営業収益」を使う非金融＋証券（鉄道・電力・小売・不動産・サービス・
+    # 倉庫・空運・証券等）。「主要な経営指標等の推移」の OperatingRevenue1SummaryOfBusinessResults
+    # （必ず連結・context=CurrentYearDuration）のみを採用する。
+    # 生の OperatingRevenue1（PL本体行）は登録しない: 金融持株会社（銀行・保険）は連結営業収益を
+    # 持たず、非連結の持株会社単体 営業収益（主にグループ内配当≒小額）が priority0 で誤採用され、
+    # 売上が過小（例: MUFG 1.3兆=単体・純利益率144%）になるため。銀行・保険は経営指標等に営業収益が
+    # 無く OrdinaryIncome(経常収益)を代用するので、Summary 変種のみ登録すれば自動的に NULL 維持される。
+    "OperatingRevenue1SummaryOfBusinessResults":       ("pl", "revenue"),
     # ── PL 売上・収益（IFRS）──────────────────────────────────────────────
     "RevenueIFRS":                                     ("pl", "revenue"),
     "RevenueIFRSSummaryOfBusinessResults":             ("pl", "revenue"),
@@ -501,6 +509,11 @@ def parse_raw_rows(rows: list) -> dict:
         ctx = row.get("context", "")
         if "Prior" in ctx and "CurrentYear" not in ctx:
             continue
+        # OperatingRevenue1 系（営業収益）は連結のみ採用。金融持株会社は連結営業収益を持たず
+        # 提出会社単体（NonConsolidatedMember）の営業収益しか無いため、非連結値を売上に誤採用しない。
+        if field == "revenue" and elem.startswith("OperatingRevenue1") and \
+                ("NonConsolidated" in ctx or "_Member" in ctx):
+            continue
         is_consol  = any(k in ctx for k in CONSOLIDATED_KEYS) and "NonConsolidated" not in ctx
         has_member = "_Member" in ctx or "NonConsolidated" in ctx
         priority   = 2 if is_consol else (1 if not has_member else 0)
@@ -553,6 +566,11 @@ def parse_xbrl_csv(df, edinet_code: str, period_end: str) -> dict:
 
         # 前期比較データ（Prior1Year等）はスキップ。当期データのみ処理する
         if "Prior" in ctx and "CurrentYear" not in ctx:
+            continue
+        # OperatingRevenue1 系（営業収益）は連結のみ採用。金融持株会社は連結営業収益を持たず
+        # 提出会社単体（NonConsolidatedMember）の営業収益しか無いため、非連結値を売上に誤採用しない。
+        if field == "revenue" and elem.startswith("OperatingRevenue1") and \
+                ("NonConsolidated" in ctx or "_Member" in ctx):
             continue
 
         is_consol  = any(k in ctx for k in CONSOLIDATED_KEYS) and "NonConsolidated" not in ctx

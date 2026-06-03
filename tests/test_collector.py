@@ -281,6 +281,48 @@ class TestParseXbrlCsv:
         })
         assert parse_xbrl_csv(df, "E01777", "2025-03-31")["pl"]["revenue"] == 12034917.0
 
+    def test_operating_revenue_summary_mapped_to_revenue(self):
+        """「売上高」ではなく「営業収益」を使う非金融＋証券（鉄道・電力・小売・不動産・証券等）。
+        経営指標等の OperatingRevenue1SummaryOfBusinessResults（必ず連結, CurrentYearDuration）を
+        売上に採り、非連結 NetSales(メンバー,優先度0) に勝つ。"""
+        df = pd.DataFrame({
+            "要素ID": [
+                "jpcrp_cor:OperatingRevenue1SummaryOfBusinessResults",
+                "jppfs_cor:NetSales",  # 非連結（メンバー）
+            ],
+            "コンテキストID": [
+                "CurrentYearDuration",
+                "CurrentYearDuration_NonConsolidatedMember",
+            ],
+            "値": ["2887553", "100000"],
+        })
+        assert parse_xbrl_csv(df, "E04147", "2025-03-31")["pl"]["revenue"] == 2887553.0
+
+    def test_holdco_nonconsolidated_operating_revenue_not_mapped(self):
+        """金融持株会社（銀行・保険）対策: 連結営業収益が無く、提出会社単体（NonConsolidatedMember）の
+        OperatingRevenue1SummaryOfBusinessResults しか無い場合は revenue に採らない（NULL維持）。
+        経常収益(OrdinaryIncomeSummary)も売上ではないので未マップ。
+        （非連結値を採ると MUFG 1.3兆=単体・純利益率144% になる回帰の防止）"""
+        df = pd.DataFrame({
+            "要素ID": [
+                "jpcrp_cor:OperatingRevenue1SummaryOfBusinessResults",  # 提出会社単体のみ（連結なし）
+                "jpcrp_cor:OrdinaryIncomeSummaryOfBusinessResults",     # 経常収益（売上ではない）
+            ],
+            "コンテキストID": ["CurrentYearDuration_NonConsolidatedMember", "CurrentYearDuration"],
+            "値": ["1343267", "13629997"],
+        })
+        assert "revenue" not in parse_xbrl_csv(df, "E03606", "2025-03-31")["pl"]
+
+    def test_operating_revenue_consolidated_beats_nonconsolidated_member(self):
+        """連結 OperatingRevenue1Summary(CurrentYearDuration) が、同一企業の提出会社単体
+        (NonConsolidatedMember) の同要素に勝つ（大和証券・JR東日本のように両方ある場合）。"""
+        df = pd.DataFrame({
+            "要素ID": ["jpcrp_cor:OperatingRevenue1SummaryOfBusinessResults"] * 2,
+            "コンテキストID": ["CurrentYearDuration_NonConsolidatedMember", "CurrentYearDuration"],
+            "値": ["111013", "1372014"],
+        })
+        assert parse_xbrl_csv(df, "E03753", "2025-03-31")["pl"]["revenue"] == 1372014.0
+
 
 class TestMatchCapexByLabel:
     @pytest.mark.parametrize("label,expected", [
