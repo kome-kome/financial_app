@@ -71,6 +71,10 @@ XBRL_MAP = {
     # ── PL 売上・収益（IFRS）──────────────────────────────────────────────
     "RevenueIFRS":                                     ("pl", "revenue"),
     "RevenueIFRSSummaryOfBusinessResults":             ("pl", "revenue"),
+    # 「売上収益（Revenue）」ではなく「売上高（NetSales）」を IFRS で使う企業（ソニー等）。
+    # 未登録時は非連結 NetSales（メンバー・優先度0）を誤採用し連結売上が大幅過小になっていた。
+    "NetSalesIFRS":                                    ("pl", "revenue"),
+    "NetSalesIFRSSummaryOfBusinessResults":            ("pl", "revenue"),
     # ── PL 売上原価・費用（JGAAP）───────────────────────────────────────
     "CostOfSales":                                     ("pl", "cost_of_sales"),
     "SellingGeneralAndAdministrativeExpenses":         ("pl", "sga"),
@@ -208,9 +212,18 @@ XBRL_MAP = {
     "CashFlowsFromUsedInOperatingActivitiesUSGAAPSummaryOfBusinessResults": ("cf", "operating_cf"),
     "CashFlowsFromUsedInInvestingActivitiesUSGAAPSummaryOfBusinessResults": ("cf", "investing_cf"),
     "CashFlowsFromUsedInFinancingActivitiesUSGAAPSummaryOfBusinessResults": ("cf", "financing_cf"),
-    # 連結売上（US-GAAP）。未登録時は非連結 NetSales（メンバー・優先度0）を誤採用していたため、
-    # CurrentYearDuration（優先度1）の本要素を登録して連結値を正しく採る。
+    # 連結の売上・利益・資産・資本・EPS/BPS（US-GAAP 経営指標等）。未登録時は非連結 NetSales
+    # （メンバー・優先度0）を誤採用し連結値が過小/欠損だった。CurrentYear*（優先度1）の本要素群で是正。
+    # 注: US-GAAP 経営指標等には営業利益が無いため operating_profit は別途（取得不可の場合あり）。
     "RevenuesUSGAAPSummaryOfBusinessResults":          ("pl", "revenue"),
+    "ProfitLossBeforeTaxUSGAAPSummaryOfBusinessResults": ("pl", "pretax_profit"),
+    "NetIncomeLossAttributableToOwnersOfParentUSGAAPSummaryOfBusinessResults": ("pl", "net_income"),
+    "BasicEarningsLossPerShareUSGAAPSummaryOfBusinessResults": ("pl", "eps"),
+    "TotalAssetsUSGAAPSummaryOfBusinessResults":       ("bs", "total_assets"),
+    "EquityIncludingPortionAttributableToNonControllingInterestUSGAAPSummaryOfBusinessResults": ("bs", "total_equity"),
+    "EquityAttributableToOwnersOfParentUSGAAPSummaryOfBusinessResults": ("bs", "equity_parent"),
+    "EquityAttributableToOwnersOfParentPerShareUSGAAPSummaryOfBusinessResults": ("bs", "bps"),
+    "CashAndCashEquivalentsUSGAAPSummaryOfBusinessResults": ("bs", "cash"),
     # ── バリュエーション・配当 ────────────────────────────────────────────
     "DividendPaidPerShare":                            ("val", "dps"),
     "DividendPaidPerShareSummaryOfBusinessResults":    ("val", "dps"),    # 経営指標等セクション

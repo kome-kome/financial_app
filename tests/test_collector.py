@@ -222,14 +222,19 @@ class TestParseXbrlCsv:
         assert cf["investing_cf"] == -4189736.0
         assert cf["financing_cf"] == 197236.0
 
-    def test_usgaap_cf_and_consolidated_revenue_from_summary(self):
-        """US-GAAP決算（キヤノン・コマツ・オリックス・野村等）のCF合計と連結売上は
-        ...USGAAPSummaryOfBusinessResults に集約される。連結売上(CurrentYearDuration,優先度1)が
-        非連結NetSales(メンバー,優先度0)に勝つことも確認（誤って非連結値を採らない）。"""
+    def test_usgaap_cf_and_consolidated_metrics_from_summary(self):
+        """US-GAAP決算（キヤノン・コマツ・オリックス・野村等）のCF合計・連結売上・純利益・
+        総資産・純資産・EPS/BPS は ...USGAAPSummaryOfBusinessResults に集約される。
+        連結値(CurrentYear*,優先度1)が非連結NetSales(メンバー,優先度0)に勝つことも確認。"""
         df = pd.DataFrame({
             "要素ID": [
                 "jpcrp_cor:RevenuesUSGAAPSummaryOfBusinessResults",
                 "jppfs_cor:NetSales",  # 非連結（メンバー）→ 連結値に負ける
+                "jpcrp_cor:NetIncomeLossAttributableToOwnersOfParentUSGAAPSummaryOfBusinessResults",
+                "jpcrp_cor:TotalAssetsUSGAAPSummaryOfBusinessResults",
+                "jpcrp_cor:EquityAttributableToOwnersOfParentUSGAAPSummaryOfBusinessResults",
+                "jpcrp_cor:BasicEarningsLossPerShareUSGAAPSummaryOfBusinessResults",
+                "jpcrp_cor:EquityAttributableToOwnersOfParentPerShareUSGAAPSummaryOfBusinessResults",
                 "jpcrp_cor:CashFlowsFromUsedInOperatingActivitiesUSGAAPSummaryOfBusinessResults",
                 "jpcrp_cor:CashFlowsFromUsedInInvestingActivitiesUSGAAPSummaryOfBusinessResults",
                 "jpcrp_cor:CashFlowsFromUsedInFinancingActivitiesUSGAAPSummaryOfBusinessResults",
@@ -238,16 +243,43 @@ class TestParseXbrlCsv:
                 "CurrentYearDuration",
                 "CurrentYearDuration_NonConsolidatedMember",
                 "CurrentYearDuration",
+                "CurrentYearInstant",
+                "CurrentYearInstant",
+                "CurrentYearDuration",
+                "CurrentYearInstant",
+                "CurrentYearDuration",
                 "CurrentYearDuration",
                 "CurrentYearDuration",
             ],
-            "値": ["4624727", "1837606", "475903", "-237450", "-179221"],
+            "値": ["4624727", "1837606", "332053", "6135044", "3491808",
+                   "367.48", "3974.81", "475903", "-237450", "-179221"],
         })
         res = parse_xbrl_csv(df, "E02274", "2025-12-31")
         assert res["pl"]["revenue"] == 4624727.0  # 連結。非連結1837606ではない
+        assert res["pl"]["net_income"] == 332053.0
+        assert res["bs"]["total_assets"] == 6135044.0
+        assert res["bs"]["equity_parent"] == 3491808.0
+        assert res["pl"]["eps"] == 367.48
+        assert res["bs"]["bps"] == 3974.81
         assert res["cf"]["operating_cf"] == 475903.0
         assert res["cf"]["investing_cf"] == -237450.0
         assert res["cf"]["financing_cf"] == -179221.0
+
+    def test_ifrs_netsales_beats_nonconsolidated(self):
+        """「売上収益(Revenue)」ではなく「売上高(NetSales)」をIFRSで使う企業（ソニー等）。
+        連結 NetSalesIFRS(CurrentYearDuration,優先度1) が非連結 NetSales(メンバー,優先度0)に勝つ。"""
+        df = pd.DataFrame({
+            "要素ID": [
+                "jpigp_cor:NetSalesIFRS",
+                "jppfs_cor:NetSales",  # 非連結（メンバー）
+            ],
+            "コンテキストID": [
+                "CurrentYearDuration",
+                "CurrentYearDuration_NonConsolidatedMember",
+            ],
+            "値": ["12034917", "173940"],
+        })
+        assert parse_xbrl_csv(df, "E01777", "2025-03-31")["pl"]["revenue"] == 12034917.0
 
 
 class TestMatchCapexByLabel:
