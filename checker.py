@@ -6,7 +6,7 @@
 from datetime import datetime
 from sqlalchemy import func
 from sqlalchemy.orm import Session
-from database import FinancialRecord
+from database import FinancialRecord, FinancialMetric
 
 
 def run_data_quality_check(db: Session) -> dict:
@@ -50,12 +50,14 @@ def _check_null_fields(db: Session) -> list:
 def _check_outliers(db: Session) -> list:
     issues = []
 
+    # roe / equity_ratio は計算結果のため financial_metrics VIEW を参照する
+    # （financial_records には存在しない）。売上高・PBR・PER はソース列。
     checks = [
-        ("ROE絶対値 > 1000%",       FinancialRecord.roe,             lambda c: func.abs(c) > 1000),
+        ("ROE絶対値 > 1000%",       FinancialMetric.roe,             lambda c: func.abs(c) > 1000),
         ("負の売上高",               FinancialRecord.pl_revenue,      lambda c: c < 0),
         ("PBR < 0 または > 500",    FinancialRecord.pbr,             lambda c: (c < 0) | (c > 500)),
         ("PER < 0 または > 5000",   FinancialRecord.per,             lambda c: (c < 0) | (c > 5000)),
-        ("自己資本比率 < -100%",     FinancialRecord.equity_ratio,    lambda c: c < -100),
+        ("自己資本比率 < -100%",     FinancialMetric.equity_ratio,    lambda c: c < -100),
     ]
     for label, col, cond_fn in checks:
         count = (

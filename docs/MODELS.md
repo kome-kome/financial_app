@@ -347,7 +347,7 @@ predicted_market_cap = ŷ_pred / stock_price × market_cap     [百万円]
 ### 乖離率（業種別OLSで計算済み）
 
 ```
-gap = gap_ratio  [%]  （sector_ols.py が FinancialRecord.gap_ratio に保存）
+gap = gap_ratio  [%]  （sector_ols.py が regression_results.gap_ratio に保存。読取は financial_metrics VIEW 経由）
 ```
 
 ### 半減期推定: AR(1) MLE（推奨パス）

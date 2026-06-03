@@ -15,7 +15,6 @@ from database import (
     Company,
     FinancialRecord,
     RegressionResult,
-    calc_zscore_normalization,
     pack_elements,
     unpack_elements,
     upsert_company,
@@ -90,11 +89,14 @@ class TestUpsertFinancial:
         assert obj.dps == 10.0
 
     def test_derived_not_persisted(self, db):
-        # 計算結果（derived）は financial_records に永続化されない（financial_metrics VIEW が担う）
+        # 計算結果（derived）は financial_records に永続化されない（financial_metrics VIEW が担う）。
+        # 計算列は ORM から削除済みのため、そもそも属性として存在しない。
         obj = upsert_financial(db, self._data(derived={"roe": 8.0, "op_margin": 12.3}))
         db.commit()
-        assert obj.roe is None
-        assert obj.op_margin is None
+        assert obj.bs_total_assets == 5000.0          # ソースは保存される
+        assert not hasattr(FinancialRecord, "roe")
+        assert not hasattr(FinancialRecord, "op_margin")
+        assert not hasattr(FinancialRecord, "gap_ratio")
 
     def test_raw_xbrl_json_populated(self, db):
         obj = upsert_financial(db, self._data())
@@ -147,49 +149,7 @@ class TestUpsertRegressionResult:
         assert rr.period_end == ""
 
 
-class TestZscoreNormalization:
-    def _add(self, db, make_fin, year, code, op_margin):
-        db.add(make_fin(edinet_code=code, year=year,
-                        period_end=f"{year}-03-31", op_margin=op_margin))
-
-    def test_per_year_isolation(self, db, make_fin):
-        # 2023: [10,20,30] → mean=20, stdev=10 → z = -1.0/0.0/+1.0
-        for i, v in enumerate([10.0, 20.0, 30.0]):
-            self._add(db, make_fin, 2023, f"E2023{i}", v)
-        # 2022 は別母集団（巨大値）。2023 の z に混ざらないこと
-        for i, v in enumerate([100.0, 200.0]):
-            self._add(db, make_fin, 2022, f"E2022{i}", v)
-        db.commit()
-        calc_zscore_normalization(db)
-        rows = {r.edinet_code: r for r in db.query(FinancialRecord).filter_by(year=2023).all()}
-        assert rows["E20230"].z_op_margin == -1.0
-        assert rows["E20231"].z_op_margin == 0.0
-        assert rows["E20232"].z_op_margin == 1.0
-
-    def test_fewer_than_two_skipped(self, db, make_fin):
-        self._add(db, make_fin, 2023, "E00001", 12.0)
-        db.commit()
-        calc_zscore_normalization(db)
-        r = db.query(FinancialRecord).filter_by(year=2023).one()
-        assert r.z_op_margin is None
-
-    def test_specific_year_only(self, db, make_fin):
-        for i, v in enumerate([10.0, 20.0, 30.0]):
-            self._add(db, make_fin, 2023, f"E2023{i}", v)
-        for i, v in enumerate([10.0, 20.0, 30.0]):
-            self._add(db, make_fin, 2022, f"E2022{i}", v)
-        db.commit()
-        calc_zscore_normalization(db, year=2023)
-        r2023 = db.query(FinancialRecord).filter_by(year=2023, edinet_code="E20231").one()
-        r2022 = db.query(FinancialRecord).filter_by(year=2022, edinet_code="E20221").one()
-        assert r2023.z_op_margin == 0.0
-        assert r2022.z_op_margin is None  # 指定年度のみ計算
-
-    def test_zero_stdev_fallback(self, db, make_fin):
-        # 全て同値 → stdev 0 → `or 1.0` で割り 0.0（ゼロ除算/inf を防ぐ）
-        for i in range(3):
-            self._add(db, make_fin, 2023, f"E{i:05d}", 50.0)
-        db.commit()
-        calc_zscore_normalization(db)
-        rows = db.query(FinancialRecord).filter_by(year=2023).all()
-        assert all(r.z_op_margin == 0.0 for r in rows)
+# Zスコア正規化は financial_metrics VIEW（PostgreSQL window function）へ移行した。
+# 旧 calc_zscore_normalization は廃止済み。VIEW の算出値が旧実装と一致することは
+# Postgres 上で別途検証している（年度内・標本SD・sd=0→1.0・n>=2・丸め桁の一致）。
+# SQLite には STDDEV/WINDOW が無いため本ファイルでは検証しない。

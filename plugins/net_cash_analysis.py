@@ -200,9 +200,9 @@ class NetCashAnalysisPlugin(AnalysisPlugin):
         }
 
     async def execute(self, params: dict, db: Any) -> dict:
-        # net_cash / nc_ratio は本プラグインが自前計算（関数型）。roe のみ派生のため
-        # 表示用に financial_metrics VIEW から読む。max_year 抽出は base テーブルで行う。
-        from database import FinancialRecord, FinancialMetric
+        # net_cash / nc_ratio は本プラグインが自前計算（関数型）。roe など派生・ソースは
+        # financial_metrics VIEW から読む（max_year 抽出も VIEW で行う）。
+        from database import FinancialMetric
 
         min_nc_ratio   = _num(params.get("min_nc_ratio")) or 0.0
         max_nc_ratio   = _num(params.get("max_nc_ratio"))
@@ -222,9 +222,9 @@ class NetCashAnalysisPlugin(AnalysisPlugin):
         if year:
             query = db.query(FinancialMetric).filter(FinancialMetric.year == int(year))
         else:
-            subq = (db.query(FinancialRecord.edinet_code,
-                             func.max(FinancialRecord.year).label("max_year"))
-                      .group_by(FinancialRecord.edinet_code).subquery())
+            subq = (db.query(FinancialMetric.edinet_code,
+                             func.max(FinancialMetric.year).label("max_year"))
+                      .group_by(FinancialMetric.edinet_code).subquery())
             query = (db.query(FinancialMetric)
                        .join(subq,
                              (FinancialMetric.edinet_code == subq.c.edinet_code) &

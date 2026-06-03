@@ -36,11 +36,11 @@ class TestConstants:
 # ── execute(): in-memory SQLite ──────────────────────────────────────────────
 
 class TestExecute:
-    def test_ranking_orders_by_weighted_score(self, db, make_fin):
+    def test_ranking_orders_by_weighted_score(self, db, make_metric):
         db.add_all([
-            make_fin(edinet_code="E00001", z_roe=3.0),
-            make_fin(edinet_code="E00002", z_roe=1.0),
-            make_fin(edinet_code="E00003", z_roe=-1.0),
+            make_metric(edinet_code="E00001", z_roe=3.0),
+            make_metric(edinet_code="E00002", z_roe=1.0),
+            make_metric(edinet_code="E00003", z_roe=-1.0),
         ])
         db.commit()
         res = asyncio.run(plugin.execute(
@@ -51,10 +51,10 @@ class TestExecute:
         scores = [r["score"] for r in res["results"]]
         assert scores == sorted(scores, reverse=True)
 
-    def test_min_coverage_skips_low_coverage(self, db, make_fin):
+    def test_min_coverage_skips_low_coverage(self, db, make_metric):
         db.add_all([
-            make_fin(edinet_code="E00001", z_roe=2.0, z_op_margin=1.0),  # coverage 1.0
-            make_fin(edinet_code="E00002", z_roe=2.0, z_op_margin=None),  # coverage 0.5
+            make_metric(edinet_code="E00001", z_roe=2.0, z_op_margin=1.0),  # coverage 1.0
+            make_metric(edinet_code="E00002", z_roe=2.0, z_op_margin=None),  # coverage 0.5
         ])
         db.commit()
         res = asyncio.run(plugin.execute(
@@ -73,19 +73,19 @@ class TestExecute:
         assert res["count"] == 0
         assert res["total_candidates"] == 0
 
-    def test_top_n_limits_results(self, db, make_fin):
-        db.add_all([make_fin(edinet_code=f"E{i:05d}", z_roe=float(i)) for i in range(1, 6)])
+    def test_top_n_limits_results(self, db, make_metric):
+        db.add_all([make_metric(edinet_code=f"E{i:05d}", z_roe=float(i)) for i in range(1, 6)])
         db.commit()
         res = asyncio.run(plugin.execute(
             {"weights": {"z_roe": 1.0}, "min_coverage": 0.0, "top_n": 2}, db))
         assert len(res["results"]) == 2
         assert res["total_candidates"] == 5
 
-    def test_only_latest_year_per_company(self, db, make_fin):
+    def test_only_latest_year_per_company(self, db, make_metric):
         # 同一企業の複数年は最新年のみ対象（max-year subquery）
         db.add_all([
-            make_fin(edinet_code="E00001", year=2021, period_end="2021-03-31", z_roe=9.0),
-            make_fin(edinet_code="E00001", year=2023, period_end="2023-03-31", z_roe=1.0),
+            make_metric(edinet_code="E00001", year=2021, period_end="2021-03-31", z_roe=9.0),
+            make_metric(edinet_code="E00001", year=2023, period_end="2023-03-31", z_roe=1.0),
         ])
         db.commit()
         res = asyncio.run(plugin.execute(

@@ -80,8 +80,7 @@ class RecommendPlugin(AnalysisPlugin):
         min_coverage は重み付き指標のうち値が存在する比率（重み総和ベース）の下限。
         """
         # Zスコア・gap_ratio・派生指標は financial_metrics VIEW が都度算出/合成する。
-        # max_year 抽出は軽いので base テーブル（FinancialRecord）で行う。
-        from database import FinancialRecord, FinancialMetric
+        from database import FinancialMetric
 
         preset       = params.get("preset", "バランス型")
         weights      = params.get("weights") or PRESETS.get(preset, PRESETS["バランス型"])
@@ -97,9 +96,9 @@ class RecommendPlugin(AnalysisPlugin):
             return {"count": 0, "total_candidates": 0, "presets": PRESETS,
                     "metrics": METRICS, "results": []}
 
-        subq = (db.query(FinancialRecord.edinet_code,
-                         func.max(FinancialRecord.year).label("max_year"))
-                  .group_by(FinancialRecord.edinet_code).subquery())
+        subq = (db.query(FinancialMetric.edinet_code,
+                         func.max(FinancialMetric.year).label("max_year"))
+                  .group_by(FinancialMetric.edinet_code).subquery())
         query = (db.query(FinancialMetric)
                    .join(subq, (FinancialMetric.edinet_code == subq.c.edinet_code) &
                                (FinancialMetric.year == subq.c.max_year)))

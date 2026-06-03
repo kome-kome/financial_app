@@ -9,7 +9,7 @@ import os
 import sys
 
 import pytest
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -20,7 +20,9 @@ os.environ.setdefault("APP_RATELIMIT_ENABLED", "false")
 # プロジェクトルートを import パスに追加（database / plugins を import するため）
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from database import Base, Company, FinancialRecord, StockPriceHistory  # noqa: E402
+from database import (  # noqa: E402
+    Base, ViewBase, Company, FinancialRecord, FinancialMetric, StockPriceHistory,
+)
 
 
 @pytest.fixture
@@ -37,14 +39,11 @@ def db():
         poolclass=StaticPool,
     )
     Base.metadata.create_all(bind=engine)
-    # FinancialMetric が参照する financial_metrics VIEW。本番（Postgres）は派生値を都度算出
-    # する計算 VIEW だが、SQLite には STDDEV/WINDOW 等が無いため、テストでは
-    # financial_records をそのまま通すパススルー VIEW で代替する（派生計算式の同値性は
-    # Postgres 側で別途検証）。計算列はテストが FinancialRecord に直接セットして検証する。
-    with engine.begin() as conn:
-        conn.execute(text(
-            "CREATE VIEW IF NOT EXISTS financial_metrics AS SELECT * FROM financial_records"
-        ))
+    # 本番（Postgres）では financial_metrics は派生値を都度算出する計算 VIEW だが、SQLite には
+    # STDDEV/WINDOW 等が無く同等の VIEW を作れない。テストでは FinancialMetric（読み取りモデル）
+    # の列定義からテーブルを生成し、テストが派生値・予測値を直接 INSERT して読み取り挙動を検証する
+    # （派生計算式の同値性は Postgres 側で別途検証）。
+    ViewBase.metadata.create_all(bind=engine)
     Session = sessionmaker(bind=engine, autoflush=False, autocommit=False)
     session = Session()
     try:
@@ -72,6 +71,18 @@ _FIN_DEFAULTS = dict(
 def make_fin():
     def _make(**overrides):
         return FinancialRecord(**{**_FIN_DEFAULTS, **overrides})
+    return _make
+
+
+@pytest.fixture
+def make_metric():
+    """financial_metrics（読み取りモデル FinancialMetric）行のファクトリ。
+
+    本番では VIEW が算出する派生指標・予測値も、テストでは直接 INSERT して注入する
+    （FinancialMetric はソース列＋派生列＋predicted/gap を全て持つ）。
+    make_fin と同じデフォルト・同じ override 形式で使える。"""
+    def _make(**overrides):
+        return FinancialMetric(**{**_FIN_DEFAULTS, **overrides})
     return _make
 
 

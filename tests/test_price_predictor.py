@@ -120,7 +120,7 @@ class TestExecute:
         with pytest.raises(ValueError):
             asyncio.run(plugin.execute({}, db))
 
-    def test_insufficient_samples_raises(self, db, make_fin, make_price):
+    def test_insufficient_samples_raises(self, db, make_metric, make_price):
         # 1 社・100 営業日。月末スナップショットが学習に必要な最低数(10)に届かない。
         start = datetime(2023, 1, 1)
         prices = [
@@ -133,7 +133,7 @@ class TestExecute:
             for i in range(100)
         ]
         db.add_all(prices)
-        db.add(make_fin(edinet_code="E00001", period_end="2022-12-31",
+        db.add(make_metric(edinet_code="E00001", period_end="2022-12-31",
                         per=15.0, pbr=1.2, roe=8.0))
         db.commit()
         with pytest.raises(ValueError):
