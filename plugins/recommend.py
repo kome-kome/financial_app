@@ -79,7 +79,9 @@ class RecommendPlugin(AnalysisPlugin):
         これにより指標カバレッジが異なる銘柄を公平に比較できる。
         min_coverage は重み付き指標のうち値が存在する比率（重み総和ベース）の下限。
         """
-        from database import FinancialRecord
+        # Zスコア・gap_ratio・派生指標は financial_metrics VIEW が都度算出/合成する。
+        # max_year 抽出は軽いので base テーブル（FinancialRecord）で行う。
+        from database import FinancialRecord, FinancialMetric
 
         preset       = params.get("preset", "バランス型")
         weights      = params.get("weights") or PRESETS.get(preset, PRESETS["バランス型"])
@@ -98,15 +100,15 @@ class RecommendPlugin(AnalysisPlugin):
         subq = (db.query(FinancialRecord.edinet_code,
                          func.max(FinancialRecord.year).label("max_year"))
                   .group_by(FinancialRecord.edinet_code).subquery())
-        query = (db.query(FinancialRecord)
-                   .join(subq, (FinancialRecord.edinet_code == subq.c.edinet_code) &
-                               (FinancialRecord.year == subq.c.max_year)))
+        query = (db.query(FinancialMetric)
+                   .join(subq, (FinancialMetric.edinet_code == subq.c.edinet_code) &
+                               (FinancialMetric.year == subq.c.max_year)))
         if year:
-            query = query.filter(FinancialRecord.year == int(year))
+            query = query.filter(FinancialMetric.year == int(year))
         if industry:
-            query = query.filter(FinancialRecord.industry == industry)
+            query = query.filter(FinancialMetric.industry == industry)
         if min_market_cap is not None:
-            query = query.filter(FinancialRecord.market_cap >= float(min_market_cap))
+            query = query.filter(FinancialMetric.market_cap >= float(min_market_cap))
 
         records = query.all()
         scored = []

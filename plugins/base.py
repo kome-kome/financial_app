@@ -7,6 +7,7 @@ class AnalysisPlugin(ABC):
     label: str
     description: str = ""
     depends_on: list[str] = []  # 先に実行が必要なプラグイン名
+    heavy: bool = False         # True: 重い計算。Render 軽量モードではブロックしローカル実行を促す
 
     @abstractmethod
     def params_schema(self) -> dict:
@@ -24,5 +25,6 @@ class AnalysisPlugin(ABC):
             "label": self.label,
             "description": self.description,
             "depends_on": self.depends_on,
+            "heavy": self.heavy,
             "params_schema": self.params_schema(),
         }

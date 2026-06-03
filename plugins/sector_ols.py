@@ -170,9 +170,10 @@ class SectorOLSPlugin(AnalysisPlugin):
     description = (
         "業種ごとに個別OLS回帰を実行し、業種内の割安・割高スコアリングを行います。"
         "目的変数は株価[円/株]、説明変数は per-share[円/株] に固定（次元整合性を構造的に強制）。"
-        "実行すると predicted_market_cap / gap_ratio がDBに書き込まれ、乖離分析タブに反映されます。"
+        "実行すると predicted_market_cap / gap_ratio が regression_results に書き込まれ、乖離分析タブに反映されます。"
     )
     depends_on = []
+    heavy = True   # 業種ごとの行列回帰。Render Free では OOM するためローカル実行に限定
 
     def params_schema(self) -> dict:
         return {
@@ -229,7 +230,7 @@ class SectorOLSPlugin(AnalysisPlugin):
 
     async def execute(self, params: dict, db: Any) -> dict:
         from sqlalchemy import func
-        from database import FinancialRecord
+        from database import FinancialRecord, upsert_regression_result
 
         target      = params.get("target", "stock_price")
         features    = params.get("features") or DEFAULT_FEATURES_PRICE
@@ -339,12 +340,19 @@ class SectorOLSPlugin(AnalysisPlugin):
                 predicted = all_yhat[i]  # [円/株]
                 gap = round((predicted - actual) / actual * 100, 2) if actual else None
 
+                # 予測時価総額[百万円]: 市場データが揃う銘柄のみ換算。
+                # 計算結果は財務本体ではなく regression_results へ隔離保存する。
                 if r.market_cap and r.stock_price and r.stock_price > 0:
-                    r.predicted_market_cap = round(predicted / r.stock_price * r.market_cap, 0)
+                    predicted_mcap = round(predicted / r.stock_price * r.market_cap, 0)
                 else:
-                    # 換算不能 → 既存値を変更しない（DB に NULL のまま、または旧値保持）
-                    r.predicted_market_cap = None
-                r.gap_ratio = gap
+                    predicted_mcap = None
+                upsert_regression_result(
+                    db,
+                    edinet_code=r.edinet_code, year=r.year, period_end=r.period_end,
+                    predicted_market_cap=predicted_mcap, gap_ratio=gap,
+                    model=("ridge" if regularization == "ridge" else "ols"),
+                    sector=sector,
+                )
 
                 sector_preds.append({
                     "sec_code":     r.sec_code or r.edinet_code,

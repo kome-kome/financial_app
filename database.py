@@ -284,7 +284,186 @@ def upsert_xbrl_raw(db, doc_id: str, edinet_code: str, period_end: str, rows: li
     db.execute(stmt)
 
 
-# ── 7. DB初期化 ────────────────────────────────────────────────────────────
+# ── 8. 回帰分析の出力（重い派生・本体から隔離） ────────────────────────────
+# 業種別OLS/Ridge の予測値・乖離率。financial_records（ソース＋軽い派生）とは
+# 別テーブルに保持し、「計算結果」と「生データ」をDB上で分離する。
+# 重い回帰計算はローカルで実行し、ここへ書き込む（Render は読むだけ）。
+
+class RegressionResult(Base):
+    __tablename__ = "regression_results"
+    __table_args__ = (
+        PrimaryKeyConstraint("edinet_code", "year", "period_end",
+                             name="pk_regression_results"),
+        Index("ix_regr_industry_year", "sector", "year"),
+    )
+
+    edinet_code          = Column(String(10), nullable=False)
+    year                 = Column(Integer, nullable=False)
+    period_end           = Column(String(20), nullable=False, default="")
+    predicted_market_cap = Column(Float)   # 回帰モデル予測時価総額（百万円）
+    gap_ratio            = Column(Float)   # 乖離率 %（(予測-実績)/実績*100）
+    model                = Column(String(20))   # "ols" / "ridge"
+    sector               = Column(String(100))  # 学習に使った業種
+    computed_at          = Column(DateTime, default=datetime.utcnow,
+                                  onupdate=datetime.utcnow)
+
+
+def upsert_regression_result(db, *, edinet_code: str, year: int, period_end: str,
+                             predicted_market_cap, gap_ratio, model: str, sector: str):
+    """OLS/Ridge の予測値を regression_results に upsert する。
+
+    主キー (edinet_code, year, period_end) で merge するため PostgreSQL / SQLite の
+    どちらでも動作する（pg_insert の ON CONFLICT は Postgres 専用のため使わない）。
+    """
+    db.merge(RegressionResult(
+        edinet_code=edinet_code, year=year, period_end=period_end or "",
+        predicted_market_cap=predicted_market_cap, gap_ratio=gap_ratio,
+        model=model, sector=sector, computed_at=datetime.utcnow(),
+    ))
+
+
+# ── 9. 読み取りモデル: financial_metrics VIEW ──────────────────────────────
+# financial_records（ソース列）から軽い派生（比率・Zスコア・成長率）を「都度SQL算出」し、
+# regression_results を LEFT JOIN して予測値も合成する読み取り専用 VIEW。
+# 派生値はDBに保存しない（関数型）。計算は Supabase 側で走るため Render の CPU を使わない。
+# 式は collector.calc_derived / database._calc_zscore_for_year / calc_growth_rates と一致させてある
+# （truthy フォールバック・標本SD・sd=0→1.0・n>=2・丸め桁）。
+
+ViewBase = declarative_base()   # create_all に VIEW を CREATE TABLE させないため別メタデータ
+
+
+class FinancialMetric(ViewBase):
+    """financial_metrics VIEW の読み取り専用 ORM マッピング。属性名は FinancialRecord と一致。"""
+    __tablename__ = "financial_metrics"
+
+    id           = Column(Integer, primary_key=True)
+    edinet_code  = Column(String(10))
+    sec_code     = Column(String(6))
+    company_name = Column(String(200))
+    industry     = Column(String(100))
+    market       = Column(String(50))
+    year         = Column(Integer)
+    period_end   = Column(String(20))
+    doc_id       = Column(String(20))
+    source       = Column(String(50))
+    accounting_standard = Column(String(20))
+    # ソース（financial_records からそのまま）
+    bs_total_assets = Column(Float); bs_current_assets = Column(Float)
+    bs_receivables = Column(Float); bs_inventory = Column(Float)
+    bs_noncurrent_assets = Column(Float); bs_buildings = Column(Float)
+    bs_machinery = Column(Float); bs_intangible_assets = Column(Float)
+    bs_cash = Column(Float); bs_investment_securities = Column(Float)
+    bs_total_liabilities = Column(Float); bs_current_liabilities = Column(Float)
+    bs_payables = Column(Float); bs_noncurrent_liabilities = Column(Float)
+    bs_short_term_debt = Column(Float); bs_long_term_debt = Column(Float)
+    bs_bonds_payable = Column(Float); bs_total_equity = Column(Float)
+    bs_equity_parent = Column(Float); bs_paid_in_capital = Column(Float)
+    bs_retained_earnings = Column(Float); bs_bps = Column(Float)
+    pl_revenue = Column(Float); pl_cost_of_sales = Column(Float)
+    pl_gross_profit = Column(Float); pl_sga = Column(Float)
+    pl_operating_profit = Column(Float); pl_nonoperating_income = Column(Float)
+    pl_ordinary_profit = Column(Float); pl_pretax_profit = Column(Float)
+    pl_net_income = Column(Float); pl_net_income_attr = Column(Float)
+    pl_eps = Column(Float); pl_ebitda = Column(Float)
+    cf_operating_cf = Column(Float); cf_investing_cf = Column(Float)
+    cf_financing_cf = Column(Float); cf_free_cf = Column(Float)
+    cf_net_change_cash = Column(Float); cf_capex = Column(Float)
+    stock_price = Column(Float); market_cap = Column(Float)
+    per = Column(Float); pbr = Column(Float); div_yield = Column(Float); dps = Column(Float)
+    # 軽い派生（VIEW が都度算出）
+    op_margin = Column(Float); net_margin = Column(Float)
+    roe = Column(Float); roa = Column(Float)
+    equity_ratio = Column(Float); de_ratio = Column(Float); cf_ratio = Column(Float)
+    net_cash = Column(Float); nc_ratio = Column(Float)
+    z_revenue = Column(Float); z_op_margin = Column(Float); z_roe = Column(Float)
+    z_equity_ratio = Column(Float); z_cf_ratio = Column(Float); z_eps = Column(Float)
+    z_de_ratio = Column(Float); z_nc_ratio = Column(Float)
+    rev_growth = Column(Float); op_growth = Column(Float); eps_growth = Column(Float)
+    # 回帰出力（regression_results を LEFT JOIN）
+    predicted_market_cap = Column(Float); gap_ratio = Column(Float)
+
+
+# financial_metrics VIEW DDL。式は既存 Python 実装と一致させてある。
+FINANCIAL_METRICS_VIEW_SQL = """
+CREATE OR REPLACE VIEW financial_metrics AS
+WITH d AS (
+    SELECT
+        fr.id, fr.edinet_code, fr.sec_code, fr.company_name, fr.industry, fr.market,
+        fr.year, fr.period_end, fr.doc_id, fr.source, fr.accounting_standard,
+        fr.bs_total_assets, fr.bs_current_assets, fr.bs_receivables, fr.bs_inventory,
+        fr.bs_noncurrent_assets, fr.bs_buildings, fr.bs_machinery, fr.bs_intangible_assets,
+        fr.bs_cash, fr.bs_investment_securities, fr.bs_total_liabilities, fr.bs_current_liabilities,
+        fr.bs_payables, fr.bs_noncurrent_liabilities, fr.bs_short_term_debt, fr.bs_long_term_debt,
+        fr.bs_bonds_payable, fr.bs_total_equity, fr.bs_equity_parent, fr.bs_paid_in_capital,
+        fr.bs_retained_earnings, fr.bs_bps,
+        fr.pl_revenue, fr.pl_cost_of_sales, fr.pl_gross_profit, fr.pl_sga, fr.pl_operating_profit,
+        fr.pl_nonoperating_income, fr.pl_ordinary_profit, fr.pl_pretax_profit, fr.pl_net_income,
+        fr.pl_net_income_attr, fr.pl_eps, fr.pl_ebitda,
+        fr.cf_operating_cf, fr.cf_investing_cf, fr.cf_financing_cf, fr.cf_free_cf,
+        fr.cf_net_change_cash, fr.cf_capex,
+        fr.stock_price, fr.market_cap, fr.per, fr.pbr, fr.div_yield, fr.dps,
+        CASE WHEN COALESCE(fr.pl_revenue,0) <> 0
+             THEN ROUND((COALESCE(fr.pl_operating_profit,0) / fr.pl_revenue * 100)::numeric, 2) END AS op_margin,
+        CASE WHEN COALESCE(fr.pl_revenue,0) <> 0
+             THEN ROUND((COALESCE(NULLIF(fr.pl_net_income,0), NULLIF(fr.pl_net_income_attr,0), 0) / fr.pl_revenue * 100)::numeric, 2) END AS net_margin,
+        CASE WHEN COALESCE(NULLIF(fr.bs_total_equity,0), NULLIF(fr.bs_equity_parent,0), 0) <> 0
+             THEN ROUND((COALESCE(NULLIF(fr.pl_net_income,0), NULLIF(fr.pl_net_income_attr,0), 0) / COALESCE(NULLIF(fr.bs_total_equity,0), NULLIF(fr.bs_equity_parent,0), 0) * 100)::numeric, 2) END AS roe,
+        CASE WHEN COALESCE(fr.bs_total_assets,0) <> 0
+             THEN ROUND((COALESCE(NULLIF(fr.pl_net_income,0), NULLIF(fr.pl_net_income_attr,0), 0) / fr.bs_total_assets * 100)::numeric, 2) END AS roa,
+        CASE WHEN COALESCE(fr.bs_total_assets,0) <> 0
+             THEN ROUND((COALESCE(NULLIF(fr.bs_total_equity,0), NULLIF(fr.bs_equity_parent,0), 0) / fr.bs_total_assets * 100)::numeric, 2) END AS equity_ratio,
+        CASE WHEN COALESCE(NULLIF(fr.bs_total_equity,0), NULLIF(fr.bs_equity_parent,0), 0) <> 0
+             THEN ROUND(((COALESCE(fr.bs_short_term_debt,0) + COALESCE(fr.bs_long_term_debt,0)) / COALESCE(NULLIF(fr.bs_total_equity,0), NULLIF(fr.bs_equity_parent,0), 0))::numeric, 4) END AS de_ratio,
+        CASE WHEN COALESCE(fr.pl_revenue,0) <> 0
+             THEN ROUND((COALESCE(fr.cf_operating_cf,0) / fr.pl_revenue * 100)::numeric, 2) END AS cf_ratio,
+        CASE WHEN COALESCE(fr.bs_current_assets,0) <> 0 OR COALESCE(fr.bs_total_liabilities,0) <> 0
+             THEN ROUND((COALESCE(fr.bs_current_assets,0) + COALESCE(fr.bs_investment_securities,0) * 0.7 - COALESCE(fr.bs_total_liabilities,0))::numeric, 0) END AS net_cash
+    FROM financial_records fr
+),
+n AS (
+    SELECT d.*,
+        CASE WHEN d.net_cash IS NOT NULL AND COALESCE(d.market_cap,0) <> 0
+             THEN ROUND((d.net_cash / (d.market_cap * 1000000))::numeric, 4) END AS nc_ratio
+    FROM d
+)
+SELECT
+    n.*,
+    CASE WHEN COUNT(n.pl_revenue) OVER yw >= 2
+         THEN ROUND(((n.pl_revenue - AVG(n.pl_revenue) OVER yw) / COALESCE(NULLIF(STDDEV_SAMP(n.pl_revenue) OVER yw, 0), 1.0))::numeric, 4) END AS z_revenue,
+    CASE WHEN COUNT(n.op_margin) OVER yw >= 2
+         THEN ROUND(((n.op_margin - AVG(n.op_margin) OVER yw) / COALESCE(NULLIF(STDDEV_SAMP(n.op_margin) OVER yw, 0), 1.0))::numeric, 4) END AS z_op_margin,
+    CASE WHEN COUNT(n.roe) OVER yw >= 2
+         THEN ROUND(((n.roe - AVG(n.roe) OVER yw) / COALESCE(NULLIF(STDDEV_SAMP(n.roe) OVER yw, 0), 1.0))::numeric, 4) END AS z_roe,
+    CASE WHEN COUNT(n.equity_ratio) OVER yw >= 2
+         THEN ROUND(((n.equity_ratio - AVG(n.equity_ratio) OVER yw) / COALESCE(NULLIF(STDDEV_SAMP(n.equity_ratio) OVER yw, 0), 1.0))::numeric, 4) END AS z_equity_ratio,
+    CASE WHEN COUNT(n.cf_ratio) OVER yw >= 2
+         THEN ROUND(((n.cf_ratio - AVG(n.cf_ratio) OVER yw) / COALESCE(NULLIF(STDDEV_SAMP(n.cf_ratio) OVER yw, 0), 1.0))::numeric, 4) END AS z_cf_ratio,
+    CASE WHEN COUNT(n.pl_eps) OVER yw >= 2
+         THEN ROUND(((n.pl_eps - AVG(n.pl_eps) OVER yw) / COALESCE(NULLIF(STDDEV_SAMP(n.pl_eps) OVER yw, 0), 1.0))::numeric, 4) END AS z_eps,
+    CASE WHEN COUNT(n.de_ratio) OVER yw >= 2
+         THEN ROUND(((n.de_ratio - AVG(n.de_ratio) OVER yw) / COALESCE(NULLIF(STDDEV_SAMP(n.de_ratio) OVER yw, 0), 1.0))::numeric, 4) END AS z_de_ratio,
+    CASE WHEN COUNT(n.nc_ratio) OVER yw >= 2
+         THEN ROUND(((n.nc_ratio - AVG(n.nc_ratio) OVER yw) / COALESCE(NULLIF(STDDEV_SAMP(n.nc_ratio) OVER yw, 0), 1.0))::numeric, 4) END AS z_nc_ratio,
+    CASE WHEN n.pl_revenue IS NOT NULL AND n.pl_revenue <> 0
+          AND LAG(n.pl_revenue) OVER cw IS NOT NULL AND LAG(n.pl_revenue) OVER cw <> 0
+         THEN ROUND(((n.pl_revenue / LAG(n.pl_revenue) OVER cw - 1) * 100)::numeric, 2) END AS rev_growth,
+    CASE WHEN n.pl_operating_profit IS NOT NULL AND n.pl_operating_profit <> 0
+          AND LAG(n.pl_operating_profit) OVER cw IS NOT NULL AND LAG(n.pl_operating_profit) OVER cw <> 0
+         THEN ROUND(((n.pl_operating_profit / LAG(n.pl_operating_profit) OVER cw - 1) * 100)::numeric, 2) END AS op_growth,
+    CASE WHEN n.pl_eps IS NOT NULL AND n.pl_eps <> 0
+          AND LAG(n.pl_eps) OVER cw IS NOT NULL AND LAG(n.pl_eps) OVER cw <> 0
+         THEN ROUND(((n.pl_eps / LAG(n.pl_eps) OVER cw - 1) * 100)::numeric, 2) END AS eps_growth,
+    rr.predicted_market_cap,
+    rr.gap_ratio
+FROM n
+LEFT JOIN regression_results rr
+       ON rr.edinet_code = n.edinet_code AND rr.year = n.year AND rr.period_end = n.period_end
+WINDOW yw AS (PARTITION BY n.year),
+       cw AS (PARTITION BY n.edinet_code ORDER BY n.year, n.period_end)
+"""
+
+
+# ── 10. DB初期化 ───────────────────────────────────────────────────────────
 
 def init_db():
     """テーブル作成・インデックス構築・カラムマイグレーション"""
@@ -314,6 +493,9 @@ def init_db():
             "CREATE INDEX IF NOT EXISTS ix_xbrl_raw_edinet_period "
             "ON xbrl_raw_documents (edinet_code, period_end)"
         ))
+        # financial_metrics VIEW（ソース列から軽い派生を都度算出＋regression_results を合成）。
+        # regression_results は create_all で先に作成済みのため LEFT JOIN 可能。
+        conn.execute(text(FINANCIAL_METRICS_VIEW_SQL))
         conn.commit()
 
 
@@ -365,10 +547,9 @@ def upsert_financial(db, data: dict) -> FinancialRecord:
     # CF
     for k, v in data.get("cf", {}).items():
         flat[f"cf_{k}"] = v
-    # derived
-    for k, v in data.get("derived", {}).items():
-        flat[k] = v
-    # val (market data)
+    # derived（op_margin / roe / net_cash 等の計算結果）は financial_records には保存しない。
+    # financial_metrics VIEW がソース列から都度算出する（計算結果と生データのDB分離）。
+    # val (market data) は市場スナップショットのため保存する。
     for k, v in data.get("val", {}).items():
         flat[k] = v
 

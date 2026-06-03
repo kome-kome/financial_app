@@ -16,7 +16,7 @@ from collector import (
     collect_stock_price_history_jquants, update_market_data_from_history,
     fill_recent_stock_price_gap_yahoo,
 )
-from database import SessionLocal, init_db, calc_growth_rates, calc_zscore_normalization
+from database import SessionLocal, init_db
 
 LOG_FILE = "pipeline_incremental.log"
 
@@ -49,17 +49,8 @@ async def main():
         return
     log(f"[1/4] XBRL 差分収集 完了 ({(time.time()-t0)/60:.1f}分経過)")
 
-    # ─── Phase 2: 成長率・Zスコア再計算 ─────────────────────────────────────
-    log("[2/4] 成長率・Zスコア再計算 開始")
-    db = SessionLocal()
-    try:
-        calc_growth_rates(db)
-        log("  成長率 計算完了")
-        calc_zscore_normalization(db)
-        log("  Zスコア 計算完了")
-    finally:
-        db.close()
-    log(f"[2/4] 成長率・Zスコア 完了 ({(time.time()-t0)/60:.1f}分経過)")
+    # ─── Phase 2: 成長率・Zスコアは financial_metrics VIEW が都度算出するため事前計算は不要 ───
+    log("[2/4] 成長率・Zスコアは financial_metrics VIEW で都度算出（事前計算スキップ）")
 
     # ─── Phase 3: マクロデータ収集 ───────────────────────────────────────────
     log("[3/4] マクロデータ収集 開始")

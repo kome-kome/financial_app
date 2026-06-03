@@ -142,13 +142,33 @@ class TestStatsEndpoint:
         assert body["records_with_prediction"] == 0
 
     def test_records_with_prediction_counts_gap_ratio(self, db, make_fin):
-        # gap_ratio が書き込まれたレコードのみカウント（業種別OLS実行済み判定）
-        db.add(make_fin(edinet_code="E00001", year=2023, gap_ratio=12.3))
-        db.add(make_fin(edinet_code="E00002", year=2023, gap_ratio=None))
+        # 予測値は regression_results に保存される。gap_ratio 付きの件数をカウント（OLS実行済み判定）
+        from database import RegressionResult
+        db.add(make_fin(edinet_code="E00001", year=2023))
+        db.add(RegressionResult(edinet_code="E00001", year=2023,
+                                period_end="2023-03-31", gap_ratio=12.3))
+        db.add(RegressionResult(edinet_code="E00002", year=2023,
+                                period_end="2023-03-31", gap_ratio=None))
         db.commit()
         api.app.dependency_overrides[api.get_db] = lambda: db
         body = client.get("/api/stats").json()
         assert body["records_with_prediction"] == 1
+
+
+class TestHeavyPluginRenderBlock:
+    def test_sector_ols_blocked_in_light_mode(self, db, monkeypatch):
+        # Render 軽量モードでは重い回帰プラグインは 403（ローカル実行を促す）
+        monkeypatch.setattr(api, "RENDER_LIGHT_MODE", True)
+        api.app.dependency_overrides[api.get_db] = lambda: db
+        r = client.post("/api/plugins/sector_ols/run", json={})
+        assert r.status_code == 403
+
+    def test_sector_ols_not_blocked_when_not_light(self, db, monkeypatch):
+        # 通常モードでは heavy ブロックは発火しない（データ無しで実行→400 になる）
+        monkeypatch.setattr(api, "RENDER_LIGHT_MODE", False)
+        api.app.dependency_overrides[api.get_db] = lambda: db
+        r = client.post("/api/plugins/sector_ols/run", json={})
+        assert r.status_code != 403
 
 
 class TestCompaniesEndpoint:

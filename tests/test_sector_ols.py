@@ -52,6 +52,11 @@ class TestConstants:
         # 派生キーと DB永続キーは重複しない（命名規則の整合性）
         assert set(PER_SHARE_DERIVED.keys()).isdisjoint(DB_PER_SHARE_KEYS)
 
+    def test_plugin_is_heavy(self):
+        # 重い回帰は Render 軽量モードでブロックするため heavy フラグを持つ
+        assert plugin.heavy is True
+        assert plugin.to_meta()["heavy"] is True
+
 
 # ── execute(): in-memory SQLite ──────────────────────────────────────────────
 
@@ -99,16 +104,18 @@ class TestExecute:
             asyncio.run(plugin.execute({}, db))
 
     def test_writes_predictions_and_ranks(self, db, make_fin):
-        from database import FinancialRecord
+        from database import RegressionResult
         _seed_sector(db, make_fin, n=12)
         res = asyncio.run(plugin.execute({}, db))
         assert res["n_sectors"] >= 1
         assert res["sector_stats"][0]["r2"] is not None
+        # 予測値は financial_records ではなく regression_results に保存される（計算結果の分離）
+        rrs = db.query(RegressionResult).all()
+        assert len(rrs) == 12
         # 乖離率は全件付与されること（市場データ揃いの seed）
-        rows = db.query(FinancialRecord).all()
-        assert all(r.gap_ratio is not None for r in rows)
+        assert all(r.gap_ratio is not None for r in rrs)
         # market_cap & stock_price 揃いの場合 predicted_market_cap も書き込まれる
-        assert all(r.predicted_market_cap is not None for r in rows)
+        assert all(r.predicted_market_cap is not None for r in rrs)
         # 業種内ランクが全件付与されていること
         assert all(p["sector_rank"] is not None for p in res["results"])
 

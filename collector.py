@@ -1443,11 +1443,8 @@ def _apply_price_to_record(rec, price: float) -> None:
         rec.market_cap = round(price * shares / 1_000_000, 2)
     if rec.dps and rec.dps > 0 and price > 0:
         rec.div_yield = round(rec.dps / price * 100, 2)
-    if (rec.net_cash is not None
-            and rec.market_cap and rec.market_cap > 0):
-        rec.nc_ratio = round(
-            rec.net_cash / (rec.market_cap * 1_000_000), 4
-        )
+    # nc_ratio（= net_cash / 時価総額）は計算結果のため financial_metrics VIEW で都度算出する
+    # （財務本体には永続化しない）。
 
 
 def _bisect_left(sorted_list: list, value: str) -> int:
@@ -1535,13 +1532,9 @@ async def update_market_data(max_companies: Optional[int] = None,
                     latest.market_cap = round(price * shares / 1_000_000, 2)
                 if latest.dps and latest.dps > 0 and price > 0:
                     latest.div_yield = round(latest.dps / price * 100, 2)
-                # ネットキャッシュ比率 = net_cash[円] / (market_cap[百万円] × 1e6)
+                # nc_ratio（ネットキャッシュ比率 = net_cash / 時価総額）は計算結果のため
+                # financial_metrics VIEW で都度算出する（財務本体には永続化しない）。
                 # 清原氏の銘柄選別基準: nc_ratio > 1.0 で「時価総額を上回るネットキャッシュ」
-                if (latest.net_cash is not None
-                        and latest.market_cap and latest.market_cap > 0):
-                    latest.nc_ratio = round(
-                        latest.net_cash / (latest.market_cap * 1_000_000), 4
-                    )
 
                 updated += 1
                 if updated % 50 == 0:

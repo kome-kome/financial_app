@@ -201,7 +201,9 @@ class PricePredictorPlugin(AnalysisPlugin):
         }
 
     async def execute(self, params: dict, db: Any) -> dict:
-        from database import Company, FinancialRecord, StockPriceHistory
+        # 財務特徴量（roe / equity_ratio / z_* / gap_ratio）は派生・回帰由来のため
+        # financial_metrics VIEW から読む（全年度分が必要なので最新行に絞らない）。
+        from database import Company, FinancialMetric, StockPriceHistory
 
         horizon = int(params.get("horizon") or 20)
         use_price = bool(params.get("use_price_features", True))
@@ -230,8 +232,8 @@ class PricePredictorPlugin(AnalysisPlugin):
             prices_by_co[p.edinet_code].append(p)
 
         fin_recs_all = (
-            db.query(FinancialRecord)
-            .order_by(FinancialRecord.edinet_code, FinancialRecord.period_end)
+            db.query(FinancialMetric)
+            .order_by(FinancialMetric.edinet_code, FinancialMetric.period_end)
             .all()
         )
         fin_by_co: dict[str, list] = defaultdict(list)

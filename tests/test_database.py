@@ -14,11 +14,13 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from database import (
     Company,
     FinancialRecord,
+    RegressionResult,
     calc_zscore_normalization,
     pack_elements,
     unpack_elements,
     upsert_company,
     upsert_financial,
+    upsert_regression_result,
 )
 
 
@@ -69,6 +71,7 @@ class TestUpsertFinancial:
             "bs": {"total_assets": 5000.0, "bps": 100.0},
             "pl": {"revenue": 1000.0, "eps": 50.0},
             "cf": {"operating_cf": 150.0},
+            # derived（計算結果）は financial_records には保存しない（VIEW で都度算出）
             "derived": {"roe": 8.0},
             "val": {"per": 15.0, "dps": 10.0},
         }
@@ -83,9 +86,15 @@ class TestUpsertFinancial:
         assert obj.pl_revenue == 1000.0         # pl_ プレフィックス
         assert obj.pl_eps == 50.0
         assert obj.cf_operating_cf == 150.0     # cf_ プレフィックス
-        assert obj.roe == 8.0                    # derived はそのまま
         assert obj.per == 15.0                   # val もそのまま
         assert obj.dps == 10.0
+
+    def test_derived_not_persisted(self, db):
+        # 計算結果（derived）は financial_records に永続化されない（financial_metrics VIEW が担う）
+        obj = upsert_financial(db, self._data(derived={"roe": 8.0, "op_margin": 12.3}))
+        db.commit()
+        assert obj.roe is None
+        assert obj.op_margin is None
 
     def test_raw_xbrl_json_populated(self, db):
         obj = upsert_financial(db, self._data())
@@ -101,6 +110,41 @@ class TestUpsertFinancial:
         rows = db.query(FinancialRecord).filter_by(edinet_code="E00001", year=2023).all()
         assert len(rows) == 1
         assert rows[0].pl_revenue == 2000.0
+
+
+class TestUpsertRegressionResult:
+    def _args(self, **over):
+        d = dict(edinet_code="E00001", year=2023, period_end="2023-03-31",
+                 predicted_market_cap=12000.0, gap_ratio=-15.0,
+                 model="ols", sector="情報・通信業")
+        d.update(over)
+        return d
+
+    def test_insert_new(self, db):
+        upsert_regression_result(db, **self._args())
+        db.commit()
+        rr = db.query(RegressionResult).one()
+        assert rr.predicted_market_cap == 12000.0
+        assert rr.gap_ratio == -15.0
+        assert rr.model == "ols"
+
+    def test_upsert_updates_in_place(self, db):
+        # 同一キー (edinet_code, year, period_end) は merge で上書きされ重複しない
+        upsert_regression_result(db, **self._args(gap_ratio=-15.0))
+        db.commit()
+        upsert_regression_result(db, **self._args(gap_ratio=30.0, model="ridge"))
+        db.commit()
+        rows = db.query(RegressionResult).all()
+        assert len(rows) == 1
+        assert rows[0].gap_ratio == 30.0
+        assert rows[0].model == "ridge"
+
+    def test_empty_period_end_normalized(self, db):
+        # period_end が None でも空文字キーで保存できる（PK NOT NULL 制約回避）
+        upsert_regression_result(db, **self._args(period_end=None))
+        db.commit()
+        rr = db.query(RegressionResult).one()
+        assert rr.period_end == ""
 
 
 class TestZscoreNormalization:
