@@ -178,6 +178,50 @@ class TestParseXbrlCsv:
         })
         assert "capex" not in parse_xbrl_csv(df, "E99999", "2025-03-31")["cf"]
 
+    def test_ifrs_cf_detail_elements_extracted(self):
+        """IFRS決算のCF計算書本体（NetCash...IFRS）から営業/投資/財務CF・現金増減を抽出する。
+        トヨタ等のIFRS大企業のCFが全NULLになっていた根本原因（要素ID未登録）の回帰防止。
+        コンテキストは Consolidated を含まない CurrentYearDuration。"""
+        df = pd.DataFrame({
+            "要素ID": [
+                "jpigp_cor:NetCashProvidedByUsedInOperatingActivitiesIFRS",
+                "jpigp_cor:NetCashProvidedByUsedInInvestingActivitiesIFRS",
+                "jpigp_cor:NetCashProvidedByUsedInFinancingActivitiesIFRS",
+                "jpigp_cor:NetIncreaseDecreaseInCashAndCashEquivalentsIFRS",
+            ],
+            "コンテキストID": ["CurrentYearDuration"] * 4,
+            "値": ["3696934", "-4189736", "197236", "-429656"],
+        })
+        cf = parse_xbrl_csv(df, "E02144", "2025-03-31")["cf"]
+        assert cf["operating_cf"] == 3696934.0
+        assert cf["investing_cf"] == -4189736.0
+        assert cf["financing_cf"] == 197236.0
+        assert cf["net_change_cash"] == -429656.0
+
+    def test_ifrs_cf_summary_section_elements_extracted(self):
+        """CF計算書本体を独自拡張要素でタグ付けする企業向けに、
+        「主要な経営指標等の推移」(...IFRSSummaryOfBusinessResults) からも当期CFを拾う。
+        Prior年度（Prior4YearDuration）は除外し CurrentYearDuration のみ採用する。"""
+        df = pd.DataFrame({
+            "要素ID": [
+                "jpcrp_cor:CashFlowsFromUsedInOperatingActivitiesIFRSSummaryOfBusinessResults",
+                "jpcrp_cor:CashFlowsFromUsedInOperatingActivitiesIFRSSummaryOfBusinessResults",
+                "jpcrp_cor:CashFlowsFromUsedInInvestingActivitiesIFRSSummaryOfBusinessResults",
+                "jpcrp_cor:CashFlowsFromUsedInFinancingActivitiesIFRSSummaryOfBusinessResults",
+            ],
+            "コンテキストID": [
+                "Prior4YearDuration",   # 過年度 → 除外されること
+                "CurrentYearDuration",
+                "CurrentYearDuration",
+                "CurrentYearDuration",
+            ],
+            "値": ["2727162", "3696934", "-4189736", "197236"],
+        })
+        cf = parse_xbrl_csv(df, "E02144", "2025-03-31")["cf"]
+        assert cf["operating_cf"] == 3696934.0  # 過年度2727162ではなく当期
+        assert cf["investing_cf"] == -4189736.0
+        assert cf["financing_cf"] == 197236.0
+
 
 class TestMatchCapexByLabel:
     @pytest.mark.parametrize("label,expected", [
