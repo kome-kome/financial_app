@@ -222,6 +222,33 @@ class TestParseXbrlCsv:
         assert cf["investing_cf"] == -4189736.0
         assert cf["financing_cf"] == 197236.0
 
+    def test_usgaap_cf_and_consolidated_revenue_from_summary(self):
+        """US-GAAP決算（キヤノン・コマツ・オリックス・野村等）のCF合計と連結売上は
+        ...USGAAPSummaryOfBusinessResults に集約される。連結売上(CurrentYearDuration,優先度1)が
+        非連結NetSales(メンバー,優先度0)に勝つことも確認（誤って非連結値を採らない）。"""
+        df = pd.DataFrame({
+            "要素ID": [
+                "jpcrp_cor:RevenuesUSGAAPSummaryOfBusinessResults",
+                "jppfs_cor:NetSales",  # 非連結（メンバー）→ 連結値に負ける
+                "jpcrp_cor:CashFlowsFromUsedInOperatingActivitiesUSGAAPSummaryOfBusinessResults",
+                "jpcrp_cor:CashFlowsFromUsedInInvestingActivitiesUSGAAPSummaryOfBusinessResults",
+                "jpcrp_cor:CashFlowsFromUsedInFinancingActivitiesUSGAAPSummaryOfBusinessResults",
+            ],
+            "コンテキストID": [
+                "CurrentYearDuration",
+                "CurrentYearDuration_NonConsolidatedMember",
+                "CurrentYearDuration",
+                "CurrentYearDuration",
+                "CurrentYearDuration",
+            ],
+            "値": ["4624727", "1837606", "475903", "-237450", "-179221"],
+        })
+        res = parse_xbrl_csv(df, "E02274", "2025-12-31")
+        assert res["pl"]["revenue"] == 4624727.0  # 連結。非連結1837606ではない
+        assert res["cf"]["operating_cf"] == 475903.0
+        assert res["cf"]["investing_cf"] == -237450.0
+        assert res["cf"]["financing_cf"] == -179221.0
+
 
 class TestMatchCapexByLabel:
     @pytest.mark.parametrize("label,expected", [

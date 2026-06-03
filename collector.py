@@ -200,6 +200,17 @@ XBRL_MAP = {
     # タグ付けされるため、要素ID照合に加え _match_capex_by_label のラベル照合でも捕捉する。
     "PurchaseOfPropertyPlantAndEquipmentIFRS":         ("cf", "capex"),
     "PurchaseOfPropertyPlantAndEquipmentAndIntangibleAssetsIFRS": ("cf", "capex"),
+    # ── CF・売上（US-GAAP）────────────────────────────────────────────────
+    # 米国基準採用企業（キヤノン・コマツ・オリックス・野村HD・ソニー旧年度等）のCF合計と
+    # 連結売上は「主要な経営指標等の推移」の ...USGAAPSummaryOfBusinessResults 要素に集約される
+    # （実XBRL診断で確定。context=CurrentYearDuration）。IFRS と同じく本体の連結CF計算書は
+    # 独自拡張要素のため、この経営指標等セクションが確実な取得源になる。
+    "CashFlowsFromUsedInOperatingActivitiesUSGAAPSummaryOfBusinessResults": ("cf", "operating_cf"),
+    "CashFlowsFromUsedInInvestingActivitiesUSGAAPSummaryOfBusinessResults": ("cf", "investing_cf"),
+    "CashFlowsFromUsedInFinancingActivitiesUSGAAPSummaryOfBusinessResults": ("cf", "financing_cf"),
+    # 連結売上（US-GAAP）。未登録時は非連結 NetSales（メンバー・優先度0）を誤採用していたため、
+    # CurrentYearDuration（優先度1）の本要素を登録して連結値を正しく採る。
+    "RevenuesUSGAAPSummaryOfBusinessResults":          ("pl", "revenue"),
     # ── バリュエーション・配当 ────────────────────────────────────────────
     "DividendPaidPerShare":                            ("val", "dps"),
     "DividendPaidPerShareSummaryOfBusinessResults":    ("val", "dps"),    # 経営指標等セクション
