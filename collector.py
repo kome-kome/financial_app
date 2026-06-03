@@ -220,8 +220,12 @@ XBRL_MAP = {
     "NetIncomeLossAttributableToOwnersOfParentUSGAAPSummaryOfBusinessResults": ("pl", "net_income"),
     "BasicEarningsLossPerShareUSGAAPSummaryOfBusinessResults": ("pl", "eps"),
     "TotalAssetsUSGAAPSummaryOfBusinessResults":       ("bs", "total_assets"),
+    # 自己資本: 「株主資本」(EquityAttributable…)と「純資産額」(EquityIncluding…NCI)のうち
+    # どちらか一方のみ載る企業がある（キヤノン=株主資本のみ／野村=純資産額のみ）。両方を
+    # total_equity に登録し、同優先度では先勝ち（CSV上で株主資本が先＝株主資本利益率に整合）。
+    # 片方しか無くても連結自己資本が必ず埋まり、ROE/自己資本比率が非連結値で誤算出されない。
+    "EquityAttributableToOwnersOfParentUSGAAPSummaryOfBusinessResults": ("bs", "total_equity"),
     "EquityIncludingPortionAttributableToNonControllingInterestUSGAAPSummaryOfBusinessResults": ("bs", "total_equity"),
-    "EquityAttributableToOwnersOfParentUSGAAPSummaryOfBusinessResults": ("bs", "equity_parent"),
     "EquityAttributableToOwnersOfParentPerShareUSGAAPSummaryOfBusinessResults": ("bs", "bps"),
     "CashAndCashEquivalentsUSGAAPSummaryOfBusinessResults": ("bs", "cash"),
     # ── バリュエーション・配当 ────────────────────────────────────────────

@@ -232,7 +232,7 @@ class TestParseXbrlCsv:
                 "jppfs_cor:NetSales",  # 非連結（メンバー）→ 連結値に負ける
                 "jpcrp_cor:NetIncomeLossAttributableToOwnersOfParentUSGAAPSummaryOfBusinessResults",
                 "jpcrp_cor:TotalAssetsUSGAAPSummaryOfBusinessResults",
-                "jpcrp_cor:EquityAttributableToOwnersOfParentUSGAAPSummaryOfBusinessResults",
+                "jpcrp_cor:EquityAttributableToOwnersOfParentUSGAAPSummaryOfBusinessResults",  # 株主資本 → total_equity
                 "jpcrp_cor:BasicEarningsLossPerShareUSGAAPSummaryOfBusinessResults",
                 "jpcrp_cor:EquityAttributableToOwnersOfParentPerShareUSGAAPSummaryOfBusinessResults",
                 "jpcrp_cor:CashFlowsFromUsedInOperatingActivitiesUSGAAPSummaryOfBusinessResults",
@@ -258,7 +258,7 @@ class TestParseXbrlCsv:
         assert res["pl"]["revenue"] == 4624727.0  # 連結。非連結1837606ではない
         assert res["pl"]["net_income"] == 332053.0
         assert res["bs"]["total_assets"] == 6135044.0
-        assert res["bs"]["equity_parent"] == 3491808.0
+        assert res["bs"]["total_equity"] == 3491808.0  # 株主資本→total_equity（ROE/自己資本比率の整合）
         assert res["pl"]["eps"] == 367.48
         assert res["bs"]["bps"] == 3974.81
         assert res["cf"]["operating_cf"] == 475903.0
