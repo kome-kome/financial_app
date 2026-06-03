@@ -9,7 +9,6 @@ PostgreSQL スキーマ定義・ORM・upsert処理
 
 import os, gzip, json
 from datetime import datetime
-from typing import Optional
 from dotenv import load_dotenv
 from sqlalchemy import (
     create_engine, Column, String, Integer, Float, DateTime,
@@ -139,18 +138,7 @@ class FinancialRecord(Base):
     cf_net_change_cash      = Column(Float)   # 現金増減
     cf_capex                = Column(Float)   # 設備投資額
 
-    # ── 計算済み指標（正規化前）──────────────────────────────────────────
-    op_margin               = Column(Float)   # 営業利益率 %
-    net_margin              = Column(Float)   # 純利益率 %
-    roe                     = Column(Float)   # ROE %
-    roa                     = Column(Float)   # ROA %
-    equity_ratio            = Column(Float)   # 自己資本比率 %
-    de_ratio                = Column(Float)   # D/Eレシオ
-    cf_ratio                = Column(Float)   # 営業CF/売上比率 %
-    net_cash                = Column(Float)   # ネットキャッシュ（円・清原式）
-    nc_ratio                = Column(Float)   # ネットキャッシュ比率 = net_cash / 時価総額（百万円換算）
-
-    # ── 市場データ（株価・バリュエーション）─────────────────────────────
+    # ── 市場データ（株価・バリュエーション・収集時点スナップショット）────
     stock_price             = Column(Float)   # 株価（収集時点）
     market_cap              = Column(Float)   # 時価総額（百万円）
     per                     = Column(Float)   # PER
@@ -158,24 +146,10 @@ class FinancialRecord(Base):
     div_yield               = Column(Float)   # 配当利回り %
     dps                     = Column(Float)   # 1株配当
 
-    # ── 正規化済みスコア（Zスコア・業種内偏差）──────────────────────────
-    z_revenue               = Column(Float)
-    z_op_margin             = Column(Float)
-    z_roe                   = Column(Float)
-    z_equity_ratio          = Column(Float)
-    z_cf_ratio              = Column(Float)
-    z_eps                   = Column(Float)
-    z_de_ratio              = Column(Float)
-    z_nc_ratio              = Column(Float)   # ネットキャッシュ比率のZスコア
-
-    # ── 前期比成長率 ─────────────────────────────────────────────────────
-    rev_growth              = Column(Float)   # 売上高成長率 %
-    op_growth               = Column(Float)   # 営業利益成長率 %
-    eps_growth              = Column(Float)   # EPS成長率 %
-
-    # ── 予測関連 ─────────────────────────────────────────────────────────
-    predicted_market_cap    = Column(Float)   # 回帰モデル予測時価総額
-    gap_ratio               = Column(Float)   # 乖離率 %
+    # 計算結果（派生比率・Zスコア・成長率・OLS予測値）は financial_records には保持しない。
+    #   - 軽い派生／Zスコア／成長率 → financial_metrics VIEW（ソース列から都度算出）
+    #   - OLS予測値（predicted_market_cap / gap_ratio）→ regression_results テーブル
+    # 旧計算列は本コミットで DROP 済み（init_db の DROP マイグレーション参照）。
 
     raw_xbrl_json           = Column(JSON)    # 生XBRLデータ（デバッグ用）
     created_at              = Column(DateTime, default=datetime.utcnow)
@@ -474,7 +448,7 @@ def init_db():
             "CREATE INDEX IF NOT EXISTS ix_companies_name_gin "
             "ON companies USING gin(to_tsvector('simple', name))"
         ))
-        # 新規カラムのマイグレーション（冪等）
+        # 新規ソース列のマイグレーション（冪等）。計算列はここに含めない（VIEW が担う）。
         _new_cols = [
             "pl_cost_of_sales", "pl_sga", "pl_nonoperating_income",
             "bs_receivables", "bs_inventory",
@@ -482,11 +456,25 @@ def init_db():
             "bs_payables", "bs_bonds_payable",
             "bs_paid_in_capital", "bs_retained_earnings",
             "bs_investment_securities",
-            "net_cash", "nc_ratio", "z_nc_ratio",
         ]
         for col in _new_cols:
             conn.execute(text(
                 f"ALTER TABLE financial_records ADD COLUMN IF NOT EXISTS {col} DOUBLE PRECISION"
+            ))
+        # 旧計算列の DROP（冪等）。派生指標は financial_metrics VIEW、OLS予測値は
+        # regression_results へ移行済みのため financial_records からは恒久的に削除する。
+        # VIEW はソース列から派生を計算しており、これらの列を参照しないため DROP 可能。
+        _legacy_computed_cols = [
+            "op_margin", "net_margin", "roe", "roa", "equity_ratio", "de_ratio",
+            "cf_ratio", "net_cash", "nc_ratio",
+            "z_revenue", "z_op_margin", "z_roe", "z_equity_ratio", "z_cf_ratio",
+            "z_eps", "z_de_ratio", "z_nc_ratio",
+            "rev_growth", "op_growth", "eps_growth",
+            "predicted_market_cap", "gap_ratio",
+        ]
+        for col in _legacy_computed_cols:
+            conn.execute(text(
+                f"ALTER TABLE financial_records DROP COLUMN IF EXISTS {col}"
             ))
         # xbrl_raw_documents インデックス（テーブル自体は create_all で作成済み）
         conn.execute(text(
@@ -579,94 +567,7 @@ def upsert_financial(db, data: dict) -> FinancialRecord:
     return obj
 
 
-def calc_growth_rates(db):
-    """前期比成長率を全レコードに対して計算・更新（PostgreSQL window function 版）。
-
-    旧実装は全レコードをメモリに展開してループしていたため、件数が増えると OOM の
-    リスクがあった。本実装は LAG() OVER (PARTITION BY edinet_code ORDER BY year,
-    period_end) で SQL 側に処理を押し込み、DB の効率的なソート・スキャンを活用する。
-
-    セマンティクス（旧実装との一致点）:
-      - 前期と当期の両方が NULL でなく 0 でもないときのみ更新する
-      - rev_growth / op_growth / eps_growth は各 % で小数 2 桁丸め
-      - 順序は (edinet_code, year, period_end) で副ソート（CLAUDE.md 既知事項）
-    """
-    sql = text("""
-        WITH lagged AS (
-            SELECT
-                id,
-                pl_revenue           AS curr_rev,
-                LAG(pl_revenue) OVER w           AS prev_rev,
-                pl_operating_profit  AS curr_op,
-                LAG(pl_operating_profit) OVER w  AS prev_op,
-                pl_eps               AS curr_eps,
-                LAG(pl_eps) OVER w               AS prev_eps
-            FROM financial_records
-            WINDOW w AS (PARTITION BY edinet_code ORDER BY year, period_end)
-        )
-        UPDATE financial_records fr
-        SET
-            rev_growth = CASE
-                WHEN l.curr_rev IS NOT NULL AND l.curr_rev <> 0
-                 AND l.prev_rev IS NOT NULL AND l.prev_rev <> 0
-                THEN ROUND(((l.curr_rev / l.prev_rev - 1) * 100)::numeric, 2)
-                ELSE fr.rev_growth
-            END,
-            op_growth = CASE
-                WHEN l.curr_op IS NOT NULL AND l.curr_op <> 0
-                 AND l.prev_op IS NOT NULL AND l.prev_op <> 0
-                THEN ROUND(((l.curr_op / l.prev_op - 1) * 100)::numeric, 2)
-                ELSE fr.op_growth
-            END,
-            eps_growth = CASE
-                WHEN l.curr_eps IS NOT NULL AND l.curr_eps <> 0
-                 AND l.prev_eps IS NOT NULL AND l.prev_eps <> 0
-                THEN ROUND(((l.curr_eps / l.prev_eps - 1) * 100)::numeric, 2)
-                ELSE fr.eps_growth
-            END
-        FROM lagged l
-        WHERE fr.id = l.id
-    """)
-    db.execute(sql)
-    db.commit()
-
-
-def calc_zscore_normalization(db, year: Optional[int] = None):
-    """
-    Zスコア正規化を年度単位で計算する。
-    year 指定時: その年度のみ再計算。
-    year 省略時: DB内の全年度を個別に計算（年度内比較が正しくなる）。
-    異なる年度（マクロ環境が異なる）を同一母集団にまとめると比較が歪むため
-    必ず年度ごとに分けて計算すること。
-    """
-    import statistics
-
-    if year is None:
-        years = [row[0] for row in db.query(FinancialRecord.year).distinct().all()]
-        for y in years:
-            _calc_zscore_for_year(db, y)
-    else:
-        _calc_zscore_for_year(db, year)
-    db.commit()
-
-
-def _calc_zscore_for_year(db, year: int):
-    """指定年度内でZスコアを計算して書き込む（commitは呼び出し元で行う）"""
-    import statistics
-    records = db.query(FinancialRecord).filter_by(year=year).all()
-    if not records:
-        return
-
-    fields = ["pl_revenue", "op_margin", "roe", "equity_ratio", "cf_ratio", "pl_eps", "de_ratio", "nc_ratio"]
-    z_cols  = ["z_revenue",  "z_op_margin", "z_roe", "z_equity_ratio", "z_cf_ratio", "z_eps", "z_de_ratio", "z_nc_ratio"]
-
-    for src, dst in zip(fields, z_cols):
-        vals = [getattr(r, src) for r in records if getattr(r, src) is not None]
-        if len(vals) < 2:
-            continue
-        mu = statistics.mean(vals)
-        sd = statistics.stdev(vals) or 1.0
-        for r in records:
-            v = getattr(r, src)
-            if v is not None:
-                setattr(r, dst, round((v - mu) / sd, 4))
+# 成長率・Zスコアの事前計算関数（calc_growth_rates / calc_zscore_normalization /
+# _calc_zscore_for_year）は廃止した。これらは financial_records の計算列へ書き戻す実装
+# だったが、派生指標は financial_metrics VIEW がソース列から都度算出する方式へ移行済み
+# （計算結果と生データのDB分離）。算出ロジックは FINANCIAL_METRICS_VIEW_SQL を参照。

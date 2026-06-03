@@ -185,9 +185,10 @@ class TestCompaniesEndpoint:
 
 
 class TestFinancialsEndpoint:
-    def test_returns_records_year_ascending(self, db, make_fin):
-        db.add(make_fin(edinet_code="E00001", year=2022, period_end="2022-03-31"))
-        db.add(make_fin(edinet_code="E00001", year=2023, period_end="2023-03-31"))
+    def test_returns_records_year_ascending(self, db, make_metric):
+        # get_financials は financial_metrics（読み取りモデル）を参照する
+        db.add(make_metric(edinet_code="E00001", year=2022, period_end="2022-03-31"))
+        db.add(make_metric(edinet_code="E00001", year=2023, period_end="2023-03-31"))
         db.commit()
         api.app.dependency_overrides[api.get_db] = lambda: db
         r = client.get("/api/financials/E00001")

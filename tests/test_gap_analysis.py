@@ -55,8 +55,8 @@ class TestExecute:
         with pytest.raises(ValueError):
             asyncio.run(plugin.execute({}, db))
 
-    def test_short_history_uses_heuristic(self, db, make_fin):
-        db.add_all([make_fin(edinet_code="E00001", gap_ratio=20.0)])
+    def test_short_history_uses_heuristic(self, db, make_metric):
+        db.add_all([make_metric(edinet_code="E00001", gap_ratio=20.0)])
         db.commit()
         res = asyncio.run(plugin.execute({}, db))
         assert res["n_heuristic_fallback"] == 1
@@ -66,10 +66,10 @@ class TestExecute:
         # half_life = max(6, min(24, |20|/2)) = 10
         assert row["half_life_months"] == 10.0
 
-    def test_long_history_uses_ar1(self, db, make_fin):
+    def test_long_history_uses_ar1(self, db, make_metric):
         gaps = [40.0, 28.0, 20.0, 14.0, 10.0, 7.0, 5.0, 4.0, 3.0, 2.0]  # 平均回帰的に減衰
         db.add_all([
-            make_fin(edinet_code="E00001", year=2014 + i,
+            make_metric(edinet_code="E00001", year=2014 + i,
                      period_end=f"{2014 + i}-03-31", gap_ratio=g)
             for i, g in enumerate(gaps)
         ])
@@ -78,10 +78,10 @@ class TestExecute:
         assert res["n_ar1_estimated"] >= 1
         assert any(r["method"] == "ar1" for r in res["results"])
 
-    def test_sort_direction(self, db, make_fin):
+    def test_sort_direction(self, db, make_metric):
         db.add_all([
-            make_fin(edinet_code="E00001", gap_ratio=5.0),
-            make_fin(edinet_code="E00002", gap_ratio=25.0),
+            make_metric(edinet_code="E00001", gap_ratio=5.0),
+            make_metric(edinet_code="E00002", gap_ratio=25.0),
         ])
         db.commit()
         asc = asyncio.run(plugin.execute({"sort": "asc"}, db))
