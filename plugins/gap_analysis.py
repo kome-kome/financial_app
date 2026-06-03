@@ -83,15 +83,17 @@ class GapAnalysisPlugin(AnalysisPlugin):
         }
 
     async def execute(self, params: dict, db: Any) -> dict:
-        from database import FinancialRecord
+        # gap_ratio / predicted_market_cap は regression_results 由来。
+        # financial_metrics VIEW が LEFT JOIN して合成するため VIEW を読む。
+        from database import FinancialMetric
 
         year = params.get("year")
         sort = params.get("sort", "asc")
 
         # 当該フィルタの最新スナップショット
-        query = db.query(FinancialRecord).filter(FinancialRecord.gap_ratio.isnot(None))
+        query = db.query(FinancialMetric).filter(FinancialMetric.gap_ratio.isnot(None))
         if year:
-            query = query.filter(FinancialRecord.year == int(year))
+            query = query.filter(FinancialMetric.year == int(year))
         records = query.all()
 
         if not records:
@@ -99,11 +101,11 @@ class GapAnalysisPlugin(AnalysisPlugin):
 
         # AR(1) 推定用に、各企業の全年度 gap_ratio 履歴を取得
         all_history = (
-            db.query(FinancialRecord.edinet_code,
-                     FinancialRecord.year,
-                     FinancialRecord.gap_ratio)
-              .filter(FinancialRecord.gap_ratio.isnot(None))
-              .order_by(FinancialRecord.edinet_code, FinancialRecord.year)
+            db.query(FinancialMetric.edinet_code,
+                     FinancialMetric.year,
+                     FinancialMetric.gap_ratio)
+              .filter(FinancialMetric.gap_ratio.isnot(None))
+              .order_by(FinancialMetric.edinet_code, FinancialMetric.year)
               .all()
         )
         history_by_co: dict[str, list[float]] = defaultdict(list)

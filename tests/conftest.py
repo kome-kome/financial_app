@@ -9,7 +9,7 @@ import os
 import sys
 
 import pytest
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -37,6 +37,14 @@ def db():
         poolclass=StaticPool,
     )
     Base.metadata.create_all(bind=engine)
+    # FinancialMetric が参照する financial_metrics VIEW。本番（Postgres）は派生値を都度算出
+    # する計算 VIEW だが、SQLite には STDDEV/WINDOW 等が無いため、テストでは
+    # financial_records をそのまま通すパススルー VIEW で代替する（派生計算式の同値性は
+    # Postgres 側で別途検証）。計算列はテストが FinancialRecord に直接セットして検証する。
+    with engine.begin() as conn:
+        conn.execute(text(
+            "CREATE VIEW IF NOT EXISTS financial_metrics AS SELECT * FROM financial_records"
+        ))
     Session = sessionmaker(bind=engine, autoflush=False, autocommit=False)
     session = Session()
     try:

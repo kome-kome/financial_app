@@ -91,8 +91,8 @@ def _clear_auth_cookies(response) -> None:
 
 from database import (
     SessionLocal, init_db,
-    Company, FinancialRecord, CollectionLog, StockPriceHistory, MacroData,
-    calc_growth_rates, calc_zscore_normalization,
+    Company, FinancialRecord, FinancialMetric, RegressionResult,
+    CollectionLog, StockPriceHistory, MacroData,
 )
 from collector import run_full_collection, refresh_company, update_market_data, collect_stock_price_history, collect_stock_price_history_jquants, update_industry_from_jpx, collect_macro_data, MACRO_SERIES, reparse_from_raw
 import plugins as plugin_registry
@@ -322,9 +322,7 @@ async def _run_collection_bg(years: int, max_co: Optional[int], log_id: int, ski
     try:
         cancelled = await run_full_collection(years, max_co, on_progress=on_progress,
                                               skip_existing=skip_existing, cancel_check=cancel_check)
-        if not cancelled:
-            calc_growth_rates(db)
-            calc_zscore_normalization(db)
+        # 成長率・Zスコアは financial_metrics VIEW が都度算出するため収集後の事前計算は不要。
         log_obj = db.get(CollectionLog, log_id)
         if log_obj:
             log_obj.status = "done"
@@ -401,9 +399,7 @@ async def _run_smart_collection_bg(log_id: int, years: int):
                 skip_existing=True, cancel_check=cancel_check
             )
 
-        if not cancelled:
-            calc_growth_rates(db)
-            calc_zscore_normalization(db)
+        # 成長率・Zスコアは financial_metrics VIEW が都度算出するため事前計算は不要。
 
         log_obj = db.get(CollectionLog, log_id)
         if log_obj:
@@ -982,11 +978,11 @@ async def get_stats(db: Session = Depends(get_db)):
     n_companies   = db.query(Company).count()
     n_records     = db.query(FinancialRecord).count()
     n_stock_price = db.query(func.count(StockPriceHistory.edinet_code)).scalar() or 0
-    # 業種別OLS実行済み判定用: 予測値（gap_ratio）が書き込まれたレコード数。
+    # 業種別OLS実行済み判定用: regression_results に書き込まれた予測値の件数。
     # 乖離分析は gap_ratio が必須のため、0 件なら未実行（UIで乖離分析タブをロック）。
     n_predicted = (
-        db.query(func.count(FinancialRecord.id))
-        .filter(FinancialRecord.gap_ratio.isnot(None))
+        db.query(func.count(RegressionResult.edinet_code))
+        .filter(RegressionResult.gap_ratio.isnot(None))
         .scalar()
     ) or 0
 
@@ -1069,10 +1065,11 @@ async def list_companies(
             .group_by(FinancialRecord.edinet_code)
             .subquery()
         )
+        # 派生指標・予測値を含むため financial_metrics VIEW から最新行を取得する。
         latest_recs = (
-            db.query(FinancialRecord)
-            .join(subq, (FinancialRecord.edinet_code == subq.c.edinet_code) &
-                        (FinancialRecord.year == subq.c.max_year))
+            db.query(FinancialMetric)
+            .join(subq, (FinancialMetric.edinet_code == subq.c.edinet_code) &
+                        (FinancialMetric.year == subq.c.max_year))
             .all()
         )
         latest_map = {r.edinet_code: _record_to_dict(r) for r in latest_recs}
@@ -1087,16 +1084,17 @@ async def list_companies(
 async def get_financials(edinet_code: str, db: Session = Depends(get_db)):
     if not _EDINET_CODE_RE.match(edinet_code):
         raise HTTPException(400, "edinet_code の形式が不正です（例: E02167）")
-    records = (db.query(FinancialRecord)
+    # 派生指標・Zスコア・成長率・予測値は financial_metrics VIEW で都度算出される。
+    records = (db.query(FinancialMetric)
                .filter_by(edinet_code=edinet_code)
-               .order_by(FinancialRecord.year)
+               .order_by(FinancialMetric.year)
                .all())
     if not records:
         raise HTTPException(404, "データが見つかりません")
     return {"edinet_code": edinet_code, "records": [_record_to_dict(r) for r in records]}
 
 
-def _record_to_dict(r: FinancialRecord) -> dict:
+def _record_to_dict(r) -> dict:
     return {
         "edinet_code":  r.edinet_code,
         "sec_code":     r.sec_code,
@@ -1193,43 +1191,44 @@ class ScreenRequest(BaseModel):
 @app.post("/api/screen")
 @limiter.limit(RATELIMIT_ANALYSIS)
 async def screening(request: Request, req: ScreenRequest, db: Session = Depends(get_db)):
-    # 最新年度のレコードのみ対象
+    # 最新年度のレコードのみ対象。派生指標フィルタは financial_metrics VIEW を対象にする
+    # （op_margin / roe / rev_growth 等は VIEW が都度算出。本体には保存しない）。
     subq = (db.query(FinancialRecord.edinet_code,
                      func.max(FinancialRecord.year).label("max_year"))
               .group_by(FinancialRecord.edinet_code)
               .subquery())
-    query = (db.query(FinancialRecord)
-               .join(subq, (FinancialRecord.edinet_code == subq.c.edinet_code) &
-                           (FinancialRecord.year == subq.c.max_year)))
+    query = (db.query(FinancialMetric)
+               .join(subq, (FinancialMetric.edinet_code == subq.c.edinet_code) &
+                           (FinancialMetric.year == subq.c.max_year)))
 
     if req.year:
-        query = query.filter(FinancialRecord.year == req.year)
+        query = query.filter(FinancialMetric.year == req.year)
     if req.industry:
-        query = query.filter(FinancialRecord.industry == req.industry)
+        query = query.filter(FinancialMetric.industry == req.industry)
     if req.market:
-        query = query.filter(FinancialRecord.market == req.market)
+        query = query.filter(FinancialMetric.market == req.market)
     if req.min_rev_growth is not None:
-        query = query.filter(FinancialRecord.rev_growth >= req.min_rev_growth)
+        query = query.filter(FinancialMetric.rev_growth >= req.min_rev_growth)
     if req.min_op_margin is not None:
-        query = query.filter(FinancialRecord.op_margin >= req.min_op_margin)
+        query = query.filter(FinancialMetric.op_margin >= req.min_op_margin)
     if req.min_net_margin is not None:
-        query = query.filter(FinancialRecord.net_margin >= req.min_net_margin)
+        query = query.filter(FinancialMetric.net_margin >= req.min_net_margin)
     if req.min_roe is not None:
-        query = query.filter(FinancialRecord.roe >= req.min_roe)
+        query = query.filter(FinancialMetric.roe >= req.min_roe)
     if req.min_roa is not None:
-        query = query.filter(FinancialRecord.roa >= req.min_roa)
+        query = query.filter(FinancialMetric.roa >= req.min_roa)
     if req.min_equity_ratio is not None:
-        query = query.filter(FinancialRecord.equity_ratio >= req.min_equity_ratio)
+        query = query.filter(FinancialMetric.equity_ratio >= req.min_equity_ratio)
     if req.max_de_ratio is not None:
-        query = query.filter(FinancialRecord.de_ratio <= req.max_de_ratio)
+        query = query.filter(FinancialMetric.de_ratio <= req.max_de_ratio)
     if req.max_per is not None:
-        query = query.filter(FinancialRecord.per <= req.max_per)
+        query = query.filter(FinancialMetric.per <= req.max_per)
     if req.max_pbr is not None:
-        query = query.filter(FinancialRecord.pbr <= req.max_pbr)
+        query = query.filter(FinancialMetric.pbr <= req.max_pbr)
     if req.min_div_yield is not None:
-        query = query.filter(FinancialRecord.div_yield >= req.min_div_yield)
+        query = query.filter(FinancialMetric.div_yield >= req.min_div_yield)
     if req.min_cf_ratio is not None:
-        query = query.filter(FinancialRecord.cf_ratio >= req.min_cf_ratio)
+        query = query.filter(FinancialMetric.cf_ratio >= req.min_cf_ratio)
 
     rows = query.limit(req.limit).all()
     return {"count": len(rows), "results": [_record_to_dict(r) for r in rows]}
@@ -1249,6 +1248,11 @@ async def run_plugin(request: Request, plugin_name: str, params: dict, db: Sessi
     p = plugin_registry.get_plugin(plugin_name)
     if p is None:
         raise HTTPException(404, f"プラグイン '{plugin_name}' が見つかりません")
+    # 重い回帰計算は Render Free では OOM するためローカル実行に限定。
+    # 結果は regression_results（共有DB）に保存され、Render は読み取りのみで反映される。
+    if RENDER_LIGHT_MODE and getattr(p, "heavy", False):
+        raise HTTPException(403, f"「{p.label}」は計算が重いためローカル環境で実行してください"
+                                 "（Render Free プラン制限。結果は共有DBに保存され本番に反映されます）")
     try:
         return await p.execute(params, db)
     except ValueError as e:
@@ -1835,7 +1839,8 @@ async def db_export_table(
 
 @app.get("/api/export/csv")
 async def export_csv(year: Optional[int] = None, db: Session = Depends(get_db)):
-    query = db.query(FinancialRecord)
+    # 派生指標・予測値を含むため financial_metrics VIEW から出力する。
+    query = db.query(FinancialMetric)
     if year:
         query = query.filter_by(year=year)
     records = query.limit(10000).all()

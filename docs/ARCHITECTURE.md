@@ -43,25 +43,29 @@ graph LR
         DB["🗃️ DB ビューア\ndb.html\nスキーマ/プレビュー/統計/リレーション/ドリルダウン"]
     end
 
-    subgraph LOCAL["💻 ローカル PC（制限なし）"]
+    subgraph LOCAL["💻 ローカル PC（制限なし・重い計算担当）"]
         direction TB
-        API_L["⚡ api.py\n全操作可能\n・全件収集\n・株価履歴再構築\n・J-Quants大量収集\n・分析・スクリーニング"]
+        API_L["⚡ api.py\n全操作可能\n・全件収集\n・株価履歴再構築\n・J-Quants大量収集\n・重いOLS回帰（結果を共有DBへ保存）\n・分析・スクリーニング"]
         COL_L["🔄 collector.py\n・EDINET全社XBRL収集\n・stooq株価取得\n・JPX業種補完"]
     end
 
-    subgraph RENDER["☁️ Render（軽量モード RENDER_LIGHT_MODE=true）"]
+    subgraph RENDER["☁️ Render（軽量モード RENDER_LIGHT_MODE=true・読み取り担当）"]
         direction TB
-        API_R["⚡ api.py\n・差分収集のみ許可\n・全件収集はブロック（403）\n・株価履歴・J-Quantsはブロック（403）\n・スクリーニング・分析は通常通り\n・自動収集なし（手動のみ）"]
+        API_R["⚡ api.py\n・差分収集のみ許可\n・全件収集はブロック（403）\n・株価履歴・J-Quantsはブロック（403）\n・重いプラグイン(heavy)はブロック（403）\n・VIEW読取・乖離/推薦/スクリーニングは通常通り\n・自動収集なし（手動のみ）"]
         COL_R["🔄 collector.py\n差分収集・市場データ更新"]
     end
 
     subgraph SUPABASE["🗄️ Supabase PostgreSQL（共有DB）"]
         direction TB
         CO[("companies\n企業マスタ\n約4,000社")]
-        FR[("financial_records\n財務データ\nBS / PL / CF")]
+        FR[("financial_records\nソースのみ\nBS / PL / CF + 市場スナップ")]
+        FM["financial_metrics（VIEW）\n派生指標を都度SQL算出\n＋regression_results をJOIN"]
+        RR[("regression_results\nOLS予測値\npredicted/gap（重い派生）")]
         SPH[("stock_price_history\n日次株価履歴\nOHLCV")]
         MD[("macro_data\n為替・金利・指数")]
         CL[("collection_logs\n収集ジョブログ")]
+        FR --> FM
+        RR --> FM
     end
 
     subgraph EXT["🌍 外部サービス"]
@@ -148,9 +152,17 @@ graph TD
 
 ## 3. データベース設計（ER図）
 
-> 5つのテーブルの構造と主要カラム、テーブル間の関係を示します。
+> テーブルの構造と主要カラム、テーブル間の関係を示します。
 > `||--o{` は「1対多」（1社に対して複数の財務レコードが存在する）を意味します。
 > `macro_data` は企業に紐づかない独立テーブル（マクロ環境データ）です。
+>
+> **計算結果と生データのDB分離（重要）**:
+> - `financial_records` は **ソース（XBRL再分類＋市場スナップショット）のみ**を保持する。
+> - 軽い派生指標（営業利益率・ROE・自己資本比率・D/E・CF比率・ネットキャッシュ・各Zスコア・成長率）は
+>   **`financial_metrics` VIEW がソース列から都度SQL算出**する（DBに永続化しない＝関数型）。
+> - 重い派生（OLS予測値 `predicted_market_cap` / `gap_ratio`）は **`regression_results` テーブル**に隔離保存する。
+> - アプリの読み取りは ORM `FinancialMetric`（VIEW）経由で、ソース＋派生＋予測値をまとめて取得する。
+>   VIEW の計算は Supabase 側で走るため Render の CPU を消費しない。
 
 ```mermaid
 erDiagram
@@ -198,24 +210,23 @@ erDiagram
         float   bs_investment_securities "投資有価証券（円・清原式NC用）"
         float   cf_operating_cf        "営業キャッシュフロー（円）"
         float   cf_free_cf             "フリーCF=営業CF+投資CF（円）"
-        float   op_margin              "営業利益率（%）"
-        float   roe                    "ROE 自己資本利益率（%）"
-        float   equity_ratio           "自己資本比率（%）"
-        float   de_ratio               "D/Eレシオ"
-        float   net_cash               "ネットキャッシュ（円・清原式）"
-        float   nc_ratio               "ネットキャッシュ比率=net_cash/時価総額"
-        float   rev_growth             "売上高成長率（%）"
-        float   z_roe                  "ROEのZスコア（年度内正規化）"
-        float   z_op_margin            "営業利益率のZスコア"
-        float   z_nc_ratio             "NC比率のZスコア（年度内正規化）"
-        float   stock_price            "株価（収集時点）"
-        float   market_cap             "時価総額（百万円）※単位注意"
-        float   per                    "PER 株価収益率"
-        float   pbr                    "PBR 株価純資産倍率"
-        float   predicted_market_cap   "OLS予測時価総額（百万円）"
-        float   gap_ratio              "乖離率（%）=(実際-予測)/予測"
+        float   stock_price            "株価（収集時点スナップショット）"
+        float   market_cap             "時価総額（百万円・収集時点）※単位注意"
+        float   per                    "PER（収集時点スナップショット）"
+        float   pbr                    "PBR（収集時点スナップショット）"
         datetime created_at            "登録日時"
         datetime updated_at            "更新日時"
+    }
+
+    regression_results {
+        string  edinet_code         PK "企業（複合PK）"
+        int     year                PK "決算年度（複合PK）"
+        string  period_end          PK "決算期末日（複合PK・空文字許容）"
+        float   predicted_market_cap   "OLS予測時価総額（百万円）"
+        float   gap_ratio              "乖離率（%）=(予測-実際)/実際"
+        string  model                  "ols / ridge"
+        string  sector                 "学習に使った業種"
+        datetime computed_at           "計算日時"
     }
 
     stock_price_history {
@@ -271,7 +282,14 @@ erDiagram
     companies         ||--o{  financial_records    : "1社 → 複数年度の財務データ"
     companies         ||--o{  stock_price_history  : "1社 → 複数日分の株価履歴"
     xbrl_raw_documents }o--|| financial_records   : "doc_id で紐付け（再解析用）"
+    financial_records ||--o| regression_results  : "(edinet_code,year,period_end) で1対0..1"
 ```
+
+> **`financial_metrics`（VIEW・物理テーブルではない）**: `financial_records` をソースに、
+> `op_margin` / `net_margin` / `roe` / `roa` / `equity_ratio` / `de_ratio` / `cf_ratio` /
+> `net_cash` / `nc_ratio` / `z_*`（8指標）/ `rev_growth` / `op_growth` / `eps_growth` を
+> SQL で都度算出し、`regression_results` を LEFT JOIN して `predicted_market_cap` / `gap_ratio` も合成する。
+> 算出式は旧 `collector.calc_derived` / `_calc_zscore_for_year` / `calc_growth_rates` と一致（移植）。
 
 ---
 
@@ -306,8 +324,8 @@ sequenceDiagram
     loop 対象書類（数千件）を1件ずつ
         BGT  ->> EDI : XBRL取得 GET /documents/{doc_id}?type=5
         EDI -->> BGT : ZIPファイル（XBRL CSV含む）
-        BGT  ->> BGT : ZIP解凍 → XBRLをパース<br/>BS/PL/CF に分類<br/>ROE・営業利益率など派生指標を計算
-        BGT  ->> DB  : financial_records へ upsert
+        BGT  ->> BGT : ZIP解凍 → XBRLをパース<br/>BS/PL/CF に分類（ソースのみ）<br/>※派生指標は永続化しない（VIEW が都度算出）
+        BGT  ->> DB  : financial_records へ upsert（ソース列のみ）
         BGT -->> API : on_progress → "[X/Y] 企業名(コード) 決算期末"
         API -->> UI  : SSEイベント
     end
@@ -317,9 +335,7 @@ sequenceDiagram
     JPX -->> BGT : 証券コード→業種名の対応表
     BGT  ->> DB  : companies・financial_records の industry を更新
 
-    Note over BGT,DB: フェーズ④: 後処理（収集完了後に自動実行）
-    BGT  ->> DB  : 前期比成長率を全レコード再計算（calc_growth_rates）
-    BGT  ->> DB  : Zスコア正規化を年度別に再計算（calc_zscore_normalization）
+    Note over BGT,DB: フェーズ④: 後処理は不要<br/>成長率・Zスコアは financial_metrics VIEW が読み取り時に都度算出（事前計算を廃止）
 
     BGT -->> API : 完了通知
     API -->> UI  : SSEイベント（running=false）
@@ -438,17 +454,19 @@ sequenceDiagram
         PLG  ->> PLG : winsorize() で外れ値を p1-p99 にクリッピング
         PLG  ->> PLG : normalize() で特徴量を z-score 正規化（業種内）
         PLG  ->> PLG : ols() / ridge_regression() で β を推定
-        PLG  ->> DB  : predicted_market_cap（円/株 → 百万円換算）/ gap_ratio を書き戻し
+        PLG  ->> DB  : predicted_market_cap（円/株 → 百万円換算）/ gap_ratio を<br/>regression_results へ upsert（merge・財務本体と分離）
     end
 
     PLG -->> API : { sector_stats, results }
     API -->> UI  : 業種別 R²・予測値一覧
 
+    Note over User,DB: ※ 重い回帰は Render 軽量モードでは 403（ローカルで実行→結果が共有DBに保存され本番に反映）
+
     Note over User,DB: ② 乖離分析の実行（業種別OLS完了後に利用可能）
     User ->> UI  : 「乖離分析」タブを選択
     UI   ->> API : GET /api/gap-analysis?sort=asc
     API  ->> GAP : plugin.execute(params, db)
-    GAP  ->> DB  : SELECT WHERE gap_ratio IS NOT NULL
+    GAP  ->> DB  : SELECT financial_metrics WHERE gap_ratio IS NOT NULL<br/>（VIEW が regression_results をJOIN）
     DB  -->> GAP : 予測値付きレコード
     GAP -->> API : { results: [{company, gap_ratio, market_cap, predicted, ...}] }
     API -->> UI  : ランキングデータ
@@ -471,8 +489,8 @@ sequenceDiagram
     User ->> UI  : 条件を入力（PER≤20, ROE≥10%, 自己資本比率≥40% など）
     UI   ->> API : POST /api/screen { max_per:20, min_roe:10, min_equity_ratio:40, ... }
 
-    Note over API,DB: 各企業の「最新年度」レコードのみを対象にサブクエリで絞り込む
-    API  ->> DB  : SELECT fr.* FROM financial_records fr<br/>JOIN (SELECT edinet_code, MAX(year)) subq<br/>WHERE [各条件フィルタ]<br/>LIMIT 200
+    Note over API,DB: 各企業の「最新年度」レコードのみを対象にサブクエリで絞り込む<br/>派生指標フィルタ（ROE・営業利益率等）は financial_metrics VIEW を対象にする
+    API  ->> DB  : SELECT m.* FROM financial_metrics m<br/>JOIN (SELECT edinet_code, MAX(year) FROM financial_records) subq<br/>WHERE [各条件フィルタ]<br/>LIMIT 200
     DB  -->> API : 条件に合致したレコード一覧
 
     API -->> UI  : { count: N, results: [...] }
@@ -490,16 +508,19 @@ sequenceDiagram
 
 ---
 
-## 4-6. Zスコア正規化フロー
+## 4-6. Zスコア正規化（financial_metrics VIEW で都度算出）
 
-> 年度ごとに業界内での相対位置（偏差値に近い概念）を計算するフローです。収集完了後・または手動実行時に自動呼び出し。
+> 年度ごとに業界内での相対位置（偏差値に近い概念）を計算する。**事前計算・永続化は廃止**し、
+> `financial_metrics` VIEW が読み取り時に SQL の window function で都度算出する（関数型）。
 
-**処理手順**:
-1. `SELECT DISTINCT year FROM financial_records` で年度一覧を取得
-2. 年度ごとに個別処理（**年度をまたいで混ぜない**こと）:
-   - `SELECT * FROM financial_records WHERE year = {year}` で該当年度の全レコード取得
-   - 対象指標（`pl_revenue`, `op_margin`, `roe`, `equity_ratio`, `cf_ratio`, `pl_eps`, `de_ratio`）ごとに μ/σ を計算し Z = (値 − μ) / σ を算出
-   - `UPDATE financial_records SET z_{field} = Z WHERE year={year}` で書き戻し
+**VIEW 内の算出ロジック**（旧 `_calc_zscore_for_year` と同一・年度をまたがない）:
+- 対象指標（`pl_revenue`, `op_margin`, `roe`, `equity_ratio`, `cf_ratio`, `pl_eps`, `de_ratio`, `nc_ratio`）ごとに
+  `Z = (値 − AVG(値) OVER (PARTITION BY year)) / COALESCE(NULLIF(STDDEV_SAMP(値) OVER (PARTITION BY year), 0), 1.0)`
+- 年度内の非NULL件数が 2 未満なら NULL（`COUNT(値) OVER (PARTITION BY year) >= 2` ガード）
+- 標本標準偏差・`sd=0→1.0` フォールバック・丸め桁（z は 4 桁）まで旧実装に一致させてある。
+
+> 旧 `calc_zscore_normalization` / `calc_growth_rates` 関数は残置（非推奨・収集後の呼び出しは廃止）。
+> 派生比率・成長率も同様に VIEW が算出する（成長率は `LAG() OVER (PARTITION BY edinet_code ORDER BY year, period_end)`）。
 
 ---
 
@@ -623,27 +644,23 @@ flowchart TD
 
     C["📦 データ分類\n─────────────────\nBS: 総資産・純資産・現金など\nPL: 売上高・営業利益・純利益・EPSなど\nCF: 営業CF・投資CF・財務CFなど"]
 
-    D["🧮 派生指標計算\ncalc_derived()\n─────────────────\nROE = 純利益 ÷ 純資産\n営業利益率 = 営業利益 ÷ 売上高\n自己資本比率 = 純資産 ÷ 総資産\nD/Eレシオ = 負債 ÷ 純資産\nフリーCF = 営業CF + 投資CF"]
+    E["🗄️ DB保存（ソースのみ）\nupsert_financial()\n─────────────────\n(edinet_code, year, period_end)\nで重複チェック → 存在すれば更新\n※派生指標は保存しない（derived 取り込み廃止）"]
 
-    E["🗄️ DB保存\nupsert_financial()\n─────────────────\n(edinet_code, year, period_end)\nで重複チェック → 存在すれば更新"]
+    F["📈 株価取得\nstooq / J-Quants\n─────────────────\nstock_price/market_cap/per/pbr を\n収集時点スナップショットとして保存"]
 
-    F["📈 株価取得\nstooq API\n─────────────────\n株価 → PER = 株価÷EPS\n株価 → PBR = 株価÷BPS\n時価総額 = 株価×（純資産÷BPS）"]
+    D["🧮 派生指標（永続化しない）\nfinancial_metrics VIEW\n─────────────────\nROE・営業利益率・自己資本比率・D/E・CF比率\nネットキャッシュ・各Zスコア・前期比成長率を\nソース列から都度SQL算出（関数型）"]
 
-    G["📐 前期比成長率\ncalc_growth_rates()\n─────────────────\nPostgreSQL の LAG() window function で\nedinet_code 単位の前期値と比較\n（DB 側で完結、大規模データでも OOM 回避）\n売上成長率・営業利益成長率・EPS成長率"]
+    I["🧩 業種別OLS分析（重い・ローカル実行）\nplugins/sector_ols.py\n─────────────────\n業種ごとに個別OLS／winsorize/z-score前処理\n→ predicted/gap を regression_results へ保存\n（Render軽量モードでは403）"]
 
-    H["📊 Zスコア正規化\ncalc_zscore_normalization()\n─────────────────\n年度ごとに計算（年度混在禁止）\nZ = (値 - 年度内平均) ÷ 年度内標準偏差\nROE・営業利益率・自己資本比率など7指標"]
-
-    I["🧩 業種別OLS分析\nplugins/sector_ols.py\n─────────────────\n業種ごとに個別OLSを実行\nwinsorize で外れ値除去（p1-p99）\nnormalize で z-score 正規化（業種内）\n→ 理論時価総額をDBに書込み"]
-
-    J["🎯 乖離率計算\nplugins/gap_analysis.py\n─────────────────\ngap_ratio = (実際 - 予測) ÷ 予測 × 100\nマイナス → 予測より安い（割安候補）\nプラス  → 予測より高い（割高候補）"]
+    J["🎯 乖離率計算\nplugins/gap_analysis.py\n─────────────────\nfinancial_metrics VIEW（regression_results JOIN）から\ngap_ratio を読み取りランキング・AR(1)半減期推定"]
 
     K["🏆 割安銘柄ランキング\nanalysis.html\n─────────────────\n乖離率の小さい順に表示\n収束スコア・半減期は参考値として表示"]
 
-    A --> B --> C --> D --> E --> F --> G --> H --> I --> J --> K
+    A --> B --> C --> E --> F --> D --> I --> J --> K
 
     style A  fill:#1e3a5f,color:#93c5fd
     style E  fill:#052e16,color:#86efac
-    style H  fill:#1c1400,color:#fcd34d
+    style D  fill:#1c1400,color:#fcd34d
     style K  fill:#2e1065,color:#c4b5fd
 ```
 
@@ -661,6 +678,7 @@ classDiagram
         +str label
         +str description
         +list depends_on
+        +bool heavy
         +params_schema() dict
         +execute(params, db) dict
         +to_meta() dict
@@ -694,8 +712,9 @@ classDiagram
         +name = "sector_ols"
         +label = "業種別OLS分析"
         +depends_on = []
+        +heavy = True
         +params_schema() 業種選択・説明変数
-        +execute() 業種内OLS→予測値計算
+        +execute() 業種内OLS→regression_results へ保存
     }
 
     class PricePredictorPlugin {
@@ -742,7 +761,8 @@ classDiagram
     SectorOLSPlugin      --> Utils : ols() / winsorize() / normalize() を使用
     PricePredictorPlugin --> Utils : ols() / winsorize() / walk_forward_cv_monthly() を使用
 
-    note for GapAnalysisPlugin "業種別OLS分析の実行後でないと\npredicted_market_capが空のため404になる"
+    note for SectorOLSPlugin "heavy=True: Render 軽量モードでは\nrun_plugin が 403 を返しローカル実行を促す\n（結果は regression_results に保存され本番へ反映）"
+    note for GapAnalysisPlugin "業種別OLSの実行後でないと\nregression_results が空のため結果が出ない\n（financial_metrics VIEW 経由で gap_ratio を読む）"
     note for PricePredictorPlugin "StockPriceHistory + FinancialRecord を結合\n月次スナップショット × 全企業でパネルデータ構築\nルックアヘッドバイアス禁止: period_end + 45日ラグ厳守"
     note for NetCashAnalysisPlugin "清原達郎『わが投資術』式\nNC = 流動資産 + 投資有価証券×0.7 − 総負債\nOLS不使用・会計値からの直接計算"
     note for Utils "numpy / scipy は使用しない\n（純Python実装のみ）\nwalk_forward_cv_monthly() を含む"
@@ -830,8 +850,8 @@ graph LR
     end
 
     subgraph ANALYSIS["📊 分析 /api/"]
-        AN1["GET /api/plugins\n利用可能なプラグイン一覧"]
-        AN2["POST /api/plugins/{name}/run\nプラグインを実行"]
+        AN1["GET /api/plugins\n利用可能なプラグイン一覧（heavy フラグ含む）"]
+        AN2["POST /api/plugins/{name}/run\nプラグインを実行\n（heavy かつ RENDER_LIGHT_MODE は 403）"]
         AN4["GET /api/gap-analysis\n乖離分析（旧互換エンドポイント）"]
         AN5["POST /api/screen\nスクリーニング（条件絞り込み）"]
         AN6["GET /api/recommend/presets\n推薦プリセット一覧"]
@@ -914,19 +934,19 @@ graph TB
 | ファイル | 種別 | 役割 | 主な依存先 |
 |---|---|---|---|
 | `api.py` | バックエンド | REST API窓口・認証・SSE・手動収集トリガー（自動収集は GitHub Actions が担当） | database.py, collector.py, plugins/ |
-| `database.py` | バックエンド | DBテーブル定義・upsert・成長率/Zスコア計算。6テーブル（Company / FinancialRecord / StockPriceHistory / MacroData / CollectionLog / XbrlRawDocument）。`pack_elements`/`unpack_elements`/`upsert_xbrl_raw` ヘルパを含む | PostgreSQL |
-| `collector.py` | バックエンド | EDINET/J-Quants/JPX/マクロデータからデータ収集→DB保存。株価は J-Quants が主経路（stooq は Azure IP ブロックのためローカル補助のみ）。`MACRO_SERIES` で為替・金利・指数・コモディティ9系列を定義 | EDINET API, J-Quants, JPX |
+| `database.py` | バックエンド | DBテーブル定義・upsert。7テーブル（Company / FinancialRecord / StockPriceHistory / MacroData / CollectionLog / XbrlRawDocument / **RegressionResult**）＋ **`financial_metrics` VIEW**（派生指標を都度SQL算出・読み取り専用 ORM `FinancialMetric`）。`upsert_financial` は **ソース列のみ**保存（derived 取り込み廃止）。`upsert_regression_result`（merge・方言非依存）。`calc_growth_rates`/`calc_zscore_normalization` は非推奨残置（VIEW に移行）。`pack_elements`/`unpack_elements`/`upsert_xbrl_raw` ヘルパを含む | PostgreSQL |
+| `collector.py` | バックエンド | EDINET/J-Quants/JPX/マクロデータからデータ収集→DB保存。**派生指標・Zスコア・成長率・nc_ratio は永続化しない**（financial_metrics VIEW が担う）。`calc_derived` は free_cf/nonoperating_income の算出のみ残す。株価は J-Quants が主経路（stooq は Azure IP ブロックのためローカル補助のみ）。`MACRO_SERIES` で為替・金利・指数・コモディティ9系列を定義 | EDINET API, J-Quants, JPX |
 | `checker.py` | バックエンド | データ品質チェック（NULL率・外れ値・収録状況） | database.py |
 | `plugins/base.py` | バックエンド | 分析プラグインの抽象基底クラス | — |
 | `plugins/__init__.py` | バックエンド | プラグインを自動スキャン・レジストリ管理 | plugins/*.py |
-| `plugins/gap_analysis.py` | バックエンド | 乖離分析（割安・割高ランキング） | plugins/utils.py |
+| `plugins/gap_analysis.py` | バックエンド | 乖離分析（割安・割高ランキング）。gap_ratio は financial_metrics VIEW（regression_results をJOIN）から読む | plugins/utils.py |
 | `plugins/recommend.py` | バックエンド | 複合スコアによる銘柄推薦 | plugins/utils.py |
 | `plugins/total_return.py` | バックエンド | 配当込みトータルリターン分析 | plugins/utils.py |
-| `plugins/sector_ols.py` | バックエンド | 業種別OLS回帰分析（次元整合・winsorize+z-score前処理） | plugins/utils.py |
+| `plugins/sector_ols.py` | バックエンド | 業種別OLS回帰分析（次元整合・winsorize+z-score前処理）。`heavy=True`（Render 軽量モードで 403）。予測値は regression_results へ保存 | plugins/utils.py |
 | `plugins/price_predictor.py` | バックエンド | 株価リターン予測（価格×財務特徴量OLS・月次WFV） | plugins/utils.py |
 | `plugins/net_cash_analysis.py` | バックエンド | ネットキャッシュ分析（清原達郎『わが投資術』式）＋グレアムNCAV。NC = 流動資産 + 投資有価証券×0.7 − 総負債、NCAV = 流動資産 − 総負債。推計時価総額の崩れによる異常比率はサニティ上限で自動除外し、任意で営業CF>0等のバリュートラップ除外も可能 | database.py |
 | `plugins/utils.py` | バックエンド | ols()・normalize()・winsorize()・walk_forward_cv()・walk_forward_cv_monthly() | — |
-| `tests/` | テスト | pytest 回帰テスト（188件）。プラグイン7個＋utils＋`database.py`（upsert・年度別Zスコア）＋`collector.py`（XBRLパース・派生指標＋ネットワーク取得を httpx MockTransport でモック）＋`api.py`（純関数・`/health`・DB-backed 読取エンドポイント）をカバー。in-memory SQLite fixture（StaticPool）／FastAPI TestClient／httpx MockTransport で検証。共通 fixture は `tests/conftest.py`（`db`/`make_fin` 等） | pytest, sqlalchemy, fastapi, httpx |
+| `tests/` | テスト | pytest 回帰テスト（243件）。プラグイン＋utils＋`database.py`（upsert・年度別Zスコア・RegressionResult merge・derived非永続）＋`collector.py`（XBRLパース・派生指標＋ネットワーク取得を httpx MockTransport でモック）＋`api.py`（純関数・`/health`・DB-backed 読取・heavy回帰のRenderブロック）をカバー。in-memory SQLite fixture（StaticPool）／FastAPI TestClient／httpx MockTransport で検証。`financial_metrics` VIEW は SQLite ではパススルー VIEW で代替（計算式の同値性は Postgres で別途検証）。共通 fixture は `tests/conftest.py`（`db`/`make_fin` 等） | pytest, sqlalchemy, fastapi, httpx |
 | `requirements-dev.txt` | 設定 | 開発・テスト専用依存（`pytest`）。本番 `requirements.txt` と分離（Render メモリ節約） | — |
 | `dashboard.html` | フロントエンド | トップページ・全体サマリー（`/`） | api.py |
 | `collection.html` | フロントエンド | 収集管理・スクリーニング・DBブラウザ（`/collection`） | api.py |

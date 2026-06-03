@@ -73,6 +73,16 @@ const PLUGIN_TAB_MAP = {
 };
 let _allTabs   = ['backtest'];
 let _pluginMeta = {};
+// Render 軽量モード（true なら重い回帰はローカル実行に限定。UIで無効化＋案内）
+let _renderLightMode = false;
+
+async function initLightMode(){
+  try {
+    const r = await fetch('/api/system/info');
+    const d = await r.json();
+    _renderLightMode = !!d.render_light_mode;
+  } catch(e){ /* 取得失敗は通常モード扱い */ }
+}
 
 
 function apiBase() { return document.getElementById('api-base').value.trim().replace(/\/$/,''); }
@@ -878,6 +888,8 @@ async function initPlugins() {
 }
 
 function _createDynamicTab(plugin, tabId) {
+  // 重い回帰は Render 軽量モードでは実行不可（ローカルで実行→共有DBに保存→本番反映）
+  const blocked = plugin.heavy && _renderLightMode;
   const div = document.createElement('div');
   div.id = 'tab-' + tabId;
   div.className = 'hidden';
@@ -886,8 +898,9 @@ function _createDynamicTab(plugin, tabId) {
       <div class="section-title">${esc(plugin.label)}</div>
       ${plugin.description ? `<div class="info-box" style="margin-bottom:14px">${esc(plugin.description)}</div>` : ''}
       ${plugin.depends_on.length ? `<div class="info-box" style="border-color:#f59e0b;margin-bottom:14px">⚠ 事前実行が必要: ${esc(plugin.depends_on.join('、'))}</div>` : ''}
+      ${blocked ? `<div class="info-box" style="border-color:#ef4444;margin-bottom:14px">⚠ この分析は計算が重いため、Render 環境では実行できません。ローカルPCで実行すると結果が共有DBに保存され、本番にも反映されます。</div>` : ''}
       <div id="form-${esc(tabId)}">${_renderParamsForm(plugin.params_schema, tabId)}</div>
-      <button class="btn btn-primary" style="margin-top:16px" data-click="runDynamicPlugin" data-arg="${esc(plugin.name)}" data-arg2="${esc(tabId)}">
+      <button class="btn btn-primary" style="margin-top:16px${blocked ? ';opacity:0.4' : ''}" data-click="runDynamicPlugin" data-arg="${esc(plugin.name)}" data-arg2="${esc(tabId)}"${blocked ? ' disabled title="Render環境ではローカルPCから実行してください"' : ''}>
         ${esc(plugin.label)}を実行
       </button>
     </div>
@@ -933,6 +946,10 @@ function _renderParamsForm(schema, tabId) {
 async function runDynamicPlugin(pluginName, tabId) {
   const plugin = _pluginMeta[pluginName];
   if (!plugin) return;
+  if (plugin.heavy && _renderLightMode) {
+    showNotif(`「${plugin.label}」は計算が重いためローカルPCで実行してください（Render環境では無効）`);
+    return;
+  }
   const params = {};
   for (const [key, field] of Object.entries(plugin.params_schema)) {
     const el = document.getElementById(`param-${tabId}-${key}`);
@@ -1006,7 +1023,8 @@ function dl(content, name) {
 // 初期化
 initAuth();
 initRecommend();  // おすすめ銘柄タブのプリセット取得（既存タブ用）
-initPlugins();    // プラグイン一覧取得 → nav生成・動的タブ追加・最初のタブ表示
+// 軽量モード判定を先に解決してから動的タブを生成（重い回帰の無効化に必要）
+initLightMode().then(() => initPlugins());
 preflight();
 
 // data 属性ハンドラ用ヘルパ（this=対象要素）

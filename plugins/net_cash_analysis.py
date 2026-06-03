@@ -200,7 +200,9 @@ class NetCashAnalysisPlugin(AnalysisPlugin):
         }
 
     async def execute(self, params: dict, db: Any) -> dict:
-        from database import FinancialRecord
+        # net_cash / nc_ratio は本プラグインが自前計算（関数型）。roe のみ派生のため
+        # 表示用に financial_metrics VIEW から読む。max_year 抽出は base テーブルで行う。
+        from database import FinancialRecord, FinancialMetric
 
         min_nc_ratio   = _num(params.get("min_nc_ratio")) or 0.0
         max_nc_ratio   = _num(params.get("max_nc_ratio"))
@@ -218,24 +220,24 @@ class NetCashAnalysisPlugin(AnalysisPlugin):
 
         # 年度指定がなければ各社の最新年度のみを対象にする
         if year:
-            query = db.query(FinancialRecord).filter(FinancialRecord.year == int(year))
+            query = db.query(FinancialMetric).filter(FinancialMetric.year == int(year))
         else:
             subq = (db.query(FinancialRecord.edinet_code,
                              func.max(FinancialRecord.year).label("max_year"))
                       .group_by(FinancialRecord.edinet_code).subquery())
-            query = (db.query(FinancialRecord)
+            query = (db.query(FinancialMetric)
                        .join(subq,
-                             (FinancialRecord.edinet_code == subq.c.edinet_code) &
-                             (FinancialRecord.year == subq.c.max_year)))
+                             (FinancialMetric.edinet_code == subq.c.edinet_code) &
+                             (FinancialMetric.year == subq.c.max_year)))
 
         # ネットキャッシュ計算には流動資産 or 総負債が必要、比率には市場時価が必要
-        query = query.filter(FinancialRecord.market_cap.isnot(None))
-        query = query.filter(FinancialRecord.market_cap > 0)
+        query = query.filter(FinancialMetric.market_cap.isnot(None))
+        query = query.filter(FinancialMetric.market_cap > 0)
         if industry:
-            query = query.filter(FinancialRecord.industry == industry)
+            query = query.filter(FinancialMetric.industry == industry)
         # 最低時価総額は任意。空/0 のときは絞らない（小型バーゲンを取りこぼさない）
         if min_market_cap is not None and min_market_cap > 0:
-            query = query.filter(FinancialRecord.market_cap >= min_market_cap)
+            query = query.filter(FinancialMetric.market_cap >= min_market_cap)
 
         records = query.all()
 
