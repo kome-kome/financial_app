@@ -65,13 +65,15 @@ async def main(years_back: int, collect_only: bool = False,
                finalize_only: bool = False, backfill_yahoo: bool = False,
                refill_cf: bool = False, refill_cf_limit: int = 3000,
                refill_cf_sleep: float = 0.5, refill_capex_only: bool = False,
+               refill_missing_cf: bool = False,
                diagnose_cf: bool = False, diagnose_cf_limit: int = 20):
     t0 = time.time()
     log("=" * 60)
     if diagnose_cf:
         mode = "diagnose-cf"
     elif refill_cf:
-        mode = "refill-capex-only" if refill_capex_only else "refill-cf"
+        mode = ("refill-cf-missing" if refill_missing_cf
+                else "refill-capex-only" if refill_capex_only else "refill-cf")
     elif backfill_yahoo:
         mode = "backfill-yahoo"
     elif collect_only:
@@ -102,10 +104,14 @@ async def main(years_back: int, collect_only: bool = False,
 
     # ─── Phase 7: CF NULL 補完（単独モード）──────────────────────────────────
     if refill_cf:
-        target_desc = ("cf_capex IS NULL かつ cf_net_change_cash IS NOT NULL（capex のみ補完）"
-                       if refill_capex_only
-                       else "cf_net_change_cash IS NULL（投資CF/現金増減/capex を補完）")
-        log(f"[7/7] CF NULL 補完 開始（limit={refill_cf_limit}, capex_only={refill_capex_only}）")
+        if refill_missing_cf:
+            target_desc = "cf_operating_cf IS NULL（CF全NULL＝IFRS決算大企業等の営業/投資/財務CFを補完）"
+        elif refill_capex_only:
+            target_desc = "cf_capex IS NULL かつ cf_net_change_cash IS NOT NULL（capex のみ補完）"
+        else:
+            target_desc = "cf_net_change_cash IS NULL（投資CF/現金増減/capex を補完）"
+        log(f"[7/7] CF NULL 補完 開始（limit={refill_cf_limit}, capex_only={refill_capex_only}, "
+            f"missing_cf={refill_missing_cf}）")
         log(f"  対象: {target_desc}")
         db7 = SessionLocal()
         try:
@@ -113,6 +119,7 @@ async def main(years_back: int, collect_only: bool = False,
                 db7,
                 limit=refill_cf_limit,
                 capex_only=refill_capex_only,
+                missing_cf=refill_missing_cf,
                 sleep_sec=refill_cf_sleep,
                 on_progress=lambda c, t, m: log(m) if c % 100 == 0 or t - c < 10 else None,
             )
@@ -233,6 +240,8 @@ if __name__ == "__main__":
                         help="CF 補完の1件あたりスリープ秒（デフォルト 0.5）")
     parser.add_argument("--refill-capex-only", action="store_true",
                         help="capex のみ補完（net_change_cash 補完済みレコードの設備投資を一度だけ補完。手動ワンショット専用）")
+    parser.add_argument("--refill-cf-missing", action="store_true",
+                        help="CF全NULL（cf_operating_cf IS NULL）レコードを補完（IFRS決算大企業等の営業/投資/財務CF）")
     parser.add_argument("--diagnose-cf", action="store_true",
                         help="診断モード: サンプル書類の CF ラベル/要素IDを出力（capex ラベル照合の検証用）")
     parser.add_argument("--diagnose-cf-limit", type=int, default=20,
@@ -249,6 +258,7 @@ if __name__ == "__main__":
             f"  refill_cf={args.refill_cf}"
             f"  refill_cf_limit={args.refill_cf_limit}"
             f"  refill_capex_only={args.refill_capex_only}"
+            f"  refill_cf_missing={args.refill_cf_missing}"
             f"  diagnose_cf={args.diagnose_cf}\n"
         )
     asyncio.run(main(
@@ -260,6 +270,7 @@ if __name__ == "__main__":
         refill_cf_limit=args.refill_cf_limit,
         refill_cf_sleep=args.refill_cf_sleep,
         refill_capex_only=args.refill_capex_only,
+        refill_missing_cf=args.refill_cf_missing,
         diagnose_cf=args.diagnose_cf,
         diagnose_cf_limit=args.diagnose_cf_limit,
     ))

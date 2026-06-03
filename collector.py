@@ -71,6 +71,10 @@ XBRL_MAP = {
     # ── PL 売上・収益（IFRS）──────────────────────────────────────────────
     "RevenueIFRS":                                     ("pl", "revenue"),
     "RevenueIFRSSummaryOfBusinessResults":             ("pl", "revenue"),
+    # 「売上収益（Revenue）」ではなく「売上高（NetSales）」を IFRS で使う企業（ソニー等）。
+    # 未登録時は非連結 NetSales（メンバー・優先度0）を誤採用し連結売上が大幅過小になっていた。
+    "NetSalesIFRS":                                    ("pl", "revenue"),
+    "NetSalesIFRSSummaryOfBusinessResults":            ("pl", "revenue"),
     # ── PL 売上原価・費用（JGAAP）───────────────────────────────────────
     "CostOfSales":                                     ("pl", "cost_of_sales"),
     "SellingGeneralAndAdministrativeExpenses":         ("pl", "sga"),
@@ -177,12 +181,53 @@ XBRL_MAP = {
     "PaymentsForPurchaseOfPropertyPlantAndEquipment":  ("cf", "capex"),
     "CapitalExpendituresForTangibleAssets":            ("cf", "capex"),          # 旧候補 fallback
     # ── CF（IFRS）────────────────────────────────────────────────────────
+    # 実XBRL診断（トヨタ/クボタ/ホンダ等の有報）で確定した IFRS CF 合計の2系統。
+    # いずれも当期は context=CurrentYearDuration（Prior除外フィルタを通過）。
+    #   (1) CF計算書本体: NetCashProvidedByUsedIn...IFRS
+    #   (2) 主要な経営指標等の推移: CashFlowsFromUsedIn...IFRSSummaryOfBusinessResults
+    #       （全有報に必ず存在する5期分テーブル。本体が独自拡張要素の企業の保険）
+    # 旧来の CashFlowsFromUsedIn...IFRS（Summary無し）は実データに存在せず、
+    # IFRS決算の大企業（トヨタ等268社）のCFが全て未取得になっていた根本原因。
+    "NetCashProvidedByUsedInOperatingActivitiesIFRS":  ("cf", "operating_cf"),
+    "NetCashProvidedByUsedInInvestingActivitiesIFRS":  ("cf", "investing_cf"),
+    "NetCashProvidedByUsedInFinancingActivitiesIFRS":  ("cf", "financing_cf"),
+    "NetIncreaseDecreaseInCashAndCashEquivalentsIFRS": ("cf", "net_change_cash"),
+    "CashFlowsFromUsedInOperatingActivitiesIFRSSummaryOfBusinessResults": ("cf", "operating_cf"),
+    "CashFlowsFromUsedInInvestingActivitiesIFRSSummaryOfBusinessResults": ("cf", "investing_cf"),
+    "CashFlowsFromUsedInFinancingActivitiesIFRSSummaryOfBusinessResults": ("cf", "financing_cf"),
+    # 旧候補（実データ未確認・無害なため互換目的で残置）
     "CashFlowsFromUsedInOperatingActivitiesIFRS":      ("cf", "operating_cf"),
     "CashFlowsFromUsedInInvestmentActivitiesIFRS":     ("cf", "investing_cf"),
     "CashFlowsFromUsedInInvestingActivitiesIFRS":      ("cf", "investing_cf"),   # 綴り揺れ対応
     "CashFlowsFromUsedInFinancingActivitiesIFRS":      ("cf", "financing_cf"),
+    # capex（IFRS）。本体は企業独自要素 PurchaseOfPropertyPlantAndEquipmentInvCFIFRS 等で
+    # タグ付けされるため、要素ID照合に加え _match_capex_by_label のラベル照合でも捕捉する。
     "PurchaseOfPropertyPlantAndEquipmentIFRS":         ("cf", "capex"),
     "PurchaseOfPropertyPlantAndEquipmentAndIntangibleAssetsIFRS": ("cf", "capex"),
+    # ── CF・売上（US-GAAP）────────────────────────────────────────────────
+    # 米国基準採用企業（キヤノン・コマツ・オリックス・野村HD・ソニー旧年度等）のCF合計と
+    # 連結売上は「主要な経営指標等の推移」の ...USGAAPSummaryOfBusinessResults 要素に集約される
+    # （実XBRL診断で確定。context=CurrentYearDuration）。IFRS と同じく本体の連結CF計算書は
+    # 独自拡張要素のため、この経営指標等セクションが確実な取得源になる。
+    "CashFlowsFromUsedInOperatingActivitiesUSGAAPSummaryOfBusinessResults": ("cf", "operating_cf"),
+    "CashFlowsFromUsedInInvestingActivitiesUSGAAPSummaryOfBusinessResults": ("cf", "investing_cf"),
+    "CashFlowsFromUsedInFinancingActivitiesUSGAAPSummaryOfBusinessResults": ("cf", "financing_cf"),
+    # 連結の売上・利益・資産・資本・EPS/BPS（US-GAAP 経営指標等）。未登録時は非連結 NetSales
+    # （メンバー・優先度0）を誤採用し連結値が過小/欠損だった。CurrentYear*（優先度1）の本要素群で是正。
+    # 注: US-GAAP 経営指標等には営業利益が無いため operating_profit は別途（取得不可の場合あり）。
+    "RevenuesUSGAAPSummaryOfBusinessResults":          ("pl", "revenue"),
+    "ProfitLossBeforeTaxUSGAAPSummaryOfBusinessResults": ("pl", "pretax_profit"),
+    "NetIncomeLossAttributableToOwnersOfParentUSGAAPSummaryOfBusinessResults": ("pl", "net_income"),
+    "BasicEarningsLossPerShareUSGAAPSummaryOfBusinessResults": ("pl", "eps"),
+    "TotalAssetsUSGAAPSummaryOfBusinessResults":       ("bs", "total_assets"),
+    # 自己資本: 「株主資本」(EquityAttributable…)と「純資産額」(EquityIncluding…NCI)のうち
+    # どちらか一方のみ載る企業がある（キヤノン=株主資本のみ／野村=純資産額のみ）。両方を
+    # total_equity に登録し、同優先度では先勝ち（CSV上で株主資本が先＝株主資本利益率に整合）。
+    # 片方しか無くても連結自己資本が必ず埋まり、ROE/自己資本比率が非連結値で誤算出されない。
+    "EquityAttributableToOwnersOfParentUSGAAPSummaryOfBusinessResults": ("bs", "total_equity"),
+    "EquityIncludingPortionAttributableToNonControllingInterestUSGAAPSummaryOfBusinessResults": ("bs", "total_equity"),
+    "EquityAttributableToOwnersOfParentPerShareUSGAAPSummaryOfBusinessResults": ("bs", "bps"),
+    "CashAndCashEquivalentsUSGAAPSummaryOfBusinessResults": ("bs", "cash"),
     # ── バリュエーション・配当 ────────────────────────────────────────────
     "DividendPaidPerShare":                            ("val", "dps"),
     "DividendPaidPerShareSummaryOfBusinessResults":    ("val", "dps"),    # 経営指標等セクション
@@ -1258,12 +1303,13 @@ async def refill_cf_from_xbrl(
     db,
     limit: int = 3000,
     capex_only: bool = False,
+    missing_cf: bool = False,
     sleep_sec: float = 0.5,
     on_progress: Optional[Callable[[int, int, str], None]] = None,
 ) -> dict:
     """CF フィールドが NULL の既存レコードを EDINET XBRL から再取得して補完する。
 
-    通常モード（capex_only=False）:
+    通常モード（capex_only=False, missing_cf=False）:
       対象 = cf_net_change_cash IS NULL かつ cf_operating_cf IS NOT NULL かつ doc_id IS NOT NULL
       net_change_cash は標準要素で充足率100%のため「未補完」マーカーとして使う。
       補完されると net_change_cash が埋まり対象から外れるため、繰り返し実行で自然終了する
@@ -1274,26 +1320,40 @@ async def refill_cf_from_xbrl(
       通常モードで net_change_cash 等は補完済みだが capex だけ未取得のレコード（ラベル照合追加前の
       旧バッチ分）を一度だけ補完する。手動ワンショット専用（スケジュールには載せない）。
 
-    fetch_xbrl_csv の全 CSV concat 修正 + capex ラベル照合により capex/net_change_cash を補完する。
+    missing_cf モード:
+      対象 = cf_operating_cf IS NULL かつ doc_id IS NOT NULL（＝CF が全 NULL）
+      営業CFすら取得できていないレコード。IFRS決算の大企業（トヨタ等）が該当し、
+      上記2モードは cf_operating_cf IS NOT NULL を前提とするため拾えなかった。
+      XBRL_MAP への IFRS CF 要素追加（NetCash...IFRS / ...IFRSSummaryOfBusinessResults）と
+      併用して埋める。営業CFが埋まれば対象から外れるため繰り返し実行で自然終了する。
+
+    fetch_xbrl_csv の全 CSV concat + capex ラベル照合により capex/net_change_cash を補完する。
     """
     from database import FinancialRecord
 
-    mode = "capex_only" if capex_only else "normal"
+    mode = "missing" if missing_cf else ("capex_only" if capex_only else "normal")
     log.info(f"refill_cf_from_xbrl 開始 (mode={mode}, limit={limit}, sleep={sleep_sec})")
 
-    # 対象レコードを取得
-    q = db.query(FinancialRecord).filter(
-        FinancialRecord.cf_operating_cf.isnot(None),
-        FinancialRecord.doc_id.isnot(None),
-    )
-    if capex_only:
-        q = q.filter(
-            FinancialRecord.cf_capex.is_(None),
-            FinancialRecord.cf_net_change_cash.isnot(None),
+    def _target_q():
+        """モード別の対象レコードクエリ（targets 取得と remaining 集計で共用）。"""
+        if missing_cf:
+            return db.query(FinancialRecord).filter(
+                FinancialRecord.cf_operating_cf.is_(None),
+                FinancialRecord.doc_id.isnot(None),
+            )
+        q = db.query(FinancialRecord).filter(
+            FinancialRecord.cf_operating_cf.isnot(None),
+            FinancialRecord.doc_id.isnot(None),
         )
-    else:
-        q = q.filter(FinancialRecord.cf_net_change_cash.is_(None))
-    targets = q.order_by(FinancialRecord.period_end.desc()).limit(limit).all()
+        if capex_only:
+            return q.filter(
+                FinancialRecord.cf_capex.is_(None),
+                FinancialRecord.cf_net_change_cash.isnot(None),
+            )
+        return q.filter(FinancialRecord.cf_net_change_cash.is_(None))
+
+    # 対象レコードを取得
+    targets = _target_q().order_by(FinancialRecord.period_end.desc()).limit(limit).all()
 
     total = len(targets)
     log.info(f"  対象レコード: {total}件")
@@ -1359,18 +1419,7 @@ async def refill_cf_from_xbrl(
     db.commit()
 
     # 残件数を集計（スケジュール実行の終了判定に使う）
-    rq = db.query(FinancialRecord).filter(
-        FinancialRecord.cf_operating_cf.isnot(None),
-        FinancialRecord.doc_id.isnot(None),
-    )
-    if capex_only:
-        rq = rq.filter(
-            FinancialRecord.cf_capex.is_(None),
-            FinancialRecord.cf_net_change_cash.isnot(None),
-        )
-    else:
-        rq = rq.filter(FinancialRecord.cf_net_change_cash.is_(None))
-    remaining = rq.count()
+    remaining = _target_q().count()
 
     result = {"updated": updated, "skipped": skipped, "failed": failed, "remaining": remaining}
     log.info(f"refill_cf_from_xbrl 完了: {result}")

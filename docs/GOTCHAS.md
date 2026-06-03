@@ -33,8 +33,18 @@ SSEエンドポイント: 収集=`/api/collect/stream`、市場データ=`/api/c
 - **EDINET XBRL CSV** は UTF-8 と UTF-16 LE（タブ区切り）が混在。`fetch_xbrl_csv` で両方対応済み。
 - **XBRL要素選択**: 連結優先判定は `"NonConsolidated" not in ctx` を必ず含めること。優先度: 連結=2 > 非メンバー=1 > メンバー付き=0。
 - **CF要素名・XBRL ZIP 構造**: EDINET XBRL type=5 ZIP には**複数の CSV ファイル**が含まれる。CF合計は概要ファイルに、CF明細は別ファイルに存在。ZIP内の全CSVを concat して parse する（`fetch_xbrl_csv`）。投資CFのEDINET標準要素は `NetCashProvidedByUsedInInvestmentActivities`（Investment、旧 Investing は誤り）。
+- **IFRS/US-GAAP決算のCF・売上要素名（重要・実証済み）**: IFRS採用企業（トヨタ・ホンダ・クボタ等）のCF合計は **`NetCashProvidedByUsedInOperatingActivitiesIFRS`**（=`NetCash...IFRS` 系。`CashFlowsFromUsedIn...IFRS` ではない）でタグ付けされる。さらに全有報に必ず存在する「主要な経営指標等の推移」テーブルに **`CashFlowsFromUsedInOperatingActivitiesIFRSSummaryOfBusinessResults`** 系（営業/投資/財務）があり、本体が独自拡張要素の企業の保険として両系統を `XBRL_MAP` に登録している。当期は `context=CurrentYearDuration`（`Consolidated` を含まないが Prior 除外フィルタは通る）。IFRSのcapexは `PurchaseOfPropertyPlantAndEquipmentInvCFIFRS` 等の独自要素だが既存のラベル照合（「有形固定資産の取得による支出」）で捕捉される。
+  - **US-GAAP採用企業**（キヤノン・コマツ・オリックス・野村HD・ソニー旧年度等）も同型で、CF合計・**連結売上**・純利益・総資産・純資産・EPS/BPS が `...USGAAPSummaryOfBusinessResults`（`CashFlowsFromUsedInOperatingActivitiesUSGAAPSummaryOfBusinessResults` 系・`RevenuesUSGAAPSummaryOfBusinessResults`・`NetIncomeLossAttributableToOwnersOfParentUSGAAPSummaryOfBusinessResults`・`TotalAssetsUSGAAPSummaryOfBusinessResults`・`EquityAttributableToOwnersOfParentUSGAAPSummaryOfBusinessResults`・`BasicEarningsLossPerShareUSGAAPSummaryOfBusinessResults` 等）に集約される（営業利益は経営指標等に存在せず取得不可）。**注意**: これら未登録時は非連結 `NetSales`（メンバー・優先度0）を誤採用し連結値が大幅過小/欠損になっていた（例: キヤノン 連結4.6兆を1.8兆と誤記）。
+  - **IFRSで「売上高(NetSales)」を使う企業**（ソニー等）の連結売上は `NetSalesIFRS`（「売上収益」の `RevenueIFRS` ではない）。これも未登録時は非連結 `NetSales` に負けていた。
+  - **自己資本の注意**: US-GAAP社は「株主資本」(`EquityAttributableToOwnersOfParentUSGAAP…`)と「純資産額」(`EquityIncludingPortion…NCI…`)の**どちらか一方しか載らない**企業がある（キヤノン=株主資本のみ／野村=純資産額のみ）。両方を `total_equity` に登録し片方欠落でも連結自己資本が埋まるようにした（同優先度は先勝ち＝株主資本利益率に整合）。未対応だとキヤノンの `total_equity` が非連結のまま残り ROE が約2倍に誤算出されていた。
+  - 既収集レコードは**保存済み doc_id からの再パース＋ upsert で是正済み**（2026-06-03、US-GAAP/移行組11社）。`upsert_financial` は市場データ列を保持するため CF専用 `--refill-cf-missing`（CF列のみ）とは別に PL/BS も含めて上書きできる。EPS/BPS 変更後の `per`/`pbr`/`market_cap` は保存列のため、保存済み株価＋新EPS/BPSで `_apply_price_to_record` により再計算した（次回の株価更新でも自動再計算される）。
+- **売上NULLの残存（既知の制約）**: 最新年度で売上が NULL の企業が約259社残る。内訳は金融セクター（銀行・証券・保険・その他金融で約119社／売上高の概念がなく経常収益・営業収益・保険料で計上）と運輸（陸運・倉庫・海運で約51社／`OperatingRevenue` 系）等。業種別に異なる収益要素のマッピングが必要な別課題（未対応）。
 - **capex（設備投資）はラベル照合で取得**: 設備投資のCF明細行は**企業独自の拡張要素ID**でタグ付けされることが多く、標準要素ID（`PurchaseOfPropertyPlantAndEquipment`）では捕捉できない（実証: 3,000件中0件）。EDINET CSV の**「項目名」列**で照合する（`_match_capex_by_label` / `CAPEX_LABEL_*` 定数）。「有形固定資産の取得による支出」等を捕捉し、売却収入・無形のみは除外。capex は支出＝負（`-abs(val)`）で統一。
-- **CF NULL補完の運用**: `refill-cf.yml` の通常補完は **2026-05-31 に完了**（remaining=0）。スケジュール無効化済み（PR #31）。capex 充足率 88.8%、残り 2,144件はアセットライト企業で再実行しても変わらない。将来の新規データで NULL が出た場合は `mode=refill` で workflow_dispatch を手動実行すること。
+- **CF NULL補完の運用**: `refill_cf_from_xbrl` には3モードがある。
+  - `normal`（既定）: `cf_net_change_cash IS NULL AND cf_operating_cf IS NOT NULL` を対象（投資CF/現金増減/capex を補完）。`refill-cf.yml` の通常補完は 2026-05-31 に remaining=0。
+  - `capex_only`（`--refill-capex-only`）: capex のみワンショット補完。
+  - **`missing`（`--refill-cf-missing`）**: `cf_operating_cf IS NULL`（＝CFが全NULL）を対象。IFRS/US-GAAP決算の大企業は営業CFすら取れておらず、`normal`/`capex_only` が `cf_operating_cf IS NOT NULL` を前提とするため**永久に対象外**になっていた。`XBRL_MAP` への IFRS/US-GAAP CF 要素追加と併せて 2026-06-03 に補完し、**CF未収集企業 268社 → 0社**（上記「IFRS/US-GAAP決算のCF・売上要素名」参照）。
+  - **注意**: 旧「remaining=0 で完了」は `normal` モードの残件のみを数えており、CF全NULL社（IFRS大企業）はカウント外だった。新規データで CF が全NULL のレコードが出た場合は `--refill-cf-missing` を使うこと。
 - **`check.py` の日付**は自動計算（祝日は非対応、祝日前後は失敗する場合あり）。
 
 ---
