@@ -11,6 +11,7 @@
 | [GOTCHAS.md](docs/GOTCHAS.md) | 既知のハマりどころ（XBRL / CF / capex / 時刻 / 業種 / 認証実装メモ / 進捗仕様） | 収集・分析の実装時 |
 | [DEPLOYMENT.md](docs/DEPLOYMENT.md) | Render デプロイ運用＋データ収集の自動/手動の仕組み＋外部サービス制約（GitHub Actions / Supabase / J-Quants） | デプロイ・収集・インフラ設計時 |
 | [MODELS.md](docs/MODELS.md) | 分析モデル解説＋モデル固有の制約 | 分析モデル変更時 |
+| [SKILLS_AND_AGENTS.md](docs/SKILLS_AND_AGENTS.md) | スキル／エージェントの索引マニュアル | スラッシュコマンドや調査エージェントを使うとき |
 
 > **設計の前に [DEPLOYMENT.md](docs/DEPLOYMENT.md) の「外部サービス制約」節を必ず参照**：無料プラン制約（stooq ブロック・Supabase 500MB・J-Quants レート制限等）に違反しない方式を選ぶこと。
 
