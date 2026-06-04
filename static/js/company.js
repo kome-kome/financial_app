@@ -134,6 +134,20 @@ wireGran('#bs-gran', g => { bsGran = g; drawBS(); });
 wireGran('#pl-gran', g => { plGran = g; drawPL(); });
 wireGran('#cf-gran', g => { cfGran = g; drawCF(); });
 
+// 株価の解像度トグル（data-res）。seg-btn の active 切替は wireGran と同様。
+(function wirePriceRes(){
+  const btns = document.querySelectorAll('#price-res .seg-btn');
+  btns.forEach(btn => {
+    btn.addEventListener('click', () => {
+      if (btn.classList.contains('active')) return;
+      btns.forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      priceRes = btn.dataset.res;
+      if (priceCode) loadPriceHistory(priceCode, priceRes);
+    });
+  });
+})();
+
 // ── 企業データ読み込み・描画 ─────────────────────────────────
 async function loadCompany(code){
   const empty = document.getElementById('empty-state');
@@ -208,9 +222,21 @@ async function loadCompany(code){
   empty.style.display = 'none';
   view.style.display = 'block';
 
-  // 株価（別ソース・取得失敗してもページは表示する）
+  // 株価（別ソース・取得失敗してもページは表示する）。初期は日次(6M)。
+  priceCode = code;
+  loadPriceHistory(code, priceRes);
+}
+
+// ── 株価チャート: 解像度トグル（6M日次 / 全期間週次）────────────────────
+let priceCode = null;
+let priceRes  = 'daily';
+
+async function loadPriceHistory(code, res){
+  // daily は直近約6か月（窓内全件）、weekly は全履歴。days は上限側に広く取る。
+  const days = res === 'weekly' ? 520 : 400;
   try {
-    const hist = await apiFetch('/api/stock/history/' + encodeURIComponent(code) + '?days=1825');
+    const hist = await apiFetch('/api/stock/history/' + encodeURIComponent(code)
+                                + '?days=' + days + '&resolution=' + res);
     renderPrice(hist || []);
   } catch(e) {
     renderPrice([]);

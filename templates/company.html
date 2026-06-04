@@ -222,8 +222,16 @@ table.cmp tbody tr:hover td{background:#1e2235}
 
     <div class="panel" id="panel-price">
       <div class="chart-card">
-        <div class="chart-title">株価（日次終値）</div>
-        <div class="chart-note">直近最大5年程度の日次終値（円）。出典: J-Quants / stooq</div>
+        <div class="bs-head">
+          <div>
+            <div class="chart-title">株価（終値）</div>
+            <div class="chart-note">終値ライン（円）。<b>6M</b>＝直近約6か月の日次／<b>全期間</b>＝週次（週末終値）。出典: J-Quants / stooq</div>
+          </div>
+          <div class="seg" id="price-res" role="group" aria-label="表示解像度">
+            <button class="seg-btn active" data-res="daily" type="button">6M(日次)</button>
+            <button class="seg-btn" data-res="weekly" type="button">全期間(週次)</button>
+          </div>
+        </div>
         <div class="chart-box tall">
           <canvas id="chart-price"></canvas>
           <div id="price-empty" style="display:none;position:absolute;top:50%;left:0;right:0;transform:translateY(-50%);text-align:center;color:#64748b">株価データがありません（株価履歴の収集が必要です）</div>

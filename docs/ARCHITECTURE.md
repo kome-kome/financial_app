@@ -61,7 +61,7 @@ graph LR
         FR[("financial_records\nソースのみ\nBS / PL / CF + 市場スナップ")]
         FM["financial_metrics（VIEW）\n派生指標を都度SQL算出\n＋regression_results をJOIN"]
         RR[("regression_results\nOLS予測値\npredicted/gap（重い派生）")]
-        SPH[("stock_price_history\n日次株価履歴\nOHLCV")]
+        SPH[("stock_price_daily / _weekly\nclose-only 2本立て\n直近6か月日次 + 全履歴週次")]
         MD[("macro_data\n為替・金利・指数")]
         CL[("collection_logs\n収集ジョブログ")]
         FR --> FM
@@ -229,17 +229,21 @@ erDiagram
         datetime computed_at           "計算日時"
     }
 
-    stock_price_history {
-        int     id           PK "自動採番ID"
-        string  edinet_code  FK "企業への紐付け"
-        string  sec_code        "証券コード"
-        string  trade_date      "取引日（YYYY-MM-DD）"
-        float   open            "始値"
-        float   high            "高値"
-        float   low             "安値"
+    stock_price_daily {
+        string  edinet_code  PK "企業への紐付け（PK1）"
+        string  trade_date   PK "取引日 YYYY-MM-DD（PK2）"
         float   close           "終値（NOT NULL）"
-        float   volume          "出来高"
-        datetime created_at     "登録日時"
+        float   volume          "出来高（VWAP算出用・週次集約時に消費）"
+    }
+
+    stock_price_weekly {
+        string  edinet_code  PK "企業への紐付け（PK1）"
+        string  week_start   PK "ISO週の月曜 YYYY-MM-DD（PK2）"
+        string  trade_date      "週内最終営業日の実日付"
+        float   close_last      "最終営業日終値（実約定・チャート/バックテスト）"
+        float   volume_sum      "週内出来高合計（VWAP分母・欠落週はNULL）"
+        float   turnover_sum    "週内売買代金合計 Σ(close×vol)（VWAP分子・流動性変量）"
+        int     n_days          "週内に集約した営業日数（祝日週の信頼度）"
     }
 
     collection_logs {
@@ -280,7 +284,8 @@ erDiagram
     }
 
     companies         ||--o{  financial_records    : "1社 → 複数年度の財務データ"
-    companies         ||--o{  stock_price_history  : "1社 → 複数日分の株価履歴"
+    companies         ||--o{  stock_price_daily    : "1社 → 直近6か月の日次終値"
+    companies         ||--o{  stock_price_weekly   : "1社 → 全履歴の週次終値"
     xbrl_raw_documents }o--|| financial_records   : "doc_id で紐付け（再解析用）"
     financial_records ||--o| regression_results  : "(edinet_code,year,period_end) で1対0..1"
 ```
@@ -346,7 +351,7 @@ sequenceDiagram
 
 ## 4-2. 株価履歴収集フロー
 
-> 株価の日次OHLCV（始値・高値・安値・終値・出来高）を取得して保存するフローです。
+> 株価を取得し、**close-only の2本立て**（`stock_price_daily`＝直近6か月の日次／`stock_price_weekly`＝全履歴の週次集約）へ保存するフローです。容量恒久対策（Supabase Free 500MB）として旧 `stock_price_history`（日次OHLCV全履歴）から移行。詳細は [DEPLOYMENT.md「容量設計」](DEPLOYMENT.md) 参照。
 
 **現在の主経路**: J-Quants（JPX公式）。GitHub Actions Runner（Azure IP）からは stooq が完全ブロック。
 
@@ -355,7 +360,7 @@ sequenceDiagram
 2. UI が `GET /api/collect/history/stream` で SSE 接続
 3. BGT が `SELECT edinet_code, sec_code FROM companies WHERE sec_code IS NOT NULL` で企業一覧取得
 4. 全企業ループ（J-Quants: 日付単位で全銘柄一括取得・`JQUANTS_RATE_SLEEP=20秒`; stooq ローカル補助: 1社1リクエスト・1.5秒）
-5. `stock_price_history` へ `ON CONFLICT DO UPDATE`（J-Quants）または `ON CONFLICT DO NOTHING`（stooq）
+5. 単一チョークポイント `record_prices_batch`（database.py）で **①daily upsert → ②触れた週のみ daily から weekly を再集約 upsert（aggregate_weeks）→ ③daily を直近 `DAILY_WINDOW_DAYS` で trim**。3経路（J-Quants/stooq/yahoo）すべてが通る。専用スケジューラ不要（収集に相乗り）
 6. `on_progress` → SSE で進捗配信 → 完了後 `running=false`
 7. UI が `GET /api/collect/history/coverage` で収録状況を更新表示
 
@@ -499,7 +504,7 @@ sequenceDiagram
     opt 銘柄詳細の確認
         User ->> UI  : 銘柄名をクリック
         UI   ->> API : GET /api/financials/{edinet_code}（財務データ全年度）
-        UI   ->> API : GET /api/stock/history/{edinet_code}?days=30（株価履歴）
+        UI   ->> API : GET /api/stock/history/{edinet_code}?days=30&resolution=daily（終値時系列）
         Note over UI: Promise.all で並列取得
         API -->> UI  : 財務データ + 株価OHLCV（直近30日）
         UI  -->> User: 詳細モーダル（財務サマリー + 株価履歴テーブル）
@@ -802,7 +807,7 @@ graph LR
         S1["GET /api/stats\n企業数・レコード数・最新年度\n+ データ鮮度（最終更新日時・経過日数・期待最新年度・freshness判定）"]
         S2["GET /api/companies\n企業一覧（検索・業種・市場フィルタ）"]
         S3["GET /api/financials/{edinet_code}\n指定企業の全年度財務データ"]
-        S4["GET /api/stock/history/{edinet_code}\n日次株価履歴（OHLCVリスト）"]
+        S4["GET /api/stock/history/{edinet_code}?resolution=daily|weekly\n終値時系列（close-only・daily=直近6か月/weekly=全履歴）"]
         S5["GET /api/export/csv\n財務データをCSVでダウンロード"]
     end
 
