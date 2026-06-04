@@ -46,8 +46,6 @@
 - **DB バックアップ運用ポリシー**: Supabase の自動バックアップ機能を利用しつつ、復旧手順を文書化
 - **監視**: Render ダッシュボード + UptimeRobot 等の外形監視追加検討
 
-> **完了済み**: 認証の HttpOnly Cookie 化（旧項目 F）は実装済み（Tier3-3）。`auth_token`（HttpOnly）＋`csrf_token` の2 Cookie + CSRF Double-Submit。詳細は [GOTCHAS.md](GOTCHAS.md) を参照。
-
 ---
 
 ## 注意事項（設計制約）

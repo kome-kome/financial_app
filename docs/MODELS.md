@@ -323,7 +323,7 @@ predicted_market_cap = ŷ_pred / stock_price × market_cap     [百万円]
 - 業種分類はJPX上場会社一覧（TSE 33業種）による。分類の粒度が粗いため、同業種内でもビジネスモデルの差異が大きい場合がある
 - 株数推計は IFRS/JGAAP 定義差、期中増資、優先株・転換社債存在時に誤差が生じる（FUTURE_TASKS の J-Quants `IssuedShares` 取得で根本解決予定）
 - per-share 10項目以上選択時は PL同士・BS同士の比例関係から VIF>10 が頻発する。`check_collinearity` の警告が出た業種では Ridge への切替を強く推奨
-- `gap_ratio` の収束予測には統計的根拠がない（→ [乖離分析](#3-乖離分析ou過程ヒューリスティック) を参照）
+- `gap_ratio` の収束予測には統計的根拠がない（→ [乖離分析](#3-乖離分析ar1-mle--フォールバックヒューリスティック) を参照）
 - 乖離分析（gap_analysis）は本プラグインの実行後でなければ利用不可
 
 ### 参考文献

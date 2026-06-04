@@ -13,7 +13,7 @@
    - [4-1. 財務データ収集フロー](#4-1-財務データ収集フロー)
    - [4-2. 株価履歴収集フロー](#4-2-株価履歴収集フロー)
    - [4-3. 認証フロー](#4-3-認証フロー)
-   - [4-4. OLS回帰分析フロー](#4-4-ols回帰分析フロー)
+   - [4-4. 業種別OLS分析フロー](#4-4-業種別ols分析フロー)
    - [4-5. スクリーニングフロー](#4-5-スクリーニングフロー)
    - [4-6. Zスコア正規化フロー](#4-6-zスコア正規化フロー)
    - [4-7. エラー・キャンセルフロー](#4-7-エラーキャンセルフロー)
@@ -936,7 +936,7 @@ graph TB
 | `api.py` | バックエンド | REST API窓口・認証・SSE・手動収集トリガー（自動収集は GitHub Actions が担当） | database.py, collector.py, plugins/ |
 | `database.py` | バックエンド | DBテーブル定義・upsert。7テーブル（Company / FinancialRecord / StockPriceHistory / MacroData / CollectionLog / XbrlRawDocument / **RegressionResult**）＋ **`financial_metrics` VIEW**（派生指標を都度SQL算出・読み取り専用 ORM `FinancialMetric`）。`upsert_financial` は **ソース列のみ**保存（derived 取り込み廃止）。`upsert_regression_result`（merge・方言非依存）。派生指標は VIEW へ移行し旧 `calc_growth_rates`/`calc_zscore_normalization` は削除、旧計算列は `init_db` の冪等 `DROP COLUMN` で除去。`pack_elements`/`unpack_elements`/`upsert_xbrl_raw` ヘルパを含む | PostgreSQL |
 | `collector.py` | バックエンド | EDINET/J-Quants/JPX/マクロデータからデータ収集→DB保存。**派生指標・Zスコア・成長率・nc_ratio は永続化しない**（financial_metrics VIEW が担う）。`calc_derived` は free_cf/nonoperating_income の算出のみ残す。株価は J-Quants が主経路（stooq は Azure IP ブロックのためローカル補助のみ）。`MACRO_SERIES` で為替・金利・指数・コモディティ9系列を定義 | EDINET API, J-Quants, JPX |
-| `checker.py` | バックエンド | データ品質チェック（NULL率・外れ値・収録状況） | database.py |
+| `checker.py` | バックエンド | データ品質チェック（NULL率・外れ値・収録状況） | database.py, api.py（import元） |
 | `plugins/base.py` | バックエンド | 分析プラグインの抽象基底クラス | — |
 | `plugins/__init__.py` | バックエンド | プラグインを自動スキャン・レジストリ管理 | plugins/*.py |
 | `plugins/gap_analysis.py` | バックエンド | 乖離分析（割安・割高ランキング）。gap_ratio は financial_metrics VIEW（regression_results をJOIN）から読む | plugins/utils.py |
@@ -959,6 +959,7 @@ graph TB
 | `_pipeline_gh.py` | GitHub Actions | 全件収集パイプライン（full-pipeline.yml から workflow_dispatch 手動起動）。`--refill-cf`（CF NULL 補完: 投資CF/現金増減/capex）・`--refill-capex-only`（capex のみワンショット）・`--refill-cf-missing`（CF全NULL社=IFRS決算大企業の営業/投資/財務CFを補完）・`--diagnose-cf`（CF ラベル診断）モードを持つ。`normal` CF補完は 2026-05-31 に完了（capex 88.8%充足）、IFRS/US-GAAP決算企業の CF全NULL は 2026-06-03 に `--refill-cf-missing` で補完し CF未収集 268社→0社（詳細は GOTCHAS.md「IFRS/US-GAAP決算のCF・売上要素名」「CF NULL補完の運用」）。 | collector.py, database.py |
 | `_pipeline_incremental.py` | GitHub Actions | 差分収集パイプライン（daily-incremental.yml で毎日 JST 03:00 自動実行） | collector.py, database.py |
 | `check.py` | ユーティリティ | EDINET API 疎通確認ワンショット | EDINET API |
+| `scripts/check_db_state.py` | ユーティリティ | DB 状態確認ワンショット（主要6テーブルの行数＋直近の収集ログ表示）。Supabase 移行差分／パイプライン実行後の件数チェック用（手動実行） | database.py |
 | `.env` | 設定 | APIキー・DB接続・認証情報（UTF-8 BOMなし） | — |
 | `ARCHITECTURE.md` | ドキュメント | 本ファイル。コード変更時は必ず更新する | — |
 | `MODELS.md` | ドキュメント | 分析モデルの数式・パラメータ・参考文献（Markdown版）。モデル変更時は `models.html` とセットで更新する。 | — |
@@ -967,4 +968,4 @@ graph TB
 | `VISION.md` | ドキュメント | プロジェクトの目的・方針 | — |
 | `CLAUDE.md` | 設定 | Claude Codeへの動作指示（索引＋必須ルール） | — |
 | `.claude/agents/financial-app-explorer.md` | 設定 | read-only 探索サブエージェント定義（多ファイル調査・大ドキュメント精読をトークン節約で委譲） | — |
-| `.claude/skills/tidy/SKILL.md` | 設定 | `/tidy` 軽量化点検 Skill（デッドファイル・壊れリンク・doc⇔code 乖離を調査→整理） | — |
+| `.claude/skills/*/SKILL.md` | 設定 | プロジェクト固有スキル（`/tidy` 軽量化点検 等）＋汎用スキル群。索引・各スキルの説明は [SKILLS_AND_AGENTS.md](SKILLS_AND_AGENTS.md) を参照 | — |

@@ -24,6 +24,8 @@ Claude Code で使える **スキル（Skill）** と **エージェント（Age
 
 ## 2. スキル一覧（用途別）
 
+> **凡例**: 末尾 † のコマンドは現在この環境に未収録（呼び出しても動かない）。利用するには別途セットアップが必要。それ以外は組み込みコマンド、または `.claude/skills/` に収録済み。
+
 ### 🛠 コード品質チェック
 
 | コマンド | 何をする | 使う場面 |
@@ -62,7 +64,7 @@ Claude Code で使える **スキル（Skill）** と **エージェント（Age
 | `/to-issues` | 計画を独立 Issue に分解 | PRD を実装単位に落とす |
 | `/triage` | Issue を選別・整理 | バックログ整備 |
 | `/handoff` | 別エージェントに引き継ぐ要約を作成 | コンテキスト圧迫時 |
-| `/deep-research` | Web 検索で多角的に調査・レポート化 | 技術選定・最新情報 |
+| `/deep-research` † | Web 検索で多角的に調査・レポート化 | 技術選定・最新情報 |
 
 ### ⚙️ Claude Code 設定
 
@@ -73,7 +75,7 @@ Claude Code で使える **スキル（Skill）** と **エージェント（Age
 | `/fewer-permission-prompts` | 許可ダイアログを減らす自動許可リスト作成 | 確認が煩わしいとき |
 | `/git-guardrails-claude-code` | `git push --force` 等の危険コマンドをブロック | 事故防止 |
 | `/setup-pre-commit` | Husky + lint-staged 導入 | コミット時の自動整形 |
-| `/session-start-hook` | Web セッション開始時の準備フック作成 | Claude Code on the web 導入時 |
+| `/session-start-hook` † | Web セッション開始時の準備フック作成 | Claude Code on the web 導入時 |
 | `/write-a-skill` | 新しいスキルを自作 | 独自スキルを作りたい |
 | `/setup-matt-pocock-skills` | 上記スキル群が動く前提を整備 | 初回セットアップ |
 
