@@ -1,6 +1,6 @@
 ---
 name: scaffold-exercises
-description: Create exercise directory structures with sections, problems, solutions, and explainers that pass linting. Use when user wants to scaffold exercises, create exercise stubs, or set up a new course section.
+description: リント（lint）を通る、セクション・問題・解答・解説から成る演習ディレクトリ構造を作成する。演習を雛形生成したい、演習スタブを作りたい、新しいコースのセクションを用意したいときに使用。
 ---
 
 # Scaffold Exercises

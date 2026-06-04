@@ -1,6 +1,6 @@
 ---
 name: migrate-to-shoehorn
-description: Migrate test files from `as` type assertions to @total-typescript/shoehorn. Use when user mentions shoehorn, wants to replace `as` in tests, or needs partial test data.
+description: テストファイルを `as` 型アサーションから @total-typescript/shoehorn へ移行する。ユーザーが shoehorn に言及したとき、テスト内の `as` を置き換えたいとき、部分的なテストデータが必要なときに使用。
 ---
 
 # Migrate to Shoehorn

@@ -1,6 +1,6 @@
 ---
 name: triage
-description: Triage issues through a state machine driven by triage roles. Use when user wants to create an issue, triage issues, review incoming bugs or feature requests, prepare issues for an AFK agent, or manage issue workflow.
+description: トリアージのロールに沿ったステートマシンでイシューをトリアージする。イシューを作成したい、イシューをトリアージしたい、届いたバグや機能要望をレビューしたい、AFK エージェント向けにイシューを整えたい、イシューのワークフローを管理したいときに使用。
 ---
 
 # Triage
