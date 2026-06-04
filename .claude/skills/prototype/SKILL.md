@@ -1,6 +1,6 @@
 ---
 name: prototype
-description: Build a throwaway prototype to flesh out a design before committing to it. Routes between two branches — a runnable terminal app for state/business-logic questions, or several radically different UI variations toggleable from one route. Use when the user wants to prototype, sanity-check a data model or state machine, mock up a UI, explore design options, or says "prototype this", "let me play with it", "try a few designs".
+description: 設計を確定する前に、使い捨てのプロトタイプで具体化する。2つの分岐を使い分ける — 状態やビジネスロジックの検証には実行可能なターミナルアプリ、UI 検討には1つのルートから切り替えられる大胆に異なる複数バリエーション。プロトタイプを作りたい、データモデルや状態機械を検証したい、UI のモックを作りたい、デザイン案を探りたいとき、または "prototype this" / "let me play with it" / "try a few designs" と言われたときに使用。
 ---
 
 # Prototype

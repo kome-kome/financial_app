@@ -1,6 +1,6 @@
 ---
 name: write-a-skill
-description: Create new agent skills with proper structure, progressive disclosure, and bundled resources. Use when user wants to create, write, or build a new skill.
+description: 適切な構造・段階的開示（progressive disclosure）・付随リソースを備えた新しいエージェントスキルを作成する。新しいスキルを作成・記述・構築したいときに使用。
 ---
 
 # Writing Skills
