@@ -709,9 +709,8 @@ async def collect_stock_price_history(
     skip_existing=True: DB の最新 trade_date から翌日以降のみ取得（差分収集）。
     backfill=True かつ skip_existing=True: 前方差分に加えて後方欠損（years_back 起点→最古レコード前日）も補完。
     """
-    from database import StockPriceHistory
+    from database import StockPriceWeekly, record_prices_batch, trim_daily
     from sqlalchemy import func as sqlfunc
-    from sqlalchemy.dialects.postgresql import insert as pg_insert
 
     today     = date.today()
     date_from = date(today.year - years_back, today.month, today.day)
@@ -732,19 +731,20 @@ async def collect_stock_price_history(
     minmax_dates: dict = {}
     latest_dates: dict = {}
     if skip_existing:
+        # 差分判定は全履歴を持つ weekly の min/max を基準にする（daily は直近窓のみのため）
         if backfill:
             minmax_dates = {
                 row.edinet_code: (row.min_date, row.max_date)
                 for row in db.query(
-                    StockPriceHistory.edinet_code,
-                    sqlfunc.min(StockPriceHistory.trade_date).label("min_date"),
-                    sqlfunc.max(StockPriceHistory.trade_date).label("max_date"),
-                ).group_by(StockPriceHistory.edinet_code).all()
+                    StockPriceWeekly.edinet_code,
+                    sqlfunc.min(StockPriceWeekly.trade_date).label("min_date"),
+                    sqlfunc.max(StockPriceWeekly.trade_date).label("max_date"),
+                ).group_by(StockPriceWeekly.edinet_code).all()
             }
         else:
             latest_dates = dict(
-                db.query(StockPriceHistory.edinet_code, sqlfunc.max(StockPriceHistory.trade_date))
-                .group_by(StockPriceHistory.edinet_code)
+                db.query(StockPriceWeekly.edinet_code, sqlfunc.max(StockPriceWeekly.trade_date))
+                .group_by(StockPriceWeekly.edinet_code)
                 .all()
             )
 
@@ -824,16 +824,16 @@ async def collect_stock_price_history(
 
             try:
                 if rows:
-                    stmt = pg_insert(StockPriceHistory).values([
-                        {"edinet_code": edinet_code, "sec_code": sec_code, **r}
+                    # close-only 2本立て（daily+weekly）へ集約保存。trim はループ末で一括。
+                    inserted_total += record_prices_batch(db, [
+                        {"edinet_code": edinet_code, "trade_date": r["trade_date"],
+                         "close": r.get("close"), "volume": r.get("volume")}
                         for r in rows
-                    ]).on_conflict_do_nothing(constraint="uq_sph_edinet_date")
-                    result = db.execute(stmt)
-                    db.commit()
-                    inserted_total += result.rowcount
+                    ], trim=False)
             except Exception as e:
                 log.warning(f"株価履歴保存失敗 {sec_code}: {e}")
 
+    trim_daily(db)
     if on_progress:
         on_progress(progress_total, progress_total, f"[完了] {total}社処理（スキップ:{skipped_total}社）、{inserted_total}件追加")
     return {"cancelled": False, "inserted": inserted_total, "skipped": skipped_total, "companies": total}
@@ -888,8 +888,7 @@ async def collect_stock_price_history_jquants(
     if not api_key:
         raise ValueError("環境変数 JQUANTS_API_KEY が未設定です")
 
-    from database import StockPriceHistory, Company as _Company
-    from sqlalchemy.dialects.postgresql import insert as pg_insert
+    from database import record_prices_batch, trim_daily, Company as _Company
 
     today     = date.today()
     date_from = today - timedelta(days=days_back)
@@ -974,25 +973,14 @@ async def collect_stock_price_history_jquants(
             records = deduped
 
             if records:
-                ins = pg_insert(StockPriceHistory).values(records)
-                stmt = ins.on_conflict_do_update(
-                    constraint="uq_sph_edinet_date",
-                    set_={
-                        "open":   ins.excluded.open,
-                        "high":   ins.excluded.high,
-                        "low":    ins.excluded.low,
-                        "close":  ins.excluded.close,
-                        "volume": ins.excluded.volume,
-                    },
-                )
-                result = db.execute(stmt)
-                db.commit()
-                upserted_total += result.rowcount
+                # close-only 2本立て（daily+weekly）へ集約保存。trim はループ末で一括。
+                upserted_total += record_prices_batch(db, records, trim=False)
 
             if on_progress:
                 on_progress(completed, total,
                             f"[{completed}/{total}] {date_str} {len(records)}件")
 
+    trim_daily(db)
     if on_progress:
         on_progress(total, total, f"[完了] {total}日処理・{upserted_total}件追加/更新")
     return {"cancelled": False, "upserted": upserted_total, "days": total}
@@ -1012,31 +1000,31 @@ def update_market_data_from_history(db, point_in_time: bool = False) -> int:
 
     戻り値: 更新した財務レコード数
     """
-    from database import StockPriceHistory, FinancialRecord
+    from database import StockPriceDaily, StockPriceWeekly, FinancialRecord, latest_prices
     from sqlalchemy import func as sqlfunc
 
     if not point_in_time:
-        # ── 最新レコードのみ・最新株価 ─────────────────────────────────────
+        # ── 最新レコードのみ・最新株価（daily＝直近窓を優先・無ければ weekly）─────────
         subq = (
             db.query(
-                StockPriceHistory.edinet_code,
-                sqlfunc.max(StockPriceHistory.trade_date).label("max_date"),
+                StockPriceDaily.edinet_code,
+                sqlfunc.max(StockPriceDaily.trade_date).label("max_date"),
             )
-            .group_by(StockPriceHistory.edinet_code)
+            .group_by(StockPriceDaily.edinet_code)
             .subquery()
         )
-        latest_prices = (
-            db.query(StockPriceHistory.edinet_code, StockPriceHistory.close)
+        latest_price_rows = (
+            db.query(StockPriceDaily.edinet_code, StockPriceDaily.close)
             .join(
                 subq,
-                (StockPriceHistory.edinet_code == subq.c.edinet_code)
-                & (StockPriceHistory.trade_date == subq.c.max_date),
+                (StockPriceDaily.edinet_code == subq.c.edinet_code)
+                & (StockPriceDaily.trade_date == subq.c.max_date),
             )
             .all()
         )
 
         updated = 0
-        for edinet_code, price in latest_prices:
+        for edinet_code, price in latest_price_rows:
             if price is None or price <= 0:
                 continue
             latest = (
@@ -1057,15 +1045,15 @@ def update_market_data_from_history(db, point_in_time: bool = False) -> int:
         return updated
 
     # ── point_in_time=True: 全レコードを period_end 近傍の株価で更新 ─────────
-    # メモリに全 stock_price_history を読み込んで edinet_code 別に整理する
+    # period_end 近傍の価格は全履歴を持つ weekly（close_last）から引く
     all_rows = db.query(
-        StockPriceHistory.edinet_code,
-        StockPriceHistory.trade_date,
-        StockPriceHistory.close,
+        StockPriceWeekly.edinet_code,
+        StockPriceWeekly.trade_date,
+        StockPriceWeekly.close_last,
     ).all()
 
     if not all_rows:
-        log.info("update_market_data_from_history(point_in_time): stock_price_history が空のためスキップ")
+        log.info("update_market_data_from_history(point_in_time): stock_price_weekly が空のためスキップ")
         return 0
 
     # {edinet_code: sorted list of (trade_date_str, close)}
@@ -1126,16 +1114,13 @@ def update_market_data_from_history(db, point_in_time: bool = False) -> int:
         if updated % 200 == 0:
             db.commit()
 
-    # 最新レコードは最新株価で上書き（スクリーニング用の現在株価を保証）
-    # history は昇順ソート済みのため最後の要素が最新取引日
-    for ec, prices in history.items():
-        if not prices:
-            continue
-        _, latest_price = prices[-1]
+    # 最新レコードは現在株価で上書き（スクリーニング用）。daily（直近窓）を優先し
+    # 無ければ weekly にフォールバックする latest_prices で最新終値を引く。
+    for ec, info in latest_prices(db, list(latest_by_ec.keys())).items():
+        latest_price = info.get("price")
         if not latest_price or latest_price <= 0:
             continue
-        if ec in latest_by_ec:
-            _apply_price_to_record(latest_by_ec[ec], latest_price)
+        _apply_price_to_record(latest_by_ec[ec], latest_price)
 
     db.commit()
     log.info(f"update_market_data_from_history(point_in_time): {updated}レコードを更新")
@@ -1254,13 +1239,14 @@ async def fill_recent_stock_price_gap_yahoo(
     差分収集（incremental）後のフォールバックとして使用。
     J-Quants データが存在する行は上書きしない（ON CONFLICT DO NOTHING）。
     """
-    from database import StockPriceHistory, Company as _Company
+    from database import StockPriceDaily, StockPriceWeekly, record_prices_batch, trim_daily, Company as _Company
     from sqlalchemy import func as sqlfunc
-    from sqlalchemy.dialects.postgresql import insert as pg_insert
 
-    latest_row = db.query(sqlfunc.max(StockPriceHistory.trade_date)).scalar()
+    # 最新日は直近窓の daily を基準にする（無ければ weekly にフォールバック）
+    latest_row = (db.query(sqlfunc.max(StockPriceDaily.trade_date)).scalar()
+                  or db.query(sqlfunc.max(StockPriceWeekly.trade_date)).scalar())
     if not latest_row:
-        log.info("fill_recent_stock_price_gap_yahoo: stock_price_history が空のためスキップ")
+        log.info("fill_recent_stock_price_gap_yahoo: 株価データが空のためスキップ")
         return {"skipped": True, "reason": "empty"}
 
     latest_date = date.fromisoformat(latest_row)
@@ -1291,29 +1277,23 @@ async def fill_recent_stock_price_gap_yahoo(
                 records = [
                     {
                         "edinet_code": edinet_code,
-                        "sec_code":    sec_code,
                         "trade_date":  r["trade_date"],
-                        "open":  r["open"], "high": r["high"],
-                        "low":   r["low"],  "close": r["close"],
-                        "volume": r["volume"],
+                        "close":  r["close"], "volume": r.get("volume"),
                     }
                     for r in rows if r["close"]
                 ]
                 if records:
-                    ins  = pg_insert(StockPriceHistory).values(records)
-                    stmt = ins.on_conflict_do_nothing(constraint="uq_sph_edinet_date")
-                    result = db.execute(stmt)
-                    upserted += result.rowcount
-                    if upserted % 500 == 0:
-                        db.commit()
+                    # ギャップ補完は最新日より後の新規日付が対象のため衝突は稀。
+                    # close-only 2本立てへ集約保存（trim はループ末で一括）。
+                    upserted += record_prices_batch(db, records, trim=False)
 
             if on_progress and i % 500 == 0:
                 on_progress(i, total, f"[Yahoo gap-fill {i}/{total}] {upserted}件追加")
 
             await asyncio.sleep(YAHOO_STOCK_RATE_SLEEP)
 
-    db.commit()
-    log.info(f"fill_recent_stock_price_gap_yahoo: {upserted}件を stock_price_history に追加")
+    trim_daily(db)
+    log.info(f"fill_recent_stock_price_gap_yahoo: {upserted}件を株価テーブルへ集約保存")
     return {"skipped": False, "upserted": upserted, "from": d_from, "to": d_to}
 
 

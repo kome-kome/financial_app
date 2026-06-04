@@ -92,7 +92,8 @@ def _clear_auth_cookies(response) -> None:
 from database import (
     SessionLocal, init_db,
     Company, FinancialRecord, FinancialMetric, RegressionResult,
-    CollectionLog, StockPriceHistory, MacroData,
+    CollectionLog, StockPriceDaily, StockPriceWeekly, MacroData,
+    prices_on_or_after, latest_prices,
 )
 from collector import run_full_collection, refresh_company, update_market_data, collect_stock_price_history, collect_stock_price_history_jquants, update_industry_from_jpx, collect_macro_data, MACRO_SERIES, reparse_from_raw
 import plugins as plugin_registry
@@ -665,11 +666,11 @@ async def history_collection_status():
 
 @app.get("/api/collect/history/coverage")
 async def history_coverage(db: Session = Depends(get_db)):
-    """収集済み株価履歴の社数・レコード数・最古日付を返す"""
-    total_companies = db.query(StockPriceHistory.edinet_code).distinct().count()
-    total_records   = db.query(func.count(StockPriceHistory.edinet_code)).scalar() or 0
-    oldest_date     = db.query(func.min(StockPriceHistory.trade_date)).scalar()
-    newest_date     = db.query(func.max(StockPriceHistory.trade_date)).scalar()
+    """収集済み株価（全履歴の weekly 基準）の社数・レコード数・最古/最新日付を返す"""
+    total_companies = db.query(StockPriceWeekly.edinet_code).distinct().count()
+    total_records   = db.query(func.count(StockPriceWeekly.edinet_code)).scalar() or 0
+    oldest_date     = db.query(func.min(StockPriceWeekly.trade_date)).scalar()
+    newest_date     = db.query(func.max(StockPriceWeekly.trade_date)).scalar()
     return {
         "companies":   total_companies,
         "records":     total_records,
@@ -678,30 +679,37 @@ async def history_coverage(db: Session = Depends(get_db)):
     }
 
 @app.get("/api/stock/history/{edinet_code}")
-async def get_stock_history(edinet_code: str, days: int = 365, db: Session = Depends(get_db)):
-    """指定企業の日次 OHLCV を最新 days 日分返す"""
+async def get_stock_history(edinet_code: str, days: int = 365,
+                            resolution: str = "daily", db: Session = Depends(get_db)):
+    """指定企業の終値時系列を返す（close-only）。
+    resolution=daily : 直近 DAILY_WINDOW_DAYS 日の日次終値（チャートの日次ズーム用）
+    resolution=weekly: 全履歴の週次終値（close_last。チャートの全期間表示・長期用）
+    返却は [{trade_date, close}] の昇順。
+    """
     if not _EDINET_CODE_RE.match(edinet_code):
         raise HTTPException(400, "edinet_code の形式が不正です（例: E02167）")
     if not 1 <= days <= 3650:
         raise HTTPException(400, "days は 1〜3650 の範囲で指定してください")
-    rows = (
-        db.query(StockPriceHistory)
-        .filter(StockPriceHistory.edinet_code == edinet_code)
-        .order_by(StockPriceHistory.trade_date.desc())
-        .limit(days)
-        .all()
-    )
-    return [
-        {
-            "trade_date": r.trade_date,
-            "open":       r.open,
-            "high":       r.high,
-            "low":        r.low,
-            "close":      r.close,
-            "volume":     r.volume,
-        }
-        for r in reversed(rows)
-    ]
+    if resolution not in ("daily", "weekly"):
+        raise HTTPException(400, "resolution は daily / weekly のいずれか")
+
+    if resolution == "weekly":
+        rows = (
+            db.query(StockPriceWeekly.trade_date, StockPriceWeekly.close_last)
+            .filter(StockPriceWeekly.edinet_code == edinet_code)
+            .order_by(StockPriceWeekly.trade_date.desc())
+            .limit(days)
+            .all()
+        )
+    else:
+        rows = (
+            db.query(StockPriceDaily.trade_date, StockPriceDaily.close)
+            .filter(StockPriceDaily.edinet_code == edinet_code)
+            .order_by(StockPriceDaily.trade_date.desc())
+            .limit(days)
+            .all()
+        )
+    return [{"trade_date": r[0], "close": r[1]} for r in reversed(rows)]
 
 
 async def _sse_stream(status: dict):
@@ -977,7 +985,7 @@ async def get_macro_data(series_code: str, days: int = 365, db: Session = Depend
 async def get_stats(db: Session = Depends(get_db)):
     n_companies   = db.query(Company).count()
     n_records     = db.query(FinancialRecord).count()
-    n_stock_price = db.query(func.count(StockPriceHistory.edinet_code)).scalar() or 0
+    n_stock_price = db.query(func.count(StockPriceWeekly.edinet_code)).scalar() or 0
     # 業種別OLS実行済み判定用: regression_results に書き込まれた予測値の件数。
     # 乖離分析は gap_ratio が必須のため、0 件なら未実行（UIで乖離分析タブをロック）。
     n_predicted = (
@@ -1313,7 +1321,7 @@ def _backtest_single(
 ) -> dict:
     """バックテストを1期間分実行してdictを返す（例外はそのまま伝播）"""
     from plugins.recommend import PRESETS
-    from database import FinancialRecord, StockPriceHistory
+    from database import FinancialRecord
 
     weights = PRESETS.get(preset_name, PRESETS["バランス型"])
     today = date.today()
@@ -1366,51 +1374,10 @@ def _backtest_single(
     bench_limit = min(500, len(scored))
     bench_codes = [r.edinet_code for _, r in scored[:bench_limit]]
 
-    def _first_prices(codes: list, after: str) -> dict:
-        if not codes:
-            return {}
-        sq = (
-            db.query(StockPriceHistory.edinet_code,
-                     func.min(StockPriceHistory.trade_date).label("min_date"))
-            .filter(StockPriceHistory.edinet_code.in_(codes))
-            .filter(StockPriceHistory.trade_date >= after)
-            .group_by(StockPriceHistory.edinet_code)
-            .subquery()
-        )
-        rows = (
-            db.query(StockPriceHistory.edinet_code,
-                     StockPriceHistory.close,
-                     StockPriceHistory.trade_date)
-            .join(sq, (StockPriceHistory.edinet_code == sq.c.edinet_code) &
-                      (StockPriceHistory.trade_date == sq.c.min_date))
-            .all()
-        )
-        return {row.edinet_code: {"price": row.close, "date": row.trade_date}
-                for row in rows}
-
-    def _last_prices(codes: list) -> dict:
-        if not codes:
-            return {}
-        sq = (
-            db.query(StockPriceHistory.edinet_code,
-                     func.max(StockPriceHistory.trade_date).label("max_date"))
-            .filter(StockPriceHistory.edinet_code.in_(codes))
-            .group_by(StockPriceHistory.edinet_code)
-            .subquery()
-        )
-        rows = (
-            db.query(StockPriceHistory.edinet_code,
-                     StockPriceHistory.close,
-                     StockPriceHistory.trade_date)
-            .join(sq, (StockPriceHistory.edinet_code == sq.c.edinet_code) &
-                      (StockPriceHistory.trade_date == sq.c.max_date))
-            .all()
-        )
-        return {row.edinet_code: {"price": row.close, "date": row.trade_date}
-                for row in rows}
-
-    sp_all = _first_prices(bench_codes, start_date_str)
-    ep_all = _last_prices(bench_codes)
+    # エントリー=start_date 以降の最初の終値（daily窓内なら日次・古ければ週次へ自動切替）。
+    # イグジット="now"=最新終値（daily優先）。価格取得は database のヘルパに集約。
+    sp_all = prices_on_or_after(db, bench_codes, start_date_str)
+    ep_all = latest_prices(db, bench_codes)
 
     results = []
     for rank, (score, r) in enumerate(top, 1):
@@ -1538,15 +1505,17 @@ async def backtest_multi(
 _DB_VIEWER_TABLES = {
     "companies":           Company,
     "financial_records":   FinancialRecord,
-    "stock_price_history": StockPriceHistory,
+    "stock_price_daily":   StockPriceDaily,
+    "stock_price_weekly":  StockPriceWeekly,
     "macro_data":          MacroData,
     "collection_logs":     CollectionLog,
 }
 
 _DB_VIEWER_RELATIONS = [
     # (from_table, from_column, to_table, to_column, label)
-    ("financial_records",   "edinet_code", "companies", "edinet_code", "1社:N年度"),
-    ("stock_price_history", "edinet_code", "companies", "edinet_code", "1社:N日次"),
+    ("financial_records",  "edinet_code", "companies", "edinet_code", "1社:N年度"),
+    ("stock_price_daily",  "edinet_code", "companies", "edinet_code", "1社:N日次(直近)"),
+    ("stock_price_weekly", "edinet_code", "companies", "edinet_code", "1社:N週次(全期間)"),
 ]
 
 
@@ -1767,13 +1736,14 @@ async def db_company_drilldown(edinet_code: str, db: Session = Depends(get_db)):
         .order_by(FinancialRecord.year.desc())
         .all()
     )
-    sph_count = db.query(func.count(StockPriceHistory.edinet_code)).filter_by(edinet_code=edinet_code).scalar() or 0
-    sph_oldest = db.query(func.min(StockPriceHistory.trade_date)).filter_by(edinet_code=edinet_code).scalar()
-    sph_newest = db.query(func.max(StockPriceHistory.trade_date)).filter_by(edinet_code=edinet_code).scalar()
+    # カバレッジは全履歴の weekly 基準、直近プレビューは日次（daily）。
+    sph_count = db.query(func.count(StockPriceWeekly.edinet_code)).filter_by(edinet_code=edinet_code).scalar() or 0
+    sph_oldest = db.query(func.min(StockPriceWeekly.trade_date)).filter_by(edinet_code=edinet_code).scalar()
+    sph_newest = db.query(func.max(StockPriceWeekly.trade_date)).filter_by(edinet_code=edinet_code).scalar()
     sph_recent = (
-        db.query(StockPriceHistory)
+        db.query(StockPriceDaily)
         .filter_by(edinet_code=edinet_code)
-        .order_by(StockPriceHistory.trade_date.desc())
+        .order_by(StockPriceDaily.trade_date.desc())
         .limit(30).all()
     )
 

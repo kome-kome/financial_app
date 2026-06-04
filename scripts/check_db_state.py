@@ -14,7 +14,8 @@ with engine.connect() as conn:
     rows = conn.execute(text("""
         SELECT 'companies'           AS tbl, COUNT(*) AS cnt FROM companies
         UNION ALL SELECT 'financial_records',  COUNT(*) FROM financial_records
-        UNION ALL SELECT 'stock_price_history', COUNT(*) FROM stock_price_history
+        UNION ALL SELECT 'stock_price_daily',  COUNT(*) FROM stock_price_daily
+        UNION ALL SELECT 'stock_price_weekly', COUNT(*) FROM stock_price_weekly
         UNION ALL SELECT 'xbrl_raw_documents', COUNT(*) FROM xbrl_raw_documents
         UNION ALL SELECT 'macro_data',         COUNT(*) FROM macro_data
         UNION ALL SELECT 'collection_logs',    COUNT(*) FROM collection_logs

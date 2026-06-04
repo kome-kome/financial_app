@@ -135,10 +135,29 @@ Render ダッシュボードで管理。
 
 | 項目 | 制約値 | 設計への影響 |
 |---|---|---|
-| DB ストレージ | **500 MB** | `SKIP_XBRL_RAW=true` を維持（xbrl_raw_documents の大量書き込みを避ける） |
+| DB ストレージ | **500 MB** | `SKIP_XBRL_RAW=true` を維持＋株価は close-only 2本立て（下記「容量設計」） |
 | 接続数 | **最大60接続**（pgbouncer 経由） | 並列パイプライン実行を禁止。`max-parallel: 1` を維持 |
 | 一時的 read-only 移行 | トランザクションが長すぎると自動移行 | `run_full_collection` は `MASTER_BATCH=200` 件ごとに commit |
 | プロジェクト停止 | **1週間アクセスなしで自動停止** | 長期不使用時は要注意 |
+
+#### 容量設計（株価 = 最大の消費者）
+
+旧 `stock_price_history`（日次OHLCV全履歴）が約 359MB / 全体80% を占め、年約220MB で増加して 500MB 上限の主犯だった。**close-only の2本立て**へ移行して恒久対策とする：
+
+- **`stock_price_daily`**：直近 `DAILY_WINDOW_DAYS`（≒6か月）の日次終値のみ。収集のたびにローリング削除（trim）でサイズが頭打ち（autovacuum が死領域を再利用）。チャートの日次ズーム・短期バックテスト用。
+- **`stock_price_weekly`**：全履歴の週次集約（追記専用・trim しない）。`close_last`＋生集約 `volume_sum`/`turnover_sum`/`n_days` のみ保持し、**VWAP・相対流動性は派生**（保存しない）。チャート全期間・長期バックテスト・将来の予測モデル用。
+- 見通し：5年分 weekly ≈ 145MB、総計 ≈ 285MB / 500MB、+約37MB/年（runway 約6年）。書き込みは単一チョークポイント `record_prices_batch`（daily upsert→触れた週を weekly 再集約→trim）。
+
+**移行（一回限り・ローカル実行 `migrate_stock_price_dual.py`）**：満杯DB（≈448MB）で新旧テーブルを併存させると 500MB 超で read-only に墜落するため、**ローカルで集約計算 → 旧テーブル DROP（即解放）→ コンパクトな新テーブルをアップロード** の順で Supabase 側ピークを上げない（[GOTCHAS.md](GOTCHAS.md) 参照）。
+
+**将来オプション（いずれも未実装・発動条件つき）**：
+- *別ストア退避*（S3互換 / 別Postgres 等）：真の日次OHLCV・出来高分析・intraday が要件化したとき、または Supabase 使用量が 400MB を再突破したとき検討。
+- *ティアード in-place 圧縮*（1テーブルで日次→週次→月次に加齢圧縮）：上記2本立てで容量・UXとも足りているため不要。再考は別ストアと同条件。
+
+**後続PR（本対策に連なる別タスク）**：
+- *予測モデルの平滑化ターゲット化*：`turnover_sum`/`volume_sum` 由来の VWAP・相対流動性を説明/被説明変数に。年次株価変動ノイズ対策。MODELS.md 更新を伴う。
+- *`financial_records.raw_xbrl_json` の drop*：financial_records 73MB の主因。第2の容量レバー。
+- *過去2〜5年の Yahoo 週次バックフィル*：J-Quants 無料は2年上限のため、5年時系列（財務5年と整合）を Yahoo から `stock_price_weekly` へ補填。上記モデルPRの土台。
 
 ### J-Quants API（無料プラン）
 

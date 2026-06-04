@@ -8,7 +8,7 @@ PostgreSQL スキーマ定義・ORM・upsert処理
 """
 
 import os, gzip, json
-from datetime import datetime
+from datetime import datetime, date, timedelta
 from dotenv import load_dotenv
 from sqlalchemy import (
     create_engine, Column, String, Integer, Float, DateTime,
@@ -158,24 +158,233 @@ class FinancialRecord(Base):
     company = relationship("Company", back_populates="records")
 
 
-# ── 3. 株価履歴（日次OHLCV） ───────────────────────────────────────────────
+# ── 3. 株価履歴（2本立て: 直近=日次 / 全履歴=週次。close-only・source-only）────────
+# Supabase Free 500MB 制約の恒久対策。旧 stock_price_history（日次OHLCV全履歴・359MB）を
+#   - StockPriceDaily : 直近 DAILY_WINDOW_DAYS の日次終値（チャート日次ズーム・短期バックテスト）
+#   - StockPriceWeekly: 全履歴の週次集約（チャート全期間・長期バックテスト・将来モデル）
+# に分離。OHLC のうち close のみ保持（チャートは終値ライン）。VWAP・相対流動性は
+# turnover_sum/volume_sum から「派生」（保存しない＝financial_metrics VIEW と同じ流儀）。
 
-class StockPriceHistory(Base):
-    __tablename__ = "stock_price_history"
+DAILY_WINDOW_DAYS = 183   # daily の保持窓（約6か月）。weekly が全履歴を持つため自由に変更可・移行不要
+
+
+class StockPriceDaily(Base):
+    """直近 DAILY_WINDOW_DAYS 日の日次終値。ローリング削除で一定サイズに保つ。"""
+    __tablename__ = "stock_price_daily"
     __table_args__ = (
-        PrimaryKeyConstraint("edinet_code", "trade_date", name="uq_sph_edinet_date"),
-        Index("ix_sph_sec_date", "sec_code", "trade_date"),
+        PrimaryKeyConstraint("edinet_code", "trade_date", name="pk_stock_price_daily"),
+        Index("ix_spd_trade_date", "trade_date"),   # 全社横断 trim（trade_date < cutoff）用
     )
 
     edinet_code = Column(String(10), ForeignKey("companies.edinet_code"), nullable=False)
-    sec_code    = Column(String(6),  nullable=False)
     trade_date  = Column(String(10), nullable=False)   # "YYYY-MM-DD"
-    open        = Column(Float)
-    high        = Column(Float)
-    low         = Column(Float)
     close       = Column(Float, nullable=False)
-    volume      = Column(Float)
-    created_at  = Column(DateTime, default=datetime.utcnow)
+    volume      = Column(Float)                         # VWAP 算出用（週次集約時に消費）
+
+
+class StockPriceWeekly(Base):
+    """全履歴の週次集約（追記専用・trim しない）。1 ISO週 = 1 レコード。source-only。"""
+    __tablename__ = "stock_price_weekly"
+    __table_args__ = (
+        PrimaryKeyConstraint("edinet_code", "week_start", name="pk_stock_price_weekly"),
+    )
+
+    edinet_code  = Column(String(10), ForeignKey("companies.edinet_code"), nullable=False)
+    week_start   = Column(String(10), nullable=False)   # ISO週の月曜 "YYYY-MM-DD"
+    trade_date   = Column(String(10))                   # 週内最終営業日の実日付
+    close_last   = Column(Float, nullable=False)        # 最終営業日終値（実約定・チャート/バックテスト）
+    volume_sum   = Column(Float)                         # 週内出来高合計（VWAP分母）。volume欠落週は None
+    turnover_sum = Column(Float)                         # 週内売買代金合計 Σ(close*vol)（VWAP分子・流動性変量）
+    n_days       = Column(Integer)                       # 週内に集約した営業日数（祝日週の信頼度判定）
+
+
+def iso_week_start(trade_date: str) -> str:
+    """'YYYY-MM-DD' → その ISO 週の月曜日 'YYYY-MM-DD'。"""
+    d = date.fromisoformat(trade_date[:10])
+    return (d - timedelta(days=d.weekday())).isoformat()
+
+
+def aggregate_weeks(rows) -> list:
+    """日次行を ISO 週ごとに集約する純粋関数（DB 非依存・テスト対象）。
+
+    入力 rows: iterable of (edinet_code, trade_date, close, volume)
+    出力: [{edinet_code, week_start, trade_date, close_last, volume_sum, turnover_sum, n_days}, ...]
+
+    - close_last = 週内最終営業日の終値（trade_date 昇順の末尾）
+    - volume_sum / turnover_sum = 週内に volume が取得できた日のみ合計。1日も無ければ None
+      （VWAP 派生側は turnover_sum/volume_sum、None の週は close_last にフォールバック）
+    - n_days = 集約に使った営業日数
+    """
+    groups: dict = {}
+    for ec, td, close, vol in rows:
+        if close is None:
+            continue
+        ws = iso_week_start(td)
+        groups.setdefault((ec, ws), []).append((td[:10], close, vol))
+
+    out = []
+    for (ec, ws), items in groups.items():
+        items.sort(key=lambda x: x[0])          # trade_date 昇順
+        last_td, last_close, _ = items[-1]
+        with_vol = [(c, v) for _, c, v in items if v is not None]
+        if with_vol:
+            volume_sum   = sum(v for _, v in with_vol)
+            turnover_sum = sum(c * v for c, v in with_vol)
+        else:
+            volume_sum = turnover_sum = None
+        out.append(dict(
+            edinet_code=ec, week_start=ws, trade_date=last_td,
+            close_last=last_close, volume_sum=volume_sum,
+            turnover_sum=turnover_sum, n_days=len(items),
+        ))
+    return out
+
+
+def _daily_cutoff(window_days: int = DAILY_WINDOW_DAYS) -> str:
+    """daily テーブルの保持下限日（today - window_days）を 'YYYY-MM-DD' で返す。"""
+    return (date.today() - timedelta(days=window_days)).isoformat()
+
+
+def trim_daily(db, window_days: int = DAILY_WINDOW_DAYS) -> int:
+    """daily の保持窓より古い行を削除する（ループ収集の末尾で1回だけ呼ぶ用）。戻り値: 削除行数。"""
+    res = db.execute(
+        StockPriceDaily.__table__.delete()
+        .where(StockPriceDaily.trade_date < _daily_cutoff(window_days))
+    )
+    db.commit()
+    return res.rowcount or 0
+
+
+def record_prices_batch(db, rows: list, *, trim: bool = True) -> int:
+    """価格収集の単一チョークポイント（J-Quants/stooq/yahoo 全経路が通る）。
+
+    rows: [{edinet_code, trade_date, close, volume?}, ...]（同一キーは呼び出し側で重複排除済み前提）
+    手順: ① daily upsert → ② 触れた週のみ daily から weekly を再集約 upsert → ③ daily の trim。
+    Postgres 専用（pg_insert ON CONFLICT）。集約ロジックは aggregate_weeks（純粋・テスト済）に委譲。
+    戻り値: upsert した daily 行数。
+    """
+    rows = [r for r in rows if r.get("close") is not None and r.get("trade_date")]
+    if not rows:
+        return 0
+
+    # ① daily upsert
+    daily_vals = [{
+        "edinet_code": r["edinet_code"], "trade_date": r["trade_date"][:10],
+        "close": float(r["close"]),
+        "volume": float(r["volume"]) if r.get("volume") is not None else None,
+    } for r in rows]
+    ins = pg_insert(StockPriceDaily).values(daily_vals)
+    db.execute(ins.on_conflict_do_update(
+        constraint="pk_stock_price_daily",
+        set_={"close": ins.excluded.close, "volume": ins.excluded.volume},
+    ))
+
+    # ② 触れた週を daily から再集約（過去 run の部分週も含めて完全な週で確定）
+    _recompute_weeks_from_daily(db, daily_vals)
+
+    # ③ trim（古い daily を削除。weekly が全履歴を持つので情報損失なし）
+    if trim:
+        db.execute(
+            StockPriceDaily.__table__.delete()
+            .where(StockPriceDaily.trade_date < _daily_cutoff())
+        )
+    db.commit()
+    return len(daily_vals)
+
+
+def _recompute_weeks_from_daily(db, daily_vals: list) -> None:
+    """daily_vals が触れた (edinet_code, week_start) の週を daily から再集約し weekly へ upsert。"""
+    affected = {(r["edinet_code"], iso_week_start(r["trade_date"])) for r in daily_vals}
+    if not affected:
+        return
+    ecs   = {ec for ec, _ in affected}
+    weeks = sorted(ws for _, ws in affected)
+    lo = weeks[0]
+    hi = (date.fromisoformat(weeks[-1]) + timedelta(days=6)).isoformat()
+
+    daily_rows = (
+        db.query(StockPriceDaily.edinet_code, StockPriceDaily.trade_date,
+                 StockPriceDaily.close, StockPriceDaily.volume)
+        .filter(StockPriceDaily.edinet_code.in_(ecs),
+                StockPriceDaily.trade_date >= lo,
+                StockPriceDaily.trade_date <= hi)
+        .all()
+    )
+    agg = aggregate_weeks(
+        (r.edinet_code, r.trade_date, r.close, r.volume) for r in daily_rows
+    )
+    weekly_vals = [a for a in agg if (a["edinet_code"], a["week_start"]) in affected]
+    if not weekly_vals:
+        return
+    wins = pg_insert(StockPriceWeekly).values(weekly_vals)
+    db.execute(wins.on_conflict_do_update(
+        constraint="pk_stock_price_weekly",
+        set_={
+            "trade_date":   wins.excluded.trade_date,
+            "close_last":   wins.excluded.close_last,
+            "volume_sum":   wins.excluded.volume_sum,
+            "turnover_sum": wins.excluded.turnover_sum,
+            "n_days":       wins.excluded.n_days,
+        },
+    ))
+
+
+def prices_on_or_after(db, codes: list, after: str) -> dict:
+    """各 edinet_code の after 以降・最初の終値を返す（バックテストのエントリー用）。
+
+    解像度自動切替: after が daily 窓内なら daily を引き、無ければ weekly にフォールバック。
+    戻り値: {edinet_code: {"price": close, "date": trade_date}}。
+    """
+    if not codes:
+        return {}
+    result: dict = {}
+    if after >= _daily_cutoff():
+        result.update(_first_from(db, StockPriceDaily, StockPriceDaily.close, codes, after))
+    missing = [c for c in codes if c not in result]
+    if missing:
+        result.update(_first_from(db, StockPriceWeekly, StockPriceWeekly.close_last, missing, after))
+    return result
+
+
+def latest_prices(db, codes: list) -> dict:
+    """各 edinet_code の最新終値を返す（バックテストのイグジット='now' 用）。daily 優先・無ければ weekly。"""
+    if not codes:
+        return {}
+    result = _latest_from(db, StockPriceDaily, StockPriceDaily.close, codes)
+    missing = [c for c in codes if c not in result]
+    if missing:
+        result.update(_latest_from(db, StockPriceWeekly, StockPriceWeekly.close_last, missing))
+    return result
+
+
+def _first_from(db, model, price_col, codes: list, after: str) -> dict:
+    from sqlalchemy import func as _f
+    sq = (
+        db.query(model.edinet_code, _f.min(model.trade_date).label("d"))
+        .filter(model.edinet_code.in_(codes), model.trade_date >= after)
+        .group_by(model.edinet_code).subquery()
+    )
+    rows = (
+        db.query(model.edinet_code, price_col, model.trade_date)
+        .join(sq, (model.edinet_code == sq.c.edinet_code) & (model.trade_date == sq.c.d))
+        .all()
+    )
+    return {r[0]: {"price": r[1], "date": r[2]} for r in rows}
+
+
+def _latest_from(db, model, price_col, codes: list) -> dict:
+    from sqlalchemy import func as _f
+    sq = (
+        db.query(model.edinet_code, _f.max(model.trade_date).label("d"))
+        .filter(model.edinet_code.in_(codes))
+        .group_by(model.edinet_code).subquery()
+    )
+    rows = (
+        db.query(model.edinet_code, price_col, model.trade_date)
+        .join(sq, (model.edinet_code == sq.c.edinet_code) & (model.trade_date == sq.c.d))
+        .all()
+    )
+    return {r[0]: {"price": r[1], "date": r[2]} for r in rows}
 
 
 # ── 4. 収集ジョブログ ──────────────────────────────────────────────────────

@@ -21,7 +21,8 @@ os.environ.setdefault("APP_RATELIMIT_ENABLED", "false")
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from database import (  # noqa: E402
-    Base, ViewBase, Company, FinancialRecord, FinancialMetric, StockPriceHistory,
+    Base, ViewBase, Company, FinancialRecord, FinancialMetric,
+    StockPriceDaily, StockPriceWeekly, iso_week_start,
 )
 
 
@@ -98,9 +99,29 @@ def make_company():
 
 @pytest.fixture
 def make_price():
+    """直近窓の日次終値 StockPriceDaily 行のファクトリ（close-only）。"""
     def _make(**overrides):
-        data = dict(edinet_code="E00001", sec_code="1001",
-                    trade_date="2023-01-04", close=1000.0)
+        data = dict(edinet_code="E00001", trade_date="2023-01-04", close=1000.0)
         data.update(overrides)
-        return StockPriceHistory(**data)
+        return StockPriceDaily(**data)
+    return _make
+
+
+@pytest.fixture
+def make_weekly():
+    """全履歴の週次集約 StockPriceWeekly 行のファクトリ。
+
+    trade_date を渡すと week_start を ISO 週の月曜から自動算出する（override 可）。
+    close_last のみ指定すれば volume_sum/turnover_sum/n_days はデフォルト値で埋まる。"""
+    def _make(**overrides):
+        trade_date = overrides.pop("trade_date", "2023-01-06")
+        data = dict(
+            edinet_code="E00001",
+            week_start=iso_week_start(trade_date),
+            trade_date=trade_date,
+            close_last=1000.0,
+            volume_sum=10000.0, turnover_sum=1.0e7, n_days=5,
+        )
+        data.update(overrides)
+        return StockPriceWeekly(**data)
     return _make

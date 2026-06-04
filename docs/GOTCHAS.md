@@ -58,6 +58,8 @@ SSEエンドポイント: 収集=`/api/collect/stream`、市場データ=`/api/c
 - **`CollectionLog.status`** の値: `running` / `done` / `error` / `resolved`（修正済みエラー）。UIは `resolved` を緑扱い。
 - **.env は UTF-8（BOMなし）で保存すること**。BOM付きだと最初のキーが読み込めずAPIキーが空になる。
 - 本番運用前に `APP_PASSWORD`・`APP_SECRET_KEY`・`APP_RECOVERY_KEY` を必ず設定する。
+- **株価は close-only の2本立て**（`stock_price_daily`＝直近6か月日次 / `stock_price_weekly`＝全履歴週次）。価格の読み書きは必ず単一ヘルパ経由：書き込み＝`record_prices_batch`（daily upsert→週次再集約→trim）、エントリー価格＝`prices_on_or_after`（窓内daily・古ければweekly・daily空ならweeklyフォールバック）、最新値＝`latest_prices`（daily優先）。VWAP/相対流動性は `turnover_sum/volume_sum` から派生（保存しない）。
+- **満杯DBでの株価移行の罠**：旧 `stock_price_history`（≈359MB）と新2テーブルを併存させると 448MB→553MB で **500MB 超＝read-only 墜落**。`DELETE`/`ALTER DROP COLUMN` はファイルを縮めず（解放は `VACUUM FULL` 必要だが満杯では実行不可）。→ `migrate_stock_price_dual.py` は **ローカルで集約計算 → 旧 `DROP TABLE`（即解放）→ コンパクトな新テーブルをアップロード** の順で Supabase ピークを現状から上げない。退避 dump は照合完了まで保持（再投入元）。
 
 ---
 

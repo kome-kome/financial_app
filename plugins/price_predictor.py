@@ -1,11 +1,12 @@
 """
 株価リターン予測プラグイン
 
-StockPriceHistory（日次OHLCV）と FinancialRecord（年次財務）を edinet_code で結合し、
-月次スナップショットを学習データとして OLS でN日先の対数リターンを予測する。
+StockPriceWeekly（全履歴の週次終値 close_last）と FinancialRecord（年次財務）を
+edinet_code で結合し、月次スナップショットを学習データとして OLS でN期先の対数リターンを
+予測する。価格系列は週次刻み（容量対策で日次は直近6か月のみ保持のため）。
 
 特徴量:
-  価格系: MA20乖離率 / 60日ボラティリティ / RSI(14) / ATR比率(14)
+  価格系: MA20乖離率 / 60期ボラティリティ / RSI(14) / ATR比率（週次は close 退化）
   財務系: PER / PBR / ROE / 自己資本比率 / Zスコア群 / gap_ratio（無次元）
 
 次元整合性（CLAUDE.md制約準拠）:
@@ -203,7 +204,8 @@ class PricePredictorPlugin(AnalysisPlugin):
     async def execute(self, params: dict, db: Any) -> dict:
         # 財務特徴量（roe / equity_ratio / z_* / gap_ratio）は派生・回帰由来のため
         # financial_metrics VIEW から読む（全年度分が必要なので最新行に絞らない）。
-        from database import Company, FinancialMetric, StockPriceHistory
+        from database import Company, FinancialMetric, StockPriceWeekly
+        from collections import namedtuple as _namedtuple
 
         horizon = int(params.get("horizon") or 20)
         use_price = bool(params.get("use_price_features", True))
@@ -217,9 +219,14 @@ class PricePredictorPlugin(AnalysisPlugin):
 
         # ── データロード ────────────────────────────────────────────────────
 
+        # 全履歴の価格系列は weekly（close_last）から読む（daily は直近窓のみのため）。
+        # 価格特徴量は週次刻みで計算される（high/low は持たないため atr は close で退化）。
+        # 日次刻みでの再チューニングはモデル改善PRの範囲。
+        _PX = _namedtuple("_PX", "edinet_code trade_date close high low")
         all_prices = (
-            db.query(StockPriceHistory)
-            .order_by(StockPriceHistory.edinet_code, StockPriceHistory.trade_date)
+            db.query(StockPriceWeekly.edinet_code, StockPriceWeekly.trade_date,
+                     StockPriceWeekly.close_last)
+            .order_by(StockPriceWeekly.edinet_code, StockPriceWeekly.trade_date)
             .all()
         )
         if not all_prices:
@@ -228,8 +235,8 @@ class PricePredictorPlugin(AnalysisPlugin):
             )
 
         prices_by_co: dict[str, list] = defaultdict(list)
-        for p in all_prices:
-            prices_by_co[p.edinet_code].append(p)
+        for ec, td, cl in all_prices:
+            prices_by_co[ec].append(_PX(ec, td, cl, None, None))
 
         fin_recs_all = (
             db.query(FinancialMetric)

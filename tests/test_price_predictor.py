@@ -120,15 +120,14 @@ class TestExecute:
         with pytest.raises(ValueError):
             asyncio.run(plugin.execute({}, db))
 
-    def test_insufficient_samples_raises(self, db, make_metric, make_price):
-        # 1 社・100 営業日。月末スナップショットが学習に必要な最低数(10)に届かない。
-        start = datetime(2023, 1, 1)
+    def test_insufficient_samples_raises(self, db, make_metric, make_weekly):
+        # 1 社・100 週（週次刻み）。学習に必要な月末サンプル最低数(10)に届かない。
+        start = datetime(2023, 1, 2)   # 月曜
         prices = [
-            make_price(
+            make_weekly(
                 edinet_code="E00001",
-                trade_date=(start + timedelta(days=i)).strftime("%Y-%m-%d"),
-                close=1000.0 + i + (i % 5) * 3.0,
-                high=1005.0 + i, low=995.0 + i,
+                trade_date=(start + timedelta(days=i * 7)).strftime("%Y-%m-%d"),
+                close_last=1000.0 + i + (i % 5) * 3.0,
             )
             for i in range(100)
         ]

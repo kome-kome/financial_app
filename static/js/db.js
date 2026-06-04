@@ -67,14 +67,15 @@ async function loadRelations(){
     if(!d) return;
     const box = document.getElementById('relations-box');
 
-    // companies を中央、左に financial_records、右に stock_price_history、下に collection_logs（独立）
+    // companies を中央、左に financial_records、右に株価2本立て（daily/weekly）、下に collection_logs
     const tablesByName = Object.fromEntries(d.tables.map(t => [t.name, t]));
 
     const layout = `
       <div class="er-canvas">
         ${renderEntity(tablesByName.financial_records)}
         ${renderEntity(tablesByName.companies, true)}
-        ${renderEntity(tablesByName.stock_price_history)}
+        ${renderEntity(tablesByName.stock_price_daily)}
+        ${renderEntity(tablesByName.stock_price_weekly)}
       </div>
       <div style="margin-top:24px">
         ${renderEntity(tablesByName.collection_logs, false, true)}
@@ -366,16 +367,15 @@ async function runDrilldown(){
         `}
       </div>
       <div class="drilldown-section">
-        <h3>📈 stock_price_history (${d.stock_price_history.total.toLocaleString()} 件 / ${d.stock_price_history.oldest_date ?? '—'} 〜 ${d.stock_price_history.newest_date ?? '—'})</h3>
-        ${d.stock_price_history.recent.length === 0 ? '<div class="empty-msg">株価履歴なし</div>' : `
+        <h3>📈 株価（全期間=週次 / 直近プレビュー=日次） (${d.stock_price_history.total.toLocaleString()} 週 / ${d.stock_price_history.oldest_date ?? '—'} 〜 ${d.stock_price_history.newest_date ?? '—'})</h3>
+        ${d.stock_price_history.recent.length === 0 ? '<div class="empty-msg">株価データなし</div>' : `
           <div class="table-wrap" style="max-height:240px">
             <table class="data-table">
-              <thead><tr><th>trade_date</th><th>open</th><th>high</th><th>low</th><th>close</th><th>volume</th></tr></thead>
+              <thead><tr><th>trade_date</th><th>close</th><th>volume</th></tr></thead>
               <tbody>
                 ${d.stock_price_history.recent.map(r => `
                   <tr>
                     <td>${fmt(r.trade_date)}</td>
-                    <td>${fmt(r.open)}</td><td>${fmt(r.high)}</td><td>${fmt(r.low)}</td>
                     <td>${fmt(r.close)}</td><td>${fmt(r.volume)}</td>
                   </tr>
                 `).join('')}
