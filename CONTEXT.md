@@ -19,6 +19,10 @@ _Avoid_: GUI項目, 表示カラム
 回帰分析モデルの説明変数として使う項目。要件は表示とは別で、per-share の次元整合性・winsorize・パネルでの欠損率（標準間カバレッジ）が効く。GUI 表示の有無とは独立に価値を持つ。
 _Avoid_: （口語の「説明変数」は可。正式にはこちら）
 
+**回帰結果 (regression result)**:
+業種別OLS（producer）が `regression_results` テーブルへ書き込む銘柄×年度の出力（predicted_market_cap / gap_ratio / model[ols|ridge] / sector / computed_at）。乖離分析（consumer・`depends_on=["sector_ols"]`）が消費する seam の通貨。producer 未実行なら乖離分析は前提条件エラー（`plugins.ensure_dependencies` が `depends_on` を runner/専用エンドポイントで強制）。回帰が財務データ更新より古い＝stale。
+_Avoid_: 予測結果, OLS結果（モデル混在を曖昧にするため）
+
 ## データソースと収集
 
 **全件収集 (full collection)**:

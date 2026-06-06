@@ -171,6 +171,31 @@ class TestHeavyPluginRenderBlock:
         assert r.status_code != 403
 
 
+class TestGapAnalysisDependency:
+    """candidate4: depends_on の実行時強制を HTTP レイヤで検証（C1: 専用404 / 汎用400）。"""
+
+    def test_gap_analysis_404_when_sector_ols_not_run(self, db):
+        # 回帰未実行（regression_results 空）→ depends_on 未充足で 404
+        api.app.dependency_overrides[api.get_db] = lambda: db
+        assert client.get("/api/gap-analysis").status_code == 404
+
+    def test_run_plugin_400_when_dependency_unsatisfied(self, db):
+        # 汎用 runner 経由は同じ前提条件未充足を 400 で返す
+        api.app.dependency_overrides[api.get_db] = lambda: db
+        assert client.post("/api/plugins/gap_analysis/run", json={}).status_code == 400
+
+    def test_gap_analysis_200_empty_when_regression_exists_but_no_rows(self, db):
+        # 回帰はある（depends_on 充足）が当該フィルタに該当行なし → 200・空結果（404 ではない）
+        from database import RegressionResult
+        db.add(RegressionResult(edinet_code="E00001", year=2023, period_end="2023-03-31",
+                                predicted_market_cap=1.0, gap_ratio=5.0, model="ols", sector="x"))
+        db.commit()
+        api.app.dependency_overrides[api.get_db] = lambda: db
+        r = client.get("/api/gap-analysis")
+        assert r.status_code == 200
+        assert r.json()["count"] == 0
+
+
 class TestCompaniesEndpoint:
     def test_list_and_filters(self, db, make_company):
         db.add(make_company(edinet_code="E00001", name="トヨタ自動車", industry="輸送用機器"))

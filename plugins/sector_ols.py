@@ -175,6 +175,16 @@ class SectorOLSPlugin(AnalysisPlugin):
     depends_on = []
     heavy = True   # 業種ごとの行列回帰。Render Free では OOM するためローカル実行に限定
 
+    def produced_output(self, db) -> bool:
+        """regression_results に gap_ratio 付きの予測値を書き終えているか。
+        gap_analysis（depends_on=["sector_ols"]）の前提充足判定に使う。"""
+        from database import RegressionResult
+        return (
+            db.query(RegressionResult.edinet_code)
+              .filter(RegressionResult.gap_ratio.isnot(None))
+              .first() is not None
+        )
+
     def params_schema(self) -> dict:
         return {
             "target": {
