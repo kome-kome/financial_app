@@ -100,7 +100,9 @@ class FinancialRecord(Base):
     bs_noncurrent_assets    = Column(Float)   # 固定資産
     bs_buildings            = Column(Float)   # 建物及び構築物
     bs_machinery            = Column(Float)   # 機械装置及び運搬具
+    bs_ppe_total            = Column(Float)   # 有形固定資産合計（内訳=建物+機械等の整合用。C2）
     bs_intangible_assets    = Column(Float)   # 無形固定資産
+    bs_investments_other_assets = Column(Float)  # 投資その他の資産合計（JGAAP固定資産構造。C2）
     bs_cash                 = Column(Float)   # 現金・預金
     bs_investment_securities = Column(Float)  # 投資有価証券（清原式ネットキャッシュ用）
     bs_total_liabilities    = Column(Float)   # 総負債
@@ -128,7 +130,12 @@ class FinancialRecord(Base):
     pl_net_income           = Column(Float)   # 当期純利益
     pl_net_income_attr      = Column(Float)   # 親会社帰属純利益（IFRS）
     pl_eps                  = Column(Float)   # EPS（円）
-    pl_ebitda               = Column(Float)   # EBITDA（計算値）
+    pl_ebitda               = Column(Float)   # EBITDA（計算値=営業利益+減価償却費）
+    # ── PL 網羅性追加（C2）──
+    pl_rd_expenses          = Column(Float)   # 研究開発費
+    pl_depreciation         = Column(Float)   # 減価償却費及び償却費（D&A・CF add-back。EBITDA入力）
+    pl_extraordinary_income = Column(Float)   # 特別利益（JGAAP概念。IFRS/US-GAAP連結は概ねnull）
+    pl_extraordinary_loss   = Column(Float)   # 特別損失（JGAAP概念。IFRS/US-GAAP連結は概ねnull）
 
     # ── CF（キャッシュフロー）再分類項目 ────────────────────────────────
     cf_operating_cf         = Column(Float)   # 営業CF
@@ -145,6 +152,10 @@ class FinancialRecord(Base):
     pbr                     = Column(Float)   # PBR
     div_yield               = Column(Float)   # 配当利回り %
     dps                     = Column(Float)   # 1株配当
+
+    # ── 非財務（C2・nonfin セクション経由で直接列にマップ）────────────────
+    employees               = Column(Float)   # 従業員数（連結・整数値をFloat格納）
+    issued_shares           = Column(Float)   # 期末発行済株式総数（表示・参考。OLS分母はshares_outstanding維持）
 
     # 計算結果（派生比率・Zスコア・成長率・OLS予測値）は financial_records には保持しない。
     #   - 軽い派生／Zスコア／成長率 → financial_metrics VIEW（ソース列から都度算出）
@@ -665,6 +676,11 @@ def init_db():
             "bs_payables", "bs_bonds_payable",
             "bs_paid_in_capital", "bs_retained_earnings",
             "bs_investment_securities",
+            # 網羅性追加（C2）。全て DOUBLE PRECISION で冪等 ADD（非財務 employees/issued_shares 含む）
+            "bs_ppe_total", "bs_investments_other_assets",
+            "pl_rd_expenses", "pl_depreciation",
+            "pl_extraordinary_income", "pl_extraordinary_loss",
+            "employees", "issued_shares",
         ]
         for col in _new_cols:
             conn.execute(text(
@@ -748,6 +764,9 @@ def upsert_financial(db, data: dict) -> FinancialRecord:
     # financial_metrics VIEW がソース列から都度算出する（計算結果と生データのDB分離）。
     # val (market data) は市場スナップショットのため保存する。
     for k, v in data.get("val", {}).items():
+        flat[k] = v
+    # nonfin（従業員数・発行済株式数など非財務）はプレフィックス無しの直接列にマップ（C2）
+    for k, v in data.get("nonfin", {}).items():
         flat[k] = v
 
     # 生データ保存

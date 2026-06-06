@@ -239,6 +239,24 @@ XBRL_MAP = {
     # ── バリュエーション・配当 ────────────────────────────────────────────
     "DividendPaidPerShare":                            ("val", "dps"),
     "DividendPaidPerShareSummaryOfBusinessResults":    ("val", "dps"),    # 経営指標等セクション
+    # ── 網羅性追加（C2）。実XBRL診断で確定した標準要素（拡張要素/ラベル照合は不要）──
+    # BS 固定資産の合計（内訳=建物+機械との整合用 / 投資その他）。IFRS は ...IFRS 別綴り。
+    "PropertyPlantAndEquipment":                       ("bs", "ppe_total"),                  # 有形固定資産合計（JGAAP）
+    "PropertyPlantAndEquipmentIFRS":                   ("bs", "ppe_total"),                  # 有形固定資産合計（IFRS）
+    "InvestmentsAndOtherAssets":                       ("bs", "investments_other_assets"),   # 投資その他の資産合計（JGAAP固定資産構造）
+    # PL 研究開発費（研究開発活動セクションの連結総額。SGA内訳は fallback）
+    "ResearchAndDevelopmentExpensesResearchAndDevelopmentActivities": ("pl", "rd_expenses"),
+    "ResearchAndDevelopmentExpensesSGA":               ("pl", "rd_expenses"),                # fallback（販管費内の研究開発費）
+    # PL 減価償却費及び償却費（CF add-back の連結総額。EBITDA 入力）
+    "DepreciationAndAmortizationOpeCF":                ("pl", "depreciation"),               # JGAAP
+    "DepreciationAndAmortizationOpeCFIFRS":            ("pl", "depreciation"),               # IFRS
+    # PL 特別損益（JGAAP概念。IFRS/US-GAAP連結には無く概ね null）
+    "ExtraordinaryIncome":                             ("pl", "extraordinary_income"),
+    "ExtraordinaryLoss":                               ("pl", "extraordinary_loss"),
+    # 非財務（nonfin セクション→ プレフィックス無しの直接列）
+    "NumberOfEmployees":                               ("nonfin", "employees"),              # 従業員数（連結=CurrentYearInstant が priority1 で勝つ）
+    "NumberOfIssuedSharesAsOfFiscalYearEndIssuedSharesTotalNumberOfSharesEtc": ("nonfin", "issued_shares"),  # 期末発行済株式総数（正確値）
+    "TotalNumberOfIssuedSharesSummaryOfBusinessResults": ("nonfin", "issued_shares"),        # fallback（経営指標等・千株丸め）
 }
 
 # 連結データ優先判定キー。"Prior1Year" は含めない（前期連結データが当期データを上書きするバグを防ぐ）
@@ -497,8 +515,8 @@ def df_to_raw_rows(df) -> list:
 
 
 def parse_raw_rows(rows: list) -> dict:
-    """[{element, context, value}, ...] から {bs, pl, cf, meta} を抽出（再解析用）"""
-    result = {"bs": {}, "pl": {}, "cf": {}, "val": {}, "meta": {}}
+    """[{element, context, value}, ...] から {bs, pl, cf, val, nonfin, meta} を抽出（再解析用）"""
+    result = {"bs": {}, "pl": {}, "cf": {}, "val": {}, "nonfin": {}, "meta": {}}
     _priority: dict = {}
     for row in rows:
         elem = row.get("element", "")
@@ -515,7 +533,11 @@ def parse_raw_rows(rows: list) -> dict:
                 ("NonConsolidated" in ctx or "_Member" in ctx):
             continue
         is_consol  = any(k in ctx for k in CONSOLIDATED_KEYS) and "NonConsolidated" not in ctx
-        has_member = "_Member" in ctx or "NonConsolidated" in ctx
+        # 次元メンバー（セグメント別・株式種類別等）は全て "...Member" で終わる breakdown。
+        # "_Member" 限定だと "ReportableSegmentMember"（直前にアンダースコア無し）を取りこぼし、
+        # 連結総額（メンバー無し context）と同優先度で並んで CSV 順次第で上書きされる（従業員数で顕在化）。
+        # 広く "Member" を breakdown とみなすことで連結総額を確実に優先する。
+        has_member = "Member" in ctx or "NonConsolidated" in ctx
         priority   = 2 if is_consol else (1 if not has_member else 0)
         try:
             val = float(str(row.get("value", "")).replace(",", ""))
@@ -534,7 +556,7 @@ def parse_raw_rows(rows: list) -> dict:
 
 
 def parse_xbrl_csv(df, edinet_code: str, period_end: str) -> dict:
-    result = {"bs": {}, "pl": {}, "cf": {}, "val": {}, "meta": {}}
+    result = {"bs": {}, "pl": {}, "cf": {}, "val": {}, "nonfin": {}, "meta": {}}
     if df is None or df.empty:
         return result
     df.columns = [c.strip() for c in df.columns]
@@ -574,7 +596,11 @@ def parse_xbrl_csv(df, edinet_code: str, period_end: str) -> dict:
             continue
 
         is_consol  = any(k in ctx for k in CONSOLIDATED_KEYS) and "NonConsolidated" not in ctx
-        has_member = "_Member" in ctx or "NonConsolidated" in ctx
+        # 次元メンバー（セグメント別・株式種類別等）は全て "...Member" で終わる breakdown。
+        # "_Member" 限定だと "ReportableSegmentMember"（直前にアンダースコア無し）を取りこぼし、
+        # 連結総額（メンバー無し context）と同優先度で並んで CSV 順次第で上書きされる（従業員数で顕在化）。
+        # 広く "Member" を breakdown とみなすことで連結総額を確実に優先する。
+        has_member = "Member" in ctx or "NonConsolidated" in ctx
         priority   = 2 if is_consol else (1 if not has_member else 0)
 
         val_raw = row[col_map["value"]]
@@ -615,6 +641,10 @@ def calc_derived(rec: dict) -> dict:
     # 営業外損益（純額）= 経常利益 - 営業利益。pl セクションに置くことで pl_ プレフィックスが付く
     if op and ord_p:
         pl["nonoperating_income"] = round(ord_p - op, 0)
+    # EBITDA = 営業利益 + 減価償却費及び償却費（C2 で depreciation を収集。両方揃う時のみ算出）
+    dep = pl.get("depreciation")
+    if op and dep:
+        pl["ebitda"] = round(op + dep, 0)
     # 清原達郎式ネットキャッシュ = 流動資産 + 投資有価証券×0.7 − 総負債
     # 投資有価証券が未取得の古いレコードは 0 として扱う（簡易NCAV式相当）。
     # nc_ratio は market_cap 確定後に update_market_data_only で計算する。

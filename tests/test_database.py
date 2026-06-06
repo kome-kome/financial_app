@@ -88,6 +88,24 @@ class TestUpsertFinancial:
         assert obj.per == 15.0                   # val もそのまま
         assert obj.dps == 10.0
 
+    def test_c2_fields_and_nonfin_section(self, db):
+        # 網羅性追加（C2）: bs/pl 新列＋ nonfin セクション（プレフィックス無しの直接列）
+        obj = upsert_financial(db, self._data(
+            bs={"ppe_total": 31778.0, "investments_other_assets": 12066.0},
+            pl={"rd_expenses": 3241.0, "depreciation": 2757.0,
+                "extraordinary_income": 445.0, "extraordinary_loss": 41.0},
+            nonfin={"employees": 19967.0, "issued_shares": 15794987460.0},
+        ))
+        db.commit()
+        assert obj.bs_ppe_total == 31778.0
+        assert obj.bs_investments_other_assets == 12066.0
+        assert obj.pl_rd_expenses == 3241.0
+        assert obj.pl_depreciation == 2757.0
+        assert obj.pl_extraordinary_income == 445.0
+        assert obj.pl_extraordinary_loss == 41.0
+        assert obj.employees == 19967.0             # nonfin → 直接列
+        assert obj.issued_shares == 15794987460.0   # 数十億株も float で保持
+
     def test_derived_not_persisted(self, db):
         # 計算結果（derived）は financial_records に永続化されない（financial_metrics VIEW が担う）。
         # 計算列は ORM から削除済みのため、そもそも属性として存在しない。
