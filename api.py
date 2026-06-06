@@ -97,6 +97,8 @@ from database import (
 )
 from collector import run_full_collection, refresh_company, update_market_data, collect_stock_price_history, collect_stock_price_history_jquants, update_industry_from_jpx, collect_macro_data, MACRO_SERIES, reparse_from_raw
 from collection_jobs import jobs
+import backtest
+import serializers
 import plugins as plugin_registry
 
 
@@ -941,7 +943,7 @@ async def list_companies(
                         (FinancialMetric.year == subq.c.max_year))
             .all()
         )
-        latest_map = {r.edinet_code: _record_to_dict(r) for r in latest_recs}
+        latest_map = {r.edinet_code: serializers.record_to_dict(r) for r in latest_recs}
         for item in items:
             item["latest"] = latest_map.get(item["edinet_code"])
     return {"total": total, "items": items}
@@ -960,78 +962,9 @@ async def get_financials(edinet_code: str, db: Session = Depends(get_db)):
                .all())
     if not records:
         raise HTTPException(404, "データが見つかりません")
-    return {"edinet_code": edinet_code, "records": [_record_to_dict(r) for r in records]}
+    return {"edinet_code": edinet_code, "records": [serializers.record_to_dict(r) for r in records]}
 
 
-def _record_to_dict(r) -> dict:
-    return {
-        "edinet_code":  r.edinet_code,
-        "sec_code":     r.sec_code,
-        "company_name": r.company_name,
-        "industry":     r.industry,
-        "year": r.year, "period_end": r.period_end,
-        "bs": {
-            "total_assets": r.bs_total_assets,
-            "current_assets": r.bs_current_assets,
-            "noncurrent_assets": r.bs_noncurrent_assets,
-            "cash": r.bs_cash,
-            "total_liabilities": r.bs_total_liabilities,
-            "total_equity": r.bs_total_equity,
-            "equity_parent": r.bs_equity_parent,
-            "short_term_debt": r.bs_short_term_debt,
-            "long_term_debt": r.bs_long_term_debt,
-            "bps": r.bs_bps,
-            "equity_ratio": r.equity_ratio,
-        },
-        "pl": {
-            "revenue": r.pl_revenue,
-            "cost_of_sales": r.pl_cost_of_sales,
-            "gross_profit": r.pl_gross_profit,
-            "sga": r.pl_sga,
-            "operating_profit": r.pl_operating_profit,
-            "ordinary_profit": r.pl_ordinary_profit,
-            "net_income": r.pl_net_income,
-            "eps": r.pl_eps,
-            "ebitda": r.pl_ebitda,
-            "op_margin": r.op_margin,
-            "net_margin": r.net_margin,
-            "rev_growth": r.rev_growth,
-            "eps_growth": r.eps_growth,
-        },
-        "cf": {
-            "operating_cf": r.cf_operating_cf,
-            "investing_cf": r.cf_investing_cf,
-            "financing_cf": r.cf_financing_cf,
-            "free_cf": r.cf_free_cf,
-            "capex": r.cf_capex,
-            "cf_ratio": r.cf_ratio,
-        },
-        "val": {
-            "market_cap": r.market_cap,
-            "stock_price": r.stock_price,
-            "per": r.per, "pbr": r.pbr,
-            "div_yield": r.div_yield,
-            "dps": r.dps,
-            "de_ratio": r.de_ratio,
-            "roe": r.roe, "roa": r.roa,
-        },
-        "nc": {
-            "net_cash": r.net_cash,
-            "nc_ratio": r.nc_ratio,
-        },
-        "zscore": {
-            "z_revenue": r.z_revenue,
-            "z_op_margin": r.z_op_margin,
-            "z_roe": r.z_roe,
-            "z_equity_ratio": r.z_equity_ratio,
-            "z_cf_ratio": r.z_cf_ratio,
-            "z_eps": r.z_eps,
-            "z_de_ratio": r.z_de_ratio,
-            "z_nc_ratio": r.z_nc_ratio,
-        },
-        "predicted_market_cap": r.predicted_market_cap,
-        "gap_ratio": r.gap_ratio,
-    }
 
 
 # ── スクリーニング API ──────────────────────────────────────────────────
@@ -1100,7 +1033,7 @@ async def screening(request: Request, req: ScreenRequest, db: Session = Depends(
         query = query.filter(FinancialMetric.cf_ratio >= req.min_cf_ratio)
 
     rows = query.limit(req.limit).all()
-    return {"count": len(rows), "results": [_record_to_dict(r) for r in rows]}
+    return {"count": len(rows), "results": [serializers.record_to_dict(r) for r in rows]}
 
 
 # ── プラグイン API ──────────────────────────────────────────────────────
@@ -1165,165 +1098,9 @@ async def recommend_stocks(req: dict, db: Session = Depends(get_db)):
         raise HTTPException(500, "分析エラーが発生しました。")
 
 
-# ── バックテスト共通ロジック ────────────────────────────────────────────
-
-def _bt_percentile(sorted_arr: list, p: float) -> float:
-    """pパーセンタイル値（0〜100）。numpy.percentile（線形補間）を使用。"""
-    n = len(sorted_arr)
-    if n == 0:
-        return 0.0
-    if n == 1:
-        return float(sorted_arr[0])
-    import numpy as np
-    return float(np.percentile(sorted_arr, p, method="linear"))
-
-
-def _backtest_single(
-    db: Session,
-    preset_name: str,
-    months_ago: int,
-    top_n: int,
-    industry: Optional[str],
-    min_market_cap: Optional[float],
-) -> dict:
-    """バックテストを1期間分実行してdictを返す（例外はそのまま伝播）"""
-    from plugins.recommend import PRESETS
-    from database import FinancialRecord
-
-    weights = PRESETS.get(preset_name, PRESETS["バランス型"])
-    today = date.today()
-    start_date = today - timedelta(days=months_ago * 30)
-    start_date_str = start_date.strftime("%Y-%m-%d")
-    today_str = today.strftime("%Y-%m-%d")
-
-    subq = (
-        db.query(FinancialRecord.edinet_code,
-                 func.max(FinancialRecord.year).label("max_year"))
-        .filter(FinancialRecord.period_end <= start_date_str)
-        .group_by(FinancialRecord.edinet_code)
-        .subquery()
-    )
-    query = (
-        db.query(FinancialRecord)
-        .join(subq, (FinancialRecord.edinet_code == subq.c.edinet_code) &
-                    (FinancialRecord.year == subq.c.max_year))
-        .filter(FinancialRecord.period_end <= start_date_str)
-    )
-    if industry:
-        query = query.filter(FinancialRecord.industry == industry)
-    if min_market_cap is not None:
-        query = query.filter(FinancialRecord.market_cap >= float(min_market_cap))
-    records = query.all()
-
-    best: dict = {}
-    for r in records:
-        score, has_any = 0.0, False
-        for metric, weight in weights.items():
-            val = getattr(r, metric, None)
-            if val is not None:
-                score += weight * val
-                has_any = True
-        if not has_any:
-            continue
-        if r.edinet_code not in best or r.period_end > best[r.edinet_code][1].period_end:
-            best[r.edinet_code] = (score, r)
-
-    scored = sorted(best.values(), key=lambda x: x[0], reverse=True)
-    if not scored:
-        return {
-            "start_date": start_date_str, "end_date": today_str,
-            "holding_months": months_ago, "top_n": top_n, "preset": preset_name,
-            "summary": None, "results": [], "total_candidates": 0,
-            "message": f"{start_date_str} 時点の財務データが見つかりませんでした",
-        }
-
-    top = scored[:top_n]
-    bench_limit = min(500, len(scored))
-    bench_codes = [r.edinet_code for _, r in scored[:bench_limit]]
-
-    # エントリー=start_date 以降の最初の終値（daily窓内なら日次・古ければ週次へ自動切替）。
-    # イグジット="now"=最新終値（daily優先）。価格取得は database のヘルパに集約。
-    sp_all = prices_on_or_after(db, bench_codes, start_date_str)
-    ep_all = latest_prices(db, bench_codes)
-
-    results = []
-    for rank, (score, r) in enumerate(top, 1):
-        c = r.edinet_code
-        sp = sp_all.get(c)
-        ep = ep_all.get(c)
-        if (sp and ep and sp["price"] and ep["price"]
-                and sp["date"] < ep["date"]):
-            ret_pct = round((ep["price"] - sp["price"]) / sp["price"] * 100, 2)
-        else:
-            ret_pct = None
-        results.append({
-            "rank":           rank,
-            "edinet_code":    c,
-            "sec_code":       r.sec_code or "",
-            "company_name":   r.company_name or "",
-            "industry":       r.industry or "",
-            "score":          round(score, 3),
-            "year":           r.year,
-            "period_end":     r.period_end,
-            "start_price":    sp["price"] if sp else None,
-            "start_date":     sp["date"]  if sp else None,
-            "end_price":      ep["price"] if ep else None,
-            "end_date":       ep["date"]  if ep else None,
-            "return_pct":     ret_pct,
-            "has_price_data": ret_pct is not None,
-        })
-
-    bench_returns = [
-        (ep_all[c]["price"] - sp_all[c]["price"]) / sp_all[c]["price"] * 100
-        for c in bench_codes
-        if (c in sp_all and c in ep_all
-            and sp_all[c]["price"] and ep_all[c]["price"]
-            and sp_all[c]["date"] < ep_all[c]["date"])
-    ]
-
-    valid = [r["return_pct"] for r in results if r["return_pct"] is not None]
-    if valid:
-        import numpy as np
-        n = len(valid)
-        arr = np.asarray(valid, dtype=float)
-        avg = float(arr.mean())
-        srt = sorted(valid)
-        std = float(arr.std(ddof=0))
-        b_avg = float(np.mean(bench_returns)) if bench_returns else None
-        summary = {
-            "avg_return_pct":    round(avg, 2),
-            "median_return_pct": round(_bt_percentile(srt, 50), 2),
-            "std_dev_pct":       round(std, 2),
-            "p5_pct":            round(_bt_percentile(srt,  5), 2),
-            "p25_pct":           round(_bt_percentile(srt, 25), 2),
-            "p75_pct":           round(_bt_percentile(srt, 75), 2),
-            "p95_pct":           round(_bt_percentile(srt, 95), 2),
-            "win_rate_pct":      round(sum(1 for x in valid if x > 0) / n * 100, 1),
-            "n_with_data":       n,
-            "benchmark_avg_pct": round(b_avg, 2) if b_avg is not None else None,
-            "excess_return_pct": round(avg - b_avg, 2) if b_avg is not None else None,
-            "n_benchmark":       len(bench_returns),
-        }
-    else:
-        summary = None
-
-    return {
-        "start_date":       start_date_str,
-        "end_date":         today_str,
-        "holding_months":   months_ago,
-        "top_n":            top_n,
-        "preset":           preset_name,
-        "total_candidates": len(scored),
-        "summary":          summary,
-        "results":          results,
-    }
-
-
-_BT_MULTI_PERIODS = [3, 6, 12, 18, 24]
-
 
 @app.get("/api/backtest")
-async def backtest(
+async def run_backtest(
     preset: str = "バランス型",
     months_ago: int = 6,
     top_n: int = 20,
@@ -1337,7 +1114,7 @@ async def backtest(
     if not (5 <= top_n <= 100):
         raise HTTPException(400, "top_n は 5〜100 の範囲で指定してください")
     try:
-        return _backtest_single(db, preset, months_ago, top_n, industry, min_market_cap)
+        return backtest.run(db, preset, months_ago, top_n, industry, min_market_cap)
     except Exception as e:
         log.error("Backtest error: %s", e, exc_info=True)
         raise HTTPException(500, "バックテスト実行エラーが発生しました。")
@@ -1355,9 +1132,9 @@ async def backtest_multi(
     if not (5 <= top_n <= 100):
         raise HTTPException(400, "top_n は 5〜100 の範囲で指定してください")
     periods = []
-    for m in _BT_MULTI_PERIODS:
+    for m in backtest.MULTI_PERIODS:
         try:
-            periods.append(_backtest_single(db, preset, m, top_n, industry, min_market_cap))
+            periods.append(backtest.run(db, preset, m, top_n, industry, min_market_cap))
         except Exception as e:
             log.error("Backtest multi error (months=%d): %s", m, e, exc_info=True)
             periods.append({"holding_months": m, "summary": None, "results": [],

@@ -196,6 +196,30 @@ class TestGapAnalysisDependency:
         assert r.json()["count"] == 0
 
 
+class TestBacktestEndpoint:
+    """candidate3: backtest 抽出後のエンドポイント配線（routing→backtest.run 委譲）を検証。"""
+
+    def test_validation_rejects_bad_months_ago(self, db):
+        api.app.dependency_overrides[api.get_db] = lambda: db
+        assert client.get("/api/backtest", params={"months_ago": 0}).status_code == 400
+
+    def test_returns_no_data_on_empty_db(self, db):
+        api.app.dependency_overrides[api.get_db] = lambda: db
+        r = client.get("/api/backtest")
+        assert r.status_code == 200
+        assert r.json()["total_candidates"] == 0
+
+    def test_scores_via_financial_metric(self, db, make_metric):
+        # 旧バグ（FinancialRecord 引きで常に空）の HTTP レイヤ回帰
+        db.add(make_metric(edinet_code="E00001", year=2020, period_end="2020-03-31",
+                           market_cap=10000.0, z_roe=2.0))
+        db.commit()
+        api.app.dependency_overrides[api.get_db] = lambda: db
+        r = client.get("/api/backtest")
+        assert r.status_code == 200
+        assert r.json()["total_candidates"] == 1
+
+
 class TestCompaniesEndpoint:
     def test_list_and_filters(self, db, make_company):
         db.add(make_company(edinet_code="E00001", name="トヨタ自動車", industry="輸送用機器"))
