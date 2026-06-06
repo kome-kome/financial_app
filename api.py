@@ -6,7 +6,7 @@ FastAPI バックエンド
 - フロントエンド（Phase1-2/3-4 HTML）への CORS 対応 REST API
 """
 
-import asyncio, json, logging, re
+import json, logging, re
 import hmac, hashlib, base64, secrets, time as _time, os
 import httpx
 
@@ -96,6 +96,7 @@ from database import (
     prices_on_or_after, latest_prices,
 )
 from collector import run_full_collection, refresh_company, update_market_data, collect_stock_price_history, collect_stock_price_history_jquants, update_industry_from_jpx, collect_macro_data, MACRO_SERIES, reparse_from_raw
+from collection_jobs import jobs
 import plugins as plugin_registry
 
 
@@ -122,7 +123,7 @@ async def lifespan(app: FastAPI):
 # 注: 環境変数名は slowapi 内部の予約キー RATELIMIT_* と衝突しないよう APP_ 接頭辞を付ける
 # （素の RATELIMIT_ENABLED だと slowapi が文字列値を取り込み enabled を誤上書きする）。
 RATELIMIT_ENABLED = os.getenv("APP_RATELIMIT_ENABLED", "true").lower() == "true"
-RATELIMIT_COLLECT  = "3/minute"   # 収集ジョブ起動（重い I/O・_job_status と二重防御）
+RATELIMIT_COLLECT  = "3/minute"   # 収集ジョブ起動（重い I/O・collection_jobs の running ガードと二重防御）
 RATELIMIT_ANALYSIS = "20/minute"  # スクリーニング・分析プラグイン・乖離分析
 RATELIMIT_REFRESH  = "10/minute"  # 単一企業更新
 RATELIMIT_AUTH     = "10/minute"  # ログイン（ブルートフォース対策）
@@ -241,26 +242,11 @@ async def system_info():
 SMART_CHUNK_SIZE     = 200   # スマート収集: 1チャンクあたりの企業数増分
 SMART_FULL_THRESHOLD = 3500  # この企業数以上は「全社収集完了」と判定し差分収集に切り替え
 
-# 注意: 以下のステータス辞書はシングル Worker 運用前提（VISION.md 参照）。
-# asyncio 単一イベントループ内では mutations が await を跨がないため、
-# 同一プロセス内の競合は発生しない。複数 Worker 環境では各プロセスが独立した
-# 状態を持つため Redis 等の外部ストアへの移行が必要。
-_LOG_MAX = 500
-
-_job_status: dict = {"running": False, "log": [], "log_seq": 0, "progress": 0, "total": 0, "job_type": "", "cancel_requested": False}
-_market_status: dict = {"running": False, "progress": 0, "total": 0, "log": [], "log_seq": 0, "cancel_requested": False}
-_history_status: dict  = {"running": False, "progress": 0, "total": 0, "log": [], "log_seq": 0, "cancel_requested": False}
-_jquants_status: dict  = {"running": False, "progress": 0, "total": 0, "log": [], "log_seq": 0, "cancel_requested": False}
-_macro_status:   dict  = {"running": False, "progress": 0, "total": 0, "log": [], "log_seq": 0, "cancel_requested": False}
-_reparse_status: dict  = {"running": False, "progress": 0, "total": 0, "log": [], "log_seq": 0, "cancel_requested": False}
-
-def _append_log(status: dict, msg: str) -> None:
-    """ステータス辞書にログを追加。log_seq は累積カウンタとして単調増加し、
-    SSE 消費者が切り捨て後も正しい差分を計算できるようにする。"""
-    status["log"].append(msg)
-    status["log_seq"] = status.get("log_seq", 0) + 1
-    if len(status["log"]) > _LOG_MAX:
-        status["log"] = status["log"][-_LOG_MAX:]
+# 収集ジョブの実行時状態は collection_jobs.jobs（job 名キーの registry）に集約。
+# 注意: registry はシングル Worker 運用前提（VISION.md 参照）。asyncio 単一イベントループ内では
+# mutations が await を跨がないため同一プロセス内の競合は無いが、複数 Worker 環境では各プロセスが
+# 独立した状態を持つため Redis 等の外部ストアへの移行が必要。
+_COLLECTION = "collection"   # full / smart / incremental が共有する単一スロット名
 
 class CollectRequest(BaseModel):
     years_back: int = Field(default=1, ge=1, le=5)
@@ -287,26 +273,26 @@ class JQuantsCollectRequest(BaseModel):
 async def start_collection(request: Request, req: CollectRequest, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
     if RENDER_LIGHT_MODE and not req.skip_existing:
         raise HTTPException(403, "全件収集はローカル環境から実行してください（Render Free プラン制限）")
-    if _job_status["running"]:
+    if jobs.is_running(_COLLECTION):
         raise HTTPException(400, "収集ジョブが既に実行中です")
     job_type = "incremental" if req.skip_existing else "full"
     log_obj = CollectionLog(job_type=job_type, status="running")
     db.add(log_obj); db.commit(); db.refresh(log_obj)
-    _job_status.update({"running": True, "log": [], "progress": 0, "log_id": log_obj.id})
+    jobs.state(_COLLECTION).reset_for_run()
     background_tasks.add_task(_run_collection_bg, req.years_back, req.max_companies, log_obj.id, req.skip_existing)
     return {"message": "収集ジョブを開始しました", "log_id": log_obj.id}
 
 async def _run_collection_bg(years: int, max_co: Optional[int], log_id: int, skip_existing: bool = False):
-    _job_status["cancel_requested"] = False
+    st = jobs.state(_COLLECTION)
     _prog_ticks = [0]
 
     db = SessionLocal()
     baseline_records = db.query(FinancialRecord).count()
 
     def on_progress(current, total, msg):
-        _job_status["progress"] = current
-        _job_status["total"]    = total
-        _append_log(_job_status, msg)
+        st.progress = current
+        st.total    = total
+        st.append_log(msg)
         _prog_ticks[0] += 1
         if _prog_ticks[0] % 10 == 0:
             try:
@@ -318,7 +304,7 @@ async def _run_collection_bg(years: int, max_co: Optional[int], log_id: int, ski
                 db.rollback()
 
     def cancel_check():
-        return _job_status.get("cancel_requested", False)
+        return st.cancel_requested
 
     try:
         cancelled = await run_full_collection(years, max_co, on_progress=on_progress,
@@ -342,20 +328,20 @@ async def _run_collection_bg(years: int, max_co: Optional[int], log_id: int, ski
             log_obj.records_saved = max(0, db.query(FinancialRecord).count() - baseline_records)
             db.commit()
     finally:
-        _job_status["running"] = False
-        _job_status["cancel_requested"] = False
+        st.running = False
+        st.cancel_requested = False
         db.close()
 
 async def _run_smart_collection_bg(log_id: int, years: int):
-    _job_status["cancel_requested"] = False
+    st = jobs.state(_COLLECTION)
     _prog_ticks = [0]
     db = SessionLocal()
     baseline_records = db.query(FinancialRecord).count()
 
     def on_progress(current, total, msg):
-        _job_status["progress"] = current
-        _job_status["total"]    = total
-        _append_log(_job_status, msg)
+        st.progress = current
+        st.total    = total
+        st.append_log(msg)
         _prog_ticks[0] += 1
         if _prog_ticks[0] % 10 == 0:
             try:
@@ -367,13 +353,13 @@ async def _run_smart_collection_bg(log_id: int, years: int):
                 db.rollback()
 
     def cancel_check():
-        return _job_status.get("cancel_requested", False)
+        return st.cancel_requested
 
     try:
         company_count = db.query(Company).count()
 
         if company_count >= SMART_FULL_THRESHOLD:
-            _append_log(_job_status,
+            st.append_log(
                 f"[スマート判定] DB企業数={company_count}社 → 差分収集モード（過去{years}年）"
             )
             cancelled = await run_full_collection(
@@ -381,7 +367,7 @@ async def _run_smart_collection_bg(log_id: int, years: int):
                 skip_existing=True, cancel_check=cancel_check
             )
         elif company_count == 0:
-            _append_log(_job_status,
+            st.append_log(
                 f"[スマート判定] DB企業数=0社 → 初回チャンク収集（先着{SMART_CHUNK_SIZE}社）"
             )
             cancelled = await run_full_collection(
@@ -391,7 +377,7 @@ async def _run_smart_collection_bg(log_id: int, years: int):
         else:
             chunk_no = (company_count // SMART_CHUNK_SIZE) + 1
             target   = chunk_no * SMART_CHUNK_SIZE
-            _append_log(_job_status,
+            st.append_log(
                 f"[スマート判定] DB企業数={company_count}社 → "
                 f"チャンク{chunk_no}（先着{target}社のうち未収集を処理）"
             )
@@ -421,8 +407,8 @@ async def _run_smart_collection_bg(log_id: int, years: int):
             log_obj.records_saved = max(0, db.query(FinancialRecord).count() - baseline_records)
             db.commit()
     finally:
-        _job_status["running"]          = False
-        _job_status["cancel_requested"] = False
+        st.running          = False
+        st.cancel_requested = False
         db.close()
 
 @app.post("/api/collect/smart-start")
@@ -433,20 +419,21 @@ async def start_smart_collection(
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
 ):
-    if _job_status["running"] and not req.force:
+    if jobs.is_running(_COLLECTION) and not req.force:
         raise HTTPException(400, "収集ジョブが既に実行中です")
     if req.force:
         _reset_stuck_jobs(db, message="ユーザーによる強制再開で上書き")
     log_obj = CollectionLog(job_type="smart", status="running")
     db.add(log_obj); db.commit(); db.refresh(log_obj)
-    _job_status.update({"running": True, "log": [], "progress": 0, "log_id": log_obj.id, "job_type": "smart"})
+    jobs.state(_COLLECTION).reset_for_run()
     background_tasks.add_task(_run_smart_collection_bg, log_obj.id, req.years_back)
     return {"message": "スマート収集ジョブを開始しました", "log_id": log_obj.id}
 
 def _reset_stuck_jobs(db: Session, message: str = "ユーザーによる強制リセット") -> int:
     """in-memory フラグと DB の running ジョブを強制 error 扱いに戻す。リセット件数を返す。"""
-    _job_status["running"]          = False
-    _job_status["cancel_requested"] = False
+    st = jobs.state(_COLLECTION)
+    st.running = False
+    st.cancel_requested = False
     stuck = db.query(CollectionLog).filter(CollectionLog.status == "running").all()
     for job in stuck:
         job.status      = "error"
@@ -465,11 +452,11 @@ async def reset_stuck_collection(db: Session = Depends(get_db)):
 @app.post("/api/scheduler/run-now")
 async def scheduler_run_now(background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
     """手動差分収集: 過去1年・収集済みスキップ＋成長率/Zスコア＋市場・マクロ更新"""
-    if _job_status["running"]:
+    if jobs.is_running(_COLLECTION):
         raise HTTPException(400, "収集ジョブが既に実行中です")
     log_obj = CollectionLog(job_type="incremental", status="running")
     db.add(log_obj); db.commit(); db.refresh(log_obj)
-    _job_status.update({"running": True, "log": [], "progress": 0, "log_id": log_obj.id})
+    jobs.state(_COLLECTION).reset_for_run()
     background_tasks.add_task(_run_collection_bg, 1, None, log_obj.id, True)
     return {"message": "差分収集を開始しました（過去1年・収集済みスキップ）", "log_id": log_obj.id}
 
@@ -477,7 +464,7 @@ async def scheduler_run_now(background_tasks: BackgroundTasks, db: Session = Dep
 async def collection_status(db: Session = Depends(get_db)):
     logs = db.query(CollectionLog).order_by(CollectionLog.id.desc()).limit(5).all()
     return {
-        "running": _job_status["running"],
+        "running": jobs.is_running(_COLLECTION),
         "recent_jobs": [
             {"id": l.id, "status": l.status, "started": _utc_to_jst_str(l.started_at),
              "companies": l.companies_processed, "records": l.records_saved}
@@ -487,9 +474,9 @@ async def collection_status(db: Session = Depends(get_db)):
 
 @app.post("/api/collect/stop")
 async def stop_collection():
-    if not _job_status["running"]:
+    if not jobs.is_running(_COLLECTION):
         raise HTTPException(400, "実行中の収集ジョブがありません")
-    _job_status["cancel_requested"] = True
+    jobs.request_cancel(_COLLECTION)
     return {"message": "停止リクエストを送信しました。現在処理中の書類完了後に停止します。"}
 
 @app.get("/api/collect/edinet-coverage")
@@ -568,46 +555,23 @@ class MarketDataRequest(BaseModel):
 @app.post("/api/collect/market-data")
 @limiter.limit(RATELIMIT_COLLECT)
 async def start_market_data_update(request: Request, req: MarketDataRequest, background_tasks: BackgroundTasks):
-    if _market_status["running"] and not req.force:
-        raise HTTPException(400, "市場データ更新ジョブが既に実行中です")
-    _market_status.update({"running": True, "progress": 0, "total": 0, "log": [], "cancel_requested": False})
-
-    def on_progress(current, total, msg):
-        _market_status["progress"] = current
-        _market_status["total"]    = total
-        _append_log(_market_status, msg)
-
-    def cancel_check():
-        return _market_status.get("cancel_requested", False)
-
-    async def _run():
-        try:
-            await update_market_data(req.max_companies, on_progress=on_progress, cancel_check=cancel_check)
-        except Exception as e:
-            log.error("市場データ更新エラー: %s", e, exc_info=True)
-            _append_log(_market_status, "[エラー] 市場データ更新中に問題が発生しました（詳細はサーバーログを確認）")
-        finally:
-            _market_status["running"] = False
-            _market_status["cancel_requested"] = False
-
-    background_tasks.add_task(_run)
+    async def body(on_progress, cancel_check):
+        await update_market_data(req.max_companies, on_progress=on_progress, cancel_check=cancel_check)
+    jobs.start("market", background_tasks, body,
+               busy_message="市場データ更新ジョブが既に実行中です", force=req.force,
+               error_message="[エラー] 市場データ更新中に問題が発生しました（詳細はサーバーログを確認）")
     return {"message": "市場データ更新を開始しました"}
 
 @app.post("/api/collect/market-stop")
 async def stop_market_data():
-    if not _market_status["running"]:
+    if not jobs.is_running("market"):
         raise HTTPException(400, "実行中の市場データ更新ジョブがありません")
-    _market_status["cancel_requested"] = True
+    jobs.request_cancel("market")
     return {"message": "市場データ更新の停止リクエストを送信しました"}
 
 @app.get("/api/collect/market-data/status")
 async def market_data_status():
-    return {
-        "running":  _market_status["running"],
-        "progress": _market_status["progress"],
-        "total":    _market_status["total"],
-        "recent_logs": _market_status["log"][-20:],
-    }
+    return jobs.snapshot("market")
 
 
 # ── 株価履歴収集 ──────────────────────────────────────────────────────────
@@ -617,19 +581,8 @@ async def market_data_status():
 async def start_history_collection(request: Request, req: HistoryCollectRequest, background_tasks: BackgroundTasks):
     if RENDER_LIGHT_MODE:
         raise HTTPException(403, "株価履歴収集はローカル環境から実行してください（Render Free プラン制限）")
-    if _history_status["running"] and not req.force:
-        raise HTTPException(400, "株価履歴収集ジョブが既に実行中です")
-    _history_status.update({"running": True, "progress": 0, "total": 0, "log": [], "cancel_requested": False})
 
-    def on_progress(current, total, msg):
-        _history_status["progress"] = current
-        _history_status["total"]    = total
-        _append_log(_history_status, msg)
-
-    def cancel_check():
-        return _history_status.get("cancel_requested", False)
-
-    async def _run():
+    async def body(on_progress, cancel_check):
         db = SessionLocal()
         try:
             await collect_stock_price_history(
@@ -637,32 +590,24 @@ async def start_history_collection(request: Request, req: HistoryCollectRequest,
                 on_progress=on_progress, cancel_check=cancel_check,
                 skip_existing=req.skip_existing, backfill=req.backfill,
             )
-        except Exception as e:
-            log.error("株価履歴収集エラー: %s", e, exc_info=True)
-            _append_log(_history_status, "[エラー] 株価履歴収集中に問題が発生しました（詳細はサーバーログを確認）")
         finally:
-            _history_status["running"] = False
-            _history_status["cancel_requested"] = False
             db.close()
 
-    background_tasks.add_task(_run)
+    jobs.start("history", background_tasks, body,
+               busy_message="株価履歴収集ジョブが既に実行中です", force=req.force,
+               error_message="[エラー] 株価履歴収集中に問題が発生しました（詳細はサーバーログを確認）")
     return {"message": "株価履歴収集を開始しました"}
 
 @app.post("/api/collect/history/stop")
 async def stop_history_collection():
-    if not _history_status["running"]:
+    if not jobs.is_running("history"):
         raise HTTPException(400, "実行中の株価履歴収集ジョブがありません")
-    _history_status["cancel_requested"] = True
+    jobs.request_cancel("history")
     return {"message": "株価履歴収集の停止リクエストを送信しました"}
 
 @app.get("/api/collect/history/status")
 async def history_collection_status():
-    return {
-        "running":     _history_status["running"],
-        "progress":    _history_status["progress"],
-        "total":       _history_status["total"],
-        "recent_logs": _history_status["log"][-20:],
-    }
+    return jobs.snapshot("history")
 
 @app.get("/api/collect/history/coverage")
 async def history_coverage(db: Session = Depends(get_db)):
@@ -712,45 +657,17 @@ async def get_stock_history(edinet_code: str, days: int = 365,
     return [{"trade_date": r[0], "close": r[1]} for r in reversed(rows)]
 
 
-async def _sse_stream(status: dict):
-    """SSE共通ジェネレータ。status辞書を監視してリアルタイム配信する。
-
-    log_seq（累積カウンタ）を使って差分計算するため、内部リストが切り捨てされても
-    ログの取りこぼしを最小化できる（切り捨て分は復元不可だが、以降は連続配信可能）。
-    """
-    last_seq = 0
-    while True:
-        log_list = status["log"]
-        cur_seq = status.get("log_seq", 0)
-        # log_list[-1] の seq == cur_seq、log_list[0] の seq == cur_seq - len(log_list) + 1
-        oldest_seq = cur_seq - len(log_list) + 1
-        start = max(0, last_seq - oldest_seq + 1) if log_list else 0
-        new_logs = log_list[start:]
-        last_seq = cur_seq
-        data = {
-            "running":  status["running"],
-            "progress": status["progress"],
-            "total":    status["total"],
-            "new_logs": new_logs,
-        }
-        yield f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
-        if not status["running"]:
-            break
-        await asyncio.sleep(1)
-
-_SSE_HEADERS = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
-
 @app.get("/api/collect/stream")
 async def progress_stream():
-    return StreamingResponse(_sse_stream(_job_status), media_type="text/event-stream", headers=_SSE_HEADERS)
+    return jobs.stream(_COLLECTION)
 
 @app.get("/api/collect/market-stream")
 async def market_progress_stream():
-    return StreamingResponse(_sse_stream(_market_status), media_type="text/event-stream", headers=_SSE_HEADERS)
+    return jobs.stream("market")
 
 @app.get("/api/collect/history/stream")
 async def history_progress_stream():
-    return StreamingResponse(_sse_stream(_history_status), media_type="text/event-stream", headers=_SSE_HEADERS)
+    return jobs.stream("history")
 
 class ReparseRequest(BaseModel):
     year:        Optional[int] = None
@@ -761,44 +678,26 @@ class ReparseRequest(BaseModel):
 async def start_reparse(request: Request, req: ReparseRequest, background_tasks: BackgroundTasks):
     """xbrl_raw_documents から financial_records を再構築する（EDINET 通信なし）。
     RENDER_LIGHT_MODE でも許可（軽量処理のため）。"""
-    if _reparse_status["running"]:
-        raise HTTPException(400, "再解析ジョブが既に実行中です")
-    _reparse_status.update({"running": True, "progress": 0, "total": 0, "log": [], "cancel_requested": False})
-
-    def on_progress(current, total, msg):
-        _reparse_status["progress"] = current
-        _reparse_status["total"]    = total
-        _append_log(_reparse_status, msg)
-
-    def cancel_check():
-        return _reparse_status.get("cancel_requested", False)
-
-    async def _run():
-        try:
-            await reparse_from_raw(
-                year=req.year,
-                edinet_code=req.edinet_code,
-                on_progress=on_progress,
-                cancel_check=cancel_check,
-            )
-        except Exception as e:
-            log.error("再解析エラー: %s", e, exc_info=True)
-            _append_log(_reparse_status, "[エラー] 再解析中に問題が発生しました")
-        finally:
-            _reparse_status["running"] = False
-            _reparse_status["cancel_requested"] = False
-
-    background_tasks.add_task(_run)
+    async def body(on_progress, cancel_check):
+        await reparse_from_raw(
+            year=req.year,
+            edinet_code=req.edinet_code,
+            on_progress=on_progress,
+            cancel_check=cancel_check,
+        )
+    jobs.start("reparse", background_tasks, body,
+               busy_message="再解析ジョブが既に実行中です",
+               error_message="[エラー] 再解析中に問題が発生しました")
     return {"message": "再解析ジョブを開始しました"}
 
 @app.post("/api/collect/reparse/cancel")
 async def cancel_reparse():
-    _reparse_status["cancel_requested"] = True
+    jobs.request_cancel("reparse")
     return {"message": "停止リクエストを送信しました"}
 
 @app.get("/api/collect/reparse/stream")
 async def reparse_progress_stream():
-    return StreamingResponse(_sse_stream(_reparse_status), media_type="text/event-stream", headers=_SSE_HEADERS)
+    return jobs.stream("reparse")
 
 @app.post("/api/collect/industry")
 async def collect_industry(db: Session = Depends(get_db)):
@@ -812,56 +711,38 @@ async def collect_industry(db: Session = Depends(get_db)):
 async def start_jquants_collection(request: Request, req: JQuantsCollectRequest, background_tasks: BackgroundTasks):
     if RENDER_LIGHT_MODE:
         raise HTTPException(403, "J-Quants収集はローカル環境から実行してください（Render Free プラン制限）")
-    if _jquants_status["running"] and not req.force:
-        raise HTTPException(400, "J-Quants収集ジョブが既に実行中です")
-    _jquants_status.update({"running": True, "progress": 0, "total": 0, "log": [], "cancel_requested": False})
 
-    def on_progress(current, total, msg):
-        _jquants_status["progress"] = current
-        _jquants_status["total"]    = total
-        _append_log(_jquants_status, msg)
-
-    def cancel_check():
-        return _jquants_status.get("cancel_requested", False)
-
-    async def _run():
+    async def body(on_progress, cancel_check):
         db = SessionLocal()
         try:
             await collect_stock_price_history_jquants(
                 db, req.days_back, on_progress=on_progress, cancel_check=cancel_check,
             )
         except ValueError as e:
-            _append_log(_jquants_status, f"[設定エラー] {e}")
-        except Exception as e:
-            log.error("J-Quants収集エラー: %s", e, exc_info=True)
-            _append_log(_jquants_status, "[エラー] 収集中に問題が発生しました")
+            # 設定不備（API キー未設定等）は registry の汎用エラーでなく専用メッセージを出す
+            jobs.state("jquants").append_log(f"[設定エラー] {e}")
         finally:
-            _jquants_status["running"] = False
-            _jquants_status["cancel_requested"] = False
             db.close()
 
-    background_tasks.add_task(_run)
+    jobs.start("jquants", background_tasks, body,
+               busy_message="J-Quants収集ジョブが既に実行中です", force=req.force,
+               error_message="[エラー] 収集中に問題が発生しました")
     return {"message": "J-Quants収集を開始しました"}
 
 @app.post("/api/collect/jquants/stop")
 async def stop_jquants_collection():
-    if not _jquants_status["running"]:
+    if not jobs.is_running("jquants"):
         raise HTTPException(400, "実行中のJ-Quants収集ジョブがありません")
-    _jquants_status["cancel_requested"] = True
+    jobs.request_cancel("jquants")
     return {"message": "J-Quants収集の停止リクエストを送信しました"}
 
 @app.get("/api/collect/jquants/status")
 async def jquants_collection_status():
-    return {
-        "running":     _jquants_status["running"],
-        "progress":    _jquants_status["progress"],
-        "total":       _jquants_status["total"],
-        "recent_logs": _jquants_status["log"][-20:],
-    }
+    return jobs.snapshot("jquants")
 
 @app.get("/api/collect/jquants/stream")
 async def jquants_progress_stream():
-    return StreamingResponse(_sse_stream(_jquants_status), media_type="text/event-stream", headers=_SSE_HEADERS)
+    return jobs.stream("jquants")
 
 
 # ── マクロデータ収集（為替・金利・指数・コモディティ）─────────────────
@@ -873,54 +754,34 @@ class MacroCollectRequest(BaseModel):
 @app.post("/api/collect/macro/start")
 @limiter.limit(RATELIMIT_COLLECT)
 async def start_macro_collection(request: Request, req: MacroCollectRequest, background_tasks: BackgroundTasks):
-    if _macro_status["running"] and not req.force:
-        raise HTTPException(400, "マクロ収集ジョブが既に実行中です")
-    _macro_status.update({"running": True, "progress": 0, "total": 0, "log": [], "cancel_requested": False})
-
-    def on_progress(current, total, msg):
-        _macro_status["progress"] = current
-        _macro_status["total"]    = total
-        _append_log(_macro_status, msg)
-
-    def cancel_check():
-        return _macro_status.get("cancel_requested", False)
-
-    async def _run():
+    async def body(on_progress, cancel_check):
         db = SessionLocal()
         try:
             await collect_macro_data(
                 db, req.years_back, on_progress=on_progress, cancel_check=cancel_check,
             )
-        except Exception as e:
-            log.error(f"マクロ収集エラー: {e}")
-            _append_log(_macro_status, "[エラー] マクロ収集中に問題が発生しました（詳細はサーバーログを確認）")
         finally:
-            _macro_status["running"] = False
-            _macro_status["cancel_requested"] = False
             db.close()
 
-    background_tasks.add_task(_run)
+    jobs.start("macro", background_tasks, body,
+               busy_message="マクロ収集ジョブが既に実行中です", force=req.force,
+               error_message="[エラー] マクロ収集中に問題が発生しました（詳細はサーバーログを確認）")
     return {"message": "マクロデータ収集を開始しました"}
 
 @app.post("/api/collect/macro/stop")
 async def stop_macro_collection():
-    if not _macro_status["running"]:
+    if not jobs.is_running("macro"):
         raise HTTPException(400, "実行中のマクロ収集ジョブがありません")
-    _macro_status["cancel_requested"] = True
+    jobs.request_cancel("macro")
     return {"message": "マクロ収集の停止リクエストを送信しました"}
 
 @app.get("/api/collect/macro/status")
 async def macro_collection_status():
-    return {
-        "running":     _macro_status["running"],
-        "progress":    _macro_status["progress"],
-        "total":       _macro_status["total"],
-        "recent_logs": _macro_status["log"][-20:],
-    }
+    return jobs.snapshot("macro")
 
 @app.get("/api/collect/macro/stream")
 async def macro_progress_stream():
-    return StreamingResponse(_sse_stream(_macro_status), media_type="text/event-stream", headers=_SSE_HEADERS)
+    return jobs.stream("macro")
 
 
 @app.get("/api/macro/series")
