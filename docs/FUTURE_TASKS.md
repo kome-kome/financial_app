@@ -48,6 +48,39 @@
 
 ---
 
+## Tier 2/3 — 財務項目の網羅性↑（収集パイプライン仕様変更）【grill 検討中・2026-06-05 保留】
+
+`/grill-with-docs` で「データ収集パイプラインの仕様変更」を検討した到達点。用語は **root `CONTEXT.md`**（表示項目 / 分析特徴量 / 再分類項目）参照。目的は (1)鮮度↑ (2)網羅性↑ (4)コスト制約 の三立。**TDnet（真の四半期・年4点）派生は保留**（データ量制約大）。本命は **XBRL 項目の深掘り**。
+
+欲しい項目を **C1（既に DB にある＝パイプライン変更不要・GUI 改修のみ）** と **C2（真に未収集＝要収集追加）** に仕分けた。
+
+### C1 — 既存カラムの GUI 表示（パイプライン変更ゼロ・別 PR の company.js 改修）
+- company.js が残差設計で捨てている既存カラムを表示する: 売上債権 `bs_receivables` / 棚卸資産 `bs_inventory` / 建物 `bs_buildings` / 機械 `bs_machinery` / 無形固定資産 `bs_intangible_assets` / 経常利益 `pl_ordinary_profit` / 特別損益純額（`pl_pretax_profit − pl_ordinary_profit` で導出）
+- **注意**: 経常利益・特別損益は **JGAAP 専用概念**（IFRS/US-GAAP 企業は null）。「有形固定資産の内訳」は建物+機械のみで合計と不一致→チャートの balance invariant が壊れる。クリーンには有形固定資産合計タグの C2 収集が要る
+
+### C2 — 新規 XBRL 項目の収集（要パイプライン変更＝本題）
+- **表示用**: 減価償却費(合計) / 有形固定資産合計・投資その他資産合計 / 特別損益の内訳
+- **分析特徴量用**: 研究開発費 / 減価償却費の内訳 / 特別損益の内訳 / 従業員数(Int・非財務) / 発行済株式数（→ **既存タスク G と統合**。G は J-Quants `IssuedShares`、本検討は XBRL 期末株式数タグを想定。per-share 正規化=MODELS.md の要なのでどちらかに一本化すること）
+- **実装**: `XBRL_MAP`(collector.py) と `FinancialRecord`(database.py) の **両方更新**（CLAUDE.md 制約）
+- **再収集方式 = (a) フル再収集1回でユーザー確定**。新項目の追加コストはほぼゼロ（同じ XBRL ZIP を再パースするだけ）。列追加の容量増は約1.6MB で些少＝**網羅性↑は容量問題ではない**
+
+### ブロッカー（容量）— ✅ 解消済み（2026-06-06）
+- ~~Supabase は **448MB/500MB（90%）**。主因は `stock_price_history`（359MB＝80%）~~
+- **stock_price 移行を完遂**（`migrate_stock_price_dual.py` をローカル実行・旧 `stock_price_history` を DROP → 新 daily(225,616行)/weekly(354,684行)へ投入・照合 OK）。
+- **再計測（2026-06-06）: DB 総容量 165MB/500MB・ヘッドルーム約335MB**。旧表 359MB が消え主因解消。weekly 49MB＋daily 27MB＋financial_records 73MB が主構成。
+- フル再収集の一時肥大（全件 UPDATE で約60MB の dead tuple）は **335MB ヘッドルームに余裕で収まる** → C2 のフル再収集は**容量的に着手可能**。
+- 補足: `raw_xbrl_json` drop（financial_records 73MB の第2レバー = PR-B）は容量緊急性が下がったが有効な打ち手として温存（[[project-collection-expansion]] / 容量プラン参照）。
+
+### 未解決（再開時の最初の質問 = Q5）
+**フル再収集をどの方式で回すか**（容量ブロッカーは解消済み・335MB ヘッドルームが前提）:
+- (あ) 既存 upsert 方式でそのまま再収集（**最小変更・推奨**）。335MB ヘッドルームがあるため、従来必要だった `raw_xbrl_json` 削除＋`VACUUM FULL` の事前領域確保は**容量目的では不要**になった（やる場合は PR-B として独立実施）。
+- (い) `TRUNCATE` → 全件 INSERT（肥大ゼロだが収集中サイトが数時間空・`MASTER_BATCH` 設計と不整合）
+- ~~(う) `stock_price_history` 最適化~~ → **済**（dual-table 移行 2026-06-06 完了）。残るのは **鮮度 goal(1)=daily 差分の再有効化**（株価が 2026-03-06 で停止中。別タスク）。
+
+推奨: **(あ) 即実施**。daily 差分再有効化は別枝。
+
+---
+
 ## 注意事項（設計制約）
 
 変更・実装時は以下の制約を必ず守ること（`CLAUDE.md` より）：
