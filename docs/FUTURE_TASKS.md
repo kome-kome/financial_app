@@ -61,7 +61,7 @@
 ### C2 — 新規 XBRL 項目の収集（要パイプライン変更＝本題）
 - **表示用**: 減価償却費(合計) / 有形固定資産合計・投資その他資産合計 / 特別損益の内訳
 - **分析特徴量用**: 研究開発費 / 減価償却費の内訳 / 特別損益の内訳 / 従業員数(Int・非財務) / 発行済株式数（→ **既存タスク G と統合**。G は J-Quants `IssuedShares`、本検討は XBRL 期末株式数タグを想定。per-share 正規化=MODELS.md の要なのでどちらかに一本化すること）
-- **実装**: `XBRL_MAP`(collector.py) と `FinancialRecord`(database.py) の **両方更新**（CLAUDE.md 制約）
+- **実装**: `FinancialRecord`(database.py) の列に `info={"xbrl": [...]}` で生タグを併記する **1箇所のみ**。`XBRL_MAP` は `build_xbrl_map()` が列 info から逆引き生成（手書き不要）。drift は `tests/test_xbrl_registry.py` が構造的に防ぐ（CLAUDE.md 制約）
 - **再収集方式 = (a) フル再収集1回でユーザー確定**。新項目の追加コストはほぼゼロ（同じ XBRL ZIP を再パースするだけ）。列追加の容量増は約1.6MB で些少＝**網羅性↑は容量問題ではない**
 
 ### ブロッカー（容量）— ✅ 解消済み（2026-06-06）
