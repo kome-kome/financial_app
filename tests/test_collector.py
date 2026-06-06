@@ -68,12 +68,24 @@ class TestConstants:
     def test_xbrl_map_structure(self):
         for elem, mapped in XBRL_MAP.items():
             assert isinstance(mapped, tuple) and len(mapped) == 2
-            assert mapped[0] in {"bs", "pl", "cf", "val", "meta"}
+            assert mapped[0] in {"bs", "pl", "cf", "val", "nonfin", "meta"}
 
     def test_xbrl_map_known_mappings(self):
         assert XBRL_MAP["NetSales"] == ("pl", "revenue")
         assert XBRL_MAP["Assets"] == ("bs", "total_assets")
         assert XBRL_MAP["NetCashProvidedByUsedInOperatingActivities"] == ("cf", "operating_cf")
+
+    def test_xbrl_map_c2_mappings(self):
+        # 網羅性追加（C2）の標準要素マッピング
+        assert XBRL_MAP["PropertyPlantAndEquipment"] == ("bs", "ppe_total")
+        assert XBRL_MAP["PropertyPlantAndEquipmentIFRS"] == ("bs", "ppe_total")
+        assert XBRL_MAP["InvestmentsAndOtherAssets"] == ("bs", "investments_other_assets")
+        assert XBRL_MAP["DepreciationAndAmortizationOpeCF"] == ("pl", "depreciation")
+        assert XBRL_MAP["ExtraordinaryIncome"] == ("pl", "extraordinary_income")
+        assert XBRL_MAP["ExtraordinaryLoss"] == ("pl", "extraordinary_loss")
+        assert XBRL_MAP["NumberOfEmployees"] == ("nonfin", "employees")
+        assert XBRL_MAP["NumberOfIssuedSharesAsOfFiscalYearEndIssuedSharesTotalNumberOfSharesEtc"] \
+            == ("nonfin", "issued_shares")
 
     def test_tse_industry(self):
         assert TSE_INDUSTRY["5250"] == "情報・通信業"
@@ -140,7 +152,7 @@ class TestParseXbrlCsv:
         assert res["bs"]["total_assets"] == 5000.0
 
     def test_none_or_empty_returns_empty(self):
-        empty = {"bs": {}, "pl": {}, "cf": {}, "val": {}, "meta": {}}
+        empty = {"bs": {}, "pl": {}, "cf": {}, "val": {}, "nonfin": {}, "meta": {}}
         assert parse_xbrl_csv(None, "E00001", "2023-03-31") == empty
         assert parse_xbrl_csv(pd.DataFrame(), "E00001", "2023-03-31") == empty
 
@@ -177,6 +189,66 @@ class TestParseXbrlCsv:
             "値": ["200"],
         })
         assert "capex" not in parse_xbrl_csv(df, "E99999", "2025-03-31")["cf"]
+
+    # ── C2: 網羅性追加項目 ──────────────────────────────────────────────────
+    def test_c2_bs_pl_fields_extracted(self):
+        """有形固定資産合計/投資その他/研究開発費/減価償却費/特別損益を標準要素から抽出。"""
+        df = pd.DataFrame({
+            "要素ID": [
+                "jppfs_cor:PropertyPlantAndEquipment",
+                "jppfs_cor:InvestmentsAndOtherAssets",
+                "jpcrp_cor:ResearchAndDevelopmentExpensesResearchAndDevelopmentActivities",
+                "jppfs_cor:DepreciationAndAmortizationOpeCF",
+                "jppfs_cor:ExtraordinaryIncome",
+                "jppfs_cor:ExtraordinaryLoss",
+            ],
+            "コンテキストID": ["CurrentYearConsolidatedInstant", "CurrentYearConsolidatedInstant",
+                              "CurrentYearConsolidatedDuration", "CurrentYearConsolidatedDuration",
+                              "CurrentYearConsolidatedDuration", "CurrentYearConsolidatedDuration"],
+            "値": ["31778", "12066", "3241", "2757", "445", "41"],
+        })
+        res = parse_xbrl_csv(df, "E00001", "2025-03-31")
+        assert res["bs"]["ppe_total"] == 31778.0
+        assert res["bs"]["investments_other_assets"] == 12066.0
+        assert res["pl"]["rd_expenses"] == 3241.0
+        assert res["pl"]["depreciation"] == 2757.0
+        assert res["pl"]["extraordinary_income"] == 445.0
+        assert res["pl"]["extraordinary_loss"] == 41.0
+
+    def test_c2_ppe_total_ifrs_variant(self):
+        df = pd.DataFrame({
+            "要素ID": ["jpigp_cor:PropertyPlantAndEquipmentIFRS"],
+            "コンテキストID": ["CurrentYearInstant"],
+            "値": ["15333693"],
+        })
+        assert parse_xbrl_csv(df, "E02144", "2025-03-31")["bs"]["ppe_total"] == 15333693.0
+
+    def test_c2_employees_consolidated_total_beats_segments(self):
+        """従業員数は連結総額(メンバー無し context=priority1)がセグメント/非連結(member=priority0)に勝つ。
+        セグメント context は ...ReportableSegmentMember（直前にアンダースコア無し）でも breakdown 扱い。"""
+        df = pd.DataFrame({
+            "要素ID": ["jpcrp_cor:NumberOfEmployees"] * 3,
+            "コンテキストID": [
+                "CurrentYearInstant_jpcrp030000-asr_E03144-000NITORIReportableSegmentMember",  # segment → 0
+                "CurrentYearInstant_NonConsolidatedMember",                                    # 非連結 → 0
+                "CurrentYearInstant",                                                          # 連結総額 → 1
+            ],
+            "値": ["18670", "939", "19967"],
+        })
+        assert parse_xbrl_csv(df, "E03144", "2025-03-31")["nonfin"]["employees"] == 19967.0
+
+    def test_c2_issued_shares_prefers_fiscal_year_end_exact(self):
+        """期末発行済株式総数: 正確値(FilingDateInstant・メンバー無し=priority1)が
+        経営指標等の丸めSummary(NonConsolidatedMember=priority0)に勝つ。大株数もfloatで保持。"""
+        df = pd.DataFrame({
+            "要素ID": [
+                "jpcrp_cor:TotalNumberOfIssuedSharesSummaryOfBusinessResults",
+                "jpcrp_cor:NumberOfIssuedSharesAsOfFiscalYearEndIssuedSharesTotalNumberOfSharesEtc",
+            ],
+            "コンテキストID": ["CurrentYearInstant_NonConsolidatedMember", "FilingDateInstant"],
+            "値": ["15794987000", "15794987460"],
+        })
+        assert parse_xbrl_csv(df, "E02144", "2025-03-31")["nonfin"]["issued_shares"] == 15794987460.0
 
     def test_ifrs_cf_detail_elements_extracted(self):
         """IFRS決算のCF計算書本体（NetCash...IFRS）から営業/投資/財務CF・現金増減を抽出する。
