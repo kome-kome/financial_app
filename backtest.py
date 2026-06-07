@@ -1,0 +1,168 @@
+"""バックテスト分析（プリセット・スコアリング上位 N 社の実績リターン計算）。
+
+api.py の routing から引き上げた分析ロジック。interface は `(db, params) -> dict` で、
+FastAPI app に依存しないため HTTP 往復なしで直接テストできる（tests/test_backtest.py）。
+価格取得は database のヘルパ（prices_on_or_after / latest_prices）に集約。
+"""
+from datetime import date, timedelta
+from typing import Optional
+
+from sqlalchemy import func
+from sqlalchemy.orm import Session
+
+from database import FinancialMetric, prices_on_or_after, latest_prices
+from plugins.recommend import PRESETS
+
+# 複数保有期間バックテスト（/api/backtest/multi）の保有月数。
+MULTI_PERIODS = [3, 6, 12, 18, 24]
+
+
+def percentile(sorted_arr: list, p: float) -> float:
+    """pパーセンタイル値（0〜100）。numpy.percentile（線形補間）を使用。"""
+    n = len(sorted_arr)
+    if n == 0:
+        return 0.0
+    if n == 1:
+        return float(sorted_arr[0])
+    import numpy as np
+    return float(np.percentile(sorted_arr, p, method="linear"))
+
+
+def run(
+    db: Session,
+    preset_name: str,
+    months_ago: int,
+    top_n: int,
+    industry: Optional[str],
+    min_market_cap: Optional[float],
+) -> dict:
+    """バックテストを1期間分実行してdictを返す（例外はそのまま伝播）"""
+    weights = PRESETS.get(preset_name, PRESETS["バランス型"])
+    today = date.today()
+    start_date = today - timedelta(days=months_ago * 30)
+    start_date_str = start_date.strftime("%Y-%m-%d")
+    today_str = today.strftime("%Y-%m-%d")
+
+    # スコア指標（z_roe / z_op_margin / gap_ratio 等）は financial_metrics VIEW が算出する
+    # 派生値のため、FinancialRecord ではなく読み取りモデル FinancialMetric を引く。
+    subq = (
+        db.query(FinancialMetric.edinet_code,
+                 func.max(FinancialMetric.year).label("max_year"))
+        .filter(FinancialMetric.period_end <= start_date_str)
+        .group_by(FinancialMetric.edinet_code)
+        .subquery()
+    )
+    query = (
+        db.query(FinancialMetric)
+        .join(subq, (FinancialMetric.edinet_code == subq.c.edinet_code) &
+                    (FinancialMetric.year == subq.c.max_year))
+        .filter(FinancialMetric.period_end <= start_date_str)
+    )
+    if industry:
+        query = query.filter(FinancialMetric.industry == industry)
+    if min_market_cap is not None:
+        query = query.filter(FinancialMetric.market_cap >= float(min_market_cap))
+    records = query.all()
+
+    best: dict = {}
+    for r in records:
+        score, has_any = 0.0, False
+        for metric, weight in weights.items():
+            val = getattr(r, metric, None)
+            if val is not None:
+                score += weight * val
+                has_any = True
+        if not has_any:
+            continue
+        if r.edinet_code not in best or r.period_end > best[r.edinet_code][1].period_end:
+            best[r.edinet_code] = (score, r)
+
+    scored = sorted(best.values(), key=lambda x: x[0], reverse=True)
+    if not scored:
+        return {
+            "start_date": start_date_str, "end_date": today_str,
+            "holding_months": months_ago, "top_n": top_n, "preset": preset_name,
+            "summary": None, "results": [], "total_candidates": 0,
+            "message": f"{start_date_str} 時点の財務データが見つかりませんでした",
+        }
+
+    top = scored[:top_n]
+    bench_limit = min(500, len(scored))
+    bench_codes = [r.edinet_code for _, r in scored[:bench_limit]]
+
+    # エントリー=start_date 以降の最初の終値（daily窓内なら日次・古ければ週次へ自動切替）。
+    # イグジット="now"=最新終値（daily優先）。価格取得は database のヘルパに集約。
+    sp_all = prices_on_or_after(db, bench_codes, start_date_str)
+    ep_all = latest_prices(db, bench_codes)
+
+    results = []
+    for rank, (score, r) in enumerate(top, 1):
+        c = r.edinet_code
+        sp = sp_all.get(c)
+        ep = ep_all.get(c)
+        if (sp and ep and sp["price"] and ep["price"]
+                and sp["date"] < ep["date"]):
+            ret_pct = round((ep["price"] - sp["price"]) / sp["price"] * 100, 2)
+        else:
+            ret_pct = None
+        results.append({
+            "rank":           rank,
+            "edinet_code":    c,
+            "sec_code":       r.sec_code or "",
+            "company_name":   r.company_name or "",
+            "industry":       r.industry or "",
+            "score":          round(score, 3),
+            "year":           r.year,
+            "period_end":     r.period_end,
+            "start_price":    sp["price"] if sp else None,
+            "start_date":     sp["date"]  if sp else None,
+            "end_price":      ep["price"] if ep else None,
+            "end_date":       ep["date"]  if ep else None,
+            "return_pct":     ret_pct,
+            "has_price_data": ret_pct is not None,
+        })
+
+    bench_returns = [
+        (ep_all[c]["price"] - sp_all[c]["price"]) / sp_all[c]["price"] * 100
+        for c in bench_codes
+        if (c in sp_all and c in ep_all
+            and sp_all[c]["price"] and ep_all[c]["price"]
+            and sp_all[c]["date"] < ep_all[c]["date"])
+    ]
+
+    valid = [r["return_pct"] for r in results if r["return_pct"] is not None]
+    if valid:
+        import numpy as np
+        n = len(valid)
+        arr = np.asarray(valid, dtype=float)
+        avg = float(arr.mean())
+        srt = sorted(valid)
+        std = float(arr.std(ddof=0))
+        b_avg = float(np.mean(bench_returns)) if bench_returns else None
+        summary = {
+            "avg_return_pct":    round(avg, 2),
+            "median_return_pct": round(percentile(srt, 50), 2),
+            "std_dev_pct":       round(std, 2),
+            "p5_pct":            round(percentile(srt,  5), 2),
+            "p25_pct":           round(percentile(srt, 25), 2),
+            "p75_pct":           round(percentile(srt, 75), 2),
+            "p95_pct":           round(percentile(srt, 95), 2),
+            "win_rate_pct":      round(sum(1 for x in valid if x > 0) / n * 100, 1),
+            "n_with_data":       n,
+            "benchmark_avg_pct": round(b_avg, 2) if b_avg is not None else None,
+            "excess_return_pct": round(avg - b_avg, 2) if b_avg is not None else None,
+            "n_benchmark":       len(bench_returns),
+        }
+    else:
+        summary = None
+
+    return {
+        "start_date":       start_date_str,
+        "end_date":         today_str,
+        "holding_months":   months_ago,
+        "top_n":            top_n,
+        "preset":           preset_name,
+        "total_candidates": len(scored),
+        "summary":          summary,
+        "results":          results,
+    }

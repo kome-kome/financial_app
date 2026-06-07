@@ -87,10 +87,11 @@ pytest tests/test_utils.py  # 単一ファイル
 
 ## 設計制約（変えてはいけないこと）
 
-- **`upsert_financial` の入力**: `{bs,pl,cf,derived,val}`。bs/pl/cf は `bs_` 等プレフィックス付きで DB カラムにマップ、derived/val はそのまま。XBRL項目追加時は `XBRL_MAP`（collector.py）と `FinancialRecord`（database.py）の**両方**を更新。
+- **`upsert_financial` の入力**: `{bs,pl,cf,derived,val,nonfin}`。bs/pl/cf は `bs_` 等プレフィックス付きで DB カラムにマップ、derived は破棄（VIEW で算出）、val/nonfin はプレフィックス無しの直接列へ。**未知キーは silent-drop せず raise**（fail fast）。
+- **再分類項目の追加は1箇所**: `FinancialRecord`（database.py）の列に `info={"xbrl": [...]}` で生タグを併記するだけ。`XBRL_MAP`（collector.py）は `build_xbrl_map()` が列 info から逆引き生成するため手書きしない（列定義が唯一の源）。接頭辞なし列（val/nonfin）は `info["section"]` を明示。parse 側の例外ロジック（連結優先度・capex ラベル照合・OperatingRevenue1 フィルタ）は collector.py に残す。
 - **`run_full_collection` の `df_master` は常に全件**（`max_companies` で絞らない）。`max_companies` は書類収集件数の上限のみ。`collect_doc_ids_for_period` の `max_companies` は全期間スキャン後に先着N社へ絞る（早期終了禁止）。
 - **認証ミドルウェアは `/api/auth/` プレフィックスを常に通過**させる（ログインAPI自体を守ると詰まる）。
-- **`/api/gap-analysis` は `/api/regression` 実行後でないと404**。
+- **`/api/gap-analysis` は業種別OLS（sector_ols）実行後でないと404**。`depends_on` を `plugins.ensure_dependencies` が runner（`/api/plugins/{name}/run`→400）と専用エンドポイント（`/api/gap-analysis`→404）で強制する（producer の `produced_output` で判定）。`/api/regression` という実エンドポイントは無く、回帰は `/api/plugins/sector_ols/run` 経由。
 - **CORS は `ALLOWED_ORIGIN` 環境変数で制御**（デフォルト `http://localhost:8000`）。
 - **分析モデルの次元整合性（必須）**: 説明変数と被説明変数は同一次元（per-share財務金額[円/株]→株価[円/株]の Ohlson 型）。OLS学習前に各特徴量を `winsorize`（p1-p99、`plugins/utils.py`）。詳細・根拠は [MODELS.md](docs/MODELS.md)。
 - **科学計算ライブラリ**（numpy/scipy/statsmodels/scikit-learn）は利用可。採用基準は [VISION.md](docs/VISION.md)。

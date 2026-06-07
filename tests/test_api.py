@@ -171,6 +171,55 @@ class TestHeavyPluginRenderBlock:
         assert r.status_code != 403
 
 
+class TestGapAnalysisDependency:
+    """candidate4: depends_on の実行時強制を HTTP レイヤで検証（C1: 専用404 / 汎用400）。"""
+
+    def test_gap_analysis_404_when_sector_ols_not_run(self, db):
+        # 回帰未実行（regression_results 空）→ depends_on 未充足で 404
+        api.app.dependency_overrides[api.get_db] = lambda: db
+        assert client.get("/api/gap-analysis").status_code == 404
+
+    def test_run_plugin_400_when_dependency_unsatisfied(self, db):
+        # 汎用 runner 経由は同じ前提条件未充足を 400 で返す
+        api.app.dependency_overrides[api.get_db] = lambda: db
+        assert client.post("/api/plugins/gap_analysis/run", json={}).status_code == 400
+
+    def test_gap_analysis_200_empty_when_regression_exists_but_no_rows(self, db):
+        # 回帰はある（depends_on 充足）が当該フィルタに該当行なし → 200・空結果（404 ではない）
+        from database import RegressionResult
+        db.add(RegressionResult(edinet_code="E00001", year=2023, period_end="2023-03-31",
+                                predicted_market_cap=1.0, gap_ratio=5.0, model="ols", sector="x"))
+        db.commit()
+        api.app.dependency_overrides[api.get_db] = lambda: db
+        r = client.get("/api/gap-analysis")
+        assert r.status_code == 200
+        assert r.json()["count"] == 0
+
+
+class TestBacktestEndpoint:
+    """candidate3: backtest 抽出後のエンドポイント配線（routing→backtest.run 委譲）を検証。"""
+
+    def test_validation_rejects_bad_months_ago(self, db):
+        api.app.dependency_overrides[api.get_db] = lambda: db
+        assert client.get("/api/backtest", params={"months_ago": 0}).status_code == 400
+
+    def test_returns_no_data_on_empty_db(self, db):
+        api.app.dependency_overrides[api.get_db] = lambda: db
+        r = client.get("/api/backtest")
+        assert r.status_code == 200
+        assert r.json()["total_candidates"] == 0
+
+    def test_scores_via_financial_metric(self, db, make_metric):
+        # 旧バグ（FinancialRecord 引きで常に空）の HTTP レイヤ回帰
+        db.add(make_metric(edinet_code="E00001", year=2020, period_end="2020-03-31",
+                           market_cap=10000.0, z_roe=2.0))
+        db.commit()
+        api.app.dependency_overrides[api.get_db] = lambda: db
+        r = client.get("/api/backtest")
+        assert r.status_code == 200
+        assert r.json()["total_candidates"] == 1
+
+
 class TestCompaniesEndpoint:
     def test_list_and_filters(self, db, make_company):
         db.add(make_company(edinet_code="E00001", name="トヨタ自動車", industry="輸送用機器"))

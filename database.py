@@ -92,58 +92,74 @@ class FinancialRecord(Base):
     source       = Column(String(50), default="EDINET_XBRL")
     accounting_standard = Column(String(20))
 
-    # ── BS（貸借対照表）再分類項目 ──────────────────────────────────────
-    bs_total_assets         = Column(Float)   # 総資産
-    bs_current_assets       = Column(Float)   # 流動資産
-    bs_receivables          = Column(Float)   # 売掛金（売上債権）
-    bs_inventory            = Column(Float)   # 棚卸資産
-    bs_noncurrent_assets    = Column(Float)   # 固定資産
-    bs_buildings            = Column(Float)   # 建物及び構築物
-    bs_machinery            = Column(Float)   # 機械装置及び運搬具
-    bs_ppe_total            = Column(Float)   # 有形固定資産合計（内訳=建物+機械等の整合用。C2）
-    bs_intangible_assets    = Column(Float)   # 無形固定資産
-    bs_investments_other_assets = Column(Float)  # 投資その他の資産合計（JGAAP固定資産構造。C2）
-    bs_cash                 = Column(Float)   # 現金・預金
-    bs_investment_securities = Column(Float)  # 投資有価証券（清原式ネットキャッシュ用）
-    bs_total_liabilities    = Column(Float)   # 総負債
-    bs_current_liabilities  = Column(Float)   # 流動負債
-    bs_payables             = Column(Float)   # 買掛金（仕入債務）
-    bs_noncurrent_liabilities = Column(Float) # 固定負債
-    bs_short_term_debt      = Column(Float)   # 短期借入金
-    bs_long_term_debt       = Column(Float)   # 長期借入金
-    bs_bonds_payable        = Column(Float)   # 社債
-    bs_total_equity         = Column(Float)   # 純資産（連結）
-    bs_equity_parent        = Column(Float)   # 親会社株主帰属持分（IFRS）
-    bs_paid_in_capital      = Column(Float)   # 資本金
-    bs_retained_earnings    = Column(Float)   # 利益剰余金
-    bs_bps                  = Column(Float)   # 1株純資産
+    # ── BS（貸借対照表）再分類項目。info["xbrl"] = この列へ集約する生タグ群（多対一） ──
+    bs_total_assets         = Column(Float, info={"xbrl": ["Assets", "AssetsIFRS", "TotalAssetsUSGAAPSummaryOfBusinessResults"]})  # 総資産
+    bs_current_assets       = Column(Float, info={"xbrl": ["CurrentAssets", "CurrentAssetsIFRS"]})  # 流動資産
+    bs_receivables          = Column(Float, info={"xbrl": ["NotesAndAccountsReceivableTrade", "AccountsReceivableTrade", "TradeAndOtherReceivablesCurrentIFRS"]})  # 売掛金（売上債権）
+    bs_inventory            = Column(Float, info={"xbrl": ["Inventories", "InventoriesIFRS"]})  # 棚卸資産
+    bs_noncurrent_assets    = Column(Float, info={"xbrl": ["NoncurrentAssets", "NoncurrentAssetsIFRS"]})  # 固定資産
+    # 建物及び構築物（純額のみ）。BuildingsAndStructures（Net無し）は取得原価=グロスで bs_ppe_total（純額）を超え
+    # balance invariant を壊すため除外。代替綴り BuildingsNet・IFRS 純額 BuildingsAndStructuresIFRS を採用。
+    bs_buildings            = Column(Float, info={"xbrl": ["BuildingsAndStructuresNet", "BuildingsNet", "BuildingsAndStructuresIFRS"]})  # 建物及び構築物（純額）
+    # 機械装置（純額のみ）。MachineryAndEquipment（Net無し）はグロスのため除外。
+    bs_machinery            = Column(Float, info={"xbrl": ["MachineryAndEquipmentNet"]})  # 機械装置及び運搬具（純額）
+    bs_ppe_total            = Column(Float, info={"xbrl": ["PropertyPlantAndEquipment", "PropertyPlantAndEquipmentIFRS"]})  # 有形固定資産合計（内訳=建物+機械等の整合用。C2）
+    bs_intangible_assets    = Column(Float, info={"xbrl": ["IntangibleAssets", "IntangibleAssetsIFRS", "GoodwillAndIntangibleAssetsIFRS"]})  # 無形固定資産
+    bs_investments_other_assets = Column(Float, info={"xbrl": ["InvestmentsAndOtherAssets"]})  # 投資その他の資産合計（JGAAP固定資産構造。C2）
+    bs_cash                 = Column(Float, info={"xbrl": ["CashAndCashEquivalents", "CashAndCashEquivalentsIFRS", "CashAndCashEquivalentsUSGAAPSummaryOfBusinessResults"]})  # 現金・預金
+    # 投資有価証券（清原式ネットキャッシュ用）。IFRS は非流動その他金融資産で近似（流動性の高い金融資産は別科目のため除外）
+    bs_investment_securities = Column(Float, info={"xbrl": ["InvestmentSecurities", "InvestmentsInSecurities", "ShortTermInvestmentSecurities", "OtherFinancialAssetsNonCurrentIFRS"]})  # 投資有価証券
+    bs_total_liabilities    = Column(Float, info={"xbrl": ["Liabilities", "LiabilitiesIFRS"]})  # 総負債
+    bs_current_liabilities  = Column(Float, info={"xbrl": ["CurrentLiabilities", "CurrentLiabilitiesIFRS"]})  # 流動負債
+    bs_payables             = Column(Float, info={"xbrl": ["NotesAndAccountsPayableTrade", "AccountsPayableTrade", "TradeAndOtherPayablesCurrentIFRS"]})  # 買掛金（仕入債務）
+    bs_noncurrent_liabilities = Column(Float, info={"xbrl": ["NoncurrentLiabilities", "NoncurrentLiabilitiesIFRS"]})  # 固定負債
+    bs_short_term_debt      = Column(Float, info={"xbrl": ["ShortTermLoansPayable"]})  # 短期借入金
+    bs_long_term_debt       = Column(Float, info={"xbrl": ["LongTermLoansPayable"]})  # 長期借入金
+    bs_bonds_payable        = Column(Float, info={"xbrl": ["BondsPayable"]})  # 社債
+    # 純資産（連結）。US-GAAP は「株主資本」「純資産額(NCI含む)」のどちらか一方のみ載る企業があり両方登録（同優先度では先勝ち）
+    bs_total_equity         = Column(Float, info={"xbrl": ["Equity", "NetAssets", "EquityIFRS", "EquityAttributableToOwnersOfParentUSGAAPSummaryOfBusinessResults", "EquityIncludingPortionAttributableToNonControllingInterestUSGAAPSummaryOfBusinessResults"]})  # 純資産（連結）
+    bs_equity_parent        = Column(Float, info={"xbrl": ["EquityAttributableToOwnersOfParent", "EquityAttributableToOwnersOfParentIFRS"]})  # 親会社株主帰属持分（IFRS）
+    bs_paid_in_capital      = Column(Float, info={"xbrl": ["CapitalStock", "IssuedCapitalIFRS"]})  # 資本金
+    bs_retained_earnings    = Column(Float, info={"xbrl": ["RetainedEarnings", "RetainedEarningsIFRS"]})  # 利益剰余金
+    bs_bps                  = Column(Float, info={"xbrl": ["BookValuePerShare", "NetAssetsPerShareSummaryOfBusinessResults", "EquityAttributableToOwnersOfParentPerShareUSGAAPSummaryOfBusinessResults"]})  # 1株純資産
 
     # ── PL（損益計算書）再分類項目 ──────────────────────────────────────
-    pl_revenue              = Column(Float)   # 売上高
-    pl_cost_of_sales        = Column(Float)   # 売上原価
-    pl_gross_profit         = Column(Float)   # 売上総利益
-    pl_sga                  = Column(Float)   # 販売費及び一般管理費
-    pl_operating_profit     = Column(Float)   # 営業利益
-    pl_nonoperating_income  = Column(Float)   # 営業外損益（純額）= 経常利益 - 営業利益
-    pl_ordinary_profit      = Column(Float)   # 経常利益
-    pl_pretax_profit        = Column(Float)   # 税前利益
-    pl_net_income           = Column(Float)   # 当期純利益
-    pl_net_income_attr      = Column(Float)   # 親会社帰属純利益（IFRS）
-    pl_eps                  = Column(Float)   # EPS（円）
-    pl_ebitda               = Column(Float)   # EBITDA（計算値=営業利益+減価償却費）
+    # 売上高。生 OperatingRevenue1（PL本体）は登録しない: 金融持株会社が単体営業収益を誤採用するため
+    # Summary 変種のみ採用。NetSalesIFRS はソニー等が Revenue でなく NetSales を使う IFRS 企業対策。
+    pl_revenue              = Column(Float, info={"xbrl": [
+        "NetSales", "Revenues", "NetRevenues", "OperatingRevenues", "Revenue",
+        "OperatingRevenue1SummaryOfBusinessResults",
+        "RevenueIFRS", "RevenueIFRSSummaryOfBusinessResults",
+        "NetSalesIFRS", "NetSalesIFRSSummaryOfBusinessResults",
+        "RevenuesUSGAAPSummaryOfBusinessResults",
+    ]})  # 売上高
+    pl_cost_of_sales        = Column(Float, info={"xbrl": ["CostOfSales", "CostOfSalesIFRS"]})  # 売上原価
+    pl_gross_profit         = Column(Float, info={"xbrl": ["GrossProfit", "GrossProfitIFRS"]})  # 売上総利益
+    pl_sga                  = Column(Float, info={"xbrl": ["SellingGeneralAndAdministrativeExpenses"]})  # 販売費及び一般管理費
+    pl_operating_profit     = Column(Float, info={"xbrl": ["OperatingIncome", "OperatingProfit", "ProfitFromOperatingActivities", "OperatingProfitLossIFRS", "ProfitFromOperatingActivitiesIFRS"]})  # 営業利益
+    pl_nonoperating_income  = Column(Float)   # 営業外損益（純額）= 経常利益 - 営業利益（派生列・tagなし）
+    pl_ordinary_profit      = Column(Float, info={"xbrl": ["OrdinaryIncome"]})  # 経常利益
+    pl_pretax_profit        = Column(Float, info={"xbrl": ["ProfitLossBeforeIncomeTaxes", "ProfitLossBeforeIncomeTaxesIFRS", "ProfitLossBeforeTaxUSGAAPSummaryOfBusinessResults"]})  # 税前利益
+    pl_net_income           = Column(Float, info={"xbrl": ["NetIncomeLoss", "ProfitLoss", "ProfitLossIFRS", "NetIncomeLossAttributableToOwnersOfParentUSGAAPSummaryOfBusinessResults"]})  # 当期純利益
+    pl_net_income_attr      = Column(Float, info={"xbrl": ["ProfitLossAttributableToOwnersOfParent", "ProfitLossAttributableToOwnersOfParentIFRS"]})  # 親会社帰属純利益（IFRS）
+    pl_eps                  = Column(Float, info={"xbrl": ["EarningsPerShare", "BasicEarningsLossPerShare", "BasicEarningsLossPerShareSummaryOfBusinessResults", "BasicEarningsLossPerShareIFRS", "EarningsPerShareIFRS", "BasicEarningsLossPerShareUSGAAPSummaryOfBusinessResults"]})  # EPS（円）
+    pl_ebitda               = Column(Float)   # EBITDA（計算値=営業利益+減価償却費・派生列・tagなし）
     # ── PL 網羅性追加（C2）──
-    pl_rd_expenses          = Column(Float)   # 研究開発費
-    pl_depreciation         = Column(Float)   # 減価償却費及び償却費（D&A・CF add-back。EBITDA入力）
-    pl_extraordinary_income = Column(Float)   # 特別利益（JGAAP概念。IFRS/US-GAAP連結は概ねnull）
-    pl_extraordinary_loss   = Column(Float)   # 特別損失（JGAAP概念。IFRS/US-GAAP連結は概ねnull）
+    pl_rd_expenses          = Column(Float, info={"xbrl": ["ResearchAndDevelopmentExpensesResearchAndDevelopmentActivities", "ResearchAndDevelopmentExpensesSGA"]})  # 研究開発費
+    pl_depreciation         = Column(Float, info={"xbrl": ["DepreciationAndAmortizationOpeCF", "DepreciationAndAmortizationOpeCFIFRS"]})  # 減価償却費及び償却費（D&A・CF add-back。EBITDA入力）
+    pl_extraordinary_income = Column(Float, info={"xbrl": ["ExtraordinaryIncome"]})  # 特別利益（JGAAP概念。IFRS/US-GAAP連結は概ねnull）
+    pl_extraordinary_loss   = Column(Float, info={"xbrl": ["ExtraordinaryLoss"]})  # 特別損失（JGAAP概念。IFRS/US-GAAP連結は概ねnull）
 
     # ── CF（キャッシュフロー）再分類項目 ────────────────────────────────
-    cf_operating_cf         = Column(Float)   # 営業CF
-    cf_investing_cf         = Column(Float)   # 投資CF
-    cf_financing_cf         = Column(Float)   # 財務CF
-    cf_free_cf              = Column(Float)   # フリーCF（計算値）
-    cf_net_change_cash      = Column(Float)   # 現金増減
-    cf_capex                = Column(Float)   # 設備投資額
+    # CF 合計: JGAAP=CashFlowsFrom…系、IFRS/共通=NetCashProvidedByUsedIn…系、IFRS/US-GAAP 経営指標等=…SummaryOfBusinessResults。
+    # IFRS/US-GAAP は本体CF計算書が独自拡張要素のため、経営指標等セクションが確実な取得源（トヨタ等268社対策）。
+    cf_operating_cf         = Column(Float, info={"xbrl": ["NetCashProvidedByUsedInOperatingActivities", "CashFlowsFromOperatingActivities", "NetCashProvidedByUsedInOperatingActivitiesIFRS", "CashFlowsFromUsedInOperatingActivitiesIFRSSummaryOfBusinessResults", "CashFlowsFromUsedInOperatingActivitiesIFRS", "CashFlowsFromUsedInOperatingActivitiesUSGAAPSummaryOfBusinessResults"]})  # 営業CF
+    cf_investing_cf         = Column(Float, info={"xbrl": ["NetCashProvidedByUsedInInvestmentActivities", "NetCashProvidedByUsedInInvestingActivities", "CashFlowsFromInvestingActivities", "NetCashProvidedByUsedInInvestingActivitiesIFRS", "CashFlowsFromUsedInInvestingActivitiesIFRSSummaryOfBusinessResults", "CashFlowsFromUsedInInvestmentActivitiesIFRS", "CashFlowsFromUsedInInvestingActivitiesIFRS", "CashFlowsFromUsedInInvestingActivitiesUSGAAPSummaryOfBusinessResults"]})  # 投資CF
+    cf_financing_cf         = Column(Float, info={"xbrl": ["NetCashProvidedByUsedInFinancingActivities", "CashFlowsFromFinancingActivities", "NetCashProvidedByUsedInFinancingActivitiesIFRS", "CashFlowsFromUsedInFinancingActivitiesIFRSSummaryOfBusinessResults", "CashFlowsFromUsedInFinancingActivitiesIFRS", "CashFlowsFromUsedInFinancingActivitiesUSGAAPSummaryOfBusinessResults"]})  # 財務CF
+    cf_free_cf              = Column(Float)   # フリーCF（計算値・派生列・tagなし）
+    cf_net_change_cash      = Column(Float, info={"xbrl": ["NetIncreaseDecreaseInCashAndCashEquivalents", "CashAndCashEquivalentsIncreaseDecrease", "CashAndCashEquivalentsPeriodIncreaseDecrease", "NetIncreaseDecreaseInCashAndCashEquivalentsIFRS"]})  # 現金増減
+    # 設備投資。要素ID照合に加え _match_capex_by_label のラベル照合でも捕捉（企業独自の拡張要素対策）
+    cf_capex                = Column(Float, info={"xbrl": ["PurchaseOfPropertyPlantAndEquipment", "PurchaseOfPropertyPlantAndEquipmentAndIntangibleAssets", "PurchaseOfPropertyPlantAndEquipmentInvestmentCF", "PaymentsForPurchaseOfPropertyPlantAndEquipment", "CapitalExpendituresForTangibleAssets", "PurchaseOfPropertyPlantAndEquipmentIFRS", "PurchaseOfPropertyPlantAndEquipmentAndIntangibleAssetsIFRS"]})  # 設備投資額
 
     # ── 市場データ（株価・バリュエーション・収集時点スナップショット）────
     stock_price             = Column(Float)   # 株価（収集時点）
@@ -151,11 +167,12 @@ class FinancialRecord(Base):
     per                     = Column(Float)   # PER
     pbr                     = Column(Float)   # PBR
     div_yield               = Column(Float)   # 配当利回り %
-    dps                     = Column(Float)   # 1株配当
+    # 1株配当。section=val: 接頭辞なしで直接列にマップ（build_xbrl_map が列名から section を判定できないため明示）
+    dps                     = Column(Float, info={"xbrl": ["DividendPaidPerShare", "DividendPaidPerShareSummaryOfBusinessResults"], "section": "val"})  # 1株配当
 
-    # ── 非財務（C2・nonfin セクション経由で直接列にマップ）────────────────
-    employees               = Column(Float)   # 従業員数（連結・整数値をFloat格納）
-    issued_shares           = Column(Float)   # 期末発行済株式総数（表示・参考。OLS分母はshares_outstanding維持）
+    # ── 非財務（C2・nonfin セクション経由で直接列にマップ）。section=nonfin を明示 ────────
+    employees               = Column(Float, info={"xbrl": ["NumberOfEmployees"], "section": "nonfin"})  # 従業員数（連結・整数値をFloat格納）
+    issued_shares           = Column(Float, info={"xbrl": ["NumberOfIssuedSharesAsOfFiscalYearEndIssuedSharesTotalNumberOfSharesEtc", "TotalNumberOfIssuedSharesSummaryOfBusinessResults"], "section": "nonfin"})  # 期末発行済株式総数（表示・参考。OLS分母はshares_outstanding維持）
 
     # 計算結果（派生比率・Zスコア・成長率・OLS予測値）は financial_records には保持しない。
     #   - 軽い派生／Zスコア／成長率 → financial_metrics VIEW（ソース列から都度算出）
@@ -167,6 +184,38 @@ class FinancialRecord(Base):
     updated_at              = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     company = relationship("Company", back_populates="records")
+
+
+# ── 再分類項目レジストリ: FinancialRecord の列定義を唯一の源とした射影 ──────────────
+# XBRL_MAP（生タグ → (section, field)）は手書きせず、各列の info["xbrl"] から逆引き生成する。
+# 「源泉タグ付き列」= info["xbrl"] を持つ列（parse 対象）／「派生列」= 持たない列（calc_derived・市場データ）。
+# section は bs_/pl_/cf_ 接頭辞から推論し、接頭辞なし列（val/nonfin）は info["section"] で明示する。
+
+def _column_target(col) -> tuple[str, str]:
+    """列から (section, field) を決める。pl_revenue→("pl","revenue")、dps→("val","dps")。"""
+    section = col.info.get("section")
+    if section:                       # 接頭辞なし列（val/nonfin）は section 明示・field=列名
+        return section, col.name
+    section, _, field = col.name.partition("_")   # bs_/pl_/cf_ 接頭辞から分解
+    return section, field
+
+
+def build_xbrl_map() -> dict[str, tuple[str, str]]:
+    """FinancialRecord の各列 info["xbrl"] を逆引きし、生タグ → (section, field) を生成する。
+    同一の生タグが2列に現れたら ValueError（多対一の一意性違反を import 時に検出）。"""
+    mapping: dict[str, tuple[str, str]] = {}
+    for col in FinancialRecord.__table__.columns:
+        for tag in col.info.get("xbrl", ()):
+            if tag in mapping:
+                raise ValueError(
+                    f"XBRL 生タグ '{tag}' が複数列に重複登録: {mapping[tag]} と {_column_target(col)}"
+                )
+            mapping[tag] = _column_target(col)
+    return mapping
+
+
+# upsert_financial の未知キー検出に使う、書込み可能な (section, field) の集合。
+VALID_TARGETS: frozenset[tuple[str, str]] = frozenset(build_xbrl_map().values())
 
 
 # ── 3. 株価履歴（2本立て: 直近=日次 / 全履歴=週次。close-only・source-only）────────
@@ -776,6 +825,15 @@ def upsert_financial(db, data: dict) -> FinancialRecord:
         "cf": data.get("cf", {}),
     }
 
+    # 未知キーは silent-drop せず fail fast。bs/pl/cf は XBRL_MAP=列 info 由来で構造保証されるため、
+    # 実際に発火し得るのは collector が手で組む val/nonfin キーの typo（開発時バグ）に限られる。
+    unknown = [k for k in flat if not hasattr(FinancialRecord, k)]
+    if unknown:
+        raise ValueError(
+            f"upsert_financial: FinancialRecord に無い未知キー {unknown}"
+            f"（val/nonfin の typo か列追加忘れ）"
+        )
+
     obj = db.query(FinancialRecord).filter_by(
         edinet_code=flat["edinet_code"],
         year=flat["year"],
@@ -783,13 +841,13 @@ def upsert_financial(db, data: dict) -> FinancialRecord:
     ).first()
 
     if obj is None:
-        valid = {k: v for k, v in flat.items() if hasattr(FinancialRecord, k)}
-        obj = FinancialRecord(**valid)
+        # flat のキーは上の検証で全て FinancialRecord 列であることを保証済み
+        obj = FinancialRecord(**flat)
         db.add(obj)
         db.flush()  # autoflush=False のため明示的にフラッシュ（同一セッション内の重複を防ぐ）
     else:
         for k, v in flat.items():
-            if hasattr(FinancialRecord, k) and v is not None:
+            if v is not None:
                 setattr(obj, k, v)
     obj.updated_at = datetime.utcnow()
     return obj

@@ -96,8 +96,19 @@ class GapAnalysisPlugin(AnalysisPlugin):
             query = query.filter(FinancialMetric.year == int(year))
         records = query.all()
 
+        # 回帰の鮮度・モデルメタ（staleness / ols-ridge 混在の可視化）。
+        regression = self._regression_meta(db, year)
+
+        # 依存（sector_ols）が全く未実行のケースは前段の ensure_dependencies が 404/400 で弾く。
+        # ここで空 = 回帰はあるが当該フィルタ（年度等）に該当が無い → エラーでなく空結果を返す。
         if not records:
-            raise ValueError("先に業種別OLS分析を実行してください")
+            return {
+                "count": 0,
+                "n_ar1_estimated": 0,
+                "n_heuristic_fallback": 0,
+                "results": [],
+                "regression": regression,
+            }
 
         # AR(1) 推定用に、各企業の全年度 gap_ratio 履歴を取得
         all_history = (
@@ -161,6 +172,34 @@ class GapAnalysisPlugin(AnalysisPlugin):
             "n_ar1_estimated": n_ar1,
             "n_heuristic_fallback": n_heuristic,
             "results": results,
+            "regression": regression,
+        }
+
+    def _regression_meta(self, db, year) -> dict:
+        """回帰結果（regression_results）の鮮度・使用モデルを要約する。
+
+        - computed_at      : 回帰の最終計算時刻（最大）
+        - data_updated_at  : 財務データの最終更新時刻（最大）
+        - is_stale         : 回帰がデータ更新より古い（再実行が望ましい）
+        - models           : 当該フィルタで使われたモデル（ols/ridge 混在の検出）
+        """
+        from database import RegressionResult, FinancialRecord
+        from sqlalchemy import func
+
+        rq = db.query(RegressionResult).filter(RegressionResult.gap_ratio.isnot(None))
+        if year:
+            rq = rq.filter(RegressionResult.year == int(year))
+        computed_at = rq.with_entities(func.max(RegressionResult.computed_at)).scalar()
+        models = sorted(
+            m for (m,) in rq.with_entities(RegressionResult.model).distinct().all() if m
+        )
+        data_updated_at = db.query(func.max(FinancialRecord.updated_at)).scalar()
+        is_stale = bool(computed_at and data_updated_at and computed_at < data_updated_at)
+        return {
+            "computed_at":     computed_at.isoformat() if computed_at else None,
+            "data_updated_at": data_updated_at.isoformat() if data_updated_at else None,
+            "is_stale":        is_stale,
+            "models":          models,
         }
 
 
