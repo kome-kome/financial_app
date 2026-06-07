@@ -594,7 +594,8 @@ class FinancialMetric(ViewBase):
     bs_total_assets = Column(Float); bs_current_assets = Column(Float)
     bs_receivables = Column(Float); bs_inventory = Column(Float)
     bs_noncurrent_assets = Column(Float); bs_buildings = Column(Float)
-    bs_machinery = Column(Float); bs_intangible_assets = Column(Float)
+    bs_machinery = Column(Float); bs_ppe_total = Column(Float)
+    bs_intangible_assets = Column(Float); bs_investments_other_assets = Column(Float)
     bs_cash = Column(Float); bs_investment_securities = Column(Float)
     bs_total_liabilities = Column(Float); bs_current_liabilities = Column(Float)
     bs_payables = Column(Float); bs_noncurrent_liabilities = Column(Float)
@@ -608,11 +609,14 @@ class FinancialMetric(ViewBase):
     pl_ordinary_profit = Column(Float); pl_pretax_profit = Column(Float)
     pl_net_income = Column(Float); pl_net_income_attr = Column(Float)
     pl_eps = Column(Float); pl_ebitda = Column(Float)
+    pl_rd_expenses = Column(Float); pl_depreciation = Column(Float)
+    pl_extraordinary_income = Column(Float); pl_extraordinary_loss = Column(Float)
     cf_operating_cf = Column(Float); cf_investing_cf = Column(Float)
     cf_financing_cf = Column(Float); cf_free_cf = Column(Float)
     cf_net_change_cash = Column(Float); cf_capex = Column(Float)
     stock_price = Column(Float); market_cap = Column(Float)
     per = Column(Float); pbr = Column(Float); div_yield = Column(Float); dps = Column(Float)
+    employees = Column(Float); issued_shares = Column(Float)
     # 軽い派生（VIEW が都度算出）
     op_margin = Column(Float); net_margin = Column(Float)
     roe = Column(Float); roa = Column(Float)
@@ -634,7 +638,8 @@ WITH d AS (
         fr.id, fr.edinet_code, fr.sec_code, fr.company_name, fr.industry, fr.market,
         fr.year, fr.period_end, fr.doc_id, fr.source, fr.accounting_standard,
         fr.bs_total_assets, fr.bs_current_assets, fr.bs_receivables, fr.bs_inventory,
-        fr.bs_noncurrent_assets, fr.bs_buildings, fr.bs_machinery, fr.bs_intangible_assets,
+        fr.bs_noncurrent_assets, fr.bs_buildings, fr.bs_machinery, fr.bs_ppe_total,
+        fr.bs_intangible_assets, fr.bs_investments_other_assets,
         fr.bs_cash, fr.bs_investment_securities, fr.bs_total_liabilities, fr.bs_current_liabilities,
         fr.bs_payables, fr.bs_noncurrent_liabilities, fr.bs_short_term_debt, fr.bs_long_term_debt,
         fr.bs_bonds_payable, fr.bs_total_equity, fr.bs_equity_parent, fr.bs_paid_in_capital,
@@ -642,9 +647,11 @@ WITH d AS (
         fr.pl_revenue, fr.pl_cost_of_sales, fr.pl_gross_profit, fr.pl_sga, fr.pl_operating_profit,
         fr.pl_nonoperating_income, fr.pl_ordinary_profit, fr.pl_pretax_profit, fr.pl_net_income,
         fr.pl_net_income_attr, fr.pl_eps, fr.pl_ebitda,
+        fr.pl_rd_expenses, fr.pl_depreciation, fr.pl_extraordinary_income, fr.pl_extraordinary_loss,
         fr.cf_operating_cf, fr.cf_investing_cf, fr.cf_financing_cf, fr.cf_free_cf,
         fr.cf_net_change_cash, fr.cf_capex,
         fr.stock_price, fr.market_cap, fr.per, fr.pbr, fr.div_yield, fr.dps,
+        fr.employees, fr.issued_shares,
         CASE WHEN COALESCE(fr.pl_revenue,0) <> 0
              THEN ROUND((COALESCE(fr.pl_operating_profit,0) / fr.pl_revenue * 100)::numeric, 2) END AS op_margin,
         CASE WHEN COALESCE(fr.pl_revenue,0) <> 0
@@ -757,6 +764,9 @@ def init_db():
         ))
         # financial_metrics VIEW（ソース列から軽い派生を都度算出＋regression_results を合成）。
         # regression_results は create_all で先に作成済みのため LEFT JOIN 可能。
+        # 列の追加・並び替え時は CREATE OR REPLACE VIEW が「末尾追加のみ可」の制約で失敗するため、
+        # 一度 DROP してから作り直す（VIEW に依存する DB オブジェクトは無い＝安全）。
+        conn.execute(text("DROP VIEW IF EXISTS financial_metrics"))
         conn.execute(text(FINANCIAL_METRICS_VIEW_SQL))
         conn.commit()
 

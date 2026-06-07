@@ -622,7 +622,7 @@ stateDiagram-v2
         direction TB
         [*] --> CoSearch
         CoSearch : 🔎 企業検索\ncompany.html\n企業名・証券コードで検索
-        CoDetail : 🏢 企業詳細\n業績/財務(BS)/CF/per-share・配当/\nバリュエーション/株価/業種内Z/ネットキャッシュ/同業比較\nChart.js 時系列グラフ
+        CoDetail : 🏢 企業詳細\n業績(PL/利益段階/R&D・減価償却・EBITDA)/\n財務(BS資産内訳・有形固定資産内訳)/CF/per-share・配当/\nバリュエーション/株価/業種内Z/ネットキャッシュ/同業比較\nChart.js 時系列グラフ
         CoSearch --> CoDetail : 企業選択（/company/{edinet_code}）
     }
 

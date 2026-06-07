@@ -72,7 +72,7 @@ a{color:inherit}
 .seg-btn:hover{color:#e2e8f0}
 .seg-btn.active{background:#7c3aed;color:#fff}
 
-.stats-grid.s8{grid-template-columns:repeat(4,1fr)}
+.stats-grid.s10{grid-template-columns:repeat(5,1fr)}
 
 /* 同業比較テーブル */
 table.cmp{width:100%;border-collapse:collapse;font-size:12px;margin-top:4px}
@@ -124,7 +124,7 @@ table.cmp tbody tr:hover td{background:#1e2235}
       <div class="co-meta" id="co-meta"></div>
     </div>
 
-    <div class="stats-grid s8" id="summary-cards"></div>
+    <div class="stats-grid s10" id="summary-cards"></div>
 
     <div class="tabs" role="tablist">
       <button class="tab active" data-tab="perf" role="tab">業績</button>
@@ -158,6 +158,16 @@ table.cmp tbody tr:hover td{background:#1e2235}
         <div class="chart-note">営業利益率・純利益率（％）</div>
         <div class="chart-box"><canvas id="chart-margin"></canvas></div>
       </div>
+      <div class="chart-card">
+        <div class="chart-title">利益の段階 — 営業利益・経常利益・特別損益・純利益</div>
+        <div class="chart-note">折れ線＝<b style="color:#60a5fa">営業利益</b>・<b style="color:#f59e0b">経常利益</b>・<b style="color:#34d399">純利益</b>（億円）／棒＝<b style="color:#22c55e">特別利益(+)</b>・<b style="color:#ef4444">特別損失(−)</b>。経常利益−営業利益＝営業外損益。経常利益・特別損益は日本基準（JGAAP）固有のため、開示の無い企業（IFRS/米国基準の多く）では非表示になります。</div>
+        <div class="chart-box tall"><canvas id="chart-profit-stages"></canvas></div>
+      </div>
+      <div class="chart-card">
+        <div class="chart-title">研究開発費・減価償却費・EBITDA</div>
+        <div class="chart-note">棒＝<b style="color:#f472b6">研究開発費</b>・<b style="color:#94a3b8">減価償却費</b>（億円）／折れ線＝<b style="color:#34d399">EBITDA</b>（営業利益＋減価償却費）。データの無い項目は表示されません。</div>
+        <div class="chart-box tall"><canvas id="chart-rd-dep"></canvas></div>
+      </div>
     </div>
 
     <div class="panel" id="panel-bs">
@@ -174,6 +184,11 @@ table.cmp tbody tr:hover td{background:#1e2235}
           </div>
         </div>
         <div class="chart-box xtall"><canvas id="chart-bs"></canvas></div>
+      </div>
+      <div class="chart-card">
+        <div class="chart-title">有形固定資産の内訳</div>
+        <div class="chart-note">積み上げ棒（億円・純額）。<b style="color:#6366f1">建物及び構築物</b>＋<b style="color:#22d3ee">機械装置</b>＋その他有形＝有形固定資産合計。機械装置は連結純額の開示が無い企業では欠損します。</div>
+        <div class="chart-box tall"><canvas id="chart-ppe"></canvas></div>
       </div>
     </div>
 

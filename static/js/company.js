@@ -190,6 +190,8 @@ async function loadCompany(code){
   ].join('');
 
   // サマリーカード（最新年度）
+  const _emp = latest.nonfin?.employees;
+  const _sh  = latest.nonfin?.issued_shares;
   const cards = [
     {label:`売上高 (${latest.year})`, value: fmtNum(toOku(latest.pl.revenue)), sub:'億円'},
     {label:'営業利益', value: fmtNum(toOku(latest.pl.operating_profit)), sub:'億円'},
@@ -199,6 +201,8 @@ async function loadCompany(code){
     {label:'自己資本比率', value: fmtPct(latest.bs.equity_ratio), sub:''},
     {label:'PER', value: fmtX(latest.val.per), sub:''},
     {label:'PBR', value: fmtX(latest.val.pbr), sub:''},
+    {label:'従業員数', value: (_emp!=null ? fmtNum(_emp, 0) : '—'), sub:'人'},
+    {label:'発行済株式数', value: (_sh!=null ? fmtNum(_sh/1e6, 0) : '—'), sub:'百万株'},
   ];
   document.getElementById('summary-cards').innerHTML = cards.map(c => `
     <div class="stat-card">
@@ -218,6 +222,9 @@ async function loadCompany(code){
   renderMcap(labels, recs);
   renderZscore(latest);
   renderNC(labels, recs);
+  renderPPE(labels, recs);
+  renderProfitStages(labels, recs);
+  renderRdDep(labels, recs);
 
   empty.style.display = 'none';
   view.style.display = 'block';
@@ -348,13 +355,23 @@ function bsDatasets(recs, level){
   const num = v => { const x = toOku(v); return (x==null || isNaN(x)) ? 0 : x; };
   const ta   = r => num(r.bs.total_assets);
   const ca   = r => num(r.bs.current_assets);
-  const cash = r => num(r.bs.cash);
+  const cash = r => Math.min(num(r.bs.cash), ca(r));     // 現金は流動資産に収める
   const te   = r => num(r.bs.total_equity);
   const std  = r => num(r.bs.short_term_debt);
   const ltd  = r => num(r.bs.long_term_debt);
-  // 資産側（合計＝総資産になるよう固定資産で帳尻）
+  // 資産側（合計＝総資産になるよう各内訳をクランプ＋残差で帳尻）
   const fixed   = r => Math.max(0, ta(r) - ca(r));      // 固定資産
-  const otherCa = r => Math.max(0, ca(r) - cash(r));    // その他流動資産
+  const otherCa = r => Math.max(0, ca(r) - cash(r));    // その他流動資産（粗/中）
+  // 流動内訳（細）: 現金→売上債権→棚卸→その他。合計は ca に収める。
+  const recvC   = r => Math.min(num(r.bs.receivables), Math.max(0, ca(r) - cash(r)));
+  const invyC   = r => Math.min(num(r.bs.inventory),   Math.max(0, ca(r) - cash(r) - recvC(r)));
+  const otherCaF= r => Math.max(0, ca(r) - cash(r) - recvC(r) - invyC(r));
+  // 固定内訳: 有形→無形→投資その他→その他固定。合計は fixed に収める。
+  const ppeC    = r => Math.min(num(r.bs.ppe_total), fixed(r));
+  const intgC   = r => Math.min(num(r.bs.intangible_assets), Math.max(0, fixed(r) - ppeC(r)));
+  const invoC   = r => Math.min(num(r.bs.investments_other_assets), Math.max(0, fixed(r) - ppeC(r) - intgC(r)));
+  const otherFx = r => Math.max(0, fixed(r) - ppeC(r) - intgC(r) - invoC(r));
+  const fxOtherM= r => Math.max(0, fixed(r) - ppeC(r));   // 中: 有形以外の固定資産
   // 負債側（合計＝総資産−純資産＝負債合計）
   const liab    = r => Math.max(0, ta(r) - te(r));      // 負債合計
   const mInt    = r => Math.min(std(r) + ltd(r), liab(r));        // 有利子負債（中）
@@ -364,7 +381,8 @@ function bsDatasets(recs, level){
   const fOth    = r => Math.max(0, liab(r) - fStd(r) - fLtd(r));  // その他負債（細）
 
   const C = {
-    fixed:'#4f46e5', otherCa:'#3b82f6', cash:'#22d3ee', ca:'#3b82f6',   // 資産＝青系
+    fixed:'#4f46e5', ppe:'#4f46e5', intang:'#7c3aed', invOther:'#6366f1', otherFx:'#334155', // 固定＝藍～紫
+    otherCa:'#3b82f6', cash:'#22d3ee', recv:'#38bdf8', invy:'#0ea5e9', ca:'#3b82f6',          // 流動＝青～シアン
     equity:'#34d399', otherLi:'#64748b', intDebt:'#f87171',            // 負債純資産
     stDebt:'#f87171', ltDebt:'#fb923c',
   };
@@ -382,9 +400,14 @@ function bsDatasets(recs, level){
   }
   if (level === 'fine'){
     return [
-      bar('固定資産',       C.fixed,   'asset', fixed),
-      bar('その他流動資産', C.otherCa, 'asset', otherCa),
-      bar('現金及び預金',   C.cash,    'asset', cash),
+      bar('その他固定資産',   C.otherFx,  'asset', otherFx),
+      bar('投資その他の資産', C.invOther, 'asset', invoC),
+      bar('無形固定資産',     C.intang,   'asset', intgC),
+      bar('有形固定資産',     C.ppe,      'asset', ppeC),
+      bar('その他流動資産',   C.otherCa,  'asset', otherCaF),
+      bar('棚卸資産',         C.invy,     'asset', invyC),
+      bar('売上債権',         C.recv,     'asset', recvC),
+      bar('現金及び預金',     C.cash,     'asset', cash),
       bar('純資産',         C.equity,  'le',    te),
       bar('その他負債',     C.otherLi, 'le',    fOth),
       bar('長期有利子負債', C.ltDebt,  'le',    fLtd),
@@ -393,9 +416,10 @@ function bsDatasets(recs, level){
   }
   // medium
   return [
-    bar('固定資産',       C.fixed,   'asset', fixed),
-    bar('その他流動資産', C.otherCa, 'asset', otherCa),
-    bar('現金及び預金',   C.cash,    'asset', cash),
+    bar('その他固定資産', C.otherFx,  'asset', fxOtherM),
+    bar('有形固定資産',   C.ppe,      'asset', ppeC),
+    bar('その他流動資産', C.otherCa,  'asset', otherCa),
+    bar('現金及び預金',   C.cash,     'asset', cash),
     bar('純資産',         C.equity,  'le',    te),
     bar('その他負債',     C.otherLi, 'le',    mOth),
     bar('有利子負債',     C.intDebt, 'le',    mInt),
@@ -436,6 +460,88 @@ function drawBS(){
         y1:{ position:'right', title:{display:true, text:'%', color:'#64748b'}, min:0, max:100, ticks:{color:'#a78bfa'}, grid:{drawOnChartArea:false} },
       }
     })
+  });
+}
+
+// ── 有形固定資産の内訳（建物/機械/その他有形）。純額是正の成果が見える ──
+function renderPPE(labels, recs){
+  const canvas = document.getElementById('chart-ppe');
+  if (!canvas) return;
+  const card = canvas.closest('.chart-card');
+  const num = v => { const x = toOku(v); return (x==null||isNaN(x)) ? 0 : x; };
+  const ppe = r => num(r.bs.ppe_total);
+  const hasData = recs.some(r => r.bs.ppe_total != null);
+  if (card) card.style.display = hasData ? '' : 'none';
+  if (!hasData) return;
+  const bld = r => Math.min(num(r.bs.buildings), ppe(r));
+  const mac = r => Math.min(num(r.bs.machinery), Math.max(0, ppe(r) - bld(r)));
+  const oth = r => Math.max(0, ppe(r) - bld(r) - mac(r));
+  const bar = (label, color, fn) => ({ label, backgroundColor:color, stack:'ppe', borderRadius:2, data:recs.map(fn) });
+  charts.ppe = new Chart(canvas, {
+    type:'bar',
+    data:{ labels, datasets:[
+      bar('建物及び構築物', '#6366f1', bld),
+      bar('機械装置',       '#22d3ee', mac),
+      bar('その他有形固定資産', '#334155', oth),
+    ]},
+    options: baseOpts({ scales:{
+      x:{ stacked:true, ticks:{color:'#94a3b8'}, grid:{color:'#1e2235'} },
+      y:{ stacked:true, title:{display:true, text:'億円', color:'#64748b'}, ticks:{color:'#94a3b8'}, grid:{color:'#1e2235'} },
+    }})
+  });
+}
+
+// ── 利益の段階（営業利益・経常利益・純利益＝折れ線／特別利益・特別損失＝棒）──
+//  経常利益・特別損益は JGAAP 固有のため、いずれも開示が無い企業はカード退避。
+//  税引前利益は収集カバレッジが低いため使わず、特別損益は収集済みの実額を直接描く。
+function renderProfitStages(labels, recs){
+  const canvas = document.getElementById('chart-profit-stages');
+  if (!canvas) return;
+  const card = canvas.closest('.chart-card');
+  const hasData = recs.some(r => r.pl.ordinary_profit != null
+    || r.pl.extraordinary_income != null || r.pl.extraordinary_loss != null);
+  if (card) card.style.display = hasData ? '' : 'none';
+  if (!hasData) return;
+  const ok  = v => { const x = toOku(v); return (x==null||isNaN(x)) ? null : x; };
+  const neg = v => { const x = toOku(v); return (x==null||isNaN(x)) ? null : -Math.abs(x); }; // 特別損失は減算方向
+  const line = (label, color, fn) => ({ type:'line', label, data:recs.map(fn), borderColor:color, backgroundColor:color, tension:.3, pointRadius:3, spanGaps:true });
+  const bar  = (label, color, fn) => ({ type:'bar',  label, data:recs.map(fn), backgroundColor:color, borderRadius:2 });
+  charts.profitStages = new Chart(canvas, {
+    type:'bar',
+    data:{ labels, datasets:[
+      bar('特別利益',  '#22c55e', r=>ok(r.pl.extraordinary_income)),
+      bar('特別損失',  '#ef4444', r=>neg(r.pl.extraordinary_loss)),
+      line('営業利益', '#60a5fa', r=>ok(r.pl.operating_profit)),
+      line('経常利益', '#f59e0b', r=>ok(r.pl.ordinary_profit)),
+      line('純利益',   '#34d399', r=>ok(r.pl.net_income)),
+    ]},
+    options: baseOpts({ scales:{
+      x:{ ticks:{color:'#94a3b8'}, grid:{color:'#1e2235'} },
+      y:{ title:{display:true, text:'億円', color:'#64748b'}, ticks:{color:'#94a3b8'}, grid:{color:'#1e2235'} },
+    }})
+  });
+}
+
+// ── 研究開発費・減価償却費・EBITDA（全 null の企業はカード退避）──
+function renderRdDep(labels, recs){
+  const canvas = document.getElementById('chart-rd-dep');
+  if (!canvas) return;
+  const card = canvas.closest('.chart-card');
+  const hasData = recs.some(r => r.pl.rd_expenses!=null || r.pl.depreciation!=null || r.pl.ebitda!=null);
+  if (card) card.style.display = hasData ? '' : 'none';
+  if (!hasData) return;
+  const ok = v => { const x = toOku(v); return (x==null||isNaN(x)) ? null : x; };
+  charts.rdDep = new Chart(canvas, {
+    type:'bar',
+    data:{ labels, datasets:[
+      { label:'研究開発費', backgroundColor:'#f472b6', borderRadius:3, data:recs.map(r=>ok(r.pl.rd_expenses)) },
+      { label:'減価償却費', backgroundColor:'#94a3b8', borderRadius:3, data:recs.map(r=>ok(r.pl.depreciation)) },
+      { label:'EBITDA', type:'line', data:recs.map(r=>ok(r.pl.ebitda)), borderColor:'#34d399', backgroundColor:'#34d399', tension:.3, pointRadius:3, spanGaps:true },
+    ]},
+    options: baseOpts({ scales:{
+      x:{ ticks:{color:'#94a3b8'}, grid:{color:'#1e2235'} },
+      y:{ title:{display:true, text:'億円', color:'#64748b'}, ticks:{color:'#94a3b8'}, grid:{color:'#1e2235'} },
+    }})
   });
 }
 
