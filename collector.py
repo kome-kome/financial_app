@@ -12,6 +12,7 @@ from typing import Optional, Callable
 from dotenv import load_dotenv
 import httpx
 import pandas as pd
+from sqlalchemy import func as sqla_func
 from database import (
     SessionLocal, Company, FinancialRecord, MacroData,
     XbrlRawDocument, upsert_company, upsert_financial,
@@ -860,16 +861,14 @@ def update_market_data_from_history(db, point_in_time: bool = False) -> int:
             .all()
         )
 
+        valid_ecs = [ec for ec, price in latest_price_rows if price and price > 0]
+        latest_fin_by_ec = _fetch_latest_fin_by_ec(db, valid_ecs)
+
         updated = 0
         for edinet_code, price in latest_price_rows:
             if price is None or price <= 0:
                 continue
-            latest = (
-                db.query(FinancialRecord)
-                .filter_by(edinet_code=edinet_code)
-                .order_by(FinancialRecord.year.desc())
-                .first()
-            )
+            latest = latest_fin_by_ec.get(edinet_code)
             if not latest:
                 continue
             _apply_price_to_record(latest, price)
@@ -1343,6 +1342,31 @@ def _bisect_left(sorted_list: list, value: str) -> int:
     return lo
 
 
+def _fetch_latest_fin_by_ec(db, edinet_codes: list) -> dict:
+    """各社の最新 FinancialRecord を1クエリで取得して {edinet_code: record} を返す。
+
+    ROW_NUMBER() OVER (PARTITION BY edinet_code ORDER BY year DESC, period_end DESC)
+    で最新行を確定するため、同一 year・複数 period_end が存在しても安全。
+    N+1 クエリの代替として update_market_data 系関数で使用。
+    """
+    if not edinet_codes:
+        return {}
+    rn = sqla_func.row_number().over(
+        partition_by=FinancialRecord.edinet_code,
+        order_by=[FinancialRecord.year.desc(), FinancialRecord.period_end.desc()],
+    ).label("rn")
+    subq = (
+        db.query(FinancialRecord.id, rn)
+        .filter(FinancialRecord.edinet_code.in_(edinet_codes))
+        .subquery()
+    )
+    return {
+        r.edinet_code: r
+        for r in db.query(FinancialRecord)
+        .join(subq, (FinancialRecord.id == subq.c.id) & (subq.c.rn == 1))
+        .all()
+    }
+
 
 async def update_market_data(max_companies: Optional[int] = None,
                              on_progress: Optional[Callable] = None,
@@ -1366,6 +1390,8 @@ async def update_market_data(max_companies: Optional[int] = None,
         total = len(companies)
         updated = 0
         log.info(f"市場データ更新開始: {total}社")
+
+        latest_fin_by_ec = _fetch_latest_fin_by_ec(db, [c.edinet_code for c in companies])
 
         sem = asyncio.Semaphore(STOOQ_CONCURRENCY)
 
@@ -1397,10 +1423,7 @@ async def update_market_data(max_companies: Optional[int] = None,
                 if price is None:
                     continue
 
-                latest = (db.query(FinancialRecord)
-                          .filter_by(edinet_code=company.edinet_code)
-                          .order_by(FinancialRecord.year.desc())
-                          .first())
+                latest = latest_fin_by_ec.get(company.edinet_code)
                 if not latest:
                     continue
 
