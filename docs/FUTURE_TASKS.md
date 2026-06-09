@@ -2,6 +2,76 @@
 
 未実装の改善項目を記録する。完了済み項目は `docs/archive/IMPROVEMENTS.md` に集約してあるため、本書からは削除済み（git 履歴で参照可能）。
 
+> **凡例**: 各項目は「該当（`ファイル:行`）／問題／改善案／検証」で issue 化可能な粒度。見積は感覚値。
+
+---
+
+## Tier 1 — コード品質・技術的負債（リファクタ）
+
+> 2026-06-09 のコードベース棚卸しで洗い出した項目。**機能は正常**で、保守性・性能・テスト容易性の改善が目的。
+> 棚卸し時点で **未処理 PR / Open Issue は 0 件・依存は最新 pin・本番コードに TODO/FIXME なし**＝負債は局所的。
+> 旧 `docs/archive/REFACTORING.md` の未着手項目（4-4 / 4-5 / 4-6 / 4-7）を実コード確認のうえ本書へ再掲・更新した（4-2 `_now_jst` 共通化は定義消滅により**解決済み**）。
+
+### T1-1. XBRL parse ロジックの重複統合 【高】（旧 REFACTORING 4-4）
+- **該当**: `collector.py:324 parse_raw_rows` と `collector.py:365 parse_xbrl_csv`
+- **問題**: `Prior` コンテキストスキップ・`OperatingRevenue1` 非連結フィルタ・`is_consol`/`has_member`/`priority` 計算・float 変換＋例外無視の4ブロックが2関数に逐語的に重複。`parse_xbrl_csv` 固有は列検出・capex ラベル照合・capex 符号統一の3点のみ。
+- **改善案**: 中核を `_apply_priority_row(row, result, priority)` ヘルパへ抽出し両関数から呼ぶ。
+- **検証**: リファクタ前後で `financial_records` 件数・既存 `tests/test_collector.py` 全通過を確認（デグレ検出）。
+- **見積**: 中。
+
+### T1-2. 収集バックグラウンドジョブの共通化 【高】
+- **該当**: `api.py:287 _run_collection_bg` と `api.py:337 _run_smart_collection_bg`
+- **問題**: `on_progress`/`cancel_check` クロージャ・`CollectionLog` の done/error 更新・`finally` のフラグリセットが約60行逐語重複（実コード確認済み）。片方のバグ修正をもう片方に反映し忘れるリスク。
+- **改善案**: `_run_bg_job(coro_factory, log_id)` ラッパに共通枠を切り出し、差分（smart 判定ロジック）だけを引数注入。
+- **検証**: 既存 `tests/test_collection_jobs.py` の通過＋smart 判定3分岐の手動確認。
+- **見積**: 中。
+
+### T1-3. `update_market_data_from_history` の N+1 クエリ解消 【高・性能】
+- **該当**: `collector.py:864-878`（`point_in_time=False`）／同型が `collector.py:1400-1403`（stooq 版）にも
+- **問題**: `latest_price_rows`（最大約4,000社）をループしながら各社の最新 `FinancialRecord` を個別 `SELECT ... ORDER BY year DESC LIMIT 1`。最大4,000往復。GitHub Actions 差分収集の最頻パスで、Supabase `pool_size=3` 下では特に効く。
+- **改善案**: `ROW_NUMBER() OVER (PARTITION BY edinet_code ORDER BY year DESC)` のサブクエリで最新行を1クエリ一括取得。
+- **検証**: 更新件数が現行と一致することを小規模 DB で確認。
+- **見積**: 中。
+
+### T1-4. `point_in_time=True` の全件メモリロード回避 【中・性能】
+- **該当**: `collector.py:886-903`
+- **問題**: `StockPriceWeekly` 全履歴（数百万行）を `.all()` で Python 側に展開し `defaultdict` に保持。Render メモリ 512MB 制約と相性が悪い。
+- **改善案**: `period_end` を使った window 関数（`LAST_VALUE` 等）／lateral join で近傍価格選択を DB 側へ寄せる。
+- **見積**: 中〜大（アルゴリズム移植）。
+
+### T1-5. 未使用 `walk_forward_cv`（年次版）の採否判断 【中】（旧 REFACTORING 4-6）
+- **該当**: `plugins/utils.py:470 walk_forward_cv`
+- **問題**: 本番未使用（`tests/test_utils.py` のみが参照し延命）。実プラグインは月次版 `walk_forward_cv_monthly`（`price_predictor.py:369`）のみ使用。テストだけ存在するデッドコードは新規読者を混乱させる。
+- **改善案**: `sector_ols.py` 等へ組み込む or 関数＋テストを削除、いずれかに決定。
+- **見積**: 小。
+
+### T1-6. JS 共通ユーティリティの集約 【中】
+- **該当**: `static/js/{analysis,collection,dashboard,company,db}.js`
+- **問題**: `esc()` / `_getCookie()` / `apiFetch()` / `initAuth()` / `logout()` が各ページ JS に個別コピー。認証フローや CSRF トークン取得の修正が多点変更になる。
+- **改善案**: `static/js/common.js` に集約し各ページで先読み（CSP・読み込み順に注意）。
+- **検証**: 全4画面（dashboard/collection/analysis/company）でログイン・API 呼び出しが従来どおり動作。
+- **見積**: 中。
+
+### T1-7. 巨大ファイルの責務分割 【低】（旧 REFACTORING 4-5）
+- **該当**: `collector.py`（1,933行）/ `api.py`（1,580行）。特に `run_full_collection`（`collector.py:1497`・約180行・6責務混在）、`collect_stock_price_history`（`collector.py:536`・約140行・4状態分岐）。
+- **問題**: 単一関数・単一ファイルに責務が集中し読解・テストが困難。
+- **改善案**: `api_collection.py` 等への分割や責務別関数抽出。**大 diff になるため必要性を都度再評価**（性急に着手しない）。
+- **見積**: 大。
+
+### T1-8. デッドコード・残骸の掃除 【低】
+- **該当 / 内容**:
+  - `collector.py:1060` の `elapsed = 0.0` が代入後に未参照（書きかけ残骸）。
+  - `migrate_stock_price_dual.py`（ルート）: dual-table 移行は 2026-06-06 に完遂済み。`scripts/` へ退避 or 削除候補（ただし手順は GOTCHAS/DEPLOYMENT に記録済み）。
+  - `check.py`（EDINET 疎通）と `checker.py`（データ品質）は別物だが命名が紛らわしい（旧 REFACTORING 4-7）。`check.py` は `os.environ['EDINET_API_KEY']` 直参照で `.env` 無しの import が KeyError。改名（例 `edinet_ping.py` / `data_quality.py`）は import 全書換＋CLAUDE.md 更新を伴う。
+- **見積**: 小（個別に）。
+
+### T1-9. テスト欠落の補完 【中】
+- **該当 / 内容**:
+  - `collector.py` の非同期株価収集系（`update_market_data_from_history` / `backfill_historical_stock_prices_yahoo` / `fill_recent_stock_price_gap_yahoo` / `reparse_from_raw`）に対応テストなし（純粋関数・XBRL parse 系のみ網羅）。
+  - `api.py` の収集起動エンドポイント（`/api/collect/start` 等）の DB モックテストなし。
+  - `checker.py` の `run_data_quality_check`（173行・単体テスト可能）にテストなし。
+- **見積**: 中。
+
 ---
 
 ## Tier 2 — 分析品質の改善
