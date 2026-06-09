@@ -98,16 +98,6 @@ def compute_ncav_ratio(ncav: float | None, market_cap_mn: float | None) -> float
     return ncav / (float(market_cap_mn) * 1_000_000)
 
 
-def _num(v: Any) -> float | None:
-    """空文字・None を None に正規化して float 化（UI からの空欄入力対応）。"""
-    if v is None or v == "":
-        return None
-    try:
-        return float(v)
-    except (TypeError, ValueError):
-        return None
-
-
 class NetCashAnalysisPlugin(AnalysisPlugin):
     name = "net_cash_analysis"
     label = "ネットキャッシュ分析"
@@ -122,6 +112,7 @@ class NetCashAnalysisPlugin(AnalysisPlugin):
         return {
             "min_nc_ratio": {
                 "type": "number",
+                "dtype": "float",
                 "label": "最低ネットキャッシュ比率（任意）",
                 "default": 0.0,
                 "optional": True,
@@ -132,6 +123,7 @@ class NetCashAnalysisPlugin(AnalysisPlugin):
             },
             "max_nc_ratio": {
                 "type": "number",
+                "dtype": "float",
                 "label": "NC比率の上限（データ品質ガード）",
                 "default": SANITY_MAX_NC_RATIO,
                 "optional": True,
@@ -142,6 +134,7 @@ class NetCashAnalysisPlugin(AnalysisPlugin):
             },
             "min_market_cap": {
                 "type": "number",
+                "dtype": "float",
                 "label": "最低時価総額（百万円・任意）",
                 "default": None,
                 "optional": True,
@@ -149,6 +142,7 @@ class NetCashAnalysisPlugin(AnalysisPlugin):
             },
             "min_ncav_ratio": {
                 "type": "number",
+                "dtype": "float",
                 "label": "最低NCAV比率（任意・グレアム）",
                 "default": None,
                 "optional": True,
@@ -176,12 +170,14 @@ class NetCashAnalysisPlugin(AnalysisPlugin):
             },
             "year": {
                 "type": "number",
+                "dtype": "int",
                 "label": "対象年度（空=各社の最新）",
                 "default": None,
                 "optional": True,
             },
             "top_n": {
                 "type": "slider",
+                "dtype": "int",
                 "label": "表示件数",
                 "min": 10, "max": 200, "step": 10,
                 "default": 50,
@@ -204,23 +200,24 @@ class NetCashAnalysisPlugin(AnalysisPlugin):
         # financial_metrics VIEW から読む（max_year 抽出も VIEW で行う）。
         from database import FinancialMetric
 
-        min_nc_ratio   = _num(params.get("min_nc_ratio")) or 0.0
-        max_nc_ratio   = _num(params.get("max_nc_ratio"))
-        min_market_cap = _num(params.get("min_market_cap"))
-        min_ncav_ratio = _num(params.get("min_ncav_ratio"))
-        require_ocf    = bool(params.get("require_positive_ocf"))
-        require_ni     = bool(params.get("require_positive_ni"))
-        industry       = params.get("industry")
-        year           = params.get("year")
-        top_n          = int(params.get("top_n") or 50)
-        sort           = params.get("sort") or "nc_ratio_desc"
+        # params はパラメータ契約に従い coerce 済み。
+        min_nc_ratio   = params["min_nc_ratio"] or 0.0
+        max_nc_ratio   = params["max_nc_ratio"]
+        min_market_cap = params["min_market_cap"]
+        min_ncav_ratio = params["min_ncav_ratio"]
+        require_ocf    = params["require_positive_ocf"]
+        require_ni     = params["require_positive_ni"]
+        industry       = params["industry"]
+        year           = params["year"]
+        top_n          = params["top_n"]
+        sort           = params["sort"]
 
         # サニティ上限は正の値のときのみ有効（空/0 で無効）
         sanity_cap = max_nc_ratio if (max_nc_ratio and max_nc_ratio > 0) else None
 
         # 年度指定がなければ各社の最新年度のみを対象にする
         if year:
-            query = db.query(FinancialMetric).filter(FinancialMetric.year == int(year))
+            query = db.query(FinancialMetric).filter(FinancialMetric.year == year)
         else:
             subq = (db.query(FinancialMetric.edinet_code,
                              func.max(FinancialMetric.year).label("max_year"))

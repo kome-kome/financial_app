@@ -11,6 +11,7 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from plugins import execute_plugin
 from plugins.total_return import (
     ALL_MECE_FEATURES,
     BS_FEATURES,
@@ -61,16 +62,16 @@ def _seed(db, make_fin, n=24):
 class TestExecute:
     def test_empty_db_raises(self, db):
         with pytest.raises(ValueError):
-            asyncio.run(plugin.execute({}, db))
+            asyncio.run(execute_plugin(plugin, {}, db))
 
     def test_insufficient_records_raises(self, db, make_fin):
         _seed(db, make_fin, n=5)  # 20 件未満
         with pytest.raises(ValueError):
-            asyncio.run(plugin.execute({}, db))
+            asyncio.run(execute_plugin(plugin, {}, db))
 
     def test_ranking_and_structure(self, db, make_fin):
         _seed(db, make_fin, n=24)
-        res = asyncio.run(plugin.execute({}, db))
+        res = asyncio.run(execute_plugin(plugin, {}, db))
         # 構造
         assert "cv_metrics" in res and "mean_r2" in res["cv_metrics"]
         assert "pl_eps" in res["feature_weights"]
@@ -86,6 +87,6 @@ class TestExecute:
 
     def test_min_div_yield_filter(self, db, make_fin):
         _seed(db, make_fin, n=24)
-        res = asyncio.run(plugin.execute({"min_div_yield": 3.0}, db))
+        res = asyncio.run(execute_plugin(plugin, {"min_div_yield": 3.0}, db))
         # 返ってきた銘柄はすべて配当利回り >= 3.0
         assert all(r["div_yield_pct"] >= 3.0 for r in res["ranking"])

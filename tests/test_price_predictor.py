@@ -14,6 +14,7 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from plugins import execute_plugin
 from plugins.price_predictor import (
     FINANCIAL_LAG_DAYS,
     _add_days,
@@ -118,7 +119,7 @@ class TestComputePriceFeatures:
 class TestExecute:
     def test_no_price_history_raises(self, db):
         with pytest.raises(ValueError):
-            asyncio.run(plugin.execute({}, db))
+            asyncio.run(execute_plugin(plugin, {}, db))
 
     def test_insufficient_samples_raises(self, db, make_metric, make_weekly):
         # 1 社・100 週（週次刻み）。学習に必要な月末サンプル最低数(10)に届かない。
@@ -136,4 +137,4 @@ class TestExecute:
                         per=15.0, pbr=1.2, roe=8.0))
         db.commit()
         with pytest.raises(ValueError):
-            asyncio.run(plugin.execute({}, db))
+            asyncio.run(execute_plugin(plugin, {}, db))

@@ -11,6 +11,7 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from plugins import execute_plugin
 from plugins.recommend import METRICS, PRESETS, plugin
 
 
@@ -43,7 +44,7 @@ class TestExecute:
             make_metric(edinet_code="E00003", z_roe=-1.0),
         ])
         db.commit()
-        res = asyncio.run(plugin.execute(
+        res = asyncio.run(execute_plugin(plugin,
             {"weights": {"z_roe": 1.0}, "min_coverage": 0.0}, db))
         assert res["count"] == 3
         codes = [r["edinet_code"] for r in res["results"]]
@@ -57,29 +58,30 @@ class TestExecute:
             make_metric(edinet_code="E00002", z_roe=2.0, z_op_margin=None),  # coverage 0.5
         ])
         db.commit()
-        res = asyncio.run(plugin.execute(
+        res = asyncio.run(execute_plugin(plugin,
             {"weights": {"z_roe": 1.0, "z_op_margin": 1.0}, "min_coverage": 0.75}, db))
         assert res["count"] == 1
         assert res["skipped_low_coverage"] == 1
         assert res["results"][0]["edinet_code"] == "E00001"
 
     def test_zero_weights_returns_empty(self, db):
-        res = asyncio.run(plugin.execute({"weights": {"z_roe": 0.0}}, db))
+        res = asyncio.run(execute_plugin(plugin,{"weights": {"z_roe": 0.0}}, db))
         assert res["count"] == 0
         assert res["total_candidates"] == 0
 
     def test_empty_db_returns_empty(self, db):
-        res = asyncio.run(plugin.execute({"weights": {"z_roe": 1.0}}, db))
+        res = asyncio.run(execute_plugin(plugin,{"weights": {"z_roe": 1.0}}, db))
         assert res["count"] == 0
         assert res["total_candidates"] == 0
 
     def test_top_n_limits_results(self, db, make_metric):
-        db.add_all([make_metric(edinet_code=f"E{i:05d}", z_roe=float(i)) for i in range(1, 6)])
+        # top_n はスキーマ slider の min=10（パラメータ契約で reject 強制）。有効範囲で検証する。
+        db.add_all([make_metric(edinet_code=f"E{i:05d}", z_roe=float(i)) for i in range(1, 13)])
         db.commit()
-        res = asyncio.run(plugin.execute(
-            {"weights": {"z_roe": 1.0}, "min_coverage": 0.0, "top_n": 2}, db))
-        assert len(res["results"]) == 2
-        assert res["total_candidates"] == 5
+        res = asyncio.run(execute_plugin(
+            plugin, {"weights": {"z_roe": 1.0}, "min_coverage": 0.0, "top_n": 10}, db))
+        assert len(res["results"]) == 10
+        assert res["total_candidates"] == 12
 
     def test_only_latest_year_per_company(self, db, make_metric):
         # 同一企業の複数年は最新年のみ対象（max-year subquery）
@@ -88,7 +90,7 @@ class TestExecute:
             make_metric(edinet_code="E00001", year=2023, period_end="2023-03-31", z_roe=1.0),
         ])
         db.commit()
-        res = asyncio.run(plugin.execute(
+        res = asyncio.run(execute_plugin(plugin,
             {"weights": {"z_roe": 1.0}, "min_coverage": 0.0}, db))
         assert res["count"] == 1
         assert res["results"][0]["year"] == 2023

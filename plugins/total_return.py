@@ -73,12 +73,12 @@ class TotalReturnPlugin(AnalysisPlugin):
     def params_schema(self) -> dict:
         return {
             "use_cf": {
-                "type": "bool",
+                "type": "checkbox",
                 "label": "CF因子を使用（1株営業CF）",
                 "default": True,
             },
             "use_sector_fe": {
-                "type": "bool",
+                "type": "checkbox",
                 "label": "業種固定効果を使用（業種ダミー変数）",
                 "default": True,
                 "description": (
@@ -88,18 +88,21 @@ class TotalReturnPlugin(AnalysisPlugin):
             },
             "n_folds": {
                 "type": "slider",
+                "dtype": "int",
                 "label": "CVフォールド数（k-fold）",
                 "min": 3, "max": 10, "step": 1,
                 "default": 5,
             },
             "top_n": {
                 "type": "slider",
+                "dtype": "int",
                 "label": "表示件数",
                 "min": 10, "max": 50, "step": 5,
                 "default": 20,
             },
             "min_div_yield": {
                 "type": "number",
+                "dtype": "float",
                 "label": "最低配当利回り（%、0=フィルタなし）",
                 "default": 0.0,
                 "optional": True,
@@ -109,11 +112,12 @@ class TotalReturnPlugin(AnalysisPlugin):
     async def execute(self, params: dict, db: Any) -> dict:
         from database import FinancialRecord
 
-        use_cf        = params.get("use_cf", True)
-        use_sector_fe = params.get("use_sector_fe", True)
-        n_folds       = int(params.get("n_folds", 5))
-        top_n         = int(params.get("top_n", 20))
-        min_div_yield = float(params.get("min_div_yield") or 0.0)
+        # params はパラメータ契約に従い coerce 済み。
+        use_cf        = params["use_cf"]
+        use_sector_fe = params["use_sector_fe"]
+        n_folds       = params["n_folds"]
+        top_n         = params["top_n"]
+        min_div_yield = params["min_div_yield"]
 
         # 使用する特徴量（すべて [円/株]）
         features = list(PL_FEATURES)

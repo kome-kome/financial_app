@@ -67,6 +67,7 @@ class GapAnalysisPlugin(AnalysisPlugin):
         return {
             "year": {
                 "type": "number",
+                "dtype": "int",
                 "label": "対象年度（空=全年度）",
                 "default": None,
                 "optional": True,
@@ -87,13 +88,14 @@ class GapAnalysisPlugin(AnalysisPlugin):
         # financial_metrics VIEW が LEFT JOIN して合成するため VIEW を読む。
         from database import FinancialMetric
 
-        year = params.get("year")
-        sort = params.get("sort", "asc")
+        # params はパラメータ契約に従い coerce 済み（year:int|None・sort:str）。
+        year = params["year"]
+        sort = params["sort"]
 
         # 当該フィルタの最新スナップショット
         query = db.query(FinancialMetric).filter(FinancialMetric.gap_ratio.isnot(None))
         if year:
-            query = query.filter(FinancialMetric.year == int(year))
+            query = query.filter(FinancialMetric.year == year)
         records = query.all()
 
         # 回帰の鮮度・モデルメタ（staleness / ols-ridge 混在の可視化）。
@@ -188,7 +190,7 @@ class GapAnalysisPlugin(AnalysisPlugin):
 
         rq = db.query(RegressionResult).filter(RegressionResult.gap_ratio.isnot(None))
         if year:
-            rq = rq.filter(RegressionResult.year == int(year))
+            rq = rq.filter(RegressionResult.year == year)
         computed_at = rq.with_entities(func.max(RegressionResult.computed_at)).scalar()
         models = sorted(
             m for (m,) in rq.with_entities(RegressionResult.model).distinct().all() if m

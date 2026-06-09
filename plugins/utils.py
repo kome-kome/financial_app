@@ -17,6 +17,159 @@ from scipy import stats as scipy_stats
 LOG_PRED_CAP = 15.0
 
 
+# ── パラメータ契約（param contract）の coerce seam ──────────────────────────
+# CONTEXT.md「パラメータ契約」を参照。プラグインの params_schema() を型契約として読み、
+# raw params を型付け・default 補完・bounds/membership 検証する単一の純粋関数。
+# 各 execute 冒頭に散在していた int()/float()/isinstance().split()/clamp/or-default を
+# ここへ集約する。違反は ValueError（runner が 400 へマップ）。
+#
+# 2軸: type = ウィジェット（select/multiselect/slider/number/checkbox/text/weights）、
+#      dtype = データ型（int/float/str/list[str]/bool/dict）。
+#      dtype は数値ウィジェット（number/slider）にのみ明示必須、他は type から推論する。
+
+# widget type → 推論 dtype（数値は曖昧なため推論せず dtype 明示を要求する）
+_WIDGET_DTYPE = {
+    "select":      "str",
+    "text":        "str",
+    "multiselect": "list[str]",
+    "checkbox":    "bool",
+    "weights":     "dict",
+}
+_TRUE_STRINGS = {"true", "1", "on", "yes"}
+_MISSING = object()
+
+
+def _is_blank(v) -> bool:
+    """欠損とみなす値（未指定・None・空文字・NaN）。NaN はフロントの空数値入力由来。"""
+    if v is _MISSING or v is None:
+        return True
+    if isinstance(v, str) and v.strip() == "":
+        return True
+    if isinstance(v, float) and math.isnan(v):
+        return True
+    return False
+
+
+def _resolve_dtype(key: str, field: dict) -> str:
+    """フィールドの dtype を決める。number/slider は dtype 明示必須、他は widget から推論。"""
+    if "dtype" in field:
+        return field["dtype"]
+    wtype = field.get("type")
+    if wtype in ("number", "slider"):
+        raise ValueError(
+            f"schema バグ: '{key}' は {wtype} のため dtype（int/float）の明示が必須です"
+        )
+    inferred = _WIDGET_DTYPE.get(wtype)
+    if inferred is None:
+        raise ValueError(f"schema バグ: '{key}' の type='{wtype}' は未知のウィジェットです")
+    return inferred
+
+
+def _coerce_scalar(key: str, dtype: str, value):
+    """単一スカラーを dtype に従って変換する。変換不能は ValueError。"""
+    if dtype == "int":
+        if isinstance(value, bool):          # bool は int サブクラスのため明示的に弾く
+            raise ValueError(f"'{key}' は整数である必要があります")
+        if isinstance(value, int):
+            return value
+        if isinstance(value, float):
+            if value.is_integer():
+                return int(value)
+            raise ValueError(f"'{key}' は整数である必要があります（{value}）")
+        try:
+            return int(str(value).strip())
+        except (ValueError, TypeError):
+            raise ValueError(f"'{key}' を整数に変換できません: {value!r}")
+    if dtype == "float":
+        if isinstance(value, bool):
+            raise ValueError(f"'{key}' は数値である必要があります")
+        if isinstance(value, (int, float)):
+            return float(value)
+        try:
+            return float(str(value).strip())
+        except (ValueError, TypeError):
+            raise ValueError(f"'{key}' を数値に変換できません: {value!r}")
+    if dtype == "bool":
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        return str(value).strip().lower() in _TRUE_STRINGS
+    if dtype == "str":
+        return str(value)
+    raise ValueError(f"内部エラー: 未対応 dtype '{dtype}'")
+
+
+def coerce_params(schema: dict, raw: dict) -> dict:
+    """パラメータ契約（schema）に従い raw params を型付け・default 補完・検証する。
+
+    処理（フィールドごと）:
+      1. dtype 解決（number/slider は int/float 明示、他は type から推論）
+      2. 欠損（_is_blank）→ default があれば適用（None 可）／optional なら None／
+         どちらも無ければ ValueError（必須欠落）
+      3. dtype 別 coerce（int/float/str/bool/list[str]/dict）。変換不能は ValueError
+      4. bounds（min/max、数値のみ）違反は ValueError（reject）
+      5. membership（select/multiselect の options）違反は ValueError（reject）
+
+    出力は schema 宣言キーのみ（raw の未知キーは無視）。意味的 validation
+    （features 非空・weights 合計≠0 等）は execute 側に残す。
+    """
+    out: dict = {}
+    for key, field in schema.items():
+        if not isinstance(field, dict):
+            continue
+        dtype = _resolve_dtype(key, field)
+        raw_val = raw.get(key, _MISSING)
+
+        # ── 欠損処理 ──────────────────────────────────────────────
+        if _is_blank(raw_val):
+            if "default" in field:
+                out[key] = field["default"]
+            elif field.get("optional"):
+                out[key] = None
+            else:
+                raise ValueError(f"'{key}' は必須です")
+            continue
+
+        # ── dtype 別 coerce ───────────────────────────────────────
+        if dtype == "list[str]":
+            if isinstance(raw_val, str):
+                val = [s.strip() for s in raw_val.split(",") if s.strip()]
+            elif isinstance(raw_val, (list, tuple)):
+                val = [str(x).strip() for x in raw_val if str(x).strip()]
+            else:
+                raise ValueError(f"'{key}' はリストである必要があります: {raw_val!r}")
+        elif dtype == "dict":
+            if not isinstance(raw_val, dict):
+                raise ValueError(f"'{key}' は辞書である必要があります: {raw_val!r}")
+            val = {str(k): _coerce_scalar(key, "float", v) for k, v in raw_val.items()}
+        else:
+            val = _coerce_scalar(key, dtype, raw_val)
+
+        # ── bounds（数値のみ・reject）─────────────────────────────
+        if dtype in ("int", "float"):
+            lo, hi = field.get("min"), field.get("max")
+            if lo is not None and val < lo:
+                raise ValueError(f"'{key}' は {lo} 以上である必要があります（{val}）")
+            if hi is not None and val > hi:
+                raise ValueError(f"'{key}' は {hi} 以下である必要があります（{val}）")
+
+        # ── membership（select/multiselect・reject）───────────────
+        if field.get("type") in ("select", "multiselect"):
+            allowed = {
+                o["value"] for o in field.get("options", [])
+                if isinstance(o, dict) and "value" in o
+            }
+            if allowed:
+                check = val if isinstance(val, list) else [val]
+                bad = [v for v in check if v not in allowed]
+                if bad:
+                    raise ValueError(f"'{key}' に無効な値があります: {bad}")
+
+        out[key] = val
+    return out
+
+
 def shares_outstanding(record) -> float | None:
     """発行済株式数を推計（純資産 ÷ BPS）。
 

@@ -1056,8 +1056,8 @@ async def run_plugin(request: Request, plugin_name: str, params: dict, db: Sessi
         raise HTTPException(403, f"「{p.label}」は計算が重いためローカル環境で実行してください"
                                  "（Render Free プラン制限。結果は共有DBに保存され本番に反映されます）")
     try:
-        plugin_registry.ensure_dependencies(p, db)   # depends_on を実行時に強制（未充足は早期に弾く）
-        return await p.execute(params, db)
+        # execute_plugin が coerce_params（パラメータ契約）→ ensure_dependencies → execute を担う。
+        return await plugin_registry.execute_plugin(p, params, db)
     except plugin_registry.DependencyError as e:
         raise HTTPException(400, str(e))
     except ValueError as e:
@@ -1071,8 +1071,9 @@ async def run_plugin(request: Request, plugin_name: str, params: dict, db: Sessi
 async def gap_analysis(request: Request, year: Optional[int] = None, sort: str = "asc", db: Session = Depends(get_db)):
     p = plugin_registry.get_plugin("gap_analysis")
     try:
-        plugin_registry.ensure_dependencies(p, db)   # 業種別OLS未実行なら 404（CLAUDE.md 制約を強制）
-        return await p.execute({"year": year, "sort": sort}, db)
+        # execute_plugin が coerce→ensure_dependencies→execute を担う。
+        # 業種別OLS未実行なら DependencyError → 404（CLAUDE.md 制約を強制）。
+        return await plugin_registry.execute_plugin(p, {"year": year, "sort": sort}, db)
     except plugin_registry.DependencyError as e:
         raise HTTPException(404, str(e))
     except ValueError as e:
@@ -1090,7 +1091,9 @@ async def get_recommend_presets():
 async def recommend_stocks(req: dict, db: Session = Depends(get_db)):
     p = plugin_registry.get_plugin("recommend")
     try:
-        return await p.execute(req, db)
+        return await plugin_registry.execute_plugin(p, req, db)
+    except plugin_registry.DependencyError as e:
+        raise HTTPException(400, str(e))
     except ValueError as e:
         raise HTTPException(400, str(e))
     except Exception as e:

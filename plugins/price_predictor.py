@@ -172,6 +172,7 @@ class PricePredictorPlugin(AnalysisPlugin):
         return {
             "horizon": {
                 "type": "select",
+                "dtype": "int",   # options の value が整数のため明示（membership 整合）
                 "label": "予測期間（日）",
                 "options": [
                     {"value": 5,  "label": "5日先"},
@@ -181,7 +182,7 @@ class PricePredictorPlugin(AnalysisPlugin):
                 "default": 20,
             },
             "use_price_features": {
-                "type": "boolean",
+                "type": "checkbox",
                 "label": "価格特徴量を使用（MA20乖離・ボラティリティ・RSI・ATR）",
                 "default": True,
             },
@@ -194,6 +195,7 @@ class PricePredictorPlugin(AnalysisPlugin):
             },
             "top_n": {
                 "type": "number",
+                "dtype": "int",
                 "label": "上位表示件数",
                 "default": 30,
                 "min": 5,
@@ -207,12 +209,11 @@ class PricePredictorPlugin(AnalysisPlugin):
         from database import Company, FinancialMetric, StockPriceWeekly
         from collections import namedtuple as _namedtuple
 
-        horizon = int(params.get("horizon") or 20)
-        use_price = bool(params.get("use_price_features", True))
-        fin_features = params.get("features") or DEFAULT_FIN_FEATURES
-        if isinstance(fin_features, str):
-            fin_features = [f.strip() for f in fin_features.split(",") if f.strip()]
-        top_n = max(5, min(100, int(params.get("top_n") or 30)))
+        # params はパラメータ契約に従い coerce 済み。
+        horizon = params["horizon"]
+        use_price = params["use_price_features"]
+        fin_features = params["features"]
+        top_n = params["top_n"]
 
         if not use_price and not fin_features:
             raise ValueError("価格特徴量か財務特徴量のいずれかを有効にしてください。")

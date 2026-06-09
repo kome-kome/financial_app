@@ -213,11 +213,14 @@ class SectorOLSPlugin(AnalysisPlugin):
             },
             "min_samples": {
                 "type": "number",
+                "dtype": "int",
                 "label": "業種最低サンプル数",
                 "default": 10,
+                "min": 5,
             },
             "year": {
                 "type": "number",
+                "dtype": "int",
                 "label": "対象年度（空=最新年度）",
                 "default": None,
                 "optional": True,
@@ -242,13 +245,12 @@ class SectorOLSPlugin(AnalysisPlugin):
         from sqlalchemy import func
         from database import FinancialRecord, upsert_regression_result
 
-        target      = params.get("target", "stock_price")
-        features    = params.get("features") or DEFAULT_FEATURES_PRICE
-        if isinstance(features, str):
-            features = [f.strip() for f in features.split(",") if f.strip()]
-        min_samples = max(5, int(params.get("min_samples") or 10))
-        regularization = params.get("regularization", "none")
-        year        = params.get("year")
+        # params はパラメータ契約に従い coerce 済み（execute_plugin / coerce_params 経由）。
+        target         = params["target"]
+        features       = params["features"]
+        min_samples    = params["min_samples"]
+        regularization = params["regularization"]
+        year           = params["year"]
 
         if not features:
             raise ValueError("説明変数を1つ以上選択してください")
@@ -265,7 +267,7 @@ class SectorOLSPlugin(AnalysisPlugin):
                         (FinancialRecord.year == subq.c.max_year))
         )
         if year:
-            query = db.query(FinancialRecord).filter(FinancialRecord.year == int(year))
+            query = db.query(FinancialRecord).filter(FinancialRecord.year == year)
         records = query.all()
 
         if not records:
