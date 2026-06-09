@@ -35,17 +35,20 @@ class RecommendPlugin(AnalysisPlugin):
                 "type": "weights",
                 "label": "カスタムウェイト",
                 "metrics": METRICS,
-                "default": PRESETS["バランス型"],
+                "default": None,
+                "optional": True,   # 未指定なら execute が preset の重みにフォールバック
                 "description": "各指標の重要度（-2〜3）。z_de_ratioは負ウェイト推奨",
             },
             "top_n": {
                 "type": "slider",
+                "dtype": "int",
                 "label": "表示件数",
                 "min": 10, "max": 100, "step": 10,
                 "default": 30,
             },
             "min_coverage": {
                 "type": "slider",
+                "dtype": "float",
                 "label": "必須指標カバレッジ（0-1）",
                 "min": 0.0, "max": 1.0, "step": 0.1,
                 "default": 0.5,
@@ -53,6 +56,7 @@ class RecommendPlugin(AnalysisPlugin):
             },
             "year": {
                 "type": "number",
+                "dtype": "int",
                 "label": "対象年度（空=最新）",
                 "default": None,
                 "optional": True,
@@ -65,6 +69,7 @@ class RecommendPlugin(AnalysisPlugin):
             },
             "min_market_cap": {
                 "type": "number",
+                "dtype": "float",
                 "label": "最低時価総額（百万円）",
                 "default": None,
                 "optional": True,
@@ -82,13 +87,14 @@ class RecommendPlugin(AnalysisPlugin):
         # Zスコア・gap_ratio・派生指標は financial_metrics VIEW が都度算出/合成する。
         from database import FinancialMetric
 
-        preset       = params.get("preset", "バランス型")
-        weights      = params.get("weights") or PRESETS.get(preset, PRESETS["バランス型"])
-        top_n        = int(params.get("top_n", 30))
-        min_coverage = float(params.get("min_coverage", 0.5))
-        year         = params.get("year")
-        industry     = params.get("industry")
-        min_market_cap = params.get("min_market_cap")
+        # params はパラメータ契約に従い coerce 済み。weights 未指定時は preset の重みへ。
+        preset       = params["preset"]
+        weights      = params["weights"] or PRESETS.get(preset, PRESETS["バランス型"])
+        top_n        = params["top_n"]
+        min_coverage = params["min_coverage"]
+        year         = params["year"]
+        industry     = params["industry"]
+        min_market_cap = params["min_market_cap"]
 
         # 重み総和（絶対値ベース）。カバレッジ計算と正規化に使う
         total_weight = sum(abs(w) for w in weights.values())

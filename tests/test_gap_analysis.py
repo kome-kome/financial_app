@@ -20,6 +20,12 @@ from plugins.gap_analysis import (
     _estimate_ar1_half_life_years,
     plugin,
 )
+from plugins.utils import coerce_params
+
+
+def _typed(raw):
+    """パラメータ契約で coerce のみ行う（依存ゲートは通さず execute 単体を検証する）。"""
+    return coerce_params(plugin.params_schema(), raw)
 
 
 # ── 純粋: AR(1) 半減期推定 ───────────────────────────────────────────────────
@@ -55,7 +61,7 @@ class TestExecute:
     def test_no_gap_records_returns_empty(self, db):
         # 前提条件（sector_ols 未実行）の弾きは ensure_dependencies が担うため、execute 自体は
         # 空結果を返す（「該当年度に無い」= エラーではない）。回帰メタは null/空。
-        res = asyncio.run(plugin.execute({}, db))
+        res = asyncio.run(plugin.execute(_typed({}), db))
         assert res["count"] == 0
         assert res["results"] == []
         assert res["regression"]["computed_at"] is None
@@ -72,7 +78,7 @@ class TestExecute:
                                 predicted_market_cap=12000.0, gap_ratio=10.0,
                                 model="ols", sector="情報・通信業", computed_at=old))  # 回帰は古い
         db.commit()
-        reg = asyncio.run(plugin.execute({}, db))["regression"]
+        reg = asyncio.run(plugin.execute(_typed({}), db))["regression"]
         assert reg["models"] == ["ols"]
         assert reg["is_stale"] is True                         # 回帰 < データ更新 → stale
         assert reg["computed_at"] is not None and reg["data_updated_at"] is not None
@@ -80,7 +86,7 @@ class TestExecute:
     def test_short_history_uses_heuristic(self, db, make_metric):
         db.add_all([make_metric(edinet_code="E00001", gap_ratio=20.0)])
         db.commit()
-        res = asyncio.run(plugin.execute({}, db))
+        res = asyncio.run(plugin.execute(_typed({}), db))
         assert res["n_heuristic_fallback"] == 1
         assert res["n_ar1_estimated"] == 0
         row = res["results"][0]
@@ -96,7 +102,7 @@ class TestExecute:
             for i, g in enumerate(gaps)
         ])
         db.commit()
-        res = asyncio.run(plugin.execute({}, db))
+        res = asyncio.run(plugin.execute(_typed({}), db))
         assert res["n_ar1_estimated"] >= 1
         assert any(r["method"] == "ar1" for r in res["results"])
 
@@ -106,7 +112,7 @@ class TestExecute:
             make_metric(edinet_code="E00002", gap_ratio=25.0),
         ])
         db.commit()
-        asc = asyncio.run(plugin.execute({"sort": "asc"}, db))
+        asc = asyncio.run(plugin.execute(_typed({"sort": "asc"}), db))
         assert asc["results"][0]["gap_ratio"] == 5.0
-        desc = asyncio.run(plugin.execute({"sort": "desc"}, db))
+        desc = asyncio.run(plugin.execute(_typed({"sort": "desc"}), db))
         assert desc["results"][0]["gap_ratio"] == 25.0

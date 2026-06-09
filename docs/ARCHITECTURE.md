@@ -457,7 +457,7 @@ sequenceDiagram
     Note over User,DB: ① 業種別OLS分析の実行（target=stock_price 固定・per-share 説明変数）
     User ->> UI  : 説明変数（per-share[円/株]）・業種最低サンプル数・正則化を選択して「実行」
     UI   ->> API : POST /api/plugins/sector_ols/run { target=stock_price, features:[ps_*...], min_samples }
-    API  ->> PLG : plugin.execute(params, db)
+    API  ->> PLG : execute_plugin(p, raw, db)（coerce_params→ensure_dependencies→execute）
 
     PLG  ->> DB  : SELECT financial_records（最新年度）
     DB  -->> PLG : 全レコード
@@ -479,7 +479,7 @@ sequenceDiagram
     Note over User,DB: ② 乖離分析の実行（業種別OLS完了後に利用可能）
     User ->> UI  : 「乖離分析」タブを選択
     UI   ->> API : GET /api/gap-analysis?sort=asc
-    API  ->> GAP : plugin.execute(params, db)
+    API  ->> GAP : execute_plugin(p, {year, sort}, db)（coerce→ensure_dependencies→execute）
     GAP  ->> DB  : SELECT financial_metrics WHERE gap_ratio IS NOT NULL<br/>（VIEW が regression_results をJOIN）
     DB  -->> GAP : 予測値付きレコード
     GAP -->> API : { results: [{company, gap_ratio, market_cap, predicted, ...}] }
@@ -752,10 +752,13 @@ classDiagram
         +_load() プラグインファイルを自動スキャン
         +get_plugin(name) AnalysisPlugin
         +list_plugins() list
+        +ensure_dependencies(plugin, db) depends_on 強制
+        +execute_plugin(plugin, raw, db) coerce→ensure→execute の単一入口
     }
 
     class Utils {
         <<module>>
+        +coerce_params(schema, raw) typed params : パラメータ契約の coerce seam
         +ols(X, y) coefficients, r2
         +normalize(values, method) normalized_values
         +winsorize(values, p_low, p_high) clipped_values
@@ -779,7 +782,8 @@ classDiagram
     note for GapAnalysisPlugin "業種別OLSの実行後でないと\nregression_results が空のため結果が出ない\n（financial_metrics VIEW 経由で gap_ratio を読む）"
     note for PricePredictorPlugin "StockPriceHistory + FinancialRecord を結合\n月次スナップショット × 全企業でパネルデータ構築\nルックアヘッドバイアス禁止: period_end + 45日ラグ厳守"
     note for NetCashAnalysisPlugin "清原達郎『わが投資術』式\nNC = 流動資産 + 投資有価証券×0.7 − 総負債\nOLS不使用・会計値からの直接計算"
-    note for Utils "numpy / scipy は使用しない\n（純Python実装のみ）\nwalk_forward_cv_monthly() を含む"
+    note for AnalysisPlugin "params_schema() はパラメータ契約（CONTEXT.md）:\ntype=ウィジェット / dtype=データ型 の2軸。\nexecute は coerce 済み typed params を受け取り、\n意味的 validation だけ持つ（型変換・default・\nbounds/membership は coerce_params が担う）"
+    note for Utils "統計は numpy / scipy / statsmodels / sklearn を使用。\ncoerce_params（パラメータ契約の coerce seam）と\nwalk_forward_cv_monthly() を含む"
 ```
 
 ---
