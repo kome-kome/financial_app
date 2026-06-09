@@ -284,14 +284,19 @@ async def start_collection(request: Request, req: CollectRequest, background_tas
     background_tasks.add_task(_run_collection_bg, req.years_back, req.max_companies, log_obj.id, req.skip_existing)
     return {"message": "収集ジョブを開始しました", "log_id": log_obj.id}
 
-async def _run_collection_bg(years: int, max_co: Optional[int], log_id: int, skip_existing: bool = False):
+async def _run_bg_job(coro_factory, log_id: int, error_msg: str = "収集処理でエラーが発生しました（詳細はサーバーログを確認）") -> None:
+    """full / smart 収集ジョブの共通ライフサイクルラッパー。
+
+    DB セッション管理・on_progress/cancel_check の注入・CollectionLog の
+    done/error 更新・finally でのフラグリセットを担う。
+    差分ロジック（どの run_full_collection 呼び出しか）は coro_factory(on_progress, cancel_check, db) で注入。
+    """
     st = jobs.state(_COLLECTION)
     _prog_ticks = [0]
-
     db = SessionLocal()
     baseline_records = db.query(FinancialRecord).count()
 
-    def on_progress(current, total, msg):
+    def on_progress(current: int, total: int, msg: str) -> None:
         st.progress = current
         st.total    = total
         st.append_log(msg)
@@ -305,17 +310,15 @@ async def _run_collection_bg(years: int, max_co: Optional[int], log_id: int, ski
             except Exception:
                 db.rollback()
 
-    def cancel_check():
+    def cancel_check() -> bool:
         return st.cancel_requested
 
     try:
-        cancelled = await run_full_collection(years, max_co, on_progress=on_progress,
-                                              skip_existing=skip_existing, cancel_check=cancel_check)
-        # 成長率・Zスコアは financial_metrics VIEW が都度算出するため収集後の事前計算は不要。
+        cancelled = await coro_factory(on_progress, cancel_check, db)
         log_obj = db.get(CollectionLog, log_id)
         if log_obj:
-            log_obj.status = "done"
-            log_obj.finished_at = datetime.utcnow()
+            log_obj.status        = "done"
+            log_obj.finished_at   = datetime.utcnow()
             log_obj.records_saved = max(0, db.query(FinancialRecord).count() - baseline_records)
             if cancelled:
                 log_obj.message = "ユーザーにより停止"
@@ -324,57 +327,41 @@ async def _run_collection_bg(years: int, max_co: Optional[int], log_id: int, ski
         log.error("収集ジョブエラー (log_id=%s): %s", log_id, e, exc_info=True)
         log_obj = db.get(CollectionLog, log_id)
         if log_obj:
-            log_obj.status = "error"
-            log_obj.message = "収集処理でエラーが発生しました（詳細はサーバーログを確認）"
-            log_obj.finished_at = datetime.utcnow()
+            log_obj.status        = "error"
+            log_obj.message       = error_msg
+            log_obj.finished_at   = datetime.utcnow()
             log_obj.records_saved = max(0, db.query(FinancialRecord).count() - baseline_records)
             db.commit()
     finally:
-        st.running = False
+        st.running          = False
         st.cancel_requested = False
         db.close()
 
+
+async def _run_collection_bg(years: int, max_co: Optional[int], log_id: int, skip_existing: bool = False):
+    async def coro(on_progress, cancel_check, _db):
+        return await run_full_collection(
+            years, max_co, on_progress=on_progress,
+            skip_existing=skip_existing, cancel_check=cancel_check,
+        )
+    await _run_bg_job(coro, log_id)
+
+
 async def _run_smart_collection_bg(log_id: int, years: int):
-    st = jobs.state(_COLLECTION)
-    _prog_ticks = [0]
-    db = SessionLocal()
-    baseline_records = db.query(FinancialRecord).count()
-
-    def on_progress(current, total, msg):
-        st.progress = current
-        st.total    = total
-        st.append_log(msg)
-        _prog_ticks[0] += 1
-        if _prog_ticks[0] % 10 == 0:
-            try:
-                obj = db.get(CollectionLog, log_id)
-                if obj:
-                    obj.companies_processed = current
-                    db.commit()
-            except Exception:
-                db.rollback()
-
-    def cancel_check():
-        return st.cancel_requested
-
-    try:
+    async def coro(on_progress, cancel_check, db):
         company_count = db.query(Company).count()
-
+        st = jobs.state(_COLLECTION)
         if company_count >= SMART_FULL_THRESHOLD:
-            st.append_log(
-                f"[スマート判定] DB企業数={company_count}社 → 差分収集モード（過去{years}年）"
-            )
-            cancelled = await run_full_collection(
+            st.append_log(f"[スマート判定] DB企業数={company_count}社 → 差分収集モード（過去{years}年）")
+            return await run_full_collection(
                 years, None, on_progress=on_progress,
-                skip_existing=True, cancel_check=cancel_check
+                skip_existing=True, cancel_check=cancel_check,
             )
         elif company_count == 0:
-            st.append_log(
-                f"[スマート判定] DB企業数=0社 → 初回チャンク収集（先着{SMART_CHUNK_SIZE}社）"
-            )
-            cancelled = await run_full_collection(
+            st.append_log(f"[スマート判定] DB企業数=0社 → 初回チャンク収集（先着{SMART_CHUNK_SIZE}社）")
+            return await run_full_collection(
                 years, SMART_CHUNK_SIZE, on_progress=on_progress,
-                skip_existing=False, cancel_check=cancel_check
+                skip_existing=False, cancel_check=cancel_check,
             )
         else:
             chunk_no = (company_count // SMART_CHUNK_SIZE) + 1
@@ -383,35 +370,11 @@ async def _run_smart_collection_bg(log_id: int, years: int):
                 f"[スマート判定] DB企業数={company_count}社 → "
                 f"チャンク{chunk_no}（先着{target}社のうち未収集を処理）"
             )
-            cancelled = await run_full_collection(
+            return await run_full_collection(
                 years, target, on_progress=on_progress,
-                skip_existing=True, cancel_check=cancel_check
+                skip_existing=True, cancel_check=cancel_check,
             )
-
-        # 成長率・Zスコアは financial_metrics VIEW が都度算出するため事前計算は不要。
-
-        log_obj = db.get(CollectionLog, log_id)
-        if log_obj:
-            log_obj.status      = "done"
-            log_obj.finished_at = datetime.utcnow()
-            log_obj.records_saved = max(0, db.query(FinancialRecord).count() - baseline_records)
-            if cancelled:
-                log_obj.message = "ユーザーにより停止"
-            db.commit()
-
-    except Exception as e:
-        log.error("スマート収集エラー: %s", e, exc_info=True)
-        log_obj = db.get(CollectionLog, log_id)
-        if log_obj:
-            log_obj.status      = "error"
-            log_obj.message     = "スマート収集でエラーが発生しました（詳細はサーバーログを確認）"
-            log_obj.finished_at = datetime.utcnow()
-            log_obj.records_saved = max(0, db.query(FinancialRecord).count() - baseline_records)
-            db.commit()
-    finally:
-        st.running          = False
-        st.cancel_requested = False
-        db.close()
+    await _run_bg_job(coro, log_id, error_msg="スマート収集でエラーが発生しました（詳細はサーバーログを確認）")
 
 @app.post("/api/collect/smart-start")
 @limiter.limit(RATELIMIT_COLLECT)
