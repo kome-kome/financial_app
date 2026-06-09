@@ -47,3 +47,20 @@ def ensure_dependencies(plugin: AnalysisPlugin, db) -> None:
     if unsatisfied:
         labels = "・".join((get_plugin(n).label if get_plugin(n) else n) for n in unsatisfied)
         raise DependencyError(plugin.name, unsatisfied, f"先に「{labels}」を実行してください")
+
+
+async def execute_plugin(plugin: AnalysisPlugin, raw: dict, db) -> dict:
+    """プラグイン実行の単一 in-process 入口。
+
+    パラメータ契約（CONTEXT.md）に従い raw params を coerce してから依存を強制し、
+    execute へ型付き params を渡す:
+        coerce_params(plugin.params_schema(), raw) → ensure_dependencies → execute
+
+    HTTP runner（/api/plugins/{name}/run・/api/recommend）とテストが共通で使う。
+    例外（ValueError / DependencyError）は握らず送出し、呼び出し側（endpoint）が
+    HTTP ステータスへマップする（gap-analysis→404・runner→400 の意図的差を保つため）。
+    """
+    from .utils import coerce_params
+    typed = coerce_params(plugin.params_schema(), raw)
+    ensure_dependencies(plugin, db)
+    return await plugin.execute(typed, db)

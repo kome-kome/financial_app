@@ -11,6 +11,7 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from plugins import execute_plugin
 from plugins.sector_ols import (
     DB_PER_SHARE_KEYS,
     DEFAULT_FEATURES_PRICE,
@@ -96,17 +97,17 @@ def _seed_sector(db, make_fin, n=12, industry="情報・通信業"):
 class TestExecute:
     def test_empty_db_raises(self, db):
         with pytest.raises(ValueError):
-            asyncio.run(plugin.execute({}, db))
+            asyncio.run(execute_plugin(plugin, {}, db))
 
     def test_insufficient_samples_raises(self, db, make_fin):
         _seed_sector(db, make_fin, n=3)  # default min_samples=10 未満
         with pytest.raises(ValueError):
-            asyncio.run(plugin.execute({}, db))
+            asyncio.run(execute_plugin(plugin, {}, db))
 
     def test_writes_predictions_and_ranks(self, db, make_fin):
         from database import RegressionResult
         _seed_sector(db, make_fin, n=12)
-        res = asyncio.run(plugin.execute({}, db))
+        res = asyncio.run(execute_plugin(plugin, {}, db))
         assert res["n_sectors"] >= 1
         assert res["sector_stats"][0]["r2"] is not None
         # 予測値は financial_records ではなく regression_results に保存される（計算結果の分離）
@@ -122,8 +123,8 @@ class TestExecute:
     def test_features_comma_string(self, db, make_fin):
         _seed_sector(db, make_fin, n=12)
         # per-share キーのみで指定可能（カンマ区切り）
-        res = asyncio.run(plugin.execute(
-            {"features": "pl_eps,bs_bps,ps_revenue,ps_operating_cf"}, db))
+        res = asyncio.run(execute_plugin(
+            plugin, {"features": "pl_eps,bs_bps,ps_revenue,ps_operating_cf"}, db))
         assert res["n_sectors"] >= 1
 
     def test_skip_records_without_bps(self, db, make_fin):
@@ -166,7 +167,7 @@ class TestExecute:
         db.add_all(recs_ok + recs_no_bps)
         db.commit()
 
-        res = asyncio.run(plugin.execute({}, db))
+        res = asyncio.run(execute_plugin(plugin, {}, db))
         # 業種に集計されたサンプル数は bs_bps 有効の 11 社のみ
         assert res["n_total"] == 11
 

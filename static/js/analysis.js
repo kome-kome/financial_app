@@ -934,6 +934,8 @@ function _renderParamsForm(schema, tabId) {
           data-input="syncVal" data-target="val-${tabId}-${key}" style="flex:1;accent-color:#7c3aed">
         <span id="val-${tabId}-${key}" style="color:#a78bfa;font-weight:600;min-width:36px">${field.default}</span>
       </div>`;
+    } else if (field.type === 'checkbox') {
+      html += `<input type="checkbox" id="param-${tabId}-${key}"${field.default ? ' checked' : ''} style="width:auto;accent-color:#7c3aed">`;
     } else {
       html += `<input type="${field.type === 'number' ? 'number' : 'text'}" id="param-${tabId}-${key}" placeholder="${field.default ?? ''}">`;
     }
@@ -957,6 +959,8 @@ async function runDynamicPlugin(pluginName, tabId) {
     if (field.type === 'multiselect') {
       const selected = [...el.selectedOptions].map(o => o.value);
       params[key] = selected.length > 0 ? selected : null;
+    } else if (field.type === 'checkbox') {
+      params[key] = el.checked;
     } else {
       let val = el.value;
       params[key] = (field.type === 'slider' || field.type === 'number')

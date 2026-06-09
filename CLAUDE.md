@@ -92,6 +92,8 @@ pytest tests/test_utils.py  # 単一ファイル
 - **`run_full_collection` の `df_master` は常に全件**（`max_companies` で絞らない）。`max_companies` は書類収集件数の上限のみ。`collect_doc_ids_for_period` の `max_companies` は全期間スキャン後に先着N社へ絞る（早期終了禁止）。
 - **認証ミドルウェアは `/api/auth/` プレフィックスを常に通過**させる（ログインAPI自体を守ると詰まる）。
 - **`/api/gap-analysis` は業種別OLS（sector_ols）実行後でないと404**。`depends_on` を `plugins.ensure_dependencies` が runner（`/api/plugins/{name}/run`→400）と専用エンドポイント（`/api/gap-analysis`→404）で強制する（producer の `produced_output` で判定）。`/api/regression` という実エンドポイントは無く、回帰は `/api/plugins/sector_ols/run` 経由。
+- **プラグイン起動は `plugins.execute_plugin(plugin, raw, db)` が単一入口**（runner / `/api/recommend` / `/api/gap-analysis` が共用・テストもこれ）。内部で `coerce_params`→`ensure_dependencies`→`execute` の順。例外（`ValueError`/`DependencyError`）は握らず送出し、各 endpoint の except が HTTP へマップ（gap-analysis→404・runner→400 の差を保つ）。
+- **`params_schema()` はパラメータ契約**（CONTEXT.md「パラメータ契約」）。`type`（ウィジェット）と `dtype`（データ型: int/float/str/list[str]/bool/dict）の2軸を持ち、dtype は `number`/`slider` にのみ明示必須（他は type から推論）。型変換・default 補完・bounds(min/max)/membership(options) 検証は `coerce_params`（`plugins/utils.py`）が一手に担い、**違反は reject（ValueError）**。`execute` は coerce 済み typed params を受け取り、意味的 validation（features 非空・weights 合計≠0 等）だけ持つ。bool ウィジェットは `checkbox` に統一（`boolean`/`bool` 禁止）。
 - **CORS は `ALLOWED_ORIGIN` 環境変数で制御**（デフォルト `http://localhost:8000`）。
 - **分析モデルの次元整合性（必須）**: 説明変数と被説明変数は同一次元（per-share財務金額[円/株]→株価[円/株]の Ohlson 型）。OLS学習前に各特徴量を `winsorize`（p1-p99、`plugins/utils.py`）。詳細・根拠は [MODELS.md](docs/MODELS.md)。
 - **科学計算ライブラリ**（numpy/scipy/statsmodels/scikit-learn）は利用可。採用基準は [VISION.md](docs/VISION.md)。

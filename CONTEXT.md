@@ -35,3 +35,9 @@ _Avoid_: 更新収集, アップデート
 **収集ジョブ (collection job)**:
 収集処理の実行時インスタンスの状態（running / progress / log / cancel）。種別は collection（full/incremental/smart 共有）/ market / history / jquants / macro / reparse。job 名キーの単一 registry（`collection_jobs.jobs`）が状態を保持し SSE で進捗配信する。全件収集・差分収集が「処理の種類」を指すのに対し、収集ジョブは「実行中スロットの状態」を指す。
 _Avoid_: ステータス辞書, status dict（実装詳細・旧称）
+
+## 分析プラグイン
+
+**パラメータ契約 (param contract)**:
+分析プラグインの `params_schema()` を UI フォーム定義かつ型契約として使う宣言。各フィールドは `type`（ウィジェット: select/multiselect/slider/number/checkbox/text/weights）と `dtype`（データ型: int/float/str/list[str]/bool/dict）の2軸を持ち、dtype は数値（number/slider）にのみ明示し他は type から推論する。単一の coerce seam（`coerce_params`）がこの契約から raw params の型付け・default 補完・bounds/membership 検証を行い、execute には意味的 validation（features 非空・weights 合計≠0 等）だけが残る。bounds/membership 違反は reject（ValueError）。
+_Avoid_: パラメータスキーマ, フォーム定義（型契約の側面が落ちるため）
