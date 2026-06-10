@@ -24,7 +24,6 @@ from plugins.utils import (
     ols,
     ols_with_diagnostics,
     ridge_regression,
-    walk_forward_cv,
     walk_forward_cv_monthly,
     winsorize,
 )
@@ -207,32 +206,6 @@ class TestKfoldCv:
         # 線形なので CV r2 は十分高いはず
         avg_r2 = sum(r["r2"] for r in out) / len(out)
         assert avg_r2 > 0.8
-
-
-# ── walk_forward_cv ──────────────────────────────────────────────────────
-
-class TestWalkForwardCv:
-    def test_returns_empty_when_too_few_years(self):
-        records = {2020: [([1.0], 1.0)] * 10}
-        out = walk_forward_cv(records, ["x"], min_train_years=2)
-        assert out == []
-
-    def test_basic_walk_forward(self):
-        import random
-        rng = random.Random(1)
-        records = {}
-        for year in range(2018, 2024):
-            samples = []
-            for _ in range(30):
-                x = rng.uniform(1, 100)
-                y = 10 + 2 * x + rng.gauss(0, 5)
-                samples.append(([x], y))
-            records[year] = samples
-        out = walk_forward_cv(records, ["x"], min_train_years=2, n_folds=3, y_norm_method="zscore")
-        assert len(out) == 3
-        for r in out:
-            assert "test_year" in r and "r2" in r
-            assert r["test_year"] in (2021, 2022, 2023)
 
 
 # ── walk_forward_cv_monthly ──────────────────────────────────────────────

@@ -39,11 +39,6 @@
 - **改善案**: `period_end` を使った window 関数（`LAST_VALUE` 等）／lateral join で近傍価格選択を DB 側へ寄せる。
 - **見積**: 中〜大（アルゴリズム移植）。
 
-### T1-5. 未使用 `walk_forward_cv`（年次版）の採否判断 【中】（旧 REFACTORING 4-6）
-- **該当**: `plugins/utils.py:470 walk_forward_cv`
-- **問題**: 本番未使用（`tests/test_utils.py` のみが参照し延命）。実プラグインは月次版 `walk_forward_cv_monthly`（`price_predictor.py:369`）のみ使用。テストだけ存在するデッドコードは新規読者を混乱させる。
-- **改善案**: `sector_ols.py` 等へ組み込む or 関数＋テストを削除、いずれかに決定。
-- **見積**: 小。
 
 ### T1-6. JS 共通ユーティリティの集約 【中】
 - **該当**: `static/js/{analysis,collection,dashboard,company,db}.js`
@@ -58,10 +53,11 @@
 - **改善案**: `api_collection.py` 等への分割や責務別関数抽出。**大 diff になるため必要性を都度再評価**（性急に着手しない）。
 - **見積**: 大。
 
-### T1-8. デッドコード・残骸の掃除 【低】
-- **該当 / 内容**:
-  - `collector.py:1060` の `elapsed = 0.0` が代入後に未参照（書きかけ残骸）。
-  - `migrate_stock_price_dual.py`（ルート）: dual-table 移行は 2026-06-06 に完遂済み。`scripts/` へ退避 or 削除候補（ただし手順は GOTCHAS/DEPLOYMENT に記録済み）。
+### T1-8. デッドコード・残骸の掃除 【低】（一部完了）
+- **完了済み**:
+  - `collector.py` の `elapsed = 0.0` 残骸を削除（2026-06-10）。
+  - `migrate_stock_price_dual.py` をルートから `scripts/` へ移動（2026-06-10）。
+- **残課題**:
   - `check.py`（EDINET 疎通）と `checker.py`（データ品質）は別物だが命名が紛らわしい（旧 REFACTORING 4-7）。`check.py` は `os.environ['EDINET_API_KEY']` 直参照で `.env` 無しの import が KeyError。改名（例 `edinet_ping.py` / `data_quality.py`）は import 全書換＋CLAUDE.md 更新を伴う。
 - **見積**: 小（個別に）。
 
