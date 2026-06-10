@@ -322,6 +322,50 @@ def df_to_raw_rows(df) -> list:
     return rows
 
 
+def _apply_row(
+    elem: str, ctx: str, val_raw, cat: str, field: str,
+    result: dict, _priority: dict, apply_capex_sign: bool = False,
+) -> None:
+    """共通フィルタ・優先度計算・結果反映。parse_raw_rows / parse_xbrl_csv の中核共通ロジック。
+
+    Prior コンテキストスキップ・OperatingRevenue1 非連結フィルタ・
+    is_consol/has_member/priority 計算・float 変換・meta/priority 更新を担う。
+    apply_capex_sign=True のとき capex を負値（支出＝アウトフロー）に統一する。
+    """
+    # 前期比較データ（Prior1Year等）はスキップ。当期データのみ処理する
+    if "Prior" in ctx and "CurrentYear" not in ctx:
+        return
+    # OperatingRevenue1 系（営業収益）は連結のみ採用。金融持株会社は連結営業収益を持たず
+    # 提出会社単体（NonConsolidatedMember）の営業収益しか無いため、非連結値を売上に誤採用しない。
+    if field == "revenue" and elem.startswith("OperatingRevenue1") and \
+            ("NonConsolidated" in ctx or "_Member" in ctx):
+        return
+    is_consol  = any(k in ctx for k in CONSOLIDATED_KEYS) and "NonConsolidated" not in ctx
+    # 次元メンバー（セグメント別・株式種類別等）は全て "...Member" で終わる breakdown。
+    # "_Member" 限定だと "ReportableSegmentMember"（直前にアンダースコア無し）を取りこぼし、
+    # 連結総額（メンバー無し context）と同優先度で並んで CSV 順次第で上書きされる（従業員数で顕在化）。
+    # 広く "Member" を breakdown とみなすことで連結総額を確実に優先する。
+    has_member = "Member" in ctx or "NonConsolidated" in ctx
+    priority   = 2 if is_consol else (1 if not has_member else 0)
+    try:
+        val = float(str(val_raw).replace(",", ""))
+    except (ValueError, TypeError):
+        return
+    if apply_capex_sign and field == "capex":
+        # capex は支出＝負（アウトフロー）で統一する（UI の符号ロバスト実装と整合）
+        val = -abs(val)
+    if cat == "meta":
+        # 業種コード: 数値 → 4桁ゼロ埋め文字列 → 業種名に変換
+        code_str = str(int(val)).zfill(4)
+        result["meta"]["tse_industry_code"] = code_str
+        result["meta"]["industry_name"] = TSE_INDUSTRY.get(code_str, "")
+    else:
+        key = f"{cat}_{field}"
+        if priority > _priority.get(key, -1):
+            result[cat][field] = val
+            _priority[key] = priority
+
+
 def parse_raw_rows(rows: list) -> dict:
     """[{element, context, value}, ...] から {bs, pl, cf, val, nonfin, meta} を抽出（再解析用）"""
     result = {"bs": {}, "pl": {}, "cf": {}, "val": {}, "nonfin": {}, "meta": {}}
@@ -333,33 +377,7 @@ def parse_raw_rows(rows: list) -> dict:
             continue
         cat, field = category_field
         ctx = row.get("context", "")
-        if "Prior" in ctx and "CurrentYear" not in ctx:
-            continue
-        # OperatingRevenue1 系（営業収益）は連結のみ採用。金融持株会社は連結営業収益を持たず
-        # 提出会社単体（NonConsolidatedMember）の営業収益しか無いため、非連結値を売上に誤採用しない。
-        if field == "revenue" and elem.startswith("OperatingRevenue1") and \
-                ("NonConsolidated" in ctx or "_Member" in ctx):
-            continue
-        is_consol  = any(k in ctx for k in CONSOLIDATED_KEYS) and "NonConsolidated" not in ctx
-        # 次元メンバー（セグメント別・株式種類別等）は全て "...Member" で終わる breakdown。
-        # "_Member" 限定だと "ReportableSegmentMember"（直前にアンダースコア無し）を取りこぼし、
-        # 連結総額（メンバー無し context）と同優先度で並んで CSV 順次第で上書きされる（従業員数で顕在化）。
-        # 広く "Member" を breakdown とみなすことで連結総額を確実に優先する。
-        has_member = "Member" in ctx or "NonConsolidated" in ctx
-        priority   = 2 if is_consol else (1 if not has_member else 0)
-        try:
-            val = float(str(row.get("value", "")).replace(",", ""))
-        except (ValueError, TypeError):
-            continue
-        if cat == "meta":
-            code_str = str(int(val)).zfill(4)
-            result["meta"]["tse_industry_code"] = code_str
-            result["meta"]["industry_name"] = TSE_INDUSTRY.get(code_str, "")
-        else:
-            key = f"{cat}_{field}"
-            if priority > _priority.get(key, -1):
-                result[cat][field] = val
-                _priority[key] = priority
+        _apply_row(elem, ctx, row.get("value", ""), cat, field, result, _priority)
     return result
 
 
@@ -372,10 +390,7 @@ def parse_xbrl_csv(df, edinet_code: str, period_end: str) -> dict:
     if not {"element", "value"}.issubset(col_map):
         return result
 
-    # 優先度管理: 連結(2) > 非メンバー非連結(1) > メンバー付き非連結(0)
-    # これにより CSV 内の行順序に依存せず正しい値を採用できる
     _priority: dict = {}
-
     label_col = col_map.get("label")
 
     for _, row in df.iterrows():
@@ -393,44 +408,7 @@ def parse_xbrl_csv(df, edinet_code: str, period_end: str) -> dict:
 
         cat, field = category_field
         ctx = str(row.get(col_map.get("context", ""), ""))
-
-        # 前期比較データ（Prior1Year等）はスキップ。当期データのみ処理する
-        if "Prior" in ctx and "CurrentYear" not in ctx:
-            continue
-        # OperatingRevenue1 系（営業収益）は連結のみ採用。金融持株会社は連結営業収益を持たず
-        # 提出会社単体（NonConsolidatedMember）の営業収益しか無いため、非連結値を売上に誤採用しない。
-        if field == "revenue" and elem.startswith("OperatingRevenue1") and \
-                ("NonConsolidated" in ctx or "_Member" in ctx):
-            continue
-
-        is_consol  = any(k in ctx for k in CONSOLIDATED_KEYS) and "NonConsolidated" not in ctx
-        # 次元メンバー（セグメント別・株式種類別等）は全て "...Member" で終わる breakdown。
-        # "_Member" 限定だと "ReportableSegmentMember"（直前にアンダースコア無し）を取りこぼし、
-        # 連結総額（メンバー無し context）と同優先度で並んで CSV 順次第で上書きされる（従業員数で顕在化）。
-        # 広く "Member" を breakdown とみなすことで連結総額を確実に優先する。
-        has_member = "Member" in ctx or "NonConsolidated" in ctx
-        priority   = 2 if is_consol else (1 if not has_member else 0)
-
-        val_raw = row[col_map["value"]]
-        try:
-            val = float(str(val_raw).replace(",", ""))
-        except (ValueError, TypeError):
-            continue
-
-        # capex は支出＝負（アウトフロー）で統一する（UI の符号ロバスト実装と整合）
-        if field == "capex":
-            val = -abs(val)
-
-        if cat == "meta":
-            # 業種コード: 数値 → 4桁ゼロ埋め文字列 → 業種名に変換
-            code_str = str(int(val)).zfill(4)
-            result["meta"]["tse_industry_code"] = code_str
-            result["meta"]["industry_name"] = TSE_INDUSTRY.get(code_str, "")
-        else:
-            key = f"{cat}_{field}"
-            if priority > _priority.get(key, -1):
-                result[cat][field] = val
-                _priority[key] = priority
+        _apply_row(elem, ctx, row[col_map["value"]], cat, field, result, _priority, apply_capex_sign=True)
     return result
 
 
@@ -1055,8 +1033,7 @@ async def backfill_historical_stock_prices_yahoo(
             if on_progress and (i % 200 == 0 or i == total):
                 on_progress(i, total, f"[Yahoo backfill {i}/{total}] {sec_code}  累計{updated}件更新")
 
-            # レート制限対策
-            elapsed = 0.0  # fetch_yahoo_history 内の処理時間は含まれるため短めのスリープ
+            # レート制限対策（fetch_yahoo_history 内の処理時間は含まれるため短めのスリープ）
             if YAHOO_STOCK_RATE_SLEEP > 0:
                 await asyncio.sleep(YAHOO_STOCK_RATE_SLEEP)
 
