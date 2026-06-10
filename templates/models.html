@@ -287,7 +287,7 @@ predicted_market_cap = ŷ_pred / stock_price × market_cap   <span class="sym">[
     </tbody>
   </table>
 
-  <p>派生 per-share の全選択肢は PL/BS/CF の絶対額カラムを網羅（約30項目、<code>ps_*</code> プレフィックス）。</p>
+  <p>派生 per-share の全選択肢は PL/BS/CF の絶対額カラムを網羅（約37項目、<code>ps_*</code> プレフィックス）。うち <strong>C2 収集列</strong>（研究開発費 <code>ps_rd_expenses</code>・減価償却費 <code>ps_depreciation</code>・有形固定資産合計 <code>ps_ppe_total</code>・投資その他の資産合計 <code>ps_investments_other_assets</code>・特別損益 <code>ps_extraordinary_income</code>/<code>ps_extraordinary_loss</code>）も per-share 派生として選択可能。ただし欠損が広い（特別損益は JGAAP 専用・研究開発費は非研究開発企業で null）ため<strong>デフォルト10項目には含めず</strong>、研究開発集約度・資本集約度を見たい業種で明示選択する運用。</p>
 
   <p><strong>実行条件:</strong> 業種最小サンプル数（デフォルト: 10社）を満たさない業種はスキップ。各銘柄について <code>bs_bps &gt; 0</code> かつ <code>bs_total_equity &gt; 0</code> が必須（株数推計のため）。</p>
 

@@ -297,11 +297,15 @@ ps_<feat> = <絶対額カラム> / shares     [円/株]
 
 **派生 per-share の全選択肢**（PL/BS/CF の絶対額カラムを網羅、`ps_*` プレフィックス）:
 
-- PL: `ps_revenue`, `ps_cost_of_sales`, `ps_gross_profit`, `ps_sga`, `ps_operating_profit`, `ps_nonoperating_income`, `ps_ordinary_profit`, `ps_net_income`
-- BS資産: `ps_total_assets`, `ps_current_assets`, `ps_receivables`, `ps_inventory`, `ps_cash`, `ps_noncurrent_assets`, `ps_buildings`, `ps_machinery`, `ps_intangible_assets`, `ps_investment_securities`
+- PL: `ps_revenue`, `ps_cost_of_sales`, `ps_gross_profit`, `ps_sga`, `ps_rd_expenses`†, `ps_operating_profit`, `ps_depreciation`†, `ps_nonoperating_income`, `ps_ordinary_profit`, `ps_extraordinary_income`†, `ps_extraordinary_loss`†, `ps_pretax_profit`, `ps_net_income`
+- BS資産: `ps_total_assets`, `ps_current_assets`, `ps_receivables`, `ps_inventory`, `ps_cash`, `ps_noncurrent_assets`, `ps_buildings`, `ps_machinery`, `ps_ppe_total`†, `ps_intangible_assets`, `ps_investments_other_assets`†, `ps_investment_securities`
 - BS負債: `ps_total_liabilities`, `ps_current_liabilities`, `ps_payables`, `ps_noncurrent_liabilities`, `ps_short_term_debt`, `ps_long_term_debt`, `ps_bonds_payable`
 - BS純資産: `ps_total_equity`, `ps_paid_in_capital`, `ps_retained_earnings`
 - CF: `ps_operating_cf`, `ps_investing_cf`, `ps_financing_cf`, `ps_free_cf`, `ps_net_change_cash`, `ps_capex`
+
+**† C2 収集列の結線**（研究開発費 `pl_rd_expenses` / 減価償却費 `pl_depreciation` / 有形固定資産合計 `bs_ppe_total` / 投資その他の資産合計 `bs_investments_other_assets` / 特別損益 `pl_extraordinary_income`・`pl_extraordinary_loss`）を per-share 派生として選択可能にした。**デフォルト10項目には含めない**（選択肢としてのみ提供）。理由は次の2点:
+- **欠損による標本縮小**: sector_ols は選択した全特徴量が non-null の銘柄のみを集計するため、欠損が広い列（特別損益は JGAAP 専用で IFRS/US-GAAP 連結は概ね null、研究開発費は非研究開発企業で null）をデフォルトに入れると業種ごとの標本が激減する。
+- **多重共線性**: per-share 11 項目以上で VIF>10 が頻発するため、C2 列は「研究開発集約度・資本集約度を見たい業種で明示選択し、必要に応じ Ridge 併用」という運用を推奨。
 
 ### 予測値の DB 書き込み
 
