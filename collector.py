@@ -1033,8 +1033,7 @@ async def backfill_historical_stock_prices_yahoo(
             if on_progress and (i % 200 == 0 or i == total):
                 on_progress(i, total, f"[Yahoo backfill {i}/{total}] {sec_code}  累計{updated}件更新")
 
-            # レート制限対策
-            elapsed = 0.0  # fetch_yahoo_history 内の処理時間は含まれるため短めのスリープ
+            # レート制限対策（fetch_yahoo_history 内の処理時間は含まれるため短めのスリープ）
             if YAHOO_STOCK_RATE_SLEEP > 0:
                 await asyncio.sleep(YAHOO_STOCK_RATE_SLEEP)
 
