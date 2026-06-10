@@ -53,19 +53,16 @@
 - **改善案**: `api_collection.py` 等への分割や責務別関数抽出。**大 diff になるため必要性を都度再評価**（性急に着手しない）。
 - **見積**: 大。
 
-### T1-8. デッドコード・残骸の掃除 【低】（一部完了）
-- **完了済み**:
-  - `collector.py` の `elapsed = 0.0` 残骸を削除（2026-06-10）。
-  - `migrate_stock_price_dual.py` をルートから `scripts/` へ移動（2026-06-10）。
-- **残課題**:
-  - `check.py`（EDINET 疎通）と `checker.py`（データ品質）は別物だが命名が紛らわしい（旧 REFACTORING 4-7）。`check.py` は `os.environ['EDINET_API_KEY']` 直参照で `.env` 無しの import が KeyError。改名（例 `edinet_ping.py` / `data_quality.py`）は import 全書換＋CLAUDE.md 更新を伴う。
-- **見積**: 小（個別に）。
+### T1-8. デッドコード・残骸の掃除 【低】（完了）
+- `collector.py` の `elapsed = 0.0` 残骸を削除（2026-06-10）。
+- `migrate_stock_price_dual.py` をルートから `scripts/` へ移動（2026-06-10）。
+- `check.py` → `edinet_ping.py`、`checker.py` → `data_quality.py` に改名（2026-06-10）。
 
 ### T1-9. テスト欠落の補完 【中】
 - **該当 / 内容**:
   - `collector.py` の非同期株価収集系（`update_market_data_from_history` / `backfill_historical_stock_prices_yahoo` / `fill_recent_stock_price_gap_yahoo` / `reparse_from_raw`）に対応テストなし（純粋関数・XBRL parse 系のみ網羅）。
   - `api.py` の収集起動エンドポイント（`/api/collect/start` 等）の DB モックテストなし。
-  - `checker.py` の `run_data_quality_check`（173行・単体テスト可能）にテストなし。
+  - `data_quality.py` の `run_data_quality_check`（173行・単体テスト可能）にテストなし。
 - **見積**: 中。
 
 ---

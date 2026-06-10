@@ -494,7 +494,7 @@ async def market_coverage(db: Session = Depends(get_db)):
 @app.get("/api/collect/data-quality")
 async def data_quality(db: Session = Depends(get_db)):
     """収集データの品質チェックサマリー"""
-    from checker import run_data_quality_check
+    from data_quality import run_data_quality_check
     try:
         result = run_data_quality_check(db)
         return result
