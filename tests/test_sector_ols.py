@@ -53,6 +53,30 @@ class TestConstants:
         # 派生キーと DB永続キーは重複しない（命名規則の整合性）
         assert set(PER_SHARE_DERIVED.keys()).isdisjoint(DB_PER_SHARE_KEYS)
 
+    def test_c2_features_wired(self):
+        # C2 収集列が per-share 派生として結線されていること（収集済み→分析未活用 の回帰防止）
+        c2_map = {
+            "ps_rd_expenses":              "pl_rd_expenses",
+            "ps_depreciation":             "pl_depreciation",
+            "ps_extraordinary_income":     "pl_extraordinary_income",
+            "ps_extraordinary_loss":       "pl_extraordinary_loss",
+            "ps_pretax_profit":            "pl_pretax_profit",
+            "ps_ppe_total":                "bs_ppe_total",
+            "ps_investments_other_assets": "bs_investments_other_assets",
+        }
+        for ps_key, src_col in c2_map.items():
+            assert PER_SHARE_DERIVED.get(ps_key) == src_col, f"{ps_key} 未結線"
+            assert ps_key in _PER_SHARE_VALUES, f"{ps_key} not in FEATURE_OPTIONS"
+
+    def test_c2_features_not_in_defaults(self):
+        # 欠損縮小（全特徴量 non-null 要件）と VIF 回避のため、C2 列はデフォルト非選択
+        c2_keys = {
+            "ps_rd_expenses", "ps_depreciation", "ps_extraordinary_income",
+            "ps_extraordinary_loss", "ps_pretax_profit", "ps_ppe_total",
+            "ps_investments_other_assets",
+        }
+        assert c2_keys.isdisjoint(DEFAULT_FEATURES_PRICE)
+
     def test_plugin_is_heavy(self):
         # 重い回帰は Render 軽量モードでブロックするため heavy フラグを持つ
         assert plugin.heavy is True
@@ -126,6 +150,45 @@ class TestExecute:
         res = asyncio.run(execute_plugin(
             plugin, {"features": "pl_eps,bs_bps,ps_revenue,ps_operating_cf"}, db))
         assert res["n_sectors"] >= 1
+
+    def test_resolve_c2_per_share_value(self, make_fin):
+        # C2 派生 per-share が「絶対額 ÷ 発行株数」で正しく算出されること
+        from plugins.sector_ols import _resolve_per_share_value
+        from plugins.utils import shares_outstanding
+
+        rec = make_fin(bs_total_equity=1.0e9, bs_bps=500.0, pl_rd_expenses=2.0e8)
+        shares = shares_outstanding(rec)         # 1.0e9 / 500 = 2.0e6 株
+        assert shares == pytest.approx(2.0e6)
+        v = _resolve_per_share_value(rec, "ps_rd_expenses", shares)
+        assert v == pytest.approx(2.0e8 / 2.0e6)  # 100 円/株
+
+    def test_execute_with_c2_features(self, db, make_fin):
+        # C2 per-share 特徴量を選択して coerce→execute が通り、予測が書かれること（結線の通し確認）
+        from database import RegressionResult
+        recs = []
+        for i in range(1, 13):
+            bps_val = 800.0 + 50.0 * i + (i % 4) * 10.0
+            equity_val = bps_val * (1.0e6 + 5.0e4 * i)
+            recs.append(make_fin(
+                edinet_code=f"E{i:05d}", industry="情報・通信業",
+                bs_total_equity=equity_val, bs_bps=bps_val,
+                pl_rd_expenses=3.0e7 + 4.0e6 * i + (i % 3) * 1.0e6,
+                pl_depreciation=5.0e7 + 6.0e6 * i + (i % 4) * 2.0e6,
+                bs_ppe_total=8.0e8 + 7.0e7 * i + (i % 5) * 1.0e7,
+                stock_price=1500.0 + 100.0 * i + (i % 3) * 50.0,
+                market_cap=1000.0 + 200.0 * i,
+            ))
+        db.add_all(recs)
+        db.commit()
+
+        res = asyncio.run(execute_plugin(
+            plugin,
+            {"features": ["bs_bps", "ps_rd_expenses", "ps_depreciation", "ps_ppe_total"]},
+            db,
+        ))
+        assert res["n_total"] == 12
+        assert res["sector_stats"][0]["r2"] is not None
+        assert len(db.query(RegressionResult).all()) == 12
 
     def test_skip_records_without_bps(self, db, make_fin):
         """bs_bps が NULL の銘柄は株数推計不能のため対象外になることを検証。"""

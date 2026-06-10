@@ -39,9 +39,14 @@ PER_SHARE_DERIVED: dict[str, str] = {
     "ps_cost_of_sales":        "pl_cost_of_sales",
     "ps_gross_profit":         "pl_gross_profit",
     "ps_sga":                  "pl_sga",
+    "ps_rd_expenses":          "pl_rd_expenses",          # C2: 研究開発費（無形投資の代理変数）
     "ps_operating_profit":     "pl_operating_profit",
+    "ps_depreciation":         "pl_depreciation",         # C2: 減価償却費（D&A・EBITDA 入力）
     "ps_nonoperating_income":  "pl_nonoperating_income",
     "ps_ordinary_profit":      "pl_ordinary_profit",
+    "ps_extraordinary_income": "pl_extraordinary_income", # C2: 特別利益（JGAAP概念・IFRS/USは概ねnull）
+    "ps_extraordinary_loss":   "pl_extraordinary_loss",   # C2: 特別損失（JGAAP概念・IFRS/USは概ねnull）
+    "ps_pretax_profit":        "pl_pretax_profit",        # 税引前利益（標準項目だが従来未結線）
     "ps_net_income":           "pl_net_income",
     # BS — 資産
     "ps_total_assets":         "bs_total_assets",
@@ -52,7 +57,9 @@ PER_SHARE_DERIVED: dict[str, str] = {
     "ps_noncurrent_assets":    "bs_noncurrent_assets",
     "ps_buildings":            "bs_buildings",
     "ps_machinery":            "bs_machinery",
+    "ps_ppe_total":            "bs_ppe_total",            # C2: 有形固定資産合計（建物+機械の整合用）
     "ps_intangible_assets":    "bs_intangible_assets",
+    "ps_investments_other_assets": "bs_investments_other_assets",  # C2: 投資その他の資産合計（JGAAP）
     "ps_investment_securities":"bs_investment_securities",
     # BS — 負債
     "ps_total_liabilities":    "bs_total_liabilities",
@@ -89,9 +96,14 @@ FEATURE_OPTIONS_PER_SHARE = [
     {"value": "ps_cost_of_sales",        "label": "[PL/株] 売上原価（円/株）"},
     {"value": "ps_gross_profit",         "label": "[PL/株] 売上総利益（円/株）"},
     {"value": "ps_sga",                  "label": "[PL/株] 販管費（円/株）"},
+    {"value": "ps_rd_expenses",          "label": "[PL/株] 研究開発費（円/株・C2）"},
     {"value": "ps_operating_profit",     "label": "[PL/株] 営業利益（円/株）"},
+    {"value": "ps_depreciation",         "label": "[PL/株] 減価償却費（円/株・C2）"},
     {"value": "ps_nonoperating_income",  "label": "[PL/株] 営業外損益（円/株）"},
     {"value": "ps_ordinary_profit",      "label": "[PL/株] 経常利益（円/株）"},
+    {"value": "ps_extraordinary_income", "label": "[PL/株] 特別利益（円/株・C2・JGAAP）"},
+    {"value": "ps_extraordinary_loss",   "label": "[PL/株] 特別損失（円/株・C2・JGAAP）"},
+    {"value": "ps_pretax_profit",        "label": "[PL/株] 税引前利益（円/株）"},
     {"value": "ps_net_income",           "label": "[PL/株] 当期純利益（円/株）"},
     # 派生 per-share — BS資産
     {"value": "ps_total_assets",         "label": "[BS資産/株] 総資産（円/株）"},
@@ -102,7 +114,9 @@ FEATURE_OPTIONS_PER_SHARE = [
     {"value": "ps_noncurrent_assets",    "label": "[BS資産/株] 固定資産（円/株）"},
     {"value": "ps_buildings",            "label": "[BS資産/株] 建物及び構築物（円/株）"},
     {"value": "ps_machinery",            "label": "[BS資産/株] 機械装置（円/株）"},
+    {"value": "ps_ppe_total",            "label": "[BS資産/株] 有形固定資産合計（円/株・C2）"},
     {"value": "ps_intangible_assets",    "label": "[BS資産/株] 無形固定資産（円/株）"},
+    {"value": "ps_investments_other_assets","label": "[BS資産/株] 投資その他の資産合計（円/株・C2）"},
     {"value": "ps_investment_securities","label": "[BS資産/株] 投資有価証券（円/株）"},
     # 派生 per-share — BS負債
     {"value": "ps_total_liabilities",    "label": "[BS負債/株] 総負債（円/株）"},
