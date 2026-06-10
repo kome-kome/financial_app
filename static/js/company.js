@@ -1,4 +1,3 @@
-function esc(s){return String(s??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');}
 function apiBase(){return '';}
 
 function showNotif(msg, type='error'){
@@ -12,22 +11,6 @@ function showNotif(msg, type='error'){
   setTimeout(()=>el.remove(), 4000);
 }
 
-function _getCookie(name){
-  const m = document.cookie.match('(^|; )' + name + '=([^;]*)');
-  return m ? decodeURIComponent(m[2]) : '';
-}
-async function apiFetch(path){
-  const heads = {'Content-Type':'application/json'};
-  const r = await fetch(apiBase() + path, {headers: heads, credentials: 'same-origin'});
-  if (r.status === 401){ location.href = '/login?next=' + encodeURIComponent(location.pathname); return null; }
-  if (!r.ok){
-    if (r.status===502||r.status===503||r.status===504)
-      throw new Error(`サーバー再起動中 (${r.status})。しばらく待ってから再試行してください`);
-    if (r.status===404) throw new Error('NOT_FOUND');
-    throw new Error(await r.text());
-  }
-  return r.json();
-}
 
 // ── 数値フォーマット ──────────────────────────────────────────
 const OKU = 1e8;
@@ -816,7 +799,6 @@ function peerBar(canvasId, names, data, colors, label){
   });
 }
 
-// ── 認証チェック・起動 ───────────────────────────────────────
 async function init(){
   try{
     const r = await fetch(apiBase() + '/api/auth/status');

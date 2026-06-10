@@ -1,5 +1,3 @@
-function esc(s){return String(s??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');}
-
 function showNotif(msg, type='error'){
   const el = document.createElement('div');
   el.textContent = msg;
@@ -13,21 +11,6 @@ function showNotif(msg, type='error'){
 
 function apiBase() { return ''; }
 
-function _getCookie(name){
-  const m = document.cookie.match('(^|; )' + name + '=([^;]*)');
-  return m ? decodeURIComponent(m[2]) : '';
-}
-async function apiFetch(path) {
-  const heads = {'Content-Type': 'application/json'};
-  const r = await fetch(apiBase() + path, {headers: heads, credentials: 'same-origin'});
-  if (r.status === 401) { location.href = '/login?next=/'; return null; }
-  if(!r.ok){
-    if(r.status===502||r.status===503||r.status===504)
-      throw new Error(`サーバー再起動中 (${r.status})。しばらく待ってから再試行してください`);
-    throw new Error(await r.text());
-  }
-  return r.json();
-}
 
 async function loadStats() {
   try {
@@ -115,15 +98,6 @@ async function loadStats() {
 }
 
 
-async function initAuth() {
-  try {
-    const r = await fetch(apiBase() + '/api/auth/status');
-    const d = await r.json();
-    if (d.auth_required && !_getCookie('csrf_token')) {
-      location.href = '/login?next=/';
-    }
-  } catch(e) { /* API未起動時はスキップ */ }
-}
 
 initAuth();
 loadStats();
