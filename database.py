@@ -621,6 +621,7 @@ class FinancialMetric(ViewBase):
     op_margin = Column(Float); net_margin = Column(Float)
     roe = Column(Float); roa = Column(Float)
     equity_ratio = Column(Float); de_ratio = Column(Float); cf_ratio = Column(Float)
+    rd_intensity = Column(Float); da_intensity = Column(Float)
     net_cash = Column(Float); nc_ratio = Column(Float)
     z_revenue = Column(Float); z_op_margin = Column(Float); z_roe = Column(Float)
     z_equity_ratio = Column(Float); z_cf_ratio = Column(Float); z_eps = Column(Float)
@@ -666,6 +667,12 @@ WITH d AS (
              THEN ROUND(((COALESCE(fr.bs_short_term_debt,0) + COALESCE(fr.bs_long_term_debt,0)) / COALESCE(NULLIF(fr.bs_total_equity,0), NULLIF(fr.bs_equity_parent,0), 0))::numeric, 4) END AS de_ratio,
         CASE WHEN COALESCE(fr.pl_revenue,0) <> 0
              THEN ROUND((COALESCE(fr.cf_operating_cf,0) / fr.pl_revenue * 100)::numeric, 2) END AS cf_ratio,
+        -- C2 結線: 研究開発集約度・減価償却集約度（無次元 [%]）。分子は非 COALESCE で
+        -- null 伝播させる（R&D/D&A 未開示企業は intensity も null → price_predictor が自動除外）。
+        CASE WHEN COALESCE(fr.pl_revenue,0) <> 0
+             THEN ROUND((fr.pl_rd_expenses / fr.pl_revenue * 100)::numeric, 2) END AS rd_intensity,
+        CASE WHEN COALESCE(fr.pl_revenue,0) <> 0
+             THEN ROUND((fr.pl_depreciation / fr.pl_revenue * 100)::numeric, 2) END AS da_intensity,
         CASE WHEN COALESCE(fr.bs_current_assets,0) <> 0 OR COALESCE(fr.bs_total_liabilities,0) <> 0
              THEN ROUND((COALESCE(fr.bs_current_assets,0) + COALESCE(fr.bs_investment_securities,0) * 0.7 - COALESCE(fr.bs_total_liabilities,0))::numeric, 0) END AS net_cash
     FROM financial_records fr
