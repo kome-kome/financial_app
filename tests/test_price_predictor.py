@@ -138,3 +138,57 @@ class TestExecute:
         db.commit()
         with pytest.raises(ValueError):
             asyncio.run(execute_plugin(plugin, {}, db))
+
+    def test_execute_with_c2_intensity_features(self, db, make_metric, make_weekly):
+        # rd_intensity / da_intensity を選択して coerce→execute が通り、特徴量重みと
+        # 予測結果が返ること（FinancialMetric 経由の C2 intensity 結線の通し確認）。
+        start = datetime(2023, 1, 2)  # 月曜
+        # (edinet_code, rd_intensity, da_intensity, 価格スロープ) — (rd,da) は非共線に配置
+        specs = [
+            ("E00001", 2.0, 6.0, 1.3),
+            ("E00002", 7.0, 3.0, 0.7),
+            ("E00003", 4.0, 9.0, 1.9),
+            ("E00004", 9.0, 5.0, 1.1),
+        ]
+        n_weeks = 90  # min_rows = 60 + horizon(5) = 65 を超える長さ
+        for ec, rd, da, slope in specs:
+            db.add_all([
+                make_weekly(
+                    edinet_code=ec,
+                    trade_date=(start + timedelta(days=i * 7)).strftime("%Y-%m-%d"),
+                    close_last=1000.0 + i * slope + (i % 6) * 4.0,
+                )
+                for i in range(n_weeks)
+            ])
+            db.add(make_metric(edinet_code=ec, period_end="2022-12-31",
+                               rd_intensity=rd, da_intensity=da))
+        db.commit()
+
+        res = asyncio.run(execute_plugin(
+            plugin,
+            {"horizon": 5, "use_price_features": False,
+             "features": ["rd_intensity", "da_intensity"]},
+            db,
+        ))
+        assert res["n_train_samples"] >= 10
+        assert set(res["feature_weights"]) == {"rd_intensity", "da_intensity"}
+        assert res["results"]  # 最新スナップショットのスコアリング結果（4社）
+
+
+# ── 財務特徴量オプション定数（C2 intensity 結線の回帰防止）─────────────────────
+
+class TestFinFeatureOptions:
+    def test_c2_intensity_options_present(self):
+        # C2 列由来の無次元 intensity が選択肢に結線されていること
+        from plugins.price_predictor import FIN_FEATURE_LABELS, FIN_FEATURE_OPTIONS
+        vals = {o["value"] for o in FIN_FEATURE_OPTIONS}
+        assert {"rd_intensity", "da_intensity"} <= vals
+        # ラベルは FIN_FEATURE_OPTIONS から自動派生される
+        assert FIN_FEATURE_LABELS["rd_intensity"]
+        assert FIN_FEATURE_LABELS["da_intensity"]
+
+    def test_c2_intensity_not_in_defaults(self):
+        # 欠損縮小回避のためデフォルト財務特徴量（per/pbr/roe）には含めない
+        from plugins.price_predictor import DEFAULT_FIN_FEATURES
+        assert "rd_intensity" not in DEFAULT_FIN_FEATURES
+        assert "da_intensity" not in DEFAULT_FIN_FEATURES

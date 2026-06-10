@@ -451,10 +451,14 @@ N ∈ {5, 20, 60}日  （ユーザー選択）
 | `pbr` | 株価純資産倍率 |
 | `roe` | 自己資本利益率 [%] |
 | `equity_ratio` | 自己資本比率 [%] |
+| `rd_intensity` | 研究開発集約度 = `pl_rd_expenses / pl_revenue` [%]（C2列の結線・VIEW算出） |
+| `da_intensity` | 減価償却集約度 = `pl_depreciation / pl_revenue` [%]（C2列の結線・VIEW算出） |
 | `z_op_margin` | 営業利益率 Zスコア（年度別正規化済み） |
 | `z_roe` | ROE Zスコア |
 | `z_cf_ratio` | 営業CF/売上比 Zスコア |
 | `gap_ratio` | 業種別OLS乖離率 [%] |
+
+> **C2 結線（無次元 intensity）**: 研究開発費・減価償却費（per-share 絶対額では対数リターンと次元不整合）を**売上で正規化した集約度 [%]** として投入。`financial_metrics` VIEW が `op_margin` と同じ流儀で算出し、分子は非 COALESCE で null 伝播（R&D/D&A 未開示企業は intensity も null → サンプルから自動除外）。デフォルト財務特徴量（`per`/`pbr`/`roe`）には含めず選択肢として提供。
 
 **決算公表ラグ**: 財務データは period_end から 45 日後に利用可能とみなして結合する（前倒し利用によるルックアヘッドバイアスを防止）。
 
