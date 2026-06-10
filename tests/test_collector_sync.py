@@ -49,6 +49,28 @@ class TestUpdateMarketDataDefault:
         db.refresh(rec)
         assert rec.pbr == pytest.approx(2.0)
 
+    def test_market_cap_prefers_issued_shares(self, db, make_fin, make_price):
+        # issued_shares 直接利用: 1.0e6株 × 2000円 / 1e6 = 2000 百万円
+        # 旧実装（bs_total_equity/bs_bps）なら: 1.5e9/500 = 3.0e6株 → 6000 百万円
+        rec = make_fin(issued_shares=1.0e6, bs_total_equity=1.5e9, bs_bps=500.0)
+        db.add(rec)
+        db.add(make_price(close=2000.0))
+        db.commit()
+        update_market_data_from_history(db)
+        db.refresh(rec)
+        assert rec.market_cap == pytest.approx(2000.0)  # issued_shares 優先
+
+    def test_market_cap_falls_back_to_derived_when_no_issued_shares(self, db, make_fin, make_price):
+        # issued_shares なし: bs_total_equity/bs_bps フォールバック
+        # 1.0e9/500 = 2.0e6株 × 1000円 / 1e6 = 2000 百万円
+        rec = make_fin(bs_total_equity=1.0e9, bs_bps=500.0)
+        db.add(rec)
+        db.add(make_price(close=1000.0))
+        db.commit()
+        update_market_data_from_history(db)
+        db.refresh(rec)
+        assert rec.market_cap == pytest.approx(2000.0)  # フォールバック
+
     def test_calculates_per_from_eps(self, db, make_fin, make_price):
         rec = make_fin(pl_eps=50.0)
         db.add(rec)
