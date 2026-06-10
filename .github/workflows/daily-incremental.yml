@@ -5,9 +5,16 @@ name: Daily Incremental (差分収集・毎日自動実行)
 # Render 側には自動収集を持たせない設計。定時自動収集はこのワークフローが担う。
 
 on:
-  schedule:
-    - cron: '0 18 * * *'   # UTC 18:00 = JST 03:00
-  workflow_dispatch:        # 手動トリガーも可
+  # ⚠️ schedule（毎日 cron）は段階的に無効化中。
+  # 2026-05-26 に全件収集との同時実行回避で .disabled 化 → dual-table 移行(2026-06-06)後、
+  # 本ワークフローは一度も新スキーマ下で走っていない。さらに J-Quants 無料は直近12週を
+  # 配信しないため、鮮度は Phase 4 の Yahoo ギャップ補完（fill_recent_stock_price_gap_yahoo）
+  # に依存する。Yahoo が GitHub Actions の IP から到達できるか未実証のため、
+  # まず workflow_dispatch で手動1回流して株価が当日付近まで前進することを確認し、
+  # 確認後に下記 schedule のコメントを外して定時自動収集を再開する。
+  # schedule:
+  #   - cron: '0 18 * * *'   # UTC 18:00 = JST 03:00
+  workflow_dispatch:        # 手動トリガー（当面はこちらのみ）
 
 jobs:
   incremental:
