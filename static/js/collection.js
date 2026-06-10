@@ -1,50 +1,12 @@
-function esc(s){return String(s??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');}
-
 let API = '';
 let dbPage = 0, dbLimit = 50;
 let screenResults = [];
 let normData = {};
 let searchTimer = null;
 
-// ── 認証 ────────────────────────────────────────────────────────────
-function _getCookie(name){
-  const m = document.cookie.match('(^|; )' + name + '=([^;]*)');
-  return m ? decodeURIComponent(m[2]) : '';
-}
-async function initAuth(){
-  try {
-    const r = await fetch('/api/auth/status');
-    const d = await r.json();
-    if(d.auth_required){
-      if(!_getCookie('csrf_token')){
-        location.href = '/login?next=' + encodeURIComponent(location.pathname);
-        return;
-      }
-      document.getElementById('logout-btn').style.display = '';
-    }
-  } catch(e){ /* API 未起動時はスキップ */ }
-}
-async function logout(){
-  try { await fetch('/api/auth/logout', {method:'POST', credentials:'same-origin'}); } catch(e){}
-  location.href = '/login';
-}
-
 // ── API ────────────────────────────────────────────────────────────
 function apiBase(){ return document.getElementById('api-base').value.trim().replace(/\/$/,'') }
 
-async function apiFetch(path, opts={}){
-  const heads = {'Content-Type':'application/json'};
-  const _m = (opts.method || 'GET').toUpperCase();
-  if(_m !== 'GET' && _m !== 'HEAD') heads['X-CSRF-Token'] = _getCookie('csrf_token');
-  const r = await fetch(apiBase()+path, {credentials:'same-origin', ...opts, headers:{...heads, ...(opts.headers||{})}});
-  if(r.status===401){ location.href='/login'; return; }
-  if(!r.ok){
-    if(r.status===502||r.status===503||r.status===504)
-      throw new Error(`サーバー再起動中 (${r.status})。しばらく待ってから再試行してください`);
-    throw new Error(await r.text());
-  }
-  return r.json();
-}
 
 async function checkApi(){
   try{

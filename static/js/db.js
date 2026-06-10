@@ -1,4 +1,3 @@
-function esc(s){return String(s??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');}
 function fmt(v){
   if(v===null||v===undefined) return '<span class="null-cell">NULL</span>';
   if(typeof v==='number'){
@@ -9,17 +8,6 @@ function fmt(v){
 }
 function apiBase(){ return ''; }
 
-function _getCookie(name){
-  const m = document.cookie.match('(^|; )' + name + '=([^;]*)');
-  return m ? decodeURIComponent(m[2]) : '';
-}
-async function apiFetch(path){
-  const heads = {'Content-Type':'application/json'};
-  const r = await fetch(apiBase()+path, {headers: heads, credentials: 'same-origin'});
-  if(r.status===401){ location.href='/login?next=/db'; return null; }
-  if(!r.ok) throw new Error(await r.text());
-  return r.json();
-}
 
 // ── 状態 ─────────────────────────────────────────────────────────────
 const state = {
@@ -444,17 +432,6 @@ document.getElementById('drill-btn').onclick = runDrilldown;
 document.getElementById('drill-code').addEventListener('keypress', e => {
   if(e.key === 'Enter') runDrilldown();
 });
-
-// ── 認証チェック → 起動 ─────────────────────────────────────────────
-async function initAuth(){
-  try{
-    const r = await fetch('/api/auth/status');
-    const d = await r.json();
-    if(d.auth_required && !_getCookie('csrf_token')){
-      location.href = '/login?next=/db';
-    }
-  }catch(e){}
-}
 
 (async () => {
   await initAuth();
