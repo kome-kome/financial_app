@@ -158,7 +158,7 @@ graph TD
 >
 > **計算結果と生データのDB分離（重要）**:
 > - `financial_records` は **ソース（XBRL再分類＋市場スナップショット）のみ**を保持する。
-> - 軽い派生指標（営業利益率・ROE・自己資本比率・D/E・CF比率・ネットキャッシュ・各Zスコア・成長率）は
+> - 軽い派生指標（営業利益率・ROE・自己資本比率・D/E・CF比率・研究開発/減価償却集約度・ネットキャッシュ・各Zスコア・成長率）は
 >   **`financial_metrics` VIEW がソース列から都度SQL算出**する（DBに永続化しない＝関数型）。
 > - 重い派生（OLS予測値 `predicted_market_cap` / `gap_ratio`）は **`regression_results` テーブル**に隔離保存する。
 > - アプリの読み取りは ORM `FinancialMetric`（VIEW）経由で、ソース＋派生＋予測値をまとめて取得する。
@@ -301,6 +301,7 @@ erDiagram
 
 > **`financial_metrics`（VIEW・物理テーブルではない）**: `financial_records` をソースに、
 > `op_margin` / `net_margin` / `roe` / `roa` / `equity_ratio` / `de_ratio` / `cf_ratio` /
+> `rd_intensity` / `da_intensity`（研究開発・減価償却の対売上集約度 [%]・C2列の結線） /
 > `net_cash` / `nc_ratio` / `z_*`（8指標）/ `rev_growth` / `op_growth` / `eps_growth` を
 > SQL で都度算出し、`regression_results` を LEFT JOIN して `predicted_market_cap` / `gap_ratio` も合成する。
 > 算出式は旧 `collector.calc_derived` / `_calc_zscore_for_year` / `calc_growth_rates` と一致（移植）。
