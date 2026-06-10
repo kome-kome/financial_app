@@ -1297,10 +1297,13 @@ def _apply_price_to_record(rec, price: float) -> None:
         rec.per = round(price / rec.pl_eps, 2)
     if rec.bs_bps and rec.bs_bps > 0:
         rec.pbr = round(price / rec.bs_bps, 2)
-    if (rec.bs_bps and rec.bs_bps > 0
-            and rec.bs_total_equity and rec.bs_total_equity > 0):
-        shares = rec.bs_total_equity / rec.bs_bps
-        rec.market_cap = round(price * shares / 1_000_000, 2)
+    _sh = (float(rec.issued_shares) if (rec.issued_shares and rec.issued_shares > 0)
+           else ((rec.bs_total_equity / rec.bs_bps)
+                 if (rec.bs_bps and rec.bs_bps > 0
+                     and rec.bs_total_equity and rec.bs_total_equity > 0)
+                 else None))
+    if _sh:
+        rec.market_cap = round(price * _sh / 1_000_000, 2)
     if rec.dps and rec.dps > 0 and price > 0:
         rec.div_yield = round(rec.dps / price * 100, 2)
     # nc_ratio（= net_cash / 時価総額）は計算結果のため financial_metrics VIEW で都度算出する
@@ -1410,10 +1413,13 @@ async def update_market_data(max_companies: Optional[int] = None,
                     latest.per = round(price / latest.pl_eps, 2)
                 if latest.bs_bps and latest.bs_bps > 0:
                     latest.pbr = round(price / latest.bs_bps, 2)
-                if (latest.bs_bps and latest.bs_bps > 0
-                        and latest.bs_total_equity and latest.bs_total_equity > 0):
-                    shares = latest.bs_total_equity / latest.bs_bps
-                    latest.market_cap = round(price * shares / 1_000_000, 2)
+                _sh = (float(latest.issued_shares) if (latest.issued_shares and latest.issued_shares > 0)
+                       else ((latest.bs_total_equity / latest.bs_bps)
+                             if (latest.bs_bps and latest.bs_bps > 0
+                                 and latest.bs_total_equity and latest.bs_total_equity > 0)
+                             else None))
+                if _sh:
+                    latest.market_cap = round(price * _sh / 1_000_000, 2)
                 if latest.dps and latest.dps > 0 and price > 0:
                     latest.div_yield = round(latest.dps / price * 100, 2)
                 # nc_ratio（ネットキャッシュ比率 = net_cash / 時価総額）は計算結果のため
