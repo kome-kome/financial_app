@@ -693,12 +693,15 @@ async def _jquants_fetch_date(session: httpx.AsyncClient, api_key: str, date_str
 async def collect_stock_price_history_jquants(
     db,
     days_back: int = 14,
+    date_from: Optional[date] = None,
+    date_to: Optional[date] = None,
     on_progress: Optional[Callable] = None,
     cancel_check: Optional[Callable] = None,
 ) -> dict:
     """J-Quants API から日次 OHLCV を日付単位で取得し ON CONFLICT UPDATE で保存する。
     J-Quants は JPX 公式データのため、stooq 由来レコードより優先して上書きする。
     1回のリクエストで全銘柄のデータが取得できるため stooq より大幅に高速。
+    date_from/date_to を指定した場合はその範囲を使用し、省略時は days_back から計算する。
     """
     api_key = os.environ.get("JQUANTS_API_KEY", "")
     if not api_key:
@@ -706,14 +709,16 @@ async def collect_stock_price_history_jquants(
 
     from database import record_prices_batch, trim_daily, Company as _Company
 
-    today     = date.today()
-    date_from = today - timedelta(days=days_back)
+    today  = date.today()
+    _from  = date_from if date_from is not None else (today - timedelta(days=days_back))
+    _to    = date_to   if date_to   is not None else today
+    span   = (_to - _from).days + 1
     # 土日は J-Quants も空を返すのでスキップして API コール数を削減
     dates = [
-        (date_from + timedelta(days=i)).strftime("%Y-%m-%d")
-        for i in range(days_back + 1)
-        if (date_from + timedelta(days=i)).weekday() < 5
-        and (date_from + timedelta(days=i)) <= today
+        (_from + timedelta(days=i)).strftime("%Y-%m-%d")
+        for i in range(span)
+        if (_from + timedelta(days=i)).weekday() < 5
+        and (_from + timedelta(days=i)) <= _to
     ]
 
     # sec_code (4桁) → edinet_code のルックアップ（全社一括で1回のみ）
