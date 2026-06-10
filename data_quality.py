@@ -142,7 +142,9 @@ def _check_by_accounting_standard(db: Session) -> list:
         )
         fields_summary = []
         for col_name, label, outlier_fn in field_specs:
-            col = getattr(FinancialRecord, col_name)
+            col = getattr(FinancialRecord, col_name, None)
+            if col is None:
+                continue  # VIEW 派生列（roe 等）は FinancialRecord に存在しないためスキップ
             null_count = (
                 db.query(func.count(FinancialRecord.id))
                 .filter(std_filter, col.is_(None))

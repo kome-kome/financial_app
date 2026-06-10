@@ -58,12 +58,11 @@
 - `migrate_stock_price_dual.py` をルートから `scripts/` へ移動（2026-06-10）。
 - `check.py` → `edinet_ping.py`、`checker.py` → `data_quality.py` に改名（2026-06-10）。
 
-### T1-9. テスト欠落の補完 【中】
-- **該当 / 内容**:
-  - `collector.py` の非同期株価収集系（`update_market_data_from_history` / `backfill_historical_stock_prices_yahoo` / `fill_recent_stock_price_gap_yahoo` / `reparse_from_raw`）に対応テストなし（純粋関数・XBRL parse 系のみ網羅）。
-  - `api.py` の収集起動エンドポイント（`/api/collect/start` 等）の DB モックテストなし。
-  - `data_quality.py` の `run_data_quality_check`（173行・単体テスト可能）にテストなし。
-- **見積**: 中。
+### T1-9. テスト欠落の補完 【中】（完了）
+- `data_quality.py` 全4関数を `tests/test_data_quality.py`（26件）でカバー（2026-06-10）。
+- `update_market_data_from_history`（sync）を `tests/test_collector_sync.py`（15件）でカバー（2026-06-10）。
+- `/api/collect/start` を `tests/test_api_collect.py`（7件）でカバー（2026-06-10）。
+- 副産物: `data_quality._check_by_accounting_standard` の `FinancialRecord.roe` 属性エラーを修正（`getattr` のフォールバックで VIEW 派生列をスキップ）。
 
 ---
 
