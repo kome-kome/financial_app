@@ -103,7 +103,7 @@ python collector.py --years 1 --max 10   # 動作確認用（10 社）
 python collector.py --company E000001    # 特定企業のみ更新
 python collector.py --market             # 株価のみ更新
 python collector.py --incremental        # 差分収集（収集済みをスキップ）
-python check.py                          # EDINET API 接続確認
+python edinet_ping.py                    # EDINET API 接続確認
 pytest                                   # テスト実行
 ```
 

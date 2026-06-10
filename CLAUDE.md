@@ -47,7 +47,7 @@ python collector.py --years 1 --max 10  # テスト用（10社）
 python collector.py --company E02167    # 特定企業更新
 python collector.py --market            # 株価のみ更新
 python collector.py --incremental       # 差分収集
-python check.py                         # EDINET API接続テスト
+python edinet_ping.py                    # EDINET API接続テスト
 ```
 
 ```bash

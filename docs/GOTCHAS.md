@@ -48,7 +48,7 @@ SSEエンドポイント: 収集=`/api/collect/stream`、市場データ=`/api/c
   - `capex_only`（`--refill-capex-only`）: capex のみワンショット補完。
   - **`missing`（`--refill-cf-missing`）**: `cf_operating_cf IS NULL`（＝CFが全NULL）を対象。IFRS/US-GAAP決算の大企業は営業CFすら取れておらず、`normal`/`capex_only` が `cf_operating_cf IS NOT NULL` を前提とするため**永久に対象外**になっていた。`XBRL_MAP` への IFRS/US-GAAP CF 要素追加と併せて 2026-06-03 に補完し、**CF未収集企業 268社 → 0社**（上記「IFRS/US-GAAP決算のCF・売上要素名」参照）。
   - **注意**: 旧「remaining=0 で完了」は `normal` モードの残件のみを数えており、CF全NULL社（IFRS大企業）はカウント外だった。新規データで CF が全NULL のレコードが出た場合は `--refill-cf-missing` を使うこと。
-- **`check.py` の日付**は自動計算（祝日は非対応、祝日前後は失敗する場合あり）。
+- **`edinet_ping.py` の日付**は自動計算（祝日は非対応、祝日前後は失敗する場合あり）。
 
 ---
 
