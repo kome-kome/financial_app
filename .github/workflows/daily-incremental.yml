@@ -12,9 +12,9 @@ on:
   # に依存する。Yahoo が GitHub Actions の IP から到達できるか未実証のため、
   # まず workflow_dispatch で手動1回流して株価が当日付近まで前進することを確認し、
   # 確認後に下記 schedule のコメントを外して定時自動収集を再開する。
-  # schedule:
-  #   - cron: '0 18 * * *'   # UTC 18:00 = JST 03:00
-  workflow_dispatch:        # 手動トリガー（当面はこちらのみ）
+  schedule:
+    - cron: '0 18 * * *'   # UTC 18:00 = JST 03:00
+  workflow_dispatch:
 
 jobs:
   incremental:
