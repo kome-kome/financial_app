@@ -1296,7 +1296,8 @@ async def db_stats(table: str, db: Session = Depends(get_db)):
                 p = db.execute(sql).first()
                 s["p50"] = round(float(p.p50), 4) if p and p.p50 is not None else None
                 s["p99"] = round(float(p.p99), 4) if p and p.p99 is not None else None
-            except Exception:
+            except Exception as e:
+                log.warning("パーセンタイル計算失敗 [%s.%s]: %s: %s", table, col.name, type(e).__name__, e)
                 s["p50"] = None
                 s["p99"] = None
         else:
@@ -1304,7 +1305,8 @@ async def db_stats(table: str, db: Session = Depends(get_db)):
             try:
                 distinct_cnt = db.query(func.count(func.distinct(col))).scalar() or 0
                 s["distinct"] = int(distinct_cnt)
-            except Exception:
+            except Exception as e:
+                log.warning("distinct数取得失敗 [%s.%s]: %s: %s", table, col.name, type(e).__name__, e)
                 s["distinct"] = None
         stats.append(s)
     return {"table": table, "row_count": row_count, "stats": stats}

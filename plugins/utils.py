@@ -479,26 +479,17 @@ def check_collinearity(X_cols: list[list[float]], feature_names: list[str],
         return {"correlation": [], "vif": [], "high_corr_pairs": [], "high_vif": []}
 
     n = len(X_cols[0])
-    means = [statistics.mean(c) for c in X_cols]
-    sds = [statistics.stdev(c) if len(c) > 1 else 0.0 for c in X_cols]
 
-    # ── Pearson 相関行列 ───────────────────────────────────────────────
-    corr = [[1.0 if i == j else 0.0 for j in range(k)] for i in range(k)]
+    # ── Pearson 相関行列（np.corrcoef でベクトル化）──────────────────
+    X_arr = np.array(X_cols, dtype=float)  # shape: (k, n)
+    corr_matrix = np.corrcoef(X_arr)       # shape: (k, k)、ゼロ分散列は NaN
+    corr = corr_matrix.tolist()
     high_corr_pairs: list[tuple] = []
     for i in range(k):
         for j in range(i + 1, k):
-            if sds[i] == 0 or sds[j] == 0:
-                corr[i][j] = corr[j][i] = float("nan")
-                continue
-            cov = sum(
-                (X_cols[i][r] - means[i]) * (X_cols[j][r] - means[j])
-                for r in range(n)
-            ) / (n - 1)
-            r = cov / (sds[i] * sds[j])
-            r = max(-1.0, min(1.0, r))
-            corr[i][j] = corr[j][i] = r
-            if abs(r) > corr_threshold:
-                high_corr_pairs.append((i, j, round(r, 4)))
+            r = corr_matrix[i, j]
+            if not np.isnan(r) and abs(r) > corr_threshold:
+                high_corr_pairs.append((i, j, round(float(r), 4)))
 
     # ── VIF（各特徴量を他の特徴量で OLS 回帰）───────────────────────
     vif: list[float] = []
