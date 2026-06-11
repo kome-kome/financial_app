@@ -62,14 +62,19 @@ async def main():
 
     # ─── Phase 1: XBRL 差分収集（過去1年・収集済みスキップ）───────────────
     log("[1/4] XBRL 差分収集 開始（過去1年・skip_existing=True）")
-    cancelled = await _run_with_retry(
-        lambda: run_full_collection(
-            years_back=1,
-            skip_existing=True,
-            on_progress=lambda c, t, m: log(m) if c % 50 == 0 or "[完了]" in m or "[企業マスタ" in m else None,
-        ),
-        label="XBRL差分収集",
-    )
+    db1 = SessionLocal()
+    try:
+        cancelled = await _run_with_retry(
+            lambda: run_full_collection(
+                db1,
+                years_back=1,
+                skip_existing=True,
+                on_progress=lambda c, t, m: log(m) if c % 50 == 0 or "[完了]" in m or "[企業マスタ" in m else None,
+            ),
+            label="XBRL差分収集",
+        )
+    finally:
+        db1.close()
     if cancelled:
         log("[1/4] 収集が停止されました")
         return
