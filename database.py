@@ -18,7 +18,7 @@ from datetime import datetime, date, timedelta, timezone
 from dotenv import load_dotenv
 from sqlalchemy import (
     create_engine, Column, String, Integer, Float, DateTime,
-    Text, UniqueConstraint, PrimaryKeyConstraint, Index, JSON, LargeBinary, ForeignKey, text
+    Text, UniqueConstraint, PrimaryKeyConstraint, Index, JSON, LargeBinary, ForeignKey, text, func
 )
 from sqlalchemy.orm import declarative_base, sessionmaker, relationship
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -880,3 +880,24 @@ def upsert_financial(db, data: dict) -> FinancialRecord:
 # _calc_zscore_for_year）は廃止した。これらは financial_records の計算列へ書き戻す実装
 # だったが、派生指標は financial_metrics VIEW がソース列から都度算出する方式へ移行済み
 # （計算結果と生データのDB分離）。算出ロジックは FINANCIAL_METRICS_VIEW_SQL を参照。
+
+
+def latest_year_subq(db, model):
+    """企業ごとの最新年度レコードを1行に絞るサブクエリを返す。
+
+    model には FinancialRecord または FinancialMetric を渡す。
+    用途: 最新年度のみを対象にするクエリで join に利用する。
+
+    例:
+        subq = latest_year_subq(db, FinancialRecord)
+        rows = db.query(FinancialRecord).join(
+            subq,
+            (FinancialRecord.edinet_code == subq.c.edinet_code) &
+            (FinancialRecord.year == subq.c.max_year)
+        ).all()
+    """
+    return (
+        db.query(model.edinet_code, func.max(model.year).label("max_year"))
+        .group_by(model.edinet_code)
+        .subquery()
+    )

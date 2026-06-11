@@ -93,7 +93,7 @@ from database import (
     SessionLocal, init_db,
     Company, FinancialRecord, FinancialMetric, RegressionResult,
     CollectionLog, StockPriceDaily, StockPriceWeekly, MacroData,
-    prices_on_or_after, latest_prices,
+    prices_on_or_after, latest_prices, latest_year_subq,
 )
 from collector import run_full_collection, refresh_company, update_market_data, collect_stock_price_history, collect_stock_price_history_jquants, update_industry_from_jpx, collect_macro_data, MACRO_SERIES, reparse_from_raw
 from collection_jobs import jobs
@@ -960,10 +960,7 @@ class ScreenRequest(BaseModel):
 async def screening(request: Request, req: ScreenRequest, db: Session = Depends(get_db)):
     # 最新年度のレコードのみ対象。派生指標フィルタは financial_metrics VIEW を対象にする
     # （op_margin / roe / rev_growth 等は VIEW が都度算出。本体には保存しない）。
-    subq = (db.query(FinancialRecord.edinet_code,
-                     func.max(FinancialRecord.year).label("max_year"))
-              .group_by(FinancialRecord.edinet_code)
-              .subquery())
+    subq = latest_year_subq(db, FinancialRecord)
     query = (db.query(FinancialMetric)
                .join(subq, (FinancialMetric.edinet_code == subq.c.edinet_code) &
                            (FinancialMetric.year == subq.c.max_year)))
