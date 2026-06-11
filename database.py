@@ -1,18 +1,24 @@
 """
 PostgreSQL スキーマ定義・ORM・upsert処理
 テーブル構成:
-  companies        — 企業マスタ（EDINETコード・証券コード・業種）
-  financial_records — BS/PL/CF 再分類済み年次財務データ
-  derived_metrics   — 正規化・計算済み財務指標
-  collection_logs   — 収集ジョブログ
+  companies          — 企業マスタ（EDINETコード・証券コード・業種）
+  financial_records  — BS/PL/CF 再分類済み年次財務データ
+  stock_price_daily  — 日次株価
+  stock_price_weekly — 週次株価
+  collection_logs    — 収集ジョブログ
+  macro_data         — マクロ経済指標
+  xbrl_raw_documents — XBRL生データキャッシュ
+  regression_results — OLS回帰結果キャッシュ
+VIEW:
+  financial_metrics  — 派生指標・Zスコア・成長率（financial_records から都度算出）
 """
 
 import os, gzip, json
-from datetime import datetime, date, timedelta
+from datetime import datetime, date, timedelta, timezone
 from dotenv import load_dotenv
 from sqlalchemy import (
     create_engine, Column, String, Integer, Float, DateTime,
-    Text, UniqueConstraint, PrimaryKeyConstraint, Index, JSON, LargeBinary, ForeignKey, text
+    Text, UniqueConstraint, PrimaryKeyConstraint, Index, JSON, LargeBinary, ForeignKey, text, func
 )
 from sqlalchemy.orm import declarative_base, sessionmaker, relationship
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -60,8 +66,8 @@ class Company(Base):
     market       = Column(String(50))                      # プライム/スタンダード/グロース
     fiscal_month = Column(Integer)                         # 決算月
     accounting_standard = Column(String(20))               # JGAAP/IFRS/US-GAAP
-    created_at   = Column(DateTime, default=datetime.utcnow)
-    updated_at   = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at   = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at   = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
     records = relationship("FinancialRecord", back_populates="company",
                            cascade="all, delete-orphan")
@@ -180,8 +186,8 @@ class FinancialRecord(Base):
     # 旧計算列は本コミットで DROP 済み（init_db の DROP マイグレーション参照）。
 
     raw_xbrl_json           = Column(JSON)    # 生XBRLデータ（デバッグ用）
-    created_at              = Column(DateTime, default=datetime.utcnow)
-    updated_at              = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at              = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at              = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
     company = relationship("Company", back_populates="records")
 
@@ -455,7 +461,7 @@ class CollectionLog(Base):
     id           = Column(Integer, primary_key=True, autoincrement=True)
     job_type     = Column(String(50))          # full / incremental / single
     status       = Column(String(20))          # running / done / error
-    started_at   = Column(DateTime, default=datetime.utcnow)
+    started_at   = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     finished_at  = Column(DateTime)
     companies_processed = Column(Integer, default=0)
     records_saved       = Column(Integer, default=0)
@@ -482,7 +488,7 @@ class MacroData(Base):
     low         = Column(Float)
     close       = Column(Float, nullable=False)
     volume      = Column(Float)
-    created_at  = Column(DateTime, default=datetime.utcnow)
+    created_at  = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
 
 # ── 6. XBRL 生データ中間テーブル ──────────────────────────────────────────
@@ -502,7 +508,7 @@ class XbrlRawDocument(Base):
     elements_gz     = Column(LargeBinary, nullable=False)
     elements_format = Column(String(10), default="gzip+json")
     n_rows          = Column(Integer)
-    fetched_at      = Column(DateTime, default=datetime.utcnow)
+    fetched_at      = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
 
 def pack_elements(rows: list) -> bytes:
@@ -516,7 +522,7 @@ def unpack_elements(blob: bytes) -> list:
 
 def upsert_xbrl_raw(db, doc_id: str, edinet_code: str, period_end: str, rows: list):
     blob = pack_elements(rows)
-    now  = datetime.utcnow()
+    now  = datetime.now(timezone.utc)
     stmt = pg_insert(XbrlRawDocument).values(
         doc_id=doc_id, edinet_code=edinet_code, period_end=period_end,
         elements_gz=blob, elements_format="gzip+json", n_rows=len(rows), fetched_at=now,
@@ -547,8 +553,8 @@ class RegressionResult(Base):
     gap_ratio            = Column(Float)   # 乖離率 %（(予測-実績)/実績*100）
     model                = Column(String(20))   # "ols" / "ridge"
     sector               = Column(String(100))  # 学習に使った業種
-    computed_at          = Column(DateTime, default=datetime.utcnow,
-                                  onupdate=datetime.utcnow)
+    computed_at          = Column(DateTime, default=lambda: datetime.now(timezone.utc),
+                                  onupdate=lambda: datetime.now(timezone.utc))
 
 
 def upsert_regression_result(db, *, edinet_code: str, year: int, period_end: str,
@@ -561,7 +567,7 @@ def upsert_regression_result(db, *, edinet_code: str, year: int, period_end: str
     db.merge(RegressionResult(
         edinet_code=edinet_code, year=year, period_end=period_end or "",
         predicted_market_cap=predicted_market_cap, gap_ratio=gap_ratio,
-        model=model, sector=sector, computed_at=datetime.utcnow(),
+        model=model, sector=sector, computed_at=datetime.now(timezone.utc),
     ))
 
 
@@ -785,7 +791,7 @@ def upsert_company(db, data: dict) -> Company:
     if obj is None:
         obj = Company(**{k: v for k, v in data.items() if hasattr(Company, k)})
         db.add(obj)
-        obj.updated_at = datetime.utcnow()
+        obj.updated_at = datetime.now(timezone.utc)
         return obj
     # 既存: 実値が変わるフィールドだけ更新する（空文字/None で実値を潰さない）。
     # 3500+ 社の dirty UPDATE が一気に流れると Supabase が read-only に転ぶため
@@ -799,7 +805,7 @@ def upsert_company(db, data: dict) -> Company:
             setattr(obj, k, v)
             changed = True
     if changed:
-        obj.updated_at = datetime.utcnow()
+        obj.updated_at = datetime.now(timezone.utc)
     return obj
 
 
@@ -866,7 +872,7 @@ def upsert_financial(db, data: dict) -> FinancialRecord:
         for k, v in flat.items():
             if v is not None:
                 setattr(obj, k, v)
-    obj.updated_at = datetime.utcnow()
+    obj.updated_at = datetime.now(timezone.utc)
     return obj
 
 
@@ -874,3 +880,24 @@ def upsert_financial(db, data: dict) -> FinancialRecord:
 # _calc_zscore_for_year）は廃止した。これらは financial_records の計算列へ書き戻す実装
 # だったが、派生指標は financial_metrics VIEW がソース列から都度算出する方式へ移行済み
 # （計算結果と生データのDB分離）。算出ロジックは FINANCIAL_METRICS_VIEW_SQL を参照。
+
+
+def latest_year_subq(db, model):
+    """企業ごとの最新年度レコードを1行に絞るサブクエリを返す。
+
+    model には FinancialRecord または FinancialMetric を渡す。
+    用途: 最新年度のみを対象にするクエリで join に利用する。
+
+    例:
+        subq = latest_year_subq(db, FinancialRecord)
+        rows = db.query(FinancialRecord).join(
+            subq,
+            (FinancialRecord.edinet_code == subq.c.edinet_code) &
+            (FinancialRecord.year == subq.c.max_year)
+        ).all()
+    """
+    return (
+        db.query(model.edinet_code, func.max(model.year).label("max_year"))
+        .group_by(model.edinet_code)
+        .subquery()
+    )

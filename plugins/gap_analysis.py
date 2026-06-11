@@ -1,8 +1,11 @@
+import logging
 import math
 from collections import defaultdict
 from typing import Any
 
 from .base import AnalysisPlugin
+
+logger = logging.getLogger(__name__)
 
 # AR(1) MLE で半減期を推定するための最低観測数
 _AR1_MIN_OBS = 8
@@ -26,14 +29,16 @@ def _estimate_ar1_half_life_years(series: list[float]) -> dict | None:
         from statsmodels.tsa.arima.model import ARIMA
         model = ARIMA(series, order=(1, 0, 0))
         res = model.fit()
-    except Exception:
+    except Exception as e:
+        logger.warning("AR(1) ARIMA推定失敗 (%s: %s)", type(e).__name__, e)
         return None
 
     # statsmodels ARIMA の AR(1) 係数は res.arparams[0] = φ
     try:
         phi = float(res.arparams[0])
         intercept = float(res.params[0])  # 定数項
-    except Exception:
+    except Exception as e:
+        logger.warning("AR(1) 係数取得失敗 (%s: %s)", type(e).__name__, e)
         return None
 
     # 平均回帰条件: 0 < φ < 1 でないと半減期が定義できない

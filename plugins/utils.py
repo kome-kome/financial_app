@@ -479,26 +479,17 @@ def check_collinearity(X_cols: list[list[float]], feature_names: list[str],
         return {"correlation": [], "vif": [], "high_corr_pairs": [], "high_vif": []}
 
     n = len(X_cols[0])
-    means = [statistics.mean(c) for c in X_cols]
-    sds = [statistics.stdev(c) if len(c) > 1 else 0.0 for c in X_cols]
 
-    # ── Pearson 相関行列 ───────────────────────────────────────────────
-    corr = [[1.0 if i == j else 0.0 for j in range(k)] for i in range(k)]
+    # ── Pearson 相関行列（np.corrcoef でベクトル化）──────────────────
+    X_arr = np.array(X_cols, dtype=float)  # shape: (k, n)
+    corr_matrix = np.corrcoef(X_arr)       # shape: (k, k)、ゼロ分散列は NaN
+    corr = corr_matrix.tolist()
     high_corr_pairs: list[tuple] = []
     for i in range(k):
         for j in range(i + 1, k):
-            if sds[i] == 0 or sds[j] == 0:
-                corr[i][j] = corr[j][i] = float("nan")
-                continue
-            cov = sum(
-                (X_cols[i][r] - means[i]) * (X_cols[j][r] - means[j])
-                for r in range(n)
-            ) / (n - 1)
-            r = cov / (sds[i] * sds[j])
-            r = max(-1.0, min(1.0, r))
-            corr[i][j] = corr[j][i] = r
-            if abs(r) > corr_threshold:
-                high_corr_pairs.append((i, j, round(r, 4)))
+            r = corr_matrix[i, j]
+            if not np.isnan(r) and abs(r) > corr_threshold:
+                high_corr_pairs.append((i, j, round(float(r), 4)))
 
     # ── VIF（各特徴量を他の特徴量で OLS 回帰）───────────────────────
     vif: list[float] = []
@@ -538,6 +529,56 @@ def check_collinearity(X_cols: list[list[float]], feature_names: list[str],
     }
 
 
+def _fit_predict_fold(
+    train_samples: list[tuple],
+    test_samples: list[tuple],
+    n_feat: int,
+    y_norm_method: str = "zscore",
+) -> tuple[list[float], list[float]] | None:
+    """フォールドの学習・予測を実行し (yhat_orig, y_test_orig) を返す。失敗時は None。
+
+    kfold_cv / walk_forward_cv_monthly の共通フレーム:
+    winsorize → normalize → OLS → 予測 → 逆変換。
+    """
+    X_train_raw = [s[0] for s in train_samples]
+    y_train_raw = [s[1] for s in train_samples]
+
+    norm_params: list[tuple[float, float]] = []
+    win_params:  list[tuple[float, float]] = []
+    X_train_norm = [[1.0] + [0.0] * n_feat for _ in range(len(X_train_raw))]
+    for fi in range(n_feat):
+        col = [row[fi] for row in X_train_raw]
+        col_w, w_lo, w_hi = winsorize(col)
+        win_params.append((w_lo, w_hi))
+        normed, p1, p2 = normalize(col_w, "zscore")
+        norm_params.append((p1, p2))
+        for ri, v in enumerate(normed):
+            X_train_norm[ri][fi + 1] = v
+
+    y_train, y_mu, y_sd = normalize(y_train_raw, y_norm_method)
+    result = ols(X_train_norm, y_train)
+    if not result:
+        return None
+    beta = result["beta"]
+
+    X_test_norm = []
+    for s in test_samples:
+        row = [1.0]
+        for fi, v in enumerate(s[0]):
+            w_lo, w_hi = win_params[fi]
+            v_w = max(w_lo, min(w_hi, v))
+            p1, p2 = norm_params[fi]
+            row.append(normalize_transform(v_w, p1, p2))
+        X_test_norm.append(row)
+
+    yhat_norm = [sum(row[j] * beta[j] for j in range(len(beta))) for row in X_test_norm]
+    if y_norm_method == "log":
+        yhat_orig = [math.exp(min(v * y_sd + y_mu, LOG_PRED_CAP)) for v in yhat_norm]
+    else:
+        yhat_orig = [v * y_sd + y_mu for v in yhat_norm]
+    return yhat_orig, [s[1] for s in test_samples]
+
+
 def kfold_cv(samples: list, n_folds: int = 5,
              y_norm_method: str = "log") -> list[dict]:
     """
@@ -565,43 +606,10 @@ def kfold_cv(samples: list, n_folds: int = 5,
         train_samples = [samples[i] for i in train_idx]
         test_samples  = [samples[i] for i in list(test_idx)]
 
-        X_train_raw = [s[0] for s in train_samples]
-        y_train_raw = [s[1] for s in train_samples]
-
-        norm_params: list[tuple[float, float]] = []
-        win_params:  list[tuple[float, float]] = []
-        X_train_norm = [[1.0] + [0.0] * n_feat for _ in range(len(X_train_raw))]
-        for fi in range(n_feat):
-            col = [row[fi] for row in X_train_raw]
-            col_w, w_lo, w_hi = winsorize(col)
-            win_params.append((w_lo, w_hi))
-            normed, p1, p2 = normalize(col_w, "zscore")
-            norm_params.append((p1, p2))
-            for ri, v in enumerate(normed):
-                X_train_norm[ri][fi + 1] = v
-
-        y_train, y_mu, y_sd = normalize(y_train_raw, y_norm_method)
-        result = ols(X_train_norm, y_train)
-        if not result:
+        fold_res = _fit_predict_fold(train_samples, test_samples, n_feat, y_norm_method)
+        if fold_res is None:
             continue
-        beta = result["beta"]
-
-        X_test_norm = []
-        for s in test_samples:
-            row = [1.0]
-            for fi, v in enumerate(s[0]):
-                w_lo, w_hi = win_params[fi]
-                v_w = max(w_lo, min(w_hi, v))
-                p1, p2 = norm_params[fi]
-                row.append(normalize_transform(v_w, p1, p2))
-            X_test_norm.append(row)
-
-        yhat_norm = [sum(row[j] * beta[j] for j in range(len(beta))) for row in X_test_norm]
-        if y_norm_method == "log":
-            yhat_orig = [math.exp(min(v * y_sd + y_mu, LOG_PRED_CAP)) for v in yhat_norm]
-        else:
-            yhat_orig = [v * y_sd + y_mu for v in yhat_norm]
-        y_test_orig = [s[1] for s in test_samples]
+        yhat_orig, y_test_orig = fold_res
 
         ymean = statistics.mean(y_test_orig)
         sst = sum((v - ymean) ** 2 for v in y_test_orig)
@@ -653,40 +661,10 @@ def walk_forward_cv_monthly(
         if len(train_samples) < 5 or not test_samples:
             continue
 
-        X_train_raw = [s[0] for s in train_samples]
-        y_train_raw = [s[1] for s in train_samples]
-
-        norm_params: list[tuple[float, float]] = []
-        win_params:  list[tuple[float, float]] = []
-        X_train_norm = [[1.0] + [0.0] * n_feat for _ in range(len(X_train_raw))]
-        for fi in range(n_feat):
-            col = [row[fi] for row in X_train_raw]
-            col_w, w_lo, w_hi = winsorize(col)
-            win_params.append((w_lo, w_hi))
-            normed, p1, p2 = normalize(col_w, "zscore")
-            norm_params.append((p1, p2))
-            for ri, v in enumerate(normed):
-                X_train_norm[ri][fi + 1] = v
-
-        y_train, y_mu, y_sd = normalize(y_train_raw, "zscore")
-        result = ols(X_train_norm, y_train)
-        if not result:
+        fold_res = _fit_predict_fold(train_samples, test_samples, n_feat)
+        if fold_res is None:
             continue
-        beta = result["beta"]
-
-        X_test_norm = []
-        for s in test_samples:
-            row = [1.0]
-            for fi, v in enumerate(s[0]):
-                w_lo, w_hi = win_params[fi]
-                v_w = max(w_lo, min(w_hi, v))
-                p1, p2 = norm_params[fi]
-                row.append(normalize_transform(v_w, p1, p2))
-            X_test_norm.append(row)
-
-        yhat_norm = [sum(row[j] * beta[j] for j in range(len(beta))) for row in X_test_norm]
-        yhat_orig = [v * y_sd + y_mu for v in yhat_norm]
-        y_test_orig = [s[1] for s in test_samples]
+        yhat_orig, y_test_orig = fold_res
 
         ymean = statistics.mean(y_test_orig)
         sst = sum((v - ymean) ** 2 for v in y_test_orig)

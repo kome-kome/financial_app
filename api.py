@@ -14,7 +14,7 @@ log = logging.getLogger(__name__)
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 def _utc_to_jst_str(dt: Optional[datetime]) -> Optional[str]:
     """DB に UTC 保存された naive datetime を 'YYYY-MM-DD HH:MM:SS JST' に整形"""
@@ -93,7 +93,7 @@ from database import (
     SessionLocal, init_db,
     Company, FinancialRecord, FinancialMetric, RegressionResult,
     CollectionLog, StockPriceDaily, StockPriceWeekly, MacroData,
-    prices_on_or_after, latest_prices,
+    prices_on_or_after, latest_prices, latest_year_subq,
 )
 from collector import run_full_collection, refresh_company, update_market_data, collect_stock_price_history, collect_stock_price_history_jquants, update_industry_from_jpx, collect_macro_data, MACRO_SERIES, reparse_from_raw
 from collection_jobs import jobs
@@ -112,7 +112,7 @@ async def lifespan(app: FastAPI):
         for job in stuck:
             job.status = "error"
             job.message = "サーバー再起動により中断"
-            job.finished_at = datetime.utcnow()
+            job.finished_at = datetime.now(timezone.utc)
         if stuck:
             db.commit()
             log.warning("起動時に %d 件のスタックジョブを error にリセットしました", len(stuck))
@@ -318,7 +318,7 @@ async def _run_bg_job(coro_factory, log_id: int, error_msg: str = "収集処理�
         log_obj = db.get(CollectionLog, log_id)
         if log_obj:
             log_obj.status        = "done"
-            log_obj.finished_at   = datetime.utcnow()
+            log_obj.finished_at   = datetime.now(timezone.utc)
             log_obj.records_saved = max(0, db.query(FinancialRecord).count() - baseline_records)
             if cancelled:
                 log_obj.message = "ユーザーにより停止"
@@ -329,7 +329,7 @@ async def _run_bg_job(coro_factory, log_id: int, error_msg: str = "収集処理�
         if log_obj:
             log_obj.status        = "error"
             log_obj.message       = error_msg
-            log_obj.finished_at   = datetime.utcnow()
+            log_obj.finished_at   = datetime.now(timezone.utc)
             log_obj.records_saved = max(0, db.query(FinancialRecord).count() - baseline_records)
             db.commit()
     finally:
@@ -403,7 +403,7 @@ def _reset_stuck_jobs(db: Session, message: str = "ユーザーによる強制�
     for job in stuck:
         job.status      = "error"
         job.message     = message
-        job.finished_at = datetime.utcnow()
+        job.finished_at = datetime.now(timezone.utc)
     if stuck:
         db.commit()
     return len(stuck)
@@ -665,7 +665,8 @@ async def reparse_progress_stream():
     return jobs.stream("reparse")
 
 @app.post("/api/collect/industry")
-async def collect_industry(db: Session = Depends(get_db)):
+@limiter.limit(RATELIMIT_COLLECT)
+async def collect_industry(request: Request, db: Session = Depends(get_db)):
     async with httpx.AsyncClient() as client:
         updated_co, updated_fr = await update_industry_from_jpx(client, db)
     return {"updated_companies": updated_co, "updated_records": updated_fr}
@@ -841,7 +842,8 @@ async def get_stats(db: Session = Depends(get_db)):
     # データ鮮度判定（最終DB更新からの経過日数）
     days_since: Optional[int] = None
     if last_db_update:
-        days_since = (datetime.utcnow() - last_db_update).days
+        _ref = last_db_update if last_db_update.tzinfo else last_db_update.replace(tzinfo=timezone.utc)
+        days_since = (datetime.now(timezone.utc) - _ref).days
     if days_since is None:
         freshness = "empty"
     elif days_since <= 2:
@@ -958,10 +960,7 @@ class ScreenRequest(BaseModel):
 async def screening(request: Request, req: ScreenRequest, db: Session = Depends(get_db)):
     # 最新年度のレコードのみ対象。派生指標フィルタは financial_metrics VIEW を対象にする
     # （op_margin / roe / rev_growth 等は VIEW が都度算出。本体には保存しない）。
-    subq = (db.query(FinancialRecord.edinet_code,
-                     func.max(FinancialRecord.year).label("max_year"))
-              .group_by(FinancialRecord.edinet_code)
-              .subquery())
+    subq = latest_year_subq(db, FinancialRecord)
     query = (db.query(FinancialMetric)
                .join(subq, (FinancialMetric.edinet_code == subq.c.edinet_code) &
                            (FinancialMetric.year == subq.c.max_year)))
@@ -1294,7 +1293,8 @@ async def db_stats(table: str, db: Session = Depends(get_db)):
                 p = db.execute(sql).first()
                 s["p50"] = round(float(p.p50), 4) if p and p.p50 is not None else None
                 s["p99"] = round(float(p.p99), 4) if p and p.p99 is not None else None
-            except Exception:
+            except Exception as e:
+                log.warning("パーセンタイル計算失敗 [%s.%s]: %s: %s", table, col.name, type(e).__name__, e)
                 s["p50"] = None
                 s["p99"] = None
         else:
@@ -1302,7 +1302,8 @@ async def db_stats(table: str, db: Session = Depends(get_db)):
             try:
                 distinct_cnt = db.query(func.count(func.distinct(col))).scalar() or 0
                 s["distinct"] = int(distinct_cnt)
-            except Exception:
+            except Exception as e:
+                log.warning("distinct数取得失敗 [%s.%s]: %s: %s", table, col.name, type(e).__name__, e)
                 s["distinct"] = None
         stats.append(s)
     return {"table": table, "row_count": row_count, "stats": stats}

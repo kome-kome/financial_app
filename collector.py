@@ -6,6 +6,7 @@ EDINET全上場企業 財務データ収集・正規化エンジン
 - PostgreSQL DBへ保存
 """
 
+import bisect
 import os, io, zipfile, logging, asyncio
 from datetime import date, timedelta
 from typing import Optional, Callable
@@ -139,6 +140,8 @@ async def update_industry_from_jpx(client: httpx.AsyncClient, db,
                                    on_progress: Optional[Callable] = None):
     """JPX上場会社一覧Excelから TSE 33業種コードを取得し、Company/FinancialRecordを更新する"""
     import xlrd
+    import openpyxl
+    import io as _io
     try:
         log.info("JPX上場会社一覧Excelをダウンロード中...")
         if on_progress:
@@ -146,13 +149,26 @@ async def update_industry_from_jpx(client: httpx.AsyncClient, db,
         r = await client.get(JPX_EXCEL_URL, timeout=60,
                              headers={"User-Agent": "Mozilla/5.0"})
         r.raise_for_status()
-        wb = xlrd.open_workbook(file_contents=r.content, encoding_override='cp932')
-        ws = wb.sheet_by_index(0)
+        # xlrd は .xls 専用。JPX が .xlsx に移行した場合は openpyxl にフォールバック。
+        try:
+            wb = xlrd.open_workbook(file_contents=r.content, encoding_override='cp932')
+            ws = wb.sheet_by_index(0)
+            def _cell(row, col):
+                return ws.cell_value(row, col)
+            nrows = ws.nrows
+        except xlrd.XLRDError:
+            log.info("xlrd で読み込み失敗。openpyxl（xlsx）でリトライします")
+            wb_xlsx = openpyxl.load_workbook(_io.BytesIO(r.content), read_only=True, data_only=True)
+            ws_xlsx = wb_xlsx.active
+            _rows = list(ws_xlsx.iter_rows(values_only=True))
+            def _cell(row, col):
+                return _rows[row][col]
+            nrows = len(_rows)
 
         industry_map: dict = {}
-        for row_idx in range(1, ws.nrows):
-            code_val = ws.cell_value(row_idx, 1)
-            ind_val  = ws.cell_value(row_idx, 5)
+        for row_idx in range(1, nrows):
+            code_val = _cell(row_idx, 1)
+            ind_val  = _cell(row_idx, 5)
             if ind_val in ('-', '', None):
                 continue
             if isinstance(code_val, float):
@@ -909,7 +925,7 @@ def update_market_data_from_history(db, point_in_time: bool = False) -> int:
 
         # 最近傍の trade_date を二分探索
         dates = [p[0] for p in prices]
-        pos = _bisect_left(dates, target.isoformat())
+        pos = bisect.bisect_left(dates, target.isoformat())
         best_price = None
         best_gap = MAX_GAP_DAYS + 1
 
@@ -1020,7 +1036,7 @@ async def backfill_historical_stock_prices_yahoo(
 
                 for rec in recs:
                     target_str = rec.period_end[:10]
-                    pos = _bisect_left(price_dates, target_str)
+                    pos = bisect.bisect_left(price_dates, target_str)
                     best_price, best_gap = None, MAX_GAP_DAYS + 1
                     for idx in (pos - 1, pos):
                         if 0 <= idx < len(price_dates):
@@ -1313,18 +1329,6 @@ def _apply_price_to_record(rec, price: float) -> None:
         rec.div_yield = round(rec.dps / price * 100, 2)
     # nc_ratio（= net_cash / 時価総額）は計算結果のため financial_metrics VIEW で都度算出する
     # （財務本体には永続化しない）。
-
-
-def _bisect_left(sorted_list: list, value: str) -> int:
-    """文字列リストの bisect_left（stdlib bisect と同等）"""
-    lo, hi = 0, len(sorted_list)
-    while lo < hi:
-        mid = (lo + hi) // 2
-        if sorted_list[mid] < value:
-            lo = mid + 1
-        else:
-            hi = mid
-    return lo
 
 
 def _fetch_latest_fin_by_ec(db, edinet_codes: list) -> dict:
@@ -1669,7 +1673,7 @@ async def run_full_collection(years_back: int = 5,
                         await asyncio.sleep(BATCH_PAUSE)
 
                 except Exception as e:
-                    log.error(f"書類処理エラー（スキップ）: {doc_id} {filer_name} — {e}")
+                    log.error(f"書類処理エラー（スキップ）: {doc_id} {filer_name} — {e}", exc_info=True)
                     try:
                         db.rollback()
                     except Exception:

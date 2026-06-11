@@ -3,7 +3,7 @@
 収集済み財務データの NULL 率・外れ値・年度連続性を検査してレポートを返す。
 """
 
-from datetime import datetime
+from datetime import datetime, timezone
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 from database import FinancialRecord, FinancialMetric
@@ -15,7 +15,7 @@ def run_data_quality_check(db: Session) -> dict:
         "outliers":              _check_outliers(db),
         "year_summary":          _check_year_summary(db),
         "accounting_standard":   _check_by_accounting_standard(db),
-        "checked_at":            datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC"),
+        "checked_at":            datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
     }
 
 
