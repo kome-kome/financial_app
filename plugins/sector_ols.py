@@ -257,7 +257,7 @@ class SectorOLSPlugin(AnalysisPlugin):
 
     async def execute(self, params: dict, db: Any) -> dict:
         from sqlalchemy import func
-        from database import FinancialRecord, upsert_regression_result
+        from database import FinancialRecord, upsert_regression_result, latest_year_subq
 
         # params はパラメータ契約に従い coerce 済み（execute_plugin / coerce_params 経由）。
         target         = params["target"]
@@ -269,12 +269,7 @@ class SectorOLSPlugin(AnalysisPlugin):
         if not features:
             raise ValueError("説明変数を1つ以上選択してください")
 
-        subq = (
-            db.query(FinancialRecord.edinet_code,
-                     func.max(FinancialRecord.year).label("max_year"))
-            .group_by(FinancialRecord.edinet_code)
-            .subquery()
-        )
+        subq = latest_year_subq(db, FinancialRecord)
         query = (
             db.query(FinancialRecord)
             .join(subq, (FinancialRecord.edinet_code == subq.c.edinet_code) &
