@@ -840,63 +840,53 @@ async def collect_stock_price_history_jquants(
     return {"cancelled": False, "upserted": upserted_total, "days": total}
 
 
-def update_market_data_from_history(db, point_in_time: bool = False) -> int:
-    """stock_price_history の終値を financial_records.stock_price に反映する。
-    stooq が GitHub Actions IP でブロックされる問題を回避するため、
-    J-Quants 由来の stock_price_history を使ってバリュエーション指標を計算する。
-
-    point_in_time=False（デフォルト・日次差分向け）:
-        各社の最新レコードのみ、最新株価で更新する。高速。
-    point_in_time=True（全件収集 finalize 向け）:
-        全財務レコードを period_end 最近傍の株価で更新する。
-        J-Quants カバレッジ外（データなし）のレコードはスキップし既存値を保持する。
-        最新レコードは常に最新株価で上書きする。
-
-    戻り値: 更新した財務レコード数
-    """
+def _update_market_data_latest(db) -> int:
+    """point_in_time=False: 各社の最新レコードのみ、最新株価（daily優先）で更新する。"""
     from sqlalchemy import func as sqlfunc
 
-    if not point_in_time:
-        # ── 最新レコードのみ・最新株価（daily＝直近窓を優先・無ければ weekly）─────────
-        subq = (
-            db.query(
-                StockPriceDaily.edinet_code,
-                sqlfunc.max(StockPriceDaily.trade_date).label("max_date"),
-            )
-            .group_by(StockPriceDaily.edinet_code)
-            .subquery()
+    subq = (
+        db.query(
+            StockPriceDaily.edinet_code,
+            sqlfunc.max(StockPriceDaily.trade_date).label("max_date"),
         )
-        latest_price_rows = (
-            db.query(StockPriceDaily.edinet_code, StockPriceDaily.close)
-            .join(
-                subq,
-                (StockPriceDaily.edinet_code == subq.c.edinet_code)
-                & (StockPriceDaily.trade_date == subq.c.max_date),
-            )
-            .all()
+        .group_by(StockPriceDaily.edinet_code)
+        .subquery()
+    )
+    latest_price_rows = (
+        db.query(StockPriceDaily.edinet_code, StockPriceDaily.close)
+        .join(
+            subq,
+            (StockPriceDaily.edinet_code == subq.c.edinet_code)
+            & (StockPriceDaily.trade_date == subq.c.max_date),
         )
+        .all()
+    )
 
-        valid_ecs = [ec for ec, price in latest_price_rows if price and price > 0]
-        latest_fin_by_ec = _fetch_latest_fin_by_ec(db, valid_ecs)
+    valid_ecs = [ec for ec, price in latest_price_rows if price and price > 0]
+    latest_fin_by_ec = _fetch_latest_fin_by_ec(db, valid_ecs)
 
-        updated = 0
-        for edinet_code, price in latest_price_rows:
-            if price is None or price <= 0:
-                continue
-            latest = latest_fin_by_ec.get(edinet_code)
-            if not latest:
-                continue
-            _apply_price_to_record(latest, price)
-            updated += 1
-            if updated % 200 == 0:
-                db.commit()
+    updated = 0
+    for edinet_code, price in latest_price_rows:
+        if price is None or price <= 0:
+            continue
+        latest = latest_fin_by_ec.get(edinet_code)
+        if not latest:
+            continue
+        _apply_price_to_record(latest, price)
+        updated += 1
+        if updated % 200 == 0:
+            db.commit()
 
-        db.commit()
-        log.info(f"update_market_data_from_history: {updated}社を更新")
-        return updated
+    db.commit()
+    log.info(f"update_market_data_from_history: {updated}社を更新")
+    return updated
 
-    # ── point_in_time=True: 全レコードを period_end 近傍の株価で更新 ─────────
-    # period_end 近傍の価格は全履歴を持つ weekly（close_last）から引く
+
+def _update_market_data_point_in_time(db) -> int:
+    """point_in_time=True: 全財務レコードを period_end 近傍の週次株価で更新し、
+    最新レコードは現在株価で上書きする。"""
+    from collections import defaultdict
+
     all_rows = db.query(
         StockPriceWeekly.edinet_code,
         StockPriceWeekly.trade_date,
@@ -908,7 +898,6 @@ def update_market_data_from_history(db, point_in_time: bool = False) -> int:
         return 0
 
     # {edinet_code: sorted list of (trade_date_str, close)}
-    from collections import defaultdict
     history: dict = defaultdict(list)
     for ec, td, cl in all_rows:
         if cl and cl > 0:
@@ -933,13 +922,11 @@ def update_market_data_from_history(db, point_in_time: bool = False) -> int:
         if not rec.period_end:
             continue
 
-        # period_end を date に変換（"YYYY-MM-DD" 形式を前提）
         try:
             target = date.fromisoformat(rec.period_end[:10])
         except (ValueError, TypeError):
             continue
 
-        # 最近傍の trade_date を二分探索
         dates = [p[0] for p in prices]
         pos = bisect.bisect_left(dates, target.isoformat())
         best_price = None
@@ -976,6 +963,25 @@ def update_market_data_from_history(db, point_in_time: bool = False) -> int:
     db.commit()
     log.info(f"update_market_data_from_history(point_in_time): {updated}レコードを更新")
     return updated
+
+
+def update_market_data_from_history(db, point_in_time: bool = False) -> int:
+    """stock_price_history の終値を financial_records.stock_price に反映する。
+    stooq が GitHub Actions IP でブロックされる問題を回避するため、
+    J-Quants 由来の stock_price_history を使ってバリュエーション指標を計算する。
+
+    point_in_time=False（デフォルト・日次差分向け）:
+        各社の最新レコードのみ、最新株価で更新する。高速。
+    point_in_time=True（全件収集 finalize 向け）:
+        全財務レコードを period_end 最近傍の株価で更新する。
+        J-Quants カバレッジ外（データなし）のレコードはスキップし既存値を保持する。
+        最新レコードは常に最新株価で上書きする。
+
+    戻り値: 更新した財務レコード数
+    """
+    if not point_in_time:
+        return _update_market_data_latest(db)
+    return _update_market_data_point_in_time(db)
 
 
 async def backfill_historical_stock_prices_yahoo(

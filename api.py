@@ -1271,55 +1271,95 @@ async def db_preview(
 
 @app.get("/api/db/stats/{table}")
 async def db_stats(table: str, db: Session = Depends(get_db)):
-    """テーブルの統計サマリー（数値カラムは min/max/avg/p50/p99、文字列カラムはユニーク数）"""
+    """テーブルの統計サマリー（数値カラムは min/max/avg/p50/p99、文字列カラムはユニーク数）
+
+    集約クエリ3本（数値 min/max/avg/count・percentile_cont・文字列 distinct）に
+    削減（列ごと個別クエリ N×2 → 定数クエリ）。
+    """
     if table not in _DB_VIEWER_TABLES:
         raise HTTPException(404, "テーブルが見つかりません")
     model = _DB_VIEWER_TABLES[table]
     row_count = db.query(func.count()).select_from(model).scalar() or 0
 
+    all_cols   = list(model.__table__.columns)
+    col_metas  = {col.name: _column_meta(col) for col in all_cols}
+    num_cols   = [col for col in all_cols if col_metas[col.name]["numeric"]]
+    str_cols   = [col for col in all_cols if not col_metas[col.name]["numeric"]]
+
+    # ── 数値集計（1クエリ: 全数値カラムの min/max/avg/count を一括取得）──────────
+    num_agg: dict = {}
+    if row_count > 0 and num_cols:
+        exprs = []
+        for col in num_cols:
+            exprs += [
+                func.min(col).label(f"{col.name}__min"),
+                func.max(col).label(f"{col.name}__max"),
+                func.avg(col).label(f"{col.name}__avg"),
+                func.count(col).label(f"{col.name}__cnt"),
+            ]
+        row = db.query(*exprs).select_from(model).first()
+        for col in num_cols:
+            num_agg[col.name] = {
+                "min":   getattr(row, f"{col.name}__min"),
+                "max":   getattr(row, f"{col.name}__max"),
+                "avg":   getattr(row, f"{col.name}__avg"),
+                "count": getattr(row, f"{col.name}__cnt"),
+            }
+
+    # ── percentile_cont（1クエリ: PostgreSQL 専用・SQLite は None でスキップ）───
+    pct_agg: dict = {}
+    if row_count > 0 and num_cols:
+        try:
+            select_parts = ", ".join(
+                f"percentile_cont(0.5) WITHIN GROUP (ORDER BY {c.name}) AS {c.name}__p50, "
+                f"percentile_cont(0.99) WITHIN GROUP (ORDER BY {c.name}) AS {c.name}__p99"
+                for c in num_cols
+            )
+            p = db.execute(text(f"SELECT {select_parts} FROM {table}")).first()
+            for col in num_cols:
+                p50 = getattr(p, f"{col.name}__p50", None)
+                p99 = getattr(p, f"{col.name}__p99", None)
+                pct_agg[col.name] = {
+                    "p50": round(float(p50), 4) if p50 is not None else None,
+                    "p99": round(float(p99), 4) if p99 is not None else None,
+                }
+        except Exception as e:
+            log.warning("percentile_cont 一括取得失敗 [%s]: %s: %s", table, type(e).__name__, e)
+
+    # ── 文字列 distinct（1クエリ: 全文字列カラムの count(distinct) を一括取得）──
+    str_agg: dict = {}
+    if row_count > 0 and str_cols:
+        try:
+            exprs = [
+                func.count(func.distinct(col)).label(col.name)
+                for col in str_cols
+            ]
+            row = db.query(*exprs).select_from(model).first()
+            for col in str_cols:
+                str_agg[col.name] = int(getattr(row, col.name) or 0)
+        except Exception as e:
+            log.warning("distinct 一括取得失敗 [%s]: %s: %s", table, type(e).__name__, e)
+
+    # ── レスポンス組み立て ───────────────────────────────────────────────────
     stats = []
-    for col in model.__table__.columns:
-        meta = _column_meta(col)
-        s = {
-            "name":    col.name,
-            "type":    meta["type"],
-            "numeric": meta["numeric"],
-        }
+    for col in all_cols:
+        meta = col_metas[col.name]
+        s = {"name": col.name, "type": meta["type"], "numeric": meta["numeric"]}
         if row_count == 0:
             stats.append(s)
             continue
-
         if meta["numeric"]:
-            agg = db.query(
-                func.min(col), func.max(col), func.avg(col), func.count(col)
-            ).first()
-            mn, mx, avg, cnt = agg
-            s["min"]   = float(mn) if mn is not None else None
-            s["max"]   = float(mx) if mx is not None else None
+            agg = num_agg.get(col.name, {})
+            mn, mx, avg, cnt = agg.get("min"), agg.get("max"), agg.get("avg"), agg.get("count")
+            s["min"]   = float(mn)  if mn  is not None else None
+            s["max"]   = float(mx)  if mx  is not None else None
             s["avg"]   = round(float(avg), 4) if avg is not None else None
             s["count"] = int(cnt or 0)
-            # PostgreSQL の percentile_cont を生 SQL で利用（パーセンタイル分布）
-            try:
-                sql = text(
-                    f"SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY {col.name}) AS p50, "
-                    f"       percentile_cont(0.99) WITHIN GROUP (ORDER BY {col.name}) AS p99 "
-                    f"FROM {table} WHERE {col.name} IS NOT NULL"
-                )
-                p = db.execute(sql).first()
-                s["p50"] = round(float(p.p50), 4) if p and p.p50 is not None else None
-                s["p99"] = round(float(p.p99), 4) if p and p.p99 is not None else None
-            except Exception as e:
-                log.warning("パーセンタイル計算失敗 [%s.%s]: %s: %s", table, col.name, type(e).__name__, e)
-                s["p50"] = None
-                s["p99"] = None
+            p = pct_agg.get(col.name, {})
+            s["p50"] = p.get("p50")
+            s["p99"] = p.get("p99")
         else:
-            # 文字列・列挙系: ユニーク数のみ（カーディナリティ目安）
-            try:
-                distinct_cnt = db.query(func.count(func.distinct(col))).scalar() or 0
-                s["distinct"] = int(distinct_cnt)
-            except Exception as e:
-                log.warning("distinct数取得失敗 [%s.%s]: %s: %s", table, col.name, type(e).__name__, e)
-                s["distinct"] = None
+            s["distinct"] = str_agg.get(col.name)
         stats.append(s)
     return {"table": table, "row_count": row_count, "stats": stats}
 
