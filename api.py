@@ -1175,11 +1175,22 @@ async def db_schema(table: str, db: Session = Depends(get_db)):
         raise HTTPException(404, "テーブルが見つかりません")
     model = _DB_VIEWER_TABLES[table]
     row_count = db.query(func.count()).select_from(model).scalar() or 0
+    table_cols = list(model.__table__.columns)
+    # NULL 率を1クエリで集約（N+1 → 1）
+    null_counts: dict[str, int] = {}
+    if row_count > 0:
+        null_exprs = [
+            func.count().filter(col.is_(None)).label(col.name)
+            for col in table_cols
+        ]
+        row = db.query(*null_exprs).select_from(model).first()
+        null_counts = {col.name: (getattr(row, col.name) or 0) for col in table_cols}
+
     cols = []
-    for col in model.__table__.columns:
+    for col in table_cols:
         meta = _column_meta(col)
         if row_count > 0:
-            null_count = db.query(func.count()).select_from(model).filter(col.is_(None)).scalar() or 0
+            null_count = null_counts.get(col.name, 0)
             meta["null_rate"] = round(null_count / row_count * 100, 1)
             meta["null_count"] = null_count
         else:
