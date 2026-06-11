@@ -644,60 +644,93 @@ FINANCIAL_METRICS_VIEW_SQL = (Path(__file__).parent / "sql" / "financial_metrics
 
 # ── 10. DB初期化 ───────────────────────────────────────────────────────────
 
-def init_db():
-    """テーブル作成・インデックス構築・カラムマイグレーション"""
+# 新規ソース列（冪等 ADD）。計算列は含めない（VIEW が担う）。
+_NEW_COLS = [
+    "pl_cost_of_sales", "pl_sga", "pl_nonoperating_income",
+    "bs_receivables", "bs_inventory",
+    "bs_buildings", "bs_machinery", "bs_intangible_assets",
+    "bs_payables", "bs_bonds_payable",
+    "bs_paid_in_capital", "bs_retained_earnings",
+    "bs_investment_securities",
+    "bs_ppe_total", "bs_investments_other_assets",
+    "pl_rd_expenses", "pl_depreciation",
+    "pl_extraordinary_income", "pl_extraordinary_loss",
+    "employees", "issued_shares",
+]
+
+# 旧計算列（冪等 DROP）。派生指標は financial_metrics VIEW・OLS予測値は regression_results に移行済み。
+_LEGACY_COMPUTED_COLS = [
+    "op_margin", "net_margin", "roe", "roa", "equity_ratio", "de_ratio",
+    "cf_ratio", "net_cash", "nc_ratio",
+    "z_revenue", "z_op_margin", "z_roe", "z_equity_ratio", "z_cf_ratio",
+    "z_eps", "z_de_ratio", "z_nc_ratio",
+    "rev_growth", "op_growth", "eps_growth",
+    "predicted_market_cap", "gap_ratio",
+]
+
+
+def _ensure_tables() -> None:
+    """Phase 1: テーブル作成・インデックス・カラムマイグレーション（すべて冪等）"""
+    import re as _re
     Base.metadata.create_all(bind=engine)
     with engine.connect() as conn:
-        # 全文検索インデックス
         conn.execute(text(
             "CREATE INDEX IF NOT EXISTS ix_companies_name_gin "
             "ON companies USING gin(to_tsvector('simple', name))"
         ))
-        # 新規ソース列のマイグレーション（冪等）。計算列はここに含めない（VIEW が担う）。
-        _new_cols = [
-            "pl_cost_of_sales", "pl_sga", "pl_nonoperating_income",
-            "bs_receivables", "bs_inventory",
-            "bs_buildings", "bs_machinery", "bs_intangible_assets",
-            "bs_payables", "bs_bonds_payable",
-            "bs_paid_in_capital", "bs_retained_earnings",
-            "bs_investment_securities",
-            # 網羅性追加（C2）。全て DOUBLE PRECISION で冪等 ADD（非財務 employees/issued_shares 含む）
-            "bs_ppe_total", "bs_investments_other_assets",
-            "pl_rd_expenses", "pl_depreciation",
-            "pl_extraordinary_income", "pl_extraordinary_loss",
-            "employees", "issued_shares",
-        ]
-        for col in _new_cols:
+        for col in _NEW_COLS:
             conn.execute(text(
                 f"ALTER TABLE financial_records ADD COLUMN IF NOT EXISTS {col} DOUBLE PRECISION"
             ))
-        # 旧計算列の DROP（冪等）。派生指標は financial_metrics VIEW、OLS予測値は
-        # regression_results へ移行済みのため financial_records からは恒久的に削除する。
-        # VIEW はソース列から派生を計算しており、これらの列を参照しないため DROP 可能。
-        _legacy_computed_cols = [
-            "op_margin", "net_margin", "roe", "roa", "equity_ratio", "de_ratio",
-            "cf_ratio", "net_cash", "nc_ratio",
-            "z_revenue", "z_op_margin", "z_roe", "z_equity_ratio", "z_cf_ratio",
-            "z_eps", "z_de_ratio", "z_nc_ratio",
-            "rev_growth", "op_growth", "eps_growth",
-            "predicted_market_cap", "gap_ratio",
-        ]
-        for col in _legacy_computed_cols:
+        for col in _LEGACY_COMPUTED_COLS:
             conn.execute(text(
                 f"ALTER TABLE financial_records DROP COLUMN IF EXISTS {col}"
             ))
-        # xbrl_raw_documents インデックス（テーブル自体は create_all で作成済み）
         conn.execute(text(
             "CREATE INDEX IF NOT EXISTS ix_xbrl_raw_edinet_period "
             "ON xbrl_raw_documents (edinet_code, period_end)"
         ))
-        # financial_metrics VIEW（ソース列から軽い派生を都度算出＋regression_results を合成）。
-        # regression_results は create_all で先に作成済みのため LEFT JOIN 可能。
-        # 列の追加・並び替え時は CREATE OR REPLACE VIEW が「末尾追加のみ可」の制約で失敗するため、
-        # 一度 DROP してから作り直す（VIEW に依存する DB オブジェクトは無い＝安全）。
-        conn.execute(text("DROP VIEW IF EXISTS financial_metrics"))
-        conn.execute(text(FINANCIAL_METRICS_VIEW_SQL))
         conn.commit()
+
+
+def _ensure_view() -> None:
+    """Phase 2: financial_metrics VIEW を定義変更時のみ DROP+再作成する。
+
+    pg_get_viewdef() で現行 VIEW 定義を取得して FINANCIAL_METRICS_VIEW_SQL と比較し、
+    差異がなければスキップ（毎起動 DROP を避ける）。
+    VIEW 未存在・比較不能（SQLite等）の場合は無条件に再作成する。
+    """
+    import re as _re
+
+    def _norm(s: str) -> str:
+        return _re.sub(r"\s+", " ", s.strip().rstrip(";"))
+
+    needs_recreate = True
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(
+                text("SELECT pg_get_viewdef('financial_metrics', true)")
+            ).first()
+            if row and row[0]:
+                needs_recreate = (_norm(row[0]) != _norm(FINANCIAL_METRICS_VIEW_SQL))
+    except Exception:
+        # pg_get_viewdef 未対応（SQLite 等）またはビュー未存在 → 再作成
+        needs_recreate = True
+
+    if needs_recreate:
+        with engine.connect() as conn:
+            # regression_results は create_all 後なので LEFT JOIN 可能。
+            # 列の追加・並び替えは CREATE OR REPLACE VIEW が「末尾追加のみ可」で失敗するため
+            # DROP→再作成する（VIEW に依存するオブジェクトは無く安全）。
+            conn.execute(text("DROP VIEW IF EXISTS financial_metrics"))
+            conn.execute(text(FINANCIAL_METRICS_VIEW_SQL))
+            conn.commit()
+
+
+def init_db():
+    """テーブル作成・インデックス構築・カラムマイグレーション"""
+    _ensure_tables()
+    _ensure_view()
 
 
 # ── 7. Upsert 処理 ─────────────────────────────────────────────────────────
