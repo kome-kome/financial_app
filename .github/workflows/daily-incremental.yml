@@ -19,7 +19,7 @@ on:
 jobs:
   incremental:
     runs-on: ubuntu-latest
-    timeout-minutes: 120    # 差分のみなので最大2時間
+    timeout-minutes: 360    # 初回 Yahoo backfill（~12週分）のため一時的に延長。定常時は120分で十分。
 
     steps:
       - name: Checkout
