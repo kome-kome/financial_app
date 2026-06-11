@@ -19,6 +19,8 @@ from database import (
     XbrlRawDocument, upsert_company, upsert_financial,
     upsert_xbrl_raw, pack_elements, unpack_elements,
     build_xbrl_map,
+    StockPriceDaily, StockPriceWeekly,
+    record_prices_batch, trim_daily, latest_prices,
 )
 
 load_dotenv()
@@ -541,7 +543,6 @@ async def collect_stock_price_history(
     skip_existing=True: DB の最新 trade_date から翌日以降のみ取得（差分収集）。
     backfill=True かつ skip_existing=True: 前方差分に加えて後方欠損（years_back 起点→最古レコード前日）も補完。
     """
-    from database import StockPriceWeekly, record_prices_batch, trim_daily
     from sqlalchemy import func as sqlfunc
 
     today     = date.today()
@@ -723,7 +724,6 @@ async def collect_stock_price_history_jquants(
     if not api_key:
         raise ValueError("環境変数 JQUANTS_API_KEY が未設定です")
 
-    from database import record_prices_batch, trim_daily, Company as _Company
 
     today  = date.today()
     _from  = date_from if date_from is not None else (today - timedelta(days=days_back))
@@ -740,8 +740,8 @@ async def collect_stock_price_history_jquants(
     # sec_code (4桁) → edinet_code のルックアップ（全社一括で1回のみ）
     sec_to_edinet: dict = {
         row.sec_code: row.edinet_code
-        for row in db.query(_Company.sec_code, _Company.edinet_code)
-        .filter(_Company.sec_code.isnot(None))
+        for row in db.query(Company.sec_code, Company.edinet_code)
+        .filter(Company.sec_code.isnot(None))
         .all()
     }
 
@@ -837,7 +837,6 @@ def update_market_data_from_history(db, point_in_time: bool = False) -> int:
 
     戻り値: 更新した財務レコード数
     """
-    from database import StockPriceDaily, StockPriceWeekly, FinancialRecord, latest_prices
     from sqlalchemy import func as sqlfunc
 
     if not point_in_time:
@@ -975,7 +974,6 @@ async def backfill_historical_stock_prices_yahoo(
     J-Quants 由来の既存 stock_price は上書きしない（NULL のみ補完）。
     GitHub Actions（Azure IP）から動作する。
     """
-    from database import FinancialRecord, Company as _Company
     from collections import defaultdict
 
     cutoff = (date.today() - timedelta(days=JQUANTS_BACKFILL_DAYS)).isoformat()
@@ -997,8 +995,8 @@ async def backfill_historical_stock_prices_yahoo(
     # edinet_code → sec_code マッピング
     sec_map = {
         c.edinet_code: c.sec_code
-        for c in db.query(_Company.edinet_code, _Company.sec_code)
-        .filter(_Company.sec_code.isnot(None))
+        for c in db.query(Company.edinet_code, Company.sec_code)
+        .filter(Company.sec_code.isnot(None))
         .all()
     }
 
@@ -1073,7 +1071,6 @@ async def fill_recent_stock_price_gap_yahoo(
     差分収集（incremental）後のフォールバックとして使用。
     J-Quants データが存在する行は上書きしない（ON CONFLICT DO NOTHING）。
     """
-    from database import StockPriceDaily, StockPriceWeekly, record_prices_batch, trim_daily, Company as _Company
     from sqlalchemy import func as sqlfunc
 
     # 最新日は直近窓の daily を基準にする（無ければ weekly にフォールバック）
@@ -1096,8 +1093,8 @@ async def fill_recent_stock_price_gap_yahoo(
     # sec_code → edinet_code マッピング
     companies = [
         (row.sec_code, row.edinet_code)
-        for row in db.query(_Company.sec_code, _Company.edinet_code)
-        .filter(_Company.sec_code.isnot(None))
+        for row in db.query(Company.sec_code, Company.edinet_code)
+        .filter(Company.sec_code.isnot(None))
         .all()
     ]
     total      = len(companies)
@@ -1161,7 +1158,6 @@ async def refill_cf_from_xbrl(
 
     fetch_xbrl_csv の全 CSV concat + capex ラベル照合により capex/net_change_cash を補完する。
     """
-    from database import FinancialRecord
 
     mode = "missing" if missing_cf else ("capex_only" if capex_only else "normal")
     log.info(f"refill_cf_from_xbrl 開始 (mode={mode}, limit={limit}, sleep={sleep_sec})")
@@ -1266,7 +1262,6 @@ async def diagnose_cf_labels(db, limit: int = 20) -> dict:
     項目名に固定資産/設備/取得/支出 を含む、または要素IDに Purchase/Property/Capital/
     Acquisition/Tangible を含むファクトを全て出力する。
     """
-    from database import FinancialRecord
 
     KW_LABEL = ["固定資産", "設備", "取得", "支出", "購入"]
     KW_ELEM  = ["Purchase", "Property", "Capital", "Acquisition", "Tangible", "PaymentsFor"]
@@ -1416,25 +1411,7 @@ async def update_market_data(max_companies: Optional[int] = None,
                 if not latest:
                     continue
 
-                latest.stock_price = price
-
-                if latest.pl_eps and latest.pl_eps > 0:
-                    latest.per = round(price / latest.pl_eps, 2)
-                if latest.bs_bps and latest.bs_bps > 0:
-                    latest.pbr = round(price / latest.bs_bps, 2)
-                _sh = (float(latest.issued_shares) if (latest.issued_shares and latest.issued_shares > 0)
-                       else ((latest.bs_total_equity / latest.bs_bps)
-                             if (latest.bs_bps and latest.bs_bps > 0
-                                 and latest.bs_total_equity and latest.bs_total_equity > 0)
-                             else None))
-                if _sh:
-                    latest.market_cap = round(price * _sh / 1_000_000, 2)
-                if latest.dps and latest.dps > 0 and price > 0:
-                    latest.div_yield = round(latest.dps / price * 100, 2)
-                # nc_ratio（ネットキャッシュ比率 = net_cash / 時価総額）は計算結果のため
-                # financial_metrics VIEW で都度算出する（財務本体には永続化しない）。
-                # 清原氏の銘柄選別基準: nc_ratio > 1.0 で「時価総額を上回るネットキャッシュ」
-
+                _apply_price_to_record(latest, price)
                 updated += 1
                 if updated % 50 == 0:
                     db.commit()
