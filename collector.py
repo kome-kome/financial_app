@@ -547,6 +547,29 @@ async def fetch_stock_history_stooq(
     return rows
 
 
+async def _price_collection_driver(db, batch_gen) -> tuple[bool, int]:
+    """
+    Provider-agnostic driver: iterates batch_gen, saves each batch via
+    record_prices_batch, calls trim_daily when done.
+
+    batch_gen yields list[dict] of price records, or None as a cancellation
+    sentinel (triggers early return with cancelled=True).
+    Returns (cancelled, total_inserted).
+    """
+    total = 0
+    async for batch in batch_gen:
+        if batch is None:   # cancellation sentinel from generator
+            db.commit()
+            return True, total
+        if batch:
+            try:
+                total += record_prices_batch(db, batch, trim=False)
+            except Exception as e:
+                log.warning("株価バッチ保存失敗: %s", e)
+    trim_daily(db)
+    return False, total
+
+
 async def collect_stock_price_history(
     db,
     years_back: int = 3,
@@ -559,6 +582,8 @@ async def collect_stock_price_history(
     """全企業（sec_code 保有）の日次 OHLCV を stooq から取得して DB に保存する。
     skip_existing=True: DB の最新 trade_date から翌日以降のみ取得（差分収集）。
     backfill=True かつ skip_existing=True: 前方差分に加えて後方欠損（years_back 起点→最古レコード前日）も補完。
+    プロバイダー固有ロジック（stooq 並行フェッチ）を _stooq_batch_gen に分離し、
+    _price_collection_driver の共通フレームで DB 保存・trim を一元管理する。
     """
     from sqlalchemy import func as sqlfunc
 
@@ -599,7 +624,6 @@ async def collect_stock_price_history(
             )
 
     total = len(companies)
-    inserted_total = 0
     skipped_total  = 0
 
     # 差分収集: スキップ判定を事前に行い、取得対象だけリストアップ
@@ -642,18 +666,15 @@ async def collect_stock_price_history(
                     f"[スキップ] {skipped_total}社は補完不要 → {fetch_total}件を取得します" if backfill
                     else f"[スキップ] {skipped_total}社は最新済み → {fetch_total}社を並列取得します")
 
-    sem = asyncio.Semaphore(STOOQ_HIST_CONCURRENCY)
+    async def _stooq_batch_gen(session):
+        sem = asyncio.Semaphore(STOOQ_HIST_CONCURRENCY)
 
-    async def _fetch_hist(session, edinet_code, sec_code, name, d1_co, d2_co):
-        async with sem:
-            rows = await fetch_stock_history_stooq(session, sec_code, d1_co, d2_co)
-        return edinet_code, sec_code, name, rows
+        async def _fetch_hist(ec, sc, nm, d1c, d2c):
+            async with sem:
+                rows = await fetch_stock_history_stooq(session, sc, d1c, d2c)
+            return ec, sc, nm, rows
 
-    async with httpx.AsyncClient() as session:
-        tasks = [asyncio.ensure_future(
-            _fetch_hist(session, ec, sc, nm, d1c, d2c)
-        ) for ec, sc, nm, d1c, d2c in to_fetch]
-
+        tasks = [asyncio.ensure_future(_fetch_hist(*item)) for item in to_fetch]
         completed = 0
         for coro in asyncio.as_completed(tasks):
             if cancel_check and cancel_check():
@@ -663,29 +684,28 @@ async def collect_stock_price_history(
                     on_progress(completed, progress_total,
                                 f"[停止] ユーザーによる停止（{completed}/{fetch_total}件処理済み）")
                 db.commit()
-                return {"cancelled": True, "inserted": inserted_total, "skipped": skipped_total}
-
+                yield None   # cancellation sentinel → driver returns early
+                return
             edinet_code, sec_code, name, rows = await coro
             completed += 1
             if on_progress:
                 prog = completed if backfill else skipped_total + completed
                 on_progress(prog, progress_total,
-                            f"[{prog}/{progress_total}] {name}({sec_code}) {len(rows)}件")
+                            f"[{prog}/{progress_total}] {name}({sec_code}) {len(rows) if rows else 0}件")
+            yield [
+                {"edinet_code": edinet_code, "trade_date": r["trade_date"],
+                 "close": r.get("close"), "volume": r.get("volume")}
+                for r in rows
+            ] if rows else []
 
-            try:
-                if rows:
-                    # close-only 2本立て（daily+weekly）へ集約保存。trim はループ末で一括。
-                    inserted_total += record_prices_batch(db, [
-                        {"edinet_code": edinet_code, "trade_date": r["trade_date"],
-                         "close": r.get("close"), "volume": r.get("volume")}
-                        for r in rows
-                    ], trim=False)
-            except Exception as e:
-                log.warning(f"株価履歴保存失敗 {sec_code}: {e}")
+    async with httpx.AsyncClient() as session:
+        cancelled, inserted_total = await _price_collection_driver(db, _stooq_batch_gen(session))
 
-    trim_daily(db)
+    if cancelled:
+        return {"cancelled": True, "inserted": inserted_total, "skipped": skipped_total}
     if on_progress:
-        on_progress(progress_total, progress_total, f"[完了] {total}社処理（スキップ:{skipped_total}社）、{inserted_total}件追加")
+        on_progress(progress_total, progress_total,
+                    f"[完了] {total}社処理（スキップ:{skipped_total}社）、{inserted_total}件追加")
     return {"cancelled": False, "inserted": inserted_total, "skipped": skipped_total, "companies": total}
 
 
@@ -736,11 +756,12 @@ async def collect_stock_price_history_jquants(
     J-Quants は JPX 公式データのため、stooq 由来レコードより優先して上書きする。
     1回のリクエストで全銘柄のデータが取得できるため stooq より大幅に高速。
     date_from/date_to を指定した場合はその範囲を使用し、省略時は days_back から計算する。
+    プロバイダー固有ロジック（J-Quants 日付単位フェッチ）を _jquants_batch_gen に分離し、
+    _price_collection_driver の共通フレームで DB 保存・trim を一元管理する。
     """
     api_key = os.environ.get("JQUANTS_API_KEY", "")
     if not api_key:
         raise ValueError("環境変数 JQUANTS_API_KEY が未設定です")
-
 
     today  = date.today()
     _from  = date_from if date_from is not None else (today - timedelta(days=days_back))
@@ -762,10 +783,9 @@ async def collect_stock_price_history_jquants(
         .all()
     }
 
-    total          = len(dates)
-    upserted_total = 0
+    total = len(dates)
 
-    async with httpx.AsyncClient() as session:
+    async def _jquants_batch_gen(session):
         completed = 0
         last_req_time: float = 0.0
         for date_str in dates:
@@ -773,7 +793,8 @@ async def collect_stock_price_history_jquants(
                 if on_progress:
                     on_progress(completed, total, f"[停止] ユーザーによる停止（{completed}/{total}日処理済み）")
                 db.commit()
-                return {"cancelled": True, "upserted": upserted_total}
+                yield None   # cancellation sentinel → driver returns early
+                return
 
             # リクエスト開始間隔を最低 JQUANTS_RATE_SLEEP 秒に保つ（高速な祝日レスポンス後も適用）
             if completed > 0:
@@ -789,12 +810,13 @@ async def collect_stock_price_history_jquants(
             if not quote_rows:
                 if on_progress:
                     on_progress(completed, total, f"[{completed}/{total}] {date_str} スキップ（非営業日）")
+                yield []
                 continue
 
             records = []
             for q in quote_rows:
-                code      = str(q.get("Code", ""))
-                sec_code  = code[:4]   # J-Quants は "13010"（5桁）→ 先頭4桁が証券コード
+                code        = str(q.get("Code", ""))
+                sec_code    = code[:4]   # J-Quants は "13010"（5桁）→ 先頭4桁が証券コード
                 edinet_code = sec_to_edinet.get(sec_code)
                 if not edinet_code:
                     continue
@@ -820,21 +842,19 @@ async def collect_stock_price_history_jquants(
             seen: set = set()
             deduped = []
             for rec in records:
-                key = rec["edinet_code"]
-                if key not in seen:
-                    seen.add(key)
+                if rec["edinet_code"] not in seen:
+                    seen.add(rec["edinet_code"])
                     deduped.append(rec)
-            records = deduped
-
-            if records:
-                # close-only 2本立て（daily+weekly）へ集約保存。trim はループ末で一括。
-                upserted_total += record_prices_batch(db, records, trim=False)
 
             if on_progress:
-                on_progress(completed, total,
-                            f"[{completed}/{total}] {date_str} {len(records)}件")
+                on_progress(completed, total, f"[{completed}/{total}] {date_str} {len(deduped)}件")
+            yield deduped
 
-    trim_daily(db)
+    async with httpx.AsyncClient() as session:
+        cancelled, upserted_total = await _price_collection_driver(db, _jquants_batch_gen(session))
+
+    if cancelled:
+        return {"cancelled": True, "upserted": upserted_total}
     if on_progress:
         on_progress(total, total, f"[完了] {total}日処理・{upserted_total}件追加/更新")
     return {"cancelled": False, "upserted": upserted_total, "days": total}
@@ -1093,6 +1113,8 @@ async def fill_recent_stock_price_gap_yahoo(
     Yahoo Finance から不足期間を補完して stock_price_history に追記する。
     差分収集（incremental）後のフォールバックとして使用。
     J-Quants データが存在する行は上書きしない（ON CONFLICT DO NOTHING）。
+    プロバイダー固有ロジック（Yahoo 逐次フェッチ）を _yahoo_batch_gen に分離し、
+    _price_collection_driver の共通フレームで DB 保存・trim を一元管理する。
     """
     from sqlalchemy import func as sqlfunc
 
@@ -1113,40 +1135,31 @@ async def fill_recent_stock_price_gap_yahoo(
     d_from = (latest_date + timedelta(days=1)).strftime("%Y%m%d")
     d_to   = date.today().strftime("%Y%m%d")
 
-    # sec_code → edinet_code マッピング
     companies = [
         (row.sec_code, row.edinet_code)
         for row in db.query(Company.sec_code, Company.edinet_code)
         .filter(Company.sec_code.isnot(None))
         .all()
     ]
-    total      = len(companies)
-    upserted   = 0
+    total = len(companies)
 
-    async with httpx.AsyncClient() as session:
+    async def _yahoo_batch_gen(session):
         for i, (sec_code, edinet_code) in enumerate(companies, 1):
-            ticker = f"{sec_code}.T"
-            rows = await fetch_yahoo_history(session, ticker, d_from, d_to)
-            if rows:
-                records = [
-                    {
-                        "edinet_code": edinet_code,
-                        "trade_date":  r["trade_date"],
-                        "close":  r["close"], "volume": r.get("volume"),
-                    }
-                    for r in rows if r["close"]
-                ]
-                if records:
-                    # ギャップ補完は最新日より後の新規日付が対象のため衝突は稀。
-                    # close-only 2本立てへ集約保存（trim はループ末で一括）。
-                    upserted += record_prices_batch(db, records, trim=False)
-
+            rows = await fetch_yahoo_history(session, f"{sec_code}.T", d_from, d_to)
+            # ギャップ補完は最新日より後の新規日付が対象のため衝突は稀。
+            records = [
+                {"edinet_code": edinet_code, "trade_date": r["trade_date"],
+                 "close": r["close"], "volume": r.get("volume")}
+                for r in rows if r["close"]
+            ] if rows else []
             if on_progress and i % 500 == 0:
-                on_progress(i, total, f"[Yahoo gap-fill {i}/{total}] {upserted}件追加")
-
+                on_progress(i, total, f"[Yahoo gap-fill {i}/{total}]")
+            yield records
             await asyncio.sleep(YAHOO_STOCK_RATE_SLEEP)
 
-    trim_daily(db)
+    async with httpx.AsyncClient() as session:
+        _, upserted = await _price_collection_driver(db, _yahoo_batch_gen(session))
+
     log.info(f"fill_recent_stock_price_gap_yahoo: {upserted}件を株価テーブルへ集約保存")
     return {"skipped": False, "upserted": upserted, "from": d_from, "to": d_to}
 
