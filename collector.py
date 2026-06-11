@@ -187,24 +187,41 @@ async def update_industry_from_jpx(client: httpx.AsyncClient, db,
             s = (raw_sec or '').strip()
             return s if s in industry_map else s.zfill(4)
 
-        companies = db.query(Company).all()
+        # 全件ロードを避けるため、業種ごとにバルク UPDATE する（クエリ数 = 業種数 ≈ 33）。
+        # industry_map のキーは4桁ゼロ埋め。DB に非ゼロ埋め形式で格納されている場合に対応するため、
+        # ゼロ埋め前後の両方を WHERE IN に含める。
+        from collections import defaultdict
+        from sqlalchemy import update as sa_update
+
+        by_industry: dict = defaultdict(list)
+        for sec, ind in industry_map.items():
+            by_industry[ind].append(sec)
+            stripped = sec.lstrip('0') or '0'
+            if stripped != sec:
+                by_industry[ind].append(stripped)
+
         updated_co = 0
-        for co in companies:
-            sec = resolve_sec(co.sec_code or '')
-            ind = industry_map.get(sec, '')
-            if ind and co.industry != ind:
-                co.industry = ind
-                updated_co += 1
+        for ind, codes in by_industry.items():
+            r = db.execute(
+                sa_update(Company)
+                .where(Company.sec_code.in_(codes))
+                .where(Company.industry != ind)
+                .values(industry=ind)
+                .execution_options(synchronize_session=False)
+            )
+            updated_co += r.rowcount
         db.commit()
 
-        records = db.query(FinancialRecord).all()
         updated_fr = 0
-        for fr in records:
-            sec = resolve_sec(fr.sec_code or '')
-            ind = industry_map.get(sec, '')
-            if ind and fr.industry != ind:
-                fr.industry = ind
-                updated_fr += 1
+        for ind, codes in by_industry.items():
+            r = db.execute(
+                sa_update(FinancialRecord)
+                .where(FinancialRecord.sec_code.in_(codes))
+                .where(FinancialRecord.industry != ind)
+                .values(industry=ind)
+                .execution_options(synchronize_session=False)
+            )
+            updated_fr += r.rowcount
         db.commit()
 
         log.info(f"業種更新完了: Company {updated_co}件, FinancialRecord {updated_fr}件")
