@@ -1,7 +1,7 @@
 """collector.py のユニットテスト（純粋関数・DB/ネットワーク不要）。
 
 対象: XBRL_MAP/TSE_INDUSTRY/CONSOLIDATED_KEYS 定数、XBRL パース（連結優先・前期スキップ・
-値整形）、派生指標計算 calc_derived、列検出、raw 変換、_bisect_left。
+値整形）、派生指標計算 calc_derived、列検出、raw 変換。
 """
 import asyncio
 import bisect
@@ -22,7 +22,6 @@ from collector import (
     CONSOLIDATED_KEYS,
     TSE_INDUSTRY,
     XBRL_MAP,
-    _bisect_left,
     _detect_xbrl_columns,
     _jquants_fetch_date,
     calc_derived,
@@ -494,13 +493,6 @@ class TestDfToRawRows:
 
     def test_missing_columns_returns_empty(self):
         assert df_to_raw_rows(pd.DataFrame({"foo": [1]})) == []
-
-
-class TestBisectLeft:
-    def test_matches_stdlib(self):
-        lst = ["a", "c", "e", "g"]
-        for v in ["a", "b", "c", "f", "g", "h", ""]:
-            assert _bisect_left(lst, v) == bisect.bisect_left(lst, v)
 
 
 # ── ネットワーク系（httpx MockTransport でレスポンスを擬似） ──────────────────
