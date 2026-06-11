@@ -206,119 +206,82 @@ class PricePredictorPlugin(AnalysisPlugin):
             },
         }
 
-    async def execute(self, params: dict, db: Any) -> dict:
-        # 財務特徴量（roe / equity_ratio / z_* / gap_ratio）は派生・回帰由来のため
-        # financial_metrics VIEW から読む（全年度分が必要なので最新行に絞らない）。
+    def _load_data(self, db) -> tuple:
+        """週次株価・財務メトリクス・企業マスタを DB から読み込む。"""
+        from collections import namedtuple as _nt
         from database import Company, FinancialMetric, StockPriceWeekly
-        from collections import namedtuple as _namedtuple
 
-        # params はパラメータ契約に従い coerce 済み。
-        horizon = params["horizon"]
-        use_price = params["use_price_features"]
-        fin_features = params["features"]
-        top_n = params["top_n"]
-
-        if not use_price and not fin_features:
-            raise ValueError("価格特徴量か財務特徴量のいずれかを有効にしてください。")
-
-        # ── データロード ────────────────────────────────────────────────────
-
-        # 全履歴の価格系列は weekly（close_last）から読む（daily は直近窓のみのため）。
-        # 価格特徴量は週次刻みで計算される（high/low は持たないため atr は close で退化）。
-        # 日次刻みでの再チューニングはモデル改善PRの範囲。
-        _PX = _namedtuple("_PX", "edinet_code trade_date close high low")
-        all_prices = (
+        _PX = _nt("_PX", "edinet_code trade_date close high low")
+        raw = (
             db.query(StockPriceWeekly.edinet_code, StockPriceWeekly.trade_date,
                      StockPriceWeekly.close_last)
             .order_by(StockPriceWeekly.edinet_code, StockPriceWeekly.trade_date)
             .all()
         )
-        if not all_prices:
+        if not raw:
             raise ValueError(
                 "株価履歴データがありません。先に「株価履歴収集」タブで収集を実行してください。"
             )
-
         prices_by_co: dict[str, list] = defaultdict(list)
-        for ec, td, cl in all_prices:
+        for ec, td, cl in raw:
             prices_by_co[ec].append(_PX(ec, td, cl, None, None))
 
-        fin_recs_all = (
-            db.query(FinancialMetric)
-            .order_by(FinancialMetric.edinet_code, FinancialMetric.period_end)
-            .all()
-        )
         fin_by_co: dict[str, list] = defaultdict(list)
-        for r in fin_recs_all:
+        for r in (db.query(FinancialMetric)
+                  .order_by(FinancialMetric.edinet_code, FinancialMetric.period_end)
+                  .all()):
             fin_by_co[r.edinet_code].append(r)
 
         companies = {c.edinet_code: c for c in db.query(Company).all()}
+        return prices_by_co, fin_by_co, companies
 
-        # ── 月次スナップショットの学習データ構築 ──────────────────────────
-
-        # 価格特徴量名リスト
+    def _build_snapshots(self, prices_by_co: dict, fin_by_co: dict, companies: dict,
+                         use_price: bool, fin_features: list,
+                         horizon: int) -> tuple:
+        """月次スナップショットの学習データと現在スナップショットを構築する。"""
         price_feat_names = ["ma20_dev", "vol60", "rsi14", "atr_ratio"] if use_price else []
         all_feat_names = price_feat_names + fin_features
-
-        # {"YYYY-MM": [(feat_row, log_ret), ...]}
         samples_by_ym: dict[str, list] = defaultdict(list)
-
-        # 現在スナップショット: {edinet_code: (feat_row, company_info)}
         current_snaps: dict[str, tuple] = {}
-
-        min_rows = 60 + horizon  # 価格特徴量計算に必要な最低行数
+        min_rows = 60 + horizon
 
         for edinet_code, price_rows in prices_by_co.items():
             n = len(price_rows)
             if n < min_rows:
                 continue
-
             dates  = [r.trade_date for r in price_rows]
-            closes = [r.close      for r in price_rows]
-            highs  = [r.high or r.close  for r in price_rows]
-            lows   = [r.low  or r.close  for r in price_rows]
-
+            closes = [r.close             for r in price_rows]
+            highs  = [r.high or r.close   for r in price_rows]
+            lows   = [r.low  or r.close   for r in price_rows]
             fin_recs = fin_by_co.get(edinet_code, [])
             if not fin_recs:
                 continue
 
-            # 月末インデックスを収集: 月が変わる直前の行 = 当月最終営業日
-            month_end_indices: list[int] = []
-            for i in range(n - 1):
-                if dates[i][:7] != dates[i + 1][:7]:
-                    month_end_indices.append(i)
-            month_end_indices.append(n - 1)  # 末尾も含める
+            month_end_indices: list[int] = [
+                i for i in range(n - 1) if dates[i][:7] != dates[i + 1][:7]
+            ] + [n - 1]
 
             for snap_idx in month_end_indices:
-                snap_date = dates[snap_idx]
-                snap_ym = snap_date[:7]
-
-                # 価格特徴量の計算に必要な最低行数チェック
                 if snap_idx < 60:
                     continue
-
-                # 当月を「現在」として扱う場合（最新月 = スコアリング用）
+                snap_date = dates[snap_idx]
+                snap_ym   = snap_date[:7]
                 is_current = (snap_idx == n - 1)
-
-                # 学習データとして使えるか（horizon 日後の終値が必要）
                 has_future = (snap_idx + horizon < n)
 
-                # 価格特徴量
                 if use_price:
                     pf = _compute_price_features(closes, highs, lows, snap_idx)
                     if pf is None:
                         continue
                     price_feat_row = [pf["ma20_dev"], pf["vol60"], pf["rsi14"], pf["atr_ratio"]]
                 else:
-                    price_feat_row = []
-                    pf = {}
+                    price_feat_row, pf = [], {}
 
-                # 財務特徴量
                 fin_rec = _find_applicable_fin(fin_recs, snap_date)
                 if fin_rec is None:
                     continue
 
-                fin_feat_row = []
-                ok = True
+                fin_feat_row, ok = [], True
                 for fname in fin_features:
                     val = getattr(fin_rec, fname, None)
                     if val is None:
@@ -330,33 +293,107 @@ class PricePredictorPlugin(AnalysisPlugin):
 
                 feat_row = price_feat_row + fin_feat_row
 
-                # 学習サンプル追加（ターゲットが取得できる場合のみ）
                 if has_future:
-                    c_snap = closes[snap_idx]
-                    c_fut  = closes[snap_idx + horizon]
+                    c_snap, c_fut = closes[snap_idx], closes[snap_idx + horizon]
                     if c_snap > 0 and c_fut > 0:
-                        log_ret = math.log(c_fut / c_snap)
-                        samples_by_ym[snap_ym].append((feat_row, log_ret))
+                        samples_by_ym[snap_ym].append((feat_row, math.log(c_fut / c_snap)))
 
-                # 現在スナップショット（最新月末）
                 if is_current:
                     comp = companies.get(edinet_code)
                     current_snaps[edinet_code] = (
                         feat_row,
                         {
-                            "sec_code":     fin_rec.sec_code or (comp.sec_code if comp else ""),
-                            "company_name": fin_rec.company_name or (comp.name if comp else edinet_code),
-                            "industry":     fin_rec.industry or (comp.industry if comp else ""),
+                            "sec_code":       fin_rec.sec_code or (comp.sec_code if comp else ""),
+                            "company_name":   fin_rec.company_name or (comp.name if comp else edinet_code),
+                            "industry":       fin_rec.industry or (comp.industry if comp else ""),
                             "price_features": pf,
-                            "fin_features": {k: getattr(fin_rec, k, None) for k in fin_features},
+                            "fin_features":   {k: getattr(fin_rec, k, None) for k in fin_features},
                         },
                     )
 
-        # ── サンプル数チェック ──────────────────────────────────────────────
+        return samples_by_ym, current_snaps, all_feat_names
+
+    def _fit_final_model(self, samples_by_ym: dict, n_feat: int,
+                         all_feat_names: list) -> tuple:
+        """全サンプルで OLS 最終モデルを学習し、係数・正規化パラメータを返す。"""
+        all_samples = [s for ym_s in samples_by_ym.values() for s in ym_s]
+        X_raw = [s[0] for s in all_samples]
+        y_raw = [s[1] for s in all_samples]
+
+        final_win_params:  list[tuple] = []
+        final_norm_params: list[tuple] = []
+        X_norm = [[1.0] + [0.0] * n_feat for _ in range(len(X_raw))]
+        for fi in range(n_feat):
+            col_w, w_lo, w_hi = winsorize([row[fi] for row in X_raw])
+            final_win_params.append((w_lo, w_hi))
+            normed, p1, p2 = normalize(col_w, "zscore")
+            final_norm_params.append((p1, p2))
+            for ri, v in enumerate(normed):
+                X_norm[ri][fi + 1] = v
+
+        y_norm, y_mu, y_sd = normalize(y_raw, "zscore")
+        result = ols(X_norm, y_norm)
+        if not result:
+            raise ValueError("OLS の計算に失敗しました。特徴量に多重共線性がある可能性があります。")
+
+        beta = result["beta"]
+        feature_weights = {
+            fname: {
+                "weight": round(beta[i + 1], 6),
+                "label":  PRICE_FEATURE_LABELS.get(fname) or FIN_FEATURE_LABELS.get(fname, fname),
+            }
+            for i, fname in enumerate(all_feat_names)
+        }
+        return beta, feature_weights, final_win_params, final_norm_params, y_mu, y_sd
+
+    def _score_companies(self, current_snaps: dict, n_feat: int,
+                         beta: list, final_win_params: list, final_norm_params: list,
+                         y_mu: float, y_sd: float,
+                         fin_features: list, top_n: int) -> list:
+        """現在スナップショットをスコアリングし上位 top_n を返す。"""
+        scored: list[dict] = []
+        for edinet_code, (feat_row, info) in current_snaps.items():
+            if len(feat_row) != n_feat:
+                continue
+            x_norm = [1.0]
+            for fi, v in enumerate(feat_row):
+                w_lo, w_hi = final_win_params[fi]
+                v_w = max(w_lo, min(w_hi, v))
+                x_norm.append(normalize_transform(v_w, *final_norm_params[fi]))
+            pred_log_ret = sum(x_norm[j] * beta[j] for j in range(len(beta))) * y_sd + y_mu
+            row: dict = {
+                "sec_code":        info["sec_code"],
+                "company_name":    info["company_name"],
+                "industry":        info["industry"],
+                "pred_return_pct": round(pred_log_ret * 100, 2),
+            }
+            for k, v in info["price_features"].items():
+                row[k] = round(v, 4) if v is not None else None
+            for k, v in info["fin_features"].items():
+                row[k] = round(v, 2) if v is not None else None
+            scored.append(row)
+
+        scored.sort(key=lambda r: r["pred_return_pct"] or 0, reverse=True)
+        for rank, row in enumerate(scored[:top_n], 1):
+            row["rank"] = rank
+        return scored[:top_n]
+
+    async def execute(self, params: dict, db: Any) -> dict:
+        horizon      = params["horizon"]
+        use_price    = params["use_price_features"]
+        fin_features = params["features"]
+        top_n        = params["top_n"]
+
+        if not use_price and not fin_features:
+            raise ValueError("価格特徴量か財務特徴量のいずれかを有効にしてください。")
+
+        prices_by_co, fin_by_co, companies = self._load_data(db)
+        samples_by_ym, current_snaps, all_feat_names = self._build_snapshots(
+            prices_by_co, fin_by_co, companies, use_price, fin_features, horizon
+        )
 
         total_samples = sum(len(v) for v in samples_by_ym.values())
         n_feat = len(all_feat_names)
-
         if total_samples < 10:
             raise ValueError(
                 f"学習サンプルが不足しています（{total_samples} 件）。"
@@ -368,96 +405,23 @@ class PricePredictorPlugin(AnalysisPlugin):
                 "特徴量を減らすか、データを増やしてください。"
             )
 
-        # ── 月次ウォークフォワードCV ────────────────────────────────────────
-
         cv_folds = walk_forward_cv_monthly(
-            dict(samples_by_ym),
-            all_feat_names,
-            min_train_months=6,   # データが少ない段階では 6ヶ月に緩和（仕様は18ヶ月）
-            step_months=3,
+            dict(samples_by_ym), all_feat_names, min_train_months=6, step_months=3
         )
         cv_metrics = {
-            "folds":    cv_folds,
-            "mean_r2":  round(statistics.mean(f["r2"] for f in cv_folds), 4) if cv_folds else None,
+            "folds":     cv_folds,
+            "mean_r2":   round(statistics.mean(f["r2"] for f in cv_folds), 4) if cv_folds else None,
             "mean_rmse": round(statistics.mean(f["rmse"] for f in cv_folds), 4) if cv_folds else None,
-            "n_folds":  len(cv_folds),
-            "cv_note":  "月次ウォークフォワードCV（ルックアヘッドバイアスなし）",
+            "n_folds":   len(cv_folds),
+            "cv_note":   "月次ウォークフォワードCV（ルックアヘッドバイアスなし）",
         }
 
-        # ── 全サンプルで最終 OLS 学習 ──────────────────────────────────────
-
-        all_samples = [(feat, ret) for ym_samples in samples_by_ym.values() for feat, ret in ym_samples]
-        X_raw = [s[0] for s in all_samples]
-        y_raw = [s[1] for s in all_samples]
-
-        # winsorize → zscore 正規化
-        final_win_params:  list[tuple] = []
-        final_norm_params: list[tuple] = []
-        X_norm = [[1.0] + [0.0] * n_feat for _ in range(len(X_raw))]
-        for fi in range(n_feat):
-            col = [row[fi] for row in X_raw]
-            col_w, w_lo, w_hi = winsorize(col)
-            final_win_params.append((w_lo, w_hi))
-            normed, p1, p2 = normalize(col_w, "zscore")
-            final_norm_params.append((p1, p2))
-            for ri, v in enumerate(normed):
-                X_norm[ri][fi + 1] = v
-
-        y_norm, y_mu, y_sd = normalize(y_raw, "zscore")
-        final_result = ols(X_norm, y_norm)
-        if not final_result:
-            raise ValueError("OLS の計算に失敗しました。特徴量に多重共線性がある可能性があります。")
-
-        beta = final_result["beta"]  # [intercept, b1, b2, ...]
-
-        # 特徴量の重みを出力
-        feature_weights: dict[str, dict] = {}
-        for i, fname in enumerate(all_feat_names):
-            label = PRICE_FEATURE_LABELS.get(fname) or FIN_FEATURE_LABELS.get(fname, fname)
-            feature_weights[fname] = {
-                "weight": round(beta[i + 1], 6),
-                "label":  label,
-            }
-
-        # ── 現在スナップショットをスコアリング ──────────────────────────────
-
-        scored: list[dict] = []
-        for edinet_code, (feat_row, info) in current_snaps.items():
-            if len(feat_row) != n_feat:
-                continue
-            # winsorize → zscore → OLS 予測
-            x_norm = [1.0]
-            for fi, v in enumerate(feat_row):
-                w_lo, w_hi = final_win_params[fi]
-                v_w = max(w_lo, min(w_hi, v))
-                p1, p2 = final_norm_params[fi]
-                x_norm.append(normalize_transform(v_w, p1, p2))
-
-            pred_norm = sum(x_norm[j] * beta[j] for j in range(len(beta)))
-            pred_log_ret = pred_norm * y_sd + y_mu
-            pred_return_pct = round(pred_log_ret * 100, 2)
-
-            row = {
-                "sec_code":       info["sec_code"],
-                "company_name":   info["company_name"],
-                "industry":       info["industry"],
-                "pred_return_pct": pred_return_pct,
-            }
-            # 価格特徴量を追加
-            for k, v in info["price_features"].items():
-                row[k] = round(v, 4) if v is not None else None
-            # 財務特徴量を追加
-            for k, v in info["fin_features"].items():
-                row[k] = round(v, 2) if v is not None else None
-
-            scored.append(row)
-
-        # pred_return_pct 降順でランキング
-        scored.sort(key=lambda r: r["pred_return_pct"] or 0, reverse=True)
-        for rank, row in enumerate(scored[:top_n], 1):
-            row["rank"] = rank
-
-        results = scored[:top_n]
+        beta, feature_weights, win_p, norm_p, y_mu, y_sd = self._fit_final_model(
+            samples_by_ym, n_feat, all_feat_names
+        )
+        results = self._score_companies(
+            current_snaps, n_feat, beta, win_p, norm_p, y_mu, y_sd, fin_features, top_n
+        )
 
         return {
             "cv_metrics":      cv_metrics,
