@@ -12,26 +12,14 @@
 > 棚卸し時点で **未処理 PR / Open Issue は 0 件・依存は最新 pin・本番コードに TODO/FIXME なし**＝負債は局所的。
 > 旧 `docs/archive/REFACTORING.md` の未着手項目（4-4 / 4-5 / 4-6 / 4-7）を実コード確認のうえ本書へ再掲・更新した（4-2 `_now_jst` 共通化は定義消滅により**解決済み**）。
 
-### T1-1. XBRL parse ロジックの重複統合 【高】（旧 REFACTORING 4-4）
-- **該当**: `collector.py:324 parse_raw_rows` と `collector.py:365 parse_xbrl_csv`
-- **問題**: `Prior` コンテキストスキップ・`OperatingRevenue1` 非連結フィルタ・`is_consol`/`has_member`/`priority` 計算・float 変換＋例外無視の4ブロックが2関数に逐語的に重複。`parse_xbrl_csv` 固有は列検出・capex ラベル照合・capex 符号統一の3点のみ。
-- **改善案**: 中核を `_apply_priority_row(row, result, priority)` ヘルパへ抽出し両関数から呼ぶ。
-- **検証**: リファクタ前後で `financial_records` 件数・既存 `tests/test_collector.py` 全通過を確認（デグレ検出）。
-- **見積**: 中。
+### T1-1. XBRL parse ロジックの重複統合 【高】（完了）
+- `_apply_row` ヘルパを抽出し `parse_raw_rows` / `parse_xbrl_csv` の両関数から呼ぶ形に統合（2026-06-10）。
 
-### T1-2. 収集バックグラウンドジョブの共通化 【高】
-- **該当**: `api.py:287 _run_collection_bg` と `api.py:337 _run_smart_collection_bg`
-- **問題**: `on_progress`/`cancel_check` クロージャ・`CollectionLog` の done/error 更新・`finally` のフラグリセットが約60行逐語重複（実コード確認済み）。片方のバグ修正をもう片方に反映し忘れるリスク。
-- **改善案**: `_run_bg_job(coro_factory, log_id)` ラッパに共通枠を切り出し、差分（smart 判定ロジック）だけを引数注入。
-- **検証**: 既存 `tests/test_collection_jobs.py` の通過＋smart 判定3分岐の手動確認。
-- **見積**: 中。
+### T1-2. 収集バックグラウンドジョブの共通化 【高】（完了）
+- `_run_bg_job(coro_factory, log_id)` ラッパを抽出し `_run_collection_bg` / `_run_smart_collection_bg` を薄いラッパに整理（2026-06-10）。-37行。
 
-### T1-3. `update_market_data_from_history` の N+1 クエリ解消 【高・性能】
-- **該当**: `collector.py:864-878`（`point_in_time=False`）／同型が `collector.py:1400-1403`（stooq 版）にも
-- **問題**: `latest_price_rows`（最大約4,000社）をループしながら各社の最新 `FinancialRecord` を個別 `SELECT ... ORDER BY year DESC LIMIT 1`。最大4,000往復。GitHub Actions 差分収集の最頻パスで、Supabase `pool_size=3` 下では特に効く。
-- **改善案**: `ROW_NUMBER() OVER (PARTITION BY edinet_code ORDER BY year DESC)` のサブクエリで最新行を1クエリ一括取得。
-- **検証**: 更新件数が現行と一致することを小規模 DB で確認。
-- **見積**: 中。
+### T1-3. `update_market_data_from_history` の N+1 クエリ解消 【高・性能】（完了）
+- `_fetch_latest_fin_by_ec` ヘルパを追加（ROW_NUMBER窓関数で1クエリ一括取得）し `update_market_data` / `update_market_data_from_history` から呼ぶ（2026-06-10）。
 
 ### T1-4. `point_in_time=True` の全件メモリロード回避 【中・性能】
 - **該当**: `collector.py:886-903`
@@ -40,12 +28,8 @@
 - **見積**: 中〜大（アルゴリズム移植）。
 
 
-### T1-6. JS 共通ユーティリティの集約 【中】
-- **該当**: `static/js/{analysis,collection,dashboard,company,db}.js`
-- **問題**: `esc()` / `_getCookie()` / `apiFetch()` / `initAuth()` / `logout()` が各ページ JS に個別コピー。認証フローや CSRF トークン取得の修正が多点変更になる。
-- **改善案**: `static/js/common.js` に集約し各ページで先読み（CSP・読み込み順に注意）。
-- **検証**: 全4画面（dashboard/collection/analysis/company）でログイン・API 呼び出しが従来どおり動作。
-- **見積**: 中。
+### T1-6. JS 共通ユーティリティの集約 【中】（完了）
+- `static/js/common.js` に `esc` / `_getCookie` / `apiFetch` / `initAuth` / `logout` を集約し、5ページの JS / HTML を更新（2026-06-10）。
 
 ### T1-7. 巨大ファイルの責務分割 【低】（旧 REFACTORING 4-5）
 - **該当**: `collector.py`（1,933行）/ `api.py`（1,580行）。特に `run_full_collection`（`collector.py:1497`・約180行・6責務混在）、`collect_stock_price_history`（`collector.py:536`・約140行・4状態分岐）。
