@@ -1506,6 +1506,154 @@ async def reparse_from_raw(year: Optional[int] = None,
 
 # ── フル収集 ──────────────────────────────────────────────────────────────
 
+async def _phase_upsert_master(db, client, on_progress, max_companies) -> tuple:
+    """Phase 1: EDINET から企業マスタを取得し DB に一括 Upsert する。
+    (company_info, known_edinet, edinet_set) を返す。
+    """
+    companies_df = await fetch_edinet_code_list(client)
+    master_total = len(companies_df)
+    log.info(f"企業マスタをDBに保存中... ({master_total}社)")
+    if on_progress:
+        on_progress(0, master_total, f"[企業マスタ保存] {master_total}社をDBに登録中...")
+    # 3978 社の dirty を 1 トランザクションに溜めると Supabase が read-only
+    # に切り替わるため、BATCH 件ごとに commit + expire_all してトランザクションを短く保つ
+    MASTER_BATCH = 200
+    for i, (_, row) in enumerate(companies_df.iterrows()):
+        upsert_company(db, {
+            "edinet_code":  row["edinet_code"],
+            "sec_code":     row.get("sec_code", ""),
+            "name":         row["company_name"],
+            "industry":     row.get("industry", ""),
+            "fiscal_month": int(row["fiscal_month"]) if str(row.get("fiscal_month", "")).isdigit() else None,
+        })
+        if (i + 1) % MASTER_BATCH == 0:
+            db.commit()
+            db.expire_all()
+        if on_progress and (i + 1) % 500 == 0:
+            on_progress(i + 1, master_total, f"[企業マスタ保存] {i+1}/{master_total}社完了")
+    db.commit()
+    if on_progress:
+        on_progress(master_total, master_total, f"[企業マスタ保存完了] {master_total}社")
+
+    company_info = {
+        row["edinet_code"]: {
+            "company_name": row["company_name"],
+            "industry":     row.get("industry", ""),
+        }
+        for _, row in companies_df.iterrows()
+    }
+    # 全件収集時は formCode=030000+secCode フィルタ（fetch_doc_list内）に委任し
+    # 不完全なマスタリストで絞り込まない。max_companies 指定時のみ絞り込む。
+    edinet_set = set(companies_df["edinet_code"].tolist()) if max_companies and not companies_df.empty else None
+    known_edinet = set(company_info.keys())
+    return company_info, known_edinet, edinet_set
+
+
+def _phase_build_skip_ids(db, skip_existing: bool, skip_if_raw_exists: bool) -> set:
+    """Phase 2: 差分スキップ対象の doc_id セットを DB から一括取得する。"""
+    if skip_existing:
+        rows = db.query(FinancialRecord.doc_id).filter(FinancialRecord.doc_id.isnot(None)).all()
+        ids = {r[0] for r in rows}
+        log.info(f"差分収集モード: {len(ids)}件の収集済みdoc_idをスキップ対象として読み込み")
+        return ids
+    if skip_if_raw_exists:
+        rows = db.query(XbrlRawDocument.doc_id).all()
+        ids = {r[0] for r in rows}
+        log.info(f"raw_skip モード: xbrl_raw_documents に保存済みの {len(ids)} 件をスキップ")
+        return ids
+    return set()
+
+
+async def _phase_process_docs(db, client, all_docs: list,
+                               company_info: dict, known_edinet: set,
+                               existing_doc_ids: set, skip_existing: bool,
+                               on_progress, cancel_check) -> tuple:
+    """Phase 4: XBRL 取得→パース→DB 保存のメインループ。(skipped, cancelled) を返す。"""
+    total   = len(all_docs)
+    skipped = 0
+    for i, doc in enumerate(all_docs):
+        if cancel_check and cancel_check():
+            if on_progress:
+                on_progress(i, total, f"[停止] ユーザーによる停止（{i}/{total}件処理済み）")
+            db.commit()
+            log.info(f"収集をキャンセルしました（{i}/{total}件処理済み）")
+            return skipped, True
+
+        doc_id      = doc["docID"]
+        edinet_code = doc["edinetCode"]
+        sec_code    = (doc.get("secCode") or "")[:4]
+        period_end  = doc.get("periodEnd") or ""
+        filer_name  = doc.get("filerName") or company_info.get(edinet_code, {}).get("company_name", "")
+        year        = int(period_end[:4]) if period_end else 0
+
+        if skip_existing and doc_id in existing_doc_ids:
+            skipped += 1
+            if on_progress:
+                on_progress(i + 1, total,
+                            f"[{i+1}/{total}] スキップ（収集済み）: {filer_name} {period_end}")
+            continue
+
+        if on_progress:
+            on_progress(i + 1, total, f"[{i+1}/{total}] {filer_name}({sec_code}) {period_end}")
+        log.info(f"[{i+1}/{total}] {filer_name}({sec_code}) {period_end}")
+
+        try:
+            if edinet_code not in known_edinet:
+                upsert_company(db, {
+                    "edinet_code": edinet_code, "sec_code": sec_code,
+                    "name": filer_name, "industry": "",
+                })
+                db.flush()
+                known_edinet.add(edinet_code)
+
+            xbrl_df = await fetch_xbrl_csv(client, doc_id)
+            await asyncio.sleep(RATE_SLEEP)
+
+            # XBRL 全行を raw テーブルに保存（新指標追加時の再解析用）
+            # xbrl_raw_documents への書き込みは即コミットしてロックを解放する
+            # （financial_records との間でデッドロックが起きるのを防ぐため）
+            if not SKIP_XBRL_RAW and xbrl_df is not None and not xbrl_df.empty:
+                raw_rows = df_to_raw_rows(xbrl_df)
+                if raw_rows:
+                    upsert_xbrl_raw(db, doc_id, edinet_code, period_end, raw_rows)
+                    db.commit()
+
+            raw = parse_xbrl_csv(xbrl_df, edinet_code, period_end)
+            if not any(raw.get(cat) for cat in ("bs", "pl", "cf")):
+                log.warning(f"財務データなし（スキップ）: {filer_name} {doc_id}")
+                continue
+            rec = calc_derived(raw)
+
+            xbrl_industry   = rec.get("meta", {}).get("industry_name", "")
+            master_industry = company_info.get(edinet_code, {}).get("industry", "")
+            rec.update({
+                "edinet_code":  edinet_code,
+                "sec_code":     sec_code,
+                "company_name": filer_name,
+                "industry":     xbrl_industry or master_industry,
+                "year":         year,
+                "period_end":   period_end,
+                "doc_id":       doc_id,
+                "source":       "EDINET_XBRL",
+            })
+            upsert_financial(db, rec)
+
+            if (i + 1) % 50 == 0:
+                db.commit()
+                log.info("DB commit (50件)")
+            if (i + 1) % 100 == 0:
+                await asyncio.sleep(BATCH_PAUSE)
+
+        except Exception as e:
+            log.error(f"書類処理エラー（スキップ）: {doc_id} {filer_name} — {e}", exc_info=True)
+            try:
+                db.rollback()
+            except Exception:
+                pass
+
+    return skipped, False
+
+
 async def run_full_collection(db,
                               years_back: int = 5,
                               max_companies: Optional[int] = None,
@@ -1514,171 +1662,37 @@ async def run_full_collection(db,
                               skip_if_raw_exists: bool = False,
                               cancel_check: Optional[Callable] = None):
     async with httpx.AsyncClient() as client:
-        companies_df = await fetch_edinet_code_list(client)
+        # Phase 1: 企業マスタ Upsert
+        company_info, known_edinet, edinet_set = await _phase_upsert_master(
+            db, client, on_progress, max_companies
+        )
 
-        # 企業マスタは全件DBに保存（max_companiesは収集書類数の上限であり企業マスタは絞らない）
-        df_master = companies_df
+        # Phase 2: 差分スキップ集合の構築
+        existing_doc_ids = _phase_build_skip_ids(db, skip_existing, skip_if_raw_exists)
 
-        master_total = len(df_master)
-        log.info(f"企業マスタをDBに保存中... ({master_total}社)")
-        if on_progress:
-            on_progress(0, master_total, f"[企業マスタ保存] {master_total}社をDBに登録中...")
-        # 3978 社の dirty を 1 トランザクションに溜めると Supabase が read-only
-        # に切り替わるため、BATCH 件ごとに commit + expire_all してトランザクションを短く保つ
-        MASTER_BATCH = 200
-        for i, (_, row) in enumerate(df_master.iterrows()):
-            upsert_company(db, {
-                "edinet_code":  row["edinet_code"],
-                "sec_code":     row.get("sec_code", ""),
-                "name":         row["company_name"],
-                "industry":     row.get("industry", ""),
-                "fiscal_month": int(row["fiscal_month"]) if str(row.get("fiscal_month", "")).isdigit() else None,
-            })
-            if (i + 1) % MASTER_BATCH == 0:
-                db.commit()
-                db.expire_all()
-            if on_progress and (i + 1) % 500 == 0:
-                on_progress(i + 1, master_total,
-                            f"[企業マスタ保存] {i+1}/{master_total}社完了")
-        db.commit()
-        if on_progress:
-            on_progress(master_total, master_total,
-                        f"[企業マスタ保存完了] {master_total}社")
-
-        # 差分収集モード: 収集済みのdoc_idをDBから一括取得してセットに保持
-        existing_doc_ids: set = set()
-        if skip_existing:
-            rows = db.query(FinancialRecord.doc_id).filter(FinancialRecord.doc_id.isnot(None)).all()
-            existing_doc_ids = {r[0] for r in rows}
-            log.info(f"差分収集モード: {len(existing_doc_ids)}件の収集済みdoc_idをスキップ対象として読み込み")
-        elif skip_if_raw_exists:
-            rows = db.query(XbrlRawDocument.doc_id).all()
-            existing_doc_ids = {r[0] for r in rows}
-            log.info(f"raw_skip モード: xbrl_raw_documents に保存済みの {len(existing_doc_ids)} 件をスキップ")
-
-        # company_name と industry を参照できるよう辞書化（全CSVデータを保持）
-        company_info = {
-            row["edinet_code"]: {
-                "company_name": row["company_name"],
-                "industry":     row.get("industry", ""),
-            }
-            for _, row in companies_df.iterrows()
-        }
-        # 全件収集時は formCode=030000+secCode フィルタ（fetch_doc_list内）に委任し
-        # 不完全なマスタリストで絞り込まない。max_companies 指定時のみ絞り込む。
-        edinet_set = None
-        if max_companies and not df_master.empty:
-            edinet_set = set(df_master["edinet_code"].tolist())
-        known_edinet = set(company_info.keys())
-
+        # Phase 3: 書類一覧スキャン
         today = date.today()
         start = date(today.year - years_back, 1, 1)
-        end   = today - timedelta(days=1)   # 昨日まで（最新の報告書を含む）
-
+        end   = today - timedelta(days=1)
         log.info(f"書類一覧収集: {start} ~ {end}")
         if on_progress:
             on_progress(0, 1, f"[書類スキャン開始] {start} ～ {end}（{(end - start).days + 1}日分）")
         all_docs = await collect_doc_ids_for_period(
-            client, start, end, edinet_set, max_companies=max_companies,
-            on_progress=on_progress
+            client, start, end, edinet_set, max_companies=max_companies, on_progress=on_progress
         )
-        total = len(all_docs)
-        log.info(f"対象書類数: {total}")
+        log.info(f"対象書類数: {len(all_docs)}")
 
-        skipped = 0
-        for i, doc in enumerate(all_docs):
-            if cancel_check and cancel_check():
-                if on_progress:
-                    on_progress(i, total, f"[停止] ユーザーによる停止（{i}/{total}件処理済み）")
-                db.commit()
-                log.info(f"収集をキャンセルしました（{i}/{total}件処理済み）")
-                return True
-
-            doc_id      = doc["docID"]
-            edinet_code = doc["edinetCode"]
-            sec_code    = (doc.get("secCode") or "")[:4]
-            period_end  = doc.get("periodEnd") or ""
-            filer_name  = doc.get("filerName") or company_info.get(edinet_code, {}).get("company_name", "")
-            year        = int(period_end[:4]) if period_end else 0
-
-            # 差分収集: 収集済みの書類はスキップ
-            if skip_existing and doc_id in existing_doc_ids:
-                skipped += 1
-                if on_progress:
-                    on_progress(i + 1, total,
-                                f"[{i+1}/{total}] スキップ（収集済み）: {filer_name} {period_end}")
-                continue
-
-            if on_progress:
-                on_progress(i + 1, total,
-                            f"[{i+1}/{total}] {filer_name}({sec_code}) {period_end}")
-
-            log.info(f"[{i+1}/{total}] {filer_name}({sec_code}) {period_end}")
-
-            try:
-                # 書類から発見した未登録企業を都度upsert（FK制約エラー防止）
-                if edinet_code not in known_edinet:
-                    upsert_company(db, {
-                        "edinet_code":  edinet_code,
-                        "sec_code":     sec_code,
-                        "name":         filer_name,
-                        "industry":     "",
-                    })
-                    db.flush()
-                    known_edinet.add(edinet_code)
-
-                xbrl_df = await fetch_xbrl_csv(client, doc_id)
-                await asyncio.sleep(RATE_SLEEP)
-
-                # XBRL 全行を raw テーブルに保存（新指標追加時の再解析用）
-                # xbrl_raw_documents への書き込みは即コミットしてロックを解放する
-                # （financial_records との間でデッドロックが起きるのを防ぐため）
-                if not SKIP_XBRL_RAW and xbrl_df is not None and not xbrl_df.empty:
-                    raw_rows = df_to_raw_rows(xbrl_df)
-                    if raw_rows:
-                        upsert_xbrl_raw(db, doc_id, edinet_code, period_end, raw_rows)
-                        db.commit()
-
-                raw = parse_xbrl_csv(xbrl_df, edinet_code, period_end)
-                if not any(raw.get(cat) for cat in ("bs", "pl", "cf")):
-                    log.warning(f"財務データなし（スキップ）: {filer_name} {doc_id}")
-                    continue
-                rec = calc_derived(raw)
-
-                # XBRLから業種が取れた場合は優先、なければマスタの業種
-                xbrl_industry = rec.get("meta", {}).get("industry_name", "")
-                master_industry = company_info.get(edinet_code, {}).get("industry", "")
-                industry = xbrl_industry or master_industry
-
-                rec.update({
-                    "edinet_code":  edinet_code,
-                    "sec_code":     sec_code,
-                    "company_name": filer_name,
-                    "industry":     industry,
-                    "year":         year,
-                    "period_end":   period_end,
-                    "doc_id":       doc_id,
-                    "source":       "EDINET_XBRL",
-                })
-                upsert_financial(db, rec)
-
-                if (i + 1) % 50 == 0:
-                    db.commit()
-                    log.info("DB commit (50件)")
-                if (i + 1) % 100 == 0:
-                    await asyncio.sleep(BATCH_PAUSE)
-
-            except Exception as e:
-                log.error(f"書類処理エラー（スキップ）: {doc_id} {filer_name} — {e}", exc_info=True)
-                try:
-                    db.rollback()
-                except Exception:
-                    pass
-
+        # Phase 4: XBRL 取得 / パース / DB 保存
+        skipped, cancelled = await _phase_process_docs(
+            db, client, all_docs, company_info, known_edinet,
+            existing_doc_ids, skip_existing, on_progress, cancel_check
+        )
+        if cancelled:
+            return True
         db.commit()
-        log.info(f"全収集完了（スキップ: {skipped}件 / 取得: {total - skipped}件）")
+        log.info(f"全収集完了（スキップ: {skipped}件 / 取得: {len(all_docs) - skipped}件）")
 
-        # XBRL から業種が取れないため、JPX上場会社一覧から業種を補完する
+        # Phase 5: 業種補完（JPX 上場会社一覧から XBRL で取れない業種を補完）
         await update_industry_from_jpx(client, db, on_progress=on_progress)
     return False
 
