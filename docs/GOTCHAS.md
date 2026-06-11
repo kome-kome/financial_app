@@ -25,6 +25,7 @@ SSEエンドポイント: 収集=`/api/collect/stream`、市場データ=`/api/c
 - **正規ソース**: JPX上場会社一覧Excel（`JPX_EXCEL_URL` = `data_j.xls`、33業種コード列=col4/col5）
 - `update_industry_from_jpx(client, db)` が `run_full_collection` の末尾で自動実行される。
 - 証券コードは4桁数字（`1301`）とアルファベット混在（`350A`）の両形式に対応済み。
+- **xlrd は .xls 専用**（`xlrd==2.0.2` は `.xlsx` を読めず `XLRDError` を送出）。JPX が将来 .xlsx に切り替えた場合の fallback として `openpyxl` による再読み込みを `update_industry_from_jpx` に実装済み（`xlrd.XLRDError` を捕捉 → `openpyxl.load_workbook` でリトライ）。
 
 ---
 

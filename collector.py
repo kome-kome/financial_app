@@ -140,6 +140,8 @@ async def update_industry_from_jpx(client: httpx.AsyncClient, db,
                                    on_progress: Optional[Callable] = None):
     """JPX上場会社一覧Excelから TSE 33業種コードを取得し、Company/FinancialRecordを更新する"""
     import xlrd
+    import openpyxl
+    import io as _io
     try:
         log.info("JPX上場会社一覧Excelをダウンロード中...")
         if on_progress:
@@ -147,13 +149,26 @@ async def update_industry_from_jpx(client: httpx.AsyncClient, db,
         r = await client.get(JPX_EXCEL_URL, timeout=60,
                              headers={"User-Agent": "Mozilla/5.0"})
         r.raise_for_status()
-        wb = xlrd.open_workbook(file_contents=r.content, encoding_override='cp932')
-        ws = wb.sheet_by_index(0)
+        # xlrd は .xls 専用。JPX が .xlsx に移行した場合は openpyxl にフォールバック。
+        try:
+            wb = xlrd.open_workbook(file_contents=r.content, encoding_override='cp932')
+            ws = wb.sheet_by_index(0)
+            def _cell(row, col):
+                return ws.cell_value(row, col)
+            nrows = ws.nrows
+        except xlrd.XLRDError:
+            log.info("xlrd で読み込み失敗。openpyxl（xlsx）でリトライします")
+            wb_xlsx = openpyxl.load_workbook(_io.BytesIO(r.content), read_only=True, data_only=True)
+            ws_xlsx = wb_xlsx.active
+            _rows = list(ws_xlsx.iter_rows(values_only=True))
+            def _cell(row, col):
+                return _rows[row][col]
+            nrows = len(_rows)
 
         industry_map: dict = {}
-        for row_idx in range(1, ws.nrows):
-            code_val = ws.cell_value(row_idx, 1)
-            ind_val  = ws.cell_value(row_idx, 5)
+        for row_idx in range(1, nrows):
+            code_val = _cell(row_idx, 1)
+            ind_val  = _cell(row_idx, 5)
             if ind_val in ('-', '', None):
                 continue
             if isinstance(code_val, float):

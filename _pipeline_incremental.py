@@ -11,6 +11,8 @@ from datetime import datetime, date, timedelta
 from dotenv import load_dotenv
 load_dotenv()
 
+from sqlalchemy.exc import InternalError, OperationalError
+
 from collector import (
     run_full_collection, collect_macro_data,
     collect_stock_price_history_jquants, update_market_data_from_history,
@@ -28,6 +30,27 @@ def log(msg: str):
         f.write(line + "\n")
 
 
+def _is_readonly_error(exc: BaseException) -> bool:
+    msg = str(exc).lower()
+    return "read-only" in msg or "readonlysqltransaction" in msg
+
+
+async def _run_with_retry(coro_factory, label: str,
+                          max_retry: int = 2, wait_sec: int = 90):
+    """Supabase が一時的に read-only に切り替わる事象に対する指数バックオフリトライ。"""
+    for attempt in range(max_retry + 1):
+        try:
+            return await coro_factory()
+        except (InternalError, OperationalError) as e:
+            if not _is_readonly_error(e):
+                raise
+            if attempt >= max_retry:
+                raise
+            wait = wait_sec * (2 ** attempt)
+            log(f"[{label}] ReadOnly エラー検出 (attempt {attempt+1}/{max_retry+1}) — {wait}秒待機して再試行: {e.__class__.__name__}")
+            await asyncio.sleep(wait)
+
+
 async def main():
     t0 = time.time()
     log("=" * 60)
@@ -39,10 +62,13 @@ async def main():
 
     # ─── Phase 1: XBRL 差分収集（過去1年・収集済みスキップ）───────────────
     log("[1/4] XBRL 差分収集 開始（過去1年・skip_existing=True）")
-    cancelled = await run_full_collection(
-        years_back=1,
-        skip_existing=True,
-        on_progress=lambda c, t, m: log(m) if c % 50 == 0 or "[完了]" in m or "[企業マスタ" in m else None,
+    cancelled = await _run_with_retry(
+        lambda: run_full_collection(
+            years_back=1,
+            skip_existing=True,
+            on_progress=lambda c, t, m: log(m) if c % 50 == 0 or "[完了]" in m or "[企業マスタ" in m else None,
+        ),
+        label="XBRL差分収集",
     )
     if cancelled:
         log("[1/4] 収集が停止されました")
@@ -56,9 +82,12 @@ async def main():
     log("[3/4] マクロデータ収集 開始")
     db = SessionLocal()
     try:
-        n = await collect_macro_data(
-            db, years_back=5,
-            on_progress=lambda c, t, m: log(m) if c % 10 == 0 or "完了" in m else None,
+        n = await _run_with_retry(
+            lambda: collect_macro_data(
+                db, years_back=5,
+                on_progress=lambda c, t, m: log(m) if c % 10 == 0 or "完了" in m else None,
+            ),
+            label="マクロデータ収集",
         )
         log(f"  マクロデータ {n} 件更新")
     finally:
