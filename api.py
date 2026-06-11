@@ -626,17 +626,19 @@ async def get_stock_history(edinet_code: str, days: int = 365,
     return [{"trade_date": r[0], "close": r[1]} for r in reversed(rows)]
 
 
-@app.get("/api/collect/stream")
-async def progress_stream():
-    return jobs.stream(_COLLECTION)
-
-@app.get("/api/collect/market-stream")
-async def market_progress_stream():
-    return jobs.stream("market")
-
-@app.get("/api/collect/history/stream")
-async def history_progress_stream():
-    return jobs.stream("history")
+for _sse_path, _sse_key in {
+    "/api/collect/stream":         _COLLECTION,
+    "/api/collect/market-stream":  "market",
+    "/api/collect/history/stream": "history",
+    "/api/collect/reparse/stream": "reparse",
+    "/api/collect/jquants/stream": "jquants",
+    "/api/collect/macro/stream":   "macro",
+}.items():
+    def _make_sse(k=_sse_key):
+        async def _sse_handler():
+            return jobs.stream(k)
+        return _sse_handler
+    app.get(_sse_path)(_make_sse())
 
 class ReparseRequest(BaseModel):
     year:        Optional[int] = None
@@ -663,10 +665,6 @@ async def start_reparse(request: Request, req: ReparseRequest, background_tasks:
 async def cancel_reparse():
     jobs.request_cancel("reparse")
     return {"message": "停止リクエストを送信しました"}
-
-@app.get("/api/collect/reparse/stream")
-async def reparse_progress_stream():
-    return jobs.stream("reparse")
 
 @app.post("/api/collect/industry")
 @limiter.limit(RATELIMIT_COLLECT)
@@ -710,10 +708,6 @@ async def stop_jquants_collection():
 async def jquants_collection_status():
     return jobs.snapshot("jquants")
 
-@app.get("/api/collect/jquants/stream")
-async def jquants_progress_stream():
-    return jobs.stream("jquants")
-
 
 # ── マクロデータ収集（為替・金利・指数・コモディティ）─────────────────
 
@@ -748,10 +742,6 @@ async def stop_macro_collection():
 @app.get("/api/collect/macro/status")
 async def macro_collection_status():
     return jobs.snapshot("macro")
-
-@app.get("/api/collect/macro/stream")
-async def macro_progress_stream():
-    return jobs.stream("macro")
 
 
 @app.get("/api/macro/series")
