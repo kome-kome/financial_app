@@ -15,6 +15,7 @@ VIEW:
 
 import os, gzip, json
 from datetime import datetime, date, timedelta, timezone
+from pathlib import Path
 from dotenv import load_dotenv
 from sqlalchemy import (
     create_engine, Column, String, Integer, Float, DateTime,
@@ -637,151 +638,99 @@ class FinancialMetric(ViewBase):
     predicted_market_cap = Column(Float); gap_ratio = Column(Float)
 
 
-# financial_metrics VIEW DDL。式は既存 Python 実装と一致させてある。
-FINANCIAL_METRICS_VIEW_SQL = """
-CREATE OR REPLACE VIEW financial_metrics AS
-WITH d AS (
-    SELECT
-        fr.id, fr.edinet_code, fr.sec_code, fr.company_name, fr.industry, fr.market,
-        fr.year, fr.period_end, fr.doc_id, fr.source, fr.accounting_standard,
-        fr.bs_total_assets, fr.bs_current_assets, fr.bs_receivables, fr.bs_inventory,
-        fr.bs_noncurrent_assets, fr.bs_buildings, fr.bs_machinery, fr.bs_ppe_total,
-        fr.bs_intangible_assets, fr.bs_investments_other_assets,
-        fr.bs_cash, fr.bs_investment_securities, fr.bs_total_liabilities, fr.bs_current_liabilities,
-        fr.bs_payables, fr.bs_noncurrent_liabilities, fr.bs_short_term_debt, fr.bs_long_term_debt,
-        fr.bs_bonds_payable, fr.bs_total_equity, fr.bs_equity_parent, fr.bs_paid_in_capital,
-        fr.bs_retained_earnings, fr.bs_bps,
-        fr.pl_revenue, fr.pl_cost_of_sales, fr.pl_gross_profit, fr.pl_sga, fr.pl_operating_profit,
-        fr.pl_nonoperating_income, fr.pl_ordinary_profit, fr.pl_pretax_profit, fr.pl_net_income,
-        fr.pl_net_income_attr, fr.pl_eps, fr.pl_ebitda,
-        fr.pl_rd_expenses, fr.pl_depreciation, fr.pl_extraordinary_income, fr.pl_extraordinary_loss,
-        fr.cf_operating_cf, fr.cf_investing_cf, fr.cf_financing_cf, fr.cf_free_cf,
-        fr.cf_net_change_cash, fr.cf_capex,
-        fr.stock_price, fr.market_cap, fr.per, fr.pbr, fr.div_yield, fr.dps,
-        fr.employees, fr.issued_shares,
-        CASE WHEN COALESCE(fr.pl_revenue,0) <> 0
-             THEN ROUND((COALESCE(fr.pl_operating_profit,0) / fr.pl_revenue * 100)::numeric, 2) END AS op_margin,
-        CASE WHEN COALESCE(fr.pl_revenue,0) <> 0
-             THEN ROUND((COALESCE(NULLIF(fr.pl_net_income,0), NULLIF(fr.pl_net_income_attr,0), 0) / fr.pl_revenue * 100)::numeric, 2) END AS net_margin,
-        CASE WHEN COALESCE(NULLIF(fr.bs_total_equity,0), NULLIF(fr.bs_equity_parent,0), 0) <> 0
-             THEN ROUND((COALESCE(NULLIF(fr.pl_net_income,0), NULLIF(fr.pl_net_income_attr,0), 0) / COALESCE(NULLIF(fr.bs_total_equity,0), NULLIF(fr.bs_equity_parent,0), 0) * 100)::numeric, 2) END AS roe,
-        CASE WHEN COALESCE(fr.bs_total_assets,0) <> 0
-             THEN ROUND((COALESCE(NULLIF(fr.pl_net_income,0), NULLIF(fr.pl_net_income_attr,0), 0) / fr.bs_total_assets * 100)::numeric, 2) END AS roa,
-        CASE WHEN COALESCE(fr.bs_total_assets,0) <> 0
-             THEN ROUND((COALESCE(NULLIF(fr.bs_total_equity,0), NULLIF(fr.bs_equity_parent,0), 0) / fr.bs_total_assets * 100)::numeric, 2) END AS equity_ratio,
-        CASE WHEN COALESCE(NULLIF(fr.bs_total_equity,0), NULLIF(fr.bs_equity_parent,0), 0) <> 0
-             THEN ROUND(((COALESCE(fr.bs_short_term_debt,0) + COALESCE(fr.bs_long_term_debt,0)) / COALESCE(NULLIF(fr.bs_total_equity,0), NULLIF(fr.bs_equity_parent,0), 0))::numeric, 4) END AS de_ratio,
-        CASE WHEN COALESCE(fr.pl_revenue,0) <> 0
-             THEN ROUND((COALESCE(fr.cf_operating_cf,0) / fr.pl_revenue * 100)::numeric, 2) END AS cf_ratio,
-        -- C2 結線: 研究開発集約度・減価償却集約度（無次元 [%]）。分子は非 COALESCE で
-        -- null 伝播させる（R&D/D&A 未開示企業は intensity も null → price_predictor が自動除外）。
-        CASE WHEN COALESCE(fr.pl_revenue,0) <> 0
-             THEN ROUND((fr.pl_rd_expenses / fr.pl_revenue * 100)::numeric, 2) END AS rd_intensity,
-        CASE WHEN COALESCE(fr.pl_revenue,0) <> 0
-             THEN ROUND((fr.pl_depreciation / fr.pl_revenue * 100)::numeric, 2) END AS da_intensity,
-        CASE WHEN COALESCE(fr.bs_current_assets,0) <> 0 OR COALESCE(fr.bs_total_liabilities,0) <> 0
-             THEN ROUND((COALESCE(fr.bs_current_assets,0) + COALESCE(fr.bs_investment_securities,0) * 0.7 - COALESCE(fr.bs_total_liabilities,0))::numeric, 0) END AS net_cash
-    FROM financial_records fr
-),
-n AS (
-    SELECT d.*,
-        CASE WHEN d.net_cash IS NOT NULL AND COALESCE(d.market_cap,0) <> 0
-             THEN ROUND((d.net_cash / (d.market_cap * 1000000))::numeric, 4) END AS nc_ratio
-    FROM d
-)
-SELECT
-    n.*,
-    CASE WHEN COUNT(n.pl_revenue) OVER yw >= 2
-         THEN ROUND(((n.pl_revenue - AVG(n.pl_revenue) OVER yw) / COALESCE(NULLIF(STDDEV_SAMP(n.pl_revenue) OVER yw, 0), 1.0))::numeric, 4) END AS z_revenue,
-    CASE WHEN COUNT(n.op_margin) OVER yw >= 2
-         THEN ROUND(((n.op_margin - AVG(n.op_margin) OVER yw) / COALESCE(NULLIF(STDDEV_SAMP(n.op_margin) OVER yw, 0), 1.0))::numeric, 4) END AS z_op_margin,
-    CASE WHEN COUNT(n.roe) OVER yw >= 2
-         THEN ROUND(((n.roe - AVG(n.roe) OVER yw) / COALESCE(NULLIF(STDDEV_SAMP(n.roe) OVER yw, 0), 1.0))::numeric, 4) END AS z_roe,
-    CASE WHEN COUNT(n.equity_ratio) OVER yw >= 2
-         THEN ROUND(((n.equity_ratio - AVG(n.equity_ratio) OVER yw) / COALESCE(NULLIF(STDDEV_SAMP(n.equity_ratio) OVER yw, 0), 1.0))::numeric, 4) END AS z_equity_ratio,
-    CASE WHEN COUNT(n.cf_ratio) OVER yw >= 2
-         THEN ROUND(((n.cf_ratio - AVG(n.cf_ratio) OVER yw) / COALESCE(NULLIF(STDDEV_SAMP(n.cf_ratio) OVER yw, 0), 1.0))::numeric, 4) END AS z_cf_ratio,
-    CASE WHEN COUNT(n.pl_eps) OVER yw >= 2
-         THEN ROUND(((n.pl_eps - AVG(n.pl_eps) OVER yw) / COALESCE(NULLIF(STDDEV_SAMP(n.pl_eps) OVER yw, 0), 1.0))::numeric, 4) END AS z_eps,
-    CASE WHEN COUNT(n.de_ratio) OVER yw >= 2
-         THEN ROUND(((n.de_ratio - AVG(n.de_ratio) OVER yw) / COALESCE(NULLIF(STDDEV_SAMP(n.de_ratio) OVER yw, 0), 1.0))::numeric, 4) END AS z_de_ratio,
-    CASE WHEN COUNT(n.nc_ratio) OVER yw >= 2
-         THEN ROUND(((n.nc_ratio - AVG(n.nc_ratio) OVER yw) / COALESCE(NULLIF(STDDEV_SAMP(n.nc_ratio) OVER yw, 0), 1.0))::numeric, 4) END AS z_nc_ratio,
-    CASE WHEN n.pl_revenue IS NOT NULL AND n.pl_revenue <> 0
-          AND LAG(n.pl_revenue) OVER cw IS NOT NULL AND LAG(n.pl_revenue) OVER cw <> 0
-         THEN ROUND(((n.pl_revenue / LAG(n.pl_revenue) OVER cw - 1) * 100)::numeric, 2) END AS rev_growth,
-    CASE WHEN n.pl_operating_profit IS NOT NULL AND n.pl_operating_profit <> 0
-          AND LAG(n.pl_operating_profit) OVER cw IS NOT NULL AND LAG(n.pl_operating_profit) OVER cw <> 0
-         THEN ROUND(((n.pl_operating_profit / LAG(n.pl_operating_profit) OVER cw - 1) * 100)::numeric, 2) END AS op_growth,
-    CASE WHEN n.pl_eps IS NOT NULL AND n.pl_eps <> 0
-          AND LAG(n.pl_eps) OVER cw IS NOT NULL AND LAG(n.pl_eps) OVER cw <> 0
-         THEN ROUND(((n.pl_eps / LAG(n.pl_eps) OVER cw - 1) * 100)::numeric, 2) END AS eps_growth,
-    rr.predicted_market_cap,
-    rr.gap_ratio
-FROM n
-LEFT JOIN regression_results rr
-       ON rr.edinet_code = n.edinet_code AND rr.year = n.year AND rr.period_end = n.period_end
-WINDOW yw AS (PARTITION BY n.year),
-       cw AS (PARTITION BY n.edinet_code ORDER BY n.year, n.period_end)
-"""
+# financial_metrics VIEW DDL（sql/financial_metrics_view.sql から読み込み）
+FINANCIAL_METRICS_VIEW_SQL = (Path(__file__).parent / "sql" / "financial_metrics_view.sql").read_text(encoding="utf-8")
 
 
 # ── 10. DB初期化 ───────────────────────────────────────────────────────────
 
-def init_db():
-    """テーブル作成・インデックス構築・カラムマイグレーション"""
+# 新規ソース列（冪等 ADD）。計算列は含めない（VIEW が担う）。
+_NEW_COLS = [
+    "pl_cost_of_sales", "pl_sga", "pl_nonoperating_income",
+    "bs_receivables", "bs_inventory",
+    "bs_buildings", "bs_machinery", "bs_intangible_assets",
+    "bs_payables", "bs_bonds_payable",
+    "bs_paid_in_capital", "bs_retained_earnings",
+    "bs_investment_securities",
+    "bs_ppe_total", "bs_investments_other_assets",
+    "pl_rd_expenses", "pl_depreciation",
+    "pl_extraordinary_income", "pl_extraordinary_loss",
+    "employees", "issued_shares",
+]
+
+# 旧計算列（冪等 DROP）。派生指標は financial_metrics VIEW・OLS予測値は regression_results に移行済み。
+_LEGACY_COMPUTED_COLS = [
+    "op_margin", "net_margin", "roe", "roa", "equity_ratio", "de_ratio",
+    "cf_ratio", "net_cash", "nc_ratio",
+    "z_revenue", "z_op_margin", "z_roe", "z_equity_ratio", "z_cf_ratio",
+    "z_eps", "z_de_ratio", "z_nc_ratio",
+    "rev_growth", "op_growth", "eps_growth",
+    "predicted_market_cap", "gap_ratio",
+]
+
+
+def _ensure_tables() -> None:
+    """Phase 1: テーブル作成・インデックス・カラムマイグレーション（すべて冪等）"""
+    import re as _re
     Base.metadata.create_all(bind=engine)
     with engine.connect() as conn:
-        # 全文検索インデックス
         conn.execute(text(
             "CREATE INDEX IF NOT EXISTS ix_companies_name_gin "
             "ON companies USING gin(to_tsvector('simple', name))"
         ))
-        # 新規ソース列のマイグレーション（冪等）。計算列はここに含めない（VIEW が担う）。
-        _new_cols = [
-            "pl_cost_of_sales", "pl_sga", "pl_nonoperating_income",
-            "bs_receivables", "bs_inventory",
-            "bs_buildings", "bs_machinery", "bs_intangible_assets",
-            "bs_payables", "bs_bonds_payable",
-            "bs_paid_in_capital", "bs_retained_earnings",
-            "bs_investment_securities",
-            # 網羅性追加（C2）。全て DOUBLE PRECISION で冪等 ADD（非財務 employees/issued_shares 含む）
-            "bs_ppe_total", "bs_investments_other_assets",
-            "pl_rd_expenses", "pl_depreciation",
-            "pl_extraordinary_income", "pl_extraordinary_loss",
-            "employees", "issued_shares",
-        ]
-        for col in _new_cols:
+        for col in _NEW_COLS:
             conn.execute(text(
                 f"ALTER TABLE financial_records ADD COLUMN IF NOT EXISTS {col} DOUBLE PRECISION"
             ))
-        # 旧計算列の DROP（冪等）。派生指標は financial_metrics VIEW、OLS予測値は
-        # regression_results へ移行済みのため financial_records からは恒久的に削除する。
-        # VIEW はソース列から派生を計算しており、これらの列を参照しないため DROP 可能。
-        _legacy_computed_cols = [
-            "op_margin", "net_margin", "roe", "roa", "equity_ratio", "de_ratio",
-            "cf_ratio", "net_cash", "nc_ratio",
-            "z_revenue", "z_op_margin", "z_roe", "z_equity_ratio", "z_cf_ratio",
-            "z_eps", "z_de_ratio", "z_nc_ratio",
-            "rev_growth", "op_growth", "eps_growth",
-            "predicted_market_cap", "gap_ratio",
-        ]
-        for col in _legacy_computed_cols:
+        for col in _LEGACY_COMPUTED_COLS:
             conn.execute(text(
                 f"ALTER TABLE financial_records DROP COLUMN IF EXISTS {col}"
             ))
-        # xbrl_raw_documents インデックス（テーブル自体は create_all で作成済み）
         conn.execute(text(
             "CREATE INDEX IF NOT EXISTS ix_xbrl_raw_edinet_period "
             "ON xbrl_raw_documents (edinet_code, period_end)"
         ))
-        # financial_metrics VIEW（ソース列から軽い派生を都度算出＋regression_results を合成）。
-        # regression_results は create_all で先に作成済みのため LEFT JOIN 可能。
-        # 列の追加・並び替え時は CREATE OR REPLACE VIEW が「末尾追加のみ可」の制約で失敗するため、
-        # 一度 DROP してから作り直す（VIEW に依存する DB オブジェクトは無い＝安全）。
-        conn.execute(text("DROP VIEW IF EXISTS financial_metrics"))
-        conn.execute(text(FINANCIAL_METRICS_VIEW_SQL))
         conn.commit()
+
+
+def _ensure_view() -> None:
+    """Phase 2: financial_metrics VIEW を定義変更時のみ DROP+再作成する。
+
+    pg_get_viewdef() で現行 VIEW 定義を取得して FINANCIAL_METRICS_VIEW_SQL と比較し、
+    差異がなければスキップ（毎起動 DROP を避ける）。
+    VIEW 未存在・比較不能（SQLite等）の場合は無条件に再作成する。
+    """
+    import re as _re
+
+    def _norm(s: str) -> str:
+        return _re.sub(r"\s+", " ", s.strip().rstrip(";"))
+
+    needs_recreate = True
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(
+                text("SELECT pg_get_viewdef('financial_metrics', true)")
+            ).first()
+            if row and row[0]:
+                needs_recreate = (_norm(row[0]) != _norm(FINANCIAL_METRICS_VIEW_SQL))
+    except Exception:
+        # pg_get_viewdef 未対応（SQLite 等）またはビュー未存在 → 再作成
+        needs_recreate = True
+
+    if needs_recreate:
+        with engine.connect() as conn:
+            # regression_results は create_all 後なので LEFT JOIN 可能。
+            # 列の追加・並び替えは CREATE OR REPLACE VIEW が「末尾追加のみ可」で失敗するため
+            # DROP→再作成する（VIEW に依存するオブジェクトは無く安全）。
+            conn.execute(text("DROP VIEW IF EXISTS financial_metrics"))
+            conn.execute(text(FINANCIAL_METRICS_VIEW_SQL))
+            conn.commit()
+
+
+def init_db():
+    """テーブル作成・インデックス構築・カラムマイグレーション"""
+    _ensure_tables()
+    _ensure_view()
 
 
 # ── 7. Upsert 処理 ─────────────────────────────────────────────────────────

@@ -19,6 +19,8 @@ from database import (
     XbrlRawDocument, upsert_company, upsert_financial,
     upsert_xbrl_raw, pack_elements, unpack_elements,
     build_xbrl_map,
+    StockPriceDaily, StockPriceWeekly,
+    record_prices_batch, trim_daily, latest_prices,
 )
 
 load_dotenv()
@@ -185,24 +187,41 @@ async def update_industry_from_jpx(client: httpx.AsyncClient, db,
             s = (raw_sec or '').strip()
             return s if s in industry_map else s.zfill(4)
 
-        companies = db.query(Company).all()
+        # 全件ロードを避けるため、業種ごとにバルク UPDATE する（クエリ数 = 業種数 ≈ 33）。
+        # industry_map のキーは4桁ゼロ埋め。DB に非ゼロ埋め形式で格納されている場合に対応するため、
+        # ゼロ埋め前後の両方を WHERE IN に含める。
+        from collections import defaultdict
+        from sqlalchemy import update as sa_update
+
+        by_industry: dict = defaultdict(list)
+        for sec, ind in industry_map.items():
+            by_industry[ind].append(sec)
+            stripped = sec.lstrip('0') or '0'
+            if stripped != sec:
+                by_industry[ind].append(stripped)
+
         updated_co = 0
-        for co in companies:
-            sec = resolve_sec(co.sec_code or '')
-            ind = industry_map.get(sec, '')
-            if ind and co.industry != ind:
-                co.industry = ind
-                updated_co += 1
+        for ind, codes in by_industry.items():
+            r = db.execute(
+                sa_update(Company)
+                .where(Company.sec_code.in_(codes))
+                .where(Company.industry != ind)
+                .values(industry=ind)
+                .execution_options(synchronize_session=False)
+            )
+            updated_co += r.rowcount
         db.commit()
 
-        records = db.query(FinancialRecord).all()
         updated_fr = 0
-        for fr in records:
-            sec = resolve_sec(fr.sec_code or '')
-            ind = industry_map.get(sec, '')
-            if ind and fr.industry != ind:
-                fr.industry = ind
-                updated_fr += 1
+        for ind, codes in by_industry.items():
+            r = db.execute(
+                sa_update(FinancialRecord)
+                .where(FinancialRecord.sec_code.in_(codes))
+                .where(FinancialRecord.industry != ind)
+                .values(industry=ind)
+                .execution_options(synchronize_session=False)
+            )
+            updated_fr += r.rowcount
         db.commit()
 
         log.info(f"業種更新完了: Company {updated_co}件, FinancialRecord {updated_fr}件")
@@ -528,6 +547,29 @@ async def fetch_stock_history_stooq(
     return rows
 
 
+async def _price_collection_driver(db, batch_gen) -> tuple[bool, int]:
+    """
+    Provider-agnostic driver: iterates batch_gen, saves each batch via
+    record_prices_batch, calls trim_daily when done.
+
+    batch_gen yields list[dict] of price records, or None as a cancellation
+    sentinel (triggers early return with cancelled=True).
+    Returns (cancelled, total_inserted).
+    """
+    total = 0
+    async for batch in batch_gen:
+        if batch is None:   # cancellation sentinel from generator
+            db.commit()
+            return True, total
+        if batch:
+            try:
+                total += record_prices_batch(db, batch, trim=False)
+            except Exception as e:
+                log.warning("株価バッチ保存失敗: %s", e)
+    trim_daily(db)
+    return False, total
+
+
 async def collect_stock_price_history(
     db,
     years_back: int = 3,
@@ -540,8 +582,9 @@ async def collect_stock_price_history(
     """全企業（sec_code 保有）の日次 OHLCV を stooq から取得して DB に保存する。
     skip_existing=True: DB の最新 trade_date から翌日以降のみ取得（差分収集）。
     backfill=True かつ skip_existing=True: 前方差分に加えて後方欠損（years_back 起点→最古レコード前日）も補完。
+    プロバイダー固有ロジック（stooq 並行フェッチ）を _stooq_batch_gen に分離し、
+    _price_collection_driver の共通フレームで DB 保存・trim を一元管理する。
     """
-    from database import StockPriceWeekly, record_prices_batch, trim_daily
     from sqlalchemy import func as sqlfunc
 
     today     = date.today()
@@ -581,7 +624,6 @@ async def collect_stock_price_history(
             )
 
     total = len(companies)
-    inserted_total = 0
     skipped_total  = 0
 
     # 差分収集: スキップ判定を事前に行い、取得対象だけリストアップ
@@ -624,18 +666,15 @@ async def collect_stock_price_history(
                     f"[スキップ] {skipped_total}社は補完不要 → {fetch_total}件を取得します" if backfill
                     else f"[スキップ] {skipped_total}社は最新済み → {fetch_total}社を並列取得します")
 
-    sem = asyncio.Semaphore(STOOQ_HIST_CONCURRENCY)
+    async def _stooq_batch_gen(session):
+        sem = asyncio.Semaphore(STOOQ_HIST_CONCURRENCY)
 
-    async def _fetch_hist(session, edinet_code, sec_code, name, d1_co, d2_co):
-        async with sem:
-            rows = await fetch_stock_history_stooq(session, sec_code, d1_co, d2_co)
-        return edinet_code, sec_code, name, rows
+        async def _fetch_hist(ec, sc, nm, d1c, d2c):
+            async with sem:
+                rows = await fetch_stock_history_stooq(session, sc, d1c, d2c)
+            return ec, sc, nm, rows
 
-    async with httpx.AsyncClient() as session:
-        tasks = [asyncio.ensure_future(
-            _fetch_hist(session, ec, sc, nm, d1c, d2c)
-        ) for ec, sc, nm, d1c, d2c in to_fetch]
-
+        tasks = [asyncio.ensure_future(_fetch_hist(*item)) for item in to_fetch]
         completed = 0
         for coro in asyncio.as_completed(tasks):
             if cancel_check and cancel_check():
@@ -645,29 +684,28 @@ async def collect_stock_price_history(
                     on_progress(completed, progress_total,
                                 f"[停止] ユーザーによる停止（{completed}/{fetch_total}件処理済み）")
                 db.commit()
-                return {"cancelled": True, "inserted": inserted_total, "skipped": skipped_total}
-
+                yield None   # cancellation sentinel → driver returns early
+                return
             edinet_code, sec_code, name, rows = await coro
             completed += 1
             if on_progress:
                 prog = completed if backfill else skipped_total + completed
                 on_progress(prog, progress_total,
-                            f"[{prog}/{progress_total}] {name}({sec_code}) {len(rows)}件")
+                            f"[{prog}/{progress_total}] {name}({sec_code}) {len(rows) if rows else 0}件")
+            yield [
+                {"edinet_code": edinet_code, "trade_date": r["trade_date"],
+                 "close": r.get("close"), "volume": r.get("volume")}
+                for r in rows
+            ] if rows else []
 
-            try:
-                if rows:
-                    # close-only 2本立て（daily+weekly）へ集約保存。trim はループ末で一括。
-                    inserted_total += record_prices_batch(db, [
-                        {"edinet_code": edinet_code, "trade_date": r["trade_date"],
-                         "close": r.get("close"), "volume": r.get("volume")}
-                        for r in rows
-                    ], trim=False)
-            except Exception as e:
-                log.warning(f"株価履歴保存失敗 {sec_code}: {e}")
+    async with httpx.AsyncClient() as session:
+        cancelled, inserted_total = await _price_collection_driver(db, _stooq_batch_gen(session))
 
-    trim_daily(db)
+    if cancelled:
+        return {"cancelled": True, "inserted": inserted_total, "skipped": skipped_total}
     if on_progress:
-        on_progress(progress_total, progress_total, f"[完了] {total}社処理（スキップ:{skipped_total}社）、{inserted_total}件追加")
+        on_progress(progress_total, progress_total,
+                    f"[完了] {total}社処理（スキップ:{skipped_total}社）、{inserted_total}件追加")
     return {"cancelled": False, "inserted": inserted_total, "skipped": skipped_total, "companies": total}
 
 
@@ -718,12 +756,12 @@ async def collect_stock_price_history_jquants(
     J-Quants は JPX 公式データのため、stooq 由来レコードより優先して上書きする。
     1回のリクエストで全銘柄のデータが取得できるため stooq より大幅に高速。
     date_from/date_to を指定した場合はその範囲を使用し、省略時は days_back から計算する。
+    プロバイダー固有ロジック（J-Quants 日付単位フェッチ）を _jquants_batch_gen に分離し、
+    _price_collection_driver の共通フレームで DB 保存・trim を一元管理する。
     """
     api_key = os.environ.get("JQUANTS_API_KEY", "")
     if not api_key:
         raise ValueError("環境変数 JQUANTS_API_KEY が未設定です")
-
-    from database import record_prices_batch, trim_daily, Company as _Company
 
     today  = date.today()
     _from  = date_from if date_from is not None else (today - timedelta(days=days_back))
@@ -740,15 +778,14 @@ async def collect_stock_price_history_jquants(
     # sec_code (4桁) → edinet_code のルックアップ（全社一括で1回のみ）
     sec_to_edinet: dict = {
         row.sec_code: row.edinet_code
-        for row in db.query(_Company.sec_code, _Company.edinet_code)
-        .filter(_Company.sec_code.isnot(None))
+        for row in db.query(Company.sec_code, Company.edinet_code)
+        .filter(Company.sec_code.isnot(None))
         .all()
     }
 
-    total          = len(dates)
-    upserted_total = 0
+    total = len(dates)
 
-    async with httpx.AsyncClient() as session:
+    async def _jquants_batch_gen(session):
         completed = 0
         last_req_time: float = 0.0
         for date_str in dates:
@@ -756,7 +793,8 @@ async def collect_stock_price_history_jquants(
                 if on_progress:
                     on_progress(completed, total, f"[停止] ユーザーによる停止（{completed}/{total}日処理済み）")
                 db.commit()
-                return {"cancelled": True, "upserted": upserted_total}
+                yield None   # cancellation sentinel → driver returns early
+                return
 
             # リクエスト開始間隔を最低 JQUANTS_RATE_SLEEP 秒に保つ（高速な祝日レスポンス後も適用）
             if completed > 0:
@@ -772,12 +810,13 @@ async def collect_stock_price_history_jquants(
             if not quote_rows:
                 if on_progress:
                     on_progress(completed, total, f"[{completed}/{total}] {date_str} スキップ（非営業日）")
+                yield []
                 continue
 
             records = []
             for q in quote_rows:
-                code      = str(q.get("Code", ""))
-                sec_code  = code[:4]   # J-Quants は "13010"（5桁）→ 先頭4桁が証券コード
+                code        = str(q.get("Code", ""))
+                sec_code    = code[:4]   # J-Quants は "13010"（5桁）→ 先頭4桁が証券コード
                 edinet_code = sec_to_edinet.get(sec_code)
                 if not edinet_code:
                     continue
@@ -803,84 +842,71 @@ async def collect_stock_price_history_jquants(
             seen: set = set()
             deduped = []
             for rec in records:
-                key = rec["edinet_code"]
-                if key not in seen:
-                    seen.add(key)
+                if rec["edinet_code"] not in seen:
+                    seen.add(rec["edinet_code"])
                     deduped.append(rec)
-            records = deduped
-
-            if records:
-                # close-only 2本立て（daily+weekly）へ集約保存。trim はループ末で一括。
-                upserted_total += record_prices_batch(db, records, trim=False)
 
             if on_progress:
-                on_progress(completed, total,
-                            f"[{completed}/{total}] {date_str} {len(records)}件")
+                on_progress(completed, total, f"[{completed}/{total}] {date_str} {len(deduped)}件")
+            yield deduped
 
-    trim_daily(db)
+    async with httpx.AsyncClient() as session:
+        cancelled, upserted_total = await _price_collection_driver(db, _jquants_batch_gen(session))
+
+    if cancelled:
+        return {"cancelled": True, "upserted": upserted_total}
     if on_progress:
         on_progress(total, total, f"[完了] {total}日処理・{upserted_total}件追加/更新")
     return {"cancelled": False, "upserted": upserted_total, "days": total}
 
 
-def update_market_data_from_history(db, point_in_time: bool = False) -> int:
-    """stock_price_history の終値を financial_records.stock_price に反映する。
-    stooq が GitHub Actions IP でブロックされる問題を回避するため、
-    J-Quants 由来の stock_price_history を使ってバリュエーション指標を計算する。
-
-    point_in_time=False（デフォルト・日次差分向け）:
-        各社の最新レコードのみ、最新株価で更新する。高速。
-    point_in_time=True（全件収集 finalize 向け）:
-        全財務レコードを period_end 最近傍の株価で更新する。
-        J-Quants カバレッジ外（データなし）のレコードはスキップし既存値を保持する。
-        最新レコードは常に最新株価で上書きする。
-
-    戻り値: 更新した財務レコード数
-    """
-    from database import StockPriceDaily, StockPriceWeekly, FinancialRecord, latest_prices
+def _update_market_data_latest(db) -> int:
+    """point_in_time=False: 各社の最新レコードのみ、最新株価（daily優先）で更新する。"""
     from sqlalchemy import func as sqlfunc
 
-    if not point_in_time:
-        # ── 最新レコードのみ・最新株価（daily＝直近窓を優先・無ければ weekly）─────────
-        subq = (
-            db.query(
-                StockPriceDaily.edinet_code,
-                sqlfunc.max(StockPriceDaily.trade_date).label("max_date"),
-            )
-            .group_by(StockPriceDaily.edinet_code)
-            .subquery()
+    subq = (
+        db.query(
+            StockPriceDaily.edinet_code,
+            sqlfunc.max(StockPriceDaily.trade_date).label("max_date"),
         )
-        latest_price_rows = (
-            db.query(StockPriceDaily.edinet_code, StockPriceDaily.close)
-            .join(
-                subq,
-                (StockPriceDaily.edinet_code == subq.c.edinet_code)
-                & (StockPriceDaily.trade_date == subq.c.max_date),
-            )
-            .all()
+        .group_by(StockPriceDaily.edinet_code)
+        .subquery()
+    )
+    latest_price_rows = (
+        db.query(StockPriceDaily.edinet_code, StockPriceDaily.close)
+        .join(
+            subq,
+            (StockPriceDaily.edinet_code == subq.c.edinet_code)
+            & (StockPriceDaily.trade_date == subq.c.max_date),
         )
+        .all()
+    )
 
-        valid_ecs = [ec for ec, price in latest_price_rows if price and price > 0]
-        latest_fin_by_ec = _fetch_latest_fin_by_ec(db, valid_ecs)
+    valid_ecs = [ec for ec, price in latest_price_rows if price and price > 0]
+    latest_fin_by_ec = _fetch_latest_fin_by_ec(db, valid_ecs)
 
-        updated = 0
-        for edinet_code, price in latest_price_rows:
-            if price is None or price <= 0:
-                continue
-            latest = latest_fin_by_ec.get(edinet_code)
-            if not latest:
-                continue
-            _apply_price_to_record(latest, price)
-            updated += 1
-            if updated % 200 == 0:
-                db.commit()
+    updated = 0
+    for edinet_code, price in latest_price_rows:
+        if price is None or price <= 0:
+            continue
+        latest = latest_fin_by_ec.get(edinet_code)
+        if not latest:
+            continue
+        _apply_price_to_record(latest, price)
+        updated += 1
+        if updated % 200 == 0:
+            db.commit()
 
-        db.commit()
-        log.info(f"update_market_data_from_history: {updated}社を更新")
-        return updated
+    db.commit()
+    log.info(f"update_market_data_from_history: {updated}社を更新")
+    return updated
 
-    # ── point_in_time=True: 全レコードを period_end 近傍の株価で更新 ─────────
-    # period_end 近傍の価格は全履歴を持つ weekly（close_last）から引く
+
+def _update_market_data_point_in_time(db) -> int:
+    """point_in_time=True: 全財務レコードを period_end 近傍の週次株価で更新し、
+    最新レコードは現在株価で上書きする。"""
+    from collections import defaultdict
+
     all_rows = db.query(
         StockPriceWeekly.edinet_code,
         StockPriceWeekly.trade_date,
@@ -892,7 +918,6 @@ def update_market_data_from_history(db, point_in_time: bool = False) -> int:
         return 0
 
     # {edinet_code: sorted list of (trade_date_str, close)}
-    from collections import defaultdict
     history: dict = defaultdict(list)
     for ec, td, cl in all_rows:
         if cl and cl > 0:
@@ -917,13 +942,11 @@ def update_market_data_from_history(db, point_in_time: bool = False) -> int:
         if not rec.period_end:
             continue
 
-        # period_end を date に変換（"YYYY-MM-DD" 形式を前提）
         try:
             target = date.fromisoformat(rec.period_end[:10])
         except (ValueError, TypeError):
             continue
 
-        # 最近傍の trade_date を二分探索
         dates = [p[0] for p in prices]
         pos = bisect.bisect_left(dates, target.isoformat())
         best_price = None
@@ -962,6 +985,25 @@ def update_market_data_from_history(db, point_in_time: bool = False) -> int:
     return updated
 
 
+def update_market_data_from_history(db, point_in_time: bool = False) -> int:
+    """stock_price_history の終値を financial_records.stock_price に反映する。
+    stooq が GitHub Actions IP でブロックされる問題を回避するため、
+    J-Quants 由来の stock_price_history を使ってバリュエーション指標を計算する。
+
+    point_in_time=False（デフォルト・日次差分向け）:
+        各社の最新レコードのみ、最新株価で更新する。高速。
+    point_in_time=True（全件収集 finalize 向け）:
+        全財務レコードを period_end 最近傍の株価で更新する。
+        J-Quants カバレッジ外（データなし）のレコードはスキップし既存値を保持する。
+        最新レコードは常に最新株価で上書きする。
+
+    戻り値: 更新した財務レコード数
+    """
+    if not point_in_time:
+        return _update_market_data_latest(db)
+    return _update_market_data_point_in_time(db)
+
+
 async def backfill_historical_stock_prices_yahoo(
     db,
     on_progress: Optional[Callable[[int, int, str], None]] = None,
@@ -975,7 +1017,6 @@ async def backfill_historical_stock_prices_yahoo(
     J-Quants 由来の既存 stock_price は上書きしない（NULL のみ補完）。
     GitHub Actions（Azure IP）から動作する。
     """
-    from database import FinancialRecord, Company as _Company
     from collections import defaultdict
 
     cutoff = (date.today() - timedelta(days=JQUANTS_BACKFILL_DAYS)).isoformat()
@@ -997,8 +1038,8 @@ async def backfill_historical_stock_prices_yahoo(
     # edinet_code → sec_code マッピング
     sec_map = {
         c.edinet_code: c.sec_code
-        for c in db.query(_Company.edinet_code, _Company.sec_code)
-        .filter(_Company.sec_code.isnot(None))
+        for c in db.query(Company.edinet_code, Company.sec_code)
+        .filter(Company.sec_code.isnot(None))
         .all()
     }
 
@@ -1072,8 +1113,9 @@ async def fill_recent_stock_price_gap_yahoo(
     Yahoo Finance から不足期間を補完して stock_price_history に追記する。
     差分収集（incremental）後のフォールバックとして使用。
     J-Quants データが存在する行は上書きしない（ON CONFLICT DO NOTHING）。
+    プロバイダー固有ロジック（Yahoo 逐次フェッチ）を _yahoo_batch_gen に分離し、
+    _price_collection_driver の共通フレームで DB 保存・trim を一元管理する。
     """
-    from database import StockPriceDaily, StockPriceWeekly, record_prices_batch, trim_daily, Company as _Company
     from sqlalchemy import func as sqlfunc
 
     # 最新日は直近窓の daily を基準にする（無ければ weekly にフォールバック）
@@ -1093,40 +1135,31 @@ async def fill_recent_stock_price_gap_yahoo(
     d_from = (latest_date + timedelta(days=1)).strftime("%Y%m%d")
     d_to   = date.today().strftime("%Y%m%d")
 
-    # sec_code → edinet_code マッピング
     companies = [
         (row.sec_code, row.edinet_code)
-        for row in db.query(_Company.sec_code, _Company.edinet_code)
-        .filter(_Company.sec_code.isnot(None))
+        for row in db.query(Company.sec_code, Company.edinet_code)
+        .filter(Company.sec_code.isnot(None))
         .all()
     ]
-    total      = len(companies)
-    upserted   = 0
+    total = len(companies)
 
-    async with httpx.AsyncClient() as session:
+    async def _yahoo_batch_gen(session):
         for i, (sec_code, edinet_code) in enumerate(companies, 1):
-            ticker = f"{sec_code}.T"
-            rows = await fetch_yahoo_history(session, ticker, d_from, d_to)
-            if rows:
-                records = [
-                    {
-                        "edinet_code": edinet_code,
-                        "trade_date":  r["trade_date"],
-                        "close":  r["close"], "volume": r.get("volume"),
-                    }
-                    for r in rows if r["close"]
-                ]
-                if records:
-                    # ギャップ補完は最新日より後の新規日付が対象のため衝突は稀。
-                    # close-only 2本立てへ集約保存（trim はループ末で一括）。
-                    upserted += record_prices_batch(db, records, trim=False)
-
+            rows = await fetch_yahoo_history(session, f"{sec_code}.T", d_from, d_to)
+            # ギャップ補完は最新日より後の新規日付が対象のため衝突は稀。
+            records = [
+                {"edinet_code": edinet_code, "trade_date": r["trade_date"],
+                 "close": r["close"], "volume": r.get("volume")}
+                for r in rows if r["close"]
+            ] if rows else []
             if on_progress and i % 500 == 0:
-                on_progress(i, total, f"[Yahoo gap-fill {i}/{total}] {upserted}件追加")
-
+                on_progress(i, total, f"[Yahoo gap-fill {i}/{total}]")
+            yield records
             await asyncio.sleep(YAHOO_STOCK_RATE_SLEEP)
 
-    trim_daily(db)
+    async with httpx.AsyncClient() as session:
+        _, upserted = await _price_collection_driver(db, _yahoo_batch_gen(session))
+
     log.info(f"fill_recent_stock_price_gap_yahoo: {upserted}件を株価テーブルへ集約保存")
     return {"skipped": False, "upserted": upserted, "from": d_from, "to": d_to}
 
@@ -1161,7 +1194,6 @@ async def refill_cf_from_xbrl(
 
     fetch_xbrl_csv の全 CSV concat + capex ラベル照合により capex/net_change_cash を補完する。
     """
-    from database import FinancialRecord
 
     mode = "missing" if missing_cf else ("capex_only" if capex_only else "normal")
     log.info(f"refill_cf_from_xbrl 開始 (mode={mode}, limit={limit}, sleep={sleep_sec})")
@@ -1266,7 +1298,6 @@ async def diagnose_cf_labels(db, limit: int = 20) -> dict:
     項目名に固定資産/設備/取得/支出 を含む、または要素IDに Purchase/Property/Capital/
     Acquisition/Tangible を含むファクトを全て出力する。
     """
-    from database import FinancialRecord
 
     KW_LABEL = ["固定資産", "設備", "取得", "支出", "購入"]
     KW_ELEM  = ["Purchase", "Property", "Capital", "Acquisition", "Tangible", "PaymentsFor"]
@@ -1357,7 +1388,8 @@ def _fetch_latest_fin_by_ec(db, edinet_codes: list) -> dict:
     }
 
 
-async def update_market_data(max_companies: Optional[int] = None,
+async def update_market_data(db,
+                             max_companies: Optional[int] = None,
                              on_progress: Optional[Callable] = None,
                              cancel_check: Optional[Callable] = None):
     """
@@ -1367,83 +1399,61 @@ async def update_market_data(max_companies: Optional[int] = None,
     PER: stock_price / pl_eps
     PBR: stock_price / bs_bps
     """
-    db = SessionLocal()
-    try:
-        companies = (db.query(Company)
-                     .filter(Company.sec_code.isnot(None))
-                     .filter(Company.sec_code != "")
-                     .all())
-        if max_companies:
-            companies = companies[:max_companies]
+    companies = (db.query(Company)
+                 .filter(Company.sec_code.isnot(None))
+                 .filter(Company.sec_code != "")
+                 .all())
+    if max_companies:
+        companies = companies[:max_companies]
 
-        total = len(companies)
-        updated = 0
-        log.info(f"市場データ更新開始: {total}社")
+    total = len(companies)
+    updated = 0
+    log.info(f"市場データ更新開始: {total}社")
 
-        latest_fin_by_ec = _fetch_latest_fin_by_ec(db, [c.edinet_code for c in companies])
+    latest_fin_by_ec = _fetch_latest_fin_by_ec(db, [c.edinet_code for c in companies])
 
-        sem = asyncio.Semaphore(STOOQ_CONCURRENCY)
+    sem = asyncio.Semaphore(STOOQ_CONCURRENCY)
 
-        async def _fetch_price(company, client):
-            async with sem:
-                price = await fetch_stock_price_stooq(company.sec_code, client)
-            return company, price
+    async def _fetch_price(company, client):
+        async with sem:
+            price = await fetch_stock_price_stooq(company.sec_code, client)
+        return company, price
 
-        async with httpx.AsyncClient() as client:
-            tasks = [asyncio.ensure_future(_fetch_price(c, client)) for c in companies]
-            completed = 0
-            for coro in asyncio.as_completed(tasks):
-                if cancel_check and cancel_check():
-                    for t in tasks:
-                        t.cancel()
-                    if on_progress:
-                        on_progress(completed, total,
-                                    f"[停止] ユーザーによる停止（{completed}/{total}社処理済み）")
-                    db.commit()
-                    log.info(f"市場データ更新をキャンセルしました（{completed}/{total}社処理済み）")
-                    return True
-
-                company, price = await coro
-                completed += 1
+    async with httpx.AsyncClient() as client:
+        tasks = [asyncio.ensure_future(_fetch_price(c, client)) for c in companies]
+        completed = 0
+        for coro in asyncio.as_completed(tasks):
+            if cancel_check and cancel_check():
+                for t in tasks:
+                    t.cancel()
                 if on_progress:
                     on_progress(completed, total,
-                                f"[{completed}/{total}] 株価取得: {company.sec_code} {company.name}")
+                                f"[停止] ユーザーによる停止（{completed}/{total}社処理済み）")
+                db.commit()
+                log.info(f"市場データ更新をキャンセルしました（{completed}/{total}社処理済み）")
+                return True
 
-                if price is None:
-                    continue
+            company, price = await coro
+            completed += 1
+            if on_progress:
+                on_progress(completed, total,
+                            f"[{completed}/{total}] 株価取得: {company.sec_code} {company.name}")
 
-                latest = latest_fin_by_ec.get(company.edinet_code)
-                if not latest:
-                    continue
+            if price is None:
+                continue
 
-                latest.stock_price = price
+            latest = latest_fin_by_ec.get(company.edinet_code)
+            if not latest:
+                continue
 
-                if latest.pl_eps and latest.pl_eps > 0:
-                    latest.per = round(price / latest.pl_eps, 2)
-                if latest.bs_bps and latest.bs_bps > 0:
-                    latest.pbr = round(price / latest.bs_bps, 2)
-                _sh = (float(latest.issued_shares) if (latest.issued_shares and latest.issued_shares > 0)
-                       else ((latest.bs_total_equity / latest.bs_bps)
-                             if (latest.bs_bps and latest.bs_bps > 0
-                                 and latest.bs_total_equity and latest.bs_total_equity > 0)
-                             else None))
-                if _sh:
-                    latest.market_cap = round(price * _sh / 1_000_000, 2)
-                if latest.dps and latest.dps > 0 and price > 0:
-                    latest.div_yield = round(latest.dps / price * 100, 2)
-                # nc_ratio（ネットキャッシュ比率 = net_cash / 時価総額）は計算結果のため
-                # financial_metrics VIEW で都度算出する（財務本体には永続化しない）。
-                # 清原氏の銘柄選別基準: nc_ratio > 1.0 で「時価総額を上回るネットキャッシュ」
+            _apply_price_to_record(latest, price)
+            updated += 1
+            if updated % 50 == 0:
+                db.commit()
+                log.info(f"市場データ更新中: {updated}社完了")
 
-                updated += 1
-                if updated % 50 == 0:
-                    db.commit()
-                    log.info(f"市場データ更新中: {updated}社完了")
-
-        db.commit()
-        log.info(f"市場データ更新完了: {updated}/{total}社")
-    finally:
-        db.close()
+    db.commit()
+    log.info(f"市場データ更新完了: {updated}/{total}社")
     return False
 
 
@@ -1509,183 +1519,194 @@ async def reparse_from_raw(year: Optional[int] = None,
 
 # ── フル収集 ──────────────────────────────────────────────────────────────
 
-async def run_full_collection(years_back: int = 5,
+async def _phase_upsert_master(db, client, on_progress, max_companies) -> tuple:
+    """Phase 1: EDINET から企業マスタを取得し DB に一括 Upsert する。
+    (company_info, known_edinet, edinet_set) を返す。
+    """
+    companies_df = await fetch_edinet_code_list(client)
+    master_total = len(companies_df)
+    log.info(f"企業マスタをDBに保存中... ({master_total}社)")
+    if on_progress:
+        on_progress(0, master_total, f"[企業マスタ保存] {master_total}社をDBに登録中...")
+    # 3978 社の dirty を 1 トランザクションに溜めると Supabase が read-only
+    # に切り替わるため、BATCH 件ごとに commit + expire_all してトランザクションを短く保つ
+    MASTER_BATCH = 200
+    for i, (_, row) in enumerate(companies_df.iterrows()):
+        upsert_company(db, {
+            "edinet_code":  row["edinet_code"],
+            "sec_code":     row.get("sec_code", ""),
+            "name":         row["company_name"],
+            "industry":     row.get("industry", ""),
+            "fiscal_month": int(row["fiscal_month"]) if str(row.get("fiscal_month", "")).isdigit() else None,
+        })
+        if (i + 1) % MASTER_BATCH == 0:
+            db.commit()
+            db.expire_all()
+        if on_progress and (i + 1) % 500 == 0:
+            on_progress(i + 1, master_total, f"[企業マスタ保存] {i+1}/{master_total}社完了")
+    db.commit()
+    if on_progress:
+        on_progress(master_total, master_total, f"[企業マスタ保存完了] {master_total}社")
+
+    company_info = {
+        row["edinet_code"]: {
+            "company_name": row["company_name"],
+            "industry":     row.get("industry", ""),
+        }
+        for _, row in companies_df.iterrows()
+    }
+    # 全件収集時は formCode=030000+secCode フィルタ（fetch_doc_list内）に委任し
+    # 不完全なマスタリストで絞り込まない。max_companies 指定時のみ絞り込む。
+    edinet_set = set(companies_df["edinet_code"].tolist()) if max_companies and not companies_df.empty else None
+    known_edinet = set(company_info.keys())
+    return company_info, known_edinet, edinet_set
+
+
+def _phase_build_skip_ids(db, skip_existing: bool, skip_if_raw_exists: bool) -> set:
+    """Phase 2: 差分スキップ対象の doc_id セットを DB から一括取得する。"""
+    if skip_existing:
+        rows = db.query(FinancialRecord.doc_id).filter(FinancialRecord.doc_id.isnot(None)).all()
+        ids = {r[0] for r in rows}
+        log.info(f"差分収集モード: {len(ids)}件の収集済みdoc_idをスキップ対象として読み込み")
+        return ids
+    if skip_if_raw_exists:
+        rows = db.query(XbrlRawDocument.doc_id).all()
+        ids = {r[0] for r in rows}
+        log.info(f"raw_skip モード: xbrl_raw_documents に保存済みの {len(ids)} 件をスキップ")
+        return ids
+    return set()
+
+
+async def _phase_process_docs(db, client, all_docs: list,
+                               company_info: dict, known_edinet: set,
+                               existing_doc_ids: set, skip_existing: bool,
+                               on_progress, cancel_check) -> tuple:
+    """Phase 4: XBRL 取得→パース→DB 保存のメインループ。(skipped, cancelled) を返す。"""
+    total   = len(all_docs)
+    skipped = 0
+    for i, doc in enumerate(all_docs):
+        if cancel_check and cancel_check():
+            if on_progress:
+                on_progress(i, total, f"[停止] ユーザーによる停止（{i}/{total}件処理済み）")
+            db.commit()
+            log.info(f"収集をキャンセルしました（{i}/{total}件処理済み）")
+            return skipped, True
+
+        doc_id      = doc["docID"]
+        edinet_code = doc["edinetCode"]
+        sec_code    = (doc.get("secCode") or "")[:4]
+        period_end  = doc.get("periodEnd") or ""
+        filer_name  = doc.get("filerName") or company_info.get(edinet_code, {}).get("company_name", "")
+        year        = int(period_end[:4]) if period_end else 0
+
+        if skip_existing and doc_id in existing_doc_ids:
+            skipped += 1
+            if on_progress:
+                on_progress(i + 1, total,
+                            f"[{i+1}/{total}] スキップ（収集済み）: {filer_name} {period_end}")
+            continue
+
+        if on_progress:
+            on_progress(i + 1, total, f"[{i+1}/{total}] {filer_name}({sec_code}) {period_end}")
+        log.info(f"[{i+1}/{total}] {filer_name}({sec_code}) {period_end}")
+
+        try:
+            if edinet_code not in known_edinet:
+                upsert_company(db, {
+                    "edinet_code": edinet_code, "sec_code": sec_code,
+                    "name": filer_name, "industry": "",
+                })
+                db.flush()
+                known_edinet.add(edinet_code)
+
+            xbrl_df = await fetch_xbrl_csv(client, doc_id)
+            await asyncio.sleep(RATE_SLEEP)
+
+            # XBRL 全行を raw テーブルに保存（新指標追加時の再解析用）
+            # xbrl_raw_documents への書き込みは即コミットしてロックを解放する
+            # （financial_records との間でデッドロックが起きるのを防ぐため）
+            if not SKIP_XBRL_RAW and xbrl_df is not None and not xbrl_df.empty:
+                raw_rows = df_to_raw_rows(xbrl_df)
+                if raw_rows:
+                    upsert_xbrl_raw(db, doc_id, edinet_code, period_end, raw_rows)
+                    db.commit()
+
+            raw = parse_xbrl_csv(xbrl_df, edinet_code, period_end)
+            if not any(raw.get(cat) for cat in ("bs", "pl", "cf")):
+                log.warning(f"財務データなし（スキップ）: {filer_name} {doc_id}")
+                continue
+            rec = calc_derived(raw)
+
+            xbrl_industry   = rec.get("meta", {}).get("industry_name", "")
+            master_industry = company_info.get(edinet_code, {}).get("industry", "")
+            rec.update({
+                "edinet_code":  edinet_code,
+                "sec_code":     sec_code,
+                "company_name": filer_name,
+                "industry":     xbrl_industry or master_industry,
+                "year":         year,
+                "period_end":   period_end,
+                "doc_id":       doc_id,
+                "source":       "EDINET_XBRL",
+            })
+            upsert_financial(db, rec)
+
+            if (i + 1) % 50 == 0:
+                db.commit()
+                log.info("DB commit (50件)")
+            if (i + 1) % 100 == 0:
+                await asyncio.sleep(BATCH_PAUSE)
+
+        except Exception as e:
+            log.error(f"書類処理エラー（スキップ）: {doc_id} {filer_name} — {e}", exc_info=True)
+            try:
+                db.rollback()
+            except Exception:
+                pass
+
+    return skipped, False
+
+
+async def run_full_collection(db,
+                              years_back: int = 5,
                               max_companies: Optional[int] = None,
                               on_progress: Optional[Callable] = None,
                               skip_existing: bool = False,
                               skip_if_raw_exists: bool = False,
                               cancel_check: Optional[Callable] = None):
-    db = SessionLocal()
-    try:
-        async with httpx.AsyncClient() as client:
-            companies_df = await fetch_edinet_code_list(client)
+    async with httpx.AsyncClient() as client:
+        # Phase 1: 企業マスタ Upsert
+        company_info, known_edinet, edinet_set = await _phase_upsert_master(
+            db, client, on_progress, max_companies
+        )
 
-            # 企業マスタは全件DBに保存（max_companiesは収集書類数の上限であり企業マスタは絞らない）
-            df_master = companies_df
+        # Phase 2: 差分スキップ集合の構築
+        existing_doc_ids = _phase_build_skip_ids(db, skip_existing, skip_if_raw_exists)
 
-            master_total = len(df_master)
-            log.info(f"企業マスタをDBに保存中... ({master_total}社)")
-            if on_progress:
-                on_progress(0, master_total, f"[企業マスタ保存] {master_total}社をDBに登録中...")
-            # 3978 社の dirty を 1 トランザクションに溜めると Supabase が read-only
-            # に切り替わるため、BATCH 件ごとに commit + expire_all してトランザクションを短く保つ
-            MASTER_BATCH = 200
-            for i, (_, row) in enumerate(df_master.iterrows()):
-                upsert_company(db, {
-                    "edinet_code":  row["edinet_code"],
-                    "sec_code":     row.get("sec_code", ""),
-                    "name":         row["company_name"],
-                    "industry":     row.get("industry", ""),
-                    "fiscal_month": int(row["fiscal_month"]) if str(row.get("fiscal_month", "")).isdigit() else None,
-                })
-                if (i + 1) % MASTER_BATCH == 0:
-                    db.commit()
-                    db.expire_all()
-                if on_progress and (i + 1) % 500 == 0:
-                    on_progress(i + 1, master_total,
-                                f"[企業マスタ保存] {i+1}/{master_total}社完了")
-            db.commit()
-            if on_progress:
-                on_progress(master_total, master_total,
-                            f"[企業マスタ保存完了] {master_total}社")
+        # Phase 3: 書類一覧スキャン
+        today = date.today()
+        start = date(today.year - years_back, 1, 1)
+        end   = today - timedelta(days=1)
+        log.info(f"書類一覧収集: {start} ~ {end}")
+        if on_progress:
+            on_progress(0, 1, f"[書類スキャン開始] {start} ～ {end}（{(end - start).days + 1}日分）")
+        all_docs = await collect_doc_ids_for_period(
+            client, start, end, edinet_set, max_companies=max_companies, on_progress=on_progress
+        )
+        log.info(f"対象書類数: {len(all_docs)}")
 
-            # 差分収集モード: 収集済みのdoc_idをDBから一括取得してセットに保持
-            existing_doc_ids: set = set()
-            if skip_existing:
-                rows = db.query(FinancialRecord.doc_id).filter(FinancialRecord.doc_id.isnot(None)).all()
-                existing_doc_ids = {r[0] for r in rows}
-                log.info(f"差分収集モード: {len(existing_doc_ids)}件の収集済みdoc_idをスキップ対象として読み込み")
-            elif skip_if_raw_exists:
-                rows = db.query(XbrlRawDocument.doc_id).all()
-                existing_doc_ids = {r[0] for r in rows}
-                log.info(f"raw_skip モード: xbrl_raw_documents に保存済みの {len(existing_doc_ids)} 件をスキップ")
+        # Phase 4: XBRL 取得 / パース / DB 保存
+        skipped, cancelled = await _phase_process_docs(
+            db, client, all_docs, company_info, known_edinet,
+            existing_doc_ids, skip_existing, on_progress, cancel_check
+        )
+        if cancelled:
+            return True
+        db.commit()
+        log.info(f"全収集完了（スキップ: {skipped}件 / 取得: {len(all_docs) - skipped}件）")
 
-            # company_name と industry を参照できるよう辞書化（全CSVデータを保持）
-            company_info = {
-                row["edinet_code"]: {
-                    "company_name": row["company_name"],
-                    "industry":     row.get("industry", ""),
-                }
-                for _, row in companies_df.iterrows()
-            }
-            # 全件収集時は formCode=030000+secCode フィルタ（fetch_doc_list内）に委任し
-            # 不完全なマスタリストで絞り込まない。max_companies 指定時のみ絞り込む。
-            edinet_set = None
-            if max_companies and not df_master.empty:
-                edinet_set = set(df_master["edinet_code"].tolist())
-            known_edinet = set(company_info.keys())
-
-            today = date.today()
-            start = date(today.year - years_back, 1, 1)
-            end   = today - timedelta(days=1)   # 昨日まで（最新の報告書を含む）
-
-            log.info(f"書類一覧収集: {start} ~ {end}")
-            if on_progress:
-                on_progress(0, 1, f"[書類スキャン開始] {start} ～ {end}（{(end - start).days + 1}日分）")
-            all_docs = await collect_doc_ids_for_period(
-                client, start, end, edinet_set, max_companies=max_companies,
-                on_progress=on_progress
-            )
-            total = len(all_docs)
-            log.info(f"対象書類数: {total}")
-
-            skipped = 0
-            for i, doc in enumerate(all_docs):
-                if cancel_check and cancel_check():
-                    if on_progress:
-                        on_progress(i, total, f"[停止] ユーザーによる停止（{i}/{total}件処理済み）")
-                    db.commit()
-                    log.info(f"収集をキャンセルしました（{i}/{total}件処理済み）")
-                    return True
-
-                doc_id      = doc["docID"]
-                edinet_code = doc["edinetCode"]
-                sec_code    = (doc.get("secCode") or "")[:4]
-                period_end  = doc.get("periodEnd") or ""
-                filer_name  = doc.get("filerName") or company_info.get(edinet_code, {}).get("company_name", "")
-                year        = int(period_end[:4]) if period_end else 0
-
-                # 差分収集: 収集済みの書類はスキップ
-                if skip_existing and doc_id in existing_doc_ids:
-                    skipped += 1
-                    if on_progress:
-                        on_progress(i + 1, total,
-                                    f"[{i+1}/{total}] スキップ（収集済み）: {filer_name} {period_end}")
-                    continue
-
-                if on_progress:
-                    on_progress(i + 1, total,
-                                f"[{i+1}/{total}] {filer_name}({sec_code}) {period_end}")
-
-                log.info(f"[{i+1}/{total}] {filer_name}({sec_code}) {period_end}")
-
-                try:
-                    # 書類から発見した未登録企業を都度upsert（FK制約エラー防止）
-                    if edinet_code not in known_edinet:
-                        upsert_company(db, {
-                            "edinet_code":  edinet_code,
-                            "sec_code":     sec_code,
-                            "name":         filer_name,
-                            "industry":     "",
-                        })
-                        db.flush()
-                        known_edinet.add(edinet_code)
-
-                    xbrl_df = await fetch_xbrl_csv(client, doc_id)
-                    await asyncio.sleep(RATE_SLEEP)
-
-                    # XBRL 全行を raw テーブルに保存（新指標追加時の再解析用）
-                    # xbrl_raw_documents への書き込みは即コミットしてロックを解放する
-                    # （financial_records との間でデッドロックが起きるのを防ぐため）
-                    if not SKIP_XBRL_RAW and xbrl_df is not None and not xbrl_df.empty:
-                        raw_rows = df_to_raw_rows(xbrl_df)
-                        if raw_rows:
-                            upsert_xbrl_raw(db, doc_id, edinet_code, period_end, raw_rows)
-                            db.commit()
-
-                    raw = parse_xbrl_csv(xbrl_df, edinet_code, period_end)
-                    if not any(raw.get(cat) for cat in ("bs", "pl", "cf")):
-                        log.warning(f"財務データなし（スキップ）: {filer_name} {doc_id}")
-                        continue
-                    rec = calc_derived(raw)
-
-                    # XBRLから業種が取れた場合は優先、なければマスタの業種
-                    xbrl_industry = rec.get("meta", {}).get("industry_name", "")
-                    master_industry = company_info.get(edinet_code, {}).get("industry", "")
-                    industry = xbrl_industry or master_industry
-
-                    rec.update({
-                        "edinet_code":  edinet_code,
-                        "sec_code":     sec_code,
-                        "company_name": filer_name,
-                        "industry":     industry,
-                        "year":         year,
-                        "period_end":   period_end,
-                        "doc_id":       doc_id,
-                        "source":       "EDINET_XBRL",
-                    })
-                    upsert_financial(db, rec)
-
-                    if (i + 1) % 50 == 0:
-                        db.commit()
-                        log.info("DB commit (50件)")
-                    if (i + 1) % 100 == 0:
-                        await asyncio.sleep(BATCH_PAUSE)
-
-                except Exception as e:
-                    log.error(f"書類処理エラー（スキップ）: {doc_id} {filer_name} — {e}", exc_info=True)
-                    try:
-                        db.rollback()
-                    except Exception:
-                        pass
-
-            db.commit()
-            log.info(f"全収集完了（スキップ: {skipped}件 / 取得: {total - skipped}件）")
-
-            # XBRL から業種が取れないため、JPX上場会社一覧から業種を補完する
-            await update_industry_from_jpx(client, db, on_progress=on_progress)
-    finally:
-        db.close()
+        # Phase 5: 業種補完（JPX 上場会社一覧から XBRL で取れない業種を補完）
+        await update_industry_from_jpx(client, db, on_progress=on_progress)
     return False
 
 
@@ -1931,7 +1952,13 @@ if __name__ == "__main__":
             on_progress=lambda c, t, m: print(m),
         ))
     elif args.market:
-        asyncio.run(update_market_data(args.max))
+        async def _market():
+            db = SessionLocal()
+            try:
+                await update_market_data(db, args.max)
+            finally:
+                db.close()
+        asyncio.run(_market())
     elif args.macro:
         async def _run():
             db = SessionLocal()
@@ -1945,4 +1972,10 @@ if __name__ == "__main__":
     elif args.company:
         asyncio.run(refresh_company(args.company, args.years))
     else:
-        asyncio.run(run_full_collection(args.years, args.max, skip_existing=args.incremental))
+        async def _full():
+            db = SessionLocal()
+            try:
+                await run_full_collection(db, args.years, args.max, skip_existing=args.incremental)
+            finally:
+                db.close()
+        asyncio.run(_full())
