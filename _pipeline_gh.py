@@ -155,15 +155,20 @@ async def main(years_back: int, collect_only: bool = False,
     if not finalize_only:
         # ─── Phase 1: XBRL 収集（financial_records.doc_id でスキップ）──────────
         log(f"[1/5] XBRL 収集 開始（skip_existing=True, years_back={years_back}）")
-        cancelled = await _run_with_retry(
-            lambda: run_full_collection(
-                years_back=years_back,
-                skip_existing=True,
-                skip_if_raw_exists=False,
-                on_progress=lambda c, t, m: log(m) if c % 50 == 0 or "[完了]" in m or "[企業マスタ" in m else None,
-            ),
-            label="1/5",
-        )
+        db1 = SessionLocal()
+        try:
+            cancelled = await _run_with_retry(
+                lambda: run_full_collection(
+                    db1,
+                    years_back=years_back,
+                    skip_existing=True,
+                    skip_if_raw_exists=False,
+                    on_progress=lambda c, t, m: log(m) if c % 50 == 0 or "[完了]" in m or "[企業マスタ" in m else None,
+                ),
+                label="1/5",
+            )
+        finally:
+            db1.close()
         if cancelled:
             log("[1/5] 収集が停止されました")
             return

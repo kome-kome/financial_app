@@ -290,3 +290,50 @@ class TestCollectStatusEndpoint:
         assert body["running"] is False
         assert len(body["recent_jobs"]) == 1
         assert body["recent_jobs"][0]["status"] == "done"
+
+
+class TestScreenEndpoint:
+    """#74: /api/screen フィルタ条件の統合テスト。"""
+
+    def _setup(self, db, make_fin, make_metric, rows):
+        """FinancialRecord + FinancialMetric を同一 edinet_code/year でペア挿入。"""
+        for kw in rows:
+            db.add(make_fin(edinet_code=kw["edinet_code"], year=kw.get("year", 2023)))
+            db.add(make_metric(**kw))
+        db.commit()
+
+    def test_no_filter_returns_all(self, db, make_fin, make_metric):
+        self._setup(db, make_fin, make_metric, [
+            {"edinet_code": "E00001", "year": 2023, "roe": 0.15},
+            {"edinet_code": "E00002", "year": 2023, "roe": 0.08},
+        ])
+        api.app.dependency_overrides[api.get_db] = lambda: db
+        r = client.post("/api/screen", json={})
+        assert r.status_code == 200
+        assert r.json()["count"] == 2
+
+    def test_combined_filters_industry_and_roe(self, db, make_fin, make_metric):
+        self._setup(db, make_fin, make_metric, [
+            {"edinet_code": "E00001", "year": 2023, "industry": "情報・通信業", "roe": 0.20},
+            {"edinet_code": "E00002", "year": 2023, "industry": "銀行業", "roe": 0.20},
+        ])
+        api.app.dependency_overrides[api.get_db] = lambda: db
+        r = client.post("/api/screen", json={"min_roe": 0.15, "industry": "情報・通信業"})
+        assert r.status_code == 200
+        body = r.json()
+        assert body["count"] == 1
+        assert body["results"][0]["edinet_code"] == "E00001"
+
+    def test_no_match_returns_empty(self, db, make_fin, make_metric):
+        self._setup(db, make_fin, make_metric, [
+            {"edinet_code": "E00001", "year": 2023, "roe": 0.05},
+        ])
+        api.app.dependency_overrides[api.get_db] = lambda: db
+        r = client.post("/api/screen", json={"min_roe": 999.0})
+        assert r.status_code == 200
+        assert r.json()["count"] == 0
+
+    def test_invalid_limit_type_returns_422(self, db):
+        api.app.dependency_overrides[api.get_db] = lambda: db
+        r = client.post("/api/screen", json={"limit": "not_a_number"})
+        assert r.status_code == 422

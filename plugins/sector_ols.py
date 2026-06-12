@@ -255,20 +255,8 @@ class SectorOLSPlugin(AnalysisPlugin):
             },
         }
 
-    async def execute(self, params: dict, db: Any) -> dict:
-        from sqlalchemy import func
-        from database import FinancialRecord, upsert_regression_result, latest_year_subq
-
-        # params はパラメータ契約に従い coerce 済み（execute_plugin / coerce_params 経由）。
-        target         = params["target"]
-        features       = params["features"]
-        min_samples    = params["min_samples"]
-        regularization = params["regularization"]
-        year           = params["year"]
-
-        if not features:
-            raise ValueError("説明変数を1つ以上選択してください")
-
+    def _load_records(self, db, year: int | None) -> list:
+        from database import FinancialRecord, latest_year_subq
         subq = latest_year_subq(db, FinancialRecord)
         query = (
             db.query(FinancialRecord)
@@ -278,11 +266,11 @@ class SectorOLSPlugin(AnalysisPlugin):
         if year:
             query = db.query(FinancialRecord).filter(FinancialRecord.year == year)
         records = query.all()
-
         if not records:
             raise ValueError("データがありません。先にデータ収集を実行してください。")
+        return records
 
-        # 業種ごとにサンプルを分類
+    def _classify_by_sector(self, records: list, features: list, target: str) -> dict:
         by_sector: dict[str, list] = defaultdict(list)
         for r in records:
             if not r.industry:
@@ -290,10 +278,9 @@ class SectorOLSPlugin(AnalysisPlugin):
             y_val = getattr(r, target, None)
             if y_val is None or y_val <= 0:
                 continue
-            # 派生 per-share 計算に必要な発行株数を一括取得
             shares = shares_outstanding(r)
             if shares is None or shares <= 0:
-                continue  # 株数推計不能の銘柄は対象外
+                continue
             row, ok = [], True
             for feat in features:
                 v = _resolve_per_share_value(r, feat, shares)
@@ -303,162 +290,172 @@ class SectorOLSPlugin(AnalysisPlugin):
                 row.append(v)
             if ok:
                 by_sector[r.industry].append((row, float(y_val), r))
+        return by_sector
 
-        sector_stats = []
-        all_predictions = []
-        n_skipped = 0
+    def _preprocess_sector(self, samples: list, features: list) -> tuple:
+        """winsorize + z-score 正規化。(X_norm, y_normed, y_mu, y_sd, X_win_cols, raw_y_win) を返す。"""
+        raw_X = [s[0] for s in samples]
+        raw_y = [s[1] for s in samples]
+        X_win_cols = []
+        for fi in range(len(features)):
+            col_w, _, _ = winsorize([row[fi] for row in raw_X])
+            X_win_cols.append(col_w)
+        raw_X_win = [
+            [X_win_cols[fi][ri] for fi in range(len(features))]
+            for ri in range(len(samples))
+        ]
+        raw_y_win, _, _ = winsorize(raw_y)
+        X_norm: list = []
+        for fi in range(len(features)):
+            normed, _, _ = normalize([row[fi] for row in raw_X_win], "zscore")
+            for ri, v in enumerate(normed):
+                if fi == 0:
+                    X_norm.append([1.0, v])
+                else:
+                    X_norm[ri].append(v)
+        y_normed, y_mu, y_sd = normalize(raw_y_win, "zscore")
+        return X_norm, y_normed, y_mu, y_sd, X_win_cols, raw_y_win
+
+    def _fit_and_predict(self, X_norm: list, y_normed: list,
+                         y_mu: float, y_sd: float, regularization: str) -> tuple:
+        """OLS/Ridge フィット + 逆正規化予測値。失敗時は (None, None)。"""
+        result = ridge_regression(X_norm, y_normed) if regularization == "ridge" \
+            else ols(X_norm, y_normed)
+        if not result:
+            return None, None
+        beta = result["beta"]
+        all_yhat_norm = [sum(x * b for x, b in zip(row, beta)) for row in X_norm]
+        all_yhat = [v * y_sd + y_mu for v in all_yhat_norm]
+        return result, all_yhat
+
+    def _persist_and_rank(self, db, sector: str, samples: list,
+                          all_yhat: list, regularization: str) -> list:
+        """予測値・乖離率を DB に保存し、業種内ランク付きリストを返す。"""
+        from database import upsert_regression_result
+        sector_preds = []
+        for i, (_, actual, r) in enumerate(samples):
+            predicted = all_yhat[i]
+            gap = round((predicted - actual) / actual * 100, 2) if actual else None
+            predicted_mcap = (
+                round(predicted / r.stock_price * r.market_cap, 0)
+                if r.market_cap and r.stock_price and r.stock_price > 0 else None
+            )
+            upsert_regression_result(
+                db,
+                edinet_code=r.edinet_code, year=r.year, period_end=r.period_end,
+                predicted_market_cap=predicted_mcap, gap_ratio=gap,
+                model=("ridge" if regularization == "ridge" else "ols"),
+                sector=sector,
+            )
+            sector_preds.append({
+                "sec_code":     r.sec_code or r.edinet_code,
+                "company_name": r.company_name,
+                "industry":     sector,
+                "year":         r.year,
+                "actual":       round(actual, 0),
+                "predicted":    round(predicted, 0),
+                "gap_ratio":    gap,
+                "sector_rank":  None,
+                "sector_total": len(samples),
+            })
+        db.commit()
+        sorted_idxs = sorted(range(len(sector_preds)),
+                             key=lambda i: sector_preds[i]["gap_ratio"] or 0)
+        for rank, idx in enumerate(sorted_idxs, 1):
+            sector_preds[idx]["sector_rank"] = rank
+        return sector_preds
+
+    def _build_stat_entry(self, sector: str, samples: list, result: dict,
+                          y_sd: float, X_norm: list, y_normed: list,
+                          features: list, regularization: str,
+                          X_win_cols: list) -> dict:
+        """業種統計エントリ（診断統計・多重共線性チェック含む）を構築する。"""
+        p_values = result.get("p_value", [])
+        n_significant = (
+            sum(1 for pv in p_values[1:] if pv == pv and pv < 0.05)
+            if regularization != "ridge" else None
+        )
+        collinearity = check_collinearity(X_win_cols, list(features))
+        diag = None
+        if regularization != "ridge":
+            try:
+                diag = ols_with_diagnostics(X_norm, y_normed, cov_type="HC3")
+            except Exception:
+                diag = None
+        stat_entry = {
+            "industry": sector,
+            "n":        len(samples),
+            "r2":       round(result["r2"], 4),
+            "adj_r2":   round(result["adj_r2"], 4),
+            "rmse":     round(result["rmse"] * y_sd, 2),
+            "df":       result.get("df"),
+            "rank":     result.get("rank"),
+            "method":   result.get("method", "ols"),
+            "alpha":    result.get("alpha"),
+            "condition_number": (
+                round(result["condition_number"], 2)
+                if result.get("condition_number") is not None
+                and math.isfinite(result.get("condition_number", float("inf")))
+                else None
+            ),
+            "n_significant_features": n_significant,
+            "p_values": [round(pv, 4) if pv == pv else None for pv in p_values],
+            "t_stats":  [round(t, 4) if t == t else None for t in result.get("t_stat", [])],
+            "collinearity_warnings": {
+                "high_corr_pairs": collinearity["high_corr_pairs"],
+                "high_vif":        collinearity["high_vif"],
+            },
+        }
+        if diag is not None:
+            stat_entry["diagnostics"] = {
+                "durbin_watson": round(diag["durbin_watson"], 3),
+                "jarque_bera": (
+                    {
+                        "stat":     round(diag["jarque_bera"]["stat"], 3),
+                        "pvalue":   round(diag["jarque_bera"]["pvalue"], 4),
+                        "skew":     round(diag["jarque_bera"]["skew"], 3),
+                        "kurtosis": round(diag["jarque_bera"]["kurtosis"], 3),
+                    }
+                    if diag.get("jarque_bera") is not None else None
+                ),
+                "f_stat":   round(diag["f_stat"], 3) if math.isfinite(diag.get("f_stat", float("nan"))) else None,
+                "f_pvalue": round(diag["f_pvalue"], 6) if math.isfinite(diag.get("f_pvalue", float("nan"))) else None,
+                "se_hc3":   [round(s, 4) if math.isfinite(s) else None for s in diag["se"]],
+                "cov_type": diag["cov_type"],
+            }
+        return stat_entry
+
+    async def execute(self, params: dict, db: Any) -> dict:
+        target         = params["target"]
+        features       = params["features"]
+        min_samples    = params["min_samples"]
+        regularization = params["regularization"]
+        year           = params["year"]
+
+        if not features:
+            raise ValueError("説明変数を1つ以上選択してください")
+
+        records   = self._load_records(db, year)
+        by_sector = self._classify_by_sector(records, features, target)
+
+        sector_stats, all_predictions, n_skipped = [], [], 0
 
         for sector, samples in sorted(by_sector.items()):
             if len(samples) < min_samples:
                 n_skipped += 1
                 continue
 
-            raw_X = [s[0] for s in samples]
-            raw_y = [s[1] for s in samples]
-
-            # 外れ値処理（必須）: 特徴量・目的変数ともに winsorize(p1-p99)
-            X_win_cols = []
-            for fi in range(len(features)):
-                col = [row[fi] for row in raw_X]
-                col_w, _, _ = winsorize(col)
-                X_win_cols.append(col_w)
-            raw_X_win = [
-                [X_win_cols[fi][ri] for fi in range(len(features))]
-                for ri in range(len(samples))
-            ]
-            raw_y_win, _, _ = winsorize(raw_y)
-
-            # z-score 正規化（業種内）
-            X_norm = []
-            for fi in range(len(features)):
-                col = [row[fi] for row in raw_X_win]
-                normed, _, _ = normalize(col, "zscore")
-                for ri, v in enumerate(normed):
-                    if fi == 0:
-                        X_norm.append([1.0, v])
-                    else:
-                        X_norm[ri].append(v)
-            y_normed, y_mu, y_sd = normalize(raw_y_win, "zscore")
-
-            # 回帰モデル選択: OLS（デフォルト） or Ridge（L2 正則化）
-            if regularization == "ridge":
-                result = ridge_regression(X_norm, y_normed)
-            else:
-                result = ols(X_norm, y_normed)
-            if not result:
+            X_norm, y_normed, y_mu, y_sd, X_win_cols, _ = self._preprocess_sector(samples, features)
+            result, all_yhat = self._fit_and_predict(X_norm, y_normed, y_mu, y_sd, regularization)
+            if result is None:
                 n_skipped += 1
                 continue
 
-            beta = result["beta"]
-            all_yhat_norm = [sum(x * b for x, b in zip(row, beta)) for row in X_norm]
-            all_yhat = [v * y_sd + y_mu for v in all_yhat_norm]
-
-            # 各レコードに予測値・乖離率を書き込み
-            # target は常に stock_price[円/株] なので、市場データ（stock_price, market_cap）
-            # が揃っている銘柄のみ predicted_market_cap[百万円] に換算保存する
-            sector_preds = []
-            for i, (_, actual, r) in enumerate(samples):
-                predicted = all_yhat[i]  # [円/株]
-                gap = round((predicted - actual) / actual * 100, 2) if actual else None
-
-                # 予測時価総額[百万円]: 市場データが揃う銘柄のみ換算。
-                # 計算結果は財務本体ではなく regression_results へ隔離保存する。
-                if r.market_cap and r.stock_price and r.stock_price > 0:
-                    predicted_mcap = round(predicted / r.stock_price * r.market_cap, 0)
-                else:
-                    predicted_mcap = None
-                upsert_regression_result(
-                    db,
-                    edinet_code=r.edinet_code, year=r.year, period_end=r.period_end,
-                    predicted_market_cap=predicted_mcap, gap_ratio=gap,
-                    model=("ridge" if regularization == "ridge" else "ols"),
-                    sector=sector,
-                )
-
-                sector_preds.append({
-                    "sec_code":     r.sec_code or r.edinet_code,
-                    "company_name": r.company_name,
-                    "industry":     sector,
-                    "year":         r.year,
-                    "actual":       round(actual, 0),
-                    "predicted":    round(predicted, 0),
-                    "gap_ratio":    gap,
-                    "sector_rank":  None,
-                    "sector_total": len(samples),
-                })
-
-            db.commit()
-
-            # 業種内ランク付け（gap_ratio 低い順 = 割安が1位）
-            sorted_preds = sorted(
-                range(len(sector_preds)),
-                key=lambda i: sector_preds[i]["gap_ratio"] or 0
+            sector_preds = self._persist_and_rank(db, sector, samples, all_yhat, regularization)
+            stat_entry   = self._build_stat_entry(
+                sector, samples, result, y_sd, X_norm, y_normed, features, regularization, X_win_cols
             )
-            for rank, idx in enumerate(sorted_preds, 1):
-                sector_preds[idx]["sector_rank"] = rank
-
             all_predictions.extend(sector_preds)
-            # 説明変数の有意性カウント（切片を除く、p < 0.05 を有意とみなす）
-            # Ridge は p 値を返さないため n_significant も NaN（None）
-            p_values = result.get("p_value", [])
-            n_significant = sum(
-                1 for pv in p_values[1:] if pv == pv and pv < 0.05
-            ) if regularization != "ridge" else None
-
-            # 多重共線性チェック（winsorize 後・正規化前の列で実施）
-            collinearity = check_collinearity(X_win_cols, list(features))
-
-            # 詳細統計診断（statsmodels: Durbin-Watson・Jarque-Bera・F検定）
-            # OLS のみ実施。Ridge は伝統的な統計推論が定義されないためスキップ
-            diag = None
-            if regularization != "ridge":
-                try:
-                    diag = ols_with_diagnostics(X_norm, y_normed, cov_type="HC3")
-                except Exception:
-                    diag = None
-
-            stat_entry = {
-                "industry": sector,
-                "n":        len(samples),
-                "r2":       round(result["r2"], 4),
-                "adj_r2":   round(result["adj_r2"], 4),
-                "rmse":     round(result["rmse"] * y_sd, 2),
-                "df":       result.get("df"),
-                "rank":     result.get("rank"),
-                "method":   result.get("method", "ols"),
-                "alpha":    result.get("alpha"),  # Ridge のみ非 None
-                "condition_number": (
-                    round(result["condition_number"], 2)
-                    if result.get("condition_number") is not None
-                    and math.isfinite(result.get("condition_number", float("inf")))
-                    else None
-                ),
-                "n_significant_features": n_significant,
-                "p_values": [round(pv, 4) if pv == pv else None for pv in p_values],
-                "t_stats":  [round(t, 4) if t == t else None for t in result.get("t_stat", [])],
-                "collinearity_warnings": {
-                    "high_corr_pairs": collinearity["high_corr_pairs"],
-                    "high_vif":        collinearity["high_vif"],
-                },
-            }
-            if diag is not None:
-                stat_entry["diagnostics"] = {
-                    "durbin_watson": round(diag["durbin_watson"], 3),
-                    "jarque_bera": (
-                        {
-                            "stat":   round(diag["jarque_bera"]["stat"], 3),
-                            "pvalue": round(diag["jarque_bera"]["pvalue"], 4),
-                            "skew":   round(diag["jarque_bera"]["skew"], 3),
-                            "kurtosis": round(diag["jarque_bera"]["kurtosis"], 3),
-                        }
-                        if diag.get("jarque_bera") is not None
-                        else None
-                    ),
-                    "f_stat":   round(diag["f_stat"], 3) if math.isfinite(diag.get("f_stat", float("nan"))) else None,
-                    "f_pvalue": round(diag["f_pvalue"], 6) if math.isfinite(diag.get("f_pvalue", float("nan"))) else None,
-                    "se_hc3":   [round(s, 4) if math.isfinite(s) else None for s in diag["se"]],
-                    "cov_type": diag["cov_type"],
-                }
             sector_stats.append(stat_entry)
 
         if not sector_stats:
