@@ -69,6 +69,8 @@ class TotalReturnPlugin(AnalysisPlugin):
         "株価上昇余地＋配当利回りの期待総合リターンでランキング"
     )
     depends_on = []
+    category = "③ 将来リターンを予測"
+    ui_order = 310
 
     def params_schema(self) -> dict:
         return {

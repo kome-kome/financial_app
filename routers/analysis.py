@@ -16,9 +16,42 @@ router = APIRouter()
 log = logging.getLogger(__name__)
 
 
+# サイドバーIA用の「特例エントリ」。AnalysisPlugin ではない分析（スクリーニング・バックテスト）を
+# プラグインと同じメタ形(name/label/category/ui_order)で /api/plugins に並べ、フロントの統一サイドバーへ載せる。
+# 完全プラグイン化はしない（backtest は GET・params_schema 非使用・マルチピリオドで契約に馴染まないため）。
+# href を持つエントリはタブを持たず、サイドバーで別ページへのリンクとして描画される。
+SPECIAL_ANALYSES = [
+    {
+        "name": "screen",
+        "label": "スクリーニング",
+        "description": "ROE・PER・自己資本比率などの財務条件で銘柄を絞り込みます",
+        "depends_on": [],
+        "heavy": False,
+        "category": "① 銘柄を探す",
+        "ui_order": 130,
+        "params_schema": {},
+        "href": "/collection",  # 既存UIは収集ページ。分析ハブへの統合は後続PRで対応
+    },
+    {
+        "name": "backtest",
+        "label": "バックテスト",
+        "description": "過去時点での推薦スコアの期待リターン（その後の株価変化）を検証します",
+        "depends_on": [],
+        "heavy": False,
+        "category": "④ 戦略を検証",
+        "ui_order": 410,
+        "params_schema": {},  # 専用UI（既存タブ）を使用するため空
+    },
+]
+
+
 @router.get("/api/plugins")
 async def list_plugins():
-    return {"plugins": [p.to_meta() for p in plugin_registry.list_plugins()]}
+    """分析メタ一覧。プラグイン + 特例エントリ(screen/backtest)を ui_order 昇順で返す。"""
+    metas = [p.to_meta() for p in plugin_registry.list_plugins()]
+    metas.extend(SPECIAL_ANALYSES)
+    metas.sort(key=lambda m: m.get("ui_order", 999))
+    return {"plugins": metas}
 
 
 @router.post("/api/plugins/{plugin_name}/run", response_model=None)

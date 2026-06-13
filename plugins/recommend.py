@@ -21,6 +21,8 @@ class RecommendPlugin(AnalysisPlugin):
     label = "おすすめ銘柄"
     description = "Zスコア指標を重み付けスコアリングしてランキング表示します"
     depends_on = []
+    category = "① 銘柄を探す"
+    ui_order = 110
 
     def params_schema(self) -> dict:
         return {

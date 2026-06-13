@@ -20,6 +20,11 @@ class AnalysisPlugin(ABC):
     description: str = ""
     depends_on: list[str] = []  # 先に実行が必要なプラグイン名
     heavy: bool = False         # True: 重い計算。Render 軽量モードではブロックしローカル実行を促す
+    # UIサイドバーの目的別グルーピング（投資フロー順）。
+    # category = サイドバーのグループ見出し。ui_order = 並び順（十の位=カテゴリ帯, 一の位=カテゴリ内順）。
+    # カテゴリの表示順は所属エントリの ui_order 昇順で決まる。未設定は末尾。
+    category: str = ""
+    ui_order: int = 999
 
     @abstractmethod
     def params_schema(self) -> dict:
@@ -47,5 +52,7 @@ class AnalysisPlugin(ABC):
             "description": self.description,
             "depends_on": self.depends_on,
             "heavy": self.heavy,
+            "category": self.category,
+            "ui_order": self.ui_order,
             "params_schema": self.params_schema(),
         }
