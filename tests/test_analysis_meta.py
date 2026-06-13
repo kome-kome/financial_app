@@ -108,3 +108,19 @@ class TestFreshnessBarHtml:
         """gap-locked カードは鮮度バーに置き換えられ、HTMLに残っていないこと。"""
         body = client.get("/analysis").text
         assert 'id="gap-locked"' not in body
+
+
+class TestCrossLinks:
+    def test_company_page_has_gap_crosslink(self):
+        """company ページの理論時価総額チャートに /analysis?tab=gap リンクがある。"""
+        r = client.get("/company/E02167")
+        assert r.status_code == 200
+        assert '/analysis?tab=gap' in r.text
+
+    def test_company_page_has_nc_crosslink(self):
+        """company ページのネットキャッシュチャートに /analysis?tab=net_cash リンクがある。"""
+        assert '/analysis?tab=net_cash' in client.get("/company/E02167").text
+
+    def test_company_page_has_recommend_crosslink(self):
+        """company ページのZスコアチャートに /analysis?tab=recommend リンクがある。"""
+        assert '/analysis?tab=recommend' in client.get("/company/E02167").text

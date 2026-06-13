@@ -230,7 +230,7 @@ table.cmp tbody tr:hover td{background:#1e2235}
       </div>
       <div class="chart-card">
         <div class="chart-title">理論時価総額 vs 実績時価総額・乖離率 <span style="color:#a78bfa">（本ツール独自）</span></div>
-        <div class="chart-note">棒＝実績／理論時価総額（億円）／折れ線＝乖離率（右軸・％）。理論値は業種別OLS回帰の実行後に表示されます（未実行なら空）。</div>
+        <div class="chart-note">棒＝実績／理論時価総額（億円）／折れ線＝乖離率（右軸・％）。理論値は業種別OLS回帰の実行後に表示されます（未実行なら空）。｜<a href="/analysis?tab=gap" style="color:#a78bfa">横断比較（乖離分析）→</a></div>
         <div class="chart-box tall"><canvas id="chart-mcap"></canvas></div>
       </div>
     </div>
@@ -257,7 +257,7 @@ table.cmp tbody tr:hover td{background:#1e2235}
     <div class="panel" id="panel-zscore">
       <div class="chart-card">
         <div class="chart-title">業種内ポジション（Zスコア・最新年度） <span style="color:#a78bfa">（本ツール独自）</span></div>
-        <div class="chart-note">同一業種・同一年度内での標準化偏差。0＝業種平均、外側ほど高い（D/Eレシオは高いほど負債が多い点に注意）。</div>
+        <div class="chart-note">同一業種・同一年度内での標準化偏差。0＝業種平均、外側ほど高い（D/Eレシオは高いほど負債が多い点に注意）。｜<a href="/analysis?tab=recommend" style="color:#a78bfa">横断ランキング（おすすめ銘柄）→</a></div>
         <div class="chart-box tall"><canvas id="chart-zscore"></canvas></div>
       </div>
     </div>
@@ -265,7 +265,7 @@ table.cmp tbody tr:hover td{background:#1e2235}
     <div class="panel" id="panel-nc">
       <div class="chart-card">
         <div class="chart-title">清原式ネットキャッシュ <span style="color:#a78bfa">（本ツール独自）</span></div>
-        <div class="chart-note">NC＝流動資産＋投資有価証券×0.7−総負債（億円）／NC比率＝NC÷時価総額（倍。1.0超で時価総額を上回るネットキャッシュ）</div>
+        <div class="chart-note">NC＝流動資産＋投資有価証券×0.7−総負債（億円）／NC比率＝NC÷時価総額（倍。1.0超で時価総額を上回るネットキャッシュ）｜<a href="/analysis?tab=net_cash" style="color:#a78bfa">横断ランキング（ネットキャッシュ分析）→</a></div>
         <div class="chart-box tall"><canvas id="chart-nc"></canvas></div>
       </div>
     </div>
