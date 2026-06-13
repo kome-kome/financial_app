@@ -7,7 +7,8 @@ import asyncio
 import math
 import os
 import sys
-from datetime import datetime, timedelta
+from collections import namedtuple
+from datetime import date, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
@@ -192,3 +193,90 @@ class TestFinFeatureOptions:
         from plugins.price_predictor import DEFAULT_FIN_FEATURES
         assert "rd_intensity" not in DEFAULT_FIN_FEATURES
         assert "da_intensity" not in DEFAULT_FIN_FEATURES
+
+
+# ── _build_snapshots の数値テスト ──────────────────────────────────────────────
+
+_PX = namedtuple("_PX", "edinet_code trade_date close high low")
+
+
+class TestBuildSnapshots:
+    """月次スナップショット構築ロジックの境界値テスト（DB不要・直接呼び出し）。"""
+
+    def _prices(self, n: int, start: str = "2022-01-03") -> list:
+        """n 件の週次価格スタブを生成する（月曜始まり）。"""
+        base = date.fromisoformat(start)
+        return [
+            _PX("E00001", (base + timedelta(weeks=i)).isoformat(),
+                1000.0 + i, 1005.0 + i, 995.0 + i)
+            for i in range(n)
+        ]
+
+    def _fin_rec(self, period_end: str, per: float = 15.0):
+        return SimpleNamespace(
+            period_end=period_end,
+            per=per,
+            sec_code="1001",
+            company_name="テスト",
+            industry="情報・通信業",
+        )
+
+    def _company(self):
+        return SimpleNamespace(sec_code="1001", name="テスト", industry="情報・通信業")
+
+    def test_month_end_indices_detected_as_ym_keys(self):
+        """月境界を持つ週次列から samples_by_ym キーが YYYY-MM 形式で正しく生成される。"""
+        prices = self._prices(80)
+        prices_by_co = {"E00001": prices}
+        fin_by_co   = {"E00001": [self._fin_rec("2021-12-31")]}
+        companies   = {"E00001": self._company()}
+
+        samples_by_ym, _, _ = plugin._build_snapshots(
+            prices_by_co, fin_by_co, companies,
+            use_price=False, fin_features=["per"], horizon=5,
+        )
+
+        # snap_idx >= 60 の月末スナップ点が YYYY-MM キーとして格納される
+        assert len(samples_by_ym) >= 1
+        for ym in samples_by_ym:
+            assert len(ym) == 7 and ym[4] == "-"  # YYYY-MM 形式チェック
+        # キーは prices 内の実在する年月のみ
+        valid_yms = {p.trade_date[:7] for p in prices}
+        assert all(ym in valid_yms for ym in samples_by_ym)
+
+    def test_horizon_exceeds_n_no_future_samples(self):
+        """snap_idx + horizon >= n の場合は samples_by_ym に追加されない。"""
+        horizon = 5
+        n = 60 + horizon  # 全 snap_idx（>= 60）で has_future = False
+        prices = self._prices(n)
+        prices_by_co = {"E00001": prices}
+        fin_by_co   = {"E00001": [self._fin_rec("2021-12-31")]}
+        companies   = {"E00001": self._company()}
+
+        samples_by_ym, current_snaps, _ = plugin._build_snapshots(
+            prices_by_co, fin_by_co, companies,
+            use_price=False, fin_features=["per"], horizon=horizon,
+        )
+
+        # has_future = False の全スナップはサンプルに追加されない
+        assert len(samples_by_ym) == 0
+        # is_current（最終行）は current_snaps には格納される
+        assert "E00001" in current_snaps
+
+    def test_current_snaps_stores_only_latest_snapshot(self):
+        """is_current フラグが立つ最新スナップのみ current_snaps に格納される。"""
+        prices = self._prices(80)
+        prices_by_co = {"E00001": prices}
+        fin_by_co   = {"E00001": [self._fin_rec("2021-12-31")]}
+        companies   = {"E00001": self._company()}
+
+        _, current_snaps, _ = plugin._build_snapshots(
+            prices_by_co, fin_by_co, companies,
+            use_price=False, fin_features=["per"], horizon=5,
+        )
+
+        # 最新スナップショット 1 社分のみ格納
+        assert list(current_snaps.keys()) == ["E00001"]
+        feat_row, info = current_snaps["E00001"]
+        assert isinstance(feat_row, list) and len(feat_row) == 1  # fin_features=["per"] のみ
+        assert "per" in info["fin_features"]
