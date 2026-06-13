@@ -107,6 +107,12 @@ tr:hover td{background:#1e2235}
 .btn:disabled{opacity:.4;cursor:not-allowed}
 .co-link{color:#a78bfa;text-decoration:none}
 .co-link:hover{text-decoration:underline}
+/* モデル鮮度バー（② 割安度カテゴリ内に常設） */
+.freshness-bar{padding:8px 14px;background:#0f1929;border:1px solid #1e2235;border-radius:6px;font-size:12px;color:#94a3b8;display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:12px}
+.freshness-badge{display:inline-block;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:600}
+.freshness-fresh{background:#065f46;color:#6ee7b7}
+.freshness-stale{background:#78350f;color:#fde68a}
+.freshness-none{background:#1e293b;color:#64748b}
 </style>
 </head>
 <body>
@@ -165,15 +171,9 @@ tr:hover td{background:#1e2235}
 <!-- 乖離分析 -->
 <div id="tab-gap" class="hidden">
 
-  <!-- ロック状態: 業種別OLS 未実行時に表示 -->
-  <div class="card" id="gap-locked" style="display:none">
-    <div class="section-title">乖離分析（割安・割高スクリーニング）</div>
-    <div class="info-box" style="border-color:#f59e0b;margin-bottom:14px">
-      🔒 この分析を表示するには、先に <strong>業種別OLS</strong> を実行してください。<br>
-      業種別OLSが各銘柄の理論株価（予測時価総額）と乖離率を業種内で計算し、その結果をここで
-      割安・割高ランキングとして表示します。乖離率データがまだDBに無いため、現在は実行できません。
-    </div>
-    <button class="btn btn-primary" data-click="showTab" data-arg="sector_ols">→ 業種別OLSを実行する</button>
+  <!-- モデル鮮度バー（常設）: 業種別OLSの計算日・経過日数・データ同期状態を表示 -->
+  <div id="model-freshness-bar" class="freshness-bar">
+    <div id="freshness-content"><span class="freshness-badge freshness-none">モデル情報取得中…</span></div>
   </div>
 
   <!-- 利用可能状態: 業種別OLS 実行済み（DBに予測値あり）の時に表示 -->
