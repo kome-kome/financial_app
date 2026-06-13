@@ -15,23 +15,65 @@ let _gapScatter = null, _gapHist = null;
 // 乖離分析の利用可否（業種別OLS の実行に依存）
 let _gapDataExists    = false;  // /api/stats: 過去にOLSを実行しDBに予測値が残っている
 let _olsRanThisSession = false; // このセッションで業種別OLSを実行した
+let _modelStatus = null;         // /api/model/status キャッシュ（鮮度バー用）
 
-// 乖離分析タブのロック/解除を画面に反映する。
+// 鮮度バーと gap-ready の表示を更新する。
 // 利用可能条件: DBに予測値あり（過去実行）または このセッションでOLS実行済み。
 function refreshGapAvailability() {
   const available = _gapDataExists || _olsRanThisSession;
-  const locked = document.getElementById('gap-locked');
-  const ready  = document.getElementById('gap-ready');
-  if (locked) locked.style.display = available ? 'none' : 'block';
-  if (ready)  ready.style.display  = available ? 'block' : 'none';
-  // サイドバー項目にロック表示（業種別OLS未実行時は 🔒 + グレーアウト）
+  const ready = document.getElementById('gap-ready');
+  if (ready) ready.style.display = available ? 'block' : 'none';
+  // サイドバーのロック演出を除去（鮮度バーに委譲）
   const btn = document.querySelector('.sidebar-item[data-tab="gap"]');
   if (btn) {
     const baseLabel = (_pluginMeta['gap_analysis'] && _pluginMeta['gap_analysis'].label) || '乖離分析';
-    btn.classList.toggle('locked', !available);
-    btn.textContent = (available ? '' : '🔒 ') + baseLabel;
-    btn.title = available ? '' : '業種別OLSの実行後に利用できます';
+    btn.textContent = baseLabel;
+    btn.classList.remove('locked');
+    btn.title = '';
   }
+  _updateFreshnessBar(available);
+}
+
+// /api/model/status を取得してキャッシュし、鮮度バーを再描画する。
+async function fetchModelStatus() {
+  try {
+    _modelStatus = await apiFetch('/api/model/status');
+    refreshGapAvailability();
+  } catch(e) { /* 取得失敗は無視（バーは現状維持） */ }
+}
+
+// モデル鮮度バーの内容を DOM に反映する。
+function _updateFreshnessBar(available) {
+  const content = document.getElementById('freshness-content');
+  if (!content) return;
+  if (!available) {
+    content.innerHTML =
+      `<span class="freshness-badge freshness-none">モデル未計算</span>` +
+      ` 業種別OLSモデルがまだ実行されていません。先に` +
+      ` <button class="btn btn-primary btn-sm" style="margin:0 6px" data-click="showTab" data-arg="sector_ols">業種別OLSを実行</button>` +
+      ` してください。`;
+    return;
+  }
+  const s = _modelStatus;
+  if (!s || !s.computed_at) {
+    content.innerHTML = '<span class="freshness-badge freshness-none">モデル情報取得中…</span>';
+    return;
+  }
+  const dtStr = s.computed_at.endsWith('Z') ? s.computed_at : s.computed_at + 'Z';
+  const dt = new Date(dtStr);
+  const dateStr = `${dt.getMonth() + 1}/${dt.getDate()}`;
+  const daysAgo = s.staleness_days != null ? s.staleness_days : '?';
+  const badgeCls = s.is_stale ? 'freshness-stale' : 'freshness-fresh';
+  const badgeText = s.is_stale
+    ? `最終計算: ${dateStr}（${daysAgo}日前・要更新）`
+    : `最終計算: ${dateStr}（${daysAgo}日前）`;
+  let extra = s.is_stale
+    ? ' <span class="text-amber">⚠ 財務データが更新されています</span>' : '';
+  if (_renderLightMode)
+    extra += ' <span style="font-size:11px;color:#64748b">| 本番は再計算不可・ローカルで更新してください</span>';
+  content.innerHTML =
+    `<span class="freshness-badge ${badgeCls}">${esc(badgeText)}</span>` +
+    ` ${Number(s.n_results).toLocaleString()}社の予測値${extra}`;
 }
 if (window.Chart){
   Chart.defaults.color = '#94a3b8';
@@ -76,7 +118,8 @@ async function preflight() {
     const prOk  = (d.stock_price_records ?? 0) > 0;
     // 過去の業種別OLS実行でDBに予測値が残っていれば乖離分析を解放
     _gapDataExists = (d.records_with_prediction ?? 0) > 0;
-    refreshGapAvailability();
+    refreshGapAvailability();   // 即時: gap-ready 表示を反映
+    fetchModelStatus();          // 非同期: 鮮度バーの詳細を更新
     document.getElementById('status-fin-dot').style.background  = finOk ? '#10b981' : '#ef4444';
     document.getElementById('status-fin-text').textContent       = `${d.companies.toLocaleString()}社 / ${d.records.toLocaleString()}件`;
     document.getElementById('status-fin-text').style.color       = finOk ? '#10b981' : '#ef4444';
@@ -946,7 +989,8 @@ async function runDynamicPlugin(pluginName, tabId) {
     // 業種別OLS が完了したら乖離分析を解放し、結果に導線を出す
     if (pluginName === 'sector_ols') {
       _olsRanThisSession = true;
-      refreshGapAvailability();
+      refreshGapAvailability();   // 即時: gap-ready を表示
+      fetchModelStatus();          // 非同期: 鮮度バーを新しい計算結果で更新
       content.insertAdjacentHTML('afterbegin',
         `<div class="info-box" style="border-color:#10b981;margin-bottom:14px">
           ✓ 業種別OLSが完了しました。各銘柄の理論株価と乖離率を計算しDBに保存しました。

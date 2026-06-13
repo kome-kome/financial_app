@@ -877,6 +877,7 @@ graph LR
     subgraph ANALYSIS["📊 分析 /api/"]
         AN1["GET /api/plugins\nプラグイン + 特例エントリ(screen/backtest)のメタ一覧\n（category/ui_order/heavy 含む・ui_order 昇順）"]
         AN2["POST /api/plugins/{name}/run\nプラグインを実行\n（heavy かつ RENDER_LIGHT_MODE は 403）"]
+        AN10["GET /api/model/status\n業種別OLSモデルの鮮度情報\n（computed_at/staleness_days/n_results/is_stale）\n鮮度バーUI用の軽量GET"]
         AN4["GET /api/gap-analysis\n乖離分析（旧互換エンドポイント）"]
         AN5["POST /api/screen\nスクリーニング（条件絞り込み）"]
         AN6["GET /api/recommend/presets\n推薦プリセット一覧"]
@@ -978,7 +979,7 @@ graph TB
 | `requirements-dev.txt` | 設定 | 開発・テスト専用依存（`pytest`）。本番 `requirements.txt` と分離（Render メモリ節約） | — |
 | `dashboard.html` | フロントエンド | トップページ・全体サマリー（`/`） | api.py |
 | `collection.html` | フロントエンド | 収集管理・スクリーニング・DBブラウザ（`/collection`） | api.py |
-| `analysis.html` | フロントエンド | 分析ハブ（`/analysis`）。左サイドバーを `/api/plugins` のメタ（category/ui_order）から目的別4カテゴリ（①銘柄を探す/②割安度/③リターン予測/④検証）で動的生成（`buildSidebar`）。乖離分析に横断分布（理論vs実績の散布図・乖離率ヒストグラム）を Chart.js で表示。スクリーニングは特例エントリとして `/collection` へリンク。動的タブの結果描画は `RESULT_RENDERERS`（plugin名→描画関数の登録制・未登録は汎用フォールバック）、CSV出力は単一の `exportCSV(name)` ディスパッチャ（`CSV_EXPORTERS` 登録制）に統一 | api.py, Chart.js (CDN) |
+| `analysis.html` | フロントエンド | 分析ハブ（`/analysis`）。左サイドバーを `/api/plugins` のメタ（category/ui_order）から目的別4カテゴリ（①銘柄を探す/②割安度/③リターン予測/④検証）で動的生成（`buildSidebar`）。乖離分析に横断分布（理論vs実績の散布図・乖離率ヒストグラム）を Chart.js で表示。スクリーニングは特例エントリとして `/collection` へリンク。動的タブの結果描画は `RESULT_RENDERERS`（plugin名→描画関数の登録制・未登録は汎用フォールバック）、CSV出力は単一の `exportCSV(name)` ディスパッチャ（`CSV_EXPORTERS` 登録制）に統一。乖離分析タブに**モデル鮮度バー**（`#model-freshness-bar`）を常設 — `/api/model/status` から computed_at/staleness_days を取得して表示し、OLSロック演出を廃止 | api.py, Chart.js (CDN) |
 | `login.html` | フロントエンド | 認証ログイン画面（`/login`） | api.py |
 | `models.html` | フロントエンド | モデル解説・参考文献ページ（`/models`）。8モデルの数式・パラメータ・DOIリンクをインラインHTMLで表示。 | — |
 | `db.html` | フロントエンド | DBビューア（`/db`）。4テーブルのスキーマ・プレビュー・統計サマリー・ER 風リレーション・企業ドリルダウン・CSV エクスポート。 | api.py |

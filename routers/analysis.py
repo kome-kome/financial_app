@@ -54,6 +54,34 @@ async def list_plugins():
     return {"plugins": metas}
 
 
+@router.get("/api/model/status")
+async def model_status(db: Session = Depends(api.get_db)):
+    """業種別OLSモデルの鮮度情報。鮮度バーUI用。"""
+    import datetime
+    from sqlalchemy import func
+    from database import FinancialRecord, RegressionResult
+
+    rq = db.query(RegressionResult).filter(RegressionResult.gap_ratio.isnot(None))
+    computed_at = rq.with_entities(func.max(RegressionResult.computed_at)).scalar()
+    n_results = rq.count()
+    data_updated_at = db.query(func.max(FinancialRecord.updated_at)).scalar()
+
+    staleness_days = None
+    is_stale = False
+    if computed_at:
+        now = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
+        staleness_days = (now - computed_at).days
+        if data_updated_at:
+            is_stale = computed_at < data_updated_at
+
+    return {
+        "computed_at": computed_at.isoformat() if computed_at else None,
+        "staleness_days": staleness_days,
+        "n_results": n_results,
+        "is_stale": is_stale,
+    }
+
+
 @router.post("/api/plugins/{plugin_name}/run", response_model=None)
 @api.limiter.limit(api.RATELIMIT_ANALYSIS)
 async def run_plugin(

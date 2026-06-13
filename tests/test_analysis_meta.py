@@ -67,3 +67,44 @@ class TestPluginsEndpoint:
             if cat not in seen:
                 seen.append(cat)
         assert seen == EXPECTED_CATEGORY_ORDER
+
+
+class TestModelStatusEndpoint:
+    def test_returns_200_with_required_keys(self):
+        r = client.get("/api/model/status")
+        assert r.status_code == 200
+        d = r.json()
+        assert "computed_at" in d
+        assert "staleness_days" in d
+        assert "n_results" in d
+        assert "is_stale" in d
+
+    def test_field_types(self):
+        d = client.get("/api/model/status").json()
+        # computed_at は ISO文字列か None
+        assert d["computed_at"] is None or isinstance(d["computed_at"], str)
+        # staleness_days は int か None（DBが空の場合は None）
+        assert d["staleness_days"] is None or isinstance(d["staleness_days"], int)
+        # n_results は 0 以上の int
+        assert isinstance(d["n_results"], int) and d["n_results"] >= 0
+        # is_stale は bool
+        assert isinstance(d["is_stale"], bool)
+
+    def test_no_render_light_mode_field(self):
+        """render_light_mode は /api/system/info が担当し model/status には含まない。"""
+        d = client.get("/api/model/status").json()
+        assert "render_light_mode" not in d
+
+
+class TestFreshnessBarHtml:
+    def test_freshness_bar_element_exists(self):
+        r = client.get("/analysis")
+        assert r.status_code == 200
+        body = r.text
+        assert 'id="model-freshness-bar"' in body
+        assert 'id="freshness-content"' in body
+
+    def test_gap_locked_removed(self):
+        """gap-locked カードは鮮度バーに置き換えられ、HTMLに残っていないこと。"""
+        body = client.get("/analysis").text
+        assert 'id="gap-locked"' not in body
