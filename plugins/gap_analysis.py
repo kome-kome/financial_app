@@ -83,10 +83,10 @@ class GapAnalysisPlugin(AnalysisPlugin):
                 "type": "select",
                 "label": "ソート順",
                 "options": [
-                    {"value": "asc",  "label": "乖離率 低い順（割安）"},
-                    {"value": "desc", "label": "乖離率 高い順（割高）"},
+                    {"value": "desc", "label": "乖離率 高い順（割安）"},
+                    {"value": "asc",  "label": "乖離率 低い順（割高）"},
                 ],
-                "default": "asc",
+                "default": "desc",
             },
         }
 

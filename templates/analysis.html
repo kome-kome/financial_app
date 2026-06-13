@@ -179,24 +179,16 @@ tr:hover td{background:#1e2235}
   <!-- 利用可能状態: 業種別OLS 実行済み（DBに予測値あり）の時に表示 -->
   <div id="gap-ready" style="display:none">
   <div class="card">
-    <div class="flex-between">
-      <div class="section-title" style="margin-bottom:0">乖離分析（割安・割高スクリーニング）</div>
-      <div class="flex">
-        <input type="number" id="gap-year" placeholder="年度（空欄=全）" style="width:140px">
-        <select id="gap-sort" style="width:160px">
-          <option value="gap_desc">乖離率 高い順（割安）</option>
-          <option value="gap_asc">乖離率 低い順（割高）</option>
-        </select>
-        <button class="btn btn-primary btn-sm" id="btn-gap-analysis" data-click="runGapAnalysis">分析を実行</button>
-      </div>
-    </div>
-    <div class="info-box" style="margin-top:12px">
+    <div class="section-title">乖離分析（割安・割高スクリーニング）</div>
+    <div class="info-box" style="margin-bottom:12px">
       乖離率 = (予測時価総額 − 実際時価総額) / 実際時価総額 × 100<br>
       <span class="gap-positive">正値（緑）</span>: 予測 &gt; 実際 → モデル上は割安の可能性
       &nbsp;|&nbsp;
       <span class="gap-negative">負値（赤）</span>: 予測 &lt; 実際 → モデル上は割高の可能性<br>
       <span style="color:#f59e0b;font-size:11px">⚠ 期待乖離・収束スコアはOU過程に基づくヒューリスティック推定値です。統計的な予測確率ではなく、投資判断の参考値にすぎません。</span>
     </div>
+    <div id="params-form-gap"></div>
+    <button class="btn btn-primary btn-sm" id="btn-gap-analysis" data-click="runGapAnalysis" style="margin-top:8px">分析を実行</button>
   </div>
 
   <div class="card" id="gap-results-card" style="display:none">
@@ -267,26 +259,8 @@ tr:hover td{background:#1e2235}
 
   <div class="card">
     <div class="section-title">フィルター</div>
-    <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:14px">
-      <div class="form-group" style="margin-bottom:0">
-        <label>表示件数</label>
-        <select id="rec-top-n">
-          <option value="10">上位10社</option>
-          <option value="20">上位20社</option>
-          <option value="30" selected>上位30社</option>
-          <option value="50">上位50社</option>
-        </select>
-      </div>
-      <div class="form-group" style="margin-bottom:0">
-        <label>業種（空欄=全て）</label>
-        <input type="text" id="rec-industry" placeholder="例: 電気機器">
-      </div>
-      <div class="form-group" style="margin-bottom:0">
-        <label>最低時価総額（百万円）</label>
-        <input type="number" id="rec-min-cap" placeholder="例: 10000">
-      </div>
-    </div>
-    <button class="btn btn-primary" id="btn-recommend" data-click="runRecommend">
+    <div id="params-form-recommend"></div>
+    <button class="btn btn-primary" id="btn-recommend" data-click="runRecommend" style="margin-top:8px">
       <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
       おすすめ銘柄を分析
     </button>
@@ -323,34 +297,7 @@ tr:hover td{background:#1e2235}
         期待総合リターン（株価上昇余地＋配当利回り）が高い企業をランキングします。<br>
         <span style="color:#f59e0b;font-size:11px">⚠ 予測値はモデルの推定値であり、投資判断の参考値にすぎません。</span>
       </div>
-      <div class="form-group">
-        <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
-          <input type="checkbox" id="tr-use-cf" checked style="width:auto;accent-color:#7c3aed">
-          CF因子を使用（1株営業CF）
-        </label>
-      </div>
-      <div class="form-group">
-        <label>CVフォールド数</label>
-        <div style="display:flex;align-items:center;gap:8px">
-          <input type="range" id="tr-n-folds" min="3" max="10" step="1" value="5"
-            data-input="syncVal" data-target="tr-n-folds-val"
-            style="flex:1;accent-color:#7c3aed">
-          <span id="tr-n-folds-val" style="color:#a78bfa;font-weight:600;min-width:24px">5</span>
-        </div>
-      </div>
-      <div class="form-group">
-        <label>表示件数</label>
-        <div style="display:flex;align-items:center;gap:8px">
-          <input type="range" id="tr-top-n" min="10" max="50" step="5" value="20"
-            data-input="syncVal" data-target="tr-top-n-val"
-            style="flex:1;accent-color:#7c3aed">
-          <span id="tr-top-n-val" style="color:#a78bfa;font-weight:600;min-width:24px">20</span>
-        </div>
-      </div>
-      <div class="form-group">
-        <label>最低配当利回り（%、0=フィルタなし）</label>
-        <input type="number" id="tr-min-div" value="0" min="0" max="10" step="0.5">
-      </div>
+      <div id="params-form-total-return"></div>
       <button class="btn btn-primary" id="btn-total-return" data-click="runTotalReturn" style="margin-top:8px">
         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/><polyline points="17 6 23 6 23 12"/></svg>
         総合リターン予測を実行
@@ -443,64 +390,8 @@ tr:hover td{background:#1e2235}
       <span style="color:#f59e0b;font-size:11px">⚠ 投資有価証券の 0.7 倍は<span class="gloss" data-tip="保有株を売って利益が出ると約30%課税される。これを見込み、投資有価証券は簿価の0.7倍で保守的に評価する。">含み益課税</span>（約30%）を考慮した清原式の経験則。実態の換金価値は市況・銘柄構成で変動するため参考値です。</span><br>
       <span style="color:#94a3b8;font-size:11px">ℹ 時価総額は<span class="gloss" data-tip="発行株式数を 純資産÷1株純資産(BPS) で概算した値。実測ではないため誤差が出ることがある。">推計株数</span>（純資産÷BPS）ベースの概算です。推計が壊れると比率が異常値になるため、<strong>NC比率の上限</strong>（<span class="gloss" data-tip="時価総額は推計値のため、計算が壊れると比率が異常な大きさ(数千倍など)になることがある。その異常値を自動で除外する安全装置(サニティ＝妥当性チェック)。既定はNC比率5.0超を除外。">データ品質ガード</span>）で自動除外します。一律の時価総額下限は設けず、小型バーゲンを取りこぼしません。</span>
     </div>
-    <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:10px">
-      <div class="form-group" style="margin-bottom:0">
-        <label>最低ネットキャッシュ比率（任意）</label>
-        <input type="number" id="nc-min-ratio" value="0" min="-5" max="5" step="0.1">
-        <div class="text-sm" style="margin-top:4px;color:#64748b">0=NCプラスの全銘柄、0.5=半額バーゲン、1.0=現金で買える</div>
-      </div>
-      <div class="form-group" style="margin-bottom:0">
-        <label>NC比率の上限（<span class="gloss" data-tip="時価総額は推計値のため、計算が壊れると比率が異常な大きさ(数千倍など)になることがある。その異常値を自動で除外する安全装置(サニティ＝妥当性チェック)。既定はNC比率5.0超を除外。">データ品質ガード</span>）</label>
-        <input type="number" id="nc-max-ratio" value="5" min="0" step="0.5">
-        <div class="text-sm" style="margin-top:4px;color:#64748b"><span class="gloss" data-tip="正気・妥当性の意味。常識的にありえない大きさの比率を『計算ミス・データ崩れ』とみなして弾くための上限値。">サニティ上限</span>。推計時価総額の崩れによる異常値を除外。空/0=無効</div>
-      </div>
-      <div class="form-group" style="margin-bottom:0">
-        <label>最低時価総額（百万円・任意）</label>
-        <input type="number" id="nc-min-cap" placeholder="空=制限なし" min="0" step="1000">
-        <div class="text-sm" style="margin-top:4px;color:#64748b">任意で小型株を除外。空=制限なし（推奨）</div>
-      </div>
-      <div class="form-group" style="margin-bottom:0">
-        <label>最低<span class="gloss" data-tip="Net Current Asset Value＝純流動資産価値（流動資産−総負債）÷時価総額。投資有価証券の0.7補正をしないグレアム流の保守的な割安指標。">NCAV比率</span>（任意・グレアム）</label>
-        <input type="number" id="nc-min-ncav" placeholder="例: 1.5" min="-5" max="5" step="0.1">
-        <div class="text-sm" style="margin-top:4px;color:#64748b">1.5=<span class="gloss" data-tip="時価総額がNCAVの3分の2未満の超割安株。グレアムが好んだ解散価値を大きく下回る銘柄群。">グレアムのネットネット</span>に限定。空=制限なし</div>
-      </div>
-      <div class="form-group" style="margin-bottom:0">
-        <label>業種（空欄=全業種）</label>
-        <input type="text" id="nc-industry" placeholder="例: 電気機器">
-      </div>
-      <div class="form-group" style="margin-bottom:0">
-        <label>対象年度（空=各社の最新）</label>
-        <input type="number" id="nc-year" placeholder="例: 2024">
-      </div>
-      <div class="form-group" style="margin-bottom:0">
-        <label>表示件数</label>
-        <select id="nc-top-n">
-          <option value="20">上位20社</option>
-          <option value="50" selected>上位50社</option>
-          <option value="100">上位100社</option>
-          <option value="200">上位200社</option>
-        </select>
-      </div>
-      <div class="form-group" style="margin-bottom:0">
-        <label>ソート順</label>
-        <select id="nc-sort">
-          <option value="nc_ratio_desc" selected>NC比率 高い順（割安）</option>
-          <option value="nc_ratio_asc">NC比率 低い順</option>
-          <option value="net_cash_desc">NC額 大きい順</option>
-          <option value="ncav_ratio_desc">NCAV比率 高い順（グレアム割安）</option>
-        </select>
-      </div>
-    </div>
-    <div style="display:flex;gap:20px;align-items:center;margin-bottom:14px;flex-wrap:wrap">
-      <span class="text-sm" style="color:#94a3b8"><span class="gloss" data-tip="割安に見えても、業績悪化や現金の垂れ流しで株価が上がらない『万年割安』の罠。営業CFや純利益のプラスを条件にして避ける。">バリュートラップ</span>除外（任意）:</span>
-      <label class="text-sm" style="display:flex;align-items:center;gap:6px;cursor:pointer;color:#cbd5e1">
-        <input type="checkbox" id="nc-require-ocf"> 営業CF&gt;0 の企業のみ
-      </label>
-      <label class="text-sm" style="display:flex;align-items:center;gap:6px;cursor:pointer;color:#cbd5e1">
-        <input type="checkbox" id="nc-require-ni"> 純利益&gt;0 の企業のみ
-      </label>
-    </div>
-    <button class="btn btn-primary" id="btn-net-cash" data-click="runNetCash">
+    <div id="params-form-net-cash"></div>
+    <button class="btn btn-primary" id="btn-net-cash" data-click="runNetCash" style="margin-top:8px">
       <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
       ネットキャッシュ分析を実行
     </button>

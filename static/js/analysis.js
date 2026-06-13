@@ -147,8 +147,8 @@ async function preflight() {
 
 // ── 乖離分析 ─────────────────────────────────────────────────────────
 async function runGapAnalysis() {
-  const year = document.getElementById('gap-year').value;
-  const url = '/api/gap-analysis' + (year ? `?year=${year}` : '');
+  const params = _collectParamValues('gap_analysis', _pluginMeta['gap_analysis']?.params_schema ?? {});
+  const url = '/api/gap-analysis' + (params.year ? `?year=${params.year}` : '');
   try {
     const d = await apiFetch(url);
     gapResults = d.results;
@@ -162,10 +162,11 @@ async function runGapAnalysis() {
 }
 
 function renderGap(rows) {
-  const sort = document.getElementById('gap-sort').value;
+  const sortEl = document.getElementById('param-gap_analysis-sort');
+  const sort = sortEl ? sortEl.value : 'desc';
   let sorted = [...rows];
-  if (sort === 'gap_desc') sorted.sort((a,b) => (b.gap_ratio??0) - (a.gap_ratio??0));
-  else                     sorted.sort((a,b) => (a.gap_ratio??0) - (b.gap_ratio??0));
+  if (sort === 'desc') sorted.sort((a,b) => (b.gap_ratio??0) - (a.gap_ratio??0));
+  else                 sorted.sort((a,b) => (a.gap_ratio??0) - (b.gap_ratio??0));
 
   const tbody = document.getElementById('gap-tbody');
   tbody.innerHTML = sorted.map(r => {
@@ -314,18 +315,16 @@ async function runRecommend() {
     const val = parseFloat(document.getElementById(`range-${key}`)?.value ?? 0);
     if (val !== 0) weights[key] = val;
   }
-  const industry = document.getElementById('rec-industry').value.trim();
-  const minCap = parseFloat(document.getElementById('rec-min-cap').value);
+  const recMeta = _pluginMeta['recommend'];
+  const filterSchema = recMeta ? Object.fromEntries(
+    Object.entries(recMeta.params_schema).filter(([k, v]) => v.type !== 'weights' && k !== 'preset')
+  ) : {};
+  const filterParams = _collectParamValues('recommend', filterSchema);
 
   try {
     const d = await apiFetch('/api/recommend', {
       method: 'POST',
-      body: JSON.stringify({
-        weights,
-        top_n: parseInt(document.getElementById('rec-top-n').value),
-        industry: industry || null,
-        min_market_cap: isNaN(minCap) ? null : minCap,
-      })
+      body: JSON.stringify({ weights, ...filterParams })
     });
     recResults = d.results;
     document.getElementById('rec-result-title').textContent =
@@ -379,12 +378,7 @@ async function runTotalReturn() {
   btn.disabled = true;
   btn.innerHTML = '<span class="spinner"></span> 分析中...';
 
-  const params = {
-    use_cf:        document.getElementById('tr-use-cf').checked,
-    n_folds:       parseInt(document.getElementById('tr-n-folds').value),
-    top_n:         parseInt(document.getElementById('tr-top-n').value),
-    min_div_yield: parseFloat(document.getElementById('tr-min-div').value) || 0,
-  };
+  const params = _collectParamValues('total_return', _pluginMeta['total_return']?.params_schema ?? {});
 
   try {
     const d = await apiFetch('/api/plugins/total_return/run', {method:'POST', body:JSON.stringify(params)});
@@ -481,18 +475,7 @@ function exportTotalReturnCSV() {
 let ncResults = [];
 
 async function runNetCash() {
-  const params = {
-    min_nc_ratio:        parseFloat(document.getElementById('nc-min-ratio').value || '0'),
-    max_nc_ratio:        document.getElementById('nc-max-ratio').value ? parseFloat(document.getElementById('nc-max-ratio').value) : null,
-    min_market_cap:      document.getElementById('nc-min-cap').value ? parseFloat(document.getElementById('nc-min-cap').value) : null,
-    min_ncav_ratio:      document.getElementById('nc-min-ncav').value ? parseFloat(document.getElementById('nc-min-ncav').value) : null,
-    require_positive_ocf: document.getElementById('nc-require-ocf').checked,
-    require_positive_ni:  document.getElementById('nc-require-ni').checked,
-    industry:            document.getElementById('nc-industry').value.trim() || null,
-    year:                document.getElementById('nc-year').value ? parseInt(document.getElementById('nc-year').value, 10) : null,
-    top_n:               parseInt(document.getElementById('nc-top-n').value, 10),
-    sort:                document.getElementById('nc-sort').value,
-  };
+  const params = _collectParamValues('net_cash_analysis', _pluginMeta['net_cash_analysis']?.params_schema ?? {});
   const btn = document.getElementById('btn-net-cash');
   btn.disabled = true;
   btn.textContent = '実行中...';
@@ -860,6 +843,23 @@ async function initPlugins() {
   if (startTab) showTab(startTab);
   // 乖離分析タブのロック状態を反映（preflight と initPlugins の競合に備え両方で呼ぶ）
   refreshGapAvailability();
+
+  // 静的タブのフォームをメタ駆動で注入（params_schema → _renderParamsForm）
+  const _inject = (containerId, pluginName, schemaFilter) => {
+    const el = document.getElementById(containerId);
+    const meta = _pluginMeta[pluginName];
+    if (!el || !meta) return;
+    const schema = schemaFilter ? Object.fromEntries(
+      Object.entries(meta.params_schema).filter(schemaFilter)
+    ) : meta.params_schema;
+    el.innerHTML = _renderParamsForm(schema, pluginName);
+  };
+  _inject('params-form-gap',          'gap_analysis',      null);
+  _inject('params-form-total-return', 'total_return',      null);
+  _inject('params-form-net-cash',     'net_cash_analysis', null);
+  // recommend: weights/preset は静的 HTML に温存、フィルター項目のみ注入
+  _inject('params-form-recommend',    'recommend',
+    ([k, v]) => v.type !== 'weights' && k !== 'preset');
 }
 
 // /api/plugins のメタを category でグルーピングし、ui_order 昇順でサイドバーを生成する。
@@ -960,6 +960,26 @@ function _renderParamsForm(schema, tabId) {
   return html;
 }
 
+function _collectParamValues(tabId, schema) {
+  const params = {};
+  for (const [key, field] of Object.entries(schema)) {
+    const el = document.getElementById(`param-${tabId}-${key}`);
+    if (!el) continue;
+    if (field.type === 'multiselect') {
+      const sel = [...el.selectedOptions].map(o => o.value);
+      params[key] = sel.length > 0 ? sel : null;
+    } else if (field.type === 'checkbox') {
+      params[key] = el.checked;
+    } else {
+      const val = el.value;
+      params[key] = (field.type === 'slider' || field.type === 'number')
+        ? (val === '' ? null : parseFloat(val))
+        : (val || null);
+    }
+  }
+  return params;
+}
+
 async function runDynamicPlugin(pluginName, tabId) {
   const plugin = _pluginMeta[pluginName];
   if (!plugin) return;
@@ -967,22 +987,7 @@ async function runDynamicPlugin(pluginName, tabId) {
     showNotif(`「${plugin.label}」は計算が重いためローカルPCで実行してください（Render環境では無効）`);
     return;
   }
-  const params = {};
-  for (const [key, field] of Object.entries(plugin.params_schema)) {
-    const el = document.getElementById(`param-${tabId}-${key}`);
-    if (!el) continue;
-    if (field.type === 'multiselect') {
-      const selected = [...el.selectedOptions].map(o => o.value);
-      params[key] = selected.length > 0 ? selected : null;
-    } else if (field.type === 'checkbox') {
-      params[key] = el.checked;
-    } else {
-      let val = el.value;
-      params[key] = (field.type === 'slider' || field.type === 'number')
-        ? (val === '' ? null : parseFloat(val))
-        : (val || null);
-    }
-  }
+  const params = _collectParamValues(tabId, plugin.params_schema);
   try {
     const d = await apiFetch(`/api/plugins/${pluginName}/run`, {method:'POST', body:JSON.stringify(params)});
     const card = document.getElementById(`dynresult-${tabId}`);
