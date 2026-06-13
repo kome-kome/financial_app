@@ -1357,14 +1357,15 @@ async def refill_pl_bs_from_xbrl(
     sleep_sec: float = RATE_SLEEP,
     on_progress: Optional[Callable[[int, int, str], None]] = None,
 ) -> dict:
-    """`pl_pretax_profit` が NULL のレコードを EDINET XBRL から再取得し、
+    """`bs_inventory` が NULL のレコードを EDINET XBRL から再取得し、
     NULL の PL/BS 列を一括補完する（既存値は上書きしない）。
 
-    駆動マーカー = `pl_pretax_profit IS NULL` かつ `doc_id IS NOT NULL`。税前が埋まると
+    駆動マーカー = `bs_inventory IS NULL` かつ `doc_id IS NOT NULL`。棚卸資産が埋まると
     対象から外れるため、繰り返し実行で自然終了する（refill_cf_from_xbrl と同じ思想）。
-    残課題: 税前を真にパースできない少数レコードは再実行のたびに再取得される（許容）。
+    注意: 棚卸資産を持たない企業（金融・サービス等）は何度実行しても埋まらないため
+    永続的な少数残件として残る（無害）。
 
-    タグ修正（database.py の pl_pretax_profit など）後の既存データ是正用。`raw_xbrl_json`
+    タグ修正・パースロジック変更後の既存データ是正用。`raw_xbrl_json`
     は生タグを保存しないため `reparse_from_raw` では復元できず再フェッチが必須。値は
     parse_xbrl_csv の連結優先ロジックで選ばれるため通常収集と同等の信頼性。CF は
     refill_cf_from_xbrl が担当するため対象外。
@@ -1375,7 +1376,7 @@ async def refill_pl_bs_from_xbrl(
 
     def _target_q():
         return db.query(FinancialRecord).filter(
-            FinancialRecord.pl_pretax_profit.is_(None),
+            FinancialRecord.bs_inventory.is_(None),
             FinancialRecord.doc_id.isnot(None),
         )
 
