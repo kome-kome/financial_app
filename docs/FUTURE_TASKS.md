@@ -12,30 +12,24 @@
 > 棚卸し時点で **未処理 PR / Open Issue は 0 件・依存は最新 pin・本番コードに TODO/FIXME なし**＝負債は局所的。
 > 旧 `docs/archive/REFACTORING.md` の未着手項目（4-4 / 4-5 / 4-6 / 4-7）を実コード確認のうえ本書へ再掲・更新した（4-2 `_now_jst` 共通化は定義消滅により**解決済み**）。
 
-### T1-1. XBRL parse ロジックの重複統合 【高】（旧 REFACTORING 4-4）
-- **該当**: `collector.py:324 parse_raw_rows` と `collector.py:365 parse_xbrl_csv`
-- **問題**: `Prior` コンテキストスキップ・`OperatingRevenue1` 非連結フィルタ・`is_consol`/`has_member`/`priority` 計算・float 変換＋例外無視の4ブロックが2関数に逐語的に重複。`parse_xbrl_csv` 固有は列検出・capex ラベル照合・capex 符号統一の3点のみ。
-- **改善案**: 中核を `_apply_priority_row(row, result, priority)` ヘルパへ抽出し両関数から呼ぶ。
-- **検証**: リファクタ前後で `financial_records` 件数・既存 `tests/test_collector.py` 全通過を確認（デグレ検出）。
-- **見積**: 中。
+### T1-1. XBRL parse ロジックの重複統合 【高】（旧 REFACTORING 4-4）（完了 2026-06-13）
+- **完了**: 中核を `_apply_row()`（`collector.py:371`）へ抽出し、`parse_raw_rows`（`collector.py:431`→L459）・`parse_xbrl_csv`（`collector.py:464`→L507）の両方から呼ぶ形に統合済み。`parse_xbrl_csv` 固有の capex 符号統一は `apply_capex_sign=True` 引数で吸収。
+- **問題（当時）**: `Prior` コンテキストスキップ・`OperatingRevenue1` 非連結フィルタ・`is_consol`/`has_member`/`priority` 計算・float 変換＋例外無視の4ブロックが2関数に逐語的に重複していた。
+- **検証**: 既存 `tests/test_collector.py` 全通過で確認済み。
 
-### T1-2. 収集バックグラウンドジョブの共通化 【高】
-- **該当**: `api.py:287 _run_collection_bg` と `api.py:337 _run_smart_collection_bg`
-- **問題**: `on_progress`/`cancel_check` クロージャ・`CollectionLog` の done/error 更新・`finally` のフラグリセットが約60行逐語重複（実コード確認済み）。片方のバグ修正をもう片方に反映し忘れるリスク。
-- **改善案**: `_run_bg_job(coro_factory, log_id)` ラッパに共通枠を切り出し、差分（smart 判定ロジック）だけを引数注入。
-- **検証**: 既存 `tests/test_collection_jobs.py` の通過＋smart 判定3分岐の手動確認。
-- **見積**: 中。
+### T1-2. 収集バックグラウンドジョブの共通化 【高】（完了）
+- **完了**: `_run_bg_job(coro_factory, log_id, error_msg=...)` ラッパ（`api.py:210`）に共通枠を切り出し済み。`_run_collection_bg`（`api.py:259`）・`_run_smart_collection_bg`（`api.py:268`）の両方が `_run_bg_job` を呼ぶ。`CollectionLog` の done/error 更新・`finally` のフラグリセットが一元化された。
+- **問題（当時）**: 上記処理が約60行逐語重複し、片方のバグ修正をもう片方に反映し忘れるリスクがあった。
+- **検証**: 既存 `tests/test_collection_jobs.py` の通過で確認済み。
 
-### T1-3. `update_market_data_from_history` の N+1 クエリ解消 【高・性能】
-- **該当**: `collector.py:864-878`（`point_in_time=False`）／同型が `collector.py:1400-1403`（stooq 版）にも
-- **問題**: `latest_price_rows`（最大約4,000社）をループしながら各社の最新 `FinancialRecord` を個別 `SELECT ... ORDER BY year DESC LIMIT 1`。最大4,000往復。GitHub Actions 差分収集の最頻パスで、Supabase `pool_size=3` 下では特に効く。
-- **改善案**: `ROW_NUMBER() OVER (PARTITION BY edinet_code ORDER BY year DESC)` のサブクエリで最新行を1クエリ一括取得。
-- **検証**: 更新件数が現行と一致することを小規模 DB で確認。
-- **見積**: 中。
+### T1-3. `update_market_data_from_history` の N+1 クエリ解消 【高・性能】（完了）
+- **完了**: `_fetch_latest_fin_by_ec(db, edinet_codes)`（`collector.py:1518`）が `ROW_NUMBER() OVER (PARTITION BY edinet_code ORDER BY year DESC, period_end DESC)` で各社の最新 `FinancialRecord` を1クエリ一括取得するヘルパとして抽出済み。`point_in_time=False` 経路（`collector.py:949`）と業種更新経路（`collector.py:1566`）の両方から共用。
+- **問題（当時）**: `latest_price_rows`（最大約4,000社）をループしながら各社最新行を個別 SELECT し最大4,000往復。Supabase `pool_size=3` 下で特に重かった。
+- **検証**: 更新件数が現行と一致することを確認済み。
 
-### T1-4. `point_in_time=True` の全件メモリロード回避 【中・性能】
-- **該当**: `collector.py:886-903`
-- **問題**: `StockPriceWeekly` 全履歴（数百万行）を `.all()` で Python 側に展開し `defaultdict` に保持。Render メモリ 512MB 制約と相性が悪い。
+### T1-4. `point_in_time=True` の全件メモリロード回避 【中・性能】（未着手）
+- **該当**: `_update_market_data_point_in_time`（`collector.py:968`）。`StockPriceWeekly` 全履歴を `.all()`（`collector.py:977`）で取得。
+- **問題**: `StockPriceWeekly` 全履歴（数百万行）を `.all()` で Python 側に展開し `defaultdict` に保持。Render メモリ 512MB 制約と相性が悪い。T1-3 で `point_in_time=False` 経路は窓関数化済みだが、本 point-in-time 経路は未移行。
 - **改善案**: `period_end` を使った window 関数（`LAST_VALUE` 等）／lateral join で近傍価格選択を DB 側へ寄せる。
 - **見積**: 中〜大（アルゴリズム移植）。
 
@@ -47,10 +41,11 @@
 - **検証**: 全4画面（dashboard/collection/analysis/company）でログイン・API 呼び出しが従来どおり動作。
 - **見積**: 中。
 
-### T1-7. 巨大ファイルの責務分割 【低】（旧 REFACTORING 4-5）
-- **該当**: `collector.py`（1,933行）/ `api.py`（1,580行）。特に `run_full_collection`（`collector.py:1497`・約180行・6責務混在）、`collect_stock_price_history`（`collector.py:536`・約140行・4状態分岐）。
-- **問題**: 単一関数・単一ファイルに責務が集中し読解・テストが困難。
-- **改善案**: `api_collection.py` 等への分割や責務別関数抽出。**大 diff になるため必要性を都度再評価**（性急に着手しない）。
+### T1-7. 巨大ファイルの責務分割 【低】（旧 REFACTORING 4-5）（一部完了・継続検討）
+- **該当（実測 2026-06-13）**: `collector.py`（2,148行）/ `api.py`（354行）。`api.py` はエンドポイントを `routers/` 配下（`collect.py` / `market.py` / `analysis.py` 等）へ分割済みで、本体は薄いオーケストレータになった。
+- **完了分**: `run_full_collection`（`collector.py:1823`）は `_phase_upsert_master`（L1675）・`_phase_build_skip_ids`（L1718）・`_phase_process_docs`（L1733）へ責務分解済み（旧記述の「約180行・6責務混在」は解消）。
+- **残**: `collector.py` 本体は依然 2,148 行で、株価収集/XBRL財務/CF補完/業種更新が同居（→ ドメイン別モジュール分割は **Issue #114** で設計承認待ち）。`collect_stock_price_history` の状態分岐整理は未着手。
+- **改善案**: `collector_prices.py` / `collector_financials.py` / `collector_master.py` への分割（#114）。**大 diff になるため必要性を都度再評価**。
 - **見積**: 大。
 
 ### T1-8. デッドコード・残骸の掃除 【低】（完了）
