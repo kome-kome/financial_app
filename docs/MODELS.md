@@ -319,8 +319,9 @@ predicted_market_cap = ŷ_pred / stock_price × market_cap     [百万円]
 
 ### 実行条件
 
-- 業種内のサンプル数 ≥ `min_samples`（デフォルト: 10社）でなければスキップ
-- 各銘柄について `bs_bps > 0` かつ `bs_total_equity > 0` が必須（株数推計のため）
+- 業種内のサンプル数 ≥ `min_samples`（デフォルト: 5社）でなければスキップ
+- 各銘柄に発行株数が必要。`issued_shares`（XBRL 直接値・fill率100%）を優先し、欠損時のみ `bs_total_equity ÷ bs_bps` で推計する（`plugins/utils.shares_outstanding`）。どちらでも株数を求められない銘柄のみ対象外（`bs_bps` 欠損だけでは除外されない）
+- **説明変数の自動ドロップ**（`_select_features`）: 説明変数は「選択列が1つでも NULL の銘柄を AND 除外」する仕様のため、欠損列を重ねると全銘柄が除外され 0 業種に潰れる。これを防ぐため (1) 母集団での欠損率が `MAX_FEATURE_MISSING_RATE`（50%）超の列を一括除外し、(2) なおどの業種も `min_samples` に届かない場合は欠損の多い列から1つずつ除外して、いずれかの業種が `min_samples` に届くまで繰り返す。除外列は結果の `dropped_features` で返し、画面に警告表示する
 
 ### 仮定・限界
 

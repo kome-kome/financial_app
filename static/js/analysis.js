@@ -952,6 +952,13 @@ async function runDynamicPlugin(pluginName, tabId) {
 
 function _renderGenericResult(data) {
   let html = '';
+  // 業種別OLS: 欠損が多く自動ドロップした説明変数の警告
+  if (Array.isArray(data.dropped_features) && data.dropped_features.length) {
+    html += `<div style="margin-bottom:12px;padding:8px 12px;border-left:3px solid #f59e0b;background:rgba(245,158,11,0.08);font-size:12px;color:#fbbf24">
+      欠損が多いため自動除外した説明変数（${data.dropped_features.length}件）:
+      ${data.dropped_features.map(f => `${esc(f.label)}（NULL ${Number(f.missing_rate)}% / ${Number(f.missing)}社）`).join('、')}
+    </div>`;
+  }
   // 業種別OLS: sector_stats サマリーを先に描画
   if (Array.isArray(data.sector_stats) && data.sector_stats.length) {
     html += `<div style="margin-bottom:16px">

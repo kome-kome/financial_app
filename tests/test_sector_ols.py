@@ -124,9 +124,29 @@ class TestExecute:
             asyncio.run(execute_plugin(plugin, {}, db))
 
     def test_insufficient_samples_raises(self, db, make_fin):
-        _seed_sector(db, make_fin, n=3)  # default min_samples=10 未満
+        _seed_sector(db, make_fin, n=3)  # default min_samples=5 未満
         with pytest.raises(ValueError):
             asyncio.run(execute_plugin(plugin, {}, db))
+
+    def test_auto_drops_high_missing_feature(self, db, make_fin):
+        # 欠損率の高い説明変数を足しても AND 全除外で 0 業種に潰れず、自動ドロップして
+        # 実行できること（_select_features の根本対策）。pl_pretax_profit は seed しない
+        # ＝ ps_pretax_profit は 100% NULL になる。
+        _seed_sector(db, make_fin, n=12)
+        params = {"features": DEFAULT_FEATURES_PRICE + ["ps_pretax_profit"], "min_samples": 5}
+        res = asyncio.run(execute_plugin(plugin, params, db))
+        assert res["n_sectors"] >= 1
+        dropped = {d["feature"] for d in res["dropped_features"]}
+        assert "ps_pretax_profit" in dropped          # 100% NULL は自動ドロップ
+        assert "ps_pretax_profit" not in res["features_used"]
+        assert set(res["features_used"]) <= set(DEFAULT_FEATURES_PRICE)
+
+    def test_all_features_high_missing_raises_clearly(self, db, make_fin):
+        # 選択列が全て高欠損なら採用列ゼロで明確に reject（データ収集ではなく項目選択の問題）
+        _seed_sector(db, make_fin, n=12)
+        params = {"features": ["ps_pretax_profit", "ps_machinery"], "min_samples": 5}
+        with pytest.raises(ValueError, match="自動除外"):
+            asyncio.run(execute_plugin(plugin, params, db))
 
     def test_writes_predictions_and_ranks(self, db, make_fin):
         from database import RegressionResult

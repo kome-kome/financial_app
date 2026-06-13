@@ -463,8 +463,9 @@ sequenceDiagram
     PLG  ->> DB  : SELECT financial_records（最新年度）
     DB  -->> PLG : 全レコード
 
+    PLG  ->> PLG : 欠損率の高い説明変数を自動ドロップ（_select_features）<br/>除外列は dropped_features として返す
     loop 各業種
-        PLG  ->> PLG : 各 record で shares = bs_total_equity / bs_bps を計算<br/>bs_bps NULL/0 の銘柄はスキップ
+        PLG  ->> PLG : 各 record で shares を算出（issued_shares 優先／欠損時 bs_total_equity÷bs_bps）<br/>株数を求められない銘柄のみスキップ
         PLG  ->> PLG : 派生 per-share (ps_*) を「絶対額 / shares」で実行時計算
         PLG  ->> PLG : winsorize() で外れ値を p1-p99 にクリッピング
         PLG  ->> PLG : normalize() で特徴量を z-score 正規化（業種内）
@@ -472,7 +473,7 @@ sequenceDiagram
         PLG  ->> DB  : predicted_market_cap（円/株 → 百万円換算）/ gap_ratio を<br/>regression_results へ upsert（merge・財務本体と分離）
     end
 
-    PLG -->> API : { sector_stats, results }
+    PLG -->> API : { sector_stats, results, dropped_features }
     API -->> UI  : 業種別 R²・予測値一覧
 
     Note over User,DB: ※ 重い回帰は Render 軽量モードでは 403（ローカルで実行→結果が共有DBに保存され本番に反映）
