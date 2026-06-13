@@ -266,8 +266,8 @@ async def _run_collection_bg(years: int, max_co: Optional[int], log_id: int, ski
 
 
 async def _run_smart_collection_bg(log_id: int, years: int):
-    SMART_CHUNK_SIZE     = 200
-    SMART_FULL_THRESHOLD = 3500
+    # モジュールトップでは循環インポートになるため関数内ローカルインポートで単一定義を参照
+    from routers.collect import SMART_CHUNK_SIZE, SMART_FULL_THRESHOLD
 
     async def coro(on_progress, cancel_check, db):
         company_count = db.query(Company).count()
