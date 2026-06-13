@@ -317,7 +317,7 @@ async function runRecommend() {
   }
 }
 
-function dlRecCsv() {
+function exportRecommendCSV() {
   if (!recResults.length) return;
   const header = '順位,証券コード,企業名,業種,スコア,ROE%,営業利益率%,売上成長率%,割安度%,時価総額(百万円)';
   const rows = recResults.map(r =>
@@ -941,7 +941,7 @@ async function runDynamicPlugin(pluginName, tabId) {
     const d = await apiFetch(`/api/plugins/${pluginName}/run`, {method:'POST', body:JSON.stringify(params)});
     const card = document.getElementById(`dynresult-${tabId}`);
     const content = document.getElementById(`dynresult-content-${tabId}`);
-    content.innerHTML = _renderGenericResult(d);
+    content.innerHTML = (RESULT_RENDERERS[pluginName] || _renderGenericResult)(d);
     card.classList.remove('hidden');
     // 業種別OLS が完了したら乖離分析を解放し、結果に導線を出す
     if (pluginName === 'sector_ols') {
@@ -957,16 +957,23 @@ async function runDynamicPlugin(pluginName, tabId) {
   } catch(e) { showNotif(`実行失敗: ${e.message}`); }
 }
 
-function _renderGenericResult(data) {
+// 結果レンダラ登録制: 動的タブ（プラグイン runner）の結果描画を plugin名 → 描画関数で対応付ける。
+// 未登録のプラグイン（例: price_predictor）は _renderGenericResult（results 表 or JSON）にフォールバック。
+const RESULT_RENDERERS = {
+  'sector_ols': renderSectorOls,
+};
+
+// 業種別OLS 専用レンダラ: 自動ドロップ警告 + 業種別R²サマリ + ランキング表（汎用部を再利用）
+function renderSectorOls(data) {
   let html = '';
-  // 業種別OLS: 欠損が多く自動ドロップした説明変数の警告
+  // 欠損が多く自動ドロップした説明変数の警告
   if (Array.isArray(data.dropped_features) && data.dropped_features.length) {
     html += `<div style="margin-bottom:12px;padding:8px 12px;border-left:3px solid #f59e0b;background:rgba(245,158,11,0.08);font-size:12px;color:#fbbf24">
       欠損が多いため自動除外した説明変数（${data.dropped_features.length}件）:
       ${data.dropped_features.map(f => `${esc(f.label)}（NULL ${Number(f.missing_rate)}% / ${Number(f.missing)}社）`).join('、')}
     </div>`;
   }
-  // 業種別OLS: sector_stats サマリーを先に描画
+  // sector_stats サマリーを先に描画
   if (Array.isArray(data.sector_stats) && data.sector_stats.length) {
     html += `<div style="margin-bottom:16px">
       <div style="font-size:12px;color:#a78bfa;font-weight:600;margin-bottom:6px">
@@ -982,15 +989,19 @@ function _renderGenericResult(data) {
       </table></div>
     </div>`;
   }
+  return html + _renderGenericResult(data);
+}
+
+// 汎用結果レンダラ（フォールバック）: results 配列を表に、無ければ JSON を整形表示する。
+function _renderGenericResult(data) {
   if (Array.isArray(data.results) && data.results.length) {
     const cols = Object.keys(data.results[0]);
     const header = cols.map(c => `<th>${esc(c)}</th>`).join('');
     const rows = data.results.map(r =>
       `<tr>${cols.map(c => `<td>${esc(String(r[c] ?? '-'))}</td>`).join('')}</tr>`).join('');
-    html += `<div style="overflow-x:auto"><table><thead><tr>${header}</tr></thead><tbody>${rows}</tbody></table></div>`;
-    return html;
+    return `<div style="overflow-x:auto"><table><thead><tr>${header}</tr></thead><tbody>${rows}</tbody></table></div>`;
   }
-  return html + `<pre style="color:#94a3b8;font-size:12px;white-space:pre-wrap">${esc(JSON.stringify(data, null, 2))}</pre>`;
+  return `<pre style="color:#94a3b8;font-size:12px;white-space:pre-wrap">${esc(JSON.stringify(data, null, 2))}</pre>`;
 }
 
 function dl(content, name) {
@@ -998,6 +1009,20 @@ function dl(content, name) {
   a.href = URL.createObjectURL(new Blob([content], {type:'text/csv'}));
   a.download = name;
   a.click();
+}
+
+// CSV出力統一: タブごとにバラバラだった export*/dl* を単一の exportCSV(name) へ集約。
+// 各ビルダは対応する結果キャッシュ（gapResults 等）を読んで dl() でダウンロードする。
+const CSV_EXPORTERS = {
+  'gap_analysis':      exportGapCSV,
+  'recommend':         exportRecommendCSV,
+  'total_return':      exportTotalReturnCSV,
+  'net_cash_analysis': exportNetCashCSV,
+  'backtest':          exportBtCSV,
+};
+function exportCSV(name) {
+  const fn = CSV_EXPORTERS[name];
+  if (fn) fn();
 }
 
 // 初期化

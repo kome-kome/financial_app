@@ -204,7 +204,7 @@ tr:hover td{background:#1e2235}
       <div class="section-title" style="margin-bottom:0">
         結果 <span id="gap-count" class="tag tag-purple">-</span>
       </div>
-      <button class="btn btn-secondary btn-sm" data-click="exportGapCSV">CSV出力</button>
+      <button class="btn btn-secondary btn-sm" data-click="exportCSV" data-arg="gap_analysis">CSV出力</button>
     </div>
     <div style="overflow-x:auto;margin-top:12px">
       <table>
@@ -295,7 +295,7 @@ tr:hover td{background:#1e2235}
   <div class="card" id="rec-result-card" style="display:none">
     <div class="flex-between">
       <div class="section-title" style="margin-bottom:0" id="rec-result-title">分析結果</div>
-      <button class="btn btn-secondary btn-sm" data-click="dlRecCsv">CSVダウンロード</button>
+      <button class="btn btn-secondary btn-sm" data-click="exportCSV" data-arg="recommend">CSVダウンロード</button>
     </div>
     <div style="overflow-x:auto;margin-top:12px">
       <table>
@@ -411,7 +411,7 @@ tr:hover td{background:#1e2235}
       </div>
       <div class="flex">
         <span class="text-sm" style="font-size:11px">期待リターン = 株価上昇余地 + 配当利回り（参考値）</span>
-        <button class="btn btn-secondary btn-sm" data-click="exportTotalReturnCSV">CSV出力</button>
+        <button class="btn btn-secondary btn-sm" data-click="exportCSV" data-arg="total_return">CSV出力</button>
       </div>
     </div>
     <div style="overflow-x:auto;margin-top:12px">
@@ -535,7 +535,7 @@ tr:hover td{background:#1e2235}
       <div class="section-title" style="margin-bottom:0">
         結果 <span id="nc-count" class="tag tag-purple" style="margin-left:6px">-</span>
       </div>
-      <button class="btn btn-secondary btn-sm" data-click="exportNetCashCSV">CSV出力</button>
+      <button class="btn btn-secondary btn-sm" data-click="exportCSV" data-arg="net_cash_analysis">CSV出力</button>
     </div>
     <div style="overflow-x:auto;margin-top:12px">
       <table>
@@ -629,7 +629,7 @@ tr:hover td{background:#1e2235}
         <div class="section-title" style="margin-bottom:4px">バックテスト結果</div>
         <div class="text-sm" id="bt-period-label"></div>
       </div>
-      <button class="btn btn-secondary btn-sm" data-click="exportBtCSV">CSV出力</button>
+      <button class="btn btn-secondary btn-sm" data-click="exportCSV" data-arg="backtest">CSV出力</button>
     </div>
     <div class="grid4" style="margin-bottom:8px" id="bt-summary-grid"></div>
     <div id="bt-percentile" style="margin-bottom:14px;padding:12px;background:#0f1117;border-radius:8px;border:1px solid #1e293b"></div>
