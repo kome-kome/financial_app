@@ -16,6 +16,8 @@ let _gapScatter = null, _gapHist = null;
 let _gapDataExists    = false;  // /api/stats: 過去にOLSを実行しDBに予測値が残っている
 let _olsRanThisSession = false; // このセッションで業種別OLSを実行した
 let _modelStatus = null;         // /api/model/status キャッシュ（鮮度バー用）
+// URL ?tab= で起動タブを指定（/company からの相互リンク等: /analysis?tab=gap など）
+const _urlTab = new URLSearchParams(window.location.search).get('tab');
 
 // 鮮度バーと gap-ready の表示を更新する。
 // 利用可能条件: DBに予測値あり（過去実行）または このセッションでOLS実行済み。
@@ -853,8 +855,9 @@ async function initPlugins() {
     if (!PLUGIN_TAB_MAP[plugin.name]) _createDynamicTab(plugin, tabId);
   }
   buildSidebar(plugins);
-  // 最初のタブを表示（ui_order 昇順の先頭 = 「① 銘柄を探す」の先頭）
-  if (_allTabs.length) showTab(_allTabs[0]);
+  // URL ?tab= 指定があれば優先、なければ ui_order 最小（「① 銘柄を探す」先頭）を表示
+  const startTab = (_urlTab && _allTabs.includes(_urlTab)) ? _urlTab : _allTabs[0];
+  if (startTab) showTab(startTab);
   // 乖離分析タブのロック状態を反映（preflight と initPlugins の競合に備え両方で呼ぶ）
   refreshGapAvailability();
 }
