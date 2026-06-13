@@ -109,48 +109,21 @@ class TotalReturnPlugin(AnalysisPlugin):
             },
         }
 
-    async def execute(self, params: dict, db: Any) -> dict:
-        from database import FinancialRecord
-
-        # params はパラメータ契約に従い coerce 済み。
-        use_cf        = params["use_cf"]
-        use_sector_fe = params["use_sector_fe"]
-        n_folds       = params["n_folds"]
-        top_n         = params["top_n"]
-        min_div_yield = params["min_div_yield"]
-
-        # 使用する特徴量（すべて [円/株]）
-        features = list(PL_FEATURES)
-        if use_cf:
-            features += CF_FEATURES
-        features += BS_FEATURES + DIV_FEATURES
-
-        # stock_price と pl_eps と bs_bps が揃っているレコードを取得
-        records = (db.query(FinancialRecord)
-                     .filter(FinancialRecord.stock_price.isnot(None))
-                     .filter(FinancialRecord.stock_price > 0)
-                     .filter(FinancialRecord.pl_eps.isnot(None))
-                     .filter(FinancialRecord.bs_bps.isnot(None))
-                     .all())
-
-        if len(records) < 20:
-            raise ValueError(
-                f"データが不足しています（{len(records)}件）。"
-                "市場データ更新・財務データ収集を先に実行してください。"
-            )
-
+    def _build_features(
+        self,
+        records: list,
+        features: list[str],
+        use_sector_fe: bool,
+    ) -> tuple[list, list[str], "str | None"]:
+        """有効サンプル収集と業種ダミー列追加。(valid_records, sector_dummies, sector_baseline) を返す。"""
         def extract(r):
-            """[円/株] の特徴量ベクトルと株価を返す"""
             row = []
             for feat in features:
                 if feat == "cf_ops_ps":
-                    # 1株営業CF = 営業CF ÷ 発行株数
                     shares = shares_outstanding(r)
                     cf = r.cf_operating_cf
-                    if shares and shares > 0 and cf is not None:
-                        v = float(cf) / shares
-                    else:
-                        v = 0.0  # NULL 許容
+                    v = (float(cf) / shares
+                         if shares and shares > 0 and cf is not None else 0.0)
                 else:
                     v = getattr(r, feat, None)
                     if v is None:
@@ -160,13 +133,11 @@ class TotalReturnPlugin(AnalysisPlugin):
                             return None, None, None
                     v = float(v)
                 row.append(v)
-
             sp = r.stock_price
             if sp is None or sp <= 0:
                 return None, None, None
             return row, float(sp), r
 
-        # 有効サンプル収集
         valid_records = []
         for r in records:
             row, sp, rec = extract(r)
@@ -179,50 +150,36 @@ class TotalReturnPlugin(AnalysisPlugin):
                 "財務データ収集を先に実行してください。"
             )
 
-        # ─── 業種固定効果（One-hot ダミー）─────────────────────────────────
-        # サンプル数 ≥ SECTOR_FE_MIN_SAMPLES の業種のみダミー化。
-        # 最初の業種を基準（dropped baseline）として OLS の多重共線性を避ける。
         sector_dummies: list[str] = []
-        sector_baseline: str | None = None
+        sector_baseline: "str | None" = None
         if use_sector_fe:
-            industry_counts = Counter(
-                (r.industry or "未分類") for _, _, r in valid_records
-            )
-            eligible = sorted(
-                ind for ind, c in industry_counts.items()
-                if c >= SECTOR_FE_MIN_SAMPLES
-            )
+            industry_counts = Counter((r.industry or "未分類") for _, _, r in valid_records)
+            eligible = sorted(ind for ind, c in industry_counts.items()
+                              if c >= SECTOR_FE_MIN_SAMPLES)
             if len(eligible) >= 2:
                 sector_baseline = eligible[0]
                 sector_dummies = eligible[1:]
 
         def encode_sector(r) -> list[float]:
-            """業種ダミーベクトル。基準業種は全ゼロ、それ以外はその業種のみ 1。"""
             if not sector_dummies:
                 return []
             ind = r.industry or "未分類"
             return [1.0 if ind == d else 0.0 for d in sector_dummies]
 
-        # 各サンプルに業種ダミーを追加
-        valid_records_extended = []
-        for row, sp, rec in valid_records:
-            sec_row = encode_sector(rec)
-            valid_records_extended.append((row + sec_row, sp, rec))
-        valid_records = valid_records_extended
+        return (
+            [(row + encode_sector(rec), sp, rec) for row, sp, rec in valid_records],
+            sector_dummies,
+            sector_baseline,
+        )
 
+    def _fit_and_cv(self, valid_records: list, n_folds: int) -> dict:
+        """k-fold CV + 全サンプルでの最終 OLS フィット。モデル情報を辞書で返す。"""
         samples = [(vr[0], vr[1]) for vr in valid_records]
-        # 特徴量名一覧（係数表示用）
-        all_feature_names = list(features) + [f"sector_{d}" for d in sector_dummies]
-        n_feat = len(all_feature_names)
-
-        # ─── k-fold CV ───────────────────────────────────────────────────────
-        # 株価も対数正規分布に近い（分布の裾が重い）ため log 正規化を使用
+        n_feat = len(samples[0][0])
         cv_results = kfold_cv(samples, n_folds=n_folds, y_norm_method="log")
 
-        # ─── 全サンプルで最終モデルを学習 ─────────────────────────────────────
         X_all_raw = [s[0] for s in samples]
         y_all_raw = [s[1] for s in samples]
-
         norm_params: list[tuple[float, float]] = []
         win_params:  list[tuple[float, float]] = []
         X_all_norm = [[1.0] + [0.0] * n_feat for _ in range(len(X_all_raw))]
@@ -239,9 +196,30 @@ class TotalReturnPlugin(AnalysisPlugin):
         final_model = ols(X_all_norm, y_all)
         if not final_model:
             raise ValueError("最終モデルの学習に失敗しました（行列が特異）")
-        beta = final_model["beta"]
 
-        # ─── 全有効銘柄で予測・ランキング ─────────────────────────────────────
+        return {
+            "cv_results":  cv_results,
+            "beta":        final_model["beta"],
+            "win_params":  win_params,
+            "norm_params": norm_params,
+            "y_mu":        y_mu,
+            "y_sd":        y_sd,
+            "n_samples":   len(samples),
+        }
+
+    def _rank_candidates(
+        self,
+        valid_records: list,
+        model: dict,
+        features: list[str],
+        min_div_yield: float,
+    ) -> list[dict]:
+        """理論株価推定・乖離率・総合リターンスコア算出。ソート済みリストを返す。"""
+        beta       = model["beta"]
+        win_params = model["win_params"]
+        norm_params = model["norm_params"]
+        y_mu, y_sd  = model["y_mu"], model["y_sd"]
+
         ranking = []
         for feat_row, sp, r in valid_records:
             x_norm = [1.0]
@@ -252,86 +230,84 @@ class TotalReturnPlugin(AnalysisPlugin):
                 x_norm.append(normalize_transform(v_w, p1, p2))
 
             pred_norm  = sum(x_norm[j] * beta[j] for j in range(len(beta)))
-            pred_price = math.exp(min(pred_norm * y_sd + y_mu, LOG_PRED_CAP))  # 円/株
-
-            upside = (pred_price - sp) / sp
+            pred_price = math.exp(min(pred_norm * y_sd + y_mu, LOG_PRED_CAP))
+            upside     = (pred_price - sp) / sp
 
             # 予測乖離が異常に大きい場合はスキップ（外挿過多・データ異常）
             if upside > 5.0 or upside < -1.0:
                 continue
 
-            # 配当利回り（30%超はデータ異常）
             dy = float(r.div_yield or 0.0)
             if dy > 30.0:
                 dy = 0.0
-
             if min_div_yield > 0 and dy < min_div_yield:
                 continue
 
             total_return = upside + dy / 100.0
             name = getattr(r, "company_name", None) or r.edinet_code
-
-            # implied 倍率を参考情報として付記
-            eps = float(r.pl_eps) if r.pl_eps else None
-            bps = float(r.bs_bps) if r.bs_bps else None
-            implied_per = round(pred_price / eps, 1) if eps and eps > 0 else None
-            implied_pbr = round(pred_price / bps, 2) if bps and bps > 0 else None
-
+            eps  = float(r.pl_eps) if r.pl_eps else None
+            bps  = float(r.bs_bps) if r.bs_bps else None
             ranking.append({
-                "edinet_code":     r.edinet_code,
-                "sec_code":        r.sec_code or "",
-                "name":            name,
-                "industry":        r.industry or "",
-                "year":            r.year,
-                "total_return_pct":  round(total_return * 100, 2),
-                "upside_pct":        round(upside * 100, 2),
-                "div_yield_pct":     round(dy, 2),
-                "pred_price":        round(pred_price, 1),
-                "actual_price":      round(sp, 1),
-                "implied_per":       implied_per,
-                "implied_pbr":       implied_pbr,
+                "edinet_code":      r.edinet_code,
+                "sec_code":         r.sec_code or "",
+                "name":             name,
+                "industry":         r.industry or "",
+                "year":             r.year,
+                "total_return_pct": round(total_return * 100, 2),
+                "upside_pct":       round(upside * 100, 2),
+                "div_yield_pct":    round(dy, 2),
+                "pred_price":       round(pred_price, 1),
+                "actual_price":     round(sp, 1),
+                "implied_per":      round(pred_price / eps, 1) if eps and eps > 0 else None,
+                "implied_pbr":      round(pred_price / bps, 2) if bps and bps > 0 else None,
             })
 
         ranking.sort(key=lambda x: x["total_return_pct"], reverse=True)
-        ranking = ranking[:top_n]
-        for i, item in enumerate(ranking):
+        return ranking
+
+    def _build_response(
+        self,
+        ranking: list[dict],
+        model: dict,
+        features: list[str],
+        sector_dummies: list[str],
+        sector_baseline: "str | None",
+        top_n: int,
+    ) -> dict:
+        """API レスポンス辞書の組み立て。"""
+        beta       = model["beta"]
+        cv_results = model["cv_results"]
+
+        ranked = ranking[:top_n]
+        for i, item in enumerate(ranked):
             item["rank"] = i + 1
 
-        # 係数の解釈（implied 倍率として表示。業種ダミーは別出力）
-        feature_weights = {}
-        for fi, feat in enumerate(features):
-            b = beta[fi + 1]
-            interp = ""
-            if feat == "pl_eps":
-                interp = "implied P/E 倍率の近似"
-            elif feat == "bs_bps":
-                interp = "implied P/B 倍率の近似"
-            elif feat == "cf_ops_ps":
-                interp = "implied Price/CF 倍率の近似"
-            elif feat == "dps":
-                interp = "implied 配当還元倍率の近似"
-            feature_weights[feat] = {
-                "weight": round(b, 6),
-                "label":  FEATURE_LABELS.get(feat, feat),
-                "group":  ("pl" if feat in PL_FEATURES
-                           else "cf" if feat in CF_FEATURES
-                           else "bs" if feat in BS_FEATURES
-                           else "div"),
-                "interpretation": interp,
+        interp_map = {
+            "pl_eps":    "implied P/E 倍率の近似",
+            "bs_bps":    "implied P/B 倍率の近似",
+            "cf_ops_ps": "implied Price/CF 倍率の近似",
+            "dps":       "implied 配当還元倍率の近似",
+        }
+        feature_weights = {
+            feat: {
+                "weight":         round(beta[fi + 1], 6),
+                "label":          FEATURE_LABELS.get(feat, feat),
+                "group":          ("pl" if feat in PL_FEATURES  else
+                                   "cf" if feat in CF_FEATURES  else
+                                   "bs" if feat in BS_FEATURES  else "div"),
+                "interpretation": interp_map.get(feat, ""),
             }
+            for fi, feat in enumerate(features)
+        }
 
-        # 業種固定効果の係数（基準業種に対する log 価格水準の差）
-        sector_effects: list[dict] = []
-        offset = len(features) + 1  # 切片 + 財務特徴量
-        for si, d in enumerate(sector_dummies):
-            sector_effects.append({
-                "industry": d,
-                "log_premium": round(beta[offset + si], 4),
-            })
+        offset = len(features) + 1
+        sector_effects = [
+            {"industry": d, "log_premium": round(beta[offset + si], 4)}
+            for si, d in enumerate(sector_dummies)
+        ]
 
-        mean_r2   = round(statistics.mean(f["r2"] for f in cv_results), 4) if cv_results else None
+        mean_r2   = round(statistics.mean(f["r2"]       for f in cv_results), 4) if cv_results else None
         mean_rmse = round(statistics.mean(f["rmse_pct"] for f in cv_results), 2) if cv_results else None
-
         model_note = "目的変数=株価[円/株]、説明変数=EPS/BPS/CF/DPS[円/株]"
         if sector_dummies:
             model_note += f" + 業種ダミー {len(sector_dummies)} 個（基準: {sector_baseline}）"
@@ -341,7 +317,7 @@ class TotalReturnPlugin(AnalysisPlugin):
                 "folds":         cv_results,
                 "mean_r2":       mean_r2,
                 "mean_rmse_pct": mean_rmse,
-                "n_samples":     len(samples),
+                "n_samples":     model["n_samples"],
                 "cv_type":       "k-fold 横断的CV（銘柄間バイアス除去）",
                 "model_note":    model_note,
             },
@@ -358,9 +334,43 @@ class TotalReturnPlugin(AnalysisPlugin):
                 "effects":   sector_effects,
                 "n_dummies": len(sector_dummies),
             },
-            "ranking":         ranking,
-            "n_total_samples": len(samples),
+            "ranking":         ranked,
+            "n_total_samples": model["n_samples"],
         }
+
+    async def execute(self, params: dict, db: Any) -> dict:
+        from database import FinancialRecord
+
+        use_cf        = params["use_cf"]
+        use_sector_fe = params["use_sector_fe"]
+        n_folds       = params["n_folds"]
+        top_n         = params["top_n"]
+        min_div_yield = params["min_div_yield"]
+
+        features = list(PL_FEATURES)
+        if use_cf:
+            features += CF_FEATURES
+        features += BS_FEATURES + DIV_FEATURES
+
+        records = (db.query(FinancialRecord)
+                     .filter(FinancialRecord.stock_price.isnot(None))
+                     .filter(FinancialRecord.stock_price > 0)
+                     .filter(FinancialRecord.pl_eps.isnot(None))
+                     .filter(FinancialRecord.bs_bps.isnot(None))
+                     .all())
+
+        if len(records) < 20:
+            raise ValueError(
+                f"データが不足しています（{len(records)}件）。"
+                "市場データ更新・財務データ収集を先に実行してください。"
+            )
+
+        valid_records, sector_dummies, sector_baseline = self._build_features(
+            records, features, use_sector_fe
+        )
+        model   = self._fit_and_cv(valid_records, n_folds)
+        ranking = self._rank_candidates(valid_records, model, features, min_div_yield)
+        return self._build_response(ranking, model, features, sector_dummies, sector_baseline, top_n)
 
 
 plugin = TotalReturnPlugin()

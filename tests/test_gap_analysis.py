@@ -5,6 +5,7 @@ execute(): gap_ratio 皆無→空結果（前提条件の弾きは ensure_depend
 / AR(1)・ヒューリスティックの分岐 / ソート。
 """
 import asyncio
+import math
 import os
 import sys
 
@@ -53,6 +54,34 @@ class TestEstimateAr1:
     def test_zero_variance_series_returns_none(self):
         # 定数列は平均回帰条件（0<phi<1）を満たさない → None
         assert _estimate_ar1_half_life_years([5.0] * 20) is None
+
+    def test_unit_root_phi_gte_1_returns_none_no_exception(self):
+        """φ >= 1（単位根）のシリーズ：例外を送出せず None を返す。"""
+        # 単調増加列は AR(1) 係数 φ ≈ 1 を与える
+        series = [float(i) for i in range(30)]
+        result = _estimate_ar1_half_life_years(series)
+        assert result is None  # 例外ではなく None
+
+    def test_negative_phi_returns_none_no_exception(self):
+        """φ <= 0（負の自己相関）のシリーズ：例外を送出せず None を返す。"""
+        # 交互符号列は AR(1) 係数 φ < 0 を与える
+        series = [(-1.0) ** i * 10.0 for i in range(20)]
+        result = _estimate_ar1_half_life_years(series)
+        assert result is None  # 例外ではなく None
+
+    def test_phi_half_known_analytical_half_life(self):
+        """φ ≈ 0.5 の正常系：半減期が解析値 1.0 年と数値的に一致する（回帰テスト）。"""
+        rng = np.random.default_rng(123)
+        phi_true, n = 0.5, 100
+        x = [0.0]
+        for _ in range(n - 1):
+            x.append(phi_true * x[-1] + float(rng.normal(0, 1)))
+        result = _estimate_ar1_half_life_years(x)
+        assert result is not None
+        # φ = 0.5 の解析的半減期 = -log(2)/log(0.5) = 1.0 年
+        expected_hl = -math.log(2) / math.log(0.5)
+        assert result["half_life_years"] == pytest.approx(expected_hl, abs=0.5)
+        assert 0 < result["phi"] < 1
 
 
 # ── execute(): in-memory SQLite ──────────────────────────────────────────────
