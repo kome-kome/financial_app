@@ -20,6 +20,17 @@ body{font-family:'Segoe UI',sans-serif;background:#0f1117;color:#e2e8f0;min-heig
 .nav-btn.locked{color:#64748b;opacity:.7}
 .nav-link{padding:11px 18px;font-size:13px;color:#64748b;text-decoration:none;display:inline-flex;align-items:center;gap:5px;margin-left:auto}
 .nav-link:hover{color:#94a3b8}
+/* 目的別IA: 左サイドバー型ハブ（カテゴリ→分析の2階層） */
+.layout{display:flex;align-items:flex-start;max-width:1640px;margin:0 auto}
+.sidebar{flex:0 0 224px;width:224px;background:#161927;border-right:1px solid #2d3154;padding:10px 10px 30px;min-height:calc(100vh - 110px)}
+.sidebar-cat{font-size:11px;color:#64748b;font-weight:600;text-transform:uppercase;letter-spacing:.5px;margin:16px 8px 6px}
+.sidebar-cat:first-child{margin-top:6px}
+.sidebar-item{display:block;width:100%;text-align:left;padding:8px 12px;margin:2px 0;font-size:13px;color:#94a3b8;background:none;border:none;border-radius:6px;cursor:pointer;text-decoration:none;transition:background .15s,color .15s}
+.sidebar-item:hover{background:#1e2235;color:#e2e8f0}
+.sidebar-item.active{background:#2e1065;color:#c4b5fd;font-weight:600}
+.sidebar-item.locked{color:#64748b;opacity:.7}
+.sidebar-ext{font-size:10px;color:#64748b;margin-left:4px}
+.layout .container{flex:1;min-width:0;max-width:none;margin:0}
 .container{padding:20px;max-width:1400px;margin:0 auto}
 .card{background:#1a1d2e;border:1px solid #2d3154;border-radius:10px;padding:16px;margin-bottom:16px}
 .grid4{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:16px}
@@ -29,6 +40,11 @@ body{font-family:'Segoe UI',sans-serif;background:#0f1117;color:#e2e8f0;min-heig
   .container{padding:12px}
   .grid4{grid-template-columns:repeat(2,1fr)}
   .grid3{grid-template-columns:repeat(2,1fr)}
+  /* 狭幅ではサイドバーを上部の横スクロール帯に切り替える */
+  .layout{flex-direction:column}
+  .sidebar{flex:none;width:100%;min-height:0;border-right:none;border-bottom:1px solid #2d3154;display:flex;flex-wrap:wrap;align-items:center;gap:4px;padding:8px 12px}
+  .sidebar-cat{width:100%;margin:8px 4px 2px}
+  .sidebar-item{width:auto}
 }
 @media (max-width: 480px){
   .grid4{grid-template-columns:1fr}
@@ -110,9 +126,7 @@ tr:hover td{background:#1e2235}
   <button id="logout-btn" data-click="logout" style="display:none;margin-left:8px;padding:5px 12px;background:transparent;border:1px solid #4a5568;border-radius:4px;color:#94a3b8;font-size:12px;cursor:pointer">ログアウト</button>
 </div>
 
-<div class="nav" id="plugin-nav">
-  <!-- 分析プラグインのタブは initPlugins() が動的に挿入する -->
-  <button class="nav-btn" data-tab="backtest" data-click="showTab" data-arg="backtest">バックテスト</button>
+<div class="nav" id="top-nav">
   <a href="/" class="nav-link" style="color:#64748b">
     <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>
     ホーム
@@ -140,6 +154,11 @@ tr:hover td{background:#1e2235}
   </div>
   <a href="/collection" style="color:#a78bfa;font-size:12px;text-decoration:none;margin-left:auto">← データ収集ページへ</a>
 </div>
+
+<div class="layout">
+<aside class="sidebar" id="analysis-sidebar">
+  <!-- 分析メニュー（目的別カテゴリ）は initPlugins() が /api/plugins のメタから生成 -->
+</aside>
 
 <div class="container">
 
@@ -661,6 +680,7 @@ tr:hover td{background:#1e2235}
 </div>
 
 </div><!-- container -->
+</div><!-- layout -->
 
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 <script src="/static/js/common.js"></script>

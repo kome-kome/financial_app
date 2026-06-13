@@ -24,8 +24,8 @@ function refreshGapAvailability() {
   const ready  = document.getElementById('gap-ready');
   if (locked) locked.style.display = available ? 'none' : 'block';
   if (ready)  ready.style.display  = available ? 'block' : 'none';
-  // ナビゲーションボタンにロック表示（業種別OLS未実行時は 🔒 + グレーアウト）
-  const btn = document.querySelector('.nav-btn[data-tab="gap"]');
+  // サイドバー項目にロック表示（業種別OLS未実行時は 🔒 + グレーアウト）
+  const btn = document.querySelector('.sidebar-item[data-tab="gap"]');
   if (btn) {
     const baseLabel = (_pluginMeta['gap_analysis'] && _pluginMeta['gap_analysis'].label) || '乖離分析';
     btn.classList.toggle('locked', !available);
@@ -45,8 +45,11 @@ const PLUGIN_TAB_MAP = {
   'recommend':          'recommend',
   'total_return':       'total_return',
   'net_cash_analysis':  'net_cash',
+  'backtest':           'backtest',   // 特例エントリ。既存の静的タブ #tab-backtest を使用
 };
-let _allTabs   = ['backtest'];
+// サイドバー項目の先頭につける目印（視認性のため。強調は active 状態で表現）
+const PLUGIN_ICON = { 'recommend': '★ ', 'total_return': '◆ ', 'net_cash_analysis': '¥ ' };
+let _allTabs   = [];        // タブを持つ分析の tabId 一覧（initPlugins が構築）
 let _pluginMeta = {};
 // Render 軽量モード（true なら重い回帰はローカル実行に限定。UIで無効化＋案内）
 let _renderLightMode = false;
@@ -782,71 +785,75 @@ function showTab(t) {
     const el = document.getElementById('tab-' + x);
     if (el) el.classList.toggle('hidden', x !== t);
   });
-  document.querySelectorAll('.nav-btn').forEach(b => {
+  document.querySelectorAll('.sidebar-item').forEach(b => {
     b.classList.toggle('active', b.dataset.tab === t);
   });
 }
 
-// ── プラグイン動的読み込み ─────────────────────────────────────────────
+// ── プラグイン動的読み込み（メタ駆動サイドバー）─────────────────────────
 async function initPlugins() {
+  let plugins;
   try {
     const d = await apiFetch('/api/plugins');
-    const nav = document.getElementById('plugin-nav');
-    const backtestBtn = nav.querySelector('[data-tab="backtest"]');
-
-    for (const plugin of d.plugins) {
-      _pluginMeta[plugin.name] = plugin;
-      const tabId = PLUGIN_TAB_MAP[plugin.name] || plugin.name;
-
-      if (!_allTabs.includes(tabId)) _allTabs.unshift(tabId);
-
-      // nav ボタン生成
-      const btn = document.createElement('button');
-      btn.className = 'nav-btn';
-      btn.dataset.tab = tabId;
-      btn.onclick = () => showTab(tabId);
-      if (plugin.name === 'recommend') {
-        btn.style.color = '#10b981';
-        btn.textContent = '★ ' + plugin.label;
-      } else if (plugin.name === 'total_return') {
-        btn.style.color = '#f59e0b';
-        btn.textContent = '◆ ' + plugin.label;
-      } else if (plugin.name === 'net_cash_analysis') {
-        btn.style.color = '#fbbf24';
-        btn.textContent = '¥ ' + plugin.label;
-      } else {
-        btn.textContent = plugin.label;
-      }
-      nav.insertBefore(btn, backtestBtn);
-
-      // 既存タブにマッピングがないプラグインはタブを動的生成
-      if (!PLUGIN_TAB_MAP[plugin.name]) {
-        _createDynamicTab(plugin, tabId);
-      }
-    }
+    plugins = d.plugins;
   } catch(e) {
     console.error('プラグイン一覧取得失敗:', e);
-    // フォールバック: 既存タブをそのまま使用
-    _allTabs = ['gap', 'recommend', 'total_return', 'backtest'];
-    const nav = document.getElementById('plugin-nav');
-    const backtestBtn = nav.querySelector('[data-tab="backtest"]');
-    [
-      {tabId:'gap', label:'乖離分析'},
-      {tabId:'recommend', label:'★ おすすめ銘柄', style:'color:#10b981'},
-    ].forEach(({tabId, label, style}) => {
-      const btn = document.createElement('button');
-      btn.className = 'nav-btn';
-      btn.dataset.tab = tabId;
-      btn.onclick = () => showTab(tabId);
-      btn.textContent = label;
-      if (style) btn.style.cssText = style;
-      nav.insertBefore(btn, backtestBtn);
-    });
+    plugins = _fallbackPlugins();
   }
-  // 最初のタブを表示
-  showTab(_allTabs[0]);
+  _allTabs = [];
+  for (const plugin of plugins) {
+    _pluginMeta[plugin.name] = plugin;
+    if (plugin.href) continue;   // 外部リンク（例: スクリーニング→/collection）はタブを持たない
+    const tabId = PLUGIN_TAB_MAP[plugin.name] || plugin.name;
+    if (!_allTabs.includes(tabId)) _allTabs.push(tabId);
+    // 既存タブにマッピングがないプラグイン（sector_ols / price_predictor）はタブを動的生成
+    if (!PLUGIN_TAB_MAP[plugin.name]) _createDynamicTab(plugin, tabId);
+  }
+  buildSidebar(plugins);
+  // 最初のタブを表示（ui_order 昇順の先頭 = 「① 銘柄を探す」の先頭）
+  if (_allTabs.length) showTab(_allTabs[0]);
   // 乖離分析タブのロック状態を反映（preflight と initPlugins の競合に備え両方で呼ぶ）
   refreshGapAvailability();
+}
+
+// /api/plugins のメタを category でグルーピングし、ui_order 昇順でサイドバーを生成する。
+// href を持つエントリ（スクリーニング等）は別ページへのリンクとして描画する。
+function buildSidebar(plugins) {
+  const side = document.getElementById('analysis-sidebar');
+  if (!side) return;
+  const sorted = [...plugins].sort((a, b) => (a.ui_order ?? 999) - (b.ui_order ?? 999));
+  const order = [];          // カテゴリの出現順（ui_order 昇順で確定）
+  const byCat = {};
+  for (const p of sorted) {
+    const cat = p.category || 'その他';
+    if (!byCat[cat]) { byCat[cat] = []; order.push(cat); }
+    byCat[cat].push(p);
+  }
+  let html = '';
+  for (const cat of order) {
+    html += `<div class="sidebar-cat">${esc(cat)}</div>`;
+    for (const p of byCat[cat]) {
+      if (p.href) {
+        html += `<a class="sidebar-item" href="${esc(p.href)}">${esc(p.label)}<span class="sidebar-ext">↗</span></a>`;
+      } else {
+        const tabId = PLUGIN_TAB_MAP[p.name] || p.name;
+        const icon = PLUGIN_ICON[p.name] || '';
+        html += `<button type="button" class="sidebar-item" data-tab="${esc(tabId)}" data-click="showTab" data-arg="${esc(tabId)}">${esc(icon + p.label)}</button>`;
+      }
+    }
+  }
+  side.innerHTML = html;
+}
+
+// /api/plugins 取得失敗時のフォールバック（静的タブを持つ分析のみ・カテゴリ付き）
+function _fallbackPlugins() {
+  return [
+    {name:'recommend',         label:'おすすめ銘柄',       category:'① 銘柄を探す',       ui_order:110, depends_on:[],            params_schema:{}},
+    {name:'net_cash_analysis', label:'ネットキャッシュ分析', category:'① 銘柄を探す',       ui_order:120, depends_on:[],            params_schema:{}},
+    {name:'gap_analysis',      label:'乖離分析',           category:'② 割安度を測る',     ui_order:220, depends_on:['sector_ols'], params_schema:{}},
+    {name:'total_return',      label:'総合リターン予測',     category:'③ 将来リターンを予測', ui_order:310, depends_on:[],            params_schema:{}},
+    {name:'backtest',          label:'バックテスト',        category:'④ 戦略を検証',       ui_order:410, depends_on:[],            params_schema:{}},
+  ];
 }
 
 function _createDynamicTab(plugin, tabId) {

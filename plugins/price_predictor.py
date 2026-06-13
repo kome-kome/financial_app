@@ -170,6 +170,8 @@ class PricePredictorPlugin(AnalysisPlugin):
         "【注意】株価履歴データが必要です。先に株価履歴収集を実行してください。"
     )
     depends_on = []
+    category = "③ 将来リターンを予測"
+    ui_order = 320
 
     def params_schema(self) -> dict:
         return {

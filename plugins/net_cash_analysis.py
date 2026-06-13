@@ -107,6 +107,8 @@ class NetCashAnalysisPlugin(AnalysisPlugin):
         "推計時価総額の崩れによる異常比率はサニティ上限で自動除外し、任意で営業CF>0等のバリュートラップ除外も行える。"
     )
     depends_on = []
+    category = "① 銘柄を探す"
+    ui_order = 120
 
     def params_schema(self) -> dict:
         return {

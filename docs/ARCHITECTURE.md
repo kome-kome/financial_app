@@ -38,7 +38,7 @@ graph LR
         LOGIN["🔐 ログイン画面\nlogin.html"]
         D["🏠 ダッシュボード\ndashboard.html\n企業数・収録状況サマリー"]
         C["📦 収集管理\ncollection.html\n財務収集/株価収集/市場データ更新/DB閲覧\n（4タブ構成・ウィザードUX）"]
-        A["📊 分析画面\nanalysis.html\n乖離分析/プラグイン/バックテスト\n（4タブ構成・ステータスバー・ウィザードUX）"]
+        A["📊 分析画面\nanalysis.html\n目的別4カテゴリの左サイドバー\n（銘柄を探す/割安度/リターン予測/検証・ステータスバー）"]
         M["📖 モデル解説\nmodels.html\n数式・参考文献・DOIリンク"]
         DB["🗃️ DB ビューア\ndb.html\nスキーマ/プレビュー/統計/リレーション/ドリルダウン"]
     end
@@ -586,19 +586,22 @@ stateDiagram-v2
 
     state Analysis {
         direction TB
-        [*] --> Gap
-        Gap      : 🎯 乖離分析\n割安・割高ランキング\n（財務データ必須・ウィザード制御）
-        Plugin   : 🧩 プラグイン分析\n推薦・総合リターン予測など\n（財務データ必須・ウィザード制御）
-        Backtest : 🔁 バックテスト\n過去のスコアリング精度検証\n（株価データ必須・ウィザード制御）
+        [*] --> Find
+        Find    : ① 銘柄を探す\nおすすめ/ネットキャッシュ/スクリーニング
+        Value   : ② 割安度を測る\n業種別OLS → 乖離分析
+        Predict : ③ 将来リターンを予測\n総合リターン/株価リターン
+        Verify  : ④ 戦略を検証\nバックテスト
 
-        Gap      --> Plugin   : タブ切替
-        Gap      --> Backtest : タブ切替
+        Find    --> Value   : サイドバー切替
+        Value   --> Predict : サイドバー切替
+        Predict --> Verify  : サイドバー切替
     }
 
     note right of Analysis
-      ステータスバー（常時表示）:
-      財務データ件数 / 株価データ件数
-      不足時に各実行ボタンを自動 disabled
+      左サイドバー = /api/plugins のメタ（category/ui_order）から
+      目的別カテゴリで動的生成（投資フロー順）。
+      スクリーニングは /collection へのリンク（特例エントリ・href）。
+      ステータスバー: 財務/株価データ件数（不足時に実行ボタンを自動 disabled）
     end note
 
     state Models {
@@ -695,6 +698,8 @@ classDiagram
         +str description
         +list depends_on
         +bool heavy
+        +str category
+        +int ui_order
         +params_schema() dict
         +execute(params, db) dict
         +to_meta() dict
@@ -870,7 +875,7 @@ graph LR
     end
 
     subgraph ANALYSIS["📊 分析 /api/"]
-        AN1["GET /api/plugins\n利用可能なプラグイン一覧（heavy フラグ含む）"]
+        AN1["GET /api/plugins\nプラグイン + 特例エントリ(screen/backtest)のメタ一覧\n（category/ui_order/heavy 含む・ui_order 昇順）"]
         AN2["POST /api/plugins/{name}/run\nプラグインを実行\n（heavy かつ RENDER_LIGHT_MODE は 403）"]
         AN4["GET /api/gap-analysis\n乖離分析（旧互換エンドポイント）"]
         AN5["POST /api/screen\nスクリーニング（条件絞り込み）"]
@@ -973,7 +978,7 @@ graph TB
 | `requirements-dev.txt` | 設定 | 開発・テスト専用依存（`pytest`）。本番 `requirements.txt` と分離（Render メモリ節約） | — |
 | `dashboard.html` | フロントエンド | トップページ・全体サマリー（`/`） | api.py |
 | `collection.html` | フロントエンド | 収集管理・スクリーニング・DBブラウザ（`/collection`） | api.py |
-| `analysis.html` | フロントエンド | 回帰分析・乖離分析・プラグイン（`/analysis`）。乖離分析タブに横断分布（理論vs実績の散布図・乖離率ヒストグラム）を Chart.js で表示 | api.py, Chart.js (CDN) |
+| `analysis.html` | フロントエンド | 分析ハブ（`/analysis`）。左サイドバーを `/api/plugins` のメタ（category/ui_order）から目的別4カテゴリ（①銘柄を探す/②割安度/③リターン予測/④検証）で動的生成（`buildSidebar`）。乖離分析に横断分布（理論vs実績の散布図・乖離率ヒストグラム）を Chart.js で表示。スクリーニングは特例エントリとして `/collection` へリンク | api.py, Chart.js (CDN) |
 | `login.html` | フロントエンド | 認証ログイン画面（`/login`） | api.py |
 | `models.html` | フロントエンド | モデル解説・参考文献ページ（`/models`）。8モデルの数式・パラメータ・DOIリンクをインラインHTMLで表示。 | — |
 | `db.html` | フロントエンド | DBビューア（`/db`）。4テーブルのスキーマ・プレビュー・統計サマリー・ER 風リレーション・企業ドリルダウン・CSV エクスポート。 | api.py |

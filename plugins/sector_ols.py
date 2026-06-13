@@ -197,6 +197,8 @@ class SectorOLSPlugin(AnalysisPlugin):
     )
     depends_on = []
     heavy = True   # 業種ごとの行列回帰。Render Free では OOM するためローカル実行に限定
+    category = "② 割安度を測る"
+    ui_order = 210
 
     def produced_output(self, db) -> bool:
         """regression_results に gap_ratio 付きの予測値を書き終えているか。
