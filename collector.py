@@ -73,6 +73,16 @@ XBRL_MAP = build_xbrl_map()
 # 連結データ優先判定キー。"Prior1Year" は含めない（前期連結データが当期データを上書きするバグを防ぐ）
 CONSOLIDATED_KEYS = ["Consolidated"]
 
+# 棚卸資産サブ項目 — aggregate Inventories 要素を出さない会社（JGAAP の ~92%）向けフォールバック。
+# 各タプルは precedence 順（先頭が取れたら後続をスキップして二重計上を防ぐ）。
+_INVENTORY_GROUPS: tuple = (
+    ("MerchandiseAndFinishedGoods", "Merchandise", "FinishedGoods"),  # 商品及び製品
+    ("WorkInProcess",),                                                # 仕掛品
+    ("RawMaterialsAndSupplies", "RawMaterials", "Supplies"),          # 原材料及び貯蔵品
+    ("OtherInventories",),                                             # その他の棚卸資産
+)
+_INVENTORY_SUB_ELEMS: frozenset = frozenset(e for g in _INVENTORY_GROUPS for e in g)
+
 # ── capex（設備投資）のラベル照合 ─────────────────────────────────────────
 # 設備投資の CF 明細行は企業独自の拡張要素IDでタグ付けされることが多く、要素ID照合では
 # 捕捉できない（実証: 標準要素 PurchaseOfPropertyPlantAndEquipment は0件）。
@@ -402,18 +412,52 @@ def _apply_row(
             _priority[key] = priority
 
 
+def _inventory_fallback(inv_parts: dict, result: dict) -> None:
+    """aggregate Inventories 未取得時にサブ項目の合計を bs["inventory"] へ設定する。"""
+    if result["bs"].get("inventory") is not None or not inv_parts:
+        return
+    total = 0.0
+    found = False
+    for group in _INVENTORY_GROUPS:
+        for elem in group:
+            if elem in inv_parts:
+                total += inv_parts[elem]
+                found = True
+                break
+    if found:
+        result["bs"]["inventory"] = total
+
+
 def parse_raw_rows(rows: list) -> dict:
     """[{element, context, value}, ...] から {bs, pl, cf, val, nonfin, meta} を抽出（再解析用）"""
     result = {"bs": {}, "pl": {}, "cf": {}, "val": {}, "nonfin": {}, "meta": {}}
     _priority: dict = {}
+    _inv_parts: dict = {}
+    _inv_prio: dict = {}
     for row in rows:
         elem = row.get("element", "")
         category_field = XBRL_MAP.get(elem)
         if not category_field:
+            if elem in _INVENTORY_SUB_ELEMS:
+                ctx = row.get("context", "")
+                if "Prior" in ctx and "CurrentYear" not in ctx:
+                    continue
+                is_consol = any(k in ctx for k in CONSOLIDATED_KEYS) and "NonConsolidated" not in ctx
+                has_member = "Member" in ctx or "NonConsolidated" in ctx
+                prio = 2 if is_consol else (1 if not has_member else 0)
+                try:
+                    val = float(str(row.get("value", "")).replace(",", ""))
+                except (ValueError, TypeError):
+                    pass
+                else:
+                    if prio > _inv_prio.get(elem, -1):
+                        _inv_parts[elem] = val
+                        _inv_prio[elem] = prio
             continue
         cat, field = category_field
         ctx = row.get("context", "")
         _apply_row(elem, ctx, row.get("value", ""), cat, field, result, _priority)
+    _inventory_fallback(_inv_parts, result)
     return result
 
 
@@ -427,6 +471,8 @@ def parse_xbrl_csv(df, edinet_code: str, period_end: str) -> dict:
         return result
 
     _priority: dict = {}
+    _inv_parts: dict = {}
+    _inv_prio: dict = {}
     label_col = col_map.get("label")
 
     for _, row in df.iterrows():
@@ -434,17 +480,33 @@ def parse_xbrl_csv(df, edinet_code: str, period_end: str) -> dict:
         elem = raw_elem.split(":")[-1] if ":" in raw_elem else raw_elem
         category_field = XBRL_MAP.get(elem)
 
-        # 要素ID照合で外れた行は capex のラベル照合を試みる（拡張要素ID対策）。
-        # 設備投資は企業独自要素でタグ付けされるため項目名（日本語ラベル）で捕捉する。
+        # 要素ID照合で外れた行は capex のラベル照合、次に棚卸資産サブ項目照合を試みる。
         if not category_field:
             if label_col is not None and _match_capex_by_label(str(row.get(label_col, ""))):
                 category_field = ("cf", "capex")
+            elif elem in _INVENTORY_SUB_ELEMS:
+                ctx = str(row.get(col_map.get("context", ""), ""))
+                if "Prior" in ctx and "CurrentYear" not in ctx:
+                    continue
+                is_consol = any(k in ctx for k in CONSOLIDATED_KEYS) and "NonConsolidated" not in ctx
+                has_member = "Member" in ctx or "NonConsolidated" in ctx
+                prio = 2 if is_consol else (1 if not has_member else 0)
+                try:
+                    val = float(str(row[col_map["value"]]).replace(",", ""))
+                except (ValueError, TypeError):
+                    continue
+                if prio > _inv_prio.get(elem, -1):
+                    _inv_parts[elem] = val
+                    _inv_prio[elem] = prio
+                continue
             else:
                 continue
 
         cat, field = category_field
         ctx = str(row.get(col_map.get("context", ""), ""))
         _apply_row(elem, ctx, row[col_map["value"]], cat, field, result, _priority, apply_capex_sign=True)
+
+    _inventory_fallback(_inv_parts, result)
     return result
 
 
