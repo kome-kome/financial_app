@@ -311,7 +311,8 @@ async def fetch_xbrl_csv(client: httpx.AsyncClient, doc_id: str):
                     # EDINET の XBRL CSV は UTF-16 LE (BOM付き) + タブ区切りの場合がある
                     content = raw.decode("utf-16", errors="replace")
                     df_part = pd.read_csv(io.StringIO(content), sep="\t", low_memory=False)
-                except Exception:
+                except Exception as e:
+                    log.warning(f"XBRL CSVスキップ: {fname} / {e}")
                     continue
                 if df_part is not None and not df_part.empty:
                     all_dfs.append(df_part)
@@ -925,17 +926,15 @@ def _update_market_data_point_in_time(db) -> int:
     for ec in history:
         history[ec].sort()  # trade_date の昇順
 
-    all_records = db.query(FinancialRecord).all()
-
     # 最新レコード（year最大）を社別にメモリ上でインデックス（最後の上書きステップで使用）
     latest_by_ec: dict = {}
-    for rec in all_records:
+    for rec in db.query(FinancialRecord).yield_per(500):
         ec = rec.edinet_code
         if ec not in latest_by_ec or (rec.year or 0) > (latest_by_ec[ec].year or 0):
             latest_by_ec[ec] = rec
 
     updated = 0
-    for rec in all_records:
+    for rec in db.query(FinancialRecord).yield_per(500):
         prices = history.get(rec.edinet_code)
         if not prices:
             continue
@@ -1752,8 +1751,8 @@ async def _phase_process_docs(db, client, all_docs: list,
             log.error(f"書類処理エラー（スキップ）: {doc_id} {filer_name} — {e}", exc_info=True)
             try:
                 db.rollback()
-            except Exception:
-                pass
+            except Exception as rollback_err:
+                log.error(f"rollback失敗: {rollback_err}")
 
     return skipped, False
 

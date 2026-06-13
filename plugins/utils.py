@@ -6,9 +6,12 @@ numpy / scipy / statsmodels を利用する（旧 Pure Python 実装からの移
 - p 値は scipy.stats.t.sf（df < 30 でも正確）
 - 詳細診断は statsmodels.OLS（Durbin-Watson・Jarque-Bera・F検定）
 """
+import logging
 import math
 import statistics
 from typing import Any
+
+log = logging.getLogger(__name__)
 
 import numpy as np
 from scipy import stats as scipy_stats
@@ -329,7 +332,8 @@ def ols_with_diagnostics(X: list, y: list, cov_type: str = "nonrobust") -> dict 
             res = model.fit()
         else:
             res = model.fit(cov_type=cov_type)
-    except Exception:
+    except Exception as e:
+        log.debug(f"OLS失敗: {e}")
         return None
 
     df = int(res.df_resid)
