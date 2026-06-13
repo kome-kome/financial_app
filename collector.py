@@ -1290,6 +1290,97 @@ async def refill_cf_from_xbrl(
     return result
 
 
+async def refill_pl_bs_from_xbrl(
+    db,
+    limit: Optional[int] = None,
+    sleep_sec: float = RATE_SLEEP,
+    on_progress: Optional[Callable[[int, int, str], None]] = None,
+) -> dict:
+    """`pl_pretax_profit` が NULL のレコードを EDINET XBRL から再取得し、
+    NULL の PL/BS 列を一括補完する（既存値は上書きしない）。
+
+    駆動マーカー = `pl_pretax_profit IS NULL` かつ `doc_id IS NOT NULL`。税前が埋まると
+    対象から外れるため、繰り返し実行で自然終了する（refill_cf_from_xbrl と同じ思想）。
+    残課題: 税前を真にパースできない少数レコードは再実行のたびに再取得される（許容）。
+
+    タグ修正（database.py の pl_pretax_profit など）後の既存データ是正用。`raw_xbrl_json`
+    は生タグを保存しないため `reparse_from_raw` では復元できず再フェッチが必須。値は
+    parse_xbrl_csv の連結優先ロジックで選ばれるため通常収集と同等の信頼性。CF は
+    refill_cf_from_xbrl が担当するため対象外。
+    """
+    from sqlalchemy.orm import defer
+
+    log.info(f"refill_pl_bs_from_xbrl 開始 (limit={limit}, sleep={sleep_sec})")
+
+    def _target_q():
+        return db.query(FinancialRecord).filter(
+            FinancialRecord.pl_pretax_profit.is_(None),
+            FinancialRecord.doc_id.isnot(None),
+        )
+
+    # raw_xbrl_json は使わないので defer（全件ロード時の転送/メモリ削減）
+    q = (_target_q()
+         .options(defer(FinancialRecord.raw_xbrl_json))
+         .order_by(FinancialRecord.period_end.desc()))
+    if limit:
+        q = q.limit(limit)
+    targets = q.all()
+
+    total = len(targets)
+    log.info(f"  対象レコード: {total}件")
+    if total == 0:
+        return {"updated": 0, "skipped": 0, "failed": 0, "remaining": 0}
+
+    updated = skipped = failed = 0
+
+    async with httpx.AsyncClient(timeout=60) as client:
+        for i, rec in enumerate(targets, 1):
+            msg = f"[PL/BS補完 {i}/{total}] {rec.company_name} {rec.period_end}"
+            if on_progress:
+                on_progress(i, total, msg)
+            if i % 100 == 0:
+                log.info(msg)
+
+            try:
+                df = await fetch_xbrl_csv(client, rec.doc_id)
+                if df is None or df.empty:
+                    skipped += 1
+                    continue
+
+                parsed = parse_xbrl_csv(df, rec.edinet_code, str(rec.period_end))
+                changed = False
+                # NULL の PL/BS 列のみ書き込む（既存値を保護＝上書き禁止）
+                for cat in ("pl", "bs"):
+                    for field, val in (parsed.get(cat) or {}).items():
+                        col = f"{cat}_{field}"
+                        if val is not None and hasattr(rec, col) and getattr(rec, col) is None:
+                            setattr(rec, col, val)
+                            changed = True
+
+                if changed:
+                    db.add(rec)
+                    updated += 1
+                else:
+                    skipped += 1
+
+                # 100件ごとに commit（長時間トランザクション対策）
+                if updated % 100 == 0 and updated > 0:
+                    db.commit()
+
+            except Exception as e:
+                log.warning(f"  PL/BS補完失敗 {rec.edinet_code} {rec.doc_id}: {e}")
+                failed += 1
+
+            await asyncio.sleep(sleep_sec)
+
+    db.commit()
+
+    remaining = _target_q().count()
+    result = {"updated": updated, "skipped": skipped, "failed": failed, "remaining": remaining}
+    log.info(f"refill_pl_bs_from_xbrl 完了: {result}")
+    return result
+
+
 async def diagnose_cf_labels(db, limit: int = 20) -> dict:
     """診断モード: サンプル書類の CF 関連ファクト（要素ID・項目名・値）をログに出力する。
 
@@ -1943,6 +2034,8 @@ if __name__ == "__main__":
     parser.add_argument("--incremental", action="store_true", help="収集済みをスキップ（差分収集）")
     parser.add_argument("--reparse",     action="store_true", help="xbrl_raw_documents から financial_records を再構築")
     parser.add_argument("--year",        type=int, default=None, help="再解析対象年度（--reparse と組み合わせ）")
+    parser.add_argument("--refill-pl-bs", action="store_true", help="pl_pretax 等 NULL の PL/BS 列を EDINET 再取得で補完（タグ修正後の既存データ是正）")
+    parser.add_argument("--sleep",       type=float, default=RATE_SLEEP, help="EDINET リクエスト間隔（秒・--refill-pl-bs 用）")
     args = parser.parse_args()
 
     if args.reparse:
@@ -1951,6 +2044,18 @@ if __name__ == "__main__":
             edinet_code=args.company,
             on_progress=lambda c, t, m: print(m),
         ))
+    elif args.refill_pl_bs:
+        async def _refill_pl_bs():
+            db = SessionLocal()
+            try:
+                r = await refill_pl_bs_from_xbrl(
+                    db, limit=args.max, sleep_sec=args.sleep,
+                    on_progress=lambda c, t, m: print(m),
+                )
+                print(r)
+            finally:
+                db.close()
+        asyncio.run(_refill_pl_bs())
     elif args.market:
         async def _market():
             db = SessionLocal()
