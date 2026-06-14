@@ -970,37 +970,71 @@ def _update_market_data_point_in_time(db) -> int:
     最新レコードは現在株価で上書きする。"""
     from collections import defaultdict
 
-    all_rows = db.query(
-        StockPriceWeekly.edinet_code,
-        StockPriceWeekly.trade_date,
-        StockPriceWeekly.close_last,
-    ).all()
+    # ── point_in_time=True: 全レコードを period_end 近傍の株価で更新 ─────────
+    # financial_records を先にロードし、対象会社×日付範囲でフィルタした
+    # weekly 行だけを取得する（全件メモリ展開を回避）。
+    all_records = db.query(FinancialRecord).all()
 
-    if not all_rows:
+    # 最新レコード（year最大）を社別にインデックス（最後の上書きステップで使用）
+    latest_by_ec: dict = {}
+    for rec in all_records:
+        ec = rec.edinet_code
+        if ec not in latest_by_ec or (rec.year or 0) > (latest_by_ec[ec].year or 0):
+            latest_by_ec[ec] = rec
+
+    # period_end を持つレコードのみが近傍探索の対象
+    dated_records = [r for r in all_records if r.period_end]
+    if not dated_records:
+        log.info("update_market_data_from_history(point_in_time): period_end ありレコードが空のためスキップ")
+        # 最新レコードへの現在株価上書きだけ実施（期間探索なし）
+        for ec, info in latest_prices(db, list(latest_by_ec.keys())).items():
+            latest_price = info.get("price")
+            if not latest_price or latest_price <= 0:
+                continue
+            _apply_price_to_record(latest_by_ec[ec], latest_price)
+        db.commit()
+        return 0
+
+    # 対象会社・日付範囲を算出して weekly を必要範囲だけロード
+    # ec_subq は Query をそのまま渡す（SQLAlchemy が SELECT サブクエリへ変換）
+    period_ends = [r.period_end[:10] for r in dated_records]
+    date_lo = (date.fromisoformat(min(period_ends)) - timedelta(days=MAX_GAP_DAYS)).isoformat()
+    date_hi = (date.fromisoformat(max(period_ends)) + timedelta(days=MAX_GAP_DAYS)).isoformat()
+    ec_q = (
+        db.query(FinancialRecord.edinet_code)
+        .filter(FinancialRecord.period_end.isnot(None))
+        .distinct()
+    )
+    weekly_rows = (
+        db.query(
+            StockPriceWeekly.edinet_code,
+            StockPriceWeekly.trade_date,
+            StockPriceWeekly.close_last,
+        )
+        .filter(
+            StockPriceWeekly.edinet_code.in_(ec_q),
+            StockPriceWeekly.trade_date >= date_lo,
+            StockPriceWeekly.trade_date <= date_hi,
+            StockPriceWeekly.close_last > 0,
+        )
+        .all()
+    )
+
+    if not weekly_rows:
         log.info("update_market_data_from_history(point_in_time): stock_price_weekly が空のためスキップ")
         return 0
 
     # {edinet_code: sorted list of (trade_date_str, close)}
     history: dict = defaultdict(list)
-    for ec, td, cl in all_rows:
-        if cl and cl > 0:
-            history[ec].append((td, cl))
+    for ec, td, cl in weekly_rows:
+        history[ec].append((td, cl))
     for ec in history:
         history[ec].sort()  # trade_date の昇順
 
-    # 最新レコード（year最大）を社別にメモリ上でインデックス（最後の上書きステップで使用）
-    latest_by_ec: dict = {}
-    for rec in db.query(FinancialRecord).yield_per(500):
-        ec = rec.edinet_code
-        if ec not in latest_by_ec or (rec.year or 0) > (latest_by_ec[ec].year or 0):
-            latest_by_ec[ec] = rec
-
     updated = 0
-    for rec in db.query(FinancialRecord).yield_per(500):
+    for rec in dated_records:
         prices = history.get(rec.edinet_code)
         if not prices:
-            continue
-        if not rec.period_end:
             continue
 
         try:

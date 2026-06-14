@@ -27,19 +27,14 @@
 - **問題（当時）**: `latest_price_rows`（最大約4,000社）をループしながら各社最新行を個別 SELECT し最大4,000往復。Supabase `pool_size=3` 下で特に重かった。
 - **検証**: 更新件数が現行と一致することを確認済み。
 
-### T1-4. `point_in_time=True` の全件メモリロード回避 【中・性能】（未着手）
-- **該当**: `_update_market_data_point_in_time`（`collector.py:968`）。`StockPriceWeekly` 全履歴を `.all()`（`collector.py:977`）で取得。
-- **問題**: `StockPriceWeekly` 全履歴（数百万行）を `.all()` で Python 側に展開し `defaultdict` に保持。Render メモリ 512MB 制約と相性が悪い。T1-3 で `point_in_time=False` 経路は窓関数化済みだが、本 point-in-time 経路は未移行。
-- **改善案**: `period_end` を使った window 関数（`LAST_VALUE` 等）／lateral join で近傍価格選択を DB 側へ寄せる。
-- **見積**: 中〜大（アルゴリズム移植）。
+### T1-4. `point_in_time=True` の全件メモリロード回避 【中・性能】（完了 2026-06-14）
+- **完了**: `update_market_data_from_history(point_in_time=True)` の `StockPriceWeekly` 全件 `.all()` を廃止。`FinancialRecord.period_end` の min/max から日付範囲を算出し、対象 `edinet_code` サブクエリ＋日付範囲フィルタ＋`close_last > 0` 条件で SQL 側に絞り込んでから Python に取得する方式に変更（`collector.py`）。Python 側の二分探索（`_bisect_left`）は保持。
+- **問題（当時）**: `StockPriceWeekly` 全件（354,684行、約70〜140MB）を `.all()` で Python 側に展開し `defaultdict` に保持。Render メモリ 512MB 制約と相性が悪かった。
+- **検証**: `tests/test_collector_sync.py`（`TestUpdateMarketDataPointInTime`）全通過で確認済み。
 
 
-### T1-6. JS 共通ユーティリティの集約 【中】
-- **該当**: `static/js/{analysis,collection,dashboard,company,db}.js`
-- **問題**: `esc()` / `_getCookie()` / `apiFetch()` / `initAuth()` / `logout()` が各ページ JS に個別コピー。認証フローや CSRF トークン取得の修正が多点変更になる。
-- **改善案**: `static/js/common.js` に集約し各ページで先読み（CSP・読み込み順に注意）。
-- **検証**: 全4画面（dashboard/collection/analysis/company）でログイン・API 呼び出しが従来どおり動作。
-- **見積**: 中。
+### T1-6. JS 共通ユーティリティの集約 【中】（完了）
+- `static/js/common.js` に `esc` / `_getCookie` / `apiFetch` / `initAuth` / `logout` を集約し、5ページの JS / HTML を更新（2026-06-10）。
 
 ### T1-7. 巨大ファイルの責務分割 【低】（旧 REFACTORING 4-5）（一部完了・継続検討）
 - **該当（実測 2026-06-13）**: `collector.py`（2,148行）/ `api.py`（354行）。`api.py` はエンドポイントを `routers/` 配下（`collect.py` / `market.py` / `analysis.py` 等）へ分割済みで、本体は薄いオーケストレータになった。
