@@ -9,11 +9,12 @@ SKIP_XBRL_RAW=true（デフォルト）の運用前提:
 実行モード:
   --years-back N      収集年数（デフォルト 5）
   --collect-only      Phase 1-2 のみ（XBRL収集）
-  --finalize-only     Phase 3-5 のみ（成長率/Zスコア/マクロ/J-Quants株価）
+  --finalize-only     Phase 3-5 のみ（Phase 3=成長率/Zスコアは financial_metrics VIEW が
+                      都度算出のため事前計算なし／Phase 4=マクロ／Phase 5=J-Quants株価）
   --backfill-yahoo    Phase 6: Yahoo Finance で過去株価をバックフィル
                       （J-Quants カバー外の FY2021〜FY2023 等を補完）
   --refill-cf         Phase 7: CF NULL 補完（capex/net_change_cash を XBRL 再取得で補完）
-  --refill-cf-limit N CF 補完の上限件数（デフォルト 3000・約90分）
+  --refill-cf-limit N CF 補完の上限件数（CLI デフォルト 6000）
 """
 import argparse, asyncio, sys, time
 from datetime import datetime
