@@ -62,7 +62,11 @@ pytest tests/test_utils.py  # 単一ファイル
 | ファイル | 役割 |
 |---|---|
 | `database.py` | テーブル定義・upsert・成長率/Zスコア計算 |
-| `collector.py` | EDINET+J-Quants からデータ収集→DB保存 |
+| `collector.py` | オーケストレータ＋後方互換の再エクスポート層＋CLI（実体は下記4分割） |
+| `collector_utils.py` | 収集系共通の設定定数・ロガー |
+| `collector_master.py` | 企業/業種マスタ収集（EDINET コードリスト・JPX 業種） |
+| `collector_financials.py` | XBRL 財務収集・パース・CF/PL-BS 補完・全件収集 |
+| `collector_prices.py` | 株価（stooq/J-Quants/Yahoo）・市場データ更新・マクロ収集 |
 | `api.py` | FastAPI REST・SSE・回帰分析 |
 | `plugins/` | 分析モデル（自動検出方式）。詳細は [MODELS.md](docs/MODELS.md) |
 | `templates/*.html` | 画面（`/`=dashboard, `/collection`, `/analysis`, `/company/{code}`）。JS は `static/js/<page>.js` |
@@ -88,8 +92,8 @@ pytest tests/test_utils.py  # 単一ファイル
 ## 設計制約（変えてはいけないこと）
 
 - **`upsert_financial` の入力**: `{bs,pl,cf,derived,val,nonfin}`。bs/pl/cf は `bs_` 等プレフィックス付きで DB カラムにマップ、derived は破棄（VIEW で算出）、val/nonfin はプレフィックス無しの直接列へ。**未知キーは silent-drop せず raise**（fail fast）。
-  - **補足（`calc_derived` の永続化列との関係）**: 破棄されるのは入力の `derived` キーのみ。`calc_derived`（collector.py）は free_cf / ebitda / nonoperating_income 等を **`cf`/`pl` セクションに入れて返す**ため、これらは `cf_free_cf` / `pl_ebitda` 等の**実列へ永続化される**（VIEW 算出ではない）。「軽い派生（成長率・Zスコア等）は VIEW で都度算出・非永続」と「収集時に確定する派生額は実列へ保存」を区別すること。
-- **再分類項目の追加は1箇所**: `FinancialRecord`（database.py）の列に `info={"xbrl": [...]}` で生タグを併記するだけ。`XBRL_MAP`（collector.py）は `build_xbrl_map()` が列 info から逆引き生成するため手書きしない（列定義が唯一の源）。接頭辞なし列（val/nonfin）は `info["section"]` を明示。parse 側の例外ロジック（連結優先度・capex ラベル照合・OperatingRevenue1 フィルタ）は collector.py に残す。
+  - **補足（`calc_derived` の永続化列との関係）**: 破棄されるのは入力の `derived` キーのみ。`calc_derived`（collector_financials.py）は free_cf / ebitda / nonoperating_income 等を **`cf`/`pl` セクションに入れて返す**ため、これらは `cf_free_cf` / `pl_ebitda` 等の**実列へ永続化される**（VIEW 算出ではない）。「軽い派生（成長率・Zスコア等）は VIEW で都度算出・非永続」と「収集時に確定する派生額は実列へ保存」を区別すること。
+- **再分類項目の追加は1箇所**: `FinancialRecord`（database.py）の列に `info={"xbrl": [...]}` で生タグを併記するだけ。`XBRL_MAP`（collector_financials.py）は `build_xbrl_map()` が列 info から逆引き生成するため手書きしない（列定義が唯一の源）。接頭辞なし列（val/nonfin）は `info["section"]` を明示。parse 側の例外ロジック（連結優先度・capex ラベル照合・OperatingRevenue1 フィルタ）は collector_financials.py に残す。
 - **`run_full_collection` の `df_master` は常に全件**（`max_companies` で絞らない）。`max_companies` は書類収集件数の上限のみ。`collect_doc_ids_for_period` の `max_companies` は全期間スキャン後に先着N社へ絞る（早期終了禁止）。
 - **認証ミドルウェアは `/api/auth/` プレフィックスを常に通過**させる（ログインAPI自体を守ると詰まる）。
 - **`/api/gap-analysis` は業種別OLS（sector_ols）実行後でないと404**。`depends_on` を `plugins.ensure_dependencies` が runner（`/api/plugins/{name}/run`→400）と専用エンドポイント（`/api/gap-analysis`→404）で強制する（producer の `produced_output` で判定）。`/api/regression` という実エンドポイントは無く、回帰は `/api/plugins/sector_ols/run` 経由。

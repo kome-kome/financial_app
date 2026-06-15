@@ -25,7 +25,7 @@ def _run(docs, **patches):
     """known_edinet を事前投入（master フェーズの DB 書き込みを回避）して実行する。"""
     db = MagicMock()
     known = {"E00001", "E00002"}
-    with patch("collector.RATE_SLEEP", 0), patch("collector.BATCH_PAUSE", 0):
+    with patch("collector_financials.RATE_SLEEP", 0), patch("collector_financials.BATCH_PAUSE", 0):
         return asyncio.run(_phase_process_docs(
             db, client=MagicMock(), all_docs=docs,
             company_info={}, known_edinet=known,
@@ -48,10 +48,10 @@ class TestPhaseProcessDocsFailSoft:
             return _good_parsed()
 
         with (
-            patch("collector.fetch_xbrl_csv", new=AsyncMock(return_value="df")),
-            patch("collector.parse_xbrl_csv", side_effect=parse_side),
-            patch("collector.calc_derived", return_value={"meta": {}}),
-            patch("collector.upsert_financial") as upsert,
+            patch("collector_financials.fetch_xbrl_csv", new=AsyncMock(return_value="df")),
+            patch("collector_financials.parse_xbrl_csv", side_effect=parse_side),
+            patch("collector_financials.calc_derived", return_value={"meta": {}}),
+            patch("collector_financials.upsert_financial") as upsert,
         ):
             result, _db = _run(docs)
 
@@ -68,10 +68,10 @@ class TestPhaseProcessDocsFailSoft:
                 raise OperationalError("stmt", {}, Exception("db down"))
 
         with (
-            patch("collector.fetch_xbrl_csv", new=AsyncMock(return_value="df")),
-            patch("collector.parse_xbrl_csv", return_value=_good_parsed()),
-            patch("collector.calc_derived", return_value={"meta": {}}),
-            patch("collector.upsert_financial", side_effect=upsert_side) as upsert,
+            patch("collector_financials.fetch_xbrl_csv", new=AsyncMock(return_value="df")),
+            patch("collector_financials.parse_xbrl_csv", return_value=_good_parsed()),
+            patch("collector_financials.calc_derived", return_value={"meta": {}}),
+            patch("collector_financials.upsert_financial", side_effect=upsert_side) as upsert,
         ):
             result, db = _run(docs)
 
@@ -87,14 +87,14 @@ class TestPhaseProcessDocsFailSoft:
             raise ValueError("always fails")
 
         with (
-            patch("collector.fetch_xbrl_csv", new=AsyncMock(return_value="df")),
-            patch("collector.parse_xbrl_csv", side_effect=parse_side),
-            patch("collector.upsert_financial"),
+            patch("collector_financials.fetch_xbrl_csv", new=AsyncMock(return_value="df")),
+            patch("collector_financials.parse_xbrl_csv", side_effect=parse_side),
+            patch("collector_financials.upsert_financial"),
         ):
             db = MagicMock()
             db.rollback.side_effect = Exception("rollback boom")
             known = {"E00001", "E00002"}
-            with patch("collector.RATE_SLEEP", 0), patch("collector.BATCH_PAUSE", 0):
+            with patch("collector_financials.RATE_SLEEP", 0), patch("collector_financials.BATCH_PAUSE", 0):
                 # 二次例外が送出されずに完走すれば成功
                 result = asyncio.run(_phase_process_docs(
                     db, client=MagicMock(), all_docs=docs,

@@ -31,9 +31,9 @@ def _collect_with_capture(db, **kwargs):
         fetch_calls.append((sec_code, d_from, d_to))
         return []
 
-    with patch("collector.fetch_stock_history_stooq", new=mock_fetch):
-        with patch("collector.record_prices_batch", return_value=0):
-            with patch("collector.trim_daily", return_value=0):
+    with patch("collector_prices.fetch_stock_history_stooq", new=mock_fetch):
+        with patch("collector_prices.record_prices_batch", return_value=0):
+            with patch("collector_prices.trim_daily", return_value=0):
                 asyncio.run(collect_stock_price_history(db, **kwargs))
     return fetch_calls
 
@@ -50,10 +50,10 @@ class TestCollectStooqHistory:
         db.add(make_weekly(edinet_code="E00001", trade_date=yesterday, close_last=1000.0))
         db.commit()
 
-        with patch("collector.fetch_stock_history_stooq",
+        with patch("collector_prices.fetch_stock_history_stooq",
                    new_callable=AsyncMock, return_value=[]) as mock_fetch:
-            with patch("collector.record_prices_batch", return_value=0):
-                with patch("collector.trim_daily", return_value=0):
+            with patch("collector_prices.record_prices_batch", return_value=0):
+                with patch("collector_prices.trim_daily", return_value=0):
                     result = asyncio.run(
                         collect_stock_price_history(db, skip_existing=True)
                     )
@@ -78,9 +78,9 @@ class TestCollectStooqHistory:
             fetch_calls.append((sec_code, d_from, d_to))
             return []
 
-        with patch("collector.fetch_stock_history_stooq", new=mock_fetch):
-            with patch("collector.record_prices_batch", return_value=0):
-                with patch("collector.trim_daily", return_value=0):
+        with patch("collector_prices.fetch_stock_history_stooq", new=mock_fetch):
+            with patch("collector_prices.record_prices_batch", return_value=0):
+                with patch("collector_prices.trim_daily", return_value=0):
                     result = asyncio.run(
                         collect_stock_price_history(
                             db, years_back=1, skip_existing=True, backfill=True
@@ -142,10 +142,10 @@ class TestCollectStooqHistory:
         db.add(make_weekly(edinet_code="E00001", trade_date=yesterday, close_last=1000.0))
         db.commit()
 
-        with patch("collector.fetch_stock_history_stooq",
+        with patch("collector_prices.fetch_stock_history_stooq",
                    new_callable=AsyncMock, return_value=[]) as mock_fetch:
-            with patch("collector.record_prices_batch", return_value=0):
-                with patch("collector.trim_daily", return_value=0):
+            with patch("collector_prices.record_prices_batch", return_value=0):
+                with patch("collector_prices.trim_daily", return_value=0):
                     result = asyncio.run(
                         collect_stock_price_history(
                             db, years_back=1, skip_existing=True, backfill=True
@@ -174,10 +174,10 @@ class TestCollectStooqHistory:
         db.add(make_company(edinet_code="E00001", sec_code="1001", name="テスト"))
         db.commit()
 
-        with patch("collector.fetch_stock_history_stooq",
+        with patch("collector_prices.fetch_stock_history_stooq",
                    new_callable=AsyncMock, return_value=[]):
-            with patch("collector.record_prices_batch", return_value=0):
-                with patch("collector.trim_daily", return_value=0):
+            with patch("collector_prices.record_prices_batch", return_value=0):
+                with patch("collector_prices.trim_daily", return_value=0):
                     result = asyncio.run(
                         collect_stock_price_history(
                             db, skip_existing=False, cancel_check=lambda: True
@@ -200,8 +200,8 @@ class TestBackfillYahooNearestMatch:
         async def mock_fetch(session, ticker, d_from, d_to):
             return rows
 
-        with patch("collector.fetch_yahoo_history", new=mock_fetch):
-            with patch("collector.YAHOO_STOCK_RATE_SLEEP", 0):
+        with patch("collector_prices.fetch_yahoo_history", new=mock_fetch):
+            with patch("collector_prices.YAHOO_STOCK_RATE_SLEEP", 0):
                 return asyncio.run(backfill_historical_stock_prices_yahoo(db))
 
     def test_picks_nearest_when_both_sides_present(self, db, make_company, make_fin):
@@ -267,12 +267,12 @@ class TestCollectJQuantsHistory:
             "O": 1000.0, "H": 1010.0, "L": 990.0, "C": 1005.0, "Vo": 10000.0,
         }
 
-        with patch("collector._jquants_fetch_date",
+        with patch("collector_prices._jquants_fetch_date",
                    new_callable=AsyncMock, return_value=[jquants_row]):
-            with patch("collector.record_prices_batch", return_value=1) as mock_batch:
-                with patch("collector.trim_daily", return_value=0):
+            with patch("collector_prices.record_prices_batch", return_value=1) as mock_batch:
+                with patch("collector_prices.trim_daily", return_value=0):
                     with patch.dict(os.environ, {"JQUANTS_API_KEY": "test-key"}):
-                        with patch("collector.JQUANTS_RATE_SLEEP", 0):
+                        with patch("collector_prices.JQUANTS_RATE_SLEEP", 0):
                             result = asyncio.run(
                                 collect_stock_price_history_jquants(
                                     db, date_from=self._MON, date_to=self._MON,
@@ -287,12 +287,12 @@ class TestCollectJQuantsHistory:
         """cancel_check が True を返すと処理が中断され cancelled: True が返る。"""
         self._add_company(db, make_company)
 
-        with patch("collector._jquants_fetch_date",
+        with patch("collector_prices._jquants_fetch_date",
                    new_callable=AsyncMock, return_value=[]):
-            with patch("collector.record_prices_batch", return_value=0):
-                with patch("collector.trim_daily", return_value=0):
+            with patch("collector_prices.record_prices_batch", return_value=0):
+                with patch("collector_prices.trim_daily", return_value=0):
                     with patch.dict(os.environ, {"JQUANTS_API_KEY": "test-key"}):
-                        with patch("collector.JQUANTS_RATE_SLEEP", 0):
+                        with patch("collector_prices.JQUANTS_RATE_SLEEP", 0):
                             result = asyncio.run(
                                 collect_stock_price_history_jquants(
                                     db,
@@ -308,12 +308,12 @@ class TestCollectJQuantsHistory:
         """API が空レスポンスを返す日付（非営業日等）は upsert されない。"""
         self._add_company(db, make_company)
 
-        with patch("collector._jquants_fetch_date",
+        with patch("collector_prices._jquants_fetch_date",
                    new_callable=AsyncMock, return_value=[]):
-            with patch("collector.record_prices_batch", return_value=0) as mock_batch:
-                with patch("collector.trim_daily", return_value=0):
+            with patch("collector_prices.record_prices_batch", return_value=0) as mock_batch:
+                with patch("collector_prices.trim_daily", return_value=0):
                     with patch.dict(os.environ, {"JQUANTS_API_KEY": "test-key"}):
-                        with patch("collector.JQUANTS_RATE_SLEEP", 0):
+                        with patch("collector_prices.JQUANTS_RATE_SLEEP", 0):
                             result = asyncio.run(
                                 collect_stock_price_history_jquants(
                                     db,
