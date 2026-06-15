@@ -1,6 +1,6 @@
 """refill_pl_bs_from_xbrl のユニットテスト。
 
-EDINET 再取得（fetch_xbrl_csv / parse_xbrl_csv）をモックし、pl_pretax_profit を駆動
+EDINET 再取得（fetch_xbrl_csv / parse_xbrl_csv）をモックし、bs_inventory を駆動
 マーカーに NULL の PL/BS 列のみ補完する挙動（既存値は上書きしない）を検証する。
 """
 import asyncio
@@ -76,11 +76,12 @@ class TestRefillPlBsFromXbrl:
         assert rec.pl_pretax_profit == 100.0   # NULL だったので補完
         assert rec.pl_revenue == 999.0          # 既存値は保護
 
-    def test_skips_records_with_pretax_present(self, db, make_fin):
-        # pretax が既にあるレコードは対象外＝再取得しない（自然終了の検証）
+    def test_skips_records_with_inventory_present(self, db, make_fin):
+        # 駆動マーカー bs_inventory が既に埋まっているレコードは対象外＝再取得しない
+        # （自然終了の検証）
         rec = make_fin(
             edinet_code="E00003", doc_id="S100C",
-            pl_pretax_profit=123.0,
+            bs_inventory=50.0,
         )
         db.add(rec)
         db.commit()
@@ -88,14 +89,14 @@ class TestRefillPlBsFromXbrl:
         fetch = AsyncMock(return_value=_df())
         with (
             patch("collector.fetch_xbrl_csv", new=fetch),
-            patch("collector.parse_xbrl_csv", return_value=_parsed(pl={"pretax_profit": 999.0})),
+            patch("collector.parse_xbrl_csv", return_value=_parsed(bs={"inventory": 999.0})),
         ):
             result = self._run(refill_pl_bs_from_xbrl(db, sleep_sec=0))
 
         assert result == {"updated": 0, "skipped": 0, "failed": 0, "remaining": 0}
         fetch.assert_not_called()
         db.refresh(rec)
-        assert rec.pl_pretax_profit == 123.0
+        assert rec.bs_inventory == 50.0
 
     def test_skips_when_xbrl_empty(self, db, make_fin):
         db.add(make_fin(edinet_code="E00004", doc_id="S100D", pl_pretax_profit=None))

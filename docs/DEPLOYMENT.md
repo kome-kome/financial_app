@@ -18,6 +18,9 @@ Render の制約と運用形態に合わせて設計すること。
 | **手動のみ** | 株価バックフィル（過去2年分） | workflow_dispatch で起動 | GitHub Actions `backfill-stock-history.yml` |
 | **手動のみ** | CF補完・capex補完 | workflow_dispatch で起動 | GitHub Actions `refill-cf.yml` |
 | **UIから手動** | 差分収集・株価更新 | ユーザーがボタン押下 | Render Web UI |
+| **自動（CI）** | `pytest` 回帰テスト（Secrets・本番DB非依存） | PR / main への push | GitHub Actions `ci.yml` |
+
+> **CI（`ci.yml`）**: データ収集系ワークフローとは独立した回帰検知用。`pull_request` と main への `push` で Python 3.13.7 上に `requirements.txt` + `requirements-dev.txt` を入れて `pytest` を実行する。Secrets・外部ネットワーク・本番 DB には一切触れず、`conftest.py` の in-memory SQLite / モックで完結する範囲のみを検証する。
 
 ### daily-incremental の動作詳細
 
