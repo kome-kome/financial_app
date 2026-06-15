@@ -14,6 +14,7 @@ from dotenv import load_dotenv
 import httpx
 import pandas as pd
 from sqlalchemy import func as sqla_func
+from sqlalchemy.exc import SQLAlchemyError
 from database import (
     SessionLocal, Company, FinancialRecord, MacroData,
     XbrlRawDocument, upsert_company, upsert_financial,
@@ -1789,6 +1790,14 @@ def _phase_build_skip_ids(db, skip_existing: bool, skip_if_raw_exists: bool) -> 
     return set()
 
 
+def _safe_rollback(db) -> None:
+    """rollback 失敗（二次例外）でも収集ループを止めないための安全 rollback。"""
+    try:
+        db.rollback()
+    except Exception as rollback_err:
+        log.error(f"rollback失敗: {rollback_err}")
+
+
 async def _phase_process_docs(db, client, all_docs: list,
                                company_info: dict, known_edinet: set,
                                existing_doc_ids: set, skip_existing: bool,
@@ -1822,6 +1831,8 @@ async def _phase_process_docs(db, client, all_docs: list,
             on_progress(i + 1, total, f"[{i+1}/{total}] {filer_name}({sec_code}) {period_end}")
         log.info(f"[{i+1}/{total}] {filer_name}({sec_code}) {period_end}")
 
+        # 失敗種別の切り分け用に現在のフェーズを追跡する（fetch / parse / db）。
+        phase = "master"
         try:
             if edinet_code not in known_edinet:
                 upsert_company(db, {
@@ -1831,18 +1842,21 @@ async def _phase_process_docs(db, client, all_docs: list,
                 db.flush()
                 known_edinet.add(edinet_code)
 
+            phase = "fetch"
             xbrl_df = await fetch_xbrl_csv(client, doc_id)
             await asyncio.sleep(RATE_SLEEP)
 
             # XBRL 全行を raw テーブルに保存（新指標追加時の再解析用）
             # xbrl_raw_documents への書き込みは即コミットしてロックを解放する
             # （financial_records との間でデッドロックが起きるのを防ぐため）
+            phase = "db"
             if not SKIP_XBRL_RAW and xbrl_df is not None and not xbrl_df.empty:
                 raw_rows = df_to_raw_rows(xbrl_df)
                 if raw_rows:
                     upsert_xbrl_raw(db, doc_id, edinet_code, period_end, raw_rows)
                     db.commit()
 
+            phase = "parse"
             raw = parse_xbrl_csv(xbrl_df, edinet_code, period_end)
             if not any(raw.get(cat) for cat in ("bs", "pl", "cf")):
                 log.warning(f"財務データなし（スキップ）: {filer_name} {doc_id}")
@@ -1861,6 +1875,7 @@ async def _phase_process_docs(db, client, all_docs: list,
                 "doc_id":       doc_id,
                 "source":       "EDINET_XBRL",
             })
+            phase = "db"
             upsert_financial(db, rec)
 
             if (i + 1) % 50 == 0:
@@ -1869,12 +1884,19 @@ async def _phase_process_docs(db, client, all_docs: list,
             if (i + 1) % 100 == 0:
                 await asyncio.sleep(BATCH_PAUSE)
 
+        # 1社の失敗で収集全体を止めないフェイルソフト方針（個社スキップ＋種別別ログ）。
+        except httpx.HTTPError as e:
+            log.error(f"[取得失敗 phase={phase}] {edinet_code}/{doc_id} {filer_name}: "
+                      f"{e.__class__.__name__}: {e}")
+            _safe_rollback(db)
+        except SQLAlchemyError as e:
+            log.error(f"[DB保存失敗 phase={phase}] {edinet_code}/{doc_id} {filer_name}: "
+                      f"{e.__class__.__name__}: {e}", exc_info=True)
+            _safe_rollback(db)
         except Exception as e:
-            log.error(f"書類処理エラー（スキップ）: {doc_id} {filer_name} — {e}", exc_info=True)
-            try:
-                db.rollback()
-            except Exception as rollback_err:
-                log.error(f"rollback失敗: {rollback_err}")
+            log.error(f"[パース/処理失敗 phase={phase}] {edinet_code}/{doc_id} {filer_name}: "
+                      f"{e.__class__.__name__}: {e}", exc_info=True)
+            _safe_rollback(db)
 
     return skipped, False
 
