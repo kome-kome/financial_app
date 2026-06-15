@@ -1,0 +1,41 @@
+name: CI (pytest)
+
+# PR と main への push で pytest を自動実行する回帰検知用 CI。
+# 収集パイプライン（full / incremental / backfill / refill-cf）とは独立し、
+# Secrets・外部ネットワーク・本番 DB に一切依存しない（conftest.py の
+# in-memory SQLite / モックで完結する範囲のみ）。
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+# 同一 PR/ブランチで新しい push があれば古い実行をキャンセルする。
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13.7'  # render.yaml の PYTHON_VERSION と一致させる
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Run pytest
+        run: pytest

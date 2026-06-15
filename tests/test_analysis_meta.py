@@ -8,6 +8,8 @@ PR1（目的別IA再設計の土台）:
 import os
 import sys
 
+import pytest
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # import 時の APP_SECRET_KEY 未設定警告を避けるため、import 前にダミーを設定
@@ -70,6 +72,15 @@ class TestPluginsEndpoint:
 
 
 class TestModelStatusEndpoint:
+    """/api/model/status は DB を参照するため、get_db を in-memory SQLite fixture に
+    差し替えて本番 DB 非依存で検証する（空 DB → computed_at None・n_results 0）。"""
+
+    @pytest.fixture(autouse=True)
+    def _override_db(self, db):
+        api.app.dependency_overrides[api.get_db] = lambda: db
+        yield
+        api.app.dependency_overrides.clear()
+
     def test_returns_200_with_required_keys(self):
         r = client.get("/api/model/status")
         assert r.status_code == 200
