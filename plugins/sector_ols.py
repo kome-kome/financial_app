@@ -461,7 +461,7 @@ class SectorOLSPlugin(AnalysisPlugin):
         """業種統計エントリ（診断統計・多重共線性チェック含む）を構築する。"""
         p_values = result.get("p_value", [])
         n_significant = (
-            sum(1 for pv in p_values[1:] if pv == pv and pv < 0.05)
+            sum(1 for pv in p_values[1:] if not math.isnan(pv) and pv < 0.05)
             if regularization != "ridge" else None
         )
         collinearity = check_collinearity(X_win_cols, list(features))
@@ -488,7 +488,7 @@ class SectorOLSPlugin(AnalysisPlugin):
                 else None
             ),
             "n_significant_features": n_significant,
-            "p_values": [round(pv, 4) if pv == pv else None for pv in p_values],
+            "p_values": [round(pv, 4) if not math.isnan(pv) else None for pv in p_values],
             "t_stats":  [round(t, 4) if t == t else None for t in result.get("t_stat", [])],
             "collinearity_warnings": {
                 "high_corr_pairs": collinearity["high_corr_pairs"],
