@@ -14,7 +14,7 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from collector import update_industry_from_jpx
+from collector import _read_jpx_excel, update_industry_from_jpx
 
 
 def _make_jpx_xlsx(rows: list) -> bytes:
@@ -33,6 +33,76 @@ def _mock_client(content: bytes) -> httpx.AsyncClient:
     def handler(request):
         return httpx.Response(200, content=content)
     return httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+
+class _FakeXlsSheet:
+    """xlrd の sheet インターフェース（cell_value / nrows）を最小再現するスタブ。"""
+    def __init__(self, rows):
+        self._rows = rows
+    @property
+    def nrows(self):
+        return len(self._rows)
+    def cell_value(self, row, col):
+        return self._rows[row][col]   # 列不足は IndexError（実 xlrd と同挙動）
+
+
+class _FakeXlsBook:
+    def __init__(self, rows):
+        self._sheet = _FakeXlsSheet(rows)
+    def sheet_by_index(self, idx):
+        return self._sheet
+
+
+class TestReadJpxExcel:
+    """Excel バイト列 → 業種辞書の純粋変換 `_read_jpx_excel` の単体テスト。"""
+
+    def test_parses_real_xlsx(self):
+        """.xlsx 形式（xlrd が XLRDError → openpyxl フォールバック経路）を実データで検証。"""
+        content = _make_jpx_xlsx([("1001", "情報・通信業"), ("2001", "小売業")])
+        result = _read_jpx_excel(content)
+        assert result == {"1001": "情報・通信業", "2001": "小売業"}
+
+    def test_xlsx_skips_blank_industry_rows(self):
+        """業種が空（'-'/None）の行はスキップされる。"""
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.append(["col0", "sec_code", "c2", "c3", "c4", "industry"])
+        ws.append(["", "2001", "", "", "", "小売業"])   # 採用
+        ws.append(["", "3001", "", "", "", "-"])        # 業種 '-' → スキップ
+        ws.append(["", "4001", "", "", "", None])       # 業種 None → スキップ
+        buf = io.BytesIO(); wb.save(buf)
+        result = _read_jpx_excel(buf.getvalue())
+        assert result == {"2001": "小売業"}
+
+    def test_empty_sheet_returns_empty_dict(self):
+        """ヘッダのみ（データ行なし）の空シートは空辞書を返す。"""
+        wb = openpyxl.Workbook()
+        wb.active.append(["col0", "sec_code", "c2", "c3", "c4", "industry"])
+        buf = io.BytesIO(); wb.save(buf)
+        assert _read_jpx_excel(buf.getvalue()) == {}
+
+    def test_missing_required_columns_skipped(self):
+        """業種列（6列目）を欠く行は IndexError をスキップして空辞書になる。"""
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.append(["col0", "sec_code"])      # 2列しかない
+        ws.append(["", "1001"])              # 業種列なし → スキップ
+        buf = io.BytesIO(); wb.save(buf)
+        assert _read_jpx_excel(buf.getvalue()) == {}
+
+    def test_parses_xls_via_xlrd(self, monkeypatch):
+        """.xls 形式（xlrd 成功経路）を、xlrd.open_workbook をスタブ化して検証。"""
+        rows = [
+            ["col0", "sec_code", "c2", "c3", "c4", "industry"],  # ヘッダ
+            ["", 1001.0, "", "", "", "情報・通信業"],            # xls は数値が float
+            ["", 101.0, "", "", "", "建設業"],                   # float → 4桁ゼロ埋め "0101"
+            ["", "9999", "", "", "", "サービス業"],
+        ]
+        import xlrd
+        monkeypatch.setattr(xlrd, "open_workbook",
+                            lambda *a, **k: _FakeXlsBook(rows))
+        result = _read_jpx_excel(b"dummy-xls-bytes")
+        assert result == {"1001": "情報・通信業", "0101": "建設業", "9999": "サービス業"}
 
 
 class TestUpdateIndustryFromJpx:
