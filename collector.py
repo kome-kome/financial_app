@@ -1253,6 +1253,73 @@ async def fill_recent_stock_price_gap_yahoo(
     return {"skipped": False, "upserted": upserted, "from": d_from, "to": d_to}
 
 
+async def _refill_records_from_xbrl(db, target_q, field_updater, *, label: str,
+                                    limit: Optional[int] = None, defer_raw: bool = False,
+                                    sleep_sec: float = RATE_SLEEP,
+                                    on_progress: Optional[Callable[[int, int, str], None]] = None) -> dict:
+    """EDINET XBRL 再取得で NULL 列を補完する共通骨格（CF / PL・BS の refill が共用）。
+
+    `target_q()` は対象レコードのフィルタ済みクエリを返す callable（targets 取得と
+    remaining 集計の両方で呼ぶ）。列ごとの補完ロジックは `field_updater(rec, parsed) -> bool`
+    に注入し、何か書き込めば True（=更新扱い）を返す。骨格（httpx セッション・enumerate
+    ループ・on_progress・fetch→parse・100件ごと commit・例外処理・sleep）は共通。
+    """
+    q = target_q().order_by(FinancialRecord.period_end.desc())
+    if defer_raw:
+        from sqlalchemy.orm import defer
+        # raw_xbrl_json は使わないので defer（全件ロード時の転送/メモリ削減）
+        q = q.options(defer(FinancialRecord.raw_xbrl_json))
+    if limit:
+        q = q.limit(limit)
+    targets = q.all()
+
+    total = len(targets)
+    log.info(f"  対象レコード: {total}件")
+    if total == 0:
+        return {"updated": 0, "skipped": 0, "failed": 0, "remaining": 0}
+
+    updated = skipped = failed = 0
+
+    async with httpx.AsyncClient(timeout=60) as client:
+        for i, rec in enumerate(targets, 1):
+            msg = f"[{label} {i}/{total}] {rec.company_name} {rec.period_end}"
+            if on_progress:
+                on_progress(i, total, msg)
+            if i % 100 == 0:
+                log.info(msg)
+
+            try:
+                df = await fetch_xbrl_csv(client, rec.doc_id)
+                if df is None or df.empty:
+                    skipped += 1
+                    continue
+
+                parsed = parse_xbrl_csv(df, rec.edinet_code, str(rec.period_end))
+                if field_updater(rec, parsed):
+                    db.add(rec)
+                    updated += 1
+                else:
+                    skipped += 1
+
+                # 100件ごとに commit（長時間トランザクション対策）
+                if updated % 100 == 0 and updated > 0:
+                    db.commit()
+
+            except Exception as e:
+                log.warning(f"  {label}失敗 {rec.edinet_code} {rec.doc_id}: {e}")
+                failed += 1
+
+            await asyncio.sleep(sleep_sec)
+
+    db.commit()
+
+    # 残件数を集計（スケジュール実行の終了判定に使う）
+    remaining = target_q().count()
+    result = {"updated": updated, "skipped": skipped, "failed": failed, "remaining": remaining}
+    log.info(f"{label} 完了: {result}")
+    return result
+
+
 async def refill_cf_from_xbrl(
     db,
     limit: int = 3000,
@@ -1305,78 +1372,33 @@ async def refill_cf_from_xbrl(
             )
         return q.filter(FinancialRecord.cf_net_change_cash.is_(None))
 
-    # 対象レコードを取得
-    targets = _target_q().order_by(FinancialRecord.period_end.desc()).limit(limit).all()
+    def _cf_updater(rec, parsed) -> bool:
+        cf = parsed.get("cf", {})
+        if not cf:
+            return False
+        changed = False
+        # CF フィールドが NULL の場合のみ書き込む（既存値を保護）
+        for field, col in [
+            ("capex",           "cf_capex"),
+            ("net_change_cash", "cf_net_change_cash"),
+            ("investing_cf",    "cf_investing_cf"),
+            ("operating_cf",    "cf_operating_cf"),
+            ("financing_cf",    "cf_financing_cf"),
+        ]:
+            val = cf.get(field)
+            if val is not None and getattr(rec, col) is None:
+                setattr(rec, col, val)
+                changed = True
+        if changed:
+            # free_cf = 営業CF + 投資CF
+            if rec.cf_operating_cf is not None and rec.cf_investing_cf is not None:
+                rec.cf_free_cf = rec.cf_operating_cf + rec.cf_investing_cf
+        return changed
 
-    total = len(targets)
-    log.info(f"  対象レコード: {total}件")
-    if total == 0:
-        return {"updated": 0, "skipped": 0, "failed": 0, "remaining": 0}
-
-    updated = skipped = failed = 0
-    SLEEP_SEC = sleep_sec  # EDINET API レート制限対策
-
-    async with httpx.AsyncClient(timeout=60) as client:
-        for i, rec in enumerate(targets, 1):
-            msg = f"[CF補完 {i}/{total}] {rec.company_name} {rec.period_end}"
-            if on_progress:
-                on_progress(i, total, msg)
-            if i % 100 == 0:
-                log.info(msg)
-
-            try:
-                df = await fetch_xbrl_csv(client, rec.doc_id)
-                if df is None or df.empty:
-                    skipped += 1
-                    continue
-
-                parsed = parse_xbrl_csv(df, rec.edinet_code, str(rec.period_end))
-                cf = parsed.get("cf", {})
-                if not cf:
-                    skipped += 1
-                    continue
-
-                changed = False
-                # CF フィールドが NULL の場合のみ書き込む（既存値を保護）
-                for field, col in [
-                    ("capex",           "cf_capex"),
-                    ("net_change_cash", "cf_net_change_cash"),
-                    ("investing_cf",    "cf_investing_cf"),
-                    ("operating_cf",    "cf_operating_cf"),
-                    ("financing_cf",    "cf_financing_cf"),
-                ]:
-                    val = cf.get(field)
-                    if val is not None and getattr(rec, col) is None:
-                        setattr(rec, col, val)
-                        changed = True
-
-                if changed:
-                    # free_cf = 営業CF + 投資CF
-                    if rec.cf_operating_cf is not None and rec.cf_investing_cf is not None:
-                        rec.cf_free_cf = rec.cf_operating_cf + rec.cf_investing_cf
-                    db.add(rec)
-                    updated += 1
-                else:
-                    skipped += 1
-
-                # 100件ごとに commit（長時間トランザクション対策）
-                if updated % 100 == 0 and updated > 0:
-                    db.commit()
-
-            except Exception as e:
-                log.warning(f"  CF補完失敗 {rec.edinet_code} {rec.doc_id}: {e}")
-                failed += 1
-
-            await asyncio.sleep(SLEEP_SEC)
-
-    db.commit()
-
-    # 残件数を集計（スケジュール実行の終了判定に使う）
-    remaining = _target_q().count()
-
-    result = {"updated": updated, "skipped": skipped, "failed": failed, "remaining": remaining}
-    log.info(f"refill_cf_from_xbrl 完了: {result}")
-    return result
+    return await _refill_records_from_xbrl(
+        db, _target_q, _cf_updater, label="CF補完",
+        limit=limit, sleep_sec=sleep_sec, on_progress=on_progress,
+    )
 
 
 async def refill_pl_bs_from_xbrl(
@@ -1398,8 +1420,6 @@ async def refill_pl_bs_from_xbrl(
     parse_xbrl_csv の連結優先ロジックで選ばれるため通常収集と同等の信頼性。CF は
     refill_cf_from_xbrl が担当するため対象外。
     """
-    from sqlalchemy.orm import defer
-
     log.info(f"refill_pl_bs_from_xbrl 開始 (limit={limit}, sleep={sleep_sec})")
 
     def _target_q():
@@ -1408,67 +1428,21 @@ async def refill_pl_bs_from_xbrl(
             FinancialRecord.doc_id.isnot(None),
         )
 
-    # raw_xbrl_json は使わないので defer（全件ロード時の転送/メモリ削減）
-    q = (_target_q()
-         .options(defer(FinancialRecord.raw_xbrl_json))
-         .order_by(FinancialRecord.period_end.desc()))
-    if limit:
-        q = q.limit(limit)
-    targets = q.all()
+    def _pl_bs_updater(rec, parsed) -> bool:
+        changed = False
+        # NULL の PL/BS 列のみ書き込む（既存値を保護＝上書き禁止）
+        for cat in ("pl", "bs"):
+            for field, val in (parsed.get(cat) or {}).items():
+                col = f"{cat}_{field}"
+                if val is not None and hasattr(rec, col) and getattr(rec, col) is None:
+                    setattr(rec, col, val)
+                    changed = True
+        return changed
 
-    total = len(targets)
-    log.info(f"  対象レコード: {total}件")
-    if total == 0:
-        return {"updated": 0, "skipped": 0, "failed": 0, "remaining": 0}
-
-    updated = skipped = failed = 0
-
-    async with httpx.AsyncClient(timeout=60) as client:
-        for i, rec in enumerate(targets, 1):
-            msg = f"[PL/BS補完 {i}/{total}] {rec.company_name} {rec.period_end}"
-            if on_progress:
-                on_progress(i, total, msg)
-            if i % 100 == 0:
-                log.info(msg)
-
-            try:
-                df = await fetch_xbrl_csv(client, rec.doc_id)
-                if df is None or df.empty:
-                    skipped += 1
-                    continue
-
-                parsed = parse_xbrl_csv(df, rec.edinet_code, str(rec.period_end))
-                changed = False
-                # NULL の PL/BS 列のみ書き込む（既存値を保護＝上書き禁止）
-                for cat in ("pl", "bs"):
-                    for field, val in (parsed.get(cat) or {}).items():
-                        col = f"{cat}_{field}"
-                        if val is not None and hasattr(rec, col) and getattr(rec, col) is None:
-                            setattr(rec, col, val)
-                            changed = True
-
-                if changed:
-                    db.add(rec)
-                    updated += 1
-                else:
-                    skipped += 1
-
-                # 100件ごとに commit（長時間トランザクション対策）
-                if updated % 100 == 0 and updated > 0:
-                    db.commit()
-
-            except Exception as e:
-                log.warning(f"  PL/BS補完失敗 {rec.edinet_code} {rec.doc_id}: {e}")
-                failed += 1
-
-            await asyncio.sleep(sleep_sec)
-
-    db.commit()
-
-    remaining = _target_q().count()
-    result = {"updated": updated, "skipped": skipped, "failed": failed, "remaining": remaining}
-    log.info(f"refill_pl_bs_from_xbrl 完了: {result}")
-    return result
+    return await _refill_records_from_xbrl(
+        db, _target_q, _pl_bs_updater, label="PL/BS補完",
+        limit=limit, defer_raw=True, sleep_sec=sleep_sec, on_progress=on_progress,
+    )
 
 
 async def diagnose_cf_labels(db, limit: int = 20) -> dict:
