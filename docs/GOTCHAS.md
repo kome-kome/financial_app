@@ -51,6 +51,10 @@ SSEエンドポイント: 収集=`/api/collect/stream`、市場データ=`/api/c
   - `capex_only`（`--refill-capex-only`）: capex のみワンショット補完。
   - **`missing`（`--refill-cf-missing`）**: `cf_operating_cf IS NULL`（＝CFが全NULL）を対象。IFRS/US-GAAP決算の大企業は営業CFすら取れておらず、`normal`/`capex_only` が `cf_operating_cf IS NOT NULL` を前提とするため**永久に対象外**になっていた。`XBRL_MAP` への IFRS/US-GAAP CF 要素追加と併せて 2026-06-03 に補完し、**CF未収集企業 268社 → 0社**（上記「IFRS/US-GAAP決算のCF・売上要素名」参照）。
   - **注意**: 旧「remaining=0 で完了」は `normal` モードの残件のみを数えており、CF全NULL社（IFRS大企業）はカウント外だった。新規データで CF が全NULL のレコードが出た場合は `--refill-cf-missing` を使うこと。
+- **bs_inventory バックフィルの運用**: `refill_pl_bs_from_xbrl`（`_pipeline_gh.py --refill-pl-bs` / GitHub Actions `refill-pl-bs.yml`）は `bs_inventory IS NULL AND doc_id IS NOT NULL` を駆動マーカーに、NULL の PL/BS 列を XBRL 再取得で補完する。
+  - **原因はタグ漏れではなく時系列コホート**: パーサ修正（`_inventory_fallback`＝棚卸サブ項目合計）以降に収集した新しい年度（2023+）は null 率 ~3%（金融子会社等の正当な残差）まで下がっているが、修正前に収集した旧コホート（〜2022）が backfill 未実施で残存していた（2026-06-15 実測で旧年度 57〜94% null）。よって `XBRL_MAP` の追加は不要で、旧データの再取得で是正する。
+  - **古い順（`order="asc"`）で処理**: NULL は旧コホートに集中するため、`_refill_records_from_xbrl` の `order` を `asc` にして古い年度から処理する。limit 付き／タイムアウト時も本命の旧年度に着実に前進・再開できる（新しい順だと直近の正当 NULL=金融等で limit を浪費し旧年度に届かない）。**全件バックフィルは limit 省略（None）で一括実行**するのが基本。
+  - **金融等の正当 NULL は残る**: 銀行（~99%）・保険（~94%）・証券等は棚卸資産を持たないため何度実行しても埋まらず、永続的な少数残件として残る（無害）。`remaining` がこの水準で下げ止まったら完了とみなす。
 - **`edinet_ping.py` の日付**は自動計算（祝日は非対応、祝日前後は失敗する場合あり）。
 
 ---

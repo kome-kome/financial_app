@@ -17,6 +17,7 @@ Render の制約と運用形態に合わせて設計すること。
 | **手動のみ** | 全件収集（全社 × 5年分） | workflow_dispatch で起動 | GitHub Actions `full-pipeline.yml` |
 | **手動のみ** | 株価バックフィル（過去2年分） | workflow_dispatch で起動 | GitHub Actions `backfill-stock-history.yml` |
 | **手動のみ** | CF補完・capex補完 | workflow_dispatch で起動 | GitHub Actions `refill-cf.yml` |
+| **手動のみ** | bs_inventory 補完（旧コホート是正） | workflow_dispatch で起動 | GitHub Actions `refill-pl-bs.yml` |
 | **UIから手動** | 差分収集・株価更新 | ユーザーがボタン押下 | Render Web UI |
 | **自動（CI）** | `pytest` 回帰テスト（Secrets・本番DB非依存） | PR / main への push | GitHub Actions `ci.yml` |
 
@@ -44,6 +45,16 @@ Render の制約と運用形態に合わせて設計すること。
 | capex 充足率 | **88.8%**（CF文を持つ 19,073件中 16,929件取得済み） |
 | 残り 2,144件 | アセットライト企業（持株会社・IT等）で capex 行が元々無いため永続的に NULL。再実行しても変わらない |
 | `refill-cf.yml` スケジュール | **無効化済み**（PR #31、2026-05-31）。workflow_dispatch は手動実行用として残存 |
+
+### bs_inventory バックフィル（`refill-pl-bs.yml`）
+
+`bs_inventory` の NULL はタグ漏れではなく**時系列コホート**が原因（パーサ修正前に収集した〜2022年度が backfill 未実施。2026-06-15 実測で旧年度 57〜94% null・新年度は ~3%）。`refill-pl-bs.yml` を **workflow_dispatch（limit 省略＝全件・約4〜5時間）** で起動し、古い順に XBRL を再取得して是正する。詳細・残件の見方は GOTCHAS.md「bs_inventory バックフィルの運用」。
+
+| 項目 | 状態 |
+|---|---|
+| 自動化整備 | ✅ `_pipeline_gh.py --refill-pl-bs` + `refill-pl-bs.yml` を結線 |
+| 本番バックフィル実行 | ⏳ **未実施**（main マージ後に workflow_dispatch で1回実行予定） |
+| 完了判定 | `remaining` が金融等の正当 NULL 水準（銀行~99%・保険~94%）で下げ止まったら完了 |
 
 ---
 

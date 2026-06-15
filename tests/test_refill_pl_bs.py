@@ -106,3 +106,29 @@ class TestRefillPlBsFromXbrl:
         assert result["skipped"] == 1
         assert result["updated"] == 0
         assert result["remaining"] == 1   # 補完できず対象に残る
+
+    def test_processes_oldest_period_first(self, db, make_fin):
+        # order="asc": NULL は旧コホートに集中するため古い period_end から処理する。
+        # 挿入順をバラバラにしても doc_id の取得順が period_end 昇順になることを検証。
+        db.add(make_fin(edinet_code="E10002", doc_id="D2022",
+                        year=2022, period_end="2022-03-31", bs_inventory=None))
+        db.add(make_fin(edinet_code="E10000", doc_id="D2020",
+                        year=2020, period_end="2020-03-31", bs_inventory=None))
+        db.add(make_fin(edinet_code="E10001", doc_id="D2021",
+                        year=2021, period_end="2021-03-31", bs_inventory=None))
+        db.commit()
+
+        fetched_order: list[str] = []
+
+        async def _fetch(client, doc_id):
+            fetched_order.append(doc_id)
+            return _df()
+
+        with (
+            patch("collector.fetch_xbrl_csv", new=AsyncMock(side_effect=_fetch)),
+            patch("collector.parse_xbrl_csv", return_value=_parsed(bs={"inventory": 1.0})),
+        ):
+            result = self._run(refill_pl_bs_from_xbrl(db, sleep_sec=0))
+
+        assert result["updated"] == 3
+        assert fetched_order == ["D2020", "D2021", "D2022"]   # 古い順

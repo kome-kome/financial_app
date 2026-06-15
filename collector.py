@@ -1255,7 +1255,7 @@ async def fill_recent_stock_price_gap_yahoo(
 
 async def _refill_records_from_xbrl(db, target_q, field_updater, *, label: str,
                                     limit: Optional[int] = None, defer_raw: bool = False,
-                                    sleep_sec: float = RATE_SLEEP,
+                                    sleep_sec: float = RATE_SLEEP, order: str = "desc",
                                     on_progress: Optional[Callable[[int, int, str], None]] = None) -> dict:
     """EDINET XBRL 再取得で NULL 列を補完する共通骨格（CF / PL・BS の refill が共用）。
 
@@ -1263,8 +1263,12 @@ async def _refill_records_from_xbrl(db, target_q, field_updater, *, label: str,
     remaining 集計の両方で呼ぶ）。列ごとの補完ロジックは `field_updater(rec, parsed) -> bool`
     に注入し、何か書き込めば True（=更新扱い）を返す。骨格（httpx セッション・enumerate
     ループ・on_progress・fetch→parse・100件ごと commit・例外処理・sleep）は共通。
+
+    `order` は period_end の処理順（"desc"=新しい順 / "asc"=古い順）。limit 付き／途中
+    中断（タイムアウト等）でも本命コホートを先に処理したい補完では "asc" を指定する。
     """
-    q = target_q().order_by(FinancialRecord.period_end.desc())
+    period_order = FinancialRecord.period_end.asc() if order == "asc" else FinancialRecord.period_end.desc()
+    q = target_q().order_by(period_order)
     if defer_raw:
         from sqlalchemy.orm import defer
         # raw_xbrl_json は使わないので defer（全件ロード時の転送/メモリ削減）
@@ -1415,6 +1419,11 @@ async def refill_pl_bs_from_xbrl(
     注意: 棚卸資産を持たない企業（金融・サービス等）は何度実行しても埋まらないため
     永続的な少数残件として残る（無害）。
 
+    処理順は `order="asc"`（period_end 古い順）。NULL は主にパーサ修正前に収集した
+    古いコホート（旧年度）に集中するため、古い順に処理することで limit 付き／タイムアウト
+    時も本命の旧年度に着実に前進・再開できる（新しい順だと直近の正当 NULL=金融等で
+    limit を浪費し旧年度に届かない）。
+
     タグ修正・パースロジック変更後の既存データ是正用。`raw_xbrl_json`
     は生タグを保存しないため `reparse_from_raw` では復元できず再フェッチが必須。値は
     parse_xbrl_csv の連結優先ロジックで選ばれるため通常収集と同等の信頼性。CF は
@@ -1441,7 +1450,7 @@ async def refill_pl_bs_from_xbrl(
 
     return await _refill_records_from_xbrl(
         db, _target_q, _pl_bs_updater, label="PL/BS補完",
-        limit=limit, defer_raw=True, sleep_sec=sleep_sec, on_progress=on_progress,
+        limit=limit, defer_raw=True, sleep_sec=sleep_sec, order="asc", on_progress=on_progress,
     )
 
 
