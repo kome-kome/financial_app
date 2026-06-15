@@ -454,6 +454,27 @@ def _inventory_fallback(inv_parts: dict, result: dict) -> None:
         result["bs"]["inventory"] = total
 
 
+def _collect_inventory_row(elem: str, ctx: str, raw_value, inv_parts: dict, inv_prio: dict) -> None:
+    """棚卸資産サブ項目を連結優先度付きで inv_parts へ集約する（in-place）。
+
+    parse_raw_rows / parse_xbrl_csv 共通。Prior 期（CurrentYear を含まない）は除外し、
+    連結 > 単体(メンバー無し) > メンバー有り の優先度が高い値で上書きする。
+    パース不能な値は無視する。
+    """
+    if "Prior" in ctx and "CurrentYear" not in ctx:
+        return
+    is_consol = any(k in ctx for k in CONSOLIDATED_KEYS) and "NonConsolidated" not in ctx
+    has_member = "Member" in ctx or "NonConsolidated" in ctx
+    prio = 2 if is_consol else (1 if not has_member else 0)
+    try:
+        val = float(str(raw_value).replace(",", ""))
+    except (ValueError, TypeError):
+        return
+    if prio > inv_prio.get(elem, -1):
+        inv_parts[elem] = val
+        inv_prio[elem] = prio
+
+
 def parse_raw_rows(rows: list) -> dict:
     """[{element, context, value}, ...] から {bs, pl, cf, val, nonfin, meta} を抽出（再解析用）"""
     result = {"bs": {}, "pl": {}, "cf": {}, "val": {}, "nonfin": {}, "meta": {}}
@@ -465,20 +486,10 @@ def parse_raw_rows(rows: list) -> dict:
         category_field = XBRL_MAP.get(elem)
         if not category_field:
             if elem in _INVENTORY_SUB_ELEMS:
-                ctx = row.get("context", "")
-                if "Prior" in ctx and "CurrentYear" not in ctx:
-                    continue
-                is_consol = any(k in ctx for k in CONSOLIDATED_KEYS) and "NonConsolidated" not in ctx
-                has_member = "Member" in ctx or "NonConsolidated" in ctx
-                prio = 2 if is_consol else (1 if not has_member else 0)
-                try:
-                    val = float(str(row.get("value", "")).replace(",", ""))
-                except (ValueError, TypeError):
-                    pass
-                else:
-                    if prio > _inv_prio.get(elem, -1):
-                        _inv_parts[elem] = val
-                        _inv_prio[elem] = prio
+                _collect_inventory_row(
+                    elem, row.get("context", ""), row.get("value", ""),
+                    _inv_parts, _inv_prio,
+                )
             continue
         cat, field = category_field
         ctx = row.get("context", "")
@@ -511,19 +522,10 @@ def parse_xbrl_csv(df, edinet_code: str, period_end: str) -> dict:
             if label_col is not None and _match_capex_by_label(str(row.get(label_col, ""))):
                 category_field = ("cf", "capex")
             elif elem in _INVENTORY_SUB_ELEMS:
-                ctx = str(row.get(col_map.get("context", ""), ""))
-                if "Prior" in ctx and "CurrentYear" not in ctx:
-                    continue
-                is_consol = any(k in ctx for k in CONSOLIDATED_KEYS) and "NonConsolidated" not in ctx
-                has_member = "Member" in ctx or "NonConsolidated" in ctx
-                prio = 2 if is_consol else (1 if not has_member else 0)
-                try:
-                    val = float(str(row[col_map["value"]]).replace(",", ""))
-                except (ValueError, TypeError):
-                    continue
-                if prio > _inv_prio.get(elem, -1):
-                    _inv_parts[elem] = val
-                    _inv_prio[elem] = prio
+                _collect_inventory_row(
+                    elem, str(row.get(col_map.get("context", ""), "")), row[col_map["value"]],
+                    _inv_parts, _inv_prio,
+                )
                 continue
             else:
                 continue
