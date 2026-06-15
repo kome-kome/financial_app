@@ -14,7 +14,28 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from collector import collect_stock_price_history, collect_stock_price_history_jquants
+from collector import (
+    backfill_historical_stock_prices_yahoo,
+    collect_stock_price_history,
+    collect_stock_price_history_jquants,
+)
+from database import FinancialRecord
+
+
+def _collect_with_capture(db, **kwargs):
+    """collect_stock_price_history を実行し、stooq へ渡された (sec_code, d_from, d_to)
+    のフェッチ呼び出しを順序どおり捕捉して返すヘルパー。"""
+    fetch_calls: list = []
+
+    async def mock_fetch(session, sec_code, d_from, d_to):
+        fetch_calls.append((sec_code, d_from, d_to))
+        return []
+
+    with patch("collector.fetch_stock_history_stooq", new=mock_fetch):
+        with patch("collector.record_prices_batch", return_value=0):
+            with patch("collector.trim_daily", return_value=0):
+                asyncio.run(collect_stock_price_history(db, **kwargs))
+    return fetch_calls
 
 
 # ── stooq版：collect_stock_price_history ─────────────────────────────────────
@@ -72,6 +93,82 @@ class TestCollectStooqHistory:
         assert all(sc == "1001" for sc in sec_codes)
         assert result["cancelled"] is False
 
+    def test_backfill_forward_only_when_history_starts_at_range_start(
+        self, db, make_company, make_weekly
+    ):
+        """backfill=True: 最古レコードが years_back 起点ちょうど（後方欠損なし）かつ
+        最新が古い場合、前方差分のみが to_fetch に積まれる。"""
+        today = date.today()
+        date_from = date(today.year - 1, today.month, today.day)
+        date_from_str = date_from.strftime("%Y-%m-%d")
+        # 最古=最新が years_back 起点ちょうど → 後方欠損は発生せず、前方のみ
+        db.add(make_company(edinet_code="E00001", sec_code="1001", name="テスト"))
+        db.add(make_weekly(edinet_code="E00001", trade_date=date_from_str, close_last=1000.0))
+        db.commit()
+
+        fetch_calls = _collect_with_capture(db, years_back=1, skip_existing=True, backfill=True)
+
+        expected_d1_fwd = (date_from + timedelta(days=1)).strftime("%Y%m%d")
+        expected_d2 = today.strftime("%Y%m%d")
+        assert fetch_calls == [("1001", expected_d1_fwd, expected_d2)]
+
+    def test_backfill_backward_only_when_history_is_current(
+        self, db, make_company, make_weekly
+    ):
+        """backfill=True: 最新が昨日（前方差分なし）かつ最古が years_back 起点より後の
+        場合、後方欠損のみが to_fetch に積まれる。"""
+        today = date.today()
+        date_from = date(today.year - 1, today.month, today.day)
+        yesterday = (today - timedelta(days=1)).strftime("%Y-%m-%d")
+        db.add(make_company(edinet_code="E00001", sec_code="1001", name="テスト"))
+        db.add(make_weekly(edinet_code="E00001", trade_date=yesterday, close_last=1000.0))
+        db.commit()
+
+        fetch_calls = _collect_with_capture(db, years_back=1, skip_existing=True, backfill=True)
+
+        expected_d1 = date_from.strftime("%Y%m%d")
+        expected_d2_bwd = (today - timedelta(days=2)).strftime("%Y%m%d")
+        assert fetch_calls == [("1001", expected_d1, expected_d2_bwd)]
+
+    def test_backfill_skips_when_no_gaps(self, db, make_company, make_weekly):
+        """backfill=True: 履歴が years_back 起点〜昨日を完全カバーしている場合、
+        前方・後方とも欠損なしでスキップされフェッチは発生しない。"""
+        today = date.today()
+        date_from = date(today.year - 1, today.month, today.day)
+        date_from_str = date_from.strftime("%Y-%m-%d")
+        yesterday = (today - timedelta(days=1)).strftime("%Y-%m-%d")
+        db.add(make_company(edinet_code="E00001", sec_code="1001", name="テスト"))
+        db.add(make_weekly(edinet_code="E00001", trade_date=date_from_str, close_last=900.0))
+        db.add(make_weekly(edinet_code="E00001", trade_date=yesterday, close_last=1000.0))
+        db.commit()
+
+        with patch("collector.fetch_stock_history_stooq",
+                   new_callable=AsyncMock, return_value=[]) as mock_fetch:
+            with patch("collector.record_prices_batch", return_value=0):
+                with patch("collector.trim_daily", return_value=0):
+                    result = asyncio.run(
+                        collect_stock_price_history(
+                            db, years_back=1, skip_existing=True, backfill=True
+                        )
+                    )
+
+        mock_fetch.assert_not_called()
+        assert result["skipped"] == 1
+
+    def test_backfill_full_range_when_no_history(self, db, make_company):
+        """backfill=True: 週次レコードが1件も無い企業は years_back 起点→今日の
+        全範囲が1件 to_fetch に積まれる。"""
+        today = date.today()
+        date_from = date(today.year - 1, today.month, today.day)
+        db.add(make_company(edinet_code="E00001", sec_code="1001", name="テスト"))
+        db.commit()
+
+        fetch_calls = _collect_with_capture(db, years_back=1, skip_existing=True, backfill=True)
+
+        assert fetch_calls == [
+            ("1001", date_from.strftime("%Y%m%d"), today.strftime("%Y%m%d"))
+        ]
+
     def test_cancel_check_stops_collection(self, db, make_company):
         """cancel_check が True を返すと処理が中断され cancelled: True が返る。"""
         db.add(make_company(edinet_code="E00001", sec_code="1001", name="テスト"))
@@ -88,6 +185,65 @@ class TestCollectStooqHistory:
                     )
 
         assert result["cancelled"] is True
+
+
+# ── Yahoo backfill：backfill_historical_stock_prices_yahoo ───────────────────
+
+class TestBackfillYahooNearestMatch:
+    """Yahoo backfill の period_end 近傍マッチングの境界値テスト（fetch_yahoo_history
+    をモックし、_nearest_price 経由の最近傍選択を統合レベルで検証する）。"""
+
+    # default period_end="2023-03-31" は cutoff（today-730日）より前で backfill 対象。
+    _PERIOD_END = "2023-03-31"
+
+    def _run(self, db, rows):
+        async def mock_fetch(session, ticker, d_from, d_to):
+            return rows
+
+        with patch("collector.fetch_yahoo_history", new=mock_fetch):
+            with patch("collector.YAHOO_STOCK_RATE_SLEEP", 0):
+                return asyncio.run(backfill_historical_stock_prices_yahoo(db))
+
+    def test_picks_nearest_when_both_sides_present(self, db, make_company, make_fin):
+        """period_end の前後どちらにも候補があるとき、より近い日付の終値を採用する。"""
+        db.add(make_company(edinet_code="E00001", sec_code="1001"))
+        db.add(make_fin(period_end=self._PERIOD_END))
+        db.commit()
+
+        # 2023-03-31 に対し前(03-20:11日)より後(04-01:1日)が近い
+        updated = self._run(db, [
+            {"trade_date": "2023-03-20", "close": 900.0},
+            {"trade_date": "2023-04-01", "close": 1100.0},
+        ])
+
+        assert updated == 1
+        rec = db.query(FinancialRecord).first()
+        assert rec.stock_price == 1100.0
+
+    def test_no_update_when_gap_exceeded(self, db, make_company, make_fin):
+        """最近傍でも MAX_GAP_DAYS(30日)を超える場合は更新しない。"""
+        db.add(make_company(edinet_code="E00001", sec_code="1001"))
+        db.add(make_fin(period_end=self._PERIOD_END))
+        db.commit()
+
+        # 2023-03-31 から最も近い候補でも 60 日以上離れている
+        updated = self._run(db, [
+            {"trade_date": "2023-01-15", "close": 900.0},
+            {"trade_date": "2023-06-15", "close": 1100.0},
+        ])
+
+        assert updated == 0
+        rec = db.query(FinancialRecord).first()
+        assert rec.stock_price is None
+
+    def test_no_target_records_returns_zero(self, db, make_company, make_fin):
+        """stock_price が既に埋まっているレコードは対象外（NULL のみ補完）。"""
+        db.add(make_company(edinet_code="E00001", sec_code="1001"))
+        db.add(make_fin(period_end=self._PERIOD_END, stock_price=500.0))
+        db.commit()
+
+        updated = self._run(db, [{"trade_date": "2023-03-30", "close": 1000.0}])
+        assert updated == 0
 
 
 # ── JQuants版：collect_stock_price_history_jquants ───────────────────────────
