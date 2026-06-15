@@ -1043,21 +1043,8 @@ def _update_market_data_point_in_time(db) -> int:
             continue
 
         dates = [p[0] for p in prices]
-        pos = bisect.bisect_left(dates, target.isoformat())
-        best_price = None
-        best_gap = MAX_GAP_DAYS + 1
-
-        for idx in (pos - 1, pos):
-            if 0 <= idx < len(prices):
-                td_str, cl = prices[idx]
-                try:
-                    td = date.fromisoformat(td_str[:10])
-                except ValueError:
-                    continue
-                gap = abs((td - target).days)
-                if gap < best_gap:
-                    best_gap = gap
-                    best_price = cl
+        price_dict = dict(prices)
+        best_price = _nearest_price(dates, price_dict, target.isoformat(), MAX_GAP_DAYS)
 
         if best_price is None:
             continue
@@ -1172,14 +1159,7 @@ async def backfill_historical_stock_prices_yahoo(
 
                 for rec in recs:
                     target_str = rec.period_end[:10]
-                    pos = bisect.bisect_left(price_dates, target_str)
-                    best_price, best_gap = None, MAX_GAP_DAYS + 1
-                    for idx in (pos - 1, pos):
-                        if 0 <= idx < len(price_dates):
-                            td = price_dates[idx]
-                            gap = abs((date.fromisoformat(td) - date.fromisoformat(target_str)).days)
-                            if gap < best_gap:
-                                best_gap, best_price = gap, price_dict[td]
+                    best_price = _nearest_price(price_dates, price_dict, target_str, MAX_GAP_DAYS)
                     if best_price and best_price > 0:
                         _apply_price_to_record(rec, best_price)
                         updated += 1
@@ -1527,6 +1507,38 @@ async def diagnose_cf_labels(db, limit: int = 20) -> dict:
 
     log.info(f"diagnose_cf_labels 完了: ユニーク要素 {len(found)}種")
     return found
+
+
+def _nearest_price(sorted_dates: list, price_dict: dict, target_str: str,
+                   max_gap: int) -> Optional[float]:
+    """昇順の日付文字列リスト `sorted_dates` から `target_str` に最も近い日付の
+    価格（`price_dict[日付]`）を返す。最近傍の日付差が `max_gap` 日を超える場合は
+    None。bisect で挿入位置を求め、その前後2候補のみを比較する。
+
+    point-in-time マッチと Yahoo backfill の最近傍探索で共用する内部ヘルパー。
+    """
+    try:
+        target = date.fromisoformat(target_str[:10])
+    except (ValueError, TypeError):
+        return None
+
+    pos = bisect.bisect_left(sorted_dates, target_str)
+    best_price = None
+    best_gap = max_gap + 1
+
+    for idx in (pos - 1, pos):
+        if 0 <= idx < len(sorted_dates):
+            td_str = sorted_dates[idx]
+            try:
+                td = date.fromisoformat(td_str[:10])
+            except ValueError:
+                continue
+            gap = abs((td - target).days)
+            if gap < best_gap:
+                best_gap = gap
+                best_price = price_dict[td_str]
+
+    return best_price
 
 
 def _apply_price_to_record(rec, price: float) -> None:
