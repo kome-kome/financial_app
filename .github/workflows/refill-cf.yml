@@ -1,14 +1,15 @@
 name: CF NULL 補完（投資CF・現金増減・設備投資の再取得）
 
-# 自動繰り返しスケジュール:
-#   【完了】通常補完（cf_net_change_cash IS NULL）は remaining=0 で完了（2026-05-31）。
-#   スケジュールは無効化済み。capex-only は手動 workflow_dispatch で随時実行可能。
-# 手動起動:
-#   workflow_dispatch で件数・モードを指定して即時実行。
+# 実行ポリシー: 手動（workflow_dispatch）のみ。定期 cron は持たない（Issue #117 で案B承認）。
+#   理由（本番DB 20,548行の実態計測にもとづく判断）:
+#     - 主要3区分（営業/投資/財務CF）は初回 XBRL 収集で ≧99.7% 充足しており、
+#       「CF NULL が蓄積し続ける」懸念は実態として発生していない。
+#     - 唯一の有意な欠損は capex（~11%）だが全年度で安定した構造的欠損であり、
+#       同じ XBRL を再パースする日次 cron では改善しない（改善は parse 側のラベル照合課題）。
+#     - よって定期 cron の便益はほぼ無く、J-Quants レート制限・Render スリープのコストのみ残るため廃止。
+#   必要時は workflow_dispatch で mode（refill/capex-only/diagnose）・件数を指定して即時実行する。
 
 on:
-  # schedule:           # 通常補完完了（remaining=0）のため停止（2026-05-31）
-  #   - cron: '0 16 * * *'
   workflow_dispatch:
     inputs:
       mode:
@@ -47,14 +48,14 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Run (mode=${{ github.event_name == 'schedule' && 'refill' || inputs.mode }})
+      - name: Run (mode=${{ inputs.mode }})
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           EDINET_API_KEY: ${{ secrets.EDINET_API_KEY }}
         run: |
-          MODE="${{ github.event_name == 'schedule' && 'refill' || inputs.mode }}"
-          LIMIT="${{ github.event_name == 'schedule' && '6000' || inputs.limit }}"
-          DIAG_LIMIT="${{ github.event_name == 'schedule' && '20' || inputs.diagnose_limit }}"
+          MODE="${{ inputs.mode }}"
+          LIMIT="${{ inputs.limit }}"
+          DIAG_LIMIT="${{ inputs.diagnose_limit }}"
           echo "MODE=$MODE LIMIT=$LIMIT"
           if [ "$MODE" = "diagnose" ]; then
             python _pipeline_gh.py --diagnose-cf --diagnose-cf-limit "$DIAG_LIMIT"

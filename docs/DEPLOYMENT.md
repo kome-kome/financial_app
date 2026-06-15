@@ -44,7 +44,21 @@ Render の制約と運用形態に合わせて設計すること。
 | 通常補完（`cf_net_change_cash IS NULL`）| ✅ **全件完了**（remaining=0） |
 | capex 充足率 | **88.8%**（CF文を持つ 19,073件中 16,929件取得済み） |
 | 残り 2,144件 | アセットライト企業（持株会社・IT等）で capex 行が元々無いため永続的に NULL。再実行しても変わらない |
-| `refill-cf.yml` スケジュール | **無効化済み**（PR #31、2026-05-31）。workflow_dispatch は手動実行用として残存 |
+| `refill-cf.yml` スケジュール | **cron を撤去し手動（workflow_dispatch）のみ**に確定（Issue #117・案B）。下記の実態計測により定期実行は便益が無いと判断 |
+
+#### cron を持たない理由（Issue #117 / 本番DB 20,548行の実態計測）
+
+| CF 区分 | 充足率 |
+|---|---|
+| 営業CF `cf_operating_cf` | 100.0% |
+| 投資CF `cf_investing_cf` | 99.9% |
+| 財務CF `cf_financing_cf` | 99.7% |
+| 現金増減 `cf_net_change_cash` | 98.3% |
+| 設備投資 `cf_capex` | 88.9% |
+
+- 主要3区分（営業/投資/財務CF）は初回 XBRL 収集で ≧99.7% 充足し、「CF NULL が蓄積し続ける」懸念は実態として発生していない。
+- 唯一の有意な欠損は capex（~11%）だが全年度で安定した**構造的欠損**（提出企業ごとのタグ揺れ）であり、同じ XBRL を再パースする日次 cron では改善しない。本質的改善は parse 側のラベル照合拡充（別 Issue）で扱う。
+- よって定期 cron の便益はほぼ無く、J-Quants レート制限・Render スリープのコストのみ残るため cron は撤去。欠損補完が必要な場合は `workflow_dispatch`（mode=refill/capex-only/diagnose・件数指定）で随時実行する。
 
 ### bs_inventory バックフィル（`refill-pl-bs.yml`）
 
