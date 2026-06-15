@@ -17,10 +17,9 @@ SKIP_XBRL_RAW=true（デフォルト）の運用前提:
 """
 import argparse, asyncio, sys, time
 from datetime import datetime
+from functools import partial
 from dotenv import load_dotenv
 load_dotenv()
-
-from sqlalchemy.exc import InternalError, OperationalError
 
 from collector import (
     run_full_collection, update_market_data, collect_macro_data, reparse_from_raw,
@@ -30,35 +29,14 @@ from collector import (
     SKIP_XBRL_RAW, JQUANTS_BACKFILL_DAYS,
 )
 from database import SessionLocal, init_db
+import _pipeline_utils
 
 LOG_FILE = "pipeline_gh.log"
 
-def log(msg: str):
-    ts = datetime.now().strftime("%H:%M:%S")
-    line = f"[{ts}] {msg}"
-    print(line, flush=True)
-    with open(LOG_FILE, "a", encoding="utf-8") as f:
-        f.write(line + "\n")
-
-
-def _is_readonly_error(exc: BaseException) -> bool:
-    msg = str(exc).lower()
-    return "read-only" in msg or "readonlysqltransaction" in msg
-
-
-async def _run_with_retry(coro_factory, label: str,
-                         max_retry: int = 2, wait_sec: int = 90):
-    """Supabase が一時的に read-only に切り替わる事象に対する単純なリトライ。"""
-    for attempt in range(max_retry + 1):
-        try:
-            return await coro_factory()
-        except (InternalError, OperationalError) as e:
-            if not _is_readonly_error(e):
-                raise
-            if attempt >= max_retry:
-                raise
-            log(f"[{label}] ReadOnly エラー検出 (attempt {attempt+1}/{max_retry+1}) — {wait_sec}秒待機して再試行: {e.__class__.__name__}")
-            await asyncio.sleep(wait_sec)
+log = _pipeline_utils.make_logger(LOG_FILE)
+_is_readonly_error = _pipeline_utils._is_readonly_error
+# gh パイプラインは定数待機（backoff_base=1）で従来挙動を維持する。
+_run_with_retry = partial(_pipeline_utils._run_with_retry, log_fn=log, backoff_base=1)
 
 
 async def main(years_back: int, collect_only: bool = False,
