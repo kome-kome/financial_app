@@ -39,8 +39,8 @@ class TestRefillPlBsFromXbrl:
         db.commit()
 
         with (
-            patch("collector.fetch_xbrl_csv", new=AsyncMock(return_value=_df())),
-            patch("collector.parse_xbrl_csv", return_value=_parsed(
+            patch("collector_financials.fetch_xbrl_csv", new=AsyncMock(return_value=_df())),
+            patch("collector_financials.parse_xbrl_csv", return_value=_parsed(
                 pl={"pretax_profit": 126.0, "revenue": 500.0},
                 bs={"inventory": 77.0},
             )),
@@ -64,8 +64,8 @@ class TestRefillPlBsFromXbrl:
         db.commit()
 
         with (
-            patch("collector.fetch_xbrl_csv", new=AsyncMock(return_value=_df())),
-            patch("collector.parse_xbrl_csv", return_value=_parsed(
+            patch("collector_financials.fetch_xbrl_csv", new=AsyncMock(return_value=_df())),
+            patch("collector_financials.parse_xbrl_csv", return_value=_parsed(
                 pl={"pretax_profit": 100.0, "revenue": 555.0},
             )),
         ):
@@ -88,8 +88,8 @@ class TestRefillPlBsFromXbrl:
 
         fetch = AsyncMock(return_value=_df())
         with (
-            patch("collector.fetch_xbrl_csv", new=fetch),
-            patch("collector.parse_xbrl_csv", return_value=_parsed(bs={"inventory": 999.0})),
+            patch("collector_financials.fetch_xbrl_csv", new=fetch),
+            patch("collector_financials.parse_xbrl_csv", return_value=_parsed(bs={"inventory": 999.0})),
         ):
             result = self._run(refill_pl_bs_from_xbrl(db, sleep_sec=0))
 
@@ -101,7 +101,7 @@ class TestRefillPlBsFromXbrl:
     def test_skips_when_xbrl_empty(self, db, make_fin):
         db.add(make_fin(edinet_code="E00004", doc_id="S100D", pl_pretax_profit=None))
         db.commit()
-        with patch("collector.fetch_xbrl_csv", new=AsyncMock(return_value=None)):
+        with patch("collector_financials.fetch_xbrl_csv", new=AsyncMock(return_value=None)):
             result = self._run(refill_pl_bs_from_xbrl(db, sleep_sec=0))
         assert result["skipped"] == 1
         assert result["updated"] == 0
@@ -125,8 +125,8 @@ class TestRefillPlBsFromXbrl:
             return _df()
 
         with (
-            patch("collector.fetch_xbrl_csv", new=AsyncMock(side_effect=_fetch)),
-            patch("collector.parse_xbrl_csv", return_value=_parsed(bs={"inventory": 1.0})),
+            patch("collector_financials.fetch_xbrl_csv", new=AsyncMock(side_effect=_fetch)),
+            patch("collector_financials.parse_xbrl_csv", return_value=_parsed(bs={"inventory": 1.0})),
         ):
             result = self._run(refill_pl_bs_from_xbrl(db, sleep_sec=0))
 

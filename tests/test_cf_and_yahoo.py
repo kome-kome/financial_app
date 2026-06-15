@@ -48,8 +48,8 @@ class TestRefillCfFromXbrl:
         db.commit()
 
         with (
-            patch("collector.fetch_xbrl_csv", new=AsyncMock(return_value=_make_cf_df())),
-            patch("collector.parse_xbrl_csv", return_value=_parsed_cf(
+            patch("collector_financials.fetch_xbrl_csv", new=AsyncMock(return_value=_make_cf_df())),
+            patch("collector_financials.parse_xbrl_csv", return_value=_parsed_cf(
                 op_cf=100.0, net_cash=50.0, capex=-30.0, inv_cf=-80.0, fin_cf=20.0
             )),
         ):
@@ -70,8 +70,8 @@ class TestRefillCfFromXbrl:
         db.commit()
 
         with (
-            patch("collector.fetch_xbrl_csv", new=AsyncMock(return_value=_make_cf_df())),
-            patch("collector.parse_xbrl_csv", return_value=_parsed_cf(capex=-30.0)),
+            patch("collector_financials.fetch_xbrl_csv", new=AsyncMock(return_value=_make_cf_df())),
+            patch("collector_financials.parse_xbrl_csv", return_value=_parsed_cf(capex=-30.0)),
         ):
             result = self._run(refill_cf_from_xbrl(db, limit=10, capex_only=True, sleep_sec=0))
 
@@ -88,8 +88,8 @@ class TestRefillCfFromXbrl:
         db.commit()
 
         with (
-            patch("collector.fetch_xbrl_csv", new=AsyncMock(return_value=_make_cf_df())),
-            patch("collector.parse_xbrl_csv", return_value=_parsed_cf(op_cf=200.0)),
+            patch("collector_financials.fetch_xbrl_csv", new=AsyncMock(return_value=_make_cf_df())),
+            patch("collector_financials.parse_xbrl_csv", return_value=_parsed_cf(op_cf=200.0)),
         ):
             result = self._run(refill_cf_from_xbrl(db, limit=10, missing_cf=True, sleep_sec=0))
 
@@ -102,7 +102,7 @@ class TestRefillCfFromXbrl:
         db.commit()
 
         with (
-            patch("collector.fetch_xbrl_csv", new=AsyncMock(return_value=None)),
+            patch("collector_financials.fetch_xbrl_csv", new=AsyncMock(return_value=None)),
         ):
             result = self._run(refill_cf_from_xbrl(db, limit=10, sleep_sec=0))
 
@@ -136,7 +136,7 @@ class TestFillRecentStockPriceGapYahoo:
         db.add(make_price(trade_date=old_date))
         db.commit()
 
-        with patch("collector.fetch_yahoo_history", new=AsyncMock(return_value=[
+        with patch("collector_prices.fetch_yahoo_history", new=AsyncMock(return_value=[
             {"trade_date": date.today().isoformat(), "close": 1500.0, "volume": 10000},
         ])):
             result = self._run(fill_recent_stock_price_gap_yahoo(db))

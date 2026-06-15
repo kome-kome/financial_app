@@ -39,7 +39,7 @@ def _run(**kwargs):
         return list(DAILY.get(target_date, []))
 
     fetch_mock = AsyncMock(side_effect=fake_fetch)
-    with patch("collector.fetch_doc_list", new=fetch_mock), \
+    with patch("collector_financials.fetch_doc_list", new=fetch_mock), \
          patch("collector.asyncio.sleep", new=AsyncMock()):
         docs = asyncio.run(
             collect_doc_ids_for_period(client=None, start=START, end=END, **kwargs)

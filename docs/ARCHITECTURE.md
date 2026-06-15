@@ -964,7 +964,11 @@ graph TB
 | `backtest.py` | バックエンド | バックテスト分析（プリセット・スコアリング上位N社の実績リターン）。`run(db, …)->dict` / `percentile` / `MULTI_PERIODS`。FastAPI 非依存で直接テスト可能。スコア指標は `FinancialMetric`（VIEW 派生）を引く | database.py, plugins.recommend |
 | `serializers.py` | バックエンド | 財務レコード（`FinancialMetric`）を bs/pl/cf/val/nc/zscore のネスト dict へ整形する純粋関数 `record_to_dict` | — |
 | `database.py` | バックエンド | DBテーブル定義・upsert。8テーブル（Company / FinancialRecord / StockPriceDaily / StockPriceWeekly / MacroData / CollectionLog / XbrlRawDocument / **RegressionResult**）＋ **`financial_metrics` VIEW**（派生指標を都度SQL算出・読み取り専用 ORM `FinancialMetric`）。`upsert_financial` は **ソース列のみ**保存（derived 取り込み廃止）。`upsert_regression_result`（merge・方言非依存）。派生指標は VIEW へ移行し旧 `calc_growth_rates`/`calc_zscore_normalization` は削除、旧計算列は `init_db` の冪等 `DROP COLUMN` で除去。`pack_elements`/`unpack_elements`/`upsert_xbrl_raw` ヘルパを含む | PostgreSQL |
-| `collector.py` | バックエンド | EDINET/J-Quants/JPX/マクロデータからデータ収集→DB保存。**派生指標・Zスコア・成長率・nc_ratio は永続化しない**（financial_metrics VIEW が担う）。`calc_derived` は free_cf/nonoperating_income の算出のみ残す。株価は J-Quants が主経路（stooq は Azure IP ブロックのためローカル補助のみ）。`MACRO_SERIES` で為替・金利・指数・コモディティ9系列を定義 | EDINET API, J-Quants, JPX |
+| `collector.py` | バックエンド | **オーケストレータ＋後方互換の再エクスポート層**（88行）。CLI エントリ（`python collector.py ...`）を保持し、責務別4モジュールの全シンボルを再エクスポートする（`from collector import X` / `collector.X` は従来どおり）。実体は下記4ファイル | collector_utils/master/financials/prices |
+| `collector_utils.py` | バックエンド | 収集系モジュール共通の設定定数（EDINET/J-Quants/Yahoo/stooq のレート・並列数・バッチ閾値）とロガー `log` | dotenv |
+| `collector_master.py` | バックエンド | 企業/業種マスタ収集（EDINET コードリスト `fetch_edinet_code_list`・JPX 業種マスタ `update_industry_from_jpx` / `_read_jpx_excel`） | EDINET API, JPX, collector_utils |
+| `collector_financials.py` | バックエンド | XBRL 財務収集・パース・正規化（`parse_xbrl_csv` / `calc_derived` ほか）＋ CF/PL-BS 補完・再解析＋全件収集オーケストレーション（`run_full_collection` / `_phase_*`）。**派生指標・Zスコア・成長率・nc_ratio は永続化しない**（financial_metrics VIEW が担う）。`calc_derived` は free_cf/nonoperating_income の算出のみ残す | EDINET API, collector_utils, collector_master |
+| `collector_prices.py` | バックエンド | 株価収集（stooq / J-Quants / Yahoo）＋市場データ更新＋マクロ指標収集。株価は J-Quants が主経路（stooq は Azure IP ブロックのためローカル補助のみ）。`MACRO_SERIES` で為替・金利・指数・コモディティ9系列を定義 | J-Quants, Yahoo, stooq, collector_utils |
 | `data_quality.py` | バックエンド | データ品質チェック（NULL率・外れ値・収録状況） | database.py, api.py（import元） |
 | `plugins/base.py` | バックエンド | 分析プラグインの抽象基底クラス | — |
 | `plugins/__init__.py` | バックエンド | プラグインを自動スキャン・レジストリ管理 | plugins/*.py |

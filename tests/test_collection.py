@@ -66,14 +66,14 @@ class TestRunFullCollection:
     def test_normal_case_inserts_financial_record(self, db):
         """正常系: 企業1社・書類1件でFinancialRecordが作成される"""
         with (
-            patch("collector.fetch_edinet_code_list",
+            patch("collector_financials.fetch_edinet_code_list",
                   new=AsyncMock(return_value=_company_df())),
-            patch("collector.collect_doc_ids_for_period",
+            patch("collector_financials.collect_doc_ids_for_period",
                   new=AsyncMock(return_value=_doc_list())),
-            patch("collector.fetch_xbrl_csv",
+            patch("collector_financials.fetch_xbrl_csv",
                   new=AsyncMock(return_value=_xbrl_df())),
-            patch("collector.parse_xbrl_csv", return_value=_parsed_financial()),
-            patch("collector.update_industry_from_jpx",
+            patch("collector_financials.parse_xbrl_csv", return_value=_parsed_financial()),
+            patch("collector_financials.update_industry_from_jpx",
                   new=AsyncMock(return_value=(0, 0))),
             patch("collector.asyncio.sleep", new=AsyncMock()),
         ):
@@ -90,13 +90,13 @@ class TestRunFullCollection:
     def test_error_during_processing_skips_and_rolls_back(self, db):
         """書類処理中に例外が発生した場合、ロールバックしてスキップする"""
         with (
-            patch("collector.fetch_edinet_code_list",
+            patch("collector_financials.fetch_edinet_code_list",
                   new=AsyncMock(return_value=_company_df())),
-            patch("collector.collect_doc_ids_for_period",
+            patch("collector_financials.collect_doc_ids_for_period",
                   new=AsyncMock(return_value=_doc_list())),
-            patch("collector.fetch_xbrl_csv",
+            patch("collector_financials.fetch_xbrl_csv",
                   new=AsyncMock(side_effect=RuntimeError("EDINET 障害テスト"))),
-            patch("collector.update_industry_from_jpx",
+            patch("collector_financials.update_industry_from_jpx",
                   new=AsyncMock(return_value=(0, 0))),
             patch("collector.asyncio.sleep", new=AsyncMock()),
         ):
@@ -116,14 +116,14 @@ class TestRunFullCollection:
         db.commit()
 
         with (
-            patch("collector.fetch_edinet_code_list",
+            patch("collector_financials.fetch_edinet_code_list",
                   new=AsyncMock(return_value=_company_df())),
-            patch("collector.collect_doc_ids_for_period",
+            patch("collector_financials.collect_doc_ids_for_period",
                   new=AsyncMock(return_value=_doc_list())),
-            patch("collector.fetch_xbrl_csv",
+            patch("collector_financials.fetch_xbrl_csv",
                   new=AsyncMock(return_value=_xbrl_df())) as mock_fetch,
-            patch("collector.parse_xbrl_csv", return_value=_parsed_financial()),
-            patch("collector.update_industry_from_jpx",
+            patch("collector_financials.parse_xbrl_csv", return_value=_parsed_financial()),
+            patch("collector_financials.update_industry_from_jpx",
                   new=AsyncMock(return_value=(0, 0))),
             patch("collector.asyncio.sleep", new=AsyncMock()),
         ):
@@ -178,8 +178,8 @@ class TestReparseFromRaw:
         proxy = _NoCloseSession(db)
 
         with (
-            patch("collector.SessionLocal", return_value=proxy),
-            patch("collector.parse_raw_rows", return_value=_parsed_financial()),
+            patch("collector_financials.SessionLocal", return_value=proxy),
+            patch("collector_financials.parse_raw_rows", return_value=_parsed_financial()),
             patch("collector.asyncio.sleep", new=AsyncMock()),
         ):
             cancelled = self._run(reparse_from_raw(edinet_code="E00001"))
@@ -201,8 +201,8 @@ class TestReparseFromRaw:
         proxy = _NoCloseSession(db)
 
         with (
-            patch("collector.SessionLocal", return_value=proxy),
-            patch("collector.parse_raw_rows", return_value=_parsed_financial()),
+            patch("collector_financials.SessionLocal", return_value=proxy),
+            patch("collector_financials.parse_raw_rows", return_value=_parsed_financial()),
         ):
             cancelled = self._run(
                 reparse_from_raw(edinet_code="E00001",
@@ -224,8 +224,8 @@ class TestReparseFromRaw:
         proxy = _NoCloseSession(db)
 
         with (
-            patch("collector.SessionLocal", return_value=proxy),
-            patch("collector.parse_raw_rows", return_value=_parsed_financial()),
+            patch("collector_financials.SessionLocal", return_value=proxy),
+            patch("collector_financials.parse_raw_rows", return_value=_parsed_financial()),
             patch("collector.asyncio.sleep", new=AsyncMock()),
         ):
             self._run(reparse_from_raw(year=2023))
