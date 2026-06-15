@@ -88,6 +88,7 @@ pytest tests/test_utils.py  # 単一ファイル
 ## 設計制約（変えてはいけないこと）
 
 - **`upsert_financial` の入力**: `{bs,pl,cf,derived,val,nonfin}`。bs/pl/cf は `bs_` 等プレフィックス付きで DB カラムにマップ、derived は破棄（VIEW で算出）、val/nonfin はプレフィックス無しの直接列へ。**未知キーは silent-drop せず raise**（fail fast）。
+  - **補足（`calc_derived` の永続化列との関係）**: 破棄されるのは入力の `derived` キーのみ。`calc_derived`（collector.py）は free_cf / ebitda / nonoperating_income 等を **`cf`/`pl` セクションに入れて返す**ため、これらは `cf_free_cf` / `pl_ebitda` 等の**実列へ永続化される**（VIEW 算出ではない）。「軽い派生（成長率・Zスコア等）は VIEW で都度算出・非永続」と「収集時に確定する派生額は実列へ保存」を区別すること。
 - **再分類項目の追加は1箇所**: `FinancialRecord`（database.py）の列に `info={"xbrl": [...]}` で生タグを併記するだけ。`XBRL_MAP`（collector.py）は `build_xbrl_map()` が列 info から逆引き生成するため手書きしない（列定義が唯一の源）。接頭辞なし列（val/nonfin）は `info["section"]` を明示。parse 側の例外ロジック（連結優先度・capex ラベル照合・OperatingRevenue1 フィルタ）は collector.py に残す。
 - **`run_full_collection` の `df_master` は常に全件**（`max_companies` で絞らない）。`max_companies` は書類収集件数の上限のみ。`collect_doc_ids_for_period` の `max_companies` は全期間スキャン後に先着N社へ絞る（早期終了禁止）。
 - **認証ミドルウェアは `/api/auth/` プレフィックスを常に通過**させる（ログインAPI自体を守ると詰まる）。

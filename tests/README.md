@@ -66,9 +66,9 @@ python -m pytest tests/ -v
   `collector.py`（XBRL パース・派生指標などの純関数＋ネットワーク取得をモック）、
   `api.py`（純関数＋`/health`＋DB-backed 読取エンドポイント）。
 - **未カバー（テストしにくい部分）**:
-  - `database.py` の `calc_growth_rates` — PostgreSQL 専用 SQL（`LAG() OVER`・`::numeric`）で SQLite では検証不可。
+  - `financial_metrics` VIEW（成長率・Zスコア等の派生指標を算出する PostgreSQL 専用 VIEW・`LAG() OVER`/`::numeric`）— SQLite では VIEW DDL を張れず検証不可（旧 `calc_growth_rates` 関数は VIEW 移行で廃止済み）。
   - `api.py` の SSE ストリーミング・バックグラウンドジョブを起動する重い収集/分析 POST。
-  - `collector.py` の大きな統合フロー（`run_full_collection`/`update_market_data`/400日スキャンループ）と
-    `update_industry_from_jpx`（JPX Excel 解析）。
+  - `collector.py` の大きな統合フロー（`run_full_collection`/`update_market_data`/400日スキャンループ）。
+    なお `update_industry_from_jpx` の Excel 解析は純粋関数 `_read_jpx_excel` として抽出済みで `tests/test_update_industry.py` がカバーする。
 
 これらは `docs/archive/IMPROVEMENTS.md` で追跡する。
