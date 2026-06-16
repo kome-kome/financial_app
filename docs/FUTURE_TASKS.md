@@ -36,12 +36,14 @@
 ### T1-6. JS 共通ユーティリティの集約 【中】（完了）
 - `static/js/common.js` に `esc` / `_getCookie` / `apiFetch` / `initAuth` / `logout` を集約し、5ページの JS / HTML を更新（2026-06-10）。
 
-### T1-7. 巨大ファイルの責務分割 【低】（旧 REFACTORING 4-5）（一部完了・継続検討）
-- **該当（実測 2026-06-13）**: `collector.py`（2,148行）/ `api.py`（354行）。`api.py` はエンドポイントを `routers/` 配下（`collect.py` / `market.py` / `analysis.py` 等）へ分割済みで、本体は薄いオーケストレータになった。
-- **完了分**: `run_full_collection`（`collector.py:1823`）は `_phase_upsert_master`（L1675）・`_phase_build_skip_ids`（L1718）・`_phase_process_docs`（L1733）へ責務分解済み（旧記述の「約180行・6責務混在」は解消）。
-- **残**: `collector.py` 本体は依然 2,148 行で、株価収集/XBRL財務/CF補完/業種更新が同居（→ ドメイン別モジュール分割は **Issue #114** で設計承認待ち）。`collect_stock_price_history` の状態分岐整理は未着手。
-- **改善案**: `collector_prices.py` / `collector_financials.py` / `collector_master.py` への分割（#114）。**大 diff になるため必要性を都度再評価**。
-- **見積**: 大。
+### T1-7. 巨大ファイルの責務分割 【低】（旧 REFACTORING 4-5）（完了 2026-06-16）
+- **完了**: `collector.py`（2,182行）を4ドメインモジュールへ分割（PR #164）。`collector.py` は88行の再エクスポートオーケストレータのみになった。
+  - `collector_utils.py` — 共通設定定数・ロガー
+  - `collector_master.py` — 企業/業種マスタ収集（EDINETコードリスト / JPX業種）
+  - `collector_financials.py` — XBRL財務収集・パース・CF / PL-BS補完・再解析
+  - `collector_prices.py` — 株価（stooq / J-Quants / Yahoo）・マクロ指標収集
+- **後方互換**: `collector.py` が全シンボルを `from module import *` で再エクスポートするため、`_pipeline_gh.py` / `_pipeline_incremental.py` / テストの import パス変更なし。
+- **検証**: `pytest tests/ -q` → 488 passed（失敗4件は既存・PR無関係）。Issue #114 クローズ。
 
 ### T1-8. デッドコード・残骸の掃除 【低】（完了）
 - `collector.py` の `elapsed = 0.0` 残骸を削除（2026-06-10）。

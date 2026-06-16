@@ -40,6 +40,7 @@ build/
 # Claude Code ローカル設定（共有不要）
 .claude/settings.local.json
 .claude/scheduled_tasks.lock
+.claude/worktrees/
 
 # デプロイ用ローカル設定
 .env.local
