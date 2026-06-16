@@ -201,15 +201,17 @@ def df_to_raw_rows(df) -> list:
     col_map = _detect_xbrl_columns(df)
     if not {"element", "value"}.issubset(col_map):
         return []
+    # iterrows() は1行ごとに Series を生成して遅い。列を一括で list 化し zip で回す
+    # （1書類あたり数千〜数万行になりうる収集ホットパス）。
+    ctx_col  = col_map.get("context")
+    elements = df[col_map["element"]].astype(str).tolist()
+    values   = df[col_map["value"]].astype(str).tolist()
+    contexts = (df[ctx_col].astype(str).tolist()
+                if ctx_col and ctx_col in df.columns else [""] * len(df))
     rows = []
-    for _, row in df.iterrows():
-        raw_elem = str(row[col_map["element"]])
+    for raw_elem, ctx, val in zip(elements, contexts, values):
         elem = raw_elem.split(":")[-1] if ":" in raw_elem else raw_elem
-        rows.append({
-            "element": elem,
-            "context": str(row.get(col_map.get("context", ""), "")),
-            "value":   str(row[col_map["value"]]),
-        })
+        rows.append({"element": elem, "context": ctx, "value": val})
     return rows
 
 
@@ -331,27 +333,33 @@ def parse_xbrl_csv(df, edinet_code: str, period_end: str) -> dict:
     _inv_prio: dict = {}
     label_col = col_map.get("label")
 
-    for _, row in df.iterrows():
-        raw_elem = str(row[col_map["element"]])
+    # iterrows() は1行ごとに Series を生成して遅い。列を一括で list 化し zip で回す
+    # （1書類あたり数千〜数万行になりうる収集ホットパス）。value は生のまま渡し、
+    # 後段の _apply_row / _collect_inventory_row が float 変換する。
+    ctx_col  = col_map.get("context")
+    elements = df[col_map["element"]].astype(str).tolist()
+    values   = df[col_map["value"]].tolist()
+    contexts = (df[ctx_col].astype(str).tolist()
+                if ctx_col and ctx_col in df.columns else [""] * len(df))
+    labels   = (df[label_col].astype(str).tolist()
+                if label_col is not None and label_col in df.columns else [""] * len(df))
+
+    for raw_elem, ctx, val, label in zip(elements, contexts, values, labels):
         elem = raw_elem.split(":")[-1] if ":" in raw_elem else raw_elem
         category_field = XBRL_MAP.get(elem)
 
         # 要素ID照合で外れた行は capex のラベル照合、次に棚卸資産サブ項目照合を試みる。
         if not category_field:
-            if label_col is not None and _match_capex_by_label(str(row.get(label_col, ""))):
+            if label_col is not None and _match_capex_by_label(label):
                 category_field = ("cf", "capex")
             elif elem in _INVENTORY_SUB_ELEMS:
-                _collect_inventory_row(
-                    elem, str(row.get(col_map.get("context", ""), "")), row[col_map["value"]],
-                    _inv_parts, _inv_prio,
-                )
+                _collect_inventory_row(elem, ctx, val, _inv_parts, _inv_prio)
                 continue
             else:
                 continue
 
         cat, field = category_field
-        ctx = str(row.get(col_map.get("context", ""), ""))
-        _apply_row(elem, ctx, row[col_map["value"]], cat, field, result, _priority, apply_capex_sign=True)
+        _apply_row(elem, ctx, val, cat, field, result, _priority, apply_capex_sign=True)
 
     _inventory_fallback(_inv_parts, result)
     return result
@@ -716,9 +724,13 @@ async def _phase_upsert_master(db, client, on_progress, max_companies) -> tuple:
     log.info(f"企業マスタをDBに保存中... ({master_total}社)")
     if on_progress:
         on_progress(0, master_total, f"[企業マスタ保存] {master_total}社をDBに登録中...")
+    # iterrows() の二重走査を避け、to_dict('records') で1パスに統一
+    # （upsert と company_info 構築を同一ループで行う）。
+    records = companies_df.to_dict("records")
+    company_info = {}
     # 3978 社の dirty を 1 トランザクションに溜めると Supabase が read-only
     # に切り替わるため、MASTER_COMMIT_BATCH 件ごとに commit + expire_all してトランザクションを短く保つ
-    for i, (_, row) in enumerate(companies_df.iterrows()):
+    for i, row in enumerate(records):
         upsert_company(db, {
             "edinet_code":  row["edinet_code"],
             "sec_code":     row.get("sec_code", ""),
@@ -726,6 +738,10 @@ async def _phase_upsert_master(db, client, on_progress, max_companies) -> tuple:
             "industry":     row.get("industry", ""),
             "fiscal_month": int(row["fiscal_month"]) if str(row.get("fiscal_month", "")).isdigit() else None,
         })
+        company_info[row["edinet_code"]] = {
+            "company_name": row["company_name"],
+            "industry":     row.get("industry", ""),
+        }
         if (i + 1) % MASTER_COMMIT_BATCH == 0:
             db.commit()
             db.expire_all()
@@ -734,14 +750,6 @@ async def _phase_upsert_master(db, client, on_progress, max_companies) -> tuple:
     db.commit()
     if on_progress:
         on_progress(master_total, master_total, f"[企業マスタ保存完了] {master_total}社")
-
-    company_info = {
-        row["edinet_code"]: {
-            "company_name": row["company_name"],
-            "industry":     row.get("industry", ""),
-        }
-        for _, row in companies_df.iterrows()
-    }
     # 全件収集時は formCode=030000+secCode フィルタ（fetch_doc_list内）に委任し
     # 不完全なマスタリストで絞り込まない。max_companies 指定時のみ絞り込む。
     edinet_set = set(companies_df["edinet_code"].tolist()) if max_companies and not companies_df.empty else None
