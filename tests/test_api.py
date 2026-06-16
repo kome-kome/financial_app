@@ -10,7 +10,7 @@ import hmac
 import os
 import sys
 import time as _time
-from datetime import datetime
+from datetime import datetime, date
 
 import pytest
 from sqlalchemy import create_engine
@@ -146,9 +146,9 @@ class TestStatsEndpoint:
         from database import RegressionResult
         db.add(make_fin(edinet_code="E00001", year=2023))
         db.add(RegressionResult(edinet_code="E00001", year=2023,
-                                period_end="2023-03-31", gap_ratio=12.3))
+                                period_end=date(2023, 3, 31), gap_ratio=12.3))
         db.add(RegressionResult(edinet_code="E00002", year=2023,
-                                period_end="2023-03-31", gap_ratio=None))
+                                period_end=date(2023, 3, 31), gap_ratio=None))
         db.commit()
         api.app.dependency_overrides[api.get_db] = lambda: db
         body = client.get("/api/stats").json()
@@ -187,7 +187,7 @@ class TestGapAnalysisDependency:
     def test_gap_analysis_200_empty_when_regression_exists_but_no_rows(self, db):
         # 回帰はある（depends_on 充足）が当該フィルタに該当行なし → 200・空結果（404 ではない）
         from database import RegressionResult
-        db.add(RegressionResult(edinet_code="E00001", year=2023, period_end="2023-03-31",
+        db.add(RegressionResult(edinet_code="E00001", year=2023, period_end=date(2023, 3, 31),
                                 predicted_market_cap=1.0, gap_ratio=5.0, model="ols", sector="x"))
         db.commit()
         api.app.dependency_overrides[api.get_db] = lambda: db

@@ -12,13 +12,15 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from plugins import ensure_dependencies, get_plugin
 from plugins.base import AnalysisPlugin, DependencyError
-from database import RegressionResult
+from database import RegressionResult, _parse_period_end
 
 
 def _regression_row(**over):
     data = dict(edinet_code="E00001", year=2023, period_end="2023-03-31",
                 predicted_market_cap=1.0, gap_ratio=5.0, model="ols", sector="x")
     data.update(over)
+    if isinstance(data.get("period_end"), str):
+        data["period_end"] = _parse_period_end(data["period_end"])
     return RegressionResult(**data)
 
 

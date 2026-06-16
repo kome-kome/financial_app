@@ -587,9 +587,9 @@ def _update_market_data_point_in_time(db) -> int:
 
     # 対象会社・日付範囲を算出して weekly を必要範囲だけロード
     # ec_subq は Query をそのまま渡す（SQLAlchemy が SELECT サブクエリへ変換）
-    period_ends = [r.period_end[:10] for r in dated_records]
-    date_lo = (date.fromisoformat(min(period_ends)) - timedelta(days=MAX_GAP_DAYS)).isoformat()
-    date_hi = (date.fromisoformat(max(period_ends)) + timedelta(days=MAX_GAP_DAYS)).isoformat()
+    period_ends = [r.period_end for r in dated_records]
+    date_lo = (min(period_ends) - timedelta(days=MAX_GAP_DAYS)).isoformat()
+    date_hi = (max(period_ends) + timedelta(days=MAX_GAP_DAYS)).isoformat()
     ec_q = (
         db.query(FinancialRecord.edinet_code)
         .filter(FinancialRecord.period_end.isnot(None))
@@ -628,7 +628,7 @@ def _update_market_data_point_in_time(db) -> int:
             continue
 
         try:
-            target = date.fromisoformat(rec.period_end[:10])
+            target = rec.period_end
         except (ValueError, TypeError):
             continue
 
@@ -689,7 +689,7 @@ async def backfill_historical_stock_prices_yahoo(
     J-Quants 由来の既存 stock_price は上書きしない（NULL のみ補完）。
     GitHub Actions（Azure IP）から動作する。
     """
-    cutoff = (date.today() - timedelta(days=JQUANTS_BACKFILL_DAYS)).isoformat()
+    cutoff = date.today() - timedelta(days=JQUANTS_BACKFILL_DAYS)
 
     # 対象: stock_price が NULL かつ period_end が J-Quants カバー外
     target_records = (
@@ -732,9 +732,9 @@ async def backfill_historical_stock_prices_yahoo(
                 return updated
 
             # この企業の全 period_end をカバーする日付範囲（±MAX_GAP_DAYS の余裕を持たせる）
-            period_ends = sorted(r.period_end[:10] for r in recs)
-            d_from = (date.fromisoformat(period_ends[0])  - timedelta(days=MAX_GAP_DAYS)).strftime("%Y%m%d")
-            d_to   = (date.fromisoformat(period_ends[-1]) + timedelta(days=MAX_GAP_DAYS)).strftime("%Y%m%d")
+            period_ends = sorted(r.period_end for r in recs)
+            d_from = (period_ends[0]  - timedelta(days=MAX_GAP_DAYS)).strftime("%Y%m%d")
+            d_to   = (period_ends[-1] + timedelta(days=MAX_GAP_DAYS)).strftime("%Y%m%d")
 
             # Yahoo Finance ティッカー（東証: {sec_code}.T）
             ticker = f"{sec_code}.T"
@@ -746,7 +746,7 @@ async def backfill_historical_stock_prices_yahoo(
                 price_dates = sorted(price_dict.keys())
 
                 for rec in recs:
-                    target_str = rec.period_end[:10]
+                    target_str = rec.period_end.isoformat() if rec.period_end else ""
                     best_price = _nearest_price(price_dates, price_dict, target_str, MAX_GAP_DAYS)
                     if best_price and best_price > 0:
                         _apply_price_to_record(rec, best_price)

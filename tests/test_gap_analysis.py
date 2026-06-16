@@ -8,6 +8,7 @@ import asyncio
 import math
 import os
 import sys
+from datetime import date
 
 import numpy as np
 import pytest
@@ -103,7 +104,7 @@ class TestExecute:
         old, new = datetime(2020, 1, 1), datetime(2026, 1, 1)
         db.add(make_fin(updated_at=new))                       # 財務データは新しい
         db.add(make_metric(edinet_code="E00001", gap_ratio=10.0))
-        db.add(RegressionResult(edinet_code="E00001", year=2023, period_end="2023-03-31",
+        db.add(RegressionResult(edinet_code="E00001", year=2023, period_end=date(2023, 3, 31),
                                 predicted_market_cap=12000.0, gap_ratio=10.0,
                                 model="ols", sector="情報・通信業", computed_at=old))  # 回帰は古い
         db.commit()

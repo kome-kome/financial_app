@@ -5,6 +5,7 @@
 import asyncio
 import os
 import sys
+from datetime import date
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pandas as pd
@@ -13,7 +14,7 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from collector import reparse_from_raw, run_full_collection
-from database import FinancialRecord, XbrlRawDocument
+from database import FinancialRecord, XbrlRawDocument, _parse_period_end
 from database import pack_elements
 
 
@@ -84,7 +85,7 @@ class TestRunFullCollection:
             edinet_code="E00001", doc_id="S100TEST"
         ).first()
         assert rec is not None
-        assert rec.period_end == "2023-03-31"
+        assert rec.period_end == date(2023, 3, 31)
         assert rec.bs_total_assets == 1_000_000_000.0
 
     def test_error_during_processing_skips_and_rolls_back(self, db):
@@ -155,13 +156,13 @@ class TestReparseFromRaw:
         return asyncio.run(coro)
 
     def _make_raw_doc(self, db, edinet_code="E00001",
-                      doc_id="S100TEST", period_end="2023-03-31"):
+                      doc_id="S100TEST", period_end=date(2023, 3, 31)):
         """XbrlRawDocument を DB に挿入して返す"""
         raw_rows = [{"element": "Assets", "context": "Prior2YearInstant_NonConsolidatedMember", "value": "1000000000"}]
         doc = XbrlRawDocument(
             doc_id=doc_id,
             edinet_code=edinet_code,
-            period_end=period_end,
+            period_end=_parse_period_end(period_end),
             elements_gz=pack_elements(raw_rows),
             n_rows=len(raw_rows),
         )
@@ -189,7 +190,7 @@ class TestReparseFromRaw:
             edinet_code="E00001", doc_id="S100TEST"
         ).first()
         assert rec is not None
-        assert rec.period_end == "2023-03-31"
+        assert rec.period_end == date(2023, 3, 31)
         assert rec.bs_total_assets == 1_000_000_000.0
 
     def test_cancel_check_stops_processing(self, db, make_company):

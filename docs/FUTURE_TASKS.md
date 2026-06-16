@@ -68,20 +68,11 @@
 - **検証**: `pytest tests/ -q` → 549 passed
 
 ### H. `period_end` を VARCHAR から DATE 型へ移行
-- **問題**: 現状 `String(20)` で `"YYYY-MM-DD"` を格納。期間比較は辞書順依存、JOIN や範囲インデックスの効率が悪い
-- **改善案**: PostgreSQL の DATE 型へ移行
-  ```sql
-  ALTER TABLE financial_records
-    ALTER COLUMN period_end TYPE DATE
-    USING NULLIF(period_end, '')::DATE;
-  ```
-- **リスク**:
-  - 非 ISO 形式値や空文字が含まれていた場合に移行失敗
-  - `upsert_financial` のキー検索条件・各クエリで `String` → `date` 変換が必要
-  - `calc_growth_rates` の `ORDER BY period_end` は型変更後も動くが要動作確認
-- **前提**: Supabase ダッシュボードで `SELECT DISTINCT period_end FROM financial_records WHERE period_end !~ '^\d{4}-\d{2}-\d{2}$'` で異常値が無いことを確認 → 自動バックアップを取ってからマイグレーション
-- **Render 適合**: マイグレーションを `init_db()` 内に冪等な `DO $$ ... $$` ブロックで書き、起動時に 1 度だけ実行。失敗時に環境変数 `SKIP_PERIOD_END_MIGRATION=1` で skip できるフェールセーフを用意
-- **実装場所**: `database.py`（スキーマ・upsert・init_db）、`collector.py`（doc.get("periodEnd") の値変換）
+- **完了**: `feature/t2h-period-end-date` ブランチで実装・テスト確認済み（549 passed）
+- `FinancialRecord` / `XbrlRawDocument` / `RegressionResult` / `FinancialMetric` の `period_end` を `Column(Date, nullable=True)` へ変更
+- `_parse_period_end(s)` ヘルパーを `database.py` に追加し、`upsert_financial` / `upsert_xbrl_raw` / `upsert_regression_result` から使用
+- `_ensure_tables()` に冪等な DDL マイグレーション（`USING NULLIF(NULLIF(period_end,''), 'NULL')::DATE`）を追加、`SKIP_PERIOD_END_MIGRATION=1` フェールセーフ付き
+- `collector_financials.py`・`collector_prices.py`・`backtest.py`・`plugins/price_predictor.py`・`plugins/sector_ols.py`・`routers/market.py`・`serializers.py`・テスト全ファイルを対応修正
 
 ---
 

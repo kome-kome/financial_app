@@ -48,7 +48,7 @@ def run(
     subq = (
         db.query(FinancialMetric.edinet_code,
                  func.max(FinancialMetric.year).label("max_year"))
-        .filter(FinancialMetric.period_end <= start_date_str)
+        .filter(FinancialMetric.period_end <= start_date)
         .group_by(FinancialMetric.edinet_code)
         .subquery()
     )
@@ -56,7 +56,7 @@ def run(
         db.query(FinancialMetric)
         .join(subq, (FinancialMetric.edinet_code == subq.c.edinet_code) &
                     (FinancialMetric.year == subq.c.max_year))
-        .filter(FinancialMetric.period_end <= start_date_str)
+        .filter(FinancialMetric.period_end <= start_date)
     )
     if industry:
         query = query.filter(FinancialMetric.industry == industry)
@@ -113,7 +113,7 @@ def run(
             "industry":       r.industry or "",
             "score":          round(score, 3),
             "year":           r.year,
-            "period_end":     r.period_end,
+            "period_end":     r.period_end.isoformat() if r.period_end else None,
             "start_price":    sp["price"] if sp else None,
             "start_date":     sp["date"]  if sp else None,
             "end_price":      ep["price"] if ep else None,

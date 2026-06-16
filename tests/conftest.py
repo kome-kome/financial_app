@@ -3,10 +3,11 @@
 プラグインの execute() は SQLAlchemy Session を要求するため、in-memory SQLite に
 ORM モデルからテーブルを生成して渡す。init_db() は Postgres 専用 SQL（gin / DOUBLE
 PRECISION）を含むので呼ばず、Base.metadata.create_all で生成する。
-モデルは Integer/String/Float/DateTime/JSON/LargeBinary のみで SQLite 互換。
+モデルは Integer/String/Float/DateTime/JSON/LargeBinary/Date のみで SQLite 互換。
 """
 import os
 import sys
+from datetime import date
 
 import pytest
 from sqlalchemy import create_engine
@@ -22,7 +23,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from database import (  # noqa: E402
     Base, ViewBase, Company, FinancialRecord, FinancialMetric,
-    StockPriceDaily, StockPriceWeekly, iso_week_start,
+    StockPriceDaily, StockPriceWeekly, iso_week_start, _parse_period_end,
 )
 
 
@@ -63,7 +64,7 @@ _FIN_DEFAULTS = dict(
     company_name="テスト株式会社",
     industry="情報・通信業",
     year=2023,
-    period_end="2023-03-31",
+    period_end=date(2023, 3, 31),
     market_cap=10000.0,   # 百万円
 )
 
@@ -71,7 +72,11 @@ _FIN_DEFAULTS = dict(
 @pytest.fixture
 def make_fin():
     def _make(**overrides):
-        return FinancialRecord(**{**_FIN_DEFAULTS, **overrides})
+        kw = {**_FIN_DEFAULTS, **overrides}
+        # period_end が文字列で渡された場合は date に変換する（テスト互換）
+        if "period_end" in kw and isinstance(kw["period_end"], str):
+            kw["period_end"] = _parse_period_end(kw["period_end"])
+        return FinancialRecord(**kw)
     return _make
 
 
@@ -83,7 +88,11 @@ def make_metric():
     （FinancialMetric はソース列＋派生列＋predicted/gap を全て持つ）。
     make_fin と同じデフォルト・同じ override 形式で使える。"""
     def _make(**overrides):
-        return FinancialMetric(**{**_FIN_DEFAULTS, **overrides})
+        kw = {**_FIN_DEFAULTS, **overrides}
+        # period_end が文字列で渡された場合は date に変換する（テスト互換）
+        if "period_end" in kw and isinstance(kw["period_end"], str):
+            kw["period_end"] = _parse_period_end(kw["period_end"])
+        return FinancialMetric(**kw)
     return _make
 
 

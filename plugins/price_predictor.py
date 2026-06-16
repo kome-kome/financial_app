@@ -153,7 +153,9 @@ def _find_applicable_fin(fin_recs: list, snap_date: str):
     for fr in fin_recs:
         if not fr.period_end:
             continue
-        avail_date = _add_days(fr.period_end[:10], FINANCIAL_LAG_DAYS)
+        _pe = fr.period_end
+        _pe_str = _pe.isoformat() if hasattr(_pe, "isoformat") else str(_pe)[:10]
+        avail_date = _add_days(_pe_str, FINANCIAL_LAG_DAYS)
         if avail_date <= snap_date:
             result = fr
     return result
