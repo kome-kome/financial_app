@@ -18,7 +18,7 @@ from datetime import datetime, date, timedelta, timezone
 from pathlib import Path
 from dotenv import load_dotenv
 from sqlalchemy import (
-    create_engine, Column, String, Integer, Float, DateTime,
+    create_engine, Column, String, Integer, Float, DateTime, Date,
     Text, UniqueConstraint, PrimaryKeyConstraint, Index, JSON, LargeBinary, ForeignKey, text, func
 )
 from sqlalchemy.orm import declarative_base, sessionmaker, relationship
@@ -97,7 +97,7 @@ class FinancialRecord(Base):
     industry     = Column(String(100))
     market       = Column(String(50))
     year         = Column(Integer, nullable=False)
-    period_end   = Column(String(20))                      # 決算期末日 YYYY-MM-DD
+    period_end   = Column(Date, nullable=True)              # 決算期末日
     doc_id       = Column(String(20))                      # EDINET書類管理番号
     source       = Column(String(50), default="EDINET_XBRL")
     accounting_standard = Column(String(20))
@@ -540,7 +540,7 @@ class XbrlRawDocument(Base):
     id              = Column(Integer, primary_key=True, autoincrement=True)
     doc_id          = Column(String(20), nullable=False, index=True)
     edinet_code     = Column(String(10), nullable=False, index=True)
-    period_end      = Column(String(20))
+    period_end      = Column(Date, nullable=True)
     elements_gz     = Column(LargeBinary, nullable=False)
     elements_format = Column(String(10), default="gzip+json")
     n_rows          = Column(Integer)
@@ -556,11 +556,26 @@ def unpack_elements(blob: bytes) -> list:
     return json.loads(gzip.decompress(blob).decode("utf-8"))
 
 
+def _parse_period_end(s) -> "date | None":
+    """文字列 'YYYY-MM-DD' または date オブジェクトを date に変換する。None/空文字は None を返す。"""
+    if s is None:
+        return None
+    if isinstance(s, date):
+        return s
+    s = str(s).strip()
+    if not s or s in ("", "NULL", "None"):
+        return None
+    try:
+        return date.fromisoformat(s[:10])
+    except (ValueError, TypeError):
+        return None
+
+
 def upsert_xbrl_raw(db, doc_id: str, edinet_code: str, period_end: str, rows: list):
     blob = pack_elements(rows)
     now  = datetime.now(timezone.utc)
     stmt = pg_insert(XbrlRawDocument).values(
-        doc_id=doc_id, edinet_code=edinet_code, period_end=period_end,
+        doc_id=doc_id, edinet_code=edinet_code, period_end=_parse_period_end(period_end),
         elements_gz=blob, elements_format="gzip+json", n_rows=len(rows), fetched_at=now,
     ).on_conflict_do_update(
         index_elements=["doc_id"],
@@ -584,7 +599,7 @@ class RegressionResult(Base):
 
     edinet_code          = Column(String(10), nullable=False)
     year                 = Column(Integer, nullable=False)
-    period_end           = Column(String(20), nullable=False, default="")
+    period_end           = Column(Date, nullable=True)
     predicted_market_cap = Column(Float)   # 回帰モデル予測時価総額（百万円）
     gap_ratio            = Column(Float)   # 乖離率 %（(予測-実績)/実績*100）
     model                = Column(String(20))   # "ols" / "ridge"
@@ -601,7 +616,7 @@ def upsert_regression_result(db, *, edinet_code: str, year: int, period_end: str
     どちらでも動作する（pg_insert の ON CONFLICT は Postgres 専用のため使わない）。
     """
     db.merge(RegressionResult(
-        edinet_code=edinet_code, year=year, period_end=period_end or "",
+        edinet_code=edinet_code, year=year, period_end=_parse_period_end(period_end),
         predicted_market_cap=predicted_market_cap, gap_ratio=gap_ratio,
         model=model, sector=sector, computed_at=datetime.now(timezone.utc),
     ))
@@ -628,7 +643,7 @@ class FinancialMetric(ViewBase):
     industry     = Column(String(100))
     market       = Column(String(50))
     year         = Column(Integer)
-    period_end   = Column(String(20))
+    period_end   = Column(Date, nullable=True)
     doc_id       = Column(String(20))
     source       = Column(String(50))
     accounting_standard = Column(String(20))
@@ -728,6 +743,30 @@ def _ensure_tables() -> None:
             "CREATE INDEX IF NOT EXISTS ix_xbrl_raw_edinet_period "
             "ON xbrl_raw_documents (edinet_code, period_end)"
         ))
+        # period_end を VARCHAR(20) → DATE 型に変換するマイグレーション（冪等）
+        # SKIP_PERIOD_END_MIGRATION=1 で skip できるフェールセーフ付き
+        if not os.environ.get("SKIP_PERIOD_END_MIGRATION"):
+            try:
+                for tbl in ("financial_records", "xbrl_raw_documents", "regression_results"):
+                    conn.execute(text(f"""
+                        DO $$
+                        BEGIN
+                            IF EXISTS (
+                                SELECT 1 FROM information_schema.columns
+                                WHERE table_name='{tbl}' AND column_name='period_end'
+                                AND data_type='character varying'
+                            ) THEN
+                                ALTER TABLE {tbl}
+                                ALTER COLUMN period_end TYPE DATE
+                                USING NULLIF(NULLIF(period_end,''), 'NULL')::DATE;
+                            END IF;
+                        END $$
+                    """))
+            except Exception as _e:
+                log.warning(
+                    f"period_end DATE 型マイグレーション失敗"
+                    f"（SKIP_PERIOD_END_MIGRATION=1 で回避可能）: {_e}"
+                )
         conn.commit()
 
 
@@ -808,7 +847,7 @@ def upsert_financial(db, data: dict) -> FinancialRecord:
         "market":             data.get("market"),
         "accounting_standard":data.get("accounting_standard"),
         "year":               data.get("year"),
-        "period_end":         data.get("period_end"),
+        "period_end":         _parse_period_end(data.get("period_end")),
         "doc_id":             data.get("doc_id"),
         "source":             data.get("source", "EDINET_XBRL"),
     }
@@ -849,7 +888,7 @@ def upsert_financial(db, data: dict) -> FinancialRecord:
     obj = db.query(FinancialRecord).filter_by(
         edinet_code=flat["edinet_code"],
         year=flat["year"],
-        period_end=flat.get("period_end", ""),
+        period_end=flat.get("period_end"),
     ).first()
 
     if obj is None:

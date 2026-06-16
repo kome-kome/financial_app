@@ -10,14 +10,14 @@ from typing import Optional, Callable
 
 import httpx
 import pandas as pd
-from sqlalchemy import func as sqla_func
+from sqlalchemy import func as sqla_func, extract
 from sqlalchemy.exc import SQLAlchemyError
 
 from database import (
     SessionLocal, Company, FinancialRecord, MacroData,
     XbrlRawDocument, upsert_company, upsert_financial,
     upsert_xbrl_raw, pack_elements, unpack_elements,
-    build_xbrl_map,
+    build_xbrl_map, _parse_period_end,
     StockPriceDaily, StockPriceWeekly,
     record_prices_batch, trim_daily, latest_prices,
 )
@@ -449,7 +449,7 @@ async def _refill_records_from_xbrl(db, target_q, field_updater, *, label: str,
                     skipped += 1
                     continue
 
-                parsed = parse_xbrl_csv(df, rec.edinet_code, str(rec.period_end))
+                parsed = parse_xbrl_csv(df, rec.edinet_code, rec.period_end.isoformat() if rec.period_end else "")
                 if field_updater(rec, parsed):
                     db.add(rec)
                     updated += 1
@@ -668,7 +668,7 @@ async def reparse_from_raw(year: Optional[int] = None,
     try:
         q = db.query(XbrlRawDocument)
         if year:
-            q = q.filter(XbrlRawDocument.period_end.like(f"{year}%"))
+            q = q.filter(extract('year', XbrlRawDocument.period_end) == year)
         if edinet_code:
             q = q.filter(XbrlRawDocument.edinet_code == edinet_code)
         docs = q.order_by(XbrlRawDocument.period_end.desc()).all()
@@ -695,8 +695,8 @@ async def reparse_from_raw(year: Optional[int] = None,
                 "sec_code":     co.sec_code if co else "",
                 "company_name": co.name if co else "",
                 "industry":     xbrl_industry or (co.industry if co else ""),
-                "year":         int(doc.period_end[:4]) if doc.period_end else 0,
-                "period_end":   doc.period_end,
+                "year":         doc.period_end.year if doc.period_end else 0,
+                "period_end":   doc.period_end.isoformat() if doc.period_end else "",
                 "doc_id":       doc.doc_id,
                 "source":       "EDINET_XBRL",
             })

@@ -13,7 +13,7 @@ def record_to_dict(r) -> dict:
         "sec_code":     r.sec_code,
         "company_name": r.company_name,
         "industry":     r.industry,
-        "year": r.year, "period_end": r.period_end,
+        "year": r.year, "period_end": r.period_end.isoformat() if r.period_end else None,
         "bs": {
             "total_assets": r.bs_total_assets,
             "current_assets": r.bs_current_assets,

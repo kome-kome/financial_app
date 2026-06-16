@@ -160,11 +160,11 @@ class TestUpsertRegressionResult:
         assert rows[0].model == "ridge"
 
     def test_empty_period_end_normalized(self, db):
-        # period_end が None でも空文字キーで保存できる（PK NOT NULL 制約回避）
+        # period_end が None の場合は NULL として保存される（DATE 型移行後）
         upsert_regression_result(db, **self._args(period_end=None))
         db.commit()
         rr = db.query(RegressionResult).one()
-        assert rr.period_end == ""
+        assert rr.period_end is None
 
 
 # Zスコア正規化は financial_metrics VIEW（PostgreSQL window function）へ移行した。

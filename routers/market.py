@@ -219,7 +219,7 @@ async def get_stats(db: Session = Depends(api.get_db)):
         "stock_price_records":  n_stock_price,
         "records_with_prediction": n_predicted,
         "latest_year":          latest_fr.year       if latest_fr else None,
-        "latest_period_end":    latest_fr.period_end if latest_fr else None,
+        "latest_period_end":    latest_fr.period_end.isoformat() if latest_fr and latest_fr.period_end else None,
         "last_db_update":       api._utc_to_jst_str(last_db_update),
         "days_since_update":    days_since,
         "expected_latest_year": expected_year,
@@ -661,7 +661,7 @@ async def export_csv(year: Optional[int] = None, db: Session = Depends(api.get_d
     ])
     for r in records:
         writer.writerow([
-            r.sec_code, r.company_name, r.industry, r.year, r.period_end,
+            r.sec_code, r.company_name, r.industry, r.year, r.period_end.isoformat() if r.period_end else "",
             r.pl_revenue, r.pl_operating_profit, r.pl_net_income,
             r.bs_total_assets, r.bs_total_equity,
             r.cf_operating_cf, r.market_cap, r.per, r.pbr, r.roe, r.equity_ratio,
