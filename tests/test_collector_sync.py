@@ -166,3 +166,67 @@ class TestUpdateMarketDataPointInTime:
         update_market_data_from_history(db, point_in_time=True)
         db.refresh(rec)
         assert rec.stock_price is None
+
+
+class TestUpdateMarketDataPointInTimeNearest:
+    """point_in_time=True の最近傍探索・日付範囲フィルタ・latest_by_ec 整合の深掘り。
+
+    最新レコードは最終ステップで latest_prices に上書きされるため、近傍探索の挙動は
+    「最新でない（year が小さい）レコード」で観測する。
+    """
+
+    def test_bisect_selects_nearest_weekly(self, db, make_fin, make_weekly):
+        # old_rec(2022) は最新でないため近傍探索の結果がそのまま残る
+        old_rec = make_fin(year=2022, period_end="2022-03-31")
+        new_rec = make_fin(year=2023, period_end="2023-03-31")  # latest
+        db.add_all([old_rec, new_rec])
+        # 2022-03-31 近傍: 03-28(差3日) を 03-07(差24日) より優先（bisect で前後2候補比較）
+        db.add(make_weekly(trade_date="2022-03-07", close_last=2100.0))
+        db.add(make_weekly(trade_date="2022-03-28", close_last=2200.0))
+        db.add(make_weekly(trade_date="2023-03-27", close_last=5000.0))  # 最新側
+        db.commit()
+        update_market_data_from_history(db, point_in_time=True)
+        db.refresh(old_rec); db.refresh(new_rec)
+        assert old_rec.stock_price == 2200.0   # period_end 最近傍
+        assert new_rec.stock_price == 5000.0   # latest 上書き
+
+    def test_weekly_beyond_max_gap_not_matched(self, db, make_fin, make_weekly):
+        # MAX_GAP_DAYS=30。old_rec の period_end から 30日超離れた weekly は不採用
+        old_rec = make_fin(year=2022, period_end="2022-03-31")
+        new_rec = make_fin(year=2023, period_end="2023-03-31")  # latest
+        db.add_all([old_rec, new_rec])
+        db.add(make_weekly(trade_date="2022-05-09", close_last=2200.0))  # 39日差 → 範囲外
+        db.add(make_weekly(trade_date="2023-03-27", close_last=5000.0))  # 最新側
+        db.commit()
+        update_market_data_from_history(db, point_in_time=True)
+        db.refresh(old_rec); db.refresh(new_rec)
+        assert old_rec.stock_price is None     # gap > MAX_GAP_DAYS で不採用・既存値保持
+        assert new_rec.stock_price == 5000.0
+
+    def test_latest_record_overwritten_with_latest_price(self, db, make_fin, make_weekly):
+        # 単独=最新レコード。近傍(3000)で一旦更新後、最終ステップで最新株価(4000)に上書き。
+        # 最新週次(2023-06-26)は period_end±MAX_GAP の weekly 取得範囲外だが、
+        # latest_prices は別クエリのため最新終値として引かれる（latest_by_ec 整合）。
+        rec = make_fin(year=2023, period_end="2023-03-31", bs_bps=1000.0)
+        db.add(rec)
+        db.add(make_weekly(trade_date="2023-03-27", close_last=3000.0))
+        db.add(make_weekly(trade_date="2023-06-26", close_last=4000.0))
+        db.commit()
+        update_market_data_from_history(db, point_in_time=True)
+        db.refresh(rec)
+        assert rec.stock_price == 4000.0       # 近傍3000ではなく最新4000で上書き
+        assert rec.pbr == pytest.approx(4.0)
+
+    def test_two_companies_matched_by_own_period_end(self, db, make_fin, make_weekly):
+        rec1 = make_fin(edinet_code="E00001", year=2023, period_end="2023-03-31")
+        rec2 = make_fin(edinet_code="E00002", sec_code="1002",
+                        year=2023, period_end="2023-09-30")
+        db.add_all([rec1, rec2])
+        db.add(make_weekly(edinet_code="E00001", trade_date="2023-03-27", close_last=1500.0))
+        db.add(make_weekly(edinet_code="E00002", trade_date="2023-09-25", close_last=2500.0))
+        db.commit()
+        n = update_market_data_from_history(db, point_in_time=True)
+        db.refresh(rec1); db.refresh(rec2)
+        assert rec1.stock_price == 1500.0      # 各社が自社 period_end 近傍で独立にマッチ
+        assert rec2.stock_price == 2500.0
+        assert n == 2
