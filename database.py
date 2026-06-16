@@ -398,6 +398,38 @@ def _recompute_weeks_from_daily(db, daily_vals: list) -> None:
     ))
 
 
+def upsert_macro_batch(db, vals: list) -> int:
+    """macro_data への系列横断バルク upsert（(series_code, trade_date) 競合で最新値上書き）。
+
+    `collect_macro_data` の単一書き込み口。系列ごとの行単位 INSERT/UPDATE 分岐を
+    1 ステートメントのバルク upsert に圧縮する（Supabase pool_size 制約下の N+1 解消）。
+    Postgres / SQLite 両対応（dialect に応じて insert を選択）。
+    vals: [{series_code, series_name, category, trade_date, open, high, low, close, volume}, ...]
+    戻り値: upsert を試みた行数（新規＋更新の合計）。
+    """
+    if not vals:
+        return 0
+    dialect = db.bind.dialect.name if db.bind is not None else "postgresql"
+    if dialect == "sqlite":
+        from sqlalchemy.dialects.sqlite import insert as _insert
+    else:
+        from sqlalchemy.dialects.postgresql import insert as _insert
+    stmt = _insert(MacroData).values(vals)
+    # 既存行は最新値で上書き（series_name/category は系列固定のため不変＝OHLCV のみ更新）
+    stmt = stmt.on_conflict_do_update(
+        index_elements=["series_code", "trade_date"],
+        set_={
+            "open":   stmt.excluded.open,
+            "high":   stmt.excluded.high,
+            "low":    stmt.excluded.low,
+            "close":  stmt.excluded.close,
+            "volume": stmt.excluded.volume,
+        },
+    )
+    db.execute(stmt)
+    return len(vals)
+
+
 def prices_on_or_after(db, codes: list, after: str) -> dict:
     """各 edinet_code の after 以降・最初の終値を返す（バックテストのエントリー用）。
 
