@@ -15,6 +15,7 @@
 
 前処理: winsorize(p1-p99) → z-score正規化（業種内） → OLS / Ridge
 """
+import logging
 import math
 from collections import defaultdict
 from typing import Any
@@ -29,6 +30,8 @@ from .utils import (
     shares_outstanding,
     winsorize,
 )
+
+log = logging.getLogger(__name__)
 
 
 # 派生 per-share キー → 対応する絶対額カラム名 のマッピング
@@ -469,7 +472,8 @@ class SectorOLSPlugin(AnalysisPlugin):
         if regularization != "ridge":
             try:
                 diag = ols_with_diagnostics(X_norm, y_normed, cov_type="HC3")
-            except Exception:
+            except Exception as e:
+                log.debug(f"業種 {sector} の診断統計（HC3）計算失敗（diag=None でフォールバック）: {e}")
                 diag = None
         stat_entry = {
             "industry": sector,

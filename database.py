@@ -13,7 +13,7 @@ VIEW:
   financial_metrics  — 派生指標・Zスコア・成長率（financial_records から都度算出）
 """
 
-import os, gzip, json
+import os, gzip, json, logging
 from datetime import datetime, date, timedelta, timezone
 from pathlib import Path
 from dotenv import load_dotenv
@@ -25,6 +25,8 @@ from sqlalchemy.orm import declarative_base, sessionmaker, relationship
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 load_dotenv()
+
+log = logging.getLogger(__name__)
 
 DATABASE_URL = os.environ.get(
     "DATABASE_URL",
@@ -713,8 +715,10 @@ def _ensure_view() -> None:
             ).first()
             if row and row[0]:
                 needs_recreate = (_norm(row[0]) != _norm(FINANCIAL_METRICS_VIEW_SQL))
-    except Exception:
-        # pg_get_viewdef 未対応（SQLite 等）またはビュー未存在 → 再作成
+    except Exception as e:
+        # pg_get_viewdef 未対応（SQLite 等）・VIEW 未存在・接続エラーのいずれか → 再作成。
+        # 接続エラーと「VIEW 未存在」を切り分けられるよう例外内容をログに残す。
+        log.debug(f"financial_metrics VIEW 定義の取得失敗 → 再作成する（理由: {e!r}）")
         needs_recreate = True
 
     if needs_recreate:
