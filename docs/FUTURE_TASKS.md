@@ -93,21 +93,23 @@
 
 ---
 
-## Tier 2/3 — 財務項目の網羅性↑（収集パイプライン仕様変更）【grill 検討中・2026-06-05 保留】
+## Tier 2/3 — 財務項目の網羅性↑（収集パイプライン仕様変更）【C1・C2 コード完了 2026-06-16 / 残=本番フル再収集】
 
 `/grill-with-docs` で「データ収集パイプラインの仕様変更」を検討した到達点。用語は **root `CONTEXT.md`**（表示項目 / 分析特徴量 / 再分類項目）参照。目的は (1)鮮度↑ (2)網羅性↑ (4)コスト制約 の三立。**TDnet（真の四半期・年4点）派生は保留**（データ量制約大）。本命は **XBRL 項目の深掘り**。
 
-欲しい項目を **C1（既に DB にある＝パイプライン変更不要・GUI 改修のみ）** と **C2（真に未収集＝要収集追加）** に仕分けた。
+欲しい項目を **C1（既に DB にある＝パイプライン変更不要・GUI 改修のみ）** と **C2（真に未収集＝要収集追加）** に仕分けた。**C1・C2 とも実装は完了済み**（下記）。残るのは新列を本番 DB に充填する **フル再収集（運用作業）** のみ。
 
-### C1 — 既存カラムの GUI 表示（パイプライン変更ゼロ・別 PR の company.js 改修）
-- company.js が残差設計で捨てている既存カラムを表示する: 売上債権 `bs_receivables` / 棚卸資産 `bs_inventory` / 建物 `bs_buildings` / 機械 `bs_machinery` / 無形固定資産 `bs_intangible_assets` / 経常利益 `pl_ordinary_profit` / 特別損益純額（`pl_pretax_profit − pl_ordinary_profit` で導出）
-- **注意**: 経常利益・特別損益は **JGAAP 専用概念**（IFRS/US-GAAP 企業は null）。「有形固定資産の内訳」は建物+機械のみで合計と不一致→チャートの balance invariant が壊れる。クリーンには有形固定資産合計タグの C2 収集が要る
+### C1 — 既存カラムの GUI 表示（完了 2026-06-16・commit e850654）
+- **完了**: `static/js/company.js` が残差設計で捨てていた既存カラムを表示済み — 売上債権 `bs_receivables` / 棚卸資産 `bs_inventory` / 建物 `bs_buildings` / 機械 `bs_machinery` / 無形固定資産 `bs_intangible_assets` / 経常利益 `pl_ordinary_profit` / 特別損益（特別利益・特別損失）。「有形固定資産の内訳」の合計整合は C2 の `bs_ppe_total` 合計タグ収集で解決済み。
+- **設計メモ（保持）**: 経常利益・特別損益は **JGAAP 専用概念**（IFRS/US-GAAP 企業は null）。
 
-### C2 — 新規 XBRL 項目の収集（要パイプライン変更＝本題）
-- **表示用**: 減価償却費(合計) / 有形固定資産合計・投資その他資産合計 / 特別損益の内訳
-- **分析特徴量用**: 研究開発費 / 減価償却費の内訳 / 特別損益の内訳 / 従業員数(Int・非財務) / 発行済株式数（→ **既存タスク G と統合**。G は J-Quants `IssuedShares`、本検討は XBRL 期末株式数タグを想定。per-share 正規化=MODELS.md の要なのでどちらかに一本化すること）
-- **実装**: `FinancialRecord`(database.py) の列に `info={"xbrl": [...]}` で生タグを併記する **1箇所のみ**。`XBRL_MAP` は `build_xbrl_map()` が列 info から逆引き生成（手書き不要）。drift は `tests/test_xbrl_registry.py` が構造的に防ぐ（CLAUDE.md 制約）
-- **再収集方式 = (a) フル再収集1回でユーザー確定**。新項目の追加コストはほぼゼロ（同じ XBRL ZIP を再パースするだけ）。列追加の容量増は約1.6MB で些少＝**網羅性↑は容量問題ではない**
+### C2 — 新規 XBRL 項目の収集（完了 2026-06-16・commit 27f5734 / d87d687 / e850654）
+- **完了**: XBRL 新8項目を `FinancialRecord`（database.py）へ `info={"xbrl": [...]}` 併記で追加し、収集〜表示〜分析まで結線済み:
+  - 表示用: `pl_depreciation`（減価償却費・合計）/ `bs_ppe_total`（有形固定資産合計）/ `bs_investments_other_assets`（投資その他の資産合計）/ `pl_extraordinary_income`・`pl_extraordinary_loss`（特別損益の内訳）
+  - 分析特徴量用: `pl_rd_expenses`（研究開発費）/ `employees`（従業員数・nonfin）/ `issued_shares`（期末発行済株式総数・nonfin）
+- **実装の唯一の源**: `XBRL_MAP` は `build_xbrl_map()` が列 info から逆引き生成（手書き不要）。drift は `tests/test_xbrl_registry.py` が構造的に防止。派生は `calc_derived` が `pl_depreciation` から EBITDA（営業利益+減価償却費）を算出、分析は `price_predictor.py` が `rd_intensity`/`da_intensity`（対売上集約度）として無次元結線。
+- **発行済株式数の一本化（済）**: per-share 正規化の分母は `shares_outstanding()`（plugins/utils.py）が3段階優先で解決 — XBRL 期末値 `issued_shares` → `company.issued_shares`（J-Quants `IssuedShares`・Tier 2-G）→ `bs_total_equity/bs_bps` 推計。`issued_shares` 列は表示・参考として維持。
+- **検証**: `pytest tests/ -q` → 549 passed（`tests/test_xbrl_registry.py` 含む）。ARCHITECTURE.md の financial_records ER 図も更新済み。
 
 ### ブロッカー（容量）— ✅ 解消済み（2026-06-06）
 - ~~Supabase は **448MB/500MB（90%）**。主因は `stock_price_history`（359MB＝80%）~~
@@ -116,13 +118,12 @@
 - フル再収集の一時肥大（全件 UPDATE で約60MB の dead tuple）は **335MB ヘッドルームに余裕で収まる** → C2 のフル再収集は**容量的に着手可能**。
 - 補足: `raw_xbrl_json` drop（financial_records 73MB の第2レバー = PR-B）は容量緊急性が下がったが有効な打ち手として温存（[[project-collection-expansion]] / 容量プラン参照）。
 
-### 未解決（再開時の最初の質問 = Q5）
-**フル再収集をどの方式で回すか**（容量ブロッカーは解消済み・335MB ヘッドルームが前提）:
-- (あ) 既存 upsert 方式でそのまま再収集（**最小変更・推奨**）。335MB ヘッドルームがあるため、従来必要だった `raw_xbrl_json` 削除＋`VACUUM FULL` の事前領域確保は**容量目的では不要**になった（やる場合は PR-B として独立実施）。
-- (い) `TRUNCATE` → 全件 INSERT（肥大ゼロだが収集中サイトが数時間空・`MASTER_BATCH` 設計と不整合）
-- ~~(う) `stock_price_history` 最適化~~ → **済**（dual-table 移行 2026-06-06 完了）。残るのは **鮮度 goal(1)=daily 差分の再有効化**（株価が 2026-03-06 で停止中。別タスク）。
-
-推奨: **(あ) 即実施**。daily 差分再有効化は別枝。
+### 残作業 — 本番フル再収集（運用・コード変更なし）【Q5 解決済み: 方式(あ)確定】
+C2 の新8列は**次回フル再収集で populate される**（既存レコードは再収集まで NULL）。コードは結線済みのため、ここは運用作業のみ。容量ブロッカーは解消済み（335MB ヘッドルーム）。
+- **方式 = (あ) 既存 upsert 方式でそのまま再収集に確定**（最小変更）。新項目の追加コストはほぼゼロ（同じ XBRL ZIP を再パースするだけ）・列追加の容量増は約1.6MB。`raw_xbrl_json` 削除＋`VACUUM FULL` の事前領域確保は**容量目的では不要**（やる場合は PR-B として独立実施）。
+- **実行手段**: `python collector.py --years 5`（EDINET から全件再取得・要 `EDINET_API_KEY`・数時間）。または `/api/collect/reparse/start`（`xbrl_raw_documents` からの再解析・EDINET 通信なし・Render 可）だが、**本番は `SKIP_XBRL_RAW=true`（Supabase 容量対策）で raw 未保存のため再解析は実質使えず、EDINET 全件再取得が必要**。
+- 不採用: (い) `TRUNCATE` → 全件 INSERT（肥大ゼロだが収集中サイトが数時間空・`MASTER_BATCH` 設計と不整合）。
+- 別枝: ~~(う) `stock_price_history` 最適化~~ は**済**（dual-table 移行 2026-06-06 完了）。残るは **鮮度 goal(1)=daily 差分の再有効化**（株価が 2026-03-06 で停止中。別タスク）。
 
 ---
 
