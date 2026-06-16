@@ -174,19 +174,23 @@ def coerce_params(schema: dict, raw: dict) -> dict:
 
 
 def shares_outstanding(record) -> float | None:
-    """発行済株式数を返す。
+    """発行済株式数を返す（優先順位: XBRL期末値 → J-Quantsマスタ値 → BS推計）。
 
-    XBRL 直接収集列 `issued_shares` を優先し、未収録の場合は
-    純資産 ÷ BPS で推計する（フォールバック）。
+    1. record.issued_shares   — XBRL 直接収集列（期末発行済株式数タグ）
+    2. record.company.issued_shares — J-Quants /markets/listed/info で取得した最新値
+    3. bs_total_equity / bs_bps     — 純資産÷BPS 推計（外れ値リスクあり）
 
-    `issued_shares` 優先の根拠: bs_bps が誤った XBRL タグを捕捉すると
-    推計値が実際の数十万倍になる企業が散見される（実DB比較で中央乖離 3.2%、
-    p95 で 44%）。`issued_shares` はXBRL期末発行済株式数タグの直接値で
-    fill_rate 100%・外れ値が少ない。
+    bs_bps が誤った XBRL タグを捕捉すると推計値が実際の数十万倍になる企業が
+    散見される（実DB比較で中央乖離 3.2%、p95 で 44%）。
     """
     issued = getattr(record, "issued_shares", None)
     if issued and issued > 0:
         return float(issued)
+    # J-Quants マスタ値（company リレーション経由・遅延ロード）
+    company = getattr(record, "company", None)
+    co_issued = getattr(company, "issued_shares", None) if company is not None else None
+    if co_issued and co_issued > 0:
+        return float(co_issued)
     eq = getattr(record, "bs_total_equity", None)
     bps = getattr(record, "bs_bps", None)
     if eq and bps and bps > 0:

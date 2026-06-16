@@ -332,6 +332,68 @@ async def _jquants_fetch_date(session: httpx.AsyncClient, api_key: str, date_str
     return rows
 
 
+async def _fetch_jquants_issued_shares(session: httpx.AsyncClient, api_key: str) -> dict:
+    """J-Quants /markets/listed/info から全上場銘柄の発行済株式数を取得する。
+    戻り値: {sec_code(4桁): issued_shares(float)} — 取得失敗時は空辞書。
+    """
+    headers = {"x-api-key": api_key}
+    try:
+        r = await session.get(JQUANTS_LISTED_INFO_ENDPOINT, headers=headers, timeout=30)
+        if r.status_code == 429:
+            await asyncio.sleep(90)
+            r = await session.get(JQUANTS_LISTED_INFO_ENDPOINT, headers=headers, timeout=30)
+        if not r.is_success:
+            log.warning(f"J-Quants listed/info 取得失敗 status={r.status_code}")
+            return {}
+        result = {}
+        for item in r.json().get("info", []):
+            code = str(item.get("Code", ""))
+            shares = item.get("IssuedShares")
+            if code and shares is not None:
+                result[code[:4]] = float(shares)
+        return result
+    except Exception as e:
+        log.warning(f"J-Quants listed/info 例外: {e}")
+        return {}
+
+
+def _update_issued_shares(db, sec_to_edinet: dict, issued_shares_map: dict) -> int:
+    """companies.issued_shares を J-Quants 値で更新し、
+    financial_records.issued_shares が NULL の最新レコードにも補完する。
+    戻り値: 更新した companies 行数。
+    """
+    updated = 0
+    for sec_code, shares in issued_shares_map.items():
+        edinet_code = sec_to_edinet.get(sec_code)
+        if not edinet_code or shares <= 0:
+            continue
+        rows = db.query(Company).filter(Company.edinet_code == edinet_code).all()
+        for co in rows:
+            co.issued_shares = shares
+            updated += 1
+
+    if updated:
+        db.flush()
+        # 最新の financial_record で issued_shares が NULL のものを J-Quants 値で補完
+        from sqlalchemy import text as _text
+        db.execute(_text("""
+            UPDATE financial_records fr
+            SET issued_shares = c.issued_shares
+            FROM companies c
+            WHERE fr.edinet_code = c.edinet_code
+              AND c.issued_shares IS NOT NULL
+              AND fr.issued_shares IS NULL
+              AND fr.year = (
+                  SELECT MAX(fr2.year)
+                  FROM financial_records fr2
+                  WHERE fr2.edinet_code = fr.edinet_code
+              )
+        """))
+        db.commit()
+        log.info(f"J-Quants 発行済株式数: {updated}社を companies に更新")
+    return updated
+
+
 async def collect_stock_price_history_jquants(
     db,
     days_back: int = 14,
@@ -440,6 +502,11 @@ async def collect_stock_price_history_jquants(
 
     async with httpx.AsyncClient() as session:
         cancelled, upserted_total = await _price_collection_driver(db, _jquants_batch_gen(session))
+        # 価格収集と同じセッションで発行済株式数も取得（API キー共用）
+        issued_shares_map = await _fetch_jquants_issued_shares(session, api_key)
+
+    if issued_shares_map:
+        _update_issued_shares(db, sec_to_edinet, issued_shares_map)
 
     if cancelled:
         return {"cancelled": True, "upserted": upserted_total}
