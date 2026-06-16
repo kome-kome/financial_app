@@ -12,7 +12,7 @@
 | [DEPLOYMENT.md](docs/DEPLOYMENT.md) | Render デプロイ運用＋データ収集の自動/手動の仕組み＋外部サービス制約（GitHub Actions / Supabase / J-Quants） | デプロイ・収集・インフラ設計時 |
 | [MODELS.md](docs/MODELS.md) | 分析モデル解説＋モデル固有の制約 | 分析モデル変更時 |
 | [SKILLS_AND_AGENTS.md](docs/SKILLS_AND_AGENTS.md) | スキル／エージェントの索引マニュアル | スラッシュコマンドや調査エージェントを使うとき |
-| [FUTURE_TASKS.md](docs/FUTURE_TASKS.md) | 未実装の改善項目（issue 化可能な粒度の技術的負債・改善案）＋一部の現行仕様の根拠（`walk_forward_cv_monthly` 等） | リファクタ着手・改善項目の参照時 |
+| [FUTURE_TASKS.md](docs/FUTURE_TASKS.md) | 未実装の改善項目のみ（本番データ鮮度・分析モデル拡張・運用堅牢化）。完了項目は `docs/archive/IMPROVEMENTS.md` へ集約 | リファクタ着手・改善項目の参照時 |
 
 > **設計の前に [DEPLOYMENT.md](docs/DEPLOYMENT.md) の「外部サービス制約」節を必ず参照**：無料プラン制約（stooq ブロック・Supabase 500MB・J-Quants レート制限等）に違反しない方式を選ぶこと。
 

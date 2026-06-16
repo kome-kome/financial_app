@@ -1,129 +1,48 @@
 # 今後の課題・改善案
 
-未実装の改善項目を記録する。完了済み項目は `docs/archive/IMPROVEMENTS.md` に集約してあるため、本書からは削除済み（git 履歴で参照可能）。
+未実装の改善項目を記録する。完了済み項目は `docs/archive/IMPROVEMENTS.md` に集約済み（git 履歴で詳細参照可能）。
 
-> **凡例**: 各項目は「該当（`ファイル:行`）／問題／改善案／検証」で issue 化可能な粒度。見積は感覚値。
-
----
-
-## Tier 1 — コード品質・技術的負債（リファクタ）
-
-> 2026-06-09 のコードベース棚卸しで洗い出した項目。**機能は正常**で、保守性・性能・テスト容易性の改善が目的。
-> **棚卸し時点（2026-06-09）のスナップショット**として **未処理 PR / Open Issue は 0 件・依存は最新 pin・本番コードに TODO/FIXME なし** だった＝負債は局所的。その後の Issue 起票・PR 状況は GitHub Issues を参照（本注記は当時の状態であり現況とは限らない）。
-> 旧 `docs/archive/REFACTORING.md` の未着手項目（4-4 / 4-5 / 4-6 / 4-7）を実コード確認のうえ本書へ再掲・更新した（4-2 `_now_jst` 共通化は定義消滅により**解決済み**）。
-
-### T1-1. XBRL parse ロジックの重複統合 【高】（旧 REFACTORING 4-4）（完了 2026-06-13）
-- **完了**: 中核を `_apply_row()`（`collector.py:371`）へ抽出し、`parse_raw_rows`（`collector.py:431`→L459）・`parse_xbrl_csv`（`collector.py:464`→L507）の両方から呼ぶ形に統合済み。`parse_xbrl_csv` 固有の capex 符号統一は `apply_capex_sign=True` 引数で吸収。
-- **問題（当時）**: `Prior` コンテキストスキップ・`OperatingRevenue1` 非連結フィルタ・`is_consol`/`has_member`/`priority` 計算・float 変換＋例外無視の4ブロックが2関数に逐語的に重複していた。
-- **検証**: 既存 `tests/test_collector.py` 全通過で確認済み。
-
-### T1-2. 収集バックグラウンドジョブの共通化 【高】（完了）
-- **完了**: `_run_bg_job(coro_factory, log_id, error_msg=...)` ラッパ（`api.py:210`）に共通枠を切り出し済み。`_run_collection_bg`（`api.py:259`）・`_run_smart_collection_bg`（`api.py:268`）の両方が `_run_bg_job` を呼ぶ。`CollectionLog` の done/error 更新・`finally` のフラグリセットが一元化された。
-- **問題（当時）**: 上記処理が約60行逐語重複し、片方のバグ修正をもう片方に反映し忘れるリスクがあった。
-- **検証**: 既存 `tests/test_collection_jobs.py` の通過で確認済み。
-
-### T1-3. `update_market_data_from_history` の N+1 クエリ解消 【高・性能】（完了）
-- **完了**: `_fetch_latest_fin_by_ec(db, edinet_codes)`（`collector.py:1518`）が `ROW_NUMBER() OVER (PARTITION BY edinet_code ORDER BY year DESC, period_end DESC)` で各社の最新 `FinancialRecord` を1クエリ一括取得するヘルパとして抽出済み。`point_in_time=False` 経路（`collector.py:949`）と業種更新経路（`collector.py:1566`）の両方から共用。
-- **問題（当時）**: `latest_price_rows`（最大約4,000社）をループしながら各社最新行を個別 SELECT し最大4,000往復。Supabase `pool_size=3` 下で特に重かった。
-- **検証**: 更新件数が現行と一致することを確認済み。
-
-### T1-4. `point_in_time=True` の全件メモリロード回避 【中・性能】（完了 2026-06-14）
-- **完了**: `update_market_data_from_history(point_in_time=True)` の `StockPriceWeekly` 全件 `.all()` を廃止。`FinancialRecord.period_end` の min/max から日付範囲を算出し、対象 `edinet_code` サブクエリ＋日付範囲フィルタ＋`close_last > 0` 条件で SQL 側に絞り込んでから Python に取得する方式に変更（`collector.py`）。Python 側の二分探索（`_bisect_left`）は保持。
-- **問題（当時）**: `StockPriceWeekly` 全件（354,684行、約70〜140MB）を `.all()` で Python 側に展開し `defaultdict` に保持。Render メモリ 512MB 制約と相性が悪かった。
-- **検証**: `tests/test_collector_sync.py`（`TestUpdateMarketDataPointInTime`）全通過で確認済み。
-
-
-### T1-6. JS 共通ユーティリティの集約 【中】（完了）
-- `static/js/common.js` に `esc` / `_getCookie` / `apiFetch` / `initAuth` / `logout` を集約し、5ページの JS / HTML を更新（2026-06-10）。
-
-### T1-7. 巨大ファイルの責務分割 【低】（旧 REFACTORING 4-5）（完了 2026-06-16）
-- **完了**: `collector.py`（2,182行）を4ドメインモジュールへ分割（PR #164）。`collector.py` は88行の再エクスポートオーケストレータのみになった。
-  - `collector_utils.py` — 共通設定定数・ロガー
-  - `collector_master.py` — 企業/業種マスタ収集（EDINETコードリスト / JPX業種）
-  - `collector_financials.py` — XBRL財務収集・パース・CF / PL-BS補完・再解析
-  - `collector_prices.py` — 株価（stooq / J-Quants / Yahoo）・マクロ指標収集
-- **後方互換**: `collector.py` が全シンボルを `from module import *` で再エクスポートするため、`_pipeline_gh.py` / `_pipeline_incremental.py` / テストの import パス変更なし。
-- **検証**: `pytest tests/ -q` → 488 passed（失敗4件は既存・PR無関係）。Issue #114 クローズ。
-
-### T1-8. デッドコード・残骸の掃除 【低】（完了）
-- `collector.py` の `elapsed = 0.0` 残骸を削除（2026-06-10）。
-- `migrate_stock_price_dual.py` をルートから `scripts/` へ移動（2026-06-10）。
-- `check.py` → `edinet_ping.py`、`checker.py` → `data_quality.py` に改名（2026-06-10）。
-
-### T1-9. テスト欠落の補完 【中】（完了）
-- `data_quality.py` 全4関数を `tests/test_data_quality.py`（26件）でカバー（2026-06-10）。
-- `update_market_data_from_history`（sync）を `tests/test_collector_sync.py`（15件）でカバー（2026-06-10）。
-- `/api/collect/start` を `tests/test_api_collect.py`（7件）でカバー（2026-06-10）。
-- 副産物: `data_quality._check_by_accounting_standard` の `FinancialRecord.roe` 属性エラーを修正（`getattr` のフォールバックで VIEW 派生列をスキップ）。
+> **凡例**: 各項目は「該当（`ファイル:行`）／問題／改善案／検証」で issue 化可能な粒度。優先度は 【高 / 中 / 低】、種別は「運用」（本番環境の操作・コード変更なし）か「コード」（新規実装）で示す。
+> **直近完了（2026-06）**: Tier 1 リファクタ全件（T1-1〜T1-9）／ 発行済株式数の正規取得（G）／ `period_end` DATE 型移行（H）／ 財務項目網羅性 C1・C2。詳細は `docs/archive/IMPROVEMENTS.md`「Phase 4」。
 
 ---
 
-## Tier 2 — 分析品質の改善
+## Tier 1 — 本番データの鮮度・完全性【運用・最優先】
 
-### G. 発行済株式数の正規ソース取得（完了 2026-06-16）
-- **完了**:
-  - `Company` モデルに `issued_shares` カラム追加（`database.py`）＋ `_ensure_tables()` で `ALTER TABLE companies ADD COLUMN IF NOT EXISTS issued_shares DOUBLE PRECISION` を冪等実行
-  - `collector_prices.py` に `_fetch_jquants_issued_shares()` 追加（J-Quants `/v2/markets/listed/info` 呼び出し）。`collect_stock_price_history_jquants` の末尾で呼び出し、`companies.issued_shares` を更新後、`financial_records.issued_shares IS NULL` の最新レコードを SQL でバルク補完
-  - `plugins/utils.py` の `shares_outstanding()` を3段階優先に更新: XBRL期末値 → `company.issued_shares`（J-Quants）→ `bs_total_equity/bs_bps` 推計
-- **検証**: `pytest tests/ -q` → 549 passed
+> 既に実装・マージ済みの機能を本番で実データとして機能させるための運用作業。コード変更は基本不要だが、本番リソース（EDINET API キー・Supabase・GitHub Actions 実行権限）へのアクセスが要る。Claude のセッションからは実行不可で、ユーザー環境での操作が必要。
 
-### H. `period_end` を VARCHAR から DATE 型へ移行
-- **完了**: `feature/t2h-period-end-date` ブランチで実装・テスト確認済み（549 passed）
-- `FinancialRecord` / `XbrlRawDocument` / `RegressionResult` / `FinancialMetric` の `period_end` を `Column(Date, nullable=True)` へ変更
-- `_parse_period_end(s)` ヘルパーを `database.py` に追加し、`upsert_financial` / `upsert_xbrl_raw` / `upsert_regression_result` から使用
-- `_ensure_tables()` に冪等な DDL マイグレーション（`USING NULLIF(NULLIF(period_end,''), 'NULL')::DATE`）を追加、`SKIP_PERIOD_END_MIGRATION=1` フェールセーフ付き
-- `collector_financials.py`・`collector_prices.py`・`backtest.py`・`plugins/price_predictor.py`・`plugins/sector_ols.py`・`routers/market.py`・`serializers.py`・テスト全ファイルを対応修正
+### DF-1. 株価 daily 差分収集（cron）の再有効化  【高・運用】
+- **問題**: ライブの株価が **J-Quants 無料の約12週遅れ（最新 ≈2026-03 中旬）で頭打ち**。鮮度を担う Yahoo Finance ギャップ補完（`fill_recent_stock_price_gap_yahoo`）は差分パイプライン（`_pipeline_incremental.py` Phase 4）にのみ存在するが、その `daily-incremental.yml` の `on.schedule`（cron）が dual-table 移行（2026-06-06）後に**未実証のためコメントアウト中**。株価チャート・バックテストが鮮度を失っている。
+- **改善案**: ① `workflow_dispatch` で手動1回実行 → 株価が当日付近まで前進し、Yahoo 補完が GitHub Actions の Azure IP から到達・成功することを確認 → ② `on.schedule` のコメントを外して cron を再開。
+- **手順詳細**: `docs/DEPLOYMENT.md`「再有効化の段階運用（2026-06-10〜）」。
+- **該当**: `.github/workflows/daily-incremental.yml` / `_pipeline_incremental.py`
 
----
-
-## Tier 3 — 機能追加
-
-### Macro. マクロ要因を組み込んだ分析モデル
-- **問題**: マクロデータ（金利・為替）取り込み基盤は完成したが、これを使った分析モデルがまだない
-- **改善案**: 既存プラグイン（`recommend.py` / `total_return.py` / `price_predictor.py`）に
-  マクロ特徴量を追加（例: 10年金利水準・USDJPY変動率を特徴量として）
-- **前提**: 過去5年のマクロデータがDB蓄積されていること（`/api/collect/macro/start` で取得）
-- **実装場所**: `plugins/utils.py`（マクロ特徴量取得関数）、各プラグイン
-- **設計留意**: マクロ系列は財務データと頻度が違う（日次 vs 年次）。決算月の前後Nヶ月の
-  値や前年同月比などに変換してから OLS 特徴量に投入する必要がある
-
-### 本番運用の残課題
-- **DB バックアップ運用ポリシー**: Supabase の自動バックアップ機能を利用しつつ、復旧手順を文書化
-- **監視**: Render ダッシュボード + UptimeRobot 等の外形監視追加検討
+### DF-2. C2 新項目の本番フル再収集  【中・運用】
+- **問題**: C2 の新8列（`pl_depreciation` / `bs_ppe_total` / `bs_investments_other_assets` / `pl_extraordinary_income`・`loss` / `pl_rd_expenses` / `employees` / `issued_shares`）はコード結線済みだが、**本番 DB の既存レコードは再収集まで NULL** のまま。company 画面の内訳チャート・分析特徴量（R&D/D&A 集約度）に新項目が表示されない。
+- **改善案**: `python collector.py --years 5`（**方式(あ)=既存 upsert・最小変更で確定**）。新項目の追加コストはほぼゼロ（同じ XBRL ZIP を再パースするだけ）・列追加の容量増は約1.6MB で、DB 容量 165MB/500MB・ヘッドルーム約335MB（2026-06-06 計測）に余裕で収まる。
+- **注意**: 本番は `SKIP_XBRL_RAW=true`（Supabase 容量対策）で raw 未保存のため、`/api/collect/reparse`（再解析）は使えず **EDINET からの全件再取得が必要**。`raw_xbrl_json` 削除＋`VACUUM FULL` の事前領域確保は容量目的では不要（やる場合は独立 PR）。
+- **該当**: `collector.py`（`run_full_collection`）／要 `EDINET_API_KEY`・数時間
 
 ---
 
-## Tier 2/3 — 財務項目の網羅性↑（収集パイプライン仕様変更）【C1・C2 コード完了 2026-06-16 / 残=本番フル再収集】
+## Tier 2 — 分析モデルの拡張【コード】
 
-`/grill-with-docs` で「データ収集パイプラインの仕様変更」を検討した到達点。用語は **root `CONTEXT.md`**（表示項目 / 分析特徴量 / 再分類項目）参照。目的は (1)鮮度↑ (2)網羅性↑ (4)コスト制約 の三立。**TDnet（真の四半期・年4点）派生は保留**（データ量制約大）。本命は **XBRL 項目の深掘り**。
+### M-1. マクロ要因を組み込んだ分析モデル  【中・コード】
+- **問題**: マクロデータ（金利・為替）の収集基盤（`MacroData` テーブル・`collect_macro_data`・`MACRO_SERIES`・`/api/collect/macro/start`）は完成しているが、**これを使った分析モデルがまだない**（プラグインにマクロ特徴量の利用は皆無）。
+- **改善案**: 既存プラグイン（`recommend.py` / `total_return.py` / `price_predictor.py`）にマクロ特徴量を追加（例: 10年金利水準・USDJPY 変動率）。
+- **前提**: 過去5年のマクロデータが DB 蓄積されていること（`/api/collect/macro/start`）。
+- **実装場所**: `plugins/utils.py`（マクロ特徴量取得関数）＋各プラグイン。
+- **設計留意**: マクロ系列は財務データと頻度が違う（日次 vs 年次）。決算月の前後 N ヶ月の値や前年同月比などに変換してから OLS 特徴量に投入する。**次元整合性**（注意事項1）に注意し、水準そのものでなく無次元の変化率・偏差を特徴量とする。
 
-欲しい項目を **C1（既に DB にある＝パイプライン変更不要・GUI 改修のみ）** と **C2（真に未収集＝要収集追加）** に仕分けた。**C1・C2 とも実装は完了済み**（下記）。残るのは新列を本番 DB に充填する **フル再収集（運用作業）** のみ。
+---
 
-### C1 — 既存カラムの GUI 表示（完了 2026-06-16・commit e850654）
-- **完了**: `static/js/company.js` が残差設計で捨てていた既存カラムを表示済み — 売上債権 `bs_receivables` / 棚卸資産 `bs_inventory` / 建物 `bs_buildings` / 機械 `bs_machinery` / 無形固定資産 `bs_intangible_assets` / 経常利益 `pl_ordinary_profit` / 特別損益（特別利益・特別損失）。「有形固定資産の内訳」の合計整合は C2 の `bs_ppe_total` 合計タグ収集で解決済み。
-- **設計メモ（保持）**: 経常利益・特別損益は **JGAAP 専用概念**（IFRS/US-GAAP 企業は null）。
+## Tier 3 — 本番運用の堅牢化【運用・インフラ】
 
-### C2 — 新規 XBRL 項目の収集（完了 2026-06-16・commit 27f5734 / d87d687 / e850654）
-- **完了**: XBRL 新8項目を `FinancialRecord`（database.py）へ `info={"xbrl": [...]}` 併記で追加し、収集〜表示〜分析まで結線済み:
-  - 表示用: `pl_depreciation`（減価償却費・合計）/ `bs_ppe_total`（有形固定資産合計）/ `bs_investments_other_assets`（投資その他の資産合計）/ `pl_extraordinary_income`・`pl_extraordinary_loss`（特別損益の内訳）
-  - 分析特徴量用: `pl_rd_expenses`（研究開発費）/ `employees`（従業員数・nonfin）/ `issued_shares`（期末発行済株式総数・nonfin）
-- **実装の唯一の源**: `XBRL_MAP` は `build_xbrl_map()` が列 info から逆引き生成（手書き不要）。drift は `tests/test_xbrl_registry.py` が構造的に防止。派生は `calc_derived` が `pl_depreciation` から EBITDA（営業利益+減価償却費）を算出、分析は `price_predictor.py` が `rd_intensity`/`da_intensity`（対売上集約度）として無次元結線。
-- **発行済株式数の一本化（済）**: per-share 正規化の分母は `shares_outstanding()`（plugins/utils.py）が3段階優先で解決 — XBRL 期末値 `issued_shares` → `company.issued_shares`（J-Quants `IssuedShares`・Tier 2-G）→ `bs_total_equity/bs_bps` 推計。`issued_shares` 列は表示・参考として維持。
-- **検証**: `pytest tests/ -q` → 549 passed（`tests/test_xbrl_registry.py` 含む）。ARCHITECTURE.md の financial_records ER 図も更新済み。
+### O-1. DB バックアップ運用ポリシーの策定  【中・運用】
+- Supabase の自動バックアップ機能を利用しつつ、復旧手順を `docs/DEPLOYMENT.md` に文書化する。
 
-### ブロッカー（容量）— ✅ 解消済み（2026-06-06）
-- ~~Supabase は **448MB/500MB（90%）**。主因は `stock_price_history`（359MB＝80%）~~
-- **stock_price 移行を完遂**（`migrate_stock_price_dual.py` をローカル実行・旧 `stock_price_history` を DROP → 新 daily(225,616行)/weekly(354,684行)へ投入・照合 OK）。
-- **再計測（2026-06-06）: DB 総容量 165MB/500MB・ヘッドルーム約335MB**。旧表 359MB が消え主因解消。weekly 49MB＋daily 27MB＋financial_records 73MB が主構成。
-- フル再収集の一時肥大（全件 UPDATE で約60MB の dead tuple）は **335MB ヘッドルームに余裕で収まる** → C2 のフル再収集は**容量的に着手可能**。
-- 補足: `raw_xbrl_json` drop（financial_records 73MB の第2レバー = PR-B）は容量緊急性が下がったが有効な打ち手として温存（[[project-collection-expansion]] / 容量プラン参照）。
-
-### 残作業 — 本番フル再収集（運用・コード変更なし）【Q5 解決済み: 方式(あ)確定】
-C2 の新8列は**次回フル再収集で populate される**（既存レコードは再収集まで NULL）。コードは結線済みのため、ここは運用作業のみ。容量ブロッカーは解消済み（335MB ヘッドルーム）。
-- **方式 = (あ) 既存 upsert 方式でそのまま再収集に確定**（最小変更）。新項目の追加コストはほぼゼロ（同じ XBRL ZIP を再パースするだけ）・列追加の容量増は約1.6MB。`raw_xbrl_json` 削除＋`VACUUM FULL` の事前領域確保は**容量目的では不要**（やる場合は PR-B として独立実施）。
-- **実行手段**: `python collector.py --years 5`（EDINET から全件再取得・要 `EDINET_API_KEY`・数時間）。または `/api/collect/reparse/start`（`xbrl_raw_documents` からの再解析・EDINET 通信なし・Render 可）だが、**本番は `SKIP_XBRL_RAW=true`（Supabase 容量対策）で raw 未保存のため再解析は実質使えず、EDINET 全件再取得が必要**。
-- 不採用: (い) `TRUNCATE` → 全件 INSERT（肥大ゼロだが収集中サイトが数時間空・`MASTER_BATCH` 設計と不整合）。
-- 別枝: ~~(う) `stock_price_history` 最適化~~ は**済**（dual-table 移行 2026-06-06 完了）。残るは **鮮度 goal(1)=daily 差分の再有効化**（株価が 2026-03-06 で停止中。別タスク）。
+### O-2. 外形監視の追加  【低・運用】
+- Render ダッシュボード + UptimeRobot 等の外形監視を追加検討。死活監視用の `/health` エンドポイントは既設（DB 疎通で 200/503）。
 
 ---
 
