@@ -348,14 +348,16 @@ def ols_with_diagnostics(X: list, y: list, cov_type: str = "nonrobust") -> dict 
                 "stat": float(jb_stat), "pvalue": float(jb_p),
                 "skew": float(skew), "kurtosis": float(kurt),
             }
-        except Exception:
+        except Exception as e:
+            log.debug(f"Jarque-Bera 計算失敗（jb=None でフォールバック）: {e}")
             jb = None
     else:
         jb = None
 
     try:
         dw = float(durbin_watson(resid))
-    except Exception:
+    except Exception as e:
+        log.debug(f"Durbin-Watson 計算失敗（dw=NaN でフォールバック）: {e}")
         dw = float("nan")
 
     return {
@@ -417,7 +419,8 @@ def ridge_regression(X: list, y: list,
             scoring="neg_mean_squared_error",
         )
         model.fit(X_np, y_np)
-    except Exception:
+    except Exception as e:
+        log.debug(f"Ridge 回帰の fitting 失敗（None を返却）: {e}")
         return None
 
     beta_np = np.asarray(model.coef_)

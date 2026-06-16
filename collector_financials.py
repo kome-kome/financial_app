@@ -854,7 +854,7 @@ async def _phase_process_docs(db, client, all_docs: list,
 
             if (i + 1) % COLLECT_COMMIT_BATCH == 0:
                 db.commit()
-                log.info("DB commit (50件)")
+                log.info(f"DB commit ({COLLECT_COMMIT_BATCH}件)")
             if (i + 1) % COLLECT_SLEEP_BATCH == 0:
                 await asyncio.sleep(BATCH_PAUSE)
 
