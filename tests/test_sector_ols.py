@@ -261,3 +261,125 @@ class TestExecute:
         options = schema["target"]["options"]
         assert len(options) == 1
         assert options[0]["value"] == "stock_price"
+
+
+# ── サブメソッド単体テスト（#169：回帰検出粒度の向上）──────────────────────────
+import math
+import statistics
+
+from plugins.utils import normalize, winsorize
+
+
+class TestPreprocessSector:
+    """_preprocess_sector: winsorize(p1-p99) → z-score 正規化 + 切片列付与。"""
+
+    def test_winsorize_then_zscore_and_intercept(self):
+        features = ["f0", "f1"]
+        # 100 サンプル。f0 と y に巨大外れ値を1つ仕込み、winsorize でクリップされることを見る
+        rows = [[float(i), float(i) * 2.0] for i in range(100)]
+        ys   = [float(i) for i in range(100)]
+        rows[0][0] = 1e9
+        ys[0]      = 1e9
+        samples = [(rows[i], ys[i], None) for i in range(100)]
+
+        X_norm, y_normed, y_mu, y_sd, X_win_cols, raw_y_win = \
+            plugin._preprocess_sector(samples, features)
+
+        # 切片列（1.0）＋特徴量列。各行は len(features)+1 要素
+        assert all(row[0] == 1.0 for row in X_norm)
+        assert all(len(row) == len(features) + 1 for row in X_norm)
+        assert len(X_norm) == len(samples)
+
+        # winsorize 適用: f0 列の外れ値（1e9）が p99 でクリップされ最大値が激減
+        assert max(X_win_cols[0]) < 1e9
+        assert X_win_cols[0] == winsorize([r[0] for r in rows])[0]
+
+        # z-score 正規化: 第1特徴量列の平均≈0・標準偏差≈1
+        feat0_norm = [row[1] for row in X_norm]
+        assert abs(statistics.mean(feat0_norm)) < 1e-9
+        assert abs(statistics.stdev(feat0_norm) - 1.0) < 1e-6
+
+        # y も winsorize → zscore（mu/sd は winsorize 済み y から算出）
+        assert raw_y_win == winsorize(ys)[0]
+        _, exp_mu, exp_sd = normalize(raw_y_win, "zscore")
+        assert y_mu == exp_mu and y_sd == exp_sd
+
+
+class TestFitAndPredict:
+    """_fit_and_predict: regularization による OLS / Ridge 分岐 + 逆正規化予測。"""
+
+    def _xy(self):
+        # 切片付き設計行列（線形 y=2x）。正規化済み入力という前提
+        X_norm   = [[1.0, float(i)] for i in range(10)]
+        y_normed = [0.5 * i for i in range(10)]
+        return X_norm, y_normed
+
+    def test_ols_branch(self):
+        X_norm, y_normed = self._xy()
+        result, all_yhat = plugin._fit_and_predict(
+            X_norm, y_normed, y_mu=100.0, y_sd=2.0, regularization="ols")
+        assert result is not None
+        assert "alpha" not in result  # OLS は正則化パラメータを返さない
+        # 逆正規化: yhat_norm * y_sd + y_mu と一致
+        beta = result["beta"]
+        expected = [sum(x * b for x, b in zip(row, beta)) * 2.0 + 100.0 for row in X_norm]
+        assert all(abs(a - e) < 1e-9 for a, e in zip(all_yhat, expected))
+
+    def test_ridge_branch(self):
+        X_norm, y_normed = self._xy()
+        result, all_yhat = plugin._fit_and_predict(
+            X_norm, y_normed, y_mu=0.0, y_sd=1.0, regularization="ridge")
+        assert result is not None
+        assert "alpha" in result  # Ridge は選択された α を返す（OLS との分岐確認）
+        beta = result["beta"]
+        expected = [sum(x * b for x, b in zip(row, beta)) for row in X_norm]
+        assert all(abs(a - e) < 1e-9 for a, e in zip(all_yhat, expected))
+
+    def test_returns_none_on_empty(self):
+        # フィット不能（空行列）→ (None, None)
+        result, all_yhat = plugin._fit_and_predict([], [], 0.0, 1.0, "ols")
+        assert result is None and all_yhat is None
+
+
+class TestBuildStatEntry:
+    """_build_stat_entry: 診断統計の NaN/欠損を安全に詰める（境界値）。"""
+
+    def test_nan_values_packed_as_none(self):
+        result = {
+            "r2": 0.5, "adj_r2": 0.4, "rmse": 1.0,
+            "df": 3, "rank": 3, "method": "ridge", "alpha": 1.0,
+            "condition_number": float("nan"),               # NaN → None
+            "p_value": [float("nan"), float("nan"), float("nan")],
+            "t_stat":  [float("nan"), 2.0, float("nan")],   # 一部のみ有限
+        }
+        # 2特徴量（+切片）で check_collinearity が単列スカラー化を踏まない構成
+        X_win_cols = [
+            [1.0, 2.0, 3.0, 4.0, 5.0],
+            [2.0, 1.0, 4.0, 3.0, 5.0],
+        ]
+        entry = plugin._build_stat_entry(
+            sector="X", samples=[(None, 1.0, None)] * 5, result=result,
+            y_sd=1.0, X_norm=[[1.0, 0.0, 0.0]] * 5, y_normed=[0.0] * 5,
+            features=["f0", "f1"], regularization="ridge", X_win_cols=X_win_cols,
+        )
+        assert entry["condition_number"] is None           # NaN → None
+        assert entry["p_values"] == [None, None, None]      # NaN → None
+        assert entry["t_stats"] == [None, 2.0, None]        # 有限値のみ残る
+        assert entry["n_significant_features"] is None      # ridge は算出しない
+        assert "diagnostics" not in entry                   # ridge は HC3 診断をスキップ
+        assert entry["n"] == 5 and entry["industry"] == "X"
+
+    def test_finite_condition_number_rounded(self):
+        result = {
+            "r2": 0.5, "adj_r2": 0.4, "rmse": 1.0,
+            "df": 3, "rank": 3, "method": "ridge", "alpha": 1.0,
+            "condition_number": 12.3456,
+            "p_value": [], "t_stat": [],
+        }
+        entry = plugin._build_stat_entry(
+            sector="Y", samples=[(None, 1.0, None)] * 5, result=result,
+            y_sd=1.0, X_norm=[[1.0, 0.0, 0.0]] * 5, y_normed=[0.0] * 5,
+            features=["f0", "f1"], regularization="ridge",
+            X_win_cols=[[1.0, 2.0, 3.0, 4.0, 5.0], [2.0, 1.0, 4.0, 3.0, 5.0]],
+        )
+        assert entry["condition_number"] == round(12.3456, 2)
