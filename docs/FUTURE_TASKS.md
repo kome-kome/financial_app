@@ -60,12 +60,12 @@
 
 ## Tier 2 — 分析品質の改善
 
-### G. 発行済株式数の正規ソース取得
-- **問題**: `plugins/total_return.py` の `shares_outstanding` は `bs_total_equity / bs_bps` で推計しているが、IFRS/JGAAP 混在・期中増資・優先株存在時に精度が低下する
-- **改善案**: J-Quants `/markets/listed/info` の `IssuedShares` フィールドから正規の発行済株式数を取得し、`companies` テーブルに `issued_shares` カラム追加 + `cf_ops_ps` 計算に直接利用
-- **前提**: `JQUANTS_API_KEY` が設定済みであること（プレミアムプラン要否は要確認）
-- **Render 適合**: コード変更のみ。`init_db()` で `ALTER TABLE companies ADD COLUMN IF NOT EXISTS issued_shares` を冪等実装すれば起動時に自動マイグレーション
-- **実装場所**: `collector.py` の `collect_stock_price_history_jquants` 拡張、`database.py` のスキーマ更新、`plugins/total_return.py` の置換
+### G. 発行済株式数の正規ソース取得（完了 2026-06-16）
+- **完了**:
+  - `Company` モデルに `issued_shares` カラム追加（`database.py`）＋ `_ensure_tables()` で `ALTER TABLE companies ADD COLUMN IF NOT EXISTS issued_shares DOUBLE PRECISION` を冪等実行
+  - `collector_prices.py` に `_fetch_jquants_issued_shares()` 追加（J-Quants `/v2/markets/listed/info` 呼び出し）。`collect_stock_price_history_jquants` の末尾で呼び出し、`companies.issued_shares` を更新後、`financial_records.issued_shares IS NULL` の最新レコードを SQL でバルク補完
+  - `plugins/utils.py` の `shares_outstanding()` を3段階優先に更新: XBRL期末値 → `company.issued_shares`（J-Quants）→ `bs_total_equity/bs_bps` 推計
+- **検証**: `pytest tests/ -q` → 549 passed
 
 ### H. `period_end` を VARCHAR から DATE 型へ移行
 - **問題**: 現状 `String(20)` で `"YYYY-MM-DD"` を格納。期間比較は辞書順依存、JOIN や範囲インデックスの効率が悪い

@@ -69,6 +69,7 @@ class Company(Base):
     market       = Column(String(50))                      # プライム/スタンダード/グロース
     fiscal_month = Column(Integer)                         # 決算月
     accounting_standard = Column(String(20))               # JGAAP/IFRS/US-GAAP
+    issued_shares = Column(Float, nullable=True)           # 発行済株式数（J-Quants 取得・最新値）
     created_at   = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     updated_at   = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
@@ -711,6 +712,9 @@ def _ensure_tables() -> None:
         conn.execute(text(
             "CREATE INDEX IF NOT EXISTS ix_companies_name_gin "
             "ON companies USING gin(to_tsvector('simple', name))"
+        ))
+        conn.execute(text(
+            "ALTER TABLE companies ADD COLUMN IF NOT EXISTS issued_shares DOUBLE PRECISION"
         ))
         for col in _NEW_COLS:
             conn.execute(text(
