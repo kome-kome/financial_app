@@ -20,6 +20,7 @@ from database import (
     build_xbrl_map,
     StockPriceDaily, StockPriceWeekly,
     record_prices_batch, trim_daily, latest_prices,
+    upsert_macro_batch,
 )
 
 from collector_utils import *
@@ -1027,34 +1028,20 @@ async def collect_macro_data(
                     on_progress(i, total, f"[マクロ {i}/{total}] {series['name']} データ無し")
                 continue
 
-            # 既存行のキー集合を一度に取得し、無いものだけ INSERT、有るものは UPDATE
-            existing_dates = {
-                d for (d,) in db.query(MacroData.trade_date)
-                                .filter(MacroData.series_code == series["code"]).all()
-            }
-            ins, upd = 0, 0
-            for r in rows:
-                if r["trade_date"] in existing_dates:
-                    db.query(MacroData).filter_by(
-                        series_code=series["code"], trade_date=r["trade_date"]
-                    ).update({
-                        "open": r["open"], "high": r["high"], "low": r["low"],
-                        "close": r["close"], "volume": r["volume"],
-                    })
-                    upd += 1
-                else:
-                    db.add(MacroData(
-                        series_code = series["code"],
-                        series_name = series["name"],
-                        category    = series["category"],
-                        trade_date  = r["trade_date"],
-                        open=r["open"], high=r["high"], low=r["low"],
-                        close=r["close"], volume=r["volume"],
-                    ))
-                    ins += 1
+            # 系列単位のバルク upsert（(series_code, trade_date) 競合で最新値上書き）。
+            # 旧実装は行ごとに INSERT/UPDATE を発行していたが N+1 解消のため 1 文に圧縮。
+            vals = [{
+                "series_code": series["code"],
+                "series_name": series["name"],
+                "category":    series["category"],
+                "trade_date":  r["trade_date"],
+                "open": r["open"], "high": r["high"], "low": r["low"],
+                "close": r["close"], "volume": r["volume"],
+            } for r in rows]
+            n = upsert_macro_batch(db, vals)
             db.commit()
-            saved += ins + upd
+            saved += n
             if on_progress:
-                on_progress(i, total, f"[マクロ {i}/{total}] {series['name']}: {ins}件新規, {upd}件更新")
+                on_progress(i, total, f"[マクロ {i}/{total}] {series['name']}: {n}件処理")
 
     return saved
