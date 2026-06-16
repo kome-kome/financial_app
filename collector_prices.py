@@ -49,39 +49,90 @@ async def fetch_stock_price_stooq(sec_code: str, client: httpx.AsyncClient) -> O
         return None
 
 
+def _stooq_float(s: str) -> float | None:
+    """stooq CSV セルを float 化。パース不能なら None（欠損許容経路用）。"""
+    try:
+        return float(s)
+    except ValueError:
+        return None
+
+
+def _parse_stooq_csv(text: str, *, strict: bool) -> list:
+    """stooq 日次 OHLCV CSV（"Date,Open,High,Low,Close,Volume"）をパースする。
+    close は両経路とも必須（パース不能行はスキップ）。
+    strict=True : open/high/low/volume も float 必須で、不能なら行ごとスキップ（個別銘柄経路）。
+    strict=False: open/high/low/volume は None 許容（マクロ経路）。
+    """
+    rows = []
+    lines = text.strip().splitlines()
+    if len(lines) < 2:
+        return []
+    for line in lines[1:]:   # ヘッダー行をスキップ
+        parts = line.split(",")
+        if len(parts) < 5:
+            continue
+        try:
+            close = float(parts[4])
+        except ValueError:
+            continue
+        if strict:
+            try:
+                row = {
+                    "trade_date": parts[0],          # "YYYY-MM-DD"
+                    "open":       float(parts[1]),
+                    "high":       float(parts[2]),
+                    "low":        float(parts[3]),
+                    "close":      close,
+                    "volume":     float(parts[5]) if len(parts) > 5 else None,
+                }
+            except ValueError:
+                continue
+        else:
+            row = {
+                "trade_date": parts[0],
+                "open":       _stooq_float(parts[1]),
+                "high":       _stooq_float(parts[2]),
+                "low":        _stooq_float(parts[3]),
+                "close":      close,
+                "volume":     _stooq_float(parts[5]) if len(parts) > 5 else None,
+            }
+        rows.append(row)
+    return rows
+
+
+async def _fetch_stooq_ohlcv(
+    session: httpx.AsyncClient,
+    ticker: str,
+    date_from: str,   # "YYYYMMDD"
+    date_to: str,     # "YYYYMMDD"
+    *,
+    strict: bool,
+    log_label: str,
+) -> list:
+    """stooq 日次 OHLCV CSV を取得・パースする単一実装。
+    ticker 組み立ては呼び出し側が行う（個別銘柄は `.jp` 付与・マクロはそのまま）。"""
+    url = f"https://stooq.com/q/d/l/?s={ticker}&d1={date_from}&d2={date_to}&i=d"
+    try:
+        r = await session.get(url, timeout=30)
+        r.raise_for_status()
+        text = r.text
+    except Exception as e:
+        log.debug(f"{log_label}: {e}")
+        return []
+    return _parse_stooq_csv(text, strict=strict)
+
+
 async def fetch_stock_history_stooq(
     session: httpx.AsyncClient,
     sec_code: str,
     date_from: str,   # "YYYYMMDD"
     date_to: str,     # "YYYYMMDD"
 ) -> list:
-    """stooq 日次 OHLCV を取得して [{trade_date, open, high, low, close, volume}] で返す"""
-    url = f"https://stooq.com/q/d/l/?s={sec_code}.jp&d1={date_from}&d2={date_to}&i=d"
-    try:
-        r = await session.get(url, timeout=30)
-        r.raise_for_status()
-        text = r.text
-    except Exception as e:
-        log.debug(f"stooq履歴取得失敗 {sec_code}: {e}")
-        return []
-
-    rows = []
-    for line in text.strip().splitlines()[1:]:   # ヘッダー行をスキップ
-        parts = line.split(",")
-        if len(parts) < 5:
-            continue
-        try:
-            rows.append({
-                "trade_date": parts[0],          # "YYYY-MM-DD"
-                "open":       float(parts[1]),
-                "high":       float(parts[2]),
-                "low":        float(parts[3]),
-                "close":      float(parts[4]),
-                "volume":     float(parts[5]) if len(parts) > 5 else None,
-            })
-        except ValueError:
-            continue
-    return rows
+    """stooq 日次 OHLCV を取得して [{trade_date, open, high, low, close, volume}] で返す（個別銘柄・`.jp` 付与）。"""
+    return await _fetch_stooq_ohlcv(
+        session, f"{sec_code}.jp", date_from, date_to,
+        strict=True, log_label=f"stooq履歴取得失敗 {sec_code}",
+    )
 
 
 async def _price_collection_driver(db, batch_gen) -> tuple[bool, int]:
@@ -932,41 +983,11 @@ async def fetch_stooq_history(
     date_from: str,   # "YYYYMMDD"
     date_to:   str,   # "YYYYMMDD"
 ) -> list:
-    """stooq 日次 OHLCV（汎用ティッカー）を取得して [{trade_date, open, high, low, close, volume}] で返す"""
-    url = f"https://stooq.com/q/d/l/?s={ticker}&d1={date_from}&d2={date_to}&i=d"
-    try:
-        r = await session.get(url, timeout=30)
-        r.raise_for_status()
-        text = r.text
-    except Exception as e:
-        log.debug(f"stooq マクロ取得失敗 {ticker}: {e}")
-        return []
-
-    rows = []
-    lines = text.strip().splitlines()
-    if len(lines) < 2:
-        return []
-    # ヘッダー（"Date,Open,High,Low,Close,Volume"）以外を解析
-    for line in lines[1:]:
-        parts = line.split(",")
-        if len(parts) < 5:
-            continue
-        try:
-            close = float(parts[4])
-        except ValueError:
-            continue
-        def _f(s):
-            try: return float(s)
-            except ValueError: return None
-        rows.append({
-            "trade_date": parts[0],
-            "open":       _f(parts[1]),
-            "high":       _f(parts[2]),
-            "low":        _f(parts[3]),
-            "close":      close,
-            "volume":     _f(parts[5]) if len(parts) > 5 else None,
-        })
-    return rows
+    """stooq 日次 OHLCV（汎用ティッカー・マクロ用）。open/high/low/volume は None 許容。"""
+    return await _fetch_stooq_ohlcv(
+        session, ticker, date_from, date_to,
+        strict=False, log_label=f"stooq マクロ取得失敗 {ticker}",
+    )
 
 
 async def collect_macro_data(
