@@ -449,7 +449,9 @@ async def _refill_records_from_xbrl(db, target_q, field_updater, *, label: str,
                     skipped += 1
                     continue
 
-                parsed = parse_xbrl_csv(df, rec.edinet_code, rec.period_end.isoformat() if rec.period_end else "")
+                pe = rec.period_end
+                period_end_str = pe.isoformat() if hasattr(pe, "isoformat") else str(pe) if pe else ""
+                parsed = parse_xbrl_csv(df, rec.edinet_code, period_end_str)
                 if field_updater(rec, parsed):
                     db.add(rec)
                     updated += 1
