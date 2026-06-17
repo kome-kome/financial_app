@@ -27,86 +27,99 @@
 
 ## Tier 2 — 分析モデルの拡張【コード】
 
-### M-1. マクロ要因を組み込んだ分析モデル  【中・コード】
+### M-1. マクロ・リスク-リターン推奨モデル（新プラグイン）  【中・コード】
 
-**背景**  
-マクロデータ収集基盤（`MacroData` テーブル・`collect_macro_data`・9系列・`/api/collect/macro/start`）は完成済み。9系列（USDJPY, EURJPY, US10Y, JP10Y, NIKKEI225, TOPIX, SP500, WTI, GOLD）を日次 OHLCV で蓄積。しかし **分析プラグイン側はマクロ特徴量を一切使っていない**（`plugins/utils.py` にマクロ取得関数ゼロ）。
+> **位置づけ**: 単なる「既存モデルへのマクロ特徴量追加」を超え、**マクロ環境ごとに企業/セクター/財務構造の感応度が違う**ことを交差項で捉え、各銘柄を **リスク-リターン平面**に配置して推奨集合を選ぶ新プラグイン `plugins/macro_risk_return.py` を起こす。最小フェーズ（Phase A）は既存 `price_predictor` へのマクロ特徴量追加なので、段階的に価値が出る。
 
-**対象プラグインと除外理由**
+**着想（ユーザー要件）**: マクロ要因に反応しやすいセクター・財務指標（PL/BS/CF 要素）・個別企業があり、「マクロ×ベース説明変数」の相関で**予測可能性の大小**が決まる。予測可能性を**予測値の分散（リスク）**として定義し、**リスクとリターンの期待値**から推奨企業を選定したい。縦軸リターン・横軸リスクの散布図で効率的な企業群を可視化する。
 
-| プラグイン | 対応 | 理由 |
-|---|---|---|
-| `price_predictor.py` | ✅ 優先 | 月次スナップ・対数リターン(無次元)目的・`snap_date` 基準でマクロを時点整合できる |
-| `total_return.py` | ✅ 次フェーズ | 年次・`period_end+45日` 基準で結合。Ohlson 型の per-share 特徴量と無次元マクロを混在させる際、正規化パイプラインが吸収する |
-| `recommend.py` | ❌ 除外 | クロスセクション Z スコアは全企業で **同一値** → 分散=0 → 特徴量として機能しない。レジームフィルタへの拡張は別設計（スコープ外）|
+#### 学術的裏付け（設計の妥当性検証済み）
 
-**マクロ特徴量の設計（次元整合性を守る）**
+| 理論 | 我々の設計への含意 |
+|---|---|
+| **Markowitz (1952) 効率的フロンティア / Sharpe** | リスク-リターン平面は標準。**生リターンでなく Sharpe 的な リターン/リスク でランク**する |
+| **Fama-French 3/5因子** | 財務比率（value=B/M・profitability・investment）は実証済みファクター。符号事前（B/M+・利益率+・投資−）で係数をサニティチェック。ただし因子間冗長性に注意 |
+| **APT / Chen-Roll-Ross (1986)** | 金利ターム・スプレッド・為替は理論的に価格付けされるリスク。**「同じマクロに企業ごと異なるβ」= 交差項設計そのもの**。ただしマクロは*水準でなくサプライズ/変化*を使う |
+| **Black-Litterman (1992) / James-Stein** | 生の予測リターンは誤差最大化を招く。**μ をセクター平均へ収縮し、収縮ウェイトを予測信頼度（R1）にする** |
+| **低ボラ・アノマリー / Betting-Against-Beta (Frazzini-Pedersen 2014)** | 高ボラ罰則はリターン押上げにもなる。**フロンティアは非単調**で低ボラ・クラスタが左上を支配する前提で描画 |
+| **Michaud (1989) / Chopra-Ziemba (1993) / DeMiguel (2009)** | 危険なのはリターン軸。期待リターン誤差は分散誤差の約11倍有害。推奨ルールは凝りすぎない（1/N に勝つのは難しい） |
 
-生データは [円/ドル] や [%] の次元を持つため **無次元化してから OLS 投入** する。2方式を採用：
+#### 説明変数（全て無次元 — 注意事項1の次元整合性を満たす）
 
-| 特徴量名 | series_code | 変換式 | 次元 | 適用先 |
+被説明変数 μ（1年先リターン・年率）が無次元なので、説明変数も全て無次元に揃える。
+
+- **財務比率**: `per` / `pbr` / `roe` / `equity_ratio` / `rd_intensity` / `da_intensity` ＋ 年度別 Z スコア
+- **モメンタム**: 12-1ヶ月リターン（週次株価 `stock_price_weekly` から算出・新規）。Jegadeesh-Titman の単独最強アノマリーで value と負相関
+- **マクロ（サプライズ/変化）**: USDJPY YoY 変化率・US10Y/JP10Y の5年 Z スコア（ターム-スプレッド系）。*水準でなく innovation*（CRR）
+- **交差項**: 財務×マクロ ＋ セクターダミー×マクロ（条件付きβ = APT の異質感応度）
+
+| 変換 | series | 式 | 次元 |
+|---|---|---|---|
+| YoY 変化率 | USDJPY, SP500 | (ref30日平均 − 1y前30日平均)/1y前30日平均 | 無次元率 |
+| 5年 Z スコア | US10Y, JP10Y | (ref30日平均 − 5y平均)/5y標準偏差 | 無次元 Z |
+
+#### モデル選択（次元爆発の制御）
+
+交差項は財務×マクロ + セクター×マクロで 40〜60 項に膨らむため：
+
+- **前進選択 BIC**: 空モデルから BIC を最も下げる項を1つずつ採用、改善停止で打切り（O(p²)・Render 内）
+- **VIF 監視**: 各ステップで既存 `check_collinearity`（`plugins/utils.py`）を噛ませ、共線項の不安定スワップを防ぐ
+- **walk-forward CV**: 既存 `walk_forward_cv_monthly` で時系列順を守った汎化検証（plain k-fold はルックアヘッド）
+
+#### リスク3指標と役割分化（3D を「対等3軸」でなく役割で分ける）
+
+| 軸 | 量 | 定義 | 役割 | 解像度 |
 |---|---|---|---|---|
-| `macro_usdjpy_yoy` | USDJPY | (ref30日平均 − 1y前30日平均) / 1y前30日平均 | 無次元率 | price_predictor, total_return |
-| `macro_us10y_zscore` | US10Y | (ref30日平均 − 5y平均) / 5y標準偏差 | 無次元 Z | price_predictor |
-| `macro_jp10y_zscore` | JP10Y | (ref30日平均 − 5y平均) / 5y標準偏差 | 無次元 Z | total_return |
-| `macro_sp500_yoy` | SP500 | (ref30日平均 − 1y前30日平均) / 1y前30日平均 | 無次元率 | price_predictor |
+| **Y=リターン** | μ_shrunk | 1年先リターン年率を**セクター平均へ収縮**（重み=R1） | 期待リターン | 個社・厳密 |
+| **X=リスク（既定）** | **R2** 実現ボラ | 予測基準日直前1年の週次リターン標準偏差 ×√52（過去のみ=リークなし） | 価格変動リスク・Sharpe 分母 | 個社・厳密 |
+| **符号化=信頼** | **R1** 予測不確実性 | OLS 予測分散 s²(1+xᵀ(XᵀX)⁻¹x) の `se_obs` | この点をどれだけ信じるか・μ収縮ウェイト兼用 | 個社・厳密 |
+| **補助** | **R3** モデル信頼性 | セクター×サイズ・バケットの CV 残差 RMSE | この企業「タイプ」をモデルがどれだけ説明できたか | バケット |
 
-`ref30日平均` = ref_date 直前 30 日の close 平均（日次ノイズ軽減）。金利は水準の YoY 変化率でなく Z スコアを採用（% 点変化は直感的でないため）。
+R1（イン・サンプルのレバレッジ）と R3（アウト・オブ・サンプルのグループ誤差）は「モデル信頼性」の二面、R2 は「価格リスク」。
 
-**周波数ミスマッチ（日次 vs 年次）の対処**  
-`price_predictor._find_applicable_fin` の「`period_end + 45日 ≤ snap_date` を満たす最新財務」パターンを流用。snap_date 時点のマクロ値（上記30日平均）を財務スナップと同じ snap_dict に追加するだけで、既存の OLS パイプラインに乗る。
+#### 推奨ロジック
 
-**実装場所と関数仕様**
+- **効用ランキング** `U = μ_shrunk − λ·R2`（λ=リスク回避度・スライダーで可変）。λ=0 でリターン最大化、λ大でリスク最小化
+- **パレートフロンティア強調**: 「同リスクでより高リターン」な非劣解を散布図上で色分け
+- 低ボラ・アノマリーより、フロンティアは右肩上がりにならず低ボラ・クラスタが左上を支配する想定 → そのまま提示
 
-```python
-# plugins/utils.py — 新規追加
-def get_macro_features(
-    db,
-    ref_date: date,
-    feature_names: list[str],   # ["macro_usdjpy_yoy", "macro_us10y_zscore", ...]
-    window_days: int = 30,      # ref_date 直前 N 日の close 平均
-    zscore_years: int = 5,      # Z スコア算出用の歴史窓
-) -> dict[str, float | None]:
-    """
-    MacroData テーブルから ref_date 時点のマクロ特徴量 dict を返す。
-    DB 未蓄積（NULL）は None を返し、呼び出し側でサンプルを除外する。
-    """
-```
+#### 可視化（Chart.js のみ・Plotly 不採用）
 
-```python
-# plugins/price_predictor.py — 追加箇所
-MACRO_FEATURE_OPTIONS = [
-    {"value": "macro_usdjpy_yoy",   "label": "USD/JPY 前年比変化率"},
-    {"value": "macro_us10y_zscore", "label": "米10年金利 5年Zスコア"},
-    {"value": "macro_sp500_yoy",    "label": "S&P500 前年比リターン"},
-]
-# 1. params_schema() の features.options に MACRO_FEATURE_OPTIONS を追記
-# 2. _build_snapshots() で get_macro_features(db, snap_date, ...) を呼び出し
-#    → snap_dict に "macro_*" キーを追加
-#    → _fit_final_model はキー名で X 列を構築するため改修不要（既設計）
-```
+本プロジェクトは **Chart.js 4.4.1 のみ**（Plotly 未使用）。真の3D散布図は描けないが、リスク-リターンは本来2D（Markowitz 平面）なので：
 
-**実装順序**
+- **Chart.js バブル**: Y軸=μ_shrunk（固定）・X軸=リスク（R2 既定、セレクタで R1/R3 切替）・**バブルのサイズ/色 = R1 信頼度**（大/濃いほど高信頼）
+- パレート効率銘柄を強調色・ホバーで企業名/U/μ/各リスク値を表示
+- Plotly 導入（真の3D）は別途セキュリティ評価＋承認が必要なため見送り
 
-1. `plugins/utils.py` に `get_macro_features` を追加（DB クエリ + 変換ロジック）
-2. `tests/test_price_predictor.py` にマクロ特徴量 None ケースのテスト追加
-3. `plugins/price_predictor.py` に `MACRO_FEATURE_OPTIONS` + `_build_snapshots` 拡張
-4. `plugins/total_return.py` に同様追加（次フェーズ）
-5. `docs/MODELS.md` の price_predictor セクション更新（マクロ特徴量の説明追記）
-6. `docs/ARCHITECTURE.md` の plugins セクション更新
+#### 実装フェーズ
 
-**前提条件の確認方法**  
-蓄積状況は Supabase SQL エディタで確認：
-```sql
-SELECT series_code, MIN(trade_date), MAX(trade_date), COUNT(*)
-FROM macro_data GROUP BY series_code ORDER BY series_code;
-```
-5年分（≈1250行/系列）が揃っていれば準備完了。足りない場合は `/api/collect/macro/start` で再収集。
+| Phase | 内容 | 該当ファイル | 検証 |
+|---|---|---|---|
+| **A. マクロ特徴量基盤** | `get_macro_features(db, ref_date, feature_names, window_days, zscore_years)` を `plugins/utils.py` に追加（`macro_data` から ref_date 時点の YoY/Z を算出・未蓄積は None）。モメンタム 12-1ヶ月リターン算出関数も追加。既存 `price_predictor._build_snapshots` で `snap_date` 基準に結合（`_find_applicable_fin` パターン流用） | `plugins/utils.py` / `plugins/price_predictor.py` | `tests/test_price_predictor.py` に None ケース・YoY 計算のテスト |
+| **B. 交差項モデル** | 新プラグイン `macro_risk_return.py`。財務×マクロ + セクター×マクロ交差項・前進BIC・VIF監視・walk-forward CV で μ を算出 | `plugins/macro_risk_return.py` | `tests/test_macro_risk_return.py`（合成データで BIC が無効交差項を落とすこと） |
+| **C. リスク-リターン** | R1/R2/R3 算出・μ のセクター収縮・`U=μ−λR²`・パレート抽出 | 同上 + `plugins/utils.py`（収縮・パレート関数） | 収縮が R1 大で強く効く・パレート集合が非劣であることのテスト |
+| **D. UI** | analysis.html に新タブ・Chart.js バブル・λスライダー・軸セレクタ・ランキング表 | `templates/analysis.html` / `static/js/analysis.js` | 主要画面の手動確認（CLAUDE.md テスト方針） |
 
-**注意事項**
-- OLS 学習前の `winsorize(p1-p99)` は `price_predictor._fit_final_model` 内で **全特徴量に一括適用** されるため、マクロ特徴量も自動で外れ値処理される
-- `get_macro_features` が `None` を返したサンプル（未収集期間）は `_build_snapshots` 内の既存 None 除外ロジックで自動スキップ
-- 多重共線性（SP500 と日経225 は高相関）は `check_collinearity`（`plugins/utils.py`）で事前確認推奨
+#### params_schema（パラメータ契約・CLAUDE.md 準拠）
+
+- `lambda_risk`（slider, dtype=float, 0〜3, default=1.0）: リスク回避度
+- `risk_axis`（select, options=[R2,R1,R3], default=R2）: X軸に置くリスク
+- `features`（multiselect）: 財務+マクロ特徴量の選択
+- `sector_grouping`（select, options=[大分類,中分類]）: セクターダミーの粒度
+- `momentum_window`（number, dtype=int, default=12）: モメンタム算出月数
+- `min_coverage`（slider, dtype=float）: 特徴量充足率の下限
+
+#### 前提条件
+
+1. **マクロ5年蓄積**（`/api/collect/macro/start`）。確認: `SELECT series_code, MIN(trade_date), MAX(trade_date), COUNT(*) FROM macro_data GROUP BY series_code;`（≈1250行/系列）
+2. **週次株価の履歴**（モメンタム・R2 用）— `stock_price_weekly` は全履歴保持済みで充足
+3. **サンプル充足**: 交差項 40〜60 に対し (企業×年) サンプルが十分か本番 DB で要確認（前進BICは最終 15〜25 項に収束する想定）
+
+#### 設計留意・ドキュメント更新
+
+- `winsorize(p1-p99)` は OLS 学習前に全特徴量へ一括適用（注意事項2）
+- Z スコアは年度別に算出（注意事項3）
+- 完了時に `docs/MODELS.md`（新モデル解説・参考文献は原著 DOI: Markowitz 1952 / Fama-French 1993,2015 / Chen-Roll-Ross 1986 / Black-Litterman 1992 / Frazzini-Pedersen 2014）と `templates/models.html`・`docs/ARCHITECTURE.md`（プラグイン/画面/エンドポイント）を更新
 
 ---
 
