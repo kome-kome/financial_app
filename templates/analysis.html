@@ -570,6 +570,72 @@ tr:hover td{background:#1e2235}
   </div>
 </div>
 
+<!-- マクロ×リスク-リターン推奨（M-1） -->
+<div id="tab-macro_risk_return" class="hidden">
+  <div class="grid2">
+    <div class="card">
+      <div class="section-title">マクロ×リスク-リターン設定</div>
+      <div class="info-box" style="margin-bottom:14px">
+        財務指標 × マクロ要因の交差項 OLS（前進 BIC）で1年先リターンを推定し、<br>
+        R2（実現ボラ）と R1（予測不確実性）をリスク軸として効率的フロンティアを描画します。<br>
+        <span style="color:#f59e0b;font-size:11px">⚠ 予測値はモデルの推定値です。投資判断の参考値としてご利用ください。</span>
+      </div>
+      <div id="params-form-macro_risk_return"></div>
+      <button class="btn btn-primary" id="btn-mrr"
+              data-click="runDynamicPlugin"
+              data-arg="macro_risk_return" data-arg2="macro_risk_return"
+              style="margin-top:8px">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>
+          <polyline points="17 6 23 6 23 12"/>
+        </svg>
+        リスク-リターン分析を実行
+      </button>
+    </div>
+    <div class="card">
+      <div class="section-title">モデル品質（Walk-forward CV）</div>
+      <div id="mrr-cv-waiting" class="text-sm" style="padding:40px 0;text-align:center">
+        左のパネルで設定し「実行」をクリックしてください
+      </div>
+      <div id="mrr-cv-content" class="hidden">
+        <div class="grid3" style="margin-bottom:16px">
+          <div class="stat-card"><div class="stat-label">平均 R²（CV）</div><div class="stat-value" id="mrr-mean-r2" style="color:#a78bfa">-</div></div>
+          <div class="stat-card"><div class="stat-label">平均 RMSE（CV）</div><div class="stat-value" id="mrr-mean-rmse" style="color:#60a5fa;font-size:18px">-</div></div>
+          <div class="stat-card"><div class="stat-label">選択特徴量数</div><div class="stat-value" id="mrr-n-features" style="color:#10b981">-</div></div>
+        </div>
+        <div style="font-size:12px;color:#a78bfa;font-weight:600;margin-bottom:4px">選択された特徴量（BIC）</div>
+        <div id="mrr-features-list" style="font-size:12px;color:#94a3b8;margin-bottom:10px;word-break:break-all"></div>
+        <div class="section-title" style="font-size:13px">フォルド別 CV 詳細</div>
+        <div style="overflow-x:auto">
+          <table>
+            <thead><tr><th>Fold</th><th>学習 N</th><th>テスト N</th><th>R²</th><th>RMSE</th></tr></thead>
+            <tbody id="mrr-fold-tbody"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card hidden" id="mrr-chart-card">
+    <div class="flex-between" style="flex-wrap:wrap;gap:8px;margin-bottom:8px">
+      <div class="section-title" style="margin-bottom:0">リスク-リターン散布図
+        <span class="tag tag-purple" style="margin-left:6px">効率的フロンティア</span>
+      </div>
+      <div style="font-size:12px;color:#94a3b8;display:flex;gap:16px;align-items:center">
+        <span>● パレート優位（強調）　○ 非優位</span>
+        <span>バブルサイズ = R1 信頼度（大 = 高信頼）</span>
+      </div>
+    </div>
+    <div style="position:relative;height:420px">
+      <canvas id="chart-mrr-bubble"></canvas>
+    </div>
+  </div>
+
+  <div id="dynresult-macro_risk_return" class="card hidden">
+    <div id="dynresult-content-macro_risk_return"></div>
+  </div>
+</div>
+
 </div><!-- container -->
 </div><!-- layout -->
 

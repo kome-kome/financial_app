@@ -90,6 +90,7 @@ const PLUGIN_TAB_MAP = {
   'total_return':       'total_return',
   'net_cash_analysis':  'net_cash',
   'backtest':           'backtest',   // 特例エントリ。既存の静的タブ #tab-backtest を使用
+  'macro_risk_return':  'macro_risk_return',
 };
 // サイドバー項目の先頭につける目印（視認性のため。強調は active 状態で表現）
 const PLUGIN_ICON = { 'recommend': '★ ', 'total_return': '◆ ', 'net_cash_analysis': '¥ ' };
@@ -131,7 +132,7 @@ async function preflight() {
     document.getElementById('api-dot').style.background = '#10b981';
     [['btn-gap-analysis', !finOk], ['btn-recommend', !finOk],
      ['btn-total-return', !finOk], ['btn-backtest', !prOk],
-     ['btn-bt-multi', !prOk]].forEach(([id, disabled]) => {
+     ['btn-bt-multi', !prOk], ['btn-mrr', !finOk || !prOk]].forEach(([id, disabled]) => {
       const el = document.getElementById(id);
       if (!el) return;
       el.disabled = disabled;
@@ -854,9 +855,10 @@ async function initPlugins() {
     ) : meta.params_schema;
     el.innerHTML = _renderParamsForm(schema, pluginName);
   };
-  _inject('params-form-gap',          'gap_analysis',      null);
-  _inject('params-form-total-return', 'total_return',      null);
-  _inject('params-form-net-cash',     'net_cash_analysis', null);
+  _inject('params-form-gap',              'gap_analysis',      null);
+  _inject('params-form-total-return',     'total_return',      null);
+  _inject('params-form-net-cash',         'net_cash_analysis', null);
+  _inject('params-form-macro_risk_return','macro_risk_return',  null);
   // recommend: weights/preset は静的 HTML に温存、フィルター項目のみ注入
   _inject('params-form-recommend',    'recommend',
     ([k, v]) => v.type !== 'weights' && k !== 'preset');
@@ -1012,7 +1014,8 @@ async function runDynamicPlugin(pluginName, tabId) {
 // 結果レンダラ登録制: 動的タブ（プラグイン runner）の結果描画を plugin名 → 描画関数で対応付ける。
 // 未登録のプラグイン（例: price_predictor）は _renderGenericResult（results 表 or JSON）にフォールバック。
 const RESULT_RENDERERS = {
-  'sector_ols': renderSectorOls,
+  'sector_ols':        renderSectorOls,
+  'macro_risk_return': renderMacroRiskReturn,
 };
 
 // 業種別OLS 専用レンダラ: 自動ドロップ警告 + 業種別R²サマリ + ランキング表（汎用部を再利用）
@@ -1042,6 +1045,114 @@ function renderSectorOls(data) {
     </div>`;
   }
   return html + _renderGenericResult(data);
+}
+
+// マクロ×リスク-リターン専用レンダラ: CV指標 + バブルチャート + ランキング表
+let _mrrChart = null;
+function renderMacroRiskReturn(data) {
+  // ── CV 指標 ──────────────────────────────────────────────────────
+  const cv = data.cv_metrics || {};
+  const waiting = document.getElementById('mrr-cv-waiting');
+  const cvContent = document.getElementById('mrr-cv-content');
+  if (waiting) waiting.classList.add('hidden');
+  if (cvContent) {
+    cvContent.classList.remove('hidden');
+    const el = (id) => document.getElementById(id);
+    el('mrr-mean-r2').textContent   = cv.mean_r2  != null ? cv.mean_r2.toFixed(3)  : '-';
+    el('mrr-mean-rmse').textContent  = cv.mean_rmse != null ? cv.mean_rmse.toFixed(4) : '-';
+    el('mrr-n-features').textContent = (data.selected_features || []).length;
+    el('mrr-features-list').textContent = (data.selected_features || []).join('、') || '（なし）';
+    const folds = cv.folds || [];
+    el('mrr-fold-tbody').innerHTML = folds.map((f, i) =>
+      `<tr><td>${i+1}</td><td>${f.n_train||'-'}</td><td>${f.n_test||'-'}</td>
+       <td class="${f.r2>0.3?'text-green':''}">${f.r2!=null?f.r2.toFixed(3):'-'}</td>
+       <td>${f.rmse!=null?f.rmse.toFixed(4):'-'}</td></tr>`
+    ).join('');
+  }
+
+  // ── バブルチャート ────────────────────────────────────────────────
+  const results = data.results || [];
+  const chartCard = document.getElementById('mrr-chart-card');
+  if (chartCard && results.length) {
+    chartCard.classList.remove('hidden');
+    const canvas = document.getElementById('chart-mrr-bubble');
+    if (canvas && window.Chart) {
+      if (_mrrChart) { _mrrChart.destroy(); _mrrChart = null; }
+      const paretoItems    = results.filter(r => r.is_pareto  && r.r2 != null && r.mu_shrunk != null);
+      const nonParetoItems = results.filter(r => !r.is_pareto && r.r2 != null && r.mu_shrunk != null);
+      const r1Max = Math.max(...results.map(r => r.r1 ?? 0), 1e-9);
+      const toPoint = (r) => ({
+        x: r.r2 ?? 0,
+        y: r.mu_shrunk ?? 0,
+        r: Math.max(4, 26 * (1 - (r.r1 ?? 0) / r1Max)),
+        label: r.company_name || r.edinet_code,
+        utility: r.utility, r1: r.r1,
+      });
+      _mrrChart = new Chart(canvas, {
+        type: 'bubble',
+        data: { datasets: [
+          { label: 'パレート優位', data: paretoItems.map(toPoint),
+            backgroundColor: 'rgba(167,139,250,0.75)', borderColor: '#a78bfa', borderWidth: 2 },
+          { label: '非優位', data: nonParetoItems.map(toPoint),
+            backgroundColor: 'rgba(100,116,139,0.4)', borderColor: '#475569', borderWidth: 1 },
+        ]},
+        options: {
+          responsive: true, maintainAspectRatio: false,
+          plugins: {
+            legend: { position: 'top' },
+            tooltip: { callbacks: { label: (ctx) => {
+              const pt = ctx.raw;
+              return [
+                pt.label,
+                `μ_shrunk: ${pt.y.toFixed(4)}`,
+                `R2（ボラ）: ${pt.x.toFixed(4)}`,
+                `R1（不確実性）: ${pt.r1 != null ? pt.r1.toFixed(4) : '-'}`,
+                `U（効用）: ${pt.utility != null ? pt.utility.toFixed(4) : '-'}`,
+              ];
+            }}},
+          },
+          scales: {
+            x: { title: { display: true, text: 'リスク（R2: 実現ボラティリティ）' }},
+            y: { title: { display: true, text: '期待リターン（μ_shrunk・年率）' }},
+          },
+        },
+      });
+    }
+  }
+
+  // ── ランキング表 ──────────────────────────────────────────────────
+  if (!results.length) {
+    return '<div class="text-sm" style="padding:20px;text-align:center;color:#94a3b8">結果がありません</div>';
+  }
+  const header = `<tr><th>順位</th><th>証券コード</th><th>企業名</th><th>業種</th>
+    <th>μ_shrunk</th><th>R2 ボラ</th><th>R1 不確実性</th><th>効用 U</th><th>パレート</th></tr>`;
+  const rows = results.map((r, i) => {
+    const mu = r.mu_shrunk ?? 0;
+    const muClass = mu > 0 ? 'text-green' : 'text-red';
+    const paretoTag = r.is_pareto ? '<span style="color:#a78bfa;font-weight:700">★</span>' : '';
+    return `<tr>
+      <td>${i+1}</td>
+      <td>${esc(r.sec_code||'-')}</td>
+      <td><a href="/company/${esc(r.edinet_code||'')}" style="color:#60a5fa">${esc(r.company_name||'-')}</a></td>
+      <td style="font-size:11px">${esc(r.industry||'-')}</td>
+      <td class="${muClass}">${(mu*100).toFixed(2)}%</td>
+      <td>${r.r2!=null?(r.r2*100).toFixed(2)+'%':'-'}</td>
+      <td style="font-size:11px;color:#94a3b8">${r.r1!=null?r.r1.toFixed(4):'-'}</td>
+      <td class="text-green">${r.utility!=null?r.utility.toFixed(4):'-'}</td>
+      <td style="text-align:center">${paretoTag}</td>
+    </tr>`;
+  }).join('');
+
+  return `
+    <div class="flex-between" style="flex-wrap:wrap;gap:8px;margin-bottom:10px">
+      <div class="section-title" style="margin-bottom:0">
+        リスク-リターンランキング
+        <span class="tag tag-purple" style="margin-left:6px">${results.length}社</span>
+      </div>
+    </div>
+    <div style="overflow-x:auto">
+      <table><thead>${header}</thead><tbody>${rows}</tbody></table>
+    </div>`;
 }
 
 // 汎用結果レンダラ（フォールバック）: results 配列を表に、無ければ JSON を整形表示する。
