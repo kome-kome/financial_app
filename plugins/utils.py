@@ -692,3 +692,147 @@ def walk_forward_cv_monthly(
         })
 
     return fold_results
+
+
+# ── M-1 Phase A: マクロ特徴量・モメンタム ──────────────────────────────────────
+
+# feature_name → (series_code, transform: "yoy" | "zscore")
+# series_code は collector_prices.py の MACRO_SERIES["code"] と一致させる
+_MACRO_FEATURE_MAP: dict[str, tuple[str, str]] = {
+    "macro_usdjpy_yoy":   ("USDJPY", "yoy"),
+    "macro_sp500_yoy":    ("SP500",  "yoy"),
+    "macro_us10y_zscore": ("US10Y",  "zscore"),
+    "macro_jp10y_zscore": ("JP10Y",  "zscore"),
+}
+
+
+def get_macro_features(
+    db,
+    ref_date: str,
+    feature_names: list[str],
+    window_days: int = 30,
+    zscore_years: int = 5,
+) -> dict[str, float | None]:
+    """MacroData テーブルから ref_date 時点のマクロ特徴量 dict を返す。
+
+    yoy  : (直近 window_days 平均 − 1年前 window_days 平均) / 1年前平均
+    zscore: (直近 window_days 平均 − zscore_years 全体平均) / 全体標準偏差
+    DB 未蓄積（データなし/不足）は None を返す。呼び出し側でサンプルを除外すること。
+    """
+    from datetime import date as _date, timedelta as _td
+    from database import MacroData  # lazy import to avoid circular dependency
+
+    ref = _date.fromisoformat(ref_date)
+    result: dict[str, float | None] = {}
+
+    # 必要な series_code を集約し、1 クエリで取得（N+1 回避）
+    series_needed: dict[str, str] = {}  # series_code → transform
+    valid_fnames: list[str] = []
+    for fname in feature_names:
+        if fname not in _MACRO_FEATURE_MAP:
+            result[fname] = None
+            continue
+        scode, ttype = _MACRO_FEATURE_MAP[fname]
+        series_needed[scode] = ttype
+        valid_fnames.append(fname)
+
+    if not series_needed:
+        return result
+
+    has_zscore = any(t == "zscore" for t in series_needed.values())
+    lookback_days = zscore_years * 366 if has_zscore else 365 + window_days + 30
+    since = (ref - _td(days=lookback_days)).isoformat()
+
+    rows = (
+        db.query(MacroData)
+        .filter(
+            MacroData.series_code.in_(list(series_needed.keys())),
+            MacroData.trade_date >= since,
+            MacroData.trade_date <= ref_date,
+            MacroData.close.isnot(None),
+        )
+        .order_by(MacroData.series_code, MacroData.trade_date)
+        .all()
+    )
+
+    by_series: dict[str, dict[str, float]] = {}
+    for r in rows:
+        by_series.setdefault(r.series_code, {})[r.trade_date] = r.close
+
+    win_start = (ref - _td(days=window_days)).isoformat()
+
+    for fname in valid_fnames:
+        scode, ttype = _MACRO_FEATURE_MAP[fname]
+        date_close = by_series.get(scode, {})
+        if not date_close:
+            result[fname] = None
+            continue
+
+        current_vals = [v for d, v in date_close.items() if d >= win_start]
+        if not current_vals:
+            result[fname] = None
+            continue
+        current_avg = statistics.mean(current_vals)
+
+        if ttype == "yoy":
+            ref_1y  = ref - _td(days=365)
+            p_start = (ref_1y - _td(days=window_days)).isoformat()
+            p_end   = (ref_1y + _td(days=window_days)).isoformat()
+            prev_vals = [v for d, v in date_close.items() if p_start <= d <= p_end]
+            if not prev_vals:
+                result[fname] = None
+                continue
+            prev_avg = statistics.mean(prev_vals)
+            result[fname] = (current_avg - prev_avg) / prev_avg if prev_avg else None
+
+        elif ttype == "zscore":
+            all_vals = list(date_close.values())
+            if len(all_vals) < 20:
+                result[fname] = None
+                continue
+            mu = statistics.mean(all_vals)
+            sigma = statistics.stdev(all_vals) if len(all_vals) > 1 else 0.0
+            result[fname] = (current_avg - mu) / sigma if sigma else None
+
+    return result
+
+
+def get_momentum_return(
+    price_rows: list,
+    ref_date: str,
+    long_months: int = 12,
+    short_months: int = 1,
+) -> float | None:
+    """Jegadeesh-Titman 型モメンタムを算出する。
+
+    log(P_{ref - short_months} / P_{ref - long_months}) を返す。
+    price_rows: .trade_date (str "YYYY-MM-DD") と .close (float) を持つオブジェクト列。
+    リークなし — ref_date より未来の行は無視する。
+    """
+    from datetime import date as _date, timedelta as _td
+
+    if not price_rows:
+        return None
+
+    ref = _date.fromisoformat(ref_date)
+    short_cutoff = (ref - _td(days=short_months * 30)).isoformat()
+    long_cutoff  = (ref - _td(days=long_months  * 30)).isoformat()
+
+    eligible = [
+        (r.trade_date, r.close)
+        for r in price_rows
+        if r.trade_date <= ref_date and r.close and r.close > 0
+    ]
+    if not eligible:
+        return None
+
+    short_cands = [(d, c) for d, c in eligible if d <= short_cutoff]
+    long_cands  = [(d, c) for d, c in eligible if d <= long_cutoff]
+
+    if not short_cands or not long_cands:
+        return None
+
+    short_price = short_cands[-1][1]
+    long_price  = long_cands[-1][1]
+
+    return math.log(short_price / long_price)
