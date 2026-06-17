@@ -1,4 +1,5 @@
 """tests/test_macro_risk_return.py — M-1 Phase B: MacroRiskReturnPlugin"""
+import asyncio
 import math
 from datetime import date, timedelta
 from types import SimpleNamespace
@@ -273,28 +274,26 @@ class TestExecuteIntegration:
         db.query.side_effect = _query_side_effect
         return db
 
-    @pytest.mark.asyncio
-    async def test_execute_minimal(self):
+    def test_execute_minimal(self):
         plugin = MacroRiskReturnPlugin()
         schema = plugin.params_schema()
         params = coerce_params(schema, {"use_macro": False})
 
         db = self._build_mock_db()
-        result = await plugin.execute(params, db)
+        result = asyncio.run(plugin.execute(params, db))
 
         assert "results" in result
         assert "cv_metrics" in result
         assert "selected_features" in result
         assert isinstance(result["results"], list)
 
-    @pytest.mark.asyncio
-    async def test_execute_returns_risk_return_fields(self):
+    def test_execute_returns_risk_return_fields(self):
         plugin = MacroRiskReturnPlugin()
         schema = plugin.params_schema()
         params = coerce_params(schema, {"use_macro": False, "top_n": 5})
 
         db = self._build_mock_db()
-        result = await plugin.execute(params, db)
+        result = asyncio.run(plugin.execute(params, db))
 
         for item in result["results"]:
             assert "edinet_code" in item
