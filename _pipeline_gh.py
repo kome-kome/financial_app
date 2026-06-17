@@ -17,6 +17,8 @@ SKIP_XBRL_RAW=true（デフォルト）の運用前提:
   --refill-cf-limit N CF 補完の上限件数（CLI デフォルト 6000）
   --refill-pl-bs      Phase 8: bs_inventory NULL 補完（旧コホートの PL/BS 列を XBRL 再取得で是正）
   --refill-pl-bs-limit N  PL/BS 補完の上限件数（CLI デフォルト None＝全件）
+  --refill-c2         C2 NULL 補完（pl_depreciation/bs_ppe_total 等を XBRL 再取得で是正）
+  --refill-c2-limit N C2 補完の上限件数（CLI デフォルト None＝全件）
 """
 import argparse, asyncio, sys, time
 from datetime import datetime
@@ -29,7 +31,7 @@ from collector import (
     run_full_collection, update_market_data, collect_macro_data, reparse_from_raw,
     collect_stock_price_history_jquants, update_market_data_from_history,
     backfill_historical_stock_prices_yahoo, fill_recent_stock_price_gap_yahoo,
-    refill_cf_from_xbrl, refill_pl_bs_from_xbrl, diagnose_cf_labels,
+    refill_cf_from_xbrl, refill_pl_bs_from_xbrl, refill_c2_from_xbrl, diagnose_cf_labels,
     SKIP_XBRL_RAW, JQUANTS_BACKFILL_DAYS,
 )
 from database import SessionLocal, init_db
@@ -50,6 +52,8 @@ async def main(years_back: int, collect_only: bool = False,
                refill_missing_cf: bool = False,
                refill_pl_bs: bool = False, refill_pl_bs_limit: Optional[int] = None,
                refill_pl_bs_sleep: float = 0.6,
+               refill_c2: bool = False, refill_c2_limit: Optional[int] = None,
+               refill_c2_sleep: float = 0.6,
                diagnose_cf: bool = False, diagnose_cf_limit: int = 20):
     t0 = time.time()
     log("=" * 60)
@@ -60,6 +64,8 @@ async def main(years_back: int, collect_only: bool = False,
                 else "refill-capex-only" if refill_capex_only else "refill-cf")
     elif refill_pl_bs:
         mode = "refill-pl-bs"
+    elif refill_c2:
+        mode = "refill-c2"
     elif backfill_yahoo:
         mode = "backfill-yahoo"
     elif collect_only:
@@ -139,6 +145,31 @@ async def main(years_back: int, collect_only: bool = False,
         finally:
             db8.close()
         log(f"[8/8] bs_inventory NULL 補完 完了 ({(time.time()-t0)/60:.1f}分経過)")
+        log("=" * 60)
+        log(f"パイプライン完了  総所要時間: {(time.time()-t0)/60:.1f}分")
+        log("=" * 60)
+        return
+
+    # ─── C2 NULL 補完（単独モード）──────────────────────────────────────────────
+    # C2 追加列（pl_depreciation / bs_ppe_total 等）は skip_existing=True の通常収集では
+    # 既存 doc_id がスキップされるため NULL のまま残存。pl_depreciation を駆動マーカーとして
+    # 古い順に再取得し、PL/BS/nonfin の NULL 列を一括補完する。
+    if refill_c2:
+        log(f"[C2] C2 NULL 補完 開始（limit={refill_c2_limit}, 古い順）")
+        log("  対象: pl_depreciation IS NULL かつ doc_id IS NOT NULL（C2 列を補完）")
+        db_c2 = SessionLocal()
+        try:
+            result = await refill_c2_from_xbrl(
+                db_c2,
+                limit=refill_c2_limit,
+                sleep_sec=refill_c2_sleep,
+                on_progress=lambda c, t, m: log(m) if c % 100 == 0 or t - c < 10 else None,
+            )
+            log(f"  C2 補完完了: updated={result['updated']}, skipped={result['skipped']}, "
+                f"failed={result['failed']}, remaining={result.get('remaining', '?')}")
+        finally:
+            db_c2.close()
+        log(f"[C2] C2 NULL 補完 完了 ({(time.time()-t0)/60:.1f}分経過)")
         log("=" * 60)
         log(f"パイプライン完了  総所要時間: {(time.time()-t0)/60:.1f}分")
         log("=" * 60)
@@ -264,6 +295,12 @@ if __name__ == "__main__":
                         help="PL/BS 補完の上限件数（デフォルト None＝全件・約4〜5時間）")
     parser.add_argument("--refill-pl-bs-sleep", type=float, default=0.6,
                         help="PL/BS 補完の1件あたりスリープ秒（デフォルト 0.6）")
+    parser.add_argument("--refill-c2", action="store_true",
+                        help="C2 NULL 補完（pl_depreciation/bs_ppe_total 等 C2 追加列を XBRL 再取得で是正・古い順）")
+    parser.add_argument("--refill-c2-limit", type=int, default=None,
+                        help="C2 補完の上限件数（デフォルト None＝全件）")
+    parser.add_argument("--refill-c2-sleep", type=float, default=0.6,
+                        help="C2 補完の1件あたりスリープ秒（デフォルト 0.6）")
     parser.add_argument("--diagnose-cf", action="store_true",
                         help="診断モード: サンプル書類の CF ラベル/要素IDを出力（capex ラベル照合の検証用）")
     parser.add_argument("--diagnose-cf-limit", type=int, default=20,
@@ -283,6 +320,8 @@ if __name__ == "__main__":
             f"  refill_cf_missing={args.refill_cf_missing}"
             f"  refill_pl_bs={args.refill_pl_bs}"
             f"  refill_pl_bs_limit={args.refill_pl_bs_limit}"
+            f"  refill_c2={args.refill_c2}"
+            f"  refill_c2_limit={args.refill_c2_limit}"
             f"  diagnose_cf={args.diagnose_cf}\n"
         )
     asyncio.run(main(
@@ -298,6 +337,9 @@ if __name__ == "__main__":
         refill_pl_bs=args.refill_pl_bs,
         refill_pl_bs_limit=args.refill_pl_bs_limit,
         refill_pl_bs_sleep=args.refill_pl_bs_sleep,
+        refill_c2=args.refill_c2,
+        refill_c2_limit=args.refill_c2_limit,
+        refill_c2_sleep=args.refill_c2_sleep,
         diagnose_cf=args.diagnose_cf,
         diagnose_cf_limit=args.diagnose_cf_limit,
     ))

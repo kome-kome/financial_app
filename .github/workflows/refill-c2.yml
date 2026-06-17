@@ -1,0 +1,58 @@
+name: C2 NULL 補完（pl_depreciation 等の C2 追加列を再取得）
+
+# 一回性バックフィル:
+#   C2 追加列（pl_depreciation / pl_rd_expenses / pl_extraordinary_income / pl_extraordinary_loss /
+#   bs_ppe_total / bs_investments_other_assets / employees / issued_shares）は
+#   skip_existing=True の通常収集では既存 doc_id がスキップされるため NULL のまま残存。
+#   pl_depreciation を駆動マーカーとして古い順に XBRL を再取得し NULL 列を是正する。
+#   完了後（remaining≒金融等の正当 NULL のみ）はスケジュール不要。
+# 手動起動:
+#   workflow_dispatch で limit（省略時は全件）を指定して即時実行。
+
+on:
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: '補完件数の上限（省略＝全件・約4〜5時間。分割実行したい場合のみ指定）'
+        required: false
+        default: ''
+
+jobs:
+  refill-c2:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350  # 全件 ~8000件 × (~1.5s 取得 + 0.6s sleep) ≈ 4.6h。余裕を持って 350 分
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13.7'  # render.yaml の PYTHON_VERSION と一致させる
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run refill-c2 (limit=${{ inputs.limit }})
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          EDINET_API_KEY: ${{ secrets.EDINET_API_KEY }}
+        run: |
+          LIMIT="${{ inputs.limit }}"
+          if [ -n "$LIMIT" ]; then
+            echo "LIMIT=$LIMIT"
+            python _pipeline_gh.py --refill-c2 --refill-c2-limit "$LIMIT"
+          else
+            echo "LIMIT=(none / all)"
+            python _pipeline_gh.py --refill-c2
+          fi
+
+      - name: Upload log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: refill-c2-log
+          path: pipeline_gh.log
+          retention-days: 7

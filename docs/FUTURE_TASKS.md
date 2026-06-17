@@ -11,10 +11,9 @@
 
 > 既に実装・マージ済みの機能を本番で実データとして機能させるための運用作業。コード変更は基本不要だが、本番リソース（EDINET API キー・Supabase・GitHub Actions 実行権限）へのアクセスが要る。Claude のセッションからは実行不可で、ユーザー環境での操作が必要。
 
-### DF-1. 株価 daily 差分収集（cron）の再有効化  【高・運用】
-- **問題**: ライブの株価が **J-Quants 無料の約12週遅れ（最新 ≈2026-03 中旬）で頭打ち**。鮮度を担う Yahoo Finance ギャップ補完（`fill_recent_stock_price_gap_yahoo`）は差分パイプライン（`_pipeline_incremental.py` Phase 4）にのみ存在するが、その `daily-incremental.yml` の `on.schedule`（cron）が dual-table 移行（2026-06-06）後に**未実証のためコメントアウト中**。株価チャート・バックテストが鮮度を失っている。
-- **改善案**: ① `workflow_dispatch` で手動1回実行 → 株価が当日付近まで前進し、Yahoo 補完が GitHub Actions の Azure IP から到達・成功することを確認 → ② `on.schedule` のコメントを外して cron を再開。
-- **手順詳細**: `docs/DEPLOYMENT.md`「再有効化の段階運用（2026-06-10〜）」。
+### DF-1. 株価 daily 差分収集（cron）の再有効化  【✅ 完了・2026-06-12〜】
+- 2026-06-12 以降、毎日 `schedule` トリガーで success 継続中。
+- J-Quants catchup（embargo 明け分 upsert）・Yahoo gap-fill（当日株価補完）・financial_records.stock_price 更新（約3,774社）が正常動作確認済み（最終確認: 2026-06-16）。
 - **該当**: `.github/workflows/daily-incremental.yml` / `_pipeline_incremental.py`
 
 ### DF-2. C2 新項目の本番フル再収集  【中・運用】

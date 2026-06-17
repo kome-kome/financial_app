@@ -605,6 +605,50 @@ async def refill_pl_bs_from_xbrl(
     )
 
 
+async def refill_c2_from_xbrl(
+    db,
+    limit: Optional[int] = None,
+    sleep_sec: float = RATE_SLEEP,
+    on_progress: Optional[Callable[[int, int, str], None]] = None,
+) -> dict:
+    """`pl_depreciation` が NULL のレコードを EDINET XBRL から再取得し、
+    C2 追加列（PL/BS/nonfin）を一括補完する（既存値は上書きしない）。
+
+    駆動マーカー = `pl_depreciation IS NULL` かつ `doc_id IS NOT NULL`。
+    C2 対象列: pl_depreciation / pl_rd_expenses / pl_extraordinary_income / pl_extraordinary_loss
+               bs_ppe_total / bs_investments_other_assets / employees / issued_shares
+
+    nonfin 列（employees / issued_shares）はプレフィックスなしで直接列にマップする。
+    金融・サービス等で正当に pl_depreciation が取れない少数残件は永続的に残る（無害）。
+    """
+    log.info(f"refill_c2_from_xbrl 開始 (limit={limit}, sleep={sleep_sec})")
+
+    def _target_q():
+        return db.query(FinancialRecord).filter(
+            FinancialRecord.pl_depreciation.is_(None),
+            FinancialRecord.doc_id.isnot(None),
+        )
+
+    def _c2_updater(rec, parsed) -> bool:
+        changed = False
+        for cat in ("pl", "bs"):
+            for field, val in (parsed.get(cat) or {}).items():
+                col = f"{cat}_{field}"
+                if val is not None and hasattr(rec, col) and getattr(rec, col) is None:
+                    setattr(rec, col, val)
+                    changed = True
+        for field, val in (parsed.get("nonfin") or {}).items():
+            if val is not None and hasattr(rec, field) and getattr(rec, field) is None:
+                setattr(rec, field, val)
+                changed = True
+        return changed
+
+    return await _refill_records_from_xbrl(
+        db, _target_q, _c2_updater, label="C2補完",
+        limit=limit, defer_raw=True, sleep_sec=sleep_sec, order="asc", on_progress=on_progress,
+    )
+
+
 async def diagnose_cf_labels(db, limit: int = 20) -> dict:
     """診断モード: サンプル書類の CF 関連ファクト（要素ID・項目名・値）をログに出力する。
 
