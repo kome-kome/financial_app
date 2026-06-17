@@ -132,6 +132,11 @@ R1（イン・サンプルのレバレッジ）と R3（アウト・オブ・サ
 ### O-2. 外形監視の追加  【低・運用】
 - Render ダッシュボード + UptimeRobot 等の外形監視を追加検討。死活監視用の `/health` エンドポイントは既設（DB 疎通で 200/503）。
 
+### O-3. GitHub Actions workflow の整理・命名改善  【低・運用】
+- **問題**: workflow が増加し、名前が似ていて実行すべき workflow が判断しづらい。現在 `full-pipeline` / `daily-incremental` / `refill-cf` / `refill-pl-bs` / `refill-c2` / `backfill-stock-history` / `ci` と 7本存在。
+- **改善案**: ① workflow 名に用途カテゴリのプレフィックスを付ける（例: `[定常] 差分収集・毎日` / `[バックフィル] C2 NULL 補完` / `[一回性] 株価履歴バックフィル`）。② `docs/DEPLOYMENT.md` に「どの workflow をいつ使うか」の早見表を追加する。
+- **該当**: `.github/workflows/*.yml` / `docs/DEPLOYMENT.md`
+
 ---
 
 ## 注意事項（設計制約）
