@@ -3,7 +3,7 @@
 未実装の改善項目を記録する。完了済み項目は `docs/archive/IMPROVEMENTS.md` に集約済み（git 履歴で詳細参照可能）。
 
 > **凡例**: 各項目は「該当（`ファイル:行`）／問題／改善案／検証」で issue 化可能な粒度。優先度は 【高 / 中 / 低】、種別は「運用」（本番環境の操作・コード変更なし）か「コード」（新規実装）で示す。
-> **直近完了（2026-06）**: Tier 1 リファクタ全件（T1-1〜T1-9）／ 発行済株式数の正規取得（G）／ `period_end` DATE 型移行（H）／ 財務項目網羅性 C1・C2。詳細は `docs/archive/IMPROVEMENTS.md`「Phase 4」。
+> **直近完了（2026-06）**: Tier 1 リファクタ全件（T1-1〜T1-9）／ 発行済株式数の正規取得（G）／ `period_end` DATE 型移行（H）／ 財務項目網羅性 C1・C2 / **M-1 マクロ×リスク-リターン推奨モデル（Phase A–D 全件）**。詳細は `docs/archive/IMPROVEMENTS.md`「Phase 4」。
 
 ---
 
@@ -99,7 +99,7 @@ R1（イン・サンプルのレバレッジ）と R3（アウト・オブ・サ
 | **A. マクロ特徴量基盤** ✅ | `get_macro_features` / `get_momentum_return` / `_MACRO_FEATURE_MAP` を `plugins/utils.py` に追加 | `plugins/utils.py` | `tests/test_macro_features.py`（17テスト合格） |
 | **B. 交差項モデル** ✅ | 新プラグイン `macro_risk_return.py`。財務×マクロ + セクター×マクロ交差項・前進BIC・VIF監視・walk-forward CV で μ を算出 | `plugins/macro_risk_return.py` | `tests/test_macro_risk_return.py`（18テスト合格） |
 | **C. リスク-リターン** ✅ (R3 は未実装) | R1/R2 算出・μ のセクター収縮（James-Stein）・U=μ−λR²・パレート抽出 は Phase B に含めて実装済み。R3（セクター×サイズバケット CV-RMSE）は未実装で `risk_axis` オプションから除外中 | 同上 + `plugins/utils.py` | テスト済み（`r1`, `r2`, `mu_shrunk`, `is_pareto`, `utility` を検証） |
-| **D. UI** | analysis.html に新タブ・Chart.js バブル（Y=μ_shrunk / X=R2 or R1 / バブルサイズ=R1信頼度）・λスライダー・軸セレクタ・ランキング表 | `templates/analysis.html` / `static/js/analysis.js` | 主要画面の手動確認（CLAUDE.md テスト方針） |
+| **D. UI** ✅ | analysis.html に新タブ・Chart.js バブル（Y=μ_shrunk / X=R2 or R1 / バブルサイズ=R1信頼度逆数）・パレート強調・Walk-forward CV 指標・ランキング表 | `templates/analysis.html` / `static/js/analysis.js` | 手動確認済み（18テスト + CI green） |
 
 #### params_schema（パラメータ契約・CLAUDE.md 準拠）
 
