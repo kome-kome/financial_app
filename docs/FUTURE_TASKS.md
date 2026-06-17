@@ -96,10 +96,10 @@ R1（イン・サンプルのレバレッジ）と R3（アウト・オブ・サ
 
 | Phase | 内容 | 該当ファイル | 検証 |
 |---|---|---|---|
-| **A. マクロ特徴量基盤** | `get_macro_features(db, ref_date, feature_names, window_days, zscore_years)` を `plugins/utils.py` に追加（`macro_data` から ref_date 時点の YoY/Z を算出・未蓄積は None）。モメンタム 12-1ヶ月リターン算出関数も追加。既存 `price_predictor._build_snapshots` で `snap_date` 基準に結合（`_find_applicable_fin` パターン流用） | `plugins/utils.py` / `plugins/price_predictor.py` | `tests/test_price_predictor.py` に None ケース・YoY 計算のテスト |
-| **B. 交差項モデル** | 新プラグイン `macro_risk_return.py`。財務×マクロ + セクター×マクロ交差項・前進BIC・VIF監視・walk-forward CV で μ を算出 | `plugins/macro_risk_return.py` | `tests/test_macro_risk_return.py`（合成データで BIC が無効交差項を落とすこと） |
-| **C. リスク-リターン** | R1/R2/R3 算出・μ のセクター収縮・`U=μ−λR²`・パレート抽出 | 同上 + `plugins/utils.py`（収縮・パレート関数） | 収縮が R1 大で強く効く・パレート集合が非劣であることのテスト |
-| **D. UI** | analysis.html に新タブ・Chart.js バブル・λスライダー・軸セレクタ・ランキング表 | `templates/analysis.html` / `static/js/analysis.js` | 主要画面の手動確認（CLAUDE.md テスト方針） |
+| **A. マクロ特徴量基盤** ✅ | `get_macro_features` / `get_momentum_return` / `_MACRO_FEATURE_MAP` を `plugins/utils.py` に追加 | `plugins/utils.py` | `tests/test_macro_features.py`（17テスト合格） |
+| **B. 交差項モデル** ✅ | 新プラグイン `macro_risk_return.py`。財務×マクロ + セクター×マクロ交差項・前進BIC・VIF監視・walk-forward CV で μ を算出 | `plugins/macro_risk_return.py` | `tests/test_macro_risk_return.py`（18テスト合格） |
+| **C. リスク-リターン** ✅ (R3 は未実装) | R1/R2 算出・μ のセクター収縮（James-Stein）・U=μ−λR²・パレート抽出 は Phase B に含めて実装済み。R3（セクター×サイズバケット CV-RMSE）は未実装で `risk_axis` オプションから除外中 | 同上 + `plugins/utils.py` | テスト済み（`r1`, `r2`, `mu_shrunk`, `is_pareto`, `utility` を検証） |
+| **D. UI** | analysis.html に新タブ・Chart.js バブル（Y=μ_shrunk / X=R2 or R1 / バブルサイズ=R1信頼度）・λスライダー・軸セレクタ・ランキング表 | `templates/analysis.html` / `static/js/analysis.js` | 主要画面の手動確認（CLAUDE.md テスト方針） |
 
 #### params_schema（パラメータ契約・CLAUDE.md 準拠）
 

@@ -754,6 +754,16 @@ classDiagram
         +execute() 清原式NC比率＋グレアムNCAV比率でランキング生成（OLS不使用・品質ガード/トラップ除外付き）
     }
 
+    class MacroRiskReturnPlugin {
+        +name = "macro_risk_return"
+        +label = "マクロ×リスク-リターン推奨"
+        +depends_on = []
+        +heavy = True
+        +ui_order = 330
+        +params_schema() lambda_risk/risk_axis/fin_features/use_macro/top_n 等
+        +execute() 交差項OLS(財務×マクロ)+前進BIC+Walk-forward CV+James-Stein縮小+Paretoフロンティア
+    }
+
     class PluginRegistry {
         -dict _registry
         +_load() プラグインファイルを自動スキャン
@@ -978,14 +988,15 @@ graph TB
 | `plugins/sector_ols.py` | バックエンド | 業種別OLS回帰分析（次元整合・winsorize+z-score前処理）。`heavy=True`（Render 軽量モードで 403）。予測値は regression_results へ保存 | plugins/utils.py |
 | `plugins/price_predictor.py` | バックエンド | 株価リターン予測（価格×財務特徴量OLS・月次WFV） | plugins/utils.py |
 | `plugins/net_cash_analysis.py` | バックエンド | ネットキャッシュ分析（清原達郎『わが投資術』式）＋グレアムNCAV。NC = 流動資産 + 投資有価証券×0.7 − 総負債、NCAV = 流動資産 − 総負債。推計時価総額の崩れによる異常比率はサニティ上限で自動除外し、任意で営業CF>0等のバリュートラップ除外も可能 | database.py |
-| `plugins/utils.py` | バックエンド | ols()・normalize()・winsorize()・walk_forward_cv()・walk_forward_cv_monthly() | — |
+| `plugins/macro_risk_return.py` | バックエンド | マクロ×リスク-リターン推奨（交差項OLS+前進BIC+Walk-forward CV+James-Stein縮小+Paretoフロンティア）。`heavy=True`。`use_macro=False` でマクロ特徴量なしの純財務モデルとして実行可 | plugins/utils.py |
+| `plugins/utils.py` | バックエンド | ols()・normalize()・winsorize()・walk_forward_cv()・walk_forward_cv_monthly()・get_macro_features()・get_momentum_return() | — |
 | `tests/` | テスト | pytest 回帰テスト（313件）。プラグイン＋utils＋`database.py`（upsert・RegressionResult merge・derived非永続）＋`collector.py`（XBRLパース・派生指標＋ネットワーク取得を httpx MockTransport でモック）＋`api.py`（純関数・`/health`・DB-backed 読取・heavy回帰のRenderブロック）をカバー。in-memory SQLite fixture（StaticPool）／FastAPI TestClient／httpx MockTransport で検証。`financial_metrics` は SQLite では `FinancialMetric` 列定義から生成したテーブルで代替し、派生値・予測値はテストが直接注入（`make_metric`）。計算式の同値性は Postgres で別途検証。共通 fixture は `tests/conftest.py`（`db`/`make_fin`/`make_metric` 等） | pytest, sqlalchemy, fastapi, httpx |
 | `requirements-dev.txt` | 設定 | 開発・テスト専用依存（`pytest`）。本番 `requirements.txt` と分離（Render メモリ節約） | — |
 | `dashboard.html` | フロントエンド | トップページ・全体サマリー（`/`） | api.py |
 | `collection.html` | フロントエンド | 収集管理・スクリーニング・DBブラウザ（`/collection`） | api.py |
 | `analysis.html` | フロントエンド | 分析ハブ（`/analysis`）。左サイドバーを `/api/plugins` のメタ（category/ui_order）から目的別4カテゴリ（①銘柄を探す/②割安度/③リターン予測/④検証）で動的生成（`buildSidebar`）。乖離分析に横断分布（理論vs実績の散布図・乖離率ヒストグラム）を Chart.js で表示。スクリーニングは特例エントリとして `/collection` へリンク。動的タブの結果描画は `RESULT_RENDERERS`（plugin名→描画関数の登録制・未登録は汎用フォールバック）、CSV出力は単一の `exportCSV(name)` ディスパッチャ（`CSV_EXPORTERS` 登録制）に統一。乖離分析タブに**モデル鮮度バー**（`#model-freshness-bar`）を常設 — `/api/model/status` から computed_at/staleness_days を取得して表示し、OLSロック演出を廃止 | api.py, Chart.js (CDN) |
 | `login.html` | フロントエンド | 認証ログイン画面（`/login`） | api.py |
-| `models.html` | フロントエンド | モデル解説・参考文献ページ（`/models`）。8モデルの数式・パラメータ・DOIリンクをインラインHTMLで表示。 | — |
+| `models.html` | フロントエンド | モデル解説・参考文献ページ（`/models`）。9モデルの数式・パラメータ・DOIリンクをインラインHTMLで表示。 | — |
 | `db.html` | フロントエンド | DBビューア（`/db`）。4テーブルのスキーマ・プレビュー・統計サマリー・ER 風リレーション・企業ドリルダウン・CSV エクスポート。 | api.py |
 | `company.html` | フロントエンド | 企業詳細（`/company`・`/company/{edinet_code}`）。個別企業の業績・財務(BS)・CF・per-share/配当・バリュエーション（理論時価総額乖離）・日次株価・業種内Zスコアレーダー・清原式ネットキャッシュ・同業比較を Chart.js の時系列グラフで可視化。企業名・証券コード検索付き。財務(BS)タブはバフェットコード型で各年「左＝資産（借方）／右＝負債・純資産（貸方）」を並列表示し、粒度（粗/中/細）切替で内訳の細かさを変更できる（どの粒度でも資産バー＝負債純資産バー＝総資産になるよう補正）。業績(PL)タブは売上高を費用・利益に分解した積み上げ棒（最上部＝純利益）を粒度（粗/中/細）切替で表示（合計＝売上高、信頼性の低い stored gross_profit は不使用）。CFタブも粒度（粗＝フリー+財務／中＝営業/投資/財務／細＝営業/設備投資/その他投資/財務）切替に対応し、CFデータ未収集の企業には明示メッセージを表示。同業比較タブは選択企業を必ず表示し業種内時価総額順位を併記。**相互リンク**：理論時価総額/乖離率チャート→`/analysis?tab=gap`・Zスコアチャート→`/analysis?tab=recommend`・ネットキャッシュチャート→`/analysis?tab=net_cash`（逆方向の乖離分析表→`/company/{code}` は既存） | api.py, Chart.js (CDN) |
 | `static/js/*.js` | フロントエンド | 各HTMLテンプレから外部化したページ別JS（CSP対応）。dashboard / collection / analysis / company / db / models / login の7ファイル。`/static` で配信（api.py の `StaticFiles` マウント）。`<style>` とインラインイベントハンドラ（`onclick=` 等）はHTML側に残置（後者は将来 addEventListener 化予定）。 | api.py |

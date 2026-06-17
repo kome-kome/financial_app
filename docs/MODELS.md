@@ -15,6 +15,7 @@
 6. [Zスコア重み付けスコアリング（おすすめ銘柄）](#6-zスコア重み付けスコアリングおすすめ銘柄)
 7. [バックテスト](#7-バックテスト)
 8. [ネットキャッシュ分析（清原達郎式）](#8-ネットキャッシュ分析清原達郎式)
+9. [マクロ×リスク-リターン推奨](#9-マクロリスク-リターン推奨)
 
 ---
 
@@ -794,6 +795,76 @@ IFRS には完全に対応する科目がないため、「非流動その他金
 
 ---
 
+## 9. マクロ×リスク-リターン推奨
+
+**プラグイン**: `plugins/macro_risk_return.py` / `MacroRiskReturnPlugin`  
+**カテゴリ**: ③ 将来リターンを予測（`ui_order=330`、`heavy=True`）
+
+### 9.1 概要
+
+マクロ要因（為替・金利・株式市況）と企業固有の財務指標の**交差項 OLS** で1年先リターン μ を推定し、各銘柄をリスク-リターン平面に配置して**効率的フロンティア**（Pareto 最優解）を提示するモデル。
+
+### 9.2 説明変数
+
+| 種別 | 特徴量 | 変換 |
+|---|---|---|
+| 財務比率 | per, pbr, roe, equity_ratio, rd_intensity, da_intensity, z_op_margin, z_roe, z_cf_ratio | 無次元（FinancialMetric VIEW） |
+| モメンタム | 12-1ヶ月ログリターン | log(P_short / P_long) |
+| マクロ | USDJPY, SP500 YoY 変化率 / US10Y, JP10Y 5年 Z スコア | YoY = Δ/前年 / Z = (現在−5年平均)/5年SD |
+| 交差項 | 財務指標 × マクロ要因 + セクターダミー × マクロ（最大10セクター） | 積（無次元×無次元） |
+
+被説明変数は **1年先週次ログリターン（年率）**。全特徴量は学習前に `winsorize(p1–p99)` を適用。
+
+### 9.3 特徴量選択（前進 BIC）
+
+$$\text{BIC} = n \log\!\left(\frac{SSE}{n}\right) + k \log n$$
+
+空モデルから BIC を最も下げる特徴量を1本ずつ追加（前進選択）。各ステップで `check_collinearity`（VIF 閾値 10）を噛ませ、多重共線性のある特徴量をブロック。BIC が改善しなくなった時点で打ち切り（最大 `max_features` 個）。
+
+### 9.4 Walk-forward CV
+
+既存の `walk_forward_cv_monthly`（`plugins/utils.py`）で月次ロールウィンドウ CV を実施。時系列順を厳守（通常の k-fold はルックアヘッドバイアスが生じるため不可）。各フォールドの RMSE・MAE・R² を記録。
+
+### 9.5 リスク指標
+
+| 指標 | 定義 | 役割 |
+|---|---|---|
+| **R1** 予測不確実性 | OLS 予測分散 $s^2(1 + x^\top (X^\top X)^{-1} x)$ の平方根（`se_obs`） | モデル信頼度・縮小ウェイト兼用 |
+| **R2** 実現ボラティリティ | 直前52週の週次ログリターン SD × √52 | 価格変動リスク（Sharpe 分母） |
+
+### 9.6 James-Stein 縮小
+
+予測リターン μ_raw をセクター平均 μ_sector へ縮小（Black-Litterman 型）:
+
+$$\mu_{\text{shrunk}} = (1 - w) \cdot \mu_{\text{raw}} + w \cdot \mu_{\text{sector}}, \quad w = R1 / R1_{\max}$$
+
+R1 が大きい（信頼度が低い）ほど強くセクター平均に引き寄せる。
+
+### 9.7 Pareto フロンティア と 効用関数
+
+$$U = \mu_{\text{shrunk}} - \lambda \cdot R2$$
+
+λ はリスク回避度（スライダー、0〜3、既定 1.0）。U でランキングし上位 `top_n` 社を返す。
+
+Pareto 最優解（同リスクで高リターン、または同リターンで低リスク）を `is_pareto=True` でフラグし、散布図上で強調描画する。
+
+### 9.8 制約・前提
+
+1. 週次株価履歴（`stock_price_weekly.close_last`）が少なくとも1年分（≥52週）必要
+2. マクロデータ（`macro_data`）の YoY 用に約400日、Z スコア用に5年分の蓄積が必要（未蓄積は None でスキップ）
+3. 学習サンプル数（企業数 × 月数）が 20 件未満の場合はプラグインが空結果を返す
+
+### 9.9 参考文献
+
+- **Markowitz, H. (1952)**. "Portfolio Selection." *Journal of Finance*, 7(1), 77–91. → https://doi.org/10.2307/2975974
+- **Fama, E.F. & French, K.R. (1993)**. "Common risk factors in the returns on stocks and bonds." *Journal of Financial Economics*, 33(1), 3–56. → https://doi.org/10.1016/0304-405X(93)90023-5
+- **Chen, N., Roll, R., & Ross, S.A. (1986)**. "Economic Forces and the Stock Market." *Journal of Business*, 59(3), 383–403. → https://doi.org/10.1086/296344
+- **Black, F. & Litterman, R. (1992)**. "Global Portfolio Optimization." *Financial Analysts Journal*, 48(5), 28–43. → https://doi.org/10.2469/faj.v48.n5.28
+- **Frazzini, A. & Pedersen, L.H. (2014)**. "Betting Against Beta." *Journal of Financial Economics*, 111(1), 1–23. → https://doi.org/10.1016/j.jfineco.2013.10.005
+- **Jegadeesh, N. & Titman, S. (1993)**. "Returns to Buying Winners and Selling Losers: Implications for Stock Market Efficiency." *Journal of Finance*, 48(1), 65–91. → https://doi.org/10.1111/j.1540-6261.1993.tb04702.x
+
+---
+
 ## 改訂履歴
 
 | 日付 | 内容 |
@@ -801,3 +872,4 @@ IFRS には完全に対応する科目がないため、「非流動その他金
 | 2026-05-14 | 初版作成（モデル 1–7 を記述）|
 | 2026-05-21 | モデル 8（ネットキャッシュ分析・清原達郎式）を追加 |
 | 2026-06-01 | モデル 8 に Graham NCAV 指標・NCAV比率（2/3ルール）を併設。一律の時価総額下限を廃しデータ品質ガード（NC比率サニティ上限）に置換。営業CF>0/純利益>0 のバリュートラップ除外を追加 |
+| 2026-06-17 | モデル 9（マクロ×リスク-リターン推奨）を追加。交差項OLS + 前進BIC + Walk-forward CV + James-Stein縮小 + Paretoフロンティア |

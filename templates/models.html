@@ -98,6 +98,8 @@ td code{background:#0f172a;border:1px solid #1e2235;padding:1px 5px;border-radiu
     <a href="#m7">7. バックテスト</a>
     <a href="#m8">8. ネットキャッシュ分析</a>
     <div class="toc-sub"><a href="#m8">清原達郎式</a></div>
+    <a href="#m9">9. マクロ×リスク-リターン推奨</a>
+    <div class="toc-sub"><a href="#m9">交差項OLS + BIC + Pareto</a></div>
   </nav>
 </aside>
 
@@ -685,6 +687,49 @@ z_nc_ratio = (nc_ratio − μ_year) / σ_year
       （NCAV 戦略の超過収益の学術的検証）
     </div>
   </div>
+</div>
+
+<div class="model-section" id="m9">
+  <h2>9. マクロ×リスク-リターン推奨</h2>
+  <p>財務指標とマクロ要因の交差項 OLS で1年先リターンを推定し、リスク-リターン平面の効率的フロンティア（Pareto 最優解）を提示するモデル。</p>
+
+  <h3>9.1 説明変数</h3>
+  <p>被説明変数 μ（1年先週次ログリターン年率）、全変数は無次元。OLS 学習前に全特徴量へ <code>winsorize(p1–p99)</code> を適用。</p>
+  <ul>
+    <li><strong>財務比率</strong>: PER / PBR / ROE / 自己資本比率 / R&amp;D集約度 / D&amp;A集約度 / Z スコア3種（FinancialMetric VIEW）</li>
+    <li><strong>モメンタム</strong>: 12-1ヶ月ログリターン — Jegadeesh-Titman (1993) アノマリー</li>
+    <li><strong>マクロ (innovation)</strong>: USDJPY・SP500 YoY 変化率 / US10Y・JP10Y 5年 Z スコア — Chen-Roll-Ross (1986) 型</li>
+    <li><strong>交差項</strong>: 財務指標 × マクロ + セクターダミー × マクロ（APT の異質感応度 β を捕捉）</li>
+  </ul>
+
+  <h3>9.2 前進 BIC 特徴量選択</h3>
+  <div class="formula">BIC = n · log(SSE / n) + k · log(n)</div>
+  <p>空モデルから BIC を最も下げる特徴量を1本ずつ追加（O(p²)）。各ステップで VIF 閾値 10 を検査し多重共線性のある候補をブロック。BIC が改善しなくなった時点で打ち切り（上限 <code>max_features</code>）。</p>
+
+  <h3>9.3 リスク指標</h3>
+  <table>
+    <tr><th>記号</th><th>定義</th><th>役割</th></tr>
+    <tr><td><strong>R1</strong></td><td>OLS 予測分散 s²(1 + xᵀ(XᵀX)⁻¹x) の平方根</td><td>予測不確実性・μ 縮小ウェイト兼用</td></tr>
+    <tr><td><strong>R2</strong></td><td>直前52週週次ログリターン SD × √52</td><td>価格変動リスク（Sharpe 分母）</td></tr>
+  </table>
+
+  <h3>9.4 James-Stein 縮小（Black-Litterman 型）</h3>
+  <div class="formula">μ<sub>shrunk</sub> = (1 − w) · μ<sub>raw</sub> + w · μ<sub>sector</sub><br>w = R1 / R1<sub>max</sub></div>
+  <p>R1 が大きい（信頼度が低い）ほど強くセクター平均へ引き寄せる。</p>
+
+  <h3>9.5 効用関数と Pareto フロンティア</h3>
+  <div class="formula">U = μ<sub>shrunk</sub> − λ · R2</div>
+  <p>λ はリスク回避度スライダー（0〜3、既定 1.0）。U 降順で top_n 社を返す。<br>
+  Pareto 最優解（同リスクで高リターン or 同リターンで低リスク）を <code>is_pareto=true</code> でフラグし、バブルチャートで強調描画する。</p>
+
+  <h3>9.6 参考文献</h3>
+  <ul>
+    <li>Markowitz, H. (1952). "Portfolio Selection." <em>Journal of Finance</em>, 7(1), 77–91. <a href="https://doi.org/10.2307/2975974" target="_blank" rel="noopener">https://doi.org/10.2307/2975974</a></li>
+    <li>Chen, N., Roll, R. &amp; Ross, S.A. (1986). "Economic Forces and the Stock Market." <em>Journal of Business</em>, 59(3), 383–403. <a href="https://doi.org/10.1086/296344" target="_blank" rel="noopener">https://doi.org/10.1086/296344</a></li>
+    <li>Black, F. &amp; Litterman, R. (1992). "Global Portfolio Optimization." <em>Financial Analysts Journal</em>, 48(5), 28–43. <a href="https://doi.org/10.2469/faj.v48.n5.28" target="_blank" rel="noopener">https://doi.org/10.2469/faj.v48.n5.28</a></li>
+    <li>Jegadeesh, N. &amp; Titman, S. (1993). "Returns to Buying Winners and Selling Losers." <em>Journal of Finance</em>, 48(1), 65–91. <a href="https://doi.org/10.1111/j.1540-6261.1993.tb04702.x" target="_blank" rel="noopener">https://doi.org/10.1111/j.1540-6261.1993.tb04702.x</a></li>
+    <li>Frazzini, A. &amp; Pedersen, L.H. (2014). "Betting Against Beta." <em>Journal of Financial Economics</em>, 111(1), 1–23. <a href="https://doi.org/10.1016/j.jfineco.2013.10.005" target="_blank" rel="noopener">https://doi.org/10.1016/j.jfineco.2013.10.005</a></li>
+  </ul>
 </div>
 
 </main>
