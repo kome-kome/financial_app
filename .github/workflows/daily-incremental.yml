@@ -1,4 +1,4 @@
-name: Daily Incremental (差分収集・毎日自動実行)
+name: "[定常] 差分収集・毎日自動実行"
 
 # JST 03:00 = UTC 18:00
 # 差分収集（過去1年・skip_existing）＋成長率/Zスコア＋市場データ＋マクロデータ

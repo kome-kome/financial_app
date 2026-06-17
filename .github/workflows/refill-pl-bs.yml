@@ -1,4 +1,4 @@
-name: bs_inventory NULL 補完（旧コホートの PL/BS 列を再取得）
+name: "[補完] PL/BS NULL バックフィル（旧コホート・bs_inventory 等）"
 
 # 一回性バックフィル:
 #   パーサ修正（_inventory_fallback）前に収集した旧コホート（〜2022年度）が

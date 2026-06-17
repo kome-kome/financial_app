@@ -18,8 +18,21 @@ Render の制約と運用形態に合わせて設計すること。
 | **手動のみ** | 株価バックフィル（過去2年分） | workflow_dispatch で起動 | GitHub Actions `backfill-stock-history.yml` |
 | **手動のみ** | CF補完・capex補完 | workflow_dispatch で起動 | GitHub Actions `refill-cf.yml` |
 | **手動のみ** | bs_inventory 補完（旧コホート是正） | workflow_dispatch で起動 | GitHub Actions `refill-pl-bs.yml` |
+| **手動のみ** | C2 新列 NULL 補完 | workflow_dispatch で起動 | GitHub Actions `refill-c2.yml` |
 | **UIから手動** | 差分収集・株価更新 | ユーザーがボタン押下 | Render Web UI |
 | **自動（CI）** | `pytest` 回帰テスト（Secrets・本番DB非依存） | PR / main への push | GitHub Actions `ci.yml` |
+
+### GitHub Actions workflow 早見表（いつ・何を・どれを使うか）
+
+| カテゴリ | workflow 名 | ファイル | 使うタイミング | 所要時間の目安 |
+|---|---|---|---|---|
+| `[CI]` | pytest 自動テスト | `ci.yml` | PR・main push で自動実行（手動起動不要） | 〜1分 |
+| `[定常]` | 差分収集・毎日自動実行 | `daily-incremental.yml` | 毎日 JST 03:00 に自動。手動で即時更新したい場合は `workflow_dispatch` | 5〜15分 |
+| `[全件]` | XBRL収集・財務データ全件更新 | `full-pipeline.yml` | DB初期構築時・全社バックフィル必要時（`daily-incremental` を `.disabled` に退避して同時実行回避） | 200〜240分 |
+| `[一回性]` | 株価履歴バックフィル | `backfill-stock-history.yml` | `stock_price` が NULL な企業の過去2年株価を補完（通常は1回で完了） | 60〜90分 |
+| `[補完]` | C2 NULL バックフィル | `refill-c2.yml` | C2 新列（`pl_depreciation` 等）が NULL のまま残っている場合に EDINET から再取得 | 2〜4時間 |
+| `[補完]` | CF NULL バックフィル | `refill-cf.yml` | `cf_investing_cf` 等が NULL の場合に再取得（mode: refill / capex-only / diagnose） | 1〜3時間 |
+| `[補完]` | PL/BS NULL バックフィル | `refill-pl-bs.yml` | `bs_inventory` 等 旧コホート（〜2022年）が NULL の場合に再取得 | 4〜5時間 |
 
 > **CI（`ci.yml`）**: データ収集系ワークフローとは独立した回帰検知用。`pull_request` と main への `push` で Python 3.13.7 上に `requirements.txt` + `requirements-dev.txt` を入れて `pytest` を実行する。Secrets・外部ネットワーク・本番 DB には一切触れず、`conftest.py` の in-memory SQLite / モックで完結する範囲のみを検証する。
 

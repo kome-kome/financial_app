@@ -1,4 +1,4 @@
-name: CI (pytest)
+name: "[CI] pytest 自動テスト"
 
 # PR と main への push で pytest を自動実行する回帰検知用 CI。
 # 収集パイプライン（full / incremental / backfill / refill-cf）とは独立し、

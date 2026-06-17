@@ -1,4 +1,4 @@
-name: Backfill Stock Price History (Yahoo Finance)
+name: "[一回性] 株価履歴バックフィル（Yahoo Finance）"
 
 on:
   workflow_dispatch:

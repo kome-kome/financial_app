@@ -1,4 +1,4 @@
-name: CF NULL 補完（投資CF・現金増減・設備投資の再取得）
+name: "[補完] CF NULL バックフィル（投資CF・capex 等）"
 
 # 実行ポリシー: 手動（workflow_dispatch）のみ。定期 cron は持たない（Issue #117 で案B承認）。
 #   理由（本番DB 20,548行の実態計測にもとづく判断）:

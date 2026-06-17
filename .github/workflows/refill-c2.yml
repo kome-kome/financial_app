@@ -1,4 +1,4 @@
-name: C2 NULL 補完（pl_depreciation 等の C2 追加列を再取得）
+name: "[補完] C2 NULL バックフィル（pl_depreciation 等）"
 
 # 一回性バックフィル:
 #   C2 追加列（pl_depreciation / pl_rd_expenses / pl_extraordinary_income / pl_extraordinary_loss /

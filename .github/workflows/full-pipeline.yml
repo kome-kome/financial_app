@@ -1,4 +1,4 @@
-name: Full Pipeline (XBRL収集・財務データ更新)
+name: "[全件] XBRL収集・財務データ全件更新"
 
 on:
   workflow_dispatch:
