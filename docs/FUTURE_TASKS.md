@@ -28,11 +28,85 @@
 ## Tier 2 — 分析モデルの拡張【コード】
 
 ### M-1. マクロ要因を組み込んだ分析モデル  【中・コード】
-- **問題**: マクロデータ（金利・為替）の収集基盤（`MacroData` テーブル・`collect_macro_data`・`MACRO_SERIES`・`/api/collect/macro/start`）は完成しているが、**これを使った分析モデルがまだない**（プラグインにマクロ特徴量の利用は皆無）。
-- **改善案**: 既存プラグイン（`recommend.py` / `total_return.py` / `price_predictor.py`）にマクロ特徴量を追加（例: 10年金利水準・USDJPY 変動率）。
-- **前提**: 過去5年のマクロデータが DB 蓄積されていること（`/api/collect/macro/start`）。
-- **実装場所**: `plugins/utils.py`（マクロ特徴量取得関数）＋各プラグイン。
-- **設計留意**: マクロ系列は財務データと頻度が違う（日次 vs 年次）。決算月の前後 N ヶ月の値や前年同月比などに変換してから OLS 特徴量に投入する。**次元整合性**（注意事項1）に注意し、水準そのものでなく無次元の変化率・偏差を特徴量とする。
+
+**背景**  
+マクロデータ収集基盤（`MacroData` テーブル・`collect_macro_data`・9系列・`/api/collect/macro/start`）は完成済み。9系列（USDJPY, EURJPY, US10Y, JP10Y, NIKKEI225, TOPIX, SP500, WTI, GOLD）を日次 OHLCV で蓄積。しかし **分析プラグイン側はマクロ特徴量を一切使っていない**（`plugins/utils.py` にマクロ取得関数ゼロ）。
+
+**対象プラグインと除外理由**
+
+| プラグイン | 対応 | 理由 |
+|---|---|---|
+| `price_predictor.py` | ✅ 優先 | 月次スナップ・対数リターン(無次元)目的・`snap_date` 基準でマクロを時点整合できる |
+| `total_return.py` | ✅ 次フェーズ | 年次・`period_end+45日` 基準で結合。Ohlson 型の per-share 特徴量と無次元マクロを混在させる際、正規化パイプラインが吸収する |
+| `recommend.py` | ❌ 除外 | クロスセクション Z スコアは全企業で **同一値** → 分散=0 → 特徴量として機能しない。レジームフィルタへの拡張は別設計（スコープ外）|
+
+**マクロ特徴量の設計（次元整合性を守る）**
+
+生データは [円/ドル] や [%] の次元を持つため **無次元化してから OLS 投入** する。2方式を採用：
+
+| 特徴量名 | series_code | 変換式 | 次元 | 適用先 |
+|---|---|---|---|---|
+| `macro_usdjpy_yoy` | USDJPY | (ref30日平均 − 1y前30日平均) / 1y前30日平均 | 無次元率 | price_predictor, total_return |
+| `macro_us10y_zscore` | US10Y | (ref30日平均 − 5y平均) / 5y標準偏差 | 無次元 Z | price_predictor |
+| `macro_jp10y_zscore` | JP10Y | (ref30日平均 − 5y平均) / 5y標準偏差 | 無次元 Z | total_return |
+| `macro_sp500_yoy` | SP500 | (ref30日平均 − 1y前30日平均) / 1y前30日平均 | 無次元率 | price_predictor |
+
+`ref30日平均` = ref_date 直前 30 日の close 平均（日次ノイズ軽減）。金利は水準の YoY 変化率でなく Z スコアを採用（% 点変化は直感的でないため）。
+
+**周波数ミスマッチ（日次 vs 年次）の対処**  
+`price_predictor._find_applicable_fin` の「`period_end + 45日 ≤ snap_date` を満たす最新財務」パターンを流用。snap_date 時点のマクロ値（上記30日平均）を財務スナップと同じ snap_dict に追加するだけで、既存の OLS パイプラインに乗る。
+
+**実装場所と関数仕様**
+
+```python
+# plugins/utils.py — 新規追加
+def get_macro_features(
+    db,
+    ref_date: date,
+    feature_names: list[str],   # ["macro_usdjpy_yoy", "macro_us10y_zscore", ...]
+    window_days: int = 30,      # ref_date 直前 N 日の close 平均
+    zscore_years: int = 5,      # Z スコア算出用の歴史窓
+) -> dict[str, float | None]:
+    """
+    MacroData テーブルから ref_date 時点のマクロ特徴量 dict を返す。
+    DB 未蓄積（NULL）は None を返し、呼び出し側でサンプルを除外する。
+    """
+```
+
+```python
+# plugins/price_predictor.py — 追加箇所
+MACRO_FEATURE_OPTIONS = [
+    {"value": "macro_usdjpy_yoy",   "label": "USD/JPY 前年比変化率"},
+    {"value": "macro_us10y_zscore", "label": "米10年金利 5年Zスコア"},
+    {"value": "macro_sp500_yoy",    "label": "S&P500 前年比リターン"},
+]
+# 1. params_schema() の features.options に MACRO_FEATURE_OPTIONS を追記
+# 2. _build_snapshots() で get_macro_features(db, snap_date, ...) を呼び出し
+#    → snap_dict に "macro_*" キーを追加
+#    → _fit_final_model はキー名で X 列を構築するため改修不要（既設計）
+```
+
+**実装順序**
+
+1. `plugins/utils.py` に `get_macro_features` を追加（DB クエリ + 変換ロジック）
+2. `tests/test_price_predictor.py` にマクロ特徴量 None ケースのテスト追加
+3. `plugins/price_predictor.py` に `MACRO_FEATURE_OPTIONS` + `_build_snapshots` 拡張
+4. `plugins/total_return.py` に同様追加（次フェーズ）
+5. `docs/MODELS.md` の price_predictor セクション更新（マクロ特徴量の説明追記）
+6. `docs/ARCHITECTURE.md` の plugins セクション更新
+
+**前提条件の確認方法**  
+蓄積状況は Supabase SQL エディタで確認：
+```sql
+SELECT series_code, MIN(trade_date), MAX(trade_date), COUNT(*)
+FROM macro_data GROUP BY series_code ORDER BY series_code;
+```
+5年分（≈1250行/系列）が揃っていれば準備完了。足りない場合は `/api/collect/macro/start` で再収集。
+
+**注意事項**
+- OLS 学習前の `winsorize(p1-p99)` は `price_predictor._fit_final_model` 内で **全特徴量に一括適用** されるため、マクロ特徴量も自動で外れ値処理される
+- `get_macro_features` が `None` を返したサンプル（未収集期間）は `_build_snapshots` 内の既存 None 除外ロジックで自動スキップ
+- 多重共線性（SP500 と日経225 は高相関）は `check_collinearity`（`plugins/utils.py`）で事前確認推奨
 
 ---
 
