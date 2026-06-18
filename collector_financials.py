@@ -70,7 +70,7 @@ CAPEX_LABEL_REQUIRE = ["有形固定資産"]                         # 有形固
 CAPEX_LABEL_EXCLUDE = ["売却", "収入", "減少"]                 # 売却収入・回収は capex ではない
 
 
-def _match_capex_by_label(label: str) -> bool:
+def _match_capex_by_label(label) -> bool:
     """項目名（日本語ラベル）が設備投資（有形固定資産の取得による支出）に該当するか判定。
 
     例: "有形固定資産の取得による支出" → True
@@ -78,7 +78,7 @@ def _match_capex_by_label(label: str) -> bool:
         "有形固定資産の売却による収入" → False（売却収入）
         "無形固定資産の取得による支出" → False（有形を含まない）
     """
-    if not label:
+    if not isinstance(label, str) or not label:  # NaN(float) は str でないため早期リターン
         return False
     if not any(kw in label for kw in CAPEX_LABEL_REQUIRE):
         return False
