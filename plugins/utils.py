@@ -661,7 +661,7 @@ def walk_forward_cv_monthly(
     """
     all_yms = sorted(samples_by_ym.keys())
     if len(all_yms) < min_train_months + 1:
-        return []
+        return ([], {}) if return_residuals else []
 
     n_feat = len(feature_names)
 
@@ -709,11 +709,11 @@ def walk_forward_cv_monthly(
 
 # feature_name → (series_code, transform: "yoy" | "zscore")
 # series_code は collector_prices.py の MACRO_SERIES["code"] と一致させる
+# JP10Y は stooq/Yahoo Finance で取得不可のため除外
 _MACRO_FEATURE_MAP: dict[str, tuple[str, str]] = {
     "macro_usdjpy_yoy":   ("USDJPY", "yoy"),
     "macro_sp500_yoy":    ("SP500",  "yoy"),
     "macro_us10y_zscore": ("US10Y",  "zscore"),
-    "macro_jp10y_zscore": ("JP10Y",  "zscore"),
 }
 
 

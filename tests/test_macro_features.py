@@ -36,7 +36,8 @@ def test_macro_feature_map_keys():
     assert "macro_usdjpy_yoy"   in _MACRO_FEATURE_MAP
     assert "macro_sp500_yoy"    in _MACRO_FEATURE_MAP
     assert "macro_us10y_zscore" in _MACRO_FEATURE_MAP
-    assert "macro_jp10y_zscore" in _MACRO_FEATURE_MAP
+    # macro_jp10y_zscore は stooq/Yahoo Finance で取得不可のため削除済み
+    assert "macro_jp10y_zscore" not in _MACRO_FEATURE_MAP
     for fname, (scode, ttype) in _MACRO_FEATURE_MAP.items():
         assert ttype in ("yoy", "zscore"), f"{fname} の transform が不正"
 

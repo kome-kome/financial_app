@@ -46,11 +46,11 @@ FIN_BASE_OPTIONS = [
 DEFAULT_FIN_FEATURES = ["per", "pbr", "roe", "equity_ratio"]
 
 # series_code → transform ("yoy" | "zscore")
+# JP10Y は stooq/Yahoo Finance で取得不可（stooq JS チャレンジ・^JGB 上場廃止）のため除外
 _MACRO_MAP = {
     "macro_usdjpy_yoy":   ("USDJPY", "yoy"),
     "macro_sp500_yoy":    ("SP500",  "yoy"),
     "macro_us10y_zscore": ("US10Y",  "zscore"),
-    "macro_jp10y_zscore": ("JP10Y",  "zscore"),
 }
 MACRO_FEATURE_NAMES = list(_MACRO_MAP.keys())
 
