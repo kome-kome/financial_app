@@ -788,17 +788,20 @@ classDiagram
     AnalysisPlugin <|-- SectorOLSPlugin
     AnalysisPlugin <|-- PricePredictorPlugin
     AnalysisPlugin <|-- NetCashAnalysisPlugin
+    AnalysisPlugin <|-- MacroRiskReturnPlugin
 
     PluginRegistry --> AnalysisPlugin : 管理・呼び出し
 
-    GapAnalysisPlugin    --> Utils : 統計処理を使用
-    SectorOLSPlugin      --> Utils : ols() / winsorize() / normalize() を使用
-    PricePredictorPlugin --> Utils : ols() / winsorize() / walk_forward_cv_monthly() を使用
+    GapAnalysisPlugin     --> Utils : 統計処理を使用
+    SectorOLSPlugin       --> Utils : ols() / winsorize() / normalize() を使用
+    PricePredictorPlugin  --> Utils : ols() / winsorize() / walk_forward_cv_monthly() を使用
+    MacroRiskReturnPlugin --> Utils : ols() / winsorize() / walk_forward_cv_monthly(return_residuals) / get_macro_features() を使用
 
     note for SectorOLSPlugin "heavy=True: Render 軽量モードでは\nrun_plugin が 403 を返しローカル実行を促す\n（結果は regression_results に保存され本番へ反映）"
     note for GapAnalysisPlugin "業種別OLSの実行後でないと\nregression_results が空のため結果が出ない\n（financial_metrics VIEW 経由で gap_ratio を読む）"
     note for PricePredictorPlugin "stock_price_daily + FinancialRecord を結合\n月次スナップショット × 全企業でパネルデータ構築\nルックアヘッドバイアス禁止: period_end + 45日ラグ厳守"
     note for NetCashAnalysisPlugin "清原達郎『わが投資術』式\nNC = 流動資産 + 投資有価証券×0.7 − 総負債\nOLS不使用・会計値からの直接計算"
+    note for MacroRiskReturnPlugin "交差項OLS+前進BIC+walk-forward CV+James-Stein縮小\nリスク軸 R1/R2/R3 を risk_axis で切替\n（R3=セクター×サイズ別バケットの CV 残差 RMSE・サイズ代理 bs_total_assets）\nheavy=True / use_macro=False で純財務モデルにも縮退"
     note for AnalysisPlugin "params_schema() はパラメータ契約（CONTEXT.md）:\ntype=ウィジェット / dtype=データ型 の2軸。\nexecute は coerce 済み typed params を受け取り、\n意味的 validation だけ持つ（型変換・default・\nbounds/membership は coerce_params が担う）"
     note for Utils "統計は numpy / scipy / statsmodels / sklearn を使用。\ncoerce_params（パラメータ契約の coerce seam）と\nwalk_forward_cv_monthly() を含む"
 ```
@@ -824,6 +827,7 @@ graph LR
 
     subgraph OPS["🩺 運用"]
         H1["GET /health\n死活監視（DB疎通確認、認証不要）\n200=ok / 503=degraded"]
+        H2["GET /api/system/info\nRENDER_LIGHT_MODE フラグを返す\n（フロントが heavy プラグイン可否を判定）"]
     end
 
     subgraph AUTH["🔐 認証 /api/auth/"]
@@ -969,7 +973,8 @@ graph TB
 
 | ファイル | 種別 | 役割 | 主な依存先 |
 |---|---|---|---|
-| `api.py` | バックエンド | REST API窓口・認証・SSE・手動収集トリガー（自動収集は GitHub Actions が担当）。収集ジョブの実行時状態は `collection_jobs.jobs` registry へ委譲。バックテスト計算は `backtest`、財務レコード整形は `serializers` へ委譲（routing へ痩せる） | database.py, collector.py, collection_jobs.py, backtest.py, serializers.py, plugins/ |
+| `api.py` | バックエンド | FastAPI アプリ本体。REST ルートは `routers/` 4本へ分割し `include_router` で集約。自身は HTML ページ配信・`/health`・`/api/system/info`・ミドルウェア（認証/CORS）・`StaticFiles` マウントを担う。収集ジョブの実行時状態は `collection_jobs.jobs` registry、バックテスト計算は `backtest`、財務レコード整形は `serializers` へ委譲 | routers/*, database.py, collector.py, collection_jobs.py, backtest.py, serializers.py, plugins/ |
+| `routers/*.py` | バックエンド | `api.py` が `include_router` で束ねる REST ルーター4本（いずれも `APIRouter()`・フルパス保持）。`auth`（認証・Cookie/CSRF 発行）/ `collect`（収集管理・進捗SSE）/ `market`（統計・企業一覧・株価/履歴・マクロ・CSV）/ `analysis`（プラグイン実行・推薦・乖離・スクリーニング・バックテスト・DBビューア）。REST ルート定義の実体はここにある | database.py, collection_jobs.py, plugins/, data_quality.py |
 | `collection_jobs.py` | バックエンド | 収集ジョブの実行時状態を集約する registry。job 名キーの `JobState`（running/progress/log/cancel）＋ start/cancel/snapshot/stream を提供。旧6本の並列 status dict を1箇所に畳む。SSE 配信ジェネレータ（`_sse_stream`）を内包 | fastapi |
 | `backtest.py` | バックエンド | バックテスト分析（プリセット・スコアリング上位N社の実績リターン）。`run(db, …)->dict` / `percentile` / `MULTI_PERIODS`。FastAPI 非依存で直接テスト可能。スコア指標は `FinancialMetric`（VIEW 派生）を引く | database.py, plugins.recommend |
 | `serializers.py` | バックエンド | 財務レコード（`FinancialMetric`）を bs/pl/cf/val/nc/zscore のネスト dict へ整形する純粋関数 `record_to_dict` | — |
@@ -999,15 +1004,18 @@ graph TB
 | `models.html` | フロントエンド | モデル解説・参考文献ページ（`/models`）。9モデルの数式・パラメータ・DOIリンクをインラインHTMLで表示。 | — |
 | `db.html` | フロントエンド | DBビューア（`/db`）。4テーブルのスキーマ・プレビュー・統計サマリー・ER 風リレーション・企業ドリルダウン・CSV エクスポート。 | api.py |
 | `company.html` | フロントエンド | 企業詳細（`/company`・`/company/{edinet_code}`）。個別企業の業績・財務(BS)・CF・per-share/配当・バリュエーション（理論時価総額乖離）・日次株価・業種内Zスコアレーダー・清原式ネットキャッシュ・同業比較を Chart.js の時系列グラフで可視化。企業名・証券コード検索付き。財務(BS)タブはバフェットコード型で各年「左＝資産（借方）／右＝負債・純資産（貸方）」を並列表示し、粒度（粗/中/細）切替で内訳の細かさを変更できる（どの粒度でも資産バー＝負債純資産バー＝総資産になるよう補正）。業績(PL)タブは売上高を費用・利益に分解した積み上げ棒（最上部＝純利益）を粒度（粗/中/細）切替で表示（合計＝売上高、信頼性の低い stored gross_profit は不使用）。CFタブも粒度（粗＝フリー+財務／中＝営業/投資/財務／細＝営業/設備投資/その他投資/財務）切替に対応し、CFデータ未収集の企業には明示メッセージを表示。同業比較タブは選択企業を必ず表示し業種内時価総額順位を併記。**相互リンク**：理論時価総額/乖離率チャート→`/analysis?tab=gap`・Zスコアチャート→`/analysis?tab=recommend`・ネットキャッシュチャート→`/analysis?tab=net_cash`（逆方向の乖離分析表→`/company/{code}` は既存） | api.py, Chart.js (CDN) |
-| `static/js/*.js` | フロントエンド | 各HTMLテンプレから外部化したページ別JS（CSP対応）。dashboard / collection / analysis / company / db / models / login の7ファイル。`/static` で配信（api.py の `StaticFiles` マウント）。`<style>` とインラインイベントハンドラ（`onclick=` 等）はHTML側に残置（後者は将来 addEventListener 化予定）。 | api.py |
+| `static/js/*.js` | フロントエンド | 各HTMLテンプレから外部化したページ別JS（CSP対応）。common（`esc`/`apiFetch`/`initAuth`/`logout` 等の共通ユーティリティ・全ページ読込）+ dashboard / collection / analysis / company / db / models / login の8ファイル。`/static` で配信（api.py の `StaticFiles` マウント）。`<style>` とインラインイベントハンドラ（`onclick=` 等）はHTML側に残置（後者は将来 addEventListener 化予定）。 | api.py |
 | `_pipeline_gh.py` | GitHub Actions | 全件収集パイプライン（full-pipeline.yml から workflow_dispatch 手動起動）。`--refill-cf`（CF NULL 補完: 投資CF/現金増減/capex）・`--refill-capex-only`（capex のみワンショット）・`--refill-cf-missing`（CF全NULL社=IFRS決算大企業の営業/投資/財務CFを補完）・`--refill-pl-bs`（bs_inventory NULL 補完: 旧コホート〜2022の PL/BS 列を XBRL 再取得で是正・古い順／`refill-pl-bs.yml`）・`--diagnose-cf`（CF ラベル診断）モードを持つ。`normal` CF補完は 2026-05-31 に完了（capex 88.8%充足）、IFRS/US-GAAP決算企業の CF全NULL は 2026-06-03 に `--refill-cf-missing` で補完し CF未収集 268社→0社（詳細は GOTCHAS.md「IFRS/US-GAAP決算のCF・売上要素名」「CF NULL補完の運用」「bs_inventory バックフィルの運用」）。 | collector.py, database.py |
 | `_pipeline_incremental.py` | GitHub Actions | 差分収集パイプライン（daily-incremental.yml で毎日 JST 03:00 自動実行） | collector.py, database.py |
+| `_pipeline_utils.py` | GitHub Actions | 全件/差分パイプライン共通基盤。ファイルロガー生成（`make_logger`）・Supabase の read-only/一時エラー検出（`_is_readonly_error`）・指数バックオフ付きリトライラッパ（`_run_with_retry`） | collector.py |
 | `edinet_ping.py` | ユーティリティ | EDINET API 疎通確認ワンショット | EDINET API |
 | `scripts/check_db_state.py` | ユーティリティ | DB 状態確認ワンショット（主要6テーブルの行数＋直近の収集ログ表示）。Supabase 移行差分／パイプライン実行後の件数チェック用（手動実行） | database.py |
+| `scripts/migrate_stock_price_dual.py` | ユーティリティ | 株価テーブルの daily/weekly 二系列化に伴う一回限りのデータ移行スクリプト（ローカル手動実行・移行完了済み） | database.py |
+| `launch.py` | ユーティリティ | Windows ローカル開発用 tkinter ランチャー（uvicorn 起動 GUI）。本番・CI からは未参照の独立ツール | uvicorn |
 | `.env` | 設定 | APIキー・DB接続・認証情報（UTF-8 BOMなし） | — |
 | `ARCHITECTURE.md` | ドキュメント | 本ファイル。コード変更時は必ず更新する | — |
 | `MODELS.md` | ドキュメント | 分析モデルの数式・パラメータ・参考文献（Markdown版）。モデル変更時は `models.html` とセットで更新する。 | — |
-| `FUTURE_TASKS.md` | ドキュメント | 未実装の課題・改善案（発行株式数の正規化・period_end の DATE 型化・マクロ要因モデル等、Tier 別） | — |
+| `FUTURE_TASKS.md` | ドキュメント | 未実装の課題・改善案を Tier 別に記録（Tier1=本番データ鮮度・運用／Tier2=分析モデル拡張・コード／Tier3=運用堅牢化）。完了項目は `archive/IMPROVEMENTS.md` へ移設 | — |
 | `docs/archive/` | ドキュメント | 完了済み作業記録（REFACTORING・IMPROVEMENTS・VISUALIZATION_IMPROVEMENTS）。現行参照には使わない | — |
 | `VISION.md` | ドキュメント | プロジェクトの目的・方針 | — |
 | `CLAUDE.md` | 設定 | Claude Codeへの動作指示（索引＋必須ルール） | — |
