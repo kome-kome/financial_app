@@ -98,7 +98,7 @@ R1（イン・サンプルのレバレッジ）と R3（アウト・オブ・サ
 |---|---|---|---|
 | **A. マクロ特徴量基盤** ✅ | `get_macro_features` / `get_momentum_return` / `_MACRO_FEATURE_MAP` を `plugins/utils.py` に追加 | `plugins/utils.py` | `tests/test_macro_features.py`（17テスト合格） |
 | **B. 交差項モデル** ✅ | 新プラグイン `macro_risk_return.py`。財務×マクロ + セクター×マクロ交差項・前進BIC・VIF監視・walk-forward CV で μ を算出 | `plugins/macro_risk_return.py` | `tests/test_macro_risk_return.py`（18テスト合格） |
-| **C. リスク-リターン** ✅ (R3 は未実装) | R1/R2 算出・μ のセクター収縮（James-Stein）・U=μ−λR²・パレート抽出 は Phase B に含めて実装済み。R3（セクター×サイズバケット CV-RMSE）は未実装で `risk_axis` オプションから除外中 | 同上 + `plugins/utils.py` | テスト済み（`r1`, `r2`, `mu_shrunk`, `is_pareto`, `utility` を検証） |
+| **C. リスク-リターン** ✅ | R1/R2 算出・μ のセクター収縮（James-Stein）・U=μ−λR_axis・パレート抽出 は Phase B に実装。**R3（セクター×サイズ三分位バケットの walk-forward CV 残差 RMSE）も実装済み**（2026-06-18）。サイズ代理=`bs_total_assets`、バケット標本不足は セクター→全体 へフォールバック。`risk_axis` で R1/R2/R3 を切替し、散布図・効用・Pareto 判定を選択軸に整合 | 同上 + `plugins/utils.py`（`walk_forward_cv_monthly(return_residuals=True)`） | `tests/test_macro_risk_return.py`（`TestR3Buckets` + execute 統合で `r3`/`risk_axis` を検証） |
 | **D. UI** ✅ | analysis.html に新タブ・Chart.js バブル（Y=μ_shrunk / X=R2 or R1 / バブルサイズ=R1信頼度逆数）・パレート強調・Walk-forward CV 指標・ランキング表 | `templates/analysis.html` / `static/js/analysis.js` | 手動確認済み（18テスト + CI green） |
 
 #### params_schema（パラメータ契約・CLAUDE.md 準拠）

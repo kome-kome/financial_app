@@ -28,6 +28,9 @@ from .utils import (
 
 FINANCIAL_LAG_DAYS = 45
 HORIZON_WEEKS = 52
+# R3（セクター×サイズ別 CV-RMSE）でバケットを採用する最小残差数。
+# 下回ったら sector → global へフォールバックして過小標本のノイズを避ける。
+R3_MIN_BUCKET_N = 5
 
 FIN_BASE_OPTIONS = [
     {"value": "per",          "label": "PER"},
@@ -196,10 +199,11 @@ class MacroRiskReturnPlugin(AnalysisPlugin):
             "risk_axis": {
                 "type": "select",
                 "label": "横軸リスク",
-                "description": "R2=実現ボラ（既定）/ R1=予測不確実性",
+                "description": "R2=実現ボラ（既定）/ R1=予測不確実性 / R3=モデル信頼性（セクター×サイズ別CV-RMSE）",
                 "options": [
                     {"value": "r2", "label": "R2 実現ボラティリティ（既定）"},
                     {"value": "r1", "label": "R1 予測不確実性"},
+                    {"value": "r3", "label": "R3 モデル信頼性（バケットCV-RMSE）"},
                 ],
                 "default": "r2",
             },
@@ -269,7 +273,7 @@ class MacroRiskReturnPlugin(AnalysisPlugin):
         macro_cache = self._preload_macro(db, prices_by_co) if use_macro else {}
         sectors = self._collect_sectors(fin_by_co, companies)
 
-        samples_by_ym, current_snaps, all_feat_names = self._build_snapshots(
+        samples_by_ym, sample_meta_by_ym, current_snaps, all_feat_names = self._build_snapshots(
             prices_by_co, fin_by_co, companies, macro_cache, sectors,
             fin_features, use_macro, mom_window, min_coverage,
         )
@@ -293,9 +297,10 @@ class MacroRiskReturnPlugin(AnalysisPlugin):
             for ym, pairs in samples_by_ym.items()
         }
 
-        # --- Walk-Forward CV ---
-        cv_folds = walk_forward_cv_monthly(
-            dict(samples_sel), selected_names, min_train_months=6, step_months=3
+        # --- Walk-Forward CV（残差も回収し R3 バケット CV-RMSE を算出）---
+        cv_folds, cv_residuals_by_ym = walk_forward_cv_monthly(
+            dict(samples_sel), selected_names, min_train_months=6, step_months=3,
+            return_residuals=True,
         )
         cv_metrics = {
             "folds":     cv_folds,
@@ -303,6 +308,9 @@ class MacroRiskReturnPlugin(AnalysisPlugin):
             "mean_rmse": round(statistics.mean(f["rmse"] for f in cv_folds), 4) if cv_folds else None,
             "n_folds":   len(cv_folds),
         }
+
+        # --- R3: セクター×サイズ・バケット別の CV 残差 RMSE（モデル信頼性）---
+        r3_data = self._compute_r3_buckets(cv_residuals_by_ym, sample_meta_by_ym)
 
         # --- 最終モデル学習 ---
         beta, win_params, norm_params, y_mu, y_sd, XtX_inv, sigma2 = self._fit_final(
@@ -314,7 +322,7 @@ class MacroRiskReturnPlugin(AnalysisPlugin):
             current_snaps, sel_idx, n_sel,
             beta, win_params, norm_params, y_mu, y_sd,
             XtX_inv, sigma2, prices_by_co,
-            lambda_risk, risk_axis, top_n,
+            lambda_risk, risk_axis, top_n, r3_data,
         )
 
         return {
@@ -322,6 +330,7 @@ class MacroRiskReturnPlugin(AnalysisPlugin):
             "selected_features": selected_names,
             "n_train_samples":  total_samples,
             "n_companies":      len(current_snaps),
+            "risk_axis":        risk_axis,
             "results":          results,
         }
 
@@ -412,6 +421,9 @@ class MacroRiskReturnPlugin(AnalysisPlugin):
         n_feat = len(all_feat_names)
 
         samples_by_ym: dict[str, list] = defaultdict(list)
+        # R3 用: 各学習サンプルと同順の (sector, size) メタ列。samples_by_ym と
+        # 添字対応させ、walk-forward CV の残差をバケット集計するのに使う。
+        sample_meta_by_ym: dict[str, list] = defaultdict(list)
         current_snaps: dict[str, tuple] = {}
         min_rows = HORIZON_WEEKS + 4
 
@@ -478,6 +490,11 @@ class MacroRiskReturnPlugin(AnalysisPlugin):
                 # セクター取得
                 industry = fin_rec.industry or (companies.get(edinet_code, None) and companies[edinet_code].industry) or "不明"
 
+                # サイズ代理 = 総資産（R3 バケット用）。本番で確実に充足するコア BS 項目を採用
+                # （issued_shares は C2 新列で本番 NULL のため不可）。分位点は単調変換不変なので生値。
+                size_val = getattr(fin_rec, "bs_total_assets", None)
+                size_val = float(size_val) if (size_val is not None and size_val > 0) else None
+
                 # 交差項
                 inter_row: list[float] = []
                 if use_macro:
@@ -500,6 +517,8 @@ class MacroRiskReturnPlugin(AnalysisPlugin):
                     c_snap, c_fut = closes[snap_idx], closes[snap_idx + HORIZON_WEEKS]
                     if c_snap and c_fut and c_snap > 0 and c_fut > 0:
                         samples_by_ym[snap_ym].append((feat_row, math.log(c_fut / c_snap)))
+                        # サンプルと同順でメタを追加（添字対応を厳守）
+                        sample_meta_by_ym[snap_ym].append((industry, size_val))
 
                 if is_current:
                     comp = companies.get(edinet_code)
@@ -507,11 +526,12 @@ class MacroRiskReturnPlugin(AnalysisPlugin):
                         "sec_code":     fin_rec.sec_code or (comp.sec_code if comp else ""),
                         "company_name": fin_rec.company_name or (comp.name if comp else edinet_code),
                         "industry":     industry,
+                        "size":         size_val,
                         "price_rows":   price_rows,
                         "snap_date":    snap_date,
                     })
 
-        return dict(samples_by_ym), current_snaps, all_feat_names
+        return dict(samples_by_ym), dict(sample_meta_by_ym), current_snaps, all_feat_names
 
     @staticmethod
     def _momentum(closes: list, dates: list, snap_idx: int, long_months: int) -> float | None:
@@ -642,6 +662,78 @@ class MacroRiskReturnPlugin(AnalysisPlugin):
 
         return beta, win_params, norm_params, y_mu, y_sd, XtX_inv, sigma2
 
+    # ── R3: セクター×サイズ・バケット別 CV-RMSE（モデル信頼性）──────────────────
+
+    @staticmethod
+    def _size_bucket(size: float | None, thresholds: tuple | None) -> str | None:
+        """総資産を S/M/L の三分位バケットへ割当てる。サイズ/閾値欠損は None。"""
+        if size is None or size <= 0 or thresholds is None:
+            return None
+        t1, t2 = thresholds
+        if size < t1:
+            return "S"
+        if size < t2:
+            return "M"
+        return "L"
+
+    def _compute_r3_buckets(self, residuals_by_ym: dict, meta_by_ym: dict) -> dict:
+        """walk-forward CV 残差を (sector, size三分位) バケットへ集計する。
+
+        返り値は二乗残差の累積 {(sector,bucket):[sse,n]} / {sector:[sse,n]} / [sse,n] と
+        三分位閾値。実 RMSE と粒度フォールバックは `_r3_for` が担う。
+        サイズ閾値は「残差を持つサンプル」の母集団から決め、現企業へも同閾値を適用する。
+        """
+        sizes = [
+            size
+            for ym in residuals_by_ym
+            for (_sector, size) in meta_by_ym.get(ym, [])
+            if size is not None and size > 0
+        ]
+        thresholds: tuple | None = None
+        if len(sizes) >= 3:
+            ss = sorted(sizes)
+            thresholds = (ss[len(ss) // 3], ss[2 * len(ss) // 3])
+
+        bucket: dict = defaultdict(lambda: [0.0, 0])
+        sector: dict = defaultdict(lambda: [0.0, 0])
+        glob = [0.0, 0]
+        for ym, resids in residuals_by_ym.items():
+            metas = meta_by_ym.get(ym, [])
+            for k, (yhat, ytrue) in enumerate(resids):
+                if k >= len(metas):
+                    break  # 添字対応が崩れた場合の安全策（通常は同長）
+                sec, size = metas[k]
+                e2 = (ytrue - yhat) ** 2
+                glob[0] += e2; glob[1] += 1
+                if sec:
+                    s = sector[sec]; s[0] += e2; s[1] += 1
+                    bkt = self._size_bucket(size, thresholds)
+                    if bkt is not None:
+                        b = bucket[(sec, bkt)]; b[0] += e2; b[1] += 1
+        return {
+            "bucket":     dict(bucket),
+            "sector":     dict(sector),
+            "global":     glob,
+            "thresholds": thresholds,
+        }
+
+    def _r3_for(self, sector: str | None, size: float | None, r3_data: dict) -> float | None:
+        """企業の (sector, size) から R3 = √(平均二乗残差) を返す。
+        (sector,bucket) → sector → global の順に、最小残差数を満たす最も細かい粒度を採用。"""
+        def _rmse(acc) -> float | None:
+            return math.sqrt(acc[0] / acc[1]) if (acc and acc[1] > 0) else None
+
+        bkt = self._size_bucket(size, r3_data.get("thresholds"))
+        if sector and bkt is not None:
+            acc = r3_data["bucket"].get((sector, bkt))
+            if acc and acc[1] >= R3_MIN_BUCKET_N:
+                return _rmse(acc)
+        if sector:
+            acc = r3_data["sector"].get(sector)
+            if acc and acc[1] >= R3_MIN_BUCKET_N:
+                return _rmse(acc)
+        return _rmse(r3_data.get("global"))
+
     # ── スコアリング ─────────────────────────────────────────────────────────
 
     def _score_companies(
@@ -649,7 +741,7 @@ class MacroRiskReturnPlugin(AnalysisPlugin):
         current_snaps, sel_idx, n_sel,
         beta, win_params, norm_params, y_mu, y_sd,
         XtX_inv, sigma2, prices_by_co,
-        lambda_risk, risk_axis, top_n,
+        lambda_risk, risk_axis, top_n, r3_data,
     ) -> list[dict]:
         raw_items: list[dict] = []
 
@@ -682,6 +774,9 @@ class MacroRiskReturnPlugin(AnalysisPlugin):
             snap_date  = info["snap_date"]
             r2 = _realized_vol(price_rows, snap_date, weeks=52)
 
+            # R3: セクター×サイズ・バケットの CV-RMSE（モデル信頼性・バケット解像度）
+            r3 = self._r3_for(info.get("industry"), info.get("size"), r3_data)
+
             raw_items.append({
                 "edinet_code":  edinet_code,
                 "sec_code":     info["sec_code"],
@@ -690,6 +785,7 @@ class MacroRiskReturnPlugin(AnalysisPlugin):
                 "mu_raw":       round(mu_raw, 6),
                 "r1":           round(r1, 6) if r1 is not None else None,
                 "r2":           round(r2, 6) if r2 is not None else None,
+                "r3":           round(r3, 6) if r3 is not None else None,
             })
 
         if not raw_items:
@@ -709,10 +805,12 @@ class MacroRiskReturnPlugin(AnalysisPlugin):
             sec_mu = sector_means.get(it["industry"], it["mu_raw"])
             it["mu_shrunk"] = round((1 - w) * it["mu_raw"] + w * sec_mu, 6)
 
-        # Pareto フロンティア
+        # Pareto フロンティア（表示中のリスク軸で非劣解を判定し、可視化と整合させる）
+        pareto_axis = risk_axis if risk_axis in ("r1", "r2", "r3") else "r2"
         pareto_codes = _pareto_frontier(
-            [it for it in raw_items if it.get("r2") is not None and it.get("mu_shrunk") is not None],
-            x_key="r2",
+            [it for it in raw_items
+             if it.get(pareto_axis) is not None and it.get("mu_shrunk") is not None],
+            x_key=pareto_axis,
             y_key="mu_shrunk",
         )
 

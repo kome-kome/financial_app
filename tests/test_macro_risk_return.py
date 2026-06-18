@@ -35,6 +35,7 @@ def _make_fin(period_end_str: str, **kwargs):
         per=15.0, pbr=1.2, roe=8.0, equity_ratio=55.0,
         rd_intensity=2.0, da_intensity=3.0,
         z_op_margin=0.5, z_roe=0.3, z_cf_ratio=0.1,
+        bs_total_assets=1.0e5,  # R3 サイズ代理（総資産）
     )
     defaults.update(kwargs)
     return SimpleNamespace(**defaults)
@@ -166,6 +167,11 @@ class TestParamsSchema:
         with pytest.raises(ValueError):
             coerce_params(self.schema, {"risk_axis": "r99"})
 
+    def test_coerce_r3_axis(self):
+        """R3 が有効な risk_axis 値として受理される（M-1 R3 追加）。"""
+        result = coerce_params(self.schema, {"risk_axis": "r3"})
+        assert result["risk_axis"] == "r3"
+
 
 # ── _forward_bic (BIC が有効特徴量を選ぶ) ─────────────────────────────────────
 
@@ -215,6 +221,57 @@ class TestForwardBIC:
         assert result == []
 
 
+# ── R3: セクター×サイズ・バケット CV-RMSE ─────────────────────────────────────
+
+class TestR3Buckets:
+
+    def setup_method(self):
+        self.plugin = MacroRiskReturnPlugin()
+
+    def test_size_bucket(self):
+        th = (50.0, 100.0)
+        assert self.plugin._size_bucket(10, th) == "S"
+        assert self.plugin._size_bucket(70, th) == "M"
+        assert self.plugin._size_bucket(150, th) == "L"
+        # 欠損・閾値なし・非正は None
+        assert self.plugin._size_bucket(None, th) is None
+        assert self.plugin._size_bucket(10, None) is None
+        assert self.plugin._size_bucket(0, th) is None
+
+    def test_bucket_rmse_by_sector_size(self):
+        """セクター×サイズ三分位ごとに残差 RMSE が分離して算出される。"""
+        residuals, metas = [], []
+        for size, err in [(1.0, 0.1), (50.0, 0.2), (100.0, 0.3)]:
+            for _ in range(6):
+                residuals.append((0.0, err))   # (yhat, ytrue) → 残差 = err
+                metas.append(("A", size))
+        r3 = self.plugin._compute_r3_buckets({"2024-01": residuals}, {"2024-01": metas})
+
+        assert r3["thresholds"] == (50.0, 100.0)  # size 1→S / 50→M / 100→L
+        assert self.plugin._r3_for("A", 1.0, r3) == pytest.approx(0.1)
+        assert self.plugin._r3_for("A", 50.0, r3) == pytest.approx(0.2)
+        assert self.plugin._r3_for("A", 100.0, r3) == pytest.approx(0.3)
+
+    def test_fallback_hierarchy(self):
+        """小標本バケットは sector→global へフォールバックする。"""
+        residuals, metas = [], []
+        for _ in range(6):  # sector A: 十分な標本
+            residuals.append((0.0, 0.1)); metas.append(("A", 10.0))
+        for _ in range(2):  # sector Z: バケットもセクターも標本不足（<5）
+            residuals.append((0.0, 0.5)); metas.append(("Z", 10.0))
+        r3 = self.plugin._compute_r3_buckets({"2024-01": residuals}, {"2024-01": metas})
+
+        assert self.plugin._r3_for("A", 10.0, r3) == pytest.approx(0.1)
+        expected_global = math.sqrt((6 * 0.1 ** 2 + 2 * 0.5 ** 2) / 8)
+        assert self.plugin._r3_for("Z", 10.0, r3) == pytest.approx(expected_global)
+
+    def test_no_residuals_returns_none(self):
+        """残差ゼロ件なら R3 は None（global も空）。"""
+        r3 = self.plugin._compute_r3_buckets({}, {})
+        assert r3["thresholds"] is None
+        assert self.plugin._r3_for("A", 10.0, r3) is None
+
+
 # ── execute（モック DB で統合確認）────────────────────────────────────────────
 
 class TestExecuteIntegration:
@@ -240,7 +297,8 @@ class TestExecuteIntegration:
                       edinet_code=ec,
                       year=2020 + y,
                       per=15.0 + j * 2,
-                      pbr=1.2 + j * 0.3)
+                      pbr=1.2 + j * 0.3,
+                      bs_total_assets=(j + 1) * 1.0e5)  # 社ごとに S/M/L サイズを変える
             for j, ec in enumerate(codes)
             for y in range(6)
         ]
@@ -295,8 +353,25 @@ class TestExecuteIntegration:
         db = self._build_mock_db()
         result = asyncio.run(plugin.execute(params, db))
 
+        assert result["risk_axis"] == "r2"
         for item in result["results"]:
             assert "edinet_code" in item
             assert "mu_shrunk" in item
+            assert "utility" in item
+            assert "is_pareto" in item
+            assert "r3" in item  # R3 リスク指標（float or None）
+
+    def test_execute_r3_axis(self):
+        """risk_axis='r3' で実行でき、各銘柄に R3 が付与され効用が算出される。"""
+        plugin = MacroRiskReturnPlugin()
+        schema = plugin.params_schema()
+        params = coerce_params(schema, {"use_macro": False, "top_n": 5, "risk_axis": "r3"})
+
+        db = self._build_mock_db()
+        result = asyncio.run(plugin.execute(params, db))
+
+        assert result["risk_axis"] == "r3"
+        for item in result["results"]:
+            assert "r3" in item
             assert "utility" in item
             assert "is_pareto" in item
