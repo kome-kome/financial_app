@@ -2,6 +2,7 @@
 import bisect
 import calendar
 import io
+import traceback
 import zipfile
 import asyncio
 from collections import defaultdict
@@ -188,6 +189,8 @@ def _detect_xbrl_columns(df) -> dict:
     """XBRL CSV の列名マップ {element, context, value, label} を検出して返す"""
     col_map = {}
     for c in df.columns:
+        if not isinstance(c, str):  # pd.concat 後に NaN 列名が混入する場合に備えたガード
+            continue
         lc = c.lower()
         if "要素" in c or "element" in lc:          col_map["element"] = c
         elif "コンテキスト" in c or "context" in lc: col_map["context"] = c
@@ -463,7 +466,7 @@ async def _refill_records_from_xbrl(db, target_q, field_updater, *, label: str,
                     db.commit()
 
             except Exception as e:
-                log.warning(f"  {label}失敗 {rec.edinet_code} {rec.doc_id}: {e}")
+                log.warning(f"  {label}失敗 {rec.edinet_code} {rec.doc_id}: {e}\n{traceback.format_exc()}")
                 failed += 1
 
             await asyncio.sleep(sleep_sec)
