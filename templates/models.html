@@ -708,19 +708,21 @@ z_nc_ratio = (nc_ratio − μ_year) / σ_year
 
   <h3>9.3 リスク指標</h3>
   <table>
-    <tr><th>記号</th><th>定義</th><th>役割</th></tr>
-    <tr><td><strong>R1</strong></td><td>OLS 予測分散 s²(1 + xᵀ(XᵀX)⁻¹x) の平方根</td><td>予測不確実性・μ 縮小ウェイト兼用</td></tr>
-    <tr><td><strong>R2</strong></td><td>直前52週週次ログリターン SD × √52</td><td>価格変動リスク（Sharpe 分母）</td></tr>
+    <tr><th>記号</th><th>定義</th><th>役割</th><th>解像度</th></tr>
+    <tr><td><strong>R1</strong></td><td>OLS 予測分散 s²(1 + xᵀ(XᵀX)⁻¹x) の平方根</td><td>予測不確実性・μ 縮小ウェイト兼用</td><td>個社</td></tr>
+    <tr><td><strong>R2</strong></td><td>直前52週週次ログリターン SD × √52</td><td>価格変動リスク（Sharpe 分母）</td><td>個社</td></tr>
+    <tr><td><strong>R3</strong></td><td>セクター×サイズ三分位バケットの walk-forward CV 残差 RMSE（サイズ代理=総資産）</td><td>モデル信頼性（この企業タイプの説明度）。標本不足時は セクター→全体 へフォールバック</td><td>バケット</td></tr>
   </table>
+  <p>横軸リスク <code>risk_axis</code> で R1/R2/R3 を切替え、散布図の横軸・効用・Pareto 判定の軸に用いる。</p>
 
   <h3>9.4 James-Stein 縮小（Black-Litterman 型）</h3>
   <div class="formula">μ<sub>shrunk</sub> = (1 − w) · μ<sub>raw</sub> + w · μ<sub>sector</sub><br>w = R1 / R1<sub>max</sub></div>
   <p>R1 が大きい（信頼度が低い）ほど強くセクター平均へ引き寄せる。</p>
 
   <h3>9.5 効用関数と Pareto フロンティア</h3>
-  <div class="formula">U = μ<sub>shrunk</sub> − λ · R2</div>
-  <p>λ はリスク回避度スライダー（0〜3、既定 1.0）。U 降順で top_n 社を返す。<br>
-  Pareto 最優解（同リスクで高リターン or 同リターンで低リスク）を <code>is_pareto=true</code> でフラグし、バブルチャートで強調描画する。</p>
+  <div class="formula">U = μ<sub>shrunk</sub> − λ · R<sub>axis</sub></div>
+  <p>λ はリスク回避度スライダー（0〜3、既定 1.0）。R<sub>axis</sub> は <code>risk_axis</code> で選んだリスク（R2 既定 / R1 / R3）。U 降順で top_n 社を返す。<br>
+  Pareto 最優解（同リスクで高リターン or 同リターンで低リスク）を <code>is_pareto=true</code> でフラグし、バブルチャートで強調描画する。Pareto 判定軸は表示中の <code>risk_axis</code> に追従し、可視化・効用・フロンティア強調を一貫させる。</p>
 
   <h3>9.6 参考文献</h3>
   <ul>

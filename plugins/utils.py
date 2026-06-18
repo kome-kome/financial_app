@@ -645,13 +645,19 @@ def walk_forward_cv_monthly(
     feature_names: list,
     min_train_months: int = 18,
     step_months: int = 3,
-) -> list[dict]:
+    return_residuals: bool = False,
+) -> list[dict] | tuple[list[dict], dict]:
     """月次ウォークフォワードCV（FUTURE_TASKS.md 仕様）。
     samples_by_ym: {"YYYY-MM": [(feature_row: list[float], target: float), ...]}
     学習: index < i の全月、テスト: index = i の1ヶ月、step_months ずつスライド。
     y正規化: zscore（対数リターンは無次元のため log 変換不要）。
     ルックアヘッドバイアスなし: テスト月データは学習に使わない。
     Returns: [{test_ym, n_train, n_test, r2, rmse}, ...]
+    return_residuals=True のとき (fold_results, residuals_by_ym) を返す。
+      residuals_by_ym = {test_ym: [(yhat, y_true), ...]}（テストサンプル順）。
+      M-1 の R3（セクター×サイズ別バケットの CV-RMSE）のように、個別残差を
+      外部メタデータでグループ集計したい用途向け。テストサンプルの並び順は
+      samples_by_ym[test_ym] と一致するため、呼び出し側で同順のメタ列と突合できる。
     """
     all_yms = sorted(samples_by_ym.keys())
     if len(all_yms) < min_train_months + 1:
@@ -660,6 +666,7 @@ def walk_forward_cv_monthly(
     n_feat = len(feature_names)
 
     fold_results = []
+    residuals_by_ym: dict[str, list[tuple[float, float]]] = {}
     for i in range(min_train_months, len(all_yms), step_months):
         test_ym = all_yms[i]
         train_yms = all_yms[:i]
@@ -690,7 +697,11 @@ def walk_forward_cv_monthly(
             "r2":      round(r2, 4),
             "rmse":    round(rmse, 4),
         })
+        if return_residuals:
+            residuals_by_ym[test_ym] = list(zip(yhat_orig, y_test_orig))
 
+    if return_residuals:
+        return fold_results, residuals_by_ym
     return fold_results
 
 

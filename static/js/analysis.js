@@ -1050,6 +1050,10 @@ function renderSectorOls(data) {
 // マクロ×リスク-リターン専用レンダラ: CV指標 + バブルチャート + ランキング表
 let _mrrChart = null;
 function renderMacroRiskReturn(data) {
+  // 横軸リスクの選択（R1/R2/R3）。バックエンドが echo した risk_axis に追従する。
+  const AXIS_LABELS = { r1: 'R1 予測不確実性', r2: 'R2 実現ボラティリティ', r3: 'R3 モデル信頼性' };
+  const axisKey = ['r1', 'r2', 'r3'].includes(data.risk_axis) ? data.risk_axis : 'r2';
+
   // ── CV 指標 ──────────────────────────────────────────────────────
   const cv = data.cv_metrics || {};
   const waiting = document.getElementById('mrr-cv-waiting');
@@ -1078,11 +1082,11 @@ function renderMacroRiskReturn(data) {
     const canvas = document.getElementById('chart-mrr-bubble');
     if (canvas && window.Chart) {
       if (_mrrChart) { _mrrChart.destroy(); _mrrChart = null; }
-      const paretoItems    = results.filter(r => r.is_pareto  && r.r2 != null && r.mu_shrunk != null);
-      const nonParetoItems = results.filter(r => !r.is_pareto && r.r2 != null && r.mu_shrunk != null);
+      const paretoItems    = results.filter(r => r.is_pareto  && r[axisKey] != null && r.mu_shrunk != null);
+      const nonParetoItems = results.filter(r => !r.is_pareto && r[axisKey] != null && r.mu_shrunk != null);
       const r1Max = Math.max(...results.map(r => r.r1 ?? 0), 1e-9);
       const toPoint = (r) => ({
-        x: r.r2 ?? 0,
+        x: r[axisKey] ?? 0,
         y: r.mu_shrunk ?? 0,
         r: Math.max(4, 26 * (1 - (r.r1 ?? 0) / r1Max)),
         label: r.company_name || r.edinet_code,
@@ -1105,14 +1109,14 @@ function renderMacroRiskReturn(data) {
               return [
                 pt.label,
                 `μ_shrunk: ${pt.y.toFixed(4)}`,
-                `R2（ボラ）: ${pt.x.toFixed(4)}`,
-                `R1（不確実性）: ${pt.r1 != null ? pt.r1.toFixed(4) : '-'}`,
+                `${AXIS_LABELS[axisKey]}: ${pt.x.toFixed(4)}`,
+                `R1 信頼度(バブル径): ${pt.r1 != null ? pt.r1.toFixed(4) : '-'}`,
                 `U（効用）: ${pt.utility != null ? pt.utility.toFixed(4) : '-'}`,
               ];
             }}},
           },
           scales: {
-            x: { title: { display: true, text: 'リスク（R2: 実現ボラティリティ）' }},
+            x: { title: { display: true, text: `リスク（${AXIS_LABELS[axisKey]}）` }},
             y: { title: { display: true, text: '期待リターン（μ_shrunk・年率）' }},
           },
         },
@@ -1125,7 +1129,7 @@ function renderMacroRiskReturn(data) {
     return '<div class="text-sm" style="padding:20px;text-align:center;color:#94a3b8">結果がありません</div>';
   }
   const header = `<tr><th>順位</th><th>証券コード</th><th>企業名</th><th>業種</th>
-    <th>μ_shrunk</th><th>R2 ボラ</th><th>R1 不確実性</th><th>効用 U</th><th>パレート</th></tr>`;
+    <th>μ_shrunk</th><th>R2 ボラ</th><th>R1 不確実性</th><th>R3 信頼性</th><th>効用 U</th><th>パレート</th></tr>`;
   const rows = results.map((r, i) => {
     const mu = r.mu_shrunk ?? 0;
     const muClass = mu > 0 ? 'text-green' : 'text-red';
@@ -1138,6 +1142,7 @@ function renderMacroRiskReturn(data) {
       <td class="${muClass}">${(mu*100).toFixed(2)}%</td>
       <td>${r.r2!=null?(r.r2*100).toFixed(2)+'%':'-'}</td>
       <td style="font-size:11px;color:#94a3b8">${r.r1!=null?r.r1.toFixed(4):'-'}</td>
+      <td style="font-size:11px;color:#94a3b8">${r.r3!=null?r.r3.toFixed(4):'-'}</td>
       <td class="text-green">${r.utility!=null?r.utility.toFixed(4):'-'}</td>
       <td style="text-align:center">${paretoTag}</td>
     </tr>`;
@@ -1148,6 +1153,7 @@ function renderMacroRiskReturn(data) {
       <div class="section-title" style="margin-bottom:0">
         リスク-リターンランキング
         <span class="tag tag-purple" style="margin-left:6px">${results.length}社</span>
+        <span class="tag" style="margin-left:6px">横軸リスク: ${AXIS_LABELS[axisKey]}</span>
       </div>
     </div>
     <div style="overflow-x:auto">

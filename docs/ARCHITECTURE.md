@@ -988,7 +988,7 @@ graph TB
 | `plugins/sector_ols.py` | バックエンド | 業種別OLS回帰分析（次元整合・winsorize+z-score前処理）。`heavy=True`（Render 軽量モードで 403）。予測値は regression_results へ保存 | plugins/utils.py |
 | `plugins/price_predictor.py` | バックエンド | 株価リターン予測（価格×財務特徴量OLS・月次WFV） | plugins/utils.py |
 | `plugins/net_cash_analysis.py` | バックエンド | ネットキャッシュ分析（清原達郎『わが投資術』式）＋グレアムNCAV。NC = 流動資産 + 投資有価証券×0.7 − 総負債、NCAV = 流動資産 − 総負債。推計時価総額の崩れによる異常比率はサニティ上限で自動除外し、任意で営業CF>0等のバリュートラップ除外も可能 | database.py |
-| `plugins/macro_risk_return.py` | バックエンド | マクロ×リスク-リターン推奨（交差項OLS+前進BIC+Walk-forward CV+James-Stein縮小+Paretoフロンティア）。`heavy=True`。`use_macro=False` でマクロ特徴量なしの純財務モデルとして実行可 | plugins/utils.py |
+| `plugins/macro_risk_return.py` | バックエンド | マクロ×リスク-リターン推奨（交差項OLS+前進BIC+Walk-forward CV+James-Stein縮小+Paretoフロンティア）。リスク軸 R1/R2/R3 を `risk_axis` で切替（R3=セクター×サイズ別バケットの CV 残差 RMSE。サイズ代理=`bs_total_assets`）。`heavy=True`。`use_macro=False` でマクロ特徴量なしの純財務モデルとして実行可 | plugins/utils.py |
 | `plugins/utils.py` | バックエンド | ols()・normalize()・winsorize()・walk_forward_cv()・walk_forward_cv_monthly()・get_macro_features()・get_momentum_return() | — |
 | `tests/` | テスト | pytest 回帰テスト（313件）。プラグイン＋utils＋`database.py`（upsert・RegressionResult merge・derived非永続）＋`collector.py`（XBRLパース・派生指標＋ネットワーク取得を httpx MockTransport でモック）＋`api.py`（純関数・`/health`・DB-backed 読取・heavy回帰のRenderブロック）をカバー。in-memory SQLite fixture（StaticPool）／FastAPI TestClient／httpx MockTransport で検証。`financial_metrics` は SQLite では `FinancialMetric` 列定義から生成したテーブルで代替し、派生値・予測値はテストが直接注入（`make_metric`）。計算式の同値性は Postgres で別途検証。共通 fixture は `tests/conftest.py`（`db`/`make_fin`/`make_metric` 等） | pytest, sqlalchemy, fastapi, httpx |
 | `requirements-dev.txt` | 設定 | 開発・テスト専用依存（`pytest`）。本番 `requirements.txt` と分離（Render メモリ節約） | — |
