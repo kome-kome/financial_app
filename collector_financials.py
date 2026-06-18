@@ -199,6 +199,17 @@ def _detect_xbrl_columns(df) -> dict:
     return col_map
 
 
+def _col_as_str_list(df, col) -> list:
+    """列を文字列リスト化する。NaN は空文字に正規化する。
+
+    pandas 3.0 から `Series.astype(str)` は NaN を文字列 "nan" へ変換せず float の
+    まま残すため、`.astype(str).tolist()` の結果に float NaN が混入する。これが
+    後段の `"Prior" in ctx` / `kw in label` / `elem.split(":")` を TypeError で
+    落とす（C2 補完で全件失敗の原因）。fillna("") で NaN を先に潰してから変換する。
+    """
+    return df[col].fillna("").astype(str).tolist()
+
+
 def df_to_raw_rows(df) -> list:
     """XBRL CSV DataFrame を [{element, context, value}, ...] に変換（raw 保存用）"""
     col_map = _detect_xbrl_columns(df)
@@ -207,9 +218,9 @@ def df_to_raw_rows(df) -> list:
     # iterrows() は1行ごとに Series を生成して遅い。列を一括で list 化し zip で回す
     # （1書類あたり数千〜数万行になりうる収集ホットパス）。
     ctx_col  = col_map.get("context")
-    elements = df[col_map["element"]].astype(str).tolist()
-    values   = df[col_map["value"]].astype(str).tolist()
-    contexts = (df[ctx_col].astype(str).tolist()
+    elements = _col_as_str_list(df, col_map["element"])
+    values   = _col_as_str_list(df, col_map["value"])
+    contexts = (_col_as_str_list(df, ctx_col)
                 if ctx_col and ctx_col in df.columns else [""] * len(df))
     rows = []
     for raw_elem, ctx, val in zip(elements, contexts, values):
@@ -340,11 +351,11 @@ def parse_xbrl_csv(df, edinet_code: str, period_end: str) -> dict:
     # （1書類あたり数千〜数万行になりうる収集ホットパス）。value は生のまま渡し、
     # 後段の _apply_row / _collect_inventory_row が float 変換する。
     ctx_col  = col_map.get("context")
-    elements = df[col_map["element"]].astype(str).tolist()
+    elements = _col_as_str_list(df, col_map["element"])
     values   = df[col_map["value"]].tolist()
-    contexts = (df[ctx_col].astype(str).tolist()
+    contexts = (_col_as_str_list(df, ctx_col)
                 if ctx_col and ctx_col in df.columns else [""] * len(df))
-    labels   = (df[label_col].astype(str).tolist()
+    labels   = (_col_as_str_list(df, label_col)
                 if label_col is not None and label_col in df.columns else [""] * len(df))
 
     for raw_elem, ctx, val, label in zip(elements, contexts, values, labels):

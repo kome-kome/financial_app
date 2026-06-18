@@ -12,6 +12,7 @@ import zipfile
 from datetime import date
 
 import httpx
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -188,6 +189,25 @@ class TestParseXbrlCsv:
             "値": ["200"],
         })
         assert "capex" not in parse_xbrl_csv(df, "E99999", "2025-03-31")["cf"]
+
+    def test_nan_cells_do_not_crash_parse(self):
+        """pandas 3.0 で `astype(str)` が NaN を float のまま残す回帰の防止。
+
+        要素ID/コンテキストID/項目名のいずれに NaN があってもクラッシュせず、
+        正常行（有形固定資産・capex）は抽出される。修正前は label の NaN が
+        `_match_capex_by_label` で `argument of type 'float' is not iterable` を
+        投げ、C2 補完が全件失敗していた。
+        """
+        df = pd.DataFrame({
+            "要素ID": ["jppfs_cor:PropertyPlantAndEquipment", np.nan,
+                       "jpcrp030000-asr_E99999-000:PurchaseOfPPEExtension"],
+            "コンテキストID": ["CurrentYearConsolidatedInstant", "CurrentYearConsolidatedDuration", np.nan],
+            "項目名": [np.nan, "ダミー", "有形固定資産の取得による支出"],
+            "値": ["1000", "999", "500"],
+        })
+        res = parse_xbrl_csv(df, "E99999", "2025-03-31")
+        assert res["bs"]["ppe_total"] == 1000.0
+        assert res["cf"]["capex"] == -500.0
 
     # ── C2: 網羅性追加項目 ──────────────────────────────────────────────────
     def test_c2_bs_pl_fields_extracted(self):
