@@ -202,6 +202,63 @@ Render ダッシュボードで管理。
 - *`financial_records.raw_xbrl_json` の drop*：financial_records 73MB の主因。第2の容量レバー。
 - *過去2〜5年の Yahoo 週次バックフィル*：J-Quants 無料は2年上限のため、5年時系列（財務5年と整合）を Yahoo から `stock_price_weekly` へ補填。上記モデルPRの土台。
 
+#### バックアップ運用ポリシー
+
+##### 自動バックアップ（Supabase 標準機能）
+
+Supabase 無料プランは **毎日1回の自動バックアップを7日間保持** する（Point-in-Time Recovery は有料プランのみ）。
+
+| 項目 | Free プラン |
+|---|---|
+| 自動バックアップ頻度 | 1日1回 |
+| 保持期間 | **7日間** |
+| PITR（任意時点復元） | 非対応（Pro プラン以上） |
+| 確認場所 | Supabase ダッシュボード → Project Settings → Database → Backups |
+
+##### 手動バックアップ（スキーマ変更・大規模更新前に実施）
+
+重大な DB 変更（`ALTER TABLE`・データ移行・全件再収集）の前は手動バックアップを取得する。
+
+```
+# Supabase ダッシュボードから
+Project Settings → Database → Backups → "Create Backup"（Pro）
+ ↑ Free プランでは不可。代わりに pg_dump を使う：
+
+pg_dump "$DATABASE_URL" \
+  --no-acl --no-owner \
+  --format=custom \
+  --file="backup_$(date +%Y%m%d).dump"
+```
+
+`DATABASE_URL` は Render・ローカルの `.env` に設定されている接続文字列（`postgresql://...?sslmode=require`）を使う。
+
+##### 復旧手順
+
+**Supabase ダッシュボードから復元する場合（7日以内）**:
+1. Supabase ダッシュボード → Project Settings → Database → Backups
+2. 復元したい日時を選んで "Restore" をクリック
+3. 復元中は DB が停止（数分〜十数分）→ Render の Web サービスも一時的に 503 になる
+4. 完了後、`/health` で DB 疎通を確認
+
+**pg_dump バックアップから復元する場合**:
+```
+# 既存 DB を全消去してから復元（⚠️ 不可逆操作）
+pg_restore --clean --no-acl --no-owner \
+  -d "$DATABASE_URL" \
+  backup_YYYYMMDD.dump
+```
+
+##### プロジェクト停止（1週間無アクセス）からの復旧
+
+Supabase 無料プランは **1週間アクセスなしで自動停止**する。
+
+1. Supabase ダッシュボード → 該当プロジェクト → "Restore project" ボタン
+2. 起動完了まで数分待つ
+3. Render は `DATABASE_URL` で再接続を自動リトライするため、Render 側の操作は不要
+4. GitHub Actions の差分収集（`daily-incremental.yml`）が翌日から再開されることを確認
+
+**長期離席時の対策**: UptimeRobot 等で `/health` を定期 ping する（O-2 参照）と自動停止を防げる。
+
 ### J-Quants API（無料プラン）
 
 | 項目 | 制約値 | 設計への影響 |
