@@ -1054,9 +1054,10 @@ function renderSectorOls(data) {
 }
 
 // マクロ×リスク-リターン専用レンダラ: CV指標 + バブルチャート + ランキング表
-// M-1 リスク-リターン可視化。サーバーは全社の raw 値（mu_shrunk/r1/r2/r3）を返し、
+// M-1 リスク-リターン可視化。サーバーは全社の raw 値（mu_raw/mu_shrunk/r1/r2/r3）を返し、
 // 効用 U・パレート・並べ替え・top_n は λ／リスク軸に依存する後処理として
 // クライアント側で算出する（軸切替・λ調整は再計算なしで即時反映）。
+// 期待リターンの基準は mu_raw（収縮は低シグナル時に銘柄差を消すため表の参考列に留める）。
 const MRR_AXIS_LABELS = { r1: 'R1 予測不確実性', r2: 'R2 実現ボラティリティ', r3: 'R3 モデル信頼性' };
 let _mrrChart = null;
 let _mrrData  = null;
@@ -1085,7 +1086,7 @@ function _mrrReadParams() {
 
 // 効率的フロンティア（最小リスク x・最大リターン y）の非劣解集合を O(n log n) で算出。
 function _mrrParetoSet(items, axisKey) {
-  const arr = items.map(it => ({ c: it.edinet_code, x: it[axisKey], y: it.mu_shrunk }))
+  const arr = items.map(it => ({ c: it.edinet_code, x: it[axisKey], y: it.mu_raw }))
     .sort((a, b) => (a.x === b.x ? b.y - a.y : a.x - b.x));
   const set = new Set();
   let bestY = -Infinity;
@@ -1094,15 +1095,25 @@ function _mrrParetoSet(items, axisKey) {
 }
 
 // 全社 raw 値から、選択 λ／軸で U・パレートを算出し U 降順に並べた view を返す。
+// 期待リターンは mu_raw（モデルの素の銘柄別推定）を用いる。mu_shrunk は低シグナル時に
+// 全社をセクター平均へ収縮し銘柄差が消えるため、チャート/効用には不適（表に参考値として残す）。
 function _mrrRecompute() {
   const { lambda, axis, topN } = _mrrReadParams();
   const items = (_mrrData && _mrrData.results ? _mrrData.results : [])
-    .filter(r => r[axis] != null && r.mu_shrunk != null)
-    .map(r => ({ ...r, _u: r.mu_shrunk - lambda * r[axis] }));
+    .filter(r => r[axis] != null && r.mu_raw != null)
+    .map(r => ({ ...r, _u: r.mu_raw - lambda * r[axis] }));
   const paretoSet = _mrrParetoSet(items, axis);
   items.forEach(it => { it._pareto = paretoSet.has(it.edinet_code); });
   items.sort((a, b) => b._u - a._u);
   return { axis, lambda, topN, all: items, top: items.slice(0, topN) };
+}
+
+// X軸（リスク）上限 = 描画対象の選択軸値の99パーセンタイル。データ過少銘柄の
+// 過大ボラ外れ値で全バブルが左端へ潰れるのを防ぐ。点数が少なければ null（キャップなし）。
+function _mrrXCap(pts, axisKey) {
+  const xs = pts.map(p => p[axisKey]).filter(x => x != null).sort((a, b) => a - b);
+  if (xs.length < 5) return null;
+  return xs[Math.min(xs.length - 1, Math.floor(xs.length * 0.99))];
 }
 
 // 効用 U → 色（スレート→紫の濃淡）。高 U ほど紫が濃い。
@@ -1149,8 +1160,12 @@ function _mrrPaintChart(v) {
   const r1Max = Math.max(...pts.map(p => p.r1 ?? 0), 1e-9);
   const us = pts.map(p => p._u);
   const uMin = Math.min(...us), uMax = Math.max(...us);
+  // X軸 p99 クランプ: 極端な実現ボラ（データ過少銘柄）で全バブルが左端へ潰れるのを防ぐ。
+  // 上限超過の銘柄は右端に貼り付ける（_p には真値を保持しツールチップは実値表示）。
+  const xCap = _mrrXCap(pts, axisKey);
+  const clampX = (x) => (xCap != null && x > xCap) ? xCap : x;
   const bubble = pts.map(p => ({
-    x: p[axisKey], y: p.mu_shrunk,
+    x: clampX(p[axisKey]), y: p.mu_raw,
     r: Math.max(4, 26 * (1 - (p.r1 ?? 0) / r1Max)),
     _p: p,
   }));
@@ -1158,7 +1173,7 @@ function _mrrPaintChart(v) {
   const bc = pts.map(p => p._pareto ? '#f9a8d4' : 'rgba(71,85,105,0.6)');
   const bw = pts.map(p => p._pareto ? 2.5 : 1);
   const front = pts.filter(p => p._pareto)
-    .map(p => ({ x: p[axisKey], y: p.mu_shrunk }))
+    .map(p => ({ x: clampX(p[axisKey]), y: p.mu_raw }))
     .sort((a, b) => a.x - b.x);
   _mrrChart = new Chart(canvas, {
     data: { datasets: [
@@ -1176,7 +1191,8 @@ function _mrrPaintChart(v) {
           if (!p) return '';
           return [
             p.company_name || p.edinet_code,
-            `μ_shrunk: ${(p.mu_shrunk ?? 0).toFixed(4)}`,
+            `μ_raw: ${(p.mu_raw ?? 0).toFixed(4)}`,
+            `μ_shrunk(参考): ${p.mu_shrunk != null ? p.mu_shrunk.toFixed(4) : '-'}`,
             `${MRR_AXIS_LABELS[axisKey]}: ${(p[axisKey] ?? 0).toFixed(4)}`,
             `R1 信頼度(径): ${p.r1 != null ? p.r1.toFixed(4) : '-'}`,
             `U（効用・色）: ${p._u != null ? p._u.toFixed(4) : '-'}`,
@@ -1185,8 +1201,9 @@ function _mrrPaintChart(v) {
         }}},
       },
       scales: {
-        x: { title: { display: true, text: `リスク（${MRR_AXIS_LABELS[axisKey]}）` }},
-        y: { title: { display: true, text: '期待リターン（μ_shrunk・年率）' }},
+        x: { title: { display: true, text: `リスク（${MRR_AXIS_LABELS[axisKey]}）` },
+             max: xCap != null ? xCap * 1.05 : undefined },
+        y: { title: { display: true, text: '期待リターン（μ_raw・年率）' }},
       },
     },
   });
@@ -1199,10 +1216,11 @@ function _mrrTableHTML(v) {
   }
   const total = (_mrrData && _mrrData.results ? _mrrData.results.length : v.top.length);
   const header = `<tr><th>順位</th><th>証券コード</th><th>企業名</th><th>業種</th>
-    <th>μ_shrunk</th><th>R2 ボラ</th><th>R1 不確実性</th><th>R3 信頼性</th><th>効用 U</th><th>パレート</th></tr>`;
+    <th>μ_raw</th><th>μ_shrunk(参考)</th><th>R2 ボラ</th><th>R1 不確実性</th><th>R3 信頼性</th><th>効用 U</th><th>パレート</th></tr>`;
   const rows = v.top.map((r, i) => {
-    const mu = r.mu_shrunk ?? 0;
+    const mu = r.mu_raw ?? 0;
     const muClass = mu > 0 ? 'text-green' : 'text-red';
+    const muShr = r.mu_shrunk;
     const paretoTag = r._pareto ? '<span style="color:#f9a8d4;font-weight:700">★</span>' : '';
     return `<tr>
       <td>${i+1}</td>
@@ -1210,6 +1228,7 @@ function _mrrTableHTML(v) {
       <td><a href="/company/${esc(r.edinet_code||'')}" style="color:#60a5fa">${esc(r.company_name||'-')}</a></td>
       <td style="font-size:11px">${esc(r.industry||'-')}</td>
       <td class="${muClass}">${(mu*100).toFixed(2)}%</td>
+      <td style="font-size:11px;color:#94a3b8">${muShr!=null?(muShr*100).toFixed(2)+'%':'-'}</td>
       <td>${r.r2!=null?(r.r2*100).toFixed(2)+'%':'-'}</td>
       <td style="font-size:11px;color:#94a3b8">${r.r1!=null?r.r1.toFixed(4):'-'}</td>
       <td style="font-size:11px;color:#94a3b8">${r.r3!=null?r.r3.toFixed(4):'-'}</td>
@@ -1227,6 +1246,10 @@ function _mrrTableHTML(v) {
         <span class="tag" style="margin-left:6px">λ=${v.lambda}</span>
       </div>
       <div class="text-sm" style="color:#64748b">λ・リスク軸・表示件数は即時反映（再計算不要）</div>
+    </div>
+    <div class="text-sm" style="color:#64748b;margin-bottom:6px;font-size:11px">
+      ※ μ_raw はモデルの素の銘柄別推定（収縮なし）。検証 R² は低く推定にはノイズを含むため、
+      順位は目安。μ_shrunk はセクター平均への収縮後の保守的推定（参考）。
     </div>
     <div style="overflow-x:auto">
       <table><thead>${header}</thead><tbody>${rows}</tbody></table>
