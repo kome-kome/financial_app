@@ -15,7 +15,7 @@
 | XBRL取得・保存 | `[X/Y] 企業名(証券コード) 決算期末` |
 | 差分スキップ | `[X/Y] スキップ（収集済み）: 企業名 決算期末` |
 
-SSEエンドポイント: 収集=`/api/collect/stream`、市場データ=`/api/collect/market-stream`
+SSEエンドポイント（進捗のリアルタイム配信・全6本）: 収集=`/api/collect/stream`、市場データ=`/api/collect/market-stream`、株価履歴=`/api/collect/history/stream`、再解析=`/api/collect/reparse/stream`、J-Quants=`/api/collect/jquants/stream`、マクロ=`/api/collect/macro/stream`（一覧の正本は ARCHITECTURE.md §8）
 
 ---
 
