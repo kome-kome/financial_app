@@ -761,7 +761,7 @@ classDiagram
         +heavy = True
         +ui_order = 330
         +params_schema() lambda_risk/risk_axis/fin_features/use_macro/top_n 等
-        +execute() 交差項OLS(財務×マクロ)+前進BIC+Walk-forward CV+James-Stein縮小+Paretoフロンティア
+        +execute() 交差項OLS(財務×マクロ)+LassoLarsIC(BIC)選択+OLS再フィット+Walk-forward CV+James-Stein縮小。全社rawを返却(効用U/Pareto/top_nはJS後処理)
     }
 
     class PluginRegistry {
@@ -801,7 +801,7 @@ classDiagram
     note for GapAnalysisPlugin "業種別OLSの実行後でないと\nregression_results が空のため結果が出ない\n（financial_metrics VIEW 経由で gap_ratio を読む）"
     note for PricePredictorPlugin "stock_price_daily + FinancialRecord を結合\n月次スナップショット × 全企業でパネルデータ構築\nルックアヘッドバイアス禁止: period_end + 45日ラグ厳守"
     note for NetCashAnalysisPlugin "清原達郎『わが投資術』式\nNC = 流動資産 + 投資有価証券×0.7 − 総負債\nOLS不使用・会計値からの直接計算"
-    note for MacroRiskReturnPlugin "交差項OLS+前進BIC+walk-forward CV+James-Stein縮小\nリスク軸 R1/R2/R3 を risk_axis で切替\n（R3=セクター×サイズ別バケットの CV 残差 RMSE・サイズ代理 bs_total_assets）\nheavy=True / use_macro=False で純財務モデルにも縮退"
+    note for MacroRiskReturnPlugin "交差項OLS+LassoLarsIC(BIC)選択+OLS再フィット+walk-forward CV+James-Stein縮小\nリスク軸 R1/R2/R3 を risk_axis で切替（効用U/Pareto/top_nはクライアント側後処理＝即時切替）\n（R3=セクター×サイズ別バケットの CV 残差 RMSE・サイズ代理 bs_total_assets）\nマクロ計算は日付メモ化で高速化（既定219s→29s）\nheavy=True / use_macro=False で純財務モデルにも縮退"
     note for AnalysisPlugin "params_schema() はパラメータ契約（CONTEXT.md）:\ntype=ウィジェット / dtype=データ型 の2軸。\nexecute は coerce 済み typed params を受け取り、\n意味的 validation だけ持つ（型変換・default・\nbounds/membership は coerce_params が担う）"
     note for Utils "統計は numpy / scipy / statsmodels / sklearn を使用。\ncoerce_params（パラメータ契約の coerce seam）と\nwalk_forward_cv_monthly() を含む"
 ```
@@ -993,7 +993,7 @@ graph TB
 | `plugins/sector_ols.py` | バックエンド | 業種別OLS回帰分析（次元整合・winsorize+z-score前処理）。`heavy=True`（Render 軽量モードで 403）。予測値は regression_results へ保存 | plugins/utils.py |
 | `plugins/price_predictor.py` | バックエンド | 株価リターン予測（価格×財務特徴量OLS・月次WFV） | plugins/utils.py |
 | `plugins/net_cash_analysis.py` | バックエンド | ネットキャッシュ分析（清原達郎『わが投資術』式）＋グレアムNCAV。NC = 流動資産 + 投資有価証券×0.7 − 総負債、NCAV = 流動資産 − 総負債。推計時価総額の崩れによる異常比率はサニティ上限で自動除外し、任意で営業CF>0等のバリュートラップ除外も可能 | database.py |
-| `plugins/macro_risk_return.py` | バックエンド | マクロ×リスク-リターン推奨（交差項OLS+前進BIC+Walk-forward CV+James-Stein縮小+Paretoフロンティア）。リスク軸 R1/R2/R3 を `risk_axis` で切替（R3=セクター×サイズ別バケットの CV 残差 RMSE。サイズ代理=`bs_total_assets`）。`heavy=True`。`use_macro=False` でマクロ特徴量なしの純財務モデルとして実行可 | plugins/utils.py |
+| `plugins/macro_risk_return.py` | バックエンド | マクロ×リスク-リターン推奨（交差項OLS+`LassoLarsIC(BIC)`選択+OLS再フィット+Walk-forward CV+James-Stein縮小）。**全社rawを返却し効用U/Pareto/top_nはJS後処理**（λ・リスク軸切替が即時）。リスク軸 R1/R2/R3 を `risk_axis` で切替（R3=セクター×サイズ別バケットの CV 残差 RMSE。サイズ代理=`bs_total_assets`）。マクロ計算は日付メモ化で高速化（既定219s→29s）。`heavy=True`。`use_macro=False` でマクロ特徴量なしの純財務モデルとして実行可 | plugins/utils.py |
 | `plugins/utils.py` | バックエンド | ols()・normalize()・winsorize()・walk_forward_cv()・walk_forward_cv_monthly()・get_macro_features()・get_momentum_return() | — |
 | `tests/` | テスト | pytest 回帰テスト（313件）。プラグイン＋utils＋`database.py`（upsert・RegressionResult merge・derived非永続）＋`collector.py`（XBRLパース・派生指標＋ネットワーク取得を httpx MockTransport でモック）＋`api.py`（純関数・`/health`・DB-backed 読取・heavy回帰のRenderブロック）をカバー。in-memory SQLite fixture（StaticPool）／FastAPI TestClient／httpx MockTransport で検証。`financial_metrics` は SQLite では `FinancialMetric` 列定義から生成したテーブルで代替し、派生値・予測値はテストが直接注入（`make_metric`）。計算式の同値性は Postgres で別途検証。共通 fixture は `tests/conftest.py`（`db`/`make_fin`/`make_metric` 等） | pytest, sqlalchemy, fastapi, httpx |
 | `requirements-dev.txt` | 設定 | 開発・テスト専用依存（`pytest`）。本番 `requirements.txt` と分離（Render メモリ節約） | — |
