@@ -1108,12 +1108,24 @@ function _mrrRecompute() {
   return { axis, lambda, topN, all: items, top: items.slice(0, topN) };
 }
 
-// X軸（リスク）上限 = 描画対象の選択軸値の99パーセンタイル。データ過少銘柄の
-// 過大ボラ外れ値で全バブルが左端へ潰れるのを防ぐ。点数が少なければ null（キャップなし）。
-function _mrrXCap(pts, axisKey) {
-  const xs = pts.map(p => p[axisKey]).filter(x => x != null).sort((a, b) => a - b);
-  if (xs.length < 5) return null;
-  return xs[Math.min(xs.length - 1, Math.floor(xs.length * 0.99))];
+// 配列の分位点（0..1）。空なら null。少数点でも端に丸めず線形補間で安定させる。
+function _mrrPctl(vals, q) {
+  const xs = vals.filter(v => v != null).sort((a, b) => a - b);
+  if (!xs.length) return null;
+  const pos = (xs.length - 1) * q;
+  const lo = Math.floor(pos), hi = Math.ceil(pos);
+  return lo === hi ? xs[lo] : xs[lo] + (xs[hi] - xs[lo]) * (pos - lo);
+}
+
+// 描画用の軸範囲 [p1, p99]（＋わずかな余白）。データ過少銘柄の外れ値（過大ボラ・
+// 過大μ）で軸が引き伸ばされ全点が隅へ潰れるのを防ぐ。範囲外の<2%は描画されない。
+function _mrrAxisRange(pts, key) {
+  const vals = pts.map(p => p[key]).filter(v => v != null);
+  if (vals.length < 5) return {};
+  const lo = _mrrPctl(vals, 0.01), hi = _mrrPctl(vals, 0.99);
+  if (lo == null || hi == null || hi <= lo) return {};
+  const pad = (hi - lo) * 0.05;
+  return { min: lo - pad, max: hi + pad };
 }
 
 // 効用 U → 色（スレート→紫の濃淡）。高 U ほど紫が濃い。
@@ -1147,46 +1159,54 @@ function _mrrPaintCv(data) {
     : '<tr><td colspan="5" style="color:#64748b">CVフォルドなし（学習月数が不足。株価週次履歴の蓄積を待つ必要があります）</td></tr>';
 }
 
-// バブルチャート: y=μ_shrunk / x=選択リスク軸 / 色=効用U / 径=R1信頼度 / 枠線・線=パレート。
+// バブルチャート: x=選択リスク軸 / y=μ_raw / 色=効用U / 枠線・線=パレート。
+// 散布図は全社（リスク-リターンの全体像）を描き、効用上位 top_n を少し大きく濃く強調する。
+// 「Uで絞った上位N」だけを描くとリスク方向に潰れるため、母集団を描いてフロンティアを見せる。
+// 径は固定（R1 はほぼ一定で径エンコードが無意味なため。R1 はツールチップで参照）。
 function _mrrPaintChart(v) {
   const chartCard = document.getElementById('mrr-chart-card');
   const canvas = document.getElementById('chart-mrr-bubble');
   if (!chartCard || !canvas || !window.Chart) return;
   if (_mrrChart) { _mrrChart.destroy(); _mrrChart = null; }
-  const pts = v.top;
+  const pts = v.all;
   if (!pts.length) { chartCard.classList.add('hidden'); return; }
   chartCard.classList.remove('hidden');
   const axisKey = v.axis;
-  const r1Max = Math.max(...pts.map(p => p.r1 ?? 0), 1e-9);
+  const topSet = new Set(v.top.map(p => p.edinet_code));
   const us = pts.map(p => p._u);
   const uMin = Math.min(...us), uMax = Math.max(...us);
-  // X軸 p99 クランプ: 極端な実現ボラ（データ過少銘柄）で全バブルが左端へ潰れるのを防ぐ。
-  // 上限超過の銘柄は右端に貼り付ける（_p には真値を保持しツールチップは実値表示）。
-  const xCap = _mrrXCap(pts, axisKey);
-  const clampX = (x) => (xCap != null && x > xCap) ? xCap : x;
+  // 軸範囲を [p1,p99] に固定（外れ値で潰れない）。範囲外の点は Chart.js が描画省略。
+  const xRange = _mrrAxisRange(pts, axisKey);
+  const yRange = _mrrAxisRange(pts, 'mu_raw');
+  // データ値自体を [p1,p99] にクランプ（外れ値は境界へ積む）。Chart.js は外れ値が
+  // 残ると scales.min/max を設定しても軸を引き伸ばすため、値クランプで確実に潰れを防ぐ。
+  const clamp = (val, R) => (R.min == null || val == null) ? val : Math.min(R.max, Math.max(R.min, val));
+  // サイズは固定（R1 はほぼ一定で径エンコードが退化するため）。全社の雲が見えるよう
+  // 背景点も視認可能な大きさ・不透明度にし、上位 top_n とパレートを少し大きく強調する。
   const bubble = pts.map(p => ({
-    x: clampX(p[axisKey]), y: p.mu_raw,
-    r: Math.max(4, 26 * (1 - (p.r1 ?? 0) / r1Max)),
-    _p: p,
+    x: clamp(p[axisKey], xRange), y: clamp(p.mu_raw, yRange),
+    r: p._pareto ? 6 : (topSet.has(p.edinet_code) ? 5 : 3),
+    _p: p, _top: topSet.has(p.edinet_code),
   }));
-  const bg = pts.map(p => _mrrUColor(p._u, uMin, uMax, 0.8));
-  const bc = pts.map(p => p._pareto ? '#f9a8d4' : 'rgba(71,85,105,0.6)');
-  const bw = pts.map(p => p._pareto ? 2.5 : 1);
+  const bg = pts.map(p => _mrrUColor(p._u, uMin, uMax, topSet.has(p.edinet_code) ? 0.9 : 0.55));
+  const bc = pts.map(p => p._pareto ? '#f9a8d4' : (topSet.has(p.edinet_code) ? 'rgba(226,232,240,0.9)' : 'rgba(148,163,184,0.4)'));
+  const bw = pts.map(p => p._pareto ? 2.5 : (topSet.has(p.edinet_code) ? 1.2 : 0.5));
   const front = pts.filter(p => p._pareto)
-    .map(p => ({ x: clampX(p[axisKey]), y: p.mu_raw }))
+    .map(p => ({ x: clamp(p[axisKey], xRange), y: clamp(p.mu_raw, yRange) }))
     .sort((a, b) => a.x - b.x);
   _mrrChart = new Chart(canvas, {
     data: { datasets: [
       { type: 'line', label: '効率的フロンティア', data: front,
         borderColor: '#f9a8d4', borderWidth: 2, pointRadius: 0, fill: false, tension: 0, order: 0 },
-      { type: 'bubble', label: '銘柄（色=効用U / 径=R1信頼度 / 枠線=パレート）', data: bubble,
+      { type: 'bubble', label: `銘柄（全${pts.length}社・上位${v.top.length}を強調）`, data: bubble,
         backgroundColor: bg, borderColor: bc, borderWidth: bw, order: 1 },
     ]},
     options: {
       responsive: true, maintainAspectRatio: false,
       plugins: {
         legend: { position: 'top' },
-        tooltip: { callbacks: { label: (ctx) => {
+        tooltip: { filter: (ctx) => !ctx.raw || ctx.raw._top !== false || ctx.datasetIndex === 0,
+          callbacks: { label: (ctx) => {
           const p = ctx.raw && ctx.raw._p;
           if (!p) return '';
           return [
@@ -1201,9 +1221,13 @@ function _mrrPaintChart(v) {
         }}},
       },
       scales: {
-        x: { title: { display: true, text: `リスク（${MRR_AXIS_LABELS[axisKey]}）` },
-             max: xCap != null ? xCap * 1.05 : undefined },
-        y: { title: { display: true, text: '期待リターン（μ_raw・年率）' }},
+        // type:'linear' を明示。frontier の line データセットがあると Chart.js は x 軸を
+        // 既定で category スケールにし、数値 min/max を無視して点を等間隔配置するため
+        // （= x がクランプされず外れ値で潰れる主因）。linear を強制して数値軸にする。
+        x: { type: 'linear', title: { display: true, text: `リスク（${MRR_AXIS_LABELS[axisKey]}）` },
+             min: xRange.min, max: xRange.max },
+        y: { type: 'linear', title: { display: true, text: '期待リターン（μ_raw・年率）' },
+             min: yRange.min, max: yRange.max },
       },
     },
   });
