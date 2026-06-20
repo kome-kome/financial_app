@@ -20,7 +20,7 @@ _Avoid_: GUI項目, 表示カラム
 _Avoid_: （口語の「説明変数」は可。正式にはこちら）
 
 **回帰結果 (regression result)**:
-業種別OLS（producer）が `regression_results` テーブルへ書き込む銘柄×年度の出力（predicted_market_cap / gap_ratio / model[ols|ridge] / sector / computed_at）。乖離分析（consumer・`depends_on=["sector_ols"]`）が消費する seam の通貨。producer 未実行なら乖離分析は前提条件エラー（`plugins.ensure_dependencies` が `depends_on` を runner/専用エンドポイントで強制）。回帰が財務データ更新より古い＝stale。
+業種別OLS（producer）が `regression_results` テーブルへ書き込む銘柄×年度の出力（predicted_market_cap / gap_ratio / model[ols|ridge] / sector / computed_at）。バリュエーション分析（consumer・`depends_on=["sector_ols"]`）が消費する seam の通貨。producer 未実行なら乖離分析は前提条件エラー（`plugins.ensure_dependencies` が `depends_on` を runner/専用エンドポイントで強制）。回帰が財務データ更新より古い＝stale。
 _Avoid_: 予測結果, OLS結果（モデル混在を曖昧にするため）
 
 ## データソースと収集
@@ -36,7 +36,27 @@ _Avoid_: 更新収集, アップデート
 収集処理の実行時インスタンスの状態（running / progress / log / cancel）。種別は collection（full/incremental/smart 共有）/ market / history / jquants / macro / reparse。job 名キーの単一 registry（`collection_jobs.jobs`）が状態を保持し SSE で進捗配信する。全件収集・差分収集が「処理の種類」を指すのに対し、収集ジョブは「実行中スロットの状態」を指す。
 _Avoid_: ステータス辞書, status dict（実装詳細・旧称）
 
+## 分析の階層
+
+分析手法は3つの層に整理する。層が違えば「種類の違う導出」であり、フラットな行列（base × operator）では扱わない。
+
+**一次分析 (primary analysis)**:
+個別銘柄を入力にとり、銘柄ごとの**シグナル**（スコア／割安度／リターン予測）を出力する分析。目的で下位分類する — スクリーニング（探す）／バリュエーション（割安度）／リターン予測。利用者はこの出力に直接アクションする。
+_Avoid_: 基本分析, ベース分析（層を曖昧にするため）
+
+**双対分析 (dual analysis)**:
+一次分析を**逆観点**で**保有銘柄**へ向け直し、売り判断を生む分析（売り候補ランキングが唯一の実体）。一次分析と数式は連続（符号反転）だが、**対象ユニバース（全市場→保有）と意思決定（買い→売り）が変わる**ため、任意の一次分析へ自由に適用できる operator ではない。スクリーニング系にのみ自然に成立する。
+_Avoid_: 逆分析, 反転スコア（双対の「対象が変わる」性質が落ちるため）
+
+**メタ検証 (meta-validation)**:
+一次分析そのものの**実績有効性**を評価する分析（バックテスト・各モデル内蔵の WF-CV）。出力は銘柄選択ではなく**品質指標**。recommend は内蔵検証を持たずバックテストへ外付け、price_predictor / macro は WF-CV を内蔵 ＝ メタ検証は「既に一部解決済みの横断的関心事」であり、各一次分析へ一律に増設する variant ではない。
+_Avoid_: 検証分析, 評価（メタ＝分析の分析である性質が落ちるため）
+
 ## 分析プラグイン
+
+**バリュエーション分析 (valuation analysis)**:
+業種内OLS（sector_ols）の `gap_ratio` seam を起点に、**割安度（gap）・平均回帰タイミング（AR(1)半減期）・期待総リターン（gap＋配当利回り）** を一括で出す一次分析（バリュエーション系の唯一のハブ）。旧「乖離分析（gap_analysis）」を改名・拡張したもので、旧 total_return プラグインの「理論株価乖離＋配当利回りで総リターンランキング」機能を吸収した（独自OLSは廃止し sector_ols を消費）。implied P/E・P/B は予測株価÷EPS・BPS で再現する。OLSエンジンは sector_ols 1本に統一。
+_Avoid_: 乖離分析（gap だけを指す旧称・責務が狭い）, 総合リターン予測（吸収された旧プラグイン名）
 
 **パラメータ契約 (param contract)**:
 分析プラグインの `params_schema()` を UI フォーム定義かつ型契約として使う宣言。各フィールドは `type`（ウィジェット: select/multiselect/slider/number/checkbox/text/weights）と `dtype`（データ型: int/float/str/list[str]/bool/dict）の2軸を持ち、dtype は数値（number/slider）にのみ明示し他は type から推論する。単一の coerce seam（`coerce_params`）がこの契約から raw params の型付け・default 補完・bounds/membership 検証を行い、execute には意味的 validation（features 非空・weights 合計≠0 等）だけが残る。bounds/membership 違反は reject（ValueError）。スライダー（type=slider）は粒度 `step` を必ず宣言し、int dtype の step は整数とする（未宣言だと HTML range が連続値になり int で端数を吐いて reject されるため。JS 側も dtype から安全側の step を導出する二重防御）。
