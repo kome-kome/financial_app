@@ -1059,6 +1059,19 @@ function renderSectorOls(data) {
 // クライアント側で算出する（軸切替・λ調整は再計算なしで即時反映）。
 // 期待リターンの基準は mu_raw（収縮は低シグナル時に銘柄差を消すため表の参考列に留める）。
 const MRR_AXIS_LABELS = { r1: 'R1 予測不確実性', r2: 'R2 実現ボラティリティ', r3: 'R3 モデル信頼性' };
+// 係数バー用: 特徴量コード → 表示ラベル（既知のものだけ。未知はコードのまま表示）。
+const MRR_FEAT_LABELS = {
+  per: 'PER', pbr: 'PBR', roe: 'ROE', roa: 'ROA', equity_ratio: '自己資本比率',
+  de_ratio: 'D/E', cf_ratio: '営業CF/売上', eps_growth: 'EPS成長率', op_growth: '営業利益成長率',
+  rd_intensity: 'R&D集約度', da_intensity: 'D&A集約度',
+  z_op_margin: '営業利益率Z', z_roe: 'ROE Z', z_cf_ratio: 'CF比率Z',
+  macro_usdjpy_yoy: 'USD/JPY(YoY)', macro_sp500_yoy: 'S&P500(YoY)', macro_us10y_zscore: '米10年金利(Z)',
+  macro_nikkei225_yoy: '日経225(YoY)',
+  momentum_12m1: 'モメンタム(12-1)',
+};
+// 種別 → 色（財務/マクロ/交差項/テクニカル）。
+const MRR_COEF_COLORS = { fin: '#60a5fa', macro: '#fbbf24', cross: '#c084fc', tech: '#34d399' };
+const MRR_COEF_TYPE_LABELS = { fin: '財務', macro: 'マクロ', cross: '交差項', tech: 'テクニカル' };
 let _mrrChart = null;
 let _mrrData  = null;
 let _mrrPaintTimer = null;
@@ -1150,6 +1163,7 @@ function _mrrPaintCv(data) {
   el('mrr-mean-rmse').textContent   = cv.mean_rmse != null ? cv.mean_rmse.toFixed(4) : '-';
   el('mrr-n-features').textContent  = (data.selected_features || []).length;
   el('mrr-features-list').textContent = (data.selected_features || []).join('、') || '（なし）';
+  _mrrPaintCoefBars(data.feature_coefs || {});
   const folds = cv.folds || [];
   el('mrr-fold-tbody').innerHTML = folds.length
     ? folds.map((f, i) =>
@@ -1157,6 +1171,57 @@ function _mrrPaintCv(data) {
          <td class="${f.r2>0.3?'text-green':''}">${f.r2!=null?f.r2.toFixed(3):'-'}</td>
          <td>${f.rmse!=null?f.rmse.toFixed(4):'-'}</td></tr>`).join('')
     : '<tr><td colspan="5" style="color:#64748b">CVフォルドなし（学習月数が不足。株価週次履歴の蓄積を待つ必要があります）</td></tr>';
+}
+
+// 特徴量コードを種別分類（交差項 > マクロ > テクニカル > 財務）。
+function _mrrCoefType(name) {
+  if (name.includes('_x_')) return 'cross';
+  if (name.startsWith('macro_')) return 'macro';
+  if (name.startsWith('momentum')) return 'tech';
+  return 'fin';
+}
+// 特徴量コードを表示ラベル化。交差項は '_x_' で分割し各要素をラベル化して ' × ' で連結。
+// セクターダミー（sec_<safe>_x_<macro>）は 'セクター[safe]' と表示。
+function _mrrCoefLabel(name) {
+  if (name.includes('_x_')) {
+    return name.split('_x_').map(part => {
+      if (part.startsWith('sec_')) return `業種[${part.slice(4)}]`;
+      return MRR_FEAT_LABELS[part] || part;
+    }).join(' × ');
+  }
+  return MRR_FEAT_LABELS[name] || name;
+}
+// 標準化係数の横バー（ゼロ中心・正右/負左）。種別で色分け、|係数| 降順に並べる。
+function _mrrPaintCoefBars(coefs) {
+  const host = document.getElementById('mrr-coef-bars');
+  const legend = document.getElementById('mrr-coef-legend');
+  if (!host) return;
+  const entries = Object.entries(coefs).sort((a, b) => Math.abs(b[1]) - Math.abs(a[1]));
+  if (!entries.length) { host.innerHTML = '<span style="color:#64748b;font-size:12px">（係数なし）</span>'; if (legend) legend.innerHTML = ''; return; }
+  const maxAbs = Math.max(...entries.map(([, v]) => Math.abs(v))) || 1;
+  // 凡例（出現した種別のみ）
+  if (legend) {
+    const used = [...new Set(entries.map(([n]) => _mrrCoefType(n)))];
+    legend.innerHTML = used.map(t =>
+      `<span style="display:inline-flex;align-items:center;gap:4px"><span style="width:10px;height:10px;border-radius:2px;background:${MRR_COEF_COLORS[t]};display:inline-block"></span>${MRR_COEF_TYPE_LABELS[t]}</span>`
+    ).join('');
+  }
+  host.innerHTML = entries.map(([name, v]) => {
+    const t = _mrrCoefType(name);
+    const color = MRR_COEF_COLORS[t];
+    const w = (Math.abs(v) / maxAbs) * 50;           // 片側 0–50%
+    const pos = v >= 0;
+    const bar = pos
+      ? `<div style="position:absolute;left:50%;width:${w}%;height:14px;background:${color};border-radius:0 3px 3px 0"></div>`
+      : `<div style="position:absolute;right:50%;width:${w}%;height:14px;background:${color};border-radius:3px 0 0 3px"></div>`;
+    return `<div style="display:flex;align-items:center;gap:8px;margin-bottom:3px">
+        <div style="width:190px;flex:none;font-size:11px;color:#cbd5e1;text-align:right;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${name}">${_mrrCoefLabel(name)}</div>
+        <div style="position:relative;flex:1;height:14px;background:#1e293b;border-radius:3px">
+          <div style="position:absolute;left:50%;top:-2px;bottom:-2px;width:1px;background:#475569"></div>${bar}
+        </div>
+        <div style="width:54px;flex:none;font-size:11px;color:${pos?'#86efac':'#fca5a5'};text-align:left">${pos?'+':''}${v.toFixed(3)}</div>
+      </div>`;
+  }).join('');
 }
 
 // バブルチャート: x=選択リスク軸 / y=μ_raw / 色=効用U / 枠線・線=パレート。

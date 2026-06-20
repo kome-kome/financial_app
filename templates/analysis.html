@@ -606,6 +606,11 @@ tr:hover td{background:#1e2235}
         </div>
         <div style="font-size:12px;color:#a78bfa;font-weight:600;margin-bottom:4px">選択された特徴量（BIC）</div>
         <div id="mrr-features-list" style="font-size:12px;color:#94a3b8;margin-bottom:10px;word-break:break-all"></div>
+        <div style="font-size:12px;color:#a78bfa;font-weight:600;margin-bottom:4px">標準化係数（効いた向き・相対的な大きさ）
+          <span style="font-weight:400;color:#64748b">　※ CV R² は低く、符号と相対大小の目安。寄与度の過大解釈は禁物</span>
+        </div>
+        <div id="mrr-coef-legend" style="font-size:11px;color:#94a3b8;display:flex;gap:14px;flex-wrap:wrap;margin-bottom:6px"></div>
+        <div id="mrr-coef-bars" style="margin-bottom:12px"></div>
         <div class="section-title" style="font-size:13px">フォルド別 CV 詳細</div>
         <div style="overflow-x:auto">
           <table>
@@ -643,7 +648,7 @@ tr:hover td{background:#1e2235}
 </div><!-- layout -->
 
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
-<script src="/static/js/common.js?v=20260620c"></script>
-<script src="/static/js/analysis.js?v=20260620c"></script>
+<script src="/static/js/common.js?v=20260620e"></script>
+<script src="/static/js/analysis.js?v=20260620e"></script>
 </body>
 </html>

@@ -760,8 +760,8 @@ classDiagram
         +depends_on = []
         +heavy = True
         +ui_order = 330
-        +params_schema() lambda_risk/risk_axis/fin_features/use_macro/top_n 等
-        +execute() 交差項OLS(財務×マクロ)+LassoLarsIC(BIC)選択+OLS再フィット+Walk-forward CV+James-Stein縮小。全社rawを返却(効用U/Pareto/top_nはJS後処理)
+        +params_schema() lambda_risk/risk_axis/fin_features(価格フリー含む)/use_macro/macro_features(USDJPY/SP500/US10Y/NIKKEI225 multiselect)/top_n 等
+        +execute() 交差項OLS(財務×マクロ)+LassoLarsIC(BIC)選択+OLS再フィット+Walk-forward CV+James-Stein縮小。全社raw+selected_features+feature_coefs(標準化係数)を返却(効用U/Pareto/top_nはJS後処理)
     }
 
     class PluginRegistry {

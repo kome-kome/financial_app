@@ -31,27 +31,50 @@ HORIZON_WEEKS = 52
 # 下回ったら sector → global へフォールバックして過小標本のノイズを避ける。
 R3_MIN_BUCKET_N = 5
 
+# 財務ベース特徴量の選択肢（全て financial_metrics VIEW の実列。getattr で解決＝DB移行不要）。
+# per/pbr は将来リターンに対するバリュー因子（Fama-French HML ≒ 1/PBR）であり循環ではない
+# （目的変数は株価でなく 52週先リターン）。価格を含まないファンダ（roa/cf_ratio/de_ratio/
+# eps_growth/op_growth）を併置し、「割安」と「価格の平均回帰」を分離できるようにする。
 FIN_BASE_OPTIONS = [
     {"value": "per",          "label": "PER"},
     {"value": "pbr",          "label": "PBR"},
     {"value": "roe",          "label": "ROE（%）"},
+    {"value": "roa",          "label": "ROA（%）"},
     {"value": "equity_ratio", "label": "自己資本比率（%）"},
+    {"value": "de_ratio",     "label": "D/Eレシオ"},
+    {"value": "cf_ratio",     "label": "営業CF/売上（%）"},
+    {"value": "eps_growth",   "label": "EPS成長率（%）"},
+    {"value": "op_growth",    "label": "営業利益成長率（%）"},
     {"value": "rd_intensity", "label": "R&D集約度"},
     {"value": "da_intensity", "label": "D&A集約度"},
     {"value": "z_op_margin",  "label": "営業利益率Zスコア"},
     {"value": "z_roe",        "label": "ROE Zスコア"},
     {"value": "z_cf_ratio",   "label": "CF比率Zスコア"},
 ]
-DEFAULT_FIN_FEATURES = ["per", "pbr", "roe", "equity_ratio"]
+# 既定は価格由来（per/pbr）に偏らないよう価格フリーの roa・eps_growth を混合。
+DEFAULT_FIN_FEATURES = ["per", "pbr", "roe", "equity_ratio", "roa", "eps_growth"]
 
 # series_code → transform ("yoy" | "zscore")
-# JP10Y は stooq/Yahoo Finance で取得不可（stooq JS チャレンジ・^JGB 上場廃止）のため除外
+# JP10Y・TOPIX は本番 macro_data に蓄積がない（収集失敗：JP10Y=^JGB 上場廃止 / TOPIX=^tpx・^TPX
+# 取得不可）ため除外。選ぶと全スナップショットが None スキップでモデル学習不能になるため、
+# データのある系列のみを公開する（収集が直り次第ここに追加すれば自動で選択肢に出る）。
 _MACRO_MAP = {
-    "macro_usdjpy_yoy":   ("USDJPY", "yoy"),
-    "macro_sp500_yoy":    ("SP500",  "yoy"),
-    "macro_us10y_zscore": ("US10Y",  "zscore"),
+    "macro_usdjpy_yoy":    ("USDJPY",    "yoy"),
+    "macro_sp500_yoy":     ("SP500",     "yoy"),
+    "macro_us10y_zscore":  ("US10Y",     "zscore"),
+    "macro_nikkei225_yoy": ("NIKKEI225", "yoy"),
 }
 MACRO_FEATURE_NAMES = list(_MACRO_MAP.keys())
+
+# params_schema の multiselect 用ラベル。USDJPY/SP500/US10Y を既定選択（NIKKEI225 は
+# 市場成分・SP500 との多重共線があるため任意）。
+MACRO_FEATURE_OPTIONS = [
+    {"value": "macro_usdjpy_yoy",    "label": "USD/JPY 前年比（YoY）"},
+    {"value": "macro_sp500_yoy",     "label": "S&P500 前年比（YoY）"},
+    {"value": "macro_us10y_zscore",  "label": "米10年金利 Zスコア"},
+    {"value": "macro_nikkei225_yoy", "label": "日経225 前年比（YoY）"},
+]
+DEFAULT_MACRO_FEATURES = ["macro_usdjpy_yoy", "macro_sp500_yoy", "macro_us10y_zscore"]
 
 
 # ── ヘルパー ──────────────────────────────────────────────────────────────────
@@ -217,6 +240,13 @@ class MacroRiskReturnPlugin(AnalysisPlugin):
                 "label": "マクロ特徴量・交差項を使用",
                 "default": True,
             },
+            "macro_features": {
+                "type": "multiselect",
+                "label": "マクロ特徴量",
+                "description": "use_macro=ON のとき、ここで選んだマクロ系列のみを特徴量・交差項に使う。",
+                "options": MACRO_FEATURE_OPTIONS,
+                "default": DEFAULT_MACRO_FEATURES,
+            },
             "momentum_window": {
                 "type": "number",
                 "dtype": "int",
@@ -257,6 +287,7 @@ class MacroRiskReturnPlugin(AnalysisPlugin):
         risk_axis      = params["risk_axis"]
         fin_features   = params["fin_features"]
         use_macro      = params["use_macro"]
+        macro_features = params["macro_features"]
         mom_window     = params["momentum_window"]
         max_features   = params["max_features"]
         min_coverage   = params["min_coverage"]
@@ -265,16 +296,19 @@ class MacroRiskReturnPlugin(AnalysisPlugin):
         if not fin_features:
             raise ValueError("財務特徴量を1つ以上選択してください。")
 
+        # 選択マクロ系列（use_macro=OFF なら空）。空選択は実質マクロ無効と同義。
+        macro_names = list(macro_features) if use_macro else []
+
         prices_by_co, fin_by_co, companies = self._load_data(db)
         if not prices_by_co:
             raise ValueError("株価週次履歴がありません。先に収集を実行してください。")
 
-        macro_cache = self._preload_macro(db, prices_by_co) if use_macro else {}
+        macro_cache = self._preload_macro(db, prices_by_co, macro_names) if macro_names else {}
         sectors = self._collect_sectors(fin_by_co, companies)
 
         samples_by_ym, sample_meta_by_ym, current_snaps, all_feat_names = self._build_snapshots(
             prices_by_co, fin_by_co, companies, macro_cache, sectors,
-            fin_features, use_macro, mom_window, min_coverage,
+            fin_features, macro_names, mom_window, min_coverage,
         )
 
         total_samples = sum(len(v) for v in samples_by_ym.values())
@@ -324,9 +358,16 @@ class MacroRiskReturnPlugin(AnalysisPlugin):
             XtX_inv, sigma2, prices_by_co, r3_data,
         )
 
+        # 標準化係数（X・y とも z-score 正規化済のため特徴量間で大小比較可能）。
+        # beta[0]=切片、beta[1:] が selected_names と整列。UI の係数バー表示に使う。
+        feature_coefs = {
+            name: round(float(beta[i + 1]), 4) for i, name in enumerate(selected_names)
+        }
+
         return {
             "cv_metrics":       cv_metrics,
             "selected_features": selected_names,
+            "feature_coefs":    feature_coefs,
             "n_train_samples":  total_samples,
             "n_companies":      len(results),
             # クライアントの初期表示シード（λ・リスク軸・表示件数は再計算なしで切替可能）
@@ -362,7 +403,7 @@ class MacroRiskReturnPlugin(AnalysisPlugin):
         companies = {c.edinet_code: c for c in db.query(Company).all()}
         return prices_by_co, fin_by_co, companies
 
-    def _preload_macro(self, db, prices_by_co: dict) -> dict:
+    def _preload_macro(self, db, prices_by_co: dict, macro_names: list[str] | None = None) -> dict:
         from database import MacroData
         all_dates = [row.trade_date for rows in prices_by_co.values() for row in rows]
         if not all_dates:
@@ -372,16 +413,19 @@ class MacroRiskReturnPlugin(AnalysisPlugin):
         # zscore 用に 5年前まで遡る
         since = (_date.fromisoformat(min_d) - _td(days=5 * 366)).isoformat()
         max_d = max(all_dates)
-        rows = (
+        # 選択された macro_features に対応する series_code のみロード（未指定なら全系列）
+        series_codes = sorted({_MACRO_MAP[n][0] for n in (macro_names or MACRO_FEATURE_NAMES) if n in _MACRO_MAP})
+        q = (
             db.query(MacroData)
             .filter(
                 MacroData.trade_date >= since,
                 MacroData.trade_date <= max_d,
                 MacroData.close.isnot(None),
             )
-            .order_by(MacroData.series_code, MacroData.trade_date)
-            .all()
         )
+        if series_codes:
+            q = q.filter(MacroData.series_code.in_(series_codes))
+        rows = q.order_by(MacroData.series_code, MacroData.trade_date).all()
         by_series: dict[str, dict[str, float]] = {}
         for r in rows:
             by_series.setdefault(r.series_code, {})[r.trade_date] = r.close
@@ -401,9 +445,10 @@ class MacroRiskReturnPlugin(AnalysisPlugin):
     def _build_snapshots(
         self,
         prices_by_co, fin_by_co, companies, macro_cache,
-        sectors, fin_features, use_macro, mom_window, min_coverage,
+        sectors, fin_features, macro_names, mom_window, min_coverage,
     ) -> tuple:
-        macro_names = MACRO_FEATURE_NAMES if use_macro else []
+        # macro_names は呼び出し側で選択済み（use_macro=OFF や空選択なら []）。
+        use_macro = bool(macro_names)
         momentum_name = ["momentum_12m1"] if use_macro else []
 
         # 交差項名を生成（fin × macro + sector_dummy × macro）
