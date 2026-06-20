@@ -572,13 +572,14 @@ coverage_i = Σⱼ∈present |weight_j| / Σⱼ |weight_j|
 
 **メタ層の一般化（scoring source）**: 検証対象のスコアリング手法を `source` パラメータで切り替える（`SCORING_SOURCES`）。ランキングを出す一次分析なら同一土俵（as-of スコア→上位N社→実現リターン→ベンチマーク超過）で比較できる。
 
-| source | スコア（高いほど買い候補） | 前提 |
-|---|---|---|
-| `recommend`（既定） | recommend プリセットの加重和（z_roe 等） | — |
-| `valuation` | 期待総リターン ＝ `gap_ratio` ＋ 配当利回り [%] | sector_ols 実行済み年度のみ（gap_ratio 必須） |
-| `net_cash` | 清原式ネットキャッシュ比率 ＝ (流動資産＋投資有価証券×0.7−総負債) / 時価総額 | — |
+| source | スコア（高いほど上位 N 社へ） | 有効性の判定 | 前提 |
+|---|---|---|---|
+| `recommend`（既定） | recommend プリセットの加重和（z_roe 等） | 超過収益 > 0 | — |
+| `valuation` | 期待総リターン ＝ `gap_ratio` ＋ 配当利回り [%] | 超過収益 > 0 | sector_ols 実行済み年度のみ（gap_ratio 必須） |
+| `net_cash` | 清原式ネットキャッシュ比率 ＝ (流動資産＋投資有価証券×0.7−総負債) / 時価総額 | 超過収益 > 0 | — |
+| `sell` | 売り候補 ＝ recommend 加重和の符号反転（買い系の逆観点） | **超過収益 < 0**（上位＝売り候補が下回るほど有効） | — |
 
-ML 系（price_predictor / macro）は WF-CV を内蔵するため対象外（→ §4・§9）。`preset` は `recommend` のときのみ意味を持つ。
+ML 系（price_predictor / macro）は WF-CV を内蔵するため対象外（→ §4・§9）。`preset` は `recommend` / `sell` のときのみ意味を持つ。`sell` はメタ層×双対層（売り判断の有効性検証）にあたり、上位 N 社＝最も売り向きの銘柄なので、その後リターンがベンチマークを**下回る**ほど売りシグナルが有効と読む。
 
 ### 計算ロジック
 

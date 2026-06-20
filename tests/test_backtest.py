@@ -150,3 +150,24 @@ class TestScoringSource:
         codes = [r["edinet_code"] for r in res["results"]]
         assert codes == ["E00001", "E00002"]   # 1.5 > 0.2
         assert res["results"][0]["score"] == 1.5
+
+    def test_source_sell_inverts_recommend_ranking(self, db, make_metric):
+        # sell は recommend 加重和の符号反転（買い系の逆観点）。
+        # recommend なら E00002(score=5) が首位だが、sell では最下位の買い＝最上位の売り。
+        db.add(make_metric(edinet_code="E00001", year=2020, period_end="2020-03-31",
+                           z_roe=1.0, z_op_margin=0.5))   # buy=1.5 → sell=-1.5
+        db.add(make_metric(edinet_code="E00002", year=2020, period_end="2020-03-31",
+                           z_roe=3.0, z_op_margin=2.0))   # buy=5.0 → sell=-5.0
+        db.add(make_metric(edinet_code="E00003", year=2020, period_end="2020-03-31",
+                           z_roe=2.0, z_op_margin=1.0))   # buy=3.0 → sell=-3.0
+        db.commit()
+        buy  = backtest.run(db, "バランス型", 6, 20, None, None, source="recommend")
+        sell = backtest.run(db, "バランス型", 6, 20, None, None, source="sell")
+        assert sell["source"] == "sell"
+        # sell ランキングは recommend の完全な逆順
+        buy_codes  = [r["edinet_code"] for r in buy["results"]]
+        sell_codes = [r["edinet_code"] for r in sell["results"]]
+        assert sell_codes == list(reversed(buy_codes))
+        # 売り候補首位＝最も買い向きでない E00001（sell score=-1.5 が最大）
+        assert sell_codes[0] == "E00001"
+        assert sell["results"][0]["score"] == -1.5

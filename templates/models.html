@@ -517,7 +517,7 @@ z_metric_j_i: 企業 i の指標 j の Zスコア（年度別正規化済み）<
   <h2>7. バックテスト</h2>
   <span class="file-tag">backtest.py — GET /api/backtest（routers/analysis.py）</span>
 
-  <p>過去 N ヶ月前の時点で確定していた財務データを使いスコアリングし、その後の実際の株価リターンを計算することでモデルの有効性を事後的に検証する。<strong>検証対象のスコアリング手法は <code>source</code> で切替</strong>（<code>recommend</code> ＝複合スコア／<code>valuation</code> ＝期待総リターン gap_ratio＋配当／<code>net_cash</code> ＝清原式ネットキャッシュ比率）。ランキングを出す一次分析を同一土俵で比較できる（メタ層の一般化）。</p>
+  <p>過去 N ヶ月前の時点で確定していた財務データを使いスコアリングし、その後の実際の株価リターンを計算することでモデルの有効性を事後的に検証する。<strong>検証対象のスコアリング手法は <code>source</code> で切替</strong>（<code>recommend</code> ＝複合スコア／<code>valuation</code> ＝期待総リターン gap_ratio＋配当／<code>net_cash</code> ＝清原式ネットキャッシュ比率／<code>sell</code> ＝売り候補＝買い系スコアの符号反転）。ランキングを出す一次分析を同一土俵で比較できる（メタ層の一般化）。<code>sell</code> は<strong>超過収益が負（上位＝売り候補が下回る）ほど有効</strong>と読む（メタ層×双対層）。</p>
 
   <h3>計算ロジック</h3>
   <div class="formula-block">start_date = today − months_ago × 30日

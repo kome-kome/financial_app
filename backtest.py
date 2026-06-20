@@ -18,11 +18,14 @@ from plugins.net_cash_analysis import compute_net_cash, compute_nc_ratio
 MULTI_PERIODS = [3, 6, 12, 18, 24]
 
 # バックテストで検証できるスコアリング手法（ランキングを出す一次分析を as-of で再現する）。
-# いずれも「スコアが高いほど買い候補」に揃える（上位 N 社のその後リターンを測る）。
+# 買い系（recommend/valuation/net_cash）は「スコアが高いほど買い候補」で、上位 N 社の
+# その後リターンがベンチマークを上回れば有効。sell は双対（買い系の逆観点）で、上位 N 社＝
+# 最も売り向きの銘柄。**sell は超過収益が負（＝下回る）ほど売りシグナルが有効**と解釈する。
 #   recommend : recommend のプリセット加重和（z_roe 等）
 #   valuation : バリュエーション分析の期待総リターン（gap_ratio + 配当利回り）
 #   net_cash  : 清原式ネットキャッシュ比率
-SCORING_SOURCES = ("recommend", "valuation", "net_cash")
+#   sell      : 売り候補（recommend 加重和の符号反転＝買い系スコアの逆観点・メタ×双対）
+SCORING_SOURCES = ("recommend", "valuation", "net_cash", "sell")
 
 # 配当利回りの異常値ガード（％）。gap_analysis（バリュエーション分析）と整合。
 _DIV_YIELD_CAP = 30.0
@@ -47,14 +50,16 @@ def score_record(r, source: str, weights: dict) -> float | None:
         nc = compute_net_cash(r.bs_current_assets, r.bs_investment_securities,
                               r.bs_total_liabilities)
         return compute_nc_ratio(nc, r.market_cap)
-    # recommend（既定）: プリセット加重和
+    # recommend（既定）: プリセット加重和。sell は同一加重の符号反転（買い系の逆観点）。
     score, has_any = 0.0, False
     for metric, weight in weights.items():
         val = getattr(r, metric, None)
         if val is not None:
             score += weight * val
             has_any = True
-    return score if has_any else None
+    if not has_any:
+        return None
+    return -score if source == "sell" else score
 
 
 def percentile(sorted_arr: list, p: float) -> float:
