@@ -799,7 +799,8 @@ IFRS には完全に対応する科目がないため、「非流動その他金
 ## 9. マクロ×リスク-リターン推奨
 
 **プラグイン**: `plugins/macro_risk_return.py` / `MacroRiskReturnPlugin`  
-**カテゴリ**: ③ 将来リターンを予測（`ui_order=330`、`heavy=True`）
+**カテゴリ**: ③ 将来リターンを予測（`ui_order=330`、`heavy=True`）  
+**副読本**: 予備知識ゼロ向けの噛み砕いた解説は [`M1_MACRO_MODEL_GUIDE.md`](M1_MACRO_MODEL_GUIDE.md)（本節はその正式・技術版）
 
 ### 9.1 概要
 
