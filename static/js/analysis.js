@@ -87,6 +87,7 @@ if (window.Chart){
 const PLUGIN_TAB_MAP = {
   'gap_analysis':       'gap',
   'recommend':          'recommend',
+  'sell_ranking':       'sell_ranking',
   'total_return':       'total_return',
   'net_cash_analysis':  'net_cash',
   'backtest':           'backtest',   // 特例エントリ。既存の静的タブ #tab-backtest を使用
@@ -369,6 +370,163 @@ function exportRecommendCSV() {
     [r.rank, r.sec_code, r.company_name, r.industry, r.score,
      r.roe, r.op_margin, r.rev_growth, r.gap_ratio, r.market_cap].join(','));
   dl([header, ...rows].join('\n'), 'recommend.csv');
+}
+
+// ── 売り候補ランキング（保有銘柄の売り時）────────────────────────────────
+// 観点 → [表示ラベル, バランス型の既定ウェイト]。バックエンド SELL_METRICS と一致させる。
+const SELL_WEIGHT_LABELS = {
+  'gap_ratio':    ['割高度（回帰乖離）', 1.0],
+  'roe':          ['ROE（収益性）',      1.0],
+  'op_margin':    ['営業利益率',          1.0],
+  'cf_ratio':     ['CF余力',             0.8],
+  'rev_growth':   ['売上成長率',          0.6],
+  'equity_ratio': ['財務安全性',          0.4],
+};
+// plugins/sell_ranking.py PRESETS と一致させる（高いほどその観点を売り判断で重視）。
+const SELL_PRESETS = {
+  'バランス型':   {gap_ratio:1.0, roe:1.0, op_margin:1.0, cf_ratio:0.8, rev_growth:0.6, equity_ratio:0.4},
+  '割高警戒型':   {gap_ratio:2.5, roe:0.5, op_margin:0.5, rev_growth:0.3},
+  '業績悪化重視': {roe:2.0, op_margin:1.5, cf_ratio:1.0, rev_growth:1.5, gap_ratio:0.5},
+};
+const SELL_HOLDINGS_KEY = 'sell_ranking_holdings';
+let sellResults = [];
+
+// 売り判定タブの初期化: ウェイトグリッド描画＋保有入力の localStorage 復元。
+function initSellRanking() {
+  const grid = document.getElementById('sell-weight-grid');
+  if (grid) {
+    grid.innerHTML = Object.entries(SELL_WEIGHT_LABELS).map(([key, [label, def]]) => `
+      <div style="background:#0f1117;border-radius:8px;padding:10px">
+        <div style="font-size:11px;color:#64748b;margin-bottom:6px">${label}</div>
+        <div style="display:flex;align-items:center;gap:8px">
+          <input type="range" min="0" max="3" step="0.1" value="${def}"
+            style="flex:1;accent-color:#ef4444;cursor:pointer"
+            data-input="syncWVal" data-target="sw-val-${key}" id="srange-${key}">
+          <span id="sw-val-${key}" style="font-size:14px;font-weight:600;color:#fca5a5;min-width:32px;text-align:right">${def.toFixed(1)}</span>
+        </div>
+      </div>`).join('');
+  }
+  const ta = document.getElementById('param-sell_ranking-holdings');
+  if (ta) {
+    try { const saved = localStorage.getItem(SELL_HOLDINGS_KEY); if (saved) ta.value = saved; } catch(e) {}
+    ta.addEventListener('input', () => {
+      try { localStorage.setItem(SELL_HOLDINGS_KEY, ta.value); } catch(e) {}
+    });
+  }
+}
+
+function applySellPreset(name) {
+  const weights = SELL_PRESETS[name];
+  if (!weights) return;
+  for (const key of Object.keys(SELL_WEIGHT_LABELS)) {
+    const range = document.getElementById(`srange-${key}`);
+    const label = document.getElementById(`sw-val-${key}`);
+    if (!range) continue;
+    const val = weights[key] ?? 0;
+    range.value = val;
+    label.textContent = Number(val).toFixed(1);
+  }
+}
+
+async function runSellRanking() {
+  const ta = document.getElementById('param-sell_ranking-holdings');
+  const holdings = ta ? ta.value : '';
+  try { localStorage.setItem(SELL_HOLDINGS_KEY, holdings); } catch(e) {}
+  if (!holdings.trim()) { showNotif('保有銘柄を入力してください'); return; }
+
+  const weights = {};
+  for (const key of Object.keys(SELL_WEIGHT_LABELS)) {
+    const v = parseFloat(document.getElementById(`srange-${key}`)?.value ?? 0);
+    if (v > 0) weights[key] = v;
+  }
+  const body = {
+    holdings,
+    weights,
+    sell_threshold:   parseFloat(document.getElementById('sell-th')?.value ?? 0.8),
+    reduce_threshold: parseFloat(document.getElementById('reduce-th')?.value ?? 0.3),
+    timing_adjust:    !!document.getElementById('sell-timing-adjust')?.checked,
+  };
+
+  const btn = document.getElementById('btn-sell-ranking');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span> 判定中...';
+  try {
+    const d = await apiFetch('/api/plugins/sell_ranking/run', {method:'POST', body:JSON.stringify(body)});
+    renderSellRanking(d);
+  } catch(e) {
+    showNotif('売り判定に失敗: ' + e.message + '（割高度を使うには先に「業種別OLS分析」を実行してください）');
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="2 12 6 12 9 3 15 21 18 12 22 12"/></svg> 売り候補を判定';
+  }
+}
+
+const SELL_ACTION_STYLE = {
+  'SELL':    ['#ef4444', '売却'],
+  'REDUCE':  ['#f59e0b', '一部売却'],
+  'HOLD':    ['#64748b', '保有継続'],
+  'データ不足': ['#475569', 'データ不足'],
+};
+const SELL_TREND_STYLE = {
+  '下落': '#fca5a5', '上昇': '#86efac', '横ばい': '#94a3b8', '不明': '#64748b',
+};
+
+function renderSellRanking(d) {
+  sellResults = d.results || [];
+  document.getElementById('sell-result-title').textContent =
+    `判定結果：${d.count}社（売却 ${d.n_sell} / 一部売却 ${d.n_reduce} / 保有継続 ${d.n_hold}）`;
+
+  const notes = [];
+  if (d.not_found && d.not_found.length)
+    notes.push(`<span class="text-amber">⚠ DBに無い銘柄（未収録/ETF/外国株等）: ${esc(d.not_found.join('、'))}</span>`);
+  if (d.invalid && d.invalid.length)
+    notes.push(`<span class="text-amber">⚠ 解釈できなかった入力: ${esc(d.invalid.join(' / '))}</span>`);
+  if (d.gap_available === false)
+    notes.push(`<span style="color:#64748b">※ 割高度は業種別OLS未実行のため売り判定から除外されています</span>`);
+  document.getElementById('sell-notes').innerHTML = notes.join('<br>');
+
+  const fmtPct = (v, goodIsPos) => {
+    if (v == null) return '-';
+    const cls = (v >= 0) === goodIsPos ? 'gap-positive' : 'gap-negative';
+    return `<span class="${cls}">${v >= 0 ? '+' : ''}${Number(v).toFixed(1)}%</span>`;
+  };
+  const tbody = document.getElementById('sell-tbody');
+  tbody.innerHTML = sellResults.map(r => {
+    const [aColor, aLabel] = SELL_ACTION_STYLE[r.action] || ['#64748b', r.action];
+    const tColor = SELL_TREND_STYLE[r.trend] || '#64748b';
+    const scoreColor = r.score == null ? '#64748b' : r.score > 0 ? '#fca5a5' : '#86efac';
+    // 損益: 取得単価が無ければ '-'
+    const pnl = r.pnl_pct == null ? '<span style="color:#475569">-</span>'
+      : `<span class="${r.pnl_pct >= 0 ? 'gap-positive' : 'gap-negative'}">${r.pnl_pct >= 0 ? '+' : ''}${Number(r.pnl_pct).toFixed(1)}%</span>`;
+    return `<tr>
+      <td style="font-weight:700;color:#e2e8f0">${Number(r.rank)}</td>
+      <td><span class="tag" style="background:${aColor}22;color:${aColor};font-weight:700">${esc(aLabel)}</span></td>
+      <td style="color:#38bdf8;font-weight:600">${esc(r.sec_code || '-')}</td>
+      <td>${r.edinet_code ? `<a href="/company/${esc(r.edinet_code)}" class="co-link" style="font-weight:600">${esc(r.company_name)}</a>` : esc(r.company_name)}</td>
+      <td style="color:#94a3b8;font-size:11px">${esc(r.industry || '-')}</td>
+      <td style="font-weight:700;color:${scoreColor}">${r.score == null ? '-' : Number(r.score).toFixed(2)}</td>
+      <td style="color:${tColor};font-weight:600">${esc(r.trend)}</td>
+      <td style="text-align:right">${fmtPct(r.ret_13w, true)}</td>
+      <td style="text-align:right">${r.drawdown_52w == null ? '-' : `<span class="gap-negative">${Number(r.drawdown_52w).toFixed(1)}%</span>`}</td>
+      <td style="text-align:right">${fmtPct(r.gap_ratio, true)}</td>
+      <td style="text-align:right">${r.roe != null ? Number(r.roe).toFixed(1) + '%' : '-'}</td>
+      <td style="text-align:right">${fmtPct(r.rev_growth, true)}</td>
+      <td style="text-align:right">${pnl}</td>
+    </tr>`;
+  }).join('');
+  document.getElementById('sell-result-card').style.display = 'block';
+}
+
+function exportSellRankingCSV() {
+  if (!sellResults.length) return;
+  const h = '順位,判定,証券コード,企業名,業種,売りスコア,トレンド,13週リターン%,52週高値からの下落%,割高度%,ROE%,売上成長%,取得単価,現値,損益%\n';
+  const b = sellResults.map(r => [
+    r.rank, r.action, r.sec_code, r.company_name, r.industry,
+    r.score ?? '', r.trend, r.ret_13w ?? '', r.drawdown_52w ?? '',
+    r.gap_ratio ?? '', r.roe ?? '', r.rev_growth ?? '',
+    r.avg_cost ?? '', r.last_close ?? '', r.pnl_pct ?? ''
+  ].join(',')).join('\n');
+  dl('﻿' + h + b, 'sell_ranking.csv');
 }
 
 // ── 総合リターン予測 ──────────────────────────────────────────────────
@@ -1393,6 +1551,7 @@ function dl(content, name) {
 const CSV_EXPORTERS = {
   'gap_analysis':      exportGapCSV,
   'recommend':         exportRecommendCSV,
+  'sell_ranking':      exportSellRankingCSV,
   'total_return':      exportTotalReturnCSV,
   'net_cash_analysis': exportNetCashCSV,
   'backtest':          exportBtCSV,
@@ -1405,6 +1564,7 @@ function exportCSV(name) {
 // 初期化
 initAuth();
 initRecommend();  // おすすめ銘柄タブのプリセット取得（既存タブ用）
+initSellRanking();  // 売り候補タブ: ウェイトグリッド描画＋保有入力の localStorage 復元
 // 軽量モード判定を先に解決してから動的タブを生成（重い回帰の無効化に必要）
 initLightMode().then(() => initPlugins());
 preflight();

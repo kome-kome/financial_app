@@ -104,6 +104,8 @@ td code{background:#0f172a;border:1px solid #1e2235;padding:1px 5px;border-radiu
     <div class="toc-sub"><a href="#m8">清原達郎式</a></div>
     <a href="#m9">9. マクロ×リスク-リターン推奨</a>
     <div class="toc-sub"><a href="#m9">交差項OLS + BIC + Pareto</a></div>
+    <a href="#m10">10. 売り候補ランキング</a>
+    <div class="toc-sub"><a href="#m10">保有銘柄の売り時</a></div>
   </nav>
 </aside>
 
@@ -741,6 +743,46 @@ z_nc_ratio = (nc_ratio − μ_year) / σ_year
     <li>Jegadeesh, N. &amp; Titman, S. (1993). "Returns to Buying Winners and Selling Losers." <em>Journal of Finance</em>, 48(1), 65–91. <a href="https://doi.org/10.1111/j.1540-6261.1993.tb04702.x" target="_blank" rel="noopener">https://doi.org/10.1111/j.1540-6261.1993.tb04702.x</a></li>
     <li>Frazzini, A. &amp; Pedersen, L.H. (2014). "Betting Against Beta." <em>Journal of Financial Economics</em>, 111(1), 1–23. <a href="https://doi.org/10.1016/j.jfineco.2013.10.005" target="_blank" rel="noopener">https://doi.org/10.1016/j.jfineco.2013.10.005</a></li>
   </ul>
+</div>
+
+<!-- ── Model 10 ── -->
+<div class="model-section" id="m10">
+  <h2>10. 売り候補ランキング <span class="model-tag">保有銘柄の売り時</span></h2>
+  <span class="file-tag">plugins/sell_ranking.py</span>
+
+  <p>買い系モデル（§1・§2/§3・§6）が<strong>全銘柄ユニバースから「買い」を探す</strong>のに対し、本モデルは<strong>ユーザーが入力した保有銘柄リスト</strong>の中から「売るべき銘柄と売り時」をランキングする。観点は買いの「逆」：① 割高度（回帰乖離 <code>gap_ratio</code> が負＝割高）、② 業績悪化（ROE・営業利益率・CF・成長率の低さ）、③ 価格モメンタム（下落トレンド＝売り時）。保有はサーバ非保存（都度入力＋ブラウザ記憶）、購入単価は損益表示のみ。</p>
+
+  <h3>スコア計算式（スケール整合）</h3>
+  <p>％指標（<code>gap_ratio</code>・<code>rev_growth</code>）と無次元比率（<code>roe</code> 等）が混在するため、次元整合性の原則（§共通事項）に従い<strong>最新年度ユニバース全体で winsorize → z 標準化</strong>してから合成する。</p>
+  <div class="formula-block"><span class="var">sell_score_i</span> = Σⱼ∈present (weight_j × (−z_metric_j_i)) / Σⱼ∈present weight_j
+
+weight_j     : 観点 j を売り判断で重視する度合い（非負）
+z_metric_j_i : 企業 i の指標 j のユニバース標準化値（±5 クリップ）</div>
+  <p>符号反転 <code>−z</code> により、平均より劣る（割高・低収益・低成長）銘柄ほどスコアが正に大きくなる。平均並みは ≈0。カバレッジ下限を下回る銘柄は「データ不足」。</p>
+
+  <h3>価格モメンタム（タイミング軸）</h3>
+  <p><code>stock_price_weekly</code> から 13週リターン・52週高値からの下落を算出し、トレンドを <span class="tag tag-red">下落</span>（13週 ≤ −10%）/ <span class="tag tag-green">上昇</span>（≥ +10%）/ 横ばい に分類する。</p>
+
+  <h3>アクションラベル</h3>
+  <p>絶対閾値: スコア ≥ <code>sell_threshold</code>（既定 0.8）→ <strong>SELL</strong>、≥ <code>reduce_threshold</code>（既定 0.3）→ <strong>REDUCE</strong>、未満 → <strong>HOLD</strong>。タイミング補正（既定 ON）: 下落は 1 段引き上げ、上昇は SELL→REDUCE へ緩和（上昇中の即売り回避）。相対ランキング＋絶対ラベルの併用により、優良な保有のみなら全 HOLD になる。</p>
+
+  <div class="warn-box">
+    <strong>限界:</strong> 割高度には §2 業種別OLS の事前実行が必要（未実行なら 400）。DB 未収録（ETF・外国株）は判定対象外。ウェイトは直感的ヒューリスティックで、投資助言ではなく保有整理の参考スコア。
+  </div>
+
+  <div class="refs">
+    <h4>参考文献</h4>
+    <div class="ref-item">
+      Jegadeesh, N. & Titman, S. (1993). <span class="ref-title">"Returns to Buying Winners and Selling Losers."</span><br>
+      <em>Journal of Finance</em>, 48(1), 65–91.<br>
+      <a href="https://doi.org/10.1111/j.1540-6261.1993.tb04702.x" target="_blank" rel="noopener">https://doi.org/10.1111/j.1540-6261.1993.tb04702.x</a>
+    </div>
+    <div class="ref-item">
+      Ohlson, J.A. (1995). <span class="ref-title">"Earnings, Book Values, and Dividends in Equity Valuation."</span><br>
+      <em>Contemporary Accounting Research</em>, 11(2), 661–687.<br>
+      <a href="https://doi.org/10.1111/j.1911-3846.1995.tb00461.x" target="_blank" rel="noopener">https://doi.org/10.1111/j.1911-3846.1995.tb00461.x</a>
+    </div>
+  </div>
 </div>
 
 </main>

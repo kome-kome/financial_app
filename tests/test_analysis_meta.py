@@ -22,12 +22,13 @@ from routers.analysis import SPECIAL_ANALYSES  # noqa: E402
 
 client = TestClient(api.app)
 
-# 投資フロー順の期待カテゴリ並び（ui_order 帯: 100/200/300/400）
+# 投資フロー順の期待カテゴリ並び（ui_order 帯: 100/200/300/400/500）
 EXPECTED_CATEGORY_ORDER = [
     "① 銘柄を探す",
     "② 割安度を測る",
     "③ 将来リターンを予測",
     "④ 戦略を検証",
+    "⑤ 保有を見直す",
 ]
 
 
