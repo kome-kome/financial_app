@@ -41,3 +41,15 @@ _Avoid_: ステータス辞書, status dict（実装詳細・旧称）
 **パラメータ契約 (param contract)**:
 分析プラグインの `params_schema()` を UI フォーム定義かつ型契約として使う宣言。各フィールドは `type`（ウィジェット: select/multiselect/slider/number/checkbox/text/weights）と `dtype`（データ型: int/float/str/list[str]/bool/dict）の2軸を持ち、dtype は数値（number/slider）にのみ明示し他は type から推論する。単一の coerce seam（`coerce_params`）がこの契約から raw params の型付け・default 補完・bounds/membership 検証を行い、execute には意味的 validation（features 非空・weights 合計≠0 等）だけが残る。bounds/membership 違反は reject（ValueError）。
 _Avoid_: パラメータスキーマ, フォーム定義（型契約の側面が落ちるため）
+
+**売りスコア (sell score)**:
+売り候補ランキング（`plugins/sell_ranking.py`）が保有銘柄に付ける「手放すべき度合い」。買い系スコアの逆観点（割高度＝`gap_ratio` 反転・業績悪化＝ROE/利益率/CF/成長の低さ）を最新年度ユニバースで winsorize→z 標準化し、非負ウェイトで `Σ w·(−z)/Σ w` として合成する（平均並み≈0、劣る銘柄ほど正に大きい）。価格モメンタムはスコアに混ぜず別軸（trend）として扱う。
+_Avoid_: 売り推奨度（ラベルと混同するため）
+
+**アクションラベル (action label)**:
+売りスコアに絶対閾値を当てて付ける `SELL`／`REDUCE`／`HOLD`（値不足は「データ不足」）。相対ランキングと併用し、優良な保有のみなら全 `HOLD` になる。
+_Avoid_: シグナル, 判定（曖昧）
+
+**タイミング補正 (timing adjustment)**:
+価格トレンド（週次株価の 13週リターン等から `下落`/`上昇`/`横ばい`/`不明` に分類）でアクションラベルを 1 段ずらす規則。`下落`＝売り圧力↑（HOLD→REDUCE→SELL）、`上昇`＝SELL→REDUCE へ緩和（上昇中の即売り回避）。
+_Avoid_: モメンタムフィルタ（スコアを除外する意味に取れるため）

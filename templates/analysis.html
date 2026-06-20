@@ -291,6 +291,86 @@ tr:hover td{background:#1e2235}
 
 </div>
 
+<!-- 売り候補ランキング（保有銘柄の売り時） -->
+<div id="tab-sell_ranking" class="hidden">
+
+  <div class="card">
+    <div class="section-title">保有銘柄を入力<a class="co-link" href="/guide#sell_ranking" target="_blank" rel="noopener" style="float:right;font-size:12px;font-weight:400">❓ やさしい解説</a></div>
+    <div class="info-box" style="margin-bottom:14px">
+      すでに保有している銘柄を 1 行ずつ入力してください（証券コードのみでも可）。<br>
+      書式: <code>証券コード[, @取得単価][, 購入日]</code>　例: <code>7203, @1500, 2024-03-10</code> / <code>6758 @12000</code> / <code>9984</code><br>
+      取得単価を入れると損益（PnL）も表示します。入力内容はこのブラウザに自動保存されます。<br>
+      ★ 業種別OLS分析を先に実行すると「割高度」が売り判定に使われます。
+    </div>
+    <textarea id="param-sell_ranking-holdings" rows="6" placeholder="7203, @1500, 2024-03-10&#10;6758 @12000&#10;9984"
+      style="width:100%;font-family:monospace;font-size:13px;resize:vertical;background:#0f1117;color:#e2e8f0;border:1px solid #1e2235;border-radius:6px;padding:8px"></textarea>
+  </div>
+
+  <div class="card">
+    <div class="section-title">売り判定のウェイト</div>
+    <div class="info-box" style="margin-bottom:14px">
+      プリセットを選ぶか、各観点を「売り判断でどれだけ重視するか（0〜3）」をスライダーで調整します。
+    </div>
+    <div class="flex" style="margin-bottom:16px">
+      <button class="btn btn-secondary" data-click="applySellPreset" data-arg="バランス型">⚖ バランス型</button>
+      <button class="btn btn-secondary" data-click="applySellPreset" data-arg="割高警戒型">◆ 割高警戒型</button>
+      <button class="btn btn-secondary" data-click="applySellPreset" data-arg="業績悪化重視">▼ 業績悪化重視</button>
+    </div>
+    <div class="section-title" style="font-size:12px;margin-bottom:10px">観点ウェイト（スライダー）</div>
+    <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:8px" id="sell-weight-grid"></div>
+
+    <div class="section-title" style="font-size:12px;margin:16px 0 10px">アクション閾値・タイミング</div>
+    <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:12px">
+      <div>
+        <label style="font-size:11px;color:#64748b">SELL 閾値（売りスコア）</label>
+        <div style="display:flex;align-items:center;gap:8px">
+          <input type="range" id="sell-th" min="0" max="2" step="0.1" value="0.8"
+            data-input="syncVal" data-target="sell-th-val" style="flex:1;accent-color:#ef4444">
+          <span id="sell-th-val" style="color:#fca5a5;font-weight:600;min-width:30px">0.8</span>
+        </div>
+      </div>
+      <div>
+        <label style="font-size:11px;color:#64748b">REDUCE 閾値（売りスコア）</label>
+        <div style="display:flex;align-items:center;gap:8px">
+          <input type="range" id="reduce-th" min="0" max="2" step="0.1" value="0.3"
+            data-input="syncVal" data-target="reduce-th-val" style="flex:1;accent-color:#f59e0b">
+          <span id="reduce-th-val" style="color:#fcd34d;font-weight:600;min-width:30px">0.3</span>
+        </div>
+      </div>
+    </div>
+    <label style="display:flex;align-items:center;gap:8px;margin-top:12px;font-size:12px;color:#94a3b8">
+      <input type="checkbox" id="sell-timing-adjust" checked style="width:auto;accent-color:#7c3aed">
+      価格トレンドでラベル補正（下落＝売り圧力↑ / 上昇＝即売り回避）
+    </label>
+
+    <button class="btn btn-primary" id="btn-sell-ranking" data-click="runSellRanking" style="margin-top:16px">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="2 12 6 12 9 3 15 21 18 12 22 12"/></svg>
+      売り候補を判定
+    </button>
+  </div>
+
+  <div class="card" id="sell-result-card" style="display:none">
+    <div class="flex-between">
+      <div class="section-title" style="margin-bottom:0" id="sell-result-title">判定結果</div>
+      <button class="btn btn-secondary btn-sm" data-click="exportCSV" data-arg="sell_ranking">CSVダウンロード</button>
+    </div>
+    <div id="sell-notes" class="text-sm" style="margin-top:8px"></div>
+    <div style="overflow-x:auto;margin-top:12px">
+      <table>
+        <thead>
+          <tr>
+            <th>順位</th><th>判定</th><th>証券コード</th><th>企業名</th><th>業種</th>
+            <th>売りスコア</th><th>トレンド</th><th>13週<br>リターン</th><th>52週高値<br>からの下落</th>
+            <th>割高度%</th><th>ROE%</th><th>売上成長%</th><th>損益</th>
+          </tr>
+        </thead>
+        <tbody id="sell-tbody"></tbody>
+      </table>
+    </div>
+  </div>
+
+</div>
+
 <!-- 総合リターン予測 -->
 <div id="tab-total_return" class="hidden">
   <div class="grid2">

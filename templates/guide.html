@@ -96,6 +96,8 @@ td code,p code,li code{background:#0f172a;border:1px solid #1e2235;padding:1px 5
     <a href="#macro_risk_return">マクロ×リスク-リターン</a>
     <div class="toc-section-title">④ 戦略を検証</div>
     <a href="#backtest">バックテスト</a>
+    <div class="toc-section-title">⑤ 保有を見直す</div>
+    <a href="#sell_ranking">売り候補ランキング</a>
     <div class="toc-section-title">共通の考え方</div>
     <a href="#zscore">Zスコアって何？</a>
   </nav>
@@ -316,6 +318,32 @@ td code,p code,li code{background:#0f172a;border:1px solid #1e2235;padding:1px 5
   <div class="warn-box">過去がよくても未来を保証しません。さらに、<strong>今もうデータベースに残っている会社だけ</strong>を対象にするため（＝途中で消えた会社が含まれない＝<span class="term" data-tip="生き残った会社だけを見て『成績が良い』と錯覚すること。失敗して消えた会社が集計から抜け落ちるために起きる。">生存バイアス</span>）、結果は実際より良く見えがちです。</div>
 
   <div class="more">→ もっと詳しく：<a href="/models#m7">モデル解説 7. バックテスト</a></div>
+</div>
+
+<!-- ⑤ 売り候補ランキング ───────────────────────── -->
+<div class="model-section" id="sell_ranking">
+  <h2>売り候補ランキング <span class="model-tag">⑤ 保有を見直す</span></h2>
+
+  <h3>🟢 ひとことで言うと</h3>
+  <div class="analogy">
+    「おすすめ銘柄」が<strong>これから買う候補</strong>を探すのに対し、これは<strong>すでに持っている銘柄の中から「そろそろ売った方がよさそうな順」</strong>に並べる仕組みです。買いの裏返しで、<strong>割高・業績が悪化・株価が下げ始め</strong>の3つの観点から「売り点数」をつけ、各銘柄に<strong>売却 / 一部売却 / 保有継続</strong>の札を貼ります。
+  </div>
+
+  <h3>📊 何が分かる？</h3>
+  <p>持ち株を一覧で並べ、どれが相対的に手放す候補かが分かります。さらに「今が売り時か（株価のトレンド）」も加味して、割高でも上昇中の銘柄はあわてて売らないよう調整します。取得単価を入れれば損益（含み益・含み損）も表示します。</p>
+
+  <h3>🛠 どう使う？</h3>
+  <ul class="steps">
+    <li>持っている銘柄を<strong>1行ずつ</strong>入力します（証券コードだけでもOK。例: <code>7203, @1500, 2024-03-10</code>）。入力はこのブラウザに自動保存されます。</li>
+    <li>「割高警戒型・業績悪化重視・バランス型」などの<strong>プリセット</strong>を選ぶか、スライダーで観点の重みを調整します。</li>
+    <li>実行すると、売り点数の高い順に並び、<strong>売却 / 一部売却 / 保有継続</strong>の札が付きます。</li>
+  </ul>
+  <div class="info-box">各観点は同じ年の全社の中で「平均よりどれくらい良い／悪いか」（<span class="term" data-tip="平均=0、+で平均以上、−で平均以下の点数。">Zスコア</span>）に直してから合計するので、観点の単位の違いに引きずられません。「割高度」を使うには先に<a href="/guide#sector_ols" style="color:#34d399">業種別OLS分析</a>を実行してください。</div>
+
+  <h3>⚠ 注意点・落とし穴</h3>
+  <div class="warn-box">これは「いつ売れば儲かる」を当てるものではなく、<strong>持ち株を見直すきっかけ</strong>です。全部が優良なら全銘柄「保有継続」になります。ETF や外国株など未収録の銘柄は判定できません。</div>
+
+  <div class="more">→ もっと詳しく：<a href="/models#m10">モデル解説 10. 売り候補ランキング</a></div>
 </div>
 
 <!-- 共通：Zスコア ───────────────────────────── -->
