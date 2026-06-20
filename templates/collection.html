@@ -77,6 +77,12 @@ tr:hover td{background:#1e2235}
 .btn:disabled{opacity:.4;cursor:not-allowed}
 .co-link{color:#a78bfa;text-decoration:none}
 .co-link:hover{text-decoration:underline}
+.gnav{display:flex;align-items:center;gap:2px;background:#13162a;border-bottom:1px solid #2d3154;padding:0 24px;flex-wrap:wrap}
+.gnav-link{padding:10px 14px;font-size:13px;color:#94a3b8;text-decoration:none;border-bottom:2px solid transparent;transition:color .15s,border-color .15s}
+.gnav-link:hover{color:#e2e8f0}
+.gnav-link.active{color:#fff;border-bottom-color:#7c3aed}
+.gnav-ref{color:#64748b}
+.gnav-spacer{margin-left:auto}
 </style>
 </head>
 <body>
@@ -96,19 +102,21 @@ tr:hover td{background:#1e2235}
   <button id="logout-btn" data-click="logout" style="display:none;margin-left:8px;padding:5px 12px;background:transparent;border:1px solid #4a5568;border-radius:4px;color:#94a3b8;font-size:12px;cursor:pointer">ログアウト</button>
 </div>
 
+<nav class="gnav">
+  <a href="/" class="gnav-link">ホーム</a>
+  <a href="/analysis" class="gnav-link">分析</a>
+  <a href="/company" class="gnav-link">企業詳細</a>
+  <a href="/collection" class="gnav-link active">収集</a>
+  <span class="gnav-spacer"></span>
+  <a href="/guide" class="gnav-link gnav-ref" style="color:#34d399">やさしい解説</a>
+  <a href="/models" class="gnav-link gnav-ref" style="color:#a78bfa">モデル解説</a>
+</nav>
+
 <div class="nav">
-  <a href="/" class="nav-link" style="margin-left:0;margin-right:8px;color:#64748b">
-    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>
-    ホーム
-  </a>
   <button class="nav-btn active" data-tab="collect"      data-click="showTab" data-arg="collect">財務データ収集</button>
   <button class="nav-btn"        data-tab="stockmarket"  data-click="showTab" data-arg="stockmarket">株価・市場データ</button>
   <button class="nav-btn"        data-tab="dataview"     data-click="showTab" data-arg="dataview">データ確認</button>
   <button class="nav-btn"        data-tab="screen"       data-click="showTab" data-arg="screen">スクリーニング</button>
-  <a href="/analysis" class="nav-link">
-    分析
-    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
-  </a>
 </div>
 
 <div class="container">

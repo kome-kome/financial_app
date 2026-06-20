@@ -113,6 +113,12 @@ tr:hover td{background:#1e2235}
 .freshness-fresh{background:#065f46;color:#6ee7b7}
 .freshness-stale{background:#78350f;color:#fde68a}
 .freshness-none{background:#1e293b;color:#64748b}
+.gnav{display:flex;align-items:center;gap:2px;background:#13162a;border-bottom:1px solid #2d3154;padding:0 24px;flex-wrap:wrap}
+.gnav-link{padding:10px 14px;font-size:13px;color:#94a3b8;text-decoration:none;border-bottom:2px solid transparent;transition:color .15s,border-color .15s}
+.gnav-link:hover{color:#e2e8f0}
+.gnav-link.active{color:#fff;border-bottom-color:#7c3aed}
+.gnav-ref{color:#64748b}
+.gnav-spacer{margin-left:auto}
 </style>
 </head>
 <body>
@@ -132,24 +138,15 @@ tr:hover td{background:#1e2235}
   <button id="logout-btn" data-click="logout" style="display:none;margin-left:8px;padding:5px 12px;background:transparent;border:1px solid #4a5568;border-radius:4px;color:#94a3b8;font-size:12px;cursor:pointer">ログアウト</button>
 </div>
 
-<div class="nav" id="top-nav">
-  <a href="/" class="nav-link" style="color:#64748b">
-    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>
-    ホーム
-  </a>
-  <a href="/collection" class="nav-link">
-    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>
-    収集
-  </a>
-  <a href="/guide" class="nav-link" style="color:#34d399">
-    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20z"/><path d="M9.1 9a3 3 0 0 1 5.8 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12" y2="17"/></svg>
-    やさしい解説
-  </a>
-  <a href="/models" class="nav-link" style="color:#a78bfa">
-    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg>
-    モデル解説
-  </a>
-</div>
+<nav class="gnav">
+  <a href="/" class="gnav-link">ホーム</a>
+  <a href="/analysis" class="gnav-link active">分析</a>
+  <a href="/company" class="gnav-link">企業詳細</a>
+  <a href="/collection" class="gnav-link">収集</a>
+  <span class="gnav-spacer"></span>
+  <a href="/guide" class="gnav-link gnav-ref" style="color:#34d399">やさしい解説</a>
+  <a href="/models" class="gnav-link gnav-ref" style="color:#a78bfa">モデル解説</a>
+</nav>
 
 <div id="data-status-bar" style="background:#0f1117;border-bottom:1px solid #1e293b;padding:8px 24px;display:flex;align-items:center;gap:20px;font-size:12px">
   <div style="display:flex;align-items:center;gap:6px">

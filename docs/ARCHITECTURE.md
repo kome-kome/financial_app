@@ -556,7 +556,7 @@ sequenceDiagram
 
 ## 5. 画面遷移図
 
-> 5画面とその中のタブ構成、遷移ルートを示します。
+> 各画面とその中のタブ構成、遷移ルートを示します。全サブページは共通の上部グローバルナビ（`.gnav`）を持つ（図の下の注記参照）。
 
 ```mermaid
 stateDiagram-v2
@@ -569,7 +569,7 @@ stateDiagram-v2
 
     state Dashboard {
         [*] --> DashMain
-        DashMain : 🏠 ダッシュボード\ndashboard.html\n・企業数・レコード数\n・最新年度\n・API接続状況
+        DashMain : 🏠 ダッシュボード\ndashboard.html\n・企業数・レコード数・最新年度・API接続状況\n・ナビカード3階層（メイン:分析/企業詳細\nサブ:収集 / 補助:やさしい解説・モデル解説・DB）
     }
 
     state Collection {
@@ -633,25 +633,24 @@ stateDiagram-v2
     }
 
     [*]        --> Dashboard  : APP_PASSWORD未設定時\n（開発モード）
-    Dashboard  --> Collection : 「収集ページへ」
-    Dashboard  --> Analysis   : 「分析ページへ」
-    Dashboard  --> Company    : 「企業を検索して開く」
-    Dashboard  --> Models     : 「モデル解説を開く」
-    Dashboard  --> DBViewer   : 「DB を開く」
-    Collection --> Dashboard  : 「ホーム」
-    Analysis   --> Dashboard  : 「ホーム」
-    Analysis   --> Models     : 「モデル解説」リンク
-    Analysis   --> Guide      : 「やさしい解説」リンク＋各タブ「❓」
-    Guide      --> Models     : 各セクション「→ もっと詳しく」
-    Models     --> Guide      : ヘッダー「やさしい解説」
-    Collection --> Analysis   : 「分析」リンク
-    Analysis   --> Collection : 「← データ収集ページへ」リンク
-    DBViewer   --> Dashboard  : 「← ホーム」
-    Company    --> Dashboard  : 「ダッシュボード」
+
+    %% ダッシュボード = 使用頻度で3階層に配置したナビカード
+    Dashboard  --> Analysis   : メイン「分析ページを開く」
+    Dashboard  --> Company    : メイン「企業を検索して開く」
+    Dashboard  --> Collection : サブ「収集ページを開く」
+    Dashboard  --> Guide      : 補助「やさしい解説」
+    Dashboard  --> Models     : 補助「モデル解説・参考文献」
+    Dashboard  --> DBViewer   : 補助「DB ビューア」
+
+    %% 内容由来の遷移（企業名クリック・ドリルダウン）
     Collection --> Company    : 企業名クリック（スクリーニング/DB一覧）
     Analysis   --> Company    : 企業名クリック（乖離/推薦/総合/NC/BT）
     DBViewer   --> Company    : ドリルダウンの「企業ページを開く」
+    Analysis   --> Guide      : 各タブ見出しの「❓ やさしい解説」
+    Guide      --> Models     : 各セクション「→ もっと詳しく」
 ```
+
+> **グローバルナビ（`.gnav`・全サブページ共通）**: ダッシュボード以外の全ページ（分析・企業詳細・収集・DB・やさしい解説・モデル解説）の上部に、同一の横断ナビ `ホーム / 分析 / 企業詳細 / 収集 ｜ やさしい解説 / モデル解説` を常設。主要4導線を左、リファレンス2件を右（`gnav-spacer` で右寄せ）に分け、現在ページは `.active`（下線）で示す。これにより「分析 → 気になった銘柄を企業詳細でドリルダウン」のような横移動がホーム経由なしで可能。収集ページのみ、この下にページ内タブ（財務データ収集 / 株価・市場 / データ確認 / スクリーニング）を別バーで持つ。
 
 ---
 
