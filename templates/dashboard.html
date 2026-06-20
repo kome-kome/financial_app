@@ -57,6 +57,15 @@ body{font-family:'Segoe UI',sans-serif;background:#0f1117;color:#e2e8f0;min-heig
 .nav-btn:hover{background:#6d28d9}
 .nav-btn-outline{background:transparent;border:1px solid #334155;color:#94a3b8}
 .nav-btn-outline:hover{background:#1e293b;color:#e2e8f0}
+.nav-grid-main{grid-template-columns:1fr 1fr}
+.nav-grid-sub{grid-template-columns:1fr}
+.aux-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:28px}
+.aux-card{background:#15182a;border:1px solid #242846;border-radius:10px;padding:14px 16px;display:flex;align-items:center;gap:12px;text-decoration:none;transition:border-color .2s}
+.aux-card:hover{border-color:#475569}
+.aux-card-icon{width:30px;height:30px;border-radius:7px;display:flex;align-items:center;justify-content:center;flex-shrink:0}
+.aux-card-title{font-size:13px;font-weight:600;color:#cbd5e1}
+.aux-card-desc{font-size:11px;color:#64748b;margin-top:2px}
+@media(max-width:720px){.aux-grid{grid-template-columns:1fr}}
 .scheduler-card{background:#1a1d2e;border:1px solid #2d3154;border-radius:12px;padding:20px}
 .sched-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin-top:14px}
 .sched-item{background:#0f1117;border-radius:8px;padding:14px}
@@ -122,32 +131,9 @@ body{font-family:'Segoe UI',sans-serif;background:#0f1117;color:#e2e8f0;min-heig
     </div>
   </div>
 
-  <!-- ナビゲーションカード -->
-  <div class="section-title">ページへ移動</div>
-  <div class="nav-grid">
-    <!-- 収集 & スクリーニング -->
-    <div class="nav-card">
-      <div class="nav-card-title">
-        <div class="nav-card-icon icon-blue">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#93c5fd" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
-        </div>
-        収集 & スクリーニング
-      </div>
-      <div class="nav-card-desc">
-        EDINETから財務データを収集し、条件でスクリーニングします。
-      </div>
-      <ul class="feature-list">
-        <li>EDINET / stooq からの財務・株価データ収集</li>
-        <li>財務指標によるスクリーニング</li>
-        <li>財務レコードのDB閲覧</li>
-        <li>Zスコア正規化ビュー</li>
-      </ul>
-      <a href="/collection" class="nav-btn">
-        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
-        収集ページを開く
-      </a>
-    </div>
-
+  <!-- ナビゲーションカード（メイン: よく使う） -->
+  <div class="section-title">よく使う</div>
+  <div class="nav-grid nav-grid-main">
     <!-- 分析 -->
     <div class="nav-card">
       <div class="nav-card-title">
@@ -160,10 +146,10 @@ body{font-family:'Segoe UI',sans-serif;background:#0f1117;color:#e2e8f0;min-heig
         収集した財務データを使って回帰分析・乖離分析・スコアリングを行います。
       </div>
       <ul class="feature-list">
-        <li>OLS 重回帰分析（理論時価総額の算出）</li>
+        <li>★ おすすめ銘柄スコアリング・売り候補ランキング</li>
         <li>乖離分析（割安・割高スクリーニング）</li>
-        <li>★ おすすめ銘柄スコアリング</li>
-        <li>市場データ（株価・バリュエーション）更新</li>
+        <li>OLS 重回帰分析（理論時価総額の算出）</li>
+        <li>マクロ×リスク-リターン・総合リターン予測</li>
       </ul>
       <a href="/analysis" class="nav-btn">
         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
@@ -193,51 +179,64 @@ body{font-family:'Segoe UI',sans-serif;background:#0f1117;color:#e2e8f0;min-heig
         企業を検索して開く
       </a>
     </div>
+  </div>
 
-    <!-- DB ビューア -->
+  <!-- データ管理（サブ） -->
+  <div class="section-title">データ管理</div>
+  <div class="nav-grid nav-grid-sub">
+    <!-- 収集 & スクリーニング -->
     <div class="nav-card">
       <div class="nav-card-title">
-        <div class="nav-card-icon" style="background:#052e16">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#86efac" stroke-width="2"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/><path d="M3 12c0 1.66 4 3 9 3s9-1.34 9-3"/></svg>
+        <div class="nav-card-icon icon-blue">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#93c5fd" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
         </div>
-        DB ビューア
+        収集 & スクリーニング
       </div>
       <div class="nav-card-desc">
-        DB の中身をブラウザから直接確認します。スキーマ・統計・リレーション・企業横断検索を1画面で。
+        財務・株価データは毎日 03:00 JST に GitHub Actions が自動収集します。このページは手動の差分収集・再収集や、条件スクリーニングなど補助的な操作用です。
       </div>
       <ul class="feature-list">
-        <li>4テーブルの行数・カラム定義・NULL率</li>
-        <li>テーブル間リレーション（ER）可視化</li>
-        <li>統計サマリー（min/max/avg/p50/p99）</li>
-        <li>企業別ドリルダウン・CSV エクスポート</li>
+        <li>EDINET / stooq からの財務・株価データ手動収集</li>
+        <li>財務指標によるスクリーニング</li>
+        <li>財務レコードのDB閲覧・Zスコア正規化ビュー</li>
       </ul>
-      <a href="/db" class="nav-btn" style="background:#15803d">
+      <a href="/collection" class="nav-btn">
         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
-        DB を開く
+        収集ページを開く
       </a>
     </div>
+  </div>
 
-    <!-- モデル解説 -->
-    <div class="nav-card">
-      <div class="nav-card-title">
-        <div class="nav-card-icon" style="background:#1e1b4b">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#a78bfa" stroke-width="2"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg>
-        </div>
-        モデル解説・参考文献
+  <!-- リファレンス・ツール（補助） -->
+  <div class="section-title">リファレンス・ツール</div>
+  <div class="aux-grid">
+    <a href="/guide" class="aux-card">
+      <div class="aux-card-icon" style="background:#064e3b">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#34d399" stroke-width="2"><path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20z"/><path d="M9.1 9a3 3 0 0 1 5.8 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12" y2="17"/></svg>
       </div>
-      <div class="nav-card-desc">
-        アプリで使用している統計・ファイナンスモデルの数式・パラメータ・ソース論文をまとめたドキュメントです。
+      <div>
+        <div class="aux-card-title">やさしい解説</div>
+        <div class="aux-card-desc">各分析手法を数式なしで噛み砕いた初心者向け解説</div>
       </div>
-      <ul class="feature-list">
-        <li>Ohlson(1995) 型 OLS 回帰・セクター OLS・OU プロセス乖離分析</li>
-        <li>月次ウォークフォワード CV・Zスコア正規化・加重スコアリング・バックテスト</li>
-        <li>各モデルの数式・仮定・既知問題と参考文献 DOI リンク</li>
-      </ul>
-      <a href="/models" class="nav-btn" style="background:#312e81">
-        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
-        モデル解説を開く
-      </a>
-    </div>
+    </a>
+    <a href="/models" class="aux-card">
+      <div class="aux-card-icon" style="background:#1e1b4b">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#a78bfa" stroke-width="2"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg>
+      </div>
+      <div>
+        <div class="aux-card-title">モデル解説・参考文献</div>
+        <div class="aux-card-desc">数式・パラメータ・ソース論文（技術版ドキュメント）</div>
+      </div>
+    </a>
+    <a href="/db" class="aux-card">
+      <div class="aux-card-icon" style="background:#052e16">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#86efac" stroke-width="2"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/><path d="M3 12c0 1.66 4 3 9 3s9-1.34 9-3"/></svg>
+      </div>
+      <div>
+        <div class="aux-card-title">DB ビューア</div>
+        <div class="aux-card-desc">スキーマ・統計・リレーションの点検（開発者向け）</div>
+      </div>
+    </a>
   </div>
 
   <!-- 自動収集: GitHub Actions -->

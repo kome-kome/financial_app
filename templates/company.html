@@ -90,6 +90,12 @@ table.cmp tbody tr:hover td{background:#1e2235}
   .stats-grid{grid-template-columns:1fr 1fr}
   .search-wrap{max-width:none}
 }
+.gnav{display:flex;align-items:center;gap:2px;background:#13162a;border-bottom:1px solid #2d3154;padding:0 24px;flex-wrap:wrap}
+.gnav-link{padding:10px 14px;font-size:13px;color:#94a3b8;text-decoration:none;border-bottom:2px solid transparent;transition:color .15s,border-color .15s}
+.gnav-link:hover{color:#e2e8f0}
+.gnav-link.active{color:#fff;border-bottom-color:#7c3aed}
+.gnav-ref{color:#64748b}
+.gnav-spacer{margin-left:auto}
 </style>
 </head>
 <body>
@@ -108,6 +114,16 @@ table.cmp tbody tr:hover td{background:#1e2235}
     ダッシュボード
   </a>
 </div>
+
+<nav class="gnav">
+  <a href="/" class="gnav-link">ホーム</a>
+  <a href="/analysis" class="gnav-link">分析</a>
+  <a href="/company" class="gnav-link active">企業詳細</a>
+  <a href="/collection" class="gnav-link">収集</a>
+  <span class="gnav-spacer"></span>
+  <a href="/guide" class="gnav-link gnav-ref" style="color:#34d399">やさしい解説</a>
+  <a href="/models" class="gnav-link gnav-ref" style="color:#a78bfa">モデル解説</a>
+</nav>
 
 <div class="container">
   <!-- 未選択・ローディング・エラー -->
