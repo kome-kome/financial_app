@@ -13,7 +13,7 @@
 | [MODELS.md](docs/MODELS.md) | 分析モデル解説＋モデル固有の制約 | 分析モデル変更時 |
 | [M1_MACRO_MODEL_GUIDE.md](docs/M1_MACRO_MODEL_GUIDE.md) | M-1（マクロ×リスク-リターン推奨）の初心者向け副読本。予備知識ゼロから設計思想を解説。正式版は MODELS.md §9 | M-1 の考え方を噛み砕いて把握したいとき |
 | [SKILLS_AND_AGENTS.md](docs/SKILLS_AND_AGENTS.md) | スキル／エージェントの索引マニュアル | スラッシュコマンドや調査エージェントを使うとき |
-| [FUTURE_TASKS.md](docs/FUTURE_TASKS.md) | 未実装の改善項目のみ（本番データ鮮度・分析モデル拡張・運用堅牢化）。完了項目は `docs/archive/IMPROVEMENTS.md` へ集約 | リファクタ着手・改善項目の参照時 |
+| [FUTURE_TASKS.md](docs/FUTURE_TASKS.md) | **Issue 運用ガイド＋設計制約**（残タスクの正本は GitHub Issues。本書はタスク実体を持たない）。完了項目は `docs/archive/IMPROVEMENTS.md` へ集約 | リファクタ着手・改善項目の参照時 |
 
 > **設計の前に [DEPLOYMENT.md](docs/DEPLOYMENT.md) の「外部サービス制約」節を必ず参照**：無料プラン制約（stooq ブロック・Supabase 500MB・J-Quants レート制限等）に違反しない方式を選ぶこと。
 
@@ -87,7 +87,16 @@ pytest tests/test_utils.py  # 単一ファイル
 | バグ修正・小改善 | `main` 直接 | commit → push |
 | 機能追加・大きな変更 | `feature/xxx` | branch → push → PR |
 
-**セッション終了時**: `git status` →（`.env`・機密を除外して）`git add` → `git commit` → `git push`。
+### タスク管理（残タスクの正本＝GitHub Issues）
+
+web版・ローカル版の双方が同じ Issue を見ることで、**コードと残タスクの乖離を防ぐ**。タスク実体をメモリや docs に二重記載しない（過去はこの二重記載が乖離源になった）。
+
+- **起票**: `gh issue create`（優先度 `priority:high|medium|low`、本番運用は `ops`）。粒度は「該当／問題／改善案／検証」。
+- **着手**: `gh issue list --state open` で確認 → 対応 Issue を見て作業。
+- **完了の同期**: PR 本文に `Closes #N` を書く。**main マージで Issue が自動クローズ**＝コード状態と残タスクが構造的に一致する。
+- 運用詳細は [FUTURE_TASKS.md](docs/FUTURE_TASKS.md)。
+
+**セッション終了時**: `git status` →（`.env`・機密を除外して）`git add` → `git commit` → `git push`。**残タスクが生じたら Issue 化**してから終了する。
 
 ---
 
