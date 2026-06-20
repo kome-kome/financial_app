@@ -93,9 +93,8 @@ td code,p code,li code{background:#0f172a;border:1px solid #1e2235;padding:1px 5
     <a href="#net_cash_analysis">ネットキャッシュ分析</a>
     <div class="toc-section-title">② 割安度を測る</div>
     <a href="#sector_ols">業種別OLS分析</a>
-    <a href="#gap_analysis">乖離分析</a>
+    <a href="#gap_analysis">バリュエーション分析</a>
     <div class="toc-section-title">③ 将来リターンを予測</div>
-    <a href="#total_return">総合リターン予測</a>
     <a href="#price_predictor">株価リターン予測</a>
     <a href="#macro_risk_return">マクロ×リスク-リターン</a>
     <div class="toc-section-title">④ 戦略を検証</div>
@@ -184,7 +183,7 @@ td code,p code,li code{background:#0f172a;border:1px solid #1e2235;padding:1px 5
   </div>
 
   <h3>📊 何が分かる？</h3>
-  <p>業種ごとに「財務の数字 → 妥当な株価」の関係式を作ります。これが次の<a href="/guide#gap_analysis" style="color:#a7f3d0">乖離分析</a>の土台になります。同じ業種の中で比べることで、業種ごとの値ごろ感の違い（IT は高め・銀行は低めなど）に惑わされずに済みます。</p>
+  <p>業種ごとに「財務の数字 → 妥当な株価」の関係式を作ります。これが次の<a href="/guide#gap_analysis" style="color:#a7f3d0">バリュエーション分析</a>の土台になります。同じ業種の中で比べることで、業種ごとの値ごろ感の違い（IT は高め・銀行は低めなど）に惑わされずに済みます。</p>
 
   <h3>🛠 どう使う？</h3>
   <ul class="steps">
@@ -199,55 +198,33 @@ td code,p code,li code{background:#0f172a;border:1px solid #1e2235;padding:1px 5
   <div class="more">→ もっと詳しく：<a href="/models#m2">モデル解説 2. 業種別OLS回帰</a></div>
 </div>
 
-<!-- ② 乖離分析 ──────────────────────────────── -->
+<!-- ② バリュエーション分析 ──────────────────────── -->
 <div class="model-section" id="gap_analysis">
-  <h2>乖離分析 <span class="model-tag">② 割安度を測る</span></h2>
+  <h2>バリュエーション分析 <span class="model-tag">② 割安度を測る</span></h2>
 
   <h3>🟢 ひとことで言うと</h3>
   <div class="analogy">
-    「<strong>理論の値段と、実際の値段のズレ</strong>」を測る分析です。業種別OLSが出した「本来このくらい妥当」という理論株価と、市場でついている実際の株価を比べます。実際が理論より<strong>安ければ割安（緑）</strong>、<strong>高ければ割高（赤）</strong>。さらに、過去のズレが<strong>どのくらいの速さで埋まってきたか</strong>を見て、「半分に縮むまでの目安期間（半減期）」も推定します。
+    「<strong>理論の値段と、実際の値段のズレ</strong>」を測る分析です。業種別OLSが出した「本来このくらい妥当」という理論株価と、市場でついている実際の株価を比べます。実際が理論より<strong>安ければ割安（緑）</strong>、<strong>高ければ割高（赤）</strong>。さらに、過去のズレが<strong>どのくらいの速さで埋まってきたか</strong>（半減期）と、<strong>値上がり余地＋配当の「期待総リターン」</strong>もまとめて出します。
   </div>
 
   <h3>📊 何が分かる？</h3>
   <ul>
     <li><strong>乖離率</strong>：理論より割安か割高か（プラスが割安）。</li>
+    <li><strong>期待総リターン</strong>：値上がり余地（乖離率）＋配当利回り。「ソート順」で総リターン順に並べ替えられます。</li>
+    <li><strong>implied PER / PBR</strong>：理論株価ベースの割安感の倍率。</li>
     <li><strong>期待乖離・収束スコア</strong>：そのズレが今後どのくらいのペースで縮みそうかの<strong>目安</strong>。</li>
   </ul>
 
   <h3>🛠 どう使う？</h3>
   <ul class="steps">
     <li>先に<a href="/guide#sector_ols" style="color:#a7f3d0">業種別OLS分析</a>を実行しておく（土台が必要なので、未実行だとこのタブはロックされます）。</li>
-    <li>実行すると、割安〜割高の順に会社が並びます。</li>
+    <li>実行すると、割安〜割高の順に会社が並びます。「ソート順」で期待総リターン順にも切り替えられます。</li>
   </ul>
 
   <h3>⚠ 注意点・落とし穴</h3>
-  <div class="warn-box">「何ヶ月後にどれだけ縮む」という数字は、<span class="term" data-tip="平均回帰：行き過ぎた値がいずれ平均へ戻ろうとする性質。ゴムひもが伸びても元に戻るイメージ。">平均回帰</span>を仮定した<strong>ヒューリスティック（経験則）の参考値</strong>であり、当たる確率ではありません。割安に見えても、それには理由（業績悪化など）がある場合もあります。</div>
+  <div class="warn-box">「何ヶ月後にどれだけ縮む」「期待総リターン」という数字は、<span class="term" data-tip="平均回帰：行き過ぎた値がいずれ平均へ戻ろうとする性質。ゴムひもが伸びても元に戻るイメージ。">平均回帰</span>を仮定した<strong>ヒューリスティック（経験則）の参考値</strong>であり、当たる確率ではありません。割安に見えても、それには理由（業績悪化など）がある場合もあります。</div>
 
-  <div class="more">→ もっと詳しく：<a href="/models#m3">モデル解説 3. 乖離分析（AR(1) MLE）</a></div>
-</div>
-
-<!-- ③ 総合リターン予測 ───────────────────────── -->
-<div class="model-section" id="total_return">
-  <h2>総合リターン予測 <span class="model-tag">③ 将来リターンを予測</span></h2>
-
-  <h3>🟢 ひとことで言うと</h3>
-  <div class="analogy">
-    「<strong>値上がり余地 ＋ 配当</strong>」を合わせた、ざっくりした<strong>もうけの見込み</strong>を出す分析です。会社の1株あたりの利益・純資産・キャッシュフロー・配当から理論株価を計算し、<strong>今の株価よりどれだけ上がる余地があるか</strong>を出して、そこに<strong>配当の利回り</strong>を足します。
-  </div>
-
-  <h3>📊 何が分かる？</h3>
-  <p>「値上がり期待＋配当」を合算した総合リターン（％）で会社を並べられます。配当をくれる会社が相対的に評価されやすいのが特徴です。</p>
-
-  <h3>🛠 どう使う？</h3>
-  <ul class="steps">
-    <li>そのまま実行でOK。キャッシュフロー因子や業種の違いを考慮する設定をON/OFFできます。</li>
-    <li>結果と一緒に表示される<strong>モデル品質（CV）</strong>で、予測のあてになり具合の目安も確認できます。</li>
-  </ul>
-
-  <h3>⚠ 注意点・落とし穴</h3>
-  <div class="warn-box">理論株価の計算には<strong>発行株式数の概算</strong>を使う場面があり、会計基準の違いなどで精度が落ちることがあります。あくまで相対比較の材料として使ってください。</div>
-
-  <div class="more">→ もっと詳しく：<a href="/models#m1">モデル解説 1. 総合リターン予測（Ohlsonモデル型）</a></div>
+  <div class="more">→ もっと詳しく：<a href="/models#m3">モデル解説 3. バリュエーション分析</a></div>
 </div>
 
 <!-- ③ 株価リターン予測 ───────────────────────── -->

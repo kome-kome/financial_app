@@ -146,3 +146,65 @@ class TestExecute:
         assert asc["results"][0]["gap_ratio"] == 5.0
         desc = asyncio.run(plugin.execute(_typed({"sort": "desc"}), db))
         assert desc["results"][0]["gap_ratio"] == 25.0
+
+
+# ── execute(): 期待総リターン系（旧 total_return 吸収）─────────────────────────
+
+class TestTotalReturnColumns:
+    def test_total_return_columns_present_and_computed(self, db, make_metric):
+        # gap=20% / 株価1000 / EPS50 / BPS800 / 配当利回り3% の単一銘柄。
+        db.add(make_metric(edinet_code="E00001", gap_ratio=20.0,
+                           stock_price=1000.0, pl_eps=50.0, bs_bps=800.0, div_yield=3.0))
+        db.commit()
+        row = asyncio.run(plugin.execute(_typed({}), db))["results"][0]
+        # 期待総リターン = gap + 配当利回り（同次元 %）
+        assert row["div_yield_pct"] == 3.0
+        assert row["expected_total_return_pct"] == pytest.approx(23.0)
+        # 予測株価 = 実株価 × (1 + gap/100) = 1000 × 1.20 = 1200
+        assert row["pred_price"] == pytest.approx(1200.0)
+        assert row["actual_price"] == pytest.approx(1000.0)
+        # implied PER = 予測株価 / EPS = 1200 / 50 = 24.0、PBR = 1200 / 800 = 1.5
+        assert row["implied_per"] == pytest.approx(24.0)
+        assert row["implied_pbr"] == pytest.approx(1.5)
+
+    def test_div_yield_cap_treats_outlier_as_zero(self, db, make_metric):
+        # 異常な配当利回り（>30%）は 0 とみなす
+        db.add(make_metric(edinet_code="E00001", gap_ratio=10.0,
+                           stock_price=500.0, div_yield=99.0))
+        db.commit()
+        row = asyncio.run(plugin.execute(_typed({}), db))["results"][0]
+        assert row["div_yield_pct"] == 0.0
+        assert row["expected_total_return_pct"] == pytest.approx(10.0)
+
+    def test_missing_price_yields_null_implied(self, db, make_metric):
+        # 株価欠損なら予測株価・implied 倍率は None（期待総リターンは gap+配当で算出可）
+        db.add(make_metric(edinet_code="E00001", gap_ratio=15.0,
+                           stock_price=None, pl_eps=50.0, div_yield=2.0))
+        db.commit()
+        row = asyncio.run(plugin.execute(_typed({}), db))["results"][0]
+        assert row["pred_price"] is None
+        assert row["implied_per"] is None
+        assert row["expected_total_return_pct"] == pytest.approx(17.0)
+
+    def test_sort_by_total_return(self, db, make_metric):
+        # A: gap=20, 配当0 → 総リターン20 / B: gap=5, 配当25→capで0 … 別ケースで明快に。
+        # A: gap=10, 配当8 → 18 / B: gap=20, 配当0 → 20。総リターン順なら B が先。
+        db.add_all([
+            make_metric(edinet_code="E00001", gap_ratio=10.0, stock_price=100.0, div_yield=8.0),
+            make_metric(edinet_code="E00002", gap_ratio=20.0, stock_price=100.0, div_yield=0.0),
+        ])
+        db.commit()
+        res = asyncio.run(plugin.execute(_typed({"sort": "total_return"}), db))
+        trs = [r["expected_total_return_pct"] for r in res["results"]]
+        assert trs == sorted(trs, reverse=True)
+        assert res["results"][0]["edinet_code"] == "E00002"   # 総リターン20 > 18
+
+    def test_min_div_yield_filter(self, db, make_metric):
+        db.add_all([
+            make_metric(edinet_code="E00001", gap_ratio=10.0, stock_price=100.0, div_yield=4.0),
+            make_metric(edinet_code="E00002", gap_ratio=10.0, stock_price=100.0, div_yield=1.0),
+        ])
+        db.commit()
+        res = asyncio.run(plugin.execute(_typed({"min_div_yield": 3.0}), db))
+        assert all(r["div_yield_pct"] >= 3.0 for r in res["results"])
+        assert {r["edinet_code"] for r in res["results"]} == {"E00001"}

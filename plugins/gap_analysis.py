@@ -1,3 +1,17 @@
+"""バリュエーション分析プラグイン（旧 乖離分析 / gap_analysis）。
+
+業種内OLS（sector_ols）の `gap_ratio` seam を起点に、バリュエーション系の出力を
+一括で出すハブ:
+  - 割安度（gap_ratio）          … 業種内 OLS 理論株価との乖離率 [%]
+  - 平均回帰タイミング（半減期）  … gap_ratio 時系列の AR(1) MLE
+  - 期待総リターン               … gap_ratio + 配当利回り [%]（旧 total_return 吸収）
+  - implied P/E・P/B             … 予測株価 ÷ EPS・BPS
+
+旧 total_return プラグイン（独自プール回帰 OLS）はここへ統合・廃止した。理論株価は
+sector_ols の per-share 業種内回帰から得る（OLSエンジンは sector_ols 1本に統一）。
+内部 plugin name / `/api/gap-analysis` エンドポイントは後方互換のため "gap_analysis" を維持し、
+表示ラベルのみ「バリュエーション分析」へ改名している。
+"""
 import logging
 import math
 from collections import defaultdict
@@ -6,6 +20,9 @@ from typing import Any
 from .base import AnalysisPlugin
 
 logger = logging.getLogger(__name__)
+
+# 配当利回りの異常値ガード（％）。VIEW 由来の極端値を 0 とみなす（旧 total_return 踏襲）。
+_DIV_YIELD_CAP = 30.0
 
 # AR(1) MLE で半減期を推定するための最低観測数
 _AR1_MIN_OBS = 8
@@ -58,11 +75,11 @@ def _estimate_ar1_half_life_years(series: list[float]) -> dict | None:
 
 
 class GapAnalysisPlugin(AnalysisPlugin):
-    name = "gap_analysis"
-    label = "乖離分析"
+    name = "gap_analysis"   # 内部 slug は後方互換（/api/gap-analysis）。表示ラベルは下記。
+    label = "バリュエーション分析"
     description = (
-        "業種別OLS分析で算出した理論時価総額との乖離率を表示します"
-        "（先に業種別OLS分析を実行してください）。"
+        "業種別OLS分析の理論株価との乖離率（割安度）を起点に、平均回帰タイミング（半減期）と"
+        "期待総リターン（乖離＋配当利回り）を一括表示します（先に業種別OLS分析を実行してください）。"
         "履歴データが十分にある銘柄は AR(1) MLE で平均回帰速度を推定し、"
         "不足する銘柄はヒューリスティック（参考値）にフォールバックします。"
     )
@@ -83,10 +100,18 @@ class GapAnalysisPlugin(AnalysisPlugin):
                 "type": "select",
                 "label": "ソート順",
                 "options": [
-                    {"value": "desc", "label": "乖離率 高い順（割安）"},
-                    {"value": "asc",  "label": "乖離率 低い順（割高）"},
+                    {"value": "desc",         "label": "乖離率 高い順（割安）"},
+                    {"value": "asc",          "label": "乖離率 低い順（割高）"},
+                    {"value": "total_return", "label": "期待総リターン 高い順（乖離＋配当）"},
                 ],
                 "default": "desc",
+            },
+            "min_div_yield": {
+                "type": "number",
+                "dtype": "float",
+                "label": "最低配当利回り（%、0=フィルタなし）",
+                "default": 0.0,
+                "optional": True,
             },
         }
 
@@ -95,9 +120,10 @@ class GapAnalysisPlugin(AnalysisPlugin):
         # financial_metrics VIEW が LEFT JOIN して合成するため VIEW を読む。
         from database import FinancialMetric
 
-        # params はパラメータ契約に従い coerce 済み（year:int|None・sort:str）。
+        # params はパラメータ契約に従い coerce 済み（year:int|None・sort:str・min_div_yield:float）。
         year = params["year"]
         sort = params["sort"]
+        min_div_yield = params["min_div_yield"]
 
         # 当該フィルタの最新スナップショット
         query = db.query(FinancialMetric).filter(FinancialMetric.gap_ratio.isnot(None))
@@ -137,6 +163,26 @@ class GapAnalysisPlugin(AnalysisPlugin):
         n_ar1, n_heuristic = 0, 0
         for r in records:
             gap = r.gap_ratio or 0.0
+
+            # 期待総リターン（旧 total_return 吸収）: gap[%] と同次元の配当利回り[%] を加算。
+            # 理論株価は sector_ols の gap_ratio から復元: pred = actual × (1 + gap/100)。
+            div_yield = float(r.div_yield) if r.div_yield is not None else 0.0
+            if div_yield > _DIV_YIELD_CAP:
+                div_yield = 0.0
+            if min_div_yield > 0 and div_yield < min_div_yield:
+                continue   # 配当利回りフィルタ（0=フィルタなし）
+
+            sp  = r.stock_price
+            eps = float(r.pl_eps) if r.pl_eps else None
+            bps = float(r.bs_bps) if r.bs_bps else None
+            if sp and sp > 0:
+                pred_price = round(sp * (1 + gap / 100.0), 1)
+                implied_per = round(pred_price / eps, 1) if eps and eps > 0 else None
+                implied_pbr = round(pred_price / bps, 2) if bps and bps > 0 else None
+            else:
+                pred_price = implied_per = implied_pbr = None
+            expected_total_return = round(gap + div_yield, 2)
+
             series = history_by_co.get(r.edinet_code, [])
             ar1 = _estimate_ar1_half_life_years(series)
 
@@ -159,23 +205,34 @@ class GapAnalysisPlugin(AnalysisPlugin):
             conv_score_12m = round(min(95, max(5, 50 + gap * 0.8)), 1)
 
             results.append({
-                "edinet_code":           r.edinet_code,
-                "sec_code":              r.sec_code,
-                "company_name":          r.company_name,
-                "industry":              r.industry,
-                "actual_market_cap":     r.market_cap,
-                "predicted_market_cap":  r.predicted_market_cap,
-                "gap_ratio":             gap,
-                "expected_gap_6m":       exp_6m,
-                "expected_gap_12m":      exp_12m,
-                "conv_score_12m":        conv_score_12m,
-                "half_life_months":      round(half_life_months, 2),
-                "method":                method,
-                "ar1_phi":               round(phi, 4) if phi is not None else None,
-                "n_history":             len(series),
+                "edinet_code":               r.edinet_code,
+                "sec_code":                  r.sec_code,
+                "company_name":              r.company_name,
+                "industry":                  r.industry,
+                "actual_market_cap":         r.market_cap,
+                "predicted_market_cap":      r.predicted_market_cap,
+                "gap_ratio":                 gap,
+                # 期待総リターン系（旧 total_return 由来）
+                "div_yield_pct":             round(div_yield, 2),
+                "expected_total_return_pct": expected_total_return,
+                "pred_price":                pred_price,
+                "actual_price":              round(sp, 1) if sp else None,
+                "implied_per":               implied_per,
+                "implied_pbr":               implied_pbr,
+                # 平均回帰タイミング系
+                "expected_gap_6m":           exp_6m,
+                "expected_gap_12m":          exp_12m,
+                "conv_score_12m":            conv_score_12m,
+                "half_life_months":          round(half_life_months, 2),
+                "method":                    method,
+                "ar1_phi":                   round(phi, 4) if phi is not None else None,
+                "n_history":                 len(series),
             })
 
-        results.sort(key=lambda x: x["gap_ratio"], reverse=(sort == "desc"))
+        if sort == "total_return":
+            results.sort(key=lambda x: x["expected_total_return_pct"], reverse=True)
+        else:
+            results.sort(key=lambda x: x["gap_ratio"], reverse=(sort == "desc"))
         return {
             "count": len(results),
             "n_ar1_estimated": n_ar1,

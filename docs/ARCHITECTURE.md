@@ -127,7 +127,7 @@ graph TD
 
     subgraph ANALYZE["📊 分析"]
         AN1["OLS回帰分析\n財務指標→理論株価を推定"]
-        AN2["乖離分析\n割安・割高ランキング"]
+        AN2["バリュエーション分析\n割安度＋半減期＋期待総リターン"]
         AN3["Zスコア正規化\n年度内での相対順位"]
         AN4["推薦プラグイン\n複合スコアでランキング"]
         AN5["業種別OLS分析"]
@@ -479,8 +479,8 @@ sequenceDiagram
 
     Note over User,DB: ※ 重い回帰は Render 軽量モードでは 403（ローカルで実行→結果が共有DBに保存され本番に反映）
 
-    Note over User,DB: ② 乖離分析の実行（業種別OLS完了後に利用可能）
-    User ->> UI  : 「乖離分析」タブを選択
+    Note over User,DB: ② バリュエーション分析の実行（業種別OLS完了後に利用可能）
+    User ->> UI  : 「バリュエーション分析」タブを選択
     UI   ->> API : GET /api/gap-analysis?sort=asc
     API  ->> GAP : execute_plugin(p, {year, sort}, db)（coerce→ensure_dependencies→execute）
     GAP  ->> DB  : SELECT financial_metrics WHERE gap_ratio IS NOT NULL<br/>（VIEW が regression_results をJOIN）
@@ -589,8 +589,8 @@ stateDiagram-v2
         direction TB
         [*] --> Find
         Find    : ① 銘柄を探す\nおすすめ/ネットキャッシュ/スクリーニング
-        Value   : ② 割安度を測る\n業種別OLS → 乖離分析
-        Predict : ③ 将来リターンを予測\n総合リターン/株価リターン
+        Value   : ② 割安度を測る\n業種別OLS → バリュエーション分析
+        Predict : ③ 将来リターンを予測\n株価リターン/マクロ×リスクリターン
         Verify  : ④ 戦略を検証\nバックテスト
 
         Find    --> Value   : サイドバー切替
@@ -674,7 +674,7 @@ flowchart TD
 
     I["🧩 業種別OLS分析（重い・ローカル実行）\nplugins/sector_ols.py\n─────────────────\n業種ごとに個別OLS／winsorize/z-score前処理\n→ predicted/gap を regression_results へ保存\n（Render軽量モードでは403）"]
 
-    J["🎯 乖離率計算\nplugins/gap_analysis.py\n─────────────────\nfinancial_metrics VIEW（regression_results JOIN）から\ngap_ratio を読み取りランキング・AR(1)半減期推定"]
+    J["🎯 バリュエーション分析\nplugins/gap_analysis.py\n─────────────────\nfinancial_metrics VIEW（regression_results JOIN）から\ngap_ratio を読み取り→割安度/AR(1)半減期/期待総リターン"]
 
     K["🏆 割安銘柄ランキング\nanalysis.html\n─────────────────\n乖離率の小さい順に表示\n収束スコア・半減期は参考値として表示"]
 
@@ -710,10 +710,10 @@ classDiagram
 
     class GapAnalysisPlugin {
         +name = "gap_analysis"
-        +label = "乖離分析"
+        +label = "バリュエーション分析"
         +depends_on = ["sector_ols"]
-        +params_schema() 年度・ソート順
-        +execute() gap_ratio計算→ランキング生成
+        +params_schema() 年度・ソート順・最低配当利回り
+        +execute() gap_ratio→割安度/半減期/期待総リターン
     }
 
     class RecommendPlugin {
@@ -722,14 +722,6 @@ classDiagram
         +depends_on = []
         +params_schema() プリセット選択・指標ウェイト
         +execute() 複合スコアでランキング生成
-    }
-
-    class TotalReturnPlugin {
-        +name = "total_return"
-        +label = "総合リターン予測"
-        +depends_on = []
-        +params_schema() use_cf / use_sector_fe / n_folds / top_n
-        +execute() Ohlson 型 OLS + 業種固定効果（オプション）
     }
 
     class SectorOLSPlugin {
@@ -896,7 +888,7 @@ graph LR
         AN1["GET /api/plugins\nプラグイン + 特例エントリ(screen/backtest)のメタ一覧\n（category/ui_order/heavy 含む・ui_order 昇順）"]
         AN2["POST /api/plugins/{name}/run\nプラグインを実行\n（heavy かつ RENDER_LIGHT_MODE は 403）"]
         AN10["GET /api/model/status\n業種別OLSモデルの鮮度情報\n（computed_at/staleness_days/n_results/is_stale）\n鮮度バーUI用の軽量GET"]
-        AN4["GET /api/gap-analysis\n乖離分析（旧互換エンドポイント）"]
+        AN4["GET /api/gap-analysis\nバリュエーション分析（旧互換エンドポイント）"]
         AN5["POST /api/screen\nスクリーニング（条件絞り込み）"]
         AN6["GET /api/recommend/presets\n推薦プリセット一覧"]
         AN7["POST /api/recommend\n推薦スクリーニング実行"]
@@ -991,10 +983,9 @@ graph TB
 | `data_quality.py` | バックエンド | データ品質チェック（NULL率・外れ値・収録状況） | database.py, api.py（import元） |
 | `plugins/base.py` | バックエンド | 分析プラグインの抽象基底クラス | — |
 | `plugins/__init__.py` | バックエンド | プラグインを自動スキャン・レジストリ管理 | plugins/*.py |
-| `plugins/gap_analysis.py` | バックエンド | 乖離分析（割安・割高ランキング）。gap_ratio は financial_metrics VIEW（regression_results をJOIN）から読む | plugins/utils.py |
+| `plugins/gap_analysis.py` | バックエンド | バリュエーション分析（割安度＋AR(1)半減期＋期待総リターン）。gap_ratio は financial_metrics VIEW（regression_results をJOIN）から読む。期待総リターン＝gap_ratio＋配当利回り、implied PER/PBR＝予測株価÷EPS/BPS（旧 total_return を吸収）。内部 slug・`/api/gap-analysis` は後方互換で維持・表示ラベルは「バリュエーション分析」 | plugins/utils.py |
 | `plugins/recommend.py` | バックエンド | 複合スコアによる銘柄推薦 | plugins/utils.py |
 | `plugins/sell_ranking.py` | バックエンド | 売り候補ランキング（保有銘柄の売り時）。買い系の逆観点（割高度 gap_ratio 反転・業績悪化・価格モメンタム）を最新年度ユニバースで winsorize+z 標準化して合成し、相対ランキング＋SELL/REDUCE/HOLD 絶対ラベル（トレンド補正）を付与。保有は都度入力（サーバ非保存）・購入単価は損益表示のみ。`depends_on=["sector_ols"]`（gap_ratio 用）。価格モメンタムは stock_price_weekly | plugins/utils.py, database.py |
-| `plugins/total_return.py` | バックエンド | 配当込みトータルリターン分析 | plugins/utils.py |
 | `plugins/sector_ols.py` | バックエンド | 業種別OLS回帰分析（次元整合・winsorize+z-score前処理）。`heavy=True`（Render 軽量モードで 403）。予測値は regression_results へ保存 | plugins/utils.py |
 | `plugins/price_predictor.py` | バックエンド | 株価リターン予測（価格×財務特徴量OLS・月次WFV） | plugins/utils.py |
 | `plugins/net_cash_analysis.py` | バックエンド | ネットキャッシュ分析（清原達郎『わが投資術』式）＋グレアムNCAV。NC = 流動資産 + 投資有価証券×0.7 − 総負債、NCAV = 流動資産 − 総負債。推計時価総額の崩れによる異常比率はサニティ上限で自動除外し、任意で営業CF>0等のバリュートラップ除外も可能 | database.py |
@@ -1004,12 +995,12 @@ graph TB
 | `requirements-dev.txt` | 設定 | 開発・テスト専用依存（`pytest`）。本番 `requirements.txt` と分離（Render メモリ節約） | — |
 | `dashboard.html` | フロントエンド | トップページ・全体サマリー（`/`） | api.py |
 | `collection.html` | フロントエンド | 収集管理・スクリーニング・DBブラウザ（`/collection`） | api.py |
-| `analysis.html` | フロントエンド | 分析ハブ（`/analysis`）。左サイドバーを `/api/plugins` のメタ（category/ui_order）から目的別5カテゴリ（①銘柄を探す/②割安度/③リターン予測/④検証/⑤保有を見直す）で動的生成（`buildSidebar`）。売り候補ランキング（`#tab-sell_ranking`・保有銘柄の売り時）は静的タブ＋保有入力 textarea（localStorage 記憶）。乖離分析に横断分布（理論vs実績の散布図・乖離率ヒストグラム）を Chart.js で表示。スクリーニングは特例エントリとして `/collection` へリンク。動的タブの結果描画は `RESULT_RENDERERS`（plugin名→描画関数の登録制・未登録は汎用フォールバック）、CSV出力は単一の `exportCSV(name)` ディスパッチャ（`CSV_EXPORTERS` 登録制）に統一。乖離分析タブに**モデル鮮度バー**（`#model-freshness-bar`）を常設 — `/api/model/status` から computed_at/staleness_days を取得して表示し、OLSロック演出を廃止 | api.py, Chart.js (CDN) |
+| `analysis.html` | フロントエンド | 分析ハブ（`/analysis`）。左サイドバーを `/api/plugins` のメタ（category/ui_order）から目的別5カテゴリ（①銘柄を探す/②割安度/③リターン予測/④検証/⑤保有を見直す）で動的生成（`buildSidebar`）。売り候補ランキング（`#tab-sell_ranking`・保有銘柄の売り時）は静的タブ＋保有入力 textarea（localStorage 記憶）。バリュエーション分析に横断分布（理論vs実績の散布図・乖離率ヒストグラム）を Chart.js で表示。スクリーニングは特例エントリとして `/collection` へリンク。動的タブの結果描画は `RESULT_RENDERERS`（plugin名→描画関数の登録制・未登録は汎用フォールバック）、CSV出力は単一の `exportCSV(name)` ディスパッチャ（`CSV_EXPORTERS` 登録制）に統一。バリュエーション分析タブに**モデル鮮度バー**（`#model-freshness-bar`）を常設 — `/api/model/status` から computed_at/staleness_days を取得して表示し、OLSロック演出を廃止 | api.py, Chart.js (CDN) |
 | `login.html` | フロントエンド | 認証ログイン画面（`/login`） | api.py |
 | `models.html` | フロントエンド | モデル解説・参考文献ページ（`/models`）。9モデルの数式・パラメータ・DOIリンクをインラインHTMLで表示。 | — |
-| `guide.html` | フロントエンド | 初心者向け「やさしい解説」ページ（`/guide`）。各分析を数式なし・たとえ話で説明（ひとことで言うと／何が分かる／どう使う／注意点）。セクションidはプラグイン名（`recommend`/`net_cash_analysis`/`gap_analysis`/`sector_ols`/`total_return`/`price_predictor`/`macro_risk_return`/`backtest`/`sell_ranking`/`zscore`）でディープリンク可能。分析画面の各タブの「❓ やさしい解説」リンクから該当セクションへ飛ぶ。各セクション末尾から技術版 `/models#mN` へ相互リンク。TOC追従は `models.js` を再利用（専用JSなし）。 | — |
+| `guide.html` | フロントエンド | 初心者向け「やさしい解説」ページ（`/guide`）。各分析を数式なし・たとえ話で説明（ひとことで言うと／何が分かる／どう使う／注意点）。セクションidはプラグイン名（`recommend`/`net_cash_analysis`/`gap_analysis`/`sector_ols`/`price_predictor`/`macro_risk_return`/`backtest`/`sell_ranking`/`zscore`）でディープリンク可能（`gap_analysis`=バリュエーション分析、旧 total_return は統合）。分析画面の各タブの「❓ やさしい解説」リンクから該当セクションへ飛ぶ。各セクション末尾から技術版 `/models#mN` へ相互リンク。TOC追従は `models.js` を再利用（専用JSなし）。 | — |
 | `db.html` | フロントエンド | DBビューア（`/db`）。4テーブルのスキーマ・プレビュー・統計サマリー・ER 風リレーション・企業ドリルダウン・CSV エクスポート。 | api.py |
-| `company.html` | フロントエンド | 企業詳細（`/company`・`/company/{edinet_code}`）。個別企業の業績・財務(BS)・CF・per-share/配当・バリュエーション（理論時価総額乖離）・日次株価・業種内Zスコアレーダー・清原式ネットキャッシュ・同業比較を Chart.js の時系列グラフで可視化。企業名・証券コード検索付き。財務(BS)タブはバフェットコード型で各年「左＝資産（借方）／右＝負債・純資産（貸方）」を並列表示し、粒度（粗/中/細）切替で内訳の細かさを変更できる（どの粒度でも資産バー＝負債純資産バー＝総資産になるよう補正）。業績(PL)タブは売上高を費用・利益に分解した積み上げ棒（最上部＝純利益）を粒度（粗/中/細）切替で表示（合計＝売上高、信頼性の低い stored gross_profit は不使用）。CFタブも粒度（粗＝フリー+財務／中＝営業/投資/財務／細＝営業/設備投資/その他投資/財務）切替に対応し、CFデータ未収集の企業には明示メッセージを表示。同業比較タブは選択企業を必ず表示し業種内時価総額順位を併記。**相互リンク**：理論時価総額/乖離率チャート→`/analysis?tab=gap`・Zスコアチャート→`/analysis?tab=recommend`・ネットキャッシュチャート→`/analysis?tab=net_cash`（逆方向の乖離分析表→`/company/{code}` は既存） | api.py, Chart.js (CDN) |
+| `company.html` | フロントエンド | 企業詳細（`/company`・`/company/{edinet_code}`）。個別企業の業績・財務(BS)・CF・per-share/配当・バリュエーション（理論時価総額乖離）・日次株価・業種内Zスコアレーダー・清原式ネットキャッシュ・同業比較を Chart.js の時系列グラフで可視化。企業名・証券コード検索付き。財務(BS)タブはバフェットコード型で各年「左＝資産（借方）／右＝負債・純資産（貸方）」を並列表示し、粒度（粗/中/細）切替で内訳の細かさを変更できる（どの粒度でも資産バー＝負債純資産バー＝総資産になるよう補正）。業績(PL)タブは売上高を費用・利益に分解した積み上げ棒（最上部＝純利益）を粒度（粗/中/細）切替で表示（合計＝売上高、信頼性の低い stored gross_profit は不使用）。CFタブも粒度（粗＝フリー+財務／中＝営業/投資/財務／細＝営業/設備投資/その他投資/財務）切替に対応し、CFデータ未収集の企業には明示メッセージを表示。同業比較タブは選択企業を必ず表示し業種内時価総額順位を併記。**相互リンク**：理論時価総額/乖離率チャート→`/analysis?tab=gap`・Zスコアチャート→`/analysis?tab=recommend`・ネットキャッシュチャート→`/analysis?tab=net_cash`（逆方向のバリュエーション分析表→`/company/{code}` は既存） | api.py, Chart.js (CDN) |
 | `static/js/*.js` | フロントエンド | 各HTMLテンプレから外部化したページ別JS（CSP対応）。common（`esc`/`apiFetch`/`initAuth`/`logout` 等の共通ユーティリティ・全ページ読込）+ dashboard / collection / analysis / company / db / models / login の8ファイル。`/static` で配信（api.py の `StaticFiles` マウント）。`<style>` とインラインイベントハンドラ（`onclick=` 等）はHTML側に残置（後者は将来 addEventListener 化予定）。 | api.py |
 | `_pipeline_gh.py` | GitHub Actions | 全件収集パイプライン（full-pipeline.yml から workflow_dispatch 手動起動）。`--refill-cf`（CF NULL 補完: 投資CF/現金増減/capex）・`--refill-capex-only`（capex のみワンショット）・`--refill-cf-missing`（CF全NULL社=IFRS決算大企業の営業/投資/財務CFを補完）・`--refill-pl-bs`（bs_inventory NULL 補完: 旧コホート〜2022の PL/BS 列を XBRL 再取得で是正・古い順／`refill-pl-bs.yml`）・`--diagnose-cf`（CF ラベル診断）モードを持つ。`normal` CF補完は 2026-05-31 に完了（capex 88.8%充足）、IFRS/US-GAAP決算企業の CF全NULL は 2026-06-03 に `--refill-cf-missing` で補完し CF未収集 268社→0社（詳細は GOTCHAS.md「IFRS/US-GAAP決算のCF・売上要素名」「CF NULL補完の運用」「bs_inventory バックフィルの運用」）。 | collector.py, database.py |
 | `_pipeline_incremental.py` | GitHub Actions | 差分収集パイプライン（daily-incremental.yml で毎日 JST 03:00 自動実行） | collector.py, database.py |

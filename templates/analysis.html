@@ -180,13 +180,14 @@ tr:hover td{background:#1e2235}
   <!-- 利用可能状態: 業種別OLS 実行済み（DBに予測値あり）の時に表示 -->
   <div id="gap-ready" style="display:none">
   <div class="card">
-    <div class="section-title">乖離分析（割安・割高スクリーニング）<a class="co-link" href="/guide#gap_analysis" target="_blank" rel="noopener" style="float:right;font-size:12px;font-weight:400">❓ やさしい解説</a></div>
+    <div class="section-title">バリュエーション分析（割安度・平均回帰・期待総リターン）<a class="co-link" href="/guide#gap_analysis" target="_blank" rel="noopener" style="float:right;font-size:12px;font-weight:400">❓ やさしい解説</a></div>
     <div class="info-box" style="margin-bottom:12px">
       乖離率 = (予測時価総額 − 実際時価総額) / 実際時価総額 × 100<br>
       <span class="gap-positive">正値（緑）</span>: 予測 &gt; 実際 → モデル上は割安の可能性
       &nbsp;|&nbsp;
       <span class="gap-negative">負値（赤）</span>: 予測 &lt; 実際 → モデル上は割高の可能性<br>
-      <span style="color:#f59e0b;font-size:11px">⚠ 期待乖離・収束スコアはOU過程に基づくヒューリスティック推定値です。統計的な予測確率ではなく、投資判断の参考値にすぎません。</span>
+      <strong style="color:#10b981">期待総リターン</strong> = 乖離率 + 配当利回り&nbsp;<span style="color:#64748b">[%]</span>（「ソート順」で総リターン順に切替可）。<strong>implied PER</strong> = 予測株価 ÷ EPS。<br>
+      <span style="color:#f59e0b;font-size:11px">⚠ 期待乖離・収束スコア・期待総リターンはヒューリスティック／参考値です。統計的な予測確率ではなく、投資判断の参考にすぎません。</span>
     </div>
     <div id="params-form-gap"></div>
     <button class="btn btn-primary btn-sm" id="btn-gap-analysis" data-click="runGapAnalysis" style="margin-top:8px">分析を実行</button>
@@ -209,6 +210,9 @@ tr:hover td{background:#1e2235}
             <th>実際時価総額(億)</th>
             <th>予測時価総額(億)</th>
             <th>乖離率%</th>
+            <th title="期待総リターン = 乖離率 + 配当利回り（参考値）">期待総リターン% ⓘ</th>
+            <th>配当利回り%</th>
+            <th title="implied P/E = 予測株価 ÷ EPS">implied PER</th>
             <th>6ヶ月後期待乖離%</th>
             <th>12ヶ月後期待乖離%</th>
             <th title="OU過程ヒューリスティック。確率ではなく参考スコア。">収束スコア(12M) ⓘ</th>
@@ -366,95 +370,6 @@ tr:hover td{background:#1e2235}
     </div>
   </div>
 
-</div>
-
-<!-- 総合リターン予測 -->
-<div id="tab-total_return" class="hidden">
-  <div class="grid2">
-    <div class="card">
-      <div class="section-title">総合リターン予測設定<a class="co-link" href="/guide#total_return" target="_blank" rel="noopener" style="float:right;font-size:12px;font-weight:400">❓ やさしい解説</a></div>
-      <div class="info-box" style="margin-bottom:14px">
-        1株当たり財務金額（EPS/BPS/CF/DPS）[円/株] を説明変数、株価[円/株]を目的変数とした OLS 回帰で<br>
-        期待総合リターン（株価上昇余地＋配当利回り）が高い企業をランキングします。<br>
-        <span style="color:#f59e0b;font-size:11px">⚠ 予測値はモデルの推定値であり、投資判断の参考値にすぎません。</span>
-      </div>
-      <div id="params-form-total-return"></div>
-      <button class="btn btn-primary" id="btn-total-return" data-click="runTotalReturn" style="margin-top:8px">
-        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/><polyline points="17 6 23 6 23 12"/></svg>
-        総合リターン予測を実行
-      </button>
-    </div>
-
-    <div class="card">
-      <div class="section-title">モデル品質（時系列CV）</div>
-      <div id="tr-cv-waiting" class="text-sm" style="padding:40px 0;text-align:center">
-        左のパネルで設定し「実行」をクリックしてください
-      </div>
-      <div id="tr-cv-content" class="hidden">
-        <div class="grid3" style="margin-bottom:16px">
-          <div class="stat-card"><div class="stat-label">平均R²（CV）</div><div class="stat-value" id="tr-mean-r2" style="color:#a78bfa">-</div></div>
-          <div class="stat-card"><div class="stat-label">平均RMSE%（CV）</div><div class="stat-value" id="tr-mean-rmse" style="color:#60a5fa;font-size:18px">-</div></div>
-          <div class="stat-card"><div class="stat-label">学習サンプル数</div><div class="stat-value" id="tr-n-samples" style="color:#10b981">-</div></div>
-        </div>
-        <div style="font-size:11px;color:#64748b;margin-bottom:10px" id="tr-cv-type"></div>
-        <div class="section-title" style="font-size:13px">フォルド別CV詳細</div>
-        <div style="overflow-x:auto">
-          <table>
-            <thead><tr><th>Fold</th><th>学習N</th><th>テストN</th><th>R²</th><th>RMSE%</th></tr></thead>
-            <tbody id="tr-fold-tbody"></tbody>
-          </table>
-        </div>
-      </div>
-    </div>
-  </div>
-
-  <div class="card hidden" id="tr-weights-card">
-    <div class="section-title">MECE因子ウェイト（最終モデル）</div>
-    <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:16px">
-      <div>
-        <div style="font-size:12px;color:#60a5fa;margin-bottom:10px;font-weight:600">PL因子（EPS）</div>
-        <div id="tr-pl-weights"></div>
-      </div>
-      <div>
-        <div style="font-size:12px;color:#34d399;margin-bottom:10px;font-weight:600">CF因子（営業CF）</div>
-        <div id="tr-cf-weights"></div>
-      </div>
-      <div>
-        <div style="font-size:12px;color:#a78bfa;margin-bottom:10px;font-weight:600">BS因子（BPS）</div>
-        <div id="tr-bs-weights"></div>
-      </div>
-      <div>
-        <div style="font-size:12px;color:#f59e0b;margin-bottom:10px;font-weight:600">配当因子（DPS）</div>
-        <div id="tr-div-weights"></div>
-      </div>
-    </div>
-  </div>
-
-  <div class="card hidden" id="tr-ranking-card">
-    <div class="flex-between" style="flex-wrap:wrap;gap:8px">
-      <div class="section-title" style="margin-bottom:0">
-        総合リターンランキング
-        <span id="tr-ranking-count" class="tag tag-purple" style="margin-left:6px">-</span>
-        <span id="tr-latest-year" class="tag tag-blue" style="margin-left:6px">-</span>
-      </div>
-      <div class="flex">
-        <span class="text-sm" style="font-size:11px">期待リターン = 株価上昇余地 + 配当利回り（参考値）</span>
-        <button class="btn btn-secondary btn-sm" data-click="exportCSV" data-arg="total_return">CSV出力</button>
-      </div>
-    </div>
-    <div style="overflow-x:auto;margin-top:12px">
-      <table>
-        <thead>
-          <tr>
-            <th>順位</th><th>証券コード</th><th>企業名</th><th>業種</th>
-            <th>期待リターン%</th><th>株価上昇余地%</th><th>配当利回り%</th>
-            <th>予測株価(円)</th><th>実際株価(円)</th><th>implied PER</th><th>implied PBR</th>
-          </tr>
-        </thead>
-        <tbody id="tr-ranking-tbody"></tbody>
-      </table>
-    </div>
-  </div>
 </div>
 
 <!-- ネットキャッシュ分析（清原達郎『わが投資術』） -->
