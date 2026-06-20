@@ -17,10 +17,11 @@
 - **注意**: 本番は `SKIP_XBRL_RAW=true`（Supabase 容量対策）で raw 未保存のため、`/api/collect/reparse`（再解析）は使えず **EDINET からの全件再取得が必要**。`raw_xbrl_json` 削除＋`VACUUM FULL` の事前領域確保は容量目的では不要（やる場合は独立 PR）。
 - **該当**: `collector.py`（`run_full_collection`）／要 `EDINET_API_KEY`・数時間
 
-### DF-3. 週次株価の履歴延伸（M-1 walk-forward CV の成立用）  【中・運用】
-- **問題**: 週次株価（`stock_price_weekly`）の被覆が約2年分（本番 2026-06 時点で **2024-05-28〜**）しかなく、**M-1（マクロ×リスク-リターン推奨）の `use_macro=true` で walk-forward CV が 0 フォルド（`mean_r2=None`）**になる。学習サンプルは「52週先リターン（未来必要）」かつ「12ヶ月モメンタム（過去必要）」を同時要求するため、両条件を満たす月が**約1ヶ月の薄帯**に収縮するのが原因。`use_macro=false`（モメンタム非使用）なら複数月が確保され CV 成立（mean R²≈0.0122）。
-- **改善案**: 週次株価を**5年程度までバックフィル**して履歴を延ばす（Yahoo Finance backfill 等。週次は容量影響が小さく、`stock_price_history` 2本立て＝daily 6か月＋weekly 全履歴の設計と整合）。延伸後に use_macro=true で CV フォルドが複数になることを確認。
-- **検証**: バックフィル後 `plugins/macro_risk_return` を use_macro=true で実行し `cv_metrics.n_folds ≥ 2` / `mean_r2 != None` を確認。`SELECT min(trade_date) FROM stock_price_weekly` で被覆開始日を確認。
+### DF-3. 週次株価の履歴延伸（M-1 モメンタム特徴量の活用用）  【低・運用】
+- **状況更新（2026-06-20）**: モメンタムを `use_macro` 連動から独立パラメータ `use_momentum`（既定 OFF）へ切り離したため、**既定構成（`use_macro=ON` / `use_momentum=OFF`）ではマクロ・交差項を使ったまま walk-forward CV が複数フォルドで成立する**ようになった（過去履歴要件が外れたため）。本タスクは「CV を成立させる」目的では**解消済み**で、残るのは「`use_momentum=ON` で12ヶ月モメンタムも特徴量に使いたい場合」のオプション課題（優先度を中→低へ降格）。
+- **問題（use_momentum=ON 時のみ）**: 週次株価（`stock_price_weekly`）の被覆が約2年分（本番 2026-06 時点で **2024-05-28〜**）しかないため、`use_momentum=ON` にすると「52週先リターン（未来必要）」かつ「12ヶ月モメンタム（過去必要）」を同時要求し、両条件を満たす月が**約1ヶ月の薄帯**に収縮して CV が 0 フォルド（`mean_r2=None`）になる。
+- **改善案**: 週次株価を**5年程度までバックフィル**して履歴を延ばす（Yahoo Finance backfill 等。週次は容量影響が小さく、`stock_price_history` 2本立て＝daily 6か月＋weekly 全履歴の設計と整合）。延伸後に `use_momentum=ON` でも CV フォルドが複数になることを確認。
+- **検証**: バックフィル後 `plugins/macro_risk_return` を **`use_momentum=true`** で実行し `cv_metrics.n_folds ≥ 2` / `mean_r2 != None` を確認。`SELECT min(trade_date) FROM stock_price_weekly` で被覆開始日を確認。
 - **該当**: `collector_prices.py`（株価収集・Yahoo backfill）／`plugins/macro_risk_return.py`（§9.8 既知制約として記載済み）／要本番収集権限。詳細診断は MODELS.md §9.8。
 
 ---

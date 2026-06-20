@@ -38,6 +38,9 @@ WITH d AS (
              THEN ROUND((fr.pl_rd_expenses / fr.pl_revenue * 100)::numeric, 2) END AS rd_intensity,
         CASE WHEN COALESCE(fr.pl_revenue,0) <> 0
              THEN ROUND((fr.pl_depreciation / fr.pl_revenue * 100)::numeric, 2) END AS da_intensity,
+        -- 総資産回転率（無次元・回）。デュポン分解 ROA ≈ net_margin × asset_turnover の中核因子。
+        CASE WHEN COALESCE(fr.bs_total_assets,0) <> 0
+             THEN ROUND((COALESCE(fr.pl_revenue,0) / fr.bs_total_assets)::numeric, 4) END AS asset_turnover,
         CASE WHEN COALESCE(fr.bs_current_assets,0) <> 0 OR COALESCE(fr.bs_total_liabilities,0) <> 0
              THEN ROUND((COALESCE(fr.bs_current_assets,0) + COALESCE(fr.bs_investment_securities,0) * 0.7 - COALESCE(fr.bs_total_liabilities,0))::numeric, 0) END AS net_cash
     FROM financial_records fr

@@ -1061,8 +1061,10 @@ function renderSectorOls(data) {
 const MRR_AXIS_LABELS = { r1: 'R1 予測不確実性', r2: 'R2 実現ボラティリティ', r3: 'R3 モデル信頼性' };
 // 係数バー用: 特徴量コード → 表示ラベル（既知のものだけ。未知はコードのまま表示）。
 const MRR_FEAT_LABELS = {
-  per: 'PER', pbr: 'PBR', roe: 'ROE', roa: 'ROA', equity_ratio: '自己資本比率',
-  de_ratio: 'D/E', cf_ratio: '営業CF/売上', eps_growth: 'EPS成長率', op_growth: '営業利益成長率',
+  per: 'PER', pbr: 'PBR', div_yield: '配当利回り', roe: 'ROE', roa: 'ROA',
+  op_margin: '営業利益率', net_margin: '純利益率', asset_turnover: '総資産回転率',
+  equity_ratio: '自己資本比率', de_ratio: 'D/E', nc_ratio: 'ネットキャッシュ比率',
+  cf_ratio: '営業CF/売上', eps_growth: 'EPS成長率', op_growth: '営業利益成長率', rev_growth: '売上成長率',
   rd_intensity: 'R&D集約度', da_intensity: 'D&A集約度',
   z_op_margin: '営業利益率Z', z_roe: 'ROE Z', z_cf_ratio: 'CF比率Z',
   macro_usdjpy_yoy: 'USD/JPY(YoY)', macro_sp500_yoy: 'S&P500(YoY)', macro_us10y_zscore: '米10年金利(Z)',

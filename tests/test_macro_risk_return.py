@@ -36,6 +36,8 @@ def _make_fin(period_end_str: str, **kwargs):
         de_ratio=0.4, cf_ratio=9.0, eps_growth=5.0, op_growth=6.0,
         rd_intensity=2.0, da_intensity=3.0,
         z_op_margin=0.5, z_roe=0.3, z_cf_ratio=0.1,
+        op_margin=8.0, net_margin=5.0, asset_turnover=0.8,
+        div_yield=2.0, rev_growth=4.0, nc_ratio=0.1,
         bs_total_assets=1.0e5,  # R3 サイズ代理（総資産）
     )
     defaults.update(kwargs)
@@ -221,6 +223,26 @@ class TestParamsSchema:
         from plugins.macro_risk_return import _MACRO_MAP
         assert _MACRO_MAP["macro_nikkei225_yoy"] == ("NIKKEI225", "yoy")
 
+    def test_use_momentum_default_off(self):
+        """use_momentum の既定は OFF（マクロ ON のままで walk-forward CV を成立させるため）。"""
+        result = coerce_params(self.schema, {})
+        assert result["use_momentum"] is False
+
+    def test_use_momentum_can_enable(self):
+        result = coerce_params(self.schema, {"use_momentum": True})
+        assert result["use_momentum"] is True
+
+    def test_new_price_free_fin_features_accepted(self):
+        """追加した価格フリー特徴量（収益性・成長・財務健全性）が受理される。"""
+        feats = ["op_margin", "net_margin", "asset_turnover", "rev_growth", "nc_ratio"]
+        result = coerce_params(self.schema, {"fin_features": feats})
+        assert result["fin_features"] == feats
+
+    def test_div_yield_fin_feature_accepted(self):
+        """配当利回り（バリュー因子）が fin_features 選択肢として受理される。"""
+        result = coerce_params(self.schema, {"fin_features": ["div_yield"]})
+        assert result["fin_features"] == ["div_yield"]
+
 
 # ── _forward_bic (BIC が有効特徴量を選ぶ) ─────────────────────────────────────
 
@@ -325,9 +347,9 @@ class TestR3Buckets:
 
 class TestExecuteIntegration:
 
-    def _build_mock_db(self, ref: date = date(2025, 6, 1)):
-        """合成データ（3社・120週・6決算）で execute が通ることを確認。"""
-        n_weeks = 120
+    def _build_mock_db(self, ref: date = date(2025, 6, 1), n_weeks: int = 120):
+        """合成データ（3社・既定120週・6決算）で execute が通ることを確認。
+        n_weeks はモメンタム（過去履歴要件）テスト用に延伸できる。"""
         codes = ["E01234", "E02345", "E03456"]
         bases  = [1000.0,   2000.0,   500.0]
 
@@ -462,3 +484,43 @@ class TestExecuteIntegration:
         assert set(coefs.keys()) == set(result["selected_features"])
         assert len(coefs) == len(result["selected_features"])
         assert all(isinstance(v, float) for v in coefs.values())
+
+    def test_execute_with_momentum(self):
+        """use_momentum=True で momentum_12m1 が候補に入り execute が通る。
+        モメンタムは過去履歴を要するため週次株価を延伸（n_weeks=200）して検証する。"""
+        plugin = MacroRiskReturnPlugin()
+        schema = plugin.params_schema()
+        params = coerce_params(schema, {"use_macro": False, "use_momentum": True})
+
+        db = self._build_mock_db(n_weeks=200)
+        result = asyncio.run(plugin.execute(params, db))
+
+        assert "results" in result
+        assert "cv_metrics" in result
+        assert isinstance(result["results"], list)
+
+    def test_momentum_independent_of_macro(self):
+        """momentum は use_macro と独立。use_macro=False・use_momentum=True で
+        momentum 特徴量が候補生成され、サンプルが組める（従来は use_macro 連動だった）。"""
+        plugin = MacroRiskReturnPlugin()
+        db = self._build_mock_db(n_weeks=200)
+        prices_by_co, fin_by_co, companies = plugin._load_data(db)
+        sectors = plugin._collect_sectors(fin_by_co, companies)
+        # macro_names=[]（use_macro 相当 OFF）でも use_momentum=True なら momentum が候補に入る
+        _samples, _meta, _snaps, all_feat_names = plugin._build_snapshots(
+            prices_by_co, fin_by_co, companies, {}, sectors,
+            ["per", "pbr", "roa"], [], True, 12, 0.5,
+        )
+        assert "momentum_12m1" in all_feat_names
+
+    def test_no_momentum_when_disabled(self):
+        """use_momentum=False なら macro 有無に関わらず momentum 特徴量は候補に入らない。"""
+        plugin = MacroRiskReturnPlugin()
+        db = self._build_mock_db(n_weeks=200)
+        prices_by_co, fin_by_co, companies = plugin._load_data(db)
+        sectors = plugin._collect_sectors(fin_by_co, companies)
+        _samples, _meta, _snaps, all_feat_names = plugin._build_snapshots(
+            prices_by_co, fin_by_co, companies, {}, sectors,
+            ["per", "pbr", "roa"], [], False, 12, 0.5,
+        )
+        assert "momentum_12m1" not in all_feat_names

@@ -32,24 +32,32 @@ HORIZON_WEEKS = 52
 R3_MIN_BUCKET_N = 5
 
 # 財務ベース特徴量の選択肢（全て financial_metrics VIEW の実列。getattr で解決＝DB移行不要）。
-# per/pbr は将来リターンに対するバリュー因子（Fama-French HML ≒ 1/PBR）であり循環ではない
-# （目的変数は株価でなく 52週先リターン）。価格を含まないファンダ（roa/cf_ratio/de_ratio/
-# eps_growth/op_growth）を併置し、「割安」と「価格の平均回帰」を分離できるようにする。
+# per/pbr/div_yield は将来リターンに対するバリュー因子（Fama-French HML ≒ 1/PBR）であり循環では
+# ない（目的変数は株価でなく 52週先リターン）。価格を含まないファンダ（roa/op_margin/net_margin/
+# asset_turnover/cf_ratio/de_ratio/nc_ratio/eps_growth/op_growth/rev_growth）を併置し、「割安」と
+# 「収益性・成長・財務健全性」を分離できるようにする。net_margin×asset_turnover≈roa のデュポン
+# 分解因子も選べる。絶対額（net_cash 等）は次元整合性（無次元）に反するため選択肢に含めない。
 FIN_BASE_OPTIONS = [
-    {"value": "per",          "label": "PER"},
-    {"value": "pbr",          "label": "PBR"},
-    {"value": "roe",          "label": "ROE（%）"},
-    {"value": "roa",          "label": "ROA（%）"},
-    {"value": "equity_ratio", "label": "自己資本比率（%）"},
-    {"value": "de_ratio",     "label": "D/Eレシオ"},
-    {"value": "cf_ratio",     "label": "営業CF/売上（%）"},
-    {"value": "eps_growth",   "label": "EPS成長率（%）"},
-    {"value": "op_growth",    "label": "営業利益成長率（%）"},
-    {"value": "rd_intensity", "label": "R&D集約度"},
-    {"value": "da_intensity", "label": "D&A集約度"},
-    {"value": "z_op_margin",  "label": "営業利益率Zスコア"},
-    {"value": "z_roe",        "label": "ROE Zスコア"},
-    {"value": "z_cf_ratio",   "label": "CF比率Zスコア"},
+    {"value": "per",            "label": "PER"},
+    {"value": "pbr",            "label": "PBR"},
+    {"value": "div_yield",      "label": "配当利回り（%）"},
+    {"value": "roe",            "label": "ROE（%）"},
+    {"value": "roa",            "label": "ROA（%）"},
+    {"value": "op_margin",      "label": "営業利益率（%）"},
+    {"value": "net_margin",     "label": "純利益率（%）"},
+    {"value": "asset_turnover", "label": "総資産回転率（回）"},
+    {"value": "equity_ratio",   "label": "自己資本比率（%）"},
+    {"value": "de_ratio",       "label": "D/Eレシオ"},
+    {"value": "nc_ratio",       "label": "ネットキャッシュ比率"},
+    {"value": "cf_ratio",       "label": "営業CF/売上（%）"},
+    {"value": "eps_growth",     "label": "EPS成長率（%）"},
+    {"value": "op_growth",      "label": "営業利益成長率（%）"},
+    {"value": "rev_growth",     "label": "売上成長率（%）"},
+    {"value": "rd_intensity",   "label": "R&D集約度"},
+    {"value": "da_intensity",   "label": "D&A集約度"},
+    {"value": "z_op_margin",    "label": "営業利益率Zスコア"},
+    {"value": "z_roe",          "label": "ROE Zスコア"},
+    {"value": "z_cf_ratio",     "label": "CF比率Zスコア"},
 ]
 # 既定は価格由来（per/pbr）に偏らないよう価格フリーの roa・eps_growth を混合。
 DEFAULT_FIN_FEATURES = ["per", "pbr", "roe", "equity_ratio", "roa", "eps_growth"]
@@ -247,10 +255,21 @@ class MacroRiskReturnPlugin(AnalysisPlugin):
                 "options": MACRO_FEATURE_OPTIONS,
                 "default": DEFAULT_MACRO_FEATURES,
             },
+            "use_momentum": {
+                "type": "checkbox",
+                "label": "モメンタム特徴量を使用",
+                "description": (
+                    "12-1ヶ月モメンタムを特徴量に加える。ON は各スナップショットに過去履歴を要求"
+                    "するため、週次株価の蓄積が浅い環境では walk-forward CV のフォールド数が減る"
+                    "（既定 OFF＝マクロ ON のままでも CV が成立する）。マクロとは独立に切替可能。"
+                ),
+                "default": False,
+            },
             "momentum_window": {
                 "type": "number",
                 "dtype": "int",
                 "label": "モメンタム算出月数",
+                "description": "use_momentum=ON のとき、何ヶ月前を起点に 12-1 モメンタムを測るか。",
                 "default": 12,
                 "min": 3,
                 "max": 24,
@@ -288,6 +307,7 @@ class MacroRiskReturnPlugin(AnalysisPlugin):
         fin_features   = params["fin_features"]
         use_macro      = params["use_macro"]
         macro_features = params["macro_features"]
+        use_momentum   = params["use_momentum"]
         mom_window     = params["momentum_window"]
         max_features   = params["max_features"]
         min_coverage   = params["min_coverage"]
@@ -308,7 +328,7 @@ class MacroRiskReturnPlugin(AnalysisPlugin):
 
         samples_by_ym, sample_meta_by_ym, current_snaps, all_feat_names = self._build_snapshots(
             prices_by_co, fin_by_co, companies, macro_cache, sectors,
-            fin_features, macro_names, mom_window, min_coverage,
+            fin_features, macro_names, use_momentum, mom_window, min_coverage,
         )
 
         total_samples = sum(len(v) for v in samples_by_ym.values())
@@ -445,11 +465,13 @@ class MacroRiskReturnPlugin(AnalysisPlugin):
     def _build_snapshots(
         self,
         prices_by_co, fin_by_co, companies, macro_cache,
-        sectors, fin_features, macro_names, mom_window, min_coverage,
+        sectors, fin_features, macro_names, use_momentum, mom_window, min_coverage,
     ) -> tuple:
         # macro_names は呼び出し側で選択済み（use_macro=OFF や空選択なら []）。
+        # モメンタムは use_macro とは独立に use_momentum で制御する（過去履歴要件を切り離し、
+        # マクロ ON のままでも walk-forward CV のサンプル帯が収縮しないようにするため）。
         use_macro = bool(macro_names)
-        momentum_name = ["momentum_12m1"] if use_macro else []
+        momentum_name = ["momentum_12m1"] if use_momentum else []
 
         # 交差項名を生成（fin × macro + sector_dummy × macro）
         interaction_names: list[str] = []
@@ -534,9 +556,9 @@ class MacroRiskReturnPlugin(AnalysisPlugin):
                         macro_row.append(float(val))  # type: ignore[arg-type]
                         macro_dict[mn] = float(val)   # type: ignore[arg-type]
 
-                # モメンタム
+                # モメンタム（use_macro とは独立に use_momentum で制御）
                 mom_row: list[float] = []
-                if use_macro:
+                if use_momentum:
                     mom = self._momentum(closes, dates, snap_idx, mom_window)
                     if mom is None:
                         continue
