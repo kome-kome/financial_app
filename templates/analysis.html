@@ -466,7 +466,15 @@ tr:hover td{background:#1e2235}
     </div>
     <div class="grid4" style="margin-bottom:14px">
       <div class="form-group">
-        <label>プリセット</label>
+        <label>検証する手法（scoring source）</label>
+        <select id="bt-source">
+          <option value="recommend" selected>おすすめ（複合スコア）</option>
+          <option value="valuation">バリュエーション（期待総リターン）</option>
+          <option value="net_cash">ネットキャッシュ（清原式）</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>プリセット（おすすめ手法のみ）</label>
         <select id="bt-preset">
           <option value="バランス型">バランス型</option>
           <option value="成長重視">成長重視</option>

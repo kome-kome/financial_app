@@ -100,3 +100,53 @@ class TestRun:
         res = backtest.run(db, "バランス型", 6, 20, None, None)
         codes = [r["edinet_code"] for r in res["results"]]
         assert codes == ["E00002", "E00003", "E00001"]
+        assert res["source"] == "recommend"   # 既定 source
+
+
+# ── scoring source パラメータ化（#206・メタ層の一般化）──────────────────────
+
+class TestScoringSource:
+    def test_unknown_source_raises(self, db):
+        import pytest
+        with pytest.raises(ValueError):
+            backtest.run(db, "バランス型", 6, 20, None, None, source="nope")
+
+    def test_source_valuation_ranks_by_total_return(self, db, make_metric):
+        # 期待総リターン = gap_ratio + 配当利回り。gap_ratio が None の銘柄は除外。
+        db.add(make_metric(edinet_code="E00001", year=2020, period_end="2020-03-31",
+                           gap_ratio=20.0, div_yield=5.0))   # 25
+        db.add(make_metric(edinet_code="E00002", year=2020, period_end="2020-03-31",
+                           gap_ratio=30.0, div_yield=0.0))   # 30
+        db.add(make_metric(edinet_code="E00003", year=2020, period_end="2020-03-31",
+                           gap_ratio=None,  div_yield=9.0))   # 除外（gap_ratio なし）
+        db.commit()
+        res = backtest.run(db, "バランス型", 6, 20, None, None, source="valuation")
+        assert res["source"] == "valuation"
+        assert res["total_candidates"] == 2
+        codes = [r["edinet_code"] for r in res["results"]]
+        assert codes == ["E00002", "E00001"]   # 30 > 25
+
+    def test_source_valuation_caps_outlier_div_yield(self, db, make_metric):
+        # 異常な配当利回り（>30%）は 0 とみなす → スコアは gap_ratio のみ
+        db.add(make_metric(edinet_code="E00001", year=2020, period_end="2020-03-31",
+                           gap_ratio=10.0, div_yield=99.0))
+        db.commit()
+        res = backtest.run(db, "バランス型", 6, 20, None, None, source="valuation")
+        assert res["results"][0]["score"] == 10.0
+
+    def test_source_net_cash_ranks_by_nc_ratio(self, db, make_metric):
+        # nc_ratio = (流動資産 + 投資有価証券×0.7 − 総負債) / (market_cap[百万円]×1e6)
+        # market_cap=1000(百万円)=1e9円。
+        db.add(make_metric(edinet_code="E00001", year=2020, period_end="2020-03-31",
+                           market_cap=1000.0, bs_current_assets=2.0e9,
+                           bs_investment_securities=0.0, bs_total_liabilities=5.0e8))  # nc=1.5e9 → 1.5
+        db.add(make_metric(edinet_code="E00002", year=2020, period_end="2020-03-31",
+                           market_cap=1000.0, bs_current_assets=1.0e9,
+                           bs_investment_securities=0.0, bs_total_liabilities=8.0e8))  # nc=2e8 → 0.2
+        db.commit()
+        res = backtest.run(db, "バランス型", 6, 20, None, None, source="net_cash")
+        assert res["source"] == "net_cash"
+        assert res["total_candidates"] == 2
+        codes = [r["edinet_code"] for r in res["results"]]
+        assert codes == ["E00001", "E00002"]   # 1.5 > 0.2
+        assert res["results"][0]["score"] == 1.5

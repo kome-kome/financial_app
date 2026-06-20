@@ -564,11 +564,21 @@ coverage_i = Σⱼ∈present |weight_j| / Σⱼ |weight_j|
 
 ## 7. バックテスト
 
-**実装ファイル**: `api.py` の `/api/backtest`・`/api/backtest/multi` エンドポイント
+**実装ファイル**: `backtest.py`（ロジック）＋ `routers/analysis.py` の `/api/backtest`・`/api/backtest/multi` エンドポイント
 
 ### 概要
 
 過去 N ヶ月前の時点で確定していた財務データを使いスコアリングし、その後の実際の株価リターンを計算する。モデルの有効性を事後的に検証するために使用する。マルチピリオド比較（3/6/12/18/24 ヶ月）により保有期間と有効性の関係も分析できる。
+
+**メタ層の一般化（scoring source）**: 検証対象のスコアリング手法を `source` パラメータで切り替える（`SCORING_SOURCES`）。ランキングを出す一次分析なら同一土俵（as-of スコア→上位N社→実現リターン→ベンチマーク超過）で比較できる。
+
+| source | スコア（高いほど買い候補） | 前提 |
+|---|---|---|
+| `recommend`（既定） | recommend プリセットの加重和（z_roe 等） | — |
+| `valuation` | 期待総リターン ＝ `gap_ratio` ＋ 配当利回り [%] | sector_ols 実行済み年度のみ（gap_ratio 必須） |
+| `net_cash` | 清原式ネットキャッシュ比率 ＝ (流動資産＋投資有価証券×0.7−総負債) / 時価総額 | — |
+
+ML 系（price_predictor / macro）は WF-CV を内蔵するため対象外（→ §4・§9）。`preset` は `recommend` のときのみ意味を持つ。
 
 ### 計算ロジック
 
@@ -578,7 +588,8 @@ start_date = today − months_ago × 30日
 1. start_date 以前に period_end が確定しているレコードで
    各社の最新年度のデータを取得
 
-2. recommend.py と同じ重み付きスコアで全社をランキング
+2. source のスコア関数（score_record）で全社をランキング
+   （recommend=加重和 / valuation=gap+配当 / net_cash=NC比率）
 
 3. 上位 top_n 社について:
    始値 = start_date 以降の最初の終値

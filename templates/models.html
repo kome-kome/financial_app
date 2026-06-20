@@ -515,9 +515,9 @@ z_metric_j_i: 企業 i の指標 j の Zスコア（年度別正規化済み）<
 <!-- ── Model 7 ── -->
 <div class="model-section" id="m7">
   <h2>7. バックテスト</h2>
-  <span class="file-tag">api.py — GET /api/backtest</span>
+  <span class="file-tag">backtest.py — GET /api/backtest（routers/analysis.py）</span>
 
-  <p>過去 N ヶ月前の時点で確定していた財務データを使いスコアリングし、その後の実際の株価リターンを計算することでモデルの有効性を事後的に検証する。</p>
+  <p>過去 N ヶ月前の時点で確定していた財務データを使いスコアリングし、その後の実際の株価リターンを計算することでモデルの有効性を事後的に検証する。<strong>検証対象のスコアリング手法は <code>source</code> で切替</strong>（<code>recommend</code> ＝複合スコア／<code>valuation</code> ＝期待総リターン gap_ratio＋配当／<code>net_cash</code> ＝清原式ネットキャッシュ比率）。ランキングを出す一次分析を同一土俵で比較できる（メタ層の一般化）。</p>
 
   <h3>計算ロジック</h3>
   <div class="formula-block">start_date = today − months_ago × 30日
@@ -525,7 +525,8 @@ z_metric_j_i: 企業 i の指標 j の Zスコア（年度別正規化済み）<
 1. start_date 以前に period_end が確定しているレコードで
    各社の最新年度データを取得
 
-2. recommend.py と同じ重み付きスコアで全社をランキング
+2. source のスコア関数で全社をランキング
+   （recommend=加重和 / valuation=gap+配当 / net_cash=NC比率）
 
 3. 上位 top_n 社について:
    始値 = start_date 以降の最初の終値

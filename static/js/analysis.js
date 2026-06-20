@@ -639,11 +639,12 @@ async function runBacktest() {
   const months   = document.getElementById('bt-months').value;
   const topn     = document.getElementById('bt-topn').value;
   const industry = document.getElementById('bt-industry').value.trim();
+  const source   = document.getElementById('bt-source').value;
   const btn = document.getElementById('btn-backtest');
   btn.disabled = true;
   btn.innerHTML = '<span class="spinner"></span> 計算中...';
   try {
-    let url = `/api/backtest?preset=${encodeURIComponent(preset)}&months_ago=${months}&top_n=${topn}`;
+    let url = `/api/backtest?preset=${encodeURIComponent(preset)}&months_ago=${months}&top_n=${topn}&source=${encodeURIComponent(source)}`;
     if (industry) url += `&industry=${encodeURIComponent(industry)}`;
     const d = await apiFetch(url);
     btResults = d.results;
@@ -832,11 +833,12 @@ async function runBtMulti() {
   const preset   = document.getElementById('bt-preset').value;
   const topn     = document.getElementById('bt-topn').value;
   const industry = document.getElementById('bt-industry').value.trim();
+  const source   = document.getElementById('bt-source').value;
   const btn = document.getElementById('btn-bt-multi');
   btn.disabled = true;
   btn.innerHTML = '<span class="spinner"></span> 集計中（5期間）...';
   try {
-    let url = `/api/backtest/multi?preset=${encodeURIComponent(preset)}&top_n=${topn}`;
+    let url = `/api/backtest/multi?preset=${encodeURIComponent(preset)}&top_n=${topn}&source=${encodeURIComponent(source)}`;
     if (industry) url += `&industry=${encodeURIComponent(industry)}`;
     const d = await apiFetch(url);
     _renderBtMulti(d);
