@@ -225,6 +225,7 @@ class MacroRiskReturnPlugin(AnalysisPlugin):
                 "default": 1.0,
                 "min": 0.0,
                 "max": 3.0,
+                "step": 0.1,
             },
             "risk_axis": {
                 "type": "select",
@@ -281,6 +282,7 @@ class MacroRiskReturnPlugin(AnalysisPlugin):
                 "default": 20,
                 "min": 5,
                 "max": 40,
+                "step": 1,
             },
             "min_coverage": {
                 "type": "slider",
@@ -290,6 +292,7 @@ class MacroRiskReturnPlugin(AnalysisPlugin):
                 "default": 0.5,
                 "min": 0.1,
                 "max": 1.0,
+                "step": 0.05,
             },
             "top_n": {
                 "type": "number",

@@ -1104,8 +1104,11 @@ function _renderParamsForm(schema, tabId) {
       });
       html += '</select><div class="text-sm" style="color:#64748b;margin-top:2px">Ctrl+クリックで複数選択</div>';
     } else if (field.type === 'slider') {
+      // step は schema が源。未指定なら dtype から安全側に導出する（int→1 / float→'any'）。
+      // これにより int スライダーが端数値を吐いて coerce_params に弾かれることはない。
+      const step = field.step ?? (field.dtype === 'int' ? 1 : 'any');
       html += `<div style="display:flex;align-items:center;gap:8px">
-        <input type="range" id="param-${tabId}-${key}" min="${field.min}" max="${field.max}" step="${field.step ?? 'any'}" value="${field.default}"
+        <input type="range" id="param-${tabId}-${key}" min="${field.min}" max="${field.max}" step="${step}" value="${field.default}"
           data-input="syncVal" data-target="val-${tabId}-${key}" style="flex:1;accent-color:#7c3aed">
         <span id="val-${tabId}-${key}" style="color:#a78bfa;font-weight:600;min-width:36px">${field.default}</span>
       </div>`;
@@ -1130,11 +1133,14 @@ function _collectParamValues(tabId, schema) {
       params[key] = sel.length > 0 ? sel : null;
     } else if (field.type === 'checkbox') {
       params[key] = el.checked;
-    } else {
+    } else if (field.type === 'slider' || field.type === 'number') {
       const val = el.value;
-      params[key] = (field.type === 'slider' || field.type === 'number')
-        ? (val === '' ? null : parseFloat(val))
-        : (val || null);
+      // dtype=int は整数へ丸める（スライダーの端数・手入力の小数点を coerce 前に正規化）。
+      params[key] = (val === '' ? null
+        : field.dtype === 'int' ? Math.round(parseFloat(val))
+        : parseFloat(val));
+    } else {
+      params[key] = el.value || null;
     }
   }
   return params;

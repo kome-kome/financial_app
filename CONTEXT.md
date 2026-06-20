@@ -39,7 +39,7 @@ _Avoid_: ステータス辞書, status dict（実装詳細・旧称）
 ## 分析プラグイン
 
 **パラメータ契約 (param contract)**:
-分析プラグインの `params_schema()` を UI フォーム定義かつ型契約として使う宣言。各フィールドは `type`（ウィジェット: select/multiselect/slider/number/checkbox/text/weights）と `dtype`（データ型: int/float/str/list[str]/bool/dict）の2軸を持ち、dtype は数値（number/slider）にのみ明示し他は type から推論する。単一の coerce seam（`coerce_params`）がこの契約から raw params の型付け・default 補完・bounds/membership 検証を行い、execute には意味的 validation（features 非空・weights 合計≠0 等）だけが残る。bounds/membership 違反は reject（ValueError）。
+分析プラグインの `params_schema()` を UI フォーム定義かつ型契約として使う宣言。各フィールドは `type`（ウィジェット: select/multiselect/slider/number/checkbox/text/weights）と `dtype`（データ型: int/float/str/list[str]/bool/dict）の2軸を持ち、dtype は数値（number/slider）にのみ明示し他は type から推論する。単一の coerce seam（`coerce_params`）がこの契約から raw params の型付け・default 補完・bounds/membership 検証を行い、execute には意味的 validation（features 非空・weights 合計≠0 等）だけが残る。bounds/membership 違反は reject（ValueError）。スライダー（type=slider）は粒度 `step` を必ず宣言し、int dtype の step は整数とする（未宣言だと HTML range が連続値になり int で端数を吐いて reject されるため。JS 側も dtype から安全側の step を導出する二重防御）。
 _Avoid_: パラメータスキーマ, フォーム定義（型契約の側面が落ちるため）
 
 **売りスコア (sell score)**:
