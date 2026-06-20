@@ -16,6 +16,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from collector import (
     backfill_historical_stock_prices_yahoo,
+    backfill_weekly_history_yahoo,
     collect_stock_price_history,
     collect_stock_price_history_jquants,
 )
@@ -244,6 +245,70 @@ class TestBackfillYahooNearestMatch:
 
         updated = self._run(db, [{"trade_date": "2023-03-30", "close": 1000.0}])
         assert updated == 0
+
+
+# ── 週次バックフィル：backfill_weekly_history_yahoo（#198）────────────────────
+
+class TestBackfillWeeklyHistoryYahoo:
+    """stock_price_weekly 過去延伸の対象選定ロジックを検証する。
+
+    record_prices_batch は Postgres 専用（pg_insert）のためモックし、fetch_yahoo_history へ
+    渡される (ticker, d_from, d_to) を捕捉して「どの社をどの範囲で取得するか」を確認する。
+    """
+
+    def _run(self, db, years_back=5):
+        fetch_calls: list = []
+
+        async def mock_fetch(session, ticker, d_from, d_to):
+            fetch_calls.append((ticker, d_from, d_to))
+            return []  # 取得 0 件（保存経路は別途モック）
+
+        with patch("collector_prices.fetch_yahoo_history", new=mock_fetch):
+            with patch("collector_prices.record_prices_batch", return_value=0):
+                with patch("collector_prices.YAHOO_STOCK_RATE_SLEEP", 0):
+                    result = asyncio.run(
+                        backfill_weekly_history_yahoo(db, years_back=years_back))
+        return result, fetch_calls
+
+    def test_skips_already_covered_company(self, db, make_company, make_weekly):
+        """週次の最古日が floor(today-years_back) 以前の社は取得対象外。"""
+        old = (date.today() - timedelta(days=365 * 6)).strftime("%Y-%m-%d")
+        db.add(make_company(edinet_code="E00001", sec_code="1001"))
+        db.add(make_weekly(edinet_code="E00001", trade_date=old, close_last=1000.0))
+        db.commit()
+
+        result, fetch_calls = self._run(db, years_back=5)
+        assert fetch_calls == []
+        assert result.get("skipped") is True
+        assert result.get("companies") == 0
+
+    def test_extends_company_with_recent_only_weekly(self, db, make_company, make_weekly):
+        """週次が直近2年分しかない社は floor〜(最古日-1) で取得される。"""
+        oldest = (date.today() - timedelta(days=365 * 2)).strftime("%Y-%m-%d")
+        db.add(make_company(edinet_code="E00001", sec_code="1001"))
+        db.add(make_weekly(edinet_code="E00001", trade_date=oldest, close_last=1000.0))
+        db.commit()
+
+        result, fetch_calls = self._run(db, years_back=5)
+        assert len(fetch_calls) == 1
+        ticker, d_from, d_to = fetch_calls[0]
+        assert ticker == "1001.T"
+        floor_d = date(date.today().year - 5, date.today().month, date.today().day)
+        expected_to = (date.fromisoformat(oldest) - timedelta(days=1)).strftime("%Y%m%d")
+        assert d_from == floor_d.strftime("%Y%m%d")
+        assert d_to == expected_to
+        assert result.get("companies") == 1
+
+    def test_fetches_full_range_when_no_weekly(self, db, make_company):
+        """週次が未収集の社は floor〜today の全範囲で取得される。"""
+        db.add(make_company(edinet_code="E00001", sec_code="1001"))
+        db.commit()
+
+        _, fetch_calls = self._run(db, years_back=5)
+        assert len(fetch_calls) == 1
+        ticker, d_from, d_to = fetch_calls[0]
+        assert ticker == "1001.T"
+        assert d_to == date.today().strftime("%Y%m%d")
 
 
 # ── JQuants版：collect_stock_price_history_jquants ───────────────────────────

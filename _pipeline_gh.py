@@ -31,6 +31,7 @@ from collector import (
     run_full_collection, update_market_data, collect_macro_data, reparse_from_raw,
     collect_stock_price_history_jquants, update_market_data_from_history,
     backfill_historical_stock_prices_yahoo, fill_recent_stock_price_gap_yahoo,
+    backfill_weekly_history_yahoo,
     refill_cf_from_xbrl, refill_pl_bs_from_xbrl, refill_c2_from_xbrl, diagnose_cf_labels,
     SKIP_XBRL_RAW, JQUANTS_BACKFILL_DAYS,
 )
@@ -47,6 +48,7 @@ _run_with_retry = partial(_pipeline_utils._run_with_retry, log_fn=log, backoff_b
 
 async def main(years_back: int, collect_only: bool = False,
                finalize_only: bool = False, backfill_yahoo: bool = False,
+               backfill_weekly: bool = False, backfill_weekly_years: int = 5,
                refill_cf: bool = False, refill_cf_limit: int = 3000,
                refill_cf_sleep: float = 0.5, refill_capex_only: bool = False,
                refill_missing_cf: bool = False,
@@ -68,6 +70,8 @@ async def main(years_back: int, collect_only: bool = False,
         mode = "refill-c2"
     elif backfill_yahoo:
         mode = "backfill-yahoo"
+    elif backfill_weekly:
+        mode = "backfill-weekly"
     elif collect_only:
         mode = "collect-only"
     elif finalize_only:
@@ -194,6 +198,27 @@ async def main(years_back: int, collect_only: bool = False,
         log("=" * 60)
         return
 
+    # ─── 週次株価バックフィル（単独モード・#198）──────────────────────────────────
+    # stock_price_weekly を過去 backfill_weekly_years 年まで延伸し、use_momentum=ON 時の
+    # walk-forward CV（52週先リターン＋12ヶ月モメンタム）が成立する被覆を確保する。
+    if backfill_weekly:
+        log(f"[週次backfill] 開始（years_back={backfill_weekly_years}, Yahoo Finance）")
+        log("  対象: stock_price_weekly の最古日が today-years_back より新しい（過去不足）社")
+        dbw = SessionLocal()
+        try:
+            r = await backfill_weekly_history_yahoo(
+                dbw, years_back=backfill_weekly_years,
+                on_progress=lambda c, t, m: log(m),
+            )
+            log(f"  週次backfill 完了: {r}")
+        finally:
+            dbw.close()
+        log(f"[週次backfill] 完了 ({(time.time()-t0)/60:.1f}分経過)")
+        log("=" * 60)
+        log(f"パイプライン完了  総所要時間: {(time.time()-t0)/60:.1f}分")
+        log("=" * 60)
+        return
+
     if not finalize_only:
         # ─── Phase 1: XBRL 収集（financial_records.doc_id でスキップ）──────────
         log(f"[1/5] XBRL 収集 開始（skip_existing=True, years_back={years_back}）")
@@ -279,6 +304,10 @@ if __name__ == "__main__":
                         help="Phase 3-5 のみ実行（成長率/Zスコア/マクロ/J-Quants株価）")
     parser.add_argument("--backfill-yahoo", action="store_true",
                         help="Phase 6: Yahoo Finance で過去株価をバックフィル（J-Quants カバー外の旧年度を補完）")
+    parser.add_argument("--backfill-weekly", action="store_true",
+                        help="週次株価バックフィル（#198）: stock_price_weekly を過去方向へ延伸し use_momentum=ON の CV 被覆を確保")
+    parser.add_argument("--backfill-weekly-years", type=int, default=5,
+                        help="週次バックフィルの延伸年数（デフォルト 5）")
     parser.add_argument("--refill-cf", action="store_true",
                         help="Phase 7: CF NULL 補完（投資CF/現金増減/capex を XBRL 再取得で補完）")
     parser.add_argument("--refill-cf-limit", type=int, default=6000,
@@ -314,6 +343,7 @@ if __name__ == "__main__":
             f"  collect_only={args.collect_only}"
             f"  finalize_only={args.finalize_only}"
             f"  backfill_yahoo={args.backfill_yahoo}"
+            f"  backfill_weekly={args.backfill_weekly}"
             f"  refill_cf={args.refill_cf}"
             f"  refill_cf_limit={args.refill_cf_limit}"
             f"  refill_capex_only={args.refill_capex_only}"
@@ -329,6 +359,8 @@ if __name__ == "__main__":
         collect_only=args.collect_only,
         finalize_only=args.finalize_only,
         backfill_yahoo=args.backfill_yahoo,
+        backfill_weekly=args.backfill_weekly,
+        backfill_weekly_years=args.backfill_weekly_years,
         refill_cf=args.refill_cf,
         refill_cf_limit=args.refill_cf_limit,
         refill_cf_sleep=args.refill_cf_sleep,

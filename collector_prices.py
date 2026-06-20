@@ -826,6 +826,92 @@ async def fill_recent_stock_price_gap_yahoo(
     return {"skipped": False, "upserted": upserted, "from": d_from, "to": d_to}
 
 
+async def backfill_weekly_history_yahoo(
+    db,
+    years_back: int = 5,
+    on_progress: Optional[Callable[[int, int, str], None]] = None,
+    cancel_check: Optional[Callable[[], bool]] = None,
+) -> dict:
+    """stock_price_weekly を過去方向へ years_back 年まで延伸する（Yahoo Finance / #198）。
+
+    背景: use_momentum=ON（macro_risk_return §9.8）は 52週先リターン＋12ヶ月モメンタムを
+    同時に要求するため、週次株価の被覆が短いと walk-forward CV が 0 フォルドになる。
+    各社の週次の最古 trade_date が today-years_back より新しい（＝過去が不足）場合に、
+    不足期間を Yahoo から取得し record_prices_batch 経由で daily→weekly 再集約して埋める。
+
+    ストレージ安全性: 1社処理ごとに record_prices_batch(trim=True) を呼び、daily を保持窓
+    （DAILY_WINDOW_DAYS）以外は都度 trim する。これにより 5年×全社の daily が同時展開して
+    Supabase Free 500MB を超えるのを防ぐ。weekly は古い daily から再集約済みのため情報損失なし。
+    既存 weekly 行は ON CONFLICT UPDATE で同値上書き（破壊なし）。
+    J-Quants カバー外の過去も Yahoo で取得でき、GitHub Actions（Azure IP）から動作する。
+    """
+    today     = date.today()
+    floor_d   = date(today.year - years_back, today.month, today.day)
+    floor_str = floor_d.isoformat()
+    d_from    = floor_d.strftime("%Y%m%d")
+
+    # 企業ごとの週次最古 trade_date（weekly 未収集の社はキー無し）
+    min_week = dict(
+        db.query(StockPriceWeekly.edinet_code,
+                 sqla_func.min(StockPriceWeekly.trade_date))
+        .group_by(StockPriceWeekly.edinet_code)
+        .all()
+    )
+
+    companies = (
+        db.query(Company.sec_code, Company.edinet_code)
+        .filter(Company.sec_code.isnot(None), Company.sec_code != "")
+        .all()
+    )
+
+    # 取得対象: weekly 未収集、または最古日が floor より新しい（過去が不足する）社のみ
+    to_fetch = []
+    for sec_code, edinet_code in companies:
+        oldest = min_week.get(edinet_code)
+        if oldest is None:
+            d_to = today
+        elif oldest > floor_str:
+            d_to = date.fromisoformat(oldest) - timedelta(days=1)
+        else:
+            continue  # 既に years_back 以上カバー済み
+        to_fetch.append((sec_code, edinet_code, d_to.strftime("%Y%m%d")))
+
+    total = len(to_fetch)
+    if total == 0:
+        log.info(f"backfill_weekly_history_yahoo: 全社 {years_back}年以上カバー済み（対象なし）")
+        return {"skipped": True, "reason": "already_covered", "companies": 0}
+
+    upserted = 0
+    async with httpx.AsyncClient() as session:
+        for i, (sec_code, edinet_code, d_to) in enumerate(sorted(to_fetch), 1):
+            if cancel_check and cancel_check():
+                if on_progress:
+                    on_progress(i - 1, total, f"[週次backfill] 停止（{upserted}件保存済み）")
+                return {"cancelled": True, "upserted": upserted, "companies": i - 1}
+
+            rows = await fetch_yahoo_history(session, f"{sec_code}.T", d_from, d_to)
+            records = [
+                {"edinet_code": edinet_code, "trade_date": r["trade_date"],
+                 "close": r["close"], "volume": r.get("volume")}
+                for r in rows if r.get("close")
+            ] if rows else []
+            if records:
+                try:
+                    # 1社ごとに trim=True：daily を都度 trim して保持窓外の過去を残さない
+                    upserted += record_prices_batch(db, records, trim=True)
+                except Exception as e:
+                    log.warning("週次backfill バッチ保存失敗 %s: %s", sec_code, e)
+
+            if on_progress and (i % YAHOO_BACKFILL_PROGRESS_BATCH == 0 or i == total):
+                on_progress(i, total, f"[週次backfill {i}/{total}] {sec_code} 累計{upserted}件")
+
+            if YAHOO_STOCK_RATE_SLEEP > 0:
+                await asyncio.sleep(YAHOO_STOCK_RATE_SLEEP)
+
+    log.info(f"backfill_weekly_history_yahoo: {upserted}件の daily を保存し weekly を再集約（{total}社）")
+    return {"skipped": False, "upserted": upserted, "companies": total, "floor": floor_str}
+
+
 def _nearest_price(sorted_dates: list, price_dict: dict, target_str: str,
                    max_gap: int) -> Optional[float]:
     """昇順の日付文字列リスト `sorted_dates` から `target_str` に最も近い日付の

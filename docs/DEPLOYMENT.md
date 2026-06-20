@@ -30,6 +30,7 @@ Render の制約と運用形態に合わせて設計すること。
 | `[定常]` | 差分収集・毎日自動実行 | `daily-incremental.yml` | 毎日 JST 03:00 に自動。手動で即時更新したい場合は `workflow_dispatch` | 5〜15分 |
 | `[全件]` | XBRL収集・財務データ全件更新 | `full-pipeline.yml` | DB初期構築時・全社バックフィル必要時（`daily-incremental` を `.disabled` に退避して同時実行回避） | 200〜240分 |
 | `[一回性]` | 株価履歴バックフィル | `backfill-stock-history.yml` | `stock_price` が NULL な企業の過去2年株価を補完（通常は1回で完了） | 60〜90分 |
+| `[一回性]` | 週次株価バックフィル | `backfill-weekly-history.yml` | `stock_price_weekly` を過去 N 年（既定5）まで延伸し、`use_momentum=ON` の walk-forward CV 被覆を確保（#198・既定 OFF なので通常は不要） | 60〜150分 |
 | `[補完]` | C2 NULL バックフィル | `refill-c2.yml` | C2 新列（`pl_depreciation` 等）が NULL のまま残っている場合に EDINET から再取得 | 2〜4時間 |
 | `[補完]` | CF NULL バックフィル | `refill-cf.yml` | `cf_investing_cf` 等が NULL の場合に再取得（mode: refill / capex-only / diagnose） | 1〜3時間 |
 | `[補完]` | PL/BS NULL バックフィル | `refill-pl-bs.yml` | `bs_inventory` 等 旧コホート（〜2022年）が NULL の場合に再取得 | 4〜5時間 |
@@ -173,6 +174,7 @@ Render ダッシュボードで管理。
 **ジョブ所要時間（設計参考値）**:
 - `full-pipeline.yml` finalize（Phase 3〜5）: **200分前後**（`timeout-minutes: 240`）。内訳 = 成長率/Zスコア再計算 約2分 ／ マクロ9系列 約27分 ／ J-Quants 株価（`JQUANTS_BACKFILL_DAYS=730`）約163〜200分。`JQUANTS_BACKFILL_DAYS` 変更時は再計算。
 - `backfill-stock-history.yml`: 対象＝stock_price NULL かつ period_end 730日超前（初回 約3,800社）。`YAHOO_STOCK_RATE_SLEEP=0.5秒`・1社1リクエストで **約60〜90分**（`timeout-minutes: 150`）。
+- `backfill-weekly-history.yml`（#198）: 対象＝`stock_price_weekly` の最古日が `today-years` より新しい社。`backfill_weekly_history_yahoo` が Yahoo から過去方向に取得し、**1社ごとに `record_prices_batch(trim=True)`** で daily→weekly 再集約しつつ daily を都度 trim する（5年×全社の daily 同時展開を避け Supabase 500MB を超えない）。`YAHOO_STOCK_RATE_SLEEP=0.5秒`で **約60〜150分**（`timeout-minutes: 150`）。
 
 ### Supabase（無料プラン）
 
@@ -200,7 +202,7 @@ Render ダッシュボードで管理。
 **後続PR（本対策に連なる別タスク）**：
 - *予測モデルの平滑化ターゲット化*：`turnover_sum`/`volume_sum` 由来の VWAP・相対流動性を説明/被説明変数に。年次株価変動ノイズ対策。MODELS.md 更新を伴う。
 - *`financial_records.raw_xbrl_json` の drop*：financial_records 73MB の主因。第2の容量レバー。
-- *過去2〜5年の Yahoo 週次バックフィル*：J-Quants 無料は2年上限のため、5年時系列（財務5年と整合）を Yahoo から `stock_price_weekly` へ補填。上記モデルPRの土台。
+- *過去2〜5年の Yahoo 週次バックフィル*：J-Quants 無料は2年上限のため、5年時系列（財務5年と整合）を Yahoo から `stock_price_weekly` へ補填。**実装済み（#198・`backfill-weekly-history.yml` / `backfill_weekly_history_yahoo`）。本番実行は use_momentum 常用時に手動で1回**。
 
 #### バックアップ運用ポリシー
 

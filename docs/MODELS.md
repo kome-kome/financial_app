@@ -872,7 +872,7 @@ $$U = \mu_{\text{raw}} - \lambda \cdot R_{\text{axis}}$$
 1. 週次株価履歴（`stock_price_weekly.close_last`）が少なくとも1年分（≥52週）必要
 2. マクロデータ（`macro_data`）の YoY 用に約400日、Z スコア用に5年分の蓄積が必要（未蓄積は None でスキップ）
 3. 学習サンプル数（企業数 × 月数）が 20 件未満の場合はプラグインが空結果を返す
-4. **被覆制約はモメンタム由来（`use_momentum=true` のとき）**: 「52週先リターン（未来必要）」かつ「12ヶ月モメンタム（過去必要）」を同時に要求すると、週次株価が約2年分（本番現状 2024-05〜）しかない環境では両条件を満たす月が**約1ヶ月の薄い帯**に収縮し、walk-forward CV が 0 フォルド（`mean_r2=None`）になる。**本改修でモメンタムを `use_macro` から切り離し `use_momentum`（既定 OFF）化**したため、**既定構成（`use_macro=ON` / `use_momentum=OFF`）ではマクロ・交差項を使ったまま CV が複数フォルドで成立する**（モメンタムの過去履歴要件が外れるため）。`use_momentum=ON` で12ヶ月モメンタムを使う場合は引き続き上記の薄帯制約が生じ、CV 品質の回復には**週次株価のバックフィル**で履歴を延ばす必要がある（FUTURE_TASKS DF-3・収集側の課題）。
+4. **被覆制約はモメンタム由来（`use_momentum=true` のとき）**: 「52週先リターン（未来必要）」かつ「12ヶ月モメンタム（過去必要）」を同時に要求すると、週次株価が約2年分（本番現状 2024-05〜）しかない環境では両条件を満たす月が**約1ヶ月の薄い帯**に収縮し、walk-forward CV が 0 フォルド（`mean_r2=None`）になる。**本改修でモメンタムを `use_macro` から切り離し `use_momentum`（既定 OFF）化**したため、**既定構成（`use_macro=ON` / `use_momentum=OFF`）ではマクロ・交差項を使ったまま CV が複数フォルドで成立する**（モメンタムの過去履歴要件が外れるため）。`use_momentum=ON` で12ヶ月モメンタムを使う場合は引き続き上記の薄帯制約が生じ、CV 品質の回復には**週次株価のバックフィル**で履歴を延ばす必要がある（#198）。バックフィルは `backfill_weekly_history_yahoo`（`collector_prices.py`）を実装済み＝`python _pipeline_gh.py --backfill-weekly --backfill-weekly-years 5`、または GitHub Actions の「[一回性] 週次株価バックフィル」ワークフローで本番実行する（要本番収集権限）。週次の最古日が `today-years` より新しい社だけを Yahoo から過去方向に取得し、`record_prices_batch` 経由で daily→weekly 再集約する（1社ごとに daily を trim するため Supabase 500MB を超えない）。実行後の検証: `SELECT min(trade_date) FROM stock_price_weekly` が `today-years` 近傍まで遡り、`use_momentum=true` で `cv_metrics.n_folds >= 2`。
 
 ### 9.9 参考文献
 
