@@ -6,7 +6,8 @@
 
   ① 割高度（gap_ratio が負＝割高）         … gap_analysis / sector_ols の割安スクリーニングの逆
   ② 業績悪化（ROE・営業利益率・CF・成長率の低さ） … recommend の優良スコアの逆
-  ③ 価格モメンタム（タイミング）            … 買い系には無い「売り時」軸
+  ③ ネットキャッシュ余力の毀損（nc_ratio が低い） … 清原式ネットキャッシュ分析の逆（安全マージン消失）
+  ④ 価格モメンタム（タイミング）            … 買い系には無い「売り時」軸
 
 スコア設計（スケール整合）:
   各シグナルは「高いほど良い（売る理由が小さい）」指標なので、最新年度ユニバース全体で
@@ -24,18 +25,35 @@ from typing import Any
 
 from .base import AnalysisPlugin
 from .utils import winsorize, normalize_transform
+from .net_cash_analysis import compute_net_cash, compute_nc_ratio
 
 
-# 売りシグナルに使う financial_metrics VIEW 列（すべて「高い＝売る理由が小さい」向き）。
+# 売りシグナルに使う指標（すべて「高い＝売る理由が小さい」向き）。
+# 多くは financial_metrics VIEW 列だが、nc_ratio は VIEW 列ではなく実行時計算（_resolve_metric）。
 # UI のウェイトグリッドと一致させる（static/js/analysis.js: SELL_WEIGHT_LABELS）。
-SELL_METRICS = ["gap_ratio", "roe", "op_margin", "cf_ratio", "rev_growth", "equity_ratio"]
+SELL_METRICS = ["gap_ratio", "roe", "op_margin", "cf_ratio", "rev_growth", "equity_ratio", "nc_ratio"]
 
 # プリセット（ウェイトは ≥0。値が大きいほどその観点を売り判断で重視）。
+# nc_ratio = 清原式ネットキャッシュ比率の逆観点（クッション消失＝安全マージン喪失を売り軸へ）。
 PRESETS = {
-    "バランス型":   {"gap_ratio": 1.0, "roe": 1.0, "op_margin": 1.0, "cf_ratio": 0.8, "rev_growth": 0.6, "equity_ratio": 0.4},
-    "割高警戒型":   {"gap_ratio": 2.5, "roe": 0.5, "op_margin": 0.5, "rev_growth": 0.3},
-    "業績悪化重視": {"roe": 2.0, "op_margin": 1.5, "cf_ratio": 1.0, "rev_growth": 1.5, "gap_ratio": 0.5},
+    "バランス型":   {"gap_ratio": 1.0, "roe": 1.0, "op_margin": 1.0, "cf_ratio": 0.8, "rev_growth": 0.6, "equity_ratio": 0.4, "nc_ratio": 0.4},
+    "割高警戒型":   {"gap_ratio": 2.5, "roe": 0.5, "op_margin": 0.5, "rev_growth": 0.3, "nc_ratio": 0.8},
+    "業績悪化重視": {"roe": 2.0, "op_margin": 1.5, "cf_ratio": 1.0, "rev_growth": 1.5, "gap_ratio": 0.5, "nc_ratio": 0.3},
 }
+
+
+def _resolve_metric(r, m: str) -> float | None:
+    """売り指標の値を取り出す。多くは VIEW 列だが nc_ratio は実行時計算する。
+
+    nc_ratio = 清原式ネットキャッシュ比率（高い＝クッション厚い＝売る理由が小さい）。
+    クッション消失（低い/負）の銘柄ほど -z が大きくなり売りスコアへ加点される。
+    """
+    if m == "nc_ratio":
+        nc = compute_net_cash(getattr(r, "bs_current_assets", None),
+                              getattr(r, "bs_investment_securities", None),
+                              getattr(r, "bs_total_liabilities", None))
+        return compute_nc_ratio(nc, getattr(r, "market_cap", None))
+    return getattr(r, m, None)
 
 # トレンド判定の閾値（13週リターン）。
 _TREND_UP   = 0.10    # +10% 以上 → 上昇
@@ -166,8 +184,8 @@ class SellRankingPlugin(AnalysisPlugin):
     name = "sell_ranking"
     label = "売り候補ランキング"
     description = (
-        "保有銘柄リストの中から、割高度（回帰乖離）・業績悪化（収益性/CF/成長）・価格モメンタムを"
-        "総合して「売るべき銘柄と売り時」をランキングします。各銘柄に SELL/REDUCE/HOLD を付与します。"
+        "保有銘柄リストの中から、割高度（回帰乖離）・業績悪化（収益性/CF/成長）・ネットキャッシュ余力の"
+        "毀損・価格モメンタムを総合して「売るべき銘柄と売り時」をランキングします。各銘柄に SELL/REDUCE/HOLD を付与します。"
     )
     depends_on = ["sector_ols"]   # 割高度（gap_ratio）に regression_results を使うため
     category = "⑤ 保有を見直す"
@@ -258,7 +276,7 @@ class SellRankingPlugin(AnalysisPlugin):
 
         stats: dict[str, tuple[float, float]] = {}
         for m in weights:
-            vals = [v for v in (getattr(r, m, None) for r in universe) if v is not None]
+            vals = [v for v in (_resolve_metric(r, m) for r in universe) if v is not None]
             if len(vals) < 4:
                 continue
             wv, _, _ = winsorize(vals)
@@ -298,7 +316,7 @@ class SellRankingPlugin(AnalysisPlugin):
             weight_present = 0.0
             detail: dict[str, float | None] = {}
             for m, w in weights.items():
-                raw = getattr(r, m, None)
+                raw = _resolve_metric(r, m)
                 if raw is not None and m in stats:
                     mu, sd = stats[m]
                     zstd = normalize_transform(float(raw), mu, sd, "zscore")

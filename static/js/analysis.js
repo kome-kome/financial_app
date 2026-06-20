@@ -387,12 +387,13 @@ const SELL_WEIGHT_LABELS = {
   'cf_ratio':     ['CF余力',             0.8],
   'rev_growth':   ['売上成長率',          0.6],
   'equity_ratio': ['財務安全性',          0.4],
+  'nc_ratio':     ['ネットキャッシュ余力', 0.4],
 };
 // plugins/sell_ranking.py PRESETS と一致させる（高いほどその観点を売り判断で重視）。
 const SELL_PRESETS = {
-  'バランス型':   {gap_ratio:1.0, roe:1.0, op_margin:1.0, cf_ratio:0.8, rev_growth:0.6, equity_ratio:0.4},
-  '割高警戒型':   {gap_ratio:2.5, roe:0.5, op_margin:0.5, rev_growth:0.3},
-  '業績悪化重視': {roe:2.0, op_margin:1.5, cf_ratio:1.0, rev_growth:1.5, gap_ratio:0.5},
+  'バランス型':   {gap_ratio:1.0, roe:1.0, op_margin:1.0, cf_ratio:0.8, rev_growth:0.6, equity_ratio:0.4, nc_ratio:0.4},
+  '割高警戒型':   {gap_ratio:2.5, roe:0.5, op_margin:0.5, rev_growth:0.3, nc_ratio:0.8},
+  '業績悪化重視': {roe:2.0, op_margin:1.5, cf_ratio:1.0, rev_growth:1.5, gap_ratio:0.5, nc_ratio:0.3},
 };
 const SELL_HOLDINGS_KEY = 'sell_ranking_holdings';
 let sellResults = [];
