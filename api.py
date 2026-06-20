@@ -346,6 +346,10 @@ async def serve_analysis():
 async def serve_models():
     return FileResponse(BASE_DIR / "templates" / "models.html", headers=_NO_CACHE)
 
+@app.get("/guide")
+async def serve_guide():
+    return FileResponse(BASE_DIR / "templates" / "guide.html", headers=_NO_CACHE)
+
 @app.get("/db")
 async def serve_db_viewer():
     return FileResponse(BASE_DIR / "templates" / "db.html", headers=_NO_CACHE)
