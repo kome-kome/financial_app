@@ -694,17 +694,19 @@ z_nc_ratio = (nc_ratio − μ_year) / σ_year
   <p>財務指標とマクロ要因の交差項 OLS で1年先リターンを推定し、リスク-リターン平面の効率的フロンティア（Pareto 最優解）を提示するモデル。</p>
 
   <h3>9.1 説明変数</h3>
-  <p>被説明変数 μ（1年先週次ログリターン年率）、全変数は無次元。OLS 学習前に全特徴量へ <code>winsorize(p1–p99)</code> を適用。</p>
+  <p>被説明変数 μ（1年先＝52週先週次ログリターン年率）、全変数は無次元。OLS 学習前に全特徴量へ <code>winsorize(p1–p99)</code>→z-score 標準化を適用。財務特徴量・マクロ特徴量は分析画面の M-1 タブで選択できる（<code>fin_features</code> / <code>macro_features</code> multiselect）。</p>
   <ul>
-    <li><strong>財務比率</strong>: PER / PBR / ROE / 自己資本比率 / R&amp;D集約度 / D&amp;A集約度 / Z スコア3種（FinancialMetric VIEW）</li>
-    <li><strong>モメンタム</strong>: 12-1ヶ月ログリターン — Jegadeesh-Titman (1993) アノマリー</li>
-    <li><strong>マクロ (innovation)</strong>: USDJPY・SP500 YoY 変化率 / US10Y・JP10Y 5年 Z スコア — Chen-Roll-Ross (1986) 型</li>
-    <li><strong>交差項</strong>: 財務指標 × マクロ + セクターダミー × マクロ（APT の異質感応度 β を捕捉）</li>
+    <li><strong>財務（価格由来＝バリュー）</strong>: PER / PBR（既定）</li>
+    <li><strong>財務（価格フリー）</strong>: ROE / ROA / 自己資本比率 / D/E / 営業CF/売上 / EPS成長率 / 営業利益成長率 / R&amp;D集約度 / D&amp;A集約度 / Z スコア3種（FinancialMetric VIEW）。既定は ROE・ROA・自己資本比率・EPS成長率</li>
+    <li><strong>モメンタム</strong>: 12-1ヶ月ログリターン — Jegadeesh-Titman (1993) アノマリー（use_macro 時）</li>
+    <li><strong>マクロ (innovation)</strong>: USDJPY / SP500 / NIKKEI225 = YoY 変化率、US10Y = 5年 Z スコア — Chen-Roll-Ross (1986) 型（既定は USDJPY・SP500・US10Y。TOPIX・JP10Y は収集不可のため非対応）</li>
+    <li><strong>交差項</strong>: 選択財務 × 選択マクロ + セクターダミー × マクロ（APT の異質感応度 β を捕捉）</li>
   </ul>
+  <p><strong>PER/PBR は循環参照ではない</strong>：目的変数は株価水準でなく<strong>将来リターン</strong>のため、現在の PER/PBR で将来リターンを予測するのは正統な<strong>バリュー・ファクター</strong>（Fama-French HML ≒ 1/PBR）。価格を含まないファンダ（ROA・EPS成長率 等）を既定に併置し「割安」と「価格の平均回帰」を分離できるようにしている。</p>
 
-  <h3>9.2 前進 BIC 特徴量選択</h3>
+  <h3>9.2 特徴量選択（LASSO-LARS / BIC）</h3>
   <div class="formula">BIC = n · log(SSE / n) + k · log(n)</div>
-  <p>空モデルから BIC を最も下げる特徴量を1本ずつ追加（O(p²)）。各ステップで VIF 閾値 10 を検査し多重共線性のある候補をブロック。BIC が改善しなくなった時点で打ち切り（上限 <code>max_features</code>）。</p>
+  <p><code>LassoLarsIC(criterion="bic")</code> で LARS パスを1パス計算し BIC 最小点を選ぶ（標準化後）。L1 正則化が共線性をネイティブに処理するため VIF 門番は不要。BIC 最小解が上限を超える場合は |係数| 降順の上位 <code>max_features</code> に切り詰め、選択済み特徴量で<strong>最終 OLS を再フィット</strong>して不偏化する（LASSO は選択専用）。</p>
 
   <h3>9.3 リスク指標</h3>
   <table>
@@ -719,14 +721,17 @@ z_nc_ratio = (nc_ratio − μ_year) / σ_year
   <div class="formula">μ<sub>shrunk</sub> = (1 − w) · μ<sub>raw</sub> + w · μ<sub>sector</sub><br>w = R1 / R1<sub>max</sub></div>
   <p>R1 が大きい（信頼度が低い）ほど強くセクター平均へ引き寄せる。</p>
 
-  <h3>9.5 効用関数と Pareto フロンティア</h3>
-  <div class="formula">U = μ<sub>shrunk</sub> − λ · R<sub>axis</sub></div>
-  <p>λ はリスク回避度スライダー（0〜3、既定 1.0）。R<sub>axis</sub> は <code>risk_axis</code> で選んだリスク（R2 既定 / R1 / R3）。U 降順で top_n 社を返す。<br>
-  Pareto 最優解（同リスクで高リターン or 同リターンで低リスク）を <code>is_pareto=true</code> でフラグし、バブルチャートで強調描画する。Pareto 判定軸は表示中の <code>risk_axis</code> に追従し、可視化・効用・フロンティア強調を一貫させる。</p>
+  <h3>9.5 効用関数と Pareto フロンティア（クライアント側即時）</h3>
+  <div class="formula">U = μ<sub>raw</sub> − λ · R<sub>axis</sub></div>
+  <p>λ はリスク回避度スライダー（0〜3、既定 1.0）。R<sub>axis</sub> は <code>risk_axis</code> で選んだリスク（R2 既定 / R1 / R3）。期待リターン基準は <strong>μ<sub>raw</sub></strong>（μ<sub>shrunk</sub> は低シグナル時に全社がセクター平均へ潰れるため可視化・効用には不適。表の参考列に併記）。<br>
+  効用 U・Pareto 判定・並べ替え・top_n はモデル再学習に関与しない後処理のため、サーバーは<strong>全社の raw 値</strong>を返し、これらは<strong>ブラウザ側で算出</strong>する。よって <strong>λ 調整・リスク軸切替・表示件数は再計算なしで即時反映</strong>される（重い計算は特徴量・マクロ等モデル本体を変えた時のみ）。<br>
+  バブルチャートのマッピングは <strong>y=μ<sub>raw</sub> / x=選択リスク軸（type:linear 数値軸）/ 色の濃淡=効用 U / 枠線強調＋フロンティア線=Pareto 優位</strong>。散布図は全社を描画し効用上位 top_n を強調、両軸は [p1,p99] にクランプ。径は固定（R1 はほぼ一定で径エンコードが退化するためツールチップへ）。Pareto 判定軸は表示中の <code>risk_axis</code> に追従する。</p>
+  <p><strong>選択特徴量の係数可視化</strong>：<code>execute</code> は最終 OLS の<strong>標準化係数</strong>を <code>feature_coefs</code> で返し、UI は |β| 降順の横バーで表示する（財務／マクロ／交差項／テクニカルを色分け、ゼロ中心で符号＝株高/株安方向）。CV R² は低いため、係数は<strong>符号と相対的大小の目安</strong>であり寄与度の過大解釈は避ける。</p>
 
   <h3>9.6 参考文献</h3>
   <ul>
     <li>Markowitz, H. (1952). "Portfolio Selection." <em>Journal of Finance</em>, 7(1), 77–91. <a href="https://doi.org/10.2307/2975974" target="_blank" rel="noopener">https://doi.org/10.2307/2975974</a></li>
+    <li>Efron, B., Hastie, T., Johnstone, I. &amp; Tibshirani, R. (2004). "Least Angle Regression." <em>Annals of Statistics</em>, 32(2), 407–499. <a href="https://doi.org/10.1214/009053604000000067" target="_blank" rel="noopener">https://doi.org/10.1214/009053604000000067</a></li>
     <li>Chen, N., Roll, R. &amp; Ross, S.A. (1986). "Economic Forces and the Stock Market." <em>Journal of Business</em>, 59(3), 383–403. <a href="https://doi.org/10.1086/296344" target="_blank" rel="noopener">https://doi.org/10.1086/296344</a></li>
     <li>Black, F. &amp; Litterman, R. (1992). "Global Portfolio Optimization." <em>Financial Analysts Journal</em>, 48(5), 28–43. <a href="https://doi.org/10.2469/faj.v48.n5.28" target="_blank" rel="noopener">https://doi.org/10.2469/faj.v48.n5.28</a></li>
     <li>Jegadeesh, N. &amp; Titman, S. (1993). "Returns to Buying Winners and Selling Losers." <em>Journal of Finance</em>, 48(1), 65–91. <a href="https://doi.org/10.1111/j.1540-6261.1993.tb04702.x" target="_blank" rel="noopener">https://doi.org/10.1111/j.1540-6261.1993.tb04702.x</a></li>

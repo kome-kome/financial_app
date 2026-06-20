@@ -142,7 +142,16 @@ app = FastAPI(title="EDINET Financial API", version="2.0", lifespan=lifespan)
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
-app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
+class _RevalidateStaticFiles(StaticFiles):
+    """静的アセットに Cache-Control: no-cache を付与し、ブラウザに毎回 ETag 再検証を強制する。
+    （変更なしは 304 で軽量・変更時は確実に最新取得。JS/CSS 更新がキャッシュで反映されない事故を防ぐ）"""
+    async def get_response(self, path, scope):
+        response = await super().get_response(path, scope)
+        response.headers["Cache-Control"] = "no-cache"
+        return response
+
+
+app.mount("/static", _RevalidateStaticFiles(directory=str(BASE_DIR / "static")), name="static")
 
 _ALLOWED_ORIGINS = [o.strip() for o in os.getenv("ALLOWED_ORIGIN", "http://localhost:8000").split(",") if o.strip()]
 app.add_middleware(

@@ -18,7 +18,6 @@ import numpy as np
 
 from .base import AnalysisPlugin
 from .utils import (
-    check_collinearity,
     normalize,
     normalize_transform,
     ols,
@@ -32,27 +31,50 @@ HORIZON_WEEKS = 52
 # 下回ったら sector → global へフォールバックして過小標本のノイズを避ける。
 R3_MIN_BUCKET_N = 5
 
+# 財務ベース特徴量の選択肢（全て financial_metrics VIEW の実列。getattr で解決＝DB移行不要）。
+# per/pbr は将来リターンに対するバリュー因子（Fama-French HML ≒ 1/PBR）であり循環ではない
+# （目的変数は株価でなく 52週先リターン）。価格を含まないファンダ（roa/cf_ratio/de_ratio/
+# eps_growth/op_growth）を併置し、「割安」と「価格の平均回帰」を分離できるようにする。
 FIN_BASE_OPTIONS = [
     {"value": "per",          "label": "PER"},
     {"value": "pbr",          "label": "PBR"},
     {"value": "roe",          "label": "ROE（%）"},
+    {"value": "roa",          "label": "ROA（%）"},
     {"value": "equity_ratio", "label": "自己資本比率（%）"},
+    {"value": "de_ratio",     "label": "D/Eレシオ"},
+    {"value": "cf_ratio",     "label": "営業CF/売上（%）"},
+    {"value": "eps_growth",   "label": "EPS成長率（%）"},
+    {"value": "op_growth",    "label": "営業利益成長率（%）"},
     {"value": "rd_intensity", "label": "R&D集約度"},
     {"value": "da_intensity", "label": "D&A集約度"},
     {"value": "z_op_margin",  "label": "営業利益率Zスコア"},
     {"value": "z_roe",        "label": "ROE Zスコア"},
     {"value": "z_cf_ratio",   "label": "CF比率Zスコア"},
 ]
-DEFAULT_FIN_FEATURES = ["per", "pbr", "roe", "equity_ratio"]
+# 既定は価格由来（per/pbr）に偏らないよう価格フリーの roa・eps_growth を混合。
+DEFAULT_FIN_FEATURES = ["per", "pbr", "roe", "equity_ratio", "roa", "eps_growth"]
 
 # series_code → transform ("yoy" | "zscore")
-# JP10Y は stooq/Yahoo Finance で取得不可（stooq JS チャレンジ・^JGB 上場廃止）のため除外
+# JP10Y・TOPIX は本番 macro_data に蓄積がない（収集失敗：JP10Y=^JGB 上場廃止 / TOPIX=^tpx・^TPX
+# 取得不可）ため除外。選ぶと全スナップショットが None スキップでモデル学習不能になるため、
+# データのある系列のみを公開する（収集が直り次第ここに追加すれば自動で選択肢に出る）。
 _MACRO_MAP = {
-    "macro_usdjpy_yoy":   ("USDJPY", "yoy"),
-    "macro_sp500_yoy":    ("SP500",  "yoy"),
-    "macro_us10y_zscore": ("US10Y",  "zscore"),
+    "macro_usdjpy_yoy":    ("USDJPY",    "yoy"),
+    "macro_sp500_yoy":     ("SP500",     "yoy"),
+    "macro_us10y_zscore":  ("US10Y",     "zscore"),
+    "macro_nikkei225_yoy": ("NIKKEI225", "yoy"),
 }
 MACRO_FEATURE_NAMES = list(_MACRO_MAP.keys())
+
+# params_schema の multiselect 用ラベル。USDJPY/SP500/US10Y を既定選択（NIKKEI225 は
+# 市場成分・SP500 との多重共線があるため任意）。
+MACRO_FEATURE_OPTIONS = [
+    {"value": "macro_usdjpy_yoy",    "label": "USD/JPY 前年比（YoY）"},
+    {"value": "macro_sp500_yoy",     "label": "S&P500 前年比（YoY）"},
+    {"value": "macro_us10y_zscore",  "label": "米10年金利 Zスコア"},
+    {"value": "macro_nikkei225_yoy", "label": "日経225 前年比（YoY）"},
+]
+DEFAULT_MACRO_FEATURES = ["macro_usdjpy_yoy", "macro_sp500_yoy", "macro_us10y_zscore"]
 
 
 # ── ヘルパー ──────────────────────────────────────────────────────────────────
@@ -218,6 +240,13 @@ class MacroRiskReturnPlugin(AnalysisPlugin):
                 "label": "マクロ特徴量・交差項を使用",
                 "default": True,
             },
+            "macro_features": {
+                "type": "multiselect",
+                "label": "マクロ特徴量",
+                "description": "use_macro=ON のとき、ここで選んだマクロ系列のみを特徴量・交差項に使う。",
+                "options": MACRO_FEATURE_OPTIONS,
+                "default": DEFAULT_MACRO_FEATURES,
+            },
             "momentum_window": {
                 "type": "number",
                 "dtype": "int",
@@ -258,6 +287,7 @@ class MacroRiskReturnPlugin(AnalysisPlugin):
         risk_axis      = params["risk_axis"]
         fin_features   = params["fin_features"]
         use_macro      = params["use_macro"]
+        macro_features = params["macro_features"]
         mom_window     = params["momentum_window"]
         max_features   = params["max_features"]
         min_coverage   = params["min_coverage"]
@@ -266,16 +296,19 @@ class MacroRiskReturnPlugin(AnalysisPlugin):
         if not fin_features:
             raise ValueError("財務特徴量を1つ以上選択してください。")
 
+        # 選択マクロ系列（use_macro=OFF なら空）。空選択は実質マクロ無効と同義。
+        macro_names = list(macro_features) if use_macro else []
+
         prices_by_co, fin_by_co, companies = self._load_data(db)
         if not prices_by_co:
             raise ValueError("株価週次履歴がありません。先に収集を実行してください。")
 
-        macro_cache = self._preload_macro(db, prices_by_co) if use_macro else {}
+        macro_cache = self._preload_macro(db, prices_by_co, macro_names) if macro_names else {}
         sectors = self._collect_sectors(fin_by_co, companies)
 
         samples_by_ym, sample_meta_by_ym, current_snaps, all_feat_names = self._build_snapshots(
             prices_by_co, fin_by_co, companies, macro_cache, sectors,
-            fin_features, use_macro, mom_window, min_coverage,
+            fin_features, macro_names, mom_window, min_coverage,
         )
 
         total_samples = sum(len(v) for v in samples_by_ym.values())
@@ -317,20 +350,30 @@ class MacroRiskReturnPlugin(AnalysisPlugin):
             samples_sel, n_sel
         )
 
-        # --- スコアリング ---
+        # --- スコアリング（全社の raw 値を返す。効用 U・パレート・並べ替え・top_n は
+        #     λ/リスク軸に依存する後処理のためクライアント側で算出する）---
         results = self._score_companies(
             current_snaps, sel_idx, n_sel,
             beta, win_params, norm_params, y_mu, y_sd,
-            XtX_inv, sigma2, prices_by_co,
-            lambda_risk, risk_axis, top_n, r3_data,
+            XtX_inv, sigma2, prices_by_co, r3_data,
         )
+
+        # 標準化係数（X・y とも z-score 正規化済のため特徴量間で大小比較可能）。
+        # beta[0]=切片、beta[1:] が selected_names と整列。UI の係数バー表示に使う。
+        feature_coefs = {
+            name: round(float(beta[i + 1]), 4) for i, name in enumerate(selected_names)
+        }
 
         return {
             "cv_metrics":       cv_metrics,
             "selected_features": selected_names,
+            "feature_coefs":    feature_coefs,
             "n_train_samples":  total_samples,
-            "n_companies":      len(current_snaps),
+            "n_companies":      len(results),
+            # クライアントの初期表示シード（λ・リスク軸・表示件数は再計算なしで切替可能）
             "risk_axis":        risk_axis,
+            "lambda_risk":      lambda_risk,
+            "top_n":            top_n,
             "results":          results,
         }
 
@@ -360,7 +403,7 @@ class MacroRiskReturnPlugin(AnalysisPlugin):
         companies = {c.edinet_code: c for c in db.query(Company).all()}
         return prices_by_co, fin_by_co, companies
 
-    def _preload_macro(self, db, prices_by_co: dict) -> dict:
+    def _preload_macro(self, db, prices_by_co: dict, macro_names: list[str] | None = None) -> dict:
         from database import MacroData
         all_dates = [row.trade_date for rows in prices_by_co.values() for row in rows]
         if not all_dates:
@@ -370,16 +413,19 @@ class MacroRiskReturnPlugin(AnalysisPlugin):
         # zscore 用に 5年前まで遡る
         since = (_date.fromisoformat(min_d) - _td(days=5 * 366)).isoformat()
         max_d = max(all_dates)
-        rows = (
+        # 選択された macro_features に対応する series_code のみロード（未指定なら全系列）
+        series_codes = sorted({_MACRO_MAP[n][0] for n in (macro_names or MACRO_FEATURE_NAMES) if n in _MACRO_MAP})
+        q = (
             db.query(MacroData)
             .filter(
                 MacroData.trade_date >= since,
                 MacroData.trade_date <= max_d,
                 MacroData.close.isnot(None),
             )
-            .order_by(MacroData.series_code, MacroData.trade_date)
-            .all()
         )
+        if series_codes:
+            q = q.filter(MacroData.series_code.in_(series_codes))
+        rows = q.order_by(MacroData.series_code, MacroData.trade_date).all()
         by_series: dict[str, dict[str, float]] = {}
         for r in rows:
             by_series.setdefault(r.series_code, {})[r.trade_date] = r.close
@@ -399,9 +445,10 @@ class MacroRiskReturnPlugin(AnalysisPlugin):
     def _build_snapshots(
         self,
         prices_by_co, fin_by_co, companies, macro_cache,
-        sectors, fin_features, use_macro, mom_window, min_coverage,
+        sectors, fin_features, macro_names, mom_window, min_coverage,
     ) -> tuple:
-        macro_names = MACRO_FEATURE_NAMES if use_macro else []
+        # macro_names は呼び出し側で選択済み（use_macro=OFF や空選択なら []）。
+        use_macro = bool(macro_names)
         momentum_name = ["momentum_12m1"] if use_macro else []
 
         # 交差項名を生成（fin × macro + sector_dummy × macro）
@@ -426,6 +473,11 @@ class MacroRiskReturnPlugin(AnalysisPlugin):
         sample_meta_by_ym: dict[str, list] = defaultdict(list)
         current_snaps: dict[str, tuple] = {}
         min_rows = HORIZON_WEEKS + 4
+
+        # マクロ特徴量は snap_date のみに依存（企業非依存）。多数の企業が同じ月末日を
+        # 共有するため、日付でメモ化して全マクロ日付の再走査を 1 日 1 回に抑える
+        # （旧: (企業×月) ごとに全日付走査 → _build_snapshots の支配的コスト）。
+        macro_memo: dict[str, dict] = {}
 
         for edinet_code, price_rows in prices_by_co.items():
             n = len(price_rows)
@@ -471,7 +523,10 @@ class MacroRiskReturnPlugin(AnalysisPlugin):
                 macro_row: list[float] = []
                 macro_dict: dict[str, float] = {}
                 if use_macro:
-                    m_feats = _macro_from_cache(macro_cache, snap_date, macro_names)
+                    m_feats = macro_memo.get(snap_date)
+                    if m_feats is None:
+                        m_feats = _macro_from_cache(macro_cache, snap_date, macro_names)
+                        macro_memo[snap_date] = m_feats
                     if any(v is None for v in m_feats.values()):
                         continue  # マクロ未蓄積はスキップ
                     for mn in macro_names:
@@ -558,67 +613,50 @@ class MacroRiskReturnPlugin(AnalysisPlugin):
         samples_by_ym: dict,
         all_feat_names: list[str],
         max_features: int = 20,
-        vif_threshold: float = 10.0,
+        vif_threshold: float = 10.0,  # 後方互換のため残す（LassoLarsIC では未使用）
     ) -> list[str]:
+        """LASSO-LARS パスを BIC 最小で切る特徴量選択（sklearn）。
+
+        旧実装の「貪欲前進BIC＋VIF門番」（各候補×各ステップで OLS を数千回）を
+        `LassoLarsIC(criterion='bic')` の 1 パス LARS パス計算へ置換し、36,000 行
+        規模でも秒オーダーに短縮する。L1 正則化が共線性をネイティブに処理するため
+        VIF 門番は不要。選択は LASSO で行い、最終係数は `_fit_final` の OLS 再フィットで
+        不偏化する（LASSO は選択専用）。BIC 最小解が max_features を超える場合は
+        |係数| 降順の上位 max_features に切り詰める（ラベル「最大採用特徴量数」に忠実）。
+        """
+        from sklearn.linear_model import LassoLarsIC
+
         all_samples = [s for ym_s in samples_by_ym.values() for s in ym_s]
         if len(all_samples) < 5:
             return []
-        X_raw = [s[0] for s in all_samples]
-        y_raw = [s[1] for s in all_samples]
-        n = len(y_raw)
         n_cand = len(all_feat_names)
+        X_raw = np.asarray([s[0] for s in all_samples], dtype=float)
+        y_raw = [s[1] for s in all_samples]
 
-        # winsorize + zscore 正規化（全候補特徴量に適用）
-        X_norm_cols: list[list[float]] = []
+        # winsorize + zscore 正規化（L1 ペナルティを特徴量間で公平にするため必須）
+        X_norm = np.empty_like(X_raw)
         for ci in range(n_cand):
-            col = [X_raw[ri][ci] for ri in range(n)]
-            col_w, _, _ = winsorize(col)
+            col_w, _, _ = winsorize(X_raw[:, ci].tolist())
             col_n, _, _ = normalize(col_w, "zscore")
-            X_norm_cols.append(col_n)
+            X_norm[:, ci] = col_n
         y_w, _, _ = winsorize(y_raw)
         y_n, _, _ = normalize(y_w, "zscore")
+        y_np = np.asarray(y_n, dtype=float)
 
-        def _bic(selected_cols: list[int]) -> float:
-            if not selected_cols:
-                sse = sum(v ** 2 for v in y_n) - len(y_n) * (statistics.mean(y_n) ** 2)
-                return n * math.log(max(sse, 1e-12) / n) + math.log(n)
-            X_sub = [[1.0] + [X_norm_cols[ci][ri] for ci in selected_cols]
-                     for ri in range(n)]
-            res = ols(X_sub, y_n)
-            if res is None:
-                return float("inf")
-            sse = sum((y_n[i] - res["yhat"][i]) ** 2 for i in range(n))
-            k = len(selected_cols) + 1  # +1 for intercept
-            return n * math.log(max(sse, 1e-12) / n) + k * math.log(n)
+        try:
+            model = LassoLarsIC(criterion="bic")
+            model.fit(X_norm, y_np)
+        except Exception as e:  # 特異・数値エラー時は選択なしで上位へ委譲
+            log.debug(f"LassoLarsIC 失敗（選択なし）: {e}")
+            return []
 
-        selected: list[int] = []
-        remaining = list(range(n_cand))
-        current_bic = _bic([])
-
-        while remaining and len(selected) < max_features:
-            best_bic = current_bic
-            best_ci  = -1
-
-            for ci in remaining:
-                test = selected + [ci]
-                # VIF チェック（2個以上になったとき）
-                if len(test) >= 2:
-                    X_cols_test = [X_norm_cols[i] for i in test]
-                    names_test  = [all_feat_names[i] for i in test]
-                    vif_info = check_collinearity(X_cols_test, names_test)
-                    if vif_info.get("max_vif", 0) > vif_threshold:
-                        continue
-                b = _bic(test)
-                if b < best_bic:
-                    best_bic = b
-                    best_ci  = ci
-
-            if best_ci == -1:
-                break
-            selected.append(best_ci)
-            remaining.remove(best_ci)
-            current_bic = best_bic
-
+        coef = model.coef_
+        nz = [i for i in range(n_cand) if abs(coef[i]) > 1e-12]
+        if not nz:
+            return []
+        # |係数| 降順で max_features に切り詰め → 元の特徴量順に並べ直し（可読性）
+        nz.sort(key=lambda i: abs(coef[i]), reverse=True)
+        selected = sorted(nz[:max_features])
         return [all_feat_names[i] for i in selected]
 
     # ── 最終モデル学習 ───────────────────────────────────────────────────────
@@ -740,9 +778,14 @@ class MacroRiskReturnPlugin(AnalysisPlugin):
         self,
         current_snaps, sel_idx, n_sel,
         beta, win_params, norm_params, y_mu, y_sd,
-        XtX_inv, sigma2, prices_by_co,
-        lambda_risk, risk_axis, top_n, r3_data,
+        XtX_inv, sigma2, prices_by_co, r3_data,
     ) -> list[dict]:
+        """全社の raw リスク-リターン指標を返す。
+
+        効用 U・パレート判定・並べ替え・top_n は λ／リスク軸に依存する後処理であり、
+        クライアント側で再計算なしに切替できるよう、ここでは算出しない（JS が担う）。
+        μ 収縮（R1 依存・λ/軸に非依存）はモデル確定値のためサーバー側で行う。
+        """
         raw_items: list[dict] = []
 
         for edinet_code, (feat_row, info) in current_snaps.items():
@@ -751,7 +794,6 @@ class MacroRiskReturnPlugin(AnalysisPlugin):
 
             # 選択済み列だけ抽出・正規化
             x_norm = [1.0]
-            ok = True
             for fi, orig_ci in enumerate(sel_idx):
                 v = feat_row[orig_ci]
                 wlo, whi = win_params[fi]
@@ -795,43 +837,19 @@ class MacroRiskReturnPlugin(AnalysisPlugin):
         r1_vals = [it["r1"] for it in raw_items if it["r1"] is not None]
         r1_max  = max(r1_vals) if r1_vals else 1.0
 
-        sector_means: dict[str, float] = defaultdict(list)  # type: ignore[assignment]
+        sector_sums: dict[str, list] = defaultdict(list)
         for it in raw_items:
-            sector_means[it["industry"]].append(it["mu_raw"])  # type: ignore[index]
-        sector_means = {s: statistics.mean(vs) for s, vs in sector_means.items()}  # type: ignore[assignment]
+            sector_sums[it["industry"]].append(it["mu_raw"])
+        sector_means = {s: statistics.mean(vs) for s, vs in sector_sums.items()}
 
         for it in raw_items:
             w = (it["r1"] / r1_max) if (it["r1"] is not None and r1_max > 0) else 0.5
             sec_mu = sector_means.get(it["industry"], it["mu_raw"])
             it["mu_shrunk"] = round((1 - w) * it["mu_raw"] + w * sec_mu, 6)
 
-        # Pareto フロンティア（表示中のリスク軸で非劣解を判定し、可視化と整合させる）
-        pareto_axis = risk_axis if risk_axis in ("r1", "r2", "r3") else "r2"
-        pareto_codes = _pareto_frontier(
-            [it for it in raw_items
-             if it.get(pareto_axis) is not None and it.get("mu_shrunk") is not None],
-            x_key=pareto_axis,
-            y_key="mu_shrunk",
-        )
-
-        # 効用 U = μ_shrunk - λ × リスク（選択軸）
-        for it in raw_items:
-            risk_val = it.get(risk_axis) or it.get("r2")
-            if it.get("mu_shrunk") is not None and risk_val is not None:
-                it["utility"] = round(it["mu_shrunk"] - lambda_risk * risk_val, 6)
-            else:
-                it["utility"] = None
-            it["is_pareto"] = edinet_code in pareto_codes  # Will be overwritten below
-
-        # is_pareto を正しく設定
-        for it in raw_items:
-            it["is_pareto"] = it["edinet_code"] in pareto_codes
-
-        # U でソートして top_n
-        scored = [it for it in raw_items if it.get("utility") is not None]
-        scored.sort(key=lambda x: x["utility"], reverse=True)
-
-        return scored[:top_n]
+        # μ_shrunk 降順の安定既定順（クライアントは選択 λ/軸で U 並べ替えする）
+        raw_items.sort(key=lambda x: x.get("mu_shrunk") or -1e18, reverse=True)
+        return raw_items
 
 
 plugin = MacroRiskReturnPlugin()

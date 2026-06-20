@@ -32,7 +32,8 @@ def _make_fin(period_end_str: str, **kwargs):
         industry="製造業",
         market="東証プライム",
         period_end=date.fromisoformat(period_end_str),
-        per=15.0, pbr=1.2, roe=8.0, equity_ratio=55.0,
+        per=15.0, pbr=1.2, roe=8.0, roa=4.0, equity_ratio=55.0,
+        de_ratio=0.4, cf_ratio=9.0, eps_growth=5.0, op_growth=6.0,
         rd_intensity=2.0, da_intensity=3.0,
         z_op_margin=0.5, z_roe=0.3, z_cf_ratio=0.1,
         bs_total_assets=1.0e5,  # R3 サイズ代理（総資産）
@@ -172,6 +173,54 @@ class TestParamsSchema:
         result = coerce_params(self.schema, {"risk_axis": "r3"})
         assert result["risk_axis"] == "r3"
 
+    def test_default_fin_features_include_price_free(self):
+        """既定の財務特徴量に価格フリーの roa・eps_growth が混合されている。"""
+        result = coerce_params(self.schema, {})
+        assert set(result["fin_features"]) == {
+            "per", "pbr", "roe", "equity_ratio", "roa", "eps_growth"
+        }
+
+    def test_coerce_new_fin_features(self):
+        """追加した価格フリー特徴量が fin_features 選択肢として受理される。"""
+        result = coerce_params(
+            self.schema,
+            {"fin_features": ["roa", "cf_ratio", "de_ratio", "eps_growth", "op_growth"]},
+        )
+        assert result["fin_features"] == ["roa", "cf_ratio", "de_ratio", "eps_growth", "op_growth"]
+
+    def test_coerce_invalid_fin_feature_rejected(self):
+        with pytest.raises(ValueError):
+            coerce_params(self.schema, {"fin_features": ["not_a_feature"]})
+
+    def test_macro_features_default(self):
+        """macro_features の既定は現状の3系列。"""
+        result = coerce_params(self.schema, {})
+        assert result["macro_features"] == [
+            "macro_usdjpy_yoy", "macro_sp500_yoy", "macro_us10y_zscore"
+        ]
+
+    def test_macro_features_accepts_nikkei(self):
+        result = coerce_params(
+            self.schema, {"macro_features": ["macro_nikkei225_yoy"]}
+        )
+        assert result["macro_features"] == ["macro_nikkei225_yoy"]
+
+    def test_macro_features_invalid_rejected(self):
+        with pytest.raises(ValueError):
+            coerce_params(self.schema, {"macro_features": ["macro_gold_yoy"]})
+
+    def test_macro_features_topix_excluded(self):
+        """TOPIX は本番 macro_data に蓄積がない（収集失敗）ため選択肢から除外。"""
+        from plugins.macro_risk_return import _MACRO_MAP
+        assert "macro_topix_yoy" not in _MACRO_MAP
+        with pytest.raises(ValueError):
+            coerce_params(self.schema, {"macro_features": ["macro_topix_yoy"]})
+
+    def test_macro_map_has_nikkei(self):
+        """_MACRO_MAP に NIKKEI225(YoY) が結線されている。"""
+        from plugins.macro_risk_return import _MACRO_MAP
+        assert _MACRO_MAP["macro_nikkei225_yoy"] == ("NIKKEI225", "yoy")
+
 
 # ── _forward_bic (BIC が有効特徴量を選ぶ) ─────────────────────────────────────
 
@@ -298,6 +347,8 @@ class TestExecuteIntegration:
                       year=2020 + y,
                       per=15.0 + j * 2,
                       pbr=1.2 + j * 0.3,
+                      roa=4.0 + j + y * 0.5,           # 価格フリー特徴量に横断/時系列の変動を持たせる
+                      eps_growth=5.0 + j * 2 + y,
                       bs_total_assets=(j + 1) * 1.0e5)  # 社ごとに S/M/L サイズを変える
             for j, ec in enumerate(codes)
             for y in range(6)
@@ -345,7 +396,9 @@ class TestExecuteIntegration:
         assert "selected_features" in result
         assert isinstance(result["results"], list)
 
-    def test_execute_returns_risk_return_fields(self):
+    def test_execute_returns_raw_risk_return_fields(self):
+        """サーバーは全社の raw 値（mu_raw/mu_shrunk/r1/r2/r3）を返す。
+        効用 U・パレート・top_n スライスはクライアント側の後処理へ移譲したため返さない。"""
         plugin = MacroRiskReturnPlugin()
         schema = plugin.params_schema()
         params = coerce_params(schema, {"use_macro": False, "top_n": 5})
@@ -354,15 +407,34 @@ class TestExecuteIntegration:
         result = asyncio.run(plugin.execute(params, db))
 
         assert result["risk_axis"] == "r2"
+        # λ・top_n はクライアント初期表示シードとしてエコーされる
+        assert result["lambda_risk"] == params["lambda_risk"]
+        assert result["top_n"] == 5
         for item in result["results"]:
             assert "edinet_code" in item
+            assert "mu_raw" in item
             assert "mu_shrunk" in item
-            assert "utility" in item
-            assert "is_pareto" in item
+            assert "r1" in item
+            assert "r2" in item
             assert "r3" in item  # R3 リスク指標（float or None）
+            # 後処理（U・パレート）はサーバーから除去された
+            assert "utility" not in item
+            assert "is_pareto" not in item
+
+    def test_execute_returns_all_companies_not_sliced(self):
+        """top_n はサーバーでスライスしない（クライアントが U で並べ替え・上位抽出する）。"""
+        plugin = MacroRiskReturnPlugin()
+        schema = plugin.params_schema()
+        res_small = asyncio.run(plugin.execute(
+            coerce_params(schema, {"use_macro": False, "top_n": 5}), self._build_mock_db()))
+        res_large = asyncio.run(plugin.execute(
+            coerce_params(schema, {"use_macro": False, "top_n": 100}), self._build_mock_db()))
+        # top_n を変えても返却件数は同じ（= 全社）
+        assert len(res_small["results"]) == len(res_large["results"])
+        assert len(res_small["results"]) == res_small["n_companies"]
 
     def test_execute_r3_axis(self):
-        """risk_axis='r3' で実行でき、各銘柄に R3 が付与され効用が算出される。"""
+        """risk_axis='r3' で実行でき、各銘柄に R3 raw 値が付与される。"""
         plugin = MacroRiskReturnPlugin()
         schema = plugin.params_schema()
         params = coerce_params(schema, {"use_macro": False, "top_n": 5, "risk_axis": "r3"})
@@ -373,5 +445,20 @@ class TestExecuteIntegration:
         assert result["risk_axis"] == "r3"
         for item in result["results"]:
             assert "r3" in item
-            assert "utility" in item
-            assert "is_pareto" in item
+            assert "mu_shrunk" in item
+
+    def test_execute_returns_feature_coefs(self):
+        """execute は selected_features と整合する標準化係数 feature_coefs を返す。"""
+        plugin = MacroRiskReturnPlugin()
+        schema = plugin.params_schema()
+        params = coerce_params(schema, {"use_macro": False, "top_n": 5})
+
+        result = asyncio.run(plugin.execute(params, self._build_mock_db()))
+
+        assert "feature_coefs" in result
+        coefs = result["feature_coefs"]
+        assert isinstance(coefs, dict)
+        # 係数のキー集合は選択特徴量と一致し、値は float
+        assert set(coefs.keys()) == set(result["selected_features"])
+        assert len(coefs) == len(result["selected_features"])
+        assert all(isinstance(v, float) for v in coefs.values())

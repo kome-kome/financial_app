@@ -947,14 +947,14 @@ function _renderParamsForm(schema, tabId) {
       html += '</select><div class="text-sm" style="color:#64748b;margin-top:2px">Ctrl+クリックで複数選択</div>';
     } else if (field.type === 'slider') {
       html += `<div style="display:flex;align-items:center;gap:8px">
-        <input type="range" id="param-${tabId}-${key}" min="${field.min}" max="${field.max}" step="${field.step}" value="${field.default}"
+        <input type="range" id="param-${tabId}-${key}" min="${field.min}" max="${field.max}" step="${field.step ?? 'any'}" value="${field.default}"
           data-input="syncVal" data-target="val-${tabId}-${key}" style="flex:1;accent-color:#7c3aed">
         <span id="val-${tabId}-${key}" style="color:#a78bfa;font-weight:600;min-width:36px">${field.default}</span>
       </div>`;
     } else if (field.type === 'checkbox') {
       html += `<input type="checkbox" id="param-${tabId}-${key}"${field.default ? ' checked' : ''} style="width:auto;accent-color:#7c3aed">`;
     } else {
-      html += `<input type="${field.type === 'number' ? 'number' : 'text'}" id="param-${tabId}-${key}" placeholder="${field.default ?? ''}">`;
+      html += `<input type="${field.type === 'number' ? 'number' : 'text'}" id="param-${tabId}-${key}" value="${field.default ?? ''}" placeholder="${field.default ?? ''}">`;
     }
     if (field.description) html += `<div class="text-sm" style="margin-top:4px">${field.description}</div>`;
     html += '</div>';
@@ -989,6 +989,9 @@ async function runDynamicPlugin(pluginName, tabId) {
     showNotif(`「${plugin.label}」は計算が重いためローカルPCで実行してください（Render環境では無効）`);
     return;
   }
+  const btn = this instanceof HTMLElement ? this : null;
+  const origHTML = btn ? btn.innerHTML : null;
+  if (btn) { btn.disabled = true; btn.textContent = '実行中...'; }
   const params = _collectParamValues(tabId, plugin.params_schema);
   try {
     const d = await apiFetch(`/api/plugins/${pluginName}/run`, {method:'POST', body:JSON.stringify(params)});
@@ -1009,6 +1012,9 @@ async function runDynamicPlugin(pluginName, tabId) {
       showNotif('乖離分析が利用可能になりました', 'success');
     }
   } catch(e) { showNotif(`実行失敗: ${e.message}`); }
+  finally {
+    if (btn) { btn.disabled = false; btn.innerHTML = origHTML; }
+  }
 }
 
 // 結果レンダラ登録制: 動的タブ（プラグイン runner）の結果描画を plugin名 → 描画関数で対応付ける。
@@ -1048,102 +1054,274 @@ function renderSectorOls(data) {
 }
 
 // マクロ×リスク-リターン専用レンダラ: CV指標 + バブルチャート + ランキング表
+// M-1 リスク-リターン可視化。サーバーは全社の raw 値（mu_raw/mu_shrunk/r1/r2/r3）を返し、
+// 効用 U・パレート・並べ替え・top_n は λ／リスク軸に依存する後処理として
+// クライアント側で算出する（軸切替・λ調整は再計算なしで即時反映）。
+// 期待リターンの基準は mu_raw（収縮は低シグナル時に銘柄差を消すため表の参考列に留める）。
+const MRR_AXIS_LABELS = { r1: 'R1 予測不確実性', r2: 'R2 実現ボラティリティ', r3: 'R3 モデル信頼性' };
+// 係数バー用: 特徴量コード → 表示ラベル（既知のものだけ。未知はコードのまま表示）。
+const MRR_FEAT_LABELS = {
+  per: 'PER', pbr: 'PBR', roe: 'ROE', roa: 'ROA', equity_ratio: '自己資本比率',
+  de_ratio: 'D/E', cf_ratio: '営業CF/売上', eps_growth: 'EPS成長率', op_growth: '営業利益成長率',
+  rd_intensity: 'R&D集約度', da_intensity: 'D&A集約度',
+  z_op_margin: '営業利益率Z', z_roe: 'ROE Z', z_cf_ratio: 'CF比率Z',
+  macro_usdjpy_yoy: 'USD/JPY(YoY)', macro_sp500_yoy: 'S&P500(YoY)', macro_us10y_zscore: '米10年金利(Z)',
+  macro_nikkei225_yoy: '日経225(YoY)',
+  momentum_12m1: 'モメンタム(12-1)',
+};
+// 種別 → 色（財務/マクロ/交差項/テクニカル）。
+const MRR_COEF_COLORS = { fin: '#60a5fa', macro: '#fbbf24', cross: '#c084fc', tech: '#34d399' };
+const MRR_COEF_TYPE_LABELS = { fin: '財務', macro: 'マクロ', cross: '交差項', tech: 'テクニカル' };
 let _mrrChart = null;
-function renderMacroRiskReturn(data) {
-  // 横軸リスクの選択（R1/R2/R3）。バックエンドが echo した risk_axis に追従する。
-  const AXIS_LABELS = { r1: 'R1 予測不確実性', r2: 'R2 実現ボラティリティ', r3: 'R3 モデル信頼性' };
-  const axisKey = ['r1', 'r2', 'r3'].includes(data.risk_axis) ? data.risk_axis : 'r2';
+let _mrrData  = null;
+let _mrrPaintTimer = null;
 
-  // ── CV 指標 ──────────────────────────────────────────────────────
+function renderMacroRiskReturn(data) {
+  _mrrData = data;
+  _mrrPaintCv(data);                          // CV 指標（リスク軸に非依存・1回）
+  const v = _mrrRecompute();
+  setTimeout(() => _mrrPaintChart(v), 0);     // チャートは content 注入後に描画
+  return _mrrTableHTML(v);
+}
+
+// フォームの λ／リスク軸／表示件数を読む（未設定はサーバー echo をシード）。
+function _mrrReadParams() {
+  const g = (id) => document.getElementById('param-macro_risk_return-' + id);
+  const d = _mrrData || {};
+  const lamEl = g('lambda_risk'), axEl = g('risk_axis'), tnEl = g('top_n');
+  const lambda = (lamEl && lamEl.value !== '') ? parseFloat(lamEl.value) : (d.lambda_risk ?? 1.0);
+  const axis = ['r1', 'r2', 'r3'].includes(axEl && axEl.value)
+    ? axEl.value
+    : (['r1', 'r2', 'r3'].includes(d.risk_axis) ? d.risk_axis : 'r2');
+  const topN = (tnEl && tnEl.value !== '') ? Math.max(1, Math.round(parseFloat(tnEl.value))) : (d.top_n ?? 30);
+  return { lambda, axis, topN };
+}
+
+// 効率的フロンティア（最小リスク x・最大リターン y）の非劣解集合を O(n log n) で算出。
+function _mrrParetoSet(items, axisKey) {
+  const arr = items.map(it => ({ c: it.edinet_code, x: it[axisKey], y: it.mu_raw }))
+    .sort((a, b) => (a.x === b.x ? b.y - a.y : a.x - b.x));
+  const set = new Set();
+  let bestY = -Infinity;
+  for (const p of arr) { if (p.y > bestY) { set.add(p.c); bestY = p.y; } }
+  return set;
+}
+
+// 全社 raw 値から、選択 λ／軸で U・パレートを算出し U 降順に並べた view を返す。
+// 期待リターンは mu_raw（モデルの素の銘柄別推定）を用いる。mu_shrunk は低シグナル時に
+// 全社をセクター平均へ収縮し銘柄差が消えるため、チャート/効用には不適（表に参考値として残す）。
+function _mrrRecompute() {
+  const { lambda, axis, topN } = _mrrReadParams();
+  const items = (_mrrData && _mrrData.results ? _mrrData.results : [])
+    .filter(r => r[axis] != null && r.mu_raw != null)
+    .map(r => ({ ...r, _u: r.mu_raw - lambda * r[axis] }));
+  const paretoSet = _mrrParetoSet(items, axis);
+  items.forEach(it => { it._pareto = paretoSet.has(it.edinet_code); });
+  items.sort((a, b) => b._u - a._u);
+  return { axis, lambda, topN, all: items, top: items.slice(0, topN) };
+}
+
+// 配列の分位点（0..1）。空なら null。少数点でも端に丸めず線形補間で安定させる。
+function _mrrPctl(vals, q) {
+  const xs = vals.filter(v => v != null).sort((a, b) => a - b);
+  if (!xs.length) return null;
+  const pos = (xs.length - 1) * q;
+  const lo = Math.floor(pos), hi = Math.ceil(pos);
+  return lo === hi ? xs[lo] : xs[lo] + (xs[hi] - xs[lo]) * (pos - lo);
+}
+
+// 描画用の軸範囲 [p1, p99]（＋わずかな余白）。データ過少銘柄の外れ値（過大ボラ・
+// 過大μ）で軸が引き伸ばされ全点が隅へ潰れるのを防ぐ。範囲外の<2%は描画されない。
+function _mrrAxisRange(pts, key) {
+  const vals = pts.map(p => p[key]).filter(v => v != null);
+  if (vals.length < 5) return {};
+  const lo = _mrrPctl(vals, 0.01), hi = _mrrPctl(vals, 0.99);
+  if (lo == null || hi == null || hi <= lo) return {};
+  const pad = (hi - lo) * 0.05;
+  return { min: lo - pad, max: hi + pad };
+}
+
+// 効用 U → 色（スレート→紫の濃淡）。高 U ほど紫が濃い。
+function _mrrUColor(u, uMin, uMax, alpha) {
+  const t = uMax > uMin ? (u - uMin) / (uMax - uMin) : 0.5;
+  const r = Math.round(100 + (167 - 100) * t);
+  const g = Math.round(116 + (139 - 116) * t);
+  const b = Math.round(139 + (250 - 139) * t);
+  return `rgba(${r},${g},${b},${alpha})`;
+}
+
+// CV 指標パネル（リスク軸に非依存）。
+function _mrrPaintCv(data) {
   const cv = data.cv_metrics || {};
   const waiting = document.getElementById('mrr-cv-waiting');
   const cvContent = document.getElementById('mrr-cv-content');
   if (waiting) waiting.classList.add('hidden');
-  if (cvContent) {
-    cvContent.classList.remove('hidden');
-    const el = (id) => document.getElementById(id);
-    el('mrr-mean-r2').textContent   = cv.mean_r2  != null ? cv.mean_r2.toFixed(3)  : '-';
-    el('mrr-mean-rmse').textContent  = cv.mean_rmse != null ? cv.mean_rmse.toFixed(4) : '-';
-    el('mrr-n-features').textContent = (data.selected_features || []).length;
-    el('mrr-features-list').textContent = (data.selected_features || []).join('、') || '（なし）';
-    const folds = cv.folds || [];
-    el('mrr-fold-tbody').innerHTML = folds.map((f, i) =>
-      `<tr><td>${i+1}</td><td>${f.n_train||'-'}</td><td>${f.n_test||'-'}</td>
-       <td class="${f.r2>0.3?'text-green':''}">${f.r2!=null?f.r2.toFixed(3):'-'}</td>
-       <td>${f.rmse!=null?f.rmse.toFixed(4):'-'}</td></tr>`
+  if (!cvContent) return;
+  cvContent.classList.remove('hidden');
+  const el = (id) => document.getElementById(id);
+  el('mrr-mean-r2').textContent    = cv.mean_r2  != null ? cv.mean_r2.toFixed(3)  : '-';
+  el('mrr-mean-rmse').textContent   = cv.mean_rmse != null ? cv.mean_rmse.toFixed(4) : '-';
+  el('mrr-n-features').textContent  = (data.selected_features || []).length;
+  el('mrr-features-list').textContent = (data.selected_features || []).join('、') || '（なし）';
+  _mrrPaintCoefBars(data.feature_coefs || {});
+  const folds = cv.folds || [];
+  el('mrr-fold-tbody').innerHTML = folds.length
+    ? folds.map((f, i) =>
+        `<tr><td>${i+1}</td><td>${f.n_train||'-'}</td><td>${f.n_test||'-'}</td>
+         <td class="${f.r2>0.3?'text-green':''}">${f.r2!=null?f.r2.toFixed(3):'-'}</td>
+         <td>${f.rmse!=null?f.rmse.toFixed(4):'-'}</td></tr>`).join('')
+    : '<tr><td colspan="5" style="color:#64748b">CVフォルドなし（学習月数が不足。株価週次履歴の蓄積を待つ必要があります）</td></tr>';
+}
+
+// 特徴量コードを種別分類（交差項 > マクロ > テクニカル > 財務）。
+function _mrrCoefType(name) {
+  if (name.includes('_x_')) return 'cross';
+  if (name.startsWith('macro_')) return 'macro';
+  if (name.startsWith('momentum')) return 'tech';
+  return 'fin';
+}
+// 特徴量コードを表示ラベル化。交差項は '_x_' で分割し各要素をラベル化して ' × ' で連結。
+// セクターダミー（sec_<safe>_x_<macro>）は 'セクター[safe]' と表示。
+function _mrrCoefLabel(name) {
+  if (name.includes('_x_')) {
+    return name.split('_x_').map(part => {
+      if (part.startsWith('sec_')) return `業種[${part.slice(4)}]`;
+      return MRR_FEAT_LABELS[part] || part;
+    }).join(' × ');
+  }
+  return MRR_FEAT_LABELS[name] || name;
+}
+// 標準化係数の横バー（ゼロ中心・正右/負左）。種別で色分け、|係数| 降順に並べる。
+function _mrrPaintCoefBars(coefs) {
+  const host = document.getElementById('mrr-coef-bars');
+  const legend = document.getElementById('mrr-coef-legend');
+  if (!host) return;
+  const entries = Object.entries(coefs).sort((a, b) => Math.abs(b[1]) - Math.abs(a[1]));
+  if (!entries.length) { host.innerHTML = '<span style="color:#64748b;font-size:12px">（係数なし）</span>'; if (legend) legend.innerHTML = ''; return; }
+  const maxAbs = Math.max(...entries.map(([, v]) => Math.abs(v))) || 1;
+  // 凡例（出現した種別のみ）
+  if (legend) {
+    const used = [...new Set(entries.map(([n]) => _mrrCoefType(n)))];
+    legend.innerHTML = used.map(t =>
+      `<span style="display:inline-flex;align-items:center;gap:4px"><span style="width:10px;height:10px;border-radius:2px;background:${MRR_COEF_COLORS[t]};display:inline-block"></span>${MRR_COEF_TYPE_LABELS[t]}</span>`
     ).join('');
   }
+  host.innerHTML = entries.map(([name, v]) => {
+    const t = _mrrCoefType(name);
+    const color = MRR_COEF_COLORS[t];
+    const w = (Math.abs(v) / maxAbs) * 50;           // 片側 0–50%
+    const pos = v >= 0;
+    const bar = pos
+      ? `<div style="position:absolute;left:50%;width:${w}%;height:14px;background:${color};border-radius:0 3px 3px 0"></div>`
+      : `<div style="position:absolute;right:50%;width:${w}%;height:14px;background:${color};border-radius:3px 0 0 3px"></div>`;
+    return `<div style="display:flex;align-items:center;gap:8px;margin-bottom:3px">
+        <div style="width:190px;flex:none;font-size:11px;color:#cbd5e1;text-align:right;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${name}">${_mrrCoefLabel(name)}</div>
+        <div style="position:relative;flex:1;height:14px;background:#1e293b;border-radius:3px">
+          <div style="position:absolute;left:50%;top:-2px;bottom:-2px;width:1px;background:#475569"></div>${bar}
+        </div>
+        <div style="width:54px;flex:none;font-size:11px;color:${pos?'#86efac':'#fca5a5'};text-align:left">${pos?'+':''}${v.toFixed(3)}</div>
+      </div>`;
+  }).join('');
+}
 
-  // ── バブルチャート ────────────────────────────────────────────────
-  const results = data.results || [];
+// バブルチャート: x=選択リスク軸 / y=μ_raw / 色=効用U / 枠線・線=パレート。
+// 散布図は全社（リスク-リターンの全体像）を描き、効用上位 top_n を少し大きく濃く強調する。
+// 「Uで絞った上位N」だけを描くとリスク方向に潰れるため、母集団を描いてフロンティアを見せる。
+// 径は固定（R1 はほぼ一定で径エンコードが無意味なため。R1 はツールチップで参照）。
+function _mrrPaintChart(v) {
   const chartCard = document.getElementById('mrr-chart-card');
-  if (chartCard && results.length) {
-    chartCard.classList.remove('hidden');
-    const canvas = document.getElementById('chart-mrr-bubble');
-    if (canvas && window.Chart) {
-      if (_mrrChart) { _mrrChart.destroy(); _mrrChart = null; }
-      const paretoItems    = results.filter(r => r.is_pareto  && r[axisKey] != null && r.mu_shrunk != null);
-      const nonParetoItems = results.filter(r => !r.is_pareto && r[axisKey] != null && r.mu_shrunk != null);
-      const r1Max = Math.max(...results.map(r => r.r1 ?? 0), 1e-9);
-      const toPoint = (r) => ({
-        x: r[axisKey] ?? 0,
-        y: r.mu_shrunk ?? 0,
-        r: Math.max(4, 26 * (1 - (r.r1 ?? 0) / r1Max)),
-        label: r.company_name || r.edinet_code,
-        utility: r.utility, r1: r.r1,
-      });
-      _mrrChart = new Chart(canvas, {
-        type: 'bubble',
-        data: { datasets: [
-          { label: 'パレート優位', data: paretoItems.map(toPoint),
-            backgroundColor: 'rgba(167,139,250,0.75)', borderColor: '#a78bfa', borderWidth: 2 },
-          { label: '非優位', data: nonParetoItems.map(toPoint),
-            backgroundColor: 'rgba(100,116,139,0.4)', borderColor: '#475569', borderWidth: 1 },
-        ]},
-        options: {
-          responsive: true, maintainAspectRatio: false,
-          plugins: {
-            legend: { position: 'top' },
-            tooltip: { callbacks: { label: (ctx) => {
-              const pt = ctx.raw;
-              return [
-                pt.label,
-                `μ_shrunk: ${pt.y.toFixed(4)}`,
-                `${AXIS_LABELS[axisKey]}: ${pt.x.toFixed(4)}`,
-                `R1 信頼度(バブル径): ${pt.r1 != null ? pt.r1.toFixed(4) : '-'}`,
-                `U（効用）: ${pt.utility != null ? pt.utility.toFixed(4) : '-'}`,
-              ];
-            }}},
-          },
-          scales: {
-            x: { title: { display: true, text: `リスク（${AXIS_LABELS[axisKey]}）` }},
-            y: { title: { display: true, text: '期待リターン（μ_shrunk・年率）' }},
-          },
-        },
-      });
-    }
-  }
+  const canvas = document.getElementById('chart-mrr-bubble');
+  if (!chartCard || !canvas || !window.Chart) return;
+  if (_mrrChart) { _mrrChart.destroy(); _mrrChart = null; }
+  const pts = v.all;
+  if (!pts.length) { chartCard.classList.add('hidden'); return; }
+  chartCard.classList.remove('hidden');
+  const axisKey = v.axis;
+  const topSet = new Set(v.top.map(p => p.edinet_code));
+  const us = pts.map(p => p._u);
+  const uMin = Math.min(...us), uMax = Math.max(...us);
+  // 軸範囲を [p1,p99] に固定（外れ値で潰れない）。範囲外の点は Chart.js が描画省略。
+  const xRange = _mrrAxisRange(pts, axisKey);
+  const yRange = _mrrAxisRange(pts, 'mu_raw');
+  // データ値自体を [p1,p99] にクランプ（外れ値は境界へ積む）。Chart.js は外れ値が
+  // 残ると scales.min/max を設定しても軸を引き伸ばすため、値クランプで確実に潰れを防ぐ。
+  const clamp = (val, R) => (R.min == null || val == null) ? val : Math.min(R.max, Math.max(R.min, val));
+  // サイズは固定（R1 はほぼ一定で径エンコードが退化するため）。全社の雲が見えるよう
+  // 背景点も視認可能な大きさ・不透明度にし、上位 top_n とパレートを少し大きく強調する。
+  const bubble = pts.map(p => ({
+    x: clamp(p[axisKey], xRange), y: clamp(p.mu_raw, yRange),
+    r: p._pareto ? 6 : (topSet.has(p.edinet_code) ? 5 : 3),
+    _p: p, _top: topSet.has(p.edinet_code),
+  }));
+  const bg = pts.map(p => _mrrUColor(p._u, uMin, uMax, topSet.has(p.edinet_code) ? 0.9 : 0.55));
+  const bc = pts.map(p => p._pareto ? '#f9a8d4' : (topSet.has(p.edinet_code) ? 'rgba(226,232,240,0.9)' : 'rgba(148,163,184,0.4)'));
+  const bw = pts.map(p => p._pareto ? 2.5 : (topSet.has(p.edinet_code) ? 1.2 : 0.5));
+  const front = pts.filter(p => p._pareto)
+    .map(p => ({ x: clamp(p[axisKey], xRange), y: clamp(p.mu_raw, yRange) }))
+    .sort((a, b) => a.x - b.x);
+  _mrrChart = new Chart(canvas, {
+    data: { datasets: [
+      { type: 'line', label: '効率的フロンティア', data: front,
+        borderColor: '#f9a8d4', borderWidth: 2, pointRadius: 0, fill: false, tension: 0, order: 0 },
+      { type: 'bubble', label: `銘柄（全${pts.length}社・上位${v.top.length}を強調）`, data: bubble,
+        backgroundColor: bg, borderColor: bc, borderWidth: bw, order: 1 },
+    ]},
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: {
+        legend: { position: 'top' },
+        tooltip: { filter: (ctx) => !ctx.raw || ctx.raw._top !== false || ctx.datasetIndex === 0,
+          callbacks: { label: (ctx) => {
+          const p = ctx.raw && ctx.raw._p;
+          if (!p) return '';
+          return [
+            p.company_name || p.edinet_code,
+            `μ_raw: ${(p.mu_raw ?? 0).toFixed(4)}`,
+            `μ_shrunk(参考): ${p.mu_shrunk != null ? p.mu_shrunk.toFixed(4) : '-'}`,
+            `${MRR_AXIS_LABELS[axisKey]}: ${(p[axisKey] ?? 0).toFixed(4)}`,
+            `R1 信頼度(径): ${p.r1 != null ? p.r1.toFixed(4) : '-'}`,
+            `U（効用・色）: ${p._u != null ? p._u.toFixed(4) : '-'}`,
+            p._pareto ? '★ パレート優位' : '',
+          ].filter(Boolean);
+        }}},
+      },
+      scales: {
+        // type:'linear' を明示。frontier の line データセットがあると Chart.js は x 軸を
+        // 既定で category スケールにし、数値 min/max を無視して点を等間隔配置するため
+        // （= x がクランプされず外れ値で潰れる主因）。linear を強制して数値軸にする。
+        x: { type: 'linear', title: { display: true, text: `リスク（${MRR_AXIS_LABELS[axisKey]}）` },
+             min: xRange.min, max: xRange.max },
+        y: { type: 'linear', title: { display: true, text: '期待リターン（μ_raw・年率）' },
+             min: yRange.min, max: yRange.max },
+      },
+    },
+  });
+}
 
-  // ── ランキング表 ──────────────────────────────────────────────────
-  if (!results.length) {
-    return '<div class="text-sm" style="padding:20px;text-align:center;color:#94a3b8">結果がありません</div>';
+// ランキング表（クライアント算出の U・パレートで描画）。
+function _mrrTableHTML(v) {
+  if (!v.top.length) {
+    return '<div class="text-sm" style="padding:20px;text-align:center;color:#94a3b8">結果がありません（選択リスク軸の値が揃う銘柄がありません）</div>';
   }
+  const total = (_mrrData && _mrrData.results ? _mrrData.results.length : v.top.length);
   const header = `<tr><th>順位</th><th>証券コード</th><th>企業名</th><th>業種</th>
-    <th>μ_shrunk</th><th>R2 ボラ</th><th>R1 不確実性</th><th>R3 信頼性</th><th>効用 U</th><th>パレート</th></tr>`;
-  const rows = results.map((r, i) => {
-    const mu = r.mu_shrunk ?? 0;
+    <th>μ_raw</th><th>μ_shrunk(参考)</th><th>R2 ボラ</th><th>R1 不確実性</th><th>R3 信頼性</th><th>効用 U</th><th>パレート</th></tr>`;
+  const rows = v.top.map((r, i) => {
+    const mu = r.mu_raw ?? 0;
     const muClass = mu > 0 ? 'text-green' : 'text-red';
-    const paretoTag = r.is_pareto ? '<span style="color:#a78bfa;font-weight:700">★</span>' : '';
+    const muShr = r.mu_shrunk;
+    const paretoTag = r._pareto ? '<span style="color:#f9a8d4;font-weight:700">★</span>' : '';
     return `<tr>
       <td>${i+1}</td>
       <td>${esc(r.sec_code||'-')}</td>
       <td><a href="/company/${esc(r.edinet_code||'')}" style="color:#60a5fa">${esc(r.company_name||'-')}</a></td>
       <td style="font-size:11px">${esc(r.industry||'-')}</td>
       <td class="${muClass}">${(mu*100).toFixed(2)}%</td>
+      <td style="font-size:11px;color:#94a3b8">${muShr!=null?(muShr*100).toFixed(2)+'%':'-'}</td>
       <td>${r.r2!=null?(r.r2*100).toFixed(2)+'%':'-'}</td>
       <td style="font-size:11px;color:#94a3b8">${r.r1!=null?r.r1.toFixed(4):'-'}</td>
       <td style="font-size:11px;color:#94a3b8">${r.r3!=null?r.r3.toFixed(4):'-'}</td>
-      <td class="text-green">${r.utility!=null?r.utility.toFixed(4):'-'}</td>
+      <td class="text-green">${r._u!=null?r._u.toFixed(4):'-'}</td>
       <td style="text-align:center">${paretoTag}</td>
     </tr>`;
   }).join('');
@@ -1152,14 +1330,42 @@ function renderMacroRiskReturn(data) {
     <div class="flex-between" style="flex-wrap:wrap;gap:8px;margin-bottom:10px">
       <div class="section-title" style="margin-bottom:0">
         リスク-リターンランキング
-        <span class="tag tag-purple" style="margin-left:6px">${results.length}社</span>
-        <span class="tag" style="margin-left:6px">横軸リスク: ${AXIS_LABELS[axisKey]}</span>
+        <span class="tag tag-purple" style="margin-left:6px">上位${v.top.length} / 全${total}社</span>
+        <span class="tag" style="margin-left:6px">横軸: ${MRR_AXIS_LABELS[v.axis]}</span>
+        <span class="tag" style="margin-left:6px">λ=${v.lambda}</span>
       </div>
+      <div class="text-sm" style="color:#64748b">λ・リスク軸・表示件数は即時反映（再計算不要）</div>
+    </div>
+    <div class="text-sm" style="color:#64748b;margin-bottom:6px;font-size:11px">
+      ※ μ_raw はモデルの素の銘柄別推定（収縮なし）。検証 R² は低く推定にはノイズを含むため、
+      順位は目安。μ_shrunk はセクター平均への収縮後の保守的推定（参考）。
     </div>
     <div style="overflow-x:auto">
       <table><thead>${header}</thead><tbody>${rows}</tbody></table>
     </div>`;
 }
+
+// λ／リスク軸／表示件数の変更でクライアント再描画（モデル再学習なし）。
+function _mrrRepaint() {
+  if (!_mrrData) return;
+  const v = _mrrRecompute();
+  _mrrPaintChart(v);
+  const content = document.getElementById('dynresult-content-macro_risk_return');
+  if (content) content.innerHTML = _mrrTableHTML(v);
+}
+function _mrrScheduleRepaint() {
+  if (!_mrrData) return;
+  clearTimeout(_mrrPaintTimer);
+  _mrrPaintTimer = setTimeout(_mrrRepaint, 80);  // スライダー連続入力をデバウンス
+}
+// λ/軸/件数だけを即時クライアント反映（特徴量・マクロ等の変更は「実行」ボタンが必要）。
+const _MRR_CLIENT_PARAMS = ['lambda_risk', 'risk_axis', 'top_n'];
+function _mrrIsClientParam(id) {
+  const prefix = 'param-macro_risk_return-';
+  return id.startsWith(prefix) && _MRR_CLIENT_PARAMS.includes(id.slice(prefix.length));
+}
+document.addEventListener('input',  (e) => { if (e.target && e.target.id && _mrrIsClientParam(e.target.id)) _mrrScheduleRepaint(); });
+document.addEventListener('change', (e) => { if (e.target && e.target.id && _mrrIsClientParam(e.target.id)) _mrrScheduleRepaint(); });
 
 // 汎用結果レンダラ（フォールバック）: results 配列を表に、無ければ JSON を整形表示する。
 function _renderGenericResult(data) {

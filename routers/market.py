@@ -219,7 +219,7 @@ async def get_stats(db: Session = Depends(api.get_db)):
         "stock_price_records":  n_stock_price,
         "records_with_prediction": n_predicted,
         "latest_year":          latest_fr.year       if latest_fr else None,
-        "latest_period_end":    latest_fr.period_end.isoformat() if latest_fr and latest_fr.period_end else None,
+        "latest_period_end":    str(latest_fr.period_end) if latest_fr and latest_fr.period_end else None,
         "last_db_update":       api._utc_to_jst_str(last_db_update),
         "days_since_update":    days_since,
         "expected_latest_year": expected_year,
