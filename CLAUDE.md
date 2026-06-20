@@ -70,7 +70,7 @@ pytest tests/test_utils.py  # 単一ファイル
 | `collector_prices.py` | 株価（stooq/J-Quants/Yahoo）・市場データ更新・マクロ収集 |
 | `api.py` | FastAPI REST・SSE・回帰分析 |
 | `plugins/` | 分析モデル（自動検出方式）。詳細は [MODELS.md](docs/MODELS.md) |
-| `templates/*.html` | 画面（`/`=dashboard, `/collection`, `/analysis`, `/company/{code}`）。JS は `static/js/<page>.js` |
+| `templates/*.html` | 画面（`/`=dashboard, `/collection`, `/analysis`, `/company/{code}`, `/models`=モデル解説[技術版], `/guide`=やさしい解説[初心者向け]）。JS は `static/js/<page>.js`（`guide.html` は `models.js` を再利用） |
 | `_pipeline_gh.py` / `_pipeline_incremental.py` | GitHub Actions 用・全件 / 差分収集 |
 
 完全なファイル役割一覧・処理フロー・ER図は [ARCHITECTURE.md](docs/ARCHITECTURE.md) を参照。

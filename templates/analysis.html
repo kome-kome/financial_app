@@ -141,6 +141,10 @@ tr:hover td{background:#1e2235}
     <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>
     収集
   </a>
+  <a href="/guide" class="nav-link" style="color:#34d399">
+    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20z"/><path d="M9.1 9a3 3 0 0 1 5.8 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12" y2="17"/></svg>
+    やさしい解説
+  </a>
   <a href="/models" class="nav-link" style="color:#a78bfa">
     <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg>
     モデル解説
@@ -179,7 +183,7 @@ tr:hover td{background:#1e2235}
   <!-- 利用可能状態: 業種別OLS 実行済み（DBに予測値あり）の時に表示 -->
   <div id="gap-ready" style="display:none">
   <div class="card">
-    <div class="section-title">乖離分析（割安・割高スクリーニング）</div>
+    <div class="section-title">乖離分析（割安・割高スクリーニング）<a class="co-link" href="/guide#gap_analysis" target="_blank" rel="noopener" style="float:right;font-size:12px;font-weight:400">❓ やさしい解説</a></div>
     <div class="info-box" style="margin-bottom:12px">
       乖離率 = (予測時価総額 − 実際時価総額) / 実際時価総額 × 100<br>
       <span class="gap-positive">正値（緑）</span>: 予測 &gt; 実際 → モデル上は割安の可能性
@@ -242,7 +246,7 @@ tr:hover td{background:#1e2235}
 <div id="tab-recommend" class="hidden">
 
   <div class="card">
-    <div class="section-title">分析プリセット</div>
+    <div class="section-title">分析プリセット<a class="co-link" href="/guide#recommend" target="_blank" rel="noopener" style="float:right;font-size:12px;font-weight:400">❓ やさしい解説</a></div>
     <div class="info-box" style="margin-bottom:14px">
       プリセットを選ぶか、下のスライダーで各指標の重要度を自分でカスタマイズできます。<br>
       ★ 業種別OLS分析を先に実行すると「割安度」指標が使えるようになります。
@@ -291,7 +295,7 @@ tr:hover td{background:#1e2235}
 <div id="tab-total_return" class="hidden">
   <div class="grid2">
     <div class="card">
-      <div class="section-title">総合リターン予測設定</div>
+      <div class="section-title">総合リターン予測設定<a class="co-link" href="/guide#total_return" target="_blank" rel="noopener" style="float:right;font-size:12px;font-weight:400">❓ やさしい解説</a></div>
       <div class="info-box" style="margin-bottom:14px">
         1株当たり財務金額（EPS/BPS/CF/DPS）[円/株] を説明変数、株価[円/株]を目的変数とした OLS 回帰で<br>
         期待総合リターン（株価上昇余地＋配当利回り）が高い企業をランキングします。<br>
@@ -379,7 +383,7 @@ tr:hover td{background:#1e2235}
 <!-- ネットキャッシュ分析（清原達郎『わが投資術』） -->
 <div id="tab-net_cash" class="hidden">
   <div class="card">
-    <div class="section-title">ネットキャッシュ分析 — 清原達郎『わが投資術』</div>
+    <div class="section-title">ネットキャッシュ分析 — 清原達郎『わが投資術』<a class="co-link" href="/guide#net_cash_analysis" target="_blank" rel="noopener" style="float:right;font-size:12px;font-weight:400">❓ やさしい解説</a></div>
     <div class="info-box" style="margin-bottom:14px">
       <strong style="color:#10b981" class="gloss" data-tip="すぐ換金できる資産から全負債を引いた、実質的な手元現金。流動資産＋投資有価証券×0.7−総負債で計算する清原達郎式の指標。">ネットキャッシュ</strong> = 流動資産 + 投資有価証券 × 0.7 − 総負債&nbsp;<span style="color:#64748b">[円]（清原式）</span><br>
       <strong style="color:#10b981" class="gloss" data-tip="ネットキャッシュ÷時価総額。1.0で会社をまるごと買える現金を保有、0.5で時価総額の半分が現金。大きいほど割安。">ネットキャッシュ比率</strong> = ネットキャッシュ ÷ 時価総額&nbsp;<span style="color:#64748b">[無次元]</span><br>
@@ -462,7 +466,7 @@ tr:hover td{background:#1e2235}
 <div id="tab-backtest" class="hidden">
   <div class="card">
     <div class="flex-between" style="margin-bottom:12px">
-      <div class="section-title" style="margin-bottom:0">バックテスト — 過去のスコアリング精度検証</div>
+      <div class="section-title" style="margin-bottom:0">バックテスト — 過去のスコアリング精度検証<a class="co-link" href="/guide#backtest" target="_blank" rel="noopener" style="float:right;font-size:12px;font-weight:400">❓ やさしい解説</a></div>
     </div>
     <div class="info-box" style="margin-bottom:14px">
       Nヶ月前の時点で確定していた財務データを使い、スコアリング上位N社のその後の実績株価リターンを検証します。<br>
@@ -574,7 +578,7 @@ tr:hover td{background:#1e2235}
 <div id="tab-macro_risk_return" class="hidden">
   <div class="grid2">
     <div class="card">
-      <div class="section-title">マクロ×リスク-リターン設定</div>
+      <div class="section-title">マクロ×リスク-リターン設定<a class="co-link" href="/guide#macro_risk_return" target="_blank" rel="noopener" style="float:right;font-size:12px;font-weight:400">❓ やさしい解説</a></div>
       <div class="info-box" style="margin-bottom:14px">
         財務指標 × マクロ要因の交差項 OLS（前進 BIC）で1年先リターンを推定し、<br>
         R2（実現ボラ）・R1（予測不確実性）・R3（セクター×サイズ別のモデル信頼性）を<br>

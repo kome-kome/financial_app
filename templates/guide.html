@@ -1,0 +1,344 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>やさしい解説</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'Segoe UI',sans-serif;background:#0f1117;color:#e2e8f0;min-height:100vh;line-height:1.7}
+.header{background:#1a1d2e;border-bottom:1px solid #2d3154;padding:14px 24px;display:flex;align-items:center;gap:14px;position:sticky;top:0;z-index:100}
+.header h1{font-size:17px;font-weight:600;color:#34d399}
+.badge{background:#064e3b;color:#6ee7b7;font-size:11px;padding:3px 8px;border-radius:12px}
+.nav-link{padding:8px 14px;font-size:13px;color:#64748b;text-decoration:none;display:inline-flex;align-items:center;gap:5px;border-radius:6px}
+.nav-link:first-of-type{margin-left:auto}
+.nav-link:hover{background:#1e293b;color:#94a3b8}
+.layout{display:flex;max-width:1400px;margin:0 auto;padding:24px;gap:28px}
+.sidebar{width:240px;flex-shrink:0}
+.toc{background:#1a1d2e;border:1px solid #2d3154;border-radius:10px;padding:16px;position:sticky;top:80px}
+.toc-title{font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:.5px;margin-bottom:12px}
+.toc a{display:block;font-size:12px;color:#64748b;text-decoration:none;padding:5px 8px;border-radius:5px;transition:all .15s;border-left:2px solid transparent}
+.toc a:hover{background:#1e293b;color:#34d399;border-left-color:#10b981}
+.toc a.active{background:#1e293b;color:#34d399;border-left-color:#10b981}
+.toc-section-title{font-size:10px;color:#4b5563;text-transform:uppercase;letter-spacing:.5px;margin:12px 0 4px 8px}
+.content{flex:1;min-width:0}
+.intro{background:#1a1d2e;border:1px solid #2d3154;border-radius:10px;padding:20px 24px;margin-bottom:20px}
+.intro p{font-size:13px;color:#cbd5e1;margin-bottom:8px}
+.model-section{background:#1a1d2e;border:1px solid #2d3154;border-radius:10px;padding:24px;margin-bottom:20px}
+.model-section:target{border-color:#10b981;box-shadow:0 0 0 2px rgba(16,185,129,.2)}
+h2{font-size:18px;font-weight:700;color:#34d399;margin-bottom:4px;display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+h2 .model-tag{font-size:10px;background:#1e293b;border:1px solid #334155;color:#64748b;padding:2px 8px;border-radius:10px;font-weight:400}
+h3{font-size:14px;font-weight:600;color:#6ee7b7;margin:18px 0 8px;display:flex;align-items:center;gap:7px}
+p{font-size:13px;color:#cbd5e1;margin-bottom:10px}
+ul{margin:6px 0 12px 20px}
+li{font-size:13px;color:#cbd5e1;margin-bottom:5px}
+.analogy{background:#0a1a14;border:1px solid #134e3a;border-left:3px solid #10b981;border-radius:8px;padding:14px 16px;font-size:13px;color:#d1fae5;margin:6px 0 14px;line-height:1.7}
+.analogy strong{color:#6ee7b7}
+.info-box{background:#1e2235;border:1px solid #2d3154;border-radius:8px;padding:12px 14px;font-size:12px;color:#cbd5e1;margin:8px 0;border-left:3px solid #10b981;line-height:1.7}
+.warn-box{background:#451a03;border:1px solid #92400e;border-radius:8px;padding:12px 14px;font-size:12px;color:#fcd34d;margin:8px 0;line-height:1.7}
+.warn-box strong{color:#fbbf24}
+.steps{counter-reset:step;list-style:none;margin:6px 0 12px 0;padding:0}
+.steps li{position:relative;padding:6px 0 6px 34px;font-size:13px;color:#cbd5e1;border-bottom:1px solid #1e2235}
+.steps li:last-child{border-bottom:none}
+.steps li::before{counter-increment:step;content:counter(step);position:absolute;left:0;top:6px;width:22px;height:22px;background:#064e3b;color:#6ee7b7;border-radius:50%;font-size:12px;font-weight:700;display:flex;align-items:center;justify-content:center}
+table{width:100%;border-collapse:collapse;font-size:12px;margin:8px 0}
+th{text-align:left;padding:8px 10px;color:#64748b;font-weight:500;border-bottom:1px solid #2d3154;background:#141722}
+td{padding:8px 10px;border-bottom:1px solid #1e2235;color:#cbd5e1}
+td code,p code,li code{background:#0f172a;border:1px solid #1e2235;padding:1px 5px;border-radius:3px;font-size:11px;color:#67e8f9;font-family:monospace}
+.more{margin-top:16px;padding-top:14px;border-top:1px solid #2d3154;font-size:12px}
+.more a{color:#a78bfa;text-decoration:none;font-weight:600}
+.more a:hover{text-decoration:underline}
+.term{border-bottom:1px dotted #5b8b76;cursor:help;position:relative;color:#a7f3d0}
+.term::after{content:attr(data-tip);position:absolute;left:0;top:calc(100% + 7px);z-index:60;width:max-content;max-width:280px;white-space:normal;background:#0a0c14;color:#cbd5e1;border:1px solid #3b4263;border-radius:7px;padding:9px 11px;font-size:11px;font-weight:400;line-height:1.6;box-shadow:0 10px 30px rgba(0,0,0,.5);opacity:0;visibility:hidden;transform:translateY(-4px);transition:opacity .13s,transform .13s;pointer-events:none}
+.term:hover::after{opacity:1;visibility:visible;transform:translateY(0)}
+.tag{display:inline-block;padding:2px 7px;border-radius:10px;font-size:10px;font-weight:500}
+.tag-green{background:#052e16;color:#86efac}
+.tag-amber{background:#451a03;color:#fcd34d}
+.tag-red{background:#450a0a;color:#fca5a5}
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div style="width:30px;height:30px;background:#064e3b;border-radius:8px;display:flex;align-items:center;justify-content:center">
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#34d399" stroke-width="2"><path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20z"/><path d="M9.1 9a3 3 0 0 1 5.8 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12" y2="17"/></svg>
+  </div>
+  <h1>やさしい解説</h1>
+  <span class="badge">初心者向け</span>
+  <a href="/analysis" class="nav-link">
+    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>
+    分析へ戻る
+  </a>
+  <a href="/models" class="nav-link" style="margin-left:0">
+    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg>
+    モデル解説（技術版）
+  </a>
+  <a href="/" class="nav-link" style="margin-left:0">
+    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
+    ホーム
+  </a>
+</div>
+
+<div class="layout">
+
+<aside class="sidebar">
+  <nav class="toc">
+    <div class="toc-title">もくじ</div>
+    <div class="toc-section-title">① 銘柄を探す</div>
+    <a href="#recommend">おすすめ銘柄</a>
+    <a href="#net_cash_analysis">ネットキャッシュ分析</a>
+    <div class="toc-section-title">② 割安度を測る</div>
+    <a href="#sector_ols">業種別OLS分析</a>
+    <a href="#gap_analysis">乖離分析</a>
+    <div class="toc-section-title">③ 将来リターンを予測</div>
+    <a href="#total_return">総合リターン予測</a>
+    <a href="#price_predictor">株価リターン予測</a>
+    <a href="#macro_risk_return">マクロ×リスク-リターン</a>
+    <div class="toc-section-title">④ 戦略を検証</div>
+    <a href="#backtest">バックテスト</a>
+    <div class="toc-section-title">共通の考え方</div>
+    <a href="#zscore">Zスコアって何？</a>
+  </nav>
+</aside>
+
+<main class="content">
+
+<div class="intro">
+  <p>このページは、分析タブで使われている手法を<strong>数式を使わずに、たとえ話で</strong>説明するページです。各分析の画面で「❓ やさしい解説」を押すと、ここの対応する場所へ飛んできます。</p>
+  <p>もっと正確な数式・前提・参考論文を知りたくなったら、各セクション末尾の「→ もっと詳しく」から<a href="/models" style="color:#a78bfa;text-decoration:none">モデル解説（技術版）</a>へ進めます。</p>
+  <p style="color:#fcd34d;font-size:12px;margin-bottom:0">⚠ どの分析も「未来を当てる魔法」ではありません。判断を助ける<strong>参考材料</strong>として使ってください。</p>
+</div>
+
+<!-- ① おすすめ銘柄 ───────────────────────────── -->
+<div class="model-section" id="recommend">
+  <h2>おすすめ銘柄 <span class="model-tag">① 銘柄を探す</span></h2>
+
+  <h3>🟢 ひとことで言うと</h3>
+  <div class="analogy">
+    通信簿のようなものです。「収益力」「成長」「割安さ」など<strong>複数の科目の成績</strong>を、あなたが決めた重要度（ウェイト）で合計して、<strong>総合点の高い順に会社を並べる</strong>仕組みです。理科を重視する子・国語を重視する子で順位が変わるように、ウェイトを変えると上位の顔ぶれも変わります。
+  </div>
+
+  <h3>📊 何が分かる？</h3>
+  <p>たくさんの会社の中から、自分の好みの条件に合った「良さそうな会社」をまとめて見つけられます。点数の内訳も見えるので、なぜ上位なのかを確認できます。</p>
+
+  <h3>🛠 どう使う？</h3>
+  <ul class="steps">
+    <li>「バランス型・成長重視・割安重視・高収益重視」などの<strong>プリセット</strong>を選ぶ（まずはバランス型でOK）。</li>
+    <li>こだわりがあれば、各指標の<strong>スライダー（ウェイト）</strong>を動かして重要度を調整する。</li>
+    <li>実行すると、総合点の高い順に会社が並びます。</li>
+  </ul>
+  <div class="info-box">各社は指標ごとに「平均からどれくらい良い／悪いか」を表す<span class="term" data-tip="同じ年の全社の中で平均より上か下かを表す点数。平均=0、+で平均以上、−で平均以下。">Zスコア</span>に変換してから合計します。これにより、規模や業種の違う会社どうしも公平に比べられます。</div>
+
+  <h3>⚠ 注意点・落とし穴</h3>
+  <div class="warn-box">ウェイト（重要度）の決め方には数学的な正解はなく、<strong>あなたの好みの設定</strong>です。「この設定が儲かる」とは限らないので、<a href="/guide#backtest" style="color:#fbbf24">バックテスト</a>で過去の成績を確かめるのがおすすめです。</div>
+
+  <div class="more">→ もっと詳しく：<a href="/models#m6">モデル解説 6. Zスコア重み付けスコアリング</a></div>
+</div>
+
+<!-- ① ネットキャッシュ分析 ───────────────────── -->
+<div class="model-section" id="net_cash_analysis">
+  <h2>ネットキャッシュ分析 <span class="model-tag">① 銘柄を探す</span></h2>
+
+  <h3>🟢 ひとことで言うと</h3>
+  <div class="analogy">
+    会社の「<strong>財布の中身</strong>」を数える分析です。会社が持っている現金など（すぐお金にできる資産）から借金を引いて、<strong>手元にいくら残るか</strong>を計算します。もし「手元に残るお金 ＞ その会社を丸ごと買う値段（時価総額）」なら、<strong>現金の詰まった財布を、財布より安く買える</strong>ようなお買い得状態かもしれません。
+  </div>
+
+  <h3>📊 何が分かる？</h3>
+  <p>会社の値段（<span class="term" data-tip="株価 × 発行株式数。会社を丸ごと買うのに必要な金額の目安。">時価総額</span>）に対して、手元資金がどれだけ分厚いかが分かります。比率が高いほど「現金的に割安」と見なせます。</p>
+  <table>
+    <thead><tr><th>比率の目安</th><th>意味</th></tr></thead>
+    <tbody>
+      <tr><td><span class="tag tag-amber">1.0 以上</span></td><td>会社の値段より多くの現金を持っている</td></tr>
+      <tr><td><span class="tag tag-green">0.5 以上</span></td><td>値段の半分以上を現金で持っている</td></tr>
+      <tr><td><span class="tag tag-red">0 以下</span></td><td>借金のほうが多い（手元はマイナス）</td></tr>
+    </tbody>
+  </table>
+
+  <h3>🛠 どう使う？</h3>
+  <ul class="steps">
+    <li>そのまま実行すると、財布の分厚い順に会社が並びます。</li>
+    <li>「本業でお金を稼げている会社だけ見たい」なら、営業キャッシュフローや純利益がプラスの会社に絞るフィルタをON。</li>
+  </ul>
+  <div class="info-box">この分析は予測モデルを使わず、<strong>決算書の数字をそのまま計算</strong>するだけなので、推定のブレが混じりにくいのが長所です。清原達郎『わが投資術』とグレアムの考え方がベースです。</div>
+
+  <h3>⚠ 注意点・落とし穴</h3>
+  <div class="warn-box">現金が分厚くても<strong>万年割安のまま放置される会社</strong>もあります。また、商社・銀行・REIT などは決算書の構造が特殊で、この指標がうまく働きません（業種フィルタで外すのがおすすめ）。</div>
+
+  <div class="more">→ もっと詳しく：<a href="/models#m8">モデル解説 8. ネットキャッシュ分析（清原達郎式）</a></div>
+</div>
+
+<!-- ② 業種別OLS分析 ─────────────────────────── -->
+<div class="model-section" id="sector_ols">
+  <h2>業種別OLS分析 <span class="model-tag">② 割安度を測る</span></h2>
+
+  <h3>🟢 ひとことで言うと</h3>
+  <div class="analogy">
+    「<strong>同じ業種の会社を並べて、相場の値ごろ感を学ぶ</strong>」分析です。中古車の値段を「年式・走行距離・グレード」から推測するのと同じで、会社の利益・純資産などの数字から「この会社なら本来このくらいの株価が妥当」という<strong>理論株価</strong>を計算します。<span class="term" data-tip="Ordinary Least Squares（最小二乗法）。データに最もよく当てはまる直線を引く、回帰分析の基本手法。">OLS</span>は、その「当てはまりの良い式」を見つける計算方法です。
+  </div>
+
+  <h3>📊 何が分かる？</h3>
+  <p>業種ごとに「財務の数字 → 妥当な株価」の関係式を作ります。これが次の<a href="/guide#gap_analysis" style="color:#a7f3d0">乖離分析</a>の土台になります。同じ業種の中で比べることで、業種ごとの値ごろ感の違い（IT は高め・銀行は低めなど）に惑わされずに済みます。</p>
+
+  <h3>🛠 どう使う？</h3>
+  <ul class="steps">
+    <li>基本はそのまま実行でOK。説明に使う財務項目を増減させることもできます。</li>
+    <li>「多重共線性の警告」（似た指標を入れすぎたサイン）が出たら、<span class="term" data-tip="係数が暴れないように、ほどよく抑えながら式を作る方法。似た指標が多いときに安定する。">Ridge（リッジ）</span>に切り替えると安定します。</li>
+  </ul>
+  <div class="info-box">この分析は計算が重いため、本番（Render）環境では実行できないことがあります。その場合は手元のPCで実行すると、結果が共有データベースに保存され本番にも反映されます。</div>
+
+  <h3>⚠ 注意点・落とし穴</h3>
+  <div class="warn-box">仲間の会社が少なすぎる業種（既定では5社未満）は計算されません。また理論株価はあくまで「業種内の平均的な値ごろ」であり、<strong>正解の株価ではありません</strong>。</div>
+
+  <div class="more">→ もっと詳しく：<a href="/models#m2">モデル解説 2. 業種別OLS回帰</a></div>
+</div>
+
+<!-- ② 乖離分析 ──────────────────────────────── -->
+<div class="model-section" id="gap_analysis">
+  <h2>乖離分析 <span class="model-tag">② 割安度を測る</span></h2>
+
+  <h3>🟢 ひとことで言うと</h3>
+  <div class="analogy">
+    「<strong>理論の値段と、実際の値段のズレ</strong>」を測る分析です。業種別OLSが出した「本来このくらい妥当」という理論株価と、市場でついている実際の株価を比べます。実際が理論より<strong>安ければ割安（緑）</strong>、<strong>高ければ割高（赤）</strong>。さらに、過去のズレが<strong>どのくらいの速さで埋まってきたか</strong>を見て、「半分に縮むまでの目安期間（半減期）」も推定します。
+  </div>
+
+  <h3>📊 何が分かる？</h3>
+  <ul>
+    <li><strong>乖離率</strong>：理論より割安か割高か（プラスが割安）。</li>
+    <li><strong>期待乖離・収束スコア</strong>：そのズレが今後どのくらいのペースで縮みそうかの<strong>目安</strong>。</li>
+  </ul>
+
+  <h3>🛠 どう使う？</h3>
+  <ul class="steps">
+    <li>先に<a href="/guide#sector_ols" style="color:#a7f3d0">業種別OLS分析</a>を実行しておく（土台が必要なので、未実行だとこのタブはロックされます）。</li>
+    <li>実行すると、割安〜割高の順に会社が並びます。</li>
+  </ul>
+
+  <h3>⚠ 注意点・落とし穴</h3>
+  <div class="warn-box">「何ヶ月後にどれだけ縮む」という数字は、<span class="term" data-tip="平均回帰：行き過ぎた値がいずれ平均へ戻ろうとする性質。ゴムひもが伸びても元に戻るイメージ。">平均回帰</span>を仮定した<strong>ヒューリスティック（経験則）の参考値</strong>であり、当たる確率ではありません。割安に見えても、それには理由（業績悪化など）がある場合もあります。</div>
+
+  <div class="more">→ もっと詳しく：<a href="/models#m3">モデル解説 3. 乖離分析（AR(1) MLE）</a></div>
+</div>
+
+<!-- ③ 総合リターン予測 ───────────────────────── -->
+<div class="model-section" id="total_return">
+  <h2>総合リターン予測 <span class="model-tag">③ 将来リターンを予測</span></h2>
+
+  <h3>🟢 ひとことで言うと</h3>
+  <div class="analogy">
+    「<strong>値上がり余地 ＋ 配当</strong>」を合わせた、ざっくりした<strong>もうけの見込み</strong>を出す分析です。会社の1株あたりの利益・純資産・キャッシュフロー・配当から理論株価を計算し、<strong>今の株価よりどれだけ上がる余地があるか</strong>を出して、そこに<strong>配当の利回り</strong>を足します。
+  </div>
+
+  <h3>📊 何が分かる？</h3>
+  <p>「値上がり期待＋配当」を合算した総合リターン（％）で会社を並べられます。配当をくれる会社が相対的に評価されやすいのが特徴です。</p>
+
+  <h3>🛠 どう使う？</h3>
+  <ul class="steps">
+    <li>そのまま実行でOK。キャッシュフロー因子や業種の違いを考慮する設定をON/OFFできます。</li>
+    <li>結果と一緒に表示される<strong>モデル品質（CV）</strong>で、予測のあてになり具合の目安も確認できます。</li>
+  </ul>
+
+  <h3>⚠ 注意点・落とし穴</h3>
+  <div class="warn-box">理論株価の計算には<strong>発行株式数の概算</strong>を使う場面があり、会計基準の違いなどで精度が落ちることがあります。あくまで相対比較の材料として使ってください。</div>
+
+  <div class="more">→ もっと詳しく：<a href="/models#m1">モデル解説 1. 総合リターン予測（Ohlsonモデル型）</a></div>
+</div>
+
+<!-- ③ 株価リターン予測 ───────────────────────── -->
+<div class="model-section" id="price_predictor">
+  <h2>株価リターン予測 <span class="model-tag">③ 将来リターンを予測</span></h2>
+
+  <h3>🟢 ひとことで言うと</h3>
+  <div class="analogy">
+    「<strong>チャートの形＋会社の体力</strong>」から、<strong>数日〜数ヶ月先の値動き</strong>を当てにいく分析です。移動平均からの離れ具合・値動きの荒さ・買われすぎ／売られすぎ（RSI）といった<strong>チャートのサイン</strong>に、ROEやPERといった<strong>財務の数字</strong>も加えて予測します。
+  </div>
+
+  <h3>📊 何が分かる？</h3>
+  <p>5日・20日・60日先などの株価リターン（％）の予測と、その予測がどれだけあてになりそうかの目安が分かります。</p>
+
+  <h3>🛠 どう使う？</h3>
+  <ul class="steps">
+    <li>予測したい先の日数（例：20日先）を選んで実行。</li>
+    <li><strong>ウォークフォワード検証</strong>（＝過去のある時点に立ち、それ以前のデータだけで予測して答え合わせ）の成績で、信頼度を確認します。</li>
+  </ul>
+  <div class="info-box">「未来のデータをこっそり使ってズルをしない」ように、いつも<strong>過去だけで学習→少し先でテスト</strong>を繰り返して評価します。これがウォークフォワードCVです。</div>
+
+  <h3>⚠ 注意点・落とし穴</h3>
+  <div class="warn-box">直線的な関係しか捉えられないため、複雑なパターンは苦手です。また財務データは年1回しか更新されないため、短期予測では同じ財務値が使い回されます。短期の値動き予測は特に外れやすい点に注意。</div>
+
+  <div class="more">→ もっと詳しく：<a href="/models#m4">モデル解説 4. 株価リターン予測（月次WF-CV）</a></div>
+</div>
+
+<!-- ③ マクロ×リスク-リターン ─────────────────── -->
+<div class="model-section" id="macro_risk_return">
+  <h2>マクロ×リスク-リターン推奨 <span class="model-tag">③ 将来リターンを予測</span></h2>
+
+  <h3>🟢 ひとことで言うと</h3>
+  <div class="analogy">
+    「<strong>もうけの大きさ</strong>」だけでなく「<strong>どれだけブレるか（リスク）</strong>」も一緒に見て、<strong>コスパの良い会社</strong>を探す分析です。さらに、為替や米国株などの<strong>世の中の流れ（マクロ）</strong>も取り込み、「円安に強い会社／弱い会社」といった相性まで考えます。横軸リスク・縦軸リターンの地図の上で、<strong>同じリスクならより高リターンな会社（効率的フロンティア）</strong>を浮かび上がらせます。
+  </div>
+
+  <h3>📊 何が分かる？</h3>
+  <p>リスクとリターンのバランスが良い会社が、散布図（バブルチャート）と一覧で分かります。どの要因（財務・マクロ）が効いているかの目安も棒グラフで見られます。</p>
+
+  <h3>🛠 どう使う？</h3>
+  <ul class="steps">
+    <li>使いたい財務要因・マクロ要因を選んで実行（既定のままでもOK）。</li>
+    <li><strong>リスク回避度（λ）スライダー</strong>や<strong>横軸のリスクの種類</strong>を動かすと、再計算なしですぐに並びが変わります。安全志向なら λ を大きめに。</li>
+  </ul>
+  <div class="info-box">「リスク」には、予測の不確実さ・過去の値動きの荒さ・モデルの当てはまりの悪さなど数種類があり、好みで横軸を切り替えられます。</div>
+
+  <h3>⚠ 注意点・落とし穴</h3>
+  <div class="warn-box">最も高度な分析で、当てはまりの精度（CVのR²）は高くありません。表示される要因の効き具合は「<strong>向き（株高/株安）と大小の目安</strong>」として読み、効果を過大に信じないでください。</div>
+
+  <div class="more">→ もっと詳しく：<a href="/models#m9">モデル解説 9. マクロ×リスク-リターン推奨</a></div>
+</div>
+
+<!-- ④ バックテスト ──────────────────────────── -->
+<div class="model-section" id="backtest">
+  <h2>バックテスト <span class="model-tag">④ 戦略を検証</span></h2>
+
+  <h3>🟢 ひとことで言うと</h3>
+  <div class="analogy">
+    「<strong>もし過去にこの作戦で選んでいたら、儲かった？</strong>」を確かめる<strong>答え合わせ</strong>です。Nヶ月前の時点で分かっていた情報だけを使って会社を選び、その後の実際の株価でどうなったかを計算します。
+  </div>
+
+  <h3>📊 何が分かる？</h3>
+  <p>スコアリングで選んだ上位の会社が、その後どれだけ上がった／下がったか。さらに「全体平均（ベンチマーク）」と比べて<strong>勝てていたか（超過収益）</strong>が分かります。</p>
+
+  <h3>🛠 どう使う？</h3>
+  <ul class="steps">
+    <li>何ヶ月前から検証するか・上位何社を見るかを選んで実行。</li>
+    <li>上位グループの平均リターンが、全体平均を上回っているかを確認します。</li>
+  </ul>
+
+  <h3>⚠ 注意点・落とし穴</h3>
+  <div class="warn-box">過去がよくても未来を保証しません。さらに、<strong>今もうデータベースに残っている会社だけ</strong>を対象にするため（＝途中で消えた会社が含まれない＝<span class="term" data-tip="生き残った会社だけを見て『成績が良い』と錯覚すること。失敗して消えた会社が集計から抜け落ちるために起きる。">生存バイアス</span>）、結果は実際より良く見えがちです。</div>
+
+  <div class="more">→ もっと詳しく：<a href="/models#m7">モデル解説 7. バックテスト</a></div>
+</div>
+
+<!-- 共通：Zスコア ───────────────────────────── -->
+<div class="model-section" id="zscore">
+  <h2>Zスコアって何？ <span class="model-tag">共通の考え方</span></h2>
+
+  <h3>🟢 ひとことで言うと</h3>
+  <div class="analogy">
+    テストの「<strong>偏差値</strong>」とそっくりな考え方です。ある年の全社の中で、その会社の数字が<strong>平均よりどれくらい上か下か</strong>を、ものさしを揃えて表した点数です。<strong>0が平均、プラスなら平均以上、マイナスなら平均以下</strong>。売上のような「桁の大きい数字」も、利益率のような「％の数字」も、同じものさしに乗せて比べられるようになります。
+  </div>
+
+  <h3>📊 なぜ使うの？</h3>
+  <p>会社ごとに規模も単位もバラバラな指標を、そのまま足し算すると桁の大きい指標だけが効いてしまいます。Zスコアに直しておくと、<strong>どの指標も対等に</strong>比べられるので、おすすめ銘柄のスコアリングなどで公平な合計ができます。</p>
+  <div class="info-box">同じ年どうしで比べるのがポイントです。好景気の年と不景気の年を混ぜると比較が歪むため、<strong>年ごと</strong>に平均と散らばりを計算しています。</div>
+
+  <div class="warn-box"><strong>まぎらわしい注意：</strong>ここでの「Zスコア」は偏差値の仲間（標準化スコア）で、倒産予測で有名な「Altman の Z スコア」とは<strong>別物</strong>です。</div>
+
+  <div class="more">→ もっと詳しく：<a href="/models#m5">モデル解説 5. 横断的Zスコア正規化</a></div>
+</div>
+
+</main>
+</div>
+
+<script src="/static/js/models.js"></script>
+</body>
+</html>

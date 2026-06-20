@@ -641,6 +641,9 @@ stateDiagram-v2
     Collection --> Dashboard  : 「ホーム」
     Analysis   --> Dashboard  : 「ホーム」
     Analysis   --> Models     : 「モデル解説」リンク
+    Analysis   --> Guide      : 「やさしい解説」リンク＋各タブ「❓」
+    Guide      --> Models     : 各セクション「→ もっと詳しく」
+    Models     --> Guide      : ヘッダー「やさしい解説」
     Collection --> Analysis   : 「分析」リンク
     Analysis   --> Collection : 「← データ収集ページへ」リンク
     DBViewer   --> Dashboard  : 「← ホーム」
@@ -821,6 +824,7 @@ graph LR
         P3["GET /analysis\nanalysis.html を返す"]
         P4["GET /login\nlogin.html を返す"]
         P5["GET /models\nmodels.html を返す\n（モデル解説・参考文献）"]
+        P5g["GET /guide\nguide.html を返す\n（初心者向けやさしい解説）"]
         P6["GET /db\ndb.html を返す\n（DBビューア）"]
         P7["GET /company\ncompany.html を返す\n（企業検索）"]
         P8["GET /company/{edinet_code}\ncompany.html を返す\n（個別企業の業績・財務・CF可視化）"]
@@ -1003,6 +1007,7 @@ graph TB
 | `analysis.html` | フロントエンド | 分析ハブ（`/analysis`）。左サイドバーを `/api/plugins` のメタ（category/ui_order）から目的別4カテゴリ（①銘柄を探す/②割安度/③リターン予測/④検証）で動的生成（`buildSidebar`）。乖離分析に横断分布（理論vs実績の散布図・乖離率ヒストグラム）を Chart.js で表示。スクリーニングは特例エントリとして `/collection` へリンク。動的タブの結果描画は `RESULT_RENDERERS`（plugin名→描画関数の登録制・未登録は汎用フォールバック）、CSV出力は単一の `exportCSV(name)` ディスパッチャ（`CSV_EXPORTERS` 登録制）に統一。乖離分析タブに**モデル鮮度バー**（`#model-freshness-bar`）を常設 — `/api/model/status` から computed_at/staleness_days を取得して表示し、OLSロック演出を廃止 | api.py, Chart.js (CDN) |
 | `login.html` | フロントエンド | 認証ログイン画面（`/login`） | api.py |
 | `models.html` | フロントエンド | モデル解説・参考文献ページ（`/models`）。9モデルの数式・パラメータ・DOIリンクをインラインHTMLで表示。 | — |
+| `guide.html` | フロントエンド | 初心者向け「やさしい解説」ページ（`/guide`）。各分析を数式なし・たとえ話で説明（ひとことで言うと／何が分かる／どう使う／注意点）。セクションidはプラグイン名（`recommend`/`net_cash_analysis`/`gap_analysis`/`sector_ols`/`total_return`/`price_predictor`/`macro_risk_return`/`backtest`/`zscore`）でディープリンク可能。分析画面の各タブの「❓ やさしい解説」リンクから該当セクションへ飛ぶ。各セクション末尾から技術版 `/models#mN` へ相互リンク。TOC追従は `models.js` を再利用（専用JSなし）。 | — |
 | `db.html` | フロントエンド | DBビューア（`/db`）。4テーブルのスキーマ・プレビュー・統計サマリー・ER 風リレーション・企業ドリルダウン・CSV エクスポート。 | api.py |
 | `company.html` | フロントエンド | 企業詳細（`/company`・`/company/{edinet_code}`）。個別企業の業績・財務(BS)・CF・per-share/配当・バリュエーション（理論時価総額乖離）・日次株価・業種内Zスコアレーダー・清原式ネットキャッシュ・同業比較を Chart.js の時系列グラフで可視化。企業名・証券コード検索付き。財務(BS)タブはバフェットコード型で各年「左＝資産（借方）／右＝負債・純資産（貸方）」を並列表示し、粒度（粗/中/細）切替で内訳の細かさを変更できる（どの粒度でも資産バー＝負債純資産バー＝総資産になるよう補正）。業績(PL)タブは売上高を費用・利益に分解した積み上げ棒（最上部＝純利益）を粒度（粗/中/細）切替で表示（合計＝売上高、信頼性の低い stored gross_profit は不使用）。CFタブも粒度（粗＝フリー+財務／中＝営業/投資/財務／細＝営業/設備投資/その他投資/財務）切替に対応し、CFデータ未収集の企業には明示メッセージを表示。同業比較タブは選択企業を必ず表示し業種内時価総額順位を併記。**相互リンク**：理論時価総額/乖離率チャート→`/analysis?tab=gap`・Zスコアチャート→`/analysis?tab=recommend`・ネットキャッシュチャート→`/analysis?tab=net_cash`（逆方向の乖離分析表→`/company/{code}` は既存） | api.py, Chart.js (CDN) |
 | `static/js/*.js` | フロントエンド | 各HTMLテンプレから外部化したページ別JS（CSP対応）。common（`esc`/`apiFetch`/`initAuth`/`logout` 等の共通ユーティリティ・全ページ読込）+ dashboard / collection / analysis / company / db / models / login の8ファイル。`/static` で配信（api.py の `StaticFiles` マウント）。`<style>` とインラインイベントハンドラ（`onclick=` 等）はHTML側に残置（後者は将来 addEventListener 化予定）。 | api.py |
