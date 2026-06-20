@@ -808,17 +808,17 @@ IFRS には完全に対応する科目がないため、「非流動その他金
 
 | 種別 | 特徴量（選択肢） | 既定 | 変換 |
 |---|---|---|---|
-| 財務（価格由来＝バリュー） | per, pbr | ✓ | 無次元（FinancialMetric VIEW） |
-| 財務（価格フリー） | roe, **roa**, equity_ratio, **de_ratio**, **cf_ratio**, **eps_growth**, **op_growth**, rd_intensity, da_intensity, z_op_margin, z_roe, z_cf_ratio | roe, **roa**, equity_ratio, **eps_growth** | 無次元（FinancialMetric VIEW 既存列） |
-| モメンタム | 12-1ヶ月ログリターン | （use_macro 時） | log(P_short / P_long) |
-| マクロ | USDJPY/SP500/NIKKEI225 = YoY 変化率、US10Y = 5年 Z スコア | USDJPY, SP500, US10Y | YoY = Δ/前年 / Z = (現在−5年平均)/5年SD |
-| 交差項 | 選択財務 × 選択マクロ + セクターダミー × マクロ（最大10セクター） | — | 積（無次元×無次元） |
+| 財務（価格由来＝バリュー） | per, pbr, **div_yield** | per, pbr | 無次元（FinancialMetric VIEW） |
+| 財務（価格フリー） | roe, **roa**, **op_margin**, **net_margin**, **asset_turnover**, equity_ratio, **de_ratio**, **nc_ratio**, **cf_ratio**, **eps_growth**, **op_growth**, **rev_growth**, rd_intensity, da_intensity, z_op_margin, z_roe, z_cf_ratio | roe, **roa**, equity_ratio, **eps_growth** | 無次元（FinancialMetric VIEW 既存列。**asset_turnover は本改修で VIEW 追加**） |
+| モメンタム | 12-1ヶ月ログリターン | （use_momentum 時・**既定 OFF**） | log(P_short / P_long) |
+| マクロ | USDJPY/SP500/NIKKEI225 = YoY 変化率、US10Y = 5年 Z スコア | USDJPY, SP500, US10Y（use_macro 時） | YoY = Δ/前年 / Z = (現在−5年平均)/5年SD |
+| 交差項 | 選択財務 × 選択マクロ + セクターダミー × マクロ（最大10セクター） | （use_macro 時） | 積（無次元×無次元） |
 
 被説明変数は **1年先（52週先）週次ログリターン（年率・無次元）**。全特徴量は学習前に `winsorize(p1–p99)`→z-score 標準化を適用。
 
-> **PER/PBR は「循環参照」ではない（重要）**: 目的変数は株価水準ではなく**将来リターン**であるため、現在の PER/PBR で将来リターンを予測するのは正統な**バリュー・ファクター**（Fama-French HML ≒ book-to-market = 1/PBR）。`per×eps=price` の恒等式が問題になるのは「現在株価水準」を当てる場合だけで、本モデルには当てはまらない（**他のプラグイン sector_ols / price_predictor の per-share→株価 Ohlson 型（§本書 該当節）とは目的変数が異なる**）。ただし PER/PBR は分子に同じ株価 P_t を共有し「割安」と「価格の平均回帰」を分離しきれないため、価格を含まないファンダ（roa/eps_growth 等）を既定に併置して補強する。
+> **PER/PBR は「循環参照」ではない（重要）**: 目的変数は株価水準ではなく**将来リターン**であるため、現在の PER/PBR で将来リターンを予測するのは正統な**バリュー・ファクター**（Fama-French HML ≒ book-to-market = 1/PBR）。`per×eps=price` の恒等式が問題になるのは「現在株価水準」を当てる場合だけで、本モデルには当てはまらない（**他のプラグイン sector_ols / price_predictor の per-share→株価 Ohlson 型（§本書 該当節）とは目的変数が異なる**）。ただし PER/PBR は分子に同じ株価 P_t を共有し「割安」と「価格の平均回帰」を分離しきれないため、価格を含まないファンダ（roa/eps_growth 等）を既定に併置して補強する。**収益性の質を分解するデュポン因子（net_margin × asset_turnover ≈ roa）・成長（rev_growth）・財務健全性（nc_ratio）も価格フリーの選択肢として提供**する（既定外・任意採用）。div_yield は配当という株価由来のバリュー因子で per/pbr と同枠（循環ではない）。
 
-> **特徴量・マクロの選択 UI**: 財務特徴量（`fin_features` multiselect）とマクロ特徴量（`macro_features` multiselect）は `/analysis` の M-1 タブで選べる。`use_macro`（マスタ ON/OFF）が OFF のときはマクロ・交差項・モメンタムを生成しない。NIKKEI225 は収集済みだが市場成分・SP500 との多重共線があるため既定では未選択（任意）。**TOPIX・JP10Y は本番 macro_data に蓄積がない（収集失敗：JP10Y=^JGB 上場廃止 / TOPIX=^tpx・^TPX 取得不可）ため選択肢から除外**（選ぶと全サンプルが None スキップで学習不能になる。収集が直り次第 `_MACRO_MAP` へ追加すれば自動で選択肢に出る）。
+> **特徴量・マクロの選択 UI**: 財務特徴量（`fin_features` multiselect）とマクロ特徴量（`macro_features` multiselect）は `/analysis` の M-1 タブで選べる。`use_macro`（マスタ ON/OFF）が OFF のときはマクロ・交差項を生成しない。**モメンタムは `use_macro` から独立した `use_momentum`（既定 OFF）で制御する**（§9.4・§9.8：マクロを使いつつモメンタムの過去履歴要件を外して walk-forward CV を成立させるため）。NIKKEI225 は収集済みだが市場成分・SP500 との多重共線があるため既定では未選択（任意）。**TOPIX・JP10Y は本番 macro_data に蓄積がない（収集失敗：JP10Y=^JGB 上場廃止 / TOPIX=^tpx・^TPX 取得不可）ため選択肢から除外**（選ぶと全サンプルが None スキップで学習不能になる。収集が直り次第 `_MACRO_MAP` へ追加すれば自動で選択肢に出る）。
 
 ### 9.3 特徴量選択（LASSO-LARS / BIC）
 
@@ -828,7 +828,7 @@ IFRS には完全に対応する科目がないため、「非流動その他金
 
 ### 9.4 Walk-forward CV
 
-既存の `walk_forward_cv_monthly`（`plugins/utils.py`）で月次ロールウィンドウ CV を実施。時系列順を厳守（通常の k-fold はルックアヘッドバイアスが生じるため不可）。各フォールドの RMSE・MAE・R² を記録。
+既存の `walk_forward_cv_monthly`（`plugins/utils.py`）で月次ロールウィンドウ CV を実施。時系列順を厳守（通常の k-fold はルックアヘッドバイアスが生じるため不可）。各フォールドの RMSE・MAE・R² を記録。**学習サンプルが要求する履歴長は特徴量構成で決まる**：52週先リターン（未来）は常に必要だが、**12ヶ月モメンタムは `use_momentum=ON` のときだけ過去履歴を要求する**。`use_momentum=OFF`（既定）なら `use_macro=ON` のままでも過去履歴要件が外れ、週次株価が浅くてもフォールドが確保できる（§9.8）。
 
 ### 9.5 リスク指標
 
@@ -869,7 +869,7 @@ $$U = \mu_{\text{raw}} - \lambda \cdot R_{\text{axis}}$$
 1. 週次株価履歴（`stock_price_weekly.close_last`）が少なくとも1年分（≥52週）必要
 2. マクロデータ（`macro_data`）の YoY 用に約400日、Z スコア用に5年分の蓄積が必要（未蓄積は None でスキップ）
 3. 学習サンプル数（企業数 × 月数）が 20 件未満の場合はプラグインが空結果を返す
-4. **既知の被覆制約（`use_macro=true`）**: 学習サンプルは「52週先リターン（未来必要）」かつ「12ヶ月モメンタム（過去必要）」を同時に要求する。週次株価が約2年分（本番現状 2024-05〜）しかないと、両条件を満たす月が**約1ヶ月の薄い帯**に収縮し、walk-forward CV が 0 フォルド（`mean_r2=None`）になる。CV 品質の回復には**週次株価のバックフィル**で履歴を延ばす必要がある（収集側の課題）。`use_macro=false`（モメンタム非使用）では複数月が確保され CV が成立する。
+4. **被覆制約はモメンタム由来（`use_momentum=true` のとき）**: 「52週先リターン（未来必要）」かつ「12ヶ月モメンタム（過去必要）」を同時に要求すると、週次株価が約2年分（本番現状 2024-05〜）しかない環境では両条件を満たす月が**約1ヶ月の薄い帯**に収縮し、walk-forward CV が 0 フォルド（`mean_r2=None`）になる。**本改修でモメンタムを `use_macro` から切り離し `use_momentum`（既定 OFF）化**したため、**既定構成（`use_macro=ON` / `use_momentum=OFF`）ではマクロ・交差項を使ったまま CV が複数フォルドで成立する**（モメンタムの過去履歴要件が外れるため）。`use_momentum=ON` で12ヶ月モメンタムを使う場合は引き続き上記の薄帯制約が生じ、CV 品質の回復には**週次株価のバックフィル**で履歴を延ばす必要がある（FUTURE_TASKS DF-3・収集側の課題）。
 
 ### 9.9 参考文献
 
@@ -906,3 +906,4 @@ $$U = \mu_{\text{raw}} - \lambda \cdot R_{\text{axis}}$$
 | 2026-06-20 | バブルチャートが依然 X 軸で潰れる件を是正。原因は「効用 U 上位 N のみ描画」で λ>0 だと低リスク銘柄ばかり集まる構造。散布図を **全社描画＋効用上位 N 強調**へ変更し、**両軸を [p1,p99] に固定**（外れ値で軸が伸び全点が隅へ潰れるのを防止）。p99 クランプの少数点バグ（floor(n·0.99)=max）も汎用パーセンタイル関数へ置換して解消 |
 | 2026-06-20 | **X 軸潰れの真因を特定・根治**: frontier の line データセットにより Chart.js が x 軸を既定で **category スケール**化し、数値 min/max・クランプを無視していた（y は既定 linear で正常だったため「Y は効くのに X だけ潰れる」非対称が発生）。**x/y に `type:'linear'` を明示**して数値軸を強制。あわせて雲を可視化（径は固定＝R1 がほぼ一定で径エンコードが退化していたため廃止・R1 はツールチップへ）。静的アセットのブラウザキャッシュで JS 更新が反映されない事故も是正（`api.py` 静的配信に `Cache-Control: no-cache`・テンプレ script に版クエリ） |
 | 2026-06-20 | **特徴量の正当性強化＋マクロ可視化＋係数表示**（ゴール=予測力ではなく解釈性）。①目的変数は将来リターンのため PER/PBR は循環でなくバリュー因子と整理（§9.2 注記）。価格を含まないファンダ（roa/cf_ratio/de_ratio/eps_growth/op_growth）を選択肢に追加し、既定に roa・eps_growth を注入（全て FinancialMetric VIEW 既存列＝DB 移行ゼロ）。②マクロを `macro_features` multiselect 化（USDJPY/SP500/US10Y＋NIKKEI225、既定3。TOPIX は本番データなし＝収集失敗のため JP10Y 同様に除外）。③`execute` が標準化係数 `feature_coefs` を返し、UI が種別色分けの係数バーで表示（§9.7） |
+| 2026-06-20 | **モメンタム独立化（CV 制約の緩和）＋価格フリー特徴量の拡充**。①モメンタムを `use_macro` 連動から切り離し独立パラメータ `use_momentum`（既定 OFF）化。既定構成（`use_macro=ON`/`use_momentum=OFF`）で過去履歴要件が外れ walk-forward CV が複数フォルドで成立（§9.4・§9.8。従来は use_macro=true で 0 フォルド）。②財務特徴量に div_yield（バリュー）・op_margin/net_margin/asset_turnover（デュポン分解）・rev_growth（成長）・nc_ratio（健全性）を追加。asset_turnover のみ `financial_metrics` VIEW に新規列追加、他は既存列 |

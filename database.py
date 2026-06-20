@@ -679,6 +679,7 @@ class FinancialMetric(ViewBase):
     roe = Column(Float); roa = Column(Float)
     equity_ratio = Column(Float); de_ratio = Column(Float); cf_ratio = Column(Float)
     rd_intensity = Column(Float); da_intensity = Column(Float)
+    asset_turnover = Column(Float)
     net_cash = Column(Float); nc_ratio = Column(Float)
     z_revenue = Column(Float); z_op_margin = Column(Float); z_roe = Column(Float)
     z_equity_ratio = Column(Float); z_cf_ratio = Column(Float); z_eps = Column(Float)

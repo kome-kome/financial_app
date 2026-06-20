@@ -301,6 +301,7 @@ erDiagram
 
 > **`financial_metrics`（VIEW・物理テーブルではない）**: `financial_records` をソースに、
 > `op_margin` / `net_margin` / `roe` / `roa` / `equity_ratio` / `de_ratio` / `cf_ratio` /
+> `asset_turnover`（総資産回転率＝売上/総資産・デュポン分解因子・M-1 特徴量） /
 > `rd_intensity` / `da_intensity`（研究開発・減価償却の対売上集約度 [%]・C2列の結線） /
 > `net_cash` / `nc_ratio` / `z_*`（8指標）/ `rev_growth` / `op_growth` / `eps_growth` を
 > SQL で都度算出し、`regression_results` を LEFT JOIN して `predicted_market_cap` / `gap_ratio` も合成する。
