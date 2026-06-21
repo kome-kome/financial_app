@@ -231,6 +231,52 @@ def normalize(vals: list, method: str) -> tuple[list, float, float]:
     return [(v - mu) / sd for v in vals], mu, sd
 
 
+def fit_feature_columns(
+    X_raw: list[list[float]],
+    n_feat: int,
+    method: str = "zscore",
+) -> tuple[list[list[float]], list[tuple[float, float]], list[tuple[float, float]]]:
+    """列ごとに winsorize → normalize を適用し、intercept 付き設計行列と学習パラメータを返す。
+
+    OLS 学習側の共通前処理。`(X_norm, win_params, norm_params)` を返す:
+      - X_norm[ri] = [1.0, v1, v2, ...]（先頭が intercept、列順は特徴量順）
+      - win_params[fi] = (w_lo, w_hi)   winsorize 境界（推論時のクランプに使用）
+      - norm_params[fi] = (p1, p2)      normalize パラメータ（推論時の変換に使用）
+
+    推論側は `transform_feature_row` で同じパラメータを使って 1 サンプルを変換する
+    （学習データの統計でテストを変換することでリークを防ぐ）。
+    """
+    X_norm = [[1.0] + [0.0] * n_feat for _ in range(len(X_raw))]
+    win_params: list[tuple[float, float]] = []
+    norm_params: list[tuple[float, float]] = []
+    for fi in range(n_feat):
+        col_w, w_lo, w_hi = winsorize([row[fi] for row in X_raw])
+        win_params.append((w_lo, w_hi))
+        normed, p1, p2 = normalize(col_w, method)
+        norm_params.append((p1, p2))
+        for ri, v in enumerate(normed):
+            X_norm[ri][fi + 1] = v
+    return X_norm, win_params, norm_params
+
+
+def transform_feature_row(
+    feat_row: list[float],
+    win_params: list[tuple[float, float]],
+    norm_params: list[tuple[float, float]],
+) -> list[float]:
+    """学習済み win/norm パラメータで 1 サンプルを intercept 付き行へ変換する。
+
+    `fit_feature_columns` が返した win_params / norm_params をそのまま渡す。
+    winsorize 境界でクランプ → normalize_transform（±5 クランプ）の順。
+    """
+    row = [1.0]
+    for fi, v in enumerate(feat_row):
+        w_lo, w_hi = win_params[fi]
+        v_w = max(w_lo, min(w_hi, v))
+        row.append(normalize_transform(v_w, *norm_params[fi]))
+    return row
+
+
 def _two_sided_pvalue(t: float, df: int) -> float:
     """両側 p 値。scipy.stats.t.sf による正確な計算（df < 30 でも正しい裾確率）。
 
@@ -554,17 +600,7 @@ def _fit_predict_fold(
     X_train_raw = [s[0] for s in train_samples]
     y_train_raw = [s[1] for s in train_samples]
 
-    norm_params: list[tuple[float, float]] = []
-    win_params:  list[tuple[float, float]] = []
-    X_train_norm = [[1.0] + [0.0] * n_feat for _ in range(len(X_train_raw))]
-    for fi in range(n_feat):
-        col = [row[fi] for row in X_train_raw]
-        col_w, w_lo, w_hi = winsorize(col)
-        win_params.append((w_lo, w_hi))
-        normed, p1, p2 = normalize(col_w, "zscore")
-        norm_params.append((p1, p2))
-        for ri, v in enumerate(normed):
-            X_train_norm[ri][fi + 1] = v
+    X_train_norm, win_params, norm_params = fit_feature_columns(X_train_raw, n_feat)
 
     y_train, y_mu, y_sd = normalize(y_train_raw, y_norm_method)
     result = ols(X_train_norm, y_train)
@@ -572,15 +608,7 @@ def _fit_predict_fold(
         return None
     beta = result["beta"]
 
-    X_test_norm = []
-    for s in test_samples:
-        row = [1.0]
-        for fi, v in enumerate(s[0]):
-            w_lo, w_hi = win_params[fi]
-            v_w = max(w_lo, min(w_hi, v))
-            p1, p2 = norm_params[fi]
-            row.append(normalize_transform(v_w, p1, p2))
-        X_test_norm.append(row)
+    X_test_norm = [transform_feature_row(s[0], win_params, norm_params) for s in test_samples]
 
     yhat_norm = [sum(row[j] * beta[j] for j in range(len(beta))) for row in X_test_norm]
     if y_norm_method == "log":
