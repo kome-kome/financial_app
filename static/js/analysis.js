@@ -1137,8 +1137,10 @@ const MRR_FEAT_LABELS = {
   cf_ratio: '営業CF/売上', eps_growth: 'EPS成長率', op_growth: '営業利益成長率', rev_growth: '売上成長率',
   rd_intensity: 'R&D集約度', da_intensity: 'D&A集約度',
   z_op_margin: '営業利益率Z', z_roe: 'ROE Z', z_cf_ratio: 'CF比率Z',
-  macro_usdjpy_yoy: 'USD/JPY(YoY)', macro_sp500_yoy: 'S&P500(YoY)', macro_us10y_zscore: '米10年金利(Z)',
-  macro_nikkei225_yoy: '日経225(YoY)',
+  macro_usdjpy_yoy: 'USD/JPY(YoY)', macro_eurjpy_yoy: 'EUR/JPY(YoY)', macro_dxy_yoy: 'ドル指数(YoY)',
+  macro_sp500_yoy: 'S&P500(YoY)', macro_us5y_zscore: '米5年金利(Z)', macro_us10y_zscore: '米10年金利(Z)',
+  macro_us30y_zscore: '米30年金利(Z)', macro_nikkei225_yoy: '日経225(YoY)', macro_vix_zscore: 'VIX(Z)',
+  macro_wti_yoy: 'WTI原油(YoY)', macro_gold_yoy: '金(YoY)',
   momentum_12m1: 'モメンタム(12-1)',
 };
 // 種別 → 色（財務/マクロ/交差項/テクニカル）。
