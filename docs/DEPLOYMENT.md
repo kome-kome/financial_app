@@ -31,6 +31,7 @@ Render の制約と運用形態に合わせて設計すること。
 | `[全件]` | XBRL収集・財務データ全件更新 | `full-pipeline.yml` | DB初期構築時・全社バックフィル必要時（`daily-incremental` を `.disabled` に退避して同時実行回避） | 200〜240分 |
 | `[一回性]` | 株価履歴バックフィル | `backfill-stock-history.yml` | `stock_price` が NULL な企業の過去2年株価を補完（通常は1回で完了） | 60〜90分 |
 | `[一回性]` | 週次株価バックフィル | `backfill-weekly-history.yml` | `stock_price_weekly` を過去 N 年（既定5）まで延伸し、`use_momentum=ON` の walk-forward CV 被覆を確保（#198・既定 OFF なので通常は不要） | 60〜150分 |
+| `[補完]` | マクロのみ収集 | `collect-macro.yml` | `MACRO_SERIES`（為替・金利・指数・コモディティ・ボラ）を Yahoo から収集。新規系列追加（#218 VIX/DXY/US5Y/US30Y 等）の Actions 到達性・蓄積実証や macro_data の鮮度補完。`workflow_dispatch`（years 既定5） | 〜数分 |
 | `[補完]` | C2 NULL バックフィル | `refill-c2.yml` | C2 新列（`pl_depreciation` 等）が NULL のまま残っている場合に EDINET から再取得 | 2〜4時間 |
 | `[補完]` | CF NULL バックフィル | `refill-cf.yml` | `cf_investing_cf` 等が NULL の場合に再取得（mode: refill / capex-only / diagnose） | 1〜3時間 |
 | `[補完]` | PL/BS NULL バックフィル | `refill-pl-bs.yml` | `bs_inventory` 等 旧コホート（〜2022年）が NULL の場合に再取得 | 4〜5時間 |
