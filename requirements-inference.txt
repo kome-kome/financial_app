@@ -1,0 +1,20 @@
+# M-1 per-stock 階層ベイズ推論バッチ専用の依存（GitHub Actions でのみ使用）。
+#
+# ねらい: 本番 Render ランタイム（api）には PyMC/PyTensor を載せない。
+#   階層 MCMC は `/api/plugins/{name}/run` の同期リクエストでは回せないため
+#   （ADR-0002「実行アーキ＝推論バッチ分離」）、推論は GitHub Actions のバッチで
+#   行い、per-stock 事後ローディングを DB へ永続化する。本番の requirements.txt とは
+#   分離し、本番ビルドを軽量に保つ。
+#
+# 使い方（Actions の推論ジョブ内）:
+#   pip install -r requirements-inference.txt
+#
+# 本番依存を継承しつつ PyMC を追加する。
+-r requirements.txt
+
+# Bayesian probabilistic programming（NUTS サンプラ）。
+# 枯れた 5 系最終付近を採用（メジャー直後の 6.0.x は安定性未知数のため見送り）。
+# NOTE: pytensor / arviz は pymc の依存として解決される。推論 workflow を実装する際に
+#       `pip freeze` で完全 pin（== の固定）へ移行すること（requirements.txt の pin 方針に合わせる）。
+#       下記バージョンは PyPI で最終確認のうえ確定する（2026-06 時点の 5 系最終付近）。
+pymc==5.28.5

@@ -63,14 +63,18 @@ FIN_BASE_OPTIONS = [
 DEFAULT_FIN_FEATURES = ["per", "pbr", "roe", "equity_ratio", "roa", "eps_growth"]
 
 # series_code → transform ("yoy" | "zscore")
-# JP10Y・TOPIX は本番 macro_data に蓄積がない（収集失敗：JP10Y=^JGB 上場廃止 / TOPIX=^tpx・^TPX
-# 取得不可）ため除外。選ぶと全スナップショットが None スキップでモデル学習不能になるため、
-# データのある系列のみを公開する（収集が直り次第ここに追加すれば自動で選択肢に出る）。
+# 公開するのは本番 macro_data に蓄積のある系列のみ（#218 フェーズ1：既収集の EURJPY・WTI・GOLD を
+# チャネル網羅[FX・コモディティ]のため追加公開）。JP10Y・TOPIX は収集失敗（JP10Y=^JGB 上場廃止 /
+# TOPIX=^tpx・^TPX 取得不可）で蓄積が無く、選ぶと全スナップショットが None スキップでモデル学習
+# 不能になるため除外（収集が直り次第ここに追加すれば自動で選択肢に出る）。
 _MACRO_MAP = {
     "macro_usdjpy_yoy":    ("USDJPY",    "yoy"),
+    "macro_eurjpy_yoy":    ("EURJPY",    "yoy"),
     "macro_sp500_yoy":     ("SP500",     "yoy"),
     "macro_us10y_zscore":  ("US10Y",     "zscore"),
     "macro_nikkei225_yoy": ("NIKKEI225", "yoy"),
+    "macro_wti_yoy":       ("WTI",       "yoy"),
+    "macro_gold_yoy":      ("GOLD",      "yoy"),
 }
 MACRO_FEATURE_NAMES = list(_MACRO_MAP.keys())
 
@@ -78,9 +82,12 @@ MACRO_FEATURE_NAMES = list(_MACRO_MAP.keys())
 # 市場成分・SP500 との多重共線があるため任意）。
 MACRO_FEATURE_OPTIONS = [
     {"value": "macro_usdjpy_yoy",    "label": "USD/JPY 前年比（YoY）"},
+    {"value": "macro_eurjpy_yoy",    "label": "EUR/JPY 前年比（YoY）"},
     {"value": "macro_sp500_yoy",     "label": "S&P500 前年比（YoY）"},
     {"value": "macro_us10y_zscore",  "label": "米10年金利 Zスコア"},
     {"value": "macro_nikkei225_yoy", "label": "日経225 前年比（YoY）"},
+    {"value": "macro_wti_yoy",       "label": "WTI原油 前年比（YoY）"},
+    {"value": "macro_gold_yoy",      "label": "金（ゴールド）前年比（YoY）"},
 ]
 DEFAULT_MACRO_FEATURES = ["macro_usdjpy_yoy", "macro_sp500_yoy", "macro_us10y_zscore"]
 

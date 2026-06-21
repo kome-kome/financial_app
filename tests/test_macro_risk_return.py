@@ -209,7 +209,21 @@ class TestParamsSchema:
 
     def test_macro_features_invalid_rejected(self):
         with pytest.raises(ValueError):
-            coerce_params(self.schema, {"macro_features": ["macro_gold_yoy"]})
+            coerce_params(self.schema, {"macro_features": ["macro_not_real_yoy"]})
+
+    def test_macro_features_accepts_exposed_commodities_and_eurjpy(self):
+        """#218 フェーズ1: 既収集の EURJPY・WTI・GOLD が選択可能・正しく結線される。"""
+        from plugins.macro_risk_return import _MACRO_MAP
+        assert _MACRO_MAP["macro_eurjpy_yoy"] == ("EURJPY", "yoy")
+        assert _MACRO_MAP["macro_wti_yoy"] == ("WTI", "yoy")
+        assert _MACRO_MAP["macro_gold_yoy"] == ("GOLD", "yoy")
+        result = coerce_params(
+            self.schema,
+            {"macro_features": ["macro_eurjpy_yoy", "macro_wti_yoy", "macro_gold_yoy"]},
+        )
+        assert result["macro_features"] == [
+            "macro_eurjpy_yoy", "macro_wti_yoy", "macro_gold_yoy"
+        ]
 
     def test_macro_features_topix_excluded(self):
         """TOPIX は本番 macro_data に蓄積がない（収集失敗）ため選択肢から除外。"""
