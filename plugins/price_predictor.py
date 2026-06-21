@@ -27,7 +27,7 @@ from typing import Any
 import numpy as np
 
 from .base import AnalysisPlugin
-from .utils import normalize, normalize_transform, ols, walk_forward_cv_monthly, winsorize
+from .utils import fit_feature_columns, normalize, ols, transform_feature_row, walk_forward_cv_monthly
 
 FINANCIAL_LAG_DAYS = 45  # 決算公表ラグ: period_end からこの日数後に財務データが利用可能とみなす
 
@@ -324,16 +324,7 @@ class PricePredictorPlugin(AnalysisPlugin):
         X_raw = [s[0] for s in all_samples]
         y_raw = [s[1] for s in all_samples]
 
-        final_win_params:  list[tuple] = []
-        final_norm_params: list[tuple] = []
-        X_norm = [[1.0] + [0.0] * n_feat for _ in range(len(X_raw))]
-        for fi in range(n_feat):
-            col_w, w_lo, w_hi = winsorize([row[fi] for row in X_raw])
-            final_win_params.append((w_lo, w_hi))
-            normed, p1, p2 = normalize(col_w, "zscore")
-            final_norm_params.append((p1, p2))
-            for ri, v in enumerate(normed):
-                X_norm[ri][fi + 1] = v
+        X_norm, final_win_params, final_norm_params = fit_feature_columns(X_raw, n_feat)
 
         y_norm, y_mu, y_sd = normalize(y_raw, "zscore")
         result = ols(X_norm, y_norm)
@@ -359,11 +350,7 @@ class PricePredictorPlugin(AnalysisPlugin):
         for edinet_code, (feat_row, info) in current_snaps.items():
             if len(feat_row) != n_feat:
                 continue
-            x_norm = [1.0]
-            for fi, v in enumerate(feat_row):
-                w_lo, w_hi = final_win_params[fi]
-                v_w = max(w_lo, min(w_hi, v))
-                x_norm.append(normalize_transform(v_w, *final_norm_params[fi]))
+            x_norm = transform_feature_row(feat_row, final_win_params, final_norm_params)
             pred_log_ret = sum(x_norm[j] * beta[j] for j in range(len(beta))) * y_sd + y_mu
             row: dict = {
                 "sec_code":        info["sec_code"],
