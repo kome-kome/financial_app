@@ -38,7 +38,7 @@ graph LR
         LOGIN["🔐 ログイン画面\nlogin.html"]
         D["🏠 ダッシュボード\ndashboard.html\n企業数・収録状況サマリー"]
         C["📦 収集管理\ncollection.html\n財務収集/株価収集/市場データ更新/DB閲覧\n（4タブ構成・ウィザードUX）"]
-        A["📊 分析画面\nanalysis.html\n目的別4カテゴリの左サイドバー\n（銘柄を探す/割安度/リターン予測/検証・ステータスバー）"]
+        A["📊 分析画面\nanalysis.html\n目的別5カテゴリの左サイドバー\n（銘柄を探す/割安度/リターン予測/検証/保有を見直す・ステータスバー）"]
         M["📖 モデル解説\nmodels.html\n数式・参考文献・DOIリンク"]
         DB["🗃️ DB ビューア\ndb.html\nスキーマ/プレビュー/統計/リレーション/ドリルダウン"]
     end
@@ -607,7 +607,7 @@ stateDiagram-v2
 
     state Models {
         [*] --> ModelDoc
-        ModelDoc : 📖 モデル解説\nmodels.html\n・数式・パラメータ表\n・参考文献DOIリンク\n（7モデル）
+        ModelDoc : 📖 モデル解説\nmodels.html\n・数式・パラメータ表\n・参考文献DOIリンク\n（9モデル）
     }
 
     state DBViewer {
@@ -775,11 +775,13 @@ classDiagram
         +normalize(values, method) normalized_values
         +winsorize(values, p_low, p_high) clipped_values
         +walk_forward_cv(X, y, n_splits) cv_metrics
+        +fit_feature_columns(X, n_feat) win_params, norm_params
+        +transform_feature_row(sample, win_params, norm_params) list
     }
 
     AnalysisPlugin <|-- GapAnalysisPlugin
     AnalysisPlugin <|-- RecommendPlugin
-    AnalysisPlugin <|-- TotalReturnPlugin
+    AnalysisPlugin <|-- SellRankingPlugin
     AnalysisPlugin <|-- SectorOLSPlugin
     AnalysisPlugin <|-- PricePredictorPlugin
     AnalysisPlugin <|-- NetCashAnalysisPlugin
@@ -990,8 +992,9 @@ graph TB
 | `plugins/price_predictor.py` | バックエンド | 株価リターン予測（価格×財務特徴量OLS・月次WFV） | plugins/utils.py |
 | `plugins/net_cash_analysis.py` | バックエンド | ネットキャッシュ分析（清原達郎『わが投資術』式）＋グレアムNCAV。NC = 流動資産 + 投資有価証券×0.7 − 総負債、NCAV = 流動資産 − 総負債。推計時価総額の崩れによる異常比率はサニティ上限で自動除外し、任意で営業CF>0等のバリュートラップ除外も可能 | database.py |
 | `plugins/macro_risk_return.py` | バックエンド | マクロ×リスク-リターン推奨（交差項OLS+`LassoLarsIC(BIC)`選択+OLS再フィット+Walk-forward CV+James-Stein縮小）。**全社rawを返却し効用U/Pareto/top_nはJS後処理**（λ・リスク軸切替が即時）。リスク軸 R1/R2/R3 を `risk_axis` で切替（R3=セクター×サイズ別バケットの CV 残差 RMSE。サイズ代理=`bs_total_assets`）。マクロ計算は日付メモ化で高速化（既定219s→29s）。`heavy=True`。`use_macro=False` でマクロ特徴量なしの純財務モデルとして実行可 | plugins/utils.py |
-| `plugins/utils.py` | バックエンド | ols()・normalize()・winsorize()・walk_forward_cv()・walk_forward_cv_monthly()・get_macro_features()・get_momentum_return() | — |
+| `plugins/utils.py` | バックエンド | coerce_params()・ols()・normalize()・winsorize()・walk_forward_cv()・walk_forward_cv_monthly()・get_macro_features()・get_momentum_return()・fit_feature_columns()・transform_feature_row()（後2者は feature 前処理ループの集約・PR#213） | — |
 | `tests/` | テスト | pytest 回帰テスト（313件）。プラグイン＋utils＋`database.py`（upsert・RegressionResult merge・derived非永続）＋`collector.py`（XBRLパース・派生指標＋ネットワーク取得を httpx MockTransport でモック）＋`api.py`（純関数・`/health`・DB-backed 読取・heavy回帰のRenderブロック）をカバー。in-memory SQLite fixture（StaticPool）／FastAPI TestClient／httpx MockTransport で検証。`financial_metrics` は SQLite では `FinancialMetric` 列定義から生成したテーブルで代替し、派生値・予測値はテストが直接注入（`make_metric`）。計算式の同値性は Postgres で別途検証。共通 fixture は `tests/conftest.py`（`db`/`make_fin`/`make_metric` 等） | pytest, sqlalchemy, fastapi, httpx |
+| `tests/README.md` | テスト | テスト実行方法・fixture 方針の補足ドキュメント | — |
 | `requirements-dev.txt` | 設定 | 開発・テスト専用依存（`pytest`）。本番 `requirements.txt` と分離（Render メモリ節約） | — |
 | `dashboard.html` | フロントエンド | トップページ・全体サマリー（`/`） | api.py |
 | `collection.html` | フロントエンド | 収集管理・スクリーニング・DBブラウザ（`/collection`） | api.py |
@@ -1015,6 +1018,8 @@ graph TB
 | `FUTURE_TASKS.md` | ドキュメント | 未実装の課題・改善案を Tier 別に記録（Tier1=本番データ鮮度・運用／Tier2=分析モデル拡張・コード／Tier3=運用堅牢化）。完了項目は `archive/IMPROVEMENTS.md` へ移設 | — |
 | `docs/archive/` | ドキュメント | 完了済み作業記録（REFACTORING・IMPROVEMENTS・VISUALIZATION_IMPROVEMENTS）。現行参照には使わない | — |
 | `VISION.md` | ドキュメント | プロジェクトの目的・方針 | — |
+| `CONTEXT.md` | ドキュメント | ドメイン用語集（再分類項目・分析特徴量・表示項目・パラメータ契約の用語定義）。CLAUDE.md 設計制約から参照 | — |
+| `docs/adr/*.md` | ドキュメント | ADR（Architecture Decision Record）。`0001`＝バリュエーション統合とバックテスト一般化（旧 total_return→gap_analysis 吸収の根拠） | — |
 | `CLAUDE.md` | 設定 | Claude Codeへの動作指示（索引＋必須ルール） | — |
 | `.claude/agents/financial-app-explorer.md` | 設定 | read-only 探索サブエージェント定義（多ファイル調査・大ドキュメント精読をトークン節約で委譲） | — |
 | `.claude/skills/*/SKILL.md` | 設定 | プロジェクト固有スキル（`/tidy` 軽量化点検 等）＋汎用スキル群。索引・各スキルの説明は [SKILLS_AND_AGENTS.md](SKILLS_AND_AGENTS.md) を参照 | — |

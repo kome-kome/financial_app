@@ -27,11 +27,4 @@ gh issue create --label "priority:low,ops" # 新タスク起票
 
 ## 注意事項（設計制約）
 
-変更・実装時は以下の制約を必ず守ること（`CLAUDE.md` より）：
-
-1. **次元整合性**: 無次元比率で絶対額を予測しない（Ohlsonモデル型で per-share 設計）
-2. **外れ値処理**: OLS学習前に `winsorize(p1-p99)` を適用
-3. **Zスコアは年度別に計算**（年度を跨いで計算しない）
-4. **科学計算ライブラリ採用基準**: numpy/scipy/statsmodels/scikit-learn は採用可（`docs/VISION.md` の採用基準参照）。新規ライブラリ追加時は同基準と CLAUDE.md「パッケージ管理方針」に従う
-5. **`docs/ARCHITECTURE.md` を同じ作業内で更新**
-6. **Render デプロイ前提**: メモリ 512MB・スピンダウン 15 分・SSH 不可・永続ディスクなし。スキーマ変更は `init_db()` の冪等マイグレーションで対応。詳細は `docs/DEPLOYMENT.md`
+変更・実装時の設計制約（次元整合性・`winsorize(p1-p99)`・Zスコア年度別計算・科学計算ライブラリ採用基準・`docs/ARCHITECTURE.md` 同時更新・Render デプロイ前提）の**正本は [CLAUDE.md](../CLAUDE.md) の「設計制約」セクション**を参照する。二重記載が乖離源になるため、本書では再掲しない（残タスクの正本＝GitHub Issues と同じ方針）。
