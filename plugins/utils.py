@@ -500,6 +500,31 @@ def ridge_regression(X: list, y: list,
     }
 
 
+def macro_risk_exposure(loadings, factor_cov) -> float:
+    """系統的マクロリスク曝露 R_macro = sqrt(betaᵀ・Σ_macro・beta)（ADR-0002 §5）。
+
+    マクロ因子で説明されるリターンの標準偏差。per-stock 事後ローディング ``loadings``
+    （β ベクトル）と選択マクロ因子の共分散行列 ``factor_cov``（Σ_macro）から算出する。
+    μ・R2 と同じ「リターン単位」になるため、効用 U = μ − λ·R の λ が次元整合する
+    （総リスク ≒ sqrt(系統的² + 固有²) として R2 のマクロ起因成分に分解できる）。
+    ‖β‖（L2 ノルム）では単位がリターンにならないため ADR で棄却された定義。
+
+    Raises:
+        ValueError: ベクトル/行列の次元が不整合なとき（fail fast）。
+    """
+    b = np.asarray(loadings, dtype=float).ravel()
+    S = np.asarray(factor_cov, dtype=float)
+    if b.size == 0:
+        return 0.0
+    if S.shape != (b.size, b.size):
+        raise ValueError(
+            f"factor_cov の形状 {tuple(S.shape)} が loadings 次元 ({b.size},) と不整合"
+        )
+    var = float(b @ S @ b)
+    # 対称半正定値行列からの僅少な数値的負値を 0 にクリップしてから sqrt をとる。
+    return math.sqrt(max(var, 0.0))
+
+
 def normalize_transform(val: float, param1: float, param2: float, method: str = "zscore") -> float:
     """学習データから求めたパラメータでスカラー値を変換する。z-score は ±5 にクリップ。"""
     if method == "log":
