@@ -137,7 +137,7 @@ td code,p code,li code{background:#0f172a;border:1px solid #1e2235;padding:1px 5
   <h3>⚠ 注意点・落とし穴</h3>
   <div class="warn-box">ウェイト（重要度）の決め方には数学的な正解はなく、<strong>あなたの好みの設定</strong>です。「この設定が儲かる」とは限らないので、<a href="/guide#backtest" style="color:#fbbf24">バックテスト</a>で過去の成績を確かめるのがおすすめです。</div>
 
-  <div class="more">→ もっと詳しく：<a href="/models#m6">モデル解説 6. Zスコア重み付けスコアリング</a></div>
+  <div class="more">→ もっと詳しく：<a href="/models#m6">モデル解説：Zスコア重み付けスコアリング</a></div>
 </div>
 
 <!-- ① ネットキャッシュ分析 ───────────────────── -->
@@ -170,7 +170,7 @@ td code,p code,li code{background:#0f172a;border:1px solid #1e2235;padding:1px 5
   <h3>⚠ 注意点・落とし穴</h3>
   <div class="warn-box">現金が分厚くても<strong>万年割安のまま放置される会社</strong>もあります。また、商社・銀行・REIT などは決算書の構造が特殊で、この指標がうまく働きません（業種フィルタで外すのがおすすめ）。</div>
 
-  <div class="more">→ もっと詳しく：<a href="/models#m8">モデル解説 8. ネットキャッシュ分析（清原達郎式）</a></div>
+  <div class="more">→ もっと詳しく：<a href="/models#m8">モデル解説：ネットキャッシュ分析（清原達郎式）</a></div>
 </div>
 
 <!-- ② 業種別OLS分析 ─────────────────────────── -->
@@ -195,7 +195,7 @@ td code,p code,li code{background:#0f172a;border:1px solid #1e2235;padding:1px 5
   <h3>⚠ 注意点・落とし穴</h3>
   <div class="warn-box">仲間の会社が少なすぎる業種（既定では5社未満）は計算されません。また理論株価はあくまで「業種内の平均的な値ごろ」であり、<strong>正解の株価ではありません</strong>。</div>
 
-  <div class="more">→ もっと詳しく：<a href="/models#m2">モデル解説 2. 業種別OLS回帰</a></div>
+  <div class="more">→ もっと詳しく：<a href="/models#m2">モデル解説：業種別OLS回帰</a></div>
 </div>
 
 <!-- ② バリュエーション分析 ──────────────────────── -->
@@ -224,7 +224,7 @@ td code,p code,li code{background:#0f172a;border:1px solid #1e2235;padding:1px 5
   <h3>⚠ 注意点・落とし穴</h3>
   <div class="warn-box">「何ヶ月後にどれだけ縮む」「期待総リターン」という数字は、<span class="term" data-tip="平均回帰：行き過ぎた値がいずれ平均へ戻ろうとする性質。ゴムひもが伸びても元に戻るイメージ。">平均回帰</span>を仮定した<strong>ヒューリスティック（経験則）の参考値</strong>であり、当たる確率ではありません。割安に見えても、それには理由（業績悪化など）がある場合もあります。</div>
 
-  <div class="more">→ もっと詳しく：<a href="/models#m3">モデル解説 3. バリュエーション分析</a></div>
+  <div class="more">→ もっと詳しく：<a href="/models#m3">モデル解説：バリュエーション分析</a></div>
 </div>
 
 <!-- ③ 株価リターン予測 ───────────────────────── -->
@@ -249,7 +249,7 @@ td code,p code,li code{background:#0f172a;border:1px solid #1e2235;padding:1px 5
   <h3>⚠ 注意点・落とし穴</h3>
   <div class="warn-box">直線的な関係しか捉えられないため、複雑なパターンは苦手です。また財務データは年1回しか更新されないため、短期予測では同じ財務値が使い回されます。短期の値動き予測は特に外れやすい点に注意。</div>
 
-  <div class="more">→ もっと詳しく：<a href="/models#m4">モデル解説 4. 株価リターン予測（月次WF-CV）</a></div>
+  <div class="more">→ もっと詳しく：<a href="/models#m4">モデル解説：株価リターン予測（月次WF-CV）</a></div>
 </div>
 
 <!-- ③ マクロ×リスク-リターン ─────────────────── -->
@@ -274,7 +274,7 @@ td code,p code,li code{background:#0f172a;border:1px solid #1e2235;padding:1px 5
   <h3>⚠ 注意点・落とし穴</h3>
   <div class="warn-box">最も高度な分析で、当てはまりの精度（CVのR²）は高くありません。表示される要因の効き具合は「<strong>向き（株高/株安）と大小の目安</strong>」として読み、効果を過大に信じないでください。</div>
 
-  <div class="more">→ もっと詳しく：<a href="/models#m9">モデル解説 9. マクロ×リスク-リターン推奨</a></div>
+  <div class="more">→ もっと詳しく：<a href="/models#m9">モデル解説：マクロ×リスク-リターン推奨</a></div>
 </div>
 
 <!-- ④ バックテスト ──────────────────────────── -->
@@ -298,7 +298,7 @@ td code,p code,li code{background:#0f172a;border:1px solid #1e2235;padding:1px 5
   <h3>⚠ 注意点・落とし穴</h3>
   <div class="warn-box">過去がよくても未来を保証しません。さらに、<strong>今もうデータベースに残っている会社だけ</strong>を対象にするため（＝途中で消えた会社が含まれない＝<span class="term" data-tip="生き残った会社だけを見て『成績が良い』と錯覚すること。失敗して消えた会社が集計から抜け落ちるために起きる。">生存バイアス</span>）、結果は実際より良く見えがちです。</div>
 
-  <div class="more">→ もっと詳しく：<a href="/models#m7">モデル解説 7. バックテスト</a></div>
+  <div class="more">→ もっと詳しく：<a href="/models#m7">モデル解説：バックテスト</a></div>
 </div>
 
 <!-- ⑤ 売り候補ランキング ───────────────────────── -->
@@ -324,7 +324,7 @@ td code,p code,li code{background:#0f172a;border:1px solid #1e2235;padding:1px 5
   <h3>⚠ 注意点・落とし穴</h3>
   <div class="warn-box">これは「いつ売れば儲かる」を当てるものではなく、<strong>持ち株を見直すきっかけ</strong>です。全部が優良なら全銘柄「保有継続」になります。ETF や外国株など未収録の銘柄は判定できません。</div>
 
-  <div class="more">→ もっと詳しく：<a href="/models#m10">モデル解説 10. 売り候補ランキング</a></div>
+  <div class="more">→ もっと詳しく：<a href="/models#m10">モデル解説：売り候補ランキング</a></div>
 </div>
 
 <!-- 共通：Zスコア ───────────────────────────── -->
@@ -342,7 +342,7 @@ td code,p code,li code{background:#0f172a;border:1px solid #1e2235;padding:1px 5
 
   <div class="warn-box"><strong>まぎらわしい注意：</strong>ここでの「Zスコア」は偏差値の仲間（標準化スコア）で、倒産予測で有名な「Altman の Z スコア」とは<strong>別物</strong>です。</div>
 
-  <div class="more">→ もっと詳しく：<a href="/models#m5">モデル解説 5. 横断的Zスコア正規化</a></div>
+  <div class="more">→ もっと詳しく：<a href="/models#m5">モデル解説：横断的Zスコア正規化</a></div>
 </div>
 
 </main>

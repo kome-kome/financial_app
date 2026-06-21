@@ -12,7 +12,7 @@ function showNotif(msg, type='error'){
 let gapResults  = [];
 let _gapScatter = null, _gapHist = null;
 
-// 乖離分析の利用可否（業種別OLS の実行に依存）
+// バリュエーション分析の利用可否（業種別OLS の実行に依存）
 let _gapDataExists    = false;  // /api/stats: 過去にOLSを実行しDBに予測値が残っている
 let _olsRanThisSession = false; // このセッションで業種別OLSを実行した
 let _modelStatus = null;         // /api/model/status キャッシュ（鮮度バー用）
@@ -119,7 +119,7 @@ async function preflight() {
     _preflight = d;
     const finOk = d.records > 0;
     const prOk  = (d.stock_price_records ?? 0) > 0;
-    // 過去の業種別OLS実行でDBに予測値が残っていれば乖離分析を解放
+    // 過去の業種別OLS実行でDBに予測値が残っていればバリュエーション分析を解放
     _gapDataExists = (d.records_with_prediction ?? 0) > 0;
     refreshGapAvailability();   // 即時: gap-ready 表示を反映
     fetchModelStatus();          // 非同期: 鮮度バーの詳細を更新
@@ -146,7 +146,7 @@ async function preflight() {
   }
 }
 
-// ── 乖離分析 ─────────────────────────────────────────────────────────
+// ── バリュエーション分析 ─────────────────────────────────────────────────────────
 async function runGapAnalysis() {
   const params = _collectParamValues('gap_analysis', _pluginMeta['gap_analysis']?.params_schema ?? {});
   const url = '/api/gap-analysis' + (params.year ? `?year=${params.year}` : '');
@@ -158,7 +158,7 @@ async function runGapAnalysis() {
     renderGap(gapResults);
     renderGapCharts(gapResults);
   } catch(e) {
-    showNotif('乖離分析失敗: ' + e.message + '（先に業種別OLS分析を実行してください）');
+    showNotif('バリュエーション分析失敗: ' + e.message + '（先に業種別OLS分析を実行してください）');
   }
 }
 
@@ -908,7 +908,7 @@ async function initPlugins() {
   // URL ?tab= 指定があれば優先、なければ ui_order 最小（「① 銘柄を探す」先頭）を表示
   const startTab = (_urlTab && _allTabs.includes(_urlTab)) ? _urlTab : _allTabs[0];
   if (startTab) showTab(startTab);
-  // 乖離分析タブのロック状態を反映（preflight と initPlugins の競合に備え両方で呼ぶ）
+  // バリュエーション分析タブのロック状態を反映（preflight と initPlugins の競合に備え両方で呼ぶ）
   refreshGapAvailability();
 
   // 静的タブのフォームをメタ駆動で注入（params_schema → _renderParamsForm）
@@ -1069,7 +1069,7 @@ async function runDynamicPlugin(pluginName, tabId) {
     const content = document.getElementById(`dynresult-content-${tabId}`);
     content.innerHTML = (RESULT_RENDERERS[pluginName] || _renderGenericResult)(d);
     card.classList.remove('hidden');
-    // 業種別OLS が完了したら乖離分析を解放し、結果に導線を出す
+    // 業種別OLS が完了したらバリュエーション分析を解放し、結果に導線を出す
     if (pluginName === 'sector_ols') {
       _olsRanThisSession = true;
       refreshGapAvailability();   // 即時: gap-ready を表示
@@ -1077,9 +1077,9 @@ async function runDynamicPlugin(pluginName, tabId) {
       content.insertAdjacentHTML('afterbegin',
         `<div class="info-box" style="border-color:#10b981;margin-bottom:14px">
           ✓ 業種別OLSが完了しました。各銘柄の理論株価と乖離率を計算しDBに保存しました。
-          <button class="btn btn-primary btn-sm" style="margin-left:12px" data-click="showTab" data-arg="gap">→ 乖離分析を見る</button>
+          <button class="btn btn-primary btn-sm" style="margin-left:12px" data-click="showTab" data-arg="gap">→ バリュエーション分析を見る</button>
         </div>`);
-      showNotif('乖離分析が利用可能になりました', 'success');
+      showNotif('バリュエーション分析が利用可能になりました', 'success');
     }
   } catch(e) { showNotif(`実行失敗: ${e.message}`); }
   finally {
