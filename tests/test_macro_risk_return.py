@@ -208,8 +208,9 @@ class TestParamsSchema:
         assert result["macro_features"] == ["macro_nikkei225_yoy"]
 
     def test_macro_features_invalid_rejected(self):
+        # macro_data 蓄積の無い系列（JP10Y は収集失敗で未公開）は選択肢外として reject される。
         with pytest.raises(ValueError):
-            coerce_params(self.schema, {"macro_features": ["macro_not_real_yoy"]})
+            coerce_params(self.schema, {"macro_features": ["macro_jp10y_zscore"]})
 
     def test_macro_features_accepts_exposed_commodities_and_eurjpy(self):
         """#218 フェーズ1: 既収集の EURJPY・WTI・GOLD が選択可能・正しく結線される。"""

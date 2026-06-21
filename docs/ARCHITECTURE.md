@@ -981,7 +981,7 @@ graph TB
 | `collector_utils.py` | バックエンド | 収集系モジュール共通の設定定数（EDINET/J-Quants/Yahoo/stooq のレート・並列数・バッチ閾値）とロガー `log` | dotenv |
 | `collector_master.py` | バックエンド | 企業/業種マスタ収集（EDINET コードリスト `fetch_edinet_code_list`・JPX 業種マスタ `update_industry_from_jpx` / `_read_jpx_excel`） | EDINET API, JPX, collector_utils |
 | `collector_financials.py` | バックエンド | XBRL 財務収集・パース・正規化（`parse_xbrl_csv` / `calc_derived` ほか）＋ CF/PL-BS 補完・再解析＋全件収集オーケストレーション（`run_full_collection` / `_phase_*`）。**派生指標・Zスコア・成長率・nc_ratio は永続化しない**（financial_metrics VIEW が担う）。`calc_derived` は free_cf/nonoperating_income の算出のみ残す | EDINET API, collector_utils, collector_master |
-| `collector_prices.py` | バックエンド | 株価収集（stooq / J-Quants / Yahoo）＋市場データ更新＋マクロ指標収集。株価は J-Quants が主経路（stooq は Azure IP ブロックのためローカル補助のみ）。`MACRO_SERIES` で為替・金利・指数・コモディティ9系列を定義 | J-Quants, Yahoo, stooq, collector_utils |
+| `collector_prices.py` | バックエンド | 株価収集（stooq / J-Quants / Yahoo）＋市場データ更新＋マクロ指標収集。株価は J-Quants が主経路（stooq は Azure IP ブロックのためローカル補助のみ）。`MACRO_SERIES` で為替・金利・指数・コモディティ・ボラ13系列を定義 | J-Quants, Yahoo, stooq, collector_utils |
 | `data_quality.py` | バックエンド | データ品質チェック（NULL率・外れ値・収録状況） | database.py, api.py（import元） |
 | `plugins/base.py` | バックエンド | 分析プラグインの抽象基底クラス | — |
 | `plugins/__init__.py` | バックエンド | プラグインを自動スキャン・レジストリ管理 | plugins/*.py |
