@@ -67,15 +67,16 @@ DEFAULT_FIN_FEATURES = ["per", "pbr", "roe", "equity_ratio", "roa", "eps_growth"
 # plugins/utils.py::get_macro_features は遅延 import で本マップを参照する）。
 # ここに載せる条件 = 本番 macro_data に蓄積がある系列のみ。データの無い系列を選ぶと全スナップ
 # ショットが None スキップになりモデル学習不能になるため公開しない。
+#   - #218 フェーズ1：既収集の EURJPY・WTI・GOLD をチャネル網羅[FX・コモディティ]のため追加公開。
 #   - JP10Y・TOPIX: 収集失敗（JP10Y=^JGB 上場廃止 / TOPIX=^tpx・^TPX 取得不可）で蓄積なし → 非公開。
 #   - VIX/DXY/US5Y/US30Y（#218 フェーズ1）: MACRO_SERIES へは追加済みだが macro_data への蓄積を
 #     Actions で実証してから本マップへ追加する（蓄積前に公開すると上記 None スキップ問題が再発する）。
 _MACRO_MAP = {
     "macro_usdjpy_yoy":    ("USDJPY",    "yoy"),
+    "macro_eurjpy_yoy":    ("EURJPY",    "yoy"),
     "macro_sp500_yoy":     ("SP500",     "yoy"),
     "macro_us10y_zscore":  ("US10Y",     "zscore"),
     "macro_nikkei225_yoy": ("NIKKEI225", "yoy"),
-    "macro_eurjpy_yoy":    ("EURJPY",    "yoy"),
     "macro_wti_yoy":       ("WTI",       "yoy"),
     "macro_gold_yoy":      ("GOLD",      "yoy"),
 }
@@ -85,12 +86,12 @@ MACRO_FEATURE_NAMES = list(_MACRO_MAP.keys())
 # GOLD は SP500/市場成分との多重共線や任意性のため既定には含めず選択肢としてのみ公開）。
 MACRO_FEATURE_OPTIONS = [
     {"value": "macro_usdjpy_yoy",    "label": "USD/JPY 前年比（YoY）"},
+    {"value": "macro_eurjpy_yoy",    "label": "EUR/JPY 前年比（YoY）"},
     {"value": "macro_sp500_yoy",     "label": "S&P500 前年比（YoY）"},
     {"value": "macro_us10y_zscore",  "label": "米10年金利 Zスコア"},
     {"value": "macro_nikkei225_yoy", "label": "日経225 前年比（YoY）"},
-    {"value": "macro_eurjpy_yoy",    "label": "EUR/JPY 前年比（YoY）"},
     {"value": "macro_wti_yoy",       "label": "WTI原油 前年比（YoY）"},
-    {"value": "macro_gold_yoy",      "label": "金 前年比（YoY）"},
+    {"value": "macro_gold_yoy",      "label": "金（ゴールド）前年比（YoY）"},
 ]
 DEFAULT_MACRO_FEATURES = ["macro_usdjpy_yoy", "macro_sp500_yoy", "macro_us10y_zscore"]
 

@@ -20,6 +20,7 @@ from plugins.utils import (
     LOG_PRED_CAP,
     check_collinearity,
     kfold_cv,
+    macro_risk_exposure,
     normalize,
     normalize_transform,
     ols,
@@ -29,6 +30,42 @@ from plugins.utils import (
     walk_forward_cv_monthly,
     winsorize,
 )
+
+
+# ── macro_risk_exposure（R_macro = sqrt(βᵀΣβ)）─────────────────────────────
+
+class TestMacroRiskExposure:
+    def test_single_factor(self):
+        # b=[2], Σ=[[9]] → sqrt(4*9) = 6
+        assert macro_risk_exposure([2.0], [[9.0]]) == pytest.approx(6.0)
+
+    def test_diagonal_cov(self):
+        # 無相関 2 因子: b=[1,1], Σ=diag(4,9) → sqrt(4+9)
+        r = macro_risk_exposure([1.0, 1.0], [[4.0, 0.0], [0.0, 9.0]])
+        assert r == pytest.approx(math.sqrt(13.0))
+
+    def test_full_cov_with_correlation(self):
+        # 相関項が二次形式に効く: b=[1,1], Σ=[[1,0.5],[0.5,1]] → sqrt(1+1+2*0.5)=sqrt(3)
+        r = macro_risk_exposure([1.0, 1.0], [[1.0, 0.5], [0.5, 1.0]])
+        assert r == pytest.approx(math.sqrt(3.0))
+
+    def test_returns_in_return_units_scales_linearly(self):
+        # ローディングを 2 倍すると R_macro も 2 倍（リターン単位の標準偏差ゆえ）
+        cov = [[1.0, 0.2], [0.2, 1.0]]
+        base = macro_risk_exposure([1.0, 0.5], cov)
+        doubled = macro_risk_exposure([2.0, 1.0], cov)
+        assert doubled == pytest.approx(2.0 * base)
+
+    def test_empty_loadings_returns_zero(self):
+        assert macro_risk_exposure([], [[]]) == 0.0
+
+    def test_dimension_mismatch_raises(self):
+        with pytest.raises(ValueError):
+            macro_risk_exposure([1.0, 2.0], [[1.0]])
+
+    def test_negative_quadratic_form_clipped_to_zero(self):
+        # 数値誤差で二次形式が僅かに負になっても sqrt(NaN) を出さず 0 に丸める
+        assert macro_risk_exposure([1.0], [[-1.0]]) == 0.0
 
 
 # ── winsorize ────────────────────────────────────────────────────────────
