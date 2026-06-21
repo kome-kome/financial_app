@@ -30,9 +30,8 @@ python -m pytest tests/ -v
 | `test_utils.py` | `plugins/utils.py`（OLS・winsorize・kfold/walk-forward CV・統計診断） | numpy / scipy / statsmodels |
 | `test_net_cash_analysis.py` | `plugins/net_cash_analysis.py`（清原式ネットキャッシュ計算） | なし（純関数） |
 | `test_recommend.py` | `plugins/recommend.py`（Zスコア重み付けスコアリング） | SQLite fixture |
-| `test_gap_analysis.py` | `plugins/gap_analysis.py`（AR(1) 半減期推定・乖離分析） | statsmodels / SQLite fixture |
+| `test_gap_analysis.py` | `plugins/gap_analysis.py`（AR(1) 半減期推定・バリュエーション分析。期待総リターン列は旧 total_return 吸収） | statsmodels / SQLite fixture |
 | `test_sector_ols.py` | `plugins/sector_ols.py`（業種別OLS回帰・予測値書き込み） | numpy / SQLite fixture |
-| `test_total_return.py` | `plugins/total_return.py`（per-share OLS 総合リターン） | numpy / SQLite fixture |
 | `test_price_predictor.py` | `plugins/price_predictor.py`（価格特徴量・N日先リターン予測） | numpy / SQLite fixture |
 | `test_database.py` | `database.py`（pack/unpack・upsert_company・upsert_financial・年度別Zスコア） | SQLite fixture |
 | `test_collector.py` | `collector.py`（XBRL パース・連結優先・派生指標 calc_derived・列検出・定数＋ネットワーク系：書類一覧/XBRL ZIP/stooq/J-Quants） | pandas / httpx MockTransport |
