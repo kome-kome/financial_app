@@ -35,7 +35,7 @@ SPECIAL_ANALYSES = [
     {
         "name": "backtest",
         "label": "バックテスト",
-        "description": "過去時点での推薦スコアの期待リターン（その後の株価変化）を検証します",
+        "description": "過去時点でのスコアリング（おすすめ／バリュエーション／ネットキャッシュ）の期待リターン（その後の株価変化）を検証します",
         "depends_on": [],
         "heavy": False,
         "category": "④ 戦略を検証",
@@ -152,14 +152,17 @@ async def run_backtest(
     top_n: int = 20,
     industry: Optional[str] = None,
     min_market_cap: Optional[float] = None,
+    source: str = "recommend",
     db: Session = Depends(api.get_db),
 ):
     if not (1 <= months_ago <= 60):
         raise HTTPException(400, "months_ago は 1〜60 の範囲で指定してください")
     if not (5 <= top_n <= 100):
         raise HTTPException(400, "top_n は 5〜100 の範囲で指定してください")
+    if source not in backtest.SCORING_SOURCES:
+        raise HTTPException(400, f"source は {', '.join(backtest.SCORING_SOURCES)} のいずれか")
     try:
-        return backtest.run(db, preset, months_ago, top_n, industry, min_market_cap)
+        return backtest.run(db, preset, months_ago, top_n, industry, min_market_cap, source)
     except Exception as e:
         log.error("Backtest error: %s", e, exc_info=True)
         raise HTTPException(500, "バックテスト実行エラーが発生しました。")
@@ -171,16 +174,19 @@ async def backtest_multi(
     top_n: int = 20,
     industry: Optional[str] = None,
     min_market_cap: Optional[float] = None,
+    source: str = "recommend",
     db: Session = Depends(api.get_db),
 ):
     if not (5 <= top_n <= 100):
         raise HTTPException(400, "top_n は 5〜100 の範囲で指定してください")
+    if source not in backtest.SCORING_SOURCES:
+        raise HTTPException(400, f"source は {', '.join(backtest.SCORING_SOURCES)} のいずれか")
     periods = []
     for m in backtest.MULTI_PERIODS:
         try:
-            periods.append(backtest.run(db, preset, m, top_n, industry, min_market_cap))
+            periods.append(backtest.run(db, preset, m, top_n, industry, min_market_cap, source))
         except Exception as e:
             log.error("Backtest multi error (months=%d): %s", m, e, exc_info=True)
             periods.append({"holding_months": m, "summary": None, "results": [],
                             "total_candidates": 0, "error": "計算エラー"})
-    return {"periods": periods, "preset": preset, "top_n": top_n}
+    return {"periods": periods, "preset": preset, "top_n": top_n, "source": source}

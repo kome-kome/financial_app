@@ -12,9 +12,54 @@ from sqlalchemy.orm import Session
 
 from database import FinancialMetric, prices_on_or_after, latest_prices
 from plugins.recommend import PRESETS
+from plugins.net_cash_analysis import compute_net_cash, compute_nc_ratio
 
 # 複数保有期間バックテスト（/api/backtest/multi）の保有月数。
 MULTI_PERIODS = [3, 6, 12, 18, 24]
+
+# バックテストで検証できるスコアリング手法（ランキングを出す一次分析を as-of で再現する）。
+# 買い系（recommend/valuation/net_cash）は「スコアが高いほど買い候補」で、上位 N 社の
+# その後リターンがベンチマークを上回れば有効。sell は双対（買い系の逆観点）で、上位 N 社＝
+# 最も売り向きの銘柄。**sell は超過収益が負（＝下回る）ほど売りシグナルが有効**と解釈する。
+#   recommend : recommend のプリセット加重和（z_roe 等）
+#   valuation : バリュエーション分析の期待総リターン（gap_ratio + 配当利回り）
+#   net_cash  : 清原式ネットキャッシュ比率
+#   sell      : 売り候補（recommend 加重和の符号反転＝買い系スコアの逆観点・メタ×双対）
+SCORING_SOURCES = ("recommend", "valuation", "net_cash", "sell")
+
+# 配当利回りの異常値ガード（％）。gap_analysis（バリュエーション分析）と整合。
+_DIV_YIELD_CAP = 30.0
+
+
+def score_record(r, source: str, weights: dict) -> float | None:
+    """1レコードのスコア（高いほど買い候補）。算出不能なら None（候補から除外）。
+
+    各 source は financial_metrics VIEW の as-of スナップショット（FinancialMetric）から
+    一次分析のランキングキーを再現する。recommend のみ preset 加重を使う。
+    """
+    if source == "valuation":
+        # 期待総リターン[%] = gap_ratio[%] + 配当利回り[%]（gap_ratio 必須＝sector_ols 実行済み年度のみ）
+        if r.gap_ratio is None:
+            return None
+        dy = float(r.div_yield) if r.div_yield is not None else 0.0
+        if dy > _DIV_YIELD_CAP:
+            dy = 0.0
+        return float(r.gap_ratio) + dy
+    if source == "net_cash":
+        # 清原式ネットキャッシュ比率 = (流動資産 + 投資有価証券×0.7 − 総負債) / 時価総額
+        nc = compute_net_cash(r.bs_current_assets, r.bs_investment_securities,
+                              r.bs_total_liabilities)
+        return compute_nc_ratio(nc, r.market_cap)
+    # recommend（既定）: プリセット加重和。sell は同一加重の符号反転（買い系の逆観点）。
+    score, has_any = 0.0, False
+    for metric, weight in weights.items():
+        val = getattr(r, metric, None)
+        if val is not None:
+            score += weight * val
+            has_any = True
+    if not has_any:
+        return None
+    return -score if source == "sell" else score
 
 
 def percentile(sorted_arr: list, p: float) -> float:
@@ -35,8 +80,17 @@ def run(
     top_n: int,
     industry: Optional[str],
     min_market_cap: Optional[float],
+    source: str = "recommend",
 ) -> dict:
-    """バックテストを1期間分実行してdictを返す（例外はそのまま伝播）"""
+    """バックテストを1期間分実行してdictを返す（例外はそのまま伝播）。
+
+    source で検証対象の一次分析を切替（recommend / valuation / net_cash）。
+    仕組み（as-of スコア→上位N社→実現リターン→ベンチマーク超過）は source 非依存。
+    """
+    if source not in SCORING_SOURCES:
+        raise ValueError(
+            f"未知の scoring source: {source!r}（{', '.join(SCORING_SOURCES)} のいずれか）"
+        )
     weights = PRESETS.get(preset_name, PRESETS["バランス型"])
     today = date.today()
     start_date = today - timedelta(days=months_ago * 30)
@@ -66,13 +120,8 @@ def run(
 
     best: dict = {}
     for r in records:
-        score, has_any = 0.0, False
-        for metric, weight in weights.items():
-            val = getattr(r, metric, None)
-            if val is not None:
-                score += weight * val
-                has_any = True
-        if not has_any:
+        score = score_record(r, source, weights)
+        if score is None:
             continue
         if r.edinet_code not in best or r.period_end > best[r.edinet_code][1].period_end:
             best[r.edinet_code] = (score, r)
@@ -82,6 +131,7 @@ def run(
         return {
             "start_date": start_date_str, "end_date": today_str,
             "holding_months": months_ago, "top_n": top_n, "preset": preset_name,
+            "source": source,
             "summary": None, "results": [], "total_candidates": 0,
             "message": f"{start_date_str} 時点の財務データが見つかりませんでした",
         }
@@ -162,6 +212,7 @@ def run(
         "holding_months":   months_ago,
         "top_n":            top_n,
         "preset":           preset_name,
+        "source":           source,
         "total_candidates": len(scored),
         "summary":          summary,
         "results":          results,

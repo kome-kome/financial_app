@@ -219,6 +219,22 @@ class TestBacktestEndpoint:
         assert r.status_code == 200
         assert r.json()["total_candidates"] == 1
 
+    def test_rejects_unknown_source(self, db):
+        api.app.dependency_overrides[api.get_db] = lambda: db
+        assert client.get("/api/backtest", params={"source": "nope"}).status_code == 400
+
+    def test_valuation_source_passes_through(self, db, make_metric):
+        # source=valuation: gap_ratio を持つ銘柄のみ候補化（HTTP レイヤ）
+        db.add(make_metric(edinet_code="E00001", year=2020, period_end="2020-03-31",
+                           gap_ratio=15.0, div_yield=2.0))
+        db.commit()
+        api.app.dependency_overrides[api.get_db] = lambda: db
+        r = client.get("/api/backtest", params={"source": "valuation"})
+        assert r.status_code == 200
+        body = r.json()
+        assert body["source"] == "valuation"
+        assert body["total_candidates"] == 1
+
 
 class TestCompaniesEndpoint:
     def test_list_and_filters(self, db, make_company):

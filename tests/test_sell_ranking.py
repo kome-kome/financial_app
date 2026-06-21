@@ -229,6 +229,30 @@ class TestExecute:
         assert res["count"] == 0
         assert res["results"] == []
 
+    def test_net_cash_cushion_loss_scores_higher(self, db, make_metric):
+        # ネットキャッシュ余力（nc_ratio）の毀損＝クッション消失ほど売りスコアが高い（#208）。
+        # market_cap=1000(百万円)=1e9円。nc = 流動資産 − 総負債（投資有価証券=0）。
+        specs = [
+            ("1001", 2.0e8),   # nc=-3e8 → ratio -0.3（最も毀損）
+            ("1002", 5.0e8),   # 0
+            ("1003", 1.0e9),   # 0.5
+            ("1004", 1.5e9),   # 1.0
+            ("1005", 2.0e9),   # 1.5（最も厚い）
+        ]
+        for i, (sec, ca) in enumerate(specs, 1):
+            db.add(make_metric(edinet_code=f"E{i:04d}", sec_code=sec, company_name=f"会社{i}",
+                               year=2023, market_cap=1000.0,
+                               bs_current_assets=ca, bs_investment_securities=0.0,
+                               bs_total_liabilities=5.0e8))
+        db.commit()
+        res = _run({"holdings": "1001\n1005", "weights": {"nc_ratio": 1.0},
+                    "min_coverage": 0.0}, db)
+        assert res["count"] == 2
+        assert res["results"][0]["sec_code"] == "1001"   # クッション毀損 → 売り上位
+        assert res["results"][1]["sec_code"] == "1005"
+        assert res["results"][0]["score"] > 0
+        assert res["results"][1]["score"] < 0
+
 
 # ── 依存ゲート（sector_ols）─────────────────────────────────────────────────
 

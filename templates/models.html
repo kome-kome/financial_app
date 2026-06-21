@@ -93,11 +93,10 @@ td code{background:#0f172a;border:1px solid #1e2235;padding:1px 5px;border-radiu
     <div class="toc-section-title">共通事項</div>
     <a href="#common">外れ値処理・次元整合性</a>
     <div class="toc-section-title">モデル</div>
-    <a href="#m1">1. 総合リターン予測</a>
-    <div class="toc-sub"><a href="#m1">Ohlsonモデル型OLS</a></div>
+    <a href="#m1">1. 総合リターン予測 → §3へ統合</a>
     <a href="#m2">2. 業種別OLS回帰</a>
-    <a href="#m3">3. 乖離分析</a>
-    <div class="toc-sub"><a href="#m3">AR(1) MLE + フォールバック</a></div>
+    <a href="#m3">3. バリュエーション分析</a>
+    <div class="toc-sub"><a href="#m3">割安度＋平均回帰＋期待総リターン</a></div>
     <a href="#m4">4. 株価リターン予測</a>
     <div class="toc-sub"><a href="#m4">月次WF-CV</a></div>
     <a href="#m5">5. 横断的Zスコア正規化</a>
@@ -166,70 +165,20 @@ HC3 SE:          不均一分散に対応したロバスト標準誤差</div>
   <p>業種別 OLS の <code>regularization="ridge"</code> パラメータで切替可能。多重共線性が顕著な業種では予測安定性が向上するが、SE / t / p 値は定義されない（NaN）。実装は <code>sklearn.linear_model.RidgeCV</code>。</p>
 </div>
 
-<!-- ── Model 1 ── -->
+<!-- ── Model 1（バリュエーション分析§3へ統合・廃止） ── -->
 <div class="model-section" id="m1">
-  <h2>1. 総合リターン予測 <span class="model-tag">Ohlsonモデル型OLS</span></h2>
-  <span class="file-tag">plugins/total_return.py</span>
+  <h2>1. 総合リターン予測 <span class="model-tag">→ §3 バリュエーション分析へ統合</span></h2>
+  <span class="file-tag">plugins/total_return.py（廃止）</span>
 
-  <p>Ohlson (1995) が提唱した残余利益モデルの OLS 近似。1株当たりの財務金額から理論株価を推定し、現在株価との乖離（上昇余地）と配当利回りを合算して総合リターンを予測する。</p>
+  <p>旧「総合リターン予測」は独自のプール OLS（全市場一括＋業種ダミー）で理論株価を推定し、上昇余地＋配当利回りを総合リターンとしてランキングしていた。この OLS エンジンは<strong>業種別OLS（§2）</strong>と二重化していたため統合し、本モデルは廃止した（ADR-0001）。</p>
 
-  <h3>モデル定式化</h3>
-  <div class="formula-block"><span class="comment"># 目的変数</span>
-<span class="var">y</span> = stock_price  <span class="sym">[円/株]</span>
+  <ul>
+    <li>理論株価の推定は <strong>業種別OLS（§2）1本</strong>に集約（業種内回帰でプール回帰より精緻）。</li>
+    <li>「期待総リターン＝乖離率＋配当利回り」のランキングは <strong>バリュエーション分析（§3）</strong>へ吸収し、<code>gap_ratio</code> seam ＋配当利回りから算出（独自 OLS 不要）。</li>
+    <li>implied P/E・P/B は <strong>予測株価 ÷ EPS・BPS</strong> で銘柄ごとに復元（プール回帰の β 係数解釈は失うが、業種別係数で代替）。</li>
+  </ul>
 
-<span class="comment"># 説明変数（全て [円/株] — 次元整合）</span>
-<span class="var">X</span> = [EPS,  BPS,  OPS_CF,  DPS]
-
-<span class="comment"># cf_ops_ps の推計</span>
-発行株式数 ≈ bs_total_equity / bs_bps
-cf_ops_ps  = cf_operating_cf / 発行株式数
-
-<span class="comment"># 前処理</span>
-X_raw → winsorize(p1–p99) → z-score正規化 → X_norm
-y_raw → log変換 → z-score正規化 → y_norm
-
-<span class="comment"># OLS</span>
-<span class="var">ŷ_norm</span> = β₀ + β₁·EPS_norm + β₂·BPS_norm + β₃·CF_norm + β₄·DPS_norm
-
-<span class="comment"># 逆変換（exp上限: exp(15) ≈ 3.3百万円/株）</span>
-<span class="var">ŷ</span> = exp( min(ŷ_norm·σ_y + μ_y, <span class="val">15.0</span>) )  <span class="sym">[円/株]</span>
-
-<span class="comment"># 総合リターン</span>
-上昇余地   = (ŷ − 実際株価) / 実際株価 × 100  <span class="sym">[%]</span>
-総合リターン = 上昇余地 + 配当利回り          <span class="sym">[%]</span></div>
-
-  <h3>係数の経済的解釈</h3>
-  <table>
-    <thead><tr><th>係数</th><th>解釈</th><th>単位</th></tr></thead>
-    <tbody>
-      <tr><td><code>β₁</code> (EPS)</td><td>implied P/E 倍率</td><td>無次元</td></tr>
-      <tr><td><code>β₂</code> (BPS)</td><td>implied P/B 倍率</td><td>無次元</td></tr>
-      <tr><td><code>β₃</code> (CF)</td><td>implied Price/CF 倍率</td><td>無次元</td></tr>
-      <tr><td><code>β₄</code> (DPS)</td><td>implied 配当割引倍率</td><td>無次元</td></tr>
-      <tr><td><code>β_sector_i</code></td><td>業種 i の基準業種に対する log 価格水準差</td><td>log 単位</td></tr>
-    </tbody>
-  </table>
-  <p>係数が経済的に意味を持つのは、説明変数と被説明変数の次元が全て [円/株] で一致しているため。</p>
-
-  <h3>業種固定効果（オプション・デフォルト ON）</h3>
-  <div class="formula-block"><span class="var">ŷ</span> = <span class="var">β</span>₀ + <span class="var">β</span>₁·EPS + <span class="var">β</span>₂·BPS + <span class="var">β</span>₃·CF + <span class="var">β</span>₄·DPS + Σⱼ <span class="var">β</span><span class="sym">sector_j</span> · 1{industry = j}</div>
-  <p>業種ごとの P/E・P/B 水準差を One-hot ダミー変数（最初の業種を基準としてドロップ）で吸収。サンプル数 ≥ 5 の業種のみダミー化（過学習防止）。シミュレーション検証で R² 0.83 → 0.97 に改善。</p>
-
-  <h3>主要パラメータ</h3>
-  <table>
-    <thead><tr><th>パラメータ</th><th>デフォルト</th><th>説明</th></tr></thead>
-    <tbody>
-      <tr><td><code>use_cf</code></td><td>True</td><td>CF因子（1株営業CF）を使用するか</td></tr>
-      <tr><td><code>use_sector_fe</code></td><td>True</td><td>業種固定効果（ダミー変数）を使用するか</td></tr>
-      <tr><td><code>n_folds</code></td><td>5</td><td>横断的 k-fold 分割数</td></tr>
-      <tr><td><code>top_n</code></td><td>20</td><td>上位表示件数</td></tr>
-      <tr><td><code>LOG_PRED_CAP</code></td><td>15.0</td><td>予測値の log-space 上限（≈ 3.3百万円）</td></tr>
-    </tbody>
-  </table>
-
-  <div class="warn-box">
-    <strong>限界:</strong> 発行株式数の推計は近似値（IFRS/JGAAP 混在時に精度低下）。J-Quants の <code>IssuedShares</code> 取得は FUTURE_TASKS Tier 2-G として残課題。
-  </div>
+  <p>理論的背景（Ohlson 残余利益モデル）は §2・§3 の per-share 回帰に引き継がれている。</p>
 
   <div class="refs">
     <h4>参考文献</h4>
@@ -310,7 +259,7 @@ predicted_market_cap = ŷ_pred / stock_price × market_cap   <span class="sym">[
       <li><strong>説明変数の自動ドロップ:</strong> 選択列のうち欠損率が 50% を超える列、および AND 除外でどの業種も最小サンプル数に届かない場合の欠損最多列を自動除外し、除外内容を画面に警告表示（欠損列を重ねて 0 業種に潰れる事故を防ぐ）</li>
       <li>per-share 10項目以上選択時は PL同士・BS同士の比例関係から VIF&gt;10 が頻発する。<code>check_collinearity</code> の警告が出た業種では <strong>Ridge への切替を強く推奨</strong></li>
       <li>株数推計は IFRS/JGAAP 定義差・期中増資・優先株・転換社債存在時に誤差あり（FUTURE_TASKS の J-Quants <code>IssuedShares</code> 取得で根本解決予定）</li>
-      <li>乖離分析（gap_analysis）は本プラグインの実行後でなければ利用不可。gap_ratio の収束予測には統計的根拠がない（→ モデル 3 参照）</li>
+      <li>バリュエーション分析（gap_analysis）は本プラグインの実行後でなければ利用不可。gap_ratio の収束予測には統計的根拠がない（→ モデル 3 参照）</li>
     </ul>
   </div>
 
@@ -329,10 +278,17 @@ predicted_market_cap = ŷ_pred / stock_price × market_cap   <span class="sym">[
 
 <!-- ── Model 3 ── -->
 <div class="model-section" id="m3">
-  <h2>3. 乖離分析 <span class="model-tag">AR(1) MLE + フォールバック</span></h2>
-  <span class="file-tag">plugins/gap_analysis.py</span>
+  <h2>3. バリュエーション分析 <span class="model-tag">割安度＋平均回帰＋期待総リターン</span></h2>
+  <span class="file-tag">plugins/gap_analysis.py（内部 slug・/api/gap-analysis は後方互換で維持）</span>
 
-  <p>業種別OLSが推定した理論値と実際の時価総額の乖離率を表示し、各銘柄の年次 gap_ratio 履歴に対して <code>statsmodels</code> の AR(1) モデルを MLE 推定して半減期を計算する。履歴が 8 観測未満の銘柄はヒューリスティックにフォールバック。</p>
+  <p>業種別OLS（§2）が推定した理論値と実際値の乖離率（割安度）を起点に、平均回帰タイミング（半減期）と期待総リターン（乖離＋配当利回り）を一括で出すバリュエーション系のハブ。各銘柄の年次 gap_ratio 履歴に対して <code>statsmodels</code> の AR(1) モデルを MLE 推定して半減期を計算する（履歴 8 観測未満はヒューリスティックにフォールバック）。旧「総合リターン予測」（§1）の独自 OLS は廃止し、本モデルへ統合した（ADR-0001）。</p>
+
+  <h3>期待総リターンと implied 倍率（旧 total_return 吸収）</h3>
+  <div class="formula-block"><span class="comment"># gap_ratio[%] と配当利回り[%] は同次元 → 加算可能</span>
+予測株価     = 実株価 × (1 + gap_ratio / 100)        <span class="sym">[円/株]</span>
+<span class="var">期待総リターン</span> = gap_ratio + 配当利回り              <span class="sym">[%]</span>  <span class="comment"># sort=total_return で降順表示</span>
+implied PER  = 予測株価 ÷ EPS,  implied PBR = 予測株価 ÷ BPS</div>
+  <p>配当利回りの異常値（30%超）は 0 とみなす。<code>min_div_yield</code>（%）で最低配当利回りフィルタ。プール回帰の β 係数（市場全体の implied 倍率）は失うが、業種別係数（§2）で代替する。</p>
 
   <h3>AR(1) MLE による半減期推定（推奨パス）</h3>
   <div class="formula-block"><span class="var">x</span><span class="sym">t</span> = c + <span class="var">φ</span> <span class="var">x</span><span class="sym">t-1</span> + <span class="var">ε</span><span class="sym">t</span>,   <span class="var">ε</span><span class="sym">t</span> ~ N(0, σ²)
@@ -559,9 +515,9 @@ z_metric_j_i: 企業 i の指標 j の Zスコア（年度別正規化済み）<
 <!-- ── Model 7 ── -->
 <div class="model-section" id="m7">
   <h2>7. バックテスト</h2>
-  <span class="file-tag">api.py — GET /api/backtest</span>
+  <span class="file-tag">backtest.py — GET /api/backtest（routers/analysis.py）</span>
 
-  <p>過去 N ヶ月前の時点で確定していた財務データを使いスコアリングし、その後の実際の株価リターンを計算することでモデルの有効性を事後的に検証する。</p>
+  <p>過去 N ヶ月前の時点で確定していた財務データを使いスコアリングし、その後の実際の株価リターンを計算することでモデルの有効性を事後的に検証する。<strong>検証対象のスコアリング手法は <code>source</code> で切替</strong>（<code>recommend</code> ＝複合スコア／<code>valuation</code> ＝期待総リターン gap_ratio＋配当／<code>net_cash</code> ＝清原式ネットキャッシュ比率／<code>sell</code> ＝売り候補＝買い系スコアの符号反転）。ランキングを出す一次分析を同一土俵で比較できる（メタ層の一般化）。<code>sell</code> は<strong>超過収益が負（上位＝売り候補が下回る）ほど有効</strong>と読む（メタ層×双対層）。</p>
 
   <h3>計算ロジック</h3>
   <div class="formula-block">start_date = today − months_ago × 30日
@@ -569,7 +525,8 @@ z_metric_j_i: 企業 i の指標 j の Zスコア（年度別正規化済み）<
 1. start_date 以前に period_end が確定しているレコードで
    各社の最新年度データを取得
 
-2. recommend.py と同じ重み付きスコアで全社をランキング
+2. source のスコア関数で全社をランキング
+   （recommend=加重和 / valuation=gap+配当 / net_cash=NC比率）
 
 3. 上位 top_n 社について:
    始値 = start_date 以降の最初の終値

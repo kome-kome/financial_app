@@ -28,7 +28,7 @@ function refreshGapAvailability() {
   // サイドバーのロック演出を除去（鮮度バーに委譲）
   const btn = document.querySelector('.sidebar-item[data-tab="gap"]');
   if (btn) {
-    const baseLabel = (_pluginMeta['gap_analysis'] && _pluginMeta['gap_analysis'].label) || '乖離分析';
+    const baseLabel = (_pluginMeta['gap_analysis'] && _pluginMeta['gap_analysis'].label) || 'バリュエーション分析';
     btn.textContent = baseLabel;
     btn.classList.remove('locked');
     btn.title = '';
@@ -88,13 +88,12 @@ const PLUGIN_TAB_MAP = {
   'gap_analysis':       'gap',
   'recommend':          'recommend',
   'sell_ranking':       'sell_ranking',
-  'total_return':       'total_return',
   'net_cash_analysis':  'net_cash',
   'backtest':           'backtest',   // 特例エントリ。既存の静的タブ #tab-backtest を使用
   'macro_risk_return':  'macro_risk_return',
 };
 // サイドバー項目の先頭につける目印（視認性のため。強調は active 状態で表現）
-const PLUGIN_ICON = { 'recommend': '★ ', 'total_return': '◆ ', 'net_cash_analysis': '¥ ' };
+const PLUGIN_ICON = { 'recommend': '★ ', 'gap_analysis': '◆ ', 'net_cash_analysis': '¥ ' };
 let _allTabs   = [];        // タブを持つ分析の tabId 一覧（initPlugins が構築）
 let _pluginMeta = {};
 // Render 軽量モード（true なら重い回帰はローカル実行に限定。UIで無効化＋案内）
@@ -132,7 +131,7 @@ async function preflight() {
     document.getElementById('status-price-text').style.color     = prOk  ? '#10b981' : '#ef4444';
     document.getElementById('api-dot').style.background = '#10b981';
     [['btn-gap-analysis', !finOk], ['btn-recommend', !finOk],
-     ['btn-total-return', !finOk], ['btn-backtest', !prOk],
+     ['btn-backtest', !prOk],
      ['btn-bt-multi', !prOk], ['btn-mrr', !finOk || !prOk]].forEach(([id, disabled]) => {
       const el = document.getElementById(id);
       if (!el) return;
@@ -167,13 +166,17 @@ function renderGap(rows) {
   const sortEl = document.getElementById('param-gap_analysis-sort');
   const sort = sortEl ? sortEl.value : 'desc';
   let sorted = [...rows];
-  if (sort === 'desc') sorted.sort((a,b) => (b.gap_ratio??0) - (a.gap_ratio??0));
-  else                 sorted.sort((a,b) => (a.gap_ratio??0) - (b.gap_ratio??0));
+  if (sort === 'total_return')
+    sorted.sort((a,b) => (b.expected_total_return_pct??0) - (a.expected_total_return_pct??0));
+  else if (sort === 'desc') sorted.sort((a,b) => (b.gap_ratio??0) - (a.gap_ratio??0));
+  else                      sorted.sort((a,b) => (a.gap_ratio??0) - (b.gap_ratio??0));
 
   const tbody = document.getElementById('gap-tbody');
   tbody.innerHTML = sorted.map(r => {
     const gap = r.gap_ratio ?? 0;
     const gapCls = gap > 0 ? 'gap-positive' : 'gap-negative';
+    const tr = r.expected_total_return_pct ?? 0;
+    const trColor = tr > 0 ? '#10b981' : '#ef4444';
     return `<tr>
       <td><span class="tag tag-blue">${esc(r.sec_code||r.edinet_code)}</span></td>
       <td>${r.edinet_code ? `<a href="/company/${esc(r.edinet_code)}" class="co-link" style="font-weight:500">${esc(r.company_name)}</a>` : esc(r.company_name)}</td>
@@ -181,6 +184,9 @@ function renderGap(rows) {
       <td style="text-align:right;font-family:monospace">${fmt0((r.actual_market_cap||0)/100)}</td>
       <td style="text-align:right;font-family:monospace">${fmt0((r.predicted_market_cap||0)/100)}</td>
       <td class="${gapCls}" style="text-align:right;font-family:monospace">${gap>0?'+':''}${gap}%</td>
+      <td style="text-align:right;font-family:monospace;font-weight:600;color:${trColor}">${tr>0?'+':''}${tr}%</td>
+      <td style="text-align:right;font-family:monospace;color:#f59e0b">${Number(r.div_yield_pct??0)}%</td>
+      <td style="text-align:right;font-family:monospace;color:#64748b">${r.implied_per!=null?Number(r.implied_per):'-'}</td>
       <td style="text-align:right;font-family:monospace;color:#94a3b8">${Number(r.expected_gap_6m)}%</td>
       <td style="text-align:right;font-family:monospace;color:#94a3b8">${Number(r.expected_gap_12m)}%</td>
       <td style="text-align:right">
@@ -247,9 +253,9 @@ function renderGapCharts(rows) {
 
 function exportGapCSV() {
   if (!gapResults.length) return;
-  const h = '証券コード,企業名,業種,実際時価総額,予測時価総額,乖離率%,期待乖離6M%,期待乖離12M%,収束スコア12M(参考)\n';
-  const b = gapResults.map(r=>[r.sec_code,r.company_name,r.industry,r.actual_market_cap,r.predicted_market_cap,r.gap_ratio,r.expected_gap_6m,r.expected_gap_12m,r.conv_score_12m].join(',')).join('\n');
-  dl('﻿'+h+b, 'gap_analysis.csv');
+  const h = '証券コード,企業名,業種,実際時価総額,予測時価総額,乖離率%,期待総リターン%,配当利回り%,implied PER,implied PBR,予測株価,実際株価,期待乖離6M%,期待乖離12M%,収束スコア12M(参考)\n';
+  const b = gapResults.map(r=>[r.sec_code,r.company_name,r.industry,r.actual_market_cap,r.predicted_market_cap,r.gap_ratio,r.expected_total_return_pct,r.div_yield_pct,r.implied_per??'',r.implied_pbr??'',r.pred_price??'',r.actual_price??'',r.expected_gap_6m,r.expected_gap_12m,r.conv_score_12m].join(',')).join('\n');
+  dl('﻿'+h+b, 'valuation_analysis.csv');
 }
 
 // ── おすすめ銘柄 ────────────────────────────────────────────────────
@@ -381,12 +387,13 @@ const SELL_WEIGHT_LABELS = {
   'cf_ratio':     ['CF余力',             0.8],
   'rev_growth':   ['売上成長率',          0.6],
   'equity_ratio': ['財務安全性',          0.4],
+  'nc_ratio':     ['ネットキャッシュ余力', 0.4],
 };
 // plugins/sell_ranking.py PRESETS と一致させる（高いほどその観点を売り判断で重視）。
 const SELL_PRESETS = {
-  'バランス型':   {gap_ratio:1.0, roe:1.0, op_margin:1.0, cf_ratio:0.8, rev_growth:0.6, equity_ratio:0.4},
-  '割高警戒型':   {gap_ratio:2.5, roe:0.5, op_margin:0.5, rev_growth:0.3},
-  '業績悪化重視': {roe:2.0, op_margin:1.5, cf_ratio:1.0, rev_growth:1.5, gap_ratio:0.5},
+  'バランス型':   {gap_ratio:1.0, roe:1.0, op_margin:1.0, cf_ratio:0.8, rev_growth:0.6, equity_ratio:0.4, nc_ratio:0.4},
+  '割高警戒型':   {gap_ratio:2.5, roe:0.5, op_margin:0.5, rev_growth:0.3, nc_ratio:0.8},
+  '業績悪化重視': {roe:2.0, op_margin:1.5, cf_ratio:1.0, rev_growth:1.5, gap_ratio:0.5, nc_ratio:0.3},
 };
 const SELL_HOLDINGS_KEY = 'sell_ranking_holdings';
 let sellResults = [];
@@ -529,107 +536,6 @@ function exportSellRankingCSV() {
   dl('﻿' + h + b, 'sell_ranking.csv');
 }
 
-// ── 総合リターン予測 ──────────────────────────────────────────────────
-let trResults = [];
-
-async function runTotalReturn() {
-  const btn = document.getElementById('btn-total-return');
-  btn.disabled = true;
-  btn.innerHTML = '<span class="spinner"></span> 分析中...';
-
-  const params = _collectParamValues('total_return', _pluginMeta['total_return']?.params_schema ?? {});
-
-  try {
-    const d = await apiFetch('/api/plugins/total_return/run', {method:'POST', body:JSON.stringify(params)});
-    renderTotalReturn(d);
-  } catch(e) {
-    showNotif('実行失敗: ' + e.message);
-  } finally {
-    btn.disabled = false;
-    btn.innerHTML = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/><polyline points="17 6 23 6 23 12"/></svg> 総合リターン予測を実行';
-  }
-}
-
-function renderTotalReturn(d) {
-  const cv = d.cv_metrics;
-  document.getElementById('tr-mean-r2').textContent   = cv.mean_r2 ?? 'N/A';
-  document.getElementById('tr-mean-rmse').textContent = cv.mean_rmse_pct != null ? cv.mean_rmse_pct + '%' : 'N/A';
-  document.getElementById('tr-n-samples').textContent = (cv.n_samples ?? d.n_total_samples ?? '-') + '社';
-  document.getElementById('tr-cv-type').textContent   = cv.cv_type || '';
-  document.getElementById('tr-cv-waiting').classList.add('hidden');
-  document.getElementById('tr-cv-content').classList.remove('hidden');
-
-  const foldTbody = document.getElementById('tr-fold-tbody');
-  foldTbody.innerHTML = (cv.folds || []).map(f => {
-    const r2Color = f.r2 > 0.5 ? '#10b981' : f.r2 > 0.2 ? '#f59e0b' : '#ef4444';
-    return `<tr>
-      <td style="color:#60a5fa;font-weight:600">${f.fold ?? '-'}</td>
-      <td style="color:#64748b">${f.n_train}</td>
-      <td style="color:#64748b">${f.n_test}</td>
-      <td style="color:${r2Color};font-weight:600">${f.r2}</td>
-      <td style="font-family:monospace">${f.rmse_pct}%</td>
-    </tr>`;
-  }).join('') || '<tr><td colspan="5" class="text-sm" style="text-align:center;padding:16px">CVデータ不足</td></tr>';
-
-  const weights = d.feature_weights;
-  const maxAbs = Math.max(...Object.values(weights).map(w => Math.abs(w.weight)), 0.001);
-
-  function weightRow(key) {
-    const w = weights[key];
-    if (!w) return '';
-    const barW = Math.round(Math.abs(w.weight) / maxAbs * 100);
-    const color = w.weight >= 0 ? '#10b981' : '#ef4444';
-    return `<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;font-size:12px">
-      <span style="color:#94a3b8;min-width:130px">${w.label}</span>
-      <div style="flex:1;background:#1e293b;border-radius:4px;height:8px;overflow:hidden">
-        <div style="width:${barW}%;height:100%;background:${color};border-radius:4px"></div>
-      </div>
-      <span style="font-family:monospace;color:${color};min-width:70px;text-align:right">${w.weight>=0?'+':''}${w.weight.toFixed(4)}</span>
-    </div>`;
-  }
-
-  document.getElementById('tr-pl-weights').innerHTML  = (d.feature_groups.pl||[]).map(weightRow).join('');
-  document.getElementById('tr-cf-weights').innerHTML  = (d.feature_groups.cf||[]).map(weightRow).join('');
-  document.getElementById('tr-bs-weights').innerHTML  = (d.feature_groups.bs||[]).map(weightRow).join('');
-  document.getElementById('tr-div-weights').innerHTML = (d.feature_groups.div||[]).map(weightRow).join('');
-  document.getElementById('tr-weights-card').classList.remove('hidden');
-
-  trResults = d.ranking;
-  document.getElementById('tr-ranking-count').textContent = d.ranking.length + '社';
-  document.getElementById('tr-latest-year').textContent   = d.latest_year + '年度';
-
-  const rankTbody = document.getElementById('tr-ranking-tbody');
-  rankTbody.innerHTML = d.ranking.map(r => {
-    const rankColor = r.rank === 1 ? '#f59e0b' : r.rank <= 3 ? '#fcd34d' : '#e2e8f0';
-    const retColor  = r.total_return_pct > 0 ? '#10b981' : '#ef4444';
-    const upColor   = r.upside_pct > 0 ? '#10b981' : '#ef4444';
-    const fmtPct = (v, c) => `<span style="color:${c};font-weight:600">${v >= 0 ? '+' : ''}${v}%</span>`;
-    return `<tr>
-      <td style="font-weight:700;color:${rankColor};font-size:15px">${Number(r.rank)}</td>
-      <td><span class="tag tag-blue">${esc(r.sec_code||'-')}</span></td>
-      <td>${r.edinet_code ? `<a href="/company/${esc(r.edinet_code)}" class="co-link" style="font-weight:500">${esc(r.name)}</a>` : esc(r.name)}</td>
-      <td><span class="tag tag-amber" style="font-size:10px">${esc(r.industry||'-')}</span></td>
-      <td>${fmtPct(r.total_return_pct, retColor)}</td>
-      <td>${fmtPct(r.upside_pct, upColor)}</td>
-      <td style="color:#f59e0b">${Number(r.div_yield_pct)}%</td>
-      <td style="text-align:right;font-family:monospace;color:#94a3b8">${fmt0(r.pred_price)}円</td>
-      <td style="text-align:right;font-family:monospace;color:#94a3b8">${fmt0(r.actual_price)}円</td>
-      <td style="text-align:right;font-family:monospace;color:#64748b">${r.implied_per!=null?Number(r.implied_per):'-'}</td>
-      <td style="text-align:right;font-family:monospace;color:#64748b">${r.implied_pbr!=null?Number(r.implied_pbr):'-'}</td>
-    </tr>`;
-  }).join('');
-  document.getElementById('tr-ranking-card').classList.remove('hidden');
-}
-
-function exportTotalReturnCSV() {
-  if (!trResults.length) return;
-  const h = '順位,証券コード,企業名,業種,期待リターン%,株価上昇余地%,配当利回り%,予測株価(円),実際株価(円),implied PER,implied PBR\n';
-  const b = trResults.map(r =>
-    [r.rank,r.sec_code,r.name,r.industry,r.total_return_pct,r.upside_pct,r.div_yield_pct,r.pred_price,r.actual_price,r.implied_per??'',r.implied_pbr??''].join(',')
-  ).join('\n');
-  dl('﻿'+h+b, 'total_return_ranking.csv');
-}
-
 // ── ネットキャッシュ分析（清原達郎） ────────────────────────────────────
 let ncResults = [];
 
@@ -734,11 +640,12 @@ async function runBacktest() {
   const months   = document.getElementById('bt-months').value;
   const topn     = document.getElementById('bt-topn').value;
   const industry = document.getElementById('bt-industry').value.trim();
+  const source   = document.getElementById('bt-source').value;
   const btn = document.getElementById('btn-backtest');
   btn.disabled = true;
   btn.innerHTML = '<span class="spinner"></span> 計算中...';
   try {
-    let url = `/api/backtest?preset=${encodeURIComponent(preset)}&months_ago=${months}&top_n=${topn}`;
+    let url = `/api/backtest?preset=${encodeURIComponent(preset)}&months_ago=${months}&top_n=${topn}&source=${encodeURIComponent(source)}`;
     if (industry) url += `&industry=${encodeURIComponent(industry)}`;
     const d = await apiFetch(url);
     btResults = d.results;
@@ -927,11 +834,12 @@ async function runBtMulti() {
   const preset   = document.getElementById('bt-preset').value;
   const topn     = document.getElementById('bt-topn').value;
   const industry = document.getElementById('bt-industry').value.trim();
+  const source   = document.getElementById('bt-source').value;
   const btn = document.getElementById('btn-bt-multi');
   btn.disabled = true;
   btn.innerHTML = '<span class="spinner"></span> 集計中（5期間）...';
   try {
-    let url = `/api/backtest/multi?preset=${encodeURIComponent(preset)}&top_n=${topn}`;
+    let url = `/api/backtest/multi?preset=${encodeURIComponent(preset)}&top_n=${topn}&source=${encodeURIComponent(source)}`;
     if (industry) url += `&industry=${encodeURIComponent(industry)}`;
     const d = await apiFetch(url);
     _renderBtMulti(d);
@@ -1014,7 +922,6 @@ async function initPlugins() {
     el.innerHTML = _renderParamsForm(schema, pluginName);
   };
   _inject('params-form-gap',              'gap_analysis',      null);
-  _inject('params-form-total-return',     'total_return',      null);
   _inject('params-form-net-cash',         'net_cash_analysis', null);
   _inject('params-form-macro_risk_return','macro_risk_return',  null);
   // recommend: weights/preset は静的 HTML に温存、フィルター項目のみ注入
@@ -1056,8 +963,7 @@ function _fallbackPlugins() {
   return [
     {name:'recommend',         label:'おすすめ銘柄',       category:'① 銘柄を探す',       ui_order:110, depends_on:[],            params_schema:{}},
     {name:'net_cash_analysis', label:'ネットキャッシュ分析', category:'① 銘柄を探す',       ui_order:120, depends_on:[],            params_schema:{}},
-    {name:'gap_analysis',      label:'乖離分析',           category:'② 割安度を測る',     ui_order:220, depends_on:['sector_ols'], params_schema:{}},
-    {name:'total_return',      label:'総合リターン予測',     category:'③ 将来リターンを予測', ui_order:310, depends_on:[],            params_schema:{}},
+    {name:'gap_analysis',      label:'バリュエーション分析', category:'② 割安度を測る',     ui_order:220, depends_on:['sector_ols'], params_schema:{}},
     {name:'backtest',          label:'バックテスト',        category:'④ 戦略を検証',       ui_order:410, depends_on:[],            params_schema:{}},
   ];
 }
@@ -1558,7 +1464,6 @@ const CSV_EXPORTERS = {
   'gap_analysis':      exportGapCSV,
   'recommend':         exportRecommendCSV,
   'sell_ranking':      exportSellRankingCSV,
-  'total_return':      exportTotalReturnCSV,
   'net_cash_analysis': exportNetCashCSV,
   'backtest':          exportBtCSV,
 };
