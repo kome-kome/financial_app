@@ -62,25 +62,35 @@ FIN_BASE_OPTIONS = [
 # 既定は価格由来（per/pbr）に偏らないよう価格フリーの roa・eps_growth を混合。
 DEFAULT_FIN_FEATURES = ["per", "pbr", "roe", "equity_ratio", "roa", "eps_growth"]
 
-# series_code → transform ("yoy" | "zscore")
-# JP10Y・TOPIX は本番 macro_data に蓄積がない（収集失敗：JP10Y=^JGB 上場廃止 / TOPIX=^tpx・^TPX
-# 取得不可）ため除外。選ぶと全スナップショットが None スキップでモデル学習不能になるため、
-# データのある系列のみを公開する（収集が直り次第ここに追加すれば自動で選択肢に出る）。
+# feature_name → (series_code, transform: "yoy" | "zscore")
+# series_code は collector_prices.py の MACRO_SERIES["code"] と一致させる（このマップが唯一の正本。
+# plugins/utils.py::get_macro_features は遅延 import で本マップを参照する）。
+# ここに載せる条件 = 本番 macro_data に蓄積がある系列のみ。データの無い系列を選ぶと全スナップ
+# ショットが None スキップになりモデル学習不能になるため公開しない。
+#   - JP10Y・TOPIX: 収集失敗（JP10Y=^JGB 上場廃止 / TOPIX=^tpx・^TPX 取得不可）で蓄積なし → 非公開。
+#   - VIX/DXY/US5Y/US30Y（#218 フェーズ1）: MACRO_SERIES へは追加済みだが macro_data への蓄積を
+#     Actions で実証してから本マップへ追加する（蓄積前に公開すると上記 None スキップ問題が再発する）。
 _MACRO_MAP = {
     "macro_usdjpy_yoy":    ("USDJPY",    "yoy"),
     "macro_sp500_yoy":     ("SP500",     "yoy"),
     "macro_us10y_zscore":  ("US10Y",     "zscore"),
     "macro_nikkei225_yoy": ("NIKKEI225", "yoy"),
+    "macro_eurjpy_yoy":    ("EURJPY",    "yoy"),
+    "macro_wti_yoy":       ("WTI",       "yoy"),
+    "macro_gold_yoy":      ("GOLD",      "yoy"),
 }
 MACRO_FEATURE_NAMES = list(_MACRO_MAP.keys())
 
-# params_schema の multiselect 用ラベル。USDJPY/SP500/US10Y を既定選択（NIKKEI225 は
-# 市場成分・SP500 との多重共線があるため任意）。
+# params_schema の multiselect 用ラベル。USDJPY/SP500/US10Y を既定選択（NIKKEI225・EURJPY・WTI・
+# GOLD は SP500/市場成分との多重共線や任意性のため既定には含めず選択肢としてのみ公開）。
 MACRO_FEATURE_OPTIONS = [
     {"value": "macro_usdjpy_yoy",    "label": "USD/JPY 前年比（YoY）"},
     {"value": "macro_sp500_yoy",     "label": "S&P500 前年比（YoY）"},
     {"value": "macro_us10y_zscore",  "label": "米10年金利 Zスコア"},
     {"value": "macro_nikkei225_yoy", "label": "日経225 前年比（YoY）"},
+    {"value": "macro_eurjpy_yoy",    "label": "EUR/JPY 前年比（YoY）"},
+    {"value": "macro_wti_yoy",       "label": "WTI原油 前年比（YoY）"},
+    {"value": "macro_gold_yoy",      "label": "金 前年比（YoY）"},
 ]
 DEFAULT_MACRO_FEATURES = ["macro_usdjpy_yoy", "macro_sp500_yoy", "macro_us10y_zscore"]
 

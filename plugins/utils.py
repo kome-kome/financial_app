@@ -735,14 +735,13 @@ def walk_forward_cv_monthly(
 
 # ── M-1 Phase A: マクロ特徴量・モメンタム ──────────────────────────────────────
 
-# feature_name → (series_code, transform: "yoy" | "zscore")
-# series_code は collector_prices.py の MACRO_SERIES["code"] と一致させる
-# JP10Y は stooq/Yahoo Finance で取得不可のため除外
-_MACRO_FEATURE_MAP: dict[str, tuple[str, str]] = {
-    "macro_usdjpy_yoy":   ("USDJPY", "yoy"),
-    "macro_sp500_yoy":    ("SP500",  "yoy"),
-    "macro_us10y_zscore": ("US10Y",  "zscore"),
-}
+# feature_name → (series_code, transform: "yoy" | "zscore") の正本は
+# plugins/macro_risk_return.py::_MACRO_MAP。重複定義（#218 フェーズ1）を解消するため、
+# ここでは遅延 import で正本を取得する（macro_risk_return → utils の import 方向があるため
+# モジュールレベル import は循環になる。関数呼び出し時の遅延 import で回避する）。
+def _macro_feature_map() -> dict[str, tuple[str, str]]:
+    from plugins.macro_risk_return import _MACRO_MAP
+    return _MACRO_MAP
 
 
 def get_macro_features(
@@ -763,15 +762,16 @@ def get_macro_features(
 
     ref = _date.fromisoformat(ref_date)
     result: dict[str, float | None] = {}
+    macro_map = _macro_feature_map()
 
     # 必要な series_code を集約し、1 クエリで取得（N+1 回避）
     series_needed: dict[str, str] = {}  # series_code → transform
     valid_fnames: list[str] = []
     for fname in feature_names:
-        if fname not in _MACRO_FEATURE_MAP:
+        if fname not in macro_map:
             result[fname] = None
             continue
-        scode, ttype = _MACRO_FEATURE_MAP[fname]
+        scode, ttype = macro_map[fname]
         series_needed[scode] = ttype
         valid_fnames.append(fname)
 
@@ -801,7 +801,7 @@ def get_macro_features(
     win_start = (ref - _td(days=window_days)).isoformat()
 
     for fname in valid_fnames:
-        scode, ttype = _MACRO_FEATURE_MAP[fname]
+        scode, ttype = macro_map[fname]
         date_close = by_series.get(scode, {})
         if not date_close:
             result[fname] = None

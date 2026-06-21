@@ -208,8 +208,9 @@ class TestParamsSchema:
         assert result["macro_features"] == ["macro_nikkei225_yoy"]
 
     def test_macro_features_invalid_rejected(self):
+        # macro_data 蓄積の無い系列（JP10Y は収集失敗で未公開）は選択肢外として reject される。
         with pytest.raises(ValueError):
-            coerce_params(self.schema, {"macro_features": ["macro_gold_yoy"]})
+            coerce_params(self.schema, {"macro_features": ["macro_jp10y_zscore"]})
 
     def test_macro_features_topix_excluded(self):
         """TOPIX は本番 macro_data に蓄積がない（収集失敗）ため選択肢から除外。"""

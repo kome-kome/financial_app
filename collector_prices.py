@@ -1059,17 +1059,25 @@ async def update_market_data(db,
 
 # ── マクロデータ（為替・金利・指数・コモディティ）─────────────────────────
 
-# stooq ティッカー定義。category は 'fx' / 'rate' / 'equity' / 'commodity'。
+# stooq ティッカー定義。category は 'fx' / 'rate' / 'equity' / 'commodity' / 'volatility'。
+# 本番収集は GitHub Actions（Azure IP）上で Yahoo Finance を優先する（stooq は 403 ブロック）。
+# VIX/DXY/US5Y/US30Y は #218 フェーズ1 で追加。Yahoo のみで取得するため stooq ticker は
+# best-effort（空文字は stooq フォールバック時に「データ無し」で skip され安全）。これらが
+# macro_data に実際に蓄積されたことを Actions で実証してから M-1 の特徴量（_MACRO_MAP）へ公開する。
 MACRO_SERIES: list[dict] = [
-    {"code": "USDJPY",    "name": "USD/JPY",      "category": "fx",        "ticker": "usdjpy",   "yf_ticker": "USDJPY=X"},
-    {"code": "EURJPY",    "name": "EUR/JPY",      "category": "fx",        "ticker": "eurjpy",   "yf_ticker": "EURJPY=X"},
-    {"code": "US10Y",     "name": "米10年金利",   "category": "rate",      "ticker": "10usy.b",  "yf_ticker": "^TNX"},
-    {"code": "JP10Y",     "name": "日10年金利",   "category": "rate",      "ticker": "10jpy.b",  "yf_ticker": "^JGB"},
-    {"code": "NIKKEI225", "name": "日経225",      "category": "equity",    "ticker": "^nkx",     "yf_ticker": "^N225"},
-    {"code": "TOPIX",     "name": "TOPIX",        "category": "equity",    "ticker": "^tpx",     "yf_ticker": "^TPX"},
-    {"code": "SP500",     "name": "S&P500",       "category": "equity",    "ticker": "^spx",     "yf_ticker": "^GSPC"},
-    {"code": "WTI",       "name": "WTI原油",      "category": "commodity", "ticker": "cl.f",     "yf_ticker": "CL=F"},
-    {"code": "GOLD",      "name": "金",           "category": "commodity", "ticker": "gc.f",     "yf_ticker": "GC=F"},
+    {"code": "USDJPY",    "name": "USD/JPY",      "category": "fx",         "ticker": "usdjpy",   "yf_ticker": "USDJPY=X"},
+    {"code": "EURJPY",    "name": "EUR/JPY",      "category": "fx",         "ticker": "eurjpy",   "yf_ticker": "EURJPY=X"},
+    {"code": "DXY",       "name": "ドル指数",     "category": "fx",         "ticker": "",         "yf_ticker": "DX-Y.NYB"},
+    {"code": "US5Y",      "name": "米5年金利",    "category": "rate",       "ticker": "",         "yf_ticker": "^FVX"},
+    {"code": "US10Y",     "name": "米10年金利",   "category": "rate",       "ticker": "10usy.b",  "yf_ticker": "^TNX"},
+    {"code": "US30Y",     "name": "米30年金利",   "category": "rate",       "ticker": "",         "yf_ticker": "^TYX"},
+    {"code": "JP10Y",     "name": "日10年金利",   "category": "rate",       "ticker": "10jpy.b",  "yf_ticker": "^JGB"},
+    {"code": "NIKKEI225", "name": "日経225",      "category": "equity",     "ticker": "^nkx",     "yf_ticker": "^N225"},
+    {"code": "TOPIX",     "name": "TOPIX",        "category": "equity",     "ticker": "^tpx",     "yf_ticker": "^TPX"},
+    {"code": "SP500",     "name": "S&P500",       "category": "equity",     "ticker": "^spx",     "yf_ticker": "^GSPC"},
+    {"code": "VIX",       "name": "VIX恐怖指数",  "category": "volatility", "ticker": "",         "yf_ticker": "^VIX"},
+    {"code": "WTI",       "name": "WTI原油",      "category": "commodity",  "ticker": "cl.f",     "yf_ticker": "CL=F"},
+    {"code": "GOLD",      "name": "金",           "category": "commodity",  "ticker": "gc.f",     "yf_ticker": "GC=F"},
 ]
 
 

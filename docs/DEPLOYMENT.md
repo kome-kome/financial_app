@@ -172,7 +172,7 @@ Render ダッシュボードで管理。
 **Private ↔ Public 切替**: 通常は Private。月 2,000 分を使い切ったら Public 化 → Actions 実行 → 翌月1日リセット後に Private 復帰（GitHub UI → `Settings → Danger Zone → Change repository visibility`）。secrets は可視性と独立して保護されるため切替時の操作不要。
 
 **ジョブ所要時間（設計参考値）**:
-- `full-pipeline.yml` finalize（Phase 3〜5）: **200分前後**（`timeout-minutes: 240`）。内訳 = 成長率/Zスコア再計算 約2分 ／ マクロ9系列 約27分 ／ J-Quants 株価（`JQUANTS_BACKFILL_DAYS=730`）約163〜200分。`JQUANTS_BACKFILL_DAYS` 変更時は再計算。
+- `full-pipeline.yml` finalize（Phase 3〜5）: **200分前後**（`timeout-minutes: 240`）。内訳 = 成長率/Zスコア再計算 約2分 ／ マクロ13系列 約27分→系列数に概ね比例（#218 で 9→13・要再計測） ／ J-Quants 株価（`JQUANTS_BACKFILL_DAYS=730`）約163〜200分。`JQUANTS_BACKFILL_DAYS` 変更時は再計算。
 - `backfill-stock-history.yml`: 対象＝stock_price NULL かつ period_end 730日超前（初回 約3,800社）。`YAHOO_STOCK_RATE_SLEEP=0.5秒`・1社1リクエストで **約60〜90分**（`timeout-minutes: 150`）。
 - `backfill-weekly-history.yml`（#198）: 対象＝`stock_price_weekly` の最古日が `today-years` より新しい社。`backfill_weekly_history_yahoo` が Yahoo から過去方向に取得し、**1社ごとに `record_prices_batch(trim=True)`** で daily→weekly 再集約しつつ daily を都度 trim する（5年×全社の daily 同時展開を避け Supabase 500MB を超えない）。`YAHOO_STOCK_RATE_SLEEP=0.5秒`で **約60〜150分**（`timeout-minutes: 150`）。
 
