@@ -31,6 +31,7 @@ from __future__ import annotations
 import argparse
 import logging
 from dataclasses import dataclass
+from datetime import datetime, timezone
 
 import numpy as np
 
@@ -144,7 +145,10 @@ def run_inference(draws: int = 1000, tune: int = 1000, target_accept: float = 0.
         idata = pm.sample(draws=draws, tune=tune, target_accept=target_accept,
                           random_seed=seed, progressbar=False)
 
-    return summarize(idata, selected, macro_sel, edinet_codes)
+    result = summarize(idata, selected, macro_sel, edinet_codes)
+    if not result.run_id:
+        result.run_id = datetime.now(timezone.utc).strftime("mb_%Y%m%dT%H%M%SZ")
+    return result
 
 
 def summarize(idata, selected: list[str], macro_sel: np.ndarray,
@@ -179,12 +183,29 @@ def summarize(idata, selected: list[str], macro_sel: np.ndarray,
 
 
 def persist(db, result: InferenceResult) -> None:
-    """推論結果を DB へ upsert する（LOADINGS_TABLE / META_TABLE）。
+    """推論結果を macro_beta_meta / macro_beta_loadings へ upsert する（#214）。
 
-    スキーマ・upsert は database.py 側に実装する（Issue #214）。Supabase 500MB 制約下で、
-    per-stock × factor の行数（~銘柄数×選択因子数）と Sigma_macro（メタ1行 JSON）に収まる。
+    per-stock 切片は factor_name="_intercept" 行として格納し、producer が μ を復元する。
+    スキーマ・upsert 本体は database.upsert_macro_beta（縦持ち・DDL 追加のみ・Supabase 容量軽微）。
     """
-    raise NotImplementedError("persist: database.py に macro_beta テーブルと upsert を実装（Issue #214）")
+    from database import upsert_macro_beta  # 遅延 import（バッチ実行時のみ DB へ接続）
+
+    meta = {
+        "run_id":           result.run_id,
+        "snapshot_date":    result.snapshot_date,
+        "selected_factors": result.selected_factors,
+        "factor_cov":       result.factor_cov,
+        "hyperparams":      {},
+    }
+    rows: list[dict] = []
+    for code, fmap in result.loadings.items():
+        for fname, (mean, se) in fmap.items():
+            rows.append({"run_id": result.run_id, "edinet_code": code,
+                         "factor_name": fname, "loading_mean": mean, "loading_se": se})
+        a_mean, a_se = result.alpha.get(code, (0.0, None))
+        rows.append({"run_id": result.run_id, "edinet_code": code,
+                     "factor_name": "_intercept", "loading_mean": a_mean, "loading_se": a_se})
+    upsert_macro_beta(db, meta, rows)
 
 
 def main() -> None:

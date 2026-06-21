@@ -431,6 +431,75 @@ def upsert_macro_batch(db, vals: list) -> int:
     return len(vals)
 
 
+def upsert_macro_beta(db, meta: dict, loadings: list) -> int:
+    """M-1 per-stock 階層ベイズ推論結果を macro_beta_meta / macro_beta_loadings へ upsert。
+
+    meta:     {run_id, snapshot_date, selected_factors[list], factor_cov[list[list]], hyperparams[dict]}
+    loadings: [{run_id, edinet_code, factor_name, loading_mean, loading_se}, ...]
+              （per-stock 切片は factor_name="_intercept" 行として渡す）
+    run_id で冪等（既存ランは上書き）。Postgres / SQLite 両対応。戻り値は loadings 行数。
+    """
+    if not meta or not meta.get("run_id"):
+        raise ValueError("upsert_macro_beta: meta['run_id'] は必須です")
+    dialect = db.bind.dialect.name if db.bind is not None else "postgresql"
+    if dialect == "sqlite":
+        from sqlalchemy.dialects.sqlite import insert as _insert
+    else:
+        from sqlalchemy.dialects.postgresql import insert as _insert
+
+    mstmt = _insert(MacroBetaMeta).values(**meta)
+    mstmt = mstmt.on_conflict_do_update(
+        index_elements=["run_id"],
+        set_={
+            "snapshot_date":    mstmt.excluded.snapshot_date,
+            "selected_factors": mstmt.excluded.selected_factors,
+            "factor_cov":       mstmt.excluded.factor_cov,
+            "hyperparams":      mstmt.excluded.hyperparams,
+        },
+    )
+    db.execute(mstmt)
+
+    if loadings:
+        lstmt = _insert(MacroBetaLoading).values(loadings)
+        lstmt = lstmt.on_conflict_do_update(
+            index_elements=["run_id", "edinet_code", "factor_name"],
+            set_={
+                "loading_mean": lstmt.excluded.loading_mean,
+                "loading_se":   lstmt.excluded.loading_se,
+            },
+        )
+        db.execute(lstmt)
+    return len(loadings)
+
+
+def get_macro_beta(db, run_id: str | None = None):
+    """macro_beta 推論結果を読む（M-1 producer 用）。
+
+    run_id 未指定なら最新ラン（created_at 最大・同時刻は id で決定）。戻り値:
+      (meta: dict | None, loadings: {edinet_code: {factor_name: (mean, se)}})
+    未蓄積なら (None, {})。
+    """
+    if run_id is None:
+        row = (db.query(MacroBetaMeta)
+               .order_by(MacroBetaMeta.created_at.desc(), MacroBetaMeta.id.desc())
+               .first())
+    else:
+        row = db.query(MacroBetaMeta).filter_by(run_id=run_id).first()
+    if row is None:
+        return None, {}
+    meta = {
+        "run_id":           row.run_id,
+        "snapshot_date":    row.snapshot_date,
+        "selected_factors": row.selected_factors,
+        "factor_cov":       row.factor_cov,
+        "hyperparams":      row.hyperparams,
+    }
+    loadings: dict = {}
+    for lr in db.query(MacroBetaLoading).filter_by(run_id=row.run_id).all():
+        loadings.setdefault(lr.edinet_code, {})[lr.factor_name] = (lr.loading_mean, lr.loading_se)
+    return meta, loadings
+
+
 def prices_on_or_after(db, codes: list, after: str) -> dict:
     """各 edinet_code の after 以降・最初の終値を返す（バックテストのエントリー用）。
 
@@ -525,6 +594,47 @@ class MacroData(Base):
     close       = Column(Float, nullable=False)
     volume      = Column(Float)
     created_at  = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+
+# ── 5b. M-1 per-stock 階層マクロ・ベータ推論結果（#214 / ADR-0002）─────────────
+# macro_beta_inference.py（GitHub Actions 推論バッチ・本番非搭載）が書き込み、M-1
+# プラグイン（producer）が読む。MCMC はリクエスト時に回せないためバッチ分離する
+# （ADR-0002「実行アーキ＝推論バッチ分離」）。縦持ち・DDL 追加のみ・Supabase 容量軽微。
+
+class MacroBetaLoading(Base):
+    """per-stock × 共有マクロ因子の事後ローディング（平均・SE）。
+
+    銘柄切片は factor_name="_intercept" の行として格納する（producer が
+    μ = intercept + Σ_f beta_f · macro_f を復元する）。事後SE は R1' の素。"""
+    __tablename__ = "macro_beta_loadings"
+    __table_args__ = (
+        UniqueConstraint("run_id", "edinet_code", "factor_name", name="uq_macro_beta_loading"),
+        Index("ix_macro_beta_loading_code", "edinet_code"),
+    )
+
+    id           = Column(Integer, primary_key=True, autoincrement=True)
+    run_id       = Column(String(40), nullable=False)
+    edinet_code  = Column(String(10), nullable=False)
+    factor_name  = Column(String(40), nullable=False)   # マクロ feature 名 or "_intercept"
+    loading_mean = Column(Float, nullable=False)         # 事後平均 β（= μ の予測係数）
+    loading_se   = Column(Float)                         # 事後SE（R1' の素）
+    created_at   = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+
+class MacroBetaMeta(Base):
+    """推論ラン単位のメタ（選択因子集合・因子共分散 Σ_macro・ハイパラ）。"""
+    __tablename__ = "macro_beta_meta"
+    __table_args__ = (
+        UniqueConstraint("run_id", name="uq_macro_beta_meta_run"),
+    )
+
+    id               = Column(Integer, primary_key=True, autoincrement=True)
+    run_id           = Column(String(40), nullable=False)
+    snapshot_date    = Column(String(10))               # "YYYY-MM-DD"
+    selected_factors = Column(JSON)                     # list[str]
+    factor_cov       = Column(JSON)                     # list[list[float]]（Σ_macro・R_macro 用）
+    hyperparams      = Column(JSON)                     # dict（draws/tune/target_accept 等）
+    created_at       = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
 
 # ── 6. XBRL 生データ中間テーブル ──────────────────────────────────────────
