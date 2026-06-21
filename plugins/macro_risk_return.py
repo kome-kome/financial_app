@@ -67,29 +67,39 @@ DEFAULT_FIN_FEATURES = ["per", "pbr", "roe", "equity_ratio", "roa", "eps_growth"
 # plugins/utils.py::get_macro_features は遅延 import で本マップを参照する）。
 # ここに載せる条件 = 本番 macro_data に蓄積がある系列のみ。データの無い系列を選ぶと全スナップ
 # ショットが None スキップになりモデル学習不能になるため公開しない。
-#   - #218 フェーズ1：既収集の EURJPY・WTI・GOLD をチャネル網羅[FX・コモディティ]のため追加公開。
+#   - #218 フェーズ1：既収集の EURJPY・WTI・GOLD（FX・コモディティ）に加え、VIX・DXY・US5Y・US30Y
+#     （ボラ・FX・米金利/期間構造）を公開。後者は collect-macro.yml の Actions 実行（2026-06-21・
+#     run #1）で Azure IP からの取得・蓄積（各1255〜1257件/5年）を実証済み。チャネル網羅＝
+#     FX・株式・米金利/期間・コモディティ・ボラの5チャネル。
 #   - JP10Y・TOPIX: 収集失敗（JP10Y=^JGB 上場廃止 / TOPIX=^tpx・^TPX 取得不可）で蓄積なし → 非公開。
-#   - VIX/DXY/US5Y/US30Y（#218 フェーズ1）: MACRO_SERIES へは追加済みだが macro_data への蓄積を
-#     Actions で実証してから本マップへ追加する（蓄積前に公開すると上記 None スキップ問題が再発する）。
 _MACRO_MAP = {
     "macro_usdjpy_yoy":    ("USDJPY",    "yoy"),
     "macro_eurjpy_yoy":    ("EURJPY",    "yoy"),
+    "macro_dxy_yoy":       ("DXY",       "yoy"),
     "macro_sp500_yoy":     ("SP500",     "yoy"),
+    "macro_us5y_zscore":   ("US5Y",      "zscore"),
     "macro_us10y_zscore":  ("US10Y",     "zscore"),
+    "macro_us30y_zscore":  ("US30Y",     "zscore"),
     "macro_nikkei225_yoy": ("NIKKEI225", "yoy"),
+    "macro_vix_zscore":    ("VIX",       "zscore"),
     "macro_wti_yoy":       ("WTI",       "yoy"),
     "macro_gold_yoy":      ("GOLD",      "yoy"),
 }
 MACRO_FEATURE_NAMES = list(_MACRO_MAP.keys())
 
-# params_schema の multiselect 用ラベル。USDJPY/SP500/US10Y を既定選択（NIKKEI225・EURJPY・WTI・
-# GOLD は SP500/市場成分との多重共線や任意性のため既定には含めず選択肢としてのみ公開）。
+# params_schema の multiselect 用ラベル。USDJPY/SP500/US10Y を既定選択（その他は SP500/市場成分との
+# 多重共線[VIX↔SP500・米金利↔DXY 等]や任意性のため既定には含めず選択肢としてのみ公開。pooled BIC が
+# 過剰選択を抑える）。
 MACRO_FEATURE_OPTIONS = [
     {"value": "macro_usdjpy_yoy",    "label": "USD/JPY 前年比（YoY）"},
     {"value": "macro_eurjpy_yoy",    "label": "EUR/JPY 前年比（YoY）"},
+    {"value": "macro_dxy_yoy",       "label": "ドル指数（DXY）前年比（YoY）"},
     {"value": "macro_sp500_yoy",     "label": "S&P500 前年比（YoY）"},
+    {"value": "macro_us5y_zscore",   "label": "米5年金利 Zスコア"},
     {"value": "macro_us10y_zscore",  "label": "米10年金利 Zスコア"},
+    {"value": "macro_us30y_zscore",  "label": "米30年金利 Zスコア"},
     {"value": "macro_nikkei225_yoy", "label": "日経225 前年比（YoY）"},
+    {"value": "macro_vix_zscore",    "label": "VIX恐怖指数 Zスコア"},
     {"value": "macro_wti_yoy",       "label": "WTI原油 前年比（YoY）"},
     {"value": "macro_gold_yoy",      "label": "金（ゴールド）前年比（YoY）"},
 ]

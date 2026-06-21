@@ -42,10 +42,13 @@ def test_macro_feature_map_keys():
     assert "macro_eurjpy_yoy"   in _MACRO_FEATURE_MAP
     assert "macro_wti_yoy"      in _MACRO_FEATURE_MAP
     assert "macro_gold_yoy"     in _MACRO_FEATURE_MAP
+    # #218 フェーズ1: VIX/DXY/US5Y/US30Y は collect-macro.yml の Actions 実行で蓄積実証後に公開
+    assert "macro_vix_zscore"   in _MACRO_FEATURE_MAP
+    assert "macro_dxy_yoy"      in _MACRO_FEATURE_MAP
+    assert "macro_us5y_zscore"  in _MACRO_FEATURE_MAP
+    assert "macro_us30y_zscore" in _MACRO_FEATURE_MAP
     # macro_jp10y_zscore は stooq/Yahoo Finance で取得不可のため未公開
     assert "macro_jp10y_zscore" not in _MACRO_FEATURE_MAP
-    # VIX/DXY/US5Y/US30Y は MACRO_SERIES へ追加済みだが macro_data 蓄積の Actions 実証前は未公開
-    assert "macro_vix_zscore"   not in _MACRO_FEATURE_MAP
     for fname, (scode, ttype) in _MACRO_FEATURE_MAP.items():
         assert ttype in ("yoy", "zscore"), f"{fname} の transform が不正"
 
