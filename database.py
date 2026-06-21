@@ -748,21 +748,36 @@ def _ensure_tables() -> None:
         # SKIP_PERIOD_END_MIGRATION=1 で skip できるフェールセーフ付き
         if not os.environ.get("SKIP_PERIOD_END_MIGRATION"):
             try:
-                for tbl in ("financial_records", "xbrl_raw_documents", "regression_results"):
-                    conn.execute(text(f"""
-                        DO $$
-                        BEGIN
-                            IF EXISTS (
-                                SELECT 1 FROM information_schema.columns
-                                WHERE table_name='{tbl}' AND column_name='period_end'
-                                AND data_type='character varying'
-                            ) THEN
-                                ALTER TABLE {tbl}
-                                ALTER COLUMN period_end TYPE DATE
-                                USING NULLIF(NULLIF(period_end,''), 'NULL')::DATE;
-                            END IF;
-                        END $$
-                    """))
+                # financial_metrics VIEW が financial_records.period_end に依存するため、
+                # ALTER 前に VIEW を DROP する（直後に init_db→_ensure_view が再作成）。
+                # VIEW を落とさないと "cannot alter type of a column used by a view" で
+                # 失敗し、period_end が varchar のまま残る（→ date 比較クエリが全滅）。
+                # 移行が必要なとき（financial_records.period_end が varchar）だけ落とし、
+                # 既に DATE の DB（本番）は何もしない（冪等・VIEW churn なし）。
+                needs_migration = conn.execute(text("""
+                    SELECT EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_name='financial_records' AND column_name='period_end'
+                        AND data_type='character varying'
+                    )
+                """)).scalar()
+                if needs_migration:
+                    conn.execute(text("DROP VIEW IF EXISTS financial_metrics"))
+                    for tbl in ("financial_records", "xbrl_raw_documents", "regression_results"):
+                        conn.execute(text(f"""
+                            DO $$
+                            BEGIN
+                                IF EXISTS (
+                                    SELECT 1 FROM information_schema.columns
+                                    WHERE table_name='{tbl}' AND column_name='period_end'
+                                    AND data_type='character varying'
+                                ) THEN
+                                    ALTER TABLE {tbl}
+                                    ALTER COLUMN period_end TYPE DATE
+                                    USING NULLIF(NULLIF(period_end,''), 'NULL')::DATE;
+                                END IF;
+                            END $$
+                        """))
             except Exception as _e:
                 log.warning(
                     f"period_end DATE 型マイグレーション失敗"
