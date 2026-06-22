@@ -1,7 +1,7 @@
 """
 M-1 マクロ・リスク-リターン推奨プラグイン（Phase B）
 
-財務比率 × マクロ要因の交差項を前進 BIC で選択し、
+財務比率 × マクロ要因の交差項を LassoLarsIC(BIC) で選択し、
 リスク-リターン平面に各銘柄をプロットして推奨集合を選ぶ。
 
 次元整合性（CLAUDE.md）:
@@ -236,7 +236,7 @@ def _realized_vol(price_rows: list, ref_date: str, weeks: int = 52) -> float | N
 def _pareto_frontier(
     items: list[dict],
     x_key: str = "r2",
-    y_key: str = "mu_shrunk",
+    y_key: str = "mu_raw",
 ) -> set[str]:
     """Y が大きく X が小さい意味での非劣解（Pareto 最適）の edinet_code 集合を返す。"""
     dominated: set[str] = set()
@@ -261,7 +261,7 @@ class MacroRiskReturnPlugin(AnalysisPlugin):
     name = "macro_risk_return"
     label = "マクロ×リスク-リターン推奨"
     description = (
-        "財務比率×マクロ要因の交差項を前進BICで選択し、"
+        "財務比率×マクロ要因の交差項を LassoLarsIC(BIC) で選択し、"
         "各銘柄を期待リターン（縦軸）×リスク（横軸）の散布図に配置して推奨集合を選びます。"
         "【注意】株価週次履歴とマクロデータ5年分の蓄積が必要です。"
     )
@@ -405,10 +405,9 @@ class MacroRiskReturnPlugin(AnalysisPlugin):
             raise ValueError("株価週次履歴がありません。先に収集を実行してください。")
 
         macro_cache = self._preload_macro(db, prices_by_co, macro_names) if macro_names else {}
-        sectors = self._collect_sectors(fin_by_co, companies)
 
         samples_by_ym, sample_meta_by_ym, current_snaps, all_feat_names = self._build_snapshots(
-            prices_by_co, fin_by_co, companies, macro_cache, sectors,
+            prices_by_co, fin_by_co, companies, macro_cache,
             fin_features, macro_names, use_momentum, mom_window, min_coverage,
         )
 
@@ -416,8 +415,8 @@ class MacroRiskReturnPlugin(AnalysisPlugin):
         if total_samples < 20:
             raise ValueError(f"学習サンプルが不足（{total_samples}件）。データを収集してから再実行してください。")
 
-        # --- 前進 BIC 特徴量選択 ---
-        selected_names = self._forward_bic(
+        # --- LassoLarsIC(BIC) 特徴量選択 ---
+        selected_names = self._select_macro_features(
             samples_by_ym, all_feat_names, max_features=max_features
         )
         n_sel = len(selected_names)
@@ -554,7 +553,7 @@ class MacroRiskReturnPlugin(AnalysisPlugin):
     def _build_snapshots(
         self,
         prices_by_co, fin_by_co, companies, macro_cache,
-        sectors, fin_features, macro_names, use_momentum, mom_window, min_coverage,
+        fin_features, macro_names, use_momentum, mom_window, min_coverage,
     ) -> tuple:
         # macro_names は呼び出し側で選択済み（use_macro=OFF や空選択なら []）。
         # モメンタムは use_macro とは独立に use_momentum で制御する（過去履歴要件を切り離し、
@@ -562,16 +561,12 @@ class MacroRiskReturnPlugin(AnalysisPlugin):
         use_macro = bool(macro_names)
         momentum_name = ["momentum_12m1"] if use_momentum else []
 
-        # 交差項名を生成（fin × macro + sector_dummy × macro）
+        # 交差項名を生成（fin × macro）
         interaction_names: list[str] = []
         if use_macro:
             for fn in fin_features:
                 for mn in macro_names:
                     interaction_names.append(f"{fn}_x_{mn}")
-            for s in sectors[:10]:  # 最大10セクター
-                safe = s.replace(" ", "_").replace("・", "_")[:12]
-                for mn in macro_names:
-                    interaction_names.append(f"sec_{safe}_x_{mn}")
 
         all_feat_names = (
             fin_features + macro_names + momentum_name + interaction_names
@@ -661,16 +656,12 @@ class MacroRiskReturnPlugin(AnalysisPlugin):
                 size_val = getattr(fin_rec, "bs_total_assets", None)
                 size_val = float(size_val) if (size_val is not None and size_val > 0) else None
 
-                # 交差項
+                # 交差項（fin × macro）
                 inter_row: list[float] = []
                 if use_macro:
                     for fn, fv in zip(fin_features, fin_row):
                         for mn in macro_names:
                             inter_row.append(fv * macro_dict[mn])
-                    for s in sectors[:10]:
-                        d_val = 1.0 if industry == s else 0.0
-                        for mn in macro_names:
-                            inter_row.append(d_val * macro_dict[mn])
 
                 feat_row = fin_row + macro_row + mom_row + inter_row
 
@@ -717,23 +708,20 @@ class MacroRiskReturnPlugin(AnalysisPlugin):
             return None
         return math.log(short_cands[-1][1] / long_cands[-1][1])
 
-    # ── 前進 BIC 特徴量選択 ─────────────────────────────────────────────────
+    # ── LassoLarsIC(BIC) 特徴量選択 ────────────────────────────────────────────
 
-    def _forward_bic(
+    def _select_macro_features(
         self,
         samples_by_ym: dict,
         all_feat_names: list[str],
         max_features: int = 20,
-        vif_threshold: float = 10.0,  # 後方互換のため残す（LassoLarsIC では未使用）
     ) -> list[str]:
         """LASSO-LARS パスを BIC 最小で切る特徴量選択（sklearn）。
 
-        旧実装の「貪欲前進BIC＋VIF門番」（各候補×各ステップで OLS を数千回）を
-        `LassoLarsIC(criterion='bic')` の 1 パス LARS パス計算へ置換し、36,000 行
-        規模でも秒オーダーに短縮する。L1 正則化が共線性をネイティブに処理するため
-        VIF 門番は不要。選択は LASSO で行い、最終係数は `_fit_final` の OLS 再フィットで
-        不偏化する（LASSO は選択専用）。BIC 最小解が max_features を超える場合は
-        |係数| 降順の上位 max_features に切り詰める（ラベル「最大採用特徴量数」に忠実）。
+        `LassoLarsIC(criterion='bic')` の 1 パス LARS パス計算で特徴量を選択する。
+        L1 正則化が共線性をネイティブに処理する。選択は LASSO で行い、最終係数は
+        `_fit_final` の OLS 再フィットで不偏化する（LASSO は選択専用）。BIC 最小解が
+        max_features を超える場合は |係数| 降順の上位 max_features に切り詰める。
         """
         from sklearn.linear_model import LassoLarsIC
 
@@ -944,22 +932,8 @@ class MacroRiskReturnPlugin(AnalysisPlugin):
         if not raw_items:
             return []
 
-        # μ 収縮: セクター平均へ R1 の正規化ウェイトで引き寄せる（Black-Litterman 型）
-        r1_vals = [it["r1"] for it in raw_items if it["r1"] is not None]
-        r1_max  = max(r1_vals) if r1_vals else 1.0
-
-        sector_sums: dict[str, list] = defaultdict(list)
-        for it in raw_items:
-            sector_sums[it["industry"]].append(it["mu_raw"])
-        sector_means = {s: statistics.mean(vs) for s, vs in sector_sums.items()}
-
-        for it in raw_items:
-            w = (it["r1"] / r1_max) if (it["r1"] is not None and r1_max > 0) else 0.5
-            sec_mu = sector_means.get(it["industry"], it["mu_raw"])
-            it["mu_shrunk"] = round((1 - w) * it["mu_raw"] + w * sec_mu, 6)
-
-        # μ_shrunk 降順の安定既定順（クライアントは選択 λ/軸で U 並べ替えする）
-        raw_items.sort(key=lambda x: x.get("mu_shrunk") or -1e18, reverse=True)
+        # μ_raw 降順の安定既定順（クライアントは選択 λ/軸で U 並べ替えする）
+        raw_items.sort(key=lambda x: x.get("mu_raw") or -1e18, reverse=True)
         return raw_items
 
 

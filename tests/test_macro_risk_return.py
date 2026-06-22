@@ -58,8 +58,8 @@ class TestParetoFrontier:
 
     def test_simple_domination(self):
         items = [
-            {"edinet_code": "A", "r2": 0.1, "mu_shrunk": 0.2},  # 非劣
-            {"edinet_code": "B", "r2": 0.3, "mu_shrunk": 0.1},  # A に劣後
+            {"edinet_code": "A", "r2": 0.1, "mu_raw": 0.2},  # 非劣
+            {"edinet_code": "B", "r2": 0.3, "mu_raw": 0.1},  # A に劣後
         ]
         pareto = _pareto_frontier(items)
         assert "A" in pareto
@@ -67,23 +67,23 @@ class TestParetoFrontier:
 
     def test_no_domination(self):
         items = [
-            {"edinet_code": "A", "r2": 0.1, "mu_shrunk": 0.1},
-            {"edinet_code": "B", "r2": 0.3, "mu_shrunk": 0.3},
+            {"edinet_code": "A", "r2": 0.1, "mu_raw": 0.1},
+            {"edinet_code": "B", "r2": 0.3, "mu_raw": 0.3},
         ]
         pareto = _pareto_frontier(items)
         assert pareto == {"A", "B"}
 
     def test_single_item(self):
-        items = [{"edinet_code": "A", "r2": 0.2, "mu_shrunk": 0.1}]
+        items = [{"edinet_code": "A", "r2": 0.2, "mu_raw": 0.1}]
         assert _pareto_frontier(items) == {"A"}
 
     def test_three_items(self):
         # A(低リスク・中リターン)、B(中・高)、C(高リスク・低リターン)
         # A と B は互いを支配しない → 両方非劣。C は A に劣後。
         items = [
-            {"edinet_code": "A", "r2": 0.1, "mu_shrunk": 0.2},  # 非劣
-            {"edinet_code": "B", "r2": 0.3, "mu_shrunk": 0.4},  # 非劣
-            {"edinet_code": "C", "r2": 0.3, "mu_shrunk": 0.2},  # B に劣後（同リスク・低リターン）
+            {"edinet_code": "A", "r2": 0.1, "mu_raw": 0.2},  # 非劣
+            {"edinet_code": "B", "r2": 0.3, "mu_raw": 0.4},  # 非劣
+            {"edinet_code": "C", "r2": 0.3, "mu_raw": 0.2},  # B に劣後（同リスク・低リターン）
         ]
         pareto = _pareto_frontier(items)
         assert "A" in pareto
@@ -259,9 +259,9 @@ class TestParamsSchema:
         assert result["fin_features"] == ["div_yield"]
 
 
-# ── _forward_bic (BIC が有効特徴量を選ぶ) ─────────────────────────────────────
+# ── _select_macro_features (BIC が有効特徴量を選ぶ) ──────────────────────────
 
-class TestForwardBIC:
+class TestSelectMacroFeatures:
 
     def _make_samples(self, n: int = 200) -> dict[str, list]:
         """y = 2*x0 - x1 + noise の合成データ。BIC が x0, x1 を選びノイズ列を落とすことを確認。"""
@@ -280,7 +280,7 @@ class TestForwardBIC:
     def test_bic_selects_informative_features(self):
         plugin = MacroRiskReturnPlugin()
         samples = self._make_samples(300)
-        selected = plugin._forward_bic(
+        selected = plugin._select_macro_features(
             samples, ["x0", "x1", "x_noise"], max_features=3
         )
         # x0, x1 は選ばれるはず（ノイズ列は BIC で落とされる可能性大）
@@ -298,12 +298,12 @@ class TestForwardBIC:
             ([rng.gauss(0, 1) for _ in range(10)], rng.gauss(0, 1))
             for _ in range(50)
         ]}
-        selected = plugin._forward_bic(fixed_samples, feat_names, max_features=2)
+        selected = plugin._select_macro_features(fixed_samples, feat_names, max_features=2)
         assert len(selected) <= 2
 
     def test_bic_empty_samples_returns_empty(self):
         plugin = MacroRiskReturnPlugin()
-        result = plugin._forward_bic({}, ["f0", "f1"])
+        result = plugin._select_macro_features({}, ["f0", "f1"])
         assert result == []
 
 
@@ -434,7 +434,7 @@ class TestExecuteIntegration:
         assert isinstance(result["results"], list)
 
     def test_execute_returns_raw_risk_return_fields(self):
-        """サーバーは全社の raw 値（mu_raw/mu_shrunk/r1/r2/r3）を返す。
+        """サーバーは全社の raw 値（mu_raw/r1/r2/r3）を返す。
         効用 U・パレート・top_n スライスはクライアント側の後処理へ移譲したため返さない。"""
         plugin = MacroRiskReturnPlugin()
         schema = plugin.params_schema()
@@ -450,7 +450,6 @@ class TestExecuteIntegration:
         for item in result["results"]:
             assert "edinet_code" in item
             assert "mu_raw" in item
-            assert "mu_shrunk" in item
             assert "r1" in item
             assert "r2" in item
             assert "r3" in item  # R3 リスク指標（float or None）
@@ -482,7 +481,7 @@ class TestExecuteIntegration:
         assert result["risk_axis"] == "r3"
         for item in result["results"]:
             assert "r3" in item
-            assert "mu_shrunk" in item
+            assert "mu_raw" in item
 
     def test_execute_returns_feature_coefs(self):
         """execute は selected_features と整合する標準化係数 feature_coefs を返す。"""
@@ -520,10 +519,9 @@ class TestExecuteIntegration:
         plugin = MacroRiskReturnPlugin()
         db = self._build_mock_db(n_weeks=200)
         prices_by_co, fin_by_co, companies = plugin._load_data(db)
-        sectors = plugin._collect_sectors(fin_by_co, companies)
         # macro_names=[]（use_macro 相当 OFF）でも use_momentum=True なら momentum が候補に入る
         _samples, _meta, _snaps, all_feat_names = plugin._build_snapshots(
-            prices_by_co, fin_by_co, companies, {}, sectors,
+            prices_by_co, fin_by_co, companies, {},
             ["per", "pbr", "roa"], [], True, 12, 0.5,
         )
         assert "momentum_12m1" in all_feat_names
@@ -533,9 +531,8 @@ class TestExecuteIntegration:
         plugin = MacroRiskReturnPlugin()
         db = self._build_mock_db(n_weeks=200)
         prices_by_co, fin_by_co, companies = plugin._load_data(db)
-        sectors = plugin._collect_sectors(fin_by_co, companies)
         _samples, _meta, _snaps, all_feat_names = plugin._build_snapshots(
-            prices_by_co, fin_by_co, companies, {}, sectors,
+            prices_by_co, fin_by_co, companies, {},
             ["per", "pbr", "roa"], [], False, 12, 0.5,
         )
         assert "momentum_12m1" not in all_feat_names

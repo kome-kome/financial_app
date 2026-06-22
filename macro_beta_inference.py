@@ -74,11 +74,11 @@ def select_shared_factors(macro: np.ndarray, returns: np.ndarray,
     """共有マクロ因子集合を pooled データ上で BIC（LassoLarsIC）選択する。
 
     ADR-0002 §1: 因子集合は全銘柄共通（pooled / large-n で次元爆発に耐性）。これは現行
-    plugins.macro_risk_return._forward_bic と同じ手続き（per-stock 化後も「共有因子選択」
+    plugins.macro_risk_return._select_macro_features と同じ手続き（per-stock 化後も「共有因子選択」
     として据え置く）。実装は既存関数の再利用を想定。
     """
     raise NotImplementedError(
-        "select_shared_factors: _forward_bic 相当を pooled で適用（Issue #214）"
+        "select_shared_factors: _select_macro_features 相当を pooled で適用（Issue #214）"
     )
 
 

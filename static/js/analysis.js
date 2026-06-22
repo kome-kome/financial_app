@@ -1124,10 +1124,9 @@ function renderSectorOls(data) {
 }
 
 // マクロ×リスク-リターン専用レンダラ: CV指標 + バブルチャート + ランキング表
-// M-1 リスク-リターン可視化。サーバーは全社の raw 値（mu_raw/mu_shrunk/r1/r2/r3）を返し、
+// M-1 リスク-リターン可視化。サーバーは全社の raw 値（mu_raw/r1/r2/r3）を返し、
 // 効用 U・パレート・並べ替え・top_n は λ／リスク軸に依存する後処理として
 // クライアント側で算出する（軸切替・λ調整は再計算なしで即時反映）。
-// 期待リターンの基準は mu_raw（収縮は低シグナル時に銘柄差を消すため表の参考列に留める）。
 const MRR_AXIS_LABELS = { r1: 'R1 予測不確実性', r2: 'R2 実現ボラティリティ', r3: 'R3 モデル信頼性' };
 // 係数バー用: 特徴量コード → 表示ラベル（既知のものだけ。未知はコードのまま表示）。
 const MRR_FEAT_LABELS = {
@@ -1182,8 +1181,6 @@ function _mrrParetoSet(items, axisKey) {
 }
 
 // 全社 raw 値から、選択 λ／軸で U・パレートを算出し U 降順に並べた view を返す。
-// 期待リターンは mu_raw（モデルの素の銘柄別推定）を用いる。mu_shrunk は低シグナル時に
-// 全社をセクター平均へ収縮し銘柄差が消えるため、チャート/効用には不適（表に参考値として残す）。
 function _mrrRecompute() {
   const { lambda, axis, topN } = _mrrReadParams();
   const items = (_mrrData && _mrrData.results ? _mrrData.results : [])
@@ -1351,7 +1348,6 @@ function _mrrPaintChart(v) {
           return [
             p.company_name || p.edinet_code,
             `μ_raw: ${(p.mu_raw ?? 0).toFixed(4)}`,
-            `μ_shrunk(参考): ${p.mu_shrunk != null ? p.mu_shrunk.toFixed(4) : '-'}`,
             `${MRR_AXIS_LABELS[axisKey]}: ${(p[axisKey] ?? 0).toFixed(4)}`,
             `R1 信頼度(径): ${p.r1 != null ? p.r1.toFixed(4) : '-'}`,
             `U（効用・色）: ${p._u != null ? p._u.toFixed(4) : '-'}`,
@@ -1379,11 +1375,10 @@ function _mrrTableHTML(v) {
   }
   const total = (_mrrData && _mrrData.results ? _mrrData.results.length : v.top.length);
   const header = `<tr><th>順位</th><th>証券コード</th><th>企業名</th><th>業種</th>
-    <th>μ_raw</th><th>μ_shrunk(参考)</th><th>R2 ボラ</th><th>R1 不確実性</th><th>R3 信頼性</th><th>効用 U</th><th>パレート</th></tr>`;
+    <th>μ_raw</th><th>R2 ボラ</th><th>R1 不確実性</th><th>R3 信頼性</th><th>効用 U</th><th>パレート</th></tr>`;
   const rows = v.top.map((r, i) => {
     const mu = r.mu_raw ?? 0;
     const muClass = mu > 0 ? 'text-green' : 'text-red';
-    const muShr = r.mu_shrunk;
     const paretoTag = r._pareto ? '<span style="color:#f9a8d4;font-weight:700">★</span>' : '';
     return `<tr>
       <td>${i+1}</td>
@@ -1391,7 +1386,6 @@ function _mrrTableHTML(v) {
       <td><a href="/company/${esc(r.edinet_code||'')}" style="color:#60a5fa">${esc(r.company_name||'-')}</a></td>
       <td style="font-size:11px">${esc(r.industry||'-')}</td>
       <td class="${muClass}">${(mu*100).toFixed(2)}%</td>
-      <td style="font-size:11px;color:#94a3b8">${muShr!=null?(muShr*100).toFixed(2)+'%':'-'}</td>
       <td>${r.r2!=null?(r.r2*100).toFixed(2)+'%':'-'}</td>
       <td style="font-size:11px;color:#94a3b8">${r.r1!=null?r.r1.toFixed(4):'-'}</td>
       <td style="font-size:11px;color:#94a3b8">${r.r3!=null?r.r3.toFixed(4):'-'}</td>
