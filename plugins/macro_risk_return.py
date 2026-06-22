@@ -23,6 +23,7 @@ from .utils import (
     ols,
     walk_forward_cv_monthly,
     winsorize,
+    macro_risk_exposure,
 )
 
 FINANCIAL_LAG_DAYS = 45
@@ -104,6 +105,39 @@ MACRO_FEATURE_OPTIONS = [
     {"value": "macro_gold_yoy",      "label": "金（ゴールド）前年比（YoY）"},
 ]
 DEFAULT_MACRO_FEATURES = ["macro_usdjpy_yoy", "macro_sp500_yoy", "macro_us10y_zscore"]
+
+
+# ── #214 producer: macro_beta（per-stock 階層ベイズ推論結果）からのスコア算出 ──
+
+def producer_scores(meta: dict, loadings: dict, macro_snapshot: dict | None = None) -> dict:
+    """macro_beta 推論結果から per-stock の μ・R_macro・R1' を算出する（ADR-0002 / #214）。
+
+    Args:
+        meta:    {"selected_factors": [...], "factor_cov": [[...]], ...}（Σ_macro はリターン単位）
+        loadings: {edinet_code: {factor_name: (mean, se)}}（"_intercept" 行を含む）
+        macro_snapshot: {factor_name: value}（現スナップショットのマクロ特徴量）。None なら μ/R1' は省略。
+
+    Returns:
+        {edinet_code: {"r_macro": float[, "mu": float, "r1_prime": float]}}
+          R_macro = sqrt(βᵀ Σ_macro β)（snapshot 非依存・常に算出）
+          μ       = α + Σ_f β_f · m_f
+          R1'     = sqrt(se_α² + Σ_f (se_f · m_f)²)（事後予測SE・delta 法・独立仮定）
+    """
+    factors = list(meta.get("selected_factors") or [])
+    cov = meta.get("factor_cov") or []
+    out: dict = {}
+    for code, fmap in loadings.items():
+        beta = [float(fmap.get(f, (0.0, None))[0]) for f in factors]
+        rec: dict = {"r_macro": macro_risk_exposure(beta, cov) if (cov and beta) else 0.0}
+        if macro_snapshot is not None:
+            m = [float(macro_snapshot.get(f) or 0.0) for f in factors]
+            se = [float(fmap.get(f, (0.0, 0.0))[1] or 0.0) for f in factors]
+            a_mean, a_se = fmap.get("_intercept", (0.0, 0.0))
+            a_se = float(a_se or 0.0)
+            rec["mu"] = float(a_mean) + sum(b * mm for b, mm in zip(beta, m))
+            rec["r1_prime"] = math.sqrt(a_se ** 2 + sum((s * mm) ** 2 for s, mm in zip(se, m)))
+        out[code] = rec
+    return out
 
 
 # ── ヘルパー ──────────────────────────────────────────────────────────────────
@@ -325,6 +359,29 @@ class MacroRiskReturnPlugin(AnalysisPlugin):
             },
         }
 
+    def produced_output(self, db: Any) -> bool:
+        """macro_beta（per-stock 階層ベイズ推論結果）を共有DBに持つか（#217 の depends_on 充足判定）。
+
+        推論バッチ（macro_beta_inference.py / Actions）が未実行なら False を返し、consumer は
+        graceful-degrade する。"""
+        try:
+            from database import get_macro_beta
+            meta, _ = get_macro_beta(db)
+            return meta is not None
+        except Exception:
+            return False
+
+    def read_producer_scores(self, db: Any, macro_snapshot: dict | None = None) -> dict:
+        """macro_beta（推論バッチ出力）を読み per-stock producer スコアを返す（#214）。
+
+        未蓄積なら {}（graceful degrade＝従来の OLS 経路のみで動作）。macro_snapshot を渡すと
+        μ・R1' も算出する（None なら R_macro のみ）。"""
+        from database import get_macro_beta
+        meta, loadings = get_macro_beta(db)
+        if not meta or not loadings:
+            return {}
+        return producer_scores(meta, loadings, macro_snapshot)
+
     async def execute(self, params: dict, db: Any) -> dict:
         lambda_risk    = params["lambda_risk"]
         risk_axis      = params["risk_axis"]
@@ -408,6 +465,13 @@ class MacroRiskReturnPlugin(AnalysisPlugin):
             name: round(float(beta[i + 1]), 4) for i, name in enumerate(selected_names)
         }
 
+        # --- #214 producer: macro_beta があれば per-stock μ・R_macro・R1' を添付（無ければ {}・
+        #     graceful degrade で従来 OLS 経路に影響しない）---
+        try:
+            macro_beta_producer = self.read_producer_scores(db)
+        except Exception:
+            macro_beta_producer = {}
+
         return {
             "cv_metrics":       cv_metrics,
             "selected_features": selected_names,
@@ -419,6 +483,7 @@ class MacroRiskReturnPlugin(AnalysisPlugin):
             "lambda_risk":      lambda_risk,
             "top_n":            top_n,
             "results":          results,
+            "macro_beta_producer": macro_beta_producer,
         }
 
     # ── データロード ────────────────────────────────────────────────────────
