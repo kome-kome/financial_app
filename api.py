@@ -14,6 +14,14 @@ import json, logging, re
 import hmac, hashlib, base64, secrets, time as _time, os
 import httpx
 
+# .env を「APP_PASSWORD 等の認証設定を読む前」に読み込む。
+# 注意: これらの os.getenv(...) は database の import より前に実行されるため、
+#       ここで明示的に load_dotenv() しないと .env のみ設定の環境（ローカル等）で
+#       APP_PASSWORD="" → 認証無効・APP_SECRET_KEY が dev 既定値、という事故になる。
+#       override=False（既定）なので本番の実環境変数（Render dashboard）が優先される。
+from dotenv import load_dotenv
+load_dotenv()
+
 log = logging.getLogger(__name__)
 from contextlib import asynccontextmanager
 from pathlib import Path
