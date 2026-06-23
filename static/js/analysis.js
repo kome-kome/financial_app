@@ -1187,15 +1187,33 @@ function _mrrParetoSet(items, axisKey) {
   return set;
 }
 
-// 全社 raw 値から、選択 λ／軸・R3 ゲートで U・パレートを算出し U 降順に並べた view を返す。
+// 非効率的フロンティア（最大リスク x・最小リターン y）の反Pareto集合を O(n log n) で算出。
+// B が A を支配 ⟺ x_B ≥ x_A かつ y_B ≤ y_A。x 降順に走査し y 新最小点を集合に追加。
+function _mrrAntiParetoSet(items, axisKey) {
+  const arr = items.map(it => ({ c: it.edinet_code, x: it[axisKey], y: it.mu_raw }))
+    .sort((a, b) => (a.x === b.x ? a.y - b.y : a.x - b.x));
+  const set = new Set();
+  let worstY = Infinity;
+  for (let i = arr.length - 1; i >= 0; i--) {
+    const p = arr[i];
+    if (p.y < worstY) { set.add(p.c); worstY = p.y; }
+  }
+  return set;
+}
+
+// 全社 raw 値から、選択 λ／軸・R3 ゲートで U・D・パレートを算出し U 降順に並べた view を返す。
 function _mrrRecompute() {
   const { lambda, axis, topN, r3Gate } = _mrrReadParams();
   const items = (_mrrData && _mrrData.results ? _mrrData.results : [])
     .filter(r => r[axis] != null && r.mu_raw != null)
     .filter(r => r3Gate <= 0 || r.r3 == null || r.r3 <= r3Gate)
-    .map(r => ({ ...r, _u: r.mu_raw - lambda * r[axis] }));
+    .map(r => ({ ...r, _u: r.mu_raw - lambda * r[axis], _d: lambda * r[axis] - r.mu_raw }));
   const paretoSet = _mrrParetoSet(items, axis);
-  items.forEach(it => { it._pareto = paretoSet.has(it.edinet_code); });
+  const antiParetoSet = _mrrAntiParetoSet(items, axis);
+  items.forEach(it => {
+    it._pareto = paretoSet.has(it.edinet_code);
+    it._anti_pareto = antiParetoSet.has(it.edinet_code);
+  });
   items.sort((a, b) => b._u - a._u);
   return { axis, lambda, topN, r3Gate, all: items, top: items.slice(0, topN) };
 }
@@ -1226,6 +1244,15 @@ function _mrrUColor(u, uMin, uMax, alpha) {
   const r = Math.round(100 + (167 - 100) * t);
   const g = Math.round(116 + (139 - 116) * t);
   const b = Math.round(139 + (250 - 139) * t);
+  return `rgba(${r},${g},${b},${alpha})`;
+}
+
+// 負の効用 D → 色（オレンジ→赤の濃淡）。高 D（売り信号強）ほど赤が濃い。
+function _mrrDColor(d, dMin, dMax, alpha) {
+  const t = dMax > dMin ? Math.min(1, Math.max(0, (d - dMin) / (dMax - dMin))) : 0.5;
+  const r = Math.round(251 + (239 - 251) * t);  // 251 → 239
+  const g = Math.round(146 + (68  - 146) * t);  // 146 → 68
+  const b = Math.round(60  + (68  - 60 ) * t);  // 60  → 68
   return `rgba(${r},${g},${b},${alpha})`;
 }
 
@@ -1325,23 +1352,41 @@ function _mrrPaintChart(v) {
   // データ値自体を [p1,p99] にクランプ（外れ値は境界へ積む）。Chart.js は外れ値が
   // 残ると scales.min/max を設定しても軸を引き伸ばすため、値クランプで確実に潰れを防ぐ。
   const clamp = (val, R) => (R.min == null || val == null) ? val : Math.min(R.max, Math.max(R.min, val));
+  // D 範囲（反Pareto点のみで算出・着色用）。
+  const dsVals = pts.filter(p => p._anti_pareto).map(p => p._d);
+  const dMin = dsVals.length ? Math.min(...dsVals) : 0;
+  const dMax = dsVals.length && Math.max(...dsVals) > dMin ? Math.max(...dsVals) : dMin + 1;
   // サイズは固定（R1 はほぼ一定で径エンコードが退化するため）。全社の雲が見えるよう
   // 背景点も視認可能な大きさ・不透明度にし、上位 top_n とパレートを少し大きく強調する。
   const bubble = pts.map(p => ({
     x: clamp(p[axisKey], xRange), y: clamp(p.mu_raw, yRange),
-    r: p._pareto ? 6 : (topSet.has(p.edinet_code) ? 5 : 3),
+    r: (p._pareto || p._anti_pareto) ? 6 : (topSet.has(p.edinet_code) ? 5 : 3),
     _p: p, _top: topSet.has(p.edinet_code),
   }));
-  const bg = pts.map(p => _mrrUColor(p._u, uMin, uMax, topSet.has(p.edinet_code) ? 0.9 : 0.55));
-  const bc = pts.map(p => p._pareto ? '#f9a8d4' : (topSet.has(p.edinet_code) ? 'rgba(226,232,240,0.9)' : 'rgba(148,163,184,0.4)'));
-  const bw = pts.map(p => p._pareto ? 2.5 : (topSet.has(p.edinet_code) ? 1.2 : 0.5));
+  // 反Pareto点はオレンジ→赤グラデーション（D 値）、それ以外は紫（U 値）。
+  const bg = pts.map(p =>
+    p._anti_pareto
+      ? _mrrDColor(p._d, dMin, dMax, topSet.has(p.edinet_code) ? 0.85 : 0.6)
+      : _mrrUColor(p._u, uMin, uMax, topSet.has(p.edinet_code) ? 0.9 : 0.55)
+  );
+  const bc = pts.map(p =>
+    p._pareto      ? '#f9a8d4' :
+    p._anti_pareto ? '#fca5a5' :
+    topSet.has(p.edinet_code) ? 'rgba(226,232,240,0.9)' : 'rgba(148,163,184,0.4)'
+  );
+  const bw = pts.map(p => (p._pareto || p._anti_pareto) ? 2.5 : (topSet.has(p.edinet_code) ? 1.2 : 0.5));
   const front = pts.filter(p => p._pareto)
+    .map(p => ({ x: clamp(p[axisKey], xRange), y: clamp(p.mu_raw, yRange) }))
+    .sort((a, b) => a.x - b.x);
+  const antifront = pts.filter(p => p._anti_pareto)
     .map(p => ({ x: clamp(p[axisKey], xRange), y: clamp(p.mu_raw, yRange) }))
     .sort((a, b) => a.x - b.x);
   _mrrChart = new Chart(canvas, {
     data: { datasets: [
-      { type: 'line', label: '効率的フロンティア', data: front,
+      { type: 'line', label: '効率的フロンティア（買い）', data: front,
         borderColor: '#f9a8d4', borderWidth: 2, pointRadius: 0, fill: false, tension: 0, order: 0 },
+      { type: 'line', label: '非効率的フロンティア（売り）', data: antifront,
+        borderColor: '#f87171', borderWidth: 2, borderDash: [6, 3], pointRadius: 0, fill: false, tension: 0, order: 0 },
       { type: 'bubble', label: `銘柄（全${pts.length}社・上位${v.top.length}を強調）`, data: bubble,
         backgroundColor: bg, borderColor: bc, borderWidth: bw, order: 1 },
     ]},
@@ -1360,8 +1405,10 @@ function _mrrPaintChart(v) {
             axisKey !== 'r2' && p.r2 != null ? `R2 ボラ: ${(p.r2 * 100).toFixed(2)}%` : null,
             axisKey !== 'r_macro' && p.r_macro != null ? `R_macro: ${(p.r_macro * 100).toFixed(2)}%` : null,
             `R3 信頼性: ${p.r3 != null ? p.r3.toFixed(4) : '-'}`,
-            `U（効用・色）: ${p._u != null ? p._u.toFixed(4) : '-'}`,
-            p._pareto ? '★ パレート優位' : '',
+            `U（効用）: ${p._u != null ? p._u.toFixed(4) : '-'}`,
+            `D（負効用）: ${p._d != null ? p._d.toFixed(4) : '-'}`,
+            p._pareto ? '★ 効率的フロンティア（買い）' : '',
+            p._anti_pareto ? '▼ 非効率的フロンティア（売り）' : '',
           ].filter(Boolean);
         }}},
       },
@@ -1385,11 +1432,15 @@ function _mrrTableHTML(v) {
   }
   const total = (_mrrData && _mrrData.results ? _mrrData.results.length : v.top.length);
   const header = `<tr><th>順位</th><th>証券コード</th><th>企業名</th><th>業種</th>
-    <th>μ_raw</th><th>R2 ボラ</th><th>R_macro</th><th>R3 信頼性</th><th>効用 U</th><th>パレート</th></tr>`;
+    <th>μ_raw</th><th>R2 ボラ</th><th>R_macro</th><th>R3 信頼性</th><th>効用 U</th><th>D（負効用）</th><th>F</th></tr>`;
   const rows = v.top.map((r, i) => {
     const mu = r.mu_raw ?? 0;
     const muClass = mu > 0 ? 'text-green' : 'text-red';
-    const paretoTag = r._pareto ? '<span style="color:#f9a8d4;font-weight:700">★</span>' : '';
+    const frontierTag = r._pareto
+      ? '<span style="color:#f9a8d4;font-weight:700" title="効率的フロンティア（買い）">★</span>'
+      : r._anti_pareto
+        ? '<span style="color:#f87171;font-weight:700" title="非効率的フロンティア（売り）">▼</span>'
+        : '';
     const r3Warn = v.r3Gate > 0 && r.r3 != null && r.r3 > v.r3Gate * 0.8
       ? ' style="color:#fbbf24"' : '';
     return `<tr>
@@ -1402,7 +1453,8 @@ function _mrrTableHTML(v) {
       <td style="font-size:11px;color:#94a3b8">${r.r_macro!=null?(r.r_macro*100).toFixed(2)+'%':'-'}</td>
       <td style="font-size:11px;color:#94a3b8"${r3Warn}>${r.r3!=null?r.r3.toFixed(4):'-'}</td>
       <td class="text-green">${r._u!=null?r._u.toFixed(4):'-'}</td>
-      <td style="text-align:center">${paretoTag}</td>
+      <td style="color:#f87171">${r._d!=null?r._d.toFixed(4):'-'}</td>
+      <td style="text-align:center">${frontierTag}</td>
     </tr>`;
   }).join('');
 
