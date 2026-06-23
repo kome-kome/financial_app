@@ -111,8 +111,9 @@ class FinancialRecord(Base):
     # 建物及び構築物（純額のみ）。BuildingsAndStructures（Net無し）は取得原価=グロスで bs_ppe_total（純額）を超え
     # balance invariant を壊すため除外。代替綴り BuildingsNet・IFRS 純額 BuildingsAndStructuresIFRS を採用。
     bs_buildings            = Column(Float, info={"xbrl": ["BuildingsAndStructuresNet", "BuildingsNet", "BuildingsAndStructuresIFRS"]})  # 建物及び構築物（純額）
-    # 機械装置（純額のみ）。MachineryAndEquipment（Net無し）はグロスのため除外。
-    bs_machinery            = Column(Float, info={"xbrl": ["MachineryAndEquipmentNet"]})  # 機械装置及び運搬具（純額）
+    # 機械装置（純額のみ）。MachineryAndEquipment/MachineryAndVehicles（Net無し）はグロスのため除外。
+    # MachineryAndVehiclesNet は「機械装置及び運搬具（純額）」の別名タグ（一部企業・業種で使用）。
+    bs_machinery            = Column(Float, info={"xbrl": ["MachineryAndEquipmentNet", "MachineryAndVehiclesNet"]})  # 機械装置及び運搬具（純額）
     bs_ppe_total            = Column(Float, info={"xbrl": ["PropertyPlantAndEquipment", "PropertyPlantAndEquipmentIFRS"]})  # 有形固定資産合計（内訳=建物+機械等の整合用。C2）
     bs_intangible_assets    = Column(Float, info={"xbrl": ["IntangibleAssets", "IntangibleAssetsIFRS", "GoodwillAndIntangibleAssetsIFRS"]})  # 無形固定資産
     bs_investments_other_assets = Column(Float, info={"xbrl": ["InvestmentsAndOtherAssets"]})  # 投資その他の資産合計（JGAAP固定資産構造。C2）

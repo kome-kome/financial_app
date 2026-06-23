@@ -665,6 +665,43 @@ async def refill_c2_from_xbrl(
     )
 
 
+async def refill_machinery_from_xbrl(
+    db,
+    limit: Optional[int] = None,
+    sleep_sec: float = RATE_SLEEP,
+    on_progress: Optional[Callable[[int, int, str], None]] = None,
+) -> dict:
+    """`bs_machinery` が NULL かつ `bs_ppe_total` が取得済みのレコードを EDINET XBRL
+    から再取得し、bs_machinery を補完する（既存値は上書きしない）。
+
+    駆動マーカー = `bs_machinery IS NULL AND bs_ppe_total IS NOT NULL AND doc_id IS NOT NULL`。
+    MachineryAndVehiclesNet タグ追加後の既存データ是正用。金融・サービス等で機械装置を
+    持たない企業は永続的に残るが無害（bs_ppe_total も NULL のため対象外）。
+    """
+    log.info(f"refill_machinery_from_xbrl 開始 (limit={limit}, sleep={sleep_sec})")
+
+    def _target_q():
+        return db.query(FinancialRecord).filter(
+            FinancialRecord.bs_machinery.is_(None),
+            FinancialRecord.bs_ppe_total.isnot(None),
+            FinancialRecord.doc_id.isnot(None),
+        )
+
+    def _machinery_updater(rec, parsed) -> bool:
+        changed = False
+        for field, val in (parsed.get("bs") or {}).items():
+            col = f"bs_{field}"
+            if val is not None and hasattr(rec, col) and getattr(rec, col) is None:
+                setattr(rec, col, val)
+                changed = True
+        return changed
+
+    return await _refill_records_from_xbrl(
+        db, _target_q, _machinery_updater, label="機械装置補完",
+        limit=limit, defer_raw=True, sleep_sec=sleep_sec, order="asc", on_progress=on_progress,
+    )
+
+
 async def diagnose_cf_labels(db, limit: int = 20) -> dict:
     """診断モード: サンプル書類の CF 関連ファクト（要素ID・項目名・値）をログに出力する。
 

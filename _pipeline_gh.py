@@ -19,6 +19,8 @@ SKIP_XBRL_RAW=true（デフォルト）の運用前提:
   --refill-pl-bs-limit N  PL/BS 補完の上限件数（CLI デフォルト None＝全件）
   --refill-c2         C2 NULL 補完（pl_depreciation/bs_ppe_total 等を XBRL 再取得で是正）
   --refill-c2-limit N C2 補完の上限件数（CLI デフォルト None＝全件）
+  --refill-machinery  bs_machinery NULL（かつ bs_ppe_total あり）を XBRL 再取得で補完
+  --refill-machinery-limit N  機械装置補完の上限件数（デフォルト None＝全件）
 """
 import argparse, asyncio, sys, time
 from datetime import datetime
@@ -32,7 +34,8 @@ from collector import (
     collect_stock_price_history_jquants, update_market_data_from_history,
     backfill_historical_stock_prices_yahoo, fill_recent_stock_price_gap_yahoo,
     backfill_weekly_history_yahoo,
-    refill_cf_from_xbrl, refill_pl_bs_from_xbrl, refill_c2_from_xbrl, diagnose_cf_labels,
+    refill_cf_from_xbrl, refill_pl_bs_from_xbrl, refill_c2_from_xbrl,
+    refill_machinery_from_xbrl, diagnose_cf_labels,
     SKIP_XBRL_RAW, JQUANTS_BACKFILL_DAYS,
 )
 from database import SessionLocal, init_db
@@ -56,6 +59,8 @@ async def main(years_back: int, collect_only: bool = False,
                refill_pl_bs_sleep: float = 0.6,
                refill_c2: bool = False, refill_c2_limit: Optional[int] = None,
                refill_c2_sleep: float = 0.6,
+               refill_machinery: bool = False, refill_machinery_limit: Optional[int] = None,
+               refill_machinery_sleep: float = 0.6,
                diagnose_cf: bool = False, diagnose_cf_limit: int = 20):
     t0 = time.time()
     log("=" * 60)
@@ -68,6 +73,8 @@ async def main(years_back: int, collect_only: bool = False,
         mode = "refill-pl-bs"
     elif refill_c2:
         mode = "refill-c2"
+    elif refill_machinery:
+        mode = "refill-machinery"
     elif backfill_yahoo:
         mode = "backfill-yahoo"
     elif backfill_weekly:
@@ -149,6 +156,30 @@ async def main(years_back: int, collect_only: bool = False,
         finally:
             db8.close()
         log(f"[8/8] bs_inventory NULL 補完 完了 ({(time.time()-t0)/60:.1f}分経過)")
+        log("=" * 60)
+        log(f"パイプライン完了  総所要時間: {(time.time()-t0)/60:.1f}分")
+        log("=" * 60)
+        return
+
+    # ─── 機械装置 NULL 補完（単独モード）──────────────────────────────────────────
+    # MachineryAndVehiclesNet タグ追加後の既存データ是正。bs_ppe_total があるのに
+    # bs_machinery が NULL のレコードを古い順に再取得して補完する。
+    if refill_machinery:
+        log(f"[machinery] bs_machinery NULL 補完 開始（limit={refill_machinery_limit}, 古い順）")
+        log("  対象: bs_machinery IS NULL かつ bs_ppe_total IS NOT NULL かつ doc_id IS NOT NULL")
+        db_m = SessionLocal()
+        try:
+            result = await refill_machinery_from_xbrl(
+                db_m,
+                limit=refill_machinery_limit,
+                sleep_sec=refill_machinery_sleep,
+                on_progress=lambda c, t, m: log(m) if c % 100 == 0 or t - c < 10 else None,
+            )
+            log(f"  機械装置補完完了: updated={result['updated']}, skipped={result['skipped']}, "
+                f"failed={result['failed']}, remaining={result.get('remaining', '?')}")
+        finally:
+            db_m.close()
+        log(f"[machinery] bs_machinery NULL 補完 完了 ({(time.time()-t0)/60:.1f}分経過)")
         log("=" * 60)
         log(f"パイプライン完了  総所要時間: {(time.time()-t0)/60:.1f}分")
         log("=" * 60)
@@ -330,6 +361,12 @@ if __name__ == "__main__":
                         help="C2 補完の上限件数（デフォルト None＝全件）")
     parser.add_argument("--refill-c2-sleep", type=float, default=0.6,
                         help="C2 補完の1件あたりスリープ秒（デフォルト 0.6）")
+    parser.add_argument("--refill-machinery", action="store_true",
+                        help="bs_machinery NULL 補完（MachineryAndVehiclesNet タグ追加後の是正・古い順）")
+    parser.add_argument("--refill-machinery-limit", type=int, default=None,
+                        help="機械装置補完の上限件数（デフォルト None＝全件）")
+    parser.add_argument("--refill-machinery-sleep", type=float, default=0.6,
+                        help="機械装置補完の1件あたりスリープ秒（デフォルト 0.6）")
     parser.add_argument("--diagnose-cf", action="store_true",
                         help="診断モード: サンプル書類の CF ラベル/要素IDを出力（capex ラベル照合の検証用）")
     parser.add_argument("--diagnose-cf-limit", type=int, default=20,
@@ -352,6 +389,8 @@ if __name__ == "__main__":
             f"  refill_pl_bs_limit={args.refill_pl_bs_limit}"
             f"  refill_c2={args.refill_c2}"
             f"  refill_c2_limit={args.refill_c2_limit}"
+            f"  refill_machinery={args.refill_machinery}"
+            f"  refill_machinery_limit={args.refill_machinery_limit}"
             f"  diagnose_cf={args.diagnose_cf}\n"
         )
     asyncio.run(main(
@@ -372,6 +411,9 @@ if __name__ == "__main__":
         refill_c2=args.refill_c2,
         refill_c2_limit=args.refill_c2_limit,
         refill_c2_sleep=args.refill_c2_sleep,
+        refill_machinery=args.refill_machinery,
+        refill_machinery_limit=args.refill_machinery_limit,
+        refill_machinery_sleep=args.refill_machinery_sleep,
         diagnose_cf=args.diagnose_cf,
         diagnose_cf_limit=args.diagnose_cf_limit,
     ))

@@ -36,8 +36,9 @@ if __name__ == "__main__":
     parser.add_argument("--incremental", action="store_true", help="収集済みをスキップ（差分収集）")
     parser.add_argument("--reparse",     action="store_true", help="xbrl_raw_documents から financial_records を再構築")
     parser.add_argument("--year",        type=int, default=None, help="再解析対象年度（--reparse と組み合わせ）")
-    parser.add_argument("--refill-pl-bs", action="store_true", help="pl_pretax 等 NULL の PL/BS 列を EDINET 再取得で補完（タグ修正後の既存データ是正）")
-    parser.add_argument("--sleep",       type=float, default=RATE_SLEEP, help="EDINET リクエスト間隔（秒・--refill-pl-bs 用）")
+    parser.add_argument("--refill-pl-bs",    action="store_true", help="pl_pretax 等 NULL の PL/BS 列を EDINET 再取得で補完（タグ修正後の既存データ是正）")
+    parser.add_argument("--refill-machinery", action="store_true", help="bs_machinery NULL（かつ bs_ppe_total あり）を EDINET 再取得で補完（MachineryAndVehiclesNet タグ追加後の是正）")
+    parser.add_argument("--sleep",           type=float, default=RATE_SLEEP, help="EDINET リクエスト間隔（秒・--refill-* 用）")
     args = parser.parse_args()
 
     if args.reparse:
@@ -58,6 +59,18 @@ if __name__ == "__main__":
             finally:
                 db.close()
         asyncio.run(_refill_pl_bs())
+    elif args.refill_machinery:
+        async def _refill_machinery():
+            db = SessionLocal()
+            try:
+                r = await refill_machinery_from_xbrl(
+                    db, limit=args.max, sleep_sec=args.sleep,
+                    on_progress=lambda c, t, m: print(m),
+                )
+                print(r)
+            finally:
+                db.close()
+        asyncio.run(_refill_machinery())
     elif args.market:
         async def _market():
             db = SessionLocal()
