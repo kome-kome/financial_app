@@ -31,14 +31,16 @@ from .net_cash_analysis import compute_net_cash, compute_nc_ratio
 # 売りシグナルに使う指標（すべて「高い＝売る理由が小さい」向き）。
 # 多くは financial_metrics VIEW 列だが、nc_ratio は VIEW 列ではなく実行時計算（_resolve_metric）。
 # UI のウェイトグリッドと一致させる（static/js/analysis.js: SELL_WEIGHT_LABELS）。
-SELL_METRICS = ["gap_ratio", "roe", "op_margin", "cf_ratio", "rev_growth", "equity_ratio", "nc_ratio"]
+SELL_METRICS = ["gap_ratio", "roe", "op_margin", "cf_ratio", "rev_growth", "equity_ratio", "nc_ratio", "mu", "neg_r_macro"]
 
 # プリセット（ウェイトは ≥0。値が大きいほどその観点を売り判断で重視）。
 # nc_ratio = 清原式ネットキャッシュ比率の逆観点（クッション消失＝安全マージン喪失を売り軸へ）。
+# mu       = M-1 期待リターン（高い＝保有理由あり＝売る理由が小さい）。M-1 未実行なら graceful-degrade。
+# neg_r_macro = −R_macro（M-1 マクロリスク曝露の符号反転。高い＝低リスク＝売る理由が小さい）。
 PRESETS = {
-    "バランス型":   {"gap_ratio": 1.0, "roe": 1.0, "op_margin": 1.0, "cf_ratio": 0.8, "rev_growth": 0.6, "equity_ratio": 0.4, "nc_ratio": 0.4},
-    "割高警戒型":   {"gap_ratio": 2.5, "roe": 0.5, "op_margin": 0.5, "rev_growth": 0.3, "nc_ratio": 0.8},
-    "業績悪化重視": {"roe": 2.0, "op_margin": 1.5, "cf_ratio": 1.0, "rev_growth": 1.5, "gap_ratio": 0.5, "nc_ratio": 0.3},
+    "バランス型":   {"gap_ratio": 1.0, "roe": 1.0, "op_margin": 1.0, "cf_ratio": 0.8, "rev_growth": 0.6, "equity_ratio": 0.4, "nc_ratio": 0.4, "mu": 0.5, "neg_r_macro": 0.3},
+    "割高警戒型":   {"gap_ratio": 2.5, "roe": 0.5, "op_margin": 0.5, "rev_growth": 0.3, "nc_ratio": 0.8, "neg_r_macro": 0.8},
+    "業績悪化重視": {"roe": 2.0, "op_margin": 1.5, "cf_ratio": 1.0, "rev_growth": 1.5, "gap_ratio": 0.5, "nc_ratio": 0.3, "mu": 0.3},
 }
 
 
@@ -242,6 +244,12 @@ class SellRankingPlugin(AnalysisPlugin):
                 "label": "対象年度（空=最新）",
                 "default": None, "optional": True,
             },
+            "r3_gate": {
+                "type": "slider", "dtype": "float",
+                "label": "R3 足切り（M-1 予測SE）",
+                "min": 0.0, "max": 0.5, "step": 0.05, "default": 0.0,
+                "description": "M-1 の μ 予測SE（r1_prime）がこの値を超える銘柄は SELL を出さない（0=無効）",
+            },
         }
 
     async def execute(self, params: dict, db: Any) -> dict:
@@ -263,7 +271,7 @@ class SellRankingPlugin(AnalysisPlugin):
         if not holdings or total_weight == 0:
             return {"count": 0, "presets": PRESETS, "metrics": SELL_METRICS,
                     "results": [], "not_found": [], "invalid": invalid,
-                    "gap_available": True}
+                    "gap_available": True, "m1_available": False}
 
         # ── ① ユニバース標準化パラメータ（最新年度の全銘柄から winsorize → mean/sd）──
         subq = latest_year_subq(db, FinancialMetric)
@@ -274,16 +282,41 @@ class SellRankingPlugin(AnalysisPlugin):
             uni_q = uni_q.filter(FinancialMetric.year == int(year))
         universe = uni_q.all()
 
+        # ── M-1 producer スコア（graceful-degrade: 未実行なら {}）──
+        import datetime as _dt
+        from plugins import get_plugin as _get_plugin
+        _m1 = _get_plugin("macro_risk_return")
+        m1_scores: dict = {}
+        if _m1 and _m1.produced_output(db):
+            try:
+                from database import get_macro_beta
+                from plugins.utils import get_macro_features
+                _meta_m1, _ = get_macro_beta(db)
+                _sel_factors = (_meta_m1 or {}).get("selected_factors") or []
+                _macro_snap: dict | None = None
+                if _sel_factors:
+                    _raw_snap = get_macro_features(db, _dt.date.today().isoformat(), _sel_factors)
+                    _macro_snap = {k: v for k, v in _raw_snap.items() if v is not None} or None
+                m1_scores = _m1.read_producer_scores(db, _macro_snap)
+            except Exception:
+                pass
+        m1_available = bool(m1_scores)
+
         stats: dict[str, tuple[float, float]] = {}
         for m in weights:
-            vals = [v for v in (_resolve_metric(r, m) for r in universe) if v is not None]
+            if m == "mu":
+                vals = [float(ps["mu"]) for ps in m1_scores.values() if ps.get("mu") is not None]
+            elif m == "neg_r_macro":
+                vals = [-float(ps["r_macro"]) for ps in m1_scores.values() if ps.get("r_macro") is not None]
+            else:
+                vals = [v for v in (_resolve_metric(r, m) for r in universe) if v is not None]
             if len(vals) < 4:
                 continue
             wv, _, _ = winsorize(vals)
-            mu = sum(wv) / len(wv)
-            var = sum((v - mu) ** 2 for v in wv) / (len(wv) - 1)
+            mean_ = sum(wv) / len(wv)
+            var = sum((v - mean_) ** 2 for v in wv) / (len(wv) - 1)
             sd = var ** 0.5 or 1.0
-            stats[m] = (mu, sd)
+            stats[m] = (mean_, sd)
         gap_available = "gap_ratio" not in weights or "gap_ratio" in stats
 
         # ── 保有銘柄の最新年度レコードを sec_code で引く ──
@@ -315,11 +348,19 @@ class SellRankingPlugin(AnalysisPlugin):
             weighted_sum = 0.0
             weight_present = 0.0
             detail: dict[str, float | None] = {}
+            _ec = r.edinet_code
+            _ps = m1_scores.get(_ec) if _ec else None
             for m, w in weights.items():
-                raw = _resolve_metric(r, m)
+                if m == "mu":
+                    raw = _ps.get("mu") if _ps else None
+                elif m == "neg_r_macro":
+                    _rm = _ps.get("r_macro") if _ps else None
+                    raw = -_rm if _rm is not None else None
+                else:
+                    raw = _resolve_metric(r, m)
                 if raw is not None and m in stats:
-                    mu, sd = stats[m]
-                    zstd = normalize_transform(float(raw), mu, sd, "zscore")
+                    mean_, sd = stats[m]
+                    zstd = normalize_transform(float(raw), mean_, sd, "zscore")
                     weighted_sum += w * (-zstd)        # 平均より下＝売り側に加点
                     weight_present += w
                 detail[m] = round(float(raw), 4) if raw is not None else None
@@ -333,6 +374,12 @@ class SellRankingPlugin(AnalysisPlugin):
             action = _base_action(score, sell_th, reduce_th)
             if timing_adj and action in _ACTIONS:
                 action = _apply_timing(action, mom["trend"])
+            # R3 足切りゲート: M-1 の μ 予測SE（r1_prime）が閾値超 → SELL を出さない
+            _r3_gate = params.get("r3_gate", 0.0)
+            if _r3_gate and action == "SELL" and _ps:
+                _r1p = _ps.get("r1_prime")
+                if _r1p is not None and float(_r1p) > _r3_gate:
+                    action = "REDUCE"
 
             last_close = mom["last_close"] if mom["last_close"] is not None else r.stock_price
             pnl_pct = None
@@ -378,6 +425,7 @@ class SellRankingPlugin(AnalysisPlugin):
             "presets":       PRESETS,
             "metrics":       SELL_METRICS,
             "gap_available": gap_available,
+            "m1_available":  m1_available,
             "results":       scored,
             "not_found":     not_found,
             "invalid":       invalid,

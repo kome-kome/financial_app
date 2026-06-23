@@ -381,19 +381,21 @@ function exportRecommendCSV() {
 // ── 売り候補ランキング（保有銘柄の売り時）────────────────────────────────
 // 観点 → [表示ラベル, バランス型の既定ウェイト]。バックエンド SELL_METRICS と一致させる。
 const SELL_WEIGHT_LABELS = {
-  'gap_ratio':    ['割高度（回帰乖離）', 1.0],
-  'roe':          ['ROE（収益性）',      1.0],
-  'op_margin':    ['営業利益率',          1.0],
-  'cf_ratio':     ['CF余力',             0.8],
-  'rev_growth':   ['売上成長率',          0.6],
-  'equity_ratio': ['財務安全性',          0.4],
-  'nc_ratio':     ['ネットキャッシュ余力', 0.4],
+  'gap_ratio':    ['割高度（回帰乖離）',        1.0],
+  'roe':          ['ROE（収益性）',             1.0],
+  'op_margin':    ['営業利益率',                1.0],
+  'cf_ratio':     ['CF余力',                   0.8],
+  'rev_growth':   ['売上成長率',                0.6],
+  'equity_ratio': ['財務安全性',                0.4],
+  'nc_ratio':     ['ネットキャッシュ余力',       0.4],
+  'mu':           ['M-1 期待リターン（μ）',     0.5],
+  'neg_r_macro':  ['M-1 マクロリスク（−Rᴹ）', 0.3],
 };
 // plugins/sell_ranking.py PRESETS と一致させる（高いほどその観点を売り判断で重視）。
 const SELL_PRESETS = {
-  'バランス型':   {gap_ratio:1.0, roe:1.0, op_margin:1.0, cf_ratio:0.8, rev_growth:0.6, equity_ratio:0.4, nc_ratio:0.4},
-  '割高警戒型':   {gap_ratio:2.5, roe:0.5, op_margin:0.5, rev_growth:0.3, nc_ratio:0.8},
-  '業績悪化重視': {roe:2.0, op_margin:1.5, cf_ratio:1.0, rev_growth:1.5, gap_ratio:0.5, nc_ratio:0.3},
+  'バランス型':   {gap_ratio:1.0, roe:1.0, op_margin:1.0, cf_ratio:0.8, rev_growth:0.6, equity_ratio:0.4, nc_ratio:0.4, mu:0.5, neg_r_macro:0.3},
+  '割高警戒型':   {gap_ratio:2.5, roe:0.5, op_margin:0.5, rev_growth:0.3, nc_ratio:0.8, neg_r_macro:0.8},
+  '業績悪化重視': {roe:2.0, op_margin:1.5, cf_ratio:1.0, rev_growth:1.5, gap_ratio:0.5, nc_ratio:0.3, mu:0.3},
 };
 const SELL_HOLDINGS_KEY = 'sell_ranking_holdings';
 let sellResults = [];
@@ -490,6 +492,8 @@ function renderSellRanking(d) {
     notes.push(`<span class="text-amber">⚠ 解釈できなかった入力: ${esc(d.invalid.join(' / '))}</span>`);
   if (d.gap_available === false)
     notes.push(`<span style="color:#64748b">※ 割高度は業種別OLS未実行のため売り判定から除外されています</span>`);
+  if (d.m1_available === false)
+    notes.push(`<span style="color:#64748b">※ M-1（マクロリスク）未実行のため μ・マクロリスク成分は除外されています</span>`);
   document.getElementById('sell-notes').innerHTML = notes.join('<br>');
 
   const fmtPct = (v, goodIsPos) => {
