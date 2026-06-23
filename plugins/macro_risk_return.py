@@ -276,22 +276,34 @@ class MacroRiskReturnPlugin(AnalysisPlugin):
                 "type": "slider",
                 "dtype": "float",
                 "label": "リスク回避度 λ",
-                "description": "U = μ − λ × R2。λ=0 でリターン最大化、λ大でリスク重視。",
+                "description": "U = μ − λ × R。λ=0 でリターン最大化、λ大でリスク重視。",
                 "default": 1.0,
                 "min": 0.0,
-                "max": 3.0,
+                "max": 5.0,
                 "step": 0.1,
             },
             "risk_axis": {
                 "type": "select",
                 "label": "横軸リスク",
-                "description": "R2=実現ボラ（既定）/ R1=予測不確実性 / R3=モデル信頼性（セクター×サイズ別CV-RMSE）",
+                "description": (
+                    "R2=実現ボラ（既定）/ R_macro=マクロ起因リスク √(βᵀΣ_macroβ)（per-stock β推論＝macro_beta 蓄積が必要）。"
+                    "両者リターン単位で λ の次元整合 U=μ−λR が保たれる。"
+                ),
                 "options": [
-                    {"value": "r2", "label": "R2 実現ボラティリティ（既定）"},
-                    {"value": "r1", "label": "R1 予測不確実性"},
-                    {"value": "r3", "label": "R3 モデル信頼性（バケットCV-RMSE）"},
+                    {"value": "r2",      "label": "R2 実現ボラティリティ（既定）"},
+                    {"value": "r_macro", "label": "R_macro マクロ起因リスク（β推論要）"},
                 ],
                 "default": "r2",
+            },
+            "r3_gate": {
+                "type": "slider",
+                "dtype": "float",
+                "label": "R3 信頼度ゲート（足切り）",
+                "description": "CV-RMSE がこの値を超える銘柄を上位表示から除外（0=ゲートなし）。",
+                "default": 0.0,
+                "min": 0.0,
+                "max": 0.5,
+                "step": 0.01,
             },
             "fin_features": {
                 "type": "multiselect",
@@ -385,6 +397,9 @@ class MacroRiskReturnPlugin(AnalysisPlugin):
     async def execute(self, params: dict, db: Any) -> dict:
         lambda_risk    = params["lambda_risk"]
         risk_axis      = params["risk_axis"]
+        if risk_axis not in ("r2", "r_macro"):
+            risk_axis = "r2"
+        r3_gate        = params.get("r3_gate", 0.0)
         fin_features   = params["fin_features"]
         use_macro      = params["use_macro"]
         macro_features = params["macro_features"]
@@ -471,18 +486,28 @@ class MacroRiskReturnPlugin(AnalysisPlugin):
         except Exception:
             macro_beta_producer = {}
 
+        # per-stock R_macro を全社 raw 値に追加（#215 リスク軸 r_macro のデータソース）。
+        # macro_beta 未蓄積なら None（クライアントは r_macro 軸選択時に null をフィルタ）。
+        for item in results:
+            prod = macro_beta_producer.get(item["edinet_code"])
+            item["r_macro"] = (
+                round(float(prod["r_macro"]), 6)
+                if (prod and prod.get("r_macro") is not None)
+                else None
+            )
+
         return {
             "cv_metrics":       cv_metrics,
             "selected_features": selected_names,
             "feature_coefs":    feature_coefs,
             "n_train_samples":  total_samples,
             "n_companies":      len(results),
-            # クライアントの初期表示シード（λ・リスク軸・表示件数は再計算なしで切替可能）
+            # クライアントの初期表示シード（λ・リスク軸・表示件数・ゲートは再計算なしで切替可能）
             "risk_axis":        risk_axis,
             "lambda_risk":      lambda_risk,
+            "r3_gate":          r3_gate,
             "top_n":            top_n,
             "results":          results,
-            "macro_beta_producer": macro_beta_producer,
         }
 
     # ── データロード ────────────────────────────────────────────────────────

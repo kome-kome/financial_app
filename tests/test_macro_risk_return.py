@@ -164,16 +164,23 @@ class TestParamsSchema:
         with pytest.raises(ValueError):
             coerce_params(self.schema, {"lambda_risk": -0.1})
         with pytest.raises(ValueError):
-            coerce_params(self.schema, {"lambda_risk": 3.1})
+            coerce_params(self.schema, {"lambda_risk": 5.1})  # max=5.0 (#215 拡張)
 
     def test_coerce_invalid_risk_axis(self):
         with pytest.raises(ValueError):
             coerce_params(self.schema, {"risk_axis": "r99"})
 
-    def test_coerce_r3_axis(self):
-        """R3 が有効な risk_axis 値として受理される（M-1 R3 追加）。"""
-        result = coerce_params(self.schema, {"risk_axis": "r3"})
-        assert result["risk_axis"] == "r3"
+    def test_coerce_r1_r3_axis_invalid(self):
+        """R1/R3 は効用軸から除外（#215 リスク軸再編）：選択肢として拒否される。"""
+        with pytest.raises(ValueError):
+            coerce_params(self.schema, {"risk_axis": "r1"})
+        with pytest.raises(ValueError):
+            coerce_params(self.schema, {"risk_axis": "r3"})
+
+    def test_coerce_r_macro_axis_valid(self):
+        """r_macro が有効な risk_axis 値として受理される（#215）。"""
+        result = coerce_params(self.schema, {"risk_axis": "r_macro"})
+        assert result["risk_axis"] == "r_macro"
 
     def test_default_fin_features_include_price_free(self):
         """既定の財務特徴量に価格フリーの roa・eps_growth が混合されている。"""
@@ -469,19 +476,31 @@ class TestExecuteIntegration:
         assert len(res_small["results"]) == len(res_large["results"])
         assert len(res_small["results"]) == res_small["n_companies"]
 
-    def test_execute_r3_axis(self):
-        """risk_axis='r3' で実行でき、各銘柄に R3 raw 値が付与される。"""
+    def test_execute_r3_in_results(self):
+        """R3 は各銘柄の raw 値（足切りゲート用）として結果に付与される（#215 ゲート降格）。"""
         plugin = MacroRiskReturnPlugin()
         schema = plugin.params_schema()
-        params = coerce_params(schema, {"use_macro": False, "top_n": 5, "risk_axis": "r3"})
+        params = coerce_params(schema, {"use_macro": False, "top_n": 5})
 
         db = self._build_mock_db()
         result = asyncio.run(plugin.execute(params, db))
 
-        assert result["risk_axis"] == "r3"
         for item in result["results"]:
             assert "r3" in item
             assert "mu_raw" in item
+
+    def test_execute_r_macro_in_results(self):
+        """全社 results に r_macro キーが含まれる（#215）。macro_beta 未蓄積なら None。"""
+        plugin = MacroRiskReturnPlugin()
+        schema = plugin.params_schema()
+        params = coerce_params(schema, {"use_macro": False, "top_n": 5, "risk_axis": "r_macro"})
+
+        db = self._build_mock_db()
+        result = asyncio.run(plugin.execute(params, db))
+
+        assert result["risk_axis"] == "r_macro"
+        for item in result["results"]:
+            assert "r_macro" in item  # macro_beta 未蓄積 → None だが key は必ず存在
 
     def test_execute_returns_feature_coefs(self):
         """execute は selected_features と整合する標準化係数 feature_coefs を返す。"""

@@ -1127,7 +1127,12 @@ function renderSectorOls(data) {
 // M-1 リスク-リターン可視化。サーバーは全社の raw 値（mu_raw/r1/r2/r3）を返し、
 // 効用 U・パレート・並べ替え・top_n は λ／リスク軸に依存する後処理として
 // クライアント側で算出する（軸切替・λ調整は再計算なしで即時反映）。
-const MRR_AXIS_LABELS = { r1: 'R1 予測不確実性', r2: 'R2 実現ボラティリティ', r3: 'R3 モデル信頼性' };
+const MRR_AXIS_LABELS = {
+  r2:      'R2 実現ボラティリティ',
+  r_macro: 'R_macro マクロ起因リスク',
+  r1:      'R1 予測不確実性',   // 軸選択肢から除外（縮小駆動に降格）
+  r3:      'R3 モデル信頼性',   // 軸選択肢から除外（足切りゲートに降格）
+};
 // 係数バー用: 特徴量コード → 表示ラベル（既知のものだけ。未知はコードのまま表示）。
 const MRR_FEAT_LABELS = {
   per: 'PER', pbr: 'PBR', div_yield: '配当利回り', roe: 'ROE', roa: 'ROA',
@@ -1157,17 +1162,19 @@ function renderMacroRiskReturn(data) {
   return _mrrTableHTML(v);
 }
 
-// フォームの λ／リスク軸／表示件数を読む（未設定はサーバー echo をシード）。
+// フォームの λ／リスク軸／表示件数／R3 ゲートを読む（未設定はサーバー echo をシード）。
+const _MRR_VALID_AXES = ['r2', 'r_macro'];
 function _mrrReadParams() {
   const g = (id) => document.getElementById('param-macro_risk_return-' + id);
   const d = _mrrData || {};
-  const lamEl = g('lambda_risk'), axEl = g('risk_axis'), tnEl = g('top_n');
+  const lamEl = g('lambda_risk'), axEl = g('risk_axis'), tnEl = g('top_n'), gEl = g('r3_gate');
   const lambda = (lamEl && lamEl.value !== '') ? parseFloat(lamEl.value) : (d.lambda_risk ?? 1.0);
-  const axis = ['r1', 'r2', 'r3'].includes(axEl && axEl.value)
+  const axis = _MRR_VALID_AXES.includes(axEl && axEl.value)
     ? axEl.value
-    : (['r1', 'r2', 'r3'].includes(d.risk_axis) ? d.risk_axis : 'r2');
+    : (_MRR_VALID_AXES.includes(d.risk_axis) ? d.risk_axis : 'r2');
   const topN = (tnEl && tnEl.value !== '') ? Math.max(1, Math.round(parseFloat(tnEl.value))) : (d.top_n ?? 30);
-  return { lambda, axis, topN };
+  const r3Gate = (gEl && gEl.value !== '') ? parseFloat(gEl.value) : (d.r3_gate ?? 0.0);
+  return { lambda, axis, topN, r3Gate };
 }
 
 // 効率的フロンティア（最小リスク x・最大リターン y）の非劣解集合を O(n log n) で算出。
@@ -1180,16 +1187,17 @@ function _mrrParetoSet(items, axisKey) {
   return set;
 }
 
-// 全社 raw 値から、選択 λ／軸で U・パレートを算出し U 降順に並べた view を返す。
+// 全社 raw 値から、選択 λ／軸・R3 ゲートで U・パレートを算出し U 降順に並べた view を返す。
 function _mrrRecompute() {
-  const { lambda, axis, topN } = _mrrReadParams();
+  const { lambda, axis, topN, r3Gate } = _mrrReadParams();
   const items = (_mrrData && _mrrData.results ? _mrrData.results : [])
     .filter(r => r[axis] != null && r.mu_raw != null)
+    .filter(r => r3Gate <= 0 || r.r3 == null || r.r3 <= r3Gate)
     .map(r => ({ ...r, _u: r.mu_raw - lambda * r[axis] }));
   const paretoSet = _mrrParetoSet(items, axis);
   items.forEach(it => { it._pareto = paretoSet.has(it.edinet_code); });
   items.sort((a, b) => b._u - a._u);
-  return { axis, lambda, topN, all: items, top: items.slice(0, topN) };
+  return { axis, lambda, topN, r3Gate, all: items, top: items.slice(0, topN) };
 }
 
 // 配列の分位点（0..1）。空なら null。少数点でも端に丸めず線形補間で安定させる。
@@ -1348,8 +1356,10 @@ function _mrrPaintChart(v) {
           return [
             p.company_name || p.edinet_code,
             `μ_raw: ${(p.mu_raw ?? 0).toFixed(4)}`,
-            `${MRR_AXIS_LABELS[axisKey]}: ${(p[axisKey] ?? 0).toFixed(4)}`,
-            `R1 信頼度(径): ${p.r1 != null ? p.r1.toFixed(4) : '-'}`,
+            `${MRR_AXIS_LABELS[axisKey] || axisKey}: ${(p[axisKey] ?? 0).toFixed(4)}`,
+            axisKey !== 'r2' && p.r2 != null ? `R2 ボラ: ${(p.r2 * 100).toFixed(2)}%` : null,
+            axisKey !== 'r_macro' && p.r_macro != null ? `R_macro: ${(p.r_macro * 100).toFixed(2)}%` : null,
+            `R3 信頼性: ${p.r3 != null ? p.r3.toFixed(4) : '-'}`,
             `U（効用・色）: ${p._u != null ? p._u.toFixed(4) : '-'}`,
             p._pareto ? '★ パレート優位' : '',
           ].filter(Boolean);
@@ -1375,11 +1385,13 @@ function _mrrTableHTML(v) {
   }
   const total = (_mrrData && _mrrData.results ? _mrrData.results.length : v.top.length);
   const header = `<tr><th>順位</th><th>証券コード</th><th>企業名</th><th>業種</th>
-    <th>μ_raw</th><th>R2 ボラ</th><th>R1 不確実性</th><th>R3 信頼性</th><th>効用 U</th><th>パレート</th></tr>`;
+    <th>μ_raw</th><th>R2 ボラ</th><th>R_macro</th><th>R3 信頼性</th><th>効用 U</th><th>パレート</th></tr>`;
   const rows = v.top.map((r, i) => {
     const mu = r.mu_raw ?? 0;
     const muClass = mu > 0 ? 'text-green' : 'text-red';
     const paretoTag = r._pareto ? '<span style="color:#f9a8d4;font-weight:700">★</span>' : '';
+    const r3Warn = v.r3Gate > 0 && r.r3 != null && r.r3 > v.r3Gate * 0.8
+      ? ' style="color:#fbbf24"' : '';
     return `<tr>
       <td>${i+1}</td>
       <td>${esc(r.sec_code||'-')}</td>
@@ -1387,8 +1399,8 @@ function _mrrTableHTML(v) {
       <td style="font-size:11px">${esc(r.industry||'-')}</td>
       <td class="${muClass}">${(mu*100).toFixed(2)}%</td>
       <td>${r.r2!=null?(r.r2*100).toFixed(2)+'%':'-'}</td>
-      <td style="font-size:11px;color:#94a3b8">${r.r1!=null?r.r1.toFixed(4):'-'}</td>
-      <td style="font-size:11px;color:#94a3b8">${r.r3!=null?r.r3.toFixed(4):'-'}</td>
+      <td style="font-size:11px;color:#94a3b8">${r.r_macro!=null?(r.r_macro*100).toFixed(2)+'%':'-'}</td>
+      <td style="font-size:11px;color:#94a3b8"${r3Warn}>${r.r3!=null?r.r3.toFixed(4):'-'}</td>
       <td class="text-green">${r._u!=null?r._u.toFixed(4):'-'}</td>
       <td style="text-align:center">${paretoTag}</td>
     </tr>`;
@@ -1426,8 +1438,8 @@ function _mrrScheduleRepaint() {
   clearTimeout(_mrrPaintTimer);
   _mrrPaintTimer = setTimeout(_mrrRepaint, 80);  // スライダー連続入力をデバウンス
 }
-// λ/軸/件数だけを即時クライアント反映（特徴量・マクロ等の変更は「実行」ボタンが必要）。
-const _MRR_CLIENT_PARAMS = ['lambda_risk', 'risk_axis', 'top_n'];
+// λ/軸/件数/R3ゲートだけを即時クライアント反映（特徴量・マクロ等の変更は「実行」ボタンが必要）。
+const _MRR_CLIENT_PARAMS = ['lambda_risk', 'risk_axis', 'top_n', 'r3_gate'];
 function _mrrIsClientParam(id) {
   const prefix = 'param-macro_risk_return-';
   return id.startsWith(prefix) && _MRR_CLIENT_PARAMS.includes(id.slice(prefix.length));

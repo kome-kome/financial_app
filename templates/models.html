@@ -584,21 +584,18 @@ step_months      = <span class="val">3</span>
   <h3>リスク指標</h3>
   <table>
     <tr><th>記号</th><th>定義</th><th>役割</th><th>解像度</th></tr>
-    <tr><td><strong>R1</strong></td><td>OLS 予測分散 s²(1 + xᵀ(XᵀX)⁻¹x) の平方根</td><td>予測不確実性・μ 縮小ウェイト兼用</td><td>個社</td></tr>
-    <tr><td><strong>R2</strong></td><td>直前52週週次ログリターン SD × √52</td><td>価格変動リスク（Sharpe 分母）</td><td>個社</td></tr>
-    <tr><td><strong>R3</strong></td><td>セクター×サイズ三分位バケットの walk-forward CV 残差 RMSE（サイズ代理=総資産）</td><td>モデル信頼性（この企業タイプの説明度）。標本不足時は セクター→全体 へフォールバック</td><td>バケット</td></tr>
+    <tr><td><strong>R2</strong></td><td>直前52週週次ログリターン SD × √52</td><td>価格変動リスク（Sharpe 分母）。<strong>効用軸（既定）</strong></td><td>個社</td></tr>
+    <tr><td><strong>R_macro</strong></td><td>√(βᵀΣ<sub>macro</sub>β)（β=per-stock 事後ローディング、Σ=選択因子の共分散）</td><td>マクロ起因リスク（リターン単位）。<strong>効用軸（R2 と選択制）</strong>。macro_beta 推論要</td><td>個社</td></tr>
+    <tr><td><strong>R1</strong></td><td>OLS 予測分散 s²(1 + xᵀ(XᵀX)⁻¹x) の平方根</td><td>縮小駆動（効用軸から除外）</td><td>個社</td></tr>
+    <tr><td><strong>R3</strong></td><td>セクター×サイズ三分位バケットの walk-forward CV 残差 RMSE（サイズ代理=総資産）</td><td>足切りゲート（<code>r3_gate</code>）。標本不足時は セクター→全体 へフォールバック</td><td>バケット</td></tr>
   </table>
-  <p>横軸リスク <code>risk_axis</code> で R1/R2/R3 を切替え、散布図の横軸・効用・Pareto 判定の軸に用いる。</p>
-
-  <h3>James-Stein 縮小（Black-Litterman 型）</h3>
-  <div class="formula">μ<sub>shrunk</sub> = (1 − w) · μ<sub>raw</sub> + w · μ<sub>sector</sub><br>w = R1 / R1<sub>max</sub></div>
-  <p>R1 が大きい（信頼度が低い）ほど強くセクター平均へ引き寄せる。</p>
+  <p>効用軸（<code>risk_axis</code>）は <strong>R2 / R_macro の選択制</strong>。両者リターン単位のため λ の次元整合が保たれる。R3 は <code>r3_gate</code> スライダー（既定 0=ゲートなし）で上位表示から低信頼銘柄を除外する信頼度 machinery に降格。</p>
 
   <h3>効用関数と Pareto フロンティア（クライアント側即時）</h3>
   <div class="formula">U = μ<sub>raw</sub> − λ · R<sub>axis</sub></div>
-  <p>λ はリスク回避度スライダー（0〜3、既定 1.0）。R<sub>axis</sub> は <code>risk_axis</code> で選んだリスク（R2 既定 / R1 / R3）。期待リターン基準は <strong>μ<sub>raw</sub></strong>（μ<sub>shrunk</sub> は低シグナル時に全社がセクター平均へ潰れるため可視化・効用には不適。表の参考列に併記）。<br>
-  効用 U・Pareto 判定・並べ替え・top_n はモデル再学習に関与しない後処理のため、サーバーは<strong>全社の raw 値</strong>を返し、これらは<strong>ブラウザ側で算出</strong>する。よって <strong>λ 調整・リスク軸切替・表示件数は再計算なしで即時反映</strong>される（重い計算は特徴量・マクロ等モデル本体を変えた時のみ）。<br>
-  バブルチャートのマッピングは <strong>y=μ<sub>raw</sub> / x=選択リスク軸（type:linear 数値軸）/ 色の濃淡=効用 U / 枠線強調＋フロンティア線=Pareto 優位</strong>。散布図は全社を描画し効用上位 top_n を強調、両軸は [p1,p99] にクランプ。径は固定（R1 はほぼ一定で径エンコードが退化するためツールチップへ）。Pareto 判定軸は表示中の <code>risk_axis</code> に追従する。</p>
+  <p>λ はリスク回避度スライダー（0〜5、既定 1.0）。R<sub>axis</sub> は <code>risk_axis</code> で選んだリスク（R2 既定 / R_macro）。期待リターン基準は <strong>μ<sub>raw</sub></strong>（OLS の生予測値）。<br>
+  効用 U・Pareto 判定・並べ替え・top_n・R3 ゲートはモデル再学習に関与しない後処理のため、サーバーは<strong>全社の raw 値</strong>（mu_raw / r1 / r2 / r3 / r_macro）を返し、これらは<strong>ブラウザ側で算出</strong>する。よって <strong>λ 調整・リスク軸切替・表示件数・R3 ゲートは再計算なしで即時反映</strong>される（重い計算は特徴量・マクロ等モデル本体を変えた時のみ）。<br>
+  バブルチャートのマッピングは <strong>y=μ<sub>raw</sub> / x=選択リスク軸（R2/R_macro・type:linear）/ 色の濃淡=効用 U / 枠線強調＋フロンティア線=Pareto 優位</strong>。散布図は R3 ゲート後の全社を描画し効用上位 top_n を強調、両軸は [p1,p99] にクランプ。Pareto 判定軸は <code>risk_axis</code> に追従する。</p>
   <p><strong>選択特徴量の係数可視化</strong>：<code>execute</code> は最終 OLS の<strong>標準化係数</strong>を <code>feature_coefs</code> で返し、UI は |β| 降順の横バーで表示する（財務／マクロ／交差項／テクニカルを色分け、ゼロ中心で符号＝株高/株安方向）。CV R² は低いため、係数は<strong>符号と相対的大小の目安</strong>であり寄与度の過大解釈は避ける。</p>
 
   <h3>参考文献</h3>
