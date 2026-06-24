@@ -8,7 +8,7 @@ import io
 import json
 import logging
 from datetime import datetime
-from typing import Optional
+from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
@@ -426,7 +426,14 @@ async def db_preview(
     if filter_col and filter_val:
         if filter_col not in col_map:
             raise HTTPException(400, "filter_col が不正です")
-        query = query.filter(col_map[filter_col] == filter_val)
+        col_meta = _column_meta(col_map[filter_col])
+        typed_val: Any = filter_val
+        if col_meta["numeric"]:
+            try:
+                typed_val = int(filter_val) if col_meta["type"] == "int" else float(filter_val)
+            except ValueError:
+                raise HTTPException(400, f"filter_val は数値カラム {filter_col} に変換できません")
+        query = query.filter(col_map[filter_col] == typed_val)
     total = query.count()
 
     if sort:
@@ -617,7 +624,14 @@ async def db_export_table(
     if filter_col and filter_val:
         if filter_col not in col_map:
             raise HTTPException(400, "filter_col が不正です")
-        query = query.filter(col_map[filter_col] == filter_val)
+        col_meta = _column_meta(col_map[filter_col])
+        typed_val: Any = filter_val
+        if col_meta["numeric"]:
+            try:
+                typed_val = int(filter_val) if col_meta["type"] == "int" else float(filter_val)
+            except ValueError:
+                raise HTTPException(400, f"filter_val は数値カラム {filter_col} に変換できません")
+        query = query.filter(col_map[filter_col] == typed_val)
     rows = query.limit(limit).all()
 
     output = io.StringIO()

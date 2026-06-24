@@ -82,6 +82,15 @@ class TestDbPreview:
     def test_invalid_sort_column_returns_400(self):
         assert client.get("/api/db/preview/companies?sort=nonexistent").status_code == 400
 
+    def test_numeric_col_with_non_numeric_filter_returns_400(self):
+        r = client.get("/api/db/preview/financial_records?filter_col=year&filter_val=abc")
+        assert r.status_code == 400
+
+    def test_numeric_col_with_valid_filter_returns_200(self, db, make_fin):
+        db.add(make_fin(year=2023)); db.commit()
+        r = client.get("/api/db/preview/financial_records?filter_col=year&filter_val=2023")
+        assert r.status_code == 200
+
 
 # ── /api/db/stats/{table} ───────────────────────────────────────────────────
 
@@ -148,6 +157,10 @@ class TestDbExport:
 
     def test_invalid_limit_returns_400(self):
         assert client.get("/api/db/export/companies?limit=0").status_code == 400
+
+    def test_numeric_col_with_non_numeric_filter_returns_400(self):
+        r = client.get("/api/db/export/financial_records?filter_col=year&filter_val=abc")
+        assert r.status_code == 400
 
 
 # ── /api/export/csv ─────────────────────────────────────────────────────────
