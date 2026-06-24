@@ -104,3 +104,18 @@ def test_no_authorization_header_used(auth_client):
     fresh = TestClient(api.app)  # Cookie を持たない別クライアント
     r = fresh.get(PROBE, headers={"Authorization": f"Bearer {token}"})
     assert r.status_code == 401  # Authorization ヘッダは無視される
+
+
+def test_token_invalidated_after_password_change(auth_client):
+    """パスワード変更後に旧トークンが 401 になることを確認（#230）。"""
+    _login(auth_client)
+    assert auth_client.get(PROBE).status_code != 401  # ログイン済み: 通過
+
+    # パスワード変更（reset-password が行う api.APP_PASSWORD 書き換えを模倣）
+    old_pw = api.APP_PASSWORD
+    api.APP_PASSWORD = "newpass_changed_456"
+    try:
+        # 旧 Cookie のトークンは旧パスワード由来の fingerprint で署名済み → 失効
+        assert auth_client.get(PROBE).status_code == 401
+    finally:
+        api.APP_PASSWORD = old_pw

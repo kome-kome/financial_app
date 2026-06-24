@@ -63,9 +63,16 @@ if not APP_SECRET_KEY:
 _TOKEN_TTL      = 30 * 24 * 3600
 RENDER_LIGHT_MODE = os.environ.get("RENDER_LIGHT_MODE", "").lower() in ("1", "true", "yes")
 
+def _pw_fingerprint() -> str:
+    """APP_PASSWORD の HMAC 断片。トークン署名に混入してパスワード変更時に旧トークンを失効させる。"""
+    if not APP_PASSWORD:
+        return ""
+    return hmac.new(APP_SECRET_KEY.encode(), APP_PASSWORD.encode(), hashlib.sha256).hexdigest()[:16]
+
 def _create_token() -> str:
     ts  = str(int(_time.time()))
-    sig = hmac.new(APP_SECRET_KEY.encode(), ts.encode(), hashlib.sha256).hexdigest()
+    msg = f"{ts}:{_pw_fingerprint()}"
+    sig = hmac.new(APP_SECRET_KEY.encode(), msg.encode(), hashlib.sha256).hexdigest()
     return base64.urlsafe_b64encode(f"{ts}:{sig}".encode()).decode()
 
 def _verify_token(token: str) -> bool:
@@ -74,7 +81,8 @@ def _verify_token(token: str) -> bool:
     try:
         raw     = base64.urlsafe_b64decode(token.encode()).decode()
         ts, sig = raw.rsplit(":", 1)
-        expected = hmac.new(APP_SECRET_KEY.encode(), ts.encode(), hashlib.sha256).hexdigest()
+        msg = f"{ts}:{_pw_fingerprint()}"
+        expected = hmac.new(APP_SECRET_KEY.encode(), msg.encode(), hashlib.sha256).hexdigest()
         return hmac.compare_digest(sig, expected) and _time.time() - int(ts) < _TOKEN_TTL
     except Exception:
         return False
