@@ -73,6 +73,8 @@ DEFAULT_FIN_FEATURES = ["per", "pbr", "roe", "equity_ratio", "roa", "eps_growth"
 #     run #1）で Azure IP からの取得・蓄積（各1255〜1257件/5年）を実証済み。チャネル網羅＝
 #     FX・株式・米金利/期間・コモディティ・ボラの5チャネル。
 #   - JP10Y・TOPIX: 収集失敗（JP10Y=^JGB 上場廃止 / TOPIX=^tpx・^TPX 取得不可）で蓄積なし → 非公開。
+#   - FRED チャネル（#221）: FRED_API_KEY 設定後・本番蓄積確認後に以下のコメントアウトを解除して公開。
+#     蓄積前に有効化するとスナップショット全件 None スキップになりモデル学習不能になるため保留。
 _MACRO_MAP = {
     "macro_usdjpy_yoy":    ("USDJPY",    "yoy"),
     "macro_eurjpy_yoy":    ("EURJPY",    "yoy"),
@@ -85,12 +87,19 @@ _MACRO_MAP = {
     "macro_vix_zscore":    ("VIX",       "zscore"),
     "macro_wti_yoy":       ("WTI",       "yoy"),
     "macro_gold_yoy":      ("GOLD",      "yoy"),
+    # ── FRED チャネル: 本番蓄積確認後に解除（collect-macro.yml で FRED_API_KEY を設定） ──
+    # "macro_hy_oas_zscore":       ("HY_OAS",       "zscore"),  # 米HYスプレッド（クレジット）
+    # "macro_ig_oas_zscore":       ("IG_OAS",        "zscore"),  # 米IGスプレッド（クレジット）
+    # "macro_breakeven10y_zscore": ("BREAKEVEN10Y",  "zscore"),  # 米10年BEI（インフレ期待）
+    # "macro_jp10y_fred_zscore":   ("JP10Y_FRED",    "zscore"),  # 日10年金利（FRED・月次）
+    # "macro_t10y2y_zscore":       ("T10Y2Y",        "zscore"),  # 米10y−2yスプレッド（期間構造）
 }
 MACRO_FEATURE_NAMES = list(_MACRO_MAP.keys())
 
 # params_schema の multiselect 用ラベル。USDJPY/SP500/US10Y を既定選択（その他は SP500/市場成分との
 # 多重共線[VIX↔SP500・米金利↔DXY 等]や任意性のため既定には含めず選択肢としてのみ公開。pooled BIC が
 # 過剰選択を抑える）。
+# FRED チャネルは _MACRO_MAP の解除と同時に以下のコメントアウトも解除すること。
 MACRO_FEATURE_OPTIONS = [
     {"value": "macro_usdjpy_yoy",    "label": "USD/JPY 前年比（YoY）"},
     {"value": "macro_eurjpy_yoy",    "label": "EUR/JPY 前年比（YoY）"},
@@ -103,6 +112,12 @@ MACRO_FEATURE_OPTIONS = [
     {"value": "macro_vix_zscore",    "label": "VIX恐怖指数 Zスコア"},
     {"value": "macro_wti_yoy",       "label": "WTI原油 前年比（YoY）"},
     {"value": "macro_gold_yoy",      "label": "金（ゴールド）前年比（YoY）"},
+    # ── FRED チャネル: 本番蓄積確認後に解除 ──────────────────────────────────
+    # {"value": "macro_hy_oas_zscore",       "label": "米HYスプレッド（OAS）Zスコア"},
+    # {"value": "macro_ig_oas_zscore",       "label": "米IGスプレッド（OAS）Zスコア"},
+    # {"value": "macro_breakeven10y_zscore", "label": "米10年BEI（インフレ期待）Zスコア"},
+    # {"value": "macro_jp10y_fred_zscore",   "label": "日10年金利（FRED）Zスコア"},
+    # {"value": "macro_t10y2y_zscore",       "label": "米10y−2yスプレッド Zスコア"},
 ]
 DEFAULT_MACRO_FEATURES = ["macro_usdjpy_yoy", "macro_sp500_yoy", "macro_us10y_zscore"]
 

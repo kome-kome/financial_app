@@ -1081,6 +1081,65 @@ MACRO_SERIES: list[dict] = [
     {"code": "GOLD",      "name": "金",           "category": "commodity",  "ticker": "gc.f",     "yf_ticker": "GC=F"},
 ]
 
+# ── FRED マクロ系列（クレジット・インフレ・JP金利・期間構造）──────────────────────────
+# FRED_API_KEY が設定されている場合のみ収集。未設定時は collect_macro_data 内でスキップ。
+# アカウント登録: https://fred.stlouisfed.org/docs/api/api_key.html （無料・要ユーザー登録）
+# GitHub Actions シークレット名: FRED_API_KEY
+# レート制限: 120 req/min → FRED_RATE_SLEEP=0.6s でバッファ込み
+FRED_API_KEY  = os.getenv("FRED_API_KEY", "")
+FRED_BASE_URL = "https://api.stlouisfed.org/fred/series/observations"
+FRED_RATE_SLEEP = 0.6  # 120 req/min = 2/s → 0.6s でバッファ付き
+
+FRED_SERIES: list[dict] = [
+    {"code": "HY_OAS",       "name": "米HYスプレッド（OAS）",     "category": "credit",    "fred_id": "BAMLH0A0HYM2"},
+    {"code": "IG_OAS",       "name": "米IGスプレッド（OAS）",     "category": "credit",    "fred_id": "BAMLC0A0CM"},
+    {"code": "BREAKEVEN10Y", "name": "米10年BEI（インフレ期待）", "category": "inflation", "fred_id": "T10YIE"},
+    {"code": "JP10Y_FRED",   "name": "日10年金利（FRED）",        "category": "rate",      "fred_id": "IRLTLT01JPM156N"},
+    {"code": "T10Y2Y",       "name": "米10y−2yスプレッド",       "category": "rate",      "fred_id": "T10Y2Y"},
+]
+
+
+async def fetch_fred_series(
+    session: httpx.AsyncClient,
+    fred_id: str,
+    date_from: str,  # "YYYY-MM-DD"
+    date_to:   str,  # "YYYY-MM-DD"
+) -> list:
+    """FRED API から指定系列の観測値を取得する（日次・月次両対応）。
+    欠損値（"."）はスキップ。月次系列は月初日の1レコードのみ返す。"""
+    params = {
+        "series_id":         fred_id,
+        "api_key":           FRED_API_KEY,
+        "file_type":         "json",
+        "observation_start": date_from,
+        "observation_end":   date_to,
+    }
+    try:
+        r = await session.get(FRED_BASE_URL, params=params, timeout=30)
+        r.raise_for_status()
+        data = r.json()
+    except Exception as e:
+        log.warning("FRED 取得失敗 %s: %s", fred_id, e)
+        return []
+
+    rows = []
+    for obs in data.get("observations", []):
+        v = obs.get("value", ".")
+        if v == "." or v is None:
+            continue
+        try:
+            rows.append({
+                "trade_date": obs["date"],
+                "open":   None,
+                "high":   None,
+                "low":    None,
+                "close":  float(v),
+                "volume": None,
+            })
+        except (ValueError, KeyError):
+            continue
+    return rows
+
 
 async def fetch_yahoo_history(
     session: httpx.AsyncClient,
@@ -1159,15 +1218,17 @@ async def collect_macro_data(
     on_progress: Optional[Callable[[int, int, str], None]] = None,
     cancel_check: Optional[Callable[[], bool]] = None,
 ):
-    """MACRO_SERIES の全系列について日次データを取得し macro_data に upsert する。
+    """MACRO_SERIES（Yahoo/stooq）+ FRED_SERIES（FRED API）の全系列を macro_data に upsert する。
     Yahoo Finance を優先して使用し（GitHub Actions Azure IP でも動作）、
-    取得失敗時は stooq にフォールバックする。
+    取得失敗時は stooq にフォールバックする。FRED は FRED_API_KEY が設定された場合のみ収集。
     既存レコードがあれば close 等を上書き（最新値で更新）。"""
     today    = date.today()
     start    = today - timedelta(days=int(years_back * 365.25))
     d1       = start.strftime("%Y%m%d")
     d2       = today.strftime("%Y%m%d")
-    total    = len(MACRO_SERIES)
+    d1_iso   = start.strftime("%Y-%m-%d")
+    d2_iso   = today.strftime("%Y-%m-%d")
+    total    = len(MACRO_SERIES) + (len(FRED_SERIES) if FRED_API_KEY else 0)
     saved    = 0
 
     async with httpx.AsyncClient() as session:
@@ -1205,5 +1266,43 @@ async def collect_macro_data(
             saved += n
             if on_progress:
                 on_progress(i, total, f"[マクロ {i}/{total}] {series['name']}: {n}件処理")
+
+        # ── FRED 収集（FRED_API_KEY が設定されている場合のみ）──────────────────
+        if not FRED_API_KEY:
+            if on_progress:
+                on_progress(total, total, "[FRED] FRED_API_KEY 未設定のためスキップ")
+            return saved
+
+        base_i = len(MACRO_SERIES)
+        for j, series in enumerate(FRED_SERIES, 1):
+            idx = base_i + j
+            if cancel_check and cancel_check():
+                if on_progress:
+                    on_progress(idx - 1, total, "[マクロ収集] ユーザー停止")
+                return saved
+
+            if on_progress:
+                on_progress(idx - 1, total, f"[FRED {j}/{len(FRED_SERIES)}] {series['name']} 取得中")
+            rows = await fetch_fred_series(session, series["fred_id"], d1_iso, d2_iso)
+            await asyncio.sleep(FRED_RATE_SLEEP)
+
+            if not rows:
+                if on_progress:
+                    on_progress(idx, total, f"[FRED {j}/{len(FRED_SERIES)}] {series['name']} データ無し")
+                continue
+
+            vals = [{
+                "series_code": series["code"],
+                "series_name": series["name"],
+                "category":    series["category"],
+                "trade_date":  r["trade_date"],
+                "open": r["open"], "high": r["high"], "low": r["low"],
+                "close": r["close"], "volume": r["volume"],
+            } for r in rows]
+            n = upsert_macro_batch(db, vals)
+            db.commit()
+            saved += n
+            if on_progress:
+                on_progress(idx, total, f"[FRED {j}/{len(FRED_SERIES)}] {series['name']}: {n}件処理")
 
     return saved
