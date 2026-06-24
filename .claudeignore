@@ -14,3 +14,6 @@ migration_dumps/
 
 # 環境変数ファイル（機密情報）
 .env
+
+# SQL定義ファイル（VIEW内容はARCHITECTURE.mdに要約済み）
+sql/
