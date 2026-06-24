@@ -155,6 +155,7 @@ async def _price_collection_driver(db, batch_gen) -> tuple[bool, int]:
                 total += record_prices_batch(db, batch, trim=False)
             except Exception as e:
                 log.warning("株価バッチ保存失敗: %s", e)
+                db.rollback()  # aborted transaction をリセット。次バッチ・trim_daily を救済
     trim_daily(db)
     return False, total
 
