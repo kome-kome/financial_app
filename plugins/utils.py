@@ -699,6 +699,7 @@ def walk_forward_cv_monthly(
     min_train_months: int = 18,
     step_months: int = 3,
     return_residuals: bool = False,
+    fit_predict=None,
 ) -> list[dict] | tuple[list[dict], dict]:
     """月次ウォークフォワードCV（FUTURE_TASKS.md 仕様）。
     samples_by_ym: {"YYYY-MM": [(feature_row: list[float], target: float), ...]}
@@ -711,6 +712,9 @@ def walk_forward_cv_monthly(
       M-1 の R3（セクター×サイズ別バケットの CV-RMSE）のように、個別残差を
       外部メタデータでグループ集計したい用途向け。テストサンプルの並び順は
       samples_by_ym[test_ym] と一致するため、呼び出し側で同順のメタ列と突合できる。
+    fit_predict: None=OLS（既定）。callable の場合 fit_predict(train_samples, test_samples)
+      → (yhat_orig, y_test_orig) を呼ぶ（XGBoost 等の injectable コールバック用・ADR-0003 §3）。
+      None を返したフォールドはスキップ。callable を渡しても M-1 の挙動は変わらない。
     """
     all_yms = sorted(samples_by_ym.keys())
     if len(all_yms) < min_train_months + 1:
@@ -732,7 +736,13 @@ def walk_forward_cv_monthly(
         if len(train_samples) < 5 or not test_samples:
             continue
 
-        fold_res = _fit_predict_fold(train_samples, test_samples, n_feat)
+        if fit_predict is None:
+            fold_res = _fit_predict_fold(train_samples, test_samples, n_feat)
+        else:
+            try:
+                fold_res = fit_predict(train_samples, test_samples)
+            except Exception:
+                continue
         if fold_res is None:
             continue
         yhat_orig, y_test_orig = fold_res
@@ -758,14 +768,12 @@ def walk_forward_cv_monthly(
     return fold_results
 
 
-# ── M-1 Phase A: マクロ特徴量・モメンタム ──────────────────────────────────────
+# ── M-1/M-2 Phase A: マクロ特徴量 ──────────────────────────────────────────
 
 # feature_name → (series_code, transform: "yoy" | "zscore") の正本は
-# plugins/macro_risk_return.py::_MACRO_MAP。重複定義（#218 フェーズ1）を解消するため、
-# ここでは遅延 import で正本を取得する（macro_risk_return → utils の import 方向があるため
-# モジュールレベル import は循環になる。関数呼び出し時の遅延 import で回避する）。
+# plugins/macro_snapshots.py::_MACRO_MAP（ADR-0003 §3 循環依存ハック解消）。
 def _macro_feature_map() -> dict[str, tuple[str, str]]:
-    from plugins.macro_risk_return import _MACRO_MAP
+    from plugins.macro_snapshots import _MACRO_MAP
     return _MACRO_MAP
 
 

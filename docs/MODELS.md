@@ -897,6 +897,91 @@ $$
 
 ---
 
+## 11. M-2 マクロ×財務 勾配ブースティング（macro_gbdt）
+
+`plugins/macro_gbdt.py` / `MacroGbdtPlugin`  
+**カテゴリ**: ③ 将来リターンを予測（`ui_order=340`、`heavy=True`）
+
+### 11.1 概要
+
+M-1（§9）の**非線形兄弟**。同一の目的変数（52週先対数リターン）・同一スナップショット母集団・同一のリスク-リターン幾何（μ／R2／R3／[[系統的マクロリスク曝露]]／効率的フロンティア）を共有しつつ、勾配ブースティング決定木（XGBoost）が `fin×macro` の交互作用を**自動学習**する。M-1 が手動生成した交差項は持たない。
+
+**M-2 の価値は「M-1（OLS 線形）と M-2（XGBoost 非線形）を同一データで並置・比較し、どちらが有効かをユーザー自身が判断・改善し続けられること」**にある（VISION.md の核心）。
+
+### 11.2 設計決定（ADR-0003）
+
+| 決定 | 内容 |
+|---|---|
+| 実行アーキ | 同期 in-execute・`heavy=True`（Render では 403・ローカル限定）。モデル非永続・毎回学習 |
+| データ構築 | `macro_snapshots.py` の共有ビルダー（`build_interactions=False`）。M-1 と**同一母集団を構造保証** |
+| walk-forward CV | `walk_forward_cv_monthly` に `fit_predict` コールバックを注入。同一 fold・同一 r2/rmse 式を共有 |
+| 内蔵比較 | 同一特徴量・同一 fold の**素 OLS ベースライン**（交差項/BIC なし）を side-by-side で出力 |
+| SHAP | グローバル mean\|SHAP\|（`feature_coefs` スロット・**大きさのみ・方向なし**）＋per-stock SHAP 全社添付 |
+| R1 | 出さない（OLS 固有の予測 SE。効用軸でないため欠落しても幾何は壊れない） |
+| R_macro | 既存 `macro_beta` producer から流用（M-1 と軸パリティを維持） |
+| 正則化 | 強正則化デフォルト（`max_depth=4`・`min_child_weight=5`・`subsample=colsample_bytree=0.8`・`reg_lambda=1.0`・`lr=0.05`）。日本株 52週リターンは低 S/N のため過学習を抑制 |
+
+### 11.3 特徴量
+
+M-1 から**交差項（`fin×macro`）を除いた**同一セット。BIC/LASSO の事前選択なし（木の暗黙選択に委ねる）。
+
+- 財務ベース（`fin_features` multiselect）: M-1 と同一選択肢
+- マクロ（`macro_features` multiselect）: M-1 と同一選択肢（`use_macro=True/False` で制御）
+- モメンタム（`use_momentum`、既定 OFF）: M-1 と同一
+
+### 11.4 walk-forward CV と early_stopping
+
+各フォールド（train 月 < test 月・`min_train_months=6`・`step_months=3`）で:
+
+1. y を p1-p99 winsorize（X は winsorize しない。木は単調不変）
+2. train の時系列末尾 20% を `eval_set`（リーク安全・実運用設定を模す）
+3. `early_stopping_rounds`（既定 40）で過学習を検知して学習停止
+4. `best_iteration` を記録
+
+**最終モデル**: CV フォールドの `best_iteration` の中央値を `n_estimators` として全データで refit。直近月を捨てず予測に活用。
+
+### 11.5 SHAP による解釈
+
+SHAP（SHapley Additive exPlanations）は個々の特徴量がモデルの予測値にどれだけ貢献するかを分解する手法。
+
+- **グローバル重要度 mean|SHAP|**: 全銘柄にわたる絶対値平均。UI の `feature_coefs` バーで表示（**大きさのみ。M-1 の標準化係数と異なり方向は読めない**）
+- **per-stock SHAP**: 各銘柄の特徴量寄与内訳。`results[i].shap` に丸め値を添付。UI の行クリックで展開
+
+### 11.6 出力契約
+
+M-1（§9）と同一形式で散布図・効用・フロンティアの client 機械を共用できる:
+
+```json
+{
+  "cv_metrics": {
+    "xgb":          {"mean_r2": ..., "mean_rmse": ..., "n_folds": ..., "folds": [...]},
+    "ols_baseline": {"mean_r2": ..., "mean_rmse": ..., "n_folds": ..., "folds": [...]}
+  },
+  "selected_features": ["per", "pbr", ...],
+  "feature_coefs":  {"per": 0.042, ...},  // mean|SHAP|（非負）
+  "results": [
+    {"edinet_code": "...", "mu_raw": ..., "r1": null, "r2": ..., "r3": ..., "r_macro": ...,
+     "shap": {"per": 0.012, "pbr": -0.008, ...}, ...}
+  ],
+  "model_type": "xgboost",
+  "best_iteration": 120
+}
+```
+
+### 11.7 将来エンハンス
+
+- inner-CV グリッド / optuna によるハイパラ自動探索
+- quantile regression（`reg:quantileerror`）による予測区間（R1' 代替）
+- SHAP interaction values（特徴量ペアの交互作用可視化）
+- M-2 初心者向けガイド（`M2_MACRO_GBDT_GUIDE.md`）
+
+### 11.8 参考文献
+
+- **Chen, T. & Guestrin, C. (2016)**. "XGBoost: A Scalable Tree Boosting System." *Proceedings of the 22nd ACM SIGKDD*, pp. 785–794. → https://doi.org/10.1145/2939672.2939785
+- **Lundberg, S.M. & Lee, S.-I. (2017)**. "A Unified Approach to Interpreting Model Predictions." *Advances in Neural Information Processing Systems*, 30. → https://arxiv.org/abs/1705.07874
+
+---
+
 ## 改訂履歴
 
 | 日付 | 内容 |
@@ -915,3 +1000,4 @@ $$
 | 2026-06-20 | モデル 10（売り候補ランキング・保有銘柄の売り時）を追加。買い系の逆観点（割高度 gap_ratio 反転・業績悪化・価格モメンタム）をユニバース標準化で合成し、相対ランキング＋SELL/REDUCE/HOLD 絶対ラベル（タイミング補正付き）を付与。保有はサーバ非保存（都度入力＋localStorage）、購入単価は損益表示のみ |
 | 2026-06-22 | M-1 tidy (#220)。①特徴量選択関数を `_forward_bic`→`_select_macro_features` へ改名（実体は LassoLarsIC ベース、貪欲前進 BIC の名残を一掃）。②未使用引数 `vif_threshold` を削除。③セクターダミー×マクロ交差項を廃止（fin×macro のみに簡素化）。④μ_shrunk（セクター平均収縮）を廃止し μ_raw を唯一の期待リターン指標に統一。各ドキュメント・JS・テストを整合 |
 | 2026-06-23 | リスク軸再編（#215）。①`risk_axis` を r2/r_macro に再編（R1/R3 を効用軸から除外）。②R_macro（√(βᵀΣ_macroβ)・リターン単位）を全社 raw 値に追加（macro_beta 未蓄積なら None・graceful degrade）。③R3 を表示/足切りゲート（`r3_gate` スライダー・0=ゲートなし）に降格。④λ レンジを 0〜5 に拡張（次元整合の確保）。クライアント側後処理・ランキング表列・tooltip も整合 |
+| 2026-06-25 | **M-2（マクロ×財務 勾配ブースティング）を §10 として追加**（#234・ADR-0003）。M-1 と同一スナップショット母集団（build_interactions=False）・同一リスク-リターン幾何を共有する非線形兄弟。共有ビルダーを macro_snapshots.py に集約し M-2→M-1 結合をゼロ化。walk_forward_cv_monthly に fit_predict コールバックを注入して同一 fold で XGBoost/OLS を比較。SHAP でグローバル mean\|SHAP\|（feature_coefs スロット）＋per-stock 寄与を全社返却。R1 なし（ADR-0003 §5）。xgboost-3.3.0 / shap-0.52.0 を requirements.txt に完全 pin |

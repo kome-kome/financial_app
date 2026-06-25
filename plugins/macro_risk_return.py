@@ -7,11 +7,13 @@ M-1 マクロ・リスク-リターン推奨プラグイン（Phase B）
 次元整合性（CLAUDE.md）:
   目的変数 = 52週先対数リターン（無次元）
   説明変数 = 財務比率・Zスコア・マクロ変化率/Zスコア・それらの交差項（全て無次元）
+
+共有ロジックは macro_snapshots.py に集約（ADR-0003 §3）。
+本モジュールは: BIC 特徴量選択・最終 OLS フィット・R3・スコアリング・プラグイン本体を保有。
 """
 import math
 import statistics
 from collections import defaultdict
-from datetime import datetime, timedelta
 from typing import Any
 
 import numpy as np
@@ -23,233 +25,27 @@ from .utils import (
     ols,
     walk_forward_cv_monthly,
     winsorize,
-    macro_risk_exposure,
 )
-
-FINANCIAL_LAG_DAYS = 45
-HORIZON_WEEKS = 52
+from .macro_snapshots import (
+    FINANCIAL_LAG_DAYS,
+    HORIZON_WEEKS,
+    FIN_BASE_OPTIONS,
+    DEFAULT_FIN_FEATURES,
+    _MACRO_MAP,
+    MACRO_FEATURE_NAMES,
+    MACRO_FEATURE_OPTIONS,
+    DEFAULT_MACRO_FEATURES,
+    _realized_vol,
+    _find_applicable_fin,  # テスト後方互換の再エクスポート
+    _macro_from_cache,     # テスト後方互換の再エクスポート
+    load_data,
+    preload_macro,
+    build_snapshots,
+    producer_scores,
+    get_producer_scores,
+)
 # R3（セクター×サイズ別 CV-RMSE）でバケットを採用する最小残差数。
-# 下回ったら sector → global へフォールバックして過小標本のノイズを避ける。
 R3_MIN_BUCKET_N = 5
-
-# 財務ベース特徴量の選択肢（全て financial_metrics VIEW の実列。getattr で解決＝DB移行不要）。
-# per/pbr/div_yield は将来リターンに対するバリュー因子（Fama-French HML ≒ 1/PBR）であり循環では
-# ない（目的変数は株価でなく 52週先リターン）。価格を含まないファンダ（roa/op_margin/net_margin/
-# asset_turnover/cf_ratio/de_ratio/nc_ratio/eps_growth/op_growth/rev_growth）を併置し、「割安」と
-# 「収益性・成長・財務健全性」を分離できるようにする。net_margin×asset_turnover≈roa のデュポン
-# 分解因子も選べる。絶対額（net_cash 等）は次元整合性（無次元）に反するため選択肢に含めない。
-FIN_BASE_OPTIONS = [
-    {"value": "per",            "label": "PER"},
-    {"value": "pbr",            "label": "PBR"},
-    {"value": "div_yield",      "label": "配当利回り（%）"},
-    {"value": "roe",            "label": "ROE（%）"},
-    {"value": "roa",            "label": "ROA（%）"},
-    {"value": "op_margin",      "label": "営業利益率（%）"},
-    {"value": "net_margin",     "label": "純利益率（%）"},
-    {"value": "asset_turnover", "label": "総資産回転率（回）"},
-    {"value": "equity_ratio",   "label": "自己資本比率（%）"},
-    {"value": "de_ratio",       "label": "D/Eレシオ"},
-    {"value": "nc_ratio",       "label": "ネットキャッシュ比率"},
-    {"value": "cf_ratio",       "label": "営業CF/売上（%）"},
-    {"value": "eps_growth",     "label": "EPS成長率（%）"},
-    {"value": "op_growth",      "label": "営業利益成長率（%）"},
-    {"value": "rev_growth",     "label": "売上成長率（%）"},
-    {"value": "rd_intensity",   "label": "R&D集約度"},
-    {"value": "da_intensity",   "label": "D&A集約度"},
-    {"value": "z_op_margin",    "label": "営業利益率Zスコア"},
-    {"value": "z_roe",          "label": "ROE Zスコア"},
-    {"value": "z_cf_ratio",     "label": "CF比率Zスコア"},
-]
-# 既定は価格由来（per/pbr）に偏らないよう価格フリーの roa・eps_growth を混合。
-DEFAULT_FIN_FEATURES = ["per", "pbr", "roe", "equity_ratio", "roa", "eps_growth"]
-
-# feature_name → (series_code, transform: "yoy" | "zscore")
-# series_code は collector_prices.py の MACRO_SERIES["code"] と一致させる（このマップが唯一の正本。
-# plugins/utils.py::get_macro_features は遅延 import で本マップを参照する）。
-# ここに載せる条件 = 本番 macro_data に蓄積がある系列のみ。データの無い系列を選ぶと全スナップ
-# ショットが None スキップになりモデル学習不能になるため公開しない。
-#   - #218 フェーズ1：既収集の EURJPY・WTI・GOLD（FX・コモディティ）に加え、VIX・DXY・US5Y・US30Y
-#     （ボラ・FX・米金利/期間構造）を公開。後者は collect-macro.yml の Actions 実行（2026-06-21・
-#     run #1）で Azure IP からの取得・蓄積（各1255〜1257件/5年）を実証済み。チャネル網羅＝
-#     FX・株式・米金利/期間・コモディティ・ボラの5チャネル。
-#   - JP10Y・TOPIX: 収集失敗（JP10Y=^JGB 上場廃止 / TOPIX=^tpx・^TPX 取得不可）で蓄積なし → 非公開。
-#   - FRED チャネル（#221）: FRED_API_KEY 設定後・本番蓄積確認後に以下のコメントアウトを解除して公開。
-#     蓄積前に有効化するとスナップショット全件 None スキップになりモデル学習不能になるため保留。
-_MACRO_MAP = {
-    "macro_usdjpy_yoy":    ("USDJPY",    "yoy"),
-    "macro_eurjpy_yoy":    ("EURJPY",    "yoy"),
-    "macro_dxy_yoy":       ("DXY",       "yoy"),
-    "macro_sp500_yoy":     ("SP500",     "yoy"),
-    "macro_us5y_zscore":   ("US5Y",      "zscore"),
-    "macro_us10y_zscore":  ("US10Y",     "zscore"),
-    "macro_us30y_zscore":  ("US30Y",     "zscore"),
-    "macro_nikkei225_yoy": ("NIKKEI225", "yoy"),
-    "macro_vix_zscore":    ("VIX",       "zscore"),
-    "macro_wti_yoy":       ("WTI",       "yoy"),
-    "macro_gold_yoy":      ("GOLD",      "yoy"),
-    # ── FRED チャネル（#221・2026-06-24 本番蓄積確認済み） ──────────────────────
-    "macro_hy_oas_zscore":       ("HY_OAS",       "zscore"),  # 米HYスプレッド（クレジット）
-    "macro_ig_oas_zscore":       ("IG_OAS",        "zscore"),  # 米IGスプレッド（クレジット）
-    "macro_breakeven10y_zscore": ("BREAKEVEN10Y",  "zscore"),  # 米10年BEI（インフレ期待）
-    "macro_jp10y_fred_zscore":   ("JP10Y_FRED",    "zscore"),  # 日10年金利（FRED・月次）
-    "macro_t10y2y_zscore":       ("T10Y2Y",        "zscore"),  # 米10y−2yスプレッド（期間構造）
-}
-MACRO_FEATURE_NAMES = list(_MACRO_MAP.keys())
-
-# params_schema の multiselect 用ラベル。USDJPY/SP500/US10Y を既定選択（その他は SP500/市場成分との
-# 多重共線[VIX↔SP500・米金利↔DXY 等]や任意性のため既定には含めず選択肢としてのみ公開。pooled BIC が
-# 過剰選択を抑える）。
-# FRED チャネルは _MACRO_MAP の解除と同時に以下のコメントアウトも解除すること。
-MACRO_FEATURE_OPTIONS = [
-    {"value": "macro_usdjpy_yoy",    "label": "USD/JPY 前年比（YoY）"},
-    {"value": "macro_eurjpy_yoy",    "label": "EUR/JPY 前年比（YoY）"},
-    {"value": "macro_dxy_yoy",       "label": "ドル指数（DXY）前年比（YoY）"},
-    {"value": "macro_sp500_yoy",     "label": "S&P500 前年比（YoY）"},
-    {"value": "macro_us5y_zscore",   "label": "米5年金利 Zスコア"},
-    {"value": "macro_us10y_zscore",  "label": "米10年金利 Zスコア"},
-    {"value": "macro_us30y_zscore",  "label": "米30年金利 Zスコア"},
-    {"value": "macro_nikkei225_yoy", "label": "日経225 前年比（YoY）"},
-    {"value": "macro_vix_zscore",    "label": "VIX恐怖指数 Zスコア"},
-    {"value": "macro_wti_yoy",       "label": "WTI原油 前年比（YoY）"},
-    {"value": "macro_gold_yoy",      "label": "金（ゴールド）前年比（YoY）"},
-    # ── FRED チャネル（#221・2026-06-24 本番蓄積確認済み） ──────────────────────
-    {"value": "macro_hy_oas_zscore",       "label": "米HYスプレッド（OAS）Zスコア"},
-    {"value": "macro_ig_oas_zscore",       "label": "米IGスプレッド（OAS）Zスコア"},
-    {"value": "macro_breakeven10y_zscore", "label": "米10年BEI（インフレ期待）Zスコア"},
-    {"value": "macro_jp10y_fred_zscore",   "label": "日10年金利（FRED）Zスコア"},
-    {"value": "macro_t10y2y_zscore",       "label": "米10y−2yスプレッド Zスコア"},
-]
-DEFAULT_MACRO_FEATURES = ["macro_usdjpy_yoy", "macro_sp500_yoy", "macro_us10y_zscore"]
-
-
-# ── #214 producer: macro_beta（per-stock 階層ベイズ推論結果）からのスコア算出 ──
-
-def producer_scores(meta: dict, loadings: dict, macro_snapshot: dict | None = None) -> dict:
-    """macro_beta 推論結果から per-stock の μ・R_macro・R1' を算出する（ADR-0002 / #214）。
-
-    Args:
-        meta:    {"selected_factors": [...], "factor_cov": [[...]], ...}（Σ_macro はリターン単位）
-        loadings: {edinet_code: {factor_name: (mean, se)}}（"_intercept" 行を含む）
-        macro_snapshot: {factor_name: value}（現スナップショットのマクロ特徴量）。None なら μ/R1' は省略。
-
-    Returns:
-        {edinet_code: {"r_macro": float[, "mu": float, "r1_prime": float]}}
-          R_macro = sqrt(βᵀ Σ_macro β)（snapshot 非依存・常に算出）
-          μ       = α + Σ_f β_f · m_f
-          R1'     = sqrt(se_α² + Σ_f (se_f · m_f)²)（事後予測SE・delta 法・独立仮定）
-    """
-    factors = list(meta.get("selected_factors") or [])
-    cov = meta.get("factor_cov") or []
-    out: dict = {}
-    for code, fmap in loadings.items():
-        beta = [float(fmap.get(f, (0.0, None))[0]) for f in factors]
-        rec: dict = {"r_macro": macro_risk_exposure(beta, cov) if (cov and beta) else 0.0}
-        if macro_snapshot is not None:
-            m = [float(macro_snapshot.get(f) or 0.0) for f in factors]
-            se = [float(fmap.get(f, (0.0, 0.0))[1] or 0.0) for f in factors]
-            a_mean, a_se = fmap.get("_intercept", (0.0, 0.0))
-            a_se = float(a_se or 0.0)
-            rec["mu"] = float(a_mean) + sum(b * mm for b, mm in zip(beta, m))
-            rec["r1_prime"] = math.sqrt(a_se ** 2 + sum((s * mm) ** 2 for s, mm in zip(se, m)))
-        out[code] = rec
-    return out
-
-
-# ── ヘルパー ──────────────────────────────────────────────────────────────────
-
-def _add_days(date_str: str, days: int) -> str:
-    d = datetime.strptime(date_str, "%Y-%m-%d")
-    return (d + timedelta(days=days)).strftime("%Y-%m-%d")
-
-
-def _find_applicable_fin(fin_recs: list, snap_date: str):
-    result = None
-    for fr in fin_recs:
-        if not fr.period_end:
-            continue
-        pe = fr.period_end
-        pe_str = pe.isoformat() if hasattr(pe, "isoformat") else str(pe)[:10]
-        if _add_days(pe_str, FINANCIAL_LAG_DAYS) <= snap_date:
-            result = fr
-    return result
-
-
-def _macro_from_cache(
-    by_series: dict[str, dict[str, float]],
-    ref_date: str,
-    feature_names: list[str],
-    window_days: int = 30,
-    zscore_years: int = 5,
-) -> dict[str, float | None]:
-    """プリロード済みマクロデータから特徴量を計算（DB クエリなし）。"""
-    from datetime import date as _date, timedelta as _td
-    ref = _date.fromisoformat(ref_date)
-    win_start = (ref - _td(days=window_days)).isoformat()
-    result: dict[str, float | None] = {}
-
-    for fname in feature_names:
-        if fname not in _MACRO_MAP:
-            result[fname] = None
-            continue
-        scode, ttype = _MACRO_MAP[fname]
-        date_close = by_series.get(scode, {})
-        if not date_close:
-            result[fname] = None
-            continue
-
-        current_vals = [v for d, v in date_close.items() if win_start <= d <= ref_date]
-        if not current_vals:
-            # 月次系列等で窓内に観測がない場合は ref_date 以前の最新値を forward-fill
-            past = sorted((d, v) for d, v in date_close.items() if d <= ref_date)
-            if not past:
-                result[fname] = None
-                continue
-            current_vals = [past[-1][1]]
-        current_avg = statistics.mean(current_vals)
-
-        if ttype == "yoy":
-            ref_1y = ref - _td(days=365)
-            p_s = (ref_1y - _td(days=window_days)).isoformat()
-            p_e = (ref_1y + _td(days=window_days)).isoformat()
-            prev_vals = [v for d, v in date_close.items() if p_s <= d <= p_e]
-            if not prev_vals:
-                result[fname] = None
-                continue
-            prev_avg = statistics.mean(prev_vals)
-            result[fname] = (current_avg - prev_avg) / prev_avg if prev_avg else None
-
-        elif ttype == "zscore":
-            hist_start = (ref - _td(days=zscore_years * 366)).isoformat()
-            all_vals = [v for d, v in date_close.items() if hist_start <= d <= ref_date]
-            if len(all_vals) < 20:
-                result[fname] = None
-                continue
-            mu = statistics.mean(all_vals)
-            sigma = statistics.stdev(all_vals) if len(all_vals) > 1 else 0.0
-            result[fname] = (current_avg - mu) / sigma if sigma else None
-
-    return result
-
-
-def _realized_vol(price_rows: list, ref_date: str, weeks: int = 52) -> float | None:
-    """ref_date 直前 weeks 週の実現ボラティリティ（年率）を返す。リークなし。"""
-    eligible = [(r.trade_date, r.close_last)
-                for r in price_rows
-                if r.trade_date <= ref_date and r.close_last and r.close_last > 0]
-    if len(eligible) < 4:
-        return None
-    # 直近 weeks+1 件
-    recent = eligible[max(0, len(eligible) - weeks - 1):]
-    if len(recent) < 4:
-        return None
-    log_rets = [
-        math.log(recent[i][1] / recent[i - 1][1])
-        for i in range(1, len(recent))
-        if recent[i - 1][1] > 0
-    ]
-    if len(log_rets) < 3:
-        return None
-    return statistics.stdev(log_rets) * math.sqrt(52)
 
 
 def _pareto_frontier(
@@ -403,15 +199,21 @@ class MacroRiskReturnPlugin(AnalysisPlugin):
             return False
 
     def read_producer_scores(self, db: Any, macro_snapshot: dict | None = None) -> dict:
-        """macro_beta（推論バッチ出力）を読み per-stock producer スコアを返す（#214）。
+        """macro_beta producer スコアを返す。macro_snapshots.get_producer_scores の thin wrapper。"""
+        return get_producer_scores(db, macro_snapshot)
 
-        未蓄積なら {}（graceful degrade＝従来の OLS 経路のみで動作）。macro_snapshot を渡すと
-        μ・R1' も算出する（None なら R_macro のみ）。"""
-        from database import get_macro_beta
-        meta, loadings = get_macro_beta(db)
-        if not meta or not loadings:
-            return {}
-        return producer_scores(meta, loadings, macro_snapshot)
+    # ── テスト後方互換ラッパー（macro_snapshots への thin delegation）────────────
+
+    def _load_data(self, db) -> tuple:
+        return load_data(db)
+
+    def _build_snapshots(self, prices_by_co, fin_by_co, companies, macro_cache,
+                         fin_features, macro_names, use_momentum, mom_window, min_coverage) -> tuple:
+        return build_snapshots(
+            prices_by_co, fin_by_co, companies, macro_cache,
+            fin_features, macro_names, use_momentum, mom_window, min_coverage,
+            build_interactions=True,
+        )
 
     async def execute(self, params: dict, db: Any) -> dict:
         lambda_risk    = params["lambda_risk"]
@@ -431,18 +233,18 @@ class MacroRiskReturnPlugin(AnalysisPlugin):
         if not fin_features:
             raise ValueError("財務特徴量を1つ以上選択してください。")
 
-        # 選択マクロ系列（use_macro=OFF なら空）。空選択は実質マクロ無効と同義。
         macro_names = list(macro_features) if use_macro else []
 
-        prices_by_co, fin_by_co, companies = self._load_data(db)
+        prices_by_co, fin_by_co, companies = load_data(db)
         if not prices_by_co:
             raise ValueError("株価週次履歴がありません。先に収集を実行してください。")
 
-        macro_cache = self._preload_macro(db, prices_by_co, macro_names) if macro_names else {}
+        macro_cache = preload_macro(db, prices_by_co, macro_names) if macro_names else {}
 
-        samples_by_ym, sample_meta_by_ym, current_snaps, all_feat_names = self._build_snapshots(
+        samples_by_ym, sample_meta_by_ym, current_snaps, all_feat_names = build_snapshots(
             prices_by_co, fin_by_co, companies, macro_cache,
             fin_features, macro_names, use_momentum, mom_window, min_coverage,
+            build_interactions=True,
         )
 
         total_samples = sum(len(v) for v in samples_by_ym.values())
@@ -528,229 +330,6 @@ class MacroRiskReturnPlugin(AnalysisPlugin):
             "top_n":            top_n,
             "results":          results,
         }
-
-    # ── データロード ────────────────────────────────────────────────────────
-
-    def _load_data(self, db) -> tuple:
-        from collections import namedtuple as _nt
-        from database import Company, FinancialMetric, StockPriceWeekly
-
-        raw = (
-            db.query(StockPriceWeekly.edinet_code, StockPriceWeekly.trade_date,
-                     StockPriceWeekly.close_last)
-            .order_by(StockPriceWeekly.edinet_code, StockPriceWeekly.trade_date)
-            .all()
-        )
-        _PX = _nt("_PX", "trade_date close_last")
-        prices_by_co: dict[str, list] = defaultdict(list)
-        for ec, td, cl in raw:
-            prices_by_co[ec].append(_PX(td, cl))
-
-        fin_by_co: dict[str, list] = defaultdict(list)
-        for r in (db.query(FinancialMetric)
-                  .order_by(FinancialMetric.edinet_code, FinancialMetric.period_end)
-                  .all()):
-            fin_by_co[r.edinet_code].append(r)
-
-        companies = {c.edinet_code: c for c in db.query(Company).all()}
-        return prices_by_co, fin_by_co, companies
-
-    def _preload_macro(self, db, prices_by_co: dict, macro_names: list[str] | None = None) -> dict:
-        from database import MacroData
-        all_dates = [row.trade_date for rows in prices_by_co.values() for row in rows]
-        if not all_dates:
-            return {}
-        from datetime import date as _date, timedelta as _td
-        min_d = min(all_dates)
-        # zscore 用に 5年前まで遡る
-        since = (_date.fromisoformat(min_d) - _td(days=5 * 366)).isoformat()
-        max_d = max(all_dates)
-        # 選択された macro_features に対応する series_code のみロード（未指定なら全系列）
-        series_codes = sorted({_MACRO_MAP[n][0] for n in (macro_names or MACRO_FEATURE_NAMES) if n in _MACRO_MAP})
-        q = (
-            db.query(MacroData)
-            .filter(
-                MacroData.trade_date >= since,
-                MacroData.trade_date <= max_d,
-                MacroData.close.isnot(None),
-            )
-        )
-        if series_codes:
-            q = q.filter(MacroData.series_code.in_(series_codes))
-        rows = q.order_by(MacroData.series_code, MacroData.trade_date).all()
-        by_series: dict[str, dict[str, float]] = {}
-        for r in rows:
-            by_series.setdefault(r.series_code, {})[r.trade_date] = r.close
-        return by_series
-
-    def _collect_sectors(self, fin_by_co: dict, companies: dict) -> list[str]:
-        seen: set[str] = set()
-        for recs in fin_by_co.values():
-            if recs:
-                seen.add(recs[-1].industry or "不明")
-        for c in companies.values():
-            seen.add(c.industry or "不明")
-        return sorted(seen - {"不明", None, ""})
-
-    # ── スナップショット構築 ─────────────────────────────────────────────────
-
-    def _build_snapshots(
-        self,
-        prices_by_co, fin_by_co, companies, macro_cache,
-        fin_features, macro_names, use_momentum, mom_window, min_coverage,
-    ) -> tuple:
-        # macro_names は呼び出し側で選択済み（use_macro=OFF や空選択なら []）。
-        # モメンタムは use_macro とは独立に use_momentum で制御する（過去履歴要件を切り離し、
-        # マクロ ON のままでも walk-forward CV のサンプル帯が収縮しないようにするため）。
-        use_macro = bool(macro_names)
-        momentum_name = ["momentum_12m1"] if use_momentum else []
-
-        # 交差項名を生成（fin × macro）
-        interaction_names: list[str] = []
-        if use_macro:
-            for fn in fin_features:
-                for mn in macro_names:
-                    interaction_names.append(f"{fn}_x_{mn}")
-
-        all_feat_names = (
-            fin_features + macro_names + momentum_name + interaction_names
-        )
-        n_feat = len(all_feat_names)
-
-        samples_by_ym: dict[str, list] = defaultdict(list)
-        # R3 用: 各学習サンプルと同順の (sector, size) メタ列。samples_by_ym と
-        # 添字対応させ、walk-forward CV の残差をバケット集計するのに使う。
-        sample_meta_by_ym: dict[str, list] = defaultdict(list)
-        current_snaps: dict[str, tuple] = {}
-        min_rows = HORIZON_WEEKS + 4
-
-        # マクロ特徴量は snap_date のみに依存（企業非依存）。多数の企業が同じ月末日を
-        # 共有するため、日付でメモ化して全マクロ日付の再走査を 1 日 1 回に抑える
-        # （旧: (企業×月) ごとに全日付走査 → _build_snapshots の支配的コスト）。
-        macro_memo: dict[str, dict] = {}
-
-        for edinet_code, price_rows in prices_by_co.items():
-            n = len(price_rows)
-            if n < min_rows:
-                continue
-            fin_recs = fin_by_co.get(edinet_code, [])
-            if not fin_recs:
-                continue
-
-            dates  = [r.trade_date for r in price_rows]
-            closes = [r.close_last  for r in price_rows]
-
-            # 月末インデックス
-            month_ends = [
-                i for i in range(n - 1) if dates[i][:7] != dates[i + 1][:7]
-            ] + [n - 1]
-
-            for snap_idx in month_ends:
-                if snap_idx < 4:
-                    continue
-                snap_date = dates[snap_idx]
-                snap_ym   = snap_date[:7]
-                is_current = (snap_idx == n - 1)
-                has_future = (snap_idx + HORIZON_WEEKS < n)
-
-                fin_rec = _find_applicable_fin(fin_recs, snap_date)
-                if fin_rec is None:
-                    continue
-
-                # 財務特徴量
-                fin_row: list[float] = []
-                ok = True
-                for fn in fin_features:
-                    v = getattr(fin_rec, fn, None)
-                    if v is None:
-                        ok = False
-                        break
-                    fin_row.append(float(v))
-                if not ok:
-                    continue
-
-                # マクロ特徴量
-                macro_row: list[float] = []
-                macro_dict: dict[str, float] = {}
-                if use_macro:
-                    m_feats = macro_memo.get(snap_date)
-                    if m_feats is None:
-                        m_feats = _macro_from_cache(macro_cache, snap_date, macro_names)
-                        macro_memo[snap_date] = m_feats
-                    if any(v is None for v in m_feats.values()):
-                        continue  # マクロ未蓄積はスキップ
-                    for mn in macro_names:
-                        val = m_feats[mn]
-                        macro_row.append(float(val))  # type: ignore[arg-type]
-                        macro_dict[mn] = float(val)   # type: ignore[arg-type]
-
-                # モメンタム（use_macro とは独立に use_momentum で制御）
-                mom_row: list[float] = []
-                if use_momentum:
-                    mom = self._momentum(closes, dates, snap_idx, mom_window)
-                    if mom is None:
-                        continue
-                    mom_row = [mom]
-
-                # セクター取得
-                industry = fin_rec.industry or (companies.get(edinet_code, None) and companies[edinet_code].industry) or "不明"
-
-                # サイズ代理 = 総資産（R3 バケット用）。本番で確実に充足するコア BS 項目を採用
-                # （issued_shares は C2 新列で本番 NULL のため不可）。分位点は単調変換不変なので生値。
-                size_val = getattr(fin_rec, "bs_total_assets", None)
-                size_val = float(size_val) if (size_val is not None and size_val > 0) else None
-
-                # 交差項（fin × macro）
-                inter_row: list[float] = []
-                if use_macro:
-                    for fn, fv in zip(fin_features, fin_row):
-                        for mn in macro_names:
-                            inter_row.append(fv * macro_dict[mn])
-
-                feat_row = fin_row + macro_row + mom_row + inter_row
-
-                # 充足率チェック
-                non_null = sum(1 for v in feat_row if v == v)  # NaN チェック
-                if non_null / n_feat < min_coverage:
-                    continue
-
-                if has_future:
-                    c_snap, c_fut = closes[snap_idx], closes[snap_idx + HORIZON_WEEKS]
-                    if c_snap and c_fut and c_snap > 0 and c_fut > 0:
-                        samples_by_ym[snap_ym].append((feat_row, math.log(c_fut / c_snap)))
-                        # サンプルと同順でメタを追加（添字対応を厳守）
-                        sample_meta_by_ym[snap_ym].append((industry, size_val))
-
-                if is_current:
-                    comp = companies.get(edinet_code)
-                    current_snaps[edinet_code] = (feat_row, {
-                        "sec_code":     fin_rec.sec_code or (comp.sec_code if comp else ""),
-                        "company_name": fin_rec.company_name or (comp.name if comp else edinet_code),
-                        "industry":     industry,
-                        "size":         size_val,
-                        "price_rows":   price_rows,
-                        "snap_date":    snap_date,
-                    })
-
-        return dict(samples_by_ym), dict(sample_meta_by_ym), current_snaps, all_feat_names
-
-    @staticmethod
-    def _momentum(closes: list, dates: list, snap_idx: int, long_months: int) -> float | None:
-        short_months = 1
-        snap_date = dates[snap_idx]
-        from datetime import date as _date, timedelta as _td
-        ref = _date.fromisoformat(snap_date)
-        short_cutoff = (ref - _td(days=short_months * 30)).isoformat()
-        long_cutoff  = (ref - _td(days=long_months  * 30)).isoformat()
-        eligible = [(dates[i], closes[i]) for i in range(snap_idx + 1)
-                    if closes[i] and closes[i] > 0]
-        if not eligible:
-            return None
-        short_cands = [(d, c) for d, c in eligible if d <= short_cutoff]
-        long_cands  = [(d, c) for d, c in eligible if d <= long_cutoff]
-        if not short_cands or not long_cands:
-            return None
-        return math.log(short_cands[-1][1] / long_cands[-1][1])
 
     # ── LassoLarsIC(BIC) 特徴量選択 ────────────────────────────────────────────
 
