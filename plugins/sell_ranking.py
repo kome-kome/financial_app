@@ -244,11 +244,21 @@ class SellRankingPlugin(AnalysisPlugin):
                 "label": "対象年度（空=最新）",
                 "default": None, "optional": True,
             },
+            "mu_source": {
+                "type": "select",
+                "label": "μ（期待リターン）の出所",
+                "options": [
+                    {"value": "macro_risk_return", "label": "M-1: マクロ×リスク-リターン（OLS）"},
+                    {"value": "macro_gbdt",        "label": "M-2: マクロ×財務 勾配ブースティング（XGBoost）"},
+                ],
+                "default": "macro_risk_return",
+                "description": "売りスコアの μ / −R_macro 観点に使う推奨モデル。未実行なら graceful-degrade（μ除外）。",
+            },
             "r3_gate": {
                 "type": "slider", "dtype": "float",
                 "label": "R3 足切り（M-1 予測SE）",
                 "min": 0.0, "max": 0.5, "step": 0.05, "default": 0.0,
-                "description": "M-1 の μ 予測SE（r1_prime）がこの値を超える銘柄は SELL を出さない（0=無効）",
+                "description": "M-1 の μ 予測SE（r1_prime）がこの値を超える銘柄は SELL を出さない（0=無効・M-2選択時は無効）",
             },
         }
 
@@ -266,12 +276,14 @@ class SellRankingPlugin(AnalysisPlugin):
         timing_adj   = params["timing_adjust"]
         min_coverage = params["min_coverage"]
         year         = params["year"]
+        mu_source    = params.get("mu_source", "macro_risk_return")
 
         total_weight = sum(weights.values())
         if not holdings or total_weight == 0:
             return {"count": 0, "presets": PRESETS, "metrics": SELL_METRICS,
                     "results": [], "not_found": [], "invalid": invalid,
-                    "gap_available": True, "m1_available": False}
+                    "gap_available": True, "mu_available": False,
+                    "mu_source": mu_source}
 
         # ── ① ユニバース標準化パラメータ（最新年度の全銘柄から winsorize → mean/sd）──
         subq = latest_year_subq(db, FinancialMetric)
@@ -282,12 +294,15 @@ class SellRankingPlugin(AnalysisPlugin):
             uni_q = uni_q.filter(FinancialMetric.year == int(year))
         universe = uni_q.all()
 
-        # ── M-1 producer スコア（graceful-degrade: 未実行なら {}）──
+        # ── 期待リターン μ producer スコア（mu_source で M-1/M-2 切替・graceful-degrade）──
+        # ADR-0004: mu_source=macro_risk_return（既定）/ macro_gbdt。両者とも
+        # read_producer_scores が {edinet_code: {mu, r_macro, r1_prime}} を返す共通契約。
+        # r_macro は共有 macro_beta 由来でモデル非依存（neg_r_macro は mu_source に依らず不変）。
         import datetime as _dt
         from plugins import get_plugin as _get_plugin
-        _m1 = _get_plugin("macro_risk_return")
-        m1_scores: dict = {}
-        if _m1 and _m1.produced_output(db):
+        _producer = _get_plugin(mu_source)
+        mu_scores: dict = {}
+        if _producer and _producer.produced_output(db):
             try:
                 from database import get_macro_beta
                 from plugins.utils import get_macro_features
@@ -297,17 +312,17 @@ class SellRankingPlugin(AnalysisPlugin):
                 if _sel_factors:
                     _raw_snap = get_macro_features(db, _dt.date.today().isoformat(), _sel_factors)
                     _macro_snap = {k: v for k, v in _raw_snap.items() if v is not None} or None
-                m1_scores = _m1.read_producer_scores(db, _macro_snap)
+                mu_scores = _producer.read_producer_scores(db, _macro_snap)
             except Exception:
                 pass
-        m1_available = bool(m1_scores)
+        mu_available = bool(mu_scores)
 
         stats: dict[str, tuple[float, float]] = {}
         for m in weights:
             if m == "mu":
-                vals = [float(ps["mu"]) for ps in m1_scores.values() if ps.get("mu") is not None]
+                vals = [float(ps["mu"]) for ps in mu_scores.values() if ps.get("mu") is not None]
             elif m == "neg_r_macro":
-                vals = [-float(ps["r_macro"]) for ps in m1_scores.values() if ps.get("r_macro") is not None]
+                vals = [-float(ps["r_macro"]) for ps in mu_scores.values() if ps.get("r_macro") is not None]
             else:
                 vals = [v for v in (_resolve_metric(r, m) for r in universe) if v is not None]
             if len(vals) < 4:
@@ -349,7 +364,7 @@ class SellRankingPlugin(AnalysisPlugin):
             weight_present = 0.0
             detail: dict[str, float | None] = {}
             _ec = r.edinet_code
-            _ps = m1_scores.get(_ec) if _ec else None
+            _ps = mu_scores.get(_ec) if _ec else None
             for m, w in weights.items():
                 if m == "mu":
                     raw = _ps.get("mu") if _ps else None
@@ -374,9 +389,10 @@ class SellRankingPlugin(AnalysisPlugin):
             action = _base_action(score, sell_th, reduce_th)
             if timing_adj and action in _ACTIONS:
                 action = _apply_timing(action, mom["trend"])
-            # R3 足切りゲート: M-1 の μ 予測SE（r1_prime）が閾値超 → SELL を出さない
+            # R3 足切りゲート: M-1 の μ 予測SE（r1_prime）が閾値超 → SELL を出さない。
+            # mu_source=macro_gbdt（M-2）は r1_prime を持たないため無効（ADR-0004・no-op）。
             _r3_gate = params.get("r3_gate", 0.0)
-            if _r3_gate and action == "SELL" and _ps:
+            if _r3_gate and action == "SELL" and _ps and mu_source != "macro_gbdt":
                 _r1p = _ps.get("r1_prime")
                 if _r1p is not None and float(_r1p) > _r3_gate:
                     action = "REDUCE"
@@ -425,7 +441,8 @@ class SellRankingPlugin(AnalysisPlugin):
             "presets":       PRESETS,
             "metrics":       SELL_METRICS,
             "gap_available": gap_available,
-            "m1_available":  m1_available,
+            "mu_available":  mu_available,
+            "mu_source":     mu_source,
             "results":       scored,
             "not_found":     not_found,
             "invalid":       invalid,

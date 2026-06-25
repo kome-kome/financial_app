@@ -238,6 +238,13 @@ erDiagram
         datetime computed_at           "計算日時"
     }
 
+    macro_gbdt_scores {
+        string  edinet_code   PK "企業（最新スナップショットのみ・全置換）"
+        float   mu               "M-2 予測 52週先対数リターン μ̂（producer・ADR-0004）"
+        string  snapshot_date    "スナップ基準日 YYYY-MM-DD"
+        datetime created_at      "計算日時"
+    }
+
     stock_price_daily {
         string  edinet_code  PK "企業への紐付け（PK1）"
         string  trade_date   PK "取引日 YYYY-MM-DD（PK2）"
@@ -987,13 +994,13 @@ graph TB
 | `plugins/__init__.py` | バックエンド | プラグインを自動スキャン・レジストリ管理 | plugins/*.py |
 | `plugins/gap_analysis.py` | バックエンド | バリュエーション分析（割安度＋AR(1)半減期＋期待総リターン）。gap_ratio は financial_metrics VIEW（regression_results をJOIN）から読む。期待総リターン＝gap_ratio＋配当利回り、implied PER/PBR＝予測株価÷EPS/BPS（旧 total_return を吸収）。内部 slug・`/api/gap-analysis` は後方互換で維持・表示ラベルは「バリュエーション分析」 | plugins/utils.py |
 | `plugins/recommend.py` | バックエンド | 複合スコアによる銘柄推薦 | plugins/utils.py |
-| `plugins/sell_ranking.py` | バックエンド | 売り候補ランキング（保有銘柄の売り時）。買い系の逆観点（割高度 gap_ratio 反転・業績悪化・**ネットキャッシュ余力 nc_ratio 毀損**・価格モメンタム）を最新年度ユニバースで winsorize+z 標準化して合成し、相対ランキング＋SELL/REDUCE/HOLD 絶対ラベル（トレンド補正）を付与。`nc_ratio` は VIEW 列でなく `_resolve_metric` が実行時計算（net_cash_analysis の compute_* を再利用）。保有は都度入力（サーバ非保存）・購入単価は損益表示のみ。`depends_on=["sector_ols"]`（gap_ratio 用）。価格モメンタムは stock_price_weekly | plugins/utils.py, database.py, plugins.net_cash_analysis |
+| `plugins/sell_ranking.py` | バックエンド | 売り候補ランキング（保有銘柄の売り時）。買い系の逆観点（割高度 gap_ratio 反転・業績悪化・**ネットキャッシュ余力 nc_ratio 毀損**・価格モメンタム）を最新年度ユニバースで winsorize+z 標準化して合成し、相対ランキング＋SELL/REDUCE/HOLD 絶対ラベル（トレンド補正）を付与。`nc_ratio` は VIEW 列でなく `_resolve_metric` が実行時計算（net_cash_analysis の compute_* を再利用）。保有は都度入力（サーバ非保存）・購入単価は損益表示のみ。`depends_on=["sector_ols"]`（gap_ratio 用）。価格モメンタムは stock_price_weekly。**μ／−R_macro 観点の出所は `mu_source` トグル（既定 M-1 `macro_risk_return`／M-2 `macro_gbdt`）で切替**——選択 producer の `read_producer_scores` を読み、未実行なら graceful-degrade（`mu_available=false`）。M-2 選択時は r1_prime 不在で R3 足切りゲート無効（ADR-0004） | plugins/utils.py, database.py, plugins.net_cash_analysis |
 | `plugins/sector_ols.py` | バックエンド | 業種別OLS回帰分析（次元整合・winsorize+z-score前処理）。`heavy=True`（Render 軽量モードで 403）。予測値は regression_results へ保存 | plugins/utils.py |
 | `plugins/price_predictor.py` | バックエンド | 株価リターン予測（価格×財務特徴量OLS・月次WFV） | plugins/utils.py |
 | `plugins/net_cash_analysis.py` | バックエンド | ネットキャッシュ分析（清原達郎『わが投資術』式）＋グレアムNCAV。NC = 流動資産 + 投資有価証券×0.7 − 総負債、NCAV = 流動資産 − 総負債。推計時価総額の崩れによる異常比率はサニティ上限で自動除外し、任意で営業CF>0等のバリュートラップ除外も可能 | database.py |
-| `plugins/macro_snapshots.py` | バックエンド | M-1/M-2 共有スナップショット構築モジュール（ADR-0003 §3）。`_MACRO_MAP` 正本・`build_snapshots`（`build_interactions` フラグ）・`load_data`・`preload_macro`・`_realized_vol`・`producer_scores`/`get_producer_scores` を集約。M-2→M-1 結合ゼロ | plugins/utils.py |
+| `plugins/macro_snapshots.py` | バックエンド | M-1/M-2 共有スナップショット構築モジュール（ADR-0003 §3）。`_MACRO_MAP` 正本・`build_snapshots`（`build_interactions` フラグ）・`load_data`・`preload_macro`・`_realized_vol`・`producer_scores`/`get_producer_scores`・**`oof_backtest`（アウトオブサンプル検証ヘルパ・ADR-0004）** を集約。M-2→M-1 結合ゼロ | plugins/utils.py |
 | `plugins/macro_risk_return.py` | バックエンド | M-1 マクロ×リスク-リターン推奨（交差項OLS+`LassoLarsIC(BIC)`選択+OLS再フィット+Walk-forward CV）。**全社rawを返却しJS後処理**。`heavy=True`。共有ロジックは `macro_snapshots.py` に移管（ADR-0003） | plugins/utils.py, macro_snapshots.py |
-| `plugins/macro_gbdt.py` | バックエンド | M-2 マクロ×財務 勾配ブースティング（ADR-0003 / #234）。XGBoost が交互作用を自動学習。同一 fold で OLS ベースライン比較・SHAP グローバル+per-stock 全社添付。`heavy=True`・`ui_order=340` | plugins/utils.py, macro_snapshots.py, xgboost, shap |
+| `plugins/macro_gbdt.py` | バックエンド | M-2 マクロ×財務 勾配ブースティング（ADR-0003 / ADR-0004 / #234）。XGBoost が交互作用を自動学習。同一 fold で OLS ベースライン比較・SHAP グローバル+per-stock 全社添付。**`oof_backtest`（アウトオブサンプル検証＝無リーク OOF 予測の分位/rank-IC/LS/hit-rate）を返却**し、**per-stock μ̂ を `macro_gbdt_scores` へ全置換で永続化**（producer）。`produced_output`/`read_producer_scores`（M-1 と同一形）で売り推奨が `mu_source` 経由で読む。`heavy=True`・`ui_order=340` | plugins/utils.py, macro_snapshots.py, xgboost, shap |
 | `plugins/utils.py` | バックエンド | coerce_params()・ols()・normalize()・winsorize()・walk_forward_cv()・`walk_forward_cv_monthly(fit_predict=None)`（fit_predict コールバックで OLS/XGBoost を切替可・ADR-0003 §3）・get_macro_features()・get_momentum_return()・fit_feature_columns()・transform_feature_row() | — |
 | `tests/` | テスト | pytest 回帰テスト（313件）。プラグイン＋utils＋`database.py`（upsert・RegressionResult merge・derived非永続）＋`collector.py`（XBRLパース・派生指標＋ネットワーク取得を httpx MockTransport でモック）＋`api.py`（純関数・`/health`・DB-backed 読取・heavy回帰のRenderブロック）をカバー。in-memory SQLite fixture（StaticPool）／FastAPI TestClient／httpx MockTransport で検証。`financial_metrics` は SQLite では `FinancialMetric` 列定義から生成したテーブルで代替し、派生値・予測値はテストが直接注入（`make_metric`）。計算式の同値性は Postgres で別途検証。共通 fixture は `tests/conftest.py`（`db`/`make_fin`/`make_metric` 等） | pytest, sqlalchemy, fastapi, httpx |
 | `tests/README.md` | テスト | テスト実行方法・fixture 方針の補足ドキュメント | — |

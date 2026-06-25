@@ -275,3 +275,59 @@ class TestDependencyGate:
         res = asyncio.run(execute_plugin(plugin,
             {"holdings": "1001", "weights": {"roe": 1.0}, "min_coverage": 0.0}, db))
         assert res["count"] == 1
+
+
+# ── μ 出所トグル（M-1/M-2・ADR-0004）─────────────────────────────────────────
+
+class TestMuSource:
+    def _seed_universe(self, db, make_metric):
+        db.add_all(_universe(make_metric, [1.0, 2.0, 3.0, 4.0, 5.0]))
+        db.commit()
+
+    def _seed_m2(self, db, mus):
+        from database import replace_macro_gbdt_scores
+        replace_macro_gbdt_scores(
+            db, [{"edinet_code": ec, "mu": v} for ec, v in mus.items()], "2026-06-26")
+
+    def test_macro_gbdt_mu_used_when_available(self, db, make_metric):
+        self._seed_universe(db, make_metric)
+        # 低μ=保有理由小=売る理由大 → 売りスコア高
+        self._seed_m2(db, {"E0001": -0.10, "E0002": -0.05, "E0003": 0.0,
+                           "E0004": 0.05, "E0005": 0.10})
+        res = _run({"holdings": "1001\n1005", "weights": {"mu": 1.0},
+                    "min_coverage": 0.0, "mu_source": "macro_gbdt",
+                    "timing_adjust": False}, db)
+        assert res["mu_available"] is True
+        assert res["mu_source"] == "macro_gbdt"
+        by = {r["sec_code"]: r for r in res["results"]}
+        assert by["1001"]["score"] > by["1005"]["score"]   # 低μ → 売り上位
+        assert by["1001"]["score"] > 0
+        assert by["1005"]["score"] < 0
+
+    def test_macro_gbdt_graceful_when_not_run(self, db, make_metric):
+        self._seed_universe(db, make_metric)
+        # macro_gbdt_scores 空 → graceful（mu 除外・roe で判定継続）
+        res = _run({"holdings": "1001", "weights": {"mu": 1.0, "roe": 0.5},
+                    "min_coverage": 0.0, "mu_source": "macro_gbdt"}, db)
+        assert res["mu_available"] is False
+        assert res["mu_source"] == "macro_gbdt"
+        assert res["count"] == 1
+
+    def test_default_mu_source_is_m1(self, db, make_metric):
+        self._seed_universe(db, make_metric)
+        # mu_source 未指定 → coerce が default=macro_risk_return 補完
+        res = _run({"holdings": "1001", "weights": {"roe": 1.0},
+                    "min_coverage": 0.0}, db)
+        assert res["mu_source"] == "macro_risk_return"
+
+    def test_r3_gate_noop_under_macro_gbdt(self, db, make_metric):
+        self._seed_universe(db, make_metric)
+        self._seed_m2(db, {"E0001": -0.20, "E0002": -0.05, "E0003": 0.0,
+                           "E0004": 0.05, "E0005": 0.10})
+        # r3_gate>0 でも M-2 は r1_prime 無 → SELL を REDUCE に格下げしない（no-op）
+        res = _run({"holdings": "1001", "weights": {"mu": 1.0}, "min_coverage": 0.0,
+                    "sell_threshold": 0.8, "reduce_threshold": 0.3,
+                    "r3_gate": 0.1, "mu_source": "macro_gbdt", "timing_adjust": False}, db)
+        row = res["results"][0]
+        assert row["sec_code"] == "1001"
+        assert row["action"] == "SELL"

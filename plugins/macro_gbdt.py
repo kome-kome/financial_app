@@ -35,6 +35,7 @@ from .macro_snapshots import (
     preload_macro,
     build_snapshots,
     get_producer_scores,
+    oof_backtest,
 )
 from .macro_risk_return import (
     MacroRiskReturnPlugin as _M1,
@@ -285,6 +286,37 @@ class MacroGbdtPlugin(AnalysisPlugin):
             },
         }
 
+    def produced_output(self, db: Any) -> bool:
+        """M-2 producer μ̂（macro_gbdt_scores）を共有DBに持つか（sell_ranking の graceful 判定用）。
+
+        M-2 を一度ローカル実行すると execute() が μ̂ を永続化する。未実行なら False を返し、
+        consumer（sell_ranking, mu_source=macro_gbdt）は graceful-degrade する（ADR-0004）。"""
+        try:
+            from database import get_macro_gbdt_scores
+            return bool(get_macro_gbdt_scores(db))
+        except Exception:
+            return False
+
+    def read_producer_scores(self, db: Any, macro_snapshot: dict | None = None) -> dict:
+        """M-1 と同一形 {edinet_code: {mu, r_macro, r1_prime}} を返す（sell_ranking 共用）。
+
+        mu は永続化済み macro_gbdt_scores、r_macro は共有 macro_beta producer から
+        マージ、r1_prime は常に None（XGBoost は OLS 予測SE を持たない・ADR-0003 §5）。"""
+        from database import get_macro_gbdt_scores
+        mus = get_macro_gbdt_scores(db)
+        if not mus:
+            return {}
+        r_macro_src = get_producer_scores(db, macro_snapshot)
+        out: dict = {}
+        for ec, mu in mus.items():
+            prod = r_macro_src.get(ec) or {}
+            out[ec] = {
+                "mu":       float(mu),
+                "r_macro":  prod.get("r_macro"),
+                "r1_prime": None,
+            }
+        return out
+
     async def execute(self, params: dict, db: Any) -> dict:
         import xgboost as xgb
         import shap
@@ -451,6 +483,26 @@ class MacroGbdtPlugin(AnalysisPlugin):
                 else None
             )
 
+        # ── アウトオブサンプル検証（OOF）: 無リーク walk-forward 予測のモデル評価（ADR-0004）─
+        # 既存「バックテスト」(/api/backtest) とは別概念。再学習・追加価格取得なし。
+        oof_bt = oof_backtest(cv_residuals_xgb, n_quantiles=5)
+
+        # ── producer μ̂ を永続化（sell_ranking が mu_source=macro_gbdt で読む・ADR-0004）─
+        from database import replace_macro_gbdt_scores
+        _snap_dates = [current_snaps[c][1].get("snap_date") for c in codes_ordered]
+        _snap_dates = [d for d in _snap_dates if d]
+        _rep = max(_snap_dates) if _snap_dates else None
+        _rep_str = (_rep.isoformat() if hasattr(_rep, "isoformat")
+                    else (str(_rep)[:10] if _rep else None))
+        try:
+            replace_macro_gbdt_scores(
+                db,
+                [{"edinet_code": it["edinet_code"], "mu": it["mu_raw"]} for it in raw_items],
+                _rep_str,
+            )
+        except Exception:
+            pass   # 永続化失敗（読取専用DB等）は分析表示を妨げない・producer は次回実行で再生成
+
         return {
             "cv_metrics":        cv_metrics,
             "selected_features": all_feat_names,
@@ -464,6 +516,7 @@ class MacroGbdtPlugin(AnalysisPlugin):
             "results":           raw_items,
             "model_type":        "xgboost",
             "best_iteration":    n_est_final,
+            "oof_backtest":      oof_bt,
         }
 
 
