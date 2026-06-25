@@ -1106,7 +1106,7 @@ async def fetch_fred_series(
     date_to:   str,  # "YYYY-MM-DD"
 ) -> list:
     """FRED API から指定系列の観測値を取得する（日次・月次両対応）。
-    欠損値（"."）はスキップ。月次系列は月初日の1レコードのみ返す。"""
+    欠損値（"."）と None はスキップ。月次系列は FRED が1か月1観測を返すので結果も月次になる。"""
     params = {
         "series_id":         fred_id,
         "api_key":           FRED_API_KEY,
@@ -1118,8 +1118,12 @@ async def fetch_fred_series(
         r = await session.get(FRED_BASE_URL, params=params, timeout=30)
         r.raise_for_status()
         data = r.json()
+    except httpx.HTTPStatusError as e:
+        # URL にクエリで api_key を渡しているため e をそのまま出すと鍵が漏洩する
+        log.warning("FRED 取得失敗 %s: HTTP %s", fred_id, e.response.status_code)
+        return []
     except Exception as e:
-        log.warning("FRED 取得失敗 %s: %s", fred_id, e)
+        log.warning("FRED 取得失敗 %s: %s", fred_id, type(e).__name__)
         return []
 
     rows = []

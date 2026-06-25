@@ -199,8 +199,12 @@ def _macro_from_cache(
 
         current_vals = [v for d, v in date_close.items() if win_start <= d <= ref_date]
         if not current_vals:
-            result[fname] = None
-            continue
+            # 月次系列等で窓内に観測がない場合は ref_date 以前の最新値を forward-fill
+            past = sorted((d, v) for d, v in date_close.items() if d <= ref_date)
+            if not past:
+                result[fname] = None
+                continue
+            current_vals = [past[-1][1]]
         current_avg = statistics.mean(current_vals)
 
         if ttype == "yoy":

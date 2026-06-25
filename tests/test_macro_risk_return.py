@@ -140,6 +140,26 @@ class TestMacroFromCache:
         result = _macro_from_cache({}, "2025-06-01", ["macro_usdjpy_yoy"])
         assert result["macro_usdjpy_yoy"] is None
 
+    def test_monthly_series_forward_fill(self):
+        """月次系列で30日窓内に観測がなくても前月の値を forward-fill して None にならない。
+        JP10Y_FRED シナリオ: 最終観測2025-05-01、ref=2025-06-15（5/1 は30日窓外）。"""
+        ref = date(2025, 6, 15)
+        cache: dict[str, dict[str, float]] = {}
+        # 月次データを2020-01〜2025-05 で用意（zscore に必要な20件超・値に変動あり）
+        d = date(2020, 1, 1)
+        i = 0
+        while d <= date(2025, 5, 1):
+            cache.setdefault("JP10Y_FRED", {})[d.isoformat()] = 0.3 + i * 0.02
+            m, y = d.month + 1, d.year
+            if m > 12:
+                m, y = 1, y + 1
+            d = date(y, m, 1)
+            i += 1
+
+        result = _macro_from_cache(cache, ref.isoformat(), ["macro_jp10y_fred_zscore"])
+        # 30日窓（5/16〜6/15）に観測なし → 5/1 を forward-fill → None にならないこと
+        assert result["macro_jp10y_fred_zscore"] is not None
+
 
 # ── params_schema + coerce_params ────────────────────────────────────────────
 
