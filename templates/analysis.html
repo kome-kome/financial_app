@@ -649,6 +649,33 @@ tr:hover td{background:#1e2235}
   </div>
 </div>
 
+<div id="tab-macro_gbdt" class="hidden">
+  <div class="card">
+    <div class="section-title">M-2: マクロ×財務 勾配ブースティング設定<a class="co-link" href="/guide#macro_gbdt" target="_blank" rel="noopener" style="float:right;font-size:12px;font-weight:400">❓ やさしい解説</a></div>
+    <div class="info-box" style="margin-bottom:14px">
+      財務指標 × マクロ要因を <b>勾配ブースティング木（XGBoost）</b>で学習し、1年先リターンの非線形推定を行います。<br>
+      同一特徴量の OLS ベースラインと Walk-Forward CV で比較し、特徴量寄与は mean|SHAP|（大きさのみ）で提示します。<br>
+      <span style="color:#f59e0b;font-size:11px">⚠ 計算が重いためローカル環境で実行してください（Render 環境では無効）。予測値はモデルの推定値で、投資判断の参考値です。</span>
+    </div>
+    <div id="params-form-macro_gbdt"></div>
+    <button class="btn btn-primary" id="btn-mg"
+            data-click="runDynamicPlugin"
+            data-arg="macro_gbdt" data-arg2="macro_gbdt"
+            style="margin-top:8px">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>
+        <polyline points="17 6 23 6 23 12"/>
+      </svg>
+      勾配ブースティング分析を実行
+    </button>
+  </div>
+
+  <div id="dynresult-macro_gbdt" class="card hidden">
+    <div class="section-title">結果</div>
+    <div id="dynresult-content-macro_gbdt"></div>
+  </div>
+</div>
+
 </div><!-- container -->
 </div><!-- layout -->
 
