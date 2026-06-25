@@ -389,8 +389,8 @@ const SELL_WEIGHT_LABELS = {
   'rev_growth':   ['売上成長率',                0.6],
   'equity_ratio': ['財務安全性',                0.4],
   'nc_ratio':     ['ネットキャッシュ余力',       0.4],
-  'mu':           ['M-1 期待リターン（μ）',     0.5],
-  'neg_r_macro':  ['M-1 マクロリスク（−Rᴹ）', 0.3],
+  'mu':           ['期待リターン μ（M-1/M-2）',  0.5],
+  'neg_r_macro':  ['マクロリスク（−Rᴹ・共有）', 0.3],
 };
 // plugins/sell_ranking.py PRESETS と一致させる（高いほどその観点を売り判断で重視）。
 const SELL_PRESETS = {
@@ -455,6 +455,7 @@ async function runSellRanking() {
     sell_threshold:   parseFloat(document.getElementById('sell-th')?.value ?? 0.8),
     reduce_threshold: parseFloat(document.getElementById('reduce-th')?.value ?? 0.3),
     timing_adjust:    !!document.getElementById('sell-timing-adjust')?.checked,
+    mu_source:        document.getElementById('sell-mu-source')?.value || 'macro_risk_return',
   };
 
   const btn = document.getElementById('btn-sell-ranking');
@@ -493,8 +494,11 @@ function renderSellRanking(d) {
     notes.push(`<span class="text-amber">⚠ 解釈できなかった入力: ${esc(d.invalid.join(' / '))}</span>`);
   if (d.gap_available === false)
     notes.push(`<span style="color:#64748b">※ 割高度は業種別OLS未実行のため売り判定から除外されています</span>`);
-  if (d.m1_available === false)
-    notes.push(`<span style="color:#64748b">※ M-1（マクロリスク）未実行のため μ・マクロリスク成分は除外されています</span>`);
+  if (d.mu_available === false) {
+    const _lbl = d.mu_source === 'macro_gbdt' ? 'M-2（勾配ブースティング）' : 'M-1（マクロリスク-リターン）';
+    const _act = d.mu_source === 'macro_gbdt' ? 'M-2 を分析タブでローカル実行してください' : 'M-1 を実行してください';
+    notes.push(`<span style="color:#64748b">※ ${_lbl} 未実行のため μ・マクロリスク成分は除外されています（${_act}）</span>`);
+  }
   document.getElementById('sell-notes').innerHTML = notes.join('<br>');
 
   const fmtPct = (v, goodIsPos) => {
@@ -1528,6 +1532,54 @@ function _mgPaintCv(data) {
   const ols = cv.ols_baseline || {};
   const el = document.getElementById('dynresult-content-macro_gbdt');
   if (!el) return;
+
+  // アウトオブサンプル検証（OOF）: μ̂ が将来リターンを順序付けるか（無リーク・再学習なし）
+  const oof = data.oof_backtest || {};
+  const qr  = oof.quantile_returns || [];
+  const ic  = oof.rank_ic || {};
+  const hasOof = qr.length > 0;
+  const oofHtml = `
+  <div style="margin-bottom:16px;padding:12px 16px;background:#0f172a;border-radius:8px;border:1px solid #334155">
+    <div style="font-size:12px;color:#a78bfa;font-weight:600;margin-bottom:4px">
+      アウトオブサンプル検証（OOF）— μ̂ が将来リターンを順序付けるか（無リーク walk-forward 予測）
+    </div>
+    <div style="font-size:11px;color:#64748b;margin-bottom:10px">
+      既存「バックテスト」(/api/backtest) とは別物。再学習なし・各期で μ̂ を横断${oof.n_quantiles||5}分位し実現52週リターンを集計。
+    </div>
+    ${hasOof ? `
+    <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:12px">
+      <div style="padding:8px;background:#0b1220;border-radius:6px">
+        <div style="font-size:10px;color:#64748b">rank-IC（Spearman 平均±std）</div>
+        <div style="font-size:15px;font-weight:700;color:${(ic.mean||0)>0?'#86efac':'#f87171'}">${ic.mean!=null?ic.mean.toFixed(3):'-'}<span style="font-size:11px;color:#64748b"> ±${ic.std!=null?ic.std.toFixed(3):'-'}</span></div>
+        <div style="font-size:10px;color:#475569">${ic.n||0} fold</div>
+      </div>
+      <div style="padding:8px;background:#0b1220;border-radius:6px">
+        <div style="font-size:10px;color:#64748b">ロングショート spread（top−bottom）</div>
+        <div style="font-size:15px;font-weight:700;color:${(oof.long_short_spread||0)>0?'#86efac':'#f87171'}">${oof.long_short_spread!=null?(oof.long_short_spread*100).toFixed(2)+'%':'-'}</div>
+      </div>
+      <div style="padding:8px;background:#0b1220;border-radius:6px">
+        <div style="font-size:10px;color:#64748b">hit-rate（top&gt;bottom の期）</div>
+        <div style="font-size:15px;font-weight:700;color:#c084fc">${oof.hit_rate!=null?(oof.hit_rate*100).toFixed(0)+'%':'-'}</div>
+        <div style="font-size:10px;color:#475569">${oof.n_periods_quantile||0} 期</div>
+      </div>
+    </div>
+    <div style="font-size:11px;color:#94a3b8;margin-bottom:6px">分位別 平均実現リターン（左=最低 μ̂ → 右=最高 μ̂・52週先・期間平均）</div>
+    <div style="display:flex;align-items:flex-end;gap:6px;height:92px">
+      ${(() => {
+        const mx = Math.max(...qr.map(Math.abs), 1e-9);
+        return qr.map((v, i) => {
+          const h = Math.round(Math.abs(v) / mx * 70) + 2;
+          const col = v >= 0 ? '#34d399' : '#f87171';
+          return `<div style="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:flex-end;height:100%">
+            <div style="font-size:10px;color:${col}">${(v*100).toFixed(1)}%</div>
+            <div style="width:100%;height:${h}px;background:${col};border-radius:3px 3px 0 0"></div>
+            <div style="font-size:10px;color:#64748b;margin-top:2px">Q${i+1}</div>
+          </div>`;
+        }).join('');
+      })()}
+    </div>` : `<div style="font-size:11px;color:#64748b">OOF サンプルが期内 ${(oof.n_quantiles||5)*2} 銘柄未満のため分位を表示できません（データ蓄積後に再実行）。rank-IC は ${ic.n||0} fold で算出。</div>`}
+  </div>`;
+
   // CV パネルを先頭に inject（テーブル返却前）
   const cvHtml = `
   <div style="margin-bottom:16px;padding:12px 16px;background:#0f172a;border-radius:8px;border:1px solid #334155">
@@ -1564,6 +1616,7 @@ function _mgPaintCv(data) {
       <div id="mg-coef-bars" style="margin-top:4px"></div>
     </div>
   </div>
+  ${oofHtml}
   <canvas id="chart-mg-bubble" style="width:100%;max-height:360px;display:block;margin-bottom:16px"></canvas>`;
   const resultCard = document.getElementById('dynresult-macro_gbdt') || el.closest('.card');
   // CV パネルをテーブルより上に置くため、result area の直前に挿入

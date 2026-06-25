@@ -441,3 +441,112 @@ def get_producer_scores(db: Any, macro_snapshot: dict | None = None) -> dict:
         return producer_scores(meta, loadings, macro_snapshot)
     except Exception:
         return {}
+
+
+# ── アウトオブサンプル検証（OOF）: 無リーク walk-forward 予測のモデル評価（ADR-0004）──
+# 既存「バックテスト」(/api/backtest・preset/as-of ポートフォリオ模擬) とは別概念。
+# こちらは「μ̂ が将来リターンを順序付けるか」を OOF 予測のみで評価する（再学習・追加価格取得なし）。
+# M-2（macro_gbdt）が使用。M-1 も同じ residuals を持つため後付け可能（共有ヘルパ・ADR-0004 §6）。
+
+def _avg_ranks(vals: list) -> list:
+    """同順位を平均順位に割り当てた順位列（1始まり）を返す。"""
+    order = sorted(range(len(vals)), key=lambda i: vals[i])
+    ranks = [0.0] * len(vals)
+    i = 0
+    while i < len(order):
+        j = i
+        while j + 1 < len(order) and vals[order[j + 1]] == vals[order[i]]:
+            j += 1
+        avg = (i + j) / 2.0 + 1.0   # i..j の平均順位（1始まり）
+        for k in range(i, j + 1):
+            ranks[order[k]] = avg
+        i = j + 1
+    return ranks
+
+
+def _spearman(xs: list, ys: list) -> float | None:
+    """Spearman 順位相関（= 順位の Pearson）。n<3 または無分散なら None。"""
+    n = len(xs)
+    if n < 3:
+        return None
+    rx, ry = _avg_ranks(xs), _avg_ranks(ys)
+    mx, my = sum(rx) / n, sum(ry) / n
+    cov = sum((a - mx) * (b - my) for a, b in zip(rx, ry))
+    vx = sum((a - mx) ** 2 for a in rx)
+    vy = sum((b - my) ** 2 for b in ry)
+    if vx <= 0 or vy <= 0:
+        return None
+    return cov / math.sqrt(vx * vy)
+
+
+def oof_backtest(residuals_by_ym: dict, n_quantiles: int = 5) -> dict:
+    """無リーク OOF 予測から「アウトオブサンプル検証（OOF）」指標を算出する（ADR-0004）。
+
+    residuals_by_ym = {test_ym: [(yhat, y_true), ...]}（walk_forward_cv_monthly の
+    return_residuals=True 出力・テストサンプル順）。再学習・追加の価格取得は不要。
+
+    手法（ADR-0004「分位の作り方」）:
+      - 各 test_ym 内で yhat を横断ランク→ n_quantiles 分位→分位平均 y_true（期内）
+        →期間平均（per-period cross-sectional・μ̂ 水準の時系列ドリフトに頑健）。
+      - rank-IC = Spearman(yhat, y_true) を fold 毎→ mean/std/n。
+      - long_short_spread = top分位平均 − bottom分位平均（期間平均）。
+      - hit_rate = top分位 > bottom分位 だった期の割合。
+      - 期内サンプルが n_quantiles*2 未満の期は分位計算から自動除外（IC には使用）。
+    quantile_returns[0]=最低 μ̂ バケット, [-1]=最高 μ̂ バケットの実現リターン。
+    """
+    yms = sorted(residuals_by_ym.keys())
+    n_oof = sum(len(residuals_by_ym[y]) for y in yms)
+
+    # rank-IC（fold 毎・サンプル<3 の期は除外）
+    ics: list[float] = []
+    for ym in yms:
+        pairs = residuals_by_ym[ym]
+        ic = _spearman([p[0] for p in pairs], [p[1] for p in pairs])
+        if ic is not None:
+            ics.append(ic)
+    ic_mean = statistics.mean(ics) if ics else None
+    ic_std = statistics.pstdev(ics) if len(ics) > 1 else (0.0 if ics else None)
+
+    # 期内横断分位リターン（各期で yhat 昇順→ n_quantiles 等分→分位平均 y_true）
+    q_sums = [0.0] * n_quantiles
+    q_periods = 0
+    ls_spreads: list[float] = []
+    hits = 0
+    for ym in yms:
+        pairs = residuals_by_ym[ym]
+        if len(pairs) < n_quantiles * 2:
+            continue
+        ordered = sorted(pairs, key=lambda p: p[0])   # yhat 昇順
+        m = len(ordered)
+        q_means = []
+        for q in range(n_quantiles):
+            lo = q * m // n_quantiles
+            hi = (q + 1) * m // n_quantiles
+            seg = ordered[lo:hi]
+            q_means.append(sum(p[1] for p in seg) / len(seg))
+        for q in range(n_quantiles):
+            q_sums[q] += q_means[q]
+        q_periods += 1
+        ls = q_means[-1] - q_means[0]   # top（高 yhat）− bottom（低 yhat）
+        ls_spreads.append(ls)
+        if ls > 0:
+            hits += 1
+
+    quantile_returns = [round(s / q_periods, 6) for s in q_sums] if q_periods else []
+    long_short_spread = round(statistics.mean(ls_spreads), 6) if ls_spreads else None
+    hit_rate = round(hits / q_periods, 4) if q_periods else None
+
+    return {
+        "n_quantiles":        n_quantiles,
+        "n_periods":          len(yms),
+        "n_periods_quantile": q_periods,
+        "n_oof_samples":      n_oof,
+        "quantile_returns":   quantile_returns,
+        "rank_ic": {
+            "mean": round(ic_mean, 4) if ic_mean is not None else None,
+            "std":  round(ic_std, 4) if ic_std is not None else None,
+            "n":    len(ics),
+        },
+        "long_short_spread": long_short_spread,
+        "hit_rate":          hit_rate,
+    }

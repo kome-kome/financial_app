@@ -344,6 +344,17 @@ tr:hover td{background:#1e2235}
       価格トレンドでラベル補正（下落＝売り圧力↑ / 上昇＝即売り回避）
     </label>
 
+    <div style="margin-top:14px">
+      <label style="font-size:11px;color:#64748b;display:block;margin-bottom:4px">期待リターン μ の出所（推奨モデル）</label>
+      <select id="sell-mu-source" style="width:100%;background:#0f1117;color:#e2e8f0;border:1px solid #1e2235;border-radius:6px;padding:6px 8px;font-size:12px">
+        <option value="macro_risk_return">M-1: マクロ×リスク-リターン（OLS）</option>
+        <option value="macro_gbdt">M-2: マクロ×財務 勾配ブースティング（XGBoost）</option>
+      </select>
+      <div style="font-size:11px;color:#64748b;margin-top:4px">
+        μ 観点に使う推奨モデル。選択モデルが未実行ならその成分を自動除外します（M-2 は分析タブで要ローカル実行）。−Rᴹ は共有マクロβ由来でモデル非依存。
+      </div>
+    </div>
+
     <button class="btn btn-primary" id="btn-sell-ranking" data-click="runSellRanking" style="margin-top:16px">
       <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="2 12 6 12 9 3 15 21 18 12 22 12"/></svg>
       売り候補を判定
@@ -681,6 +692,6 @@ tr:hover td{background:#1e2235}
 
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 <script src="/static/js/common.js?v=20260620e"></script>
-<script src="/static/js/analysis.js?v=20260620e"></script>
+<script src="/static/js/analysis.js?v=20260626a"></script>
 </body>
 </html>

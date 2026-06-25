@@ -501,6 +501,52 @@ def get_macro_beta(db, run_id: str | None = None):
     return meta, loadings
 
 
+# ── 5c. M-2 per-stock 勾配ブースティング予測 μ̂（ADR-0004 / Issue #234）───────────
+# M-2（macro_gbdt）プラグインが execute() 末尾で書き込み、sell_ranking（consumer）が読む。
+# XGBoost は線形 β 表現を持たないため、M-1 の macro_beta（β 縦持ち・read 時 μ 復元）と異なり
+# per-stock μ̂ を直接保存する。最新スナップショットのみ保持（履歴不要）＝ replace 方式。
+# 「producer.execute() が直書き」は sector_ols→regression_results と同じパターン（ADR-0004）。
+
+class MacroGbdtScore(Base):
+    """M-2 の per-stock 期待リターン μ̂（最新実行スナップショット）。
+
+    sell_ranking が mu_source="macro_gbdt" 選択時に read_producer_scores 経由で読む。
+    R_macro は共有 macro_beta から別途マージするため本テーブルには持たない。"""
+    __tablename__ = "macro_gbdt_scores"
+
+    edinet_code   = Column(String(10), primary_key=True)
+    mu            = Column(Float, nullable=False)   # XGBoost 予測 52週先対数リターン（無次元）
+    snapshot_date = Column(String(10))              # "YYYY-MM-DD"（実行時スナップ基準日）
+    created_at    = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+
+def replace_macro_gbdt_scores(db, rows: list, snapshot_date: str | None = None) -> int:
+    """M-2 producer μ̂ を全置換する（最新スナップショットのみ保持）。
+
+    rows = [{"edinet_code": str, "mu": float}, ...]。1 txn で全削除→一括 insert。
+    mu が None の行はスキップ（予測不能銘柄を保存しない）。戻り値は保存件数。
+    """
+    db.query(MacroGbdtScore).delete()
+    objs = [
+        MacroGbdtScore(edinet_code=r["edinet_code"], mu=float(r["mu"]),
+                       snapshot_date=snapshot_date)
+        for r in rows
+        if r.get("edinet_code") and r.get("mu") is not None
+    ]
+    if objs:
+        db.add_all(objs)
+    db.commit()
+    return len(objs)
+
+
+def get_macro_gbdt_scores(db) -> dict:
+    """M-2 producer μ̂ を {edinet_code: mu} で返す（未蓄積なら {}・graceful degrade）。"""
+    try:
+        return {r.edinet_code: r.mu for r in db.query(MacroGbdtScore).all()}
+    except Exception:
+        return {}
+
+
 def prices_on_or_after(db, codes: list, after: str) -> dict:
     """各 edinet_code の after 以降・最初の終値を返す（バックテストのエントリー用）。
 

@@ -964,18 +964,31 @@ M-1（§9）と同一形式で散布図・効用・フロンティアの client 
      "shap": {"per": 0.012, "pbr": -0.008, ...}, ...}
   ],
   "model_type": "xgboost",
-  "best_iteration": 120
+  "best_iteration": 120,
+  "oof_backtest": {                       // アウトオブサンプル検証（OOF・ADR-0004）
+    "n_quantiles": 5, "n_periods": 24, "n_periods_quantile": 22, "n_oof_samples": 4123,
+    "quantile_returns": [...],            // 期内横断分位→期間平均（左=最低μ̂→右=最高μ̂）
+    "rank_ic": {"mean": 0.03, "std": 0.11, "n": 24},   // Spearman(μ̂, y) を fold 毎
+    "long_short_spread": 0.018, "hit_rate": 0.58
+  }
 }
 ```
 
-### 11.7 将来エンハンス
+### 11.7 アウトオブサンプル検証（OOF）と売り推奨連携（ADR-0004）
 
+M-2 の `execute()` は walk-forward CV の**無リーク OOF 予測**（`{test_ym:[(yhat,y_true),…]}`）から、**再学習・追加価格取得なしで** `oof_backtest` を返す。指標は ① **分位リターン**（各期で μ̂ を横断ランク→分位→分位平均実現リターン→期間平均＝per-period cross-sectional・μ̂ 水準の時系列ドリフトに頑健）、② **rank-IC**（Spearman(μ̂, y) を fold 毎→平均±std）、③ **ロングショート spread**（top−bottom 分位）、④ **hit-rate**（top>bottom だった期の割合）。**既存「バックテスト」（§7・preset/as-of のポートフォリオ模擬）とは別概念**で「予測 μ̂ が将来リターンを順序付けるか」を測る（用語は CONTEXT.md「[[アウトオブサンプル検証]]」）。共有ヘルパ `plugins/macro_snapshots.py::oof_backtest`。
+
+あわせて per-stock μ̂ を `macro_gbdt_scores` テーブルへ**全置換で永続化**し（`sector_ols`→`regression_results` と同型・producer.execute 直書き）、**売り候補ランキング（§10）が `mu_source` トグル**（既定 `macro_risk_return`＝M-1／`macro_gbdt`＝M-2）で読む。M-2 の `read_producer_scores` は M-1 と同一形 `{mu, r_macro, r1_prime}` を返す（`r_macro` は共有 `macro_beta`・`r1_prime` は M-2 で None）。M-2 は予測 SE を持たないため **R3 足切りゲートは M-2 選択時は無効**。
+
+### 11.8 将来エンハンス
+
+- 同 OOF 検証を M-1 にも結線（共有ヘルパ呼び出し1行・線形 vs 非線形の予測力を OOF で直接対比）
 - inner-CV グリッド / optuna によるハイパラ自動探索
 - quantile regression（`reg:quantileerror`）による予測区間（R1' 代替）
 - SHAP interaction values（特徴量ペアの交互作用可視化）
 - M-2 初心者向けガイド（`M2_MACRO_GBDT_GUIDE.md`）
 
-### 11.8 参考文献
+### 11.9 参考文献
 
 - **Chen, T. & Guestrin, C. (2016)**. "XGBoost: A Scalable Tree Boosting System." *Proceedings of the 22nd ACM SIGKDD*, pp. 785–794. → https://doi.org/10.1145/2939672.2939785
 - **Lundberg, S.M. & Lee, S.-I. (2017)**. "A Unified Approach to Interpreting Model Predictions." *Advances in Neural Information Processing Systems*, 30. → https://arxiv.org/abs/1705.07874

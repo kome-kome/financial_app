@@ -17,7 +17,7 @@ import pytest
 import numpy as np
 
 from plugins.macro_gbdt import MacroGbdtPlugin, _make_xgb_fit_predict
-from plugins.macro_snapshots import build_snapshots, FINANCIAL_LAG_DAYS, HORIZON_WEEKS
+from plugins.macro_snapshots import build_snapshots, FINANCIAL_LAG_DAYS, HORIZON_WEEKS, oof_backtest
 from plugins.utils import coerce_params
 
 
@@ -352,6 +352,23 @@ class TestExecuteSmoke:
             assert key in cv["xgb"], f"cv_metrics.xgb に '{key}' がない"
             assert key in cv["ols_baseline"], f"cv_metrics.ols_baseline に '{key}' がない"
 
+    def test_execute_has_oof_backtest(self):
+        """execute が oof_backtest（アウトオブサンプル検証）を返す（ADR-0004）。"""
+        db, prices_by_co, fin_by_co, companies = self._make_db()
+        params = self._make_params(use_macro=False)
+
+        with patch("plugins.macro_gbdt.load_data", return_value=(prices_by_co, fin_by_co, companies)), \
+             patch("plugins.macro_gbdt.preload_macro", return_value={}), \
+             patch("plugins.macro_gbdt.get_producer_scores", return_value={}):
+            result = asyncio.run(plugin.execute(params, db))
+
+        assert "oof_backtest" in result, "execute 出力に oof_backtest がない"
+        oof = result["oof_backtest"]
+        for k in ("n_quantiles", "n_periods", "n_periods_quantile", "n_oof_samples",
+                  "quantile_returns", "rank_ic", "long_short_spread", "hit_rate"):
+            assert k in oof, f"oof_backtest に '{k}' がない"
+        assert set(oof["rank_ic"].keys()) == {"mean", "std", "n"}
+
     def test_execute_all_companies_returned(self):
         """results は全社を返す（top_n でスライスしない）。"""
         n_co = 4
@@ -460,3 +477,88 @@ class TestPluginMeta:
         meta = plugin.to_meta()
         for k in ("name", "label", "heavy", "category", "ui_order", "params_schema"):
             assert k in meta
+
+
+# ── 6. アウトオブサンプル検証（OOF）ヘルパ（ADR-0004）─────────────────────────
+
+class TestOofBacktest:
+    """oof_backtest: 無リーク OOF 予測 → 分位/IC/LS/hit-rate。純関数・DB非依存。"""
+
+    def _ramp(self, n=20):
+        # yhat と y_true 同順（完全な順序付け）
+        return [(i * 0.01, i * 0.01) for i in range(n)]
+
+    def test_perfect_order_ic_one_and_monotonic(self):
+        r = {"2020-01": self._ramp(), "2020-02": self._ramp()}
+        o = oof_backtest(r, n_quantiles=5)
+        assert o["rank_ic"]["mean"] == 1.0
+        assert o["rank_ic"]["n"] == 2
+        assert o["long_short_spread"] > 0
+        assert o["hit_rate"] == 1.0
+        q = o["quantile_returns"]
+        assert q == sorted(q), "分位リターンが μ̂ 昇順で単調増でない"
+        assert o["n_oof_samples"] == 40
+        assert o["n_periods_quantile"] == 2
+
+    def test_reverse_order_negative_ic(self):
+        r = {"m": [(i * 0.01, -i * 0.01) for i in range(20)]}
+        o = oof_backtest(r, n_quantiles=5)
+        assert o["rank_ic"]["mean"] == -1.0
+        assert o["long_short_spread"] < 0
+        assert o["hit_rate"] == 0.0
+
+    def test_insufficient_samples_no_quantiles(self):
+        # 期内サンプルが n_quantiles*2 未満 → 分位は出さないが IC は試行
+        r = {"m": [(0.1, 0.2), (0.2, 0.1), (0.3, 0.3)]}  # 3 < 5*2
+        o = oof_backtest(r, n_quantiles=5)
+        assert o["quantile_returns"] == []
+        assert o["n_periods_quantile"] == 0
+        assert o["long_short_spread"] is None
+        assert o["hit_rate"] is None
+        assert o["rank_ic"]["n"] == 1   # IC は 3 サンプルで算出
+
+    def test_empty(self):
+        o = oof_backtest({}, n_quantiles=5)
+        assert o["n_oof_samples"] == 0
+        assert o["rank_ic"]["n"] == 0
+        assert o["rank_ic"]["mean"] is None
+        assert o["quantile_returns"] == []
+
+
+# ── 7. producer μ̂ 永続化（sell_ranking 連携・ADR-0004）───────────────────────
+
+class TestProducer:
+    """macro_gbdt_scores への write→read 往復・スナップショット置換・M-1 形契約。"""
+
+    def test_produced_output_false_when_empty(self, db):
+        assert plugin.produced_output(db) is False
+
+    def test_replace_and_read_round_trip(self, db):
+        from database import replace_macro_gbdt_scores, get_macro_gbdt_scores
+        rows = [{"edinet_code": f"E{i:05d}", "mu": i * 0.01} for i in range(5)]
+        n = replace_macro_gbdt_scores(db, rows, "2026-06-26")
+        assert n == 5
+        assert plugin.produced_output(db) is True
+        got = get_macro_gbdt_scores(db)
+        assert got["E00003"] == pytest.approx(0.03)
+        # read_producer_scores は M-1 と同一形 {mu, r_macro, r1_prime}
+        scores = plugin.read_producer_scores(db, None)
+        assert set(scores["E00002"].keys()) == {"mu", "r_macro", "r1_prime"}
+        assert scores["E00002"]["mu"] == pytest.approx(0.02)
+        assert scores["E00002"]["r1_prime"] is None          # XGBoost は予測SEなし
+        assert scores["E00002"]["r_macro"] is None            # macro_beta 未蓄積→graceful
+
+    def test_replace_is_snapshot_overwrite(self, db):
+        from database import replace_macro_gbdt_scores, get_macro_gbdt_scores
+        replace_macro_gbdt_scores(db, [{"edinet_code": "E1", "mu": 0.1},
+                                       {"edinet_code": "E2", "mu": 0.2}], "d1")
+        # 2回目は全置換 → E1/E2 は消え E3 のみ残る
+        replace_macro_gbdt_scores(db, [{"edinet_code": "E3", "mu": 0.3}], "d2")
+        assert get_macro_gbdt_scores(db) == {"E3": pytest.approx(0.3)}
+
+    def test_none_mu_skipped(self, db):
+        from database import replace_macro_gbdt_scores, get_macro_gbdt_scores
+        n = replace_macro_gbdt_scores(db, [{"edinet_code": "E1", "mu": None},
+                                           {"edinet_code": "E2", "mu": 0.2}], "d")
+        assert n == 1
+        assert set(get_macro_gbdt_scores(db)) == {"E2"}
