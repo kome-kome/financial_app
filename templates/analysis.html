@@ -687,11 +687,37 @@ tr:hover td{background:#1e2235}
   </div>
 </div>
 
+<div id="tab-macro_dlm" class="hidden">
+  <div class="card">
+    <div class="section-title">M-3: ベイズ状態空間（時変マクロβ DLM）設定<a class="co-link" href="/guide#macro_dlm" target="_blank" rel="noopener" style="float:right;font-size:12px;font-weight:400">❓ やさしい解説</a></div>
+    <div class="info-box" style="margin-bottom:14px">
+      銘柄ごとに<b>週次リターン</b>を主要マクロの<b>週次変化</b>へ回帰し、係数（α/β）が時間変動する <b>動的線形モデル（DLM）</b> をカルマン型逐次ベイズ更新で推定します。<br>
+      最新の潜在アルファ α を期待リターン µ̂ とし、マクロ感応度 β の時系列と<b>信用区間</b>を可視化します（M-1/M-2 が静的係数なのに対し、係数の時間変化そのものを捉えます）。<br>
+      <span style="color:#f59e0b;font-size:11px">⚠ 計算が重いためローカル環境で実行してください（Render 環境では無効）。µ̂ はモデルの推定値で、投資判断の参考値です。</span>
+    </div>
+    <div id="params-form-macro_dlm"></div>
+    <button class="btn btn-primary" id="btn-mdlm"
+            data-click="runDynamicPlugin"
+            data-arg="macro_dlm" data-arg2="macro_dlm"
+            style="margin-top:8px">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>
+      </svg>
+      ベイズ状態空間分析を実行
+    </button>
+  </div>
+
+  <div id="dynresult-macro_dlm" class="card hidden">
+    <div class="section-title">結果</div>
+    <div id="dynresult-content-macro_dlm"></div>
+  </div>
+</div>
+
 </div><!-- container -->
 </div><!-- layout -->
 
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 <script src="/static/js/common.js?v=20260620e"></script>
-<script src="/static/js/analysis.js?v=20260626a"></script>
+<script src="/static/js/analysis.js?v=20260626b"></script>
 </body>
 </html>

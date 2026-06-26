@@ -995,6 +995,107 @@ M-2 の `execute()` は walk-forward CV の**無リーク OOF 予測**（`{test_
 
 ---
 
+## 12. M-3 ベイズ状態空間モデル（時変マクロβ DLM・macro_dlm）
+
+`plugins/macro_dlm.py` / `MacroDlmPlugin`  
+**カテゴリ**: ③ 将来リターンを予測（`ui_order=360`、`heavy=True`）
+
+### 12.1 概要
+
+M-1（§9・OLS 線形）・M-2（§11・XGBoost 非線形）の**第3の兄弟**。両者が「ある時点でクロスセクションに係数を1つ推定する（**静的係数**）」のに対し、M-3 は**係数そのものが時間とともに変動する**ベイズ動的線形モデル（DLM）を、**銘柄ごとに独立**なカルマン型逐次ベイズ更新で推定する。係数の時間変化そのものを捉え、マクロ感応度 β の推移と期待リターン α の現在水準を、**信用区間つき**で提示する。
+
+M-1/M-2 と同じ「リターン予測ファミリ」に属し、最新の潜在アルファ α_T を年率化したものを期待リターン µ̂ としてランキングに用いる。
+
+### 12.2 設計決定
+
+| 決定 | 内容 |
+|---|---|
+| 構造 | **銘柄別 TVP 時系列**（per-stock）。各銘柄を独立に推定し、銘柄固有の時変マクロ感応度を得る |
+| 観測 | **週次リターン × マクロ週次変化**（同時点ファクタ応答 / APT 型）。指数/FX/商品は対数リターン、金利は週次差分 |
+| ファクター | **マクロ + 市場ファクター**（既定 `USDJPY/US10Y/NIKKEI225/WTI`）。市場（日経225）を含めると α は市場・マクロ調整後の**固有アルファ** |
+| 推定エンジン | **自前 割引係数 DLM（West & Harrison 型・numpy）**。割引 δ で状態ノイズを与え銘柄ごとの数値最適化が不要（1パス高速）。観測分散は Normal-Gamma 共役で学習し予測分布は Student-t |
+| α のダイナミクス | **ランダムウォーク（ローカルレベル）** α_t = α_{t-1} + ω |
+| ユニバース | 全適格銘柄（最低週数を満たすもの）・`heavy=True`（Render では 403・ローカル限定）。モデル非永続・毎回学習 |
+| 出力統合 | 初版は API/UI のみ（µ̂ ランキング・β 経路・診断）。producer 化（`macro_dlm_scores`）と売り推奨連携（§10）は将来 Issue |
+
+### 12.3 モデル定式化
+
+各銘柄 i を独立に、週 t で（添字 i 省略）:
+
+**観測方程式**: y_t = F_t' θ_t + ν_t,　ν_t ～ N(0, V_t)  
+　F_t = [1, Δm_{1,t}, …, Δm_{k,t}]'　（定数項=α 用の 1 ＋ マクロ週次変化）  
+　θ_t = [α_t, β_{1,t}, …, β_{k,t}]'　（状態 = 時変アルファ + 時変マクロβ）
+
+**システム方程式**（ローカルレベル＝ランダムウォーク）: θ_t = θ_{t-1} + ω_t,　ω_t ～ N(0, W_t)
+
+- y_t = 週次対数リターン `log(close_last_t / close_last_{t-1})`
+- Δm_{j,t} = マクロ因子 j の週次変化（指数/FX/商品＝対数リターン、金利＝差分）
+
+### 12.4 推定（割引フィルタ＋分散学習）
+
+割引係数 δ により W_t を陽に与えず **R_t = C_{t-1}/δ**（事前共分散の割引膨張）として状態ノイズを表現する（West & Harrison）。観測分散 V_t は分散割引 β_v による Normal-Gamma 共役更新でオンライン学習する。1銘柄1フォワードパス:
+
+```
+事前:   a_t = m_{t-1},            R_t = C_{t-1}/δ
+予測:   f_t = F_t' a_t,           Q_t = F_t' R_t F_t + S_{t-1}   ← 1期先予測（観測前）
+更新:   e_t = y_t − f_t,          A_t = R_t F_t / Q_t
+        n_t = β_v n_{t-1} + 1,    S_t = S_{t-1}(β_v n_{t-1} + e_t²/Q_t)/n_t
+        m_t = a_t + A_t e_t,       C_t = (S_t/S_{t-1})(R_t − A_t A_t' Q_t)
+```
+
+予測分布は自由度 n_{t-1} の Student-t（位置 f_t・尺度 Q_t）。状態 θ_t の事後 (m_t, C_t) から α・β の信用区間が解析的に得られる。
+
+### 12.5 出力契約
+
+```json
+{
+  "model_type": "bayesian_dlm",
+  "macro_features": ["dlm_usdjpy", "dlm_us10y", "dlm_nikkei225", "dlm_wti"],
+  "factor_labels": {"dlm_usdjpy": "USD/JPY 週次変化", ...},
+  "params": {"state_discount": 0.98, "var_discount": 0.98, "min_weeks": 104, "burn_in_weeks": 26, "top_n": 50},
+  "n_companies": 1234,
+  "diagnostics": {"calibration": 1.05, "pred_rmse": 0.021, "coverage95": 0.94, "n_companies_scored": 1234},
+  "results": [
+    {"edinet_code": "...", "sec_code": "...", "company_name": "...", "industry": "...",
+     "mu": 0.18, "mu_ci": [0.02, 0.34], "alpha_weekly": 0.0035, "n_weeks": 210,
+     "pred_rmse": 0.020, "coverage95": 0.95, "r_macro": 0.11,
+     "beta_latest": {"dlm_usdjpy": {"mean": 0.42, "lo": 0.10, "hi": 0.74}, ...},
+     "path": {"dates": [...], "alpha": {"mean": [...], "lo": [...], "hi": [...]},
+              "beta": {"dlm_usdjpy": {"mean": [...], "lo": [...], "hi": [...]}, ...}}}
+  ]
+}
+```
+
+µ̂ = 年率化した最新フィルタ α_T（= α_T × 52）。経路（`path`）は payload 抑制のため µ̂ 上位 `top_n` 銘柄のみ・最大 120 点に間引いて添付する。
+
+### 12.6 検証（1期先予測診断）
+
+DLM のフォワードパスは各週 y_t を**観測前**に予測する。標準化予測誤差 e_t/√Q_t（バーンイン除外）から、① **校正**（標準化誤差²の平均・1 が理想＝予測分散が妥当）、② **予測 RMSE**（週次リターン単位）、③ **95% 信用区間カバレッジ**を全銘柄平均で集計する。M-1/M-2 の walk-forward CV とは別枠の、状態空間モデルに固有の自己診断。
+
+### 12.7 制約・限界
+
+- **同時点回帰**: β はマクロ「ショックへの感応度」であり予測子ではない。µ̂ は潜在 α（マクロで説明されない持続的ドリフト）に由来する。将来のマクロ変化は未知のため µ̂ ≈ α_T として扱う。
+- **週次・最低履歴**: 既定 104 週（約2年）未満の銘柄は対象外。状態次元 = 1+k に対し週次データ点数が要る。
+- **重なりなしの逐次観測**: 欠損週（マクロ整列不能・株価 0）はスキップし、残りを連続観測として扱う（暦上の小さなギャップは無視）。
+- **割引係数は固定**: δ・β_v はユーザー指定（自動選択は将来 Issue）。
+- 既存マクロ特徴量（M-1/M-2 の水準 YoY/Zスコア）とは別物の**週次変化**を使う（`_DLM_MACRO_MAP`）。
+
+### 12.8 将来エンハンス
+
+- producer 化（`macro_dlm_scores` 全置換永続化）＋売り候補ランキング（§10）の `mu_source` トグルへ M-3 を追加
+- α の AR(1) 化（平均回帰 µ̂）・δ/β_v の周辺尤度最大化による自動選択
+- walk-forward CV による M-1/M-2 との µ̂ ランキング横並び比較（OOF・§11.7 と同枠）
+- 系統的マクロリスク R_macro,i(t) を効用 U = µ − λR の軸へ正式組込み（現状は表示のみ）
+- M-3 初心者向けガイド（`M3_STATE_SPACE_GUIDE.md`）
+
+### 12.9 参考文献
+
+- **West, M. & Harrison, J. (1997)**. *Bayesian Forecasting and Dynamic Models*, 2nd ed. Springer. → https://doi.org/10.1007/b98971
+- **Kalman, R. E. (1960)**. "A New Approach to Linear Filtering and Prediction Problems." *Journal of Basic Engineering*, 82(1), 35–45. → https://doi.org/10.1115/1.3662552
+- **Ross, S. A. (1976)**. "The Arbitrage Theory of Capital Asset Pricing." *Journal of Economic Theory*, 13(3), 341–360. → https://doi.org/10.1016/0022-0531(76)90046-6
+
+---
+
 ## 改訂履歴
 
 | 日付 | 内容 |
@@ -1014,3 +1115,4 @@ M-2 の `execute()` は walk-forward CV の**無リーク OOF 予測**（`{test_
 | 2026-06-22 | M-1 tidy (#220)。①特徴量選択関数を `_forward_bic`→`_select_macro_features` へ改名（実体は LassoLarsIC ベース、貪欲前進 BIC の名残を一掃）。②未使用引数 `vif_threshold` を削除。③セクターダミー×マクロ交差項を廃止（fin×macro のみに簡素化）。④μ_shrunk（セクター平均収縮）を廃止し μ_raw を唯一の期待リターン指標に統一。各ドキュメント・JS・テストを整合 |
 | 2026-06-23 | リスク軸再編（#215）。①`risk_axis` を r2/r_macro に再編（R1/R3 を効用軸から除外）。②R_macro（√(βᵀΣ_macroβ)・リターン単位）を全社 raw 値に追加（macro_beta 未蓄積なら None・graceful degrade）。③R3 を表示/足切りゲート（`r3_gate` スライダー・0=ゲートなし）に降格。④λ レンジを 0〜5 に拡張（次元整合の確保）。クライアント側後処理・ランキング表列・tooltip も整合 |
 | 2026-06-25 | **M-2（マクロ×財務 勾配ブースティング）を §10 として追加**（#234・ADR-0003）。M-1 と同一スナップショット母集団（build_interactions=False）・同一リスク-リターン幾何を共有する非線形兄弟。共有ビルダーを macro_snapshots.py に集約し M-2→M-1 結合をゼロ化。walk_forward_cv_monthly に fit_predict コールバックを注入して同一 fold で XGBoost/OLS を比較。SHAP でグローバル mean\|SHAP\|（feature_coefs スロット）＋per-stock 寄与を全社返却。R1 なし（ADR-0003 §5）。xgboost-3.3.0 / shap-0.52.0 を requirements.txt に完全 pin |
+| 2026-06-26 | **M-3（ベイズ状態空間モデル・時変マクロβ DLM）を §12 として追加**。M-1/M-2 の静的係数に対し、係数が時間変動する銘柄別 DLM をカルマン型逐次ベイズ更新で推定。観測=週次リターン×マクロ週次変化（既定 USDJPY/US10Y/NIKKEI225/WTI）。自前 割引係数 DLM（West & Harrison 型・numpy）＋ Normal-Gamma 共役で観測分散を学習し α/β の信用区間を解析的に出力。最新フィルタ α_T を年率化して µ̂ ランキング、β 経路と1期先予測診断（校正/RMSE/カバレッジ）を UI 可視化。初版は API/UI のみ（producer 化・sell_ranking 連携は将来）。新規依存なし（numpy/scipy のみ） |

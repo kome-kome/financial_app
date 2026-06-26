@@ -97,6 +97,7 @@ td code,p code,li code{background:#0f172a;border:1px solid #1e2235;padding:1px 5
     <div class="toc-section-title">③ 将来リターンを予測</div>
     <a href="#price_predictor">株価リターン予測</a>
     <a href="#macro_risk_return">マクロ×リスク-リターン</a>
+    <a href="#macro_dlm">ベイズ状態空間（時変マクロβ）</a>
     <div class="toc-section-title">④ 戦略を検証</div>
     <a href="#backtest">バックテスト</a>
     <div class="toc-section-title">⑤ 保有を見直す</div>
@@ -275,6 +276,31 @@ td code,p code,li code{background:#0f172a;border:1px solid #1e2235;padding:1px 5
   <div class="warn-box">最も高度な分析で、当てはまりの精度（CVのR²）は高くありません。表示される要因の効き具合は「<strong>向き（株高/株安）と大小の目安</strong>」として読み、効果を過大に信じないでください。</div>
 
   <div class="more">→ もっと詳しく：<a href="/models#m9">モデル解説：マクロ×リスク-リターン推奨</a></div>
+</div>
+
+<!-- ③ ベイズ状態空間（時変マクロβ DLM）─────────── -->
+<div class="model-section" id="macro_dlm">
+  <h2>ベイズ状態空間（時変マクロβ） <span class="model-tag">③ 将来リターンを予測</span></h2>
+
+  <h3>🟢 ひとことで言うと</h3>
+  <div class="analogy">
+    会社と「世の中の流れ（為替・金利・株価指数・原油）」の<strong>相性は、時とともに変わります</strong>。この分析は、その相性（マクロへの感応度）が<strong>毎週どう動いてきたか</strong>を1銘柄ずつ追いかけ、いまの「世の中で説明できない持ち味（実力＝アルファ）」を取り出して期待リターンにします。M-1・M-2 が「いまの相性を1枚の写真で撮る」のに対し、これは<strong>相性の動画を撮る</strong>イメージです。<span class="term" data-tip="観測（株価）の裏にある見えない状態（係数）を、新しいデータが来るたびに少しずつ更新して推定する手法。カルマンフィルタが代表例。">状態空間モデル</span>という考え方を使います。
+  </div>
+
+  <h3>📊 何が分かる？</h3>
+  <p>期待リターン µ̂ の高い順に銘柄が並び、各銘柄の<strong>マクロ感応度（β）が時間とともにどう変化したか</strong>を、<span class="term" data-tip="推定値がどれくらい確からしいかの幅。狭いほど自信がある推定。">信用区間</span>つきの折れ線グラフで確認できます。「円安に強くなってきた」「金利上昇に弱くなった」といった<strong>移り変わり</strong>が見えます。</p>
+
+  <h3>🛠 どう使う？</h3>
+  <ul class="steps">
+    <li>マクロ要因（既定は USD/JPY・米10年金利・日経225・WTI）を選んで実行（既定のままでもOK）。</li>
+    <li>一覧の行をクリックすると、その銘柄の<strong>α（実力）や各β（相性）の推移グラフ</strong>に切り替わります。「表示系列」で見たい係数を選べます。</li>
+  </ul>
+  <div class="info-box">δ（係数がどれだけ速く動くか）を 1 に近づけると変化はゆっくり、小さくすると敏感に動きます。下に出る「校正」「カバレッジ」は、予測の不確実さの見積もりが妥当かどうかの自己チェックです。</div>
+
+  <h3>⚠ 注意点・落とし穴</h3>
+  <div class="warn-box">β は「マクロが動いたときの反応の強さ」であって、<strong>マクロ自体の先読みではありません</strong>（未来の為替や金利は分かりません）。µ̂ は「世の中で説明できない持ち味」を頼りにした推定値なので、参考程度に。週次で約2年以上の株価履歴がある銘柄だけが対象です。計算が重いのでローカル環境で実行してください。</div>
+
+  <div class="more">→ もっと詳しく：<a href="/models#m12">モデル解説：M-3 ベイズ状態空間モデル</a></div>
 </div>
 
 <!-- ④ バックテスト ──────────────────────────── -->
