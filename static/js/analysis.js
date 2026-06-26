@@ -1620,7 +1620,7 @@ function _mgPaintCv(data) {
     </div>
   </div>
   ${oofHtml}
-  <canvas id="chart-mg-bubble" style="width:100%;max-height:360px;display:block;margin-bottom:16px"></canvas>`;
+  <div style="position:relative;height:360px;margin-bottom:16px"><canvas id="chart-mg-bubble"></canvas></div>`;
   const resultCard = document.getElementById('dynresult-macro_gbdt') || el.closest('.card');
   // CV パネルをテーブルより上に置くため、result area の直前に挿入
   const cvWrap = document.getElementById('mg-cv-wrap');
@@ -1822,7 +1822,9 @@ function _dlmInjectBubble() {
     const target = document.getElementById('dynresult-macro_dlm');
     if (target) target.insertAdjacentElement('beforebegin', wrap);
   }
-  wrap.innerHTML = `<canvas id="chart-dlm-bubble" style="width:100%;max-height:360px;display:block;margin-bottom:16px"></canvas>`;
+  // responsive+maintainAspectRatio:false は「固定高さ・relative の親」が必須。
+  // 親の高さを auto にすると Chart.js のリサイズ→ResizeObserver が循環し無限再描画になる。
+  wrap.innerHTML = `<div style="position:relative;height:360px;margin-bottom:16px"><canvas id="chart-dlm-bubble"></canvas></div>`;
 }
 
 // λ・topN をパラメータフォームから読む（フォールバック: サーバー返却値）。
@@ -2033,7 +2035,7 @@ function _dlmTableHTML(data, v) {
         <select id="dlm-series" style="margin-left:6px;background:#0f1117;color:#e2e8f0;border:1px solid #1e2235;border-radius:6px;padding:4px 6px;font-size:12px">${seriesOpts}</select>
       </label>
     </div>
-    <canvas id="chart-dlm" style="width:100%;max-height:320px;display:block;margin-bottom:16px"></canvas>
+    <div style="position:relative;height:320px;margin-bottom:16px"><canvas id="chart-dlm"></canvas></div>
     <div style="overflow-x:auto"><table>
       <thead><tr><th>#</th><th>コード</th><th>銘柄名</th><th>業種</th><th>µ̂(年率)</th><th>R_macro</th><th>U=µ̂−λR</th><th>F</th>${betaHead}<th>RMSE</th><th>被覆</th></tr></thead>
       <tbody>${trs}</tbody>
