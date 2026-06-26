@@ -288,6 +288,28 @@ class TestExecuteSmoke:
         res = self._run()
         assert set(res["factor_labels"].keys()) == set(DEFAULT_MACRO_FEATURES)
 
+    def test_oof_backtest_keys_present(self):
+        """execute 結果に oof_backtest キーと必須サブキーが含まれる。"""
+        res = self._run(n_companies=5, n_weeks=90)
+        assert "oof_backtest" in res, "oof_backtest キーがない"
+        oof = res["oof_backtest"]
+        for k in ("n_quantiles", "n_periods", "n_periods_quantile", "n_oof_samples",
+                  "quantile_returns", "rank_ic", "long_short_spread", "hit_rate"):
+            assert k in oof, f"oof_backtest に '{k}' がない"
+        assert isinstance(oof["rank_ic"], dict)
+        for k in ("mean", "std", "n"):
+            assert k in oof["rank_ic"], f"rank_ic に '{k}' がない"
+
+    def test_oof_n_oof_samples_positive(self):
+        """OOF サンプルが1件以上集まる（バーンイン後に週次ペアが存在する）。"""
+        res = self._run(n_companies=5, n_weeks=90, burn_in_weeks=5, min_weeks=40)
+        assert res["oof_backtest"]["n_oof_samples"] > 0
+
+    def test_oof_rank_ic_n_positive(self):
+        """rank-IC の fold 数が正（月次グルーピングで複数の fold が生成される）。"""
+        res = self._run(n_companies=5, n_weeks=90, burn_in_weeks=5, min_weeks=40)
+        assert res["oof_backtest"]["rank_ic"]["n"] > 0
+
 
 # ── 6. guard: 異常系 ─────────────────────────────────────────────────────────
 
@@ -351,7 +373,84 @@ class TestHelpers:
             assert isinstance(label, str) and label
 
 
-# ── 8. producer: write→read round-trip + sell_ranking 連携 ───────────────────
+# ── 8. OOF: アウトオブサンプル検証（ADR-0004）────────────────────────────────
+
+class TestOofBacktest:
+    """Issue #240: M-3 が oof_backtest を呼び、α の順序付け能力を評価できること。"""
+
+    def _run_ordered(self, n_companies: int = 20, n_weeks: int = 260):
+        """α_true[i] = i * 0.001 の完全順序合成データで execute を実行し結果を返す。
+
+        ノイズを極小（0.0005）にすることで rank-IC が正（α 推定が順序を回収）になることを確認。
+        マクロ不使用（F = [1]・定数項のみ）になるよう 'dlm_nikkei225' のみ選択し、
+        マクロ水準を全期間一定（→ Δmacro ≈ 0）にしてαに集中させる。
+        """
+        import datetime
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock, patch as _patch
+
+        base = datetime.date(2018, 1, 5)
+        dates = [(base + datetime.timedelta(weeks=w)).isoformat() for w in range(n_weeks)]
+
+        # α_true の階段: 銘柄 i は日次ドリフト = i * 0.001 / 52
+        # 意図的に全銘柄の週次リターンが α_true に比例するよう設計
+        rng = np.random.default_rng(999)
+        prices_by_co, companies = {}, {}
+        for ci in range(n_companies):
+            alpha_true = ci * 0.001          # 週次アルファ
+            ec = f"EO{ci:04d}"
+            close = 1000.0
+            rows = []
+            for d in dates:
+                ret = alpha_true + float(rng.normal(0, 0.0005))   # ノイズ極小
+                close *= math.exp(ret)
+                rows.append(SimpleNamespace(trade_date=d, close_last=close))
+            prices_by_co[ec] = rows
+            companies[ec] = SimpleNamespace(
+                edinet_code=ec, name=f"会社{ci}", sec_code=str(2000 + ci), industry="テスト業",
+            )
+
+        # マクロ: NIKKEI225 を定数（→ Δlogret ≈ 0）にして β の影響を消す
+        nikkei_level = 28000.0
+        macro_levels = {
+            "NIKKEI225": (list(dates), [nikkei_level] * n_weeks),
+        }
+
+        base_params = {k: v["default"] for k, v in plugin.params_schema().items() if "default" in v}
+        from plugins.utils import coerce_params as _coerce
+        params = _coerce(plugin.params_schema(), base_params)
+        params.update({
+            "macro_features": ["dlm_nikkei225"],
+            "min_weeks": 52, "burn_in_weeks": 26, "top_n": n_companies,
+            "state_discount": 0.98,
+        })
+
+        db = MagicMock()
+        with _patch("plugins.macro_dlm.load_prices", return_value=(prices_by_co, companies)), \
+             _patch("plugins.macro_dlm.load_macro_levels", return_value=macro_levels):
+            import asyncio
+            return asyncio.run(plugin.execute(params, db))
+
+    def test_oof_rank_ic_positive_with_ordered_data(self):
+        """α_true が完全昇順の合成データで rank-IC の mean が正になる（予測力あり）。"""
+        res = self._run_ordered()
+        oof = res["oof_backtest"]
+        assert oof["rank_ic"]["n"] > 0, "fold が0件: OOF ペアが収集されていない"
+        ic_mean = oof["rank_ic"]["mean"]
+        assert ic_mean is not None, "rank_ic.mean が None"
+        assert ic_mean > 0, f"α が完全順序なのに rank-IC が非正: {ic_mean}"
+
+    def test_oof_quantile_returns_monotone_with_ordered_data(self):
+        """α 完全順序データで分位リターンが Q1 < Q5 の傾向を持つ（単調増加）。"""
+        res = self._run_ordered(n_companies=20)
+        oof = res["oof_backtest"]
+        qr = oof["quantile_returns"]
+        if not qr:
+            pytest.skip("n_quantiles * 2 銘柄未満で分位計算スキップ（データ不足）")
+        assert qr[-1] > qr[0], f"高 α 分位が低 α 分位を上回らない: {qr}"
+
+
+# ── 9. producer: write→read round-trip + sell_ranking 連携 ───────────────────
 
 class TestProducer:
     """Issue #238: M-3 producer 化（produced_output / read_producer_scores / execute 永続化）"""

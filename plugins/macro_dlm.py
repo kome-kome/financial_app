@@ -367,6 +367,7 @@ class MacroDlmPlugin(AnalysisPlugin):
         agg_se2: list[float] = []     # 標準化予測誤差²（校正＝平均が1なら整合）
         agg_rmse: list[float] = []
         agg_cov: list[float] = []
+        oof_residuals: dict[str, list] = {}  # {YYYY-MM: [(yhat, y_true), ...]}
 
         for ec, px_rows in prices_by_co.items():
             if len(px_rows) < min_weeks + 1:
@@ -393,6 +394,12 @@ class MacroDlmPlugin(AnalysisPlugin):
                 bs = float(sd_path[-1, j + 1])
                 beta_T.append(bm)
                 beta_latest[f] = {"mean": _r(bm), "lo": _r(bm - tq * bs), "hi": _r(bm + tq * bs)}
+
+            # OOF 残差収集: α_{t-1|t-1}（バーンイン後）vs y_t（1期先・無リーク）
+            for t in range(b0 + 1, T):
+                yhat = float(m_path[t - 1, 0]) * WEEKS_PER_YEAR
+                ym = used_dates[t][:7]
+                oof_residuals.setdefault(ym, []).append((yhat, float(y[t])))
 
             # 1期先診断（バーンイン除外）
             se = res["std_errs"][b0:]
@@ -477,6 +484,15 @@ class MacroDlmPlugin(AnalysisPlugin):
             "n_companies_scored": n_companies,
         }
 
+        # ── アウトオブサンプル検証（OOF）: α_{t-1} が翌週リターンを順序付けるか（ADR-0004）─
+        from .macro_snapshots import oof_backtest as _oof_backtest
+        oof_bt = _oof_backtest(oof_residuals, n_quantiles=5) if oof_residuals else {
+            "n_quantiles": 5, "n_periods": 0, "n_periods_quantile": 0,
+            "n_oof_samples": 0, "quantile_returns": [],
+            "rank_ic": {"mean": None, "std": None, "n": 0},
+            "long_short_spread": None, "hit_rate": None,
+        }
+
         # ── producer μ̂ を永続化（sell_ranking が mu_source=macro_dlm で読む・ADR-0004）─
         from database import replace_macro_dlm_scores
         try:
@@ -499,6 +515,7 @@ class MacroDlmPlugin(AnalysisPlugin):
             },
             "n_companies": n_companies,
             "diagnostics": diagnostics,
+            "oof_backtest": oof_bt,
             "results": rows[:top_n],
         }
 

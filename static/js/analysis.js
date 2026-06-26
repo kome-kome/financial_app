@@ -1836,6 +1836,54 @@ function _dlmDiagHTML(data) {
   </div>`;
 }
 
+function _dlmOofHTML(data) {
+  const oof = data.oof_backtest || {};
+  const qr  = oof.quantile_returns || [];
+  const ic  = oof.rank_ic || {};
+  const hasOof = qr.length > 0;
+  return `
+  <div style="margin-bottom:16px;padding:12px 16px;background:#0f172a;border-radius:8px;border:1px solid #334155">
+    <div style="font-size:12px;color:#a78bfa;font-weight:600;margin-bottom:4px">
+      アウトオブサンプル検証（OOF）— α_{t-1} が翌週リターンを横断順序付けするか（無リーク・1期先）
+    </div>
+    <div style="font-size:11px;color:#64748b;margin-bottom:10px">
+      DLM フィルタの1期先予測 α を月次クロスセクションで集計。M-1/M-2 の年率OOFと同枠で比較可能。
+    </div>
+    ${hasOof ? `
+    <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:12px">
+      <div style="padding:8px;background:#0b1220;border-radius:6px">
+        <div style="font-size:10px;color:#64748b">rank-IC（Spearman 平均±std）</div>
+        <div style="font-size:15px;font-weight:700;color:${(ic.mean||0)>0?'#86efac':'#f87171'}">${ic.mean!=null?ic.mean.toFixed(3):'-'}<span style="font-size:11px;color:#64748b"> ±${ic.std!=null?ic.std.toFixed(3):'-'}</span></div>
+        <div style="font-size:10px;color:#475569">${ic.n||0} fold</div>
+      </div>
+      <div style="padding:8px;background:#0b1220;border-radius:6px">
+        <div style="font-size:10px;color:#64748b">ロングショート spread（top−bottom）</div>
+        <div style="font-size:15px;font-weight:700;color:${(oof.long_short_spread||0)>0?'#86efac':'#f87171'}">${oof.long_short_spread!=null?(oof.long_short_spread*100).toFixed(2)+'%':'-'}</div>
+      </div>
+      <div style="padding:8px;background:#0b1220;border-radius:6px">
+        <div style="font-size:10px;color:#64748b">hit-rate（top&gt;bottom の期）</div>
+        <div style="font-size:15px;font-weight:700;color:#c084fc">${oof.hit_rate!=null?(oof.hit_rate*100).toFixed(0)+'%':'-'}</div>
+        <div style="font-size:10px;color:#475569">${oof.n_periods_quantile||0} 期</div>
+      </div>
+    </div>
+    <div style="font-size:11px;color:#94a3b8;margin-bottom:6px">分位別 平均実現リターン（左=最低 α → 右=最高 α・週次・期間平均）</div>
+    <div style="display:flex;align-items:flex-end;gap:6px;height:92px">
+      ${(() => {
+        const mx = Math.max(...qr.map(Math.abs), 1e-9);
+        return qr.map((v, i) => {
+          const h = Math.round(Math.abs(v) / mx * 70) + 2;
+          const col = v >= 0 ? '#34d399' : '#f87171';
+          return `<div style="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:flex-end;height:100%">
+            <div style="font-size:10px;color:${col}">${(v*100).toFixed(2)}%</div>
+            <div style="width:100%;height:${h}px;background:${col};border-radius:3px 3px 0 0"></div>
+            <div style="font-size:10px;color:#64748b;margin-top:2px">Q${i+1}</div>
+          </div>`;
+        }).join('');
+      })()}
+    </div>` : `<div style="font-size:11px;color:#64748b">OOF サンプルが期内 ${(oof.n_quantiles||5)*2} 銘柄未満のため分位を表示できません。rank-IC は ${ic.n||0} fold で算出。</div>`}
+  </div>`;
+}
+
 function _dlmTableHTML(data) {
   const rows = data.results || [];
   const factors = data.macro_features || [];
@@ -1861,7 +1909,7 @@ function _dlmTableHTML(data) {
       <td style="text-align:right;font-family:monospace">${r.coverage95 != null ? (r.coverage95 * 100).toFixed(0) + '%' : '-'}</td>
     </tr>`;
   }).join('');
-  return _dlmDiagHTML(data) + `
+  return _dlmDiagHTML(data) + _dlmOofHTML(data) + `
     <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">
       <div style="font-size:11px;color:#64748b">行クリックで銘柄を選択 → 下に α/β の時系列（信用区間バンド）を表示</div>
       <span style="flex:1"></span>
