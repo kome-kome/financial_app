@@ -349,9 +349,10 @@ tr:hover td{background:#1e2235}
       <select id="sell-mu-source" style="width:100%;background:#0f1117;color:#e2e8f0;border:1px solid #1e2235;border-radius:6px;padding:6px 8px;font-size:12px">
         <option value="macro_risk_return">M-1: マクロ×リスク-リターン（OLS）</option>
         <option value="macro_gbdt">M-2: マクロ×財務 勾配ブースティング（XGBoost）</option>
+        <option value="macro_dlm">M-3: ベイズ状態空間（時変マクロβ DLM）</option>
       </select>
       <div style="font-size:11px;color:#64748b;margin-top:4px">
-        μ 観点に使う推奨モデル。選択モデルが未実行ならその成分を自動除外します（M-2 は分析タブで要ローカル実行）。−Rᴹ は共有マクロβ由来でモデル非依存。
+        μ 観点に使う推奨モデル。選択モデルが未実行ならその成分を自動除外します（M-2/M-3 は分析タブで要ローカル実行）。−Rᴹ は共有マクロβ由来でモデル非依存。
       </div>
     </div>
 
