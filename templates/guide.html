@@ -95,7 +95,6 @@ td code,p code,li code{background:#0f172a;border:1px solid #1e2235;padding:1px 5
     <a href="#sector_ols">業種別OLS分析</a>
     <a href="#gap_analysis">バリュエーション分析</a>
     <div class="toc-section-title">③ 将来リターンを予測</div>
-    <a href="#price_predictor">株価リターン予測</a>
     <a href="#macro_risk_return">マクロ×リスク-リターン</a>
     <a href="#macro_gbdt">マクロ×財務 勾配ブースティング（M-2）</a>
     <a href="#macro_dlm">ベイズ状態空間（時変マクロβ）</a>
@@ -227,31 +226,6 @@ td code,p code,li code{background:#0f172a;border:1px solid #1e2235;padding:1px 5
   <div class="warn-box">「何ヶ月後にどれだけ縮む」「期待総リターン」という数字は、<span class="term" data-tip="平均回帰：行き過ぎた値がいずれ平均へ戻ろうとする性質。ゴムひもが伸びても元に戻るイメージ。">平均回帰</span>を仮定した<strong>ヒューリスティック（経験則）の参考値</strong>であり、当たる確率ではありません。割安に見えても、それには理由（業績悪化など）がある場合もあります。</div>
 
   <div class="more">→ もっと詳しく：<a href="/models#m3">モデル解説：バリュエーション分析</a></div>
-</div>
-
-<!-- ③ 株価リターン予測 ───────────────────────── -->
-<div class="model-section" id="price_predictor">
-  <h2>株価リターン予測 <span class="model-tag">③ 将来リターンを予測</span></h2>
-
-  <h3>🟢 ひとことで言うと</h3>
-  <div class="analogy">
-    「<strong>チャートの形＋会社の体力</strong>」から、<strong>数日〜数ヶ月先の値動き</strong>を当てにいく分析です。移動平均からの離れ具合・値動きの荒さ・買われすぎ／売られすぎ（RSI）といった<strong>チャートのサイン</strong>に、ROEやPERといった<strong>財務の数字</strong>も加えて予測します。
-  </div>
-
-  <h3>📊 何が分かる？</h3>
-  <p>5日・20日・60日先などの株価リターン（％）の予測と、その予測がどれだけあてになりそうかの目安が分かります。</p>
-
-  <h3>🛠 どう使う？</h3>
-  <ul class="steps">
-    <li>予測したい先の日数（例：20日先）を選んで実行。</li>
-    <li><strong>ウォークフォワード検証</strong>（＝過去のある時点に立ち、それ以前のデータだけで予測して答え合わせ）の成績で、信頼度を確認します。</li>
-  </ul>
-  <div class="info-box">「未来のデータをこっそり使ってズルをしない」ように、いつも<strong>過去だけで学習→少し先でテスト</strong>を繰り返して評価します。これがウォークフォワードCVです。</div>
-
-  <h3>⚠ 注意点・落とし穴</h3>
-  <div class="warn-box">直線的な関係しか捉えられないため、複雑なパターンは苦手です。また財務データは年1回しか更新されないため、短期予測では同じ財務値が使い回されます。短期の値動き予測は特に外れやすい点に注意。</div>
-
-  <div class="more">→ もっと詳しく：<a href="/models#m4">モデル解説：株価リターン予測（月次WF-CV）</a></div>
 </div>
 
 <!-- ③ マクロ×リスク-リターン ─────────────────── -->

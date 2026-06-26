@@ -33,7 +33,7 @@ WITH d AS (
         CASE WHEN COALESCE(fr.pl_revenue,0) <> 0
              THEN ROUND((COALESCE(fr.cf_operating_cf,0) / fr.pl_revenue * 100)::numeric, 2) END AS cf_ratio,
         -- C2 結線: 研究開発集約度・減価償却集約度（無次元 [%]）。分子は非 COALESCE で
-        -- null 伝播させる（R&D/D&A 未開示企業は intensity も null → price_predictor が自動除外）。
+        -- null 伝播させる（R&D/D&A 未開示企業は intensity も null → 分析特徴量から自動除外）。
         CASE WHEN COALESCE(fr.pl_revenue,0) <> 0
              THEN ROUND((fr.pl_rd_expenses / fr.pl_revenue * 100)::numeric, 2) END AS rd_intensity,
         CASE WHEN COALESCE(fr.pl_revenue,0) <> 0

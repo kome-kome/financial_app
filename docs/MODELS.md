@@ -11,7 +11,7 @@
 1. [総合リターン予測 → バリュエーション分析へ統合（§3参照）](#1-総合リターン予測--バリュエーション分析へ統合3参照)
 2. [業種別OLS回帰](#2-業種別ols回帰)
 3. [バリュエーション分析（割安度＋平均回帰＋期待総リターン）](#3-バリュエーション分析割安度平均回帰期待総リターン)
-4. [株価リターン予測（月次WF-CV）](#4-株価リターン予測月次wf-cv)
+4. [株価リターン予測 → 削除（M-1 §9 へ集約）](#4-株価リターン予測--削除m-1-9-へ集約)
 5. [横断的Zスコア正規化](#5-横断的zスコア正規化)
 6. [Zスコア重み付けスコアリング（おすすめ銘柄）](#6-zスコア重み付けスコアリングおすすめ銘柄)
 7. [バックテスト](#7-バックテスト)
@@ -349,107 +349,11 @@ dX_t = κ(θ − X_t) dt + σ dW_t,   half_life = ln(2) / κ
 
 ---
 
-## 4. 株価リターン予測（月次WF-CV）
+## 4. 株価リターン予測 → 削除（M-1 §9 へ集約）
 
-**実装ファイル**: `plugins/price_predictor.py`
+**旧実装ファイル**: `plugins/price_predictor.py`（削除）
 
-### 概要
-
-日次株価履歴（OHLCV）と年次財務指標を組み合わせ、N 日先の株価対数リターンを OLS で予測する。**月次ウォークフォワード CV（ルックアヘッドバイアスなし）** で評価する。
-
-### 目的変数
-
-```
-y = log(C_{t+N} / C_t)  [無次元対数リターン]
-
-N ∈ {5, 20, 60}日  （ユーザー選択）
-```
-
-### 特徴量（全て無次元 — 次元整合）
-
-**価格系特徴量**（`StockPriceHistory` から計算）:
-
-| 変数 | 定義 | 範囲 |
-|---|---|---|
-| `ma20_dev` | (C − MA20) / MA20 | (−1, +∞) |
-| `vol60` | 過去60日のログリターンの標準偏差 | [0, +∞) |
-| `rsi14` | RSI(14) = 100 − 100/(1+RS)、RS = 平均上昇 / 平均下落 | [0, 100] |
-| `atr_ratio` | ATR(14) / C（True Range の 14日平均を現在値で除したもの） | [0, +∞) |
-
-**財務系特徴量**（`FinancialRecord` から結合）:
-
-| 変数 | 内容 |
-|---|---|
-| `per` | 株価収益率 |
-| `pbr` | 株価純資産倍率 |
-| `roe` | 自己資本利益率 [%] |
-| `equity_ratio` | 自己資本比率 [%] |
-| `rd_intensity` | 研究開発集約度 = `pl_rd_expenses / pl_revenue` [%]（C2列の結線・VIEW算出） |
-| `da_intensity` | 減価償却集約度 = `pl_depreciation / pl_revenue` [%]（C2列の結線・VIEW算出） |
-| `z_op_margin` | 営業利益率 Zスコア（年度別正規化済み） |
-| `z_roe` | ROE Zスコア |
-| `z_cf_ratio` | 営業CF/売上比 Zスコア |
-| `gap_ratio` | 業種別OLS乖離率 [%] |
-
-> **C2 結線（無次元 intensity）**: 研究開発費・減価償却費（per-share 絶対額では対数リターンと次元不整合）を**売上で正規化した集約度 [%]** として投入。`financial_metrics` VIEW が `op_margin` と同じ流儀で算出し、分子は非 COALESCE で null 伝播（R&D/D&A 未開示企業は intensity も null → サンプルから自動除外）。デフォルト財務特徴量（`per`/`pbr`/`roe`）には含めず選択肢として提供。
-
-**決算公表ラグ**: 財務データは period_end から 45 日後に利用可能とみなして結合する（前倒し利用によるルックアヘッドバイアスを防止）。
-
-### RSI の計算
-
-```
-changes = [C_i − C_{i-1}  for i in (t-14, t)]
-avg_gain = mean([max(c, 0)  for c in changes])
-avg_loss = mean([abs(min(c, 0))  for c in changes])
-RS = avg_gain / avg_loss  （avg_loss = 0 の場合: RSI = 100 or 50）
-RSI = 100 − 100 / (1 + RS)
-```
-
-### ATR の計算
-
-```
-TR_i = max(H_i − L_i,  |H_i − C_{i-1}|,  |L_i − C_{i-1}|)
-ATR(14) = mean(TR_i  for i in (t-14, t))
-atr_ratio = ATR(14) / C_t
-```
-
-### 月次ウォークフォワードCV
-
-```
-全月度 = ["YYYY-MM", "YYYY-MM", ...]  （昇順）
-
-For i = min_train_months to len(全月度)−1, step = step_months:
-  test_month  = 全月度[i]
-  train_months = 全月度[:i]  （i未満の全月）
-
-  学習: train_months の全企業 × 全スナップショット
-  テスト: test_month のスナップショットのみ
-  評価: テストセットで R²・RMSE を計算
-```
-
-**ルックアヘッドバイアス防止**:
-- テスト月のデータは学習に一切使用しない
-- 正規化パラメータも学習データのみから計算
-
-| パラメータ | 値 |
-|---|---|
-| `min_train_months` | 18 ヶ月（データ不足時は 6 ヶ月に緩和） |
-| `step_months` | 3 |
-
-### 仮定・限界
-
-- 線形 OLS であるため、特徴量と目的変数の非線形関係を捉えられない（RSI の U 字型効果等）
-- 財務データは年 1 回更新のため、月次スナップショットでは同じ財務値が繰り返し使用される
-- gap_ratio が NULL の場合は財務特徴量が欠損になる（業種別OLS未実行時）
-
-### 参考文献
-
-- **Wilder, J.W. (1978)**. *New Concepts in Technical Trading Systems*. Trend Research.
-  （RSI・ATR の原典）
-- **Bergmeir, C. & Benítez, J.M. (2012)**. "On the use of cross-validation for time series predictor evaluation." *Information Sciences*, 191, 192–213.
-  → https://doi.org/10.1016/j.ins.2011.12.028
-- **Hyndman, R.J. & Athanasopoulos, G. (2021)**. *Forecasting: Principles and Practice* (3rd ed.). OTexts.
-  → https://otexts.com/fpp3/
+旧「株価リターン予測」は価格テクニカル特徴量（MA乖離・ボラティリティ・RSI・ATR）＋財務比率を OLS で N 日先（5/20/60日）リターンへ回帰する最古の予測器だった。中核（線形 OLS によるファンダ由来のリターン予測）は **M-1 マクロ×リスク-リターン推奨（§9）** が上位互換で吸収しており、固有のテクニカル特徴量・短期ホライズンはプロジェクトの目的（ファンダメンタル＋マクロ）から外れた「おまけ」であったため、役割が重複する劣化版として削除した（ADR-0005）。リターン予測そのものは比較ファミリー M-1（線形）／M-2（非線形）／M-3（時変）が 52 週ホライズンで担う。
 
 ---
 
@@ -581,7 +485,7 @@ coverage_i = Σⱼ∈present |weight_j| / Σⱼ |weight_j|
 | `net_cash` | 清原式ネットキャッシュ比率 ＝ (流動資産＋投資有価証券×0.7−総負債) / 時価総額 | 超過収益 > 0 | — |
 | `sell` | 売り候補 ＝ recommend 加重和の符号反転（買い系の逆観点） | **超過収益 < 0**（上位＝売り候補が下回るほど有効） | — |
 
-ML 系（price_predictor / macro）は WF-CV を内蔵するため対象外（→ §4・§9）。`preset` は `recommend` / `sell` のときのみ意味を持つ。`sell` はメタ層×双対層（売り判断の有効性検証）にあたり、上位 N 社＝最も売り向きの銘柄なので、その後リターンがベンチマークを**下回る**ほど売りシグナルが有効と読む。
+ML 系（macro）は WF-CV を内蔵するため対象外（→ §9）。`preset` は `recommend` / `sell` のときのみ意味を持つ。`sell` はメタ層×双対層（売り判断の有効性検証）にあたり、上位 N 社＝最も売り向きの銘柄なので、その後リターンがベンチマークを**下回る**ほど売りシグナルが有効と読む。
 
 ### 計算ロジック
 
@@ -760,7 +664,7 @@ IFRS には完全に対応する科目がないため、「非流動その他金
 
 被説明変数は **1年先（52週先）週次ログリターン（年率・無次元）**。全特徴量は学習前に `winsorize(p1–p99)`→z-score 標準化を適用。
 
-> **PER/PBR は「循環参照」ではない（重要）**: 目的変数は株価水準ではなく**将来リターン**であるため、現在の PER/PBR で将来リターンを予測するのは正統な**バリュー・ファクター**（Fama-French HML ≒ book-to-market = 1/PBR）。`per×eps=price` の恒等式が問題になるのは「現在株価水準」を当てる場合だけで、本モデルには当てはまらない（**他のプラグイン sector_ols / price_predictor の per-share→株価 Ohlson 型（§本書 該当節）とは目的変数が異なる**）。ただし PER/PBR は分子に同じ株価 P_t を共有し「割安」と「価格の平均回帰」を分離しきれないため、価格を含まないファンダ（roa/eps_growth 等）を既定に併置して補強する。**収益性の質を分解するデュポン因子（net_margin × asset_turnover ≈ roa）・成長（rev_growth）・財務健全性（nc_ratio）も価格フリーの選択肢として提供**する（既定外・任意採用）。div_yield は配当という株価由来のバリュー因子で per/pbr と同枠（循環ではない）。
+> **PER/PBR は「循環参照」ではない（重要）**: 目的変数は株価水準ではなく**将来リターン**であるため、現在の PER/PBR で将来リターンを予測するのは正統な**バリュー・ファクター**（Fama-French HML ≒ book-to-market = 1/PBR）。`per×eps=price` の恒等式が問題になるのは「現在株価水準」を当てる場合だけで、本モデルには当てはまらない（**他のプラグイン sector_ols（業種別OLS）の per-share→株価 Ohlson 型（§2）とは目的変数が異なる**）。ただし PER/PBR は分子に同じ株価 P_t を共有し「割安」と「価格の平均回帰」を分離しきれないため、価格を含まないファンダ（roa/eps_growth 等）を既定に併置して補強する。**収益性の質を分解するデュポン因子（net_margin × asset_turnover ≈ roa）・成長（rev_growth）・財務健全性（nc_ratio）も価格フリーの選択肢として提供**する（既定外・任意採用）。div_yield は配当という株価由来のバリュー因子で per/pbr と同枠（循環ではない）。
 
 > **特徴量・マクロの選択 UI**: 財務特徴量（`fin_features` multiselect）とマクロ特徴量（`macro_features` multiselect）は `/analysis` の M-1 タブで選べる。`use_macro`（マスタ ON/OFF）が OFF のときはマクロ・交差項を生成しない。**モメンタムは `use_macro` から独立した `use_momentum`（既定 OFF）で制御する**（§9.4・§9.8：マクロを使いつつモメンタムの過去履歴要件を外して walk-forward CV を成立させるため）。選択肢は **FX・株式・米金利/期間・コモディティ・ボラの5チャネル / 11系列**（#218 フェーズ1）：USD/JPY・EUR/JPY・ドル指数(DXY)・S&P500・米5/10/30年金利・日経225・VIX・WTI・金。既定選択は USD/JPY・S&P500・米10年金利の3本のみで、その他は多重共線（VIX↔SP500・米金利↔DXY 等）や任意性のため既定では未選択（任意。pooled BIC が過剰選択を抑える）。VIX/DXY/US5Y/US30Y は `collect-macro.yml` の Actions 実行で macro_data への蓄積（各1255〜1257件/5年）を実証してから公開した。**TOPIX・JP10Y は本番 macro_data に蓄積がない（収集失敗：JP10Y=^JGB 上場廃止 / TOPIX=^tpx・^TPX 取得不可）ため選択肢から除外**（選ぶと全サンプルが None スキップで学習不能になる。収集が直り次第 `_MACRO_MAP` へ追加すれば自動で選択肢に出る）。
 

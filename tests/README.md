@@ -32,7 +32,6 @@ python -m pytest tests/ -v
 | `test_recommend.py` | `plugins/recommend.py`（Zスコア重み付けスコアリング） | SQLite fixture |
 | `test_gap_analysis.py` | `plugins/gap_analysis.py`（AR(1) 半減期推定・バリュエーション分析。期待総リターン列は旧 total_return 吸収） | statsmodels / SQLite fixture |
 | `test_sector_ols.py` | `plugins/sector_ols.py`（業種別OLS回帰・予測値書き込み） | numpy / SQLite fixture |
-| `test_price_predictor.py` | `plugins/price_predictor.py`（価格特徴量・N日先リターン予測） | numpy / SQLite fixture |
 | `test_database.py` | `database.py`（pack/unpack・upsert_company・upsert_financial・年度別Zスコア） | SQLite fixture |
 | `test_collector.py` | `collector.py`（XBRL パース・連結優先・派生指標 calc_derived・列検出・定数＋ネットワーク系：書類一覧/XBRL ZIP/stooq/J-Quants） | pandas / httpx MockTransport |
 | `test_api.py` | `api.py`（JST変換・edinet_code 検証・トークン署名/検証・`/health`・DB-backed 読取エンドポイント） | fastapi TestClient |
@@ -61,7 +60,7 @@ python -m pytest tests/ -v
 
 ## カバレッジの現状と残課題
 
-- **カバー済み**: プラグイン 7 個（utils 含む）、`database.py`（upsert・年度別Zスコア・pack/unpack）、
+- **カバー済み**: プラグイン 8 個＋`utils`、`database.py`（upsert・年度別Zスコア・pack/unpack）、
   `collector.py`（XBRL パース・派生指標などの純関数＋ネットワーク取得をモック）、
   `api.py`（純関数＋`/health`＋DB-backed 読取エンドポイント）。
 - **未カバー（テストしにくい部分）**:

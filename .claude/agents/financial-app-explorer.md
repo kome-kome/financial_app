@@ -12,7 +12,7 @@ model: sonnet
 - `collector.py` — EDINET XBRL + J-Quants 株価収集 → DB保存。`XBRL_MAP` で XBRL 要素を DB カラムにマップ。capex はラベル照合（`CAPEX_LABEL_*`）。
 - `database.py` — テーブル定義・`upsert_financial`（入力 `{bs,pl,cf,derived,val}`）・成長率/Zスコア計算。
 - `api.py` — FastAPI REST・SSE 進捗配信・回帰分析エンドポイント・認証ミドルウェア。
-- `plugins/` — 分析モデル（自動検出方式）。`utils.py`（`ols`/`winsorize`）、`sector_ols.py`、`total_return.py`、`price_predictor.py`、`recommend.py` 等。
+- `plugins/` — 分析モデル（自動検出方式）。`utils.py`（`ols`/`winsorize`）、`sector_ols.py`、`gap_analysis.py`、`recommend.py` 等。
 - `templates/*.html` — UI（dashboard/collection/analysis/company）。JS は `static/js/<page>.js` に外部化。
 - `_pipeline_gh.py` / `_pipeline_incremental.py` — GitHub Actions 用の全件 / 差分収集。
 

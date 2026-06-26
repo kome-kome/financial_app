@@ -104,7 +104,6 @@ td code{background:#0f172a;border:1px solid #1e2235;padding:1px 5px;border-radiu
     <a href="#m2">業種別OLS回帰</a>
     <a href="#m3">バリュエーション分析</a>
     <div class="toc-section-title">③ 将来リターンを予測（一次分析）</div>
-    <a href="#m4">株価リターン予測（月次WF-CV）</a>
     <a href="#m9">マクロ×リスク-リターン推奨</a>
     <a href="#m11">M-2: マクロ×財務 勾配ブースティング</a>
     <a href="#m12">M-3: ベイズ状態空間（時変マクロβ）</a>
@@ -489,80 +488,6 @@ conv_score₁₂ₘ = max(<span class="val">5</span>, min(<span class="val">95</
   <span class="layer-tag">一次分析・リターン予測</span>
 </div>
 <p class="cat-desc">将来リターンそのものを推定する。ウォークフォワードCVで自己検証を内蔵する。</p>
-
-<div class="model-section" id="m4">
-  <h2>株価リターン予測 <span class="model-tag">月次WF-CV</span></h2>
-  <span class="file-tag">plugins/price_predictor.py</span>
-
-  <p>日次株価履歴（OHLCV）と年次財務指標を組み合わせ、N 日先の株価対数リターンを OLS で予測する。月次ウォークフォワード CV（ルックアヘッドバイアスなし）で評価する。</p>
-
-  <h3>目的変数</h3>
-  <div class="formula-block"><span class="var">y</span> = log(C_{t+N} / C_t)  <span class="sym">[無次元対数リターン]</span>
-N ∈ {<span class="val">5</span>, <span class="val">20</span>, <span class="val">60</span>} 日（ユーザー選択）</div>
-
-  <h3>特徴量（全て無次元 — 次元整合）</h3>
-  <table>
-    <thead><tr><th>変数</th><th>定義</th><th>範囲</th></tr></thead>
-    <tbody>
-      <tr><td><code>ma20_dev</code></td><td>(C − MA20) / MA20</td><td>(−1, +∞)</td></tr>
-      <tr><td><code>vol60</code></td><td>過去60日ログリターンの標準偏差</td><td>[0, +∞)</td></tr>
-      <tr><td><code>rsi14</code></td><td>RSI(14) — 下記参照</td><td>[0, 100]</td></tr>
-      <tr><td><code>atr_ratio</code></td><td>ATR(14) / C_t</td><td>[0, +∞)</td></tr>
-      <tr><td><code>per</code>, <code>pbr</code>, <code>roe</code>, <code>equity_ratio</code></td><td>財務比率</td><td>無次元</td></tr>
-      <tr><td><code>rd_intensity</code>, <code>da_intensity</code></td><td>研究開発/減価償却の対売上集約度 [%]（C2列の結線・VIEW算出。デフォルト非選択）</td><td>無次元</td></tr>
-      <tr><td><code>z_op_margin</code>, <code>z_roe</code>, <code>z_cf_ratio</code></td><td>年度別Zスコア</td><td>無次元</td></tr>
-      <tr><td><code>gap_ratio</code></td><td>業種別OLS乖離率 [%]</td><td>無次元</td></tr>
-    </tbody>
-  </table>
-
-  <h3>RSI(14) の計算</h3>
-  <div class="formula-block">changes    = [C_i − C_{i-1}  for i in (t−14, t)]
-avg_gain   = mean([max(c, 0)  for c in changes])
-avg_loss   = mean([abs(min(c, 0))  for c in changes])
-RS         = avg_gain / avg_loss
-<span class="var">RSI</span>        = 100 − 100 / (1 + RS)</div>
-
-  <h3>ATR(14) の計算</h3>
-  <div class="formula-block">TR_i = max(H_i − L_i,  |H_i − C_{i-1}|,  |L_i − C_{i-1}|)
-<span class="var">ATR(14)</span>  = mean(TR_i  for i in (t−14, t))
-atr_ratio = ATR(14) / C_t</div>
-
-  <h3>月次ウォークフォワードCV</h3>
-  <div class="formula-block">全月度 = ["YYYY-MM", ...]  （昇順）
-
-For i = min_train_months to len(全月度)−1, step = step_months:
-  test_month   = 全月度[i]
-  train_months = 全月度[:i]  <span class="comment"># i 未満の全月</span>
-
-  学習: train_months の全企業 × 全スナップショット
-  テスト: test_month のスナップショットのみ
-  正規化パラメータ: 学習データのみから計算
-
-min_train_months = <span class="val">18</span>（データ不足時は <span class="val">6</span> に緩和）
-step_months      = <span class="val">3</span>
-決算ラグ補正      = <span class="val">45</span> 日（period_end から利用可能とみなす日数）</div>
-
-  <div class="warn-box">
-    <strong>限界:</strong> 線形 OLS のため RSI の U 字型効果等の非線形関係を捉えられない。財務データは年 1 回更新のため、月次スナップショットで同じ値が繰り返し使用される。gap_ratio が NULL の場合は財務特徴量が欠損になる。
-  </div>
-
-  <div class="refs">
-    <h4>参考文献</h4>
-    <div class="ref-item">
-      Wilder, J.W. (1978). <span class="ref-title"><em>New Concepts in Technical Trading Systems.</em></span> Trend Research.
-      （RSI・ATR の原典）
-    </div>
-    <div class="ref-item">
-      Bergmeir, C. & Benítez, J.M. (2012). <span class="ref-title">"On the use of cross-validation for time series predictor evaluation."</span><br>
-      <em>Information Sciences</em>, 191, 192–213.<br>
-      <a href="https://doi.org/10.1016/j.ins.2011.12.028" target="_blank" rel="noopener">https://doi.org/10.1016/j.ins.2011.12.028</a>
-    </div>
-    <div class="ref-item">
-      Hyndman, R.J. & Athanasopoulos, G. (2021). <span class="ref-title"><em>Forecasting: Principles and Practice</em></span> (3rd ed.). OTexts.<br>
-      <a href="https://otexts.com/fpp3/" target="_blank" rel="noopener">https://otexts.com/fpp3/</a>（オープンアクセス）
-    </div>
-  </div>
-</div>
 
 <div class="model-section" id="m9">
   <h2>マクロ×リスク-リターン推奨</h2>

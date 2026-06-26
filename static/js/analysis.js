@@ -911,7 +911,7 @@ async function initPlugins() {
     if (plugin.href) continue;   // 外部リンク（例: スクリーニング→/collection）はタブを持たない
     const tabId = PLUGIN_TAB_MAP[plugin.name] || plugin.name;
     if (!_allTabs.includes(tabId)) _allTabs.push(tabId);
-    // 既存タブにマッピングがないプラグイン（sector_ols / price_predictor）はタブを動的生成
+    // 既存タブにマッピングがないプラグイン（sector_ols 等）はタブを動的生成
     if (!PLUGIN_TAB_MAP[plugin.name]) _createDynamicTab(plugin, tabId);
   }
   buildSidebar(plugins);
@@ -1100,7 +1100,7 @@ async function runDynamicPlugin(pluginName, tabId) {
 }
 
 // 結果レンダラ登録制: 動的タブ（プラグイン runner）の結果描画を plugin名 → 描画関数で対応付ける。
-// 未登録のプラグイン（例: price_predictor）は _renderGenericResult（results 表 or JSON）にフォールバック。
+// 未登録のプラグインは _renderGenericResult（results 表 or JSON）にフォールバック。
 const RESULT_RENDERERS = {
   'sector_ols':        renderSectorOls,
   'macro_risk_return': renderMacroRiskReturn,
