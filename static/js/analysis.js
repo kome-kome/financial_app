@@ -92,6 +92,7 @@ const PLUGIN_TAB_MAP = {
   'backtest':           'backtest',   // 特例エントリ。既存の静的タブ #tab-backtest を使用
   'macro_risk_return':  'macro_risk_return',
   'macro_gbdt':         'macro_gbdt',
+  'macro_dlm':          'macro_dlm',
 };
 // サイドバー項目の先頭につける目印（視認性のため。強調は active 状態で表現）
 const PLUGIN_ICON = { 'recommend': '★ ', 'gap_analysis': '◆ ', 'net_cash_analysis': '¥ ' };
@@ -934,6 +935,7 @@ async function initPlugins() {
   _inject('params-form-net-cash',         'net_cash_analysis', null);
   _inject('params-form-macro_risk_return','macro_risk_return',  null);
   _inject('params-form-macro_gbdt',       'macro_gbdt',         null);
+  _inject('params-form-macro_dlm',        'macro_dlm',          null);
   // recommend: weights/preset は静的 HTML に温存、フィルター項目のみ注入
   _inject('params-form-recommend',    'recommend',
     ([k, v]) => v.type !== 'weights' && k !== 'preset');
@@ -1103,6 +1105,7 @@ const RESULT_RENDERERS = {
   'sector_ols':        renderSectorOls,
   'macro_risk_return': renderMacroRiskReturn,
   'macro_gbdt':        renderMacroGbdt,
+  'macro_dlm':         renderMacroDlm,
 };
 
 // 業種別OLS 専用レンダラ: 自動ドロップ警告 + 業種別R²サマリ + ランキング表（汎用部を再利用）
@@ -1802,6 +1805,124 @@ function _mgIsClientParam(id) {
 }
 document.addEventListener('input',  (e) => { if (e.target && e.target.id && _mgIsClientParam(e.target.id)) _mgScheduleRepaint(); });
 document.addEventListener('change', (e) => { if (e.target && e.target.id && _mgIsClientParam(e.target.id)) _mgScheduleRepaint(); });
+
+// ── M-3 ベイズ状態空間（時変マクロβ DLM）専用レンダラ ───────────────────────
+// サーバーは µ̂ 上位 N 銘柄の最新 α/β・信用区間・α/β 経路・1期先診断を返す。
+// 行クリックで銘柄を選択し、α または各 β の時系列（信用区間バンド）を Chart.js で描く。
+let _dlmData = null, _dlmChart = null, _dlmSel = null, _dlmSeries = 'alpha';
+
+function renderMacroDlm(data) {
+  _dlmData = data;
+  const rows = data.results || [];
+  _dlmSel = rows.length ? rows[0].edinet_code : null;
+  _dlmSeries = 'alpha';
+  setTimeout(() => _dlmPaintChart(), 0);
+  return _dlmTableHTML(data);
+}
+
+function _dlmDiagHTML(data) {
+  const d = data.diagnostics || {};
+  const p = data.params || {};
+  return `<div style="margin-bottom:16px;padding:12px 16px;background:#0f172a;border-radius:8px;border:1px solid #334155">
+    <div style="font-size:12px;color:#a78bfa;font-weight:600;margin-bottom:8px">
+      1期先予測診断（バーンイン除外・全 ${data.n_companies || 0} 銘柄平均）
+    </div>
+    <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px">
+      <div style="padding:8px;background:#0b1220;border-radius:6px"><div style="font-size:10px;color:#64748b">校正（標準化誤差² 平均・1 が理想）</div><div style="font-size:15px;font-weight:700;color:#c084fc">${d.calibration != null ? d.calibration.toFixed(3) : '-'}</div></div>
+      <div style="padding:8px;background:#0b1220;border-radius:6px"><div style="font-size:10px;color:#64748b">予測 RMSE（週次リターン）</div><div style="font-size:15px;font-weight:700;color:#94a3b8">${d.pred_rmse != null ? d.pred_rmse.toFixed(4) : '-'}</div></div>
+      <div style="padding:8px;background:#0b1220;border-radius:6px"><div style="font-size:10px;color:#64748b">95% 信用区間カバレッジ</div><div style="font-size:15px;font-weight:700;color:${(d.coverage95 || 0) >= 0.9 ? '#86efac' : '#fbbf24'}">${d.coverage95 != null ? (d.coverage95 * 100).toFixed(1) + '%' : '-'}</div></div>
+    </div>
+    <div style="margin-top:8px;font-size:11px;color:#64748b">δ=${p.state_discount ?? '-'} ／ β_v=${p.var_discount ?? '-'} ／ 最低 ${p.min_weeks ?? '-'} 週 ／ バーンイン ${p.burn_in_weeks ?? '-'} 週</div>
+  </div>`;
+}
+
+function _dlmTableHTML(data) {
+  const rows = data.results || [];
+  const factors = data.macro_features || [];
+  const labels = data.factor_labels || {};
+  const seriesOpts = ['<option value="alpha">α（潜在アルファ）</option>']
+    .concat(factors.map(f => `<option value="${esc(f)}">β: ${esc(labels[f] || f)}</option>`)).join('');
+  const betaHead = factors.map(f => `<th>β:${esc(labels[f] || f)}</th>`).join('');
+  const betaCells = r => factors.map(f => {
+    const b = (r.beta_latest || {})[f] || {};
+    return `<td style="text-align:right;font-family:monospace">${b.mean != null ? b.mean.toFixed(3) : '-'}</td>`;
+  }).join('');
+  const trs = rows.map((r, i) => {
+    const seld = r.edinet_code === _dlmSel;
+    const mu = r.mu;
+    return `<tr style="cursor:pointer;${seld ? 'background:rgba(124,58,237,0.14)' : ''}" onclick="document.dispatchEvent(new CustomEvent('dlm-select',{detail:'${esc(r.edinet_code)}'}))">
+      <td>${i + 1}</td>
+      <td>${esc(r.sec_code || '-')}</td>
+      <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(r.company_name || r.edinet_code)}</td>
+      <td>${esc(r.industry || '-')}</td>
+      <td class="${mu > 0 ? 'text-green' : 'text-red'}" style="text-align:right;font-family:monospace">${mu != null ? (mu * 100).toFixed(1) + '%' : '-'}</td>
+      ${betaCells(r)}
+      <td style="text-align:right;font-family:monospace">${r.pred_rmse != null ? r.pred_rmse.toFixed(4) : '-'}</td>
+      <td style="text-align:right;font-family:monospace">${r.coverage95 != null ? (r.coverage95 * 100).toFixed(0) + '%' : '-'}</td>
+    </tr>`;
+  }).join('');
+  return _dlmDiagHTML(data) + `
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">
+      <div style="font-size:11px;color:#64748b">行クリックで銘柄を選択 → 下に α/β の時系列（信用区間バンド）を表示</div>
+      <span style="flex:1"></span>
+      <label style="font-size:11px;color:#94a3b8">表示系列
+        <select id="dlm-series" style="margin-left:6px;background:#0f1117;color:#e2e8f0;border:1px solid #1e2235;border-radius:6px;padding:4px 6px;font-size:12px">${seriesOpts}</select>
+      </label>
+    </div>
+    <canvas id="chart-dlm" style="width:100%;max-height:320px;display:block;margin-bottom:16px"></canvas>
+    <div style="overflow-x:auto"><table>
+      <thead><tr><th>#</th><th>コード</th><th>銘柄名</th><th>業種</th><th>µ̂(年率)</th>${betaHead}<th>RMSE</th><th>被覆</th></tr></thead>
+      <tbody>${trs}</tbody>
+    </table></div>`;
+}
+
+function _dlmPaintChart() {
+  const canvas = document.getElementById('chart-dlm');
+  if (!canvas || !window.Chart || !_dlmData) return;
+  if (_dlmChart) { _dlmChart.destroy(); _dlmChart = null; }
+  const row = (_dlmData.results || []).find(r => r.edinet_code === _dlmSel);
+  if (!row || !row.path) return;
+  const path = row.path;
+  const ser = _dlmSeries === 'alpha' ? path.alpha : (path.beta || {})[_dlmSeries];
+  if (!ser) return;
+  const isAlpha = _dlmSeries === 'alpha';
+  const title = isAlpha ? 'α（週次・潜在アルファ）' : ('β: ' + ((_dlmData.factor_labels || {})[_dlmSeries] || _dlmSeries));
+  const band = 'rgba(124,58,237,0.16)';
+  _dlmChart = new Chart(canvas, {
+    type: 'line',
+    data: {
+      labels: path.dates,
+      datasets: [
+        { label: '上限', data: ser.hi, borderColor: 'transparent', backgroundColor: band, pointRadius: 0, fill: '+1', tension: 0.2 },
+        { label: '下限', data: ser.lo, borderColor: 'transparent', backgroundColor: band, pointRadius: 0, fill: false, tension: 0.2 },
+        { label: title, data: ser.mean, borderColor: '#a78bfa', borderWidth: 1.6, pointRadius: 0, fill: false, tension: 0.2 },
+      ]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false, animation: { duration: 0 },
+      plugins: {
+        legend: { display: true, labels: { filter: it => it.text !== '上限' && it.text !== '下限' } },
+        title: { display: true, text: `${esc(row.company_name || row.edinet_code)}（${esc(row.sec_code || '')}） — ${title}`, color: '#cbd5e1', font: { size: 12 } },
+        tooltip: { mode: 'index', intersect: false },
+      },
+      scales: {
+        x: { type: 'category', grid: { color: 'rgba(255,255,255,0.04)' }, ticks: { color: '#64748b', maxTicksLimit: 8 } },
+        y: { grid: { color: 'rgba(255,255,255,0.05)' }, ticks: { color: '#64748b' } },
+      }
+    }
+  });
+}
+
+function _dlmRepaint() {
+  if (!_dlmData) return;
+  const content = document.getElementById('dynresult-content-macro_dlm');
+  if (content) content.innerHTML = _dlmTableHTML(_dlmData);
+  const sel = document.getElementById('dlm-series');
+  if (sel) sel.value = _dlmSeries;          // 行クリック再描画で系列選択を保持
+  setTimeout(() => _dlmPaintChart(), 0);
+}
+document.addEventListener('dlm-select', e => { _dlmSel = e.detail; _dlmRepaint(); });
+document.addEventListener('change', e => { if (e.target && e.target.id === 'dlm-series') { _dlmSeries = e.target.value; _dlmPaintChart(); } });
 
 // 汎用結果レンダラ（フォールバック）: results 配列を表に、無ければ JSON を整形表示する。
 function _renderGenericResult(data) {
