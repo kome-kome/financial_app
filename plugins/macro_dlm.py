@@ -322,6 +322,16 @@ class MacroDlmPlugin(AnalysisPlugin):
                 ),
                 "default": False,
             },
+            "lambda_risk": {
+                "type": "slider",
+                "dtype": "float",
+                "label": "リスク回避度 λ",
+                "description": (
+                    "U = µ̂ − λ × R_macro。λ=0 でリターン最大化、λ大でマクロリスク重視。"
+                    "スライダー操作は再計算なしで即時反映（クライアント後処理）。"
+                ),
+                "default": 1.0, "min": 0.0, "max": 5.0, "step": 0.1,
+            },
         }
 
     # ── マクロ週次変化の整列（forward-fill＋週次変化）────────────────────────
@@ -611,6 +621,7 @@ class MacroDlmPlugin(AnalysisPlugin):
             "model_type": "bayesian_dlm",
             "macro_features": factors,
             "factor_labels": {f: _DLM_MACRO_MAP[f][2] for f in factors},
+            "lambda_risk": params.get("lambda_risk", 1.0),
             "params": {
                 "state_discount": delta, "var_discount": beta_v,
                 "min_weeks": min_weeks, "burn_in_weeks": burn_in, "top_n": top_n,
