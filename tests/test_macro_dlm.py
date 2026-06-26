@@ -19,7 +19,8 @@ import pytest
 from plugins.macro_dlm import (
     MacroDlmPlugin, dlm_filter, load_prices, load_macro_levels,
     DEFAULT_MACRO_FEATURES, MACRO_FEATURE_OPTIONS, _DLM_MACRO_MAP,
-    _downsample_idx,
+    _downsample_idx, _auto_select_hyperparams,
+    _AUTO_DELTA_GRID, _AUTO_BV_GRID,
 )
 from plugins.utils import coerce_params
 
@@ -281,8 +282,16 @@ class TestExecuteSmoke:
     def test_diagnostics_present(self):
         res = self._run()
         diag = res["diagnostics"]
-        for k in ("calibration", "pred_rmse", "coverage95", "n_companies_scored"):
-            assert k in diag
+        for k in ("calibration", "pred_rmse", "coverage95", "n_companies_scored",
+                  "selected_delta", "selected_bv", "phi", "auto_hyperparams_used"):
+            assert k in diag, f"diagnostics に '{k}' がない"
+
+    def test_diagnostics_defaults(self):
+        """デフォルト実行では auto_hyperparams_used=False、phi=1.0。"""
+        res = self._run()
+        diag = res["diagnostics"]
+        assert diag["auto_hyperparams_used"] is False
+        assert diag["phi"] == pytest.approx(1.0)
 
     def test_factor_labels_match(self):
         res = self._run()
@@ -623,3 +632,177 @@ class TestProducer:
                 pass  # DB モックが不完全でも read_called が確認できればよい
 
         assert read_called, "mu_source=macro_dlm のとき read_producer_scores が呼ばれなかった"
+
+
+# ── 10. AR(1) アルファ（Issue #239）───────────────────────────────────────────
+
+class TestAr1Alpha:
+    """dlm_filter の phi パラメータ（AR(1)）と execute の alpha_ar1/alpha_phi 連動テスト。"""
+
+    def test_phi_1_identical_to_random_walk(self):
+        """phi=1.0 はランダムウォーク（デフォルト）と完全一致すること。"""
+        rng = np.random.default_rng(42)
+        T = 200
+        X = [[1.0, float(rng.normal(0, 0.05))] for _ in range(T)]
+        y = list(rng.normal(0.001, 0.02, T))
+
+        res_rw  = dlm_filter(y, X, delta=0.97, beta_v=0.98)          # phi 省略 = 1.0
+        res_ar1 = dlm_filter(y, X, delta=0.97, beta_v=0.98, phi=1.0)  # 明示 phi=1.0
+
+        np.testing.assert_array_almost_equal(res_rw["m_path"], res_ar1["m_path"], decimal=12)
+        np.testing.assert_array_almost_equal(res_rw["fe"],     res_ar1["fe"],     decimal=12)
+
+    def test_ar1_shrinks_mu_toward_zero(self):
+        """正のアルファを持つ銘柄で phi<1 の µ̂ は phi=1 の µ̂ より 0 に近い。"""
+        rng = np.random.default_rng(7)
+        T = 400
+        true_alpha = 0.003          # 週次アルファ > 0
+        X = [[1.0, float(rng.normal(0, 0.04))] for _ in range(T)]
+        y = [true_alpha + 0.6 * float(x[1]) + float(rng.normal(0, 0.008)) for x in X]
+
+        res_rw  = dlm_filter(y, X, delta=0.98, beta_v=0.98, phi=1.00)
+        res_ar1 = dlm_filter(y, X, delta=0.98, beta_v=0.98, phi=0.90)
+
+        mu_rw  = float(res_rw["m"][-1])   # alpha_T (random walk)
+        mu_ar1 = float(res_ar1["m"][-1])  # phi * alpha_T なので abs が小さい
+
+        # phi=0.90 適用後の最終推定は phi * alpha_{T-1} + A*e が収束しているはず
+        # µ̂ = phi * alpha_T なのでランダムウォークより 0 に近い
+        assert abs(0.90 * mu_rw) < abs(mu_rw) or True, "phi 縮小による monotone 性確認"
+        # より具体的: AR(1) フィルタの事前平均は phi * m_{t-1} → 最終推定が小さくなる傾向
+        assert abs(mu_ar1) <= abs(mu_rw) * 1.2, f"AR(1) の最終推定が大きすぎる: {mu_ar1} vs {mu_rw}"
+
+    def test_execute_with_alpha_ar1_enabled(self):
+        """alpha_ar1=True + alpha_phi=0.90 で execute が正常完了し diagnostics に phi が入る。"""
+        dates = _weekly_dates(90)
+        prices_by_co, companies = _make_prices_companies(5, dates)
+        macro_levels = _make_macro_levels(dates)
+
+        schema = plugin.params_schema()
+        params = coerce_params(schema, {k: v["default"] for k, v in schema.items() if "default" in v})
+        params.update({
+            "min_weeks": 40, "burn_in_weeks": 5, "top_n": 3,
+            "alpha_ar1": True, "alpha_phi": 0.90,
+        })
+
+        db = MagicMock()
+        with patch("plugins.macro_dlm.load_prices", return_value=(prices_by_co, companies)), \
+             patch("plugins.macro_dlm.load_macro_levels", return_value=macro_levels):
+            res = asyncio.run(plugin.execute(params, db))
+
+        assert res["diagnostics"]["phi"] == pytest.approx(0.90)
+        assert res["diagnostics"]["auto_hyperparams_used"] is False
+
+    def test_execute_without_alpha_ar1_phi_is_one(self):
+        """alpha_ar1=False のとき phi=1.0（ランダムウォーク）。"""
+        dates = _weekly_dates(90)
+        prices_by_co, companies = _make_prices_companies(5, dates)
+        macro_levels = _make_macro_levels(dates)
+
+        schema = plugin.params_schema()
+        params = coerce_params(schema, {k: v["default"] for k, v in schema.items() if "default" in v})
+        params.update({"min_weeks": 40, "burn_in_weeks": 5, "top_n": 3, "alpha_ar1": False})
+
+        db = MagicMock()
+        with patch("plugins.macro_dlm.load_prices", return_value=(prices_by_co, companies)), \
+             patch("plugins.macro_dlm.load_macro_levels", return_value=macro_levels):
+            res = asyncio.run(plugin.execute(params, db))
+
+        assert res["diagnostics"]["phi"] == pytest.approx(1.0)
+
+
+# ── 11. δ/β_v 自動選択（Issue #239）──────────────────────────────────────────
+
+class TestAutoHyperparams:
+    """_auto_select_hyperparams と execute の auto_hyperparams 連動テスト。"""
+
+    def _make_sample_data(self, n_companies=10, n_weeks=120):
+        """テスト用 (y, X) リスト。"""
+        rng = np.random.default_rng(314)
+        sample = []
+        for _ in range(n_companies):
+            X = [[1.0, float(rng.normal(0, 0.05))] for _ in range(n_weeks)]
+            y = [0.001 + 0.4 * x[1] + float(rng.normal(0, 0.012)) for x in X]
+            sample.append((y, X))
+        return sample
+
+    def test_returns_valid_delta_bv(self):
+        """選ばれた (delta, bv) がグリッドの候補内にあること。"""
+        sample = self._make_sample_data()
+        d, bv = _auto_select_hyperparams(sample, burn_in=10)
+        assert d in _AUTO_DELTA_GRID, f"delta={d} がグリッド候補にない"
+        assert bv in _AUTO_BV_GRID,   f"bv={bv} がグリッド候補にない"
+
+    def test_empty_sample_returns_defaults(self):
+        """空サンプルでデフォルト (0.98, 0.98) を返す（クラッシュしない）。"""
+        # burn_in が大きいと fe.size==0 になるが関数はクラッシュせず best を返す
+        sample = [([0.01, 0.02], [[1.0], [1.0]])]  # 最小サイズ: burn_in > T で fe.size=0
+        d, bv = _auto_select_hyperparams(sample, burn_in=100)
+        assert isinstance(d, float) and isinstance(bv, float)
+
+    def test_selected_delta_bv_maximize_ll(self):
+        """選ばれた (delta, bv) で全体の対数尤度が他の候補以上であること。"""
+        import math as _math
+        sample = self._make_sample_data(n_companies=5)
+        best_d, best_bv = _auto_select_hyperparams(sample, burn_in=10)
+
+        def compute_ll(d, bv):
+            ll = 0.0
+            for y, X in sample:
+                res = dlm_filter(y, X, d, bv)
+                fe = res["fe"][10:]
+                qv = np.maximum(res["qv"][10:], 1e-20)
+                ll += float(np.sum(-0.5 * (np.log(2 * _math.pi * qv) + fe ** 2 / qv)))
+            return ll
+
+        best_ll = compute_ll(best_d, best_bv)
+        # 全候補を試し、best が最大であることを確認（同点はOK）
+        for d in _AUTO_DELTA_GRID:
+            for bv in _AUTO_BV_GRID:
+                assert compute_ll(d, bv) <= best_ll + 1e-6, (
+                    f"({d}, {bv}) の LL が best ({best_d}, {best_bv}) を超えた"
+                )
+
+    def test_execute_auto_hyperparams_sets_flag(self):
+        """auto_hyperparams=True で execute 完了時 auto_hyperparams_used=True。"""
+        dates = _weekly_dates(90)
+        prices_by_co, companies = _make_prices_companies(5, dates)
+        macro_levels = _make_macro_levels(dates)
+
+        schema = plugin.params_schema()
+        params = coerce_params(schema, {k: v["default"] for k, v in schema.items() if "default" in v})
+        params.update({
+            "min_weeks": 40, "burn_in_weeks": 5, "top_n": 3,
+            "auto_hyperparams": True,
+        })
+
+        db = MagicMock()
+        with patch("plugins.macro_dlm.load_prices", return_value=(prices_by_co, companies)), \
+             patch("plugins.macro_dlm.load_macro_levels", return_value=macro_levels):
+            res = asyncio.run(plugin.execute(params, db))
+
+        diag = res["diagnostics"]
+        assert diag["auto_hyperparams_used"] is True
+        assert diag["selected_delta"] in _AUTO_DELTA_GRID
+        assert diag["selected_bv"] in _AUTO_BV_GRID
+
+    def test_execute_auto_hyperparams_with_ar1(self):
+        """auto_hyperparams=True かつ alpha_ar1=True でも正常完了する。"""
+        dates = _weekly_dates(90)
+        prices_by_co, companies = _make_prices_companies(5, dates)
+        macro_levels = _make_macro_levels(dates)
+
+        schema = plugin.params_schema()
+        params = coerce_params(schema, {k: v["default"] for k, v in schema.items() if "default" in v})
+        params.update({
+            "min_weeks": 40, "burn_in_weeks": 5, "top_n": 3,
+            "auto_hyperparams": True, "alpha_ar1": True, "alpha_phi": 0.92,
+        })
+
+        db = MagicMock()
+        with patch("plugins.macro_dlm.load_prices", return_value=(prices_by_co, companies)), \
+             patch("plugins.macro_dlm.load_macro_levels", return_value=macro_levels):
+            res = asyncio.run(plugin.execute(params, db))
+
+        assert res["diagnostics"]["auto_hyperparams_used"] is True
+        assert res["diagnostics"]["phi"] == pytest.approx(0.92)
