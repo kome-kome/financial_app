@@ -306,6 +306,35 @@ class MacroDlmPlugin(AnalysisPlugin):
             used_dates.append(dates[t])
         return y, X, used_dates
 
+    def produced_output(self, db: Any) -> bool:
+        """M-3 producer μ̂（macro_dlm_scores）を共有DBに持つか（sell_ranking の graceful 判定用）。"""
+        try:
+            from database import get_macro_dlm_scores
+            return bool(get_macro_dlm_scores(db))
+        except Exception:
+            return False
+
+    def read_producer_scores(self, db: Any, macro_snapshot: dict | None = None) -> dict:
+        """M-1 と同一形 {edinet_code: {mu, r_macro, r1_prime}} を返す（sell_ranking 共用）。
+
+        mu は永続化済み macro_dlm_scores、r_macro は共有 macro_beta producer から
+        マージ、r1_prime は常に None（DLM は OLS 予測SE を持たない）。"""
+        from database import get_macro_dlm_scores
+        from .macro_snapshots import get_producer_scores
+        mus = get_macro_dlm_scores(db)
+        if not mus:
+            return {}
+        r_macro_src = get_producer_scores(db, macro_snapshot)
+        out: dict = {}
+        for ec, mu in mus.items():
+            prod = r_macro_src.get(ec) or {}
+            out[ec] = {
+                "mu":       float(mu),
+                "r_macro":  prod.get("r_macro"),
+                "r1_prime": None,
+            }
+        return out
+
     async def execute(self, params: dict, db: Any) -> dict:
         factors: list[str] = params["macro_features"]
         delta: float = params["state_discount"]
@@ -412,6 +441,10 @@ class MacroDlmPlugin(AnalysisPlugin):
         rows.sort(key=lambda r: (r["mu"] is None, -(r["mu"] or 0.0)))
         n_companies = len(rows)
 
+        # snapshot_date = 全銘柄の used_dates[-1] の最大値（_path_src を pop する前に収集）
+        _snap_dates = [r["_path_src"][2][-1] for r in rows if r.get("_path_src") and r["_path_src"][2]]
+        _snap_str: str | None = max(_snap_dates) if _snap_dates else None
+
         # top_n のみ α/β 経路（信用区間バンド）を構築して付与
         for r in rows[:top_n]:
             m_path, sd_path, used_dates, b0 = r.pop("_path_src")
@@ -443,6 +476,18 @@ class MacroDlmPlugin(AnalysisPlugin):
             "coverage95": _r(float(np.mean(agg_cov)), 4) if agg_cov else None,
             "n_companies_scored": n_companies,
         }
+
+        # ── producer μ̂ を永続化（sell_ranking が mu_source=macro_dlm で読む・ADR-0004）─
+        from database import replace_macro_dlm_scores
+        try:
+            replace_macro_dlm_scores(
+                db,
+                [{"edinet_code": r["edinet_code"], "mu": r["mu"]}
+                 for r in rows if r.get("mu") is not None],
+                _snap_str,
+            )
+        except Exception:
+            pass   # 永続化失敗（読取専用DB等）は分析表示を妨げない
 
         return {
             "model_type": "bayesian_dlm",

@@ -547,6 +547,50 @@ def get_macro_gbdt_scores(db) -> dict:
         return {}
 
 
+# ── 5d. M-3 per-stock ベイズ DLM 年率化アルファ μ̂（Issue #238）────────────────
+# M-3（macro_dlm）プラグインが execute() 末尾で書き込み、sell_ranking（consumer）が読む。
+# macro_gbdt_scores と同型。最新スナップショットのみ保持（replace 方式）。
+
+class MacroDlmScore(Base):
+    """M-3 の per-stock 期待リターン μ̂（最新実行スナップショット）。
+
+    sell_ranking が mu_source="macro_dlm" 選択時に read_producer_scores 経由で読む。
+    R_macro は共有 macro_beta から別途マージするため本テーブルには持たない。"""
+    __tablename__ = "macro_dlm_scores"
+
+    edinet_code   = Column(String(10), primary_key=True)
+    mu            = Column(Float, nullable=False)   # 年率化アルファ α_T × 52（無次元）
+    snapshot_date = Column(String(10))              # "YYYY-MM-DD"（実行時の最終週基準日）
+    created_at    = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+
+def replace_macro_dlm_scores(db, rows: list, snapshot_date: str | None = None) -> int:
+    """M-3 producer μ̂ を全置換する（最新スナップショットのみ保持）。
+
+    rows = [{"edinet_code": str, "mu": float}, ...]。1 txn で全削除→一括 insert。
+    mu が None の行はスキップ（推定不能銘柄を保存しない）。戻り値は保存件数。
+    """
+    db.query(MacroDlmScore).delete()
+    objs = [
+        MacroDlmScore(edinet_code=r["edinet_code"], mu=float(r["mu"]),
+                      snapshot_date=snapshot_date)
+        for r in rows
+        if r.get("edinet_code") and r.get("mu") is not None
+    ]
+    if objs:
+        db.add_all(objs)
+    db.commit()
+    return len(objs)
+
+
+def get_macro_dlm_scores(db) -> dict:
+    """M-3 producer μ̂ を {edinet_code: mu} で返す（未蓄積なら {}・graceful degrade）。"""
+    try:
+        return {r.edinet_code: r.mu for r in db.query(MacroDlmScore).all()}
+    except Exception:
+        return {}
+
+
 def prices_on_or_after(db, codes: list, after: str) -> dict:
     """各 edinet_code の after 以降・最初の終値を返す（バックテストのエントリー用）。
 

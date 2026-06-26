@@ -349,3 +349,178 @@ class TestHelpers:
         for scode, kind, label in _DLM_MACRO_MAP.values():
             assert kind in ("logret", "diff")
             assert isinstance(label, str) and label
+
+
+# ── 8. producer: write→read round-trip + sell_ranking 連携 ───────────────────
+
+class TestProducer:
+    """Issue #238: M-3 producer 化（produced_output / read_producer_scores / execute 永続化）"""
+
+    def _make_db(self, stored_mus: dict | None = None):
+        """macro_dlm_scores の read/write をシミュレートする軽量 DB モック。"""
+        store: dict = {}
+        if stored_mus:
+            store.update(stored_mus)
+
+        db = MagicMock()
+
+        # replace_macro_dlm_scores が呼ばれたら store を更新
+        def _replace(rows, snapshot_date=None):
+            store.clear()
+            for r in rows:
+                if r.get("edinet_code") and r.get("mu") is not None:
+                    store[r["edinet_code"]] = r["mu"]
+            return len(store)
+
+        # get_macro_dlm_scores が呼ばれたら store を返す
+        def _get():
+            return dict(store)
+
+        return db, store, _replace, _get
+
+    def test_produced_output_false_when_empty(self):
+        with patch("database.get_macro_dlm_scores", return_value={}):
+            assert plugin.produced_output(MagicMock()) is False
+
+    def test_produced_output_true_when_data_exists(self):
+        with patch("database.get_macro_dlm_scores", return_value={"E00001": 0.05}):
+            assert plugin.produced_output(MagicMock()) is True
+
+    def test_read_producer_scores_empty_when_no_data(self):
+        with patch("database.get_macro_dlm_scores", return_value={}):
+            result = plugin.read_producer_scores(MagicMock())
+        assert result == {}
+
+    def test_read_producer_scores_shape(self):
+        stored = {"E00001": 0.12, "E00002": -0.05}
+        with patch("database.get_macro_dlm_scores", return_value=stored), \
+             patch("plugins.macro_dlm.MacroDlmPlugin.read_producer_scores.__func__",
+                   side_effect=None, create=True):
+            # macro_snapshots の get_producer_scores は r_macro を返すがここでは空でよい
+            with patch("plugins.macro_snapshots.get_producer_scores", return_value={}):
+                result = plugin.read_producer_scores(MagicMock())
+        assert set(result.keys()) == {"E00001", "E00002"}
+        for ec, v in result.items():
+            assert set(v.keys()) == {"mu", "r_macro", "r1_prime"}
+            assert v["r1_prime"] is None
+            assert isinstance(v["mu"], float)
+
+    def test_read_producer_scores_merges_r_macro(self):
+        stored = {"E00001": 0.10}
+        r_macro_src = {"E00001": {"mu": 0.0, "r_macro": 0.25, "r1_prime": 0.03}}
+        with patch("database.get_macro_dlm_scores", return_value=stored), \
+             patch("plugins.macro_snapshots.get_producer_scores", return_value=r_macro_src):
+            result = plugin.read_producer_scores(MagicMock())
+        assert result["E00001"]["r_macro"] == pytest.approx(0.25)
+        assert result["E00001"]["mu"] == pytest.approx(0.10)
+        assert result["E00001"]["r1_prime"] is None
+
+    def test_execute_persists_scores(self):
+        """execute が replace_macro_dlm_scores を呼び、全銘柄の mu を永続化する。"""
+        dates = _weekly_dates(90)
+        n_co = 5
+        prices_by_co, companies = _make_prices_companies(n_co, dates)
+        macro_levels = _make_macro_levels(dates)
+        params = {k: v["default"] for k, v in plugin.params_schema().items() if "default" in v}
+        from plugins.utils import coerce_params
+        params = coerce_params(plugin.params_schema(), params)
+        params.update({"min_weeks": 40, "burn_in_weeks": 5, "top_n": 3})
+
+        persisted: list[dict] = []
+
+        def fake_replace(db, rows, snapshot_date=None):
+            persisted.extend(rows)
+            return len(rows)
+
+        db = MagicMock()
+        with patch("plugins.macro_dlm.load_prices", return_value=(prices_by_co, companies)), \
+             patch("plugins.macro_dlm.load_macro_levels", return_value=macro_levels), \
+             patch("database.replace_macro_dlm_scores", side_effect=fake_replace):
+            asyncio.run(plugin.execute(params, db))
+
+        assert len(persisted) == n_co, f"全 {n_co} 銘柄を保存すべきが {len(persisted)} 件"
+        for row in persisted:
+            assert "edinet_code" in row
+            assert "mu" in row and row["mu"] is not None
+
+    def test_execute_persists_all_not_just_top_n(self):
+        """top_n=2 でも全銘柄が永続化される（ランキング外銘柄の除外なし）。"""
+        dates = _weekly_dates(90)
+        n_co = 6
+        prices_by_co, companies = _make_prices_companies(n_co, dates)
+        macro_levels = _make_macro_levels(dates)
+        params = {k: v["default"] for k, v in plugin.params_schema().items() if "default" in v}
+        from plugins.utils import coerce_params
+        params = coerce_params(plugin.params_schema(), params)
+        params.update({"min_weeks": 40, "burn_in_weeks": 5, "top_n": 2})
+
+        persisted: list[dict] = []
+
+        def fake_replace(db, rows, snapshot_date=None):
+            persisted.extend(rows)
+
+        db = MagicMock()
+        with patch("plugins.macro_dlm.load_prices", return_value=(prices_by_co, companies)), \
+             patch("plugins.macro_dlm.load_macro_levels", return_value=macro_levels), \
+             patch("database.replace_macro_dlm_scores", side_effect=fake_replace):
+            asyncio.run(plugin.execute(params, db))
+
+        assert len(persisted) == n_co, f"全 {n_co} 銘柄を保存すべきが {len(persisted)} 件（top_n=2 でも全件）"
+
+    def test_sell_ranking_mu_source_schema_has_macro_dlm(self):
+        """sell_ranking の mu_source に macro_dlm が含まれる。"""
+        from plugins.sell_ranking import SellRankingPlugin
+        sell = SellRankingPlugin()
+        schema = sell.params_schema()
+        opts = {o["value"] for o in schema["mu_source"]["options"]}
+        assert "macro_dlm" in opts
+
+    def test_sell_ranking_reads_macro_dlm_scores(self):
+        """sell_ranking が mu_source=macro_dlm のとき M-3 の read_producer_scores を呼ぶ。"""
+        from plugins.sell_ranking import SellRankingPlugin
+        import asyncio as _asyncio
+        from unittest.mock import patch as _patch, MagicMock as _MM, AsyncMock
+
+        sell = SellRankingPlugin()
+        # 最低限の execute 引数
+        params_raw = {k: v.get("default") for k, v in sell.params_schema().items()}
+        params_raw["holdings"] = "7203"
+        params_raw["mu_source"] = "macro_dlm"
+        from plugins.utils import coerce_params
+        params = coerce_params(sell.params_schema(), params_raw)
+
+        read_called = []
+
+        class FakeDlmPlugin:
+            def produced_output(self, db):
+                return True
+
+            def read_producer_scores(self, db, macro_snapshot=None):
+                read_called.append(True)
+                return {}
+
+        db = _MM()
+        # FinancialMetric / latest_year_subq / StockPriceWeekly のモック
+        db.query.return_value.join.return_value.filter.return_value.all.return_value = []
+        db.query.return_value.join.return_value.all.return_value = []
+        db.query.return_value.filter.return_value.all.return_value = []
+
+        with _patch("plugins._registry", {"macro_dlm": FakeDlmPlugin()}), \
+             _patch("plugins.sell_ranking.SellRankingPlugin.execute",
+                    wraps=sell.execute):
+            # get_plugin がモックを返すように
+            with _patch("plugins.sell_ranking.__import__",
+                        side_effect=ImportError, create=True):
+                pass  # import は通常通り走る
+
+        # 実際に execute を呼んで macro_dlm plugin の read_producer_scores が呼ばれるか確認
+        with _patch("plugins.get_plugin", return_value=FakeDlmPlugin()), \
+             _patch("database.FinancialMetric", create=True), \
+             _patch("database.StockPriceWeekly", create=True), \
+             _patch("database.latest_year_subq", return_value=_MM()):
+            try:
+                _asyncio.run(sell.execute(params, db))
+            except Exception:
+                pass  # DB モックが不完全でも read_called が確認できればよい
+
+        assert read_called, "mu_source=macro_dlm のとき read_producer_scores が呼ばれなかった"

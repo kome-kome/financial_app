@@ -250,6 +250,7 @@ class SellRankingPlugin(AnalysisPlugin):
                 "options": [
                     {"value": "macro_risk_return", "label": "M-1: マクロ×リスク-リターン（OLS）"},
                     {"value": "macro_gbdt",        "label": "M-2: マクロ×財務 勾配ブースティング（XGBoost）"},
+                    {"value": "macro_dlm",         "label": "M-3: ベイズ状態空間（時変マクロβ DLM）"},
                 ],
                 "default": "macro_risk_return",
                 "description": "売りスコアの μ / −R_macro 観点に使う推奨モデル。未実行なら graceful-degrade（μ除外）。",
@@ -392,7 +393,7 @@ class SellRankingPlugin(AnalysisPlugin):
             # R3 足切りゲート: M-1 の μ 予測SE（r1_prime）が閾値超 → SELL を出さない。
             # mu_source=macro_gbdt（M-2）は r1_prime を持たないため無効（ADR-0004・no-op）。
             _r3_gate = params.get("r3_gate", 0.0)
-            if _r3_gate and action == "SELL" and _ps and mu_source != "macro_gbdt":
+            if _r3_gate and action == "SELL" and _ps and mu_source not in ("macro_gbdt", "macro_dlm"):
                 _r1p = _ps.get("r1_prime")
                 if _r1p is not None and float(_r1p) > _r3_gate:
                     action = "REDUCE"
