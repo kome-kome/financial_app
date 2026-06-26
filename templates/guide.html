@@ -97,6 +97,7 @@ td code,p code,li code{background:#0f172a;border:1px solid #1e2235;padding:1px 5
     <div class="toc-section-title">③ 将来リターンを予測</div>
     <a href="#price_predictor">株価リターン予測</a>
     <a href="#macro_risk_return">マクロ×リスク-リターン</a>
+    <a href="#macro_gbdt">マクロ×財務 勾配ブースティング（M-2）</a>
     <a href="#macro_dlm">ベイズ状態空間（時変マクロβ）</a>
     <div class="toc-section-title">④ 戦略を検証</div>
     <a href="#backtest">バックテスト</a>
@@ -278,6 +279,32 @@ td code,p code,li code{background:#0f172a;border:1px solid #1e2235;padding:1px 5
   <div class="more">→ もっと詳しく：<a href="/models#m9">モデル解説：マクロ×リスク-リターン推奨</a></div>
 </div>
 
+<!-- ③ マクロ×財務 勾配ブースティング（M-2）─────── -->
+<div class="model-section" id="macro_gbdt">
+  <h2>マクロ×財務 勾配ブースティング（M-2） <span class="model-tag">③ 将来リターンを予測</span></h2>
+
+  <h3>🟢 ひとことで言うと</h3>
+  <div class="analogy">
+    マクロ×リスク-リターン（M-1）が「<strong>1本の直線の物差し</strong>」で測る兄なら、これは「<strong>経験から場合分けを自分で覚える弟</strong>」です。「金利が高いときだけ割安株が効く」のような<strong>条件つきのクセ</strong>（数字の組み合わせで効き方が変わる関係）を、<span class="term" data-tip="弱い決定木を少しずつ継ぎ足して、前の木の間違いを次の木が補っていく学習法。複雑な関係を自動で捉えられる。">勾配ブースティング</span>という「たくさんの小さな木の合議」が、人が指定しなくても勝手に学びます。M-1 と<strong>同じデータ・同じ目標（約1年先のリターン）</strong>を使うので、<strong>どちらがよく当たるかを見比べられる</strong>のがいちばんの狙いです。
+  </div>
+
+  <h3>📊 何が分かる？</h3>
+  <p>期待リターンの高い順に銘柄が並びます。M-1 と<strong>同じ検証（ウォークフォワード）</strong>の成績（R²・誤差）を並べて表示するので、「この場面では直線（M-1）と木（M-2）のどちらが効くか」を自分で判断できます。各銘柄が「なぜ上位なのか」も、<span class="term" data-tip="ある予測に対して、各要因がどれだけ効いたかを公平に分け合って示す指標。SHapley Additive exPlanations の略。">SHAP</span>という要因の内訳で確認できます。</p>
+
+  <h3>🛠 どう使う？</h3>
+  <ul class="steps">
+    <li>使いたい財務要因・マクロ要因を選んで実行（既定のままでもOK）。</li>
+    <li>M-1 と並んだ<strong>R²・誤差</strong>を見比べて、どちらの当てはまりが良いかを確認します。</li>
+    <li>一覧の行をクリックすると、その銘柄の<strong>SHAP（要因ごとの効き具合）</strong>の内訳が見られます。</li>
+  </ul>
+  <div class="info-box">SHAP は「<strong>どれだけ効いたか（大きさ）</strong>」を表し、効いた向き（株高/株安）は銘柄別のパネルで確認します。木のモデルなので外れ値をならす処理は不要ですが、計算は重いので<strong>手元のPC（ローカル）で実行</strong>するのがおすすめです。</div>
+
+  <h3>⚠ 注意点・落とし穴</h3>
+  <div class="warn-box">株価データは「効くサインが弱くノイズが多い」ため、木のモデルは<strong>過去に当てはめすぎる（過学習）</strong>になりがちです。そのため既定では強めのブレーキ（正則化）をかけています。当てはまりの精度（R²）は高くないので、結果は<strong>順位の目安</strong>として読み、当たる確率とは思わないでください。M-1 のような「予測の確からしさの幅（信頼区間）」は持ちません。</div>
+
+  <div class="more">→ もっと詳しく：<a href="/models#m11">モデル解説：M-2 マクロ×財務 勾配ブースティング</a></div>
+</div>
+
 <!-- ③ ベイズ状態空間（時変マクロβ DLM）─────────── -->
 <div class="model-section" id="macro_dlm">
   <h2>ベイズ状態空間（時変マクロβ） <span class="model-tag">③ 将来リターンを予測</span></h2>
@@ -346,6 +373,7 @@ td code,p code,li code{background:#0f172a;border:1px solid #1e2235;padding:1px 5
     <li>実行すると、売り点数の高い順に並び、<strong>売却 / 一部売却 / 保有継続</strong>の札が付きます。</li>
   </ul>
   <div class="info-box">各観点は同じ年の全社の中で「平均よりどれくらい良い／悪いか」（<span class="term" data-tip="平均=0、+で平均以上、−で平均以下の点数。">Zスコア</span>）に直してから合計するので、観点の単位の違いに引きずられません。「割高度」を使うには先に<a href="/guide#sector_ols" style="color:#34d399">業種別OLS分析</a>を実行してください。</div>
+  <div class="info-box">売り判断に加味する「<strong>今後の伸びしろ（期待リターン）</strong>」の見立ては、<a href="/guide#macro_risk_return" style="color:#34d399">M-1</a>・<a href="/guide#macro_gbdt" style="color:#34d399">M-2</a>・<a href="/guide#macro_dlm" style="color:#34d399">M-3</a> の3つの予測モデルから「μ の出所」トグルで選べます（既定は M-1）。<strong>手元（ローカル）で一度動かしたモデルだけが選択肢に出ます</strong>。未実行のモデルを選んでもその成分は自動で外れるので、まずは既定のままでも問題ありません。</div>
 
   <h3>⚠ 注意点・落とし穴</h3>
   <div class="warn-box">これは「いつ売れば儲かる」を当てるものではなく、<strong>持ち株を見直すきっかけ</strong>です。全部が優良なら全銘柄「保有継続」になります。ETF や外国株など未収録の銘柄は判定できません。</div>
