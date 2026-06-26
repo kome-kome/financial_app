@@ -68,6 +68,10 @@ DEFAULT_MACRO_FEATURES = ["dlm_usdjpy", "dlm_us10y", "dlm_nikkei225", "dlm_wti"]
 
 WEEKS_PER_YEAR = 52
 _MAX_PATH_POINTS = 120          # チャート用に経路をこの点数まで間引く（payload 抑制）
+_AUTO_SAMPLE_N = 50             # 自動ハイパーパラメータ選択で使用する銘柄サンプル数
+# δ / β_v の探索グリッド（粗→細の2段階候補）
+_AUTO_DELTA_GRID = [0.90, 0.93, 0.95, 0.97, 0.98, 0.99, 0.995]
+_AUTO_BV_GRID    = [0.90, 0.93, 0.95, 0.97, 0.99, 1.00]
 # 弱情報事前 C_0（拡散）。α は週次リターン規模（~0.03）、β は無次元規模に合わせる。
 _PRIOR_VAR_ALPHA = 0.04         # α の事前分散（sd≒0.2/週・実質拡散）
 _PRIOR_VAR_BETA = 4.0           # β の事前分散（sd≒2）
@@ -117,10 +121,13 @@ def load_macro_levels(db, series_codes: list[str], min_date: str | None) -> dict
 
 # ── DLM フィルタ（純 numpy・West & Harrison 割引 DLM＋分散学習）───────────────
 
-def dlm_filter(y: list[float], X: list[list[float]], delta: float, beta_v: float) -> dict:
+def dlm_filter(y: list[float], X: list[list[float]], delta: float, beta_v: float,
+               phi: float = 1.0) -> dict:
     """割引係数 DLM の1パス・フォワードフィルタ（観測分散は Normal-Gamma 共役で学習）。
 
     y: 長さ T の観測（週次対数リターン）。X: T×p の設計行（先頭列=1 の定数項）。
+    phi: α（先頭状態）の AR(1) 係数。1.0 のときランダムウォーク（デフォルト）。
+         phi < 1.0 のとき α は φ·α_{t-1} へ平均回帰（β 成分はランダムウォーク維持）。
     戻り値: m_path/sd_path（各週の状態事後平均・標準偏差）、fe/q（1期先予測誤差と予測分散）、
             std_errs（標準化予測誤差 e/√Q）、最終の m/C/S/n。
     """
@@ -133,6 +140,10 @@ def dlm_filter(y: list[float], X: list[list[float]], delta: float, beta_v: float
     S = max(S, 1e-8)
     n = 1.0
 
+    # 対角遷移行列 G: α 成分のみ phi（AR(1)）、β 成分は 1.0（ランダムウォーク維持）
+    G = np.ones(p)
+    G[0] = phi
+
     m_path = np.empty((T, p))
     sd_path = np.empty((T, p))
     fe = np.empty(T)        # 1期先予測誤差（リターン単位）
@@ -141,11 +152,12 @@ def dlm_filter(y: list[float], X: list[list[float]], delta: float, beta_v: float
 
     for t in range(T):
         F = np.asarray(X[t], dtype=float)
-        a = m                       # 事前平均 a_t = m_{t-1}
-        R = C / delta               # 事前共分散 R_t = C_{t-1}/δ（割引で状態ノイズ付与）
-        f = float(F @ a)            # 1期先予測 f_t（観測前）
-        Q = float(F @ R @ F) + S    # 予測分散 Q_t
-        e = float(y[t] - f)         # 予測誤差 e_t
+        a = G * m                           # 事前平均 a_t = G ⊙ m_{t-1}
+        GCG = (G[:, None] * C) * G[None, :]  # G C G'（G が対角なので要素積で計算）
+        R = GCG / delta                     # 事前共分散 R_t = G C G' / δ
+        f = float(F @ a)                    # 1期先予測 f_t（観測前）
+        Q = float(F @ R @ F) + S            # 予測分散 Q_t
+        e = float(y[t] - f)                 # 予測誤差 e_t
 
         A = (R @ F) / Q             # カルマンゲイン A_t
         n_new = beta_v * n + 1.0    # 分散割引による自由度更新
@@ -174,6 +186,42 @@ def _downsample_idx(n: int, k: int) -> list[int]:
     if n <= k:
         return list(range(n))
     return sorted(set(round(i * (n - 1) / (k - 1)) for i in range(k)))
+
+
+def _auto_select_hyperparams(
+    sample_data: list[tuple[list, list]],
+    burn_in: int,
+    phi: float = 1.0,
+) -> tuple[float, float]:
+    """銘柄横断の正規近似周辺対数尤度を最大化して (delta, beta_v) を選ぶ。
+
+    sample_data: [(y, X), ...] のリスト（事前に min_weeks フィルタ済み）。
+    burn_in: バーンイン週数（対数尤度計算から除外）。
+    phi: dlm_filter に渡す AR(1) 係数。
+    Returns: (best_delta, best_beta_v).
+    """
+    best_ll = -math.inf
+    best: tuple[float, float] = (0.98, 0.98)
+
+    for delta in _AUTO_DELTA_GRID:
+        for bv in _AUTO_BV_GRID:
+            ll = 0.0
+            for y, X in sample_data:
+                res = dlm_filter(y, X, delta, bv, phi=phi)
+                fe = res["fe"][burn_in:]
+                qv = res["qv"][burn_in:]
+                if fe.size == 0:
+                    continue
+                qv_safe = np.maximum(qv, 1e-20)
+                # 正規近似: log p(y_t | y_{1:t-1}) ≈ -½ [log(2π Q_t) + e_t²/Q_t]
+                ll += float(np.sum(
+                    -0.5 * (np.log(2 * math.pi * qv_safe) + fe ** 2 / qv_safe)
+                ))
+            if ll > best_ll:
+                best_ll = ll
+                best = (float(delta), float(bv))
+
+    return best
 
 
 def _r(x: float, nd: int = 6) -> float | None:
@@ -243,6 +291,46 @@ class MacroDlmPlugin(AnalysisPlugin):
                 "label": "上位表示数",
                 "description": "µ̂（年率化アルファ）上位 N 銘柄をランキング・経路チャートで返す。",
                 "default": 50, "min": 1, "max": 500,
+            },
+            "alpha_ar1": {
+                "type": "checkbox",
+                "label": "AR(1) アルファ（平均回帰）",
+                "description": (
+                    "α をランダムウォークではなく AR(1) として推定します。"
+                    "µ̂ = φ·α_T × 52 に縮小され、より保守的な期待リターン推定になります。"
+                    "φ は下の「α の AR(1) 係数」スライダーで指定。"
+                ),
+                "default": False,
+            },
+            "alpha_phi": {
+                "type": "slider",
+                "dtype": "float",
+                "label": "α の AR(1) 係数 φ（AR(1) 有効時のみ）",
+                "description": (
+                    "1 に近いほどランダムウォークに近い（変化が緩やか）。"
+                    "0.95 → 半減期 ≈ 13.5 週、0.99 → 半減期 ≈ 69 週。"
+                    "「AR(1) アルファ」を有効にした場合のみ使用されます。"
+                ),
+                "default": 0.95, "min": 0.50, "max": 0.999, "step": 0.005,
+            },
+            "auto_hyperparams": {
+                "type": "checkbox",
+                "label": "δ / β_v を自動選択（周辺尤度最大化）",
+                "description": (
+                    "銘柄横断でグリッドサーチし、正規近似周辺対数尤度を最大化する δ・β_v を自動選択します。"
+                    "有効にすると上の δ・β_v スライダー指定値より優先されます（計算コストあり）。"
+                ),
+                "default": False,
+            },
+            "lambda_risk": {
+                "type": "slider",
+                "dtype": "float",
+                "label": "リスク回避度 λ",
+                "description": (
+                    "U = µ̂ − λ × R_macro。λ=0 でリターン最大化、λ大でマクロリスク重視。"
+                    "スライダー操作は再計算なしで即時反映（クライアント後処理）。"
+                ),
+                "default": 1.0, "min": 0.0, "max": 5.0, "step": 0.1,
             },
         }
 
@@ -342,6 +430,9 @@ class MacroDlmPlugin(AnalysisPlugin):
         min_weeks: int = params["min_weeks"]
         burn_in: int = params["burn_in_weeks"]
         top_n: int = params["top_n"]
+        use_ar1: bool = bool(params.get("alpha_ar1", False))
+        phi: float = float(params.get("alpha_phi", 0.95)) if use_ar1 else 1.0
+        auto_hp: bool = bool(params.get("auto_hyperparams", False))
 
         if not factors:
             raise ValueError("マクロ・ファクターを1つ以上選択してください")
@@ -360,6 +451,20 @@ class MacroDlmPlugin(AnalysisPlugin):
             raise ValueError("マクロデータがありません。先にマクロ指標を収集してください。")
 
         level_at, kinds = self._macro_change_builder(macro_levels, factors)
+
+        # 自動ハイパーパラメータ選択: 代表サンプルで周辺尤度を最大化
+        auto_hp_used = False
+        if auto_hp:
+            sample_ecs = sorted(prices_by_co.keys())[:_AUTO_SAMPLE_N]
+            sample_data: list[tuple] = []
+            for ec in sample_ecs:
+                sy, sX, _ = self._build_series(prices_by_co[ec], level_at, kinds)
+                if len(sy) >= min_weeks:
+                    sample_data.append((sy, sX))
+            if sample_data:
+                delta, beta_v = _auto_select_hyperparams(sample_data, burn_in, phi=phi)
+                auto_hp_used = True
+
         tq = stats.t.ppf(0.975, df=10_000)   # 信用区間の係数（自由度大の Student-t≒正規）
         k = len(factors)
 
@@ -367,6 +472,7 @@ class MacroDlmPlugin(AnalysisPlugin):
         agg_se2: list[float] = []     # 標準化予測誤差²（校正＝平均が1なら整合）
         agg_rmse: list[float] = []
         agg_cov: list[float] = []
+        oof_residuals: dict[str, list] = {}  # {YYYY-MM: [(yhat, y_true), ...]}
 
         for ec, px_rows in prices_by_co.items():
             if len(px_rows) < min_weeks + 1:
@@ -375,16 +481,17 @@ class MacroDlmPlugin(AnalysisPlugin):
             if len(y) < min_weeks:
                 continue
 
-            res = dlm_filter(y, X, delta, beta_v)
+            res = dlm_filter(y, X, delta, beta_v, phi=phi)
             T = len(y)
             b0 = min(burn_in, max(T - 5, 0))     # バーンイン（最低5点は残す）
 
             m_path, sd_path = res["m_path"], res["sd_path"]
             alpha_w = float(m_path[-1, 0])
             alpha_sd = float(sd_path[-1, 0])
-            mu = alpha_w * WEEKS_PER_YEAR
-            mu_lo = (alpha_w - tq * alpha_sd) * WEEKS_PER_YEAR
-            mu_hi = (alpha_w + tq * alpha_sd) * WEEKS_PER_YEAR
+            # AR(1) 時は µ̂ = φ·α_T（1期先予測値を 0 へ縮小した保守的推定）
+            mu = phi * alpha_w * WEEKS_PER_YEAR
+            mu_lo = phi * (alpha_w - tq * alpha_sd) * WEEKS_PER_YEAR
+            mu_hi = phi * (alpha_w + tq * alpha_sd) * WEEKS_PER_YEAR
 
             beta_latest: dict[str, dict] = {}
             beta_T = []
@@ -393,6 +500,13 @@ class MacroDlmPlugin(AnalysisPlugin):
                 bs = float(sd_path[-1, j + 1])
                 beta_T.append(bm)
                 beta_latest[f] = {"mean": _r(bm), "lo": _r(bm - tq * bs), "hi": _r(bm + tq * bs)}
+
+            # OOF 残差収集: φ·α_{t-1|t-1}（バーンイン後）vs y_t（1期先・無リーク）
+            # AR(1) 時は φ·α_T が 1期先予測値なので yhat にも phi を適用
+            for t in range(b0 + 1, T):
+                yhat = phi * float(m_path[t - 1, 0]) * WEEKS_PER_YEAR
+                ym = used_dates[t][:7]
+                oof_residuals.setdefault(ym, []).append((yhat, float(y[t])))
 
             # 1期先診断（バーンイン除外）
             se = res["std_errs"][b0:]
@@ -475,6 +589,20 @@ class MacroDlmPlugin(AnalysisPlugin):
             "pred_rmse": _r(float(np.mean(agg_rmse))) if agg_rmse else None,
             "coverage95": _r(float(np.mean(agg_cov)), 4) if agg_cov else None,
             "n_companies_scored": n_companies,
+            # 実際に使用されたハイパーパラメータ（自動選択 or ユーザー指定）
+            "selected_delta": _r(delta, 4),
+            "selected_bv": _r(beta_v, 4),
+            "phi": _r(phi, 4),
+            "auto_hyperparams_used": auto_hp_used,
+        }
+
+        # ── アウトオブサンプル検証（OOF）: α_{t-1} が翌週リターンを順序付けるか（ADR-0004）─
+        from .macro_snapshots import oof_backtest as _oof_backtest
+        oof_bt = _oof_backtest(oof_residuals, n_quantiles=5) if oof_residuals else {
+            "n_quantiles": 5, "n_periods": 0, "n_periods_quantile": 0,
+            "n_oof_samples": 0, "quantile_returns": [],
+            "rank_ic": {"mean": None, "std": None, "n": 0},
+            "long_short_spread": None, "hit_rate": None,
         }
 
         # ── producer μ̂ を永続化（sell_ranking が mu_source=macro_dlm で読む・ADR-0004）─
@@ -493,12 +621,14 @@ class MacroDlmPlugin(AnalysisPlugin):
             "model_type": "bayesian_dlm",
             "macro_features": factors,
             "factor_labels": {f: _DLM_MACRO_MAP[f][2] for f in factors},
+            "lambda_risk": params.get("lambda_risk", 1.0),
             "params": {
                 "state_discount": delta, "var_discount": beta_v,
                 "min_weeks": min_weeks, "burn_in_weeks": burn_in, "top_n": top_n,
             },
             "n_companies": n_companies,
             "diagnostics": diagnostics,
+            "oof_backtest": oof_bt,
             "results": rows[:top_n],
         }
 
