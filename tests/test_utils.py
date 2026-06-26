@@ -525,64 +525,6 @@ class TestRidgeRegression:
         assert result["alpha"] > 0
 
 
-# ── 価格特徴量（numpy ベースの動作確認） ─────────────────────────────────
-
-class TestPriceFeatures:
-    def _gen_prices(self, n: int, seed: int = 0):
-        import random
-        rng = random.Random(seed)
-        closes = [100.0]
-        highs = [100.0]
-        lows = [100.0]
-        for _ in range(n - 1):
-            r = rng.gauss(0.001, 0.02)
-            c = closes[-1] * math.exp(r)
-            h = c * (1 + abs(rng.gauss(0, 0.005)))
-            lo = c * (1 - abs(rng.gauss(0, 0.005)))
-            closes.append(c); highs.append(h); lows.append(lo)
-        return closes, highs, lows
-
-    def test_ma_returns_none_when_insufficient(self):
-        from plugins.price_predictor import _ma
-        assert _ma([1.0, 2.0], 20) is None
-        # 20 ちょうどなら平均が返る
-        assert _ma(list(range(1, 21)), 20) == pytest.approx(10.5)
-
-    def test_log_vol_skips_nonpositive(self):
-        # 0 を含む系列でも log を取らず継続できる（実質スキップ）
-        from plugins.price_predictor import _log_vol
-        closes = [100.0] * 61
-        # 一定値 → 全ログリターン 0 → std 0
-        assert _log_vol(closes, 60) == pytest.approx(0.0, abs=1e-12)
-
-    def test_rsi_extreme_cases(self):
-        from plugins.price_predictor import _rsi
-        # 単調上昇 → RSI = 100
-        closes = list(range(1, 100))
-        assert _rsi(closes, 14) == 100.0
-        # 単調下降 → RSI = 0 ではなく 0 付近（loss > 0、gain = 0）
-        closes = list(range(100, 0, -1))
-        assert _rsi(closes, 14) == pytest.approx(0.0, abs=1e-9)
-
-    def test_compute_price_features_full(self):
-        from plugins.price_predictor import _compute_price_features
-        closes, highs, lows = self._gen_prices(200, seed=1)
-        # 末尾で計算（n - 1 = 199）
-        pf = _compute_price_features(closes, highs, lows, 199)
-        assert pf is not None
-        assert set(pf.keys()) == {"ma20_dev", "vol60", "rsi14", "atr_ratio"}
-        # vol60 は妥当な範囲
-        assert 0 < pf["vol60"] < 0.5
-        assert 0 <= pf["rsi14"] <= 100
-
-    def test_compute_price_features_insufficient_history(self):
-        from plugins.price_predictor import _compute_price_features
-        closes, highs, lows = self._gen_prices(30, seed=1)
-        # 60 日分の vol60 が取れないため None
-        pf = _compute_price_features(closes, highs, lows, 29)
-        assert pf is None
-
-
 # ── shares_outstanding ───────────────────────────────────────────────────
 
 class TestSharesOutstanding:
