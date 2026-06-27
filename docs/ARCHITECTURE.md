@@ -1018,7 +1018,7 @@ graph TB
 | `docs/reviews/` | ドキュメント | 分析モデル等の設計レビュー記録（ADR 化前の検討メモ。例: M-2 macro-gbdt レビュー）。現行参照には使わない | — |
 | `VISION.md` | ドキュメント | プロジェクトの目的・方針 | — |
 | `CONTEXT.md` | ドキュメント | ドメイン用語集（再分類項目・分析特徴量・表示項目・パラメータ契約の用語定義）。CLAUDE.md 設計制約から参照 | — |
-| `docs/adr/*.md` | ドキュメント | ADR（Architecture Decision Record）。`0001`＝バリュエーション統合とバックテスト一般化（旧 total_return→gap_analysis 吸収）／`0002`＝M-1 per-stock 階層マクロβ／`0003`＝M-2 マクロ×財務 GBDT／`0004`＝M-2 downstream（売り推奨・OOF バックテスト） | — |
+| `docs/adr/*.md` | ドキュメント | ADR（Architecture Decision Record）。`0001`＝バリュエーション統合とバックテスト一般化（旧 total_return→gap_analysis 吸収）／`0002`＝M-1 per-stock 階層マクロβ／`0003`＝M-2 マクロ×財務 GBDT／`0004`＝M-2 downstream（売り推奨・OOF バックテスト）／`0005`＝price_predictor 削除・③リターン予測を比較ファミリーへ集約／`0006`＝日本マクロ指標 e-Stat/日銀コネクタ設計 | — |
 | `CLAUDE.md` | 設定 | Claude Codeへの動作指示（索引＋必須ルール） | — |
 | `.claude/agents/financial-app-explorer.md` | 設定 | read-only 探索サブエージェント定義（多ファイル調査・大ドキュメント精読をトークン節約で委譲） | — |
 | `.claude/skills/*/SKILL.md` | 設定 | プロジェクト固有スキル（`/tidy` 軽量化点検 等）＋汎用スキル群。索引・各スキルの説明は [SKILLS_AND_AGENTS.md](SKILLS_AND_AGENTS.md) を参照 | — |
