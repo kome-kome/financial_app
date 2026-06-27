@@ -1,3 +1,9 @@
+// Chart.js 用コンテナ: responsive+maintainAspectRatio:false は固定高さ+relative の親が必須。
+// 親が auto 高さだと ResizeObserver がフィードバックループを起こし無限再描画になる。
+function makeChartContainer(id, height) {
+  return `<div style="position:relative;height:${height}px;margin-bottom:16px"><canvas id="${id}"></canvas></div>`;
+}
+
 function showNotif(msg, type='error'){
   const el = document.createElement('div');
   el.textContent = msg;
@@ -1620,7 +1626,7 @@ function _mgPaintCv(data) {
     </div>
   </div>
   ${oofHtml}
-  <div style="position:relative;height:360px;margin-bottom:16px"><canvas id="chart-mg-bubble"></canvas></div>`;
+  ${makeChartContainer('chart-mg-bubble', 360)}`;
   const resultCard = document.getElementById('dynresult-macro_gbdt') || el.closest('.card');
   // CV パネルをテーブルより上に置くため、result area の直前に挿入
   const cvWrap = document.getElementById('mg-cv-wrap');
@@ -1822,9 +1828,7 @@ function _dlmInjectBubble() {
     const target = document.getElementById('dynresult-macro_dlm');
     if (target) target.insertAdjacentElement('beforebegin', wrap);
   }
-  // responsive+maintainAspectRatio:false は「固定高さ・relative の親」が必須。
-  // 親の高さを auto にすると Chart.js のリサイズ→ResizeObserver が循環し無限再描画になる。
-  wrap.innerHTML = `<div style="position:relative;height:360px;margin-bottom:16px"><canvas id="chart-dlm-bubble"></canvas></div>`;
+  wrap.innerHTML = makeChartContainer('chart-dlm-bubble', 360);
 }
 
 // λ・topN をパラメータフォームから読む（フォールバック: サーバー返却値）。
@@ -2035,7 +2039,7 @@ function _dlmTableHTML(data, v) {
         <select id="dlm-series" style="margin-left:6px;background:#0f1117;color:#e2e8f0;border:1px solid #1e2235;border-radius:6px;padding:4px 6px;font-size:12px">${seriesOpts}</select>
       </label>
     </div>
-    <div style="position:relative;height:320px;margin-bottom:16px"><canvas id="chart-dlm"></canvas></div>
+    ${makeChartContainer('chart-dlm', 320)}
     <div style="overflow-x:auto"><table>
       <thead><tr><th>#</th><th>コード</th><th>銘柄名</th><th>業種</th><th>µ̂(年率)</th><th>R_macro</th><th>U=µ̂−λR</th><th>F</th>${betaHead}<th>RMSE</th><th>被覆</th></tr></thead>
       <tbody>${trs}</tbody>
