@@ -40,6 +40,7 @@ jobs:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           JQUANTS_API_KEY: ${{ secrets.JQUANTS_API_KEY }}
           FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
+          ESTAT_API_KEY: ${{ secrets.ESTAT_API_KEY }}
         run: |
           python collector.py --macro --years "${{ github.event.inputs.years || '5' }}" 2>&1 | tee macro_collect.log
 
