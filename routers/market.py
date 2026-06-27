@@ -12,7 +12,7 @@ from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import func, text
 from sqlalchemy.orm import Session
 
@@ -241,6 +241,10 @@ async def list_companies(
     include_latest: bool = False,
     db: Session = Depends(api.get_db),
 ):
+    if not (1 <= limit <= 500):
+        raise HTTPException(400, "limit は 1〜500 の範囲で指定してください")
+    if offset < 0:
+        raise HTTPException(400, "offset は 0 以上で指定してください")
     query = db.query(Company)
     if q:
         query = query.filter(Company.name.ilike(f"%{q}%") | Company.sec_code.ilike(f"%{q}%"))
@@ -305,7 +309,7 @@ class ScreenRequest(BaseModel):
     max_pbr: Optional[float] = None
     min_div_yield: Optional[float] = None
     min_cf_ratio: Optional[float] = None
-    limit: int = 200
+    limit: int = Field(default=200, ge=1, le=500)
 
 
 @router.post("/api/screen")
@@ -494,12 +498,15 @@ async def db_stats(table: str, db: Session = Depends(api.get_db)):
     pct_agg: dict = {}
     if row_count > 0 and num_cols:
         try:
+            table_name = model.__tablename__
+            col_names = {c.name for c in model.__table__.columns}
             select_parts = ", ".join(
-                f"percentile_cont(0.5) WITHIN GROUP (ORDER BY {c.name}) AS {c.name}__p50, "
-                f"percentile_cont(0.99) WITHIN GROUP (ORDER BY {c.name}) AS {c.name}__p99"
+                f'percentile_cont(0.5) WITHIN GROUP (ORDER BY "{c.name}") AS "{c.name}__p50", '
+                f'percentile_cont(0.99) WITHIN GROUP (ORDER BY "{c.name}") AS "{c.name}__p99"'
                 for c in num_cols
+                if c.name in col_names
             )
-            p = db.execute(text(f"SELECT {select_parts} FROM {table}")).first()
+            p = db.execute(text(f'SELECT {select_parts} FROM "{table_name}"')).first()
             for col in num_cols:
                 p50 = getattr(p, f"{col.name}__p50", None)
                 p99 = getattr(p, f"{col.name}__p99", None)
