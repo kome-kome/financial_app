@@ -1275,8 +1275,20 @@ async def fetch_boj_series(
     """日銀時系列統計 API（stat-search.boj.or.jp/api/v1/getDataCode）から観測値を取得する。
     monthly: SURVEY_DATES は YYYYMM。quarterly: SURVEY_DATES は YYYYQQ（01-04=Q1-Q4）。
     四半期 Q1=4月公表, Q2=7月公表, Q3=10月公表, Q4=翌年1月公表 として calendar date へ変換後
-    lag_days 分だけ後ろへシフトして trade_date とする。"""
+    lag_days 分だけ後ろへシフトして trade_date とする。
+    quarterly 系列の startDate/endDate は YYYYQQ 形式に変換して送信（YYYYMM だと 400）。"""
     _Q_RELEASE_MONTH = {1: 4, 2: 7, 3: 10, 4: 1}
+
+    if freq == "quarterly":
+        def _yyyymm_to_boj_quarter(yyyymm: str) -> str:
+            year, month = int(yyyymm[:4]), int(yyyymm[4:])
+            if month <= 3:   return f"{year - 1}04"  # Jan-Mar → Q4 of prev year
+            elif month <= 6: return f"{year}01"       # Apr-Jun → Q1
+            elif month <= 9: return f"{year}02"       # Jul-Sep → Q2
+            else:            return f"{year}03"        # Oct-Dec → Q3
+        date_from = _yyyymm_to_boj_quarter(date_from)
+        date_to   = _yyyymm_to_boj_quarter(date_to)
+
     params = {
         "format":    "json",
         "db":        db,
@@ -1371,6 +1383,12 @@ async def fetch_estat_series(
         raw_v = val.get("$")
         t     = val.get("@time", "")
         if raw_v is None or t == "":
+            continue
+        # API がフィルタを無視して複数 @cat01/@area を返す場合に client-side で絞る。
+        # 同 (series_code, trade_date) 重複による CardinalityViolation を防ぐ。
+        if cd_cat01 and val.get("@cat01") != cd_cat01:
+            continue
+        if cd_area and val.get("@area") != cd_area:
             continue
         try:
             yyyymm = t[:6]  # "YYYYMM000000" → "YYYYMM"

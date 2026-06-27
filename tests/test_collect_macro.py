@@ -290,3 +290,21 @@ def test_boj_status_non_200_returns_empty():
             return await fetch_boj_series(s, "MD02", "MAM1NAM2M2MO", "202501", "202503")
     rows = asyncio.run(run())
     assert rows == []
+
+
+def test_boj_quarterly_uses_yyyyqq_date_format():
+    """quarterly 系列は startDate/endDate を YYYYQQ 形式で送信する（YYYYMM だと BOJ API が 400）。"""
+    import asyncio
+    captured = {}
+
+    async def run():
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured["url"] = str(request.url)
+            return httpx.Response(200, json=_boj_json("TK_CODE", "quarterly", [], []))
+        async with _REAL_ASYNC_CLIENT(transport=httpx.MockTransport(handler)) as s:
+            # date_from="202006"(June2020)→Q1="202001", date_to="202606"(June2026)→Q1="202601"
+            return await fetch_boj_series(s, "CO", "TK_CODE", "202006", "202606",
+                                          freq="quarterly")
+    asyncio.run(run())
+    assert "startDate=202001" in captured["url"], captured["url"]
+    assert "endDate=202601"   in captured["url"], captured["url"]
