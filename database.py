@@ -9,6 +9,7 @@ PostgreSQL スキーマ定義・ORM・upsert処理
   macro_data         — マクロ経済指標
   xbrl_raw_documents — XBRL生データキャッシュ
   regression_results — OLS回帰結果キャッシュ
+  app_settings       — アプリ設定（APP_PASSWORD 等）永続化
 VIEW:
   financial_metrics  — 派生指標・Zスコア・成長率（financial_records から都度算出）
 """
@@ -665,6 +666,18 @@ class CollectionLog(Base):
     message      = Column(Text)
 
 
+# ── 4b. アプリ設定永続化 ───────────────────────────────────────────────────────
+# Render 等 ephemeral FS 環境でも設定が再起動後も保持されるよう DB に格納する。
+# APP_PASSWORD のリセット結果はここに書き込まれ、起動時に env より優先して読まれる。
+
+class AppSetting(Base):
+    __tablename__ = "app_settings"
+
+    key        = Column(String(64), primary_key=True)
+    value      = Column(Text, nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+
 # ── 5. マクロデータ（為替・金利・指数・コモディティ） ──────────────────────
 
 class MacroData(Base):
@@ -1030,6 +1043,22 @@ def init_db():
 
 
 # ── 7. Upsert 処理 ─────────────────────────────────────────────────────────
+
+def get_setting(db, key: str):
+    """app_settings から値を取得。未設定なら None。"""
+    row = db.query(AppSetting).filter_by(key=key).first()
+    return row.value if row else None
+
+
+def upsert_setting(db, key: str, value: str) -> None:
+    """app_settings へ key=value を upsert しコミット。"""
+    row = db.query(AppSetting).filter_by(key=key).first()
+    if row is None:
+        db.add(AppSetting(key=key, value=value, updated_at=datetime.now(timezone.utc)))
+    else:
+        row.value = value
+        row.updated_at = datetime.now(timezone.utc)
+    db.commit()
 
 def upsert_company(db, data: dict) -> Company:
     obj = db.query(Company).filter_by(edinet_code=data["edinet_code"]).first()

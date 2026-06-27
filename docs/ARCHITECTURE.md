@@ -274,6 +274,12 @@ erDiagram
         text     message              "補足メッセージ"
     }
 
+    app_settings {
+        string   key        PK "設定キー（例: APP_PASSWORD）"
+        text     value         "設定値"
+        datetime updated_at   "最終更新日時"
+    }
+
     macro_data {
         int      id           PK "自動採番ID"
         string   series_code     "系列コード（USDJPY/US10Y/NIKKEI225/JP_REAL_GDP 等）"
@@ -429,8 +435,10 @@ sequenceDiagram
     Note over User,AUTH: ⑤ パスワードリセット（APP_RECOVERY_KEY使用）
     User ->> AUTH : POST /api/auth/reset-password { recovery_key, new_password }
     AUTH ->> AUTH : hmac.compare_digest() で回復キーを検証
-    AUTH ->> AUTH : .env ファイルの APP_PASSWORD を更新
+    AUTH ->> DB   : upsert app_settings(key="APP_PASSWORD", value=new_pw)
+    AUTH ->> AUTH : api.APP_PASSWORD をインメモリ更新
     AUTH -->> User : 200 { "message": "パスワードを更新しました" }
+    Note over AUTH,DB: 起動時: lifespan が app_settings から APP_PASSWORD を読み Render 再起動後も永続
 ```
 
 ### セキュリティレスポンスヘッダ（`_SecurityHeadersMiddleware`）

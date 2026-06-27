@@ -353,7 +353,7 @@ ADR-0006 §Decision-1 が定める CPI チャネル。
 | `JQUANTS_API_KEY` | J-Quants API キー（任意） | 手動設定 |
 | `FRED_API_KEY` | FRED（米セントルイス連銀）API キー（任意） | 手動設定。未設定時はマクロ収集の FRED チャネルをスキップ |
 | `ESTAT_API_KEY` | 政府統計 e-Stat API キー（任意・CPI 収集用） | [e-stat.go.jp/api/](https://www.e-stat.go.jp/api/) で無料登録。未設定時は e-Stat チャネルをスキップ |
-| `APP_PASSWORD` | ログインパスワード | 手動設定（必須） |
+| `APP_PASSWORD` | ログインパスワード（初期値） | 手動設定（必須）。リセット後は `app_settings` テーブルの値が優先（Render 再起動後も永続） |
 | `APP_SECRET_KEY` | トークン署名キー（HMAC） | Render 自動生成 |
 | `APP_RECOVERY_KEY` | パスワードリセット用 | 手動設定 |
 | `ALLOWED_ORIGIN` | CORS 許可オリジン | 手動設定（例: `https://<your-service>.onrender.com`） |

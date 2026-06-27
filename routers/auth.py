@@ -3,7 +3,6 @@
 /api/auth/* および /health を担当。
 """
 import logging
-from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel
@@ -13,24 +12,6 @@ import api
 
 router = APIRouter()
 log = logging.getLogger(__name__)
-
-BASE_DIR = Path(__file__).parent.parent
-
-
-def _update_env_file(key: str, value: str):
-    env_path = BASE_DIR / ".env"
-    lines = []
-    found = False
-    if env_path.exists():
-        for line in env_path.read_text(encoding="utf-8").splitlines():
-            if line.startswith(f"{key}="):
-                lines.append(f"{key}={value}")
-                found = True
-            else:
-                lines.append(line)
-    if not found:
-        lines.append(f"{key}={value}")
-    env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 class LoginRequest(BaseModel):
@@ -89,7 +70,12 @@ async def reset_password(request: Request, req: ResetPasswordRequest):
     if len(new_pw) < 8:
         raise HTTPException(400, "パスワードは8文字以上で設定してください")
     api.APP_PASSWORD = new_pw
-    _update_env_file("APP_PASSWORD", api.APP_PASSWORD)
+    db = api.SessionLocal()
+    try:
+        from database import upsert_setting
+        upsert_setting(db, "APP_PASSWORD", new_pw)
+    finally:
+        db.close()
     return {"message": "パスワードを更新しました"}
 
 
