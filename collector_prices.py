@@ -1356,6 +1356,7 @@ async def fetch_estat_series(
         "cdArea":       cd_area,
         "cdTimeFrom":   date_from,
         "cdTimeTo":     date_to,
+        "lvTime":       "4",   # 月次階層のみ取得（年次集計行を除外）
         "lang":         "J",
         "metaGetFlg":   "N",
     }
