@@ -187,3 +187,106 @@ def test_japan_macro_fred_series_registered():
     assert by_code["JP_TRADE_BAL"]["lag_days"] == 135
     # 既存系列は lag_days 未設定（= 0 既定で後方互換）
     assert "lag_days" not in by_code["JP10Y_FRED"]
+
+
+# ── 5. 日銀 API フェッチャー（ADR-0006 §着手点1）───────────────────────────
+from collector import fetch_boj_series, BOJ_SERIES, ESTAT_SERIES
+
+
+def _boj_json(series_code: str, freq: str, survey_dates: list, values: list) -> dict:
+    """fetch_boj_series が解析する BOJ API getDataCode レスポンス。"""
+    return {
+        "STATUS": 200,
+        "RESULTSET": [{
+            "SERIES_CODE": series_code,
+            "FREQUENCY": freq,
+            "VALUES": {"SURVEY_DATES": survey_dates, "VALUES": values},
+        }],
+    }
+
+
+def _fetch_boj(series_code, survey_dates, values, freq="monthly", lag_days=0, db_name="MD02"):
+    import asyncio
+
+    async def run():
+        def handler(request: httpx.Request) -> httpx.Response:
+            if "stat-search.boj.or.jp" in request.url.host:
+                return httpx.Response(200, json=_boj_json(series_code, freq, survey_dates, values))
+            return httpx.Response(404)
+        async with _REAL_ASYNC_CLIENT(transport=httpx.MockTransport(handler)) as s:
+            return await fetch_boj_series(s, db_name, series_code, "202001", "202601",
+                                          lag_days=lag_days, freq=freq)
+    return asyncio.run(run())
+
+
+def test_boj_monthly_m2_date_conversion_and_lag():
+    # M2 月次: YYYYMM=202501 → 2025-01-01 + 21days → 2025-01-22
+    rows = _fetch_boj("MAM1NAM2M2MO", [202501, 202502], [12000000, 12100000],
+                      freq="monthly", lag_days=21)
+    assert len(rows) == 2
+    assert rows[0]["trade_date"] == "2025-01-22"
+    assert rows[1]["trade_date"] == "2025-02-22"
+    assert rows[0]["close"] == 12000000.0
+
+
+def test_boj_quarterly_tankan_date_conversion_and_lag():
+    # 短観 四半期: Q1(01)→4月1日+14=4月15, Q2(02)→7月1日+14=7月15,
+    #              Q3(03)→10月1日+14=10月15, Q4(04)→翌年1月1日+14=1月15
+    rows = _fetch_boj("TK99F1000601GCQ01000", [202401, 202402, 202403, 202404],
+                      [11, 13, 14, 14], freq="quarterly", lag_days=14, db_name="CO")
+    assert len(rows) == 4
+    assert rows[0]["trade_date"] == "2024-04-15"   # Q1
+    assert rows[1]["trade_date"] == "2024-07-15"   # Q2
+    assert rows[2]["trade_date"] == "2024-10-15"   # Q3
+    assert rows[3]["trade_date"] == "2025-01-15"   # Q4 → 翌年1月
+
+
+def test_boj_series_registered():
+    by_code = {s["code"]: s for s in BOJ_SERIES}
+    # M2
+    assert "JP_M2" in by_code
+    assert by_code["JP_M2"]["db"] == "MD02"
+    assert by_code["JP_M2"]["freq"] == "monthly"
+    assert by_code["JP_M2"]["lag_days"] == 21
+    # 短観 4バリアント登録済み
+    for code in ("JP_TANKAN_MFG_LARGE", "JP_TANKAN_NONMFG_LARGE",
+                 "JP_TANKAN_MFG_SMALL", "JP_TANKAN_NONMFG_SMALL"):
+        assert code in by_code, f"{code} が BOJ_SERIES に未登録"
+        assert by_code[code]["db"] == "CO"
+        assert by_code[code]["freq"] == "quarterly"
+        assert by_code[code]["lag_days"] == 14
+
+
+def test_estat_series_registered():
+    by_code = {s["code"]: s for s in ESTAT_SERIES}
+    # CPI 3系列
+    assert "JP_CPI_TOTAL" in by_code
+    assert "JP_CPI_CORE"  in by_code
+    assert "JP_CPI_TOKYO" in by_code
+    assert by_code["JP_CPI_CORE"]["cd_cat01"]  == "0161"   # 生鮮食品を除く総合
+    assert by_code["JP_CPI_TOKYO"]["cd_area"]  == "13100"  # 東京都区部
+    assert by_code["JP_CPI_CORE"]["lag_days"]  == 30
+
+
+def test_boj_api_error_returns_empty():
+    import asyncio
+
+    async def run():
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(500)
+        async with _REAL_ASYNC_CLIENT(transport=httpx.MockTransport(handler)) as s:
+            return await fetch_boj_series(s, "MD02", "MAM1NAM2M2MO", "202501", "202503")
+    rows = asyncio.run(run())
+    assert rows == []
+
+
+def test_boj_status_non_200_returns_empty():
+    import asyncio
+
+    async def run():
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={"STATUS": 400, "MESSAGE": "Invalid params"})
+        async with _REAL_ASYNC_CLIENT(transport=httpx.MockTransport(handler)) as s:
+            return await fetch_boj_series(s, "MD02", "MAM1NAM2M2MO", "202501", "202503")
+    rows = asyncio.run(run())
+    assert rows == []

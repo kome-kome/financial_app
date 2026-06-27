@@ -23,7 +23,7 @@ from database import (
     StockPriceDaily, StockPriceWeekly, MacroData, CollectionLog,
     latest_year_subq,
 )
-from collector import MACRO_SERIES
+from collector import MACRO_SERIES, FRED_SERIES, BOJ_SERIES, ESTAT_SERIES
 
 router = APIRouter()
 log = logging.getLogger(__name__)
@@ -135,14 +135,15 @@ async def list_macro_series(db: Session = Depends(api.get_db)):
         .all()
     )
     by_code = {r.series_code: r for r in rows}
+    all_series = MACRO_SERIES + FRED_SERIES + BOJ_SERIES + ESTAT_SERIES
     items = []
-    for s in MACRO_SERIES:
+    for s in all_series:
         r = by_code.get(s["code"])
         items.append({
             "code":     s["code"],
             "name":     s["name"],
             "category": s["category"],
-            "ticker":   s["ticker"],
+            "ticker":   s.get("ticker", ""),
             "rows":     int(r.rows) if r else 0,
             "oldest":   r.oldest if r else None,
             "newest":   r.newest if r else None,
@@ -153,7 +154,8 @@ async def list_macro_series(db: Session = Depends(api.get_db)):
 @router.get("/api/macro/data/{series_code}")
 async def get_macro_data(series_code: str, days: int = 365, db: Session = Depends(api.get_db)):
     """指定系列の日次データを最新 days 日分返す"""
-    if series_code not in {s["code"] for s in MACRO_SERIES}:
+    all_codes = {s["code"] for s in MACRO_SERIES + FRED_SERIES + BOJ_SERIES + ESTAT_SERIES}
+    if series_code not in all_codes:
         raise HTTPException(404, "未知の系列コードです")
     if not (1 <= days <= 10000):
         raise HTTPException(400, "days は 1〜10000 の範囲で指定してください")

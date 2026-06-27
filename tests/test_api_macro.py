@@ -14,10 +14,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import api  # noqa: E402
 from database import MacroData  # noqa: E402
-from collector import MACRO_SERIES  # noqa: E402
+from collector import MACRO_SERIES, FRED_SERIES, BOJ_SERIES, ESTAT_SERIES  # noqa: E402
 
 client = TestClient(api.app)
 
+_ALL_SERIES = MACRO_SERIES + FRED_SERIES + BOJ_SERIES + ESTAT_SERIES
 _VALID_CODE = MACRO_SERIES[0]["code"]  # 例: "USDJPY"
 
 
@@ -35,7 +36,7 @@ class TestMacroSeries:
         r = client.get("/api/macro/series")
         assert r.status_code == 200
         items = r.json()["series"]
-        assert len(items) == len(MACRO_SERIES)
+        assert len(items) == len(_ALL_SERIES)
         assert all(i["rows"] == 0 for i in items)
 
     def test_reflects_row_counts(self, db):

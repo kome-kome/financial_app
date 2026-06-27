@@ -81,6 +81,13 @@ _MACRO_MAP = {
     "macro_jp_unemp_zscore":     ("JP_UNEMP",     "zscore"),
     "macro_jp_ip_yoy":           ("JP_IP",        "yoy"),
     "macro_jp_trade_bal_zscore": ("JP_TRADE_BAL", "zscore"),
+    # ── 日銀/e-Stat チャネル（ADR-0006・#251 第2弾）───────────────────────────
+    # 日銀コア CPI は BOJ が金融政策判断基準に使う指標で M-1 の金利文脈と整合。
+    # 短観 DI は既に拡散指数（水準値）なため yoy は解釈が歪む → zscore。
+    # M2 は名目水準なので yoy。公表ラグは収集側（BOJ_SERIES/ESTAT_SERIES.lag_days）で補正済み。
+    "macro_jp_cpi_core_yoy":          ("JP_CPI_CORE",         "yoy"),
+    "macro_jp_tankan_mfg_large_zscore": ("JP_TANKAN_MFG_LARGE", "zscore"),
+    "macro_jp_m2_yoy":                ("JP_M2",               "yoy"),
 }
 MACRO_FEATURE_NAMES = list(_MACRO_MAP.keys())
 
@@ -106,6 +113,9 @@ MACRO_FEATURE_OPTIONS = [
     {"value": "macro_jp_unemp_zscore",     "label": "日本 失業率 Zスコア"},
     {"value": "macro_jp_ip_yoy",           "label": "日本 鉱工業生産指数 前年比（YoY）"},
     {"value": "macro_jp_trade_bal_zscore", "label": "日本 貿易収支 Zスコア"},
+    {"value": "macro_jp_cpi_core_yoy",           "label": "日本 コアCPI 前年比（YoY）"},
+    {"value": "macro_jp_tankan_mfg_large_zscore", "label": "日銀短観 製造業大企業 業況DI Zスコア"},
+    {"value": "macro_jp_m2_yoy",                 "label": "日本 M2（マネーストック）前年比（YoY）"},
 ]
 DEFAULT_MACRO_FEATURES = ["macro_usdjpy_yoy", "macro_sp500_yoy", "macro_us10y_zscore"]
 

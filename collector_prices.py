@@ -1113,6 +1113,103 @@ FRED_SERIES: list[dict] = [
 # 市場系（years_back）より長く遡って観測点を担保する。
 FRED_MIN_YEARS_BACK = 10
 
+# ── 日銀 時系列統計 API（stat-search.boj.or.jp/api/v1）─────────────────────
+# 認証不要・JSON。ADR-0006 §Decision-2。
+# 注: ADR は api.boj.or.jp と記したが実エンドポイントは stat-search.boj.or.jp/api/v1
+#   （2026-02 新 API 発表後も stat-search が正式エンドポイント）→ GOTCHAS.md に記載済み。
+BOJ_BASE_URL  = "https://www.stat-search.boj.or.jp/api/v1"
+BOJ_RATE_SLEEP = 0.5  # 同一 DB への連続リクエストに備えたバッファ
+
+# freq="monthly" → SURVEY_DATES は YYYYMM（e.g. 202501）
+# freq="quarterly" → SURVEY_DATES は YYYYQQ（01=Q1/4月, 02=Q2/7月, 03=Q3/10月, 04=Q4/翌1月）
+BOJ_SERIES: list[dict] = [
+    {
+        "code": "JP_M2",
+        "name": "日本 M2（マネーストック）",
+        "category": "money",
+        "db": "MD02",
+        "boj_code": "MAM1NAM2M2MO",
+        "freq": "monthly",
+        "lag_days": 21,
+    },
+    {
+        "code": "JP_TANKAN_MFG_LARGE",
+        "name": "短観 製造業大企業 業況DI",
+        "category": "survey",
+        "db": "CO",
+        "boj_code": "TK99F1000601GCQ01000",
+        "freq": "quarterly",
+        "lag_days": 14,
+    },
+    {
+        "code": "JP_TANKAN_NONMFG_LARGE",
+        "name": "短観 非製造業大企業 業況DI",
+        "category": "survey",
+        "db": "CO",
+        "boj_code": "TK99F2000601GCQ01000",
+        "freq": "quarterly",
+        "lag_days": 14,
+    },
+    {
+        "code": "JP_TANKAN_MFG_SMALL",
+        "name": "短観 製造業中小企業 業況DI",
+        "category": "survey",
+        "db": "CO",
+        "boj_code": "TK99F1000601GCQ03000",
+        "freq": "quarterly",
+        "lag_days": 14,
+    },
+    {
+        "code": "JP_TANKAN_NONMFG_SMALL",
+        "name": "短観 非製造業中小企業 業況DI",
+        "category": "survey",
+        "db": "CO",
+        "boj_code": "TK99F2000601GCQ03000",
+        "freq": "quarterly",
+        "lag_days": 14,
+    },
+]
+
+# ── e-Stat API（CPI）──────────────────────────────────────────────────────────
+# ESTAT_API_KEY が設定されている場合のみ収集（FRED_API_KEY と同挙動）。
+# アカウント登録: https://www.e-stat.go.jp/api/ （無料・要ユーザー登録）
+# GitHub Actions シークレット名: ESTAT_API_KEY
+# statsDataId=0003427113: 2020年基準消費者物価指数
+#   cdCat01=0001: 総合, 0161: 生鮮食品を除く総合（非季調）
+#   cdArea=00000: 全国, 13100: 東京都区部
+ESTAT_API_KEY  = os.getenv("ESTAT_API_KEY", "")
+ESTAT_BASE_URL = "https://api.e-stat.go.jp/rest/3.0/app/json/getStatsData"
+
+ESTAT_SERIES: list[dict] = [
+    {
+        "code": "JP_CPI_TOTAL",
+        "name": "日本 CPI 全国総合",
+        "category": "price",
+        "stats_data_id": "0003427113",
+        "cd_cat01": "0001",
+        "cd_area": "00000",
+        "lag_days": 30,
+    },
+    {
+        "code": "JP_CPI_CORE",
+        "name": "日本 CPI 全国コア（生鮮除く）",
+        "category": "price",
+        "stats_data_id": "0003427113",
+        "cd_cat01": "0161",
+        "cd_area": "00000",
+        "lag_days": 30,
+    },
+    {
+        "code": "JP_CPI_TOKYO",
+        "name": "日本 CPI 東京都区部総合",
+        "category": "price",
+        "stats_data_id": "0003427113",
+        "cd_cat01": "0001",
+        "cd_area": "13100",
+        "lag_days": 30,
+    },
+]
+
 
 async def fetch_fred_series(
     session: httpx.AsyncClient,
@@ -1162,6 +1259,132 @@ async def fetch_fred_series(
                 "volume": None,
             })
         except (ValueError, KeyError):
+            continue
+    return rows
+
+
+async def fetch_boj_series(
+    session: httpx.AsyncClient,
+    db: str,
+    boj_code: str,
+    date_from: str,  # "YYYYMM"
+    date_to:   str,  # "YYYYMM"
+    lag_days: int = 0,
+    freq: str = "monthly",
+) -> list:
+    """日銀時系列統計 API（stat-search.boj.or.jp/api/v1/getDataCode）から観測値を取得する。
+    monthly: SURVEY_DATES は YYYYMM。quarterly: SURVEY_DATES は YYYYQQ（01-04=Q1-Q4）。
+    四半期 Q1=4月公表, Q2=7月公表, Q3=10月公表, Q4=翌年1月公表 として calendar date へ変換後
+    lag_days 分だけ後ろへシフトして trade_date とする。"""
+    _Q_RELEASE_MONTH = {1: 4, 2: 7, 3: 10, 4: 1}
+    params = {
+        "format":    "json",
+        "db":        db,
+        "startDate": date_from,
+        "endDate":   date_to,
+        "code":      boj_code,
+    }
+    try:
+        r = await session.get(f"{BOJ_BASE_URL}/getDataCode", params=params, timeout=30)
+        r.raise_for_status()
+        data = r.json()
+    except Exception as e:
+        log.warning("BOJ 取得失敗 %s/%s: %s", db, boj_code, type(e).__name__)
+        return []
+
+    if data.get("STATUS") != 200:
+        log.warning("BOJ 取得失敗 %s/%s: STATUS=%s", db, boj_code, data.get("STATUS"))
+        return []
+
+    rows = []
+    for series in data.get("RESULTSET", []):
+        vdata = series.get("VALUES", {})
+        survey_dates = vdata.get("SURVEY_DATES", [])
+        values       = vdata.get("VALUES", [])
+        for sd, v in zip(survey_dates, values):
+            if v is None:
+                continue
+            sd_str = str(sd)
+            if freq == "quarterly":
+                year    = int(sd_str[:4])
+                quarter = int(sd_str[4:])
+                month   = _Q_RELEASE_MONTH[quarter]
+                if quarter == 4:
+                    year += 1
+                obs_date = date(year, month, 1).isoformat()
+            else:
+                year     = int(sd_str[:4])
+                month    = int(sd_str[4:])
+                obs_date = date(year, month, 1).isoformat()
+            if lag_days:
+                obs_date = (date.fromisoformat(obs_date) + timedelta(days=lag_days)).isoformat()
+            rows.append({
+                "trade_date": obs_date,
+                "open": None, "high": None, "low": None,
+                "close": float(v), "volume": None,
+            })
+    return rows
+
+
+async def fetch_estat_series(
+    session: httpx.AsyncClient,
+    stats_data_id: str,
+    cd_cat01: str,
+    cd_area: str,
+    date_from: str,  # "YYYYMM000000"
+    date_to:   str,  # "YYYYMM000000"
+    lag_days: int = 0,
+) -> list:
+    """e-Stat API（api.e-stat.go.jp）から月次統計を取得する。ESTAT_API_KEY が必要。
+    @time 形式 YYYYMM000000 の先頭6文字（YYYYMM）を月初日に変換後 lag_days でシフト。"""
+    params = {
+        "appId":        ESTAT_API_KEY,
+        "statsDataId":  stats_data_id,
+        "cdCat01":      cd_cat01,
+        "cdArea":       cd_area,
+        "cdTimeFrom":   date_from,
+        "cdTimeTo":     date_to,
+        "lang":         "J",
+        "metaGetFlg":   "N",
+    }
+    try:
+        r = await session.get(ESTAT_BASE_URL, params=params, timeout=30)
+        r.raise_for_status()
+        data = r.json()
+    except Exception as e:
+        log.warning("e-Stat 取得失敗 %s/%s: %s", stats_data_id, cd_cat01, type(e).__name__)
+        return []
+
+    try:
+        values = (
+            data["GET_STATS_DATA"]["STATISTICAL_DATA"]["DATA_INF"]["VALUE"]
+        )
+    except (KeyError, TypeError):
+        log.warning("e-Stat レスポンス解析失敗 %s/%s", stats_data_id, cd_cat01)
+        return []
+
+    if isinstance(values, dict):
+        values = [values]
+
+    rows = []
+    for val in values:
+        raw_v = val.get("$")
+        t     = val.get("@time", "")
+        if raw_v is None or t == "":
+            continue
+        try:
+            yyyymm = t[:6]  # "YYYYMM000000" → "YYYYMM"
+            year   = int(yyyymm[:4])
+            month  = int(yyyymm[4:])
+            obs_date = date(year, month, 1).isoformat()
+            if lag_days:
+                obs_date = (date.fromisoformat(obs_date) + timedelta(days=lag_days)).isoformat()
+            rows.append({
+                "trade_date": obs_date,
+                "open": None, "high": None, "low": None,
+                "close": float(raw_v), "volume": None,
+            })
+        except (ValueError, IndexError):
             continue
     return rows
 
@@ -1243,20 +1466,32 @@ async def collect_macro_data(
     on_progress: Optional[Callable[[int, int, str], None]] = None,
     cancel_check: Optional[Callable[[], bool]] = None,
 ):
-    """MACRO_SERIES（Yahoo/stooq）+ FRED_SERIES（FRED API）の全系列を macro_data に upsert する。
-    Yahoo Finance を優先して使用し（GitHub Actions Azure IP でも動作）、
-    取得失敗時は stooq にフォールバックする。FRED は FRED_API_KEY が設定された場合のみ収集。
-    既存レコードがあれば close 等を上書き（最新値で更新）。"""
-    today    = date.today()
-    start    = today - timedelta(days=int(years_back * 365.25))
-    d1       = start.strftime("%Y%m%d")
-    d2       = today.strftime("%Y%m%d")
+    """MACRO_SERIES（Yahoo/stooq）+ FRED_SERIES + BOJ_SERIES + ESTAT_SERIES を macro_data に upsert。
+    Yahoo Finance 優先（GitHub Actions Azure IP 対応）→ stooq フォールバック。
+    FRED: FRED_API_KEY 設定時のみ。BOJ: 常時収集（認証不要）。e-Stat: ESTAT_API_KEY 設定時のみ。
+    既存レコードは close 等を上書き（最新値で更新）。"""
+    today      = date.today()
+    start      = today - timedelta(days=int(years_back * 365.25))
+    d1         = start.strftime("%Y%m%d")
+    d2         = today.strftime("%Y%m%d")
     # FRED は市場系より長く遡る（四半期系列の zscore に ≥20 点を確保）。
     fred_start = today - timedelta(days=int(max(years_back, FRED_MIN_YEARS_BACK) * 365.25))
-    d1_iso   = fred_start.strftime("%Y-%m-%d")
-    d2_iso   = today.strftime("%Y-%m-%d")
-    total    = len(MACRO_SERIES) + (len(FRED_SERIES) if FRED_API_KEY else 0)
-    saved    = 0
+    d1_iso     = fred_start.strftime("%Y-%m-%d")
+    d2_iso     = today.strftime("%Y-%m-%d")
+    # BOJ: 短観は四半期なので FRED と同じく長めに遡る（zscore ≥20 点確保）。
+    boj_start  = today - timedelta(days=int(max(years_back, FRED_MIN_YEARS_BACK) * 365.25))
+    d1_boj     = boj_start.strftime("%Y%m")   # "YYYYMM"
+    d2_boj     = today.strftime("%Y%m")
+    # e-Stat: @time フォーマット YYYYMM000000。
+    d1_estat   = boj_start.strftime("%Y%m") + "000000"
+    d2_estat   = today.strftime("%Y%m") + "000000"
+    total      = (
+        len(MACRO_SERIES)
+        + (len(FRED_SERIES)  if FRED_API_KEY  else 0)
+        + len(BOJ_SERIES)
+        + (len(ESTAT_SERIES) if ESTAT_API_KEY else 0)
+    )
+    saved      = 0
 
     async with httpx.AsyncClient() as session:
         for i, series in enumerate(MACRO_SERIES, 1):
@@ -1297,27 +1532,67 @@ async def collect_macro_data(
         # ── FRED 収集（FRED_API_KEY が設定されている場合のみ）──────────────────
         if not FRED_API_KEY:
             if on_progress:
-                on_progress(total, total, "[FRED] FRED_API_KEY 未設定のためスキップ")
-            return saved
+                on_progress(len(MACRO_SERIES), total, "[FRED] FRED_API_KEY 未設定のためスキップ")
+        else:
+            base_i = len(MACRO_SERIES)
+            for j, series in enumerate(FRED_SERIES, 1):
+                idx = base_i + j
+                if cancel_check and cancel_check():
+                    if on_progress:
+                        on_progress(idx - 1, total, "[マクロ収集] ユーザー停止")
+                    return saved
 
-        base_i = len(MACRO_SERIES)
-        for j, series in enumerate(FRED_SERIES, 1):
-            idx = base_i + j
+                if on_progress:
+                    on_progress(idx - 1, total, f"[FRED {j}/{len(FRED_SERIES)}] {series['name']} 取得中")
+                rows = await fetch_fred_series(
+                    session, series["fred_id"], d1_iso, d2_iso, series.get("lag_days", 0)
+                )
+                await asyncio.sleep(FRED_RATE_SLEEP)
+
+                if not rows:
+                    if on_progress:
+                        on_progress(idx, total, f"[FRED {j}/{len(FRED_SERIES)}] {series['name']} データ無し")
+                    continue
+
+                vals = [{
+                    "series_code": series["code"],
+                    "series_name": series["name"],
+                    "category":    series["category"],
+                    "trade_date":  r["trade_date"],
+                    "open": r["open"], "high": r["high"], "low": r["low"],
+                    "close": r["close"], "volume": r["volume"],
+                } for r in rows]
+                n = upsert_macro_batch(db, vals)
+                db.commit()
+                saved += n
+                if on_progress:
+                    on_progress(idx, total, f"[FRED {j}/{len(FRED_SERIES)}] {series['name']}: {n}件処理")
+
+        # ── 日銀 収集（認証不要・常時）──────────────────────────────────────────
+        boj_base_i = len(MACRO_SERIES) + (len(FRED_SERIES) if FRED_API_KEY else 0)
+        for k, series in enumerate(BOJ_SERIES, 1):
+            idx = boj_base_i + k
             if cancel_check and cancel_check():
                 if on_progress:
                     on_progress(idx - 1, total, "[マクロ収集] ユーザー停止")
                 return saved
 
             if on_progress:
-                on_progress(idx - 1, total, f"[FRED {j}/{len(FRED_SERIES)}] {series['name']} 取得中")
-            rows = await fetch_fred_series(
-                session, series["fred_id"], d1_iso, d2_iso, series.get("lag_days", 0)
+                on_progress(idx - 1, total, f"[BOJ {k}/{len(BOJ_SERIES)}] {series['name']} 取得中")
+            rows = await fetch_boj_series(
+                session,
+                series["db"],
+                series["boj_code"],
+                d1_boj,
+                d2_boj,
+                series.get("lag_days", 0),
+                series.get("freq", "monthly"),
             )
-            await asyncio.sleep(FRED_RATE_SLEEP)
+            await asyncio.sleep(BOJ_RATE_SLEEP)
 
             if not rows:
                 if on_progress:
-                    on_progress(idx, total, f"[FRED {j}/{len(FRED_SERIES)}] {series['name']} データ無し")
+                    on_progress(idx, total, f"[BOJ {k}/{len(BOJ_SERIES)}] {series['name']} データ無し")
                 continue
 
             vals = [{
@@ -1332,6 +1607,50 @@ async def collect_macro_data(
             db.commit()
             saved += n
             if on_progress:
-                on_progress(idx, total, f"[FRED {j}/{len(FRED_SERIES)}] {series['name']}: {n}件処理")
+                on_progress(idx, total, f"[BOJ {k}/{len(BOJ_SERIES)}] {series['name']}: {n}件処理")
+
+        # ── e-Stat 収集（ESTAT_API_KEY が設定されている場合のみ）────────────────
+        if not ESTAT_API_KEY:
+            if on_progress:
+                on_progress(total, total, "[e-Stat] ESTAT_API_KEY 未設定のためスキップ")
+        else:
+            estat_base_i = boj_base_i + len(BOJ_SERIES)
+            for m, series in enumerate(ESTAT_SERIES, 1):
+                idx = estat_base_i + m
+                if cancel_check and cancel_check():
+                    if on_progress:
+                        on_progress(idx - 1, total, "[マクロ収集] ユーザー停止")
+                    return saved
+
+                if on_progress:
+                    on_progress(idx - 1, total, f"[e-Stat {m}/{len(ESTAT_SERIES)}] {series['name']} 取得中")
+                rows = await fetch_estat_series(
+                    session,
+                    series["stats_data_id"],
+                    series["cd_cat01"],
+                    series["cd_area"],
+                    d1_estat,
+                    d2_estat,
+                    series.get("lag_days", 0),
+                )
+
+                if not rows:
+                    if on_progress:
+                        on_progress(idx, total, f"[e-Stat {m}/{len(ESTAT_SERIES)}] {series['name']} データ無し")
+                    continue
+
+                vals = [{
+                    "series_code": series["code"],
+                    "series_name": series["name"],
+                    "category":    series["category"],
+                    "trade_date":  r["trade_date"],
+                    "open": r["open"], "high": r["high"], "low": r["low"],
+                    "close": r["close"], "volume": r["volume"],
+                } for r in rows]
+                n = upsert_macro_batch(db, vals)
+                db.commit()
+                saved += n
+                if on_progress:
+                    on_progress(idx, total, f"[e-Stat {m}/{len(ESTAT_SERIES)}] {series['name']}: {n}件処理")
 
     return saved
