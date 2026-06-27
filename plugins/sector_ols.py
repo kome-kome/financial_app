@@ -267,6 +267,18 @@ class SectorOLSPlugin(AnalysisPlugin):
                     "VIF>10 が頻発するため Ridge を強く推奨。"
                 ),
             },
+            "shrink_threshold": {
+                "type": "number",
+                "dtype": "int",
+                "label": "薄業種縮約閾値（0=無効）",
+                "default": 15,
+                "min": 0,
+                "description": (
+                    "業種サンプル数がこの値未満の場合、全社プール OLS との予測ブレンドで係数を安定化"
+                    "（部分プーリング）。n/threshold が小さいほどグローバル予測への縮約が強い。"
+                    "0 で無効化（従来の separate OLS 動作）。"
+                ),
+            },
         }
 
     def _load_records(self, db, year: int | None) -> list:
@@ -519,11 +531,12 @@ class SectorOLSPlugin(AnalysisPlugin):
         return stat_entry
 
     async def execute(self, params: dict, db: Any) -> dict:
-        target         = params["target"]
-        features       = params["features"]
-        min_samples    = params["min_samples"]
-        regularization = params["regularization"]
-        year           = params["year"]
+        target           = params["target"]
+        features         = params["features"]
+        min_samples      = params["min_samples"]
+        regularization   = params["regularization"]
+        year             = params["year"]
+        shrink_threshold = params["shrink_threshold"]
 
         if not features:
             raise ValueError("説明変数を1つ以上選択してください")
@@ -543,6 +556,21 @@ class SectorOLSPlugin(AnalysisPlugin):
 
         by_sector = self._classify_by_sector(base, features)
 
+        # 部分プーリング: 薄業種の係数安定化のため全社プール OLS を事前フィット
+        global_pred_map: dict = {}
+        if shrink_threshold > 0:
+            all_eligible = [
+                s for _, samples in by_sector.items()
+                if len(samples) >= min_samples
+                for s in samples
+            ]
+            if all_eligible:
+                X_g, y_g, y_g_mu, y_g_sd, _, _ = self._preprocess_sector(all_eligible, features)
+                g_result, g_yhat = self._fit_and_predict(X_g, y_g, y_g_mu, y_g_sd, regularization)
+                if g_result is not None:
+                    for i, s in enumerate(all_eligible):
+                        global_pred_map[(s[2].edinet_code, s[2].year)] = g_yhat[i]
+
         sector_stats, all_predictions, n_skipped = [], [], 0
 
         for sector, samples in sorted(by_sector.items()):
@@ -555,6 +583,15 @@ class SectorOLSPlugin(AnalysisPlugin):
             if result is None:
                 n_skipped += 1
                 continue
+
+            # 薄業種: グローバル予測へ縮約（w = 1 - n/threshold、n=0 → 完全グローバル）
+            n = len(samples)
+            if global_pred_map and n < shrink_threshold:
+                w = 1.0 - n / shrink_threshold
+                all_yhat = [
+                    w * global_pred_map.get((s[2].edinet_code, s[2].year), yhat) + (1.0 - w) * yhat
+                    for s, yhat in zip(samples, all_yhat)
+                ]
 
             sector_preds = self._persist_and_rank(db, sector, samples, all_yhat, regularization)
             stat_entry   = self._build_stat_entry(
@@ -583,6 +620,11 @@ class SectorOLSPlugin(AnalysisPlugin):
             "dropped_features":  dropped_features,
             "sector_stats":      sector_stats,
             "results":           all_predictions,
+            "shrink_threshold":  shrink_threshold,
+            "n_shrunk_sectors":  (
+                sum(1 for s in sector_stats if s["n"] < shrink_threshold)
+                if shrink_threshold > 0 else 0
+            ),
         }
 
 

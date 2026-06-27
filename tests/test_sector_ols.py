@@ -383,3 +383,126 @@ class TestBuildStatEntry:
             X_win_cols=[[1.0, 2.0, 3.0, 4.0, 5.0], [2.0, 1.0, 4.0, 3.0, 5.0]],
         )
         assert entry["condition_number"] == round(12.3456, 2)
+
+
+# ── 部分プーリング（薄業種縮約）テスト ────────────────────────────────────────────
+
+class TestShrinkage:
+    """shrink_threshold による薄業種の gap_ratio 安定化を検証。"""
+
+    FEATURES = ["pl_eps", "bs_bps"]  # 2特徴量: 薄業種でも OLS が回る最小構成
+
+    def _seed_two_sectors(self, db, make_fin, n_thin=7, n_thick=20):
+        """薄業種（n_thin 社・外れ値1社含む）＋厚業種（n_thick 社）を投入。"""
+        recs = []
+        # 厚業種: 正常データ
+        for i in range(1, n_thick + 1):
+            bps_val = 500.0 + 30.0 * i
+            recs.append(make_fin(
+                edinet_code=f"T{i:05d}", industry="厚業種",
+                bs_total_equity=bps_val * 1.0e6,
+                bs_bps=bps_val,
+                pl_net_income=5.0e7 + 1.0e7 * i,
+                pl_eps=50.0 + 5.0 * i,
+                dps=10.0 + i,
+                stock_price=800.0 + 50.0 * i,
+                market_cap=1000.0 + 100.0 * i,
+            ))
+        # 薄業種: 正常 (n_thin-1) 社 ＋ 外れ値 1 社（stock_price が 50倍）
+        for i in range(1, n_thin):
+            bps_val = 600.0 + 40.0 * i
+            recs.append(make_fin(
+                edinet_code=f"S{i:05d}", industry="薄業種",
+                bs_total_equity=bps_val * 1.0e6,
+                bs_bps=bps_val,
+                pl_net_income=4.0e7 + 8.0e6 * i,
+                pl_eps=40.0 + 4.0 * i,
+                dps=8.0 + i,
+                stock_price=700.0 + 40.0 * i,
+                market_cap=900.0 + 80.0 * i,
+            ))
+        # 外れ値: EPS・BPS は普通だが stock_price が極端
+        recs.append(make_fin(
+            edinet_code="SOUT1", industry="薄業種",
+            bs_total_equity=650.0 * 1.0e6,
+            bs_bps=650.0,
+            pl_net_income=4.5e7,
+            pl_eps=45.0,
+            dps=9.0,
+            stock_price=50000.0,  # 50倍の外れ値
+            market_cap=60000.0,
+        ))
+        db.add_all(recs)
+        db.commit()
+
+    def test_shrink_threshold_in_return(self, db, make_fin):
+        """shrink_threshold と n_shrunk_sectors が戻り値に含まれること。"""
+        self._seed_two_sectors(db, make_fin)
+        res = asyncio.run(execute_plugin(
+            plugin,
+            {"features": self.FEATURES, "min_samples": 5, "shrink_threshold": 15},
+            db,
+        ))
+        assert "shrink_threshold" in res
+        assert res["shrink_threshold"] == 15
+        assert "n_shrunk_sectors" in res
+        assert res["n_shrunk_sectors"] >= 0
+
+    def test_no_shrinkage_when_threshold_zero(self, db, make_fin):
+        """shrink_threshold=0 のとき n_shrunk_sectors=0（従来 separate OLS と同等）。"""
+        self._seed_two_sectors(db, make_fin)
+        res = asyncio.run(execute_plugin(
+            plugin,
+            {"features": self.FEATURES, "min_samples": 5, "shrink_threshold": 0},
+            db,
+        ))
+        assert res["shrink_threshold"] == 0
+        assert res["n_shrunk_sectors"] == 0
+
+    def test_thin_sector_counted_as_shrunk(self, db, make_fin):
+        """薄業種（n < threshold）が n_shrunk_sectors に計上されること。"""
+        self._seed_two_sectors(db, make_fin, n_thin=7, n_thick=20)
+        res = asyncio.run(execute_plugin(
+            plugin,
+            {"features": self.FEATURES, "min_samples": 5, "shrink_threshold": 15},
+            db,
+        ))
+        # 薄業種 n=7 < threshold=15 → shrunk にカウントされる
+        assert res["n_shrunk_sectors"] >= 1
+
+    def test_shrinkage_reduces_gap_ratio_variance(self, db, make_fin):
+        """薄業種に外れ値がある場合、縮約あり/なしで gap_ratio 標準偏差が低下すること。"""
+        from database import RegressionResult
+        self._seed_two_sectors(db, make_fin, n_thin=7, n_thick=20)
+
+        # 縮約なし
+        asyncio.run(execute_plugin(
+            plugin,
+            {"features": self.FEATURES, "min_samples": 5, "shrink_threshold": 0},
+            db,
+        ))
+        thin_gaps_no_shrink = [
+            r.gap_ratio for r in db.query(RegressionResult).all()
+            if r.sector == "薄業種" and r.gap_ratio is not None
+        ]
+        db.query(RegressionResult).delete()
+        db.commit()
+
+        # 縮約あり
+        asyncio.run(execute_plugin(
+            plugin,
+            {"features": self.FEATURES, "min_samples": 5, "shrink_threshold": 15},
+            db,
+        ))
+        thin_gaps_shrunk = [
+            r.gap_ratio for r in db.query(RegressionResult).all()
+            if r.sector == "薄業種" and r.gap_ratio is not None
+        ]
+
+        assert len(thin_gaps_no_shrink) > 0 and len(thin_gaps_shrunk) > 0
+        std_no_shrink = statistics.stdev(thin_gaps_no_shrink) if len(thin_gaps_no_shrink) > 1 else 0
+        std_shrunk    = statistics.stdev(thin_gaps_shrunk)    if len(thin_gaps_shrunk) > 1 else 0
+        # 縮約後の std は縮約前以下（外れ値がグローバル予測に引き寄せられる）
+        assert std_shrunk <= std_no_shrink, (
+            f"shrunk std={std_shrunk:.2f} should be <= no-shrink std={std_no_shrink:.2f}"
+        )
