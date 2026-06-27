@@ -49,6 +49,12 @@ def test_macro_feature_map_keys():
     assert "macro_us30y_zscore" in _MACRO_FEATURE_MAP
     # macro_jp10y_zscore は stooq/Yahoo Finance で取得不可のため未公開
     assert "macro_jp10y_zscore" not in _MACRO_FEATURE_MAP
+    # #250 日本マクロのリバランス: 実体経済指標4種＋TOPIX を公開
+    assert _MACRO_FEATURE_MAP["macro_jp_real_gdp_yoy"]     == ("JP_REAL_GDP",  "yoy")
+    assert _MACRO_FEATURE_MAP["macro_jp_unemp_zscore"]     == ("JP_UNEMP",     "zscore")
+    assert _MACRO_FEATURE_MAP["macro_jp_ip_yoy"]           == ("JP_IP",        "yoy")
+    assert _MACRO_FEATURE_MAP["macro_jp_trade_bal_zscore"] == ("JP_TRADE_BAL", "zscore")
+    assert _MACRO_FEATURE_MAP["macro_topix_yoy"]           == ("TOPIX",        "yoy")
     for fname, (scode, ttype) in _MACRO_FEATURE_MAP.items():
         assert ttype in ("yoy", "zscore"), f"{fname} の transform が不正"
 

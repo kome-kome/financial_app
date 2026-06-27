@@ -659,14 +659,14 @@ IFRS には完全に対応する科目がないため、「非流動その他金
 | 財務（価格由来＝バリュー） | per, pbr, **div_yield** | per, pbr | 無次元（FinancialMetric VIEW） |
 | 財務（価格フリー） | roe, **roa**, **op_margin**, **net_margin**, **asset_turnover**, equity_ratio, **de_ratio**, **nc_ratio**, **cf_ratio**, **eps_growth**, **op_growth**, **rev_growth**, rd_intensity, da_intensity, z_op_margin, z_roe, z_cf_ratio | roe, **roa**, equity_ratio, **eps_growth** | 無次元（FinancialMetric VIEW 既存列。**asset_turnover は本改修で VIEW 追加**） |
 | モメンタム | 12-1ヶ月ログリターン | （use_momentum 時・**既定 OFF**） | log(P_short / P_long) |
-| マクロ | USDJPY/SP500/NIKKEI225 = YoY 変化率、US10Y = 5年 Z スコア | USDJPY, SP500, US10Y（use_macro 時） | YoY = Δ/前年 / Z = (現在−5年平均)/5年SD |
+| マクロ | 市場系: USDJPY/EURJPY/SP500/NIKKEI225/**TOPIX** = YoY、米5/10/30年金利・DXY・VIX・WTI・金・FREDクレジット/インフレ = Zスコア。**日本実体経済（#250）: 実質GDP・鉱工業生産 = YoY、失業率・貿易収支 = Zスコア** | USDJPY, SP500, US10Y（use_macro 時・米国寄り既定3本を維持） | YoY = Δ/前年 / Z = (現在−5年平均)/5年SD |
 | 交差項 | 選択財務 × 選択マクロ | （use_macro 時） | 積（無次元×無次元） |
 
 被説明変数は **1年先（52週先）週次ログリターン（年率・無次元）**。全特徴量は学習前に `winsorize(p1–p99)`→z-score 標準化を適用。
 
 > **PER/PBR は「循環参照」ではない（重要）**: 目的変数は株価水準ではなく**将来リターン**であるため、現在の PER/PBR で将来リターンを予測するのは正統な**バリュー・ファクター**（Fama-French HML ≒ book-to-market = 1/PBR）。`per×eps=price` の恒等式が問題になるのは「現在株価水準」を当てる場合だけで、本モデルには当てはまらない（**他のプラグイン sector_ols（業種別OLS）の per-share→株価 Ohlson 型（§2）とは目的変数が異なる**）。ただし PER/PBR は分子に同じ株価 P_t を共有し「割安」と「価格の平均回帰」を分離しきれないため、価格を含まないファンダ（roa/eps_growth 等）を既定に併置して補強する。**収益性の質を分解するデュポン因子（net_margin × asset_turnover ≈ roa）・成長（rev_growth）・財務健全性（nc_ratio）も価格フリーの選択肢として提供**する（既定外・任意採用）。div_yield は配当という株価由来のバリュー因子で per/pbr と同枠（循環ではない）。
 
-> **特徴量・マクロの選択 UI**: 財務特徴量（`fin_features` multiselect）とマクロ特徴量（`macro_features` multiselect）は `/analysis` の M-1 タブで選べる。`use_macro`（マスタ ON/OFF）が OFF のときはマクロ・交差項を生成しない。**モメンタムは `use_macro` から独立した `use_momentum`（既定 OFF）で制御する**（§9.4・§9.8：マクロを使いつつモメンタムの過去履歴要件を外して walk-forward CV を成立させるため）。選択肢は **FX・株式・米金利/期間・コモディティ・ボラの5チャネル / 11系列**（#218 フェーズ1）：USD/JPY・EUR/JPY・ドル指数(DXY)・S&P500・米5/10/30年金利・日経225・VIX・WTI・金。既定選択は USD/JPY・S&P500・米10年金利の3本のみで、その他は多重共線（VIX↔SP500・米金利↔DXY 等）や任意性のため既定では未選択（任意。pooled BIC が過剰選択を抑える）。VIX/DXY/US5Y/US30Y は `collect-macro.yml` の Actions 実行で macro_data への蓄積（各1255〜1257件/5年）を実証してから公開した。**TOPIX・JP10Y は本番 macro_data に蓄積がない（収集失敗：JP10Y=^JGB 上場廃止 / TOPIX=^tpx・^TPX 取得不可）ため選択肢から除外**（選ぶと全サンプルが None スキップで学習不能になる。収集が直り次第 `_MACRO_MAP` へ追加すれば自動で選択肢に出る）。
+> **特徴量・マクロの選択 UI**: 財務特徴量（`fin_features` multiselect）とマクロ特徴量（`macro_features` multiselect）は `/analysis` の M-1 タブで選べる。`use_macro`（マスタ ON/OFF）が OFF のときはマクロ・交差項を生成しない。**モメンタムは `use_macro` から独立した `use_momentum`（既定 OFF）で制御する**（§9.4・§9.8：マクロを使いつつモメンタムの過去履歴要件を外して walk-forward CV を成立させるため）。選択肢は **FX・株式・米金利/期間・コモディティ・ボラの5チャネル / 11系列**（#218 フェーズ1）：USD/JPY・EUR/JPY・ドル指数(DXY)・S&P500・米5/10/30年金利・日経225・VIX・WTI・金。既定選択は USD/JPY・S&P500・米10年金利の3本のみで、その他は多重共線（VIX↔SP500・米金利↔DXY 等）や任意性のため既定では未選択（任意。pooled BIC が過剰選択を抑える）。VIX/DXY/US5Y/US30Y は `collect-macro.yml` の Actions 実行で macro_data への蓄積（各1255〜1257件/5年）を実証してから公開した。**TOPIX は指数 ^TPX 配信停止のため収集を ETF 1306.T（NEXT FUNDS TOPIX・指数とほぼ同追従）へ切替え、YoY 特徴量として公開（#250）。日次の日本10年金利は ^JGB 上場廃止で取得不能のため引き続き未公開**。さらに **#250 で日本の実体経済指標4種を FRED 経由で追加**：実質GDP(JPNRGDPEXP)・鉱工業生産(JPNPROINDMISMEI)=YoY、失業率(LRUNTTTTJPM156S)・貿易収支(XTNTVA01JPQ664S)=Zスコア（米国偏重の是正）。これらは公表ラグが大きいため、収集時に `lag_days`（四半期135日・月次60日）分 `trade_date` を後ろへシフトして先読みバイアス（look-ahead）を防ぐ（[GOTCHAS.md](GOTCHAS.md) 参照）。既定はユーザー方針により米国寄り3本のまま（日本指標は任意選択）。米クレジット/インフレ系（HY_OAS・IG_OAS・BREAKEVEN10Y・T10Y2Y・JP10Y_FRED）は #221 で FRED から追加済み。
 
 ### 9.3 特徴量選択（LASSO-LARS / BIC）
 
@@ -918,7 +918,7 @@ M-1/M-2 と同じ「リターン予測ファミリ」に属し、最新の潜在
 |---|---|
 | 構造 | **銘柄別 TVP 時系列**（per-stock）。各銘柄を独立に推定し、銘柄固有の時変マクロ感応度を得る |
 | 観測 | **週次リターン × マクロ週次変化**（同時点ファクタ応答 / APT 型）。指数/FX/商品は対数リターン、金利は週次差分 |
-| ファクター | **マクロ + 市場ファクター**（既定 `USDJPY/US10Y/NIKKEI225/WTI`）。市場（日経225）を含めると α は市場・マクロ調整後の**固有アルファ** |
+| ファクター | **マクロ + 市場ファクター**（既定 `USDJPY/US10Y/NIKKEI225/WTI`）。市場（日経225）を含めると α は市場・マクロ調整後の**固有アルファ**。#250 で **TOPIX（広範市場・1306.T 連動・`dlm_topix`）を選択肢に追加**。日次の日本10年金利は ^JGB 廃止で取得不能のため `dlm_jp10y` は月次 FRED 据置（週次差分は多くの週でゼロ＝情報量に限界） |
 | 推定エンジン | **自前 割引係数 DLM（West & Harrison 型・numpy）**。割引 δ で状態ノイズを与え銘柄ごとの数値最適化が不要（1パス高速）。観測分散は Normal-Gamma 共役で学習し予測分布は Student-t |
 | α のダイナミクス | **ランダムウォーク（ローカルレベル）** α_t = α_{t-1} + ω |
 | ユニバース | 全適格銘柄（最低週数を満たすもの）・`heavy=True`（Render では 403・ローカル限定）。モデル非永続・毎回学習 |

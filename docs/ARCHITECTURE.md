@@ -62,7 +62,7 @@ graph LR
         FM["financial_metrics（VIEW）\n派生指標を都度SQL算出\n＋regression_results をJOIN"]
         RR[("regression_results\nOLS予測値\npredicted/gap（重い派生）")]
         SPH[("stock_price_daily / _weekly\nclose-only 2本立て\n直近6か月日次 + 全履歴週次")]
-        MD[("macro_data\n為替・金利・指数")]
+        MD[("macro_data\n為替・金利・指数・日本実体経済")]
         CL[("collection_logs\n収集ジョブログ")]
         FR --> FM
         RR --> FM
@@ -276,10 +276,10 @@ erDiagram
 
     macro_data {
         int      id           PK "自動採番ID"
-        string   series_code     "系列コード（USDJPY/US10Y/NIKKEI225 等）"
+        string   series_code     "系列コード（USDJPY/US10Y/NIKKEI225/JP_REAL_GDP 等）"
         string   series_name     "表示名"
-        string   category        "fx / rate / equity / commodity"
-        string   trade_date      "取引日（YYYY-MM-DD）"
+        string   category        "fx / rate / equity / commodity / credit / inflation / real_economy / labor / production / trade"
+        string   trade_date      "取引日（YYYY-MM-DD）。FRED 低頻度系列は公表ラグ分シフト済（#250）"
         float    open            "始値"
         float    high            "高値"
         float    low             "安値"
@@ -979,7 +979,7 @@ graph TB
 | `collector_utils.py` | バックエンド | 収集系モジュール共通の設定定数（EDINET/J-Quants/Yahoo/stooq のレート・並列数・バッチ閾値）とロガー `log` | dotenv |
 | `collector_master.py` | バックエンド | 企業/業種マスタ収集（EDINET コードリスト `fetch_edinet_code_list`・JPX 業種マスタ `update_industry_from_jpx` / `_read_jpx_excel`） | EDINET API, JPX, collector_utils |
 | `collector_financials.py` | バックエンド | XBRL 財務収集・パース・正規化（`parse_xbrl_csv` / `calc_derived` ほか）＋ CF/PL-BS 補完・再解析＋全件収集オーケストレーション（`run_full_collection` / `_phase_*`）。**派生指標・Zスコア・成長率・nc_ratio は永続化しない**（financial_metrics VIEW が担う）。`calc_derived` は free_cf/nonoperating_income の算出のみ残す | EDINET API, collector_utils, collector_master |
-| `collector_prices.py` | バックエンド | 株価収集（stooq / J-Quants / Yahoo）＋市場データ更新＋マクロ指標収集。株価は J-Quants が主経路（stooq は Azure IP ブロックのためローカル補助のみ）。`MACRO_SERIES` で為替・金利・指数・コモディティ・ボラ13系列を定義 | J-Quants, Yahoo, stooq, collector_utils |
+| `collector_prices.py` | バックエンド | 株価収集（stooq / J-Quants / Yahoo）＋市場データ更新＋マクロ指標収集。株価は J-Quants が主経路（stooq は Azure IP ブロックのためローカル補助のみ）。`MACRO_SERIES` で為替・金利・指数・コモディティ・ボラ13系列、`FRED_SERIES` で FRED 9系列（米クレジット/インフレ＋#250 日本実体経済4種：実質GDP・失業率・鉱工業生産・貿易収支、公表ラグ `lag_days` シフト付き）を定義。TOPIX は指数 ^TPX 配信停止のため ETF 1306.T で収集（#250） | J-Quants, Yahoo, stooq, FRED, collector_utils |
 | `data_quality.py` | バックエンド | データ品質チェック（NULL率・外れ値・収録状況） | database.py, api.py（import元） |
 | `plugins/base.py` | バックエンド | 分析プラグインの抽象基底クラス | — |
 | `plugins/__init__.py` | バックエンド | プラグインを自動スキャン・レジストリ管理 | plugins/*.py |

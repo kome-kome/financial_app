@@ -499,7 +499,7 @@ conv_score₁₂ₘ = max(<span class="val">5</span>, min(<span class="val">95</
     <li><strong>財務（価格由来＝バリュー）</strong>: PER / PBR（既定）</li>
     <li><strong>財務（価格フリー）</strong>: ROE / ROA / 自己資本比率 / D/E / 営業CF/売上 / EPS成長率 / 営業利益成長率 / R&amp;D集約度 / D&amp;A集約度 / Z スコア3種（FinancialMetric VIEW）。既定は ROE・ROA・自己資本比率・EPS成長率</li>
     <li><strong>モメンタム</strong>: 12-1ヶ月ログリターン — Jegadeesh-Titman (1993) アノマリー（use_macro 時）</li>
-    <li><strong>マクロ (innovation)</strong>: USDJPY / SP500 / NIKKEI225 = YoY 変化率、US10Y = 5年 Z スコア — Chen-Roll-Ross (1986) 型（既定は USDJPY・SP500・US10Y。TOPIX・JP10Y は収集不可のため非対応）</li>
+    <li><strong>マクロ (innovation)</strong>: 市場系 USDJPY / SP500 / NIKKEI225 / TOPIX = YoY 変化率、US10Y 等 = 5年 Z スコア、＋<strong>日本実体経済（実質GDP・鉱工業生産=YoY、失業率・貿易収支=Zスコア。FRED 経由・公表ラグ補正）</strong> — Chen-Roll-Ross (1986) 型（既定は米国寄り USDJPY・SP500・US10Y を維持。TOPIX は ETF 1306.T で収集修正済。日次の日本10年金利は ^JGB 廃止で非対応）</li>
     <li><strong>交差項</strong>: 選択財務 × 選択マクロ + セクターダミー × マクロ（APT の異質感応度 β を捕捉）</li>
   </ul>
   <p><strong>PER/PBR は循環参照ではない</strong>：目的変数は株価水準でなく<strong>将来リターン</strong>のため、現在の PER/PBR で将来リターンを予測するのは正統な<strong>バリュー・ファクター</strong>（Fama-French HML ≒ 1/PBR）。価格を含まないファンダ（ROA・EPS成長率 等）を既定に併置し「割安」と「価格の平均回帰」を分離できるようにしている。</p>
@@ -592,7 +592,7 @@ conv_score₁₂ₘ = max(<span class="val">5</span>, min(<span class="val">95</
   <div class="model-specs" style="margin-bottom:16px">
     <div><span class="spec-label">構造</span> 銘柄別 TVP 時系列（per-stock）。銘柄固有の時変マクロ感応度を得る</div>
     <div><span class="spec-label">観測</span> 週次リターン × マクロ週次変化（同時点ファクタ応答 / APT 型）</div>
-    <div><span class="spec-label">ファクター</span> 既定 USD/JPY・米10年金利・日経225・WTI（市場ファクターを含め α は固有アルファ）</div>
+    <div><span class="spec-label">ファクター</span> 既定 USD/JPY・米10年金利・日経225・WTI（市場ファクターを含め α は固有アルファ）。TOPIX（広範市場・1306.T 連動）を選択肢に追加。日次の日本10年金利は ^JGB 廃止のため月次 FRED 据置</div>
     <div><span class="spec-label">推定</span> 自前 割引係数 DLM（West &amp; Harrison 型）。割引 δ で状態ノイズを表現し銘柄ごとの最適化が不要</div>
     <div><span class="spec-label">不確実性</span> 観測分散を Normal-Gamma 共役で学習。予測分布は Student-t で α/β の信用区間を解析的に算出</div>
     <div><span class="spec-label">µ̂</span> 最新フィルタ α<sub>T</sub> を年率化（α<sub>T</sub> × 52）。M-1/M-2 と同じ µ̂ ランキング</div>

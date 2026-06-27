@@ -253,12 +253,21 @@ class TestParamsSchema:
             "macro_eurjpy_yoy", "macro_wti_yoy", "macro_gold_yoy"
         ]
 
-    def test_macro_features_topix_excluded(self):
-        """TOPIX は本番 macro_data に蓄積がない（収集失敗）ため選択肢から除外。"""
+    def test_macro_features_topix_accepted(self):
+        """#250: TOPIX 指数 ^TPX 廃止に伴い収集を ETF 1306.T へ修正し、YoY で公開。"""
         from plugins.macro_risk_return import _MACRO_MAP
-        assert "macro_topix_yoy" not in _MACRO_MAP
-        with pytest.raises(ValueError):
-            coerce_params(self.schema, {"macro_features": ["macro_topix_yoy"]})
+        assert _MACRO_MAP["macro_topix_yoy"] == ("TOPIX", "yoy")
+        result = coerce_params(self.schema, {"macro_features": ["macro_topix_yoy"]})
+        assert result["macro_features"] == ["macro_topix_yoy"]
+
+    def test_macro_features_japan_real_economy_accepted(self):
+        """#250: 日本実体経済指標4種（GDP・失業率・鉱工業生産・貿易収支）を選択可能。"""
+        jp = [
+            "macro_jp_real_gdp_yoy", "macro_jp_unemp_zscore",
+            "macro_jp_ip_yoy", "macro_jp_trade_bal_zscore",
+        ]
+        result = coerce_params(self.schema, {"macro_features": jp})
+        assert result["macro_features"] == jp
 
     def test_macro_map_has_nikkei(self):
         """_MACRO_MAP に NIKKEI225(YoY) が結線されている。"""

@@ -135,3 +135,55 @@ def test_updates_existing_and_inserts_new(db):
     assert usdjpy[DATE2].close == 2.0
     # USDJPY は 2 行のまま（既存行を重複挿入していない）
     assert len(usdjpy) == 2
+
+
+# ── 4. FRED 公表ラグ補正（#250）：lag_days 分だけ trade_date が後ろへシフトする ──
+from collector import fetch_fred_series, FRED_SERIES
+
+
+def _fred_handler(observations: list):
+    """FRED observations API のモック（[(date, value), ...]）。"""
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "api.stlouisfed.org":
+            return httpx.Response(200, json={
+                "observations": [{"date": d, "value": v} for d, v in observations]
+            })
+        return httpx.Response(404)
+    return handler
+
+
+def _fetch_fred(observations, **kwargs):
+    import asyncio
+
+    async def run():
+        async with _REAL_ASYNC_CLIENT(
+            transport=httpx.MockTransport(_fred_handler(observations))
+        ) as s:
+            return await fetch_fred_series(s, "DUMMY", "2016-01-01", "2026-06-27", **kwargs)
+    return asyncio.run(run())
+
+
+def test_fred_lag_days_shifts_trade_date():
+    # 四半期GDP：obs_date=期首 2026-01-01 を lag_days=135 で公表時点へシフト → 2026-05-16
+    rows = _fetch_fred([("2026-01-01", "550.0")], lag_days=135)
+    assert len(rows) == 1
+    assert rows[0]["trade_date"] == "2026-05-16"
+    assert rows[0]["close"] == 550.0
+
+
+def test_fred_lag_days_zero_keeps_obs_date():
+    # lag_days 既定=0 → 既存系列は完全後方互換（シフトなし）
+    rows = _fetch_fred([("2026-05-01", "2.6")])
+    assert rows[0]["trade_date"] == "2026-05-01"
+
+
+def test_japan_macro_fred_series_registered():
+    by_code = {s["code"]: s for s in FRED_SERIES}
+    # 第1弾 日本実体経済指標が lag_days 付きで登録されている
+    assert by_code["JP_REAL_GDP"]["fred_id"] == "JPNRGDPEXP"
+    assert by_code["JP_REAL_GDP"]["lag_days"] == 135
+    assert by_code["JP_UNEMP"]["lag_days"] == 60
+    assert by_code["JP_IP"]["lag_days"] == 60
+    assert by_code["JP_TRADE_BAL"]["lag_days"] == 135
+    # 既存系列は lag_days 未設定（= 0 既定で後方互換）
+    assert "lag_days" not in by_code["JP10Y_FRED"]
