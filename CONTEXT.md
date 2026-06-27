@@ -36,6 +36,18 @@ _Avoid_: 更新収集, アップデート
 収集処理の実行時インスタンスの状態（running / progress / log / cancel）。種別は collection（full/incremental/smart 共有）/ market / history / jquants / macro / reparse。job 名キーの単一 registry（`collection_jobs.jobs`）が状態を保持し SSE で進捗配信する。全件収集・差分収集が「処理の種類」を指すのに対し、収集ジョブは「実行中スロットの状態」を指す。
 _Avoid_: ステータス辞書, status dict（実装詳細・旧称）
 
+**公表ラグ補正 (publication lag correction)**:
+経済統計の参照期間末日に公表遅延日数（`lag_days`）を加算して `trade_date` に記録する変換。月次・四半期指標は翌月〜翌々月に公表されるため、補正なしでは「参照期末時点でまだ存在しない値を参照した」情報リークが生じる。分析側（`_MACRO_MAP` スナップショット）はこの補正済み `trade_date` を基準に最近値を読むため、リーク処理は収集層に局所化される。
+_Avoid_: 遅延補正, 時系列ズレ（収集層での明示的補正という意味が落ちる）
+
+**マクロ収集チャネル (macro collection channel)**:
+`macro_data` テーブルへの収集経路。Yahoo Finance（市場系: 為替・金利・指数・コモディティ）/ FRED API（信用スプレッド・損益分岐点・日本実質GDP等）/ e-Stat API（CPI 等）/ 日銀 REST API（M2・短観DI等）の4チャネル。認証 key が必要なチャネル（FRED・e-Stat）は key 未設定時にスキップし、Yahoo・日銀は常時収集。
+_Avoid_: データソース（実装の fetch 関数名と混同するため）
+
+**マクロ系列バリアント / デフォルト公開 (macro series variant / default exposure)**:
+同一概念の複数バリアント（例: CPI 全国総合・全国コア・東京都区部）を全収集して `macro_data` に蓄積するが、`_MACRO_MAP`（モデル特徴量への公開）は最も解釈しやすい1系列に絞る方針。将来の切り替えや比較はデータ再収集なしに可能。デフォルト系列は series_code に `_CORE` 等の接尾辞で区別し、`_MACRO_MAP` のコメントで選択理由を明記する。
+_Avoid_: 多系列収集（バリアントの「同一概念」という構造が落ちる）
+
 ## 分析の階層
 
 分析手法は3つの層に整理する。層が違えば「種類の違う導出」であり、フラットな行列（base × operator）では扱わない。
