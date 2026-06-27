@@ -1384,11 +1384,11 @@ async def fetch_estat_series(
         t     = val.get("@time", "")
         if raw_v is None or t == "":
             continue
-        # API がフィルタを無視して複数 @cat01/@area を返す場合に client-side で絞る。
-        # 同 (series_code, trade_date) 重複による CardinalityViolation を防ぐ。
-        if cd_cat01 and val.get("@cat01") != cd_cat01:
+        # @cat01/@area が VALUE 要素に存在する場合のみフィルタ（属性なし = API 側で既に絞込済み）。
+        # 属性なしのとき None != cd_cat01 → 全行スキップになるため "in val" チェックが必須。
+        if cd_cat01 and "@cat01" in val and val["@cat01"] != cd_cat01:
             continue
-        if cd_area and val.get("@area") != cd_area:
+        if cd_area and "@area" in val and val["@area"] != cd_area:
             continue
         try:
             yyyymm = t[:6]  # "YYYYMM000000" → "YYYYMM"
@@ -1404,7 +1404,11 @@ async def fetch_estat_series(
             })
         except (ValueError, IndexError):
             continue
-    return rows
+    # 同 trade_date が複数行ある場合（API が同一時点を複数カテゴリで返す等）は最後の値で dedup。
+    seen: dict = {}
+    for r in rows:
+        seen[r["trade_date"]] = r
+    return list(seen.values())
 
 
 async def fetch_yahoo_history(
