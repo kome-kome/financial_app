@@ -248,6 +248,23 @@ class TestCompaniesEndpoint:
         ind = client.get("/api/companies", params={"industry": "電気機器"}).json()
         assert [i["edinet_code"] for i in ind["items"]] == ["E00002"]
 
+    def test_limit_out_of_range_returns_400(self, db):
+        api.app.dependency_overrides[api.get_db] = lambda: db
+        assert client.get("/api/companies", params={"limit": 0}).status_code == 400
+        assert client.get("/api/companies", params={"limit": 501}).status_code == 400
+        assert client.get("/api/companies", params={"limit": 100000000}).status_code == 400
+
+    def test_negative_offset_returns_400(self, db):
+        api.app.dependency_overrides[api.get_db] = lambda: db
+        assert client.get("/api/companies", params={"offset": -1}).status_code == 400
+
+    def test_valid_limit_and_offset_returns_200(self, db, make_company):
+        db.add(make_company(edinet_code="E00001", name="テスト", industry="情報"))
+        db.commit()
+        api.app.dependency_overrides[api.get_db] = lambda: db
+        assert client.get("/api/companies", params={"limit": 1, "offset": 0}).status_code == 200
+        assert client.get("/api/companies", params={"limit": 500, "offset": 0}).status_code == 200
+
 
 class TestFinancialsEndpoint:
     def test_returns_records_year_ascending(self, db, make_metric):
@@ -353,3 +370,13 @@ class TestScreenEndpoint:
         api.app.dependency_overrides[api.get_db] = lambda: db
         r = client.post("/api/screen", json={"limit": "not_a_number"})
         assert r.status_code == 422
+
+    def test_limit_out_of_range_returns_422(self, db):
+        api.app.dependency_overrides[api.get_db] = lambda: db
+        assert client.post("/api/screen", json={"limit": 0}).status_code == 422
+        assert client.post("/api/screen", json={"limit": 501}).status_code == 422
+
+    def test_valid_limit_boundary_returns_200(self, db):
+        api.app.dependency_overrides[api.get_db] = lambda: db
+        assert client.post("/api/screen", json={"limit": 1}).status_code == 200
+        assert client.post("/api/screen", json={"limit": 500}).status_code == 200
