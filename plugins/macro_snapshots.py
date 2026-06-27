@@ -63,6 +63,7 @@ _MACRO_MAP = {
     "macro_us10y_zscore":  ("US10Y",     "zscore"),
     "macro_us30y_zscore":  ("US30Y",     "zscore"),
     "macro_nikkei225_yoy": ("NIKKEI225", "yoy"),
+    "macro_topix_yoy":     ("TOPIX",     "yoy"),
     "macro_vix_zscore":    ("VIX",       "zscore"),
     "macro_wti_yoy":       ("WTI",       "yoy"),
     "macro_gold_yoy":      ("GOLD",      "yoy"),
@@ -72,6 +73,14 @@ _MACRO_MAP = {
     "macro_breakeven10y_zscore": ("BREAKEVEN10Y", "zscore"),
     "macro_jp10y_fred_zscore":   ("JP10Y_FRED",   "zscore"),
     "macro_t10y2y_zscore":       ("T10Y2Y",       "zscore"),
+    # ── 日本 実体経済指標（#250・米国偏重の是正）─────────────────────────────────
+    # 水準系（GDP・生産指数）は常に正なので yoy。失業率は「率」なので既存金利と同じ
+    # zscore 規約。貿易収支は符号がプラス/マイナス両方を取り yoy（除算）が発散するため
+    # zscore。低頻度＋公表ラグは収集側（FRED_SERIES.lag_days）で trade_date を補正済み。
+    "macro_jp_real_gdp_yoy":     ("JP_REAL_GDP",  "yoy"),
+    "macro_jp_unemp_zscore":     ("JP_UNEMP",     "zscore"),
+    "macro_jp_ip_yoy":           ("JP_IP",        "yoy"),
+    "macro_jp_trade_bal_zscore": ("JP_TRADE_BAL", "zscore"),
 }
 MACRO_FEATURE_NAMES = list(_MACRO_MAP.keys())
 
@@ -84,6 +93,7 @@ MACRO_FEATURE_OPTIONS = [
     {"value": "macro_us10y_zscore",  "label": "米10年金利 Zスコア"},
     {"value": "macro_us30y_zscore",  "label": "米30年金利 Zスコア"},
     {"value": "macro_nikkei225_yoy", "label": "日経225 前年比（YoY）"},
+    {"value": "macro_topix_yoy",     "label": "TOPIX 前年比（YoY）"},
     {"value": "macro_vix_zscore",    "label": "VIX恐怖指数 Zスコア"},
     {"value": "macro_wti_yoy",       "label": "WTI原油 前年比（YoY）"},
     {"value": "macro_gold_yoy",      "label": "金（ゴールド）前年比（YoY）"},
@@ -92,6 +102,10 @@ MACRO_FEATURE_OPTIONS = [
     {"value": "macro_breakeven10y_zscore", "label": "米10年BEI（インフレ期待）Zスコア"},
     {"value": "macro_jp10y_fred_zscore",   "label": "日10年金利（FRED）Zスコア"},
     {"value": "macro_t10y2y_zscore",       "label": "米10y−2yスプレッド Zスコア"},
+    {"value": "macro_jp_real_gdp_yoy",     "label": "日本 実質GDP 前年比（YoY）"},
+    {"value": "macro_jp_unemp_zscore",     "label": "日本 失業率 Zスコア"},
+    {"value": "macro_jp_ip_yoy",           "label": "日本 鉱工業生産指数 前年比（YoY）"},
+    {"value": "macro_jp_trade_bal_zscore", "label": "日本 貿易収支 Zスコア"},
 ]
 DEFAULT_MACRO_FEATURES = ["macro_usdjpy_yoy", "macro_sp500_yoy", "macro_us10y_zscore"]
 

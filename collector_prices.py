@@ -1074,7 +1074,9 @@ MACRO_SERIES: list[dict] = [
     {"code": "US30Y",     "name": "米30年金利",   "category": "rate",       "ticker": "",         "yf_ticker": "^TYX"},
     {"code": "JP10Y",     "name": "日10年金利",   "category": "rate",       "ticker": "10jpy.b",  "yf_ticker": "^JGB"},
     {"code": "NIKKEI225", "name": "日経225",      "category": "equity",     "ticker": "^nkx",     "yf_ticker": "^N225"},
-    {"code": "TOPIX",     "name": "TOPIX",        "category": "equity",     "ticker": "^tpx",     "yf_ticker": "^TPX"},
+    # TOPIX 指数 ^TPX は Yahoo で配信停止（200 OK だが 0 件）。TOPIX 連動 ETF 1306.T
+    # （NEXT FUNDS TOPIX・最長履歴・高流動）を代理に使う＝yoy/logret/zscore は指数と同等に追従。
+    {"code": "TOPIX",     "name": "TOPIX",        "category": "equity",     "ticker": "^tpx",     "yf_ticker": "1306.T"},
     {"code": "SP500",     "name": "S&P500",       "category": "equity",     "ticker": "^spx",     "yf_ticker": "^GSPC"},
     {"code": "VIX",       "name": "VIX恐怖指数",  "category": "volatility", "ticker": "",         "yf_ticker": "^VIX"},
     {"code": "WTI",       "name": "WTI原油",      "category": "commodity",  "ticker": "cl.f",     "yf_ticker": "CL=F"},
@@ -1096,7 +1098,20 @@ FRED_SERIES: list[dict] = [
     {"code": "BREAKEVEN10Y", "name": "米10年BEI（インフレ期待）", "category": "inflation", "fred_id": "T10YIE"},
     {"code": "JP10Y_FRED",   "name": "日10年金利（FRED）",        "category": "rate",      "fred_id": "IRLTLT01JPM156N"},
     {"code": "T10Y2Y",       "name": "米10y−2yスプレッド",       "category": "rate",      "fred_id": "T10Y2Y"},
+    # ── 日本 実体経済指標（#250・日本マクロのリバランス）─────────────────────────
+    # FRED は観測値を「期の参照開始日」の日付で返す。実体経済指標は公表ラグが大きい
+    # （GDP=期末から約1.5〜2か月、月次指標=約1か月）ため、lag_days 分だけ trade_date を
+    # 後ろへシフトして「この日には知れた値」へ正規化する＝先読みバイアス（look-ahead）防止。
+    # lag_days 未指定の既存5系列は 0=シフト無し（完全後方互換）。
+    # 採用前に各 fred_id の最終更新日を確認すること（OECD 旧系列は凍結あり：CPALTT01JPM657N 等）。
+    {"code": "JP_REAL_GDP",  "name": "日本 実質GDP",        "category": "real_economy", "fred_id": "JPNRGDPEXP",      "freq": "quarterly", "lag_days": 135},
+    {"code": "JP_UNEMP",     "name": "日本 失業率",         "category": "labor",        "fred_id": "LRUNTTTTJPM156S", "freq": "monthly",   "lag_days": 60},
+    {"code": "JP_IP",        "name": "日本 鉱工業生産指数", "category": "production",    "fred_id": "JPNPROINDMISMEI", "freq": "monthly",   "lag_days": 60},
+    {"code": "JP_TRADE_BAL", "name": "日本 貿易収支",       "category": "trade",        "fred_id": "XTNTVA01JPQ664S", "freq": "quarterly", "lag_days": 135},
 ]
+# FRED 低頻度系列の履歴確保（四半期 zscore は ≥20 点必要・[macro_snapshots]_macro_from_cache）。
+# 市場系（years_back）より長く遡って観測点を担保する。
+FRED_MIN_YEARS_BACK = 10
 
 
 async def fetch_fred_series(
@@ -1104,9 +1119,12 @@ async def fetch_fred_series(
     fred_id: str,
     date_from: str,  # "YYYY-MM-DD"
     date_to:   str,  # "YYYY-MM-DD"
+    lag_days: int = 0,
 ) -> list:
     """FRED API から指定系列の観測値を取得する（日次・月次両対応）。
-    欠損値（"."）と None はスキップ。月次系列は FRED が1か月1観測を返すので結果も月次になる。"""
+    欠損値（"."）と None はスキップ。月次系列は FRED が1か月1観測を返すので結果も月次になる。
+    lag_days > 0 のとき、observation の日付（期の参照開始日）を lag_days 分だけ後ろへ
+    シフトして trade_date とする＝公表ラグ補正（実体経済指標の先読みバイアス防止）。"""
     params = {
         "series_id":         fred_id,
         "api_key":           FRED_API_KEY,
@@ -1132,8 +1150,11 @@ async def fetch_fred_series(
         if v == "." or v is None:
             continue
         try:
+            obs_date = obs["date"]
+            if lag_days:
+                obs_date = (date.fromisoformat(obs_date) + timedelta(days=lag_days)).isoformat()
             rows.append({
-                "trade_date": obs["date"],
+                "trade_date": obs_date,
                 "open":   None,
                 "high":   None,
                 "low":    None,
@@ -1230,7 +1251,9 @@ async def collect_macro_data(
     start    = today - timedelta(days=int(years_back * 365.25))
     d1       = start.strftime("%Y%m%d")
     d2       = today.strftime("%Y%m%d")
-    d1_iso   = start.strftime("%Y-%m-%d")
+    # FRED は市場系より長く遡る（四半期系列の zscore に ≥20 点を確保）。
+    fred_start = today - timedelta(days=int(max(years_back, FRED_MIN_YEARS_BACK) * 365.25))
+    d1_iso   = fred_start.strftime("%Y-%m-%d")
     d2_iso   = today.strftime("%Y-%m-%d")
     total    = len(MACRO_SERIES) + (len(FRED_SERIES) if FRED_API_KEY else 0)
     saved    = 0
@@ -1287,7 +1310,9 @@ async def collect_macro_data(
 
             if on_progress:
                 on_progress(idx - 1, total, f"[FRED {j}/{len(FRED_SERIES)}] {series['name']} 取得中")
-            rows = await fetch_fred_series(session, series["fred_id"], d1_iso, d2_iso)
+            rows = await fetch_fred_series(
+                session, series["fred_id"], d1_iso, d2_iso, series.get("lag_days", 0)
+            )
             await asyncio.sleep(FRED_RATE_SLEEP)
 
             if not rows:

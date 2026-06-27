@@ -54,13 +54,16 @@ _DLM_MACRO_MAP: dict[str, tuple[str, str, str]] = {
     "dlm_dxy":       ("DXY",        "logret", "ドル指数（DXY）週次変化"),
     "dlm_sp500":     ("SP500",      "logret", "S&P500 週次変化"),
     "dlm_nikkei225": ("NIKKEI225",  "logret", "日経225 週次変化（市場ファクター）"),
+    "dlm_topix":     ("TOPIX",      "logret", "TOPIX 週次変化（広範市場ファクター）"),
     "dlm_vix":       ("VIX",        "logret", "VIX 週次変化"),
     "dlm_wti":       ("WTI",        "logret", "WTI原油 週次変化"),
     "dlm_gold":      ("GOLD",       "logret", "金（ゴールド）週次変化"),
     "dlm_us5y":      ("US5Y",       "diff",   "米5年金利 週次差分"),
     "dlm_us10y":     ("US10Y",      "diff",   "米10年金利 週次差分"),
     "dlm_us30y":     ("US30Y",      "diff",   "米30年金利 週次差分"),
-    "dlm_jp10y":     ("JP10Y_FRED", "diff",   "日10年金利（FRED）週次差分"),
+    # 日次の日本10年金利は Yahoo ^JGB が廃止（404）で取得不能。FRED は月次のみのため
+    # 週次差分は多くの週でゼロ＝情報量に限界あり（日次ソース確保は将来課題）。
+    "dlm_jp10y":     ("JP10Y_FRED", "diff",   "日10年金利（FRED・月次）週次差分"),
     "dlm_t10y2y":    ("T10Y2Y",     "diff",   "米10y−2yスプレッド 週次差分"),
 }
 MACRO_FEATURE_OPTIONS = [{"value": k, "label": v[2]} for k, v in _DLM_MACRO_MAP.items()]

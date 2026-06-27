@@ -53,6 +53,14 @@ class TestPluginMeta:
         valid = {o["value"] for o in MACRO_FEATURE_OPTIONS}
         assert set(DEFAULT_MACRO_FEATURES) <= valid
 
+    def test_topix_factor_registered(self):
+        # #250: 広範市場ファクター TOPIX を週次対数リターンで選択可能にした
+        assert _DLM_MACRO_MAP["dlm_topix"][0] == "TOPIX"
+        assert _DLM_MACRO_MAP["dlm_topix"][1] == "logret"
+        assert "dlm_topix" in {o["value"] for o in MACRO_FEATURE_OPTIONS}
+        # 日次の日本10年金利は ^JGB 廃止のため月次 FRED を維持
+        assert _DLM_MACRO_MAP["dlm_jp10y"][0] == "JP10Y_FRED"
+
     def test_to_meta_has_required_keys(self):
         meta = plugin.to_meta()
         for k in ("name", "label", "heavy", "category", "ui_order", "params_schema"):
