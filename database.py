@@ -675,7 +675,7 @@ class MacroData(Base):
     )
 
     id          = Column(Integer, primary_key=True, autoincrement=True)
-    series_code = Column(String(20), nullable=False)  # "USDJPY" / "TNX10Y" / "NIKKEI225" 等
+    series_code = Column(String(32), nullable=False)  # "USDJPY" / "JP_TANKAN_NONMFG_LARGE" 等
     series_name = Column(String(50))                  # 表示名（"USD/JPY"・"米10年金利" 等）
     category    = Column(String(20))                  # "fx" / "rate" / "equity" / "commodity"
     trade_date  = Column(String(10), nullable=False)  # "YYYY-MM-DD"
