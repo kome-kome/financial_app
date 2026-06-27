@@ -183,7 +183,8 @@ def test_japan_macro_fred_series_registered():
     assert by_code["JP_REAL_GDP"]["fred_id"] == "JPNRGDPEXP"
     assert by_code["JP_REAL_GDP"]["lag_days"] == 135
     assert by_code["JP_UNEMP"]["lag_days"] == 60
-    assert by_code["JP_IP"]["lag_days"] == 60
+    # JP_IP (JPNPROINDMISMEI) は 2024-04-30 で凍結のため除外中 (#253)
+    assert "JP_IP" not in by_code
     assert by_code["JP_TRADE_BAL"]["lag_days"] == 135
     # 既存系列は lag_days 未設定（= 0 既定で後方互換）
     assert "lag_days" not in by_code["JP10Y_FRED"]

@@ -261,10 +261,10 @@ class TestParamsSchema:
         assert result["macro_features"] == ["macro_topix_yoy"]
 
     def test_macro_features_japan_real_economy_accepted(self):
-        """#250: 日本実体経済指標4種（GDP・失業率・鉱工業生産・貿易収支）を選択可能。"""
+        """#250: 日本実体経済指標（GDP・失業率・貿易収支）を選択可能。鉱工業生産は #253 で除外中。"""
         jp = [
             "macro_jp_real_gdp_yoy", "macro_jp_unemp_zscore",
-            "macro_jp_ip_yoy", "macro_jp_trade_bal_zscore",
+            "macro_jp_trade_bal_zscore",
         ]
         result = coerce_params(self.schema, {"macro_features": jp})
         assert result["macro_features"] == jp

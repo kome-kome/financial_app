@@ -79,7 +79,7 @@ _MACRO_MAP = {
     # zscore。低頻度＋公表ラグは収集側（FRED_SERIES.lag_days）で trade_date を補正済み。
     "macro_jp_real_gdp_yoy":     ("JP_REAL_GDP",  "yoy"),
     "macro_jp_unemp_zscore":     ("JP_UNEMP",     "zscore"),
-    "macro_jp_ip_yoy":           ("JP_IP",        "yoy"),
+    # macro_jp_ip_yoy: JPNPROINDMISMEI が 2024-04-30 で凍結 (#253)。e-Stat コネクタ実装まで除外。
     "macro_jp_trade_bal_zscore": ("JP_TRADE_BAL", "zscore"),
     # ── 日銀/e-Stat チャネル（ADR-0006・#251 第2弾）───────────────────────────
     # 日銀コア CPI は BOJ が金融政策判断基準に使う指標で M-1 の金利文脈と整合。
@@ -111,7 +111,7 @@ MACRO_FEATURE_OPTIONS = [
     {"value": "macro_t10y2y_zscore",       "label": "米10y−2yスプレッド Zスコア"},
     {"value": "macro_jp_real_gdp_yoy",     "label": "日本 実質GDP 前年比（YoY）"},
     {"value": "macro_jp_unemp_zscore",     "label": "日本 失業率 Zスコア"},
-    {"value": "macro_jp_ip_yoy",           "label": "日本 鉱工業生産指数 前年比（YoY）"},
+    # macro_jp_ip_yoy は #253 で一時除外（JPNPROINDMISMEI 凍結）
     {"value": "macro_jp_trade_bal_zscore", "label": "日本 貿易収支 Zスコア"},
     {"value": "macro_jp_cpi_core_yoy",           "label": "日本 コアCPI 前年比（YoY）"},
     {"value": "macro_jp_tankan_mfg_large_zscore", "label": "日銀短観 製造業大企業 業況DI Zスコア"},

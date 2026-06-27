@@ -1106,7 +1106,7 @@ FRED_SERIES: list[dict] = [
     # 採用前に各 fred_id の最終更新日を確認すること（OECD 旧系列は凍結あり：CPALTT01JPM657N 等）。
     {"code": "JP_REAL_GDP",  "name": "日本 実質GDP",        "category": "real_economy", "fred_id": "JPNRGDPEXP",      "freq": "quarterly", "lag_days": 135},
     {"code": "JP_UNEMP",     "name": "日本 失業率",         "category": "labor",        "fred_id": "LRUNTTTTJPM156S", "freq": "monthly",   "lag_days": 60},
-    {"code": "JP_IP",        "name": "日本 鉱工業生産指数", "category": "production",    "fred_id": "JPNPROINDMISMEI", "freq": "monthly",   "lag_days": 60},
+    # JP_IP (JPNPROINDMISMEI) は 2024-04-30 で凍結確認済み (#253)。e-Stat コネクタ実装まで除外。
     {"code": "JP_TRADE_BAL", "name": "日本 貿易収支",       "category": "trade",        "fred_id": "XTNTVA01JPQ664S", "freq": "quarterly", "lag_days": 135},
 ]
 # FRED 低頻度系列の履歴確保（四半期 zscore は ≥20 点必要・[macro_snapshots]_macro_from_cache）。

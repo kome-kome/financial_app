@@ -52,7 +52,8 @@ def test_macro_feature_map_keys():
     # #250 日本マクロのリバランス: 実体経済指標4種＋TOPIX を公開
     assert _MACRO_FEATURE_MAP["macro_jp_real_gdp_yoy"]     == ("JP_REAL_GDP",  "yoy")
     assert _MACRO_FEATURE_MAP["macro_jp_unemp_zscore"]     == ("JP_UNEMP",     "zscore")
-    assert _MACRO_FEATURE_MAP["macro_jp_ip_yoy"]           == ("JP_IP",        "yoy")
+    # macro_jp_ip_yoy は JPNPROINDMISMEI 凍結のため除外中 (#253)
+    assert "macro_jp_ip_yoy" not in _MACRO_FEATURE_MAP
     assert _MACRO_FEATURE_MAP["macro_jp_trade_bal_zscore"] == ("JP_TRADE_BAL", "zscore")
     assert _MACRO_FEATURE_MAP["macro_topix_yoy"]           == ("TOPIX",        "yoy")
     for fname, (scode, ttype) in _MACRO_FEATURE_MAP.items():
