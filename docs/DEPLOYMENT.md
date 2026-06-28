@@ -41,7 +41,7 @@ Render の制約と運用形態に合わせて設計すること。
 | `[一回性]` | 週次株価バックフィル | `old/backfill-weekly-history.yml` | `stock_price_weekly` を過去5年まで延伸（#198・walk-forward CV 被覆確保） | 60〜150分 |
 | `[補完]` | C2 NULL バックフィル | `old/refill-c2.yml` | C2 新列（`pl_depreciation` 等）が NULL の場合に EDINET から再取得 | 2〜4時間 |
 | `[補完]` | CF NULL バックフィル | `old/refill-cf.yml` | `cf_investing_cf` 等が NULL の場合に再取得（mode: refill / capex-only / diagnose） | 1〜3時間 |
-| `[補完]` | PL/BS NULL バックフィル | `old/refill-pl-bs.yml` | `bs_inventory` 等 旧コホート（〜2022年）が NULL の場合に再取得 | 4〜5時間 |
+| `[補完]` | PL/BS NULL バックフィル | `old/.github/workflows/old/refill-pl-bs.yml` | `bs_inventory` 等 旧コホート（〜2022年）が NULL の場合に再取得 | 4〜5時間 |
 | `[補完]` | bs_machinery バックフィル | `old/refill-machinery.yml` | `bs_machinery` NULL を XBRL 再取得で是正（MachineryEquipmentAndVehiclesNet タグ追加後・#202） | 4〜5時間 |
 
 > **CI（`ci.yml`）**: データ収集系ワークフローとは独立した回帰検知用。`pull_request` と main への `push` で Python 3.13.7 上に `requirements.txt` + `requirements-dev.txt` を入れて `pytest` を実行する。Secrets・外部ネットワーク・本番 DB には一切触れず、`conftest.py` の in-memory SQLite / モックで完結する範囲のみを検証する。
@@ -83,13 +83,13 @@ Render の制約と運用形態に合わせて設計すること。
 - 唯一の有意な欠損は capex（~11%）だが全年度で安定した**構造的欠損**（提出企業ごとのタグ揺れ）であり、同じ XBRL を再パースする日次 cron では改善しない。本質的改善は parse 側のラベル照合拡充（別 Issue）で扱う。
 - よって定期 cron の便益はほぼ無く、J-Quants レート制限・Render スリープのコストのみ残るため cron は撤去。欠損補完が必要な場合は `workflow_dispatch`（mode=refill/capex-only/diagnose・件数指定）で随時実行する。
 
-### bs_inventory バックフィル（`refill-pl-bs.yml`）
+### bs_inventory バックフィル（`.github/workflows/old/refill-pl-bs.yml`）
 
-`bs_inventory` の NULL はタグ漏れではなく**時系列コホート**が原因（パーサ修正前に収集した〜2022年度が backfill 未実施。2026-06-15 実測で旧年度 57〜94% null・新年度は ~3%）。`refill-pl-bs.yml` を **workflow_dispatch（limit 省略＝全件・約4〜5時間）** で起動し、古い順に XBRL を再取得して是正する。詳細・残件の見方は GOTCHAS.md「bs_inventory バックフィルの運用」。
+`bs_inventory` の NULL はタグ漏れではなく**時系列コホート**が原因（パーサ修正前に収集した〜2022年度が backfill 未実施。2026-06-15 実測で旧年度 57〜94% null・新年度は ~3%）。`.github/workflows/old/refill-pl-bs.yml` を **workflow_dispatch（limit 省略＝全件・約4〜5時間）** で起動し、古い順に XBRL を再取得して是正する。詳細・残件の見方は GOTCHAS.md「bs_inventory バックフィルの運用」。
 
 | 項目 | 状態 |
 |---|---|
-| 自動化整備 | ✅ `_pipeline_gh.py --refill-pl-bs` + `refill-pl-bs.yml` を結線 |
+| 自動化整備 | ✅ `_pipeline_gh.py --refill-pl-bs` + `.github/workflows/old/refill-pl-bs.yml` を結線 |
 | 本番バックフィル実行 | ✅ **完了**（2026-06-24 実測: 全年度 82〜87% カバレッジ。残 NULL はサービス業・金融等の構造的欠損） |
 | 完了判定 | 全年度で一様な欠損率（≒13〜18%）になっており旧コホート偏りは解消済み |
 

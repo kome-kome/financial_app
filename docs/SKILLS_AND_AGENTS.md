@@ -91,8 +91,8 @@ Claude Code で使える **スキル（Skill）** と **エージェント（Age
 |---|---|---|
 | `/claude-api` | Anthropic SDK の使い方・モデル更新支援 | API コードを書く・移行する |
 | `/loop` | プロンプトを定期実行 | 「5分ごとにデプロイ確認」など |
-| `/migrate-to-shoehorn` | テストの `as` を shoehorn に置換 | TS テスト改善 |
-| `/scaffold-exercises` | 練習問題スキャフォールド生成 | 教材作成用 |
+| `/migrate-to-shoehorn` | テストの `as` を shoehorn に置換 | TS テスト改善（汎用・本 PJ 非使用） |
+| `/scaffold-exercises` | 練習問題スキャフォールド生成 | 教材作成用（汎用・本 PJ 非使用） |
 
 ---
 

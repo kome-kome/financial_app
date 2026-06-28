@@ -2,6 +2,7 @@
 name: financial-app-explorer
 description: financial_app（日本株財務分析ツール）のコードベース／ドキュメントを read-only で探索する専門エージェント。複数ファイルに跨る調査・実装箇所の特定・大きいドキュメント（ARCHITECTURE.md / MODELS.md）の要約が必要なときに使い、結論だけ受け取ってメインのトークンを節約する。単純な単一ファイル参照や既知箇所のピンポイント変更には使わない。
 tools: Glob, Grep, Read
+skills: caveman
 model: sonnet
 ---
 

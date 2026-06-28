@@ -1017,13 +1017,15 @@ graph TB
 | `_pipeline_incremental.py` | GitHub Actions | 差分収集パイプライン（daily-incremental.yml で毎日 JST 03:00 自動実行） | collector.py, database.py |
 | `_pipeline_utils.py` | GitHub Actions | 全件/差分パイプライン共通基盤。ファイルロガー生成（`make_logger`）・Supabase の read-only/一時エラー検出（`_is_readonly_error`）・指数バックオフ付きリトライラッパ（`_run_with_retry`） | collector.py |
 | `edinet_ping.py` | ユーティリティ | EDINET API 疎通確認ワンショット | EDINET API |
-| `scripts/check_db_state.py` | ユーティリティ | DB 状態確認ワンショット（主要6テーブルの行数＋直近の収集ログ表示）。Supabase 移行差分／パイプライン実行後の件数チェック用（手動実行） | database.py || `launch.py` | ユーティリティ | Windows ローカル開発用 tkinter ランチャー（uvicorn 起動 GUI）。本番・CI からは未参照の独立ツール | uvicorn |
+| `scripts/check_db_state.py` | ユーティリティ | DB 状態確認ワンショット（主要6テーブルの行数＋直近の収集ログ表示）。Supabase 移行差分／パイプライン実行後の件数チェック用（手動実行） | database.py |
+| `launch.py` | ユーティリティ | Windows ローカル開発用 tkinter ランチャー（uvicorn 起動 GUI）。本番・CI からは未参照の独立ツール | uvicorn |
+| `macro_beta_inference.py` | GitHub Actions | ADR-0002「per-stock 階層マクロβ」の推論バッチ（`requirements-inference.txt` 対応）。`database.py`・`plugins/macro_risk_return.py` から参照。GitHub Actions デプロイは未整備のため手動実行専用 | database.py, plugins/macro_risk_return.py |
 | `.env` | 設定 | APIキー・DB接続・認証情報（UTF-8 BOMなし） | — |
 | `ARCHITECTURE.md` | ドキュメント | 本ファイル。コード変更時は必ず更新する | — |
 | `MODELS.md` | ドキュメント | 分析モデルの数式・パラメータ・参考文献（Markdown版）。モデル変更時は `models.html` とセットで更新する。 | — |
 | `FUTURE_TASKS.md` | ドキュメント | Issue 運用ガイド＋設計制約（残タスクの正本は GitHub Issues。本書はタスク実体を持たない）。完了項目は `archive/IMPROVEMENTS.md` へ集約 | — |
 | `docs/archive/` | ドキュメント | 完了済み作業記録（REFACTORING・IMPROVEMENTS・VISUALIZATION_IMPROVEMENTS）。現行参照には使わない | — |
-| `docs/reviews/` | ドキュメント | 分析モデル等の設計レビュー記録（ADR 化前の検討メモ。例: M-2 macro-gbdt レビュー）。現行参照には使わない | — |
+| `docs/reviews/` | ドキュメント | 分析モデル等の設計レビュー記録（ADR 化前の検討メモ。`2026-06-26-m2-macro-gbdt-review.md`・`2026-06-27-web-api-auth-input-validation-review.md` 等）。現行参照には使わない | — |
 | `VISION.md` | ドキュメント | プロジェクトの目的・方針 | — |
 | `CONTEXT.md` | ドキュメント | ドメイン用語集（再分類項目・分析特徴量・表示項目・パラメータ契約の用語定義）。CLAUDE.md 設計制約から参照 | — |
 | `docs/adr/*.md` | ドキュメント | ADR（Architecture Decision Record）。`0001`＝バリュエーション統合とバックテスト一般化（旧 total_return→gap_analysis 吸収）／`0002`＝M-1 per-stock 階層マクロβ／`0003`＝M-2 マクロ×財務 GBDT／`0004`＝M-2 downstream（売り推奨・OOF バックテスト）／`0005`＝price_predictor 削除・③リターン予測を比較ファミリーへ集約／`0006`＝日本マクロ指標 e-Stat/日銀コネクタ設計 | — |
