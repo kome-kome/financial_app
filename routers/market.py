@@ -79,6 +79,23 @@ def _normalize_row(row) -> dict:
     return out
 
 
+_CSV_DANGER = frozenset(("=", "+", "-", "@", "\t", "\r"))
+
+
+def _csv_safe(v: Any) -> Any:
+    """先頭が数式メタ文字の文字列を単引用符でエスケープ（CWE-1236対策）。"""
+    if isinstance(v, str) and v[:1] in _CSV_DANGER:
+        return "'" + v
+    return v
+
+
+def _csv_row(values) -> str:
+    """値リストを CSV 1行（改行含む）に変換する。"""
+    buf = io.StringIO()
+    csv.writer(buf).writerow(values)
+    return buf.getvalue()
+
+
 # ── 株価履歴 ─────────────────────────────────────────────────────────────
 
 @router.get("/api/stock/history/{edinet_code}")
@@ -613,17 +630,19 @@ async def db_company_drilldown(edinet_code: str, db: Session = Depends(api.get_d
 
 
 @router.get("/api/db/export/{table}")
+@api.limiter.limit(api.RATELIMIT_ANALYSIS)
 async def db_export_table(
+    request: Request,
     table: str,
-    limit:      int = 10000,
+    limit:      int = 5000,
     filter_col: Optional[str] = None,
     filter_val: Optional[str] = None,
     db: Session = Depends(api.get_db),
 ):
     if table not in _DB_VIEWER_TABLES:
         raise HTTPException(404, "テーブルが見つかりません")
-    if not (1 <= limit <= 100000):
-        raise HTTPException(400, "limit は 1〜100000 の範囲で指定してください")
+    if not (1 <= limit <= 10000):
+        raise HTTPException(400, "limit は 1〜10000 の範囲で指定してください")
 
     model   = _DB_VIEWER_TABLES[table]
     col_map = {c.name: c for c in model.__table__.columns}
@@ -643,22 +662,21 @@ async def db_export_table(
         query = query.filter(col_map[filter_col] == typed_val)
     rows = query.limit(limit).all()
 
-    output = io.StringIO()
-    writer = csv.writer(output)
-    writer.writerow([c.name for c in cols])
-    for r in rows:
-        row_vals = []
-        for c in cols:
-            v = getattr(r, c.name)
-            if isinstance(v, datetime):
-                v = v.strftime("%Y-%m-%d %H:%M:%S")
-            elif isinstance(v, (dict, list)):
-                v = json.dumps(v, ensure_ascii=False)
-            row_vals.append(v)
-        writer.writerow(row_vals)
-    output.seek(0)
+    def row_gen():
+        yield _csv_row([c.name for c in cols])
+        for r in rows:
+            row_vals = []
+            for c in cols:
+                v = getattr(r, c.name)
+                if isinstance(v, datetime):
+                    v = v.strftime("%Y-%m-%d %H:%M:%S")
+                elif isinstance(v, (dict, list)):
+                    v = json.dumps(v, ensure_ascii=False)
+                row_vals.append(_csv_safe(v))
+            yield _csv_row(row_vals)
+
     return StreamingResponse(
-        iter([output.getvalue()]),
+        row_gen(),
         media_type="text/csv",
         headers={"Content-Disposition": f"attachment; filename={table}.csv"},
     )
@@ -667,33 +685,36 @@ async def db_export_table(
 # ── CSV エクスポート ──────────────────────────────────────────────────────
 
 @router.get("/api/export/csv")
-async def export_csv(year: Optional[int] = None, db: Session = Depends(api.get_db)):
+@api.limiter.limit(api.RATELIMIT_ANALYSIS)
+async def export_csv(request: Request, year: Optional[int] = None, db: Session = Depends(api.get_db)):
     query = db.query(FinancialMetric)
     if year:
         query = query.filter_by(year=year)
     records = query.limit(10000).all()
 
-    output = io.StringIO()
-    writer = csv.writer(output)
-    writer.writerow([
+    HEADER = [
         "証券コード", "企業名", "業種", "期", "決算期末",
         "売上高", "営業利益", "純利益", "総資産", "純資産",
         "営業CF", "時価総額", "PER", "PBR", "ROE", "自己資本比率",
         "営業利益率", "純利益率", "D/Eレシオ",
         "予測時価総額", "乖離率%"
-    ])
-    for r in records:
-        writer.writerow([
-            r.sec_code, r.company_name, r.industry, r.year, r.period_end.isoformat() if r.period_end else "",
-            r.pl_revenue, r.pl_operating_profit, r.pl_net_income,
-            r.bs_total_assets, r.bs_total_equity,
-            r.cf_operating_cf, r.market_cap, r.per, r.pbr, r.roe, r.equity_ratio,
-            r.op_margin, r.net_margin, r.de_ratio,
-            r.predicted_market_cap, r.gap_ratio
-        ])
-    output.seek(0)
+    ]
+
+    def row_gen():
+        yield _csv_row(HEADER)
+        for r in records:
+            yield _csv_row([
+                r.sec_code, _csv_safe(r.company_name), _csv_safe(r.industry),
+                r.year, r.period_end.isoformat() if r.period_end else "",
+                r.pl_revenue, r.pl_operating_profit, r.pl_net_income,
+                r.bs_total_assets, r.bs_total_equity,
+                r.cf_operating_cf, r.market_cap, r.per, r.pbr, r.roe, r.equity_ratio,
+                r.op_margin, r.net_margin, r.de_ratio,
+                r.predicted_market_cap, r.gap_ratio
+            ])
+
     return StreamingResponse(
-        iter([output.getvalue()]),
+        row_gen(),
         media_type="text/csv",
         headers={"Content-Disposition": "attachment; filename=financial_db.csv"}
     )

