@@ -1356,7 +1356,8 @@ async def fetch_estat_series(
         "cdArea":       cd_area,
         "cdTimeFrom":   date_from,
         "cdTimeTo":     date_to,
-        "lvTime":       "2",   # 月次階層のみ取得（年次集計行を除外）。4は0003427113で空→2を試用中
+        # lvTime: statsDataId=0003427113（長期時系列）は 2/4 ともに解析失敗。
+        # 月次 CPI は別 statsDataId または FRED チャネルへの移行が必要（Issue #257）。
         "lang":         "J",
         "metaGetFlg":   "N",
     }
