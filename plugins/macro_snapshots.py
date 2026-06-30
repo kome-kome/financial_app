@@ -311,11 +311,18 @@ def build_snapshots(
     mom_window: int,
     min_coverage: float,
     build_interactions: bool = True,
+    macro_nan_ok: bool = False,
 ) -> tuple[dict, dict, dict, list[str]]:
     """M-1/M-2 共有スナップショット構築。
 
     build_interactions=True（M-1 既定）: fin×macro 交差項を生成。
     build_interactions=False（M-2）: 交差項なし＝同一母集団を保証しつつ特徴量を削減。
+
+    macro_nan_ok=False（既定・M-1）: マクロ特徴量が1つでも欠損したらスナップショットを破棄。
+    macro_nan_ok=True（M-2 専用）: マクロ欠損を float('nan') として保持し企業を残す。
+      XGBoost は NaN をネイティブ処理するため、表示母集団を財務＋株価で決められる
+      （薄いマクロ系列を足しても企業が激減しない）。表示可否は min_coverage が制御する。
+      **build_interactions=False と併用すること**（交差項に NaN が混入すると OLS が壊れる）。
     """
     use_macro = bool(macro_names)
     momentum_name = ["momentum_12m1"] if use_momentum else []
@@ -381,11 +388,14 @@ def build_snapshots(
                     m_feats = _macro_from_cache(macro_cache, snap_date, macro_names)
                     macro_memo[snap_date] = m_feats
                 if any(v is None for v in m_feats.values()):
-                    continue
+                    if not macro_nan_ok:
+                        continue
+                    # M-2: 欠損は NaN として保持（XGBoost が処理）。企業は落とさない。
                 for mn in macro_names:
                     val = m_feats[mn]
-                    macro_row.append(float(val))  # type: ignore[arg-type]
-                    macro_dict[mn] = float(val)   # type: ignore[arg-type]
+                    fval = float("nan") if val is None else float(val)
+                    macro_row.append(fval)
+                    macro_dict[mn] = fval
 
             mom_row: list[float] = []
             if use_momentum:

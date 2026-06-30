@@ -245,12 +245,20 @@ def fit_feature_columns(
 
     推論側は `transform_feature_row` で同じパラメータを使って 1 サンプルを変換する
     （学習データの統計でテストを変換することでリークを防ぐ）。
+
+    欠損値（NaN）は winsorize 前に当該列の平均（nanmean・全 NaN 列は 0）で補完する。
+    補完統計は学習フォールド内のみで計算するためリークしない（M-2 のマクロ欠損許容用。
+    M-1/sector_ols は NaN を生成しないため無影響）。
     """
     X_norm = [[1.0] + [0.0] * n_feat for _ in range(len(X_raw))]
     win_params: list[tuple[float, float]] = []
     norm_params: list[tuple[float, float]] = []
     for fi in range(n_feat):
-        col_w, w_lo, w_hi = winsorize([row[fi] for row in X_raw])
+        col = [row[fi] for row in X_raw]
+        present = [v for v in col if v == v]   # NaN 除外（v == v は NaN 判定）
+        col_mean = (sum(present) / len(present)) if present else 0.0
+        col = [v if v == v else col_mean for v in col]
+        col_w, w_lo, w_hi = winsorize(col)
         win_params.append((w_lo, w_hi))
         normed, p1, p2 = normalize(col_w, method)
         norm_params.append((p1, p2))
@@ -267,10 +275,14 @@ def transform_feature_row(
     """学習済み win/norm パラメータで 1 サンプルを intercept 付き行へ変換する。
 
     `fit_feature_columns` が返した win_params / norm_params をそのまま渡す。
-    winsorize 境界でクランプ → normalize_transform（±5 クランプ）の順。
+    欠損値（NaN）は学習列の中心値（norm_params[fi][0]）で補完 → winsorize 境界でクランプ
+    → normalize_transform（±5 クランプ）の順。中心値補完は正規化後ほぼ 0 の中立値となり、
+    学習統計のみ使用するためリークしない。
     """
     row = [1.0]
     for fi, v in enumerate(feat_row):
+        if v != v:   # NaN → 学習列の中心値で補完（中立化・リークなし）
+            v = norm_params[fi][0]
         w_lo, w_hi = win_params[fi]
         v_w = max(w_lo, min(w_hi, v))
         row.append(normalize_transform(v_w, *norm_params[fi]))

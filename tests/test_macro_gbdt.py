@@ -72,6 +72,25 @@ def _make_db_mock(n_companies=5, n_weeks=120):
     return db, prices_by_co, fin_by_co, companies
 
 
+def _make_macro_cache_usdjpy_only(prices_by_co):
+    """USDJPY を全期間カバーで生成（YoY が全 snap_date で計算可能）。
+
+    他系列（SP500 / US10Y 等）は意図的に含めない → _macro_from_cache が None を返し、
+    macro_nan_ok の挙動（厳格除外 vs NaN 保持）を検証できる。
+    """
+    import datetime
+    all_dates = sorted({r.trade_date for rows in prices_by_co.values() for r in rows})
+    start = datetime.date.fromisoformat(all_dates[0]) - datetime.timedelta(days=420)
+    end   = datetime.date.fromisoformat(all_dates[-1]) + datetime.timedelta(days=10)
+    series = {}
+    d, i = start, 0
+    while d <= end:
+        series[d.isoformat()] = 100.0 + i * 0.1
+        d += datetime.timedelta(days=7)
+        i += 1
+    return {"USDJPY": series}   # SP500 / US10Y は欠落
+
+
 plugin = MacroGbdtPlugin()
 
 
@@ -146,6 +165,62 @@ class TestParity:
             targets_m1 = [t for _, t in s_m1[ym]]
             targets_m2 = [t for _, t in s_m2[ym]]
             assert targets_m1 == targets_m2, f"{ym} のターゲットが異なる"
+
+
+# ── 1b. マクロ NaN 許容（macro_nan_ok・M-2 専用）────────────────────────────────
+
+class TestMacroNanOk:
+    """薄いマクロ系列で企業が激減しない根本対策の検証（build_snapshots レベル）。"""
+
+    def _inputs(self):
+        _, prices_by_co, fin_by_co, companies = _make_db_mock(n_companies=3, n_weeks=130)
+        return prices_by_co, fin_by_co, companies
+
+    def test_strict_drops_companies_when_macro_missing(self):
+        """macro_nan_ok=False（M-1 既定）: 1系列でも欠損なら全企業脱落（従来挙動）。"""
+        prices_by_co, fin_by_co, companies = self._inputs()
+        macro_cache = _make_macro_cache_usdjpy_only(prices_by_co)
+        macro_names = ["macro_usdjpy_yoy", "macro_sp500_yoy"]   # SP500 は cache に無い
+        samples, _, snaps, _ = build_snapshots(
+            prices_by_co, fin_by_co, companies, macro_cache,
+            ["per", "pbr"], macro_names, False, 12, 0.5,
+            build_interactions=False, macro_nan_ok=False,
+        )
+        assert len(snaps) == 0, "厳格モードで欠損系列があるのに企業が残った"
+        assert sum(len(v) for v in samples.values()) == 0
+
+    def test_nan_ok_retains_companies_with_nan_feature(self):
+        """macro_nan_ok=True（M-2）: 欠損系列は NaN として保持し企業を残す。"""
+        prices_by_co, fin_by_co, companies = self._inputs()
+        macro_cache = _make_macro_cache_usdjpy_only(prices_by_co)
+        macro_names = ["macro_usdjpy_yoy", "macro_sp500_yoy"]
+        samples, _, snaps, feats = build_snapshots(
+            prices_by_co, fin_by_co, companies, macro_cache,
+            ["per", "pbr"], macro_names, False, 12, 0.5,
+            build_interactions=False, macro_nan_ok=True,
+        )
+        assert len(snaps) > 0, "NaN 許容モードで企業が残らなかった"
+        sp_idx  = feats.index("macro_sp500_yoy")
+        usd_idx = feats.index("macro_usdjpy_yoy")
+        for ec, (feat_row, _info) in snaps.items():
+            assert math.isnan(feat_row[sp_idx]), "欠損系列が NaN になっていない"
+            assert math.isfinite(feat_row[usd_idx]), "充足系列まで NaN 化している"
+
+    def test_company_count_stable_when_adding_thin_feature(self):
+        """薄い系列を足しても企業数が維持される（USDJPY のみ → +SP500 で不変）。"""
+        prices_by_co, fin_by_co, companies = self._inputs()
+        macro_cache = _make_macro_cache_usdjpy_only(prices_by_co)
+        _, _, snaps_1, _ = build_snapshots(
+            prices_by_co, fin_by_co, companies, macro_cache,
+            ["per", "pbr"], ["macro_usdjpy_yoy"], False, 12, 0.5,
+            build_interactions=False, macro_nan_ok=True,
+        )
+        _, _, snaps_2, _ = build_snapshots(
+            prices_by_co, fin_by_co, companies, macro_cache,
+            ["per", "pbr"], ["macro_usdjpy_yoy", "macro_sp500_yoy"], False, 12, 0.5,
+            build_interactions=False, macro_nan_ok=True,
+        )
+        assert set(snaps_1.keys()) == set(snaps_2.keys()), "薄い系列追加で企業母集団が変化した"
 
 
 # ── 2. leak ───────────────────────────────────────────────────────────────────
@@ -425,6 +500,26 @@ class TestExecuteSmoke:
 
         for item in result["results"]:
             assert item.get("r1") is None, f"r1 が None でない（{item['edinet_code']}）"
+
+    def test_execute_with_partial_macro_nan(self):
+        """マクロ一部欠損（NaN）でも execute が end-to-end（XGB CV・OLS baseline・最終fit
+        ・predict・SHAP）を完走し全社返す。USDJPY のみ充足、SP500/US10Y は NaN。"""
+        db, prices_by_co, fin_by_co, companies = self._make_db()
+        params = self._make_params(use_macro=True)   # 既定3マクロ
+        macro_cache = _make_macro_cache_usdjpy_only(prices_by_co)
+
+        with patch("plugins.macro_gbdt.load_data", return_value=(prices_by_co, fin_by_co, companies)), \
+             patch("plugins.macro_gbdt.preload_macro", return_value=macro_cache), \
+             patch("plugins.macro_gbdt.get_producer_scores", return_value={}):
+            result = asyncio.run(plugin.execute(params, db))
+
+        assert result["n_companies"] > 0, "NaN マクロで企業が全滅した"
+        assert "macro_sp500_yoy" in result["selected_features"]
+        # OLS ベースラインも NaN 補完で完走している
+        assert result["cv_metrics"]["ols_baseline"]["n_folds"] >= 0
+        # μ̂ が有限
+        for item in result["results"]:
+            assert item["mu_raw"] == item["mu_raw"], "mu_raw が NaN"
 
     def test_execute_model_type_xgboost(self):
         db, prices_by_co, fin_by_co, companies = self._make_db()

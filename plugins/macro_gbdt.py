@@ -182,7 +182,11 @@ class MacroGbdtPlugin(AnalysisPlugin):
                 "type": "slider",
                 "dtype": "float",
                 "label": "特徴量充足率下限",
-                "description": "全特徴量が揃っているサンプルの最低割合（M-1 と同一母集団を保つため同値推奨）。",
+                "description": (
+                    "サンプル採用に必要な非欠損特徴量の最低割合。マクロ欠損は NaN として保持し"
+                    "（XGBoost が処理）、本下限が表示可否を制御する。薄いマクロ系列を足しても"
+                    "下限を割らなければ企業は脱落しない。財務特徴量は欠損時に常に除外。"
+                ),
                 "default": 0.5,
                 "min": 0.1,
                 "max": 1.0,
@@ -349,6 +353,7 @@ class MacroGbdtPlugin(AnalysisPlugin):
             prices_by_co, fin_by_co, companies, macro_cache,
             fin_features, macro_names, use_momentum, mom_window, min_coverage,
             build_interactions=False,
+            macro_nan_ok=True,
         )
 
         total_samples = sum(len(v) for v in samples_by_ym.values())

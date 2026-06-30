@@ -19,6 +19,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from plugins.utils import (
     LOG_PRED_CAP,
     check_collinearity,
+    fit_feature_columns,
     kfold_cv,
     macro_risk_exposure,
     normalize,
@@ -27,6 +28,7 @@ from plugins.utils import (
     ols_with_diagnostics,
     ridge_regression,
     shares_outstanding,
+    transform_feature_row,
     walk_forward_cv_monthly,
     winsorize,
 )
@@ -548,6 +550,46 @@ class TestSharesOutstanding:
     def test_returns_none_when_no_attribute(self):
         rec = SimpleNamespace()
         assert shares_outstanding(rec) is None
+
+
+# ── fit_feature_columns / transform_feature_row の NaN 補完 ───────────────
+# M-2 のマクロ欠損許容（macro_nan_ok）で OLS ベースライン経路へ NaN が流入する。
+# 学習列平均（nanmean）による補完がリークなしで機能することを担保する。
+
+class TestFeatureColumnsNaN:
+    def test_fit_imputes_nan_with_column_mean(self):
+        # 列0は [1, 2, NaN, 3] → 非NaN平均=2 で補完。winsorize/normalize が NaN で壊れない。
+        X_raw = [[1.0, 10.0], [2.0, 20.0], [float("nan"), 30.0], [3.0, 40.0]]
+        X_norm, win_params, norm_params = fit_feature_columns(X_raw, n_feat=2)
+        # 全要素が有限（NaN が伝播していない）
+        for row in X_norm:
+            assert all(math.isfinite(v) for v in row), f"NaN/inf が残存: {row}"
+        # intercept 列が先頭
+        assert all(row[0] == 1.0 for row in X_norm)
+
+    def test_fit_all_nan_column_becomes_zero(self):
+        # 全 NaN 列は col_mean=0 → 正規化後も 0（定数列・クラッシュしない）
+        X_raw = [[float("nan"), 1.0], [float("nan"), 2.0], [float("nan"), 3.0], [float("nan"), 4.0]]
+        X_norm, _, _ = fit_feature_columns(X_raw, n_feat=2)
+        for row in X_norm:
+            assert math.isfinite(row[1]), "全NaN列が有限化されていない"
+
+    def test_transform_imputes_nan_to_neutral(self):
+        # 学習列の中心（mean）で補完 → 正規化後ほぼ 0（中立値）
+        X_raw = [[0.0], [1.0], [2.0], [3.0], [4.0]]
+        _, win_params, norm_params = fit_feature_columns(X_raw, n_feat=1)
+        row = transform_feature_row([float("nan")], win_params, norm_params)
+        assert math.isfinite(row[1])
+        assert abs(row[1]) < 1e-9, f"NaN 補完が中立(0)でない: {row[1]}"
+
+    def test_transform_no_nan_unchanged(self):
+        # NaN を含まない行は従来どおり（中立化分岐が副作用を持たない）
+        X_raw = [[0.0], [1.0], [2.0], [3.0], [4.0]]
+        _, win_params, norm_params = fit_feature_columns(X_raw, n_feat=1)
+        with_value = transform_feature_row([2.0], win_params, norm_params)
+        assert math.isfinite(with_value[1])
+        # 中央値(=2)は z=0 付近
+        assert abs(with_value[1]) < 1e-9
 
 
 # ── LOG_PRED_CAP ─────────────────────────────────────────────────────────
