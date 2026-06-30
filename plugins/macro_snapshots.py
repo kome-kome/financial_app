@@ -113,7 +113,8 @@ MACRO_FEATURE_OPTIONS = [
     {"value": "macro_jp_unemp_zscore",     "label": "日本 失業率 Zスコア"},
     # macro_jp_ip_yoy は #253 で一時除外（JPNPROINDMISMEI 凍結）
     {"value": "macro_jp_trade_bal_zscore", "label": "日本 貿易収支 Zスコア"},
-    {"value": "macro_jp_cpi_core_yoy",           "label": "日本 コアCPI 前年比（YoY）"},
+    # macro_jp_cpi_core_yoy: e-Stat statsDataId=0003427113 が年次データのみ返却（lvTime 調査中）。
+    # 月次データ収集が確認できるまで選択肢から除外。
     {"value": "macro_jp_tankan_mfg_large_zscore", "label": "日銀短観 製造業大企業 業況DI Zスコア"},
     {"value": "macro_jp_m2_yoy",                 "label": "日本 M2（マネーストック）前年比（YoY）"},
 ]
