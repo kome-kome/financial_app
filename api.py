@@ -102,8 +102,8 @@ def _set_auth_cookies(response, token: str, csrf: str) -> None:
                         secure=_COOKIE_SECURE, samesite="lax", path="/")
 
 def _clear_auth_cookies(response) -> None:
-    response.delete_cookie(_AUTH_COOKIE, path="/")
-    response.delete_cookie(_CSRF_COOKIE, path="/")
+    response.delete_cookie(_AUTH_COOKIE, path="/", secure=_COOKIE_SECURE, httponly=True, samesite="lax")
+    response.delete_cookie(_CSRF_COOKIE, path="/", secure=_COOKIE_SECURE, samesite="lax")
 
 # ── DB / コレクター インポート ──────────────────────────────────────────────
 from database import (
@@ -221,7 +221,9 @@ async def _auth_middleware(request: Request, call_next):
         return await call_next(request)
     if path.startswith("/api/"):
         if not _verify_token(request.cookies.get(_AUTH_COOKIE, "")):
-            return JSONResponse({"detail": "認証が必要です"}, status_code=401)
+            resp = JSONResponse({"detail": "認証が必要です"}, status_code=401)
+            _clear_auth_cookies(resp)
+            return resp
         if request.method in _CSRF_UNSAFE_METHODS:
             header_tok = request.headers.get("X-CSRF-Token", "")
             cookie_tok = request.cookies.get(_CSRF_COOKIE, "")

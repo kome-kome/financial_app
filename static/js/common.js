@@ -41,7 +41,7 @@ async function apiFetch(path, opts = {}) {
   const _m = (opts.method || 'GET').toUpperCase();
   if (_m !== 'GET' && _m !== 'HEAD') heads['X-CSRF-Token'] = _getCookie('csrf_token');
   const r = await fetch(apiBase() + path, { credentials: 'same-origin', ...opts, headers: { ...heads, ...(opts.headers || {}) } });
-  if (r.status === 401) { location.href = '/login?next=' + encodeURIComponent(location.pathname + location.search); return null; }
+  if (r.status === 401) { document.cookie = 'csrf_token=; max-age=0; path=/'; location.href = '/login?next=' + encodeURIComponent(location.pathname + location.search); return null; }
   if (!r.ok) {
     if (r.status === 502 || r.status === 503 || r.status === 504)
       throw new Error(`サーバー再起動中 (${r.status})。しばらく待ってから再試行してください`);
