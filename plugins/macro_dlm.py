@@ -70,6 +70,10 @@ MACRO_FEATURE_OPTIONS = [{"value": k, "label": v[2]} for k, v in _DLM_MACRO_MAP.
 DEFAULT_MACRO_FEATURES = ["dlm_usdjpy", "dlm_us10y", "dlm_nikkei225", "dlm_wti"]
 
 WEEKS_PER_YEAR = 52
+# 週次日付グリッドで forward-fill 値がこの割合未満しか無い factor はモデルから自動除外する。
+# 未収集・歴史の浅い系列を含めると全週で欠損→全週スキップ→企業が一斉脱落するため、factor を
+# 落として企業母集団を factor 選択から切り離す（除外は diagnostics に表示）。
+_MIN_FACTOR_COVERAGE = 0.5
 _MAX_PATH_POINTS = 120          # チャート用に経路をこの点数まで間引く（payload 抑制）
 _AUTO_SAMPLE_N = 50             # 自動ハイパーパラメータ選択で使用する銘柄サンプル数
 # δ / β_v の探索グリッド（粗→細の2段階候補）
@@ -453,6 +457,34 @@ class MacroDlmPlugin(AnalysisPlugin):
         if not macro_levels:
             raise ValueError("マクロデータがありません。先にマクロ指標を収集してください。")
 
+        # ── 薄い factor の自動除外（企業母集団を factor 選択から切り離す）──────────
+        # 週次日付グリッドで forward-fill 値が _MIN_FACTOR_COVERAGE 未満しか無い factor
+        # （未収集・歴史が浅い系列）は多くの週で null になり、含めるとその週がスキップされ
+        # 企業が一斉脱落する。これをモデルから外して企業を残し、除外を diagnostics に表示する。
+        grid = sorted(set(all_dates))
+        n_grid = len(grid)
+
+        def _factor_coverage(feat: str) -> float:
+            scode = _DLM_MACRO_MAP[feat][0]
+            d, _v = macro_levels.get(scode, ([], []))
+            if not d or not n_grid:
+                return 0.0
+            pos = bisect.bisect_left(grid, d[0])   # forward-fill 可能日 = grid 日付 ≥ 初出日
+            return (n_grid - pos) / n_grid
+
+        factor_coverage = {f: _factor_coverage(f) for f in factors}
+        dropped_factors = [
+            {"feature": f, "label": _DLM_MACRO_MAP[f][2], "coverage": _r(factor_coverage[f], 4)}
+            for f in factors if factor_coverage[f] < _MIN_FACTOR_COVERAGE
+        ]
+        factors = [f for f in factors if factor_coverage[f] >= _MIN_FACTOR_COVERAGE]
+        if not factors:
+            _names = "、".join(d["label"] for d in dropped_factors)
+            raise ValueError(
+                f"選択したマクロ・ファクターはいずれもデータ蓄積が不足しています（{_names}）。"
+                f"カバレッジ {_MIN_FACTOR_COVERAGE:.0%} 以上の系列を選ぶか、マクロ収集を実行してください。"
+            )
+
         level_at, kinds = self._macro_change_builder(macro_levels, factors)
 
         # 自動ハイパーパラメータ選択: 代表サンプルで周辺尤度を最大化
@@ -597,6 +629,9 @@ class MacroDlmPlugin(AnalysisPlugin):
             "selected_bv": _r(beta_v, 4),
             "phi": _r(phi, 4),
             "auto_hyperparams_used": auto_hp_used,
+            # データ蓄積不足で除外した factor と、選択 factor のカバレッジ（透明性）
+            "dropped_factors": dropped_factors,
+            "factor_coverage": {f: _r(c, 4) for f, c in factor_coverage.items()},
         }
 
         # ── アウトオブサンプル検証（OOF）: α_{t-1} が翌週リターンを順序付けるか（ADR-0004）─

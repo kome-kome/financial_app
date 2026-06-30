@@ -1942,6 +1942,12 @@ function _dlmDiagHTML(data) {
       <div style="padding:8px;background:#0b1220;border-radius:6px"><div style="font-size:10px;color:#64748b">95% 信用区間カバレッジ</div><div style="font-size:15px;font-weight:700;color:${(d.coverage95 || 0) >= 0.9 ? '#86efac' : '#fbbf24'}">${d.coverage95 != null ? (d.coverage95 * 100).toFixed(1) + '%' : '-'}</div></div>
     </div>
     <div style="margin-top:8px;font-size:11px;color:#64748b">δ=${p.state_discount ?? '-'} ／ β_v=${p.var_discount ?? '-'} ／ 最低 ${p.min_weeks ?? '-'} 週 ／ バーンイン ${p.burn_in_weeks ?? '-'} 週</div>
+    ${(() => {
+      const dropped = d.dropped_factors || [];
+      if (!dropped.length) return '';
+      const items = dropped.map(x => `${esc(x.label || x.feature)}（被覆 ${x.coverage != null ? (x.coverage * 100).toFixed(0) + '%' : '-'}）`).join('、');
+      return `<div style="margin-top:8px;font-size:11px;color:#fbbf24">⚠ データ蓄積不足のためモデルから自動除外した factor: ${items}<span style="color:#64748b">（企業母集団は維持されます）</span></div>`;
+    })()}
   </div>`;
 }
 

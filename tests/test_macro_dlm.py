@@ -372,6 +372,88 @@ class TestGuards:
             asyncio.run(plugin.execute(params, db))
 
 
+# ── 6b. 薄い factor の自動除外（factor を増やすと企業数が減る問題の対処）─────────
+
+class TestThinFactorDrop:
+    """カバレッジ不足の factor をモデルから外し企業母集団を維持する（diagnostics に表示）。"""
+
+    def _params(self, **ov):
+        base = {k: v["default"] for k, v in plugin.params_schema().items() if "default" in v}
+        p = coerce_params(plugin.params_schema(), base)
+        p.update({"min_weeks": 40, "burn_in_weeks": 5, "top_n": 3})
+        p.update(ov)
+        return p
+
+    def _run(self, prices_by_co, companies, macro_levels, **pover):
+        params = self._params(**pover)
+        db = MagicMock()
+        with patch("plugins.macro_dlm.load_prices", return_value=(prices_by_co, companies)), \
+             patch("plugins.macro_dlm.load_macro_levels", return_value=macro_levels):
+            return asyncio.run(plugin.execute(params, db))
+
+    def test_thin_factor_dropped_companies_kept(self):
+        """歴史の浅い factor（US10Y を後半 20 週のみ）は除外され、企業は残る。"""
+        dates = _weekly_dates(90)
+        prices_by_co, companies = _make_prices_companies(5, dates)
+        macro = _make_macro_levels(dates)
+        late = dates[70:]   # カバレッジ ≈ 20/90 ≈ 0.22 < 0.5
+        macro["US10Y"] = (list(late), [4.0 + 0.01 * i for i in range(len(late))])
+
+        res = self._run(prices_by_co, companies, macro)
+        dropped = {x["feature"] for x in res["diagnostics"]["dropped_factors"]}
+        assert "dlm_us10y" in dropped, "薄い factor が除外されていない"
+        assert "dlm_us10y" not in res["macro_features"], "除外 factor がモデルに残っている"
+        # factor_labels はモデルが実際に使った factor のみ
+        assert set(res["factor_labels"].keys()) == set(res["macro_features"])
+        # 企業は脱落しない（5 社全員スコア）
+        assert res["n_companies"] == 5
+
+    def test_company_count_matches_subset_selection(self):
+        """薄い factor 込みの企業数 == 薄い factor を外した3因子だけ選んだ企業数。"""
+        dates = _weekly_dates(90)
+        prices_by_co, companies = _make_prices_companies(5, dates)
+        macro = _make_macro_levels(dates)
+        macro["US10Y"] = (list(dates[70:]), [4.0 + 0.01 * i for i in range(20)])
+
+        res_all = self._run(prices_by_co, companies, macro)   # 既定4因子（US10Y は除外される）
+        res_sub = self._run(prices_by_co, companies, macro,
+                            macro_features=["dlm_usdjpy", "dlm_nikkei225", "dlm_wti"])
+        assert res_all["n_companies"] == res_sub["n_companies"]
+
+    def test_well_covered_factors_not_dropped(self):
+        """全 factor が高カバレッジなら除外なし（既定挙動は不変）。"""
+        dates = _weekly_dates(90)
+        prices_by_co, companies = _make_prices_companies(3, dates)
+        macro = _make_macro_levels(dates)
+        res = self._run(prices_by_co, companies, macro)
+        assert res["diagnostics"]["dropped_factors"] == []
+        assert set(res["macro_features"]) == set(DEFAULT_MACRO_FEATURES)
+
+    def test_all_thin_factors_raises_clear_error(self):
+        """選択 factor が全て蓄積不足なら factor 名入りの明確なエラー。"""
+        dates = _weekly_dates(90)
+        prices_by_co, companies = _make_prices_companies(3, dates)
+        late = dates[82:]   # 全系列をごく最近のみに（カバレッジ < 0.5）
+        macro = {sc: (list(late), [1.0 + 0.01 * i for i in range(len(late))])
+                 for sc in ("USDJPY", "NIKKEI225", "WTI", "US10Y")}
+        db = MagicMock()
+        with patch("plugins.macro_dlm.load_prices", return_value=(prices_by_co, companies)), \
+             patch("plugins.macro_dlm.load_macro_levels", return_value=macro):
+            with pytest.raises(ValueError, match="データ蓄積が不足"):
+                asyncio.run(plugin.execute(self._params(), db))
+
+    def test_factor_coverage_reported(self):
+        """diagnostics.factor_coverage に全選択 factor のカバレッジが入る。"""
+        dates = _weekly_dates(90)
+        prices_by_co, companies = _make_prices_companies(3, dates)
+        macro = _make_macro_levels(dates)
+        res = self._run(prices_by_co, companies, macro)
+        cov = res["diagnostics"]["factor_coverage"]
+        assert set(cov.keys()) == set(DEFAULT_MACRO_FEATURES)
+        for v in cov.values():
+            assert v == pytest.approx(1.0)
+
+
 # ── 7. ヘルパ ────────────────────────────────────────────────────────────────
 
 class TestHelpers:
