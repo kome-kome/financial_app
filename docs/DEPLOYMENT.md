@@ -30,6 +30,7 @@ Render の制約と運用形態に合わせて設計すること。
 | `[定常]` | 差分収集・毎日自動実行 | `daily-incremental.yml` | 毎日 JST 03:00 に自動。手動で即時更新したい場合は `workflow_dispatch` | 5〜15分 |
 | `[全件]` | XBRL収集・財務データ全件更新 | `full-pipeline.yml` | DB初期構築時・全社バックフィル必要時（`daily-incremental` を `.disabled` に退避して同時実行回避） | 200〜240分 |
 | `[補完]` | マクロのみ収集 | `collect-macro.yml` | `MACRO_SERIES`（為替・金利・指数・コモディティ・ボラ）を Yahoo から収集。新規系列追加や macro_data の鮮度補完。`workflow_dispatch`（years 既定5） | 〜数分 |
+| `[推論]` | M-1 per-stock 階層マクロβ推論 | `macro-beta-inference.yml` | ADR-0002 の PyMC 階層ベイズ推論バッチ（`macro_beta_inference.py`）。本番 `requirements.txt` ではなく `requirements-inference.txt`（+PyMC）を使用。`workflow_dispatch`（draws/tune/target_accept 指定可・既定 1000/1000/0.9）。マクロ環境・銘柄構成の変化に応じて随時手動実行する想定で、現時点では定期スケジュールなし | 未計測（本番規模での初回実行後に実測値を追記予定。ローカル検証: 4銘柄合成データ・draws/tune=50・chains=2・g++無しの Python フォールバックで約8分） |
 
 #### アーカイブ済み（`.github/workflows/old/` 配下・一回性・Actions 対象外）
 

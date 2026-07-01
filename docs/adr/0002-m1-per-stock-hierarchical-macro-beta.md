@@ -2,7 +2,11 @@
 
 ## Status
 
-accepted（2026-06-21・**設計決定**）。実装は GitHub Issues で追跡。**現行コードはユニバース単一 β のまま**であり、本 ADR は合意済みの進化方向を記録する（doc⇔code 乖離を避けるための明示）。
+accepted（2026-06-21・**設計決定**）→ **実装・デプロイ完了（2026-07-02・Issue #260）**。
+
+**実装済み**: `macro_beta_inference.py` の `build_panel`（`plugins/macro_snapshots.py` のデータ経路を再利用）・`select_shared_factors`（`select_features_bic` 共有ヘルパーへ集約し `macro_risk_return._select_macro_features` と実体統一）・`build_hierarchical_model` の non-centered パラメータ化（offset×scale・Neal's funnel 対策）・収束診断（r_hat/ESS/発散遷移数を hyperparams へ保存）。GitHub Actions 推論ワークフロー `macro-beta-inference.yml`（`workflow_dispatch` 手動実行のみ・定期スケジュールは持たない）を整備。合成データでのエンドツーエンド動作確認済み（`tests/test_macro_beta_inference.py`：`build_panel`/`select_shared_factors`単体・階層モデル構築+NUTSサンプリング・`run_inference`一気通貫、いずれも pass）。
+
+**未実施（初回本番実行後に本節を更新）**: 本番 DB での初回実行・実データでの収束確認（r_hat<1.01）・WF-CV 検証（単一β比 R² 非劣化・R1' の銘柄間分散>0・Consequences 節の受け入れ基準）。
 
 **改訂（2026-06-21）**: partial pooling の手法を**フルベイズ二層階層モデル（全体→セクター→銘柄、PyMC 5系・NUTS）**に確定。R_macro を **√(βᵀΣ_macroβ)**（リターン単位）に確定。実行アーキを**推論バッチ分離**（PyMC は GitHub Actions 専用・本番 Render 非搭載）に確定。詳細は下記 Decision §1/§5・Considered Options・Consequences に反映済み。
 

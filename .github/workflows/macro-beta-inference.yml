@@ -1,0 +1,65 @@
+name: "[補完] M-1 per-stock 階層マクロ・ベータ推論バッチ"
+
+# ADR-0002「M-1 を per-stock 階層マクロ・ベータへ再設計」の推論バッチ（macro_beta_inference.py）。
+# 全体→セクター→銘柄の二層フルベイズ階層モデル（PyMC・NUTS）を GitHub Actions 上で実行し、
+# 結果（per-stock 事後ローディング・SE・選択因子集合・因子共分散）を macro_beta_loadings /
+# macro_beta_meta へ永続化する。M-1 プラグイン（macro_risk_return）は producer としてこれを読む。
+#
+# MCMC は /api/plugins/{name}/run の同期リクエストでは回せない（Render タイムアウト）ため
+# バッチ分離（ADR-0002「実行アーキ＝推論バッチ分離」）。本番 Render の requirements.txt には
+# PyMC を載せず、本ワークフロー専用の requirements-inference.txt でのみ導入する。
+#
+# 実行頻度: 手動（workflow_dispatch）のみ。マクロ環境・銘柄構成の変化に応じて随時再実行する
+# 想定で、日次/週次の定期実行は今のところ設けない（初回実行の収束・所要時間の実績を見て検討）。
+
+on:
+  workflow_dispatch:
+    inputs:
+      draws:
+        description: "NUTS 事後サンプル数（チェーンあたり）"
+        required: false
+        default: "1000"
+      tune:
+        description: "NUTS チューニングステップ数"
+        required: false
+        default: "1000"
+      target_accept:
+        description: "NUTS target_accept（発散が多い場合は 0.95 等へ引き上げ）"
+        required: false
+        default: "0.9"
+
+jobs:
+  infer:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13.7'  # render.yaml の PYTHON_VERSION と一致させる
+          cache: 'pip'
+
+      - name: Install dependencies (requirements.txt + PyMC)
+        run: pip install -r requirements-inference.txt
+
+      - name: Run inference batch
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          python macro_beta_inference.py \
+            --draws "${{ github.event.inputs.draws || '1000' }}" \
+            --tune "${{ github.event.inputs.tune || '1000' }}" \
+            --target-accept "${{ github.event.inputs.target_accept || '0.9' }}" \
+            2>&1 | tee macro_beta_inference.log
+
+      - name: Upload log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: macro-beta-inference-log
+          path: macro_beta_inference.log
+          retention-days: 30

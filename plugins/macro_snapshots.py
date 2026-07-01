@@ -20,7 +20,7 @@ from typing import Any
 
 import numpy as np
 
-from .utils import macro_risk_exposure
+from .utils import macro_risk_exposure, normalize, winsorize
 
 # ── 定数 ──────────────────────────────────────────────────────────────────
 
@@ -313,7 +313,8 @@ def build_snapshots(
     min_coverage: float,
     build_interactions: bool = True,
     macro_nan_ok: bool = False,
-) -> tuple[dict, dict, dict, list[str]]:
+    return_stock_ids: bool = False,
+) -> tuple:
     """M-1/M-2 共有スナップショット構築。
 
     build_interactions=True（M-1 既定）: fin×macro 交差項を生成。
@@ -324,6 +325,10 @@ def build_snapshots(
       XGBoost は NaN をネイティブ処理するため、表示母集団を財務＋株価で決められる
       （薄いマクロ系列を足しても企業が激減しない）。表示可否は min_coverage が制御する。
       **build_interactions=False と併用すること**（交差項に NaN が混入すると OLS が壊れる）。
+
+    return_stock_ids=True（ADR-0002 M-1 per-stock 階層ベイズ専用）: 5番目の戻り値として
+      `stock_ids_by_ym: dict[str, list[str]]`（各サンプルの edinet_code・samples_by_ym と同じ並び順）
+      を追加する。既定 False では戻り値の形（4-tuple）は従来どおり変わらない。
     """
     use_macro = bool(macro_names)
     momentum_name = ["momentum_12m1"] if use_momentum else []
@@ -339,6 +344,7 @@ def build_snapshots(
 
     samples_by_ym: dict[str, list] = defaultdict(list)
     sample_meta_by_ym: dict[str, list] = defaultdict(list)
+    stock_ids_by_ym: dict[str, list] = defaultdict(list)
     current_snaps: dict[str, tuple] = {}
     min_rows = HORIZON_WEEKS + 4
     macro_memo: dict[str, dict] = {}
@@ -431,6 +437,8 @@ def build_snapshots(
                 if c_snap and c_fut and c_snap > 0 and c_fut > 0:
                     samples_by_ym[snap_ym].append((feat_row, math.log(c_fut / c_snap)))
                     sample_meta_by_ym[snap_ym].append((industry, size_val))
+                    if return_stock_ids:
+                        stock_ids_by_ym[snap_ym].append(edinet_code)
 
             if is_current:
                 comp = companies.get(edinet_code)
@@ -443,7 +451,50 @@ def build_snapshots(
                     "snap_date":    snap_date,
                 })
 
+    if return_stock_ids:
+        return (dict(samples_by_ym), dict(sample_meta_by_ym), current_snaps,
+                all_feat_names, dict(stock_ids_by_ym))
     return dict(samples_by_ym), dict(sample_meta_by_ym), current_snaps, all_feat_names
+
+
+# ── 特徴量選択（BIC） ──────────────────────────────────────────────────────
+
+def select_features_bic(X: np.ndarray, y: np.ndarray, max_features: int) -> list[int]:
+    """winsorize+zscore 正規化した上で LassoLarsIC(BIC) により特徴量を選択し、列インデックスを返す。
+
+    M-1（macro_risk_return._select_macro_features）と M-1' per-stock 階層ベイズ
+    （macro_beta_inference.select_shared_factors）が共有する「pooled BIC 選択」の実体
+    （ADR-0002 §1・Considered Options）。L1 正則化が共線性をネイティブに処理する。
+    選択は LASSO で行い、最終係数は呼び出し側の OLS/階層モデル再フィットで不偏化する。
+    BIC 最小解が max_features を超える場合は |係数| 降順の上位 max_features に切り詰める。
+    """
+    from sklearn.linear_model import LassoLarsIC
+
+    n_samples, n_cand = X.shape
+    if n_samples < 5:
+        return []
+
+    X_norm = np.empty_like(X, dtype=float)
+    for ci in range(n_cand):
+        col_w, _, _ = winsorize(X[:, ci].tolist())
+        col_n, _, _ = normalize(col_w, "zscore")
+        X_norm[:, ci] = col_n
+    y_w, _, _ = winsorize(list(y))
+    y_n, _, _ = normalize(y_w, "zscore")
+    y_np = np.asarray(y_n, dtype=float)
+
+    try:
+        model = LassoLarsIC(criterion="bic")
+        model.fit(X_norm, y_np)
+    except Exception:
+        return []
+
+    coef = model.coef_
+    nz = [i for i in range(n_cand) if abs(coef[i]) > 1e-12]
+    if not nz:
+        return []
+    nz.sort(key=lambda i: abs(coef[i]), reverse=True)
+    return sorted(nz[:max_features])
 
 
 # ── producer スコア ────────────────────────────────────────────────────────

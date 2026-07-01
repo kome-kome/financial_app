@@ -53,33 +53,94 @@ class InferenceResult:
     alpha: dict[str, tuple[float, float]]          # 銘柄切片（事後平均・SE）
     mu_pred: dict[str, float]                       # per-stock 予測リターン μ（事後平均予測）
     factor_cov: list[list[float]]                   # Sigma_macro（選択因子の共分散・R_macro 用）
+    diagnostics: dict | None = None                 # r_hat_max/ess_bulk_min 等（収束診断・ADR-0002 検証）
+    hyperparams: dict | None = None                 # draws/tune/target_accept/seed（persist で meta へ）
 
 
-def build_panel(db) -> tuple:
+def build_panel(db, macro_names: list[str] | None = None) -> tuple:
     """DB から週次リターン・マクロ因子・セクターを読み、パネル（銘柄×時点×因子）を構築する。
 
-    既存の plugins.macro_risk_return の _load_data / _preload_macro / _build_snapshots と
-    同じデータ経路を再利用する想定（重複ロジックは共通ヘルパーへ切り出す — Issue #214）。
+    plugins.macro_snapshots の load_data / preload_macro / build_snapshots を再利用する
+    （ADR-0002 §2: マクロは主効果のみ・交差項なし・欠損サンプルは破棄）。財務特徴量は
+    階層モデルの説明変数に含めない（fin_features=[]）ため build_snapshots には要求しないが、
+    「その月に適用可能な財務レコードが存在する」ことはスナップショット採用の前提として残る
+    （build_snapshots 内部の _find_applicable_fin ゲート）。
+
+    macro_names 省略時は MACRO_FEATURE_NAMES（全系列・BIC 選択の候補プール）を使う。
+    テストでは小さい集合を明示的に渡せる。
 
     Returns:
         (returns, macro, stock_idx, sector_idx, factor_names, edinet_codes, sector_names)
     """
-    raise NotImplementedError(
-        "build_panel: macro_risk_return のデータ経路を共通化して接続する（Issue #214）"
+    from plugins.macro_snapshots import (
+        MACRO_FEATURE_NAMES,
+        build_snapshots,
+        load_data,
+        preload_macro,
     )
+
+    prices_by_co, fin_by_co, companies = load_data(db)
+    if not prices_by_co:
+        raise ValueError("build_panel: 株価週次履歴がありません。先に収集を実行してください。")
+
+    macro_names = list(macro_names) if macro_names is not None else list(MACRO_FEATURE_NAMES)
+    macro_cache = preload_macro(db, prices_by_co, macro_names)
+
+    samples_by_ym, sample_meta_by_ym, _current_snaps, factor_names, stock_ids_by_ym = build_snapshots(
+        prices_by_co, fin_by_co, companies, macro_cache,
+        fin_features=[], macro_names=macro_names,
+        use_momentum=False, mom_window=0, min_coverage=1.0,
+        build_interactions=False, macro_nan_ok=False,
+        return_stock_ids=True,
+    )
+
+    returns: list[float] = []
+    macro_rows: list[list[float]] = []
+    edinet_code_seq: list[str] = []
+    sector_seq: list[str] = []
+    for ym in sorted(samples_by_ym.keys()):
+        pairs = samples_by_ym[ym]
+        metas = sample_meta_by_ym[ym]
+        codes = stock_ids_by_ym[ym]
+        for (feat_row, log_ret), (industry, _size), code in zip(pairs, metas, codes):
+            returns.append(log_ret)
+            macro_rows.append(feat_row)
+            edinet_code_seq.append(code)
+            sector_seq.append(industry)
+
+    if not returns:
+        raise ValueError(
+            "build_panel: 有効なサンプルがありません（株価週次履歴・マクロ・財務データの蓄積状況を確認してください）"
+        )
+
+    edinet_codes = sorted(set(edinet_code_seq))
+    code_to_idx = {c: i for i, c in enumerate(edinet_codes)}
+
+    # 銘柄ごとのセクター（build_hierarchical_model の mu_sector[sector_idx] は
+    # 「銘柄→セクター」の写像を要求する。observation粒度の sector_seq とは別物）。
+    stock_sector: dict[str, str] = dict(zip(edinet_code_seq, sector_seq))
+    sector_names = sorted(set(stock_sector.values()))
+    sector_to_idx = {s: i for i, s in enumerate(sector_names)}
+
+    stock_idx = np.array([code_to_idx[c] for c in edinet_code_seq], dtype=int)          # observation粒度（beta[stock_idx] 用）
+    sector_idx = np.array([sector_to_idx[stock_sector[c]] for c in edinet_codes], dtype=int)  # 銘柄粒度（mu_sector[sector_idx] 用）
+    returns_arr = np.asarray(returns, dtype=float)
+    macro_arr = np.asarray(macro_rows, dtype=float)
+
+    return returns_arr, macro_arr, stock_idx, sector_idx, factor_names, edinet_codes, sector_names
 
 
 def select_shared_factors(macro: np.ndarray, returns: np.ndarray,
                           factor_names: list[str], max_features: int) -> list[int]:
     """共有マクロ因子集合を pooled データ上で BIC（LassoLarsIC）選択する。
 
-    ADR-0002 §1: 因子集合は全銘柄共通（pooled / large-n で次元爆発に耐性）。これは現行
-    plugins.macro_risk_return._select_macro_features と同じ手続き（per-stock 化後も「共有因子選択」
-    として据え置く）。実装は既存関数の再利用を想定。
+    ADR-0002 §1: 因子集合は全銘柄共通（pooled / large-n で次元爆発に耐性）。実体は
+    plugins.macro_snapshots.select_features_bic（macro_risk_return._select_macro_features
+    と同一の pooled BIC 選択手続き・ADR-0002 Considered Options）。
     """
-    raise NotImplementedError(
-        "select_shared_factors: _select_macro_features 相当を pooled で適用（Issue #214）"
-    )
+    from plugins.macro_snapshots import select_features_bic
+
+    return select_features_bic(macro, returns, max_features)
 
 
 def build_hierarchical_model(returns: np.ndarray, macro: np.ndarray,
@@ -87,17 +148,22 @@ def build_hierarchical_model(returns: np.ndarray, macro: np.ndarray,
                              n_stock: int, n_sector: int, n_factor: int):
     """全体→セクター→銘柄の二層階層モデルを構築して返す（pm.Model）。
 
-    階層（ADR-0002 §1 で確定した二層 partial pooling）::
+    階層（ADR-0002 §1 で確定した二層 partial pooling。non-centered パラメータ化で実装）::
 
-        mu_universe[f]  ~ Normal(0, 1)                                   # ユニバース事前
-        sigma_sector[f] ~ HalfNormal(1)
-        mu_sector[s, f] ~ Normal(mu_universe[f], sigma_sector[f])        # セクター層
-        sigma_stock[f]  ~ HalfNormal(1)
-        beta[i, f]      ~ Normal(mu_sector[sector(i), f], sigma_stock[f])# 銘柄層
-        alpha[i]        ~ Normal(0, 1)                                   # 銘柄切片
+        mu_universe[f]      ~ Normal(0, 1)                                        # ユニバース事前
+        sigma_sector[f]     ~ HalfNormal(1)
+        mu_sector_raw[s, f] ~ Normal(0, 1)
+        mu_sector[s, f]     := mu_universe[f] + mu_sector_raw[s, f] * sigma_sector[f]   # セクター層
+        sigma_stock[f]      ~ HalfNormal(1)
+        beta_raw[i, f]      ~ Normal(0, 1)
+        beta[i, f]          := mu_sector[sector(i), f] + beta_raw[i, f] * sigma_stock[f] # 銘柄層
+        alpha[i]            ~ Normal(0, 1)                                        # 銘柄切片
         r[obs] ~ Normal(alpha[stock] + sum_f beta[stock,f]*macro[obs,f], sigma_obs)
 
-    NOTE: 収束改善のため non-centered パラメータ化（offset×scale）への置換を推奨（夜間で検討）。
+    non-centered 化（offset×scale の Deterministic 合成）は funnel（漏斗状の事後分布）に
+    起因する発散遷移を抑え、小 n（実効サンプル一桁／銘柄）での NUTS 収束を改善する
+    （Betancourt & Girolami 2013・Neal's funnel）。beta/mu_sector は Deterministic のため
+    idata.posterior からそのまま参照可能（summarize() は変更不要）。
     """
     import pymc as pm  # 遅延 import（本番ランタイムからの誤 import 事故を防ぐ）
 
@@ -109,12 +175,15 @@ def build_hierarchical_model(returns: np.ndarray, macro: np.ndarray,
     with pm.Model(coords=coords) as model:
         mu_universe = pm.Normal("mu_universe", 0.0, 1.0, dims="factor")
         sigma_sector = pm.HalfNormal("sigma_sector", 1.0, dims="factor")
-        mu_sector = pm.Normal(
-            "mu_sector", mu_universe, sigma_sector, dims=("sector", "factor")
+        mu_sector_raw = pm.Normal("mu_sector_raw", 0.0, 1.0, dims=("sector", "factor"))
+        mu_sector = pm.Deterministic(
+            "mu_sector", mu_universe + mu_sector_raw * sigma_sector, dims=("sector", "factor")
         )
+
         sigma_stock = pm.HalfNormal("sigma_stock", 1.0, dims="factor")
-        beta = pm.Normal(
-            "beta", mu_sector[sector_idx], sigma_stock, dims=("stock", "factor")
+        beta_raw = pm.Normal("beta_raw", 0.0, 1.0, dims=("stock", "factor"))
+        beta = pm.Deterministic(
+            "beta", mu_sector[sector_idx] + beta_raw * sigma_stock, dims=("stock", "factor")
         )
         alpha = pm.Normal("alpha", 0.0, 1.0, dims="stock")
 
@@ -126,14 +195,24 @@ def build_hierarchical_model(returns: np.ndarray, macro: np.ndarray,
 
 
 def run_inference(draws: int = 1000, tune: int = 1000, target_accept: float = 0.9,
-                  seed: int = 0, db=None) -> InferenceResult:
-    """推論バッチの本体。build_panel → 因子選択 → 階層モデル → NUTS → 事後要約。"""
+                  seed: int = 0, db=None, macro_names: list[str] | None = None,
+                  chains: int = 4) -> InferenceResult:
+    """推論バッチの本体。build_panel → 因子選択 → 階層モデル → NUTS → 事後要約。
+
+    macro_names はテスト用（小さい候補プールを注入）。省略時は build_panel の既定
+    （MACRO_FEATURE_NAMES 全系列）を使う。chains は既定 4（pymc 既定と同じ）だが、
+    テストでは軽量化のため小さくできる。
+    """
     import pymc as pm  # 遅延 import
 
-    returns, macro, stock_idx, sector_idx, factor_names, edinet_codes, sector_names = build_panel(db)
+    returns, macro, stock_idx, sector_idx, factor_names, edinet_codes, sector_names = build_panel(
+        db, macro_names=macro_names
+    )
 
     sel = select_shared_factors(macro, returns, factor_names,
                                 max_features=min(12, macro.shape[1]))
+    if not sel:
+        raise ValueError("select_shared_factors: 有効なマクロ因子が選択されませんでした。データを確認してください。")
     macro_sel = macro[:, sel]
     selected = [factor_names[i] for i in sel]
 
@@ -143,12 +222,38 @@ def run_inference(draws: int = 1000, tune: int = 1000, target_accept: float = 0.
     )
     with model:
         idata = pm.sample(draws=draws, tune=tune, target_accept=target_accept,
-                          random_seed=seed, progressbar=False)
+                          random_seed=seed, chains=chains, progressbar=False)
+
+    diagnostics = summarize_diagnostics(idata)
+    if diagnostics.get("r_hat_max") is not None and diagnostics["r_hat_max"] > 1.01:
+        logger.warning(
+            "収束診断: r_hat_max=%.4f が ADR-0002 検証基準（<1.01）を超過。"
+            "draws/tune を増やすか再実行を検討してください（ess_bulk_min=%s, n_divergences=%s）",
+            diagnostics["r_hat_max"], diagnostics.get("ess_bulk_min"), diagnostics.get("n_divergences"),
+        )
 
     result = summarize(idata, selected, macro_sel, edinet_codes)
     if not result.run_id:
         result.run_id = datetime.now(timezone.utc).strftime("mb_%Y%m%dT%H%M%SZ")
+    if not result.snapshot_date:
+        result.snapshot_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    result.diagnostics = diagnostics
+    result.hyperparams = {"draws": draws, "tune": tune, "target_accept": target_accept, "seed": seed}
     return result
+
+
+def summarize_diagnostics(idata) -> dict:
+    """r_hat・ESS の収束診断サマリ（ADR-0002 検証基準: r_hat<1.01・ESS 十分性・発散遷移数）。"""
+    import arviz as az
+
+    summ = az.summary(idata, var_names=["beta", "alpha", "mu_universe"], kind="diagnostics")
+    diverging = idata.sample_stats.get("diverging") if hasattr(idata, "sample_stats") else None
+    return {
+        "r_hat_max":     float(summ["r_hat"].max()),
+        "ess_bulk_min":  float(summ["ess_bulk"].min()),
+        "ess_tail_min":  float(summ["ess_tail"].min()),
+        "n_divergences": int(diverging.sum()) if diverging is not None else None,
+    }
 
 
 def summarize(idata, selected: list[str], macro_sel: np.ndarray,
@@ -195,7 +300,7 @@ def persist(db, result: InferenceResult) -> None:
         "snapshot_date":    result.snapshot_date,
         "selected_factors": result.selected_factors,
         "factor_cov":       result.factor_cov,
-        "hyperparams":      {},
+        "hyperparams":      {**(result.hyperparams or {}), "diagnostics": result.diagnostics},
     }
     rows: list[dict] = []
     for code, fmap in result.loadings.items():
@@ -214,6 +319,7 @@ def main() -> None:
     ap.add_argument("--tune", type=int, default=1000)
     ap.add_argument("--target-accept", type=float, default=0.9)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--chains", type=int, default=4)
     args = ap.parse_args()
 
     logging.basicConfig(level=logging.INFO)
@@ -221,10 +327,11 @@ def main() -> None:
 
     db = SessionLocal()
     try:
-        result = run_inference(draws=args.draws, tune=args.tune,
-                               target_accept=args.target_accept, seed=args.seed, db=db)
+        result = run_inference(draws=args.draws, tune=args.tune, target_accept=args.target_accept,
+                               seed=args.seed, db=db, chains=args.chains)
         persist(db, result)
         logger.info("推論完了: %d 銘柄 / 因子 %s", len(result.loadings), result.selected_factors)
+        logger.info("収束診断: %s", result.diagnostics)
     finally:
         db.close()
 
