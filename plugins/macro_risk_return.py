@@ -41,6 +41,7 @@ from .macro_snapshots import (
     load_data,
     preload_macro,
     build_snapshots,
+    select_features_bic,
     producer_scores,
     get_producer_scores,
 )
@@ -341,45 +342,16 @@ class MacroRiskReturnPlugin(AnalysisPlugin):
     ) -> list[str]:
         """LASSO-LARS パスを BIC 最小で切る特徴量選択（sklearn）。
 
-        `LassoLarsIC(criterion='bic')` の 1 パス LARS パス計算で特徴量を選択する。
-        L1 正則化が共線性をネイティブに処理する。選択は LASSO で行い、最終係数は
-        `_fit_final` の OLS 再フィットで不偏化する（LASSO は選択専用）。BIC 最小解が
-        max_features を超える場合は |係数| 降順の上位 max_features に切り詰める。
+        共有ロジックは `macro_snapshots.select_features_bic` に集約（ADR-0002 §1・
+        `macro_beta_inference.select_shared_factors` と同一の pooled BIC 選択手続き）。
         """
-        from sklearn.linear_model import LassoLarsIC
-
         all_samples = [s for ym_s in samples_by_ym.values() for s in ym_s]
         if len(all_samples) < 5:
             return []
-        n_cand = len(all_feat_names)
         X_raw = np.asarray([s[0] for s in all_samples], dtype=float)
-        y_raw = [s[1] for s in all_samples]
-
-        # winsorize + zscore 正規化（L1 ペナルティを特徴量間で公平にするため必須）
-        X_norm = np.empty_like(X_raw)
-        for ci in range(n_cand):
-            col_w, _, _ = winsorize(X_raw[:, ci].tolist())
-            col_n, _, _ = normalize(col_w, "zscore")
-            X_norm[:, ci] = col_n
-        y_w, _, _ = winsorize(y_raw)
-        y_n, _, _ = normalize(y_w, "zscore")
-        y_np = np.asarray(y_n, dtype=float)
-
-        try:
-            model = LassoLarsIC(criterion="bic")
-            model.fit(X_norm, y_np)
-        except Exception as e:  # 特異・数値エラー時は選択なしで上位へ委譲
-            log.debug(f"LassoLarsIC 失敗（選択なし）: {e}")
-            return []
-
-        coef = model.coef_
-        nz = [i for i in range(n_cand) if abs(coef[i]) > 1e-12]
-        if not nz:
-            return []
-        # |係数| 降順で max_features に切り詰め → 元の特徴量順に並べ直し（可読性）
-        nz.sort(key=lambda i: abs(coef[i]), reverse=True)
-        selected = sorted(nz[:max_features])
-        return [all_feat_names[i] for i in selected]
+        y_raw = np.asarray([s[1] for s in all_samples], dtype=float)
+        idx = select_features_bic(X_raw, y_raw, max_features)
+        return [all_feat_names[i] for i in idx]
 
     # ── 最終モデル学習 ───────────────────────────────────────────────────────
 
