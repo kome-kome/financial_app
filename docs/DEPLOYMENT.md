@@ -16,7 +16,7 @@ Render の制約と運用形態に合わせて設計すること。
 | **自動（毎日）** | 差分収集（新規書類 + 株価更新） | UTC 18:00（JST 03:00）毎日 | GitHub Actions `daily-incremental.yml` |
 | **手動のみ** | 全件収集（全社 × 5年分） | workflow_dispatch で起動 | GitHub Actions `full-pipeline.yml` |
 | **手動のみ** | マクロのみ収集（為替・金利等） | workflow_dispatch で起動 | GitHub Actions `collect-macro.yml` |
-| **手動のみ（アーカイブ）** | 株価バックフィル / 週次延伸 / CF補完 / bs_inventory 補完 / C2補完 / bs_machinery 補完 | workflow_dispatch で起動 | GitHub Actions `old/` 配下（一回性・完了済み） |
+| **手動のみ（アーカイブ）** | bs_inventory 補完 | workflow_dispatch で起動 | GitHub Actions `old/` 配下（一回性・完了済み） |
 | **UIから手動** | 差分収集・株価更新 | ユーザーがボタン押下 | Render Web UI |
 | **自動（CI）** | `pytest` 回帰テスト（Secrets・本番DB非依存） | PR / main への push | GitHub Actions `ci.yml` |
 
@@ -35,14 +35,11 @@ Render の制約と運用形態に合わせて設計すること。
 
 一回性バックフィル完了後に `old/` へ退避済み。再実行が必要な場合のみ `workflow_dispatch` で起動する。定期スケジュールは持たない。
 
+> 株価履歴バックフィル / 週次株価バックフィル / C2 NULL バックフィル / CF NULL バックフィル / bs_machinery バックフィルの5本は完了済みにつき削除済み（Issue #259）。
+
 | カテゴリ | workflow 名 | ファイル | 用途 | 所要時間の目安 |
 |---|---|---|---|---|
-| `[一回性]` | 株価履歴バックフィル | `old/backfill-stock-history.yml` | `stock_price` が NULL な企業の過去2年株価を補完（#DF 株価 daily 構築） | 60〜90分 |
-| `[一回性]` | 週次株価バックフィル | `old/backfill-weekly-history.yml` | `stock_price_weekly` を過去5年まで延伸（#198・walk-forward CV 被覆確保） | 60〜150分 |
-| `[補完]` | C2 NULL バックフィル | `old/refill-c2.yml` | C2 新列（`pl_depreciation` 等）が NULL の場合に EDINET から再取得 | 2〜4時間 |
-| `[補完]` | CF NULL バックフィル | `old/refill-cf.yml` | `cf_investing_cf` 等が NULL の場合に再取得（mode: refill / capex-only / diagnose） | 1〜3時間 |
 | `[補完]` | PL/BS NULL バックフィル | `old/.github/workflows/old/refill-pl-bs.yml` | `bs_inventory` 等 旧コホート（〜2022年）が NULL の場合に再取得 | 4〜5時間 |
-| `[補完]` | bs_machinery バックフィル | `old/refill-machinery.yml` | `bs_machinery` NULL を XBRL 再取得で是正（MachineryEquipmentAndVehiclesNet タグ追加後・#202） | 4〜5時間 |
 
 > **CI（`ci.yml`）**: データ収集系ワークフローとは独立した回帰検知用。`pull_request` と main への `push` で Python 3.13.7 上に `requirements.txt` + `requirements-dev.txt` を入れて `pytest` を実行する。Secrets・外部ネットワーク・本番 DB には一切触れず、`conftest.py` の in-memory SQLite / モックで完結する範囲のみを検証する。
 
