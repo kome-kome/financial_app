@@ -265,7 +265,8 @@ def test_estat_series_registered():
     assert "JP_CPI_CORE"  in by_code
     assert "JP_CPI_TOKYO" in by_code
     assert by_code["JP_CPI_CORE"]["cd_cat01"]  == "0161"   # 生鮮食品を除く総合
-    assert by_code["JP_CPI_TOKYO"]["cd_area"]  == "13100"  # 東京都区部
+    # 表示名は "13100 東京都区部" だが実際の cdArea コードは 13A01（#262 で実API確認）
+    assert by_code["JP_CPI_TOKYO"]["cd_area"]  == "13A01"  # 東京都区部
     assert by_code["JP_CPI_CORE"]["lag_days"]  == 30
     # cdTab（表章項目=指数）未指定が年次データのみ返却される原因だった（#262）
     for code in ("JP_CPI_TOTAL", "JP_CPI_CORE", "JP_CPI_TOKYO"):
@@ -314,7 +315,9 @@ def test_boj_quarterly_uses_yyyyqq_date_format():
     assert "endDate=202601"   in captured["url"], captured["url"]
 
 
-# ── 6. e-Stat API フェッチャー（cdTab 未指定バグの回帰テスト・#262）──────────────
+# ── 6. e-Stat API フェッチャー（cdTab/lvTime 未指定バグの回帰テスト・#262）─────────
+# 実 API 検証済みの @time 実測フォーマット: 月次="YYYY"+"00"+"MM"+"MM"（月を2回繰り返す。
+# 例 2024年12月="2024001212"）、年度（会計年度集計）="YYYY"+"10"+"0000"。
 
 def _estat_json(values: list) -> dict:
     """fetch_estat_series が解析する e-Stat API getStatsData レスポンス形式。"""
@@ -335,15 +338,16 @@ def _fetch_estat(cd_tab, cd_cat01, cd_area, values, lag_days=0):
             return httpx.Response(200, json=_estat_json(values))
         async with _REAL_ASYNC_CLIENT(transport=httpx.MockTransport(handler)) as s:
             return await fetch_estat_series(s, "0003427113", cd_tab, cd_cat01, cd_area,
-                                            "202001000000", "202601000000", lag_days=lag_days)
+                                            "2020000101", "2026000606", lag_days=lag_days)
     return asyncio.run(run())
 
 
 def test_estat_monthly_values_parsed_and_deduped():
-    """@time の月次コード（先頭6桁=YYYYMM）から月初日を復元し、lag_days 分シフトする。"""
+    """@time の月次コード（"YYYY"+"00"+"MM"+"MM"）から年・月を復元し、lag_days 分シフトする。
+    月は先頭6文字ではなく末尾2文字から取り出す点が回帰しやすい（#262）。"""
     values = [
-        {"@time": "2024010000", "@cat01": "0161", "@area": "00000", "$": "105.2"},
-        {"@time": "2024020000", "@cat01": "0161", "@area": "00000", "$": "105.6"},
+        {"@time": "2024000101", "@cat01": "0161", "@area": "00000", "$": "105.2"},  # 2024年1月
+        {"@time": "2024000202", "@cat01": "0161", "@area": "00000", "$": "105.6"},  # 2024年2月
     ]
     rows = _fetch_estat("1", "0161", "00000", values, lag_days=30)
     assert len(rows) == 2
@@ -352,21 +356,34 @@ def test_estat_monthly_values_parsed_and_deduped():
     assert rows[1]["trade_date"] == "2024-03-02"  # 2024-02-01 + 30日（うるう年）
 
 
-def test_estat_filters_by_cat01_when_multiple_categories_present():
-    """cdCat01 を指定していても API が複数カテゴリを混在返却する場合に備え、
-    後段の @cat01 一致フィルタで意図しないカテゴリの値を除外できることを確認する。"""
+def test_estat_ignores_fiscal_year_rows_if_present():
+    """年度集計行（@time="YYYY"+"10"+"0000"）が万一混入しても、月として誤読しない
+    （[8:10]="00" は有効な月ではないため ValueError で当該行のみスキップされる）。"""
     values = [
-        {"@time": "2024010000", "@cat01": "0001", "@area": "00000", "$": "106.0"},  # 総合（除外対象）
-        {"@time": "2024010000", "@cat01": "0161", "@area": "00000", "$": "105.2"},  # コア（一致）
+        {"@time": "2024000101", "@cat01": "0161", "@area": "00000", "$": "105.2"},  # 2024年1月（正常）
+        {"@time": "2024100000", "@cat01": "0161", "@area": "00000", "$": "999.9"},  # 2024年度（除外されるべき）
     ]
     rows = _fetch_estat("1", "0161", "00000", values)
     assert len(rows) == 1
     assert rows[0]["close"] == 105.2
 
 
-def test_estat_series_request_includes_cdtab():
-    """cdTab（表章項目）未指定が年次データのみ返却される原因だったため、
-    送信パラメータに cdTab が含まれることを確認する（#262）。"""
+def test_estat_filters_by_cat01_when_multiple_categories_present():
+    """cdCat01 を指定していても API が複数カテゴリを混在返却する場合に備え、
+    後段の @cat01 一致フィルタで意図しないカテゴリの値を除外できることを確認する。"""
+    values = [
+        {"@time": "2024000101", "@cat01": "0001", "@area": "00000", "$": "106.0"},  # 総合（除外対象）
+        {"@time": "2024000101", "@cat01": "0161", "@area": "00000", "$": "105.2"},  # コア（一致）
+    ]
+    rows = _fetch_estat("1", "0161", "00000", values)
+    assert len(rows) == 1
+    assert rows[0]["close"] == 105.2
+
+
+def test_estat_series_request_includes_cdtab_and_lvtime():
+    """cdTab（表章項目）・lvTime（時間軸レベル=月次）のどちらか片方でも欠けると
+    年次データのみ返却される（#262 で実API確認済み）ため、両方が送信パラメータに
+    含まれることを確認する。"""
     import asyncio
     captured = {}
 
@@ -376,9 +393,10 @@ def test_estat_series_request_includes_cdtab():
             return httpx.Response(200, json=_estat_json([]))
         async with _REAL_ASYNC_CLIENT(transport=httpx.MockTransport(handler)) as s:
             return await fetch_estat_series(s, "0003427113", "1", "0161", "00000",
-                                            "202001000000", "202601000000")
+                                            "2020000101", "2026000606")
     asyncio.run(run())
     assert "cdTab=1" in captured["url"], captured["url"]
+    assert "lvTime=4" in captured["url"], captured["url"]
 
 
 def test_estat_response_missing_value_path_returns_empty():
@@ -393,6 +411,6 @@ def test_estat_response_missing_value_path_returns_empty():
             })
         async with _REAL_ASYNC_CLIENT(transport=httpx.MockTransport(handler)) as s:
             return await fetch_estat_series(s, "0003427113", "1", "0161", "00000",
-                                            "202001000000", "202601000000")
+                                            "2020000101", "2026000606")
     rows = asyncio.run(run())
     assert rows == []

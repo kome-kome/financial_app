@@ -1176,8 +1176,10 @@ BOJ_SERIES: list[dict] = [
 # GitHub Actions シークレット名: ESTAT_API_KEY
 # statsDataId=0003427113: 2020年基準消費者物価指数（月次〜1970年・年次集計が同一テーブルに混在）
 #   cdCat01=0001: 総合, 0161: 生鮮食品を除く総合（非季調）
-#   cdArea=00000: 全国, 13100: 東京都区部
-#   cdTab=1: 表章項目「指数」（#262）。無指定だと表章項目が絞られず年次系列のみ返却される。
+#   cdArea=00000: 全国, 13A01: 東京都区部（表示名は "13100 東京都区部" だが実際の @code は 13A01。
+#     旧来の "13100" を cdArea に指定すると STATUS=1「該当データなし」で0件になる・#262 で実API確認）
+#   cdTab=1: 表章項目「指数」＋lvTime=4: 時間軸レベル「月次」（#262）。
+#     両方指定しないと表章項目・時間軸レベルが絞られず年次系列のみ返却される。
 ESTAT_API_KEY  = os.getenv("ESTAT_API_KEY", "")
 ESTAT_BASE_URL = "https://api.e-stat.go.jp/rest/3.0/app/json/getStatsData"
 
@@ -1209,7 +1211,7 @@ ESTAT_SERIES: list[dict] = [
         "stats_data_id": "0003427113",
         "cd_tab": "1",
         "cd_cat01": "0001",
-        "cd_area": "13100",
+        "cd_area": "13A01",
         "lag_days": 30,
     },
 ]
@@ -1353,9 +1355,12 @@ async def fetch_estat_series(
     lag_days: int = 0,
 ) -> list:
     """e-Stat API（api.e-stat.go.jp）から月次統計を取得する。ESTAT_API_KEY が必要。
-    @time 形式 YYYYMM000000 の先頭6文字（YYYYMM）を月初日に変換後 lag_days でシフト。
-    cdTab（表章項目）を指定しないと statsDataId=0003427113 は表章項目が絞られず
-    年次系列のみ返却される（lvTime パラメータでの絞り込みは #257/#262 で失敗確認済み）。"""
+    @time 実測フォーマットは月次 "YYYY" + "00" + "MM" + "MM"（月を2回繰り返す。例 2024年12月＝
+    "2024001212"）・年度（会計年度集計）は "YYYY" + "10" + "0000"。年度行の先頭6文字が偶然
+    "YYYY10" になり月=10と誤読される事故があった（#256）ため、月は末尾2文字から取り出す。
+    cdTab（表章項目=1:指数）と lvTime（時間軸レベル=4:月次）の両方が必須（#262 で実 API 検証済み。
+    片方だけでは年次行が混入するか解析失敗になる。過去の lvTime 単体試行が失敗したのは cdTab
+    未指定のままだったため）。"""
     params = {
         "appId":        ESTAT_API_KEY,
         "statsDataId":  stats_data_id,
@@ -1364,6 +1369,7 @@ async def fetch_estat_series(
         "cdArea":       cd_area,
         "cdTimeFrom":   date_from,
         "cdTimeTo":     date_to,
+        "lvTime":       "4",
         "lang":         "J",
         "metaGetFlg":   "N",
     }
@@ -1399,9 +1405,11 @@ async def fetch_estat_series(
         if cd_area and "@area" in val and val["@area"] != cd_area:
             continue
         try:
-            yyyymm = t[:6]  # "YYYYMM000000" → "YYYYMM"
-            year   = int(yyyymm[:4])
-            month  = int(yyyymm[4:])
+            # "YYYY" + "00" + "MM" + "MM"（月次・月が2回繰り返される）。年は先頭4文字、
+            # 月は末尾2文字（[6:8] と同値）から取り出す。[4:6] は月ではなく年次/月次の
+            # 区分マーカー（月次="00"・年度="10"）なので月として読んではいけない。
+            year   = int(t[:4])
+            month  = int(t[8:10])
             obs_date = date(year, month, 1).isoformat()
             if lag_days:
                 obs_date = (date.fromisoformat(obs_date) + timedelta(days=lag_days)).isoformat()
