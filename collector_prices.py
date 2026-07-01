@@ -1174,9 +1174,10 @@ BOJ_SERIES: list[dict] = [
 # ESTAT_API_KEY が設定されている場合のみ収集（FRED_API_KEY と同挙動）。
 # アカウント登録: https://www.e-stat.go.jp/api/ （無料・要ユーザー登録）
 # GitHub Actions シークレット名: ESTAT_API_KEY
-# statsDataId=0003427113: 2020年基準消費者物価指数
+# statsDataId=0003427113: 2020年基準消費者物価指数（月次〜1970年・年次集計が同一テーブルに混在）
 #   cdCat01=0001: 総合, 0161: 生鮮食品を除く総合（非季調）
 #   cdArea=00000: 全国, 13100: 東京都区部
+#   cdTab=1: 表章項目「指数」（#262）。無指定だと表章項目が絞られず年次系列のみ返却される。
 ESTAT_API_KEY  = os.getenv("ESTAT_API_KEY", "")
 ESTAT_BASE_URL = "https://api.e-stat.go.jp/rest/3.0/app/json/getStatsData"
 
@@ -1186,6 +1187,7 @@ ESTAT_SERIES: list[dict] = [
         "name": "日本 CPI 全国総合",
         "category": "price",
         "stats_data_id": "0003427113",
+        "cd_tab": "1",
         "cd_cat01": "0001",
         "cd_area": "00000",
         "lag_days": 30,
@@ -1195,6 +1197,7 @@ ESTAT_SERIES: list[dict] = [
         "name": "日本 CPI 全国コア（生鮮除く）",
         "category": "price",
         "stats_data_id": "0003427113",
+        "cd_tab": "1",
         "cd_cat01": "0161",
         "cd_area": "00000",
         "lag_days": 30,
@@ -1204,6 +1207,7 @@ ESTAT_SERIES: list[dict] = [
         "name": "日本 CPI 東京都区部総合",
         "category": "price",
         "stats_data_id": "0003427113",
+        "cd_tab": "1",
         "cd_cat01": "0001",
         "cd_area": "13100",
         "lag_days": 30,
@@ -1341,6 +1345,7 @@ async def fetch_boj_series(
 async def fetch_estat_series(
     session: httpx.AsyncClient,
     stats_data_id: str,
+    cd_tab: str,
     cd_cat01: str,
     cd_area: str,
     date_from: str,  # "YYYYMM000000"
@@ -1348,16 +1353,17 @@ async def fetch_estat_series(
     lag_days: int = 0,
 ) -> list:
     """e-Stat API（api.e-stat.go.jp）から月次統計を取得する。ESTAT_API_KEY が必要。
-    @time 形式 YYYYMM000000 の先頭6文字（YYYYMM）を月初日に変換後 lag_days でシフト。"""
+    @time 形式 YYYYMM000000 の先頭6文字（YYYYMM）を月初日に変換後 lag_days でシフト。
+    cdTab（表章項目）を指定しないと statsDataId=0003427113 は表章項目が絞られず
+    年次系列のみ返却される（lvTime パラメータでの絞り込みは #257/#262 で失敗確認済み）。"""
     params = {
         "appId":        ESTAT_API_KEY,
         "statsDataId":  stats_data_id,
+        "cdTab":        cd_tab,
         "cdCat01":      cd_cat01,
         "cdArea":       cd_area,
         "cdTimeFrom":   date_from,
         "cdTimeTo":     date_to,
-        # lvTime: statsDataId=0003427113（長期時系列）は 2/4 ともに解析失敗。
-        # 月次 CPI は別 statsDataId または FRED チャネルへの移行が必要（Issue #257）。
         "lang":         "J",
         "metaGetFlg":   "N",
     }
@@ -1651,6 +1657,7 @@ async def collect_macro_data(
                 rows = await fetch_estat_series(
                     session,
                     series["stats_data_id"],
+                    series["cd_tab"],
                     series["cd_cat01"],
                     series["cd_area"],
                     d1_estat,

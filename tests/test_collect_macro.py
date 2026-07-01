@@ -191,7 +191,7 @@ def test_japan_macro_fred_series_registered():
 
 
 # ── 5. 日銀 API フェッチャー（ADR-0006 §着手点1）───────────────────────────
-from collector import fetch_boj_series, BOJ_SERIES, ESTAT_SERIES
+from collector import fetch_boj_series, BOJ_SERIES, ESTAT_SERIES, fetch_estat_series
 
 
 def _boj_json(series_code: str, freq: str, survey_dates: list, values: list) -> dict:
@@ -267,6 +267,9 @@ def test_estat_series_registered():
     assert by_code["JP_CPI_CORE"]["cd_cat01"]  == "0161"   # 生鮮食品を除く総合
     assert by_code["JP_CPI_TOKYO"]["cd_area"]  == "13100"  # 東京都区部
     assert by_code["JP_CPI_CORE"]["lag_days"]  == 30
+    # cdTab（表章項目=指数）未指定が年次データのみ返却される原因だった（#262）
+    for code in ("JP_CPI_TOTAL", "JP_CPI_CORE", "JP_CPI_TOKYO"):
+        assert by_code[code]["cd_tab"] == "1", f"{code} に cd_tab 未設定"
 
 
 def test_boj_api_error_returns_empty():
@@ -309,3 +312,87 @@ def test_boj_quarterly_uses_yyyyqq_date_format():
     asyncio.run(run())
     assert "startDate=202001" in captured["url"], captured["url"]
     assert "endDate=202601"   in captured["url"], captured["url"]
+
+
+# ── 6. e-Stat API フェッチャー（cdTab 未指定バグの回帰テスト・#262）──────────────
+
+def _estat_json(values: list) -> dict:
+    """fetch_estat_series が解析する e-Stat API getStatsData レスポンス形式。"""
+    return {
+        "GET_STATS_DATA": {
+            "STATISTICAL_DATA": {
+                "DATA_INF": {"VALUE": values},
+            },
+        },
+    }
+
+
+def _fetch_estat(cd_tab, cd_cat01, cd_area, values, lag_days=0):
+    import asyncio
+
+    async def run():
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json=_estat_json(values))
+        async with _REAL_ASYNC_CLIENT(transport=httpx.MockTransport(handler)) as s:
+            return await fetch_estat_series(s, "0003427113", cd_tab, cd_cat01, cd_area,
+                                            "202001000000", "202601000000", lag_days=lag_days)
+    return asyncio.run(run())
+
+
+def test_estat_monthly_values_parsed_and_deduped():
+    """@time の月次コード（先頭6桁=YYYYMM）から月初日を復元し、lag_days 分シフトする。"""
+    values = [
+        {"@time": "2024010000", "@cat01": "0161", "@area": "00000", "$": "105.2"},
+        {"@time": "2024020000", "@cat01": "0161", "@area": "00000", "$": "105.6"},
+    ]
+    rows = _fetch_estat("1", "0161", "00000", values, lag_days=30)
+    assert len(rows) == 2
+    assert rows[0]["trade_date"] == "2024-01-31"  # 2024-01-01 + 30日
+    assert rows[0]["close"] == 105.2
+    assert rows[1]["trade_date"] == "2024-03-02"  # 2024-02-01 + 30日（うるう年）
+
+
+def test_estat_filters_by_cat01_when_multiple_categories_present():
+    """cdCat01 を指定していても API が複数カテゴリを混在返却する場合に備え、
+    後段の @cat01 一致フィルタで意図しないカテゴリの値を除外できることを確認する。"""
+    values = [
+        {"@time": "2024010000", "@cat01": "0001", "@area": "00000", "$": "106.0"},  # 総合（除外対象）
+        {"@time": "2024010000", "@cat01": "0161", "@area": "00000", "$": "105.2"},  # コア（一致）
+    ]
+    rows = _fetch_estat("1", "0161", "00000", values)
+    assert len(rows) == 1
+    assert rows[0]["close"] == 105.2
+
+
+def test_estat_series_request_includes_cdtab():
+    """cdTab（表章項目）未指定が年次データのみ返却される原因だったため、
+    送信パラメータに cdTab が含まれることを確認する（#262）。"""
+    import asyncio
+    captured = {}
+
+    async def run():
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured["url"] = str(request.url)
+            return httpx.Response(200, json=_estat_json([]))
+        async with _REAL_ASYNC_CLIENT(transport=httpx.MockTransport(handler)) as s:
+            return await fetch_estat_series(s, "0003427113", "1", "0161", "00000",
+                                            "202001000000", "202601000000")
+    asyncio.run(run())
+    assert "cdTab=1" in captured["url"], captured["url"]
+
+
+def test_estat_response_missing_value_path_returns_empty():
+    """lvTime=2 で確認された「HTTP 200 だが DATA_INF.VALUE が存在しない」形状でも
+    例外を送出せず空リストへフォールバックする（#262 症状の回帰防止）。"""
+    import asyncio
+
+    async def run():
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={
+                "GET_STATS_DATA": {"RESULT": {"STATUS": 1, "ERROR_MSG": "該当データなし"}},
+            })
+        async with _REAL_ASYNC_CLIENT(transport=httpx.MockTransport(handler)) as s:
+            return await fetch_estat_series(s, "0003427113", "1", "0161", "00000",
+                                            "202001000000", "202601000000")
+    rows = asyncio.run(run())
+    assert rows == []
