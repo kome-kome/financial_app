@@ -196,12 +196,21 @@ def build_hierarchical_model(returns: np.ndarray, macro: np.ndarray,
 
 def run_inference(draws: int = 1000, tune: int = 1000, target_accept: float = 0.9,
                   seed: int = 0, db=None, macro_names: list[str] | None = None,
-                  chains: int = 4) -> InferenceResult:
+                  chains: int = 4, nuts_sampler: str | None = None,
+                  init: str | None = None) -> InferenceResult:
     """推論バッチの本体。build_panel → 因子選択 → 階層モデル → NUTS → 事後要約。
 
     macro_names はテスト用（小さい候補プールを注入）。省略時は build_panel の既定
     （MACRO_FEATURE_NAMES 全系列）を使う。chains は既定 4（pymc 既定と同じ）だが、
     テストでは軽量化のため小さくできる。
+
+    nuts_sampler/init は既定 None（PyMC 既定の純 Python バックエンド・jitter+adapt_diag
+    初期化）。本番規模（n_stock~3800）は純 Python バックエンド実測 75秒/draw で
+    GitHub Actions のジョブ上限（6時間）に収まらないため、本番実行は
+    nuts_sampler="numpyro" を明示指定する（実測 10.5秒/draw・約7倍高速、
+    requirements-inference.txt の jax/numpyro 追加が前提）。numpyro 既定初期化は
+    この規模のモデルで発散が多発したため、init="adapt_diag"（PyMC 既定と同等）を
+    併用すること。詳細は ADR-0002 参照。
     """
     import pymc as pm  # 遅延 import
 
@@ -220,9 +229,20 @@ def run_inference(draws: int = 1000, tune: int = 1000, target_accept: float = 0.
         returns, macro_sel, stock_idx, sector_idx,
         n_stock=len(edinet_codes), n_sector=len(sector_names), n_factor=len(sel),
     )
+    sample_kwargs: dict = dict(draws=draws, tune=tune, target_accept=target_accept,
+                               random_seed=seed, chains=chains, progressbar=False)
+    if nuts_sampler == "numpyro":
+        import os
+        import numpyro
+        os.environ.setdefault("XLA_FLAGS", f"--xla_force_host_platform_device_count={chains}")
+        numpyro.set_host_device_count(chains)
+        sample_kwargs["nuts_sampler"] = "numpyro"
+    elif nuts_sampler:
+        sample_kwargs["nuts_sampler"] = nuts_sampler
+    if init:
+        sample_kwargs["init"] = init
     with model:
-        idata = pm.sample(draws=draws, tune=tune, target_accept=target_accept,
-                          random_seed=seed, chains=chains, progressbar=False)
+        idata = pm.sample(**sample_kwargs)
 
     diagnostics = summarize_diagnostics(idata)
     if diagnostics.get("r_hat_max") is not None and diagnostics["r_hat_max"] > 1.01:
@@ -238,7 +258,8 @@ def run_inference(draws: int = 1000, tune: int = 1000, target_accept: float = 0.
     if not result.snapshot_date:
         result.snapshot_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     result.diagnostics = diagnostics
-    result.hyperparams = {"draws": draws, "tune": tune, "target_accept": target_accept, "seed": seed}
+    result.hyperparams = {"draws": draws, "tune": tune, "target_accept": target_accept, "seed": seed,
+                          "chains": chains, "nuts_sampler": nuts_sampler or "pymc", "init": init}
     return result
 
 
@@ -320,6 +341,14 @@ def main() -> None:
     ap.add_argument("--target-accept", type=float, default=0.9)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--chains", type=int, default=4)
+    ap.add_argument("--nuts-sampler", default=None,
+                    help="既定は PyMC 純 Python バックエンド。本番規模では 'numpyro' 指定が必須"
+                         "（純 Pythonは実測75秒/draw・GitHub Actionsの6時間上限に収まらない）")
+    ap.add_argument("--init", default=None,
+                    help="numpyro 使用時は 'adapt_diag' 推奨（既定初期化は発散多発の実測あり）")
+    ap.add_argument("--force", action="store_true",
+                    help="収束診断が ADR-0002 基準（r_hat_max<1.01）未達でも DB へ persist する"
+                         "（既定は拒否。producer に品質ゲートが無く即座にライブ推奨へ反映されるため）")
     args = ap.parse_args()
 
     logging.basicConfig(level=logging.INFO)
@@ -328,10 +357,20 @@ def main() -> None:
     db = SessionLocal()
     try:
         result = run_inference(draws=args.draws, tune=args.tune, target_accept=args.target_accept,
-                               seed=args.seed, db=db, chains=args.chains)
-        persist(db, result)
-        logger.info("推論完了: %d 銘柄 / 因子 %s", len(result.loadings), result.selected_factors)
+                               seed=args.seed, db=db, chains=args.chains,
+                               nuts_sampler=args.nuts_sampler, init=args.init)
         logger.info("収束診断: %s", result.diagnostics)
+        r_hat_max = result.diagnostics.get("r_hat_max")
+        if r_hat_max is not None and r_hat_max > 1.01 and not args.force:
+            logger.error(
+                "persist を拒否: r_hat_max=%.4f が ADR-0002 基準（<1.01）を超過（n_divergences=%s）。"
+                "macro_risk_return の producer には品質ゲートが無く persist 即ライブ反映されるため、"
+                "既定では書き込まない。draws/tune/target_accept を見直すか、--force で強制書き込み可能。",
+                r_hat_max, result.diagnostics.get("n_divergences"),
+            )
+            raise SystemExit(1)
+        persist(db, result)
+        logger.info("推論完了・DB永続化済み: %d 銘柄 / 因子 %s", len(result.loadings), result.selected_factors)
     finally:
         db.close()
 

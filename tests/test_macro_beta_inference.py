@@ -234,4 +234,5 @@ class TestRunInferenceEndToEnd:
                 assert fname in fmap
         assert result.diagnostics is not None
         assert result.diagnostics["r_hat_max"] is not None
-        assert result.hyperparams == {"draws": 50, "tune": 50, "target_accept": 0.9, "seed": 0}
+        assert result.hyperparams == {"draws": 50, "tune": 50, "target_accept": 0.9, "seed": 0,
+                                      "chains": 2, "nuts_sampler": "pymc", "init": None}
