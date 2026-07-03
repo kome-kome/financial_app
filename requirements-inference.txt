@@ -18,3 +18,12 @@
 #       `pip freeze` で完全 pin（== の固定）へ移行すること（requirements.txt の pin 方針に合わせる）。
 #       下記バージョンは PyPI で最終確認のうえ確定する（2026-06 時点の 5 系最終付近）。
 pymc==5.28.5
+
+# NUTS を JAX(XLA) JIT コンパイル経由で実行する高速バックエンド（pm.sample(..., nuts_sampler="numpyro")）。
+# 純 Python 実装の既定サンプラでは大規模階層モデル（per-stock β）が実測 75秒/draw と
+# GitHub Actions のジョブ時間上限（6時間）内に収まらないため導入（診断結果は ADR-0002 参照）。
+# 既知 CVE なし（2026-07 時点調査・Google/pyro-ppl 維持の主要ライブラリ）。
+# 診断ワークフロー実行時の pip install ログで確定（2026-07-02）。
+jax==0.10.2
+jaxlib==0.10.2
+numpyro==0.21.0

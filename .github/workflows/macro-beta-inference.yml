@@ -11,6 +11,16 @@ name: "[補完] M-1 per-stock 階層マクロ・ベータ推論バッチ"
 #
 # 実行頻度: 手動（workflow_dispatch）のみ。マクロ環境・銘柄構成の変化に応じて随時再実行する
 # 想定で、日次/週次の定期実行は今のところ設けない（初回実行の収束・所要時間の実績を見て検討）。
+#
+# サンプラーバックエンド: 診断計測（2026-07-02）の結果、PyMC 純 Python バックエンドは
+# 本番規模（n_stock≈3800）で実測 75秒/draw と GitHub Actions のジョブ時間上限（6時間）に
+# 収まらないことが判明したため、nuts_sampler="numpyro"（JAX/XLA JIT・実測 10.5〜11.2秒/draw・
+# 約7倍高速）を既定にした。numpyro の既定初期化は発散多発（同一設定で乱数シードのみ違うと
+# 1/100〜91/100 divergence の両極端が出た）ため init="adapt_diag" を必須で併用する。
+# chains は 2 固定（ubuntu-latest ランナーの実測コア数に一致・4 だと 2 波に分かれ倍増する）。
+# それでも収束保証はできないため、persist は macro_beta_inference.py 側で
+# r_hat_max<1.01（ADR-0002 検証基準）をゲートし、未達なら DB へ書き込まず失敗する
+# （producer の macro_risk_return には品質ゲートが無く persist 即ライブ反映されるため）。
 
 on:
   workflow_dispatch:
@@ -18,20 +28,24 @@ on:
       draws:
         description: "NUTS 事後サンプル数（チェーンあたり）"
         required: false
-        default: "1000"
+        default: "800"
       tune:
         description: "NUTS チューニングステップ数"
         required: false
-        default: "1000"
+        default: "800"
       target_accept:
-        description: "NUTS target_accept（発散が多い場合は 0.95 等へ引き上げ）"
+        description: "NUTS target_accept（発散が多い場合は 0.97 等へさらに引き上げ）"
         required: false
-        default: "0.9"
+        default: "0.95"
+      chains:
+        description: "チェーン数（ubuntu-latest の実コア数に合わせ既定2。増やすと2コアでは波が増え時間も比例増加）"
+        required: false
+        default: "2"
 
 jobs:
   infer:
     runs-on: ubuntu-latest
-    timeout-minutes: 180
+    timeout-minutes: 340
 
     steps:
       - name: Checkout
@@ -43,7 +57,7 @@ jobs:
           python-version: '3.13.7'  # render.yaml の PYTHON_VERSION と一致させる
           cache: 'pip'
 
-      - name: Install dependencies (requirements.txt + PyMC)
+      - name: Install dependencies (requirements.txt + PyMC + numpyro)
         run: pip install -r requirements-inference.txt
 
       - name: Run inference batch
@@ -51,9 +65,12 @@ jobs:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: |
           python macro_beta_inference.py \
-            --draws "${{ github.event.inputs.draws || '1000' }}" \
-            --tune "${{ github.event.inputs.tune || '1000' }}" \
-            --target-accept "${{ github.event.inputs.target_accept || '0.9' }}" \
+            --draws "${{ github.event.inputs.draws || '800' }}" \
+            --tune "${{ github.event.inputs.tune || '800' }}" \
+            --target-accept "${{ github.event.inputs.target_accept || '0.95' }}" \
+            --chains "${{ github.event.inputs.chains || '2' }}" \
+            --nuts-sampler numpyro \
+            --init adapt_diag \
             2>&1 | tee macro_beta_inference.log
 
       - name: Upload log
