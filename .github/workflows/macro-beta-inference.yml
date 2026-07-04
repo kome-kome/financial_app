@@ -17,10 +17,17 @@ name: "[補完] M-1 per-stock 階層マクロ・ベータ推論バッチ"
 # 収まらないことが判明したため、nuts_sampler="numpyro"（JAX/XLA JIT・実測 10.5〜11.2秒/draw・
 # 約7倍高速）を既定にした。numpyro の既定初期化は発散多発（同一設定で乱数シードのみ違うと
 # 1/100〜91/100 divergence の両極端が出た）ため init="adapt_diag" を必須で併用する。
-# chains は 2 固定（ubuntu-latest ランナーの実測コア数に一致・4 だと 2 波に分かれ倍増する）。
+# chains は 2 固定（ubuntu-latest ランナーの実コア数）。chains=4 を実測したところ、
+# 2コアに4 virtual device を載せた結果 CPU/メモリを使い切りランナー自体がクラッシュした
+# （"hosted runner lost communication with the server"・run 28696715446・ログすら残らず失敗）。
+# 無料枠のランナーでは chains を増やす方向は選択肢にならない。
+#
 # それでも収束保証はできないため、persist は macro_beta_inference.py 側で
 # r_hat_max<1.01（ADR-0002 検証基準）をゲートし、未達なら DB へ書き込まず失敗する
 # （producer の macro_risk_return には品質ゲートが無く persist 即ライブ反映されるため）。
+# 実測では chains=2・draws=800/1000 のどちらも r_hat_max=1.02 で頭打ち（PyMC 自身が
+# 「r_hat の信頼できる計算には4 chain以上推奨」と警告する通り、2 chain では基準がやや
+# 保守的に出ている可能性がある）。人手でその結果を採用する場合は force 入力を true にする。
 
 on:
   workflow_dispatch:
@@ -38,9 +45,13 @@ on:
         required: false
         default: "0.95"
       chains:
-        description: "チェーン数（ubuntu-latest の実コア数に合わせ既定2。増やすと2コアでは波が増え時間も比例増加）"
+        description: "チェーン数（既定2固定を推奨。4は2コアランナーでリソース枯渇しクラッシュ実測済み・要大容量ランナー）"
         required: false
         default: "2"
+      force:
+        description: "収束基準未達（r_hat_max>=1.01）でも persist する（true/false）。人手で結果を精査した上でのみ true にする"
+        required: false
+        default: "false"
 
 jobs:
   infer:
@@ -64,6 +75,8 @@ jobs:
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: |
+          FORCE_FLAG=""
+          if [ "${{ github.event.inputs.force || 'false' }}" = "true" ]; then FORCE_FLAG="--force"; fi
           python macro_beta_inference.py \
             --draws "${{ github.event.inputs.draws || '800' }}" \
             --tune "${{ github.event.inputs.tune || '800' }}" \
@@ -71,6 +84,7 @@ jobs:
             --chains "${{ github.event.inputs.chains || '2' }}" \
             --nuts-sampler numpyro \
             --init adapt_diag \
+            $FORCE_FLAG \
             2>&1 | tee macro_beta_inference.log
 
       - name: Upload log
