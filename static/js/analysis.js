@@ -1174,8 +1174,53 @@ let _mrrChart = null;
 let _mrrData  = null;
 let _mrrPaintTimer = null;
 
+// #273: r_macro（macro_beta 推論バッチ／DLM自前計算）が全社 null で使えない場合の
+// 共通メッセージ。「結果がありません」だけでは理由不明になるため軸別に理由を明示する。
+function _riskAxisEmptyMessage(axis) {
+  return axis === 'r_macro'
+    ? 'R_macro（マクロ起因リスク）データが利用できません。macro_beta推論バッチが未実行か、算出に十分なデータが蓄積されていない可能性があります。実現ボラ「R2」でご確認ください。'
+    : '結果がありません（選択リスク軸の値が揃う銘柄がありません）';
+}
+// risk_axis セレクトの「R_macro」選択肢を availability に応じて無効化する（M-1/M-2 共用）。
+// 無効化時に現在の選択が r_macro なら r2 へ戻す（後続の recompute が正しい軸を読めるよう
+// この関数は recompute より前に呼ぶこと）。
+function _updateRiskAxisOption(tabId, available) {
+  const sel = document.getElementById(`param-${tabId}-risk_axis`);
+  if (!sel) return;
+  const opt = [...sel.options].find(o => o.value === 'r_macro');
+  if (!opt) return;
+  opt.disabled = !available;
+  opt.title = available ? '' : 'macro_beta推論バッチ未実行のため選択できません';
+  if (!available && sel.value === 'r_macro') sel.value = 'r2';
+}
+// キャンバスの親コンテナに「データなし」メッセージ用の兄弟要素を用意し表示/非表示を切替える
+// （canvas 要素自体は破棄しない＝データ復活時に再度 Chart.js から参照できるようにする）。
+function _toggleChartEmpty(canvas, axis) {
+  if (!canvas) return;
+  const host = canvas.parentElement;
+  if (!host) return;
+  let msg = host.querySelector('.chart-empty-msg');
+  if (!msg) {
+    msg = document.createElement('div');
+    msg.className = 'chart-empty-msg text-sm';
+    msg.style.cssText = 'padding:20px;text-align:center;color:#94a3b8';
+    host.appendChild(msg);
+  }
+  msg.textContent = _riskAxisEmptyMessage(axis);
+  msg.classList.remove('hidden');
+  canvas.classList.add('hidden');
+}
+function _hideChartEmpty(canvas) {
+  if (!canvas) return;
+  const host = canvas.parentElement;
+  const msg = host && host.querySelector('.chart-empty-msg');
+  if (msg) msg.classList.add('hidden');
+  canvas.classList.remove('hidden');
+}
+
 function renderMacroRiskReturn(data) {
   _mrrData = data;
+  _updateRiskAxisOption('macro_risk_return', data.r_macro_available !== false);
   _mrrPaintCv(data);                          // CV 指標（リスク軸に非依存・1回）
   const v = _mrrRecompute();
   setTimeout(() => _mrrPaintChart(v), 0);     // チャートは content 注入後に描画
@@ -1449,7 +1494,7 @@ function _mrrPaintChart(v) {
 // ランキング表（クライアント算出の U・パレートで描画）。
 function _mrrTableHTML(v) {
   if (!v.top.length) {
-    return '<div class="text-sm" style="padding:20px;text-align:center;color:#94a3b8">結果がありません（選択リスク軸の値が揃う銘柄がありません）</div>';
+    return `<div class="text-sm" style="padding:20px;text-align:center;color:#94a3b8">${esc(_riskAxisEmptyMessage(v.axis))}</div>`;
   }
   const total = (_mrrData && _mrrData.results ? _mrrData.results.length : v.top.length);
   const header = `<tr><th>順位</th><th>証券コード</th><th>企業名</th><th>業種</th>
@@ -1528,6 +1573,7 @@ let _mgPaintTimer = null;
 
 function renderMacroGbdt(data) {
   _mgData = data;
+  _updateRiskAxisOption('macro_gbdt', data.r_macro_available !== false);
   _mgPaintCv(data);
   const v = _mgRecompute();
   setTimeout(() => _mgPaintChart(v), 0);
@@ -1681,7 +1727,8 @@ function _mgPaintChart(v) {
   if (!canvas || !window.Chart) return;
   if (_mgChart) { _mgChart.destroy(); _mgChart = null; }
   const pts = v.all;
-  if (!pts.length) return;
+  if (!pts.length) { _toggleChartEmpty(canvas, v.axis); return; }
+  _hideChartEmpty(canvas);
   const axisKey = v.axis;
   const topSet = new Set(v.top.map(p => p.edinet_code));
   const us = pts.map(p => p._u);
@@ -1761,6 +1808,9 @@ function _mgShowShap(editnetCode) {
 
 function _mgTableHTML(v) {
   const { top, axis } = v;
+  if (!top.length) {
+    return `<div class="text-sm" style="padding:20px;text-align:center;color:#94a3b8">${esc(_riskAxisEmptyMessage(axis))}</div>`;
+  }
   const frontierLabel = r => r._pareto ? '★' : r._anti_pareto ? '▼' : '';
   const rows = top.map((r,i) => {
     const frontier = frontierLabel(r);
@@ -1864,7 +1914,8 @@ function _dlmPaintBubbleChart(v) {
   if (!canvas || !window.Chart) return;
   if (_dlmBubbleChart) { _dlmBubbleChart.destroy(); _dlmBubbleChart = null; }
   const pts = v.all;
-  if (!pts.length) return;
+  if (!pts.length) { _toggleChartEmpty(canvas, 'r_macro'); return; }
+  _hideChartEmpty(canvas);
   const topSet = new Set(v.top.map(p => p.edinet_code));
   const us = pts.map(p => p._u);
   const uMin = Math.min(...us), uMax = Math.max(...us);

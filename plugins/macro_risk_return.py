@@ -317,6 +317,9 @@ class MacroRiskReturnPlugin(AnalysisPlugin):
                 if (prod and prod.get("r_macro") is not None)
                 else None
             )
+        # #273: r_macro が全社 None（macro_beta 未蓄積）かをクライアントへ明示。
+        # UI は risk_axis の r_macro 選択肢を無効化し理由を表示する（サイレント空表示の防止）。
+        r_macro_available = any(item["r_macro"] is not None for item in results)
 
         return {
             "cv_metrics":       cv_metrics,
@@ -330,6 +333,7 @@ class MacroRiskReturnPlugin(AnalysisPlugin):
             "r3_gate":          r3_gate,
             "top_n":            top_n,
             "results":          results,
+            "r_macro_available": r_macro_available,
         }
 
     # ── LassoLarsIC(BIC) 特徴量選択 ────────────────────────────────────────────

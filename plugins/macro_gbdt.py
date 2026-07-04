@@ -487,6 +487,8 @@ class MacroGbdtPlugin(AnalysisPlugin):
                 if (prod and prod.get("r_macro") is not None)
                 else None
             )
+        # #273: r_macro が全社 None（macro_beta 未蓄積）かをクライアントへ明示。
+        r_macro_available = any(item["r_macro"] is not None for item in raw_items)
 
         # ── アウトオブサンプル検証（OOF）: 無リーク walk-forward 予測のモデル評価（ADR-0004）─
         # 既存「バックテスト」(/api/backtest) とは別概念。再学習・追加価格取得なし。
@@ -522,6 +524,7 @@ class MacroGbdtPlugin(AnalysisPlugin):
             "model_type":        "xgboost",
             "best_iteration":    n_est_final,
             "oof_backtest":      oof_bt,
+            "r_macro_available": r_macro_available,
         }
 
 

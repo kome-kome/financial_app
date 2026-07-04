@@ -668,6 +668,9 @@ class MacroDlmPlugin(AnalysisPlugin):
             "diagnostics": diagnostics,
             "oof_backtest": oof_bt,
             "results": rows[:top_n],
+            # #273: r_macro は自前計算だが分散不足等で全社 None になり得る（β推論と別要因）。
+            # クライアントはこのフラグでリスク-リターン散布図の空表示に理由メッセージを出す。
+            "r_macro_available": any(r.get("r_macro") is not None for r in rows[:top_n]),
         }
 
 

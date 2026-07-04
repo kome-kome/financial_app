@@ -327,6 +327,30 @@ class TestExecuteSmoke:
         res = self._run(n_companies=5, n_weeks=90, burn_in_weeks=5, min_weeks=40)
         assert res["oof_backtest"]["rank_ic"]["n"] > 0
 
+    def test_r_macro_available_true_with_sufficient_data(self):
+        """#273: 通常データがあれば r_macro_available は True（自前計算が全社成功）。"""
+        res = self._run(n_companies=5, n_weeks=90)
+        assert res["r_macro_available"] is True
+        assert any(r.get("r_macro") is not None for r in res["results"])
+
+    def test_r_macro_available_false_when_computation_fails(self):
+        """#273: R_macro 自前計算（共分散）が失敗すると全社 None になり得るが、
+        r_macro_available=False で明示されグラフ側が空表示の理由を示せる。execute 自体は
+        graceful degrade で完走する。"""
+        dates = _weekly_dates(90)
+        prices_by_co, companies = _make_prices_companies(5, dates)
+        macro_levels = _make_macro_levels(dates)
+        params = self._params(min_weeks=40, burn_in_weeks=5, top_n=3)
+        db = MagicMock()
+        with patch("plugins.macro_dlm.load_prices", return_value=(prices_by_co, companies)), \
+             patch("plugins.macro_dlm.load_macro_levels", return_value=macro_levels), \
+             patch("plugins.macro_dlm.macro_risk_exposure", side_effect=ValueError("boom")):
+            res = asyncio.run(plugin.execute(params, db))
+
+        assert res["r_macro_available"] is False
+        assert len(res["results"]) > 0
+        assert all(r.get("r_macro") is None for r in res["results"])
+
 
 # ── 6. guard: 異常系 ─────────────────────────────────────────────────────────
 

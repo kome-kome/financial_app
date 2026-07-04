@@ -531,6 +531,30 @@ class TestExecuteIntegration:
         for item in result["results"]:
             assert "r_macro" in item  # macro_beta 未蓄積 → None だが key は必ず存在
 
+    def test_execute_r_macro_available_false_when_producer_empty(self):
+        """#273: macro_beta 未蓄積時、r_macro_available は False（UI が risk_axis の
+        r_macro 選択肢を無効化する判断材料）。"""
+        plugin = MacroRiskReturnPlugin()
+        schema = plugin.params_schema()
+        params = coerce_params(schema, {"use_macro": False, "top_n": 5})
+
+        result = asyncio.run(plugin.execute(params, self._build_mock_db()))
+
+        assert result["r_macro_available"] is False
+        assert all(item["r_macro"] is None for item in result["results"])
+
+    def test_execute_r_macro_available_true_when_producer_has_data(self):
+        """#273: macro_beta が1社でも蓄積済みなら r_macro_available は True。"""
+        plugin = MacroRiskReturnPlugin()
+        schema = plugin.params_schema()
+        params = coerce_params(schema, {"use_macro": False, "top_n": 5})
+        producer = {"E01234": {"mu": 0.01, "r_macro": 0.05, "r1_prime": 0.02}}
+
+        with patch("plugins.macro_risk_return.get_producer_scores", return_value=producer):
+            result = asyncio.run(plugin.execute(params, self._build_mock_db()))
+
+        assert result["r_macro_available"] is True
+
     def test_execute_returns_feature_coefs(self):
         """execute は selected_features と整合する標準化係数 feature_coefs を返す。"""
         plugin = MacroRiskReturnPlugin()

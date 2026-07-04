@@ -532,6 +532,34 @@ class TestExecuteSmoke:
 
         assert result["model_type"] == "xgboost"
 
+    def test_execute_r_macro_available_false_when_producer_empty(self):
+        """#273: macro_beta 未蓄積時、r_macro_available は False（UI が risk_axis の
+        r_macro 選択肢を無効化する判断材料）。"""
+        db, prices_by_co, fin_by_co, companies = self._make_db()
+        params = self._make_params(use_macro=False)
+
+        with patch("plugins.macro_gbdt.load_data", return_value=(prices_by_co, fin_by_co, companies)), \
+             patch("plugins.macro_gbdt.preload_macro", return_value={}), \
+             patch("plugins.macro_gbdt.get_producer_scores", return_value={}):
+            result = asyncio.run(plugin.execute(params, db))
+
+        assert result["r_macro_available"] is False
+        assert all(item["r_macro"] is None for item in result["results"])
+
+    def test_execute_r_macro_available_true_when_producer_has_data(self):
+        """#273: macro_beta が1社でも蓄積済みなら r_macro_available は True。"""
+        db, prices_by_co, fin_by_co, companies = self._make_db()
+        params = self._make_params(use_macro=False)
+        first_ec = next(iter(companies))
+        producer = {first_ec: {"mu": 0.01, "r_macro": 0.05, "r1_prime": 0.02}}
+
+        with patch("plugins.macro_gbdt.load_data", return_value=(prices_by_co, fin_by_co, companies)), \
+             patch("plugins.macro_gbdt.preload_macro", return_value={}), \
+             patch("plugins.macro_gbdt.get_producer_scores", return_value=producer):
+            result = asyncio.run(plugin.execute(params, db))
+
+        assert result["r_macro_available"] is True
+
     def test_execute_insufficient_samples_raises(self):
         """サンプル不足で ValueError。"""
         db = MagicMock()
