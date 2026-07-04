@@ -332,6 +332,7 @@ def persist(db, result: InferenceResult) -> None:
         rows.append({"run_id": result.run_id, "edinet_code": code,
                      "factor_name": "_intercept", "loading_mean": a_mean, "loading_se": a_se})
     upsert_macro_beta(db, meta, rows)
+    db.commit()
 
 
 def main() -> None:
