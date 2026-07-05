@@ -217,6 +217,12 @@ def run_inference(draws: int = 1000, tune: int = 1000, target_accept: float = 0.
     returns, macro, stock_idx, sector_idx, factor_names, edinet_codes, sector_names = build_panel(
         db, macro_names=macro_names
     )
+    # Issue #269: ここでcommitしないと load_data/preload_macro のSELECTで開いたトランザクションが
+    # 後続の数時間に及ぶMCMC計算中も残留し、companies等へのAccessShareロックが他セッション（例:
+    # ローカルAPI起動時の冪等ALTER TABLE）のACCESS EXCLUSIVE取得をブロックし続ける。MCMC自体は
+    # DB接続を使わないため、ここで解放してよい。persist() はコミット後の同一db（pool_pre_ping=True・
+    # pool_recycle=180 により長時間後の再利用でも安全）をそのまま使う。
+    db.commit()
 
     sel = select_shared_factors(macro, returns, factor_names,
                                 max_features=min(12, macro.shape[1]))

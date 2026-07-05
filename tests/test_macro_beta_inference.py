@@ -236,3 +236,33 @@ class TestRunInferenceEndToEnd:
         assert result.diagnostics["r_hat_max"] is not None
         assert result.hyperparams == {"draws": 50, "tune": 50, "target_accept": 0.9, "seed": 0,
                                       "chains": 2, "nuts_sampler": "pymc", "init": None}
+
+    def test_commits_before_mcmc_sampling(self, monkeypatch):
+        """Issue #269: build_panel直後にdb.commit()し、数時間に及ぶMCMC計算中はトランザクション・
+        ロックを保持しないこと。pm.sample呼び出し時点でdb.commitが既に呼ばれているかで検証する
+        （commitがsampleより後だと本番でAccessShareロックがMCMC計算中も残留し、他セッションの
+        ALTER TABLE等をブロックする＝Issue #269で実際に発生した事象）。"""
+        pytest.importorskip("pymc")
+        import pymc as pm
+        import macro_beta_inference as mbi
+
+        monkeypatch.setattr(
+            mbi, "select_shared_factors",
+            lambda macro, returns, factor_names, max_features: list(range(min(len(factor_names), max_features))),
+        )
+
+        db, _codes, _sectors = _build_mock_db(n_weeks=100, n_companies=3)
+
+        committed_before_sample = []
+        orig_sample = pm.sample
+
+        def _spy_sample(*args, **kwargs):
+            committed_before_sample.append(db.commit.called)
+            return orig_sample(*args, **kwargs)
+
+        monkeypatch.setattr(pm, "sample", _spy_sample)
+
+        mbi.run_inference(draws=10, tune=10, target_accept=0.9, seed=0, db=db,
+                          macro_names=MACRO_TEST_NAMES, chains=2)
+
+        assert committed_before_sample == [True]
