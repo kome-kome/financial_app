@@ -191,8 +191,9 @@ class FinancialRecord(Base):
     #   - 軽い派生／Zスコア／成長率 → financial_metrics VIEW（ソース列から都度算出）
     #   - OLS予測値（predicted_market_cap / gap_ratio）→ regression_results テーブル
     # 旧計算列は本コミットで DROP 済み（init_db の DROP マイグレーション参照）。
+    # raw_xbrl_json（デバッグ用に保存していた parse 済み bs/pl/cf dict）も Issue #219 ①で
+    # DROP 済み（読取箇所ゼロ・生タグを保持せず reparse 用途にも使えなかったため。GOTCHAS.md参照）。
 
-    raw_xbrl_json           = Column(JSON)    # 生XBRLデータ（デバッグ用）
     created_at              = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     updated_at              = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
@@ -1005,6 +1006,13 @@ _LEGACY_COMPUTED_COLS = [
     "predicted_market_cap", "gap_ratio",
 ]
 
+# デバッグ用に保存していた列（冪等 DROP・容量削減・Issue #219 ①）。読取箇所ゼロ・
+# parse済み値のみで生タグを保持せず reparse 用途にも使えなかった（GOTCHAS.md参照）。
+# financial_records 約73MBの主因＝Supabase 500MB制約下の第2の容量レバー。
+_DEBUG_ONLY_COLS = [
+    "raw_xbrl_json",
+]
+
 
 def _ensure_tables() -> None:
     """Phase 1: テーブル作成・インデックス・カラムマイグレーション（すべて冪等）"""
@@ -1022,7 +1030,7 @@ def _ensure_tables() -> None:
             conn.execute(text(
                 f"ALTER TABLE financial_records ADD COLUMN IF NOT EXISTS {col} DOUBLE PRECISION"
             ))
-        for col in _LEGACY_COMPUTED_COLS:
+        for col in _LEGACY_COMPUTED_COLS + _DEBUG_ONLY_COLS:
             conn.execute(text(
                 f"ALTER TABLE financial_records DROP COLUMN IF EXISTS {col}"
             ))
@@ -1186,13 +1194,6 @@ def upsert_financial(db, data: dict) -> FinancialRecord:
     # nonfin（従業員数・発行済株式数など非財務）はプレフィックス無しの直接列にマップ（C2）
     for k, v in data.get("nonfin", {}).items():
         flat[k] = v
-
-    # 生データ保存
-    flat["raw_xbrl_json"] = {
-        "bs": data.get("bs", {}),
-        "pl": data.get("pl", {}),
-        "cf": data.get("cf", {}),
-    }
 
     # 未知キーは silent-drop せず fail fast。bs/pl/cf は XBRL_MAP=列 info 由来で構造保証されるため、
     # 実際に発火し得るのは collector が手で組む val/nonfin キーの typo（開発時バグ）に限られる。
