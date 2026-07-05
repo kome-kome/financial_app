@@ -272,6 +272,7 @@ const WEIGHT_LABELS = {
   'z_eps':          ['EPS（1株利益）',        0.5],
   'gap_ratio':      ['割安度（回帰分析後）',  0.5],
   'z_de_ratio':     ['D/Eレシオ低さ',        -0.3],
+  'z_momentum':     ['価格モメンタム（12-1ヶ月）', 0.5],
 };
 
 let recResults = [];
