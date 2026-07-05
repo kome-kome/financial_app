@@ -14,7 +14,8 @@ VIEW:
   financial_metrics  — 派生指標・Zスコア・成長率（financial_records から都度算出）
 """
 
-import os, gzip, json, logging
+import os, gzip, json, logging, contextvars
+from contextlib import contextmanager
 from datetime import datetime, date, timedelta, timezone
 from pathlib import Path
 from dotenv import load_dotenv
@@ -502,6 +503,25 @@ def get_macro_beta(db, run_id: str | None = None):
     return meta, loadings
 
 
+# ── ハイパーパラメータ探索中の producer 永続化抑止（Issue #264）─────────────────
+# 探索（plugins/tuning.py）は候補パラメータごとに各プラグインの execute() をフル実行する。
+# 対策なしでは M-2/M-3 の producer スコア（macro_gbdt_scores/macro_dlm_scores）が探索中の
+# 中間的な（最適でない）候補予測値で都度上書きされてしまう。tuning_dry_run() 中は
+# replace_macro_gbdt_scores/replace_macro_dlm_scores を no-op にし、最終選定後の本採用実行
+# （tuning_dry_run() の外）でのみ実際に永続化する。
+_tuning_dry_run: contextvars.ContextVar = contextvars.ContextVar("_tuning_dry_run", default=False)
+
+
+@contextmanager
+def tuning_dry_run():
+    """このブロック内では producer スコアの永続化（replace_macro_*_scores）を no-op にする。"""
+    token = _tuning_dry_run.set(True)
+    try:
+        yield
+    finally:
+        _tuning_dry_run.reset(token)
+
+
 # ── 5c. M-2 per-stock 勾配ブースティング予測 μ̂（ADR-0004 / Issue #234）───────────
 # M-2（macro_gbdt）プラグインが execute() 末尾で書き込み、sell_ranking（consumer）が読む。
 # XGBoost は線形 β 表現を持たないため、M-1 の macro_beta（β 縦持ち・read 時 μ 復元）と異なり
@@ -526,7 +546,10 @@ def replace_macro_gbdt_scores(db, rows: list, snapshot_date: str | None = None) 
 
     rows = [{"edinet_code": str, "mu": float}, ...]。1 txn で全削除→一括 insert。
     mu が None の行はスキップ（予測不能銘柄を保存しない）。戻り値は保存件数。
+    `tuning_dry_run()` 内では no-op（0 を返す・Issue #264）。
     """
+    if _tuning_dry_run.get():
+        return 0
     db.query(MacroGbdtScore).delete()
     objs = [
         MacroGbdtScore(edinet_code=r["edinet_code"], mu=float(r["mu"]),
@@ -570,7 +593,10 @@ def replace_macro_dlm_scores(db, rows: list, snapshot_date: str | None = None) -
 
     rows = [{"edinet_code": str, "mu": float}, ...]。1 txn で全削除→一括 insert。
     mu が None の行はスキップ（推定不能銘柄を保存しない）。戻り値は保存件数。
+    `tuning_dry_run()` 内では no-op（0 を返す・Issue #264）。
     """
+    if _tuning_dry_run.get():
+        return 0
     db.query(MacroDlmScore).delete()
     objs = [
         MacroDlmScore(edinet_code=r["edinet_code"], mu=float(r["mu"]),
@@ -590,6 +616,52 @@ def get_macro_dlm_scores(db) -> dict:
         return {r.edinet_code: r.mu for r in db.query(MacroDlmScore).all()}
     except Exception:
         return {}
+
+
+# ── 5e. ハイパーパラメータ自動探索の結果永続化（Issue #264）─────────────────────
+# hyperparameter_search.py（ローカル専用CLI）が walk-forward OOF rank-IC 等を目的関数として
+# 探索した best params を保存する。plugin_name 単位で最新1件のみ保持（履歴不要）。
+
+class PluginTunedParams(Base):
+    """プラグインごとの自動調整済みハイパーパラメータ（最新1件のみ・plugin_name PK）。"""
+    __tablename__ = "plugin_tuned_params"
+
+    plugin_name      = Column(String(40), primary_key=True)
+    params_json      = Column(JSON, nullable=False)    # best params（execute にそのまま渡せる形）
+    objective_name   = Column(String(20), nullable=False)  # "rank_ic" | "ic_ir" | "long_short"
+    objective_value  = Column(Float)
+    leaderboard_json = Column(JSON)                    # 上位20件のみ（肥大化防止）
+    n_combos         = Column(Integer)
+    data_fingerprint = Column(String(64))              # 探索に使ったデータのハッシュ（鮮度警告用）
+    tuned_at         = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+
+def upsert_tuned_params(db, plugin_name: str, params: dict, objective_name: str,
+                        objective_value: float | None, leaderboard: list,
+                        n_combos: int, data_fingerprint: str | None = None) -> None:
+    """探索結果を plugin_tuned_params へ upsert する（plugin_name で冪等・db.merge）。"""
+    db.merge(PluginTunedParams(
+        plugin_name=plugin_name, params_json=params, objective_name=objective_name,
+        objective_value=objective_value, leaderboard_json=leaderboard[:20],
+        n_combos=n_combos, data_fingerprint=data_fingerprint,
+        tuned_at=datetime.now(timezone.utc),
+    ))
+    db.commit()
+
+
+def get_tuned_params(db, plugin_name: str) -> dict | None:
+    """自動調整済みパラメータを読む（未調整なら None・graceful degrade）。"""
+    row = db.query(PluginTunedParams).filter_by(plugin_name=plugin_name).first()
+    if row is None:
+        return None
+    return {
+        "params":           row.params_json,
+        "objective_name":   row.objective_name,
+        "objective_value":  row.objective_value,
+        "n_combos":         row.n_combos,
+        "data_fingerprint": row.data_fingerprint,
+        "tuned_at":         row.tuned_at.isoformat() if row.tuned_at else None,
+    }
 
 
 def prices_on_or_after(db, codes: list, after: str) -> dict:
