@@ -11,7 +11,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from database import FinancialMetric, prices_on_or_after, latest_prices
-from plugins.recommend import PRESETS
+from plugins.recommend import PRESETS, compute_momentum_z
 from plugins.net_cash_analysis import compute_net_cash, compute_nc_ratio
 
 # 複数保有期間バックテスト（/api/backtest/multi）の保有月数。
@@ -31,11 +31,14 @@ SCORING_SOURCES = ("recommend", "valuation", "net_cash", "sell")
 _DIV_YIELD_CAP = 30.0
 
 
-def score_record(r, source: str, weights: dict) -> float | None:
+def score_record(r, source: str, weights: dict, momentum_z: dict | None = None) -> float | None:
     """1レコードのスコア（高いほど買い候補）。算出不能なら None（候補から除外）。
 
     各 source は financial_metrics VIEW の as-of スナップショット（FinancialMetric）から
     一次分析のランキングキーを再現する。recommend のみ preset 加重を使う。
+
+    momentum_z: {edinet_code: z} 形式の事前計算済み z_momentum（compute_momentum_z）。
+    weights に z_momentum が含まれる場合のみ呼び出し側が渡す（他 source では未使用）。
     """
     if source == "valuation":
         # 期待総リターン[%] = gap_ratio[%] + 配当利回り[%]（gap_ratio 必須＝sector_ols 実行済み年度のみ）
@@ -53,7 +56,10 @@ def score_record(r, source: str, weights: dict) -> float | None:
     # recommend（既定）: プリセット加重和。sell は同一加重の符号反転（買い系の逆観点）。
     score, has_any = 0.0, False
     for metric, weight in weights.items():
-        val = getattr(r, metric, None)
+        if metric == "z_momentum":
+            val = (momentum_z or {}).get(r.edinet_code)
+        else:
+            val = getattr(r, metric, None)
         if val is not None:
             score += weight * val
             has_any = True
@@ -118,9 +124,16 @@ def run(
         query = query.filter(FinancialMetric.market_cap >= float(min_market_cap))
     records = query.all()
 
+    # z_momentum は VIEW 外の実行時計算（compute_momentum_z）。as-of日=start_date_str で
+    # 参照するため、start_date より後の価格変動はスコアに影響しない（リークセーフ）。
+    momentum_z: dict = {}
+    if "z_momentum" in weights:
+        momentum_z = compute_momentum_z(
+            db, [r.edinet_code for r in records if r.edinet_code], start_date_str)
+
     best: dict = {}
     for r in records:
-        score = score_record(r, source, weights)
+        score = score_record(r, source, weights, momentum_z)
         if score is None:
             continue
         if r.edinet_code not in best or r.period_end > best[r.edinet_code][1].period_end:

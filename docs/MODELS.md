@@ -442,19 +442,28 @@ coverage_i = Σⱼ∈present |weight_j| / Σⱼ |weight_j|
 
 ### デフォルトプリセット
 
-| プリセット | z_roe | z_op_margin | z_revenue | z_cf_ratio | z_equity_ratio | z_eps | gap_ratio | z_de_ratio |
-|---|---|---|---|---|---|---|---|---|
-| バランス型 | 1.0 | 1.0 | 0.8 | 0.8 | 0.5 | — | 0.5 | — |
-| 成長重視 | 1.0 | 0.5 | 2.0 | 0.5 | — | — | 0.3 | — |
-| 割安重視 | 1.0 | 1.0 | — | — | 0.5 | — | 2.0 | — |
-| 高収益重視 | 2.0 | 2.0 | — | 1.0 | 0.5 | — | — | — |
+| プリセット | z_roe | z_op_margin | z_revenue | z_cf_ratio | z_equity_ratio | z_eps | gap_ratio | z_de_ratio | z_momentum |
+|---|---|---|---|---|---|---|---|---|---|
+| バランス型 | 1.0 | 1.0 | 0.8 | 0.8 | 0.5 | — | 0.5 | — | 0.5 |
+| 成長重視 | 1.0 | 0.5 | 2.0 | 0.5 | — | — | 0.3 | — | — |
+| 割安重視 | 1.0 | 1.0 | — | — | 0.5 | — | 2.0 | — | — |
+| 高収益重視 | 2.0 | 2.0 | — | 1.0 | 0.5 | — | — | — | — |
 
 `gap_ratio` は業種別OLS乖離率であり、「割安度」の指標として機能する（正値 = 割安）。
+
+`z_momentum` は他指標と異なり `financial_metrics` VIEW の列ではなく、`plugins/recommend.py::
+compute_momentum_z()` が実行時に計算する（sell_ranking の `_resolve_metric` と同じ方式）。
+12-1モメンタム（直近1ヶ月を除く12ヶ月の log リターン、`plugins/utils.py::
+get_momentum_return()`）を候補集団横断で winsorize → Zスコア化する。価格データは週次更新
+（`StockPriceWeekly`）で他指標の年度カデンスと異なるため、VIEW の年度別 WINDOW 関数には
+乗せず都度計算する。[バックテスト](#7-バックテスト) の as-of 検証では `start_date` 以前の
+価格のみを参照するためリークしない。
 
 ### 仮定・限界
 
 - ウェイト設定に数学的・経済学的な根拠はなく、直感的なヒューリスティック
-- 各 Zスコアは年度内の相対評価であり、絶対的な財務水準は反映しない
+- 各 Zスコアは年度内の相対評価であり、絶対的な財務水準は反映しない（z_momentum のみ
+  価格取得日時点の候補集団内相対評価）
 - モデルの有効性は [バックテスト](#7-バックテスト) で検証すること
 
 ### 参考文献
@@ -465,6 +474,9 @@ coverage_i = Σⱼ∈present |weight_j| / Σⱼ |weight_j|
 - スマートベータ・ファクタースコアリングの実務:
   **Asness, C., Frazzini, A., Israel, R., & Moskowitz, T. (2015)**. "Fact, Fiction, and Value Investing." *Journal of Portfolio Management*, 42(1), 34–52.
   → https://doi.org/10.3905/jpm.2015.42.1.034
+- 12-1モメンタムファクターの学術的基礎:
+  **Jegadeesh, N., & Titman, S. (1993)**. "Returns to Buying Winners and Selling Losers: Implications for Stock Market Efficiency." *Journal of Finance*, 48(1), 65–91.
+  → https://doi.org/10.1111/j.1540-6261.1993.tb04702.x
 
 ---
 

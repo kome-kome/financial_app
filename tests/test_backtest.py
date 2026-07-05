@@ -171,3 +171,38 @@ class TestScoringSource:
         # 売り候補首位＝最も買い向きでない E00001（sell score=-1.5 が最大）
         assert sell_codes[0] == "E00001"
         assert sell["results"][0]["score"] == -1.5
+
+
+# ── z_momentum（Issue #270）: as-of リークセーフなランキング ─────────────────
+
+class TestScoringSourceMomentum:
+    def test_z_momentum_ranks_and_is_leak_safe(self, db, make_metric, make_weekly):
+        from datetime import date, timedelta
+        today = date.today()
+        start_date = today - timedelta(days=6 * 30)   # months_ago=6 と一致させる
+        old_date    = (start_date - timedelta(days=400)).isoformat()
+        recent_date = (start_date - timedelta(days=40)).isoformat()
+
+        # z_roe 等は未設定（None）のままにし、z_momentum のみでスコアが決まるようにする。
+        # compute_momentum_z は winsorize の下限（4件）を要するため4社用意する。
+        pairs = [
+            ("E00001", 1000.0, 4000.0),   # ln(4)    最高
+            ("E00002", 1000.0, 2000.0),   # ln(2)
+            ("E00003", 1000.0, 1000.0),   # ln(1) = 0
+            ("E00004", 2000.0,  500.0),   # ln(0.25) 最低
+        ]
+        for ec, old_close, recent_close in pairs:
+            db.add(make_metric(edinet_code=ec, year=2020, period_end="2020-03-31"))
+            db.add(make_weekly(edinet_code=ec, trade_date=old_date, close_last=old_close))
+            db.add(make_weekly(edinet_code=ec, trade_date=recent_date, close_last=recent_close))
+        db.commit()
+
+        res = backtest.run(db, "バランス型", 6, 20, None, None)
+        codes = [r["edinet_code"] for r in res["results"]]
+        assert codes == ["E00001", "E00002", "E00003", "E00004"]
+
+        # start_date より後の価格変動を追加してもスコア（ランキング）は変わらない
+        db.add(make_weekly(edinet_code="E00004", trade_date=today.isoformat(), close_last=99999.0))
+        db.commit()
+        res2 = backtest.run(db, "バランス型", 6, 20, None, None)
+        assert [r["edinet_code"] for r in res2["results"]] == codes
