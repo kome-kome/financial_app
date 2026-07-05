@@ -290,6 +290,30 @@ class MacroGbdtPlugin(AnalysisPlugin):
             },
         }
 
+    def tuning_search_space(self) -> tuple:
+        """ハイパーパラメータ自動探索の探索空間（Issue #266）。
+
+        XGBoost 7軸（木構造・正則化）のみを探索対象とする。構造パラメータ
+        （fin_features/macro_features/use_momentum/min_coverage 等）はスナップショット
+        再構築が要るため既定値に固定。`n_estimators_max`/`early_stopping_rounds` は
+        early_stopping が自動決定するため対象外（#264 設計方針）。7軸の全グリッドは
+        組合せ爆発するため、呼び出し側（hyperparameter_search.py）は既定 strategy="random"
+        を推奨。
+        """
+        from .tuning import SearchDim
+
+        base_params: dict = {}
+        dims = [
+            SearchDim("max_depth",          [2, 4, 6, 8, 10]),
+            SearchDim("learning_rate",      [0.01, 0.03, 0.05, 0.1, 0.2, 0.3]),
+            SearchDim("subsample",          [0.4, 0.6, 0.8, 1.0]),
+            SearchDim("colsample_bytree",   [0.4, 0.6, 0.8, 1.0]),
+            SearchDim("min_child_weight",   [1, 5, 10, 20, 30]),
+            SearchDim("reg_lambda",         [0.0, 0.5, 1.0, 2.0, 5.0, 10.0]),
+            SearchDim("reg_alpha",          [0.0, 0.5, 1.0, 2.0, 5.0]),
+        ]
+        return base_params, dims
+
     def produced_output(self, db: Any) -> bool:
         """M-2 producer μ̂（macro_gbdt_scores）を共有DBに持つか（sell_ranking の graceful 判定用）。
 

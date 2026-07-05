@@ -122,6 +122,52 @@ class TestFreshnessBarHtml:
         assert 'id="gap-locked"' not in body
 
 
+class TestTunedParamsEndpoint:
+    """/api/plugins/{name}/tuned（Issue #264・自動調整済みハイパーパラメータの読取専用API）。"""
+
+    @pytest.fixture(autouse=True)
+    def _override_db(self, db):
+        api.app.dependency_overrides[api.get_db] = lambda: db
+        yield
+        api.app.dependency_overrides.clear()
+
+    def test_404_when_not_tuned(self):
+        r = client.get("/api/plugins/macro_gbdt/tuned")
+        assert r.status_code == 404
+
+    def test_200_after_persist(self, db):
+        from database import upsert_tuned_params
+        upsert_tuned_params(
+            db, "macro_gbdt", {"max_depth": 4}, "rank_ic", 0.083,
+            [{"params": {"max_depth": 4}, "score": 0.083}], n_combos=42,
+            data_fingerprint="abc123",
+        )
+        r = client.get("/api/plugins/macro_gbdt/tuned")
+        assert r.status_code == 200
+        d = r.json()
+        assert d["params"] == {"max_depth": 4}
+        assert d["objective_name"] == "rank_ic"
+        assert d["objective_value"] == pytest.approx(0.083)
+        assert d["n_combos"] == 42
+        assert d["data_fingerprint"] == "abc123"
+        assert isinstance(d["tuned_at"], str)
+
+    def test_other_plugin_unaffected(self, db):
+        """macro_gbdt を調整しても macro_risk_return は未調整のまま（plugin_name 単位）。"""
+        from database import upsert_tuned_params
+        upsert_tuned_params(db, "macro_gbdt", {"max_depth": 4}, "rank_ic", 0.083, [], 1, None)
+        assert client.get("/api/plugins/macro_risk_return/tuned").status_code == 404
+
+
+class TestTunedBadgeHtml:
+    """analysis.html の自動調整済みバッジ用プレースホルダ（Issue #264）。"""
+
+    def test_badge_placeholders_exist_for_all_three_models(self):
+        body = client.get("/analysis").text
+        for name in ("macro_risk_return", "macro_gbdt", "macro_dlm"):
+            assert f'id="tuned-badge-{name}"' in body
+
+
 class TestCrossLinks:
     def test_company_page_has_gap_crosslink(self):
         """company ページの理論時価総額チャートに /analysis?tab=gap リンクがある。"""

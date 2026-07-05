@@ -469,6 +469,22 @@ class TestExecuteIntegration:
         assert "selected_features" in result
         assert isinstance(result["results"], list)
 
+    def test_execute_has_oof_backtest(self):
+        """execute が oof_backtest（アウトオブサンプル検証）を返す（#272・ADR-0004・M-2/M-3 と同型）。"""
+        plugin = MacroRiskReturnPlugin()
+        schema = plugin.params_schema()
+        params = coerce_params(schema, {"use_macro": False})
+
+        db = self._build_mock_db()
+        result = asyncio.run(plugin.execute(params, db))
+
+        assert "oof_backtest" in result, "execute 出力に oof_backtest がない"
+        oof = result["oof_backtest"]
+        for k in ("n_quantiles", "n_periods", "n_periods_quantile", "n_oof_samples",
+                  "quantile_returns", "rank_ic", "long_short_spread", "hit_rate"):
+            assert k in oof, f"oof_backtest に '{k}' がない"
+        assert set(oof["rank_ic"].keys()) == {"mean", "std", "n"}
+
     def test_execute_returns_raw_risk_return_fields(self):
         """サーバーは全社の raw 値（mu_raw/r1/r2/r3）を返す。
         効用 U・パレート・top_n スライスはクライアント側の後処理へ移譲したため返さない。"""
@@ -608,3 +624,60 @@ class TestExecuteIntegration:
             ["per", "pbr", "roa"], [], False, 12, 0.5,
         )
         assert "momentum_12m1" not in all_feat_names
+
+
+# ── tuning_search_space（ハイパーパラメータ自動探索の探索空間・#265） ──────────
+
+class TestTuningSearchSpace:
+
+    def setup_method(self):
+        self.plugin = MacroRiskReturnPlugin()
+
+    def test_returns_base_params_and_dims(self):
+        base_params, dims = self.plugin.tuning_search_space()
+        assert isinstance(base_params, dict)
+        names = {d.name for d in dims}
+        assert names == {"use_macro", "use_momentum", "momentum_window",
+                         "min_coverage", "max_features"}
+
+    def test_display_only_params_excluded(self):
+        _base_params, dims = self.plugin.tuning_search_space()
+        names = {d.name for d in dims}
+        assert "lambda_risk" not in names
+        assert "risk_axis" not in names
+        assert "r3_gate" not in names
+        assert "top_n" not in names
+        assert "fin_features" not in names
+        assert "macro_features" not in names
+
+    def test_momentum_window_only_active_when_use_momentum_true(self):
+        from plugins.tuning import _grid_combos
+
+        _base_params, dims = self.plugin.tuning_search_space()
+        combos = _grid_combos(dims)
+        off_combos = [c for c in combos if c["use_momentum"] is False]
+        on_combos = [c for c in combos if c["use_momentum"] is True]
+        assert all(c["momentum_window"] == 3 for c in off_combos)  # values[0] に縮退
+        assert len({c["momentum_window"] for c in on_combos}) == 5  # 全展開
+
+    def test_dim_values_within_schema_bounds(self):
+        schema = self.plugin.params_schema()
+        _base_params, dims = self.plugin.tuning_search_space()
+        for d in dims:
+            field = schema[d.name]
+            lo, hi = field.get("min"), field.get("max")
+            for v in d.values:
+                if lo is not None:
+                    assert v >= lo, f"{d.name}={v} は schema min={lo} 未満"
+                if hi is not None:
+                    assert v <= hi, f"{d.name}={v} は schema max={hi} 超過"
+
+    def test_combos_pass_coerce_params(self):
+        from plugins.tuning import _grid_combos
+
+        base_params, dims = self.plugin.tuning_search_space()
+        schema = self.plugin.params_schema()
+        combos = _grid_combos(dims)
+        assert len(combos) > 0
+        for combo in combos:
+            coerce_params(schema, {**base_params, **combo})

@@ -920,3 +920,62 @@ class TestAutoHyperparams:
 
         assert res["diagnostics"]["auto_hyperparams_used"] is True
         assert res["diagnostics"]["phi"] == pytest.approx(0.92)
+
+
+# ── tuning_search_space（ハイパーパラメータ自動探索の探索空間・#267） ──────────
+
+class TestTuningSearchSpace:
+
+    def test_returns_base_params_and_dims(self):
+        base_params, dims = plugin.tuning_search_space()
+        assert isinstance(base_params, dict)
+        names = {d.name for d in dims}
+        assert names == {"state_discount", "var_discount", "alpha_ar1", "alpha_phi"}
+
+    def test_delta_bv_reuse_existing_auto_grids(self):
+        """周辺尤度モードと同じグリッド（_AUTO_DELTA_GRID/_AUTO_BV_GRID）を再利用する。"""
+        _base_params, dims = plugin.tuning_search_space()
+        by_name = {d.name: d for d in dims}
+        assert by_name["state_discount"].values == list(_AUTO_DELTA_GRID)
+        assert by_name["var_discount"].values == list(_AUTO_BV_GRID)
+
+    def test_macro_features_and_display_only_params_excluded(self):
+        _base_params, dims = plugin.tuning_search_space()
+        names = {d.name for d in dims}
+        assert "macro_features" not in names
+        assert "lambda_risk" not in names
+        assert "top_n" not in names
+        assert "min_weeks" not in names
+        assert "burn_in_weeks" not in names
+
+    def test_alpha_phi_only_active_when_alpha_ar1_true(self):
+        from plugins.tuning import _grid_combos
+
+        _base_params, dims = plugin.tuning_search_space()
+        combos = _grid_combos(dims)
+        off_combos = [c for c in combos if c["alpha_ar1"] is False]
+        on_combos = [c for c in combos if c["alpha_ar1"] is True]
+        assert all(c["alpha_phi"] == 0.5 for c in off_combos)  # values[0] に縮退
+        assert len({c["alpha_phi"] for c in on_combos}) == 6    # 全展開
+
+    def test_dim_values_within_schema_bounds(self):
+        schema = plugin.params_schema()
+        _base_params, dims = plugin.tuning_search_space()
+        for d in dims:
+            field = schema[d.name]
+            lo, hi = field.get("min"), field.get("max")
+            for v in d.values:
+                if lo is not None:
+                    assert v >= lo, f"{d.name}={v} は schema min={lo} 未満"
+                if hi is not None:
+                    assert v <= hi, f"{d.name}={v} は schema max={hi} 超過"
+
+    def test_combos_pass_coerce_params(self):
+        from plugins.tuning import _grid_combos
+
+        base_params, dims = plugin.tuning_search_space()
+        schema = plugin.params_schema()
+        combos = _grid_combos(dims)
+        assert len(combos) > 0
+        for combo in combos:
+            coerce_params(schema, {**base_params, **combo})
