@@ -4,35 +4,68 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>分析</title>
+<script src="/static/js/theme-init.js"></script>
 <style>
+:root{
+  --bg:#0f1117;--bg-elevated:#1a1d2e;--bg-sunken:#0f1117;--bg-hover:#1e293b;
+  --border:#2d3154;--border-muted:#334155;--border-subtle:#1e2235;
+  --text:#e2e8f0;--text-secondary:#94a3b8;--text-muted:#64748b;--text-body:#cbd5e1;
+  --accent:#7c3aed;--accent-hover:#6d28d9;--accent-text:#a78bfa;
+  --accent-soft-bg:#312e81;--accent-soft-text:#c4b5fd;--accent-deep-bg:#2e1065;
+  --status-good:#10b981;--status-good-bg:#052e16;--status-good-text:#86efac;
+  --status-bad:#ef4444;--status-bad-bg:#450a0a;--status-bad-text:#fca5a5;
+  --status-warn:#f59e0b;--status-warn-bg:#451a03;--status-warn-text:#fcd34d;
+  --status-info:#60a5fa;--status-info-bg:#1e3a5f;--status-info-text:#93c5fd;
+  --val-up:#3b82f6;--val-up-bg:#1e3a5f;--val-up-text:#93c5fd;
+  --val-down:#ef4444;--val-down-bg:#450a0a;--val-down-text:#fca5a5;
+  --val-neutral:#10b981;--val-neutral-bg:#052e16;--val-neutral-text:#86efac;
+  --shadow-color:rgba(0,0,0,.4);
+}
+:root[data-theme="light"]{
+  --bg:#f8fafc;--bg-elevated:#ffffff;--bg-sunken:#f1f5f9;--bg-hover:#e2e8f0;
+  --border:#e2e8f0;--border-muted:#cbd5e1;--border-subtle:#e5e7eb;
+  --text:#0f172a;--text-secondary:#475569;--text-muted:#94a3b8;--text-body:#334155;
+  --accent:#7c3aed;--accent-hover:#6d28d9;--accent-text:#6d28d9;
+  --accent-soft-bg:#ede9fe;--accent-soft-text:#6d28d9;--accent-deep-bg:#ddd6fe;
+  --status-good:#059669;--status-good-bg:#d1fae5;--status-good-text:#065f46;
+  --status-bad:#dc2626;--status-bad-bg:#fee2e2;--status-bad-text:#991b1b;
+  --status-warn:#d97706;--status-warn-bg:#fef3c7;--status-warn-text:#92400e;
+  --status-info:#2563eb;--status-info-bg:#dbeafe;--status-info-text:#1e40af;
+  --val-up:#2563eb;--val-up-bg:#dbeafe;--val-up-text:#1e40af;
+  --val-down:#dc2626;--val-down-bg:#fee2e2;--val-down-text:#991b1b;
+  --val-neutral:#059669;--val-neutral-bg:#d1fae5;--val-neutral-text:#065f46;
+  --shadow-color:rgba(0,0,0,.12);
+}
 *{box-sizing:border-box;margin:0;padding:0}
-body{font-family:'Segoe UI',sans-serif;background:#0f1117;color:#e2e8f0;min-height:100vh}
-.header{background:#1a1d2e;border-bottom:1px solid #2d3154;padding:14px 24px;display:flex;align-items:center;gap:14px}
-.header h1{font-size:17px;font-weight:600;color:#a78bfa}
-.badge{background:#312e81;color:#c4b5fd;font-size:11px;padding:3px 8px;border-radius:12px}
-.api-url-bar{background:#0f1117;border:1px solid #334155;border-radius:6px;padding:5px 10px;font-size:12px;color:#94a3b8;margin-left:auto;display:flex;align-items:center;gap:8px}
-.api-url-bar input{background:none;border:none;color:#67e8f9;font-size:12px;width:220px;outline:none}
+body{font-family:'Segoe UI',sans-serif;background:var(--bg);color:var(--text);min-height:100vh}
+.header{background:var(--bg-elevated);border-bottom:1px solid var(--border);padding:14px 24px;display:flex;align-items:center;gap:14px}
+.header h1{font-size:17px;font-weight:600;color:var(--accent-text)}
+.badge{background:var(--accent-soft-bg);color:var(--accent-soft-text);font-size:11px;padding:3px 8px;border-radius:12px}
+.theme-toggle-btn{background:transparent;border:1px solid var(--border-muted);color:var(--text);border-radius:6px;width:30px;height:30px;font-size:14px;cursor:pointer;display:flex;align-items:center;justify-content:center;flex-shrink:0}
+.theme-toggle-btn:hover{background:var(--bg-hover)}
+.api-url-bar{background:var(--bg-sunken);border:1px solid var(--border-muted);border-radius:6px;padding:5px 10px;font-size:12px;color:var(--text-secondary);margin-left:auto;display:flex;align-items:center;gap:8px}
+.api-url-bar input{background:none;border:none;color:var(--status-info-text);font-size:12px;width:220px;outline:none}
 .dot{width:8px;height:8px;border-radius:50%;display:inline-block}
-.dot-green{background:#10b981}.dot-red{background:#ef4444}
-.nav{display:flex;border-bottom:1px solid #2d3154;background:#1a1d2e;padding:0 24px;gap:4px}
-.nav-btn{padding:11px 18px;font-size:13px;color:#94a3b8;background:none;border:none;border-bottom:2px solid transparent;cursor:pointer;transition:all .2s}
-.nav-btn.active{color:#a78bfa;border-bottom-color:#a78bfa}
-.nav-btn.locked{color:#64748b;opacity:.7}
-.nav-link{padding:11px 18px;font-size:13px;color:#64748b;text-decoration:none;display:inline-flex;align-items:center;gap:5px;margin-left:auto}
-.nav-link:hover{color:#94a3b8}
+.dot-green{background:var(--status-good)}.dot-red{background:var(--status-bad)}
+.nav{display:flex;border-bottom:1px solid var(--border);background:var(--bg-elevated);padding:0 24px;gap:4px}
+.nav-btn{padding:11px 18px;font-size:13px;color:var(--text-secondary);background:none;border:none;border-bottom:2px solid transparent;cursor:pointer;transition:all .2s}
+.nav-btn.active{color:var(--accent-text);border-bottom-color:var(--accent-text)}
+.nav-btn.locked{color:var(--text-muted);opacity:.7}
+.nav-link{padding:11px 18px;font-size:13px;color:var(--text-muted);text-decoration:none;display:inline-flex;align-items:center;gap:5px;margin-left:auto}
+.nav-link:hover{color:var(--text-secondary)}
 /* 目的別IA: 左サイドバー型ハブ（カテゴリ→分析の2階層） */
 .layout{display:flex;align-items:flex-start;max-width:1640px;margin:0 auto}
-.sidebar{flex:0 0 224px;width:224px;background:#161927;border-right:1px solid #2d3154;padding:10px 10px 30px;min-height:calc(100vh - 110px)}
-.sidebar-cat{font-size:11px;color:#64748b;font-weight:600;text-transform:uppercase;letter-spacing:.5px;margin:16px 8px 6px}
+.sidebar{flex:0 0 224px;width:224px;background:var(--bg-sunken);border-right:1px solid var(--border);padding:10px 10px 30px;min-height:calc(100vh - 110px)}
+.sidebar-cat{font-size:11px;color:var(--text-muted);font-weight:600;text-transform:uppercase;letter-spacing:.5px;margin:16px 8px 6px}
 .sidebar-cat:first-child{margin-top:6px}
-.sidebar-item{display:block;width:100%;text-align:left;padding:8px 12px;margin:2px 0;font-size:13px;color:#94a3b8;background:none;border:none;border-radius:6px;cursor:pointer;text-decoration:none;transition:background .15s,color .15s}
-.sidebar-item:hover{background:#1e2235;color:#e2e8f0}
-.sidebar-item.active{background:#2e1065;color:#c4b5fd;font-weight:600}
-.sidebar-item.locked{color:#64748b;opacity:.7}
-.sidebar-ext{font-size:10px;color:#64748b;margin-left:4px}
+.sidebar-item{display:block;width:100%;text-align:left;padding:8px 12px;margin:2px 0;font-size:13px;color:var(--text-secondary);background:none;border:none;border-radius:6px;cursor:pointer;text-decoration:none;transition:background .15s,color .15s}
+.sidebar-item:hover{background:var(--border-subtle);color:var(--text)}
+.sidebar-item.active{background:var(--accent-deep-bg);color:var(--accent-soft-text);font-weight:600}
+.sidebar-item.locked{color:var(--text-muted);opacity:.7}
+.sidebar-ext{font-size:10px;color:var(--text-muted);margin-left:4px}
 .layout .container{flex:1;min-width:0;max-width:none;margin:0}
 .container{padding:20px;max-width:1400px;margin:0 auto}
-.card{background:#1a1d2e;border:1px solid #2d3154;border-radius:10px;padding:16px;margin-bottom:16px}
+.card{background:var(--bg-elevated);border:1px solid var(--border);border-radius:10px;padding:16px;margin-bottom:16px}
 .grid4{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:16px}
 .grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:16px}
 .grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px}
@@ -42,7 +75,7 @@ body{font-family:'Segoe UI',sans-serif;background:#0f1117;color:#e2e8f0;min-heig
   .grid3{grid-template-columns:repeat(2,1fr)}
   /* 狭幅ではサイドバーを上部の横スクロール帯に切り替える */
   .layout{flex-direction:column}
-  .sidebar{flex:none;width:100%;min-height:0;border-right:none;border-bottom:1px solid #2d3154;display:flex;flex-wrap:wrap;align-items:center;gap:4px;padding:8px 12px}
+  .sidebar{flex:none;width:100%;min-height:0;border-right:none;border-bottom:1px solid var(--border);display:flex;flex-wrap:wrap;align-items:center;gap:4px;padding:8px 12px}
   .sidebar-cat{width:100%;margin:8px 4px 2px}
   .sidebar-item{width:auto}
 }
@@ -52,90 +85,91 @@ body{font-family:'Segoe UI',sans-serif;background:#0f1117;color:#e2e8f0;min-heig
   .grid2{grid-template-columns:1fr}
   .card{padding:12px}
 }
-.card-title{font-size:11px;color:#64748b;margin-bottom:6px;text-transform:uppercase;letter-spacing:.5px}
+.card-title{font-size:11px;color:var(--text-muted);margin-bottom:6px;text-transform:uppercase;letter-spacing:.5px}
 .card-value{font-size:22px;font-weight:700}
-.card-sub{font-size:11px;color:#64748b;margin-top:3px}
-.section-title{font-size:14px;font-weight:600;color:#a78bfa;margin-bottom:12px}
+.card-sub{font-size:11px;color:var(--text-muted);margin-top:3px}
+.section-title{font-size:14px;font-weight:600;color:var(--accent-text);margin-bottom:12px}
 .btn{padding:8px 16px;border-radius:6px;border:none;font-size:13px;cursor:pointer;display:inline-flex;align-items:center;gap:5px;transition:all .15s}
-.btn-primary{background:#7c3aed;color:#fff}.btn-primary:hover{background:#6d28d9}
-.btn-secondary{background:#1e293b;color:#94a3b8;border:1px solid #334155}.btn-secondary:hover{background:#334155;color:#e2e8f0}
-.btn-green{background:#065f46;color:#6ee7b7;border:1px solid #047857}.btn-green:hover{background:#047857}
+.btn-primary{background:var(--accent);color:#fff}.btn-primary:hover{background:var(--accent-hover)}
+.btn-secondary{background:var(--bg-hover);color:var(--text-secondary);border:1px solid var(--border-muted)}.btn-secondary:hover{background:var(--border-muted);color:var(--text)}
+.btn-green{background:var(--val-up-bg);color:var(--val-up-text);border:1px solid var(--val-up)}.btn-green:hover{background:var(--val-up)}
 .btn-sm{padding:5px 10px;font-size:12px}
-input,select{background:#0f1117;border:1px solid #334155;border-radius:6px;color:#e2e8f0;padding:8px 12px;font-size:13px;width:100%}
-input:focus,select:focus{outline:none;border-color:#7c3aed}
-label{font-size:12px;color:#94a3b8;display:block;margin-bottom:4px}
+input,select{background:var(--bg-sunken);border:1px solid var(--border-muted);border-radius:6px;color:var(--text);padding:8px 12px;font-size:13px;width:100%}
+input:focus,select:focus{outline:none;border-color:var(--accent)}
+label{font-size:12px;color:var(--text-secondary);display:block;margin-bottom:4px}
 .form-group{margin-bottom:12px}
 table{width:100%;border-collapse:collapse;font-size:12px}
-th{text-align:left;padding:9px 10px;color:#64748b;font-weight:500;border-bottom:1px solid #2d3154;background:#141722;white-space:nowrap}
+th{text-align:left;padding:9px 10px;color:var(--text-muted);font-weight:500;border-bottom:1px solid var(--border);background:var(--bg-sunken);white-space:nowrap}
 th.sortable{cursor:pointer;user-select:none}
-th.sortable:hover{color:#a78bfa}
-td{padding:9px 10px;border-bottom:1px solid #1e2235}
-tr:hover td{background:#1e2235}
+th.sortable:hover{color:var(--accent-text)}
+td{padding:9px 10px;border-bottom:1px solid var(--border-subtle)}
+tr:hover td{background:var(--border-subtle)}
 .tag{display:inline-block;padding:2px 7px;border-radius:10px;font-size:10px;font-weight:500}
-.tag-blue{background:#1e3a5f;color:#93c5fd}
-.tag-green{background:#052e16;color:#86efac}
-.tag-red{background:#450a0a;color:#fca5a5}
-.tag-amber{background:#451a03;color:#fcd34d}
-.tag-purple{background:#2e1065;color:#c4b5fd}
-.log-box{background:#0a0c14;border:1px solid #1e2235;border-radius:8px;padding:12px;height:180px;overflow-y:auto;font-family:monospace;font-size:11px}
-.log-entry{padding:1px 0;color:#94a3b8}
-.log-entry.success{color:#10b981}.log-entry.error{color:#ef4444}.log-entry.info{color:#60a5fa}
+.tag-blue{background:var(--status-info-bg);color:var(--status-info-text)}
+.tag-green{background:var(--status-good-bg);color:var(--status-good-text)}
+.tag-red{background:var(--status-bad-bg);color:var(--status-bad-text)}
+.tag-amber{background:var(--status-warn-bg);color:var(--status-warn-text)}
+.tag-purple{background:var(--accent-deep-bg);color:var(--accent-soft-text)}
+.log-box{background:var(--bg-sunken);border:1px solid var(--border-subtle);border-radius:8px;padding:12px;height:180px;overflow-y:auto;font-family:monospace;font-size:11px}
+.log-entry{padding:1px 0;color:var(--text-secondary)}
+.log-entry.success{color:var(--status-good)}.log-entry.error{color:var(--status-bad)}.log-entry.info{color:var(--status-info)}
 .progress-wrap{margin-top:10px}
-.progress-bar{height:6px;background:#1e293b;border-radius:3px;overflow:hidden}
-.progress-fill{height:100%;background:linear-gradient(90deg,#7c3aed,#a78bfa);border-radius:3px;transition:width .4s}
+.progress-bar{height:6px;background:var(--bg-hover);border-radius:3px;overflow:hidden}
+.progress-fill{height:100%;background:linear-gradient(90deg,var(--accent),var(--accent-text));border-radius:3px;transition:width .4s}
 .hidden{display:none}
 .flex{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
 .flex-between{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px}
-.text-sm{font-size:12px;color:#64748b}
-.text-green{color:#10b981}.text-red{color:#ef4444}.text-amber{color:#f59e0b}
-.spinner{width:16px;height:16px;border:2px solid #334155;border-top-color:#a78bfa;border-radius:50%;animation:spin .7s linear infinite;display:inline-block}
+.text-sm{font-size:12px;color:var(--text-muted)}
+.text-green{color:var(--val-up)}.text-red{color:var(--val-down)}.text-amber{color:var(--status-warn)}
+.spinner{width:16px;height:16px;border:2px solid var(--border-muted);border-top-color:var(--accent-text);border-radius:50%;animation:spin .7s linear infinite;display:inline-block}
 @keyframes spin{to{transform:rotate(360deg)}}
 .coef-bar{display:inline-block;height:8px;border-radius:4px;vertical-align:middle;margin-left:6px}
 .checkbox-grid{display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px}
-.checkbox-item{display:flex;align-items:center;gap:6px;font-size:12px;color:#94a3b8;cursor:pointer}
+.checkbox-item{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text-secondary);cursor:pointer}
 .checkbox-item input{width:auto;margin:0}
-.gap-positive{color:#10b981;font-weight:600}
-.gap-negative{color:#ef4444;font-weight:600}
-.stat-card{background:#0f1117;border-radius:8px;padding:12px;text-align:center}
-.stat-label{font-size:10px;color:#64748b;margin-bottom:4px;text-transform:uppercase;letter-spacing:.5px}
+.gap-positive{color:var(--val-up);font-weight:600}
+.gap-negative{color:var(--val-down);font-weight:600}
+.stat-card{background:var(--bg-sunken);border-radius:8px;padding:12px;text-align:center}
+.stat-label{font-size:10px;color:var(--text-muted);margin-bottom:4px;text-transform:uppercase;letter-spacing:.5px}
 .stat-value{font-size:20px;font-weight:700}
-.info-box{background:#1e2235;border-radius:8px;padding:12px;font-size:12px;color:#94a3b8;border-left:3px solid #7c3aed;line-height:1.6}
+.info-box{background:var(--border-subtle);border-radius:8px;padding:12px;font-size:12px;color:var(--text-secondary);border-left:3px solid var(--accent);line-height:1.6}
 /* 用語ツールチップ（マウスオーバーで解説を表示） */
-.gloss{border-bottom:1px dotted #8b9bb4;cursor:help;position:relative}
-.gloss::after{content:attr(data-tip);position:absolute;left:0;top:calc(100% + 7px);z-index:60;width:max-content;max-width:280px;white-space:normal;text-align:left;text-transform:none;letter-spacing:normal;background:#0a0c14;color:#cbd5e1;border:1px solid #3b4263;border-radius:7px;padding:9px 11px;font-size:11px;font-weight:400;line-height:1.6;box-shadow:0 10px 30px rgba(0,0,0,.5);opacity:0;visibility:hidden;transform:translateY(-4px);transition:opacity .13s ease,transform .13s ease;pointer-events:none}
+.gloss{border-bottom:1px dotted var(--text-secondary);cursor:help;position:relative}
+.gloss::after{content:attr(data-tip);position:absolute;left:0;top:calc(100% + 7px);z-index:60;width:max-content;max-width:280px;white-space:normal;text-align:left;text-transform:none;letter-spacing:normal;background:var(--bg-sunken);color:var(--text-body);border:1px solid var(--border-muted);border-radius:7px;padding:9px 11px;font-size:11px;font-weight:400;line-height:1.6;box-shadow:0 10px 30px var(--shadow-color);opacity:0;visibility:hidden;transform:translateY(-4px);transition:opacity .13s ease,transform .13s ease;pointer-events:none}
 .gloss:hover::after{opacity:1;visibility:visible;transform:translateY(0)}
 .btn:disabled{opacity:.4;cursor:not-allowed}
-.co-link{color:#a78bfa;text-decoration:none}
+.co-link{color:var(--accent-text);text-decoration:none}
 .co-link:hover{text-decoration:underline}
 /* モデル鮮度バー（② 割安度カテゴリ内に常設） */
-.freshness-bar{padding:8px 14px;background:#0f1929;border:1px solid #1e2235;border-radius:6px;font-size:12px;color:#94a3b8;display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:12px}
+.freshness-bar{padding:8px 14px;background:var(--bg-sunken);border:1px solid var(--border-subtle);border-radius:6px;font-size:12px;color:var(--text-secondary);display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:12px}
 .freshness-badge{display:inline-block;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:600}
-.freshness-fresh{background:#065f46;color:#6ee7b7}
-.freshness-stale{background:#78350f;color:#fde68a}
-.freshness-none{background:#1e293b;color:#64748b}
-.gnav{display:flex;align-items:center;gap:2px;background:#13162a;border-bottom:1px solid #2d3154;padding:0 24px;flex-wrap:wrap}
-.gnav-link{padding:10px 14px;font-size:13px;color:#94a3b8;text-decoration:none;border-bottom:2px solid transparent;transition:color .15s,border-color .15s}
-.gnav-link:hover{color:#e2e8f0}
-.gnav-link.active{color:#fff;border-bottom-color:#7c3aed}
-.gnav-ref{color:#64748b}
+.freshness-fresh{background:var(--val-up-bg);color:var(--val-up-text)}
+.freshness-stale{background:var(--status-warn-bg);color:var(--status-warn-text)}
+.freshness-none{background:var(--bg-hover);color:var(--text-muted)}
+.gnav{display:flex;align-items:center;gap:2px;background:var(--bg-elevated);border-bottom:1px solid var(--border);padding:0 24px;flex-wrap:wrap}
+.gnav-link{padding:10px 14px;font-size:13px;color:var(--text-secondary);text-decoration:none;border-bottom:2px solid transparent;transition:color .15s,border-color .15s}
+.gnav-link:hover{color:var(--text)}
+.gnav-link.active{color:var(--text);border-bottom-color:var(--accent)}
+.gnav-ref{color:var(--text-muted)}
 .gnav-spacer{margin-left:auto}
 </style>
 </head>
 <body>
 
 <div class="header">
-  <div style="width:30px;height:30px;background:#312e81;border-radius:8px;display:flex;align-items:center;justify-content:center">
-    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#a78bfa" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+  <div style="width:30px;height:30px;background:var(--accent-soft-bg);border-radius:8px;display:flex;align-items:center;justify-content:center">
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--accent-text)" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
   </div>
   <h1>分析</h1>
   <span class="badge">分析</span>
   <div class="api-url-bar">
-    <span class="dot" id="api-dot" style="background:#f59e0b"></span>
+    <span class="dot" id="api-dot" style="background:var(--status-warn)"></span>
     <span style="font-size:11px">API:</span>
     <input type="text" id="api-base" value="" placeholder="http://localhost:8000">
-    <button class="btn btn-sm" style="padding:3px 8px;background:#1e293b;border:1px solid #334155;color:#94a3b8;border-radius:4px" data-click="preflight">接続確認</button>
+    <button class="btn btn-sm" style="padding:3px 8px;background:var(--bg-hover);border:1px solid var(--border-muted);color:var(--text-secondary);border-radius:4px" data-click="preflight">接続確認</button>
   </div>
-  <button id="logout-btn" data-click="logout" style="display:none;margin-left:8px;padding:5px 12px;background:transparent;border:1px solid #4a5568;border-radius:4px;color:#94a3b8;font-size:12px;cursor:pointer">ログアウト</button>
+  <button id="theme-toggle" class="theme-toggle-btn" title="ライト/ダーク切替" aria-label="テーマ切替">🌙</button>
+  <button id="logout-btn" data-click="logout" style="display:none;margin-left:8px;padding:5px 12px;background:transparent;border:1px solid var(--border-muted);border-radius:4px;color:var(--text-secondary);font-size:12px;cursor:pointer">ログアウト</button>
 </div>
 
 <nav class="gnav">
@@ -144,22 +178,22 @@ tr:hover td{background:#1e2235}
   <a href="/company" class="gnav-link">企業詳細</a>
   <a href="/collection" class="gnav-link">収集</a>
   <span class="gnav-spacer"></span>
-  <a href="/guide" class="gnav-link gnav-ref" style="color:#34d399">やさしい解説</a>
-  <a href="/models" class="gnav-link gnav-ref" style="color:#a78bfa">モデル解説</a>
+  <a href="/guide" class="gnav-link gnav-ref" style="color:var(--val-up)">やさしい解説</a>
+  <a href="/models" class="gnav-link gnav-ref" style="color:var(--accent-text)">モデル解説</a>
 </nav>
 
-<div id="data-status-bar" style="background:#0f1117;border-bottom:1px solid #1e293b;padding:8px 24px;display:flex;align-items:center;gap:20px;font-size:12px">
+<div id="data-status-bar" style="background:var(--bg-sunken);border-bottom:1px solid var(--bg-hover);padding:8px 24px;display:flex;align-items:center;gap:20px;font-size:12px">
   <div style="display:flex;align-items:center;gap:6px">
-    <span id="status-fin-dot" class="dot" style="background:#f59e0b"></span>
-    <span style="color:#64748b">財務データ:</span>
-    <span id="status-fin-text" style="color:#94a3b8">確認中...</span>
+    <span id="status-fin-dot" class="dot" style="background:var(--status-warn)"></span>
+    <span style="color:var(--text-muted)">財務データ:</span>
+    <span id="status-fin-text" style="color:var(--text-secondary)">確認中...</span>
   </div>
   <div style="display:flex;align-items:center;gap:6px">
-    <span id="status-price-dot" class="dot" style="background:#f59e0b"></span>
-    <span style="color:#64748b">株価データ:</span>
-    <span id="status-price-text" style="color:#94a3b8">確認中...</span>
+    <span id="status-price-dot" class="dot" style="background:var(--status-warn)"></span>
+    <span style="color:var(--text-muted)">株価データ:</span>
+    <span id="status-price-text" style="color:var(--text-secondary)">確認中...</span>
   </div>
-  <a href="/collection" style="color:#a78bfa;font-size:12px;text-decoration:none;margin-left:auto">← データ収集ページへ</a>
+  <a href="/collection" style="color:var(--accent-text);font-size:12px;text-decoration:none;margin-left:auto">← データ収集ページへ</a>
 </div>
 
 <div class="layout">
@@ -186,8 +220,8 @@ tr:hover td{background:#1e2235}
       <span class="gap-positive">正値（緑）</span>: 予測 &gt; 実際 → モデル上は割安の可能性
       &nbsp;|&nbsp;
       <span class="gap-negative">負値（赤）</span>: 予測 &lt; 実際 → モデル上は割高の可能性<br>
-      <strong style="color:#10b981">期待総リターン</strong> = 乖離率 + 配当利回り&nbsp;<span style="color:#64748b">[%]</span>（「ソート順」で総リターン順に切替可）。<strong>implied PER</strong> = 予測株価 ÷ EPS。<br>
-      <span style="color:#f59e0b;font-size:11px">⚠ 期待乖離・収束スコア・期待総リターンはヒューリスティック／参考値です。統計的な予測確率ではなく、投資判断の参考にすぎません。</span>
+      <strong style="color:var(--val-up)">期待総リターン</strong> = 乖離率 + 配当利回り&nbsp;<span style="color:var(--text-muted)">[%]</span>（「ソート順」で総リターン順に切替可）。<strong>implied PER</strong> = 予測株価 ÷ EPS。<br>
+      <span style="color:var(--status-warn);font-size:11px">⚠ 期待乖離・収束スコア・期待総リターンはヒューリスティック／参考値です。統計的な予測確率ではなく、投資判断の参考にすぎません。</span>
     </div>
     <div id="params-form-gap"></div>
     <button class="btn btn-primary btn-sm" id="btn-gap-analysis" data-click="runGapAnalysis" style="margin-top:8px">分析を実行</button>
@@ -231,11 +265,11 @@ tr:hover td{background:#1e2235}
     </div>
     <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:16px">
       <div>
-        <div style="font-size:12px;color:#94a3b8;margin-bottom:6px">理論 vs 実際 時価総額（億円・対数軸）</div>
+        <div style="font-size:12px;color:var(--text-secondary);margin-bottom:6px">理論 vs 実際 時価総額（億円・対数軸）</div>
         <div style="position:relative;height:340px"><canvas id="chart-gap-scatter"></canvas></div>
       </div>
       <div>
-        <div style="font-size:12px;color:#94a3b8;margin-bottom:6px">乖離率の分布（社数）</div>
+        <div style="font-size:12px;color:var(--text-secondary);margin-bottom:6px">乖離率の分布（社数）</div>
         <div style="position:relative;height:340px"><canvas id="chart-gap-hist"></canvas></div>
       </div>
     </div>
@@ -304,7 +338,7 @@ tr:hover td{background:#1e2235}
       ★ 業種別OLS分析を先に実行すると「割高度」が売り判定に使われます。
     </div>
     <textarea id="param-sell_ranking-holdings" rows="6" placeholder="7203, @1500, 2024-03-10&#10;6758 @12000&#10;9984"
-      style="width:100%;font-family:monospace;font-size:13px;resize:vertical;background:#0f1117;color:#e2e8f0;border:1px solid #1e2235;border-radius:6px;padding:8px"></textarea>
+      style="width:100%;font-family:monospace;font-size:13px;resize:vertical;background:var(--bg-sunken);color:var(--text);border:1px solid var(--border-subtle);border-radius:6px;padding:8px"></textarea>
   </div>
 
   <div class="card">
@@ -323,35 +357,35 @@ tr:hover td{background:#1e2235}
     <div class="section-title" style="font-size:12px;margin:16px 0 10px">アクション閾値・タイミング</div>
     <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:12px">
       <div>
-        <label style="font-size:11px;color:#64748b">SELL 閾値（売りスコア）</label>
+        <label style="font-size:11px;color:var(--text-muted)">SELL 閾値（売りスコア）</label>
         <div style="display:flex;align-items:center;gap:8px">
           <input type="range" id="sell-th" min="0" max="2" step="0.1" value="0.8"
-            data-input="syncVal" data-target="sell-th-val" style="flex:1;accent-color:#ef4444">
-          <span id="sell-th-val" style="color:#fca5a5;font-weight:600;min-width:30px">0.8</span>
+            data-input="syncVal" data-target="sell-th-val" style="flex:1;accent-color:var(--val-down)">
+          <span id="sell-th-val" style="color:var(--val-down-text);font-weight:600;min-width:30px">0.8</span>
         </div>
       </div>
       <div>
-        <label style="font-size:11px;color:#64748b">REDUCE 閾値（売りスコア）</label>
+        <label style="font-size:11px;color:var(--text-muted)">REDUCE 閾値（売りスコア）</label>
         <div style="display:flex;align-items:center;gap:8px">
           <input type="range" id="reduce-th" min="0" max="2" step="0.1" value="0.3"
-            data-input="syncVal" data-target="reduce-th-val" style="flex:1;accent-color:#f59e0b">
-          <span id="reduce-th-val" style="color:#fcd34d;font-weight:600;min-width:30px">0.3</span>
+            data-input="syncVal" data-target="reduce-th-val" style="flex:1;accent-color:var(--status-warn)">
+          <span id="reduce-th-val" style="color:var(--status-warn-text);font-weight:600;min-width:30px">0.3</span>
         </div>
       </div>
     </div>
-    <label style="display:flex;align-items:center;gap:8px;margin-top:12px;font-size:12px;color:#94a3b8">
-      <input type="checkbox" id="sell-timing-adjust" checked style="width:auto;accent-color:#7c3aed">
+    <label style="display:flex;align-items:center;gap:8px;margin-top:12px;font-size:12px;color:var(--text-secondary)">
+      <input type="checkbox" id="sell-timing-adjust" checked style="width:auto;accent-color:var(--accent)">
       価格トレンドでラベル補正（下落＝売り圧力↑ / 上昇＝即売り回避）
     </label>
 
     <div style="margin-top:14px">
-      <label style="font-size:11px;color:#64748b;display:block;margin-bottom:4px">期待リターン μ の出所（推奨モデル）</label>
-      <select id="sell-mu-source" style="width:100%;background:#0f1117;color:#e2e8f0;border:1px solid #1e2235;border-radius:6px;padding:6px 8px;font-size:12px">
+      <label style="font-size:11px;color:var(--text-muted);display:block;margin-bottom:4px">期待リターン μ の出所（推奨モデル）</label>
+      <select id="sell-mu-source" style="width:100%;background:var(--bg-sunken);color:var(--text);border:1px solid var(--border-subtle);border-radius:6px;padding:6px 8px;font-size:12px">
         <option value="macro_risk_return">M-1: マクロ×リスク-リターン（OLS）</option>
         <option value="macro_gbdt">M-2: マクロ×財務 勾配ブースティング（XGBoost）</option>
         <option value="macro_dlm">M-3: ベイズ状態空間（時変マクロβ DLM）</option>
       </select>
-      <div style="font-size:11px;color:#64748b;margin-top:4px">
+      <div style="font-size:11px;color:var(--text-muted);margin-top:4px">
         μ 観点に使う推奨モデル。選択モデルが未実行ならその成分を自動除外します（M-2/M-3 は分析タブで要ローカル実行）。−Rᴹ は共有マクロβ由来でモデル非依存。
       </div>
     </div>
@@ -389,14 +423,14 @@ tr:hover td{background:#1e2235}
   <div class="card">
     <div class="section-title">ネットキャッシュ分析 — 清原達郎『わが投資術』<a class="co-link" href="/guide#net_cash_analysis" target="_blank" rel="noopener" style="float:right;font-size:12px;font-weight:400">❓ やさしい解説</a></div>
     <div class="info-box" style="margin-bottom:14px">
-      <strong style="color:#10b981" class="gloss" data-tip="すぐ換金できる資産から全負債を引いた、実質的な手元現金。流動資産＋投資有価証券×0.7−総負債で計算する清原達郎式の指標。">ネットキャッシュ</strong> = 流動資産 + 投資有価証券 × 0.7 − 総負債&nbsp;<span style="color:#64748b">[円]（清原式）</span><br>
-      <strong style="color:#10b981" class="gloss" data-tip="ネットキャッシュ÷時価総額。1.0で会社をまるごと買える現金を保有、0.5で時価総額の半分が現金。大きいほど割安。">ネットキャッシュ比率</strong> = ネットキャッシュ ÷ 時価総額&nbsp;<span style="color:#64748b">[無次元]</span><br>
-      <strong style="color:#67e8f9" class="gloss" data-tip="Net Current Asset Value＝純流動資産価値。流動資産−総負債。投資有価証券の0.7補正をしない、ベンジャミン・グレアム(1934)の古典的で保守的な割安指標。">NCAV</strong> = 流動資産 − 総負債&nbsp;<span style="color:#64748b">[円]（グレアム1934・より保守的）</span> &nbsp;/&nbsp; <strong style="color:#67e8f9" class="gloss" data-tip="NCAV÷時価総額。大きいほど割安で、1.5以上が『ネットネット』水準。">NCAV比率</strong> = NCAV ÷ 時価総額<br>
-      <span style="color:#fcd34d">NC比率 ≥ 1.0</span>: 現金で買える&nbsp;|&nbsp;
-      <span style="color:#a7f3d0">NC比率 ≥ 0.5</span>: 半額バーゲン&nbsp;|&nbsp;
-      <span style="color:#67e8f9">NCAV比率 ≥ 1.5</span>: <span class="gloss" data-tip="時価総額がNCAV(純流動資産価値)の3分の2未満＝NCAV比率1.5以上の超割安株。グレアムが好んだ、解散価値を大きく下回る銘柄群。これがグレアムの『2/3ルール』。">グレアムのネットネット</span>（時価総額 &lt; NCAV×2/3）<br>
-      <span style="color:#f59e0b;font-size:11px">⚠ 投資有価証券の 0.7 倍は<span class="gloss" data-tip="保有株を売って利益が出ると約30%課税される。これを見込み、投資有価証券は簿価の0.7倍で保守的に評価する。">含み益課税</span>（約30%）を考慮した清原式の経験則。実態の換金価値は市況・銘柄構成で変動するため参考値です。</span><br>
-      <span style="color:#94a3b8;font-size:11px">ℹ 時価総額は<span class="gloss" data-tip="発行株式数を 純資産÷1株純資産(BPS) で概算した値。実測ではないため誤差が出ることがある。">推計株数</span>（純資産÷BPS）ベースの概算です。推計が壊れると比率が異常値になるため、<strong>NC比率の上限</strong>（<span class="gloss" data-tip="時価総額は推計値のため、計算が壊れると比率が異常な大きさ(数千倍など)になることがある。その異常値を自動で除外する安全装置(サニティ＝妥当性チェック)。既定はNC比率5.0超を除外。">データ品質ガード</span>）で自動除外します。一律の時価総額下限は設けず、小型バーゲンを取りこぼしません。</span>
+      <strong style="color:var(--val-up)" class="gloss" data-tip="すぐ換金できる資産から全負債を引いた、実質的な手元現金。流動資産＋投資有価証券×0.7−総負債で計算する清原達郎式の指標。">ネットキャッシュ</strong> = 流動資産 + 投資有価証券 × 0.7 − 総負債&nbsp;<span style="color:var(--text-muted)">[円]（清原式）</span><br>
+      <strong style="color:var(--val-up)" class="gloss" data-tip="ネットキャッシュ÷時価総額。1.0で会社をまるごと買える現金を保有、0.5で時価総額の半分が現金。大きいほど割安。">ネットキャッシュ比率</strong> = ネットキャッシュ ÷ 時価総額&nbsp;<span style="color:var(--text-muted)">[無次元]</span><br>
+      <strong style="color:var(--status-info-text)" class="gloss" data-tip="Net Current Asset Value＝純流動資産価値。流動資産−総負債。投資有価証券の0.7補正をしない、ベンジャミン・グレアム(1934)の古典的で保守的な割安指標。">NCAV</strong> = 流動資産 − 総負債&nbsp;<span style="color:var(--text-muted)">[円]（グレアム1934・より保守的）</span> &nbsp;/&nbsp; <strong style="color:var(--status-info-text)" class="gloss" data-tip="NCAV÷時価総額。大きいほど割安で、1.5以上が『ネットネット』水準。">NCAV比率</strong> = NCAV ÷ 時価総額<br>
+      <span style="color:var(--status-warn-text)">NC比率 ≥ 1.0</span>: 現金で買える&nbsp;|&nbsp;
+      <span style="color:var(--val-up-text)">NC比率 ≥ 0.5</span>: 半額バーゲン&nbsp;|&nbsp;
+      <span style="color:var(--status-info-text)">NCAV比率 ≥ 1.5</span>: <span class="gloss" data-tip="時価総額がNCAV(純流動資産価値)の3分の2未満＝NCAV比率1.5以上の超割安株。グレアムが好んだ、解散価値を大きく下回る銘柄群。これがグレアムの『2/3ルール』。">グレアムのネットネット</span>（時価総額 &lt; NCAV×2/3）<br>
+      <span style="color:var(--status-warn);font-size:11px">⚠ 投資有価証券の 0.7 倍は<span class="gloss" data-tip="保有株を売って利益が出ると約30%課税される。これを見込み、投資有価証券は簿価の0.7倍で保守的に評価する。">含み益課税</span>（約30%）を考慮した清原式の経験則。実態の換金価値は市況・銘柄構成で変動するため参考値です。</span><br>
+      <span style="color:var(--text-secondary);font-size:11px">ℹ 時価総額は<span class="gloss" data-tip="発行株式数を 純資産÷1株純資産(BPS) で概算した値。実測ではないため誤差が出ることがある。">推計株数</span>（純資産÷BPS）ベースの概算です。推計が壊れると比率が異常値になるため、<strong>NC比率の上限</strong>（<span class="gloss" data-tip="時価総額は推計値のため、計算が壊れると比率が異常な大きさ(数千倍など)になることがある。その異常値を自動で除外する安全装置(サニティ＝妥当性チェック)。既定はNC比率5.0超を除外。">データ品質ガード</span>）で自動除外します。一律の時価総額下限は設けず、小型バーゲンを取りこぼしません。</span>
     </div>
     <div id="params-form-net-cash"></div>
     <button class="btn btn-primary" id="btn-net-cash" data-click="runNetCash" style="margin-top:8px">
@@ -410,23 +444,23 @@ tr:hover td{background:#1e2235}
     <div class="grid4" style="margin-bottom:8px">
       <div class="stat-card">
         <div class="stat-label">現金で買える（NC比率 ≥ 1.0）</div>
-        <div class="stat-value" id="nc-stat-very-cheap" style="color:#fbbf24">-</div>
+        <div class="stat-value" id="nc-stat-very-cheap" style="color:var(--status-warn-text)">-</div>
       </div>
       <div class="stat-card">
         <div class="stat-label">半額バーゲン（NC比率 ≥ 0.5）</div>
-        <div class="stat-value" id="nc-stat-cheap" style="color:#86efac">-</div>
+        <div class="stat-value" id="nc-stat-cheap" style="color:var(--val-up-text)">-</div>
       </div>
       <div class="stat-card">
         <div class="stat-label"><span class="gloss" data-tip="時価総額がNCAV(純流動資産価値)の3分の2未満＝NCAV比率1.5以上の超割安株。グレアムが好んだ、解散価値を大きく下回る銘柄群（グレアムの2/3ルール）。">グレアム ネットネット</span>（NCAV比率 ≥ 1.5）</div>
-        <div class="stat-value" id="nc-stat-netnet" style="color:#67e8f9">-</div>
+        <div class="stat-value" id="nc-stat-netnet" style="color:var(--status-info-text)">-</div>
       </div>
       <div class="stat-card">
         <div class="stat-label">投資有価証券データ保有</div>
-        <div class="stat-value" id="nc-stat-inv-sec" style="color:#a78bfa">-</div>
+        <div class="stat-value" id="nc-stat-inv-sec" style="color:var(--accent-text)">-</div>
       </div>
     </div>
-    <div id="nc-excluded-note" style="margin-top:6px;font-size:11px;color:#f59e0b"></div>
-    <div id="nc-industry-summary" style="margin-top:6px;font-size:11px;color:#94a3b8"></div>
+    <div id="nc-excluded-note" style="margin-top:6px;font-size:11px;color:var(--status-warn)"></div>
+    <div id="nc-industry-summary" style="margin-top:6px;font-size:11px;color:var(--text-secondary)"></div>
   </div>
 
   <div class="card hidden" id="nc-results-card">
@@ -474,7 +508,7 @@ tr:hover td{background:#1e2235}
     </div>
     <div class="info-box" style="margin-bottom:14px">
       Nヶ月前の時点で確定していた財務データを使い、スコアリング上位N社のその後の実績株価リターンを検証します。<br>
-      株価履歴データが必要です（未収集の場合は先に<a href="/collection" style="color:#a78bfa">収集ページ</a>で株価履歴を収集してください）。
+      株価履歴データが必要です（未収集の場合は先に<a href="/collection" style="color:var(--accent-text)">収集ページ</a>で株価履歴を収集してください）。
     </div>
     <div class="grid4" style="margin-bottom:14px">
       <div class="form-group">
@@ -540,9 +574,9 @@ tr:hover td{background:#1e2235}
       <button class="btn btn-secondary btn-sm" data-click="exportCSV" data-arg="backtest">CSV出力</button>
     </div>
     <div class="grid4" style="margin-bottom:8px" id="bt-summary-grid"></div>
-    <div id="bt-percentile" style="margin-bottom:14px;padding:12px;background:#0f1117;border-radius:8px;border:1px solid #1e293b"></div>
+    <div id="bt-percentile" style="margin-bottom:14px;padding:12px;background:var(--bg-sunken);border-radius:8px;border:1px solid var(--border-subtle)"></div>
     <div class="info-box" id="bt-benchmark-box" style="margin-bottom:14px"></div>
-    <div id="bt-histogram" style="margin-bottom:14px;padding:12px;background:#0f1117;border-radius:8px;border:1px solid #1e293b"></div>
+    <div id="bt-histogram" style="margin-bottom:14px;padding:12px;background:var(--bg-sunken);border-radius:8px;border:1px solid var(--border-subtle)"></div>
     <div style="overflow-x:auto">
       <table>
         <thead>
@@ -565,7 +599,7 @@ tr:hover td{background:#1e2235}
 
   <div class="card hidden" id="bt-multi-card">
     <div class="section-title" style="margin-bottom:8px">マルチピリオド比較</div>
-    <div class="text-sm" style="color:#64748b;margin-bottom:12px">同じプリセット・上位N社で、3〜24ヶ月保有した場合のリターンを比較します。</div>
+    <div class="text-sm" style="color:var(--text-muted);margin-bottom:12px">同じプリセット・上位N社で、3〜24ヶ月保有した場合のリターンを比較します。</div>
     <div style="overflow-x:auto">
       <table>
         <thead>
@@ -596,7 +630,7 @@ tr:hover td{background:#1e2235}
         財務指標 × マクロ要因の交差項 OLS（前進 BIC）で1年先リターンを推定し、<br>
         R2（実現ボラ）・R1（予測不確実性）・R3（セクター×サイズ別のモデル信頼性）を<br>
         リスク軸として効率的フロンティアを描画します（横軸リスクで切替）。<br>
-        <span style="color:#f59e0b;font-size:11px">⚠ 予測値はモデルの推定値です。投資判断の参考値としてご利用ください。</span>
+        <span style="color:var(--status-warn);font-size:11px">⚠ 予測値はモデルの推定値です。投資判断の参考値としてご利用ください。</span>
       </div>
       <div id="params-form-macro_risk_return"></div>
       <button class="btn btn-primary" id="btn-mrr"
@@ -617,16 +651,16 @@ tr:hover td{background:#1e2235}
       </div>
       <div id="mrr-cv-content" class="hidden">
         <div class="grid3" style="margin-bottom:16px">
-          <div class="stat-card"><div class="stat-label">平均 R²（CV）</div><div class="stat-value" id="mrr-mean-r2" style="color:#a78bfa">-</div></div>
-          <div class="stat-card"><div class="stat-label">平均 RMSE（CV）</div><div class="stat-value" id="mrr-mean-rmse" style="color:#60a5fa;font-size:18px">-</div></div>
-          <div class="stat-card"><div class="stat-label">選択特徴量数</div><div class="stat-value" id="mrr-n-features" style="color:#10b981">-</div></div>
+          <div class="stat-card"><div class="stat-label">平均 R²（CV）</div><div class="stat-value" id="mrr-mean-r2" style="color:var(--accent-text)">-</div></div>
+          <div class="stat-card"><div class="stat-label">平均 RMSE（CV）</div><div class="stat-value" id="mrr-mean-rmse" style="color:var(--status-info);font-size:18px">-</div></div>
+          <div class="stat-card"><div class="stat-label">選択特徴量数</div><div class="stat-value" id="mrr-n-features" style="color:var(--val-up)">-</div></div>
         </div>
-        <div style="font-size:12px;color:#a78bfa;font-weight:600;margin-bottom:4px">選択された特徴量（BIC）</div>
-        <div id="mrr-features-list" style="font-size:12px;color:#94a3b8;margin-bottom:10px;word-break:break-all"></div>
-        <div style="font-size:12px;color:#a78bfa;font-weight:600;margin-bottom:4px">標準化係数（効いた向き・相対的な大きさ）
-          <span style="font-weight:400;color:#64748b">　※ CV R² は低く、符号と相対大小の目安。寄与度の過大解釈は禁物</span>
+        <div style="font-size:12px;color:var(--accent-text);font-weight:600;margin-bottom:4px">選択された特徴量（BIC）</div>
+        <div id="mrr-features-list" style="font-size:12px;color:var(--text-secondary);margin-bottom:10px;word-break:break-all"></div>
+        <div style="font-size:12px;color:var(--accent-text);font-weight:600;margin-bottom:4px">標準化係数（効いた向き・相対的な大きさ）
+          <span style="font-weight:400;color:var(--text-muted)">　※ CV R² は低く、符号と相対大小の目安。寄与度の過大解釈は禁物</span>
         </div>
-        <div id="mrr-coef-legend" style="font-size:11px;color:#94a3b8;display:flex;gap:14px;flex-wrap:wrap;margin-bottom:6px"></div>
+        <div id="mrr-coef-legend" style="font-size:11px;color:var(--text-secondary);display:flex;gap:14px;flex-wrap:wrap;margin-bottom:6px"></div>
         <div id="mrr-coef-bars" style="margin-bottom:12px"></div>
         <div class="section-title" style="font-size:13px">フォルド別 CV 詳細</div>
         <div style="overflow-x:auto">
@@ -644,7 +678,7 @@ tr:hover td{background:#1e2235}
       <div class="section-title" style="margin-bottom:0">リスク-リターン散布図
         <span class="tag tag-purple" style="margin-left:6px">効率的フロンティア</span>
       </div>
-      <div style="font-size:12px;color:#94a3b8;display:flex;gap:16px;align-items:center;flex-wrap:wrap">
+      <div style="font-size:12px;color:var(--text-secondary);display:flex;gap:16px;align-items:center;flex-wrap:wrap">
         <span>全社を描画・効用上位N社を強調（やや大・濃）</span>
         <span>横軸 = リスク / 縦軸 = μ_raw（モデル素の期待リターン）</span>
         <span>色の濃淡 = 効用 U（濃いほど高 U）</span>
@@ -667,7 +701,7 @@ tr:hover td{background:#1e2235}
     <div class="info-box" style="margin-bottom:14px">
       財務指標 × マクロ要因を <b>勾配ブースティング木（XGBoost）</b>で学習し、1年先リターンの非線形推定を行います。<br>
       同一特徴量の OLS ベースラインと Walk-Forward CV で比較し、特徴量寄与は mean|SHAP|（大きさのみ）で提示します。<br>
-      <span style="color:#f59e0b;font-size:11px">⚠ 計算が重いためローカル環境で実行してください（Render 環境では無効）。予測値はモデルの推定値で、投資判断の参考値です。</span>
+      <span style="color:var(--status-warn);font-size:11px">⚠ 計算が重いためローカル環境で実行してください（Render 環境では無効）。予測値はモデルの推定値で、投資判断の参考値です。</span>
     </div>
     <div id="params-form-macro_gbdt"></div>
     <button class="btn btn-primary" id="btn-mg"
@@ -694,7 +728,7 @@ tr:hover td{background:#1e2235}
     <div class="info-box" style="margin-bottom:14px">
       銘柄ごとに<b>週次リターン</b>を主要マクロの<b>週次変化</b>へ回帰し、係数（α/β）が時間変動する <b>動的線形モデル（DLM）</b> をカルマン型逐次ベイズ更新で推定します。<br>
       最新の潜在アルファ α を期待リターン µ̂ とし、マクロ感応度 β の時系列と<b>信用区間</b>を可視化します（M-1/M-2 が静的係数なのに対し、係数の時間変化そのものを捉えます）。<br>
-      <span style="color:#f59e0b;font-size:11px">⚠ 計算が重いためローカル環境で実行してください（Render 環境では無効）。µ̂ はモデルの推定値で、投資判断の参考値です。</span>
+      <span style="color:var(--status-warn);font-size:11px">⚠ 計算が重いためローカル環境で実行してください（Render 環境では無効）。µ̂ はモデルの推定値で、投資判断の参考値です。</span>
     </div>
     <div id="params-form-macro_dlm"></div>
     <button class="btn btn-primary" id="btn-mdlm"

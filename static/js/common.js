@@ -7,6 +7,49 @@ function esc(s) {
   return String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
+// ── テーマ（ライト/ダーク） ──────────────────────────────────────────
+// data-theme 属性の初期値は各テンプレート <head> 先頭のインラインスクリプトが
+// ペイント前に同期設定する（FOUC防止のため common.js より前に確定させる必要がある）。
+
+function currentTheme() {
+  return document.documentElement.dataset.theme === 'light' ? 'light' : 'dark';
+}
+
+function cssVar(name) {
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+}
+
+function applyThemeIcon() {
+  const btn = document.getElementById('theme-toggle');
+  if (btn) btn.textContent = currentTheme() === 'dark' ? '☀️' : '🌙';
+}
+
+function toggleTheme() {
+  const next = currentTheme() === 'dark' ? 'light' : 'dark';
+  document.documentElement.dataset.theme = next;
+  localStorage.setItem('theme', next);
+  applyThemeIcon();
+  if (typeof window.onThemeChange === 'function') window.onThemeChange();
+}
+
+function initTheme() {
+  applyThemeIcon();
+  document.getElementById('theme-toggle')?.addEventListener('click', toggleTheme);
+}
+initTheme();
+
+// ── 通知トースト ────────────────────────────────────────────────────
+
+function showNotif(msg, type = 'error') {
+  const el = document.createElement('div');
+  el.textContent = msg;
+  el.setAttribute('role', type === 'error' ? 'alert' : 'status');
+  el.setAttribute('aria-live', type === 'error' ? 'assertive' : 'polite');
+  el.className = `notif notif-${type}`;
+  document.body.appendChild(el);
+  setTimeout(() => el.remove(), 4000);
+}
+
 // ── 認証 ────────────────────────────────────────────────────────────
 
 function _getCookie(name) {

@@ -1,14 +1,3 @@
-function showNotif(msg, type='error'){
-  const el = document.createElement('div');
-  el.textContent = msg;
-  el.setAttribute('role', type==='error' ? 'alert' : 'status');
-  el.setAttribute('aria-live', type==='error' ? 'assertive' : 'polite');
-  const bg = type==='error' ? '#ef4444' : type==='success' ? '#10b981' : '#3b82f6';
-  el.style.cssText = `position:fixed;bottom:20px;right:20px;z-index:9999;padding:10px 16px;border-radius:6px;font-size:13px;color:#fff;max-width:420px;background:${bg};box-shadow:0 4px 12px rgba(0,0,0,.4)`;
-  document.body.appendChild(el);
-  setTimeout(()=>el.remove(), 4000);
-}
-
 function apiBase() { return ''; }
 
 
@@ -28,16 +17,16 @@ async function loadStats() {
       const behind = d.expected_latest_year - d.latest_year;
       const periodStr = d.latest_period_end ? `期末: ${d.latest_period_end}` : '';
       if (behind <= 0) {
-        yearEl.style.color = '#10b981';
-        yearMeta.innerHTML = `${periodStr}<br><span style="color:#86efac">✓ 最新年度を取得済み</span>`;
+        yearEl.style.color = cssVar('--status-good');
+        yearMeta.innerHTML = `${periodStr}<br><span style="color:${cssVar('--status-good-text')}">✓ 最新年度を取得済み</span>`;
         yearCard.classList.remove('warn','alert');
       } else if (behind === 1) {
-        yearEl.style.color = '#fcd34d';
-        yearMeta.innerHTML = `${periodStr}<br><span style="color:#fcd34d">期待: ${d.expected_latest_year}（${behind}年遅れ）</span>`;
+        yearEl.style.color = cssVar('--status-warn-text');
+        yearMeta.innerHTML = `${periodStr}<br><span style="color:${cssVar('--status-warn-text')}">期待: ${d.expected_latest_year}（${behind}年遅れ）</span>`;
         yearCard.classList.add('warn'); yearCard.classList.remove('alert');
       } else {
-        yearEl.style.color = '#fca5a5';
-        yearMeta.innerHTML = `${periodStr}<br><span style="color:#fca5a5">期待: ${d.expected_latest_year}（${behind}年遅れ）</span>`;
+        yearEl.style.color = cssVar('--status-bad-text');
+        yearMeta.innerHTML = `${periodStr}<br><span style="color:${cssVar('--status-bad-text')}">期待: ${d.expected_latest_year}（${behind}年遅れ）</span>`;
         yearCard.classList.add('alert'); yearCard.classList.remove('warn');
       }
     } else {
@@ -46,11 +35,11 @@ async function loadStats() {
 
     // データ鮮度カード
     const FRESH_LABELS = {
-      fresh:    {text: '最新',     cls: 'fr-fresh',    color: '#86efac'},
-      ok:       {text: '良好',     cls: 'fr-ok',       color: '#93c5fd'},
-      stale:    {text: 'やや古い', cls: 'fr-stale',    color: '#fcd34d'},
-      outdated: {text: '古い',     cls: 'fr-outdated', color: '#fca5a5'},
-      empty:    {text: 'データなし', cls: 'fr-empty',  color: '#64748b'},
+      fresh:    {text: '最新',     cls: 'fr-fresh',    color: cssVar('--status-good-text')},
+      ok:       {text: '良好',     cls: 'fr-ok',       color: cssVar('--status-info-text')},
+      stale:    {text: 'やや古い', cls: 'fr-stale',    color: cssVar('--status-warn-text')},
+      outdated: {text: '古い',     cls: 'fr-outdated', color: cssVar('--status-bad-text')},
+      empty:    {text: 'データなし', cls: 'fr-empty',  color: cssVar('--text-muted')},
     };
     const f = FRESH_LABELS[d.freshness] || FRESH_LABELS.empty;
     const freshDaysEl  = document.getElementById('stat-fresh-days');
@@ -99,5 +88,6 @@ async function loadStats() {
 
 
 
+window.onThemeChange = loadStats;
 initAuth();
 loadStats();

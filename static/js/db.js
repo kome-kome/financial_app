@@ -71,12 +71,12 @@ async function loadRelations(){
       <div class="er-relations-list">
         ${d.relations.map(r => `
           <div class="er-relation-row">
-            <strong style="color:#86efac">${esc(r.from_table)}.${esc(r.from_column)}</strong>
-            → <strong style="color:#fcd34d">${esc(r.to_table)}.${esc(r.to_column)}</strong>
-            <span style="color:#64748b;margin-left:8px">[${esc(r.label)}]</span>
+            <strong style="color:${cssVar('--status-good-text')}">${esc(r.from_table)}.${esc(r.from_column)}</strong>
+            → <strong style="color:${cssVar('--status-warn-text')}">${esc(r.to_table)}.${esc(r.to_column)}</strong>
+            <span style="color:${cssVar('--text-muted')};margin-left:8px">[${esc(r.label)}]</span>
           </div>
         `).join('')}
-        <div style="color:#64748b;font-size:11px;margin-top:6px;padding-left:10px">
+        <div style="color:${cssVar('--text-muted')};font-size:11px;margin-top:6px;padding-left:10px">
           ※ collection_logs は他テーブルと直接リレーションを持たない独立テーブル
         </div>
       </div>
@@ -93,14 +93,14 @@ function renderEntity(t, highlight, full){
   const more = t.columns.length - shownCols.length;
   const pkSet = new Set(t.pk);
   return `
-    <div class="er-entity" style="${highlight?'border-color:#a78bfa;background:#1e1b3a':''}">
+    <div class="er-entity" style="${highlight?`border-color:${cssVar('--accent-text')};background:${cssVar('--accent-soft-bg')}`:''}">
       <div class="er-entity-name">${esc(t.name)}</div>
       ${shownCols.map(c => `
         <div class="er-entity-col ${pkSet.has(c)?'pk':(c==='edinet_code'?'fk':'')}">
           ${pkSet.has(c)?'🔑 ':''}${c==='edinet_code'&&!pkSet.has(c)?'🔗 ':''}${esc(c)}
         </div>
       `).join('')}
-      ${more > 0 ? `<div class="er-entity-col" style="color:#475569">... 他 ${more} カラム</div>` : ''}
+      ${more > 0 ? `<div class="er-entity-col" style="color:${cssVar('--text-muted')}">... 他 ${more} カラム</div>` : ''}
     </div>
   `;
 }
@@ -139,7 +139,7 @@ async function loadSchema(name){
     });
 
     el.innerHTML = `
-      <div style="margin-bottom:10px;font-size:12px;color:#64748b">
+      <div style="margin-bottom:10px;font-size:12px;color:${cssVar('--text-muted')}">
         全 ${d.row_count.toLocaleString()} 行 / ${d.columns.length} カラム
       </div>
       <div style="overflow-x:auto">
@@ -253,7 +253,7 @@ async function loadStats(name){
     const d = await apiFetch(`/api/db/stats/${name}`);
     if(!d) return;
     el.innerHTML = `
-      <div style="margin-bottom:10px;font-size:12px;color:#64748b">
+      <div style="margin-bottom:10px;font-size:12px;color:${cssVar('--text-muted')}">
         全 ${d.row_count.toLocaleString()} 行を対象に集計
       </div>
       <div style="overflow-x:auto">
@@ -276,7 +276,7 @@ async function loadStats(name){
               return `
                 <tr>
                   <td class="col-name-cell">${esc(s.name)}</td>
-                  <td style="text-align:left;color:#93c5fd">${esc(s.type)}</td>
+                  <td style="text-align:left;color:${cssVar('--status-info-text')}">${esc(s.type)}</td>
                   <td>${s.distinct!==undefined && s.distinct!==null ? s.distinct.toLocaleString()+' uniq' : '—'}</td>
                   <td class="text-type" colspan="5">（非数値カラム）</td>
                 </tr>
@@ -285,7 +285,7 @@ async function loadStats(name){
             return `
               <tr>
                 <td class="col-name-cell">${esc(s.name)}</td>
-                <td style="text-align:left;color:#93c5fd">${esc(s.type)}</td>
+                <td style="text-align:left;color:${cssVar('--status-info-text')}">${esc(s.type)}</td>
                 <td>${s.count!==undefined ? s.count.toLocaleString() : '—'}</td>
                 <td>${s.min!==undefined && s.min!==null ? fmt(s.min) : '—'}</td>
                 <td>${s.avg!==undefined && s.avg!==null ? fmt(s.avg) : '—'}</td>
@@ -438,3 +438,12 @@ document.getElementById('drill-code').addEventListener('keypress', e => {
   loadTables();
   loadRelations();
 })();
+
+// テーマ切替時、cssVar() で色を焼き込み済みの動的DOM（リレーション図・スキーマ・統計）を再描画する。
+window.onThemeChange = function(){
+  loadRelations();
+  if(state.selectedTable){
+    loadSchema(state.selectedTable);
+    loadStats(state.selectedTable);
+  }
+};

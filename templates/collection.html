@@ -4,23 +4,56 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>収集 &amp; スクリーニング</title>
+<script src="/static/js/theme-init.js"></script>
 <style>
+:root{
+  --bg:#0f1117;--bg-elevated:#1a1d2e;--bg-sunken:#0f1117;--bg-hover:#1e293b;
+  --border:#2d3154;--border-muted:#334155;--border-subtle:#1e2235;
+  --text:#e2e8f0;--text-secondary:#94a3b8;--text-muted:#64748b;--text-body:#cbd5e1;
+  --accent:#7c3aed;--accent-hover:#6d28d9;--accent-text:#a78bfa;
+  --accent-soft-bg:#312e81;--accent-soft-text:#c4b5fd;--accent-deep-bg:#2e1065;
+  --status-good:#10b981;--status-good-bg:#052e16;--status-good-text:#86efac;
+  --status-bad:#ef4444;--status-bad-bg:#450a0a;--status-bad-text:#fca5a5;
+  --status-warn:#f59e0b;--status-warn-bg:#451a03;--status-warn-text:#fcd34d;
+  --status-info:#60a5fa;--status-info-bg:#1e3a5f;--status-info-text:#93c5fd;
+  --val-up:#3b82f6;--val-up-bg:#1e3a5f;--val-up-text:#93c5fd;
+  --val-down:#ef4444;--val-down-bg:#450a0a;--val-down-text:#fca5a5;
+  --val-neutral:#10b981;--val-neutral-bg:#052e16;--val-neutral-text:#86efac;
+  --shadow-color:rgba(0,0,0,.4);
+}
+:root[data-theme="light"]{
+  --bg:#f8fafc;--bg-elevated:#ffffff;--bg-sunken:#f1f5f9;--bg-hover:#e2e8f0;
+  --border:#e2e8f0;--border-muted:#cbd5e1;--border-subtle:#e5e7eb;
+  --text:#0f172a;--text-secondary:#475569;--text-muted:#94a3b8;--text-body:#334155;
+  --accent:#7c3aed;--accent-hover:#6d28d9;--accent-text:#6d28d9;
+  --accent-soft-bg:#ede9fe;--accent-soft-text:#6d28d9;--accent-deep-bg:#ddd6fe;
+  --status-good:#059669;--status-good-bg:#d1fae5;--status-good-text:#065f46;
+  --status-bad:#dc2626;--status-bad-bg:#fee2e2;--status-bad-text:#991b1b;
+  --status-warn:#d97706;--status-warn-bg:#fef3c7;--status-warn-text:#92400e;
+  --status-info:#2563eb;--status-info-bg:#dbeafe;--status-info-text:#1e40af;
+  --val-up:#2563eb;--val-up-bg:#dbeafe;--val-up-text:#1e40af;
+  --val-down:#dc2626;--val-down-bg:#fee2e2;--val-down-text:#991b1b;
+  --val-neutral:#059669;--val-neutral-bg:#d1fae5;--val-neutral-text:#065f46;
+  --shadow-color:rgba(0,0,0,.12);
+}
 *{box-sizing:border-box;margin:0;padding:0}
-body{font-family:'Segoe UI',sans-serif;background:#0f1117;color:#e2e8f0;min-height:100vh}
-.header{background:#1a1d2e;border-bottom:1px solid #2d3154;padding:14px 24px;display:flex;align-items:center;gap:14px}
-.header h1{font-size:17px;font-weight:600;color:#a78bfa}
-.badge{background:#312e81;color:#c4b5fd;font-size:11px;padding:3px 8px;border-radius:12px}
-.api-url-bar{background:#0f1117;border:1px solid #334155;border-radius:6px;padding:5px 10px;font-size:12px;color:#94a3b8;margin-left:auto;display:flex;align-items:center;gap:8px}
-.api-url-bar input{background:none;border:none;color:#67e8f9;font-size:12px;width:220px;outline:none}
+body{font-family:'Segoe UI',sans-serif;background:var(--bg);color:var(--text);min-height:100vh}
+.header{background:var(--bg-elevated);border-bottom:1px solid var(--border);padding:14px 24px;display:flex;align-items:center;gap:14px}
+.header h1{font-size:17px;font-weight:600;color:var(--accent-text)}
+.badge{background:var(--accent-soft-bg);color:var(--accent-soft-text);font-size:11px;padding:3px 8px;border-radius:12px}
+.theme-toggle-btn{background:transparent;border:1px solid var(--border-muted);color:var(--text);border-radius:6px;width:30px;height:30px;font-size:14px;cursor:pointer;display:flex;align-items:center;justify-content:center;flex-shrink:0}
+.theme-toggle-btn:hover{background:var(--bg-hover)}
+.api-url-bar{background:var(--bg-sunken);border:1px solid var(--border-muted);border-radius:6px;padding:5px 10px;font-size:12px;color:var(--text-secondary);margin-left:auto;display:flex;align-items:center;gap:8px}
+.api-url-bar input{background:none;border:none;color:var(--status-info-text);font-size:12px;width:220px;outline:none}
 .dot{width:8px;height:8px;border-radius:50%;display:inline-block}
-.dot-green{background:#10b981}.dot-red{background:#ef4444}.dot-yellow{background:#f59e0b}
-.nav{display:flex;border-bottom:1px solid #2d3154;background:#1a1d2e;padding:0 24px}
-.nav-btn{padding:11px 18px;font-size:13px;color:#94a3b8;background:none;border:none;border-bottom:2px solid transparent;cursor:pointer;transition:all .2s}
-.nav-btn.active{color:#a78bfa;border-bottom-color:#a78bfa}
-.nav-link{padding:11px 18px;font-size:13px;color:#a78bfa;text-decoration:none;display:inline-flex;align-items:center;gap:5px;margin-left:auto;transition:color .2s}
-.nav-link:hover{color:#c4b5fd}
+.dot-green{background:var(--status-good)}.dot-red{background:var(--status-bad)}.dot-yellow{background:var(--status-warn)}
+.nav{display:flex;border-bottom:1px solid var(--border);background:var(--bg-elevated);padding:0 24px}
+.nav-btn{padding:11px 18px;font-size:13px;color:var(--text-secondary);background:none;border:none;border-bottom:2px solid transparent;cursor:pointer;transition:all .2s}
+.nav-btn.active{color:var(--accent-text);border-bottom-color:var(--accent-text)}
+.nav-link{padding:11px 18px;font-size:13px;color:var(--accent-text);text-decoration:none;display:inline-flex;align-items:center;gap:5px;margin-left:auto;transition:color .2s}
+.nav-link:hover{color:var(--accent-soft-text)}
 .container{padding:20px;max-width:1200px;margin:0 auto}
-.card{background:#1a1d2e;border:1px solid #2d3154;border-radius:10px;padding:16px;margin-bottom:16px}
+.card{background:var(--bg-elevated);border:1px solid var(--border);border-radius:10px;padding:16px;margin-bottom:16px}
 .grid4{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:16px}
 .grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px}
 @media (max-width: 768px){
@@ -32,74 +65,75 @@ body{font-family:'Segoe UI',sans-serif;background:#0f1117;color:#e2e8f0;min-heig
   .grid2{grid-template-columns:1fr}
   .card{padding:12px}
 }
-.card-title{font-size:11px;color:#64748b;margin-bottom:6px;text-transform:uppercase;letter-spacing:.5px}
+.card-title{font-size:11px;color:var(--text-muted);margin-bottom:6px;text-transform:uppercase;letter-spacing:.5px}
 .card-value{font-size:22px;font-weight:700}
-.section-title{font-size:14px;font-weight:600;color:#a78bfa;margin-bottom:12px}
+.section-title{font-size:14px;font-weight:600;color:var(--accent-text);margin-bottom:12px}
 .btn{padding:8px 16px;border-radius:6px;border:none;font-size:13px;cursor:pointer;display:inline-flex;align-items:center;gap:5px;transition:all .15s}
-.btn-primary{background:#7c3aed;color:#fff}.btn-primary:hover{background:#6d28d9}
-.btn-secondary{background:#1e293b;color:#94a3b8;border:1px solid #334155}.btn-secondary:hover{background:#334155;color:#e2e8f0}
-.btn-danger{background:#7f1d1d;color:#fca5a5}
+.btn-primary{background:var(--accent);color:#fff}.btn-primary:hover{background:var(--accent-hover)}
+.btn-secondary{background:var(--bg-hover);color:var(--text-secondary);border:1px solid var(--border-muted)}.btn-secondary:hover{background:var(--border-muted);color:var(--text)}
+.btn-danger{background:var(--status-bad-bg);color:var(--status-bad-text)}
 .btn-sm{padding:5px 10px;font-size:12px}
-input,select{background:#0f1117;border:1px solid #334155;border-radius:6px;color:#e2e8f0;padding:8px 12px;font-size:13px;width:100%}
-input:focus,select:focus{outline:none;border-color:#7c3aed}
-label{font-size:12px;color:#94a3b8;display:block;margin-bottom:4px}
+input,select{background:var(--bg-sunken);border:1px solid var(--border-muted);border-radius:6px;color:var(--text);padding:8px 12px;font-size:13px;width:100%}
+input:focus,select:focus{outline:none;border-color:var(--accent)}
+label{font-size:12px;color:var(--text-secondary);display:block;margin-bottom:4px}
 .form-group{margin-bottom:12px}
 table{width:100%;border-collapse:collapse;font-size:12px}
-th{text-align:left;padding:9px 10px;color:#64748b;font-weight:500;border-bottom:1px solid #2d3154;background:#141722}
+th{text-align:left;padding:9px 10px;color:var(--text-muted);font-weight:500;border-bottom:1px solid var(--border);background:var(--bg-sunken)}
 th.sortable{cursor:pointer;user-select:none}
-th.sortable:hover{color:#a78bfa}
-td{padding:9px 10px;border-bottom:1px solid #1e2235}
-tr:hover td{background:#1e2235}
+th.sortable:hover{color:var(--accent-text)}
+td{padding:9px 10px;border-bottom:1px solid var(--border-subtle)}
+tr:hover td{background:var(--border-subtle)}
 .tag{display:inline-block;padding:2px 7px;border-radius:10px;font-size:10px;font-weight:500}
-.tag-blue{background:#1e3a5f;color:#93c5fd}
-.tag-green{background:#052e16;color:#86efac}
-.tag-red{background:#450a0a;color:#fca5a5}
-.tag-amber{background:#451a03;color:#fcd34d}
-.tag-purple{background:#2e1065;color:#c4b5fd}
-.log-box{background:#0a0c14;border:1px solid #1e2235;border-radius:8px;padding:12px;height:200px;overflow-y:auto;font-family:monospace;font-size:11px}
-.log-entry{padding:1px 0;color:#94a3b8}
-.log-entry.success{color:#10b981}.log-entry.error{color:#ef4444}.log-entry.info{color:#60a5fa}.log-entry.warn{color:#f59e0b}
+.tag-blue{background:var(--status-info-bg);color:var(--status-info-text)}
+.tag-green{background:var(--status-good-bg);color:var(--status-good-text)}
+.tag-red{background:var(--status-bad-bg);color:var(--status-bad-text)}
+.tag-amber{background:var(--status-warn-bg);color:var(--status-warn-text)}
+.tag-purple{background:var(--accent-deep-bg);color:var(--accent-soft-text)}
+.log-box{background:var(--bg-sunken);border:1px solid var(--border-subtle);border-radius:8px;padding:12px;height:200px;overflow-y:auto;font-family:monospace;font-size:11px}
+.log-entry{padding:1px 0;color:var(--text-secondary)}
+.log-entry.success{color:var(--status-good)}.log-entry.error{color:var(--status-bad)}.log-entry.info{color:var(--status-info)}.log-entry.warn{color:var(--status-warn)}
 .progress-wrap{margin-top:10px}
-.progress-bar{height:6px;background:#1e293b;border-radius:3px;overflow:hidden}
-.progress-fill{height:100%;background:linear-gradient(90deg,#7c3aed,#a78bfa);border-radius:3px;transition:width .4s}
+.progress-bar{height:6px;background:var(--bg-hover);border-radius:3px;overflow:hidden}
+.progress-fill{height:100%;background:linear-gradient(90deg,var(--accent),var(--accent-text));border-radius:3px;transition:width .4s}
 .hidden{display:none}
 .flex{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
 .flex-between{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px}
-.text-sm{font-size:12px;color:#64748b}
-.text-green{color:#10b981}.text-red{color:#ef4444}.text-amber{color:#f59e0b}
+.text-sm{font-size:12px;color:var(--text-muted)}
+.text-green{color:var(--val-up)}.text-red{color:var(--val-down)}.text-amber{color:var(--status-warn)}
 .score-bar{display:flex;align-items:center;gap:6px}
-.score-track{flex:1;height:5px;background:#1e293b;border-radius:3px;overflow:hidden}
+.score-track{flex:1;height:5px;background:var(--bg-hover);border-radius:3px;overflow:hidden}
 .score-fill{height:100%;border-radius:3px}
-.spinner{width:16px;height:16px;border:2px solid #334155;border-top-color:#a78bfa;border-radius:50%;animation:spin .7s linear infinite;display:inline-block}
+.spinner{width:16px;height:16px;border:2px solid var(--border-muted);border-top-color:var(--accent-text);border-radius:50%;animation:spin .7s linear infinite;display:inline-block}
 @keyframes spin{to{transform:rotate(360deg)}}
 .modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:100;display:flex;align-items:center;justify-content:center}
-.modal{background:#1a1d2e;border:1px solid #2d3154;border-radius:12px;padding:24px;width:520px;max-width:95vw;max-height:90vh;overflow-y:auto}
+.modal{background:var(--bg-elevated);border:1px solid var(--border);border-radius:12px;padding:24px;width:520px;max-width:95vw;max-height:90vh;overflow-y:auto}
 .btn:disabled{opacity:.4;cursor:not-allowed}
-.co-link{color:#a78bfa;text-decoration:none}
+.co-link{color:var(--accent-text);text-decoration:none}
 .co-link:hover{text-decoration:underline}
-.gnav{display:flex;align-items:center;gap:2px;background:#13162a;border-bottom:1px solid #2d3154;padding:0 24px;flex-wrap:wrap}
-.gnav-link{padding:10px 14px;font-size:13px;color:#94a3b8;text-decoration:none;border-bottom:2px solid transparent;transition:color .15s,border-color .15s}
-.gnav-link:hover{color:#e2e8f0}
-.gnav-link.active{color:#fff;border-bottom-color:#7c3aed}
-.gnav-ref{color:#64748b}
+.gnav{display:flex;align-items:center;gap:2px;background:var(--bg-elevated);border-bottom:1px solid var(--border);padding:0 24px;flex-wrap:wrap}
+.gnav-link{padding:10px 14px;font-size:13px;color:var(--text-secondary);text-decoration:none;border-bottom:2px solid transparent;transition:color .15s,border-color .15s}
+.gnav-link:hover{color:var(--text)}
+.gnav-link.active{color:var(--text);border-bottom-color:var(--accent)}
+.gnav-ref{color:var(--text-muted)}
 .gnav-spacer{margin-left:auto}
 </style>
 </head>
 <body>
 
 <div class="header">
-  <div style="width:30px;height:30px;background:#312e81;border-radius:8px;display:flex;align-items:center;justify-content:center">
-    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#a78bfa" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M9 21V9"/></svg>
+  <div style="width:30px;height:30px;background:var(--accent-soft-bg);border-radius:8px;display:flex;align-items:center;justify-content:center">
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--accent-text)" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M9 21V9"/></svg>
   </div>
   <h1>収集 &amp; スクリーニング</h1>
   <span class="badge">収集</span>
   <div class="api-url-bar">
-    <span class="dot" id="api-dot" style="background:#f59e0b"></span>
+    <span class="dot" id="api-dot" style="background:var(--status-warn)"></span>
     <span style="font-size:11px">API:</span>
     <input type="text" id="api-base" value="" placeholder="http://localhost:8000">
-    <button class="btn btn-sm" style="padding:3px 8px;background:#1e293b;border:1px solid #334155;color:#94a3b8;border-radius:4px" data-click="checkApi">接続確認</button>
+    <button class="btn btn-sm" style="padding:3px 8px;background:var(--bg-hover);border:1px solid var(--border-muted);color:var(--text-secondary);border-radius:4px" data-click="checkApi">接続確認</button>
   </div>
-  <button id="logout-btn" data-click="logout" style="display:none;margin-left:8px;padding:5px 12px;background:transparent;border:1px solid #4a5568;border-radius:4px;color:#94a3b8;font-size:12px;cursor:pointer">ログアウト</button>
+  <button id="theme-toggle" class="theme-toggle-btn" title="ライト/ダーク切替" aria-label="テーマ切替">🌙</button>
+  <button id="logout-btn" data-click="logout" style="display:none;margin-left:8px;padding:5px 12px;background:transparent;border:1px solid var(--border-muted);border-radius:4px;color:var(--text-secondary);font-size:12px;cursor:pointer">ログアウト</button>
 </div>
 
 <nav class="gnav">
@@ -108,8 +142,8 @@ tr:hover td{background:#1e2235}
   <a href="/company" class="gnav-link">企業詳細</a>
   <a href="/collection" class="gnav-link active">収集</a>
   <span class="gnav-spacer"></span>
-  <a href="/guide" class="gnav-link gnav-ref" style="color:#34d399">やさしい解説</a>
-  <a href="/models" class="gnav-link gnav-ref" style="color:#a78bfa">モデル解説</a>
+  <a href="/guide" class="gnav-link gnav-ref" style="color:var(--val-up)">やさしい解説</a>
+  <a href="/models" class="gnav-link gnav-ref" style="color:var(--accent-text)">モデル解説</a>
 </nav>
 
 <div class="nav">
@@ -122,7 +156,7 @@ tr:hover td{background:#1e2235}
 <div class="container">
 
 <!-- 軽量モードバナー（Render環境時のみ表示） -->
-<div id="light-mode-banner" style="display:none;background:#2d2100;border:1px solid #78350f;border-radius:8px;padding:10px 16px;margin-bottom:16px;font-size:13px;color:#fcd34d">
+<div id="light-mode-banner" style="display:none;background:var(--status-warn-bg);border:1px solid var(--status-warn);border-radius:8px;padding:10px 16px;margin-bottom:16px;font-size:13px;color:var(--status-warn-text)">
   ⚠️ <strong>Render 環境（軽量モード）</strong>: 全件収集・株価履歴再構築・J-Quants 収集はローカル PC から実行してください。差分収集・市場データ更新・分析は通常どおり利用できます。
 </div>
 
@@ -130,34 +164,34 @@ tr:hover td{background:#1e2235}
 <div id="tab-collect">
   <!-- サマリーカード -->
   <div class="grid4">
-    <div class="card"><div class="card-title">DB企業数</div><div class="card-value" id="s-companies" style="color:#a78bfa">-</div></div>
-    <div class="card"><div class="card-title">財務レコード</div><div class="card-value" id="s-records" style="color:#38bdf8">-</div></div>
+    <div class="card"><div class="card-title">DB企業数</div><div class="card-value" id="s-companies" style="color:var(--accent-text)">-</div></div>
+    <div class="card"><div class="card-title">財務レコード</div><div class="card-value" id="s-records" style="color:var(--status-info)">-</div></div>
     <div class="card"><div class="card-title">最終年度</div><div class="card-value" id="s-year" style="font-size:18px">-</div></div>
-    <div class="card"><div class="card-title">API接続</div><div class="card-value" id="s-api" style="font-size:14px;color:#f59e0b">未確認</div></div>
+    <div class="card"><div class="card-title">API接続</div><div class="card-value" id="s-api" style="font-size:14px;color:var(--status-warn)">未確認</div></div>
   </div>
 
   <!-- 差分収集（手動実行） -->
-  <div class="card" style="border-color:#1e3a5f">
+  <div class="card" style="border-color:var(--status-info-bg)">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
       <div class="section-title" style="margin-bottom:0">差分収集（手動実行）</div>
       <button class="btn btn-primary btn-sm" data-click="runNow">今すぐ実行</button>
     </div>
-    <div style="font-size:12px;color:#64748b;line-height:1.6">
+    <div style="font-size:12px;color:var(--text-muted);line-height:1.6">
       過去1年・収集済みスキップ＋成長率/Zスコア＋市場・マクロデータを一括更新します。<br>
-      <span style="color:#38bdf8">🔄 自動収集は GitHub Actions（毎日 03:00 JST）で実行されます。</span>
+      <span style="color:var(--status-info)">🔄 自動収集は GitHub Actions（毎日 03:00 JST）で実行されます。</span>
     </div>
   </div>
 
   <!-- スマート収集（推奨） -->
-  <div class="card" style="border-color:#7c3aed;margin-bottom:16px">
+  <div class="card" style="border-color:var(--accent);margin-bottom:16px">
     <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px">
-      <div class="section-title" style="margin-bottom:0;color:#a78bfa">スマート収集</div>
-      <span style="font-size:11px;background:#2e1065;color:#c4b5fd;padding:2px 8px;border-radius:10px;font-weight:500">推奨</span>
+      <div class="section-title" style="margin-bottom:0;color:var(--accent-text)">スマート収集</div>
+      <span style="font-size:11px;background:var(--accent-deep-bg);color:var(--accent-soft-text);padding:2px 8px;border-radius:10px;font-weight:500">推奨</span>
     </div>
-    <div style="background:#130d24;border-radius:8px;padding:10px 12px;font-size:12px;color:#c4b5fd;border-left:3px solid #7c3aed;margin-bottom:14px">
+    <div style="background:var(--accent-deep-bg);border-radius:8px;padding:10px 12px;font-size:12px;color:var(--accent-soft-text);border-left:3px solid var(--accent);margin-bottom:14px">
       DB状態を自動判定し、初回は200社ずつ分割収集（チャンク収集）、全社収集完了後は差分収集に切り替えます。<br>
-      <span style="color:#64748b">Render無料プラン（512MB）でも安全に動作します。ボタンを繰り返しクリックするだけで全社収集が完了します。</span><br>
-      <span style="color:#64748b">EDINETに保管されている過去5年分が取得可能な最大範囲です。最新の有価証券報告書（直近の決算）も含まれます。</span>
+      <span style="color:var(--text-muted)">Render無料プラン（512MB）でも安全に動作します。ボタンを繰り返しクリックするだけで全社収集が完了します。</span><br>
+      <span style="color:var(--text-muted)">EDINETに保管されている過去5年分が取得可能な最大範囲です。最新の有価証券報告書（直近の決算）も含まれます。</span>
     </div>
     <div class="form-group" style="max-width:240px;margin-bottom:12px">
       <label>遡及年数</label>
@@ -167,13 +201,13 @@ tr:hover td{background:#1e2235}
         <option value="5" selected>5年（EDINET上限・推奨）</option>
       </select>
     </div>
-    <div id="smart-mode-badge" style="display:none;font-size:12px;margin-bottom:10px;padding:4px 10px;border-radius:6px;background:#1e293b"></div>
+    <div id="smart-mode-badge" style="display:none;font-size:12px;margin-bottom:10px;padding:4px 10px;border-radius:6px;background:var(--bg-hover)"></div>
     <div class="flex" style="margin-bottom:12px">
-      <button class="btn btn-primary" id="btn-smart" data-click="startSmartCollection" style="background:#6d28d9;border:1px solid #7c3aed">
+      <button class="btn btn-primary" id="btn-smart" data-click="startSmartCollection" style="background:var(--accent-hover);border:1px solid var(--accent)">
         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M4.22 4.22l2.12 2.12M17.66 17.66l2.12 2.12M2 12h3M19 12h3M4.22 19.78l2.12-2.12M17.66 6.34l2.12-2.12"/></svg>
         スマート収集を実行
       </button>
-      <button class="btn btn-secondary btn-sm" id="btn-smart-stop" data-click="stopCollection" style="display:none;border-color:#ef4444;color:#ef4444">
+      <button class="btn btn-secondary btn-sm" id="btn-smart-stop" data-click="stopCollection" style="display:none;border-color:var(--status-bad);color:var(--status-bad)">
         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/></svg>
         停止
       </button>
@@ -183,23 +217,23 @@ tr:hover td{background:#1e2235}
         <span class="spinner"></span>
         <span class="text-sm" id="smart-progress-label">判定中...</span>
       </div>
-      <div class="progress-bar" role="progressbar" aria-valuemin="0" aria-valuemax="100"><div class="progress-fill" id="smart-progress-fill" style="width:0%;background:linear-gradient(90deg,#6d28d9,#a78bfa)"></div></div>
+      <div class="progress-bar" role="progressbar" aria-valuemin="0" aria-valuemax="100"><div class="progress-fill" id="smart-progress-fill" style="width:0%;background:linear-gradient(90deg,var(--accent-hover),var(--accent-text))"></div></div>
     </div>
   </div>
 
   <!-- 差分収集 / 全件収集（詳細設定） -->
   <details style="margin-bottom:16px">
-    <summary style="cursor:pointer;padding:10px 16px;background:#141722;border:1px solid #1e293b;border-radius:8px;font-size:13px;color:#475569;list-style:none;display:flex;align-items:center;gap:8px">
+    <summary style="cursor:pointer;padding:10px 16px;background:var(--bg-sunken);border:1px solid var(--bg-hover);border-radius:8px;font-size:13px;color:var(--text-secondary);list-style:none;display:flex;align-items:center;gap:8px">
       <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
       詳細設定（差分収集 / 全件収集）
-      <span style="font-size:11px;background:#1e293b;color:#475569;padding:2px 8px;border-radius:10px;margin-left:4px">上級者向け</span>
+      <span style="font-size:11px;background:var(--bg-hover);color:var(--text-secondary);padding:2px 8px;border-radius:10px;margin-left:4px">上級者向け</span>
     </summary>
     <div style="padding-top:12px">
   <div class="grid2">
     <!-- 差分収集 -->
-    <div class="card" style="border-color:#1e3a5f">
+    <div class="card" style="border-color:var(--status-info-bg)">
       <div class="section-title">差分収集</div>
-      <div style="background:#0d1829;border-radius:8px;padding:10px 12px;font-size:12px;color:#93c5fd;border-left:3px solid #3b82f6;margin-bottom:14px">
+      <div style="background:var(--status-info-bg);border-radius:8px;padding:10px 12px;font-size:12px;color:var(--status-info-text);border-left:3px solid var(--status-info);margin-bottom:14px">
         過去1年分のEDINET書類のうち、まだ取り込んでいないものだけを取得します。定期実行に最適です。
       </div>
       <div class="flex" style="margin-bottom:12px">
@@ -207,7 +241,7 @@ tr:hover td{background:#1e2235}
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 11-2.12-9.36L23 10"/></svg>
           差分収集を実行
         </button>
-        <button class="btn btn-secondary btn-sm" id="btn-stop" data-click="stopCollection" style="display:none;border-color:#ef4444;color:#ef4444">
+        <button class="btn btn-secondary btn-sm" id="btn-stop" data-click="stopCollection" style="display:none;border-color:var(--status-bad);color:var(--status-bad)">
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/></svg>
           停止
         </button>
@@ -224,7 +258,7 @@ tr:hover td{background:#1e2235}
     <!-- 全件収集 -->
     <div class="card">
       <div class="section-title">全件収集</div>
-      <div style="background:#1e2235;border-radius:8px;padding:10px 12px;font-size:12px;color:#94a3b8;border-left:3px solid #7c3aed;margin-bottom:14px">
+      <div style="background:var(--border-subtle);border-radius:8px;padding:10px 12px;font-size:12px;color:var(--text-secondary);border-left:3px solid var(--accent);margin-bottom:14px">
         全上場企業（約3,900社）の有価証券報告書 XBRL を取り込みます。初回または長期未収集時に使用してください。
       </div>
       <div class="form-group">
@@ -234,9 +268,9 @@ tr:hover td{background:#1e2235}
           <option value="3">3年</option>
           <option value="5" selected>5年（EDINET保管上限・推奨）</option>
         </select>
-        <div style="font-size:11px;color:#64748b;margin-top:4px">※ EDINET API は最大5年分を保管。5年指定で取得可能な最大範囲をカバーします。</div>
+        <div style="font-size:11px;color:var(--text-muted);margin-top:4px">※ EDINET API は最大5年分を保管。5年指定で取得可能な最大範囲をカバーします。</div>
       </div>
-      <div style="background:#1c1400;border:1px solid #78350f;border-radius:6px;padding:10px 12px;font-size:12px;color:#fcd34d;margin-bottom:12px">
+      <div style="background:var(--status-warn-bg);border:1px solid var(--status-warn);border-radius:6px;padding:10px 12px;font-size:12px;color:var(--status-warn-text);margin-bottom:12px">
         ⚠️ 全社収集は<strong>数時間</strong>かかります。サーバーを停止しないでください。
       </div>
       <button class="btn btn-primary" id="btn-collect" data-click="startFullCollection">
@@ -255,7 +289,7 @@ tr:hover td{background:#1e2235}
       <div class="flex">
         <button class="btn btn-secondary btn-sm" data-click="clearLog">クリア</button>
         <button class="btn btn-secondary btn-sm" data-click="checkJobStatus">最新ジョブ確認</button>
-        <button class="btn btn-secondary btn-sm" data-click="resetStuckJobs" style="color:#f59e0b">強制リセット</button>
+        <button class="btn btn-secondary btn-sm" data-click="resetStuckJobs" style="color:var(--status-warn)">強制リセット</button>
       </div>
     </div>
     <div class="log-box" id="log-box" style="margin-top:10px" role="log" aria-live="polite" aria-label="ジョブ実行ログ"></div>
@@ -263,7 +297,7 @@ tr:hover td{background:#1e2235}
 
   <!-- 個別企業リフレッシュ（折りたたみ） -->
   <details style="margin-bottom:16px">
-    <summary style="cursor:pointer;padding:10px 16px;background:#1a1d2e;border:1px solid #2d3154;border-radius:8px;font-size:13px;color:#94a3b8;list-style:none;display:flex;align-items:center;gap:8px">
+    <summary style="cursor:pointer;padding:10px 16px;background:var(--bg-elevated);border:1px solid var(--border);border-radius:8px;font-size:13px;color:var(--text-secondary);list-style:none;display:flex;align-items:center;gap:8px">
       <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
       個別企業リフレッシュ（EDINETコード）
     </summary>
@@ -291,7 +325,7 @@ tr:hover td{background:#1e2235}
 
   <!-- データ品質（折りたたみ） -->
   <details style="margin-bottom:16px">
-    <summary style="cursor:pointer;padding:10px 16px;background:#1a1d2e;border:1px solid #2d3154;border-radius:8px;font-size:13px;color:#94a3b8;list-style:none;display:flex;align-items:center;gap:8px">
+    <summary style="cursor:pointer;padding:10px 16px;background:var(--bg-elevated);border:1px solid var(--border);border-radius:8px;font-size:13px;color:var(--text-secondary);list-style:none;display:flex;align-items:center;gap:8px">
       <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
       データ品質チェック
     </summary>
@@ -314,7 +348,7 @@ tr:hover td{background:#1e2235}
 <div id="tab-stockmarket" class="hidden">
   <!-- ウィザードバナー（財務データ0件時のみ表示） -->
   <div id="stockmarket-prereq-banner" class="hidden"
-       style="background:#1c0a0a;border:1px solid #7f1d1d;border-radius:8px;padding:12px 16px;margin-bottom:16px;color:#fca5a5">
+       style="background:var(--status-bad-bg);border:1px solid var(--status-bad);border-radius:8px;padding:12px 16px;margin-bottom:16px;color:var(--status-bad-text)">
     ⚠️ 先に「財務データ収集」タブでデータを収集してください（現在 0 件）
   </div>
 
@@ -343,16 +377,16 @@ tr:hover td{background:#1e2235}
   <!-- J-Quants（推奨・JPX公式） -->
   <div style="margin-bottom:24px">
     <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px">
-      <div style="width:6px;height:6px;border-radius:50%;background:#a78bfa"></div>
-      <div style="font-size:14px;font-weight:600;color:#a78bfa">J-Quants（JPX公式データ）</div>
-      <span style="font-size:11px;background:#2e1065;color:#c4b5fd;padding:2px 8px;border-radius:10px;font-weight:500">推奨</span>
+      <div style="width:6px;height:6px;border-radius:50%;background:var(--accent-text)"></div>
+      <div style="font-size:14px;font-weight:600;color:var(--accent-text)">J-Quants（JPX公式データ）</div>
+      <span style="font-size:11px;background:var(--accent-deep-bg);color:var(--accent-soft-text);padding:2px 8px;border-radius:10px;font-weight:500">推奨</span>
     </div>
     <div class="grid2">
-      <div class="card" style="border-color:#312e81">
+      <div class="card" style="border-color:var(--accent-soft-bg)">
         <div class="section-title">J-Quants 株価履歴収集</div>
-        <div style="background:#0d1120;border-radius:8px;padding:10px 12px;font-size:12px;color:#a78bfa;border-left:3px solid #7c3aed;margin-bottom:14px">
+        <div style="background:var(--accent-deep-bg);border-radius:8px;padding:10px 12px;font-size:12px;color:var(--accent-text);border-left:3px solid var(--accent);margin-bottom:14px">
           JPX 公式 API から1日単位で全銘柄を一括取得します。stooq より高速・正確です。<br>
-          <span style="color:#64748b">※ 要設定: <code>JQUANTS_API_KEY</code> を .env に設定（J-Quants ダッシュボード → API Keys）</span>
+          <span style="color:var(--text-muted)">※ 要設定: <code>JQUANTS_API_KEY</code> を .env に設定（J-Quants ダッシュボード → API Keys）</span>
         </div>
         <div class="form-group">
           <label>取得日数</label>
@@ -371,10 +405,10 @@ tr:hover td{background:#1e2235}
             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg>
             収集開始
           </button>
-          <button class="btn btn-secondary btn-sm" id="btn-jq-force" data-click="startJQuantsCollection" data-arg="true" style="display:none;border-color:#f59e0b;color:#f59e0b">
+          <button class="btn btn-secondary btn-sm" id="btn-jq-force" data-click="startJQuantsCollection" data-arg="true" style="display:none;border-color:var(--status-warn);color:var(--status-warn)">
             強制再開
           </button>
-          <button class="btn btn-secondary btn-sm" id="btn-jq-stop" data-click="stopJQuantsCollection" style="display:none;border-color:#ef4444;color:#ef4444">
+          <button class="btn btn-secondary btn-sm" id="btn-jq-stop" data-click="stopJQuantsCollection" style="display:none;border-color:var(--status-bad);color:var(--status-bad)">
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/></svg>
             停止
           </button>
@@ -384,23 +418,23 @@ tr:hover td{background:#1e2235}
             <span class="spinner"></span>
             <span class="text-sm" id="jq-progress-label">収集中...</span>
           </div>
-          <div class="progress-bar" role="progressbar" aria-valuemin="0" aria-valuemax="100"><div class="progress-fill" id="jq-progress-fill" style="width:0%;background:#7c3aed"></div></div>
+          <div class="progress-bar" role="progressbar" aria-valuemin="0" aria-valuemax="100"><div class="progress-fill" id="jq-progress-fill" style="width:0%;background:var(--accent)"></div></div>
         </div>
         <div class="flex-between" style="margin-top:12px;margin-bottom:6px">
-          <div style="font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:.5px">収集ログ</div>
+          <div style="font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px">収集ログ</div>
           <button class="btn btn-secondary btn-sm" data-click="clearById" data-target="jq-log">クリア</button>
         </div>
         <div class="log-box" id="jq-log" role="log" aria-live="polite" aria-label="J-Quants 収集ログ"></div>
       </div>
-      <div class="card" style="border-color:#312e81">
-        <div class="section-title" style="color:#a78bfa">J-Quants の特徴</div>
-        <div style="font-size:12px;color:#94a3b8;line-height:2">
+      <div class="card" style="border-color:var(--accent-soft-bg)">
+        <div class="section-title" style="color:var(--accent-text)">J-Quants の特徴</div>
+        <div style="font-size:12px;color:var(--text-secondary);line-height:2">
           <div>✓ &nbsp;1リクエストで全銘柄を一括取得（stooq より高速）</div>
           <div>✓ &nbsp;修正株価・分割調整済みデータ</div>
           <div>✓ &nbsp;取得済みデータも上書き更新（修正値に追従）</div>
           <div>✓ &nbsp;stooq との重複は J-Quants が上書き優先</div>
-          <div style="color:#64748b;margin-top:8px">• 無料プランは過去2年分まで対応</div>
-          <div style="color:#64748b">• レート制限: 約20秒/日付ごと（自動調整）</div>
+          <div style="color:var(--text-muted);margin-top:8px">• 無料プランは過去2年分まで対応</div>
+          <div style="color:var(--text-muted)">• レート制限: 約20秒/日付ごと（自動調整）</div>
         </div>
       </div>
     </div>
@@ -409,17 +443,17 @@ tr:hover td{background:#1e2235}
   <!-- 市場データ更新（stooq専用・スクリーニングに必須） -->
   <div style="margin-bottom:16px">
     <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px">
-      <div style="width:6px;height:6px;border-radius:50%;background:#64748b"></div>
-      <div style="font-size:14px;font-weight:600;color:#94a3b8">市場データ（株価・バリュエーション）更新</div>
-      <span style="font-size:11px;background:#1e293b;color:#64748b;padding:2px 8px;border-radius:10px;font-weight:500">stooq / APIキー不要</span>
+      <div style="width:6px;height:6px;border-radius:50%;background:var(--text-muted)"></div>
+      <div style="font-size:14px;font-weight:600;color:var(--text-secondary)">市場データ（株価・バリュエーション）更新</div>
+      <span style="font-size:11px;background:var(--bg-hover);color:var(--text-muted);padding:2px 8px;border-radius:10px;font-weight:500">stooq / APIキー不要</span>
     </div>
-    <div class="card" style="border-color:#1e293b">
-      <div style="background:#0d1120;border-radius:8px;padding:10px 12px;font-size:12px;color:#64748b;border-left:3px solid #334155;margin-bottom:14px">
-        スクリーニングで使う <strong style="color:#94a3b8">現在株価・PER・PBR・時価総額・配当利回り</strong> を stooq から取得して financial_records に書き込みます。<br>
-        <span style="color:#475569">J-Quants（OHLCV履歴）とは別の役割で、このデータは stooq が唯一のソースです。スクリーニング前に実行してください。</span>
+    <div class="card" style="border-color:var(--bg-hover)">
+      <div style="background:var(--bg-sunken);border-radius:8px;padding:10px 12px;font-size:12px;color:var(--text-muted);border-left:3px solid var(--border-muted);margin-bottom:14px">
+        スクリーニングで使う <strong style="color:var(--text-secondary)">現在株価・PER・PBR・時価総額・配当利回り</strong> を stooq から取得して financial_records に書き込みます。<br>
+        <span style="color:var(--text-muted)">J-Quants（OHLCV履歴）とは別の役割で、このデータは stooq が唯一のソースです。スクリーニング前に実行してください。</span>
       </div>
-          <div class="section-title" style="color:#64748b">市場データ（株価・バリュエーション）更新</div>
-          <div style="font-size:12px;color:#475569;margin-bottom:14px">
+          <div class="section-title" style="color:var(--text-muted)">市場データ（株価・バリュエーション）更新</div>
+          <div style="font-size:12px;color:var(--text-muted);margin-bottom:14px">
             stooq.com から現在株価を取得し、PER・PBR・時価総額・配当利回りを計算します。
           </div>
           <div class="form-group">
@@ -431,10 +465,10 @@ tr:hover td{background:#1e2235}
               <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 102.13-9.36L1 10"/></svg>
               市場データ更新開始
             </button>
-            <button class="btn btn-secondary btn-sm" id="btn-market-force" data-click="startMarketUpdate" data-arg="true" style="display:none;border-color:#f59e0b;color:#f59e0b" title="既に実行中のジョブを停止して再起動します">
+            <button class="btn btn-secondary btn-sm" id="btn-market-force" data-click="startMarketUpdate" data-arg="true" style="display:none;border-color:var(--status-warn);color:var(--status-warn)" title="既に実行中のジョブを停止して再起動します">
               強制再開
             </button>
-            <button class="btn btn-secondary btn-sm" id="btn-market-stop" data-click="stopMarketUpdate" style="display:none;border-color:#ef4444;color:#ef4444">
+            <button class="btn btn-secondary btn-sm" id="btn-market-stop" data-click="stopMarketUpdate" style="display:none;border-color:var(--status-bad);color:var(--status-bad)">
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/></svg>
               停止
             </button>
@@ -448,7 +482,7 @@ tr:hover td{background:#1e2235}
             <div class="progress-bar" role="progressbar" aria-valuemin="0" aria-valuemax="100"><div class="progress-fill" id="market-progress-fill" style="width:0%"></div></div>
           </div>
           <div class="flex-between" style="margin-top:12px;margin-bottom:6px">
-            <div style="font-size:11px;color:#475569;text-transform:uppercase;letter-spacing:.5px">更新ログ</div>
+            <div style="font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px">更新ログ</div>
             <button class="btn btn-secondary btn-sm" data-click="clearMarketLog">クリア</button>
           </div>
           <div class="log-box" id="market-log-box" role="log" aria-live="polite" aria-label="市場データ更新ログ"></div>
@@ -458,19 +492,19 @@ tr:hover td{background:#1e2235}
 
   <!-- 株価履歴収集（stooq フォールバック） -->
   <details style="margin-bottom:0">
-    <summary style="cursor:pointer;padding:10px 16px;background:#141722;border:1px solid #1e293b;border-radius:8px;font-size:13px;color:#475569;list-style:none;display:flex;align-items:center;gap:8px">
+    <summary style="cursor:pointer;padding:10px 16px;background:var(--bg-sunken);border:1px solid var(--bg-hover);border-radius:8px;font-size:13px;color:var(--text-secondary);list-style:none;display:flex;align-items:center;gap:8px">
       <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
       株価履歴収集（stooq）
-      <span style="font-size:11px;background:#1e293b;color:#475569;padding:2px 8px;border-radius:10px;margin-left:4px">フォールバック / APIキー不要 / 最大5年</span>
+      <span style="font-size:11px;background:var(--bg-hover);color:var(--text-secondary);padding:2px 8px;border-radius:10px;margin-left:4px">フォールバック / APIキー不要 / 最大5年</span>
     </summary>
     <div style="padding-top:12px">
-      <div style="font-size:12px;color:#475569;background:#0f1117;border:1px solid #1e293b;border-radius:6px;padding:8px 12px;margin-bottom:12px">
+      <div style="font-size:12px;color:var(--text-muted);background:var(--bg-sunken);border:1px solid var(--bg-hover);border-radius:6px;padding:8px 12px;margin-bottom:12px">
         J-Quants API キーが未設定の場合、または2年超の履歴（最大5年）が必要な場合のフォールバックです。<br>
         stooq で収集した OHLCV は J-Quants が収集済みの日付については J-Quants データに上書きされます（J-Quants が正データ）。
       </div>
-      <div class="card" style="border-color:#1e293b">
-          <div class="section-title" style="color:#64748b">株価履歴収集（OHLCV）</div>
-          <div style="font-size:12px;color:#475569;margin-bottom:14px">
+      <div class="card" style="border-color:var(--bg-hover)">
+          <div class="section-title" style="color:var(--text-muted)">株価履歴収集（OHLCV）</div>
+          <div style="font-size:12px;color:var(--text-muted);margin-bottom:14px">
             stooq から日次 OHLCV を取得します。最大5年対応（J-Quants 無料プランは2年まで）。
           </div>
           <div class="form-group">
@@ -503,10 +537,10 @@ tr:hover td{background:#1e2235}
               <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg>
               収集開始
             </button>
-            <button class="btn btn-secondary btn-sm" id="btn-history-force" data-click="startHistoryCollection" data-arg="true" style="display:none;border-color:#f59e0b;color:#f59e0b" title="既に実行中のジョブを停止して再起動します">
+            <button class="btn btn-secondary btn-sm" id="btn-history-force" data-click="startHistoryCollection" data-arg="true" style="display:none;border-color:var(--status-warn);color:var(--status-warn)" title="既に実行中のジョブを停止して再起動します">
               強制再開
             </button>
-            <button class="btn btn-secondary btn-sm" id="btn-history-stop" data-click="stopHistoryCollection" style="display:none;border-color:#ef4444;color:#ef4444">
+            <button class="btn btn-secondary btn-sm" id="btn-history-stop" data-click="stopHistoryCollection" style="display:none;border-color:var(--status-bad);color:var(--status-bad)">
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/></svg>
               停止
             </button>
@@ -519,7 +553,7 @@ tr:hover td{background:#1e2235}
             <div class="progress-bar" role="progressbar" aria-valuemin="0" aria-valuemax="100"><div class="progress-fill" id="history-progress-fill" style="width:0%"></div></div>
           </div>
           <div class="flex-between" style="margin-top:12px;margin-bottom:6px">
-            <div style="font-size:11px;color:#475569;text-transform:uppercase;letter-spacing:.5px">収集ログ</div>
+            <div style="font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px">収集ログ</div>
             <button class="btn btn-secondary btn-sm" data-click="clearById" data-target="history-log">クリア</button>
           </div>
           <div class="log-box" id="history-log" role="log" aria-live="polite" aria-label="株価履歴収集ログ"></div>
@@ -531,12 +565,12 @@ tr:hover td{background:#1e2235}
 
   <div class="card" style="margin-top:16px">
     <div class="flex-between" style="margin-bottom:6px">
-      <div style="font-size:14px;font-weight:600;color:#86efac">マクロデータ（為替・金利・指数・コモディティ）</div>
-      <div style="font-size:11px;color:#64748b">stooq 経由 / 9系列・日次OHLCV</div>
+      <div style="font-size:14px;font-weight:600;color:var(--status-good-text)">マクロデータ（為替・金利・指数・コモディティ）</div>
+      <div style="font-size:11px;color:var(--text-muted)">stooq 経由 / 9系列・日次OHLCV</div>
     </div>
-    <div style="font-size:12px;color:#64748b;margin-bottom:14px">
+    <div style="font-size:12px;color:var(--text-muted);margin-bottom:14px">
       USD/JPY・米日10年金利・日経/TOPIX/S&P500・WTI/金 の日次データを取得します。<br>
-      <span style="color:#475569">※ 既存日付は上書き更新。自動取得は GitHub Actions（毎日 03:00 JST）で実行されます。</span>
+      <span style="color:var(--text-muted)">※ 既存日付は上書き更新。自動取得は GitHub Actions（毎日 03:00 JST）で実行されます。</span>
     </div>
 
     <div class="form-group" style="max-width:280px">
@@ -553,7 +587,7 @@ tr:hover td{background:#1e2235}
         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg>
         マクロ収集開始
       </button>
-      <button class="btn btn-secondary btn-sm" id="btn-macro-stop" data-click="stopMacroCollection" style="display:none;border-color:#ef4444;color:#ef4444">
+      <button class="btn btn-secondary btn-sm" id="btn-macro-stop" data-click="stopMacroCollection" style="display:none;border-color:var(--status-bad);color:var(--status-bad)">
         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/></svg>
         停止
       </button>
@@ -577,7 +611,7 @@ tr:hover td{background:#1e2235}
     </div>
 
     <div class="flex-between" style="margin-top:12px;margin-bottom:6px">
-      <div style="font-size:11px;color:#475569;text-transform:uppercase;letter-spacing:.5px">収集ログ</div>
+      <div style="font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px">収集ログ</div>
       <button class="btn btn-secondary btn-sm" data-click="clearById" data-target="macro-log">クリア</button>
     </div>
     <div class="log-box" id="macro-log"></div>
@@ -586,30 +620,30 @@ tr:hover td{background:#1e2235}
   <!-- XBRL 再解析 -->
   <div class="card" style="margin-top:16px">
     <div class="flex-between" style="margin-bottom:6px">
-      <div style="font-size:14px;font-weight:600;color:#93c5fd">XBRL 再解析（Re-parse from Raw）</div>
-      <div style="font-size:11px;color:#64748b">EDINET 通信なし / Render でも利用可</div>
+      <div style="font-size:14px;font-weight:600;color:var(--status-info-text)">XBRL 再解析（Re-parse from Raw）</div>
+      <div style="font-size:11px;color:var(--text-muted)">EDINET 通信なし / Render でも利用可</div>
     </div>
-    <div style="font-size:12px;color:#64748b;margin-bottom:14px">
-      収集時に保存した XBRL 生データ（<code style="color:#93c5fd">xbrl_raw_documents</code>）から
-      <code style="color:#93c5fd">financial_records</code> を再構築します。<br>
+    <div style="font-size:12px;color:var(--text-muted);margin-bottom:14px">
+      収集時に保存した XBRL 生データ（<code style="color:var(--status-info-text)">xbrl_raw_documents</code>）から
+      <code style="color:var(--status-info-text)">financial_records</code> を再構築します。<br>
       新しい財務指標を <code>XBRL_MAP</code> に追加した後、EDINET への再ダウンロードなしで全件更新できます。<br>
-      <span style="color:#475569">※ raw データが蓄積されている書類のみ対象（新規収集分から順次蓄積）。</span>
+      <span style="color:var(--text-muted)">※ raw データが蓄積されている書類のみ対象（新規収集分から順次蓄積）。</span>
     </div>
     <div style="display:flex;gap:12px;margin-bottom:14px;align-items:flex-end">
       <div class="form-group" style="margin:0;max-width:140px">
         <label style="font-size:11px">年度フィルタ（任意）</label>
         <input type="number" id="reparse-year" placeholder="例: 2024" min="2015" max="2030"
-               style="width:100%;background:#1e293b;border:1px solid #334155;color:#f1f5f9;border-radius:6px;padding:6px 10px;font-size:13px">
+               style="width:100%;background:var(--bg-hover);border:1px solid var(--border-muted);color:var(--text);border-radius:6px;padding:6px 10px;font-size:13px">
       </div>
       <div class="form-group" style="margin:0;flex:1;max-width:220px">
         <label style="font-size:11px">EDINET コード（任意）</label>
         <input type="text" id="reparse-edinet" placeholder="例: E00000（空欄=全社）"
-               style="width:100%;background:#1e293b;border:1px solid #334155;color:#f1f5f9;border-radius:6px;padding:6px 10px;font-size:13px">
+               style="width:100%;background:var(--bg-hover);border:1px solid var(--border-muted);color:var(--text);border-radius:6px;padding:6px 10px;font-size:13px">
       </div>
     </div>
     <div style="display:flex;gap:8px;margin-bottom:12px;align-items:center">
       <button class="btn btn-primary" id="btn-reparse-start" data-click="startReparse">再解析を実行</button>
-      <button class="btn btn-secondary btn-sm" id="btn-reparse-stop" data-click="stopReparse" style="display:none;border-color:#ef4444;color:#ef4444">停止</button>
+      <button class="btn btn-secondary btn-sm" id="btn-reparse-stop" data-click="stopReparse" style="display:none;border-color:var(--status-bad);color:var(--status-bad)">停止</button>
       <button class="btn btn-secondary btn-sm" data-click="clearById" data-target="reparse-log">ログクリア</button>
     </div>
     <div class="log-box" id="reparse-log" role="log" aria-live="polite"></div>
@@ -644,7 +678,7 @@ tr:hover td{background:#1e2235}
   </div>
 
   <!-- BS/PL/CF 再分類ビュー -->
-  <div style="margin-top:16px;padding-top:16px;border-top:1px solid #1e293b">
+  <div style="margin-top:16px;padding-top:16px;border-top:1px solid var(--bg-hover)">
     <div class="card">
       <div class="flex-between">
         <div class="section-title" style="margin-bottom:0">BS / PL / CF 再分類ビュー</div>
@@ -671,19 +705,19 @@ tr:hover td{background:#1e2235}
     </div>
     <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:16px;margin-top:12px">
       <div>
-        <div class="text-sm" style="color:#a78bfa;margin-bottom:8px">PL指標</div>
+        <div class="text-sm" style="color:var(--accent-text);margin-bottom:8px">PL指標</div>
         <div class="form-group"><label>売上高成長率% ≥</label><input type="number" id="sc-rev-growth" placeholder="例: 5"></div>
         <div class="form-group"><label>営業利益率% ≥</label><input type="number" id="sc-op-margin" placeholder="例: 10"></div>
         <div class="form-group"><label>純利益率% ≥</label><input type="number" id="sc-net-margin" placeholder="例: 5"></div>
       </div>
       <div>
-        <div class="text-sm" style="color:#10b981;margin-bottom:8px">BS指標</div>
+        <div class="text-sm" style="color:var(--status-good);margin-bottom:8px">BS指標</div>
         <div class="form-group"><label>ROE% ≥</label><input type="number" id="sc-roe" placeholder="例: 8"></div>
         <div class="form-group"><label>自己資本比率% ≥</label><input type="number" id="sc-equity-ratio" placeholder="例: 40"></div>
         <div class="form-group"><label>D/Eレシオ ≤</label><input type="number" id="sc-de" placeholder="例: 1.5"></div>
       </div>
       <div>
-        <div class="text-sm" style="color:#f59e0b;margin-bottom:8px">バリュエーション・CF</div>
+        <div class="text-sm" style="color:var(--status-warn);margin-bottom:8px">バリュエーション・CF</div>
         <div class="form-group"><label>PER ≤</label><input type="number" id="sc-per" placeholder="例: 20"></div>
         <div class="form-group"><label>PBR ≤</label><input type="number" id="sc-pbr" placeholder="例: 2"></div>
         <div class="form-group"><label>配当利回% ≥</label><input type="number" id="sc-div" placeholder="例: 2"></div>
@@ -725,7 +759,7 @@ tr:hover td{background:#1e2235}
 <!-- 詳細モーダル -->
 <div class="modal-overlay" id="modal-detail" style="display:none">
   <div class="modal">
-    <div style="font-size:15px;font-weight:600;color:#a78bfa;margin-bottom:14px" id="modal-title"></div>
+    <div style="font-size:15px;font-weight:600;color:var(--accent-text);margin-bottom:14px" id="modal-title"></div>
     <div id="modal-body"></div>
     <button class="btn btn-secondary" style="margin-top:16px" data-click="closeModal">閉じる</button>
   </div>

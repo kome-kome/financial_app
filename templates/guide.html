@@ -4,73 +4,107 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>やさしい解説</title>
+<script src="/static/js/theme-init.js"></script>
 <style>
+:root{
+  --bg:#0f1117;--bg-elevated:#1a1d2e;--bg-sunken:#0f1117;--bg-hover:#1e293b;
+  --border:#2d3154;--border-muted:#334155;--border-subtle:#1e2235;
+  --text:#e2e8f0;--text-secondary:#94a3b8;--text-muted:#64748b;--text-body:#cbd5e1;
+  --accent:#7c3aed;--accent-hover:#6d28d9;--accent-text:#a78bfa;
+  --accent-soft-bg:#312e81;--accent-soft-text:#c4b5fd;--accent-deep-bg:#2e1065;
+  --status-good:#10b981;--status-good-bg:#052e16;--status-good-text:#86efac;
+  --status-bad:#ef4444;--status-bad-bg:#450a0a;--status-bad-text:#fca5a5;
+  --status-warn:#f59e0b;--status-warn-bg:#451a03;--status-warn-text:#fcd34d;
+  --status-info:#60a5fa;--status-info-bg:#1e3a5f;--status-info-text:#93c5fd;
+  --val-up:#3b82f6;--val-up-bg:#1e3a5f;--val-up-text:#93c5fd;
+  --val-down:#ef4444;--val-down-bg:#450a0a;--val-down-text:#fca5a5;
+  --val-neutral:#10b981;--val-neutral-bg:#052e16;--val-neutral-text:#86efac;
+  --shadow-color:rgba(0,0,0,.4);
+}
+:root[data-theme="light"]{
+  --bg:#f8fafc;--bg-elevated:#ffffff;--bg-sunken:#f1f5f9;--bg-hover:#e2e8f0;
+  --border:#e2e8f0;--border-muted:#cbd5e1;--border-subtle:#e5e7eb;
+  --text:#0f172a;--text-secondary:#475569;--text-muted:#94a3b8;--text-body:#334155;
+  --accent:#7c3aed;--accent-hover:#6d28d9;--accent-text:#6d28d9;
+  --accent-soft-bg:#ede9fe;--accent-soft-text:#6d28d9;--accent-deep-bg:#ddd6fe;
+  --status-good:#059669;--status-good-bg:#d1fae5;--status-good-text:#065f46;
+  --status-bad:#dc2626;--status-bad-bg:#fee2e2;--status-bad-text:#991b1b;
+  --status-warn:#d97706;--status-warn-bg:#fef3c7;--status-warn-text:#92400e;
+  --status-info:#2563eb;--status-info-bg:#dbeafe;--status-info-text:#1e40af;
+  --val-up:#2563eb;--val-up-bg:#dbeafe;--val-up-text:#1e40af;
+  --val-down:#dc2626;--val-down-bg:#fee2e2;--val-down-text:#991b1b;
+  --val-neutral:#059669;--val-neutral-bg:#d1fae5;--val-neutral-text:#065f46;
+  --shadow-color:rgba(0,0,0,.12);
+}
 *{box-sizing:border-box;margin:0;padding:0}
-body{font-family:'Segoe UI',sans-serif;background:#0f1117;color:#e2e8f0;min-height:100vh;line-height:1.7}
-.header{background:#1a1d2e;border-bottom:1px solid #2d3154;padding:14px 24px;display:flex;align-items:center;gap:14px;position:sticky;top:0;z-index:100}
-.header h1{font-size:17px;font-weight:600;color:#34d399}
-.badge{background:#064e3b;color:#6ee7b7;font-size:11px;padding:3px 8px;border-radius:12px}
-.nav-link{padding:8px 14px;font-size:13px;color:#64748b;text-decoration:none;display:inline-flex;align-items:center;gap:5px;border-radius:6px}
+body{font-family:'Segoe UI',sans-serif;background:var(--bg);color:var(--text);min-height:100vh;line-height:1.7}
+.header{background:var(--bg-elevated);border-bottom:1px solid var(--border);padding:14px 24px;display:flex;align-items:center;gap:14px;position:sticky;top:0;z-index:100}
+.header h1{font-size:17px;font-weight:600;color:var(--status-good-text)}
+.badge{background:var(--status-good-bg);color:var(--status-good-text);font-size:11px;padding:3px 8px;border-radius:12px}
+.nav-link{padding:8px 14px;font-size:13px;color:var(--text-muted);text-decoration:none;display:inline-flex;align-items:center;gap:5px;border-radius:6px}
 .nav-link:first-of-type{margin-left:auto}
-.nav-link:hover{background:#1e293b;color:#94a3b8}
+.nav-link:hover{background:var(--bg-hover);color:var(--text-secondary)}
+.theme-toggle-btn{background:transparent;border:1px solid var(--border-muted);color:var(--text);border-radius:6px;width:30px;height:30px;font-size:14px;cursor:pointer;display:flex;align-items:center;justify-content:center;flex-shrink:0}
+.theme-toggle-btn:hover{background:var(--bg-hover)}
 .layout{display:flex;max-width:1400px;margin:0 auto;padding:24px;gap:28px}
 .sidebar{width:240px;flex-shrink:0}
-.toc{background:#1a1d2e;border:1px solid #2d3154;border-radius:10px;padding:16px;position:sticky;top:80px}
-.toc-title{font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:.5px;margin-bottom:12px}
-.toc a{display:block;font-size:12px;color:#64748b;text-decoration:none;padding:5px 8px;border-radius:5px;transition:all .15s;border-left:2px solid transparent}
-.toc a:hover{background:#1e293b;color:#34d399;border-left-color:#10b981}
-.toc a.active{background:#1e293b;color:#34d399;border-left-color:#10b981}
-.toc-section-title{font-size:10px;color:#4b5563;text-transform:uppercase;letter-spacing:.5px;margin:12px 0 4px 8px}
+.toc{background:var(--bg-elevated);border:1px solid var(--border);border-radius:10px;padding:16px;position:sticky;top:80px}
+.toc-title{font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:12px}
+.toc a{display:block;font-size:12px;color:var(--text-muted);text-decoration:none;padding:5px 8px;border-radius:5px;transition:all .15s;border-left:2px solid transparent}
+.toc a:hover{background:var(--bg-hover);color:var(--status-good-text);border-left-color:var(--status-good)}
+.toc a.active{background:var(--bg-hover);color:var(--status-good-text);border-left-color:var(--status-good)}
+.toc-section-title{font-size:10px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px;margin:12px 0 4px 8px}
 .content{flex:1;min-width:0}
-.intro{background:#1a1d2e;border:1px solid #2d3154;border-radius:10px;padding:20px 24px;margin-bottom:20px}
-.intro p{font-size:13px;color:#cbd5e1;margin-bottom:8px}
-.model-section{background:#1a1d2e;border:1px solid #2d3154;border-radius:10px;padding:24px;margin-bottom:20px}
-.model-section:target{border-color:#10b981;box-shadow:0 0 0 2px rgba(16,185,129,.2)}
-h2{font-size:18px;font-weight:700;color:#34d399;margin-bottom:4px;display:flex;align-items:center;gap:10px;flex-wrap:wrap}
-h2 .model-tag{font-size:10px;background:#1e293b;border:1px solid #334155;color:#64748b;padding:2px 8px;border-radius:10px;font-weight:400}
-h3{font-size:14px;font-weight:600;color:#6ee7b7;margin:18px 0 8px;display:flex;align-items:center;gap:7px}
-p{font-size:13px;color:#cbd5e1;margin-bottom:10px}
+.intro{background:var(--bg-elevated);border:1px solid var(--border);border-radius:10px;padding:20px 24px;margin-bottom:20px}
+.intro p{font-size:13px;color:var(--text-body);margin-bottom:8px}
+.model-section{background:var(--bg-elevated);border:1px solid var(--border);border-radius:10px;padding:24px;margin-bottom:20px}
+.model-section:target{border-color:var(--status-good);box-shadow:0 0 0 2px rgba(16,185,129,.2)}
+h2{font-size:18px;font-weight:700;color:var(--status-good-text);margin-bottom:4px;display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+h2 .model-tag{font-size:10px;background:var(--bg-hover);border:1px solid var(--border-muted);color:var(--text-muted);padding:2px 8px;border-radius:10px;font-weight:400}
+h3{font-size:14px;font-weight:600;color:var(--status-good-text);margin:18px 0 8px;display:flex;align-items:center;gap:7px}
+p{font-size:13px;color:var(--text-body);margin-bottom:10px}
 ul{margin:6px 0 12px 20px}
-li{font-size:13px;color:#cbd5e1;margin-bottom:5px}
-.analogy{background:#0a1a14;border:1px solid #134e3a;border-left:3px solid #10b981;border-radius:8px;padding:14px 16px;font-size:13px;color:#d1fae5;margin:6px 0 14px;line-height:1.7}
-.analogy strong{color:#6ee7b7}
-.info-box{background:#1e2235;border:1px solid #2d3154;border-radius:8px;padding:12px 14px;font-size:12px;color:#cbd5e1;margin:8px 0;border-left:3px solid #10b981;line-height:1.7}
-.warn-box{background:#451a03;border:1px solid #92400e;border-radius:8px;padding:12px 14px;font-size:12px;color:#fcd34d;margin:8px 0;line-height:1.7}
-.warn-box strong{color:#fbbf24}
+li{font-size:13px;color:var(--text-body);margin-bottom:5px}
+.analogy{background:var(--status-good-bg);border:1px solid var(--status-good);border-left:3px solid var(--status-good);border-radius:8px;padding:14px 16px;font-size:13px;color:var(--status-good-text);margin:6px 0 14px;line-height:1.7}
+.analogy strong{color:var(--status-good-text)}
+.info-box{background:var(--border-subtle);border:1px solid var(--border);border-radius:8px;padding:12px 14px;font-size:12px;color:var(--text-body);margin:8px 0;border-left:3px solid var(--status-good);line-height:1.7}
+.warn-box{background:var(--status-warn-bg);border:1px solid var(--status-warn);border-radius:8px;padding:12px 14px;font-size:12px;color:var(--status-warn-text);margin:8px 0;line-height:1.7}
+.warn-box strong{color:var(--status-warn-text)}
 .steps{counter-reset:step;list-style:none;margin:6px 0 12px 0;padding:0}
-.steps li{position:relative;padding:6px 0 6px 34px;font-size:13px;color:#cbd5e1;border-bottom:1px solid #1e2235}
+.steps li{position:relative;padding:6px 0 6px 34px;font-size:13px;color:var(--text-body);border-bottom:1px solid var(--border-subtle)}
 .steps li:last-child{border-bottom:none}
-.steps li::before{counter-increment:step;content:counter(step);position:absolute;left:0;top:6px;width:22px;height:22px;background:#064e3b;color:#6ee7b7;border-radius:50%;font-size:12px;font-weight:700;display:flex;align-items:center;justify-content:center}
+.steps li::before{counter-increment:step;content:counter(step);position:absolute;left:0;top:6px;width:22px;height:22px;background:var(--status-good-bg);color:var(--status-good-text);border-radius:50%;font-size:12px;font-weight:700;display:flex;align-items:center;justify-content:center}
 table{width:100%;border-collapse:collapse;font-size:12px;margin:8px 0}
-th{text-align:left;padding:8px 10px;color:#64748b;font-weight:500;border-bottom:1px solid #2d3154;background:#141722}
-td{padding:8px 10px;border-bottom:1px solid #1e2235;color:#cbd5e1}
-td code,p code,li code{background:#0f172a;border:1px solid #1e2235;padding:1px 5px;border-radius:3px;font-size:11px;color:#67e8f9;font-family:monospace}
-.more{margin-top:16px;padding-top:14px;border-top:1px solid #2d3154;font-size:12px}
-.more a{color:#a78bfa;text-decoration:none;font-weight:600}
+th{text-align:left;padding:8px 10px;color:var(--text-muted);font-weight:500;border-bottom:1px solid var(--border);background:var(--bg-sunken)}
+td{padding:8px 10px;border-bottom:1px solid var(--border-subtle);color:var(--text-body)}
+td code,p code,li code{background:var(--bg-sunken);border:1px solid var(--border-subtle);padding:1px 5px;border-radius:3px;font-size:11px;color:var(--status-info-text);font-family:monospace}
+.more{margin-top:16px;padding-top:14px;border-top:1px solid var(--border);font-size:12px}
+.more a{color:var(--accent-text);text-decoration:none;font-weight:600}
 .more a:hover{text-decoration:underline}
-.term{border-bottom:1px dotted #5b8b76;cursor:help;position:relative;color:#a7f3d0}
-.term::after{content:attr(data-tip);position:absolute;left:0;top:calc(100% + 7px);z-index:60;width:max-content;max-width:280px;white-space:normal;background:#0a0c14;color:#cbd5e1;border:1px solid #3b4263;border-radius:7px;padding:9px 11px;font-size:11px;font-weight:400;line-height:1.6;box-shadow:0 10px 30px rgba(0,0,0,.5);opacity:0;visibility:hidden;transform:translateY(-4px);transition:opacity .13s,transform .13s;pointer-events:none}
+.term{border-bottom:1px dotted var(--status-good);cursor:help;position:relative;color:var(--status-good-text)}
+.term::after{content:attr(data-tip);position:absolute;left:0;top:calc(100% + 7px);z-index:60;width:max-content;max-width:280px;white-space:normal;background:var(--bg-sunken);color:var(--text-body);border:1px solid var(--border-muted);border-radius:7px;padding:9px 11px;font-size:11px;font-weight:400;line-height:1.6;box-shadow:0 10px 30px var(--shadow-color);opacity:0;visibility:hidden;transform:translateY(-4px);transition:opacity .13s,transform .13s;pointer-events:none}
 .term:hover::after{opacity:1;visibility:visible;transform:translateY(0)}
 .tag{display:inline-block;padding:2px 7px;border-radius:10px;font-size:10px;font-weight:500}
-.tag-green{background:#052e16;color:#86efac}
-.tag-amber{background:#451a03;color:#fcd34d}
-.tag-red{background:#450a0a;color:#fca5a5}
-.gnav{display:flex;align-items:center;gap:2px;background:#13162a;border-bottom:1px solid #2d3154;padding:0 24px;flex-wrap:wrap}
-.gnav-link{padding:10px 14px;font-size:13px;color:#94a3b8;text-decoration:none;border-bottom:2px solid transparent;transition:color .15s,border-color .15s}
-.gnav-link:hover{color:#e2e8f0}
-.gnav-link.active{color:#fff;border-bottom-color:#7c3aed}
-.gnav-ref{color:#64748b}
+.tag-green{background:var(--status-good-bg);color:var(--status-good-text)}
+.tag-amber{background:var(--status-warn-bg);color:var(--status-warn-text)}
+.tag-red{background:var(--status-bad-bg);color:var(--status-bad-text)}
+.gnav{display:flex;align-items:center;gap:2px;background:var(--bg-elevated);border-bottom:1px solid var(--border);padding:0 24px;flex-wrap:wrap}
+.gnav-link{padding:10px 14px;font-size:13px;color:var(--text-secondary);text-decoration:none;border-bottom:2px solid transparent;transition:color .15s,border-color .15s}
+.gnav-link:hover{color:var(--text)}
+.gnav-link.active{color:var(--text);border-bottom-color:var(--accent)}
+.gnav-ref{color:var(--text-muted)}
 .gnav-spacer{margin-left:auto}
 </style>
 </head>
 <body>
 
 <div class="header">
-  <div style="width:30px;height:30px;background:#064e3b;border-radius:8px;display:flex;align-items:center;justify-content:center">
-    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#34d399" stroke-width="2"><path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20z"/><path d="M9.1 9a3 3 0 0 1 5.8 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12" y2="17"/></svg>
+  <div style="width:30px;height:30px;background:var(--status-good-bg);border-radius:8px;display:flex;align-items:center;justify-content:center">
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--status-good-text)" stroke-width="2"><path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20z"/><path d="M9.1 9a3 3 0 0 1 5.8 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12" y2="17"/></svg>
   </div>
   <h1>やさしい解説</h1>
   <span class="badge">初心者向け</span>
+  <button id="theme-toggle" class="theme-toggle-btn" title="ライト/ダーク切替" aria-label="テーマ切替">🌙</button>
 </div>
 
 <nav class="gnav">
@@ -79,8 +113,8 @@ td code,p code,li code{background:#0f172a;border:1px solid #1e2235;padding:1px 5
   <a href="/company" class="gnav-link">企業詳細</a>
   <a href="/collection" class="gnav-link">収集</a>
   <span class="gnav-spacer"></span>
-  <a href="/guide" class="gnav-link gnav-ref active" style="color:#34d399">やさしい解説</a>
-  <a href="/models" class="gnav-link gnav-ref" style="color:#a78bfa">モデル解説</a>
+  <a href="/guide" class="gnav-link gnav-ref active" style="color:var(--status-good-text)">やさしい解説</a>
+  <a href="/models" class="gnav-link gnav-ref" style="color:var(--accent-text)">モデル解説</a>
 </nav>
 
 <div class="layout">
@@ -111,8 +145,8 @@ td code,p code,li code{background:#0f172a;border:1px solid #1e2235;padding:1px 5
 
 <div class="intro">
   <p>このページは、分析タブで使われている手法を<strong>数式を使わずに、たとえ話で</strong>説明するページです。各分析の画面で「❓ やさしい解説」を押すと、ここの対応する場所へ飛んできます。</p>
-  <p>もっと正確な数式・前提・参考論文を知りたくなったら、各セクション末尾の「→ もっと詳しく」から<a href="/models" style="color:#a78bfa;text-decoration:none">モデル解説（技術版）</a>へ進めます。</p>
-  <p style="color:#fcd34d;font-size:12px;margin-bottom:0">⚠ どの分析も「未来を当てる魔法」ではありません。判断を助ける<strong>参考材料</strong>として使ってください。</p>
+  <p>もっと正確な数式・前提・参考論文を知りたくなったら、各セクション末尾の「→ もっと詳しく」から<a href="/models" style="color:var(--accent-text);text-decoration:none">モデル解説（技術版）</a>へ進めます。</p>
+  <p style="color:var(--status-warn-text);font-size:12px;margin-bottom:0">⚠ どの分析も「未来を当てる魔法」ではありません。判断を助ける<strong>参考材料</strong>として使ってください。</p>
 </div>
 
 <!-- ① おすすめ銘柄 ───────────────────────────── -->
@@ -136,7 +170,7 @@ td code,p code,li code{background:#0f172a;border:1px solid #1e2235;padding:1px 5
   <div class="info-box">各社は指標ごとに「平均からどれくらい良い／悪いか」を表す<span class="term" data-tip="同じ年の全社の中で平均より上か下かを表す点数。平均=0、+で平均以上、−で平均以下。">Zスコア</span>に変換してから合計します。これにより、規模や業種の違う会社どうしも公平に比べられます。</div>
 
   <h3>⚠ 注意点・落とし穴</h3>
-  <div class="warn-box">ウェイト（重要度）の決め方には数学的な正解はなく、<strong>あなたの好みの設定</strong>です。「この設定が儲かる」とは限らないので、<a href="/guide#backtest" style="color:#fbbf24">バックテスト</a>で過去の成績を確かめるのがおすすめです。</div>
+  <div class="warn-box">ウェイト（重要度）の決め方には数学的な正解はなく、<strong>あなたの好みの設定</strong>です。「この設定が儲かる」とは限らないので、<a href="/guide#backtest" style="color:var(--status-warn-text)">バックテスト</a>で過去の成績を確かめるのがおすすめです。</div>
 
   <div class="more">→ もっと詳しく：<a href="/models#m6">モデル解説：Zスコア重み付けスコアリング</a></div>
 </div>
@@ -184,7 +218,7 @@ td code,p code,li code{background:#0f172a;border:1px solid #1e2235;padding:1px 5
   </div>
 
   <h3>📊 何が分かる？</h3>
-  <p>業種ごとに「財務の数字 → 妥当な株価」の関係式を作ります。これが次の<a href="/guide#gap_analysis" style="color:#a7f3d0">バリュエーション分析</a>の土台になります。同じ業種の中で比べることで、業種ごとの値ごろ感の違い（IT は高め・銀行は低めなど）に惑わされずに済みます。</p>
+  <p>業種ごとに「財務の数字 → 妥当な株価」の関係式を作ります。これが次の<a href="/guide#gap_analysis" style="color:var(--status-good-text)">バリュエーション分析</a>の土台になります。同じ業種の中で比べることで、業種ごとの値ごろ感の違い（IT は高め・銀行は低めなど）に惑わされずに済みます。</p>
 
   <h3>🛠 どう使う？</h3>
   <ul class="steps">
@@ -218,7 +252,7 @@ td code,p code,li code{background:#0f172a;border:1px solid #1e2235;padding:1px 5
 
   <h3>🛠 どう使う？</h3>
   <ul class="steps">
-    <li>先に<a href="/guide#sector_ols" style="color:#a7f3d0">業種別OLS分析</a>を実行しておく（土台が必要なので、未実行だとこのタブはロックされます）。</li>
+    <li>先に<a href="/guide#sector_ols" style="color:var(--status-good-text)">業種別OLS分析</a>を実行しておく（土台が必要なので、未実行だとこのタブはロックされます）。</li>
     <li>実行すると、割安〜割高の順に会社が並びます。「ソート順」で期待総リターン順にも切り替えられます。</li>
   </ul>
 
@@ -346,8 +380,8 @@ td code,p code,li code{background:#0f172a;border:1px solid #1e2235;padding:1px 5
     <li>「割高警戒型・業績悪化重視・バランス型」などの<strong>プリセット</strong>を選ぶか、スライダーで観点の重みを調整します。</li>
     <li>実行すると、売り点数の高い順に並び、<strong>売却 / 一部売却 / 保有継続</strong>の札が付きます。</li>
   </ul>
-  <div class="info-box">各観点は同じ年の全社の中で「平均よりどれくらい良い／悪いか」（<span class="term" data-tip="平均=0、+で平均以上、−で平均以下の点数。">Zスコア</span>）に直してから合計するので、観点の単位の違いに引きずられません。「割高度」を使うには先に<a href="/guide#sector_ols" style="color:#34d399">業種別OLS分析</a>を実行してください。</div>
-  <div class="info-box">売り判断に加味する「<strong>今後の伸びしろ（期待リターン）</strong>」の見立ては、<a href="/guide#macro_risk_return" style="color:#34d399">M-1</a>・<a href="/guide#macro_gbdt" style="color:#34d399">M-2</a>・<a href="/guide#macro_dlm" style="color:#34d399">M-3</a> の3つの予測モデルから「μ の出所」トグルで選べます（既定は M-1）。<strong>手元（ローカル）で一度動かしたモデルだけが選択肢に出ます</strong>。未実行のモデルを選んでもその成分は自動で外れるので、まずは既定のままでも問題ありません。</div>
+  <div class="info-box">各観点は同じ年の全社の中で「平均よりどれくらい良い／悪いか」（<span class="term" data-tip="平均=0、+で平均以上、−で平均以下の点数。">Zスコア</span>）に直してから合計するので、観点の単位の違いに引きずられません。「割高度」を使うには先に<a href="/guide#sector_ols" style="color:var(--status-good-text)">業種別OLS分析</a>を実行してください。</div>
+  <div class="info-box">売り判断に加味する「<strong>今後の伸びしろ（期待リターン）</strong>」の見立ては、<a href="/guide#macro_risk_return" style="color:var(--status-good-text)">M-1</a>・<a href="/guide#macro_gbdt" style="color:var(--status-good-text)">M-2</a>・<a href="/guide#macro_dlm" style="color:var(--status-good-text)">M-3</a> の3つの予測モデルから「μ の出所」トグルで選べます（既定は M-1）。<strong>手元（ローカル）で一度動かしたモデルだけが選択肢に出ます</strong>。未実行のモデルを選んでもその成分は自動で外れるので、まずは既定のままでも問題ありません。</div>
 
   <h3>⚠ 注意点・落とし穴</h3>
   <div class="warn-box">これは「いつ売れば儲かる」を当てるものではなく、<strong>持ち株を見直すきっかけ</strong>です。全部が優良なら全銘柄「保有継続」になります。ETF や外国株など未収録の銘柄は判定できません。</div>
@@ -376,6 +410,7 @@ td code,p code,li code{background:#0f172a;border:1px solid #1e2235;padding:1px 5
 </main>
 </div>
 
+<script src="/static/js/common.js"></script>
 <script src="/static/js/models.js"></script>
 </body>
 </html>

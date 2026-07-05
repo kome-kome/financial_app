@@ -1,16 +1,5 @@
 function apiBase(){return '';}
 
-function showNotif(msg, type='error'){
-  const el = document.createElement('div');
-  el.textContent = msg;
-  el.setAttribute('role', type==='error' ? 'alert' : 'status');
-  el.setAttribute('aria-live', type==='error' ? 'assertive' : 'polite');
-  const bg = type==='error' ? '#ef4444' : type==='success' ? '#10b981' : '#3b82f6';
-  el.style.cssText = `position:fixed;bottom:20px;right:20px;z-index:9999;padding:10px 16px;border-radius:6px;font-size:13px;color:#fff;max-width:420px;background:${bg};box-shadow:0 4px 12px rgba(0,0,0,.4)`;
-  document.body.appendChild(el);
-  setTimeout(()=>el.remove(), 4000);
-}
-
 
 // ── 数値フォーマット ──────────────────────────────────────────
 const OKU = 1e8;
@@ -22,8 +11,8 @@ function fmtX(v){ return (v==null || isNaN(v)) ? '—' : Number(v).toFixed(2) + 
 
 // ── Chart.js ダークテーマ既定 ────────────────────────────────
 if (window.Chart){
-  Chart.defaults.color = '#94a3b8';
-  Chart.defaults.borderColor = '#1e2235';
+  Chart.defaults.color = cssVar('--text-secondary');
+  Chart.defaults.borderColor = cssVar('--border-subtle');
   Chart.defaults.font.family = "'Segoe UI', sans-serif";
   Chart.defaults.font.size = 11;
 }
@@ -35,10 +24,10 @@ let peersLoaded = false;
 const baseOpts = (extra={}) => ({
   responsive:true, maintainAspectRatio:false,
   interaction:{mode:'index', intersect:false},
-  plugins:{ legend:{labels:{color:'#cbd5e1', boxWidth:12, padding:14}},
-            tooltip:{backgroundColor:'#0f1117', borderColor:'#2d3154', borderWidth:1, padding:10} },
-  scales:{ x:{ ticks:{color:'#94a3b8'}, grid:{color:'#1e2235'} },
-           y:{ ticks:{color:'#94a3b8'}, grid:{color:'#1e2235'} } },
+  plugins:{ legend:{labels:{color:cssVar('--text-body'), boxWidth:12, padding:14}},
+            tooltip:{backgroundColor:cssVar('--bg-sunken'), borderColor:cssVar('--border'), borderWidth:1, padding:10} },
+  scales:{ x:{ ticks:{color:cssVar('--text-secondary')}, grid:{color:cssVar('--border-subtle')} },
+           y:{ ticks:{color:cssVar('--text-secondary')}, grid:{color:cssVar('--border-subtle')} } },
   ...extra
 });
 
@@ -73,7 +62,7 @@ async function runSearch(q){
     const d = await apiFetch('/api/companies?limit=20&q=' + encodeURIComponent(q));
     if (!d) return;
     if (!d.items || d.items.length === 0){
-      searchResults.innerHTML = '<div class="search-item" style="color:#64748b;cursor:default">該当する企業がありません</div>';
+      searchResults.innerHTML = '<div class="search-item" style="color:var(--text-muted);cursor:default">該当する企業がありません</div>';
       searchResults.classList.add('show');
       return;
     }
@@ -252,7 +241,7 @@ function plDatasets(recs, level){
   const otherOpEx = r => Math.max(0, rev(r) - cos(r) - sga(r) - op(r));         // 細: その他営業費用
   const nonOpTax  = r => Math.max(0, op(r) - profit(r));                        // 細: 営業外・特別・税金等
 
-  const C = { cos:'#475569', sga:'#f59e0b', other:'#94a3b8', nonop:'#fb923c', profit:'#34d399', cost:'#64748b' };
+  const C = { cos:'#475569', sga:'#f59e0b', other:cssVar('--text-secondary'), nonop:'#fb923c', profit:'#34d399', cost:cssVar('--text-muted') };
   const bar = (label, color, fn) =>
     ({ label, backgroundColor:color, stack:'pl', borderRadius:2, data:recs.map(fn) });
 
@@ -296,8 +285,8 @@ function drawPL(){
     data:{ labels, datasets },
     options: baseOpts({
       plugins:{
-        legend:{ labels:{ color:'#cbd5e1', boxWidth:12, padding:10 } },
-        tooltip:{ backgroundColor:'#0f1117', borderColor:'#2d3154', borderWidth:1, padding:10,
+        legend:{ labels:{ color:cssVar('--text-body'), boxWidth:12, padding:10 } },
+        tooltip:{ backgroundColor:cssVar('--bg-sunken'), borderColor:cssVar('--border'), borderWidth:1, padding:10,
           callbacks:{ label:(ctx)=>{
             const ds = ctx.dataset, v = ctx.parsed.y;
             if (ds.yAxisID === 'y1') return ` ${ds.label}: ${fmtNum(v)}%`;
@@ -307,9 +296,9 @@ function drawPL(){
           }}}
       },
       scales:{
-        x:{ stacked:true, ticks:{color:'#94a3b8'}, grid:{color:'#1e2235'} },
-        y:{ stacked:true, title:{display:true, text:'億円', color:'#64748b'}, ticks:{color:'#94a3b8'}, grid:{color:'#1e2235'} },
-        y1:{ position:'right', title:{display:true, text:'%', color:'#64748b'}, ticks:{color:'#f59e0b'}, grid:{drawOnChartArea:false} },
+        x:{ stacked:true, ticks:{color:cssVar('--text-secondary')}, grid:{color:cssVar('--border-subtle')} },
+        y:{ stacked:true, title:{display:true, text:'億円', color:cssVar('--text-muted')}, ticks:{color:cssVar('--text-secondary')}, grid:{color:cssVar('--border-subtle')} },
+        y1:{ position:'right', title:{display:true, text:'%', color:cssVar('--text-muted')}, ticks:{color:'#f59e0b'}, grid:{drawOnChartArea:false} },
       }
     })
   });
@@ -366,7 +355,7 @@ function bsDatasets(recs, level){
   const C = {
     fixed:'#4f46e5', ppe:'#4f46e5', intang:'#7c3aed', invOther:'#6366f1', otherFx:'#334155', // 固定＝藍～紫
     otherCa:'#3b82f6', cash:'#22d3ee', recv:'#38bdf8', invy:'#0ea5e9', ca:'#3b82f6',          // 流動＝青～シアン
-    equity:'#34d399', otherLi:'#64748b', intDebt:'#f87171',            // 負債純資産
+    equity:'#34d399', otherLi:cssVar('--text-muted'), intDebt:'#f87171',            // 負債純資産
     stDebt:'#f87171', ltDebt:'#fb923c',
   };
   const bar = (label, color, stack, fn) =>
@@ -427,8 +416,8 @@ function drawBS(){
     data:{ labels, datasets },
     options: baseOpts({
       plugins:{
-        legend:{ labels:{ color:'#cbd5e1', boxWidth:12, padding:10 } },
-        tooltip:{ backgroundColor:'#0f1117', borderColor:'#2d3154', borderWidth:1, padding:10,
+        legend:{ labels:{ color:cssVar('--text-body'), boxWidth:12, padding:10 } },
+        tooltip:{ backgroundColor:cssVar('--bg-sunken'), borderColor:cssVar('--border'), borderWidth:1, padding:10,
           callbacks:{ label:(ctx)=>{
             const ds = ctx.dataset, v = ctx.parsed.y;
             if (ds.yAxisID === 'y1') return ` ${ds.label}: ${fmtNum(v)}%`;
@@ -438,9 +427,9 @@ function drawBS(){
           }}}
       },
       scales:{
-        x:{ stacked:true, ticks:{color:'#94a3b8'}, grid:{color:'#1e2235'} },
-        y:{ stacked:true, title:{display:true, text:'億円', color:'#64748b'}, ticks:{color:'#94a3b8'}, grid:{color:'#1e2235'} },
-        y1:{ position:'right', title:{display:true, text:'%', color:'#64748b'}, min:0, max:100, ticks:{color:'#a78bfa'}, grid:{drawOnChartArea:false} },
+        x:{ stacked:true, ticks:{color:cssVar('--text-secondary')}, grid:{color:cssVar('--border-subtle')} },
+        y:{ stacked:true, title:{display:true, text:'億円', color:cssVar('--text-muted')}, ticks:{color:cssVar('--text-secondary')}, grid:{color:cssVar('--border-subtle')} },
+        y1:{ position:'right', title:{display:true, text:'%', color:cssVar('--text-muted')}, min:0, max:100, ticks:{color:'#a78bfa'}, grid:{drawOnChartArea:false} },
       }
     })
   });
@@ -468,8 +457,8 @@ function renderPPE(labels, recs){
       bar('その他有形固定資産', '#334155', oth),
     ]},
     options: baseOpts({ scales:{
-      x:{ stacked:true, ticks:{color:'#94a3b8'}, grid:{color:'#1e2235'} },
-      y:{ stacked:true, title:{display:true, text:'億円', color:'#64748b'}, ticks:{color:'#94a3b8'}, grid:{color:'#1e2235'} },
+      x:{ stacked:true, ticks:{color:cssVar('--text-secondary')}, grid:{color:cssVar('--border-subtle')} },
+      y:{ stacked:true, title:{display:true, text:'億円', color:cssVar('--text-muted')}, ticks:{color:cssVar('--text-secondary')}, grid:{color:cssVar('--border-subtle')} },
     }})
   });
 }
@@ -492,15 +481,15 @@ function renderProfitStages(labels, recs){
   charts.profitStages = new Chart(canvas, {
     type:'bar',
     data:{ labels, datasets:[
-      bar('特別利益',  '#22c55e', r=>ok(r.pl.extraordinary_income)),
-      bar('特別損失',  '#ef4444', r=>neg(r.pl.extraordinary_loss)),
+      bar('特別利益',  cssVar('--val-up'), r=>ok(r.pl.extraordinary_income)),
+      bar('特別損失',  cssVar('--val-down'), r=>neg(r.pl.extraordinary_loss)),
       line('営業利益', '#60a5fa', r=>ok(r.pl.operating_profit)),
       line('経常利益', '#f59e0b', r=>ok(r.pl.ordinary_profit)),
       line('純利益',   '#34d399', r=>ok(r.pl.net_income)),
     ]},
     options: baseOpts({ scales:{
-      x:{ ticks:{color:'#94a3b8'}, grid:{color:'#1e2235'} },
-      y:{ title:{display:true, text:'億円', color:'#64748b'}, ticks:{color:'#94a3b8'}, grid:{color:'#1e2235'} },
+      x:{ ticks:{color:cssVar('--text-secondary')}, grid:{color:cssVar('--border-subtle')} },
+      y:{ title:{display:true, text:'億円', color:cssVar('--text-muted')}, ticks:{color:cssVar('--text-secondary')}, grid:{color:cssVar('--border-subtle')} },
     }})
   });
 }
@@ -518,12 +507,12 @@ function renderRdDep(labels, recs){
     type:'bar',
     data:{ labels, datasets:[
       { label:'研究開発費', backgroundColor:'#f472b6', borderRadius:3, data:recs.map(r=>ok(r.pl.rd_expenses)) },
-      { label:'減価償却費', backgroundColor:'#94a3b8', borderRadius:3, data:recs.map(r=>ok(r.pl.depreciation)) },
+      { label:'減価償却費', backgroundColor:cssVar('--text-secondary'), borderRadius:3, data:recs.map(r=>ok(r.pl.depreciation)) },
       { label:'EBITDA', type:'line', data:recs.map(r=>ok(r.pl.ebitda)), borderColor:'#34d399', backgroundColor:'#34d399', tension:.3, pointRadius:3, spanGaps:true },
     ]},
     options: baseOpts({ scales:{
-      x:{ ticks:{color:'#94a3b8'}, grid:{color:'#1e2235'} },
-      y:{ title:{display:true, text:'億円', color:'#64748b'}, ticks:{color:'#94a3b8'}, grid:{color:'#1e2235'} },
+      x:{ ticks:{color:cssVar('--text-secondary')}, grid:{color:cssVar('--border-subtle')} },
+      y:{ title:{display:true, text:'億円', color:cssVar('--text-muted')}, ticks:{color:cssVar('--text-secondary')}, grid:{color:cssVar('--border-subtle')} },
     }})
   });
 }
@@ -555,7 +544,7 @@ function drawCF(){
     canvas.style.display = 'none';
     const d = document.createElement('div');
     d.className = 'cf-empty';
-    d.style.cssText = 'display:flex;align-items:center;justify-content:center;height:100%;color:#64748b;font-size:13px;text-align:center;padding:20px';
+    d.style.cssText = 'display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted);font-size:13px;text-align:center;padding:20px';
     d.textContent = 'この企業のキャッシュフローデータは未収集です（再収集で取得できます）。';
     box.appendChild(d);
     note.textContent = '棒＝CF区分（億円）／折れ線＝フリーCF（営業CF＋投資CF）。';
@@ -591,16 +580,16 @@ function drawCF(){
   const invMissing   = !recs.some(r => r.cf.investing_cf != null);
   const capexMissing = !recs.some(r => r.cf.capex != null);
   let warn = '';
-  if (invMissing) warn = ' <b style="color:#f59e0b">※投資CFが未収集のため、フリーCFを表示できません（再収集が必要です）。</b>';
-  else if (cfGran === 'fine' && capexMissing) warn = ' <b style="color:#f59e0b">※設備投資が未収集のため「その他投資CF」に投資CF全額を表示しています。</b>';
+  if (invMissing) warn = ' <b style="color:var(--status-warn)">※投資CFが未収集のため、フリーCFを表示できません（再収集が必要です）。</b>';
+  else if (cfGran === 'fine' && capexMissing) warn = ' <b style="color:var(--status-warn)">※設備投資が未収集のため「その他投資CF」に投資CF全額を表示しています。</b>';
   note.innerHTML = '棒＝CF区分（億円）／折れ線＝フリーCF（営業CF＋投資CF）。粒度で内訳の細かさが変わります。' + warn;
 
   charts.cf = new Chart(canvas, {
     type:'bar',
     data:{ labels, datasets },
     options: baseOpts({ scales:{
-      x:{ ticks:{color:'#94a3b8'}, grid:{color:'#1e2235'} },
-      y:{ title:{display:true, text:'億円', color:'#64748b'}, ticks:{color:'#94a3b8'}, grid:{color:'#1e2235'} },
+      x:{ ticks:{color:cssVar('--text-secondary')}, grid:{color:cssVar('--border-subtle')} },
+      y:{ title:{display:true, text:'億円', color:cssVar('--text-muted')}, ticks:{color:cssVar('--text-secondary')}, grid:{color:cssVar('--border-subtle')} },
     }})
   });
 }
@@ -615,9 +604,9 @@ function renderPsh(labels, recs){
        borderColor:'#60a5fa', backgroundColor:'#60a5fa', tension:.3, pointRadius:3},
     ]},
     options: baseOpts({ scales:{
-      x:{ ticks:{color:'#94a3b8'}, grid:{color:'#1e2235'} },
-      y:{ title:{display:true, text:'EPS・DPS（円）', color:'#64748b'}, ticks:{color:'#94a3b8'}, grid:{color:'#1e2235'} },
-      y1:{ position:'right', title:{display:true, text:'BPS（円）', color:'#64748b'}, ticks:{color:'#60a5fa'}, grid:{drawOnChartArea:false} },
+      x:{ ticks:{color:cssVar('--text-secondary')}, grid:{color:cssVar('--border-subtle')} },
+      y:{ title:{display:true, text:'EPS・DPS（円）', color:cssVar('--text-muted')}, ticks:{color:cssVar('--text-secondary')}, grid:{color:cssVar('--border-subtle')} },
+      y1:{ position:'right', title:{display:true, text:'BPS（円）', color:cssVar('--text-muted')}, ticks:{color:'#60a5fa'}, grid:{drawOnChartArea:false} },
     }})
   });
 }
@@ -655,9 +644,9 @@ function renderMcap(labels, recs){
        borderColor:'#f59e0b', backgroundColor:'#f59e0b', tension:.3, pointRadius:3},
     ]},
     options: baseOpts({ scales:{
-      x:{ ticks:{color:'#94a3b8'}, grid:{color:'#1e2235'} },
-      y:{ title:{display:true, text:'億円', color:'#64748b'}, ticks:{color:'#94a3b8'}, grid:{color:'#1e2235'} },
-      y1:{ position:'right', title:{display:true, text:'乖離率 %', color:'#64748b'}, ticks:{color:'#f59e0b'}, grid:{drawOnChartArea:false} },
+      x:{ ticks:{color:cssVar('--text-secondary')}, grid:{color:cssVar('--border-subtle')} },
+      y:{ title:{display:true, text:'億円', color:cssVar('--text-muted')}, ticks:{color:cssVar('--text-secondary')}, grid:{color:cssVar('--border-subtle')} },
+      y1:{ position:'right', title:{display:true, text:'乖離率 %', color:cssVar('--text-muted')}, ticks:{color:'#f59e0b'}, grid:{drawOnChartArea:false} },
     }})
   });
 }
@@ -674,8 +663,8 @@ function renderPrice(hist){
        fill:true, pointRadius:0, borderWidth:1.5, tension:.1},
     ]},
     options: baseOpts({ scales:{
-      x:{ ticks:{color:'#94a3b8', maxTicksLimit:12, autoSkip:true, maxRotation:0}, grid:{color:'#1e2235'} },
-      y:{ title:{display:true, text:'円', color:'#64748b'}, ticks:{color:'#94a3b8'}, grid:{color:'#1e2235'} },
+      x:{ ticks:{color:cssVar('--text-secondary'), maxTicksLimit:12, autoSkip:true, maxRotation:0}, grid:{color:cssVar('--border-subtle')} },
+      y:{ title:{display:true, text:'円', color:cssVar('--text-muted')}, ticks:{color:cssVar('--text-secondary')}, grid:{color:cssVar('--border-subtle')} },
     }})
   });
 }
@@ -690,9 +679,9 @@ function renderZscore(latest){
       datasets:[{ label:`業種内Zスコア (${latest.year})`, data:vals,
         borderColor:'#a78bfa', backgroundColor:'rgba(167,139,250,.2)', pointBackgroundColor:'#a78bfa', borderWidth:2 }] },
     options:{ responsive:true, maintainAspectRatio:false,
-      plugins:{ legend:{labels:{color:'#cbd5e1'}}, tooltip:{backgroundColor:'#0f1117', borderColor:'#2d3154', borderWidth:1} },
-      scales:{ r:{ min:-2.5, max:2.5, ticks:{stepSize:1, color:'#64748b', backdropColor:'transparent'},
-        grid:{color:'#2d3154'}, angleLines:{color:'#2d3154'}, pointLabels:{color:'#cbd5e1', font:{size:11}} } } }
+      plugins:{ legend:{labels:{color:cssVar('--text-body')}}, tooltip:{backgroundColor:cssVar('--bg-sunken'), borderColor:cssVar('--border'), borderWidth:1} },
+      scales:{ r:{ min:-2.5, max:2.5, ticks:{stepSize:1, color:cssVar('--text-muted'), backdropColor:'transparent'},
+        grid:{color:cssVar('--border')}, angleLines:{color:cssVar('--border')}, pointLabels:{color:cssVar('--text-body'), font:{size:11}} } } }
   });
 }
 
@@ -705,9 +694,9 @@ function renderNC(labels, recs){
        borderColor:'#f59e0b', backgroundColor:'#f59e0b', tension:.3, pointRadius:3},
     ]},
     options: baseOpts({ scales:{
-      x:{ ticks:{color:'#94a3b8'}, grid:{color:'#1e2235'} },
-      y:{ title:{display:true, text:'億円', color:'#64748b'}, ticks:{color:'#94a3b8'}, grid:{color:'#1e2235'} },
-      y1:{ position:'right', title:{display:true, text:'NC比率（倍）', color:'#64748b'}, ticks:{color:'#f59e0b'}, grid:{drawOnChartArea:false} },
+      x:{ ticks:{color:cssVar('--text-secondary')}, grid:{color:cssVar('--border-subtle')} },
+      y:{ title:{display:true, text:'億円', color:cssVar('--text-muted')}, ticks:{color:cssVar('--text-secondary')}, grid:{color:cssVar('--border-subtle')} },
+      y1:{ position:'right', title:{display:true, text:'NC比率（倍）', color:cssVar('--text-muted')}, ticks:{color:'#f59e0b'}, grid:{drawOnChartArea:false} },
     }})
   });
 }
@@ -765,7 +754,7 @@ async function loadPeers(){
     const L = p.latest, isMe = p.edinet_code === curCompany.code;
     const rank = rankMap[p.edinet_code] || (idx + 1);
     return `<tr class="${isMe ? 'me' : ''}">
-      <td class="num" style="color:#64748b">${rank}</td>
+      <td class="num" style="color:var(--text-muted)">${rank}</td>
       <td>${esc(p.sec_code || '-')}</td>
       <td><a href="/company/${esc(p.edinet_code)}">${esc(p.name)}</a></td>
       <td class="num">${fmtNum(toOku(L.pl.revenue))}</td>
@@ -782,7 +771,7 @@ async function loadPeers(){
     <tbody>${rows}</tbody></table>`;
 
   const names = top.map(p => p.name.length > 8 ? p.name.slice(0, 8) + '…' : p.name);
-  const colors = top.map(p => p.edinet_code === curCompany.code ? '#a78bfa' : '#475569');
+  const colors = top.map(p => p.edinet_code === curCompany.code ? cssVar('--accent-text') : cssVar('--text-muted'));
   peerBar('chart-peer-opm', names, top.map(p => p.latest.pl.op_margin), colors, '営業利益率(%)');
   peerBar('chart-peer-roe', names, top.map(p => p.latest.val.roe), colors, 'ROE(%)');
 }
@@ -793,8 +782,8 @@ function peerBar(canvasId, names, data, colors, label){
     type:'bar',
     data:{ labels:names, datasets:[{ label, data, backgroundColor:colors, borderRadius:3 }] },
     options: baseOpts({ indexAxis:'y', plugins:{ legend:{display:false} }, scales:{
-      x:{ title:{display:true, text:'%', color:'#64748b'}, ticks:{color:'#94a3b8'}, grid:{color:'#1e2235'} },
-      y:{ ticks:{color:'#94a3b8'}, grid:{color:'#1e2235'} },
+      x:{ title:{display:true, text:'%', color:cssVar('--text-muted')}, ticks:{color:cssVar('--text-secondary')}, grid:{color:cssVar('--border-subtle')} },
+      y:{ ticks:{color:cssVar('--text-secondary')}, grid:{color:cssVar('--border-subtle')} },
     }})
   });
 }
@@ -812,3 +801,11 @@ async function init(){
   if (code){ loadCompany(code); }
 }
 init();
+
+window.onThemeChange = function(){
+  if (window.Chart){
+    Chart.defaults.color = cssVar('--text-secondary');
+    Chart.defaults.borderColor = cssVar('--border-subtle');
+  }
+  if (curCompany.code) loadCompany(curCompany.code);
+};

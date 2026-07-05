@@ -4,39 +4,73 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>ログイン — 財務分析ツール</title>
+<script src="/static/js/theme-init.js"></script>
 <style>
+:root{
+  --bg:#0f1117;--bg-elevated:#1a1d2e;--bg-sunken:#0f1117;--bg-hover:#1e293b;
+  --border:#2d3154;--border-muted:#334155;--border-subtle:#1e2235;
+  --text:#e2e8f0;--text-secondary:#94a3b8;--text-muted:#64748b;--text-body:#cbd5e1;
+  --accent:#7c3aed;--accent-hover:#6d28d9;--accent-text:#a78bfa;
+  --accent-soft-bg:#312e81;--accent-soft-text:#c4b5fd;--accent-deep-bg:#2e1065;
+  --status-good:#10b981;--status-good-bg:#052e16;--status-good-text:#86efac;
+  --status-bad:#ef4444;--status-bad-bg:#450a0a;--status-bad-text:#fca5a5;
+  --status-warn:#f59e0b;--status-warn-bg:#451a03;--status-warn-text:#fcd34d;
+  --status-info:#60a5fa;--status-info-bg:#1e3a5f;--status-info-text:#93c5fd;
+  --val-up:#3b82f6;--val-up-bg:#1e3a5f;--val-up-text:#93c5fd;
+  --val-down:#ef4444;--val-down-bg:#450a0a;--val-down-text:#fca5a5;
+  --val-neutral:#10b981;--val-neutral-bg:#052e16;--val-neutral-text:#86efac;
+  --shadow-color:rgba(0,0,0,.4);
+}
+:root[data-theme="light"]{
+  --bg:#f8fafc;--bg-elevated:#ffffff;--bg-sunken:#f1f5f9;--bg-hover:#e2e8f0;
+  --border:#e2e8f0;--border-muted:#cbd5e1;--border-subtle:#e5e7eb;
+  --text:#0f172a;--text-secondary:#475569;--text-muted:#94a3b8;--text-body:#334155;
+  --accent:#7c3aed;--accent-hover:#6d28d9;--accent-text:#6d28d9;
+  --accent-soft-bg:#ede9fe;--accent-soft-text:#6d28d9;--accent-deep-bg:#ddd6fe;
+  --status-good:#059669;--status-good-bg:#d1fae5;--status-good-text:#065f46;
+  --status-bad:#dc2626;--status-bad-bg:#fee2e2;--status-bad-text:#991b1b;
+  --status-warn:#d97706;--status-warn-bg:#fef3c7;--status-warn-text:#92400e;
+  --status-info:#2563eb;--status-info-bg:#dbeafe;--status-info-text:#1e40af;
+  --val-up:#2563eb;--val-up-bg:#dbeafe;--val-up-text:#1e40af;
+  --val-down:#dc2626;--val-down-bg:#fee2e2;--val-down-text:#991b1b;
+  --val-neutral:#059669;--val-neutral-bg:#d1fae5;--val-neutral-text:#065f46;
+  --shadow-color:rgba(0,0,0,.12);
+}
 *{box-sizing:border-box;margin:0;padding:0}
-body{font-family:'Segoe UI',sans-serif;background:#0f1117;color:#e2e8f0;min-height:100vh;display:flex;align-items:center;justify-content:center}
-.card{background:#1a1d2e;border:1px solid #2d3154;border-radius:12px;padding:36px 40px;width:360px}
+body{font-family:'Segoe UI',sans-serif;background:var(--bg);color:var(--text);min-height:100vh;display:flex;align-items:center;justify-content:center}
+.card{background:var(--bg-elevated);border:1px solid var(--border);border-radius:12px;padding:36px 40px;width:360px}
 .logo{display:flex;align-items:center;gap:12px;margin-bottom:28px}
-.logo-icon{width:36px;height:36px;background:#312e81;border-radius:10px;display:flex;align-items:center;justify-content:center;flex-shrink:0}
-h1{font-size:18px;font-weight:600;color:#a78bfa}
-.sub{font-size:12px;color:#64748b;margin-top:2px}
-label{display:block;font-size:12px;color:#94a3b8;margin-bottom:6px;margin-top:20px}
-input[type=password]{width:100%;background:#0f1117;border:1px solid #334155;border-radius:6px;padding:10px 12px;color:#e2e8f0;font-size:14px;outline:none;transition:border-color .2s}
-input[type=password]:focus{border-color:#7c3aed}
-.btn{width:100%;margin-top:24px;padding:11px;background:#7c3aed;color:#fff;border:none;border-radius:6px;font-size:14px;font-weight:600;cursor:pointer;transition:background .2s}
-.btn:hover{background:#6d28d9}
-.btn:disabled{background:#4a4a6a;cursor:not-allowed}
-.btn-secondary{width:100%;margin-top:10px;padding:9px;background:transparent;color:#7c3aed;border:1px solid #7c3aed;border-radius:6px;font-size:13px;font-weight:500;cursor:pointer;transition:all .2s}
-.btn-secondary:hover{background:#1e1b3a}
-.error{color:#f87171;font-size:12px;margin-top:12px;text-align:center;display:none}
-.success{color:#4ade80;font-size:12px;margin-top:12px;text-align:center;display:none}
-.forgot-link{display:block;text-align:center;margin-top:16px;font-size:12px;color:#64748b;cursor:pointer;text-decoration:underline}
-.forgot-link:hover{color:#94a3b8}
+.logo-icon{width:36px;height:36px;background:var(--accent-soft-bg);border-radius:10px;display:flex;align-items:center;justify-content:center;flex-shrink:0}
+h1{font-size:18px;font-weight:600;color:var(--accent-text)}
+.sub{font-size:12px;color:var(--text-muted);margin-top:2px}
+label{display:block;font-size:12px;color:var(--text-secondary);margin-bottom:6px;margin-top:20px}
+input[type=password]{width:100%;background:var(--bg-sunken);border:1px solid var(--border-muted);border-radius:6px;padding:10px 12px;color:var(--text);font-size:14px;outline:none;transition:border-color .2s}
+input[type=password]:focus{border-color:var(--accent)}
+.btn{width:100%;margin-top:24px;padding:11px;background:var(--accent);color:#fff;border:none;border-radius:6px;font-size:14px;font-weight:600;cursor:pointer;transition:background .2s}
+.btn:hover{background:var(--accent-hover)}
+.btn:disabled{opacity:.4;cursor:not-allowed}
+.btn-secondary{width:100%;margin-top:10px;padding:9px;background:transparent;color:var(--accent-text);border:1px solid var(--accent);border-radius:6px;font-size:13px;font-weight:500;cursor:pointer;transition:all .2s}
+.btn-secondary:hover{background:var(--bg-hover)}
+.error{color:var(--status-bad-text);font-size:12px;margin-top:12px;text-align:center;display:none}
+.success{color:var(--status-good-text);font-size:12px;margin-top:12px;text-align:center;display:none}
+.forgot-link{display:block;text-align:center;margin-top:16px;font-size:12px;color:var(--text-muted);cursor:pointer;text-decoration:underline}
+.forgot-link:hover{color:var(--text-secondary)}
 .panel{display:none}
+.theme-toggle-btn{background:transparent;border:1px solid var(--border-muted);color:var(--text);border-radius:6px;width:30px;height:30px;font-size:14px;cursor:pointer;display:flex;align-items:center;justify-content:center;flex-shrink:0;margin-left:auto}
+.theme-toggle-btn:hover{background:var(--bg-hover)}
 </style>
 </head>
 <body>
 <div class="card">
   <div class="logo">
     <div class="logo-icon">
-      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#a78bfa" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--accent-text)" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
     </div>
     <div>
       <h1>財務分析ツール</h1>
       <div class="sub">個人用 · 限定アクセス</div>
     </div>
+    <button id="theme-toggle" class="theme-toggle-btn" title="ライト/ダーク切替" aria-label="テーマ切替">🌙</button>
   </div>
   <!-- ログインパネル -->
   <div id="login-panel">
@@ -60,6 +94,7 @@ input[type=password]:focus{border-color:#7c3aed}
   </div>
 </div>
 
+<script src="/static/js/common.js"></script>
 <script src="/static/js/login.js"></script>
 </body>
 </html>

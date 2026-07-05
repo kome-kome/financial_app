@@ -4,17 +4,6 @@ function makeChartContainer(id, height) {
   return `<div style="position:relative;height:${height}px;margin-bottom:16px"><canvas id="${id}"></canvas></div>`;
 }
 
-function showNotif(msg, type='error'){
-  const el = document.createElement('div');
-  el.textContent = msg;
-  el.setAttribute('role', type==='error' ? 'alert' : 'status');
-  el.setAttribute('aria-live', type==='error' ? 'assertive' : 'polite');
-  const bg = type==='error' ? '#ef4444' : type==='success' ? '#10b981' : '#3b82f6';
-  el.style.cssText = `position:fixed;bottom:20px;right:20px;z-index:9999;padding:10px 16px;border-radius:6px;font-size:13px;color:#fff;max-width:420px;background:${bg};box-shadow:0 4px 12px rgba(0,0,0,.4)`;
-  document.body.appendChild(el);
-  setTimeout(()=>el.remove(), 4000);
-}
-
 let gapResults  = [];
 let _gapScatter = null, _gapHist = null;
 
@@ -78,16 +67,23 @@ function _updateFreshnessBar(available) {
   let extra = s.is_stale
     ? ' <span class="text-amber">⚠ 財務データが更新されています</span>' : '';
   if (_renderLightMode)
-    extra += ' <span style="font-size:11px;color:#64748b">| 本番は再計算不可・ローカルで更新してください</span>';
+    extra += ' <span style="font-size:11px;color:var(--text-muted)">| 本番は再計算不可・ローカルで更新してください</span>';
   content.innerHTML =
     `<span class="freshness-badge ${badgeCls}">${esc(badgeText)}</span>` +
     ` ${Number(s.n_results).toLocaleString()}社の予測値${extra}`;
 }
 if (window.Chart){
-  Chart.defaults.color = '#94a3b8';
-  Chart.defaults.borderColor = '#1e2235';
+  Chart.defaults.color = cssVar('--text-secondary');
+  Chart.defaults.borderColor = cssVar('--border-subtle');
   Chart.defaults.font.family = "'Segoe UI', sans-serif";
 }
+window.onThemeChange = function(){
+  if (window.Chart){
+    Chart.defaults.color = cssVar('--text-secondary');
+    Chart.defaults.borderColor = cssVar('--border-subtle');
+  }
+  fetchModelStatus();
+};
 
 // プラグインシステム
 const PLUGIN_TAB_MAP = {
@@ -131,13 +127,13 @@ async function preflight() {
     _gapDataExists = (d.records_with_prediction ?? 0) > 0;
     refreshGapAvailability();   // 即時: gap-ready 表示を反映
     fetchModelStatus();          // 非同期: 鮮度バーの詳細を更新
-    document.getElementById('status-fin-dot').style.background  = finOk ? '#10b981' : '#ef4444';
+    document.getElementById('status-fin-dot').style.background  = finOk ? cssVar('--status-good') : cssVar('--status-bad');
     document.getElementById('status-fin-text').textContent       = `${d.companies.toLocaleString()}社 / ${d.records.toLocaleString()}件`;
-    document.getElementById('status-fin-text').style.color       = finOk ? '#10b981' : '#ef4444';
-    document.getElementById('status-price-dot').style.background = prOk  ? '#10b981' : '#ef4444';
+    document.getElementById('status-fin-text').style.color       = finOk ? cssVar('--status-good') : cssVar('--status-bad');
+    document.getElementById('status-price-dot').style.background = prOk  ? cssVar('--status-good') : cssVar('--status-bad');
     document.getElementById('status-price-text').textContent     = `${(d.stock_price_records ?? 0).toLocaleString()}件`;
-    document.getElementById('status-price-text').style.color     = prOk  ? '#10b981' : '#ef4444';
-    document.getElementById('api-dot').style.background = '#10b981';
+    document.getElementById('status-price-text').style.color     = prOk  ? cssVar('--status-good') : cssVar('--status-bad');
+    document.getElementById('api-dot').style.background = cssVar('--status-good');
     [['btn-gap-analysis', !finOk], ['btn-recommend', !finOk],
      ['btn-backtest', !prOk],
      ['btn-bt-multi', !prOk], ['btn-mrr', !finOk || !prOk]].forEach(([id, disabled]) => {
@@ -150,7 +146,7 @@ async function preflight() {
         : '';
     });
   } catch(e) {
-    document.getElementById('api-dot').style.background = '#ef4444';
+    document.getElementById('api-dot').style.background = cssVar('--status-bad');
   }
 }
 
@@ -184,7 +180,7 @@ function renderGap(rows) {
     const gap = r.gap_ratio ?? 0;
     const gapCls = gap > 0 ? 'gap-positive' : 'gap-negative';
     const tr = r.expected_total_return_pct ?? 0;
-    const trColor = tr > 0 ? '#10b981' : '#ef4444';
+    const trColor = tr > 0 ? cssVar('--val-up') : cssVar('--val-down');
     return `<tr>
       <td><span class="tag tag-blue">${esc(r.sec_code||r.edinet_code)}</span></td>
       <td>${r.edinet_code ? `<a href="/company/${esc(r.edinet_code)}" class="co-link" style="font-weight:500">${esc(r.company_name)}</a>` : esc(r.company_name)}</td>
@@ -193,10 +189,10 @@ function renderGap(rows) {
       <td style="text-align:right;font-family:monospace">${fmt0((r.predicted_market_cap||0)/100)}</td>
       <td class="${gapCls}" style="text-align:right;font-family:monospace">${gap>0?'+':''}${gap}%</td>
       <td style="text-align:right;font-family:monospace;font-weight:600;color:${trColor}">${tr>0?'+':''}${tr}%</td>
-      <td style="text-align:right;font-family:monospace;color:#f59e0b">${Number(r.div_yield_pct??0)}%</td>
-      <td style="text-align:right;font-family:monospace;color:#64748b">${r.implied_per!=null?Number(r.implied_per):'-'}</td>
-      <td style="text-align:right;font-family:monospace;color:#94a3b8">${Number(r.expected_gap_6m)}%</td>
-      <td style="text-align:right;font-family:monospace;color:#94a3b8">${Number(r.expected_gap_12m)}%</td>
+      <td style="text-align:right;font-family:monospace;color:${cssVar('--status-warn')}">${Number(r.div_yield_pct??0)}%</td>
+      <td style="text-align:right;font-family:monospace;color:var(--text-muted)">${r.implied_per!=null?Number(r.implied_per):'-'}</td>
+      <td style="text-align:right;font-family:monospace;color:var(--text-secondary)">${Number(r.expected_gap_6m)}%</td>
+      <td style="text-align:right;font-family:monospace;color:var(--text-secondary)">${Number(r.expected_gap_12m)}%</td>
       <td style="text-align:right">
         <span class="tag ${r.conv_score_12m>60?'tag-green':r.conv_score_12m>40?'tag-amber':'tag-red'}" title="ヒューリスティック参考値">${Number(r.conv_score_12m)}</span>
       </td>
@@ -222,14 +218,14 @@ function renderGapCharts(rows) {
     data:{ datasets:[
       { label:'企業', data:scatterData, pointBackgroundColor:ptColors, pointRadius:3, pointHoverRadius:5 },
       { label:'理論＝実際（基準線）', type:'line', data:[{x:mn,y:mn},{x:mx,y:mx}], showLine:true,
-        borderColor:'#64748b', borderDash:[5,4], pointRadius:0, fill:false },
+        borderColor:cssVar('--text-muted'), borderDash:[5,4], pointRadius:0, fill:false },
     ]},
     options:{ responsive:true, maintainAspectRatio:false,
-      plugins:{ legend:{labels:{color:'#cbd5e1'}},
+      plugins:{ legend:{labels:{color:cssVar('--text-body')}},
         tooltip:{ callbacks:{ label:(c)=>`実際 ${fmt0(c.parsed.x)} / 理論 ${fmt0(c.parsed.y)} 億円` } } },
       scales:{
-        x:{ type:'logarithmic', title:{display:true, text:'実際時価総額（億円）', color:'#64748b'}, ticks:{color:'#94a3b8'}, grid:{color:'#1e2235'} },
-        y:{ type:'logarithmic', title:{display:true, text:'理論時価総額（億円）', color:'#64748b'}, ticks:{color:'#94a3b8'}, grid:{color:'#1e2235'} },
+        x:{ type:'logarithmic', title:{display:true, text:'実際時価総額（億円）', color:cssVar('--text-muted')}, ticks:{color:cssVar('--text-secondary')}, grid:{color:cssVar('--border-subtle')} },
+        y:{ type:'logarithmic', title:{display:true, text:'理論時価総額（億円）', color:cssVar('--text-muted')}, ticks:{color:cssVar('--text-secondary')}, grid:{color:cssVar('--border-subtle')} },
       }}
   });
 
@@ -245,15 +241,15 @@ function renderGapCharts(rows) {
     {lo:50,  hi:Infinity, label:'> 50%'},
   ];
   const counts = BINS.map(b => rows.filter(r => { const g = r.gap_ratio; return g != null && g >= b.lo && g < b.hi; }).length);
-  const histColors = BINS.map(b => b.lo >= 0 ? '#10b981' : '#ef4444');
+  const histColors = BINS.map(b => b.lo >= 0 ? cssVar('--val-up') : cssVar('--val-down'));
   if (_gapHist) _gapHist.destroy();
   _gapHist = new Chart(document.getElementById('chart-gap-hist'), {
     type:'bar',
     data:{ labels:BINS.map(b=>b.label), datasets:[{ label:'社数', data:counts, backgroundColor:histColors, borderRadius:3 }] },
     options:{ responsive:true, maintainAspectRatio:false,
       plugins:{ legend:{display:false} },
-      scales:{ x:{ ticks:{color:'#94a3b8'}, grid:{color:'#1e2235'} },
-               y:{ title:{display:true, text:'社数', color:'#64748b'}, ticks:{color:'#94a3b8'}, grid:{color:'#1e2235'}, beginAtZero:true } }}
+      scales:{ x:{ ticks:{color:cssVar('--text-secondary')}, grid:{color:cssVar('--border-subtle')} },
+               y:{ title:{display:true, text:'社数', color:cssVar('--text-muted')}, ticks:{color:cssVar('--text-secondary')}, grid:{color:cssVar('--border-subtle')}, beginAtZero:true } }}
   });
 
   card.style.display = 'block';
@@ -295,14 +291,14 @@ function renderWeightGrid() {
   grid.innerHTML = '';
   for (const [key, [label, def]] of Object.entries(WEIGHT_LABELS)) {
     grid.innerHTML += `
-      <div style="background:#0f1117;border-radius:8px;padding:10px">
-        <div style="font-size:11px;color:#64748b;margin-bottom:6px">${label}</div>
+      <div style="background:var(--bg-sunken);border-radius:8px;padding:10px">
+        <div style="font-size:11px;color:var(--text-muted);margin-bottom:6px">${label}</div>
         <div style="display:flex;align-items:center;gap:8px">
           <input type="range" min="-2" max="3" step="0.1" value="${def}"
-            style="flex:1;accent-color:#7c3aed;cursor:pointer"
+            style="flex:1;accent-color:var(--accent);cursor:pointer"
             data-input="syncWVal" data-target="w-val-${key}"
             id="range-${key}">
-          <span id="w-val-${key}" style="font-size:14px;font-weight:600;color:#a78bfa;min-width:32px;text-align:right">${def.toFixed(1)}</span>
+          <span id="w-val-${key}" style="font-size:14px;font-weight:600;color:var(--accent-text);min-width:32px;text-align:right">${def.toFixed(1)}</span>
         </div>
       </div>`;
   }
@@ -349,23 +345,23 @@ async function runRecommend() {
     const tbody = document.getElementById('rec-tbody');
     tbody.innerHTML = '';
     for (const r of d.results) {
-      const rankColor = r.rank === 1 ? '#f59e0b' : r.rank <= 3 ? '#fcd34d' : '#e2e8f0';
-      const scoreColor = r.score > 2 ? '#10b981' : r.score > 0 ? '#a78bfa' : '#94a3b8';
+      const rankColor = r.rank === 1 ? cssVar('--status-warn') : r.rank <= 3 ? cssVar('--status-warn-text') : cssVar('--text');
+      const scoreColor = r.score > 2 ? cssVar('--val-up') : r.score > 0 ? cssVar('--accent-text') : cssVar('--text-secondary');
       const fmtPct = (v, good='positive') => v == null ? '-'
         : `<span class="gap-${v >= 0 ? good : (good==='positive'?'negative':'positive')}">${v >= 0 ? '+' : ''}${v.toFixed(1)}%</span>`;
       const fmtCap = v => v == null ? '-' : Math.round(v / 100).toLocaleString() + '億円';
       tbody.innerHTML += `
         <tr>
           <td style="font-weight:700;color:${rankColor};font-size:15px">${Number(r.rank)}</td>
-          <td style="color:#38bdf8;font-weight:600">${esc(r.sec_code || '-')}</td>
+          <td style="color:${cssVar('--status-info')};font-weight:600">${esc(r.sec_code || '-')}</td>
           <td>${r.edinet_code ? `<a href="/company/${esc(r.edinet_code)}" class="co-link" style="font-weight:600">${esc(r.company_name)}</a>` : esc(r.company_name)}</td>
-          <td style="color:#94a3b8;font-size:11px">${esc(r.industry || '-')}</td>
+          <td style="color:var(--text-secondary);font-size:11px">${esc(r.industry || '-')}</td>
           <td style="font-weight:700;color:${scoreColor}">${r.score.toFixed(2)}</td>
           <td>${r.roe != null ? r.roe.toFixed(1) + '%' : '-'}</td>
           <td>${r.op_margin != null ? r.op_margin.toFixed(1) + '%' : '-'}</td>
           <td>${fmtPct(r.rev_growth)}</td>
           <td>${fmtPct(r.gap_ratio)}</td>
-          <td style="color:#94a3b8;font-size:12px">${fmtCap(r.market_cap)}</td>
+          <td style="color:var(--text-secondary);font-size:12px">${fmtCap(r.market_cap)}</td>
         </tr>`;
     }
     document.getElementById('rec-result-card').style.display = 'block';
@@ -413,13 +409,13 @@ function initSellRanking() {
   const grid = document.getElementById('sell-weight-grid');
   if (grid) {
     grid.innerHTML = Object.entries(SELL_WEIGHT_LABELS).map(([key, [label, def]]) => `
-      <div style="background:#0f1117;border-radius:8px;padding:10px">
-        <div style="font-size:11px;color:#64748b;margin-bottom:6px">${label}</div>
+      <div style="background:var(--bg-sunken);border-radius:8px;padding:10px">
+        <div style="font-size:11px;color:var(--text-muted);margin-bottom:6px">${label}</div>
         <div style="display:flex;align-items:center;gap:8px">
           <input type="range" min="0" max="3" step="0.1" value="${def}"
-            style="flex:1;accent-color:#ef4444;cursor:pointer"
+            style="flex:1;accent-color:${cssVar('--val-down')};cursor:pointer"
             data-input="syncWVal" data-target="sw-val-${key}" id="srange-${key}">
-          <span id="sw-val-${key}" style="font-size:14px;font-weight:600;color:#fca5a5;min-width:32px;text-align:right">${def.toFixed(1)}</span>
+          <span id="sw-val-${key}" style="font-size:14px;font-weight:600;color:${cssVar('--val-down-text')};min-width:32px;text-align:right">${def.toFixed(1)}</span>
         </div>
       </div>`).join('');
   }
@@ -479,14 +475,15 @@ async function runSellRanking() {
   }
 }
 
+// トークン名だけを保持し、実色は使用時に cssVar() で解決する（テーマ切替に追従させるため）。
 const SELL_ACTION_STYLE = {
-  'SELL':    ['#ef4444', '売却'],
-  'REDUCE':  ['#f59e0b', '一部売却'],
-  'HOLD':    ['#64748b', '保有継続'],
-  'データ不足': ['#475569', 'データ不足'],
+  'SELL':    ['--val-down', '売却'],
+  'REDUCE':  ['--status-warn', '一部売却'],
+  'HOLD':    ['--text-muted', '保有継続'],
+  'データ不足': ['--text-muted', 'データ不足'],
 };
 const SELL_TREND_STYLE = {
-  '下落': '#fca5a5', '上昇': '#86efac', '横ばい': '#94a3b8', '不明': '#64748b',
+  '下落': '--val-down-text', '上昇': '--val-up-text', '横ばい': '--text-secondary', '不明': '--text-muted',
 };
 
 function renderSellRanking(d) {
@@ -500,11 +497,11 @@ function renderSellRanking(d) {
   if (d.invalid && d.invalid.length)
     notes.push(`<span class="text-amber">⚠ 解釈できなかった入力: ${esc(d.invalid.join(' / '))}</span>`);
   if (d.gap_available === false)
-    notes.push(`<span style="color:#64748b">※ 割高度は業種別OLS未実行のため売り判定から除外されています</span>`);
+    notes.push(`<span style="color:var(--text-muted)">※ 割高度は業種別OLS未実行のため売り判定から除外されています</span>`);
   if (d.mu_available === false) {
     const _lbl = d.mu_source === 'macro_gbdt' ? 'M-2（勾配ブースティング）' : 'M-1（マクロリスク-リターン）';
     const _act = d.mu_source === 'macro_gbdt' ? 'M-2 を分析タブでローカル実行してください' : 'M-1 を実行してください';
-    notes.push(`<span style="color:#64748b">※ ${_lbl} 未実行のため μ・マクロリスク成分は除外されています（${_act}）</span>`);
+    notes.push(`<span style="color:var(--text-muted)">※ ${_lbl} 未実行のため μ・マクロリスク成分は除外されています（${_act}）</span>`);
   }
   document.getElementById('sell-notes').innerHTML = notes.join('<br>');
 
@@ -515,18 +512,19 @@ function renderSellRanking(d) {
   };
   const tbody = document.getElementById('sell-tbody');
   tbody.innerHTML = sellResults.map(r => {
-    const [aColor, aLabel] = SELL_ACTION_STYLE[r.action] || ['#64748b', r.action];
-    const tColor = SELL_TREND_STYLE[r.trend] || '#64748b';
-    const scoreColor = r.score == null ? '#64748b' : r.score > 0 ? '#fca5a5' : '#86efac';
+    const [aColorTok, aLabel] = SELL_ACTION_STYLE[r.action] || ['--text-muted', r.action];
+    const aColor = cssVar(aColorTok);
+    const tColor = cssVar(SELL_TREND_STYLE[r.trend] || '--text-muted');
+    const scoreColor = r.score == null ? cssVar('--text-muted') : r.score > 0 ? cssVar('--val-down-text') : cssVar('--val-up-text');
     // 損益: 取得単価が無ければ '-'
-    const pnl = r.pnl_pct == null ? '<span style="color:#475569">-</span>'
+    const pnl = r.pnl_pct == null ? '<span style="color:var(--text-muted)">-</span>'
       : `<span class="${r.pnl_pct >= 0 ? 'gap-positive' : 'gap-negative'}">${r.pnl_pct >= 0 ? '+' : ''}${Number(r.pnl_pct).toFixed(1)}%</span>`;
     return `<tr>
-      <td style="font-weight:700;color:#e2e8f0">${Number(r.rank)}</td>
+      <td style="font-weight:700;color:var(--text)">${Number(r.rank)}</td>
       <td><span class="tag" style="background:${aColor}22;color:${aColor};font-weight:700">${esc(aLabel)}</span></td>
-      <td style="color:#38bdf8;font-weight:600">${esc(r.sec_code || '-')}</td>
+      <td style="color:${cssVar('--status-info')};font-weight:600">${esc(r.sec_code || '-')}</td>
       <td>${r.edinet_code ? `<a href="/company/${esc(r.edinet_code)}" class="co-link" style="font-weight:600">${esc(r.company_name)}</a>` : esc(r.company_name)}</td>
-      <td style="color:#94a3b8;font-size:11px">${esc(r.industry || '-')}</td>
+      <td style="color:var(--text-secondary);font-size:11px">${esc(r.industry || '-')}</td>
       <td style="font-weight:700;color:${scoreColor}">${r.score == null ? '-' : Number(r.score).toFixed(2)}</td>
       <td style="color:${tColor};font-weight:600">${esc(r.trend)}</td>
       <td style="text-align:right">${fmtPct(r.ret_13w, true)}</td>
@@ -597,34 +595,34 @@ function renderNetCash() {
   const tbody = document.getElementById('nc-tbody');
   const fmt = v => (v === null || v === undefined) ? '-' : Number(v).toLocaleString();
   tbody.innerHTML = ncResults.map(r => {
-    const ratioColor = r.nc_ratio >= 1.0 ? '#fbbf24'
-                     : r.nc_ratio >= 0.5 ? '#86efac'
-                     : r.nc_ratio >= 0   ? '#94a3b8'
-                                          : '#fca5a5';
-    const ncColor = r.net_cash_oku >= 0 ? '#86efac' : '#fca5a5';
-    const ncavRatioColor = (r.ncav_ratio === null || r.ncav_ratio === undefined) ? '#64748b'
-                         : r.ncav_ratio >= 1.5 ? '#67e8f9'
-                         : r.ncav_ratio >= 1.0 ? '#86efac'
-                         : r.ncav_ratio >= 0   ? '#94a3b8'
-                                                : '#fca5a5';
-    const ocfColor = (r.operating_cf_oku === null || r.operating_cf_oku === undefined) ? '#64748b'
-                   : r.operating_cf_oku >= 0 ? '#94a3b8' : '#fca5a5';
-    const invNote = r.has_investment_sec ? '' : '<span style="color:#64748b" title="投資有価証券データ未取得（古いレコード）"> *</span>';
-    const netnetBadge = r.is_graham_netnet ? '<span title="グレアムのネットネット（時価総額 < NCAV×2/3）" style="color:#67e8f9"> ★</span>' : '';
+    const ratioColor = r.nc_ratio >= 1.0 ? cssVar('--status-warn-text')
+                     : r.nc_ratio >= 0.5 ? cssVar('--val-up-text')
+                     : r.nc_ratio >= 0   ? cssVar('--text-secondary')
+                                          : cssVar('--val-down-text');
+    const ncColor = r.net_cash_oku >= 0 ? cssVar('--val-up-text') : cssVar('--val-down-text');
+    const ncavRatioColor = (r.ncav_ratio === null || r.ncav_ratio === undefined) ? cssVar('--text-muted')
+                         : r.ncav_ratio >= 1.5 ? cssVar('--status-info-text')
+                         : r.ncav_ratio >= 1.0 ? cssVar('--val-up-text')
+                         : r.ncav_ratio >= 0   ? cssVar('--text-secondary')
+                                                : cssVar('--val-down-text');
+    const ocfColor = (r.operating_cf_oku === null || r.operating_cf_oku === undefined) ? cssVar('--text-muted')
+                   : r.operating_cf_oku >= 0 ? cssVar('--text-secondary') : cssVar('--val-down-text');
+    const invNote = r.has_investment_sec ? '' : '<span style="color:var(--text-muted)" title="投資有価証券データ未取得（古いレコード）"> *</span>';
+    const netnetBadge = r.is_graham_netnet ? `<span title="グレアムのネットネット（時価総額 < NCAV×2/3）" style="color:${cssVar('--status-info-text')}"> ★</span>` : '';
     return `<tr>
       <td>${r.rank}</td>
-      <td><code style="color:#67e8f9">${esc(r.sec_code || '')}</code></td>
+      <td><code style="color:${cssVar('--status-info-text')}">${esc(r.sec_code || '')}</code></td>
       <td>${r.edinet_code ? `<a href="/company/${esc(r.edinet_code)}" class="co-link">${esc(r.company_name || '')}</a>` : esc(r.company_name || '')}</td>
-      <td style="color:#94a3b8">${esc(r.industry || '')}</td>
+      <td style="color:var(--text-secondary)">${esc(r.industry || '')}</td>
       <td>${r.year ?? '-'}</td>
       <td style="text-align:right;color:${ncColor};font-weight:600">${fmt(r.net_cash_oku)}</td>
       <td style="text-align:right;color:${ratioColor};font-weight:600">${Number(r.nc_ratio).toFixed(3)}</td>
-      <td style="text-align:right;color:#cbd5e1">${fmt(r.ncav_oku)}</td>
+      <td style="text-align:right;color:var(--text-body)">${fmt(r.ncav_oku)}</td>
       <td style="text-align:right;color:${ncavRatioColor};font-weight:600">${(r.ncav_ratio === null || r.ncav_ratio === undefined) ? '-' : Number(r.ncav_ratio).toFixed(3)}${netnetBadge}</td>
       <td style="text-align:right">${fmt(r.market_cap_oku)}</td>
-      <td style="text-align:right;color:#94a3b8">${fmt(r.current_assets_oku)}</td>
-      <td style="text-align:right;color:#94a3b8">${fmt(r.investment_sec_oku)}${invNote}</td>
-      <td style="text-align:right;color:#94a3b8">${fmt(r.total_liabilities_oku)}</td>
+      <td style="text-align:right;color:var(--text-secondary)">${fmt(r.current_assets_oku)}</td>
+      <td style="text-align:right;color:var(--text-secondary)">${fmt(r.investment_sec_oku)}${invNote}</td>
+      <td style="text-align:right;color:var(--text-secondary)">${fmt(r.total_liabilities_oku)}</td>
       <td style="text-align:right;color:${ocfColor}">${fmt(r.operating_cf_oku)}</td>
       <td style="text-align:right">${r.per ?? '-'}</td>
       <td style="text-align:right">${r.pbr ?? '-'}</td>
@@ -685,7 +683,7 @@ function _renderBtSummary(s) {
   const grid = document.getElementById('bt-summary-grid');
   const pctEl = document.getElementById('bt-percentile');
   if (!s) {
-    grid.innerHTML = '<div class="text-sm" style="color:#64748b;padding:12px">株価データが不足しているため、リターンを計算できませんでした。株価履歴を収集してから実行してください。</div>';
+    grid.innerHTML = '<div class="text-sm" style="color:var(--text-muted);padding:12px">株価データが不足しているため、リターンを計算できませんでした。株価履歴を収集してから実行してください。</div>';
     if (pctEl) pctEl.innerHTML = '';
     return;
   }
@@ -702,7 +700,7 @@ function _renderBtSummary(s) {
     </div>
     <div class="stat-card">
       <div class="stat-label">勝率（プラスリターン）</div>
-      <div class="stat-value" style="font-size:18px;color:${s.win_rate_pct >= 50 ? '#10b981' : '#ef4444'}">${s.win_rate_pct}%</div>
+      <div class="stat-value" style="font-size:18px;color:${s.win_rate_pct >= 50 ? cssVar('--val-up') : cssVar('--val-down')}">${s.win_rate_pct}%</div>
       <div class="card-sub">${s.n_with_data}社中</div>
     </div>
     <div class="stat-card">
@@ -717,27 +715,27 @@ function _renderBtSummary(s) {
   const p25x = toX(s.p25_pct ?? 0), p75x = toX(s.p75_pct ?? 0);
   const medx = toX(s.median_return_pct ?? 0), avgx = toX(s.avg_return_pct ?? 0);
   pctEl.innerHTML = `
-    <div style="font-size:11px;color:#64748b;margin-bottom:8px">
+    <div style="font-size:11px;color:var(--text-muted);margin-bottom:8px">
       パーセンタイル &nbsp;
-      <span style="color:#94a3b8">p5 = ${fmtR(s.p5_pct)}</span> &nbsp;
-      <span style="color:#c4b5fd">p25 = ${fmtR(s.p25_pct)}</span> &nbsp;
-      <span style="color:#a78bfa;font-weight:600">中央値 = ${fmtR(s.median_return_pct)}</span> &nbsp;
-      <span style="color:#c4b5fd">p75 = ${fmtR(s.p75_pct)}</span> &nbsp;
-      <span style="color:#94a3b8">p95 = ${fmtR(s.p95_pct)}</span>
+      <span style="color:var(--text-secondary)">p5 = ${fmtR(s.p5_pct)}</span> &nbsp;
+      <span style="color:var(--accent-soft-text)">p25 = ${fmtR(s.p25_pct)}</span> &nbsp;
+      <span style="color:var(--accent-text);font-weight:600">中央値 = ${fmtR(s.median_return_pct)}</span> &nbsp;
+      <span style="color:var(--accent-soft-text)">p75 = ${fmtR(s.p75_pct)}</span> &nbsp;
+      <span style="color:var(--text-secondary)">p95 = ${fmtR(s.p95_pct)}</span>
     </div>
     <div style="position:relative;height:28px">
-      <div style="position:absolute;left:1%;right:1%;top:50%;height:1px;background:#334155"></div>
-      <div style="position:absolute;left:${p25x}%;width:${p75x - p25x}%;top:5px;height:18px;background:#312e81;border:1px solid #6d28d9;border-radius:3px"></div>
-      <div style="position:absolute;left:${medx}%;top:3px;width:2px;height:22px;background:#a78bfa;transform:translateX(-50%)"></div>
-      <div style="position:absolute;left:${avgx}%;top:50%;transform:translate(-50%,-50%);width:8px;height:8px;border-radius:50%;background:#f59e0b"></div>
-      <div style="position:absolute;left:1%;top:6px;width:2px;height:16px;background:#475569"></div>
-      <div style="position:absolute;right:1%;top:6px;width:2px;height:16px;background:#475569"></div>
+      <div style="position:absolute;left:1%;right:1%;top:50%;height:1px;background:var(--border-muted)"></div>
+      <div style="position:absolute;left:${p25x}%;width:${p75x - p25x}%;top:5px;height:18px;background:var(--accent-soft-bg);border:1px solid var(--accent-hover);border-radius:3px"></div>
+      <div style="position:absolute;left:${medx}%;top:3px;width:2px;height:22px;background:var(--accent-text);transform:translateX(-50%)"></div>
+      <div style="position:absolute;left:${avgx}%;top:50%;transform:translate(-50%,-50%);width:8px;height:8px;border-radius:50%;background:var(--status-warn)"></div>
+      <div style="position:absolute;left:1%;top:6px;width:2px;height:16px;background:var(--text-muted)"></div>
+      <div style="position:absolute;right:1%;top:6px;width:2px;height:16px;background:var(--text-muted)"></div>
     </div>
-    <div style="font-size:10px;color:#475569;margin-top:4px">
-      <span style="color:#475569">| p5〜p95の全範囲</span> &nbsp;
-      <span style="color:#6d28d9">■ IQR（p25〜p75）</span> &nbsp;
-      <span style="color:#a78bfa">| 中央値</span> &nbsp;
-      <span style="color:#f59e0b">● 平均</span>
+    <div style="font-size:10px;color:var(--text-muted);margin-top:4px">
+      <span style="color:var(--text-muted)">| p5〜p95の全範囲</span> &nbsp;
+      <span style="color:var(--accent-hover)">■ IQR（p25〜p75）</span> &nbsp;
+      <span style="color:var(--accent-text)">| 中央値</span> &nbsp;
+      <span style="color:var(--status-warn)">● 平均</span>
     </div>`;
 }
 
@@ -750,10 +748,10 @@ function _renderBtBenchmark(s) {
   const b = s.benchmark_avg_pct;
   const e = s.excess_return_pct;
   box.innerHTML = `ベンチマーク平均リターン（スコアリング対象 ${s.n_benchmark}社）:
-    <strong style="color:${b >= 0 ? '#10b981' : '#ef4444'}">${b >= 0 ? '+' : ''}${b}%</strong>
+    <strong style="color:${b >= 0 ? cssVar('--val-up') : cssVar('--val-down')}">${b >= 0 ? '+' : ''}${b}%</strong>
     &nbsp;|&nbsp; 超過収益:
-    <strong style="color:${(e ?? 0) >= 0 ? '#10b981' : '#ef4444'}">${(e ?? 0) >= 0 ? '+' : ''}${e ?? '-'}%</strong>
-    <span style="color:#64748b;font-size:11px;margin-left:8px">（ベンチマーク = 同期間のスコアリング対象全社の平均）</span>`;
+    <strong style="color:${(e ?? 0) >= 0 ? cssVar('--val-up') : cssVar('--val-down')}">${(e ?? 0) >= 0 ? '+' : ''}${e ?? '-'}%</strong>
+    <span style="color:var(--text-muted);font-size:11px;margin-left:8px">（ベンチマーク = 同期間のスコアリング対象全社の平均）</span>`;
 }
 
 function _renderBtTable(rows) {
@@ -766,11 +764,11 @@ function _renderBtTable(rows) {
       <td><span class="tag tag-blue">${esc(r.sec_code||r.edinet_code)}</span></td>
       <td>${r.edinet_code ? `<a href="/company/${esc(r.edinet_code)}" class="co-link" style="font-weight:500">${esc(r.company_name)}</a>` : esc(r.company_name)}</td>
       <td><span class="tag tag-amber" style="font-size:10px">${esc(r.industry||'-')}</span></td>
-      <td style="font-family:monospace;color:#a78bfa">${r.score}</td>
+      <td style="font-family:monospace;color:var(--accent-text)">${r.score}</td>
       <td style="text-align:right;font-family:monospace">${r.start_price != null ? '&yen;' + Math.round(r.start_price).toLocaleString() : '-'}</td>
       <td style="text-align:right;font-family:monospace">${r.end_price != null ? '&yen;' + Math.round(r.end_price).toLocaleString() : '-'}</td>
       <td class="${cls}" style="text-align:right;font-family:monospace;font-weight:600">${txt}</td>
-      <td style="color:#64748b;font-size:11px">${r.start_date||'-'}</td>
+      <td style="color:var(--text-muted);font-size:11px">${r.start_date||'-'}</td>
     </tr>`;
   }).join('');
 }
@@ -821,28 +819,28 @@ function _renderBtHistogram(rows) {
   const bars = BINS.map((b, i) => {
     const bH = Math.max(Math.round((b.n / maxN) * cH), b.n > 0 ? 2 : 0);
     const x = PL + i * bW + 2, y = PT + (cH - bH);
-    const col = b.lo >= 0 ? '#10b981' : b.hi <= 0 ? '#ef4444' : '#f59e0b';
+    const col = b.lo >= 0 ? cssVar('--val-up') : b.hi <= 0 ? cssVar('--val-down') : cssVar('--val-neutral');
     return [
       `<rect x="${x}" y="${y}" width="${bW - 4}" height="${bH}" fill="${col}" opacity="0.85" rx="2"/>`,
-      b.n > 0 ? `<text x="${x+(bW-4)/2}" y="${y-4}" text-anchor="middle" fill="#e2e8f0" font-size="10">${b.n}</text>` : '',
-      `<text x="${x+(bW-4)/2}" y="${PT+cH+16}" text-anchor="middle" fill="#64748b" font-size="9" transform="rotate(-20 ${x+(bW-4)/2} ${PT+cH+16})">${b.label}</text>`,
+      b.n > 0 ? `<text x="${x+(bW-4)/2}" y="${y-4}" text-anchor="middle" fill="${cssVar('--text')}" font-size="10">${b.n}</text>` : '',
+      `<text x="${x+(bW-4)/2}" y="${PT+cH+16}" text-anchor="middle" fill="${cssVar('--text-muted')}" font-size="9" transform="rotate(-20 ${x+(bW-4)/2} ${PT+cH+16})">${b.label}</text>`,
     ].join('');
   }).join('');
 
   const yLines = [0, Math.ceil(maxN/2), maxN].map(v => {
     const y = PT + cH - Math.round((v/maxN)*cH);
-    return `<line x1="${PL}" y1="${y}" x2="${PL+cW}" y2="${y}" stroke="#1e293b" stroke-width="1"/>
-            <text x="${PL-4}" y="${y+3}" text-anchor="end" fill="#475569" font-size="9">${v}</text>`;
+    return `<line x1="${PL}" y1="${y}" x2="${PL+cW}" y2="${y}" stroke="${cssVar('--border-subtle')}" stroke-width="1"/>
+            <text x="${PL-4}" y="${y+3}" text-anchor="end" fill="${cssVar('--text-muted')}" font-size="9">${v}</text>`;
   }).join('');
 
   el.innerHTML = `
-    <div style="font-size:11px;color:#64748b;margin-bottom:6px">リターン分布ヒストグラム（銘柄数）</div>
+    <div style="font-size:11px;color:var(--text-muted);margin-bottom:6px">リターン分布ヒストグラム（銘柄数）</div>
     <svg viewBox="0 0 ${W} ${H}" style="width:100%;max-height:160px;display:block;overflow:visible">
-      <rect x="${PL}" y="${PT}" width="${cW}" height="${cH}" fill="#080c14" rx="2"/>
+      <rect x="${PL}" y="${PT}" width="${cW}" height="${cH}" fill="${cssVar('--bg-sunken')}" rx="2"/>
       ${yLines}
       ${bars}
-      <line x1="${PL}" y1="${PT}" x2="${PL}" y2="${PT+cH}" stroke="#334155" stroke-width="1"/>
-      <line x1="${PL}" y1="${PT+cH}" x2="${PL+cW}" y2="${PT+cH}" stroke="#334155" stroke-width="1"/>
+      <line x1="${PL}" y1="${PT}" x2="${PL}" y2="${PT+cH}" stroke="${cssVar('--border-muted')}" stroke-width="1"/>
+      <line x1="${PL}" y1="${PT+cH}" x2="${PL+cW}" y2="${PT+cH}" stroke="${cssVar('--border-muted')}" stroke-width="1"/>
     </svg>`;
 }
 
@@ -869,21 +867,21 @@ async function runBtMulti() {
 }
 
 function _renderBtMulti(data) {
-  const fmtR = v => v == null ? '<span style="color:#475569">-</span>' :
+  const fmtR = v => v == null ? '<span style="color:var(--text-muted)">-</span>' :
     `<span class="${v >= 0 ? 'gap-positive' : 'gap-negative'}">${v >= 0 ? '+' : ''}${v}%</span>`;
   document.getElementById('bt-multi-tbody').innerHTML = data.periods.map(p => {
     const s = p.summary;
     const wr = s?.win_rate_pct;
     return `<tr>
-      <td style="font-weight:600;color:#94a3b8">${p.holding_months}ヶ月</td>
-      <td style="color:#64748b;font-size:11px">${p.start_date || '-'}</td>
+      <td style="font-weight:600;color:var(--text-secondary)">${p.holding_months}ヶ月</td>
+      <td style="color:var(--text-muted);font-size:11px">${p.start_date || '-'}</td>
       <td style="text-align:right">${s ? fmtR(s.avg_return_pct) : '-'}</td>
       <td style="text-align:right">${s ? fmtR(s.median_return_pct) : '-'}</td>
-      <td style="text-align:right;font-family:monospace;color:#94a3b8">${s?.std_dev_pct != null ? '±'+s.std_dev_pct+'%' : '-'}</td>
-      <td style="text-align:right;color:${(wr??0)>=50?'#10b981':'#ef4444'}">${wr != null ? wr+'%' : '-'}</td>
+      <td style="text-align:right;font-family:monospace;color:var(--text-secondary)">${s?.std_dev_pct != null ? '±'+s.std_dev_pct+'%' : '-'}</td>
+      <td style="text-align:right;color:${(wr??0)>=50?cssVar('--val-up'):cssVar('--val-down')}">${wr != null ? wr+'%' : '-'}</td>
       <td style="text-align:right">${s ? fmtR(s.excess_return_pct) : '-'}</td>
-      <td style="text-align:right;font-family:monospace;font-size:11px;color:#64748b">${s ? fmtR(s.p5_pct)+'&nbsp;/&nbsp;'+fmtR(s.p95_pct) : '-'}</td>
-      <td style="text-align:right;color:#64748b">${s?.n_with_data ?? 0}社</td>
+      <td style="text-align:right;font-family:monospace;font-size:11px;color:var(--text-muted)">${s ? fmtR(s.p5_pct)+'&nbsp;/&nbsp;'+fmtR(s.p95_pct) : '-'}</td>
+      <td style="text-align:right;color:var(--text-muted)">${s?.n_with_data ?? 0}社</td>
     </tr>`;
   }).join('');
 }
@@ -996,8 +994,8 @@ function _createDynamicTab(plugin, tabId) {
     <div class="card">
       <div class="section-title">${esc(plugin.label)}<a class="co-link" href="/guide#${esc(plugin.name)}" target="_blank" rel="noopener" style="float:right;font-size:12px;font-weight:400">❓ やさしい解説</a></div>
       ${plugin.description ? `<div class="info-box" style="margin-bottom:14px">${esc(plugin.description)}</div>` : ''}
-      ${plugin.depends_on.length ? `<div class="info-box" style="border-color:#f59e0b;margin-bottom:14px">⚠ 事前実行が必要: ${esc(plugin.depends_on.join('、'))}</div>` : ''}
-      ${blocked ? `<div class="info-box" style="border-color:#ef4444;margin-bottom:14px">⚠ この分析は計算が重いため、Render 環境では実行できません。ローカルPCで実行すると結果が共有DBに保存され、本番にも反映されます。</div>` : ''}
+      ${plugin.depends_on.length ? `<div class="info-box" style="border-color:${cssVar('--status-warn')};margin-bottom:14px">⚠ 事前実行が必要: ${esc(plugin.depends_on.join('、'))}</div>` : ''}
+      ${blocked ? `<div class="info-box" style="border-color:${cssVar('--status-bad')};margin-bottom:14px">⚠ この分析は計算が重いため、Render 環境では実行できません。ローカルPCで実行すると結果が共有DBに保存され、本番にも反映されます。</div>` : ''}
       <div id="form-${esc(tabId)}">${_renderParamsForm(plugin.params_schema, tabId)}</div>
       <button class="btn btn-primary" style="margin-top:16px${blocked ? ';opacity:0.4' : ''}" data-click="runDynamicPlugin" data-arg="${esc(plugin.name)}" data-arg2="${esc(tabId)}"${blocked ? ' disabled title="Render環境ではローカルPCから実行してください"' : ''}>
         ${esc(plugin.label)}を実行
@@ -1026,18 +1024,18 @@ function _renderParamsForm(schema, tabId) {
         const sel = (field.default || []).includes(opt.value) ? ' selected' : '';
         html += `<option value="${esc(opt.value)}"${sel}>${esc(opt.label)}</option>`;
       });
-      html += '</select><div class="text-sm" style="color:#64748b;margin-top:2px">Ctrl+クリックで複数選択</div>';
+      html += '</select><div class="text-sm" style="color:var(--text-muted);margin-top:2px">Ctrl+クリックで複数選択</div>';
     } else if (field.type === 'slider') {
       // step は schema が源。未指定なら dtype から安全側に導出する（int→1 / float→'any'）。
       // これにより int スライダーが端数値を吐いて coerce_params に弾かれることはない。
       const step = field.step ?? (field.dtype === 'int' ? 1 : 'any');
       html += `<div style="display:flex;align-items:center;gap:8px">
         <input type="range" id="param-${tabId}-${key}" min="${field.min}" max="${field.max}" step="${step}" value="${field.default}"
-          data-input="syncVal" data-target="val-${tabId}-${key}" style="flex:1;accent-color:#7c3aed">
-        <span id="val-${tabId}-${key}" style="color:#a78bfa;font-weight:600;min-width:36px">${field.default}</span>
+          data-input="syncVal" data-target="val-${tabId}-${key}" style="flex:1;accent-color:var(--accent)">
+        <span id="val-${tabId}-${key}" style="color:var(--accent-text);font-weight:600;min-width:36px">${field.default}</span>
       </div>`;
     } else if (field.type === 'checkbox') {
-      html += `<input type="checkbox" id="param-${tabId}-${key}"${field.default ? ' checked' : ''} style="width:auto;accent-color:#7c3aed">`;
+      html += `<input type="checkbox" id="param-${tabId}-${key}"${field.default ? ' checked' : ''} style="width:auto;accent-color:var(--accent)">`;
     } else {
       html += `<input type="${field.type === 'number' ? 'number' : 'text'}" id="param-${tabId}-${key}" value="${field.default ?? ''}" placeholder="${field.default ?? ''}">`;
     }
@@ -1093,7 +1091,7 @@ async function runDynamicPlugin(pluginName, tabId) {
       refreshGapAvailability();   // 即時: gap-ready を表示
       fetchModelStatus();          // 非同期: 鮮度バーを新しい計算結果で更新
       content.insertAdjacentHTML('afterbegin',
-        `<div class="info-box" style="border-color:#10b981;margin-bottom:14px">
+        `<div class="info-box" style="border-color:${cssVar('--status-good')};margin-bottom:14px">
           ✓ 業種別OLSが完了しました。各銘柄の理論株価と乖離率を計算しDBに保存しました。
           <button class="btn btn-primary btn-sm" style="margin-left:12px" data-click="showTab" data-arg="gap">→ バリュエーション分析を見る</button>
         </div>`);
@@ -1119,7 +1117,7 @@ function renderSectorOls(data) {
   let html = '';
   // 欠損が多く自動ドロップした説明変数の警告
   if (Array.isArray(data.dropped_features) && data.dropped_features.length) {
-    html += `<div style="margin-bottom:12px;padding:8px 12px;border-left:3px solid #f59e0b;background:rgba(245,158,11,0.08);font-size:12px;color:#fbbf24">
+    html += `<div style="margin-bottom:12px;padding:8px 12px;border-left:3px solid ${cssVar('--status-warn')};background:rgba(245,158,11,0.08);font-size:12px;color:${cssVar('--status-warn-text')}">
       欠損が多いため自動除外した説明変数（${data.dropped_features.length}件）:
       ${data.dropped_features.map(f => `${esc(f.label)}（NULL ${Number(f.missing_rate)}% / ${Number(f.missing)}社）`).join('、')}
     </div>`;
@@ -1127,7 +1125,7 @@ function renderSectorOls(data) {
   // sector_stats サマリーを先に描画
   if (Array.isArray(data.sector_stats) && data.sector_stats.length) {
     html += `<div style="margin-bottom:16px">
-      <div style="font-size:12px;color:#a78bfa;font-weight:600;margin-bottom:6px">
+      <div style="font-size:12px;color:var(--accent-text);font-weight:600;margin-bottom:6px">
         業種別 R² サマリー（${Number(data.n_sectors||0)}業種 / ${Number(data.n_total||0)}社 / スキップ ${Number(data.n_skipped_sectors||0)}業種）
       </div>
       <div style="overflow-x:auto"><table>
@@ -1168,7 +1166,8 @@ const MRR_FEAT_LABELS = {
   momentum_12m1: 'モメンタム(12-1)',
 };
 // 種別 → 色（財務/マクロ/交差項/テクニカル）。
-const MRR_COEF_COLORS = { fin: '#60a5fa', macro: '#fbbf24', cross: '#c084fc', tech: '#34d399' };
+const MRR_COEF_COLOR_TOKENS = { fin: '--status-info', macro: '--status-warn-text', cross: '#c084fc', tech: '#34d399' };
+const MRR_COEF_COLORS = new Proxy({}, { get: (_, t) => { const v = MRR_COEF_COLOR_TOKENS[t]; return v && v.startsWith('--') ? cssVar(v) : v; } });
 const MRR_COEF_TYPE_LABELS = { fin: '財務', macro: 'マクロ', cross: '交差項', tech: 'テクニカル' };
 let _mrrChart = null;
 let _mrrData  = null;
@@ -1203,7 +1202,7 @@ function _toggleChartEmpty(canvas, axis) {
   if (!msg) {
     msg = document.createElement('div');
     msg.className = 'chart-empty-msg text-sm';
-    msg.style.cssText = 'padding:20px;text-align:center;color:#94a3b8';
+    msg.style.cssText = 'padding:20px;text-align:center;color:var(--text-secondary)';
     host.appendChild(msg);
   }
   msg.textContent = _riskAxisEmptyMessage(axis);
@@ -1341,7 +1340,7 @@ function _mrrPaintCv(data) {
         `<tr><td>${i+1}</td><td>${f.n_train||'-'}</td><td>${f.n_test||'-'}</td>
          <td class="${f.r2>0.3?'text-green':''}">${f.r2!=null?f.r2.toFixed(3):'-'}</td>
          <td>${f.rmse!=null?f.rmse.toFixed(4):'-'}</td></tr>`).join('')
-    : '<tr><td colspan="5" style="color:#64748b">CVフォルドなし（学習月数が不足。株価週次履歴の蓄積を待つ必要があります）</td></tr>';
+    : '<tr><td colspan="5" style="color:var(--text-muted)">CVフォルドなし（学習月数が不足。株価週次履歴の蓄積を待つ必要があります）</td></tr>';
 }
 
 // 特徴量コードを種別分類（交差項 > マクロ > テクニカル > 財務）。
@@ -1369,7 +1368,7 @@ function _mrrPaintCoefBars(coefs, hostId, legendId) {
   const legend = document.getElementById(legendId || 'mrr-coef-legend');
   if (!host) return;
   const entries = Object.entries(coefs).sort((a, b) => Math.abs(b[1]) - Math.abs(a[1]));
-  if (!entries.length) { host.innerHTML = '<span style="color:#64748b;font-size:12px">（係数なし）</span>'; if (legend) legend.innerHTML = ''; return; }
+  if (!entries.length) { host.innerHTML = '<span style="color:var(--text-muted);font-size:12px">（係数なし）</span>'; if (legend) legend.innerHTML = ''; return; }
   const maxAbs = Math.max(...entries.map(([, v]) => Math.abs(v))) || 1;
   // 凡例（出現した種別のみ）
   if (legend) {
@@ -1387,11 +1386,11 @@ function _mrrPaintCoefBars(coefs, hostId, legendId) {
       ? `<div style="position:absolute;left:50%;width:${w}%;height:14px;background:${color};border-radius:0 3px 3px 0"></div>`
       : `<div style="position:absolute;right:50%;width:${w}%;height:14px;background:${color};border-radius:3px 0 0 3px"></div>`;
     return `<div style="display:flex;align-items:center;gap:8px;margin-bottom:3px">
-        <div style="width:190px;flex:none;font-size:11px;color:#cbd5e1;text-align:right;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${name}">${_mrrCoefLabel(name)}</div>
-        <div style="position:relative;flex:1;height:14px;background:#1e293b;border-radius:3px">
-          <div style="position:absolute;left:50%;top:-2px;bottom:-2px;width:1px;background:#475569"></div>${bar}
+        <div style="width:190px;flex:none;font-size:11px;color:var(--text-body);text-align:right;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${name}">${_mrrCoefLabel(name)}</div>
+        <div style="position:relative;flex:1;height:14px;background:var(--border-subtle);border-radius:3px">
+          <div style="position:absolute;left:50%;top:-2px;bottom:-2px;width:1px;background:var(--text-muted)"></div>${bar}
         </div>
-        <div style="width:54px;flex:none;font-size:11px;color:${pos?'#86efac':'#fca5a5'};text-align:left">${pos?'+':''}${v.toFixed(3)}</div>
+        <div style="width:54px;flex:none;font-size:11px;color:${pos?cssVar('--val-up-text'):cssVar('--val-down-text')};text-align:left">${pos?'+':''}${v.toFixed(3)}</div>
       </div>`;
   }).join('');
 }
@@ -1436,8 +1435,8 @@ function _mrrPaintChart(v) {
       : _mrrUColor(p._u, uMin, uMax, topSet.has(p.edinet_code) ? 0.9 : 0.55)
   );
   const bc = pts.map(p =>
-    p._pareto      ? '#f9a8d4' :
-    p._anti_pareto ? '#fca5a5' :
+    p._pareto      ? cssVar('--val-up-text') :
+    p._anti_pareto ? cssVar('--val-down-text') :
     topSet.has(p.edinet_code) ? 'rgba(226,232,240,0.9)' : 'rgba(148,163,184,0.4)'
   );
   const bw = pts.map(p => (p._pareto || p._anti_pareto) ? 2.5 : (topSet.has(p.edinet_code) ? 1.2 : 0.5));
@@ -1450,9 +1449,9 @@ function _mrrPaintChart(v) {
   _mrrChart = new Chart(canvas, {
     data: { datasets: [
       { type: 'line', label: '効率的フロンティア（買い）', data: front,
-        borderColor: '#f9a8d4', borderWidth: 2, pointRadius: 0, fill: false, tension: 0, order: 0 },
+        borderColor: cssVar('--val-up-text'), borderWidth: 2, pointRadius: 0, fill: false, tension: 0, order: 0 },
       { type: 'line', label: '非効率的フロンティア（売り）', data: antifront,
-        borderColor: '#f87171', borderWidth: 2, borderDash: [6, 3], pointRadius: 0, fill: false, tension: 0, order: 0 },
+        borderColor: cssVar('--val-down-text'), borderWidth: 2, borderDash: [6, 3], pointRadius: 0, fill: false, tension: 0, order: 0 },
       { type: 'bubble', label: `銘柄（全${pts.length}社・上位${v.top.length}を強調）`, data: bubble,
         backgroundColor: bg, borderColor: bc, borderWidth: bw, order: 1 },
     ]},
@@ -1494,7 +1493,7 @@ function _mrrPaintChart(v) {
 // ランキング表（クライアント算出の U・パレートで描画）。
 function _mrrTableHTML(v) {
   if (!v.top.length) {
-    return `<div class="text-sm" style="padding:20px;text-align:center;color:#94a3b8">${esc(_riskAxisEmptyMessage(v.axis))}</div>`;
+    return `<div class="text-sm" style="padding:20px;text-align:center;color:var(--text-secondary)">${esc(_riskAxisEmptyMessage(v.axis))}</div>`;
   }
   const total = (_mrrData && _mrrData.results ? _mrrData.results.length : v.top.length);
   const header = `<tr><th>順位</th><th>証券コード</th><th>企業名</th><th>業種</th>
@@ -1503,23 +1502,23 @@ function _mrrTableHTML(v) {
     const mu = r.mu_raw ?? 0;
     const muClass = mu > 0 ? 'text-green' : 'text-red';
     const frontierTag = r._pareto
-      ? '<span style="color:#f9a8d4;font-weight:700" title="効率的フロンティア（買い）">★</span>'
+      ? `<span style="color:${cssVar('--val-up-text')};font-weight:700" title="効率的フロンティア（買い）">★</span>`
       : r._anti_pareto
-        ? '<span style="color:#f87171;font-weight:700" title="非効率的フロンティア（売り）">▼</span>'
+        ? `<span style="color:${cssVar('--val-down-text')};font-weight:700" title="非効率的フロンティア（売り）">▼</span>`
         : '';
     const r3Warn = v.r3Gate > 0 && r.r3 != null && r.r3 > v.r3Gate * 0.8
-      ? ' style="color:#fbbf24"' : '';
+      ? ` style="color:${cssVar('--status-warn-text')}"` : '';
     return `<tr>
       <td>${i+1}</td>
       <td>${esc(r.sec_code||'-')}</td>
-      <td><a href="/company/${esc(r.edinet_code||'')}" style="color:#60a5fa">${esc(r.company_name||'-')}</a></td>
+      <td><a href="/company/${esc(r.edinet_code||'')}" style="color:var(--status-info)">${esc(r.company_name||'-')}</a></td>
       <td style="font-size:11px">${esc(r.industry||'-')}</td>
       <td class="${muClass}">${(mu*100).toFixed(2)}%</td>
       <td>${r.r2!=null?(r.r2*100).toFixed(2)+'%':'-'}</td>
-      <td style="font-size:11px;color:#94a3b8">${r.r_macro!=null?(r.r_macro*100).toFixed(2)+'%':'-'}</td>
-      <td style="font-size:11px;color:#94a3b8"${r3Warn}>${r.r3!=null?r.r3.toFixed(4):'-'}</td>
+      <td style="font-size:11px;color:var(--text-secondary)">${r.r_macro!=null?(r.r_macro*100).toFixed(2)+'%':'-'}</td>
+      <td style="font-size:11px;color:var(--text-secondary)"${r3Warn}>${r.r3!=null?r.r3.toFixed(4):'-'}</td>
       <td class="text-green">${r._u!=null?r._u.toFixed(4):'-'}</td>
-      <td style="color:#f87171">${r._d!=null?r._d.toFixed(4):'-'}</td>
+      <td style="color:${cssVar('--val-down-text')}">${r._d!=null?r._d.toFixed(4):'-'}</td>
       <td style="text-align:center">${frontierTag}</td>
     </tr>`;
   }).join('');
@@ -1532,9 +1531,9 @@ function _mrrTableHTML(v) {
         <span class="tag" style="margin-left:6px">横軸: ${MRR_AXIS_LABELS[v.axis]}</span>
         <span class="tag" style="margin-left:6px">λ=${v.lambda}</span>
       </div>
-      <div class="text-sm" style="color:#64748b">λ・リスク軸・表示件数は即時反映（再計算不要）</div>
+      <div class="text-sm" style="color:var(--text-muted)">λ・リスク軸・表示件数は即時反映（再計算不要）</div>
     </div>
-    <div class="text-sm" style="color:#64748b;margin-bottom:6px;font-size:11px">
+    <div class="text-sm" style="color:var(--text-muted);margin-bottom:6px;font-size:11px">
       ※ μ_raw はモデルの素の銘柄別推定（収縮なし）。検証 R² は低く推定にはノイズを含むため、
       順位は目安。μ_shrunk はセクター平均への収縮後の保守的推定（参考）。
     </div>
@@ -1594,80 +1593,80 @@ function _mgPaintCv(data) {
   const ic  = oof.rank_ic || {};
   const hasOof = qr.length > 0;
   const oofHtml = `
-  <div style="margin-bottom:16px;padding:12px 16px;background:#0f172a;border-radius:8px;border:1px solid #334155">
-    <div style="font-size:12px;color:#a78bfa;font-weight:600;margin-bottom:4px">
+  <div style="margin-bottom:16px;padding:12px 16px;background:var(--bg-sunken);border-radius:8px;border:1px solid var(--border-muted)">
+    <div style="font-size:12px;color:var(--accent-text);font-weight:600;margin-bottom:4px">
       アウトオブサンプル検証（OOF）— μ̂ が将来リターンを順序付けるか（無リーク walk-forward 予測）
     </div>
-    <div style="font-size:11px;color:#64748b;margin-bottom:10px">
+    <div style="font-size:11px;color:var(--text-muted);margin-bottom:10px">
       既存「バックテスト」(/api/backtest) とは別物。再学習なし・各期で μ̂ を横断${oof.n_quantiles||5}分位し実現52週リターンを集計。
     </div>
     ${hasOof ? `
     <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:12px">
-      <div style="padding:8px;background:#0b1220;border-radius:6px">
-        <div style="font-size:10px;color:#64748b">rank-IC（Spearman 平均±std）</div>
-        <div style="font-size:15px;font-weight:700;color:${(ic.mean||0)>0?'#86efac':'#f87171'}">${ic.mean!=null?ic.mean.toFixed(3):'-'}<span style="font-size:11px;color:#64748b"> ±${ic.std!=null?ic.std.toFixed(3):'-'}</span></div>
-        <div style="font-size:10px;color:#475569">${ic.n||0} fold</div>
+      <div style="padding:8px;background:var(--bg-sunken);border-radius:6px">
+        <div style="font-size:10px;color:var(--text-muted)">rank-IC（Spearman 平均±std）</div>
+        <div style="font-size:15px;font-weight:700;color:${(ic.mean||0)>0?cssVar('--val-up-text'):cssVar('--val-down-text')}">${ic.mean!=null?ic.mean.toFixed(3):'-'}<span style="font-size:11px;color:var(--text-muted)"> ±${ic.std!=null?ic.std.toFixed(3):'-'}</span></div>
+        <div style="font-size:10px;color:var(--text-muted)">${ic.n||0} fold</div>
       </div>
-      <div style="padding:8px;background:#0b1220;border-radius:6px">
-        <div style="font-size:10px;color:#64748b">ロングショート spread（top−bottom）</div>
-        <div style="font-size:15px;font-weight:700;color:${(oof.long_short_spread||0)>0?'#86efac':'#f87171'}">${oof.long_short_spread!=null?(oof.long_short_spread*100).toFixed(2)+'%':'-'}</div>
+      <div style="padding:8px;background:var(--bg-sunken);border-radius:6px">
+        <div style="font-size:10px;color:var(--text-muted)">ロングショート spread（top−bottom）</div>
+        <div style="font-size:15px;font-weight:700;color:${(oof.long_short_spread||0)>0?cssVar('--val-up-text'):cssVar('--val-down-text')}">${oof.long_short_spread!=null?(oof.long_short_spread*100).toFixed(2)+'%':'-'}</div>
       </div>
-      <div style="padding:8px;background:#0b1220;border-radius:6px">
-        <div style="font-size:10px;color:#64748b">hit-rate（top&gt;bottom の期）</div>
+      <div style="padding:8px;background:var(--bg-sunken);border-radius:6px">
+        <div style="font-size:10px;color:var(--text-muted)">hit-rate（top&gt;bottom の期）</div>
         <div style="font-size:15px;font-weight:700;color:#c084fc">${oof.hit_rate!=null?(oof.hit_rate*100).toFixed(0)+'%':'-'}</div>
-        <div style="font-size:10px;color:#475569">${oof.n_periods_quantile||0} 期</div>
+        <div style="font-size:10px;color:var(--text-muted)">${oof.n_periods_quantile||0} 期</div>
       </div>
     </div>
-    <div style="font-size:11px;color:#94a3b8;margin-bottom:6px">分位別 平均実現リターン（左=最低 μ̂ → 右=最高 μ̂・52週先・期間平均）</div>
+    <div style="font-size:11px;color:var(--text-secondary);margin-bottom:6px">分位別 平均実現リターン（左=最低 μ̂ → 右=最高 μ̂・52週先・期間平均）</div>
     <div style="display:flex;align-items:flex-end;gap:6px;height:92px">
       ${(() => {
         const mx = Math.max(...qr.map(Math.abs), 1e-9);
         return qr.map((v, i) => {
           const h = Math.round(Math.abs(v) / mx * 70) + 2;
-          const col = v >= 0 ? '#34d399' : '#f87171';
+          const col = v >= 0 ? cssVar('--val-up-text') : cssVar('--val-down-text');
           return `<div style="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:flex-end;height:100%">
             <div style="font-size:10px;color:${col}">${(v*100).toFixed(1)}%</div>
             <div style="width:100%;height:${h}px;background:${col};border-radius:3px 3px 0 0"></div>
-            <div style="font-size:10px;color:#64748b;margin-top:2px">Q${i+1}</div>
+            <div style="font-size:10px;color:var(--text-muted);margin-top:2px">Q${i+1}</div>
           </div>`;
         }).join('');
       })()}
-    </div>` : `<div style="font-size:11px;color:#64748b">OOF サンプルが期内 ${(oof.n_quantiles||5)*2} 銘柄未満のため分位を表示できません（データ蓄積後に再実行）。rank-IC は ${ic.n||0} fold で算出。</div>`}
+    </div>` : `<div style="font-size:11px;color:var(--text-muted)">OOF サンプルが期内 ${(oof.n_quantiles||5)*2} 銘柄未満のため分位を表示できません（データ蓄積後に再実行）。rank-IC は ${ic.n||0} fold で算出。</div>`}
   </div>`;
 
   // CV パネルを先頭に inject（テーブル返却前）
   const cvHtml = `
-  <div style="margin-bottom:16px;padding:12px 16px;background:#0f172a;border-radius:8px;border:1px solid #334155">
-    <div style="font-size:12px;color:#a78bfa;font-weight:600;margin-bottom:10px">
+  <div style="margin-bottom:16px;padding:12px 16px;background:var(--bg-sunken);border-radius:8px;border:1px solid var(--border-muted)">
+    <div style="font-size:12px;color:var(--accent-text);font-weight:600;margin-bottom:10px">
       Walk-Forward CV（M-2 XGBoost vs 同一特徴量 OLS ベースライン）
     </div>
     <table style="width:100%;font-size:12px;border-collapse:collapse">
       <thead><tr>
-        <th style="text-align:left;padding:4px 8px;color:#64748b">モデル</th>
-        <th style="text-align:right;padding:4px 8px;color:#64748b">Mean R²</th>
-        <th style="text-align:right;padding:4px 8px;color:#64748b">Mean RMSE</th>
-        <th style="text-align:right;padding:4px 8px;color:#64748b">フォールド数</th>
+        <th style="text-align:left;padding:4px 8px;color:var(--text-muted)">モデル</th>
+        <th style="text-align:right;padding:4px 8px;color:var(--text-muted)">Mean R²</th>
+        <th style="text-align:right;padding:4px 8px;color:var(--text-muted)">Mean RMSE</th>
+        <th style="text-align:right;padding:4px 8px;color:var(--text-muted)">フォールド数</th>
       </tr></thead>
       <tbody>
         <tr>
           <td style="padding:4px 8px;color:#c084fc;font-weight:600">XGBoost（M-2）</td>
-          <td style="padding:4px 8px;text-align:right;color:${(xgb.mean_r2||0)>0?'#86efac':'#f87171'}">${xgb.mean_r2!=null?xgb.mean_r2.toFixed(3):'-'}</td>
-          <td style="padding:4px 8px;text-align:right;color:#94a3b8">${xgb.mean_rmse!=null?xgb.mean_rmse.toFixed(4):'-'}</td>
-          <td style="padding:4px 8px;text-align:right;color:#94a3b8">${xgb.n_folds||0}</td>
+          <td style="padding:4px 8px;text-align:right;color:${(xgb.mean_r2||0)>0?cssVar('--val-up-text'):cssVar('--val-down-text')}">${xgb.mean_r2!=null?xgb.mean_r2.toFixed(3):'-'}</td>
+          <td style="padding:4px 8px;text-align:right;color:var(--text-secondary)">${xgb.mean_rmse!=null?xgb.mean_rmse.toFixed(4):'-'}</td>
+          <td style="padding:4px 8px;text-align:right;color:var(--text-secondary)">${xgb.n_folds||0}</td>
         </tr>
         <tr>
-          <td style="padding:4px 8px;color:#60a5fa">OLS ベースライン</td>
-          <td style="padding:4px 8px;text-align:right;color:${(ols.mean_r2||0)>0?'#86efac':'#f87171'}">${ols.mean_r2!=null?ols.mean_r2.toFixed(3):'-'}</td>
-          <td style="padding:4px 8px;text-align:right;color:#94a3b8">${ols.mean_rmse!=null?ols.mean_rmse.toFixed(4):'-'}</td>
-          <td style="padding:4px 8px;text-align:right;color:#94a3b8">${ols.n_folds||0}</td>
+          <td style="padding:4px 8px;color:var(--status-info)">OLS ベースライン</td>
+          <td style="padding:4px 8px;text-align:right;color:${(ols.mean_r2||0)>0?cssVar('--val-up-text'):cssVar('--val-down-text')}">${ols.mean_r2!=null?ols.mean_r2.toFixed(3):'-'}</td>
+          <td style="padding:4px 8px;text-align:right;color:var(--text-secondary)">${ols.mean_rmse!=null?ols.mean_rmse.toFixed(4):'-'}</td>
+          <td style="padding:4px 8px;text-align:right;color:var(--text-secondary)">${ols.n_folds||0}</td>
         </tr>
       </tbody>
     </table>
-    <div style="margin-top:10px;font-size:11px;color:#64748b">
+    <div style="margin-top:10px;font-size:11px;color:var(--text-muted)">
       best_iteration: ${data.best_iteration||'-'} 木 ／ 学習サンプル: ${(data.n_train_samples||0).toLocaleString()}件 ／ 特徴量: ${(data.selected_features||[]).length}個
     </div>
     <div style="margin-top:8px">
-      <div style="font-size:11px;color:#94a3b8;margin-bottom:4px">グローバル特徴量寄与 mean|SHAP|（大きさのみ・方向なし）</div>
+      <div style="font-size:11px;color:var(--text-secondary);margin-bottom:4px">グローバル特徴量寄与 mean|SHAP|（大きさのみ・方向なし）</div>
       <div id="mg-coef-bars" style="margin-top:4px"></div>
     </div>
   </div>
@@ -1753,9 +1752,9 @@ function _mgPaintChart(v) {
     type: 'bubble',
     data: {
       datasets: [
-        { label: '全銘柄', data: bubble, backgroundColor: bg, borderColor: pts.map(p => p._pareto?'#f9a8d4':p._anti_pareto?'#fca5a5':topSet.has(p.edinet_code)?'rgba(226,232,240,0.9)':'rgba(148,163,184,0.3)'), borderWidth: pts.map(p=>(p._pareto||p._anti_pareto)?2.5:topSet.has(p.edinet_code)?1.2:0.4) },
-        { label: '効率的フロンティア', data: front.sort((a,b)=>a.x-b.x), type:'line', borderColor:'#f9a8d4', borderWidth:1.5, pointRadius:0, fill:false, tension:0.3, order:0 },
-        { label: '非効率的フロンティア', data: antiFront.sort((a,b)=>a.x-b.x), type:'line', borderColor:'#fca5a5', borderWidth:1.5, pointRadius:0, fill:false, tension:0.3, order:0 },
+        { label: '全銘柄', data: bubble, backgroundColor: bg, borderColor: pts.map(p => p._pareto?cssVar('--val-up-text'):p._anti_pareto?cssVar('--val-down-text'):topSet.has(p.edinet_code)?'rgba(226,232,240,0.9)':'rgba(148,163,184,0.3)'), borderWidth: pts.map(p=>(p._pareto||p._anti_pareto)?2.5:topSet.has(p.edinet_code)?1.2:0.4) },
+        { label: '効率的フロンティア', data: front.sort((a,b)=>a.x-b.x), type:'line', borderColor:cssVar('--val-up-text'), borderWidth:1.5, pointRadius:0, fill:false, tension:0.3, order:0 },
+        { label: '非効率的フロンティア', data: antiFront.sort((a,b)=>a.x-b.x), type:'line', borderColor:cssVar('--val-down-text'), borderWidth:1.5, pointRadius:0, fill:false, tension:0.3, order:0 },
       ]
     },
     options: {
@@ -1766,8 +1765,8 @@ function _mgPaintChart(v) {
         tooltip:{callbacks:{label:ctx=>{const p=ctx.raw._p;if(!p)return'';return[`${esc(p.company_name||p.edinet_code)} (${esc(p.sec_code||'')})`,`μ=${p.mu_raw!=null?p.mu_raw.toFixed(3):'-'}  R=${p[axisKey]!=null?p[axisKey].toFixed(3):'-'}  U=${p._u!=null?p._u.toFixed(3):'-'}`,p._pareto?'★ 効率的フロンティア':p._anti_pareto?'▼ 非効率的フロンティア':'']}}}
       },
       scales:{
-        x:{title:{display:true,text:AXIS_LABELS[axisKey]||axisKey,color:'#94a3b8',font:{size:11}},grid:{color:'rgba(255,255,255,0.05)'},ticks:{color:'#64748b'},...(xRange.min!=null?{min:xRange.min,max:xRange.max}:{})},
-        y:{title:{display:true,text:'期待リターン μ（52週先対数リターン）',color:'#94a3b8',font:{size:11}},grid:{color:'rgba(255,255,255,0.05)'},ticks:{color:'#64748b'},...(yRange.min!=null?{min:yRange.min,max:yRange.max}:{})},
+        x:{title:{display:true,text:AXIS_LABELS[axisKey]||axisKey,color:cssVar('--text-secondary'),font:{size:11}},grid:{color:'rgba(255,255,255,0.05)'},ticks:{color:cssVar('--text-muted')},...(xRange.min!=null?{min:xRange.min,max:xRange.max}:{})},
+        y:{title:{display:true,text:'期待リターン μ（52週先対数リターン）',color:cssVar('--text-secondary'),font:{size:11}},grid:{color:'rgba(255,255,255,0.05)'},ticks:{color:cssVar('--text-muted')},...(yRange.min!=null?{min:yRange.min,max:yRange.max}:{})},
       }
     }
   });
@@ -1786,13 +1785,13 @@ function _mgShowShap(editnetCode) {
     const pos = v >= 0;
     const bar = pos
       ? `<div style="position:absolute;left:50%;width:${w}%;height:14px;background:#c084fc;border-radius:0 3px 3px 0"></div>`
-      : `<div style="position:absolute;right:50%;width:${w}%;height:14px;background:#60a5fa;border-radius:3px 0 0 3px"></div>`;
+      : `<div style="position:absolute;right:50%;width:${w}%;height:14px;background:var(--status-info);border-radius:3px 0 0 3px"></div>`;
     return `<div style="display:flex;align-items:center;gap:8px;margin-bottom:3px">
-      <div style="width:160px;flex:none;font-size:11px;color:#cbd5e1;text-align:right;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(MRR_FEAT_LABELS[name]||name)}</div>
-      <div style="position:relative;flex:1;height:14px;background:#1e293b;border-radius:3px">
-        <div style="position:absolute;left:50%;top:-2px;bottom:-2px;width:1px;background:#475569"></div>${bar}
+      <div style="width:160px;flex:none;font-size:11px;color:var(--text-body);text-align:right;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(MRR_FEAT_LABELS[name]||name)}</div>
+      <div style="position:relative;flex:1;height:14px;background:var(--border-subtle);border-radius:3px">
+        <div style="position:absolute;left:50%;top:-2px;bottom:-2px;width:1px;background:var(--text-muted)"></div>${bar}
       </div>
-      <div style="width:54px;flex:none;font-size:11px;color:${pos?'#86efac':'#fca5a5'};text-align:left">${pos?'+':''}${v.toFixed(3)}</div>
+      <div style="width:54px;flex:none;font-size:11px;color:${pos?cssVar('--val-up-text'):cssVar('--val-down-text')};text-align:left">${pos?'+':''}${v.toFixed(3)}</div>
     </div>`;
   }).join('');
   const panel = document.getElementById('mg-shap-panel');
@@ -1801,7 +1800,7 @@ function _mgShowShap(editnetCode) {
     <div style="font-size:12px;color:#c084fc;font-weight:600;margin-bottom:8px">
       SHAP 寄与内訳: ${esc(item.company_name||editnetCode)}（${esc(item.sec_code||'')}）
     </div>
-    <div style="font-size:11px;color:#64748b;margin-bottom:6px">正（紫）= 予測リターン↑方向　負（青）= 予測リターン↓方向</div>
+    <div style="font-size:11px;color:var(--text-muted);margin-bottom:6px">正（紫）= 予測リターン↑方向　負（青）= 予測リターン↓方向</div>
     ${bars}`;
   panel.classList.remove('hidden');
 }
@@ -1809,7 +1808,7 @@ function _mgShowShap(editnetCode) {
 function _mgTableHTML(v) {
   const { top, axis } = v;
   if (!top.length) {
-    return `<div class="text-sm" style="padding:20px;text-align:center;color:#94a3b8">${esc(_riskAxisEmptyMessage(axis))}</div>`;
+    return `<div class="text-sm" style="padding:20px;text-align:center;color:var(--text-secondary)">${esc(_riskAxisEmptyMessage(axis))}</div>`;
   }
   const frontierLabel = r => r._pareto ? '★' : r._anti_pareto ? '▼' : '';
   const rows = top.map((r,i) => {
@@ -1823,12 +1822,12 @@ function _mgTableHTML(v) {
       <td>${r[axis]!=null?r[axis].toFixed(3):'-'}</td>
       <td>${r._u!=null?r._u.toFixed(3):'-'}</td>
       <td>${r.r3!=null?r.r3.toFixed(3):'-'}</td>
-      <td style="color:${r._pareto?'#f9a8d4':r._anti_pareto?'#fca5a5':'#64748b'}">${frontier}</td>
+      <td style="color:${r._pareto?cssVar('--val-up-text'):r._anti_pareto?cssVar('--val-down-text'):cssVar('--text-muted')}">${frontier}</td>
     </tr>`;
   }).join('');
   return `
-    <div style="font-size:11px;color:#64748b;margin-bottom:8px">行をクリックすると SHAP 寄与を表示します</div>
-    <div id="mg-shap-panel" class="hidden" style="margin-bottom:16px;padding:12px 16px;background:#0f172a;border-radius:8px;border:1px solid #334155"></div>
+    <div style="font-size:11px;color:var(--text-muted);margin-bottom:8px">行をクリックすると SHAP 寄与を表示します</div>
+    <div id="mg-shap-panel" class="hidden" style="margin-bottom:16px;padding:12px 16px;background:var(--bg-sunken);border-radius:8px;border:1px solid var(--border-muted)"></div>
     <div style="overflow-x:auto">
       <table>
         <thead><tr>
@@ -1934,7 +1933,7 @@ function _dlmPaintBubbleChart(v) {
       ? _mrrDColor(p._d, 0, dMax, 0.75)
       : _mrrUColor(p._u, uMin, uMax, topSet.has(p.edinet_code) ? 0.9 : 0.55)
   );
-  const border = pts.map(p => p._pareto ? '#f9a8d4' : p._anti_pareto ? '#fca5a5' : topSet.has(p.edinet_code) ? 'rgba(226,232,240,0.9)' : 'rgba(148,163,184,0.3)');
+  const border = pts.map(p => p._pareto ? cssVar('--val-up-text') : p._anti_pareto ? cssVar('--val-down-text') : topSet.has(p.edinet_code) ? 'rgba(226,232,240,0.9)' : 'rgba(148,163,184,0.3)');
   const bw = pts.map(p => (p._pareto || p._anti_pareto) ? 2.5 : topSet.has(p.edinet_code) ? 1.2 : 0.4);
   const front     = pts.filter(p => p._pareto).sort((a, b) => a.r_macro - b.r_macro).map(p => ({ x: clamp(p.r_macro, xRange), y: clamp(p.mu_raw, yRange) }));
   const antiFront = pts.filter(p => p._anti_pareto).sort((a, b) => a.r_macro - b.r_macro).map(p => ({ x: clamp(p.r_macro, xRange), y: clamp(p.mu_raw, yRange) }));
@@ -1943,8 +1942,8 @@ function _dlmPaintBubbleChart(v) {
     data: {
       datasets: [
         { label: '全銘柄', data: bubble, backgroundColor: bg, borderColor: border, borderWidth: bw },
-        { label: '効率的フロンティア（買い）', data: front, type: 'line', borderColor: '#f9a8d4', borderWidth: 1.5, pointRadius: 0, fill: false, tension: 0.3, order: 0 },
-        { label: '非効率的フロンティア（売り）', data: antiFront, type: 'line', borderColor: '#fca5a5', borderWidth: 1.5, pointRadius: 0, fill: false, tension: 0.3, order: 0 },
+        { label: '効率的フロンティア（買い）', data: front, type: 'line', borderColor: cssVar('--val-up-text'), borderWidth: 1.5, pointRadius: 0, fill: false, tension: 0.3, order: 0 },
+        { label: '非効率的フロンティア（売り）', data: antiFront, type: 'line', borderColor: cssVar('--val-down-text'), borderWidth: 1.5, pointRadius: 0, fill: false, tension: 0.3, order: 0 },
       ]
     },
     options: {
@@ -1962,8 +1961,8 @@ function _dlmPaintBubbleChart(v) {
         }}}
       },
       scales: {
-        x: { title: { display: true, text: 'R_macro マクロ起因リスク（年率化）', color: '#94a3b8', font: { size: 11 } }, grid: { color: 'rgba(255,255,255,0.05)' }, ticks: { color: '#64748b' }, ...(xRange.min != null ? { min: xRange.min, max: xRange.max } : {}) },
-        y: { title: { display: true, text: 'µ̂ 期待リターン（年率化アルファ）', color: '#94a3b8', font: { size: 11 } }, grid: { color: 'rgba(255,255,255,0.05)' }, ticks: { color: '#64748b' }, ...(yRange.min != null ? { min: yRange.min, max: yRange.max } : {}) },
+        x: { title: { display: true, text: 'R_macro マクロ起因リスク（年率化）', color: cssVar('--text-secondary'), font: { size: 11 } }, grid: { color: 'rgba(255,255,255,0.05)' }, ticks: { color: cssVar('--text-muted') }, ...(xRange.min != null ? { min: xRange.min, max: xRange.max } : {}) },
+        y: { title: { display: true, text: 'µ̂ 期待リターン（年率化アルファ）', color: cssVar('--text-secondary'), font: { size: 11 } }, grid: { color: 'rgba(255,255,255,0.05)' }, ticks: { color: cssVar('--text-muted') }, ...(yRange.min != null ? { min: yRange.min, max: yRange.max } : {}) },
       }
     }
   });
@@ -1983,21 +1982,21 @@ function renderMacroDlm(data) {
 function _dlmDiagHTML(data) {
   const d = data.diagnostics || {};
   const p = data.params || {};
-  return `<div style="margin-bottom:16px;padding:12px 16px;background:#0f172a;border-radius:8px;border:1px solid #334155">
-    <div style="font-size:12px;color:#a78bfa;font-weight:600;margin-bottom:8px">
+  return `<div style="margin-bottom:16px;padding:12px 16px;background:var(--bg-sunken);border-radius:8px;border:1px solid var(--border-muted)">
+    <div style="font-size:12px;color:var(--accent-text);font-weight:600;margin-bottom:8px">
       1期先予測診断（バーンイン除外・全 ${data.n_companies || 0} 銘柄平均）
     </div>
     <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px">
-      <div style="padding:8px;background:#0b1220;border-radius:6px"><div style="font-size:10px;color:#64748b">校正（標準化誤差² 平均・1 が理想）</div><div style="font-size:15px;font-weight:700;color:#c084fc">${d.calibration != null ? d.calibration.toFixed(3) : '-'}</div></div>
-      <div style="padding:8px;background:#0b1220;border-radius:6px"><div style="font-size:10px;color:#64748b">予測 RMSE（週次リターン）</div><div style="font-size:15px;font-weight:700;color:#94a3b8">${d.pred_rmse != null ? d.pred_rmse.toFixed(4) : '-'}</div></div>
-      <div style="padding:8px;background:#0b1220;border-radius:6px"><div style="font-size:10px;color:#64748b">95% 信用区間カバレッジ</div><div style="font-size:15px;font-weight:700;color:${(d.coverage95 || 0) >= 0.9 ? '#86efac' : '#fbbf24'}">${d.coverage95 != null ? (d.coverage95 * 100).toFixed(1) + '%' : '-'}</div></div>
+      <div style="padding:8px;background:var(--bg-sunken);border-radius:6px"><div style="font-size:10px;color:var(--text-muted)">校正（標準化誤差² 平均・1 が理想）</div><div style="font-size:15px;font-weight:700;color:#c084fc">${d.calibration != null ? d.calibration.toFixed(3) : '-'}</div></div>
+      <div style="padding:8px;background:var(--bg-sunken);border-radius:6px"><div style="font-size:10px;color:var(--text-muted)">予測 RMSE（週次リターン）</div><div style="font-size:15px;font-weight:700;color:var(--text-secondary)">${d.pred_rmse != null ? d.pred_rmse.toFixed(4) : '-'}</div></div>
+      <div style="padding:8px;background:var(--bg-sunken);border-radius:6px"><div style="font-size:10px;color:var(--text-muted)">95% 信用区間カバレッジ</div><div style="font-size:15px;font-weight:700;color:${(d.coverage95 || 0) >= 0.9 ? cssVar('--val-up-text') : cssVar('--status-warn-text')}">${d.coverage95 != null ? (d.coverage95 * 100).toFixed(1) + '%' : '-'}</div></div>
     </div>
-    <div style="margin-top:8px;font-size:11px;color:#64748b">δ=${p.state_discount ?? '-'} ／ β_v=${p.var_discount ?? '-'} ／ 最低 ${p.min_weeks ?? '-'} 週 ／ バーンイン ${p.burn_in_weeks ?? '-'} 週</div>
+    <div style="margin-top:8px;font-size:11px;color:var(--text-muted)">δ=${p.state_discount ?? '-'} ／ β_v=${p.var_discount ?? '-'} ／ 最低 ${p.min_weeks ?? '-'} 週 ／ バーンイン ${p.burn_in_weeks ?? '-'} 週</div>
     ${(() => {
       const dropped = d.dropped_factors || [];
       if (!dropped.length) return '';
       const items = dropped.map(x => `${esc(x.label || x.feature)}（被覆 ${x.coverage != null ? (x.coverage * 100).toFixed(0) + '%' : '-'}）`).join('、');
-      return `<div style="margin-top:8px;font-size:11px;color:#fbbf24">⚠ データ蓄積不足のためモデルから自動除外した factor: ${items}<span style="color:#64748b">（企業母集団は維持されます）</span></div>`;
+      return `<div style="margin-top:8px;font-size:11px;color:${cssVar('--status-warn-text')}">⚠ データ蓄積不足のためモデルから自動除外した factor: ${items}<span style="color:var(--text-muted)">（企業母集団は維持されます）</span></div>`;
     })()}
   </div>`;
 }
@@ -2008,45 +2007,45 @@ function _dlmOofHTML(data) {
   const ic  = oof.rank_ic || {};
   const hasOof = qr.length > 0;
   return `
-  <div style="margin-bottom:16px;padding:12px 16px;background:#0f172a;border-radius:8px;border:1px solid #334155">
-    <div style="font-size:12px;color:#a78bfa;font-weight:600;margin-bottom:4px">
+  <div style="margin-bottom:16px;padding:12px 16px;background:var(--bg-sunken);border-radius:8px;border:1px solid var(--border-muted)">
+    <div style="font-size:12px;color:var(--accent-text);font-weight:600;margin-bottom:4px">
       アウトオブサンプル検証（OOF）— α_{t-1} が翌週リターンを横断順序付けするか（無リーク・1期先）
     </div>
-    <div style="font-size:11px;color:#64748b;margin-bottom:10px">
+    <div style="font-size:11px;color:var(--text-muted);margin-bottom:10px">
       DLM フィルタの1期先予測 α を月次クロスセクションで集計。M-1/M-2 の年率OOFと同枠で比較可能。
     </div>
     ${hasOof ? `
     <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:12px">
-      <div style="padding:8px;background:#0b1220;border-radius:6px">
-        <div style="font-size:10px;color:#64748b">rank-IC（Spearman 平均±std）</div>
-        <div style="font-size:15px;font-weight:700;color:${(ic.mean||0)>0?'#86efac':'#f87171'}">${ic.mean!=null?ic.mean.toFixed(3):'-'}<span style="font-size:11px;color:#64748b"> ±${ic.std!=null?ic.std.toFixed(3):'-'}</span></div>
-        <div style="font-size:10px;color:#475569">${ic.n||0} fold</div>
+      <div style="padding:8px;background:var(--bg-sunken);border-radius:6px">
+        <div style="font-size:10px;color:var(--text-muted)">rank-IC（Spearman 平均±std）</div>
+        <div style="font-size:15px;font-weight:700;color:${(ic.mean||0)>0?cssVar('--val-up-text'):cssVar('--val-down-text')}">${ic.mean!=null?ic.mean.toFixed(3):'-'}<span style="font-size:11px;color:var(--text-muted)"> ±${ic.std!=null?ic.std.toFixed(3):'-'}</span></div>
+        <div style="font-size:10px;color:var(--text-muted)">${ic.n||0} fold</div>
       </div>
-      <div style="padding:8px;background:#0b1220;border-radius:6px">
-        <div style="font-size:10px;color:#64748b">ロングショート spread（top−bottom）</div>
-        <div style="font-size:15px;font-weight:700;color:${(oof.long_short_spread||0)>0?'#86efac':'#f87171'}">${oof.long_short_spread!=null?(oof.long_short_spread*100).toFixed(2)+'%':'-'}</div>
+      <div style="padding:8px;background:var(--bg-sunken);border-radius:6px">
+        <div style="font-size:10px;color:var(--text-muted)">ロングショート spread（top−bottom）</div>
+        <div style="font-size:15px;font-weight:700;color:${(oof.long_short_spread||0)>0?cssVar('--val-up-text'):cssVar('--val-down-text')}">${oof.long_short_spread!=null?(oof.long_short_spread*100).toFixed(2)+'%':'-'}</div>
       </div>
-      <div style="padding:8px;background:#0b1220;border-radius:6px">
-        <div style="font-size:10px;color:#64748b">hit-rate（top&gt;bottom の期）</div>
+      <div style="padding:8px;background:var(--bg-sunken);border-radius:6px">
+        <div style="font-size:10px;color:var(--text-muted)">hit-rate（top&gt;bottom の期）</div>
         <div style="font-size:15px;font-weight:700;color:#c084fc">${oof.hit_rate!=null?(oof.hit_rate*100).toFixed(0)+'%':'-'}</div>
-        <div style="font-size:10px;color:#475569">${oof.n_periods_quantile||0} 期</div>
+        <div style="font-size:10px;color:var(--text-muted)">${oof.n_periods_quantile||0} 期</div>
       </div>
     </div>
-    <div style="font-size:11px;color:#94a3b8;margin-bottom:6px">分位別 平均実現リターン（左=最低 α → 右=最高 α・週次・期間平均）</div>
+    <div style="font-size:11px;color:var(--text-secondary);margin-bottom:6px">分位別 平均実現リターン（左=最低 α → 右=最高 α・週次・期間平均）</div>
     <div style="display:flex;align-items:flex-end;gap:6px;height:92px">
       ${(() => {
         const mx = Math.max(...qr.map(Math.abs), 1e-9);
         return qr.map((v, i) => {
           const h = Math.round(Math.abs(v) / mx * 70) + 2;
-          const col = v >= 0 ? '#34d399' : '#f87171';
+          const col = v >= 0 ? cssVar('--val-up-text') : cssVar('--val-down-text');
           return `<div style="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:flex-end;height:100%">
             <div style="font-size:10px;color:${col}">${(v*100).toFixed(2)}%</div>
             <div style="width:100%;height:${h}px;background:${col};border-radius:3px 3px 0 0"></div>
-            <div style="font-size:10px;color:#64748b;margin-top:2px">Q${i+1}</div>
+            <div style="font-size:10px;color:var(--text-muted);margin-top:2px">Q${i+1}</div>
           </div>`;
         }).join('');
       })()}
-    </div>` : `<div style="font-size:11px;color:#64748b">OOF サンプルが期内 ${(oof.n_quantiles||5)*2} 銘柄未満のため分位を表示できません。rank-IC は ${ic.n||0} fold で算出。</div>`}
+    </div>` : `<div style="font-size:11px;color:var(--text-muted)">OOF サンプルが期内 ${(oof.n_quantiles||5)*2} 銘柄未満のため分位を表示できません。rank-IC は ${ic.n||0} fold で算出。</div>`}
   </div>`;
 }
 
@@ -2072,15 +2071,15 @@ function _dlmTableHTML(data, v) {
     const ui = utilMap[r.edinet_code];
     const u = ui ? ui._u : null;
     const frontier = ui && ui._pareto ? '★' : ui && ui._anti_pareto ? '▼' : '';
-    const frontColor = ui && ui._pareto ? '#f9a8d4' : ui && ui._anti_pareto ? '#fca5a5' : '#64748b';
+    const frontColor = ui && ui._pareto ? cssVar('--val-up-text') : ui && ui._anti_pareto ? cssVar('--val-down-text') : cssVar('--text-muted');
     return `<tr style="cursor:pointer;${seld ? 'background:rgba(124,58,237,0.14)' : ''}" onclick="document.dispatchEvent(new CustomEvent('dlm-select',{detail:'${esc(r.edinet_code)}'}))">
       <td>${i + 1}</td>
       <td>${esc(r.sec_code || '-')}</td>
       <td style="max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(r.company_name || r.edinet_code)}</td>
       <td>${esc(r.industry || '-')}</td>
       <td class="${mu > 0 ? 'text-green' : 'text-red'}" style="text-align:right;font-family:monospace">${mu != null ? (mu * 100).toFixed(1) + '%' : '-'}</td>
-      <td style="text-align:right;font-family:monospace;color:#a78bfa">${r.r_macro != null ? (r.r_macro * 100).toFixed(2) + '%' : '-'}</td>
-      <td style="text-align:right;font-family:monospace;color:${u != null && u > 0 ? '#86efac' : '#f87171'}">${u != null ? u.toFixed(3) : '-'}</td>
+      <td style="text-align:right;font-family:monospace;color:var(--accent-text)">${r.r_macro != null ? (r.r_macro * 100).toFixed(2) + '%' : '-'}</td>
+      <td style="text-align:right;font-family:monospace;color:${u != null && u > 0 ? cssVar('--val-up-text') : cssVar('--val-down-text')}">${u != null ? u.toFixed(3) : '-'}</td>
       <td style="text-align:center;color:${frontColor};font-weight:600">${frontier}</td>
       ${betaCells(r)}
       <td style="text-align:right;font-family:monospace">${r.pred_rmse != null ? r.pred_rmse.toFixed(4) : '-'}</td>
@@ -2090,10 +2089,10 @@ function _dlmTableHTML(data, v) {
   const lambdaTag = lambda != null ? `<span class="tag" style="margin-left:6px">λ=${lambda}</span>` : '';
   return _dlmDiagHTML(data) + _dlmOofHTML(data) + `
     <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;flex-wrap:wrap">
-      <div style="font-size:11px;color:#64748b">行クリックで銘柄を選択 → 下に α/β の時系列（信用区間バンド）を表示${lambdaTag}</div>
+      <div style="font-size:11px;color:var(--text-muted)">行クリックで銘柄を選択 → 下に α/β の時系列（信用区間バンド）を表示${lambdaTag}</div>
       <span style="flex:1"></span>
-      <label style="font-size:11px;color:#94a3b8">表示系列
-        <select id="dlm-series" style="margin-left:6px;background:#0f1117;color:#e2e8f0;border:1px solid #1e2235;border-radius:6px;padding:4px 6px;font-size:12px">${seriesOpts}</select>
+      <label style="font-size:11px;color:var(--text-secondary)">表示系列
+        <select id="dlm-series" style="margin-left:6px;background:var(--bg-sunken);color:var(--text);border:1px solid var(--border-subtle);border-radius:6px;padding:4px 6px;font-size:12px">${seriesOpts}</select>
       </label>
     </div>
     ${makeChartContainer('chart-dlm', 320)}
@@ -2122,19 +2121,19 @@ function _dlmPaintChart() {
       datasets: [
         { label: '上限', data: ser.hi, borderColor: 'transparent', backgroundColor: band, pointRadius: 0, fill: '+1', tension: 0.2 },
         { label: '下限', data: ser.lo, borderColor: 'transparent', backgroundColor: band, pointRadius: 0, fill: false, tension: 0.2 },
-        { label: title, data: ser.mean, borderColor: '#a78bfa', borderWidth: 1.6, pointRadius: 0, fill: false, tension: 0.2 },
+        { label: title, data: ser.mean, borderColor: cssVar('--accent-text'), borderWidth: 1.6, pointRadius: 0, fill: false, tension: 0.2 },
       ]
     },
     options: {
       responsive: true, maintainAspectRatio: false, animation: { duration: 0 },
       plugins: {
         legend: { display: true, labels: { filter: it => it.text !== '上限' && it.text !== '下限' } },
-        title: { display: true, text: `${esc(row.company_name || row.edinet_code)}（${esc(row.sec_code || '')}） — ${title}`, color: '#cbd5e1', font: { size: 12 } },
+        title: { display: true, text: `${esc(row.company_name || row.edinet_code)}（${esc(row.sec_code || '')}） — ${title}`, color: cssVar('--text-body'), font: { size: 12 } },
         tooltip: { mode: 'index', intersect: false },
       },
       scales: {
-        x: { type: 'category', grid: { color: 'rgba(255,255,255,0.04)' }, ticks: { color: '#64748b', maxTicksLimit: 8 } },
-        y: { grid: { color: 'rgba(255,255,255,0.05)' }, ticks: { color: '#64748b' } },
+        x: { type: 'category', grid: { color: 'rgba(255,255,255,0.04)' }, ticks: { color: cssVar('--text-muted'), maxTicksLimit: 8 } },
+        y: { grid: { color: 'rgba(255,255,255,0.05)' }, ticks: { color: cssVar('--text-muted') } },
       }
     }
   });
@@ -2176,7 +2175,7 @@ function _renderGenericResult(data) {
       `<tr>${cols.map(c => `<td>${esc(String(r[c] ?? '-'))}</td>`).join('')}</tr>`).join('');
     return `<div style="overflow-x:auto"><table><thead><tr>${header}</tr></thead><tbody>${rows}</tbody></table></div>`;
   }
-  return `<pre style="color:#94a3b8;font-size:12px;white-space:pre-wrap">${esc(JSON.stringify(data, null, 2))}</pre>`;
+  return `<pre style="color:var(--text-secondary);font-size:12px;white-space:pre-wrap">${esc(JSON.stringify(data, null, 2))}</pre>`;
 }
 
 function dl(content, name) {

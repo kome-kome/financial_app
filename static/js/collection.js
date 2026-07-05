@@ -11,9 +11,9 @@ function apiBase(){ return document.getElementById('api-base').value.trim().repl
 async function checkApi(){
   try{
     const d = await apiFetch('/api/stats');
-    document.getElementById('api-dot').style.background='#10b981';
+    document.getElementById('api-dot').style.background=cssVar('--status-good');
     document.getElementById('s-api').textContent='接続OK';
-    document.getElementById('s-api').style.color='#10b981';
+    document.getElementById('s-api').style.color=cssVar('--status-good');
     document.getElementById('s-companies').textContent=d.companies.toLocaleString();
     document.getElementById('s-records').textContent=d.records.toLocaleString();
     document.getElementById('s-year').textContent=d.latest_year||'-';
@@ -21,9 +21,9 @@ async function checkApi(){
     loadIndustries();
     initWizardState();
   }catch(e){
-    document.getElementById('api-dot').style.background='#ef4444';
+    document.getElementById('api-dot').style.background=cssVar('--status-bad');
     document.getElementById('s-api').textContent='接続失敗';
-    document.getElementById('s-api').style.color='#ef4444';
+    document.getElementById('s-api').style.color=cssVar('--status-bad');
     log('API接続失敗: '+e.message,'error');
   }
 }
@@ -39,30 +39,30 @@ async function loadEdinetCoverage(){
   try{
     const d = await apiFetch('/api/collect/edinet-coverage');
     const pct = d.coverage_pct;
-    const barColor = pct >= 80 ? '#10b981' : pct >= 50 ? '#f59e0b' : '#ef4444';
+    const barColor = pct >= 80 ? cssVar('--status-good') : pct >= 50 ? cssVar('--status-warn') : cssVar('--status-bad');
     let html = `
       <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:12px">
-        <div style="background:#0f1117;border-radius:6px;padding:10px;text-align:center">
+        <div style="background:${cssVar('--bg-sunken')};border-radius:6px;padding:10px;text-align:center">
           <div class="text-sm">登録企業数</div>
-          <div style="font-size:18px;font-weight:700;color:#a78bfa">${d.total_companies.toLocaleString()}</div>
+          <div style="font-size:18px;font-weight:700;color:${cssVar('--accent-text')}">${d.total_companies.toLocaleString()}</div>
         </div>
-        <div style="background:#0f1117;border-radius:6px;padding:10px;text-align:center">
+        <div style="background:${cssVar('--bg-sunken')};border-radius:6px;padding:10px;text-align:center">
           <div class="text-sm">財務データあり</div>
-          <div style="font-size:18px;font-weight:700;color:#10b981">${d.with_records.toLocaleString()}</div>
+          <div style="font-size:18px;font-weight:700;color:${cssVar('--status-good')}">${d.with_records.toLocaleString()}</div>
         </div>
-        <div style="background:#0f1117;border-radius:6px;padding:10px;text-align:center">
+        <div style="background:${cssVar('--bg-sunken')};border-radius:6px;padding:10px;text-align:center">
           <div class="text-sm">財務データなし</div>
-          <div style="font-size:18px;font-weight:700;color:#ef4444">${d.without_records.toLocaleString()}</div>
+          <div style="font-size:18px;font-weight:700;color:${cssVar('--status-bad')}">${d.without_records.toLocaleString()}</div>
         </div>
       </div>
       <div style="margin-bottom:12px">
-        <div style="display:flex;justify-content:space-between;font-size:11px;color:#64748b;margin-bottom:3px">
+        <div style="display:flex;justify-content:space-between;font-size:11px;color:${cssVar('--text-muted')};margin-bottom:3px">
           <span>収録率</span><span>${pct}%</span>
         </div>
         <div class="progress-bar" role="progressbar" aria-valuemin="0" aria-valuemax="100"><div class="progress-fill" style="width:${pct}%;background:${barColor}"></div></div>
       </div>`;
     if(d.year_coverage && d.year_coverage.length){
-      html += '<div style="font-size:11px;color:#64748b;margin-bottom:4px">年度別収録社数（2019年以降）</div>';
+      html += `<div style="font-size:11px;color:${cssVar('--text-muted')};margin-bottom:4px">年度別収録社数（2019年以降）</div>`;
       html += '<div style="overflow-x:auto"><table style="width:100%"><thead><tr><th>年度</th><th>収録社数</th></tr></thead><tbody>';
       d.year_coverage.forEach(r=>{
         html += `<tr><td>${Number(r.year)}年度</td><td>${Number(r.count).toLocaleString()}社</td></tr>`;
@@ -70,7 +70,7 @@ async function loadEdinetCoverage(){
       html += '</tbody></table></div>';
     }
     el.innerHTML = html;
-  }catch(e){ el.innerHTML = `<p class="text-sm" style="color:#ef4444;text-align:center;padding:10px">取得失敗: ${esc(e.message)}</p>`; }
+  }catch(e){ el.innerHTML = `<p class="text-sm" style="color:${cssVar('--status-bad')};text-align:center;padding:10px">取得失敗: ${esc(e.message)}</p>`; }
 }
 
 // ── 株価カバレッジ ──────────────────────────────────────────────────
@@ -80,30 +80,30 @@ async function loadMarketCoverage(){
   try{
     const d = await apiFetch('/api/collect/market-coverage');
     const pct = d.coverage_pct;
-    const barColor = pct >= 80 ? '#10b981' : pct >= 50 ? '#f59e0b' : '#ef4444';
+    const barColor = pct >= 80 ? cssVar('--status-good') : pct >= 50 ? cssVar('--status-warn') : cssVar('--status-bad');
     el.innerHTML = `
       <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:12px">
-        <div style="background:#0f1117;border-radius:6px;padding:10px;text-align:center">
+        <div style="background:${cssVar('--bg-sunken')};border-radius:6px;padding:10px;text-align:center">
           <div class="text-sm">証券コードあり</div>
-          <div style="font-size:18px;font-weight:700;color:#a78bfa">${d.total_with_sec.toLocaleString()}</div>
+          <div style="font-size:18px;font-weight:700;color:${cssVar('--accent-text')}">${d.total_with_sec.toLocaleString()}</div>
         </div>
-        <div style="background:#0f1117;border-radius:6px;padding:10px;text-align:center">
+        <div style="background:${cssVar('--bg-sunken')};border-radius:6px;padding:10px;text-align:center">
           <div class="text-sm">株価データあり</div>
-          <div style="font-size:18px;font-weight:700;color:#10b981">${d.with_market_data.toLocaleString()}</div>
+          <div style="font-size:18px;font-weight:700;color:${cssVar('--status-good')}">${d.with_market_data.toLocaleString()}</div>
         </div>
-        <div style="background:#0f1117;border-radius:6px;padding:10px;text-align:center">
+        <div style="background:${cssVar('--bg-sunken')};border-radius:6px;padding:10px;text-align:center">
           <div class="text-sm">株価データなし</div>
-          <div style="font-size:18px;font-weight:700;color:#ef4444">${d.without_market_data.toLocaleString()}</div>
+          <div style="font-size:18px;font-weight:700;color:${cssVar('--status-bad')}">${d.without_market_data.toLocaleString()}</div>
         </div>
       </div>
       <div style="margin-bottom:10px">
-        <div style="display:flex;justify-content:space-between;font-size:11px;color:#64748b;margin-bottom:3px">
+        <div style="display:flex;justify-content:space-between;font-size:11px;color:${cssVar('--text-muted')};margin-bottom:3px">
           <span>取得率</span><span>${pct}%</span>
         </div>
         <div class="progress-bar" role="progressbar" aria-valuemin="0" aria-valuemax="100"><div class="progress-fill" style="width:${pct}%;background:${barColor}"></div></div>
       </div>
       <div class="text-sm">最終更新: ${esc(d.latest_update || '未取得')}</div>`;
-  }catch(e){ el.innerHTML = `<p class="text-sm" style="color:#ef4444;text-align:center;padding:10px">取得失敗: ${esc(e.message)}</p>`; }
+  }catch(e){ el.innerHTML = `<p class="text-sm" style="color:${cssVar('--status-bad')};text-align:center;padding:10px">取得失敗: ${esc(e.message)}</p>`; }
 }
 
 // ── データ品質 ───────────────────────────────────────────────────────
@@ -112,14 +112,14 @@ async function loadQualityReport(){
   el.innerHTML = '<p class="text-sm" style="text-align:center;padding:40px 0"><span class="spinner"></span> チェック中...</p>';
   try{
     const d = await apiFetch('/api/collect/data-quality');
-    let html = `<div class="text-sm" style="color:#64748b;margin-bottom:12px">チェック日時: ${esc(d.checked_at)}</div>`;
+    let html = `<div class="text-sm" style="color:${cssVar('--text-muted')};margin-bottom:12px">チェック日時: ${esc(d.checked_at)}</div>`;
 
     // NULL率
     html += `<div class="card" style="margin-bottom:12px">
       <div class="section-title">必須フィールドのNULL率</div>
       <div style="overflow-x:auto"><table><thead><tr><th>フィールド</th><th>NULLレコード数</th><th>NULL率</th></tr></thead><tbody>`;
     d.null_fields.forEach(r=>{
-      const color = r.null_pct < 10 ? '#10b981' : r.null_pct < 30 ? '#f59e0b' : '#ef4444';
+      const color = r.null_pct < 10 ? cssVar('--status-good') : r.null_pct < 30 ? cssVar('--status-warn') : cssVar('--status-bad');
       html += `<tr><td>${esc(r.label)}</td><td>${Number(r.null_count).toLocaleString()}</td>
         <td style="color:${color};font-weight:600">${Number(r.null_pct)}%</td></tr>`;
     });
@@ -129,11 +129,11 @@ async function loadQualityReport(){
     html += `<div class="card" style="margin-bottom:12px">
       <div class="section-title">外れ値チェック</div>`;
     if(d.outliers.length === 0){
-      html += '<p class="text-sm" style="color:#10b981">外れ値は検出されませんでした ✓</p>';
+      html += `<p class="text-sm" style="color:${cssVar('--status-good')}">外れ値は検出されませんでした ✓</p>`;
     } else {
       html += '<div style="overflow-x:auto"><table><thead><tr><th>条件</th><th>件数</th></tr></thead><tbody>';
       d.outliers.forEach(r=>{
-        html += `<tr><td>${esc(r.label)}</td><td style="color:#f59e0b;font-weight:600">${Number(r.count).toLocaleString()}</td></tr>`;
+        html += `<tr><td>${esc(r.label)}</td><td style="color:${cssVar('--status-warn')};font-weight:600">${Number(r.count).toLocaleString()}</td></tr>`;
       });
       html += '</tbody></table></div>';
     }
@@ -144,21 +144,21 @@ async function loadQualityReport(){
     html += `<div class="card">
       <div class="section-title">収録状況サマリー</div>
       <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:8px">
-        <div style="background:#0f1117;border-radius:6px;padding:10px">
+        <div style="background:${cssVar('--bg-sunken')};border-radius:6px;padding:10px">
           <div class="text-sm">収録企業数</div>
-          <div style="font-size:18px;font-weight:700;color:#a78bfa">${Number(ys.total_companies).toLocaleString()}</div>
+          <div style="font-size:18px;font-weight:700;color:${cssVar('--accent-text')}">${Number(ys.total_companies).toLocaleString()}</div>
         </div>
-        <div style="background:#0f1117;border-radius:6px;padding:10px">
+        <div style="background:${cssVar('--bg-sunken')};border-radius:6px;padding:10px">
           <div class="text-sm">3年以上データあり</div>
-          <div style="font-size:18px;font-weight:700;color:#10b981">${Number(ys.three_or_more_years).toLocaleString()}</div>
+          <div style="font-size:18px;font-weight:700;color:${cssVar('--status-good')}">${Number(ys.three_or_more_years).toLocaleString()}</div>
         </div>
-        <div style="background:#0f1117;border-radius:6px;padding:10px">
+        <div style="background:${cssVar('--bg-sunken')};border-radius:6px;padding:10px">
           <div class="text-sm">1年分のみ</div>
-          <div style="font-size:18px;font-weight:700;color:#f59e0b">${Number(ys.single_year_only).toLocaleString()}</div>
+          <div style="font-size:18px;font-weight:700;color:${cssVar('--status-warn')}">${Number(ys.single_year_only).toLocaleString()}</div>
         </div>
-        <div style="background:#0f1117;border-radius:6px;padding:10px">
+        <div style="background:${cssVar('--bg-sunken')};border-radius:6px;padding:10px">
           <div class="text-sm">株価データなし</div>
-          <div style="font-size:18px;font-weight:700;color:#ef4444">${Number(ys.no_market_data).toLocaleString()}</div>
+          <div style="font-size:18px;font-weight:700;color:${cssVar('--status-bad')}">${Number(ys.no_market_data).toLocaleString()}</div>
         </div>
       </div>
     </div>`;
@@ -167,23 +167,23 @@ async function loadQualityReport(){
     if(d.accounting_standard && d.accounting_standard.length){
       html += `<div class="card" style="margin-top:12px">
         <div class="section-title">会計基準別の品質サマリー</div>
-        <p class="text-sm" style="color:#64748b;margin-bottom:8px">IFRS と JGAAP では純資産・営業利益・1株指標の定義に差があるため、両者を混在して回帰すると係数が歪む可能性があります。</p>`;
+        <p class="text-sm" style="color:${cssVar('--text-muted')};margin-bottom:8px">IFRS と JGAAP では純資産・営業利益・1株指標の定義に差があるため、両者を混在して回帰すると係数が歪む可能性があります。</p>`;
       d.accounting_standard.forEach(grp=>{
-        html += `<div style="background:#0f1117;border-radius:6px;padding:10px;margin-bottom:8px">
+        html += `<div style="background:${cssVar('--bg-sunken')};border-radius:6px;padding:10px;margin-bottom:8px">
           <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
-            <span style="font-weight:600;color:#a78bfa">${esc(grp.standard)}</span>
-            <span class="text-sm" style="color:#64748b">${Number(grp.total).toLocaleString()} 件（全体の ${grp.share_pct}%）</span>
+            <span style="font-weight:600;color:${cssVar('--accent-text')}">${esc(grp.standard)}</span>
+            <span class="text-sm" style="color:${cssVar('--text-muted')}">${Number(grp.total).toLocaleString()} 件（全体の ${grp.share_pct}%）</span>
           </div>
           <div style="overflow-x:auto"><table><thead><tr>
             <th>フィールド</th><th>NULL 率</th><th>外れ値 率</th>
           </tr></thead><tbody>`;
         grp.fields.forEach(f=>{
-          const nullColor = f.null_pct < 10 ? '#10b981' : f.null_pct < 30 ? '#f59e0b' : '#ef4444';
+          const nullColor = f.null_pct < 10 ? cssVar('--status-good') : f.null_pct < 30 ? cssVar('--status-warn') : cssVar('--status-bad');
           const hasOutlier = (f.outlier_pct !== undefined);
-          const outColor = hasOutlier ? (f.outlier_pct < 1 ? '#10b981' : f.outlier_pct < 5 ? '#f59e0b' : '#ef4444') : '#64748b';
+          const outColor = hasOutlier ? (f.outlier_pct < 1 ? cssVar('--status-good') : f.outlier_pct < 5 ? cssVar('--status-warn') : cssVar('--status-bad')) : cssVar('--text-muted');
           const outCell = hasOutlier
             ? `<span style="color:${outColor}">${Number(f.outlier_pct).toFixed(2)}% (${Number(f.outlier_count).toLocaleString()})</span>`
-            : '<span style="color:#64748b">—</span>';
+            : `<span style="color:${cssVar('--text-muted')}">—</span>`;
           html += `<tr>
             <td>${esc(f.label)}</td>
             <td><span style="color:${nullColor}">${Number(f.null_pct)}% (${Number(f.null_count).toLocaleString()})</span></td>
@@ -196,7 +196,7 @@ async function loadQualityReport(){
     }
 
     el.innerHTML = html;
-  }catch(e){ el.innerHTML = `<p class="text-sm" style="color:#ef4444;text-align:center;padding:20px">チェック失敗: ${esc(e.message)}</p>`; }
+  }catch(e){ el.innerHTML = `<p class="text-sm" style="color:${cssVar('--status-bad')};text-align:center;padding:20px">チェック失敗: ${esc(e.message)}</p>`; }
 }
 
 // ── スマート収集 ─────────────────────────────────────────────────────
@@ -211,7 +211,7 @@ async function startSmartCollection(force=false){
     const badge = document.getElementById('smart-mode-badge');
     badge.style.display   = 'block';
     badge.textContent     = '判定中...';
-    badge.style.color     = '#94a3b8';
+    badge.style.color     = cssVar('--text-secondary');
     document.getElementById('btn-smart').disabled        = true;
     document.getElementById('btn-smart-stop').style.display = '';
     _startSmartSSE();
@@ -254,13 +254,13 @@ function _startSmartSSE(){
         const badge = document.getElementById('smart-mode-badge');
         if(modeLog.includes('差分収集モード')){
           badge.textContent = '差分モード（全社収集済み）';
-          badge.style.color = '#10b981';
+          badge.style.color = cssVar('--status-good');
         } else if(modeLog.includes('初回チャンク')){
           badge.textContent = 'チャンク 1 / 25（初回収集）';
-          badge.style.color = '#a78bfa';
+          badge.style.color = cssVar('--accent-text');
         } else {
           const m = modeLog.match(/チャンク(\d+)（先着(\d+)社/);
-          if(m){ badge.textContent = `チャンク ${m[1]} / 25（先着${m[2]}社）`; badge.style.color = '#f59e0b'; }
+          if(m){ badge.textContent = `チャンク ${m[1]} / 25（先着${m[2]}社）`; badge.style.color = cssVar('--status-warn'); }
         }
       }
       d.new_logs.forEach(msg => log(msg,'info'));
@@ -445,7 +445,7 @@ function updatePager(total, page, limit) {
   const info = document.createElement('span');
   info.className = 'text-sm';
   info.textContent = `${page + 1} / ${totalPages}ページ`;
-  info.style.cssText = 'align-self:center;color:#94a3b8';
+  info.style.cssText = `align-self:center;color:${cssVar('--text-secondary')}`;
   const next = document.createElement('button');
   next.className = 'btn btn-secondary btn-sm';
   next.textContent = '次へ →';
@@ -504,25 +504,25 @@ async function showDetail(code, name){
         ${statCard('自己資本比率', r.bs.equity_ratio+'%')}
         ${statCard('時価総額', fmt0((r.val.market_cap||0)/1e6)+'億')}
       </div>
-      <div style="font-size:12px;color:#94a3b8;line-height:2">
-        <b style="color:#10b981">PL:</b> 純利益 ${fmt0((r.pl.net_income||0)/1e6)}億 / EPS ${r.pl.eps||'-'}円 / 純利益率 ${r.pl.net_margin||'-'}%<br>
-        <b style="color:#38bdf8">BS:</b> 純資産 ${fmt0((r.bs.total_equity||0)/1e6)}億 / D/E ${r.derived?.de_ratio||'-'}<br>
-        <b style="color:#f59e0b">CF:</b> 営業CF ${fmt0((r.cf.operating_cf||0)/1e6)}億 / フリーCF ${fmt0((r.cf.free_cf||0)/1e6)}億<br>
-        <b style="color:#a78bfa">Val:</b> PER ${r.val.per||'-'}倍 / PBR ${r.val.pbr||'-'}倍 / 配当 ${r.val.div_yield||'-'}%
+      <div style="font-size:12px;color:${cssVar('--text-secondary')};line-height:2">
+        <b style="color:${cssVar('--status-good')}">PL:</b> 純利益 ${fmt0((r.pl.net_income||0)/1e6)}億 / EPS ${r.pl.eps||'-'}円 / 純利益率 ${r.pl.net_margin||'-'}%<br>
+        <b style="color:${cssVar('--status-info')}">BS:</b> 純資産 ${fmt0((r.bs.total_equity||0)/1e6)}億 / D/E ${r.derived?.de_ratio||'-'}<br>
+        <b style="color:${cssVar('--status-warn')}">CF:</b> 営業CF ${fmt0((r.cf.operating_cf||0)/1e6)}億 / フリーCF ${fmt0((r.cf.free_cf||0)/1e6)}億<br>
+        <b style="color:${cssVar('--accent-text')}">Val:</b> PER ${r.val.per||'-'}倍 / PBR ${r.val.pbr||'-'}倍 / 配当 ${r.val.div_yield||'-'}%
       </div>`;
     if(priceHistory && priceHistory.length > 0){
       html += `<div style="margin-top:14px">
-        <div style="font-size:12px;font-weight:600;color:#38bdf8;margin-bottom:6px">株価履歴（直近${priceHistory.length}日）</div>
+        <div style="font-size:12px;font-weight:600;color:${cssVar('--status-info')};margin-bottom:6px">株価履歴（直近${priceHistory.length}日）</div>
         <div style="overflow-x:auto;max-height:200px;overflow-y:auto">
           <table style="font-size:11px"><thead><tr><th>日付</th><th>始値</th><th>高値</th><th>安値</th><th>終値</th><th>出来高</th></tr></thead><tbody>`;
       [...priceHistory].reverse().forEach(p=>{
         html += `<tr>
           <td>${esc(p.trade_date)}</td>
           <td>${p.open!=null?Number(p.open).toLocaleString():'-'}</td>
-          <td style="color:#10b981">${p.high!=null?Number(p.high).toLocaleString():'-'}</td>
-          <td style="color:#ef4444">${p.low!=null?Number(p.low).toLocaleString():'-'}</td>
+          <td style="color:${cssVar('--status-good')}">${p.high!=null?Number(p.high).toLocaleString():'-'}</td>
+          <td style="color:${cssVar('--status-bad')}">${p.low!=null?Number(p.low).toLocaleString():'-'}</td>
           <td style="font-weight:600">${p.close!=null?Number(p.close).toLocaleString():'-'}</td>
-          <td style="color:#64748b">${p.volume!=null?Number(p.volume).toLocaleString():'-'}</td>
+          <td style="color:${cssVar('--text-muted')}">${p.volume!=null?Number(p.volume).toLocaleString():'-'}</td>
         </tr>`;
       });
       html += '</tbody></table></div></div>';
@@ -532,7 +532,7 @@ async function showDetail(code, name){
     document.getElementById('modal-detail').classList.remove('hidden');
   }catch(e){ log('詳細取得失敗: '+e.message,'error') }
 }
-function statCard(t,v){ return `<div style="background:#0f1117;border-radius:6px;padding:10px"><div style="font-size:10px;color:#64748b">${t}</div><div style="font-size:16px;font-weight:600">${v}</div></div>` }
+function statCard(t,v){ return `<div style="background:${cssVar('--bg-sunken')};border-radius:6px;padding:10px"><div style="font-size:10px;color:${cssVar('--text-muted')}">${t}</div><div style="font-size:16px;font-weight:600">${v}</div></div>` }
 function closeModal(){ document.getElementById('modal-detail').classList.add('hidden') }
 
 // ── 株価履歴収集 ────────────────────────────────────────────────────
@@ -543,24 +543,24 @@ async function loadHistoryCoverage(){
     const d = await apiFetch('/api/collect/history/coverage');
     el.innerHTML = `
       <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px">
-        <div style="background:#0f1117;border-radius:6px;padding:10px;text-align:center">
+        <div style="background:${cssVar('--bg-sunken')};border-radius:6px;padding:10px;text-align:center">
           <div class="text-sm">収録企業数</div>
-          <div style="font-size:18px;font-weight:700;color:#a78bfa">${Number(d.companies).toLocaleString()}</div>
+          <div style="font-size:18px;font-weight:700;color:${cssVar('--accent-text')}">${Number(d.companies).toLocaleString()}</div>
         </div>
-        <div style="background:#0f1117;border-radius:6px;padding:10px;text-align:center">
+        <div style="background:${cssVar('--bg-sunken')};border-radius:6px;padding:10px;text-align:center">
           <div class="text-sm">総レコード数</div>
-          <div style="font-size:18px;font-weight:700;color:#38bdf8">${Number(d.records).toLocaleString()}</div>
+          <div style="font-size:18px;font-weight:700;color:${cssVar('--status-info')}">${Number(d.records).toLocaleString()}</div>
         </div>
-        <div style="background:#0f1117;border-radius:6px;padding:10px;text-align:center">
+        <div style="background:${cssVar('--bg-sunken')};border-radius:6px;padding:10px;text-align:center">
           <div class="text-sm">最古データ日</div>
-          <div style="font-size:14px;font-weight:600;color:#94a3b8">${esc(d.oldest_date||'未収集')}</div>
+          <div style="font-size:14px;font-weight:600;color:${cssVar('--text-secondary')}">${esc(d.oldest_date||'未収集')}</div>
         </div>
-        <div style="background:#0f1117;border-radius:6px;padding:10px;text-align:center">
+        <div style="background:${cssVar('--bg-sunken')};border-radius:6px;padding:10px;text-align:center">
           <div class="text-sm">最新データ日</div>
-          <div style="font-size:14px;font-weight:600;color:#10b981">${esc(d.newest_date||'未収集')}</div>
+          <div style="font-size:14px;font-weight:600;color:${cssVar('--status-good')}">${esc(d.newest_date||'未収集')}</div>
         </div>
       </div>`;
-  }catch(e){ el.innerHTML = `<p class="text-sm" style="color:#ef4444;text-align:center;padding:10px">取得失敗: ${esc(e.message)}</p>`; }
+  }catch(e){ el.innerHTML = `<p class="text-sm" style="color:${cssVar('--status-bad')};text-align:center;padding:10px">取得失敗: ${esc(e.message)}</p>`; }
 }
 
 let _historySSE = null;
@@ -726,11 +726,11 @@ async function loadMacroCoverage(){
     const catColor = {fx:'tag-blue', rate:'tag-amber', equity:'tag-purple', commodity:'tag-amber'};
     tbody.innerHTML = d.series.map(s => `
       <tr>
-        <td><strong>${esc(s.name)}</strong><br><span style="font-size:10px;color:#64748b">${esc(s.code)} / ${esc(s.ticker)}</span></td>
+        <td><strong>${esc(s.name)}</strong><br><span style="font-size:10px;color:${cssVar('--text-muted')}">${esc(s.code)} / ${esc(s.ticker)}</span></td>
         <td><span class="tag ${catColor[s.category]||'tag-gray'}" style="font-size:10px">${catLabel[s.category]||s.category}</span></td>
         <td>${s.rows.toLocaleString()}</td>
-        <td>${s.oldest||'<span style="color:#475569">—</span>'}</td>
-        <td>${s.newest||'<span style="color:#475569">—</span>'}</td>
+        <td>${s.oldest||`<span style="color:${cssVar('--text-muted')}">—</span>`}</td>
+        <td>${s.newest||`<span style="color:${cssVar('--text-muted')}">—</span>`}</td>
       </tr>
     `).join('');
   }catch(e){ /* ignore */ }
@@ -897,7 +897,7 @@ function renderScreenResults(){
       <td>${r.val?.div_yield!=null?Number(r.val.div_yield):'-'}</td>
       <td>
         <div class="score-bar">
-          <div class="score-track"><div class="score-fill" style="width:${score}%;background:${score>70?'#10b981':score>40?'#f59e0b':'#ef4444'}"></div></div>
+          <div class="score-track"><div class="score-fill" style="width:${score}%;background:${score>70?cssVar('--status-good'):score>40?cssVar('--status-warn'):cssVar('--status-bad')}"></div></div>
           <span style="font-size:11px">${score}</span>
         </div>
       </td>
@@ -958,7 +958,7 @@ function renderNorm(){
   document.getElementById('norm-content').innerHTML = `
     <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:16px">
       <div>
-        <div style="color:#a78bfa;font-weight:500;margin-bottom:8px;font-size:12px">▌ BS 再分類</div>
+        <div style="color:${cssVar('--accent-text')};font-weight:500;margin-bottom:8px;font-size:12px">▌ BS 再分類</div>
         ${bsRow('流動資産', r.bs.current_assets)} ${bsRow('固定資産', r.bs.noncurrent_assets)}
         ${bsRow('現金・預金', r.bs.cash)} ${bsRow('総資産', r.bs.total_assets, true)}
         ${bsRow('流動負債', r.bs.current_liabilities)} ${bsRow('固定負債', r.bs.noncurrent_liabilities)}
@@ -966,7 +966,7 @@ function renderNorm(){
         ${bsRow('BPS', null,false,(r.bs.bps||'-')+'円')}
       </div>
       <div>
-        <div style="color:#10b981;font-weight:500;margin-bottom:8px;font-size:12px">▌ PL 再分類</div>
+        <div style="color:${cssVar('--status-good')};font-weight:500;margin-bottom:8px;font-size:12px">▌ PL 再分類</div>
         ${bsRow('売上高', r.pl.revenue)} ${bsRow('売上総利益', r.pl.gross_profit)}
         ${bsRow('営業利益', r.pl.operating_profit)} ${bsRow('経常利益', r.pl.ordinary_profit)}
         ${bsRow('当期純利益', r.pl.net_income)}
@@ -976,12 +976,12 @@ function renderNorm(){
         ${bsRow('EPS', null,false,(r.pl.eps||'-')+'円')}
       </div>
       <div>
-        <div style="color:#f59e0b;font-weight:500;margin-bottom:8px;font-size:12px">▌ CF 再分類</div>
+        <div style="color:${cssVar('--status-warn')};font-weight:500;margin-bottom:8px;font-size:12px">▌ CF 再分類</div>
         ${bsRow('営業CF', r.cf.operating_cf)} ${bsRow('投資CF', r.cf.investing_cf)}
         ${bsRow('財務CF', r.cf.financing_cf)} ${bsRow('フリーCF', r.cf.free_cf)}
         ${bsRow('設備投資', r.cf.capex)} ${bsRow('CF/売上比', null,false,(r.cf.cf_ratio||'-')+'%')}
         <div style="margin-top:12px"></div>
-        <div style="color:#60a5fa;font-weight:500;margin-bottom:8px;font-size:12px">▌ バリュエーション</div>
+        <div style="color:${cssVar('--status-info')};font-weight:500;margin-bottom:8px;font-size:12px">▌ バリュエーション</div>
         ${bsRow('時価総額', r.val.market_cap)}
         ${bsRow('PER', null,false,(r.val.per||'-')+'倍')}
         ${bsRow('PBR', null,false,(r.val.pbr||'-')+'倍')}
@@ -989,15 +989,15 @@ function renderNorm(){
         ${bsRow('配当利回', null,false,(r.val.div_yield||'-')+'%')}
       </div>
     </div>
-    <div style="margin-top:12px;font-size:11px;color:#64748b">Zスコア: 売上 ${r.zscore?.z_revenue?.toFixed(2)||'-'} / 営業利益率 ${r.zscore?.z_op_margin?.toFixed(2)||'-'} / ROE ${r.zscore?.z_roe?.toFixed(2)||'-'}</div>
+    <div style="margin-top:12px;font-size:11px;color:${cssVar('--text-muted')}">Zスコア: 売上 ${r.zscore?.z_revenue?.toFixed(2)||'-'} / 営業利益率 ${r.zscore?.z_op_margin?.toFixed(2)||'-'} / ROE ${r.zscore?.z_roe?.toFixed(2)||'-'}</div>
   `;
 }
 
 function bsRow(label, val, bold=false, rawStr=null){
   const v = rawStr !== null ? rawStr : (val==null?'-': ((val<0?'▲':'')+fmt0(Math.abs(val)/1e6)+'億'));
-  const col = rawStr===null && val!=null && val<0 ? 'color:#ef4444' : '';
-  return `<div style="display:flex;justify-content:space-between;padding:3px 0;border-bottom:1px solid #1e2235;font-size:12px">
-    <span style="color:#94a3b8">${label}</span>
+  const col = rawStr===null && val!=null && val<0 ? `color:${cssVar('--status-bad')}` : '';
+  return `<div style="display:flex;justify-content:space-between;padding:3px 0;border-bottom:1px solid ${cssVar('--border-subtle')};font-size:12px">
+    <span style="color:${cssVar('--text-secondary')}">${label}</span>
     <span style="font-weight:${bold?600:400};${col}">${v}</span></div>`;
 }
 
