@@ -12,7 +12,10 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from plugins import execute_plugin
-from plugins.recommend import METRICS, PRESETS, plugin, compute_momentum_z
+from plugins.recommend import (
+    METRICS, PRESETS, STATISTICAL_PRESET_NAME, compute_momentum_z,
+    get_dynamic_preset, plugin, resolve_weights,
+)
 
 
 # ── 純粋: 定数の整合性 ───────────────────────────────────────────────────────
@@ -32,6 +35,38 @@ class TestConstants:
         for weights in PRESETS.values():
             for w in weights.values():
                 assert isinstance(w, (int, float))
+
+
+# ── resolve_weights() / get_dynamic_preset(): 統計的最適化プリセット（Issue #271）────
+
+class TestResolveWeights:
+    def test_static_preset_passthrough(self, db):
+        assert resolve_weights(db, "バランス型") == PRESETS["バランス型"]
+        assert resolve_weights(db, "成長重視") == PRESETS["成長重視"]
+
+    def test_unknown_preset_falls_back_to_balanced(self, db):
+        assert resolve_weights(db, "存在しないプリセット") == PRESETS["バランス型"]
+
+    def test_statistical_preset_falls_back_when_unset(self, db):
+        assert get_dynamic_preset(db) is None
+        assert resolve_weights(db, STATISTICAL_PRESET_NAME) == PRESETS["バランス型"]
+
+    def test_statistical_preset_resolves_from_db(self, db):
+        from database import upsert_recommend_factor_premia
+        upsert_recommend_factor_premia(db, "rfp_1", [
+            {"run_id": "rfp_1", "factor_name": "z_roe", "mean_b": 0.15,
+             "newey_west_se": 0.04, "t_stat": 3.75, "p_value": 0.001, "n_periods": 30},
+            {"run_id": "rfp_1", "factor_name": "z_momentum", "mean_b": 0.08,
+             "newey_west_se": 0.03, "t_stat": 2.6, "p_value": 0.01, "n_periods": 30},
+        ])
+        dynamic = get_dynamic_preset(db)
+        assert dynamic == {"z_roe": 0.15, "z_momentum": 0.08}
+        assert resolve_weights(db, STATISTICAL_PRESET_NAME) == dynamic
+
+    def test_params_schema_includes_statistical_preset_option(self):
+        options = plugin.params_schema()["preset"]["options"]
+        values = [o["value"] for o in options]
+        assert STATISTICAL_PRESET_NAME in values
 
 
 # ── compute_momentum_z(): 12-1モメンタムのZスコア化 ───────────────────────────
@@ -205,3 +240,19 @@ class TestExecute:
                              lambda *a, **kw: called.append(1) or {})
         asyncio.run(execute_plugin(plugin, {"weights": {"z_roe": 1.0}, "min_coverage": 0.0}, db))
         assert called == []
+
+    def test_presets_response_includes_statistical_preset_when_available(self, db, make_metric):
+        from database import upsert_recommend_factor_premia
+        db.add(make_metric(edinet_code="E00001", z_roe=1.0))
+        upsert_recommend_factor_premia(db, "rfp_1", [
+            {"run_id": "rfp_1", "factor_name": "z_roe", "mean_b": 0.2,
+             "newey_west_se": None, "t_stat": None, "p_value": None, "n_periods": 12},
+        ])
+        db.commit()
+
+        res = asyncio.run(execute_plugin(plugin,
+            {"weights": {"z_roe": 1.0}, "min_coverage": 0.0}, db))
+        assert STATISTICAL_PRESET_NAME in res["presets"]
+        assert res["presets"][STATISTICAL_PRESET_NAME] == {"z_roe": 0.2}
+        # 既存4プリセットは変更されず残っていること
+        assert res["presets"]["バランス型"] == PRESETS["バランス型"]

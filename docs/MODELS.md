@@ -459,9 +459,34 @@ get_momentum_return()`）を候補集団横断で winsorize → Zスコア化す
 乗せず都度計算する。[バックテスト](#7-バックテスト) の as-of 検証では `start_date` 以前の
 価格のみを参照するためリークしない。
 
+### 統計的最適化プリセット（Fama-MacBeth 断面回帰）
+
+4プリセットは直感的なヒューリスティックだが、「統計的最適化」プリセットのみ
+Fama & MacBeth (1973) の断面回帰でデータ駆動に推定した重みを使う（`recommend_factor_
+premia.py`・ローカル専用CLI・Issue #271）。手順:
+
+1. 月末スナップショットごとに横断面 OLS を実行する:
+   `return_i,t+52w = Σ_k b_k,t・z_k,i,t + e_i,t`
+   （目的変数・母集団・fold は [M-1/M-2/M-3](#9-マクロリスク-リターン推奨) と共有。
+   `plugins/macro_snapshots.py::build_snapshots()` を無改修で再利用）。
+2. 各因子の時系列平均 `b_k = mean(b_k,t)` をプリセット重みとする。
+3. 52週先リターンを毎月ずらして観測するオーバーラップに起因する自己相関を
+   Newey-West（HAC）標準誤差で補正し、t統計量とあわせて記録する。
+
+`plugins/utils.py::walk_forward_cv_monthly`（M-1が使う pooled panel OLS＝複数月をプールして
+単一の OLS を学習）とは異なり、期間ごとに別々の断面 OLS を行う点が Fama-MacBeth の本質
+（設計判断の詳細は ADR-0008）。永続化は `macro_beta_inference.py` と同じ producer/consumer
+分離（バッチ→`recommend_factor_premia`テーブル→`plugins.recommend.resolve_weights()`が読む）。
+
+**`gap_ratio` は回帰対象から除外**する。`gap_ratio`（sector_ols依存）の非NULL率は本番DBで
+2020〜2024年度=0%・2025年度以降=67%超と極端に偏っており、含めると有効期間が直近2ヶ月分
+しか残らず統計的に無意味になるため（実データ検証で判明・ADR-0008）。「統計的最適化」
+プリセットは残り7指標＋z_momentumの重みのみを持つ。
+
 ### 仮定・限界
 
-- ウェイト設定に数学的・経済学的な根拠はなく、直感的なヒューリスティック
+- 4つのヒューリスティックプリセットのウェイト設定に数学的・経済学的な根拠はなく、直感的
+  （「統計的最適化」プリセットのみ Fama-MacBeth 断面回帰によるデータ駆動）
 - 各 Zスコアは年度内の相対評価であり、絶対的な財務水準は反映しない（z_momentum のみ
   価格取得日時点の候補集団内相対評価）
 - モデルの有効性は [バックテスト](#7-バックテスト) で検証すること
@@ -477,6 +502,12 @@ get_momentum_return()`）を候補集団横断で winsorize → Zスコア化す
 - 12-1モメンタムファクターの学術的基礎:
   **Jegadeesh, N., & Titman, S. (1993)**. "Returns to Buying Winners and Selling Losers: Implications for Stock Market Efficiency." *Journal of Finance*, 48(1), 65–91.
   → https://doi.org/10.1111/j.1540-6261.1993.tb04702.x
+- 「統計的最適化」プリセットの断面回帰手法:
+  **Fama, E.F., & MacBeth, J.D. (1973)**. "Risk, Return, and Equilibrium: Empirical Tests." *Journal of Political Economy*, 81(3), 607–636.
+  → https://doi.org/10.1086/260061
+- Newey-West（HAC）標準誤差:
+  **Newey, W.K., & West, K.D. (1987)**. "A Simple, Positive Semi-Definite, Heteroskedasticity and Autocorrelation Consistent Covariance Matrix." *Econometrica*, 55(3), 703–708.
+  → https://doi.org/10.2307/1913610
 
 ---
 

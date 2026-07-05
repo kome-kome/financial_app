@@ -206,3 +206,32 @@ class TestScoringSourceMomentum:
         db.commit()
         res2 = backtest.run(db, "バランス型", 6, 20, None, None)
         assert [r["edinet_code"] for r in res2["results"]] == codes
+
+
+# ── 統計的最適化プリセット（Issue #271・Fama-MacBeth）─────────────────────────
+
+class TestScoringSourceStatisticalPreset:
+    def test_resolves_dynamic_preset_weights(self, db, make_metric):
+        from database import upsert_recommend_factor_premia
+        db.add(make_metric(edinet_code="E00001", year=2020, period_end="2020-03-31", z_roe=2.0))
+        db.add(make_metric(edinet_code="E00002", year=2020, period_end="2020-03-31", z_roe=1.0))
+        upsert_recommend_factor_premia(db, "rfp_1", [
+            {"run_id": "rfp_1", "factor_name": "z_roe", "mean_b": 0.5,
+             "newey_west_se": None, "t_stat": None, "p_value": None, "n_periods": 12},
+        ])
+        db.commit()
+
+        res = backtest.run(db, "統計的最適化", 6, 20, None, None)
+        assert res["total_candidates"] == 2
+        assert res["results"][0]["edinet_code"] == "E00001"   # z_roe が高い方が上位
+
+    def test_falls_back_to_balanced_when_unset(self, db, make_metric):
+        import pytest
+        # データ未蓄積時はバランス型（z_roe+z_op_margin等）へフォールバック
+        db.add(make_metric(edinet_code="E00001", year=2020, period_end="2020-03-31",
+                           z_roe=2.0, z_op_margin=1.0))
+        db.commit()
+
+        res = backtest.run(db, "統計的最適化", 6, 20, None, None)
+        assert res["total_candidates"] == 1
+        assert res["results"][0]["score"] == pytest.approx(3.0)   # バランス型: z_roe+z_op_margin

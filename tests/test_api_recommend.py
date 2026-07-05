@@ -35,6 +35,20 @@ class TestRecommendPresets:
         assert "バランス型" in body["presets"]
         assert isinstance(body["metrics"], list) and body["metrics"]
 
+    def test_includes_statistical_preset_when_persisted(self, db):
+        from database import upsert_recommend_factor_premia
+        upsert_recommend_factor_premia(db, "rfp_1", [
+            {"run_id": "rfp_1", "factor_name": "z_roe", "mean_b": 0.3,
+             "newey_west_se": None, "t_stat": None, "p_value": None, "n_periods": 5},
+        ])
+        db.commit()
+
+        r = client.get("/api/recommend/presets")
+        assert r.status_code == 200
+        body = r.json()
+        assert "統計的最適化" in body["presets"]
+        assert body["presets"]["統計的最適化"] == {"z_roe": 0.3}
+
 
 # ── /api/recommend ──────────────────────────────────────────────────────────
 

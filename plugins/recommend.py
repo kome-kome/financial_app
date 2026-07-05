@@ -18,6 +18,47 @@ PRESETS = {
 
 _MomentumPX = namedtuple("_MomentumPX", "trade_date close")
 
+# データ駆動プリセット名（Issue #271）。PRESETS には含めず、recommend_factor_premia.py が
+# 永続化した最新のFama-MacBethファクタープレミアムから resolve_weights() が動的に組み立てる。
+STATISTICAL_PRESET_NAME = "統計的最適化"
+
+
+def get_dynamic_preset(db: Any) -> dict | None:
+    """DB永続化済みのFama-MacBethファクタープレミアムから統計的最適化プリセットの重みを
+    組み立てる（recommend_factor_premia.py --persist が書き込む・未実行ならNone）。"""
+    from database import get_latest_factor_premia
+    premia = get_latest_factor_premia(db)
+    if not premia:
+        return None
+    return {factor: vals["mean_b"] for factor, vals in premia.items()}
+
+
+def get_all_presets(db: Any) -> dict:
+    """UI表示用: 静的PRESETSに動的プリセット（算出済みなら）をマージして返す。
+
+    recommend.execute() と GET /api/recommend/presets が共用する（両者とも
+    フロントエンドのプリセット切替UIが参照する presets 辞書を返す必要があるため）。
+    """
+    dynamic_preset = get_dynamic_preset(db)
+    if dynamic_preset is not None:
+        return {**PRESETS, STATISTICAL_PRESET_NAME: dynamic_preset}
+    return PRESETS
+
+
+def resolve_weights(db: Any, preset_name: str) -> dict:
+    """プリセット名から重みdictを解決する。
+
+    静的PRESETSに一致すればそれを返す。STATISTICAL_PRESET_NAMEはDBの動的プリセットから
+    解決し、未実行（データなし）ならバランス型へフォールバックする（recommend/backtest共用）。
+    """
+    if preset_name in PRESETS:
+        return PRESETS[preset_name]
+    if preset_name == STATISTICAL_PRESET_NAME:
+        dynamic = get_dynamic_preset(db)
+        if dynamic is not None:
+            return dynamic
+    return PRESETS["バランス型"]
+
 
 def compute_momentum_z(db: Any, edinet_codes: list, as_of_date: str) -> dict:
     """12-1モメンタム（get_momentum_return）を候補集団横断でZスコア化する。
@@ -77,7 +118,8 @@ class RecommendPlugin(AnalysisPlugin):
             "preset": {
                 "type": "select",
                 "label": "プリセット",
-                "options": [{"value": k, "label": k} for k in PRESETS],
+                "options": [{"value": k, "label": k} for k in PRESETS]
+                           + [{"value": STATISTICAL_PRESET_NAME, "label": STATISTICAL_PRESET_NAME}],
                 "default": "バランス型",
                 "description": "カスタムウェイトを使う場合は「カスタム」を選択",
             },
@@ -141,17 +183,21 @@ class RecommendPlugin(AnalysisPlugin):
 
         # params はパラメータ契約に従い coerce 済み。weights 未指定時は preset の重みへ。
         preset       = params["preset"]
-        weights      = params["weights"] or PRESETS.get(preset, PRESETS["バランス型"])
+        weights      = params["weights"] or resolve_weights(db, preset)
         top_n        = params["top_n"]
         min_coverage = params["min_coverage"]
         year         = params["year"]
         industry     = params["industry"]
         min_market_cap = params["min_market_cap"]
 
+        # UI表示用: 動的プリセット（統計的最適化）が算出済みならPRESETSへマージして返す
+        # （フロントエンドのプリセット切替は presets[name] を直接参照するため無改修で動く）。
+        all_presets = get_all_presets(db)
+
         # 重み総和（絶対値ベース）。カバレッジ計算と正規化に使う
         total_weight = sum(abs(w) for w in weights.values())
         if total_weight == 0:
-            return {"count": 0, "total_candidates": 0, "presets": PRESETS,
+            return {"count": 0, "total_candidates": 0, "presets": all_presets,
                     "metrics": METRICS, "results": []}
 
         subq = latest_year_subq(db, FinancialMetric)
@@ -221,7 +267,7 @@ class RecommendPlugin(AnalysisPlugin):
             "total_candidates": len(scored),
             "skipped_low_coverage": skipped_low_coverage,
             "min_coverage":     min_coverage,
-            "presets":          PRESETS,
+            "presets":          all_presets,
             "metrics":          METRICS,
             "results":          results,
         }

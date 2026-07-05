@@ -11,7 +11,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from database import FinancialMetric, prices_on_or_after, latest_prices
-from plugins.recommend import PRESETS, compute_momentum_z
+from plugins.recommend import compute_momentum_z, resolve_weights
 from plugins.net_cash_analysis import compute_net_cash, compute_nc_ratio
 
 # 複数保有期間バックテスト（/api/backtest/multi）の保有月数。
@@ -97,7 +97,7 @@ def run(
         raise ValueError(
             f"未知の scoring source: {source!r}（{', '.join(SCORING_SOURCES)} のいずれか）"
         )
-    weights = PRESETS.get(preset_name, PRESETS["バランス型"])
+    weights = resolve_weights(db, preset_name)
     today = date.today()
     start_date = today - timedelta(days=months_ago * 30)
     start_date_str = start_date.strftime("%Y-%m-%d")

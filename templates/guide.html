@@ -163,14 +163,14 @@ td code,p code,li code{background:var(--bg-sunken);border:1px solid var(--border
 
   <h3>🛠 どう使う？</h3>
   <ul class="steps">
-    <li>「バランス型・成長重視・割安重視・高収益重視」などの<strong>プリセット</strong>を選ぶ（まずはバランス型でOK）。</li>
+    <li>「バランス型・成長重視・割安重視・高収益重視・統計的最適化」などの<strong>プリセット</strong>を選ぶ（まずはバランス型でOK）。</li>
     <li>こだわりがあれば、各指標の<strong>スライダー（ウェイト）</strong>を動かして重要度を調整する。</li>
     <li>実行すると、総合点の高い順に会社が並びます。</li>
   </ul>
-  <div class="info-box">各社は指標ごとに「平均からどれくらい良い／悪いか」を表す<span class="term" data-tip="同じ年の全社の中で平均より上か下かを表す点数。平均=0、+で平均以上、−で平均以下。">Zスコア</span>に変換してから合計します。これにより、規模や業種の違う会社どうしも公平に比べられます。</div>
+  <div class="info-box">各社は指標ごとに「平均からどれくらい良い／悪いか」を表す<span class="term" data-tip="同じ年の全社の中で平均より上か下かを表す点数。平均=0、+で平均以上、−で平均以下。">Zスコア</span>に変換してから合計します。これにより、規模や業種の違う会社どうしも公平に比べられます。指標には「値上がりの勢い（12ヶ月モメンタム）」も含まれます。</div>
 
   <h3>⚠ 注意点・落とし穴</h3>
-  <div class="warn-box">ウェイト（重要度）の決め方には数学的な正解はなく、<strong>あなたの好みの設定</strong>です。「この設定が儲かる」とは限らないので、<a href="/guide#backtest" style="color:var(--status-warn-text)">バックテスト</a>で過去の成績を確かめるのがおすすめです。</div>
+  <div class="warn-box">「バランス型」など4つのプリセットは<strong>あなたの好みの設定</strong>で、決め方に数学的な正解はありません。「統計的最適化」プリセットのみ、過去データから統計的に計算した重みを使います。いずれも「この設定が儲かる」とは限らないので、<a href="/guide#backtest" style="color:var(--status-warn-text)">バックテスト</a>で過去の成績を確かめるのがおすすめです。</div>
 
   <div class="more">→ もっと詳しく：<a href="/models#m6">モデル解説：Zスコア重み付けスコアリング</a></div>
 </div>
