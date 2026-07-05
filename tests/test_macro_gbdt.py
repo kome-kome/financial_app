@@ -685,3 +685,48 @@ class TestProducer:
                                            {"edinet_code": "E2", "mu": 0.2}], "d")
         assert n == 1
         assert set(get_macro_gbdt_scores(db)) == {"E2"}
+
+
+# ── 8. ハイパーパラメータ自動探索の探索空間（Issue #266）───────────────────────
+
+class TestTuningSearchSpace:
+
+    def test_returns_base_params_and_dims(self):
+        base_params, dims = plugin.tuning_search_space()
+        assert isinstance(base_params, dict)
+        assert len(dims) == 7
+
+    def test_dims_cover_xgb_axes_only(self):
+        _base_params, dims = plugin.tuning_search_space()
+        names = {d.name for d in dims}
+        assert names == {
+            "max_depth", "learning_rate", "subsample", "colsample_bytree",
+            "min_child_weight", "reg_lambda", "reg_alpha",
+        }
+        # 構造・表示専用パラメータは対象外
+        assert "fin_features" not in names
+        assert "n_estimators_max" not in names
+        assert "lambda_risk" not in names
+
+    def test_dim_values_within_schema_bounds(self):
+        schema = plugin.params_schema()
+        _base_params, dims = plugin.tuning_search_space()
+        for d in dims:
+            field = schema[d.name]
+            lo, hi = field.get("min"), field.get("max")
+            for v in d.values:
+                if lo is not None:
+                    assert v >= lo, f"{d.name}={v} は schema min={lo} 未満"
+                if hi is not None:
+                    assert v <= hi, f"{d.name}={v} は schema max={hi} 超過"
+
+    def test_combos_pass_coerce_params(self):
+        """探索空間から生成した候補が全て coerce_params を通る（契約違反なし）。"""
+        from plugins.tuning import _grid_combos
+
+        base_params, dims = plugin.tuning_search_space()
+        schema = plugin.params_schema()
+        combos = _grid_combos(dims)
+        assert len(combos) > 0
+        for combo in combos[:20]:  # 全組合せは多いため先頭のみ抽出検証
+            coerce_params(schema, {**base_params, **combo})

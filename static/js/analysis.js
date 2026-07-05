@@ -899,6 +899,53 @@ function showTab(t) {
   });
 }
 
+// ── 自動調整済みハイパーパラメータ（Issue #264・読取専用・重い再計算はしない）───
+const _tunedParamsCache = {};
+
+async function _loadTunedBadge(pluginName) {
+  const host = document.getElementById(`tuned-badge-${pluginName}`);
+  if (!host) return;
+  let tuned;
+  try {
+    tuned = await apiFetch(`/api/plugins/${pluginName}/tuned`);
+  } catch (e) {
+    host.innerHTML = '';   // 未調整（404）または取得失敗時はバッジ非表示
+    return;
+  }
+  _tunedParamsCache[pluginName] = tuned;
+  const dt = tuned.tuned_at ? new Date(tuned.tuned_at).toLocaleString('ja-JP') : '-';
+  const val = tuned.objective_value != null ? tuned.objective_value.toFixed(4) : '-';
+  host.innerHTML = `<div style="display:inline-flex;align-items:center;gap:8px;padding:4px 10px;background:var(--bg-sunken);border-radius:999px;font-size:12px;color:var(--text-secondary)">
+    <span>🔧 自動調整済み: ${esc(tuned.objective_name)}=${esc(val)}（${esc(dt)}）</span>
+    <button type="button" class="btn btn-secondary btn-sm" data-click="applyTunedParams" data-arg="${esc(pluginName)}">調整値を読込</button>
+  </div>`;
+}
+
+// フォームへ調整値を書き込むだけ（再計算はしない。「実行」ボタンはユーザーが別途押す）。
+function applyTunedParams(pluginName) {
+  const tuned = _tunedParamsCache[pluginName];
+  const meta = _pluginMeta[pluginName];
+  if (!tuned || !meta) return;
+  const schema = meta.params_schema || {};
+  for (const [key, value] of Object.entries(tuned.params || {})) {
+    const field = schema[key];
+    const el = document.getElementById(`param-${pluginName}-${key}`);
+    if (!field || !el) continue;
+    if (field.type === 'multiselect') {
+      const vals = Array.isArray(value) ? value : [];
+      [...el.options].forEach(o => { o.selected = vals.includes(o.value); });
+    } else if (field.type === 'checkbox') {
+      el.checked = !!value;
+    } else if (field.type === 'slider') {
+      el.value = value;
+      const label = document.getElementById(`val-${pluginName}-${key}`);
+      if (label) label.textContent = value;
+    } else {
+      el.value = value;
+    }
+  }
+}
+
 // ── プラグイン動的読み込み（メタ駆動サイドバー）─────────────────────────
 async function initPlugins() {
   let plugins;
@@ -943,6 +990,9 @@ async function initPlugins() {
   // recommend: weights/preset は静的 HTML に温存、フィルター項目のみ注入
   _inject('params-form-recommend',    'recommend',
     ([k, v]) => v.type !== 'weights' && k !== 'preset');
+
+  // 自動調整済みバッジ（M-1/M-2/M-3・Issue #264。未調整なら404で非表示のまま）
+  ['macro_risk_return', 'macro_gbdt', 'macro_dlm'].forEach(_loadTunedBadge);
 }
 
 // /api/plugins のメタを category でグルーピングし、ui_order 昇順でサイドバーを生成する。
@@ -1320,6 +1370,56 @@ function _mrrDColor(d, dMin, dMax, alpha) {
   return `rgba(${r},${g},${b},${alpha})`;
 }
 
+// アウトオブサンプル検証（OOF）: μ̂ が将来リターンを順序付けるか（無リーク・再学習なし・#272）。
+// M-2 の _mgPaintCv 内 oofHtml / M-3 の _dlmOofHTML と同じ描画（同一指標で3モデル横並び比較可能）。
+function _mrrOofHTML(data) {
+  const oof = data.oof_backtest || {};
+  const qr  = oof.quantile_returns || [];
+  const ic  = oof.rank_ic || {};
+  const hasOof = qr.length > 0;
+  return `
+  <div style="padding:12px 16px;background:var(--bg-sunken);border-radius:8px;border:1px solid var(--border-muted)">
+    <div style="font-size:12px;color:var(--accent-text);font-weight:600;margin-bottom:4px">
+      アウトオブサンプル検証（OOF）— μ̂ が将来リターンを順序付けるか（無リーク walk-forward 予測）
+    </div>
+    <div style="font-size:11px;color:var(--text-muted);margin-bottom:10px">
+      既存「バックテスト」(/api/backtest) とは別物。再学習なし・各期で μ̂ を横断${oof.n_quantiles||5}分位し実現52週リターンを集計。
+    </div>
+    ${hasOof ? `
+    <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:12px">
+      <div style="padding:8px;background:var(--bg-sunken);border-radius:6px">
+        <div style="font-size:10px;color:var(--text-muted)">rank-IC（Spearman 平均±std）</div>
+        <div style="font-size:15px;font-weight:700;color:${(ic.mean||0)>0?cssVar('--val-up-text'):cssVar('--val-down-text')}">${ic.mean!=null?ic.mean.toFixed(3):'-'}<span style="font-size:11px;color:var(--text-muted)"> ±${ic.std!=null?ic.std.toFixed(3):'-'}</span></div>
+        <div style="font-size:10px;color:var(--text-muted)">${ic.n||0} fold</div>
+      </div>
+      <div style="padding:8px;background:var(--bg-sunken);border-radius:6px">
+        <div style="font-size:10px;color:var(--text-muted)">ロングショート spread（top−bottom）</div>
+        <div style="font-size:15px;font-weight:700;color:${(oof.long_short_spread||0)>0?cssVar('--val-up-text'):cssVar('--val-down-text')}">${oof.long_short_spread!=null?(oof.long_short_spread*100).toFixed(2)+'%':'-'}</div>
+      </div>
+      <div style="padding:8px;background:var(--bg-sunken);border-radius:6px">
+        <div style="font-size:10px;color:var(--text-muted)">hit-rate（top&gt;bottom の期）</div>
+        <div style="font-size:15px;font-weight:700;color:#c084fc">${oof.hit_rate!=null?(oof.hit_rate*100).toFixed(0)+'%':'-'}</div>
+        <div style="font-size:10px;color:var(--text-muted)">${oof.n_periods_quantile||0} 期</div>
+      </div>
+    </div>
+    <div style="font-size:11px;color:var(--text-secondary);margin-bottom:6px">分位別 平均実現リターン（左=最低 μ̂ → 右=最高 μ̂・52週先・期間平均）</div>
+    <div style="display:flex;align-items:flex-end;gap:6px;height:92px">
+      ${(() => {
+        const mx = Math.max(...qr.map(Math.abs), 1e-9);
+        return qr.map((v, i) => {
+          const h = Math.round(Math.abs(v) / mx * 70) + 2;
+          const col = v >= 0 ? cssVar('--val-up-text') : cssVar('--val-down-text');
+          return `<div style="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:flex-end;height:100%">
+            <div style="font-size:10px;color:${col}">${(v*100).toFixed(1)}%</div>
+            <div style="width:100%;height:${h}px;background:${col};border-radius:3px 3px 0 0"></div>
+            <div style="font-size:10px;color:var(--text-muted);margin-top:2px">Q${i+1}</div>
+          </div>`;
+        }).join('');
+      })()}
+    </div>` : `<div style="font-size:11px;color:var(--text-muted)">OOF サンプルが期内 ${(oof.n_quantiles||5)*2} 銘柄未満のため分位を表示できません（データ蓄積後に再実行）。rank-IC は ${ic.n||0} fold で算出。</div>`}
+  </div>`;
+}
+
 // CV 指標パネル（リスク軸に非依存）。
 function _mrrPaintCv(data) {
   const cv = data.cv_metrics || {};
@@ -1341,6 +1441,8 @@ function _mrrPaintCv(data) {
          <td class="${f.r2>0.3?'text-green':''}">${f.r2!=null?f.r2.toFixed(3):'-'}</td>
          <td>${f.rmse!=null?f.rmse.toFixed(4):'-'}</td></tr>`).join('')
     : '<tr><td colspan="5" style="color:var(--text-muted)">CVフォルドなし（学習月数が不足。株価週次履歴の蓄積を待つ必要があります）</td></tr>';
+  const oofEl = el('mrr-oof-content');
+  if (oofEl) oofEl.innerHTML = _mrrOofHTML(data);
 }
 
 // 特徴量コードを種別分類（交差項 > マクロ > テクニカル > 財務）。

@@ -743,6 +743,16 @@ $$U = \mu_{\text{raw}} - \lambda \cdot R_{\text{axis}}$$
 | 特徴量選択フェーズ単体 | 約1.2万回 OLS | **0.7s** | LassoLarsIC の1パス LARS（§9.3）。 |
 | `use_macro=false`（非劣位検証） | mean R²=0.0122 | mean R²=0.0122 | 旧/新で同値。選択法置換による CV 品質劣化なし。 |
 
+### 9.11 アウトオブサンプル検証（OOF）（#272・ADR-0004）
+
+M-1 の `execute()` も M-2/M-3 と同じ共有ヘルパ `plugins/macro_snapshots.py::oof_backtest` を
+walk-forward CV の無リーク残差（`cv_residuals_by_ym`）に適用し、`oof_backtest`
+（分位リターン・rank-IC・ロングショート spread・hit-rate）を返す（§11.7 と同一指標・同一定義
+＝3モデルを横並びで比較可能）。**既存「バックテスト」（§7）とは別概念**で「予測 μ̂ が将来
+リターンを順序付けるか」を測る。M-1 は producer スコアテーブルを持たない（`macro_beta` は
+別バッチ `macro_beta_inference.py` が担う）ため、M-2 の §11.7 後半にある producer 永続化は
+該当しない。
+
 ---
 
 ## 10. 売り候補ランキング（保有銘柄の売り時）
@@ -897,8 +907,11 @@ M-2 の `execute()` は walk-forward CV の**無リーク OOF 予測**（`{test_
 
 ### 11.8 将来エンハンス
 
-- 同 OOF 検証を M-1 にも結線（共有ヘルパ呼び出し1行・線形 vs 非線形の予測力を OOF で直接対比）
-- inner-CV グリッド / optuna によるハイパラ自動探索
+- ~~同 OOF 検証を M-1 にも結線~~ → #272 で対応済み（§9.11）。線形（M-1）vs 非線形（M-2）の
+  予測力を同一指標（rank-IC 等）で直接対比可能に。
+- inner-CV グリッド / optuna によるハイパラ自動探索 → #264〜#267 でwalk-forward OOF
+  rank-IC を目的関数とする共有探索基盤（`plugins/tuning.py` + `hyperparameter_search.py`）
+  を実装（M-1/M-2/M-3 共通）
 - quantile regression（`reg:quantileerror`）による予測区間（R1' 代替）
 - SHAP interaction values（特徴量ペアの交互作用可視化）
 - M-2 初心者向けガイド（`M2_MACRO_GBDT_GUIDE.md`）

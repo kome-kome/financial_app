@@ -44,6 +44,7 @@ from .macro_snapshots import (
     select_features_bic,
     producer_scores,
     get_producer_scores,
+    oof_backtest,
 )
 # R3（セクター×サイズ別 CV-RMSE）でバケットを採用する最小残差数。
 R3_MIN_BUCKET_N = 5
@@ -187,6 +188,28 @@ class MacroRiskReturnPlugin(AnalysisPlugin):
             },
         }
 
+    def tuning_search_space(self) -> tuple:
+        """ハイパーパラメータ自動探索の探索空間（Issue #265）。
+
+        構造トグル（use_macro/use_momentum）・充足率下限（min_coverage）・BIC最大採用数
+        （max_features）の少数軸グリッド。`fin_features`/`macro_features` の部分集合探索は
+        2^N で不可能なため対象外（既定の候補プールを固定・#264 設計方針）。表示専用の
+        lambda_risk/risk_axis/r3_gate/top_n も対象外。空間が小さいため
+        strategy="grid"（全探索）を推奨。
+        """
+        from .tuning import SearchDim
+
+        base_params: dict = {}
+        dims = [
+            SearchDim("use_macro",        [True, False]),
+            SearchDim("use_momentum",     [True, False]),
+            SearchDim("momentum_window",  [3, 6, 12, 18, 24],
+                      only_if=lambda c: c.get("use_momentum") is True),
+            SearchDim("min_coverage",     [0.3, 0.5, 0.7, 0.9]),
+            SearchDim("max_features",     [5, 10, 15, 20, 30, 40]),
+        ]
+        return base_params, dims
+
     def produced_output(self, db: Any) -> bool:
         """macro_beta（per-stock 階層ベイズ推論結果）を共有DBに持つか（#217 の depends_on 充足判定）。
 
@@ -282,6 +305,10 @@ class MacroRiskReturnPlugin(AnalysisPlugin):
         # --- R3: セクター×サイズ・バケット別の CV 残差 RMSE（モデル信頼性）---
         r3_data = self._compute_r3_buckets(cv_residuals_by_ym, sample_meta_by_ym)
 
+        # --- アウトオブサンプル検証（OOF）: 無リーク walk-forward 予測のモデル評価（ADR-0004）─
+        # 既存「バックテスト」(/api/backtest) とは別概念。M-2/M-3 と同じ形（#272）。
+        oof_bt = oof_backtest(cv_residuals_by_ym, n_quantiles=5)
+
         # --- 最終モデル学習 ---
         beta, win_params, norm_params, y_mu, y_sd, XtX_inv, sigma2 = self._fit_final(
             samples_sel, n_sel
@@ -323,6 +350,7 @@ class MacroRiskReturnPlugin(AnalysisPlugin):
 
         return {
             "cv_metrics":       cv_metrics,
+            "oof_backtest":     oof_bt,
             "selected_features": selected_names,
             "feature_coefs":    feature_coefs,
             "n_train_samples":  total_samples,

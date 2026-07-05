@@ -171,3 +171,81 @@ class TestUpsertRegressionResult:
 # 旧 calc_zscore_normalization は廃止済み。VIEW の算出値が旧実装と一致することは
 # Postgres 上で別途検証している（年度内・標本SD・sd=0→1.0・n>=2・丸め桁の一致）。
 # SQLite には STDDEV/WINDOW が無いため本ファイルでは検証しない。
+
+
+class TestTunedParams:
+    """plugin_tuned_params の upsert/get（Issue #264・ハイパーパラメータ自動探索の永続化）。"""
+
+    def test_get_none_when_unset(self, db):
+        from database import get_tuned_params
+        assert get_tuned_params(db, "macro_gbdt") is None
+
+    def test_upsert_and_get_round_trip(self, db):
+        from database import get_tuned_params, upsert_tuned_params
+        upsert_tuned_params(
+            db, "macro_gbdt", {"max_depth": 4, "learning_rate": 0.05}, "rank_ic", 0.083,
+            [{"params": {"max_depth": 4}, "score": 0.083}] * 25,  # 20件超のリーダーボード
+            n_combos=200, data_fingerprint="fp1",
+        )
+        got = get_tuned_params(db, "macro_gbdt")
+        assert got["params"] == {"max_depth": 4, "learning_rate": 0.05}
+        assert got["objective_name"] == "rank_ic"
+        assert got["objective_value"] == pytest.approx(0.083)
+        assert got["n_combos"] == 200
+        assert got["data_fingerprint"] == "fp1"
+
+    def test_upsert_is_idempotent_per_plugin_name(self, db):
+        """同一 plugin_name の再 upsert は上書き（複数行にならない）。"""
+        from database import PluginTunedParams, upsert_tuned_params
+        upsert_tuned_params(db, "macro_gbdt", {"max_depth": 4}, "rank_ic", 0.1, [], 10, None)
+        upsert_tuned_params(db, "macro_gbdt", {"max_depth": 6}, "rank_ic", 0.2, [], 20, None)
+        rows = db.query(PluginTunedParams).filter_by(plugin_name="macro_gbdt").all()
+        assert len(rows) == 1
+        assert rows[0].params_json == {"max_depth": 6}
+
+    def test_leaderboard_truncated_to_top_20(self, db):
+        from database import PluginTunedParams, upsert_tuned_params
+        leaderboard = [{"params": {"x": i}, "score": i} for i in range(30)]
+        upsert_tuned_params(db, "macro_dlm", {"x": 1}, "rank_ic", 0.5, leaderboard, 30, None)
+        row = db.query(PluginTunedParams).filter_by(plugin_name="macro_dlm").one()
+        assert len(row.leaderboard_json) == 20
+
+    def test_different_plugins_independent(self, db):
+        from database import get_tuned_params, upsert_tuned_params
+        upsert_tuned_params(db, "macro_gbdt", {"a": 1}, "rank_ic", 0.1, [], 1, None)
+        assert get_tuned_params(db, "macro_risk_return") is None
+        assert get_tuned_params(db, "macro_gbdt")["params"] == {"a": 1}
+
+
+class TestTuningDryRun:
+    """database.tuning_dry_run() — 探索中の producer 永続化抑止（Issue #264）。"""
+
+    def test_replace_macro_gbdt_scores_is_noop_during_dry_run(self, db):
+        from database import get_macro_gbdt_scores, replace_macro_gbdt_scores, tuning_dry_run
+        with tuning_dry_run():
+            n = replace_macro_gbdt_scores(db, [{"edinet_code": "E1", "mu": 0.1}], "d")
+        assert n == 0
+        assert get_macro_gbdt_scores(db) == {}
+
+    def test_replace_macro_dlm_scores_is_noop_during_dry_run(self, db):
+        from database import get_macro_dlm_scores, replace_macro_dlm_scores, tuning_dry_run
+        with tuning_dry_run():
+            n = replace_macro_dlm_scores(db, [{"edinet_code": "E1", "mu": 0.1}], "d")
+        assert n == 0
+        assert get_macro_dlm_scores(db) == {}
+
+    def test_replace_works_normally_outside_dry_run(self, db):
+        """dry_run コンテキストを抜けた後は通常どおり永続化される。"""
+        from database import get_macro_gbdt_scores, replace_macro_gbdt_scores, tuning_dry_run
+        with tuning_dry_run():
+            replace_macro_gbdt_scores(db, [{"edinet_code": "E1", "mu": 0.1}], "d")
+        replace_macro_gbdt_scores(db, [{"edinet_code": "E2", "mu": 0.2}], "d")
+        assert get_macro_gbdt_scores(db) == {"E2": pytest.approx(0.2)}
+
+    def test_dry_run_resets_on_exception(self, db):
+        """with ブロック内で例外が出ても _tuning_dry_run は必ず解除される。"""
+        import database as database_module
+        with pytest.raises(ValueError):
+            with database_module.tuning_dry_run():
+                raise ValueError("boom")
+        assert database_module._tuning_dry_run.get() is False

@@ -633,6 +633,7 @@ tr:hover td{background:var(--border-subtle)}
         <span style="color:var(--status-warn);font-size:11px">⚠ 予測値はモデルの推定値です。投資判断の参考値としてご利用ください。</span>
       </div>
       <div id="params-form-macro_risk_return"></div>
+      <div id="tuned-badge-macro_risk_return" style="margin:8px 0"></div>
       <button class="btn btn-primary" id="btn-mrr"
               data-click="runDynamicPlugin"
               data-arg="macro_risk_return" data-arg2="macro_risk_return"
@@ -669,6 +670,7 @@ tr:hover td{background:var(--border-subtle)}
             <tbody id="mrr-fold-tbody"></tbody>
           </table>
         </div>
+        <div id="mrr-oof-content" style="margin-top:16px"></div>
       </div>
     </div>
   </div>
@@ -704,6 +706,7 @@ tr:hover td{background:var(--border-subtle)}
       <span style="color:var(--status-warn);font-size:11px">⚠ 計算が重いためローカル環境で実行してください（Render 環境では無効）。予測値はモデルの推定値で、投資判断の参考値です。</span>
     </div>
     <div id="params-form-macro_gbdt"></div>
+    <div id="tuned-badge-macro_gbdt" style="margin:8px 0"></div>
     <button class="btn btn-primary" id="btn-mg"
             data-click="runDynamicPlugin"
             data-arg="macro_gbdt" data-arg2="macro_gbdt"
@@ -731,6 +734,7 @@ tr:hover td{background:var(--border-subtle)}
       <span style="color:var(--status-warn);font-size:11px">⚠ 計算が重いためローカル環境で実行してください（Render 環境では無効）。µ̂ はモデルの推定値で、投資判断の参考値です。</span>
     </div>
     <div id="params-form-macro_dlm"></div>
+    <div id="tuned-badge-macro_dlm" style="margin:8px 0"></div>
     <button class="btn btn-primary" id="btn-mdlm"
             data-click="runDynamicPlugin"
             data-arg="macro_dlm" data-arg2="macro_dlm"

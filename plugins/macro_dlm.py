@@ -341,6 +341,30 @@ class MacroDlmPlugin(AnalysisPlugin):
             },
         }
 
+    def tuning_search_space(self) -> tuple:
+        """ハイパーパラメータ自動探索の探索空間（Issue #267）。
+
+        δ/β_v は既存の周辺尤度グリッド（`_AUTO_DELTA_GRID`/`_AUTO_BV_GRID`）をそのまま
+        再利用する（周辺尤度モードとOOFモードで同じ候補グリッドを共有）。alpha_phi は
+        alpha_ar1=True のときのみ意味を持つため only_if で条件付ける。macro_features の
+        部分集合探索は組合せ爆発（2^N）かつ具体的な縮約案が無いため対象外とし既定に固定
+        （#264 設計方針）。lambda_risk・top_n・min_weeks/burn_in_weeks（母集団/診断の定義）
+        も対象外。既存の `auto_hyperparams`（周辺尤度・in-UI）チェックボックスはそのまま
+        高速フォールバックとして残り、本探索空間は walk-forward OOF rank-IC を目的関数と
+        する別経路（hyperparameter_search.py CLI）で使う。
+        """
+        from .tuning import SearchDim
+
+        base_params: dict = {}
+        dims = [
+            SearchDim("state_discount", list(_AUTO_DELTA_GRID)),
+            SearchDim("var_discount",   list(_AUTO_BV_GRID)),
+            SearchDim("alpha_ar1",      [True, False]),
+            SearchDim("alpha_phi",      [0.5, 0.7, 0.9, 0.95, 0.99, 0.999],
+                      only_if=lambda c: c.get("alpha_ar1") is True),
+        ]
+        return base_params, dims
+
     # ── マクロ週次変化の整列（forward-fill＋週次変化）────────────────────────
     def _macro_change_builder(self, macro_levels: dict, factors: list[str]):
         """date → マクロ水準ベクトル（forward-fill）を返すクロージャを作る（日付メモ化）。"""

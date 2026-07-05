@@ -105,6 +105,18 @@ async def run_plugin(
         raise HTTPException(500, "分析エラーが発生しました。")
 
 
+@router.get("/api/plugins/{plugin_name}/tuned")
+async def get_plugin_tuned(plugin_name: str, db: Session = Depends(api.get_db)):
+    """自動調整済みハイパーパラメータ（Issue #264・hyperparameter_search.py --persist が
+    書き込む）を読む。読取専用・軽量（重い計算は起こさない）。未調整なら404。"""
+    from database import get_tuned_params
+
+    tuned = get_tuned_params(db, plugin_name)
+    if tuned is None:
+        raise HTTPException(404, f"'{plugin_name}' は自動調整されていません")
+    return tuned
+
+
 @router.get("/api/gap-analysis")
 @api.limiter.limit(api.RATELIMIT_ANALYSIS)
 async def gap_analysis(
