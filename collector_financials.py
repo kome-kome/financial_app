@@ -419,7 +419,7 @@ def calc_derived(rec: dict) -> dict:
 
 
 async def _refill_records_from_xbrl(db, target_q, field_updater, *, label: str,
-                                    limit: Optional[int] = None, defer_raw: bool = False,
+                                    limit: Optional[int] = None,
                                     sleep_sec: float = RATE_SLEEP, order: str = "desc",
                                     on_progress: Optional[Callable[[int, int, str], None]] = None) -> dict:
     """EDINET XBRL 再取得で NULL 列を補完する共通骨格（CF / PL・BS の refill が共用）。
@@ -434,10 +434,6 @@ async def _refill_records_from_xbrl(db, target_q, field_updater, *, label: str,
     """
     period_order = FinancialRecord.period_end.asc() if order == "asc" else FinancialRecord.period_end.desc()
     q = target_q().order_by(period_order)
-    if defer_raw:
-        from sqlalchemy.orm import defer
-        # raw_xbrl_json は使わないので defer（全件ロード時の転送/メモリ削減）
-        q = q.options(defer(FinancialRecord.raw_xbrl_json))
     if limit:
         q = q.limit(limit)
     targets = q.all()
@@ -591,10 +587,10 @@ async def refill_pl_bs_from_xbrl(
     時も本命の旧年度に着実に前進・再開できる（新しい順だと直近の正当 NULL=金融等で
     limit を浪費し旧年度に届かない）。
 
-    タグ修正・パースロジック変更後の既存データ是正用。`raw_xbrl_json`
-    は生タグを保存しないため `reparse_from_raw` では復元できず再フェッチが必須。値は
-    parse_xbrl_csv の連結優先ロジックで選ばれるため通常収集と同等の信頼性。CF は
-    refill_cf_from_xbrl が担当するため対象外。
+    タグ修正・パースロジック変更後の既存データ是正用。生タグはDBに保持しない
+    （`xbrl_raw_documents` は容量制約で本番0行）ため `reparse_from_raw` は使えず
+    再フェッチが必須。値は parse_xbrl_csv の連結優先ロジックで選ばれるため通常収集と
+    同等の信頼性。CF は refill_cf_from_xbrl が担当するため対象外。
     """
     log.info(f"refill_pl_bs_from_xbrl 開始 (limit={limit}, sleep={sleep_sec})")
 
@@ -617,7 +613,7 @@ async def refill_pl_bs_from_xbrl(
 
     return await _refill_records_from_xbrl(
         db, _target_q, _pl_bs_updater, label="PL/BS補完",
-        limit=limit, defer_raw=True, sleep_sec=sleep_sec, order="asc", on_progress=on_progress,
+        limit=limit, sleep_sec=sleep_sec, order="asc", on_progress=on_progress,
     )
 
 
@@ -661,7 +657,7 @@ async def refill_c2_from_xbrl(
 
     return await _refill_records_from_xbrl(
         db, _target_q, _c2_updater, label="C2補完",
-        limit=limit, defer_raw=True, sleep_sec=sleep_sec, order="asc", on_progress=on_progress,
+        limit=limit, sleep_sec=sleep_sec, order="asc", on_progress=on_progress,
     )
 
 
@@ -698,7 +694,7 @@ async def refill_machinery_from_xbrl(
 
     return await _refill_records_from_xbrl(
         db, _target_q, _machinery_updater, label="機械装置補完",
-        limit=limit, defer_raw=True, sleep_sec=sleep_sec, order="asc", on_progress=on_progress,
+        limit=limit, sleep_sec=sleep_sec, order="asc", on_progress=on_progress,
     )
 
 

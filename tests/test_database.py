@@ -116,11 +116,12 @@ class TestUpsertFinancial:
         assert not hasattr(FinancialRecord, "op_margin")
         assert not hasattr(FinancialRecord, "gap_ratio")
 
-    def test_raw_xbrl_json_populated(self, db):
+    def test_raw_xbrl_json_column_removed(self, db):
+        # デバッグ用に保存していた列。読取箇所ゼロ・容量削減のため削除済み（Issue #219 ①）。
         obj = upsert_financial(db, self._data())
         db.commit()
-        assert obj.raw_xbrl_json["bs"]["total_assets"] == 5000.0
-        assert set(obj.raw_xbrl_json) == {"bs", "pl", "cf"}
+        assert not hasattr(FinancialRecord, "raw_xbrl_json")
+        assert not hasattr(obj, "raw_xbrl_json")
 
     def test_update_existing_no_duplicate(self, db):
         upsert_financial(db, self._data())
