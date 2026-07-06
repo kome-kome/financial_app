@@ -1568,7 +1568,7 @@ function _mrrPaintChart(v) {
           if (!p) return '';
           return [
             p.company_name || p.edinet_code,
-            `μ_raw: ${(p.mu_raw ?? 0).toFixed(4)}`,
+            `μ_raw: ${((p.mu_raw ?? 0) * 100).toFixed(2)}%`,
             `${MRR_AXIS_LABELS[axisKey] || axisKey}: ${(p[axisKey] ?? 0).toFixed(4)}`,
             axisKey !== 'r2' && p.r2 != null ? `R2 ボラ: ${(p.r2 * 100).toFixed(2)}%` : null,
             axisKey !== 'r_macro' && p.r_macro != null ? `R_macro: ${(p.r_macro * 100).toFixed(2)}%` : null,
@@ -1600,7 +1600,7 @@ function _mrrTableHTML(v) {
   }
   const total = (_mrrData && _mrrData.results ? _mrrData.results.length : v.top.length);
   const header = `<tr><th>順位</th><th>証券コード</th><th>企業名</th><th>業種</th>
-    <th>μ_raw</th><th>R2 ボラ</th><th>R_macro</th><th>R3 信頼性</th><th>効用 U</th><th>D（負効用）</th><th>F</th></tr>`;
+    <th><span class="gloss" data-tip="期待リターン（52週=1年先の年率対数リターン、無次元）。小数を%表示しているだけで、10.00%は年率+10%を意味する（OLSモデルの生予測値）。">μ_raw</span></th><th>R2 ボラ</th><th>R_macro</th><th>R3 信頼性</th><th>効用 U</th><th>D（負効用）</th><th>F</th></tr>`;
   const rows = v.top.map((r, i) => {
     const mu = r.mu_raw ?? 0;
     const muClass = mu > 0 ? 'text-green' : 'text-red';
@@ -1637,7 +1637,7 @@ function _mrrTableHTML(v) {
       <div class="text-sm" style="color:var(--text-muted)">λ・リスク軸・表示件数は即時反映（再計算不要）</div>
     </div>
     <div class="text-sm" style="color:var(--text-muted);margin-bottom:6px;font-size:11px">
-      ※ μ_raw はモデルの素の銘柄別推定（収縮なし）。検証 R² は低く推定にはノイズを含むため、
+      ※ μ_raw は52週（1年）先の年率対数リターン予測（例: 表示10.00% = 年率+10%）。モデルの素の銘柄別推定（収縮なし）。検証 R² は低く推定にはノイズを含むため、
       順位は目安。μ_shrunk はセクター平均への収縮後の保守的推定（参考）。
     </div>
     <div style="overflow-x:auto">
@@ -1865,11 +1865,11 @@ function _mgPaintChart(v) {
       animation:{duration:0},
       plugins:{
         legend:{display:false},
-        tooltip:{callbacks:{label:ctx=>{const p=ctx.raw._p;if(!p)return'';return[`${esc(p.company_name||p.edinet_code)} (${esc(p.sec_code||'')})`,`μ=${p.mu_raw!=null?p.mu_raw.toFixed(3):'-'}  R=${p[axisKey]!=null?p[axisKey].toFixed(3):'-'}  U=${p._u!=null?p._u.toFixed(3):'-'}`,p._pareto?'★ 効率的フロンティア':p._anti_pareto?'▼ 非効率的フロンティア':'']}}}
+        tooltip:{callbacks:{label:ctx=>{const p=ctx.raw._p;if(!p)return'';return[`${esc(p.company_name||p.edinet_code)} (${esc(p.sec_code||'')})`,`μ=${p.mu_raw!=null?(p.mu_raw*100).toFixed(2)+'%':'-'}  R=${p[axisKey]!=null?p[axisKey].toFixed(3):'-'}  U=${p._u!=null?p._u.toFixed(3):'-'}`,p._pareto?'★ 効率的フロンティア':p._anti_pareto?'▼ 非効率的フロンティア':'']}}}
       },
       scales:{
         x:{title:{display:true,text:AXIS_LABELS[axisKey]||axisKey,color:cssVar('--text-secondary'),font:{size:11}},grid:{color:'rgba(255,255,255,0.05)'},ticks:{color:cssVar('--text-muted')},...(xRange.min!=null?{min:xRange.min,max:xRange.max}:{})},
-        y:{title:{display:true,text:'期待リターン μ（52週先対数リターン）',color:cssVar('--text-secondary'),font:{size:11}},grid:{color:'rgba(255,255,255,0.05)'},ticks:{color:cssVar('--text-muted')},...(yRange.min!=null?{min:yRange.min,max:yRange.max}:{})},
+        y:{title:{display:true,text:'期待リターン μ（52週先対数リターン・年率）',color:cssVar('--text-secondary'),font:{size:11}},grid:{color:'rgba(255,255,255,0.05)'},ticks:{color:cssVar('--text-muted')},...(yRange.min!=null?{min:yRange.min,max:yRange.max}:{})},
       }
     }
   });
@@ -1921,7 +1921,7 @@ function _mgTableHTML(v) {
       <td>${esc(r.sec_code||'-')}</td>
       <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(r.company_name||r.edinet_code)}</td>
       <td>${esc(r.industry||'-')}</td>
-      <td class="${r.mu_raw>0?'text-green':''}">${r.mu_raw!=null?r.mu_raw.toFixed(3):'-'}</td>
+      <td class="${r.mu_raw>0?'text-green':''}">${r.mu_raw!=null?(r.mu_raw*100).toFixed(2)+'%':'-'}</td>
       <td>${r[axis]!=null?r[axis].toFixed(3):'-'}</td>
       <td>${r._u!=null?r._u.toFixed(3):'-'}</td>
       <td>${r.r3!=null?r.r3.toFixed(3):'-'}</td>
@@ -1929,13 +1929,14 @@ function _mgTableHTML(v) {
     </tr>`;
   }).join('');
   return `
+    <div style="font-size:11px;color:var(--text-muted);margin-bottom:4px">※ μ は52週（1年）先の年率対数リターン予測（例: 表示10.00% = 年率+10%）。M-1と同一ターゲットをXGBoostで学習。</div>
     <div style="font-size:11px;color:var(--text-muted);margin-bottom:8px">行をクリックすると SHAP 寄与を表示します</div>
     <div id="mg-shap-panel" class="hidden" style="margin-bottom:16px;padding:12px 16px;background:var(--bg-sunken);border-radius:8px;border:1px solid var(--border-muted)"></div>
     <div style="overflow-x:auto">
       <table>
         <thead><tr>
           <th>#</th><th>コード</th><th>銘柄名</th><th>業種</th>
-          <th>μ</th><th>${axis==='r2'?'R2 ボラ':'R_macro'}</th><th>U=μ−λR</th><th>R3</th><th>F</th>
+          <th><span class="gloss" data-tip="期待リターン（M-1と同じ52週=1年先の年率対数リターン、無次元）。0.10は年率+10%を意味する（XGBoostモデルの予測値）。">μ</span></th><th>${axis==='r2'?'R2 ボラ':'R_macro'}</th><th>U=μ−λR</th><th>R3</th><th>F</th>
         </tr></thead>
         <tbody>${rows}</tbody>
       </table>
@@ -2200,7 +2201,7 @@ function _dlmTableHTML(data, v) {
     </div>
     ${makeChartContainer('chart-dlm', 320)}
     <div style="overflow-x:auto"><table>
-      <thead><tr><th>#</th><th>コード</th><th>銘柄名</th><th>業種</th><th>µ̂(年率)</th><th>R_macro</th><th>U=µ̂−λR</th><th>F</th>${betaHead}<th>RMSE</th><th>被覆</th></tr></thead>
+      <thead><tr><th>#</th><th>コード</th><th>銘柄名</th><th>業種</th><th><span class="gloss" data-tip="期待リターン（週次の潜在アルファ状態推定値をα×52で年率換算、無次元）。0.10は年率+10%を意味する。カルマンフィルタによる最新推定値のため、M-1/M-2（回帰・機械学習の予測値）とは算出方式が異なる。">µ̂(年率)</span></th><th>R_macro</th><th>U=µ̂−λR</th><th>F</th>${betaHead}<th>RMSE</th><th>被覆</th></tr></thead>
       <tbody>${trs}</tbody>
     </table></div>`;
 }
