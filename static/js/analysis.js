@@ -947,6 +947,149 @@ function applyTunedParams(pluginName) {
   }
 }
 
+// ── ハイパーパラメータ探索（Issue #278・M-1/M-2/M-3共通・collection.jsのSSE購読と同型）───
+const _tuningSSE = {};   // pluginName -> EventSource（タブごとに独立実行できるようMap化）
+
+function _renderTuningPanel(pluginName) {
+  const host = document.getElementById(`tuning-panel-${pluginName}`);
+  if (!host) return;
+  if (_renderLightMode) {
+    host.innerHTML = `<div class="text-sm" style="color:var(--text-muted);margin:6px 0">
+      🔍 ハイパーパラメータ探索はローカル環境で実行してください（Render環境では無効）
+    </div>`;
+    return;
+  }
+  host.innerHTML = `
+    <div style="margin:8px 0;padding:12px 14px;background:var(--bg-sunken);border-radius:8px;border:1px solid var(--border-muted)">
+      <div class="flex-between">
+        <div style="font-size:13px;font-weight:600;color:var(--text-secondary)">🔍 ハイパーパラメータ探索</div>
+        <button type="button" class="btn btn-secondary btn-sm" id="tune-toggle-${esc(pluginName)}"
+                data-click="_toggleTuningPanel" data-arg="${esc(pluginName)}">開く</button>
+      </div>
+      <div id="tune-body-${esc(pluginName)}" class="hidden" style="margin-top:10px">
+        <div class="flex" style="gap:12px;margin-bottom:8px">
+          <div class="form-group" style="flex:1"><label>探索方式</label>
+            <select id="tune-strategy-${esc(pluginName)}">
+              <option value="random" selected>random（サンプリング）</option>
+              <option value="grid">grid（全組合せ）</option>
+            </select>
+          </div>
+          <div class="form-group" style="flex:1"><label>反復数（random時のみ）</label>
+            <input type="number" id="tune-niter-${esc(pluginName)}" value="50" min="5" max="500">
+          </div>
+          <div class="form-group" style="flex:1"><label>目的関数</label>
+            <select id="tune-objective-${esc(pluginName)}">
+              <option value="rank_ic" selected>rank_ic</option>
+              <option value="ic_ir">ic_ir</option>
+              <option value="long_short">long_short</option>
+            </select>
+          </div>
+        </div>
+        <label class="flex" style="gap:6px;margin-bottom:10px;font-size:12px;color:var(--text-secondary)">
+          <input type="checkbox" id="tune-persist-scores-${esc(pluginName)}" style="width:auto">
+          探索完了後、最良パラメータで本番スコアも更新する（producerテーブルへの影響が大きいため既定オフ）
+        </label>
+        <div class="flex" style="gap:8px;margin-bottom:4px">
+          <button type="button" class="btn btn-primary btn-sm" id="tune-start-${esc(pluginName)}"
+                  data-click="_startTuning" data-arg="${esc(pluginName)}">探索を開始</button>
+          <button type="button" class="btn btn-secondary btn-sm hidden" id="tune-stop-${esc(pluginName)}"
+                  data-click="_stopTuning" data-arg="${esc(pluginName)}">停止</button>
+        </div>
+        <div class="progress-wrap hidden" id="tune-progress-${esc(pluginName)}">
+          <div class="progress-bar"><div class="progress-fill" id="tune-progress-fill-${esc(pluginName)}" style="width:0%"></div></div>
+          <div class="text-sm" id="tune-progress-label-${esc(pluginName)}" style="margin-top:4px;color:var(--text-muted)"></div>
+        </div>
+        <div class="log-box hidden" id="tune-log-${esc(pluginName)}" style="margin-top:8px"></div>
+      </div>
+    </div>`;
+}
+
+function _toggleTuningPanel(pluginName) {
+  const body = document.getElementById(`tune-body-${pluginName}`);
+  const btn = document.getElementById(`tune-toggle-${pluginName}`);
+  if (!body) return;
+  const willOpen = body.classList.contains('hidden');
+  body.classList.toggle('hidden', !willOpen);
+  if (btn) btn.textContent = willOpen ? '閉じる' : '開く';
+}
+
+async function _startTuning(pluginName) {
+  const strategy = document.getElementById(`tune-strategy-${pluginName}`).value;
+  const n_iter = parseInt(document.getElementById(`tune-niter-${pluginName}`).value) || 50;
+  const objective = document.getElementById(`tune-objective-${pluginName}`).value;
+  const persist_scores = document.getElementById(`tune-persist-scores-${pluginName}`).checked;
+  const logBox = document.getElementById(`tune-log-${pluginName}`);
+  logBox.classList.remove('hidden');
+  logBox.innerHTML = '';
+  try {
+    await apiFetch(`/api/plugins/${pluginName}/tune-start`, {
+      method: 'POST',
+      body: JSON.stringify({ strategy, n_iter, objective, persist_scores }),
+    });
+    document.getElementById(`tune-start-${pluginName}`).classList.add('hidden');
+    document.getElementById(`tune-stop-${pluginName}`).classList.remove('hidden');
+    document.getElementById(`tune-progress-${pluginName}`).classList.remove('hidden');
+    document.getElementById(`tune-progress-fill-${pluginName}`).style.width = '0%';
+    _tuneLog(pluginName, '探索を開始しました', 'success');
+    _startTuningSSE(pluginName);
+  } catch (e) {
+    _tuneLog(pluginName, '開始失敗: ' + e.message, 'error');
+  }
+}
+
+async function _stopTuning(pluginName) {
+  try {
+    await apiFetch(`/api/plugins/${pluginName}/tune-stop`, { method: 'POST' });
+    _tuneLog(pluginName, '停止リクエストを送信しました', 'info');
+    document.getElementById(`tune-stop-${pluginName}`).disabled = true;
+  } catch (e) {
+    _tuneLog(pluginName, '停止失敗: ' + e.message, 'error');
+  }
+}
+
+function _startTuningSSE(pluginName) {
+  if (_tuningSSE[pluginName]) _tuningSSE[pluginName].close();
+  const sse = new EventSource(apiBase() + `/api/plugins/${pluginName}/tune-stream`);
+  _tuningSSE[pluginName] = sse;
+  sse.onmessage = function (e) {
+    const d = JSON.parse(e.data);
+    if (d.total > 0) {
+      const pct = Math.round(d.progress / d.total * 100);
+      document.getElementById(`tune-progress-fill-${pluginName}`).style.width = pct + '%';
+      document.getElementById(`tune-progress-label-${pluginName}`).textContent =
+        `${d.progress}/${d.total} 候補評価済み`;
+    }
+    if (d.new_logs && d.new_logs.length > 0) {
+      d.new_logs.forEach(msg => _tuneLog(pluginName, msg, 'info'));
+    }
+    if (!d.running && d.progress > 0) {
+      sse.close();
+      _onTuningComplete(pluginName);
+    }
+  };
+  sse.onerror = function () { sse.close(); _onTuningComplete(pluginName); };
+}
+
+function _onTuningComplete(pluginName) {
+  document.getElementById(`tune-start-${pluginName}`).classList.remove('hidden');
+  const stopBtn = document.getElementById(`tune-stop-${pluginName}`);
+  stopBtn.classList.add('hidden');
+  stopBtn.disabled = false;
+  _tuneLog(pluginName, '探索完了', 'success');
+  _loadTunedBadge(pluginName);   // 永続化されたbest paramsをバッジへ反映
+}
+
+function _tuneLog(pluginName, msg, type = 'info') {
+  const box = document.getElementById(`tune-log-${pluginName}`);
+  if (!box) return;
+  const ts = new Date().toTimeString().slice(0, 8);
+  const el = document.createElement('div');
+  el.className = 'log-entry ' + type;
+  el.textContent = `[${ts}] ${msg}`;
+  box.appendChild(el);
+  box.scrollTop = box.scrollHeight;
+}
+
 // ── プラグイン動的読み込み（メタ駆動サイドバー）─────────────────────────
 async function initPlugins() {
   let plugins;
@@ -994,6 +1137,8 @@ async function initPlugins() {
 
   // 自動調整済みバッジ（M-1/M-2/M-3・Issue #264。未調整なら404で非表示のまま）
   ['macro_risk_return', 'macro_gbdt', 'macro_dlm'].forEach(_loadTunedBadge);
+  // ハイパーパラメータ探索GUI（Issue #278。Render環境ではローカル実行案内のみ表示）
+  ['macro_risk_return', 'macro_gbdt', 'macro_dlm'].forEach(_renderTuningPanel);
 }
 
 // /api/plugins のメタを category でグルーピングし、ui_order 昇順でサイドバーを生成する。

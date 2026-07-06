@@ -17,6 +17,7 @@ import asyncio
 import hashlib
 import json
 import logging
+from typing import Callable, Optional
 
 logger = logging.getLogger("hyperparameter_search")
 
@@ -37,26 +38,72 @@ def _data_fingerprint(db) -> str:
     return hashlib.sha256(raw.encode()).hexdigest()[:16]
 
 
-async def _run(args: argparse.Namespace) -> None:
-    from database import SessionLocal, upsert_tuned_params
+async def run_search(
+    model: str,
+    strategy: str,
+    n_iter: int,
+    objective: str,
+    seed: int,
+    db,
+    *,
+    persist: bool = False,
+    persist_scores: bool = False,
+    on_progress: Optional[Callable[[int, int, str], None]] = None,
+    cancel_check: Optional[Callable[[], bool]] = None,
+) -> dict:
+    """1モデル分の探索を実行する共有ロジック（CLI・GUIジョブ両方から呼ぶ・Issue #278）。
+
+    on_progress/cancel_check は plugins.tuning.search() へそのまま橋渡しする。
+    persist=True で plugin_tuned_params へ永続化し、persist_scores=True なら
+    best params での最終 execute も行い producer スコアを永続化する
+    （persist=False のとき persist_scores は無視される）。
+    """
+    from database import upsert_tuned_params
     from plugins import execute_plugin, get_plugin
     from plugins.tuning import search
 
+    plugin = get_plugin(model)
+    if plugin is None:
+        raise ValueError(f"プラグイン '{model}' が見つかりません")
+    space_fn = getattr(plugin, "tuning_search_space", None)
+    if space_fn is None:
+        raise ValueError(f"プラグイン '{model}' は tuning_search_space() 未実装です")
+    base_params, dims = space_fn()
+
+    result = await search(
+        plugin, base_params, dims, db,
+        objective=objective, strategy=strategy, n_iter=n_iter, seed=seed,
+        on_progress=on_progress, cancel_check=cancel_check,
+    )
+    result["persisted"] = False
+
+    if persist and result["best_params"] is not None:
+        fp = _data_fingerprint(db)
+        upsert_tuned_params(
+            db, model, result["best_params"], objective,
+            result["best_score"], result["leaderboard"][:20],
+            result["config"]["n_combos"], fp,
+        )
+        result["persisted"] = True
+
+        if persist_scores:
+            await execute_plugin(plugin, result["best_params"], db)
+
+    return result
+
+
+async def _run(args: argparse.Namespace) -> None:
+    from database import SessionLocal
+
     db = SessionLocal()
     try:
-        plugin = get_plugin(args.model)
-        if plugin is None:
-            raise SystemExit(f"プラグイン '{args.model}' が見つかりません")
-        space_fn = getattr(plugin, "tuning_search_space", None)
-        if space_fn is None:
-            raise SystemExit(f"プラグイン '{args.model}' は tuning_search_space() 未実装です")
-        base_params, dims = space_fn()
-
-        result = await search(
-            plugin, base_params, dims, db,
-            objective=args.objective, strategy=args.strategy,
-            n_iter=args.n_iter, seed=args.seed,
-        )
+        try:
+            result = await run_search(
+                args.model, args.strategy, args.n_iter, args.objective, args.seed, db,
+                persist=args.persist, persist_scores=args.persist_scores,
+            )
+        except ValueError as e:
+            raise SystemExit(str(e))
         logger.info("探索完了: best_score=%.4f（objective=%s）", result["best_score"], args.objective)
         logger.info("best_params=%s", json.dumps(result["best_params"], ensure_ascii=False))
         logger.info("config=%s", result["config"])
@@ -64,17 +111,9 @@ async def _run(args: argparse.Namespace) -> None:
         logger.info("リーダーボード上位%d件:\n%s", len(top5),
                    json.dumps(top5, ensure_ascii=False, indent=2, default=str))
 
-        if args.persist:
-            fp = _data_fingerprint(db)
-            upsert_tuned_params(
-                db, args.model, result["best_params"], args.objective,
-                result["best_score"], result["leaderboard"][:20],
-                result["config"]["n_combos"], fp,
-            )
+        if result["persisted"]:
             logger.info("plugin_tuned_params へ永続化しました（plugin_name=%s）", args.model)
-
             if args.persist_scores:
-                await execute_plugin(plugin, result["best_params"], db)
                 logger.info("best params で最終 execute を実行し、producer スコアを永続化しました")
     finally:
         db.close()

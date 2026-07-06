@@ -96,6 +96,8 @@ async def search(
     strategy: str = "random",
     n_iter: int = 50,
     seed: int = 0,
+    on_progress: Callable[[int, int, str], None] | None = None,
+    cancel_check: Callable[[], bool] | None = None,
 ) -> dict:
     """探索空間を評価し {best_params, best_score, objective, leaderboard, config} を返す。
 
@@ -106,6 +108,12 @@ async def search(
     抑止する（候補ごとに本番テーブルを上書きしないため。最終選定後の本採用実行は
     このコンテキスト外で呼ぶこと）。1候補の失敗（契約違反の ValueError・実行時例外等）は
     その候補をスコアなしとして leaderboard に記録し、探索全体は継続する。
+
+    on_progress/cancel_check は GUI からのバックグラウンドジョブ化（Issue #278）向けの
+    フック。collector_prices.py の各収集関数と同じ形（progress(current, total, msg) /
+    cancel() -> bool）で、どちらも省略時（None）は CLI 実行時と完全に同じ挙動になる。
+    cancel_check が True を返した時点で残り候補の評価を打ち切る（ユーザーの意図的な
+    停止はエラーではないため、score 済み候補が無くても ValueError にはしない）。
     """
     if objective not in OBJECTIVES:
         raise ValueError(f"objective は {OBJECTIVES} のいずれかを指定してください: {objective!r}")
@@ -119,22 +127,46 @@ async def search(
         raise ValueError("探索空間が空です（dims または only_if 条件を確認してください）")
 
     leaderboard: list[dict] = []
+    cancelled = False
     for i, combo in enumerate(combos):
+        if cancel_check is not None and cancel_check():
+            cancelled = True
+            msg = f"[停止] ユーザーによる停止（{len(leaderboard)}/{len(combos)}候補評価済み）"
+            log.info(msg)
+            if on_progress is not None:
+                on_progress(len(leaderboard), len(combos), msg)
+            break
         raw = {**base_params, **combo}
         try:
             with tuning_dry_run():
                 result = await execute_plugin(plugin, raw, db)
         except Exception as e:
             leaderboard.append({"params": combo, "score": None, "error": str(e)})
-            log.info("[%d/%d] 失敗（契約違反 or 実行時例外）: %s params=%s", i + 1, len(combos), e, combo)
+            msg = f"[{i + 1}/{len(combos)}] 失敗（契約違反 or 実行時例外）: {e} params={combo}"
+            log.info(msg)
+            if on_progress is not None:
+                on_progress(i + 1, len(combos), msg)
             continue
         oof = result.get("oof_backtest") or {}
         score = _score(oof, objective)
         leaderboard.append({"params": combo, "score": score, "oof": oof})
-        log.info("[%d/%d] score=%s params=%s", i + 1, len(combos), score, combo)
+        msg = f"[{i + 1}/{len(combos)}] score={score} params={combo}"
+        log.info(msg)
+        if on_progress is not None:
+            on_progress(i + 1, len(combos), msg)
 
     scored = [e for e in leaderboard if e["score"] is not None]
+    config = {
+        "strategy": strategy, "n_iter": n_iter, "seed": seed,
+        "n_combos": len(combos), "n_failed": len(leaderboard) - len(scored),
+        "cancelled": cancelled,
+    }
     if not scored:
+        if cancelled:
+            return {
+                "best_params": None, "best_score": None, "objective": objective,
+                "leaderboard": [], "config": config,
+            }
         raise ValueError("有効なスコアが1件も得られませんでした（全候補が失敗/契約違反/スコア算出不能）")
     scored.sort(key=lambda e: e["score"], reverse=True)
     best = scored[0]
@@ -144,8 +176,5 @@ async def search(
         "best_score":  best["score"],
         "objective":   objective,
         "leaderboard": scored,
-        "config": {
-            "strategy": strategy, "n_iter": n_iter, "seed": seed,
-            "n_combos": len(combos), "n_failed": len(leaderboard) - len(scored),
-        },
+        "config": config,
     }
