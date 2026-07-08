@@ -218,9 +218,9 @@ async def gap_analysis(
 
 
 @router.get("/api/recommend/presets")
-async def get_recommend_presets():
-    from plugins.recommend import PRESETS, METRICS
-    return {"presets": PRESETS, "metrics": METRICS}
+async def get_recommend_presets(db: Session = Depends(api.get_db)):
+    from plugins.recommend import METRICS, get_all_presets
+    return {"presets": get_all_presets(db), "metrics": METRICS}
 
 
 @router.post("/api/recommend")

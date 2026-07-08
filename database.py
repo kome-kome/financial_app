@@ -814,6 +814,86 @@ class MacroBetaMeta(Base):
     created_at       = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
 
+# ── 5f. recommend ファクタープレミアム（Fama-MacBeth・Issue #271）───────────────
+# recommend_factor_premia.py（ローカル専用CLI）が期間ごとの断面OLS係数を時系列平均した
+# ファクタープレミアム（Newey-West補正済みSE付き）を書き込み、recommend プラグインの
+# 「統計的最適化」プリセットが読む。macro_beta と同じ producer/consumer 分離パターン。
+
+class RecommendFactorPremium(Base):
+    """recommend の指標ごとのFama-MacBethファクタープレミアム（縦持ち・run_id単位）。"""
+    __tablename__ = "recommend_factor_premia"
+    __table_args__ = (
+        UniqueConstraint("run_id", "factor_name", name="uq_recommend_factor_premia"),
+    )
+
+    id             = Column(Integer, primary_key=True, autoincrement=True)
+    run_id         = Column(String(40), nullable=False)
+    factor_name    = Column(String(40), nullable=False)   # recommend.METRICS の1つ
+    mean_b         = Column(Float, nullable=False)         # 期間別β_tの時系列平均（プリセット重み）
+    newey_west_se  = Column(Float)                          # Newey-West補正済みSE
+    t_stat         = Column(Float)
+    p_value        = Column(Float)
+    n_periods      = Column(Integer)                        # 回帰に使った有効期間数
+    computed_at    = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+
+def upsert_recommend_factor_premia(db, run_id: str, rows: list) -> int:
+    """recommend_factor_premia.py の結果を upsert する（run_id+factor_name で冪等）。
+
+    rows = [{run_id, factor_name, mean_b, newey_west_se, t_stat, p_value, n_periods}, ...]
+    Postgres / SQLite 両対応。戻り値は書き込み行数。
+    """
+    if not rows:
+        return 0
+    dialect = db.bind.dialect.name if db.bind is not None else "postgresql"
+    if dialect == "sqlite":
+        from sqlalchemy.dialects.sqlite import insert as _insert
+    else:
+        from sqlalchemy.dialects.postgresql import insert as _insert
+
+    stmt = _insert(RecommendFactorPremium).values(rows)
+    stmt = stmt.on_conflict_do_update(
+        index_elements=["run_id", "factor_name"],
+        set_={
+            "mean_b":        stmt.excluded.mean_b,
+            "newey_west_se": stmt.excluded.newey_west_se,
+            "t_stat":        stmt.excluded.t_stat,
+            "p_value":       stmt.excluded.p_value,
+            "n_periods":     stmt.excluded.n_periods,
+        },
+    )
+    db.execute(stmt)
+    return len(rows)
+
+
+def get_latest_factor_premia(db, run_id: str | None = None) -> dict:
+    """recommend ファクタープレミアムを読む（recommend.resolve_weights 用）。
+
+    run_id 未指定なら最新ラン（computed_at 最大・同時刻は id で決定）。
+    戻り値: {factor_name: {"mean_b", "newey_west_se", "t_stat", "p_value", "n_periods"}}。
+    未蓄積なら空dict。
+    """
+    if run_id is None:
+        latest = (db.query(RecommendFactorPremium)
+                  .order_by(RecommendFactorPremium.computed_at.desc(),
+                            RecommendFactorPremium.id.desc())
+                  .first())
+        if latest is None:
+            return {}
+        run_id = latest.run_id
+    rows = db.query(RecommendFactorPremium).filter_by(run_id=run_id).all()
+    return {
+        r.factor_name: {
+            "mean_b":        r.mean_b,
+            "newey_west_se": r.newey_west_se,
+            "t_stat":        r.t_stat,
+            "p_value":       r.p_value,
+            "n_periods":     r.n_periods,
+        }
+        for r in rows
+    }
+
+
 # ── 6. XBRL 生データ中間テーブル ──────────────────────────────────────────
 
 class XbrlRawDocument(Base):

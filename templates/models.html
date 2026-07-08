@@ -243,18 +243,22 @@ z_metric_j_i: 企業 i の指標 j の Zスコア（年度別正規化済み）<
 
   <h3>プリセット定義</h3>
   <table>
-    <thead><tr><th>プリセット</th><th>z_roe</th><th>z_op_margin</th><th>z_revenue</th><th>z_cf_ratio</th><th>z_equity_ratio</th><th>gap_ratio</th></tr></thead>
+    <thead><tr><th>プリセット</th><th>z_roe</th><th>z_op_margin</th><th>z_revenue</th><th>z_cf_ratio</th><th>z_equity_ratio</th><th>gap_ratio</th><th>z_momentum</th></tr></thead>
     <tbody>
-      <tr><td><span class="tag tag-purple">バランス型</span></td><td>1.0</td><td>1.0</td><td>0.8</td><td>0.8</td><td>0.5</td><td>0.5</td></tr>
-      <tr><td><span class="tag tag-green">成長重視</span></td><td>1.0</td><td>0.5</td><td>2.0</td><td>0.5</td><td>—</td><td>0.3</td></tr>
-      <tr><td><span class="tag tag-amber">割安重視</span></td><td>1.0</td><td>1.0</td><td>—</td><td>—</td><td>0.5</td><td>2.0</td></tr>
-      <tr><td><span class="tag tag-red">高収益重視</span></td><td>2.0</td><td>2.0</td><td>—</td><td>1.0</td><td>0.5</td><td>—</td></tr>
+      <tr><td><span class="tag tag-purple">バランス型</span></td><td>1.0</td><td>1.0</td><td>0.8</td><td>0.8</td><td>0.5</td><td>0.5</td><td>0.5</td></tr>
+      <tr><td><span class="tag tag-green">成長重視</span></td><td>1.0</td><td>0.5</td><td>2.0</td><td>0.5</td><td>—</td><td>0.3</td><td>—</td></tr>
+      <tr><td><span class="tag tag-amber">割安重視</span></td><td>1.0</td><td>1.0</td><td>—</td><td>—</td><td>0.5</td><td>2.0</td><td>—</td></tr>
+      <tr><td><span class="tag tag-red">高収益重視</span></td><td>2.0</td><td>2.0</td><td>—</td><td>1.0</td><td>0.5</td><td>—</td><td>—</td></tr>
     </tbody>
   </table>
   <p><code>gap_ratio</code> は業種別OLS乖離率であり、正値 = 割安の指標として機能する。</p>
+  <p><code>z_momentum</code> は他指標と異なり financial_metrics VIEW の列ではなく、<code>compute_momentum_z()</code> が実行時に計算する（sell_ranking の <code>_resolve_metric</code> と同じ方式）。12-1モメンタム（直近1ヶ月を除く12ヶ月の log リターン）を候補集団横断で winsorize→Zスコア化する。</p>
+
+  <h3>統計的最適化プリセット（Fama-MacBeth 断面回帰）</h3>
+  <p>4プリセットは直感的なヒューリスティックだが、「統計的最適化」プリセットのみ Fama &amp; MacBeth (1973) の断面回帰でデータ駆動に推定した重みを使う（<code>recommend_factor_premia.py</code>・ローカル専用CLI）。月末スナップショットごとに横断面OLS <code>return_i,t+52w = Σ_k b_k,t・z_k,i,t + e_i,t</code> を実行し（母集団・目的変数・foldはM-1/M-2/M-3と共有）、各因子の時系列平均 <code>b_k = mean(b_k,t)</code> をプリセット重みとする。52週先リターンのオーバーラップに起因する自己相関は Newey-West（HAC）標準誤差で補正する。永続化は producer/consumer 分離（バッチ→<code>recommend_factor_premia</code>テーブル→<code>resolve_weights()</code>が読む）。未算出時はバランス型へフォールバックする。<code>gap_ratio</code> は sector_ols依存で2025年度以前ほぼ0%充足のため回帰対象から除外し、残り7指標＋z_momentumの重みのみを持つ（実データ検証で判明）。</p>
 
   <div class="warn-box">
-    <strong>限界:</strong> ウェイト設定に数学的根拠はなく直感的なヒューリスティック。モデルの有効性はバックテストで検証すること。
+    <strong>限界:</strong> 4つのヒューリスティックプリセットのウェイト設定に数学的根拠はない（「統計的最適化」のみFama-MacBeth断面回帰によるデータ駆動）。モデルの有効性はバックテストで検証すること。
   </div>
 
   <div class="refs">
@@ -268,6 +272,21 @@ z_metric_j_i: 企業 i の指標 j の Zスコア（年度別正規化済み）<
       Asness, C., Frazzini, A., Israel, R., & Moskowitz, T. (2015). <span class="ref-title">"Fact, Fiction, and Value Investing."</span><br>
       <em>Journal of Portfolio Management</em>, 42(1), 34–52.<br>
       <a href="https://doi.org/10.3905/jpm.2015.42.1.034" target="_blank" rel="noopener">https://doi.org/10.3905/jpm.2015.42.1.034</a>
+    </div>
+    <div class="ref-item">
+      Jegadeesh, N., & Titman, S. (1993). <span class="ref-title">"Returns to Buying Winners and Selling Losers: Implications for Stock Market Efficiency."</span><br>
+      <em>Journal of Finance</em>, 48(1), 65–91.<br>
+      <a href="https://doi.org/10.1111/j.1540-6261.1993.tb04702.x" target="_blank" rel="noopener">https://doi.org/10.1111/j.1540-6261.1993.tb04702.x</a>
+    </div>
+    <div class="ref-item">
+      Fama, E.F., & MacBeth, J.D. (1973). <span class="ref-title">"Risk, Return, and Equilibrium: Empirical Tests."</span><br>
+      <em>Journal of Political Economy</em>, 81(3), 607–636.<br>
+      <a href="https://doi.org/10.1086/260061" target="_blank" rel="noopener">https://doi.org/10.1086/260061</a>
+    </div>
+    <div class="ref-item">
+      Newey, W.K., & West, K.D. (1987). <span class="ref-title">"A Simple, Positive Semi-Definite, Heteroskedasticity and Autocorrelation Consistent Covariance Matrix."</span><br>
+      <em>Econometrica</em>, 55(3), 703–708.<br>
+      <a href="https://doi.org/10.2307/1913610" target="_blank" rel="noopener">https://doi.org/10.2307/1913610</a>
     </div>
   </div>
 </div>

@@ -218,6 +218,61 @@ class TestTunedParams:
         assert get_tuned_params(db, "macro_gbdt")["params"] == {"a": 1}
 
 
+class TestRecommendFactorPremia:
+    """recommend_factor_premia の upsert/get（Issue #271・Fama-MacBethプレミアムの永続化）。"""
+
+    def test_get_returns_empty_when_unset(self, db):
+        from database import get_latest_factor_premia
+        assert get_latest_factor_premia(db) == {}
+
+    def test_upsert_and_get_round_trip(self, db):
+        from database import get_latest_factor_premia, upsert_recommend_factor_premia
+        rows = [
+            {"run_id": "rfp_1", "factor_name": "z_roe", "mean_b": 0.12,
+             "newey_west_se": 0.03, "t_stat": 4.0, "p_value": 0.001, "n_periods": 40},
+            {"run_id": "rfp_1", "factor_name": "z_momentum", "mean_b": 0.05,
+             "newey_west_se": 0.02, "t_stat": 2.5, "p_value": 0.02, "n_periods": 40},
+        ]
+        n = upsert_recommend_factor_premia(db, "rfp_1", rows)
+        assert n == 2
+        got = get_latest_factor_premia(db)
+        assert got["z_roe"]["mean_b"] == pytest.approx(0.12)
+        assert got["z_momentum"]["t_stat"] == pytest.approx(2.5)
+        assert got["z_roe"]["n_periods"] == 40
+
+    def test_get_by_explicit_run_id(self, db):
+        from database import get_latest_factor_premia, upsert_recommend_factor_premia
+        upsert_recommend_factor_premia(db, "rfp_old", [
+            {"run_id": "rfp_old", "factor_name": "z_roe", "mean_b": 0.1,
+             "newey_west_se": None, "t_stat": None, "p_value": None, "n_periods": 10},
+        ])
+        upsert_recommend_factor_premia(db, "rfp_new", [
+            {"run_id": "rfp_new", "factor_name": "z_roe", "mean_b": 0.2,
+             "newey_west_se": None, "t_stat": None, "p_value": None, "n_periods": 20},
+        ])
+        assert get_latest_factor_premia(db, run_id="rfp_old")["z_roe"]["mean_b"] == pytest.approx(0.1)
+        # run_id 未指定は最新（computed_at が新しい方）を返す
+        assert get_latest_factor_premia(db)["z_roe"]["mean_b"] == pytest.approx(0.2)
+
+    def test_upsert_is_idempotent_per_run_and_factor(self, db):
+        from database import RecommendFactorPremium, upsert_recommend_factor_premia
+        upsert_recommend_factor_premia(db, "rfp_1", [
+            {"run_id": "rfp_1", "factor_name": "z_roe", "mean_b": 0.1,
+             "newey_west_se": None, "t_stat": None, "p_value": None, "n_periods": 10},
+        ])
+        upsert_recommend_factor_premia(db, "rfp_1", [
+            {"run_id": "rfp_1", "factor_name": "z_roe", "mean_b": 0.9,
+             "newey_west_se": None, "t_stat": None, "p_value": None, "n_periods": 99},
+        ])
+        rows = db.query(RecommendFactorPremium).filter_by(run_id="rfp_1", factor_name="z_roe").all()
+        assert len(rows) == 1
+        assert rows[0].mean_b == pytest.approx(0.9)
+
+    def test_empty_rows_is_noop(self, db):
+        from database import upsert_recommend_factor_premia
+        assert upsert_recommend_factor_premia(db, "rfp_1", []) == 0
+
+
 class TestTuningDryRun:
     """database.tuning_dry_run() — 探索中の producer 永続化抑止（Issue #264）。"""
 
