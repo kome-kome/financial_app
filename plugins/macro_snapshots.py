@@ -92,6 +92,16 @@ _MACRO_MAP = {
     "macro_jp_cpi_core_yoy":          ("JP_CPI_CORE",         "yoy"),
     "macro_jp_tankan_mfg_large_zscore": ("JP_TANKAN_MFG_LARGE", "zscore"),
     "macro_jp_m2_yoy":                ("JP_M2",               "yoy"),
+    # ── 日銀追加系列（#282・#280サブイシュー）─────────────────────────────────
+    # CGPI は CPI と川上/川下が異なる独立した物価チャネル。指数値（常に正）なので yoy。
+    # マネタリーベースは M2（マネーストック）とは異なる金融政策スタンスの直接指標。水準系なので yoy。
+    # 短観の残り3バリアント（従来 JP_TANKAN_MFG_LARGE のみ公開）は収集コストゼロのため公開し、
+    # pooled BIC による特徴選定に委ねる（多重共線性の判定はモデル側の責務）。
+    "macro_jp_cgpi_yoy":                  ("JP_CGPI",              "yoy"),
+    "macro_jp_monetary_base_yoy":         ("JP_MONETARY_BASE",     "yoy"),
+    "macro_jp_tankan_nonmfg_large_zscore": ("JP_TANKAN_NONMFG_LARGE", "zscore"),
+    "macro_jp_tankan_mfg_small_zscore":    ("JP_TANKAN_MFG_SMALL",    "zscore"),
+    "macro_jp_tankan_nonmfg_small_zscore": ("JP_TANKAN_NONMFG_SMALL", "zscore"),
 }
 MACRO_FEATURE_NAMES = list(_MACRO_MAP.keys())
 
@@ -123,6 +133,11 @@ MACRO_FEATURE_OPTIONS = [
     {"value": "macro_jp_cpi_core_yoy",             "label": "日本 CPI コア（生鮮除く）前年比（YoY）"},
     {"value": "macro_jp_tankan_mfg_large_zscore", "label": "日銀短観 製造業大企業 業況DI Zスコア"},
     {"value": "macro_jp_m2_yoy",                 "label": "日本 M2（マネーストック）前年比（YoY）"},
+    {"value": "macro_jp_cgpi_yoy",                  "label": "日本 企業物価指数（CGPI）前年比（YoY）"},
+    {"value": "macro_jp_monetary_base_yoy",         "label": "日本 マネタリーベース 前年比（YoY）"},
+    {"value": "macro_jp_tankan_nonmfg_large_zscore", "label": "日銀短観 非製造業大企業 業況DI Zスコア"},
+    {"value": "macro_jp_tankan_mfg_small_zscore",    "label": "日銀短観 製造業中小企業 業況DI Zスコア"},
+    {"value": "macro_jp_tankan_nonmfg_small_zscore", "label": "日銀短観 非製造業中小企業 業況DI Zスコア"},
 ]
 DEFAULT_MACRO_FEATURES = ["macro_usdjpy_yoy", "macro_sp500_yoy", "macro_us10y_zscore"]
 

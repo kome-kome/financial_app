@@ -1168,6 +1168,24 @@ BOJ_SERIES: list[dict] = [
         "freq": "quarterly",
         "lag_days": 14,
     },
+    {
+        "code": "JP_CGPI",
+        "name": "日本 企業物価指数（国内・総平均）",
+        "category": "price",
+        "db": "PR01",
+        "boj_code": "PRCG20_2200000000",
+        "freq": "monthly",
+        "lag_days": 30,
+    },
+    {
+        "code": "JP_MONETARY_BASE",
+        "name": "日本 マネタリーベース平均残高",
+        "category": "money",
+        "db": "MD01",
+        "boj_code": "MABS1AN11",
+        "freq": "monthly",
+        "lag_days": 14,
+    },
 ]
 
 # ── e-Stat API（CPI）──────────────────────────────────────────────────────────

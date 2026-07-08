@@ -256,6 +256,16 @@ def test_boj_series_registered():
         assert by_code[code]["db"] == "CO"
         assert by_code[code]["freq"] == "quarterly"
         assert by_code[code]["lag_days"] == 14
+    # CGPI（#282）
+    assert "JP_CGPI" in by_code
+    assert by_code["JP_CGPI"]["db"] == "PR01"
+    assert by_code["JP_CGPI"]["boj_code"] == "PRCG20_2200000000"
+    assert by_code["JP_CGPI"]["freq"] == "monthly"
+    # マネタリーベース（#282）
+    assert "JP_MONETARY_BASE" in by_code
+    assert by_code["JP_MONETARY_BASE"]["db"] == "MD01"
+    assert by_code["JP_MONETARY_BASE"]["boj_code"] == "MABS1AN11"
+    assert by_code["JP_MONETARY_BASE"]["freq"] == "monthly"
 
 
 def test_estat_series_registered():
