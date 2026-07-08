@@ -79,8 +79,12 @@ _MACRO_MAP = {
     # zscore。低頻度＋公表ラグは収集側（FRED_SERIES.lag_days）で trade_date を補正済み。
     "macro_jp_real_gdp_yoy":     ("JP_REAL_GDP",  "yoy"),
     "macro_jp_unemp_zscore":     ("JP_UNEMP",     "zscore"),
-    # macro_jp_ip_yoy: JPNPROINDMISMEI が 2024-04-30 で凍結 (#253)。e-Stat コネクタ実装まで除外。
     "macro_jp_trade_bal_zscore": ("JP_TRADE_BAL", "zscore"),
+    # ── 鉱工業指数（e-Stat・#253 の FRED 凍結代替・#281）────────────────────────
+    # JPNPROINDMISMEI（旧 FRED 系列）は2024-04-30凍結。e-Stat「鉱工業指数」2020年基準・
+    # 鉱工業総合を直接取得する代替に切替。生産・在庫とも水準系（常に正）なので yoy。
+    "macro_jp_iip_yoy":           ("JP_IIP",           "yoy"),
+    "macro_jp_iip_inventory_yoy": ("JP_IIP_INVENTORY", "yoy"),
     # ── 日銀/e-Stat チャネル（ADR-0006・#251 第2弾）───────────────────────────
     # 日銀コア CPI は BOJ が金融政策判断基準に使う指標で M-1 の金利文脈と整合。
     # 短観 DI は既に拡散指数（水準値）なため yoy は解釈が歪む → zscore。
@@ -111,8 +115,9 @@ MACRO_FEATURE_OPTIONS = [
     {"value": "macro_t10y2y_zscore",       "label": "米10y−2yスプレッド Zスコア"},
     {"value": "macro_jp_real_gdp_yoy",     "label": "日本 実質GDP 前年比（YoY）"},
     {"value": "macro_jp_unemp_zscore",     "label": "日本 失業率 Zスコア"},
-    # macro_jp_ip_yoy は #253 で一時除外（JPNPROINDMISMEI 凍結）
     {"value": "macro_jp_trade_bal_zscore", "label": "日本 貿易収支 Zスコア"},
+    {"value": "macro_jp_iip_yoy",           "label": "日本 鉱工業生産指数 前年比（YoY）"},
+    {"value": "macro_jp_iip_inventory_yoy", "label": "日本 鉱工業在庫指数 前年比（YoY）"},
     # macro_jp_cpi_core_yoy: #262 で解決済み。cdTab（表章項目=指数）と lvTime（時間軸レベル=月次）
     # の両方を fetch_estat_series に追加し、実APIで月次125行（2016-01〜2026-05）の取得を確認済み。
     {"value": "macro_jp_cpi_core_yoy",             "label": "日本 CPI コア（生鮮除く）前年比（YoY）"},
