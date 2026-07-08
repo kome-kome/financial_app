@@ -488,6 +488,67 @@ def test_estat_index_time_code_resolved_via_meta():
     assert by_date["2026-03-01"] == 102.0
 
 
+# ── 8. OECD SDMX API フェッチャー（先行指標CLI・ADR-0009・#283）─────────────────
+# 実API検証済み（2026-07-09）: CSV形式（csvfilewithlabels）で TIME_PERIOD/OBS_VALUE 列を
+# 返す。存在しない series_key は HTTP 404 + プレーンテキスト "NoRecordsFound"。
+
+from collector import fetch_oecd_series, OECD_SERIES
+
+
+def _oecd_csv(rows: list) -> str:
+    """fetch_oecd_series が解析する OECD SDMX csvfilewithlabels 形式（簡略版・
+    実レスポンスは列が多いが TIME_PERIOD/OBS_VALUE のみパースに使うため他は省略）。"""
+    lines = ["TIME_PERIOD,OBS_VALUE"]
+    for t, v in rows:
+        lines.append(f"{t},{v}")
+    return "\n".join(lines)
+
+
+def _fetch_oecd(rows, lag_days=0, status=200, body=None):
+    import asyncio
+
+    async def run():
+        def handler(request: httpx.Request) -> httpx.Response:
+            if status != 200:
+                return httpx.Response(status, text=body or "")
+            return httpx.Response(200, text=_oecd_csv(rows))
+        async with _REAL_ASYNC_CLIENT(transport=httpx.MockTransport(handler)) as s:
+            return await fetch_oecd_series(
+                s, "OECD.SDD.STES,DSD_STES@DF_CLI,4.1", "JPN.M.LI.IX._Z.AA.IX._Z.H",
+                "2020-01", lag_days=lag_days,
+            )
+    return asyncio.run(run())
+
+
+def test_oecd_series_registered():
+    by_code = {s["code"]: s for s in OECD_SERIES}
+    assert "JP_CLI" in by_code
+    assert by_code["JP_CLI"]["dataflow"]   == "OECD.SDD.STES,DSD_STES@DF_CLI,4.1"
+    assert by_code["JP_CLI"]["series_key"] == "JPN.M.LI.IX._Z.AA.IX._Z.H"
+    assert by_code["JP_CLI"]["lag_days"]   == 60
+
+
+def test_oecd_monthly_values_parsed_and_lag_shifted():
+    """TIME_PERIOD（"YYYY-MM"）から年月を復元し、lag_days 分シフトする。"""
+    rows = _fetch_oecd([("2024-06", "99.88074"), ("2024-07", "99.83847")], lag_days=60)
+    assert len(rows) == 2
+    assert rows[0]["trade_date"] == "2024-07-31"  # 2024-06-01 + 60日
+    assert rows[0]["close"] == 99.88074
+    assert rows[1]["trade_date"] == "2024-08-30"  # 2024-07-01 + 60日
+
+
+def test_oecd_missing_series_returns_empty():
+    """存在しない series_key は HTTP 404 + "NoRecordsFound"（JSONではない）を返す。
+    raise_for_status() で例外化されログ経由で空リストへフォールバックする。"""
+    rows = _fetch_oecd([], status=404, body="NoRecordsFound")
+    assert rows == []
+
+
+def test_oecd_api_error_returns_empty():
+    rows = _fetch_oecd([], status=500, body="Internal Server Error")
+    assert rows == []
+
+
 def test_estat_index_skips_weight_row():
     """ウエイト行（time_map の名前が "付加生産ウエイト" 等・YYYYMM形式でない）は
     誤って日付として解釈されず除外される。"""

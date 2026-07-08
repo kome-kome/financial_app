@@ -702,7 +702,7 @@ IFRS には完全に対応する科目がないため、「非流動その他金
 | 財務（価格由来＝バリュー） | per, pbr, **div_yield** | per, pbr | 無次元（FinancialMetric VIEW） |
 | 財務（価格フリー） | roe, **roa**, **op_margin**, **net_margin**, **asset_turnover**, equity_ratio, **de_ratio**, **nc_ratio**, **cf_ratio**, **eps_growth**, **op_growth**, **rev_growth**, rd_intensity, da_intensity, z_op_margin, z_roe, z_cf_ratio | roe, **roa**, equity_ratio, **eps_growth** | 無次元（FinancialMetric VIEW 既存列。**asset_turnover は本改修で VIEW 追加**） |
 | モメンタム | 12-1ヶ月ログリターン | （use_momentum 時・**既定 OFF**） | log(P_short / P_long) |
-| マクロ | 市場系: USDJPY/EURJPY/SP500/NIKKEI225/**TOPIX** = YoY、米5/10/30年金利・DXY・VIX・WTI・金・FREDクレジット/インフレ = Zスコア。**日本実体経済（#250）: 実質GDP・鉱工業生産 = YoY、失業率・貿易収支 = Zスコア**。**日銀/e-Stat（#251）: コアCPI = YoY、短観製造業大企業DI = Zスコア、M2 = YoY** | USDJPY, SP500, US10Y（use_macro 時・米国寄り既定3本を維持） | YoY = Δ/前年 / Z = (現在−5年平均)/5年SD |
+| マクロ | 市場系: USDJPY/EURJPY/SP500/NIKKEI225/**TOPIX** = YoY、米5/10/30年金利・DXY・VIX・WTI・金・FREDクレジット/インフレ = Zスコア。**日本実体経済（#250）: 実質GDP・鉱工業生産 = YoY、失業率・貿易収支 = Zスコア**。**日銀/e-Stat（#251）: コアCPI = YoY、短観製造業大企業DI = Zスコア、M2 = YoY**。**OECD先行指標（#283・ADR-0009）: CLI（景気先行指数）= Zスコア** | USDJPY, SP500, US10Y（use_macro 時・米国寄り既定3本を維持） | YoY = Δ/前年 / Z = (現在−5年平均)/5年SD |
 | 交差項 | 選択財務 × 選択マクロ | （use_macro 時） | 積（無次元×無次元） |
 
 被説明変数は **1年先（52週先）週次ログリターン（年率・無次元）**。全特徴量は学習前に `winsorize(p1–p99)`→z-score 標準化を適用。

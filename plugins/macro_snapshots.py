@@ -102,6 +102,10 @@ _MACRO_MAP = {
     "macro_jp_tankan_nonmfg_large_zscore": ("JP_TANKAN_NONMFG_LARGE", "zscore"),
     "macro_jp_tankan_mfg_small_zscore":    ("JP_TANKAN_MFG_SMALL",    "zscore"),
     "macro_jp_tankan_nonmfg_small_zscore": ("JP_TANKAN_NONMFG_SMALL", "zscore"),
+    # ── OECD 先行指標（ADR-0009・Issue #283）─────────────────────────────────
+    # CLI（振幅調整済み・100を中心とした指数）は水準（100からの乖離）自体がトレンド
+    # 転換点シグナルであり yoy（前年比）を取ると意味が薄れるため zscore を採用。
+    "macro_jp_cli_zscore": ("JP_CLI", "zscore"),
 }
 MACRO_FEATURE_NAMES = list(_MACRO_MAP.keys())
 
@@ -138,6 +142,7 @@ MACRO_FEATURE_OPTIONS = [
     {"value": "macro_jp_tankan_nonmfg_large_zscore", "label": "日銀短観 非製造業大企業 業況DI Zスコア"},
     {"value": "macro_jp_tankan_mfg_small_zscore",    "label": "日銀短観 製造業中小企業 業況DI Zスコア"},
     {"value": "macro_jp_tankan_nonmfg_small_zscore", "label": "日銀短観 非製造業中小企業 業況DI Zスコア"},
+    {"value": "macro_jp_cli_zscore", "label": "OECD景気先行指数（CLI）Zスコア"},
 ]
 DEFAULT_MACRO_FEATURES = ["macro_usdjpy_yoy", "macro_sp500_yoy", "macro_us10y_zscore"]
 

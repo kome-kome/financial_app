@@ -326,6 +326,20 @@ ADR-0006 §Decision-2 が定める M2・短観 DI チャネル。
 
 注: ADR-0006 は `api.boj.or.jp` と記したが実エンドポイントは `stat-search.boj.or.jp/api/v1`（GOTCHAS.md 参照）。
 
+### OECD SDMX API（認証不要）
+
+ADR-0009 が定める先行指標（leading indicator）チャネル。Issue #283。
+
+| 項目 | 値 |
+|---|---|
+| エンドポイント | `https://sdmx.oecd.org/public/rest/data` |
+| 認証 | 不要（匿名クエリのみサポート・APIキー無し。OECD公式ドキュメントで確認済み・2026-07-09） |
+| 収集系列 | `JP_CLI`（日本 Composite Leading Indicator・振幅調整済・`OECD.SDD.STES,DSD_STES@DF_CLI,4.1` / `JPN.M.LI.IX._Z.AA.IX._Z.H`） |
+| レート制限 | 非公開（「responsive experience維持のため導入」とのみ公式記載）。`OECD_RATE_SLEEP = 1.0` 秒で保守的に運用 |
+| 応答形式 | `format=csvfilewithlabels`（CSV・`TIME_PERIOD`/`OBS_VALUE`列）。存在しない `series_key` は HTTP 404 + `NoRecordsFound` |
+| 公表ラグ | CLI は対象月から2か月遅れで公表。先読みバイアス防止のため `lag_days=60`（e-Stat 鉱工業指数と同水準） |
+| GitHub Actions 疎通 | Azure IP からのブロック事例は未確認（stooq のような事例は無い想定だが本番初回実行で要確認） |
+
 ### e-Stat API（総務省統計局・要アカウント登録）
 
 ADR-0006 §Decision-1 が定める CPI チャネル。
