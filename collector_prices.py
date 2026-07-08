@@ -1188,6 +1188,30 @@ BOJ_SERIES: list[dict] = [
     },
 ]
 
+# ── OECD SDMX API（sdmx.oecd.org・認証不要）────────────────────────────────
+# 匿名クエリのみサポート・APIキー不要（OECD公式ドキュメントで確認済み・2026-07-09実API検証）。
+# レート制限: 明確な閾値は非公開（"responsive experience維持のため導入"とのみ公式記載）。
+# 月次nightly収集想定のため保守的に OECD_RATE_SLEEP=1.0s を挟む。
+# 公表ラグ: CLI は毎月公表・対象月から2か月遅れ（例: 7月公表分は5月確定値。ただし直近1-2か月分は
+# 暫定値として先行掲載されることがある）。先読みバイアス防止のため lag_days=60（e-Stat 鉱工業指数
+# JP_IIP と同水準）。ADR-0009・Issue #283。
+OECD_BASE_URL   = "https://sdmx.oecd.org/public/rest/data"
+OECD_RATE_SLEEP = 1.0
+
+OECD_SERIES: list[dict] = [
+    {
+        "code": "JP_CLI",
+        "name": "日本 OECD景気先行指数（CLI・振幅調整済）",
+        "category": "leading",
+        # dataflow: エージェンシー,データセットID,バージョン。series_key: 9次元
+        # REF_AREA.FREQ.MEASURE.UNIT_MEASURE.ACTIVITY.ADJUSTMENT.TRANSFORMATION.TIME_HORIZ.METHODOLOGY
+        # を明示指定（空欄=ワイルドカードだとサーバー側デフォルト解決に依存するため不使用）。
+        "dataflow":   "OECD.SDD.STES,DSD_STES@DF_CLI,4.1",
+        "series_key": "JPN.M.LI.IX._Z.AA.IX._Z.H",
+        "lag_days": 60,
+    },
+]
+
 # ── e-Stat API（CPI）──────────────────────────────────────────────────────────
 # ESTAT_API_KEY が設定されている場合のみ収集（FRED_API_KEY と同挙動）。
 # アカウント登録: https://www.e-stat.go.jp/api/ （無料・要ユーザー登録）
@@ -1389,6 +1413,44 @@ async def fetch_boj_series(
                 "open": None, "high": None, "low": None,
                 "close": float(v), "volume": None,
             })
+    return rows
+
+
+async def fetch_oecd_series(
+    session: httpx.AsyncClient,
+    dataflow: str,
+    series_key: str,
+    date_from: str,  # "YYYY-MM"
+    lag_days: int = 0,
+) -> list:
+    """OECD SDMX API（sdmx.oecd.org/public/rest/data）から月次系列を取得する。
+    認証不要（匿名クエリのみサポート・APIキー不要）。CSV形式（csvfilewithlabels）で取得し
+    TIME_PERIOD（"YYYY-MM"）/OBS_VALUE 列をパースする。存在しない series_key は
+    404 "NoRecordsFound" を返す（2026-07-09実API検証済み）。"""
+    url = f"{OECD_BASE_URL}/{dataflow}/{series_key}"
+    params = {"startPeriod": date_from, "format": "csvfilewithlabels"}
+    try:
+        r = await session.get(url, params=params, timeout=30)
+        r.raise_for_status()
+        df = pd.read_csv(io.StringIO(r.text), usecols=["TIME_PERIOD", "OBS_VALUE"])
+    except Exception as e:
+        log.warning("OECD 取得失敗 %s: %s", series_key, type(e).__name__)
+        return []
+
+    rows = []
+    for _, row in df.dropna(subset=["OBS_VALUE"]).iterrows():
+        try:
+            year, month = (int(x) for x in str(row["TIME_PERIOD"]).split("-"))
+            obs_date = date(year, month, 1).isoformat()
+            if lag_days:
+                obs_date = (date.fromisoformat(obs_date) + timedelta(days=lag_days)).isoformat()
+            rows.append({
+                "trade_date": obs_date,
+                "open": None, "high": None, "low": None,
+                "close": float(row["OBS_VALUE"]), "volume": None,
+            })
+        except (ValueError, TypeError):
+            continue
     return rows
 
 
@@ -1624,9 +1686,9 @@ async def collect_macro_data(
     on_progress: Optional[Callable[[int, int, str], None]] = None,
     cancel_check: Optional[Callable[[], bool]] = None,
 ):
-    """MACRO_SERIES（Yahoo/stooq）+ FRED_SERIES + BOJ_SERIES + ESTAT_SERIES を macro_data に upsert。
-    Yahoo Finance 優先（GitHub Actions Azure IP 対応）→ stooq フォールバック。
-    FRED: FRED_API_KEY 設定時のみ。BOJ: 常時収集（認証不要）。e-Stat: ESTAT_API_KEY 設定時のみ。
+    """MACRO_SERIES（Yahoo/stooq）+ FRED_SERIES + BOJ_SERIES + OECD_SERIES + ESTAT_SERIES を
+    macro_data に upsert。Yahoo Finance 優先（GitHub Actions Azure IP 対応）→ stooq フォールバック。
+    FRED: FRED_API_KEY 設定時のみ。BOJ・OECD: 常時収集（認証不要）。e-Stat: ESTAT_API_KEY 設定時のみ。
     既存レコードは close 等を上書き（最新値で更新）。"""
     today      = date.today()
     start      = today - timedelta(days=int(years_back * 365.25))
@@ -1643,10 +1705,14 @@ async def collect_macro_data(
     # e-Stat: @time フォーマット YYYYMM000000。
     d1_estat   = boj_start.strftime("%Y%m") + "000000"
     d2_estat   = today.strftime("%Y%m") + "000000"
+    # OECD: startPeriod は "YYYY-MM"。FRED/BOJ 同様に長めに遡る（zscore ≥20 点確保）。
+    oecd_start = today - timedelta(days=int(max(years_back, FRED_MIN_YEARS_BACK) * 365.25))
+    d1_oecd    = oecd_start.strftime("%Y-%m")
     total      = (
         len(MACRO_SERIES)
         + (len(FRED_SERIES)  if FRED_API_KEY  else 0)
         + len(BOJ_SERIES)
+        + len(OECD_SERIES)
         + (len(ESTAT_SERIES) + len(ESTAT_INDEX_SERIES) if ESTAT_API_KEY else 0)
     )
     saved      = 0
@@ -1767,12 +1833,51 @@ async def collect_macro_data(
             if on_progress:
                 on_progress(idx, total, f"[BOJ {k}/{len(BOJ_SERIES)}] {series['name']}: {n}件処理")
 
+        # ── OECD 収集（認証不要・常時）────────────────────────────────────────
+        oecd_base_i = boj_base_i + len(BOJ_SERIES)
+        for q, series in enumerate(OECD_SERIES, 1):
+            idx = oecd_base_i + q
+            if cancel_check and cancel_check():
+                if on_progress:
+                    on_progress(idx - 1, total, "[マクロ収集] ユーザー停止")
+                return saved
+
+            if on_progress:
+                on_progress(idx - 1, total, f"[OECD {q}/{len(OECD_SERIES)}] {series['name']} 取得中")
+            rows = await fetch_oecd_series(
+                session,
+                series["dataflow"],
+                series["series_key"],
+                d1_oecd,
+                series.get("lag_days", 0),
+            )
+            await asyncio.sleep(OECD_RATE_SLEEP)
+
+            if not rows:
+                if on_progress:
+                    on_progress(idx, total, f"[OECD {q}/{len(OECD_SERIES)}] {series['name']} データ無し")
+                continue
+
+            vals = [{
+                "series_code": series["code"],
+                "series_name": series["name"],
+                "category":    series["category"],
+                "trade_date":  r["trade_date"],
+                "open": r["open"], "high": r["high"], "low": r["low"],
+                "close": r["close"], "volume": r["volume"],
+            } for r in rows]
+            n = upsert_macro_batch(db, vals)
+            db.commit()
+            saved += n
+            if on_progress:
+                on_progress(idx, total, f"[OECD {q}/{len(OECD_SERIES)}] {series['name']}: {n}件処理")
+
         # ── e-Stat 収集（ESTAT_API_KEY が設定されている場合のみ）────────────────
         if not ESTAT_API_KEY:
             if on_progress:
                 on_progress(total, total, "[e-Stat] ESTAT_API_KEY 未設定のためスキップ")
         else:
-            estat_base_i = boj_base_i + len(BOJ_SERIES)
+            estat_base_i = oecd_base_i + len(OECD_SERIES)
             for m, series in enumerate(ESTAT_SERIES, 1):
                 idx = estat_base_i + m
                 if cancel_check and cancel_check():
