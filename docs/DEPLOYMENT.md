@@ -337,6 +337,17 @@ ADR-0006 §Decision-1 が定める CPI チャネル。
 | 収集系列 | `JP_CPI_TOTAL`・`JP_CPI_CORE`（全国コア・非季調）・`JP_CPI_TOKYO`（statsDataId=0003427113） |
 | 認証未設定時 | `collect_macro_data()` が「ESTAT_API_KEY 未設定のためスキップ」でパスする（安全弁） |
 
+**鉱工業指数チャネル（`ESTAT_INDEX_SERIES`・#253/#281）**: `JP_IP`（FRED系列 `JPNPROINDMISMEI`）が
+2024-04-30で凍結した代替として、経済産業省「鉱工業指数」を e-Stat から直接取得する。
+
+| 項目 | 値 |
+|---|---|
+| 統計表 | 鉱工業生産・出荷・在庫指数 2020年基準時系列データ（2018年1月～・業種別季節調整済指数【月次】） |
+| 収集系列 | `JP_IIP`（`statsDataId=0004052177`・生産）・`JP_IIP_INVENTORY`（`statsDataId=0004052179`・在庫） |
+| 絞込パラメータ | `cdCat01=0001000`（業種別分類「鉱工業総合」）。CPI と異なり `cdTab`/`cdArea`/`lvTime` は無い（表章項目・地域軸を持たないテーブル） |
+| time 軸の特殊性 | `@time` が `"0500100"` 等の連番コードで年月を直接表現しない（CPI は自己記述コードで直接パース可）。`metaGetFlg="Y"` で同一レスポンスに `CLASS_INF`（code→"YYYYMM"）を同梱させ、`fetch_estat_index_series` が変換する |
+| 基準改定リスク | 鉱工業指数は基準改定（2010→2015→2020年基準）のたびに `statsDataId` が別テーブルへ切替り、旧テーブルは更新停止する（JP_IP 凍結と同根）。次回改定時は本節の `statsDataId` を再調査すること |
+
 ---
 
 ## 環境変数（Render ダッシュボードで設定）

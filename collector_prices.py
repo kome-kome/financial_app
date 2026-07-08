@@ -1216,6 +1216,36 @@ ESTAT_SERIES: list[dict] = [
     },
 ]
 
+# ── e-Stat API（鉱工業指数・在庫指数）───────────────────────────────────────
+# ESTAT_API_KEY を共用（CPI と同じキー・同じスキップ挙動）。CPI（ESTAT_SERIES）とは
+# @time のフォーマットが異なる: CPI は "YYYY0000MM" の自己記述コードで直接パース可能だが、
+# 鉱工業指数は "0500100" のような連番コードで年月を直接表現しない。そのため cd_tab/cd_area
+# は存在せず（表章項目・地域軸を持たないテーブル）、fetch_estat_index_series が
+# metaGetFlg="Y" でメタ情報（time 軸 code→"YYYYMM"）を同一レスポンスに同梱取得して変換する。
+# 統計表は「経済産業省 鉱工業指数」2020年基準・業種別・季節調整済指数【月次】（2018年1月～）。
+# 鉱工業指数は基準改定（2010→2015→2020年基準）のたびに statsDataId が別テーブルへ切り替わり
+# 旧テーブルは更新停止する（FRED 版 JPNPROINDMISMEI が2024-04-30凍結した根本原因と同型・#253）。
+# 次回基準改定時（目安10年ごと）は本節の statsDataId を再調査すること。
+# cd_cat01="0001000" は業種分類（cat01）の「鉱工業総合」（"0002000"=製造工業も選択可）。
+ESTAT_INDEX_SERIES: list[dict] = [
+    {
+        "code": "JP_IIP",
+        "name": "日本 鉱工業生産指数（季調済・鉱工業総合）",
+        "category": "real_economy",
+        "stats_data_id": "0004052177",
+        "cd_cat01": "0001000",
+        "lag_days": 60,
+    },
+    {
+        "code": "JP_IIP_INVENTORY",
+        "name": "日本 鉱工業在庫指数（季調済・鉱工業総合）",
+        "category": "real_economy",
+        "stats_data_id": "0004052179",
+        "cd_cat01": "0001000",
+        "lag_days": 60,
+    },
+]
+
 
 async def fetch_fred_series(
     session: httpx.AsyncClient,
@@ -1427,6 +1457,78 @@ async def fetch_estat_series(
     return list(seen.values())
 
 
+async def fetch_estat_index_series(
+    session: httpx.AsyncClient,
+    stats_data_id: str,
+    cd_cat01: str,
+    lag_days: int = 0,
+) -> list:
+    """e-Stat API から「time 軸が連番コード」形式の指数系列（鉱工業指数等）を取得する。
+    CPI 系列（fetch_estat_series）は @time が "YYYY0000MM" の自己記述コードで直接パース
+    できるが、鉱工業指数は @time が "0500100" のような連番コードで年月を直接表現しない。
+    metaGetFlg="Y" を付けて time 軸のメタ情報（code→"YYYYMM"）を同一レスポンスへ同梱させ、
+    そのマッピングで変換する（追加の getMetaInfo 呼び出し不要・1リクエストで完結）。
+    ウエイト行等（"付加生産ウエイト" 等・6桁の YYYYMM にならない）はスキップする。"""
+    params = {
+        "appId":       ESTAT_API_KEY,
+        "statsDataId": stats_data_id,
+        "cdCat01":     cd_cat01,
+        "metaGetFlg":  "Y",
+        "lang":        "J",
+    }
+    try:
+        r = await session.get(ESTAT_BASE_URL, params=params, timeout=30)
+        r.raise_for_status()
+        data = r.json()
+    except Exception as e:
+        log.warning("e-Stat(index) 取得失敗 %s/%s: %s", stats_data_id, cd_cat01, type(e).__name__)
+        return []
+
+    try:
+        stat       = data["GET_STATS_DATA"]["STATISTICAL_DATA"]
+        values     = stat["DATA_INF"]["VALUE"]
+        class_objs = stat["CLASS_INF"]["CLASS_OBJ"]
+    except (KeyError, TypeError):
+        log.warning("e-Stat(index) レスポンス解析失敗 %s/%s", stats_data_id, cd_cat01)
+        return []
+
+    if isinstance(values, dict):
+        values = [values]
+    if isinstance(class_objs, dict):
+        class_objs = [class_objs]
+
+    time_map: dict = {}
+    for obj in class_objs:
+        if obj.get("@id") != "time":
+            continue
+        classes = obj.get("CLASS", [])
+        if isinstance(classes, dict):
+            classes = [classes]
+        for c in classes:
+            time_map[c.get("@code")] = c.get("@name")
+
+    rows = []
+    for val in values:
+        raw_v  = val.get("$")
+        code   = val.get("@time", "")
+        yyyymm = time_map.get(code, "")
+        if raw_v is None or len(yyyymm) != 6 or not yyyymm.isdigit():
+            continue  # ウエイト行等（time_map の名前が YYYYMM でない）はスキップ
+        try:
+            year, month = int(yyyymm[:4]), int(yyyymm[4:])
+            obs_date = date(year, month, 1).isoformat()
+            if lag_days:
+                obs_date = (date.fromisoformat(obs_date) + timedelta(days=lag_days)).isoformat()
+            rows.append({
+                "trade_date": obs_date,
+                "open": None, "high": None, "low": None,
+                "close": float(raw_v), "volume": None,
+            })
+        except (ValueError, IndexError):
+            continue
+    return rows
+
+
 async def fetch_yahoo_history(
     session: httpx.AsyncClient,
     yf_ticker: str,
@@ -1527,7 +1629,7 @@ async def collect_macro_data(
         len(MACRO_SERIES)
         + (len(FRED_SERIES)  if FRED_API_KEY  else 0)
         + len(BOJ_SERIES)
-        + (len(ESTAT_SERIES) if ESTAT_API_KEY else 0)
+        + (len(ESTAT_SERIES) + len(ESTAT_INDEX_SERIES) if ESTAT_API_KEY else 0)
     )
     saved      = 0
 
@@ -1691,5 +1793,42 @@ async def collect_macro_data(
                 saved += n
                 if on_progress:
                     on_progress(idx, total, f"[e-Stat {m}/{len(ESTAT_SERIES)}] {series['name']}: {n}件処理")
+
+            # ── e-Stat 鉱工業指数（time 軸が連番コード・日付範囲パラメータ無し）────
+            estat_idx_base_i = estat_base_i + len(ESTAT_SERIES)
+            for p, series in enumerate(ESTAT_INDEX_SERIES, 1):
+                idx = estat_idx_base_i + p
+                if cancel_check and cancel_check():
+                    if on_progress:
+                        on_progress(idx - 1, total, "[マクロ収集] ユーザー停止")
+                    return saved
+
+                if on_progress:
+                    on_progress(idx - 1, total, f"[e-Stat-idx {p}/{len(ESTAT_INDEX_SERIES)}] {series['name']} 取得中")
+                rows = await fetch_estat_index_series(
+                    session,
+                    series["stats_data_id"],
+                    series["cd_cat01"],
+                    series.get("lag_days", 0),
+                )
+
+                if not rows:
+                    if on_progress:
+                        on_progress(idx, total, f"[e-Stat-idx {p}/{len(ESTAT_INDEX_SERIES)}] {series['name']} データ無し")
+                    continue
+
+                vals = [{
+                    "series_code": series["code"],
+                    "series_name": series["name"],
+                    "category":    series["category"],
+                    "trade_date":  r["trade_date"],
+                    "open": r["open"], "high": r["high"], "low": r["low"],
+                    "close": r["close"], "volume": r["volume"],
+                } for r in rows]
+                n = upsert_macro_batch(db, vals)
+                db.commit()
+                saved += n
+                if on_progress:
+                    on_progress(idx, total, f"[e-Stat-idx {p}/{len(ESTAT_INDEX_SERIES)}] {series['name']}: {n}件処理")
 
     return saved
