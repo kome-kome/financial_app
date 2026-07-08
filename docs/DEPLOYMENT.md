@@ -208,7 +208,7 @@ Render ダッシュボードで管理。
 
 **後続PR（本対策に連なる別タスク）**：
 - *予測モデルの平滑化ターゲット化*：`turnover_sum`/`volume_sum` 由来の VWAP・相対流動性を説明/被説明変数に。年次株価変動ノイズ対策。MODELS.md 更新を伴う。
-- *`financial_records.raw_xbrl_json` の drop*：financial_records 73MB の主因。第2の容量レバー。
+- *`financial_records.raw_xbrl_json` の drop*：**実装済み（Issue #219 ①）**。financial_records 73MBの主因＝第2の容量レバーだった列を冪等DROPマイグレーション（`database.py::_DEBUG_ONLY_COLS`）で削除し、ヘッドルームを確保。
 - *過去2〜5年の Yahoo 週次バックフィル*：J-Quants 無料は2年上限のため、5年時系列（財務5年と整合）を Yahoo から `stock_price_weekly` へ補填。**実装済み（#198・`backfill-weekly-history.yml` / `backfill_weekly_history_yahoo`）。本番実行は use_momentum 常用時に手動で1回**。
 
 #### バックアップ運用ポリシー
@@ -336,6 +336,17 @@ ADR-0006 §Decision-1 が定める CPI チャネル。
 | APIキー | [e-stat.go.jp/api/](https://www.e-stat.go.jp/api/) で無料登録 → `ESTAT_API_KEY` 環境変数に設定 |
 | 収集系列 | `JP_CPI_TOTAL`・`JP_CPI_CORE`（全国コア・非季調）・`JP_CPI_TOKYO`（statsDataId=0003427113） |
 | 認証未設定時 | `collect_macro_data()` が「ESTAT_API_KEY 未設定のためスキップ」でパスする（安全弁） |
+
+**鉱工業指数チャネル（`ESTAT_INDEX_SERIES`・#253/#281）**: `JP_IP`（FRED系列 `JPNPROINDMISMEI`）が
+2024-04-30で凍結した代替として、経済産業省「鉱工業指数」を e-Stat から直接取得する。
+
+| 項目 | 値 |
+|---|---|
+| 統計表 | 鉱工業生産・出荷・在庫指数 2020年基準時系列データ（2018年1月～・業種別季節調整済指数【月次】） |
+| 収集系列 | `JP_IIP`（`statsDataId=0004052177`・生産）・`JP_IIP_INVENTORY`（`statsDataId=0004052179`・在庫） |
+| 絞込パラメータ | `cdCat01=0001000`（業種別分類「鉱工業総合」）。CPI と異なり `cdTab`/`cdArea`/`lvTime` は無い（表章項目・地域軸を持たないテーブル） |
+| time 軸の特殊性 | `@time` が `"0500100"` 等の連番コードで年月を直接表現しない（CPI は自己記述コードで直接パース可）。`metaGetFlg="Y"` で同一レスポンスに `CLASS_INF`（code→"YYYYMM"）を同梱させ、`fetch_estat_index_series` が変換する |
+| 基準改定リスク | 鉱工業指数は基準改定（2010→2015→2020年基準）のたびに `statsDataId` が別テーブルへ切替り、旧テーブルは更新停止する（JP_IP 凍結と同根）。次回改定時は本節の `statsDataId` を再調査すること |
 
 ---
 

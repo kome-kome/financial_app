@@ -256,6 +256,16 @@ def test_boj_series_registered():
         assert by_code[code]["db"] == "CO"
         assert by_code[code]["freq"] == "quarterly"
         assert by_code[code]["lag_days"] == 14
+    # CGPI（#282）
+    assert "JP_CGPI" in by_code
+    assert by_code["JP_CGPI"]["db"] == "PR01"
+    assert by_code["JP_CGPI"]["boj_code"] == "PRCG20_2200000000"
+    assert by_code["JP_CGPI"]["freq"] == "monthly"
+    # マネタリーベース（#282）
+    assert "JP_MONETARY_BASE" in by_code
+    assert by_code["JP_MONETARY_BASE"]["db"] == "MD01"
+    assert by_code["JP_MONETARY_BASE"]["boj_code"] == "MABS1AN11"
+    assert by_code["JP_MONETARY_BASE"]["freq"] == "monthly"
 
 
 def test_estat_series_registered():
@@ -412,5 +422,115 @@ def test_estat_response_missing_value_path_returns_empty():
         async with _REAL_ASYNC_CLIENT(transport=httpx.MockTransport(handler)) as s:
             return await fetch_estat_series(s, "0003427113", "1", "0161", "00000",
                                             "2020000101", "2026000606")
+    rows = asyncio.run(run())
+    assert rows == []
+
+
+# ── 7. e-Stat 鉱工業指数フェッチャー（time軸が連番コード・#253/#281）─────────────
+# CPI と異なり @time が "0500100" のような連番コードで年月を直接表現しない。
+# metaGetFlg="Y" で同梱される CLASS_INF（time クラス code→"YYYYMM"）を使って変換する。
+# 実API検証値: 鉱工業指数2020年基準・code="0519700"→name="202603"（2026年3月・最新）。
+
+from collector import fetch_estat_index_series, ESTAT_INDEX_SERIES
+
+
+def _estat_index_json(values: list, time_classes: list) -> dict:
+    """fetch_estat_index_series が解析する metaGetFlg=Y 付き getStatsData レスポンス形式。"""
+    return {
+        "GET_STATS_DATA": {
+            "STATISTICAL_DATA": {
+                "DATA_INF": {"VALUE": values},
+                "CLASS_INF": {"CLASS_OBJ": [
+                    {"@id": "cat01", "@name": "業種別", "CLASS": []},
+                    {"@id": "time", "@name": "時間軸", "CLASS": time_classes},
+                ]},
+            },
+        },
+    }
+
+
+def _fetch_estat_index(values, time_classes, lag_days=0):
+    import asyncio
+
+    async def run():
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json=_estat_index_json(values, time_classes))
+        async with _REAL_ASYNC_CLIENT(transport=httpx.MockTransport(handler)) as s:
+            return await fetch_estat_index_series(s, "0004052177", "0001000", lag_days=lag_days)
+    return asyncio.run(run())
+
+
+def test_estat_index_series_registered():
+    by_code = {s["code"]: s for s in ESTAT_INDEX_SERIES}
+    assert "JP_IIP" in by_code
+    assert "JP_IIP_INVENTORY" in by_code
+    assert by_code["JP_IIP"]["cd_cat01"] == "0001000"  # 鉱工業総合
+    assert by_code["JP_IIP"]["lag_days"] == 60
+
+
+def test_estat_index_time_code_resolved_via_meta():
+    """@time の連番コード（"0500100" 等）はメタ情報（code→"YYYYMM"）経由で解決する。"""
+    time_classes = [
+        {"@code": "0100100", "@name": "付加生産ウエイト"},
+        {"@code": "0500100", "@name": "201801"},
+        {"@code": "0519700", "@name": "202603"},
+    ]
+    values = [
+        {"@time": "0100100", "$": "10000"},
+        {"@time": "0500100", "$": "112.3"},
+        {"@time": "0519700", "$": "102.0"},
+    ]
+    rows = _fetch_estat_index(values, time_classes)
+    # ウエイト行(0100100)はスキップされ、2件のみ残る
+    assert len(rows) == 2
+    by_date = {r["trade_date"]: r["close"] for r in rows}
+    assert by_date["2018-01-01"] == 112.3
+    assert by_date["2026-03-01"] == 102.0
+
+
+def test_estat_index_skips_weight_row():
+    """ウエイト行（time_map の名前が "付加生産ウエイト" 等・YYYYMM形式でない）は
+    誤って日付として解釈されず除外される。"""
+    time_classes = [{"@code": "0100100", "@name": "付加生産ウエイト"}]
+    values = [{"@time": "0100100", "$": "10000"}]
+    rows = _fetch_estat_index(values, time_classes)
+    assert rows == []
+
+
+def test_estat_index_lag_days_shifts_trade_date():
+    time_classes = [{"@code": "0500100", "@name": "202401"}]
+    values = [{"@time": "0500100", "$": "105.0"}]
+    rows = _fetch_estat_index(values, time_classes, lag_days=60)
+    assert len(rows) == 1
+    assert rows[0]["trade_date"] == "2024-03-01"  # 2024-01-01 + 60日（うるう年）
+
+
+def test_estat_index_request_includes_metagetflg_and_cdcat01():
+    """metaGetFlg=Y（メタ情報同梱・追加リクエスト不要）と cdCat01 が送信されることを確認。"""
+    import asyncio
+    captured = {}
+
+    async def run():
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured["url"] = str(request.url)
+            return httpx.Response(200, json=_estat_index_json([], []))
+        async with _REAL_ASYNC_CLIENT(transport=httpx.MockTransport(handler)) as s:
+            return await fetch_estat_index_series(s, "0004052177", "0001000")
+    asyncio.run(run())
+    assert "metaGetFlg=Y" in captured["url"], captured["url"]
+    assert "cdCat01=0001000" in captured["url"], captured["url"]
+
+
+def test_estat_index_response_missing_path_returns_empty():
+    """レスポンスに DATA_INF/CLASS_INF が無い異常系でも例外を送出せず空リストへ。"""
+    import asyncio
+
+    async def run():
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={
+                "GET_STATS_DATA": {"RESULT": {"STATUS": 1, "ERROR_MSG": "該当データなし"}},
+            })
+        async with _REAL_ASYNC_CLIENT(transport=httpx.MockTransport(handler)) as s:
+            return await fetch_estat_index_series(s, "0004052177", "0001000")
     rows = asyncio.run(run())
     assert rows == []

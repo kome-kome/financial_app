@@ -11,6 +11,10 @@ from dotenv import load_dotenv
 load_dotenv()
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+# httpx は "HTTP Request: GET <url> ..." を INFO で出力し、クエリパラメータに載る
+# APIキー（FRED_API_KEY/ESTAT_API_KEY 等）がそのままログへ残ってしまうため抑制する。
+for _noisy_logger in ("httpx", "httpcore"):
+    logging.getLogger(_noisy_logger).setLevel(logging.WARNING)
 log = logging.getLogger("collector")
 
 EDINET_BASE   = "https://disclosure.edinet-fsa.go.jp/api/v2"

@@ -182,6 +182,41 @@ class TestSearch:
             asyncio.run(search(_QuadraticPlugin(), {}, dims, db=None,
                                objective="bogus", strategy="grid"))
 
+    def test_on_progress_called_once_per_candidate(self):
+        dims = [SearchDim("x", [0, 3, 5, 7])]
+        calls = []
+        asyncio.run(search(_QuadraticPlugin(), {}, dims, db=None, strategy="grid",
+                           on_progress=lambda cur, tot, msg: calls.append((cur, tot, msg))))
+        assert [c[:2] for c in calls] == [(1, 4), (2, 4), (3, 4), (4, 4)]
+        assert all(isinstance(c[2], str) and c[2] for c in calls)
+
+    def test_cancel_check_stops_early_with_partial_leaderboard(self):
+        """2候補目の直前でキャンセル要求 → 3件目以降は評価されず、済んだ分だけ返す。"""
+        dims = [SearchDim("x", [0, 3, 5, 7])]
+        seen = {"n": 0}
+
+        def cancel_check():
+            return seen["n"] >= 1
+
+        def on_progress(cur, tot, msg):
+            seen["n"] = cur
+
+        result = asyncio.run(search(_QuadraticPlugin(), {}, dims, db=None, strategy="grid",
+                                    on_progress=on_progress, cancel_check=cancel_check))
+        assert result["config"]["cancelled"] is True
+        assert len(result["leaderboard"]) == 1
+        assert result["best_params"]["x"] == 0  # 唯一評価された候補がそのまま best
+
+    def test_cancel_check_before_any_candidate_returns_empty_result_without_raising(self):
+        """即キャンセル（score済み0件）でも ValueError にはしない（ユーザー意図の停止）。"""
+        dims = [SearchDim("x", [0, 1, 2])]
+        result = asyncio.run(search(_QuadraticPlugin(), {}, dims, db=None, strategy="grid",
+                                    cancel_check=lambda: True))
+        assert result["config"]["cancelled"] is True
+        assert result["best_params"] is None
+        assert result["best_score"] is None
+        assert result["leaderboard"] == []
+
     def test_search_wraps_candidate_execution_in_tuning_dry_run(self):
         """各候補評価が database.tuning_dry_run() コンテキスト内で行われる（Issue #264）。
         M-2/M-3 の producer 永続化が探索中に本番テーブルを上書きしないための仕組み。"""
