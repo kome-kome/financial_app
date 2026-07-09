@@ -20,6 +20,13 @@ name: "[定常] M-1/M-2/M-3 ハイパーパラメータ月次自動探索"
 # 上限に収まるよう安全側に n_iter=150 へ抑えている（macro_risk_return/macro_dlm は
 # grid 探索で空間が小さく、実測 10〜60分程度に収まるためこの制約を受けない）。
 #
+# macro_risk_return/macro_dlm の timeout-minutes について: 当初「ローカル実測10〜60分」
+# を根拠に timeout-minutes=90 としていたが、この実測はローカル8コア環境のものであり、
+# GitHub Actions ホスト型ランナーは実質2コア程度（macro-beta-inference.yml の既存コメント
+# にも同様の指摘あり）のため所要時間が想定より伸びる。2026-07-09 の初回 workflow_dispatch
+# 実行で実際に両ジョブとも timeout-minutes=90 に達し cancelled となったため、240 へ
+# 引き上げた（macro_gbdt の355分ほどの余裕は不要だが、90分の2.5倍以上の安全マージンを確保）。
+#
 # 品質ゲート（Issue #291）: --persist 時、plugin_tuned_params に既存行があれば
 # objective_value を比較し、劣化していれば persist をスキップして非ゼロ終了する
 # （hyperparameter_search.py の SystemExit）。これは意図した挙動であり、
@@ -45,7 +52,7 @@ jobs:
           - model: macro_risk_return
             strategy: grid
             extra_args: ""
-            timeout_minutes: 90
+            timeout_minutes: 240   # 2026-07-09初回実行で90分timeout・cancelledのため引き上げ
           - model: macro_gbdt
             strategy: random
             extra_args: "--n-iter 150"
@@ -53,7 +60,7 @@ jobs:
           - model: macro_dlm
             strategy: grid
             extra_args: ""
-            timeout_minutes: 90
+            timeout_minutes: 240   # 2026-07-09初回実行で90分timeout・cancelledのため引き上げ
     timeout-minutes: ${{ matrix.timeout_minutes }}
 
     steps:
