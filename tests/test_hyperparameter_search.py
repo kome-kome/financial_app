@@ -129,3 +129,77 @@ class TestRunSearch:
         assert result["persisted"] is False
         from database import get_tuned_params
         assert get_tuned_params(db, "fake_model") is None
+
+
+class TestQualityGate:
+    """persist=True 時の劣化防止ゲート（Issue #291）。"""
+
+    def test_improved_score_persists(self, db, monkeypatch):
+        """前回 objective_value より今回 best_score が高ければ従来通り persist される。"""
+        import plugins
+        from database import upsert_tuned_params, get_tuned_params
+        monkeypatch.setattr(plugins, "get_plugin", lambda name: _FakePlugin())
+        upsert_tuned_params(db, "fake_model", {"x": 3}, "rank_ic", -100.0, [], 4, "fp")
+
+        result = asyncio.run(hs.run_search(
+            "fake_model", "grid", 50, "rank_ic", 0, db, persist=True,
+        ))
+
+        assert result["persisted"] is True
+        assert result["skipped_reason"] is None
+        tuned = get_tuned_params(db, "fake_model")
+        assert tuned["params"]["x"] == 5
+        assert tuned["objective_value"] == result["best_score"]
+
+    def test_degraded_score_skips_persist(self, db, monkeypatch):
+        """前回 objective_value より今回 best_score が低ければ persist せずスキップする。"""
+        import plugins
+        from database import upsert_tuned_params, get_tuned_params
+        monkeypatch.setattr(plugins, "get_plugin", lambda name: _FakePlugin())
+        # x=5 が最適解（score=0）なので、前回スコアをそれより高い値にしておくと必ず劣化扱いになる。
+        upsert_tuned_params(db, "fake_model", {"x": 5}, "rank_ic", 100.0, [], 4, "fp")
+
+        result = asyncio.run(hs.run_search(
+            "fake_model", "grid", 50, "rank_ic", 0, db, persist=True, persist_scores=True,
+        ))
+
+        assert result["persisted"] is False
+        assert result["skipped_reason"] is not None
+        # persist_scores 分岐（producer スコア永続化のための追加 execute）にも入らない
+        assert _FakePlugin.execute_calls == 4
+        tuned = get_tuned_params(db, "fake_model")
+        assert tuned["params"]["x"] == 5
+        assert tuned["objective_value"] == 100.0  # 上書きされていない
+
+    def test_first_time_no_existing_row_always_persists(self, db, monkeypatch):
+        """plugin_tuned_params に該当行がない初回は、ゲート対象外で常に persist される。"""
+        import plugins
+        from database import get_tuned_params
+        monkeypatch.setattr(plugins, "get_plugin", lambda name: _FakePlugin())
+        assert get_tuned_params(db, "fake_model") is None
+
+        result = asyncio.run(hs.run_search(
+            "fake_model", "grid", 50, "rank_ic", 0, db, persist=True,
+        ))
+
+        assert result["persisted"] is True
+        assert result["skipped_reason"] is None
+        tuned = get_tuned_params(db, "fake_model")
+        assert tuned["params"]["x"] == 5
+
+    def test_cli_run_exits_nonzero_on_skip(self, db, monkeypatch):
+        """CLI の _run() は品質ゲートでスキップされた場合、非ゼロ終了（SystemExit）する。"""
+        import argparse
+        import plugins
+        from database import upsert_tuned_params, SessionLocal
+        monkeypatch.setattr(plugins, "get_plugin", lambda name: _FakePlugin())
+        upsert_tuned_params(db, "fake_model", {"x": 5}, "rank_ic", 100.0, [], 4, "fp")
+        monkeypatch.setattr("database.SessionLocal", lambda: db)
+        monkeypatch.setattr(db, "close", lambda: None)
+
+        args = argparse.Namespace(
+            model="fake_model", strategy="grid", n_iter=50, objective="rank_ic",
+            seed=0, persist=True, persist_scores=False,
+        )
+        with pytest.raises(SystemExit):
+            asyncio.run(hs._run(args))

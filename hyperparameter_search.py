@@ -8,6 +8,11 @@ walk-forward OOF（rank-IC 等）を最大化する best params を選ぶ。
     python hyperparameter_search.py --model macro_gbdt --strategy random --n-iter 200 \\
         --objective rank_ic --seed 0 --persist --persist-scores
 
+品質ゲート（Issue #291）: --persist 時、plugin_tuned_params に既存行があれば
+その objective_value と今回の best_score を比較し、劣化していれば persist
+（persist_scores 込み）をスキップして非ゼロ終了する。GitHub Actions での
+月次自動実行を人手レビュー無しで運用しても本番値が悪化しないようにするため。
+
 新規 pip 依存は不要（scikit-learn/xgboost は本番 requirements.txt に既存）。
 """
 from __future__ import annotations
@@ -58,7 +63,7 @@ async def run_search(
     best params での最終 execute も行い producer スコアを永続化する
     （persist=False のとき persist_scores は無視される）。
     """
-    from database import upsert_tuned_params
+    from database import get_tuned_params, upsert_tuned_params
     from plugins import execute_plugin, get_plugin
     from plugins.tuning import search
 
@@ -76,8 +81,24 @@ async def run_search(
         on_progress=on_progress, cancel_check=cancel_check,
     )
     result["persisted"] = False
+    result["skipped_reason"] = None
 
     if persist and result["best_params"] is not None:
+        prev = get_tuned_params(db, model)
+        prev_score = prev["objective_value"] if prev is not None else None
+
+        if prev_score is not None and result["best_score"] < prev_score:
+            # 品質ゲート（Issue #291）: 探索結果が既存の永続値より劣化している場合は
+            # 人手レビュー抜きで本番 plugin_tuned_params / producer スコアを
+            # 上書きしない（GitHub Actions 月次自動実行を見据えた劣化防止）。
+            reason = (
+                f"前回スコア{prev_score:.4f}を下回ったため persist をスキップしました"
+                f"（今回={result['best_score']:.4f}）"
+            )
+            logger.warning(reason)
+            result["skipped_reason"] = reason
+            return result
+
         fp = _data_fingerprint(db)
         upsert_tuned_params(
             db, model, result["best_params"], objective,
@@ -115,6 +136,8 @@ async def _run(args: argparse.Namespace) -> None:
             logger.info("plugin_tuned_params へ永続化しました（plugin_name=%s）", args.model)
             if args.persist_scores:
                 logger.info("best params で最終 execute を実行し、producer スコアを永続化しました")
+        elif result["skipped_reason"]:
+            raise SystemExit(f"品質ゲートによりスキップされました: {result['skipped_reason']}")
     finally:
         db.close()
 
