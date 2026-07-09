@@ -1,6 +1,7 @@
 """株価収集（stooq / J-Quants / Yahoo Finance）とマクロ指標収集。"""
 import bisect
 import calendar
+import csv
 import io
 import zipfile
 import asyncio
@@ -1288,6 +1289,194 @@ ESTAT_INDEX_SERIES: list[dict] = [
     },
 ]
 
+# ── 内閣府ESRI 直接CSV配布（GDP需要項目・認証不要）──────────────────────────
+# e-Stat API は「四半期別ＧＤＰ速報」がvintage別アーカイブテーブル（四半期ごとに個別
+# statsDataId）しか持たず継続更新系列が存在しないため不採用（#286 実地検証済み）。
+# 代わりに内閣府ESRIが配布する実額系列CSVを直接取得する。1994年1-3月期〜最新四半期までの
+# 連続時系列が単一ファイルに収録されているため、1回のfetchで全期間バックフィルできる。
+# URL例: https://www.esri.cao.go.jp/jp/sna/data/data_list/sokuhou/files/2026/qe261_2/tables/gaku-jk2612.csv
+#   ディレクトリ名 qe{yy}{q}_{report}・ファイル名 gaku-jk{yy}{q}{report}.csv
+#   {yy}=西暦下2桁, {q}=四半期番号(1-4), {report}=速報回(1=1次速報,2=2次速報)
+# 四半期ごとに新ディレクトリが発行され旧ディレクトリは(年次改定等で)消滅することがある
+# （2026-07-10実API検証: 2024年分の旧1次速報ディレクトリは404）ため固定URLではなく
+# プロービング方式で最新の有効URLを探す。HEAD/GETいずれも同一ステータスを返すことを
+# 実地確認済みだが、ファイルが小さい（約40KB）ためGET一発でプローブ兼取得を行う。
+ESRI_BASE_URL     = "https://www.esri.cao.go.jp/jp/sna/data/data_list/sokuhou/files"
+ESRI_QUARTERS_BACK = 4      # 直近何四半期分を候補にするか（公表遅延・年次改定の保守的マージン）
+ESRI_REPORTS       = (2, 1)  # 各四半期で試す速報回。2次速報（確定に近い）を優先、無ければ1次
+
+# 単位: 十億円（2020年基準連鎖価格）・実質季節調整系列。
+# lag_days: 1次速報は四半期末から約45〜50日で公表される（例: 1-3月期の1次速報は5月中旬）。
+# trade_date は「参照四半期の翌四半期初日」を基準日とする（quarter_start + 3か月）ため、
+# 四半期末からの経過日数とほぼ同じ意味になる。既存 JP_REAL_GDP（FRED版・lag_days=135）は
+# FRED取り込み自体の遅延を含む値であり単純に流用できないため、実際の1次速報公表タイミング
+# （45〜50日）に安全マージンを載せた60日を採用（e-Stat鉱工業指数 JP_IIP と同水準）。
+ESRI_SERIES: list[dict] = [
+    {
+        "code": "JP_GDP_PRIVATE_CONSUMPTION",
+        "name": "日本 GDP 民間最終消費支出",
+        "category": "real_economy",
+        "esri_column": "PrivateConsumption",
+        "lag_days": 60,
+    },
+    {
+        "code": "JP_GDP_RESIDENTIAL_INV",
+        "name": "日本 GDP 民間住宅投資",
+        "category": "real_economy",
+        "esri_column": "PrivateResidentialInvestment",
+        "lag_days": 60,
+    },
+    {
+        "code": "JP_GDP_CAPEX",
+        "name": "日本 GDP 民間企業設備投資",
+        "category": "real_economy",
+        "esri_column": "Private Non-Resi.Investment",
+        "lag_days": 60,
+    },
+    {
+        "code": "JP_GDP_PUBLIC_INV",
+        "name": "日本 GDP 公的固定資本形成（公共投資）",
+        "category": "real_economy",
+        "esri_column": "PublicInvestment",
+        "lag_days": 60,
+    },
+]
+
+
+def _esri_candidate_urls(today: date) -> list[str]:
+    """直近 ESRI_QUARTERS_BACK 四半期 × ESRI_REPORTS（2次優先）のURL候補を、
+    新しい四半期・新しい速報回の順（最新四半期の2次速報が最優先）に生成する。"""
+    q = (today.month - 1) // 3 + 1
+    urls = []
+    for i in range(ESRI_QUARTERS_BACK):
+        total_q = today.year * 4 + (q - 1) - i
+        year, qq = divmod(total_q, 4)
+        qq += 1
+        yy = f"{year % 100:02d}"
+        for report in ESRI_REPORTS:
+            urls.append(
+                f"{ESRI_BASE_URL}/{year}/qe{yy}{qq}_{report}/tables/gaku-jk{yy}{qq}{report}.csv"
+            )
+    return urls
+
+
+def _parse_esri_gdp_csv(text: str) -> dict[str, list[dict]]:
+    """ESRI CSV本文（cp932デコード済みテキスト）を列名ごとの観測値へパースする。
+    lag_days は未適用（trade_date は「参照四半期の翌四半期初日」の生値）。呼び出し側
+    （fetch_esri_gdp_csv/collect_macro_data）が各系列の lag_days を適用する。
+    CSVはカンマ区切り数値がダブルクォートで囲まれる箇所があるため csv モジュールでパースする
+    （内部のカンマを区切りと誤認しない）。1列目は期ラベル（例 "1994/ 1- 3." "4- 6."）で、
+    年は "/" 付きの行にのみ現れ、以降は前回の年を引き継ぐ。"""
+    rows = list(csv.reader(io.StringIO(text)))
+
+    header_idx = None
+    for i, row in enumerate(rows):
+        if any(cell.strip() == "PrivateConsumption" for cell in row):
+            header_idx = i
+            break
+    if header_idx is None:
+        log.warning("ESRI CSV ヘッダー行（PrivateConsumption）が見つからない")
+        return {}
+
+    header = [c.strip() for c in rows[header_idx]]
+    col_index: dict[str, int] = {}
+    for series in ESRI_SERIES:
+        col_name = series["esri_column"]
+        if col_name in col_index:
+            continue
+        try:
+            col_index[col_name] = header.index(col_name)
+        except ValueError:
+            log.warning("ESRI CSV に列 %s が見つからない", col_name)
+    if not col_index:
+        return {}
+
+    result: dict[str, list[dict]] = {name: [] for name in col_index}
+    last_year: Optional[int] = None
+    for row in rows[header_idx + 1:]:
+        if not row or not row[0].strip():
+            continue
+        label = row[0].strip()
+        if "/" in label:
+            year_str, rest = label.split("/", 1)
+            year_str = year_str.strip()
+            if not year_str.isdigit():
+                continue
+            last_year = int(year_str)
+        else:
+            rest = label
+        if last_year is None:
+            continue
+        month_str = rest.split("-", 1)[0].strip()
+        if not month_str.isdigit():
+            continue  # 脚注行（"＊年率で表示している。" 等）はここで除外される
+        month = int(month_str)
+        if month not in (1, 4, 7, 10):
+            continue
+        # 参照四半期の翌四半期初日を基準日とする（lag_days は呼び出し側で加算）。
+        next_month = month + 3
+        next_year  = last_year
+        if next_month > 12:
+            next_month -= 12
+            next_year  += 1
+        base_date = date(next_year, next_month, 1)
+
+        for col_name, idx in col_index.items():
+            if idx >= len(row):
+                continue
+            raw = row[idx].replace(",", "").strip()
+            if not raw:
+                continue
+            try:
+                value = float(raw)
+            except ValueError:
+                continue
+            result[col_name].append({
+                "trade_date": base_date.isoformat(),
+                "open": None, "high": None, "low": None,
+                "close": value, "volume": None,
+            })
+    return result
+
+
+async def fetch_esri_gdp_csv(session: httpx.AsyncClient) -> dict[str, list[dict]]:
+    """内閣府ESRI直接CSV配布からGDP需要項目CSVを1回のfetchで取得しパースする。
+    直近 ESRI_QUARTERS_BACK 四半期×ESRI_REPORTS の候補URLを新しい順に試行し、
+    最初にHTTP 200が返ったものを採用する（1ファイルに1994Q1〜最新まで全期間を含むため
+    1回のfetchで足りる）。全候補が失敗した場合はログ警告のみで空dictを返す
+    （他系列の収集を止めない・fetch_boj_series等と同じフェイルセーフ方針）。"""
+    for url in _esri_candidate_urls(date.today()):
+        try:
+            r = await session.get(url, timeout=30)
+        except Exception as e:
+            log.debug("ESRI 取得失敗 %s: %s", url, type(e).__name__)
+            continue
+        if r.status_code != 200:
+            continue
+        try:
+            text = r.content.decode("cp932")
+        except UnicodeDecodeError as e:
+            log.warning("ESRI CSV デコード失敗 %s: %s", url, e)
+            return {}
+        return _parse_esri_gdp_csv(text)
+
+    log.warning(
+        "ESRI GDP CSV 取得失敗: 候補URL全滅（直近%d四半期×速報%s）",
+        ESRI_QUARTERS_BACK, ESRI_REPORTS,
+    )
+    return {}
+
+
+def _esri_apply_lag(rows: list[dict], lag_days: int) -> list[dict]:
+    """_parse_esri_gdp_csv が返す生の観測値行に lag_days 分のシフトを適用する。"""
+    if not lag_days:
+        return rows
+    shifted = []
+    for r in rows:
+        d = date.fromisoformat(r["trade_date"]) + timedelta(days=lag_days)
+        shifted.append({**r, "trade_date": d.isoformat()})
+    return shifted
+
 
 async def fetch_fred_series(
     session: httpx.AsyncClient,
@@ -1686,10 +1875,10 @@ async def collect_macro_data(
     on_progress: Optional[Callable[[int, int, str], None]] = None,
     cancel_check: Optional[Callable[[], bool]] = None,
 ):
-    """MACRO_SERIES（Yahoo/stooq）+ FRED_SERIES + BOJ_SERIES + OECD_SERIES + ESTAT_SERIES を
-    macro_data に upsert。Yahoo Finance 優先（GitHub Actions Azure IP 対応）→ stooq フォールバック。
-    FRED: FRED_API_KEY 設定時のみ。BOJ・OECD: 常時収集（認証不要）。e-Stat: ESTAT_API_KEY 設定時のみ。
-    既存レコードは close 等を上書き（最新値で更新）。"""
+    """MACRO_SERIES（Yahoo/stooq）+ FRED_SERIES + BOJ_SERIES + OECD_SERIES + ESRI_SERIES +
+    ESTAT_SERIES を macro_data に upsert。Yahoo Finance 優先（GitHub Actions Azure IP 対応）→
+    stooq フォールバック。FRED: FRED_API_KEY 設定時のみ。BOJ・OECD・ESRI: 常時収集（認証不要）。
+    e-Stat: ESTAT_API_KEY 設定時のみ。既存レコードは close 等を上書き（最新値で更新）。"""
     today      = date.today()
     start      = today - timedelta(days=int(years_back * 365.25))
     d1         = start.strftime("%Y%m%d")
@@ -1713,6 +1902,7 @@ async def collect_macro_data(
         + (len(FRED_SERIES)  if FRED_API_KEY  else 0)
         + len(BOJ_SERIES)
         + len(OECD_SERIES)
+        + len(ESRI_SERIES)
         + (len(ESTAT_SERIES) + len(ESTAT_INDEX_SERIES) if ESTAT_API_KEY else 0)
     )
     saved      = 0
@@ -1872,12 +2062,51 @@ async def collect_macro_data(
             if on_progress:
                 on_progress(idx, total, f"[OECD {q}/{len(OECD_SERIES)}] {series['name']}: {n}件処理")
 
+        # ── 内閣府ESRI GDP需要項目 収集（認証不要・常時、1回のfetchで4系列取得）──────
+        esri_base_i = oecd_base_i + len(OECD_SERIES)
+        if cancel_check and cancel_check():
+            if on_progress:
+                on_progress(esri_base_i, total, "[マクロ収集] ユーザー停止")
+            return saved
+
+        if on_progress:
+            on_progress(esri_base_i, total, f"[ESRI 1/{len(ESRI_SERIES)}] GDP需要項目CSV 取得中")
+        esri_cache = await fetch_esri_gdp_csv(session)
+        for r_i, series in enumerate(ESRI_SERIES, 1):
+            idx = esri_base_i + r_i
+            if cancel_check and cancel_check():
+                if on_progress:
+                    on_progress(idx - 1, total, "[マクロ収集] ユーザー停止")
+                return saved
+
+            base_rows = esri_cache.get(series["esri_column"], [])
+            rows = _esri_apply_lag(base_rows, series.get("lag_days", 0))
+
+            if not rows:
+                if on_progress:
+                    on_progress(idx, total, f"[ESRI {r_i}/{len(ESRI_SERIES)}] {series['name']} データ無し")
+                continue
+
+            vals = [{
+                "series_code": series["code"],
+                "series_name": series["name"],
+                "category":    series["category"],
+                "trade_date":  r["trade_date"],
+                "open": r["open"], "high": r["high"], "low": r["low"],
+                "close": r["close"], "volume": r["volume"],
+            } for r in rows]
+            n = upsert_macro_batch(db, vals)
+            db.commit()
+            saved += n
+            if on_progress:
+                on_progress(idx, total, f"[ESRI {r_i}/{len(ESRI_SERIES)}] {series['name']}: {n}件処理")
+
         # ── e-Stat 収集（ESTAT_API_KEY が設定されている場合のみ）────────────────
         if not ESTAT_API_KEY:
             if on_progress:
                 on_progress(total, total, "[e-Stat] ESTAT_API_KEY 未設定のためスキップ")
         else:
-            estat_base_i = oecd_base_i + len(OECD_SERIES)
+            estat_base_i = esri_base_i + len(ESRI_SERIES)
             for m, series in enumerate(ESTAT_SERIES, 1):
                 idx = estat_base_i + m
                 if cancel_check and cancel_check():
