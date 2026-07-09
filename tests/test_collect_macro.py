@@ -595,3 +595,134 @@ def test_estat_index_response_missing_path_returns_empty():
             return await fetch_estat_index_series(s, "0004052177", "0001000")
     rows = asyncio.run(run())
     assert rows == []
+
+
+# ── 6. 内閣府ESRI GDP需要項目 直接CSV配布（#286）───────────────────────────
+from collector import (
+    fetch_esri_gdp_csv, ESRI_SERIES, _esri_candidate_urls, _parse_esri_gdp_csv,
+    _esri_apply_lag,
+)
+
+
+# 実データの列順を再現した簡略ヘッダー行（実際は日本語見出し行等も混在するが
+# _parse_esri_gdp_csv は "PrivateConsumption" セルを含む行のみを探すため無関係）。
+ESRI_HEADER_ROW = (
+    ",GDP(Expenditure Approach),PrivateConsumption,Consumption ofHouseholds,"
+    "ExcludingImputed Rent,PrivateResidentialInvestment,Private Non-Resi.Investment,"
+    "Changein PrivateInventories,GovernmentConsumption,PublicInvestment,"
+    "Changein PublicInventories,Net Exports"
+)
+
+
+def _esri_csv(data_rows: list) -> str:
+    """fetch_esri_gdp_csv/_parse_esri_gdp_csv が解析するESRI実額系列CSVの簡略版。"""
+    lines = ["実質季節調整系列,,,", ESRI_HEADER_ROW, *data_rows]
+    return "\n".join(lines)
+
+
+_ESRI_ROW_1994Q1 = (
+    '1994/ 1- 3.,"465,065.0 ","252,337.9 ","248,579.4 ","212,801.4 ","33,377.1 ",'
+    '"75,393.7 ","3,963.4 ","70,669.0 ","47,225.3 ",-489.4 ,"-5,582.8 "'
+)
+_ESRI_ROW_1994Q2 = (
+    '4- 6.,"461,497.8 ","253,547.0 ","249,701.3 ","213,721.0 ","34,755.7 ",'
+    '"74,417.6 ","-2,837.6 ","71,469.4 ","48,073.0 ",559.7 ,"-6,148.3 "'
+)
+
+
+def test_esri_series_registered():
+    by_code = {s["code"]: s for s in ESRI_SERIES}
+    assert by_code["JP_GDP_PRIVATE_CONSUMPTION"]["esri_column"] == "PrivateConsumption"
+    assert by_code["JP_GDP_RESIDENTIAL_INV"]["esri_column"]     == "PrivateResidentialInvestment"
+    assert by_code["JP_GDP_CAPEX"]["esri_column"]                == "Private Non-Resi.Investment"
+    assert by_code["JP_GDP_PUBLIC_INV"]["esri_column"]           == "PublicInvestment"
+    for s in ESRI_SERIES:
+        assert s["category"]  == "real_economy"
+        assert s["lag_days"]  == 60
+
+
+def test_esri_candidate_urls_newest_quarter_and_report_first():
+    urls = _esri_candidate_urls(date(2026, 7, 10))  # 2026Q3中
+    assert len(urls) == 8  # 直近4四半期 × 速報2種
+    assert urls[0] == ("https://www.esri.cao.go.jp/jp/sna/data/data_list/sokuhou/files/"
+                        "2026/qe263_2/tables/gaku-jk2632.csv")
+    assert urls[1] == ("https://www.esri.cao.go.jp/jp/sna/data/data_list/sokuhou/files/"
+                        "2026/qe263_1/tables/gaku-jk2631.csv")
+    assert urls[-1] == ("https://www.esri.cao.go.jp/jp/sna/data/data_list/sokuhou/files/"
+                         "2025/qe254_1/tables/gaku-jk2541.csv")
+
+
+def test_esri_candidate_urls_year_rollover():
+    urls = _esri_candidate_urls(date(2026, 1, 15))  # 2026Q1中 → 遡ると前年へまたぐ
+    assert "qe261_2" in urls[0]
+    assert "qe254_2" in urls[2]  # 2025Q4
+
+
+def test_esri_parse_extracts_four_columns_and_carries_year():
+    text = _esri_csv([_ESRI_ROW_1994Q1, _ESRI_ROW_1994Q2])
+    result = _parse_esri_gdp_csv(text)
+    assert set(result.keys()) == {
+        "PrivateConsumption", "PrivateResidentialInvestment",
+        "Private Non-Resi.Investment", "PublicInvestment",
+    }
+
+    consumption = result["PrivateConsumption"]
+    assert len(consumption) == 2
+    # Q1（年明示）→ 翌四半期初日 1994-04-01 が基準日。Q2（年省略）は前行の年を引き継ぐ。
+    assert consumption[0]["trade_date"] == "1994-04-01"
+    assert consumption[0]["close"] == 252337.9
+    assert consumption[1]["trade_date"] == "1994-07-01"
+    assert consumption[1]["close"] == 253547.0
+
+    assert result["PrivateResidentialInvestment"][0]["close"] == 33377.1
+    assert result["Private Non-Resi.Investment"][0]["close"]  == 75393.7
+    assert result["PublicInvestment"][0]["close"]              == 47225.3
+
+
+def test_esri_parse_skips_footnote_rows():
+    text = _esri_csv([_ESRI_ROW_1994Q1, "＊年率で表示している。,,,,,,,,,,,"])
+    result = _parse_esri_gdp_csv(text)
+    assert len(result["PrivateConsumption"]) == 1
+
+
+def test_esri_parse_missing_header_returns_empty():
+    assert _parse_esri_gdp_csv("no header here\n1,2,3\n") == {}
+
+
+def test_esri_apply_lag_shifts_trade_date():
+    rows = [{"trade_date": "1994-04-01", "open": None, "high": None, "low": None,
+             "close": 100.0, "volume": None}]
+    shifted = _esri_apply_lag(rows, 60)
+    assert shifted[0]["trade_date"] == "1994-05-31"
+    assert _esri_apply_lag(rows, 0) == rows
+
+
+def _fetch_esri_probe(url_status_map: dict) -> dict:
+    """URL→ステータスコードのマップに基づき fetch_esri_gdp_csv のプロービングを検証する。
+    200 を返すURLには常に _ESRI_ROW_1994Q1 一行のみを含むCSVを返す。"""
+    import asyncio
+
+    async def run():
+        def handler(request: httpx.Request) -> httpx.Response:
+            status = url_status_map.get(str(request.url), 404)
+            if status == 200:
+                body = _esri_csv([_ESRI_ROW_1994Q1]).encode("cp932")
+                return httpx.Response(200, content=body)
+            return httpx.Response(status)
+        async with _REAL_ASYNC_CLIENT(transport=httpx.MockTransport(handler)) as s:
+            return await fetch_esri_gdp_csv(s)
+    return asyncio.run(run())
+
+
+def test_esri_probing_falls_back_to_first_200():
+    """先頭2候補が404、3番目が200になるケース→3番目の内容が採用される。"""
+    urls = _esri_candidate_urls(date.today())
+    status_map = {urls[0]: 404, urls[1]: 404, urls[2]: 200}
+    result = _fetch_esri_probe(status_map)
+    assert result["PrivateConsumption"][0]["close"] == 252337.9
+
+
+def test_esri_probing_all_fail_returns_empty():
+    """全候補404の場合はログ警告のみで空dictを返し、例外を送出しない。"""
+    result = _fetch_esri_probe({})
+    assert result == {}
