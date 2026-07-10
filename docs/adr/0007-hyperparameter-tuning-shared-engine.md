@@ -5,6 +5,13 @@
 accepted（2026-07-05）。実装は GitHub Issue #264（基盤）・#265（M-1）・#266（M-2）・#267（M-3）、
 前提として #272（M-1 の oof_backtest 結線）を含む。
 
+**superseded by 0010**（2026-07-10・GUI手動トリガー廃止・GitHub Actions月次自動実行へ移行）。
+本 ADR が前提としていた「GUI から探索を手動起動する」実行手段は Issue #293 で廃止された。
+共有探索エンジン（`plugins/tuning.py`）自体の設計（目的関数・探索空間宣言・dry-run 永続化
+抑止等、以下 Decision の各項目）は現行実装の正本のままであり、本文は履歴として保持する。
+実行手段の変更・品質ゲート追加・snapshot キャッシュ化の経緯は
+[0010](0010-hyperparameter-tuning-github-actions-automation.md) を参照。
+
 ## Context
 
 M-1（`macro_risk_return`）・M-2（`macro_gbdt`）・M-3（`macro_dlm`）は多数のハイパーパラメータを
