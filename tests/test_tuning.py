@@ -1,5 +1,6 @@
-"""tests/test_tuning.py — 共有ハイパーパラメータ探索エンジン（Issue #264）"""
+"""tests/test_tuning.py — 共有ハイパーパラメータ探索エンジン（Issue #264・スナップショットキャッシュ #298）"""
 import asyncio
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -240,3 +241,236 @@ class TestSearch:
 
         assert dry_run_seen == [True, True, True, True]
         assert database._tuning_dry_run.get() is False  # コンテキスト外では解除されている
+
+
+# ── plugins.macro_snapshots._BoundedCache（探索専用の簡易LRU・Issue #298） ──────────
+
+class TestBoundedCache:
+
+    def test_hit_returns_cached_value_without_recompute(self):
+        from plugins.macro_snapshots import _BoundedCache
+        cache = _BoundedCache(maxsize=8)
+        compute = MagicMock(return_value="v")
+
+        assert cache.get_or_compute("k", compute) == "v"
+        assert cache.get_or_compute("k", compute) == "v"
+        assert compute.call_count == 1
+
+    def test_different_keys_both_compute(self):
+        from plugins.macro_snapshots import _BoundedCache
+        cache = _BoundedCache(maxsize=8)
+
+        assert cache.get_or_compute("a", lambda: "va") == "va"
+        assert cache.get_or_compute("b", lambda: "vb") == "vb"
+        assert len(cache._data) == 2
+
+    def test_evicts_least_recently_used_beyond_maxsize(self):
+        from plugins.macro_snapshots import _BoundedCache
+        cache = _BoundedCache(maxsize=2)
+        cache.get_or_compute("a", lambda: "va")
+        cache.get_or_compute("b", lambda: "vb")
+        cache.get_or_compute("c", lambda: "vc")  # "a" は未再アクセスのまま最古→追い出される
+
+        assert "a" not in cache._data
+        assert "b" in cache._data
+        assert "c" in cache._data
+
+    def test_get_or_compute_refreshes_recency(self):
+        from plugins.macro_snapshots import _BoundedCache
+        cache = _BoundedCache(maxsize=2)
+        cache.get_or_compute("a", lambda: "va")
+        cache.get_or_compute("b", lambda: "vb")
+        cache.get_or_compute("a", lambda: "va")  # "a" を再アクセス→最新扱いへ更新
+        cache.get_or_compute("c", lambda: "vc")  # 最古の "b" が追い出される
+
+        assert "b" not in cache._data
+        assert "a" in cache._data
+        assert "c" in cache._data
+
+
+# ── plugins.macro_snapshots.tuning_snapshot_cache（Issue #298） ────────────────────
+# load_data/preload_macro/build_snapshots はいずれも探索軸に依存しない重い処理
+# （DB全件ロード・特徴量スナップショット構築）。tuning_snapshot_cache() コンテキスト内では
+# 同一引数の呼び出しをキャッシュし、コンテキスト外（通常の /api/plugins/{name}/run 相当）
+# では毎回フル計算される（副作用が漏れ出さない）ことを確認する。
+
+class TestTuningSnapshotCache:
+
+    def test_load_data_cached_within_context(self, monkeypatch):
+        import plugins.macro_snapshots as ms
+        mock_impl = MagicMock(return_value=({}, {}, {}))
+        monkeypatch.setattr(ms, "_load_data_impl", mock_impl)
+
+        with ms.tuning_snapshot_cache():
+            ms.load_data("db1")
+            ms.load_data("db1")
+
+        assert mock_impl.call_count == 1
+
+    def test_load_data_recomputes_outside_context(self, monkeypatch):
+        import plugins.macro_snapshots as ms
+        mock_impl = MagicMock(return_value=({}, {}, {}))
+        monkeypatch.setattr(ms, "_load_data_impl", mock_impl)
+
+        ms.load_data("db1")
+        ms.load_data("db1")
+
+        assert mock_impl.call_count == 2
+
+    def test_load_data_cache_is_isolated_per_context_entry(self, monkeypatch):
+        """with ブロックを抜けた後の再入場は独立した新しいキャッシュになる（残留しない）。"""
+        import plugins.macro_snapshots as ms
+        mock_impl = MagicMock(return_value=({}, {}, {}))
+        monkeypatch.setattr(ms, "_load_data_impl", mock_impl)
+
+        with ms.tuning_snapshot_cache():
+            ms.load_data("db1")
+        with ms.tuning_snapshot_cache():
+            ms.load_data("db1")
+
+        assert mock_impl.call_count == 2
+
+    def test_preload_macro_cached_by_prices_and_macro_names(self, monkeypatch):
+        import plugins.macro_snapshots as ms
+        mock_impl = MagicMock(return_value={})
+        monkeypatch.setattr(ms, "_preload_macro_impl", mock_impl)
+        prices = {"E1": []}
+
+        with ms.tuning_snapshot_cache():
+            ms.preload_macro("db1", prices, ["macro_usdjpy_yoy"])
+            ms.preload_macro("db1", prices, ["macro_usdjpy_yoy"])  # 同一キー→ヒット
+            ms.preload_macro("db1", prices, ["macro_sp500_yoy"])   # macro_names が違う→ミス
+
+        assert mock_impl.call_count == 2
+
+    def test_preload_macro_different_prices_object_is_cache_miss(self, monkeypatch):
+        import plugins.macro_snapshots as ms
+        mock_impl = MagicMock(return_value={})
+        monkeypatch.setattr(ms, "_preload_macro_impl", mock_impl)
+
+        with ms.tuning_snapshot_cache():
+            ms.preload_macro("db1", {"E1": []}, ["macro_usdjpy_yoy"])
+            ms.preload_macro("db1", {"E1": []}, ["macro_usdjpy_yoy"])  # 別オブジェクト→ミス
+
+        assert mock_impl.call_count == 2
+
+    def test_build_snapshots_cached_by_full_key(self, monkeypatch):
+        import plugins.macro_snapshots as ms
+        mock_impl = MagicMock(return_value=({}, {}, {}, []))
+        monkeypatch.setattr(ms, "_build_snapshots_impl", mock_impl)
+        prices, fin, companies, macro = {}, {}, {}, {}
+
+        with ms.tuning_snapshot_cache():
+            ms.build_snapshots(prices, fin, companies, macro,
+                               ["per"], ["macro_usdjpy_yoy"], False, 11, 1.0,
+                               build_interactions=True)
+            ms.build_snapshots(prices, fin, companies, macro,
+                               ["per"], ["macro_usdjpy_yoy"], False, 11, 1.0,
+                               build_interactions=True)
+
+        assert mock_impl.call_count == 1
+
+    def test_build_snapshots_distinguishes_build_interactions(self, monkeypatch):
+        """build_interactions が異なれば別キー（M-1/M-2 が誤って同一結果を共有しない）。"""
+        import plugins.macro_snapshots as ms
+        mock_impl = MagicMock(return_value=({}, {}, {}, []))
+        monkeypatch.setattr(ms, "_build_snapshots_impl", mock_impl)
+        prices, fin, companies, macro = {}, {}, {}, {}
+
+        with ms.tuning_snapshot_cache():
+            ms.build_snapshots(prices, fin, companies, macro,
+                               ["per"], ["macro_usdjpy_yoy"], False, 11, 1.0,
+                               build_interactions=True)
+            ms.build_snapshots(prices, fin, companies, macro,
+                               ["per"], ["macro_usdjpy_yoy"], False, 11, 1.0,
+                               build_interactions=False)
+
+        assert mock_impl.call_count == 2
+
+    def test_build_snapshots_recomputes_outside_context(self, monkeypatch):
+        import plugins.macro_snapshots as ms
+        mock_impl = MagicMock(return_value=({}, {}, {}, []))
+        monkeypatch.setattr(ms, "_build_snapshots_impl", mock_impl)
+        prices, fin, companies, macro = {}, {}, {}, {}
+
+        ms.build_snapshots(prices, fin, companies, macro,
+                           ["per"], ["macro_usdjpy_yoy"], False, 11, 1.0)
+        ms.build_snapshots(prices, fin, companies, macro,
+                           ["per"], ["macro_usdjpy_yoy"], False, 11, 1.0)
+
+        assert mock_impl.call_count == 2
+
+
+# ── search() 統合テスト: 構造パラメータ共有候補間でのスナップショット再利用（Issue #298） ──
+
+class _SnapshotAwarePlugin:
+    """M-1/M-2 の execute() を模し、macro_snapshots の load_data/preload_macro/
+    build_snapshots を実際に呼び出す。max_features はスナップショット構築に一切使わない
+    ダミー軸（M-1 の max_features と同じ位置づけ＝BIC選択にのみ影響し構造は変えない）。"""
+    name = "fake_snapshot_model"
+    depends_on: list = []
+
+    def params_schema(self) -> dict:
+        return {"max_features": {"type": "slider", "dtype": "int", "default": 3, "min": 1, "max": 6}}
+
+    async def execute(self, params: dict, db) -> dict:
+        from plugins.macro_snapshots import build_snapshots, load_data, preload_macro
+        prices_by_co, fin_by_co, companies = load_data(db)
+        macro_cache = preload_macro(db, prices_by_co, ["macro_usdjpy_yoy"])
+        build_snapshots(
+            prices_by_co, fin_by_co, companies, macro_cache,
+            ["per"], ["macro_usdjpy_yoy"], False, 11, 1.0,
+            build_interactions=True,
+        )
+        score = -((params["max_features"] - 3) ** 2)
+        return {"oof_backtest": {"rank_ic": {"mean": float(score), "std": 1.0, "n": 3}}}
+
+
+class TestSearchReusesSnapshotsAcrossCandidates:
+
+    def test_grid_search_calls_snapshot_builders_once_for_shared_structure(self, monkeypatch):
+        """max_features のみ違う6候補（M-1 相当）は同一スナップショットを共有するはずで、
+        load_data/preload_macro/build_snapshots はそれぞれ1回だけ計算される。"""
+        import plugins.macro_snapshots as ms
+        load_mock = MagicMock(return_value=({}, {}, {}))
+        preload_mock = MagicMock(return_value={})
+        build_mock = MagicMock(return_value=({}, {}, {}, []))
+        monkeypatch.setattr(ms, "_load_data_impl", load_mock)
+        monkeypatch.setattr(ms, "_preload_macro_impl", preload_mock)
+        monkeypatch.setattr(ms, "_build_snapshots_impl", build_mock)
+
+        dims = [SearchDim("max_features", [1, 2, 3, 4, 5, 6])]
+        result = asyncio.run(search(_SnapshotAwarePlugin(), {}, dims, db="db1", strategy="grid"))
+
+        assert result["config"]["n_combos"] == 6
+        assert result["config"]["n_failed"] == 0
+        assert load_mock.call_count == 1
+        assert preload_mock.call_count == 1
+        assert build_mock.call_count == 1
+
+    def test_two_search_calls_each_get_a_fresh_cache(self, monkeypatch):
+        """search() を2回呼ぶと、2回目も独立してフル計算される（呼び出し間でキャッシュが
+        残留しない＝データが変わっていた場合でも stale な結果を返さない）。"""
+        import plugins.macro_snapshots as ms
+        load_mock = MagicMock(return_value=({}, {}, {}))
+        monkeypatch.setattr(ms, "_load_data_impl", load_mock)
+        monkeypatch.setattr(ms, "_preload_macro_impl", MagicMock(return_value={}))
+        monkeypatch.setattr(ms, "_build_snapshots_impl", MagicMock(return_value=({}, {}, {}, [])))
+
+        dims = [SearchDim("max_features", [1, 2, 3])]
+        asyncio.run(search(_SnapshotAwarePlugin(), {}, dims, db="db1", strategy="grid"))
+        asyncio.run(search(_SnapshotAwarePlugin(), {}, dims, db="db1", strategy="grid"))
+
+        assert load_mock.call_count == 2  # 各 search() 呼び出しで1回ずつ
+
+    def test_snapshot_builders_not_cached_when_called_outside_search(self, monkeypatch):
+        """search() を経由しない直接呼び出し（通常の /api/plugins/{name}/run 相当）は
+        キャッシュの影響を受けず、呼ぶたびにフル計算される。"""
+        import plugins.macro_snapshots as ms
+        load_mock = MagicMock(return_value=({}, {}, {}))
+        monkeypatch.setattr(ms, "_load_data_impl", load_mock)
+
+        ms.load_data("db1")
+        ms.load_data("db1")
+
+        assert load_mock.call_count == 2

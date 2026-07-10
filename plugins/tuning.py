@@ -114,12 +114,20 @@ async def search(
     cancel() -> bool）で、どちらも省略時（None）は CLI 実行時と完全に同じ挙動になる。
     cancel_check が True を返した時点で残り候補の評価を打ち切る（ユーザーの意図的な
     停止はエラーではないため、score 済み候補が無くても ValueError にはしない）。
+
+    探索ループ全体を macro_snapshots.tuning_snapshot_cache() で包む（Issue #298）。
+    M-1/M-2 の execute() が呼ぶ load_data/preload_macro/build_snapshots は探索軸に
+    依存しない重い処理（DB全件ロード・特徴量スナップショット構築）のため、構造パラメータ
+    （fin_features/macro_features/use_momentum/min_coverage 等）が同一の候補間では
+    結果を使い回す。このコンテキストは search() を抜けると解除され、通常の API 実行
+    （/api/plugins/{name}/run）には影響しない。
     """
     if objective not in OBJECTIVES:
         raise ValueError(f"objective は {OBJECTIVES} のいずれかを指定してください: {objective!r}")
 
     from database import tuning_dry_run
     from plugins import execute_plugin
+    from plugins.macro_snapshots import tuning_snapshot_cache
 
     rng = random.Random(seed)
     combos = _grid_combos(dims) if strategy == "grid" else _random_combos(dims, n_iter, rng)
@@ -128,32 +136,33 @@ async def search(
 
     leaderboard: list[dict] = []
     cancelled = False
-    for i, combo in enumerate(combos):
-        if cancel_check is not None and cancel_check():
-            cancelled = True
-            msg = f"[停止] ユーザーによる停止（{len(leaderboard)}/{len(combos)}候補評価済み）"
-            log.info(msg)
-            if on_progress is not None:
-                on_progress(len(leaderboard), len(combos), msg)
-            break
-        raw = {**base_params, **combo}
-        try:
-            with tuning_dry_run():
-                result = await execute_plugin(plugin, raw, db)
-        except Exception as e:
-            leaderboard.append({"params": combo, "score": None, "error": str(e)})
-            msg = f"[{i + 1}/{len(combos)}] 失敗（契約違反 or 実行時例外）: {e} params={combo}"
+    with tuning_snapshot_cache():
+        for i, combo in enumerate(combos):
+            if cancel_check is not None and cancel_check():
+                cancelled = True
+                msg = f"[停止] ユーザーによる停止（{len(leaderboard)}/{len(combos)}候補評価済み）"
+                log.info(msg)
+                if on_progress is not None:
+                    on_progress(len(leaderboard), len(combos), msg)
+                break
+            raw = {**base_params, **combo}
+            try:
+                with tuning_dry_run():
+                    result = await execute_plugin(plugin, raw, db)
+            except Exception as e:
+                leaderboard.append({"params": combo, "score": None, "error": str(e)})
+                msg = f"[{i + 1}/{len(combos)}] 失敗（契約違反 or 実行時例外）: {e} params={combo}"
+                log.info(msg)
+                if on_progress is not None:
+                    on_progress(i + 1, len(combos), msg)
+                continue
+            oof = result.get("oof_backtest") or {}
+            score = _score(oof, objective)
+            leaderboard.append({"params": combo, "score": score, "oof": oof})
+            msg = f"[{i + 1}/{len(combos)}] score={score} params={combo}"
             log.info(msg)
             if on_progress is not None:
                 on_progress(i + 1, len(combos), msg)
-            continue
-        oof = result.get("oof_backtest") or {}
-        score = _score(oof, objective)
-        leaderboard.append({"params": combo, "score": score, "oof": oof})
-        msg = f"[{i + 1}/{len(combos)}] score={score} params={combo}"
-        log.info(msg)
-        if on_progress is not None:
-            on_progress(i + 1, len(combos), msg)
 
     scored = [e for e in leaderboard if e["score"] is not None]
     config = {
