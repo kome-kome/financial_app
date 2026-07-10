@@ -918,11 +918,15 @@ async function _loadTunedBadge(pluginName) {
   const val = tuned.objective_value != null ? tuned.objective_value.toFixed(4) : '-';
   host.innerHTML = `<div style="display:inline-flex;align-items:center;gap:8px;padding:4px 10px;background:var(--bg-sunken);border-radius:999px;font-size:12px;color:var(--text-secondary)">
     <span>🔧 自動調整済み: ${esc(tuned.objective_name)}=${esc(val)}（${esc(dt)}）</span>
-    <button type="button" class="btn btn-secondary btn-sm" data-click="applyTunedParams" data-arg="${esc(pluginName)}">調整値を読込</button>
+    <button type="button" class="btn btn-secondary btn-sm" data-click="applyTunedParams" data-arg="${esc(pluginName)}">初期値にリセット</button>
   </div>`;
+  // 調整済みパラメータが存在する場合はページ読込時点でフォームへ自動反映する（Issue #294）
+  applyTunedParams(pluginName);
 }
 
 // フォームへ調整値を書き込むだけ（再計算はしない。「実行」ボタンはユーザーが別途押す）。
+// _loadTunedBadge からページ読込時に自動呼び出しされるほか、「初期値にリセット」ボタンからも
+// 手動で呼び出せる（ユーザーが値をいじった後に調整済み値へ戻す用途、Issue #294）。
 function applyTunedParams(pluginName) {
   const tuned = _tunedParamsCache[pluginName];
   const meta = _pluginMeta[pluginName];
