@@ -93,6 +93,38 @@ Render の制約と運用形態に合わせて設計すること。
 | 本番バックフィル実行 | ✅ **完了**（2026-06-24 実測: 全年度 82〜87% カバレッジ。残 NULL はサービス業・金融等の構造的欠損） |
 | 完了判定 | 全年度で一様な欠損率（≒13〜18%）になっており旧コホート偏りは解消済み |
 
+### tune-hyperparameters の運用詳細（`.github/workflows/tune-hyperparameters.yml`）
+
+M-1（`macro_risk_return`）・M-2（`macro_gbdt`）・M-3（`macro_dlm`）のハイパーパラメータ
+自動探索（ADR-0007／ADR-0010）を GitHub Actions で月次実行する。GUI からの手動トリガーは
+Issue #293 で廃止済みのため、探索の実行手段は本ワークフローの自動実行と
+`workflow_dispatch` による手動実行のみ。
+
+- **実行頻度**: `cron: '0 3 1 * *'`（UTC 03:00 = JST 12:00、毎月1日）。matrix で3モデルを
+  並列ジョブに分割し（`fail-fast: false`）、`macro_risk_return`/`macro_dlm` は
+  `--strategy grid`（`timeout-minutes: 240`）、`macro_gbdt` は
+  `--strategy random --n-iter 150`（`timeout-minutes: 355`＝6時間上限ギリギリを避ける値）。
+- **品質ゲートの挙動（Issue #291）**: `hyperparameter_search.py --persist` は
+  `plugin_tuned_params` の既存 `objective_value` と今回の `best_score` を比較し、劣化して
+  いれば永続化（`--persist-scores` 併用時の producer スコア更新も含む）をスキップして
+  `SystemExit` で非ゼロ終了する。**この場合ジョブは `failed` 扱いになり GitHub 標準の
+  失敗通知（Actions の通知設定に従いメール等）が飛ぶ**——これは意図した挙動であり、
+  `continue-on-error` 等では握りつぶさない。1モデルの品質ゲートスキップ・実行失敗は
+  `fail-fast: false` により他モデルのジョブへ波及しない。
+- **失敗時の対応手順**:
+  1. GitHub リポジトリの Actions タブ → `[定常] M-1/M-2/M-3 ハイパーパラメータ月次自動探索`
+     の該当実行を開き、失敗した matrix ジョブ（`model` 名で識別）を確認する。
+  2. 各ジョブの `Upload log` ステップが `hyperparameter_search_<model>.log` を
+     artifact として30日間保持する（`actions/upload-artifact`・`if: always()` のため
+     ジョブ失敗時も取得可能）。ダウンロードして探索の詳細ログ（各候補のスコア・
+     品質ゲートでスキップされた場合はその理由）を確認する。
+  3. 品質ゲートによる意図的なスキップ（データの一時的な劣化等）であれば、次回月次実行を
+     待つか、原因（マクロデータの欠損・異常値等）を先に是正してから
+     `workflow_dispatch` で手動再実行する（GitHub UI の Actions タブ → 対象ワークフロー →
+     `Run workflow`、または `gh workflow run tune-hyperparameters.yml`）。
+  4. 品質ゲート以外の失敗（DB接続エラー・依存関係エラー等）はログから原因を特定し、
+     修正後に同様の手順で再実行する。
+
 ---
 
 ## ローカル / Render 役割分担
