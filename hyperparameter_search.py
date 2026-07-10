@@ -22,7 +22,6 @@ import asyncio
 import hashlib
 import json
 import logging
-from typing import Callable, Optional
 
 logger = logging.getLogger("hyperparameter_search")
 
@@ -53,12 +52,9 @@ async def run_search(
     *,
     persist: bool = False,
     persist_scores: bool = False,
-    on_progress: Optional[Callable[[int, int, str], None]] = None,
-    cancel_check: Optional[Callable[[], bool]] = None,
 ) -> dict:
-    """1モデル分の探索を実行する共有ロジック（CLI・GUIジョブ両方から呼ぶ・Issue #278）。
+    """1モデル分の探索を実行する共有ロジック（CLI・GitHub Actionsから呼ぶ・Issue #264）。
 
-    on_progress/cancel_check は plugins.tuning.search() へそのまま橋渡しする。
     persist=True で plugin_tuned_params へ永続化し、persist_scores=True なら
     best params での最終 execute も行い producer スコアを永続化する
     （persist=False のとき persist_scores は無視される）。
@@ -78,7 +74,6 @@ async def run_search(
     result = await search(
         plugin, base_params, dims, db,
         objective=objective, strategy=strategy, n_iter=n_iter, seed=seed,
-        on_progress=on_progress, cancel_check=cancel_check,
     )
     result["persisted"] = False
     result["skipped_reason"] = None

@@ -2,19 +2,15 @@
 
 /api/plugins/*, /api/gap-analysis, /api/recommend, /api/backtest を担当。
 """
-import asyncio
 import logging
 from typing import Optional
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
-from pydantic import BaseModel, Field
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 
 import api
 import backtest
-import hyperparameter_search
 import plugins as plugin_registry
-from database import SessionLocal
 
 router = APIRouter()
 log = logging.getLogger(__name__)
@@ -119,82 +115,6 @@ async def get_plugin_tuned(plugin_name: str, db: Session = Depends(api.get_db)):
     if tuned is None:
         raise HTTPException(404, f"'{plugin_name}' は自動調整されていません")
     return tuned
-
-
-# ── ハイパーパラメータ探索の GUI 統合（Issue #278）───────────────────────────
-# hyperparameter_search.py（CLI専用・Issue #264）を collection_jobs.py の
-# ジョブ registry（routers/collect.py の history/reparse 等と同型）でバックグラウンド
-# ジョブ化し、SSE で進捗配信する。plugin_tuned_params への永続化は常時行う
-# （GUIから起動する時点で best params を残す意図がある）。producer スコアの上書きは
-# 影響が大きいため persist_scores のみ明示的な opt-in。
-
-class TuneStartRequest(BaseModel):
-    strategy:       str            = "random"
-    n_iter:         int             = Field(default=50, ge=5, le=500)
-    objective:      str            = "rank_ic"
-    seed:           int             = 0
-    persist_scores: bool           = False
-
-
-def _tuning_job_name(plugin_name: str) -> str:
-    return f"tuning_{plugin_name}"
-
-
-@router.post("/api/plugins/{plugin_name}/tune-start")
-async def start_plugin_tuning(
-    plugin_name: str, req: TuneStartRequest, background_tasks: BackgroundTasks,
-):
-    if plugin_name not in hyperparameter_search.MODELS:
-        raise HTTPException(404, f"'{plugin_name}' はハイパーパラメータ探索に対応していません")
-    if api.RENDER_LIGHT_MODE:
-        raise HTTPException(403, "ハイパーパラメータ探索はローカル環境で実行してください"
-                                 "（Render Free プラン制限。結果は共有DBに保存され本番に反映されます）")
-    if req.strategy not in ("grid", "random"):
-        raise HTTPException(400, "strategy は grid または random を指定してください")
-    if req.objective not in hyperparameter_search.OBJECTIVES:
-        raise HTTPException(400, f"objective は {', '.join(hyperparameter_search.OBJECTIVES)} のいずれか")
-
-    async def body(on_progress, cancel_check):
-        # 探索候補の評価（XGBoost fit 等）は同期・CPU-bound で await を挟まないため、
-        # await するだけでは asyncio イベントループを丸ごとブロックしてしまい、
-        # SSE進捗配信・tune-status が探索完了までまったく応答しなくなる
-        # （Issue #278 が解決したい「押した後、完了まで無反応」を再現してしまう）。
-        # 別スレッドへオフロードしてイベントループを解放する。
-        def _run_blocking() -> None:
-            db = SessionLocal()
-            try:
-                asyncio.run(hyperparameter_search.run_search(
-                    plugin_name, req.strategy, req.n_iter, req.objective, req.seed, db,
-                    persist=True, persist_scores=req.persist_scores,
-                    on_progress=on_progress, cancel_check=cancel_check,
-                ))
-            finally:
-                db.close()
-
-        await asyncio.to_thread(_run_blocking)
-
-    api.jobs.start(_tuning_job_name(plugin_name), background_tasks, body,
-                   busy_message=f"'{plugin_name}' のハイパーパラメータ探索は既に実行中です",
-                   error_message="[エラー] 探索中に問題が発生しました（詳細はサーバーログを確認）")
-    return {"message": "ハイパーパラメータ探索を開始しました"}
-
-
-@router.post("/api/plugins/{plugin_name}/tune-stop")
-async def stop_plugin_tuning(plugin_name: str):
-    if not api.jobs.is_running(_tuning_job_name(plugin_name)):
-        raise HTTPException(400, f"'{plugin_name}' の実行中の探索ジョブがありません")
-    api.jobs.request_cancel(_tuning_job_name(plugin_name))
-    return {"message": "探索の停止リクエストを送信しました"}
-
-
-@router.get("/api/plugins/{plugin_name}/tune-status")
-async def plugin_tuning_status(plugin_name: str):
-    return api.jobs.snapshot(_tuning_job_name(plugin_name))
-
-
-@router.get("/api/plugins/{plugin_name}/tune-stream")
-async def plugin_tuning_stream(plugin_name: str):
-    return api.jobs.stream(_tuning_job_name(plugin_name))
 
 
 @router.get("/api/gap-analysis")
