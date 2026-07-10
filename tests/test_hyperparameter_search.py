@@ -1,8 +1,8 @@
-"""tests/test_hyperparameter_search.py — run_search() 共有ロジック（Issue #278）。
+"""tests/test_hyperparameter_search.py — run_search() 共有ロジック（Issue #264）。
 
-CLI（hyperparameter_search.py の _run）と GUI ジョブ（routers/analysis.py）の
-両方から呼ばれる run_search() が、persist/persist_scores/on_progress/cancel_check を
-正しく plugins.tuning.search() へ橋渡しすることを検証する。
+CLI（hyperparameter_search.py の _run）・GitHub Actions（Issue #292）から呼ばれる
+run_search() が、persist/persist_scores を正しく plugins.tuning.search() へ
+橋渡しすることを検証する。
 """
 import asyncio
 
@@ -105,31 +105,6 @@ class TestRunSearch:
         ))
         assert result["persisted"] is False
         assert _FakePlugin.execute_calls == 4  # 追加 execute は起きない
-
-    def test_on_progress_and_cancel_check_propagate_to_search(self, db, monkeypatch):
-        import plugins
-        monkeypatch.setattr(plugins, "get_plugin", lambda name: _FakePlugin())
-        calls = []
-        result = asyncio.run(hs.run_search(
-            "fake_model", "grid", 50, "rank_ic", 0, db,
-            on_progress=lambda cur, tot, msg: calls.append((cur, tot)),
-            cancel_check=lambda: False,
-        ))
-        assert calls == [(1, 4), (2, 4), (3, 4), (4, 4)]
-        assert result["config"]["cancelled"] is False
-
-    def test_cancel_mid_search_skips_persist_when_no_scored_candidate(self, db, monkeypatch):
-        import plugins
-        monkeypatch.setattr(plugins, "get_plugin", lambda name: _FakePlugin())
-        result = asyncio.run(hs.run_search(
-            "fake_model", "grid", 50, "rank_ic", 0, db,
-            persist=True, cancel_check=lambda: True,
-        ))
-        assert result["config"]["cancelled"] is True
-        assert result["persisted"] is False
-        from database import get_tuned_params
-        assert get_tuned_params(db, "fake_model") is None
-
 
 class TestQualityGate:
     """persist=True 時の劣化防止ゲート（Issue #291）。"""
