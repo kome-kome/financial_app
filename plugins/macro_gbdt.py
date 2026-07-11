@@ -27,9 +27,7 @@ from .base import AnalysisPlugin
 from .utils import walk_forward_cv_monthly, winsorize
 from .macro_snapshots import (
     FIN_BASE_OPTIONS,
-    DEFAULT_FIN_FEATURES,
     MACRO_FEATURE_OPTIONS,
-    DEFAULT_MACRO_FEATURES,
     _realized_vol,
     load_data,
     preload_macro,
@@ -129,13 +127,13 @@ class MacroGbdtPlugin(AnalysisPlugin):
                 "type": "select",
                 "label": "横軸リスク",
                 "description": (
-                    "R2=実現ボラ（既定）/ R_macro=マクロ起因リスク（macro_beta 蓄積が必要）。"
+                    "R2=実現ボラ / R_macro=マクロ起因リスク（既定・macro_beta 蓄積が必要）。"
                 ),
                 "options": [
-                    {"value": "r2",      "label": "R2 実現ボラティリティ（既定）"},
-                    {"value": "r_macro", "label": "R_macro マクロ起因リスク（β推論要）"},
+                    {"value": "r2",      "label": "R2 実現ボラティリティ"},
+                    {"value": "r_macro", "label": "R_macro マクロ起因リスク（β推論要・既定）"},
                 ],
-                "default": "r2",
+                "default": "r_macro",
             },
             "r3_gate": {
                 "type": "slider",
@@ -152,7 +150,7 @@ class MacroGbdtPlugin(AnalysisPlugin):
                 "type": "multiselect",
                 "label": "財務ベース特徴量",
                 "options": FIN_BASE_OPTIONS,
-                "default": DEFAULT_FIN_FEATURES,
+                "default": [o["value"] for o in FIN_BASE_OPTIONS],
             },
             "use_macro": {
                 "type": "checkbox",
@@ -163,7 +161,7 @@ class MacroGbdtPlugin(AnalysisPlugin):
                 "type": "multiselect",
                 "label": "マクロ特徴量",
                 "options": MACRO_FEATURE_OPTIONS,
-                "default": DEFAULT_MACRO_FEATURES,
+                "default": [o["value"] for o in MACRO_FEATURE_OPTIONS],
             },
             "use_momentum": {
                 "type": "checkbox",
