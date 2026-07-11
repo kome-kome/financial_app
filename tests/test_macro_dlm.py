@@ -10,6 +10,7 @@
 """
 import asyncio
 import math
+from contextlib import nullcontext as _nullcontext
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -979,3 +980,61 @@ class TestTuningSearchSpace:
         assert len(combos) > 0
         for combo in combos:
             coerce_params(schema, {**base_params, **combo})
+
+
+# ── ハイパーパラメータ探索中のスコアリング省略モード（Issue #299） ─────────────
+
+class TestObjectiveOnlyMode:
+
+    def _params(self, **overrides):
+        base = {k: v["default"] for k, v in plugin.params_schema().items() if "default" in v}
+        params = coerce_params(plugin.params_schema(), base)
+        params.update(overrides)
+        return params
+
+    def _run(self, objective_only: bool, n_companies=5, n_weeks=90, **pover):
+        import database
+
+        dates = _weekly_dates(n_weeks)
+        prices_by_co, companies = _make_prices_companies(n_companies, dates)
+        macro_levels = _make_macro_levels(dates)
+        opts = {"min_weeks": 40, "burn_in_weeks": 5, "top_n": 3}
+        opts.update(pover)
+        params = self._params(**opts)
+        db = MagicMock()
+        ctx = database.tuning_objective_only() if objective_only else _nullcontext()
+        with patch("plugins.macro_dlm.load_prices", return_value=(prices_by_co, companies)), \
+             patch("plugins.macro_dlm.load_macro_levels", return_value=macro_levels), \
+             ctx:
+            return asyncio.run(plugin.execute(params, db))
+
+    def test_skips_beta_path_and_r_macro_construction(self):
+        """database.tuning_objective_only() 内では β経路構築・R_macro計算を伴う
+        全社スコアリングが呼ばれず、oof_backtest 算出直後に早期return する。"""
+        with patch("plugins.macro_dlm.macro_risk_exposure") as mock_rme:
+            res = self._run(objective_only=True)
+
+        mock_rme.assert_not_called()
+        assert res["results"] == []
+        assert res["n_companies"] == 0
+        assert res["diagnostics"] is None
+        assert res["r_macro_available"] is False
+        assert "oof_backtest" in res
+
+    def test_oof_backtest_identical_with_and_without_objective_only(self):
+        """スコアリング省略の有無で oof_backtest の値は一切変わらない（統計的妥当性の担保）。"""
+        res_full = self._run(objective_only=False)
+        res_skip = self._run(objective_only=True)
+
+        assert res_full["oof_backtest"] == res_skip["oof_backtest"]
+
+    def test_normal_mode_still_returns_full_results_outside_context(self):
+        """コンテキスト外（通常の /api/plugins/{name}/run 相当）は従来通りフルスコアリングする。"""
+        import database
+
+        assert database.is_tuning_objective_only() is False
+        res = self._run(objective_only=False)
+
+        assert len(res["results"]) > 0
+        assert res["n_companies"] > 0
+        assert res["diagnostics"] is not None

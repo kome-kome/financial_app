@@ -207,6 +207,31 @@ class TestSearch:
         assert dry_run_seen == [True, True, True, True]
         assert database._tuning_dry_run.get() is False  # コンテキスト外では解除されている
 
+    def test_search_wraps_candidate_execution_in_tuning_objective_only(self):
+        """各候補評価が database.tuning_objective_only() コンテキスト内で行われる（Issue #299）。
+        各プラグインの execute() はこれを見て oof_backtest 算出後の全社スコアリングを
+        省略できる。"""
+        import database
+
+        objective_only_seen = []
+
+        class _Probe:
+            name = "fake_probe_objective_only"
+            depends_on: list = []
+
+            def params_schema(self):
+                return {"x": {"type": "slider", "dtype": "int", "default": 0, "min": 0, "max": 3}}
+
+            async def execute(self, params, db):
+                objective_only_seen.append(database.is_tuning_objective_only())
+                return {"oof_backtest": {"rank_ic": {"mean": 1.0, "std": 1.0, "n": 3}}}
+
+        dims = [SearchDim("x", [0, 1, 2, 3])]
+        asyncio.run(search(_Probe(), {}, dims, db=None, strategy="grid"))
+
+        assert objective_only_seen == [True, True, True, True]
+        assert database.is_tuning_objective_only() is False  # コンテキスト外では解除されている
+
 
 # ── plugins.macro_snapshots._BoundedCache（探索専用の簡易LRU・Issue #298） ──────────
 

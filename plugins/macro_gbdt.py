@@ -413,6 +413,36 @@ class MacroGbdtPlugin(AnalysisPlugin):
             fit_predict=xgb_callback,
         )
 
+        # ── アウトオブサンプル検証（OOF）: 無リーク walk-forward 予測のモデル評価（ADR-0004）─
+        # 既存「バックテスト」(/api/backtest) とは別概念。cv_residuals_xgb が揃った時点で
+        # 算出可能（このあとの OLS ベースライン CV・全社スコアリング・SHAP 計算には非依存）。
+        oof_bt = oof_backtest(cv_residuals_xgb, n_quantiles=5)
+
+        # ── ハイパーパラメータ探索中は oof_backtest 算出後に早期return（Issue #299）───
+        # plugins/tuning.py::search() が読むのは oof_backtest のみで、以降の OLS
+        # ベースライン CV・最終モデル再学習・全社 raw_items 構築（SHAP 計算含む）は
+        # 探索候補の評価には不要（かつ oof_backtest の値には一切影響しない）。通常の
+        # API 実行（/api/plugins/{name}/run）ではこのモードは無効のため、常に従来通り
+        # フル実行する。
+        from database import is_tuning_objective_only
+        if is_tuning_objective_only():
+            return {
+                "cv_metrics":        {"xgb": None, "ols_baseline": None},
+                "selected_features": all_feat_names,
+                "feature_coefs":     {},
+                "n_train_samples":   total_samples,
+                "n_companies":       0,
+                "risk_axis":         risk_axis,
+                "lambda_risk":       lambda_risk,
+                "r3_gate":           r3_gate,
+                "top_n":             top_n,
+                "results":           [],
+                "model_type":        "xgboost",
+                "best_iteration":    None,
+                "oof_backtest":      oof_bt,
+                "r_macro_available": False,
+            }
+
         # ── OLS ベースライン CV（同一特徴量・交差項なし・BIC なし）────────────
         cv_folds_ols = walk_forward_cv_monthly(
             samples_by_ym, all_feat_names,
@@ -514,9 +544,8 @@ class MacroGbdtPlugin(AnalysisPlugin):
         # #273: r_macro が全社 None（macro_beta 未蓄積）かをクライアントへ明示。
         r_macro_available = any(item["r_macro"] is not None for item in raw_items)
 
-        # ── アウトオブサンプル検証（OOF）: 無リーク walk-forward 予測のモデル評価（ADR-0004）─
-        # 既存「バックテスト」(/api/backtest) とは別概念。再学習・追加価格取得なし。
-        oof_bt = oof_backtest(cv_residuals_xgb, n_quantiles=5)
+        # oof_bt は cv_residuals_xgb が揃った時点（Issue #299 の早期return判定の直前）で
+        # 算出済み（この後の全社スコアリングとは非依存のため、SHAP計算等より前に算出）。
 
         # ── producer μ̂ を永続化（sell_ranking が mu_source=macro_gbdt で読む・ADR-0004）─
         from database import replace_macro_gbdt_scores

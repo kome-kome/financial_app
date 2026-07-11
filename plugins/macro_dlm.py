@@ -527,6 +527,13 @@ class MacroDlmPlugin(AnalysisPlugin):
         tq = stats.t.ppf(0.975, df=10_000)   # 信用区間の係数（自由度大の Student-t≒正規）
         k = len(factors)
 
+        # ハイパーパラメータ探索中は per-company の全社スコアリング（β経路整形・
+        # R_macro計算・診断集計）を省略する（Issue #299）。OOF 残差の収集は dlm_filter の
+        # 呼び出し自体（1銘柄1フォワードパス）に由来し、この省略では削れない
+        # （M-1/M-2 と異なり dlm_filter が OOF 残差と最終推定値を同一パスで生成するため）。
+        from database import is_tuning_objective_only
+        objective_only = is_tuning_objective_only()
+
         rows: list[dict] = []
         agg_se2: list[float] = []     # 標準化予測誤差²（校正＝平均が1なら整合）
         agg_rmse: list[float] = []
@@ -545,6 +552,20 @@ class MacroDlmPlugin(AnalysisPlugin):
             b0 = min(burn_in, max(T - 5, 0))     # バーンイン（最低5点は残す）
 
             m_path, sd_path = res["m_path"], res["sd_path"]
+
+            # OOF 残差収集: φ·α_{t-1|t-1}（バーンイン後）vs y_t（1期先・無リーク）
+            # AR(1) 時は φ·α_T が 1期先予測値なので yhat にも phi を適用
+            for t in range(b0 + 1, T):
+                yhat = phi * float(m_path[t - 1, 0]) * WEEKS_PER_YEAR
+                ym = used_dates[t][:7]
+                oof_residuals.setdefault(ym, []).append((yhat, float(y[t])))
+
+            if objective_only:
+                # oof_backtest 算出に不要な全社スコアリングをスキップ（rows は
+                # 「推定可能な銘柄が0件」判定・件数カウントのためだけに残す）。
+                rows.append({"edinet_code": ec})
+                continue
+
             alpha_w = float(m_path[-1, 0])
             alpha_sd = float(sd_path[-1, 0])
             # AR(1) 時は µ̂ = φ·α_T（1期先予測値を 0 へ縮小した保守的推定）
@@ -559,13 +580,6 @@ class MacroDlmPlugin(AnalysisPlugin):
                 bs = float(sd_path[-1, j + 1])
                 beta_T.append(bm)
                 beta_latest[f] = {"mean": _r(bm), "lo": _r(bm - tq * bs), "hi": _r(bm + tq * bs)}
-
-            # OOF 残差収集: φ·α_{t-1|t-1}（バーンイン後）vs y_t（1期先・無リーク）
-            # AR(1) 時は φ·α_T が 1期先予測値なので yhat にも phi を適用
-            for t in range(b0 + 1, T):
-                yhat = phi * float(m_path[t - 1, 0]) * WEEKS_PER_YEAR
-                ym = used_dates[t][:7]
-                oof_residuals.setdefault(ym, []).append((yhat, float(y[t])))
 
             # 1期先診断（バーンイン除外）
             se = res["std_errs"][b0:]
@@ -610,6 +624,37 @@ class MacroDlmPlugin(AnalysisPlugin):
                 f"推定可能な銘柄がありません（最低 {min_weeks} 週・マクロ整列後）。"
                 "株価週次・マクロデータの蓄積を確認してください。"
             )
+
+        # ── アウトオブサンプル検証（OOF）: α_{t-1} が翌週リターンを順序付けるか（ADR-0004）─
+        from .macro_snapshots import oof_backtest as _oof_backtest
+        oof_bt = _oof_backtest(oof_residuals, n_quantiles=5) if oof_residuals else {
+            "n_quantiles": 5, "n_periods": 0, "n_periods_quantile": 0,
+            "n_oof_samples": 0, "quantile_returns": [],
+            "rank_ic": {"mean": None, "std": None, "n": 0},
+            "long_short_spread": None, "hit_rate": None,
+        }
+
+        # ── ハイパーパラメータ探索中は oof_backtest 算出後に早期return（Issue #299）───
+        # plugins/tuning.py::search() が読むのは oof_backtest のみで、以降の β経路構築・
+        # 診断集計・producer 永続化は探索候補の評価には不要（oof_backtest の値には
+        # 一切影響しない）。通常の API 実行（/api/plugins/{name}/run）ではこのモードは
+        # 無効のため、常に従来通りフル実行する。
+        if objective_only:
+            return {
+                "model_type": "bayesian_dlm",
+                "macro_features": factors,
+                "factor_labels": {f: _DLM_MACRO_MAP[f][2] for f in factors},
+                "lambda_risk": params.get("lambda_risk", 1.0),
+                "params": {
+                    "state_discount": delta, "var_discount": beta_v,
+                    "min_weeks": min_weeks, "burn_in_weeks": burn_in, "top_n": top_n,
+                },
+                "n_companies": 0,
+                "diagnostics": None,
+                "oof_backtest": oof_bt,
+                "results": [],
+                "r_macro_available": False,
+            }
 
         rows.sort(key=lambda r: (r["mu"] is None, -(r["mu"] or 0.0)))
         n_companies = len(rows)
@@ -658,14 +703,8 @@ class MacroDlmPlugin(AnalysisPlugin):
             "factor_coverage": {f: _r(c, 4) for f, c in factor_coverage.items()},
         }
 
-        # ── アウトオブサンプル検証（OOF）: α_{t-1} が翌週リターンを順序付けるか（ADR-0004）─
-        from .macro_snapshots import oof_backtest as _oof_backtest
-        oof_bt = _oof_backtest(oof_residuals, n_quantiles=5) if oof_residuals else {
-            "n_quantiles": 5, "n_periods": 0, "n_periods_quantile": 0,
-            "n_oof_samples": 0, "quantile_returns": [],
-            "rank_ic": {"mean": None, "std": None, "n": 0},
-            "long_short_spread": None, "hit_rate": None,
-        }
+        # oof_bt は per-company ループ直後（Issue #299 の早期return判定の直前）で
+        # 算出済み（この後の β経路構築・診断集計とは非依存）。
 
         # ── producer μ̂ を永続化（sell_ranking が mu_source=macro_dlm で読む・ADR-0004）─
         from database import replace_macro_dlm_scores

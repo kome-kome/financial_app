@@ -681,3 +681,68 @@ class TestTuningSearchSpace:
         assert len(combos) > 0
         for combo in combos:
             coerce_params(schema, {**base_params, **combo})
+
+
+# ── ハイパーパラメータ探索中のスコアリング省略モード（Issue #299） ─────────────
+
+class TestObjectiveOnlyMode:
+
+    def _params(self, **overrides):
+        plugin = MacroRiskReturnPlugin()
+        schema = plugin.params_schema()
+        return coerce_params(schema, {"use_macro": False, **overrides})
+
+    def test_skips_fit_final_and_score_companies(self):
+        """database.tuning_objective_only() 内では _fit_final/_score_companies が
+        呼ばれず、oof_backtest 算出直後に早期return する。"""
+        import database
+
+        plugin = MacroRiskReturnPlugin()
+        db = TestExecuteIntegration()._build_mock_db()
+        params = self._params()
+
+        with patch.object(MacroRiskReturnPlugin, "_fit_final") as mock_fit, \
+             patch.object(MacroRiskReturnPlugin, "_score_companies") as mock_score, \
+             database.tuning_objective_only():
+            result = asyncio.run(plugin.execute(params, db))
+
+        mock_fit.assert_not_called()
+        mock_score.assert_not_called()
+        assert result["results"] == []
+        assert result["n_companies"] == 0
+        assert result["feature_coefs"] == {}
+        assert "oof_backtest" in result
+        assert result["oof_backtest"]["rank_ic"]["n"] is not None
+
+    def test_oof_backtest_identical_with_and_without_objective_only(self):
+        """スコアリング省略の有無で oof_backtest の値は一切変わらない（統計的妥当性の担保）。"""
+        import database
+
+        plugin = MacroRiskReturnPlugin()
+        params = self._params()
+
+        db_full = TestExecuteIntegration()._build_mock_db()
+        result_full = asyncio.run(plugin.execute(params, db_full))
+
+        db_skip = TestExecuteIntegration()._build_mock_db()
+        with database.tuning_objective_only():
+            result_skip = asyncio.run(plugin.execute(params, db_skip))
+
+        assert result_full["oof_backtest"] == result_skip["oof_backtest"]
+        assert result_full["cv_metrics"] == result_skip["cv_metrics"]
+        assert result_full["selected_features"] == result_skip["selected_features"]
+
+    def test_normal_mode_still_returns_full_results_outside_context(self):
+        """コンテキスト外（通常の /api/plugins/{name}/run 相当）は従来通りフルスコアリングする。"""
+        import database
+
+        plugin = MacroRiskReturnPlugin()
+        db = TestExecuteIntegration()._build_mock_db()
+        params = self._params()
+
+        assert database.is_tuning_objective_only() is False
+        result = asyncio.run(plugin.execute(params, db))
+
+        assert len(result["results"]) > 0
+        assert result["n_companies"] > 0
+        assert result["feature_coefs"] != {}

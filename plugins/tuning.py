@@ -116,11 +116,18 @@ async def search(
     （fin_features/macro_features/use_momentum/min_coverage 等）が同一の候補間では
     結果を使い回す。このコンテキストは search() を抜けると解除され、通常の API 実行
     （/api/plugins/{name}/run）には影響しない。
+
+    同時に database.tuning_objective_only() でも包む（Issue #299）。ここで読むのは
+    oof_backtest のみのため、各プラグインの execute() は oof_backtest 算出後の
+    全社スコアリング（M-1: _fit_final/_score_companies、M-2: raw_items構築+SHAP計算、
+    M-3: 全社分のβ経路整形）を省略できる。best params での本採用実行
+    （hyperparameter_search.py::run_search の persist_scores=True 時の execute_plugin 呼び出し）
+    はこの with ブロックの外側で呼ばれるため、このコンテキストは無効＝フルスコアリングされる。
     """
     if objective not in OBJECTIVES:
         raise ValueError(f"objective は {OBJECTIVES} のいずれかを指定してください: {objective!r}")
 
-    from database import tuning_dry_run
+    from database import tuning_dry_run, tuning_objective_only
     from plugins import execute_plugin
     from plugins.macro_snapshots import tuning_snapshot_cache
 
@@ -130,7 +137,7 @@ async def search(
         raise ValueError("探索空間が空です（dims または only_if 条件を確認してください）")
 
     leaderboard: list[dict] = []
-    with tuning_snapshot_cache():
+    with tuning_snapshot_cache(), tuning_objective_only():
         for i, combo in enumerate(combos):
             raw = {**base_params, **combo}
             try:
