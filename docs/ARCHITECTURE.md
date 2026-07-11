@@ -606,7 +606,7 @@ stateDiagram-v2
         Find    : ① 銘柄を探す\nおすすめ/ネットキャッシュ/スクリーニング
         Value   : ② 割安度を測る\n業種別OLS → バリュエーション分析
         Predict : ③ 将来リターンを予測\n株価リターン/マクロ×リスクリターン
-        Verify  : ④ 戦略を検証\nバックテスト
+        Verify  : ④ 戦略を検証\nバックテスト / モデル比較（OOF）
 
         Find    --> Value   : サイドバー切替
         Value   --> Predict : サイドバー切替
@@ -893,7 +893,7 @@ graph LR
     end
 
     subgraph ANALYSIS["📊 分析 /api/"]
-        AN1["GET /api/plugins\nプラグイン + 特例エントリ(screen/backtest)のメタ一覧\n（category/ui_order/heavy 含む・ui_order 昇順）"]
+        AN1["GET /api/plugins\nプラグイン + 特例エントリ(screen/backtest/model_comparison)のメタ一覧\n（category/ui_order/heavy 含む・ui_order 昇順）"]
         AN2["POST /api/plugins/{name}/run\nプラグインを実行\n（heavy かつ RENDER_LIGHT_MODE は 403）"]
         AN11["GET /api/plugins/{name}/tuned\n自動調整済みハイパーパラメータ\n（hyperparameter_search.py --persist が書込・未調整は404）\n読取専用・軽量。探索自体はGitHub Actions月次実行(#292)経由"]
         AN10["GET /api/model/status\n業種別OLSモデルの鮮度情報\n（computed_at/staleness_days/n_results/is_stale）\n鮮度バーUI用の軽量GET"]
@@ -903,6 +903,7 @@ graph LR
         AN7["POST /api/recommend\n推薦スクリーニング実行"]
         AN8["GET /api/backtest\n過去スコアリングの実績リターン検証\n?preset&months_ago&top_n&source / summary+percentiles"]
         AN9["GET /api/backtest/multi\n複数保有期間（3/6/12/18/24ヶ月）一括比較\n?preset&top_n&source"]
+        AN12["POST /api/backtest/model-comparison\n将来リターン予測 M-1/M-2/M-3 の OOF 横並び比較\n（各モデルの oof_backtest を集約・as-of上位Nとは別手法）\n3モデルとも heavy＝ローカル専用（Renderは各モデルskip）"]
     end
 
     subgraph DBV["🗃️ DBビューア /api/db/"]
