@@ -348,12 +348,15 @@ tr:hover td{background:var(--border-subtle)}
       プリセットを選ぶか、各観点を「売り判断でどれだけ重視するか（0〜3）」をスライダーで調整します。
     </div>
     <div class="flex" style="margin-bottom:16px">
+      <button class="btn btn-secondary" data-click="applySellPreset" data-arg="マクロ予測型">📈 マクロ予測型</button>
       <button class="btn btn-secondary" data-click="applySellPreset" data-arg="バランス型">⚖ バランス型</button>
       <button class="btn btn-secondary" data-click="applySellPreset" data-arg="割高警戒型">◆ 割高警戒型</button>
       <button class="btn btn-secondary" data-click="applySellPreset" data-arg="業績悪化重視">▼ 業績悪化重視</button>
     </div>
-    <div class="section-title" style="font-size:12px;margin-bottom:10px">観点ウェイト（スライダー）</div>
-    <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:8px" id="sell-weight-grid"></div>
+    <details style="margin-top:4px">
+      <summary style="cursor:pointer;font-size:12px;color:var(--text-secondary);user-select:none">▸ 詳細：観点ウェイトを手動調整</summary>
+      <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:8px;margin-top:10px" id="sell-weight-grid"></div>
+    </details>
 
     <div class="section-title" style="font-size:12px;margin:16px 0 10px">アクション閾値・タイミング</div>
     <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:12px">
@@ -383,7 +386,7 @@ tr:hover td{background:var(--border-subtle)}
       <label style="font-size:11px;color:var(--text-muted);display:block;margin-bottom:4px">期待リターン μ の出所（推奨モデル）</label>
       <select id="sell-mu-source" style="width:100%;background:var(--bg-sunken);color:var(--text);border:1px solid var(--border-subtle);border-radius:6px;padding:6px 8px;font-size:12px">
         <option value="macro_risk_return">M-1: マクロ×リスク-リターン（OLS）</option>
-        <option value="macro_gbdt">M-2: マクロ×財務 勾配ブースティング（XGBoost）</option>
+        <option value="macro_gbdt" selected>M-2: マクロ×財務 勾配ブースティング（XGBoost）</option>
         <option value="macro_dlm">M-3: ベイズ状態空間（時変マクロβ DLM）</option>
       </select>
       <div style="font-size:11px;color:var(--text-muted);margin-top:4px">

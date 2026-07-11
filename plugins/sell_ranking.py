@@ -38,6 +38,10 @@ SELL_METRICS = ["gap_ratio", "roe", "op_margin", "cf_ratio", "rev_growth", "equi
 # mu       = M-1 期待リターン（高い＝保有理由あり＝売る理由が小さい）。M-1 未実行なら graceful-degrade。
 # neg_r_macro = −R_macro（M-1 マクロリスク曝露の符号反転。高い＝低リスク＝売る理由が小さい）。
 PRESETS = {
+    # マクロ予測型: μ（期待リターン）と −Rᴹ（マクロリスク）の2軸のみで売り候補を判定する既定プリセット。
+    # スコアは Σw(-z)/Σw で正規化されるため比率のみ有意（μ を主・リスクを従に）。両シグナルとも
+    # 選択 μ モデル（既定 M-2）の実行結果に依存し、未実行なら全保有が「データ不足」になる（§10.5）。
+    "マクロ予測型": {"mu": 1.0, "neg_r_macro": 0.5},
     "バランス型":   {"gap_ratio": 1.0, "roe": 1.0, "op_margin": 1.0, "cf_ratio": 0.8, "rev_growth": 0.6, "equity_ratio": 0.4, "nc_ratio": 0.4, "mu": 0.5, "neg_r_macro": 0.3},
     "割高警戒型":   {"gap_ratio": 2.5, "roe": 0.5, "op_margin": 0.5, "rev_growth": 0.3, "nc_ratio": 0.8, "neg_r_macro": 0.8},
     "業績悪化重視": {"roe": 2.0, "op_margin": 1.5, "cf_ratio": 1.0, "rev_growth": 1.5, "gap_ratio": 0.5, "nc_ratio": 0.3, "mu": 0.3},
@@ -206,7 +210,7 @@ class SellRankingPlugin(AnalysisPlugin):
                 "type": "select",
                 "label": "プリセット",
                 "options": [{"value": k, "label": k} for k in PRESETS],
-                "default": "バランス型",
+                "default": "マクロ予測型",
                 "description": "カスタムウェイト未指定時のフォールバック",
             },
             "weights": {
@@ -252,8 +256,8 @@ class SellRankingPlugin(AnalysisPlugin):
                     {"value": "macro_gbdt",        "label": "M-2: マクロ×財務 勾配ブースティング（XGBoost）"},
                     {"value": "macro_dlm",         "label": "M-3: ベイズ状態空間（時変マクロβ DLM）"},
                 ],
-                "default": "macro_risk_return",
-                "description": "売りスコアの μ / −R_macro 観点に使う推奨モデル。未実行なら graceful-degrade（μ除外）。",
+                "default": "macro_gbdt",
+                "description": "売りスコアの μ / −R_macro 観点に使う推奨モデル（既定 M-2）。未実行なら graceful-degrade（μ除外）。",
             },
             "r3_gate": {
                 "type": "slider", "dtype": "float",

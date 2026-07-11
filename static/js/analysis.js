@@ -398,6 +398,8 @@ const SELL_WEIGHT_LABELS = {
 };
 // plugins/sell_ranking.py PRESETS と一致させる（高いほどその観点を売り判断で重視）。
 const SELL_PRESETS = {
+  // マクロ予測型: μ と −Rᴹ の2軸のみ（既定）。μモデル未実行時は全「データ不足」になる。
+  'マクロ予測型': {mu:1.0, neg_r_macro:0.5},
   'バランス型':   {gap_ratio:1.0, roe:1.0, op_margin:1.0, cf_ratio:0.8, rev_growth:0.6, equity_ratio:0.4, nc_ratio:0.4, mu:0.5, neg_r_macro:0.3},
   '割高警戒型':   {gap_ratio:2.5, roe:0.5, op_margin:0.5, rev_growth:0.3, nc_ratio:0.8, neg_r_macro:0.8},
   '業績悪化重視': {roe:2.0, op_margin:1.5, cf_ratio:1.0, rev_growth:1.5, gap_ratio:0.5, nc_ratio:0.3, mu:0.3},
@@ -419,6 +421,7 @@ function initSellRanking() {
           <span id="sw-val-${key}" style="font-size:14px;font-weight:600;color:${cssVar('--val-down-text')};min-width:32px;text-align:right">${def.toFixed(1)}</span>
         </div>
       </div>`).join('');
+    applySellPreset('マクロ予測型');   // 既定=マクロ予測型（μ・−Rᴹ のみ）を初期スライダー状態に反映
   }
   const ta = document.getElementById('param-sell_ranking-holdings');
   if (ta) {
@@ -459,7 +462,7 @@ async function runSellRanking() {
     sell_threshold:   parseFloat(document.getElementById('sell-th')?.value ?? 0.8),
     reduce_threshold: parseFloat(document.getElementById('reduce-th')?.value ?? 0.3),
     timing_adjust:    !!document.getElementById('sell-timing-adjust')?.checked,
-    mu_source:        document.getElementById('sell-mu-source')?.value || 'macro_risk_return',
+    mu_source:        document.getElementById('sell-mu-source')?.value || 'macro_gbdt',
   };
 
   const btn = document.getElementById('btn-sell-ranking');

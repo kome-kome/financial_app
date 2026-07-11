@@ -47,6 +47,16 @@ class TestConstants:
             for w in weights.values():
                 assert w >= 0
 
+    def test_macro_preset_exists_and_macro_only(self):
+        # マクロ予測型は μ・−Rᴹ の2軸のみ（両キー存在・他観点を含まない）
+        assert "マクロ予測型" in PRESETS
+        keys = set(PRESETS["マクロ予測型"])
+        assert keys == {"mu", "neg_r_macro"}
+
+    def test_default_preset_is_macro(self):
+        # 既定プリセットはマクロ予測型
+        assert plugin.params_schema()["preset"]["default"] == "マクロ予測型"
+
 
 # ── 純粋: parse_holdings ─────────────────────────────────────────────────────
 
@@ -313,12 +323,12 @@ class TestMuSource:
         assert res["mu_source"] == "macro_gbdt"
         assert res["count"] == 1
 
-    def test_default_mu_source_is_m1(self, db, make_metric):
+    def test_default_mu_source_is_m2(self, db, make_metric):
         self._seed_universe(db, make_metric)
-        # mu_source 未指定 → coerce が default=macro_risk_return 補完
+        # mu_source 未指定 → coerce が default=macro_gbdt（M-2）補完
         res = _run({"holdings": "1001", "weights": {"roe": 1.0},
                     "min_coverage": 0.0}, db)
-        assert res["mu_source"] == "macro_risk_return"
+        assert res["mu_source"] == "macro_gbdt"
 
     def test_r3_gate_noop_under_macro_gbdt(self, db, make_metric):
         self._seed_universe(db, make_metric)
