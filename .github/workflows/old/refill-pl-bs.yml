@@ -52,5 +52,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: refill-pl-bs-log
-          path: pipeline_gh.log
+          path: logs/pipeline_gh.log
           retention-days: 7

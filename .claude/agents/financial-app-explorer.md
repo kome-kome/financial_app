@@ -18,7 +18,7 @@ model: haiku
 | `collector_financials.py` | XBRL財務収集・パース・CF/PL-BS補完。`build_xbrl_map()` で XBRL_MAP 逆引き生成 |
 | `collector_prices.py` | 株価・市場・マクロ収集 |
 | `api.py` | FastAPI REST・SSE・回帰分析エンドポイント・認証 |
-| `plugins/` | 分析モデル自動検出。`utils.py`(ols/winsorize)・`sector_ols.py`・`gap_analysis.py`・`recommend.py` |
+| `plugins/` | 分析モデル自動検出。`utils.py`(ols/winsorize)・`sector_ols`・`gap_analysis`・`recommend`・`sell_ranking`・`net_cash_analysis`・`macro_snapshots`・`macro_risk_return`(M-1)・`macro_gbdt`(M-2)・`macro_dlm`(M-3)・`tuning` |
 | `templates/*.html` | UI。JS は `static/js/<page>.js` に外部化 |
 | `_pipeline_gh.py` / `_pipeline_incremental.py` | GitHub Actions 全件/差分収集 |
 

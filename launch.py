@@ -28,7 +28,9 @@ def _is_running() -> bool:
 
 
 def _start_server():
-    log_path = os.path.join(BASE_DIR, "server.log")
+    log_dir = os.path.join(BASE_DIR, "logs")
+    os.makedirs(log_dir, exist_ok=True)
+    log_path = os.path.join(log_dir, "server.log")
     log_file = open(log_path, "w", encoding="utf-8")
     proc = subprocess.Popen(
         [PYTHON, "-m", "uvicorn", "api:app",
@@ -119,7 +121,7 @@ def main():
                 return
             time.sleep(0.5)
         root.after(0, lambda: [
-            status_var.set("⚠ 起動失敗 — server.log を確認してください"),
+            status_var.set("⚠ 起動失敗 — logs/server.log を確認してください"),
             status_lbl.config(fg="#ef4444"),
         ])
 

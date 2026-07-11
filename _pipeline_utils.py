@@ -6,6 +6,7 @@
 だったため `backoff_base` 引数で吸収し、各パイプラインは既定挙動を保つ値を束ねて使う。
 """
 import asyncio
+import os
 from datetime import datetime
 
 from sqlalchemy.exc import InternalError, OperationalError
@@ -13,6 +14,10 @@ from sqlalchemy.exc import InternalError, OperationalError
 
 def make_logger(log_file: str):
     """`log_file` に追記しつつ標準出力にも流すロガー関数を生成する。"""
+    log_dir = os.path.dirname(log_file)
+    if log_dir:
+        os.makedirs(log_dir, exist_ok=True)
+
     def log(msg: str):
         ts = datetime.now().strftime("%H:%M:%S")
         line = f"[{ts}] {msg}"

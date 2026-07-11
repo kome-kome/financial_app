@@ -20,7 +20,7 @@ from collector import (
 from database import SessionLocal, init_db
 import _pipeline_utils
 
-LOG_FILE = "pipeline_incremental.log"
+LOG_FILE = "logs/pipeline_incremental.log"
 
 log = _pipeline_utils.make_logger(LOG_FILE)
 _is_readonly_error = _pipeline_utils._is_readonly_error
