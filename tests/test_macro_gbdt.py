@@ -505,7 +505,12 @@ class TestExecuteSmoke:
         """マクロ一部欠損（NaN）でも execute が end-to-end（XGB CV・OLS baseline・最終fit
         ・predict・SHAP）を完走し全社返す。USDJPY のみ充足、SP500/US10Y は NaN。"""
         db, prices_by_co, fin_by_co, companies = self._make_db()
-        params = self._make_params(use_macro=True)   # 既定3マクロ
+        # macro_features は全選択肢が既定になったため、この
+        # テストの意図（USDJPYのみ充足・SP500/US10Yは意図的NaN）に合わせて3系列に絞る。
+        params = self._make_params(
+            use_macro=True,
+            macro_features=["macro_usdjpy_yoy", "macro_sp500_yoy", "macro_us10y_zscore"],
+        )
         macro_cache = _make_macro_cache_usdjpy_only(prices_by_co)
 
         with patch("plugins.macro_gbdt.load_data", return_value=(prices_by_co, fin_by_co, companies)), \
