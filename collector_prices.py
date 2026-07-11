@@ -10,6 +10,7 @@ from datetime import date, timedelta
 from typing import Optional, Callable
 
 import httpx
+import openpyxl
 import pandas as pd
 from sqlalchemy import func as sqla_func
 from sqlalchemy.exc import SQLAlchemyError
@@ -1342,6 +1343,49 @@ ESRI_SERIES: list[dict] = [
     },
 ]
 
+# ── IMF WEO（World Economic Outlook）見通し（認証不要・#284）──────────────────
+# 匿名クエリのみ・APIキー不要（2026-07-11実API検証済み）。既存チャネルは全て実績値
+# （trailing）のため、予測・見通し（forward-looking）チャネルはこれが初。
+#
+# vintage（先読みバイアス）の扱い（重要・2系統構成）:
+#   1) バックフィル: IMF公式「Historical WEO Forecasts Database」（WEOhistorical.xlsx・
+#      https://www.imf.org/external/pubs/ft/weo/data/WEOhistorical.xlsx）。各vintage
+#      （Spring/Fall・1990年〜）時点で「翌年」に対して発表されていた予測値を保持する
+#      point-in-time パネル。2026-07-11取得版は Spring1990〜Fall2022 まで収録
+#      （fetch_imf_weo_historical が実データで確認）。
+#   2) 継続収集: 現行 SDMX API（api.imf.org/external/sdmx/3.0）の最新 dataflow（"+"）から
+#      「今日時点で分かっている翌年予測値」を trade_date=収集日 で追加する（他の市場系列
+#      と同じ「収集日に真に既知だった値」方式＝先読みバイアスなし）。
+#   実証済みの注意点: 現行 dataflow は公式 vintage 境界とは無関係に**随時改定**される
+#      （同一 COUNTRY_UPDATE_DATE 属性でも v6.0.0/v9.0.0 で値が異なることを確認）ため、
+#      過去日付に遡って適用すると先読みバイアス化する＝③のような固定vintage日付割当は
+#      使わない。
+#   既知の空白: 2023年4月〜2025年4月の4vintage分はバックフィル source（WEOhistorical.xlsx）
+#      にも公式vintage archive（IMF.RES配下の `WEO_2025_OCT_VINTAGE` 等・2025年10月開始の
+#      新制度）にも収録されておらず復元不可。継続収集が始まった時点から新しいvintageが
+#      発表されるたびに自然に埋まっていく。
+IMF_HIST_URL = "https://www.imf.org/external/pubs/ft/weo/data/WEOhistorical.xlsx"
+IMF_BASE_URL = "https://api.imf.org/external/sdmx/3.0/data/dataflow/IMF.RES/WEO/+"
+
+IMF_SERIES: list[dict] = [
+    {
+        "code": "JP_WEO_GDP_FCAST",
+        "name": "日本 IMF WEO 実質GDP成長率見通し（翌年）",
+        "category": "forecast",
+        "indicator":    "NGDP_RPCH",  # SDMX API 側の指標コード
+        "excel_column": "ngdp_rpch",  # WEOhistorical.xlsx 側の列サフィックス
+        "lag_days": 45,
+    },
+    {
+        "code": "JP_WEO_CPI_FCAST",
+        "name": "日本 IMF WEO インフレ率見通し（翌年）",
+        "category": "forecast",
+        "indicator":    "PCPIPCH",
+        "excel_column": "pcpi_pch",
+        "lag_days": 45,
+    },
+]
+
 
 def _esri_candidate_urls(today: date) -> list[str]:
     """直近 ESRI_QUARTERS_BACK 四半期 × ESRI_REPORTS（2次優先）のURL候補を、
@@ -1798,6 +1842,132 @@ async def fetch_estat_index_series(
     return rows
 
 
+def _parse_imf_weo_sheet(wb, excel_column: str, lag_days: int = 0) -> list[dict]:
+    """WEOhistorical.xlsx の1シート（例 "ngdp_rpch"）から日本（JPN）の「翌年予測値」を
+    vintage（S{year}=Spring/F{year}=Fall）ごとに抽出する。シートは1行=対象年（`year`列）、
+    列は vintage ごとの `S{year}{excel_column}`/`F{year}{excel_column}` ペア。vintage 年 Y の
+    予測値は「対象年=Y+1の行」から読み取る（＝当年ではなく翌年見通しを採用し、既に判明
+    済みの当年実績と区別する）。欠測は "." 文字列（IMF側の欠測記号）。"""
+    ws = wb[excel_column]
+    rows_iter = ws.iter_rows(values_only=True)
+    header = next(rows_iter)
+    col_index = {name: i for i, name in enumerate(header) if name}
+    iso_idx  = col_index.get("ISOAlpha_3Code")
+    year_idx = col_index.get("year")
+    if iso_idx is None or year_idx is None:
+        log.warning("IMF WEO historical シート %s: 想定列（ISOAlpha_3Code/year）が見つからない", excel_column)
+        return []
+
+    by_year: dict[int, tuple] = {}
+    for row in rows_iter:
+        if row[iso_idx] != "JPN":
+            continue
+        try:
+            by_year[int(row[year_idx])] = row
+        except (TypeError, ValueError):
+            continue
+
+    vintage_years = sorted({
+        int(name[1:5])
+        for name in col_index
+        if name[:1] in ("S", "F") and name[1:5].isdigit() and name[5:] == excel_column
+    })
+
+    result = []
+    for vy in vintage_years:
+        target_row = by_year.get(vy + 1)
+        if target_row is None:
+            continue
+        for prefix, month in (("S", 4), ("F", 10)):
+            ci = col_index.get(f"{prefix}{vy}{excel_column}")
+            if ci is None or ci >= len(target_row):
+                continue
+            raw = target_row[ci]
+            try:
+                value = float(raw)  # 欠測は "." 文字列（IMF側の欠測記号）→ ValueError で除外
+            except (TypeError, ValueError):
+                continue
+            base_date = date(vy, month, 1)
+            trade_date = (base_date + timedelta(days=lag_days)) if lag_days else base_date
+            result.append({
+                "trade_date": trade_date.isoformat(),
+                "open": None, "high": None, "low": None,
+                "close": value, "volume": None,
+            })
+    return result
+
+
+async def fetch_imf_weo_historical(session: httpx.AsyncClient) -> dict[str, list[dict]]:
+    """IMF公式「Historical WEO Forecasts Database」（WEOhistorical.xlsx）から
+    IMF_SERIES 全系列の point-in-time バックフィルデータを1回のfetchで取得する
+    （ESRI GDP CSV と同型：1ファイルに全vintage×全年が入っているため1回で足りる）。
+    サーバーは User-Agent のみの素の GET を 403 で拒否するが、Range ヘッダーを付けた
+    リクエストには 200/206 で応答する（bot対策の実装差・2026-07-11実API検証済み）。
+    失敗時は空dictを返し、他系列の収集を止めない（fetch_esri_gdp_csv と同じ方針）。"""
+    try:
+        r = await session.get(IMF_HIST_URL, headers={"Range": "bytes=0-"}, timeout=120)
+        if r.status_code not in (200, 206):
+            log.warning("IMF WEO historical 取得失敗: HTTP %s", r.status_code)
+            return {}
+        wb = openpyxl.load_workbook(io.BytesIO(r.content), read_only=True)
+    except Exception as e:
+        log.warning("IMF WEO historical 取得/読込失敗: %s", type(e).__name__)
+        return {}
+
+    result: dict[str, list[dict]] = {}
+    try:
+        for series in IMF_SERIES:
+            sheet_name = series["excel_column"]
+            if sheet_name not in wb.sheetnames:
+                log.warning("IMF WEO historical シート不在: %s", sheet_name)
+                continue
+            result[series["code"]] = _parse_imf_weo_sheet(wb, sheet_name, series.get("lag_days", 0))
+    finally:
+        wb.close()
+    return result
+
+
+async def fetch_imf_weo_current(session: httpx.AsyncClient, indicator: str) -> list:
+    """現行（最新）IMF WEO dataflow（api.imf.org・認証不要）から「収集日時点で分かって
+    いる翌年予測値」を1点取得する。trade_date は収集日そのもの（他の市場系列と同じ
+    「その日に真に既知だった値」方式＝先読みバイアスなし）。現行dataflowは公式vintage
+    境界と無関係に随時改定される（同一 COUNTRY_UPDATE_DATE 属性でも過去版と値が異なる
+    ことを実API確認済み）ため、過去日付への割当（バックフィルと同じlag_days方式）はせず
+    常に「今日」に紐づける。"""
+    today = date.today()
+    target_year = str(today.year + 1)
+    url = f"{IMF_BASE_URL}/JPN.{indicator}.A"
+    try:
+        r = await session.get(
+            url,
+            params={"dimensionAtObservation": "TIME_PERIOD", "attributes": "dsd", "measures": "all"},
+            headers={"Accept": "application/vnd.sdmx.data+json; version=2.0.0"},
+            timeout=30,
+        )
+        r.raise_for_status()
+        d = r.json()
+        struct = d["data"]["structures"][0]
+        tp = [v["value"] for dim in struct["dimensions"]["observation"] if dim["id"] == "TIME_PERIOD" for v in dim["values"]]
+        series = list(d["data"]["dataSets"][0]["series"].values())[0]
+        obs = {tp[int(k)]: v[0] for k, v in series["observations"].items()}
+    except Exception as e:
+        log.warning("IMF WEO current 取得失敗 %s: %s", indicator, type(e).__name__)
+        return []
+
+    raw = obs.get(target_year)
+    if raw is None:
+        return []
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return []
+    return [{
+        "trade_date": today.isoformat(),
+        "open": None, "high": None, "low": None,
+        "close": value, "volume": None,
+    }]
+
+
 async def fetch_yahoo_history(
     session: httpx.AsyncClient,
     yf_ticker: str,
@@ -1876,9 +2046,10 @@ async def collect_macro_data(
     cancel_check: Optional[Callable[[], bool]] = None,
 ):
     """MACRO_SERIES（Yahoo/stooq）+ FRED_SERIES + BOJ_SERIES + OECD_SERIES + ESRI_SERIES +
-    ESTAT_SERIES を macro_data に upsert。Yahoo Finance 優先（GitHub Actions Azure IP 対応）→
-    stooq フォールバック。FRED: FRED_API_KEY 設定時のみ。BOJ・OECD・ESRI: 常時収集（認証不要）。
-    e-Stat: ESTAT_API_KEY 設定時のみ。既存レコードは close 等を上書き（最新値で更新）。"""
+    IMF_SERIES + ESTAT_SERIES を macro_data に upsert。Yahoo Finance 優先（GitHub Actions
+    Azure IP 対応）→ stooq フォールバック。FRED: FRED_API_KEY 設定時のみ。BOJ・OECD・ESRI・
+    IMF: 常時収集（認証不要）。e-Stat: ESTAT_API_KEY 設定時のみ。既存レコードは close 等を
+    上書き（最新値で更新）。"""
     today      = date.today()
     start      = today - timedelta(days=int(years_back * 365.25))
     d1         = start.strftime("%Y%m%d")
@@ -1903,6 +2074,7 @@ async def collect_macro_data(
         + len(BOJ_SERIES)
         + len(OECD_SERIES)
         + len(ESRI_SERIES)
+        + len(IMF_SERIES)
         + (len(ESTAT_SERIES) + len(ESTAT_INDEX_SERIES) if ESTAT_API_KEY else 0)
     )
     saved      = 0
@@ -2101,12 +2273,52 @@ async def collect_macro_data(
             if on_progress:
                 on_progress(idx, total, f"[ESRI {r_i}/{len(ESRI_SERIES)}] {series['name']}: {n}件処理")
 
+        # ── IMF WEO 見通し 収集（認証不要・常時、バックフィルは1回のfetchで全系列取得）──
+        imf_base_i = esri_base_i + len(ESRI_SERIES)
+        if cancel_check and cancel_check():
+            if on_progress:
+                on_progress(imf_base_i, total, "[マクロ収集] ユーザー停止")
+            return saved
+
+        if on_progress:
+            on_progress(imf_base_i, total, f"[IMF 1/{len(IMF_SERIES)}] WEO historical 取得中")
+        imf_hist_cache = await fetch_imf_weo_historical(session)
+        for h_i, series in enumerate(IMF_SERIES, 1):
+            idx = imf_base_i + h_i
+            if cancel_check and cancel_check():
+                if on_progress:
+                    on_progress(idx - 1, total, "[マクロ収集] ユーザー停止")
+                return saved
+
+            hist_rows = imf_hist_cache.get(series["code"], [])
+            current_rows = await fetch_imf_weo_current(session, series["indicator"])
+            rows = hist_rows + current_rows
+
+            if not rows:
+                if on_progress:
+                    on_progress(idx, total, f"[IMF {h_i}/{len(IMF_SERIES)}] {series['name']} データ無し")
+                continue
+
+            vals = [{
+                "series_code": series["code"],
+                "series_name": series["name"],
+                "category":    series["category"],
+                "trade_date":  r["trade_date"],
+                "open": r["open"], "high": r["high"], "low": r["low"],
+                "close": r["close"], "volume": r["volume"],
+            } for r in rows]
+            n = upsert_macro_batch(db, vals)
+            db.commit()
+            saved += n
+            if on_progress:
+                on_progress(idx, total, f"[IMF {h_i}/{len(IMF_SERIES)}] {series['name']}: {n}件処理")
+
         # ── e-Stat 収集（ESTAT_API_KEY が設定されている場合のみ）────────────────
         if not ESTAT_API_KEY:
             if on_progress:
                 on_progress(total, total, "[e-Stat] ESTAT_API_KEY 未設定のためスキップ")
         else:
-            estat_base_i = esri_base_i + len(ESRI_SERIES)
+            estat_base_i = imf_base_i + len(IMF_SERIES)
             for m, series in enumerate(ESTAT_SERIES, 1):
                 idx = estat_base_i + m
                 if cancel_check and cancel_check():

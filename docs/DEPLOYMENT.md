@@ -374,6 +374,21 @@ ADR-0009 が定める先行指標（leading indicator）チャネル。Issue #28
 | 公表ラグ | CLI は対象月から2か月遅れで公表。先読みバイアス防止のため `lag_days=60`（e-Stat 鉱工業指数と同水準） |
 | GitHub Actions 疎通 | Azure IP からのブロック事例は未確認（stooq のような事例は無い想定だが本番初回実行で要確認） |
 
+### IMF WEO SDMX API（認証不要）
+
+ADR-0011 が定める forward-looking（見通し）チャネル。Issue #284。
+
+| 項目 | 値 |
+|---|---|
+| エンドポイント（継続収集） | `https://api.imf.org/external/sdmx/3.0/data/dataflow/IMF.RES/WEO/+/JPN.{indicator}.A` |
+| エンドポイント（バックフィル） | `https://www.imf.org/external/pubs/ft/weo/data/WEOhistorical.xlsx`（IMF公式 point-in-time パネル・Spring1990〜Fall2022収録） |
+| 認証 | 不要（匿名アクセス可。2026-07-11実API検証済み） |
+| 収集系列 | `JP_WEO_GDP_FCAST`（実質GDP成長率見通し・翌年・indicator=`NGDP_RPCH`）・`JP_WEO_CPI_FCAST`（インフレ率見通し・翌年・indicator=`PCPIPCH`） |
+| vintage先読みバイアス対策 | 現行dataflowは公式vintage境界と無関係に随時改定される（実証済み）ため、継続収集は必ず `trade_date=収集日` で固定。過去日付への割当はしない（詳細は GOTCHAS.md・ADR-0011） |
+| bot保護回避 | `WEOhistorical.xlsx` はプレーンGETだと403だが `Range: bytes=0-` ヘッダー付きなら200/206で応答する（実証済み） |
+| GitHub Actions 疎通 | Azure IP からのブロック事例は未確認（本番初回実行で要確認。特に `Range` ヘッダー workaround が有効か） |
+| 既知の空白 | 2023年4月〜2025年4月の4vintage分はバックフィル・vintage archive双方に不在（復元不可・構造的空白として許容） |
+
 ### e-Stat API（総務省統計局・要アカウント登録）
 
 ADR-0006 §Decision-1 が定める CPI チャネル。
