@@ -199,36 +199,52 @@ def shares_outstanding(record) -> float | None:
 
 
 def winsorize(vals: list[float], lo_pct: float = 1.0, hi_pct: float = 99.0) -> tuple[list[float], float, float]:
-    """外れ値を lo/hi パーセンタイルでクリップする。(clipped_vals, lo_bound, hi_bound) を返す。"""
+    """外れ値を lo/hi パーセンタイルでクリップする。(clipped_vals, lo_bound, hi_bound) を返す。
+
+    numpy ベクトル化版（Issue #304）。旧 Pure Python 実装（`sorted()` + インデックス計算）と
+    完全に同一の境界・数値を返すよう、np.sort() に同じインデックス計算式を適用し、
+    np.clip() でクリップする（np.percentile() の補間モードには依存しない）。
+    ソート・比較・クリップは丸め誤差を生まない演算のため、旧実装とビット単位で一致する
+    （tests/test_utils.py の新旧比較テストで検証済み）。
+    """
     n = len(vals)
     if n < 4:
         return vals, min(vals), max(vals)
-    sv = sorted(vals)
+    arr = np.asarray(vals, dtype=float)
+    sv = np.sort(arr)
     lo_i = max(0, int(n * lo_pct / 100))
     hi_i = min(n - 1, int(math.ceil(n * hi_pct / 100)) - 1)
-    lo, hi = sv[lo_i], sv[hi_i]
+    lo, hi = float(sv[lo_i]), float(sv[hi_i])
     if lo >= hi:
         return vals, lo, hi
-    return [max(lo, min(hi, v)) for v in vals], lo, hi
+    return np.clip(arr, lo, hi).tolist(), lo, hi
 
 
 def normalize(vals: list, method: str) -> tuple[list, float, float]:
-    """正規化。(normed, param1, param2) を返す。"""
+    """正規化。(normed, param1, param2) を返す。
+
+    numpy ベクトル化版（Issue #304）。要素ごとの変換（log／減算／除算）は numpy でベクトル化
+    するが、平均・標準偏差の集計は `statistics.mean`/`statistics.stdev`（内部で Fraction による
+    厳密演算）をそのまま用いる。`np.mean`/`np.std` は総和の演算順序が異なり丸め誤差が生じ得る
+    ため、旧 Pure Python 実装と完全に同一の数値を返す要件（Issue #304）を満たせない
+    （実測: ランダム入力での不一致率 mean 約57%・std 約23%）。log 変換自体は
+    `math.log`/`np.log` が同一 libm を呼ぶためビット一致することを確認済み。
+    """
     if method == "log":
-        vals = [math.log(max(v, 1e-9)) for v in vals]
-        mu = statistics.mean(vals)
-        sd = statistics.stdev(vals) if len(vals) > 1 else 1.0
+        logged = np.log(np.maximum(np.asarray(vals, dtype=float), 1e-9)).tolist()
+        mu = statistics.mean(logged)
+        sd = statistics.stdev(logged) if len(logged) > 1 else 1.0
         sd = sd or 1.0
-        return [(v - mu) / sd for v in vals], mu, sd
+        return ((np.asarray(logged, dtype=float) - mu) / sd).tolist(), mu, sd
     if method == "minmax":
         mn, mx = min(vals), max(vals)
         r = mx - mn or 1.0
-        return [(v - mn) / r for v in vals], mn, r
+        return ((np.asarray(vals, dtype=float) - mn) / r).tolist(), mn, r
     # zscore (default)
     mu = statistics.mean(vals)
     sd = statistics.stdev(vals) if len(vals) > 1 else 1.0
     sd = sd or 1.0
-    return [(v - mu) / sd for v in vals], mu, sd
+    return ((np.asarray(vals, dtype=float) - mu) / sd).tolist(), mu, sd
 
 
 def fit_feature_columns(
@@ -249,16 +265,24 @@ def fit_feature_columns(
     欠損値（NaN）は winsorize 前に当該列の平均（nanmean・全 NaN 列は 0）で補完する。
     補完統計は学習フォールド内のみで計算するためリークしない（M-2 のマクロ欠損許容用。
     M-1/sector_ols は NaN を生成しないため無影響）。
+
+    numpy ベクトル化版（Issue #304）。NaN 判定・補完の選択（np.isnan/np.where）はビット単位で
+    元実装と一致する（値の選択のみで演算を伴わない）。補完平均（col_mean）の集計は
+    `sum()/len()`（Python 組み込み・逐次加算）を維持する（`np.sum` は総和順序が異なり
+    丸め誤差が生じ得るため、旧実装との数値完全一致要件を満たせない）。
     """
-    X_norm = [[1.0] + [0.0] * n_feat for _ in range(len(X_raw))]
+    n_rows = len(X_raw)
+    X_norm = [[1.0] + [0.0] * n_feat for _ in range(n_rows)]
     win_params: list[tuple[float, float]] = []
     norm_params: list[tuple[float, float]] = []
+    X_arr = np.asarray(X_raw, dtype=float) if n_rows else np.empty((0, n_feat), dtype=float)
     for fi in range(n_feat):
-        col = [row[fi] for row in X_raw]
-        present = [v for v in col if v == v]   # NaN 除外（v == v は NaN 判定）
+        col = X_arr[:, fi]
+        is_nan = np.isnan(col)
+        present = col[~is_nan].tolist()        # NaN 除外（元の行順を保持）
         col_mean = (sum(present) / len(present)) if present else 0.0
-        col = [v if v == v else col_mean for v in col]
-        col_w, w_lo, w_hi = winsorize(col)
+        col_filled = np.where(is_nan, col_mean, col).tolist()
+        col_w, w_lo, w_hi = winsorize(col_filled)
         win_params.append((w_lo, w_hi))
         normed, p1, p2 = normalize(col_w, method)
         norm_params.append((p1, p2))

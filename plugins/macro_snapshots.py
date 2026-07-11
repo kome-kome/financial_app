@@ -292,23 +292,48 @@ class _BoundedCache:
         return value
 
 
+# キャッシュ名前空間の一覧。load_data/preload_macro/build_snapshots は本モジュール内の
+# 専用ラッパー（下記）が直接 _tuning_cache から引く。load_prices/load_macro_levels
+# （M-3・plugins/macro_dlm.py）と cv_by_selected_features（M-1・plugins/macro_risk_return.py）
+# は `tuning_cache_get_or_compute` 経由で他モジュールから使う汎用名前空間（Issue #304）。
+_CACHE_NAMESPACES = (
+    "load_data", "preload_macro", "build_snapshots",
+    "load_prices", "load_macro_levels",
+    "cv_by_selected_features",
+)
+
+
 @contextmanager
 def tuning_snapshot_cache():
-    """このブロック内では load_data/preload_macro/build_snapshots の結果をキャッシュする。
+    """このブロック内では探索軸に依存しない重い処理の結果をキャッシュする。
 
-    ハイパーパラメータ探索（plugins/tuning.py の search()）専用。探索軸に依存しない
-    重複計算（Issue #298）を候補間で使い回す。ブロックを抜けるとキャッシュは破棄され、
+    ハイパーパラメータ探索（plugins/tuning.py の search()）専用。load_data/preload_macro/
+    build_snapshots（Issue #298・M-1/M-2 共有）に加え、M-3 の load_prices/load_macro_levels
+    （plugins/macro_dlm.py）・M-1 の BIC選択結果に紐づく CV 結果（cv_by_selected_features・
+    plugins/macro_risk_return.py）も同じコンテキストで管理する（Issue #304・モジュールを
+    またぐ利用は `tuning_cache_get_or_compute` 経由）。ブロックを抜けるとキャッシュは破棄され、
     以後の呼び出し（次回の探索・通常の API 実行）には一切影響しない。
     """
-    token = _tuning_cache.set({
-        "load_data":      _BoundedCache(),
-        "preload_macro":  _BoundedCache(),
-        "build_snapshots": _BoundedCache(),
-    })
+    token = _tuning_cache.set({ns: _BoundedCache() for ns in _CACHE_NAMESPACES})
     try:
         yield
     finally:
         _tuning_cache.reset(token)
+
+
+def tuning_cache_get_or_compute(namespace: str, key: Any, compute) -> Any:
+    """`tuning_snapshot_cache()` の名前空間付きキャッシュへ汎用アクセスする（Issue #304）。
+
+    macro_snapshots.py 外のモジュール（plugins/macro_dlm.py の load_prices/load_macro_levels・
+    plugins/macro_risk_return.py の BIC選択結果に紐づく CV 結果）が、load_data 等と同じ
+    contextvars パターンを再利用するための公開ヘルパー。`tuning_snapshot_cache()` コンテキスト
+    外（通常の API 実行）では常に `compute()` を実行しキャッシュしない。namespace は
+    `_CACHE_NAMESPACES` に定義済みのもののみ有効（未定義は KeyError）。
+    """
+    cache = _tuning_cache.get()
+    if cache is None:
+        return compute()
+    return cache[namespace].get_or_compute(key, compute)
 
 
 # ── データロード ───────────────────────────────────────────────────────────
@@ -623,6 +648,15 @@ def select_features_bic(X: np.ndarray, y: np.ndarray, max_features: int) -> list
     （ADR-0002 §1・Considered Options）。L1 正則化が共線性をネイティブに処理する。
     選択は LASSO で行い、最終係数は呼び出し側の OLS/階層モデル再フィットで不偏化する。
     BIC 最小解が max_features を超える場合は |係数| 降順の上位 max_features に切り詰める。
+
+    コスト計測（Issue #304・本番DB読取専用・M-1 max_features 6候補グリッド）: フルパイプライン
+    199.08秒（本Issueの他3案適用後）のうち本関数の累計実行時間は31.49秒（15.82%）。
+    無視できない割合だが単体では支配的ボトルネックではなく（残り84.18%は Walk-Forward CV・
+    最終 OLS・全社スコアリング）、本 Issue のスコープでは高速化を見送る（`LassoLarsIC` 自体の
+    アルゴリズム変更は統計的妥当性に影響し得るため4案の対象外）。max_features 候補間で
+    選択結果（selected_names）が偶然一致するケースが実測でも観測された（30/40 候補で
+    score 完全一致）ため、BIC 自体の高速化ではなく後続 CV の重複排除（`macro_risk_return.py`
+    の `cv_by_selected_features` キャッシュ）で対処した。
     """
     from sklearn.linear_model import LassoLarsIC
 

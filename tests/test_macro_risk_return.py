@@ -746,3 +746,94 @@ class TestObjectiveOnlyMode:
         assert len(result["results"]) > 0
         assert result["n_companies"] > 0
         assert result["feature_coefs"] != {}
+
+
+# ── BIC選択結果（selected_names）に紐づく CV/OLS 結果キャッシュ（Issue #304） ────────
+# 異なる max_features 候補間で LassoLarsIC(BIC) の選択結果（selected_names）が偶然
+# 同一になった場合、samples_by_ym が同一（#298 の build_snapshots キャッシュにより
+# 候補間で共有）である限り samples_sel も数学的に完全に同一になるため、
+# walk_forward_cv_monthly() の再実行は純粋な重複計算（近似ではない）。
+# load_data/build_snapshots はモックで固定オブジェクトを返し、#298 のキャッシュ挙動とは
+# 独立に本キャッシュ（cv_by_selected_features）だけを検証する。
+
+def _make_samples_by_ym(months: int = 10, n_per_month: int = 6, seed: int = 0) -> dict:
+    """CV に十分な月次サンプル（features=["per","pbr"]相当の2列）を合成する。"""
+    import random
+    rng = random.Random(seed)
+    data: dict = {}
+    for m in range(months):
+        ym = f"2023-{m + 1:02d}"
+        data[ym] = [
+            ([rng.uniform(-1.0, 1.0), rng.uniform(-1.0, 1.0)], rng.uniform(-0.1, 0.1))
+            for _ in range(n_per_month)
+        ]
+    return data
+
+
+class TestCvResultCacheBySelectedFeatures:
+
+    def _run(self, db, samples_by_ym, selected_names_per_call, max_features_list):
+        """build_snapshots/_select_macro_features をモックし、max_features_list の各値で
+        execute() を順に呼ぶ。selected_names_per_call は呼び出し順に対応する
+        _select_macro_features の戻り値のリスト（`[names_call1, names_call2, ...]`）。"""
+        import plugins.macro_risk_return as mrr
+
+        plugin = MacroRiskReturnPlugin()
+        schema = plugin.params_schema()
+        real_cv = mrr.walk_forward_cv_monthly
+        wrapped_cv = MagicMock(wraps=real_cv)
+
+        with patch("plugins.macro_risk_return.load_data",
+                   return_value=({"E1": []}, {}, {})), \
+             patch("plugins.macro_risk_return.build_snapshots",
+                   return_value=(samples_by_ym, {}, {}, ["per", "pbr"])), \
+             patch.object(MacroRiskReturnPlugin, "_select_macro_features",
+                          side_effect=list(selected_names_per_call)), \
+             patch("plugins.macro_risk_return.walk_forward_cv_monthly", wrapped_cv):
+            results = []
+            for mf in max_features_list:
+                params = coerce_params(schema, {"use_macro": False, "max_features": mf})
+                results.append(asyncio.run(plugin.execute(params, db)))
+        return results, wrapped_cv
+
+    def test_cv_computed_once_when_selected_names_match(self):
+        """selected_names が一致する2候補（max_features=5/30）は CV を1回だけ実行する。"""
+        import database
+        import plugins.macro_snapshots as ms
+
+        samples_by_ym = _make_samples_by_ym()
+        db = MagicMock()
+        with ms.tuning_snapshot_cache(), database.tuning_objective_only():
+            results, wrapped_cv = self._run(
+                db, samples_by_ym, [["per", "pbr"], ["per", "pbr"]], [5, 30]
+            )
+
+        assert wrapped_cv.call_count == 1
+        assert results[0]["selected_features"] == ["per", "pbr"]
+        assert results[1]["selected_features"] == ["per", "pbr"]
+        assert results[0]["oof_backtest"] == results[1]["oof_backtest"]
+
+    def test_cv_recomputed_when_selected_names_differ(self):
+        """selected_names が異なれば CV はキャッシュを共有せず2回実行される。"""
+        import database
+        import plugins.macro_snapshots as ms
+
+        samples_by_ym = _make_samples_by_ym()
+        db = MagicMock()
+        with ms.tuning_snapshot_cache(), database.tuning_objective_only():
+            _results, wrapped_cv = self._run(
+                db, samples_by_ym, [["per", "pbr"], ["pbr"]], [5, 30]
+            )
+
+        assert wrapped_cv.call_count == 2
+
+    def test_cv_recomputed_outside_tuning_context(self):
+        """tuning_snapshot_cache() コンテキスト外（通常の /api/plugins/{name}/run）では
+        selected_names が同一でもキャッシュされず毎回フル計算する。"""
+        samples_by_ym = _make_samples_by_ym()
+        db = MagicMock()
+        _results, wrapped_cv = self._run(
+            db, samples_by_ym, [["per", "pbr"], ["per", "pbr"]], [5, 30]
+        )
+
+        assert wrapped_cv.call_count == 2
