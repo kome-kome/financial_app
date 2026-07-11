@@ -626,6 +626,32 @@ tr:hover td{background:var(--border-subtle)}
   </div>
 </div>
 
+<div id="tab-model_comparison" class="hidden">
+  <div class="card">
+    <div class="flex-between" style="margin-bottom:12px">
+      <div class="section-title" style="margin-bottom:0">モデル比較（OOF）— 将来リターン予測 M-1 / M-2 / M-3</div>
+    </div>
+    <div class="info-box" style="margin-bottom:14px">
+      将来リターン予測モデル（M-1 OLS / M-2 XGBoost / M-3 DLM）の予測力を、<b>無リーク walk-forward の
+      アウトオブサンプル検証（OOF）</b>で横並び比較します。指標は rank-IC（μ̂ と実現リターンの順位相関）・
+      ロングショート spread（最高 μ̂ 分位 − 最低 μ̂ 分位）・hit-rate。<br>
+      上の「バックテスト」（過去時点スコアリング上位N社の実現リターン）とは<b>別手法</b>です。各モデルを既定
+      パラメータで実行するため<b>計算が重く、ローカル環境専用</b>（Render では実行されません）。株価週次履歴・
+      マクロ指標の蓄積が必要です。
+    </div>
+    <button class="btn btn-primary" id="btn-model-comparison" data-click="runModelComparison">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
+      3モデルを実行して比較
+    </button>
+  </div>
+
+  <div class="card hidden" id="mc-results-card">
+    <div class="section-title" style="margin-bottom:4px">比較結果 — アウトオブサンプル検証（OOF）</div>
+    <div class="text-sm" id="mc-computed-at" style="color:var(--text-muted);margin-bottom:12px"></div>
+    <div id="mc-grid" style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px"></div>
+  </div>
+</div>
+
 <!-- マクロ×リスク-リターン推奨（M-1） -->
 <div id="tab-macro_risk_return" class="hidden">
   <div class="grid2">

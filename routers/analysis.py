@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 import api
 import backtest
+import model_comparison
 import plugins as plugin_registry
 
 router = APIRouter()
@@ -41,6 +42,16 @@ SPECIAL_ANALYSES = [
         "category": "④ 戦略を検証",
         "ui_order": 410,
         "params_schema": {},  # 専用UI（既存タブ）を使用するため空
+    },
+    {
+        "name": "model_comparison",
+        "label": "モデル比較（OOF）",
+        "description": "将来リターン予測モデル M-1/M-2/M-3 の予測力（rank-IC・ロングショート spread・hit-rate）を無リーク OOF で横並び比較します（/api/backtest の as-of 上位N とは別手法）",
+        "depends_on": [],
+        "heavy": True,   # 3モデル（heavy）を実行するため。Render では各モデルがスキップされる
+        "category": "④ 戦略を検証",
+        "ui_order": 420,
+        "params_schema": {},  # 専用UI（静的タブ）を使用するため空
     },
 ]
 
@@ -202,3 +213,18 @@ async def backtest_multi(
             periods.append({"holding_months": m, "summary": None, "results": [],
                             "total_candidates": 0, "error": "計算エラー"})
     return {"periods": periods, "preset": preset, "top_n": top_n, "source": source}
+
+
+@router.post("/api/backtest/model-comparison", response_model=None)
+@api.limiter.limit(api.RATELIMIT_ANALYSIS)
+async def backtest_model_comparison(request: Request, db: Session = Depends(api.get_db)):
+    """将来リターン予測モデル M-1/M-2/M-3 の OOF バックテストを横並び比較する。
+
+    3モデルとも heavy=True のため、Render 軽量モードでは各モデルが reason="heavy_render" で
+    スキップされる（ローカル実行専用）。個々のモデル失敗は per-model で握り、比較全体は継続する。
+    """
+    try:
+        return await model_comparison.run_comparison(db, render_light_mode=api.RENDER_LIGHT_MODE)
+    except Exception as e:
+        log.error("Model comparison error: %s", e, exc_info=True)
+        raise HTTPException(500, "モデル比較の実行エラーが発生しました。")

@@ -92,6 +92,7 @@ const PLUGIN_TAB_MAP = {
   'sell_ranking':       'sell_ranking',
   'net_cash_analysis':  'net_cash',
   'backtest':           'backtest',   // 特例エントリ。既存の静的タブ #tab-backtest を使用
+  'model_comparison':   'model_comparison',   // 特例エントリ。静的タブ #tab-model_comparison を使用
   'macro_risk_return':  'macro_risk_return',
   'macro_gbdt':         'macro_gbdt',
   'macro_dlm':          'macro_dlm',
@@ -888,6 +889,95 @@ function _renderBtMulti(data) {
       <td style="text-align:right;color:var(--text-muted)">${s?.n_with_data ?? 0}社</td>
     </tr>`;
   }).join('');
+}
+
+// ── モデル比較（OOF・M-1/M-2/M-3 横並び）────────────────────────────────
+// 各モデルの oof_backtest（無リーク walk-forward）を1列カードで並べる。指標・分位バーの
+// 視覚言語は _mrrOofHTML（M-1/M-2/M-3 の各パネル）と揃える。
+async function runModelComparison() {
+  const btn = document.getElementById('btn-model-comparison');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span> 3モデル実行中（計算が重いため時間がかかります）...';
+  try {
+    const d = await apiFetch('/api/backtest/model-comparison', {method:'POST', body:'{}'});
+    _renderModelComparison(d);
+    document.getElementById('mc-results-card').classList.remove('hidden');
+  } catch(e) {
+    showNotif('モデル比較に失敗: ' + e.message);
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg> 3モデルを実行して比較';
+  }
+}
+
+// 未実行理由コード → 表示メッセージ。
+const MC_REASON_LABEL = {
+  heavy_render:   'このモデルは計算が重いため Render では実行されません（ローカルで実行してください）',
+  dependency:     '依存モデルが未実行です',
+  value_error:    'データ不足のため実行できませんでした',
+  not_registered: 'モデルが登録されていません',
+  error:          '実行エラー',
+};
+
+function _mcModelCard(m) {
+  const head = `<div style="font-size:13px;font-weight:700;color:var(--accent-text)">${esc(m.short)}</div>
+    <div style="font-size:11px;color:var(--text-muted);margin-bottom:8px">${esc(m.label || m.name)}</div>`;
+  if (!m.available) {
+    const msg = MC_REASON_LABEL[m.reason] || '実行できませんでした';
+    const detail = m.error ? `<div style="font-size:10px;color:var(--text-muted);margin-top:6px">${esc(m.error)}</div>` : '';
+    return `<div style="padding:12px 14px;background:var(--bg-sunken);border-radius:8px;border:1px solid var(--border-muted)">
+      ${head}
+      <div style="font-size:11px;color:var(--status-warn-text)">${esc(msg)}</div>${detail}
+    </div>`;
+  }
+  const oof = m.oof_backtest || {};
+  const qr  = oof.quantile_returns || [];
+  const ic  = oof.rank_ic || {};
+  const hasOof = qr.length > 0;
+  const metrics = `
+    <div style="display:grid;grid-template-columns:1fr;gap:6px;margin-bottom:10px">
+      <div style="padding:6px 8px;background:var(--bg-panel,var(--bg-sunken));border-radius:6px">
+        <div style="font-size:10px;color:var(--text-muted)">rank-IC（Spearman 平均±std）</div>
+        <div style="font-size:15px;font-weight:700;color:${(ic.mean||0)>0?cssVar('--val-up-text'):cssVar('--val-down-text')}">${ic.mean!=null?ic.mean.toFixed(3):'-'}<span style="font-size:11px;color:var(--text-muted)"> ±${ic.std!=null?ic.std.toFixed(3):'-'}</span></div>
+        <div style="font-size:10px;color:var(--text-muted)">${ic.n||0} fold</div>
+      </div>
+      <div style="padding:6px 8px;background:var(--bg-panel,var(--bg-sunken));border-radius:6px">
+        <div style="font-size:10px;color:var(--text-muted)">ロングショート spread（top−bottom）</div>
+        <div style="font-size:15px;font-weight:700;color:${(oof.long_short_spread||0)>0?cssVar('--val-up-text'):cssVar('--val-down-text')}">${oof.long_short_spread!=null?(oof.long_short_spread*100).toFixed(2)+'%':'-'}</div>
+      </div>
+      <div style="padding:6px 8px;background:var(--bg-panel,var(--bg-sunken));border-radius:6px">
+        <div style="font-size:10px;color:var(--text-muted)">hit-rate（top&gt;bottom の期）</div>
+        <div style="font-size:15px;font-weight:700;color:#c084fc">${oof.hit_rate!=null?(oof.hit_rate*100).toFixed(0)+'%':'-'}<span style="font-size:10px;color:var(--text-muted)"> / ${oof.n_periods_quantile||0}期</span></div>
+      </div>
+    </div>`;
+  const bars = hasOof ? `
+    <div style="font-size:10px;color:var(--text-secondary);margin-bottom:4px">分位別 平均実現リターン（左=最低 μ̂ → 右=最高）</div>
+    <div style="display:flex;align-items:flex-end;gap:4px;height:72px">
+      ${(() => {
+        const mx = Math.max(...qr.map(Math.abs), 1e-9);
+        return qr.map((v, i) => {
+          const h = Math.round(Math.abs(v) / mx * 54) + 2;
+          const col = v >= 0 ? cssVar('--val-up-text') : cssVar('--val-down-text');
+          return `<div style="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:flex-end;height:100%">
+            <div style="font-size:9px;color:${col}">${(v*100).toFixed(1)}</div>
+            <div style="width:100%;height:${h}px;background:${col};border-radius:3px 3px 0 0"></div>
+            <div style="font-size:9px;color:var(--text-muted);margin-top:2px">Q${i+1}</div>
+          </div>`;
+        }).join('');
+      })()}
+    </div>`
+    : `<div style="font-size:10px;color:var(--text-muted)">OOF サンプルが期内 ${(oof.n_quantiles||5)*2} 銘柄未満のため分位を表示できません。rank-IC は ${ic.n||0} fold で算出。</div>`;
+  return `<div style="padding:12px 14px;background:var(--bg-sunken);border-radius:8px;border:1px solid var(--border-muted)">
+    ${head}${metrics}${bars}
+  </div>`;
+}
+
+function _renderModelComparison(data) {
+  const models = data.models || [];
+  const ca = data.computed_at ? new Date(data.computed_at).toLocaleString('ja-JP') : '-';
+  document.getElementById('mc-computed-at').textContent =
+    `実行時刻: ${ca}　｜　rank-IC・ロングショート spread が高いほど μ̂ の予測力が高い（無リーク OOF）`;
+  document.getElementById('mc-grid').innerHTML = models.map(_mcModelCard).join('');
 }
 
 // ── ユーティリティ ───────────────────────────────────────────────────
