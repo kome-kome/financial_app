@@ -117,6 +117,12 @@ async def search(
     結果を使い回す。このコンテキストは search() を抜けると解除され、通常の API 実行
     （/api/plugins/{name}/run）には影響しない。
 
+    同じコンテキストで、M-3（macro_dlm）の load_prices/load_macro_levels（DB全件ロード）と
+    M-1（macro_risk_return）の BIC選択結果（selected_names）に紐づく Walk-Forward CV 結果も
+    キャッシュされる（Issue #304）。両者とも `macro_snapshots.tuning_cache_get_or_compute()`
+    経由で既存の `tuning_snapshot_cache()` の名前空間を再利用するため、search() 側の
+    変更はこの docstring 更新のみで完結する（with 文自体は #298 のまま）。
+
     同時に database.tuning_objective_only() でも包む（Issue #299）。ここで読むのは
     oof_backtest のみのため、各プラグインの execute() は oof_backtest 算出後の
     全社スコアリング（M-1: _fit_final/_score_companies、M-2: raw_items構築+SHAP計算、

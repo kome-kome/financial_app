@@ -391,6 +391,68 @@ class TestTuningSnapshotCache:
         assert mock_impl.call_count == 2
 
 
+# ── tuning_cache_get_or_compute（汎用キャッシュヘルパー・Issue #304） ────────────────
+# macro_snapshots.py 外のモジュール（M-3の load_prices/load_macro_levels・M-1の
+# cv_by_selected_features）が load_data 等と同じ contextvars パターンを再利用するための
+# 汎用アクセサ。プリミティブ自体の挙動（キー一致/不一致・コンテキスト内外）を直接検証する。
+
+class TestTuningCacheGetOrCompute:
+
+    def test_hits_cache_within_context_for_same_key(self):
+        import plugins.macro_snapshots as ms
+        compute = MagicMock(return_value="v")
+
+        with ms.tuning_snapshot_cache():
+            assert ms.tuning_cache_get_or_compute("load_prices", "k1", compute) == "v"
+            assert ms.tuning_cache_get_or_compute("load_prices", "k1", compute) == "v"
+
+        assert compute.call_count == 1
+
+    def test_different_keys_both_compute(self):
+        import plugins.macro_snapshots as ms
+
+        with ms.tuning_snapshot_cache():
+            assert ms.tuning_cache_get_or_compute("load_prices", "a", lambda: "va") == "va"
+            assert ms.tuning_cache_get_or_compute("load_prices", "b", lambda: "vb") == "vb"
+
+    def test_namespaces_are_isolated(self):
+        """同じキーでも名前空間が違えば別エントリ（load_prices と load_macro_levels が
+        誤って値を共有しない）。"""
+        import plugins.macro_snapshots as ms
+
+        with ms.tuning_snapshot_cache():
+            v1 = ms.tuning_cache_get_or_compute("load_prices", "k", lambda: "prices")
+            v2 = ms.tuning_cache_get_or_compute("load_macro_levels", "k", lambda: "macro")
+
+        assert v1 == "prices"
+        assert v2 == "macro"
+
+    def test_recomputes_outside_context(self):
+        import plugins.macro_snapshots as ms
+        compute = MagicMock(return_value="v")
+
+        ms.tuning_cache_get_or_compute("load_prices", "k1", compute)
+        ms.tuning_cache_get_or_compute("load_prices", "k1", compute)
+
+        assert compute.call_count == 2
+
+    def test_unknown_namespace_raises(self):
+        import plugins.macro_snapshots as ms
+
+        with ms.tuning_snapshot_cache():
+            with pytest.raises(KeyError):
+                ms.tuning_cache_get_or_compute("not_a_real_namespace", "k", lambda: "v")
+
+    def test_cv_by_selected_features_namespace_exists(self):
+        """M-1 の BIC選択結果キャッシュ（cv_by_selected_features）用の名前空間が
+        tuning_snapshot_cache() で確保されている（Issue #304）。"""
+        import plugins.macro_snapshots as ms
+
+        with ms.tuning_snapshot_cache():
+            v = ms.tuning_cache_get_or_compute("cv_by_selected_features", "k", lambda: "cv")
+        assert v == "cv"
+
+
 # ── search() 統合テスト: 構造パラメータ共有候補間でのスナップショット再利用（Issue #298） ──
 
 class _SnapshotAwarePlugin:

@@ -1038,3 +1038,94 @@ class TestObjectiveOnlyMode:
         assert len(res["results"]) > 0
         assert res["n_companies"] > 0
         assert res["diagnostics"] is not None
+
+
+# ── ハイパーパラメータ探索中の load_prices/load_macro_levels キャッシュ（Issue #304） ──
+# M-3 は #298 の tuning_snapshot_cache() 対象外（load_data/preload_macro/build_snapshots
+# は M-1/M-2 専用で、M-3 は財務を使わない独自の load_prices/load_macro_levels を持つ）
+# だったため、候補ごとに株価・マクロデータを DB から毎回フルロードしていた。
+# plugins.macro_snapshots.tuning_cache_get_or_compute() 経由で同じキャッシュ機構を再利用する。
+
+class TestTuningSnapshotCacheForDlm:
+
+    def test_load_prices_cached_within_context(self, monkeypatch):
+        import plugins.macro_dlm as dlm
+        import plugins.macro_snapshots as ms
+        mock_impl = MagicMock(return_value=({}, {}))
+        monkeypatch.setattr(dlm, "_load_prices_impl", mock_impl)
+
+        with ms.tuning_snapshot_cache():
+            dlm.load_prices("db1")
+            dlm.load_prices("db1")
+
+        assert mock_impl.call_count == 1
+
+    def test_load_prices_recomputes_outside_context(self, monkeypatch):
+        import plugins.macro_dlm as dlm
+        mock_impl = MagicMock(return_value=({}, {}))
+        monkeypatch.setattr(dlm, "_load_prices_impl", mock_impl)
+
+        dlm.load_prices("db1")
+        dlm.load_prices("db1")
+
+        assert mock_impl.call_count == 2
+
+    def test_load_prices_different_db_is_cache_miss(self, monkeypatch):
+        import plugins.macro_dlm as dlm
+        import plugins.macro_snapshots as ms
+        mock_impl = MagicMock(return_value=({}, {}))
+        monkeypatch.setattr(dlm, "_load_prices_impl", mock_impl)
+
+        with ms.tuning_snapshot_cache():
+            dlm.load_prices("db1")
+            dlm.load_prices("db2")
+
+        assert mock_impl.call_count == 2
+
+    def test_load_macro_levels_cached_by_series_and_min_date(self, monkeypatch):
+        import plugins.macro_dlm as dlm
+        import plugins.macro_snapshots as ms
+        mock_impl = MagicMock(return_value={})
+        monkeypatch.setattr(dlm, "_load_macro_levels_impl", mock_impl)
+
+        with ms.tuning_snapshot_cache():
+            dlm.load_macro_levels("db1", ["USDJPY", "US10Y"], "2020-01-01")
+            dlm.load_macro_levels("db1", ["US10Y", "USDJPY"], "2020-01-01")  # 順序違い→同一キー
+            dlm.load_macro_levels("db1", ["USDJPY"], "2020-01-01")           # series違い→ミス
+
+        assert mock_impl.call_count == 2
+
+    def test_load_macro_levels_recomputes_outside_context(self, monkeypatch):
+        import plugins.macro_dlm as dlm
+        mock_impl = MagicMock(return_value={})
+        monkeypatch.setattr(dlm, "_load_macro_levels_impl", mock_impl)
+
+        dlm.load_macro_levels("db1", ["USDJPY"], None)
+        dlm.load_macro_levels("db1", ["USDJPY"], None)
+
+        assert mock_impl.call_count == 2
+
+    def test_search_calls_load_prices_once_across_candidates(self, monkeypatch):
+        """δ/β_v のみ違う候補間（macro_features・母集団は不変）は load_prices/
+        load_macro_levels を1回だけ実行する（Issue #304）。"""
+        import asyncio
+        import plugins.macro_dlm as dlm
+        from plugins.tuning import SearchDim, search
+
+        dates = _weekly_dates(90)
+        prices_by_co, companies = _make_prices_companies(3, dates)
+        macro_levels = _make_macro_levels(dates)
+        load_prices_mock = MagicMock(return_value=(prices_by_co, companies))
+        load_macro_mock = MagicMock(return_value=macro_levels)
+        monkeypatch.setattr(dlm, "_load_prices_impl", load_prices_mock)
+        monkeypatch.setattr(dlm, "_load_macro_levels_impl", load_macro_mock)
+
+        base_params = {k: v["default"] for k, v in plugin.params_schema().items() if "default" in v}
+        base_params.update({"min_weeks": 40, "burn_in_weeks": 5, "top_n": 3})
+        dims = [SearchDim("state_discount", [0.95, 0.97, 0.99])]
+
+        result = asyncio.run(search(plugin, base_params, dims, db="db1", strategy="grid"))
+
+        assert result["config"]["n_combos"] == 3
+        assert load_prices_mock.call_count == 1
+        assert load_macro_mock.call_count == 1
