@@ -108,6 +108,11 @@ _MACRO_MAP = {
     # CLI（振幅調整済み・100を中心とした指数）は水準（100からの乖離）自体がトレンド
     # 転換点シグナルであり yoy（前年比）を取ると意味が薄れるため zscore を採用。
     "macro_jp_cli_zscore": ("JP_CLI", "zscore"),
+    # ── IMF WEO 見通し（forward-looking・#284）─────────────────────────────
+    # GDP成長率・インフレ率とも符号が反転しうる（マイナス成長・デフレ見通し）ため
+    # 既存の実績GDP（yoy）とは区別し、率指標として zscore を採用（貿易収支と同じ規約）。
+    "macro_jp_weo_gdp_fcast_zscore": ("JP_WEO_GDP_FCAST", "zscore"),
+    "macro_jp_weo_cpi_fcast_zscore": ("JP_WEO_CPI_FCAST", "zscore"),
 }
 MACRO_FEATURE_NAMES = list(_MACRO_MAP.keys())
 
@@ -145,6 +150,8 @@ MACRO_FEATURE_OPTIONS = [
     {"value": "macro_jp_tankan_mfg_small_zscore",    "label": "日銀短観 製造業中小企業 業況DI Zスコア"},
     {"value": "macro_jp_tankan_nonmfg_small_zscore", "label": "日銀短観 非製造業中小企業 業況DI Zスコア"},
     {"value": "macro_jp_cli_zscore", "label": "OECD景気先行指数（CLI）Zスコア"},
+    {"value": "macro_jp_weo_gdp_fcast_zscore", "label": "IMF WEO 実質GDP成長率見通し（翌年）Zスコア"},
+    {"value": "macro_jp_weo_cpi_fcast_zscore", "label": "IMF WEO インフレ率見通し（翌年）Zスコア"},
 ]
 DEFAULT_MACRO_FEATURES = ["macro_usdjpy_yoy", "macro_sp500_yoy", "macro_us10y_zscore"]
 
