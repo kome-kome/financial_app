@@ -67,7 +67,7 @@ _DLM_MACRO_MAP: dict[str, tuple[str, str, str]] = {
     "dlm_t10y2y":    ("T10Y2Y",     "diff",   "米10y−2yスプレッド 週次差分"),
 }
 MACRO_FEATURE_OPTIONS = [{"value": k, "label": v[2]} for k, v in _DLM_MACRO_MAP.items()]
-DEFAULT_MACRO_FEATURES = ["dlm_usdjpy", "dlm_us10y", "dlm_nikkei225", "dlm_wti"]
+DEFAULT_MACRO_FEATURES = [o["value"] for o in MACRO_FEATURE_OPTIONS]
 
 WEEKS_PER_YEAR = 52
 # 週次日付グリッドで forward-fill 値がこの割合未満しか無い factor はモデルから自動除外する。

@@ -46,8 +46,9 @@ class TestPluginMeta:
     def test_depends_on_empty(self):
         assert plugin.depends_on == []
 
-    def test_default_factors_are_four(self):
-        assert len(DEFAULT_MACRO_FEATURES) == 4
+    def test_default_factors_are_all_options(self):
+        # #309 相当（M-3）: マクロ因子の既定値は全選択肢
+        assert DEFAULT_MACRO_FEATURES == [o["value"] for o in MACRO_FEATURE_OPTIONS]
         assert "dlm_nikkei225" in DEFAULT_MACRO_FEATURES   # 市場ファクターを含む
 
     def test_all_defaults_are_valid_options(self):
@@ -199,8 +200,14 @@ def _weekly_dates(n_weeks: int, start=(2018, 1, 5)):
     return [(base + datetime.timedelta(weeks=w)).isoformat() for w in range(n_weeks)]
 
 
+# _make_macro_levels が実データを与える4系列のみ。マクロ特徴量の既定値は全選択肢（13本）に
+# 拡張済みだが、この4本以外は本フィクスチャではカバレッジ0→自動除外されるため、smoke テストで
+# 「除外されず実際にモデルへ残る factor」を指す場合はこの定数で比較する。
+_COVERED_FEATURES = ["dlm_usdjpy", "dlm_us10y", "dlm_nikkei225", "dlm_wti"]
+
+
 def _make_macro_levels(dates, seed=0):
-    """既定4因子の系列コードに対し forward-fill 用 (dates, vals) を生成。"""
+    """_COVERED_FEATURES に対応する系列コードに対し forward-fill 用 (dates, vals) を生成。"""
     rng = np.random.default_rng(seed)
     n = len(dates)
     levels = {
@@ -272,8 +279,8 @@ class TestExecuteSmoke:
         for k in ("edinet_code", "company_name", "mu", "mu_ci", "alpha_weekly",
                   "n_weeks", "beta_latest", "path"):
             assert k in r0, f"results 行に '{k}' がない"
-        # beta_latest は4因子ぶん
-        assert set(r0["beta_latest"].keys()) == set(DEFAULT_MACRO_FEATURES)
+        # beta_latest はカバレッジ充足済みの4因子ぶん（他はテストフィクスチャ上0カバレッジで除外）
+        assert set(r0["beta_latest"].keys()) == set(_COVERED_FEATURES)
         for f, b in r0["beta_latest"].items():
             assert set(b.keys()) == {"mean", "lo", "hi"}
 
@@ -285,7 +292,7 @@ class TestExecuteSmoke:
         assert n > 0
         for key in ("mean", "lo", "hi"):
             assert len(path["alpha"][key]) == n
-        for f in DEFAULT_MACRO_FEATURES:
+        for f in _COVERED_FEATURES:
             assert len(path["beta"][f]["mean"]) == n
 
     def test_diagnostics_present(self):
@@ -304,7 +311,7 @@ class TestExecuteSmoke:
 
     def test_factor_labels_match(self):
         res = self._run()
-        assert set(res["factor_labels"].keys()) == set(DEFAULT_MACRO_FEATURES)
+        assert set(res["factor_labels"].keys()) == set(_COVERED_FEATURES)
 
     def test_oof_backtest_keys_present(self):
         """execute 結果に oof_backtest キーと必須サブキーが含まれる。"""
@@ -440,7 +447,7 @@ class TestThinFactorDrop:
         macro = _make_macro_levels(dates)
         macro["US10Y"] = (list(dates[70:]), [4.0 + 0.01 * i for i in range(20)])
 
-        res_all = self._run(prices_by_co, companies, macro)   # 既定4因子（US10Y は除外される）
+        res_all = self._run(prices_by_co, companies, macro)   # 既定=全選択肢（US10Yは薄く除外・他9本は無データで除外）
         res_sub = self._run(prices_by_co, companies, macro,
                             macro_features=["dlm_usdjpy", "dlm_nikkei225", "dlm_wti"])
         assert res_all["n_companies"] == res_sub["n_companies"]
@@ -450,9 +457,9 @@ class TestThinFactorDrop:
         dates = _weekly_dates(90)
         prices_by_co, companies = _make_prices_companies(3, dates)
         macro = _make_macro_levels(dates)
-        res = self._run(prices_by_co, companies, macro)
+        res = self._run(prices_by_co, companies, macro, macro_features=_COVERED_FEATURES)
         assert res["diagnostics"]["dropped_factors"] == []
-        assert set(res["macro_features"]) == set(DEFAULT_MACRO_FEATURES)
+        assert set(res["macro_features"]) == set(_COVERED_FEATURES)
 
     def test_all_thin_factors_raises_clear_error(self):
         """選択 factor が全て蓄積不足なら factor 名入りの明確なエラー。"""
@@ -472,9 +479,9 @@ class TestThinFactorDrop:
         dates = _weekly_dates(90)
         prices_by_co, companies = _make_prices_companies(3, dates)
         macro = _make_macro_levels(dates)
-        res = self._run(prices_by_co, companies, macro)
+        res = self._run(prices_by_co, companies, macro, macro_features=_COVERED_FEATURES)
         cov = res["diagnostics"]["factor_coverage"]
-        assert set(cov.keys()) == set(DEFAULT_MACRO_FEATURES)
+        assert set(cov.keys()) == set(_COVERED_FEATURES)
         for v in cov.values():
             assert v == pytest.approx(1.0)
 
