@@ -47,6 +47,12 @@ from .utils import macro_risk_exposure
 # feature_name → (series_code, kind, label)。
 #   kind="logret": 指数/FX/商品 → 週次対数リターン  log(level_t / level_{t-1})
 #   kind="diff"  : 金利         → 週次差分          level_t − level_{t-1}（％ポイント）
+#
+# 【設計】M-3 は週次高頻度ファクター専用。M-1/M-2 が持つ月次以下のマクロ系列（JP 実体経済・
+# 物価・マネー・サーベイ・OECD CLI・IMF WEO 等）はここに追加しない（ADR-0012・Issue #310）。
+# 観測モデルが「週次リターン ~ 各ファクターの週次変化」のため、forward-fill で月内定数になる
+# 低頻度系列は週次変化が大半ゼロ＝情報量が乏しく、_MIN_FACTOR_COVERAGE の自動除外も効かない。
+# 例外は dlm_jp10y（月次 JP10Y_FRED）＝日次の日本10年金利ソースが無いためのやむを得ない代替。
 _DLM_MACRO_MAP: dict[str, tuple[str, str, str]] = {
     "dlm_usdjpy":    ("USDJPY",     "logret", "USD/JPY 週次変化"),
     "dlm_eurjpy":    ("EURJPY",     "logret", "EUR/JPY 週次変化"),
