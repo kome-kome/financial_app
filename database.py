@@ -523,6 +523,39 @@ def tuning_dry_run():
         _tuning_dry_run.reset(token)
 
 
+# ── ハイパーパラメータ探索中のスコアリング省略モード（Issue #299）───────────────────
+# tuning_snapshot_cache()（Issue #298）で load_data/build_snapshots の重複計算は解消したが、
+# M-1/M-2/M-3 の execute() は候補ごとに oof_backtest 算出後も「最終モデル再学習＋全社
+# スコアリング」（M-1: _fit_final/_score_companies、M-2: raw_items構築+SHAP計算、
+# M-3: 全社分の β 経路・r_macro 整形）までフル実行しており、探索が読むのは oof_backtest
+# のみ（plugins/tuning.py::search()）のため無駄。tuning_dry_run() と対になる
+# contextvars.ContextVar パターンで、探索中だけ各プラグインの execute() に
+# 「oof_backtest 算出後、全社スコアリングをスキップして早期returnしてよい」ことを伝える。
+# 通常の API 実行（/api/plugins/{name}/run）はこのコンテキストが未設定のため常にフル実行する。
+_tuning_objective_only: contextvars.ContextVar = contextvars.ContextVar(
+    "_tuning_objective_only", default=False
+)
+
+
+@contextmanager
+def tuning_objective_only():
+    """このブロック内では is_tuning_objective_only() が True を返す。
+
+    各プラグインの execute() はこれを見て、oof_backtest 算出後の全社スコアリングを
+    スキップした早期return分岐に入ってよい（探索の目的関数算出には不要なため）。
+    """
+    token = _tuning_objective_only.set(True)
+    try:
+        yield
+    finally:
+        _tuning_objective_only.reset(token)
+
+
+def is_tuning_objective_only() -> bool:
+    """探索中「oof_backtest算出のみで十分（全社スコアリング省略可）」モードが有効か（Issue #299）。"""
+    return _tuning_objective_only.get()
+
+
 # ── 5c. M-2 per-stock 勾配ブースティング予測 μ̂（ADR-0004 / Issue #234）───────────
 # M-2（macro_gbdt）プラグインが execute() 末尾で書き込み、sell_ranking（consumer）が読む。
 # XGBoost は線形 β 表現を持たないため、M-1 の macro_beta（β 縦持ち・read 時 μ 復元）と異なり

@@ -305,3 +305,32 @@ class TestTuningDryRun:
             with database_module.tuning_dry_run():
                 raise ValueError("boom")
         assert database_module._tuning_dry_run.get() is False
+
+
+class TestTuningObjectiveOnly:
+    """database.tuning_objective_only() — 探索中の全社スコアリング省略モード（Issue #299）。"""
+
+    def test_is_tuning_objective_only_false_by_default(self):
+        from database import is_tuning_objective_only
+        assert is_tuning_objective_only() is False
+
+    def test_is_tuning_objective_only_true_inside_context(self):
+        from database import is_tuning_objective_only, tuning_objective_only
+        with tuning_objective_only():
+            assert is_tuning_objective_only() is True
+        assert is_tuning_objective_only() is False
+
+    def test_objective_only_resets_on_exception(self):
+        """with ブロック内で例外が出ても _tuning_objective_only は必ず解除される。"""
+        import database as database_module
+        with pytest.raises(ValueError):
+            with database_module.tuning_objective_only():
+                raise ValueError("boom")
+        assert database_module._tuning_objective_only.get() is False
+
+    def test_independent_from_tuning_dry_run(self):
+        """tuning_objective_only() は tuning_dry_run() と独立したコンテキスト
+        （#298 の tuning_snapshot_cache と同様、同時に有効になり得る別モード）。"""
+        from database import is_tuning_objective_only, tuning_dry_run
+        with tuning_dry_run():
+            assert is_tuning_objective_only() is False

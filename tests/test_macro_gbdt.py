@@ -590,6 +590,78 @@ class TestPluginMeta:
     def test_plugin_category(self):
         assert plugin.category == "③ 将来リターンを予測"
 
+
+# ── 6. ハイパーパラメータ探索中のスコアリング省略モード（Issue #299） ────────────
+
+class TestObjectiveOnlyMode:
+
+    def _make_params(self, **overrides):
+        base = {k: v["default"] for k, v in plugin.params_schema().items() if "default" in v}
+        base.update(overrides)
+        return coerce_params(plugin.params_schema(), base)
+
+    def _make_db(self, n_companies=4, n_weeks=160):
+        return TestExecuteSmoke()._make_db(n_companies=n_companies, n_weeks=n_weeks)
+
+    def test_skips_shap_and_raw_items_construction(self):
+        """database.tuning_objective_only() 内では SHAP 計算・最終モデル再学習を伴う
+        全社 raw_items 構築が呼ばれず、oof_backtest 算出直後に早期return する。"""
+        import database
+
+        db, prices_by_co, fin_by_co, companies = self._make_db()
+        params = self._make_params(use_macro=False)
+
+        with patch("plugins.macro_gbdt.load_data", return_value=(prices_by_co, fin_by_co, companies)), \
+             patch("plugins.macro_gbdt.preload_macro", return_value={}), \
+             patch("plugins.macro_gbdt.get_producer_scores", return_value={}), \
+             patch("shap.TreeExplainer") as mock_shap, \
+             database.tuning_objective_only():
+            result = asyncio.run(plugin.execute(params, db))
+
+        mock_shap.assert_not_called()
+        assert result["results"] == []
+        assert result["n_companies"] == 0
+        assert result["feature_coefs"] == {}
+        assert result["best_iteration"] is None
+        assert "oof_backtest" in result
+
+    def test_oof_backtest_identical_with_and_without_objective_only(self):
+        """スコアリング省略の有無で oof_backtest の値は一切変わらない（統計的妥当性の担保）。"""
+        import database
+
+        db, prices_by_co, fin_by_co, companies = self._make_db()
+        params = self._make_params(use_macro=False)
+
+        with patch("plugins.macro_gbdt.load_data", return_value=(prices_by_co, fin_by_co, companies)), \
+             patch("plugins.macro_gbdt.preload_macro", return_value={}), \
+             patch("plugins.macro_gbdt.get_producer_scores", return_value={}):
+            result_full = asyncio.run(plugin.execute(params, MagicMock()))
+
+        with patch("plugins.macro_gbdt.load_data", return_value=(prices_by_co, fin_by_co, companies)), \
+             patch("plugins.macro_gbdt.preload_macro", return_value={}), \
+             patch("plugins.macro_gbdt.get_producer_scores", return_value={}), \
+             database.tuning_objective_only():
+            result_skip = asyncio.run(plugin.execute(params, MagicMock()))
+
+        assert result_full["oof_backtest"] == result_skip["oof_backtest"]
+
+    def test_normal_mode_still_returns_full_results_outside_context(self):
+        """コンテキスト外（通常の /api/plugins/{name}/run 相当）は従来通りフルスコアリングする。"""
+        import database
+
+        db, prices_by_co, fin_by_co, companies = self._make_db()
+        params = self._make_params(use_macro=False)
+
+        assert database.is_tuning_objective_only() is False
+        with patch("plugins.macro_gbdt.load_data", return_value=(prices_by_co, fin_by_co, companies)), \
+             patch("plugins.macro_gbdt.preload_macro", return_value={}), \
+             patch("plugins.macro_gbdt.get_producer_scores", return_value={}):
+            result = asyncio.run(plugin.execute(params, db))
+
+        assert len(result["results"]) > 0
+        assert result["n_companies"] > 0
+        assert result["best_iteration"] is not None
+
     def test_plugin_name(self):
         assert plugin.name == "macro_gbdt"
 

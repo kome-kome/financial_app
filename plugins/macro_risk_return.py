@@ -309,6 +309,28 @@ class MacroRiskReturnPlugin(AnalysisPlugin):
         # 既存「バックテスト」(/api/backtest) とは別概念。M-2/M-3 と同じ形（#272）。
         oof_bt = oof_backtest(cv_residuals_by_ym, n_quantiles=5)
 
+        # --- ハイパーパラメータ探索中は oof_backtest 算出後に早期return（Issue #299）───
+        # plugins/tuning.py::search() が読むのは oof_backtest のみで、以降の最終 OLS
+        # 再学習（_fit_final）・全社スコアリング（_score_companies）は探索候補の
+        # 評価には不要（かつ oof_backtest の値には一切影響しない）。通常の API 実行
+        # （/api/plugins/{name}/run）ではこのモードは無効のため、常に従来通りフル実行する。
+        from database import is_tuning_objective_only
+        if is_tuning_objective_only():
+            return {
+                "cv_metrics":       cv_metrics,
+                "oof_backtest":     oof_bt,
+                "selected_features": selected_names,
+                "feature_coefs":    {},
+                "n_train_samples":  total_samples,
+                "n_companies":      0,
+                "risk_axis":        risk_axis,
+                "lambda_risk":      lambda_risk,
+                "r3_gate":          r3_gate,
+                "top_n":            top_n,
+                "results":          [],
+                "r_macro_available": False,
+            }
+
         # --- 最終モデル学習 ---
         beta, win_params, norm_params, y_mu, y_sd, XtX_inv, sigma2 = self._fit_final(
             samples_sel, n_sel

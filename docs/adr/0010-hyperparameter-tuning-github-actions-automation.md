@@ -114,6 +114,9 @@ ADR-0007 で導入した共有探索エンジン（`plugins/tuning.py` + `hyperp
 - **運用**: 月次自動実行の失敗・品質ゲートスキップは GitHub Actions の標準失敗通知で
   検知する（DEPLOYMENT.md に運用手順を記載）。ログは `actions/upload-artifact` で
   30日間保持され、`workflow_dispatch` で任意タイミングの再実行が可能。
-- **将来エンハンス**: ADR-0007 で言及した CV/BIC/OLS 段階の高速化（Issue #299）は
-  本 ADR のスコープ外。`macro_gbdt` の `n_iter=150` は6時間上限に収める安全側の値で
+- **将来エンハンス**: ADR-0007 で言及した CV/BIC/OLS 段階の高速化（Issue #299・
+  スコアリング省略で M-1 フルパイプラインを6候補実測で約1.52倍高速化・ADR-0007
+  Update 2026-07-11 参照）は本 ADR のスコープ外だが実施済み。288候補フルグリッドが
+  `timeout-minutes=240` を依然として超過するリスクへの残課題（winsorize ベクトル化等）
+  は Issue #304 で追跡する。`macro_gbdt` の `n_iter=150` は6時間上限に収める安全側の値で
   あり、ランナー性能やコスト事情が変われば再調整の余地がある。
