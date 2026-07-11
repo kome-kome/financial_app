@@ -433,22 +433,25 @@ class TestExecuteIntegration:
             for j, ec in enumerate(codes)
         ]
 
-        # 呼び出し順ベースのモック（column-level query は位置で識別できないため）
-        call_count = [0]
-
+        # エンティティ識別ベースのモック（呼び出し順に依存しない）。load_weekly_prices_chunked
+        # が Company.edinet_code のコード列 → StockPriceWeekly 列を分割 fetch するようになった
+        # ため（Issue #311）、順序ではなく args[0] の str 表現（"table.column" / クラス repr）で
+        # 振り分ける。
         def _query_side_effect(*args):
             mock_q = MagicMock()
             mock_q.filter.return_value = mock_q
             mock_q.filter_by.return_value = mock_q
             mock_q.order_by.return_value = mock_q
             mock_q.first.return_value = None
-            call_count[0] += 1
-            n = call_count[0]
-            if n == 1:      # StockPriceWeekly 列クエリ
+            # str(InstrumentedAttribute)="Class.attr"、str(クラス)="<class 'database.Class'>"。
+            s0 = str(args[0]) if args else ""
+            if "StockPriceWeekly" in s0:                 # StockPriceWeekly 列クエリ
                 mock_q.all.return_value = price_tuples
-            elif n == 2:    # FinancialMetric
+            elif "Company.edinet_code" in s0:            # チャンク分割用のコード列
+                mock_q.all.return_value = [(ec,) for ec in codes]
+            elif "FinancialMetric" in s0:                # FinancialMetric（全列）
                 mock_q.all.return_value = fin_list
-            else:           # Company
+            else:                                        # db.query(Company)
                 mock_q.all.return_value = companies
             return mock_q
 

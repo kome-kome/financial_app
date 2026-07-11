@@ -345,6 +345,43 @@ def tuning_cache_get_or_compute(namespace: str, key: Any, compute) -> Any:
 
 # ── データロード ───────────────────────────────────────────────────────────
 
+# 週次株価ロードのチャンクサイズ（edinet_code を N 社ずつ IN 句で分割・Issue #311）。
+# stock_price_weekly は本番で ~95万行あり、単一クエリ（全件 .all()）で取ると Supabase
+# pooler 経由で statement_timeout(2min) 超過・大結果セットで接続破損（lost synchronization）を
+# 起こす。500社/チャンクなら各クエリが PK インデックス（edinet_code, week_start）で数秒完了し、
+# 全件でも実測 ~30秒で安定完走する（単発は失敗）。
+_WEEKLY_LOAD_BATCH = 500
+_WEEKLY_PX = namedtuple("_WeeklyPX", "trade_date close_last")
+
+
+def load_weekly_prices_chunked(db, batch: int = _WEEKLY_LOAD_BATCH) -> dict:
+    """stock_price_weekly を企業単位のチャンクに分割ロードし {edinet_code: [_WeeklyPX,...]}
+    を返す（各社リストは trade_date 昇順）。Issue #311。
+
+    edinet_code の一覧は companies から取る（週次株価の edinet_code は companies の部分集合＝
+    孤立コード無しを実測確認済み。行数が全件 count と一致）。各チャンクは
+    `WHERE edinet_code IN (...) ORDER BY edinet_code, trade_date` で PK インデックスを使う。
+    M-1/M-2（load_data）と M-3（macro_dlm.load_prices）が共用する唯一の週次ローダー。
+    """
+    from database import Company, StockPriceWeekly
+    codes = [c[0] for c in db.query(Company.edinet_code).all()]
+    # plain dict + setdefault（defaultdict にしない）: 消費側は .get()/.items()/.values() か
+    # 存在キー前提の [] アクセスのみで、欠損キーの暗黙生成に依存しない（従来の M-3 は plain dict）。
+    prices_by_co: dict[str, list] = {}
+    for i in range(0, len(codes), batch):
+        chunk = codes[i:i + batch]
+        rows = (
+            db.query(StockPriceWeekly.edinet_code, StockPriceWeekly.trade_date,
+                     StockPriceWeekly.close_last)
+            .filter(StockPriceWeekly.edinet_code.in_(chunk))
+            .order_by(StockPriceWeekly.edinet_code, StockPriceWeekly.trade_date)
+            .all()
+        )
+        for ec, td, cl in rows:
+            prices_by_co.setdefault(ec, []).append(_WEEKLY_PX(td, cl))
+    return prices_by_co
+
+
 def load_data(db) -> tuple:
     """Company / FinancialMetric / StockPriceWeekly を一括ロード。
 
@@ -360,17 +397,9 @@ def load_data(db) -> tuple:
 
 def _load_data_impl(db) -> tuple:
     """load_data の実体（キャッシュなし・毎回フル計算）。"""
-    from database import Company, FinancialMetric, StockPriceWeekly
-    _PX = namedtuple("_PX", "trade_date close_last")
-    raw = (
-        db.query(StockPriceWeekly.edinet_code, StockPriceWeekly.trade_date,
-                 StockPriceWeekly.close_last)
-        .order_by(StockPriceWeekly.edinet_code, StockPriceWeekly.trade_date)
-        .all()
-    )
-    prices_by_co: dict[str, list] = defaultdict(list)
-    for ec, td, cl in raw:
-        prices_by_co[ec].append(_PX(td, cl))
+    from database import Company, FinancialMetric
+    # 週次株価は単一クエリだと本番 pooler で timeout/接続破損するため分割ロード（Issue #311）。
+    prices_by_co = load_weekly_prices_chunked(db)
 
     fin_by_co: dict[str, list] = defaultdict(list)
     for r in (db.query(FinancialMetric)
