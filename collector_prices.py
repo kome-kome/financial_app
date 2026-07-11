@@ -411,6 +411,8 @@ async def collect_stock_price_history_jquants(
     date_from/date_to を指定した場合はその範囲を使用し、省略時は days_back から計算する。
     プロバイダー固有ロジック（J-Quants 日付単位フェッチ）を _jquants_batch_gen に分離し、
     _price_collection_driver の共通フレームで DB 保存・trim を一元管理する。
+    株式分割・併合を遡及反映した調整後値（Adj* フィールド）を使用する（Issue #314）。
+    stooq/Yahoo（バックフィル経路）も調整済み系列のため、ソース間の整合性が取れる。
     """
     api_key = os.environ.get("JQUANTS_API_KEY", "")
     if not api_key:
@@ -473,7 +475,9 @@ async def collect_stock_price_history_jquants(
                 edinet_code = sec_to_edinet.get(sec_code)
                 if not edinet_code:
                     continue
-                close_val = q.get("C")   # V2: C (unadjusted close)
+                # V2: AdjC 等は株式分割・併合を遡及反映した調整後値（Issue #314）。
+                # 未調整の C/O/H/L/Vo を使うと分割日を境に系列が段差になりリターン計算が破綻する。
+                close_val = q.get("AdjC")
                 if close_val is None:
                     continue   # close は nullable=False のためスキップ
                 try:
@@ -481,11 +485,11 @@ async def collect_stock_price_history_jquants(
                         "edinet_code": edinet_code,
                         "sec_code":    sec_code,
                         "trade_date":  q["Date"],
-                        "open":        float(q["O"])  if q.get("O")  is not None else None,
-                        "high":        float(q["H"])  if q.get("H")  is not None else None,
-                        "low":         float(q["L"])  if q.get("L")  is not None else None,
+                        "open":        float(q["AdjO"])  if q.get("AdjO")  is not None else None,
+                        "high":        float(q["AdjH"])  if q.get("AdjH")  is not None else None,
+                        "low":         float(q["AdjL"])  if q.get("AdjL")  is not None else None,
                         "close":       float(close_val),
-                        "volume":      float(q["Vo"]) if q.get("Vo") is not None else None,
+                        "volume":      float(q["AdjVo"]) if q.get("AdjVo") is not None else None,
                     })
                 except (KeyError, ValueError, TypeError):
                     continue
