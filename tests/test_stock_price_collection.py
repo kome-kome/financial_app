@@ -419,3 +419,55 @@ class TestCollectJQuantsHistory:
         assert result["upserted"] == 0
         # 空レスポンスのため record_prices_batch は呼ばれない
         mock_batch.assert_not_called()
+
+    def test_syncs_is_active_from_listed_info(self, db, make_company):
+        """J-Quants listed/info の現在の上場銘柄集合と companies.is_active を同期する（Issue #315）。"""
+        from database import Company
+        self._add_company(db, make_company)   # E00001 / sec_code=1001
+        db.add(make_company(edinet_code="E00002", sec_code="1002", name="廃止予定"))
+        db.commit()
+
+        with patch("collector_prices._jquants_fetch_date",
+                   new_callable=AsyncMock, return_value=[]):
+            with patch("collector_prices.record_prices_batch", return_value=0):
+                with patch("collector_prices.trim_daily", return_value=0):
+                    with patch("collector_prices._fetch_jquants_listed_info",
+                               new_callable=AsyncMock,
+                               return_value={"issued_shares": {}, "active_codes": {"1001"}}):
+                        with patch.dict(os.environ, {"JQUANTS_API_KEY": "test-key"}):
+                            with patch("collector_prices.JQUANTS_RATE_SLEEP", 0):
+                                asyncio.run(
+                                    collect_stock_price_history_jquants(
+                                        db, date_from=self._MON, date_to=self._MON,
+                                    )
+                                )
+
+        co1 = db.query(Company).filter_by(edinet_code="E00001").one()
+        co2 = db.query(Company).filter_by(edinet_code="E00002").one()
+        assert co1.is_active is True
+        assert co2.is_active is False
+        assert co2.delisted_date is not None
+
+    def test_listed_info_fetch_failure_skips_sync(self, db, make_company):
+        """listed/info 取得失敗（active_codes 空）時は同期をスキップし、既存 is_active を保つ。"""
+        from database import Company
+        self._add_company(db, make_company)   # E00001 / sec_code=1001
+        db.commit()
+
+        with patch("collector_prices._jquants_fetch_date",
+                   new_callable=AsyncMock, return_value=[]):
+            with patch("collector_prices.record_prices_batch", return_value=0):
+                with patch("collector_prices.trim_daily", return_value=0):
+                    with patch("collector_prices._fetch_jquants_listed_info",
+                               new_callable=AsyncMock,
+                               return_value={"issued_shares": {}, "active_codes": set()}):
+                        with patch.dict(os.environ, {"JQUANTS_API_KEY": "test-key"}):
+                            with patch("collector_prices.JQUANTS_RATE_SLEEP", 0):
+                                asyncio.run(
+                                    collect_stock_price_history_jquants(
+                                        db, date_from=self._MON, date_to=self._MON,
+                                    )
+                                )
+
+        co1 = db.query(Company).filter_by(edinet_code="E00001").one()
+        assert co1.is_active is True   # 誤って全件 delisted 化しない

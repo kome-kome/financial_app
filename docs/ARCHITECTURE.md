@@ -163,6 +163,13 @@ graph TD
 > - 重い派生（OLS予測値 `predicted_market_cap` / `gap_ratio`）は **`regression_results` テーブル**に隔離保存する。
 > - アプリの読み取りは ORM `FinancialMetric`（VIEW）経由で、ソース＋派生＋予測値をまとめて取得する。
 >   VIEW の計算は Supabase 側で走るため Render の CPU を消費しない。
+> - **上場状態（`is_active`/`delisted_date`、Issue #315）**: `companies` を LEFT JOIN して VIEW へ合成。
+>   `collect_stock_price_history_jquants`（`--market`・日次収集）が J-Quants `/markets/listed/info`
+>   （現在の上場銘柄集合）と突合し `sync_active_status()`（database.py）で自動更新する。
+>   「今買える銘柄」を選ぶプラグイン（recommend / gap_analysis / net_cash_analysis）は
+>   `is_active.isnot(False)` で対象を絞るが、**backtest はフィルタしない**
+>   （as-of の start_date 時点の候補を「現在」の上場状態で絞ると生存者バイアスを逆向きに
+>   持ち込むため）。sell_ranking はユーザー入力の保有銘柄が対象のため除外せず情報表示のみ。
 
 ```mermaid
 erDiagram
@@ -175,6 +182,8 @@ erDiagram
         string    market            "市場区分（プライム/スタンダード/グロース）"
         int       fiscal_month      "決算月（3=3月決算など）"
         string    accounting_standard "会計基準（JGAAP/IFRS/US-GAAP）"
+        bool      is_active         "上場中フラグ（既定true。J-Quants listed/info突合で自動更新）"
+        date      delisted_date     "is_active=false へ遷移した日（再上場等で復帰時はnullへ戻す）"
         datetime  created_at        "登録日時"
         datetime  updated_at        "更新日時"
     }

@@ -203,7 +203,10 @@ class RecommendPlugin(AnalysisPlugin):
         subq = latest_year_subq(db, FinancialMetric)
         query = (db.query(FinancialMetric)
                    .join(subq, (FinancialMetric.edinet_code == subq.c.edinet_code) &
-                               (FinancialMetric.year == subq.c.max_year)))
+                               (FinancialMetric.year == subq.c.max_year))
+                   # 上場廃止銘柄は買えないため対象外（Issue #315）。is_active 未設定（旧データ）は
+                   # 対象に含める（isnot(False) で NULL を許容）。
+                   .filter(FinancialMetric.is_active.isnot(False)))
         if year:
             query = query.filter(FinancialMetric.year == int(year))
         if industry:

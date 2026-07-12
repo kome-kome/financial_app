@@ -241,6 +241,26 @@ class TestExecute:
         asyncio.run(execute_plugin(plugin, {"weights": {"z_roe": 1.0}, "min_coverage": 0.0}, db))
         assert called == []
 
+    def test_delisted_company_excluded_from_ranking(self, db, make_metric):
+        # 上場廃止銘柄（is_active=False）は買えないためランキング対象から除外する（Issue #315）。
+        db.add_all([
+            make_metric(edinet_code="E00001", z_roe=3.0, is_active=False),
+            make_metric(edinet_code="E00002", z_roe=1.0),
+        ])
+        db.commit()
+        res = asyncio.run(execute_plugin(plugin,
+            {"weights": {"z_roe": 1.0}, "min_coverage": 0.0}, db))
+        assert res["total_candidates"] == 1
+        assert [r["edinet_code"] for r in res["results"]] == ["E00002"]
+
+    def test_is_active_unset_still_included(self, db, make_metric):
+        # 旧データ（is_active 未設定=NULL）は誤って除外しない（後方互換）。
+        db.add(make_metric(edinet_code="E00001", z_roe=1.0))
+        db.commit()
+        res = asyncio.run(execute_plugin(plugin,
+            {"weights": {"z_roe": 1.0}, "min_coverage": 0.0}, db))
+        assert res["total_candidates"] == 1
+
     def test_presets_response_includes_statistical_preset_when_available(self, db, make_metric):
         from database import upsert_recommend_factor_premia
         db.add(make_metric(edinet_code="E00001", z_roe=1.0))

@@ -62,6 +62,67 @@ class TestUpsertCompany:
         assert db.query(Company).count() == 1
         assert db.query(Company).one().name == "B"
 
+    def test_new_company_defaults_to_active(self, db):
+        upsert_company(db, {"edinet_code": "E00001", "name": "A"})
+        db.commit()
+        obj = db.query(Company).filter_by(edinet_code="E00001").one()
+        assert obj.is_active is True
+        assert obj.delisted_date is None
+
+
+class TestSyncActiveStatus:
+    """sync_active_status() — J-Quants listed/info 突合による is_active 自動更新（Issue #315）。"""
+
+    def test_marks_missing_company_as_delisted(self, db):
+        from database import sync_active_status
+        upsert_company(db, {"edinet_code": "E00001", "sec_code": "1001", "name": "A"})
+        db.commit()
+
+        result = sync_active_status(db, active_sec_codes={"9999"})
+
+        obj = db.query(Company).filter_by(edinet_code="E00001").one()
+        assert obj.is_active is False
+        assert obj.delisted_date is not None
+        assert result == {"delisted": 1, "reactivated": 0}
+
+    def test_active_company_still_in_set_is_untouched(self, db):
+        from database import sync_active_status
+        upsert_company(db, {"edinet_code": "E00001", "sec_code": "1001", "name": "A"})
+        db.commit()
+
+        result = sync_active_status(db, active_sec_codes={"1001"})
+
+        obj = db.query(Company).filter_by(edinet_code="E00001").one()
+        assert obj.is_active is True
+        assert obj.delisted_date is None
+        assert result == {"delisted": 0, "reactivated": 0}
+
+    def test_reactivates_when_code_reappears(self, db):
+        from database import sync_active_status
+        upsert_company(db, {"edinet_code": "E00001", "sec_code": "1001", "name": "A"})
+        db.commit()
+        # 前回同期で delisted 済みという前提を作る
+        sync_active_status(db, active_sec_codes=set())
+        assert db.query(Company).filter_by(edinet_code="E00001").one().is_active is False
+
+        result = sync_active_status(db, active_sec_codes={"1001"})
+
+        obj = db.query(Company).filter_by(edinet_code="E00001").one()
+        assert obj.is_active is True
+        assert obj.delisted_date is None
+        assert result == {"delisted": 0, "reactivated": 1}
+
+    def test_company_without_sec_code_is_untouched(self, db):
+        from database import sync_active_status
+        upsert_company(db, {"edinet_code": "E00001", "sec_code": "", "name": "A"})
+        db.commit()
+
+        result = sync_active_status(db, active_sec_codes=set())
+
+        obj = db.query(Company).filter_by(edinet_code="E00001").one()
+        assert obj.is_active is True   # sec_code 無しは突合不能なので不変
+        assert result == {"delisted": 0, "reactivated": 0}
+
 
 class TestUpsertFinancial:
     def _data(self, **over):

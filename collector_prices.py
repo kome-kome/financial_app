@@ -22,7 +22,7 @@ from database import (
     build_xbrl_map,
     StockPriceDaily, StockPriceWeekly,
     record_prices_batch, trim_daily, latest_prices,
-    upsert_macro_batch,
+    upsert_macro_batch, sync_active_status,
 )
 
 from collector_utils import *
@@ -335,11 +335,15 @@ async def _jquants_fetch_date(session: httpx.AsyncClient, api_key: str, date_str
     return rows
 
 
-async def _fetch_jquants_issued_shares(session: httpx.AsyncClient, api_key: str) -> dict:
-    """J-Quants /markets/listed/info から全上場銘柄の発行済株式数を取得する。
-    戻り値: {sec_code(4桁): issued_shares(float)} — 取得失敗時は空辞書。
+async def _fetch_jquants_listed_info(session: httpx.AsyncClient, api_key: str) -> dict:
+    """J-Quants /markets/listed/info から全上場銘柄の情報を取得する。
+
+    戻り値: {"issued_shares": {sec_code(4桁): issued_shares(float)}, "active_codes": {sec_code(4桁), ...}}
+    active_codes はレスポンスに現れた全銘柄（発行済株式数の有無を問わない）＝現在の上場銘柄集合
+    （is_active 同期・Issue #315 に使う）。取得失敗時は両方空。
     """
     headers = {"x-api-key": api_key}
+    empty = {"issued_shares": {}, "active_codes": set()}
     try:
         r = await session.get(JQUANTS_LISTED_INFO_ENDPOINT, headers=headers, timeout=30)
         if r.status_code == 429:
@@ -347,17 +351,22 @@ async def _fetch_jquants_issued_shares(session: httpx.AsyncClient, api_key: str)
             r = await session.get(JQUANTS_LISTED_INFO_ENDPOINT, headers=headers, timeout=30)
         if not r.is_success:
             log.warning(f"J-Quants listed/info 取得失敗 status={r.status_code}")
-            return {}
-        result = {}
+            return empty
+        issued_shares: dict = {}
+        active_codes: set = set()
         for item in r.json().get("info", []):
             code = str(item.get("Code", ""))
+            if not code:
+                continue
+            sec_code = code[:4]
+            active_codes.add(sec_code)
             shares = item.get("IssuedShares")
-            if code and shares is not None:
-                result[code[:4]] = float(shares)
-        return result
+            if shares is not None:
+                issued_shares[sec_code] = float(shares)
+        return {"issued_shares": issued_shares, "active_codes": active_codes}
     except Exception as e:
         log.warning(f"J-Quants listed/info 例外: {e}")
-        return {}
+        return empty
 
 
 def _update_issued_shares(db, sec_to_edinet: dict, issued_shares_map: dict) -> int:
@@ -509,11 +518,22 @@ async def collect_stock_price_history_jquants(
 
     async with httpx.AsyncClient() as session:
         cancelled, upserted_total = await _price_collection_driver(db, _jquants_batch_gen(session))
-        # 価格収集と同じセッションで発行済株式数も取得（API キー共用）
-        issued_shares_map = await _fetch_jquants_issued_shares(session, api_key)
+        # 価格収集と同じセッションで上場銘柄情報（発行済株式数・現在の上場銘柄集合）も取得（API キー共用）
+        listed_info = await _fetch_jquants_listed_info(session, api_key)
 
-    if issued_shares_map:
-        _update_issued_shares(db, sec_to_edinet, issued_shares_map)
+    if listed_info["issued_shares"]:
+        _update_issued_shares(db, sec_to_edinet, listed_info["issued_shares"])
+
+    # 現在の上場銘柄集合と companies.is_active を同期（廃止銘柄検知・Issue #315）。
+    # 取得失敗時（active_codes 空）は同期をスキップし、既存の is_active を誤って
+    # 全件 delisted 化しないようにする。
+    if listed_info["active_codes"]:
+        sync_result = sync_active_status(db, listed_info["active_codes"])
+        if sync_result["delisted"] or sync_result["reactivated"]:
+            log.info(
+                f"上場状態同期: 新規delisted={sync_result['delisted']}件, "
+                f"復帰={sync_result['reactivated']}件"
+            )
 
     if cancelled:
         return {"cancelled": True, "upserted": upserted_total}

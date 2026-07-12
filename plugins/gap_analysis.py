@@ -125,8 +125,10 @@ class GapAnalysisPlugin(AnalysisPlugin):
         sort = params["sort"]
         min_div_yield = params["min_div_yield"]
 
-        # 当該フィルタの最新スナップショット
-        query = db.query(FinancialMetric).filter(FinancialMetric.gap_ratio.isnot(None))
+        # 当該フィルタの最新スナップショット。上場廃止銘柄は買えないため対象外（Issue #315）。
+        query = (db.query(FinancialMetric)
+                   .filter(FinancialMetric.gap_ratio.isnot(None))
+                   .filter(FinancialMetric.is_active.isnot(False)))
         if year:
             query = query.filter(FinancialMetric.year == year)
         records = query.all()

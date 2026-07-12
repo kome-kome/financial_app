@@ -2,6 +2,7 @@
 
 清原達郎『わが投資術』式ネットキャッシュ指標の計算ロジックを検証する。
 """
+import asyncio
 import os
 import sys
 
@@ -9,6 +10,7 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from plugins import execute_plugin
 from plugins.net_cash_analysis import (
     INVESTMENT_DISCOUNT,
     NC_RATIO_CHEAP,
@@ -19,6 +21,7 @@ from plugins.net_cash_analysis import (
     compute_ncav_ratio,
     compute_net_cash,
     compute_nc_ratio,
+    plugin,
 )
 
 
@@ -128,6 +131,30 @@ class TestComputeNcavRatio:
 
     def test_zero_market_cap_returns_none(self):
         assert compute_ncav_ratio(100e8, 0) is None
+
+
+class TestExecuteActiveFilter:
+    """execute() の is_active フィルタ（Issue #315・上場廃止銘柄は割安ランキング対象外）。"""
+
+    def _metric(self, make_metric, **over):
+        kw = dict(bs_current_assets=1000e8, bs_total_liabilities=200e8, market_cap=50_000.0)
+        kw.update(over)
+        return make_metric(**kw)
+
+    def test_delisted_company_excluded(self, db, make_metric):
+        db.add_all([
+            self._metric(make_metric, edinet_code="E00001", is_active=False),
+            self._metric(make_metric, edinet_code="E00002"),
+        ])
+        db.commit()
+        res = asyncio.run(execute_plugin(plugin, {}, db))
+        assert [r["edinet_code"] for r in res["results"]] == ["E00002"]
+
+    def test_is_active_unset_still_included(self, db, make_metric):
+        db.add(self._metric(make_metric, edinet_code="E00001"))
+        db.commit()
+        res = asyncio.run(execute_plugin(plugin, {}, db))
+        assert res["count"] == 1
 
 
 class TestThresholds:

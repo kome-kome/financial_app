@@ -136,6 +136,17 @@ class TestExecute:
         assert res["n_ar1_estimated"] >= 1
         assert any(r["method"] == "ar1" for r in res["results"])
 
+    def test_delisted_company_excluded(self, db, make_metric):
+        # 上場廃止銘柄（is_active=False）は買えないため対象外（Issue #315）。
+        db.add_all([
+            make_metric(edinet_code="E00001", gap_ratio=50.0, is_active=False),
+            make_metric(edinet_code="E00002", gap_ratio=5.0),
+        ])
+        db.commit()
+        res = asyncio.run(plugin.execute(_typed({}), db))
+        assert res["count"] == 1
+        assert res["results"][0]["edinet_code"] == "E00002"
+
     def test_sort_direction(self, db, make_metric):
         db.add_all([
             make_metric(edinet_code="E00001", gap_ratio=5.0),

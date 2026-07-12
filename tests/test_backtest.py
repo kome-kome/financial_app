@@ -289,3 +289,54 @@ class TestCostBps:
         assert r["return_pct"] is None
         assert r["return_pct_net"] is None
         assert res["summary"] is None
+
+
+# ── 上場状態の情報表示・生存者バイアス測定（Issue #315）─────────────────────
+#
+# backtest はスコアリング対象を is_active でフィルタしない。as-of の start_date 時点で
+# 存在した候補を「現在」の上場状態で絞ると、生存者バイアスを逆向きに持ち込むため
+# （recommend 等の「今買える銘柄」プラグインとは意図的に扱いが異なる）。
+
+class TestSurvivorshipBiasMeasurement:
+    def test_delisted_candidate_not_excluded_from_scoring(self, db, make_metric):
+        from datetime import date
+        db.add(make_metric(edinet_code="E00001", year=2020, period_end="2020-03-31",
+                           z_roe=5.0, is_active=False, delisted_date=date(2021, 1, 1)))
+        db.add(make_metric(edinet_code="E00002", year=2020, period_end="2020-03-31", z_roe=1.0))
+        db.commit()
+        res = backtest.run(db, "バランス型", 6, 20, None, None)
+        assert res["total_candidates"] == 2
+        assert res["results"][0]["edinet_code"] == "E00001"
+        assert res["results"][0]["is_active"] is False
+        assert res["results"][0]["delisted_date"] == "2021-01-01"
+        assert res["results"][1]["is_active"] is True
+        assert res["results"][1]["delisted_date"] is None
+
+    def test_n_delisted_in_top_n_counts_correctly(self, db, make_metric):
+        db.add(make_metric(edinet_code="E00001", year=2020, period_end="2020-03-31",
+                           z_roe=5.0, is_active=False))
+        db.add(make_metric(edinet_code="E00002", year=2020, period_end="2020-03-31",
+                           z_roe=4.0, is_active=False))
+        db.add(make_metric(edinet_code="E00003", year=2020, period_end="2020-03-31", z_roe=1.0))
+        db.commit()
+        res = backtest.run(db, "バランス型", 6, 20, None, None)
+        assert res["n_delisted_in_top_n"] == 2
+
+    def test_n_delisted_no_price_subset_of_delisted(self, db, make_metric):
+        # 価格データが全く無い銘柄は has_price_data=False → n_with_data から自然脱落する対象
+        db.add(make_metric(edinet_code="E00001", year=2020, period_end="2020-03-31",
+                           z_roe=5.0, is_active=False))
+        db.commit()
+        res = backtest.run(db, "バランス型", 6, 20, None, None)
+        assert res["n_delisted_in_top_n"] == 1
+        assert res["n_delisted_no_price"] == 1
+        assert res["results"][0]["has_price_data"] is False
+
+    def test_is_active_unset_defaults_to_true(self, db, make_metric):
+        # 旧データ（is_active 未設定=NULL）は誤って delisted 扱いしない
+        db.add(make_metric(edinet_code="E00001", year=2020, period_end="2020-03-31", z_roe=1.0))
+        db.commit()
+        res = backtest.run(db, "バランス型", 6, 20, None, None)
+        assert res["results"][0]["is_active"] is True
+        assert res["n_delisted_in_top_n"] == 0
+        assert res["n_delisted_no_price"] == 0

@@ -217,6 +217,8 @@ class NetCashAnalysisPlugin(AnalysisPlugin):
 
         query = query.filter(FinancialMetric.market_cap.isnot(None))
         query = query.filter(FinancialMetric.market_cap > 0)
+        # 上場廃止銘柄は買えないため対象外（Issue #315）。is_active 未設定（旧データ）は対象に含める。
+        query = query.filter(FinancialMetric.is_active.isnot(False))
         if industry:
             query = query.filter(FinancialMetric.industry == industry)
         if min_market_cap is not None and min_market_cap > 0:

@@ -18,6 +18,7 @@ WITH d AS (
         fr.cf_net_change_cash, fr.cf_capex,
         fr.stock_price, fr.market_cap, fr.per, fr.pbr, fr.div_yield, fr.dps,
         fr.employees, fr.issued_shares,
+        c.is_active, c.delisted_date,
         CASE WHEN COALESCE(fr.pl_revenue,0) <> 0
              THEN ROUND((COALESCE(fr.pl_operating_profit,0) / fr.pl_revenue * 100)::numeric, 2) END AS op_margin,
         CASE WHEN COALESCE(fr.pl_revenue,0) <> 0
@@ -44,6 +45,7 @@ WITH d AS (
         CASE WHEN COALESCE(fr.bs_current_assets,0) <> 0 OR COALESCE(fr.bs_total_liabilities,0) <> 0
              THEN ROUND((COALESCE(fr.bs_current_assets,0) + COALESCE(fr.bs_investment_securities,0) * 0.7 - COALESCE(fr.bs_total_liabilities,0))::numeric, 0) END AS net_cash
     FROM financial_records fr
+    LEFT JOIN companies c ON c.edinet_code = fr.edinet_code
 ),
 n AS (
     SELECT d.*,
