@@ -1364,6 +1364,8 @@ function _toggleChartEmpty(canvas, axis) {
   msg.textContent = _riskAxisEmptyMessage(axis);
   msg.classList.remove('hidden');
   canvas.classList.add('hidden');
+  const note = host.querySelector('.chart-clip-note');
+  if (note) note.textContent = '';
 }
 function _hideChartEmpty(canvas) {
   if (!canvas) return;
@@ -1448,7 +1450,8 @@ function _mrrPctl(vals, q) {
 }
 
 // 描画用の軸範囲 [p1, p99]（＋わずかな余白）。データ過少銘柄の外れ値（過大ボラ・
-// 過大μ）で軸が引き伸ばされ全点が隅へ潰れるのを防ぐ。範囲外の<2%は描画されない。
+// 過大μ）で軸が引き伸ばされ全点が隅へ潰れるのを防ぐ。範囲外の<2%は端へクランプし、
+// 三角マーカーで「軸外れ値の境界表示」だと視覚区別する（_mrrGeom）。
 function _mrrAxisRange(pts, key) {
   const vals = pts.map(p => p[key]).filter(v => v != null);
   if (vals.length < 5) return {};
@@ -1457,6 +1460,88 @@ function _mrrAxisRange(pts, key) {
   const pad = (hi - lo) * 0.05;
   return { min: lo - pad, max: hi + pad };
 }
+
+// ── 散布図の軸外れ値表示ヘルパー（M-1/M-2/M-3 バブルチャート共用） ──────────────
+
+// 対数X軸用の範囲: 下限=正値の p0.5（log(0) 回避＋極小外れ値での引き伸ばし防止）、
+// 上限=真の最大値×1.05。対数圧縮により上側はクランプ不要＝全点を範囲内へ収められる。
+// 正値が5点未満なら {} を返し、呼び出し側は線形軸へフォールバックする。
+function _mrrLogAxisRange(pts, key) {
+  const vals = pts.map(p => p[key]).filter(v => v != null && v > 0);
+  if (vals.length < 5) return {};
+  const lo = _mrrPctl(vals, 0.005);
+  const hi = Math.max(...vals);
+  return (lo == null || lo <= 0 || hi <= lo) ? {} : { min: lo, max: hi * 1.05 };
+}
+
+// 散布点の描画座標＋クランプ方向を算出する。線形時は x,y とも軸範囲へクランプ
+//（外れ値は端に境界表示）、対数X時は x は下限フロアのみ（上側は全域が範囲内）。
+// クランプ点は三角マーカーにし、はみ出た方向へ回転させて軸外れ値だと視覚区別する。
+function _mrrGeom(pts, xKey, xRange, yRange, logX) {
+  const clamp = (val, R) => (R.min == null || val == null) ? val : Math.min(R.max, Math.max(R.min, val));
+  let outCount = 0;
+  const geo = pts.map(p => {
+    const rx = p[xKey], ry = p.mu_raw;
+    let x, cx = 0;
+    if (logX) {
+      x = (xRange.min != null && rx < xRange.min) ? ((cx = -1), xRange.min) : rx;
+    } else {
+      x = clamp(rx, xRange);
+      cx = x > rx ? -1 : x < rx ? 1 : 0;      // -1=下限クランプ / +1=上限クランプ
+    }
+    const y = clamp(ry, yRange);
+    const cy = y > ry ? -1 : y < ry ? 1 : 0;
+    const clip = cx !== 0 || cy !== 0;
+    if (clip) outCount++;
+    return { x, y, cx, cy, clip };
+  });
+  return {
+    geo, outCount,
+    styles: geo.map(g => (g.clip ? 'triangle' : 'circle')),
+    // Chart.js の rotation は時計回り度数（三角は 0°で上向き）。atan2(cx, cy) で
+    // 右=90°/下=180°/左=-90°/斜め=45°等、クランプされた方向を指す。
+    rots: geo.map(g => (g.clip ? Math.atan2(g.cx, g.cy) * 180 / Math.PI : 0)),
+  };
+}
+
+// フロンティア線用の座標: クランプしない実値（クランプすると端で線が垂直に立つ偽形状に
+// なるため）。軸範囲外へ出る区間はデータセットの clip:0 で chartArea 端において切断され、
+// 実際の方向へ「抜けて消える」表現になる。対数X時のみ log(0) 回避の下限フロアを掛ける。
+function _mrrLineXY(p, xKey, xRange, logX) {
+  const x = (logX && xRange.min != null) ? Math.max(p[xKey], xRange.min) : p[xKey];
+  return { x, y: p.mu_raw };
+}
+
+// チャート右上に「軸外れ N点」の注記をオーバーレイ表示（0点なら消す）。
+function _mrrClipNote(canvas, outCount) {
+  const host = canvas.parentElement;
+  if (!host) return;
+  let el = host.querySelector('.chart-clip-note');
+  if (!el) {
+    el = document.createElement('div');
+    el.className = 'chart-clip-note';
+    el.style.cssText = 'position:absolute;top:2px;right:8px;font-size:10px;color:var(--text-muted);pointer-events:none;text-align:right';
+    host.appendChild(el);
+  }
+  el.textContent = outCount > 0 ? `▲ ${outCount}点 = 軸範囲外（端に境界表示・実値はツールチップ参照）` : '';
+}
+
+// 対数X軸トグルの状態と切替 UI。表示のみの切替（効用計算・モデル実行に不関与）で、
+// id は param-* 形式でないためサーバーへ送られない。M-2/M-3 は結果 HTML ごとチェック
+// ボックスを再注入するため、状態をモジュール変数に保持して checked を復元する。
+let _mrrLogX = false, _mgLogX = false, _dlmLogX = false;
+function _logToggleHTML(id, checked) {
+  return `<div style="display:flex;justify-content:flex-end;margin-bottom:2px">
+    <label style="font-size:11px;color:var(--text-secondary);display:inline-flex;align-items:center;gap:5px;cursor:pointer">
+      <input type="checkbox" id="${id}"${checked ? ' checked' : ''}>対数X軸（裾の外れ値を圧縮表示）
+    </label></div>`;
+}
+document.addEventListener('change', (e) => {
+  const id = e.target && e.target.id;
+  if (id === 'mrr-log-x')      { _mrrLogX = e.target.checked; if (_mrrData) _mrrPaintChart(_mrrRecompute()); }
+  else if (id === 'mg-log-x')  { _mgLogX  = e.target.checked; if (_mgData)  _mgPaintChart(_mgRecompute()); }
+  else if (id === 'dlm-log-x') { _dlmLogX = e.target.checked; if (_dlmData) _dlmPaintBubbleChart(_dlmRecompute()); }
+});
 
 // 効用 U → 色（スレート→紫の濃淡）。高 U ほど紫が濃い。
 function _mrrUColor(u, uMin, uMax, alpha) {
@@ -1619,22 +1704,23 @@ function _mrrPaintChart(v) {
   const topSet = new Set(v.top.map(p => p.edinet_code));
   const us = pts.map(p => p._u);
   const uMin = Math.min(...us), uMax = Math.max(...us);
-  // 軸範囲を [p1,p99] に固定（外れ値で潰れない）。範囲外の点は Chart.js が描画省略。
-  const xRange = _mrrAxisRange(pts, axisKey);
+  // 軸範囲: 線形時は [p1,p99] 固定（外れ値で潰れない）。対数X時は下限フロアのみで全域表示。
+  const logRange = _mrrLogX ? _mrrLogAxisRange(pts, axisKey) : {};
+  const useLogX = logRange.min != null;
+  const xRange = useLogX ? logRange : _mrrAxisRange(pts, axisKey);
   const yRange = _mrrAxisRange(pts, 'mu_raw');
-  // データ値自体を [p1,p99] にクランプ（外れ値は境界へ積む）。Chart.js は外れ値が
-  // 残ると scales.min/max を設定しても軸を引き伸ばすため、値クランプで確実に潰れを防ぐ。
-  const clamp = (val, R) => (R.min == null || val == null) ? val : Math.min(R.max, Math.max(R.min, val));
+  // 散布点は範囲へクランプして端に境界表示し、三角マーカーで軸外れ値だと視覚区別する。
+  const G = _mrrGeom(pts, axisKey, xRange, yRange, useLogX);
   // D 範囲（反Pareto点のみで算出・着色用）。
   const dsVals = pts.filter(p => p._anti_pareto).map(p => p._d);
   const dMin = dsVals.length ? Math.min(...dsVals) : 0;
   const dMax = dsVals.length && Math.max(...dsVals) > dMin ? Math.max(...dsVals) : dMin + 1;
   // サイズは固定（R1 はほぼ一定で径エンコードが退化するため）。全社の雲が見えるよう
   // 背景点も視認可能な大きさ・不透明度にし、上位 top_n とパレートを少し大きく強調する。
-  const bubble = pts.map(p => ({
-    x: clamp(p[axisKey], xRange), y: clamp(p.mu_raw, yRange),
+  const bubble = pts.map((p, i) => ({
+    x: G.geo[i].x, y: G.geo[i].y,
     r: (p._pareto || p._anti_pareto) ? 6 : (topSet.has(p.edinet_code) ? 5 : 3),
-    _p: p, _top: topSet.has(p.edinet_code),
+    _p: p, _top: topSet.has(p.edinet_code), _clip: G.geo[i].clip,
   }));
   // 反Pareto点はオレンジ→赤グラデーション（D 値）、それ以外は紫（U 値）。
   const bg = pts.map(p =>
@@ -1649,19 +1735,20 @@ function _mrrPaintChart(v) {
   );
   const bw = pts.map(p => (p._pareto || p._anti_pareto) ? 2.5 : (topSet.has(p.edinet_code) ? 1.2 : 0.5));
   const front = pts.filter(p => p._pareto)
-    .map(p => ({ x: clamp(p[axisKey], xRange), y: clamp(p.mu_raw, yRange) }))
+    .map(p => _mrrLineXY(p, axisKey, xRange, useLogX))
     .sort((a, b) => a.x - b.x);
   const antifront = pts.filter(p => p._anti_pareto)
-    .map(p => ({ x: clamp(p[axisKey], xRange), y: clamp(p.mu_raw, yRange) }))
+    .map(p => _mrrLineXY(p, axisKey, xRange, useLogX))
     .sort((a, b) => a.x - b.x);
   _mrrChart = new Chart(canvas, {
     data: { datasets: [
-      { type: 'line', label: '効率的フロンティア（買い）', data: front,
+      { type: 'line', label: '効率的フロンティア（買い）', data: front, clip: 0,
         borderColor: cssVar('--val-up-text'), borderWidth: 2, pointRadius: 0, fill: false, tension: 0, order: 0 },
-      { type: 'line', label: '非効率的フロンティア（売り）', data: antifront,
+      { type: 'line', label: '非効率的フロンティア（売り）', data: antifront, clip: 0,
         borderColor: cssVar('--val-down-text'), borderWidth: 2, borderDash: [6, 3], pointRadius: 0, fill: false, tension: 0, order: 0 },
       { type: 'bubble', label: `銘柄（全${pts.length}社・上位${v.top.length}を強調）`, data: bubble,
-        backgroundColor: bg, borderColor: bc, borderWidth: bw, order: 1 },
+        backgroundColor: bg, borderColor: bc, borderWidth: bw, order: 1,
+        pointStyle: G.styles, rotation: G.rots },
     ]},
     options: {
       responsive: true, maintainAspectRatio: false,
@@ -1680,22 +1767,25 @@ function _mrrPaintChart(v) {
             `R3 信頼性: ${p.r3 != null ? p.r3.toFixed(4) : '-'}`,
             `U（効用）: ${p._u != null ? p._u.toFixed(4) : '-'}`,
             `D（負効用）: ${p._d != null ? p._d.toFixed(4) : '-'}`,
+            ctx.raw._clip ? '▲ 軸範囲外（チャート端に境界表示）' : '',
             p._pareto ? '★ 効率的フロンティア（買い）' : '',
             p._anti_pareto ? '▼ 非効率的フロンティア（売り）' : '',
           ].filter(Boolean);
         }}},
       },
       scales: {
-        // type:'linear' を明示。frontier の line データセットがあると Chart.js は x 軸を
+        // 数値スケールを明示。frontier の line データセットがあると Chart.js は x 軸を
         // 既定で category スケールにし、数値 min/max を無視して点を等間隔配置するため
-        // （= x がクランプされず外れ値で潰れる主因）。linear を強制して数値軸にする。
-        x: { type: 'linear', title: { display: true, text: `リスク（${MRR_AXIS_LABELS[axisKey]}）` },
+        // （= x がクランプされず外れ値で潰れる主因）。linear / logarithmic を強制する。
+        x: { type: useLogX ? 'logarithmic' : 'linear',
+             title: { display: true, text: `リスク（${MRR_AXIS_LABELS[axisKey]}）` },
              min: xRange.min, max: xRange.max },
         y: { type: 'linear', title: { display: true, text: '期待リターン（μ_raw・年率）' },
              min: yRange.min, max: yRange.max },
       },
     },
   });
+  _mrrClipNote(canvas, G.outCount);
 }
 
 // ランキング表（クライアント算出の U・パレートで描画）。
@@ -1879,6 +1969,7 @@ function _mgPaintCv(data) {
     </div>
   </div>
   ${oofHtml}
+  ${_logToggleHTML('mg-log-x', _mgLogX)}
   ${makeChartContainer('chart-mg-bubble', 360)}`;
   const resultCard = document.getElementById('dynresult-macro_gbdt') || el.closest('.card');
   // CV パネルをテーブルより上に置くため、result area の直前に挿入
@@ -1940,29 +2031,31 @@ function _mgPaintChart(v) {
   const topSet = new Set(v.top.map(p => p.edinet_code));
   const us = pts.map(p => p._u);
   const uMin = Math.min(...us), uMax = Math.max(...us);
-  const xRange = _mrrAxisRange(pts, axisKey);
+  const logRange = _mgLogX ? _mrrLogAxisRange(pts, axisKey) : {};
+  const useLogX = logRange.min != null;
+  const xRange = useLogX ? logRange : _mrrAxisRange(pts, axisKey);
   const yRange = _mrrAxisRange(pts, 'mu_raw');
-  const clamp = (val, R) => (R.min == null || val == null) ? val : Math.min(R.max, Math.max(R.min, val));
-  const bubble = pts.map(p => ({
-    x: clamp(p[axisKey], xRange), y: clamp(p.mu_raw, yRange),
+  const G = _mrrGeom(pts, axisKey, xRange, yRange, useLogX);
+  const bubble = pts.map((p, i) => ({
+    x: G.geo[i].x, y: G.geo[i].y,
     r: (p._pareto || p._anti_pareto) ? 6 : (topSet.has(p.edinet_code) ? 5 : 3),
-    _p: p,
+    _p: p, _clip: G.geo[i].clip,
   }));
   const bg = pts.map(p =>
     p._anti_pareto
       ? _mrrDColor(p._d, 0, Math.max(...pts.filter(q=>q._anti_pareto).map(q=>q._d)||[1]), 0.75)
       : _mrrUColor(p._u, uMin, uMax, topSet.has(p.edinet_code) ? 0.9 : 0.55)
   );
-  const front = pts.filter(p => p._pareto).map(p => ({ x: clamp(p[axisKey], xRange), y: clamp(p.mu_raw, yRange) }));
-  const antiFront = pts.filter(p => p._anti_pareto).map(p => ({ x: clamp(p[axisKey], xRange), y: clamp(p.mu_raw, yRange) }));
+  const front = pts.filter(p => p._pareto).map(p => _mrrLineXY(p, axisKey, xRange, useLogX));
+  const antiFront = pts.filter(p => p._anti_pareto).map(p => _mrrLineXY(p, axisKey, xRange, useLogX));
   const AXIS_LABELS = { r2: '実現ボラ（R2）', r_macro: 'マクロ起因リスク（R_macro）' };
   _mgChart = new Chart(canvas, {
     type: 'bubble',
     data: {
       datasets: [
-        { label: '全銘柄', data: bubble, backgroundColor: bg, borderColor: pts.map(p => p._pareto?cssVar('--val-up-text'):p._anti_pareto?cssVar('--val-down-text'):topSet.has(p.edinet_code)?'rgba(226,232,240,0.9)':'rgba(148,163,184,0.3)'), borderWidth: pts.map(p=>(p._pareto||p._anti_pareto)?2.5:topSet.has(p.edinet_code)?1.2:0.4) },
-        { label: '効率的フロンティア', data: front.sort((a,b)=>a.x-b.x), type:'line', borderColor:cssVar('--val-up-text'), borderWidth:1.5, pointRadius:0, fill:false, tension:0.3, order:0 },
-        { label: '非効率的フロンティア', data: antiFront.sort((a,b)=>a.x-b.x), type:'line', borderColor:cssVar('--val-down-text'), borderWidth:1.5, pointRadius:0, fill:false, tension:0.3, order:0 },
+        { label: '全銘柄', data: bubble, backgroundColor: bg, pointStyle: G.styles, rotation: G.rots, borderColor: pts.map(p => p._pareto?cssVar('--val-up-text'):p._anti_pareto?cssVar('--val-down-text'):topSet.has(p.edinet_code)?'rgba(226,232,240,0.9)':'rgba(148,163,184,0.3)'), borderWidth: pts.map(p=>(p._pareto||p._anti_pareto)?2.5:topSet.has(p.edinet_code)?1.2:0.4) },
+        { label: '効率的フロンティア', data: front.sort((a,b)=>a.x-b.x), type:'line', clip: 0, borderColor:cssVar('--val-up-text'), borderWidth:1.5, pointRadius:0, fill:false, tension:0.3, order:0 },
+        { label: '非効率的フロンティア', data: antiFront.sort((a,b)=>a.x-b.x), type:'line', clip: 0, borderColor:cssVar('--val-down-text'), borderWidth:1.5, pointRadius:0, fill:false, tension:0.3, order:0 },
       ]
     },
     options: {
@@ -1970,14 +2063,15 @@ function _mgPaintChart(v) {
       animation:{duration:0},
       plugins:{
         legend:{display:false},
-        tooltip:{callbacks:{label:ctx=>{const p=ctx.raw._p;if(!p)return'';return[`${esc(p.company_name||p.edinet_code)} (${esc(p.sec_code||'')})`,`μ=${p.mu_raw!=null?(p.mu_raw*100).toFixed(2)+'%':'-'}  R=${p[axisKey]!=null?p[axisKey].toFixed(3):'-'}  U=${p._u!=null?p._u.toFixed(3):'-'}`,p._pareto?'★ 効率的フロンティア':p._anti_pareto?'▼ 非効率的フロンティア':'']}}}
+        tooltip:{callbacks:{label:ctx=>{const p=ctx.raw._p;if(!p)return'';return[`${esc(p.company_name||p.edinet_code)} (${esc(p.sec_code||'')})`,`μ=${p.mu_raw!=null?(p.mu_raw*100).toFixed(2)+'%':'-'}  R=${p[axisKey]!=null?p[axisKey].toFixed(3):'-'}  U=${p._u!=null?p._u.toFixed(3):'-'}`,ctx.raw._clip?'▲ 軸範囲外（チャート端に境界表示）':'',p._pareto?'★ 効率的フロンティア':p._anti_pareto?'▼ 非効率的フロンティア':''].filter(Boolean)}}}
       },
       scales:{
-        x:{title:{display:true,text:AXIS_LABELS[axisKey]||axisKey,color:cssVar('--text-secondary'),font:{size:11}},grid:{color:'rgba(255,255,255,0.05)'},ticks:{color:cssVar('--text-muted')},...(xRange.min!=null?{min:xRange.min,max:xRange.max}:{})},
+        x:{type:useLogX?'logarithmic':'linear',title:{display:true,text:AXIS_LABELS[axisKey]||axisKey,color:cssVar('--text-secondary'),font:{size:11}},grid:{color:'rgba(255,255,255,0.05)'},ticks:{color:cssVar('--text-muted')},...(xRange.min!=null?{min:xRange.min,max:xRange.max}:{})},
         y:{title:{display:true,text:'期待リターン μ（52週先対数リターン・年率）',color:cssVar('--text-secondary'),font:{size:11}},grid:{color:'rgba(255,255,255,0.05)'},ticks:{color:cssVar('--text-muted')},...(yRange.min!=null?{min:yRange.min,max:yRange.max}:{})},
       }
     }
   });
+  _mrrClipNote(canvas, G.outCount);
 }
 
 // per-stock SHAP パネル（クリックで展開）
@@ -2086,7 +2180,7 @@ function _dlmInjectBubble() {
     const target = document.getElementById('dynresult-macro_dlm');
     if (target) target.insertAdjacentElement('beforebegin', wrap);
   }
-  wrap.innerHTML = makeChartContainer('chart-dlm-bubble', 360);
+  wrap.innerHTML = _logToggleHTML('dlm-log-x', _dlmLogX) + makeChartContainer('chart-dlm-bubble', 360);
 }
 
 // λ・topN をパラメータフォームから読む（フォールバック: サーバー返却値）。
@@ -2127,13 +2221,15 @@ function _dlmPaintBubbleChart(v) {
   const topSet = new Set(v.top.map(p => p.edinet_code));
   const us = pts.map(p => p._u);
   const uMin = Math.min(...us), uMax = Math.max(...us);
-  const xRange = _mrrAxisRange(pts, 'r_macro');
+  const logRange = _dlmLogX ? _mrrLogAxisRange(pts, 'r_macro') : {};
+  const useLogX = logRange.min != null;
+  const xRange = useLogX ? logRange : _mrrAxisRange(pts, 'r_macro');
   const yRange = _mrrAxisRange(pts, 'mu_raw');
-  const clamp = (val, R) => (R.min == null || val == null) ? val : Math.min(R.max, Math.max(R.min, val));
-  const bubble = pts.map(p => ({
-    x: clamp(p.r_macro, xRange), y: clamp(p.mu_raw, yRange),
+  const G = _mrrGeom(pts, 'r_macro', xRange, yRange, useLogX);
+  const bubble = pts.map((p, i) => ({
+    x: G.geo[i].x, y: G.geo[i].y,
     r: (p._pareto || p._anti_pareto) ? 6 : (topSet.has(p.edinet_code) ? 5 : 3),
-    _p: p,
+    _p: p, _clip: G.geo[i].clip,
   }));
   const antiDs = pts.filter(q => q._anti_pareto).map(q => q._d);
   const dMax = antiDs.length ? Math.max(...antiDs) : 1;
@@ -2144,15 +2240,15 @@ function _dlmPaintBubbleChart(v) {
   );
   const border = pts.map(p => p._pareto ? cssVar('--val-up-text') : p._anti_pareto ? cssVar('--val-down-text') : topSet.has(p.edinet_code) ? 'rgba(226,232,240,0.9)' : 'rgba(148,163,184,0.3)');
   const bw = pts.map(p => (p._pareto || p._anti_pareto) ? 2.5 : topSet.has(p.edinet_code) ? 1.2 : 0.4);
-  const front     = pts.filter(p => p._pareto).sort((a, b) => a.r_macro - b.r_macro).map(p => ({ x: clamp(p.r_macro, xRange), y: clamp(p.mu_raw, yRange) }));
-  const antiFront = pts.filter(p => p._anti_pareto).sort((a, b) => a.r_macro - b.r_macro).map(p => ({ x: clamp(p.r_macro, xRange), y: clamp(p.mu_raw, yRange) }));
+  const front     = pts.filter(p => p._pareto).sort((a, b) => a.r_macro - b.r_macro).map(p => _mrrLineXY(p, 'r_macro', xRange, useLogX));
+  const antiFront = pts.filter(p => p._anti_pareto).sort((a, b) => a.r_macro - b.r_macro).map(p => _mrrLineXY(p, 'r_macro', xRange, useLogX));
   _dlmBubbleChart = new Chart(canvas, {
     type: 'bubble',
     data: {
       datasets: [
-        { label: '全銘柄', data: bubble, backgroundColor: bg, borderColor: border, borderWidth: bw },
-        { label: '効率的フロンティア（買い）', data: front, type: 'line', borderColor: cssVar('--val-up-text'), borderWidth: 1.5, pointRadius: 0, fill: false, tension: 0.3, order: 0 },
-        { label: '非効率的フロンティア（売り）', data: antiFront, type: 'line', borderColor: cssVar('--val-down-text'), borderWidth: 1.5, pointRadius: 0, fill: false, tension: 0.3, order: 0 },
+        { label: '全銘柄', data: bubble, backgroundColor: bg, borderColor: border, borderWidth: bw, pointStyle: G.styles, rotation: G.rots },
+        { label: '効率的フロンティア（買い）', data: front, type: 'line', clip: 0, borderColor: cssVar('--val-up-text'), borderWidth: 1.5, pointRadius: 0, fill: false, tension: 0.3, order: 0 },
+        { label: '非効率的フロンティア（売り）', data: antiFront, type: 'line', clip: 0, borderColor: cssVar('--val-down-text'), borderWidth: 1.5, pointRadius: 0, fill: false, tension: 0.3, order: 0 },
       ]
     },
     options: {
@@ -2165,16 +2261,18 @@ function _dlmPaintBubbleChart(v) {
           return [
             `${esc(p.company_name || p.edinet_code)} (${esc(p.sec_code || '')})`,
             `µ̂=${(p.mu * 100).toFixed(1)}%  R_macro=${p.r_macro != null ? (p.r_macro * 100).toFixed(2) + '%' : '-'}  U=${p._u != null ? p._u.toFixed(3) : '-'}`,
+            ctx.raw._clip ? '▲ 軸範囲外（チャート端に境界表示）' : '',
             p._pareto ? '★ 効率的フロンティア（買い）' : p._anti_pareto ? '▼ 非効率的フロンティア（売り）' : '',
           ].filter(Boolean);
         }}}
       },
       scales: {
-        x: { title: { display: true, text: 'R_macro マクロ起因リスク（年率化）', color: cssVar('--text-secondary'), font: { size: 11 } }, grid: { color: 'rgba(255,255,255,0.05)' }, ticks: { color: cssVar('--text-muted') }, ...(xRange.min != null ? { min: xRange.min, max: xRange.max } : {}) },
+        x: { type: useLogX ? 'logarithmic' : 'linear', title: { display: true, text: 'R_macro マクロ起因リスク（年率化）', color: cssVar('--text-secondary'), font: { size: 11 } }, grid: { color: 'rgba(255,255,255,0.05)' }, ticks: { color: cssVar('--text-muted') }, ...(xRange.min != null ? { min: xRange.min, max: xRange.max } : {}) },
         y: { title: { display: true, text: 'µ̂ 期待リターン（年率化アルファ）', color: cssVar('--text-secondary'), font: { size: 11 } }, grid: { color: 'rgba(255,255,255,0.05)' }, ticks: { color: cssVar('--text-muted') }, ...(yRange.min != null ? { min: yRange.min, max: yRange.max } : {}) },
       }
     }
   });
+  _mrrClipNote(canvas, G.outCount);
 }
 
 function renderMacroDlm(data) {
