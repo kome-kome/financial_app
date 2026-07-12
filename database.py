@@ -929,6 +929,86 @@ def get_latest_factor_premia(db, run_id: str | None = None) -> dict:
     }
 
 
+# ── 5g. 会社予想開示（statement_disclosure・Issue #322）───────────────────────
+# J-Quants /fins/summary（決算短信サマリー）の生データをそのまま蓄積する。
+# DisclosedDate 基準の point-in-time 原則（ルックアヘッド防止）で使うため disc_date を
+# 素直に保持し、同一銘柄・同一日の複数開示（本開示＋ForecastRevision 等）も disc_no
+# （J-Quants の開示番号・グローバルに一意）をキーに全件そのまま残す。予想対比サプライズ
+# 等の特徴量化（f_*/m_*/d_f_*）は別タスク（Issue #322 改善案③）で行う。
+
+class StatementDisclosure(Base):
+    """決算短信サマリーの生開示データ（1開示 = 1レコード）。"""
+    __tablename__ = "statement_disclosure"
+    __table_args__ = (
+        Index("ix_statement_disclosure_edinet_date", "edinet_code", "disc_date"),
+    )
+
+    disc_no      = Column(String(20), primary_key=True)   # DiscNo（開示番号・グローバルに一意）
+    edinet_code  = Column(String(10), ForeignKey("companies.edinet_code"), nullable=False)
+    sec_code     = Column(String(6))
+    disc_date    = Column(String(10), nullable=False)      # DiscDate "YYYY-MM-DD"（point-in-time キー）
+    disc_time    = Column(String(8))                       # DiscTime "HH:MM:SS"
+    doc_type     = Column(String(60))                      # DocType（FYFinancialStatements_Consolidated_IFRS 等）
+    cur_per_type = Column(String(4))                       # CurPerType（FY/1Q/2Q/3Q）
+    cur_per_st   = Column(String(10))
+    cur_per_en   = Column(String(10))
+    cur_fy_st    = Column(String(10))
+    cur_fy_en    = Column(String(10))
+    nxt_fy_st    = Column(String(10))
+    nxt_fy_en    = Column(String(10))
+
+    # 実績
+    sales   = Column(Float)
+    op      = Column(Float)
+    odp     = Column(Float)   # 経常利益（IFRS採用企業は空＝概念なし）
+    np      = Column(Float)
+    eps     = Column(Float)
+    deps    = Column(Float)
+    div_ann = Column(Float)   # 実績年間配当
+
+    # 予想（当期）
+    f_sales   = Column(Float)
+    f_op      = Column(Float)
+    f_odp     = Column(Float)
+    f_np      = Column(Float)
+    f_eps     = Column(Float)
+    f_div_ann = Column(Float)
+
+    # 予想（翌期）
+    nxf_sales = Column(Float)
+    nxf_op    = Column(Float)
+    nxf_odp   = Column(Float)
+    nxf_np    = Column(Float)
+    nxf_eps   = Column(Float)
+
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+
+def upsert_statement_disclosures(db, rows: list) -> int:
+    """statement_disclosure を disc_no（PK）で upsert する。Postgres / SQLite 両対応。
+
+    rows = [{disc_no, edinet_code, sec_code, disc_date, ..., f_eps, nxf_eps}, ...]
+    戻り値は書き込み行数。
+    """
+    if not rows:
+        return 0
+    dialect = db.bind.dialect.name if db.bind is not None else "postgresql"
+    if dialect == "sqlite":
+        from sqlalchemy.dialects.sqlite import insert as _insert
+    else:
+        from sqlalchemy.dialects.postgresql import insert as _insert
+
+    update_cols = [c.name for c in StatementDisclosure.__table__.columns
+                   if c.name not in ("disc_no", "created_at")]
+    stmt = _insert(StatementDisclosure).values(rows)
+    stmt = stmt.on_conflict_do_update(
+        index_elements=["disc_no"],
+        set_={col: getattr(stmt.excluded, col) for col in update_cols},
+    )
+    db.execute(stmt)
+    return len(rows)
+
+
 # ── 6. XBRL 生データ中間テーブル ──────────────────────────────────────────
 
 class XbrlRawDocument(Base):

@@ -7,6 +7,7 @@
   - collector_master.py     : 企業/業種マスタ収集（EDINET コードリスト / JPX 業種）
   - collector_financials.py : XBRL 財務収集・パース・CF / PL-BS 補完・再解析
   - collector_prices.py     : 株価（stooq / J-Quants / Yahoo）・マクロ指標収集
+  - collector_disclosures.py: 会社予想開示（J-Quants /fins/summary・Issue #322）
 
 CLI エントリポイント（python collector.py ...）は本モジュールに残す。
 """
@@ -16,6 +17,7 @@ from collector_utils import *            # 設定定数・log
 from collector_master import *           # 企業/業種マスタ
 from collector_financials import *       # 財務収集・パース・補完
 from collector_prices import *           # 株価・マクロ
+from collector_disclosures import *      # 会社予想開示
 
 # テスト等が `from collector import _name` で参照する非公開名は明示的に再エクスポートする
 # （`from module import *` は先頭 _ の名前を取り込まないため）。
@@ -35,6 +37,7 @@ if __name__ == "__main__":
     parser.add_argument("--company",     type=str, default=None)
     parser.add_argument("--market",      action="store_true", help="市場データのみ更新")
     parser.add_argument("--macro",       action="store_true", help="マクロデータのみ収集")
+    parser.add_argument("--disclosures", action="store_true", help="会社予想開示（決算短信サマリー）のみ収集")
     parser.add_argument("--incremental", action="store_true", help="収集済みをスキップ（差分収集）")
     parser.add_argument("--reparse",     action="store_true", help="xbrl_raw_documents から financial_records を再構築")
     parser.add_argument("--year",        type=int, default=None, help="再解析対象年度（--reparse と組み合わせ）")
@@ -91,6 +94,15 @@ if __name__ == "__main__":
             finally:
                 db.close()
         asyncio.run(_run())
+    elif args.disclosures:
+        async def _disclosures():
+            db = SessionLocal()
+            try:
+                r = await collect_statement_disclosures(db, on_progress=lambda c, t, m: print(m))
+                print(r)
+            finally:
+                db.close()
+        asyncio.run(_disclosures())
     elif args.company:
         asyncio.run(refresh_company(args.company, args.years))
     else:
