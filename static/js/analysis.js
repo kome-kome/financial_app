@@ -660,11 +660,12 @@ async function runBacktest() {
   const topn     = document.getElementById('bt-topn').value;
   const industry = document.getElementById('bt-industry').value.trim();
   const source   = document.getElementById('bt-source').value;
+  const costBps  = document.getElementById('bt-cost-bps').value || '0';
   const btn = document.getElementById('btn-backtest');
   btn.disabled = true;
   btn.innerHTML = '<span class="spinner"></span> 計算中...';
   try {
-    let url = `/api/backtest?preset=${encodeURIComponent(preset)}&months_ago=${months}&top_n=${topn}&source=${encodeURIComponent(source)}`;
+    let url = `/api/backtest?preset=${encodeURIComponent(preset)}&months_ago=${months}&top_n=${topn}&source=${encodeURIComponent(source)}&cost_bps=${encodeURIComponent(costBps)}`;
     if (industry) url += `&industry=${encodeURIComponent(industry)}`;
     const d = await apiFetch(url);
     btResults = d.results;
@@ -693,11 +694,12 @@ function _renderBtSummary(s) {
     return;
   }
   const fmtR = v => v == null ? '-' : `<span class="${v >= 0 ? 'gap-positive' : 'gap-negative'}">${v >= 0 ? '+' : ''}${v}%</span>`;
+  const hasCost = s.cost_bps > 0;
   grid.innerHTML = `
     <div class="stat-card">
       <div class="stat-label">平均リターン</div>
       <div class="stat-value" style="font-size:18px">${fmtR(s.avg_return_pct)}</div>
-      <div class="card-sub">σ = ${s.std_dev_pct != null ? s.std_dev_pct + '%' : '-'}</div>
+      <div class="card-sub">σ = ${s.std_dev_pct != null ? s.std_dev_pct + '%' : '-'}${hasCost ? ` ／ コスト後 ${fmtR(s.avg_return_net_pct)}` : ''}</div>
     </div>
     <div class="stat-card">
       <div class="stat-label">中央値リターン</div>
@@ -706,11 +708,12 @@ function _renderBtSummary(s) {
     <div class="stat-card">
       <div class="stat-label">勝率（プラスリターン）</div>
       <div class="stat-value" style="font-size:18px;color:${s.win_rate_pct >= 50 ? cssVar('--val-up') : cssVar('--val-down')}">${s.win_rate_pct}%</div>
-      <div class="card-sub">${s.n_with_data}社中</div>
+      <div class="card-sub">${s.n_with_data}社中${hasCost ? ` ／ コスト後 ${s.win_rate_net_pct}%` : ''}</div>
     </div>
     <div class="stat-card">
       <div class="stat-label">超過収益（対ベンチマーク）</div>
       <div class="stat-value" style="font-size:18px">${fmtR(s.excess_return_pct)}</div>
+      <div class="card-sub">${hasCost ? `コスト後（往復${s.cost_bps}bp） ${fmtR(s.excess_return_net_pct)}` : '※手数料等未控除'}</div>
     </div>`;
 
   if (!pctEl) return;
@@ -752,11 +755,15 @@ function _renderBtBenchmark(s) {
   }
   const b = s.benchmark_avg_pct;
   const e = s.excess_return_pct;
+  const costNote = s.cost_bps > 0
+    ? `&nbsp;|&nbsp; コスト後超過収益（往復${s.cost_bps}bp控除）: <strong style="color:${(s.excess_return_net_pct ?? 0) >= 0 ? cssVar('--val-up') : cssVar('--val-down')}">${(s.excess_return_net_pct ?? 0) >= 0 ? '+' : ''}${s.excess_return_net_pct ?? '-'}%</strong>`
+    : '';
   box.innerHTML = `ベンチマーク平均リターン（スコアリング対象 ${s.n_benchmark}社）:
     <strong style="color:${b >= 0 ? cssVar('--val-up') : cssVar('--val-down')}">${b >= 0 ? '+' : ''}${b}%</strong>
     &nbsp;|&nbsp; 超過収益:
     <strong style="color:${(e ?? 0) >= 0 ? cssVar('--val-up') : cssVar('--val-down')}">${(e ?? 0) >= 0 ? '+' : ''}${e ?? '-'}%</strong>
-    <span style="color:var(--text-muted);font-size:11px;margin-left:8px">（ベンチマーク = 同期間のスコアリング対象全社の平均）</span>`;
+    ${costNote}
+    <span style="color:var(--text-muted);font-size:11px;margin-left:8px">（ベンチマーク = 同期間のスコアリング対象全社の平均。上記はいずれも売買コスト控除前）</span>`;
 }
 
 function _renderBtTable(rows) {
@@ -854,11 +861,12 @@ async function runBtMulti() {
   const topn     = document.getElementById('bt-topn').value;
   const industry = document.getElementById('bt-industry').value.trim();
   const source   = document.getElementById('bt-source').value;
+  const costBps  = document.getElementById('bt-cost-bps').value || '0';
   const btn = document.getElementById('btn-bt-multi');
   btn.disabled = true;
   btn.innerHTML = '<span class="spinner"></span> 集計中（5期間）...';
   try {
-    let url = `/api/backtest/multi?preset=${encodeURIComponent(preset)}&top_n=${topn}&source=${encodeURIComponent(source)}`;
+    let url = `/api/backtest/multi?preset=${encodeURIComponent(preset)}&top_n=${topn}&source=${encodeURIComponent(source)}&cost_bps=${encodeURIComponent(costBps)}`;
     if (industry) url += `&industry=${encodeURIComponent(industry)}`;
     const d = await apiFetch(url);
     _renderBtMulti(d);

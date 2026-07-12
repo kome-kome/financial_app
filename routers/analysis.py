@@ -176,6 +176,7 @@ async def run_backtest(
     industry: Optional[str] = None,
     min_market_cap: Optional[float] = None,
     source: str = "recommend",
+    cost_bps: float = 0.0,
     db: Session = Depends(api.get_db),
 ):
     if not (1 <= months_ago <= 60):
@@ -184,8 +185,10 @@ async def run_backtest(
         raise HTTPException(400, "top_n は 5〜100 の範囲で指定してください")
     if source not in backtest.SCORING_SOURCES:
         raise HTTPException(400, f"source は {', '.join(backtest.SCORING_SOURCES)} のいずれか")
+    if not (0 <= cost_bps <= 100):
+        raise HTTPException(400, "cost_bps は 0〜100 の範囲で指定してください")
     try:
-        return backtest.run(db, preset, months_ago, top_n, industry, min_market_cap, source)
+        return backtest.run(db, preset, months_ago, top_n, industry, min_market_cap, source, cost_bps)
     except Exception as e:
         log.error("Backtest error: %s", e, exc_info=True)
         raise HTTPException(500, "バックテスト実行エラーが発生しました。")
@@ -198,21 +201,24 @@ async def backtest_multi(
     industry: Optional[str] = None,
     min_market_cap: Optional[float] = None,
     source: str = "recommend",
+    cost_bps: float = 0.0,
     db: Session = Depends(api.get_db),
 ):
     if not (5 <= top_n <= 100):
         raise HTTPException(400, "top_n は 5〜100 の範囲で指定してください")
     if source not in backtest.SCORING_SOURCES:
         raise HTTPException(400, f"source は {', '.join(backtest.SCORING_SOURCES)} のいずれか")
+    if not (0 <= cost_bps <= 100):
+        raise HTTPException(400, "cost_bps は 0〜100 の範囲で指定してください")
     periods = []
     for m in backtest.MULTI_PERIODS:
         try:
-            periods.append(backtest.run(db, preset, m, top_n, industry, min_market_cap, source))
+            periods.append(backtest.run(db, preset, m, top_n, industry, min_market_cap, source, cost_bps))
         except Exception as e:
             log.error("Backtest multi error (months=%d): %s", m, e, exc_info=True)
             periods.append({"holding_months": m, "summary": None, "results": [],
                             "total_candidates": 0, "error": "計算エラー"})
-    return {"periods": periods, "preset": preset, "top_n": top_n, "source": source}
+    return {"periods": periods, "preset": preset, "top_n": top_n, "source": source, "cost_bps": cost_bps}
 
 
 @router.post("/api/backtest/model-comparison", response_model=None)

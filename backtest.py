@@ -87,11 +87,16 @@ def run(
     industry: Optional[str],
     min_market_cap: Optional[float],
     source: str = "recommend",
+    cost_bps: float = 0.0,
 ) -> dict:
     """バックテストを1期間分実行してdictを返す（例外はそのまま伝播）。
 
     source で検証対象の一次分析を切替（recommend / valuation / net_cash）。
     仕組み（as-of スコア→上位N社→実現リターン→ベンチマーク超過）は source 非依存。
+
+    cost_bps: 片道売買コスト（bp、1bp=0.01%）。往復（買い+売り）で2倍控除した
+    ネットリターンを `*_net` キーへ併記する（デフォルト0＝控除なし・既存の
+    無印キーは cost_bps に関わらず常にコスト控除前のまま＝後方互換固定）。
     """
     if source not in SCORING_SOURCES:
         raise ValueError(
@@ -158,6 +163,9 @@ def run(
     sp_all = prices_on_or_after(db, bench_codes, start_date_str)
     ep_all = latest_prices(db, bench_codes)
 
+    # bp→%変換かつ往復（買い+売り）分の2倍。cost_bps=0なら常に0（後方互換）。
+    round_trip_cost_pct = cost_bps / 100.0 * 2
+
     results = []
     for rank, (score, r) in enumerate(top, 1):
         c = r.edinet_code
@@ -166,8 +174,10 @@ def run(
         if (sp and ep and sp["price"] and ep["price"]
                 and sp["date"] < ep["date"]):
             ret_pct = round((ep["price"] - sp["price"]) / sp["price"] * 100, 2)
+            ret_pct_net = round(ret_pct - round_trip_cost_pct, 2)
         else:
             ret_pct = None
+            ret_pct_net = None
         results.append({
             "rank":           rank,
             "edinet_code":    c,
@@ -182,6 +192,7 @@ def run(
             "end_price":      ep["price"] if ep else None,
             "end_date":       ep["date"]  if ep else None,
             "return_pct":     ret_pct,
+            "return_pct_net": ret_pct_net,
             "has_price_data": ret_pct is not None,
         })
 
@@ -202,6 +213,11 @@ def run(
         srt = sorted(valid)
         std = float(arr.std(ddof=0))
         b_avg = float(np.mean(bench_returns)) if bench_returns else None
+
+        valid_net = [r["return_pct_net"] for r in results if r["return_pct_net"] is not None]
+        avg_net = float(np.mean(valid_net))
+        b_avg_net = (b_avg - round_trip_cost_pct) if b_avg is not None else None
+
         summary = {
             "avg_return_pct":    round(avg, 2),
             "median_return_pct": round(percentile(srt, 50), 2),
@@ -215,6 +231,11 @@ def run(
             "benchmark_avg_pct": round(b_avg, 2) if b_avg is not None else None,
             "excess_return_pct": round(avg - b_avg, 2) if b_avg is not None else None,
             "n_benchmark":       len(bench_returns),
+            "cost_bps":              cost_bps,
+            "avg_return_net_pct":    round(avg_net, 2),
+            "win_rate_net_pct":      round(sum(1 for x in valid_net if x > 0) / n * 100, 1),
+            "benchmark_avg_net_pct": round(b_avg_net, 2) if b_avg_net is not None else None,
+            "excess_return_net_pct": round(avg_net - b_avg_net, 2) if b_avg_net is not None else None,
         }
     else:
         summary = None
@@ -226,6 +247,7 @@ def run(
         "top_n":            top_n,
         "preset":           preset_name,
         "source":           source,
+        "cost_bps":         cost_bps,
         "total_candidates": len(scored),
         "summary":          summary,
         "results":          results,
