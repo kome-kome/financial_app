@@ -15,6 +15,7 @@ Render の制約と運用形態に合わせて設計すること。
 |---|---|---|---|
 | **自動（毎日）** | 差分収集（新規書類 + 株価更新） | UTC 18:00（JST 03:00）毎日 | GitHub Actions `daily-incremental.yml` |
 | **自動（毎月）** | M-1/M-2/M-3 ハイパーパラメータ探索・永続化 | UTC 03:00（JST 12:00）毎月1日 | GitHub Actions `tune-hyperparameters.yml` |
+| **自動（週次・段階導入中）** | `stock_price_daily` の VACUUM FULL（index bloat 対策） | UTC 19:00・土（JST 04:00・日）※現在は `workflow_dispatch` のみ有効 | GitHub Actions `vacuum-maintenance.yml` |
 | **手動のみ** | 全件収集（全社 × 5年分） | workflow_dispatch で起動 | GitHub Actions `full-pipeline.yml` |
 | **手動のみ** | マクロのみ収集（為替・金利等） | workflow_dispatch で起動 | GitHub Actions `collect-macro.yml` |
 | **手動のみ（アーカイブ）** | bs_inventory 補完 | workflow_dispatch で起動 | GitHub Actions `old/` 配下（一回性・完了済み） |
@@ -33,6 +34,7 @@ Render の制約と運用形態に合わせて設計すること。
 | `[補完]` | マクロのみ収集 | `collect-macro.yml` | `MACRO_SERIES`（為替・金利・指数・コモディティ・ボラ）を Yahoo から収集。新規系列追加や macro_data の鮮度補完。`workflow_dispatch`（years 既定5） | 〜数分 |
 | `[推論]` | M-1 per-stock 階層マクロβ推論 | `macro-beta-inference.yml` | ADR-0002 の PyMC 階層ベイズ推論バッチ（`macro_beta_inference.py`）。本番 `requirements.txt` ではなく `requirements-inference.txt`（+PyMC）を使用。`workflow_dispatch`（draws/tune/target_accept 指定可・既定 1000/1000/0.9）。マクロ環境・銘柄構成の変化に応じて随時手動実行する想定で、現時点では定期スケジュールなし | 未計測（本番規模での初回実行後に実測値を追記予定。ローカル検証: 4銘柄合成データ・draws/tune=50・chains=2・g++無しの Python フォールバックで約8分） |
 | `[定常]` | M-1/M-2/M-3 ハイパーパラメータ月次自動探索 | `tune-hyperparameters.yml` | `hyperparameter_search.py`（Issue #264/#278/#291）を matrix strategy で3モデル並列実行し `plugin_tuned_params` へ永続化（Issue #292）。`macro_risk_return`/`macro_dlm` は `--strategy grid`、`macro_gbdt` は `--strategy random --n-iter 150`（6時間上限に収める設計判断）。共通 `--objective rank_ic --persist --persist-scores --seed 0`。品質ゲート（#291）でスコア劣化時は該当ジョブが failed 終了（意図した挙動）。毎月1日 UTC 03:00（JST 12:00）自動。手動即時実行は `workflow_dispatch` | macro_risk_return/macro_dlm: 10〜60分、macro_gbdt: 4〜8時間相当を n_iter=150 で圧縮（timeout-minutes: 355） |
+| `[定常]` | DBメンテナンス（VACUUM FULL・週次） | `vacuum-maintenance.yml` | `stock_price_daily` の DELETE ベース trim による index bloat 対策（Issue #290）。`_pipeline_vacuum.py` が AUTOCOMMIT 接続で `VACUUM FULL stock_price_daily` を実行、前後の容量をログ出力。**段階導入中**：まず `workflow_dispatch` で手動実行し、Supabase pooler 経由での動作・排他ロックの影響を確認してから `schedule`（コメントアウト中）を有効化する | 数秒〜数分（対象テーブルは実測 ~70MB・42万行） |
 
 #### アーカイブ済み（`.github/workflows/old/` 配下・一回性・Actions 対象外）
 
@@ -230,7 +232,7 @@ Render ダッシュボードで管理。
 
 旧 `stock_price_history`（日次OHLCV全履歴）が約 359MB / 全体80% を占め、年約220MB で増加して 500MB 上限の主犯だった。**close-only の2本立て**へ移行して恒久対策とする：
 
-- **`stock_price_daily`**：直近 `DAILY_WINDOW_DAYS`（≒6か月）の日次終値のみ。収集のたびにローリング削除（trim）でサイズが頭打ち（autovacuum が死領域を再利用）。チャートの日次ズーム・短期バックテスト用。
+- **`stock_price_daily`**：直近 `DAILY_WINDOW_DAYS`（≒6か月）の日次終値のみ。収集のたびにローリング削除（trim）でサイズが頭打ち……のはずだが、DELETE ベースの trim は btree インデックス（`pk_stock_price_daily`/`ix_spd_trade_date`）を bloat させ続け、autovacuum は死領域をテーブル内で再利用するのみでファイルサイズは縮まない（**Issue #290**・実測: 2026-07-09 VACUUM FULL 直後 48MB→3日後 72MB）。週次 `vacuum-maintenance.yml`（VACUUM FULL・段階導入中）で物理サイズを頭打ちにする。チャートの日次ズーム・短期バックテスト用。
 - **`stock_price_weekly`**：全履歴の週次集約（追記専用・trim しない）。`close_last`＋生集約 `volume_sum`/`turnover_sum`/`n_days` のみ保持し、**VWAP・相対流動性は派生**（保存しない）。チャート全期間・長期バックテスト・将来の予測モデル用。
 - 見通し：5年分 weekly ≈ 145MB、総計 ≈ 285MB / 500MB、+約37MB/年（runway 約6年）。書き込みは単一チョークポイント `record_prices_batch`（daily upsert→触れた週を weekly 再集約→trim）。
 

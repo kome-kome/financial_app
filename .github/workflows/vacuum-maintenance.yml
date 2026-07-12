@@ -1,0 +1,49 @@
+name: "[定常] DBメンテナンス（VACUUM FULL・週次）"
+
+# JST 日曜 04:00 = UTC 土曜 19:00（daily-incremental の JST 03:00 とはずらす）
+#
+# stock_price_daily は日次収集のたびに DELETE ベースの trim を行い、
+# btree インデックスが bloat し続ける（Issue #290）。VACUUM FULL で
+# 定期的に物理サイズを頭打ちにする。
+#
+# ⚠️ 段階導入中: まず workflow_dispatch で手動実行し、
+#   - Supabase pooler 経由で VACUUM FULL が正常完了するか
+#   - 対象テーブルの排他ロックが実運用へ悪影響を与えないか
+# を確認してから、下記 schedule のコメントを外して定時自動実行を有効化する
+# （daily-incremental.yml が辿ったのと同じ導入手順）。
+
+on:
+  # schedule:
+  #   - cron: '0 19 * * 6'   # UTC 19:00 (土) = JST 04:00 (日)
+  workflow_dispatch:
+
+jobs:
+  vacuum:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13.7'  # render.yaml の PYTHON_VERSION と一致させる
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run VACUUM FULL maintenance
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: python _pipeline_vacuum.py
+
+      - name: Upload log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: vacuum-log
+          path: logs/pipeline_vacuum.log
+          retention-days: 30
