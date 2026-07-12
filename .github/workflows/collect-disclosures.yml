@@ -1,0 +1,45 @@
+name: "[補完] 会社予想開示収集"
+
+# J-Quants /fins/summary（決算短信サマリー）を statement_disclosure へ収集する手動ワークフロー。
+# 初回実行時は DB が空のため JQUANTS_BACKFILL_DAYS（730日）分をさかのぼってバックフィルする
+# （collect_statement_disclosures の差分収集ロジックによる自動判定・引数不要）。
+# 2回目以降は最新 disc_date からの差分収集となり短時間で終わる。
+#
+# 実行時間の目安: 初回バックフィルは平日約500日 × JQUANTS_RATE_SLEEP(20秒) ≒ 2.7時間。
+# Issue #322 参照。
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  collect-disclosures:
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13.7'  # render.yaml の PYTHON_VERSION と一致させる
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Collect statement disclosures
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          JQUANTS_API_KEY: ${{ secrets.JQUANTS_API_KEY }}
+        run: |
+          python collector.py --disclosures 2>&1 | tee disclosures_collect.log
+
+      - name: Upload log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: disclosures-collect-log
+          path: disclosures_collect.log
+          retention-days: 7
