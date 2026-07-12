@@ -26,8 +26,10 @@ STOOQ_CONCURRENCY      = 30    # stooq 現在株価の同時接続数
 STOOQ_HIST_CONCURRENCY = 20    # stooq 履歴の同時接続数（1リクエストが重いため控えめ）
 JQUANTS_ENDPOINT             = "https://api.jquants.com/v2/equities/bars/daily"
 JQUANTS_LISTED_INFO_ENDPOINT = "https://api.jquants.com/v2/markets/listed/info"
+JQUANTS_SUMMARY_ENDPOINT     = "https://api.jquants.com/v2/fins/summary"  # 会社予想・決算短信サマリー（Issue #322）
 JQUANTS_RATE_SLEEP           = 20.0  # リクエスト開始間隔の最低値（秒）。
 JQUANTS_BACKFILL_DAYS        = 730   # J-Quants 無料プランの最大取得可能期間（2年分）
+JQUANTS_DISCLOSURE_DELAY_DAYS = 84   # /fins/summary 無料プランの配信遅延（実測・12週固定。Issue #322 調査コメント参照）
 YAHOO_STOCK_RATE_SLEEP = 0.5   # Yahoo Finance 銘柄別取得のリクエスト間隔（秒）
                                # 銘柄ごとに1リクエスト。3800社×0.5s ≈ 32分
 MAX_GAP_DAYS           = 30    # period_end から±30日以内の株価のみ採用（point_in_time マッチ）
