@@ -235,3 +235,57 @@ class TestScoringSourceStatisticalPreset:
         res = backtest.run(db, "統計的最適化", 6, 20, None, None)
         assert res["total_candidates"] == 1
         assert res["results"][0]["score"] == pytest.approx(3.0)   # バランス型: z_roe+z_op_margin
+
+
+# ── 摩擦コスト（Issue #316）: cost_bps ────────────────────────────────────────
+
+class TestCostBps:
+    def _setup_priced_company(self, db, make_metric, make_weekly,
+                               entry_close=1000.0, exit_close=1100.0):
+        from datetime import date, timedelta
+        today = date.today()
+        start_date = today - timedelta(days=6 * 30)   # months_ago=6 と一致させる
+        entry_date = (start_date + timedelta(days=5)).isoformat()
+        exit_date = today.isoformat()
+        db.add(make_metric(edinet_code="E00001", year=2020, period_end="2020-03-31", z_roe=2.0))
+        db.add(make_weekly(edinet_code="E00001", trade_date=entry_date, close_last=entry_close))
+        db.add(make_weekly(edinet_code="E00001", trade_date=exit_date, close_last=exit_close))
+        db.commit()
+
+    def test_default_cost_bps_zero_matches_legacy_output(self, db, make_metric, make_weekly):
+        # cost_bps 未指定（デフォルト0）は既存の無印キーと完全一致（後方互換）
+        self._setup_priced_company(db, make_metric, make_weekly)
+        res = backtest.run(db, "バランス型", 6, 20, None, None)
+        r = res["results"][0]
+        assert r["return_pct"] == 10.0
+        assert r["return_pct_net"] == r["return_pct"]
+        s = res["summary"]
+        assert s["avg_return_net_pct"] == s["avg_return_pct"]
+        assert s["excess_return_net_pct"] == s["excess_return_pct"]
+        assert s["benchmark_avg_net_pct"] == s["benchmark_avg_pct"]
+        assert s["cost_bps"] == 0.0
+        assert res["cost_bps"] == 0.0
+
+    def test_cost_bps_deducts_round_trip_from_return(self, db, make_metric, make_weekly):
+        # 片道cost_bps=10（0.10%）→ 往復0.20%を差し引いたネットリターンを併記
+        self._setup_priced_company(db, make_metric, make_weekly)
+        res = backtest.run(db, "バランス型", 6, 20, None, None, source="recommend", cost_bps=10.0)
+        r = res["results"][0]
+        assert r["return_pct"] == 10.0
+        assert r["return_pct_net"] == 9.8
+        s = res["summary"]
+        assert s["cost_bps"] == 10.0
+        assert s["avg_return_net_pct"] == 9.8
+        # ベンチマークも同一銘柄1社のみ＝同額控除のため超過収益は変わらない
+        assert s["benchmark_avg_net_pct"] == 9.8
+        assert s["excess_return_net_pct"] == 0.0
+
+    def test_cost_bps_no_price_data_stays_none(self, db, make_metric):
+        # 株価データが無ければ cost_bps を指定しても None のまま（ゼロ除算等が起きない）
+        db.add(make_metric(edinet_code="E00001", year=2020, period_end="2020-03-31", z_roe=2.0))
+        db.commit()
+        res = backtest.run(db, "バランス型", 6, 20, None, None, cost_bps=10.0)
+        r = res["results"][0]
+        assert r["return_pct"] is None
+        assert r["return_pct_net"] is None
+        assert res["summary"] is None

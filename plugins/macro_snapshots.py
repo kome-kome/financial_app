@@ -792,7 +792,7 @@ def _spearman(xs: list, ys: list) -> float | None:
     return cov / math.sqrt(vx * vy)
 
 
-def oof_backtest(residuals_by_ym: dict, n_quantiles: int = 5) -> dict:
+def oof_backtest(residuals_by_ym: dict, n_quantiles: int = 5, cost_bps: float = 0.0) -> dict:
     """無リーク OOF 予測から「アウトオブサンプル検証（OOF）」指標を算出する（ADR-0004）。
 
     residuals_by_ym = {test_ym: [(yhat, y_true), ...]}（walk_forward_cv_monthly の
@@ -806,6 +806,13 @@ def oof_backtest(residuals_by_ym: dict, n_quantiles: int = 5) -> dict:
       - hit_rate = top分位 > bottom分位 だった期の割合。
       - 期内サンプルが n_quantiles*2 未満の期は分位計算から自動除外（IC には使用）。
     quantile_returns[0]=最低 μ̂ バケット, [-1]=最高 μ̂ バケットの実現リターン。
+
+    cost_bps（Issue #316）: 片道売買コスト（bp、1bp=0.01%）。long_short_spread は毎期
+    ロング・ショートを1回転する前提のため、往復（買い+売り）で2倍控除した
+    long_short_spread_net を併記する（デフォルト0＝控除なし・既存キーは不変）。
+    このコストは「期」1回あたりの控除であり、期の頻度（週次/月次）はホライズン
+    ごとに異なる（ADR-0012）ため、複数モデルの spread を跨いで cost_bps ベースで
+    直接比較する場合は呼び出し側で頻度差を考慮すること。
     """
     yms = sorted(residuals_by_ym.keys())
     n_oof = sum(len(residuals_by_ym[y]) for y in yms)
@@ -849,6 +856,11 @@ def oof_backtest(residuals_by_ym: dict, n_quantiles: int = 5) -> dict:
     long_short_spread = round(statistics.mean(ls_spreads), 6) if ls_spreads else None
     hit_rate = round(hits / q_periods, 4) if q_periods else None
 
+    round_trip_cost_pct = cost_bps / 100.0 * 2
+    long_short_spread_net = (
+        round(long_short_spread - round_trip_cost_pct, 6) if long_short_spread is not None else None
+    )
+
     return {
         "n_quantiles":        n_quantiles,
         "n_periods":          len(yms),
@@ -860,6 +872,8 @@ def oof_backtest(residuals_by_ym: dict, n_quantiles: int = 5) -> dict:
             "std":  round(ic_std, 4) if ic_std is not None else None,
             "n":    len(ics),
         },
-        "long_short_spread": long_short_spread,
-        "hit_rate":          hit_rate,
+        "long_short_spread":     long_short_spread,
+        "hit_rate":              hit_rate,
+        "cost_bps":              cost_bps,
+        "long_short_spread_net": long_short_spread_net,
     }

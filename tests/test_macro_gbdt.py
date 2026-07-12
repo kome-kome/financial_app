@@ -722,6 +722,26 @@ class TestOofBacktest:
         assert o["n_oof_samples"] == 0
         assert o["rank_ic"]["n"] == 0
         assert o["rank_ic"]["mean"] is None
+
+    # ── 摩擦コスト（Issue #316）: cost_bps ────────────────────────────────
+
+    def test_cost_bps_default_zero_matches_legacy(self):
+        r = {"2020-01": self._ramp(), "2020-02": self._ramp()}
+        o = oof_backtest(r, n_quantiles=5)
+        assert o["cost_bps"] == 0.0
+        assert o["long_short_spread_net"] == o["long_short_spread"]
+
+    def test_cost_bps_deducts_round_trip(self):
+        r = {"2020-01": self._ramp(), "2020-02": self._ramp()}
+        o = oof_backtest(r, n_quantiles=5, cost_bps=10.0)
+        assert o["cost_bps"] == 10.0
+        assert o["long_short_spread_net"] == pytest.approx(o["long_short_spread"] - 0.2)
+
+    def test_cost_bps_none_spread_stays_none(self):
+        r = {"m": [(0.1, 0.2), (0.2, 0.1), (0.3, 0.3)]}  # 3 < 5*2 → spread は None
+        o = oof_backtest(r, n_quantiles=5, cost_bps=10.0)
+        assert o["long_short_spread"] is None
+        assert o["long_short_spread_net"] is None
         assert o["quantile_returns"] == []
 
 
