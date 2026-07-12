@@ -6,15 +6,13 @@ name: "[定常] DBメンテナンス（VACUUM FULL・週次）"
 # btree インデックスが bloat し続ける（Issue #290）。VACUUM FULL で
 # 定期的に物理サイズを頭打ちにする。
 #
-# ⚠️ 段階導入中: まず workflow_dispatch で手動実行し、
-#   - Supabase pooler 経由で VACUUM FULL が正常完了するか
-#   - 対象テーブルの排他ロックが実運用へ悪影響を与えないか
-# を確認してから、下記 schedule のコメントを外して定時自動実行を有効化する
-# （daily-incremental.yml が辿ったのと同じ導入手順）。
+# ✅ 段階導入完了（2026-07-12）: workflow_dispatch でローカル・GitHub Actions
+# （Azure IP）双方から Supabase pooler 経由の VACUUM FULL 正常完了を確認済み
+# （所要 8〜9秒・対象は stock_price_daily のみ・データ変更なし）。定時自動実行を有効化。
 
 on:
-  # schedule:
-  #   - cron: '0 19 * * 6'   # UTC 19:00 (土) = JST 04:00 (日)
+  schedule:
+    - cron: '0 19 * * 6'   # UTC 19:00 (土) = JST 04:00 (日)
   workflow_dispatch:
 
 jobs:
