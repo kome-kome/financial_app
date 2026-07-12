@@ -330,6 +330,8 @@ class TestCollectJQuantsHistory:
         jquants_row = {
             "Code": "10010", "Date": "2024-01-08",
             "O": 1000.0, "H": 1010.0, "L": 990.0, "C": 1005.0, "Vo": 10000.0,
+            "AdjO": 1000.0, "AdjH": 1010.0, "AdjL": 990.0, "AdjC": 1005.0, "AdjVo": 10000.0,
+            "AdjFactor": 1.0,
         }
 
         with patch("collector_prices._jquants_fetch_date",
@@ -347,6 +349,32 @@ class TestCollectJQuantsHistory:
         assert result["cancelled"] is False
         assert result["upserted"] == 1
         mock_batch.assert_called_once()
+
+    def test_uses_adjusted_close_not_unadjusted(self, db, make_company):
+        """株式分割で AdjC と C が乖離するケース: 保存される close は調整後 AdjC を使う（Issue #314）。"""
+        self._add_company(db, make_company)
+        jquants_row = {
+            "Code": "10010", "Date": "2024-01-08",
+            "O": 2000.0, "H": 2020.0, "L": 1980.0, "C": 2010.0, "Vo": 5000.0,
+            "AdjO": 1000.0, "AdjH": 1010.0, "AdjL": 990.0, "AdjC": 1005.0, "AdjVo": 10000.0,
+            "AdjFactor": 0.5,
+        }
+
+        with patch("collector_prices._jquants_fetch_date",
+                   new_callable=AsyncMock, return_value=[jquants_row]):
+            with patch("collector_prices.record_prices_batch", return_value=1) as mock_batch:
+                with patch("collector_prices.trim_daily", return_value=0):
+                    with patch.dict(os.environ, {"JQUANTS_API_KEY": "test-key"}):
+                        with patch("collector_prices.JQUANTS_RATE_SLEEP", 0):
+                            asyncio.run(
+                                collect_stock_price_history_jquants(
+                                    db, date_from=self._MON, date_to=self._MON,
+                                )
+                            )
+
+        saved_batch = mock_batch.call_args[0][1]
+        assert saved_batch[0]["close"] == 1005.0
+        assert saved_batch[0]["volume"] == 10000.0
 
     def test_cancel_check_stops_jquants(self, db, make_company):
         """cancel_check が True を返すと処理が中断され cancelled: True が返る。"""
