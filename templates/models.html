@@ -649,6 +649,7 @@ conv_score₁₂ₘ = max(<span class="val">5</span>, min(<span class="val">95</
     <div><span class="spec-label">推定</span> 自前 割引係数 DLM（West &amp; Harrison 型）。割引 δ で状態ノイズを表現し銘柄ごとの最適化が不要</div>
     <div><span class="spec-label">不確実性</span> 観測分散を Normal-Gamma 共役で学習。予測分布は Student-t で α/β の信用区間を解析的に算出</div>
     <div><span class="spec-label">µ̂</span> 最新フィルタ α<sub>T</sub> を年率化（α<sub>T</sub> × 52）。M-1/M-2 と同じ µ̂ ランキング</div>
+    <div><span class="spec-label">価格行動系特徴量（既定全選択）</span> 週次実現ボラ・出来高z-score・52週高値乖離・4週リバーサルを銘柄固有の遅行特徴量として追加（本番データのOOF比較で有効性を確認済み）。マクロ列と異なり week (t−1) までの情報のみで計算し、マクロリスク R_macro の計算には含めない</div>
   </div>
 
   <h3>検証（1期先予測診断）</h3>

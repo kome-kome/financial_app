@@ -22,6 +22,8 @@ from plugins.macro_dlm import (
     DEFAULT_MACRO_FEATURES, MACRO_FEATURE_OPTIONS, _DLM_MACRO_MAP,
     _downsample_idx, _auto_select_hyperparams,
     _AUTO_DELTA_GRID, _AUTO_BV_GRID,
+    _build_price_features, PRICE_FEATURE_OPTIONS, DEFAULT_PRICE_FEATURES,
+    _PX_RVOL_WINDOW, _PX_VOLZ_WINDOW, _PX_HIGH52_WINDOW, _PX_REV_WINDOW,
 )
 from plugins.utils import coerce_params
 
@@ -229,7 +231,8 @@ def _make_prices_companies(n_companies, dates, seed=10):
         rows = []
         for d, r in zip(dates, rets):
             close *= math.exp(float(r))
-            rows.append(SimpleNamespace(trade_date=d, close_last=close))
+            volume = float(max(1000.0, 1_000_000.0 + rng.normal(0, 300_000)))
+            rows.append(SimpleNamespace(trade_date=d, close_last=close, volume_sum=volume))
         prices_by_co[ec] = rows
         companies[ec] = SimpleNamespace(
             edinet_code=ec, name=f"会社{ci}", sec_code=str(1000 + ci), industry="テスト業",
@@ -248,7 +251,7 @@ class TestExecuteSmoke:
         dates = _weekly_dates(n_weeks)
         prices_by_co, companies = _make_prices_companies(n_companies, dates)
         macro_levels = _make_macro_levels(dates)
-        opts = {"min_weeks": 40, "burn_in_weeks": 5, "top_n": 3}
+        opts = {"min_weeks": 40, "burn_in_weeks": 5, "top_n": 3, "price_features": []}
         opts.update(pover)
         params = self._params(**opts)
         db = MagicMock()
@@ -348,7 +351,7 @@ class TestExecuteSmoke:
         dates = _weekly_dates(90)
         prices_by_co, companies = _make_prices_companies(5, dates)
         macro_levels = _make_macro_levels(dates)
-        params = self._params(min_weeks=40, burn_in_weeks=5, top_n=3)
+        params = self._params(min_weeks=40, burn_in_weeks=5, top_n=3, price_features=[])
         db = MagicMock()
         with patch("plugins.macro_dlm.load_prices", return_value=(prices_by_co, companies)), \
              patch("plugins.macro_dlm.load_macro_levels", return_value=macro_levels), \
@@ -412,7 +415,7 @@ class TestThinFactorDrop:
     def _params(self, **ov):
         base = {k: v["default"] for k, v in plugin.params_schema().items() if "default" in v}
         p = coerce_params(plugin.params_schema(), base)
-        p.update({"min_weeks": 40, "burn_in_weeks": 5, "top_n": 3})
+        p.update({"min_weeks": 40, "burn_in_weeks": 5, "top_n": 3, "price_features": []})
         p.update(ov)
         return p
 
@@ -552,6 +555,7 @@ class TestOofBacktest:
         params = _coerce(plugin.params_schema(), base_params)
         params.update({
             "macro_features": ["dlm_nikkei225"],
+            "price_features": [],
             "min_weeks": 52, "burn_in_weeks": 26, "top_n": n_companies,
             "state_discount": 0.98,
         })
@@ -654,7 +658,7 @@ class TestProducer:
         params = {k: v["default"] for k, v in plugin.params_schema().items() if "default" in v}
         from plugins.utils import coerce_params
         params = coerce_params(plugin.params_schema(), params)
-        params.update({"min_weeks": 40, "burn_in_weeks": 5, "top_n": 3})
+        params.update({"min_weeks": 40, "burn_in_weeks": 5, "top_n": 3, "price_features": []})
 
         persisted: list[dict] = []
 
@@ -682,7 +686,7 @@ class TestProducer:
         params = {k: v["default"] for k, v in plugin.params_schema().items() if "default" in v}
         from plugins.utils import coerce_params
         params = coerce_params(plugin.params_schema(), params)
-        params.update({"min_weeks": 40, "burn_in_weeks": 5, "top_n": 2})
+        params.update({"min_weeks": 40, "burn_in_weeks": 5, "top_n": 2, "price_features": []})
 
         persisted: list[dict] = []
 
@@ -803,7 +807,7 @@ class TestAr1Alpha:
         schema = plugin.params_schema()
         params = coerce_params(schema, {k: v["default"] for k, v in schema.items() if "default" in v})
         params.update({
-            "min_weeks": 40, "burn_in_weeks": 5, "top_n": 3,
+            "min_weeks": 40, "burn_in_weeks": 5, "top_n": 3, "price_features": [],
             "alpha_ar1": True, "alpha_phi": 0.90,
         })
 
@@ -823,7 +827,7 @@ class TestAr1Alpha:
 
         schema = plugin.params_schema()
         params = coerce_params(schema, {k: v["default"] for k, v in schema.items() if "default" in v})
-        params.update({"min_weeks": 40, "burn_in_weeks": 5, "top_n": 3, "alpha_ar1": False})
+        params.update({"min_weeks": 40, "burn_in_weeks": 5, "top_n": 3, "price_features": [], "alpha_ar1": False})
 
         db = MagicMock()
         with patch("plugins.macro_dlm.load_prices", return_value=(prices_by_co, companies)), \
@@ -894,7 +898,7 @@ class TestAutoHyperparams:
         schema = plugin.params_schema()
         params = coerce_params(schema, {k: v["default"] for k, v in schema.items() if "default" in v})
         params.update({
-            "min_weeks": 40, "burn_in_weeks": 5, "top_n": 3,
+            "min_weeks": 40, "burn_in_weeks": 5, "top_n": 3, "price_features": [],
             "auto_hyperparams": True,
         })
 
@@ -917,7 +921,7 @@ class TestAutoHyperparams:
         schema = plugin.params_schema()
         params = coerce_params(schema, {k: v["default"] for k, v in schema.items() if "default" in v})
         params.update({
-            "min_weeks": 40, "burn_in_weeks": 5, "top_n": 3,
+            "min_weeks": 40, "burn_in_weeks": 5, "top_n": 3, "price_features": [],
             "auto_hyperparams": True, "alpha_ar1": True, "alpha_phi": 0.92,
         })
 
@@ -1005,7 +1009,7 @@ class TestObjectiveOnlyMode:
         dates = _weekly_dates(n_weeks)
         prices_by_co, companies = _make_prices_companies(n_companies, dates)
         macro_levels = _make_macro_levels(dates)
-        opts = {"min_weeks": 40, "burn_in_weeks": 5, "top_n": 3}
+        opts = {"min_weeks": 40, "burn_in_weeks": 5, "top_n": 3, "price_features": []}
         opts.update(pover)
         params = self._params(**opts)
         db = MagicMock()
@@ -1128,7 +1132,7 @@ class TestTuningSnapshotCacheForDlm:
         monkeypatch.setattr(dlm, "_load_macro_levels_impl", load_macro_mock)
 
         base_params = {k: v["default"] for k, v in plugin.params_schema().items() if "default" in v}
-        base_params.update({"min_weeks": 40, "burn_in_weeks": 5, "top_n": 3})
+        base_params.update({"min_weeks": 40, "burn_in_weeks": 5, "top_n": 3, "price_features": []})
         dims = [SearchDim("state_discount", [0.95, 0.97, 0.99])]
 
         result = asyncio.run(search(plugin, base_params, dims, db="db1", strategy="grid"))
@@ -1136,3 +1140,174 @@ class TestTuningSnapshotCacheForDlm:
         assert result["config"]["n_combos"] == 3
         assert load_prices_mock.call_count == 1
         assert load_macro_mock.call_count == 1
+
+
+# ── 12. 価格行動系特徴量（Issue #317）──────────────────────────────────────
+
+class TestBuildPriceFeatures:
+    """_build_price_features()（純粋関数）: 4特徴量の窓・値の正しさ。"""
+
+    def _rows(self, closes, volumes=None):
+        volumes = volumes if volumes is not None else [1.0] * len(closes)
+        return [SimpleNamespace(trade_date=f"2020-{(i // 28) + 1:02d}-{(i % 28) + 1:02d}",
+                                close_last=c, volume_sum=v)
+                for i, (c, v) in enumerate(zip(closes, volumes))]
+
+    def test_empty_selected_returns_empty_dict(self):
+        rows = self._rows([100.0, 101.0])
+        assert _build_price_features(rows, []) == {}
+
+    def test_px_rev4w_known_value(self):
+        w = _PX_REV_WINDOW
+        closes = [100.0] * w + [200.0]
+        rows = self._rows(closes)
+        vals = _build_price_features(rows, ["px_rev4w"])["px_rev4w"]
+        assert len(vals) == w + 1
+        for i in range(w):
+            assert math.isnan(vals[i])
+        assert vals[w] == pytest.approx(math.log(2.0))
+
+    def test_px_high52dev_zero_at_running_high(self):
+        # 単調増加列: 各時点の close がその時点までの最大値 → 乖離0（窓が揃った時点から）
+        w = _PX_HIGH52_WINDOW
+        closes = [100.0 * (1.01 ** i) for i in range(w + 10)]
+        rows = self._rows(closes)
+        vals = _build_price_features(rows, ["px_high52dev"])["px_high52dev"]
+        for i in range(w - 1):
+            assert math.isnan(vals[i])
+        for i in range(w - 1, len(closes)):
+            assert vals[i] == pytest.approx(0.0, abs=1e-9)
+
+    def test_px_high52dev_negative_when_off_high(self):
+        w = _PX_HIGH52_WINDOW
+        closes = [100.0] * w + [50.0]
+        rows = self._rows(closes)
+        vals = _build_price_features(rows, ["px_high52dev"])["px_high52dev"]
+        assert vals[w] == pytest.approx(math.log(50.0 / 100.0))
+
+    def test_px_rvol_matches_manual_std(self):
+        w = _PX_RVOL_WINDOW
+        rng = np.random.default_rng(0)
+        n = 40
+        closes = [100.0]
+        for _ in range(n - 1):
+            closes.append(closes[-1] * math.exp(float(rng.normal(0, 0.02))))
+        rows = self._rows(closes)
+        vals = _build_price_features(rows, ["px_rvol"])["px_rvol"]
+        logrets = [math.log(closes[i] / closes[i - 1]) for i in range(1, n)]
+        for i in range(w, n):
+            window = logrets[i - w:i]
+            expected = float(np.std(window, ddof=1))
+            assert vals[i] == pytest.approx(expected, rel=1e-9)
+
+    def test_px_volz_high_volume_gives_positive_z(self):
+        w = _PX_VOLZ_WINDOW
+        volumes = [1000.0] * w + [5000.0]
+        closes = [100.0] * len(volumes)
+        rows = self._rows(closes, volumes)
+        vals = _build_price_features(rows, ["px_volz"])["px_volz"]
+        assert vals[-1] > 1.0
+
+    def test_all_features_nan_when_history_too_short(self):
+        rows = self._rows([100.0, 101.0, 102.0])   # 3週のみ（全窓 > 3）
+        selected = [o["value"] for o in PRICE_FEATURE_OPTIONS]
+        out = _build_price_features(rows, selected)
+        for name, vals in out.items():
+            assert all(math.isnan(v) for v in vals), f"{name} が窓不足なのに有限値を返した"
+
+
+class TestPriceFeaturesSchema:
+    """params_schema() の price_features フィールド（Issue #317）。"""
+
+    def test_default_is_all_options(self):
+        # 本番データのOOF比較（rank_ic/long_short_spread/hit_rate 全て改善）を確認の上、
+        # ユーザー承認を得て全選択を既定化（Issue #317）。
+        assert DEFAULT_PRICE_FEATURES == [o["value"] for o in PRICE_FEATURE_OPTIONS]
+
+    def test_options_cover_four_features(self):
+        assert {o["value"] for o in PRICE_FEATURE_OPTIONS} == {
+            "px_rvol", "px_volz", "px_high52dev", "px_rev4w"}
+
+    def test_invalid_price_feature_rejected(self):
+        schema = plugin.params_schema()
+        raw = {k: v["default"] for k, v in schema.items() if "default" in v}
+        raw["price_features"] = ["px_rvol", "px_bogus"]
+        with pytest.raises(ValueError, match="price_features"):
+            coerce_params(schema, raw)
+
+    def test_coerce_defaults_to_all_options(self):
+        result = coerce_params(plugin.params_schema(), {})
+        assert result["price_features"] == DEFAULT_PRICE_FEATURES
+
+    def test_coerce_empty_list_stays_empty(self):
+        """明示的に空リストを渡した場合は（既定にフォールバックせず）空のまま。"""
+        result = coerce_params(plugin.params_schema(), {"price_features": []})
+        assert result["price_features"] == []
+
+
+class TestExecuteWithPriceFeatures:
+    """execute() の price_features 結線（Issue #317）: 後方互換性・β報告・r_macro の列分離。"""
+
+    def _run(self, price_features, n_companies=5, n_weeks=90, **pover):
+        dates = _weekly_dates(n_weeks)
+        prices_by_co, companies = _make_prices_companies(n_companies, dates)
+        macro_levels = _make_macro_levels(dates)
+        schema = plugin.params_schema()
+        params = coerce_params(schema, {k: v["default"] for k, v in schema.items() if "default" in v})
+        params.update({"min_weeks": 40, "burn_in_weeks": 5, "top_n": 3,
+                       "price_features": price_features})
+        params.update(pover)
+        db = MagicMock()
+        with patch("plugins.macro_dlm.load_prices", return_value=(prices_by_co, companies)), \
+             patch("plugins.macro_dlm.load_macro_levels", return_value=macro_levels):
+            return asyncio.run(plugin.execute(params, db))
+
+    def test_backward_compatible_when_no_price_features(self):
+        """price_features 未選択（既定）なら price_beta_latest/price_beta は空のまま。"""
+        res = self._run([])
+        assert res["price_features"] == []
+        assert res["results"][0]["price_beta_latest"] == {}
+        assert res["results"][0]["path"]["price_beta"] == {}
+
+    def test_price_beta_latest_keys_match_selected(self):
+        res = self._run(["px_rev4w", "px_high52dev"], n_weeks=150)
+        r0 = res["results"][0]
+        assert set(r0["price_beta_latest"].keys()) == {"px_rev4w", "px_high52dev"}
+        for b in r0["price_beta_latest"].values():
+            assert set(b.keys()) == {"mean", "lo", "hi"}
+
+    def test_price_feature_labels_present(self):
+        res = self._run(["px_rvol"], n_weeks=150)
+        assert set(res["price_feature_labels"].keys()) == {"px_rvol"}
+
+    def test_r_macro_uses_only_macro_columns(self):
+        """r_macro（マクロリスク）の共分散計算に価格行動系特徴量の列が混入しないこと。"""
+        captured = []
+
+        def _capture(beta_T, cov):
+            captured.append((list(beta_T), np.asarray(cov)))
+            return 0.1
+
+        with patch("plugins.macro_dlm.macro_risk_exposure", side_effect=_capture):
+            self._run(["px_rvol", "px_rev4w"], n_weeks=150)
+
+        assert captured, "macro_risk_exposure が呼ばれなかった"
+        k = len(_COVERED_FEATURES)
+        for beta_T, cov in captured:
+            assert len(beta_T) == k
+            assert cov.shape == (k, k)
+
+    def test_path_includes_price_beta_when_selected(self):
+        res = self._run(["px_high52dev"], n_weeks=150)
+        path = res["results"][0]["path"]
+        assert "px_high52dev" in path["price_beta"]
+        n = len(path["dates"])
+        assert len(path["price_beta"]["px_high52dev"]["mean"]) == n
+
+    def test_high52dev_shortens_usable_history(self):
+        """52週窓の特徴量を有効化すると、窓の立ち上がり分だけ使用可能週数が減る。"""
+        res_off = self._run([], n_weeks=150)
+        res_on = self._run(["px_high52dev"], n_weeks=150)
+        n_off = res_off["results"][0]["n_weeks"]
+        n_on = res_on["results"][0]["n_weeks"]
+        assert n_on < n_off
