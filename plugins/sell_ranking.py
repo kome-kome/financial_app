@@ -291,10 +291,12 @@ class SellRankingPlugin(AnalysisPlugin):
                     "mu_source": mu_source}
 
         # ── ① ユニバース標準化パラメータ（最新年度の全銘柄から winsorize → mean/sd）──
+        # 標準化の基準は「現在投資可能な母集団」に合わせるため、上場廃止銘柄は除く（Issue #315）。
         subq = latest_year_subq(db, FinancialMetric)
         uni_q = (db.query(FinancialMetric)
                    .join(subq, (FinancialMetric.edinet_code == subq.c.edinet_code) &
-                               (FinancialMetric.year == subq.c.max_year)))
+                               (FinancialMetric.year == subq.c.max_year))
+                   .filter(FinancialMetric.is_active.isnot(False)))
         if year:
             uni_q = uni_q.filter(FinancialMetric.year == int(year))
         universe = uni_q.all()
@@ -428,6 +430,10 @@ class SellRankingPlugin(AnalysisPlugin):
                 "buy_date":     h["buy_date"],
                 "pnl_pct":      pnl_pct,
                 "market_cap":   r.market_cap,
+                # 保有銘柄はユーザー入力のため is_active では除外しないが、上場廃止済みなら
+                # 明示的に知らせる（Issue #315・ゾンビ化した保有への気付き）。
+                "is_active":      r.is_active is not False,
+                "delisted_date":  r.delisted_date.isoformat() if r.delisted_date else None,
                 "detail":       detail,
             })
 

@@ -194,6 +194,11 @@ def run(
             "return_pct":     ret_pct,
             "return_pct_net": ret_pct_net,
             "has_price_data": ret_pct is not None,
+            # is_active は「現在」の上場状態（as-of の start_date 時点ではない）。start_date 時点で
+            # 存在した候補を今の上場状態でフィルタすると生存者バイアスを逆に持ち込むため、
+            # スコアリング対象からは除外せず情報表示のみに留める（Issue #315・検証用）。
+            "is_active":      r.is_active is not False,
+            "delisted_date":  r.delisted_date.isoformat() if r.delisted_date else None,
         })
 
     bench_returns = [
@@ -240,6 +245,12 @@ def run(
     else:
         summary = None
 
+    # 生存者バイアスの規模測定（Issue #315「検証」）: top_n のうち現在は上場廃止の件数と、
+    # そのうち価格データ欠損で n_with_data から自然脱落した件数。0 でも常に返す（summary が
+    # None＝価格データ皆無のケースでも測定値自体は意味を持つため）。
+    n_delisted_in_top_n = sum(1 for r in results if r["is_active"] is False)
+    n_delisted_no_price = sum(1 for r in results if r["is_active"] is False and not r["has_price_data"])
+
     return {
         "start_date":       start_date_str,
         "end_date":         today_str,
@@ -249,6 +260,8 @@ def run(
         "source":           source,
         "cost_bps":         cost_bps,
         "total_candidates": len(scored),
+        "n_delisted_in_top_n": n_delisted_in_top_n,
+        "n_delisted_no_price": n_delisted_no_price,
         "summary":          summary,
         "results":          results,
     }

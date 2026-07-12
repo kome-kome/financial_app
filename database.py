@@ -20,7 +20,7 @@ from datetime import datetime, date, timedelta, timezone
 from pathlib import Path
 from dotenv import load_dotenv
 from sqlalchemy import (
-    create_engine, Column, String, Integer, Float, DateTime, Date,
+    create_engine, Column, String, Integer, Float, Boolean, DateTime, Date,
     Text, UniqueConstraint, PrimaryKeyConstraint, Index, JSON, LargeBinary, ForeignKey, text, func
 )
 from sqlalchemy.orm import declarative_base, sessionmaker, relationship
@@ -72,6 +72,8 @@ class Company(Base):
     fiscal_month = Column(Integer)                         # 決算月
     accounting_standard = Column(String(20))               # JGAAP/IFRS/US-GAAP
     issued_shares = Column(Float, nullable=True)           # 発行済株式数（J-Quants 取得・最新値）
+    is_active     = Column(Boolean, nullable=False, default=True)  # 上場中フラグ（J-Quants listed/info突合で自動更新。Issue #315）
+    delisted_date = Column(Date, nullable=True)             # is_active=False へ遷移した日（再上場等で復帰した場合はNoneへ戻す）
     created_at   = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     updated_at   = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
@@ -1047,6 +1049,9 @@ class FinancialMetric(ViewBase):
     doc_id       = Column(String(20))
     source       = Column(String(50))
     accounting_standard = Column(String(20))
+    # companies を LEFT JOIN して合成（Issue #315）。既存行との後方互換のため NOT NULL 制約は付けない。
+    is_active     = Column(Boolean)
+    delisted_date = Column(Date, nullable=True)
     # ソース（financial_records からそのまま）
     bs_total_assets = Column(Float); bs_current_assets = Column(Float)
     bs_receivables = Column(Float); bs_inventory = Column(Float)
@@ -1138,6 +1143,12 @@ def _ensure_tables() -> None:
         ))
         conn.execute(text(
             "ALTER TABLE companies ADD COLUMN IF NOT EXISTS issued_shares DOUBLE PRECISION"
+        ))
+        conn.execute(text(
+            "ALTER TABLE companies ADD COLUMN IF NOT EXISTS is_active BOOLEAN NOT NULL DEFAULT TRUE"
+        ))
+        conn.execute(text(
+            "ALTER TABLE companies ADD COLUMN IF NOT EXISTS delisted_date DATE"
         ))
         for col in _NEW_COLS:
             conn.execute(text(
@@ -1274,6 +1285,47 @@ def upsert_company(db, data: dict) -> Company:
     if changed:
         obj.updated_at = datetime.now(timezone.utc)
     return obj
+
+
+def sync_active_status(db, active_sec_codes: set) -> dict:
+    """企業マスタの上場状態を、現在の上場銘柄集合（J-Quants listed/info 由来）と同期する（Issue #315）。
+
+    is_active=True の企業が active_sec_codes に無ければ delisted 扱い（is_active=False,
+    delisted_date=today）。逆に is_active=False の企業が active_sec_codes に含まれていれば
+    再上場・誤検出からの復帰とみなし is_active=True・delisted_date=None に戻す（自己修復）。
+    sec_code が空の企業は突合不能のため対象外。
+    戻り値: {"delisted": 新規delisted件数, "reactivated": 復帰件数}
+    """
+    from sqlalchemy import update as sa_update
+
+    currently_active = {
+        sec for (sec,) in db.query(Company.sec_code)
+        .filter(Company.is_active.is_(True), Company.sec_code.isnot(None), Company.sec_code != "")
+        .all()
+    }
+    currently_inactive = {
+        sec for (sec,) in db.query(Company.sec_code)
+        .filter(Company.is_active.is_(False), Company.sec_code.isnot(None), Company.sec_code != "")
+        .all()
+    }
+    newly_delisted = currently_active - active_sec_codes
+    reactivated    = currently_inactive & active_sec_codes
+
+    if newly_delisted:
+        db.execute(
+            sa_update(Company).where(Company.sec_code.in_(newly_delisted))
+            .values(is_active=False, delisted_date=date.today())
+            .execution_options(synchronize_session=False)
+        )
+    if reactivated:
+        db.execute(
+            sa_update(Company).where(Company.sec_code.in_(reactivated))
+            .values(is_active=True, delisted_date=None)
+            .execution_options(synchronize_session=False)
+        )
+    if newly_delisted or reactivated:
+        db.commit()
+    return {"delisted": len(newly_delisted), "reactivated": len(reactivated)}
 
 
 def upsert_financial(db, data: dict) -> FinancialRecord:

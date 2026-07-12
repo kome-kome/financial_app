@@ -239,6 +239,44 @@ class TestExecute:
         assert res["count"] == 0
         assert res["results"] == []
 
+    def test_delisted_holding_surfaces_flag_but_not_excluded(self, db, make_metric):
+        # 保有銘柄はユーザー入力のため is_active=False でも not_found にしない。
+        # 上場廃止済みであることは情報表示（is_active/delisted_date）で気付けるようにする（Issue #315）。
+        from datetime import date
+        db.add_all([
+            make_metric(edinet_code="E9001", sec_code="9001", roe=1.0,
+                       is_active=False, delisted_date=date(2024, 6, 1)),
+            *_universe(make_metric, [2.0, 3.0, 4.0, 5.0]),
+        ])
+        db.commit()
+        res = _run({"holdings": "9001", "weights": {"roe": 1.0}, "min_coverage": 0.0}, db)
+        assert res["not_found"] == []
+        row = res["results"][0]
+        assert row["is_active"] is False
+        assert row["delisted_date"] == "2024-06-01"
+
+    def test_active_holding_reports_is_active_true(self, db, make_metric):
+        db.add_all(_universe(make_metric, [1.0, 2.0, 3.0, 4.0]))
+        db.commit()
+        res = _run({"holdings": "1001", "weights": {"roe": 1.0}, "min_coverage": 0.0}, db)
+        row = res["results"][0]
+        assert row["is_active"] is True
+        assert row["delisted_date"] is None
+
+    def test_universe_excludes_delisted_from_standardization(self, db, make_metric):
+        # 標準化ユニバース（uni_q）に delisted 銘柄が混ざると極端値が mean/sd を歪める。
+        # is_active フィルタが効いていれば、追加後もスコアは変わらないはず（Issue #315）。
+        db.add_all(_universe(make_metric, [-5.0, 0.0, 5.0, 10.0, 15.0]))
+        db.commit()
+        baseline = _run({"holdings": "1001", "weights": {"roe": 1.0}, "min_coverage": 0.0}, db)
+
+        db.add(make_metric(edinet_code="E9999", sec_code="9999", company_name="廃止企業",
+                           year=2023, roe=1000.0, is_active=False))
+        db.commit()
+        after = _run({"holdings": "1001", "weights": {"roe": 1.0}, "min_coverage": 0.0}, db)
+
+        assert after["results"][0]["score"] == pytest.approx(baseline["results"][0]["score"])
+
     def test_net_cash_cushion_loss_scores_higher(self, db, make_metric):
         # ネットキャッシュ余力（nc_ratio）の毀損＝クッション消失ほど売りスコアが高い（#208）。
         # market_cap=1000(百万円)=1e9円。nc = 流動資産 − 総負債（投資有価証券=0）。

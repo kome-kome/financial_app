@@ -272,7 +272,8 @@ async def list_companies(
     total = query.count()
     rows = query.offset(offset).limit(limit).all()
     items = [{"edinet_code": c.edinet_code, "sec_code": c.sec_code,
-              "name": c.name, "industry": c.industry, "market": c.market}
+              "name": c.name, "industry": c.industry, "market": c.market,
+              "is_active": c.is_active is not False}
              for c in rows]
     if include_latest and rows:
         codes = [c.edinet_code for c in rows]
