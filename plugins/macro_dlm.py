@@ -38,6 +38,7 @@ import math
 from typing import Any
 
 import numpy as np
+import pandas as pd
 from scipy import stats
 
 from .base import AnalysisPlugin
@@ -73,6 +74,31 @@ _DLM_MACRO_MAP: dict[str, tuple[str, str, str]] = {
 }
 MACRO_FEATURE_OPTIONS = [{"value": k, "label": v[2]} for k, v in _DLM_MACRO_MAP.items()]
 DEFAULT_MACRO_FEATURES = [o["value"] for o in MACRO_FEATURE_OPTIONS]
+
+# ── 価格行動系特徴量定義（Issue #317）─────────────────────────────────────
+# stock_price_weekly（close_last/volume_sum・全履歴保持・分割調整済み）のみで構築する
+# 銘柄固有の特徴量。マクロ列（week t の「同時点」変化＝ファクター・エクスポージャー）とは
+# 意味が異なり、week (t-1) までの情報のみで計算した「既知値」を week t の観測 y_t を
+# 説明する遅行特徴量として追加する（academic factor model のモメンタム/リバーサル/ボラ
+# 特徴量と同じ扱い）。r_macro（マクロリスク指標）はこの列を含めない（execute 内で分離）。
+_PX_RVOL_WINDOW   = 12   # 週次実現ボラ（対数リターン標準偏差）の窓（週）
+_PX_VOLZ_WINDOW   = 12   # 出来高z-score の窓（週）
+_PX_HIGH52_WINDOW = 52   # 52週高値判定の窓（週）
+_PX_REV_WINDOW    = 4    # N週リバーサルの窓（週）
+
+PRICE_FEATURE_OPTIONS = [
+    {"value": "px_rvol",      "label": f"週次実現ボラティリティ（直近{_PX_RVOL_WINDOW}週の対数リターン標準偏差）"},
+    {"value": "px_volz",      "label": f"出来高z-score（直近{_PX_VOLZ_WINDOW}週の自己相対）"},
+    {"value": "px_high52dev", "label": f"{_PX_HIGH52_WINDOW}週高値からの乖離（対数）"},
+    {"value": "px_rev4w",     "label": f"{_PX_REV_WINDOW}週リバーサル（過去{_PX_REV_WINDOW}週リターン）"},
+]
+# 既定は全選択（Issue #317・実データ検証済み）: 本番DB（3,600社規模）でのOOF比較で
+# rank_ic mean +35%（0.0097→0.0131）・rank_ic std 半減（0.0572→0.0304・IC情報比率で約2.5倍）・
+# long_short_spread 負→正転換（-0.0012→+0.0008）・hit_rate 0.45→0.59（コイン投げ以下→明確に上回る）
+# の一貫した改善を確認した上でユーザー承認を得て全選択化（M-1/M-2/M-3 の既存マクロ特徴量が
+# 辿った「検証→全選択化」と同じパターン）。トレードオフ: px_high52dev の52週warmupにより
+# 対象企業数は微減（実測 3,641→3,546社）。
+DEFAULT_PRICE_FEATURES: list[str] = [o["value"] for o in PRICE_FEATURE_OPTIONS]
 
 WEEKS_PER_YEAR = 52
 # 週次日付グリッドで forward-fill 値がこの割合未満しか無い factor はモデルから自動除外する。
@@ -254,6 +280,53 @@ def _auto_select_hyperparams(
     return best
 
 
+def _build_price_features(px_rows: list, selected: list[str]) -> dict[str, list]:
+    """1銘柄分の価格行動系特徴量を週インデックス整列で事前計算する（Issue #317）。
+
+    px_rows: StockPriceWeekly 由来の (trade_date, close_last, volume_sum) 行（trade_date昇順）。
+    戻り値: {feature_name: [値|nan, ...]}（長さ=len(px_rows)）。各インデックス i の値は
+    「i 番目の週までの情報で計算可能な既知値」（_build_series 側で week t-1 のインデックスを
+    参照し、week t の観測 y_t を説明する遅行特徴量として使う）。窓に満たない先頭や NaN の
+    混入は nan（pandas rolling の min_periods=window により窓内が完全に揃わないと nan）。
+    """
+    if not selected:
+        return {}
+    closes = pd.Series(
+        [r.close_last if r.close_last and r.close_last > 0 else np.nan for r in px_rows],
+        dtype=float,
+    )
+    out: dict[str, list] = {}
+
+    if "px_rvol" in selected or "px_rev4w" in selected:
+        logret = np.log(closes / closes.shift(1))
+
+    if "px_rvol" in selected:
+        w = _PX_RVOL_WINDOW
+        out["px_rvol"] = logret.rolling(window=w, min_periods=w).std(ddof=1).tolist()
+
+    if "px_volz" in selected:
+        w = _PX_VOLZ_WINDOW
+        vols = pd.Series(
+            [r.volume_sum if getattr(r, "volume_sum", None) and r.volume_sum > 0 else np.nan
+             for r in px_rows],
+            dtype=float,
+        )
+        roll_mean = vols.rolling(window=w, min_periods=w).mean()
+        roll_std  = vols.rolling(window=w, min_periods=w).std(ddof=1).replace(0, np.nan)
+        out["px_volz"] = ((vols - roll_mean) / roll_std).tolist()
+
+    if "px_high52dev" in selected:
+        w = _PX_HIGH52_WINDOW
+        roll_max = closes.rolling(window=w, min_periods=w).max()
+        out["px_high52dev"] = np.log(closes / roll_max).tolist()
+
+    if "px_rev4w" in selected:
+        w = _PX_REV_WINDOW
+        out["px_rev4w"] = np.log(closes / closes.shift(w)).tolist()
+
+    return out
+
+
 def _r(x: float, nd: int = 6) -> float | None:
     if x is None or not math.isfinite(x):
         return None
@@ -286,6 +359,18 @@ class MacroDlmPlugin(AnalysisPlugin):
                 "default": DEFAULT_MACRO_FEATURES,
                 "description": "観測式の説明変数。指数/FX/商品は週次対数リターン、金利は週次差分。"
                                "市場ファクター（日経225）を含めると α は市場・マクロ調整後の固有アルファになる。",
+            },
+            "price_features": {
+                "type": "multiselect",
+                "label": "価格行動系特徴量（銘柄固有・任意）",
+                "options": PRICE_FEATURE_OPTIONS,
+                "default": DEFAULT_PRICE_FEATURES,
+                "description": "week (t-1) までの情報のみで計算する銘柄固有の遅行特徴量"
+                               "（週次実現ボラ・出来高z-score・52週高値乖離・4週リバーサル）。"
+                               "マクロ・ファクター（同時点変化＝エクスポージャー）とは別軸。"
+                               "既定は全選択（本番データのOOF比較で rank_ic/long_short_spread/"
+                               "hit_rate 全て改善を確認済み・Issue #317）。px_high52dev の"
+                               "52週warmupにより対象企業数はわずかに減る。",
             },
             "state_discount": {
                 "type": "slider",
@@ -412,10 +497,20 @@ class MacroDlmPlugin(AnalysisPlugin):
         kinds = [s[2] for s in series]
         return level_at, kinds
 
-    def _build_series(self, px_rows: list, level_at, kinds: list[str]):
-        """1銘柄の (y, X, used_dates) を構築。先頭列=1、欠損週はスキップ。"""
+    def _build_series(self, px_rows: list, level_at, kinds: list[str],
+                      price_features: dict[str, list] | None = None,
+                      price_feature_names: list[str] | None = None):
+        """1銘柄の (y, X, used_dates) を構築。先頭列=1、次に macro Δ、続いて価格行動系特徴量。
+        macro・価格行動系いずれも欠損/計算不能な週はスキップする。
+
+        価格行動系特徴量は week (t-1) の値（_build_price_features が事前計算した配列の
+        インデックス t-1）を使う＝ week t の観測 y_t に対する遅行特徴量（マクロ列の
+        「同時点」変化とは異なる）。
+        """
         dates = [r.trade_date for r in px_rows]
         closes = [r.close_last for r in px_rows]
+        price_features = price_features or {}
+        price_feature_names = price_feature_names or []
         y: list[float] = []
         X: list[list[float]] = []
         used_dates: list[str] = []
@@ -441,6 +536,14 @@ class MacroDlmPlugin(AnalysisPlugin):
                 else:  # diff
                     row.append(b - a)
             prev_lv = cur_lv
+            if not ok:
+                continue
+            for name in price_feature_names:
+                val = price_features[name][t - 1]
+                if val is None or not math.isfinite(val):
+                    ok = False
+                    break
+                row.append(float(val))
             if not ok:
                 continue
             y.append(math.log(c1 / c0))
@@ -479,6 +582,7 @@ class MacroDlmPlugin(AnalysisPlugin):
 
     async def execute(self, params: dict, db: Any) -> dict:
         factors: list[str] = params["macro_features"]
+        price_features: list[str] = params.get("price_features") or []
         delta: float = params["state_discount"]
         beta_v: float = params["var_discount"]
         min_weeks: int = params["min_weeks"]
@@ -540,7 +644,9 @@ class MacroDlmPlugin(AnalysisPlugin):
             sample_ecs = sorted(prices_by_co.keys())[:_AUTO_SAMPLE_N]
             sample_data: list[tuple] = []
             for ec in sample_ecs:
-                sy, sX, _ = self._build_series(prices_by_co[ec], level_at, kinds)
+                s_px_feats = _build_price_features(prices_by_co[ec], price_features)
+                sy, sX, _ = self._build_series(
+                    prices_by_co[ec], level_at, kinds, s_px_feats, price_features)
                 if len(sy) >= min_weeks:
                     sample_data.append((sy, sX))
             if sample_data:
@@ -566,7 +672,8 @@ class MacroDlmPlugin(AnalysisPlugin):
         for ec, px_rows in prices_by_co.items():
             if len(px_rows) < min_weeks + 1:
                 continue
-            y, X, used_dates = self._build_series(px_rows, level_at, kinds)
+            px_feats = _build_price_features(px_rows, price_features)
+            y, X, used_dates = self._build_series(px_rows, level_at, kinds, px_feats, price_features)
             if len(y) < min_weeks:
                 continue
 
@@ -604,6 +711,15 @@ class MacroDlmPlugin(AnalysisPlugin):
                 beta_T.append(bm)
                 beta_latest[f] = {"mean": _r(bm), "lo": _r(bm - tq * bs), "hi": _r(bm + tq * bs)}
 
+            # 価格行動系特徴量の係数（Issue #317）。マクロ β とは別枠で報告し、
+            # r_macro（下記）には含めない（銘柄固有の遅行特徴量であり「マクロリスク」ではないため）。
+            price_beta_latest: dict[str, dict] = {}
+            for j, f in enumerate(price_features):
+                idx = 1 + k + j
+                bm = float(m_path[-1, idx])
+                bs = float(sd_path[-1, idx])
+                price_beta_latest[f] = {"mean": _r(bm), "lo": _r(bm - tq * bs), "hi": _r(bm + tq * bs)}
+
             # 1期先診断（バーンイン除外）
             se = res["std_errs"][b0:]
             fe = res["fe"][b0:]
@@ -616,9 +732,11 @@ class MacroDlmPlugin(AnalysisPlugin):
                 agg_rmse.append(pred_rmse)
 
             # 系統的マクロリスク R_macro（副産物・表示の:= sqrt(βᵀ cov(Δm) β)）
+            # 価格行動系特徴量（末尾 len(price_features) 列）は銘柄固有の遅行特徴量であり
+            # 「マクロリスク」ではないため、列を macro 部分（1:1+k）に限定する（Issue #317）。
             r_macro = None
             try:
-                Xm = np.asarray([r[1:] for r in X], dtype=float)
+                Xm = np.asarray([r[1:1 + k] for r in X], dtype=float)
                 if Xm.shape[0] > k:
                     cov = np.cov(Xm, rowvar=False)
                     cov = np.atleast_2d(cov)
@@ -638,6 +756,7 @@ class MacroDlmPlugin(AnalysisPlugin):
                 "pred_rmse": _r(pred_rmse), "coverage95": _r(coverage95, 4),
                 "r_macro": _r(r_macro),
                 "beta_latest": beta_latest,
+                "price_beta_latest": price_beta_latest,
                 # 経路は top_n のみ後段で付与（payload 抑制）
                 "_path_src": (m_path, sd_path, used_dates, b0),
             })
@@ -667,6 +786,9 @@ class MacroDlmPlugin(AnalysisPlugin):
                 "model_type": "bayesian_dlm",
                 "macro_features": factors,
                 "factor_labels": {f: _DLM_MACRO_MAP[f][2] for f in factors},
+                "price_features": price_features,
+                "price_feature_labels": {o["value"]: o["label"] for o in PRICE_FEATURE_OPTIONS
+                                        if o["value"] in price_features},
                 "lambda_risk": params.get("lambda_risk", 1.0),
                 "params": {
                     "state_discount": delta, "var_discount": beta_v,
@@ -704,6 +826,13 @@ class MacroDlmPlugin(AnalysisPlugin):
                         "lo": [_r(m_path[i, j + 1] - tq * sd_path[i, j + 1]) for i in sel],
                         "hi": [_r(m_path[i, j + 1] + tq * sd_path[i, j + 1]) for i in sel],
                     } for j, f in enumerate(factors)
+                },
+                "price_beta": {
+                    f: {
+                        "mean": [_r(m_path[i, 1 + k + j]) for i in sel],
+                        "lo": [_r(m_path[i, 1 + k + j] - tq * sd_path[i, 1 + k + j]) for i in sel],
+                        "hi": [_r(m_path[i, 1 + k + j] + tq * sd_path[i, 1 + k + j]) for i in sel],
+                    } for j, f in enumerate(price_features)
                 },
             }
             r["path"] = path
@@ -745,6 +874,9 @@ class MacroDlmPlugin(AnalysisPlugin):
             "model_type": "bayesian_dlm",
             "macro_features": factors,
             "factor_labels": {f: _DLM_MACRO_MAP[f][2] for f in factors},
+            "price_features": price_features,
+            "price_feature_labels": {o["value"]: o["label"] for o in PRICE_FEATURE_OPTIONS
+                                    if o["value"] in price_features},
             "lambda_risk": params.get("lambda_risk", 1.0),
             "params": {
                 "state_discount": delta, "var_discount": beta_v,

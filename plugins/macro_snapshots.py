@@ -351,7 +351,7 @@ def tuning_cache_get_or_compute(namespace: str, key: Any, compute) -> Any:
 # 起こす。500社/チャンクなら各クエリが PK インデックス（edinet_code, week_start）で数秒完了し、
 # 全件でも実測 ~30秒で安定完走する（単発は失敗）。
 _WEEKLY_LOAD_BATCH = 500
-_WEEKLY_PX = namedtuple("_WeeklyPX", "trade_date close_last")
+_WEEKLY_PX = namedtuple("_WeeklyPX", "trade_date close_last volume_sum")
 
 
 def load_weekly_prices_chunked(db, batch: int = _WEEKLY_LOAD_BATCH) -> dict:
@@ -362,6 +362,7 @@ def load_weekly_prices_chunked(db, batch: int = _WEEKLY_LOAD_BATCH) -> dict:
     孤立コード無しを実測確認済み。行数が全件 count と一致）。各チャンクは
     `WHERE edinet_code IN (...) ORDER BY edinet_code, trade_date` で PK インデックスを使う。
     M-1/M-2（load_data）と M-3（macro_dlm.load_prices）が共用する唯一の週次ローダー。
+    volume_sum は M-3 の価格行動系特徴量（出来高z-score・Issue #317）専用で、M-1/M-2 は未参照。
     """
     from database import Company, StockPriceWeekly
     codes = [c[0] for c in db.query(Company.edinet_code).all()]
@@ -372,13 +373,13 @@ def load_weekly_prices_chunked(db, batch: int = _WEEKLY_LOAD_BATCH) -> dict:
         chunk = codes[i:i + batch]
         rows = (
             db.query(StockPriceWeekly.edinet_code, StockPriceWeekly.trade_date,
-                     StockPriceWeekly.close_last)
+                     StockPriceWeekly.close_last, StockPriceWeekly.volume_sum)
             .filter(StockPriceWeekly.edinet_code.in_(chunk))
             .order_by(StockPriceWeekly.edinet_code, StockPriceWeekly.trade_date)
             .all()
         )
-        for ec, td, cl in rows:
-            prices_by_co.setdefault(ec, []).append(_WEEKLY_PX(td, cl))
+        for ec, td, cl, vs in rows:
+            prices_by_co.setdefault(ec, []).append(_WEEKLY_PX(td, cl, vs))
     return prices_by_co
 
 

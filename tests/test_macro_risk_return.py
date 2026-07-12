@@ -404,11 +404,13 @@ class TestExecuteIntegration:
         codes = ["E01234", "E02345", "E03456"]
         bases  = [1000.0,   2000.0,   500.0]
 
-        # (edinet_code, trade_date, close_last) タプル列（3社分）
+        # (edinet_code, trade_date, close_last, volume_sum) タプル列（3社分）。
+        # volume_sum は M-1 が参照しないため固定値でよい（列数のみ合わせる・Issue #317）。
         price_tuples = [
             (ec,
              (ref - timedelta(days=(n_weeks - i) * 7)).isoformat(),
-             base * math.exp(0.001 * i * (1 + j * 0.2)))
+             base * math.exp(0.001 * i * (1 + j * 0.2)),
+             1_000_000.0)
             for j, (ec, base) in enumerate(zip(codes, bases))
             for i in range(n_weeks)
         ]

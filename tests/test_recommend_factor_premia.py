@@ -102,9 +102,10 @@ def _build_mock_recommend_db(ref: date = date(2025, 6, 1), n_weeks: int = 120, n
     codes = [f"E{i:05d}" for i in range(n_companies)]
     bases = [1000.0 + i * 300 for i in range(n_companies)]
 
+    # volume_sum は M-1 系（本テスト）が参照しないため固定値でよい（列数のみ合わせる・Issue #317）。
     price_tuples = [
         (ec, (ref - timedelta(days=(n_weeks - i) * 7)).isoformat(),
-         base * math.exp(0.002 * i * (1 + j * 0.3)))
+         base * math.exp(0.002 * i * (1 + j * 0.3)), 1_000_000.0)
         for j, (ec, base) in enumerate(zip(codes, bases))
         for i in range(n_weeks)
     ]
