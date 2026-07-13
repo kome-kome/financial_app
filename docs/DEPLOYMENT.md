@@ -18,6 +18,8 @@ Render の制約と運用形態に合わせて設計すること。
 | **自動（毎週）** | `stock_price_daily` の VACUUM FULL（index bloat 対策） | UTC 19:00・土（JST 04:00・日） | GitHub Actions `vacuum-maintenance.yml` |
 | **手動のみ** | 全件収集（全社 × 5年分） | workflow_dispatch で起動 | GitHub Actions `full-pipeline.yml` |
 | **手動のみ** | マクロのみ収集（為替・金利等） | workflow_dispatch で起動 | GitHub Actions `collect-macro.yml` |
+| **手動のみ** | 会社予想開示収集（J-Quants /fins/summary） | workflow_dispatch で起動 | GitHub Actions `collect-disclosures.yml` |
+| **手動のみ** | 半期(H1)財務収集（EDINET 半期/旧四半期Q2） | workflow_dispatch で起動 | GitHub Actions `collect-interim.yml` |
 | **手動のみ（アーカイブ）** | bs_inventory 補完 | workflow_dispatch で起動 | GitHub Actions `old/` 配下（一回性・完了済み） |
 | **UIから手動** | 差分収集・株価更新 | ユーザーがボタン押下 | Render Web UI |
 | **自動（CI）** | `pytest` 回帰テスト（Secrets・本番DB非依存） | PR / main への push | GitHub Actions `ci.yml` |
@@ -34,6 +36,7 @@ Render の制約と運用形態に合わせて設計すること。
 | `[補完]` | マクロのみ収集 | `collect-macro.yml` | `MACRO_SERIES`（為替・金利・指数・コモディティ・ボラ）を Yahoo から収集。新規系列追加や macro_data の鮮度補完。`workflow_dispatch`（years 既定5） | 〜数分 |
 | `[推論]` | M-1 per-stock 階層マクロβ推論 | `macro-beta-inference.yml` | ADR-0002 の PyMC 階層ベイズ推論バッチ（`macro_beta_inference.py`）。本番 `requirements.txt` ではなく `requirements-inference.txt`（+PyMC）を使用。`workflow_dispatch`（draws/tune/target_accept 指定可・既定 1000/1000/0.9）。マクロ環境・銘柄構成の変化に応じて随時手動実行する想定で、現時点では定期スケジュールなし | 未計測（本番規模での初回実行後に実測値を追記予定。ローカル検証: 4銘柄合成データ・draws/tune=50・chains=2・g++無しの Python フォールバックで約8分） |
 | `[定常]` | M-1/M-2/M-3 ハイパーパラメータ月次自動探索 | `tune-hyperparameters.yml` | `hyperparameter_search.py`（Issue #264/#278/#291）を matrix strategy で3モデル並列実行し `plugin_tuned_params` へ永続化（Issue #292）。`macro_risk_return`/`macro_dlm` は `--strategy grid`、`macro_gbdt` は `--strategy random --n-iter 150`（6時間上限に収める設計判断）。共通 `--objective rank_ic --persist --persist-scores --seed 0`。品質ゲート（#291）でスコア劣化時は該当ジョブが failed 終了（意図した挙動）。毎月1日 UTC 03:00（JST 12:00）自動。手動即時実行は `workflow_dispatch` | macro_risk_return/macro_dlm: 10〜60分、macro_gbdt: 4〜8時間相当を n_iter=150 で圧縮（timeout-minutes: 355） |
+| `[補完]` | 半期(H1)財務収集 | `collect-interim.yml` | EDINET 半期報告書（043A00/docType160）と旧四半期報告書（043000/docType140）の Q2(中間=H1累計)を収集し `financial_records` に `period_type='H1'` で保存（Issue #219② フェーズB）。通期収集とは独立・常に差分（収集済み doc_id をスキップ）。`workflow_dispatch`（years_back 既定6＝既存通期窓に整合）。240分に収まらない場合は years_back を分割 | 数時間（過去6年・事前選別でQ1/Q3を除外し概ね1社1半期1DL） |
 | `[定常]` | DBメンテナンス（VACUUM FULL・週次） | `vacuum-maintenance.yml` | `stock_price_daily` の DELETE ベース trim による index bloat 対策（Issue #290）。`_pipeline_vacuum.py` が AUTOCOMMIT 接続で `VACUUM FULL stock_price_daily` を実行、前後の容量をログ出力。毎週 UTC 19:00・土（JST 04:00・日）自動。手動即時実行は `workflow_dispatch`（ローカル・GitHub Actions 双方で Supabase pooler 経由の正常動作を確認済み・2026-07-12） | 数秒〜数分（対象テーブルは実測 ~50MB・42万行） |
 
 #### アーカイブ済み（`.github/workflows/old/` 配下・一回性・Actions 対象外）

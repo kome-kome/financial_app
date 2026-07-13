@@ -69,6 +69,7 @@ pytest tests/test_utils.py  # 単一ファイル
 | `collector_master.py` | 企業/業種マスタ収集（EDINET コードリスト・JPX 業種） |
 | `collector_financials.py` | XBRL 財務収集・パース・CF/PL-BS 補完・全件収集 |
 | `collector_prices.py` | 株価（stooq/J-Quants/Yahoo）・市場データ更新・マクロ収集 |
+| `collector_interim.py` | 半期(H1)財務収集（EDINET 半期報告書043A00/旧四半期Q2・period_type='H1'・Issue #219②） |
 | `api.py` | FastAPI REST・SSE・回帰分析 |
 | `plugins/` | 分析モデル（自動検出方式）。詳細は [MODELS.md](docs/MODELS.md) |
 | `templates/*.html` | 画面（`/`=dashboard, `/collection`, `/analysis`, `/company/{code}`, `/models`=モデル解説[技術版], `/guide`=やさしい解説[初心者向け]）。JS は `static/js/<page>.js`（`guide.html` は `models.js` を再利用） |

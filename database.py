@@ -89,7 +89,11 @@ class Company(Base):
 class FinancialRecord(Base):
     __tablename__ = "financial_records"
     __table_args__ = (
-        UniqueConstraint("edinet_code", "year", "period_end", name="uq_edinet_year_period"),
+        # 開示粒度(period_type)を含む複合一意（Issue #219② フェーズB）。半期(H1)行は通期と
+        # period_end が異なるため旧3列制約でも衝突しないが、訂正再開示や同一 period_end の
+        # 別粒度を厳密に区別するため period_type を制約に含める。名称も _pt を付けて改称。
+        UniqueConstraint("edinet_code", "year", "period_end", "period_type",
+                         name="uq_edinet_year_period_pt"),
         Index("ix_sec_year", "sec_code", "year"),
         Index("ix_industry_year", "industry", "year"),
         Index("ix_period_type", "period_type"),   # financial_metrics VIEW の annual フィルタ用
@@ -1256,6 +1260,25 @@ def _ensure_tables() -> None:
         conn.execute(text(
             "CREATE INDEX IF NOT EXISTS ix_period_type ON financial_records (period_type)"
         ))
+        # UNIQUE 制約に period_type を追加して改称（Issue #219② フェーズB・冪等）。
+        # 新制約が既に在れば何もしない。無ければ旧3列制約を落として4列制約を張る。
+        # 列追加（範囲拡大）のみで既存行の一意性は保たれるため ADD は失敗しない。
+        conn.execute(text("""
+            DO $$
+            BEGIN
+                IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.table_constraints
+                    WHERE constraint_name = 'uq_edinet_year_period_pt'
+                      AND table_name = 'financial_records'
+                ) THEN
+                    ALTER TABLE financial_records
+                        DROP CONSTRAINT IF EXISTS uq_edinet_year_period;
+                    ALTER TABLE financial_records
+                        ADD CONSTRAINT uq_edinet_year_period_pt
+                        UNIQUE (edinet_code, year, period_end, period_type);
+                END IF;
+            END $$
+        """))
         for col in _LEGACY_COMPUTED_COLS + _DEBUG_ONLY_COLS:
             conn.execute(text(
                 f"ALTER TABLE financial_records DROP COLUMN IF EXISTS {col}"
@@ -1443,6 +1466,9 @@ def upsert_financial(db, data: dict) -> FinancialRecord:
         "period_end":         _parse_period_end(data.get("period_end")),
         "doc_id":             data.get("doc_id"),
         "source":             data.get("source", "EDINET_XBRL"),
+        # 開示粒度（Issue #219②）。通期収集は未指定→既定 'annual'。半期収集は 'H1' 等を渡す。
+        "period_type":        data.get("period_type", "annual"),
+        "filing_date":        _parse_period_end(data.get("filing_date")),
     }
     # BS
     for k, v in data.get("bs", {}).items():
@@ -1475,6 +1501,7 @@ def upsert_financial(db, data: dict) -> FinancialRecord:
         edinet_code=flat["edinet_code"],
         year=flat["year"],
         period_end=flat.get("period_end"),
+        period_type=flat["period_type"],
     ).first()
 
     if obj is None:
