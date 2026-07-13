@@ -1,0 +1,54 @@
+name: "[補完] 半期(H1)財務収集"
+
+# EDINET の半期報告書(新式 formCode=043A00/docType160)および旧四半期報告書(043000/docType140)の
+# Q2(中間=H1累計)を収集し、financial_records に period_type='H1' として保存する手動ワークフロー
+# (Issue #219② フェーズB)。既存の通期(annual)収集とは独立。
+#
+# 収集は常に差分(収集済み doc_id はスキップ)。初回バックフィルは過去 years_back 年分の EDINET を
+# 日次スキャンし、docType140/160 の候補を DEI(TypeOfCurrentPeriodDEI=Q2)で確定して取得する。
+#
+# 実行時間の目安: 事前選別(periodEnd月フィルタ)で旧四半期の Q1/Q3 をほぼ落とすため、
+# 概ね 1社1半期あたり1ダウンロード。過去6年 × 約2000社 ≈ 数時間(RATE_SLEEP 0.6秒)。
+# 240分に収まらない場合は years_back を小さくして複数回に分割実行する。
+# 容量: H1行は既存通期(22,680行/56MB)に対し同規模の追加見込み。500MB枠内(実行前に要確認)。
+
+on:
+  workflow_dispatch:
+    inputs:
+      years_back:
+        description: "遡及年数(既定6=既存通期窓に整合)"
+        required: false
+        default: "6"
+
+jobs:
+  collect-interim:
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13.7'  # render.yaml の PYTHON_VERSION と一致させる
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Collect interim (H1) financials
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          EDINET_API_KEY: ${{ secrets.EDINET_API_KEY }}
+        run: |
+          python collector.py --interim --years ${{ github.event.inputs.years_back || '6' }} 2>&1 | tee interim_collect.log
+
+      - name: Upload log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: interim-collect-log
+          path: interim_collect.log
+          retention-days: 7

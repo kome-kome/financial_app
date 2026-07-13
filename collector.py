@@ -8,6 +8,7 @@
   - collector_financials.py : XBRL 財務収集・パース・CF / PL-BS 補完・再解析
   - collector_prices.py     : 株価（stooq / J-Quants / Yahoo）・マクロ指標収集
   - collector_disclosures.py: 会社予想開示（J-Quants /fins/summary・Issue #322）
+  - collector_interim.py    : 半期(H1)財務収集（EDINET 半期/旧四半期Q2・Issue #219②）
 
 CLI エントリポイント（python collector.py ...）は本モジュールに残す。
 """
@@ -18,6 +19,7 @@ from collector_master import *           # 企業/業種マスタ
 from collector_financials import *       # 財務収集・パース・補完
 from collector_prices import *           # 株価・マクロ
 from collector_disclosures import *      # 会社予想開示
+from collector_interim import run_interim_collection  # 半期(H1)財務収集
 
 # テスト等が `from collector import _name` で参照する非公開名は明示的に再エクスポートする
 # （`from module import *` は先頭 _ の名前を取り込まないため）。
@@ -38,6 +40,7 @@ if __name__ == "__main__":
     parser.add_argument("--market",      action="store_true", help="市場データのみ更新")
     parser.add_argument("--macro",       action="store_true", help="マクロデータのみ収集")
     parser.add_argument("--disclosures", action="store_true", help="会社予想開示（決算短信サマリー）のみ収集")
+    parser.add_argument("--interim",     action="store_true", help="半期(H1)財務のみ収集（EDINET 半期報告書・旧四半期Q2・Issue #219②）")
     parser.add_argument("--incremental", action="store_true", help="収集済みをスキップ（差分収集）")
     parser.add_argument("--reparse",     action="store_true", help="xbrl_raw_documents から financial_records を再構築")
     parser.add_argument("--year",        type=int, default=None, help="再解析対象年度（--reparse と組み合わせ）")
@@ -103,6 +106,20 @@ if __name__ == "__main__":
             finally:
                 db.close()
         asyncio.run(_disclosures())
+    elif args.interim:
+        async def _interim():
+            db = SessionLocal()
+            try:
+                # 半期収集は常に差分（収集済み doc_id を再取得しない＝再DL無駄回避・冪等）。
+                # 遡及年数は --years で指定（既定は run_interim_collection 側の 6 年）。
+                r = await run_interim_collection(
+                    db, years_back=args.years,
+                    skip_existing=True,
+                    on_progress=lambda c, t, m: print(m))
+                print(r)
+            finally:
+                db.close()
+        asyncio.run(_interim())
     elif args.company:
         asyncio.run(refresh_company(args.company, args.years))
     else:
