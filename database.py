@@ -92,6 +92,7 @@ class FinancialRecord(Base):
         UniqueConstraint("edinet_code", "year", "period_end", name="uq_edinet_year_period"),
         Index("ix_sec_year", "sec_code", "year"),
         Index("ix_industry_year", "industry", "year"),
+        Index("ix_period_type", "period_type"),   # financial_metrics VIEW の annual フィルタ用
     )
 
     id           = Column(Integer, primary_key=True, autoincrement=True)
@@ -105,6 +106,14 @@ class FinancialRecord(Base):
     doc_id       = Column(String(20))                      # EDINET書類管理番号
     source       = Column(String(50), default="EDINET_XBRL")
     accounting_standard = Column(String(20))
+    # ── 開示粒度（Issue #219② フェーズA）─────────────────────────────────────
+    # period_type: annual/H1/Q1/Q2/Q3。既存行・通期収集は既定 'annual'。半期報告書(H1)等の
+    # 非通期行を同一テーブルに同居させるための識別列。financial_metrics VIEW は
+    # WHERE period_type='annual' で通期のみを露出し既存プラグインを完全不変に保つ（年度単位の
+    # Zスコア/成長率 WINDOW が期間混在で壊れるのを防ぐ）。非通期行は period_type<>'annual' で参照。
+    # ※フェーズB（半期収集）で UNIQUE 制約に period_type を追加する（現状は非通期行ゼロで衝突なし）。
+    period_type  = Column(String(10), nullable=False, default="annual")
+    filing_date  = Column(Date, nullable=True)             # 提出日（point-in-time 基準・リーク防止用）
 
     # ── BS（貸借対照表）再分類項目。info["xbrl"] = この列へ集約する生タグ群（多対一） ──
     bs_total_assets         = Column(Float, info={"xbrl": ["Assets", "AssetsIFRS", "TotalAssetsUSGAAPSummaryOfBusinessResults"]})  # 総資産
@@ -1234,6 +1243,19 @@ def _ensure_tables() -> None:
             conn.execute(text(
                 f"ALTER TABLE financial_records ADD COLUMN IF NOT EXISTS {col} DOUBLE PRECISION"
             ))
+        # 開示粒度列（Issue #219② フェーズA・加算的マイグレーション＝非破壊）。
+        # NOT NULL DEFAULT 'annual' で既存全行を通期にバックフィル（原子的）。filing_date は
+        # 通期の既存行では未捕捉のため nullable（フェーズB の半期収集で提出日を投入）。
+        conn.execute(text(
+            "ALTER TABLE financial_records ADD COLUMN IF NOT EXISTS "
+            "period_type VARCHAR(10) NOT NULL DEFAULT 'annual'"
+        ))
+        conn.execute(text(
+            "ALTER TABLE financial_records ADD COLUMN IF NOT EXISTS filing_date DATE"
+        ))
+        conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS ix_period_type ON financial_records (period_type)"
+        ))
         for col in _LEGACY_COMPUTED_COLS + _DEBUG_ONLY_COLS:
             conn.execute(text(
                 f"ALTER TABLE financial_records DROP COLUMN IF EXISTS {col}"
