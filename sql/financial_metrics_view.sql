@@ -46,6 +46,10 @@ WITH d AS (
              THEN ROUND((COALESCE(fr.bs_current_assets,0) + COALESCE(fr.bs_investment_securities,0) * 0.7 - COALESCE(fr.bs_total_liabilities,0))::numeric, 0) END AS net_cash
     FROM financial_records fr
     LEFT JOIN companies c ON c.edinet_code = fr.edinet_code
+    -- 通期のみを露出（Issue #219② フェーズA）。半期(H1)等の非通期行を同一テーブルに同居させても、
+    -- 年度単位の Zスコア(PARTITION BY year)・成長率LAG(ORDER BY year,period_end)が期間混在で
+    -- 壊れないよう、VIEW 段でソースを通期に限定する。非通期行は period_type<>'annual' で別途参照。
+    WHERE fr.period_type = 'annual'
 ),
 n AS (
     SELECT d.*,

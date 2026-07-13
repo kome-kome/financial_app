@@ -196,6 +196,8 @@ erDiagram
         string  period_end             "決算期末日（YYYY-MM-DD）"
         string  doc_id                 "EDINET書類管理番号"
         string  accounting_standard    "会計基準"
+        string  period_type            "開示粒度 annual/H1/Q1-3（既定annual・#219②）"
+        date    filing_date            "提出日（point-in-time基準・#219②）"
         float   pl_revenue             "売上高（円）"
         float   pl_cost_of_sales      "売上原価（円）"
         float   pl_gross_profit       "売上総利益（円）"
@@ -328,6 +330,11 @@ erDiagram
 > `net_cash` / `nc_ratio` / `z_*`（8指標）/ `rev_growth` / `op_growth` / `eps_growth` を
 > SQL で都度算出し、`regression_results` を LEFT JOIN して `predicted_market_cap` / `gap_ratio` も合成する。
 > 算出式は旧 `collector.calc_derived` / `_calc_zscore_for_year` / `calc_growth_rates` と一致（移植）。
+> **通期のみを露出（`WHERE period_type='annual'`・Issue #219② フェーズA）**: 半期(H1)等の非通期行を
+> `financial_records` に同居させても、年度単位の Zスコア（`PARTITION BY year`）・成長率 LAG
+> （`ORDER BY year, period_end`）が期間混在で壊れないよう VIEW 段でソースを通期に限定する。
+> 全プラグインはこの VIEW 経由のため、非通期行の導入後も挙動は完全不変。非通期行は
+> `period_type<>'annual'` で別途参照する（消費側 VIEW はフェーズC）。
 
 ---
 

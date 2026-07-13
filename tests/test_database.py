@@ -6,6 +6,7 @@ calc_growth_rates は PostgreSQL 専用 SQL（LAG OVER・::numeric）のため S
 """
 import os
 import sys
+from datetime import date
 
 import pytest
 
@@ -192,6 +193,49 @@ class TestUpsertFinancial:
         rows = db.query(FinancialRecord).filter_by(edinet_code="E00001", year=2023).all()
         assert len(rows) == 1
         assert rows[0].pl_revenue == 2000.0
+
+    def test_period_type_defaults_to_annual(self, db):
+        # Issue #219② フェーズA: 通期収集は period_type を指定しない → 既定 'annual' が付与され、
+        # filing_date は未捕捉（None）。既存の全収集経路が自動的に通期タグになることを保証する。
+        obj = upsert_financial(db, self._data())
+        db.commit()
+        assert obj.period_type == "annual"
+        assert obj.filing_date is None
+
+
+class TestDisclosurePeriodIsolation:
+    """Issue #219② フェーズA: period_type によるスキーマ隔離の契約。
+
+    financial_metrics VIEW の `WHERE period_type='annual'` フィルタ自体は Postgres 専用 VIEW の
+    ため SQLite では検証できない（README のとおり z-score/成長率と同様に Postgres 側で別途検証）。
+    ここではモデル層の隔離契約——通期/非通期が同一テーブルに period_end 違いで同居でき、
+    period_type で相互に選別できること——を SQLite で検証する。"""
+
+    def test_annual_and_interim_coexist_and_are_separable(self, db, make_fin):
+        # 同一企業・同一 year で通期(3月末)と半期(9月末)が別行として同居する。
+        db.add(make_fin(edinet_code="E00009", year=2024,
+                        period_end=date(2025, 3, 31), period_type="annual"))
+        db.add(make_fin(edinet_code="E00009", year=2024,
+                        period_end=date(2024, 9, 30), period_type="H1",
+                        filing_date=date(2024, 11, 14)))
+        db.commit()
+
+        annual = db.query(FinancialRecord).filter_by(
+            edinet_code="E00009", period_type="annual").all()
+        interim = db.query(FinancialRecord).filter(
+            FinancialRecord.edinet_code == "E00009",
+            FinancialRecord.period_type != "annual").all()
+        assert len(annual) == 1 and annual[0].period_end == date(2025, 3, 31)
+        assert len(interim) == 1 and interim[0].period_type == "H1"
+        assert interim[0].filing_date == date(2024, 11, 14)  # point-in-time 基準を保持
+
+    def test_make_fin_factory_defaults_to_annual(self, db, make_fin):
+        # 既存テストが依存する make_fin は period_type を指定しない → 既定 'annual'。
+        # 既存テスト資産が新列導入後も通期扱いのまま不変であることを保証する。
+        obj = make_fin(edinet_code="E00010", year=2023)
+        db.add(obj)
+        db.commit()
+        assert obj.period_type == "annual"
 
 
 class TestUpsertRegressionResult:
