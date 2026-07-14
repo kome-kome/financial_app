@@ -334,7 +334,19 @@ erDiagram
 > `financial_records` に同居させても、年度単位の Zスコア（`PARTITION BY year`）・成長率 LAG
 > （`ORDER BY year, period_end`）が期間混在で壊れないよう VIEW 段でソースを通期に限定する。
 > 全プラグインはこの VIEW 経由のため、非通期行の導入後も挙動は完全不変。非通期行は
-> `period_type<>'annual'` で別途参照する（消費側 VIEW はフェーズC）。
+> `period_type<>'annual'` で別途参照する（下記 `financial_metrics_interim`）。
+
+> **`financial_metrics_interim`（VIEW・Issue #219② フェーズC）**: `financial_metrics` と対をなす
+> **非通期（半期H1等）専用**の読み取り VIEW。ソースは `financial_records` の `period_type<>'annual'`
+> 行のみ。行単位比率（`op_margin`〜`nc_ratio`）は通期版と同一式で算出し、`period_type` / `filing_date`
+> を露出（`filing_date` は #323 の point-in-time リーク防止基準）。成長率は**同一 period_type の
+> 前年同期比**（`LAG OVER (PARTITION BY edinet_code, period_type ORDER BY year, period_end)`＝H1 vs
+> 前年 H1）。Zスコア（年度内クロスセクション）・`regression_results` JOIN（通期OLS予測）は**持たない**
+> （#323 は独自正規化・年次OLS予測は H1 に非該当）。用途は #323 イベント駆動モデルへの H1 実績
+> ファンダ供給で、#322(/fins/summary)に無い `roe`/`roa`/`asset_turnover`/`equity_ratio`/`cf_ratio` 系を
+> 充足する。読み取り ORM は `FinancialMetricInterim`。市場データ（`market_cap`/`per` 等）は H1 未収集
+> のため市場依存派生（`nc_ratio` 等）は NULL になりうる。実データ充足率: 主要比率 98〜100%
+> （一部 IFRS 大手で `pl_revenue` 欠落＝売上依存派生のみ影響）。
 
 ---
 
@@ -1000,7 +1012,7 @@ graph TB
 | `collection_jobs.py` | バックエンド | 収集ジョブの実行時状態を集約する registry。job 名キーの `JobState`（running/progress/log/cancel）＋ start/cancel/snapshot/stream を提供。旧6本の並列 status dict を1箇所に畳む。SSE 配信ジェネレータ（`_sse_stream`）を内包。収集ジョブ専用ではなく job 名キーが衝突しなければ任意のバックグラウンドジョブに使える汎用 registry | fastapi |
 | `backtest.py` | バックエンド | バックテスト分析（スコアリング上位N社の実績リターン）。`run(db, …, source, cost_bps=0.0)->dict` / `score_record` / `percentile` / `SCORING_SOURCES`(`recommend`/`valuation`/`net_cash`/`sell`) / `MULTI_PERIODS`。`source` で検証対象の一次分析を切替（メタ層の一般化）。`sell`＝買い系スコアの符号反転（双対）で超過収益が負なら有効。`cost_bps`（Issue #316・片道bp）は往復2倍控除したネット値を `return_pct_net`/`avg_return_net_pct` 等 `*_net` キーへ併記し、無印キー（コスト控除前）は常に不変＝後方互換固定。FastAPI 非依存で直接テスト可能。スコア指標は `FinancialMetric`（VIEW 派生）を引く | database.py, plugins.recommend, plugins.net_cash_analysis |
 | `serializers.py` | バックエンド | 財務レコード（`FinancialMetric`）を bs/pl/cf/val/nc/zscore のネスト dict へ整形する純粋関数 `record_to_dict` | — |
-| `database.py` | バックエンド | DBテーブル定義・upsert。8テーブル（Company / FinancialRecord / StockPriceDaily / StockPriceWeekly / MacroData / CollectionLog / XbrlRawDocument / **RegressionResult**）＋ **`financial_metrics` VIEW**（派生指標を都度SQL算出・読み取り専用 ORM `FinancialMetric`）。`upsert_financial` は **ソース列のみ**保存（derived 取り込み廃止）。`upsert_regression_result`（merge・方言非依存）。派生指標は VIEW へ移行し旧 `calc_growth_rates`/`calc_zscore_normalization` は削除、旧計算列は `init_db` の冪等 `DROP COLUMN` で除去。`pack_elements`/`unpack_elements`/`upsert_xbrl_raw` ヘルパを含む | PostgreSQL |
+| `database.py` | バックエンド | DBテーブル定義・upsert。8テーブル（Company / FinancialRecord / StockPriceDaily / StockPriceWeekly / MacroData / CollectionLog / XbrlRawDocument / **RegressionResult**）＋ **`financial_metrics` VIEW**（通期・派生指標を都度SQL算出・読み取り専用 ORM `FinancialMetric`）＋ **`financial_metrics_interim` VIEW**（非通期=半期H1等・ORM `FinancialMetricInterim`・#219②フェーズC）。両 VIEW は `_ensure_view`→`_ensure_one_view` が定義差分時のみ再作成。`upsert_financial` は **ソース列のみ**保存（derived 取り込み廃止）。`upsert_regression_result`（merge・方言非依存）。派生指標は VIEW へ移行し旧 `calc_growth_rates`/`calc_zscore_normalization` は削除、旧計算列は `init_db` の冪等 `DROP COLUMN` で除去。`pack_elements`/`unpack_elements`/`upsert_xbrl_raw` ヘルパを含む | PostgreSQL |
 | `collector.py` | バックエンド | **オーケストレータ＋後方互換の再エクスポート層**。CLI エントリ（`python collector.py ...`）を保持し、責務別5モジュールの全シンボルを再エクスポートする（`from collector import X` / `collector.X` は従来どおり）。実体は下記5ファイル | collector_utils/master/financials/prices/disclosures |
 | `collector_utils.py` | バックエンド | 収集系モジュール共通の設定定数（EDINET/J-Quants/Yahoo/stooq のレート・並列数・バッチ閾値）とロガー `log` | dotenv |
 | `collector_master.py` | バックエンド | 企業/業種マスタ収集（EDINET コードリスト `fetch_edinet_code_list`・JPX 業種マスタ `update_industry_from_jpx` / `_read_jpx_excel`） | EDINET API, JPX, collector_utils |

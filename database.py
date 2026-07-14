@@ -1187,8 +1187,71 @@ class FinancialMetric(ViewBase):
     predicted_market_cap = Column(Float); gap_ratio = Column(Float)
 
 
+class FinancialMetricInterim(ViewBase):
+    """financial_metrics_interim VIEW（非通期=半期H1等）の読み取り専用 ORM（Issue #219② フェーズC）。
+
+    通期用 FinancialMetric と対をなす。#323 イベント駆動モデルへ H1 実績ファンダを供給する。
+    通期版との差分: period_type/filing_date を持つ／Zスコア・回帰予測（predicted/gap）は持たない
+    （#323 は独自正規化・年次OLS予測は H1 に非該当）／成長率は同一 period_type の前年同期比。"""
+    __tablename__ = "financial_metrics_interim"
+
+    id           = Column(Integer, primary_key=True)
+    edinet_code  = Column(String(10))
+    sec_code     = Column(String(6))
+    company_name = Column(String(200))
+    industry     = Column(String(100))
+    market       = Column(String(50))
+    year         = Column(Integer)
+    period_end   = Column(Date, nullable=True)
+    period_type  = Column(String(10))       # 'H1' 等（非通期）
+    filing_date  = Column(Date, nullable=True)  # 提出日（point-in-time 基準）
+    doc_id       = Column(String(20))
+    source       = Column(String(50))
+    accounting_standard = Column(String(20))
+    is_active     = Column(Boolean)
+    delisted_date = Column(Date, nullable=True)
+    # ソース（financial_records からそのまま）
+    bs_total_assets = Column(Float); bs_current_assets = Column(Float)
+    bs_receivables = Column(Float); bs_inventory = Column(Float)
+    bs_noncurrent_assets = Column(Float); bs_buildings = Column(Float)
+    bs_machinery = Column(Float); bs_ppe_total = Column(Float)
+    bs_intangible_assets = Column(Float); bs_investments_other_assets = Column(Float)
+    bs_cash = Column(Float); bs_investment_securities = Column(Float)
+    bs_total_liabilities = Column(Float); bs_current_liabilities = Column(Float)
+    bs_payables = Column(Float); bs_noncurrent_liabilities = Column(Float)
+    bs_short_term_debt = Column(Float); bs_long_term_debt = Column(Float)
+    bs_bonds_payable = Column(Float); bs_total_equity = Column(Float)
+    bs_equity_parent = Column(Float); bs_paid_in_capital = Column(Float)
+    bs_retained_earnings = Column(Float); bs_bps = Column(Float)
+    pl_revenue = Column(Float); pl_cost_of_sales = Column(Float)
+    pl_gross_profit = Column(Float); pl_sga = Column(Float)
+    pl_operating_profit = Column(Float); pl_nonoperating_income = Column(Float)
+    pl_ordinary_profit = Column(Float); pl_pretax_profit = Column(Float)
+    pl_net_income = Column(Float); pl_net_income_attr = Column(Float)
+    pl_eps = Column(Float); pl_ebitda = Column(Float)
+    pl_rd_expenses = Column(Float); pl_depreciation = Column(Float)
+    pl_extraordinary_income = Column(Float); pl_extraordinary_loss = Column(Float)
+    cf_operating_cf = Column(Float); cf_investing_cf = Column(Float)
+    cf_financing_cf = Column(Float); cf_free_cf = Column(Float)
+    cf_net_change_cash = Column(Float); cf_capex = Column(Float)
+    stock_price = Column(Float); market_cap = Column(Float)
+    per = Column(Float); pbr = Column(Float); div_yield = Column(Float); dps = Column(Float)
+    employees = Column(Float); issued_shares = Column(Float)
+    # 軽い派生（VIEW が都度算出・通期版と同一式）。市場依存（nc_ratio 等）は H1 で NULL になりうる。
+    op_margin = Column(Float); net_margin = Column(Float)
+    roe = Column(Float); roa = Column(Float)
+    equity_ratio = Column(Float); de_ratio = Column(Float); cf_ratio = Column(Float)
+    rd_intensity = Column(Float); da_intensity = Column(Float)
+    asset_turnover = Column(Float)
+    net_cash = Column(Float); nc_ratio = Column(Float)
+    # 前年同期比（同一 period_type 内の YoY・H1 vs 前年 H1）
+    rev_growth = Column(Float); op_growth = Column(Float); eps_growth = Column(Float)
+
+
 # financial_metrics VIEW DDL（sql/financial_metrics_view.sql から読み込み）
 FINANCIAL_METRICS_VIEW_SQL = (Path(__file__).parent / "sql" / "financial_metrics_view.sql").read_text(encoding="utf-8")
+# financial_metrics_interim VIEW DDL（Issue #219② フェーズC）
+FINANCIAL_METRICS_INTERIM_VIEW_SQL = (Path(__file__).parent / "sql" / "financial_metrics_interim_view.sql").read_text(encoding="utf-8")
 
 
 # ── 10. DB初期化 ───────────────────────────────────────────────────────────
@@ -1329,12 +1392,13 @@ def _ensure_tables() -> None:
         conn.commit()
 
 
-def _ensure_view() -> None:
-    """Phase 2: financial_metrics VIEW を定義変更時のみ DROP+再作成する。
+def _ensure_one_view(view_name: str, view_sql: str) -> None:
+    """VIEW を定義変更時のみ DROP+再作成する（毎起動 DROP を避ける）。
 
-    pg_get_viewdef() で現行 VIEW 定義を取得して FINANCIAL_METRICS_VIEW_SQL と比較し、
-    差異がなければスキップ（毎起動 DROP を避ける）。
+    pg_get_viewdef() で現行定義を取得して view_sql と比較し、差異がなければスキップ。
     VIEW 未存在・比較不能（SQLite等）の場合は無条件に再作成する。
+    列の追加・並び替えは CREATE OR REPLACE が「末尾追加のみ可」で失敗するため DROP→再作成する
+    （両 VIEW とも依存オブジェクトは無く安全）。
     """
     import re as _re
 
@@ -1345,24 +1409,31 @@ def _ensure_view() -> None:
     try:
         with engine.connect() as conn:
             row = conn.execute(
-                text("SELECT pg_get_viewdef('financial_metrics', true)")
+                text("SELECT pg_get_viewdef(:v, true)").bindparams(v=view_name)
             ).first()
             if row and row[0]:
-                needs_recreate = (_norm(row[0]) != _norm(FINANCIAL_METRICS_VIEW_SQL))
+                needs_recreate = (_norm(row[0]) != _norm(view_sql))
     except Exception as e:
         # pg_get_viewdef 未対応（SQLite 等）・VIEW 未存在・接続エラーのいずれか → 再作成。
-        # 接続エラーと「VIEW 未存在」を切り分けられるよう例外内容をログに残す。
-        log.debug(f"financial_metrics VIEW 定義の取得失敗 → 再作成する（理由: {e!r}）")
+        log.debug(f"{view_name} VIEW 定義の取得失敗 → 再作成する（理由: {e!r}）")
         needs_recreate = True
 
     if needs_recreate:
         with engine.connect() as conn:
-            # regression_results は create_all 後なので LEFT JOIN 可能。
-            # 列の追加・並び替えは CREATE OR REPLACE VIEW が「末尾追加のみ可」で失敗するため
-            # DROP→再作成する（VIEW に依存するオブジェクトは無く安全）。
-            conn.execute(text("DROP VIEW IF EXISTS financial_metrics"))
-            conn.execute(text(FINANCIAL_METRICS_VIEW_SQL))
+            conn.execute(text(f"DROP VIEW IF EXISTS {view_name}"))
+            conn.execute(text(view_sql))
             conn.commit()
+
+
+def _ensure_view() -> None:
+    """Phase 2: 読み取り専用 VIEW を定義変更時のみ再作成する。
+
+    financial_metrics（通期）と financial_metrics_interim（非通期=半期H1等・Issue #219② フェーズC）
+    の両方。両者は独立で依存関係が無いため順序は任意。regression_results は create_all 後なので
+    financial_metrics の LEFT JOIN は可能。
+    """
+    _ensure_one_view("financial_metrics", FINANCIAL_METRICS_VIEW_SQL)
+    _ensure_one_view("financial_metrics_interim", FINANCIAL_METRICS_INTERIM_VIEW_SQL)
 
 
 def init_db():
