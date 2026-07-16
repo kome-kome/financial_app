@@ -107,9 +107,10 @@ async def run_plugin(
                                  "（Render Free プラン制限。結果は共有DBに保存され本番に反映されます）")
     try:
         return await plugin_registry.execute_plugin(p, params, db)
-    except plugin_registry.DependencyError as e:
-        raise HTTPException(400, str(e))
-    except ValueError as e:
+    except (plugin_registry.DependencyError, ValueError) as e:
+        # パラメータ契約違反・依存不足のドメイン検証メッセージ（内部実装は露出しない）。
+        # 可観測性のためログにも残す（#346）。
+        log.info("プラグイン '%s' の実行を検証で拒否: %s", plugin_name, e)
         raise HTTPException(400, str(e))
     except Exception as e:
         log.error("Plugin '%s' error: %s", plugin_name, e, exc_info=True)
@@ -139,9 +140,9 @@ async def gap_analysis(
     p = plugin_registry.get_plugin("gap_analysis")
     try:
         return await plugin_registry.execute_plugin(p, {"year": year, "sort": sort}, db)
-    except plugin_registry.DependencyError as e:
-        raise HTTPException(404, str(e))
-    except ValueError as e:
+    except (plugin_registry.DependencyError, ValueError) as e:
+        # sector_ols 未実行等の依存/検証エラー（内部実装は露出しない）。可観測性のためログにも残す（#346）。
+        log.info("gap-analysis を依存/検証で拒否: %s", e)
         raise HTTPException(404, str(e))
     except Exception as e:
         log.error("Gap-analysis error: %s", e, exc_info=True)
@@ -159,9 +160,9 @@ async def recommend_stocks(req: dict, db: Session = Depends(api.get_db)):
     p = plugin_registry.get_plugin("recommend")
     try:
         return await plugin_registry.execute_plugin(p, req, db)
-    except plugin_registry.DependencyError as e:
-        raise HTTPException(400, str(e))
-    except ValueError as e:
+    except (plugin_registry.DependencyError, ValueError) as e:
+        # パラメータ契約違反・依存不足のドメイン検証メッセージ（内部実装は露出しない）。可観測性のためログにも残す（#346）。
+        log.info("recommend を依存/検証で拒否: %s", e)
         raise HTTPException(400, str(e))
     except Exception as e:
         log.error("Recommend error: %s", e, exc_info=True)

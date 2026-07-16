@@ -13,6 +13,10 @@ on:
         required: false
         default: false
 
+# 最小権限（GITHUB_TOKEN でリポジトリ書込は不要・収集/保守は Supabase 直結）
+permissions:
+  contents: read
+
 jobs:
   collect:
     if: ${{ !inputs.finalize_only }}

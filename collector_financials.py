@@ -983,7 +983,7 @@ async def run_full_collection(db,
                               skip_existing: bool = False,
                               skip_if_raw_exists: bool = False,
                               cancel_check: Optional[Callable] = None):
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(timeout=60) as client:
         # Phase 1: 企業マスタ Upsert
         company_info, known_edinet, edinet_set = await _phase_upsert_master(
             db, client, on_progress, max_companies
@@ -1023,7 +1023,7 @@ async def refresh_company(edinet_code: str, years_back: int = 5,
                           on_progress: Optional[Callable] = None):
     db = SessionLocal()
     try:
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(timeout=60) as client:
             today = date.today()
             start = date(today.year - years_back, 1, 1)
             docs  = await collect_doc_ids_for_period(client, start, today, {edinet_code})

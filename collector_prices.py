@@ -289,7 +289,7 @@ async def collect_stock_price_history(
                 for r in rows
             ] if rows else []
 
-    async with httpx.AsyncClient() as session:
+    async with httpx.AsyncClient(timeout=60) as session:
         cancelled, inserted_total = await _price_collection_driver(db, _stooq_batch_gen(session))
 
     if cancelled:
@@ -516,7 +516,7 @@ async def collect_stock_price_history_jquants(
                 on_progress(completed, total, f"[{completed}/{total}] {date_str} {len(deduped)}件")
             yield deduped
 
-    async with httpx.AsyncClient() as session:
+    async with httpx.AsyncClient(timeout=60) as session:
         cancelled, upserted_total = await _price_collection_driver(db, _jquants_batch_gen(session))
         # 価格収集と同じセッションで上場銘柄情報（発行済株式数・現在の上場銘柄集合）も取得（API キー共用）
         listed_info = await _fetch_jquants_listed_info(session, api_key)
@@ -750,7 +750,7 @@ async def backfill_historical_stock_prices_yahoo(
     total   = len(by_company)
     updated = 0
 
-    async with httpx.AsyncClient() as session:
+    async with httpx.AsyncClient(timeout=60) as session:
         for i, (sec_code, recs) in enumerate(sorted(by_company.items()), 1):
             if cancel_check and cancel_check():
                 db.commit()
@@ -846,7 +846,7 @@ async def fill_recent_stock_price_gap_yahoo(
             yield records
             await asyncio.sleep(YAHOO_STOCK_RATE_SLEEP)
 
-    async with httpx.AsyncClient() as session:
+    async with httpx.AsyncClient(timeout=60) as session:
         _, upserted = await _price_collection_driver(db, _yahoo_batch_gen(session))
 
     log.info(f"fill_recent_stock_price_gap_yahoo: {upserted}件を株価テーブルへ集約保存")
@@ -909,7 +909,7 @@ async def backfill_weekly_history_yahoo(
         return {"skipped": True, "reason": "already_covered", "companies": 0}
 
     upserted = 0
-    async with httpx.AsyncClient() as session:
+    async with httpx.AsyncClient(timeout=60) as session:
         for i, (sec_code, edinet_code, d_to) in enumerate(sorted(to_fetch), 1):
             if cancel_check and cancel_check():
                 if on_progress:
@@ -1046,7 +1046,7 @@ async def update_market_data(db,
             price = await fetch_stock_price_stooq(company.sec_code, client)
         return company, price
 
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(timeout=60) as client:
         tasks = [asyncio.ensure_future(_fetch_price(c, client)) for c in companies]
         completed = 0
         for coro in asyncio.as_completed(tasks):
@@ -2103,7 +2103,7 @@ async def collect_macro_data(
     )
     saved      = 0
 
-    async with httpx.AsyncClient() as session:
+    async with httpx.AsyncClient(timeout=60) as session:
         for i, series in enumerate(MACRO_SERIES, 1):
             if cancel_check and cancel_check():
                 if on_progress:

@@ -49,8 +49,7 @@ async def health_check():
 async def auth_login(request: Request, req: LoginRequest, response: Response):
     if not api.APP_PASSWORD:
         return {"ok": True, "dev_mode": True}
-    import hmac
-    if not hmac.compare_digest(req.password.encode(), api.APP_PASSWORD.encode()):
+    if not api._verify_password(req.password, api.APP_PASSWORD):
         raise HTTPException(401, "パスワードが違います")
     api._set_auth_cookies(response, api._create_token(), api._create_csrf())
     return {"ok": True}
@@ -69,11 +68,14 @@ async def reset_password(request: Request, req: ResetPasswordRequest):
         raise HTTPException(400, "新しいパスワードを入力してください")
     if len(new_pw) < 8:
         raise HTTPException(400, "パスワードは8文字以上で設定してください")
-    api.APP_PASSWORD = new_pw
+    # DB には平文でなく scrypt ハッシュを保存する（#345・流出時の即漏洩を防止）。
+    # メモリ側 api.APP_PASSWORD もハッシュを保持し、_verify_password が照合する。
+    hashed = api._hash_password(new_pw)
+    api.APP_PASSWORD = hashed
     db = api.SessionLocal()
     try:
         from database import upsert_setting
-        upsert_setting(db, "APP_PASSWORD", new_pw)
+        upsert_setting(db, "APP_PASSWORD", hashed)
     finally:
         db.close()
     return {"message": "パスワードを更新しました"}
