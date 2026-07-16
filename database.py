@@ -1424,6 +1424,20 @@ def _ensure_one_view(view_name: str, view_sql: str) -> None:
             conn.execute(text(view_sql))
             conn.commit()
 
+    # security_invoker=true を冪等に保証する（Issue #344・security_definer_view 解消）。
+    # pg_get_viewdef() は security_invoker オプションを SQL 定義に含めないため上の
+    # needs_recreate 比較では検出できない。再作成の有無に関わらずここで常に設定する
+    # （冪等・churn なし）。これにより VIEW 経由の基テーブルアクセスは querying user の
+    # 権限・RLS に従い、anon からの VIEW 越し読み取りを遮断する（アプリは postgres 直結の
+    # BYPASSRLS ロールのため無影響）。SQLite は VIEW の SET オプション非対応のため無視
+    # （テストは postgres VIEW を生成せず本パスを通らない）。
+    try:
+        with engine.connect() as conn:
+            conn.execute(text(f"ALTER VIEW {view_name} SET (security_invoker = true)"))
+            conn.commit()
+    except Exception as e:
+        log.debug(f"{view_name} の security_invoker 設定をスキップ（SQLite 等・理由: {e!r}）")
+
 
 def _ensure_view() -> None:
     """Phase 2: 読み取り専用 VIEW を定義変更時のみ再作成する。
