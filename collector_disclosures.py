@@ -155,7 +155,7 @@ async def collect_statement_disclosures(
     upserted_total = 0
     completed = 0
     last_req_time = 0.0
-    async with httpx.AsyncClient() as session:
+    async with httpx.AsyncClient(timeout=60) as session:
         for date_str in dates:
             if cancel_check and cancel_check():
                 if on_progress:

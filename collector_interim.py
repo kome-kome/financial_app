@@ -280,7 +280,7 @@ async def run_interim_collection(db,
 
     skip_existing=True のとき、収集済み doc_id を再取得しない(差分収集)。
     """
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(timeout=60) as client:
         fy_end_month_map = build_fy_end_month_map(db)
         log.info(f"会計年度末マップ: {len(fy_end_month_map)}社")
         known_edinet = {r[0] for r in db.query(Company.edinet_code).all()}

@@ -50,18 +50,89 @@ import io, csv
 BASE_DIR = Path(__file__).parent
 
 # ── 認証設定 ──────────────────────────────────────────────────────────────
+_INSECURE_SECRET_KEY = "dev-secret-key-DO-NOT-USE-IN-PRODUCTION"
+RENDER_LIGHT_MODE = os.environ.get("RENDER_LIGHT_MODE", "").lower() in ("1", "true", "yes")
+
+
+def _is_production_like() -> bool:
+    """本番相当環境かを判定する（Issue #345 のフェイルオープン防止ガード用）。
+
+    Render は本番サービスで環境変数 ``RENDER=true`` を自動注入し、本プロジェクトの
+    render.yaml は ``RENDER_LIGHT_MODE=true`` を設定する。いずれかが立っていれば
+    「本番相当」とみなし、必須の秘密（署名鍵・アプリパスワード）が未設定/既定値の
+    まま起動しようとした場合に fail-fast で停止する（設定ミスが即防御無効化に
+    つながるのを防ぐ）。ローカル/テストではどちらも立たないため従来どおり継続する。
+    """
+    if os.environ.get("RENDER", "").lower() in ("1", "true", "yes"):
+        return True
+    return RENDER_LIGHT_MODE
+
+
 APP_PASSWORD     = os.getenv("APP_PASSWORD", "")
 APP_RECOVERY_KEY = os.getenv("APP_RECOVERY_KEY", "")
 APP_SECRET_KEY   = os.getenv("APP_SECRET_KEY", "")
 if not APP_SECRET_KEY:
+    if _is_production_like():
+        raise RuntimeError(
+            "APP_SECRET_KEY が本番相当環境で未設定です。トークン署名鍵が既定値のまま "
+            "起動すると認証が実質無効化されるため、起動を停止します。"
+            "Render の環境変数に APP_SECRET_KEY を設定してください。"
+        )
     import warnings as _warnings
-    APP_SECRET_KEY = "dev-secret-key-DO-NOT-USE-IN-PRODUCTION"
+    APP_SECRET_KEY = _INSECURE_SECRET_KEY
     _warnings.warn(
-        "APP_SECRET_KEY が未設定です。本番デプロイ前に必ず .env に設定してください。",
+        "APP_SECRET_KEY が未設定です。開発用の既定鍵で継続します"
+        "（本番相当環境=RENDER/RENDER_LIGHT_MODE では起動を停止します）。",
         stacklevel=1,
     )
 _TOKEN_TTL      = 30 * 24 * 3600
-RENDER_LIGHT_MODE = os.environ.get("RENDER_LIGHT_MODE", "").lower() in ("1", "true", "yes")
+
+
+# ── パスワードのハッシュ化（Issue #345: DB(app_settings) 保存値の平文回避）──────────
+#   env の APP_PASSWORD は Render の秘密管理下でプロセスメモリにのみ載る（従来どおり
+#   平文可）。一方 DB(app_settings) への保存値は流出時に即漏洩し得る（RLS 見直し #344
+#   と複合するとリスク増）ため、reset 時と起動時移行で scrypt ハッシュ化して保存する。
+#   _verify_password は平文/ハッシュ両対応で、env 平文運用・既存 DB 平文値からの移行を
+#   無停止で吸収する（照合はいずれも定数時間比較）。
+_SCRYPT_N, _SCRYPT_R, _SCRYPT_P = 16384, 8, 1
+_SCRYPT_MAXMEM = 128 * 1024 * 1024
+
+
+def _hash_password(pw: str) -> str:
+    """パスワードを salt 付き scrypt でハッシュ化し、パラメータ込みの文字列で返す。"""
+    salt = secrets.token_bytes(16)
+    dk = hashlib.scrypt(
+        pw.encode(), salt=salt, n=_SCRYPT_N, r=_SCRYPT_R, p=_SCRYPT_P,
+        dklen=32, maxmem=_SCRYPT_MAXMEM,
+    )
+    return "scrypt${}${}${}${}${}".format(
+        _SCRYPT_N, _SCRYPT_R, _SCRYPT_P,
+        base64.b64encode(salt).decode(), base64.b64encode(dk).decode(),
+    )
+
+
+def _is_password_hashed(v: str) -> bool:
+    return bool(v) and v.startswith("scrypt$")
+
+
+def _verify_password(pw: str, stored: str) -> bool:
+    """入力 pw が保存値 stored（scrypt ハッシュ or 平文）に一致するか。定数時間比較。"""
+    if not stored:
+        return False
+    if _is_password_hashed(stored):
+        try:
+            _, n_s, r_s, p_s, salt_b64, dk_b64 = stored.split("$")
+            salt     = base64.b64decode(salt_b64)
+            expected = base64.b64decode(dk_b64)
+            dk = hashlib.scrypt(
+                pw.encode(), salt=salt, n=int(n_s), r=int(r_s), p=int(p_s),
+                dklen=len(expected), maxmem=_SCRYPT_MAXMEM,
+            )
+            return hmac.compare_digest(dk, expected)
+        except Exception:
+            return False
+    # 平文（env 直指定・移行前の DB 値）との後方互換比較。
+    return hmac.compare_digest(pw.encode(), stored.encode())
 
 def _pw_fingerprint() -> str:
     """APP_PASSWORD の HMAC 断片。トークン署名に混入してパスワード変更時に旧トークンを失効させる。"""
@@ -144,10 +215,21 @@ async def lifespan(app: FastAPI):
     db = SessionLocal()
     try:
         # DB に保存されたパスワードがあれば env より優先（Render ephemeral FS 対策）
-        from database import get_setting
+        from database import get_setting, upsert_setting
         pw_from_db = get_setting(db, "APP_PASSWORD")
         if pw_from_db:
+            if not _is_password_hashed(pw_from_db):
+                # 既存の平文保存値を scrypt ハッシュへ移行し、DB から平文を除去する（#345）
+                pw_from_db = _hash_password(pw_from_db)
+                upsert_setting(db, "APP_PASSWORD", pw_from_db)  # 内部で commit する
+                log.info("app_settings.APP_PASSWORD を平文から scrypt ハッシュへ移行しました")
             APP_PASSWORD = pw_from_db
+        # 本番相当環境で認証が全開放のまま公開されるのを防ぐ（DB 復元後に判定・#345）
+        if _is_production_like() and not APP_PASSWORD:
+            raise RuntimeError(
+                "APP_PASSWORD が本番相当環境で未設定です。認証が全開放のまま公開される"
+                "ため、起動を停止します。Render の環境変数に APP_PASSWORD を設定してください。"
+            )
 
         stuck = db.query(CollectionLog).filter(CollectionLog.status == "running").all()
         for job in stuck:

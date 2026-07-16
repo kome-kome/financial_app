@@ -16,6 +16,10 @@ on:
     - cron: '0 18 * * *'   # UTC 18:00 = JST 03:00
   workflow_dispatch:
 
+# 最小権限（GITHUB_TOKEN でリポジトリ書込は不要・収集/保守は Supabase 直結）
+permissions:
+  contents: read
+
 jobs:
   incremental:
     runs-on: ubuntu-latest

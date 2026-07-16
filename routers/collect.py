@@ -377,7 +377,7 @@ async def cancel_reparse():
 @router.post("/api/collect/industry")
 @api.limiter.limit(api.RATELIMIT_COLLECT)
 async def collect_industry(request: Request, db: Session = Depends(api.get_db)):
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(timeout=60) as client:
         updated_co, updated_fr = await update_industry_from_jpx(client, db)
     return {"updated_companies": updated_co, "updated_records": updated_fr}
 
