@@ -12,7 +12,7 @@ from unittest.mock import MagicMock
 import numpy as np
 import pytest
 
-from macro_beta_inference import build_panel, select_shared_factors
+from macro_beta_inference import build_panel, persist_allowed, select_shared_factors
 
 MACRO_TEST_NAMES = ["macro_usdjpy_yoy", "macro_sp500_yoy"]
 _TEST_SERIES = {"macro_usdjpy_yoy": "USDJPY", "macro_sp500_yoy": "SP500"}
@@ -269,3 +269,39 @@ class TestRunInferenceEndToEnd:
                           macro_names=MACRO_TEST_NAMES, chains=2)
 
         assert committed_before_sample == [True]
+
+
+class TestPersistGate:
+    """persist_allowed: r_hat ゲート判定（Issue #341 で threshold 可変化）。
+
+    純関数のため PyMC 不要（build_panel と同様に requirements.txt のみの CI でも実行される）。
+    """
+
+    def test_converged_persists_at_strict_default(self):
+        # strict 既定 1.01：基準を満たす run は persist 許可
+        assert persist_allowed(1.005, threshold=1.01, force=False) is True
+
+    def test_marginal_1_02_rejected_at_strict_default(self):
+        # chains=2 の構造的 ~1.02 は strict 既定では reject（cron が毎回落ちる原因）
+        assert persist_allowed(1.02, threshold=1.01, force=False) is False
+
+    def test_marginal_1_02_persists_under_relaxed_cron_threshold(self):
+        # 月次 cron が渡す 1.05：構造的 ~1.02 は自動 persist される
+        assert persist_allowed(1.02, threshold=1.05, force=False) is True
+
+    def test_genuinely_unconverged_rejected_even_when_relaxed(self):
+        # 緩和 1.05 でも、真に収束していない run（r_hat 大幅超過）は依然 reject
+        assert persist_allowed(1.20, threshold=1.05, force=False) is False
+
+    def test_threshold_boundary_is_inclusive(self):
+        # threshold ちょうどは許可（<= 判定）、僅かに超えると reject
+        assert persist_allowed(1.05, threshold=1.05, force=False) is True
+        assert persist_allowed(1.0501, threshold=1.05, force=False) is False
+
+    def test_force_overrides_any_threshold(self):
+        # force=True は threshold を無視して常に persist（人手精査後の例外運用）
+        assert persist_allowed(1.20, threshold=1.01, force=True) is True
+
+    def test_none_r_hat_is_gate_exempt(self):
+        # r_hat_max が算出不能（None）はゲート対象外＝従来挙動を踏襲
+        assert persist_allowed(None, threshold=1.01, force=False) is True

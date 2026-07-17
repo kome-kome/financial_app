@@ -341,6 +341,27 @@ def persist(db, result: InferenceResult) -> None:
     db.commit()
 
 
+def persist_allowed(r_hat_max: float | None, threshold: float, force: bool) -> bool:
+    """収束診断に基づく persist 可否判定（純関数・テスト可能に切り出し）。
+
+    persist を許可するのは以下のいずれか:
+    - `force=True`（人手で結果を精査した上での強制書き込み）
+    - `r_hat_max` が算出できない（診断不能＝ゲート対象外・従来挙動を踏襲）
+    - `r_hat_max <= threshold`（収束基準を満たす）
+
+    threshold は既定 1.01（ADR-0002 の strict 基準）。chains=2 のランナーでは r_hat が
+    構造的に 1.02 前後で頭打ちになる（PyMC も「信頼できる r_hat には4 chain以上推奨」と
+    警告する通り 2 chain では保守的に出る）ため、月次 cron 等の無人自動実行では緩和した
+    threshold（例 1.05）を渡し、構造的な ~1.02 は自動 persist しつつ、本当に収束していない
+    run（r_hat が threshold を大きく超過）は依然 reject する運用にできる（Issue #341）。
+    """
+    if force:
+        return True
+    if r_hat_max is None:
+        return True
+    return r_hat_max <= threshold
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="M-1 per-stock 階層マクロ・ベータ推論バッチ")
     ap.add_argument("--draws", type=int, default=1000)
@@ -353,8 +374,12 @@ def main() -> None:
                          "（純 Pythonは実測75秒/draw・GitHub Actionsの6時間上限に収まらない）")
     ap.add_argument("--init", default=None,
                     help="numpyro 使用時は 'adapt_diag' 推奨（既定初期化は発散多発の実測あり）")
+    ap.add_argument("--r-hat-threshold", type=float, default=1.01,
+                    help="persist を許可する r_hat_max の上限（既定 1.01＝ADR-0002 strict 基準）。"
+                         "chains=2 では r_hat が構造的に ~1.02 で頭打ちのため、無人 cron では 1.05 等へ"
+                         "緩和して構造的 ~1.02 を自動 persist しつつ真の未収束は reject する（Issue #341）")
     ap.add_argument("--force", action="store_true",
-                    help="収束診断が ADR-0002 基準（r_hat_max<1.01）未達でも DB へ persist する"
+                    help="収束診断が threshold（既定 r_hat_max<=1.01）未達でも DB へ persist する"
                          "（既定は拒否。producer に品質ゲートが無く即座にライブ推奨へ反映されるため）")
     args = ap.parse_args()
 
@@ -368,12 +393,13 @@ def main() -> None:
                                nuts_sampler=args.nuts_sampler, init=args.init)
         logger.info("収束診断: %s", result.diagnostics)
         r_hat_max = result.diagnostics.get("r_hat_max")
-        if r_hat_max is not None and r_hat_max > 1.01 and not args.force:
+        if not persist_allowed(r_hat_max, args.r_hat_threshold, args.force):
             logger.error(
-                "persist を拒否: r_hat_max=%.4f が ADR-0002 基準（<1.01）を超過（n_divergences=%s）。"
+                "persist を拒否: r_hat_max=%.4f が threshold（<=%.4f）を超過（n_divergences=%s）。"
                 "macro_risk_return の producer には品質ゲートが無く persist 即ライブ反映されるため、"
-                "既定では書き込まない。draws/tune/target_accept を見直すか、--force で強制書き込み可能。",
-                r_hat_max, result.diagnostics.get("n_divergences"),
+                "既定では書き込まない。draws/tune/target_accept を見直すか、--r-hat-threshold を"
+                "緩和するか、--force で強制書き込み可能。",
+                r_hat_max, args.r_hat_threshold, result.diagnostics.get("n_divergences"),
             )
             raise SystemExit(1)
         persist(db, result)
