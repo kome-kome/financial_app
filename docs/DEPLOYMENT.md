@@ -15,11 +15,13 @@ Render の制約と運用形態に合わせて設計すること。
 |---|---|---|---|
 | **自動（毎日）** | 差分収集（新規書類 + 株価更新） | UTC 18:00（JST 03:00）毎日 | GitHub Actions `daily-incremental.yml` |
 | **自動（毎月）** | M-1/M-2/M-3 ハイパーパラメータ探索・永続化 | UTC 03:00（JST 12:00）毎月1日 | GitHub Actions `tune-hyperparameters.yml` |
+| **自動（毎月）** | M-1 per-stock 階層マクロβ推論・永続化（producer） | UTC 11:00（JST 20:00）毎月1日 | GitHub Actions `macro-beta-inference.yml` |
 | **自動（毎週）** | `stock_price_daily` の VACUUM FULL（index bloat 対策） | UTC 19:00・土（JST 04:00・日） | GitHub Actions `vacuum-maintenance.yml` |
 | **手動のみ** | 全件収集（全社 × 5年分） | workflow_dispatch で起動 | GitHub Actions `full-pipeline.yml` |
 | **手動のみ** | マクロのみ収集（為替・金利等） | workflow_dispatch で起動 | GitHub Actions `collect-macro.yml` |
 | **手動のみ** | 会社予想開示収集（J-Quants /fins/summary） | workflow_dispatch で起動 | GitHub Actions `collect-disclosures.yml` |
 | **手動のみ** | 半期(H1)財務収集（EDINET 半期/旧四半期Q2） | workflow_dispatch で起動 | GitHub Actions `collect-interim.yml` |
+| **手動のみ** | recommend Fama-MacBeth ファクタープレミアム推定・永続化（producer） | workflow_dispatch で起動 | GitHub Actions `recommend-factor-premia.yml` |
 | **手動のみ（アーカイブ）** | bs_inventory 補完 | workflow_dispatch で起動 | GitHub Actions `old/` 配下（一回性・完了済み） |
 | **UIから手動** | 差分収集・株価更新 | ユーザーがボタン押下 | Render Web UI |
 | **自動（CI）** | `pytest` 回帰テスト（Secrets・本番DB非依存） | PR / main への push | GitHub Actions `ci.yml` |
@@ -34,9 +36,10 @@ Render の制約と運用形態に合わせて設計すること。
 | `[定常]` | 差分収集・毎日自動実行 | `daily-incremental.yml` | 毎日 JST 03:00 に自動。手動で即時更新したい場合は `workflow_dispatch` | 5〜15分 |
 | `[全件]` | XBRL収集・財務データ全件更新 | `full-pipeline.yml` | DB初期構築時・全社バックフィル必要時（`daily-incremental` を `.disabled` に退避して同時実行回避） | 200〜240分 |
 | `[補完]` | マクロのみ収集 | `collect-macro.yml` | `MACRO_SERIES`（為替・金利・指数・コモディティ・ボラ）を Yahoo から収集。新規系列追加や macro_data の鮮度補完。`workflow_dispatch`（years 既定5） | 〜数分 |
-| `[推論]` | M-1 per-stock 階層マクロβ推論 | `macro-beta-inference.yml` | ADR-0002 の PyMC 階層ベイズ推論バッチ（`macro_beta_inference.py`）。本番 `requirements.txt` ではなく `requirements-inference.txt`（+PyMC）を使用。`workflow_dispatch`（draws/tune/target_accept 指定可・既定 1000/1000/0.9）。マクロ環境・銘柄構成の変化に応じて随時手動実行する想定で、現時点では定期スケジュールなし | 未計測（本番規模での初回実行後に実測値を追記予定。ローカル検証: 4銘柄合成データ・draws/tune=50・chains=2・g++無しの Python フォールバックで約8分） |
+| `[推論]` | M-1 per-stock 階層マクロβ推論（producer） | `macro-beta-inference.yml` | ADR-0002 の PyMC 階層ベイズ推論バッチ（`macro_beta_inference.py`）→ `macro_beta_loadings`/`macro_beta_meta` へ永続化（M-1 `macro_risk_return` が consumer）。本番 `requirements.txt` ではなく `requirements-inference.txt`（+PyMC）を使用。**毎月1日 UTC 11:00（JST 20:00）自動**（Issue #341・鮮度が人力任せで滞留した反省。`tune`(UTC 03:00〜)・`daily-incremental`(UTC 18:00〜)と非重複の時間帯）。手動即時実行は `workflow_dispatch`（draws/tune/target_accept/chains/r_hat_threshold/force 指定可・既定 800/800/0.95/2/1.05/false）。**収束ゲートは `--r-hat-threshold` で可変化**（Issue #341）＝ADR-0002 strict 基準は 1.01 だが、chains=2 では r_hat が構造的に ~1.02 で頭打ち（実 persist 済み 2026-07-04 run も r_hat_max=1.02・n_divergences=0）のため cron 既定を 1.05 とし、構造的 ~1.02 は自動 persist しつつ真の未収束（r_hat が 1.05 を大きく超過）は persist せず失敗させる。閾値を緩めても足りない例外運用時のみ `force=true` | 本番規模で最大 340分（`timeout-minutes: 340`・numpyro で実測 10.5〜11.2秒/draw。ローカル検証: 4銘柄合成データ・draws/tune=50・chains=2・g++無しの Python フォールバックで約8分） |
 | `[定常]` | M-1/M-2/M-3 ハイパーパラメータ月次自動探索 | `tune-hyperparameters.yml` | `hyperparameter_search.py`（Issue #264/#278/#291）を matrix strategy で3モデル並列実行し `plugin_tuned_params` へ永続化（Issue #292）。`macro_risk_return`/`macro_dlm` は `--strategy grid`、`macro_gbdt` は `--strategy random --n-iter 150`（6時間上限に収める設計判断）。共通 `--objective rank_ic --persist --persist-scores --seed 0`。品質ゲート（#291）でスコア劣化時は該当ジョブが failed 終了（意図した挙動）。毎月1日 UTC 03:00（JST 12:00）自動。手動即時実行は `workflow_dispatch` | macro_risk_return/macro_dlm: 10〜60分、macro_gbdt: 4〜8時間相当を n_iter=150 で圧縮（timeout-minutes: 355） |
 | `[補完]` | 半期(H1)財務収集 | `collect-interim.yml` | EDINET 半期報告書（043A00/docType160）と旧四半期報告書（043000/docType140）の Q2(中間=H1累計)を収集し `financial_records` に `period_type='H1'` で保存（Issue #219② フェーズB）。通期収集とは独立・常に差分（収集済み doc_id をスキップ）。`workflow_dispatch`（years_back 既定6＝既存通期窓に整合）。240分に収まらない場合は years_back を分割 | 数時間（過去6年・事前選別でQ1/Q3を除外し概ね1社1半期1DL） |
+| `[推論]` | recommend Fama-MacBeth ファクタープレミアム推定（producer） | `recommend-factor-premia.yml` | `recommend_factor_premia.py --persist`（Issue #271/#342・ADR-0008）を実行し、月次断面 OLS（Fama & MacBeth 1973・Newey-West HAC）で推定したファクタープレミアムを `recommend_factor_premia` テーブルへ永続化（`plugins.recommend.resolve_weights()` が「統計的最適化」プリセットとして読む consumer）。依存は `requirements.txt` で充足（PyMC 不要）。**当面 `workflow_dispatch` のみ**（cron 要否は別途判断・Issue #342）。`min_companies_per_period`（既定30）・`maxlags`（既定11）指定可。MCMC のような収束ゲートは無し（断面 OLS は決定的） | 未計測（`timeout-minutes: 120`。週次株価 build_snapshots ロード＋月次断面 OLS。計算自体は MCMC より遥かに軽量） |
 | `[定常]` | DBメンテナンス（VACUUM FULL・週次） | `vacuum-maintenance.yml` | `stock_price_daily` の DELETE ベース trim による index bloat 対策（Issue #290）。`_pipeline_vacuum.py` が AUTOCOMMIT 接続で `VACUUM FULL stock_price_daily` を実行、前後の容量をログ出力。毎週 UTC 19:00・土（JST 04:00・日）自動。手動即時実行は `workflow_dispatch`（ローカル・GitHub Actions 双方で Supabase pooler 経由の正常動作を確認済み・2026-07-12） | 数秒〜数分（対象テーブルは実測 ~50MB・42万行） |
 
 #### アーカイブ済み（`.github/workflows/old/` 配下・一回性・Actions 対象外）

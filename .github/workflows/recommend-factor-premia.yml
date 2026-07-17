@@ -1,0 +1,77 @@
+name: "[補完] recommend Fama-MacBeth ファクタープレミアム推定バッチ"
+
+# recommend_factor_premia.py（Issue #271／ADR-0008）の断面回帰バッチを GitHub Actions で
+# 実行し、Fama & MacBeth (1973) の月次断面 OLS で推定したファクタープレミアムを
+# recommend_factor_premia テーブルへ永続化するワークフロー（Issue #342）。
+# recommend プラグイン（plugins.recommend.resolve_weights()）が producer としてこれを読み、
+# 「統計的最適化」プリセット重みとして利用する。
+#
+# 背景（Issue #342 / #339）: macro_beta_inference.py（M-1 producer）と同じ producer/consumer
+# 分離設計（バッチ→専用テーブル→プラグインが読む）でありながら、recommend_factor_premia.py
+# だけは GitHub Actions ワークフローが存在せず、実行手段がローカル CLI 手動実行のみだった。
+# ローカル専用 CLI でも接続先は本番 Supabase（feedback_local_scripts_hit_production_db）で、
+# 実行有無・頻度が git 履歴にもワークフロー実行ログにも残らず鮮度の実態が不明だったため、
+# 「Actions 経由で実行した記録が残る」状態にする。
+#
+# 実行頻度: 当面は手動（workflow_dispatch）のみ。cron 定期化の要否は別途判断する（Issue #342）。
+# Fama-MacBeth の設計自体は月末スナップショット・52週先リターンの月次 cadence（#271）だが、
+# 定期実行を追加するかは運用実績を見て決める。
+#
+# 依存: numpy / pandas / scipy / statsmodels（Newey-West HAC 標準誤差）はすべて requirements.txt
+# に含まれるため、macro-beta-inference.yml のような専用 requirements（PyMC）は不要。
+#
+# 品質面: このバッチには MCMC の r_hat のような収束ゲートは無い（断面 OLS は決定的）。
+# ただし有効期間数が少ないと Newey-West 補正が無意味になるため min-companies-per-period で
+# 各月の最小社数を担保する（recommend_factor_premia.py の docstring 参照）。
+
+on:
+  workflow_dispatch:
+    inputs:
+      min_companies_per_period:
+        description: "この社数未満の月は断面OLSから除外する（既定30）"
+        required: false
+        default: "30"
+      maxlags:
+        description: "Newey-West補正のラグ数（既定11＝52週先リターンのオーバーラップ月数-1）"
+        required: false
+        default: "11"
+
+# 最小権限（GITHUB_TOKEN でリポジトリ書込は不要・永続化は Supabase 直結）
+permissions:
+  contents: read
+
+jobs:
+  estimate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13.7'  # render.yaml の PYTHON_VERSION と一致させる
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run Fama-MacBeth factor premia batch
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          python recommend_factor_premia.py \
+            --min-companies-per-period "${{ github.event.inputs.min_companies_per_period || '30' }}" \
+            --maxlags "${{ github.event.inputs.maxlags || '11' }}" \
+            --persist \
+            2>&1 | tee recommend_factor_premia.log
+
+      - name: Upload log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: recommend-factor-premia-log
+          path: recommend_factor_premia.log
+          retention-days: 30

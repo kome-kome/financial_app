@@ -5,6 +5,15 @@
 accepted（2026-07-05）。実装は GitHub Issue #271（#270 に依存・2026-07-05 マージ済みのため着手）。
 実データ検証で `gap_ratio` の除外が必要と判明し、設計を1点修正（Decision 1・Consequences 参照）。
 
+**改訂（2026-07-18・Issue #342）**: Decision §5 および Considered Options の「GitHub Actions
+ワークフロー化は見送り（需要が出てから検討）」を**反転**し、`recommend-factor-premia.yml`
+（`workflow_dispatch` のみ・cron なし）を新設した。当初の見送り理由は「計算が軽く Render Free
+枠回避という macro-beta-inference.yml の目的に合致しない」だったが、#339 の再学習 cadence 棚卸し
+で別の需要が顕在化した——producer/consumer 分離である以上、ローカル CLI 手動実行だと実行有無・
+頻度が git 履歴にもワークフローログにも残らず鮮度が不明になる（`feedback_local_scripts_hit_production_db`
+のとおり接続先は本番 Supabase）。「Actions 経由で実行した記録が残る」ことがワークフロー化の
+新たな目的。計算が軽い性質は変わらないため cron 定期化は引き続き別途判断（当面 dispatch のみ）。
+
 ## Context
 
 `recommend`（おすすめ銘柄）の4プリセット重みは `docs/MODELS.md` §6「仮定・限界」に
