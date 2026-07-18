@@ -14,6 +14,8 @@ accepted（2026-06-21・**設計決定**）→ **実装・デプロイ完了（2
 
 **改訂（2026-07-18・Issue #352）**: 上記 #341 の cron 化後、`build_panel` が `ValueError: 有効なサンプルがありません` で全滅していることが発覚（#341 の r_hat プール検証を走らせて発見）。原因は #284（IMF WEO 見通し・年2回公表）で追加された `JP_WEO_GDP_FCAST`/`JP_WEO_CPI_FCAST`（zscore）が trailing 5年に約10点しか無く `_macro_from_cache` の zscore 最小点数（<20 で None）を満たさず**全 snap_date で None** になり、`macro_nan_ok=False` の ANY-None ゲートで全スナップショットが脱落したこと。対策として `build_panel` に **`_drop_unusable_macro`** を追加し、全観測日で None になる（＝一切値が出ない）マクロ特徴量を build_snapshots へ渡す前に自動除外＋WARNING ログ出力する（将来の疎な系列追加でも producer が全滅しない・`JP_WEO` は M-2 の `macro_nan_ok=True` では引き続き利用可）。あわせて `macro-beta-inference.yml` 等の run step に `set -o pipefail` を追加（`\| tee` が python の非ゼロ終了をマスクし、build_panel 失敗がジョブ緑表示に埋もれていた観測性バグの是正）。
 
+**検証メモ（2026-07-18・#341 のプール仮説を実測反証）**: 「chains=2 の run を複数回まわして生サンプルをプールすれば 2×N チェーン相当の r_hat が strict 1.01 を切れるのでは」という案を検証した（実験基盤 `scripts/experiment_pooled_rhat.py`・PR#351）。縮小規模（実データ500銘柄・K=4・draws/tune=800・numpyro）で **r_hat_max は 2/4/6/8 チェーンを通じて 1.0100 で完全に平坦（delta=+0.0000）**、一方 ESS は 525→1927 と約4倍に増加した。結論: **プールは ESS（サンプル数）を増やすが r_hat は下げない**——r_hat はチェーン内混合の良さ（between/within 分散比）で決まり、同程度に混合の甘いチェーンを増やしても比は不変。r_hat を下げるレバーは「チェーン数↑」ではなく「1本1本の混合改善（reparameterization・target_accept↑・tune↑）」。過去に draws=800/1000 でもサンプル長で動かなかった事実と合わせ、**~1.01–1.02 はこのモデル幾何の安定した床**であり、`--r-hat-threshold` の緩和（cron 1.05）が妥当な対処だったと確認された（プール昇格は見送り）。なお r_hat_max は銘柄数（パラメータ数）が増えるほど上がる max 順序統計の性質があり、500銘柄で 1.01・本番3800銘柄で 1.02 という差もこれで説明できる。
+
 ## Context
 
 M-1（マクロ×リスク-リターン推奨）は現状、**ユニバース全体で単一の β**（BIC 選択も OLS 再フィットも全銘柄プール）を学習し、銘柄固有なのは R1（断面レバレッジ）と R2（実現ボラ）だけだった。これに起因する構造的限界が判明した。
