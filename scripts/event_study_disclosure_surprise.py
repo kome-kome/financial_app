@@ -27,7 +27,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from database import SessionLocal, StatementDisclosure, StockPriceWeekly  # noqa: E402
-from feature_disclosure import build_disclosure_features  # noqa: E402
+from feature_disclosure import build_disclosure_features_batch  # noqa: E402
 from scripts._cache import cached, set_refresh  # noqa: E402
 
 
@@ -82,6 +82,8 @@ def run(forward_weeks: int, limit: int) -> None:
     prices = _load_weekly_prices(db)
     print(f"  {len(prices)} 社")
 
+    disc_features = build_disclosure_features_batch(disclosures)  # 全社一括（Issue #340）
+
     pairs = []  # (m_pm1, forward_return, disc_date, edinet_code)
     n_companies = 0
     for edinet_code, rows in disclosures.items():
@@ -89,8 +91,8 @@ def run(forward_weeks: int, limit: int) -> None:
             break
         if edinet_code not in prices:
             continue
-        feats = build_disclosure_features(rows)
-        if feats.empty or "m_pm1" not in feats:
+        feats = disc_features.get(edinet_code)
+        if feats is None or feats.empty or "m_pm1" not in feats:
             continue
         n_companies += 1
         price_df = prices[edinet_code]

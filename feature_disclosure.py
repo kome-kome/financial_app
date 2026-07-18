@@ -142,6 +142,94 @@ def build_disclosure_features(rows: list[dict]) -> pd.DataFrame:
     return df
 
 
+def build_disclosure_features_batch(rows_by_company: dict[str, list[dict]]) -> dict[str, "pd.DataFrame"]:
+    """全社の開示履歴を1パスで特徴量化する（`build_disclosure_features` の全社バッチ版）。
+
+    per-company 版を社数ぶん回すと、平均 ~8 行の極小 DataFrame の構築＋~60 列の pandas 演算を
+    社ごとに繰り返し per-operation ディスパッチ overhead が支配的になる（Issue #340 実測で
+    build_disclosure_features が特徴量計算の約7割＝368s）。本関数は全社の clean 行を1つの
+    大 DataFrame に連結し、shift/diff/ffill/単四半期化を `groupby(edinet_code)` に限定して
+    ベクトル化する。列演算（expense/pm/cost）は会社非依存ゆえ全フレーム一括。
+
+    戻り値は `{edinet_code: DataFrame}`。各 DataFrame は per-company 版の出力と列・順序・値が
+    bit 一致する（scripts/_verify で担保）。dedupe は純 Python で軽いため社ごとに実施し、
+    連結時に社ブロックを連続配置＝`sort=False` の groupby が per-company の行順を保存する。
+    """
+    clean_frames: list[dict] = []
+    for code, rows in rows_by_company.items():
+        clean = dedupe_disclosures(rows)
+        clean_frames.extend(clean)  # dedupe は (disc_date, disc_time, disc_no) 昇順を保証
+    if not clean_frames:
+        return {}
+
+    df = pd.DataFrame(clean_frames)[_RAW_COLS].reset_index(drop=True)
+    numeric_cols = ["sales", "op", "odp", "np", "f_sales", "f_op", "f_odp", "f_np"]
+    df[numeric_cols] = df[numeric_cols].apply(pd.to_numeric, errors="coerce")
+
+    g = df.groupby("edinet_code", sort=False)
+    code_ser = df["edinet_code"]
+
+    f_raw = {col: df["f_" + col].copy() for col in _LEVEL_COLS}
+
+    is_q1 = df["cur_per_type"] == "1Q"
+
+    def _quarterize_batch(raw_col: str, period_col: str) -> pd.Series:
+        # per-company の _quarterize を groupby 版へ（shift/diff/ffill を社内に限定）
+        prev_period = g[period_col].shift(1)
+        period_changed = df[period_col] != prev_period
+        diffed = g[raw_col].diff(1)
+        out = pd.Series(np.nan, index=df.index)
+        m_diff = period_changed & ~is_q1
+        m_q1 = period_changed & is_q1
+        out[m_diff] = diffed[m_diff]
+        out[m_q1] = df[raw_col][m_q1]
+        return out.groupby(code_ser, sort=False).ffill()
+
+    for col in _LEVEL_COLS:
+        df["r_" + col] = _quarterize_batch(col, "cur_per_en")
+    for col in _LEVEL_COLS:
+        df["f_" + col] = _quarterize_batch("f_" + col, "cur_fy_en")
+
+    df["r_expense1"] = df["r_sales"] - df["r_op"]
+    df["r_expense2"] = df["r_op"] - df["r_odp"]
+    df["r_expense3"] = df["r_odp"] - df["r_np"]
+    df["f_expense1"] = df["f_sales"] - df["f_op"]
+    df["f_expense2"] = df["f_op"] - df["f_odp"]
+    df["f_expense3"] = df["f_odp"] - df["f_np"]
+
+    df["r_pm1"] = df["np"] / df["sales"]
+    df["r_pm2"] = df["odp"] / df["sales"]
+    df["r_pm3"] = df["op"] / df["sales"]
+    df["f_pm1"] = f_raw["np"] / f_raw["sales"]
+    df["f_pm2"] = f_raw["odp"] / f_raw["sales"]
+    df["f_pm3"] = f_raw["op"] / f_raw["sales"]
+
+    df["r_cost1"] = (df["sales"] - df["op"]) / df["sales"]
+    df["r_cost2"] = (df["op"] - df["odp"]) / df["sales"]
+    df["r_cost3"] = (df["odp"] - df["np"]) / df["sales"]
+    df["f_cost1"] = (f_raw["sales"] - f_raw["op"]) / f_raw["sales"]
+    df["f_cost2"] = (f_raw["op"] - f_raw["odp"]) / f_raw["sales"]
+    df["f_cost3"] = (f_raw["odp"] - f_raw["np"]) / f_raw["sales"]
+
+    df.replace([np.inf, -np.inf], np.nan, inplace=True)
+
+    level_feats = ["r_sales", "r_op", "r_odp", "r_np", "f_sales", "f_op", "f_odp", "f_np",
+                   "r_expense1", "r_expense2", "r_expense3", "f_expense1", "f_expense2", "f_expense3"]
+    ratio_feats = ["r_pm1", "r_pm2", "r_pm3", "f_pm1", "f_pm2", "f_pm3",
+                   "r_cost1", "r_cost2", "r_cost3", "f_cost1", "f_cost2", "f_cost3"]
+
+    g2 = df.groupby("edinet_code", sort=False)
+    for col in [c for c in level_feats + ratio_feats if c.startswith("f_")]:
+        df["d_" + col] = g2[col].diff(1)
+
+    for col in ["sales", "op", "odp", "np", "expense1", "expense2", "expense3",
+                "pm1", "pm2", "pm3", "cost1", "cost2", "cost3"]:
+        df["m_" + col] = df["r_" + col] - g2["f_" + col].shift(1)
+
+    # 社ごとに分割（sort=False で連結時の社ブロック順＝行内順を保存）
+    return {code: sub.reset_index(drop=True) for code, sub in df.groupby("edinet_code", sort=False)}
+
+
 def load_disclosure_features(db, edinet_code: str) -> pd.DataFrame:
     """statement_disclosure から1社分を取得し build_disclosure_features へ渡す。"""
     from database import StatementDisclosure

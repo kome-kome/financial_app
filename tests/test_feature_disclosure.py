@@ -9,9 +9,14 @@ UKI移植ロジックの検証観点:
 """
 import math
 
+import pandas as pd
 import pytest
 
-from feature_disclosure import build_disclosure_features, dedupe_disclosures
+from feature_disclosure import (
+    build_disclosure_features,
+    build_disclosure_features_batch,
+    dedupe_disclosures,
+)
 
 
 def _row(cur_per_type, cur_per_en, cur_fy_en, sales, op, odp, np_, f_sales, f_op, f_odp, f_np,
@@ -124,3 +129,53 @@ class TestEmptyInput:
     def test_returns_empty_dataframe(self):
         feats = build_disclosure_features([])
         assert len(feats) == 0
+
+
+def _with_code(rows, code):
+    return [{**r, "edinet_code": code} for r in rows]
+
+
+def _company_b_rows():
+    # A とは異なる水準・欠損パターンの2社目（IFRS 経常利益 None を含む）
+    return [
+        _row("1Q", "2024-06-30", "2025-03-31", 300, 40, None, 25, 1200, 130, None, 90, "2024-08-02"),
+        _row("2Q", "2024-09-30", "2025-03-31", 640, 85, None, 52, 1250, 135, None, 92, "2024-11-07"),
+        _row("3Q", "2024-12-31", "2025-03-31", 980, 128, None, 80, 1250, 135, None, 92, "2025-02-06"),
+    ]
+
+
+class TestBuildDisclosureFeaturesBatch:
+    """全社バッチ版（Issue #340）が per-company 版と bit 一致することのリグレッションガード。"""
+
+    def test_batch_matches_per_company(self):
+        rows_by_company = {
+            "E00001": _with_code(_company_a_rows(), "E00001"),
+            "E00002": _with_code(_company_b_rows(), "E00002"),
+        }
+        batch = build_disclosure_features_batch(rows_by_company)
+        assert set(batch) == {"E00001", "E00002"}
+        for code, rows in rows_by_company.items():
+            ref = build_disclosure_features(rows).reset_index(drop=True)
+            got = batch[code].reset_index(drop=True)
+            assert list(got.columns) == list(ref.columns)
+            # 値の一致を検証（dtype は per-company/batch で null 有無により int64/float64 が
+            # 揺れる純粋な pandas 構築アーティファクトで、実 DB 値は float・下流も float() 変換
+            # のため無害。本質的不変条件は「値の一致」）
+            pd.testing.assert_frame_equal(got, ref, check_dtype=False)
+
+    def test_excludes_company_with_only_revision_rows(self):
+        # dedupe で全行除外される社はバッチ結果に現れない（per-company の feats.empty 相当）
+        revision_only = [
+            _row("EarnForecastRevision", "2024-09-30", "2025-03-31", None, None, None, None,
+                 515, 51, 46, 30.5, "2024-12-01", doc_type="EarnForecastRevision"),
+        ]
+        batch = build_disclosure_features_batch({
+            "E00001": _with_code(_company_a_rows(), "E00001"),
+            "E00009": _with_code(revision_only, "E00009"),
+        })
+        assert "E00009" not in batch
+        assert "E00001" in batch
+
+    def test_empty_input_returns_empty_dict(self):
+        assert build_disclosure_features_batch({}) == {}
+        assert build_disclosure_features_batch({"E0": [], "E1": []}) == {}

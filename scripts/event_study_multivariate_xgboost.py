@@ -81,7 +81,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from database import Company, SessionLocal, StatementDisclosure, StockPriceWeekly  # noqa: E402
-from feature_disclosure import build_disclosure_features  # noqa: E402
+from feature_disclosure import build_disclosure_features_batch  # noqa: E402
 from plugins.utils import walk_forward_cv_monthly  # noqa: E402
 from plugins.macro_gbdt import _make_xgb_fit_predict  # noqa: E402
 from plugins.macro_snapshots import oof_backtest, _spearman  # noqa: E402
@@ -182,27 +182,31 @@ def _load_weekly_prices(db) -> dict[str, pd.DataFrame]:
     return cached("weekly_prices_close", _produce)
 
 
-def _technical_features(prices: pd.DataFrame, disc_date: str) -> tuple[dict, str] | None:
-    """開示基準週の直前週までの情報のみでトレーリング＋自己履歴特徴量を計算（リーク防止）。
+def _technical_features_arr(week_arr, close_arr, disc_date: str):
+    """開示基準週の直前週までの情報のみでトレーリング＋自己履歴特徴量を計算（リーク防止・numpy版）。
 
-    Returns: (features, ref_week) or None。
-    母集団ガードは従来どおり ref_idx < 26 のみ（#336の追加特徴量 h_* は履歴不足時 NaN と
-    し、サンプル除外はしない＝全セルで母集団同一）。ref_week は断面特徴量ルックアップ用の
-    「基準週の1つ前」の week_start 実値。
+    社ごとに 1 度だけ numpy 配列を作れば per-row の pandas .iloc/pct_change オーバーヘッドを
+    消せる（Issue #340・pandas DataFrame 版から全社バッチ化で置換・~14x）。week_arr は週次
+    week_start の numpy 文字列配列、close_arr は close_last の float64 配列（どちらも社内で
+    昇順・欠損なしを本アプリの週次データが満たす＝pct_change の fill_method 差異や inf 発生が
+    なく旧 pandas 版と全イベント bit 一致を検証済み）。
+
+    Returns: (features, ref_week) or None。母集団ガードは ref_idx < 26 のみ（#336の追加特徴量
+    h_* は履歴不足時 NaN とし、サンプル除外はしない＝全セルで母集団同一）。ref_week は断面
+    特徴量ルックアップ用の「基準週の1つ前」の week_start 実値。
     """
-    idx = prices["week_start"].searchsorted(disc_date, side="left")
+    idx = int(np.searchsorted(week_arr, disc_date, side="left"))
     ref_idx = idx - 1
     if ref_idx < 26:
         return None
-    closes = prices["close_last"]
-    ref_close = closes.iloc[ref_idx]
+    ref_close = close_arr[ref_idx]
     if not ref_close or ref_close <= 0:
         return None
 
     def _ret(n_weeks):
         if ref_idx - n_weeks < 0:
             return np.nan
-        base = closes.iloc[ref_idx - n_weeks]
+        base = close_arr[ref_idx - n_weeks]
         if not base or base <= 0:
             return np.nan
         return ref_close / base - 1.0
@@ -210,19 +214,19 @@ def _technical_features(prices: pd.DataFrame, disc_date: str) -> tuple[dict, str
     def _vol(n_weeks):
         if ref_idx - n_weeks < 0:
             return np.nan
-        window = closes.iloc[ref_idx - n_weeks:ref_idx + 1]
-        rets = window.pct_change().dropna()
-        return rets.std() if len(rets) > 2 else np.nan
+        window = close_arr[ref_idx - n_weeks:ref_idx + 1]
+        rets = window[1:] / window[:-1] - 1.0          # pct_change 相当（欠損なしゆえ先頭NaN除外＝そのまま）
+        rets = rets[~np.isnan(rets)]                    # dropna 相当
+        return float(rets.std(ddof=1)) if len(rets) > 2 else np.nan
 
-    # 自己履歴相対化（F2）。52週窓が取れない場合は NaN（母集団は変えない）
     def _px_vs_mean(n_weeks):
         if ref_idx - n_weeks + 1 < 0:
             return np.nan
-        window = closes.iloc[ref_idx - n_weeks + 1:ref_idx + 1]
+        window = close_arr[ref_idx - n_weeks + 1:ref_idx + 1]
         m = window.mean()
         return ref_close / m - 1.0 if m and m > 0 else np.nan
 
-    exp_mean = closes.iloc[:ref_idx + 1].mean()
+    exp_mean = close_arr[:ref_idx + 1].mean()
     vol12, vol52 = _vol(12), _vol(52)
     hist = {
         "h_ret_52w": _ret(52),
@@ -236,7 +240,7 @@ def _technical_features(prices: pd.DataFrame, disc_date: str) -> tuple[dict, str
         "vol_12w": vol12, "vol_26w": _vol(26),
         **hist,
     }
-    return feats, prices["week_start"].iloc[ref_idx]
+    return feats, week_arr[ref_idx]
 
 
 def _forward_return(prices: pd.DataFrame, disc_date: str, forward_weeks: int):
@@ -481,6 +485,9 @@ def build_samples(forward_weeks: int, limit: int, trim: float, min_names: int,
     prices = _load_weekly_prices(db)
     print(f"  {len(prices)} 社")
 
+    print("開示特徴量を全社一括計算中（build_disclosure_features_batch・Issue #340）...")
+    disc_features = build_disclosure_features_batch(disclosures)
+
     industry_map = {code: ind for code, ind in db.query(Company.edinet_code, Company.industry)}
 
     wide = _build_wide(prices)
@@ -513,17 +520,20 @@ def build_samples(forward_weeks: int, limit: int, trim: float, min_names: int,
             break
         if edinet_code not in prices:
             continue
-        feats = build_disclosure_features(rows)
-        if feats.empty:
+        feats = disc_features.get(edinet_code)   # 全社一括計算済み（None=開示なし＝旧feats.empty相当）
+        if feats is None or feats.empty:
             continue
         n_companies += 1
         price_df = prices[edinet_code]
+        # 社ごとに 1 度だけ numpy 配列化（per-row の pandas .iloc/pct_change を回避・Issue #340）
+        week_arr = price_df["week_start"].to_numpy()
+        close_arr = price_df["close_last"].to_numpy(dtype=float)
 
         for _, row in feats.iterrows():
             fwd, base_week, end_week = _forward_return(price_df, row["disc_date"], forward_weeks)
             if pd.isna(fwd):
                 continue
-            tech_res = _technical_features(price_df, row["disc_date"])
+            tech_res = _technical_features_arr(week_arr, close_arr, row["disc_date"])
             if tech_res is None:
                 continue
             tech, ref_week = tech_res
