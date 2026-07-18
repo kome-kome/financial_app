@@ -1065,7 +1065,19 @@ graph TB
 | `docs/reviews/` | ドキュメント | 分析モデル等の設計レビュー記録（ADR 化前の検討メモ。`2026-06-26-m2-macro-gbdt-review.md`・`2026-06-27-web-api-auth-input-validation-review.md` 等）。現行参照には使わない | — |
 | `docs/VISION.md` | ドキュメント | プロジェクトの目的・方針 | — |
 | `CONTEXT.md` | ドキュメント | ドメイン用語集（再分類項目・分析特徴量・表示項目・パラメータ契約の用語定義）。CLAUDE.md 設計制約から参照 | — |
-| `docs/adr/*.md` | ドキュメント | ADR（Architecture Decision Record）。`0001`＝バリュエーション統合とバックテスト一般化（旧 total_return→gap_analysis 吸収）／`0002`＝M-1 per-stock 階層マクロβ／`0003`＝M-2 マクロ×財務 GBDT／`0004`＝M-2 downstream（売り推奨・OOF バックテスト）／`0005`＝price_predictor 削除・③リターン予測を比較ファミリーへ集約／`0006`＝日本マクロ指標 e-Stat/日銀コネクタ設計／`0007`＝ハイパーパラメータ自動探索共有エンジン（`0010`によりsuperseded）／`0008`＝recommend Fama-MacBethファクタープレミアム／`0009`＝OECD CLI先行指標チャネル／`0010`＝ハイパーパラメータ探索のGitHub Actions月次自動実行化（GUI手動トリガー廃止） | — |
+| `docs/adr/*.md` | ドキュメント | ADR（Architecture Decision Record）。`0001`＝バリュエーション統合とバックテスト一般化（旧 total_return→gap_analysis 吸収）／`0002`＝M-1 per-stock 階層マクロβ／`0003`＝M-2 マクロ×財務 GBDT／`0004`＝M-2 downstream（売り推奨・OOF バックテスト）／`0005`＝price_predictor 削除・③リターン予測を比較ファミリーへ集約／`0006`＝日本マクロ指標 e-Stat/日銀コネクタ設計／`0007`＝ハイパーパラメータ自動探索共有エンジン（`0010`によりsuperseded）／`0008`＝recommend Fama-MacBethファクタープレミアム／`0009`＝OECD CLI先行指標チャネル／`0010`＝ハイパーパラメータ探索のGitHub Actions月次自動実行化（GUI手動トリガー廃止）／`0011`＝IMF WEO 見通し（GDP成長率・インフレ率）を forward-looking チャネルとして追加／`0012`＝M-3（時変マクロβ DLM）は週次高頻度ファクター専用（月次以下のマクロ系列は組み込まない） | — |
 | `CLAUDE.md` | 設定 | Claude Codeへの動作指示（索引＋必須ルール） | — |
 | `.claude/agents/financial-app-explorer.md` | 設定 | read-only 探索サブエージェント定義（多ファイル調査・大ドキュメント精読をトークン節約で委譲） | — |
 | `.claude/skills/*/SKILL.md` | 設定 | プロジェクト固有スキル（`/tidy` 軽量化点検 等）＋汎用スキル群。索引・各スキルの説明は [SKILLS_AND_AGENTS.md](SKILLS_AND_AGENTS.md) を参照 | — |
+| `.github/workflows/ci.yml` | GitHub Actions | push/PR で `pytest`（testpaths=tests）を実行する CI | — |
+| `.github/workflows/daily-incremental.yml` | GitHub Actions | 差分収集（毎日 JST 03:00 自動＋手動）。`_pipeline_incremental.py` を起動 | `_pipeline_incremental.py` |
+| `.github/workflows/full-pipeline.yml` | GitHub Actions | 全件収集パイプライン（workflow_dispatch 手動）。`_pipeline_gh.py` の各 refill モードを起動 | `_pipeline_gh.py` |
+| `.github/workflows/collect-macro.yml` | GitHub Actions | マクロ指標収集（e-Stat/日銀/OECD/IMF WEO コネクタ・手動）。`collector.py --macro --years N` を起動 | `collector.py` |
+| `.github/workflows/collect-interim.yml` | GitHub Actions | 半期(H1)財務収集（Issue #219②・手動）。`collector.py --interim` を起動 | `collector_interim.py` |
+| `.github/workflows/collect-disclosures.yml` | GitHub Actions | 会社予想/ガイダンス開示収集（Issue #322・手動の長時間バックフィル）。`collector.py --disclosures` を起動 | `collector_disclosures.py` |
+| `.github/workflows/macro-beta-inference.yml` | GitHub Actions | M-1 per-stock 階層マクロβ推論バッチ（毎月1日 UTC 11:00 自動＋手動・Issue #341）。`macro_beta_inference.py` を起動 | `macro_beta_inference.py` |
+| `.github/workflows/tune-hyperparameters.yml` | GitHub Actions | M-1/M-2/M-3 ハイパーパラメータ月次自動探索（Issue #292）。`hyperparameter_search.py` を起動 | `hyperparameter_search.py` |
+| `.github/workflows/recommend-factor-premia.yml` | GitHub Actions | recommend の Fama-MacBeth ファクタープレミアム算出（workflow_dispatch 手動・Issue #342）。`recommend_factor_premia.py` を起動 | `recommend_factor_premia.py` |
+| `.github/workflows/vacuum-maintenance.yml` | GitHub Actions | `stock_price_daily` bloat 対策の週次 VACUUM FULL 自動化（Issue #290）。`_pipeline_vacuum.py` を起動 | `_pipeline_vacuum.py` |
+| `.github/workflows/experiment-pooled-rhat.yml` | GitHub Actions | Issue #341 r_hat プール仮説の read-only 実験（縮小500銘柄・workflow_dispatch 専用・本番DB非書込）。`scripts/experiment_pooled_rhat.py` を起動 | `scripts/experiment_pooled_rhat.py` |
+| `.github/workflows/old/refill-pl-bs.yml` | GitHub Actions | 旧コホート PL/BS 列の一括再取得（`_pipeline_gh.py --refill-pl-bs`・完了済みアーカイブ） | `_pipeline_gh.py` |

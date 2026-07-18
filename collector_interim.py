@@ -5,7 +5,7 @@ docType=140)のうち Q2(中間=H1累計)を収集し、`financial_records` に 
 保存する。既存の通期(annual)収集パス(`collector_financials._phase_process_docs`)とは独立に動作し、
 低レベルヘルパ(`fetch_xbrl_csv`/`parse_xbrl_csv`/`calc_derived`/`upsert_financial`)を再利用する。
 
-de-risk 実証(scripts/investigate_semiannual_edinet*.py・investigate_old_q2_edinet.py):
+de-risk 実証で確認した前提(検証スクリプトは Issue #219② 完了後に削除・git 履歴参照):
   - 新旧いずれも P/L・CF は context `CurrentYTDDuration`(=H1累計)、BS は `CurrentQuarterInstant` で、
     既存 `parse_xbrl_csv` が無改修で H1 累計を抽出できる(前期比較 `Prior1*` は既存フィルタが skip)。
   - 真の H1 期末は DEI 要素 `CurrentPeriodEndDateDEI`。metadata の periodEnd は新式では
