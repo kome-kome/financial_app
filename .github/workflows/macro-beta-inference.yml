@@ -101,6 +101,7 @@ jobs:
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: |
+          set -o pipefail   # tee で python の非ゼロ終了がマスクされ失敗が緑表示になるのを防ぐ（Issue #352）
           FORCE_FLAG=""
           if [ "${{ github.event.inputs.force || 'false' }}" = "true" ]; then FORCE_FLAG="--force"; fi
           python macro_beta_inference.py \

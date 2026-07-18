@@ -57,6 +57,38 @@ class InferenceResult:
     hyperparams: dict | None = None                 # draws/tune/target_accept/seed（persist で meta へ）
 
 
+def _drop_unusable_macro(macro_cache: dict, macro_names: list[str],
+                         prices_by_co: dict) -> tuple[list[str], list[str]]:
+    """全観測日で None になる（一切値が出ない）マクロ特徴量を除外する（Issue #352）。
+
+    build_panel は `macro_nan_ok=False` で build_snapshots を呼ぶため、1系列でも None の
+    サンプルは即破棄される（macro_snapshots.py の ANY-None ゲート・min_coverage 判定より前）。
+    公表頻度が低すぎて zscore の最小点数（trailing 5年に 20点）を満たさない系列——例えば
+    IMF WEO 見通し（年2回公表・#284）は約10点しか無く全 snap_date で None になる——が1つでも
+    混ざると、全スナップショットが脱落して producer 全体が落ちる。
+
+    マクロ特徴量は日付にのみ依存するので、観測されうる全 trade_date で `_macro_from_cache` が
+    None を返す特徴量＝どのスナップショットでも使えない特徴量を落とす。部分的に値が出る系列
+    （例: 収集開始が新しく古い日付では None の HY_OAS 等）は残す（それらは自身の利用可能窓で
+    正しくサンプルを制約するだけで、全滅の原因にはならない）。
+
+    Returns: (usable, dropped)
+    """
+    from plugins.macro_snapshots import _macro_from_cache
+
+    # 最新日から探索（通常のアクティブ系列は最新日で必ず値が出るので短絡が効く）。
+    probe_dates = sorted({r.trade_date for rows in prices_by_co.values() for r in rows},
+                         reverse=True)
+    usable, dropped = [], []
+    for fname in macro_names:
+        has_value = any(
+            _macro_from_cache(macro_cache, d, [fname])[fname] is not None
+            for d in probe_dates
+        )
+        (usable if has_value else dropped).append(fname)
+    return usable, dropped
+
+
 def build_panel(db, macro_names: list[str] | None = None) -> tuple:
     """DB から週次リターン・マクロ因子・セクターを読み、パネル（銘柄×時点×因子）を構築する。
 
@@ -85,6 +117,16 @@ def build_panel(db, macro_names: list[str] | None = None) -> tuple:
 
     macro_names = list(macro_names) if macro_names is not None else list(MACRO_FEATURE_NAMES)
     macro_cache = preload_macro(db, prices_by_co, macro_names)
+
+    # Issue #352: 全観測日で None になるマクロ特徴量（IMF WEO 等・公表頻度が低く zscore
+    # 最小点数未満）が1つでも混ざると macro_nan_ok=False の下で全サンプルが脱落するため、
+    # build_snapshots へ渡す前に除外する。除外内容はログに残す（silent-drop しない）。
+    macro_names, dropped = _drop_unusable_macro(macro_cache, macro_names, prices_by_co)
+    if dropped:
+        logger.warning("build_panel: 全観測日で値が出ないマクロ特徴量を除外しました: %s", dropped)
+    if not macro_names:
+        raise ValueError(
+            "build_panel: 使用可能なマクロ特徴量がありません（マクロデータの蓄積状況を確認してください）。")
 
     samples_by_ym, sample_meta_by_ym, _current_snaps, factor_names, stock_ids_by_ym = build_snapshots(
         prices_by_co, fin_by_co, companies, macro_cache,

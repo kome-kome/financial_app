@@ -12,7 +12,12 @@ from unittest.mock import MagicMock
 import numpy as np
 import pytest
 
-from macro_beta_inference import build_panel, persist_allowed, select_shared_factors
+from macro_beta_inference import (
+    _drop_unusable_macro,
+    build_panel,
+    persist_allowed,
+    select_shared_factors,
+)
 
 MACRO_TEST_NAMES = ["macro_usdjpy_yoy", "macro_sp500_yoy"]
 _TEST_SERIES = {"macro_usdjpy_yoy": "USDJPY", "macro_sp500_yoy": "SP500"}
@@ -305,3 +310,50 @@ class TestPersistGate:
     def test_none_r_hat_is_gate_exempt(self):
         # r_hat_max が算出不能（None）はゲート対象外＝従来挙動を踏襲
         assert persist_allowed(None, threshold=1.01, force=False) is True
+
+
+class TestDropUnusableMacro:
+    """_drop_unusable_macro: 全観測日で None のマクロ特徴量を落とす（Issue #352）。
+
+    純ロジック（_macro_from_cache 依存・numpy/statistics のみ）ゆえ PyMC 不要で CI 実行される。
+    """
+
+    def _weekly_dates(self, start: str, end: str):
+        d, e = date.fromisoformat(start), date.fromisoformat(end)
+        out = []
+        while d <= e:
+            out.append(d.isoformat())
+            d += timedelta(days=7)
+        return out
+
+    def _every_n_days(self, start: str, end: str, n: int):
+        d, e = date.fromisoformat(start), date.fromisoformat(end)
+        out = []
+        while d <= e:
+            out.append(d.isoformat())
+            d += timedelta(days=n)
+        return out
+
+    def _cache_and_prices(self):
+        # USDJPY: 密な週次（2019-2026）→ macro_usdjpy_yoy は全期間で値が出る
+        usdjpy = {d: 150.0 for d in self._weekly_dates("2019-01-01", "2026-07-13")}
+        # JP_WEO_GDP_FCAST: 年2回（182日毎）→ zscore の 5年窓に約10点 < 20点閾値で常に None
+        weo = {d: 1.5 for d in self._every_n_days("2016-01-01", "2026-07-01", 182)}
+        macro_cache = {"USDJPY": usdjpy, "JP_WEO_GDP_FCAST": weo}
+        # prices（観測日＝probe 対象）は週次 2020-2026
+        rows = [SimpleNamespace(trade_date=d) for d in self._weekly_dates("2020-01-06", "2026-07-13")]
+        prices_by_co = {"E00001": rows}
+        return macro_cache, prices_by_co
+
+    def test_drops_all_none_feature_keeps_usable(self):
+        cache, prices = self._cache_and_prices()
+        names = ["macro_usdjpy_yoy", "macro_jp_weo_gdp_fcast_zscore"]
+        usable, dropped = _drop_unusable_macro(cache, names, prices)
+        assert usable == ["macro_usdjpy_yoy"]
+        assert dropped == ["macro_jp_weo_gdp_fcast_zscore"]
+
+    def test_all_usable_drops_nothing(self):
+        cache, prices = self._cache_and_prices()
+        usable, dropped = _drop_unusable_macro(cache, ["macro_usdjpy_yoy"], prices)
+        assert usable == ["macro_usdjpy_yoy"]
+        assert dropped == []

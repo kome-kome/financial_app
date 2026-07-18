@@ -12,6 +12,8 @@ accepted（2026-06-21・**設計決定**）→ **実装・デプロイ完了（2
 
 **改訂（2026-07-18・Issue #341）**: `macro-beta-inference.yml` に**月次 cron（毎月1日 UTC 11:00）を追加**（従来の `workflow_dispatch` は残す）。再学習が人力任せで producer の鮮度が担保されなかった（最終成功 2026-07-04 から12日以上放置）ため、tune-hyperparameters.yml と同じ月次自動化に揃えた。あわせて、上記「収束確認（r_hat<1.01）」の **strict ゲートを `--r-hat-threshold` で可変化**した（既定 1.01・cron は 1.05）。理由: 本番実 persist 済みの 2026-07-04 run も含め chains=2 では r_hat_max が構造的に ~1.02 で頭打ち（PyMC も「信頼できる r_hat には4 chain以上推奨」と警告するとおり 2 chain では保守的に出る・当該 run は n_divergences=0 で実質収束）。strict 1.01 のままだと chains=2 の無人 cron は毎回ゲートで落ちて永遠に persist されないため、cron では 1.05 を渡して構造的 ~1.02 を自動 persist しつつ、真に収束していない run（r_hat が 1.05 を大きく超過）は依然 reject する。ゲート判定は純関数 `persist_allowed(r_hat_max, threshold, force)` に切り出し単体テスト（`TestPersistGate`）で担保。
 
+**改訂（2026-07-18・Issue #352）**: 上記 #341 の cron 化後、`build_panel` が `ValueError: 有効なサンプルがありません` で全滅していることが発覚（#341 の r_hat プール検証を走らせて発見）。原因は #284（IMF WEO 見通し・年2回公表）で追加された `JP_WEO_GDP_FCAST`/`JP_WEO_CPI_FCAST`（zscore）が trailing 5年に約10点しか無く `_macro_from_cache` の zscore 最小点数（<20 で None）を満たさず**全 snap_date で None** になり、`macro_nan_ok=False` の ANY-None ゲートで全スナップショットが脱落したこと。対策として `build_panel` に **`_drop_unusable_macro`** を追加し、全観測日で None になる（＝一切値が出ない）マクロ特徴量を build_snapshots へ渡す前に自動除外＋WARNING ログ出力する（将来の疎な系列追加でも producer が全滅しない・`JP_WEO` は M-2 の `macro_nan_ok=True` では引き続き利用可）。あわせて `macro-beta-inference.yml` 等の run step に `set -o pipefail` を追加（`\| tee` が python の非ゼロ終了をマスクし、build_panel 失敗がジョブ緑表示に埋もれていた観測性バグの是正）。
+
 ## Context
 
 M-1（マクロ×リスク-リターン推奨）は現状、**ユニバース全体で単一の β**（BIC 選択も OLS 再フィットも全銘柄プール）を学習し、銘柄固有なのは R1（断面レバレッジ）と R2（実現ボラ）だけだった。これに起因する構造的限界が判明した。
