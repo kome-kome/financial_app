@@ -13,6 +13,9 @@ __pycache__/
 *.log
 *.tmp
 
+# 検証スクリプトのローカルキャッシュ（scripts/_cache.py 生成・本番 Egress 削減用・共有不要）
+scripts/.cache/
+
 # DB 移行用ダンプ（pg_dump 生成物・サイズ大）
 migration_dumps/
 # stock_price dual-table 移行のローカル退避（migrate_stock_price_dual.py 生成・サイズ大）

@@ -28,29 +28,36 @@ load_dotenv()
 
 from database import SessionLocal, StatementDisclosure, StockPriceWeekly  # noqa: E402
 from feature_disclosure import build_disclosure_features  # noqa: E402
+from scripts._cache import cached, set_refresh  # noqa: E402
 
 
 def _load_disclosures(db) -> dict[str, list[dict]]:
-    cols = [c.name for c in StatementDisclosure.__table__.columns]
-    rows = db.query(StatementDisclosure).all()
-    by_company = defaultdict(list)
-    for r in rows:
-        by_company[r.edinet_code].append({c: getattr(r, c) for c in cols})
-    return by_company
+    def _produce():
+        cols = [c.name for c in StatementDisclosure.__table__.columns]
+        rows = db.query(StatementDisclosure).all()
+        by_company = defaultdict(list)
+        for r in rows:
+            by_company[r.edinet_code].append({c: getattr(r, c) for c in cols})
+        return by_company
+
+    return cached("disclosures_all", _produce)
 
 
 def _load_weekly_prices(db) -> dict[str, pd.DataFrame]:
-    rows = db.query(
-        StockPriceWeekly.edinet_code, StockPriceWeekly.week_start, StockPriceWeekly.close_last
-    ).all()
-    by_company = defaultdict(list)
-    for edinet_code, week_start, close_last in rows:
-        by_company[edinet_code].append((week_start, close_last))
-    out = {}
-    for edinet_code, pairs in by_company.items():
-        df = pd.DataFrame(pairs, columns=["week_start", "close_last"]).sort_values("week_start")
-        out[edinet_code] = df.reset_index(drop=True)
-    return out
+    def _produce():
+        rows = db.query(
+            StockPriceWeekly.edinet_code, StockPriceWeekly.week_start, StockPriceWeekly.close_last
+        ).all()
+        by_company = defaultdict(list)
+        for edinet_code, week_start, close_last in rows:
+            by_company[edinet_code].append((week_start, close_last))
+        out = {}
+        for edinet_code, pairs in by_company.items():
+            df = pd.DataFrame(pairs, columns=["week_start", "close_last"]).sort_values("week_start")
+            out[edinet_code] = df.reset_index(drop=True)
+        return out
+
+    return cached("weekly_prices_close", _produce)
 
 
 def _forward_return(prices: pd.DataFrame, disc_date: str, forward_weeks: int) -> float:
@@ -129,5 +136,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--forward-weeks", type=int, default=4)
     parser.add_argument("--limit", type=int, default=0, help="対象企業数の上限（0=無制限）")
+    parser.add_argument("--refresh-cache", action="store_true",
+                        help="本番DBから再取得してローカルキャッシュを更新（既定=キャッシュ優先・Egress削減）")
     args = parser.parse_args()
+    set_refresh(args.refresh_cache)
     run(args.forward_weeks, args.limit)
