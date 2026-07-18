@@ -67,6 +67,7 @@ jobs:
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: |
+          set -o pipefail   # tee で python の非ゼロ終了がマスクされ失敗が緑表示になるのを防ぐ（Issue #352）
           python -m scripts.experiment_pooled_rhat \
             --n-stocks "${{ github.event.inputs.n_stocks || '500' }}" \
             --k-runs "${{ github.event.inputs.k_runs || '4' }}" \
