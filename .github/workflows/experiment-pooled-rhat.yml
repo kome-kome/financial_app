@@ -1,0 +1,86 @@
+name: "[実験] M-1 マクロβ 複数runプール → r_hat 検証（Issue #341）"
+
+# Issue #341 フォローの一回性検証。macro_beta_inference.py の chains=2 では r_hat_max が構造的に
+# ~1.02 で頭打ちし ADR-0002 の strict ゲート（<1.01）を毎回超過する（PR#350 で cron の閾値を
+# 1.05 へ緩和）。本ワークフローは「2チェーンの run を複数回まわして生サンプルをプールすれば
+# 2×N チェーン相当の r_hat が 1.01 を切るか」を安く確かめる（Stage 2＝縮小規模・1ジョブ）。
+#
+# read-only: scripts/experiment_pooled_rhat.py は build_panel の SELECT のみで persist は一切
+# 呼ばない（本番 DB への書き込みゼロ）。production コード（macro_beta_inference.py 等）も無改修で、
+# その公開部品を組み直して生 idata を保持する。
+#
+# 依存は macro-beta-inference.yml と同じ requirements-inference.txt（PyMC/numpyro/arviz）。
+# 縮小規模（既定 500 銘柄）を1ジョブ内で K=4 回サンプリング（各 chains=2・別 seed）→ プールし、
+# 2/4/6/8 チェーンの r_hat_max 傾向をログ出力する。判定は experiment_pooled_rhat.py の
+# print_report（strict gate <1.01 に対する PASS/FAIL＋傾向）を参照。
+#
+# 本番規模（全 ~3800 銘柄）の確定回答は Stage 3（prepare→matrix sample→combine の fan-out）が
+# 必要（1ジョブ K 回直列だと 6時間上限を超過するため）。Stage 2 が有望なときのみ実装する。
+
+on:
+  workflow_dispatch:
+    inputs:
+      n_stocks:
+        description: "実データを間引く銘柄数（縮小規模。0=全件だが 1ジョブ直列では時間超過）"
+        required: false
+        default: "500"
+      k_runs:
+        description: "サンプリング回数（プール後は 2×k チェーン）"
+        required: false
+        default: "4"
+      draws:
+        description: "NUTS 事後サンプル数（チェーンあたり・本番と同じ 800）"
+        required: false
+        default: "800"
+      tune:
+        description: "NUTS チューニングステップ数"
+        required: false
+        default: "800"
+      target_accept:
+        description: "NUTS target_accept"
+        required: false
+        default: "0.95"
+
+# 最小権限（GITHUB_TOKEN でリポジトリ書込は不要・DB は read-only の Supabase 直結）
+permissions:
+  contents: read
+
+jobs:
+  experiment:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300   # 縮小 500 銘柄 × K=4 直列 + numpyro コンパイルの安全マージン
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13.7'  # render.yaml の PYTHON_VERSION と一致させる
+          cache: 'pip'
+
+      - name: Install dependencies (requirements.txt + PyMC + numpyro + arviz)
+        run: pip install -r requirements-inference.txt
+
+      - name: Run pooled r_hat experiment
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          python -m scripts.experiment_pooled_rhat \
+            --n-stocks "${{ github.event.inputs.n_stocks || '500' }}" \
+            --k-runs "${{ github.event.inputs.k_runs || '4' }}" \
+            --draws "${{ github.event.inputs.draws || '800' }}" \
+            --tune "${{ github.event.inputs.tune || '800' }}" \
+            --target-accept "${{ github.event.inputs.target_accept || '0.95' }}" \
+            --nuts-sampler numpyro \
+            --init adapt_diag \
+            2>&1 | tee experiment_pooled_rhat.log
+
+      - name: Upload log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: experiment-pooled-rhat-log
+          path: experiment_pooled_rhat.log
+          retention-days: 3
