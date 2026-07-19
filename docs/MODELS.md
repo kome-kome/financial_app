@@ -955,7 +955,9 @@ M-2 の `execute()` は walk-forward CV の**無リーク OOF 予測**（`{test_
   予測力を同一指標（rank-IC 等）で直接対比可能に。
 - inner-CV グリッド / optuna によるハイパラ自動探索 → #264〜#267 でwalk-forward OOF
   rank-IC を目的関数とする共有探索基盤（`plugins/tuning.py` + `hyperparameter_search.py`）
-  を実装（M-1/M-2/M-3 共通）
+  を実装（M-1/M-2/M-3 共通）。M-2 の探索空間は XGBoost 7軸（木構造・正則化）＋
+  モメンタム2軸（`use_momentum`/`momentum_window`・候補窓 [3,6,12,18,24] は M-1 と同一・
+  `momentum_window` は `use_momentum=True` のときのみ展開）の9軸
 - quantile regression（`reg:quantileerror`）による予測区間（R1' 代替）
 - SHAP interaction values（特徴量ペアの交互作用可視化）
 - M-2 初心者向けガイド（`M2_MACRO_GBDT_GUIDE.md`）

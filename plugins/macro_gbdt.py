@@ -291,17 +291,24 @@ class MacroGbdtPlugin(AnalysisPlugin):
     def tuning_search_space(self) -> tuple:
         """ハイパーパラメータ自動探索の探索空間（Issue #266）。
 
-        XGBoost 7軸（木構造・正則化）のみを探索対象とする。構造パラメータ
-        （fin_features/macro_features/use_momentum/min_coverage 等）はスナップショット
-        再構築が要るため既定値に固定。`n_estimators_max`/`early_stopping_rounds` は
-        early_stopping が自動決定するため対象外（#264 設計方針）。7軸の全グリッドは
-        組合せ爆発するため、呼び出し側（hyperparameter_search.py）は既定 strategy="random"
-        を推奨。
+        XGBoost 7軸（木構造・正則化）＋モメンタム2軸（use_momentum/momentum_window・
+        M-1 と同一候補・ADR-0007 §5 のチャネル単位トグル）の9軸。momentum を探索できる
+        のは build_snapshots のキャッシュキーが use_momentum/mom_window を含む（#298）ため
+        ＝再構築は momentum 構成6種（off＋窓5種）ごとに1回だけで `_CACHE_MAXSIZE=8` 内に
+        収まる。他の構造パラメータ（fin_features/macro_features/use_macro/min_coverage）は
+        引き続き既定値に固定（min_coverage 併用はキー数 6×4=24 > 8 で LRU スラッシュ）。
+        `n_estimators_max`/`early_stopping_rounds` は early_stopping が自動決定するため
+        対象外（#264 設計方針）。全グリッドは組合せ爆発するため、呼び出し側
+        （hyperparameter_search.py）は既定 strategy="random" を推奨。
         """
         from .tuning import SearchDim
 
         base_params: dict = {}
         dims = [
+            # only_if は自分より前の軸しか参照できない → use_momentum を先に置く
+            SearchDim("use_momentum",    [True, False]),
+            SearchDim("momentum_window", [3, 6, 12, 18, 24],
+                      only_if=lambda c: c.get("use_momentum") is True),
             SearchDim("max_depth",          [2, 4, 6, 8, 10]),
             SearchDim("learning_rate",      [0.01, 0.03, 0.05, 0.1, 0.2, 0.3]),
             SearchDim("subsample",          [0.4, 0.6, 0.8, 1.0]),

@@ -791,19 +791,39 @@ class TestTuningSearchSpace:
     def test_returns_base_params_and_dims(self):
         base_params, dims = plugin.tuning_search_space()
         assert isinstance(base_params, dict)
-        assert len(dims) == 7
+        assert len(dims) == 9
 
-    def test_dims_cover_xgb_axes_only(self):
+    def test_dims_cover_xgb_and_momentum_axes(self):
         _base_params, dims = plugin.tuning_search_space()
         names = {d.name for d in dims}
         assert names == {
+            "use_momentum", "momentum_window",
             "max_depth", "learning_rate", "subsample", "colsample_bytree",
             "min_child_weight", "reg_lambda", "reg_alpha",
         }
-        # 構造・表示専用パラメータは対象外
+        # モメンタム以外の構造・表示専用パラメータは対象外
         assert "fin_features" not in names
         assert "n_estimators_max" not in names
         assert "lambda_risk" not in names
+
+    def test_momentum_window_only_active_when_use_momentum_true(self):
+        """momentum_window は use_momentum=True のときのみ展開される（only_if 縮退）。
+        全グリッドは 216,000 combo と巨大なため random サンプリングで検証する。"""
+        import random
+
+        from plugins.tuning import _random_combos
+
+        _base_params, dims = plugin.tuning_search_space()
+        # only_if は自分より前の軸しか参照できない → 並び順の回帰防止
+        names = [d.name for d in dims]
+        assert names.index("use_momentum") < names.index("momentum_window")
+
+        combos = _random_combos(dims, n_iter=300, rng=random.Random(0))
+        off_combos = [c for c in combos if c["use_momentum"] is False]
+        on_combos = [c for c in combos if c["use_momentum"] is True]
+        assert off_combos and on_combos
+        assert all(c["momentum_window"] == 3 for c in off_combos)  # values[0] に縮退
+        assert len({c["momentum_window"] for c in on_combos}) > 1  # 複数窓が展開
 
     def test_dim_values_within_schema_bounds(self):
         schema = plugin.params_schema()
@@ -818,12 +838,15 @@ class TestTuningSearchSpace:
                     assert v <= hi, f"{d.name}={v} は schema max={hi} 超過"
 
     def test_combos_pass_coerce_params(self):
-        """探索空間から生成した候補が全て coerce_params を通る（契約違反なし）。"""
-        from plugins.tuning import _grid_combos
+        """探索空間から生成した候補が coerce_params を通る（契約違反なし）。
+        全グリッド構築（216,000 combo）は重いため random サンプリングで抽出検証する。"""
+        import random
+
+        from plugins.tuning import _random_combos
 
         base_params, dims = plugin.tuning_search_space()
         schema = plugin.params_schema()
-        combos = _grid_combos(dims)
+        combos = _random_combos(dims, n_iter=20, rng=random.Random(0))
         assert len(combos) > 0
-        for combo in combos[:20]:  # 全組合せは多いため先頭のみ抽出検証
+        for combo in combos:
             coerce_params(schema, {**base_params, **combo})
