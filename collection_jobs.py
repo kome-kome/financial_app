@@ -97,6 +97,10 @@ class CollectionJobs:
     def is_running(self, name: str) -> bool:
         return self.state(name).running
 
+    def any_running(self) -> bool:
+        """いずれかのジョブが実行中か（ブラウザ連動自動停止の保留判定用）。"""
+        return any(st.running for st in self._states.values())
+
     def start(
         self,
         name: str,

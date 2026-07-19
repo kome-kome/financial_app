@@ -10,7 +10,7 @@ FastAPI バックエンド（エントリポイント）
 このファイルは: 共有状態・認証ヘルパー・ミドルウェア・HTML配信・バックグラウンドジョブ関数を担う。
 """
 
-import json, logging, re
+import json, logging, re, threading
 import hmac, hashlib, base64, secrets, time as _time, os
 import httpx
 
@@ -206,6 +206,33 @@ limiter.enabled = RATELIMIT_ENABLED
 _COLLECTION = "collection"   # full / smart / incremental の共有スロット名
 
 
+# ── ブラウザ連動自動停止（launch.py 経由起動時のみ）──────────────────────
+# launch.py が FINAPP_AUTO_SHUTDOWN=1 を設定した場合のみ watchdog を起動する。
+# Render 本番・pytest・手動 uvicorn は既定 OFF（環境変数なし）で従来どおり常駐。
+AUTO_SHUTDOWN = os.environ.get("FINAPP_AUTO_SHUTDOWN", "0") == "1"
+HEARTBEAT_TIMEOUT = float(os.environ.get("FINAPP_HB_TIMEOUT", "30"))  # 最終ハートビートからの許容秒
+STARTUP_GRACE = float(os.environ.get("FINAPP_STARTUP_GRACE", "90"))   # 起動〜初回接続までの猶予秒
+_hb = {"boot": None, "last": None}
+
+
+def _shutdown_due(now: float) -> bool:
+    """自動停止すべきか。収集等のジョブ実行中は保留し、ハートビート途絶で True。"""
+    if jobs.any_running():
+        return False
+    last = _hb["last"]
+    deadline = (last + HEARTBEAT_TIMEOUT) if last is not None \
+        else ((_hb["boot"] or now) + STARTUP_GRACE)
+    return now > deadline
+
+
+def _auto_shutdown_watchdog() -> None:
+    while True:
+        _time.sleep(5)
+        if _shutdown_due(_time.monotonic()):
+            log.info("ブラウザ切断（ハートビート途絶）のためサーバーを自動停止します")
+            os._exit(0)
+
+
 # ── アプリ初期化 ──────────────────────────────────────────────────────────
 
 @asynccontextmanager
@@ -241,6 +268,11 @@ async def lifespan(app: FastAPI):
             log.warning("起動時に %d 件のスタックジョブを error にリセットしました", len(stuck))
     finally:
         db.close()
+    if AUTO_SHUTDOWN:
+        _hb["boot"] = _time.monotonic()
+        threading.Thread(target=_auto_shutdown_watchdog, daemon=True).start()
+        log.info("ブラウザ連動自動停止を有効化（timeout=%.0fs / grace=%.0fs）",
+                 HEARTBEAT_TIMEOUT, STARTUP_GRACE)
     yield
 
 app = FastAPI(title="EDINET Financial API", version="2.0", lifespan=lifespan)
@@ -434,6 +466,14 @@ app.include_router(_r_auth.router)
 @app.get("/api/system/info")
 async def system_info():
     return {"render_light_mode": RENDER_LIGHT_MODE}
+
+
+@app.post("/heartbeat")
+async def heartbeat():
+    """ブラウザ生存通知（launch.py 経由起動時の自動停止判定用）。
+    認証前の /login からも送信するため /api/ 外に置き、認証・CSRF を通過させる。"""
+    _hb["last"] = _time.monotonic()
+    return {"ok": True, "auto_shutdown": AUTO_SHUTDOWN}
 
 _NO_CACHE = {"Cache-Control": "no-cache, no-store, must-revalidate"}
 

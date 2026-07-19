@@ -20,6 +20,7 @@ BASE_DIR     = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_PORT = 8000
 PYTHON       = os.path.join(BASE_DIR, "venv", "Scripts", "python.exe")
 ICON_PATH    = os.path.join(BASE_DIR, "image", "finance_app_icon.png")
+_CLOSING     = {"flag": False}   # 「停止して閉じる」操作中は停止検知の表示を抑止
 
 
 def _is_running(url: str) -> bool:
@@ -78,6 +79,8 @@ def _start_server(port: int):
         stdout=log_file,
         stderr=log_file,
         creationflags=subprocess.CREATE_NO_WINDOW,
+        # ブラウザ連動自動停止（ハートビート途絶で自動終了）はランチャー経由のみ有効
+        env={**os.environ, "FINAPP_AUTO_SHUTDOWN": "1"},
     )
     proc._log_file = log_file  # type: ignore[attr-defined]
     return proc
@@ -155,11 +158,31 @@ def main():
     stop_btn.grid(row=3, column=1, pady=(10, 0), padx=(8, 0), sticky="w")
 
     # ── サーバー起動待ち（別スレッド）──────────────────────────────────
+    def _watch_server_exit():
+        """サーバー停止（ブラウザ切断の自動停止等）を検知したらランチャーも閉じる。"""
+        if proc is not None:
+            proc.wait()
+        else:
+            while _is_running(url):
+                time.sleep(5)
+        if _CLOSING["flag"]:
+            return
+        def _on_exit():
+            status_var.set("⏻ サーバー停止を検知 — まもなく閉じます")
+            status_lbl.config(fg="#64748b")
+            open_btn.config(state="disabled")
+            root.after(2500, root.destroy)
+        try:
+            root.after(0, _on_exit)
+        except Exception:
+            pass  # ウィンドウ破棄済みなら何もしない
+
     def _set_ready(label):
         status_var.set(label)
         status_lbl.config(fg="#10b981")
         root.title("財務分析ツール — 稼働中")
         open_btn.config(state="normal")
+        threading.Thread(target=_watch_server_exit, daemon=True).start()
 
     def _wait_ready():
         if already_up:
@@ -184,6 +207,7 @@ def main():
 
 
 def _shutdown(proc, root):
+    _CLOSING["flag"] = True
     if proc is not None:
         proc.terminate()
         log_file = getattr(proc, "_log_file", None)

@@ -93,3 +93,14 @@ async function apiFetch(path, opts = {}) {
   }
   return r.json();
 }
+
+// ── サーバー生存通知（ブラウザ連動自動停止） ─────────────────────────────
+// 全ページから /heartbeat を定期送信する。サーバー側は launch.py 経由
+// （FINAPP_AUTO_SHUTDOWN=1）のときだけ途絶検知で自動停止する。本番では無害な no-op。
+(() => {
+  const beat = () => { fetch('/heartbeat', { method: 'POST', credentials: 'same-origin' }).catch(() => {}); };
+  beat();
+  setInterval(beat, 5000);
+  // スリープ・タブ復帰時は即時送信して誤停止を防ぐ
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) beat(); });
+})();
