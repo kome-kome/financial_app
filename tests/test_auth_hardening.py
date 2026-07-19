@@ -121,6 +121,8 @@ def test_fail_fast_missing_secret_key_in_production():
     r = subprocess.run(
         [sys.executable, "-c", "import api"],
         cwd=proj, env=env, capture_output=True, text=True,
+        # Windows ローカルでは子プロセス出力(日本語)が cp932 デコードで落ちるため明示指定
+        encoding="utf-8", errors="replace",
     )
     combined = (r.stdout or "") + (r.stderr or "")
     assert r.returncode != 0, f"fail-fast せず起動した: {combined}"
@@ -139,5 +141,6 @@ def test_no_fail_fast_when_not_production():
     r = subprocess.run(
         [sys.executable, "-c", "import api"],
         cwd=proj, env=env, capture_output=True, text=True,
+        encoding="utf-8", errors="replace",
     )
     assert r.returncode == 0, (r.stdout or "") + (r.stderr or "")
