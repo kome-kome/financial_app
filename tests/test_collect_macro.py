@@ -1,7 +1,8 @@
 """collect_macro_data のモックテスト (#152)。
 
-MACRO_SERIES（9 系列）について、Yahoo Finance 取得→stooq フォールバックと、
-既存レコードの更新／新規挿入の分岐を検証する。外部 HTTP は httpx 組み込みの
+MACRO_SERIES 全系列について、Yahoo Finance 取得→stooq フォールバックと、
+既存レコードの更新／新規挿入の分岐を検証する（件数アサートは len(MACRO_SERIES)
+でパラメタライズ済みのため系列追加に自動追従する）。外部 HTTP は httpx 組み込みの
 MockTransport で擬似（新規依存なし）。DB は conftest.py の in-memory SQLite fixture。
 """
 import io
@@ -68,7 +69,7 @@ def _run(db, handler, **kwargs):
         return asyncio.run(collect_macro_data(db, years_back=1, **kwargs))
 
 
-# ── 1. Yahoo 正常系：9 系列が保存される ─────────────────────────────────────
+# ── 1. Yahoo 正常系：全系列が保存される ─────────────────────────────────────
 def test_yahoo_success_saves_all_series(db):
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.host == "query1.finance.yahoo.com":
@@ -78,13 +79,30 @@ def test_yahoo_success_saves_all_series(db):
 
     saved = _run(db, handler)
 
-    # 9 系列 × 2 日 = 18 件挿入
+    # 全系列 × 2 日 挿入（件数は MACRO_SERIES の長さに追従）
     assert saved == len(MACRO_SERIES) * 2
     codes = {c for (c,) in db.query(MacroData.series_code).distinct().all()}
     assert codes == {s["code"] for s in MACRO_SERIES}
     # Yahoo の close 値が保存されている
     row = db.query(MacroData).filter_by(series_code="USDJPY", trade_date=DATE1).one()
     assert row.close == 1.0
+
+
+# ── 1b. コモディティ・チャネル拡張が MACRO_SERIES に登録されている（#358）──────
+def test_commodity_series_defined():
+    by_code = {s["code"]: s for s in MACRO_SERIES}
+    # 既存2本＋拡張8本 = コモディティ計10系列
+    expected = {"WTI", "GOLD", "BCOM", "COPPER", "NATGAS", "SILVER",
+                "WHEAT", "CORN", "SOYBEAN", "PLATINUM"}
+    assert expected <= set(by_code), f"未登録: {expected - set(by_code)}"
+    for code in expected:
+        assert by_code[code]["category"] == "commodity", f"{code} の category が commodity でない"
+        assert by_code[code]["yf_ticker"], f"{code} に yf_ticker が無い"
+    # 拡張8本の Yahoo ティッカー（Phase 0 疎通検証済み）
+    assert by_code["BCOM"]["yf_ticker"]     == "^BCOM"
+    assert by_code["COPPER"]["yf_ticker"]   == "HG=F"
+    assert by_code["NATGAS"]["yf_ticker"]   == "NG=F"
+    assert by_code["PLATINUM"]["yf_ticker"] == "PL=F"
 
 
 # ── 2. Yahoo 失敗時：stooq へフォールバックする ─────────────────────────────
