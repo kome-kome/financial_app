@@ -106,8 +106,7 @@ WEEKS_PER_YEAR = 52
 # 落として企業母集団を factor 選択から切り離す（除外は diagnostics に表示）。
 _MIN_FACTOR_COVERAGE = 0.5
 _MAX_PATH_POINTS = 120          # チャート用に経路をこの点数まで間引く（payload 抑制）
-_AUTO_SAMPLE_N = 50             # 自動ハイパーパラメータ選択で使用する銘柄サンプル数
-# δ / β_v の探索グリッド（粗→細の2段階候補）
+# δ / β_v の探索グリッド（tuning_search_space の OOF 探索空間・hyperparameter_search.py CLI 用）
 _AUTO_DELTA_GRID = [0.90, 0.93, 0.95, 0.97, 0.98, 0.99, 0.995]
 _AUTO_BV_GRID    = [0.90, 0.93, 0.95, 0.97, 0.99, 1.00]
 # 弱情報事前 C_0（拡散）。α は週次リターン規模（~0.03）、β は無次元規模に合わせる。
@@ -242,42 +241,6 @@ def _downsample_idx(n: int, k: int) -> list[int]:
     if n <= k:
         return list(range(n))
     return sorted(set(round(i * (n - 1) / (k - 1)) for i in range(k)))
-
-
-def _auto_select_hyperparams(
-    sample_data: list[tuple[list, list]],
-    burn_in: int,
-    phi: float = 1.0,
-) -> tuple[float, float]:
-    """銘柄横断の正規近似周辺対数尤度を最大化して (delta, beta_v) を選ぶ。
-
-    sample_data: [(y, X), ...] のリスト（事前に min_weeks フィルタ済み）。
-    burn_in: バーンイン週数（対数尤度計算から除外）。
-    phi: dlm_filter に渡す AR(1) 係数。
-    Returns: (best_delta, best_beta_v).
-    """
-    best_ll = -math.inf
-    best: tuple[float, float] = (0.98, 0.98)
-
-    for delta in _AUTO_DELTA_GRID:
-        for bv in _AUTO_BV_GRID:
-            ll = 0.0
-            for y, X in sample_data:
-                res = dlm_filter(y, X, delta, bv, phi=phi)
-                fe = res["fe"][burn_in:]
-                qv = res["qv"][burn_in:]
-                if fe.size == 0:
-                    continue
-                qv_safe = np.maximum(qv, 1e-20)
-                # 正規近似: log p(y_t | y_{1:t-1}) ≈ -½ [log(2π Q_t) + e_t²/Q_t]
-                ll += float(np.sum(
-                    -0.5 * (np.log(2 * math.pi * qv_safe) + fe ** 2 / qv_safe)
-                ))
-            if ll > best_ll:
-                best_ll = ll
-                best = (float(delta), float(bv))
-
-    return best
 
 
 def _build_price_features(px_rows: list, selected: list[str]) -> dict[str, list]:
@@ -428,15 +391,6 @@ class MacroDlmPlugin(AnalysisPlugin):
                 ),
                 "default": 0.95, "min": 0.50, "max": 0.999, "step": 0.005,
             },
-            "auto_hyperparams": {
-                "type": "checkbox",
-                "label": "δ / β_v を自動選択（周辺尤度最大化）",
-                "description": (
-                    "銘柄横断でグリッドサーチし、正規近似周辺対数尤度を最大化する δ・β_v を自動選択します。"
-                    "有効にすると上の δ・β_v スライダー指定値より優先されます（計算コストあり）。"
-                ),
-                "default": False,
-            },
             "lambda_risk": {
                 "type": "slider",
                 "dtype": "float",
@@ -452,14 +406,13 @@ class MacroDlmPlugin(AnalysisPlugin):
     def tuning_search_space(self) -> tuple:
         """ハイパーパラメータ自動探索の探索空間（Issue #267）。
 
-        δ/β_v は既存の周辺尤度グリッド（`_AUTO_DELTA_GRID`/`_AUTO_BV_GRID`）をそのまま
-        再利用する（周辺尤度モードとOOFモードで同じ候補グリッドを共有）。alpha_phi は
+        δ/β_v の候補グリッドは `_AUTO_DELTA_GRID`/`_AUTO_BV_GRID`。alpha_phi は
         alpha_ar1=True のときのみ意味を持つため only_if で条件付ける。macro_features の
         部分集合探索は組合せ爆発（2^N）かつ具体的な縮約案が無いため対象外とし既定に固定
         （#264 設計方針）。lambda_risk・top_n・min_weeks/burn_in_weeks（母集団/診断の定義）
-        も対象外。既存の `auto_hyperparams`（周辺尤度・in-UI）チェックボックスはそのまま
-        高速フォールバックとして残り、本探索空間は walk-forward OOF rank-IC を目的関数と
-        する別経路（hyperparameter_search.py CLI）で使う。
+        も対象外。本探索空間は walk-forward OOF rank-IC を目的関数とする別経路
+        （hyperparameter_search.py CLI）で使う。旧 in-UI `auto_hyperparams`（周辺尤度
+        最大化）は tuned 既定値の UI 注入で役目を終え撤去した（ADR-0007 改訂を参照）。
         """
         from .tuning import SearchDim
 
@@ -590,7 +543,6 @@ class MacroDlmPlugin(AnalysisPlugin):
         top_n: int = params["top_n"]
         use_ar1: bool = bool(params.get("alpha_ar1", False))
         phi: float = float(params.get("alpha_phi", 0.95)) if use_ar1 else 1.0
-        auto_hp: bool = bool(params.get("auto_hyperparams", False))
 
         if not factors:
             raise ValueError("マクロ・ファクターを1つ以上選択してください")
@@ -637,21 +589,6 @@ class MacroDlmPlugin(AnalysisPlugin):
             )
 
         level_at, kinds = self._macro_change_builder(macro_levels, factors)
-
-        # 自動ハイパーパラメータ選択: 代表サンプルで周辺尤度を最大化
-        auto_hp_used = False
-        if auto_hp:
-            sample_ecs = sorted(prices_by_co.keys())[:_AUTO_SAMPLE_N]
-            sample_data: list[tuple] = []
-            for ec in sample_ecs:
-                s_px_feats = _build_price_features(prices_by_co[ec], price_features)
-                sy, sX, _ = self._build_series(
-                    prices_by_co[ec], level_at, kinds, s_px_feats, price_features)
-                if len(sy) >= min_weeks:
-                    sample_data.append((sy, sX))
-            if sample_data:
-                delta, beta_v = _auto_select_hyperparams(sample_data, burn_in, phi=phi)
-                auto_hp_used = True
 
         tq = stats.t.ppf(0.975, df=10_000)   # 信用区間の係数（自由度大の Student-t≒正規）
         k = len(factors)
@@ -845,11 +782,10 @@ class MacroDlmPlugin(AnalysisPlugin):
             "pred_rmse": _r(float(np.mean(agg_rmse))) if agg_rmse else None,
             "coverage95": _r(float(np.mean(agg_cov)), 4) if agg_cov else None,
             "n_companies_scored": n_companies,
-            # 実際に使用されたハイパーパラメータ（自動選択 or ユーザー指定）
+            # 実際に使用されたハイパーパラメータ（tuned 既定値 or ユーザー指定のエコーバック）
             "selected_delta": _r(delta, 4),
             "selected_bv": _r(beta_v, 4),
             "phi": _r(phi, 4),
-            "auto_hyperparams_used": auto_hp_used,
             # データ蓄積不足で除外した factor と、選択 factor のカバレッジ（透明性）
             "dropped_factors": dropped_factors,
             "factor_coverage": {f: _r(c, 4) for f, c in factor_coverage.items()},
