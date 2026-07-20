@@ -1107,6 +1107,21 @@ MACRO_SERIES: list[dict] = [
     {"code": "VIX",       "name": "VIX恐怖指数",  "category": "volatility", "ticker": "",         "yf_ticker": "^VIX"},
     {"code": "WTI",       "name": "WTI原油",      "category": "commodity",  "ticker": "cl.f",     "yf_ticker": "CL=F"},
     {"code": "GOLD",      "name": "金",           "category": "commodity",  "ticker": "gc.f",     "yf_ticker": "GC=F"},
+    # ── コモディティ・チャネル拡張（#358・ADR-0013）───────────────────────────
+    # 日本株の業種別コモディティ感応度をカバー（銅=非鉄/電線/機械・天然ガス=電力ガス/化学・
+    # 貴金属=商社/触媒/電子材料・穀物=食品/飼料）。Phase 0 疎通検証で全8系列が Yahoo v8 から
+    # 6年 1506-1510 行取得可・^BCOM も生存を確認済み。stooq はコモディティ先物が全滅（ローカル
+    # IP でも 0 件）のため ticker は空文字（Yahoo フォールバック時に安全に skip）。VIX/DXY 同様、
+    # macro_data への蓄積を Actions で実証してから M-1/M-2/M-3 の特徴量（_MACRO_MAP・
+    # _DLM_MACRO_MAP）へ公開する（2PR 構成・#218 の公開フロー準拠）。
+    {"code": "BCOM",      "name": "ブルームバーグ商品指数", "category": "commodity", "ticker": "", "yf_ticker": "^BCOM"},
+    {"code": "COPPER",    "name": "銅先物",        "category": "commodity",  "ticker": "",         "yf_ticker": "HG=F"},
+    {"code": "NATGAS",    "name": "天然ガス先物",  "category": "commodity",  "ticker": "",         "yf_ticker": "NG=F"},
+    {"code": "SILVER",    "name": "銀先物",        "category": "commodity",  "ticker": "",         "yf_ticker": "SI=F"},
+    {"code": "WHEAT",     "name": "小麦先物",      "category": "commodity",  "ticker": "",         "yf_ticker": "ZW=F"},
+    {"code": "CORN",      "name": "トウモロコシ先物", "category": "commodity", "ticker": "",       "yf_ticker": "ZC=F"},
+    {"code": "SOYBEAN",   "name": "大豆先物",      "category": "commodity",  "ticker": "",         "yf_ticker": "ZS=F"},
+    {"code": "PLATINUM",  "name": "プラチナ先物",  "category": "commodity",  "ticker": "",         "yf_ticker": "PL=F"},
 ]
 
 # ── FRED マクロ系列（クレジット・インフレ・JP金利・期間構造）──────────────────────────
