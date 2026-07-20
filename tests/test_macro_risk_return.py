@@ -221,11 +221,14 @@ class TestParamsSchema:
             coerce_params(self.schema, {"fin_features": ["not_a_feature"]})
 
     def test_macro_features_default(self):
-        """macro_features の既定は現状の3系列。"""
+        """macro_features の既定は全選択肢（#358: M-2/M-3 と揃え、コモディティを含む
+        全マクロ系列を既定 ON にした。過剰選択は LassoLarsIC(BIC) が抑える）。"""
+        from plugins.macro_risk_return import MACRO_FEATURE_OPTIONS
         result = coerce_params(self.schema, {})
-        assert result["macro_features"] == [
-            "macro_usdjpy_yoy", "macro_sp500_yoy", "macro_us10y_zscore"
-        ]
+        assert result["macro_features"] == [o["value"] for o in MACRO_FEATURE_OPTIONS]
+        # コモディティ8系列が既定に含まれる
+        for k in ("macro_bcom_yoy", "macro_copper_yoy", "macro_platinum_yoy"):
+            assert k in result["macro_features"]
 
     def test_macro_features_accepts_nikkei(self):
         result = coerce_params(

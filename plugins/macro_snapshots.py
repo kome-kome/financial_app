@@ -175,7 +175,10 @@ MACRO_FEATURE_OPTIONS = [
     {"value": "macro_soybean_yoy",  "label": "大豆先物 前年比（YoY）"},
     {"value": "macro_platinum_yoy", "label": "プラチナ先物 前年比（YoY）"},
 ]
-DEFAULT_MACRO_FEATURES = ["macro_usdjpy_yoy", "macro_sp500_yoy", "macro_us10y_zscore"]
+# 既定は全選択肢（#358・ユーザー方針変更）。従来は米国寄り3本（USDJPY/SP500/US10Y）のみ
+# だったが、コモディティを含む全マクロ系列を既定 ON にし M-2/M-3 と揃える。過剰選択は
+# LassoLarsIC(BIC) の pooled 選択が抑えるため、既定を広げても最終モデルは自動的に絞られる。
+DEFAULT_MACRO_FEATURES = [o["value"] for o in MACRO_FEATURE_OPTIONS]
 
 
 # ── 日付 / 財務 helpers ────────────────────────────────────────────────────
