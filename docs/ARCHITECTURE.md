@@ -502,7 +502,7 @@ sequenceDiagram
     Note over User,DB: ① 業種別OLS分析の実行（target=stock_price 固定・per-share 説明変数）
     User ->> UI  : 説明変数（per-share[円/株]）・業種最低サンプル数・正則化を選択して「実行」
     UI   ->> API : POST /api/plugins/sector_ols/run { target=stock_price, features:[ps_*...], min_samples }
-    API  ->> PLG : execute_plugin(p, raw, db)（coerce_params→ensure_dependencies→execute）
+    API  ->> PLG : execute_plugin(p, raw, db)（coerce_params→ensure_dependencies→execute[to_thread]）
 
     PLG  ->> DB  : SELECT financial_records（最新年度）
     DB  -->> PLG : 全レコード
@@ -525,7 +525,7 @@ sequenceDiagram
     Note over User,DB: ② バリュエーション分析の実行（業種別OLS完了後に利用可能）
     User ->> UI  : 「バリュエーション分析」タブを選択
     UI   ->> API : GET /api/gap-analysis?sort=asc
-    API  ->> GAP : execute_plugin(p, {year, sort}, db)（coerce→ensure_dependencies→execute）
+    API  ->> GAP : execute_plugin(p, {year, sort}, db)（coerce→ensure_dependencies→execute[to_thread]）
     GAP  ->> DB  : SELECT financial_metrics WHERE gap_ratio IS NOT NULL<br/>（VIEW が regression_results をJOIN）
     DB  -->> GAP : 予測値付きレコード
     GAP -->> API : { results: [{company, gap_ratio, market_cap, predicted, ...}] }
@@ -800,7 +800,7 @@ classDiagram
         +get_plugin(name) AnalysisPlugin
         +list_plugins() list
         +ensure_dependencies(plugin, db) depends_on 強制
-        +execute_plugin(plugin, raw, db) coerce→ensure→execute の単一入口
+        +execute_plugin(plugin, raw, db) coerce→ensure→execute の単一入口（execute は asyncio.to_thread でオフロード・実行中は any_executing()=True）
     }
 
     class Utils {
