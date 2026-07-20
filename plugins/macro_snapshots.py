@@ -113,6 +113,19 @@ _MACRO_MAP = {
     # 既存の実績GDP（yoy）とは区別し、率指標として zscore を採用（貿易収支と同じ規約）。
     "macro_jp_weo_gdp_fcast_zscore": ("JP_WEO_GDP_FCAST", "zscore"),
     "macro_jp_weo_cpi_fcast_zscore": ("JP_WEO_CPI_FCAST", "zscore"),
+    # ── コモディティ・チャネル拡張（ADR-0013・#358）──────────────────────────
+    # 日本株の業種別コモディティ感応度（銅=非鉄/電線/機械・天然ガス=電力ガス/化学・
+    # 貴金属=商社/触媒/電子材料・穀物=食品/飼料）を捕捉。既存 WTI/GOLD と同じく商品価格は
+    # 常に正の水準系なので yoy（前年比）を採用（変換規約 L79 準拠。docs/MODELS.md §9.2 が
+    # DXY/WTI/金を「Zスコア」と記すのは陳腐化した誤記で、コード側 yoy が正本）。
+    "macro_bcom_yoy":     ("BCOM",     "yoy"),
+    "macro_copper_yoy":   ("COPPER",   "yoy"),
+    "macro_natgas_yoy":   ("NATGAS",   "yoy"),
+    "macro_silver_yoy":   ("SILVER",   "yoy"),
+    "macro_wheat_yoy":    ("WHEAT",    "yoy"),
+    "macro_corn_yoy":     ("CORN",     "yoy"),
+    "macro_soybean_yoy":  ("SOYBEAN",  "yoy"),
+    "macro_platinum_yoy": ("PLATINUM", "yoy"),
 }
 MACRO_FEATURE_NAMES = list(_MACRO_MAP.keys())
 
@@ -152,8 +165,20 @@ MACRO_FEATURE_OPTIONS = [
     {"value": "macro_jp_cli_zscore", "label": "OECD景気先行指数（CLI）Zスコア"},
     {"value": "macro_jp_weo_gdp_fcast_zscore", "label": "IMF WEO 実質GDP成長率見通し（翌年）Zスコア"},
     {"value": "macro_jp_weo_cpi_fcast_zscore", "label": "IMF WEO インフレ率見通し（翌年）Zスコア"},
+    # コモディティ・チャネル拡張（ADR-0013・#358）
+    {"value": "macro_bcom_yoy",     "label": "ブルームバーグ商品指数 前年比（YoY）"},
+    {"value": "macro_copper_yoy",   "label": "銅先物 前年比（YoY）"},
+    {"value": "macro_natgas_yoy",   "label": "天然ガス先物 前年比（YoY）"},
+    {"value": "macro_silver_yoy",   "label": "銀先物 前年比（YoY）"},
+    {"value": "macro_wheat_yoy",    "label": "小麦先物 前年比（YoY）"},
+    {"value": "macro_corn_yoy",     "label": "トウモロコシ先物 前年比（YoY）"},
+    {"value": "macro_soybean_yoy",  "label": "大豆先物 前年比（YoY）"},
+    {"value": "macro_platinum_yoy", "label": "プラチナ先物 前年比（YoY）"},
 ]
-DEFAULT_MACRO_FEATURES = ["macro_usdjpy_yoy", "macro_sp500_yoy", "macro_us10y_zscore"]
+# 既定は全選択肢（#358・ユーザー方針変更）。従来は米国寄り3本（USDJPY/SP500/US10Y）のみ
+# だったが、コモディティを含む全マクロ系列を既定 ON にし M-2/M-3 と揃える。過剰選択は
+# LassoLarsIC(BIC) の pooled 選択が抑えるため、既定を広げても最終モデルは自動的に絞られる。
+DEFAULT_MACRO_FEATURES = [o["value"] for o in MACRO_FEATURE_OPTIONS]
 
 
 # ── 日付 / 財務 helpers ────────────────────────────────────────────────────

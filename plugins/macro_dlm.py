@@ -64,6 +64,17 @@ _DLM_MACRO_MAP: dict[str, tuple[str, str, str]] = {
     "dlm_vix":       ("VIX",        "logret", "VIX 週次変化"),
     "dlm_wti":       ("WTI",        "logret", "WTI原油 週次変化"),
     "dlm_gold":      ("GOLD",       "logret", "金（ゴールド）週次変化"),
+    # コモディティ・チャネル拡張（ADR-0013・#358）。日次先物のため週次高頻度要件（本節
+    # 冒頭 ADR-0012）に適合。銘柄別の時変βで「銘柄×特定コモディティ」の感応度を直接推定する。
+    # DEFAULT_MACRO_FEATURES=全OPTIONS 連動により自動で既定 ON（状態次元 +8）。
+    "dlm_bcom":      ("BCOM",       "logret", "ブルームバーグ商品指数 週次変化"),
+    "dlm_copper":    ("COPPER",     "logret", "銅先物 週次変化"),
+    "dlm_natgas":    ("NATGAS",     "logret", "天然ガス先物 週次変化"),
+    "dlm_silver":    ("SILVER",     "logret", "銀先物 週次変化"),
+    "dlm_wheat":     ("WHEAT",      "logret", "小麦先物 週次変化"),
+    "dlm_corn":      ("CORN",       "logret", "トウモロコシ先物 週次変化"),
+    "dlm_soybean":   ("SOYBEAN",    "logret", "大豆先物 週次変化"),
+    "dlm_platinum":  ("PLATINUM",   "logret", "プラチナ先物 週次変化"),
     "dlm_us5y":      ("US5Y",       "diff",   "米5年金利 週次差分"),
     "dlm_us10y":     ("US10Y",      "diff",   "米10年金利 週次差分"),
     "dlm_us30y":     ("US30Y",      "diff",   "米30年金利 週次差分"),
