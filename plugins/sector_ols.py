@@ -530,7 +530,7 @@ class SectorOLSPlugin(AnalysisPlugin):
             }
         return stat_entry
 
-    async def execute(self, params: dict, db: Any) -> dict:
+    def execute(self, params: dict, db: Any) -> dict:
         target           = params["target"]
         features         = params["features"]
         min_samples      = params["min_samples"]

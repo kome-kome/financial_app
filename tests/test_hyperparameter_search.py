@@ -24,7 +24,7 @@ class _FakePlugin:
         from plugins.tuning import SearchDim
         return {}, [SearchDim("x", [0, 3, 5, 7])]
 
-    async def execute(self, params: dict, db) -> dict:
+    def execute(self, params: dict, db) -> dict:
         type(self).execute_calls += 1
         score = -((params["x"] - 5) ** 2)
         return {"oof_backtest": {"rank_ic": {"mean": float(score), "std": 1.0, "n": 3}}}
@@ -38,7 +38,7 @@ class _NoSpacePlugin:
     def params_schema(self) -> dict:
         return {}
 
-    async def execute(self, params: dict, db) -> dict:
+    def execute(self, params: dict, db) -> dict:
         return {}
 
 

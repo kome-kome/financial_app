@@ -240,7 +240,7 @@ class MacroRiskReturnPlugin(AnalysisPlugin):
             build_interactions=True,
         )
 
-    async def execute(self, params: dict, db: Any) -> dict:
+    def execute(self, params: dict, db: Any) -> dict:
         lambda_risk    = params["lambda_risk"]
         risk_axis      = params["risk_axis"]
         if risk_axis not in ("r2", "r_macro"):

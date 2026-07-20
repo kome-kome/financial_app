@@ -533,7 +533,7 @@ class MacroDlmPlugin(AnalysisPlugin):
             }
         return out
 
-    async def execute(self, params: dict, db: Any) -> dict:
+    def execute(self, params: dict, db: Any) -> dict:
         factors: list[str] = params["macro_features"]
         price_features: list[str] = params.get("price_features") or []
         delta: float = params["state_discount"]

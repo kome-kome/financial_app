@@ -115,7 +115,7 @@ class GapAnalysisPlugin(AnalysisPlugin):
             },
         }
 
-    async def execute(self, params: dict, db: Any) -> dict:
+    def execute(self, params: dict, db: Any) -> dict:
         # gap_ratio / predicted_market_cap は regression_results 由来。
         # financial_metrics VIEW が LEFT JOIN して合成するため VIEW を読む。
         from database import FinancialMetric

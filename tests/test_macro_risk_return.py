@@ -1,5 +1,4 @@
 """tests/test_macro_risk_return.py — M-1 Phase B: MacroRiskReturnPlugin"""
-import asyncio
 import math
 from datetime import date, timedelta
 from types import SimpleNamespace
@@ -467,7 +466,7 @@ class TestExecuteIntegration:
         params = coerce_params(schema, {"use_macro": False})
 
         db = self._build_mock_db()
-        result = asyncio.run(plugin.execute(params, db))
+        result = plugin.execute(params, db)
 
         assert "results" in result
         assert "cv_metrics" in result
@@ -481,7 +480,7 @@ class TestExecuteIntegration:
         params = coerce_params(schema, {"use_macro": False})
 
         db = self._build_mock_db()
-        result = asyncio.run(plugin.execute(params, db))
+        result = plugin.execute(params, db)
 
         assert "oof_backtest" in result, "execute 出力に oof_backtest がない"
         oof = result["oof_backtest"]
@@ -498,7 +497,7 @@ class TestExecuteIntegration:
         params = coerce_params(schema, {"use_macro": False, "top_n": 5})
 
         db = self._build_mock_db()
-        result = asyncio.run(plugin.execute(params, db))
+        result = plugin.execute(params, db)
 
         assert result["risk_axis"] == "r2"
         # λ・top_n はクライアント初期表示シードとしてエコーされる
@@ -518,10 +517,10 @@ class TestExecuteIntegration:
         """top_n はサーバーでスライスしない（クライアントが U で並べ替え・上位抽出する）。"""
         plugin = MacroRiskReturnPlugin()
         schema = plugin.params_schema()
-        res_small = asyncio.run(plugin.execute(
-            coerce_params(schema, {"use_macro": False, "top_n": 5}), self._build_mock_db()))
-        res_large = asyncio.run(plugin.execute(
-            coerce_params(schema, {"use_macro": False, "top_n": 100}), self._build_mock_db()))
+        res_small = plugin.execute(
+            coerce_params(schema, {"use_macro": False, "top_n": 5}), self._build_mock_db())
+        res_large = plugin.execute(
+            coerce_params(schema, {"use_macro": False, "top_n": 100}), self._build_mock_db())
         # top_n を変えても返却件数は同じ（= 全社）
         assert len(res_small["results"]) == len(res_large["results"])
         assert len(res_small["results"]) == res_small["n_companies"]
@@ -533,7 +532,7 @@ class TestExecuteIntegration:
         params = coerce_params(schema, {"use_macro": False, "top_n": 5})
 
         db = self._build_mock_db()
-        result = asyncio.run(plugin.execute(params, db))
+        result = plugin.execute(params, db)
 
         for item in result["results"]:
             assert "r3" in item
@@ -546,7 +545,7 @@ class TestExecuteIntegration:
         params = coerce_params(schema, {"use_macro": False, "top_n": 5, "risk_axis": "r_macro"})
 
         db = self._build_mock_db()
-        result = asyncio.run(plugin.execute(params, db))
+        result = plugin.execute(params, db)
 
         assert result["risk_axis"] == "r_macro"
         for item in result["results"]:
@@ -559,7 +558,7 @@ class TestExecuteIntegration:
         schema = plugin.params_schema()
         params = coerce_params(schema, {"use_macro": False, "top_n": 5})
 
-        result = asyncio.run(plugin.execute(params, self._build_mock_db()))
+        result = plugin.execute(params, self._build_mock_db())
 
         assert result["r_macro_available"] is False
         assert all(item["r_macro"] is None for item in result["results"])
@@ -572,7 +571,7 @@ class TestExecuteIntegration:
         producer = {"E01234": {"mu": 0.01, "r_macro": 0.05, "r1_prime": 0.02}}
 
         with patch("plugins.macro_risk_return.get_producer_scores", return_value=producer):
-            result = asyncio.run(plugin.execute(params, self._build_mock_db()))
+            result = plugin.execute(params, self._build_mock_db())
 
         assert result["r_macro_available"] is True
 
@@ -582,7 +581,7 @@ class TestExecuteIntegration:
         schema = plugin.params_schema()
         params = coerce_params(schema, {"use_macro": False, "top_n": 5})
 
-        result = asyncio.run(plugin.execute(params, self._build_mock_db()))
+        result = plugin.execute(params, self._build_mock_db())
 
         assert "feature_coefs" in result
         coefs = result["feature_coefs"]
@@ -600,7 +599,7 @@ class TestExecuteIntegration:
         params = coerce_params(schema, {"use_macro": False, "use_momentum": True})
 
         db = self._build_mock_db(n_weeks=200)
-        result = asyncio.run(plugin.execute(params, db))
+        result = plugin.execute(params, db)
 
         assert "results" in result
         assert "cv_metrics" in result
@@ -709,7 +708,7 @@ class TestObjectiveOnlyMode:
         with patch.object(MacroRiskReturnPlugin, "_fit_final") as mock_fit, \
              patch.object(MacroRiskReturnPlugin, "_score_companies") as mock_score, \
              database.tuning_objective_only():
-            result = asyncio.run(plugin.execute(params, db))
+            result = plugin.execute(params, db)
 
         mock_fit.assert_not_called()
         mock_score.assert_not_called()
@@ -727,11 +726,11 @@ class TestObjectiveOnlyMode:
         params = self._params()
 
         db_full = TestExecuteIntegration()._build_mock_db()
-        result_full = asyncio.run(plugin.execute(params, db_full))
+        result_full = plugin.execute(params, db_full)
 
         db_skip = TestExecuteIntegration()._build_mock_db()
         with database.tuning_objective_only():
-            result_skip = asyncio.run(plugin.execute(params, db_skip))
+            result_skip = plugin.execute(params, db_skip)
 
         assert result_full["oof_backtest"] == result_skip["oof_backtest"]
         assert result_full["cv_metrics"] == result_skip["cv_metrics"]
@@ -746,7 +745,7 @@ class TestObjectiveOnlyMode:
         params = self._params()
 
         assert database.is_tuning_objective_only() is False
-        result = asyncio.run(plugin.execute(params, db))
+        result = plugin.execute(params, db)
 
         assert len(result["results"]) > 0
         assert result["n_companies"] > 0
@@ -798,7 +797,7 @@ class TestCvResultCacheBySelectedFeatures:
             results = []
             for mf in max_features_list:
                 params = coerce_params(schema, {"use_macro": False, "max_features": mf})
-                results.append(asyncio.run(plugin.execute(params, db)))
+                results.append(plugin.execute(params, db))
         return results, wrapped_cv
 
     def test_cv_computed_once_when_selected_names_match(self):

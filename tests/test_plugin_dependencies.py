@@ -32,7 +32,7 @@ class TestProducedOutput:
             label = "P"
             def params_schema(self):
                 return {}
-            async def execute(self, params, db):
+            def execute(self, params, db):
                 return {}
         assert _P().produced_output(db=None) is True
 

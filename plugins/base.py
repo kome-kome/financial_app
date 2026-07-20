@@ -32,8 +32,15 @@ class AnalysisPlugin(ABC):
         ...
 
     @abstractmethod
-    async def execute(self, params: dict, db: Any) -> dict:
-        """分析を実行して結果を返す"""
+    def execute(self, params: dict, db: Any) -> dict:
+        """分析を実行して結果を返す。
+
+        **同期（def）で実装すること**。イベントループ上では plugins.execute_plugin が
+        asyncio.to_thread でワーカースレッドへオフロードするため、CPU-bound な実装でも
+        ループを塞がない（heartbeat watchdog の誤停止防止・Issue #357）。`async def` で
+        実装すると to_thread が未 await のコルーチンを返して壊れるため禁止
+        （ABC の abstractmethod は sync/async を強制できない＝規約で守る）。
+        """
         ...
 
     def produced_output(self, db: Any) -> bool:

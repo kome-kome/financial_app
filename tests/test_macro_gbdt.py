@@ -7,7 +7,6 @@
   4. smoke   : execute が cv_metrics（xgb/ols_baseline）・SHAP・per-stock shap・全社返却を満たす
   5. M-1 回帰: 既存 test_macro_risk_return.py が通ること（pytest 呼び出しで確認）
 """
-import asyncio
 import math
 from types import SimpleNamespace
 from collections import defaultdict
@@ -403,7 +402,7 @@ class TestExecuteSmoke:
         with patch("plugins.macro_gbdt.load_data", return_value=(prices_by_co, fin_by_co, companies)), \
              patch("plugins.macro_gbdt.preload_macro", return_value={}), \
              patch("plugins.macro_gbdt.get_producer_scores", return_value={}):
-            result = asyncio.run(plugin.execute(params, db))
+            result = plugin.execute(params, db)
 
         required = {"cv_metrics", "selected_features", "feature_coefs",
                     "n_train_samples", "n_companies", "results",
@@ -418,7 +417,7 @@ class TestExecuteSmoke:
         with patch("plugins.macro_gbdt.load_data", return_value=(prices_by_co, fin_by_co, companies)), \
              patch("plugins.macro_gbdt.preload_macro", return_value={}), \
              patch("plugins.macro_gbdt.get_producer_scores", return_value={}):
-            result = asyncio.run(plugin.execute(params, db))
+            result = plugin.execute(params, db)
 
         cv = result["cv_metrics"]
         assert "xgb" in cv, "cv_metrics に xgb がない"
@@ -435,7 +434,7 @@ class TestExecuteSmoke:
         with patch("plugins.macro_gbdt.load_data", return_value=(prices_by_co, fin_by_co, companies)), \
              patch("plugins.macro_gbdt.preload_macro", return_value={}), \
              patch("plugins.macro_gbdt.get_producer_scores", return_value={}):
-            result = asyncio.run(plugin.execute(params, db))
+            result = plugin.execute(params, db)
 
         assert "oof_backtest" in result, "execute 出力に oof_backtest がない"
         oof = result["oof_backtest"]
@@ -453,7 +452,7 @@ class TestExecuteSmoke:
         with patch("plugins.macro_gbdt.load_data", return_value=(prices_by_co, fin_by_co, companies)), \
              patch("plugins.macro_gbdt.preload_macro", return_value={}), \
              patch("plugins.macro_gbdt.get_producer_scores", return_value={}):
-            result = asyncio.run(plugin.execute(params, db))
+            result = plugin.execute(params, db)
 
         assert result["n_companies"] == len(result["results"]), "n_companies と results 件数が不一致"
         assert result["n_companies"] > 0, "results が空"
@@ -466,7 +465,7 @@ class TestExecuteSmoke:
         with patch("plugins.macro_gbdt.load_data", return_value=(prices_by_co, fin_by_co, companies)), \
              patch("plugins.macro_gbdt.preload_macro", return_value={}), \
              patch("plugins.macro_gbdt.get_producer_scores", return_value={}):
-            result = asyncio.run(plugin.execute(params, db))
+            result = plugin.execute(params, db)
 
         for item in result["results"]:
             assert "shap" in item, f"{item['edinet_code']} に shap がない"
@@ -481,7 +480,7 @@ class TestExecuteSmoke:
         with patch("plugins.macro_gbdt.load_data", return_value=(prices_by_co, fin_by_co, companies)), \
              patch("plugins.macro_gbdt.preload_macro", return_value={}), \
              patch("plugins.macro_gbdt.get_producer_scores", return_value={}):
-            result = asyncio.run(plugin.execute(params, db))
+            result = plugin.execute(params, db)
 
         coefs = result["feature_coefs"]
         assert isinstance(coefs, dict) and len(coefs) > 0, "feature_coefs が空"
@@ -496,7 +495,7 @@ class TestExecuteSmoke:
         with patch("plugins.macro_gbdt.load_data", return_value=(prices_by_co, fin_by_co, companies)), \
              patch("plugins.macro_gbdt.preload_macro", return_value={}), \
              patch("plugins.macro_gbdt.get_producer_scores", return_value={}):
-            result = asyncio.run(plugin.execute(params, db))
+            result = plugin.execute(params, db)
 
         for item in result["results"]:
             assert item.get("r1") is None, f"r1 が None でない（{item['edinet_code']}）"
@@ -516,7 +515,7 @@ class TestExecuteSmoke:
         with patch("plugins.macro_gbdt.load_data", return_value=(prices_by_co, fin_by_co, companies)), \
              patch("plugins.macro_gbdt.preload_macro", return_value=macro_cache), \
              patch("plugins.macro_gbdt.get_producer_scores", return_value={}):
-            result = asyncio.run(plugin.execute(params, db))
+            result = plugin.execute(params, db)
 
         assert result["n_companies"] > 0, "NaN マクロで企業が全滅した"
         assert "macro_sp500_yoy" in result["selected_features"]
@@ -533,7 +532,7 @@ class TestExecuteSmoke:
         with patch("plugins.macro_gbdt.load_data", return_value=(prices_by_co, fin_by_co, companies)), \
              patch("plugins.macro_gbdt.preload_macro", return_value={}), \
              patch("plugins.macro_gbdt.get_producer_scores", return_value={}):
-            result = asyncio.run(plugin.execute(params, db))
+            result = plugin.execute(params, db)
 
         assert result["model_type"] == "xgboost"
 
@@ -546,7 +545,7 @@ class TestExecuteSmoke:
         with patch("plugins.macro_gbdt.load_data", return_value=(prices_by_co, fin_by_co, companies)), \
              patch("plugins.macro_gbdt.preload_macro", return_value={}), \
              patch("plugins.macro_gbdt.get_producer_scores", return_value={}):
-            result = asyncio.run(plugin.execute(params, db))
+            result = plugin.execute(params, db)
 
         assert result["r_macro_available"] is False
         assert all(item["r_macro"] is None for item in result["results"])
@@ -561,7 +560,7 @@ class TestExecuteSmoke:
         with patch("plugins.macro_gbdt.load_data", return_value=(prices_by_co, fin_by_co, companies)), \
              patch("plugins.macro_gbdt.preload_macro", return_value={}), \
              patch("plugins.macro_gbdt.get_producer_scores", return_value=producer):
-            result = asyncio.run(plugin.execute(params, db))
+            result = plugin.execute(params, db)
 
         assert result["r_macro_available"] is True
 
@@ -572,7 +571,7 @@ class TestExecuteSmoke:
 
         with patch("plugins.macro_gbdt.load_data", return_value=({}, {}, {})):
             with pytest.raises(ValueError, match="株価週次履歴"):
-                asyncio.run(plugin.execute(params, db))
+                plugin.execute(params, db)
 
     def test_execute_no_fin_features_raises(self):
         """財務特徴量が空で ValueError。"""
@@ -580,7 +579,7 @@ class TestExecuteSmoke:
         params = self._make_params(use_macro=False)
         params["fin_features"] = []
         with pytest.raises(ValueError, match="財務特徴量"):
-            asyncio.run(plugin.execute(params, db))
+            plugin.execute(params, db)
 
 
 # ── 5. プラグイン登録 ─────────────────────────────────────────────────────────
@@ -621,7 +620,7 @@ class TestObjectiveOnlyMode:
              patch("plugins.macro_gbdt.get_producer_scores", return_value={}), \
              patch("shap.TreeExplainer") as mock_shap, \
              database.tuning_objective_only():
-            result = asyncio.run(plugin.execute(params, db))
+            result = plugin.execute(params, db)
 
         mock_shap.assert_not_called()
         assert result["results"] == []
@@ -640,13 +639,13 @@ class TestObjectiveOnlyMode:
         with patch("plugins.macro_gbdt.load_data", return_value=(prices_by_co, fin_by_co, companies)), \
              patch("plugins.macro_gbdt.preload_macro", return_value={}), \
              patch("plugins.macro_gbdt.get_producer_scores", return_value={}):
-            result_full = asyncio.run(plugin.execute(params, MagicMock()))
+            result_full = plugin.execute(params, MagicMock())
 
         with patch("plugins.macro_gbdt.load_data", return_value=(prices_by_co, fin_by_co, companies)), \
              patch("plugins.macro_gbdt.preload_macro", return_value={}), \
              patch("plugins.macro_gbdt.get_producer_scores", return_value={}), \
              database.tuning_objective_only():
-            result_skip = asyncio.run(plugin.execute(params, MagicMock()))
+            result_skip = plugin.execute(params, MagicMock())
 
         assert result_full["oof_backtest"] == result_skip["oof_backtest"]
 
@@ -661,7 +660,7 @@ class TestObjectiveOnlyMode:
         with patch("plugins.macro_gbdt.load_data", return_value=(prices_by_co, fin_by_co, companies)), \
              patch("plugins.macro_gbdt.preload_macro", return_value={}), \
              patch("plugins.macro_gbdt.get_producer_scores", return_value={}):
-            result = asyncio.run(plugin.execute(params, db))
+            result = plugin.execute(params, db)
 
         assert len(result["results"]) > 0
         assert result["n_companies"] > 0

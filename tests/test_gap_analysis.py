@@ -4,7 +4,6 @@
 execute(): gap_ratio 皆無→空結果（前提条件の弾きは ensure_dependencies 側）/ 回帰メタ（staleness・model）
 / AR(1)・ヒューリスティックの分岐 / ソート。
 """
-import asyncio
 import math
 import os
 import sys
@@ -91,7 +90,7 @@ class TestExecute:
     def test_no_gap_records_returns_empty(self, db):
         # 前提条件（sector_ols 未実行）の弾きは ensure_dependencies が担うため、execute 自体は
         # 空結果を返す（「該当年度に無い」= エラーではない）。回帰メタは null/空。
-        res = asyncio.run(plugin.execute(_typed({}), db))
+        res = plugin.execute(_typed({}), db)
         assert res["count"] == 0
         assert res["results"] == []
         assert res["regression"]["computed_at"] is None
@@ -108,7 +107,7 @@ class TestExecute:
                                 predicted_market_cap=12000.0, gap_ratio=10.0,
                                 model="ols", sector="情報・通信業", computed_at=old))  # 回帰は古い
         db.commit()
-        reg = asyncio.run(plugin.execute(_typed({}), db))["regression"]
+        reg = plugin.execute(_typed({}), db)["regression"]
         assert reg["models"] == ["ols"]
         assert reg["is_stale"] is True                         # 回帰 < データ更新 → stale
         assert reg["computed_at"] is not None and reg["data_updated_at"] is not None
@@ -116,7 +115,7 @@ class TestExecute:
     def test_short_history_uses_heuristic(self, db, make_metric):
         db.add_all([make_metric(edinet_code="E00001", gap_ratio=20.0)])
         db.commit()
-        res = asyncio.run(plugin.execute(_typed({}), db))
+        res = plugin.execute(_typed({}), db)
         assert res["n_heuristic_fallback"] == 1
         assert res["n_ar1_estimated"] == 0
         row = res["results"][0]
@@ -132,7 +131,7 @@ class TestExecute:
             for i, g in enumerate(gaps)
         ])
         db.commit()
-        res = asyncio.run(plugin.execute(_typed({}), db))
+        res = plugin.execute(_typed({}), db)
         assert res["n_ar1_estimated"] >= 1
         assert any(r["method"] == "ar1" for r in res["results"])
 
@@ -143,7 +142,7 @@ class TestExecute:
             make_metric(edinet_code="E00002", gap_ratio=5.0),
         ])
         db.commit()
-        res = asyncio.run(plugin.execute(_typed({}), db))
+        res = plugin.execute(_typed({}), db)
         assert res["count"] == 1
         assert res["results"][0]["edinet_code"] == "E00002"
 
@@ -153,9 +152,9 @@ class TestExecute:
             make_metric(edinet_code="E00002", gap_ratio=25.0),
         ])
         db.commit()
-        asc = asyncio.run(plugin.execute(_typed({"sort": "asc"}), db))
+        asc = plugin.execute(_typed({"sort": "asc"}), db)
         assert asc["results"][0]["gap_ratio"] == 5.0
-        desc = asyncio.run(plugin.execute(_typed({"sort": "desc"}), db))
+        desc = plugin.execute(_typed({"sort": "desc"}), db)
         assert desc["results"][0]["gap_ratio"] == 25.0
 
 
@@ -167,7 +166,7 @@ class TestTotalReturnColumns:
         db.add(make_metric(edinet_code="E00001", gap_ratio=20.0,
                            stock_price=1000.0, pl_eps=50.0, bs_bps=800.0, div_yield=3.0))
         db.commit()
-        row = asyncio.run(plugin.execute(_typed({}), db))["results"][0]
+        row = plugin.execute(_typed({}), db)["results"][0]
         # 期待総リターン = gap + 配当利回り（同次元 %）
         assert row["div_yield_pct"] == 3.0
         assert row["expected_total_return_pct"] == pytest.approx(23.0)
@@ -183,7 +182,7 @@ class TestTotalReturnColumns:
         db.add(make_metric(edinet_code="E00001", gap_ratio=10.0,
                            stock_price=500.0, div_yield=99.0))
         db.commit()
-        row = asyncio.run(plugin.execute(_typed({}), db))["results"][0]
+        row = plugin.execute(_typed({}), db)["results"][0]
         assert row["div_yield_pct"] == 0.0
         assert row["expected_total_return_pct"] == pytest.approx(10.0)
 
@@ -192,7 +191,7 @@ class TestTotalReturnColumns:
         db.add(make_metric(edinet_code="E00001", gap_ratio=15.0,
                            stock_price=None, pl_eps=50.0, div_yield=2.0))
         db.commit()
-        row = asyncio.run(plugin.execute(_typed({}), db))["results"][0]
+        row = plugin.execute(_typed({}), db)["results"][0]
         assert row["pred_price"] is None
         assert row["implied_per"] is None
         assert row["expected_total_return_pct"] == pytest.approx(17.0)
@@ -205,7 +204,7 @@ class TestTotalReturnColumns:
             make_metric(edinet_code="E00002", gap_ratio=20.0, stock_price=100.0, div_yield=0.0),
         ])
         db.commit()
-        res = asyncio.run(plugin.execute(_typed({"sort": "total_return"}), db))
+        res = plugin.execute(_typed({"sort": "total_return"}), db)
         trs = [r["expected_total_return_pct"] for r in res["results"]]
         assert trs == sorted(trs, reverse=True)
         assert res["results"][0]["edinet_code"] == "E00002"   # 総リターン20 > 18
@@ -216,6 +215,6 @@ class TestTotalReturnColumns:
             make_metric(edinet_code="E00002", gap_ratio=10.0, stock_price=100.0, div_yield=1.0),
         ])
         db.commit()
-        res = asyncio.run(plugin.execute(_typed({"min_div_yield": 3.0}), db))
+        res = plugin.execute(_typed({"min_div_yield": 3.0}), db)
         assert all(r["div_yield_pct"] >= 3.0 for r in res["results"])
         assert {r["edinet_code"] for r in res["results"]} == {"E00001"}

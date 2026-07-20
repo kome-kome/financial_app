@@ -21,7 +21,7 @@ class _QuadraticPlugin:
             "y": {"type": "slider", "dtype": "int", "default": 0, "min": 0, "max": 10},
         }
 
-    async def execute(self, params: dict, db) -> dict:
+    def execute(self, params: dict, db) -> dict:
         score = -((params["x"] - 5) ** 2) - ((params["y"] - 2) ** 2)
         return {"oof_backtest": {"rank_ic": {"mean": float(score), "std": 1.0, "n": 5},
                                  "long_short_spread": float(score)}}
@@ -35,7 +35,7 @@ class _AlwaysFailsPlugin:
     def params_schema(self) -> dict:
         return {"x": {"type": "slider", "dtype": "int", "default": 0, "min": 0, "max": 3}}
 
-    async def execute(self, params: dict, db) -> dict:
+    def execute(self, params: dict, db) -> dict:
         raise ValueError("常に失敗する")
 
 
@@ -47,7 +47,7 @@ class _PartialFailPlugin:
     def params_schema(self) -> dict:
         return {"x": {"type": "slider", "dtype": "int", "default": 0, "min": 0, "max": 5}}
 
-    async def execute(self, params: dict, db) -> dict:
+    def execute(self, params: dict, db) -> dict:
         if params["x"] == 3:
             raise ValueError("x=3 は失敗する")
         return {"oof_backtest": {"rank_ic": {"mean": float(params["x"]), "std": 1.0, "n": 3}}}
@@ -197,7 +197,7 @@ class TestSearch:
             def params_schema(self):
                 return {"x": {"type": "slider", "dtype": "int", "default": 0, "min": 0, "max": 3}}
 
-            async def execute(self, params, db):
+            def execute(self, params, db):
                 dry_run_seen.append(database._tuning_dry_run.get())
                 return {"oof_backtest": {"rank_ic": {"mean": 1.0, "std": 1.0, "n": 3}}}
 
@@ -222,7 +222,7 @@ class TestSearch:
             def params_schema(self):
                 return {"x": {"type": "slider", "dtype": "int", "default": 0, "min": 0, "max": 3}}
 
-            async def execute(self, params, db):
+            def execute(self, params, db):
                 objective_only_seen.append(database.is_tuning_objective_only())
                 return {"oof_backtest": {"rank_ic": {"mean": 1.0, "std": 1.0, "n": 3}}}
 
@@ -465,7 +465,7 @@ class _SnapshotAwarePlugin:
     def params_schema(self) -> dict:
         return {"max_features": {"type": "slider", "dtype": "int", "default": 3, "min": 1, "max": 6}}
 
-    async def execute(self, params: dict, db) -> dict:
+    def execute(self, params: dict, db) -> dict:
         from plugins.macro_snapshots import build_snapshots, load_data, preload_macro
         prices_by_co, fin_by_co, companies = load_data(db)
         macro_cache = preload_macro(db, prices_by_co, ["macro_usdjpy_yoy"])

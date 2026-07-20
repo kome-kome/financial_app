@@ -304,7 +304,7 @@ class NetCashAnalysisPlugin(AnalysisPlugin):
             "n_excluded_trap":   n_excluded_trap,
         }
 
-    async def execute(self, params: dict, db: Any) -> dict:
+    def execute(self, params: dict, db: Any) -> dict:
         # net_cash / nc_ratio は本プラグインが自前計算（関数型）。roe など派生・ソースは
         # financial_metrics VIEW から読む（max_year 抽出も VIEW で行う）。
         sanity_cap = params["max_nc_ratio"]

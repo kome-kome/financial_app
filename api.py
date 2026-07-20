@@ -216,8 +216,11 @@ _hb = {"boot": None, "last": None}
 
 
 def _shutdown_due(now: float) -> bool:
-    """自動停止すべきか。収集等のジョブ実行中は保留し、ハートビート途絶で True。"""
-    if jobs.any_running():
+    """自動停止すべきか。収集ジョブまたは分析プラグイン実行中は保留し、ハートビート途絶で True。
+
+    プラグイン実行は to_thread オフロード（Issue #357）で heartbeat 自体は途絶しないが、
+    タブを閉じたまま長時間の分析が走るケースで os._exit による実行中断を防ぐ。"""
+    if jobs.any_running() or plugin_registry.any_executing():
         return False
     last = _hb["last"]
     deadline = (last + HEARTBEAT_TIMEOUT) if last is not None \

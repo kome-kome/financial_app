@@ -257,7 +257,7 @@ class TestExecuteSmoke:
         db = MagicMock()
         with patch("plugins.macro_dlm.load_prices", return_value=(prices_by_co, companies)), \
              patch("plugins.macro_dlm.load_macro_levels", return_value=macro_levels):
-            return asyncio.run(plugin.execute(params, db))
+            return plugin.execute(params, db)
 
     def test_required_keys(self):
         res = self._run()
@@ -355,7 +355,7 @@ class TestExecuteSmoke:
         with patch("plugins.macro_dlm.load_prices", return_value=(prices_by_co, companies)), \
              patch("plugins.macro_dlm.load_macro_levels", return_value=macro_levels), \
              patch("plugins.macro_dlm.macro_risk_exposure", side_effect=ValueError("boom")):
-            res = asyncio.run(plugin.execute(params, db))
+            res = plugin.execute(params, db)
 
         assert res["r_macro_available"] is False
         assert len(res["results"]) > 0
@@ -376,7 +376,7 @@ class TestGuards:
         with patch("plugins.macro_dlm.load_prices", return_value=({}, {})), \
              patch("plugins.macro_dlm.load_macro_levels", return_value={}):
             with pytest.raises(ValueError, match="株価週次履歴"):
-                asyncio.run(plugin.execute(self._params(), db))
+                plugin.execute(self._params(), db)
 
     def test_empty_macro_raises(self):
         dates = _weekly_dates(90)
@@ -385,7 +385,7 @@ class TestGuards:
         with patch("plugins.macro_dlm.load_prices", return_value=(prices_by_co, companies)), \
              patch("plugins.macro_dlm.load_macro_levels", return_value={}):
             with pytest.raises(ValueError, match="マクロデータ"):
-                asyncio.run(plugin.execute(self._params(), db))
+                plugin.execute(self._params(), db)
 
     def test_insufficient_weeks_raises(self):
         dates = _weekly_dates(50)
@@ -396,14 +396,14 @@ class TestGuards:
         with patch("plugins.macro_dlm.load_prices", return_value=(prices_by_co, companies)), \
              patch("plugins.macro_dlm.load_macro_levels", return_value=macro_levels):
             with pytest.raises(ValueError, match="推定可能な銘柄がありません"):
-                asyncio.run(plugin.execute(params, db))
+                plugin.execute(params, db)
 
     def test_no_macro_features_raises(self):
         db = MagicMock()
         params = self._params()
         params["macro_features"] = []
         with pytest.raises(ValueError, match="マクロ・ファクター"):
-            asyncio.run(plugin.execute(params, db))
+            plugin.execute(params, db)
 
 
 # ── 6b. 薄い factor の自動除外（factor を増やすと企業数が減る問題の対処）─────────
@@ -423,7 +423,7 @@ class TestThinFactorDrop:
         db = MagicMock()
         with patch("plugins.macro_dlm.load_prices", return_value=(prices_by_co, companies)), \
              patch("plugins.macro_dlm.load_macro_levels", return_value=macro_levels):
-            return asyncio.run(plugin.execute(params, db))
+            return plugin.execute(params, db)
 
     def test_thin_factor_dropped_companies_kept(self):
         """歴史の浅い factor（US10Y を後半 20 週のみ）は除外され、企業は残る。"""
@@ -474,7 +474,7 @@ class TestThinFactorDrop:
         with patch("plugins.macro_dlm.load_prices", return_value=(prices_by_co, companies)), \
              patch("plugins.macro_dlm.load_macro_levels", return_value=macro):
             with pytest.raises(ValueError, match="データ蓄積が不足"):
-                asyncio.run(plugin.execute(self._params(), db))
+                plugin.execute(self._params(), db)
 
     def test_factor_coverage_reported(self):
         """diagnostics.factor_coverage に全選択 factor のカバレッジが入る。"""
@@ -562,8 +562,7 @@ class TestOofBacktest:
         db = MagicMock()
         with _patch("plugins.macro_dlm.load_prices", return_value=(prices_by_co, companies)), \
              _patch("plugins.macro_dlm.load_macro_levels", return_value=macro_levels):
-            import asyncio
-            return asyncio.run(plugin.execute(params, db))
+            return plugin.execute(params, db)
 
     def test_oof_rank_ic_positive_with_ordered_data(self):
         """α_true が完全昇順の合成データで rank-IC の mean が正になる（予測力あり）。"""
@@ -669,7 +668,7 @@ class TestProducer:
         with patch("plugins.macro_dlm.load_prices", return_value=(prices_by_co, companies)), \
              patch("plugins.macro_dlm.load_macro_levels", return_value=macro_levels), \
              patch("database.replace_macro_dlm_scores", side_effect=fake_replace):
-            asyncio.run(plugin.execute(params, db))
+            plugin.execute(params, db)
 
         assert len(persisted) == n_co, f"全 {n_co} 銘柄を保存すべきが {len(persisted)} 件"
         for row in persisted:
@@ -696,7 +695,7 @@ class TestProducer:
         with patch("plugins.macro_dlm.load_prices", return_value=(prices_by_co, companies)), \
              patch("plugins.macro_dlm.load_macro_levels", return_value=macro_levels), \
              patch("database.replace_macro_dlm_scores", side_effect=fake_replace):
-            asyncio.run(plugin.execute(params, db))
+            plugin.execute(params, db)
 
         assert len(persisted) == n_co, f"全 {n_co} 銘柄を保存すべきが {len(persisted)} 件（top_n=2 でも全件）"
 
@@ -711,8 +710,7 @@ class TestProducer:
     def test_sell_ranking_reads_macro_dlm_scores(self):
         """sell_ranking が mu_source=macro_dlm のとき M-3 の read_producer_scores を呼ぶ。"""
         from plugins.sell_ranking import SellRankingPlugin
-        import asyncio as _asyncio
-        from unittest.mock import patch as _patch, MagicMock as _MM, AsyncMock
+        from unittest.mock import patch as _patch, MagicMock as _MM
 
         sell = SellRankingPlugin()
         # 最低限の execute 引数
@@ -752,7 +750,7 @@ class TestProducer:
              _patch("database.StockPriceWeekly", create=True), \
              _patch("database.latest_year_subq", return_value=_MM()):
             try:
-                _asyncio.run(sell.execute(params, db))
+                sell.execute(params, db)
             except Exception:
                 pass  # DB モックが不完全でも read_called が確認できればよい
 
@@ -813,7 +811,7 @@ class TestAr1Alpha:
         db = MagicMock()
         with patch("plugins.macro_dlm.load_prices", return_value=(prices_by_co, companies)), \
              patch("plugins.macro_dlm.load_macro_levels", return_value=macro_levels):
-            res = asyncio.run(plugin.execute(params, db))
+            res = plugin.execute(params, db)
 
         assert res["diagnostics"]["phi"] == pytest.approx(0.90)
 
@@ -830,7 +828,7 @@ class TestAr1Alpha:
         db = MagicMock()
         with patch("plugins.macro_dlm.load_prices", return_value=(prices_by_co, companies)), \
              patch("plugins.macro_dlm.load_macro_levels", return_value=macro_levels):
-            res = asyncio.run(plugin.execute(params, db))
+            res = plugin.execute(params, db)
 
         assert res["diagnostics"]["phi"] == pytest.approx(1.0)
 
@@ -918,7 +916,7 @@ class TestObjectiveOnlyMode:
         with patch("plugins.macro_dlm.load_prices", return_value=(prices_by_co, companies)), \
              patch("plugins.macro_dlm.load_macro_levels", return_value=macro_levels), \
              ctx:
-            return asyncio.run(plugin.execute(params, db))
+            return plugin.execute(params, db)
 
     def test_skips_beta_path_and_r_macro_construction(self):
         """database.tuning_objective_only() 内では β経路構築・R_macro計算を伴う
@@ -1161,7 +1159,7 @@ class TestExecuteWithPriceFeatures:
         db = MagicMock()
         with patch("plugins.macro_dlm.load_prices", return_value=(prices_by_co, companies)), \
              patch("plugins.macro_dlm.load_macro_levels", return_value=macro_levels):
-            return asyncio.run(plugin.execute(params, db))
+            return plugin.execute(params, db)
 
     def test_backward_compatible_when_no_price_features(self):
         """price_features 未選択（既定）なら price_beta_latest/price_beta は空のまま。"""

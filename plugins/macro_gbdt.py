@@ -350,7 +350,7 @@ class MacroGbdtPlugin(AnalysisPlugin):
             }
         return out
 
-    async def execute(self, params: dict, db: Any) -> dict:
+    def execute(self, params: dict, db: Any) -> dict:
         import xgboost as xgb
         import shap
 

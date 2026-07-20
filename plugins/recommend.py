@@ -168,7 +168,7 @@ class RecommendPlugin(AnalysisPlugin):
             },
         }
 
-    async def execute(self, params: dict, db: Any) -> dict:
+    def execute(self, params: dict, db: Any) -> dict:
         """重み付き指標スコアでランキング。
 
         スコア計算: weighted mean を用いる。

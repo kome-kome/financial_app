@@ -267,7 +267,7 @@ class SellRankingPlugin(AnalysisPlugin):
             },
         }
 
-    async def execute(self, params: dict, db: Any) -> dict:
+    def execute(self, params: dict, db: Any) -> dict:
         from database import FinancialMetric, StockPriceWeekly, latest_year_subq
 
         holdings, invalid = parse_holdings(params["holdings"])

@@ -26,7 +26,7 @@ from plugins.sell_ranking import (
 def _run(raw, db):
     """依存ゲートをバイパスして execute を直接実行（coerce 済み params を渡す）。"""
     typed = coerce_params(plugin.params_schema(), raw)
-    return asyncio.run(plugin.execute(typed, db))
+    return plugin.execute(typed, db)
 
 
 def _wk(week_start, close):
