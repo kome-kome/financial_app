@@ -7,8 +7,12 @@ from unittest.mock import MagicMock
 import pytest
 
 from plugins.utils import get_macro_features, get_momentum_return
-# 正本マップは macro_risk_return._MACRO_MAP（#218 で utils の重複定義を統合）。
-from plugins.macro_risk_return import _MACRO_MAP as _MACRO_FEATURE_MAP
+# 正本マップは macro_snapshots._MACRO_MAP（ADR-0003・#218 で utils の重複定義を統合）。
+# macro_risk_return は再エクスポート層のため、どちらから import しても同一オブジェクト。
+from plugins.macro_risk_return import (
+    _MACRO_MAP as _MACRO_FEATURE_MAP,
+    MACRO_FEATURE_OPTIONS,
+)
 
 
 # ── ヘルパー ──────────────────────────────────────────────────────────────────
@@ -56,8 +60,30 @@ def test_macro_feature_map_keys():
     assert "macro_jp_ip_yoy" not in _MACRO_FEATURE_MAP
     assert _MACRO_FEATURE_MAP["macro_jp_trade_bal_zscore"] == ("JP_TRADE_BAL", "zscore")
     assert _MACRO_FEATURE_MAP["macro_topix_yoy"]           == ("TOPIX",        "yoy")
+    # ADR-0013・#358 コモディティ・チャネル拡張: 8系列を yoy で公開（既存 WTI/GOLD と整合）
+    assert _MACRO_FEATURE_MAP["macro_bcom_yoy"]     == ("BCOM",     "yoy")
+    assert _MACRO_FEATURE_MAP["macro_copper_yoy"]   == ("COPPER",   "yoy")
+    assert _MACRO_FEATURE_MAP["macro_natgas_yoy"]   == ("NATGAS",   "yoy")
+    assert _MACRO_FEATURE_MAP["macro_silver_yoy"]   == ("SILVER",   "yoy")
+    assert _MACRO_FEATURE_MAP["macro_wheat_yoy"]    == ("WHEAT",    "yoy")
+    assert _MACRO_FEATURE_MAP["macro_corn_yoy"]     == ("CORN",     "yoy")
+    assert _MACRO_FEATURE_MAP["macro_soybean_yoy"]  == ("SOYBEAN",  "yoy")
+    assert _MACRO_FEATURE_MAP["macro_platinum_yoy"] == ("PLATINUM", "yoy")
     for fname, (scode, ttype) in _MACRO_FEATURE_MAP.items():
         assert ttype in ("yoy", "zscore"), f"{fname} の transform が不正"
+
+
+def test_macro_map_options_consistency():
+    """_MACRO_MAP（特徴量の正本）と MACRO_FEATURE_OPTIONS（UI 選択肢）の value 集合が
+    完全一致することを保証する。OPTIONS は手動二重管理のため、系列追加時に片方だけ更新
+    すると「選べるのに効かない／効くのに UI に出ない」不整合が起きる（GOTCHA）。この
+    テストがその追加漏れを恒久的に検知する（ADR-0013・#358 で新設）。"""
+    map_keys = set(_MACRO_FEATURE_MAP)
+    option_values = {o["value"] for o in MACRO_FEATURE_OPTIONS}
+    assert map_keys == option_values, (
+        f"_MACRO_MAP のみ: {map_keys - option_values} / "
+        f"OPTIONS のみ: {option_values - map_keys}"
+    )
 
 
 # ── get_macro_features ───────────────────────────────────────────────────────

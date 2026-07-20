@@ -65,6 +65,20 @@ class TestPluginMeta:
         # 日次の日本10年金利は ^JGB 廃止のため月次 FRED を維持
         assert _DLM_MACRO_MAP["dlm_jp10y"][0] == "JP10Y_FRED"
 
+    def test_commodity_dlm_factors_registered(self):
+        # ADR-0013・#358: コモディティ8系列を dlm へ logret で追加（日次先物＝週次高頻度
+        # 要件 ADR-0012 に適合）。DEFAULT_MACRO_FEATURES=全OPTIONS 連動で既定 ON になる。
+        option_values = {o["value"] for o in MACRO_FEATURE_OPTIONS}
+        for key, scode in [
+            ("dlm_bcom", "BCOM"), ("dlm_copper", "COPPER"), ("dlm_natgas", "NATGAS"),
+            ("dlm_silver", "SILVER"), ("dlm_wheat", "WHEAT"), ("dlm_corn", "CORN"),
+            ("dlm_soybean", "SOYBEAN"), ("dlm_platinum", "PLATINUM"),
+        ]:
+            assert _DLM_MACRO_MAP[key][0] == scode, f"{key} の series_code 不一致"
+            assert _DLM_MACRO_MAP[key][1] == "logret", f"{key} は logret であるべき"
+            assert key in option_values, f"{key} が MACRO_FEATURE_OPTIONS に無い"
+            assert key in DEFAULT_MACRO_FEATURES, f"{key} が既定に含まれない"
+
     def test_to_meta_has_required_keys(self):
         meta = plugin.to_meta()
         for k in ("name", "label", "heavy", "category", "ui_order", "params_schema"):

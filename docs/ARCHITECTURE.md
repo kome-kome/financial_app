@@ -293,7 +293,7 @@ erDiagram
 
     macro_data {
         int      id           PK "自動採番ID"
-        string   series_code     "系列コード（USDJPY/US10Y/NIKKEI225/JP_REAL_GDP 等）"
+        string   series_code     "系列コード（USDJPY/US10Y/NIKKEI225/JP_REAL_GDP/WTI/BCOM/COPPER 等）"
         string   series_name     "表示名"
         string   category        "fx / rate / equity / commodity / credit / inflation / real_economy / labor / production / trade"
         string   trade_date      "取引日（YYYY-MM-DD）。FRED 低頻度系列は公表ラグ分シフト済（#250）"
