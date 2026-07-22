@@ -454,6 +454,55 @@ class TestWalkForwardCvMonthly:
             assert test_idx >= 18
             assert r["n_train"] > 0
 
+    # ── purge/embargo（Issue #363・ADR-0014）──────────────────────────────
+    def _months(self, n, k=4, seed=3):
+        """n ヶ月 × k サンプル/月 の合成 samples_by_ym（2020-01 起点・各月固定 k 件）。"""
+        import random
+        rng = random.Random(seed)
+        samples = {}
+        for idx in range(n):
+            ym = f"{2020 + idx // 12}-{idx % 12 + 1:02d}"
+            samples[ym] = [([rng.uniform(0, 1)], rng.gauss(0, 0.1)) for _ in range(k)]
+        return samples
+
+    def test_embargo_default_zero_is_backward_compatible(self):
+        """embargo_months=0（明示）は省略時（既定0）と test_ym・n_train が完全一致。"""
+        samples = self._months(30)
+        r_omit = walk_forward_cv_monthly(samples, ["x"], min_train_months=6, step_months=3)
+        r_zero = walk_forward_cv_monthly(samples, ["x"], min_train_months=6, step_months=3,
+                                         embargo_months=0)
+        assert [f["test_ym"] for f in r_omit] == [f["test_ym"] for f in r_zero]
+        assert [f["n_train"] for f in r_omit] == [f["n_train"] for f in r_zero]
+
+    def test_embargo_shifts_first_fold_and_shrinks_train(self):
+        """案B: embargo>0 で最初のテスト月が min_train+embargo へ後ろ倒しされ、同一テスト月の
+        学習件数は embargo 分縮む。"""
+        samples = self._months(42, k=4)
+        all_yms = sorted(samples.keys())
+        r0 = walk_forward_cv_monthly(samples, ["x"], min_train_months=6, step_months=3,
+                                     embargo_months=0)
+        r12 = walk_forward_cv_monthly(samples, ["x"], min_train_months=6, step_months=3,
+                                      embargo_months=12)
+        assert r0[0]["test_ym"] == all_yms[6]       # 従来: min_train=6 から開始
+        assert r12[0]["test_ym"] == all_yms[18]     # 案B: 6 + 12 から開始
+        # 同一テスト月 all_yms[18]: embargo なし=18ヶ月分学習, embargo=12 なら 6ヶ月分のみ
+        n_train_r0_at18 = next(f["n_train"] for f in r0 if f["test_ym"] == all_yms[18])
+        assert n_train_r0_at18 == 18 * 4
+        assert r12[0]["n_train"] == 6 * 4
+        assert r12[0]["n_train"] < n_train_r0_at18
+
+    def test_embargo_purges_recent_months(self):
+        """embargo=12 の各フォールドで、学習に使う最新月とテスト月の差が 12ヶ月以上
+        （train_yms = all_yms[:test_idx-12] → 学習件数 = (test_idx-12)*k）。"""
+        samples = self._months(42, k=4)
+        all_yms = sorted(samples.keys())
+        folds = walk_forward_cv_monthly(samples, ["x"], min_train_months=6, step_months=3,
+                                        embargo_months=12)
+        assert folds  # 非空（サイレント空洞化していない）
+        for f in folds:
+            test_idx = all_yms.index(f["test_ym"])
+            assert f["n_train"] == (test_idx - 12) * 4
+
 
 # ── scipy.stats.t による正確な p 値 ────────────────────────────────────
 

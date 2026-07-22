@@ -29,6 +29,7 @@ from .utils import (
 from .macro_snapshots import (
     FINANCIAL_LAG_DAYS,
     HORIZON_WEEKS,
+    LABEL_HORIZON_MONTHS,
     FIN_BASE_OPTIONS,
     DEFAULT_FIN_FEATURES,
     _MACRO_MAP,
@@ -305,6 +306,7 @@ class MacroRiskReturnPlugin(AnalysisPlugin):
             lambda: walk_forward_cv_monthly(
                 dict(samples_sel), selected_names, min_train_months=6, step_months=3,
                 return_residuals=True,
+                embargo_months=LABEL_HORIZON_MONTHS,  # M-2 と対称に purge（#272 非対称防止・ADR-0014）
             ),
         )
         cv_metrics = {

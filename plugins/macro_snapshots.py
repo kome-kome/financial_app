@@ -28,6 +28,10 @@ from .utils import macro_risk_exposure, normalize, winsorize
 
 FINANCIAL_LAG_DAYS = 45
 HORIZON_WEEKS = 52
+# walk-forward CV の purge ギャップ（月数）: 52週先ラベルの窓重複を学習集合から除外する
+# （ADR-0014・Issue #363）。math.ceil(52*12/52) = 12。walk_forward_cv_monthly(embargo_months=)
+# へ M-1/M-2 双方が渡す（HORIZON_WEEKS の月換算の単一情報源）。
+LABEL_HORIZON_MONTHS = math.ceil(HORIZON_WEEKS * 12 / 52)  # = 12
 
 # 財務ベース特徴量の選択肢（全て financial_metrics VIEW の実列）。
 FIN_BASE_OPTIONS = [

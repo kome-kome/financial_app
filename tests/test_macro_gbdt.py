@@ -361,7 +361,7 @@ class TestExecuteSmoke:
         base.update(overrides)
         return coerce_params(plugin.params_schema(), base)
 
-    def _make_db(self, n_companies=4, n_weeks=160):
+    def _make_db(self, n_companies=4, n_weeks=210):
         """prices_by_co / fin_by_co / companies を持つ DB モックを返す。"""
         import datetime
         db = MagicMock()
@@ -442,6 +442,13 @@ class TestExecuteSmoke:
                   "quantile_returns", "rank_ic", "long_short_spread", "hit_rate"):
             assert k in oof, f"oof_backtest に '{k}' がない"
         assert set(oof["rank_ic"].keys()) == {"mean", "std", "n"}
+        # embargo=12（ADR-0014）適用後も OOF fold が生存していることを検証。キー存在のみだと
+        # fold 全滅（oof_backtest({})）でも緑になりサイレントに空洞化する（#363）。fold 生存の
+        # 直接指標は n_periods / n_oof_samples を使う（rank_ic.n は期内予測分散に依存し、
+        # この合成データは完全線形で期内予測が縮退＝Spearman 未定義になるため embargo 生存の
+        # 指標には使えない）。
+        assert oof["n_periods"] > 0, "embargo 適用で OOF fold が全滅している"
+        assert oof["n_oof_samples"] > 0
 
     def test_execute_all_companies_returned(self):
         """results は全社を返す（top_n でスライスしない）。"""
@@ -604,7 +611,7 @@ class TestObjectiveOnlyMode:
         base.update(overrides)
         return coerce_params(plugin.params_schema(), base)
 
-    def _make_db(self, n_companies=4, n_weeks=160):
+    def _make_db(self, n_companies=4, n_weeks=210):
         return TestExecuteSmoke()._make_db(n_companies=n_companies, n_weeks=n_weeks)
 
     def test_skips_shap_and_raw_items_construction(self):
