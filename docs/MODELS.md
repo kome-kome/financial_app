@@ -799,6 +799,8 @@ walk-forward CV の無リーク残差（`cv_residuals_by_ym`）に適用し、`o
 該当しない。**この無リーク残差は §9.4 の purge/embargo（`embargo_months=12`・#363・ADR-0014）を
 経た honest な OOF であり、M-2 と対称**（M-3 は週次で構造的に非該当）。
 
+> **purge の実測影響（#375・2026-07-23・本番データ・`scripts/measure_embargo_impact.py`）**: embargo=0→12 で **M-2 の OOF rank-IC は 0.348→0.141（−59%）**、M-1（財務のみ OLS）は 0.237→0.195（−18%）。embargo=0 が過去記録値（M-2≈0.33）を再現した上での低下＝**旧 M-2≈0.33 は大半が 52週先ラベルの前方リーク由来で honest 値は約0.14**。柔軟な XGBoost ほどリークを吸っていた。3兄弟比較や `mu_source` 選択は honest 値（embargo 済み）で判断する。
+
 ---
 
 ## 10. 売り候補ランキング（保有銘柄の売り時）

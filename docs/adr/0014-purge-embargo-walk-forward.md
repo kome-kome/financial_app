@@ -71,6 +71,22 @@ VISION の核心である 3兄弟（M-1/M-2/M-3）並置比較の公平性を損
   OOF テストへ `rank_ic["n"] > 0`・`n_periods > 0` を追加した（M-3 が既に持つ非空検証と対称化）。
 - M-3 のみ非適用の非対称は構造差として許容し、根拠を本 ADR と `macro_dlm.py` のコメントに固定した。
 
+### 実測（#375・`scripts/measure_embargo_impact.py`・2026-07-23・本番データ）
+
+embargo=0（従来）と =12（purge 済み）の OOF を同一データ・同一 harness で比較した:
+
+| モデル | rank-IC(0) | rank-IC(12) | Δ | long-short(0→12) |
+|---|---|---|---|---|
+| M-2（既定・全41マクロ） | 0.348 | 0.141 | **−0.206（−59%）** | 0.268 → 0.111 |
+| M-1（財務のみ OLS） | 0.237 | 0.195 | −0.042（−18%） | 0.199 → 0.159 |
+
+embargo=0 の M-2 rank-IC（0.348）が過去記録値（≈0.33）を再現＝offline 再現の忠実性を確認した上で、
+purge により **M-2 は約59%低下**。**称賛されていた M-2≈0.33 は大半が 52週先ラベルの前方リーク由来で、
+honest 値は約0.14**。柔軟な XGBoost ほどリークを吸っており、M-1（財務のみ OLS）の低下は 18% に留まる。
+#363 の purge は実データで極めて有意な是正だったことが裏付けられた。なお M-1 の本番既定（全マクロ・
+macro_nan_ok=False strict）は検証キャッシュの week_start プロキシでは全系列同時非NaNを満たせず 0 サンプルに
+なるため財務のみで測定（M-2 は本番と同一 config・値も記録値で検証済み）。
+
 参考: López de Prado, M. (2018). *Advances in Financial Machine Learning*, Ch.7（Purged K-Fold CV & Embargo）,
 Wiley. 関連 ADR: 0003（M-1/M-2 の同一母集団・同一fold・injectable fit_predict による公平性保証）,
 0004（OOF 定義・無リーク原則）, 0007（#272 の非対称の教訓・目的関数統一）, 0012（M-3 週次専用）。
