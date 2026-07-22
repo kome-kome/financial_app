@@ -633,6 +633,12 @@ class MacroDlmPlugin(AnalysisPlugin):
 
             # OOF 残差収集: φ·α_{t-1|t-1}（バーンイン後）vs y_t（1期先・無リーク）
             # AR(1) 時は φ·α_T が 1期先予測値なので yhat にも phi を適用
+            #
+            # purge/embargo 不要（Issue #363・ADR-0014）: M-3 は週次 DLM の 1週先ラベル
+            # (y_t = log(close_t/close_{t-1})) を α_{t-1} 由来の 1-step-ahead 予測と比較する
+            # 逐次フィルタで、ラベル窓が 1週のため train/test のラベル重複が構造的に生じない。
+            # M-1/M-2 の 52週先ラベル（walk_forward_cv_monthly + embargo_months=12）とは異なり
+            # 月次 purge ギャップは適用しない（比較ファミリーの"論証された非適用"であって放置ではない）。
             for t in range(b0 + 1, T):
                 yhat = phi * float(m_path[t - 1, 0]) * WEEKS_PER_YEAR
                 ym = used_dates[t][:7]

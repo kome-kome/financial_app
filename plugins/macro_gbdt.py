@@ -27,6 +27,7 @@ from .base import AnalysisPlugin
 from .utils import walk_forward_cv_monthly, winsorize
 from .macro_snapshots import (
     FIN_BASE_OPTIONS,
+    LABEL_HORIZON_MONTHS,
     MACRO_FEATURE_OPTIONS,
     _realized_vol,
     load_data,
@@ -416,6 +417,7 @@ class MacroGbdtPlugin(AnalysisPlugin):
             min_train_months=6, step_months=3,
             return_residuals=True,
             fit_predict=xgb_callback,
+            embargo_months=LABEL_HORIZON_MONTHS,  # 52週先ラベルの窓重複を purge（ADR-0014）
         )
 
         # ── アウトオブサンプル検証（OOF）: 無リーク walk-forward 予測のモデル評価（ADR-0004）─
@@ -454,6 +456,7 @@ class MacroGbdtPlugin(AnalysisPlugin):
             min_train_months=6, step_months=3,
             return_residuals=False,
             fit_predict=None,  # 既定 OLS
+            embargo_months=LABEL_HORIZON_MONTHS,  # XGB と同一 fold を保つ（比較の公平性）
         )
 
         def _cv_summary(folds):

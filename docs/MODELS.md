@@ -721,6 +721,8 @@ IFRS には完全に対応する科目がないため、「非流動その他金
 
 既存の `walk_forward_cv_monthly`（`plugins/utils.py`）で月次ロールウィンドウ CV を実施。時系列順を厳守（通常の k-fold はルックアヘッドバイアスが生じるため不可）。各フォールドの RMSE・MAE・R² を記録。**学習サンプルが要求する履歴長は特徴量構成で決まる**：52週先リターン（未来）は常に必要だが、**12ヶ月モメンタムは `use_momentum=ON` のときだけ過去履歴を要求する**。`use_momentum=OFF`（既定）なら `use_macro=ON` のままでも過去履歴要件が外れ、週次株価が浅くてもフォールドが確保できる（§9.8）。
 
+> **purge/embargo（#363・ADR-0014）**: 目的変数が 52週先リターンのため、テスト月のラベル窓 `[t, t+52週]` は直近約12ヶ月分の学習サンプルのラベル窓と時間重複しリークする（López de Prado 2018 Ch.7 の purge 未実装）。`walk_forward_cv_monthly(embargo_months=LABEL_HORIZON_MONTHS=12)` で直近12ヶ月を学習集合から除外し（学習開始を `min_train_months + embargo_months` へ後ろ倒し）、この重複を遮断する。**M-1 と M-2 に対称適用**（比較の公平性・#272 非対称防止）。M-3（§11・週次 1週先ラベル）はラベル窓が 1週で構造的に重複が生じないため月次 purge は非適用。embargo 導入後の OOF rank-IC は過去値（M-2≈0.33 / M-1≈0.23）と非連続の honest 値になる。
+
 ### 9.5 リスク指標
 
 | 指標 | 定義 | 役割 | 解像度 |
@@ -794,7 +796,8 @@ walk-forward CV の無リーク残差（`cv_residuals_by_ym`）に適用し、`o
 ＝3モデルを横並びで比較可能）。**既存「バックテスト」（§7）とは別概念**で「予測 μ̂ が将来
 リターンを順序付けるか」を測る。M-1 は producer スコアテーブルを持たない（`macro_beta` は
 別バッチ `macro_beta_inference.py` が担う）ため、M-2 の §11.7 後半にある producer 永続化は
-該当しない。
+該当しない。**この無リーク残差は §9.4 の purge/embargo（`embargo_months=12`・#363・ADR-0014）を
+経た honest な OOF であり、M-2 と対称**（M-3 は週次で構造的に非該当）。
 
 ---
 

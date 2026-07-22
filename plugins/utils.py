@@ -736,6 +736,7 @@ def walk_forward_cv_monthly(
     step_months: int = 3,
     return_residuals: bool = False,
     fit_predict=None,
+    embargo_months: int = 0,
 ) -> list[dict] | tuple[list[dict], dict]:
     """月次ウォークフォワードCV（FUTURE_TASKS.md 仕様）。
     samples_by_ym: {"YYYY-MM": [(feature_row: list[float], target: float), ...]}
@@ -751,18 +752,24 @@ def walk_forward_cv_monthly(
     fit_predict: None=OLS（既定）。callable の場合 fit_predict(train_samples, test_samples)
       → (yhat_orig, y_test_orig) を呼ぶ（XGBoost 等の injectable コールバック用・ADR-0003 §3）。
       None を返したフォールドはスキップ。callable を渡しても M-1 の挙動は変わらない。
+    embargo_months: purge ギャップ（月数・既定0=後方互換）。目的変数が H 週先リターンの
+      とき、テスト月のラベル窓 [t, t+H] と時間重複する直近 embargo_months ヶ月分を学習
+      集合から除外し、López de Prado (2018, Ch.7) の purged walk-forward を実現する
+      （ADR-0014）。0 のとき従来の train_yms = all_yms[:i] と完全一致。M-1/M-2 は 52 週先
+      ラベルのため LABEL_HORIZON_MONTHS(=12) を渡す。学習開始は min_train_months + embargo_months
+      月目に後ろ倒しされ（案B）、embargo 後も min_train_months 分の学習期間が保証される。
     """
     all_yms = sorted(samples_by_ym.keys())
-    if len(all_yms) < min_train_months + 1:
+    if len(all_yms) < min_train_months + embargo_months + 1:
         return ([], {}) if return_residuals else []
 
     n_feat = len(feature_names)
 
     fold_results = []
     residuals_by_ym: dict[str, list[tuple[float, float]]] = {}
-    for i in range(min_train_months, len(all_yms), step_months):
+    for i in range(min_train_months + embargo_months, len(all_yms), step_months):
         test_ym = all_yms[i]
-        train_yms = all_yms[:i]
+        train_yms = all_yms[:max(0, i - embargo_months)]
 
         train_samples: list[tuple] = []
         for ym in train_yms:

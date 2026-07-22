@@ -400,9 +400,12 @@ class TestR3Buckets:
 
 class TestExecuteIntegration:
 
-    def _build_mock_db(self, ref: date = date(2025, 6, 1), n_weeks: int = 120):
-        """合成データ（3社・既定120週・6決算）で execute が通ることを確認。
-        n_weeks はモメンタム（過去履歴要件）テスト用に延伸できる。"""
+    def _build_mock_db(self, ref: date = date(2025, 6, 1), n_weeks: int = 210):
+        """合成データ（3社・既定210週・6決算）で execute が通ることを確認。
+        既定210週（≈48ヶ月・52週先ラベル差引後≈36ヶ月）は M-1 の walk-forward CV に
+        embargo_months=12（ADR-0014）が入っても複数フォールドが残る量（#363）。120週だと
+        有効月≈15 で embargo 適用時に fold が全滅するため延伸した。
+        n_weeks はモメンタム（過去履歴要件）テスト用に更に延伸できる。"""
         codes = ["E01234", "E02345", "E03456"]
         bases  = [1000.0,   2000.0,   500.0]
 
@@ -491,6 +494,11 @@ class TestExecuteIntegration:
                   "quantile_returns", "rank_ic", "long_short_spread", "hit_rate"):
             assert k in oof, f"oof_backtest に '{k}' がない"
         assert set(oof["rank_ic"].keys()) == {"mean", "std", "n"}
+        # embargo=12（ADR-0014）適用後も OOF fold が生存していることを検証。キー存在のみだと
+        # fold 全滅（120週の旧データでは実際に 0 fold）でも緑になりサイレント空洞化する（#363）。
+        # fold 生存の直接指標は n_periods / n_oof_samples を使う（M-2 と対称・データ非依存）。
+        assert oof["n_periods"] > 0, "embargo 適用で OOF fold が全滅している"
+        assert oof["n_oof_samples"] > 0
 
     def test_execute_returns_raw_risk_return_fields(self):
         """サーバーは全社の raw 値（mu_raw/r1/r2/r3）を返す。
