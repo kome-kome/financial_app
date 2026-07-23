@@ -504,8 +504,13 @@ function renderSellRanking(d) {
   if (d.gap_available === false)
     notes.push(`<span style="color:var(--text-muted)">※ 割高度は業種別OLS未実行のため売り判定から除外されています</span>`);
   if (d.mu_available === false) {
-    const _lbl = d.mu_source === 'macro_gbdt' ? 'M-2（勾配ブースティング）' : 'M-1（マクロリスク-リターン）';
-    const _act = d.mu_source === 'macro_gbdt' ? 'M-2 を分析タブでローカル実行してください' : 'M-1 を実行してください';
+    const _MU_LABELS = {
+      macro_risk_return: ['M-1（マクロリスク-リターン）', 'M-1 を実行してください'],
+      macro_gbdt:        ['M-2（勾配ブースティング）', 'M-2 を分析タブでローカル実行してください'],
+      macro_dlm:         ['M-3（時変マクロβ DLM）', 'M-3 を分析タブでローカル実行してください'],
+      macro_ensemble:    ['M-4（兄弟μ̂スタッキング）', 'M-4 を分析タブでローカル実行してください'],
+    };
+    const [_lbl, _act] = _MU_LABELS[d.mu_source] || _MU_LABELS.macro_risk_return;
     notes.push(`<span style="color:var(--text-muted)">※ ${_lbl} 未実行のため μ・マクロリスク成分は除外されています（${_act}）</span>`);
   }
   document.getElementById('sell-notes').innerHTML = notes.join('<br>');

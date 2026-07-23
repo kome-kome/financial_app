@@ -23,6 +23,7 @@ COMPARISON_MODELS = [
     ("macro_risk_return", "M-1"),
     ("macro_gbdt",        "M-2"),
     ("macro_dlm",         "M-3"),
+    ("macro_ensemble",    "M-4"),   # 兄弟μ̂スタッキング（#367・ADR-0015）
 ]
 
 

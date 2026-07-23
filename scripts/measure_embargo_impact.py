@@ -40,11 +40,15 @@ from plugins.utils import coerce_params
 import plugins.macro_snapshots as ms
 import plugins.macro_gbdt as m2mod
 import plugins.macro_risk_return as m1mod
+import plugins.macro_ensemble as m4mod
 from scripts._cache import cached, set_refresh
 
 # M-1 の strict 全マクロは offline キャッシュでは 0 サンプルになるため財務のみで測る（docstring 参照）。
-PARAM_OVERRIDES = {"M-1": {"use_macro": False}, "M-2": {}}
-LABELS = {"M-1": "M-1 (use_macro=False, financial-only OLS)", "M-2": "M-2 (default, full macro)"}
+# M-4 は内部で M-1/M-2 を回すため、SUB_PARAM_OVERRIDES で M-1 側だけ同じ制約を適用する（#367）。
+PARAM_OVERRIDES = {"M-1": {"use_macro": False}, "M-2": {}, "M-4": {}}
+LABELS = {"M-1": "M-1 (use_macro=False, financial-only OLS)",
+          "M-2": "M-2 (default, full macro)",
+          "M-4": "M-4 (stack of M-1[fin-only] + M-2[full macro])"}
 EMBARGOS = (0, 12)
 METRICS = ("ic_mean", "ic_std", "ic_n", "ls", "hit", "n_periods", "n_oof")
 
@@ -104,21 +108,26 @@ def _install_offline_loaders(prices_by_co: dict, db) -> None:
             macro_holder[key] = real_preload(db, pbc, list(macro_names) if macro_names else None)
         return macro_holder[key]
 
-    for mod in (m1mod, m2mod):
+    for mod in (m1mod, m2mod, m4mod):
         mod.load_data = fake_load_data
         mod.preload_macro = fake_preload
         if hasattr(mod, "get_producer_scores"):
             mod.get_producer_scores = lambda *a, **k: {}
+    # M-4 内部の M-1 は offline 制約（week_start プロキシで strict 全マクロ 0 サンプル）に合わせる
+    m4mod.SUB_PARAM_OVERRIDES.clear()
+    m4mod.SUB_PARAM_OVERRIDES.update({"macro_risk_return": {"use_macro": False}})
 
 
 def _run(db) -> dict:
     results: dict = {}
-    for short, name in (("M-1", "macro_risk_return"), ("M-2", "macro_gbdt")):
+    for short, name in (("M-1", "macro_risk_return"), ("M-2", "macro_gbdt"),
+                        ("M-4", "macro_ensemble")):
         p = get_plugin(name)
         params = coerce_params(p.params_schema(), PARAM_OVERRIDES[short])
         for emb in EMBARGOS:
             m1mod.LABEL_HORIZON_MONTHS = emb
             m2mod.LABEL_HORIZON_MONTHS = emb
+            m4mod.LABEL_HORIZON_MONTHS = emb
             try:
                 with tuning_objective_only(), tuning_dry_run():
                     res = p.execute(params, db)
@@ -129,9 +138,17 @@ def _run(db) -> dict:
                     "ls": oof.get("long_short_spread"), "hit": oof.get("hit_rate"),
                     "n_periods": oof.get("n_periods"), "n_oof": oof.get("n_oof_samples"),
                 }
+                base_oof = res.get("base_oof_backtest") or {}
             except Exception as e:  # noqa: BLE001
                 results[(short, emb)] = {"error": f"{type(e).__name__}: {e}"}
+                base_oof = {}
             print(f"[{short} embargo={emb:>2}] {results[(short, emb)]}", flush=True)
+            # M-4 は共通 (ym,ec) 域に制限した基底の OOF も出す（apples-to-apples 判定・ADR-0015）
+            for bname, bbt in base_oof.items():
+                bric = bbt.get("rank_ic", {})
+                print(f"    base-on-common {bname}: ic_mean={bric.get('mean')} "
+                      f"ls={bbt.get('long_short_spread')} n_oof={bbt.get('n_oof_samples')}",
+                      flush=True)
     return results
 
 
@@ -144,7 +161,7 @@ def _report(results: dict) -> None:
     hdr = f"{'model':5} {'metric':10} {'embargo=0':>12} {'embargo=12':>12} {'delta':>12}"
     print(hdr)
     print("-" * len(hdr))
-    for short in ("M-1", "M-2"):
+    for short in ("M-1", "M-2", "M-4"):
         print(f"# {LABELS[short]}")
         r0, r12 = results[(short, 0)], results[(short, 12)]
         if "error" in r0 or "error" in r12:

@@ -141,6 +141,7 @@ td code{background:var(--bg-sunken);border:1px solid var(--border-subtle);paddin
     <a href="#m9">マクロ×リスク-リターン推奨</a>
     <a href="#m11">M-2: マクロ×財務 勾配ブースティング</a>
     <a href="#m12">M-3: ベイズ状態空間（時変マクロβ）</a>
+    <a href="#m13">M-4: 兄弟μ̂スタッキング</a>
     <div class="toc-section-title">④ 戦略を検証（メタ検証）</div>
     <a href="#m7">バックテスト</a>
     <div class="toc-section-title">⑤ 保有を見直す（双対分析）</div>
@@ -673,6 +674,36 @@ conv_score₁₂ₘ = max(<span class="val">5</span>, min(<span class="val">95</
       <strong>Ross, S. A. (1976)</strong>. "The Arbitrage Theory of Capital Asset Pricing."
       <em>Journal of Economic Theory</em>, 13(3), 341–360.<br>
       <a href="https://doi.org/10.1016/0022-0531(76)90046-6" target="_blank" rel="noopener">https://doi.org/10.1016/0022-0531(76)90046-6</a>
+    </div>
+  </div>
+</div>
+
+<div class="model-section" id="m13">
+  <h2>M-4: 兄弟μ̂スタッキング・アンサンブル <span class="model-tag">将来リターンを予測</span></h2>
+  <span class="file-tag">plugins/macro_ensemble.py — POST /api/plugins/macro_ensemble/run</span>
+
+  <p>M-1（線形 OLS+BIC）と M-2（非線形 XGBoost）の<strong>アウト・オブ・サンプル（OOF）予測 μ̂ を統合するメタモデル</strong>（スタッキング）。線形の頑健さ × 非線形の表現力の予測誤差が低相関なら、制約付き（非負・和1）の加重合成で相殺でき単体を超えうる。<strong>初版は M-1+M-2 のみ</strong>（M-3 は週次専用で目的頻度・母集団が異なるため除外・ADR-0012/0015）。</p>
+
+  <h3>二段ウォークフォワード（リーク回避の核）</h3>
+  <p>①M-1/M-2 それぞれの構成で snapshot を構築し、purge/embargo（<code>embargo_months=12</code>・ADR-0014）付き walk-forward で per-(月, 銘柄) の OOF 予測を自前再現。②両モデル共通の (月, 銘柄) の<strong>積集合</strong>をアンサンブル母集団とする（「両モデルが予測できる銘柄」）。③<strong>月 t に適用する統合重みは t より前の月の共通 OOF だけで学習</strong>（expanding・学習前は等重み 0.5/0.5）。基底 μ̂ 自体が embargo 済み OOF のため二段目もリークしない。④統合残差を共有 <code>oof_backtest</code> に通し、M-1/M-2/M-3 と同一指標（rank-IC・ロングショート spread・hit-rate）でモデル比較ビューに並ぶ。</p>
+
+  <h3>重み最適化</h3>
+  <p>既定は <strong>NNLS（非負最小二乗）</strong>＋和1正規化（<code>scipy.optimize.nnls</code>・和0時は等重みへフォールバック）。代替として期内平均 Spearman を最大化するグリッド探索（<code>rank_ic_grid</code>）・等重み（<code>equal</code>）を選択可。rank-IC は期内の順位のみで決まる（シフト/スケール不変）ため切片は持たず、比 w₁:w₂ だけが効く。</p>
+
+  <h3>現在μ̂と売り候補ランキング連携</h3>
+  <p>全共通 OOF で学習した最終重みを、M-1（最終 OLS）・M-2（全データ最終 XGBoost）の現在μ̂へ適用し統合μ̂を算出（最終重みは現在μ̂専用・OOF 評価には使い回さない）。<code>macro_ensemble_scores</code> へ producer 永続化し、売り候補ランキングの「μ の出所」で <strong>M-4</strong> を選択できる（未実行時は graceful-degrade）。</p>
+
+  <div class="refs">
+    <h4>参考文献</h4>
+    <div class="ref-item">
+      <strong>Wolpert, D. H. (1992)</strong>. "Stacked Generalization."
+      <em>Neural Networks</em>, 5(2), 241–259.<br>
+      <a href="https://doi.org/10.1016/S0893-6080(05)80023-1" target="_blank" rel="noopener">https://doi.org/10.1016/S0893-6080(05)80023-1</a>
+    </div>
+    <div class="ref-item">
+      <strong>Breiman, L. (1996)</strong>. "Stacked Regressions."
+      <em>Machine Learning</em>, 24, 49–64.<br>
+      <a href="https://doi.org/10.1007/BF00117832" target="_blank" rel="noopener">https://doi.org/10.1007/BF00117832</a>
     </div>
   </div>
 </div>

@@ -388,6 +388,7 @@ tr:hover td{background:var(--border-subtle)}
         <option value="macro_risk_return">M-1: マクロ×リスク-リターン（OLS）</option>
         <option value="macro_gbdt" selected>M-2: マクロ×財務 勾配ブースティング（XGBoost）</option>
         <option value="macro_dlm">M-3: ベイズ状態空間（時変マクロβ DLM）</option>
+        <option value="macro_ensemble">M-4: 兄弟μ̂スタッキング（M-1+M-2 統合）</option>
       </select>
       <div style="font-size:11px;color:var(--text-muted);margin-top:4px">
         μ 観点に使う推奨モデル。選択モデルが未実行ならその成分を自動除外します（M-2/M-3 は分析タブで要ローカル実行）。−Rᴹ は共有マクロβ由来でモデル非依存。
