@@ -108,6 +108,84 @@ class TestAlign:
         assert out == {}
 
 
+# ── 純関数: _drop_dead_macro_features（M-1 strict 全滅防止・#378 対応時に追加）──
+
+class TestDropDeadMacroFeatures:
+    def _prices(self, end="2025-06-27"):
+        import datetime
+        PX = type("PX", (), {})
+        rows = []
+        d0 = datetime.date.fromisoformat(end)
+        for w in range(220, -1, -1):        # プローブ5点(0〜1100日前)を価格履歴が覆う
+            p = PX()
+            p.trade_date = (d0 - datetime.timedelta(weeks=w)).isoformat()
+            p.close_last = 100.0
+            rows.append(p)
+        return {"E00001": rows}
+
+    def _series(self, end="2025-06-27", years=6):
+        import datetime
+        d0 = datetime.date.fromisoformat(end)
+        return {(d0 - datetime.timedelta(days=30 * i)).isoformat(): 100.0 + i
+                for i in range(12 * years)}
+
+    def test_dead_feature_dropped_alive_kept(self):
+        from plugins.macro_ensemble import _drop_dead_macro_features
+        mc = {"USDJPY": self._series(), "GOLD": {}}   # GOLD はデータ皆無 → 全プローブ None
+        names = ["macro_usdjpy_yoy", "macro_gold_yoy"]
+        kept, dropped = _drop_dead_macro_features(mc, names, self._prices())
+        assert kept == ["macro_usdjpy_yoy"]
+        assert dropped == ["macro_gold_yoy"]
+
+    def test_all_alive_no_drop(self):
+        from plugins.macro_ensemble import _drop_dead_macro_features
+        mc = {"USDJPY": self._series(), "GOLD": self._series()}
+        names = ["macro_usdjpy_yoy", "macro_gold_yoy"]
+        kept, dropped = _drop_dead_macro_features(mc, names, self._prices())
+        assert kept == names and dropped == []
+
+    def test_empty_macro_names_passthrough(self):
+        from plugins.macro_ensemble import _drop_dead_macro_features
+        assert _drop_dead_macro_features({}, [], self._prices()) == ([], [])
+
+    def test_recent_only_feature_dropped(self):
+        """直近だけ生きる部分カバレッジ特徴は labeled 領域プローブで dropped になる。
+
+        本番実測の macro_jp_real_gdp_yoy 型: 価格末尾近傍のみ非None だと素朴な末尾プローブでは
+        「生存」誤判定になり、labeled 領域（末尾-52週以前）の strict 行が全滅して OOF が空になる。"""
+        import datetime
+        from plugins.macro_ensemble import _drop_dead_macro_features
+        d0 = datetime.date.fromisoformat("2025-06-27")
+        recent_only = {(d0 - datetime.timedelta(days=i)).isoformat(): 100.0 + i
+                       for i in range(0, 200, 10)}          # 直近200日ぶんのみ
+        mc = {"USDJPY": self._series(), "GOLD": recent_only}
+        kept, dropped = _drop_dead_macro_features(
+            mc, ["macro_usdjpy_yoy", "macro_gold_yoy"], self._prices())
+        assert kept == ["macro_usdjpy_yoy"]
+        assert dropped == ["macro_gold_yoy"]
+
+    def test_thin_slice_below_coverage_dropped(self):
+        """labeled 領域の1プローブ点でだけ生きる薄い特徴はカバレッジ閾値(3/5)で dropped。
+
+        本番 real_gdp 型: label_end 近傍のみ非None だと「1点生存で keep」では strict が
+        labeled 領域の大半を殺し fold 形成不能になる（E2E 実測で検出）。"""
+        import datetime
+        from plugins.macro_ensemble import _drop_dead_macro_features
+        end = datetime.date.fromisoformat("2025-06-27")
+        label_end = end - datetime.timedelta(weeks=52)
+        # label_end 近傍の約60日ぶんのみデータ（YoY 用に1年前の点も同幅で用意）
+        thin = {}
+        for i in range(0, 60, 5):
+            d = label_end - datetime.timedelta(days=i)
+            thin[d.isoformat()] = 100.0 + i
+            thin[(d - datetime.timedelta(days=365)).isoformat()] = 90.0 + i
+        mc = {"USDJPY": self._series(), "GOLD": thin}
+        kept, dropped = _drop_dead_macro_features(
+            mc, ["macro_usdjpy_yoy", "macro_gold_yoy"], self._prices())
+        assert kept == ["macro_usdjpy_yoy"]
+        assert dropped == ["macro_gold_yoy"]
+
+
 # ── 純関数: _fit_weights ────────────────────────────────────────────────────
 
 class TestWeightOptimization:
@@ -210,7 +288,7 @@ class TestPluginMeta:
     def test_identity(self):
         assert plugin.name == "macro_ensemble"
         assert plugin.heavy is True
-        assert plugin.ui_order == 350
+        assert plugin.ui_order == 370   # M-3=360 の後（M-1→M-2→M-3→M-4 順・#378）
         assert plugin.category == "③ 将来リターンを予測"
         assert plugin.depends_on == []
 
