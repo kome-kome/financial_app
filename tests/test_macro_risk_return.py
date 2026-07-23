@@ -159,6 +159,71 @@ class TestMacroFromCache:
         # 30日窓（5/16〜6/15）に観測なし → 5/1 を forward-fill → None にならないこと
         assert result["macro_jp10y_fred_zscore"] is not None
 
+    # ── 低頻度系列（Issue #379）: 変換が構造的に None になり strict の M-1 が全滅した回帰 ──
+
+    def _quarterly(self, code: str, ref: date, years: int = 10) -> dict:
+        """四半期系列（92日間隔・本番 JP_REAL_GDP 相当）。"""
+        cache: dict[str, dict[str, float]] = {code: {}}
+        d = ref - timedelta(days=92 * 4 * years)
+        i = 0
+        while d <= ref:
+            cache[code][d.isoformat()] = 100.0 + i
+            d += timedelta(days=92)
+            i += 1
+        return cache
+
+    def _semiannual(self, code: str, ref: date, years: int = 30) -> dict:
+        """年2回系列（183日間隔・本番 IMF WEO 相当）。"""
+        cache: dict[str, dict[str, float]] = {code: {}}
+        d = ref - timedelta(days=183 * 2 * years)
+        i = 0
+        while d <= ref:
+            cache[code][d.isoformat()] = 1.0 + (i % 7) * 0.3
+            d += timedelta(days=183)
+            i += 1
+        return cache
+
+    def test_quarterly_yoy_not_none(self):
+        """四半期系列の yoy: 前年同期±30日窓に点が無くても ffill で値が出る（#379）。"""
+        ref = date(2025, 6, 28)
+        cache = self._quarterly("JP_REAL_GDP", ref)
+        val = _macro_from_cache(cache, ref.isoformat(), ["macro_jp_real_gdp_yoy"])["macro_jp_real_gdp_yoy"]
+        assert val is not None, "四半期 yoy が None（#379 の回帰）"
+
+    def test_semiannual_zscore_not_none(self):
+        """年2回系列の zscore: 5年窓に20点入らなくても直近20点で算出する（#379）。"""
+        ref = date(2025, 6, 28)
+        cache = self._semiannual("JP_WEO_GDP_FCAST", ref)
+        val = _macro_from_cache(cache, ref.isoformat(),
+                                ["macro_jp_weo_gdp_fcast_zscore"])["macro_jp_weo_gdp_fcast_zscore"]
+        assert val is not None, "年2回 zscore が None（#379 の回帰）"
+
+    def test_sparse_history_below_minimum_still_none(self):
+        """全履歴でも点数が足りない系列は従来どおり None（無条件に値を捏造しない）。"""
+        ref = date(2025, 6, 28)
+        cache = {"JP_WEO_GDP_FCAST": {
+            (ref - timedelta(days=183 * i)).isoformat(): 1.0 + i for i in range(1, 4)}}  # 3点のみ
+        val = _macro_from_cache(cache, ref.isoformat(),
+                                ["macro_jp_weo_gdp_fcast_zscore"])["macro_jp_weo_gdp_fcast_zscore"]
+        assert val is None
+
+    def test_high_frequency_values_unchanged(self):
+        """高頻度系列（日次）の値はフォールバック導入前と不変（回帰防止）。"""
+        ref = date(2025, 6, 1)
+        cache = self._build_cache(ref)
+        val = _macro_from_cache(cache, ref.isoformat(), ["macro_usdjpy_yoy"])["macro_usdjpy_yoy"]
+        assert abs(val - (150 - 130) / 130) < 0.01   # 既存 test_yoy_calculation と同値
+
+    def test_no_leak_future_points_excluded(self):
+        """ffill/点数フォールバックとも ref_date より未来の点を一切使わない（リーク防止）。"""
+        ref = date(2025, 6, 28)
+        cache = self._quarterly("JP_REAL_GDP", ref)
+        base = _macro_from_cache(cache, ref.isoformat(), ["macro_jp_real_gdp_yoy"])["macro_jp_real_gdp_yoy"]
+        for k in range(1, 9):    # 未来に極端な値を追加しても結果は変わらない
+            cache["JP_REAL_GDP"][(ref + timedelta(days=92 * k)).isoformat()] = 1e6
+        after = _macro_from_cache(cache, ref.isoformat(), ["macro_jp_real_gdp_yoy"])["macro_jp_real_gdp_yoy"]
+        assert after == base
+
 
 # ── params_schema + coerce_params ────────────────────────────────────────────
 
