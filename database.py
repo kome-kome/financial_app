@@ -667,6 +667,52 @@ def get_macro_dlm_scores(db) -> dict:
         return {}
 
 
+# ── 5e. M-4 兄弟μ̂スタッキング・アンサンブル μ̂（Issue #367）──────────────────
+# M-4（macro_ensemble）プラグインが execute() 末尾で書き込み、sell_ranking（consumer）が読む。
+# macro_gbdt_scores と同型。最新スナップショットのみ保持（replace 方式）。
+
+class MacroEnsembleScore(Base):
+    """M-4 の per-stock 統合期待リターン μ̂（M-1+M-2 のスタッキング・最新実行スナップショット）。
+
+    sell_ranking が mu_source="macro_ensemble" 選択時に read_producer_scores 経由で読む。
+    R_macro は共有 macro_beta から別途マージするため本テーブルには持たない。"""
+    __tablename__ = "macro_ensemble_scores"
+
+    edinet_code   = Column(String(10), primary_key=True)
+    mu            = Column(Float, nullable=False)   # スタッキング統合 52週先対数リターン（無次元）
+    snapshot_date = Column(String(10))              # "YYYY-MM-DD"（実行時スナップ基準日）
+    created_at    = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+
+def replace_macro_ensemble_scores(db, rows: list, snapshot_date: str | None = None) -> int:
+    """M-4 producer μ̂ を全置換する（最新スナップショットのみ保持）。
+
+    rows = [{"edinet_code": str, "mu": float}, ...]。1 txn で全削除→一括 insert。
+    mu が None の行はスキップ。戻り値は保存件数。`tuning_dry_run()` 内では no-op（0 を返す）。
+    """
+    if _tuning_dry_run.get():
+        return 0
+    db.query(MacroEnsembleScore).delete()
+    objs = [
+        MacroEnsembleScore(edinet_code=r["edinet_code"], mu=float(r["mu"]),
+                           snapshot_date=snapshot_date)
+        for r in rows
+        if r.get("edinet_code") and r.get("mu") is not None
+    ]
+    if objs:
+        db.add_all(objs)
+    db.commit()
+    return len(objs)
+
+
+def get_macro_ensemble_scores(db) -> dict:
+    """M-4 producer μ̂ を {edinet_code: mu} で返す（未蓄積なら {}・graceful degrade）。"""
+    try:
+        return {r.edinet_code: r.mu for r in db.query(MacroEnsembleScore).all()}
+    except Exception:
+        return {}
+
+
 # ── 5e. ハイパーパラメータ自動探索の結果永続化（Issue #264）─────────────────────
 # hyperparameter_search.py（ローカル専用CLI）が walk-forward OOF rank-IC 等を目的関数として
 # 探索した best params を保存する。plugin_name 単位で最新1件のみ保持（履歴不要）。
