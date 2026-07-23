@@ -1271,7 +1271,35 @@ const RESULT_RENDERERS = {
   'macro_risk_return': renderMacroRiskReturn,
   'macro_gbdt':        renderMacroGbdt,
   'macro_dlm':         renderMacroDlm,
+  'macro_ensemble':    renderMacroEnsemble,
 };
+
+// M-4 専用レンダラ: 統合重み + 同一共通域での M-4 vs 基底の判定サマリ + 上位N件の結果表。
+// 汎用 _renderGenericResult だと全社(数千行)のDOMを吐き判定サマリも出ないため専用化(#378)。
+function renderMacroEnsemble(d) {
+  const oof = d.oof_backtest || {};
+  const base = d.base_oof_backtest || {};
+  const num = (v, digits=4) => (v == null ? '-' : Number(v).toFixed(digits));
+  const ric = o => num(o && o.rank_ic ? o.rank_ic.mean : null);
+  const ls  = o => num(o ? o.long_short_spread : null);
+  const w = d.weights || {};
+  let html = `<div class="info-box" style="margin-bottom:14px">
+    統合重み: M-1=${num(w.macro_risk_return, 3)} / M-2=${num(w.macro_gbdt, 3)}（${esc(d.weight_method || '')}）
+    ・共通OOFペア ${d.n_common_pairs ?? '-'} 件</div>`;
+  html += `<div style="overflow-x:auto;margin-bottom:14px"><table>
+    <thead><tr><th>同一共通域での比較（無リークOOF）</th><th>rank-IC</th><th>long-short</th><th>期間数</th></tr></thead><tbody>
+    <tr><td><strong>M-4（統合μ̂）</strong></td><td><strong>${ric(oof)}</strong></td><td>${ls(oof)}</td><td>${oof.n_periods ?? '-'}</td></tr>
+    <tr><td>M-1 を共通域に制限</td><td>${ric(base.macro_risk_return)}</td><td>${ls(base.macro_risk_return)}</td><td>${(base.macro_risk_return || {}).n_periods ?? '-'}</td></tr>
+    <tr><td>M-2 を共通域に制限</td><td>${ric(base.macro_gbdt)}</td><td>${ls(base.macro_gbdt)}</td><td>${(base.macro_gbdt || {}).n_periods ?? '-'}</td></tr>
+    </tbody></table></div>`;
+  if ((d.dropped_macro_features_m1 || []).length)
+    html += `<div class="info-box" style="border-color:var(--status-warn);margin-bottom:14px">
+      ⚠ M-1 レグから全期間欠損のマクロ特徴を自動除外: ${esc(d.dropped_macro_features_m1.join('、'))}</div>`;
+  const topN = d.top_n || 30;
+  html += `<div class="text-sm" style="color:var(--text-muted);margin-bottom:6px">統合μ̂ 上位 ${topN} 件（全 ${d.n_companies ?? '-'} 社）</div>`;
+  html += _renderGenericResult({ ...d, results: (d.results || []).slice(0, topN) });
+  return html;
+}
 
 // 業種別OLS 専用レンダラ: 自動ドロップ警告 + 業種別R²サマリ + ランキング表（汎用部を再利用）
 function renderSectorOls(data) {

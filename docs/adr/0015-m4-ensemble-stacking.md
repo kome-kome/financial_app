@@ -22,7 +22,7 @@ accepted（2026-07-23）。Issue #367 の設計決定。
 
 ## Decision
 
-1. **新プラグイン `plugins/macro_ensemble.py`（M-4・`heavy=True`・`ui_order=350`）**。
+1. **新プラグイン `plugins/macro_ensemble.py`（M-4・`heavy=True`・`ui_order=370`）**。
    統合対象は**初版 M-1+M-2 のみ**（モジュール定数 `BASE_MODELS`・UI 非露出）。
 2. **M-4 は基底モデルの OOF を自前で再現する**: 各モデルの config（`params_schema` 既定を
    `coerce_params` で補完＝`model_comparison` と同一）で `build_snapshots(return_stock_ids=True)`
@@ -75,6 +75,10 @@ accepted（2026-07-23）。Issue #367 の設計決定。
   モデル選択の確定知見・結果は本 ADR 末尾に実測で追記する）。
 - テスト: 二段の無リーク性（月 t の y_true 破壊で t 以前の重み不変）・intersection・
   NNLS 復元・fold 生存（`n_periods>0`）を `tests/test_macro_ensemble.py` が固定。
+- 本番で3マクロ特徴が全期間 None（#379: `macro_jp_real_gdp_yoy`/IMF WEO 2系列・変換窓不足）
+  だと strict の M-1 レグが全滅するため、`_drop_dead_macro_features` が全プローブ日 None の
+  特徴を自動除外して M-1 レグを生存させる（除外は `dropped_macro_features_m1` で明示・
+  #379 の family-wide 修正までの暫定ガード。M-3 の `_MIN_FACTOR_COVERAGE` と同思想）。
 
 ### 実測（#367・offline 検証・2026-07-23・`scripts/measure_embargo_impact.py`＋`base_oof_backtest`）
 

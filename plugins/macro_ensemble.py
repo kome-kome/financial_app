@@ -34,6 +34,7 @@ from .macro_snapshots import (
     build_snapshots,
     oof_backtest,
     get_producer_scores,
+    _macro_from_cache,
     _spearman,
 )
 from .macro_gbdt import _make_xgb_fit_predict
@@ -110,6 +111,44 @@ def _fit_weights(train_by_ym: dict, method: str, grid_step: float) -> tuple:
     return _EQUAL_W
 
 
+def _drop_dead_macro_features(mc: dict, macro_names: list, prices_by_co: dict) -> tuple[list, list]:
+    """全プローブ日で変換後 None になるマクロ特徴を除外する（M-1 strict 全滅の防止）。
+
+    本番実測（2026-07-23）で `macro_jp_real_gdp_yoy` / `macro_jp_weo_gdp_fcast_zscore` /
+    `macro_jp_weo_cpi_fcast_zscore` の3特徴が変換窓不足で**全期間 None** になり、strict
+    （macro_nan_ok=False）の M-1 は1特徴でも None なら行を落とすため全 snapshot が死ぬ
+    （#358 の全マクロ既定 ON 以降、M-1 既定実行が0件になる本番バグ・別 Issue）。M-4 の
+    M-1 レグはこのガードで生存させ、除外リストを結果 `dropped_macro_features_m1` に明示する
+    （M-3 の `diagnostics.dropped_factors` と同思想）。価格履歴の端点＋中間の5点で評価し、
+    **全点 None の特徴のみ**除外する（部分カバレッジの特徴は strict 本来の意味に委ねる）。
+    """
+    if not macro_names:
+        return macro_names, []
+    from datetime import date as _date, timedelta as _td
+    last_dates = [rows[-1].trade_date for rows in prices_by_co.values() if rows]
+    if not last_dates:
+        return macro_names, []
+    ref = _date.fromisoformat(str(max(last_dates))[:10])
+    # プローブは labeled 領域（52週先ラベルが計算できる ＝ 価格末尾 − HORIZON_WEEKS 以前）に
+    # 置く。末尾近傍だけ生きる部分カバレッジ特徴（実測: macro_jp_real_gdp_yoy が直近数ヶ月のみ
+    # 非None）を「生存」と誤判定すると、labeled 領域の strict 行が全滅して OOF が空になるため。
+    label_end = ref - _td(weeks=52)
+    probes = [(label_end - _td(days=d)).isoformat() for d in (0, 200, 420, 780, 1100)]
+    # カバレッジ閾値（M-3 の _MIN_FACTOR_COVERAGE と同思想）: 5点中3点以上（≥60%）非None の
+    # 特徴のみ keep。「1点でも生存なら keep」だと直近スライスのみ生きる特徴（実測:
+    # macro_jp_real_gdp_yoy が lag シフトで ~2025-07 以降のみ非None）が残り、strict が
+    # labeled 領域の大半を殺して fold が形成できなくなる。
+    alive_count: dict = {f: 0 for f in macro_names}
+    for d in probes:
+        for f, v in _macro_from_cache(mc, d, macro_names).items():
+            if v is not None:
+                alive_count[f] += 1
+    need = max(3, (len(probes) * 3 + 4) // 5)   # 5点→3点以上
+    kept = [f for f in macro_names if alive_count[f] >= need]
+    dropped = [f for f in macro_names if alive_count[f] < need]
+    return kept, dropped
+
+
 def _stack_walk_forward(common: dict, weight_method: str, grid_step: float,
                         min_meta_months: int) -> tuple[dict, dict]:
     """二段ウォークフォワード: 月 t の統合重みを t 未満の共通 OOF だけで学習し適用する。
@@ -138,11 +177,13 @@ def _stack_walk_forward(common: dict, weight_method: str, grid_step: float,
 class MacroEnsemblePlugin(AnalysisPlugin):
     name = "macro_ensemble"
     label = "M-4: 兄弟μ̂スタッキング・アンサンブル"
-    description = "M-1(OLS) と M-2(XGBoost) の OOF μ̂ を二段ウォークフォワードで統合するメタモデル"
+    description = ("M-1(OLS) と M-2(XGBoost) の OOF μ̂ を二段ウォークフォワードで統合する"
+                   "メタモデル。実行は内部で M-1+M-2 の両方を回すため数分かかります"
+                   "（ボタンが「実行中...」の間は計算継続中）。")
     depends_on: list[str] = []          # 自前で全計算（r_macro は graceful マージ）
     heavy = True
     category = "③ 将来リターンを予測"
-    ui_order = 350                       # M-2=340 と M-3=360 の間（空き）
+    ui_order = 370                       # M-3=360 の後（M-1→M-2→M-3→M-4 順・#378）
 
     def params_schema(self) -> dict:
         return {
@@ -213,16 +254,22 @@ class MacroEnsemblePlugin(AnalysisPlugin):
     # 揃えてから各 CV を回す（fold 月が同一化し交差が成立する）。
 
     def _m1_build(self, db, prices_by_co, fin_by_co, companies, m1p) -> dict:
-        """M-1 構成（交差項あり・strict）のスナップショットを構築する（CV はまだ）。"""
+        """M-1 構成（交差項あり・strict）のスナップショットを構築する（CV はまだ）。
+
+        strict は1マクロ特徴でも None なら行を落とすため、全期間 None の死に特徴を
+        事前除外する（_drop_dead_macro_features・除外リストは結果へ明示）。"""
         from plugins import get_plugin
         m1 = get_plugin("macro_risk_return")
         macro = list(m1p["macro_features"]) if m1p["use_macro"] else []
         mc = preload_macro(db, prices_by_co, macro) if macro else {}
+        macro, dropped = (_drop_dead_macro_features(mc, macro, prices_by_co)
+                          if macro else (macro, []))
         s, meta, cur, feats, ids = build_snapshots(
             prices_by_co, fin_by_co, companies, mc,
             m1p["fin_features"], macro, m1p["use_momentum"], m1p["momentum_window"],
             m1p["min_coverage"], build_interactions=True, return_stock_ids=True)  # strict
-        return {"inst": m1, "s": s, "meta": meta, "cur": cur, "feats": feats, "ids": ids}
+        return {"inst": m1, "s": s, "meta": meta, "cur": cur, "feats": feats, "ids": ids,
+                "dropped_macro": dropped}
 
     def _m2_build(self, db, prices_by_co, fin_by_co, companies, m2p) -> dict:
         """M-2 構成（交差項なし・macro_nan_ok）のスナップショットを構築する（CV はまだ）。"""
@@ -382,6 +429,7 @@ class MacroEnsemblePlugin(AnalysisPlugin):
             "n_common_pairs":     n_common,
             "base_models":        list(BASE_MODELS),
             "selected_features_m1": ctx1["sel_names"],
+            "dropped_macro_features_m1": b1.get("dropped_macro", []),
             "top_n":              top_n,
         }
         if is_tuning_objective_only():
