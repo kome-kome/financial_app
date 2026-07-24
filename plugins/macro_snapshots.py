@@ -85,6 +85,11 @@ _MACRO_MAP = {
     # ── FRED チャネル（#221・2026-06-24 本番蓄積確認済み） ──────────────────────
     "macro_hy_oas_zscore":       ("HY_OAS",      "zscore"),
     "macro_ig_oas_zscore":       ("IG_OAS",       "zscore"),
+    # 非ICE代替の信用スプレッド（#381）。HY_OAS/IG_OAS は FRED の ICE BofA ライセンス制約で
+    # 2023-06 以降しか取得できず strict の学習窓を律速する。BAA10Y（Moody's Baa−10Y）は
+    # truncate されず 2016 以前まで遡れるため、既定の信用ファクターをこちらへ移す（下の
+    # DEFAULT_MACRO_FEATURES 参照）。
+    "macro_baa_spread_zscore":   ("BAA_SPREAD",   "zscore"),
     "macro_breakeven10y_zscore": ("BREAKEVEN10Y", "zscore"),
     "macro_jp10y_fred_zscore":   ("JP10Y_FRED",   "zscore"),
     "macro_t10y2y_zscore":       ("T10Y2Y",       "zscore"),
@@ -157,6 +162,7 @@ MACRO_FEATURE_OPTIONS = [
     {"value": "macro_gold_yoy",      "label": "金（ゴールド）前年比（YoY）"},
     {"value": "macro_hy_oas_zscore",       "label": "米HYスプレッド（OAS）Zスコア"},
     {"value": "macro_ig_oas_zscore",       "label": "米IGスプレッド（OAS）Zスコア"},
+    {"value": "macro_baa_spread_zscore",   "label": "米Baa社債スプレッド（Baa−10Y）Zスコア"},
     {"value": "macro_breakeven10y_zscore", "label": "米10年BEI（インフレ期待）Zスコア"},
     {"value": "macro_jp10y_fred_zscore",   "label": "日10年金利（FRED）Zスコア"},
     {"value": "macro_t10y2y_zscore",       "label": "米10y−2yスプレッド Zスコア"},
@@ -191,7 +197,17 @@ MACRO_FEATURE_OPTIONS = [
 # 既定は全選択肢（#358・ユーザー方針変更）。従来は米国寄り3本（USDJPY/SP500/US10Y）のみ
 # だったが、コモディティを含む全マクロ系列を既定 ON にし M-2/M-3 と揃える。過剰選択は
 # LassoLarsIC(BIC) の pooled 選択が抑えるため、既定を広げても最終モデルは自動的に絞られる。
-DEFAULT_MACRO_FEATURES = [o["value"] for o in MACRO_FEATURE_OPTIONS]
+#
+# 例外（#381）: HY_OAS/IG_OAS は FRED の ICE BofA ライセンス制約で 2026-04 以降ローリング
+# 3年窓に制限され 2023-06 以前を配信しない。strict（macro_nan_ok=False・同一母集団保証・
+# ADR-0003）の M-1 は「選択中の全マクロ特徴が同時に非None」の行しか使わないため、学習窓が
+# この2系列に律速され 24ヶ月＝honest OOF の fold が2期しか立たない。よって両系列を既定から
+# 除外し（選択肢としては残す＝直近3年窓で使いたいユーザーは手動 ON 可能）、信用スプレッドの
+# 経済的情報は非ICE代替 macro_baa_spread_zscore（Baa−10Y・日次・truncate されず 2016 以前まで
+# 遡れる）が既定で担う。次の律速はコモディティ8系列（2020-07 開始）へ緩む。
+_STRICT_TRUNCATED_FEATURES = {"macro_hy_oas_zscore", "macro_ig_oas_zscore"}
+DEFAULT_MACRO_FEATURES = [o["value"] for o in MACRO_FEATURE_OPTIONS
+                          if o["value"] not in _STRICT_TRUNCATED_FEATURES]
 
 
 # ── 日付 / 財務 helpers ────────────────────────────────────────────────────

@@ -207,6 +207,10 @@ def test_japan_macro_fred_series_registered():
     assert by_code["JP_TRADE_BAL"]["lag_days"] == 135
     # 既存系列は lag_days 未設定（= 0 既定で後方互換）
     assert "lag_days" not in by_code["JP10Y_FRED"]
+    # #381 非ICE代替の信用スプレッド（BAA10Y=Moody's Baa−10Y・日次・truncate されない）
+    assert by_code["BAA_SPREAD"]["fred_id"] == "BAA10Y"
+    assert by_code["BAA_SPREAD"]["category"] == "credit"
+    assert "lag_days" not in by_code["BAA_SPREAD"]  # 日次系列なのでラグ補正不要
 
 
 # ── 5. 日銀 API フェッチャー（ADR-0006 §着手点1）───────────────────────────
