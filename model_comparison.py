@@ -24,6 +24,7 @@ COMPARISON_MODELS = [
     ("macro_gbdt",        "M-2"),
     ("macro_dlm",         "M-3"),
     ("macro_ensemble",    "M-4"),   # 兄弟μ̂スタッキング（#367・ADR-0015）
+    ("macro_gbdt_rank",   "M-5"),   # M-2 の rank-IC 整合版・learning-to-rank（#362・ADR-0017）
 ]
 
 

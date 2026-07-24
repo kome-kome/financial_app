@@ -19,7 +19,7 @@ import model_comparison
 import plugins as plugin_registry
 from plugins.base import DependencyError
 
-_MODELS = ("macro_risk_return", "macro_gbdt", "macro_dlm", "macro_ensemble")
+_MODELS = ("macro_risk_return", "macro_gbdt", "macro_dlm", "macro_ensemble", "macro_gbdt_rank")
 
 
 def _fake_plugin(name, label="ラベル", heavy=True):
@@ -49,7 +49,7 @@ class TestRunComparison:
 
         _patch(monkeypatch, pmap, _exec)
         res = _run()
-        assert [m["short"] for m in res["models"]] == ["M-1", "M-2", "M-3", "M-4"]
+        assert [m["short"] for m in res["models"]] == ["M-1", "M-2", "M-3", "M-4", "M-5"]
         assert all(m["available"] for m in res["models"])
         assert res["models"][0]["oof_backtest"]["rank_ic"]["mean"] == 0.05
         assert res["models"][0]["label"] == "macro_risk_returnラベル"

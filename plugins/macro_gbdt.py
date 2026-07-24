@@ -351,6 +351,48 @@ class MacroGbdtPlugin(AnalysisPlugin):
             }
         return out
 
+    # ── 兄弟モデル拡張フック（M-5 macro_gbdt_rank が override・Issue #362）──────────
+    # 既定実装は M-2（MSE 回帰）の従来挙動そのもの。execute() 本体を共有しつつ、
+    # 学習目的・fit_predict・最終モデル・producer 永続化の4点だけを差し替え可能にする。
+    def _objective(self, params: dict) -> str:
+        """XGBoost の学習目的（objective）。M-2 は MSE 固定。"""
+        return "reg:squarederror"
+
+    def _model_type(self) -> str:
+        """結果メタの model_type ラベル。M-2 は "xgboost"。"""
+        return "xgboost"
+
+    def _make_cv_callback(self, xgb_params: dict, best_iterations: list) -> tuple:
+        """walk-forward CV へ注入する (fit_predict, walk_forward追加kwargs) を返す。
+
+        M-2 は XGBRegressor の early-stopping コールバック＋追加kwargsなし。M-5 は
+        XGBRanker コールバック＋`pass_train_groups=True`（月クエリグループ境界の受渡）。"""
+        return _make_xgb_fit_predict(xgb_params, best_iterations), {}
+
+    def _fit_final_model(self, final_params: dict, n_est_final: int,
+                         X_all, y_all, samples_by_ym: dict, feat_names: list):
+        """全データ再学習の最終モデルを返す。M-2 は XGBRegressor。"""
+        import xgboost as xgb
+        model = xgb.XGBRegressor(**final_params, n_estimators=n_est_final)
+        model.fit(X_all, y_all, verbose=False)
+        return model
+
+    def _persist_producer(self, db: Any, raw_items: list, rep_str: str | None) -> None:
+        """producer μ̂ を macro_gbdt_scores へ永続化（sell_ranking が mu_source で読む）。
+
+        M-2 のみ。M-5 のスコアは順位（リターン単位でない）ため producer を持たず no-op
+        で override する（Issue #362・下流統合は「順位→分位期待リターン写像」を別途定義
+        するまで見送り）。"""
+        from database import replace_macro_gbdt_scores
+        try:
+            replace_macro_gbdt_scores(
+                db,
+                [{"edinet_code": it["edinet_code"], "mu": it["mu_raw"]} for it in raw_items],
+                rep_str,
+            )
+        except Exception:
+            pass   # 永続化失敗（読取専用DB等）は分析表示を妨げない・producer は次回実行で再生成
+
     def execute(self, params: dict, db: Any) -> dict:
         import xgboost as xgb
         import shap
@@ -404,13 +446,13 @@ class MacroGbdtPlugin(AnalysisPlugin):
             "n_estimators":       params["n_estimators_max"],
             "early_stopping_rounds": params["early_stopping_rounds"],
             "tree_method":        "hist",
-            "objective":          "reg:squarederror",
+            "objective":          self._objective(params),
             "random_state":       42,
         }
 
         # ── XGBoost walk-forward CV ───────────────────────────────────────────
         best_iterations: list[int] = []
-        xgb_callback = _make_xgb_fit_predict(xgb_params, best_iterations)
+        xgb_callback, wf_extra = self._make_cv_callback(xgb_params, best_iterations)
 
         cv_folds_xgb, cv_residuals_xgb = walk_forward_cv_monthly(
             samples_by_ym, all_feat_names,
@@ -418,6 +460,7 @@ class MacroGbdtPlugin(AnalysisPlugin):
             return_residuals=True,
             fit_predict=xgb_callback,
             embargo_months=LABEL_HORIZON_MONTHS,  # 52週先ラベルの窓重複を purge（ADR-0014）
+            **wf_extra,
         )
 
         # ── アウトオブサンプル検証（OOF）: 無リーク walk-forward 予測のモデル評価（ADR-0004）─
@@ -444,7 +487,7 @@ class MacroGbdtPlugin(AnalysisPlugin):
                 "r3_gate":           r3_gate,
                 "top_n":             top_n,
                 "results":           [],
-                "model_type":        "xgboost",
+                "model_type":        self._model_type(),
                 "best_iteration":    None,
                 "oof_backtest":      oof_bt,
                 "r_macro_available": False,
@@ -492,8 +535,9 @@ class MacroGbdtPlugin(AnalysisPlugin):
 
         final_params = {k: v for k, v in xgb_params.items()
                         if k not in ("n_estimators", "early_stopping_rounds")}
-        final_model = xgb.XGBRegressor(**final_params, n_estimators=n_est_final)
-        final_model.fit(X_all, y_all, verbose=False)
+        final_model = self._fit_final_model(
+            final_params, n_est_final, X_all, y_all, samples_by_ym, all_feat_names
+        )
 
         # ── スコアリング ─────────────────────────────────────────────────────
         codes_ordered = list(current_snaps.keys())
@@ -556,20 +600,13 @@ class MacroGbdtPlugin(AnalysisPlugin):
         # 算出済み（この後の全社スコアリングとは非依存のため、SHAP計算等より前に算出）。
 
         # ── producer μ̂ を永続化（sell_ranking が mu_source=macro_gbdt で読む・ADR-0004）─
-        from database import replace_macro_gbdt_scores
+        # M-2 は macro_gbdt_scores へ書く。M-5 は producer を持たず no-op（_persist_producer override）。
         _snap_dates = [current_snaps[c][1].get("snap_date") for c in codes_ordered]
         _snap_dates = [d for d in _snap_dates if d]
         _rep = max(_snap_dates) if _snap_dates else None
         _rep_str = (_rep.isoformat() if hasattr(_rep, "isoformat")
                     else (str(_rep)[:10] if _rep else None))
-        try:
-            replace_macro_gbdt_scores(
-                db,
-                [{"edinet_code": it["edinet_code"], "mu": it["mu_raw"]} for it in raw_items],
-                _rep_str,
-            )
-        except Exception:
-            pass   # 永続化失敗（読取専用DB等）は分析表示を妨げない・producer は次回実行で再生成
+        self._persist_producer(db, raw_items, _rep_str)
 
         return {
             "cv_metrics":        cv_metrics,
@@ -582,7 +619,7 @@ class MacroGbdtPlugin(AnalysisPlugin):
             "r3_gate":           r3_gate,
             "top_n":             top_n,
             "results":           raw_items,
-            "model_type":        "xgboost",
+            "model_type":        self._model_type(),
             "best_iteration":    n_est_final,
             "oof_backtest":      oof_bt,
             "r_macro_available": r_macro_available,

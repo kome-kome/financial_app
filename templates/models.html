@@ -142,6 +142,7 @@ td code{background:var(--bg-sunken);border:1px solid var(--border-subtle);paddin
     <a href="#m11">M-2: マクロ×財務 勾配ブースティング</a>
     <a href="#m12">M-3: ベイズ状態空間（時変マクロβ）</a>
     <a href="#m13">M-4: 兄弟μ̂スタッキング</a>
+    <a href="#m14">M-5: マクロ×財務 ランク学習</a>
     <div class="toc-section-title">④ 戦略を検証（メタ検証）</div>
     <a href="#m7">バックテスト</a>
     <div class="toc-section-title">⑤ 保有を見直す（双対分析）</div>
@@ -704,6 +705,32 @@ conv_score₁₂ₘ = max(<span class="val">5</span>, min(<span class="val">95</
       <strong>Breiman, L. (1996)</strong>. "Stacked Regressions."
       <em>Machine Learning</em>, 24, 49–64.<br>
       <a href="https://doi.org/10.1007/BF00117832" target="_blank" rel="noopener">https://doi.org/10.1007/BF00117832</a>
+    </div>
+  </div>
+</div>
+
+<div class="model-section" id="m14">
+  <h2>M-5: マクロ×財務 ランク学習（learning-to-rank） <span class="model-tag">将来リターンを予測</span></h2>
+  <span class="file-tag">plugins/macro_gbdt_rank.py — POST /api/plugins/macro_gbdt_rank/run</span>
+
+  <p>M-2（マクロ×財務 勾配ブースティング）の<strong>rank-IC 整合版</strong>。M-2 は<strong>MSE 最小化</strong>で学習する一方、評価・ハイパラ探索・モデル比較はすべて<strong>期内クロスセクションの順位相関（Spearman rank-IC）</strong>で測る。この「学習の目的関数 ≠ 評価指標」のズレ（MSE は外れリターンに引きずられ順位を歪める）を、XGBoost の<strong>learning-to-rank</strong>（<code>rank:pairwise</code> 既定）で解消し、<strong>各月を1つのクエリグループ</strong>として期内順位を直接最適化する。</p>
+
+  <h3>M-2 との関係（同一土俵での純比較）</h3>
+  <p>MSE 版 M-2 を無改変のベースラインとして残すため<strong>新しい兄弟モデル</strong>として追加した。データ・特徴量・walk-forward の fold は M-2 と完全共有し（実装は M-2 を継承して学習目的だけ差し替え）、モデル比較ビューに M-5 として並ぶことで<strong>MSE と順位学習を同一 fold・同一特徴量で純比較</strong>できる。月をまたいで平坦化される学習データに月境界（クエリグループ）を復元するため、共有 walk-forward 関数に各学習月のサンプル数配列を渡す最小拡張を加えている（既定では従来動作のまま＝M-1〜M-4 に影響なし）。</p>
+
+  <h3>順位スコアの扱い（初版は比較専用）</h3>
+  <p>予測は<strong>順位スコア</strong>でリターンの水準を持たない。よって producer（現在μ̂の永続化）を持たず、売り候補ランキング（μ の出所）への統合は「順位→分位期待リターンの写像」を別途定義するまで見送る。目的関数 <code>rank:ndcg</code> を選ぶ場合はゲイン発散を避けるため期内リターンを分位グレードへ変換して学習する（<code>rank:pairwise</code> は生リターンの順序をそのまま使用）。M-5 の rank-IC が M-2 を上回るかはモデル比較ビューで実測して判断する。</p>
+
+  <div class="refs">
+    <h4>参考文献</h4>
+    <div class="ref-item">
+      <strong>Burges, C. J. C. (2010)</strong>. "From RankNet to LambdaRank to LambdaMART: An Overview."
+      <em>Microsoft Research Technical Report</em> MSR-TR-2010-82.<br>
+      <a href="https://www.microsoft.com/en-us/research/publication/from-ranknet-to-lambdarank-to-lambdamart-an-overview/" target="_blank" rel="noopener">https://www.microsoft.com/en-us/research/publication/from-ranknet-to-lambdarank-to-lambdamart-an-overview/</a>
+    </div>
+    <div class="ref-item">
+      <strong>XGBoost Learning-to-Rank documentation</strong><br>
+      <a href="https://xgboost.readthedocs.io/en/stable/tutorials/learning_to_rank.html" target="_blank" rel="noopener">https://xgboost.readthedocs.io/en/stable/tutorials/learning_to_rank.html</a>
     </div>
   </div>
 </div>
