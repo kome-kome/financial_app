@@ -38,7 +38,6 @@ import math
 from typing import Any
 
 import numpy as np
-import pandas as pd
 from scipy import stats
 
 from .base import AnalysisPlugin
@@ -86,30 +85,20 @@ _DLM_MACRO_MAP: dict[str, tuple[str, str, str]] = {
 MACRO_FEATURE_OPTIONS = [{"value": k, "label": v[2]} for k, v in _DLM_MACRO_MAP.items()]
 DEFAULT_MACRO_FEATURES = [o["value"] for o in MACRO_FEATURE_OPTIONS]
 
-# ── 価格行動系特徴量定義（Issue #317）─────────────────────────────────────
-# stock_price_weekly（close_last/volume_sum・全履歴保持・分割調整済み）のみで構築する
-# 銘柄固有の特徴量。マクロ列（week t の「同時点」変化＝ファクター・エクスポージャー）とは
-# 意味が異なり、week (t-1) までの情報のみで計算した「既知値」を week t の観測 y_t を
-# 説明する遅行特徴量として追加する（academic factor model のモメンタム/リバーサル/ボラ
-# 特徴量と同じ扱い）。r_macro（マクロリスク指標）はこの列を含めない（execute 内で分離）。
-_PX_RVOL_WINDOW   = 12   # 週次実現ボラ（対数リターン標準偏差）の窓（週）
-_PX_VOLZ_WINDOW   = 12   # 出来高z-score の窓（週）
-_PX_HIGH52_WINDOW = 52   # 52週高値判定の窓（週）
-_PX_REV_WINDOW    = 4    # N週リバーサルの窓（週）
-
-PRICE_FEATURE_OPTIONS = [
-    {"value": "px_rvol",      "label": f"週次実現ボラティリティ（直近{_PX_RVOL_WINDOW}週の対数リターン標準偏差）"},
-    {"value": "px_volz",      "label": f"出来高z-score（直近{_PX_VOLZ_WINDOW}週の自己相対）"},
-    {"value": "px_high52dev", "label": f"{_PX_HIGH52_WINDOW}週高値からの乖離（対数）"},
-    {"value": "px_rev4w",     "label": f"{_PX_REV_WINDOW}週リバーサル（過去{_PX_REV_WINDOW}週リターン）"},
-]
-# 既定は全選択（Issue #317・実データ検証済み）: 本番DB（3,600社規模）でのOOF比較で
-# rank_ic mean +35%（0.0097→0.0131）・rank_ic std 半減（0.0572→0.0304・IC情報比率で約2.5倍）・
-# long_short_spread 負→正転換（-0.0012→+0.0008）・hit_rate 0.45→0.59（コイン投げ以下→明確に上回る）
-# の一貫した改善を確認した上でユーザー承認を得て全選択化（M-1/M-2/M-3 の既存マクロ特徴量が
-# 辿った「検証→全選択化」と同じパターン）。トレードオフ: px_high52dev の52週warmupにより
-# 対象企業数は微減（実測 3,641→3,546社）。
-DEFAULT_PRICE_FEATURES: list[str] = [o["value"] for o in PRICE_FEATURE_OPTIONS]
+# ── 価格行動系特徴量定義（Issue #317・#364 で macro_snapshots へ共有化）──────────
+# 定義の正本は macro_snapshots.py（M-2/M-3 共有）。M-3 は下記を re-export し従来の
+# シンボル（_build_price_features 別名・PRICE_FEATURE_OPTIONS 等）を後方互換で維持する。
+# M-3 は week (t-1) の値を遅行特徴量として参照する（_build_series）。r_macro（マクロリスク
+# 指標）はこの列を含めない（execute 内で分離）。
+from .macro_snapshots import (  # noqa: E402
+    PRICE_FEATURE_OPTIONS,
+    DEFAULT_PRICE_FEATURES,
+    build_price_features as _build_price_features,
+    _PX_RVOL_WINDOW,
+    _PX_VOLZ_WINDOW,
+    _PX_HIGH52_WINDOW,
+    _PX_REV_WINDOW,
+)
 
 WEEKS_PER_YEAR = 52
 # 週次日付グリッドで forward-fill 値がこの割合未満しか無い factor はモデルから自動除外する。
@@ -252,53 +241,6 @@ def _downsample_idx(n: int, k: int) -> list[int]:
     if n <= k:
         return list(range(n))
     return sorted(set(round(i * (n - 1) / (k - 1)) for i in range(k)))
-
-
-def _build_price_features(px_rows: list, selected: list[str]) -> dict[str, list]:
-    """1銘柄分の価格行動系特徴量を週インデックス整列で事前計算する（Issue #317）。
-
-    px_rows: StockPriceWeekly 由来の (trade_date, close_last, volume_sum) 行（trade_date昇順）。
-    戻り値: {feature_name: [値|nan, ...]}（長さ=len(px_rows)）。各インデックス i の値は
-    「i 番目の週までの情報で計算可能な既知値」（_build_series 側で week t-1 のインデックスを
-    参照し、week t の観測 y_t を説明する遅行特徴量として使う）。窓に満たない先頭や NaN の
-    混入は nan（pandas rolling の min_periods=window により窓内が完全に揃わないと nan）。
-    """
-    if not selected:
-        return {}
-    closes = pd.Series(
-        [r.close_last if r.close_last and r.close_last > 0 else np.nan for r in px_rows],
-        dtype=float,
-    )
-    out: dict[str, list] = {}
-
-    if "px_rvol" in selected or "px_rev4w" in selected:
-        logret = np.log(closes / closes.shift(1))
-
-    if "px_rvol" in selected:
-        w = _PX_RVOL_WINDOW
-        out["px_rvol"] = logret.rolling(window=w, min_periods=w).std(ddof=1).tolist()
-
-    if "px_volz" in selected:
-        w = _PX_VOLZ_WINDOW
-        vols = pd.Series(
-            [r.volume_sum if getattr(r, "volume_sum", None) and r.volume_sum > 0 else np.nan
-             for r in px_rows],
-            dtype=float,
-        )
-        roll_mean = vols.rolling(window=w, min_periods=w).mean()
-        roll_std  = vols.rolling(window=w, min_periods=w).std(ddof=1).replace(0, np.nan)
-        out["px_volz"] = ((vols - roll_mean) / roll_std).tolist()
-
-    if "px_high52dev" in selected:
-        w = _PX_HIGH52_WINDOW
-        roll_max = closes.rolling(window=w, min_periods=w).max()
-        out["px_high52dev"] = np.log(closes / roll_max).tolist()
-
-    if "px_rev4w" in selected:
-        w = _PX_REV_WINDOW
-        out["px_rev4w"] = np.log(closes / closes.shift(w)).tolist()
-
-    return out
 
 
 def _r(x: float, nd: int = 6) -> float | None:

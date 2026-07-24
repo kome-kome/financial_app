@@ -896,6 +896,7 @@ M-1 から**交差項（`fin×macro`）を除いた**同一セット。BIC/LASSO
 - 財務ベース（`fin_features` multiselect）: M-1 と同一選択肢
 - マクロ（`macro_features` multiselect）: M-1 と同一選択肢（`use_macro=True/False` で制御）
 - モメンタム（`use_momentum`、既定 OFF）: M-1 と同一
+- **価格行動系（`price_features` multiselect、既定 OFF・Issue #364）**: M-3（§13）と**共有**する銘柄固有の遅行特徴量（週次実現ボラ `px_rvol`・出来高z-score `px_volz`・52週高値乖離 `px_high52dev`・4週リバーサル `px_rev4w`）。定義の正本は `macro_snapshots.build_price_features`（M-2/M-3 共有）。実現ボラ・出来高z・リバーサルは**非線形/閾値効果が強く GBDT の得意領域**。各スナップショット `snap_idx` 時点の既知値（未来を覗かない・`px_high52dev` の52週 warmup 分は nan → XGBoost がネイティブ処理）を momentum の直後に追加する。**追加収集ゼロ・追加 Egress ゼロ**（`volume_sum` は `StockPriceWeekly` 由来で取得済）。px_* は全て無次元→木で単調不変・次元整合 OK。`use_momentum` と同様に**M-2 側でゲート**し M-1 の OLS 特徴を汚さない。**既定 OFF は保守設定**で、OOF 前後比較（rank-IC / long-short spread / hit-rate）と個別 ablation で有効性を確認してから DEFAULT_PRICE_FEATURES を既定化する（「検証→全選択化」パターン）。参考: Jegadeesh & Titman 1993。
 
 #### 11.3.1 マクロ欠損の扱い（NaN 許容・M-2 専用）
 
@@ -999,7 +1000,7 @@ M-1/M-2 と同じ「リターン予測ファミリ」に属し、最新の潜在
 | α のダイナミクス | **ランダムウォーク（ローカルレベル）** α_t = α_{t-1} + ω |
 | ユニバース | 全適格銘柄（最低週数を満たすもの）・`heavy=True`（Render では 403・ローカル限定）。モデル非永続・毎回学習 |
 | 出力統合 | 初版は API/UI のみ（µ̂ ランキング・β 経路・診断）。producer 化（`macro_dlm_scores`）と売り推奨連携（§10）は将来 Issue |
-| 価格行動系特徴量（既定全選択・Issue #317） | `price_features` で選択する銘柄固有の**遅行特徴量**（週次実現ボラ `px_rvol`・出来高z-score `px_volz`・52週高値乖離 `px_high52dev`・4週リバーサル `px_rev4w`）。マクロ列（同時点変化＝ファクター・エクスポージャー）とは意味が異なり、week (t-1) までの情報のみで計算した既知値を y_t の説明変数に追加する。本番データのOOF比較（rank_ic mean +35%・std半減・long_short_spread負→正・hit_rate 0.45→0.59）で一貫した改善を確認しユーザー承認の上で既定全選択化。r_macro（マクロリスク）の共分散計算からはこの列を除外する |
+| 価格行動系特徴量（既定全選択・Issue #317） | `price_features` で選択する銘柄固有の**遅行特徴量**（週次実現ボラ `px_rvol`・出来高z-score `px_volz`・52週高値乖離 `px_high52dev`・4週リバーサル `px_rev4w`）。マクロ列（同時点変化＝ファクター・エクスポージャー）とは意味が異なり、week (t-1) までの情報のみで計算した既知値を y_t の説明変数に追加する。本番データのOOF比較（rank_ic mean +35%・std半減・long_short_spread負→正・hit_rate 0.45→0.59）で一貫した改善を確認しユーザー承認の上で既定全選択化。r_macro（マクロリスク）の共分散計算からはこの列を除外する。**定義は #364 で `macro_snapshots.build_price_features` へ抽出し M-2（§11.3）と共有化**（M-3 は `PRICE_FEATURE_OPTIONS`/`build_price_features` を re-export・従来シンボル互換維持） |
 
 ### 12.3 モデル定式化
 

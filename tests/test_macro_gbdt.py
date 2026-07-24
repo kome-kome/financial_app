@@ -426,6 +426,22 @@ class TestExecuteSmoke:
             assert key in cv["xgb"], f"cv_metrics.xgb に '{key}' がない"
             assert key in cv["ols_baseline"], f"cv_metrics.ols_baseline に '{key}' がない"
 
+    def test_execute_with_price_features(self):
+        """price_features 有効時に execute が完走し、selected_features へ px_* が入る（Issue #364）。"""
+        db, prices_by_co, fin_by_co, companies = self._make_db()
+        params = self._make_params(use_macro=False,
+                                   price_features=["px_rvol", "px_rev4w"])
+
+        with patch("plugins.macro_gbdt.load_data", return_value=(prices_by_co, fin_by_co, companies)), \
+             patch("plugins.macro_gbdt.preload_macro", return_value={}), \
+             patch("plugins.macro_gbdt.get_producer_scores", return_value={}):
+            result = plugin.execute(params, db)
+
+        assert "results" in result and result["results"]
+        # SHAP/feature_coefs は all_feat_names 由来 → px_* が特徴量として現れる
+        feat_names = set(result.get("feature_coefs", {}).keys())
+        assert {"px_rvol", "px_rev4w"} & feat_names, f"px_* が特徴量に現れない: {feat_names}"
+
     def test_execute_has_oof_backtest(self):
         """execute が oof_backtest（アウトオブサンプル検証）を返す（ADR-0004）。"""
         db, prices_by_co, fin_by_co, companies = self._make_db()
@@ -856,3 +872,75 @@ class TestTuningSearchSpace:
         assert len(combos) > 0
         for combo in combos:
             coerce_params(schema, {**base_params, **combo})
+
+
+# ── 価格行動系特徴量（px_*）の M-2 導入（Issue #364）─────────────────────────────
+
+class TestPriceFeatures:
+    """build_snapshots(price_features=...) が px_* を正しく配線し、既定は無変更に保つ。"""
+
+    def _inputs(self):
+        _, prices_by_co, fin_by_co, companies = _make_db_mock(n_companies=3, n_weeks=180)
+        return prices_by_co, fin_by_co, companies
+
+    def test_schema_default_off(self):
+        """M-2 の price_features 既定は空（use_momentum と同じ保守ゲート）。"""
+        schema = plugin.params_schema()
+        assert "price_features" in schema
+        assert schema["price_features"]["type"] == "multiselect"
+        assert schema["price_features"]["default"] == []
+
+    def test_default_empty_is_noop(self):
+        """price_features 未指定と空指定で feature 名・サンプル母集団が完全一致（既定無変更）。"""
+        prices_by_co, fin_by_co, companies = self._inputs()
+        args = (prices_by_co, fin_by_co, companies, {}, ["per", "pbr"], [], False, 12, 0.5)
+        s0, _, _, f0 = build_snapshots(*args, build_interactions=False, macro_nan_ok=True)
+        s1, _, _, f1 = build_snapshots(*args, build_interactions=False, macro_nan_ok=True,
+                                       price_features=[])
+        assert f0 == f1
+        assert {k: len(v) for k, v in s0.items()} == {k: len(v) for k, v in s1.items()}
+
+    def test_px_appended_after_momentum_before_interactions(self):
+        """px_* は momentum の直後・交差項の手前に並ぶ。"""
+        from plugins.macro_snapshots import build_snapshots as bs
+        prices_by_co, fin_by_co, companies = self._inputs()
+        _, _, _, feats = bs(
+            prices_by_co, fin_by_co, companies, {}, ["per", "pbr"], [], True, 12, 0.5,
+            build_interactions=False, macro_nan_ok=True,
+            price_features=["px_rvol", "px_high52dev"],
+        )
+        assert feats == ["per", "pbr", "momentum_12m1", "px_rvol", "px_high52dev"]
+
+    def test_feat_row_length_and_values_match_direct(self):
+        """feat_row 長が feature 数に一致し、px 値が build_price_features(snap_idx) と一致する。"""
+        from plugins.macro_snapshots import build_price_features
+        prices_by_co, fin_by_co, companies = self._inputs()
+        pf = ["px_rvol", "px_high52dev", "px_rev4w"]
+        samples, _, _, feats = build_snapshots(
+            prices_by_co, fin_by_co, companies, {}, ["per", "pbr"], [], False, 12, 0.1,
+            build_interactions=False, macro_nan_ok=True, price_features=pf,
+        )
+        # feature 順: fin(2) + px(3)
+        assert feats == ["per", "pbr"] + pf
+        # サンプルが存在し、各 feat_row 長が feature 数と一致
+        total = sum(len(v) for v in samples.values())
+        assert total > 0
+        for ym, rows in samples.items():
+            for feat_row, _y in rows:
+                assert len(feat_row) == len(feats)
+
+    def test_px_high52dev_warmup_reduces_population(self):
+        """px_high52dev の52週 warmup 分は nan → min_coverage=1.0 で先頭 snapshot が脱落しうる。"""
+        prices_by_co, fin_by_co, companies = self._inputs()
+        # coverage=1.0（全特徴 non-nan 必須）だと warmup 未満の px_high52dev nan で脱落
+        s_px, _, _, _ = build_snapshots(
+            prices_by_co, fin_by_co, companies, {}, ["per", "pbr"], [], False, 12, 1.0,
+            build_interactions=False, macro_nan_ok=True, price_features=["px_high52dev"],
+        )
+        s_base, _, _, _ = build_snapshots(
+            prices_by_co, fin_by_co, companies, {}, ["per", "pbr"], [], False, 12, 1.0,
+            build_interactions=False, macro_nan_ok=True,
+        )
+        n_px = sum(len(v) for v in s_px.values())
+        n_base = sum(len(v) for v in s_base.values())
+        assert n_px <= n_base
