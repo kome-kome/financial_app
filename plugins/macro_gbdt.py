@@ -29,6 +29,8 @@ from .macro_snapshots import (
     FIN_BASE_OPTIONS,
     LABEL_HORIZON_MONTHS,
     MACRO_FEATURE_OPTIONS,
+    PRICE_FEATURE_OPTIONS,
+    DEFAULT_PRICE_FEATURES,
     _realized_vol,
     load_data,
     preload_macro,
@@ -176,6 +178,17 @@ class MacroGbdtPlugin(AnalysisPlugin):
                 "default": 12,
                 "min": 3,
                 "max": 24,
+            },
+            "price_features": {
+                "type": "multiselect",
+                "label": "価格行動系特徴量（px_*）",
+                "description": (
+                    "週次実現ボラ・出来高z・52週高値乖離・4週リバーサル（M-3 と共有・追加収集ゼロ）。"
+                    "非線形/閾値効果が強く GBDT の得意領域。既定 OFF（use_momentum と同じ保守ゲート）。"
+                    "OOF 前後比較で有効性を確認してから全選択を既定化する（検証→全選択化・Issue #364）。"
+                ),
+                "options": PRICE_FEATURE_OPTIONS,
+                "default": [],
             },
             "min_coverage": {
                 "type": "slider",
@@ -407,6 +420,7 @@ class MacroGbdtPlugin(AnalysisPlugin):
         macro_names  = list(params["macro_features"]) if use_macro else []
         use_momentum = params["use_momentum"]
         mom_window   = params["momentum_window"]
+        price_features = list(params.get("price_features") or [])
         min_coverage = params["min_coverage"]
         top_n        = params["top_n"]
 
@@ -426,6 +440,7 @@ class MacroGbdtPlugin(AnalysisPlugin):
             fin_features, macro_names, use_momentum, mom_window, min_coverage,
             build_interactions=False,
             macro_nan_ok=True,
+            price_features=price_features,
         )
 
         total_samples = sum(len(v) for v in samples_by_ym.values())

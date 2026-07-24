@@ -21,6 +21,7 @@ from datetime import datetime, timedelta
 from typing import Any
 
 import numpy as np
+import pandas as pd
 
 from .utils import macro_risk_exposure, normalize, winsorize
 
@@ -183,6 +184,78 @@ MACRO_FEATURE_OPTIONS = [
 # だったが、コモディティを含む全マクロ系列を既定 ON にし M-2/M-3 と揃える。過剰選択は
 # LassoLarsIC(BIC) の pooled 選択が抑えるため、既定を広げても最終モデルは自動的に絞られる。
 DEFAULT_MACRO_FEATURES = [o["value"] for o in MACRO_FEATURE_OPTIONS]
+
+
+# ── 価格行動系特徴量定義（Issue #317・#364 で M-2/M-3 共有化）────────────────────
+# stock_price_weekly（close_last/volume_sum・全履歴保持・分割調整済み）のみで構築する
+# 銘柄固有の特徴量。マクロ列（week t の「同時点」変化＝ファクター・エクスポージャー）とは
+# 意味が異なる、銘柄固有の遅行特徴量（academic factor model のモメンタム/リバーサル/ボラ
+# 特徴量と同じ扱い）。M-3（DLM・macro_dlm）と M-2（GBDT・macro_gbdt）が本定義を共有する。
+_PX_RVOL_WINDOW   = 12   # 週次実現ボラ（対数リターン標準偏差）の窓（週）
+_PX_VOLZ_WINDOW   = 12   # 出来高z-score の窓（週）
+_PX_HIGH52_WINDOW = 52   # 52週高値判定の窓（週）
+_PX_REV_WINDOW    = 4    # N週リバーサルの窓（週）
+
+PRICE_FEATURE_OPTIONS = [
+    {"value": "px_rvol",      "label": f"週次実現ボラティリティ（直近{_PX_RVOL_WINDOW}週の対数リターン標準偏差）"},
+    {"value": "px_volz",      "label": f"出来高z-score（直近{_PX_VOLZ_WINDOW}週の自己相対）"},
+    {"value": "px_high52dev", "label": f"{_PX_HIGH52_WINDOW}週高値からの乖離（対数）"},
+    {"value": "px_rev4w",     "label": f"{_PX_REV_WINDOW}週リバーサル（過去{_PX_REV_WINDOW}週リターン）"},
+]
+# 既定は全選択（Issue #317・実データ検証済み）: 本番DB（3,600社規模）でのOOF比較で
+# rank_ic mean +35%（0.0097→0.0131）・rank_ic std 半減（0.0572→0.0304・IC情報比率で約2.5倍）・
+# long_short_spread 負→正転換（-0.0012→+0.0008）・hit_rate 0.45→0.59（コイン投げ以下→明確に上回る）
+# の一貫した改善を確認した上でユーザー承認を得て全選択化。トレードオフ: px_high52dev の52週
+# warmup により対象企業数は微減（実測 3,641→3,546社）。
+DEFAULT_PRICE_FEATURES: list[str] = [o["value"] for o in PRICE_FEATURE_OPTIONS]
+
+
+def build_price_features(px_rows: list, selected: list[str]) -> dict[str, list]:
+    """1銘柄分の価格行動系特徴量を週インデックス整列で事前計算する（Issue #317・#364）。
+
+    px_rows: StockPriceWeekly 由来の (trade_date, close_last, volume_sum) 行（trade_date昇順）。
+    戻り値: {feature_name: [値|nan, ...]}（長さ=len(px_rows)）。各インデックス i の値は
+    「i 番目の週までの情報で計算可能な既知値」（rolling の窓は i を含む過去 w 週）。M-3 は
+    week (t-1) のインデックスを参照する遅行特徴量として、M-2 は snap_idx（スナップショット週）の
+    既知値として利用する（いずれも未来を覗かない）。窓に満たない先頭や NaN の混入は nan
+    （pandas rolling の min_periods=window により窓内が完全に揃わないと nan）。
+    """
+    if not selected:
+        return {}
+    closes = pd.Series(
+        [r.close_last if r.close_last and r.close_last > 0 else np.nan for r in px_rows],
+        dtype=float,
+    )
+    out: dict[str, list] = {}
+
+    if "px_rvol" in selected or "px_rev4w" in selected:
+        logret = np.log(closes / closes.shift(1))
+
+    if "px_rvol" in selected:
+        w = _PX_RVOL_WINDOW
+        out["px_rvol"] = logret.rolling(window=w, min_periods=w).std(ddof=1).tolist()
+
+    if "px_volz" in selected:
+        w = _PX_VOLZ_WINDOW
+        vols = pd.Series(
+            [r.volume_sum if getattr(r, "volume_sum", None) and r.volume_sum > 0 else np.nan
+             for r in px_rows],
+            dtype=float,
+        )
+        roll_mean = vols.rolling(window=w, min_periods=w).mean()
+        roll_std  = vols.rolling(window=w, min_periods=w).std(ddof=1).replace(0, np.nan)
+        out["px_volz"] = ((vols - roll_mean) / roll_std).tolist()
+
+    if "px_high52dev" in selected:
+        w = _PX_HIGH52_WINDOW
+        roll_max = closes.rolling(window=w, min_periods=w).max()
+        out["px_high52dev"] = np.log(closes / roll_max).tolist()
+
+    if "px_rev4w" in selected:
+        w = _PX_REV_WINDOW
+        out["px_rev4w"] = np.log(closes / closes.shift(w)).tolist()
+
+    return out
 
 
 # ── 日付 / 財務 helpers ────────────────────────────────────────────────────
@@ -520,6 +593,7 @@ def build_snapshots(
     build_interactions: bool = True,
     macro_nan_ok: bool = False,
     return_stock_ids: bool = False,
+    price_features: list[str] | None = None,
 ) -> tuple:
     """M-1/M-2 共有スナップショット構築。
 
@@ -536,28 +610,37 @@ def build_snapshots(
       `stock_ids_by_ym: dict[str, list[str]]`（各サンプルの edinet_code・samples_by_ym と同じ並び順）
       を追加する。既定 False では戻り値の形（4-tuple）は従来どおり変わらない。
 
+    price_features（既定 None＝空・Issue #364）: 価格行動系特徴量（px_rvol/px_volz/
+      px_high52dev/px_rev4w）を指定すると、各スナップショット snap_idx 時点の既知値を
+      momentum の直後・交差項の手前に追加する（feature 名は all_feat_names 末尾側へ）。
+      M-2（GBDT・NaN ネイティブ処理）専用で `use_momentum` と同様に呼び出し側でゲートする。
+      M-1（OLS）は既定の None のままにして OLS 特徴を汚さない。px_* は全て無次元→木で
+      単調不変・次元整合 OK。px_high52dev の52週 warmup 分は nan となり coverage で制御される。
+
     tuning_snapshot_cache() コンテキスト内では、大きいオブジェクト引数（prices_by_co/
     fin_by_co/companies/macro_cache）は id()、それ以外の引数は値そのものからキーを
     構築してキャッシュする（Issue #298）。コンテキスト外では常にフル計算する。
     """
+    price_features = list(price_features) if price_features else []
     cache = _tuning_cache.get()
     if cache is None:
         return _build_snapshots_impl(
             prices_by_co, fin_by_co, companies, macro_cache,
             fin_features, macro_names, use_momentum, mom_window, min_coverage,
-            build_interactions, macro_nan_ok, return_stock_ids,
+            build_interactions, macro_nan_ok, return_stock_ids, price_features,
         )
     key = (
         id(prices_by_co), id(fin_by_co), id(companies), id(macro_cache),
         tuple(fin_features), tuple(macro_names), use_momentum, mom_window,
         min_coverage, build_interactions, macro_nan_ok, return_stock_ids,
+        tuple(price_features),
     )
     return cache["build_snapshots"].get_or_compute(
         key,
         lambda: _build_snapshots_impl(
             prices_by_co, fin_by_co, companies, macro_cache,
             fin_features, macro_names, use_momentum, mom_window, min_coverage,
-            build_interactions, macro_nan_ok, return_stock_ids,
+            build_interactions, macro_nan_ok, return_stock_ids, price_features,
         ),
     )
 
@@ -575,9 +658,11 @@ def _build_snapshots_impl(
     build_interactions: bool,
     macro_nan_ok: bool,
     return_stock_ids: bool,
+    price_features: list[str] | None = None,
 ) -> tuple:
     """build_snapshots の実体（キャッシュなし・毎回フル計算）。"""
     use_macro = bool(macro_names)
+    price_features = price_features or []
     momentum_name = ["momentum_12m1"] if use_momentum else []
 
     interaction_names: list[str] = []
@@ -586,7 +671,9 @@ def _build_snapshots_impl(
             for mn in macro_names:
                 interaction_names.append(f"{fn}_x_{mn}")
 
-    all_feat_names = fin_features + macro_names + momentum_name + interaction_names
+    all_feat_names = (
+        fin_features + macro_names + momentum_name + list(price_features) + interaction_names
+    )
     n_feat = len(all_feat_names)
 
     samples_by_ym: dict[str, list] = defaultdict(list)
@@ -606,6 +693,10 @@ def _build_snapshots_impl(
 
         dates  = [r.trade_date for r in price_rows]
         closes = [r.close_last  for r in price_rows]
+
+        # 価格行動系特徴量（Issue #364）: 銘柄単位で1回だけ週インデックス整列で事前計算。
+        # 各 snap_idx 時点の既知値（未来を覗かない）を feat_row 末尾側へ追加する。
+        px_feats = build_price_features(price_rows, price_features) if price_features else {}
 
         month_ends = [
             i for i in range(n - 1) if dates[i][:7] != dates[i + 1][:7]
@@ -658,6 +749,11 @@ def _build_snapshots_impl(
                     continue
                 mom_row = [mom]
 
+            # 価格行動系特徴量（snap_idx 時点の既知値・warmup 未満は nan → XGBoost 処理）
+            px_row: list[float] = [
+                float(px_feats[name][snap_idx]) for name in price_features
+            ] if price_features else []
+
             industry = (
                 fin_rec.industry
                 or (companies.get(edinet_code) and companies[edinet_code].industry)
@@ -673,7 +769,7 @@ def _build_snapshots_impl(
                     for mn in macro_names:
                         inter_row.append(fv * macro_dict[mn])
 
-            feat_row = fin_row + macro_row + mom_row + inter_row
+            feat_row = fin_row + macro_row + mom_row + px_row + inter_row
 
             non_null = sum(1 for v in feat_row if v == v)
             if non_null / n_feat < min_coverage:

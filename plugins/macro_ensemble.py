@@ -279,7 +279,9 @@ class MacroEnsemblePlugin(AnalysisPlugin):
             prices_by_co, fin_by_co, companies, mc,
             m2p["fin_features"], macro, m2p["use_momentum"], m2p["momentum_window"],
             m2p["min_coverage"], build_interactions=False, macro_nan_ok=True,
-            return_stock_ids=True)
+            return_stock_ids=True,
+            price_features=m2p.get("price_features") or [],  # M-2 と同構成を維持（#364）
+        )
         return {"s": s, "meta": meta, "cur": cur, "feats": feats, "ids": ids}
 
     @staticmethod
