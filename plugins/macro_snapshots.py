@@ -33,6 +33,15 @@ HORIZON_WEEKS = 52
 # へ M-1/M-2 双方が渡す（HORIZON_WEEKS の月換算の単一情報源）。
 LABEL_HORIZON_MONTHS = math.ceil(HORIZON_WEEKS * 12 / 52)  # = 12
 
+# ── 低頻度マクロ系列の変換パラメータ（Issue #379）─────────────────────────
+# `_macro_from_cache` の既定窓は日次/月次（median gap 1〜31日）前提で、四半期(92日)や
+# 年2回(183日)の系列では変換が構造的に None になり、strict（macro_nan_ok=False）の M-1 が
+# 全スナップショットを破棄して学習0件になっていた（#358 の全マクロ既定 ON 以降）。
+# 高頻度系列の値は不変のまま、低頻度系列だけを救うためのフォールバック定数。
+_YOY_PREV_FLOOR_DAYS  = 366   # yoy の前年同期 ffill 下限（ref-1y からこれ以上遡らない）
+_ZSCORE_MIN_PTS       = 20    # zscore の必要点数（従来のハードコード値）
+_ZSCORE_MIN_PTS_SPARSE = 8    # 全履歴でも足りない超低頻度系列の最低許容点数
+
 # 財務ベース特徴量の選択肢（全て financial_metrics VIEW の実列）。
 FIN_BASE_OPTIONS = [
     {"value": "per",            "label": "PER"},
@@ -246,8 +255,15 @@ def _macro_from_cache(
             p_e = (ref_1y + _td2(days=window_days)).isoformat()
             prev_vals = [v for d, v in date_close.items() if p_s <= d <= p_e]
             if not prev_vals:
-                result[fname] = None
-                continue
+                # 低頻度系列（四半期=92日間隔等）は前年同期 ±window に点が無い（Issue #379）。
+                # current 側（L233-239）と対称に「p_e 以前の直近点」へフォールバックする。
+                # 古すぎる点で yoy が無意味化しないよう _YOY_PREV_FLOOR_DAYS で下限を切る。
+                floor = (ref_1y - _td2(days=_YOY_PREV_FLOOR_DAYS)).isoformat()
+                past = sorted((d, v) for d, v in date_close.items() if floor <= d <= p_e)
+                if not past:
+                    result[fname] = None
+                    continue
+                prev_vals = [past[-1][1]]
             prev_avg = statistics.mean(prev_vals)
             result[fname] = (current_avg - prev_avg) / prev_avg if prev_avg else None
 
@@ -255,9 +271,19 @@ def _macro_from_cache(
             from datetime import date as _d3, timedelta as _td3
             hist_start = (ref - _td3(days=zscore_years * 366)).isoformat()
             all_vals = [v for d, v in date_close.items() if hist_start <= d <= ref_date]
-            if len(all_vals) < 20:
-                result[fname] = None
-                continue
+            if len(all_vals) < _ZSCORE_MIN_PTS:
+                # 低頻度系列（IMF WEO=年2回）は5年窓に _ZSCORE_MIN_PTS 点が構造的に入らない
+                # （実測5点・Issue #379）。窓を「直近 _ZSCORE_MIN_PTS 点」へ切り替えて点数を
+                # 確保する（＝低頻度ほど実効窓が伸びる）。全履歴でも足りなければ
+                # _ZSCORE_MIN_PTS_SPARSE 点まで許容し、それ未満のみ None。
+                past = sorted((d, v) for d, v in date_close.items() if d <= ref_date)
+                if len(past) >= _ZSCORE_MIN_PTS:
+                    all_vals = [v for _, v in past[-_ZSCORE_MIN_PTS:]]
+                elif len(past) >= _ZSCORE_MIN_PTS_SPARSE:
+                    all_vals = [v for _, v in past]
+                else:
+                    result[fname] = None
+                    continue
             mu = statistics.mean(all_vals)
             sigma = statistics.stdev(all_vals) if len(all_vals) > 1 else 0.0
             result[fname] = (current_avg - mu) / sigma if sigma else None

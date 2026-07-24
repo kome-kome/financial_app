@@ -15,9 +15,12 @@ companies / macro_data のみ本番から 1 回 pull する。キャッシュが
   とは数日ずれる。52週先リターンはインデックス基準のため値は不変、月バケットのみ月境界で稀に
   ずれる（rank-IC はほぼ同値）。embargo=0 の M-2 rank-IC が記録済み本番値（≈0.33）を再現する
   ことでこの近似の妥当性を確認できる。
-- M-1 の本番既定（全マクロ・macro_nan_ok=False の strict）は、上記 week_start プロキシ＋数日前
-  キャッシュでは全系列同時非NaNを満たせず 0 サンプルになる。そのため M-1 は財務のみ
-  （use_macro=False）で測る（M-2 は本番と同一の全マクロ config）。
+- **M-1 は本番と同一 config（全マクロ・strict）で測る**（#379 まで `use_macro=False` に落として
+  いたが、0 サンプルの原因は week_start プロキシではなく低頻度マクロの変換バグだった。修正後は
+  offline でも本番と同じ 24ヶ月/約71.2k サンプルを再現する＝実測で確認済み）。
+- ただし M-1 strict のスナップショットは HY_OAS/IG_OAS の収集開始（2023-06）に律速され 24ヶ月しか
+  無く、embargo=12 では `min_train_months=6` と合わせて fold が 2 期しか立たない（rank-IC の
+  統計的信頼性は低い）。マクロ履歴の backfill が前提条件（別 Issue）。
 
 実行: `python -m scripts.measure_embargo_impact`（`-m` 必須・[[feedback_scripts_dir_needs_module_invocation]]）
 出力は ASCII のみ（Windows cp932 リダイレクト対策・[[feedback_windows_cp932_stdout_symbols]]）。
@@ -43,12 +46,11 @@ import plugins.macro_risk_return as m1mod
 import plugins.macro_ensemble as m4mod
 from scripts._cache import cached, set_refresh
 
-# M-1 の strict 全マクロは offline キャッシュでは 0 サンプルになるため財務のみで測る（docstring 参照）。
-# M-4 は内部で M-1/M-2 を回すため、SUB_PARAM_OVERRIDES で M-1 側だけ同じ制約を適用する（#367）。
-PARAM_OVERRIDES = {"M-1": {"use_macro": False}, "M-2": {}, "M-4": {}}
-LABELS = {"M-1": "M-1 (use_macro=False, financial-only OLS)",
+# 3モデルとも本番既定 config で測る（#379 で M-1 strict が offline でも成立するようになった）。
+PARAM_OVERRIDES = {"M-1": {}, "M-2": {}, "M-4": {}}
+LABELS = {"M-1": "M-1 (default, full macro strict)",
           "M-2": "M-2 (default, full macro)",
-          "M-4": "M-4 (stack of M-1[fin-only] + M-2[full macro])"}
+          "M-4": "M-4 (stack of M-1 + M-2, both default)"}
 EMBARGOS = (0, 12)
 METRICS = ("ic_mean", "ic_std", "ic_n", "ls", "hit", "n_periods", "n_oof")
 
@@ -113,9 +115,8 @@ def _install_offline_loaders(prices_by_co: dict, db) -> None:
         mod.preload_macro = fake_preload
         if hasattr(mod, "get_producer_scores"):
             mod.get_producer_scores = lambda *a, **k: {}
-    # M-4 内部の M-1 は offline 制約（week_start プロキシで strict 全マクロ 0 サンプル）に合わせる
+    # #379 修正後は M-4 内部の M-1 も本番既定（strict 全マクロ）のままで成立する。
     m4mod.SUB_PARAM_OVERRIDES.clear()
-    m4mod.SUB_PARAM_OVERRIDES.update({"macro_risk_return": {"use_macro": False}})
 
 
 def _run(db) -> dict:
