@@ -18,9 +18,10 @@ companies / macro_data のみ本番から 1 回 pull する。キャッシュが
 - **M-1 は本番と同一 config（全マクロ・strict）で測る**（#379 まで `use_macro=False` に落として
   いたが、0 サンプルの原因は week_start プロキシではなく低頻度マクロの変換バグだった。修正後は
   offline でも本番と同じ 24ヶ月/約71.2k サンプルを再現する＝実測で確認済み）。
-- ただし M-1 strict のスナップショットは HY_OAS/IG_OAS の収集開始（2023-06）に律速され 24ヶ月しか
-  無く、embargo=12 では `min_train_months=6` と合わせて fold が 2 期しか立たない（rank-IC の
-  統計的信頼性は低い）。マクロ履歴の backfill が前提条件（別 Issue）。
+- M-1 strict のスナップショットは以前 HY_OAS/IG_OAS の収集開始（2023-06）に律速され 24ヶ月しか
+  無く fold が 2 期しか立たなかったが、#381（ADR-0016）で既定の信用ファクターを非ICE代替
+  BAA_SPREAD（BAA10Y・2016〜・非truncated）へ移し HY_OAS/IG_OAS を既定から除外した。以降の律速は
+  コモディティ8系列（2020-07 開始）まで緩み、M-1 の n_periods が実用水準（≥8）へ回復する。
 
 実行: `python -m scripts.measure_embargo_impact`（`-m` 必須・[[feedback_scripts_dir_needs_module_invocation]]）
 出力は ASCII のみ（Windows cp932 リダイレクト対策・[[feedback_windows_cp932_stdout_symbols]]）。

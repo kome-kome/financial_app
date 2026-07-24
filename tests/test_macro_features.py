@@ -69,8 +69,28 @@ def test_macro_feature_map_keys():
     assert _MACRO_FEATURE_MAP["macro_corn_yoy"]     == ("CORN",     "yoy")
     assert _MACRO_FEATURE_MAP["macro_soybean_yoy"]  == ("SOYBEAN",  "yoy")
     assert _MACRO_FEATURE_MAP["macro_platinum_yoy"] == ("PLATINUM", "yoy")
+    # #381 非ICE代替の信用スプレッド（Baa−10Y・zscore）
+    assert _MACRO_FEATURE_MAP["macro_baa_spread_zscore"] == ("BAA_SPREAD", "zscore")
     for fname, (scode, ttype) in _MACRO_FEATURE_MAP.items():
         assert ttype in ("yoy", "zscore"), f"{fname} の transform が不正"
+
+
+def test_default_macro_features_excludes_ice_truncated_series():
+    """#381: HY_OAS/IG_OAS は FRED の ICE BofA ライセンス制約で 2023-06 以降しか取得できず
+    strict（同一母集団・ADR-0003）M-1 の学習窓を24ヶ月に律速する。既定からは除外し（選択肢
+    としては残す）、非ICE代替 macro_baa_spread_zscore を既定の信用ファクターとして採用する。"""
+    from plugins.macro_snapshots import DEFAULT_MACRO_FEATURES
+    option_values = {o["value"] for o in MACRO_FEATURE_OPTIONS}
+    # 選択肢としては残る（手動 ON で直近3年窓を使える）
+    assert "macro_hy_oas_zscore" in option_values
+    assert "macro_ig_oas_zscore" in option_values
+    # だが既定には含めない（strict の律速を解く）
+    assert "macro_hy_oas_zscore" not in DEFAULT_MACRO_FEATURES
+    assert "macro_ig_oas_zscore" not in DEFAULT_MACRO_FEATURES
+    # 非ICE代替は既定に含める
+    assert "macro_baa_spread_zscore" in DEFAULT_MACRO_FEATURES
+    # 除外は HY/IG の2系列のみ（他は全選択肢が既定）
+    assert set(DEFAULT_MACRO_FEATURES) == option_values - {"macro_hy_oas_zscore", "macro_ig_oas_zscore"}
 
 
 def test_macro_map_options_consistency():

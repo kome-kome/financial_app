@@ -286,14 +286,21 @@ class TestParamsSchema:
             coerce_params(self.schema, {"fin_features": ["not_a_feature"]})
 
     def test_macro_features_default(self):
-        """macro_features の既定は全選択肢（#358: M-2/M-3 と揃え、コモディティを含む
-        全マクロ系列を既定 ON にした。過剰選択は LassoLarsIC(BIC) が抑える）。"""
+        """macro_features の既定は全選択肢から HY_OAS/IG_OAS を除いた集合（#358 で全系列を
+        既定 ON にしたが、#381 で FRED の ICE BofA 3年窓制限に律速される HY_OAS/IG_OAS のみ
+        strict の学習窓を壊すため既定から除外。過剰選択は LassoLarsIC(BIC) が抑える）。"""
         from plugins.macro_risk_return import MACRO_FEATURE_OPTIONS
         result = coerce_params(self.schema, {})
-        assert result["macro_features"] == [o["value"] for o in MACRO_FEATURE_OPTIONS]
-        # コモディティ8系列が既定に含まれる
-        for k in ("macro_bcom_yoy", "macro_copper_yoy", "macro_platinum_yoy"):
+        option_values = [o["value"] for o in MACRO_FEATURE_OPTIONS]
+        assert result["macro_features"] == [
+            v for v in option_values if v not in ("macro_hy_oas_zscore", "macro_ig_oas_zscore")
+        ]
+        # コモディティ8系列＋非ICE信用代替 BAA は既定に含まれる
+        for k in ("macro_bcom_yoy", "macro_copper_yoy", "macro_platinum_yoy", "macro_baa_spread_zscore"):
             assert k in result["macro_features"]
+        # ICE BofA 系列は既定から外れる（選択肢としては残る）
+        assert "macro_hy_oas_zscore" not in result["macro_features"]
+        assert "macro_ig_oas_zscore" not in result["macro_features"]
 
     def test_macro_features_accepts_nikkei(self):
         result = coerce_params(
