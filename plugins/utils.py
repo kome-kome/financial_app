@@ -737,6 +737,7 @@ def walk_forward_cv_monthly(
     return_residuals: bool = False,
     fit_predict=None,
     embargo_months: int = 0,
+    pass_train_groups: bool = False,
 ) -> list[dict] | tuple[list[dict], dict]:
     """月次ウォークフォワードCV（FUTURE_TASKS.md 仕様）。
     samples_by_ym: {"YYYY-MM": [(feature_row: list[float], target: float), ...]}
@@ -752,6 +753,11 @@ def walk_forward_cv_monthly(
     fit_predict: None=OLS（既定）。callable の場合 fit_predict(train_samples, test_samples)
       → (yhat_orig, y_test_orig) を呼ぶ（XGBoost 等の injectable コールバック用・ADR-0003 §3）。
       None を返したフォールドはスキップ。callable を渡しても M-1 の挙動は変わらない。
+    pass_train_groups: True のとき fit_predict を 3 引数 fit_predict(train_samples, test_samples,
+      train_groups) で呼ぶ。train_groups = 各学習月のサンプル数リスト（train_samples の連結順と
+      一致・合計=len(train_samples)）。learning-to-rank（XGBRanker）が各月を1クエリグループとして
+      fit(group=...) へ渡すための最小拡張（M-5・Issue #362）。既定 False では従来の 2 引数呼び出し
+      で M-1/M-2/M-3 の挙動は不変。
     embargo_months: purge ギャップ（月数・既定0=後方互換）。目的変数が H 週先リターンの
       とき、テスト月のラベル窓 [t, t+H] と時間重複する直近 embargo_months ヶ月分を学習
       集合から除外し、López de Prado (2018, Ch.7) の purged walk-forward を実現する
@@ -772,8 +778,13 @@ def walk_forward_cv_monthly(
         train_yms = all_yms[:max(0, i - embargo_months)]
 
         train_samples: list[tuple] = []
+        train_groups: list[int] = []
         for ym in train_yms:
-            train_samples.extend(samples_by_ym[ym])
+            ym_samples = samples_by_ym[ym]
+            if not ym_samples:
+                continue
+            train_samples.extend(ym_samples)
+            train_groups.append(len(ym_samples))
         test_samples = samples_by_ym.get(test_ym, [])
 
         if len(train_samples) < 5 or not test_samples:
@@ -783,7 +794,10 @@ def walk_forward_cv_monthly(
             fold_res = _fit_predict_fold(train_samples, test_samples, n_feat)
         else:
             try:
-                fold_res = fit_predict(train_samples, test_samples)
+                if pass_train_groups:
+                    fold_res = fit_predict(train_samples, test_samples, train_groups)
+                else:
+                    fold_res = fit_predict(train_samples, test_samples)
             except Exception:
                 continue
         if fold_res is None:
