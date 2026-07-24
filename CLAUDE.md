@@ -64,12 +64,13 @@ pytest tests/test_utils.py  # 単一ファイル
 | ファイル | 役割 |
 |---|---|
 | `database.py` | テーブル定義・upsert・成長率/Zスコア計算 |
-| `collector.py` | オーケストレータ＋後方互換の再エクスポート層＋CLI（実体は下記4分割） |
+| `collector.py` | オーケストレータ＋後方互換の再エクスポート層＋CLI（実体は下記5分割） |
 | `collector_utils.py` | 収集系共通の設定定数・ロガー |
 | `collector_master.py` | 企業/業種マスタ収集（EDINET コードリスト・JPX 業種） |
 | `collector_financials.py` | XBRL 財務収集・パース・CF/PL-BS 補完・全件収集 |
 | `collector_prices.py` | 株価（stooq/J-Quants/Yahoo）・市場データ更新・マクロ収集 |
 | `collector_interim.py` | 半期(H1)財務収集（EDINET 半期報告書043A00/旧四半期Q2・period_type='H1'・Issue #219②） |
+| `collector_disclosures.py` | 会社予想（ガイダンス）開示収集（J-Quants `/fins/summary`・Issue #322）。`statement_disclosure` へ実績/予想値を蓄積し、`feature_disclosure.py` の特徴量化・`recommend_factor_premia.py` の因子プレミア推定の入力元となる |
 | `api.py` | FastAPI REST・SSE・回帰分析 |
 | `plugins/` | 分析モデル（自動検出方式）。詳細は [MODELS.md](docs/MODELS.md) |
 | `templates/*.html` | 画面（`/`=dashboard, `/collection`, `/analysis`, `/company/{code}`, `/models`=モデル解説[技術版], `/guide`=やさしい解説[初心者向け]）。JS は `static/js/<page>.js`（`guide.html` は `models.js` を再利用） |
