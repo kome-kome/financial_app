@@ -1136,6 +1136,11 @@ FRED_RATE_SLEEP = 0.6  # 120 req/min = 2/s → 0.6s でバッファ付き
 FRED_SERIES: list[dict] = [
     {"code": "HY_OAS",       "name": "米HYスプレッド（OAS）",     "category": "credit",    "fred_id": "BAMLH0A0HYM2"},
     {"code": "IG_OAS",       "name": "米IGスプレッド（OAS）",     "category": "credit",    "fred_id": "BAMLC0A0CM"},
+    # 非ICE代替の信用スプレッド（#381）。FRED は 2026-04 以降 ICE BofA 系列（HY_OAS/IG_OAS）を
+    # ローリング3年窓に制限し 2023-06 以前を配信しないため、strict M-1 の学習窓が24ヶ月に律速される。
+    # BAA10Y（Moody's Baa 社債利回り − 米10年金利）は Moody's 由来で truncate されず日次1986〜取得可能。
+    # M-1/M-4 の既定信用ファクターをこちらへ移し、HY_OAS/IG_OAS は選択肢（直近3年窓）として残す。
+    {"code": "BAA_SPREAD",   "name": "米Baa社債スプレッド（Baa−10Y）", "category": "credit", "fred_id": "BAA10Y"},
     {"code": "BREAKEVEN10Y", "name": "米10年BEI（インフレ期待）", "category": "inflation", "fred_id": "T10YIE"},
     {"code": "JP10Y_FRED",   "name": "日10年金利（FRED）",        "category": "rate",      "fred_id": "IRLTLT01JPM156N"},
     {"code": "T10Y2Y",       "name": "米10y−2yスプレッド",       "category": "rate",      "fred_id": "T10Y2Y"},
