@@ -15,7 +15,10 @@ from unittest.mock import MagicMock, patch
 import pytest
 import numpy as np
 
-from plugins.macro_gbdt import MacroGbdtPlugin, _make_xgb_fit_predict
+from plugins.macro_gbdt import (
+    MacroGbdtPlugin, _make_xgb_fit_predict,
+    _build_monotone_constraints, _MONOTONE_SIGN,
+)
 from plugins.macro_snapshots import (
     build_snapshots, FINANCIAL_LAG_DAYS, HORIZON_WEEKS, oof_backtest, build_oof_meta,
 )
@@ -928,7 +931,7 @@ class TestTuningSearchSpace:
     def test_returns_base_params_and_dims(self):
         base_params, dims = plugin.tuning_search_space()
         assert isinstance(base_params, dict)
-        assert len(dims) == 9
+        assert len(dims) == 10
 
     def test_dims_cover_xgb_and_momentum_axes(self):
         _base_params, dims = plugin.tuning_search_space()
@@ -937,6 +940,7 @@ class TestTuningSearchSpace:
             "use_momentum", "momentum_window",
             "max_depth", "learning_rate", "subsample", "colsample_bytree",
             "min_child_weight", "reg_lambda", "reg_alpha",
+            "use_monotone_constraints",   # 符号事前知識 1軸（Issue #366）
         }
         # モメンタム以外の構造・表示専用パラメータは対象外
         assert "fin_features" not in names
@@ -1059,3 +1063,104 @@ class TestPriceFeatures:
         n_px = sum(len(v) for v in s_px.values())
         n_base = sum(len(v) for v in s_base.values())
         assert n_px <= n_base
+
+
+# ── 経済符号の単調性制約（monotone_constraints・Issue #366）─────────────────────
+
+class TestMonotoneConstraints:
+    """符号表・列整合タプル構築・schema・XGB への伝播・execute 完走を検証する。"""
+
+    def test_sign_table_only_confident_financials(self):
+        """符号表は経済理論で確信のある財務比率のみ ±1（マクロ/z_* は非収載）。"""
+        assert _MONOTONE_SIGN == {
+            "pbr": -1, "per": -1, "de_ratio": -1,
+            "roe": 1, "roa": 1, "op_margin": 1, "div_yield": 1,
+        }
+        # 曖昧・レジーム依存は収載しない（=制約なし 0 になる）
+        for k in ("equity_ratio", "sales_growth", "profit_growth", "current_ratio",
+                  "z_pbr", "z_per", "z_roe", "z_de", "z_op_margin",
+                  "cpi_yoy", "jgb10y", "momentum_12m1", "px_vol_13w"):
+            assert k not in _MONOTONE_SIGN
+
+    def test_build_constraints_aligns_to_feat_order(self):
+        """all_feat_names の列位置に沿ってタプルを組み、未収載は 0。"""
+        feats = ["pbr", "cpi_yoy", "roe", "z_pbr", "de_ratio", "px_vol_13w", "momentum_12m1"]
+        mc = _build_monotone_constraints(feats)
+        assert mc == (-1, 0, 1, 0, -1, 0, 0)
+        assert len(mc) == len(feats)      # 列数と厳密一致（位置ずれ防止）
+        assert isinstance(mc, tuple)
+
+    def test_build_constraints_all_zero_when_no_confident_features(self):
+        """収載財務比率が1つも無ければ全 0（制約なしと等価・無害）。"""
+        assert _build_monotone_constraints(["equity_ratio", "cpi_yoy", "momentum_12m1"]) == (0, 0, 0)
+        assert _build_monotone_constraints([]) == ()
+
+    def test_schema_has_checkbox_default_off(self):
+        """params_schema に use_monotone_constraints（checkbox・既定 OFF）が追加されている。"""
+        schema = MacroGbdtPlugin().params_schema()
+        assert "use_monotone_constraints" in schema
+        field = schema["use_monotone_constraints"]
+        assert field["type"] == "checkbox"
+        assert field["default"] is False
+
+    def test_constraints_propagate_to_xgb_regressor(self):
+        """xgb_params.monotone_constraints が CV fit_predict 経由で XGBRegressor へ渡る。"""
+        import xgboost as xgb
+
+        captured: dict = {}
+        orig_init = xgb.XGBRegressor.__init__
+
+        def spy_init(self, **kwargs):
+            captured.update(kwargs)
+            orig_init(self, **kwargs)
+
+        mc = (-1, 0, 1)
+        xgb_params = {
+            "max_depth": 3, "learning_rate": 0.1, "subsample": 0.8,
+            "colsample_bytree": 0.8, "min_child_weight": 1, "reg_lambda": 1.0,
+            "reg_alpha": 0.0, "n_estimators": 50, "early_stopping_rounds": 10,
+            "tree_method": "hist", "objective": "reg:squarederror",
+            "random_state": 42, "monotone_constraints": mc,
+        }
+        train = [([float(i % 7), float(i % 5), float(i % 3)], float(i) * 0.01) for i in range(50)]
+        test  = [([1.0, 2.0, 3.0], 0.05) for _ in range(10)]
+
+        cb = _make_xgb_fit_predict(xgb_params, [])
+        with patch.object(xgb.XGBRegressor, "__init__", spy_init):
+            cb(train, test)
+
+        assert captured.get("monotone_constraints") == mc, "monotone_constraints が XGB へ届いていない"
+
+    def _make_params(self, **overrides):
+        base = {k: v["default"] for k, v in plugin.params_schema().items() if "default" in v}
+        base.update(overrides)
+        return coerce_params(plugin.params_schema(), base)
+
+    def test_execute_with_monotone_on_completes(self):
+        """use_monotone_constraints=True で execute が end-to-end 完走し全社返す
+        （xgboost 3.3.0 が hist+tuple+SHAP を受理する統合確認）。"""
+        db, prices_by_co, fin_by_co, companies = TestExecuteSmoke()._make_db()
+        params = self._make_params(use_macro=False, use_monotone_constraints=True)
+
+        with patch("plugins.macro_gbdt.load_data", return_value=(prices_by_co, fin_by_co, companies)), \
+             patch("plugins.macro_gbdt.preload_macro", return_value={}), \
+             patch("plugins.macro_gbdt.get_producer_scores", return_value={}):
+            result = plugin.execute(params, db)
+
+        assert result["n_companies"] > 0
+        assert result["results"]
+        for item in result["results"]:
+            assert item["mu_raw"] == item["mu_raw"], "mu_raw が NaN"
+
+    def test_execute_default_off_is_baseline(self):
+        """既定（OFF）は従来通り完走（monotone 未指定でも壊れない）。"""
+        db, prices_by_co, fin_by_co, companies = TestExecuteSmoke()._make_db()
+        params = self._make_params(use_macro=False)
+        assert params["use_monotone_constraints"] is False
+
+        with patch("plugins.macro_gbdt.load_data", return_value=(prices_by_co, fin_by_co, companies)), \
+             patch("plugins.macro_gbdt.preload_macro", return_value={}), \
+             patch("plugins.macro_gbdt.get_producer_scores", return_value={}):
+            result = plugin.execute(params, db)
+
+        assert result["n_companies"] > 0

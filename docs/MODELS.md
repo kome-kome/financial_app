@@ -950,6 +950,15 @@ M-1 から**交差項（`fin×macro`）を除いた**同一セット。BIC/LASSO
 
 **最終モデル**: CV フォールドの `best_iteration` の中央値を `n_estimators` として全データで refit。直近月を捨てず予測に活用。
 
+#### 11.4.1 経済符号の単調性制約（monotone_constraints・#366）
+
+BIC/LASSO の事前選択を持たない M-2 は全特徴量を木に丸投げするため、低 S/N な日本株 52週先リターンでは**符号が経済理論と逆の過学習分岐**が生じうる。`use_monotone_constraints`（checkbox・**既定 OFF**）を ON にすると、符号が経済理論から明確な財務比率のみ XGBoost の [`monotone_constraints`](https://xgboost.readthedocs.io/en/stable/tutorials/monotonic.html) で「特徴量↑→予測 μ̂ ↑（+1）/↓（−1）」を木の分岐に強制する（Chen & Guestrin 2016 KDD）。
+
+- **符号表**（`plugins/macro_gbdt.py::_MONOTONE_SIGN`・唯一の源）: `pbr`/`per`/`de_ratio`→**−1**（割高・高レバレッジ→将来リターン低）、`roe`/`roa`/`op_margin`/`div_yield`→**+1**（クオリティ・インカム→将来リターン高）。
+- **収載しない = 0（制約なし）**: マクロ系（符号がレジーム依存）・業種内Zスコア（`z_*`）・曖昧な成長/流動性指標（`equity_ratio`/`sales_growth`/`profit_growth`/`current_ratio`）・モメンタム・`px_*`・交差項。`_build_monotone_constraints(all_feat_names)` が列位置に整合したタプルを組み（numpy 入力は列名を持たないため位置整合が必須）、`xgb_params` 経由で **CV の `fit_predict` と最終モデル双方**へ自動注入する。
+- SHAP は大きさのみで方向を持たない（§11.5）ため、**符号の事前知識は本制約が唯一の注入点**。符号がモデル構造として保証され解釈性も上がる（M-7 の signed SHAP と併用で符号表の妥当性検証が可能）。
+- **検証方針**: ON/OFF を OOF rank-IC（§11.7）で直接比較し、特に **fold 間 std の低下（頑健化）** を確認してから既定化を判断する（`use_momentum`/`px_*` と同じ保守ゲート）。native XGBoost 機能（新パッケージ不要・次元不変）で ADR-0002（M-1 の交差項却下）とは別軸・非抵触。M-5（§14・XGBRanker）も `execute` を継承し、ランカーも `monotone_constraints` を受理するため同一符号表がそのまま効く。詳細は ADR-0019。
+
 ### 11.5 SHAP による解釈
 
 SHAP（SHapley Additive exPlanations）は個々の特徴量がモデルの予測値にどれだけ貢献するかを分解する手法。
@@ -1001,7 +1010,8 @@ M-2 の `execute()` は walk-forward CV の**無リーク OOF 予測**（`{test_
   rank-IC を目的関数とする共有探索基盤（`plugins/tuning.py` + `hyperparameter_search.py`）
   を実装（M-1/M-2/M-3 共通）。M-2 の探索空間は XGBoost 7軸（木構造・正則化）＋
   モメンタム2軸（`use_momentum`/`momentum_window`・候補窓 [3,6,12,18,24] は M-1 と同一・
-  `momentum_window` は `use_momentum=True` のときのみ展開）の9軸
+  `momentum_window` は `use_momentum=True` のときのみ展開）＋符号事前知識1軸
+  （`use_monotone_constraints`・#366・§11.4.1）の10軸
 - quantile regression（`reg:quantileerror`）による予測区間（R1' 代替）
 - SHAP interaction values（特徴量ペアの交互作用可視化）
 - M-2 初心者向けガイド（`M2_MACRO_GBDT_GUIDE.md`）

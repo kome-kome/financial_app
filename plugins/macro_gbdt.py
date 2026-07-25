@@ -43,6 +43,36 @@ from .macro_risk_return import (
     MacroRiskReturnPlugin as _M1,
 )
 
+# ── 経済符号の事前知識（monotone_constraints・Issue #366）───────────────────────
+# XGBoost の単調性制約で、符号が経済理論から明確な財務比率のみ「特徴量↑→52週先
+# リターン↑（+1）/↓（−1）」を木の分岐に強制する。低 S/N な日本株リターン予測で
+# 符号が経済理論と逆の過学習分岐を抑止する正則化（Chen & Guestrin 2016 KDD）。
+#   +1: 高いほど将来リターンが高い（クオリティ・インカム）
+#   −1: 高いほど将来リターンが低い（割高・高レバレッジ）
+# マクロ系（符号がレジーム依存）・業種内Zスコア（z_*）・曖昧な成長/流動性指標・
+# モメンタム・px_* は収載せず 0（制約なし）＝木の自由分岐に委ねる。SHAP は大きさ
+# のみで方向を持たない（execute の np.abs().mean()）ため符号の事前知識は本制約が唯一の注入点。
+_MONOTONE_SIGN: dict[str, int] = {
+    "pbr":       -1,   # 割高（高 PBR）→ バリュープレミアムの逆 → 将来リターン低
+    "per":       -1,   # 割高（高 PER）→ 同上
+    "de_ratio":  -1,   # 高レバレッジ → 財務リスク高 → 将来リターン低
+    "roe":       +1,   # 高収益性（クオリティ）→ 将来リターン高
+    "roa":       +1,   # 高収益性（クオリティ）→ 将来リターン高
+    "op_margin": +1,   # 高営業利益率（クオリティ）→ 将来リターン高
+    "div_yield": +1,   # 高配当利回り（インカム）→ 将来リターン高
+}
+
+
+def _build_monotone_constraints(feat_names: list) -> tuple:
+    """all_feat_names の並び順に沿った monotone_constraints タプルを返す（Issue #366）。
+
+    _MONOTONE_SIGN に載る財務比率のみ ±1、未収載（マクロ・z_*・曖昧な成長/流動性・
+    モメンタム・px_*・交差項）は 0。XGBoost へ列位置で渡す（numpy 入力は列名を持た
+    ないため位置整合が必須）。全要素 0 でも無害（制約なしと等価）。
+    """
+    return tuple(_MONOTONE_SIGN.get(name, 0) for name in feat_names)
+
+
 # ── XGBoost fit_predict コールバックファクトリ ─────────────────────────────────
 
 _VALID_FRAC = 0.2          # 学習データから時系列末尾の何割を early_stopping 検証用に使うか
@@ -301,13 +331,29 @@ class MacroGbdtPlugin(AnalysisPlugin):
                 "max": 100,
                 "step": 10,
             },
+            "use_monotone_constraints": {
+                "type": "checkbox",
+                "label": "経済符号の単調性制約を使う",
+                "description": (
+                    "符号が経済理論から明確な財務比率（PBR/PER/D-E→負、ROE/ROA/"
+                    "営業利益率/配当利回り→正）に単調性制約を課し、符号が理論と逆の"
+                    "過学習分岐を抑止する（Issue #366）。マクロ・業種内Zスコア・"
+                    "モメンタム・px_* は制約なし。既定 OFF：OOF rank-IC の ON/OFF 比較で"
+                    "有効性（特に fold 間 std の低下）を確認してから既定化する"
+                    "（use_momentum/px_* と同じ保守ゲート）。"
+                ),
+                "default": False,
+            },
         }
 
     def tuning_search_space(self) -> tuple:
         """ハイパーパラメータ自動探索の探索空間（Issue #266）。
 
         XGBoost 7軸（木構造・正則化）＋モメンタム2軸（use_momentum/momentum_window・
-        M-1 と同一候補・ADR-0007 §5 のチャネル単位トグル）の9軸。momentum を探索できる
+        M-1 と同一候補・ADR-0007 §5 のチャネル単位トグル）＋符号事前知識1軸
+        （use_monotone_constraints・#366）の10軸。use_monotone_constraints は build_snapshots
+        のキャッシュキーに影響しない純 xgb_param のため再構築を誘発せず LRU も圧迫しない。
+        momentum を探索できる
         のは build_snapshots のキャッシュキーが use_momentum/mom_window を含む（#298）ため
         ＝再構築は momentum 構成6種（off＋窓5種）ごとに1回だけで `_CACHE_MAXSIZE=8` 内に
         収まる。他の構造パラメータ（fin_features/macro_features/use_macro/min_coverage）は
@@ -331,6 +377,7 @@ class MacroGbdtPlugin(AnalysisPlugin):
             SearchDim("min_child_weight",   [1, 5, 10, 20, 30]),
             SearchDim("reg_lambda",         [0.0, 0.5, 1.0, 2.0, 5.0, 10.0]),
             SearchDim("reg_alpha",          [0.0, 0.5, 1.0, 2.0, 5.0]),
+            SearchDim("use_monotone_constraints", [False, True]),
         ]
         return base_params, dims
 
@@ -466,6 +513,14 @@ class MacroGbdtPlugin(AnalysisPlugin):
             "objective":          self._objective(params),
             "random_state":       42,
         }
+
+        # ── 経済符号の単調性制約（Issue #366）─────────────────────────────────
+        # all_feat_names の列位置に整合したタプルを注入。xgb_params 経由のため CV の
+        # fit_predict（_make_cv_callback→base_params）と最終モデル（final_params）双方へ
+        # 自動伝播する。M-5（XGBRanker）も execute を継承し、XGBRanker は monotone_constraints
+        # を受け付けるため同一符号表がランク学習にもそのまま効く。
+        if params.get("use_monotone_constraints", False):
+            xgb_params["monotone_constraints"] = _build_monotone_constraints(all_feat_names)
 
         # ── XGBoost walk-forward CV ───────────────────────────────────────────
         best_iterations: list[int] = []
