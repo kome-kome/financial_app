@@ -616,6 +616,14 @@ conv_score₁₂ₘ = max(<span class="val">5</span>, min(<span class="val">95</
   <p>M-2 は walk-forward CV の<strong>無リーク OOF 予測</strong>だけを使い、<strong>再学習なしで</strong>「予測 μ̂ が将来リターンを順序付けるか」を検証する（既存「バックテスト」＝preset/as-of のポートフォリオ模擬とは<strong>別物</strong>）。各期で μ̂ を横断分位し、<strong>分位別の実現リターン・rank-IC（順位相関）・ロングショート spread・hit-rate</strong> を出力する。μ̂ 水準の時系列ドリフトに頑健な期内横断（per-period）分位を採る。</p>
   <p>あわせて各銘柄の μ̂ を保存し、<strong>売り候補ランキングが「μ の出所」トグルで M-1／M-2 を選べる</strong>（既定は M-1）。M-2 を一度ローカルで実行すると、以降の売り判定で M-2 の μ が使える（未実行なら自動でその成分を除外）。M-2 は予測 SE を持たないため、売り側の R3 足切りゲートは M-2 選択時は無効。設計の記録は ADR-0004。</p>
 
+  <h3>モデル比較の統計的厳密化（#369）</h3>
+  <p>「モデル比較」タブは M-1〜M-5 の <code>oof_backtest</code> を横並びにするが、mean 値の目視だけでは「あるモデルが他より<strong>本当に</strong>有効か」は言えない。walk-forward の各 fold は学習窓が重複し per-fold の rank-IC 系列は iid でないため、素朴な paired-t は分散を過小評価する。そこで #369 では<strong>純後処理</strong>（追加学習・Egress ゼロ・stdlib のみ・実装は <code>model_stats.py</code>）で2点を補強する：</p>
+  <ul>
+    <li><strong>rank-IC 差の有意性マトリクス</strong>：各モデルの per-fold rank-IC を<strong>共通 test 期でペアリング</strong>し、差の平均を系列相関を保存する<strong>定常ブートストラップ</strong>（Politis-Romano 1994）で検定。比較ビューが <strong>▲</strong>（行モデルが有意に優位・95%CIが0を跨がない）/ <strong>▼</strong>（劣位）/ <strong>n.s.</strong>（有意差なし）で表示する。</li>
+    <li><strong>分位単調性</strong>：top−bottom spread へ畳むと隠れる中間分位の U 字/非単調（過学習の兆候）を、期毎 Spearman(分位idx, 分位平均)・隣接分位の正順率・「単調増が偶然でない」片側ブートストラップ p 値で可視化する。</li>
+  </ul>
+  <p>ブートストラップ p 値は Davison-Hinkley フロア <code>(count+1)/(n_boot+1)</code> で厳密 0 を避ける。詳細は MODELS.md §9.12。ADR-0004 の OOF-first 哲学を「差の有意性」まで押し進める補強（非矛盾）。</p>
+
   <h3>参考文献</h3>
   <div class="ref-list">
     <div class="ref-item">

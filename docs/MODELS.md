@@ -804,6 +804,29 @@ walk-forward CV の無リーク残差（`cv_residuals_by_ym`）に適用し、`o
 
 > **purge の実測影響（#375・2026-07-23・本番データ・`scripts/measure_embargo_impact.py`）**: embargo=0→12 で **M-2 の OOF rank-IC は 0.348→0.141（−59%）**、M-1（財務のみ OLS）は 0.237→0.195（−18%）。embargo=0 が過去記録値（M-2≈0.33）を再現した上での低下＝**旧 M-2≈0.33 は大半が 52週先ラベルの前方リーク由来で honest 値は約0.14**。柔軟な XGBoost ほどリークを吸っていた。3兄弟比較や `mu_source` 選択は honest 値（embargo 済み）で判断する。
 
+### 9.12 モデル比較の統計的厳密化（#369・全モデル横断）
+
+`oof_backtest` の mean 値を目視で並べるだけでは「あるモデルが他より**本当に**有効か」は言えない。
+walk-forward の各 fold は学習窓が重複するため per-fold の rank-IC 系列は iid ではなく、素朴な
+paired-t は系列相関を無視して分散を過小評価し、有意差を過大に主張する。#369 では**純後処理**
+（追加学習・価格取得・Egress ゼロ・stdlib のみ）で2点を補強する。実装は `model_stats.py`
+（`oof_backtest` と `model_comparison.run_comparison` が共用）。
+
+- **rank-IC 差の有意性マトリクス**: 各モデルの per-fold IC 系列（`oof_backtest.rank_ic_by_period`
+  ＝`{test_ym: ic}`）を**共通 test 期でペアリング**し、差 IC_A−IC_B の平均を **定常ブートストラップ**
+  （Politis & Romano 1994・リサンプル単位を幾何長ブロックにして fold 間相関を標本内に保存）で検定する。
+  95% CI が 0 を跨がなければ有意。`run_comparison` は全モデルペアの上三角を `significance_matrix`
+  として返し、`/analysis` の比較ビューが ▲（行モデル優位）/▼（劣位）/n.s.（有意差なし）で表示する。
+- **分位単調性**: top−bottom spread へ畳むと中間分位の U 字/非単調（過学習・不安定シグナル）が隠れる。
+  `oof_backtest.monotonicity` は期毎の Spearman(分位idx, 分位平均リターン) の mean/std、隣接分位の
+  正順率（`adjacent_increasing_rate`）、および「単調増が偶然でない」片側ブートストラップ p 値を返す。
+
+> **なぜ Nadeau-Bengio ではなく定常ブートストラップか**: Nadeau & Bengio (2003) の補正 t は
+> train/test の重複比を要するが、`oof_backtest` は per-fold の train/test サイズを保持しない。
+> 定常ブートストラップは分布仮定もサイズ情報も不要で、系列相関を保存したまま平均の分布を得られる。
+> ADR-0004 が確立した OOF-first 哲学を「差の有意性」まで押し進める補強であり非矛盾。
+> 参考: Politis & Romano (1994) DOI:10.1080/01621459.1994.10476870 / Nadeau & Bengio (2003) DOI:10.1023/A:1024068626366。
+
 ---
 
 ## 10. 売り候補ランキング（保有銘柄の売り時）
