@@ -604,7 +604,7 @@ conv_score₁₂ₘ = max(<span class="val">5</span>, min(<span class="val">95</
     <div><span class="spec-label">特徴量選択</span> <strong>BIC/LASSO なし</strong>（全特徴量を投入し木の暗黙選択）</div>
     <div><span class="spec-label">正則化</span> max_depth=4・min_child_weight=5 等の強正則化デフォルト（低 S/N 対策）</div>
     <div><span class="spec-label">R1</span> <strong>なし</strong>（OLS 固有の予測 SE。効用軸ではないため欠落しても幾何は壊れない）</div>
-    <div><span class="spec-label">SHAP</span> グローバル mean|SHAP|（大きさのみ・方向なし）＋全社の per-stock 寄与内訳</div>
+    <div><span class="spec-label">SHAP</span> グローバル mean|SHAP|＋<strong>signed SHAP</strong>（重要度×学習方向）＋<strong>特徴量ペア交互作用</strong>（SHAP interaction）＋全社の per-stock 寄与内訳（#371）</div>
     <div><span class="spec-label">X winsorize</span> <strong>撤去</strong>（木は単調変換不変のためクリップ不要）、y winsorize は維持</div>
     <div><span class="spec-label">符号事前知識</span> <code>use_monotone_constraints</code>（既定 OFF）で確信のある財務比率のみ単調性制約（#366）</div>
   </div>
@@ -612,9 +612,10 @@ conv_score₁₂ₘ = max(<span class="val">5</span>, min(<span class="val">95</
   <h3>経済符号の単調性制約（#366）</h3>
   <p>BIC/LASSO の事前選択を持たない M-2 は全特徴量を木に丸投げするため、低 S/N な日本株リターンでは<strong>符号が経済理論と逆の過学習分岐</strong>が生じうる（SHAP も大きさのみで方向を持たない）。<code>use_monotone_constraints</code>（既定 OFF）を ON にすると、符号が経済理論から明確な財務比率だけに XGBoost の <code>monotone_constraints</code> で「特徴量↑→予測 μ̂ ↑/↓」を強制する：<strong>PBR・PER・D/E→負</strong>（割高・高レバレッジ→リターン低）、<strong>ROE・ROA・営業利益率・配当利回り→正</strong>（クオリティ・インカム→リターン高）。マクロ（レジーム依存）・業種内Zスコア・モメンタム・px_* は<strong>制約なし</strong>。符号がモデル構造として保証され解釈性も上がる。ON/OFF を OOF rank-IC で比較し fold 間 std の低下（頑健化）を確認してから既定化する（<code>use_momentum</code>/px_* と同じ保守ゲート・native XGBoost 機能で次元不変）。設計の記録は ADR-0019。</p>
 
-  <h3>SHAP による解釈</h3>
-  <p>SHAP（SHapley Additive exPlanations）は各特徴量が予測値にどれだけ寄与するかを<strong>理論的に一意に分解</strong>する手法。M-1 の標準化係数バーに相当する位置に global mean|SHAP| を表示し、ランキング行をクリックすると<strong>その銘柄がなぜ推奨されるか</strong>を特徴量別に確認できる。</p>
-  <p><em>注意：</em>mean|SHAP| は<strong>大きさのみ</strong>（非負）。M-1 の係数（正＝リターン↑・負＝リターン↓）と異なり、符号情報は per-stock SHAP パネルで確認する。</p>
+  <h3>SHAP による解釈（signed SHAP＋交互作用・#371）</h3>
+  <p>SHAP（SHapley Additive exPlanations）は各特徴量が予測値にどれだけ寄与するかを<strong>理論的に一意に分解</strong>する手法。ランキング行をクリックすると<strong>その銘柄がなぜ推奨されるか</strong>を特徴量別に確認できる。</p>
+  <p><strong>signed SHAP</strong>（#371）：グローバルバーは <code>mean|SHAP| × 学習方向符号</code> を表示し、<strong>棒長で重要度・左右で方向</strong>を同時に読める（M-1 の標準化係数バーと同じ見え方に整合）。方向は木が実際に学習した <code>corr(特徴量, SHAP)</code> の符号で、<code>use_monotone_constraints</code>（#366）の事前符号との<strong>クロスチェック</strong>に使える。</p>
+  <p><strong>SHAP 交互作用</strong>（#371）：<code>shap_interaction_values</code> で特徴量ペアの交互作用強度を測り上位ペアを可視化する。<strong>M-2 が交差項なしで自動学習する fin×macro 非線形構造の中身</strong>が見える（例：PER × 長期金利）。計算コスト O(n·F²) のため断面を最大 800 社へサブサンプルし、<code>shap_interactions</code> パラメータ（既定 ON）で OFF 可。</p>
 
   <h3>アウトオブサンプル検証（OOF）と売り推奨連携</h3>
   <p>M-2 は walk-forward CV の<strong>無リーク OOF 予測</strong>だけを使い、<strong>再学習なしで</strong>「予測 μ̂ が将来リターンを順序付けるか」を検証する（既存「バックテスト」＝preset/as-of のポートフォリオ模擬とは<strong>別物</strong>）。各期で μ̂ を横断分位し、<strong>分位別の実現リターン・rank-IC（順位相関）・ロングショート spread・hit-rate</strong> を出力する。μ̂ 水準の時系列ドリフトに頑健な期内横断（per-period）分位を採る。</p>

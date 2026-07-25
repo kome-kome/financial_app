@@ -2057,8 +2057,13 @@ function _mgPaintCv(data) {
       best_iteration: ${data.best_iteration||'-'} 木 ／ 学習サンプル: ${(data.n_train_samples||0).toLocaleString()}件 ／ 特徴量: ${(data.selected_features||[]).length}個
     </div>
     <div style="margin-top:8px">
-      <div style="font-size:11px;color:var(--text-secondary);margin-bottom:4px">グローバル特徴量寄与 mean|SHAP|（大きさのみ・方向なし）</div>
+      <div style="font-size:11px;color:var(--text-secondary);margin-bottom:4px">グローバル特徴量寄与 signed SHAP（棒長=mean|SHAP| 重要度 ／ 左右=学習された方向）</div>
       <div id="mg-coef-bars" style="margin-top:4px"></div>
+      <div style="font-size:10px;color:var(--text-muted);margin-top:4px">右（＋）=特徴量↑で予測リターン↑方向に効く ／ 左（−）=↓方向。方向は木が学習した corr(特徴量, SHAP) の符号。</div>
+    </div>
+    <div id="mg-interact-wrap" style="margin-top:12px">
+      <div style="font-size:11px;color:var(--text-secondary);margin-bottom:4px">特徴量ペアの交互作用強度（SHAP interaction・M-2 が自動学習する非線形構造）</div>
+      <div id="mg-interact-bars" style="margin-top:4px"></div>
     </div>
   </div>
   ${oofHtml}
@@ -2079,8 +2084,34 @@ function _mgPaintCv(data) {
   } else {
     cvWrap.innerHTML = cvHtml;
   }
-  // SHAP バー
-  setTimeout(() => _mrrPaintCoefBars(data.feature_coefs || {}, 'mg-coef-bars', 'mg-coef-legend'), 0);
+  // SHAP バー（署名付き重要度＝棒長は重要度・左右は学習方向・#371）
+  setTimeout(() => {
+    _mrrPaintCoefBars(data.feature_coefs_signed || data.feature_coefs || {}, 'mg-coef-bars', 'mg-coef-legend');
+    _mgPaintInteractions(data.feature_interactions || []);
+  }, 0);
+}
+
+// SHAP 交互作用の上位ペア（#371）。棒長=交互作用強度・種別色は左特徴量で分類。
+function _mgPaintInteractions(pairs) {
+  const host = document.getElementById('mg-interact-bars');
+  if (!host) return;
+  if (!pairs.length) {
+    host.innerHTML = '<span style="color:var(--text-muted);font-size:11px">（交互作用なし。特徴量が1個、または算出 OFF）</span>';
+    return;
+  }
+  const maxS = Math.max(...pairs.map(p => p.strength)) || 1;
+  host.innerHTML = pairs.map(p => {
+    const w = (p.strength / maxS) * 100;
+    const color = MRR_COEF_COLORS[_mrrCoefType(p.a)] || cssVar('--status-info');
+    const label = `${_mrrCoefLabel(p.a)} × ${_mrrCoefLabel(p.b)}`;
+    return `<div style="display:flex;align-items:center;gap:8px;margin-bottom:3px">
+        <div style="width:240px;flex:none;font-size:11px;color:var(--text-body);text-align:right;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(p.a)} × ${esc(p.b)}">${esc(label)}</div>
+        <div style="position:relative;flex:1;height:14px;background:var(--border-subtle);border-radius:3px">
+          <div style="position:absolute;left:0;width:${w}%;height:14px;background:${color};border-radius:3px"></div>
+        </div>
+        <div style="width:64px;flex:none;font-size:11px;color:var(--text-muted);text-align:left">${p.strength.toFixed(4)}</div>
+      </div>`;
+  }).join('');
 }
 
 const _MG_VALID_AXES = ['r2', 'r_macro'];

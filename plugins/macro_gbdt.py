@@ -14,7 +14,8 @@ M-1（macro_risk_return）の非線形兄弟。同一スナップショット母
   - 共有ビルダー build_snapshots(..., build_interactions=False)
   - fit_predict コールバックを walk_forward_cv_monthly に注入
   - 内蔵比較: 同一特徴量・同一 fold の素 OLS ベースライン（交差項/BIC なし）
-  - SHAP: グローバル mean|SHAP|（feature_coefs スロット）＋全社 per-stock SHAP
+  - SHAP: グローバル mean|SHAP|（feature_coefs スロット）＋署名付き重要度＋学習方向 corr
+    ＋特徴量ペアの交互作用強度（Issue #371）＋全社 per-stock SHAP
   - R1 なし（効用軸でない）、R_macro は既存 macro_beta producer から流用
 """
 import math
@@ -50,8 +51,9 @@ from .macro_risk_return import (
 #   +1: 高いほど将来リターンが高い（クオリティ・インカム）
 #   −1: 高いほど将来リターンが低い（割高・高レバレッジ）
 # マクロ系（符号がレジーム依存）・業種内Zスコア（z_*）・曖昧な成長/流動性指標・
-# モメンタム・px_* は収載せず 0（制約なし）＝木の自由分岐に委ねる。SHAP は大きさ
-# のみで方向を持たない（execute の np.abs().mean()）ため符号の事前知識は本制約が唯一の注入点。
+# モメンタム・px_* は収載せず 0（制約なし）＝木の自由分岐に委ねる。本制約は符号の
+# 「事前知識」の唯一の注入点。signed SHAP（#371・feature_shap_dir）は学習後に木が
+# 実際に付けた方向の「事後」診断であり、本制約の事前符号とのクロスチェックに使える。
 _MONOTONE_SIGN: dict[str, int] = {
     "pbr":       -1,   # 割高（高 PBR）→ バリュープレミアムの逆 → 将来リターン低
     "per":       -1,   # 割高（高 PER）→ 同上
@@ -77,6 +79,12 @@ def _build_monotone_constraints(feat_names: list) -> tuple:
 
 _VALID_FRAC = 0.2          # 学習データから時系列末尾の何割を early_stopping 検証用に使うか
 _MIN_FIT_N  = 5            # この未満なら early_stopping を諦め固定 n_estimators にフォールバック
+
+# ── SHAP 解釈性強化（signed SHAP＋交互作用・Issue #371）────────────────────────
+_INTERACT_TOP_K   = 15     # グローバル交互作用の上位ペア表示件数
+_INTERACT_MAX_ROWS = 800   # shap_interaction_values は O(n·F²) メモリ＋TreeSHAP O(n·T·D²) で
+                           # 全社（数千）だと重い。断面を等間隔サブサンプルして上限を課す
+                           # （グローバル平均 |交互作用| の順位付けには十分。決定的スライス）。
 
 
 def _make_xgb_fit_predict(xgb_params: dict, best_iterations: list) -> callable:
@@ -127,6 +135,64 @@ def _make_xgb_fit_predict(xgb_params: dict, best_iterations: list) -> callable:
         return yhat, y_test_orig
 
     return fit_predict
+
+
+# ── SHAP 解釈性ヘルパー（Issue #371）──────────────────────────────────────────
+
+def _signed_global_shap(shap_matrix: np.ndarray, X_current: np.ndarray,
+                        feat_names: list) -> tuple[dict, dict]:
+    """署名付きグローバル SHAP（Issue #371）。
+
+    mean|SHAP| は大きさのみで方向を持たない。各特徴量について
+      - 学習された単調方向 = corr(特徴量値, その SHAP 寄与) ∈ [-1, 1]
+      - 署名付き重要度      = mean|SHAP| × 方向符号
+    を返す。方向符号は monotone_constraints（#366）の事前符号とのクロスチェックにも使える。
+    特徴量値・SHAP に NaN/定数が混じる列は方向 0（符号なし＝正扱い）へフォールバック。
+    """
+    signed: dict = {}
+    direction: dict = {}
+    for i, name in enumerate(feat_names):
+        col = shap_matrix[:, i].astype(float)
+        mag = float(np.abs(col).mean())
+        xv = X_current[:, i].astype(float)
+        mask = np.isfinite(xv) & np.isfinite(col)
+        corr = 0.0
+        if mask.sum() >= 2:
+            xm, cm = xv[mask], col[mask]
+            if xm.std() > 0 and cm.std() > 0:
+                corr = float(np.corrcoef(xm, cm)[0, 1])
+        sign = 1.0 if corr >= 0 else -1.0
+        signed[name] = round(mag * sign, 6)
+        direction[name] = round(corr, 4)
+    return signed, direction
+
+
+def _global_interactions(explainer, X_int: np.ndarray, feat_names: list) -> list:
+    """グローバル SHAP 交互作用の上位ペア（Issue #371）。
+
+    shap_interaction_values → (m, F, F)。対称行列の off-diagonal |交互作用| の断面平均で
+    ペア強度を測り（ペア総効果 = [i,j]+[j,i]）、上位 _INTERACT_TOP_K を返す。対角（主効果）
+    は除外。TreeSHAP が交互作用を出せない場合は握って空リストへ degrade。
+    """
+    try:
+        inter = np.asarray(explainer.shap_interaction_values(X_int), dtype=float)
+    except Exception:
+        return []
+    if inter.ndim != 3 or inter.shape[1] != len(feat_names):
+        return []
+    abs_inter = np.abs(inter).mean(axis=0)  # (F, F)
+    F = len(feat_names)
+    pairs = []
+    for i in range(F):
+        for j in range(i + 1, F):
+            strength = float(abs_inter[i, j] + abs_inter[j, i])
+            if strength > 0:
+                pairs.append((feat_names[i], feat_names[j], strength))
+    pairs.sort(key=lambda t: t[2], reverse=True)
+    return [
+        {"a": a, "b": b, "strength": round(s, 6)}
+        for a, b, s in pairs[:_INTERACT_TOP_K]
+    ]
 
 
 # ── プラグイン本体 ────────────────────────────────────────────────────────────
@@ -344,6 +410,17 @@ class MacroGbdtPlugin(AnalysisPlugin):
                 ),
                 "default": False,
             },
+            "shap_interactions": {
+                "type": "checkbox",
+                "label": "SHAP 交互作用を算出",
+                "description": (
+                    "TreeSHAP の交互作用値で、どの特徴量ペアが非線形に効いているかを"
+                    "可視化する（M-2 が自動学習する fin×macro 交互作用の中身・Issue #371）。"
+                    f"計算コストが O(n·F²) のため断面を最大 {_INTERACT_MAX_ROWS} 社へ"
+                    "等間隔サブサンプルして上限を課す。OFF で交互作用計算をスキップ。"
+                ),
+                "default": True,
+            },
         }
 
     def tuning_search_space(self) -> tuple:
@@ -556,6 +633,10 @@ class MacroGbdtPlugin(AnalysisPlugin):
                 "cv_metrics":        {"xgb": None, "ols_baseline": None},
                 "selected_features": all_feat_names,
                 "feature_coefs":     {},
+                "feature_coefs_signed": {},
+                "feature_shap_dir":     {},
+                "feature_interactions": [],
+                "shap_interactions_available": False,
                 "n_train_samples":   total_samples,
                 "n_companies":       0,
                 "risk_axis":         risk_axis,
@@ -622,12 +703,32 @@ class MacroGbdtPlugin(AnalysisPlugin):
 
         # ── SHAP（グローバル＋per-stock）────────────────────────────────────
         explainer = shap.TreeExplainer(final_model)
-        shap_matrix = explainer.shap_values(X_current)  # (n_companies, n_features)
+        shap_matrix = np.asarray(
+            explainer.shap_values(X_current), dtype=float
+        )  # (n_companies, n_features)
 
         global_shap = {
             name: round(float(np.abs(shap_matrix[:, i]).mean()), 6)
             for i, name in enumerate(all_feat_names)
         }
+
+        # ── signed SHAP＋交互作用（解釈性強化・Issue #371）──────────────────
+        # global_shap は大きさのみ。方向（学習された単調符号）と特徴量ペアの
+        # 交互作用強度を追加し、M-2 が自動学習する非線形構造を可視化する。
+        global_shap_signed, shap_direction = _signed_global_shap(
+            shap_matrix, X_current, all_feat_names
+        )
+        if params.get("shap_interactions", True) and len(all_feat_names) >= 2:
+            n_rows = X_current.shape[0]
+            if n_rows > _INTERACT_MAX_ROWS:
+                idx = np.linspace(0, n_rows - 1, _INTERACT_MAX_ROWS).astype(int)
+                X_int = X_current[idx]
+            else:
+                X_int = X_current
+            feature_interactions = _global_interactions(explainer, X_int, all_feat_names)
+        else:
+            feature_interactions = []
+        shap_interactions_available = bool(feature_interactions)
 
         # ── 全社 raw items 構築 ──────────────────────────────────────────────
         raw_items: list[dict] = []
@@ -687,7 +788,11 @@ class MacroGbdtPlugin(AnalysisPlugin):
         return {
             "cv_metrics":        cv_metrics,
             "selected_features": all_feat_names,
-            "feature_coefs":     global_shap,   # mean|SHAP|（大きさのみ・方向なし）
+            "feature_coefs":       global_shap,   # mean|SHAP|（大きさのみ・方向なし・後方互換）
+            "feature_coefs_signed": global_shap_signed,      # 署名付き重要度（Issue #371）
+            "feature_shap_dir":     shap_direction,          # 学習された単調方向 corr∈[-1,1]
+            "feature_interactions": feature_interactions,    # 上位特徴量ペアの交互作用強度
+            "shap_interactions_available": shap_interactions_available,
             "n_train_samples":   total_samples,
             "n_companies":       len(raw_items),
             "risk_axis":         risk_axis,
