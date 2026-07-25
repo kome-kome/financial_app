@@ -65,6 +65,12 @@ FIN_BASE_OPTIONS = [
     {"value": "z_op_margin",    "label": "営業利益率Zスコア"},
     {"value": "z_roe",          "label": "ROE Zスコア"},
     {"value": "z_cf_ratio",     "label": "CF比率Zスコア"},
+    # ── 質・トレンド・業種内相対の追加因子（#373・追加収集ゼロ・成長/バリューと直交）──
+    {"value": "accruals",        "label": "アクルーアル（(純利益−営業CF)/総資産・Sloan質因子）"},
+    {"value": "delta_roe",       "label": "ROE前年差（%pt・改善/悪化トレンド）"},
+    {"value": "delta_op_margin", "label": "営業利益率前年差（%pt・改善/悪化トレンド）"},
+    {"value": "z_roe_sec",       "label": "ROE 業種内Zスコア"},
+    {"value": "z_op_margin_sec", "label": "営業利益率 業種内Zスコア"},
 ]
 DEFAULT_FIN_FEATURES = ["per", "pbr", "roe", "equity_ratio", "roa", "eps_growth"]
 
@@ -101,6 +107,15 @@ _MACRO_MAP = {
     "macro_jp_real_gdp_yoy":     ("JP_REAL_GDP",  "yoy"),
     "macro_jp_unemp_zscore":     ("JP_UNEMP",     "zscore"),
     "macro_jp_trade_bal_zscore": ("JP_TRADE_BAL", "zscore"),
+    # ── ESRI 四半期別GDP速報 需要項目（#373・追加収集ゼロの死蔵解消）─────
+    # collector_prices.py ESRI_SERIES で既収集の実質季節調整4系列（十億円・水準系→yoy）。
+    # 総需要 JP_REAL_GDP の内訳を民間消費/住宅/設備/公共の需要項目へ分解し業種別露出を捉える。
+    # M-1/M-2 向け（四半期→月次ffill で週次変化は疎・ADR-0012 により M-3=DLM には不適・
+    # 既存 JP_REAL_GDP と同じ扱い）。公表ラグは ESRI_SERIES.lag_days=60 で trade_date 補正済。
+    "macro_jp_gdp_consumption_yoy": ("JP_GDP_PRIVATE_CONSUMPTION", "yoy"),
+    "macro_jp_gdp_residential_yoy": ("JP_GDP_RESIDENTIAL_INV",     "yoy"),
+    "macro_jp_gdp_capex_yoy":       ("JP_GDP_CAPEX",               "yoy"),
+    "macro_jp_gdp_public_inv_yoy":  ("JP_GDP_PUBLIC_INV",          "yoy"),
     # ── 鉱工業指数（e-Stat・#253 の FRED 凍結代替・#281）────────────────────────
     # JPNPROINDMISMEI（旧 FRED 系列）は2024-04-30凍結。e-Stat「鉱工業指数」2020年基準・
     # 鉱工業総合を直接取得する代替に切替。生産・在庫とも水準系（常に正）なので yoy。
@@ -168,6 +183,10 @@ MACRO_FEATURE_OPTIONS = [
     {"value": "macro_jp10y_fred_zscore",   "label": "日10年金利（FRED）Zスコア"},
     {"value": "macro_t10y2y_zscore",       "label": "米10y−2yスプレッド Zスコア"},
     {"value": "macro_jp_real_gdp_yoy",     "label": "日本 実質GDP 前年比（YoY）"},
+    {"value": "macro_jp_gdp_consumption_yoy", "label": "日本 GDP 民間最終消費支出 前年比（YoY）"},
+    {"value": "macro_jp_gdp_residential_yoy", "label": "日本 GDP 民間住宅投資 前年比（YoY）"},
+    {"value": "macro_jp_gdp_capex_yoy",       "label": "日本 GDP 民間企業設備投資 前年比（YoY）"},
+    {"value": "macro_jp_gdp_public_inv_yoy",  "label": "日本 GDP 公的固定資本形成（公共投資）前年比（YoY）"},
     {"value": "macro_jp_unemp_zscore",     "label": "日本 失業率 Zスコア"},
     {"value": "macro_jp_trade_bal_zscore", "label": "日本 貿易収支 Zスコア"},
     {"value": "macro_jp_iip_yoy",           "label": "日本 鉱工業生産指数 前年比（YoY）"},

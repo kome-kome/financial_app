@@ -43,7 +43,13 @@ WITH d AS (
         CASE WHEN COALESCE(fr.bs_total_assets,0) <> 0
              THEN ROUND((COALESCE(fr.pl_revenue,0) / fr.bs_total_assets)::numeric, 4) END AS asset_turnover,
         CASE WHEN COALESCE(fr.bs_current_assets,0) <> 0 OR COALESCE(fr.bs_total_liabilities,0) <> 0
-             THEN ROUND((COALESCE(fr.bs_current_assets,0) + COALESCE(fr.bs_investment_securities,0) * 0.7 - COALESCE(fr.bs_total_liabilities,0))::numeric, 0) END AS net_cash
+             THEN ROUND((COALESCE(fr.bs_current_assets,0) + COALESCE(fr.bs_investment_securities,0) * 0.7 - COALESCE(fr.bs_total_liabilities,0))::numeric, 0) END AS net_cash,
+        -- アクルーアル（Sloan 1996 の質因子・#373）: (純利益 − 営業CF)/総資産。無次元。
+        -- 会計発生高が大きいほど将来リターンが低い傾向。純利益・営業CF のどちらか未開示なら
+        -- null 伝搬（分子を COALESCE で 0 埋めしない＝営業CF欠損企業を「発生高ゼロ」と誤認しないため）。
+        CASE WHEN COALESCE(fr.bs_total_assets,0) <> 0
+             THEN ROUND(((COALESCE(NULLIF(fr.pl_net_income,0), NULLIF(fr.pl_net_income_attr,0)) - fr.cf_operating_cf)
+                         / fr.bs_total_assets)::numeric, 4) END AS accruals
     FROM financial_records fr
     LEFT JOIN companies c ON c.edinet_code = fr.edinet_code
     -- 通期のみを露出（Issue #219② フェーズA）。半期(H1)等の非通期行を同一テーブルに同居させても、
@@ -84,10 +90,25 @@ SELECT
     CASE WHEN n.pl_eps IS NOT NULL AND n.pl_eps <> 0
           AND LAG(n.pl_eps) OVER cw IS NOT NULL AND LAG(n.pl_eps) OVER cw <> 0
          THEN ROUND(((n.pl_eps / LAG(n.pl_eps) OVER cw - 1) * 100)::numeric, 2) END AS eps_growth,
+    -- ファンダメンタル・トレンド（#373）: 収益性水準の前年差（%ポイント）。改善/悪化の
+    -- 方向そのもの＝比率growth（rev/op/eps_growth）とは別軸のモメンタム。cw（企業内・年度順）
+    -- で1期LAG。前年値が無い初年度は null。
+    CASE WHEN n.roe IS NOT NULL AND LAG(n.roe) OVER cw IS NOT NULL
+         THEN ROUND((n.roe - LAG(n.roe) OVER cw)::numeric, 2) END AS delta_roe,
+    CASE WHEN n.op_margin IS NOT NULL AND LAG(n.op_margin) OVER cw IS NOT NULL
+         THEN ROUND((n.op_margin - LAG(n.op_margin) OVER cw)::numeric, 2) END AS delta_op_margin,
+    -- 業種内Zスコア（#373）: 同年度×同業種での相対位置。既存の全ユニバースZ（yw）が持つ
+    -- 業種構成バイアス（高ROE業種に居るだけで高Z）を除去。業種内サンプル数が少ないと不安定な
+    -- ため既存Zと同じ COUNT>=2 下限ガード。industry=NULL の行は1グループに集約される。
+    CASE WHEN COUNT(n.roe) OVER yws >= 2
+         THEN ROUND(((n.roe - AVG(n.roe) OVER yws) / COALESCE(NULLIF(STDDEV_SAMP(n.roe) OVER yws, 0), 1.0))::numeric, 4) END AS z_roe_sec,
+    CASE WHEN COUNT(n.op_margin) OVER yws >= 2
+         THEN ROUND(((n.op_margin - AVG(n.op_margin) OVER yws) / COALESCE(NULLIF(STDDEV_SAMP(n.op_margin) OVER yws, 0), 1.0))::numeric, 4) END AS z_op_margin_sec,
     rr.predicted_market_cap,
     rr.gap_ratio
 FROM n
 LEFT JOIN regression_results rr
        ON rr.edinet_code = n.edinet_code AND rr.year = n.year AND rr.period_end = n.period_end
 WINDOW yw AS (PARTITION BY n.year),
+       yws AS (PARTITION BY n.year, n.industry),
        cw AS (PARTITION BY n.edinet_code ORDER BY n.year, n.period_end)
