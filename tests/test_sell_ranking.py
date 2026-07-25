@@ -332,10 +332,15 @@ class TestMuSource:
         db.add_all(_universe(make_metric, [1.0, 2.0, 3.0, 4.0, 5.0]))
         db.commit()
 
-    def _seed_m2(self, db, mus):
+    def _seed_m2(self, db, mus, r1_primes=None):
         from database import replace_macro_gbdt_scores
+        r1_primes = r1_primes or {}
         replace_macro_gbdt_scores(
-            db, [{"edinet_code": ec, "mu": v} for ec, v in mus.items()], "2026-06-26")
+            db,
+            [{"edinet_code": ec, "mu": v, "r1_prime": r1_primes.get(ec)}
+             for ec, v in mus.items()],
+            "2026-06-26",
+        )
 
     def test_macro_gbdt_mu_used_when_available(self, db, make_metric):
         self._seed_universe(db, make_metric)
@@ -368,11 +373,39 @@ class TestMuSource:
                     "min_coverage": 0.0}, db)
         assert res["mu_source"] == "macro_gbdt"
 
-    def test_r3_gate_noop_under_macro_gbdt(self, db, make_metric):
+    def test_r3_gate_active_under_macro_gbdt(self, db, make_metric):
+        """R3 足切りゲート再有効化（Issue #365）: M-2 は r1_prime=コンフォーマル区間半幅を
+        持つため、r1_prime > r3_gate の SELL 銘柄は REDUCE へ格下げされる。"""
+        self._seed_universe(db, make_metric)
+        # E0001 は売りスコア最高（低μ）だが r1_prime=0.30 > gate=0.1 → 確実性低で格下げ。
+        self._seed_m2(db, {"E0001": -0.20, "E0002": -0.05, "E0003": 0.0,
+                           "E0004": 0.05, "E0005": 0.10},
+                      r1_primes={"E0001": 0.30})
+        res = _run({"holdings": "1001", "weights": {"mu": 1.0}, "min_coverage": 0.0,
+                    "sell_threshold": 0.8, "reduce_threshold": 0.3,
+                    "r3_gate": 0.1, "mu_source": "macro_gbdt", "timing_adjust": False}, db)
+        row = res["results"][0]
+        assert row["sec_code"] == "1001"
+        assert row["action"] == "REDUCE"   # 区間半幅超過 → SELL を抑制
+
+    def test_r3_gate_passes_low_uncertainty_under_macro_gbdt(self, db, make_metric):
+        """r1_prime <= r3_gate（確実性高）の SELL 銘柄はゲートを素通りし SELL のまま。"""
         self._seed_universe(db, make_metric)
         self._seed_m2(db, {"E0001": -0.20, "E0002": -0.05, "E0003": 0.0,
-                           "E0004": 0.05, "E0005": 0.10})
-        # r3_gate>0 でも M-2 は r1_prime 無 → SELL を REDUCE に格下げしない（no-op）
+                           "E0004": 0.05, "E0005": 0.10},
+                      r1_primes={"E0001": 0.05})
+        res = _run({"holdings": "1001", "weights": {"mu": 1.0}, "min_coverage": 0.0,
+                    "sell_threshold": 0.8, "reduce_threshold": 0.3,
+                    "r3_gate": 0.1, "mu_source": "macro_gbdt", "timing_adjust": False}, db)
+        row = res["results"][0]
+        assert row["sec_code"] == "1001"
+        assert row["action"] == "SELL"
+
+    def test_r3_gate_noop_when_r1_prime_missing_macro_gbdt(self, db, make_metric):
+        """r1_prime=None（列未 migration / 旧スナップショット）はゲート素通り（graceful）。"""
+        self._seed_universe(db, make_metric)
+        self._seed_m2(db, {"E0001": -0.20, "E0002": -0.05, "E0003": 0.0,
+                           "E0004": 0.05, "E0005": 0.10})   # r1_prime 全 None
         res = _run({"holdings": "1001", "weights": {"mu": 1.0}, "min_coverage": 0.0,
                     "sell_threshold": 0.8, "reduce_threshold": 0.3,
                     "r3_gate": 0.1, "mu_source": "macro_gbdt", "timing_adjust": False}, db)

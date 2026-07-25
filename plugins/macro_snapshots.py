@@ -1015,8 +1015,99 @@ def build_oof_meta(stock_ids_by_ym: dict | None, sample_meta_by_ym: dict, yms) -
     return meta
 
 
+# ── コンフォーマル予測区間（Issue #365・分割コンフォーマル）──────────────────
+# XGBoost（M-2）は OLS のような閉形式の予測 SE を持たない。代わりに無リーク
+# walk-forward OOF 残差の絶対値の τ 分位を区間半幅（r1_prime）とする分割コンフォーマル
+# （Lei et al. 2018, JASA DOI:10.1080/01621459.2017.1307116）で確実性軸を与える。
+# marginal 版（全銘柄一定半幅）は sell_ranking の R3 足切りゲートを全通過/全遮断の二択に
+# 退化させるため、既存 R3 バケット（業種×サイズ三分位）条件付きで per-stock 化する
+# （Koenker & Bassett 1978 の分位のノンパラ近似）。バケット→業種→global の順に最小標本数を
+# 満たす最も細かい粒度を採用（_compute_r3_buckets / _r3_for と同一フォールバック規約）。
+CONFORMAL_TAU = 0.9          # 既定被覆水準（|resid| の 0.9 分位＝片側 90% を半幅とする）
+CONFORMAL_MIN_BUCKET = 20    # τ=0.9 分位が安定する最小 |resid| 標本数（未満は下位粒度へ）
+
+
+def _conformal_size_thresholds(meta_by_ym: dict) -> tuple | None:
+    """meta_by_ym の (sector, size) から size 三分位閾値 (t1,t2) を返す。
+
+    ADR-0003 の階層（macro_snapshots が基盤・M-1/M-2 がその上）を保つため、
+    macro_risk_return._compute_r3_buckets と同一の三分位ロジックを本モジュール内に複製する
+    （M-1 への上向き依存を作らない）。"""
+    sizes = [size for ym in meta_by_ym for (_sec, size) in meta_by_ym.get(ym, [])
+             if size is not None and size > 0]
+    if len(sizes) < 3:
+        return None
+    ss = sorted(sizes)
+    return (ss[len(ss) // 3], ss[2 * len(ss) // 3])
+
+
+def _conformal_size_bucket(size, thresholds) -> str | None:
+    """総資産を S/M/L の三分位バケットへ（_M1._size_bucket と同一・欠損は None）。"""
+    if size is None or size <= 0 or thresholds is None:
+        return None
+    t1, t2 = thresholds
+    return "S" if size < t1 else ("M" if size < t2 else "L")
+
+
+def conformal_bucket_halfwidths(residuals_by_ym: dict, meta_by_ym: dict,
+                                tau: float = CONFORMAL_TAU,
+                                min_bucket: int = CONFORMAL_MIN_BUCKET) -> dict:
+    """OOF 残差 |resid| の τ 分位を (業種×サイズ)/業種/global 粒度で集計し半幅マップを返す。
+
+    residuals_by_ym = {ym: [(yhat, ytrue), ...]}（walk_forward_cv_monthly の return_residuals=True）。
+    meta_by_ym[ym][k] = (sector, size)（build_snapshots の sample_meta_by_ym・残差と同順）。
+    返り値: {"bucket":{(sec,bkt):hw}, "sector":{sec:hw}, "global":hw|None,
+             "thresholds":(t1,t2)|None, "tau":tau}。半幅は該当粒度の標本数 >= min_bucket の
+    ときのみ格納（未満は conformal_halfwidth_for が下位粒度へフォールバック）。"""
+    thresholds = _conformal_size_thresholds(meta_by_ym)
+    bkt_abs: dict = defaultdict(list)
+    sec_abs: dict = defaultdict(list)
+    glob_abs: list = []
+    for ym, resids in residuals_by_ym.items():
+        metas = meta_by_ym.get(ym, [])
+        for k, (yhat, ytrue) in enumerate(resids):
+            if k >= len(metas):
+                break  # 添字対応が崩れた場合の安全策（通常は同長）
+            sec, size = metas[k]
+            ae = abs(ytrue - yhat)
+            glob_abs.append(ae)
+            if sec:
+                sec_abs[sec].append(ae)
+                b = _conformal_size_bucket(size, thresholds)
+                if b is not None:
+                    bkt_abs[(sec, b)].append(ae)
+
+    def _q(vals):
+        return float(np.quantile(vals, tau)) if len(vals) >= min_bucket else None
+
+    return {
+        "bucket":     {k: q for k, v in bkt_abs.items() if (q := _q(v)) is not None},
+        "sector":     {k: q for k, v in sec_abs.items() if (q := _q(v)) is not None},
+        "global":     (float(np.quantile(glob_abs, tau)) if glob_abs else None),
+        "thresholds": thresholds,
+        "tau":        tau,
+    }
+
+
+def conformal_halfwidth_for(sector, size, data: dict) -> float | None:
+    """企業の (sector, size) から r1_prime（区間半幅）を返す。bucket→sector→global フォールバック。"""
+    if not data:
+        return None
+    bkt = _conformal_size_bucket(size, data.get("thresholds"))
+    if sector and bkt is not None:
+        hw = data["bucket"].get((sector, bkt))
+        if hw is not None:
+            return hw
+    if sector:
+        hw = data["sector"].get(sector)
+        if hw is not None:
+            return hw
+    return data.get("global")
+
+
 def oof_backtest(residuals_by_ym: dict, n_quantiles: int = 5, cost_bps: float = 0.0,
-                 meta_by_ym: dict | None = None, rebalance_per_year: float | None = None) -> dict:
+                 meta_by_ym: dict | None = None, rebalance_per_year: float | None = None,
+                 tau: float = CONFORMAL_TAU) -> dict:
     """無リーク OOF 予測から「アウトオブサンプル検証（OOF）」指標を算出する（ADR-0004）。
 
     residuals_by_ym = {test_ym: [(yhat, y_true), ...]}（walk_forward_cv_monthly の
@@ -1176,6 +1267,25 @@ def oof_backtest(residuals_by_ym: dict, n_quantiles: int = 5, cost_bps: float = 
         if (effective_turnover is not None and rebalance_per_year) else None
     )
 
+    # ── コンフォーマル区間の被覆診断（Issue #365）─────────────────────────────
+    # honest split-conformal 被覆率: 各 test 期を、それより前の全 test 期の |resid| で較正した
+    # marginal 半幅（τ 分位）で被覆判定し、標本加重平均する（Lei et al. 2018 の妥当性検査）。
+    # 追加学習・Egress ゼロ。marginal（全銘柄一定半幅）で、per-stock バケット化は producer 側
+    # （conformal_bucket_halfwidths）が別途担う。yms は昇順のため calib は過去のみで無リーク。
+    cov_covered = 0
+    cov_total = 0
+    calib_abs: list = []
+    for ym in yms:
+        if len(calib_abs) >= CONFORMAL_MIN_BUCKET:
+            hw = float(np.quantile(calib_abs, tau))
+            for yhat, ytrue in residuals_by_ym[ym]:
+                cov_total += 1
+                if abs(ytrue - yhat) <= hw:
+                    cov_covered += 1
+        calib_abs.extend(abs(ytrue - yhat) for yhat, ytrue in residuals_by_ym[ym])
+    interval_coverage = round(cov_covered / cov_total, 4) if cov_total else None
+    interval_halfwidth = round(float(np.quantile(calib_abs, tau)), 6) if calib_abs else None
+
     # 分位単調性の畳み込み（純後処理・Egress ゼロ）。model_stats はブートストラップに
     # stdlib random のみ使用（seed 固定で決定的）。
     from model_stats import monotonicity_summary
@@ -1209,4 +1319,10 @@ def oof_backtest(residuals_by_ym: dict, n_quantiles: int = 5, cost_bps: float = 
         "annual_turnover":                annual_turnover,
         "long_short_spread_net_turnover": long_short_spread_net_turnover,
         "breakeven_cost_bps":             breakeven_cost_bps,
+        # コンフォーマル区間の被覆診断（Issue #365・全モデル family-wide）。honest
+        # walk-forward split-conformal の実測被覆率。理想は ≈ interval_tau。
+        "interval_coverage":   interval_coverage,
+        "interval_tau":        tau,
+        "interval_halfwidth":  interval_halfwidth,
+        "n_interval_calib":    cov_total,
     }

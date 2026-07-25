@@ -39,6 +39,8 @@ from .macro_snapshots import (
     get_producer_scores,
     oof_backtest,
     build_oof_meta,
+    conformal_bucket_halfwidths,
+    conformal_halfwidth_for,
 )
 from .macro_risk_return import (
     MacroRiskReturnPlugin as _M1,
@@ -472,20 +474,21 @@ class MacroGbdtPlugin(AnalysisPlugin):
     def read_producer_scores(self, db: Any, macro_snapshot: dict | None = None) -> dict:
         """M-1 と同一形 {edinet_code: {mu, r_macro, r1_prime}} を返す（sell_ranking 共用）。
 
-        mu は永続化済み macro_gbdt_scores、r_macro は共有 macro_beta producer から
-        マージ、r1_prime は常に None（XGBoost は OLS 予測SE を持たない・ADR-0003 §5）。"""
-        from database import get_macro_gbdt_scores
-        mus = get_macro_gbdt_scores(db)
-        if not mus:
+        mu / r1_prime は永続化済み macro_gbdt_scores、r_macro は共有 macro_beta producer
+        からマージ。r1_prime はコンフォーマル区間半幅（Issue #365）＝ sell_ranking の R3 足切り
+        ゲートが読む確実性軸。列未 migration / 旧スナップショットでは None（ゲート素通り）。"""
+        from database import get_macro_gbdt_producer
+        prods = get_macro_gbdt_producer(db)
+        if not prods:
             return {}
         r_macro_src = get_producer_scores(db, macro_snapshot)
         out: dict = {}
-        for ec, mu in mus.items():
+        for ec, rec in prods.items():
             prod = r_macro_src.get(ec) or {}
             out[ec] = {
-                "mu":       float(mu),
+                "mu":       float(rec["mu"]),
                 "r_macro":  prod.get("r_macro"),
-                "r1_prime": None,
+                "r1_prime": rec.get("r1_prime"),
             }
         return out
 
@@ -525,7 +528,8 @@ class MacroGbdtPlugin(AnalysisPlugin):
         try:
             replace_macro_gbdt_scores(
                 db,
-                [{"edinet_code": it["edinet_code"], "mu": it["mu_raw"]} for it in raw_items],
+                [{"edinet_code": it["edinet_code"], "mu": it["mu_raw"],
+                  "r1_prime": it.get("r1")} for it in raw_items],
                 rep_str,
             )
         except Exception:
@@ -678,6 +682,13 @@ class MacroGbdtPlugin(AnalysisPlugin):
         m1_inst = _M1()
         r3_data = m1_inst._compute_r3_buckets(cv_residuals_xgb, sample_meta_by_ym)
 
+        # ── コンフォーマル区間半幅 r1_prime（確実性軸・Issue #365）────────────────
+        # XGBoost は OLS 予測SE を持たないため、無リーク OOF 残差 |resid| の τ 分位を
+        # (業種×サイズ)/業種/global 粒度で集計し per-stock の区間半幅とする（分割コンフォーマル・
+        # Lei et al. 2018）。sell_ranking の R3 足切りゲートが読む。r3_data と同一の残差・
+        # メタから算出（R3=√平均二乗残差=リスク軸／r1_prime=|resid| τ分位=確実性軸で役割は別）。
+        conformal_data = conformal_bucket_halfwidths(cv_residuals_xgb, sample_meta_by_ym)
+
         # ── 最終モデル（全データで学習）─────────────────────────────────────
         n_est_final = (
             int(statistics.median(best_iterations))
@@ -739,6 +750,9 @@ class MacroGbdtPlugin(AnalysisPlugin):
             snap_date  = info["snap_date"]
             r2 = _realized_vol(price_rows, snap_date, weeks=52)
             r3 = m1_inst._r3_for(info.get("industry"), info.get("size"), r3_data)
+            # r1_prime = コンフォーマル区間半幅（確実性軸・Issue #365）。XGBoost は OLS 予測SE を
+            # 持たないため OOF 残差の τ 分位で代替。sell_ranking の R3 足切りゲートが読む。
+            r1p = conformal_halfwidth_for(info.get("industry"), info.get("size"), conformal_data)
             stock_shap = {
                 name: round(float(shap_matrix[j, i]), 4)
                 for i, name in enumerate(all_feat_names)
@@ -749,7 +763,7 @@ class MacroGbdtPlugin(AnalysisPlugin):
                 "company_name": info["company_name"],
                 "industry":     info["industry"],
                 "mu_raw":       round(mu_raw, 6),
-                "r1":           None,  # XGBoost は OLS 予測 SE を持たない（ADR-0003 §5）
+                "r1":           round(r1p, 6) if r1p is not None else None,  # コンフォーマル区間半幅（Issue #365）
                 "r2":           round(r2, 6) if r2 is not None else None,
                 "r3":           round(r3, 6) if r3 is not None else None,
                 "shap":         stock_shap,

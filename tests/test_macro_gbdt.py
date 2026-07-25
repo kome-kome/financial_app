@@ -573,8 +573,12 @@ class TestExecuteSmoke:
         assert result["feature_interactions"] == []
         assert result["shap_interactions_available"] is False
 
-    def test_execute_r1_is_none(self):
-        """XGBoost は R1（OLS 予測 SE）を出さない（ADR-0003 §5）。"""
+    def test_execute_r1_is_conformal_halfwidth(self):
+        """R1（確実性軸）= コンフォーマル区間半幅（Issue #365）。OLS 予測SE の代替。
+
+        XGBoost は閉形式の予測SE を持たないため、OOF 残差 |resid| の τ 分位（区間半幅）で
+        r1 を埋める。非負・有限（None もフォールバック不能時は許容）で、sell_ranking の
+        R3 足切りゲートが読める形であることを確認する。"""
         db, prices_by_co, fin_by_co, companies = self._make_db()
         params = self._make_params(use_macro=False)
 
@@ -583,8 +587,11 @@ class TestExecuteSmoke:
              patch("plugins.macro_gbdt.get_producer_scores", return_value={}):
             result = plugin.execute(params, db)
 
-        for item in result["results"]:
-            assert item.get("r1") is None, f"r1 が None でない（{item['edinet_code']}）"
+        r1s = [item.get("r1") for item in result["results"]]
+        # 少なくとも一部の銘柄が非 None の区間半幅を持つ（OOF 残差が揃えば global で必ず埋まる）。
+        assert any(v is not None for v in r1s), "r1（コンフォーマル区間半幅）が全社 None"
+        for v in r1s:
+            assert v is None or (isinstance(v, float) and v >= 0.0), f"r1 が不正な区間半幅: {v}"
 
     def test_execute_with_partial_macro_nan(self):
         """マクロ一部欠損（NaN）でも execute が end-to-end（XGB CV・OLS baseline・最終fit

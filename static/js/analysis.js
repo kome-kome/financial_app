@@ -981,6 +981,11 @@ function _mcModelCard(m) {
         <div style="font-size:15px;font-weight:700;color:${(monoSp||0)>0?cssVar('--val-up-text'):cssVar('--val-down-text')}">${monoSp!=null?monoSp.toFixed(2):'-'}<span style="font-size:11px;color:var(--text-muted)"> ／ 隣接 ${monoRate!=null?(monoRate*100).toFixed(0)+'%':'-'}</span></div>
         <div style="font-size:10px;color:${monoSig?cssVar('--val-up-text'):'var(--text-muted)'}">p=${monoP!=null?monoP.toFixed(3):'-'}${monoSig?' ✓有意':''}</div>
       </div>
+      <div style="padding:6px 8px;background:var(--bg-panel,var(--bg-sunken));border-radius:6px" title="コンフォーマル予測区間の被覆率（Issue #365）。無リークwalk-forward: 各期をそれより過去の残差で較正した区間の実測被覆率。名目τ(既定90%)に近いほど区間較正が良い。追加学習ゼロ。">
+        <div style="font-size:10px;color:var(--text-muted)">区間被覆率（実測 ／ 名目τ）</div>
+        <div style="font-size:15px;font-weight:700;color:${(() => { const c=oof.interval_coverage, t=oof.interval_tau; if(c==null||t==null) return 'var(--text-muted)'; return Math.abs(c-t)<=0.05?cssVar('--val-up-text'):cssVar('--val-down-text'); })()}">${oof.interval_coverage!=null?(oof.interval_coverage*100).toFixed(0)+'%':'-'}<span style="font-size:11px;color:var(--text-muted)"> ／ ${oof.interval_tau!=null?(oof.interval_tau*100).toFixed(0)+'%':'-'}</span></div>
+        <div style="font-size:10px;color:var(--text-muted)">${oof.n_interval_calib||0} 標本較正</div>
+      </div>
     </div>`;
   const bars = hasOof ? `
     <div style="font-size:10px;color:var(--text-secondary);margin-bottom:4px">分位別 平均実現リターン（左=最低 μ̂ → 右=最高）</div>

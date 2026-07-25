@@ -756,7 +756,7 @@ $$U = \mu_{\text{raw}} - \lambda \cdot R_{\text{axis}}$$
 
 λ はリスク回避度（スライダー、0〜5、既定 1.0）。$R_{\text{axis}}$ は `risk_axis` で選んだリスク（R2 既定 / R_macro）。期待リターンは **μ_raw**（OLS の生予測値。セクター収縮は低シグナル時に銘柄差を消すため廃止）。
 
-**R3 足切りゲート（`r3_gate`）**: CV-RMSE がスライダー値を超える銘柄を上位表示から除外（0=ゲートなし）。低信頼銘柄（モデルがその企業タイプを苦手とするバケット）を推奨集合から取り除くための信頼度 machinery。#217 SELL ランキングにも R3 ゲートを action-label 段で実装（低信頼保有を SELL から除外）。
+**R3 足切りゲート（`r3_gate`）**: CV-RMSE がスライダー値を超える銘柄を上位表示から除外（0=ゲートなし）。低信頼銘柄（モデルがその企業タイプを苦手とするバケット）を推奨集合から取り除くための信頼度 machinery。#217 SELL ランキングにも R3 ゲートを action-label 段で実装（低信頼保有を SELL から除外）。売り推奨側のゲートが読む確実性軸 `r1_prime` は M-1=OLS 予測SE／**M-2=コンフォーマル区間半幅（§11.7.1・#365）**で、M-2 選択時もゲートが機能する。
 
 **効用 U・Pareto 判定・並べ替え・`top_n` 抽出・R3 ゲートは λ／リスク軸にのみ依存する後処理であり、モデル再学習に一切関与しない**。そのためサーバー（`_score_companies`）は**全社の raw 値**（`mu_raw / r1 / r2 / r3 / r_macro`）を返し、これら後処理は**クライアント側（`static/js/analysis.js`）で算出**する。結果として λ 調整・リスク軸切替・表示件数変更・R3 ゲート変更は**再計算なし（再API なし）で即時反映**される（重い計算が走るのは特徴量・マクロ・`max_features` 等モデル本体のパラメータを変えた時のみ）。Pareto 判定軸は表示中の `risk_axis` に追従する。
 
@@ -1007,9 +1007,15 @@ M-1（§9）と同一形式で散布図・効用・フロンティアの client 
 
 ### 11.7 アウトオブサンプル検証（OOF）と売り推奨連携（ADR-0004）
 
-M-2 の `execute()` は walk-forward CV の**無リーク OOF 予測**（`{test_ym:[(yhat,y_true),…]}`）から、**再学習・追加価格取得なしで** `oof_backtest` を返す。指標は ① **分位リターン**（各期で μ̂ を横断ランク→分位→分位平均実現リターン→期間平均＝per-period cross-sectional・μ̂ 水準の時系列ドリフトに頑健）、② **rank-IC**（Spearman(μ̂, y) を fold 毎→平均±std）、③ **ロングショート spread**（top−bottom 分位）、④ **hit-rate**（top>bottom だった期の割合）。**既存「バックテスト」（§7・preset/as-of のポートフォリオ模擬）とは別概念**で「予測 μ̂ が将来リターンを順序付けるか」を測る（用語は CONTEXT.md「[[アウトオブサンプル検証]]」）。共有ヘルパ `plugins/macro_snapshots.py::oof_backtest`。
+M-2 の `execute()` は walk-forward CV の**無リーク OOF 予測**（`{test_ym:[(yhat,y_true),…]}`）から、**再学習・追加価格取得なしで** `oof_backtest` を返す。指標は ① **分位リターン**（各期で μ̂ を横断ランク→分位→分位平均実現リターン→期間平均＝per-period cross-sectional・μ̂ 水準の時系列ドリフトに頑健）、② **rank-IC**（Spearman(μ̂, y) を fold 毎→平均±std）、③ **ロングショート spread**（top−bottom 分位）、④ **hit-rate**（top>bottom だった期の割合）、⑤ **区間被覆率**（`interval_coverage`＝コンフォーマル区間の honest walk-forward 実測被覆率・§11.7.1）。**既存「バックテスト」（§7・preset/as-of のポートフォリオ模擬）とは別概念**で「予測 μ̂ が将来リターンを順序付けるか」を測る（用語は CONTEXT.md「[[アウトオブサンプル検証]]」）。共有ヘルパ `plugins/macro_snapshots.py::oof_backtest`。
 
-あわせて per-stock μ̂ を `macro_gbdt_scores` テーブルへ**全置換で永続化**し（`sector_ols`→`regression_results` と同型・producer.execute 直書き）、**売り候補ランキング（§10）が `mu_source` トグル**（既定 `macro_risk_return`＝M-1／`macro_gbdt`＝M-2）で読む。M-2 の `read_producer_scores` は M-1 と同一形 `{mu, r_macro, r1_prime}` を返す（`r_macro` は共有 `macro_beta`・`r1_prime` は M-2 で None）。M-2 は予測 SE を持たないため **R3 足切りゲートは M-2 選択時は無効**。
+あわせて per-stock μ̂ と `r1_prime` を `macro_gbdt_scores` テーブルへ**全置換で永続化**し（`sector_ols`→`regression_results` と同型・producer.execute 直書き）、**売り候補ランキング（§10）が `mu_source` トグル**（既定 `macro_risk_return`＝M-1／`macro_gbdt`＝M-2）で読む。M-2 の `read_producer_scores` は M-1 と同一形 `{mu, r_macro, r1_prime}` を返す（`r_macro` は共有 `macro_beta`）。**`r1_prime` は §11.7.1 のコンフォーマル区間半幅**で埋め、**R3 足切りゲートは M-2 選択時も機能する**（#365・ADR-0020。列未 migration / 旧スナップショットの `r1_prime=None` はゲート素通り）。
+
+#### 11.7.1 コンフォーマル予測区間（確実性軸 r1_prime・#365・ADR-0020）
+
+XGBoost は OLS のような閉形式の予測 SE を持たない。代わりに**無リーク OOF 残差 |resid| の τ 分位（既定 τ=0.9）を区間半幅**とする**分割コンフォーマル**（Lei et al. 2018）で確実性軸 `r1_prime` を与える。marginal 版（全銘柄一定半幅）は sell_ranking の R3 足切りゲートを全通過/全遮断の二択に退化させるため、**既存 R3 バケット（業種×サイズ三分位）条件付き**で per-stock 化する（`_compute_r3_buckets`／`_r3_for` と同一の bucket→sector→global フォールバック規約・標本数 <`CONFORMAL_MIN_BUCKET`=20 は下位粒度へ）。R3（=√平均二乗残差＝リスク軸）と同一残差から出るが役割は別（`r1_prime`=|resid| の τ分位＝**確実性軸**）。共有ヘルパ `conformal_bucket_halfwidths` / `conformal_halfwidth_for`（`macro_snapshots.py`・M-1/M-2 family-wide）。
+
+被覆診断は `oof_backtest` に `interval_coverage`（honest walk-forward: 各 test 期をそれより過去の全 |resid| で較正した半幅で被覆判定→標本加重平均）を追加し、`model_comparison`（`/api/backtest/model-comparison`）へ**全モデル横並びで表示**（理想は ≈`interval_tau`）。追加学習・Egress ゼロの純後処理。
 
 ### 11.8 将来エンハンス
 
@@ -1021,7 +1027,7 @@ M-2 の `execute()` は walk-forward CV の**無リーク OOF 予測**（`{test_
   モメンタム2軸（`use_momentum`/`momentum_window`・候補窓 [3,6,12,18,24] は M-1 と同一・
   `momentum_window` は `use_momentum=True` のときのみ展開）＋符号事前知識1軸
   （`use_monotone_constraints`・#366・§11.4.1）の10軸
-- quantile regression（`reg:quantileerror`）による予測区間（R1' 代替）
+- ~~quantile regression（`reg:quantileerror`）による予測区間（R1' 代替）~~ → #365 で**分割コンフォーマル区間**として対応済み（§11.7.1・ADR-0020）。quantile regression（再学習要）ではなく OOF 残差ベースのコンフォーマル（再学習不要・family-wide・被覆保証）を採用
 - ~~SHAP interaction values（特徴量ペアの交互作用可視化）~~ → #371 で対応済み（§11.5・`feature_interactions`）。あわせて signed SHAP（`feature_coefs_signed`）＋学習方向 corr（`feature_shap_dir`）も追加
 - M-2 初心者向けガイド（`M2_MACRO_GBDT_GUIDE.md`）
 
@@ -1029,6 +1035,8 @@ M-2 の `execute()` は walk-forward CV の**無リーク OOF 予測**（`{test_
 
 - **Chen, T. & Guestrin, C. (2016)**. "XGBoost: A Scalable Tree Boosting System." *Proceedings of the 22nd ACM SIGKDD*, pp. 785–794. → https://doi.org/10.1145/2939672.2939785
 - **Lundberg, S.M. & Lee, S.-I. (2017)**. "A Unified Approach to Interpreting Model Predictions." *Advances in Neural Information Processing Systems*, 30. → https://arxiv.org/abs/1705.07874
+- **Lei, J., G'Sell, M., Rinaldo, A., Tibshirani, R.J. & Wasserman, L. (2018)**. "Distribution-Free Predictive Inference for Regression." *Journal of the American Statistical Association*, 113(523), 1094–1111. → https://doi.org/10.1080/01621459.2017.1307116（§11.7.1 分割コンフォーマル区間）
+- **Koenker, R. & Bassett, G. (1978)**. "Regression Quantiles." *Econometrica*, 46(1), 33–50. → https://doi.org/10.2307/1913643（§11.7.1 分位のノンパラ近似）
 
 ---
 
