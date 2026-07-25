@@ -404,7 +404,16 @@ class MacroEnsemblePlugin(AnalysisPlugin):
         stacked, _weights_by_ym = _stack_walk_forward(
             common, weight_method, grid_step, min_meta_months)
 
-        oof_bt = oof_backtest(stacked, n_quantiles=n_quantiles)
+        # Issue #368: 業種中立rank-IC / 実効ターンオーバー用メタ。stacked[ym] も base_oof も
+        # common[ym] のサンプル順（ec 先頭）を保存するため同一メタで突合できる。四半期リバランス
+        # （M-1/M-2 と同じ step_months=3 → rebalance_per_year=4）。
+        def _ind(ec: str) -> str:
+            comp = companies.get(ec)
+            return (comp.industry if comp else "不明") or "不明"
+        oof_meta = {ym: [(ec, _ind(ec)) for (ec, *_rest) in v] for ym, v in common.items()}
+
+        oof_bt = oof_backtest(stacked, n_quantiles=n_quantiles,
+                              meta_by_ym=oof_meta, rebalance_per_year=4)
 
         # 基底モデルを「同一の共通 (ym,ec) 行」に制限した OOF（apples-to-apples 比較用）。
         # 各モデル単体の oof_backtest は自分の母集団/グリッドで算出されるため、M-4 との
@@ -412,10 +421,10 @@ class MacroEnsemblePlugin(AnalysisPlugin):
         base_oof = {
             "macro_risk_return": oof_backtest(
                 {ym: [(yh1, y) for (_ec, yh1, _yh2, y) in v] for ym, v in common.items()},
-                n_quantiles=n_quantiles),
+                n_quantiles=n_quantiles, meta_by_ym=oof_meta, rebalance_per_year=4),
             "macro_gbdt": oof_backtest(
                 {ym: [(yh2, y) for (_ec, _yh1, yh2, y) in v] for ym, v in common.items()},
-                n_quantiles=n_quantiles),
+                n_quantiles=n_quantiles, meta_by_ym=oof_meta, rebalance_per_year=4),
         }
 
         # ── ハイパラ探索/比較中は oof 算出後に早期return（現在μ̂/永続化を省く・#299）─

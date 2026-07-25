@@ -827,6 +827,15 @@ paired-t は系列相関を無視して分散を過小評価し、有意差を�
 > ADR-0004 が確立した OOF-first 哲学を「差の有意性」まで押し進める補強であり非矛盾。
 > 参考: Politis & Romano (1994) DOI:10.1080/01621459.1994.10476870 / Nadeau & Bengio (2003) DOI:10.1023/A:1024068626366。
 
+### 9.13 OOF の現実性強化：業種中立rank-IC＋ネットターンオーバーコスト（#368・ADR-0018）
+
+生 rank-IC と 100%回転固定のネット spread だけでは、**業種ベットと真の銘柄選択力**／**低回転な安定モデルと高回転モデル**を区別できない。#368 は `oof_backtest` に `meta_by_ym`（残差と同順の `{ym:[(stock_id, industry)]}`・`build_oof_meta` が build_snapshots 出力から組む）を渡したときのみ算出する2指標を**純後処理・追加学習/Egress ゼロ・numpy 不要**で足す（無印キーは不変＝後方互換）。
+
+- **業種中立 rank-IC**（`rank_ic_industry_neutral`）: 各期・業種内で yhat/y_true をそれぞれ平均順位化→業種平均順位を引く（順位デミーン）→全業種プールして Spearman → サンプル数加重平均。「素材>ハイテクを WTI で一括に並べる」ようなセクター傾斜で稼いだ IC を除去し、**業種内の真の銘柄選択力**だけを測る（`industry=None` の行・単独業種は除外）。
+- **実効ターンオーバー＋ブレークイーブンbps**（`effective_turnover` / `breakeven_cost_bps`）: 隣接期の top/bottom 分位メンバー（stock_id）の Jaccard 非重複（入替割合 0..1）を平均＝実効ターンオーバー。ブレークイーブンbps＝ロングショート spread が消える片道コスト水準 `gross·50/turnover`（既存 `cost_bps`（#316）と同一規約：net = gross − (cost_bps/100)·2·turnover=0 の解）。gross・turnover はともにリバランス頻度に比例するため **breakeven は比で頻度不変＝モデル横断で直接比較できる単一スカラー**。低回転な安定モデルほど大きい（コスト耐性が強い）。`long_short_spread_net_turnover` は実効回転で控除したネット、`annual_turnover`（＝回転×`rebalance_per_year`）は参考値。
+
+`model_comparison` へ透過し `/analysis` の比較ビューが「生IC ／ 業種中立IC」「ブレークイーブンbps ／ 実効ターンオーバー」を並置する。M-3（週次残差を月へ束ねるため1銘柄が同月複数行）は分位メンバーを stock_id 集合で dedup するため Jaccard は近似的だが頑健。参考: Grinold & Kahn "Active Portfolio Management"（turnover-adjusted・業種中立）。
+
 ---
 
 ## 10. 売り候補ランキング（保有銘柄の売り時）
@@ -970,7 +979,10 @@ M-1（§9）と同一形式で散布図・効用・フロンティアの client 
     "n_quantiles": 5, "n_periods": 24, "n_periods_quantile": 22, "n_oof_samples": 4123,
     "quantile_returns": [...],            // 期内横断分位→期間平均（左=最低μ̂→右=最高μ̂）
     "rank_ic": {"mean": 0.03, "std": 0.11, "n": 24},   // Spearman(μ̂, y) を fold 毎
-    "long_short_spread": 0.018, "hit_rate": 0.58
+    "rank_ic_industry_neutral": {"mean": 0.02, "n": 22},  // 業種内順位デミーン後（#368・§9.13）
+    "long_short_spread": 0.018, "hit_rate": 0.58,
+    "effective_turnover": 0.31, "breakeven_cost_bps": 290.0,  // 実効回転・ブレークイーブン片道bp（#368）
+    "long_short_spread_net_turnover": 0.018, "annual_turnover": 1.24   // cost_bps=0 なら net=gross
   }
 }
 ```

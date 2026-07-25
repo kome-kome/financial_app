@@ -873,7 +873,7 @@ class TestCvResultCacheBySelectedFeatures:
         with patch("plugins.macro_risk_return.load_data",
                    return_value=({"E1": []}, {}, {})), \
              patch("plugins.macro_risk_return.build_snapshots",
-                   return_value=(samples_by_ym, {}, {}, ["per", "pbr"])), \
+                   return_value=(samples_by_ym, {}, {}, ["per", "pbr"], {})), \
              patch.object(MacroRiskReturnPlugin, "_select_macro_features",
                           side_effect=list(selected_names_per_call)), \
              patch("plugins.macro_risk_return.walk_forward_cv_monthly", wrapped_cv):

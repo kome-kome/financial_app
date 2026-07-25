@@ -558,10 +558,16 @@ class MacroDlmPlugin(AnalysisPlugin):
         agg_rmse: list[float] = []
         agg_cov: list[float] = []
         oof_residuals: dict[str, list] = {}  # {YYYY-MM: [(yhat, y_true), ...]}
+        # Issue #368: oof_residuals と同順の {ym: [(stock_id, industry), ...]}。業種中立rank-IC・
+        # 実効ターンオーバー算出用。M-3 は週次残差を月へ束ねるため1銘柄が同月に複数行入りうるが、
+        # 分位メンバーシップは stock_id 集合で dedup するため Jaccard は安全（近似的だが頑健）。
+        oof_meta: dict[str, list] = {}
 
         for ec, px_rows in prices_by_co.items():
             if len(px_rows) < min_weeks + 1:
                 continue
+            comp0 = companies.get(ec)
+            industry0 = (comp0.industry if comp0 else "不明") or "不明"
             px_feats = _build_price_features(px_rows, price_features)
             y, X, used_dates = self._build_series(px_rows, level_at, kinds, px_feats, price_features)
             if len(y) < min_weeks:
@@ -585,6 +591,7 @@ class MacroDlmPlugin(AnalysisPlugin):
                 yhat = phi * float(m_path[t - 1, 0]) * WEEKS_PER_YEAR
                 ym = used_dates[t][:7]
                 oof_residuals.setdefault(ym, []).append((yhat, float(y[t])))
+                oof_meta.setdefault(ym, []).append((ec, industry0))   # #368
 
             if objective_only:
                 # oof_backtest 算出に不要な全社スコアリングをスキップ（rows は
@@ -664,13 +671,12 @@ class MacroDlmPlugin(AnalysisPlugin):
             )
 
         # ── アウトオブサンプル検証（OOF）: α_{t-1} が翌週リターンを順序付けるか（ADR-0004）─
+        # Issue #368: 業種中立rank-IC / 実効ターンオーバー / ブレークイーブンbps も算出。空でも
+        # oof_backtest({}) がフル形状（新キー含む全 None）を返すため手組みフォールバックは不要。
+        # 残差は月単位で束ねる（rebalance_per_year=12・annual_turnover 参考表示用）。
         from .macro_snapshots import oof_backtest as _oof_backtest
-        oof_bt = _oof_backtest(oof_residuals, n_quantiles=5) if oof_residuals else {
-            "n_quantiles": 5, "n_periods": 0, "n_periods_quantile": 0,
-            "n_oof_samples": 0, "quantile_returns": [],
-            "rank_ic": {"mean": None, "std": None, "n": 0},
-            "long_short_spread": None, "hit_rate": None,
-        }
+        oof_bt = _oof_backtest(oof_residuals, n_quantiles=5,
+                               meta_by_ym=oof_meta, rebalance_per_year=12)
 
         # ── ハイパーパラメータ探索中は oof_backtest 算出後に早期return（Issue #299）───
         # plugins/tuning.py::search() が読むのは oof_backtest のみで、以降の β経路構築・

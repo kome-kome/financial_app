@@ -960,7 +960,63 @@ def _spearman(xs: list, ys: list) -> float | None:
     return cov / math.sqrt(vx * vy)
 
 
-def oof_backtest(residuals_by_ym: dict, n_quantiles: int = 5, cost_bps: float = 0.0) -> dict:
+def _industry_neutral_spearman(yhats: list, ytrues: list, industries: list) -> float | None:
+    """業種中立 rank-IC（Issue #368・Grinold & Kahn 流の順位版）。
+
+    各業種内で yhat/y_true をそれぞれ平均順位化→業種平均順位を引く（順位デミーン）→
+    全業種をプールして Spearman を取る。これにより「素材>ハイテクを WTI で一括に並べる」
+    ような**業種ベット（セクター傾斜）で稼いだ IC** を除去し、**業種内の真の銘柄選択力**
+    だけを測る。単独銘柄の業種はデミーンで消える（情報量ゼロ）ため除外する。
+    有効ペア<3 または無分散なら None。
+    """
+    groups: dict = defaultdict(list)
+    for i, ind in enumerate(industries):
+        groups[ind].append(i)
+    dyh: list[float] = []
+    dyt: list[float] = []
+    for idxs in groups.values():
+        if len(idxs) < 2:
+            continue
+        ry = _avg_ranks([yhats[i] for i in idxs])
+        rt = _avg_ranks([ytrues[i] for i in idxs])
+        my = sum(ry) / len(ry)
+        mt = sum(rt) / len(rt)
+        dyh.extend(r - my for r in ry)
+        dyt.extend(r - mt for r in rt)
+    return _spearman(dyh, dyt)
+
+
+def _jaccard_nonoverlap(a: set, b: set) -> float | None:
+    """1 − |a∩b|/|a∪b|（両集合とも空なら None）。分位メンバーシップの入替割合＝実効ターンオーバー。"""
+    union = a | b
+    if not union:
+        return None
+    return 1.0 - len(a & b) / len(union)
+
+
+def build_oof_meta(stock_ids_by_ym: dict | None, sample_meta_by_ym: dict, yms) -> dict:
+    """oof_backtest 用の {ym: [(stock_id, industry), ...]} を残差と同順で組む（Issue #368）。
+
+    build_snapshots は samples_by_ym / sample_meta_by_ym / stock_ids_by_ym を同一サンプル順で
+    返し、walk_forward_cv_monthly の残差もその順序を保存する（_compute_r3_buckets や
+    macro_ensemble._align が依拠する既存契約）。よって index で 1:1 突合できる。
+      sample_meta_by_ym[ym][j] = (industry, size)（build_snapshots 出力）。
+      stock_ids_by_ym[ym][j]  = edinet_code（return_stock_ids=True 時・None 可＝ターンオーバー無効）。
+    """
+    meta: dict = {}
+    for ym in yms:
+        metas = sample_meta_by_ym.get(ym, [])
+        sids = (stock_ids_by_ym or {}).get(ym, [])
+        meta[ym] = [
+            (sids[j] if j < len(sids) else None,
+             metas[j][0] if j < len(metas) else None)
+            for j in range(len(metas))
+        ]
+    return meta
+
+
+def oof_backtest(residuals_by_ym: dict, n_quantiles: int = 5, cost_bps: float = 0.0,
+                 meta_by_ym: dict | None = None, rebalance_per_year: float | None = None) -> dict:
     """無リーク OOF 予測から「アウトオブサンプル検証（OOF）」指標を算出する（ADR-0004）。
 
     residuals_by_ym = {test_ym: [(yhat, y_true), ...]}（walk_forward_cv_monthly の
@@ -981,21 +1037,53 @@ def oof_backtest(residuals_by_ym: dict, n_quantiles: int = 5, cost_bps: float = 
     このコストは「期」1回あたりの控除であり、期の頻度（週次/月次）はホライズン
     ごとに異なる（ADR-0012）ため、複数モデルの spread を跨いで cost_bps ベースで
     直接比較する場合は呼び出し側で頻度差を考慮すること。
+
+    meta_by_ym（Issue #368・任意）: {test_ym: [(stock_id, industry), ...]}。residuals_by_ym と
+    同順（build_oof_meta が組む）。渡すと以下を追加算出する（無印キーは不変・後方互換）:
+      - rank_ic_industry_neutral: 業種内で順位デミーンしてから Spearman（業種ベットを除去した
+        真の銘柄選択力）。期毎に算出しサンプル数で加重平均。industry が None の行は除外。
+      - effective_turnover: 隣接期の top/bottom 分位メンバーシップ（stock_id）の Jaccard 非重複
+        （入替割合）の平均。安定・低回転モデルほど小さい。stock_id が無ければ None。
+      - breakeven_cost_bps: エッジ（gross spread）を実効ターンオーバーで割り戻し、片道コスト何 bp で
+        long_short_spread が消えるか＝ gross·50/turnover（cost_bps 換算と同一規約）。頻度依存の
+        gross/turnover が比で相殺されるため、リバランス頻度に依らずモデル横断で直接比較できる
+        単一スカラー（Grinold & Kahn "Active Portfolio Management" の turnover 調整）。
+      - long_short_spread_net_turnover: gross − (cost_bps/100)·2·turnover（実効回転で控除・#316 の
+        100%回転固定版 long_short_spread_net の一般化）。
+    rebalance_per_year（任意）: 年間リバランス回数。渡すと annual_turnover（＝実効回転×頻度）を
+    参考値として併記する（breakeven_cost_bps 自体は頻度不変）。
     """
     yms = sorted(residuals_by_ym.keys())
     n_oof = sum(len(residuals_by_ym[y]) for y in yms)
 
     # rank-IC（fold 毎・サンプル<3 の期は除外）。ym→ic を保持し、モデル間の
     # 「共通 test 期ペアリング」（model_stats.paired_ic_significance・Issue #369）へ供する。
+    # 業種中立 rank-IC（Issue #368・meta_by_ym 有時のみ）: 同じ第1ループで期毎に算出し
+    # (ic, 有効n) を蓄積してサンプル数加重平均する。
     ic_by_period: dict[str, float] = {}
+    in_ic_pairs: list[tuple[float, int]] = []
     for ym in yms:
         pairs = residuals_by_ym[ym]
         ic = _spearman([p[0] for p in pairs], [p[1] for p in pairs])
         if ic is not None:
             ic_by_period[ym] = ic
+        if meta_by_ym is not None:
+            metas = meta_by_ym.get(ym, [])
+            idxs = [i for i in range(len(pairs)) if i < len(metas) and metas[i][1] is not None]
+            if len(idxs) >= 3:
+                nic = _industry_neutral_spearman(
+                    [pairs[i][0] for i in idxs],
+                    [pairs[i][1] for i in idxs],
+                    [metas[i][1] for i in idxs],
+                )
+                if nic is not None:
+                    in_ic_pairs.append((nic, len(idxs)))
     ics = list(ic_by_period.values())
     ic_mean = statistics.mean(ics) if ics else None
     ic_std = statistics.pstdev(ics) if len(ics) > 1 else (0.0 if ics else None)
+    in_ic_n = len(in_ic_pairs)
+    _in_w = sum(n for _, n in in_ic_pairs)
+    in_ic_mean = (sum(ic * n for ic, n in in_ic_pairs) / _in_w) if _in_w else None
 
     # 期内横断分位リターン（各期で yhat 昇順→ n_quantiles 等分→分位平均 y_true）
     q_sums = [0.0] * n_quantiles
@@ -1008,21 +1096,36 @@ def oof_backtest(residuals_by_ym: dict, n_quantiles: int = 5, cost_bps: float = 
     mono_spearmans: list[float] = []
     adj_increasing = 0
     adj_total = 0
+    # 実効ターンオーバー（Issue #368・meta_by_ym 有時）: 分位計算対象の各期で top/bottom
+    # 分位の stock_id 集合を保持し、後段で隣接期の Jaccard 非重複を平均する。yms は昇順の
+    # ため append 順＝時系列順。
+    membership: list[tuple[set, set]] = []
     for ym in yms:
         pairs = residuals_by_ym[ym]
         if len(pairs) < n_quantiles * 2:
             continue
-        ordered = sorted(pairs, key=lambda p: p[0])   # yhat 昇順
-        m = len(ordered)
+        metas = meta_by_ym.get(ym, []) if meta_by_ym is not None else []
+        order = sorted(range(len(pairs)), key=lambda i: pairs[i][0])   # yhat 昇順（index）
+        m = len(order)
         q_means = []
+        top_ids: set = set()
+        bot_ids: set = set()
         for q in range(n_quantiles):
             lo = q * m // n_quantiles
             hi = (q + 1) * m // n_quantiles
-            seg = ordered[lo:hi]
-            q_means.append(sum(p[1] for p in seg) / len(seg))
+            seg = order[lo:hi]
+            q_means.append(sum(pairs[i][1] for i in seg) / len(seg))
+            if meta_by_ym is not None:
+                sid_set = {metas[i][0] for i in seg if i < len(metas) and metas[i][0] is not None}
+                if q == n_quantiles - 1:
+                    top_ids = sid_set
+                elif q == 0:
+                    bot_ids = sid_set
         for q in range(n_quantiles):
             q_sums[q] += q_means[q]
         q_periods += 1
+        if meta_by_ym is not None:
+            membership.append((top_ids, bot_ids))
         ls = q_means[-1] - q_means[0]   # top（高 yhat）− bottom（低 yhat）
         ls_spreads.append(ls)
         if ls > 0:
@@ -1044,6 +1147,35 @@ def oof_backtest(residuals_by_ym: dict, n_quantiles: int = 5, cost_bps: float = 
         round(long_short_spread - round_trip_cost_pct, 6) if long_short_spread is not None else None
     )
 
+    # ── 実効ターンオーバー → ネット / ブレークイーブンbps（Issue #368）─────────────
+    # 隣接期の top・bottom 分位メンバーシップの Jaccard 非重複を平均。t=0 は完全据置、
+    # t=1 は毎期総入替。gross・turnover はともにリバランス頻度に比例するため breakeven は
+    # 比で頻度不変（モデル横断で直接比較可能な単一スカラー）。
+    effective_turnover = None
+    if len(membership) >= 2:
+        ts: list[float] = []
+        for (t0, b0), (t1, b1) in zip(membership, membership[1:]):
+            parts = [x for x in (_jaccard_nonoverlap(t0, t1), _jaccard_nonoverlap(b0, b1))
+                     if x is not None]
+            if parts:
+                ts.append(sum(parts) / len(parts))
+        effective_turnover = round(statistics.mean(ts), 6) if ts else None
+
+    long_short_spread_net_turnover = (
+        round(long_short_spread - round_trip_cost_pct * effective_turnover, 6)
+        if (long_short_spread is not None and effective_turnover is not None) else None
+    )
+    # gross·50/turnover: net = gross − (cost_bps/100)·2·turnover = 0 を解いた片道コスト[bp]。
+    breakeven_cost_bps = (
+        round(long_short_spread * 50.0 / effective_turnover, 2)
+        if (long_short_spread is not None and long_short_spread > 0
+            and effective_turnover is not None and effective_turnover > 0) else None
+    )
+    annual_turnover = (
+        round(effective_turnover * rebalance_per_year, 4)
+        if (effective_turnover is not None and rebalance_per_year) else None
+    )
+
     # 分位単調性の畳み込み（純後処理・Egress ゼロ）。model_stats はブートストラップに
     # stdlib random のみ使用（seed 固定で決定的）。
     from model_stats import monotonicity_summary
@@ -1062,9 +1194,19 @@ def oof_backtest(residuals_by_ym: dict, n_quantiles: int = 5, cost_bps: float = 
         },
         # per-fold IC（ym→ic）: モデル間の共通 test 期ペアリング用（Issue #369）。
         "rank_ic_by_period":     {ym: round(v, 6) for ym, v in ic_by_period.items()},
+        # 業種中立 rank-IC（Issue #368・meta_by_ym 有時のみ非 None）。
+        "rank_ic_industry_neutral": {
+            "mean": round(in_ic_mean, 4) if in_ic_mean is not None else None,
+            "n":    in_ic_n,
+        },
         "monotonicity":          monotonicity,
         "long_short_spread":     long_short_spread,
         "hit_rate":              hit_rate,
         "cost_bps":              cost_bps,
         "long_short_spread_net": long_short_spread_net,
+        # ターンオーバー調整（Issue #368・meta_by_ym 有時のみ非 None）。
+        "effective_turnover":             effective_turnover,
+        "annual_turnover":                annual_turnover,
+        "long_short_spread_net_turnover": long_short_spread_net_turnover,
+        "breakeven_cost_bps":             breakeven_cost_bps,
     }

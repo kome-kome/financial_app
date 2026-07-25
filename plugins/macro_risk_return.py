@@ -46,6 +46,7 @@ from .macro_snapshots import (
     producer_scores,
     get_producer_scores,
     oof_backtest,
+    build_oof_meta,
     tuning_cache_get_or_compute,
 )
 # R3（セクター×サイズ別 CV-RMSE）でバケットを採用する最小残差数。
@@ -267,10 +268,11 @@ class MacroRiskReturnPlugin(AnalysisPlugin):
 
         macro_cache = preload_macro(db, prices_by_co, macro_names) if macro_names else {}
 
-        samples_by_ym, sample_meta_by_ym, current_snaps, all_feat_names = build_snapshots(
+        samples_by_ym, sample_meta_by_ym, current_snaps, all_feat_names, stock_ids_by_ym = build_snapshots(
             prices_by_co, fin_by_co, companies, macro_cache,
             fin_features, macro_names, use_momentum, mom_window, min_coverage,
             build_interactions=True,
+            return_stock_ids=True,   # Issue #368: OOF ターンオーバー用に stock_id を回収
         )
 
         total_samples = sum(len(v) for v in samples_by_ym.values())
@@ -321,7 +323,11 @@ class MacroRiskReturnPlugin(AnalysisPlugin):
 
         # --- アウトオブサンプル検証（OOF）: 無リーク walk-forward 予測のモデル評価（ADR-0004）─
         # 既存「バックテスト」(/api/backtest) とは別概念。M-2/M-3 と同じ形（#272）。
-        oof_bt = oof_backtest(cv_residuals_by_ym, n_quantiles=5)
+        # Issue #368: 業種中立rank-IC / 実効ターンオーバー / ブレークイーブンbps も算出。
+        # step_months=3 の四半期リバランス（rebalance_per_year=4）。
+        oof_meta = build_oof_meta(stock_ids_by_ym, sample_meta_by_ym, cv_residuals_by_ym.keys())
+        oof_bt = oof_backtest(cv_residuals_by_ym, n_quantiles=5,
+                              meta_by_ym=oof_meta, rebalance_per_year=4)
 
         # --- ハイパーパラメータ探索中は oof_backtest 算出後に早期return（Issue #299）───
         # plugins/tuning.py::search() が読むのは oof_backtest のみで、以降の最終 OLS
