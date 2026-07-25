@@ -959,6 +959,16 @@ BIC/LASSO の事前選択を持たない M-2 は全特徴量を木に丸投げ�
 - 本制約は符号の**事前知識**の唯一の注入点。signed SHAP（§11.5・`feature_shap_dir`・#371）は学習後に木が実際に付けた方向の**事後**診断であり、本制約の事前符号とのクロスチェックに使える（符号表の妥当性検証が M-2 内で完結）。符号がモデル構造として保証され解釈性も上がる。
 - **検証方針**: ON/OFF を OOF rank-IC（§11.7）で直接比較し、特に **fold 間 std の低下（頑健化）** を確認してから既定化を判断する（`use_momentum`/`px_*` と同じ保守ゲート）。native XGBoost 機能（新パッケージ不要・次元不変）で ADR-0002（M-1 の交差項却下）とは別軸・非抵触。M-5（§14・XGBRanker）も `execute` を継承し、ランカーも `monotone_constraints` を受理するため同一符号表がそのまま効く。詳細は ADR-0019。
 
+#### 11.4.2 セクター/サイズのカテゴリ特徴量（#370）
+
+XGBoost は業種別の分岐や**セクター×マクロ交互作用**（素材×WTI・ハイテク×DXY 等）を木で暗黙学習できるが、業種情報がモデル入力に無ければ学習しようがない。M-1 は交差項を ADR-0002 で却下しているため、これは**木ならではの拡張**（3兄弟の差別化に寄与）。`use_sector_features`（checkbox・**既定 OFF**）を ON にすると、`build_snapshots` が既に算出済の `(industry, size=bs_total_assets)` メタから 2 列を **M-2 `execute` 内で後付け連結**する（`build_snapshots` は無改変＝M-1 の OLS 特徴を汚さない）。
+
+- **`log_size`**: `log(bs_total_assets)`。木は単調不変ゆえ log/raw で分岐は不変だが解釈性で log を採る。欠損（None/非正）は `float('nan')`（XGBoost がネイティブ処理・「不明」相当・fold 非依存でリークなし）。
+- **`sector_te`**（業種の**リークフリー target encoding**）: 業種を「その業種の平均リターン」で数値化する。**リークが最大リスク**（#375 で旧 IC 0.33 が 52週先ラベルの前方リーク由来と判明した反省）のため、**必ず学習 fold 内の業種平均のみ**で fit する — CV は `_wrap_sector_target_encoding` が各 fold で学習集合だけから業種→平均リターン写像を作り test にも同一写像を適用（test 自身のラベルは使わない）、最終モデル/現在断面のスコアリングは全学習データで fit（current にラベルは無く無リーク）。未知/欠損業種（「不明」含む）は学習集合の全体平均へフォールバック。
+- **列構成**: `model_feat_names = all_feat_names + [log_size, sector_te]`（末尾 2 列）。`monotone_constraints`（§11.4.1）は両列を 0（符号が業種・レジーム依存）とする。SHAP・per-stock SHAP・`selected_features` も `model_feat_names` で揃う。**OLS ベースライン CV は sector-free の base 特徴のまま**回す（XGB と OLS の差＝非線形性の効果を切り分ける・M-1 の交差項却下と同型）。
+- **方式選択**: (A) native categorical（`enable_categorical`＋pandas category）は `np.array(float)` パイプラインを DataFrame へ変える改修が要る（effort M）ため本 Issue では見送り、追加収集ゼロ・VIEW 列追加ゼロで実装できる (B) リークフリー target encoding を採用。`tuning_search_space` の `use_sector_features` 軸で OFF/ON を自動比較できる。
+- **検証方針**: OOF rank-IC（§11.7）の ON/OFF 前後比較＋ SHAP でセクター/サイズ特徴の寄与を確認してから既定化を判断する（`use_momentum`/`px_*`/`monotone` と同じ保守ゲート）。M-5（§14・XGBRanker）も `execute` を継承し、ラッパーは 3 引数呼び出し（`pass_train_groups`）を素通しするため同一の sector 特徴がランク学習にもそのまま効く。参考: XGBoost 公式 Categorical Data docs; ADR-0003（M-2 GBDT）。
+
 ### 11.5 SHAP による解釈（signed SHAP＋交互作用・#371）
 
 SHAP（SHapley Additive exPlanations）は個々の特徴量がモデルの予測値にどれだけ貢献するかを分解する手法。M-2 は以下 5 系統を返す:
