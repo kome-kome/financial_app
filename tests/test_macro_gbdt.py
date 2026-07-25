@@ -766,6 +766,42 @@ class TestOofBacktest:
         assert o["long_short_spread_net"] is None
         assert o["quantile_returns"] == []
 
+    # ── rank-IC 差検定・単調性（Issue #369）────────────────────────────────
+
+    def test_rank_ic_by_period_maps_each_valid_period(self):
+        r = {"2020-01": self._ramp(), "2020-02": self._ramp()}
+        o = oof_backtest(r, n_quantiles=5)
+        assert set(o["rank_ic_by_period"]) == {"2020-01", "2020-02"}
+        assert o["rank_ic_by_period"]["2020-01"] == 1.0   # 完全順序 → IC=1
+
+    def test_rank_ic_by_period_skips_low_sample_periods(self):
+        # n<3 の期は _spearman が None → by_period から除外（IC の n と一致）
+        r = {"good": self._ramp(), "bad": [(0.1, 0.2), (0.2, 0.1)]}
+        o = oof_backtest(r, n_quantiles=5)
+        assert "bad" not in o["rank_ic_by_period"]
+        assert o["rank_ic"]["n"] == len(o["rank_ic_by_period"]) == 1
+
+    def test_monotonicity_perfect_order(self):
+        r = {"2020-01": self._ramp(), "2020-02": self._ramp()}
+        m = oof_backtest(r, n_quantiles=5)["monotonicity"]
+        assert m["spearman_mean"] == 1.0            # 各期の分位が完全単調増
+        assert m["adjacent_increasing_rate"] == 1.0
+        assert 0.0 < m["p_value"] < 0.001           # Davison-Hinkley フロアで厳密 0 でない
+        assert m["n_periods"] == 2
+
+    def test_monotonicity_reverse_order_low(self):
+        r = {"m": [(i * 0.01, -i * 0.01) for i in range(20)]}
+        m = oof_backtest(r, n_quantiles=5)["monotonicity"]
+        assert m["spearman_mean"] == -1.0           # 逆順 → 完全単調減
+        assert m["adjacent_increasing_rate"] == 0.0
+
+    def test_monotonicity_empty_when_no_quantile_periods(self):
+        r = {"m": [(0.1, 0.2), (0.2, 0.1), (0.3, 0.3)]}  # 分位計算対象外
+        m = oof_backtest(r, n_quantiles=5)["monotonicity"]
+        assert m["n_periods"] == 0
+        assert m["spearman_mean"] is None
+        assert m["p_value"] is None
+
 
 # ── 7. producer μ̂ 永続化（sell_ranking 連携・ADR-0004）───────────────────────
 

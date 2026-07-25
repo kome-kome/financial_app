@@ -985,13 +985,15 @@ def oof_backtest(residuals_by_ym: dict, n_quantiles: int = 5, cost_bps: float = 
     yms = sorted(residuals_by_ym.keys())
     n_oof = sum(len(residuals_by_ym[y]) for y in yms)
 
-    # rank-IC（fold 毎・サンプル<3 の期は除外）
-    ics: list[float] = []
+    # rank-IC（fold 毎・サンプル<3 の期は除外）。ym→ic を保持し、モデル間の
+    # 「共通 test 期ペアリング」（model_stats.paired_ic_significance・Issue #369）へ供する。
+    ic_by_period: dict[str, float] = {}
     for ym in yms:
         pairs = residuals_by_ym[ym]
         ic = _spearman([p[0] for p in pairs], [p[1] for p in pairs])
         if ic is not None:
-            ics.append(ic)
+            ic_by_period[ym] = ic
+    ics = list(ic_by_period.values())
     ic_mean = statistics.mean(ics) if ics else None
     ic_std = statistics.pstdev(ics) if len(ics) > 1 else (0.0 if ics else None)
 
@@ -1000,6 +1002,12 @@ def oof_backtest(residuals_by_ym: dict, n_quantiles: int = 5, cost_bps: float = 
     q_periods = 0
     ls_spreads: list[float] = []
     hits = 0
+    # 単調性（Issue #369）: top-bottom spread へ畳むと中間分位の U 字/非単調が隠れる。
+    # 期毎に Spearman(分位idx, 分位平均) と隣接分位の正順数を蓄積し model_stats で畳む。
+    q_idx = list(range(n_quantiles))
+    mono_spearmans: list[float] = []
+    adj_increasing = 0
+    adj_total = 0
     for ym in yms:
         pairs = residuals_by_ym[ym]
         if len(pairs) < n_quantiles * 2:
@@ -1019,6 +1027,13 @@ def oof_backtest(residuals_by_ym: dict, n_quantiles: int = 5, cost_bps: float = 
         ls_spreads.append(ls)
         if ls > 0:
             hits += 1
+        sp = _spearman(q_idx, q_means)   # 分位idx と 分位平均の順位相関（+1=完全単調）
+        if sp is not None:
+            mono_spearmans.append(sp)
+        for i in range(n_quantiles - 1):
+            adj_total += 1
+            if q_means[i + 1] > q_means[i]:
+                adj_increasing += 1
 
     quantile_returns = [round(s / q_periods, 6) for s in q_sums] if q_periods else []
     long_short_spread = round(statistics.mean(ls_spreads), 6) if ls_spreads else None
@@ -1028,6 +1043,11 @@ def oof_backtest(residuals_by_ym: dict, n_quantiles: int = 5, cost_bps: float = 
     long_short_spread_net = (
         round(long_short_spread - round_trip_cost_pct, 6) if long_short_spread is not None else None
     )
+
+    # 分位単調性の畳み込み（純後処理・Egress ゼロ）。model_stats はブートストラップに
+    # stdlib random のみ使用（seed 固定で決定的）。
+    from model_stats import monotonicity_summary
+    monotonicity = monotonicity_summary(mono_spearmans, adj_increasing, adj_total)
 
     return {
         "n_quantiles":        n_quantiles,
@@ -1040,6 +1060,9 @@ def oof_backtest(residuals_by_ym: dict, n_quantiles: int = 5, cost_bps: float = 
             "std":  round(ic_std, 4) if ic_std is not None else None,
             "n":    len(ics),
         },
+        # per-fold IC（ym→ic）: モデル間の共通 test 期ペアリング用（Issue #369）。
+        "rank_ic_by_period":     {ym: round(v, 6) for ym, v in ic_by_period.items()},
+        "monotonicity":          monotonicity,
         "long_short_spread":     long_short_spread,
         "hit_rate":              hit_rate,
         "cost_bps":              cost_bps,

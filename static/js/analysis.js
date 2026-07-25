@@ -946,7 +946,14 @@ function _mcModelCard(m) {
   const oof = m.oof_backtest || {};
   const qr  = oof.quantile_returns || [];
   const ic  = oof.rank_ic || {};
+  const mono = oof.monotonicity || {};
   const hasOof = qr.length > 0;
+  // 単調性（Issue #369）: 分位平均が μ̂ 昇順で単調増か。中間分位が U 字/ノイズだと
+  // spread が開いても spearman_mean/隣接正順率が下がる（過学習・不安定シグナルの検知）。
+  const monoSp = mono.spearman_mean;
+  const monoRate = mono.adjacent_increasing_rate;
+  const monoP = mono.p_value;
+  const monoSig = monoP != null && monoP < 0.05;
   const metrics = `
     <div style="display:grid;grid-template-columns:1fr;gap:6px;margin-bottom:10px">
       <div style="padding:6px 8px;background:var(--bg-panel,var(--bg-sunken));border-radius:6px">
@@ -961,6 +968,11 @@ function _mcModelCard(m) {
       <div style="padding:6px 8px;background:var(--bg-panel,var(--bg-sunken));border-radius:6px">
         <div style="font-size:10px;color:var(--text-muted)">hit-rate（top&gt;bottom の期）</div>
         <div style="font-size:15px;font-weight:700;color:#c084fc">${oof.hit_rate!=null?(oof.hit_rate*100).toFixed(0)+'%':'-'}<span style="font-size:10px;color:var(--text-muted)"> / ${oof.n_periods_quantile||0}期</span></div>
+      </div>
+      <div style="padding:6px 8px;background:var(--bg-panel,var(--bg-sunken));border-radius:6px" title="分位idxと分位平均リターンの期毎Spearman。+1=完全単調増。p値は「単調増が偶然でない」片側ブートストラップ検定（<0.05で有意）。">
+        <div style="font-size:10px;color:var(--text-muted)">分位単調性（Spearman・隣接正順率）</div>
+        <div style="font-size:15px;font-weight:700;color:${(monoSp||0)>0?cssVar('--val-up-text'):cssVar('--val-down-text')}">${monoSp!=null?monoSp.toFixed(2):'-'}<span style="font-size:11px;color:var(--text-muted)"> ／ 隣接 ${monoRate!=null?(monoRate*100).toFixed(0)+'%':'-'}</span></div>
+        <div style="font-size:10px;color:${monoSig?cssVar('--val-up-text'):'var(--text-muted)'}">p=${monoP!=null?monoP.toFixed(3):'-'}${monoSig?' ✓有意':''}</div>
       </div>
     </div>`;
   const bars = hasOof ? `
@@ -985,12 +997,53 @@ function _mcModelCard(m) {
   </div>`;
 }
 
+// rank-IC 差の有意性マトリクス（Issue #369）。共通 test 期でペアリングした IC 差を
+// 定常ブートストラップ検定した結果を上三角行列で表示。セル = 行モデル基準の差符号。
+function _mcMatrixHTML(sm) {
+  if (!sm || !sm.models || sm.models.length < 2) return '';
+  const keys = sm.models;
+  const cell = (a, b) => {
+    if (a === b) return '<td style="background:var(--bg-sunken);color:var(--text-muted);text-align:center;padding:4px 8px">—</td>';
+    // 上三角のみ格納。行 a・列 b で a のインデックスが小さければそのまま、大きければ符号反転。
+    const ia = keys.indexOf(a), ib = keys.indexOf(b);
+    const fwd = ia < ib;
+    const p = sm.pairs[fwd ? `${a}|${b}` : `${b}|${a}`];
+    if (!p || p.n_common < 2) return '<td style="text-align:center;color:var(--text-muted);padding:4px 8px" title="共通test期が不足">n/a</td>';
+    if (!p.significant) {
+      return `<td style="text-align:center;color:var(--text-muted);padding:4px 8px" title="p=${p.p_value}・95%CI[${p.ci_lo}, ${p.ci_hi}]・共通${p.n_common}期">n.s.</td>`;
+    }
+    // 有意: 行モデル a が優位なら上三角(緑)、劣位なら下三角(赤)。
+    const aBetter = p.better === a;
+    const col = aBetter ? cssVar('--val-up-text') : cssVar('--val-down-text');
+    const sym = aBetter ? '▲' : '▼';
+    const diff = fwd ? p.mean_diff : -p.mean_diff;   // 行基準の差
+    return `<td style="text-align:center;color:${col};font-weight:700;padding:4px 8px" title="Δ(rank-IC)=${diff>=0?'+':''}${diff.toFixed(3)}・p=${p.p_value}・共通${p.n_common}期">${sym} ${Math.abs(diff).toFixed(3)}</td>`;
+  };
+  const rows = keys.map(a =>
+    `<tr><th style="text-align:left;padding:4px 8px;color:var(--accent-text);white-space:nowrap">${esc(a)}</th>${keys.map(b => cell(a, b)).join('')}</tr>`
+  ).join('');
+  const header = `<tr><th></th>${keys.map(b => `<th style="padding:4px 8px;color:var(--text-secondary)">${esc(b)}</th>`).join('')}</tr>`;
+  return `
+    <div class="section-title" style="font-size:13px;margin-bottom:4px">rank-IC 差の有意性マトリクス</div>
+    <div style="font-size:11px;color:var(--text-muted);margin-bottom:8px">
+      共通 test 期でペアリングした per-fold rank-IC 差を、系列相関を保存する定常ブートストラップ
+      （Politis-Romano 1994・n_boot=2000）で検定。<b>▲</b>=行モデルが有意に優位（95%CIが0を跨がない）、
+      <b>▼</b>=行モデルが有意に劣位、<b>n.s.</b>=有意差なし。数値は行基準の Δrank-IC。ホバーで p 値・CI・共通期数。
+    </div>
+    <div style="overflow-x:auto">
+      <table style="border-collapse:collapse;font-size:12px">
+        <thead>${header}</thead><tbody>${rows}</tbody>
+      </table>
+    </div>`;
+}
+
 function _renderModelComparison(data) {
   const models = data.models || [];
   const ca = data.computed_at ? new Date(data.computed_at).toLocaleString('ja-JP') : '-';
   document.getElementById('mc-computed-at').textContent =
     `実行時刻: ${ca}　｜　rank-IC・ロングショート spread が高いほど μ̂ の予測力が高い（無リーク OOF）`;
   document.getElementById('mc-grid').innerHTML = models.map(_mcModelCard).join('');
+  document.getElementById('mc-matrix').innerHTML = _mcMatrixHTML(data.significance_matrix);
 }
 
 // ── ユーティリティ ───────────────────────────────────────────────────
