@@ -64,7 +64,7 @@ pytest tests/test_utils.py  # 単一ファイル
 | ファイル | 役割 |
 |---|---|
 | `database.py` | テーブル定義・upsert・成長率/Zスコア計算 |
-| `collector.py` | オーケストレータ＋後方互換の再エクスポート層＋CLI（実体は下記5分割） |
+| `collector.py` | オーケストレータ＋後方互換の再エクスポート層＋CLI（実体は下記6分割） |
 | `collector_utils.py` | 収集系共通の設定定数・ロガー |
 | `collector_master.py` | 企業/業種マスタ収集（EDINET コードリスト・JPX 業種） |
 | `collector_financials.py` | XBRL 財務収集・パース・CF/PL-BS 補完・全件収集 |
