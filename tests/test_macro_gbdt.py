@@ -42,6 +42,7 @@ def _make_fin(period_end_str: str, **kwargs):
         op_margin=10.0, net_margin=5.0, asset_turnover=0.8, de_ratio=0.5,
         nc_ratio=0.2, cf_ratio=8.0, op_growth=5.0, rev_growth=4.0,
         rd_intensity=0.0, da_intensity=0.0, z_op_margin=0.5, z_roe=0.3, z_cf_ratio=0.2,
+        accruals=0.02, delta_roe=1.0, delta_op_margin=0.5, z_roe_sec=0.3, z_op_margin_sec=0.4,
         div_yield=2.0, bs_total_assets=1e10,
     )
     defaults.update(kwargs)

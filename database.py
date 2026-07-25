@@ -1252,6 +1252,9 @@ class FinancialMetric(ViewBase):
     z_de_ratio = Column(Float); z_nc_ratio = Column(Float)
     rev_growth = Column(Float); op_growth = Column(Float); eps_growth = Column(Float)
     # 回帰出力（regression_results を LEFT JOIN）
+    # 質・トレンド・業種内相対の追加因子（#373・追加収集ゼロ）
+    accruals = Column(Float); delta_roe = Column(Float); delta_op_margin = Column(Float)
+    z_roe_sec = Column(Float); z_op_margin_sec = Column(Float)
     predicted_market_cap = Column(Float); gap_ratio = Column(Float)
 
 
