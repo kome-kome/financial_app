@@ -515,6 +515,64 @@ class TestExecuteSmoke:
         for name, val in coefs.items():
             assert val >= 0, f"mean|SHAP| が負（{name}={val}）: 絶対値でなければならない"
 
+    def test_execute_signed_shap(self):
+        """署名付き SHAP（feature_coefs_signed）と学習方向（feature_shap_dir）が付く（#371）。
+
+        - feature_coefs_signed のキーは feature_coefs と一致
+        - |signed| は mean|SHAP| に一致（符号だけ付与）
+        - feature_shap_dir の相関は [-1, 1]
+        """
+        db, prices_by_co, fin_by_co, companies = self._make_db()
+        params = self._make_params(use_macro=False)
+
+        with patch("plugins.macro_gbdt.load_data", return_value=(prices_by_co, fin_by_co, companies)), \
+             patch("plugins.macro_gbdt.preload_macro", return_value={}), \
+             patch("plugins.macro_gbdt.get_producer_scores", return_value={}):
+            result = plugin.execute(params, db)
+
+        mag = result["feature_coefs"]
+        signed = result["feature_coefs_signed"]
+        direction = result["feature_shap_dir"]
+        assert set(signed.keys()) == set(mag.keys()), "signed のキーが mean|SHAP| と不一致"
+        assert set(direction.keys()) == set(mag.keys()), "direction のキーが不一致"
+        for name in mag:
+            assert abs(signed[name]) == pytest.approx(mag[name], abs=1e-6), \
+                f"|signed| が mean|SHAP| と不一致（{name}）"
+            assert -1.0 <= direction[name] <= 1.0, f"方向 corr が範囲外（{name}={direction[name]}）"
+
+    def test_execute_shap_interactions(self):
+        """SHAP 交互作用の上位ペアが返る（#371）。強度降順・strength>0・自己ペアなし。"""
+        db, prices_by_co, fin_by_co, companies = self._make_db()
+        params = self._make_params(use_macro=False)
+
+        with patch("plugins.macro_gbdt.load_data", return_value=(prices_by_co, fin_by_co, companies)), \
+             patch("plugins.macro_gbdt.preload_macro", return_value={}), \
+             patch("plugins.macro_gbdt.get_producer_scores", return_value={}):
+            result = plugin.execute(params, db)
+
+        inter = result["feature_interactions"]
+        assert isinstance(inter, list), "feature_interactions は list"
+        assert result["shap_interactions_available"] is (len(inter) > 0)
+        strengths = [p["strength"] for p in inter]
+        assert strengths == sorted(strengths, reverse=True), "強度降順でない"
+        for p in inter:
+            assert set(p.keys()) == {"a", "b", "strength"}
+            assert p["a"] != p["b"], "自己ペア（対角）が混入している"
+            assert p["strength"] > 0
+
+    def test_execute_shap_interactions_off(self):
+        """shap_interactions=False で交互作用計算をスキップ（空リスト・#371）。"""
+        db, prices_by_co, fin_by_co, companies = self._make_db()
+        params = self._make_params(use_macro=False, shap_interactions=False)
+
+        with patch("plugins.macro_gbdt.load_data", return_value=(prices_by_co, fin_by_co, companies)), \
+             patch("plugins.macro_gbdt.preload_macro", return_value={}), \
+             patch("plugins.macro_gbdt.get_producer_scores", return_value={}):
+            result = plugin.execute(params, db)
+
+        assert result["feature_interactions"] == []
+        assert result["shap_interactions_available"] is False
+
     def test_execute_r1_is_none(self):
         """XGBoost は R1（OLS 予測 SE）を出さない（ADR-0003 §5）。"""
         db, prices_by_co, fin_by_co, companies = self._make_db()
@@ -654,6 +712,9 @@ class TestObjectiveOnlyMode:
         assert result["results"] == []
         assert result["n_companies"] == 0
         assert result["feature_coefs"] == {}
+        assert result["feature_coefs_signed"] == {}      # #371
+        assert result["feature_interactions"] == []       # #371
+        assert result["shap_interactions_available"] is False
         assert result["best_iteration"] is None
         assert "oof_backtest" in result
 

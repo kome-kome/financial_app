@@ -916,7 +916,7 @@ M-1（§9）の**非線形兄弟**。同一の目的変数（52週先対数リ�
 | データ構築 | `macro_snapshots.py` の共有ビルダー（`build_interactions=False`・`macro_nan_ok=True`）。M-1 と**同一母集団を構造保証**しつつ、マクロ欠損は NaN として保持（§11.3.1） |
 | walk-forward CV | `walk_forward_cv_monthly` に `fit_predict` コールバックを注入。同一 fold・同一 r2/rmse 式を共有 |
 | 内蔵比較 | 同一特徴量・同一 fold の**素 OLS ベースライン**（交差項/BIC なし）を side-by-side で出力 |
-| SHAP | グローバル mean\|SHAP\|（`feature_coefs` スロット・**大きさのみ・方向なし**）＋per-stock SHAP 全社添付 |
+| SHAP | グローバル mean\|SHAP\|（`feature_coefs`）＋**signed SHAP**（`feature_coefs_signed`＝重要度×学習方向）＋**学習方向 corr**（`feature_shap_dir`）＋**交互作用**（`feature_interactions`＝特徴量ペア強度）＋per-stock SHAP 全社添付（#371・§11.5） |
 | R1 | 出さない（OLS 固有の予測 SE。効用軸でないため欠落しても幾何は壊れない） |
 | R_macro | 既存 `macro_beta` producer から流用（M-1 と軸パリティを維持） |
 | 正則化 | 強正則化デフォルト（`max_depth=4`・`min_child_weight=5`・`subsample=colsample_bytree=0.8`・`reg_lambda=1.0`・`lr=0.05`）。日本株 52週リターンは低 S/N のため過学習を抑制 |
@@ -956,14 +956,17 @@ BIC/LASSO の事前選択を持たない M-2 は全特徴量を木に丸投げ�
 
 - **符号表**（`plugins/macro_gbdt.py::_MONOTONE_SIGN`・唯一の源）: `pbr`/`per`/`de_ratio`→**−1**（割高・高レバレッジ→将来リターン低）、`roe`/`roa`/`op_margin`/`div_yield`→**+1**（クオリティ・インカム→将来リターン高）。
 - **収載しない = 0（制約なし）**: マクロ系（符号がレジーム依存）・業種内Zスコア（`z_*`）・曖昧な成長/流動性指標（`equity_ratio`/`sales_growth`/`profit_growth`/`current_ratio`）・モメンタム・`px_*`・交差項。`_build_monotone_constraints(all_feat_names)` が列位置に整合したタプルを組み（numpy 入力は列名を持たないため位置整合が必須）、`xgb_params` 経由で **CV の `fit_predict` と最終モデル双方**へ自動注入する。
-- SHAP は大きさのみで方向を持たない（§11.5）ため、**符号の事前知識は本制約が唯一の注入点**。符号がモデル構造として保証され解釈性も上がる（M-7 の signed SHAP と併用で符号表の妥当性検証が可能）。
+- 本制約は符号の**事前知識**の唯一の注入点。signed SHAP（§11.5・`feature_shap_dir`・#371）は学習後に木が実際に付けた方向の**事後**診断であり、本制約の事前符号とのクロスチェックに使える（符号表の妥当性検証が M-2 内で完結）。符号がモデル構造として保証され解釈性も上がる。
 - **検証方針**: ON/OFF を OOF rank-IC（§11.7）で直接比較し、特に **fold 間 std の低下（頑健化）** を確認してから既定化を判断する（`use_momentum`/`px_*` と同じ保守ゲート）。native XGBoost 機能（新パッケージ不要・次元不変）で ADR-0002（M-1 の交差項却下）とは別軸・非抵触。M-5（§14・XGBRanker）も `execute` を継承し、ランカーも `monotone_constraints` を受理するため同一符号表がそのまま効く。詳細は ADR-0019。
 
-### 11.5 SHAP による解釈
+### 11.5 SHAP による解釈（signed SHAP＋交互作用・#371）
 
-SHAP（SHapley Additive exPlanations）は個々の特徴量がモデルの予測値にどれだけ貢献するかを分解する手法。
+SHAP（SHapley Additive exPlanations）は個々の特徴量がモデルの予測値にどれだけ貢献するかを分解する手法。M-2 は以下 5 系統を返す:
 
-- **グローバル重要度 mean|SHAP|**: 全銘柄にわたる絶対値平均。UI の `feature_coefs` バーで表示（**大きさのみ。M-1 の標準化係数と異なり方向は読めない**）
+- **グローバル重要度 mean|SHAP|**（`feature_coefs`）: 全銘柄にわたる絶対値平均（非負・後方互換）
+- **signed SHAP**（`feature_coefs_signed`・#371）: `mean|SHAP| × 学習方向符号`。棒長で重要度、左右で方向を同時に読める（M-1 の標準化係数バーと同じ見え方に整合）。UI の M-2 グローバルバーはこれを表示
+- **学習方向 corr**（`feature_shap_dir`・#371）: 各特徴量の値とその SHAP 寄与の相関 corr∈[-1,1]。木が実際に付けた単調方向の**事後**診断で、`monotone_constraints`（§11.4.1）の事前符号とのクロスチェックに使える（例: `roe` の事前 +1 に対し corr が負なら要調査）
+- **SHAP 交互作用**（`feature_interactions`・#371）: `shap_interaction_values`（TreeSHAP・(n,F,F)）の off-diagonal 断面平均で特徴量ペアの交互作用強度を測り、上位ペアを返す。**M-2 が交差項なしで自動学習する `fin×macro` 非線形構造の中身**を可視化する。計算コスト O(n·F²) のため断面を最大 `_INTERACT_MAX_ROWS`（既定 800 社）へ等間隔サブサンプル。`shap_interactions` パラメータ（既定 ON）で OFF 可
 - **per-stock SHAP**: 各銘柄の特徴量寄与内訳。`results[i].shap` に丸め値を添付。UI の行クリックで展開
 
 ### 11.6 出力契約
@@ -977,7 +980,13 @@ M-1（§9）と同一形式で散布図・効用・フロンティアの client 
     "ols_baseline": {"mean_r2": ..., "mean_rmse": ..., "n_folds": ..., "folds": [...]}
   },
   "selected_features": ["per", "pbr", ...],
-  "feature_coefs":  {"per": 0.042, ...},  // mean|SHAP|（非負）
+  "feature_coefs":        {"per": 0.042, ...},   // mean|SHAP|（非負・後方互換）
+  "feature_coefs_signed": {"per": -0.042, ...},  // 署名付き重要度（#371）
+  "feature_shap_dir":     {"per": -0.71, ...},   // 学習方向 corr∈[-1,1]（#371）
+  "feature_interactions": [                       // 上位交互作用ペア（#371）
+    {"a": "per", "b": "macro_ust10y", "strength": 0.0031}, ...
+  ],
+  "shap_interactions_available": true,
   "results": [
     {"edinet_code": "...", "mu_raw": ..., "r1": null, "r2": ..., "r3": ..., "r_macro": ...,
      "shap": {"per": 0.012, "pbr": -0.008, ...}, ...}
@@ -1013,7 +1022,7 @@ M-2 の `execute()` は walk-forward CV の**無リーク OOF 予測**（`{test_
   `momentum_window` は `use_momentum=True` のときのみ展開）＋符号事前知識1軸
   （`use_monotone_constraints`・#366・§11.4.1）の10軸
 - quantile regression（`reg:quantileerror`）による予測区間（R1' 代替）
-- SHAP interaction values（特徴量ペアの交互作用可視化）
+- ~~SHAP interaction values（特徴量ペアの交互作用可視化）~~ → #371 で対応済み（§11.5・`feature_interactions`）。あわせて signed SHAP（`feature_coefs_signed`）＋学習方向 corr（`feature_shap_dir`）も追加
 - M-2 初心者向けガイド（`M2_MACRO_GBDT_GUIDE.md`）
 
 ### 11.9 参考文献
