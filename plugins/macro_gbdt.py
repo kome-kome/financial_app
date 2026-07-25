@@ -12,6 +12,9 @@ M-1（macro_risk_return）の非線形兄弟。同一スナップショット母
 設計決定（ADR-0003）:
   - 同期 in-execute・heavy=True（macro_beta バッチに倣わない・XGBoost は MCMC と速度域が違う）
   - 共有ビルダー build_snapshots(..., build_interactions=False)
+  - セクター/サイズのカテゴリ特徴量（Issue #370・既定 OFF）: 業種のリークフリー target
+    encoding（学習 fold 内の業種平均リターン）＋ log_size を execute 内で後付け連結し、
+    セクター×マクロ交互作用を木に暗黙学習させる（build_snapshots 無改変＝M-1 の OLS 特徴不干渉）
   - fit_predict コールバックを walk_forward_cv_monthly に注入
   - 内蔵比較: 同一特徴量・同一 fold の素 OLS ベースライン（交差項/BIC なし）
   - SHAP: グローバル mean|SHAP|（feature_coefs スロット）＋署名付き重要度＋学習方向 corr
@@ -71,10 +74,120 @@ def _build_monotone_constraints(feat_names: list) -> tuple:
     """all_feat_names の並び順に沿った monotone_constraints タプルを返す（Issue #366）。
 
     _MONOTONE_SIGN に載る財務比率のみ ±1、未収載（マクロ・z_*・曖昧な成長/流動性・
-    モメンタム・px_*・交差項）は 0。XGBoost へ列位置で渡す（numpy 入力は列名を持た
-    ないため位置整合が必須）。全要素 0 でも無害（制約なしと等価）。
+    モメンタム・px_*・交差項・セクター/サイズ）は 0。XGBoost へ列位置で渡す（numpy 入力は
+    列名を持たないため位置整合が必須）。全要素 0 でも無害（制約なしと等価）。
+    セクター/サイズ（log_size / sector_te）は符号が業種・レジーム依存のため制約なし。
     """
     return tuple(_MONOTONE_SIGN.get(name, 0) for name in feat_names)
+
+
+# ── セクター/サイズのカテゴリ特徴量（Issue #370）──────────────────────────────
+# 業種別の分岐やセクター×マクロ交互作用（素材×WTI・ハイテク×DXY 等）は木が暗黙学習
+# できるが、業種情報がモデル入力に無ければ学習しようがない。M-1 は交差項を ADR-0002 で
+# 却下しているため、これは「木ならではの拡張」（build_snapshots は無改変＝M-1 の OLS 特徴を
+# 汚さない・本特徴は M-2 execute 内で後付け連結する）。
+#   log_size : log(bs_total_assets)。木は単調不変ゆえ log/raw で分岐は不変だが解釈性で log。
+#              欠損は NaN（XGBoost がネイティブ処理）＝「不明」相当。全列 base+[log_size,sector_te]。
+#   sector_te: 業種のリークフリー target encoding。**学習 fold 内の業種平均リターンのみ**で
+#              数値化する（CV は _wrap_sector_target_encoding が per-fold で fit＝リーク厳禁を担保、
+#              最終モデル/現在断面のスコアリングは全学習データで fit＝current にラベルは無く無リーク）。
+#              未知/欠損業種は学習集合の全体平均へフォールバック（「不明」カテゴリ吸収）。
+_SIZE_FEAT = "log_size"
+_SECTOR_TE_FEAT = "sector_te"
+
+
+def _log_size(size_val) -> float:
+    """log(total_assets)。None/非正は NaN（XGBoost がネイティブ処理・「不明」相当）。"""
+    return math.log(size_val) if (size_val is not None and size_val > 0) else float("nan")
+
+
+def _fit_sector_encoding(items) -> tuple[dict, float]:
+    """業種 target encoding をフィットして (業種→平均リターン, 全体平均) を返す。
+
+    items: (industry, y) の反復子。**呼び出し側は必ず学習集合のみを渡す**（リーク防止）。
+    全体平均は未知/欠損業種のフォールバック。空入力は ({}, 0.0)。
+    """
+    from collections import defaultdict
+    sums: dict = defaultdict(float)
+    cnts: dict = defaultdict(int)
+    tot = 0.0
+    n = 0
+    for industry, y in items:
+        sums[industry] += y
+        cnts[industry] += 1
+        tot += y
+        n += 1
+    gmean = tot / n if n else 0.0
+    enc = {k: sums[k] / cnts[k] for k in cnts}
+    return enc, gmean
+
+
+def _build_sector_cv_samples(samples_by_ym: dict, sample_meta_by_ym: dict) -> dict:
+    """CV 用にサンプルへ log_size を連結し industry を第3要素として運ぶ（Issue #370）。
+
+    返り値 {ym: [(feat_row+[log_size], y, industry), ...]}。sector_te はここでは付けず、
+    _wrap_sector_target_encoding が per-fold（学習集合内）で付与する（リーク厳禁）。
+    OLS ベースライン（fit_predict=None）は s[0]/s[1] のみ読むため第3要素は無視される。
+    """
+    out: dict = {}
+    for ym, samples in samples_by_ym.items():
+        metas = sample_meta_by_ym.get(ym, [])
+        out[ym] = [
+            (feat_row + [_log_size(size_val)], y, industry)
+            for (feat_row, y), (industry, size_val) in zip(samples, metas)
+        ]
+    return out
+
+
+def _wrap_sector_target_encoding(inner_callback) -> callable:
+    """XGB fit_predict コールバックを業種 target encoding でラップする（Issue #370）。
+
+    各 3-tuple サンプル (feat_row+[log_size], y, industry) に対し、**学習 fold のみ**から
+    業種→平均リターン写像を fit し、test にも同一写像を適用して sector_te 列を末尾へ連結する
+    （test 自身のラベルは encoding に使わない＝リークなし）。ラップ後は 2-tuple へ縮約して
+    inner_callback へ渡す。M-5（XGBRanker・pass_train_groups=True）の3引数呼び出しも
+    *rest で素通しするため M-2/M-5 双方に効く。
+    """
+    def wrapped(train_samples, test_samples, *rest):
+        enc, gmean = _fit_sector_encoding((s[2], s[1]) for s in train_samples)
+
+        def aug(s):
+            return (s[0] + [enc.get(s[2], gmean)], s[1])
+
+        return inner_callback(
+            [aug(s) for s in train_samples],
+            [aug(s) for s in test_samples],
+            *rest,
+        )
+
+    return wrapped
+
+
+def _build_sector_final_samples(samples_by_ym: dict, sample_meta_by_ym: dict) -> tuple:
+    """最終モデル用に全サンプルへ [log_size, sector_te] を連結する（Issue #370）。
+
+    sector_te は**全学習データ**で fit した業種平均（current 断面にはラベルが無いため
+    scoring は無リーク）。返り値 (final_samples_by_ym, enc, gmean)。enc/gmean は current
+    断面のスコアリングで再利用する。
+    """
+    enc, gmean = _fit_sector_encoding(
+        (industry, y)
+        for ym in samples_by_ym
+        for (_, y), (industry, _sz) in zip(samples_by_ym[ym], sample_meta_by_ym.get(ym, []))
+    )
+    out: dict = {}
+    for ym, samples in samples_by_ym.items():
+        metas = sample_meta_by_ym.get(ym, [])
+        out[ym] = [
+            (feat_row + [_log_size(size_val), enc.get(industry, gmean)], y)
+            for (feat_row, y), (industry, size_val) in zip(samples, metas)
+        ]
+    return out, enc, gmean
+
+
+def _sector_current_row(feat_row: list, info: dict, enc: dict, gmean: float) -> list:
+    """current 断面 feat_row へ [log_size, sector_te] を連結（全学習 encoding を適用）。"""
+    return feat_row + [_log_size(info.get("size")), enc.get(info.get("industry"), gmean)]
 
 
 # ── XGBoost fit_predict コールバックファクトリ ─────────────────────────────────
@@ -289,6 +402,20 @@ class MacroGbdtPlugin(AnalysisPlugin):
                 "options": PRICE_FEATURE_OPTIONS,
                 "default": [],
             },
+            "use_sector_features": {
+                "type": "checkbox",
+                "label": "セクター/サイズのカテゴリ特徴量を使う",
+                "description": (
+                    "業種（リークフリー target encoding＝各 fold 内の業種平均リターンで数値化）と"
+                    "サイズ（log 総資産）を木の入力へ追加し、セクター×マクロ交互作用（素材×WTI・"
+                    "ハイテク×DXY 等）を暗黙学習させる（Issue #370・木ならではの拡張。M-1 の OLS "
+                    "特徴は無改変）。業種欠損は「不明」カテゴリ・サイズ欠損は NaN（XGBoost が"
+                    "ネイティブ処理）。target encoding はリーク厳禁のため学習 fold 内統計に限定。"
+                    "既定 OFF：OOF rank-IC の ON/OFF 比較で有効性を確認してから既定化する"
+                    "（use_momentum/px_* と同じ保守ゲート）。"
+                ),
+                "default": False,
+            },
             "min_coverage": {
                 "type": "slider",
                 "dtype": "float",
@@ -430,8 +557,10 @@ class MacroGbdtPlugin(AnalysisPlugin):
 
         XGBoost 7軸（木構造・正則化）＋モメンタム2軸（use_momentum/momentum_window・
         M-1 と同一候補・ADR-0007 §5 のチャネル単位トグル）＋符号事前知識1軸
-        （use_monotone_constraints・#366）の10軸。use_monotone_constraints は build_snapshots
-        のキャッシュキーに影響しない純 xgb_param のため再構築を誘発せず LRU も圧迫しない。
+        （use_monotone_constraints・#366）＋セクター/サイズ特徴1軸（use_sector_features・#370）
+        の11軸。use_monotone_constraints / use_sector_features はいずれも build_snapshots
+        のキャッシュキーに影響しない execute 内後処理（前者は純 xgb_param・後者は特徴量後付け
+        連結）のため再構築を誘発せず LRU も圧迫しない。
         momentum を探索できる
         のは build_snapshots のキャッシュキーが use_momentum/mom_window を含む（#298）ため
         ＝再構築は momentum 構成6種（off＋窓5種）ごとに1回だけで `_CACHE_MAXSIZE=8` 内に
@@ -457,6 +586,7 @@ class MacroGbdtPlugin(AnalysisPlugin):
             SearchDim("reg_lambda",         [0.0, 0.5, 1.0, 2.0, 5.0, 10.0]),
             SearchDim("reg_alpha",          [0.0, 0.5, 1.0, 2.0, 5.0]),
             SearchDim("use_monotone_constraints", [False, True]),
+            SearchDim("use_sector_features", [False, True]),
         ]
         return base_params, dims
 
@@ -579,6 +709,25 @@ class MacroGbdtPlugin(AnalysisPlugin):
                 f"学習サンプルが不足（{total_samples}件）。データを収集してから再実行してください。"
             )
 
+        # ── セクター/サイズのカテゴリ特徴量（Issue #370・既定 OFF）─────────────────
+        # 木の入力へ log_size と業種 target encoding（sector_te）を後付け連結する。
+        #   - CV      : cv_samples_by_ym（industry を第3要素で運ぶ）＋ _wrap_sector_target_encoding
+        #               で per-fold（学習集合内）に sector_te を fit＝リーク厳禁を担保。
+        #   - 最終/現在: final_samples_by_ym / X_current は全学習データで fit（current にラベルなし）。
+        # OLS ベースラインは無改変（sector-free＝木ならではの拡張の効果を切り分けるため）。
+        # use_sector=False では model_feat_names/CV/最終が従来経路と完全一致（後方互換）。
+        use_sector = params.get("use_sector_features", False)
+        if use_sector:
+            model_feat_names = all_feat_names + [_SIZE_FEAT, _SECTOR_TE_FEAT]
+            cv_samples_by_ym = _build_sector_cv_samples(samples_by_ym, sample_meta_by_ym)
+            final_samples_by_ym, _sector_enc, _sector_gmean = _build_sector_final_samples(
+                samples_by_ym, sample_meta_by_ym
+            )
+        else:
+            model_feat_names = all_feat_names
+            cv_samples_by_ym = samples_by_ym
+            final_samples_by_ym = samples_by_ym
+
         # ── XGBoost パラメータ ────────────────────────────────────────────────
         xgb_params = {
             "max_depth":          params["max_depth"],
@@ -601,14 +750,17 @@ class MacroGbdtPlugin(AnalysisPlugin):
         # 自動伝播する。M-5（XGBRanker）も execute を継承し、XGBRanker は monotone_constraints
         # を受け付けるため同一符号表がランク学習にもそのまま効く。
         if params.get("use_monotone_constraints", False):
-            xgb_params["monotone_constraints"] = _build_monotone_constraints(all_feat_names)
+            xgb_params["monotone_constraints"] = _build_monotone_constraints(model_feat_names)
 
         # ── XGBoost walk-forward CV ───────────────────────────────────────────
         best_iterations: list[int] = []
         xgb_callback, wf_extra = self._make_cv_callback(xgb_params, best_iterations)
+        if use_sector:
+            # 業種 target encoding を per-fold（学習集合内）で付与するラッパー（リーク厳禁）。
+            xgb_callback = _wrap_sector_target_encoding(xgb_callback)
 
         cv_folds_xgb, cv_residuals_xgb = walk_forward_cv_monthly(
-            samples_by_ym, all_feat_names,
+            cv_samples_by_ym, model_feat_names,
             min_train_months=6, step_months=3,
             return_residuals=True,
             fit_predict=xgb_callback,
@@ -635,7 +787,7 @@ class MacroGbdtPlugin(AnalysisPlugin):
         if is_tuning_objective_only():
             return {
                 "cv_metrics":        {"xgb": None, "ols_baseline": None},
-                "selected_features": all_feat_names,
+                "selected_features": model_feat_names,
                 "feature_coefs":     {},
                 "feature_coefs_signed": {},
                 "feature_shap_dir":     {},
@@ -654,7 +806,9 @@ class MacroGbdtPlugin(AnalysisPlugin):
                 "r_macro_available": False,
             }
 
-        # ── OLS ベースライン CV（同一特徴量・交差項なし・BIC なし）────────────
+        # ── OLS ベースライン CV（base 特徴量・交差項なし・BIC なし）────────────
+        # sector 特徴（#370）は木ならではの拡張のため常に sector-free の base 特徴で回す
+        # （XGB と OLS の差 = 非線形性の効果を切り分ける・ADR-0002 が M-1 の交差項を却下したのと同型）。
         cv_folds_ols = walk_forward_cv_monthly(
             samples_by_ym, all_feat_names,
             min_train_months=6, step_months=3,
@@ -695,7 +849,10 @@ class MacroGbdtPlugin(AnalysisPlugin):
             if best_iterations
             else params["n_estimators_max"] // 2
         )
-        all_samples = [s for ym_s in samples_by_ym.values() for s in ym_s]
+        # final_samples_by_ym は sector ON なら [log_size, sector_te] 連結済（全学習 encoding）。
+        # M-5 の _fit_final_model は samples_by_ym から group を復元しつつ s[0] を特徴に使うため、
+        # sector 列も final_samples_by_ym 経由で最終ランカーへ伝わる。
+        all_samples = [s for ym_s in final_samples_by_ym.values() for s in ym_s]
         X_all = np.array([s[0] for s in all_samples], dtype=float)
         y_all_raw = [s[1] for s in all_samples]
         y_all_w, _, _ = winsorize(y_all_raw)
@@ -704,12 +861,19 @@ class MacroGbdtPlugin(AnalysisPlugin):
         final_params = {k: v for k, v in xgb_params.items()
                         if k not in ("n_estimators", "early_stopping_rounds")}
         final_model = self._fit_final_model(
-            final_params, n_est_final, X_all, y_all, samples_by_ym, all_feat_names
+            final_params, n_est_final, X_all, y_all, final_samples_by_ym, model_feat_names
         )
 
         # ── スコアリング ─────────────────────────────────────────────────────
         codes_ordered = list(current_snaps.keys())
-        X_current = np.array([current_snaps[c][0] for c in codes_ordered], dtype=float)
+        if use_sector:
+            X_current = np.array(
+                [_sector_current_row(current_snaps[c][0], current_snaps[c][1],
+                                     _sector_enc, _sector_gmean) for c in codes_ordered],
+                dtype=float,
+            )
+        else:
+            X_current = np.array([current_snaps[c][0] for c in codes_ordered], dtype=float)
         mu_preds = final_model.predict(X_current).tolist()
 
         # ── SHAP（グローバル＋per-stock）────────────────────────────────────
@@ -720,23 +884,23 @@ class MacroGbdtPlugin(AnalysisPlugin):
 
         global_shap = {
             name: round(float(np.abs(shap_matrix[:, i]).mean()), 6)
-            for i, name in enumerate(all_feat_names)
+            for i, name in enumerate(model_feat_names)
         }
 
         # ── signed SHAP＋交互作用（解釈性強化・Issue #371）──────────────────
         # global_shap は大きさのみ。方向（学習された単調符号）と特徴量ペアの
         # 交互作用強度を追加し、M-2 が自動学習する非線形構造を可視化する。
         global_shap_signed, shap_direction = _signed_global_shap(
-            shap_matrix, X_current, all_feat_names
+            shap_matrix, X_current, model_feat_names
         )
-        if params.get("shap_interactions", True) and len(all_feat_names) >= 2:
+        if params.get("shap_interactions", True) and len(model_feat_names) >= 2:
             n_rows = X_current.shape[0]
             if n_rows > _INTERACT_MAX_ROWS:
                 idx = np.linspace(0, n_rows - 1, _INTERACT_MAX_ROWS).astype(int)
                 X_int = X_current[idx]
             else:
                 X_int = X_current
-            feature_interactions = _global_interactions(explainer, X_int, all_feat_names)
+            feature_interactions = _global_interactions(explainer, X_int, model_feat_names)
         else:
             feature_interactions = []
         shap_interactions_available = bool(feature_interactions)
@@ -755,7 +919,7 @@ class MacroGbdtPlugin(AnalysisPlugin):
             r1p = conformal_halfwidth_for(info.get("industry"), info.get("size"), conformal_data)
             stock_shap = {
                 name: round(float(shap_matrix[j, i]), 4)
-                for i, name in enumerate(all_feat_names)
+                for i, name in enumerate(model_feat_names)
             }
             raw_items.append({
                 "edinet_code":  edinet_code,
@@ -801,7 +965,7 @@ class MacroGbdtPlugin(AnalysisPlugin):
 
         return {
             "cv_metrics":        cv_metrics,
-            "selected_features": all_feat_names,
+            "selected_features": model_feat_names,
             "feature_coefs":       global_shap,   # mean|SHAP|（大きさのみ・方向なし・後方互換）
             "feature_coefs_signed": global_shap_signed,      # 署名付き重要度（Issue #371）
             "feature_shap_dir":     shap_direction,          # 学習された単調方向 corr∈[-1,1]

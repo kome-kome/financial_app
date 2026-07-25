@@ -18,6 +18,9 @@ import numpy as np
 from plugins.macro_gbdt import (
     MacroGbdtPlugin, _make_xgb_fit_predict,
     _build_monotone_constraints, _MONOTONE_SIGN,
+    _SIZE_FEAT, _SECTOR_TE_FEAT, _log_size, _fit_sector_encoding,
+    _build_sector_cv_samples, _wrap_sector_target_encoding,
+    _build_sector_final_samples, _sector_current_row,
 )
 from plugins.macro_snapshots import (
     build_snapshots, FINANCIAL_LAG_DAYS, HORIZON_WEEKS, oof_backtest, build_oof_meta,
@@ -999,7 +1002,7 @@ class TestTuningSearchSpace:
     def test_returns_base_params_and_dims(self):
         base_params, dims = plugin.tuning_search_space()
         assert isinstance(base_params, dict)
-        assert len(dims) == 10
+        assert len(dims) == 11
 
     def test_dims_cover_xgb_and_momentum_axes(self):
         _base_params, dims = plugin.tuning_search_space()
@@ -1009,6 +1012,7 @@ class TestTuningSearchSpace:
             "max_depth", "learning_rate", "subsample", "colsample_bytree",
             "min_child_weight", "reg_lambda", "reg_alpha",
             "use_monotone_constraints",   # 符号事前知識 1軸（Issue #366）
+            "use_sector_features",        # セクター/サイズ 1軸（Issue #370）
         }
         # モメンタム以外の構造・表示専用パラメータは対象外
         assert "fin_features" not in names
@@ -1232,3 +1236,157 @@ class TestMonotoneConstraints:
             result = plugin.execute(params, db)
 
         assert result["n_companies"] > 0
+
+
+# ── 9. セクター/サイズのカテゴリ特徴量（Issue #370）─────────────────────────────
+
+class TestSectorSizeFeatures:
+    """業種 target encoding（リークフリー）＋ log_size の後付け連結。"""
+
+    def _make_params(self, **overrides):
+        base = {k: v["default"] for k, v in plugin.params_schema().items() if "default" in v}
+        base.update(overrides)
+        return coerce_params(plugin.params_schema(), base)
+
+    # ── schema ──
+    def test_schema_has_checkbox_default_off(self):
+        schema = MacroGbdtPlugin().params_schema()
+        assert "use_sector_features" in schema
+        field = schema["use_sector_features"]
+        assert field["type"] == "checkbox"
+        assert field["default"] is False
+
+    # ── log_size ──
+    def test_log_size_nan_for_missing_or_nonpositive(self):
+        assert math.isnan(_log_size(None))
+        assert math.isnan(_log_size(0))
+        assert math.isnan(_log_size(-5.0))
+
+    def test_log_size_log_for_positive(self):
+        assert _log_size(math.e) == pytest.approx(1.0)
+        assert _log_size(1e10) == pytest.approx(math.log(1e10))
+
+    # ── target encoding fit ──
+    def test_fit_sector_encoding_means_and_global(self):
+        enc, gmean = _fit_sector_encoding([("A", 1.0), ("A", 3.0), ("B", 10.0)])
+        assert enc["A"] == pytest.approx(2.0)
+        assert enc["B"] == pytest.approx(10.0)
+        assert gmean == pytest.approx((1.0 + 3.0 + 10.0) / 3)
+
+    def test_fit_sector_encoding_empty(self):
+        enc, gmean = _fit_sector_encoding([])
+        assert enc == {}
+        assert gmean == 0.0
+
+    # ── CV サンプル整形 ──
+    def test_build_cv_samples_appends_logsize_and_carries_industry(self):
+        samples = {"2020-01": [([1.0, 2.0], 0.05)]}
+        meta = {"2020-01": [("素材", 1e10)]}
+        out = _build_sector_cv_samples(samples, meta)
+        row, y, industry = out["2020-01"][0]
+        assert row == [1.0, 2.0, _log_size(1e10)]
+        assert y == 0.05
+        assert industry == "素材"
+
+    # ── リークフリー性（最重要）──
+    def test_wrap_target_encoding_is_leak_free(self):
+        """test サンプルの sector_te は TRAIN の業種平均のみ由来（test 自身の y を使わない）。"""
+        captured: dict = {}
+
+        def inner(tr, te, *rest):
+            captured["train"] = tr
+            captured["test"] = te
+            return [0.0] * len(te), [s[1] for s in te]
+
+        wrapped = _wrap_sector_target_encoding(inner)
+        # TRAIN: A→平均0.2、B→-0.1
+        train = [([1.0], 0.1, "A"), ([1.0], 0.3, "A"), ([1.0], -0.1, "B")]
+        # TEST: 極端な y（999/-999）でも encoding は TRAIN 由来 ＝ test の y は無関係
+        test = [([9.0], 999.0, "A"), ([9.0], -999.0, "B"), ([9.0], 0.0, "C")]
+        wrapped(train, test)
+
+        # train の sector_te（末尾列）= 業種平均
+        assert captured["train"][0][0][-1] == pytest.approx(0.2)   # A
+        assert captured["train"][2][0][-1] == pytest.approx(-0.1)  # B
+        # test の sector_te も TRAIN 平均（test の y 999/-999 由来ではない＝リークなし）
+        assert captured["test"][0][0][-1] == pytest.approx(0.2)    # A
+        assert captured["test"][1][0][-1] == pytest.approx(-0.1)   # B
+        # 未知業種 C は TRAIN 全体平均へフォールバック
+        gmean = (0.1 + 0.3 - 0.1) / 3
+        assert captured["test"][2][0][-1] == pytest.approx(gmean)
+        # 2-tuple へ縮約＆列数 +1
+        assert len(captured["train"][0]) == 2
+        assert len(captured["train"][0][0]) == 2
+
+    def test_wrap_forwards_extra_args_for_ranker(self):
+        """M-5（pass_train_groups=True）の3引数呼び出しを *rest で素通しする。"""
+        seen: dict = {}
+
+        def inner(tr, te, groups):
+            seen["groups"] = groups
+            return [0.0] * len(te), [s[1] for s in te]
+
+        wrapped = _wrap_sector_target_encoding(inner)
+        train = [([1.0], 0.1, "A"), ([1.0], 0.2, "A")]
+        test = [([1.0], 0.3, "A")]
+        wrapped(train, test, [2])
+        assert seen["groups"] == [2]
+
+    # ── 最終モデル用サンプル ──
+    def test_build_final_samples_appends_two_cols(self):
+        samples = {"2020-01": [([1.0], 0.2), ([1.0], 0.4)], "2020-02": [([2.0], -0.1)]}
+        meta = {"2020-01": [("A", 1e10), ("A", 1e10)], "2020-02": [("B", 1e9)]}
+        out, enc, gmean = _build_sector_final_samples(samples, meta)
+        assert enc["A"] == pytest.approx(0.3)
+        assert enc["B"] == pytest.approx(-0.1)
+        assert gmean == pytest.approx((0.2 + 0.4 - 0.1) / 3)
+        row, y = out["2020-01"][0]
+        assert row[0] == 1.0
+        assert row[1] == pytest.approx(_log_size(1e10))
+        assert row[2] == pytest.approx(0.3)   # sector_te = A の平均
+        assert y == 0.2
+
+    def test_sector_current_row_uses_alltrain_encoding(self):
+        enc = {"A": 0.3, "B": -0.1}
+        row = _sector_current_row([5.0], {"size": 1e10, "industry": "A"}, enc, gmean=0.05)
+        assert row[0] == 5.0
+        assert row[1] == pytest.approx(_log_size(1e10))
+        assert row[2] == pytest.approx(0.3)
+        # 未知業種 → gmean フォールバック・size 欠損 → NaN
+        row2 = _sector_current_row([5.0], {"size": None, "industry": "Z"}, enc, gmean=0.05)
+        assert math.isnan(row2[1])
+        assert row2[2] == pytest.approx(0.05)
+
+    # ── execute end-to-end ──
+    def test_execute_with_sector_features_completes(self):
+        db, prices_by_co, fin_by_co, companies = TestExecuteSmoke()._make_db()
+        params = self._make_params(use_macro=False, use_sector_features=True)
+
+        with patch("plugins.macro_gbdt.load_data", return_value=(prices_by_co, fin_by_co, companies)), \
+             patch("plugins.macro_gbdt.preload_macro", return_value={}), \
+             patch("plugins.macro_gbdt.get_producer_scores", return_value={}):
+            result = plugin.execute(params, db)
+
+        assert result["n_companies"] > 0
+        # 2 列がモデル特徴・SHAP キーへ入る
+        assert _SIZE_FEAT in result["selected_features"]
+        assert _SECTOR_TE_FEAT in result["selected_features"]
+        assert _SIZE_FEAT in result["feature_coefs"]
+        assert _SECTOR_TE_FEAT in result["feature_coefs"]
+        for item in result["results"]:
+            assert _SIZE_FEAT in item["shap"]
+            assert _SECTOR_TE_FEAT in item["shap"]
+            assert item["mu_raw"] == item["mu_raw"], "mu_raw が NaN"
+
+    def test_execute_default_off_excludes_sector_cols(self):
+        db, prices_by_co, fin_by_co, companies = TestExecuteSmoke()._make_db()
+        params = self._make_params(use_macro=False)
+        assert params["use_sector_features"] is False
+
+        with patch("plugins.macro_gbdt.load_data", return_value=(prices_by_co, fin_by_co, companies)), \
+             patch("plugins.macro_gbdt.preload_macro", return_value={}), \
+             patch("plugins.macro_gbdt.get_producer_scores", return_value={}):
+            result = plugin.execute(params, db)
+
+        assert _SIZE_FEAT not in result["selected_features"]
+        assert _SECTOR_TE_FEAT not in result["selected_features"]
