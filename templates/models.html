@@ -606,7 +606,11 @@ conv_score₁₂ₘ = max(<span class="val">5</span>, min(<span class="val">95</
     <div><span class="spec-label">R1</span> <strong>なし</strong>（OLS 固有の予測 SE。効用軸ではないため欠落しても幾何は壊れない）</div>
     <div><span class="spec-label">SHAP</span> グローバル mean|SHAP|（大きさのみ・方向なし）＋全社の per-stock 寄与内訳</div>
     <div><span class="spec-label">X winsorize</span> <strong>撤去</strong>（木は単調変換不変のためクリップ不要）、y winsorize は維持</div>
+    <div><span class="spec-label">符号事前知識</span> <code>use_monotone_constraints</code>（既定 OFF）で確信のある財務比率のみ単調性制約（#366）</div>
   </div>
+
+  <h3>経済符号の単調性制約（#366）</h3>
+  <p>BIC/LASSO の事前選択を持たない M-2 は全特徴量を木に丸投げするため、低 S/N な日本株リターンでは<strong>符号が経済理論と逆の過学習分岐</strong>が生じうる（SHAP も大きさのみで方向を持たない）。<code>use_monotone_constraints</code>（既定 OFF）を ON にすると、符号が経済理論から明確な財務比率だけに XGBoost の <code>monotone_constraints</code> で「特徴量↑→予測 μ̂ ↑/↓」を強制する：<strong>PBR・PER・D/E→負</strong>（割高・高レバレッジ→リターン低）、<strong>ROE・ROA・営業利益率・配当利回り→正</strong>（クオリティ・インカム→リターン高）。マクロ（レジーム依存）・業種内Zスコア・モメンタム・px_* は<strong>制約なし</strong>。符号がモデル構造として保証され解釈性も上がる。ON/OFF を OOF rank-IC で比較し fold 間 std の低下（頑健化）を確認してから既定化する（<code>use_momentum</code>/px_* と同じ保守ゲート・native XGBoost 機能で次元不変）。設計の記録は ADR-0019。</p>
 
   <h3>SHAP による解釈</h3>
   <p>SHAP（SHapley Additive exPlanations）は各特徴量が予測値にどれだけ寄与するかを<strong>理論的に一意に分解</strong>する手法。M-1 の標準化係数バーに相当する位置に global mean|SHAP| を表示し、ランキング行をクリックすると<strong>その銘柄がなぜ推奨されるか</strong>を特徴量別に確認できる。</p>
