@@ -5,7 +5,7 @@
 | ステータス | 🔄 **Phase 1〜3（F1〜F10）＋ Phase 4 の導線リンク 実装済み**／エクスポート・レスポンシブは未着手 |
 | 作成日 | 2026-05-26 |
 | ベンチマーク | [バフェット・コード](https://www.buffett-code.com/) |
-| 関連 | [VISION.md](VISION.md)（完成定義#2「投資情報サイトのような操作感」）/ [ARCHITECTURE.md](ARCHITECTURE.md) / [FUTURE_TASKS.md](FUTURE_TASKS.md) |
+| 関連 | [VISION.md](../VISION.md)（完成定義#2「投資情報サイトのような操作感」）/ [ARCHITECTURE.md](../ARCHITECTURE.md) / [FUTURE_TASKS.md](../FUTURE_TASKS.md) |
 
 ---
 
@@ -231,4 +231,4 @@ graph LR
 
 - バフェット・コード — <https://www.buffett-code.com/>（個別企業ページ・企業比較 `comps`・スクリーニング）
 - Chart.js — <https://www.chartjs.org/>（MIT ライセンス）
-- 内部: [VISION.md](VISION.md) / [ARCHITECTURE.md](ARCHITECTURE.md) / [FUTURE_TASKS.md](FUTURE_TASKS.md) / [MODELS.md](MODELS.md)
+- 内部: [VISION.md](../VISION.md) / [ARCHITECTURE.md](../ARCHITECTURE.md) / [FUTURE_TASKS.md](../FUTURE_TASKS.md) / [MODELS.md](../MODELS.md)
