@@ -586,6 +586,7 @@ class MacroGbdtScore(Base):
 
     edinet_code   = Column(String(10), primary_key=True)
     mu            = Column(Float, nullable=False)   # XGBoost 予測 52週先対数リターン（無次元）
+    r1_prime      = Column(Float)                    # コンフォーマル区間半幅＝確実性軸（Issue #365・None 可）
     snapshot_date = Column(String(10))              # "YYYY-MM-DD"（実行時スナップ基準日）
     created_at    = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
@@ -593,16 +594,20 @@ class MacroGbdtScore(Base):
 def replace_macro_gbdt_scores(db, rows: list, snapshot_date: str | None = None) -> int:
     """M-2 producer μ̂ を全置換する（最新スナップショットのみ保持）。
 
-    rows = [{"edinet_code": str, "mu": float}, ...]。1 txn で全削除→一括 insert。
-    mu が None の行はスキップ（予測不能銘柄を保存しない）。戻り値は保存件数。
+    rows = [{"edinet_code": str, "mu": float, "r1_prime": float|None}, ...]。1 txn で
+    全削除→一括 insert。mu が None の行はスキップ（予測不能銘柄を保存しない）。r1_prime は
+    任意（無ければ None＝R3 ゲート素通り・Issue #365）。戻り値は保存件数。
     `tuning_dry_run()` 内では no-op（0 を返す・Issue #264）。
     """
     if _tuning_dry_run.get():
         return 0
     db.query(MacroGbdtScore).delete()
     objs = [
-        MacroGbdtScore(edinet_code=r["edinet_code"], mu=float(r["mu"]),
-                       snapshot_date=snapshot_date)
+        MacroGbdtScore(
+            edinet_code=r["edinet_code"], mu=float(r["mu"]),
+            r1_prime=(float(r["r1_prime"]) if r.get("r1_prime") is not None else None),
+            snapshot_date=snapshot_date,
+        )
         for r in rows
         if r.get("edinet_code") and r.get("mu") is not None
     ]
@@ -613,9 +618,26 @@ def replace_macro_gbdt_scores(db, rows: list, snapshot_date: str | None = None) 
 
 
 def get_macro_gbdt_scores(db) -> dict:
-    """M-2 producer μ̂ を {edinet_code: mu} で返す（未蓄積なら {}・graceful degrade）。"""
+    """M-2 producer μ̂ を {edinet_code: mu} で返す（未蓄積なら {}・graceful degrade）。
+
+    後方互換のため mu のみを返す（produced_output 判定・既存呼出し用）。確実性軸 r1_prime も
+    含めた producer 全体は get_macro_gbdt_producer を使う（Issue #365）。"""
     try:
         return {r.edinet_code: r.mu for r in db.query(MacroGbdtScore).all()}
+    except Exception:
+        return {}
+
+
+def get_macro_gbdt_producer(db) -> dict:
+    """M-2 producer を {edinet_code: {"mu": float, "r1_prime": float|None}} で返す（Issue #365）。
+
+    sell_ranking の R3 足切りゲートが r1_prime（コンフォーマル区間半幅）を読むための拡張版。
+    未蓄積・列未migration なら {}（graceful degrade）。"""
+    try:
+        return {
+            r.edinet_code: {"mu": r.mu, "r1_prime": r.r1_prime}
+            for r in db.query(MacroGbdtScore).all()
+        }
     except Exception:
         return {}
 
@@ -1395,6 +1417,12 @@ def _ensure_tables() -> None:
         conn.execute(text(
             "CREATE INDEX IF NOT EXISTS ix_xbrl_raw_edinet_period "
             "ON xbrl_raw_documents (edinet_code, period_end)"
+        ))
+        # M-2 確実性軸 r1_prime（コンフォーマル区間半幅）の加算的マイグレーション
+        # （Issue #365・非破壊・冪等）。既存 macro_gbdt_scores 行は NULL のまま＝R3 ゲート
+        # 素通り。次回 M-2 実行の replace_macro_gbdt_scores が値を投入する。
+        conn.execute(text(
+            "ALTER TABLE macro_gbdt_scores ADD COLUMN IF NOT EXISTS r1_prime DOUBLE PRECISION"
         ))
         # period_end を VARCHAR(20) → DATE 型に変換するマイグレーション（冪等）
         # SKIP_PERIOD_END_MIGRATION=1 で skip できるフェールセーフ付き

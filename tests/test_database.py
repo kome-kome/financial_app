@@ -403,6 +403,23 @@ class TestTuningDryRun:
         replace_macro_gbdt_scores(db, [{"edinet_code": "E2", "mu": 0.2}], "d")
         assert get_macro_gbdt_scores(db) == {"E2": pytest.approx(0.2)}
 
+    def test_macro_gbdt_r1_prime_roundtrip(self, db):
+        """r1_prime（コンフォーマル区間半幅・Issue #365）が producer 読出しで往復する。
+        get_macro_gbdt_scores は後方互換で {ec: mu} のまま。"""
+        from database import (get_macro_gbdt_scores, get_macro_gbdt_producer,
+                              replace_macro_gbdt_scores)
+        replace_macro_gbdt_scores(db, [
+            {"edinet_code": "E1", "mu": 0.1, "r1_prime": 0.25},
+            {"edinet_code": "E2", "mu": 0.2},   # r1_prime 省略 → None
+        ], "d")
+        # 後方互換 accessor は mu のみ
+        assert get_macro_gbdt_scores(db) == {"E1": pytest.approx(0.1), "E2": pytest.approx(0.2)}
+        # 拡張 accessor は r1_prime を含む
+        prod = get_macro_gbdt_producer(db)
+        assert prod["E1"]["mu"] == pytest.approx(0.1)
+        assert prod["E1"]["r1_prime"] == pytest.approx(0.25)
+        assert prod["E2"]["r1_prime"] is None
+
     def test_dry_run_resets_on_exception(self, db):
         """with ブロック内で例外が出ても _tuning_dry_run は必ず解除される。"""
         import database as database_module

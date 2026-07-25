@@ -262,9 +262,9 @@ class SellRankingPlugin(AnalysisPlugin):
             },
             "r3_gate": {
                 "type": "slider", "dtype": "float",
-                "label": "R3 足切り（M-1 予測SE）",
+                "label": "R3 足切り（μ 予測の確実性）",
                 "min": 0.0, "max": 0.5, "step": 0.05, "default": 0.0,
-                "description": "M-1 の μ 予測SE（r1_prime）がこの値を超える銘柄は SELL を出さない（0=無効・M-2選択時は無効）",
+                "description": "μ 予測の確実性軸 r1_prime（M-1=予測SE／M-2=コンフォーマル区間半幅）がこの値を超える銘柄は SELL を出さない（0=無効・M-3/M-4選択時は無効）",
             },
         }
 
@@ -397,11 +397,12 @@ class SellRankingPlugin(AnalysisPlugin):
             action = _base_action(score, sell_th, reduce_th)
             if timing_adj and action in _ACTIONS:
                 action = _apply_timing(action, mom["trend"])
-            # R3 足切りゲート: M-1 の μ 予測SE（r1_prime）が閾値超 → SELL を出さない。
-            # mu_source=macro_gbdt（M-2）/macro_dlm（M-3）/macro_ensemble（M-4）は
-            # r1_prime を持たないため無効（ADR-0004・no-op）。
+            # R3 足切りゲート: μ 予測の確実性軸（r1_prime）が閾値超 → SELL を出さない。
+            # M-1=OLS 予測SE / M-2=コンフォーマル区間半幅（Issue #365・R3 ゲート再有効化）。
+            # mu_source=macro_dlm（M-3）/macro_ensemble（M-4）は r1_prime を持たないため無効
+            # （ADR-0004・no-op）。r1_prime が None の銘柄（列未 migration 等）はゲート素通り。
             _r3_gate = params.get("r3_gate", 0.0)
-            if _r3_gate and action == "SELL" and _ps and mu_source not in ("macro_gbdt", "macro_dlm", "macro_ensemble"):
+            if _r3_gate and action == "SELL" and _ps and mu_source not in ("macro_dlm", "macro_ensemble"):
                 _r1p = _ps.get("r1_prime")
                 if _r1p is not None and float(_r1p) > _r3_gate:
                     action = "REDUCE"
