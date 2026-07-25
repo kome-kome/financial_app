@@ -946,8 +946,11 @@ function _mcModelCard(m) {
   const oof = m.oof_backtest || {};
   const qr  = oof.quantile_returns || [];
   const ic  = oof.rank_ic || {};
+  const inIc = oof.rank_ic_industry_neutral || {};   // 業種中立rank-IC（#368）
   const mono = oof.monotonicity || {};
   const hasOof = qr.length > 0;
+  const be = oof.breakeven_cost_bps;                  // ブレークイーブンbps（#368）
+  const to = oof.effective_turnover;                  // 実効ターンオーバー（#368）
   // 単調性（Issue #369）: 分位平均が μ̂ 昇順で単調増か。中間分位が U 字/ノイズだと
   // spread が開いても spearman_mean/隣接正順率が下がる（過学習・不安定シグナルの検知）。
   const monoSp = mono.spearman_mean;
@@ -956,14 +959,18 @@ function _mcModelCard(m) {
   const monoSig = monoP != null && monoP < 0.05;
   const metrics = `
     <div style="display:grid;grid-template-columns:1fr;gap:6px;margin-bottom:10px">
-      <div style="padding:6px 8px;background:var(--bg-panel,var(--bg-sunken));border-radius:6px">
-        <div style="font-size:10px;color:var(--text-muted)">rank-IC（Spearman 平均±std）</div>
-        <div style="font-size:15px;font-weight:700;color:${(ic.mean||0)>0?cssVar('--val-up-text'):cssVar('--val-down-text')}">${ic.mean!=null?ic.mean.toFixed(3):'-'}<span style="font-size:11px;color:var(--text-muted)"> ±${ic.std!=null?ic.std.toFixed(3):'-'}</span></div>
-        <div style="font-size:10px;color:var(--text-muted)">${ic.n||0} fold</div>
+      <div style="padding:6px 8px;background:var(--bg-panel,var(--bg-sunken));border-radius:6px" title="生rank-IC＝業種ベット（例:素材>ハイテクをWTIで一括に並べる）を含む。業種中立rank-ICは各期・業種内で順位デミーンしてからSpearman＝業種内の真の銘柄選択力（Issue #368）。">
+        <div style="font-size:10px;color:var(--text-muted)">rank-IC（生 ／ 業種中立）</div>
+        <div style="font-size:15px;font-weight:700;color:${(ic.mean||0)>0?cssVar('--val-up-text'):cssVar('--val-down-text')}">${ic.mean!=null?ic.mean.toFixed(3):'-'}<span style="font-size:11px;color:var(--text-muted)"> ±${ic.std!=null?ic.std.toFixed(3):'-'}</span> <span style="font-size:12px;color:${(inIc.mean||0)>0?cssVar('--val-up-text'):cssVar('--val-down-text')}">／ ${inIc.mean!=null?inIc.mean.toFixed(3):'-'}</span></div>
+        <div style="font-size:10px;color:var(--text-muted)">${ic.n||0} fold${inIc.mean!=null?` ／ 中立 ${inIc.n||0}期`:''}</div>
       </div>
       <div style="padding:6px 8px;background:var(--bg-panel,var(--bg-sunken));border-radius:6px">
         <div style="font-size:10px;color:var(--text-muted)">ロングショート spread（top−bottom）</div>
         <div style="font-size:15px;font-weight:700;color:${(oof.long_short_spread||0)>0?cssVar('--val-up-text'):cssVar('--val-down-text')}">${oof.long_short_spread!=null?(oof.long_short_spread*100).toFixed(2)+'%':'-'}</div>
+      </div>
+      <div style="padding:6px 8px;background:var(--bg-panel,var(--bg-sunken));border-radius:6px" title="実効ターンオーバー＝隣接期の上位/下位分位メンバー(銘柄)の入替割合(0=据置,1=総入替)。ブレークイーブンbps＝片道コスト何bpでロングショートspreadが消えるか(gross·50/turnover)。頻度依存が比で相殺され、低回転な安定モデルほど高い＝コスト耐性が強い(Issue #368・Grinold & Kahn)。">
+        <div style="font-size:10px;color:var(--text-muted)">ブレークイーブンbps ／ 実効ターンオーバー</div>
+        <div style="font-size:15px;font-weight:700;color:${be!=null?cssVar('--val-up-text'):'var(--text-muted)'}">${be!=null?be.toFixed(0)+'bp':'-'}<span style="font-size:11px;color:var(--text-muted)"> ／ 回転 ${to!=null?(to*100).toFixed(0)+'%':'-'}</span></div>
       </div>
       <div style="padding:6px 8px;background:var(--bg-panel,var(--bg-sunken));border-radius:6px">
         <div style="font-size:10px;color:var(--text-muted)">hit-rate（top&gt;bottom の期）</div>

@@ -16,7 +16,9 @@ import pytest
 import numpy as np
 
 from plugins.macro_gbdt import MacroGbdtPlugin, _make_xgb_fit_predict
-from plugins.macro_snapshots import build_snapshots, FINANCIAL_LAG_DAYS, HORIZON_WEEKS, oof_backtest
+from plugins.macro_snapshots import (
+    build_snapshots, FINANCIAL_LAG_DAYS, HORIZON_WEEKS, oof_backtest, build_oof_meta,
+)
 from plugins.utils import coerce_params
 
 
@@ -765,6 +767,83 @@ class TestOofBacktest:
         assert o["long_short_spread"] is None
         assert o["long_short_spread_net"] is None
         assert o["quantile_returns"] == []
+
+    # ── 業種中立rank-IC・実効ターンオーバー・ブレークイーブンbps（Issue #368）────
+
+    def test_meta_none_new_metrics_are_none(self):
+        """meta_by_ym 未指定なら新指標は全 None・既存キーは不変（後方互換）。"""
+        r = {"2020-01": self._ramp(), "2020-02": self._ramp()}
+        o = oof_backtest(r, n_quantiles=5)
+        assert o["rank_ic_industry_neutral"] == {"mean": None, "n": 0}
+        assert o["effective_turnover"] is None
+        assert o["breakeven_cost_bps"] is None
+        assert o["long_short_spread_net_turnover"] is None
+        assert o["annual_turnover"] is None
+
+    def test_industry_neutral_ic_removes_sector_bet(self):
+        """業種ベットで raw IC は高いが業種内は逆順 → 業種中立 IC は負に落ちる。"""
+        yh = [10, 11, 12, 13, 14, 0, 1, 2, 3, 4]
+        yt = [104, 103, 102, 101, 100, 4, 3, 2, 1, 0]   # 各業種内で yhat と逆順
+        ids = [f"a{i}" for i in range(5)] + [f"b{i}" for i in range(5)]
+        inds = ["A"] * 5 + ["B"] * 5
+        r = {"m": list(zip(yh, yt))}
+        meta = {"m": list(zip(ids, inds))}
+        o = oof_backtest(r, n_quantiles=5, meta_by_ym=meta)
+        assert o["rank_ic"]["mean"] > 0.4                    # セクター傾斜で正
+        assert o["rank_ic_industry_neutral"]["mean"] == -1.0  # 業種内は完全逆順
+        assert o["rank_ic_industry_neutral"]["n"] == 1
+
+    def test_industry_neutral_skips_null_industry_and_singletons(self):
+        """industry=None の行は除外・単独業種はデミーンで消える → 有効n不足なら None。"""
+        r = {"m": [(i * 0.01, i * 0.01) for i in range(6)]}
+        # 全行 industry=None → 中立 IC 算出不可
+        meta = {"m": [(f"e{i}", None) for i in range(6)]}
+        o = oof_backtest(r, n_quantiles=5, meta_by_ym=meta)
+        assert o["rank_ic_industry_neutral"] == {"mean": None, "n": 0}
+
+    def test_turnover_zero_when_membership_stable(self):
+        """分位メンバーが毎期同一 → 実効ターンオーバー0・breakeven は算出不能(None)。"""
+        r = {"2020-01": self._ramp(), "2020-02": self._ramp()}
+        ids = [f"e{i}" for i in range(20)]
+        meta = {ym: [(i, "A") for i in ids] for ym in r}
+        o = oof_backtest(r, n_quantiles=5, meta_by_ym=meta, rebalance_per_year=4)
+        assert o["effective_turnover"] == 0.0
+        assert o["breakeven_cost_bps"] is None    # turnover=0 → ゼロ除算回避
+        assert o["annual_turnover"] == 0.0
+
+    def test_turnover_full_churn_breakeven_scales(self):
+        """2期目で銘柄を総入替 → turnover=1・breakeven=gross*50/1。"""
+        r = {"2020-01": self._ramp(), "2020-02": self._ramp()}
+        meta = {
+            "2020-01": [(f"e{i}", "A") for i in range(20)],
+            "2020-02": [(f"x{i}", "A") for i in range(20)],
+        }
+        o = oof_backtest(r, n_quantiles=5, meta_by_ym=meta, rebalance_per_year=4)
+        assert o["effective_turnover"] == 1.0
+        assert o["breakeven_cost_bps"] == pytest.approx(o["long_short_spread"] * 50.0)
+        assert o["annual_turnover"] == 4.0
+
+    def test_turnover_partial_and_net_turnover(self):
+        """部分入替の Jaccard 平均・ネット(実効回転控除) の式一致。"""
+        r = {"2020-01": [(1, 1), (2, 2), (3, 3), (4, 4)],
+             "2020-02": [(1, 1), (2, 2), (3, 3), (4, 4)]}
+        # n_quantiles=2: top={c,d}/bottom={a,b} → 期2 top={d,e}: top非重複=1-1/3, bottom=0 → 平均 1/3
+        meta = {"2020-01": [("a", "A"), ("b", "A"), ("c", "A"), ("d", "A")],
+                "2020-02": [("a", "A"), ("b", "A"), ("d", "A"), ("e", "A")]}
+        o = oof_backtest(r, n_quantiles=2, cost_bps=10.0, meta_by_ym=meta)
+        assert o["effective_turnover"] == pytest.approx(1.0 / 3.0, abs=1e-4)
+        gross = o["long_short_spread"]
+        expect_net = gross - (10.0 / 100.0) * 2 * o["effective_turnover"]
+        assert o["long_short_spread_net_turnover"] == pytest.approx(expect_net, abs=1e-6)
+
+    def test_build_oof_meta_aligns_ids_and_industry(self):
+        """build_oof_meta は残差順に (stock_id, industry) を並べる。stock_ids 無しは None 埋め。"""
+        sample_meta = {"2020-01": [("鉄鋼", 100.0), ("情報通信", 50.0)]}
+        stock_ids = {"2020-01": ["E1", "E2"]}
+        m = build_oof_meta(stock_ids, sample_meta, ["2020-01"])
+        assert m["2020-01"] == [("E1", "鉄鋼"), ("E2", "情報通信")]
+        m2 = build_oof_meta(None, sample_meta, ["2020-01"])
+        assert m2["2020-01"] == [(None, "鉄鋼"), (None, "情報通信")]
 
     # ── rank-IC 差検定・単調性（Issue #369）────────────────────────────────
 

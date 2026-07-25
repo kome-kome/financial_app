@@ -37,6 +37,7 @@ from .macro_snapshots import (
     build_snapshots,
     get_producer_scores,
     oof_backtest,
+    build_oof_meta,
 )
 from .macro_risk_return import (
     MacroRiskReturnPlugin as _M1,
@@ -435,12 +436,13 @@ class MacroGbdtPlugin(AnalysisPlugin):
         macro_cache = preload_macro(db, prices_by_co, macro_names) if macro_names else {}
 
         # ── スナップショット構築（交差項なし・M-2）───────────────────────────
-        samples_by_ym, sample_meta_by_ym, current_snaps, all_feat_names = build_snapshots(
+        samples_by_ym, sample_meta_by_ym, current_snaps, all_feat_names, stock_ids_by_ym = build_snapshots(
             prices_by_co, fin_by_co, companies, macro_cache,
             fin_features, macro_names, use_momentum, mom_window, min_coverage,
             build_interactions=False,
             macro_nan_ok=True,
             price_features=price_features,
+            return_stock_ids=True,   # Issue #368: OOF ターンオーバー用に stock_id を回収
         )
 
         total_samples = sum(len(v) for v in samples_by_ym.values())
@@ -481,7 +483,11 @@ class MacroGbdtPlugin(AnalysisPlugin):
         # ── アウトオブサンプル検証（OOF）: 無リーク walk-forward 予測のモデル評価（ADR-0004）─
         # 既存「バックテスト」(/api/backtest) とは別概念。cv_residuals_xgb が揃った時点で
         # 算出可能（このあとの OLS ベースライン CV・全社スコアリング・SHAP 計算には非依存）。
-        oof_bt = oof_backtest(cv_residuals_xgb, n_quantiles=5)
+        # Issue #368: 業種中立rank-IC / 実効ターンオーバー / ブレークイーブンbps も算出（M-5 も
+        # 本 execute を継承するため同時に得る）。step_months=3 の四半期リバランス（=4/年）。
+        oof_meta = build_oof_meta(stock_ids_by_ym, sample_meta_by_ym, cv_residuals_xgb.keys())
+        oof_bt = oof_backtest(cv_residuals_xgb, n_quantiles=5,
+                              meta_by_ym=oof_meta, rebalance_per_year=4)
 
         # ── ハイパーパラメータ探索中は oof_backtest 算出後に早期return（Issue #299）───
         # plugins/tuning.py::search() が読むのは oof_backtest のみで、以降の OLS
