@@ -25,7 +25,11 @@ import logging
 
 logger = logging.getLogger("hyperparameter_search")
 
-MODELS = ("macro_risk_return", "macro_gbdt", "macro_dlm")
+# CLI で探索できるモデル（`tuning_search_space()` を実装しているもの）。
+# GitHub Actions（tune-hyperparameters.yml）の matrix は M-1/M-2/M-3 の3本のままで、
+# macro_enet（M-6・#372）は手動 CLI 専用。M-6 の探索軸は use_momentum / momentum_window だけ
+# （α・l1_ratio は学習 fold 内 CV が自動決定するため探索対象にしない）。
+MODELS = ("macro_risk_return", "macro_gbdt", "macro_dlm", "macro_enet")
 OBJECTIVES = ("rank_ic", "ic_ir", "long_short")
 
 

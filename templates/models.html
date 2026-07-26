@@ -752,6 +752,39 @@ conv_score₁₂ₘ = max(<span class="val">5</span>, min(<span class="val">95</
   </div>
 </div>
 
+<div class="model-section" id="m15">
+  <h2>M-6: マクロ×財務 正則化線形（ElasticNet） <span class="model-tag">将来リターンを予測</span></h2>
+  <span class="file-tag">plugins/macro_enet.py — POST /api/plugins/macro_enet/run</span>
+
+  <p>M-2（勾配ブースティング）と<strong>同一データ・同一 fold</strong>で学習する<strong>線形の兄弟</strong>。説明変数を L1（スパース化）と L2（縮小）の両方で正則化する ElasticNet を使う。金利カーブ（米5年/10年/30年）や信用スプレッド、株価指数、コモディティのように<strong>互いに強く相関するグループ</strong>が並ぶ本プロジェクトの特徴量では、素の OLS は打ち消し合う巨大な係数を出しやすい。L2 成分がグループ内で係数を分け合わせ、L1 成分が効かない特徴量をゼロにするため、<strong>符号付きの係数がそのまま読める</strong>解釈性を保ったまま安定する。</p>
+
+  <h3>なぜ兄弟に加わったか（実測で M-2 を上回った）</h3>
+  <p>本モデルはもともと「候補メニュー」（探索枠）の一候補だった。本番パネル（57,955サンプル・43ヶ月・71特徴量・前方リークを purge した honest 設定）で同一 fold の OOF を比べたところ、<strong>rank-IC 0.171 対 M-2 の 0.142</strong>、差 +0.029（95%信頼区間 +0.012〜+0.047・定常ブートストラップ）と<strong>統計的に有意に上回った</strong>ため、正式な兄弟モデルへ昇格した。「低 S/N な日本株リターン予測では、木の非線形性よりもグループ共線性に対する縮小推定のほうが効く」というのが、この比較が示した知見である（LightGBM・CatBoost・ExtraTrees・Fama-MacBeth・レジーム分割線形も同時に比較した）。</p>
+
+  <h3>正則化の強さは自分で決める（学習期間内のみで選択）</h3>
+  <p>α（罰則の強さ）と L1 比率は、<strong>学習期間内をさらに時系列分割した交差検証</strong>で自動選択する（過去で学習→直近で検証の向き。期間をシャッフルするランダム分割は未来の情報を混ぜるため使わない）。実測では 71 特徴量のうち平均 29 本だけが非ゼロになり、残りは L1 が自動的に落とした。副次的な利点として<strong>銘柄入れ替え（ターンオーバー）が M-2 の 0.52 に対し 0.30 と低く、売買コストで超過収益が消えるまでの余裕が 10.7bp→22.9bp へ広がる</strong>（縮小推定でランキングが安定するため）。</p>
+
+  <h3>試したが採用しなかったこと</h3>
+  <p>マクロ 46 系列を<strong>学習期間内の主成分分析</strong>で少数の直交因子へ圧縮する案も同じ土俵で比較したが、5 主成分でマクロ変動の 90.9% を説明しても予測精度は変わらず（0.1713→0.1714）、木モデルではむしろ悪化した。効果が確認できなかったため本モデルには組み込んでいない。</p>
+
+  <h3>初版は比較専用</h3>
+  <p>予測は M-1/M-2 と同じ「52週先リターン」の単位を持つが、初版では現在μ̂の永続化（producer）と売り候補ランキングの「μ の出所」への統合は行わない（DB スキーマ追加を伴うため別途対応）。モデル比較ビューに <strong>M-6</strong> として並ぶ。</p>
+
+  <div class="refs">
+    <h4>参考文献</h4>
+    <div class="ref-item">
+      <strong>Zou, H. &amp; Hastie, T. (2005)</strong>. "Regularization and variable selection via the elastic net."
+      <em>Journal of the Royal Statistical Society: Series B</em> 67(2), 301-320.<br>
+      <a href="https://doi.org/10.1111/j.1467-9868.2005.00503.x" target="_blank" rel="noopener">https://doi.org/10.1111/j.1467-9868.2005.00503.x</a>
+    </div>
+    <div class="ref-item">
+      <strong>Politis, D. N. &amp; Romano, J. P. (1994)</strong>. "The Stationary Bootstrap."
+      <em>Journal of the American Statistical Association</em> 89(428), 1303-1313.（昇格判定に使った有意差検定）<br>
+      <a href="https://doi.org/10.1080/01621459.1994.10476870" target="_blank" rel="noopener">https://doi.org/10.1080/01621459.1994.10476870</a>
+    </div>
+  </div>
+</div>
+
 <div class="cat-header">
   <span class="cat-name">④ 戦略を検証</span>
   <span class="layer-tag">メタ検証</span>

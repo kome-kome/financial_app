@@ -126,6 +126,8 @@ web版・ローカル版の双方が同じ Issue を見ることで、**コー�
 
 `requirements.txt` は完全 pin（`==`）。アップグレードは単独 PR + `pytest` + 主要画面確認をセットで。
 
+**ローカル探索専用の依存は `requirements-optional.txt` へ**（本番 `requirements.txt` に入れない＝Render 無料プランのビルド footprint を増やさない）。導入は `pip install -r requirements-optional.txt`。未導入でもアプリは無影響で動くこと（lazy import ＋ 機能側で自動スキップ）が条件。正式採用（本番コードパスで必須化）に昇格した時点で `requirements.txt` へ移す。
+
 ---
 
 ## ドキュメント更新ルール（コード変更と同じ作業内で必須）

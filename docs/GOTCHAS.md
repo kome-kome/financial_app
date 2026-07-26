@@ -89,6 +89,8 @@ SSEエンドポイント（進捗のリアルタイム配信・全6本）: 収�
 - **プラグイン execute は同期実装＋`asyncio.to_thread` オフロード（#357）**: execute を `async def` のままイベントループ内で同期CPU処理（XGBoost CV 等・数分）すると、`/heartbeat` ハンドラが走れず30秒途絶 → launch.py 経由起動時の watchdog（別スレッド・api.py）が「ブラウザ閉」と誤認し `os._exit(0)` でサーバーを殺す（M-2 UI実行が「実行失敗」→サーバー消滅として顕在化した実障害）。対策として全プラグイン execute は同期 `def` とし、`plugins.execute_plugin` が `asyncio.to_thread` でオフロードする。留意点: (1) tuning 系 ContextVar（`tuning_dry_run`/`tuning_objective_only`/`tuning_snapshot_cache`）は **to_thread ならコンテキスト複製で伝播するが `loop.run_in_executor` 直接使用では伝播しない**（to_thread 以外へ書き換え禁止）。(2) db セッションはワーカースレッドへの逐次ハンドオフのみ許可（await 中にループ側から同一セッションを触らない）。(3) 実行中は `plugins.any_executing()` が True になり watchdog が停止を保留する（タブ閉のまま長時間分析でも殺されない）。
 - **成長率計算は (edinet_code, year, period_end) で副ソート**済み。同年複数レコードがある企業の前期比が不定にならないようにしている。
 - **フリーCF = 営業CF + 投資CF**（設備投資以外の投資活動も含む近似値）。
+- **`scripts/` のキャッシュに namedtuple / 自作クラスをそのまま pickle しない（#372）**: `scripts/*.py` は `python -m scripts.foo` で実行されるためモジュール名が `__main__` になり、そこで定義した namedtuple を pickle すると `__main__._FinRow` として記録される。同じキャッシュを他モジュールから import して読むと `AttributeError: Can't get attribute '_FinRow' on <module '__main__' ...>` で落ちる（`scripts/candidate_bakeoff.py` の財務キャッシュを別スクリプトから再利用しようとして実際に踏んだ）。**pickle には素の tuple/dict だけを載せ、読み出し後にクラスへ復元する**。形式を変えるときはキャッシュキーも更新する（旧 pickle は読めないため）。
+- **断面が定数の列は「標準偏差 > 0」で判定できない（#372）**: マクロ特徴量は同一月の全銘柄で同値だが、平均の丸め誤差により `np.std` は厳密な 0 ではなく 1e-16〜1e-18 を返す。断面回帰（Fama-MacBeth）で定数列を除外する判定は**列スケール相対の閾値**（`sd / max(平均|値|, 1) > 1e-8`）で行う。厳密比較だと定数列を取りこぼし、切片と完全共線な列が回帰に残る。
 - 分析モデルの理論・次元整合性・外れ値処理（winsorize）・株数推計・Zスコア年度別計算の詳細は [MODELS.md](MODELS.md) を参照。
 
 ---

@@ -137,38 +137,23 @@ def build_period_panel(db, min_companies_per_period: int = DEFAULT_MIN_COMPANIES
     return period_panel, factor_names
 
 
-def fama_macbeth_regression(period_panel: dict, factor_names: list[str],
-                            maxlags: int = DEFAULT_MAXLAGS) -> FactorPremiaResult:
-    """期間ごとの断面 OLS（Fama-MacBeth）→ 係数の時系列平均・Newey-West 標準誤差。
+def average_premia(betas_by_factor: dict[str, list[float]], factor_names: list[str],
+                   n_periods: int, maxlags: int = DEFAULT_MAXLAGS) -> FactorPremiaResult:
+    """期別係数 {β_{k,t}} の時系列平均を Newey-West（HAC）補正付きで畳む。
 
-    各期間 ym について、intercept 付き設計行列で `plugins.utils.ols()` を実行し β_t を得る
-    （walk_forward_cv_monthly のような複数期間プールではなく、期間ごとに独立した断面回帰）。
-    各因子 k の時系列 {β_{k,t}} を定数項のみの OLS に HAC（Newey-West）共分散で回帰することで、
-    平均値・補正済み SE・t 統計量が一度に得られる（statsmodels 標準の実装パターン）。
+    Fama-MacBeth の「第2段階」だけを切り出した純関数。各因子 k の時系列 {β_{k,t}} を
+    定数項のみの OLS に HAC 共分散で回帰することで、平均値・補正済み SE・t 統計量・p 値が
+    一度に得られる（statsmodels 標準の実装パターン）。
+
+    第1段階（期別の断面回帰）の推定手法から独立しているため、OLS 版
+    （`fama_macbeth_regression`）だけでなく、共線性へ強い Ridge 版の断面回帰
+    （`plugins/model_candidates.py` の Fama-MacBeth 予測ヘッド・Issue #372）からも
+    同じ第2段階を共有できる（HAC 補正ロジックの二重化を避ける）。
     """
     import statsmodels.api as sm
 
-    from plugins.utils import ols
-
-    n_factor = len(factor_names)
-    betas_by_factor: dict[str, list[float]] = {f: [] for f in factor_names}
-    used_yms: list[str] = []
-    for ym in sorted(period_panel.keys()):
-        X, y = period_panel[ym]
-        X_design = [[1.0] + row.tolist() for row in X]
-        result = ols(X_design, y.tolist())
-        if result is None:
-            continue
-        beta = result["beta"]
-        if len(beta) != n_factor + 1:
-            continue
-        for i, f in enumerate(factor_names):
-            betas_by_factor[f].append(beta[i + 1])   # beta[0] は intercept
-        used_yms.append(ym)
-
-    n_periods = len(used_yms)
     if n_periods == 0:
-        raise ValueError("fama_macbeth_regression: 有効な期間が1つもありません")
+        raise ValueError("average_premia: 有効な期間が1つもありません")
 
     mean_b: dict[str, float] = {}
     newey_west_se: dict[str, float | None] = {}
@@ -195,6 +180,37 @@ def fama_macbeth_regression(period_panel: dict, factor_names: list[str],
         newey_west_se=newey_west_se, t_stat=t_stat, p_value=p_value,
         n_periods=n_periods, per_period_betas=betas_by_factor,
     )
+
+
+def fama_macbeth_regression(period_panel: dict, factor_names: list[str],
+                            maxlags: int = DEFAULT_MAXLAGS) -> FactorPremiaResult:
+    """期間ごとの断面 OLS（Fama-MacBeth）→ 係数の時系列平均・Newey-West 標準誤差。
+
+    各期間 ym について、intercept 付き設計行列で `plugins.utils.ols()` を実行し β_t を得る
+    （walk_forward_cv_monthly のような複数期間プールではなく、期間ごとに独立した断面回帰）。
+    第2段階（HAC 補正付き時系列平均）は `average_premia()` が担う。
+    """
+    from plugins.utils import ols
+
+    n_factor = len(factor_names)
+    betas_by_factor: dict[str, list[float]] = {f: [] for f in factor_names}
+    used_yms: list[str] = []
+    for ym in sorted(period_panel.keys()):
+        X, y = period_panel[ym]
+        X_design = [[1.0] + row.tolist() for row in X]
+        result = ols(X_design, y.tolist())
+        if result is None:
+            continue
+        beta = result["beta"]
+        if len(beta) != n_factor + 1:
+            continue
+        for i, f in enumerate(factor_names):
+            betas_by_factor[f].append(beta[i + 1])   # beta[0] は intercept
+        used_yms.append(ym)
+
+    if not used_yms:
+        raise ValueError("fama_macbeth_regression: 有効な期間が1つもありません")
+    return average_premia(betas_by_factor, factor_names, len(used_yms), maxlags=maxlags)
 
 
 def compute_factor_premia(db, min_companies_per_period: int = DEFAULT_MIN_COMPANIES_PER_PERIOD,
