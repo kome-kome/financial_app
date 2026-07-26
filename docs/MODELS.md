@@ -1235,6 +1235,149 @@ M-2 のスキーマを継承（リスク-リターン幾何・財務/マクロ/�
 
 ---
 
+## 15. 兄弟モデル候補メニュー（探索枠・model_candidates）
+
+カテゴリ: 分析モデルではなく**モデル選択のための実験装置**（API・UI 非公開・ローカル実行専用）。
+Issue #372・ADR-0021。
+
+### 15.1 概要
+
+`walk_forward_cv_monthly(fit_predict=…)` の注入点は**同一 fold・同一特徴量・同一指標**で任意の学習器を
+評価できる共有ハーネスである。ここへ差し込むだけの「候補」を `plugins/model_candidates.py` に集約し、
+正式兄弟（M-1〜M-5）へ昇格させる前に OOF rank-IC で実証比較する。候補はプラグインではないため
+（`plugin` 属性なし＝レジストリ非登録）、API・UI・`model_comparison`・本番 requirements に一切現れない。
+
+実行は `python -m scripts.candidate_bakeoff`。M-2 既定 config（`params_schema` を `coerce_params({})`）で
+スナップショットを**1回だけ**構築し、全候補が同じ `samples_by_ym` を共有する。fold は M-2 と完全一致
+（`min_train_months=6` / `step_months=3` / `embargo_months=12`＝ADR-0014 の purge 済み honest 前提）。
+
+### 15.2 候補一覧
+
+| 候補 | 位置づけ | 要点 |
+|---|---|---|
+| `elasticnet` | 正則化線形（L1+L2） | M-1(OLS) と M-2(非線形) の中間。金利カーブ・信用スプレッドのグループ共線性に L2 で頑健な符号付き係数。α・l1_ratio は学習 fold 内 `TimeSeriesSplit` で選択 |
+| `extratrees` | バギング非線形＋予測区間 | 葉モーメントの全分散分解 Var ≈ E_t[Var_leaf]+Var_t[mean_leaf]（QRF 相当の軽量版）と木予測の経験分位の**2種**を出力し被覆率を実測 |
+| `fama_macbeth` / `fama_macbeth_ridge` | 期別断面回帰の予測ヘッド | 各月の断面回帰 λ_t → NW 補正付き時系列平均 λ̄ で ŷ=Σβ·λ̄（ADR-0008 の資産を予測側へ転用）。**マクロ列は断面定数（＝切片と共線）のため自動除外**され、実質は characteristics モデルになる |
+| `regime_linear` | 離散状態×符号解釈 | VIX（無ければ信用スプレッド）の学習 fold 内中央値でストレス/平穏に分割し regime 別 Ridge。標本不足・NaN は pooled へフォールバック |
+| `lightgbm` / `catboost` | 代替 GBDT | M-2 と同一ハイパラへ揃え**実装差だけ**を比較（leaf-wise / ordered boosting）。**任意依存**（`requirements-optional.txt`・未導入なら自動スキップ） |
+| `xgb_m2` / `ols` | 基準線 | M-2 既定と同一の XGBoost、および素 OLS（正則化なし・BIC 選択なし） |
+| `wrap_macro_pca` | 合成可能ラッパー | マクロ列だけを **fold 内 PCA** で直交少数因子へ畳む（`--pca K`）。非マクロ列は無変換で温存。任意の候補に被せられる |
+
+### 15.3 リーク防止の契約
+
+前処理パラメータ（NaN 補完平均・winsorize 境界・正規化統計・PCA 主成分・レジーム閾値・λ̄・α）は
+**すべて学習 fold 内で fit** し、テストは同一パラメータで transform するだけ。テストラベルは評価に
+しか使わない。`tests/test_model_candidates.py` は「**テストラベルだけ差し替えて予測がビット一致するか**」で
+これを直接検証する（受領証ではなく独立検証で確かめる方針）。
+
+例外は Fama-MacBeth のテスト期断面標準化のみ。自期の断面統計（説明変数だけ）を使うが、同時点の
+他銘柄の特徴量は運用時にも既知であり、ラベルは一切参照しないため look-ahead ではない。
+
+### 15.4 昇格ゲート
+
+点推定の rank-IC が M-2 を上回るだけでは昇格させない。`model_stats.paired_ic_significance`
+（ADR-0018・定常ブートストラップ）で **差が有意**（95% CI が 0 を跨がない）であり、かつ**同時に検定した
+候補数で多重比較補正**（Bonferroni・α/候補数）を通ることを条件とする。walk-forward の per-fold IC は
+学習窓が重なり系列相関を持ち、fold 数も 10 前後しかないため、点推定の大小はノイズで容易に入れ替わる。
+
+### 15.5 実測サマリ（2026-07-26・詳細は ADR-0021）
+
+本番パネル（43ヶ月 / 57,955 サンプル / 71 特徴量 / 9 fold）の honest OOF rank-IC:
+
+| 候補 | rank-IC | vs M-2 の差（95%CI・p） | 判定 |
+|---|---|---|---|
+| **elasticnet** | **0.1713** | +0.0294 [+0.0116, +0.0469]・p=0.002 | **M-6 へ昇格** |
+| fama_macbeth_ridge | 0.1653 | +0.0232・p=0.042 | 多重比較補正で不通過 |
+| extratrees | 0.1649 | +0.0230・p=0.080 | 非有意 |
+| regime_linear | 0.1627 | +0.0208・p=0.058 | 非有意 |
+| ols（基準線） | 0.1554 | +0.0134・p=0.104 | 非有意 |
+| catboost | 0.1523 | +0.0103・p=0.032 | 補正で不通過（効果量も僅少） |
+| lightgbm | 0.1474 | +0.0055・p=0.043 | 同上 |
+| xgb_m2（M-2 基準線） | 0.1419 | — | — |
+| fama_macbeth（断面OLS） | −0.0131 | −0.1550・p=0.001 | **有意に劣位** |
+
+確定した知見（ADR-0021 に詳述）:
+
+1. **木の非線形性より、グループ共線性への縮小推定のほうが効く**。GBDT 族（XGBoost/LightGBM/
+   CatBoost）はいずれも線形族（ElasticNet/素 OLS）を上回らなかった。
+2. **代替 GBDT は XGBoost をわずかに上回るが実務的には誤差**（+0.006〜+0.010）。XGBoost 採用を
+   変える理由はない＝Issue #372 の「代替GBDT を試す」は決着。任意依存のまま据え置く。
+3. **Fama-MacBeth は第1段階の正則化が必須**。素の断面 OLS は相関の強い財務特徴群で係数が発散し
+   rank-IC が負（−0.013・分位が逆順）になる。Ridge に替えるだけで 0.165 へ跳ね上がる。
+4. **マクロ fold 内 PCA は効果なし**（5 主成分で分散 90.9% を説明しても IC 不変・木では悪化）。
+5. **regime-switch 閾値線形は pooled 線形を超えない**（標本半減の不利を上回る改善が出ない）。
+6. **木予測の経験分布による区間は予測区間として使えない**（名目 80% に対し実測被覆 40.6%）。
+   分割コンフォーマル（ADR-0020）が τ=0.9 に対し 87〜89% で一貫しており、R1' はそちらが正解。
+
+---
+
+## 16. M-6 マクロ×財務 正則化線形（ElasticNet・macro_enet）
+
+カテゴリ: ③ 将来リターンを予測（`ui_order=390`・`heavy=True`・ローカル実行専用）。Issue #372・ADR-0021。
+
+### 16.1 概要
+
+M-2（macro_gbdt・XGBoost）の**線形兄弟**。§15 の候補メニューで実測した結果、M-2 を **honest OOF
+rank-IC で有意に上回った**ため正式兄弟へ昇格した（8 候補中で唯一、多重比較補正 α/8 を通過）。
+
+| 指標 | M-6 ElasticNet | M-2 XGBoost |
+|---|---|---|
+| rank-IC（mean / std） | **0.1713** / 0.1171 | 0.1419 / 0.1117 |
+| 業種中立 rank-IC | 0.1398 | 0.1208 |
+| ロングショート spread | 0.1359 | 0.1117 |
+| 実効ターンオーバー | 0.296 | 0.520 |
+| ブレークイーブンコスト | 22.9bp | 10.7bp |
+| 差の検定（vs M-2） | **+0.0294・95%CI [+0.0116, +0.0469]・p=0.002** | — |
+
+（本番パネル 57,955 サンプル／43ヶ月／71特徴量／9 fold・embargo=12。詳細は ADR-0021）
+
+**知見**: 低 S/N な日本株リターン予測では、木の非線形性より**グループ共線性に対する縮小推定**
+（金利カーブ us5y/10y/30y・信用スプレッド・株価指数・コモディティが各々ブロックを成す）のほうが効く。
+素の OLS（正則化も特徴選択もなし）は 0.1554 で、M-6 との差 0.016 が正則化の寄与にあたる。
+
+### 16.2 アルゴリズム
+
+1. **スナップショット**: M-2 と同一（`build_snapshots(build_interactions=False, macro_nan_ok=True)`）。
+2. **前処理**（学習 fold 内でのみ fit）: 列平均で NaN 補完 → p1-p99 winsorize → zscore
+   （`fit_feature_columns`）。y も winsorize→zscore し、予測は元スケールへ逆変換する。
+3. **学習**: `ElasticNetCV`。α と l1_ratio は**学習 fold 内の `TimeSeriesSplit`**（過去→直近の向き）で
+   選択する。ランダム K-fold は期間をシャッフルして楽観バイアスを生むため使わない。
+4. **CV**: `walk_forward_cv_monthly(min_train_months=6, step_months=3, embargo_months=12)`＝M-2 と同値。
+   注入する fit_predict は候補実装（`model_candidates.make_elasticnet_fit_predict`）**そのもの**で、
+   ADR-0021 の実測値と本プラグインの OOF が同一コードパスであることを保証する。
+5. **解釈**: 最終モデルの符号付き係数を `feature_coefs`（M-2 の mean|SHAP| と同じスロット）へ載せる。
+   L1 でゼロになった特徴量は係数 0＝「使われなかった」がそのまま読める。
+
+### 16.3 パラメータ
+
+財務/マクロ/モメンタム/px_* 特徴量・`min_coverage`・`top_n` は M-2 と同一契約。加えて:
+
+- `l1_ratio`（select・既定 `auto`）: 探索範囲を 0.1/0.5/0.9 の自動選択（既定）／Ridge 寄り固定／
+  均等固定／Lasso 寄り固定から選ぶ。α は常に学習 fold 内 CV が決めるため露出しない。
+
+**マクロ fold 内 PCA（§15 の改善案④）は載せていない**。同じ bake-off で実測したが、5 主成分で
+マクロ分散の 90.9% を説明しても rank-IC は 0.1713→0.1714 と不変、ターンオーバー（0.296→0.289）・
+ブレークイーブン（22.9→23.2bp）も横ばいで、木モデルではむしろ悪化した（LightGBM 0.1474→0.1379）。
+昇格ゲートを通らなかったため本番モデルには入れず、ラッパー自体は探索枠に残している。
+
+### 16.4 仮定・限界
+
+- **初版は producer なし**（M-5 と同じ扱い）。予測は M-1/M-2 と同じ 52 週先対数リターン単位なので
+  `sell_ranking` の `mu_source` へ統合可能だが、`macro_enet_scores` テーブル追加＝ DDL が本番へ
+  無条件反映される経路のため別 Issue で扱う。
+- 線形モデルのため、M-2 が捉える fin×macro の高次交互作用は表現できない。両者は**補完関係**にあり、
+  M-4（兄弟μ̂スタッキング）へ M-6 を加える拡張が自然な次の一手になる（未実施）。
+- `results` は上位 `top_n` 件のみ返す（汎用レンダラが全社数千行の DOM を吐かないようにするため）。
+
+### 16.5 参考文献
+
+- **Zou, H. & Hastie, T. (2005)**. "Regularization and variable selection via the elastic net."
+  *JRSS-B* 67(2), 301-320. DOI:10.1111/j.1467-9868.2005.00503.x
+- **Politis, D. N. & Romano, J. P. (1994)**. "The Stationary Bootstrap." *JASA* 89(428), 1303-1313.
+  DOI:10.1080/01621459.1994.10476870（昇格判定に使った有意差検定）
+
+---
+
 ## 改訂履歴
 
 | 日付 | 内容 |
@@ -1263,3 +1406,4 @@ M-2 のスキーマを継承（リスク-リターン幾何・財務/マクロ/�
 | 2026-07-23 | **M-4（兄弟μ̂スタッキング・アンサンブル）を §13 として追加**（#367・ADR-0015）。M-1+M-2 の OOF μ̂ を (ym,銘柄) intersection で整列し、二段ウォークフォワード（月 t の重みは t 未満の共通 OOF だけで学習・NNLS 非負和1）で統合。honest（embargo=12・ADR-0014）前提の `oof_backtest` を返し `model_comparison` に M-4 として並ぶ。現在μ̂は `macro_ensemble_scores` へ producer 永続化し売り候補ランキングの `mu_source` に追加。初版は M-3 除外（週次専用・ADR-0012） |
 | 2026-07-24 | **M-5（マクロ×財務 ランク学習・learning-to-rank）を §14 として追加**（#362・ADR-0017）。M-2 の rank-IC 整合版。学習目的を MSE（reg:squarederror）→ XGBoost の learning-to-rank（rank:pairwise 既定）へ差し替え、各 test 月を1クエリグループとして期内順位を直接最適化する。M-2 を無改変ベースラインとして残すため新兄弟モデル化し、execute() 本体を継承して4フック（_objective/_make_cv_callback/_fit_final_model/_persist_producer）のみ override。walk_forward_cv_monthly に `pass_train_groups`（後方互換）を足して月クエリグループ境界を fit(group=…) へ受け渡す。予測は順位スコア（リターン単位でない）ため producer なし・OOF 比較専用（sell_ranking 統合は見送り）。model_comparison に M-5 として並び M-2(MSE) と純比較。xgboost 3.3.0 同梱で新パッケージ不要 |
 | 2026-07-12 | **週次株価フルロードのタイムアウトを解消（Issue #311）**。M-1/M-2/M-3 の `stock_price_weekly` 全件ロード（~95万行）が本番 pooler の `statement_timeout=2min` を超過し（`QueryCanceled`／`lost synchronization`）、モデル比較 E2E が全モデル失敗していた。週次ロードを `macro_snapshots.load_weekly_prices_chunked`（`edinet_code` を 500 社ずつ IN 句で分割 fetch・PK インデックス使用）へ集約し、全件でも実測 ~30秒で安定完走。M-1/M-2（`_load_data_impl`）・M-3（`_load_prices_impl`）が共用。3モデル比較 E2E で全モデル OK（M-1 IC=0.23 / M-2 IC=0.33 / M-3 IC≈0.01）を確認。詳細は GOTCHAS.md「DB・運用上の注意」 |
+| 2026-07-26 | **兄弟モデル候補メニュー（§15・探索枠）と M-6 正則化線形（§16）を追加**（#372・ADR-0021）。`walk_forward_cv_monthly(fit_predict=…)` 注入点へ差し込む候補（ElasticNet／ExtraTrees・QRF／Fama-MacBeth 予測ヘッド／マクロfold内PCA／regime-switch閾値線形／LightGBM・CatBoost）を `plugins/model_candidates.py` に集約し、`scripts/candidate_bakeoff.py` で同一fold・同一特徴量・同一指標の OOF 横並び実測を行う枠組みを新設。本番パネル（43ヶ月/57,955サンプル/71特徴量/9fold）の実測で **ElasticNet が M-2(XGBoost) を有意に上回った**（rank-IC 0.1713 vs 0.1419・差 +0.0294・95%CI [+0.0116,+0.0469]・p=0.002・多重比較補正 α/8 も通過）ため **M-6（macro_enet）として昇格**。他候補は据え置き。確定知見: 木の非線形性より縮小推定が効く／代替GBDTは誤差レベル／Fama-MacBeth は第1段階の正則化が必須（素の断面OLSは rank-IC 負）／マクロPCA圧縮は効果なし／木予測分布の区間は名目80%に対し実測被覆40.6%で使えず分割コンフォーマル(ADR-0020)が正解 |

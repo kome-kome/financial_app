@@ -19,7 +19,10 @@ import model_comparison
 import plugins as plugin_registry
 from plugins.base import DependencyError
 
-_MODELS = ("macro_risk_return", "macro_gbdt", "macro_dlm", "macro_ensemble", "macro_gbdt_rank")
+# 比較対象は COMPARISON_MODELS から導出する（兄弟モデル追加時にテスト側の
+# ハードコード一覧が取り残されないように・Issue #372 で M-6 追加時に実際に取り残された）。
+_MODELS = tuple(n for n, _ in model_comparison.COMPARISON_MODELS)
+_SHORTS = [s for _, s in model_comparison.COMPARISON_MODELS]
 
 
 def _fake_plugin(name, label="ラベル", heavy=True):
@@ -49,7 +52,7 @@ class TestRunComparison:
 
         _patch(monkeypatch, pmap, _exec)
         res = _run()
-        assert [m["short"] for m in res["models"]] == ["M-1", "M-2", "M-3", "M-4", "M-5"]
+        assert [m["short"] for m in res["models"]] == _SHORTS
         assert all(m["available"] for m in res["models"])
         assert res["models"][0]["oof_backtest"]["rank_ic"]["mean"] == 0.05
         assert res["models"][0]["label"] == "macro_risk_returnラベル"

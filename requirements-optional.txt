@@ -1,0 +1,18 @@
+# ローカル探索専用の任意依存（Issue #372・兄弟モデル候補メニュー）
+#
+# 本番 requirements.txt には**入れない**。Render 無料プランのビルド時間・ディスクを
+# 増やさないため（catboost の wheel は約 100MB）。ここに pin したパッケージは
+# `scripts/candidate_bakeoff.py` の代替 GBDT 候補（plugins/model_candidates.py）でのみ
+# 使い、未導入環境では候補が自動スキップされる（candidate_available()）。
+#
+# 導入:
+#   .\venv\Scripts\Activate.ps1
+#   pip install -r requirements-optional.txt
+#
+# VISION.md「サードパーティーライブラリ採用基準」の審査結果（2026-07-26・ユーザー承認済み）:
+#   lightgbm 4.7.0 : MIT / GitHub 18.4k star / PyPI 月間 16.6M DL /
+#                    CVE-2024-43598（RCE・heap overflow）は 4.6.0 で修正済み → 4.7.0 は patched
+#   catboost 1.2.10: Apache-2.0 / GitHub 9.0k star / PyPI 月間 2.9M DL / ライブラリ固有の既知 CVE なし
+# いずれかの候補を正式兄弟（Mn）へ昇格させる場合は、その時点で requirements.txt へ移す。
+lightgbm==4.7.0
+catboost==1.2.10
