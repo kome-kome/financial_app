@@ -14,6 +14,7 @@
 | [M1_MACRO_MODEL_GUIDE.md](docs/M1_MACRO_MODEL_GUIDE.md) | M-1（マクロ×リスク-リターン推奨）の初心者向け副読本。予備知識ゼロから設計思想を解説。正式版は MODELS.md §9 | M-1 の考え方を噛み砕いて把握したいとき |
 | [SKILLS_AND_AGENTS.md](docs/SKILLS_AND_AGENTS.md) | スキル／エージェントの索引マニュアル | スラッシュコマンドや調査エージェントを使うとき |
 | [FUTURE_TASKS.md](docs/FUTURE_TASKS.md) | **Issue 運用ガイド＋設計制約**（残タスクの正本は GitHub Issues。本書はタスク実体を持たない）。完了項目は `docs/archive/IMPROVEMENTS.md` へ集約 | リファクタ着手・改善項目の参照時 |
+| [CONTEXT.md](CONTEXT.md) | ドメイン用語集（再分類項目・分析特徴量・表示項目・パラメータ契約・分析の階層等の用語定義） | 用語の定義・整合性を確認したいとき |
 
 > **設計の前に [DEPLOYMENT.md](docs/DEPLOYMENT.md) の「外部サービス制約」節を必ず参照**：無料プラン制約（stooq ブロック・Supabase 500MB・J-Quants レート制限等）に違反しない方式を選ぶこと。
 
