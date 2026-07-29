@@ -701,16 +701,17 @@ conv_score₁₂ₘ = max(<span class="val">5</span>, min(<span class="val">95</
   <h2>M-4: 兄弟μ̂スタッキング・アンサンブル <span class="model-tag">将来リターンを予測</span></h2>
   <span class="file-tag">plugins/macro_ensemble.py — POST /api/plugins/macro_ensemble/run</span>
 
-  <p>M-1（線形 OLS+BIC）と M-2（非線形 XGBoost）の<strong>アウト・オブ・サンプル（OOF）予測 μ̂ を統合するメタモデル</strong>（スタッキング）。線形の頑健さ × 非線形の表現力の予測誤差が低相関なら、制約付き（非負・和1）の加重合成で相殺でき単体を超えうる。<strong>初版は M-1+M-2 のみ</strong>（M-3 は週次専用で目的頻度・母集団が異なるため除外・ADR-0012/0015）。</p>
+  <p>M-1（線形 OLS+BIC）・M-2（非線形 XGBoost）・M-6（正則化線形 ElasticNet）の<strong>アウト・オブ・サンプル（OOF）予測 μ̂ を統合するメタモデル</strong>（スタッキング）。予測誤差が低相関な基底を、制約付き（非負・和1）の加重合成で相殺でき単体を超えうる。重みは実績から学習されるため<strong>効かない基底は自動的に重み ~0 へ落ちる</strong>＝基底追加の下振れリスクが小さい。<strong>M-3 は除外</strong>（週次専用で目的頻度・母集団が異なる・ADR-0012/0015）、<strong>M-5 も除外</strong>（順位スコアで水準を持たない・ADR-0017）。M-6 は #397 で基底に追加した。</p>
 
   <h3>二段ウォークフォワード（リーク回避の核）</h3>
-  <p>①M-1/M-2 それぞれの構成で snapshot を構築し、purge/embargo（<code>embargo_months=12</code>・ADR-0014）付き walk-forward で per-(月, 銘柄) の OOF 予測を自前再現。②両モデル共通の (月, 銘柄) の<strong>積集合</strong>をアンサンブル母集団とする（「両モデルが予測できる銘柄」）。③<strong>月 t に適用する統合重みは t より前の月の共通 OOF だけで学習</strong>（expanding・学習前は等重み 0.5/0.5）。基底 μ̂ 自体が embargo 済み OOF のため二段目もリークしない。④統合残差を共有 <code>oof_backtest</code> に通し、M-1/M-2/M-3 と同一指標（rank-IC・ロングショート spread・hit-rate）でモデル比較ビューに並ぶ。</p>
+  <p>①各基底の構成で snapshot を構築し、purge/embargo（<code>embargo_months=12</code>・ADR-0014）付き walk-forward で per-(月, 銘柄) の OOF 予測を自前再現（M-2 と M-6 はスナップショット構成が同じため共有し、学習器だけ差し替える）。②全基底に共通の (月, 銘柄) の<strong>積集合</strong>をアンサンブル母集団とする（「すべての基底が予測できる銘柄」）。③<strong>月 t に適用する統合重みは t より前の月の共通 OOF だけで学習</strong>（expanding・学習前は等重み 1/n）。基底 μ̂ 自体が embargo 済み OOF のため二段目もリークしない。④統合残差を共有 <code>oof_backtest</code> に通し、M-1/M-2/M-3 と同一指標（rank-IC・ロングショート spread・hit-rate）でモデル比較ビューに並ぶ。<strong>基底が増えると共通域は狭まりうる</strong>ため、優劣は必ず同一共通域に制限した各基底の OOF（画面の「同一共通域での比較」表）と見比べる。</p>
 
   <h3>重み最適化</h3>
-  <p>既定は <strong>NNLS（非負最小二乗）</strong>＋和1正規化（<code>scipy.optimize.nnls</code>・和0時は等重みへフォールバック）。代替として期内平均 Spearman を最大化するグリッド探索（<code>rank_ic_grid</code>）・等重み（<code>equal</code>）を選択可。rank-IC は期内の順位のみで決まる（シフト/スケール不変）ため切片は持たず、比 w₁:w₂ だけが効く。</p>
+  <p>既定は<strong>期内平均 Spearman（rank-IC）を最大化するグリッド探索</strong>（<code>rank_ic_grid</code>・基底数 n のシンプレックス格子を走査）。代替として NNLS（非負最小二乗・<code>scipy.optimize.nnls</code>＋和1正規化・和0時は等重みへフォールバック）・等重み（<code>equal</code>）を選択可。rank-IC は期内の順位のみで決まる（シフト/スケール不変）ため切片は持たず、重みの<strong>比</strong>だけが効く。</p>
+  <p><strong>既定を rank-IC 最大化にしている理由</strong>：本モデルの評価指標は rank-IC なのに NNLS の目的は二乗誤差最小化で、両者は一致しない。本番実測（#397）では、NNLS は<strong>縮小推定で予測の振れ幅が小さい M-6 を重み 0 で捨て</strong>、学習データが増えるほどその傾向が強まった。予測精度そのものは両者ほぼ互角（差 +0.0028・p=0.326）だが、NNLS のままだと OOF 上の改善が<strong>現在μ̂（売り候補ランキングへ渡す値）に反映されない</strong>ため、目的を揃えた rank-IC 最大化を既定とした。</p>
 
   <h3>現在μ̂と売り候補ランキング連携</h3>
-  <p>全共通 OOF で学習した最終重みを、M-1（最終 OLS）・M-2（全データ最終 XGBoost）の現在μ̂へ適用し統合μ̂を算出（最終重みは現在μ̂専用・OOF 評価には使い回さない）。<code>macro_ensemble_scores</code> へ producer 永続化し、売り候補ランキングの「μ の出所」で <strong>M-4</strong> を選択できる（未実行時は graceful-degrade）。</p>
+  <p>全共通 OOF で学習した最終重みを、M-1（最終 OLS）・M-2（全データ最終 XGBoost）・M-6（全データ最終 ElasticNet）の現在μ̂へ適用し統合μ̂を算出（最終重みは現在μ̂専用・OOF 評価には使い回さない）。結果表には基底ごとの内訳 μ̂ も併記する。<code>macro_ensemble_scores</code> へ producer 永続化し、売り候補ランキングの「μ の出所」で <strong>M-4</strong> を選択できる（未実行時は graceful-degrade）。</p>
 
   <div class="refs">
     <h4>参考文献</h4>

@@ -1172,28 +1172,28 @@ DLM のフォワードパスは各週 y_t を**観測前**に予測する。標�
 
 ### 13.1 概要
 
-M-1（線形 OLS+BIC）と M-2（非線形 XGBoost）の **OOF 予測 μ̂ を統合するメタモデル**（Wolpert 1992 / Breiman 1996 のスタッキング）。線形の頑健さ × 非線形の表現力の予測誤差が低相関なら、制約付き（非負・和1）の加重で相殺でき単体を超えうる。**初版は M-1+M-2 のみ**（M-3 は週次専用・ADR-0012 で目的頻度と母集団が異なるため除外＝論証された非適用）。
+M-1（線形 OLS+BIC）・M-2（非線形 XGBoost）・M-6（正則化線形 ElasticNet・#397 で追加）の **OOF 予測 μ̂ を統合するメタモデル**（Wolpert 1992 / Breiman 1996 のスタッキング）。予測誤差が低相関な基底を、制約付き（非負・和1）の加重で相殺でき単体を超えうる。重みは NNLS で学習するため**効かない基底は自動的に重み ~0 へ落ちる**＝基底追加の下振れリスクが構造的に小さい。**M-3 は除外**（週次専用・ADR-0012 で目的頻度と母集団が異なる＝論証された非適用）、**M-5 も除外**（順位スコアで水準を持たない・ADR-0017）。
 
 前提（#375・ADR-0014）: purge/embargo 後の honest 評価で M-2 rank-IC は 0.33→0.14 となり M-1 と拮抗。統合判定の基準も **honest 値で max(M-1, M-2) を上回るか**。
 
 ### 13.2 アルゴリズム（二段ウォークフォワード）
 
-1. **基底 OOF の自前再現**: M-1/M-2 の `execute()` は per-(ym,銘柄) OOF を露出しないため、M-4 が各モデルの既定 config で `build_snapshots(return_stock_ids=True)` → M-1 は BIC+OLS・M-2 は `_make_xgb_fit_predict` 注入で `walk_forward_cv_monthly(return_residuals=True, embargo_months=12)` を回す。`stock_ids_by_ym[ym][k] ↔ residuals_by_ym[ym][k]` の順序保証で (ym, edinet_code, yhat, y) を突合。
-2. **母集団**: M-1（strict）∩ M-2（nan_ok）の **(ym, edinet_code) intersection**（両モデルが予測できる銘柄）。
+1. **基底 OOF の自前再現**: 各基底の `execute()` は per-(ym,銘柄) OOF を露出しないため、M-4 が各モデルの既定 config で `build_snapshots(return_stock_ids=True)` → M-1 は BIC+OLS・M-2 は `_make_xgb_fit_predict`・M-6 は `make_elasticnet_fit_predict` を注入して `walk_forward_cv_monthly(return_residuals=True, embargo_months=12)` を回す。`stock_ids_by_ym[ym][k] ↔ residuals_by_ym[ym][k]` の順序保証で (ym, edinet_code, yhat, y) を突合。レグの組み立ては `BASE_MODELS` 駆動で、**M-2/M-6 は build 契約が同じ**（交差項なし・macro_nan_ok）ため config 同値ならスナップショットを共有する（`_same_build_config`・既定では常に同値＝二重構築なし）。
+2. **母集団**: M-1（strict）∩ M-2（nan_ok）∩ M-6 の **(ym, edinet_code) intersection**（全基底が予測できる銘柄）。
 3. **二段目（無リーク）**: 月 t の統合重みは t より前の月の共通 OOF ペアだけで学習（expanding・`_stack_walk_forward`）。学習前は等重み。基底 μ̂ が embargo=12 済み OOF のため二段目もリークしない。
-4. **重み**: 既定 `nnls`（`scipy.optimize.nnls`→和1正規化・和0は等重み）。代替 `rank_ic_grid`（期内平均 Spearman 最大化）/ `equal`。
+4. **重み**: 既定 `rank_ic_grid`（期内平均 Spearman 最大化・**n 次元シンプレックス格子** `_simplex_grid` を走査。格子点数 C(steps+n−1, n−1) が上限を超えると刻みを自動で粗くする）。代替 `nnls`（`scipy.optimize.nnls`→和1正規化・和0は等重み）/ `equal`。**既定が rank-IC 最大化なのは二段目の学習目的を評価指標へ揃えるため**——#397 の本番実測で、MSE 最小化の NNLS は縮小推定で予測分散の小さい M-6 を重み 0 で捨て、OOF の改善が現在μ̂（producer）へ反映されない非整合が出た（ADR-0007「周辺尤度 ≠ OOF rank-IC」と同型。OOF 性能自体は両者誤差レベル・p=0.326）。
 5. **評価**: 統合残差 `{t:[(ŷ_stack, y)]}` → 共有 `oof_backtest`（§9.11/§11.7 と同一指標・同一 honest 前提）→ `model_comparison` に M-4 として並ぶ。
-6. **現在μ̂（producer）**: M-1 `_fit_final`+`_score_companies`・M-2 全データ最終 XGB の現在μ̂を intersection し、全共通 OOF で学習した最終重み `w_final` を適用（`w_final` は現在μ̂専用・OOF に使い回さない）。`macro_ensemble_scores` へ全置換永続化し、売り候補ランキング（§10）の `mu_source="macro_ensemble"` で利用可能。
+6. **現在μ̂（producer）**: M-1 `_fit_final`+`_score_companies`・M-2 全データ最終 XGB・M-6 `_fit_final_and_score` の現在μ̂を intersection し、全共通 OOF で学習した最終重み `w_final` を適用（`w_final` は現在μ̂専用・OOF に使い回さない）。結果行には基底ごとの内訳 `mu_m1`/`mu_m2`/`mu_m6` を併記する。`macro_ensemble_scores` へ全置換永続化し、売り候補ランキング（§10）の `mu_source="macro_ensemble"` で利用可能。
 
 ### 13.3 パラメータ
 
-`weight_method`（nnls/rank_ic_grid/equal・既定 nnls）・`min_meta_months`（重み学習開始の最小過去OOF月数・既定2）・`grid_step`（rank_ic_grid の刻み・既定0.05）・`n_quantiles`（既定5）・`top_n`。統合対象 `BASE_MODELS` は定数（UI 非露出）。`tuning_search_space` は持たない（サブモデルは既定固定）。
+`weight_method`（rank_ic_grid/nnls/equal・**既定 rank_ic_grid**・#397）・`min_meta_months`（重み学習開始の最小過去OOF月数・既定2）・`grid_step`（rank_ic_grid の刻み・既定0.05）・`n_quantiles`（既定5）・`top_n`。統合対象 `BASE_MODELS` は定数（UI 非露出）。`tuning_search_space` は持たない（サブモデルは既定固定）。
 
 ### 13.4 仮定・限界
 
-- 実行コスト ≈ M-1+M-2 の合算（snapshot キャッシュキーが `return_stock_ids` で分岐し CV は再計算）。
-- intersection で母集団は M-1 側（strict）に律速される。`n_common_pairs` を出力し監視。
-- 統合が単体最良を上回るかは実データ次第（上回らなければ「単体で十分」が確定知見・ADR-0015 に実測を記録）。
+- 実行コスト ≈ M-1+M-2+M-6 の合算（snapshot キャッシュキーが `return_stock_ids` で分岐し CV は再計算。M-2/M-6 は build を共有するため増分は ElasticNet の CV のみ）。
+- intersection で母集団は M-1 側（strict）に律速される。`n_common_pairs` を出力し監視。基底を増やすと共通域はさらに狭まりうるため、**優劣判定は必ず `base_oof_backtest`（同一共通域に制限した各基底の OOF）と比較する**（ADR-0015 の base-on-common）。
+- 統合が単体最良を上回るかは実データ次第（上回らなければ「単体で十分」が確定知見・ADR-0015 に実測を記録）。基底の増減は `BASE_MODELS` 定数の変更だけで済み、`scripts/ensemble_base_bakeoff.py` が同一 honest 前提で構成間の OOF を横並び実測する（#397）。
 
 ### 13.5 参考文献
 
@@ -1412,3 +1412,4 @@ rank-IC で有意に上回った**ため正式兄弟へ昇格した（8 候補�
 | 2026-07-12 | **週次株価フルロードのタイムアウトを解消（Issue #311）**。M-1/M-2/M-3 の `stock_price_weekly` 全件ロード（~95万行）が本番 pooler の `statement_timeout=2min` を超過し（`QueryCanceled`／`lost synchronization`）、モデル比較 E2E が全モデル失敗していた。週次ロードを `macro_snapshots.load_weekly_prices_chunked`（`edinet_code` を 500 社ずつ IN 句で分割 fetch・PK インデックス使用）へ集約し、全件でも実測 ~30秒で安定完走。M-1/M-2（`_load_data_impl`）・M-3（`_load_prices_impl`）が共用。3モデル比較 E2E で全モデル OK（M-1 IC=0.23 / M-2 IC=0.33 / M-3 IC≈0.01）を確認。詳細は GOTCHAS.md「DB・運用上の注意」 |
 | 2026-07-26 | **兄弟モデル候補メニュー（§15・探索枠）と M-6 正則化線形（§16）を追加**（#372・ADR-0021）。`walk_forward_cv_monthly(fit_predict=…)` 注入点へ差し込む候補（ElasticNet／ExtraTrees・QRF／Fama-MacBeth 予測ヘッド／マクロfold内PCA／regime-switch閾値線形／LightGBM・CatBoost）を `plugins/model_candidates.py` に集約し、`scripts/candidate_bakeoff.py` で同一fold・同一特徴量・同一指標の OOF 横並び実測を行う枠組みを新設。本番パネル（43ヶ月/57,955サンプル/71特徴量/9fold）の実測で **ElasticNet が M-2(XGBoost) を有意に上回った**（rank-IC 0.1713 vs 0.1419・差 +0.0294・95%CI [+0.0116,+0.0469]・p=0.002・多重比較補正 α/8 も通過）ため **M-6（macro_enet）として昇格**。他候補は据え置き。確定知見: 木の非線形性より縮小推定が効く／代替GBDTは誤差レベル／Fama-MacBeth は第1段階の正則化が必須（素の断面OLSは rank-IC 負）／マクロPCA圧縮は効果なし／木予測分布の区間は名目80%に対し実測被覆40.6%で使えず分割コンフォーマル(ADR-0020)が正解 |
 | 2026-07-29 | **M-6 を producer 化し売り候補ランキング（§10）の `mu_source` へ統合**（#396・ADR-0021 の残タスク）。`macro_enet_scores`（`macro_gbdt_scores` と同型・`r1_prime` 付き）を追加し、`execute` 末尾で現在μ̂と確実性軸（コンフォーマル区間半幅・ADR-0020）を全置換永続化。`produced_output`/`read_producer_scores` は M-2 と同一形＝`mu_source="macro_enet"` で選択でき、**R3 足切りゲートも M-1・M-2 と同様に機能**する（M-3/M-4 は `r1_prime` 不在で無効のまま）。未実行時は graceful-degrade（ADR-0004）。探索中は `tuning_dry_run` で永続化 no-op（#264）。**既定 `mu_source` は M-2 のまま**＝切替は `/api/backtest` の `sell` source で事後検証してから別途判断する |
+| 2026-07-30 | **M-4（§13）の基底に M-6 を追加し、重み既定を rank-IC 最大化へ変更**（#397・ADR-0015 追記）。レグを `BASE_MODELS` 定数駆動へ一般化（build/CV/現在μ̂ を名前でディスパッチ・`_fit_weights`/`_stack_walk_forward` は n 基底対応・`rank_ic_grid` は n 次元シンプレックス格子 `_simplex_grid`）。M-2/M-6 は build 契約が同じため config 同値ならスナップショット共有（`_same_build_config`）＝増分コストは ElasticNet の CV のみ。本番実測（3,979社/9fold/OOF 13,539ペア・honest）で **M-4 は 0.1468→0.1720（+0.0252・p=0.002）と有意に改善**し、M-2（+0.0301・p=0.001）・M-1（+0.0578・p=0.040）も有意に上回った。共通域は M-1(strict) 律速のため基底追加でも 13,539 で不変。**重み既定を nnls→rank_ic_grid へ変更**: NNLS は MSE 最小化で縮小推定の M-6 を重み 0 で捨て（最終重み M-6=0.0）、OOF の改善が現在μ̂＝producer へ届かない非整合が出たため（OOF 性能自体は誤差レベル・p=0.326／rank_ic_grid の最終重みは M-1 0.30/M-2 0.10/M-6 0.60）。確定知見: **M-4 は M-6 単体を上回らない**（+0.0006・p=0.810＝互角）→ 売り候補の既定 μ 出所を M-6 へ切り替えるかは Issue #402 で `source=sell` バックテスト検証 |

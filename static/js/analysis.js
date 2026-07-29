@@ -1349,14 +1349,17 @@ function renderMacroEnsemble(d) {
   const ric = o => num(o && o.rank_ic ? o.rank_ic.mean : null);
   const ls  = o => num(o ? o.long_short_spread : null);
   const w = d.weights || {};
+  // 基底は d.base_models（サーバの BASE_MODELS）に従う。基底が増えても表が追従するよう動的生成。
+  const BASE_LABELS = { macro_risk_return: 'M-1', macro_gbdt: 'M-2', macro_dlm: 'M-3', macro_enet: 'M-6' };
+  const bases = d.base_models || Object.keys(w);
+  const bLabel = k => BASE_LABELS[k] || k;
   let html = `<div class="info-box" style="margin-bottom:14px">
-    統合重み: M-1=${num(w.macro_risk_return, 3)} / M-2=${num(w.macro_gbdt, 3)}（${esc(d.weight_method || '')}）
+    統合重み: ${bases.map(k => `${bLabel(k)}=${num(w[k], 3)}`).join(' / ')}（${esc(d.weight_method || '')}）
     ・共通OOFペア ${d.n_common_pairs ?? '-'} 件</div>`;
   html += `<div style="overflow-x:auto;margin-bottom:14px"><table>
     <thead><tr><th>同一共通域での比較（無リークOOF）</th><th>rank-IC</th><th>long-short</th><th>期間数</th></tr></thead><tbody>
     <tr><td><strong>M-4（統合μ̂）</strong></td><td><strong>${ric(oof)}</strong></td><td>${ls(oof)}</td><td>${oof.n_periods ?? '-'}</td></tr>
-    <tr><td>M-1 を共通域に制限</td><td>${ric(base.macro_risk_return)}</td><td>${ls(base.macro_risk_return)}</td><td>${(base.macro_risk_return || {}).n_periods ?? '-'}</td></tr>
-    <tr><td>M-2 を共通域に制限</td><td>${ric(base.macro_gbdt)}</td><td>${ls(base.macro_gbdt)}</td><td>${(base.macro_gbdt || {}).n_periods ?? '-'}</td></tr>
+    ${bases.map(k => `<tr><td>${bLabel(k)} を共通域に制限</td><td>${ric(base[k])}</td><td>${ls(base[k])}</td><td>${(base[k] || {}).n_periods ?? '-'}</td></tr>`).join('')}
     </tbody></table></div>`;
   if ((d.dropped_macro_features_m1 || []).length)
     html += `<div class="info-box" style="border-color:var(--status-warn);margin-bottom:14px">

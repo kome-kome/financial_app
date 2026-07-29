@@ -20,10 +20,14 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import database  # noqa: E402
 from plugins import macro_ensemble  # noqa: E402
 from plugins.macro_ensemble import (  # noqa: E402
-    _EQUAL_W,
+    BASE_MODELS,
     _MIN_META_PAIRS,
     _align,
+    _equal_w,
     _fit_weights,
+    _same_build_config,
+    _simplex_grid,
+    _simplex_grid_size,
     _stack_walk_forward,
     plugin,
 )
@@ -80,14 +84,15 @@ def _make_db(n_companies=6, n_weeks=210):
     return db, prices_by_co, fin_by_co, companies
 
 
-def _rows(ym_seed: int, n=6, w1=0.7, w2=0.3, noise=0.0):
-    """(ec, yh1, yh2, y=w1*yh1+w2*yh2+noise) の合成ペア（非共線）。"""
+def _rows(ym_seed: int, n=6, w=(0.5, 0.3, 0.2), noise=0.0):
+    """(ec, (yh_1..yh_k), y=Σ w_i·yh_i + noise) の合成ペア（非共線・基底数は len(w)）。"""
     import random
     rng = random.Random(ym_seed)
     out = []
     for i in range(n):
-        a, b = rng.gauss(0, 1), rng.gauss(0, 1)
-        out.append((f"e{i}", a, b, w1 * a + w2 * b + rng.gauss(0, noise)))
+        yh = tuple(rng.gauss(0, 1) for _ in w)
+        out.append((f"e{i}", yh,
+                    sum(wi * v for wi, v in zip(w, yh)) + rng.gauss(0, noise)))
     return out
 
 
@@ -190,47 +195,110 @@ class TestDropDeadMacroFeatures:
 
 class TestWeightOptimization:
     def test_nnls_recovers_true_weights(self):
-        tb = {"2020-01": _rows(1, n=20, w1=0.8, w2=0.2),
-              "2020-02": _rows(2, n=20, w1=0.8, w2=0.2)}
+        tb = {"2020-01": _rows(1, n=20, w=(0.6, 0.3, 0.1)),
+              "2020-02": _rows(2, n=20, w=(0.6, 0.3, 0.1))}
         w = _fit_weights(tb, "nnls", 0.05)
-        assert w[0] == pytest.approx(0.8, abs=0.05)
-        assert w[1] == pytest.approx(0.2, abs=0.05)
-        assert w[0] + w[1] == pytest.approx(1.0, abs=1e-9)
+        assert w == pytest.approx((0.6, 0.3, 0.1), abs=0.05)
+        assert sum(w) == pytest.approx(1.0, abs=1e-9)
 
     def test_nnls_all_zero_falls_back_to_equal(self):
-        # y = -(a+b)（両特徴と負相関）→ 非負制約下で w=(0,0) → 等重みフォールバック
-        tb = {"m": [(f"e{i}", i + 1.0, 2.0 * (i + 1), -(i + 1.0)) for i in range(10)]}
-        assert _fit_weights(tb, "nnls", 0.05) == _EQUAL_W
+        # y が全基底と負相関 → 非負制約下で w=(0,0,0) → 等重みフォールバック
+        tb = {"m": [(f"e{i}", (i + 1.0, 2.0 * (i + 1), 3.0 * (i + 1)), -(i + 1.0))
+                    for i in range(10)]}
+        assert _fit_weights(tb, "nnls", 0.05) == _equal_w(3)
 
     def test_grid_recovers_direction(self):
-        tb = {"2020-01": _rows(3, n=20, w1=0.8, w2=0.2)}
+        tb = {"2020-01": _rows(3, n=20, w=(0.8, 0.15, 0.05))}
         w = _fit_weights(tb, "rank_ic_grid", 0.05)
-        assert w[0] > w[1]          # M-1 側が支配的
-        assert w[0] + w[1] == pytest.approx(1.0, abs=1e-9)
+        assert w[0] > w[1] and w[0] > w[2]      # 支配的な基底を選ぶ
+        assert sum(w) == pytest.approx(1.0, abs=1e-9)
 
     def test_equal_method(self):
         tb = {"m": _rows(4, n=20)}
-        assert _fit_weights(tb, "equal", 0.05) == _EQUAL_W
+        assert _fit_weights(tb, "equal", 0.05) == _equal_w(3)
 
     def test_too_few_pairs_equal(self):
         tb = {"m": _rows(5, n=_MIN_META_PAIRS - 1)}
-        assert _fit_weights(tb, "nnls", 0.05) == _EQUAL_W
+        assert _fit_weights(tb, "nnls", 0.05) == _equal_w(3)
+
+    def test_n_base_used_when_no_pairs(self):
+        """空データでも n_base 指定で基底数どおりの等重みを返す（フォールバック契約）。"""
+        assert _fit_weights({}, "nnls", 0.05, n_base=3) == _equal_w(3)
+        assert _fit_weights({}, "nnls", 0.05, n_base=2) == (0.5, 0.5)
+
+    def test_two_base_path_still_works(self):
+        """基底数2でも一般化コードが従来どおり動く（M-6 追加前の契約を保持）。"""
+        tb = {"m1": _rows(6, n=20, w=(0.7, 0.3)), "m2": _rows(7, n=20, w=(0.7, 0.3))}
+        w = _fit_weights(tb, "nnls", 0.05)
+        assert len(w) == 2
+        assert w == pytest.approx((0.7, 0.3), abs=0.05)
+
+
+# ── 純関数: _simplex_grid / _same_build_config（N 基底一般化・#397）──────────
+
+class TestSimplexGrid:
+    def test_two_base_grid_matches_legacy_scan(self):
+        """n=2 は旧実装（w1 を 1.0→0.0 で走査）と同じ点列になる。"""
+        g = list(_simplex_grid(2, 0.05))
+        assert len(g) == 21
+        assert g[0] == (1.0, 0.0) and g[-1] == (0.0, 1.0)
+
+    def test_three_base_grid_size_and_simplex(self):
+        g = list(_simplex_grid(3, 0.05))
+        assert len(g) == 231                                  # C(20+2, 2)
+        assert all(abs(sum(w) - 1.0) < 1e-9 for w in g)
+        assert all(all(wi >= 0 for wi in w) for w in g)
+
+    def test_coarse_step(self):
+        assert len(list(_simplex_grid(3, 0.5))) == 6           # C(2+2, 2)
+
+    def test_size_helper_matches_actual_grid(self):
+        """点数カウンタは格子を実体化せずに一致する（爆発ガードが自分で飽和しないため）。"""
+        for n in (2, 3, 4):
+            for step in (0.5, 0.2, 0.05):
+                assert _simplex_grid_size(n, step) == len(list(_simplex_grid(n, step)))
+        # 実体化したら破綻する規模でも即座に数えられる
+        assert _simplex_grid_size(6, 0.01) > 50_000_000
+
+
+class TestSameBuildConfig:
+    def test_identical_configs_share_build(self):
+        a = {"fin_features": ["per"], "use_macro": True, "macro_features": ["x"],
+             "use_momentum": False, "momentum_window": 12, "min_coverage": 0.5,
+             "price_features": []}
+        assert _same_build_config(a, dict(a)) is True
+
+    def test_differing_build_key_forces_rebuild(self):
+        a = {"fin_features": ["per"], "min_coverage": 0.5}
+        assert _same_build_config(a, {**a, "min_coverage": 0.7}) is False
+
+    def test_non_build_key_ignored(self):
+        """build に効かないキー（学習器固有）の差は共有可否に影響しない。"""
+        a = {"fin_features": ["per"], "min_coverage": 0.5, "max_depth": 4}
+        assert _same_build_config(a, {**a, "max_depth": 8, "l1_ratio": "auto"}) is True
+
+    def test_m2_and_m6_defaults_are_shareable(self):
+        """既定 config では M-2/M-6 のスナップショットを共有できる（二重構築の回避）。"""
+        from plugins import get_plugin
+        m2p = coerce_params(get_plugin("macro_gbdt").params_schema(), {})
+        m6p = coerce_params(get_plugin("macro_enet").params_schema(), {})
+        assert _same_build_config(m2p, m6p) is True
 
 
 # ── 純関数: _stack_walk_forward（二段の無リーク性）──────────────────────────
 
 class TestStackWalkForward:
     def _common(self, n_months=6, n=8):
-        return {f"2020-{m:02d}": _rows(m, n=n, w1=0.7, w2=0.3, noise=0.1)
+        return {f"2020-{m:02d}": _rows(m, n=n, w=(0.5, 0.3, 0.2), noise=0.1)
                 for m in range(1, n_months + 1)}
 
     def test_early_folds_use_equal_weights(self):
         common = self._common()
         _, wby = _stack_walk_forward(common, "nnls", 0.05, min_meta_months=2)
         yms = sorted(common)
-        assert wby[yms[0]] == _EQUAL_W
-        assert wby[yms[1]] == _EQUAL_W
-        assert wby[yms[2]] != _EQUAL_W   # 3ヶ月目以降は学習重み
+        assert wby[yms[0]] == _equal_w(3)
+        assert wby[yms[1]] == _equal_w(3)
+        assert wby[yms[2]] != _equal_w(3)   # 3ヶ月目以降は学習重み
 
     def test_no_leak_month_t_target_does_not_affect_weights_upto_t(self):
         """月 t の y_true を破壊しても、t 以前の月に適用される重みは不変（無リーク）。"""
@@ -240,7 +308,7 @@ class TestStackWalkForward:
         _, w_before = _stack_walk_forward(common, "nnls", 0.05, min_meta_months=2)
 
         tampered = {ym: list(v) for ym, v in common.items()}
-        tampered[t] = [(ec, yh1, yh2, y * 100.0) for (ec, yh1, yh2, y) in tampered[t]]
+        tampered[t] = [(ec, yhats, y * 100.0) for (ec, yhats, y) in tampered[t]]
         _, w_after = _stack_walk_forward(tampered, "nnls", 0.05, min_meta_months=2)
 
         for ym in yms[: yms.index(t) + 1]:      # t 自身を含む＝t の重みは t 未満だけで決まる
@@ -248,9 +316,10 @@ class TestStackWalkForward:
         assert w_after[yms[4]] != w_before[yms[4]]  # t より後は t を学習に使う（変わってよい）
 
     def test_stacked_values_are_weighted_combination(self):
-        common = {"2020-01": [("A", 1.0, 3.0, 2.0)], "2020-02": [("B", 2.0, 4.0, 3.0)]}
-        stacked, wby = _stack_walk_forward(common, "equal", 0.05, min_meta_months=1)
-        assert stacked["2020-01"] == [(0.5 * 1.0 + 0.5 * 3.0, 2.0)]
+        common = {"2020-01": [("A", (1.0, 3.0, 5.0), 2.0)],
+                  "2020-02": [("B", (2.0, 4.0, 6.0), 3.0)]}
+        stacked, _wby = _stack_walk_forward(common, "equal", 0.05, min_meta_months=1)
+        assert stacked["2020-01"] == [(pytest.approx((1.0 + 3.0 + 5.0) / 3), 2.0)]
         assert set(stacked) == {"2020-01", "2020-02"}
 
 
@@ -261,7 +330,9 @@ class TestCoerce:
 
     def test_defaults_valid(self):
         params = coerce_params(self.schema, {})
-        assert params["weight_method"] == "nnls"
+        # 既定は rank-IC 最大化（#397・評価指標と学習目的を一致させる。NNLS は MSE 最小化で
+        # 縮小推定の M-6 を重み0にし、OOF の改善が現在μ̂へ反映されない非整合が出た）。
+        assert params["weight_method"] == "rank_ic_grid"
         assert params["n_quantiles"] == 5
         assert params["min_meta_months"] == 2
 
@@ -311,6 +382,7 @@ class TestExecuteSmoke(unittest.TestCase):
         macro_ensemble.SUB_PARAM_OVERRIDES.update({
             "macro_risk_return": {"use_macro": False},
             "macro_gbdt":        {"use_macro": False},
+            "macro_enet":        {"use_macro": False},
         })
 
     def tearDown(self):
@@ -333,7 +405,8 @@ class TestExecuteSmoke(unittest.TestCase):
                   "n_companies", "results"):
             assert k in result, f"出力に '{k}' がない"
         # base_oof_backtest は共通域に制限した各基底の OOF（優劣判定の apples-to-apples）
-        for name in ("macro_risk_return", "macro_gbdt"):
+        assert set(result["base_oof_backtest"]) == set(BASE_MODELS)
+        for name in BASE_MODELS:
             assert result["base_oof_backtest"][name]["n_oof_samples"] == \
                 result["oof_backtest"]["n_oof_samples"], "共通域の行数が M-4 と不一致"
 
@@ -348,16 +421,43 @@ class TestExecuteSmoke(unittest.TestCase):
     def test_weights_sum_to_one(self):
         result = self._run()
         w = result["weights"]
-        assert set(w) == {"macro_risk_return", "macro_gbdt"}
-        assert w["macro_risk_return"] + w["macro_gbdt"] == pytest.approx(1.0, abs=1e-3)
-        assert w["macro_risk_return"] >= 0 and w["macro_gbdt"] >= 0
+        assert set(w) == set(BASE_MODELS)                  # M-1 / M-2 / M-6（#397）
+        assert sum(w.values()) == pytest.approx(1.0, abs=1e-3)
+        assert all(v >= 0 for v in w.values())             # NNLS の非負制約
 
     def test_results_have_component_mus(self):
         result = self._run()
         assert result["n_companies"] == len(result["results"]) > 0
         for it in result["results"]:
-            for k in ("edinet_code", "mu_raw", "mu_m1", "mu_m2", "r_macro"):
+            for k in ("edinet_code", "mu_raw", "mu_m1", "mu_m2", "mu_m6", "r_macro"):
                 assert k in it
+
+    def test_stacked_mu_is_weighted_sum_of_component_mus(self):
+        """統合μ̂ = Σ w_i·μ̂_i（3基底の重み合成が結果行と整合している）。"""
+        result = self._run()
+        w = result["weights"]
+        it = result["results"][0]
+        expected = (w["macro_risk_return"] * it["mu_m1"]
+                    + w["macro_gbdt"] * it["mu_m2"]
+                    + w["macro_enet"] * it["mu_m6"])
+        assert it["mu_raw"] == pytest.approx(expected, abs=1e-4)
+
+    def test_two_base_configuration_still_executes(self):
+        """BASE_MODELS を2基底へ差し替えても動く（#397 の 2基底 vs 3基底 実測の前提）。
+
+        レグの組み立てが BASE_MODELS 駆動であることの回帰テスト。基底を戻したときに
+        M-6 由来のキーが消え、重みも2要素になる。"""
+        saved = list(macro_ensemble.BASE_MODELS)
+        macro_ensemble.BASE_MODELS[:] = ["macro_risk_return", "macro_gbdt"]
+        try:
+            result = self._run()
+        finally:
+            macro_ensemble.BASE_MODELS[:] = saved
+        assert set(result["weights"]) == {"macro_risk_return", "macro_gbdt"}
+        assert set(result["base_oof_backtest"]) == {"macro_risk_return", "macro_gbdt"}
+        assert result["n_common_pairs"] > 0
+        assert result["oof_backtest"]["n_periods"] > 0
+        assert all("mu_m6" not in it and "mu_m1" in it for it in result["results"])
 
     def test_objective_only_skips_scoring_but_same_oof(self):
         full = self._run()
