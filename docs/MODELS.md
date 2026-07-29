@@ -22,6 +22,8 @@
 12. [M-3 ベイズ状態空間モデル（時変マクロβ DLM・macro_dlm）](#12-m-3-ベイズ状態空間モデル時変マクロβ-dlmmacro_dlm)
 13. [M-4 兄弟μ̂スタッキング・アンサンブル（macro_ensemble）](#13-m-4-兄弟μ̂スタッキングアンサンブルmacro_ensemble)
 14. [M-5 マクロ×財務 ランク学習（learning-to-rank・macro_gbdt_rank）](#14-m-5-マクロ財務-ランク学習learning-to-rankmacro_gbdt_rank)
+15. [兄弟モデル候補メニュー（探索枠・model_candidates）](#15-兄弟モデル候補メニュー探索枠model_candidates)
+16. [M-6 マクロ×財務 正則化線形（ElasticNet・macro_enet）](#16-m-6-マクロ財務-正則化線形elasticnetmacro_enet)
 
 ---
 

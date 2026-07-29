@@ -132,6 +132,9 @@ td code,p code,li code{background:var(--bg-sunken);border:1px solid var(--border
     <a href="#macro_risk_return">マクロ×リスク-リターン</a>
     <a href="#macro_gbdt">マクロ×財務 勾配ブースティング（M-2）</a>
     <a href="#macro_dlm">ベイズ状態空間（時変マクロβ）</a>
+    <a href="#macro_ensemble">兄弟モデルの合わせ技（M-4）</a>
+    <a href="#macro_gbdt_rank">ランク学習版 勾配ブースティング（M-5）</a>
+    <a href="#macro_enet">正則化線形 ElasticNet（M-6）</a>
     <div class="toc-section-title">④ 戦略を検証</div>
     <a href="#backtest">バックテスト</a>
     <div class="toc-section-title">⑤ 保有を見直す</div>
@@ -336,6 +339,78 @@ td code,p code,li code{background:var(--bg-sunken);border:1px solid var(--border
   <div class="warn-box">β は「マクロが動いたときの反応の強さ」であって、<strong>マクロ自体の先読みではありません</strong>（未来の為替や金利は分かりません）。µ̂ は「世の中で説明できない持ち味」を頼りにした推定値なので、参考程度に。週次で約2年以上の株価履歴がある銘柄だけが対象です。計算が重いのでローカル環境で実行してください。</div>
 
   <div class="more">→ もっと詳しく：<a href="/models#m12">モデル解説：M-3 ベイズ状態空間モデル</a></div>
+</div>
+
+<!-- M-4 兄弟μ̂スタッキング・アンサンブル ─────────── -->
+<div class="model-section" id="macro_ensemble">
+  <h2>兄弟モデルの合わせ技 <span class="model-tag">③ 将来リターンを予測</span></h2>
+
+  <h3>🟢 ひとことで言うと</h3>
+  <div class="analogy">
+    M-1（線形・素直な回帰）と M-2（非線形・勾配ブースティング）は<strong>性格の違う2人の予想屋</strong>です。この分析は、過去にどちらがどれくらい当たってきたかを振り返り、<strong>2人の予想を良い塩梅でブレンド</strong>します。外し方の癖が2人で違えば、混ぜたほうが単独より安定することがある、という考え方（<span class="term" data-tip="複数モデルの予測を、それ自体を入力として別モデル（ここでは単純な加重平均）に学習させて統合する手法。">スタッキング</span>）です。
+  </div>
+
+  <h3>📊 何が分かる？</h3>
+  <p>M-1・M-2 を統合した期待リターン µ̂ の順位が分かります。ブレンドの重みは<strong>過去の実績だけ</strong>から自動で決まり（勘や好みは入りません）、M-1・M-2 の<strong>両方がすでに実行済みの銘柄</strong>だけが対象になります。</p>
+
+  <h3>🛠 どう使う？</h3>
+  <ul class="steps">
+    <li>先に <a href="/guide#macro_risk_return" style="color:var(--status-good-text)">M-1</a> と <a href="/guide#macro_gbdt" style="color:var(--status-good-text)">M-2</a> を一度ずつ実行しておきます（順番は問いません）。</li>
+    <li>本分析を実行すると、過去の的中実績から重みを学習し、統合後の順位が出ます。</li>
+    <li>売り候補ランキングの「μ の出所」で <strong>M-4</strong> を選べば、この統合予測を売り判断に使えます。</li>
+  </ul>
+
+  <h3>⚠ 注意点・落とし穴</h3>
+  <div class="warn-box">重みは<strong>過去の実績の振り返り</strong>なので、地合いが急に変わった直後は反応が遅れることがあります。M-1・M-2 のどちらか片方しか実行していない銘柄は対象に出ません。</div>
+
+  <div class="more">→ もっと詳しく：<a href="/models#m13">モデル解説：M-4 兄弟μ̂スタッキング・アンサンブル</a></div>
+</div>
+
+<!-- M-5 マクロ×財務 ランク学習 ─────────────────── -->
+<div class="model-section" id="macro_gbdt_rank">
+  <h2>ランク学習版 勾配ブースティング <span class="model-tag">③ 将来リターンを予測</span></h2>
+
+  <h3>🟢 ひとことで言うと</h3>
+  <div class="analogy">
+    M-2 は「リターンの<strong>値そのもの</strong>の当てっこ」として学習しますが、実際に使うときに大事なのは<strong>順位が合っているか</strong>です。この分析は M-2 と同じデータ・同じ条件を使いながら、学習の段階から<strong>順位を直接当てにいく</strong>ように作り替えた、いわば<strong>双子モデル</strong>です。
+  </div>
+
+  <h3>📊 何が分かる？</h3>
+  <p>銘柄の<strong>順位スコア</strong>が分かります。数値そのものに「〇%上がる」という意味はなく、あくまで<strong>並び順の参考</strong>です。モデル比較ビューで M-2 と同じ条件の実績（順位の当たり具合）を見比べられます。</p>
+
+  <h3>🛠 どう使う？</h3>
+  <ul class="steps">
+    <li>M-2 と同じ手順で実行すると、順位スコア順の一覧が出ます。</li>
+    <li>モデル比較ビューで、M-2（値の当てっこ）と M-5（順位の当てっこ）の<strong>どちらが実際によく当たっているか</strong>を見比べるのが主な使い道です。</li>
+  </ul>
+
+  <h3>⚠ 注意点・落とし穴</h3>
+  <div class="warn-box">現時点では<strong>比較専用</strong>です。値そのものに期待リターンとしての意味がないため、売り候補ランキングなど他機能の「μ の出所」にはまだ使えません（今後の対応待ち）。</div>
+
+  <div class="more">→ もっと詳しく：<a href="/models#m14">モデル解説：M-5 マクロ×財務 ランク学習</a></div>
+</div>
+
+<!-- M-6 マクロ×財務 正則化線形（ElasticNet） ────── -->
+<div class="model-section" id="macro_enet">
+  <h2>正則化線形（ElasticNet） <span class="model-tag">③ 将来リターンを予測</span></h2>
+
+  <h3>🟢 ひとことで言うと</h3>
+  <div class="analogy">
+    M-2 と<strong>同じデータ・同じ条件</strong>で学習する、<strong>線形版の兄弟モデル</strong>です。金利・為替・株価指数のように<strong>似た者同士の特徴量</strong>が並んでいても暴れにくい、素直な線形の計算方法（ElasticNet）を使います。実際に比べてみたところ M-2 よりよく当たったため、正式な仲間として追加されました。
+  </div>
+
+  <h3>📊 何が分かる？</h3>
+  <p>期待リターンの順位に加えて、<strong>どの要因がどれくらい効いているか</strong>が係数としてそのまま読めます（効いていない要因は自動的にゼロになります）。銘柄の入れ替わりが M-2 より穏やかなため、<strong>売買コストに強い</strong>という副次的な利点もあります。</p>
+
+  <h3>🛠 どう使う？</h3>
+  <ul class="steps">
+    <li>モデル比較ビューで M-1〜M-5 と並べて実績（順位の当たり具合）を見比べます。</li>
+  </ul>
+
+  <h3>⚠ 注意点・落とし穴</h3>
+  <div class="warn-box">現時点では<strong>比較専用</strong>です。売り候補ランキングなど他機能の「μ の出所」への統合はまだ行われていません（データベース対応を伴うため今後の対応待ち）。</div>
+
+  <div class="more">→ もっと詳しく：<a href="/models#m15">モデル解説：M-6 マクロ×財務 正則化線形（ElasticNet）</a></div>
 </div>
 
 <!-- ④ バックテスト ──────────────────────────── -->
