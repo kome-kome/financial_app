@@ -26,9 +26,11 @@ M-2（macro_gbdt・XGBoost）の**線形兄弟**。Issue #372 の候補メニュ
     不変、ターンオーバー・ブレークイーブンも横ばいで、木モデルではむしろ悪化した（LightGBM
     0.1474→0.1379）。**昇格ゲートを通らなかったため本プラグインには入れない**（ラッパー
     `model_candidates.wrap_macro_pca` は探索枠に残す）。
-  - **producer なし（初版）**: M-5 と同様に OOF 比較専用とし、`macro_enet_scores` テーブル追加・
-    `sell_ranking` の `mu_source` 統合は行わない（DB スキーマ変更は init_db が本番へ無条件反映される
-    ため別 Issue で扱う）。予測は M-1/M-2 と同じ 52 週先対数リターン単位なので、統合自体は将来可能。
+  - **producer あり（Issue #396）**: 予測は M-1/M-2 と同じ 52 週先対数リターン単位のため、
+    `macro_enet_scores`（M-2 の `macro_gbdt_scores` と同型・r1_prime 付き）へ全置換永続化し、
+    `sell_ranking` の `mu_source="macro_enet"` へ供給する。#372 の昇格時は DDL を避けて
+    切り出していた残タスク。既定 `mu_source` は M-2 のまま（切替は要バックテスト事後検証）。
+    順位スコアで水準を持たない M-5 とは異なり、M-6 は水準を持つため統合できる。
 """
 import statistics
 from typing import Any
@@ -153,12 +155,38 @@ class MacroEnetPlugin(AnalysisPlugin):
             },
         }
 
-    # ── producer を持たない（初版・M-5 と同じ扱い）──────────────────────────
+    # ── producer（M-2 と同一契約・Issue #396）────────────────────────────────
     def produced_output(self, db: Any) -> bool:
-        return False
+        """M-6 producer μ̂（macro_enet_scores）を共有DBに持つか（sell_ranking の graceful 判定用）。
+
+        M-6 を一度ローカル実行すると execute() が μ̂ を永続化する。未実行なら False を返し、
+        consumer（sell_ranking, mu_source=macro_enet）は graceful-degrade する（ADR-0004）。"""
+        try:
+            from database import get_macro_enet_scores
+            return bool(get_macro_enet_scores(db))
+        except Exception:
+            return False
 
     def read_producer_scores(self, db: Any, macro_snapshot: dict | None = None) -> dict:
-        return {}
+        """M-1/M-2 と同一形 {edinet_code: {mu, r_macro, r1_prime}} を返す（sell_ranking 共用）。
+
+        mu / r1_prime は永続化済み macro_enet_scores、r_macro は共有 macro_beta producer
+        からマージ。r1_prime はコンフォーマル区間半幅（ADR-0020）＝ sell_ranking の R3 足切り
+        ゲートが読む確実性軸。未蓄積・旧スナップショットでは None（ゲート素通り）。"""
+        from database import get_macro_enet_producer
+        prods = get_macro_enet_producer(db)
+        if not prods:
+            return {}
+        r_macro_src = get_producer_scores(db, macro_snapshot)
+        out: dict = {}
+        for ec, rec in prods.items():
+            prod = r_macro_src.get(ec) or {}
+            out[ec] = {
+                "mu":       float(rec["mu"]),
+                "r_macro":  prod.get("r_macro"),
+                "r1_prime": rec.get("r1_prime"),
+            }
+        return out
 
     def tuning_search_space(self) -> tuple:
         """探索軸は構造パラメータのみ（α・l1_ratio は学習 fold 内 CV が自動決定するため対象外）。"""
@@ -298,6 +326,14 @@ class MacroEnetPlugin(AnalysisPlugin):
         raw_items.sort(key=lambda x: x.get("mu_raw") or -1e18, reverse=True)
         r_macro_available = any(it["r_macro"] is not None for it in raw_items)
 
+        # ── producer μ̂ を永続化（sell_ranking が mu_source=macro_enet で読む・Issue #396）─
+        _snap_dates = [current_snaps[c][1].get("snap_date") for c in codes_ordered]
+        _snap_dates = [d for d in _snap_dates if d]
+        _rep = max(_snap_dates) if _snap_dates else None
+        _rep_str = (_rep.isoformat() if hasattr(_rep, "isoformat")
+                    else (str(_rep)[:10] if _rep else None))
+        self._persist_producer(db, raw_items, _rep_str)
+
         return {
             "cv_metrics":        {"enet": _cv_summary(cv_folds)},
             "selected_features": model_feat_names,
@@ -314,6 +350,23 @@ class MacroEnetPlugin(AnalysisPlugin):
             "oof_backtest":      oof_bt,
             "r_macro_available": r_macro_available,
         }
+
+    @staticmethod
+    def _persist_producer(db: Any, raw_items: list, rep_str: str | None) -> None:
+        """producer μ̂ を macro_enet_scores へ永続化（M-2 の _persist_producer と同型）。
+
+        永続化失敗（読取専用DB等）は分析表示を妨げない＝握りつぶす（producer は次回実行で
+        再生成される）。探索中は replace 側が `tuning_dry_run()` で no-op（Issue #264）。"""
+        from database import replace_macro_enet_scores
+        try:
+            replace_macro_enet_scores(
+                db,
+                [{"edinet_code": it["edinet_code"], "mu": it["mu_raw"],
+                  "r1_prime": it.get("r1")} for it in raw_items],
+                rep_str,
+            )
+        except Exception:
+            pass
 
     @staticmethod
     def _fit_final_and_score(all_samples: list, current_rows: list, l1_ratios: tuple) -> tuple:

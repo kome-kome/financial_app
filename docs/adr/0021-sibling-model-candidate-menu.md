@@ -96,6 +96,12 @@ VISION の核心は「並置してどちらが有効かを実データで決め�
 - `plugins/model_candidates.py` は `plugins/` 配下にあるためレジストリのスキャン対象になるが、
   `plugin` 属性を持たないため登録されない。モジュール import は numpy と `.utils` のみで軽い
   （sklearn / statsmodels / lightgbm / catboost は候補構築時に遅延 import）。
+- **昇格時は producer を切り出した（#372）→ 2026-07-29 に #396 で解消**。M-6 の予測は M-1/M-2 と
+  同じ 52 週先対数リターン単位のため、`macro_enet_scores`（`macro_gbdt_scores` と同型・`r1_prime`
+  付き）を追加し `sell_ranking` の `mu_source="macro_enet"` へ供給する。R3 足切りゲートも
+  ADR-0020 のコンフォーマル区間半幅をそのまま流用して機能する。**既定 `mu_source` は M-2 のまま**
+  ——rank-IC で上回っていても売り判定の出力が全面的に変わるため、`/api/backtest` の `sell` source
+  で事後検証してから別途判断する（既定変更は本 ADR の対象外）。
 
 ## 実測（本番データ・honest OOF・embargo=12・2026-07-26）
 

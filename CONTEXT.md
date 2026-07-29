@@ -131,7 +131,7 @@ M-2 の[[メタ検証]]の実体で、**既存「バックテスト」(`/api/bac
 _Avoid_: バックテスト（preset/as-of の別機能と二義化するため）, モデル内蔵WF-CV（CV は R²/RMSE・OOF は予測の順序付け力で目的が違う）
 
 **μ出所トグル (mu_source) / producer μ̂**:
-[[売りスコア]]の μ（期待リターン）・−R_macro 観点に使う推奨モデルの選択（既定 `macro_risk_return`＝M-1／`macro_gbdt`＝M-2）。M-2 の producer μ̂ は `execute()` が `macro_gbdt_scores` テーブルへ**全置換（スナップショット置換）で直書き**し（`sector_ols`→`regression_results` と同型）、売り推奨は M-1 と同一契約 `{mu, r_macro, r1_prime}` で read する。−R_macro（[[系統的マクロリスク曝露]]）は共有 `macro_beta` 由来でモデル非依存ゆえ `mu_source` に依らず不変。r1_prime は M-2 で None のため **R3 足切りゲートは M-2 選択時は無効**。選択モデル未実行なら graceful-degrade（μ 成分を除外）。
+[[売りスコア]]の μ（期待リターン）・−R_macro 観点に使う推奨モデルの選択（`macro_risk_return`＝M-1／`macro_gbdt`＝M-2・**既定**／`macro_dlm`＝M-3／`macro_ensemble`＝M-4／`macro_enet`＝M-6）。各 producer μ̂ は `execute()` が専用テーブル（`macro_gbdt_scores` / `macro_dlm_scores` / `macro_ensemble_scores` / `macro_enet_scores`）へ**全置換（スナップショット置換）で直書き**し（`sector_ols`→`regression_results` と同型）、売り推奨は M-1 と同一契約 `{mu, r_macro, r1_prime}` で read する。−R_macro（[[系統的マクロリスク曝露]]）は共有 `macro_beta` 由来でモデル非依存ゆえ `mu_source` に依らず不変。**R3 足切りゲートが効くのは r1_prime を持つ M-1（予測SE）・M-2・M-6（コンフォーマル区間半幅）のみ**（M-3/M-4 は不在＝無効）。選択モデル未実行なら graceful-degrade（μ 成分を除外）。
 _Avoid_: モデル選択（汎用すぎる）, M-2売り推奨（μ の出所のみ切替で売りロジック自体は共通のため）
 
 ## マクロ×時変β状態空間（M-3）

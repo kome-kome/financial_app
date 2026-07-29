@@ -256,6 +256,7 @@ class SellRankingPlugin(AnalysisPlugin):
                     {"value": "macro_gbdt",        "label": "M-2: マクロ×財務 勾配ブースティング（XGBoost）"},
                     {"value": "macro_dlm",         "label": "M-3: ベイズ状態空間（時変マクロβ DLM）"},
                     {"value": "macro_ensemble",    "label": "M-4: 兄弟μ̂スタッキング（M-1+M-2 統合）"},
+                    {"value": "macro_enet",        "label": "M-6: マクロ×財務 正則化線形（ElasticNet）"},
                 ],
                 "default": "macro_gbdt",
                 "description": "売りスコアの μ / −R_macro 観点に使う推奨モデル（既定 M-2）。未実行なら graceful-degrade（μ除外）。",
@@ -264,7 +265,7 @@ class SellRankingPlugin(AnalysisPlugin):
                 "type": "slider", "dtype": "float",
                 "label": "R3 足切り（μ 予測の確実性）",
                 "min": 0.0, "max": 0.5, "step": 0.05, "default": 0.0,
-                "description": "μ 予測の確実性軸 r1_prime（M-1=予測SE／M-2=コンフォーマル区間半幅）がこの値を超える銘柄は SELL を出さない（0=無効・M-3/M-4選択時は無効）",
+                "description": "μ 予測の確実性軸 r1_prime（M-1=予測SE／M-2・M-6=コンフォーマル区間半幅）がこの値を超える銘柄は SELL を出さない（0=無効・M-3/M-4選択時は無効）",
             },
         }
 
@@ -303,7 +304,8 @@ class SellRankingPlugin(AnalysisPlugin):
         universe = uni_q.all()
 
         # ── 期待リターン μ producer スコア（mu_source で M-1/M-2 切替・graceful-degrade）──
-        # ADR-0004: mu_source=macro_risk_return（既定）/ macro_gbdt。両者とも
+        # ADR-0004: mu_source=macro_risk_return / macro_gbdt（既定）/ macro_dlm /
+        # macro_ensemble / macro_enet。いずれも
         # read_producer_scores が {edinet_code: {mu, r_macro, r1_prime}} を返す共通契約。
         # r_macro は共有 macro_beta 由来でモデル非依存（neg_r_macro は mu_source に依らず不変）。
         import datetime as _dt
@@ -398,7 +400,7 @@ class SellRankingPlugin(AnalysisPlugin):
             if timing_adj and action in _ACTIONS:
                 action = _apply_timing(action, mom["trend"])
             # R3 足切りゲート: μ 予測の確実性軸（r1_prime）が閾値超 → SELL を出さない。
-            # M-1=OLS 予測SE / M-2=コンフォーマル区間半幅（Issue #365・R3 ゲート再有効化）。
+            # M-1=OLS 予測SE / M-2・M-6=コンフォーマル区間半幅（Issue #365・R3 ゲート再有効化）。
             # mu_source=macro_dlm（M-3）/macro_ensemble（M-4）は r1_prime を持たないため無効
             # （ADR-0004・no-op）。r1_prime が None の銘柄（列未 migration 等）はゲート素通り。
             _r3_gate = params.get("r3_gate", 0.0)

@@ -509,6 +509,7 @@ function renderSellRanking(d) {
       macro_gbdt:        ['M-2（勾配ブースティング）', 'M-2 を分析タブでローカル実行してください'],
       macro_dlm:         ['M-3（時変マクロβ DLM）', 'M-3 を分析タブでローカル実行してください'],
       macro_ensemble:    ['M-4（兄弟μ̂スタッキング）', 'M-4 を分析タブでローカル実行してください'],
+      macro_enet:        ['M-6（正則化線形 ElasticNet）', 'M-6 を分析タブでローカル実行してください'],
     };
     const [_lbl, _act] = _MU_LABELS[d.mu_source] || _MU_LABELS.macro_risk_return;
     notes.push(`<span style="color:var(--text-muted)">※ ${_lbl} 未実行のため μ・マクロリスク成分は除外されています（${_act}）</span>`);

@@ -866,7 +866,7 @@ $$
 
 ここで $z_i$ は指標 $i$ のユニバース標準化値（±5 にクリップ）、$w_i$ は「その観点を売り判断でどれだけ重視するか」を表す**非負ウェイト**。符号反転 $(-z_i)$ により、ユニバース平均より劣る（割高・低収益・低成長）銘柄ほどスコアが正に大きくなる。ユニバース平均並みの銘柄は ≈0。値が揃う重み付き指標の比率（カバレッジ）が下限を下回る銘柄は「データ不足」とする。
 
-プリセット（`マクロ予測型`（**既定**）/ `バランス型` / `割高警戒型` / `業績悪化重視`）は $w_i$ の既定値、UI でスライダー上書き可（スライダーは既定で折りたたみ表示）。**マクロ予測型**は期待リターン μ（`mu`）とマクロリスク −Rᴹ（`neg_r_macro`）の2軸のみを用いる（スコアは $\sum w_i(-z_i)/\sum w_i$ で正規化されるため両者の**比率のみ有意**・既定 1.0 : 0.5）。μ の出所（`mu_source`）は既定で **M-2（`macro_gbdt`）**。
+プリセット（`マクロ予測型`（**既定**）/ `バランス型` / `割高警戒型` / `業績悪化重視`）は $w_i$ の既定値、UI でスライダー上書き可（スライダーは既定で折りたたみ表示）。**マクロ予測型**は期待リターン μ（`mu`）とマクロリスク −Rᴹ（`neg_r_macro`）の2軸のみを用いる（スコアは $\sum w_i(-z_i)/\sum w_i$ で正規化されるため両者の**比率のみ有意**・既定 1.0 : 0.5）。μ の出所（`mu_source`）は M-1（`macro_risk_return`）／M-2（`macro_gbdt`・**既定**）／M-3（`macro_dlm`）／M-4（`macro_ensemble`）／M-6（`macro_enet`・#396）から選ぶ。**R3 足切りゲートが効くのは `r1_prime` を持つ M-1・M-2・M-6 のみ**（M-3/M-4 は不在＝無効）。
 
 ### 10.3 価格モメンタム（タイミング軸）
 
@@ -1364,9 +1364,11 @@ rank-IC で有意に上回った**ため正式兄弟へ昇格した（8 候補�
 
 ### 16.4 仮定・限界
 
-- **初版は producer なし**（M-5 と同じ扱い）。予測は M-1/M-2 と同じ 52 週先対数リターン単位なので
-  `sell_ranking` の `mu_source` へ統合可能だが、`macro_enet_scores` テーブル追加＝ DDL が本番へ
-  無条件反映される経路のため別 Issue で扱う。
+- **producer あり**（#396 で追加）。予測は M-1/M-2 と同じ 52 週先対数リターン単位のため、
+  `macro_enet_scores`（`macro_gbdt_scores` と同型・`r1_prime` 付き）へ全置換永続化し、
+  `sell_ranking` の `mu_source="macro_enet"` へ供給する。**既定 `mu_source` は M-2 のまま**
+  （切替は売り判定の出力が全面的に変わるため、`/api/backtest` の `sell` source で事後検証して
+  から別途判断する）。順位スコアで水準を持たない M-5 と異なり、M-6 は水準を持つため統合できる。
 - 線形モデルのため、M-2 が捉える fin×macro の高次交互作用は表現できない。両者は**補完関係**にあり、
   M-4（兄弟μ̂スタッキング）へ M-6 を加える拡張が自然な次の一手になる（未実施）。
 - `results` は上位 `top_n` 件のみ返す（汎用レンダラが全社数千行の DOM を吐かないようにするため）。
@@ -1409,3 +1411,4 @@ rank-IC で有意に上回った**ため正式兄弟へ昇格した（8 候補�
 | 2026-07-24 | **M-5（マクロ×財務 ランク学習・learning-to-rank）を §14 として追加**（#362・ADR-0017）。M-2 の rank-IC 整合版。学習目的を MSE（reg:squarederror）→ XGBoost の learning-to-rank（rank:pairwise 既定）へ差し替え、各 test 月を1クエリグループとして期内順位を直接最適化する。M-2 を無改変ベースラインとして残すため新兄弟モデル化し、execute() 本体を継承して4フック（_objective/_make_cv_callback/_fit_final_model/_persist_producer）のみ override。walk_forward_cv_monthly に `pass_train_groups`（後方互換）を足して月クエリグループ境界を fit(group=…) へ受け渡す。予測は順位スコア（リターン単位でない）ため producer なし・OOF 比較専用（sell_ranking 統合は見送り）。model_comparison に M-5 として並び M-2(MSE) と純比較。xgboost 3.3.0 同梱で新パッケージ不要 |
 | 2026-07-12 | **週次株価フルロードのタイムアウトを解消（Issue #311）**。M-1/M-2/M-3 の `stock_price_weekly` 全件ロード（~95万行）が本番 pooler の `statement_timeout=2min` を超過し（`QueryCanceled`／`lost synchronization`）、モデル比較 E2E が全モデル失敗していた。週次ロードを `macro_snapshots.load_weekly_prices_chunked`（`edinet_code` を 500 社ずつ IN 句で分割 fetch・PK インデックス使用）へ集約し、全件でも実測 ~30秒で安定完走。M-1/M-2（`_load_data_impl`）・M-3（`_load_prices_impl`）が共用。3モデル比較 E2E で全モデル OK（M-1 IC=0.23 / M-2 IC=0.33 / M-3 IC≈0.01）を確認。詳細は GOTCHAS.md「DB・運用上の注意」 |
 | 2026-07-26 | **兄弟モデル候補メニュー（§15・探索枠）と M-6 正則化線形（§16）を追加**（#372・ADR-0021）。`walk_forward_cv_monthly(fit_predict=…)` 注入点へ差し込む候補（ElasticNet／ExtraTrees・QRF／Fama-MacBeth 予測ヘッド／マクロfold内PCA／regime-switch閾値線形／LightGBM・CatBoost）を `plugins/model_candidates.py` に集約し、`scripts/candidate_bakeoff.py` で同一fold・同一特徴量・同一指標の OOF 横並び実測を行う枠組みを新設。本番パネル（43ヶ月/57,955サンプル/71特徴量/9fold）の実測で **ElasticNet が M-2(XGBoost) を有意に上回った**（rank-IC 0.1713 vs 0.1419・差 +0.0294・95%CI [+0.0116,+0.0469]・p=0.002・多重比較補正 α/8 も通過）ため **M-6（macro_enet）として昇格**。他候補は据え置き。確定知見: 木の非線形性より縮小推定が効く／代替GBDTは誤差レベル／Fama-MacBeth は第1段階の正則化が必須（素の断面OLSは rank-IC 負）／マクロPCA圧縮は効果なし／木予測分布の区間は名目80%に対し実測被覆40.6%で使えず分割コンフォーマル(ADR-0020)が正解 |
+| 2026-07-29 | **M-6 を producer 化し売り候補ランキング（§10）の `mu_source` へ統合**（#396・ADR-0021 の残タスク）。`macro_enet_scores`（`macro_gbdt_scores` と同型・`r1_prime` 付き）を追加し、`execute` 末尾で現在μ̂と確実性軸（コンフォーマル区間半幅・ADR-0020）を全置換永続化。`produced_output`/`read_producer_scores` は M-2 と同一形＝`mu_source="macro_enet"` で選択でき、**R3 足切りゲートも M-1・M-2 と同様に機能**する（M-3/M-4 は `r1_prime` 不在で無効のまま）。未実行時は graceful-degrade（ADR-0004）。探索中は `tuning_dry_run` で永続化 no-op（#264）。**既定 `mu_source` は M-2 のまま**＝切替は `/api/backtest` の `sell` source で事後検証してから別途判断する |
