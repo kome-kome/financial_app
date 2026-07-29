@@ -401,6 +401,59 @@ class TestMuSource:
         assert row["sec_code"] == "1001"
         assert row["action"] == "SELL"
 
+    def _seed_m6(self, db, mus, r1_primes=None):
+        from database import replace_macro_enet_scores
+        r1_primes = r1_primes or {}
+        replace_macro_enet_scores(
+            db,
+            [{"edinet_code": ec, "mu": v, "r1_prime": r1_primes.get(ec)}
+             for ec, v in mus.items()],
+            "2026-07-29",
+        )
+
+    def test_macro_enet_mu_used_when_available(self, db, make_metric):
+        """M-6（ElasticNet）を mu_source に選べる（Issue #396）。μ は M-1/M-2 と同一単位。"""
+        self._seed_universe(db, make_metric)
+        self._seed_m6(db, {"E0001": -0.10, "E0002": -0.05, "E0003": 0.0,
+                           "E0004": 0.05, "E0005": 0.10})
+        res = _run({"holdings": "1001\n1005", "weights": {"mu": 1.0},
+                    "min_coverage": 0.0, "mu_source": "macro_enet",
+                    "timing_adjust": False}, db)
+        assert res["mu_available"] is True
+        assert res["mu_source"] == "macro_enet"
+        by = {r["sec_code"]: r for r in res["results"]}
+        assert by["1001"]["score"] > by["1005"]["score"]   # 低μ → 売り上位
+
+    def test_macro_enet_graceful_when_not_run(self, db, make_metric):
+        """M-6 未実行（macro_enet_scores 空）でも μ を除外して判定継続（ADR-0004）。"""
+        self._seed_universe(db, make_metric)
+        res = _run({"holdings": "1001", "weights": {"mu": 1.0, "roe": 0.5},
+                    "min_coverage": 0.0, "mu_source": "macro_enet"}, db)
+        assert res["mu_available"] is False
+        assert res["mu_source"] == "macro_enet"
+        assert res["count"] == 1
+
+    def test_r3_gate_active_under_macro_enet(self, db, make_metric):
+        """M-6 は r1_prime（コンフォーマル区間半幅）を持つため R3 ゲートが効く（M-3/M-4 と違う）。"""
+        self._seed_universe(db, make_metric)
+        self._seed_m6(db, {"E0001": -0.20, "E0002": -0.05, "E0003": 0.0,
+                           "E0004": 0.05, "E0005": 0.10},
+                      r1_primes={"E0001": 0.30})
+        res = _run({"holdings": "1001", "weights": {"mu": 1.0}, "min_coverage": 0.0,
+                    "sell_threshold": 0.8, "reduce_threshold": 0.3,
+                    "r3_gate": 0.1, "mu_source": "macro_enet", "timing_adjust": False}, db)
+        assert res["results"][0]["action"] == "REDUCE"
+
+    def test_r3_gate_passes_low_uncertainty_under_macro_enet(self, db, make_metric):
+        self._seed_universe(db, make_metric)
+        self._seed_m6(db, {"E0001": -0.20, "E0002": -0.05, "E0003": 0.0,
+                           "E0004": 0.05, "E0005": 0.10},
+                      r1_primes={"E0001": 0.05})
+        res = _run({"holdings": "1001", "weights": {"mu": 1.0}, "min_coverage": 0.0,
+                    "sell_threshold": 0.8, "reduce_threshold": 0.3,
+                    "r3_gate": 0.1, "mu_source": "macro_enet", "timing_adjust": False}, db)
+        assert res["results"][0]["action"] == "SELL"
+
     def test_r3_gate_noop_when_r1_prime_missing_macro_gbdt(self, db, make_metric):
         """r1_prime=None（列未 migration / 旧スナップショット）はゲート素通り（graceful）。"""
         self._seed_universe(db, make_metric)

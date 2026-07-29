@@ -4,7 +4,7 @@
 ElasticNet 線形モデル。
 
 テスト観点:
-  1. meta   : 登録・ui_order=390・producer を持たない（OOF 比較専用の初版）
+  1. meta   : 登録・ui_order=390・未実行時は producer 無し（graceful-degrade）
   2. coerce : l1_ratio の membership 検証・macro_pca_components の bounds 検証
   3. fold   : M-2 と同一の walk-forward 設定（min_train_months=6 / step=3 / embargo=12）で回す
   4. smoke  : execute の出力契約（model_type=elasticnet・係数と特徴量名の対応・results は top_n 以内）
@@ -61,10 +61,10 @@ class TestPluginMeta:
         assert plugin.category == "③ 将来リターンを予測"
         assert plugin.heavy is True
 
-    def test_no_producer(self):
-        """初版は OOF 比較専用（producer テーブルを持たない）。"""
-        assert plugin.produced_output(MagicMock()) is False
-        assert plugin.read_producer_scores(MagicMock()) == {}
+    def test_producer_absent_before_run(self, db):
+        """未実行（macro_enet_scores 空）なら producer 無し＝consumer は graceful-degrade。"""
+        assert plugin.produced_output(db) is False
+        assert plugin.read_producer_scores(db) == {}
 
     def test_registered_in_model_comparison(self):
         from model_comparison import COMPARISON_MODELS
@@ -185,3 +185,63 @@ class TestPromotionScope:
         """マクロ列は主成分へ畳まず生のまま使う（PCA は昇格対象外・ADR-0021）。"""
         res = _run(_params(use_macro=False))
         assert not any(n.startswith("macro_pc") for n in res["selected_features"])
+
+
+# ── 7. producer 往復（in-memory SQLite・conftest の db fixture・Issue #396）───────
+
+class TestProducer:
+    def test_replace_and_read_round_trip(self, db):
+        from database import get_macro_enet_scores, replace_macro_enet_scores
+        n = replace_macro_enet_scores(
+            db,
+            [{"edinet_code": "E1", "mu": 0.12, "r1_prime": 0.30},
+             {"edinet_code": "E2", "mu": None, "r1_prime": 0.10}],
+            "2026-07-01")
+        assert n == 1                      # mu=None はスキップ
+        assert get_macro_enet_scores(db) == {"E1": 0.12}
+        assert plugin.produced_output(db) is True
+
+        scores = plugin.read_producer_scores(db)
+        assert scores["E1"]["mu"] == pytest.approx(0.12)
+        assert scores["E1"]["r1_prime"] == pytest.approx(0.30)   # R3 ゲートが読む確実性軸
+        assert "r_macro" in scores["E1"]                          # macro_beta 未蓄積なら None
+
+    def test_r1_prime_optional(self, db):
+        """r1_prime 省略時は None（R3 足切りゲート素通り・graceful）。"""
+        from database import replace_macro_enet_scores
+        replace_macro_enet_scores(db, [{"edinet_code": "E1", "mu": 0.1}], "2026-07-01")
+        assert plugin.read_producer_scores(db)["E1"]["r1_prime"] is None
+
+    def test_replace_is_snapshot_overwrite(self, db):
+        from database import get_macro_enet_scores, replace_macro_enet_scores
+        replace_macro_enet_scores(db, [{"edinet_code": "E1", "mu": 0.1}], "2026-07-01")
+        replace_macro_enet_scores(db, [{"edinet_code": "E2", "mu": 0.2}], "2026-07-02")
+        assert get_macro_enet_scores(db) == {"E2": 0.2}
+
+    def test_dry_run_noop(self, db):
+        """探索中（tuning_dry_run）は中間候補で producer を上書きしない（Issue #264）。"""
+        import database
+        from database import get_macro_enet_scores, replace_macro_enet_scores
+        with database.tuning_dry_run():
+            n = replace_macro_enet_scores(db, [{"edinet_code": "E1", "mu": 0.1}], None)
+        assert n == 0
+        assert get_macro_enet_scores(db) == {}
+
+    def test_execute_persists_producer(self):
+        """execute() 末尾で μ̂ と r1_prime が macro_enet_scores へ渡る（sell_ranking の入力）。"""
+        with patch("database.replace_macro_enet_scores") as m:
+            res = _run(_params(use_macro=False))
+        assert m.call_count == 1
+        rows, snap = m.call_args[0][1], m.call_args[0][2]
+        assert len(rows) == res["n_companies"]
+        assert {"edinet_code", "mu", "r1_prime"} == set(rows[0])
+        assert all(r["mu"] is not None for r in rows)
+        assert snap is None or len(snap) == 10          # "YYYY-MM-DD"
+
+    def test_execute_skips_persist_in_objective_only(self):
+        """探索の早期 return 経路では永続化しない（全社スコアリング前に return するため）。"""
+        from database import tuning_objective_only
+        with patch("database.replace_macro_enet_scores") as m:
+            with tuning_objective_only():
+                _run(_params(use_macro=False))
+        assert m.call_count == 0

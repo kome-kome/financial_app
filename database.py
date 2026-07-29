@@ -521,9 +521,10 @@ def get_macro_beta(db, run_id: str | None = None):
 
 # ── ハイパーパラメータ探索中の producer 永続化抑止（Issue #264）─────────────────
 # 探索（plugins/tuning.py）は候補パラメータごとに各プラグインの execute() をフル実行する。
-# 対策なしでは M-2/M-3 の producer スコア（macro_gbdt_scores/macro_dlm_scores）が探索中の
+# 対策なしでは M-2/M-3/M-4/M-6 の producer スコア（macro_gbdt_scores/macro_dlm_scores/
+# macro_ensemble_scores/macro_enet_scores）が探索中の
 # 中間的な（最適でない）候補予測値で都度上書きされてしまう。tuning_dry_run() 中は
-# replace_macro_gbdt_scores/replace_macro_dlm_scores を no-op にし、最終選定後の本採用実行
+# replace_macro_*_scores を no-op にし、最終選定後の本採用実行
 # （tuning_dry_run() の外）でのみ実際に永続化する。
 _tuning_dry_run: contextvars.ContextVar = contextvars.ContextVar("_tuning_dry_run", default=False)
 
@@ -735,7 +736,78 @@ def get_macro_ensemble_scores(db) -> dict:
         return {}
 
 
-# ── 5e. ハイパーパラメータ自動探索の結果永続化（Issue #264）─────────────────────
+# ── 5f. M-6 per-stock ElasticNet 予測 μ̂（Issue #396 / ADR-0021）──────────────
+# M-6（macro_enet）プラグインが execute() 末尾で書き込み、sell_ranking（consumer）が読む。
+# macro_gbdt_scores と同型（r1_prime 付き＝R3 足切りゲート対応）。最新スナップショットのみ
+# 保持（replace 方式）。M-6 の予測は M-1/M-2 と同じ 52週先対数リターン単位のため、
+# mu_source として M-2 と交換可能（ADR-0021・#372 では DDL を避けて #396 へ切り出した）。
+
+class MacroEnetScore(Base):
+    """M-6 の per-stock 期待リターン μ̂（最新実行スナップショット）。
+
+    sell_ranking が mu_source="macro_enet" 選択時に read_producer_scores 経由で読む。
+    R_macro は共有 macro_beta から別途マージするため本テーブルには持たない。"""
+    __tablename__ = "macro_enet_scores"
+
+    edinet_code   = Column(String(10), primary_key=True)
+    mu            = Column(Float, nullable=False)   # ElasticNet 予測 52週先対数リターン（無次元）
+    r1_prime      = Column(Float)                    # コンフォーマル区間半幅＝確実性軸（ADR-0020・None 可）
+    snapshot_date = Column(String(10))              # "YYYY-MM-DD"（実行時スナップ基準日）
+    created_at    = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+
+def replace_macro_enet_scores(db, rows: list, snapshot_date: str | None = None) -> int:
+    """M-6 producer μ̂ を全置換する（最新スナップショットのみ保持）。
+
+    rows = [{"edinet_code": str, "mu": float, "r1_prime": float|None}, ...]。1 txn で
+    全削除→一括 insert。mu が None の行はスキップ（予測不能銘柄を保存しない）。r1_prime は
+    任意（無ければ None＝R3 ゲート素通り）。戻り値は保存件数。
+    `tuning_dry_run()` 内では no-op（0 を返す・Issue #264）。
+    """
+    if _tuning_dry_run.get():
+        return 0
+    db.query(MacroEnetScore).delete()
+    objs = [
+        MacroEnetScore(
+            edinet_code=r["edinet_code"], mu=float(r["mu"]),
+            r1_prime=(float(r["r1_prime"]) if r.get("r1_prime") is not None else None),
+            snapshot_date=snapshot_date,
+        )
+        for r in rows
+        if r.get("edinet_code") and r.get("mu") is not None
+    ]
+    if objs:
+        db.add_all(objs)
+    db.commit()
+    return len(objs)
+
+
+def get_macro_enet_scores(db) -> dict:
+    """M-6 producer μ̂ を {edinet_code: mu} で返す（未蓄積なら {}・graceful degrade）。
+
+    後方互換のため mu のみを返す（produced_output 判定用）。確実性軸 r1_prime も含めた
+    producer 全体は get_macro_enet_producer を使う（M-2 の get_macro_gbdt_scores と同型）。"""
+    try:
+        return {r.edinet_code: r.mu for r in db.query(MacroEnetScore).all()}
+    except Exception:
+        return {}
+
+
+def get_macro_enet_producer(db) -> dict:
+    """M-6 producer を {edinet_code: {"mu": float, "r1_prime": float|None}} で返す。
+
+    sell_ranking の R3 足切りゲートが r1_prime（コンフォーマル区間半幅）を読むための拡張版。
+    未蓄積・列未migration なら {}（graceful degrade）。"""
+    try:
+        return {
+            r.edinet_code: {"mu": r.mu, "r1_prime": r.r1_prime}
+            for r in db.query(MacroEnetScore).all()
+        }
+    except Exception:
+        return {}
+
+
+# ── 5g. ハイパーパラメータ自動探索の結果永続化（Issue #264）─────────────────────
 # hyperparameter_search.py（ローカル専用CLI）が walk-forward OOF rank-IC 等を目的関数として
 # 探索した best params を保存する。plugin_name 単位で最新1件のみ保持（履歴不要）。
 
