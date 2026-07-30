@@ -41,7 +41,7 @@ _Avoid_: ステータス辞書, status dict（実装詳細・旧称）
 _Avoid_: 遅延補正, 時系列ズレ（収集層での明示的補正という意味が落ちる）
 
 **マクロ収集チャネル (macro collection channel)**:
-`macro_data` テーブルへの収集経路。Yahoo Finance（市場系: 為替・金利・指数・コモディティ）/ FRED API（信用スプレッド・損益分岐点・日本実質GDP等）/ e-Stat API（CPI 等）/ 日銀 REST API（M2・短観DI等）の4チャネル。認証 key が必要なチャネル（FRED・e-Stat）は key 未設定時にスキップし、Yahoo・日銀は常時収集。
+`macro_data` テーブルへの収集経路。Yahoo Finance（市場系: 為替・金利・指数・コモディティ）/ FRED API（信用スプレッド・損益分岐点・日本実質GDP・政策不確実性 EPU 等）/ e-Stat API（CPI 等）/ 日銀 REST API（M2・短観DI等）の4チャネル。認証 key が必要なチャネル（FRED・e-Stat）は key 未設定時にスキップし、Yahoo・日銀は常時収集。
 _Avoid_: データソース（実装の fetch 関数名と混同するため）
 
 **マクロ系列バリアント / デフォルト公開 (macro series variant / default exposure)**:

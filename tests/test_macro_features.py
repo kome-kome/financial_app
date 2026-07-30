@@ -71,6 +71,9 @@ def test_macro_feature_map_keys():
     assert _MACRO_FEATURE_MAP["macro_platinum_yoy"] == ("PLATINUM", "yoy")
     # #381 非ICE代替の信用スプレッド（Baa−10Y・zscore）
     assert _MACRO_FEATURE_MAP["macro_baa_spread_zscore"] == ("BAA_SPREAD", "zscore")
+    # #404 政策不確実性チャネル（EPU は常に正の水準指数 → 指数系と同じ zscore 規約）
+    assert _MACRO_FEATURE_MAP["macro_us_epu_zscore"]        == ("US_EPU",        "zscore")
+    assert _MACRO_FEATURE_MAP["macro_us_equity_epu_zscore"] == ("US_EQUITY_EPU", "zscore")
     for fname, (scode, ttype) in _MACRO_FEATURE_MAP.items():
         assert ttype in ("yoy", "zscore"), f"{fname} の transform が不正"
 
@@ -89,8 +92,26 @@ def test_default_macro_features_excludes_ice_truncated_series():
     assert "macro_ig_oas_zscore" not in DEFAULT_MACRO_FEATURES
     # 非ICE代替は既定に含める
     assert "macro_baa_spread_zscore" in DEFAULT_MACRO_FEATURES
-    # 除外は HY/IG の2系列のみ（他は全選択肢が既定）
-    assert set(DEFAULT_MACRO_FEATURES) == option_values - {"macro_hy_oas_zscore", "macro_ig_oas_zscore"}
+    # 既定は「全選択肢 − ICE truncated − 昇格ゲート未通過（#404）」で構成される
+    from plugins.macro_snapshots import _PENDING_EVAL_FEATURES, _STRICT_TRUNCATED_FEATURES
+    assert _STRICT_TRUNCATED_FEATURES == {"macro_hy_oas_zscore", "macro_ig_oas_zscore"}
+    assert set(DEFAULT_MACRO_FEATURES) == (
+        option_values - _STRICT_TRUNCATED_FEATURES - _PENDING_EVAL_FEATURES
+    )
+    # 除外セットはいずれも選択肢の部分集合（typo で「効かない除外」を作らない）
+    assert (_STRICT_TRUNCATED_FEATURES | _PENDING_EVAL_FEATURES) <= option_values
+
+
+def test_epu_features_are_selectable_but_pending_promotion():
+    """#404: EPU 2系列は選択肢として即日使えるが、rank-IC / short_side_spread の実測で
+    昇格ゲート（#372 基準）を通過するまで既定には入れない。ADR-0016 と同じ順序制約
+    （本番 macro_data へ蓄積する前に既定へ入れると strict の学習母集団が消える）。"""
+    from plugins.macro_snapshots import DEFAULT_MACRO_FEATURES, _PENDING_EVAL_FEATURES
+    option_values = {o["value"] for o in MACRO_FEATURE_OPTIONS}
+    for f in ("macro_us_epu_zscore", "macro_us_equity_epu_zscore"):
+        assert f in option_values
+        assert f in _PENDING_EVAL_FEATURES
+        assert f not in DEFAULT_MACRO_FEATURES
 
 
 def test_macro_map_options_consistency():

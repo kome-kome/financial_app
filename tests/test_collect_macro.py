@@ -213,6 +213,20 @@ def test_japan_macro_fred_series_registered():
     assert "lag_days" not in by_code["BAA_SPREAD"]  # 日次系列なのでラグ補正不要
 
 
+def test_epu_fred_series_registered():
+    """#404: Baker-Bloom-Davis EPU 2系列（日次・1985〜・現役）。日次ゆえ lag_days / freq を
+    持たない＝低頻度系列の変換窓（#379/#382）にも strict 律速（#381）にも触れない。
+    日本版 JPNEPUINDXM は FRED 側で 2016-04 凍結のため登録しない（#253 の JP_IP と同型）。"""
+    by_code = {s["code"]: s for s in FRED_SERIES}
+    assert by_code["US_EPU"]["fred_id"] == "USEPUINDXD"
+    assert by_code["US_EQUITY_EPU"]["fred_id"] == "WLEMUINDXD"
+    for code in ("US_EPU", "US_EQUITY_EPU"):
+        assert by_code[code]["category"] == "uncertainty"
+        assert "lag_days" not in by_code[code]
+        assert "freq" not in by_code[code]
+    assert "JP_EPU" not in by_code
+
+
 # ── 5. 日銀 API フェッチャー（ADR-0006 §着手点1）───────────────────────────
 from collector import fetch_boj_series, BOJ_SERIES, ESTAT_SERIES, fetch_estat_series
 
