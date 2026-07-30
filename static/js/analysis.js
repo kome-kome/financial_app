@@ -463,7 +463,7 @@ async function runSellRanking() {
     sell_threshold:   parseFloat(document.getElementById('sell-th')?.value ?? 0.8),
     reduce_threshold: parseFloat(document.getElementById('reduce-th')?.value ?? 0.3),
     timing_adjust:    !!document.getElementById('sell-timing-adjust')?.checked,
-    mu_source:        document.getElementById('sell-mu-source')?.value || 'macro_gbdt',
+    mu_source:        document.getElementById('sell-mu-source')?.value || 'macro_enet',
   };
 
   const btn = document.getElementById('btn-sell-ranking');
@@ -511,7 +511,7 @@ function renderSellRanking(d) {
       macro_ensemble:    ['M-4（兄弟μ̂スタッキング）', 'M-4 を分析タブでローカル実行してください'],
       macro_enet:        ['M-6（正則化線形 ElasticNet）', 'M-6 を分析タブでローカル実行してください'],
     };
-    const [_lbl, _act] = _MU_LABELS[d.mu_source] || _MU_LABELS.macro_risk_return;
+    const [_lbl, _act] = _MU_LABELS[d.mu_source] || _MU_LABELS.macro_enet;   // 既定 M-6（#402）
     notes.push(`<span style="color:var(--text-muted)">※ ${_lbl} 未実行のため μ・マクロリスク成分は除外されています（${_act}）</span>`);
   }
   document.getElementById('sell-notes').innerHTML = notes.join('<br>');
@@ -952,6 +952,8 @@ function _mcModelCard(m) {
   const hasOof = qr.length > 0;
   const be = oof.breakeven_cost_bps;                  // ブレークイーブンbps（#368）
   const to = oof.effective_turnover;                  // 実効ターンオーバー（#368）
+  const ss = oof.short_side_spread;                   // 売り側spread（#402）
+  const ssHit = oof.short_side_hit_rate;              // 売り側 勝率（#402）
   // 単調性（Issue #369）: 分位平均が μ̂ 昇順で単調増か。中間分位が U 字/ノイズだと
   // spread が開いても spearman_mean/隣接正順率が下がる（過学習・不安定シグナルの検知）。
   const monoSp = mono.spearman_mean;
@@ -968,6 +970,10 @@ function _mcModelCard(m) {
       <div style="padding:6px 8px;background:var(--bg-panel,var(--bg-sunken));border-radius:6px">
         <div style="font-size:10px;color:var(--text-muted)">ロングショート spread（top−bottom）</div>
         <div style="font-size:15px;font-weight:700;color:${(oof.long_short_spread||0)>0?cssVar('--val-up-text'):cssVar('--val-down-text')}">${oof.long_short_spread!=null?(oof.long_short_spread*100).toFixed(2)+'%':'-'}</div>
+      </div>
+      <div style="padding:6px 8px;background:var(--bg-panel,var(--bg-sunken));border-radius:6px" title="売り側spread＝期内全体平均−最低μ̂分位平均。売り候補ランキング(sell_ranking)はμ̂の下位を売るため、top側の強さに引っ張られるロングショートspreadでは売り判定の質を測れない(Issue #402)。大きいほど売り候補が市場平均を下回った＝売りシグナルとして有効。勝率はそれが成立した期の割合。">
+        <div style="font-size:10px;color:var(--text-muted)">売り側 spread（全体平均−最低分位）</div>
+        <div style="font-size:15px;font-weight:700;color:${(ss||0)>0?cssVar('--val-up-text'):cssVar('--val-down-text')}">${ss!=null?(ss*100).toFixed(2)+'%':'-'}<span style="font-size:11px;color:var(--text-muted)"> ／ 勝率 ${ssHit!=null?(ssHit*100).toFixed(0)+'%':'-'}</span></div>
       </div>
       <div style="padding:6px 8px;background:var(--bg-panel,var(--bg-sunken));border-radius:6px" title="実効ターンオーバー＝隣接期の上位/下位分位メンバー(銘柄)の入替割合(0=据置,1=総入替)。ブレークイーブンbps＝片道コスト何bpでロングショートspreadが消えるか(gross·50/turnover)。頻度依存が比で相殺され、低回転な安定モデルほど高い＝コスト耐性が強い(Issue #368・Grinold & Kahn)。">
         <div style="font-size:10px;color:var(--text-muted)">ブレークイーブンbps ／ 実効ターンオーバー</div>

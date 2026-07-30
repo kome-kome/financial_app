@@ -130,8 +130,12 @@ _Avoid_: SHAP係数（係数＝符号付きと誤読される）, 重要度（OL
 M-2 の[[メタ検証]]の実体で、**既存「バックテスト」(`/api/backtest`・preset/as-of のポートフォリオ模擬)とは別語**。M-2 の walk-forward CV が出す**無リーク OOF 予測**だけを使い、**再学習・追加価格取得なしで**「予測 μ̂ が将来リターンを順序付けるか」を分位リターン・rank-IC（Spearman）・ロングショート spread・hit-rate で評価する。μ̂ 水準の時系列ドリフトに頑健な**期内横断（per-period cross-sectional）分位**＋fold 毎 rank-IC を採る。`execute()` の `oof_backtest` キーで返す非永続（transient）出力。
 _Avoid_: バックテスト（preset/as-of の別機能と二義化するため）, モデル内蔵WF-CV（CV は R²/RMSE・OOF は予測の順序付け力で目的が違う）
 
+**売り側spread (short_side_spread)**:
+[[アウトオブサンプル検証]]の指標のひとつで、**期内全体平均 − 最低 μ̂ 分位平均**の期間平均（Issue #402）。[[売りスコア]]は μ̂ の**下位**を売るため、top 分位の強さに引っ張られるロングショート spread では売り判定の質を測れない（買い側が強いだけのモデルでも spread は開く）。ロングオンリーの保有者にとっての売りの価値＝「市場平均を下回る銘柄をどれだけ回避できたか」を直接測る（大きいほど有効）。per-fold 系列 `short_side_spread_by_period` を `model_stats.paired_ic_significance` へ渡して[[μ出所トグル]]候補間の差を検定する。**買い側 rank-IC の順位とは一致しない**（実測で M-2 は rank-IC で M-1 に勝つが売り側 spread では負ける・ADR-0022）。
+_Avoid_: ショートリターン（実際に空売りした収益ではなく「回避価値」のため）, bottom分位リターン（水準そのものは市場全体の地合いを含み期・モデル横断で比較できないため）
+
 **μ出所トグル (mu_source) / producer μ̂**:
-[[売りスコア]]の μ（期待リターン）・−R_macro 観点に使う推奨モデルの選択（`macro_risk_return`＝M-1／`macro_gbdt`＝M-2・**既定**／`macro_dlm`＝M-3／`macro_ensemble`＝M-4／`macro_enet`＝M-6）。各 producer μ̂ は `execute()` が専用テーブル（`macro_gbdt_scores` / `macro_dlm_scores` / `macro_ensemble_scores` / `macro_enet_scores`）へ**全置換（スナップショット置換）で直書き**し（`sector_ols`→`regression_results` と同型）、売り推奨は M-1 と同一契約 `{mu, r_macro, r1_prime}` で read する。−R_macro（[[系統的マクロリスク曝露]]）は共有 `macro_beta` 由来でモデル非依存ゆえ `mu_source` に依らず不変。**R3 足切りゲートが効くのは r1_prime を持つ M-1（予測SE）・M-2・M-6（コンフォーマル区間半幅）のみ**（M-3/M-4 は不在＝無効）。選択モデル未実行なら graceful-degrade（μ 成分を除外）。
+[[売りスコア]]の μ（期待リターン）・−R_macro 観点に使う推奨モデルの選択（`macro_risk_return`＝M-1／`macro_gbdt`＝M-2／`macro_dlm`＝M-3／`macro_ensemble`＝M-4／`macro_enet`＝M-6・**既定**）。既定は #402（ADR-0022）で M-2 → M-6 へ切替（[[売り側spread]]が +0.0145・p=0.001 で有意に優位）。各 producer μ̂ は `execute()` が専用テーブル（`macro_gbdt_scores` / `macro_dlm_scores` / `macro_ensemble_scores` / `macro_enet_scores`）へ**全置換（スナップショット置換）で直書き**し（`sector_ols`→`regression_results` と同型）、売り推奨は M-1 と同一契約 `{mu, r_macro, r1_prime}` で read する。−R_macro（[[系統的マクロリスク曝露]]）は共有 `macro_beta` 由来でモデル非依存ゆえ `mu_source` に依らず不変。**R3 足切りゲートが効くのは r1_prime を持つ M-1（予測SE）・M-2・M-6（コンフォーマル区間半幅）のみ**（M-3/M-4 は不在＝無効）。選択モデル未実行なら graceful-degrade（μ 成分を除外）。
 _Avoid_: モデル選択（汎用すぎる）, M-2売り推奨（μ の出所のみ切替で売りロジック自体は共通のため）
 
 ## マクロ×時変β状態空間（M-3）

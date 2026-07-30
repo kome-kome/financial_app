@@ -1138,6 +1138,9 @@ def oof_backtest(residuals_by_ym: dict, n_quantiles: int = 5, cost_bps: float = 
       - rank-IC = Spearman(yhat, y_true) を fold 毎→ mean/std/n。
       - long_short_spread = top分位平均 − bottom分位平均（期間平均）。
       - hit_rate = top分位 > bottom分位 だった期の割合。
+      - short_side_spread = 期内全体平均 − bottom分位平均（期間平均・Issue #402）。売り判定
+        （sell_ranking は μ̂ 下位を売る）専用の識別力。正なら売り候補が市場平均を下回った。
+        short_side_hit_rate はそれが成立した期の割合、short_side_spread_by_period は per-fold 系列。
       - 期内サンプルが n_quantiles*2 未満の期は分位計算から自動除外（IC には使用）。
     quantile_returns[0]=最低 μ̂ バケット, [-1]=最高 μ̂ バケットの実現リターン。
 
@@ -1210,6 +1213,13 @@ def oof_backtest(residuals_by_ym: dict, n_quantiles: int = 5, cost_bps: float = 
     # 分位の stock_id 集合を保持し、後段で隣接期の Jaccard 非重複を平均する。yms は昇順の
     # ため append 順＝時系列順。
     membership: list[tuple[set, set]] = []
+    # 売り側（ショート側）識別力（Issue #402）: sell_ranking（ADR-0004 の下流）は μ̂ **下位**を
+    # 売る。long_short_spread は top 分位の強さに引っ張られるため、μ̂ 出所を売り判定基準で
+    # 選ぶ材料にならない（top が強いだけのモデルでも spread は大きくなる）。ロングオンリーの
+    # 保有者にとっての売りの価値は「市場平均 − 売り候補平均」なので、期内全体平均を
+    # ベンチマークに bottom 分位の劣後幅を測る。正なら売り候補が市場平均を下回った＝有効。
+    ss_spread_by_period: dict[str, float] = {}
+    ss_hits = 0
     for ym in yms:
         pairs = residuals_by_ym[ym]
         if len(pairs) < n_quantiles * 2:
@@ -1240,6 +1250,13 @@ def oof_backtest(residuals_by_ym: dict, n_quantiles: int = 5, cost_bps: float = 
         ls_spreads.append(ls)
         if ls > 0:
             hits += 1
+        # 売り側 spread（Issue #402）: 期内全体平均 − bottom 分位平均。分位平均は
+        # 等分セグメントの単純平均だが端数（m % n_quantiles）で分位サイズが不均一に
+        # なりうるため、ベンチマークは q_means の平均ではなく全サンプル平均で取る。
+        ss = sum(p[1] for p in pairs) / m - q_means[0]
+        ss_spread_by_period[ym] = ss
+        if ss > 0:
+            ss_hits += 1
         sp = _spearman(q_idx, q_means)   # 分位idx と 分位平均の順位相関（+1=完全単調）
         if sp is not None:
             mono_spearmans.append(sp)
@@ -1251,6 +1268,10 @@ def oof_backtest(residuals_by_ym: dict, n_quantiles: int = 5, cost_bps: float = 
     quantile_returns = [round(s / q_periods, 6) for s in q_sums] if q_periods else []
     long_short_spread = round(statistics.mean(ls_spreads), 6) if ls_spreads else None
     hit_rate = round(hits / q_periods, 4) if q_periods else None
+    short_side_spread = (round(statistics.mean(ss_spread_by_period.values()), 6)
+                         if ss_spread_by_period else None)
+    short_side_hit_rate = (round(ss_hits / len(ss_spread_by_period), 4)
+                           if ss_spread_by_period else None)
 
     round_trip_cost_pct = cost_bps / 100.0 * 2
     long_short_spread_net = (
@@ -1331,6 +1352,12 @@ def oof_backtest(residuals_by_ym: dict, n_quantiles: int = 5, cost_bps: float = 
         "monotonicity":          monotonicity,
         "long_short_spread":     long_short_spread,
         "hit_rate":              hit_rate,
+        # 売り側識別力（Issue #402・sell_ranking の μ 出所選定用）。期内全体平均 − bottom
+        # 分位平均の期間平均／勝率／per-fold 系列（model_stats.paired_ic_significance で
+        # モデル間の共通 test 期ペアリング検定に渡せる形）。
+        "short_side_spread":           short_side_spread,
+        "short_side_hit_rate":         short_side_hit_rate,
+        "short_side_spread_by_period": {ym: round(v, 6) for ym, v in ss_spread_by_period.items()},
         "cost_bps":              cost_bps,
         "long_short_spread_net": long_short_spread_net,
         # ターンオーバー調整（Issue #368・meta_by_ym 有時のみ非 None）。
