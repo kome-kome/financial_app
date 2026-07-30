@@ -102,16 +102,16 @@ def test_default_macro_features_excludes_ice_truncated_series():
     assert (_STRICT_TRUNCATED_FEATURES | _PENDING_EVAL_FEATURES) <= option_values
 
 
-def test_epu_features_are_selectable_but_pending_promotion():
-    """#404: EPU 2系列は選択肢として即日使えるが、rank-IC / short_side_spread の実測で
-    昇格ゲート（#372 基準）を通過するまで既定には入れない。ADR-0016 と同じ順序制約
-    （本番 macro_data へ蓄積する前に既定へ入れると strict の学習母集団が消える）。"""
+def test_epu_features_promoted_to_default():
+    """#404 / ADR-0023: EPU 2系列は昇格ゲート（M-6 の売り側 spread +0.0032・p=0.001・
+    Bonferroni α=0.0125 通過）をクリアしたため既定に含める。保留枠
+    `_PENDING_EVAL_FEATURES` は空＝現在保留中の系列は無い。"""
     from plugins.macro_snapshots import DEFAULT_MACRO_FEATURES, _PENDING_EVAL_FEATURES
     option_values = {o["value"] for o in MACRO_FEATURE_OPTIONS}
     for f in ("macro_us_epu_zscore", "macro_us_equity_epu_zscore"):
         assert f in option_values
-        assert f in _PENDING_EVAL_FEATURES
-        assert f not in DEFAULT_MACRO_FEATURES
+        assert f in DEFAULT_MACRO_FEATURES
+    assert _PENDING_EVAL_FEATURES == set()
 
 
 def test_macro_map_options_consistency():

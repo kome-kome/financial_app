@@ -235,11 +235,15 @@ MACRO_FEATURE_OPTIONS = [
 # 経済的情報は非ICE代替 macro_baa_spread_zscore（Baa−10Y・日次・truncate されず 2016 以前まで
 # 遡れる）が既定で担う。次の律速はコモディティ8系列（2020-07 開始）へ緩む。
 _STRICT_TRUNCATED_FEATURES = {"macro_hy_oas_zscore", "macro_ig_oas_zscore"}
-# 追加直後で昇格ゲート（#372 基準＝有意差＋多重比較補正）未通過の特徴量。ADR-0016 の順序
-# 制約と同じく、本番 macro_data へ蓄積し rank-IC / short_side_spread を実測して有意と判定
-# されるまでは既定へ入れない（strict は「選択中の全マクロが同時に非None」の行しか使わない
+# 追加直後で昇格ゲート（#372 基準＝有意差＋多重比較補正）未通過の特徴量を入れる枠。ADR-0016
+# の順序制約と同じく、本番 macro_data へ蓄積し rank-IC / short_side_spread を実測して有意と
+# 判定されるまでは既定へ入れない（strict は「選択中の全マクロが同時に非None」の行しか使わない
 # ため、未蓄積の系列を既定に混ぜると学習母集団が消える）。選択肢としては即日使える。
-_PENDING_EVAL_FEATURES: set[str] = {"macro_us_epu_zscore", "macro_us_equity_epu_zscore"}
+#
+# 現在は空＝保留中の系列なし。#404 の EPU 2系列は `scripts/epu_feature_bakeoff.py` の実測
+# （3,979社・43ヶ月・57,955サンプル・9 fold）で M-6 の売り側 spread +0.0652→+0.0684
+# （diff +0.0032・p=0.001・Bonferroni α=0.0125 通過）を示し既定へ昇格した（ADR-0023）。
+_PENDING_EVAL_FEATURES: set[str] = set()
 DEFAULT_MACRO_FEATURES = [o["value"] for o in MACRO_FEATURE_OPTIONS
                           if o["value"] not in _STRICT_TRUNCATED_FEATURES
                           and o["value"] not in _PENDING_EVAL_FEATURES]
