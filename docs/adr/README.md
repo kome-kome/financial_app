@@ -1,0 +1,36 @@
+# ADR 索引（Architecture Decision Record）
+
+このディレクトリは設計上の意思決定記録（ADR）の正本。**新しい ADR を追加したら、この索引に1行足す**（`docs/ARCHITECTURE.md` 側は本ファイルへのポインタのみを持つ＝一覧の二重管理をしない・Issue #407）。
+
+| # | 決定 | 関連 Issue | 状態 |
+|---|---|---|---|
+| [0001](0001-valuation-consolidation-and-backtest-generalization.md) | バリュエーション集約・OLSエンジンを `sector_ols` 1本化・バックテスト一般化（旧 `total_return` → `gap_analysis` 吸収） | — | accepted（2026-06-21） |
+| [0002](0002-m1-per-stock-hierarchical-macro-beta.md) | M-1 を per-stock 階層マクロβ（PyMC 二層フルベイズ）へ再設計 | #260 | accepted（2026-06-21）・実装完了 |
+| [0003](0003-m2-macro-financial-gbdt.md) | M-2（マクロ×財務 GBDT）を M-1 の非線形兄弟として同期 in-execute 実装 | #234 | accepted（2026-06-25） |
+| [0004](0004-m2-downstream-sell-and-oof-backtest.md) | M-2 を売り推奨（`mu_source` トグル）とアウトオブサンプル検証（OOF）へ連動 | #234 系列 | accepted（2026-06-26） |
+| [0005](0005-remove-price-predictor-consolidate-return-prediction.md) | `price_predictor` を削除し、③リターン予測を比較ファミリー（M-1〜M-3）へ集約 | — | accepted（2026-06-27） |
+| [0006](0006-japan-macro-estat-boj-connectors.md) | 日本マクロ統計（CPI/M2/短観DI）の e-Stat API・日銀 REST コネクタ設計 | #251 | accepted（2026-06-27） |
+| [0007](0007-hyperparameter-tuning-shared-engine.md) | M-1/M-2/M-3 共有ハイパーパラメータ探索エンジン（目的関数＝walk-forward OOF rank-IC） | #264-#267 | accepted（2026-07-05）・**0010 で superseded**（実行手段のみ） |
+| [0008](0008-recommend-factor-premia-fama-macbeth.md) | recommend の Fama-MacBeth ファクタープレミアム推定（統計的最適化プリセット） | #271 | accepted（2026-07-05） |
+| [0009](0009-oecd-cli-leading-indicator.md) | OECD Composite Leading Indicator（`JP_CLI`）を先行指標チャネルへ追加 | #283 | accepted（2026-07-09） |
+| [0010](0010-hyperparameter-tuning-github-actions-automation.md) | ハイパーパラメータ探索を GUI 手動トリガーから GitHub Actions 月次自動実行へ一本化 | #291・#292 | accepted（2026-07-10） |
+| [0011](0011-imf-weo-forward-looking-forecast.md) | IMF WEO 見通し（GDP成長率・インフレ率）を forward-looking チャネルへ追加 | #284 | accepted（2026-07-11） |
+| [0012](0012-m3-dlm-weekly-only-factors.md) | M-3（時変マクロβ DLM）は週次高頻度ファクター専用（月次以下のマクロ系列は組み込まない） | #310 | accepted（2026-07-12） |
+| [0013](0013-commodity-channel-expansion.md) | コモディティ価格チャネルを日次8系列へ拡張（Yahoo Finance v8 chart API 流用） | #358 | accepted（2026-07-20） |
+| [0014](0014-purge-embargo-walk-forward.md) | walk-forward CV に purge/embargo を導入し 52週先ラベルの前方リークを遮断 | #363 | accepted（2026-07-22） |
+| [0015](0015-m4-ensemble-stacking.md) | M-4 兄弟μ̂スタッキング・アンサンブル（基底 OOF μ̂ の二段ウォークフォワード統合） | #367 | accepted（2026-07-23） |
+| [0016](0016-ice-bofa-truncation-baa-credit-proxy.md) | FRED ICE BofA 系列の履歴制限（ローリング3年）に対し非ICE代替 `BAA_SPREAD` へ既定差替 | #381 | accepted（2026-07-24） |
+| [0017](0017-m5-learning-to-rank.md) | M-5 マクロ×財務 ランク学習（`XGBRanker`・M-2 の rank-IC 整合版・producer なし） | #362 | accepted（2026-07-24） |
+| [0018](0018-oof-turnover-and-industry-neutral-ic.md) | OOF バックテストの現実性強化（業種中立 rank-IC＋ネットターンオーバーコスト） | #368 | accepted（2026-07-25） |
+| [0019](0019-m2-monotone-constraints-economic-sign-priors.md) | M-2 に `monotone_constraints` で経済符号の事前知識を注入（既定 OFF トグル） | #366 | accepted（2026-07-25） |
+| [0020](0020-m2-conformal-prediction-intervals-r3-gate.md) | M-2 に分割コンフォーマル予測区間を付与し `r1_prime`／R3 足切りゲートを再有効化 | #365 | accepted（2026-07-25） |
+| [0021](0021-sibling-model-candidate-menu.md) | 兄弟モデル候補メニュー（`fit_predict` 注入の探索枠）→ ElasticNet を **M-6** へ昇格 | #372 | accepted（2026-07-26） |
+| [0022](0022-short-side-oof-metric-and-default-mu-source.md) | 売り側 OOF 指標（`short_side_spread` 等）の新設と既定 `mu_source` の M-6 化 | #402 | accepted（2026-07-30） |
+| [0023](0023-policy-uncertainty-epu-macro-channel.md) | 政策不確実性（EPU）2系列を FRED から収集しマクロチャネルへ追加・既定昇格 | #404 | accepted（2026-07-31） |
+
+## 運用
+
+- ファイル名は `NNNN-kebab-case-title.md`（連番は追記のみ・欠番/再利用なし）。
+- 各 ADR は `# タイトル` / `## Status` / `## Context` / `## Decision` / `## Consequences`（＋必要なら `## Considered Options`）で構成する。
+- 決定を覆す場合は既存 ADR を書き換えず、新 ADR を起こして旧 ADR の Status に superseded を追記する（例: 0007 → 0010）。
+- 分析モデルの ADR は `docs/MODELS.md` の該当セクション・`templates/models.html` とセットで更新する。
