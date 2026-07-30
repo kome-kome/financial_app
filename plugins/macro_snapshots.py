@@ -100,6 +100,12 @@ _MACRO_MAP = {
     "macro_breakeven10y_zscore": ("BREAKEVEN10Y", "zscore"),
     "macro_jp10y_fred_zscore":   ("JP10Y_FRED",   "zscore"),
     "macro_t10y2y_zscore":       ("T10Y2Y",       "zscore"),
+    # ── 政策不確実性チャネル（#404）──────────────────────────────────────────
+    # Baker-Bloom-Davis EPU（新聞記事ベースの指数・常に正の水準系）。VIX が市場の織り込む
+    # 変動を測るのに対し EPU は政策・制度側の不確実性を測る別チャネル。水準そのもの（平時比
+    # で高いか低いか）がレジーム情報なので、既存の指数系（VIX/CLI/短観DI）と同じ zscore 規約。
+    "macro_us_epu_zscore":        ("US_EPU",        "zscore"),
+    "macro_us_equity_epu_zscore": ("US_EQUITY_EPU", "zscore"),
     # ── 日本 実体経済指標（#250・米国偏重の是正）─────────────────────────────────
     # 水準系（GDP・生産指数）は常に正なので yoy。失業率は「率」なので既存金利と同じ
     # zscore 規約。貿易収支は符号がプラス/マイナス両方を取り yoy（除算）が発散するため
@@ -182,6 +188,9 @@ MACRO_FEATURE_OPTIONS = [
     {"value": "macro_breakeven10y_zscore", "label": "米10年BEI（インフレ期待）Zスコア"},
     {"value": "macro_jp10y_fred_zscore",   "label": "日10年金利（FRED）Zスコア"},
     {"value": "macro_t10y2y_zscore",       "label": "米10y−2yスプレッド Zスコア"},
+    # 政策不確実性チャネル（#404）
+    {"value": "macro_us_epu_zscore",        "label": "米 経済政策不確実性指数（EPU）Zスコア"},
+    {"value": "macro_us_equity_epu_zscore", "label": "米 株式市場関連 経済不確実性指数 Zスコア"},
     {"value": "macro_jp_real_gdp_yoy",     "label": "日本 実質GDP 前年比（YoY）"},
     {"value": "macro_jp_gdp_consumption_yoy", "label": "日本 GDP 民間最終消費支出 前年比（YoY）"},
     {"value": "macro_jp_gdp_residential_yoy", "label": "日本 GDP 民間住宅投資 前年比（YoY）"},
@@ -226,8 +235,18 @@ MACRO_FEATURE_OPTIONS = [
 # 経済的情報は非ICE代替 macro_baa_spread_zscore（Baa−10Y・日次・truncate されず 2016 以前まで
 # 遡れる）が既定で担う。次の律速はコモディティ8系列（2020-07 開始）へ緩む。
 _STRICT_TRUNCATED_FEATURES = {"macro_hy_oas_zscore", "macro_ig_oas_zscore"}
+# 追加直後で昇格ゲート（#372 基準＝有意差＋多重比較補正）未通過の特徴量を入れる枠。ADR-0016
+# の順序制約と同じく、本番 macro_data へ蓄積し rank-IC / short_side_spread を実測して有意と
+# 判定されるまでは既定へ入れない（strict は「選択中の全マクロが同時に非None」の行しか使わない
+# ため、未蓄積の系列を既定に混ぜると学習母集団が消える）。選択肢としては即日使える。
+#
+# 現在は空＝保留中の系列なし。#404 の EPU 2系列は `scripts/epu_feature_bakeoff.py` の実測
+# （3,979社・43ヶ月・57,955サンプル・9 fold）で M-6 の売り側 spread +0.0652→+0.0684
+# （diff +0.0032・p=0.001・Bonferroni α=0.0125 通過）を示し既定へ昇格した（ADR-0023）。
+_PENDING_EVAL_FEATURES: set[str] = set()
 DEFAULT_MACRO_FEATURES = [o["value"] for o in MACRO_FEATURE_OPTIONS
-                          if o["value"] not in _STRICT_TRUNCATED_FEATURES]
+                          if o["value"] not in _STRICT_TRUNCATED_FEATURES
+                          and o["value"] not in _PENDING_EVAL_FEATURES]
 
 
 # ── 価格行動系特徴量定義（Issue #317・#364 で M-2/M-3 共有化）────────────────────

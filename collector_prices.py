@@ -1144,6 +1144,13 @@ FRED_SERIES: list[dict] = [
     {"code": "BREAKEVEN10Y", "name": "米10年BEI（インフレ期待）", "category": "inflation", "fred_id": "T10YIE"},
     {"code": "JP10Y_FRED",   "name": "日10年金利（FRED）",        "category": "rate",      "fred_id": "IRLTLT01JPM156N"},
     {"code": "T10Y2Y",       "name": "米10y−2yスプレッド",       "category": "rate",      "fred_id": "T10Y2Y"},
+    # ── 政策不確実性（#404）─────────────────────────────────────────────────
+    # Baker-Bloom-Davis の Economic Policy Uncertainty Index（新聞記事ベース）。日次版のため
+    # lag_days / freq は不要（#379/#382 の低頻度変換窓・#381 の strict 律速をどちらも回避）。
+    # 1985-01-01 開始・現役更新（2026-07-30 に fredgraph.csv で最終観測日を実測確認）。
+    # 日本版 JPNEPUINDXM は FRED 側で 2016-04 凍結のため採らない（#253 の JP_IP と同型）。
+    {"code": "US_EPU",        "name": "米 経済政策不確実性指数（日次）", "category": "uncertainty", "fred_id": "USEPUINDXD"},
+    {"code": "US_EQUITY_EPU", "name": "米 株式市場関連 経済不確実性指数", "category": "uncertainty", "fred_id": "WLEMUINDXD"},
     # ── 日本 実体経済指標（#250・日本マクロのリバランス）─────────────────────────
     # FRED は観測値を「期の参照開始日」の日付で返す。実体経済指標は公表ラグが大きい
     # （GDP=期末から約1.5〜2か月、月次指標=約1か月）ため、lag_days 分だけ trade_date を

@@ -335,8 +335,8 @@ ADR-0002 §4 が求めるクレジット・インフレ・JP金利・期間構�
 | 項目 | 制約値 | 設計への影響 |
 |---|---|---|
 | APIキー | **要無料アカウント登録** | [fred.stlouisfed.org](https://fred.stlouisfed.org/docs/api/api_key.html) でキー発行 → `FRED_API_KEY` 環境変数に設定 |
-| レート制限 | **120 req/分** | `FRED_RATE_SLEEP = 0.6` 秒。5系列なら総所要 < 5秒 |
-| 頻度混在 | 日次（HY/IG/BAA/BEI/T10Y2Y）+ 月次（JP10Y_FRED） | 月次系列は月初日1レコードのみ保存。M-1 の zscore 計算で年次集計するため支障なし |
+| レート制限 | **120 req/分** | `FRED_RATE_SLEEP = 0.6` 秒。11系列なら総所要 < 10秒 |
+| 頻度混在 | 日次（HY/IG/BAA/BEI/T10Y2Y/EPU 2種）+ 月次（JP10Y_FRED） | 月次系列は月初日1レコードのみ保存。M-1 の zscore 計算で年次集計するため支障なし |
 | 欠損値 | `"."` で返却 | `fetch_fred_series()` でスキップ |
 | 認証未設定時 | `FRED_API_KEY=""` | `collect_macro_data()` が「FRED_API_KEY 未設定のためスキップ」でパスする（安全弁） |
 
@@ -350,6 +350,8 @@ ADR-0002 §4 が求めるクレジット・インフレ・JP金利・期間構�
 | `BREAKEVEN10Y` | `T10YIE` | インフレ期待 | 日次 |
 | `JP10Y_FRED` | `IRLTLT01JPM156N` | JP10年金利 | 月次 |
 | `T10Y2Y` | `T10Y2Y` | 期間構造 | 日次 |
+| `US_EPU` | `USEPUINDXD` | 政策不確実性（Baker-Bloom-Davis EPU・1985〜） | 日次 |
+| `US_EQUITY_EPU` | `WLEMUINDXD` | 政策不確実性（株式市場関連・1985〜） | 日次 |
 
 > **⚠️ ICE BofA 系列の履歴制限（#381）**: FRED は 2026-04 以降 ICE BofA 指数系列（`HY_OAS`=`BAMLH0A0HYM2` / `IG_OAS`=`BAMLC0A0CM`）を**ローリング3年窓に制限**し、2023年以前を配信しない（完全系列 1996〜 は ICE/Bloomberg/Refinitiv の商用ライセンスのみ）。`FRED_MIN_YEARS_BACK=10` があっても再収集で遡れないため、M-1/M-4 の**既定の信用ファクターは非ICE代替 `BAA_SPREAD`（`BAA10Y`＝Moody's Baa−10Y・truncate されず 2016 以前まで遡れる）へ移行済み**。`HY_OAS`/`IG_OAS` は選択肢としては残す（直近3年窓）が `DEFAULT_MACRO_FEATURES` からは除外（`plugins/macro_snapshots.py::_STRICT_TRUNCATED_FEATURES`）。詳細は [ADR-0016](adr/0016-ice-bofa-truncation-baa-credit-proxy.md)・GOTCHAS.md。
 
