@@ -1,15 +1,19 @@
-"""Issue #404: EPU 2系列を `DEFAULT_MACRO_FEATURES` へ昇格すべきかの OOF 実測。
+"""新規マクロ系列を `DEFAULT_MACRO_FEATURES` へ昇格すべきかの OOF 実測（昇格ゲート）。
 
-判定対象は「マクロ特徴量セットに `macro_us_epu_zscore` / `macro_us_equity_epu_zscore`
-（Baker-Bloom-Davis EPU・#404 で収集追加）を**足すか否か**」であって、モデルの優劣ではない。
-よって同一モデル・同一 fold・同一スナップショット設定のまま、`build_snapshots` へ渡す
-`macro_names` だけを差し替えた2条件を比較する。
+ADR-0023（#404・EPU）で定式化した「収集 → 保留枠（`_PENDING_EVAL_FEATURES`）→ 実測 →
+昇格」の3段目を担う汎用ランナー。判定対象は「マクロ特徴量セットに **候補系列を足すか否か**」
+であって、モデルの優劣ではない。よって同一モデル・同一 fold・同一スナップショット設定の
+まま、`build_snapshots` へ渡す `macro_names` だけを差し替えた2条件を比較する。
 
-    base     … 現行 DEFAULT_MACRO_FEATURES（EPU なし）
-    with_epu … base + EPU 2本
+    base      … 現行 DEFAULT_MACRO_FEATURES から候補を除いたもの
+    with_cand … base + 候補
+
+候補は `--preset`（`PRESETS` の定義済みセット）か `--features`（カンマ区切り）で指定する。
+初出は #404 の EPU 専用スクリプトだったが、#406（GDELT/Wikimedia）で2件目が必要になった
+ため一般化した（`--preset epu` が旧 `scripts/epu_feature_bakeoff.py` と等価）。
 
 比較モデルは M-2（`xgb_m2`＝非線形）と M-6（`elasticnet`＝正則化線形・ADR-0021 で昇格）の
-2本。**両方**を見るのは、EPU が「木の分岐として効く」のか「縮小推定下の線形項として効く」の
+2本。**両方**を見るのは、候補が「木の分岐として効く」のか「縮小推定下の線形項として効く」の
 かで結論が変わりうるため（#372 の確定知見＝グループ共線性への縮小推定が効く）。
 
 判定指標は買い側 rank-IC と売り側 `short_side_spread` の**両方**。ADR-0022 の確定知見
@@ -23,17 +27,17 @@
 
 strict 母集団への影響（#381 の教訓）:
   M-1 は `macro_nan_ok=False`＝「選択中の全マクロが同時に非None」の行しか使わないため、
-  既定へ入れる系列のカバレッジが短いと学習窓が律速される。EPU は日次1985〜のはずだが、
+  既定へ入れる系列のカバレッジが短いと学習窓が律速される。ソース側の配信開始が古くても
   **実際に本番 macro_data へ何年分入ったか**で決まるので、strict パネルのサンプル数と
-  月数を base / with_epu で実測して比較する（縮んだら昇格しない）。
+  月数を base / with_cand で実測して比較する（縮んだら昇格しない）。
 
 データは `scripts/_cache.py` 経由のローカル pickle を使う（Issue #355・本番 Egress ゼロ）。
-ただし EPU は新規収集系列のためマクロだけは条件ごとに pull し直す（キーは系列名の md5）。
+ただし候補は新規収集系列のためマクロだけは条件ごとに pull し直す（キーは系列名の md5）。
 
 実行例（`-m` 必須・[[feedback_scripts_dir_needs_module_invocation]]）:
-    python -m scripts.epu_feature_bakeoff --smoke      # 5社に1社へ間引いた短時間確認
-    python -m scripts.epu_feature_bakeoff              # フル実測
-    python -m scripts.epu_feature_bakeoff --refresh-cache
+    python -m scripts.macro_feature_bakeoff --preset attention --smoke  # 5社に1社へ間引き
+    python -m scripts.macro_feature_bakeoff --preset attention          # フル実測
+    python -m scripts.macro_feature_bakeoff --features macro_jp_news_tone_zscore
 """
 from __future__ import annotations
 
@@ -51,6 +55,7 @@ from model_stats import paired_ic_significance  # noqa: E402
 from plugins import get_plugin  # noqa: E402
 from plugins.macro_snapshots import (  # noqa: E402
     DEFAULT_MACRO_FEATURES,
+    MACRO_FEATURE_NAMES,
     build_snapshots,
     preload_macro,
 )
@@ -63,9 +68,21 @@ from scripts.candidate_bakeoff import (  # noqa: E402
     run_one,
 )
 
-_OUT = Path(__file__).resolve().parent / ".cache" / "epu_feature_bakeoff.json"
+_OUT_DIR = Path(__file__).resolve().parent / ".cache"
 
-EPU_FEATURES = ["macro_us_epu_zscore", "macro_us_equity_epu_zscore"]
+# 昇格判定を通した／通す候補セット。新しいチャネルを足したらここへ1行足す。
+PRESETS: dict[str, list[str]] = {
+    # #404・ADR-0023（判定済み＝昇格）。再現用に残す。
+    "epu": ["macro_us_epu_zscore", "macro_us_equity_epu_zscore"],
+    # #406（GDELT ニューストーン／報道量 + Wikipedia 閲覧数）。
+    "attention": [
+        "macro_jp_news_tone_zscore",
+        "macro_jp_news_econ_tone_zscore",
+        "macro_jp_news_econ_vol_zscore",
+        "macro_jp_wiki_market_attn_zscore",
+        "macro_jp_wiki_macro_attn_zscore",
+    ],
+}
 MODELS = ["xgb_m2", "elasticnet"]
 MODEL_LABELS = {"xgb_m2": "M-2(XGBoost)", "elasticnet": "M-6(ElasticNet)"}
 # 昇格ゲート: 2モデル × 2指標（rank-IC / short_side_spread）の 4 検定を Bonferroni 補正。
@@ -125,7 +142,10 @@ def main() -> None:
         except Exception:
             pass
 
-    ap = argparse.ArgumentParser(description="Issue #404 EPU 特徴量の昇格判定")
+    ap = argparse.ArgumentParser(description="新規マクロ特徴量の昇格ゲート実測（ADR-0023）")
+    ap.add_argument("--preset", choices=sorted(PRESETS), default="attention",
+                    help=f"判定する候補セット（既定 attention）: {', '.join(sorted(PRESETS))}")
+    ap.add_argument("--features", help="候補をカンマ区切りで直接指定（--preset より優先）")
     ap.add_argument("--smoke", action="store_true", help="サンプルを間引いた短時間確認")
     ap.add_argument("--stride", type=int, default=1, help="各月のサンプル間引き幅")
     ap.add_argument("--allow-full-pull", action="store_true",
@@ -136,8 +156,19 @@ def main() -> None:
         args.stride = 5
     set_refresh(args.refresh_cache)
 
-    base_names = [f for f in DEFAULT_MACRO_FEATURES if f not in EPU_FEATURES]
-    conds = {"base": base_names, "with_epu": base_names + EPU_FEATURES}
+    cand_features = ([f.strip() for f in args.features.split(",") if f.strip()]
+                     if args.features else PRESETS[args.preset])
+    unknown = [f for f in cand_features if f not in MACRO_FEATURE_NAMES]
+    if unknown:
+        raise SystemExit(f"未登録の特徴量です（_MACRO_MAP に無い）: {', '.join(unknown)}")
+    label = args.preset if not args.features else "custom"
+    out_path = _OUT_DIR / f"macro_feature_bakeoff_{label}.json"
+    print(f"candidate ({label}): {', '.join(cand_features)}", flush=True)
+
+    # DEFAULT_MACRO_FEATURES は昇格済み系列を含みうるので、候補は必ず引いてから base を作る
+    # （保留枠 `_PENDING_EVAL_FEATURES` の系列は元から既定に入っていない）。
+    base_names = [f for f in DEFAULT_MACRO_FEATURES if f not in cand_features]
+    conds = {"base": base_names, "with_cand": base_names + cand_features}
 
     db = SessionLocal()
     try:
@@ -178,12 +209,12 @@ def main() -> None:
         db.close()
 
     # ── 3. 昇格ゲート判定 ────────────────────────────────────────────────────
-    print(f"\n=== with_epu - base (Bonferroni alpha={ALPHA:.4f}, {N_TESTS} tests) ===",
+    print(f"\n=== with_cand - base (Bonferroni alpha={ALPHA:.4f}, {N_TESTS} tests) ===",
           flush=True)
     sigs: dict[str, dict | None] = {}
     passed: list[str] = []
     for model in MODELS:
-        a = results[f"with_epu|{model}"]["oof"]
+        a = results[f"with_cand|{model}"]["oof"]
         b = results[f"base|{model}"]["oof"]
         for metric, key in (("rank_ic", "rank_ic_by_period"),
                             ("short_side_spread", "short_side_spread_by_period")):
@@ -196,9 +227,9 @@ def main() -> None:
                 passed.append(f"{MODEL_LABELS[model]}/{metric}")
             print(f"  {MODEL_LABELS[model]:<18} {metric:<18} {_fmt_sig(sig)}", flush=True)
 
-    strict_ok = strict["with_epu"]["months"] >= strict["base"]["months"]
+    strict_ok = strict["with_cand"]["months"] >= strict["base"]["months"]
     print(f"\nstrict population: base months={strict['base']['months']} -> "
-          f"with_epu={strict['with_epu']['months']} "
+          f"with_cand={strict['with_cand']['months']} "
           f"({'OK' if strict_ok else 'SHRUNK -> do not promote'})", flush=True)
 
     if passed and strict_ok:
@@ -210,6 +241,7 @@ def main() -> None:
     print(f"\n=== VERDICT: {verdict} ===", flush=True)
 
     payload = {
+        "candidate": {"label": label, "features": cand_features},
         "alpha": ALPHA,
         "n_tests": N_TESTS,
         "strict_population": strict,
@@ -217,10 +249,10 @@ def main() -> None:
         "significance": sigs,
         "verdict": verdict,
     }
-    _OUT.parent.mkdir(parents=True, exist_ok=True)
-    with _OUT.open("w", encoding="utf-8") as f:
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with out_path.open("w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, indent=2)
-    print(f"wrote {_OUT}", flush=True)
+    print(f"wrote {out_path}", flush=True)
 
 
 if __name__ == "__main__":

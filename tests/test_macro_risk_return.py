@@ -292,12 +292,14 @@ class TestParamsSchema:
         過剰選択は LassoLarsIC(BIC) が抑える。"""
         from plugins.macro_risk_return import MACRO_FEATURE_OPTIONS
         from plugins.macro_snapshots import (
+            _GATE_REJECTED_FEATURES,
             _PENDING_EVAL_FEATURES,
             _STRICT_TRUNCATED_FEATURES,
         )
         result = coerce_params(self.schema, {})
         option_values = [o["value"] for o in MACRO_FEATURE_OPTIONS]
-        excluded = _STRICT_TRUNCATED_FEATURES | _PENDING_EVAL_FEATURES
+        excluded = (_STRICT_TRUNCATED_FEATURES | _PENDING_EVAL_FEATURES
+                    | _GATE_REJECTED_FEATURES)
         assert result["macro_features"] == [v for v in option_values if v not in excluded]
         # コモディティ8系列＋非ICE信用代替 BAA は既定に含まれる
         for k in ("macro_bcom_yoy", "macro_copper_yoy", "macro_platinum_yoy", "macro_baa_spread_zscore"):

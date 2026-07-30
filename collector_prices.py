@@ -8,6 +8,7 @@ import asyncio
 from collections import defaultdict
 from datetime import date, timedelta
 from typing import Optional, Callable
+from urllib.parse import quote as urlquote  # fetch_yahoo_history のローカル変数 quote と衝突回避
 
 import httpx
 import openpyxl
@@ -1437,6 +1438,62 @@ IMF_SERIES: list[dict] = [
     },
 ]
 
+# ── GDELT DOC 2.0 API（api.gdeltproject.org・認証不要・#406）──────────────────
+# 世界のニュース記事を横断集計するプロジェクト。`mode=timeline*` は日次の集計系列を
+# JSON で返すため、**銘柄別ではなくマクロ集約系列**として macro_data へ入れる
+# （銘柄別日次は 4,000社×250営業日 ≈ 370MB/年で Supabase 無料枠に入らない・#406）。
+#
+# 実API検証（2026-07-31）:
+#   - 配信開始は 2017-01-01。それ以前を startdatetime に指定すると
+#     "Invalid query start date"（GDELT_START が下限）。
+#   - 2017-01-01〜今日を1リクエストで投げても間引かれず日次のまま返る（3,473点を確認）＝
+#     系列あたり1リクエストで全履歴が揃う。ページングもチャンク分割も要らない。
+#   - レート制限は「1リクエスト/5秒」（超過時は HTTP 200 で本文にプレーンテキストの
+#     警告を返す＝JSON パース不能）。**実体は間隔だけでなく短時間の累積クエリ数にも効く**：
+#     開発中に数十回叩いた直後は 60 秒バックオフしても全滅し、3 分放置すると即復帰した
+#     （2026-07-31 実測）。よって n 回目の待ちを GDELT_RATE_SLEEP × n 秒とする線形バックオフ
+#     （最大 6+12+18+24=60 秒/系列）で再試行し、それでも駄目なら graceful skip する。
+#     通常運用（3系列 × 日1回）はこの上限に触れない。
+GDELT_BASE_URL   = "https://api.gdeltproject.org/api/v2/doc/doc"
+GDELT_RATE_SLEEP = 6.0
+GDELT_RETRIES    = 4
+GDELT_START      = "20170101000000"   # DOC 2.0 の配信開始（これ以前は Invalid query start date）
+
+GDELT_SERIES: list[dict] = [
+    # tone は正負を跨ぐ（悲観=負・楽観=正）ため yoy は不可＝zscore 規約（macro_snapshots 側）。
+    {"code": "JP_NEWS_TONE",      "name": "日本ニュース 平均トーン（GDELT）",
+     "category": "sentiment", "mode": "timelinetone", "query": "sourcecountry:japan"},
+    {"code": "JP_NEWS_ECON_TONE", "name": "日本 株式市場ニュース 平均トーン（GDELT）",
+     "category": "sentiment", "mode": "timelinetone",
+     "query": "sourcecountry:japan theme:ECON_STOCKMARKET"},
+    # timelinevol は「全記事に占める該当記事の割合(%)」＝報道量（関心度）。
+    {"code": "JP_NEWS_ECON_VOL",  "name": "日本 株式市場ニュース 報道量（GDELT・全記事比%）",
+     "category": "attention", "mode": "timelinevol",
+     "query": "sourcecountry:japan theme:ECON_STOCKMARKET"},
+]
+
+# ── Wikimedia Pageviews API（wikimedia.org/api/rest_v1・認証不要・#406）────────
+# ja.wikipedia の記事別日次閲覧数。**User-Agent に連絡先（URL かメール）を含めないと
+# 403**（robot policy）＝ httpx 既定 UA では取得できない（2026-07-31 実API検証）。
+# 配信開始は 2015-07-01（WIKIMEDIA_START）。1リクエストで全期間（4,047点）が返る。
+#
+# 単一記事はニュース以外の流入（リンク元の変化・編集）でも跳ねるため、テーマごとに
+# **複数記事の合算バスケット**を1系列とする。欠測日（API が項目ごと落とす）は 0 ではなく
+# 「その記事の寄与なし」として合算から除外する（記事追加/削除で水準が段差になるのを避ける）。
+WIKIMEDIA_BASE_URL   = "https://wikimedia.org/api/rest_v1/metrics/pageviews/per-article"
+WIKIMEDIA_UA         = "financial_app/1.0 (+https://github.com/kome-kome/financial_app)"
+WIKIMEDIA_RATE_SLEEP = 1.0
+WIKIMEDIA_START      = "20150701"   # Pageviews API の配信開始日
+WIKIMEDIA_PROJECT    = "ja.wikipedia"
+
+WIKIMEDIA_SERIES: list[dict] = [
+    {"code": "JP_WIKI_MARKET_ATTN", "name": "日本 株式市場 関心度（ja.wikipedia 閲覧数）",
+     "category": "attention", "articles": ["日経平均株価", "東京証券取引所"]},
+    {"code": "JP_WIKI_MACRO_ATTN",  "name": "日本 景気・金融政策 関心度（ja.wikipedia 閲覧数）",
+     "category": "attention",
+     "articles": ["景気後退", "インフレーション", "日本銀行", "金融政策"]},
+]
+
 
 def _esri_candidate_urls(today: date) -> list[str]:
     """直近 ESRI_QUARTERS_BACK 四半期 × ESRI_REPORTS（2次優先）のURL候補を、
@@ -2019,6 +2076,98 @@ async def fetch_imf_weo_current(session: httpx.AsyncClient, indicator: str) -> l
     }]
 
 
+async def fetch_gdelt_timeline(
+    session: httpx.AsyncClient,
+    query: str,
+    mode: str,          # "timelinetone" | "timelinevol"
+    date_from: str,     # "YYYYMMDDHHMMSS"
+    date_to: str,       # "YYYYMMDDHHMMSS"
+) -> list:
+    """GDELT DOC 2.0 API から日次の集計系列（トーン／報道量）を取得する。認証不要。
+
+    レート超過時は HTTP 200 のままプレーンテキストの警告本文を返すため、**ステータス
+    コードではなく本文が JSON かどうか**で判定し、GDELT_RATE_SLEEP × 試行回数（線形
+    バックオフ）だけ待って再試行する。取得できなければ空リスト（graceful skip・他コネクタ
+    と同型）＝その系列はこの回だけ欠測し、次回収集で埋まる。"""
+    params = {"query": query, "mode": mode, "format": "json",
+              "startdatetime": date_from, "enddatetime": date_to}
+    payload = None
+    for attempt in range(GDELT_RETRIES):
+        try:
+            r = await session.get(GDELT_BASE_URL, params=params, timeout=180)
+            r.raise_for_status()
+            body = r.text.lstrip()
+            if body.startswith("{"):
+                payload = r.json()
+                break
+            log.debug("GDELT レート制限 %s (%d回目): %s", mode, attempt + 1, body[:80])
+        except Exception as e:
+            log.debug("GDELT 取得失敗 %s (%d回目): %s", mode, attempt + 1, type(e).__name__)
+        await asyncio.sleep(GDELT_RATE_SLEEP * (attempt + 1))
+
+    if payload is None:
+        log.warning("GDELT 取得失敗 %s %s: リトライ上限", mode, query)
+        return []
+
+    timeline = payload.get("timeline") or []
+    if not timeline:
+        return []
+
+    rows = []
+    for point in timeline[0].get("data") or []:
+        try:
+            stamp = str(point["date"])[:8]          # "20240101T000000Z" → "20240101"
+            obs_date = date(int(stamp[:4]), int(stamp[4:6]), int(stamp[6:8])).isoformat()
+            rows.append({
+                "trade_date": obs_date,
+                "open": None, "high": None, "low": None,
+                "close": float(point["value"]), "volume": None,
+            })
+        except (KeyError, TypeError, ValueError):
+            continue
+    return rows
+
+
+async def fetch_wikimedia_pageviews(
+    session: httpx.AsyncClient,
+    articles: list[str],
+    date_from: str,   # "YYYYMMDD"
+    date_to: str,     # "YYYYMMDD"
+) -> list:
+    """Wikimedia Pageviews API から記事バスケットの日次閲覧数合計を取得する。認証不要。
+
+    記事ごとに1リクエスト（全期間が1回で返る）し、日付キーで合算する。存在しない記事は
+    404 を返すので、その記事だけ落として残りで合算を続ける（graceful skip）。欠測日は
+    0 埋めせず合算から除外する（記事の増減で水準に段差を作らないため）。"""
+    totals: dict[str, float] = {}
+    for i, article in enumerate(articles):
+        quoted = urlquote(article, safe="")
+        url = (f"{WIKIMEDIA_BASE_URL}/{WIKIMEDIA_PROJECT}/all-access/all-agents/"
+               f"{quoted}/daily/{date_from}/{date_to}")
+        try:
+            r = await session.get(url, headers={"User-Agent": WIKIMEDIA_UA}, timeout=60)
+            r.raise_for_status()
+            items = r.json().get("items") or []
+        except Exception as e:
+            log.warning("Wikimedia 取得失敗 %s: %s", article, type(e).__name__)
+            items = []
+        for item in items:
+            try:
+                stamp = str(item["timestamp"])[:8]   # "2024010100" → "20240101"
+                key = date(int(stamp[:4]), int(stamp[4:6]), int(stamp[6:8])).isoformat()
+                totals[key] = totals.get(key, 0.0) + float(item["views"])
+            except (KeyError, TypeError, ValueError):
+                continue
+        if i < len(articles) - 1:
+            await asyncio.sleep(WIKIMEDIA_RATE_SLEEP)
+
+    return [{
+        "trade_date": d,
+        "open": None, "high": None, "low": None,
+        "close": v, "volume": None,
+    } for d, v in sorted(totals.items())]
+
+
 async def fetch_yahoo_history(
     session: httpx.AsyncClient,
     yf_ticker: str,
@@ -2097,10 +2246,10 @@ async def collect_macro_data(
     cancel_check: Optional[Callable[[], bool]] = None,
 ):
     """MACRO_SERIES（Yahoo/stooq）+ FRED_SERIES + BOJ_SERIES + OECD_SERIES + ESRI_SERIES +
-    IMF_SERIES + ESTAT_SERIES を macro_data に upsert。Yahoo Finance 優先（GitHub Actions
-    Azure IP 対応）→ stooq フォールバック。FRED: FRED_API_KEY 設定時のみ。BOJ・OECD・ESRI・
-    IMF: 常時収集（認証不要）。e-Stat: ESTAT_API_KEY 設定時のみ。既存レコードは close 等を
-    上書き（最新値で更新）。"""
+    IMF_SERIES + ESTAT_SERIES + GDELT_SERIES + WIKIMEDIA_SERIES を macro_data に upsert。
+    Yahoo Finance 優先（GitHub Actions Azure IP 対応）→ stooq フォールバック。FRED:
+    FRED_API_KEY 設定時のみ。BOJ・OECD・ESRI・IMF・GDELT・Wikimedia: 常時収集（認証不要）。
+    e-Stat: ESTAT_API_KEY 設定時のみ。既存レコードは close 等を上書き（最新値で更新）。"""
     today      = date.today()
     start      = today - timedelta(days=int(years_back * 365.25))
     d1         = start.strftime("%Y%m%d")
@@ -2119,6 +2268,12 @@ async def collect_macro_data(
     # OECD: startPeriod は "YYYY-MM"。FRED/BOJ 同様に長めに遡る（zscore ≥20 点確保）。
     oecd_start = today - timedelta(days=int(max(years_back, FRED_MIN_YEARS_BACK) * 365.25))
     d1_oecd    = oecd_start.strftime("%Y-%m")
+    # GDELT / Wikimedia（#406）: FRED と同じ窓で遡りつつ、各ソースの配信開始日で下限を切る
+    # （それ以前を要求すると GDELT は "Invalid query start date" を返す）。
+    d1_gdelt   = max(fred_start.strftime("%Y%m%d") + "000000", GDELT_START)
+    d2_gdelt   = today.strftime("%Y%m%d") + "000000"
+    d1_wiki    = max(fred_start.strftime("%Y%m%d"), WIKIMEDIA_START)
+    d2_wiki    = today.strftime("%Y%m%d")
     total      = (
         len(MACRO_SERIES)
         + (len(FRED_SERIES)  if FRED_API_KEY  else 0)
@@ -2127,6 +2282,8 @@ async def collect_macro_data(
         + len(ESRI_SERIES)
         + len(IMF_SERIES)
         + (len(ESTAT_SERIES) + len(ESTAT_INDEX_SERIES) if ESTAT_API_KEY else 0)
+        + len(GDELT_SERIES)
+        + len(WIKIMEDIA_SERIES)
     )
     saved      = 0
 
@@ -2445,5 +2602,83 @@ async def collect_macro_data(
                 saved += n
                 if on_progress:
                     on_progress(idx, total, f"[e-Stat-idx {p}/{len(ESTAT_INDEX_SERIES)}] {series['name']}: {n}件処理")
+
+        # ── GDELT 収集（認証不要・常時・#406）───────────────────────────────────
+        # 1系列＝1リクエストで全履歴が返る。レート制限（1req/5s）は fetch 側でリトライ、
+        # 系列間にも GDELT_RATE_SLEEP を挟む。
+        gdelt_base_i = (
+            imf_base_i + len(IMF_SERIES)
+            + (len(ESTAT_SERIES) + len(ESTAT_INDEX_SERIES) if ESTAT_API_KEY else 0)
+        )
+        for g, series in enumerate(GDELT_SERIES, 1):
+            idx = gdelt_base_i + g
+            if cancel_check and cancel_check():
+                if on_progress:
+                    on_progress(idx - 1, total, "[マクロ収集] ユーザー停止")
+                return saved
+
+            if on_progress:
+                on_progress(idx - 1, total, f"[GDELT {g}/{len(GDELT_SERIES)}] {series['name']} 取得中")
+            rows = await fetch_gdelt_timeline(
+                session, series["query"], series["mode"], d1_gdelt, d2_gdelt
+            )
+            await asyncio.sleep(GDELT_RATE_SLEEP)
+
+            if not rows:
+                if on_progress:
+                    on_progress(idx, total, f"[GDELT {g}/{len(GDELT_SERIES)}] {series['name']} データ無し")
+                continue
+
+            vals = [{
+                "series_code": series["code"],
+                "series_name": series["name"],
+                "category":    series["category"],
+                "trade_date":  r["trade_date"],
+                "open": r["open"], "high": r["high"], "low": r["low"],
+                "close": r["close"], "volume": r["volume"],
+            } for r in rows]
+            n = upsert_macro_batch(db, vals)
+            db.commit()
+            saved += n
+            if on_progress:
+                on_progress(idx, total, f"[GDELT {g}/{len(GDELT_SERIES)}] {series['name']}: {n}件処理")
+
+        # ── Wikimedia Pageviews 収集（認証不要・常時・#406）──────────────────────
+        wiki_base_i = gdelt_base_i + len(GDELT_SERIES)
+        for w, series in enumerate(WIKIMEDIA_SERIES, 1):
+            idx = wiki_base_i + w
+            if cancel_check and cancel_check():
+                if on_progress:
+                    on_progress(idx - 1, total, "[マクロ収集] ユーザー停止")
+                return saved
+
+            if on_progress:
+                on_progress(idx - 1, total,
+                            f"[Wikimedia {w}/{len(WIKIMEDIA_SERIES)}] {series['name']} 取得中")
+            rows = await fetch_wikimedia_pageviews(
+                session, series["articles"], d1_wiki, d2_wiki
+            )
+            await asyncio.sleep(WIKIMEDIA_RATE_SLEEP)
+
+            if not rows:
+                if on_progress:
+                    on_progress(idx, total,
+                                f"[Wikimedia {w}/{len(WIKIMEDIA_SERIES)}] {series['name']} データ無し")
+                continue
+
+            vals = [{
+                "series_code": series["code"],
+                "series_name": series["name"],
+                "category":    series["category"],
+                "trade_date":  r["trade_date"],
+                "open": r["open"], "high": r["high"], "low": r["low"],
+                "close": r["close"], "volume": r["volume"],
+            } for r in rows]
+            n = upsert_macro_batch(db, vals)
+            db.commit()
+            saved += n
+            if on_progress:
+                on_progress(idx, total,
+                            f"[Wikimedia {w}/{len(WIKIMEDIA_SERIES)}] {series['name']}: {n}件処理")
 
     return saved

@@ -166,6 +166,18 @@ _MACRO_MAP = {
     "macro_corn_yoy":     ("CORN",     "yoy"),
     "macro_soybean_yoy":  ("SOYBEAN",  "yoy"),
     "macro_platinum_yoy": ("PLATINUM", "yoy"),
+    # ── ニューストーン／関心度チャネル（#406・GDELT / Wikimedia Pageviews）────────
+    # EPU（#404）が新聞記事「量」で政策不確実性を測るのに対し、GDELT のトーンは記事の
+    # **極性**（悲観/楽観）を、報道量・Wikipedia 閲覧数は**注目度**を測る別チャネル。
+    # トーンは正負を跨ぐため yoy（除算）が発散する → zscore。報道量(%)・閲覧数は水準系だが、
+    # 「平時比でどれだけ注目されているか」がレジーム情報なので EPU/VIX と同じ zscore 規約
+    # （yoy にすると水準の高低が消える）。いずれも日次＝低頻度変換窓（#379/#382）・
+    # strict 律速（#381）に触れない。
+    "macro_jp_news_tone_zscore":       ("JP_NEWS_TONE",       "zscore"),
+    "macro_jp_news_econ_tone_zscore":  ("JP_NEWS_ECON_TONE",  "zscore"),
+    "macro_jp_news_econ_vol_zscore":   ("JP_NEWS_ECON_VOL",   "zscore"),
+    "macro_jp_wiki_market_attn_zscore": ("JP_WIKI_MARKET_ATTN", "zscore"),
+    "macro_jp_wiki_macro_attn_zscore":  ("JP_WIKI_MACRO_ATTN",  "zscore"),
 }
 MACRO_FEATURE_NAMES = list(_MACRO_MAP.keys())
 
@@ -222,6 +234,12 @@ MACRO_FEATURE_OPTIONS = [
     {"value": "macro_corn_yoy",     "label": "トウモロコシ先物 前年比（YoY）"},
     {"value": "macro_soybean_yoy",  "label": "大豆先物 前年比（YoY）"},
     {"value": "macro_platinum_yoy", "label": "プラチナ先物 前年比（YoY）"},
+    # ニューストーン／関心度チャネル（#406）
+    {"value": "macro_jp_news_tone_zscore",       "label": "日本ニュース 平均トーン（GDELT）Zスコア"},
+    {"value": "macro_jp_news_econ_tone_zscore",  "label": "日本 株式市場ニュース 平均トーン（GDELT）Zスコア"},
+    {"value": "macro_jp_news_econ_vol_zscore",   "label": "日本 株式市場ニュース 報道量（GDELT）Zスコア"},
+    {"value": "macro_jp_wiki_market_attn_zscore", "label": "日本 株式市場 関心度（Wikipedia 閲覧数）Zスコア"},
+    {"value": "macro_jp_wiki_macro_attn_zscore",  "label": "日本 景気・金融政策 関心度（Wikipedia 閲覧数）Zスコア"},
 ]
 # 既定は全選択肢（#358・ユーザー方針変更）。従来は米国寄り3本（USDJPY/SP500/US10Y）のみ
 # だったが、コモディティを含む全マクロ系列を既定 ON にし M-2/M-3 と揃える。過剰選択は
@@ -235,18 +253,36 @@ MACRO_FEATURE_OPTIONS = [
 # 経済的情報は非ICE代替 macro_baa_spread_zscore（Baa−10Y・日次・truncate されず 2016 以前まで
 # 遡れる）が既定で担う。次の律速はコモディティ8系列（2020-07 開始）へ緩む。
 _STRICT_TRUNCATED_FEATURES = {"macro_hy_oas_zscore", "macro_ig_oas_zscore"}
-# 追加直後で昇格ゲート（#372 基準＝有意差＋多重比較補正）未通過の特徴量を入れる枠。ADR-0016
+# 追加直後で昇格ゲート（#372 基準＝有意差＋多重比較補正）を**まだ実測していない**特徴量の枠。ADR-0016
 # の順序制約と同じく、本番 macro_data へ蓄積し rank-IC / short_side_spread を実測して有意と
 # 判定されるまでは既定へ入れない（strict は「選択中の全マクロが同時に非None」の行しか使わない
 # ため、未蓄積の系列を既定に混ぜると学習母集団が消える）。選択肢としては即日使える。
 #
-# 現在は空＝保留中の系列なし。#404 の EPU 2系列は `scripts/epu_feature_bakeoff.py` の実測
-# （3,979社・43ヶ月・57,955サンプル・9 fold）で M-6 の売り側 spread +0.0652→+0.0684
-# （diff +0.0032・p=0.001・Bonferroni α=0.0125 通過）を示し既定へ昇格した（ADR-0023）。
+# #404 の EPU 2系列は `scripts/macro_feature_bakeoff.py --preset epu` の実測（3,979社・
+# 43ヶ月・57,955サンプル・9 fold）で M-6 の売り側 spread +0.0652→+0.0684（diff +0.0032・
+# p=0.001・Bonferroni α=0.0125 通過）を示し既定へ昇格した（ADR-0023）。
+#
+# 現在は空＝実測待ちの系列なし。
 _PENDING_EVAL_FEATURES: set[str] = set()
+# 昇格ゲートを実測した結果 **有意な改善が無かった**特徴量の枠（未実測の保留枠とは区別する）。
+# 選択肢としては残し、既定からは外す。再判定するなら
+# `python -m scripts.macro_feature_bakeoff --features <カンマ区切り>`。
+#
+# #406（ADR-0024）の GDELT / Wikimedia 5系列: `--preset attention` の実測（3,979社・43ヶ月・
+# 57,955サンプル・9 fold・honest embargo=12）で4検定すべて非有意——M-2 rank-IC −0.0060
+# (p=0.140) / M-2 売り側 spread −0.0021 (p=0.495) / M-6 rank-IC +0.0010 (p=0.214) / M-6 売り側
+# spread −0.0002 (p=0.623)。strict 母集団は 43ヶ月・57,955サンプルで不変（律速はしない）。
+_GATE_REJECTED_FEATURES: set[str] = {
+    "macro_jp_news_tone_zscore",
+    "macro_jp_news_econ_tone_zscore",
+    "macro_jp_news_econ_vol_zscore",
+    "macro_jp_wiki_market_attn_zscore",
+    "macro_jp_wiki_macro_attn_zscore",
+}
 DEFAULT_MACRO_FEATURES = [o["value"] for o in MACRO_FEATURE_OPTIONS
                           if o["value"] not in _STRICT_TRUNCATED_FEATURES
-                          and o["value"] not in _PENDING_EVAL_FEATURES]
+                          and o["value"] not in _PENDING_EVAL_FEATURES
+                          and o["value"] not in _GATE_REJECTED_FEATURES]
 
 
 # ── 価格行動系特徴量定義（Issue #317・#364 で M-2/M-3 共有化）────────────────────

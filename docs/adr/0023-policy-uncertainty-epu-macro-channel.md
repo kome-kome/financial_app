@@ -43,6 +43,9 @@ GDELT / Wikimedia は銘柄別だと 370MB/年で Supabase 500MB に収まらず
 
 ## 実測（2026-07-31・`scripts/epu_feature_bakeoff.py`・ローカル pickle キャッシュ）
 
+> 注: 当該スクリプトは #406（ADR-0024）で `scripts/macro_feature_bakeoff.py` へ一般化した。
+> 本節の再現は `python -m scripts.macro_feature_bakeoff --preset epu`。
+
 同一モデル・同一 fold・同一スナップショット設定のまま `build_snapshots` へ渡す `macro_names` だけを
 差し替えた2条件（base = 現行既定 / with_epu = base + EPU 2本）を比較。3,979社・43ヶ月・57,955サンプル・
 9 fold・honest（embargo=12・ADR-0014）。M-2（非線形）と M-6（正則化線形）の両方を見るのは、EPU が
@@ -92,7 +95,7 @@ strict 母集団は **43ヶ月・57,955サンプルで不変**（EPU は 2016-07
 - 既定が変わるので M-1/M-2/M-6 の再実行後は μ̂ が変化する。旧挙動は UI のマクロ特徴量選択から EPU 2本を
   外せば再現できる。
 - 新規マクロ系列の追加手順が「収集 → 保留枠 → 実測 → 昇格」として定式化された
-  （`_PENDING_EVAL_FEATURES` ＋ `scripts/epu_feature_bakeoff.py`）。以降の系列追加はこの手順に従う。
+  （`_PENDING_EVAL_FEATURES` ＋ `scripts/macro_feature_bakeoff.py`）。以降の系列追加はこの手順に従う。
 
 ## 参考文献
 

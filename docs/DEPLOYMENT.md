@@ -424,6 +424,38 @@ ADR-0006 §Decision-1 が定める CPI チャネル。
 | time 軸の特殊性 | `@time` が `"0500100"` 等の連番コードで年月を直接表現しない（CPI は自己記述コードで直接パース可）。`metaGetFlg="Y"` で同一レスポンスに `CLASS_INF`（code→"YYYYMM"）を同梱させ、`fetch_estat_index_series` が変換する |
 | 基準改定リスク | 鉱工業指数は基準改定（2010→2015→2020年基準）のたびに `statsDataId` が別テーブルへ切替り、旧テーブルは更新停止する（JP_IP 凍結と同根）。次回改定時は本節の `statsDataId` を再調査すること |
 
+### GDELT DOC 2.0 API（認証不要・#406/ADR-0024）
+
+ニューストーン（記事の極性）・報道量チャネル。**マクロ集約系列のみ**（銘柄別日次は 4,000社 ×
+250営業日 ≈ 370MB/年で Supabase 無料枠に入らない＝構造的に不可。再提案しないこと）。
+
+| 項目 | 値 |
+|---|---|
+| エンドポイント | `https://api.gdeltproject.org/api/v2/doc/doc`（`mode=timelinetone` / `timelinevol`・`format=json`） |
+| 認証 | 不要 |
+| 収集系列 | `JP_NEWS_TONE`・`JP_NEWS_ECON_TONE`・`JP_NEWS_ECON_VOL`（いずれも `sourcecountry:japan`、後2者は `theme:ECON_STOCKMARKET` で絞り込み） |
+| 履歴 | **2017-01-01 開始**（`GDELT_START`）。それ以前を `startdatetime` に渡すと `Invalid query start date` |
+| ページング | 不要。全期間（3,473日）を1リクエストで日次のまま返す（間引きなし・2026-07-31 実測） |
+| レート制限 | **1リクエスト/5秒**。`GDELT_RATE_SLEEP = 6.0` 秒＋`GDELT_RETRIES = 3` で運用 |
+| 超過時の応答 | **HTTP 200 のままプレーンテキストの警告本文**（JSON ではない）。ステータスコードでは検知できないため本文が `{` で始まるかで判定する |
+| GitHub Actions 疎通 | 未確認（本番初回実行で要確認。レート制限は共有 IP 単位の可能性がある） |
+
+### Wikimedia Pageviews API（認証不要・#406/ADR-0024）
+
+一般大衆の関心度チャネル（ja.wikipedia の記事別日次閲覧数）。
+
+| 項目 | 値 |
+|---|---|
+| エンドポイント | `https://wikimedia.org/api/rest_v1/metrics/pageviews/per-article/ja.wikipedia/all-access/all-agents/{article}/daily/{from}/{to}` |
+| 認証 | 不要。ただし **User-Agent に連絡先（URL かメール）が必須**——欠くと 403 `Please respect our robot policy`（`WIKIMEDIA_UA` にリポジトリ URL を設定済み） |
+| 収集系列 | `JP_WIKI_MARKET_ATTN`（日経平均株価・東京証券取引所）・`JP_WIKI_MACRO_ATTN`（景気後退・インフレーション・日本銀行・金融政策）＝**記事バスケットの合算** |
+| 履歴 | 2015-07-01 開始（`WIKIMEDIA_START`）。全期間が1リクエストで返る |
+| レート制限 | 明示上限なし（robot policy 準拠）。`WIKIMEDIA_RATE_SLEEP = 1.0` 秒で保守的に運用 |
+| 欠測・404 | 欠測日は 0 埋めせず合算から除外。存在しない記事（404）はその記事だけ落として残りで合算（graceful skip） |
+
+**容量**: GDELT 3系列＋Wikimedia 2系列 ≈ 1.9万行 × 370 bytes ≈ **約7MB**（2026-07-30 時点の
+ヘッドルーム 174MB の約4%）。
+
 ---
 
 ## 環境変数（Render ダッシュボードで設定）

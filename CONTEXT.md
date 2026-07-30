@@ -49,7 +49,7 @@ _Avoid_: データソース（実装の fetch 関数名と混同するため）
 _Avoid_: 多系列収集（バリアントの「同一概念」という構造が落ちる）
 
 **マクロ特徴量の昇格ゲート (macro feature promotion gate)**:
-新規マクロ系列を `DEFAULT_MACRO_FEATURES`（既定 ON）へ入れる前に通す実測手順（ADR-0023 で定式化・#404）。「収集 → 保留枠（`_PENDING_EVAL_FEATURES`＝選択肢のみ）→ 実測 → 昇格」の4段。実測は同一モデル・同一 fold のまま `macro_names` だけを差し替えた2条件の OOF 比較で、**買い側 rank-IC と売り側 `short_side_spread` の両方**を M-2（非線形）と M-6（正則化線形）で見る（計4検定を Bonferroni 補正）。順序が重要なのは、本番 `macro_data` へ蓄積する前に既定へ入れると strict（`macro_nan_ok=False`）の学習母集団が消えるため（ADR-0016 の順序制約）。ランナーは `scripts/epu_feature_bakeoff.py`。
+新規マクロ系列を `DEFAULT_MACRO_FEATURES`（既定 ON）へ入れる前に通す実測手順（ADR-0023 で定式化・#404）。「収集 → 保留枠（`_PENDING_EVAL_FEATURES`＝選択肢のみ）→ 実測 → 昇格」の4段。実測は同一モデル・同一 fold のまま `macro_names` だけを差し替えた2条件の OOF 比較で、**買い側 rank-IC と売り側 `short_side_spread` の両方**を M-2（非線形）と M-6（正則化線形）で見る（計4検定を Bonferroni 補正）。順序が重要なのは、本番 `macro_data` へ蓄積する前に既定へ入れると strict（`macro_nan_ok=False`）の学習母集団が消えるため（ADR-0016 の順序制約）。ランナーは `scripts/macro_feature_bakeoff.py`（候補は `--preset` / `--features` で指定・#406 で EPU 専用から一般化）。**実測して非有意だった系列は棄却枠 `_GATE_REJECTED_FEATURES` へ移し、未実測の保留枠`_PENDING_EVAL_FEATURES` と区別する**（どちらも既定からは外れるが、「まだ測っていない」と「測って落ちた」を取り違えると同じ検証を繰り返す）。棄却例＝#406 のニューストーン／関心度5系列（ADR-0024）。
 _Avoid_: 特徴量選択（モデル内部の BIC/正則化による剪定と混同するため。昇格ゲートは既定セット自体の変更を指す）
 
 ## 分析の階層

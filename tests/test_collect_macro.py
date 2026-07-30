@@ -912,3 +912,162 @@ def test_fetch_imf_weo_current_api_error_returns_empty():
             return await fetch_imf_weo_current(s, "NGDP_RPCH")
     rows = asyncio.run(run())
     assert rows == []
+
+
+# ── GDELT / Wikimedia Pageviews（#406・ニューストーン／関心度チャネル）─────────
+from collector import (  # noqa: E402
+    GDELT_SERIES, GDELT_START, WIKIMEDIA_SERIES, WIKIMEDIA_UA,
+    fetch_gdelt_timeline, fetch_wikimedia_pageviews,
+)
+import collector_prices  # noqa: E402
+
+
+def _gdelt_json(dates_values: list) -> dict:
+    """fetch_gdelt_timeline が解析する DOC 2.0 timeline レスポンス形式。"""
+    return {"timeline": [{
+        "series": "Average Tone",
+        "data": [{"date": f"{d}T000000Z", "value": v} for d, v in dates_values],
+    }]}
+
+
+def test_gdelt_series_registered():
+    """#406: マクロ集約系列のみ（銘柄別日次は 370MB/年で Supabase 無料枠に入らない）。
+    tone は極性・vol は報道量で別チャネル。GDELT_START は DOC 2.0 の配信開始日で、
+    これ以前を要求すると API が "Invalid query start date" を返す（2026-07-31 実API検証）。"""
+    by_code = {s["code"]: s for s in GDELT_SERIES}
+    assert set(by_code) == {"JP_NEWS_TONE", "JP_NEWS_ECON_TONE", "JP_NEWS_ECON_VOL"}
+    assert by_code["JP_NEWS_TONE"]["mode"] == "timelinetone"
+    assert by_code["JP_NEWS_ECON_VOL"]["mode"] == "timelinevol"
+    for s in GDELT_SERIES:
+        assert s["query"].startswith("sourcecountry:japan")
+        assert s["category"] in ("sentiment", "attention")
+    assert GDELT_START == "20170101000000"
+    # 公式アナウンスの「1リクエスト/5秒」を下回らない
+    assert collector_prices.GDELT_RATE_SLEEP >= 5.0
+
+
+def test_fetch_gdelt_timeline_parses_daily_points():
+    import asyncio
+    captured = {}
+
+    async def run():
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured["params"] = dict(request.url.params)
+            return httpx.Response(200, json=_gdelt_json([("20240101", 0.1177),
+                                                         ("20240102", -0.3626)]))
+        async with _REAL_ASYNC_CLIENT(transport=httpx.MockTransport(handler)) as s:
+            return await fetch_gdelt_timeline(s, "sourcecountry:japan", "timelinetone",
+                                              "20240101000000", "20240103000000")
+    rows = asyncio.run(run())
+    assert captured["params"]["mode"] == "timelinetone"
+    assert captured["params"]["format"] == "json"
+    assert [r["trade_date"] for r in rows] == ["2024-01-01", "2024-01-02"]
+    assert rows[1]["close"] == -0.3626          # トーンは負値を取りうる（→ zscore 規約）
+    assert rows[0]["volume"] is None
+
+
+def test_fetch_gdelt_timeline_retries_plain_text_rate_limit():
+    """レート超過時 GDELT は HTTP 200 のままプレーンテキストの警告を返す（JSON ではない）。
+    ステータスコードだけ見ると空データを正常扱いしてしまうため、本文が JSON かどうかで
+    判定して再試行することを確認する。"""
+    import asyncio
+    calls = {"n": 0}
+
+    async def run():
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return httpx.Response(200, text="Please limit requests to one every 5 seconds")
+            return httpx.Response(200, json=_gdelt_json([("20240101", 1.0)]))
+        async with _REAL_ASYNC_CLIENT(transport=httpx.MockTransport(handler)) as s:
+            return await fetch_gdelt_timeline(s, "q", "timelinetone",
+                                              "20240101000000", "20240102000000")
+    with patch.object(collector_prices, "GDELT_RATE_SLEEP", 0):
+        rows = asyncio.run(run())
+    assert calls["n"] == 2
+    assert len(rows) == 1
+
+
+def test_fetch_gdelt_timeline_gives_up_returns_empty():
+    import asyncio
+
+    async def run():
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, text="Please limit requests to one every 5 seconds")
+        async with _REAL_ASYNC_CLIENT(transport=httpx.MockTransport(handler)) as s:
+            return await fetch_gdelt_timeline(s, "q", "timelinetone",
+                                              "20240101000000", "20240102000000")
+    with patch.object(collector_prices, "GDELT_RATE_SLEEP", 0):
+        rows = asyncio.run(run())
+    assert rows == []
+
+
+def _wiki_json(article: str, date_views: list) -> dict:
+    return {"items": [{"project": "ja.wikipedia", "article": article, "granularity": "daily",
+                       "timestamp": f"{d}00", "access": "all-access", "agent": "all-agents",
+                       "views": v} for d, v in date_views]}
+
+
+def test_wikimedia_series_registered_and_user_agent_has_contact():
+    """#406: Wikimedia は User-Agent に連絡先（URL かメール）が無いと 403（robot policy・
+    2026-07-31 実API検証）。単一記事の跳ねを均すため複数記事の合算バスケットを1系列とする。"""
+    by_code = {s["code"]: s for s in WIKIMEDIA_SERIES}
+    assert set(by_code) == {"JP_WIKI_MARKET_ATTN", "JP_WIKI_MACRO_ATTN"}
+    for s in WIKIMEDIA_SERIES:
+        assert len(s["articles"]) >= 2
+        assert s["category"] == "attention"
+    assert "http" in WIKIMEDIA_UA or "@" in WIKIMEDIA_UA
+
+
+def test_fetch_wikimedia_pageviews_sums_basket_and_sends_user_agent():
+    """バスケットは日付キーで合算。欠測日（API が項目ごと落とす）は 0 埋めせず、
+    その記事の寄与なしとして扱う（記事の増減で水準に段差を作らない）。"""
+    import asyncio
+    seen_ua = []
+
+    async def run():
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen_ua.append(request.headers.get("user-agent"))
+            if "A" in str(request.url):
+                return httpx.Response(200, json=_wiki_json("A", [("20240101", 10),
+                                                                 ("20240102", 20)]))
+            return httpx.Response(200, json=_wiki_json("B", [("20240102", 5)]))
+        async with _REAL_ASYNC_CLIENT(transport=httpx.MockTransport(handler)) as s:
+            return await fetch_wikimedia_pageviews(s, ["A", "B"], "20240101", "20240102")
+    with patch.object(collector_prices, "WIKIMEDIA_RATE_SLEEP", 0):
+        rows = asyncio.run(run())
+    assert [(r["trade_date"], r["close"]) for r in rows] == [
+        ("2024-01-01", 10.0),   # B は欠測 → 0 を足さない
+        ("2024-01-02", 25.0),
+    ]
+    assert all(ua == WIKIMEDIA_UA for ua in seen_ua)
+
+
+def test_fetch_wikimedia_pageviews_skips_missing_article():
+    """存在しない記事は 404。その記事だけ落として残りで合算を続ける（graceful skip）。"""
+    import asyncio
+
+    async def run():
+        def handler(request: httpx.Request) -> httpx.Response:
+            if "MISSING" in str(request.url):
+                return httpx.Response(404, json={"type": "not_found"})
+            return httpx.Response(200, json=_wiki_json("A", [("20240101", 7)]))
+        async with _REAL_ASYNC_CLIENT(transport=httpx.MockTransport(handler)) as s:
+            return await fetch_wikimedia_pageviews(s, ["MISSING", "A"], "20240101", "20240101")
+    with patch.object(collector_prices, "WIKIMEDIA_RATE_SLEEP", 0):
+        rows = asyncio.run(run())
+    assert rows == [{"trade_date": "2024-01-01", "open": None, "high": None,
+                     "low": None, "close": 7.0, "volume": None}]
+
+
+def test_fetch_wikimedia_pageviews_all_fail_returns_empty():
+    import asyncio
+
+    async def run():
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(403, text="Please respect our robot policy")
+        async with _REAL_ASYNC_CLIENT(transport=httpx.MockTransport(handler)) as s:
+            return await fetch_wikimedia_pageviews(s, ["A"], "20240101", "20240101")
+    with patch.object(collector_prices, "WIKIMEDIA_RATE_SLEEP", 0):
+        rows = asyncio.run(run())
+    assert rows == []

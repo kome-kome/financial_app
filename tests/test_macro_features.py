@@ -74,6 +74,13 @@ def test_macro_feature_map_keys():
     # #404 政策不確実性チャネル（EPU は常に正の水準指数 → 指数系と同じ zscore 規約）
     assert _MACRO_FEATURE_MAP["macro_us_epu_zscore"]        == ("US_EPU",        "zscore")
     assert _MACRO_FEATURE_MAP["macro_us_equity_epu_zscore"] == ("US_EQUITY_EPU", "zscore")
+    # #406 ニューストーン／関心度チャネル。トーンは正負を跨ぐため yoy 不可、報道量・閲覧数は
+    # 「平時比でどれだけ注目されているか」がレジーム情報 → いずれも zscore 規約。
+    assert _MACRO_FEATURE_MAP["macro_jp_news_tone_zscore"]        == ("JP_NEWS_TONE",       "zscore")
+    assert _MACRO_FEATURE_MAP["macro_jp_news_econ_tone_zscore"]   == ("JP_NEWS_ECON_TONE",  "zscore")
+    assert _MACRO_FEATURE_MAP["macro_jp_news_econ_vol_zscore"]    == ("JP_NEWS_ECON_VOL",   "zscore")
+    assert _MACRO_FEATURE_MAP["macro_jp_wiki_market_attn_zscore"] == ("JP_WIKI_MARKET_ATTN", "zscore")
+    assert _MACRO_FEATURE_MAP["macro_jp_wiki_macro_attn_zscore"]  == ("JP_WIKI_MACRO_ATTN",  "zscore")
     for fname, (scode, ttype) in _MACRO_FEATURE_MAP.items():
         assert ttype in ("yoy", "zscore"), f"{fname} の transform が不正"
 
@@ -93,25 +100,47 @@ def test_default_macro_features_excludes_ice_truncated_series():
     # 非ICE代替は既定に含める
     assert "macro_baa_spread_zscore" in DEFAULT_MACRO_FEATURES
     # 既定は「全選択肢 − ICE truncated − 昇格ゲート未通過（#404）」で構成される
-    from plugins.macro_snapshots import _PENDING_EVAL_FEATURES, _STRICT_TRUNCATED_FEATURES
-    assert _STRICT_TRUNCATED_FEATURES == {"macro_hy_oas_zscore", "macro_ig_oas_zscore"}
-    assert set(DEFAULT_MACRO_FEATURES) == (
-        option_values - _STRICT_TRUNCATED_FEATURES - _PENDING_EVAL_FEATURES
+    from plugins.macro_snapshots import (
+        _GATE_REJECTED_FEATURES, _PENDING_EVAL_FEATURES, _STRICT_TRUNCATED_FEATURES,
     )
+    assert _STRICT_TRUNCATED_FEATURES == {"macro_hy_oas_zscore", "macro_ig_oas_zscore"}
+    excluded = _STRICT_TRUNCATED_FEATURES | _PENDING_EVAL_FEATURES | _GATE_REJECTED_FEATURES
+    assert set(DEFAULT_MACRO_FEATURES) == option_values - excluded
     # 除外セットはいずれも選択肢の部分集合（typo で「効かない除外」を作らない）
-    assert (_STRICT_TRUNCATED_FEATURES | _PENDING_EVAL_FEATURES) <= option_values
+    assert excluded <= option_values
+    # 未実測（保留）と実測済み非有意（棄却）は別枠＝重複しない
+    assert not (_PENDING_EVAL_FEATURES & _GATE_REJECTED_FEATURES)
 
 
 def test_epu_features_promoted_to_default():
     """#404 / ADR-0023: EPU 2系列は昇格ゲート（M-6 の売り側 spread +0.0032・p=0.001・
-    Bonferroni α=0.0125 通過）をクリアしたため既定に含める。保留枠
-    `_PENDING_EVAL_FEATURES` は空＝現在保留中の系列は無い。"""
+    Bonferroni α=0.0125 通過）をクリアしたため既定に含める。"""
     from plugins.macro_snapshots import DEFAULT_MACRO_FEATURES, _PENDING_EVAL_FEATURES
     option_values = {o["value"] for o in MACRO_FEATURE_OPTIONS}
     for f in ("macro_us_epu_zscore", "macro_us_equity_epu_zscore"):
         assert f in option_values
         assert f in DEFAULT_MACRO_FEATURES
-    assert _PENDING_EVAL_FEATURES == set()
+        assert f not in _PENDING_EVAL_FEATURES
+
+
+def test_attention_features_registered_but_gate_rejected():
+    """#406 / ADR-0024: GDELT ニューストーン／報道量・Wikipedia 閲覧数の5系列は **選択肢
+    としては使えるが既定には入れない**。`scripts/macro_feature_bakeoff.py --preset attention`
+    の実測（3,979社・43ヶ月・57,955サンプル・9 fold）で4検定すべて非有意だったため
+    `_GATE_REJECTED_FEATURES`（実測済み・棄却）に置く——未実測の `_PENDING_EVAL_FEATURES`
+    とは区別する。"""
+    from plugins.macro_snapshots import DEFAULT_MACRO_FEATURES, _GATE_REJECTED_FEATURES
+    option_values = {o["value"] for o in MACRO_FEATURE_OPTIONS}
+    attention = {
+        "macro_jp_news_tone_zscore",
+        "macro_jp_news_econ_tone_zscore",
+        "macro_jp_news_econ_vol_zscore",
+        "macro_jp_wiki_market_attn_zscore",
+        "macro_jp_wiki_macro_attn_zscore",
+    }
+    assert attention <= option_values
+    assert attention <= _GATE_REJECTED_FEATURES
+    assert not (attention & set(DEFAULT_MACRO_FEATURES))
 
 
 def test_macro_map_options_consistency():
