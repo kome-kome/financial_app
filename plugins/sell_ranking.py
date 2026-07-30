@@ -40,7 +40,7 @@ SELL_METRICS = ["gap_ratio", "roe", "op_margin", "cf_ratio", "rev_growth", "equi
 PRESETS = {
     # マクロ予測型: μ（期待リターン）と −Rᴹ（マクロリスク）の2軸のみで売り候補を判定する既定プリセット。
     # スコアは Σw(-z)/Σw で正規化されるため比率のみ有意（μ を主・リスクを従に）。両シグナルとも
-    # 選択 μ モデル（既定 M-2）の実行結果に依存し、未実行なら全保有が「データ不足」になる（§10.5）。
+    # 選択 μ モデル（既定 M-6）の実行結果に依存し、未実行なら全保有が「データ不足」になる（§10.5）。
     "マクロ予測型": {"mu": 1.0, "neg_r_macro": 0.5},
     "バランス型":   {"gap_ratio": 1.0, "roe": 1.0, "op_margin": 1.0, "cf_ratio": 0.8, "rev_growth": 0.6, "equity_ratio": 0.4, "nc_ratio": 0.4, "mu": 0.5, "neg_r_macro": 0.3},
     "割高警戒型":   {"gap_ratio": 2.5, "roe": 0.5, "op_margin": 0.5, "rev_growth": 0.3, "nc_ratio": 0.8, "neg_r_macro": 0.8},
@@ -258,8 +258,8 @@ class SellRankingPlugin(AnalysisPlugin):
                     {"value": "macro_ensemble",    "label": "M-4: 兄弟μ̂スタッキング（M-1+M-2 統合）"},
                     {"value": "macro_enet",        "label": "M-6: マクロ×財務 正則化線形（ElasticNet）"},
                 ],
-                "default": "macro_gbdt",
-                "description": "売りスコアの μ / −R_macro 観点に使う推奨モデル（既定 M-2）。未実行なら graceful-degrade（μ除外）。",
+                "default": "macro_enet",
+                "description": "売りスコアの μ / −R_macro 観点に使う推奨モデル（既定 M-6）。未実行なら graceful-degrade（μ除外）。",
             },
             "r3_gate": {
                 "type": "slider", "dtype": "float",
@@ -283,7 +283,7 @@ class SellRankingPlugin(AnalysisPlugin):
         timing_adj   = params["timing_adjust"]
         min_coverage = params["min_coverage"]
         year         = params["year"]
-        mu_source    = params.get("mu_source", "macro_risk_return")
+        mu_source    = params.get("mu_source", "macro_enet")
 
         total_weight = sum(weights.values())
         if not holdings or total_weight == 0:
@@ -303,9 +303,9 @@ class SellRankingPlugin(AnalysisPlugin):
             uni_q = uni_q.filter(FinancialMetric.year == int(year))
         universe = uni_q.all()
 
-        # ── 期待リターン μ producer スコア（mu_source で M-1/M-2 切替・graceful-degrade）──
-        # ADR-0004: mu_source=macro_risk_return / macro_gbdt（既定）/ macro_dlm /
-        # macro_ensemble / macro_enet。いずれも
+        # ── 期待リターン μ producer スコア（mu_source で M-1/M-2 等を切替・graceful-degrade）──
+        # ADR-0004: mu_source=macro_risk_return / macro_gbdt / macro_dlm /
+        # macro_ensemble / macro_enet（既定・#402 で M-2 から切替・ADR-0022）。いずれも
         # read_producer_scores が {edinet_code: {mu, r_macro, r1_prime}} を返す共通契約。
         # r_macro は共有 macro_beta 由来でモデル非依存（neg_r_macro は mu_source に依らず不変）。
         import datetime as _dt

@@ -366,12 +366,14 @@ class TestMuSource:
         assert res["mu_source"] == "macro_gbdt"
         assert res["count"] == 1
 
-    def test_default_mu_source_is_m2(self, db, make_metric):
+    def test_default_mu_source_is_m6(self, db, make_metric):
+        """既定 μ 出所は M-6（#402・ADR-0022）。売り側 OOF 指標で M-2 を有意に上回るため
+        切替済み（M-2 は選択肢として残る）。"""
         self._seed_universe(db, make_metric)
-        # mu_source 未指定 → coerce が default=macro_gbdt（M-2）補完
+        # mu_source 未指定 → coerce が default=macro_enet（M-6）補完
         res = _run({"holdings": "1001", "weights": {"roe": 1.0},
                     "min_coverage": 0.0}, db)
-        assert res["mu_source"] == "macro_gbdt"
+        assert res["mu_source"] == "macro_enet"
 
     def test_r3_gate_active_under_macro_gbdt(self, db, make_metric):
         """R3 足切りゲート再有効化（Issue #365）: M-2 は r1_prime=コンフォーマル区間半幅を

@@ -956,6 +956,38 @@ class TestOofBacktest:
         assert m["spearman_mean"] is None
         assert m["p_value"] is None
 
+    # ── 売り側（ショート側）識別力（Issue #402）─────────────────────────────
+
+    def test_short_side_spread_positive_when_bottom_underperforms(self):
+        """完全順序なら bottom 分位は市場平均を下回る → spread 正・hit-rate 1.0。"""
+        r = {"2020-01": self._ramp(), "2020-02": self._ramp()}
+        o = oof_backtest(r, n_quantiles=5)
+        # y=0.00..0.19 → 全体平均 0.095・bottom 分位(4件)平均 0.015
+        assert o["short_side_spread"] == pytest.approx(0.08, abs=1e-6)
+        assert o["short_side_hit_rate"] == 1.0
+        assert set(o["short_side_spread_by_period"]) == {"2020-01", "2020-02"}
+
+    def test_short_side_spread_negative_on_reverse_order(self):
+        """μ̂ 下位が実際は勝つ（逆順）→ 売り側 spread 負・hit-rate 0.0。"""
+        r = {"m": [(i * 0.01, -i * 0.01) for i in range(20)]}
+        o = oof_backtest(r, n_quantiles=5)
+        assert o["short_side_spread"] < 0
+        assert o["short_side_hit_rate"] == 0.0
+
+    def test_short_side_benchmark_is_all_sample_mean_not_quantile_mean(self):
+        """分位サイズが不均一（m%n_quantiles≠0）でもベンチは全サンプル平均。"""
+        r = {"m": [(i * 0.01, i * 0.01) for i in range(7)]}   # n_quantiles=2 → 3件/4件
+        o = oof_backtest(r, n_quantiles=2)
+        # 全体平均 0.03 − bottom(3件)平均 0.01 = 0.02（分位平均の単純平均 0.0275 ではない）
+        assert o["short_side_spread"] == pytest.approx(0.02, abs=1e-6)
+
+    def test_short_side_none_when_no_quantile_periods(self):
+        r = {"m": [(0.1, 0.2), (0.2, 0.1), (0.3, 0.3)]}  # 分位計算対象外
+        o = oof_backtest(r, n_quantiles=5)
+        assert o["short_side_spread"] is None
+        assert o["short_side_hit_rate"] is None
+        assert o["short_side_spread_by_period"] == {}
+
 
 # ── 7. producer μ̂ 永続化（sell_ranking 連携・ADR-0004）───────────────────────
 

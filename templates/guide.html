@@ -409,7 +409,7 @@ td code,p code,li code{background:var(--bg-sunken);border:1px solid var(--border
   </ul>
 
   <h3>⚠ 注意点・落とし穴</h3>
-  <div class="warn-box">売り候補ランキングの<strong>既定の出所は M-2 のまま</strong>です。実績では M-6 が上回っていますが、切り替えると売り判定の並びが全面的に変わるため、バックテストで確かめてから既定を変える方針です。M-6 を使いたいときは「μ の出所」で明示的に選んでください。</div>
+  <div class="warn-box">売り候補ランキングの<strong>既定の出所は M-6 になりました</strong>（#402）。「売り候補として当たっていたか」だけを測る指標（市場平均より、いちばん期待リターンが低いグループがどれだけ下回ったか）で M-6 が M-2 を有意に上回ったためです。従来の M-2 を使いたいときは「μ の出所」で明示的に選び直せます。</div>
 
   <div class="more">→ もっと詳しく：<a href="/models#m15">モデル解説：M-6 マクロ×財務 正則化線形（ElasticNet）</a></div>
 </div>
@@ -457,7 +457,7 @@ td code,p code,li code{background:var(--bg-sunken);border:1px solid var(--border
     <li>実行すると、売り点数の高い順に並び、<strong>売却 / 一部売却 / 保有継続</strong>の札が付きます。</li>
   </ul>
   <div class="info-box">各観点は同じ年の全社の中で「平均よりどれくらい良い／悪いか」（<span class="term" data-tip="平均=0、+で平均以上、−で平均以下の点数。">Zスコア</span>）に直してから合計するので、観点の単位の違いに引きずられません。「割高度」を使うには先に<a href="/guide#sector_ols" style="color:var(--status-good-text)">業種別OLS分析</a>を実行してください。</div>
-  <div class="info-box">売り判断に加味する「<strong>今後の伸びしろ（期待リターン）</strong>」の見立ては、<a href="/guide#macro_risk_return" style="color:var(--status-good-text)">M-1</a>・<a href="/guide#macro_gbdt" style="color:var(--status-good-text)">M-2</a>・<a href="/guide#macro_dlm" style="color:var(--status-good-text)">M-3</a>・<a href="/guide#macro_ensemble" style="color:var(--status-good-text)">M-4</a>・<a href="/guide#macro_enet" style="color:var(--status-good-text)">M-6</a> の予測モデルから「μ の出所」トグルで選べます（既定は M-2）。<strong>手元（ローカル）で一度動かしたモデルだけが選択肢に出ます</strong>。未実行のモデルを選んでもその成分は自動で外れるので、まずは既定のままでも問題ありません。</div>
+  <div class="info-box">売り判断に加味する「<strong>今後の伸びしろ（期待リターン）</strong>」の見立ては、<a href="/guide#macro_risk_return" style="color:var(--status-good-text)">M-1</a>・<a href="/guide#macro_gbdt" style="color:var(--status-good-text)">M-2</a>・<a href="/guide#macro_dlm" style="color:var(--status-good-text)">M-3</a>・<a href="/guide#macro_ensemble" style="color:var(--status-good-text)">M-4</a>・<a href="/guide#macro_enet" style="color:var(--status-good-text)">M-6</a> の予測モデルから「μ の出所」トグルで選べます（既定は M-6）。<strong>手元（ローカル）で一度動かしたモデルだけが選択肢に出ます</strong>。未実行のモデルを選んでもその成分は自動で外れるので、まずは既定のままでも問題ありません。</div>
 
   <h3>⚠ 注意点・落とし穴</h3>
   <div class="warn-box">これは「いつ売れば儲かる」を当てるものではなく、<strong>持ち株を見直すきっかけ</strong>です。全部が優良なら全銘柄「保有継続」になります。ETF や外国株など未収録の銘柄は判定できません。</div>

@@ -866,7 +866,9 @@ $$
 
 ここで $z_i$ は指標 $i$ のユニバース標準化値（±5 にクリップ）、$w_i$ は「その観点を売り判断でどれだけ重視するか」を表す**非負ウェイト**。符号反転 $(-z_i)$ により、ユニバース平均より劣る（割高・低収益・低成長）銘柄ほどスコアが正に大きくなる。ユニバース平均並みの銘柄は ≈0。値が揃う重み付き指標の比率（カバレッジ）が下限を下回る銘柄は「データ不足」とする。
 
-プリセット（`マクロ予測型`（**既定**）/ `バランス型` / `割高警戒型` / `業績悪化重視`）は $w_i$ の既定値、UI でスライダー上書き可（スライダーは既定で折りたたみ表示）。**マクロ予測型**は期待リターン μ（`mu`）とマクロリスク −Rᴹ（`neg_r_macro`）の2軸のみを用いる（スコアは $\sum w_i(-z_i)/\sum w_i$ で正規化されるため両者の**比率のみ有意**・既定 1.0 : 0.5）。μ の出所（`mu_source`）は M-1（`macro_risk_return`）／M-2（`macro_gbdt`・**既定**）／M-3（`macro_dlm`）／M-4（`macro_ensemble`）／M-6（`macro_enet`・#396）から選ぶ。**R3 足切りゲートが効くのは `r1_prime` を持つ M-1・M-2・M-6 のみ**（M-3/M-4 は不在＝無効）。
+プリセット（`マクロ予測型`（**既定**）/ `バランス型` / `割高警戒型` / `業績悪化重視`）は $w_i$ の既定値、UI でスライダー上書き可（スライダーは既定で折りたたみ表示）。**マクロ予測型**は期待リターン μ（`mu`）とマクロリスク −Rᴹ（`neg_r_macro`）の2軸のみを用いる（スコアは $\sum w_i(-z_i)/\sum w_i$ で正規化されるため両者の**比率のみ有意**・既定 1.0 : 0.5）。μ の出所（`mu_source`）は M-1（`macro_risk_return`）／M-2（`macro_gbdt`）／M-3（`macro_dlm`）／M-4（`macro_ensemble`）／M-6（`macro_enet`・**既定**・#396）から選ぶ。**R3 足切りゲートが効くのは `r1_prime` を持つ M-1・M-2・M-6 のみ**（M-3/M-4 は不在＝無効）。
+
+> **既定 μ 出所の選定根拠（#402・ADR-0022）**: 既定は M-2 → **M-6** へ切替済み。判定は `oof_backtest` の**売り側指標**（`short_side_spread`＝期内全体平均−最低 μ̂ 分位平均・§11.7.2）で行う（ロングショート spread は top 分位の強さに引っ張られ売り判定の質を測れないため）。同一共通域（3,979社・9 fold・OOF 13,539ペア・honest/embargo=12）の実測は **M-6 +0.0656 > M-4 +0.0645 > M-1 +0.0581 > M-2 +0.0511**、M-6−M-2 は +0.0145・95%CI[+0.0072,+0.0219]・p=0.001 で**有意**、M-4−M-6 は p=0.655 で互角（統合は単体を超えない＝ADR-0015 と同じ判定）。**買い側 rank-IC の順位とは一致しない**（M-2 は rank-IC 0.1419 > M-1 0.1142 だが売り側では逆転）＝売り既定の選定に買い側指標を使ってはいけないことの実証。再現は `python -m scripts.sell_mu_source_bakeoff`。
 
 ### 10.3 価格モメンタム（タイミング軸）
 
@@ -890,7 +892,7 @@ $$
 1. 割高度（`gap_ratio`）には §2 業種別OLS（`regression_results`）の事前実行が必要（`depends_on=["sector_ols"]`）。未実行なら runner が 400 を返す
 2. 保有コードは証券コード4桁。DB 未収録（ETF・外国株・未上場）は `not_found` に集約し判定対象外
 3. 価格モメンタムは週次株価履歴の蓄積に依存（不足時は `不明` で補正なし）
-4. **マクロ予測型プリセット（既定）は μ・−Rᴹ の両方が選択 μ モデル（既定 M-2 `macro_gbdt`・要ローカル実行）の実行結果に依存する**（`neg_r_macro` も `mu_scores` の `r_macro` 由来）。モデル未実行なら両シグナルが欠損し、全保有が score=None＝「データ不足」になる（UI は `mu_available:false` 注記で理由を表示）。他観点も併用したい場合はスライダーで手動追加するか別プリセットを選ぶ
+4. **マクロ予測型プリセット（既定）は μ・−Rᴹ の両方が選択 μ モデル（既定 M-6 `macro_enet`・要ローカル実行）の実行結果に依存する**（`neg_r_macro` も `mu_scores` の `r_macro` 由来）。モデル未実行なら両シグナルが欠損し、全保有が score=None＝「データ不足」になる（UI は `mu_available:false` 注記で理由を表示）。他観点も併用したい場合はスライダーで手動追加するか別プリセットを選ぶ
 5. 投資助言ではなく、保有整理の参考スコアにすぎない
 
 ### 10.6 参考文献
@@ -1012,6 +1014,8 @@ M-1（§9）と同一形式で散布図・効用・フロンティアの client 
     "rank_ic": {"mean": 0.03, "std": 0.11, "n": 24},   // Spearman(μ̂, y) を fold 毎
     "rank_ic_industry_neutral": {"mean": 0.02, "n": 22},  // 業種内順位デミーン後（#368・§9.13）
     "long_short_spread": 0.018, "hit_rate": 0.58,
+    "short_side_spread": 0.012, "short_side_hit_rate": 0.73,  // 売り側識別力（#402・§11.7.2）
+    "short_side_spread_by_period": {"2024-01": 0.014, ...},   // per-fold 系列（差の有意性検定用）
     "effective_turnover": 0.31, "breakeven_cost_bps": 290.0,  // 実効回転・ブレークイーブン片道bp（#368）
     "long_short_spread_net_turnover": 0.018, "annual_turnover": 1.24   // cost_bps=0 なら net=gross
   }
@@ -1020,7 +1024,7 @@ M-1（§9）と同一形式で散布図・効用・フロンティアの client 
 
 ### 11.7 アウトオブサンプル検証（OOF）と売り推奨連携（ADR-0004）
 
-M-2 の `execute()` は walk-forward CV の**無リーク OOF 予測**（`{test_ym:[(yhat,y_true),…]}`）から、**再学習・追加価格取得なしで** `oof_backtest` を返す。指標は ① **分位リターン**（各期で μ̂ を横断ランク→分位→分位平均実現リターン→期間平均＝per-period cross-sectional・μ̂ 水準の時系列ドリフトに頑健）、② **rank-IC**（Spearman(μ̂, y) を fold 毎→平均±std）、③ **ロングショート spread**（top−bottom 分位）、④ **hit-rate**（top>bottom だった期の割合）、⑤ **区間被覆率**（`interval_coverage`＝コンフォーマル区間の honest walk-forward 実測被覆率・§11.7.1）。**既存「バックテスト」（§7・preset/as-of のポートフォリオ模擬）とは別概念**で「予測 μ̂ が将来リターンを順序付けるか」を測る（用語は CONTEXT.md「[[アウトオブサンプル検証]]」）。共有ヘルパ `plugins/macro_snapshots.py::oof_backtest`。
+M-2 の `execute()` は walk-forward CV の**無リーク OOF 予測**（`{test_ym:[(yhat,y_true),…]}`）から、**再学習・追加価格取得なしで** `oof_backtest` を返す。指標は ① **分位リターン**（各期で μ̂ を横断ランク→分位→分位平均実現リターン→期間平均＝per-period cross-sectional・μ̂ 水準の時系列ドリフトに頑健）、② **rank-IC**（Spearman(μ̂, y) を fold 毎→平均±std）、③ **ロングショート spread**（top−bottom 分位）、④ **hit-rate**（top>bottom だった期の割合）、⑤ **区間被覆率**（`interval_coverage`＝コンフォーマル区間の honest walk-forward 実測被覆率・§11.7.1）、⑥ **売り側 spread**（`short_side_spread`＝期内全体平均−最低 μ̂ 分位平均・§11.7.2）。**既存「バックテスト」（§7・preset/as-of のポートフォリオ模擬）とは別概念**で「予測 μ̂ が将来リターンを順序付けるか」を測る（用語は CONTEXT.md「[[アウトオブサンプル検証]]」）。共有ヘルパ `plugins/macro_snapshots.py::oof_backtest`。
 
 あわせて per-stock μ̂ と `r1_prime` を `macro_gbdt_scores` テーブルへ**全置換で永続化**し（`sector_ols`→`regression_results` と同型・producer.execute 直書き）、**売り候補ランキング（§10）が `mu_source` トグル**（既定 `macro_risk_return`＝M-1／`macro_gbdt`＝M-2）で読む。M-2 の `read_producer_scores` は M-1 と同一形 `{mu, r_macro, r1_prime}` を返す（`r_macro` は共有 `macro_beta`）。**`r1_prime` は §11.7.1 のコンフォーマル区間半幅**で埋め、**R3 足切りゲートは M-2 選択時も機能する**（#365・ADR-0020。列未 migration / 旧スナップショットの `r1_prime=None` はゲート素通り）。
 
@@ -1029,6 +1033,27 @@ M-2 の `execute()` は walk-forward CV の**無リーク OOF 予測**（`{test_
 XGBoost は OLS のような閉形式の予測 SE を持たない。代わりに**無リーク OOF 残差 |resid| の τ 分位（既定 τ=0.9）を区間半幅**とする**分割コンフォーマル**（Lei et al. 2018）で確実性軸 `r1_prime` を与える。marginal 版（全銘柄一定半幅）は sell_ranking の R3 足切りゲートを全通過/全遮断の二択に退化させるため、**既存 R3 バケット（業種×サイズ三分位）条件付き**で per-stock 化する（`_compute_r3_buckets`／`_r3_for` と同一の bucket→sector→global フォールバック規約・標本数 <`CONFORMAL_MIN_BUCKET`=20 は下位粒度へ）。R3（=√平均二乗残差＝リスク軸）と同一残差から出るが役割は別（`r1_prime`=|resid| の τ分位＝**確実性軸**）。共有ヘルパ `conformal_bucket_halfwidths` / `conformal_halfwidth_for`（`macro_snapshots.py`・M-1/M-2 family-wide）。
 
 被覆診断は `oof_backtest` に `interval_coverage`（honest walk-forward: 各 test 期をそれより過去の全 |resid| で較正した半幅で被覆判定→標本加重平均）を追加し、`model_comparison`（`/api/backtest/model-comparison`）へ**全モデル横並びで表示**（理想は ≈`interval_tau`）。追加学習・Egress ゼロの純後処理。
+
+#### 11.7.2 売り側（ショート側）識別力（#402・ADR-0022・全モデル横断）
+
+下流の売り候補ランキング（§10）は μ̂ の**下位**を売る。ところが `long_short_spread`（top−bottom）は **top 分位の強さに引っ張られる**ため、「買い候補としては強いが売り候補の見分けは弱い」モデルでも大きく出る。μ 出所（`mu_source`）を売り判定基準で選ぶには売り側専用の指標が必要になる。
+
+$$
+\text{売り側 spread} = \frac{1}{T}\sum_{t=1}^{T}\Big(\overline{y}_t - \overline{y}_t^{\,(q_1)}\Big)
+$$
+
+$\overline{y}_t$ は期 $t$ の**全サンプル平均**実現リターン（分位サイズが端数で不均一になるため分位平均の単純平均は使わない）、$\overline{y}_t^{(q_1)}$ は最低 μ̂ 分位の平均。ロングオンリーの保有者にとっての売りの価値＝「市場平均を下回る銘柄をどれだけ回避できたか」を測る（**大きいほど有効**）。あわせて `short_side_hit_rate`（成立期の割合）と per-fold 系列 `short_side_spread_by_period`（`model_stats.paired_ic_significance` で候補間の差を検定する入力）を返す。追加学習・Egress ゼロの純後処理で、`oof_backtest` を呼ぶ**全モデルへ自動的に波及**する（モデル比較 UI にも表示）。
+
+実測（同一共通域・3,979社・9 fold・OOF 13,539ペア・honest/embargo=12）:
+
+| モデル | 売り側 spread | 売り勝率 | 最低分位リターン | rank-IC（参考） |
+|---|---|---|---|---|
+| **M-6（ElasticNet・新既定）** | **+0.0656** | 88.9% | **+0.0556** | +0.1713 |
+| M-4（3基底統合） | +0.0645 | 88.9% | +0.0567 | +0.1720 |
+| M-1（OLS） | +0.0581 | 100% | +0.0631 | +0.1142 |
+| M-2（XGBoost・旧既定） | +0.0511 | 88.9% | +0.0701 | +0.1419 |
+
+**M-2 は rank-IC で M-1 を上回るのに売り側では下回る**（順位が逆転する）＝売り既定の選定に買い側指標を流用してはいけないことの実証。再現は `python -m scripts.sell_mu_source_bakeoff`（ローカル pickle キャッシュ利用・本番 Egress ゼロ）。
 
 ### 11.8 将来エンハンス
 
@@ -1366,11 +1391,12 @@ rank-IC で有意に上回った**ため正式兄弟へ昇格した（8 候補�
 
 - **producer あり**（#396 で追加）。予測は M-1/M-2 と同じ 52 週先対数リターン単位のため、
   `macro_enet_scores`（`macro_gbdt_scores` と同型・`r1_prime` 付き）へ全置換永続化し、
-  `sell_ranking` の `mu_source="macro_enet"` へ供給する。**既定 `mu_source` は M-2 のまま**
-  （切替は売り判定の出力が全面的に変わるため、`/api/backtest` の `sell` source で事後検証して
-  から別途判断する）。順位スコアで水準を持たない M-5 と異なり、M-6 は水準を持つため統合できる。
-- 線形モデルのため、M-2 が捉える fin×macro の高次交互作用は表現できない。両者は**補完関係**にあり、
-  M-4（兄弟μ̂スタッキング）へ M-6 を加える拡張が自然な次の一手になる（未実施）。
+  `sell_ranking` の `mu_source="macro_enet"` へ供給する。**#402（ADR-0022）で既定 `mu_source`
+  は M-2 → M-6 へ切替済み**（売り側 OOF 指標 `short_side_spread` で +0.0145・p=0.001 の有意優位・
+  §10.2 の選定根拠を参照）。順位スコアで水準を持たない M-5 と異なり、M-6 は水準を持つため統合できる。
+- 線形モデルのため、M-2 が捉える fin×macro の高次交互作用は表現できない。両者は**補完関係**とみて
+  M-4（兄弟μ̂スタッキング）へ M-6 を加えたが（#397）、統合は M-6 単体を rank-IC（p=0.810）でも
+  売り側 spread（p=0.655）でも上回らなかった（ADR-0015 の「単体で十分」判定に該当）。
 - `results` は上位 `top_n` 件のみ返す（汎用レンダラが全社数千行の DOM を吐かないようにするため）。
 
 ### 16.5 参考文献
