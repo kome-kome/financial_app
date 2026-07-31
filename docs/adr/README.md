@@ -19,7 +19,7 @@
 | [0013](0013-commodity-channel-expansion.md) | コモディティ価格チャネルを日次8系列へ拡張（Yahoo Finance v8 chart API 流用） | #358 | accepted（2026-07-20） |
 | [0014](0014-purge-embargo-walk-forward.md) | walk-forward CV に purge/embargo を導入し 52週先ラベルの前方リークを遮断 | #363 | accepted（2026-07-22） |
 | [0015](0015-m4-ensemble-stacking.md) | M-4 兄弟μ̂スタッキング・アンサンブル（基底 OOF μ̂ の二段ウォークフォワード統合） | #367 | accepted（2026-07-23） |
-| [0016](0016-ice-bofa-truncation-baa-credit-proxy.md) | FRED ICE BofA 系列の履歴制限（ローリング3年）に対し非ICE代替 `BAA_SPREAD` へ既定差替 | #381 | accepted（2026-07-24） |
+| [0016](0016-ice-bofa-truncation-baa-credit-proxy.md) | FRED ICE BofA 系列の履歴制限（ローリング3年）に対し非ICE代替 `BAA_SPREAD` へ既定差替（追試 2026-08-01: strict はもう律速していない） | #381, #411 | accepted（2026-07-24） |
 | [0017](0017-m5-learning-to-rank.md) | M-5 マクロ×財務 ランク学習（`XGBRanker`・M-2 の rank-IC 整合版・producer なし） | #362 | accepted（2026-07-24） |
 | [0018](0018-oof-turnover-and-industry-neutral-ic.md) | OOF バックテストの現実性強化（業種中立 rank-IC＋ネットターンオーバーコスト） | #368 | accepted（2026-07-25） |
 | [0019](0019-m2-monotone-constraints-economic-sign-priors.md) | M-2 に `monotone_constraints` で経済符号の事前知識を注入（既定 OFF トグル） | #366 | accepted（2026-07-25） |

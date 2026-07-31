@@ -20,8 +20,11 @@ companies / macro_data のみ本番から 1 回 pull する。キャッシュが
   offline でも本番と同じ 24ヶ月/約71.2k サンプルを再現する＝実測で確認済み）。
 - M-1 strict のスナップショットは以前 HY_OAS/IG_OAS の収集開始（2023-06）に律速され 24ヶ月しか
   無く fold が 2 期しか立たなかったが、#381（ADR-0016）で既定の信用ファクターを非ICE代替
-  BAA_SPREAD（BAA10Y・2016〜・非truncated）へ移し HY_OAS/IG_OAS を既定から除外した。以降の律速は
-  コモディティ8系列（2020-07 開始）まで緩み、M-1 の n_periods が実用水準（≥8）へ回復する。
+  BAA_SPREAD（BAA10Y・2016〜・非truncated）へ移し HY_OAS/IG_OAS を既定から除外した。これで
+  M-1 の n_periods は実用水準（≥8）へ回復した。**2026-08-01 の実測（`python -m
+  scripts.measure_strict_binding`）では strict / nan_ok / マクロ無しの母集団が完全一致し、
+  strict はもう1行も落としていない**＝現在の学習窓は週次株価・財務のデータ履歴長で決まる
+  （Issue #411）。マクロ既定を弄っても fold 数は増えない。
 
 実行: `python -m scripts.measure_embargo_impact`（`-m` 必須・[[feedback_scripts_dir_needs_module_invocation]]）
 出力は ASCII のみ（Windows cp932 リダイレクト対策・[[feedback_windows_cp932_stdout_symbols]]）。

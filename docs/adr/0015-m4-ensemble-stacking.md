@@ -124,8 +124,8 @@ config** で再測した（honest embargo=12・同一キャッシュ価格）:
 
 #381（ADR-0016）で真因が判明した——`HY_OAS`/`IG_OAS`（FRED ICE BofA）は 2026-04 以降ローリング3年窓に
 制限され再収集でも遡れない。既定の信用ファクターを非ICE代替 `BAA_SPREAD`（`BAA10Y`=Baa−10Y・2016〜）へ
-移し `HY_OAS`/`IG_OAS` を既定から除外した結果、strict の律速がコモディティ8系列（2020-07）まで緩み
-**fold が実用水準へ回復**した（honest embargo=12・同一キャッシュ価格）:
+移し `HY_OAS`/`IG_OAS` を既定から除外した結果、**fold が実用水準へ回復**した（honest embargo=12・
+同一キャッシュ価格）:
 
 | 対象 | rank-IC | long-short | n_oof（fold 数） |
 |---|---|---|---|
@@ -172,6 +172,12 @@ p=0.002）ことを受け、**基底を M-1+M-2 → M-1+M-2+M-6 へ拡張**し�
 `python -m scripts.ensemble_base_bakeoff`。パネル: 3,979 社 / 9 fold / 共通 OOF 13,539 ペア。
 **M-6 は M-2 と build を共有するため共通 (ym,ec) 域は 2 基底時と完全に同一（13,539 で不変）**
 ＝2基底 vs 3基底の比較も母集団差を含まない（当初 caveat として想定した狭まりは起きなかった）。
+
+> **共通域を狭めているレグ（2026-08-01 実測・Issue #411・`python -m scripts.measure_strict_binding`）**:
+> M-1 build（strict・交差項あり）は **47ヶ月 / 111,210 サンプル**、M-2 build（交差項なし・価格特徴あり）は
+> **43ヶ月 / 57,955 サンプル**。つまり intersection を絞っているのは **M-2 契約側**（`px_high52dev` の
+> 52週 warmup 等）で、**「M-1 strict が共通域を律速する」は誤り**（strict は nan_ok と同一母集団＝
+> 1行も落としていない）。ADR-0015 §Consequences の「M-1 の優位の実体は母集団の広さ」はこの実測と整合する。
 
 | 構成 / 基底（同一共通域） | rank-IC | IC std | LS spread |
 |---|---|---|---|
