@@ -1,0 +1,61 @@
+name: "[一回性] 週次株価バックフィル（Yahoo）"
+
+# stock_price_weekly を過去方向へ years 年まで延伸する手動ワークフロー（#198 の実装を #411 で常設化）。
+# M-1/M-2 の学習窓は週次株価と財務のデータ履歴長で決まり（ADR-0016 追試・#411）、窓を伸ばすには
+# 両方を過去へ延ばす必要がある。本ワークフローはそのうち株価側を担う（財務側は full-pipeline.yml に
+# year_steps で過去年を渡す）。
+#
+# 対象は「週次の最古 trade_date が today-years より新しい（過去が不足する）社」だけで、
+# 既にカバー済みの社はスキップする＝冪等。既存 weekly 行は同値上書き（破壊なし）。
+# daily は 1社ごとに trim=True で保持窓（DAILY_WINDOW_DAYS）外を都度削除するため、
+# バックフィル中に daily が全期間展開して 500MB を超えることはない。
+#
+# 実行時間の目安: 1社1リクエスト・YAHOO_STOCK_RATE_SLEEP=0.5秒。約4,000社で 35〜60分。
+# 容量の目安（2026-08 実測ベース）: stock_price_weekly ≒ 33MB/年（157MB / 5.5年）。
+# **実行前に必ず現在の DB サイズを確認**し、延伸年数 × 33MB を足しても Supabase Free 500MB に
+# 対して余裕（VACUUM 前のピーク +56MB 込み）が残ることを確かめること。
+
+on:
+  workflow_dispatch:
+    inputs:
+      years:
+        description: "週次株価を今日から何年前まで延伸するか（例 7 = 約2019年まで）"
+        required: false
+        default: "7"
+
+# 最小権限（GITHUB_TOKEN でリポジトリ書込は不要・収集は Supabase 直結）
+permissions:
+  contents: read
+
+jobs:
+  backfill-weekly:
+    runs-on: ubuntu-latest
+    timeout-minutes: 355  # GitHub Actions 上限6時間に対し5分の余裕
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13.7'  # render.yaml の PYTHON_VERSION と一致させる
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Backfill weekly prices
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          JQUANTS_API_KEY: ${{ secrets.JQUANTS_API_KEY }}
+        # tee でパイプすると exit code がマスクされる（#352）ため直接実行しログはファイルへ出す
+        run: python _pipeline_gh.py --backfill-weekly --backfill-weekly-years ${{ github.event.inputs.years || '7' }}
+
+      - name: Upload log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backfill-weekly-log
+          path: logs/pipeline_gh.log
+          retention-days: 7
