@@ -48,10 +48,44 @@ class TestPluginMeta:
     def test_depends_on_empty(self):
         assert plugin.depends_on == []
 
-    def test_default_factors_are_all_options(self):
-        # #309 相当（M-3）: マクロ因子の既定値は全選択肢
-        assert DEFAULT_MACRO_FEATURES == [o["value"] for o in MACRO_FEATURE_OPTIONS]
+    def test_default_factors_are_all_options_minus_gate_excluded(self):
+        # #309 相当（M-3）: マクロ因子の既定値は全選択肢。ただし #409 以降は
+        # 「昇格ゲート未通過（未実測=保留 / 実測済み非有意=棄却）」の枠だけ除外する。
+        from plugins.macro_dlm import _GATE_REJECTED_FEATURES, _PENDING_EVAL_FEATURES
+        option_values = {o["value"] for o in MACRO_FEATURE_OPTIONS}
+        excluded = _PENDING_EVAL_FEATURES | _GATE_REJECTED_FEATURES
+        assert set(DEFAULT_MACRO_FEATURES) == option_values - excluded
+        # 除外セットは選択肢の部分集合（typo で「効かない除外」を作らない）
+        assert excluded <= option_values
+        # 未実測（保留）と実測済み非有意（棄却）は別枠＝重複しない
+        assert not (_PENDING_EVAL_FEATURES & _GATE_REJECTED_FEATURES)
         assert "dlm_nikkei225" in DEFAULT_MACRO_FEATURES   # 市場ファクターを含む
+
+    def test_attention_factors_registered_but_gate_rejected(self):
+        """#409 / ADR-0024 追記: GDELT トーン・報道量／Wikipedia 閲覧数の5系列は M-3 の
+        週次高頻度要件（ADR-0012）を満たすので**選択肢としては使えるが既定には入れない**。
+        `scripts/macro_dlm_feature_bakeoff.py --preset attention` の実測（3,979社・49期・
+        652,247 OOF ペア）で 2 検定とも非有意（rank-IC diff −0.0001 p=0.807 / 売り側
+        spread diff −0.00005 p=0.513）だったため `_GATE_REJECTED_FEATURES` に置く。
+
+        変換軸: トーンは正負を跨ぐため logret 不可 → diff（金利と同じ軸）。報道量(%)・
+        閲覧数は常に正の水準系なので logret。
+        """
+        from plugins.macro_dlm import _GATE_REJECTED_FEATURES
+        option_values = {o["value"] for o in MACRO_FEATURE_OPTIONS}
+        expected = {
+            "dlm_news_tone":        ("JP_NEWS_TONE",        "diff"),
+            "dlm_news_econ_tone":   ("JP_NEWS_ECON_TONE",   "diff"),
+            "dlm_news_econ_vol":    ("JP_NEWS_ECON_VOL",    "logret"),
+            "dlm_wiki_market_attn": ("JP_WIKI_MARKET_ATTN", "logret"),
+            "dlm_wiki_macro_attn":  ("JP_WIKI_MACRO_ATTN",  "logret"),
+        }
+        for key, (scode, kind) in expected.items():
+            assert _DLM_MACRO_MAP[key][0] == scode, f"{key} の series_code 不一致"
+            assert _DLM_MACRO_MAP[key][1] == kind, f"{key} の変換が {kind} でない"
+            assert key in option_values, f"{key} が MACRO_FEATURE_OPTIONS に無い"
+        assert set(expected) <= _GATE_REJECTED_FEATURES
+        assert not (set(expected) & set(DEFAULT_MACRO_FEATURES))
 
     def test_all_defaults_are_valid_options(self):
         valid = {o["value"] for o in MACRO_FEATURE_OPTIONS}
@@ -518,6 +552,29 @@ class TestHelpers:
         for scode, kind, label in _DLM_MACRO_MAP.values():
             assert kind in ("logret", "diff")
             assert isinstance(label, str) and label
+
+    def test_build_series_diff_handles_sign_crossing_and_logret_guard(self):
+        """#409: 符号を跨ぐ系列（ニューストーン）は diff で正しく差分になり、logret 系列の
+        非正水準（GDELT 欠測日の 0）はその週を落とす（log の定義域を守る）ことを確認する。"""
+        dates = ["2021-01-04", "2021-01-11", "2021-01-18", "2021-01-25"]
+        px_rows = [SimpleNamespace(trade_date=d, close_last=c, volume_sum=None)
+                   for d, c in zip(dates, [100.0, 101.0, 102.0, 103.0])]
+        macro_levels = {
+            "JP_NEWS_TONE":     (dates, [-0.5, 0.2, 0.7, 0.9]),    # 負→正を跨ぐ
+            "JP_NEWS_ECON_VOL": (dates, [0.03, 0.02, 0.0, 0.04]),  # 3点目が欠測相当の 0
+        }
+        factors = ["dlm_news_tone", "dlm_news_econ_vol"]
+        level_at, kinds = plugin._macro_change_builder(macro_levels, factors)
+        assert kinds == ["diff", "logret"]
+        y, X, used = plugin._build_series(px_rows, level_at, kinds)
+
+        # 0 を含む遷移（t=2: →0, t=3: 0→）は logret ガードで落ち、残るのは t=1 のみ
+        assert used == ["2021-01-11"]
+        assert len(y) == len(X) == 1
+        assert X[0][0] == 1.0                                    # 定数項
+        assert X[0][1] == pytest.approx(0.2 - (-0.5))            # diff（符号跨ぎでも有限）
+        assert X[0][2] == pytest.approx(math.log(0.02 / 0.03))   # logret
+        assert y[0] == pytest.approx(math.log(101.0 / 100.0))
 
 
 # ── 8. OOF: アウトオブサンプル検証（ADR-0004）────────────────────────────────

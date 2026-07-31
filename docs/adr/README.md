@@ -27,7 +27,7 @@
 | [0021](0021-sibling-model-candidate-menu.md) | 兄弟モデル候補メニュー（`fit_predict` 注入の探索枠）→ ElasticNet を **M-6** へ昇格 | #372 | accepted（2026-07-26） |
 | [0022](0022-short-side-oof-metric-and-default-mu-source.md) | 売り側 OOF 指標（`short_side_spread` 等）の新設と既定 `mu_source` の M-6 化 | #402 | accepted（2026-07-30） |
 | [0023](0023-policy-uncertainty-epu-macro-channel.md) | 政策不確実性（EPU）2系列を FRED から収集しマクロチャネルへ追加・既定昇格 | #404 | accepted（2026-07-31） |
-| [0024](0024-news-tone-attention-macro-channel.md) | ニューストーン／関心度（GDELT・Wikimedia）を**マクロ集約**5系列で追加（銘柄別は容量不可）。昇格ゲートは不通過＝選択肢のみ | #406 | accepted（2026-07-31） |
+| [0024](0024-news-tone-attention-macro-channel.md) | ニューストーン／関心度（GDELT・Wikimedia）を**マクロ集約**5系列で追加（銘柄別は容量不可）。昇格ゲートは不通過＝選択肢のみ（月次 M-2/M-6・週次 M-3 とも非有意＝#409 の追記節） | #406, #409 | accepted（2026-07-31） |
 
 ## 運用
 
