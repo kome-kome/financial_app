@@ -45,8 +45,8 @@ from .utils import macro_risk_exposure
 
 # ── マクロ・ファクター定義 ───────────────────────────────────────────────────
 # feature_name → (series_code, kind, label)。
-#   kind="logret": 指数/FX/商品 → 週次対数リターン  log(level_t / level_{t-1})
-#   kind="diff"  : 金利         → 週次差分          level_t − level_{t-1}（％ポイント）
+#   kind="logret": 指数/FX/商品/閲覧数 → 週次対数リターン  log(level_t / level_{t-1})
+#   kind="diff"  : 金利/トーン          → 週次差分          level_t − level_{t-1}（％ポイント等）
 #
 # 【設計】M-3 は週次高頻度ファクター専用。M-1/M-2 が持つ月次以下のマクロ系列（JP 実体経済・
 # 物価・マネー・サーベイ・OECD CLI・IMF WEO 等）はここに追加しない（ADR-0012・Issue #310）。
@@ -81,9 +81,43 @@ _DLM_MACRO_MAP: dict[str, tuple[str, str, str]] = {
     # 週次差分は多くの週でゼロ＝情報量に限界あり（日次ソース確保は将来課題）。
     "dlm_jp10y":     ("JP10Y_FRED", "diff",   "日10年金利（FRED・月次）週次差分"),
     "dlm_t10y2y":    ("T10Y2Y",     "diff",   "米10y−2yスプレッド 週次差分"),
+    # ニューストーン／関心度チャネル（#409・ADR-0024 の未検証仮説）。GDELT / Wikimedia の
+    # **日次**系列で、M-3 の週次高頻度要件（本節冒頭 ADR-0012）に適合する唯一の未消化ストック。
+    # M-2/M-6 の月次スナップショット判定では4検定すべて非有意（ADR-0024）だったが、月末の値を
+    # 1点だけ使う月次では日次スパイクがほぼ落ちるため、週次の M-3 で改めて判定する。
+    # 変換: トーンは正負を跨ぐため logret 不可 → 週次差分（金利と同じ diff 軸）。報道量(%)・
+    # 閲覧数は常に正の水準系なので logret（相対変化）。報道量は GDELT の欠測日に 0 が入りうるが
+    # （実測: 2025-12-06 の1日のみ）、非正水準は _build_series の logret ガードが週ごと除外する。
+    "dlm_news_tone":        ("JP_NEWS_TONE",        "diff",   "日本ニュース 平均トーン 週次差分（GDELT）"),
+    "dlm_news_econ_tone":   ("JP_NEWS_ECON_TONE",   "diff",   "日本 株式市場ニュース 平均トーン 週次差分（GDELT）"),
+    "dlm_news_econ_vol":    ("JP_NEWS_ECON_VOL",    "logret", "日本 株式市場ニュース 報道量 週次変化（GDELT）"),
+    "dlm_wiki_market_attn": ("JP_WIKI_MARKET_ATTN", "logret", "日本 株式市場 関心度 週次変化（Wikipedia 閲覧数）"),
+    "dlm_wiki_macro_attn":  ("JP_WIKI_MACRO_ATTN",  "logret", "日本 景気・金融政策 関心度 週次変化（Wikipedia 閲覧数）"),
 }
 MACRO_FEATURE_OPTIONS = [{"value": k, "label": v[2]} for k, v in _DLM_MACRO_MAP.items()]
-DEFAULT_MACRO_FEATURES = [o["value"] for o in MACRO_FEATURE_OPTIONS]
+# 昇格ゲート（ADR-0023 の作法を M-3 へ適用）を**まだ実測していない**ファクターの枠。
+# macro_snapshots._PENDING_EVAL_FEATURES と同じ役割で、選択肢としては即日使えるが既定には
+# 入れない（状態次元 +N はそのまま推定コストになるため、無検証で全ユーザーへ負わせない）。
+# 現在は空＝実測待ちのファクターなし。
+_PENDING_EVAL_FEATURES: set[str] = set()
+# 昇格ゲートを実測した結果 **有意な改善が無かった**ファクターの枠（未実測の保留枠とは区別する）。
+# 再判定は `python -m scripts.macro_dlm_feature_bakeoff --features <カンマ区切り>`。
+#
+# #409（ADR-0024 追記）のニューストーン／関心度5系列: `--preset attention` の実測
+# （3,979社・49期・652,247 OOF ペア）で 2 検定とも非有意——rank-IC +0.0123→+0.0122
+# （diff −0.0001・p=0.807）／売り側 spread +0.00131→+0.00126（diff −0.00005・p=0.513）。
+# OOF サンプル数は 652,247 で不変（非正水準による週落ちは起きない）、実行時間のみ
+# 69.3s→75.5s（+9%・状態次元 23→28）。月次（ADR-0024）に続き週次でも効かないと確定。
+_GATE_REJECTED_FEATURES: set[str] = {
+    "dlm_news_tone",
+    "dlm_news_econ_tone",
+    "dlm_news_econ_vol",
+    "dlm_wiki_market_attn",
+    "dlm_wiki_macro_attn",
+}
+DEFAULT_MACRO_FEATURES = [o["value"] for o in MACRO_FEATURE_OPTIONS
+                          if o["value"] not in _PENDING_EVAL_FEATURES
+                          and o["value"] not in _GATE_REJECTED_FEATURES]
 
 # ── 価格行動系特徴量定義（Issue #317・#364 で macro_snapshots へ共有化）──────────
 # 定義の正本は macro_snapshots.py（M-2/M-3 共有）。M-3 は下記を re-export し従来の

@@ -669,7 +669,7 @@ conv_score₁₂ₘ = max(<span class="val">5</span>, min(<span class="val">95</
   <div class="model-specs" style="margin-bottom:16px">
     <div><span class="spec-label">構造</span> 銘柄別 TVP 時系列（per-stock）。銘柄固有の時変マクロ感応度を得る</div>
     <div><span class="spec-label">観測</span> 週次リターン × マクロ週次変化（同時点ファクタ応答 / APT 型）</div>
-    <div><span class="spec-label">ファクター</span> 既定 USD/JPY・米10年金利・日経225・WTI（市場ファクターを含め α は固有アルファ）。TOPIX（広範市場・1306.T 連動）を選択肢に追加。日次の日本10年金利は ^JGB 廃止のため月次 FRED 据置</div>
+    <div><span class="spec-label">ファクター</span> 既定は週次高頻度マクロの全選択肢（FX・株価指数・金利・コモディティ8系列）。市場ファクター（日経225・TOPIX）を含めるため α は固有アルファになる。指数/FX/商品/閲覧数は週次対数リターン、金利・ニューストーンは週次差分。日次の日本10年金利は ^JGB 廃止のため月次 FRED 据置。ニューストーン／関心度5系列（GDELT・Wikipedia 閲覧数）は<strong>選択肢のみ</strong>＝昇格ゲートの実測で有意な改善が無かったため既定 OFF</div>
     <div><span class="spec-label">推定</span> 自前 割引係数 DLM（West &amp; Harrison 型）。割引 δ で状態ノイズを表現し銘柄ごとの最適化が不要</div>
     <div><span class="spec-label">不確実性</span> 観測分散を Normal-Gamma 共役で学習。予測分布は Student-t で α/β の信用区間を解析的に算出</div>
     <div><span class="spec-label">µ̂</span> 最新フィルタ α<sub>T</sub> を年率化（α<sub>T</sub> × 52）。M-1/M-2 と同じ µ̂ ランキング</div>
