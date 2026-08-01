@@ -98,6 +98,12 @@ def _load_prices(allow_full_pull: bool) -> dict:
                                         StockPriceWeekly.week_start,
                                         StockPriceWeekly.close_last).all()):
                 out[ec].append((ws, cl))
+            # SELECT だけでもトランザクションは開く。pooler(Supavisor) 経由では close() 後も
+            # セッションが再利用待ちで残り、"idle in transaction" のまま読取ロックを掴み続けて
+            # `ALTER TABLE companies ...`（init_db の冪等マイグレーション）を
+            # AccessExclusiveLock 待ちで statement_timeout(2min) まで殺す（#411 で実害・
+            # Render 起動と収集ワークフローが同時に詰まった）。読み終えたら必ず閉じる。
+            db.commit()
             import pandas as pd
             return {ec: pd.DataFrame(rows, columns=["week_start", "close_last"])
                           .sort_values("week_start")

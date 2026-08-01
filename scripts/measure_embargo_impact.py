@@ -76,6 +76,9 @@ def _load_prices(allow_full_pull: bool) -> dict:
                                         StockPriceWeekly.week_start,
                                         StockPriceWeekly.close_last).all()):
                 out[ec].append((ws, cl))
+            # SELECT だけでもトランザクションは開く。pooler 経由では close() 後もセッションが
+            # "idle in transaction" で残り、init_db の ALTER TABLE を殺す（#411 で実害）。
+            db.commit()
             import pandas as pd
             return {ec: pd.DataFrame(rows, columns=["week_start", "close_last"]).sort_values("week_start")
                     for ec, rows in out.items()}
