@@ -1,0 +1,57 @@
+name: "[一回性] 財務レコードへの過去株価紐付け（Yahoo）"
+
+# financial_records.stock_price が NULL かつ period_end が J-Quants カバー外
+# （JQUANTS_BACKFILL_DAYS=730 日より前）の行に、Yahoo から period_end 近傍の終値を
+# 紐付ける手動ワークフロー（`_pipeline_gh.py --backfill-yahoo` の起動口・#411）。
+#
+# なぜ要るか: `financial_metrics` VIEW の per / pbr は financial_records.stock_price を
+# 分子に持つため、過去年度を EDINET から収集しただけでは per/pbr が NULL のままになり、
+# M-1 の既定 fin_features（per/pbr を含む）が揃わずスナップショットが作れない。
+# 実際 #411 の財務バックフィル（2018〜2020 annual を追加）直後は 2018/2019 の
+# stock_price が 0 件で、学習窓が price-only cap（71ヶ月）に対し 55ヶ月に留まった。
+#
+# 冪等性: 対象は stock_price IS NULL の行のみで、J-Quants 由来の既存値は上書きしない。
+# 途中終了しても PRICE_COMMIT_BATCH ごとに commit 済みのため再実行で続きから埋まる。
+# stock_price_history には書き込まない（容量節約）。
+#
+# 実行時間の目安: 1社1リクエスト（複数 period_end をまとめてカバー）・
+# YAHOO_STOCK_RATE_SLEEP=0.5秒。約4,000社で 40〜60分。
+
+on:
+  workflow_dispatch:
+
+# 最小権限（GITHUB_TOKEN でリポジトリ書込は不要・収集は Supabase 直結）
+permissions:
+  contents: read
+
+jobs:
+  backfill-price-link:
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13.7'  # render.yaml の PYTHON_VERSION と一致させる
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Backfill historical stock prices into financial_records
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        # tee でパイプすると exit code がマスクされる（#352）ため直接実行しログはファイルへ出す
+        run: python _pipeline_gh.py --backfill-yahoo
+
+      - name: Upload log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backfill-price-link-log
+          path: logs/pipeline_gh.log
+          retention-days: 7
