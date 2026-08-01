@@ -28,6 +28,7 @@
 | [0022](0022-short-side-oof-metric-and-default-mu-source.md) | 売り側 OOF 指標（`short_side_spread` 等）の新設と既定 `mu_source` の M-6 化 | #402 | accepted（2026-07-30） |
 | [0023](0023-policy-uncertainty-epu-macro-channel.md) | 政策不確実性（EPU）2系列を FRED から収集しマクロチャネルへ追加・既定昇格 | #404 | accepted（2026-07-31） |
 | [0024](0024-news-tone-attention-macro-channel.md) | ニューストーン／関心度（GDELT・Wikimedia）を**マクロ集約**5系列で追加（銘柄別は容量不可）。昇格ゲートは不通過＝選択肢のみ（月次 M-2/M-6・週次 M-3 とも非有意＝#409 の追記節） | #406, #409 | accepted（2026-07-31） |
+| [0025](0025-training-window-history-backfill.md) | 学習窓をデータ履歴の延伸で広げる（週次株価7年＋財務2018〜＋過去株価紐付け）。47→71ヶ月・fold 10→18 期。M-1 の rank-IC はコロナ期を含めると 0.198→0.113 へ低下＝旧値は短窓の点推定だった | #411 | accepted（2026-08-01） |
 
 ## 運用
 

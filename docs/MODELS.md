@@ -1217,7 +1217,7 @@ M-1（線形 OLS+BIC）・M-2（非線形 XGBoost）・M-6（正則化線形 Ela
 ### 13.4 仮定・限界
 
 - 実行コスト ≈ M-1+M-2+M-6 の合算（snapshot キャッシュキーが `return_stock_ids` で分岐し CV は再計算。M-2/M-6 は build を共有するため増分は ElasticNet の CV のみ）。
-- intersection でレグ母集団の狭い側に律速される。`n_common_pairs` を出力し監視。**2026-08-01 実測（`python -m scripts.measure_strict_binding`・Issue #411）では狭い側は M-1（strict）ではなく M-2 契約**: M-1 build 47ヶ月/111,210 サンプルに対し M-2 build は 43ヶ月/57,955（価格特徴 `px_high52dev` の52週 warmup 等）。「M-1 strict が共通域を狭める」は誤り。基底を増やすと共通域はさらに狭まりうるため、**優劣判定は必ず `base_oof_backtest`（同一共通域に制限した各基底の OOF）と比較する**（ADR-0015 の base-on-common）。
+- intersection でレグ母集団の狭い側に律速される。`n_common_pairs` を出力し監視。**2026-08-01 実測（`python -m scripts.measure_strict_binding`・Issue #411 / ADR-0025）では狭い側は M-1（strict）ではなく M-2 契約**: 履歴延伸後で M-1 build 71ヶ月/173,836 サンプルに対し M-2 build は 67ヶ月/91,482（価格特徴 `px_high52dev` の52週 warmup 等。延伸前は 47ヶ月/111,210 対 43ヶ月/57,955 で同じ非対称）。「M-1 strict が共通域を狭める」は誤り。基底を増やすと共通域はさらに狭まりうるため、**優劣判定は必ず `base_oof_backtest`（同一共通域に制限した各基底の OOF）と比較する**（ADR-0015 の base-on-common）。
 - 統合が単体最良を上回るかは実データ次第（上回らなければ「単体で十分」が確定知見・ADR-0015 に実測を記録）。基底の増減は `BASE_MODELS` 定数の変更だけで済み、`scripts/ensemble_base_bakeoff.py` が同一 honest 前提で構成間の OOF を横並び実測する（#397）。
 
 ### 13.5 参考文献
