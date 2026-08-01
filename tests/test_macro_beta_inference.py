@@ -17,6 +17,7 @@ from macro_beta_inference import (
     build_panel,
     persist_allowed,
     select_shared_factors,
+    summarize_diagnostics,
 )
 
 MACRO_TEST_NAMES = ["macro_usdjpy_yoy", "macro_sp500_yoy"]
@@ -274,6 +275,73 @@ class TestRunInferenceEndToEnd:
                           macro_names=MACRO_TEST_NAMES, chains=2)
 
         assert committed_before_sample == [True]
+
+
+class TestSummarizeDiagnostics:
+    """summarize_diagnostics: 収束診断は丸めていない生値であること（Issue #356）。
+
+    az.summary は round_to 省略時に r_hat を小数2桁・ess を整数へ丸める。丸め幅が strict
+    ゲート（1.01）と同じ桁のため、丸めたままでは persist_allowed が 1.00/1.01/1.02 の3値
+    解像度でしか判定できず、収束改善の効果測定もできない。実 MCMC は回さず az.from_dict の
+    手組み idata で検証する（arviz 必須のため CI では importorskip でスキップ）。
+    """
+
+    def _idata(self, az, seed=0, n_chains=4, n_draws=250, n_stock=3, n_factor=2):
+        """summarize_diagnostics が読む beta/alpha/mu_universe + sample_stats.diverging。
+
+        チェーンごとに平均をずらし r_hat > 1 を確実に生む（すべて同分布だと r_hat≈1.00 に
+        張り付き、丸めの有無が観測できない）。
+        """
+        rng = np.random.default_rng(seed)
+        offsets = np.linspace(0.0, 0.25, n_chains).reshape(n_chains, 1, 1, 1)
+        beta = rng.normal(size=(n_chains, n_draws, n_stock, n_factor)) + offsets
+        posterior = {
+            "beta": beta,
+            "alpha": rng.normal(size=(n_chains, n_draws, n_stock)) + offsets[:, :, :, 0],
+            "mu_universe": rng.normal(size=(n_chains, n_draws, n_factor)) + offsets[:, :, :, 0],
+        }
+        sample_stats = {"diverging": np.zeros((n_chains, n_draws), dtype=bool)}
+        return az.from_dict(posterior=posterior, sample_stats=sample_stats)
+
+    def test_returns_unrounded_values(self):
+        az = pytest.importorskip("arviz")
+        idata = self._idata(az)
+        var_names = ["beta", "alpha", "mu_universe"]
+        raw = az.summary(idata, var_names=var_names, kind="diagnostics", round_to="none")
+
+        diag = summarize_diagnostics(idata)
+        assert diag["r_hat_max"] == float(raw["r_hat"].max())
+        assert diag["ess_bulk_min"] == float(raw["ess_bulk"].min())
+        assert diag["ess_tail_min"] == float(raw["ess_tail"].min())
+
+    def test_default_arviz_rounding_would_lose_gate_resolution(self):
+        """回帰検知: az.summary 既定は r_hat を2桁・ess を整数へ丸める（＝修正前の挙動）。
+
+        この assert が落ちるときは arviz 側の丸め仕様が変わったとき。そのときは
+        summarize_diagnostics の round_to="none" が不要になったかを再判断する。
+        """
+        az = pytest.importorskip("arviz")
+        idata = self._idata(az)
+        var_names = ["beta", "alpha", "mu_universe"]
+        rounded = az.summary(idata, var_names=var_names, kind="diagnostics")
+        raw = az.summary(idata, var_names=var_names, kind="diagnostics", round_to="none")
+
+        # r_hat は小数2桁へ丸められる＝strict ゲート(1.01)と同じ桁の解像度しか残らない
+        assert float(rounded["r_hat"].max()) == round(float(raw["r_hat"].max()), 2)
+        # ess は整数へ丸められる（生値は非整数）
+        assert float(rounded["ess_bulk"].min()).is_integer()
+        assert not float(raw["ess_bulk"].min()).is_integer()
+
+    def test_diagnostics_distinguish_values_inside_one_rounding_bucket(self):
+        """丸め前提だと同値に潰れる2つの run が、生値では区別できること。
+
+        真値が同じ 2桁バケット（例 1.01）に入る run 同士でも r_hat_max が異なることを確認する。
+        これが成り立たないと Issue #341 の「r_hat_max が完全平坦」のような偽の停滞が再発する。
+        """
+        az = pytest.importorskip("arviz")
+        a = summarize_diagnostics(self._idata(az, seed=1))
+        b = summarize_diagnostics(self._idata(az, seed=2))
+        assert a["r_hat_max"] != b["r_hat_max"]
 
 
 class TestPersistGate:

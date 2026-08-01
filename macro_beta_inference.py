@@ -312,10 +312,25 @@ def run_inference(draws: int = 1000, tune: int = 1000, target_accept: float = 0.
 
 
 def summarize_diagnostics(idata) -> dict:
-    """r_hat・ESS の収束診断サマリ（ADR-0002 検証基準: r_hat<1.01・ESS 十分性・発散遷移数）。"""
+    """r_hat・ESS の収束診断サマリ（ADR-0002 検証基準: r_hat<1.01・ESS 十分性・発散遷移数）。
+
+    `round_to="none"` は必須（Issue #356）。az.summary は round_to 省略時、列ごとに固定桁で
+    丸める——**r_hat は小数2桁・ess_bulk/ess_tail は整数**（arviz/stats/stats.py の
+    `decimals = {col: 3 ... else 2 if col == "r_hat" else 0}`）。r_hat の丸め幅は strict ゲート
+    （1.01）と同じ桁なので、丸めたままでは:
+
+    - `persist_allowed` が受け取る r_hat_max は 1.00/1.01/1.02… の3値解像度しか持たず、
+      真値 1.0051 も 1.0149 も同じ 1.01 として通る（strict 基準の実体は「真値 < 1.015」）。
+    - 収束改善の効果測定ができない。Issue #341/PR#354 の「2/4/6/8 チェーンで r_hat_max=1.0100
+      が完全平坦」も、床の証拠ではなく **この2桁丸めの解像度そのもの** だった疑いが強い。
+
+    生値を返すことで、ゲート判定と収束改善の実測（experiment_pooled_rhat.py）の双方が
+    ADR-0002 の基準どおりの精度で機能する。
+    """
     import arviz as az
 
-    summ = az.summary(idata, var_names=["beta", "alpha", "mu_universe"], kind="diagnostics")
+    summ = az.summary(idata, var_names=["beta", "alpha", "mu_universe"], kind="diagnostics",
+                      round_to="none")
     diverging = idata.sample_stats.get("diverging") if hasattr(idata, "sample_stats") else None
     return {
         "r_hat_max":     float(summ["r_hat"].max()),
@@ -396,6 +411,13 @@ def persist_allowed(r_hat_max: float | None, threshold: float, force: bool) -> b
     警告する通り 2 chain では保守的に出る）ため、月次 cron 等の無人自動実行では緩和した
     threshold（例 1.05）を渡し、構造的な ~1.02 は自動 persist しつつ、本当に収束していない
     run（r_hat が threshold を大きく超過）は依然 reject する運用にできる（Issue #341）。
+
+    注記（Issue #356）: 上記「~1.02 で頭打ち」の根拠となった 2026-07 以前の観測値は、
+    summarize_diagnostics が az.summary の既定丸め（r_hat は小数2桁）を経ていたときのもので、
+    真値ではなく 1.00/1.01/1.02 の3値へ量子化された表示だった。診断は生値へ修正済みのため、
+    本関数が受け取る r_hat_max は現在 4桁精度の実値である。したがって strict 1.01 は文字どおり
+    「真値 <= 1.01」を要求する（丸め時代の実効基準は「真値 < 1.015」と緩かった）。閾値の
+    再設定は生値での再実測（experiment_pooled_rhat.py）に基づいて判断すること。
     """
     if force:
         return True
@@ -419,7 +441,9 @@ def main() -> None:
     ap.add_argument("--r-hat-threshold", type=float, default=1.01,
                     help="persist を許可する r_hat_max の上限（既定 1.01＝ADR-0002 strict 基準）。"
                          "chains=2 では r_hat が構造的に ~1.02 で頭打ちのため、無人 cron では 1.05 等へ"
-                         "緩和して構造的 ~1.02 を自動 persist しつつ真の未収束は reject する（Issue #341）")
+                         "緩和して構造的 ~1.02 を自動 persist しつつ真の未収束は reject する（Issue #341）。"
+                         "なお比較対象の r_hat_max は #356 で生値化済み（2026-07 以前のログ値は"
+                         "arviz の小数2桁丸めを経た表示値なので閾値の根拠に流用しない）")
     ap.add_argument("--force", action="store_true",
                     help="収束診断が threshold（既定 r_hat_max<=1.01）未達でも DB へ persist する"
                          "（既定は拒否。producer に品質ゲートが無く即座にライブ推奨へ反映されるため）")
