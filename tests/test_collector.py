@@ -612,6 +612,14 @@ class TestJquantsFetchDate:
         client = _client(_const(httpx.Response(400)))
         assert asyncio.run(_jquants_fetch_date(client, "key", "2023-01-01")) == []
 
+    def test_403_raises_coverage_error(self):
+        """403（カバレッジ境界 or キー無効）は raise_for_status ではなく
+        JQuantsCoverageError で返し、呼び出し側に切り分けさせる（Issue #412）。"""
+        from collector_prices import JQuantsCoverageError
+        client = _client(_const(httpx.Response(403)))
+        with pytest.raises(JQuantsCoverageError):
+            asyncio.run(_jquants_fetch_date(client, "key", "2024-08-01"))
+
     def test_pagination(self, monkeypatch):
         async def _noop(*a, **k):
             pass

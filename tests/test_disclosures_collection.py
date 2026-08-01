@@ -12,7 +12,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from collector_disclosures import (
-    _num, _row_to_record, collect_statement_disclosures,
+    _num, _row_to_record, collect_statement_disclosures, JQuantsCoverageError,
 )
 from database import StatementDisclosure
 
@@ -175,3 +175,40 @@ class TestCollectStatementDisclosures:
 
         assert fetch_calls[0] == "2024-05-08"
         assert fetch_calls[-1] == "2024-05-10"
+
+    def _collect_with_fetch(self, db, fetch, **kwargs):
+        with patch("collector_disclosures._jquants_fetch_summary_date", new=fetch):
+            with patch.dict(os.environ, {"JQUANTS_API_KEY": "test-key"}):
+                with patch("collector_disclosures.JQUANTS_RATE_SLEEP", 0):
+                    return asyncio.run(collect_statement_disclosures(db, **kwargs))
+
+    def test_403_day_is_skipped_and_collection_continues(self, db, make_company):
+        """遡及境界日の 403 は欠測扱いでスキップし、後続日の収集を継続する（Issue #412）。"""
+        db.add(make_company(edinet_code="E00001", sec_code="7203", name="トヨタ自動車"))
+        db.commit()
+
+        async def _fetch(session, api_key, date_str):
+            if date_str == "2024-05-06":
+                raise JQuantsCoverageError(date_str)
+            return [_sample_row()]
+
+        result = self._collect_with_fetch(
+            db, _fetch, date_from=date(2024, 5, 6), date_to=date(2024, 5, 8),
+        )
+
+        assert result["forbidden"] == 1
+        assert result["upserted"] > 0   # 403 の翌営業日以降は正常に保存される
+        assert db.query(StatementDisclosure).filter_by(disc_no="20240424575411").one()
+
+    def test_all_403_raises(self, db, make_company):
+        """全日程 403 は境界の欠測では説明できない（キー失効の疑い）→ 中断する。"""
+        db.add(make_company(edinet_code="E00001", sec_code="7203", name="トヨタ自動車"))
+        db.commit()
+
+        async def _fetch(session, api_key, date_str):
+            raise JQuantsCoverageError(date_str)
+
+        with pytest.raises(ValueError, match="403"):
+            self._collect_with_fetch(
+                db, _fetch, date_from=date(2024, 5, 6), date_to=date(2024, 5, 8),
+            )

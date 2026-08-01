@@ -30,6 +30,7 @@ JQUANTS_SUMMARY_ENDPOINT     = "https://api.jquants.com/v2/fins/summary"  # 会�
 JQUANTS_RATE_SLEEP           = 20.0  # リクエスト開始間隔の最低値（秒）。
 JQUANTS_BACKFILL_DAYS        = 730   # J-Quants 無料プランの最大取得可能期間（2年分）
 JQUANTS_DISCLOSURE_DELAY_DAYS = 84   # /fins/summary 無料プランの配信遅延（実測・12週固定。Issue #322 調査コメント参照）
+
 YAHOO_STOCK_RATE_SLEEP = 0.5   # Yahoo Finance 銘柄別取得のリクエスト間隔（秒）
                                # 銘柄ごとに1リクエスト。3800社×0.5s ≈ 32分
 MAX_GAP_DAYS           = 30    # period_end から±30日以内の株価のみ採用（point_in_time マッチ）
@@ -53,3 +54,13 @@ YAHOO_BACKFILL_PROGRESS_BATCH = 200 # Yahoo backfill の進捗報告間隔
 # を持てないため、デフォルトで保存をスキップ。再解析が必要な場合のみ
 # SKIP_XBRL_RAW=false にすると保存される
 SKIP_XBRL_RAW = os.environ.get("SKIP_XBRL_RAW", "true").lower() == "true"
+
+
+class JQuantsCoverageError(Exception):
+    """J-Quants が 403 を返した日を表す（Issue #412）。
+
+    無料プランの実効カバレッジ境界（`JQUANTS_BACKFILL_DAYS` の下限付近）は 400 ではなく 403 を
+    返すが、APIキー失効でも 403 になる。フェッチ側では欠測と断定せず、日付ループ側が
+    「境界の欠測（警告して継続）」か「キー失効（中断）」かを切り分ける。
+    株価（collector_prices）・開示（collector_disclosures）の両エンドポイントで共用する。
+    """

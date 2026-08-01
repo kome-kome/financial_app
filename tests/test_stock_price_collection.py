@@ -15,6 +15,7 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from collector import (
+    JQuantsCoverageError,
     backfill_historical_stock_prices_yahoo,
     backfill_weekly_history_yahoo,
     collect_stock_price_history,
@@ -471,3 +472,62 @@ class TestCollectJQuantsHistory:
 
         co1 = db.query(Company).filter_by(edinet_code="E00001").one()
         assert co1.is_active is True   # 誤って全件 delisted 化しない
+
+    # ── 403（カバレッジ境界）の扱い・Issue #412 ────────────────────────────
+    _JQ_ROW = {
+        "Code": "10010", "Date": "2024-01-09",
+        "AdjO": 1000.0, "AdjH": 1010.0, "AdjL": 990.0, "AdjC": 1005.0, "AdjVo": 10000.0,
+    }
+
+    def _run_jq(self, db, fetch_mock, active_codes):
+        with patch("collector_prices._jquants_fetch_date", new=fetch_mock):
+            with patch("collector_prices.record_prices_batch", return_value=1):
+                with patch("collector_prices.trim_daily", return_value=0):
+                    with patch("collector_prices._fetch_jquants_listed_info",
+                               new_callable=AsyncMock,
+                               return_value={"issued_shares": {}, "active_codes": active_codes}):
+                        with patch.dict(os.environ, {"JQUANTS_API_KEY": "test-key"}):
+                            with patch("collector_prices.JQUANTS_RATE_SLEEP", 0):
+                                return asyncio.run(
+                                    collect_stock_price_history_jquants(
+                                        db, date_from=self._MON, date_to=self._TUE,
+                                    )
+                                )
+
+    def test_403_day_is_skipped_and_collection_continues(self, db, make_company):
+        """カバレッジ境界日の 403 は欠測扱いでスキップし、後続日の収集を継続する（Issue #412）。"""
+        self._add_company(db, make_company)
+
+        async def fetch(session, api_key, date_str):
+            if date_str == self._MON.strftime("%Y-%m-%d"):
+                raise JQuantsCoverageError(date_str)
+            return [self._JQ_ROW]
+
+        result = self._run_jq(db, fetch, {"1001"})
+
+        assert result["cancelled"] is False
+        assert result["forbidden"] == 1
+        assert result["upserted"] == 1     # 403 の翌営業日は正常に upsert される
+
+    def test_all_403_with_valid_key_does_not_raise(self, db, make_company):
+        """全日程 403 でも listed/info が取れていればキーは有効＝範囲外として警告のみ。"""
+        self._add_company(db, make_company)
+
+        async def fetch(session, api_key, date_str):
+            raise JQuantsCoverageError(date_str)
+
+        result = self._run_jq(db, fetch, {"1001"})
+
+        assert result["cancelled"] is False
+        assert result["forbidden"] == result["days"] == 2
+        assert result["upserted"] == 0
+
+    def test_all_403_and_listed_info_failure_raises(self, db, make_company):
+        """全日程 403 かつ listed/info も失敗ならキー失効の疑い → 中断する。"""
+        self._add_company(db, make_company)
+
+        async def fetch(session, api_key, date_str):
+            raise JQuantsCoverageError(date_str)
+
+        with pytest.raises(ValueError, match="403"):
+            self._run_jq(db, fetch, set())

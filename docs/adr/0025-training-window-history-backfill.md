@@ -113,7 +113,9 @@ M-1/M-2/M-4/M-6 の honest OOF 評価は `walk_forward_cv_monthly(min_train_mont
   価格ローダに `commit()` を追加済み（詳細と診断クエリは GOTCHAS.md）。
 - **`full-pipeline.yml` の finalize は J-Quants 403 で必ず落ちる**（`JQUANTS_BACKFILL_DAYS=730` の
   境界日が無料プランの実効カバレッジ外）。財務収集自体は完了しているため本 ADR の作業には影響
-  しないが、別途 Issue #412 で対処する。
+  しない。**Issue #412 で対処済み**: 403 を `JQuantsCoverageError` として日付ループ側で欠測扱い
+  （警告＋継続）にし、全日程 403 かつ `listed/info` も失敗のときだけ中断する（DEPLOYMENT.md の
+  J-Quants 制約表を参照）。
 
 ## Alternatives considered
 

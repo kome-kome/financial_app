@@ -305,6 +305,7 @@ async def _jquants_fetch_date(session: httpx.AsyncClient, api_key: str, date_str
     """date_str (YYYY-MM-DD) の全銘柄 OHLCV を返す（ページネーション対応）。
     V2 API: x-api-key ヘッダーで認証。レスポンスキーは "data"、フィールドは O/H/L/C/Vo。
     400 = 非営業日またはサブスクリプション範囲外 → 空リストで正常終了。
+    403 = カバレッジ外またはキー無効 → JQuantsCoverageError を送出（Issue #412）。
     429 = レート制限 → 90秒待って1回だけ再試行。それでも429 なら skip。
     """
     headers = {"x-api-key": api_key}
@@ -324,6 +325,8 @@ async def _jquants_fetch_date(session: httpx.AsyncClient, api_key: str, date_str
             if r.status_code == 429:
                 log.error(f"J-Quants 429: {date_str} → 再試行も429、スキップ")
                 return []
+        if r.status_code == 403:
+            raise JQuantsCoverageError(date_str)
         if r.status_code in (400, 404):
             break  # 非営業日またはサブスクリプション範囲外
         r.raise_for_status()
@@ -449,6 +452,7 @@ async def collect_stock_price_history_jquants(
     }
 
     total = len(dates)
+    fetch_stats = {"forbidden": 0}   # 403（カバレッジ外）で読み飛ばした日数・Issue #412
 
     async def _jquants_batch_gen(session):
         completed = 0
@@ -469,7 +473,19 @@ async def collect_stock_price_history_jquants(
                     await asyncio.sleep(wait)
 
             last_req_time = asyncio.get_event_loop().time()
-            quote_rows = await _jquants_fetch_date(session, api_key, date_str)
+            try:
+                quote_rows = await _jquants_fetch_date(session, api_key, date_str)
+            except JQuantsCoverageError:
+                # 無料プランのカバレッジ境界（例: days_back=730 の下限日）は 403 を返す。
+                # 例外を伝播させると収集全体が落ちるため欠測扱いで継続する（Issue #412）。
+                fetch_stats["forbidden"] += 1
+                completed += 1
+                log.warning(f"J-Quants 403: {date_str} をカバー範囲外としてスキップ")
+                if on_progress:
+                    on_progress(completed, total,
+                                f"[{completed}/{total}] {date_str} スキップ（403 カバー範囲外）")
+                yield []
+                continue
             completed += 1
 
             if not quote_rows:
@@ -522,6 +538,18 @@ async def collect_stock_price_history_jquants(
         # 価格収集と同じセッションで上場銘柄情報（発行済株式数・現在の上場銘柄集合）も取得（API キー共用）
         listed_info = await _fetch_jquants_listed_info(session, api_key)
 
+    # 403 の切り分け（Issue #412）: listed/info が取れていればキーは有効＝カバレッジ境界の
+    # 欠測なので警告のみ。全日程 403 かつ listed/info も失敗ならキー失効/権限喪失とみなし中断。
+    if fetch_stats["forbidden"]:
+        log.warning(
+            f"J-Quants 403（カバー範囲外）: {fetch_stats['forbidden']}/{total}日をスキップ"
+        )
+        if not cancelled and fetch_stats["forbidden"] == total and not listed_info["active_codes"]:
+            raise ValueError(
+                f"J-Quants が全 {total} 日で 403 を返し listed/info も取得できませんでした。"
+                "APIキー失効または権限喪失の可能性があるため中断します（Issue #412）"
+            )
+
     if listed_info["issued_shares"]:
         _update_issued_shares(db, sec_to_edinet, listed_info["issued_shares"])
 
@@ -537,10 +565,12 @@ async def collect_stock_price_history_jquants(
             )
 
     if cancelled:
-        return {"cancelled": True, "upserted": upserted_total}
+        return {"cancelled": True, "upserted": upserted_total,
+                "forbidden": fetch_stats["forbidden"]}
     if on_progress:
         on_progress(total, total, f"[完了] {total}日処理・{upserted_total}件追加/更新")
-    return {"cancelled": False, "upserted": upserted_total, "days": total}
+    return {"cancelled": False, "upserted": upserted_total, "days": total,
+            "forbidden": fetch_stats["forbidden"]}
 
 
 def _update_market_data_latest(db) -> int:

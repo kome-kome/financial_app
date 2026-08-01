@@ -314,6 +314,9 @@ async def main(years_back: int, collect_only: bool = False,
                 on_progress=lambda c, t, m: log(m) if c % 10 == 0 or "完了" in m else None,
             )
             log(f"  stock_price_history: {result.get('upserted', 0)}件 upsert")
+            if result.get("forbidden"):
+                # 403 はカバレッジ境界の欠測として継続扱い（Issue #412）
+                log(f"  J-Quants 403（カバー範囲外）でスキップ: {result['forbidden']}日")
             n_updated = update_market_data_from_history(db5, point_in_time=True)
             log(f"  financial_records.stock_price: {n_updated}レコード 更新（J-Quants 由来）")
         finally:

@@ -17,6 +17,7 @@ from sqlalchemy import func as sqla_func
 from collector_utils import (
     log, JQUANTS_SUMMARY_ENDPOINT, JQUANTS_RATE_SLEEP,
     JQUANTS_BACKFILL_DAYS, JQUANTS_DISCLOSURE_DELAY_DAYS,
+    JQuantsCoverageError,
 )
 from database import Company, StatementDisclosure, upsert_statement_disclosures
 
@@ -34,6 +35,7 @@ def _num(v) -> Optional[float]:
 async def _jquants_fetch_summary_date(session: httpx.AsyncClient, api_key: str, date_str: str) -> list:
     """date_str (YYYY-MM-DD) の全銘柄・決算短信サマリーを返す（ページネーション対応）。
     400 = 非営業日または配信遅延・遡及期間外 → 空リストで正常終了。
+    403 = カバレッジ外またはキー無効 → JQuantsCoverageError を送出（Issue #412）。
     429 = レート制限 → 90秒待って1回だけ再試行。それでも429 なら skip。
     """
     headers = {"x-api-key": api_key}
@@ -51,6 +53,8 @@ async def _jquants_fetch_summary_date(session: httpx.AsyncClient, api_key: str, 
             if r.status_code == 429:
                 log.error(f"J-Quants 429: {date_str} → 再試行も429、スキップ")
                 return []
+        if r.status_code == 403:
+            raise JQuantsCoverageError(date_str)
         if r.status_code in (400, 404):
             break
         r.raise_for_status()
@@ -154,6 +158,7 @@ async def collect_statement_disclosures(
 
     upserted_total = 0
     completed = 0
+    forbidden = 0        # 403（カバー範囲外）で読み飛ばした日数・Issue #412
     last_req_time = 0.0
     async with httpx.AsyncClient(timeout=60) as session:
         for date_str in dates:
@@ -161,7 +166,7 @@ async def collect_statement_disclosures(
                 if on_progress:
                     on_progress(completed, total, f"[停止] ユーザーによる停止（{completed}/{total}日処理済み）")
                 db.commit()
-                return {"cancelled": True, "upserted": upserted_total}
+                return {"cancelled": True, "upserted": upserted_total, "forbidden": forbidden}
 
             if completed > 0:
                 elapsed = asyncio.get_event_loop().time() - last_req_time
@@ -170,7 +175,17 @@ async def collect_statement_disclosures(
                     await asyncio.sleep(wait)
             last_req_time = asyncio.get_event_loop().time()
 
-            raw_rows = await _jquants_fetch_summary_date(session, api_key, date_str)
+            try:
+                raw_rows = await _jquants_fetch_summary_date(session, api_key, date_str)
+            except JQuantsCoverageError:
+                # 遡及境界（JQUANTS_BACKFILL_DAYS の下限日付近）は 403。欠測扱いで継続する（Issue #412）
+                forbidden += 1
+                completed += 1
+                log.warning(f"J-Quants 403: {date_str} をカバー範囲外としてスキップ")
+                if on_progress:
+                    on_progress(completed, total,
+                                f"[{completed}/{total}] {date_str} スキップ（403 カバー範囲外）")
+                continue
             completed += 1
 
             if not raw_rows:
@@ -186,6 +201,16 @@ async def collect_statement_disclosures(
             if on_progress:
                 on_progress(completed, total, f"[{completed}/{total}] {date_str} {len(records)}件")
 
+    if forbidden:
+        log.warning(f"J-Quants 403（カバー範囲外）: {forbidden}/{total}日をスキップ")
+        # 全日程 403 は境界の欠測では説明できない（範囲は必ず遅延境界までの最近日を含む）
+        # ＝キー失効・権限喪失の疑いとして中断する（Issue #412）
+        if forbidden == total:
+            raise ValueError(
+                f"J-Quants /fins/summary が全 {total} 日で 403 を返しました。"
+                "APIキー失効または権限喪失の可能性があるため中断します（Issue #412）"
+            )
+
     if on_progress:
         on_progress(total, total, f"[完了] {total}日処理・{upserted_total}件追加/更新")
-    return {"cancelled": False, "upserted": upserted_total, "days": total}
+    return {"cancelled": False, "upserted": upserted_total, "days": total, "forbidden": forbidden}
