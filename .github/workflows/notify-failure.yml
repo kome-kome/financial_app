@@ -85,9 +85,14 @@ jobs:
           fi
 
           # --- ログ末尾。cancelled は失敗ステップを持たず --log-failed が空になるため fallback ---
-          # sed: GHA のログに混じる ANSI カラーコードと BOM を落として Issue で読める形にする
+          # sed: GHA のログに混じる ANSI カラーコードと BOM を落として Issue で読める形にする。
+          #      ログ API は ESC(0x1b) を**キャレット記法 `^[` の2文字**で返す（2026-08-02 に
+          #      od で実測）。ESC 実バイト側のパターンだけでは1文字も消えないので両方書く。
           # cut: 1行が極端に長いログ（JSON ダンプ等）で Issue 本文が肥大するのを防ぐ
-          clean() { sed -e 's/\x1b\[[0-9;]*m//g' -e 's/\xef\xbb\xbf//g' | tail -n 30 | cut -c1-500; }
+          clean() {
+            sed -e 's/\^\[\[[0-9;]*m//g' -e 's/\x1b\[[0-9;]*m//g' -e 's/\xef\xbb\xbf//g' \
+              | tail -n 30 | cut -c1-500
+          }
           log=$(gh run view "${RUN_ID}" --log-failed 2>/dev/null | clean) || true
           if [ -z "${log:-}" ]; then
             log=$(gh run view "${RUN_ID}" --log 2>/dev/null | clean) || true
