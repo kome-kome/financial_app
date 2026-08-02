@@ -168,6 +168,7 @@ _Avoid_: μ̂（水準を持つ他モデルの期待リターンと混同する�
 
 **代表 as-of (representative as-of)**:
 銘柄ごとに異なる基準日を、利用者へ 1 個だけ見せるときの代表値。**中央値（p50・偶数個は古い側）を採り、`max` は採らない**（`plugins/macro_snapshots.py::representative_snapshot_date`・Issue #417）。μ̂ は銘柄ごとに「その銘柄の最終週次バー」時点で算出されるため as-of は本来分布であり、max を代表にすると最新の 1〜2 銘柄が全体の as-of を名乗る（実測 2026-08-02: 2 銘柄 2026-07-31・3,677 銘柄 2026-07-13）。**最古（`snapshot_date_min`）と「代表値より古い銘柄数」（`n_stale`）を必ず併記**し、分布であることを潰さない。`*_scores` テーブル（M-2/M-3/M-4/M-6）と[[売り候補ランキング]]の `mu_asof` が実体。
+**例外**: M-1（`macro_risk_return`）は代表 as-of を持たない。`macro_beta_meta.snapshot_date` は推論バッチの**実行日**でデータ as-of ではないため、`get_producer_asof` は M-1 に対し None を返す（理由は [GOTCHAS.md](docs/GOTCHAS.md) 「分析・計算の実装メモ」）。
 _Avoid_: 最終スナップ日, 最新基準日（max を指すと読めるため）, スナップショット日（分布であることが落ちるため）
 
 **株価鮮度 (price freshness)**:
