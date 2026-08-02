@@ -85,10 +85,12 @@ jobs:
           fi
 
           # --- ログ末尾。cancelled は失敗ステップを持たず --log-failed が空になるため fallback ---
+          # sed: GHA のログに混じる ANSI カラーコードと BOM を落として Issue で読める形にする
           # cut: 1行が極端に長いログ（JSON ダンプ等）で Issue 本文が肥大するのを防ぐ
-          log=$(gh run view "${RUN_ID}" --log-failed 2>/dev/null | tail -n 30 | cut -c1-500) || true
+          clean() { sed -e 's/\x1b\[[0-9;]*m//g' -e 's/\xef\xbb\xbf//g' | tail -n 30 | cut -c1-500; }
+          log=$(gh run view "${RUN_ID}" --log-failed 2>/dev/null | clean) || true
           if [ -z "${log:-}" ]; then
-            log=$(gh run view "${RUN_ID}" --log 2>/dev/null | tail -n 30 | cut -c1-500) || true
+            log=$(gh run view "${RUN_ID}" --log 2>/dev/null | clean) || true
           fi
           if [ -z "${log:-}" ]; then
             log="（ログを取得できませんでした。run URL を直接参照してください）"
