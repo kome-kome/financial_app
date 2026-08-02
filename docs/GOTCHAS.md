@@ -79,6 +79,7 @@ SSEエンドポイント（進捗のリアルタイム配信・全6本）: 収�
   FROM (SELECT edinet_code, max(trade_date) d FROM stock_price_daily GROUP BY 1) t;
   ```
 - **`stock_price_weekly` の全件ロードは分割 fetch する**（Issue #311）：本番 Supabase の `stock_price_weekly` は ~95万行あり、`db.query(...).order_by(...).all()` の**単一クエリ全件取得**は pooler（`aws-*.pooler.supabase.com`）経由で `statement_timeout=2min` を超過し `QueryCanceled`、または大結果セットで `lost synchronization with server`（接続破損）を起こす（インデックスは効いており原因は純粋なデータ量＝転送＋ORM materialization）。M-1/M-2/M-3 の週次ロードは **`macro_snapshots.load_weekly_prices_chunked`**（`edinet_code` を 500 社ずつ IN 句で分割・各クエリは PK インデックスで数秒）へ集約済みで、全件でも実測 ~30秒で安定完走する（3モデル比較 E2E で全モデル OK を確認）。新たに週次株価を全件走査する処理を足すときは必ずこのヘルパー経由にする（生の `.order_by().all()` を書かない）。`SET statement_timeout` の緩和や直接接続への切替では接続破損は直らないため分割が正攻法。
+  - **取りこぼし（2026-08-02・#418）**: この教訓は M-1/M-2/M-3 にしか適用されておらず、`plugins/recommend.py::compute_momentum_z` だけが**下限日付なしの生クエリ**のまま残っていた（`z_momentum: 0.5` はバランス型プリセットの既定重み＝ユーザーが毎朝押すボタンで必ず走る経路）。**全履歴が要るとは限らない用途では、チャンク分割よりまず下限日付を掛ける**：`get_momentum_return` は `long_months=12`＝`as_of − 360日` までしか参照しないため、余裕1ヶ月を足した 400 日下限で情報損失はゼロ。実測 EXPLAIN で単一クエリの推定行数は **853,669 → 26,978/チャンク**（本番実測レイテンシ 5〜10秒）。下限は `trade_date`（nullable・非インデックス列）ではなく **PK 第2列の `week_start`** へ掛けること＝`(edinet_code, week_start)` の Index Cond に入り範囲スキャンになる（`trade_date` はリークガードの上限側だけに使う）。<br>**副作用として winsorize の母集団が変わる点は必ず実測する**：本番では「最終週次バーが下限より古い＝1年以上株価が止まった 113 社」が母集団から抜けた。旧実装ではこれらの long/short 両脚が**同一の最終バーに解決され `ln(P/P)=0`** となり、擬似的な「モメンタム 0」として標準化の母集団に混入していた（除外が正しい）。上位30社の顔ぶれは不変・z の差は最大 0.084（範囲 3.42〜5.00 に対し約2%）。
 
 ---
 

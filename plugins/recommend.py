@@ -18,6 +18,17 @@ PRESETS = {
 
 _MomentumPX = namedtuple("_MomentumPX", "trade_date close")
 
+# 週次株価ロードの遡及上限日数（Issue #418）。get_momentum_return は long_months=12＝
+# as_of - 360日 までしか参照しないため、余裕1ヶ月を足した 400 日で情報損失はゼロ。
+# 下限なしの全期間ロード（本番 stock_price_weekly は実測 1,271,282 行）は Supabase pooler の
+# statement_timeout(2min) を踏んで接続を壊す（docs/GOTCHAS.md・Issue #311 と同型）。
+_MOMENTUM_LOOKBACK_DAYS = 400
+
+# edinet_code の IN 句チャンクサイズ（Issue #311/#418）。候補全社（実測 3,677）を単一クエリへ
+# 一括バインドするとプランナ負荷が上がるため、macro_snapshots.load_weekly_prices_chunked と
+# 同じ 500 社ずつに分割する。
+_MOMENTUM_CODE_BATCH = 500
+
 # データ駆動プリセット名（Issue #271）。PRESETS には含めず、recommend_factor_premia.py が
 # 永続化した最新のFama-MacBethファクタープレミアムから resolve_weights() が動的に組み立てる。
 STATISTICAL_PRESET_NAME = "統計的最適化"
@@ -71,23 +82,35 @@ def compute_momentum_z(db: Any, edinet_codes: list, as_of_date: str) -> dict:
     リークしない（get_momentum_return 自体も ref_date 以前でフィルタする二重の安全策）。
     有効サンプルが4件未満の場合は winsorize が機能しないため空 dict を返す
     （呼び出し側では他の欠損指標と同様 None 扱いになる）。
+
+    ロードは as_of - _MOMENTUM_LOOKBACK_DAYS の下限付き＋_MOMENTUM_CODE_BATCH 社ずつの
+    チャンクで行う（Issue #418）。下限は week_start（PK の第2列）へ掛けることで
+    (edinet_code, week_start) 複合インデックスの範囲スキャンになる。trade_date は
+    nullable かつ非インデックス列なので、上限側（リークガード）だけに使う。
     """
     if not edinet_codes:
         return {}
-    from database import StockPriceWeekly
+    from datetime import date as _date, timedelta as _td
+    from database import StockPriceWeekly, iso_week_start
     from .utils import get_momentum_return, winsorize, normalize_transform
 
-    rows = (
-        db.query(StockPriceWeekly.edinet_code, StockPriceWeekly.trade_date,
-                  StockPriceWeekly.close_last)
-          .filter(StockPriceWeekly.edinet_code.in_(edinet_codes),
-                  StockPriceWeekly.trade_date <= as_of_date)
-          .order_by(StockPriceWeekly.edinet_code, StockPriceWeekly.trade_date)
-          .all()
-    )
+    week_from = iso_week_start(
+        (_date.fromisoformat(as_of_date) - _td(days=_MOMENTUM_LOOKBACK_DAYS)).isoformat())
+    codes = list(edinet_codes)
     price_rows_by_ec = defaultdict(list)
-    for ec, td, cl in rows:
-        price_rows_by_ec[ec].append(_MomentumPX(td, cl))
+    for i in range(0, len(codes), _MOMENTUM_CODE_BATCH):
+        chunk = codes[i:i + _MOMENTUM_CODE_BATCH]
+        rows = (
+            db.query(StockPriceWeekly.edinet_code, StockPriceWeekly.trade_date,
+                     StockPriceWeekly.close_last)
+              .filter(StockPriceWeekly.edinet_code.in_(chunk),
+                      StockPriceWeekly.week_start >= week_from,
+                      StockPriceWeekly.trade_date <= as_of_date)
+              .order_by(StockPriceWeekly.edinet_code, StockPriceWeekly.trade_date)
+              .all()
+        )
+        for ec, td, cl in rows:
+            price_rows_by_ec[ec].append(_MomentumPX(td, cl))
 
     raw = {}
     for ec, price_rows in price_rows_by_ec.items():

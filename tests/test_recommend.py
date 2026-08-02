@@ -142,6 +142,66 @@ class TestComputeMomentumZ:
     def test_no_codes_returns_empty(self, db):
         assert compute_momentum_z(db, [], self.AS_OF) == {}
 
+    # ── ロード方式（下限日付＋社数チャンク・Issue #418）─────────────────────
+    #
+    # 下限なし全期間ロードは本番 stock_price_weekly（127万行）で pooler の
+    # statement_timeout を踏むため、as_of - _MOMENTUM_LOOKBACK_DAYS の下限と
+    # _MOMENTUM_CODE_BATCH 社チャンクを入れている。ここでは「分割しても結果が変わらない」
+    # ことと「下限が get_momentum_return の参照範囲（12ヶ月）を削っていない」ことを固定する。
+
+    def test_chunked_load_matches_unchunked(self, db, make_weekly, monkeypatch):
+        import plugins.recommend as recommend_mod
+
+        db.add_all(self._four_companies(make_weekly))
+        db.commit()
+        codes = ["E00001", "E00002", "E00003", "E00004"]
+        baseline = compute_momentum_z(db, codes, self.AS_OF)
+
+        # 1社ずつ・2社ずつに刻んでも同一結果（チャンク境界で行が落ちない）
+        for batch in (1, 2, 3):
+            monkeypatch.setattr(recommend_mod, "_MOMENTUM_CODE_BATCH", batch)
+            assert compute_momentum_z(db, codes, self.AS_OF) == baseline
+
+    def test_lookback_window_covers_twelve_month_leg(self, db, make_weekly):
+        # OLD は as_of の371日前＝long leg（as_of-360日以前の最終バー）として必要。
+        # 下限がこれを削っていないことを、OLD 由来の値が出ていることで確認する。
+        from datetime import date
+        from plugins.recommend import _MOMENTUM_LOOKBACK_DAYS
+
+        # long leg（12ヶ月＝360日前以前の最終バー）が窓に収まる余裕があること
+        assert (date.fromisoformat(self.AS_OF)
+                - date.fromisoformat(self.OLD)).days < _MOMENTUM_LOOKBACK_DAYS
+        assert _MOMENTUM_LOOKBACK_DAYS >= 12 * 30 + 30
+
+        db.add_all(self._four_companies(make_weekly))
+        db.commit()
+        z = compute_momentum_z(db, ["E00001", "E00002", "E00003", "E00004"], self.AS_OF)
+        # ln(4) が最大・ln(0.25) が最小＝OLD の終値が long leg に使われている
+        assert len(z) == 4
+        assert z["E00001"] > 0 > z["E00004"]
+
+    def test_rows_older_than_lookback_are_not_loaded(self, db, make_weekly):
+        # 下限より古い行しか持たない銘柄は算出対象外になる（唯一の挙動変化点）。
+        # 下限なし実装では long/short 両脚ともその古い行を拾って momentum を返していた。
+        from datetime import date, timedelta
+        from plugins.recommend import _MOMENTUM_LOOKBACK_DAYS
+
+        ref = date.fromisoformat(self.AS_OF)
+        ancient_1 = (ref - timedelta(days=_MOMENTUM_LOOKBACK_DAYS + 200)).isoformat()
+        ancient_2 = (ref - timedelta(days=_MOMENTUM_LOOKBACK_DAYS + 100)).isoformat()
+
+        db.add_all(self._four_companies(make_weekly))
+        db.add(make_weekly(edinet_code="E00005", trade_date=ancient_1, close_last=1000.0))
+        db.add(make_weekly(edinet_code="E00005", trade_date=ancient_2, close_last=2000.0))
+        db.commit()
+
+        z = compute_momentum_z(
+            db, ["E00001", "E00002", "E00003", "E00004", "E00005"], self.AS_OF)
+        assert "E00005" not in z
+        # 既存4社の値は E00005 の有無に影響されない（winsorize 母集団が同じ）
+        assert z == compute_momentum_z(
+            db, ["E00001", "E00002", "E00003", "E00004"], self.AS_OF)
+
 
 # ── execute(): in-memory SQLite ──────────────────────────────────────────────
 
