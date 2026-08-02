@@ -72,6 +72,42 @@ function _updateFreshnessBar(available) {
     `<span class="freshness-badge ${badgeCls}">${esc(badgeText)}</span>` +
     ` ${Number(s.n_results).toLocaleString()}社の予測値${extra}`;
 }
+// ── 株価 as-of バー（Issue #416）─────────────────────────────────────────────
+// 判定軸は p50（中央値）。max は「最新の 1〜2 銘柄」で新しく見えるため単独では出さない
+// （実測 2026-08-02: max=07-31 は 2 銘柄・3,677 銘柄は 07-13）。
+let _priceFresh = null;
+
+const PRICE_FRESH_BADGE = {
+  fresh: 'freshness-fresh', warn: 'freshness-stale',
+  alert: 'freshness-alert', empty: 'freshness-none',
+};
+
+function _updatePriceFreshnessBar(d) {
+  const content = document.getElementById('price-freshness-content');
+  if (!content) return;
+  _priceFresh = d && d.price_asof_p50 ? {
+    p50: d.price_asof_p50, p05: d.price_asof_p05, max: d.price_asof_max,
+    bdays: d.price_stale_bdays, level: d.price_freshness,
+    nStale: d.price_n_stale_over_5d, nCodes: d.price_asof_codes,
+  } : null;
+  if (!_priceFresh) {
+    content.innerHTML = '<span class="freshness-badge freshness-none">株価 as-of 不明（株価未収集）</span>';
+    return;
+  }
+  const f = _priceFresh;
+  const badge = `株価 as-of ${f.p50}（${f.bdays}営業日前・中央値）`;
+  let extra = ` 最古 ${f.p05} / 5営業日超の遅れ ${Number(f.nStale).toLocaleString()}社` +
+              ` / ${Number(f.nCodes).toLocaleString()}社中`;
+  if (f.level === 'alert')
+    extra += ' <strong class="text-red">⚠ この結果で発注しないでください</strong>';
+  else if (f.level === 'warn')
+    extra += ' <span class="text-amber">⚠ 株価が更新されていません</span>';
+  content.innerHTML =
+    `<span class="freshness-badge ${PRICE_FRESH_BADGE[f.level] || 'freshness-none'}"` +
+    ` title="マクロ指標は週次株価の最終日でクリップされるため、株価が止まるとマクロも同じだけ止まります。マクロ単体の as-of が新しくても意味がありません。">` +
+    `${esc(badge)}</span>${extra}`;
+}
+
 if (window.Chart){
   Chart.defaults.color = cssVar('--text-secondary');
   Chart.defaults.borderColor = cssVar('--border-subtle');
@@ -127,6 +163,7 @@ async function preflight() {
     // 過去の業種別OLS実行でDBに予測値が残っていればバリュエーション分析を解放
     _gapDataExists = (d.records_with_prediction ?? 0) > 0;
     refreshGapAvailability();   // 即時: gap-ready 表示を反映
+    _updatePriceFreshnessBar(d); // 株価 as-of バー（Issue #416）
     fetchModelStatus();          // 非同期: 鮮度バーの詳細を更新
     document.getElementById('status-fin-dot').style.background  = finOk ? cssVar('--status-good') : cssVar('--status-bad');
     document.getElementById('status-fin-text').textContent       = `${d.companies.toLocaleString()}社 / ${d.records.toLocaleString()}件`;
@@ -320,6 +357,15 @@ function applyPreset(name) {
 }
 
 async function runRecommend() {
+  // 株価が古いときは実行をブロックせず確認だけ挟む（z_momentum を外した分析など
+  // 正当な用途を殺さない・無意識のクリックだけ止める・Issue #416）。
+  if (_priceFresh && _priceFresh.level === 'alert') {
+    const ok = confirm(
+      `株価が ${_priceFresh.p50} 時点で止まっています（${_priceFresh.bdays}営業日前・中央値）。\n` +
+      `PER・PBR・モメンタムを含むスコアはこの日付時点の値です。\n\n` +
+      `この結果で発注しないでください。分析だけ続けますか？`);
+    if (!ok) return;
+  }
   const btn = document.getElementById('btn-recommend');
   btn.disabled = true;
   btn.innerHTML = '<span class="spinner"></span> 分析中...';
@@ -343,6 +389,15 @@ async function runRecommend() {
     recResults = d.results;
     document.getElementById('rec-result-title').textContent =
       `分析結果：上位${d.count}社（候補${d.total_candidates}社中）`;
+    // レスポンス同梱の鮮度でバーを更新（/api/stats 取得後に株価が進んだ場合の追随）
+    const pf = d.price_freshness;
+    if (pf) _updatePriceFreshnessBar({
+      price_asof_p50: pf.price_asof_p50, price_asof_p05: pf.price_asof_p05,
+      price_asof_max: pf.price_asof_max, price_stale_bdays: pf.stale_bdays,
+      price_freshness: pf.level, price_n_stale_over_5d: pf.n_stale_over_5d,
+      price_asof_codes: pf.n_codes,
+    });
+    const staleFrom = pf && pf.price_asof_p50;
 
     const tbody = document.getElementById('rec-tbody');
     tbody.innerHTML = '';
@@ -364,6 +419,7 @@ async function runRecommend() {
           <td>${fmtPct(r.rev_growth)}</td>
           <td>${fmtPct(r.gap_ratio)}</td>
           <td style="color:var(--text-secondary);font-size:12px">${fmtCap(r.market_cap)}</td>
+          <td style="font-size:11px;color:${staleFrom && r.price_asof && r.price_asof < staleFrom ? cssVar('--status-bad') : cssVar('--text-muted')}">${esc(r.price_asof || '-')}</td>
         </tr>`;
     }
     document.getElementById('rec-result-card').style.display = 'block';
@@ -377,10 +433,11 @@ async function runRecommend() {
 
 function exportRecommendCSV() {
   if (!recResults.length) return;
-  const header = '順位,証券コード,企業名,業種,スコア,ROE%,営業利益率%,売上成長率%,割安度%,時価総額(百万円)';
+  const header = '順位,証券コード,企業名,業種,スコア,ROE%,営業利益率%,売上成長率%,割安度%,時価総額(百万円),株価日';
   const rows = recResults.map(r =>
     [r.rank, r.sec_code, r.company_name, r.industry, r.score,
-     r.roe, r.op_margin, r.rev_growth, r.gap_ratio, r.market_cap].join(','));
+     r.roe, r.op_margin, r.rev_growth, r.gap_ratio, r.market_cap,
+     r.price_asof || ''].join(','));
   dl([header, ...rows].join('\n'), 'recommend.csv');
 }
 
@@ -513,6 +570,14 @@ function renderSellRanking(d) {
     };
     const [_lbl, _act] = _MU_LABELS[d.mu_source] || _MU_LABELS.macro_enet;   // 既定 M-6（#402）
     notes.push(`<span style="color:var(--text-muted)">※ ${_lbl} 未実行のため μ・マクロリスク成分は除外されています（${_act}）</span>`);
+  }
+  // producer μ̂ の as-of（代表値=中央値・#417）。1銘柄でも新しければ全体が新しく見える
+  // max 表示を避け、最古と「代表値より古い銘柄数」を併記する。
+  if (d.mu_asof && d.mu_asof.snapshot_date) {
+    const a = d.mu_asof;
+    const nStale = a.n_stale ? `／代表より古い銘柄 ${Number(a.n_stale).toLocaleString()}社` : '';
+    notes.push(`<span style="color:var(--text-muted)">※ μ̂ の as-of: ${esc(a.snapshot_date)}（中央値）`
+      + `／最古 ${esc(a.snapshot_date_min || '不明')}${nStale}</span>`);
   }
   document.getElementById('sell-notes').innerHTML = notes.join('<br>');
 

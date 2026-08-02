@@ -29,6 +29,7 @@
 | [0023](0023-policy-uncertainty-epu-macro-channel.md) | 政策不確実性（EPU）2系列を FRED から収集しマクロチャネルへ追加・既定昇格 | #404 | accepted（2026-07-31） |
 | [0024](0024-news-tone-attention-macro-channel.md) | ニューストーン／関心度（GDELT・Wikimedia）を**マクロ集約**5系列で追加（銘柄別は容量不可）。昇格ゲートは不通過＝選択肢のみ（月次 M-2/M-6・週次 M-3 とも非有意＝#409 の追記節） | #406, #409 | accepted（2026-07-31） |
 | [0025](0025-training-window-history-backfill.md) | 学習窓をデータ履歴の延伸で広げる（週次株価7年＋財務2018〜＋過去株価紐付け）。47→71ヶ月・fold 10→18 期。M-1 の rank-IC はコロナ期を含めると 0.198→0.113 へ低下＝旧値は短窓の点推定だった | #411 | accepted（2026-08-01） |
+| [0026](0026-representative-asof-and-price-freshness.md) | 代表 as-of は中央値（max 禁止・最古と古い銘柄数を併記）／株価鮮度は p50 判定で 5・10 営業日の黄赤・実行はブロックしない | #417, #416 | accepted（2026-08-03） |
 
 ## 運用
 

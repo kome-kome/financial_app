@@ -40,6 +40,8 @@ from .macro_snapshots import (
     preload_macro,
     build_snapshots,
     get_producer_scores,
+    representative_snapshot_date,
+    to_date_str,
     oof_backtest,
     build_oof_meta,
     conformal_bucket_halfwidths,
@@ -648,9 +650,10 @@ class MacroGbdtPlugin(AnalysisPlugin):
         model.fit(X_all, y_all, verbose=False)
         return model
 
-    def _persist_producer(self, db: Any, raw_items: list, rep_str: str | None) -> None:
+    def _persist_producer(self, db: Any, raw_items: list, asof: dict) -> None:
         """producer μ̂ を macro_gbdt_scores へ永続化（sell_ranking が mu_source で読む）。
 
+        asof は `representative_snapshot_date` の戻り値（代表値=中央値・最古・古い銘柄数）。
         M-2 のみ。M-5 のスコアは順位（リターン単位でない）ため producer を持たず no-op
         で override する（Issue #362・下流統合は「順位→分位期待リターン写像」を別途定義
         するまで見送り）。"""
@@ -660,7 +663,9 @@ class MacroGbdtPlugin(AnalysisPlugin):
                 db,
                 [{"edinet_code": it["edinet_code"], "mu": it["mu_raw"],
                   "r1_prime": it.get("r1")} for it in raw_items],
-                rep_str,
+                asof.get("snapshot_date"),
+                snapshot_date_min=asof.get("snapshot_date_min"),
+                n_stale=asof.get("n_stale"),
             )
         except Exception:
             pass   # 永続化失敗（読取専用DB等）は分析表示を妨げない・producer は次回実行で再生成
@@ -926,6 +931,7 @@ class MacroGbdtPlugin(AnalysisPlugin):
                 "sec_code":     info["sec_code"],
                 "company_name": info["company_name"],
                 "industry":     info["industry"],
+                "snap_date":    to_date_str(snap_date),   # この銘柄の μ̂ の as-of（Issue #417）
                 "mu_raw":       round(mu_raw, 6),
                 "r1":           round(r1p, 6) if r1p is not None else None,  # コンフォーマル区間半幅（Issue #365）
                 "r2":           round(r2, 6) if r2 is not None else None,
@@ -956,14 +962,13 @@ class MacroGbdtPlugin(AnalysisPlugin):
 
         # ── producer μ̂ を永続化（sell_ranking が mu_source=macro_gbdt で読む・ADR-0004）─
         # M-2 は macro_gbdt_scores へ書く。M-5 は producer を持たず no-op（_persist_producer override）。
-        _snap_dates = [current_snaps[c][1].get("snap_date") for c in codes_ordered]
-        _snap_dates = [d for d in _snap_dates if d]
-        _rep = max(_snap_dates) if _snap_dates else None
-        _rep_str = (_rep.isoformat() if hasattr(_rep, "isoformat")
-                    else (str(_rep)[:10] if _rep else None))
-        self._persist_producer(db, raw_items, _rep_str)
+        # as-of は max ではなく中央値を代表値にする（Issue #417）。
+        _asof = representative_snapshot_date(
+            current_snaps[c][1].get("snap_date") for c in codes_ordered)
+        self._persist_producer(db, raw_items, _asof)
 
         return {
+            "asof":              _asof,
             "cv_metrics":        cv_metrics,
             "selected_features": model_feat_names,
             "feature_coefs":       global_shap,   # mean|SHAP|（大きさのみ・方向なし・後方互換）

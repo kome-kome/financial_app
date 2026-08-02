@@ -731,8 +731,12 @@ class TestProducer:
 
         persisted: list[dict] = []
 
-        def fake_replace(db, rows, snapshot_date=None):
+        captured: dict = {}
+
+        def fake_replace(db, rows, snapshot_date=None, snapshot_date_min=None, n_stale=None):
             persisted.extend(rows)
+            captured.update(snapshot_date=snapshot_date,
+                            snapshot_date_min=snapshot_date_min, n_stale=n_stale)
             return len(rows)
 
         db = MagicMock()
@@ -745,6 +749,10 @@ class TestProducer:
         for row in persisted:
             assert "edinet_code" in row
             assert "mu" in row and row["mu"] is not None
+        # as-of は代表値（中央値）・最古・古い銘柄数の3点で渡る（Issue #417）
+        assert captured["snapshot_date"] == dates[-1]        # 全銘柄同一グリッド → 中央値=最終週
+        assert captured["snapshot_date_min"] == dates[-1]
+        assert captured["n_stale"] == 0
 
     def test_execute_persists_all_not_just_top_n(self):
         """top_n=2 でも全銘柄が永続化される（ランキング外銘柄の除外なし）。"""
@@ -759,7 +767,7 @@ class TestProducer:
 
         persisted: list[dict] = []
 
-        def fake_replace(db, rows, snapshot_date=None):
+        def fake_replace(db, rows, snapshot_date=None, snapshot_date_min=None, n_stale=None):
             persisted.extend(rows)
 
         db = MagicMock()

@@ -173,7 +173,7 @@ class MacroGbdtRankPlugin(MacroGbdtPlugin):
         model.fit(X, y_lab, group=groups, verbose=False)
         return model
 
-    def _persist_producer(self, db: Any, raw_items: list, rep_str: str | None) -> None:
+    def _persist_producer(self, db: Any, raw_items: list, asof: dict) -> None:
         """no-op。M-5 のスコアは順位（リターン単位でない）ため producer を持たない（#362）。"""
         return None
 

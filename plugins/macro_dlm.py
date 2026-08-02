@@ -128,6 +128,7 @@ from .macro_snapshots import (  # noqa: E402
     PRICE_FEATURE_OPTIONS,
     DEFAULT_PRICE_FEATURES,
     build_price_features as _build_price_features,
+    representative_snapshot_date,
     _PX_RVOL_WINDOW,
     _PX_VOLZ_WINDOW,
     _PX_HIGH52_WINDOW,
@@ -687,6 +688,8 @@ class MacroDlmPlugin(AnalysisPlugin):
                 "sec_code": (comp.sec_code if comp else "") or "",
                 "company_name": (comp.name if comp else ec) or ec,
                 "industry": (comp.industry if comp else "不明") or "不明",
+                # この銘柄の μ̂ の as-of＝推定に使った最終週（Issue #417）
+                "snap_date": used_dates[-1] if used_dates else None,
                 "mu": _r(mu), "mu_ci": [_r(mu_lo), _r(mu_hi)],
                 "alpha_weekly": _r(alpha_w),
                 "n_weeks": T,
@@ -740,9 +743,9 @@ class MacroDlmPlugin(AnalysisPlugin):
         rows.sort(key=lambda r: (r["mu"] is None, -(r["mu"] or 0.0)))
         n_companies = len(rows)
 
-        # snapshot_date = 全銘柄の used_dates[-1] の最大値（_path_src を pop する前に収集）
-        _snap_dates = [r["_path_src"][2][-1] for r in rows if r.get("_path_src") and r["_path_src"][2]]
-        _snap_str: str | None = max(_snap_dates) if _snap_dates else None
+        # snapshot_date は銘柄別 snap_date の代表値＝中央値（max だと最新の 1〜2 銘柄が
+        # 全体の as-of を名乗る・Issue #417）。objective_only 時は snap_date を持たない。
+        _asof = representative_snapshot_date(r.get("snap_date") for r in rows)
 
         # top_n のみ α/β 経路（信用区間バンド）を構築して付与
         for r in rows[:top_n]:
@@ -800,12 +803,15 @@ class MacroDlmPlugin(AnalysisPlugin):
                 db,
                 [{"edinet_code": r["edinet_code"], "mu": r["mu"]}
                  for r in rows if r.get("mu") is not None],
-                _snap_str,
+                _asof.get("snapshot_date"),
+                snapshot_date_min=_asof.get("snapshot_date_min"),
+                n_stale=_asof.get("n_stale"),
             )
         except Exception:
             pass   # 永続化失敗（読取専用DB等）は分析表示を妨げない
 
         return {
+            "asof": _asof,
             "model_type": "bayesian_dlm",
             "macro_features": factors,
             "factor_labels": {f: _DLM_MACRO_MAP[f][2] for f in factors},

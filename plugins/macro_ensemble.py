@@ -45,6 +45,8 @@ from .macro_snapshots import (
     build_snapshots,
     oof_backtest,
     get_producer_scores,
+    representative_snapshot_date,
+    to_date_str,
     _macro_from_cache,
     _spearman,
 )
@@ -586,6 +588,7 @@ class MacroEnsemblePlugin(AnalysisPlugin):
                 "sec_code":     info.get("sec_code"),
                 "company_name": info.get("company_name"),
                 "industry":     info.get("industry"),
+                "snap_date":    to_date_str(info.get("snap_date")),   # この銘柄の μ̂ の as-of（Issue #417）
                 "mu_raw":       round(sum(w * m for w, m in zip(w_final, mus)), 6),
                 "r1": None, "r2": None, "r3": None,
             }
@@ -605,20 +608,21 @@ class MacroEnsemblePlugin(AnalysisPlugin):
         r_macro_available = any(it["r_macro"] is not None for it in results)
 
         # ── 6) producer 永続化（sell_ranking が mu_source=macro_ensemble で読む）─
-        snaps = [info.get("snap_date") for _, info in curs[0].values()]
-        snaps = [d for d in snaps if d]
-        rep = max(snaps) if snaps else None
-        rep_str = (rep.isoformat() if hasattr(rep, "isoformat") else (str(rep)[:10] if rep else None))
+        # as-of は max ではなく中央値を代表値にする。母集団も「基底レグの全社」ではなく
+        # 実際に μ̂ を出した交差銘柄（results）に合わせる（Issue #417）。
+        asof = representative_snapshot_date(it.get("snap_date") for it in results)
         try:
             from database import replace_macro_ensemble_scores
             replace_macro_ensemble_scores(
                 db, [{"edinet_code": it["edinet_code"], "mu": it["mu_raw"]} for it in results],
-                rep_str)
+                asof.get("snapshot_date"),
+                snapshot_date_min=asof.get("snapshot_date_min"),
+                n_stale=asof.get("n_stale"))
         except Exception:
             pass   # 読取専用DB等でも表示を妨げない（次回実行で再生成）
 
         base_result.update(n_companies=len(results), results=results,
-                           r_macro_available=r_macro_available)
+                           r_macro_available=r_macro_available, asof=asof)
         return base_result
 
 

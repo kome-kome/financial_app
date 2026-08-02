@@ -232,11 +232,23 @@ async def get_stats(db: Session = Depends(api.get_db)):
     else:
         freshness = "outdated"
 
+    # 株価の as-of（Issue #416）。件数だけでは「19日古いランキング」を見分けられない。
+    # 判定軸は p50（max は 2 銘柄だけ新しいといった実測ケースで嘘になる）。
+    from database import price_freshness
+    price = price_freshness(db)
+
     return {
         "companies":            n_companies,
         "records":              n_records,
         "stock_price_records":  n_stock_price,
         "records_with_prediction": n_predicted,
+        "price_asof_p50":       price["price_asof_p50"],
+        "price_asof_p05":       price["price_asof_p05"],
+        "price_asof_max":       price["price_asof_max"],
+        "price_asof_codes":     price["n_codes"],
+        "price_stale_bdays":    price["stale_bdays"],
+        "price_n_stale_over_5d": price["n_stale_over_5d"],
+        "price_freshness":      price["level"],
         "latest_year":          latest_fr.year       if latest_fr else None,
         "latest_period_end":    str(latest_fr.period_end) if latest_fr and latest_fr.period_end else None,
         "last_db_update":       api._utc_to_jst_str(last_db_update),
