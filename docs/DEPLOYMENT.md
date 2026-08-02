@@ -63,7 +63,7 @@ Render の制約と運用形態に合わせて設計すること。
 
 | 項目 | 仕様 |
 |---|---|
-| トリガー | `workflow_run: types: [completed]`。対象は `ci.yml` を除くアクティブ全12本（`workflows:` に**ワークフローの `name:` 値**を列挙） |
+| トリガー | `workflow_run: types: [completed]`。**`workflows:` は列挙せず全ワークフローを対象**にし、`ci.yml` だけ job の `if` で名前一致除外する |
 | 発火条件 | `conclusion == 'failure'` **または `'cancelled'`**。timeout 打ち切りは failure ではなく **cancelled** で終わるため両方必須（実例: `tune-hyperparameters` 300分・`collect-interim` 4h） |
 | 起票内容 | タイトル `[ops] ワークフロー失敗: <workflow name>`／ラベル `ops` `priority:high` `ci`／本文に run URL・発火イベント・ブランチ・**失敗ジョブ名**・**失敗ステップのログ末尾30行** |
 | 重複防止 | 同一タイトルの open Issue があれば新規起票せず**コメント追記** |
@@ -80,7 +80,9 @@ Render の制約と運用形態に合わせて設計すること。
 - **`notify-failure.yml` 自身の失敗**。`workflow_run` で起動されたワークフローは、さらに別の `workflow_run` を発火しない（GITHUB_TOKEN 由来イベントの無限ループ防止）。この経路が生きているかは下記セルフテストで確認する。
 - **ワークフローがそもそも起動しなくなったケース**（cron の無効化・ファイル名 `.disabled` 化など）。失敗ではなく無実行なので発火しない。鮮度そのものの監視は別系統（買い推奨画面の as-of 表示・#416）が担う。
 
-**ワークフローを追加・改名したとき**: `notify-failure.yml` の `workflows:` リストも直す。列挙漏れは「静かな通知欠落」（#414 と同型）になるため、`tests/test_workflow_failure_notification.py` が「`.github/workflows` 直下の全 `name:` が列挙されているか」を pytest で強制する（漏れると CI が落ちる）。
+**ワークフローを追加したとき**: 何もしなくてよい（`workflows:` を列挙しない設計＝新規ワークフローも自動で対象）。列挙方式に戻すと、**列挙漏れによる静かな通知欠落**（#414 と同型）が復活するうえ、そもそも起動しない（下記）。`ci.yml` を改名したときだけ job の `if` の除外文字列を追随させる。`tests/test_workflow_failure_notification.py` が「列挙方式に戻っていないか」「`ci.yml` の `name:` と `if` の文字列が一致するか」「`cancelled` が条件から落ちていないか」を pytest で強制する。
+
+> **⚠️ `workflows:` にワークフロー名を列挙してはいけない（2026-08-02 実測）**: GitHub は `workflow_run.workflows` の各要素を**フィルタパターン**として解釈するため、本リポジトリのように名前が `[定常] …` と角括弧で始まると `Encountered an issue parsing workflow trigger(s)` でワークフローごと **`startup_failure`** になる（run [30747596548](https://github.com/kome-kome/financial_app/actions/runs/30747596548)）。しかもこの状態では `types:` フィルタも効かず、`requested` を含む全イベントに反応して毎回 `startup_failure` を量産する。**「起動して失敗」ではなく「起動すらしない」ため、通知が来ないこと自体に気づけない。**
 
 **修正時の注意**: `workflow_run` は **default branch（main）上のファイルだけ**が実行される。feature ブランチでこのファイルを直しても実火では動かないため、検証は main 反映後に行う。
 

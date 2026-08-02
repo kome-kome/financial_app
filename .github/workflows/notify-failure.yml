@@ -10,11 +10,11 @@ name: "[定常] ワークフロー失敗の自動 Issue 起票"
 # 設計上の注意（触る前に必ず読むこと）:
 #   - workflow_run は **default branch (main) 上のファイルだけ**が実行される。
 #     feature ブランチでこのファイルを直しても実火では一切動かない＝検証は main 反映後。
-#   - workflows: に書くのは「ファイル名」ではなく各ワークフローの `name:` 値。
-#     列挙漏れ＝静かな通知欠落（#414 と同型の罠）になるため、
-#     tests/test_workflow_failure_notification.py が
-#     「.github/workflows 直下の全 name が列挙されているか」を pytest で強制する。
-#     ワークフローを追加・改名したらこのリストも直す（直さないと CI が落ちる）。
+#   - `workflows:` は**列挙しない**（全ワークフローを対象にする）。GitHub は
+#     workflows: の各要素をフィルタパターンとして扱うため、"[定常] …" のように
+#     角括弧で始まる名前を列挙すると startup_failure になる（下記 on: のコメント参照）。
+#     除外は job の if で行い、tests/test_workflow_failure_notification.py が
+#     「列挙方式に戻っていないか」「ci.yml の name と if の除外文字列が一致するか」を強制する。
 #   - `cancelled` を必ず含める。timeout 打ち切りは failure ではなく cancelled で終わる
 #     （実例: tune-hyperparameters 300分 timeout・collect-interim 4h timeout）。
 #   - ci.yml は対象外。PR の pytest 失敗は PR 画面で即見えるうえ、
@@ -24,20 +24,13 @@ name: "[定常] ワークフロー失敗の自動 Issue 起票"
 
 on:
   workflow_run:
-    workflows:
-      - "[定常] 差分収集・毎日自動実行"
-      - "[定常] M-1/M-2/M-3 ハイパーパラメータ月次自動探索"
-      - "[定常] DBメンテナンス（VACUUM FULL・週次）"
-      - "[全件] XBRL収集・財務データ全件更新"
-      - "[補完] 会社予想開示収集"
-      - "[補完] 半期(H1)財務収集"
-      - "[補完] マクロのみ収集"
-      - "[補完] M-1 per-stock 階層マクロ・ベータ推論バッチ"
-      - "[補完] recommend Fama-MacBeth ファクタープレミアム推定バッチ"
-      - "[一回性] 財務レコードへの過去株価紐付け（Yahoo）"
-      - "[一回性] 週次株価バックフィル（Yahoo）"
-      - "[実験] M-1 マクロβ 複数runプール → r_hat 検証（Issue #341）"
-      - "[検証] notify-failure セルフテスト"
+    # 【重要】`workflows:` は書かない＝リポジトリの全ワークフローが対象。
+    # GitHub は workflows: の各要素を**フィルタパターン**として解釈するため、
+    # 本リポジトリのように名前が "[定常] …" と角括弧で始まると
+    # "Encountered an issue parsing workflow trigger(s)" で startup_failure になる
+    # （2026-08-02 実測・run 30747596548。13本すべて列挙した版が起動できなかった）。
+    # 副次的な利点として、ワークフローを追加しても列挙漏れが構造的に起きない。
+    # 対象外にしたいワークフロー（ci.yml）は下の job の if で名前一致除外する。
     types: [completed]
 
 # issues: write はこのワークフローのみ。収集系の contents: read 最小権限は崩さない。
@@ -48,10 +41,14 @@ permissions:
 
 jobs:
   notify:
-    # timeout 由来の cancelled を取りこぼさないため failure と両方を条件にする
+    # timeout 由来の cancelled を取りこぼさないため failure と両方を条件にする。
+    # ci.yml だけは除外（PR の pytest 失敗は PR 画面で即見え、feature ブランチの
+    # 試行錯誤で Issue が乱立するため）。名前一致なので ci.yml の name を変えたら
+    # ここも直す＝tests/test_workflow_failure_notification.py が整合を強制する。
     if: >-
-      github.event.workflow_run.conclusion == 'failure' ||
-      github.event.workflow_run.conclusion == 'cancelled'
+      (github.event.workflow_run.conclusion == 'failure' ||
+      github.event.workflow_run.conclusion == 'cancelled') &&
+      github.event.workflow_run.name != '[CI] pytest 自動テスト'
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
