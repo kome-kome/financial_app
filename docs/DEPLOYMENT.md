@@ -25,6 +25,7 @@ Render の制約と運用形態に合わせて設計すること。
 | **手動のみ（アーカイブ）** | bs_inventory 補完 | workflow_dispatch で起動 | GitHub Actions `old/` 配下（一回性・完了済み） |
 | **UIから手動** | 差分収集・株価更新 | ユーザーがボタン押下 | Render Web UI |
 | **自動（CI）** | `pytest` 回帰テスト（Secrets・本番DB非依存） | PR / main への push | GitHub Actions `ci.yml` |
+| **自動（イベント）** | 他ワークフローの failure / cancelled を Issue 化 | 対象ワークフロー完了時（`workflow_run`） | GitHub Actions `notify-failure.yml` |
 
 ### GitHub Actions workflow 早見表（いつ・何を・どれを使うか）
 
@@ -40,6 +41,8 @@ Render の制約と運用形態に合わせて設計すること。
 | `[定常]` | M-1/M-2/M-3 ハイパーパラメータ月次自動探索 | `tune-hyperparameters.yml` | `hyperparameter_search.py`（Issue #264/#278/#291）を matrix strategy で3モデル並列実行し `plugin_tuned_params` へ永続化（Issue #292）。`macro_risk_return`/`macro_dlm` は `--strategy grid`、`macro_gbdt` は `--strategy random --n-iter 150`（6時間上限に収める設計判断）。共通 `--objective rank_ic --persist --persist-scores --seed 0`。品質ゲート（#291）でスコア劣化時は該当ジョブが failed 終了（意図した挙動）。毎月1日 UTC 03:00（JST 12:00）自動。手動即時実行は `workflow_dispatch` | macro_risk_return/macro_dlm: 10〜60分、macro_gbdt: 4〜8時間相当を n_iter=150 で圧縮（timeout-minutes: 355） |
 | `[補完]` | 半期(H1)財務収集 | `collect-interim.yml` | EDINET 半期報告書（043A00/docType160）と旧四半期報告書（043000/docType140）の Q2(中間=H1累計)を収集し `financial_records` に `period_type='H1'` で保存（Issue #219② フェーズB）。通期収集とは独立・常に差分（収集済み doc_id をスキップ）。`workflow_dispatch`（years_back 既定6＝既存通期窓に整合）。240分に収まらない場合は years_back を分割 | 数時間（過去6年・事前選別でQ1/Q3を除外し概ね1社1半期1DL） |
 | `[推論]` | recommend Fama-MacBeth ファクタープレミアム推定（producer） | `recommend-factor-premia.yml` | `recommend_factor_premia.py --persist`（Issue #271/#342・ADR-0008）を実行し、月次断面 OLS（Fama & MacBeth 1973・Newey-West HAC）で推定したファクタープレミアムを `recommend_factor_premia` テーブルへ永続化（`plugins.recommend.resolve_weights()` が「統計的最適化」プリセットとして読む consumer）。依存は `requirements.txt` で充足（PyMC 不要）。**当面 `workflow_dispatch` のみ**（cron 要否は別途判断・Issue #342）。`min_companies_per_period`（既定30）・`maxlags`（既定11）指定可。MCMC のような収束ゲートは無し（断面 OLS は決定的） | 未計測（`timeout-minutes: 120`。週次株価 build_snapshots ロード＋月次断面 OLS。計算自体は MCMC より遥かに軽量） |
+| `[定常]` | ワークフロー失敗の自動 Issue 起票 | `notify-failure.yml` | 上記ワークフロー（`ci.yml` を除く全12本）＋セルフテストが `failure` または `cancelled` で終わると自動起票（`workflow_run`）。手動起動しない。詳細は下記「ワークフロー失敗の通知」節 | 〜1分 |
+| `[検証]` | notify-failure セルフテスト | `notify-failure-selftest.yml` | `notify-failure.yml` の変更後に発火を実証するための、意図的に失敗するだけのワークフロー（本番データ不使用）。`workflow_dispatch`（`mode=fail`／`mode=cancel`） | 〜1分（cancel は約1分） |
 | `[定常]` | DBメンテナンス（VACUUM FULL・週次） | `vacuum-maintenance.yml` | `stock_price_daily` の DELETE ベース trim による index bloat 対策（Issue #290）。`_pipeline_vacuum.py` が AUTOCOMMIT 接続で `VACUUM FULL stock_price_daily` を実行、前後の容量をログ出力。毎週 UTC 19:00・土（JST 04:00・日）自動。手動即時実行は `workflow_dispatch`（ローカル・GitHub Actions 双方で Supabase pooler 経由の正常動作を確認済み・2026-07-12） | 数秒〜数分（対象テーブルは実測 ~50MB・42万行） |
 
 #### アーカイブ済み（`.github/workflows/old/` 配下・一回性・Actions 対象外）
@@ -53,6 +56,42 @@ Render の制約と運用形態に合わせて設計すること。
 | `[補完]` | PL/BS NULL バックフィル | `old/.github/workflows/old/refill-pl-bs.yml` | `bs_inventory` 等 旧コホート（〜2022年）が NULL の場合に再取得 | 4〜5時間 |
 
 > **CI（`ci.yml`）**: データ収集系ワークフローとは独立した回帰検知用。`pull_request` と main への `push` で Python 3.13.7 上に `requirements.txt` + `requirements-dev.txt` を入れて `pytest` を実行する。Secrets・外部ネットワーク・本番 DB には一切触れず、`conftest.py` の in-memory SQLite / モックで完結する範囲のみを検証する。
+
+### ワークフロー失敗の通知（`notify-failure.yml`・Issue #414）
+
+**GitHub 標準のメール通知は当てにしない。** `daily-incremental` が 2026-07-14〜08-01 の **19日連続 failure** で止まっていたのに誰も気づかず、その間ずっと19日古い株価でランキングを見ていた実例がある。この再発防止として、失敗を「必ず目に触れる Issue」へ変換する。
+
+| 項目 | 仕様 |
+|---|---|
+| トリガー | `workflow_run: types: [completed]`。対象は `ci.yml` を除くアクティブ全12本（`workflows:` に**ワークフローの `name:` 値**を列挙） |
+| 発火条件 | `conclusion == 'failure'` **または `'cancelled'`**。timeout 打ち切りは failure ではなく **cancelled** で終わるため両方必須（実例: `tune-hyperparameters` 300分・`collect-interim` 4h） |
+| 起票内容 | タイトル `[ops] ワークフロー失敗: <workflow name>`／ラベル `ops` `priority:high` `ci`／本文に run URL・発火イベント・ブランチ・**失敗ジョブ名**・**失敗ステップのログ末尾30行** |
+| 重複防止 | 同一タイトルの open Issue があれば新規起票せず**コメント追記** |
+| 権限 | `issues: write` は本ワークフローのみ。収集系の `contents: read` 最小権限は崩さない。ログ取得のため `actions: read` |
+
+**運用ルール（重要）**:
+
+- **復旧を確認したら Issue をクローズする。** open のまま放置すると次回以降の失敗が同じ Issue へのコメントになり、埋もれて #414 の再現になる。
+- `ci.yml` は対象外（PR の pytest 失敗は PR 画面で即見えるうえ、feature ブランチの試行錯誤で Issue が乱立するため）。
+- `.github/workflows/old/` 配下はサブディレクトリのため GitHub Actions が認識せず、対象外。
+
+**この仕組みで検知できないもの（限界）**:
+
+- **`notify-failure.yml` 自身の失敗**。`workflow_run` で起動されたワークフローは、さらに別の `workflow_run` を発火しない（GITHUB_TOKEN 由来イベントの無限ループ防止）。この経路が生きているかは下記セルフテストで確認する。
+- **ワークフローがそもそも起動しなくなったケース**（cron の無効化・ファイル名 `.disabled` 化など）。失敗ではなく無実行なので発火しない。鮮度そのものの監視は別系統（買い推奨画面の as-of 表示・#416）が担う。
+
+**ワークフローを追加・改名したとき**: `notify-failure.yml` の `workflows:` リストも直す。列挙漏れは「静かな通知欠落」（#414 と同型）になるため、`tests/test_workflow_failure_notification.py` が「`.github/workflows` 直下の全 `name:` が列挙されているか」を pytest で強制する（漏れると CI が落ちる）。
+
+**修正時の注意**: `workflow_run` は **default branch（main）上のファイルだけ**が実行される。feature ブランチでこのファイルを直しても実火では動かないため、検証は main 反映後に行う。
+
+**検証手段**: `notify-failure-selftest.yml`（`[検証] notify-failure セルフテスト`）を `workflow_dispatch` で起動する。本番データには一切触れず、意図的に失敗するだけのワークフロー。
+
+```bash
+gh workflow run notify-failure-selftest.yml -f mode=fail     # exit 1 → conclusion: failure
+gh workflow run notify-failure-selftest.yml -f mode=cancel   # timeout 打ち切り → conclusion: cancelled（約1分）
+```
+
+`notify-failure.yml` を変更したら main 反映後にこれを1回流し、Issue が起票される（2回目以降はコメント追記になる）ことを確認する。確認後は起票された Issue をクローズすること。
 
 ### daily-incremental の動作詳細
 

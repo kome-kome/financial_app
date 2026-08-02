@@ -1,0 +1,132 @@
+name: "[定常] ワークフロー失敗の自動 Issue 起票"
+
+# 目的: GitHub Actions の失敗を「必ず人間の目に触れる形（Issue）」へ変換する。
+#
+# 背景（Issue #414）:
+#   daily-incremental が 2026-07-14〜08-01 の19日連続で failure していたが、
+#   GitHub 標準のメール通知では誰も気づかず、19日古い株価でランキングを見ていた。
+#   全ワークフローに失敗検知が 0 本だったことが原因。
+#
+# 設計上の注意（触る前に必ず読むこと）:
+#   - workflow_run は **default branch (main) 上のファイルだけ**が実行される。
+#     feature ブランチでこのファイルを直しても実火では一切動かない＝検証は main 反映後。
+#   - workflows: に書くのは「ファイル名」ではなく各ワークフローの `name:` 値。
+#     列挙漏れ＝静かな通知欠落（#414 と同型の罠）になるため、
+#     tests/test_workflow_failure_notification.py が
+#     「.github/workflows 直下の全 name が列挙されているか」を pytest で強制する。
+#     ワークフローを追加・改名したらこのリストも直す（直さないと CI が落ちる）。
+#   - `cancelled` を必ず含める。timeout 打ち切りは failure ではなく cancelled で終わる
+#     （実例: tune-hyperparameters 300分 timeout・collect-interim 4h timeout）。
+#   - ci.yml は対象外。PR の pytest 失敗は PR 画面で即見えるうえ、
+#     feature ブランチの試行錯誤で Issue が乱立するため（#414 の運用判断）。
+#   - GITHUB_TOKEN で作成した Issue は他のワークフローを再帰トリガーしない（無限ループ無し）。
+#   - .github/workflows/old/ 配下はサブディレクトリのため GitHub Actions が認識しない＝対象外。
+
+on:
+  workflow_run:
+    workflows:
+      - "[定常] 差分収集・毎日自動実行"
+      - "[定常] M-1/M-2/M-3 ハイパーパラメータ月次自動探索"
+      - "[定常] DBメンテナンス（VACUUM FULL・週次）"
+      - "[全件] XBRL収集・財務データ全件更新"
+      - "[補完] 会社予想開示収集"
+      - "[補完] 半期(H1)財務収集"
+      - "[補完] マクロのみ収集"
+      - "[補完] M-1 per-stock 階層マクロ・ベータ推論バッチ"
+      - "[補完] recommend Fama-MacBeth ファクタープレミアム推定バッチ"
+      - "[一回性] 財務レコードへの過去株価紐付け（Yahoo）"
+      - "[一回性] 週次株価バックフィル（Yahoo）"
+      - "[実験] M-1 マクロβ 複数runプール → r_hat 検証（Issue #341）"
+      - "[検証] notify-failure セルフテスト"
+    types: [completed]
+
+# issues: write はこのワークフローのみ。収集系の contents: read 最小権限は崩さない。
+permissions:
+  contents: read
+  issues: write
+  actions: read      # 失敗ジョブ名・ログ末尾の取得に必要
+
+jobs:
+  notify:
+    # timeout 由来の cancelled を取りこぼさないため failure と両方を条件にする
+    if: >-
+      github.event.workflow_run.conclusion == 'failure' ||
+      github.event.workflow_run.conclusion == 'cancelled'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Issue 起票 or 既存 Issue へコメント追記
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          WF_NAME: ${{ github.event.workflow_run.name }}
+          CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          RUN_URL: ${{ github.event.workflow_run.html_url }}
+          RUN_EVENT: ${{ github.event.workflow_run.event }}
+          HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+          ENDED_AT: ${{ github.event.workflow_run.updated_at }}
+        # ${{ }} は env 経由でのみ参照する（run: へ直接展開しない＝シェルインジェクション対策）
+        run: |
+          set -uo pipefail
+
+          TITLE="[ops] ワークフロー失敗: ${WF_NAME}"
+          BODY_FILE="${RUNNER_TEMP}/notify-failure-body.md"
+
+          # --- 失敗/キャンセルしたジョブ名（成功ジョブは除く） ---
+          jobs=$(gh run view "${RUN_ID}" --json jobs \
+                   --jq '.jobs[] | select(.conclusion == "failure" or .conclusion == "cancelled") | "- `\(.name)` → \(.conclusion)"' \
+                 2>/dev/null) || true
+          if [ -z "${jobs:-}" ]; then
+            jobs="- （ジョブ情報を取得できませんでした）"
+          fi
+
+          # --- ログ末尾。cancelled は失敗ステップを持たず --log-failed が空になるため fallback ---
+          # cut: 1行が極端に長いログ（JSON ダンプ等）で Issue 本文が肥大するのを防ぐ
+          log=$(gh run view "${RUN_ID}" --log-failed 2>/dev/null | tail -n 30 | cut -c1-500) || true
+          if [ -z "${log:-}" ]; then
+            log=$(gh run view "${RUN_ID}" --log 2>/dev/null | tail -n 30 | cut -c1-500) || true
+          fi
+          if [ -z "${log:-}" ]; then
+            log="（ログを取得できませんでした。run URL を直接参照してください）"
+          fi
+
+          {
+            echo "\`${WF_NAME}\` が **${CONCLUSION}** で終了しました（自動起票）。"
+            echo
+            echo "| 項目 | 値 |"
+            echo "|---|---|"
+            echo "| run | ${RUN_URL} |"
+            echo "| 発火 | \`${RUN_EVENT}\` / branch \`${HEAD_BRANCH}\` / attempt ${RUN_ATTEMPT} |"
+            echo "| 終了時刻 (UTC) | ${ENDED_AT} |"
+            echo
+            echo "### 失敗したジョブ"
+            echo "${jobs}"
+            echo
+            echo "### ログ末尾（30行）"
+            echo '```'
+            echo "${log}"
+            echo '```'
+            echo
+            echo "---"
+            echo "このIssueは \`.github/workflows/notify-failure.yml\` による自動起票です（Issue #414）。"
+            echo "同一ワークフローの再失敗は新規起票せず本Issueへコメント追記されます。"
+            echo "**復旧を確認したらクローズしてください**（open のまま放置すると次の失敗がコメントに埋もれます）。"
+          } > "${BODY_FILE}"
+
+          # --- 重複起票の防止: 同一タイトルの open Issue があればコメント追記 ---
+          # ラベルで絞ると誰かが ops を外したときに重複起票するため、open 全件から突き合わせる。
+          # 外部 jq ではなく gh 内蔵 --jq を使う（env.TITLE 参照はローカル実測で動作確認済み）。
+          existing=$(TITLE="${TITLE}" gh issue list --state open --limit 200 --json number,title \
+                       --jq '[.[] | select(.title == env.TITLE)] | .[0].number // empty') || true
+
+          if [ -n "${existing:-}" ]; then
+            gh issue comment "${existing}" --body-file "${BODY_FILE}"
+            echo "既存 Issue #${existing} へコメントを追記しました"
+          else
+            gh issue create --title "${TITLE}" --body-file "${BODY_FILE}" \
+              --label ops --label priority:high --label ci
+            echo "新規 Issue を起票しました: ${TITLE}"
+          fi

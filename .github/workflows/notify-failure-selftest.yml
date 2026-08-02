@@ -1,0 +1,46 @@
+name: "[検証] notify-failure セルフテスト"
+
+# notify-failure.yml が実際に Issue を起票するかを確認するための、意図的に失敗するだけの
+# ワークフロー（Issue #414 の検証手順1〜3）。本番データには一切触れない。
+#
+# workflow_run は default branch 上のファイルしか実行されないため、notify-failure.yml を
+# 変更したら main 反映後にこれを1回流して発火を確認する（feature ブランチでは検証不能）。
+#
+#   mode=fail   → exit 1 で conclusion: failure
+#   mode=cancel → timeout-minutes 超過で conclusion: cancelled（timeout 打ち切りは
+#                 failure ではなく cancelled で終わることの再現。約1分待つ）
+#
+# 実行後に起票された `[ops] ワークフロー失敗: [検証] notify-failure セルフテスト` は
+# 確認したらクローズすること（open のままだと次の失敗がコメントに埋もれる）。
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "fail=即 exit 1 / cancel=timeout 打ち切りで cancelled を再現"
+        type: choice
+        options:
+          - fail
+          - cancel
+        default: fail
+
+permissions:
+  contents: read
+
+jobs:
+  selftest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 1   # cancel モードはこの上限超過で打ち切られ conclusion: cancelled になる
+
+    steps:
+      - name: 意図的に失敗する
+        env:
+          MODE: ${{ inputs.mode }}
+        run: |
+          set -uo pipefail
+          if [ "${MODE}" = "cancel" ]; then
+            echo "timeout-minutes: 1 を超過させて cancelled を再現します"
+            sleep 300
+          fi
+          echo "notify-failure.yml の検証用に意図的に失敗します（Issue #414）"
+          exit 1
