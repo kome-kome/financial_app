@@ -146,6 +146,7 @@ tr:hover td{background:var(--border-subtle)}
 .freshness-fresh{background:var(--val-up-bg);color:var(--val-up-text)}
 .freshness-stale{background:var(--status-warn-bg);color:var(--status-warn-text)}
 .freshness-none{background:var(--bg-hover);color:var(--text-muted)}
+.freshness-alert{background:var(--status-bad-bg);color:var(--status-bad-text)}
 .gnav{display:flex;align-items:center;gap:2px;background:var(--bg-elevated);border-bottom:1px solid var(--border);padding:0 24px;flex-wrap:wrap}
 .gnav-link{padding:10px 14px;font-size:13px;color:var(--text-secondary);text-decoration:none;border-bottom:2px solid transparent;transition:color .15s,border-color .15s}
 .gnav-link:hover{color:var(--text)}
@@ -280,6 +281,12 @@ tr:hover td{background:var(--border-subtle)}
 <!-- おすすめ銘柄 -->
 <div id="tab-recommend" class="hidden">
 
+  <!-- 株価 as-of バー（常設・Issue #416）: 銘柄別最終株価日の中央値と齢を出す。
+       件数だけでは「19日古いランキング」と今朝のランキングが区別できない。 -->
+  <div id="price-freshness-bar" class="freshness-bar">
+    <div id="price-freshness-content"><span class="freshness-badge freshness-none">株価 as-of 取得中…</span></div>
+  </div>
+
   <div class="card">
     <div class="section-title">分析プリセット<a class="co-link" href="/guide#recommend" target="_blank" rel="noopener" style="float:right;font-size:12px;font-weight:400">❓ やさしい解説</a></div>
     <div class="info-box" style="margin-bottom:14px">
@@ -317,7 +324,7 @@ tr:hover td{background:var(--border-subtle)}
           <tr>
             <th>順位</th><th>証券コード</th><th>企業名</th><th>業種</th>
             <th>スコア</th><th>ROE%</th><th>営業利益率%</th>
-            <th>売上成長率%</th><th>割安度%</th><th>時価総額</th>
+            <th>売上成長率%</th><th>割安度%</th><th>時価総額</th><th>株価日</th>
           </tr>
         </thead>
         <tbody id="rec-tbody"></tbody>

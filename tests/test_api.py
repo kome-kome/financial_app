@@ -154,6 +154,26 @@ class TestStatsEndpoint:
         body = client.get("/api/stats").json()
         assert body["records_with_prediction"] == 1
 
+    def test_price_asof_is_p50_not_max(self, db, make_company):
+        """株価 as-of は p50 で判定する（max だけ新しいケースで警告が消えない・Issue #416）。"""
+        from datetime import timedelta
+        from database import StockPriceDaily
+        old = (date.today() - timedelta(days=25)).isoformat()
+        new = date.today().isoformat()
+        for i in range(20):
+            ec = f"E{i:05d}"
+            db.add(make_company(edinet_code=ec))
+            db.add(StockPriceDaily(edinet_code=ec, trade_date=old, close=100.0))
+        db.add(make_company(edinet_code="E09999"))
+        db.add(StockPriceDaily(edinet_code="E09999", trade_date=new, close=100.0))
+        db.commit()
+        api.app.dependency_overrides[api.get_db] = lambda: db
+        body = client.get("/api/stats").json()
+        assert body["price_asof_p50"] == old        # max（今日）ではない
+        assert body["price_asof_max"] == new        # max は参考値としては返る
+        assert body["price_freshness"] == "alert"
+        assert body["price_n_stale_over_5d"] == 20
+
 
 class TestHeavyPluginRenderBlock:
     def test_sector_ols_blocked_in_light_mode(self, db, monkeypatch):

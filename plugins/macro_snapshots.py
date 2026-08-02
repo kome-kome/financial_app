@@ -374,6 +374,39 @@ def _add_days(date_str: str, days: int) -> str:
     return (d + timedelta(days=days)).strftime("%Y-%m-%d")
 
 
+def to_date_str(d) -> str | None:
+    """date / datetime / str を "YYYY-MM-DD" へ正規化する（None・空は None）。"""
+    if not d:
+        return None
+    return d.isoformat() if hasattr(d, "isoformat") else str(d)[:10]
+
+
+def representative_snapshot_date(snap_dates) -> dict:
+    """銘柄別スナップ日から producer の as-of 代表値を作る（Issue #417）。
+
+    μ̂ は銘柄ごとに「その銘柄の最終週次バー」時点で計算される（`build_snapshots` の
+    `is_current = (snap_idx == n - 1)`）。したがって as-of は本来 1 個の値ではない。
+    ここを `max` で潰すと「最新の 1〜2 銘柄」が全体の as-of を名乗る
+    （実測 2026-08-02: 2 銘柄 2026-07-31 / 3,677 銘柄 2026-07-13 → max は 19 日新しい嘘）。
+
+    代表値は中央値（p50）を採る。偶数個は古い側（lower median）＝保守側へ寄せる。
+
+    戻り値 `{"snapshot_date": p50, "snapshot_date_min": 最古, "snapshot_date_max": 最新,
+    "n_stale": 代表値より古い銘柄数}`。入力が空なら日付 3 つとも None・n_stale=0。
+    """
+    ds = sorted(s for s in (to_date_str(d) for d in snap_dates) if s)
+    if not ds:
+        return {"snapshot_date": None, "snapshot_date_min": None,
+                "snapshot_date_max": None, "n_stale": 0}
+    p50 = ds[(len(ds) - 1) // 2]
+    return {
+        "snapshot_date":     p50,
+        "snapshot_date_min": ds[0],
+        "snapshot_date_max": ds[-1],
+        "n_stale":           sum(1 for s in ds if s < p50),
+    }
+
+
 def _find_applicable_fin(fin_recs: list, snap_date: str):
     """snap_date より FINANCIAL_LAG_DAYS 前以前に period_end がある最新の財務レコードを返す。"""
     result = None

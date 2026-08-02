@@ -588,17 +588,24 @@ class MacroGbdtScore(Base):
     edinet_code   = Column(String(10), primary_key=True)
     mu            = Column(Float, nullable=False)   # XGBoost 予測 52週先対数リターン（無次元）
     r1_prime      = Column(Float)                    # コンフォーマル区間半幅＝確実性軸（Issue #365・None 可）
-    snapshot_date = Column(String(10))              # "YYYY-MM-DD"（実行時スナップ基準日）
+    snapshot_date = Column(String(10))              # "YYYY-MM-DD"（銘柄別スナップ日の中央値＝代表値・Issue #417）
+    snapshot_date_min = Column(String(10))          # 最古の銘柄のスナップ日（Issue #417）
+    n_stale       = Column(Integer)                  # 代表値より古いスナップ日を持つ銘柄数（Issue #417）
     created_at    = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
 
-def replace_macro_gbdt_scores(db, rows: list, snapshot_date: str | None = None) -> int:
+def replace_macro_gbdt_scores(db, rows: list, snapshot_date: str | None = None,
+                              snapshot_date_min: str | None = None,
+                              n_stale: int | None = None) -> int:
     """M-2 producer μ̂ を全置換する（最新スナップショットのみ保持）。
 
     rows = [{"edinet_code": str, "mu": float, "r1_prime": float|None}, ...]。1 txn で
     全削除→一括 insert。mu が None の行はスキップ（予測不能銘柄を保存しない）。r1_prime は
     任意（無ければ None＝R3 ゲート素通り・Issue #365）。戻り値は保存件数。
     `tuning_dry_run()` 内では no-op（0 を返す・Issue #264）。
+
+    snapshot_date は銘柄別スナップ日の**代表値（中央値）**、snapshot_date_min は最古、
+    n_stale は代表値より古い銘柄数（`representative_snapshot_date`・Issue #417）。
     """
     if _tuning_dry_run.get():
         return 0
@@ -607,7 +614,8 @@ def replace_macro_gbdt_scores(db, rows: list, snapshot_date: str | None = None) 
         MacroGbdtScore(
             edinet_code=r["edinet_code"], mu=float(r["mu"]),
             r1_prime=(float(r["r1_prime"]) if r.get("r1_prime") is not None else None),
-            snapshot_date=snapshot_date,
+            snapshot_date=snapshot_date, snapshot_date_min=snapshot_date_min,
+            n_stale=n_stale,
         )
         for r in rows
         if r.get("edinet_code") and r.get("mu") is not None
@@ -656,23 +664,30 @@ class MacroDlmScore(Base):
 
     edinet_code   = Column(String(10), primary_key=True)
     mu            = Column(Float, nullable=False)   # 年率化アルファ α_T × 52（無次元）
-    snapshot_date = Column(String(10))              # "YYYY-MM-DD"（実行時の最終週基準日）
+    snapshot_date = Column(String(10))              # "YYYY-MM-DD"（銘柄別最終週の中央値＝代表値・Issue #417）
+    snapshot_date_min = Column(String(10))          # 最古の銘柄の最終週（Issue #417）
+    n_stale       = Column(Integer)                  # 代表値より古い銘柄数（Issue #417）
     created_at    = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
 
-def replace_macro_dlm_scores(db, rows: list, snapshot_date: str | None = None) -> int:
+def replace_macro_dlm_scores(db, rows: list, snapshot_date: str | None = None,
+                             snapshot_date_min: str | None = None,
+                             n_stale: int | None = None) -> int:
     """M-3 producer μ̂ を全置換する（最新スナップショットのみ保持）。
 
     rows = [{"edinet_code": str, "mu": float}, ...]。1 txn で全削除→一括 insert。
     mu が None の行はスキップ（推定不能銘柄を保存しない）。戻り値は保存件数。
     `tuning_dry_run()` 内では no-op（0 を返す・Issue #264）。
+    snapshot_date は代表値（中央値）・snapshot_date_min は最古・n_stale は代表値より
+    古い銘柄数（Issue #417）。
     """
     if _tuning_dry_run.get():
         return 0
     db.query(MacroDlmScore).delete()
     objs = [
         MacroDlmScore(edinet_code=r["edinet_code"], mu=float(r["mu"]),
-                      snapshot_date=snapshot_date)
+                      snapshot_date=snapshot_date,
+                      snapshot_date_min=snapshot_date_min, n_stale=n_stale)
         for r in rows
         if r.get("edinet_code") and r.get("mu") is not None
     ]
@@ -703,22 +718,29 @@ class MacroEnsembleScore(Base):
 
     edinet_code   = Column(String(10), primary_key=True)
     mu            = Column(Float, nullable=False)   # スタッキング統合 52週先対数リターン（無次元）
-    snapshot_date = Column(String(10))              # "YYYY-MM-DD"（実行時スナップ基準日）
+    snapshot_date = Column(String(10))              # "YYYY-MM-DD"（銘柄別スナップ日の中央値＝代表値・Issue #417）
+    snapshot_date_min = Column(String(10))          # 最古の銘柄のスナップ日（Issue #417）
+    n_stale       = Column(Integer)                  # 代表値より古い銘柄数（Issue #417）
     created_at    = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
 
-def replace_macro_ensemble_scores(db, rows: list, snapshot_date: str | None = None) -> int:
+def replace_macro_ensemble_scores(db, rows: list, snapshot_date: str | None = None,
+                                  snapshot_date_min: str | None = None,
+                                  n_stale: int | None = None) -> int:
     """M-4 producer μ̂ を全置換する（最新スナップショットのみ保持）。
 
     rows = [{"edinet_code": str, "mu": float}, ...]。1 txn で全削除→一括 insert。
     mu が None の行はスキップ。戻り値は保存件数。`tuning_dry_run()` 内では no-op（0 を返す）。
+    snapshot_date は代表値（中央値）・snapshot_date_min は最古・n_stale は代表値より
+    古い銘柄数（Issue #417）。
     """
     if _tuning_dry_run.get():
         return 0
     db.query(MacroEnsembleScore).delete()
     objs = [
         MacroEnsembleScore(edinet_code=r["edinet_code"], mu=float(r["mu"]),
-                           snapshot_date=snapshot_date)
+                           snapshot_date=snapshot_date,
+                           snapshot_date_min=snapshot_date_min, n_stale=n_stale)
         for r in rows
         if r.get("edinet_code") and r.get("mu") is not None
     ]
@@ -752,17 +774,23 @@ class MacroEnetScore(Base):
     edinet_code   = Column(String(10), primary_key=True)
     mu            = Column(Float, nullable=False)   # ElasticNet 予測 52週先対数リターン（無次元）
     r1_prime      = Column(Float)                    # コンフォーマル区間半幅＝確実性軸（ADR-0020・None 可）
-    snapshot_date = Column(String(10))              # "YYYY-MM-DD"（実行時スナップ基準日）
+    snapshot_date = Column(String(10))              # "YYYY-MM-DD"（銘柄別スナップ日の中央値＝代表値・Issue #417）
+    snapshot_date_min = Column(String(10))          # 最古の銘柄のスナップ日（Issue #417）
+    n_stale       = Column(Integer)                  # 代表値より古い銘柄数（Issue #417）
     created_at    = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
 
-def replace_macro_enet_scores(db, rows: list, snapshot_date: str | None = None) -> int:
+def replace_macro_enet_scores(db, rows: list, snapshot_date: str | None = None,
+                              snapshot_date_min: str | None = None,
+                              n_stale: int | None = None) -> int:
     """M-6 producer μ̂ を全置換する（最新スナップショットのみ保持）。
 
     rows = [{"edinet_code": str, "mu": float, "r1_prime": float|None}, ...]。1 txn で
     全削除→一括 insert。mu が None の行はスキップ（予測不能銘柄を保存しない）。r1_prime は
     任意（無ければ None＝R3 ゲート素通り）。戻り値は保存件数。
     `tuning_dry_run()` 内では no-op（0 を返す・Issue #264）。
+    snapshot_date は代表値（中央値）・snapshot_date_min は最古・n_stale は代表値より
+    古い銘柄数（Issue #417）。
     """
     if _tuning_dry_run.get():
         return 0
@@ -771,7 +799,8 @@ def replace_macro_enet_scores(db, rows: list, snapshot_date: str | None = None) 
         MacroEnetScore(
             edinet_code=r["edinet_code"], mu=float(r["mu"]),
             r1_prime=(float(r["r1_prime"]) if r.get("r1_prime") is not None else None),
-            snapshot_date=snapshot_date,
+            snapshot_date=snapshot_date, snapshot_date_min=snapshot_date_min,
+            n_stale=n_stale,
         )
         for r in rows
         if r.get("edinet_code") and r.get("mu") is not None
@@ -805,6 +834,190 @@ def get_macro_enet_producer(db) -> dict:
         }
     except Exception:
         return {}
+
+
+# ── 5f-2. producer スコアの as-of（Issue #417）──────────────────────────────
+# μ̂ は銘柄ごとに「その銘柄の最終週次バー」時点で計算される。代表値を max で潰すと
+# 最新の 1〜2 銘柄が全体の as-of を名乗るため、*_scores は代表値（中央値）・最古・
+# 代表値より古い銘柄数の 3 点を持つ（plugins/macro_snapshots.py の
+# representative_snapshot_date が算出）。sell_ranking / UI はここから読む。
+
+_PRODUCER_SCORE_MODELS = {
+    "macro_gbdt":     MacroGbdtScore,
+    "macro_dlm":      MacroDlmScore,
+    "macro_ensemble": MacroEnsembleScore,
+    "macro_enet":     MacroEnetScore,
+}
+
+
+def get_producer_asof(db, plugin_name: str) -> dict | None:
+    """producer スコアの as-of を `{snapshot_date, snapshot_date_min, n_stale}` で返す。
+
+    未蓄積・未 migration・不明な plugin_name なら None（graceful degrade）。
+
+    M-1（macro_risk_return）は意図的に None を返す。`macro_beta_meta.snapshot_date` は
+    推論バッチの**実行日**（`macro_beta_inference.py` が UTC today を入れる）であって
+    データの as-of ではないため、そのまま as-of として見せると株価が止まっていても
+    「今日」と表示され、#417 と同型の嘘になる。M-1 の as-of 是正は別途。
+    """
+    if plugin_name == "macro_risk_return":
+        return None
+    model = _PRODUCER_SCORE_MODELS.get(plugin_name)
+    if model is None:
+        return None
+    try:
+        row = db.query(model).first()
+    except Exception:
+        return None
+    if row is None or not row.snapshot_date:
+        return None
+    return {
+        "snapshot_date":     row.snapshot_date,
+        "snapshot_date_min": row.snapshot_date_min,
+        "n_stale":           row.n_stale,
+    }
+
+
+# ── 5f-3. 株価鮮度（Issue #416）─────────────────────────────────────────────
+# 「株価が止まっているのに新しいランキングに見える」を防ぐための鮮度指標。
+# 全社 max は代表値にしない（実測 2026-08-02: max=07-31 は 2 銘柄のみ・3,677 銘柄は
+# 07-13）。判定は p50（中央値）で行い、max は参考値として並べて返すだけにする。
+
+PRICE_STALE_WARN_BDAYS  = 5    # p50 がこれより古ければ黄（注意）
+PRICE_STALE_ALERT_BDAYS = 10   # p50 がこれより古ければ赤（この結果で発注しない）
+
+
+def business_days_between(d0: date, d1: date) -> int:
+    """d0 → d1 の営業日数（土日を除く・祝日は数える）。d1 <= d0 なら 0。
+
+    祝日カレンダーを持たないため祝日も 1 営業日として数える＝実際より「古く」出る
+    （警告が早めに出る保守側の誤差）。
+    """
+    if d1 <= d0:
+        return 0
+    full_weeks, rem = divmod((d1 - d0).days, 7)
+    n = full_weeks * 5
+    wd = d0.weekday()
+    for i in range(rem):
+        if (wd + 1 + i) % 7 < 5:
+            n += 1
+    return n
+
+
+def price_asof_by_code(db) -> dict:
+    """{edinet_code: 最終株価日 "YYYY-MM-DD"} を返す（stock_price_daily の銘柄別 MAX）。
+
+    出所を financial_metrics VIEW にしないこと。VIEW の per/pbr/market_cap は
+    `update_market_data_from_history` が古い株価を焼き込むため、値からは齢が分からない。
+    """
+    try:
+        rows = (db.query(StockPriceDaily.edinet_code,
+                         func.max(StockPriceDaily.trade_date))
+                  .group_by(StockPriceDaily.edinet_code).all())
+    except Exception:
+        return {}
+    return {ec: d for ec, d in rows if ec and d}
+
+
+def _price_asof_quantiles(db) -> list:
+    """銘柄別最終株価日の分位を DB 側の集約だけで取る（転送は数行・Egress 節約）。
+
+    `/api/stats` は画面ロードのたびに呼ばれるため、3,700 行の per-code MAX を毎回
+    引かない。戻り値は [p50, p05, max, n, cutoff より古い件数] に必要な材料として
+    (n, p50, p05, dmax) を返し、件数集計は呼び出し側が cutoff 付きで別途行う。
+    percentile_disc は SQLite に無いため LIMIT/OFFSET で分位を取る（方言非依存）。
+    """
+    sub = (db.query(func.max(StockPriceDaily.trade_date).label("d"))
+             .group_by(StockPriceDaily.edinet_code).subquery())
+    n = db.query(func.count()).select_from(sub).scalar() or 0
+    if not n:
+        return [0, None, None, None]
+
+    def _nth(offset: int):
+        return (db.query(sub.c.d).order_by(sub.c.d).limit(1).offset(offset).scalar())
+
+    p50 = _nth((n - 1) // 2)
+    p05 = _nth(max(0, int(n * 0.05) - 1)) if n >= 20 else _nth(0)
+    dmax = db.query(func.max(sub.c.d)).scalar()
+    return [n, p50, p05, dmax]
+
+
+def _n_older_than(db, cutoff: str) -> int:
+    """最終株価日が cutoff より古い銘柄数（DB 側集約）。"""
+    sub = (db.query(func.max(StockPriceDaily.trade_date).label("d"))
+             .group_by(StockPriceDaily.edinet_code).subquery())
+    return db.query(func.count()).select_from(sub).filter(sub.c.d < cutoff).scalar() or 0
+
+
+def price_freshness(db, asof_by_code: dict | None = None) -> dict:
+    """株価鮮度サマリ（Issue #416）。
+
+    戻り値:
+      price_asof_p50 / price_asof_p05 / price_asof_max … 銘柄別最終日の分位（p50 が判定軸）
+      n_codes         … 株価を持つ銘柄数
+      n_stale_over_5d … 今日から PRICE_STALE_WARN_BDAYS 営業日超古い銘柄数
+      stale_bdays     … p50 が今日から何営業日前か
+      level           … "fresh" | "warn" | "alert" | "empty"
+
+    `asof_by_code`（`price_asof_by_code` の戻り値）を渡すとそれを集計する（行ごとの
+    as-of が要る `recommend` 用＝追加クエリなし）。省略時は DB 側集約だけで済ませる
+    （`/api/stats` 用＝全銘柄行を転送しない）。
+    """
+    if asof_by_code is None:
+        try:
+            n, p50, p05, dmax = _price_asof_quantiles(db)
+        except Exception:
+            return _PRICE_FRESHNESS_EMPTY.copy()
+        if not n or not p50:
+            return _PRICE_FRESHNESS_EMPTY.copy()
+        cutoff = stale_cutoff_date(date.today(), PRICE_STALE_WARN_BDAYS)
+        try:
+            n_stale = _n_older_than(db, cutoff)
+        except Exception:
+            n_stale = 0
+        return _freshness_result(p50, p05, dmax, n, n_stale)
+
+    ds = sorted(d for d in asof_by_code.values() if d)
+    if not ds:
+        return _PRICE_FRESHNESS_EMPTY.copy()
+    cutoff = stale_cutoff_date(date.today(), PRICE_STALE_WARN_BDAYS)
+    n = len(ds)
+    p50 = ds[(n - 1) // 2]                                    # lower median（偶数個は古い側）
+    p05 = ds[max(0, int(n * 0.05) - 1)] if n >= 20 else ds[0]
+    return _freshness_result(p50, p05, ds[-1], n,
+                             sum(1 for d in ds if d < cutoff))
+
+
+_PRICE_FRESHNESS_EMPTY = {
+    "price_asof_p50": None, "price_asof_p05": None, "price_asof_max": None,
+    "n_codes": 0, "n_stale_over_5d": 0, "stale_bdays": None, "level": "empty",
+}
+
+
+def stale_cutoff_date(today: date, bdays: int) -> str:
+    """`business_days_between(d, today) <= bdays` を満たす最古の日（これより古い＝stale）。
+
+    件数集計を SQL 側で `d < cutoff` の 1 条件に落とすための境界日。
+    """
+    d = today
+    while business_days_between(d - timedelta(days=1), today) <= bdays:
+        d -= timedelta(days=1)
+    return d.isoformat()
+
+
+def _freshness_result(p50: str, p05: str, dmax: str, n: int, n_stale: int) -> dict:
+    stale_bdays = business_days_between(date.fromisoformat(p50), date.today())
+    level = ("alert" if stale_bdays > PRICE_STALE_ALERT_BDAYS
+             else "warn" if stale_bdays > PRICE_STALE_WARN_BDAYS else "fresh")
+    return {
+        "price_asof_p50":  p50,
+        "price_asof_p05":  p05,
+        "price_asof_max":  dmax,
+        "n_codes":         n,
+        "n_stale_over_5d": n_stale,
+        "stale_bdays":     stale_bdays,
+        "level":           level,
+    }
 
 
 # ── 5g. ハイパーパラメータ自動探索の結果永続化（Issue #264）─────────────────────
@@ -1499,6 +1712,16 @@ def _ensure_tables() -> None:
         conn.execute(text(
             "ALTER TABLE macro_gbdt_scores ADD COLUMN IF NOT EXISTS r1_prime DOUBLE PRECISION"
         ))
+        # producer as-of の代表値是正（Issue #417・非破壊・冪等）。既存行は NULL のまま
+        # ＝「as-of 不明」として UI 側で警告表示になり、次回モデル実行で値が入る。
+        for _tbl in ("macro_gbdt_scores", "macro_dlm_scores",
+                     "macro_ensemble_scores", "macro_enet_scores"):
+            conn.execute(text(
+                f"ALTER TABLE {_tbl} ADD COLUMN IF NOT EXISTS snapshot_date_min VARCHAR(10)"
+            ))
+            conn.execute(text(
+                f"ALTER TABLE {_tbl} ADD COLUMN IF NOT EXISTS n_stale INTEGER"
+            ))
         # period_end を VARCHAR(20) → DATE 型に変換するマイグレーション（冪等）
         # SKIP_PERIOD_END_MIGRATION=1 で skip できるフェールセーフ付き
         if not os.environ.get("SKIP_PERIOD_END_MIGRATION"):

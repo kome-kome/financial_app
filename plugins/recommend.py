@@ -201,7 +201,8 @@ class RecommendPlugin(AnalysisPlugin):
         """
         # Zスコア・gap_ratio・派生指標は financial_metrics VIEW が都度算出/合成する。
         # z_momentum のみ VIEW 外の実行時計算（compute_momentum_z）。
-        from database import FinancialMetric, latest_year_subq
+        from database import (FinancialMetric, latest_year_subq,
+                              price_asof_by_code, price_freshness)
         from datetime import date
 
         # params はパラメータ契約に従い coerce 済み。weights 未指定時は preset の重みへ。
@@ -266,11 +267,17 @@ class RecommendPlugin(AnalysisPlugin):
             score = weighted_sum / weight_present
             scored.append((score, coverage, r, detail))
 
+        # 株価 as-of（Issue #416）。z_momentum も PER/PBR も株価由来なので、株価が
+        # 止まっていればスコア全体が静かに古くなる。行ごとの齢を返して UI で見せる。
+        asof_by_code = price_asof_by_code(db)
+        price = price_freshness(db, asof_by_code)
+
         scored.sort(key=lambda x: x[0], reverse=True)
         results = []
         for rank, (score, coverage, r, detail) in enumerate(scored[:top_n], 1):
             results.append({
                 "rank":         rank,
+                "price_asof":   asof_by_code.get(r.edinet_code),
                 "edinet_code":  r.edinet_code,
                 "sec_code":     r.sec_code,
                 "company_name": r.company_name,
@@ -295,6 +302,7 @@ class RecommendPlugin(AnalysisPlugin):
             "min_coverage":     min_coverage,
             "presets":          all_presets,
             "metrics":          METRICS,
+            "price_freshness":  price,       # as-of 分位・鮮度レベル（Issue #416）
             "results":          results,
         }
 

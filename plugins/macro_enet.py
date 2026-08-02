@@ -52,6 +52,8 @@ from .macro_snapshots import (
     get_producer_scores,
     load_data,
     oof_backtest,
+    representative_snapshot_date,
+    to_date_str,
     preload_macro,
 )
 from .macro_risk_return import MacroRiskReturnPlugin as _M1
@@ -316,6 +318,7 @@ class MacroEnetPlugin(AnalysisPlugin):
                 "sec_code":     info["sec_code"],
                 "company_name": info["company_name"],
                 "industry":     info["industry"],
+                "snap_date":    to_date_str(info.get("snap_date")),   # この銘柄の μ̂ の as-of（Issue #417）
                 "mu_raw":       round(float(mu_preds[j]), 6),
                 "r1":           round(r1p, 6) if r1p is not None else None,
                 "r2":           round(r2, 6) if r2 is not None else None,
@@ -327,14 +330,13 @@ class MacroEnetPlugin(AnalysisPlugin):
         r_macro_available = any(it["r_macro"] is not None for it in raw_items)
 
         # ── producer μ̂ を永続化（sell_ranking が mu_source=macro_enet で読む・Issue #396）─
-        _snap_dates = [current_snaps[c][1].get("snap_date") for c in codes_ordered]
-        _snap_dates = [d for d in _snap_dates if d]
-        _rep = max(_snap_dates) if _snap_dates else None
-        _rep_str = (_rep.isoformat() if hasattr(_rep, "isoformat")
-                    else (str(_rep)[:10] if _rep else None))
-        self._persist_producer(db, raw_items, _rep_str)
+        # as-of は max ではなく中央値を代表値にする（Issue #417）。
+        _asof = representative_snapshot_date(
+            current_snaps[c][1].get("snap_date") for c in codes_ordered)
+        self._persist_producer(db, raw_items, _asof)
 
         return {
+            "asof":              _asof,
             "cv_metrics":        {"enet": _cv_summary(cv_folds)},
             "selected_features": model_feat_names,
             # 符号付き係数（L1 でゼロになった特徴量はそのまま 0＝「使われなかった」が読める）。
@@ -352,9 +354,10 @@ class MacroEnetPlugin(AnalysisPlugin):
         }
 
     @staticmethod
-    def _persist_producer(db: Any, raw_items: list, rep_str: str | None) -> None:
+    def _persist_producer(db: Any, raw_items: list, asof: dict) -> None:
         """producer μ̂ を macro_enet_scores へ永続化（M-2 の _persist_producer と同型）。
 
+        asof は `representative_snapshot_date` の戻り値（代表値=中央値・最古・古い銘柄数）。
         永続化失敗（読取専用DB等）は分析表示を妨げない＝握りつぶす（producer は次回実行で
         再生成される）。探索中は replace 側が `tuning_dry_run()` で no-op（Issue #264）。"""
         from database import replace_macro_enet_scores
@@ -363,7 +366,9 @@ class MacroEnetPlugin(AnalysisPlugin):
                 db,
                 [{"edinet_code": it["edinet_code"], "mu": it["mu_raw"],
                   "r1_prime": it.get("r1")} for it in raw_items],
-                rep_str,
+                asof.get("snapshot_date"),
+                snapshot_date_min=asof.get("snapshot_date_min"),
+                n_stale=asof.get("n_stale"),
             )
         except Exception:
             pass

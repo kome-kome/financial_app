@@ -326,6 +326,15 @@ class SellRankingPlugin(AnalysisPlugin):
             except Exception:
                 pass
         mu_available = bool(mu_scores)
+        # producer μ̂ の as-of（代表値=中央値・最古・古い銘柄数）。μ̂ は銘柄ごとに
+        # 「その銘柄の最終週次バー」時点なので 1 個の日付には潰れない（Issue #417）。
+        mu_asof = None
+        if mu_available:
+            try:
+                from database import get_producer_asof
+                mu_asof = get_producer_asof(db, mu_source)
+            except Exception:
+                mu_asof = None
 
         stats: dict[str, tuple[float, float]] = {}
         for m in weights:
@@ -459,6 +468,7 @@ class SellRankingPlugin(AnalysisPlugin):
             "gap_available": gap_available,
             "mu_available":  mu_available,
             "mu_source":     mu_source,
+            "mu_asof":       mu_asof,
             "results":       scored,
             "not_found":     not_found,
             "invalid":       invalid,
