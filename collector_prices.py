@@ -538,16 +538,25 @@ async def collect_stock_price_history_jquants(
         # 価格収集と同じセッションで上場銘柄情報（発行済株式数・現在の上場銘柄集合）も取得（API キー共用）
         listed_info = await _fetch_jquants_listed_info(session, api_key)
 
-    # 403 の切り分け（Issue #412）: listed/info が取れていればキーは有効＝カバレッジ境界の
-    # 欠測なので警告のみ。全日程 403 かつ listed/info も失敗ならキー失効/権限喪失とみなし中断。
+    # 403 の切り分け（Issue #412 → #425 で再設計）:
+    # #412 は「全日程 403 かつ listed/info も失敗ならキー失効とみなし中断」していたが、
+    # **`/markets/listed/info` は無料プランで常に 403** であることが実測で判明した
+    # （2026-07-09/12/13 の success run すべてに `listed/info 取得失敗 status=403` が出ている）。
+    # したがって active_codes は常に空＝条件は `forbidden == total` に退化し、84日エンバーゴ内の
+    # 窓（days_back=14 等）では構造的に必ず発火してプロセスを落としていた。
+    # J-Quants（収集元A）の失敗が、同じキーに依存しない Yahoo ギャップ補完（収集元B・株価鮮度の
+    # 実質唯一の担い手）まで巻き添えでブロックするのは誤り。例外は投げず結果で返し、
+    # 呼び出し側が継続可否を判断する。キー失効の可視化は log.error と GH Actions 失敗通知（#414）で担保。
+    all_forbidden = bool(total) and fetch_stats["forbidden"] == total
     if fetch_stats["forbidden"]:
         log.warning(
             f"J-Quants 403（カバー範囲外）: {fetch_stats['forbidden']}/{total}日をスキップ"
         )
-        if not cancelled and fetch_stats["forbidden"] == total and not listed_info["active_codes"]:
-            raise ValueError(
-                f"J-Quants が全 {total} 日で 403 を返し listed/info も取得できませんでした。"
-                "APIキー失効または権限喪失の可能性があるため中断します（Issue #412）"
+        if all_forbidden and not cancelled:
+            log.error(
+                f"J-Quants が全 {total} 日で 403 を返しました。"
+                "無料プランの84日エンバーゴ内の窓を叩いた場合は正常ですが、"
+                "エンバーゴ外の日付を含むならキー失効/権限喪失の可能性があります（Issue #425）"
             )
 
     if listed_info["issued_shares"]:
@@ -566,11 +575,11 @@ async def collect_stock_price_history_jquants(
 
     if cancelled:
         return {"cancelled": True, "upserted": upserted_total,
-                "forbidden": fetch_stats["forbidden"]}
+                "forbidden": fetch_stats["forbidden"], "all_forbidden": all_forbidden}
     if on_progress:
         on_progress(total, total, f"[完了] {total}日処理・{upserted_total}件追加/更新")
     return {"cancelled": False, "upserted": upserted_total, "days": total,
-            "forbidden": fetch_stats["forbidden"]}
+            "forbidden": fetch_stats["forbidden"], "all_forbidden": all_forbidden}
 
 
 def _update_market_data_latest(db) -> int:

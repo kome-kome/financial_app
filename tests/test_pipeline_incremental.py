@@ -39,14 +39,14 @@ class TestPhase4Control:
         mocks = _run_main_with_mocks(cancelled=False)
 
         jq = mocks["collect_stock_price_history_jquants"]
-        # 直近14日取得 + catchup の計2回
-        assert jq.await_count == 2
-        first, second = jq.await_args_list
-        assert first.kwargs["days_back"] == 14
+        # J-Quants は catchup の1回のみ。直近 days_back=14 の取得は 84日エンバーゴ内で
+        # 構造的に常に0件かつ全日403で中断ガードを誤発火させたため撤去した（#419 / #425）
+        assert jq.await_count == 1
+        catchup = jq.await_args_list[0]
         # catchup は today-90 〜 today-80（J-Quants 公式値で Yahoo 暫定値を上書きする経路）
-        assert second.kwargs["date_from"] == date.today() - timedelta(days=90)
-        assert second.kwargs["date_to"] == date.today() - timedelta(days=80)
-        assert "days_back" not in second.kwargs   # catchup は明示日付指定
+        assert catchup.kwargs["date_from"] == date.today() - timedelta(days=90)
+        assert catchup.kwargs["date_to"] == date.today() - timedelta(days=80)
+        assert "days_back" not in catchup.kwargs   # catchup は明示日付指定
 
         # Yahoo gap-fill が gap_days=0 で必ず走る（steady-state の直近補完フォールバック）
         gap = mocks["fill_recent_stock_price_gap_yahoo"]
@@ -59,6 +59,55 @@ class TestPhase4Control:
     def test_macro_collection_runs_before_market_phase(self):
         mocks = _run_main_with_mocks(cancelled=False)
         assert mocks["collect_macro_data"].await_count == 1
+
+    def test_yahoo_runs_before_jquants(self):
+        """鮮度を担う Yahoo を J-Quants より先に走らせる（#425）。
+
+        片方の収集元の障害がもう片方を巻き添えにしないための順序。
+        """
+        order = []
+
+        async def _yahoo(*a, **kw):
+            order.append("yahoo")
+            return {"skipped": False, "upserted": 0, "from": "a", "to": "b"}
+
+        async def _jq(*a, **kw):
+            order.append("jquants")
+            return {"upserted": 0}
+
+        with patch.multiple(
+            pinc,
+            log=MagicMock(), init_db=MagicMock(),
+            SessionLocal=MagicMock(return_value=MagicMock()),
+            run_full_collection=AsyncMock(return_value=False),
+            collect_macro_data=AsyncMock(return_value=0),
+            collect_stock_price_history_jquants=AsyncMock(side_effect=_jq),
+            fill_recent_stock_price_gap_yahoo=AsyncMock(side_effect=_yahoo),
+            update_market_data_from_history=MagicMock(return_value=0),
+        ):
+            asyncio.run(pinc.main())
+
+        assert order == ["yahoo", "jquants"]
+
+    def test_jquants_catchup_failure_does_not_block_market_data_update(self):
+        """J-Quants catchup が例外を出しても Yahoo 補完と PER/PBR 反映は完了する（#425）。"""
+        mocks = {
+            "log": MagicMock(),
+            "init_db": MagicMock(),
+            "SessionLocal": MagicMock(return_value=MagicMock()),
+            "run_full_collection": AsyncMock(return_value=False),
+            "collect_macro_data": AsyncMock(return_value=0),
+            "collect_stock_price_history_jquants": AsyncMock(
+                side_effect=ValueError("J-Quants 側の障害")),
+            "fill_recent_stock_price_gap_yahoo": AsyncMock(
+                return_value={"skipped": False, "upserted": 5, "from": "a", "to": "b"}),
+            "update_market_data_from_history": MagicMock(return_value=3),
+        }
+        with patch.multiple(pinc, **mocks):
+            asyncio.run(pinc.main())   # 例外が伝播しないこと自体が検証対象
+
+        assert mocks["fill_recent_stock_price_gap_yahoo"].await_count == 1
+        assert mocks["update_market_data_from_history"].call_count == 1
 
 
 class TestPhase1Cancellation:

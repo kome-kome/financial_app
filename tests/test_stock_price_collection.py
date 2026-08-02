@@ -510,7 +510,7 @@ class TestCollectJQuantsHistory:
         assert result["upserted"] == 1     # 403 の翌営業日は正常に upsert される
 
     def test_all_403_with_valid_key_does_not_raise(self, db, make_company):
-        """全日程 403 でも listed/info が取れていればキーは有効＝範囲外として警告のみ。"""
+        """全日程 403（＝エンバーゴ内の窓）は範囲外として警告のみで完走する。"""
         self._add_company(db, make_company)
 
         async def fetch(session, api_key, date_str):
@@ -521,13 +521,39 @@ class TestCollectJQuantsHistory:
         assert result["cancelled"] is False
         assert result["forbidden"] == result["days"] == 2
         assert result["upserted"] == 0
+        assert result["all_forbidden"] is True
 
-    def test_all_403_and_listed_info_failure_raises(self, db, make_company):
-        """全日程 403 かつ listed/info も失敗ならキー失効の疑い → 中断する。"""
+    def test_all_403_and_listed_info_failure_does_not_raise(self, db, make_company):
+        """全日程 403 かつ listed/info も失敗しても例外を投げない（Issue #425）。
+
+        #412 はこのケースを「キー失効の疑い」として中断していたが、`/markets/listed/info`
+        は無料プランで**常に 403** であることが実測で判明した（2026-07-09/12/13 の
+        success run すべてに `listed/info 取得失敗 status=403` が出ている）。つまり
+        active_codes は常に空で、条件は「全日 403」だけに退化し、84日エンバーゴ内の窓では
+        構造的に必ず発火する。J-Quants の失敗が、同じキーに依存しない Yahoo ギャップ補完
+        （株価鮮度の実質唯一の担い手）まで巻き添えで止めていた。
+        """
         self._add_company(db, make_company)
 
         async def fetch(session, api_key, date_str):
             raise JQuantsCoverageError(date_str)
 
-        with pytest.raises(ValueError, match="403"):
-            self._run_jq(db, fetch, set())
+        result = self._run_jq(db, fetch, set())   # listed/info 失敗＝active_codes 空
+
+        assert result["cancelled"] is False
+        assert result["forbidden"] == result["days"] == 2
+        assert result["all_forbidden"] is True
+
+    def test_partial_403_is_not_all_forbidden(self, db, make_company):
+        """一部日だけ 403 なら all_forbidden は False（キー失効の誤検知を避ける）。"""
+        self._add_company(db, make_company)
+
+        async def fetch(session, api_key, date_str):
+            if date_str == self._MON.strftime("%Y-%m-%d"):
+                raise JQuantsCoverageError(date_str)
+            return [self._JQ_ROW]
+
+        result = self._run_jq(db, fetch, set())
+
+        assert result["forbidden"] == 1
+        assert result["all_forbidden"] is False

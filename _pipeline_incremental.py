@@ -76,36 +76,40 @@ async def main():
         db.close()
     log(f"[3/4] マクロデータ 完了 ({(time.time()-t0)/60:.1f}分経過)")
 
-    # ─── Phase 4: 市場データ更新（J-Quants 優先 → Yahoo Finance ギャップ補完）────
-    # J-Quants: days_back=14 で直近2週分を取得。
-    # J-Quants のデータが7日以上古い場合（APIラグ等）は Yahoo Finance で補完。
-    log("[4/4] 市場データ更新 開始（J-Quants 優先 → Yahoo Finance フォールバック）")
+    # ─── Phase 4: 市場データ更新（Yahoo で鮮度確保 → J-Quants で公式値へ置換）────
+    # 直近の鮮度は Yahoo ギャップ補完が担う。J-Quants 無料は直近84日（12週）を配信しないため、
+    # かつては days_back=14 でも取得していたが、この窓はエンバーゴ内で**構造的に常に0件**であり
+    # （毎日 JQUANTS_RATE_SLEEP=20s × 14日 ≒ 4.7分の空振り）、しかも全日403となって
+    # 中断ガードを誤発火させ Yahoo 補完まで巻き添えで止めていた（#419 / #425）。
+    log("[4/4] 市場データ更新 開始（Yahoo で鮮度確保 → J-Quants catchup で公式値へ置換）")
     db4 = SessionLocal()
     try:
-        result = await collect_stock_price_history_jquants(
-            db4, days_back=14,
-            on_progress=lambda c, t, m: log(m) if c % 3 == 0 or "完了" in m else None,
-        )
-        log(f"  J-Quants: stock_price_history {result.get('upserted', 0)}件 upsert")
-
-        # J-Quants catchup: 12週境界を過ぎた直後（today-90〜today-80日）を再取得し、
-        # Yahoo 暫定値を J-Quants 公式値で自動上書きする（毎日走ることで徐々に置換）
-        _catchup_to   = date.today() - timedelta(days=80)
-        _catchup_from = date.today() - timedelta(days=90)
-        catchup_result = await collect_stock_price_history_jquants(
-            db4, date_from=_catchup_from, date_to=_catchup_to,
-            on_progress=lambda c, t, m: log(m) if c % 3 == 0 or "完了" in m else None,
-        )
-        log(f"  J-Quants catchup ({_catchup_from}〜{_catchup_to}): {catchup_result.get('upserted', 0)}件 upsert")
-
-        # gap_days=0: steady-state でも毎日 Yahoo が直近を補完する
+        # 鮮度を先に確保する（gap_days=0: steady-state でも毎日 Yahoo が直近を補完）。
+        # J-Quants より先に置くのは、片方の収集元の失敗がもう片方を巻き添えにしないため（#425）。
         gap_result = await fill_recent_stock_price_gap_yahoo(
             db4, gap_days=0,
             on_progress=lambda c, t, m: log(m) if c % 500 == 0 or "完了" in m else None,
         )
         if not gap_result.get("skipped"):
             log(f"  Yahoo Finance gap-fill: {gap_result.get('upserted', 0)}件 追加"
-                f"（{gap_result.get('from')} 〜 {gap_result.get('to')}）")
+                f"（{gap_result.get('from')} 〜 {gap_result.get('to')}・{gap_result.get('companies')}社）")
+
+        # J-Quants catchup: 12週境界を過ぎた直後（today-90〜today-80日）を再取得し、
+        # Yahoo 暫定値を J-Quants 公式値で自動上書きする（毎日走ることで徐々に置換）。
+        # J-Quants 側の障害で鮮度更新（上の Yahoo）と PER/PBR 反映（下の market_data）を
+        # 落とさないよう、この呼び出しだけは失敗を握って継続する。
+        _catchup_to   = date.today() - timedelta(days=80)
+        _catchup_from = date.today() - timedelta(days=90)
+        try:
+            catchup_result = await collect_stock_price_history_jquants(
+                db4, date_from=_catchup_from, date_to=_catchup_to,
+                on_progress=lambda c, t, m: log(m) if c % 3 == 0 or "完了" in m else None,
+            )
+            log(f"  J-Quants catchup ({_catchup_from}〜{_catchup_to}): "
+                f"{catchup_result.get('upserted', 0)}件 upsert"
+                + ("（全日403＝カバー範囲外）" if catchup_result.get("all_forbidden") else ""))
+        except Exception as e:
+            log(f"  J-Quants catchup 失敗（継続します）: {type(e).__name__}: {e}")
 
         n_updated = update_market_data_from_history(db4)
         log(f"  financial_records.stock_price: {n_updated}社 更新")
