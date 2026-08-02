@@ -58,13 +58,22 @@ Render の制約と運用形態に合わせて設計すること。
 
 毎日 UTC 18:00 に自動起動する `_pipeline_incremental.py` は:
 1. EDINET API で「60日以内の提出書類」を取得し、未収集書類のみ XBRL 収集・DB保存
-2. 株価更新（Phase 4）: J-Quants（JPX公式）を `days_back=14` で取得 → **J-Quants 無料は直近12週を配信しない**ため、最新日が7日以上古い場合は **Yahoo Finance で `latest+1 〜 today` をギャップ補完**（`fill_recent_stock_price_gap_yahoo`）。鮮度はこの Yahoo 補完が担う（J-Quants 制約表の「配信遅延」行を参照）
+2. 株価更新（Phase 4）: J-Quants（JPX公式）を `days_back=14` で取得 → **J-Quants 無料は直近12週を配信しない**ため、**Yahoo Finance が銘柄ごとに `その社の最終日+1 〜 today` をギャップ補完**する（`fill_recent_stock_price_gap_yahoo`）。鮮度はこの Yahoo 補完が担う（J-Quants 制約表の「配信遅延」行を参照）。<br>起点は**銘柄別**（Issue #415）。全社横断の最大日を1つ選んで全社へ適用すると、一部銘柄だけ先行して復旧した場合に遅延銘柄の欠測が永久に埋まらない（2026-07 に発生。2銘柄が 07-31 / 3,677銘柄が 07-13 の状態で 14営業日分が穴のまま残った）。起点は daily 保持窓（`DAILY_WINDOW_DAYS`）でクリップし、それ以前は `backfill-weekly.yml` の管轄とする
 3. 成長率・Zスコアを再計算
 4. 所要時間: 約 5〜15分（差分量による）
 
 > **注（運用パターン）**: 全件収集（`full-pipeline.yml`）を回している間は、Supabase 接続上限での同時実行を避けるため、本ワークフローを一時的に `daily-incremental.yml.disabled` へリネームして停止する（例: コミット `4764d96`「全件収集中の同時実行回避」）。全件収集が終わったら `.yml` に戻して再有効化する。**現在ファイル名が `.disabled` の場合は自動の定時収集が止まっている状態**なので、UI / 手動収集で補う。
 >
-> **✅ cron 再開済み（2026-06-22〜）**: dual-table 移行後の `workflow_dispatch` 手動実行で Yahoo ギャップ補完・J-Quants 株価取得が GitHub Actions（Azure IP）から正常動作することを確認 → `on.schedule` を有効化。以降、UTC 18:00（JST 03:00）の定時実行が毎日成功している（直近: 2026-06-26 ✅）。
+> **✅ cron 再開済み（2026-06-22〜）**: dual-table 移行後の `workflow_dispatch` 手動実行で Yahoo ギャップ補完・J-Quants 株価取得が GitHub Actions（Azure IP）から正常動作することを確認 → `on.schedule` を有効化。UTC 18:00（JST 03:00）に毎日起動する。
+>
+> **⚠️ 2026-07-14 〜 08-01 は19日連続で failure していた**（真因: Phase 4 冒頭の J-Quants 403 が例外送出しプロセスが exit 1 → 鮮度の担い手である Yahoo ギャップ補完に一度も到達しなかった）。#412 で 403 をカバレッジ境界の欠測として継続扱いに修正済み。**この障害に19日間誰も気づかなかった**のは全ワークフローに失敗通知が無いためで、#414 で対応する。成功時の所要は実測 2h05m〜2h38m。
+
+> **鮮度の確認は max ではなく分位で行うこと。** 全社横断の `max(trade_date)` は先行復旧した数銘柄だけで新しくなり、大多数が19日古くても緑に見える（2026-08-02 の実測: max=07-31 は2銘柄のみ、3,677銘柄は 07-13）。
+> ```sql
+> SELECT percentile_disc(0.05) WITHIN GROUP (ORDER BY d) AS p05,
+>        percentile_disc(0.50) WITHIN GROUP (ORDER BY d) AS p50, max(d)
+> FROM (SELECT edinet_code, max(trade_date) d FROM stock_price_daily GROUP BY 1) t;
+> ```
 
 **重要**: GitHub Actions の Runner は Azure IP のため **stooq は完全ブロック**（403）。株価取得は J-Quants のみ使用。Claude Code リモート環境からも Yahoo Finance はブロックされる。外部サービスの制約値は本ファイル「外部サービス制約（無料プラン）」節を参照。
 

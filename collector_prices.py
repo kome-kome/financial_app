@@ -21,7 +21,7 @@ from database import (
     XbrlRawDocument, upsert_company, upsert_financial,
     upsert_xbrl_raw, pack_elements, unpack_elements,
     build_xbrl_map,
-    StockPriceDaily, StockPriceWeekly,
+    StockPriceDaily, StockPriceWeekly, DAILY_WINDOW_DAYS,
     record_prices_batch, trim_daily, latest_prices,
     upsert_macro_batch, sync_active_status,
 )
@@ -830,30 +830,43 @@ async def fill_recent_stock_price_gap_yahoo(
     gap_days: int = 7,
     on_progress: Optional[Callable[[int, int, str], None]] = None,
 ) -> dict:
-    """stock_price_history の最新日が gap_days 日以上古い場合に、
-    Yahoo Finance から不足期間を補完して stock_price_history に追記する。
+    """各社の株価が gap_days 日以上古い場合に、Yahoo Finance から不足期間を
+    **銘柄ごとに**補完して株価テーブルへ追記する。
     差分収集（incremental）後のフォールバックとして使用。
     J-Quants データが存在する行は上書きしない（ON CONFLICT DO NOTHING）。
+
+    起点は銘柄別の最終 trade_date（Issue #415）。全社横断の最大日を1つ選んで全社へ
+    適用すると、収集が数日止まった後に一部銘柄だけ先行して復旧した場合、遅れている
+    大多数の銘柄の欠測期間が永久に埋まらない（2026-07 に実際に発生。2銘柄が 07-31 /
+    3,677銘柄が 07-13 の状態で d_from=08-01 となり 14営業日分が穴のまま残った）。
+    週次バーの欠落は例外を出さず、build_snapshots の 52週先ラベル（インデックス参照）
+    や px_* のローリング窓を静かにずらすため検知が難しい。
+    per-company 起点にしても Yahoo は元々1社1リクエストのため**リクエスト数は増えない**
+    （遅延銘柄の日付レンジが広がるだけ）。同じ per-company 判定は
+    backfill_weekly_history_yahoo が既に採っている。
+
     プロバイダー固有ロジック（Yahoo 逐次フェッチ）を _yahoo_batch_gen に分離し、
     _price_collection_driver の共通フレームで DB 保存・trim を一元管理する。
     """
+    today = date.today()
 
-    # 最新日は直近窓の daily を基準にする（無ければ weekly にフォールバック）
-    latest_row = (db.query(sqla_func.max(StockPriceDaily.trade_date)).scalar()
-                  or db.query(sqla_func.max(StockPriceWeekly.trade_date)).scalar())
-    if not latest_row:
+    # 銘柄別の最終 trade_date。daily は保持窓（DAILY_WINDOW_DAYS）で trim されるため、
+    # 長期停止した社は weekly 側にしか残らない。両者の新しい方を起点にする。
+    latest_daily = dict(
+        db.query(StockPriceDaily.edinet_code, sqla_func.max(StockPriceDaily.trade_date))
+        .group_by(StockPriceDaily.edinet_code).all()
+    )
+    latest_weekly = dict(
+        db.query(StockPriceWeekly.edinet_code, sqla_func.max(StockPriceWeekly.trade_date))
+        .group_by(StockPriceWeekly.edinet_code).all()
+    )
+    if not latest_daily and not latest_weekly:
         log.info("fill_recent_stock_price_gap_yahoo: 株価データが空のためスキップ")
         return {"skipped": True, "reason": "empty"}
 
-    latest_date = date.fromisoformat(latest_row)
-    gap = (date.today() - latest_date).days
-    if gap <= gap_days:
-        log.info(f"fill_recent_stock_price_gap_yahoo: 最新日 {latest_date}（{gap}日前）→ ギャップなし")
-        return {"skipped": True, "reason": "no_gap", "latest": str(latest_date)}
-
-    log.info(f"fill_recent_stock_price_gap_yahoo: 最新日 {latest_date}（{gap}日前）→ Yahoo で補完")
-    d_from = (latest_date + timedelta(days=1)).strftime("%Y%m%d")
-    d_to   = date.today().strftime("%Y%m%d")
+    # 起点の下限。これより過去への遡及は backfill_weekly_history_yahoo の管轄
+    # （daily 保持窓を超える取得を毎日走らせない＝暴走ガード）。
+    floor_d = today - timedelta(days=DAILY_WINDOW_DAYS)
 
     companies = [
         (row.sec_code, row.edinet_code)
@@ -861,12 +874,35 @@ async def fill_recent_stock_price_gap_yahoo(
         .filter(Company.sec_code.isnot(None))
         .all()
     ]
-    total = len(companies)
+
+    to_fetch = []
+    for sec_code, edinet_code in companies:
+        _d, _w = latest_daily.get(edinet_code), latest_weekly.get(edinet_code)
+        last = max(x for x in (_d, _w) if x) if (_d or _w) else None
+        if last is None:
+            start = floor_d                       # 株価未収集の社は保持窓の先頭から
+        else:
+            last_d = date.fromisoformat(last[:10])
+            if (today - last_d).days <= gap_days:
+                continue                          # この社はギャップなし
+            start = max(last_d + timedelta(days=1), floor_d)
+        to_fetch.append((sec_code, edinet_code, start.strftime("%Y%m%d")))
+
+    total = len(to_fetch)
+    if total == 0:
+        log.info(f"fill_recent_stock_price_gap_yahoo: 全 {len(companies)} 社ギャップなし")
+        return {"skipped": True, "reason": "no_gap", "companies": 0}
+
+    to_fetch.sort()          # 銘柄順に部分反映されるよう順序を決定的にする
+    d_from_min = min(x[2] for x in to_fetch)
+    d_to = today.strftime("%Y%m%d")
+    log.info(f"fill_recent_stock_price_gap_yahoo: {total}/{len(companies)}社を補完"
+             f"（最古起点 {d_from_min} 〜 {d_to}）")
 
     async def _yahoo_batch_gen(session):
-        for i, (sec_code, edinet_code) in enumerate(companies, 1):
+        for i, (sec_code, edinet_code, d_from) in enumerate(to_fetch, 1):
             rows = await fetch_yahoo_history(session, f"{sec_code}.T", d_from, d_to)
-            # ギャップ補完は最新日より後の新規日付が対象のため衝突は稀。
+            # ギャップ補完は各社の最終日より後の新規日付が対象のため衝突は稀。
             records = [
                 {"edinet_code": edinet_code, "trade_date": r["trade_date"],
                  "close": r["close"], "volume": r.get("volume")}
@@ -881,7 +917,8 @@ async def fill_recent_stock_price_gap_yahoo(
         _, upserted = await _price_collection_driver(db, _yahoo_batch_gen(session))
 
     log.info(f"fill_recent_stock_price_gap_yahoo: {upserted}件を株価テーブルへ集約保存")
-    return {"skipped": False, "upserted": upserted, "from": d_from, "to": d_to}
+    return {"skipped": False, "upserted": upserted, "companies": total,
+            "from": d_from_min, "to": d_to}
 
 
 async def backfill_weekly_history_yahoo(

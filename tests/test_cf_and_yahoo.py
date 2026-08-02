@@ -143,3 +143,77 @@ class TestFillRecentStockPriceGapYahoo:
 
         assert result["skipped"] is False
         assert result["upserted"] >= 1
+
+    def test_start_date_is_per_company_not_global_max(self, db, make_company, make_price):
+        """起点は銘柄別の最終日（Issue #415）。
+
+        全社横断の max を1つ選んで全社に適用すると、先行して復旧した1銘柄の日付が
+        遅延銘柄にも使われ、遅延銘柄の欠測期間が永久に埋まらない（2026-07 の実障害）。
+        """
+        fresh = (date.today() - timedelta(days=1)).isoformat()   # 先行復旧した社
+        stale = (date.today() - timedelta(days=20)).isoformat()  # 19日分遅れている社
+        db.add(make_company(edinet_code="E00001", sec_code="1001"))
+        db.add(make_company(edinet_code="E00002", sec_code="1002"))
+        db.add(make_price(edinet_code="E00001", trade_date=fresh))
+        db.add(make_price(edinet_code="E00002", trade_date=stale))
+        db.commit()
+
+        seen = {}
+
+        async def _fake_fetch(session, ticker, d_from, d_to):
+            seen[ticker] = d_from
+            return []
+
+        with patch("collector_prices.fetch_yahoo_history", new=_fake_fetch):
+            self._run(fill_recent_stock_price_gap_yahoo(db, gap_days=0))
+
+        # 遅延銘柄は自分の最終日の翌日から取りに行く（全社 max の翌日ではない）
+        assert seen["1002.T"] == (date.fromisoformat(stale) + timedelta(days=1)).strftime("%Y%m%d")
+        # 先行銘柄は自分の最終日の翌日から
+        assert seen["1001.T"] == (date.fromisoformat(fresh) + timedelta(days=1)).strftime("%Y%m%d")
+
+    def test_skips_only_companies_without_gap(self, db, make_company, make_price):
+        """gap_days の判定も銘柄別。ギャップのある社だけが取得対象になる。"""
+        db.add(make_company(edinet_code="E00001", sec_code="1001"))
+        db.add(make_company(edinet_code="E00002", sec_code="1002"))
+        db.add(make_price(edinet_code="E00001", trade_date=date.today().isoformat()))
+        db.add(make_price(edinet_code="E00002",
+                          trade_date=(date.today() - timedelta(days=15)).isoformat()))
+        db.commit()
+
+        seen = []
+
+        async def _fake_fetch(session, ticker, d_from, d_to):
+            seen.append(ticker)
+            return []
+
+        with patch("collector_prices.fetch_yahoo_history", new=_fake_fetch):
+            result = self._run(fill_recent_stock_price_gap_yahoo(db, gap_days=7))
+
+        assert seen == ["1002.T"]          # today の株価を持つ 1001 は対象外
+        assert result["companies"] == 1
+
+    def test_start_date_clipped_to_daily_window(self, db, make_company, make_price):
+        """起点は daily 保持窓（DAILY_WINDOW_DAYS）でクリップする。
+
+        それより過去への遡及は backfill_weekly_history_yahoo の管轄。毎日の
+        ギャップ補完が数年分を取りに行かないための暴走ガード。
+        """
+        from database import DAILY_WINDOW_DAYS
+
+        very_old = (date.today() - timedelta(days=DAILY_WINDOW_DAYS + 400)).isoformat()
+        db.add(make_company(edinet_code="E00001", sec_code="1001"))
+        db.add(make_price(edinet_code="E00001", trade_date=very_old))
+        db.commit()
+
+        seen = {}
+
+        async def _fake_fetch(session, ticker, d_from, d_to):
+            seen[ticker] = d_from
+            return []
+
+        with patch("collector_prices.fetch_yahoo_history", new=_fake_fetch):
+            self._run(fill_recent_stock_price_gap_yahoo(db, gap_days=0))
+
+        floor_str = (date.today() - timedelta(days=DAILY_WINDOW_DAYS)).strftime("%Y%m%d")
+        assert seen["1001.T"] == floor_str
