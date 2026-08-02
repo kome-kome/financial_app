@@ -47,13 +47,15 @@ def condition(notifier) -> str:
     return notifier["jobs"]["notify"]["if"]
 
 
-def test_workflows_are_not_enumerated(notifier):
-    """`workflows:` の列挙は startup_failure を招くため禁止（全ワークフロー対象にする）。"""
+def test_workflows_is_match_all_pattern(notifier):
+    """`workflows:` は全マッチ1本に固定する（列挙も省略も startup_failure を招く）。"""
     workflow_run = _triggers(notifier)["workflow_run"] or {}
-    assert "workflows" not in workflow_run, (
-        "workflows: を列挙すると各要素がフィルタパターン扱いになり、"
-        "'[定常] …' のような角括弧始まりの名前で workflow ごと startup_failure になる"
-        "（2026-08-02 実測）。列挙せず全ワークフローを対象にし、除外は job の if で行うこと"
+    assert workflow_run.get("workflows") == ["**"], (
+        "workflows: は ['**'] から変えないこと。2026-08-02 に両側を実測: "
+        "個別列挙は各要素がフィルタパターン扱いとなり '[定常] …' の角括弧で "
+        "startup_failure（run 30747596548）／省略は "
+        "'on.workflow_run does not reference any workflows' で startup_failure"
+        "（run 30748527156）。どちらも起動すらしないため通知欠落に気づけない"
     )
 
 

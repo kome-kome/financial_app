@@ -24,13 +24,17 @@ name: "[定常] ワークフロー失敗の自動 Issue 起票"
 
 on:
   workflow_run:
-    # 【重要】`workflows:` は書かない＝リポジトリの全ワークフローが対象。
-    # GitHub は workflows: の各要素を**フィルタパターン**として解釈するため、
-    # 本リポジトリのように名前が "[定常] …" と角括弧で始まると
-    # "Encountered an issue parsing workflow trigger(s)" で startup_failure になる
-    # （2026-08-02 実測・run 30747596548。13本すべて列挙した版が起動できなかった）。
-    # 副次的な利点として、ワークフローを追加しても列挙漏れが構造的に起きない。
+    # 【重要】`workflows: ["**"]`（全マッチ1本）から変えないこと。2026-08-02 に両側を実測:
+    #   - 13本の name を個別列挙 → "Encountered an issue parsing workflow trigger(s)"
+    #     で startup_failure（run 30747596548）。要素は**フィルタパターン**として
+    #     解釈されるため、"[定常] …" の角括弧が文字クラスとして壊れる。
+    #   - `workflows:` を省略 → "on.workflow_run does not reference any workflows"
+    #     で startup_failure（run 30748527156）。必須キーであり省略もできない。
+    # どちらも「起動して失敗」ではなく**起動すらしない**ため、通知が来ないこと自体に
+    # 気づけない（#414 と同型の静かな欠落）。
+    # 全マッチにする副次的な利点として、ワークフロー追加時の列挙漏れも構造的に消える。
     # 対象外にしたいワークフロー（ci.yml）は下の job の if で名前一致除外する。
+    workflows: ["**"]
     types: [completed]
 
 # issues: write はこのワークフローのみ。収集系の contents: read 最小権限は崩さない。
