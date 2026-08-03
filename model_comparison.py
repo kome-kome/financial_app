@@ -49,14 +49,14 @@ async def run_comparison(db: Session, render_light_mode: bool = False) -> dict:
     """
     from plugins import get_plugin, execute_plugin, DependencyError
     from database import tuning_objective_only, tuning_dry_run
-    from plugins.macro_snapshots import tuning_snapshot_cache
+    from plugins.macro_snapshots import shared_snapshot_cache
 
     models: list[dict] = []
-    # tuning_snapshot_cache: 探索軸に依存しない重い共有ロード（M-1/M-2 の load_data、
+    # shared_snapshot_cache: 探索軸に依存しない重い共有ロード（M-1/M-2 の load_data、
     # M-3 の load_prices/load_macro_levels）を同一 db セッション内で1回に集約する（Issue
     # #298/#304）。比較ビューは 3モデルを連続実行するため、これが無いと 95万行の
     # stock_price_weekly フルロードがモデルごとに走り本番の statement_timeout に当たる。
-    with tuning_snapshot_cache():
+    with shared_snapshot_cache():
         for name, short in COMPARISON_MODELS:
             entry: dict = {"name": name, "short": short}
             p = get_plugin(name)
@@ -82,7 +82,7 @@ async def run_comparison(db: Session, render_light_mode: bool = False) -> dict:
                 # 1モデルが DB エラー（接続切断・トランザクション失敗）で落ちると session が
                 # 失敗状態のまま残り、後続モデルが "invalid transaction" で連鎖失敗する。
                 # 失敗したモデルだけ rollback して session を洗い、後続を独立に評価する。
-                # **成功時は rollback しない**: tuning_snapshot_cache がキャッシュした load_data の
+                # **成功時は rollback しない**: shared_snapshot_cache がキャッシュした load_data の
                 # ORM オブジェクトを expire させず、次モデルが再利用できるようにするため（rollback
                 # すると expire_on_rollback で N+1 再クエリ/DetachedInstance を招く）。失敗モデルの
                 # ロードは get_or_compute が例外時にキャッシュしないので、後続は安全に再ロードする。

@@ -1,10 +1,14 @@
-name: "[定常] 夜間スコア更新（sector_ols）"
+name: "[定常] 夜間スコア更新（sector_ols + M-6）"
 
-# 目的（Issue #432・親 #423）:
+# 目的（Issue #432/#443・親 #423）:
 #   朝は「読むだけ」にするため、夜のうちに producer を回して結果を永続化する。
-#   現状 regression_results（gap_ratio）を更新する自動経路が1本も無く、実測で
-#   computed_at が 33〜36 日前だった。gap_ratio はバランス型プリセットの既定重みに
-#   入っており、ユーザーが毎朝必ず踏むパス。
+#   - sector_ols → regression_results（gap_ratio）。#432 時点で自動経路が1本も無く、
+#     実測で computed_at が 33〜36 日前だった。gap_ratio はバランス型プリセットの
+#     既定重みに入っており、ユーザーが毎朝必ず踏むパス。
+#   - macro_enet（M-6）→ macro_enet_scores（μ̂）。sell_ranking の**既定** mu_source
+#     （#402・ADR-0022）なのに、M-6 は tune-hyperparameters.yml の matrix に入って
+#     おらず、--persist-scores の副作用でも更新されない＝ローカル手動実行が唯一の
+#     更新経路だった（#443）。
 #
 # 設計上の注意（触る前に必ず読むこと）:
 #   - 起動は daily-incremental の workflow_run チェーン。**success のときだけ**回す。
@@ -39,10 +43,14 @@ jobs:
       (github.event.workflow_run.name == '[定常] 差分収集・毎日自動実行' &&
       github.event.workflow_run.conclusion == 'success')
     runs-on: ubuntu-latest
-    # sector_ols は最新年度のみ（約4,000社・業種33）の行列回帰で軽いが、GitHub Actions の
-    # ホスト型ランナーは実質2コアでローカル実測より伸びる（tune-hyperparameters.yml の
-    # 既存コメントと同じ理由）。初回実走の実測で見直す。
-    timeout-minutes: 60
+    # sector_ols は最新年度のみ（約4,000社・業種33）の行列回帰で軽く、本番実走 16.1分
+    # （2026-08-03・run 30808053564）。M-6 はこれに加えて load_data（週次127万行）+
+    # build_snapshots + walk-forward CV（17期）+ 最終学習 + OOF バックテストを回すため
+    # 所要が読めない。GitHub Actions のホスト型ランナーは実質2コアでローカル実測より伸びる
+    # （tune-hyperparameters.yml の既存コメントと同じ理由）ので、まず安全側に置き
+    # **初回実走の実測で締める**（timeout の cancelled は notify-failure が拾うため、
+    # 短すぎる設定は誤通知になる・#414）。
+    timeout-minutes: 150
 
     steps:
       - name: Checkout

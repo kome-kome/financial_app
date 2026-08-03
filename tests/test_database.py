@@ -452,7 +452,7 @@ class TestTuningObjectiveOnly:
 
     def test_independent_from_tuning_dry_run(self):
         """tuning_objective_only() は tuning_dry_run() と独立したコンテキスト
-        （#298 の tuning_snapshot_cache と同様、同時に有効になり得る別モード）。"""
+        （#298 の shared_snapshot_cache と同様、同時に有効になり得る別モード）。"""
         from database import is_tuning_objective_only, tuning_dry_run
         with tuning_dry_run():
             assert is_tuning_objective_only() is False

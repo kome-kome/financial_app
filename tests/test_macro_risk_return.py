@@ -896,7 +896,7 @@ class TestCvResultCacheBySelectedFeatures:
 
         samples_by_ym = _make_samples_by_ym()
         db = MagicMock()
-        with ms.tuning_snapshot_cache(), database.tuning_objective_only():
+        with ms.shared_snapshot_cache(), database.tuning_objective_only():
             results, wrapped_cv = self._run(
                 db, samples_by_ym, [["per", "pbr"], ["per", "pbr"]], [5, 30]
             )
@@ -913,7 +913,7 @@ class TestCvResultCacheBySelectedFeatures:
 
         samples_by_ym = _make_samples_by_ym()
         db = MagicMock()
-        with ms.tuning_snapshot_cache(), database.tuning_objective_only():
+        with ms.shared_snapshot_cache(), database.tuning_objective_only():
             _results, wrapped_cv = self._run(
                 db, samples_by_ym, [["per", "pbr"], ["pbr"]], [5, 30]
             )
@@ -921,7 +921,7 @@ class TestCvResultCacheBySelectedFeatures:
         assert wrapped_cv.call_count == 2
 
     def test_cv_recomputed_outside_tuning_context(self):
-        """tuning_snapshot_cache() コンテキスト外（通常の /api/plugins/{name}/run）では
+        """shared_snapshot_cache() コンテキスト外（通常の /api/plugins/{name}/run）では
         selected_names が同一でもキャッシュされず毎回フル計算する。"""
         samples_by_ym = _make_samples_by_ym()
         db = MagicMock()

@@ -1402,6 +1402,11 @@ rank-IC で有意に上回った**ため正式兄弟へ昇格した（8 候補�
   `sell_ranking` の `mu_source="macro_enet"` へ供給する。**#402（ADR-0022）で既定 `mu_source`
   は M-2 → M-6 へ切替済み**（売り側 OOF 指標 `short_side_spread` で +0.0145・p=0.001 の有意優位・
   §10.2 の選定根拠を参照）。順位スコアで水準を持たない M-5 と異なり、M-6 は水準を持つため統合できる。
+- **μ̂ は夜間バッチが日次更新する**（#443）。M-6 は `tune-hyperparameters.yml` の matrix
+  （M-1/M-2/M-3）に入っておらず `--persist-scores` の副作用も受けないため、#443 以前は
+  ローカル手動実行だけが `macro_enet_scores` の更新経路だった。現在は `nightly-scores.yml`
+  → `nightly_scores.py` の `NIGHTLY_MODELS` に載っており、`daily-incremental` 成功後に
+  **params_schema の既定構成のまま**（本節の実測と同一）自動で回る。tuned params は持たない。
 - 線形モデルのため、M-2 が捉える fin×macro の高次交互作用は表現できない。両者は**補完関係**とみて
   M-4（兄弟μ̂スタッキング）へ M-6 を加えたが（#397）、統合は M-6 単体を rank-IC（p=0.810）でも
   売り側 spread（p=0.655）でも上回らなかった（ADR-0015 の「単体で十分」判定に該当）。

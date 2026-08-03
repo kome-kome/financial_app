@@ -338,3 +338,27 @@ diagnostics `auto_hyperparams_used`）。当時の維持理由「高速な in-UI
 （撤去したのは周辺尤度による選択経路のみ。OOF 経路＝`hyperparameter_search.py` CLI は無変更）。
 `coerce_params` は schema 未宣言キーを無視するため、旧クライアントが `auto_hyperparams` を
 送っても無害。
+
+## Update（2026-08-04・`tuning_snapshot_cache` → `shared_snapshot_cache` 改称・Issue #443）
+
+本 ADR の §「Update（Issue #304）」で導入したプロセス内キャッシュを、**探索専用から
+「1プロセスで `execute` を複数回まわす場面の共有キャッシュ」へ一般化**した。
+
+- `tuning_snapshot_cache()` → `shared_snapshot_cache()`
+- `tuning_cache_get_or_compute()` → `shared_cache_get_or_compute()`
+- 内部 ContextVar `_tuning_cache` → `_shared_cache`
+
+**理由**: 夜間スコア更新バッチ（`nightly_scores.py`・Issue #432/#443）が `sector_ols` と
+M-6 を1プロセスで順に回すようになり、探索と同じ「同じ `load_data`（週次127万行）を
+何度も引く」構造が探索の外に現れた。包まなければモデルを1本足すたびに Supabase の
+Egress（無料枠 5GB/月）が線形に増える。機構は `contextvars` で完結しており探索固有の
+前提を持たないため、名前だけが実態と食い違っていた。
+
+**機構・キャッシュキー・名前空間（`_CACHE_NAMESPACES`）は変更していない**（純粋な改称と
+docstring の一般化のみ）。`database.tuning_dry_run()` / `tuning_objective_only()` は探索
+固有の意味を持つため**改称していない**——夜間バッチは producer を実際に書くので前者を
+使ってはならず、`oof_backtest` だけでなく全社スコアリングまで必要なので後者も使えない。
+
+前提条件が1つ増える: **包んだブロックの中でキャッシュ対象の入力（株価・財務・マクロ）が
+書き換わらないこと**。探索は読むだけ、夜間バッチは producer が自分の出力テーブルへ書く
+だけなので成立するが、収集処理と同じプロセスで包んではいけない。
