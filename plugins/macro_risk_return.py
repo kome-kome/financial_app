@@ -47,7 +47,7 @@ from .macro_snapshots import (
     get_producer_scores,
     oof_backtest,
     build_oof_meta,
-    tuning_cache_get_or_compute,
+    shared_cache_get_or_compute,
 )
 # R3（セクター×サイズ別 CV-RMSE）でバケットを採用する最小残差数。
 R3_MIN_BUCKET_N = 5
@@ -295,14 +295,14 @@ class MacroRiskReturnPlugin(AnalysisPlugin):
         }
 
         # --- Walk-Forward CV（残差も回収し R3 バケット CV-RMSE を算出）---
-        # tuning_snapshot_cache() コンテキスト内（ハイパーパラメータ探索中）では、異なる
+        # shared_snapshot_cache() コンテキスト内（ハイパーパラメータ探索中）では、異なる
         # max_features 候補間で BIC 選択結果（selected_names）が偶然一致した場合、CV を
         # 再実行せず使い回す（Issue #304）。samples_by_ym が同一（build_snapshots が
         # #298 でキャッシュ済み）かつ selected_names が同一なら samples_sel も数学的に
         # 完全に同一になるため、CV 結果も完全に一致する（近似ではない真の重複排除）。
         # コンテキスト外（通常の /api/plugins/{name}/run）では常にフル計算する。
         cv_cache_key = (id(samples_by_ym), tuple(sorted(selected_names)))
-        cv_folds, cv_residuals_by_ym = tuning_cache_get_or_compute(
+        cv_folds, cv_residuals_by_ym = shared_cache_get_or_compute(
             "cv_by_selected_features",
             cv_cache_key,
             lambda: walk_forward_cv_monthly(

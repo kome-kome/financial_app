@@ -156,13 +156,13 @@ def load_prices(db) -> tuple[dict, dict]:
     (prices_by_co, companies) を返す。financial_metrics は使わない（本モデルは
     財務を参照しないため load_data の重い VIEW クエリを回避する）。
 
-    tuning_snapshot_cache() コンテキスト内では db セッション単位（id(db)）で結果を
+    shared_snapshot_cache() コンテキスト内では db セッション単位（id(db)）で結果を
     キャッシュし、2回目以降の呼び出しは DB へ再クエリしない（Issue #304。
-    plugins/macro_snapshots.py の load_data と同じパターンを `tuning_cache_get_or_compute`
+    plugins/macro_snapshots.py の load_data と同じパターンを `shared_cache_get_or_compute`
     経由で再利用）。コンテキスト外では常にフル計算する。
     """
-    from .macro_snapshots import tuning_cache_get_or_compute
-    return tuning_cache_get_or_compute("load_prices", id(db), lambda: _load_prices_impl(db))
+    from .macro_snapshots import shared_cache_get_or_compute
+    return shared_cache_get_or_compute("load_prices", id(db), lambda: _load_prices_impl(db))
 
 
 def _load_prices_impl(db) -> tuple[dict, dict]:
@@ -179,12 +179,12 @@ def load_macro_levels(db, series_codes: list[str], min_date: str | None) -> dict
     """MacroData から指定系列の (trade_date, close) を昇順で取得し
     {series_code: (dates_sorted, vals)} を返す（forward-fill 用に分離保持）。
 
-    tuning_snapshot_cache() コンテキスト内では (id(db), series_codes, min_date) の
+    shared_snapshot_cache() コンテキスト内では (id(db), series_codes, min_date) の
     組み合わせで結果をキャッシュする（Issue #304）。コンテキスト外では常にフル計算する。
     """
-    from .macro_snapshots import tuning_cache_get_or_compute
+    from .macro_snapshots import shared_cache_get_or_compute
     key = (id(db), tuple(sorted(series_codes)), min_date)
-    return tuning_cache_get_or_compute(
+    return shared_cache_get_or_compute(
         "load_macro_levels", key, lambda: _load_macro_levels_impl(db, series_codes, min_date)
     )
 

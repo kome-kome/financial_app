@@ -540,7 +540,7 @@ def tuning_dry_run():
 
 
 # ── ハイパーパラメータ探索中のスコアリング省略モード（Issue #299）───────────────────
-# tuning_snapshot_cache()（Issue #298）で load_data/build_snapshots の重複計算は解消したが、
+# shared_snapshot_cache()（Issue #298）で load_data/build_snapshots の重複計算は解消したが、
 # M-1/M-2/M-3 の execute() は候補ごとに oof_backtest 算出後も「最終モデル再学習＋全社
 # スコアリング」（M-1: _fit_final/_score_companies、M-2: raw_items構築+SHAP計算、
 # M-3: 全社分の β 経路・r_macro 整形）までフル実行しており、探索が読むのは oof_backtest

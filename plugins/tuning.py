@@ -110,7 +110,7 @@ async def search(
     呼び出し元は CLI（hyperparameter_search.py）・GitHub Actions のみ（Issue #293で
     GUIからの手動トリガーは廃止・#292の月次自動実行へ一本化）。
 
-    探索ループ全体を macro_snapshots.tuning_snapshot_cache() で包む（Issue #298）。
+    探索ループ全体を macro_snapshots.shared_snapshot_cache() で包む（Issue #298）。
     M-1/M-2 の execute() が呼ぶ load_data/preload_macro/build_snapshots は探索軸に
     依存しない重い処理（DB全件ロード・特徴量スナップショット構築）のため、構造パラメータ
     （fin_features/macro_features/use_momentum/min_coverage 等）が同一の候補間では
@@ -119,8 +119,8 @@ async def search(
 
     同じコンテキストで、M-3（macro_dlm）の load_prices/load_macro_levels（DB全件ロード）と
     M-1（macro_risk_return）の BIC選択結果（selected_names）に紐づく Walk-Forward CV 結果も
-    キャッシュされる（Issue #304）。両者とも `macro_snapshots.tuning_cache_get_or_compute()`
-    経由で既存の `tuning_snapshot_cache()` の名前空間を再利用するため、search() 側の
+    キャッシュされる（Issue #304）。両者とも `macro_snapshots.shared_cache_get_or_compute()`
+    経由で既存の `shared_snapshot_cache()` の名前空間を再利用するため、search() 側の
     変更はこの docstring 更新のみで完結する（with 文自体は #298 のまま）。
 
     同時に database.tuning_objective_only() でも包む（Issue #299）。ここで読むのは
@@ -135,7 +135,7 @@ async def search(
 
     from database import tuning_dry_run, tuning_objective_only
     from plugins import execute_plugin
-    from plugins.macro_snapshots import tuning_snapshot_cache
+    from plugins.macro_snapshots import shared_snapshot_cache
 
     rng = random.Random(seed)
     combos = _grid_combos(dims) if strategy == "grid" else _random_combos(dims, n_iter, rng)
@@ -143,7 +143,7 @@ async def search(
         raise ValueError("探索空間が空です（dims または only_if 条件を確認してください）")
 
     leaderboard: list[dict] = []
-    with tuning_snapshot_cache(), tuning_objective_only():
+    with shared_snapshot_cache(), tuning_objective_only():
         for i, combo in enumerate(combos):
             raw = {**base_params, **combo}
             try:

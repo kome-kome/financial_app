@@ -185,7 +185,7 @@ _Avoid_: データ鮮度（財務の更新経過日数 `freshness` と二義化�
 _Avoid_: エラー / 失敗（バッチが成功していても古いことはあるため）, 総合スコア（銘柄のスコアと二義化するため）
 
 **マクロ鮮度ゲート (macro freshness gate)**:
-既定モデルが使うマクロ系列が期待更新頻度どおり更新されているかの判定（`macro_health.py`・`macro-health.yml`・Issue #420）。`collect_macro_data` は 1 系列取れなくても `continue` するため部分失敗は exit 0 で通り、ワークフロー失敗通知（#414）では拾えない。判定対象は収集定義（`collector_prices` の 9 グループ）から生成し、critical かどうかは M-1/M-2/M-6 と M-3 の `DEFAULT_MACRO_FEATURES` から逆引きする（昇格ゲートで棄却済みの系列は自動的に critical から外れる）。**収集本体は落とさず独立ジョブだけを failure にする**（収集を止めると `nightly-scores` の `workflow_run` チェーンが発火せず、マクロと無関係な `sector_ols` の夜間更新まで巻き添えになる）。
+既定モデルが使うマクロ系列が期待更新頻度どおり更新されているかの判定（`macro_health.py`・`macro-health.yml`・Issue #420）。`collect_macro_data` は 1 系列取れなくても `continue` するため部分失敗は exit 0 で通り、ワークフロー失敗通知（#414）では拾えない。判定対象は収集定義（`collector_prices` の 9 グループ）から生成し、critical かどうかは M-1/M-2/M-6 と M-3 の `DEFAULT_MACRO_FEATURES` から逆引きする（昇格ゲートで棄却済みの系列は自動的に critical から外れる）。**収集本体は落とさず独立ジョブだけを failure にする**（収集を止めると `nightly-scores` の `workflow_run` チェーンが発火せず、`sector_ols`（`gap_ratio`）と M-6（既定 mu_source の μ̂）の夜間更新まで巻き添えになる）。
 _Avoid_: マクロ欠測チェック（欠測だけでなく「古い」も見るため）
 
 ## マクロ×財務 正則化線形（M-6）

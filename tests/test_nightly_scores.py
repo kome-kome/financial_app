@@ -1,4 +1,4 @@
-"""nightly_scores.py と nightly-scores.yml の不変条件ガード（Issue #432・親 #423）。
+"""nightly_scores.py と nightly-scores.yml の不変条件ガード（Issue #432/#443・親 #423）。
 
 守るのは2系統:
 
@@ -7,6 +7,7 @@ CLI（nightly_scores.py）
   2. 実行後に「DB へ本当に書かれたか」を直接クエリで確認すること
      （例外が出なかったことを永続化の証明にしない）
   3. 1モデルの失敗が他モデルを巻き込まず、最後に非ゼロ終了すること
+  3b. モデル間で重い共有ロード（load_data 等）を再計算しないこと（#443・Egress）
 
 ワークフロー（nightly-scores.yml）
   4. `workflows:` は `["**"]` 固定（列挙は "[定常] …" の角括弧で startup_failure）
@@ -31,6 +32,7 @@ from nightly_scores import (  # noqa: E402
     VERIFIERS,
     VerificationError,
     _summarize,
+    _verify_macro_enet,
     _verify_sector_ols,
     run_models,
 )
@@ -88,6 +90,29 @@ class TestRegistration:
         """既定 features 10項目は VIF>10 が頻発するため ridge 固定（本番の既存行も ridge）。"""
         assert NIGHTLY_PARAMS["sector_ols"]["regularization"] == "ridge"
 
+    def test_default_mu_source_producer_is_registered(self):
+        """`sell_ranking` の既定 mu_source を出す producer が夜間バッチに載っていること。
+
+        既定 μ̂ の生成元が自動実行されていないと、朝の画面には「いつのものか分からない μ̂」
+        が出る（#443）。既定を切り替えたら（#402 で M-2→M-6 のように）ここも追随させる。
+        """
+        from plugins import get_plugin
+
+        schema = get_plugin("sell_ranking").params_schema()
+        default_source = schema["mu_source"]["default"]
+        assert default_source in NIGHTLY_MODELS, (
+            f"sell_ranking の既定 mu_source '{default_source}' を更新する producer が "
+            f"NIGHTLY_MODELS（{NIGHTLY_MODELS}）に無い"
+        )
+
+    def test_macro_enet_uses_schema_defaults(self):
+        """M-6 は既定構成のまま回す（ADR-0021/0022 の実測と同一のパラメータ）。
+
+        ここでパラメータを足すと、本番の μ̂ が「昇格ゲートで評価していない構成」で
+        生成される。M-6 は tune-hyperparameters.yml の matrix にも入っていない。
+        """
+        assert "macro_enet" not in NIGHTLY_PARAMS
+
     def test_every_model_has_a_verifier(self):
         """永続化検証の無いモデルを黙って追加させない（#432 の設計上の約束）。"""
         for name in NIGHTLY_MODELS:
@@ -135,6 +160,61 @@ class TestRunModels:
         assert entries[0]["elapsed_min"] >= 0
 
 
+class TestSharedSnapshotCache:
+    """モデル間で load_data 等を再計算しない（#443・Supabase Egress 5GB/月）。
+
+    夜間バッチは1プロセスで複数の producer を回すため、包まないとモデル数だけ
+    週次127万行を再ロードする。ContextVar なので execute_plugin の
+    asyncio.to_thread オフロード先（別スレッド）まで伝播する必要がある。
+    """
+
+    @staticmethod
+    def _fake_plugin(compute_calls: list):
+        from plugins.base import AnalysisPlugin
+        from plugins.macro_snapshots import shared_cache_get_or_compute
+
+        class _Fake(AnalysisPlugin):
+            name = "fake_heavy"
+            label = "fake"
+            description = "test"
+            heavy = True
+
+            def params_schema(self) -> dict:
+                return {}
+
+            def execute(self, params, db) -> dict:
+                # 実プラグインの load_data と同じ経路でキャッシュを引く
+                val = shared_cache_get_or_compute(
+                    "load_data", "key", lambda: compute_calls.append(1) or "loaded")
+                return {"loaded": val is not None}
+
+        return _Fake()
+
+    def test_heavy_load_is_computed_once_across_models(self, db, monkeypatch):
+        import plugins
+
+        calls: list = []
+        monkeypatch.setattr(plugins, "get_plugin", lambda name: self._fake_plugin(calls))
+
+        entries = asyncio.run(run_models(["fake_a", "fake_b"], db))
+
+        assert all(e["ok"] for e in entries), [e["error"] for e in entries]
+        assert len(calls) == 1, (
+            "2モデルで load_data 相当が2回走っている＝shared_snapshot_cache が"
+            "ワーカースレッドへ伝播していない（Egress がモデル数に比例する）"
+        )
+
+    def test_cache_does_not_leak_outside_run_models(self, db, monkeypatch):
+        """バッチを抜けたらキャッシュは破棄される（通常の API 実行へ漏らさない）。"""
+        import plugins
+        from plugins import macro_snapshots as ms
+
+        monkeypatch.setattr(plugins, "get_plugin", lambda name: self._fake_plugin([]))
+        asyncio.run(run_models(["fake_a"], db))
+
+        assert ms._shared_cache.get() is None
+
+
 class TestVerifier:
     def test_empty_table_raises(self, db):
         with pytest.raises(VerificationError, match="空です"):
@@ -147,6 +227,34 @@ class TestVerifier:
         future = datetime.now(timezone.utc) + timedelta(minutes=5)
         with pytest.raises(VerificationError, match="より古い"):
             _verify_sector_ols(db, future)
+
+    def test_macro_enet_empty_table_raises(self, db):
+        with pytest.raises(VerificationError, match="空です"):
+            _verify_macro_enet(db, datetime.now(timezone.utc))
+
+    def test_macro_enet_reports_rows_and_asof(self, db):
+        """件数だけでなく as-of（代表値・最古・古い銘柄数）をログへ残す（#417）。"""
+        from database import replace_macro_enet_scores
+
+        replace_macro_enet_scores(
+            db,
+            [{"edinet_code": "E1", "mu": 0.10, "r1_prime": 0.3},
+             {"edinet_code": "E2", "mu": 0.20, "r1_prime": None}],
+            "2026-08-03", snapshot_date_min="2026-07-27", n_stale=1)
+
+        msg = _verify_macro_enet(db, datetime.now(timezone.utc) - timedelta(minutes=5))
+        assert "2社" in msg
+        assert "snapshot_date=2026-08-03" in msg
+        assert "2026-07-27" in msg and "1社" in msg
+
+    def test_macro_enet_stale_rows_raise(self, db):
+        """全置換なので、今回の実行より古い created_at は「書けていない」と判定する。"""
+        from database import replace_macro_enet_scores
+
+        replace_macro_enet_scores(db, [{"edinet_code": "E1", "mu": 0.1}], "2026-08-03")
+        future = datetime.now(timezone.utc) + timedelta(minutes=5)
+        with pytest.raises(VerificationError, match="より古い"):
+            _verify_macro_enet(db, future)
 
     def test_summarize_keeps_scalars_and_short_string_lists(self):
         """採用特徴量は残し、巨大配列は件数へ畳む（自動ドロップの追跡に必要）。"""

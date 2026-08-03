@@ -1030,10 +1030,10 @@ class TestObjectiveOnlyMode:
 
 
 # ── ハイパーパラメータ探索中の load_prices/load_macro_levels キャッシュ（Issue #304） ──
-# M-3 は #298 の tuning_snapshot_cache() 対象外（load_data/preload_macro/build_snapshots
+# M-3 は #298 の shared_snapshot_cache() 対象外（load_data/preload_macro/build_snapshots
 # は M-1/M-2 専用で、M-3 は財務を使わない独自の load_prices/load_macro_levels を持つ）
 # だったため、候補ごとに株価・マクロデータを DB から毎回フルロードしていた。
-# plugins.macro_snapshots.tuning_cache_get_or_compute() 経由で同じキャッシュ機構を再利用する。
+# plugins.macro_snapshots.shared_cache_get_or_compute() 経由で同じキャッシュ機構を再利用する。
 
 class TestTuningSnapshotCacheForDlm:
 
@@ -1043,7 +1043,7 @@ class TestTuningSnapshotCacheForDlm:
         mock_impl = MagicMock(return_value=({}, {}))
         monkeypatch.setattr(dlm, "_load_prices_impl", mock_impl)
 
-        with ms.tuning_snapshot_cache():
+        with ms.shared_snapshot_cache():
             dlm.load_prices("db1")
             dlm.load_prices("db1")
 
@@ -1065,7 +1065,7 @@ class TestTuningSnapshotCacheForDlm:
         mock_impl = MagicMock(return_value=({}, {}))
         monkeypatch.setattr(dlm, "_load_prices_impl", mock_impl)
 
-        with ms.tuning_snapshot_cache():
+        with ms.shared_snapshot_cache():
             dlm.load_prices("db1")
             dlm.load_prices("db2")
 
@@ -1077,7 +1077,7 @@ class TestTuningSnapshotCacheForDlm:
         mock_impl = MagicMock(return_value={})
         monkeypatch.setattr(dlm, "_load_macro_levels_impl", mock_impl)
 
-        with ms.tuning_snapshot_cache():
+        with ms.shared_snapshot_cache():
             dlm.load_macro_levels("db1", ["USDJPY", "US10Y"], "2020-01-01")
             dlm.load_macro_levels("db1", ["US10Y", "USDJPY"], "2020-01-01")  # 順序違い→同一キー
             dlm.load_macro_levels("db1", ["USDJPY"], "2020-01-01")           # series違い→ミス

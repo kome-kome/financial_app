@@ -1,4 +1,4 @@
-"""nightly_scores.py — 夜間スコア更新バッチ（Issue #432・親 #423）。
+"""nightly_scores.py — 夜間スコア更新バッチ（Issue #432/#443・親 #423）。
 
 `daily-incremental`（差分収集）が成功した夜にだけ producer プラグインを回し、
 朝は Render が永続化済みの結果を読むだけにするためのバッチ CLI。
@@ -6,11 +6,18 @@
 heavy を GitHub Actions 上で実行し、本番 Supabase へ直接永続化する」様式。
 
 実行:
-    python nightly_scores.py                        # 既定（sector_ols）
-    python nightly_scores.py --models sector_ols    # 明示
+    python nightly_scores.py                                   # 既定（NIGHTLY_MODELS 全部）
+    python nightly_scores.py --models sector_ols               # 明示・一部だけ
+    python nightly_scores.py --models sector_ols,macro_enet
 
-いま登録しているのは `sector_ols`（`regression_results.gap_ratio` の生成元）のみ。
-M-6 / M-2 の日次化は #423 の子2 で追加する（`NIGHTLY_MODELS` へ足すだけで載る）。
+登録済み:
+  - `sector_ols`  → `regression_results`（`gap_ratio` の生成元・買い推奨のバランス型プリセット）
+  - `macro_enet`  → `macro_enet_scores`（M-6 の μ̂・`sell_ranking` の**既定** mu_source・#402/#443）
+
+M-2（`macro_gbdt`）は載せていない。既定 mu_source ではなく、`tune-hyperparameters.yml` の
+`--persist-scores` による月次更新経路が現に生きているため（載せるなら同時に tune 側から外し、
+探索 cadence と #291 の品質ゲートの関係を詰める必要がある）。M-4（`macro_ensemble`）は基底を
+全部回してコストが合算になるのに M-6 単体を上回らないため当面除外（+0.0006・p=0.810・ADR-0022）。
 
 設計上の約束（触る前に読むこと）:
   - 1モデルの失敗が他モデルを巻き込まない（tune-hyperparameters.yml の
@@ -18,6 +25,9 @@ M-6 / M-2 の日次化は #423 の子2 で追加する（`NIGHTLY_MODELS` へ足
     （→ notify-failure.yml が Issue を起票する・#414）。
   - 「例外が出なかった」を永続化の証明にしない。実行後に DB へ直接クエリし、
     このプロセスの開始時刻より新しい書き込みがあることを確認する（VERIFIERS）。
+  - 全モデルを `shared_snapshot_cache()` で包む。`load_data`（週次127万行）・
+    `preload_macro`・`build_snapshots` はモデル間で同一のため、包まないとモデルを
+    増やすたびに Supabase Egress（5GB/月）が線形に増える（#443）。
 """
 from __future__ import annotations
 
@@ -29,13 +39,20 @@ from datetime import datetime, timezone
 
 logger = logging.getLogger("nightly_scores")
 
-# 夜間バッチが回す producer の実行順。
-NIGHTLY_MODELS: tuple[str, ...] = ("sector_ols",)
+# 夜間バッチが回す producer の実行順。軽い順に並べる（timeout で打ち切られたとき、
+# 先に終わるものだけでも当日分が揃うように）。
+NIGHTLY_MODELS: tuple[str, ...] = ("sector_ols", "macro_enet")
 
 # params_schema() の default から変えたいキーだけを書く（残りは coerce_params が補完）。
 # sector_ols の regularization=ridge: 既定 features は per-share 10項目で、PL同士・BS同士の
 # 比例関係から VIF>10 が頻発する（params_schema の説明どおり）。本番 regression_results の
 # 最新行も ridge であり、夜間バッチで ols へ戻すと過去の値と系列が入れ替わる。
+#
+# macro_enet（M-6）は**エントリを持たない＝params_schema の default をそのまま使う**。
+# ADR-0021（昇格ゲート）・ADR-0022（既定 mu_source 切替）の実測はいずれも既定構成
+# （use_momentum=False / price_features=[] / min_coverage=0.5 / l1_ratio=auto）で取った値で、
+# ここで変えると本番の μ̂ が「評価していない構成」で生成される。M-6 は
+# tune-hyperparameters.yml の matrix（M-1/M-2/M-3）に入っておらず tuned params も持たない。
 NIGHTLY_PARAMS: dict[str, dict] = {
     "sector_ols": {"regularization": "ridge"},
 }
@@ -73,8 +90,57 @@ def _verify_sector_ols(db, started_at: datetime) -> str:
             f"gap_ratio 非NULL {n_gap}件")
 
 
+def _make_score_table_verifier(model_cls_name: str, label: str):
+    """`*_scores`（producer μ̂ 用の同型テーブル）向け verifier を作る。
+
+    M-2/M-3/M-4/M-6 の μ̂ テーブルは列構成が同じ（edinet_code / mu / r1_prime /
+    snapshot_date / snapshot_date_min / n_stale / created_at）で、いずれも
+    `replace_*_scores` による**全置換**で書かれる。したがって「今回の実行で書けたか」は
+    max(created_at) だけで判定でき、モデルごとに verifier を手書きする必要がない
+    （`NIGHTLY_MODELS` へ足すだけで載る、を verifier 側でも保つ）。
+
+    ログには件数だけでなく as-of（代表値＝中央値・最古・古い銘柄数・Issue #417）も残す。
+    μ̂ が「いつの株価断面のものか」は運用上そのまま発注判断の可否に効くため。
+    """
+
+    def _verify(db, started_at: datetime) -> str:
+        from sqlalchemy import func
+
+        import database
+
+        model_cls = getattr(database, model_cls_name)
+        max_created, n_rows, snap, snap_min, n_stale = (
+            db.query(
+                func.max(model_cls.created_at),
+                func.count(model_cls.edinet_code),
+                func.max(model_cls.snapshot_date),
+                func.min(model_cls.snapshot_date_min),
+                func.max(model_cls.n_stale),
+            ).one()
+        )
+        if not n_rows or max_created is None:
+            raise VerificationError(
+                f"{label} が空です（μ̂ が1件も永続化されていません）"
+            )
+        max_created = _aware_utc(max_created)
+        if max_created < started_at:
+            raise VerificationError(
+                f"{label} の max(created_at)={max_created.isoformat()} が"
+                f" 実行開始 {started_at.isoformat()} より古い＝今回の書き込みが反映されていません"
+            )
+        return (f"{n_rows}社 / snapshot_date={snap}"
+                f"（最古 {snap_min} ・ 代表値より古い銘柄 {n_stale}社） / "
+                f"max(created_at)={max_created.isoformat()}")
+
+    return _verify
+
+
+_verify_macro_enet = _make_score_table_verifier("MacroEnetScore", "macro_enet_scores")
+
+
 VERIFIERS = {
     "sector_ols": _verify_sector_ols,
+    "macro_enet": _verify_macro_enet,
 }
 
 
@@ -99,7 +165,23 @@ def _summarize(result: dict) -> str:
 
 
 async def run_models(models: list[str], db) -> list[dict]:
-    """モデルを順に実行し、1件ごとの結果 dict を返す（例外は握って次のモデルへ進む）。"""
+    """モデルを順に実行し、1件ごとの結果 dict を返す（例外は握って次のモデルへ進む）。
+
+    全体を `shared_snapshot_cache()` で包む。`load_data`（週次127万行）/`preload_macro`/
+    `build_snapshots` はモデル間で結果が同一なので、包まないとモデル数だけ DB から
+    再ロードして Supabase Egress（5GB/月）を食う（#443）。ContextVar なので
+    `execute_plugin` の `asyncio.to_thread` オフロード先へも伝播する（plugins/__init__.py）。
+    キャッシュ対象は**入力**（株価・財務・マクロ）だけで、producer が書く出力テーブルは
+    含まないため、モデル間で書き込みが見えなくなることはない。
+    """
+    from plugins.macro_snapshots import shared_snapshot_cache
+
+    with shared_snapshot_cache():
+        return await _run_models_inner(models, db)
+
+
+async def _run_models_inner(models: list[str], db) -> list[dict]:
+    """run_models の本体（キャッシュコンテキストの中で呼ばれる前提）。"""
     from plugins import execute_plugin, get_plugin
 
     entries: list[dict] = []

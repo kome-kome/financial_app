@@ -86,7 +86,7 @@ async def execute_plugin(plugin: AnalysisPlugin, raw: dict, db) -> dict:
     execute（同期・CPU-bound）は asyncio.to_thread でワーカースレッドへオフロードし、
     イベントループを塞がない（/heartbeat が止まり watchdog が誤停止する Issue #357 の
     根本対策）。tuning 系 ContextVar（tuning_dry_run / tuning_objective_only /
-    tuning_snapshot_cache）は to_thread がコンテキストを複製するため伝播する
+    shared_snapshot_cache）は to_thread がコンテキストを複製するため伝播する
     （loop.run_in_executor 直接使用では伝播しない）。db セッションはスレッドへの
     逐次ハンドオフのみ（await 中にループ側から触らない）。
 

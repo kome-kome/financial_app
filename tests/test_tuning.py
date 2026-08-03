@@ -278,9 +278,9 @@ class TestBoundedCache:
         assert "c" in cache._data
 
 
-# ── plugins.macro_snapshots.tuning_snapshot_cache（Issue #298） ────────────────────
+# ── plugins.macro_snapshots.shared_snapshot_cache（Issue #298） ────────────────────
 # load_data/preload_macro/build_snapshots はいずれも探索軸に依存しない重い処理
-# （DB全件ロード・特徴量スナップショット構築）。tuning_snapshot_cache() コンテキスト内では
+# （DB全件ロード・特徴量スナップショット構築）。shared_snapshot_cache() コンテキスト内では
 # 同一引数の呼び出しをキャッシュし、コンテキスト外（通常の /api/plugins/{name}/run 相当）
 # では毎回フル計算される（副作用が漏れ出さない）ことを確認する。
 
@@ -291,7 +291,7 @@ class TestTuningSnapshotCache:
         mock_impl = MagicMock(return_value=({}, {}, {}))
         monkeypatch.setattr(ms, "_load_data_impl", mock_impl)
 
-        with ms.tuning_snapshot_cache():
+        with ms.shared_snapshot_cache():
             ms.load_data("db1")
             ms.load_data("db1")
 
@@ -313,9 +313,9 @@ class TestTuningSnapshotCache:
         mock_impl = MagicMock(return_value=({}, {}, {}))
         monkeypatch.setattr(ms, "_load_data_impl", mock_impl)
 
-        with ms.tuning_snapshot_cache():
+        with ms.shared_snapshot_cache():
             ms.load_data("db1")
-        with ms.tuning_snapshot_cache():
+        with ms.shared_snapshot_cache():
             ms.load_data("db1")
 
         assert mock_impl.call_count == 2
@@ -326,7 +326,7 @@ class TestTuningSnapshotCache:
         monkeypatch.setattr(ms, "_preload_macro_impl", mock_impl)
         prices = {"E1": []}
 
-        with ms.tuning_snapshot_cache():
+        with ms.shared_snapshot_cache():
             ms.preload_macro("db1", prices, ["macro_usdjpy_yoy"])
             ms.preload_macro("db1", prices, ["macro_usdjpy_yoy"])  # 同一キー→ヒット
             ms.preload_macro("db1", prices, ["macro_sp500_yoy"])   # macro_names が違う→ミス
@@ -338,7 +338,7 @@ class TestTuningSnapshotCache:
         mock_impl = MagicMock(return_value={})
         monkeypatch.setattr(ms, "_preload_macro_impl", mock_impl)
 
-        with ms.tuning_snapshot_cache():
+        with ms.shared_snapshot_cache():
             ms.preload_macro("db1", {"E1": []}, ["macro_usdjpy_yoy"])
             ms.preload_macro("db1", {"E1": []}, ["macro_usdjpy_yoy"])  # 別オブジェクト→ミス
 
@@ -350,7 +350,7 @@ class TestTuningSnapshotCache:
         monkeypatch.setattr(ms, "_build_snapshots_impl", mock_impl)
         prices, fin, companies, macro = {}, {}, {}, {}
 
-        with ms.tuning_snapshot_cache():
+        with ms.shared_snapshot_cache():
             ms.build_snapshots(prices, fin, companies, macro,
                                ["per"], ["macro_usdjpy_yoy"], False, 11, 1.0,
                                build_interactions=True)
@@ -367,7 +367,7 @@ class TestTuningSnapshotCache:
         monkeypatch.setattr(ms, "_build_snapshots_impl", mock_impl)
         prices, fin, companies, macro = {}, {}, {}, {}
 
-        with ms.tuning_snapshot_cache():
+        with ms.shared_snapshot_cache():
             ms.build_snapshots(prices, fin, companies, macro,
                                ["per"], ["macro_usdjpy_yoy"], False, 11, 1.0,
                                build_interactions=True)
@@ -391,7 +391,7 @@ class TestTuningSnapshotCache:
         assert mock_impl.call_count == 2
 
 
-# ── tuning_cache_get_or_compute（汎用キャッシュヘルパー・Issue #304） ────────────────
+# ── shared_cache_get_or_compute（汎用キャッシュヘルパー・Issue #304） ────────────────
 # macro_snapshots.py 外のモジュール（M-3の load_prices/load_macro_levels・M-1の
 # cv_by_selected_features）が load_data 等と同じ contextvars パターンを再利用するための
 # 汎用アクセサ。プリミティブ自体の挙動（キー一致/不一致・コンテキスト内外）を直接検証する。
@@ -402,27 +402,27 @@ class TestTuningCacheGetOrCompute:
         import plugins.macro_snapshots as ms
         compute = MagicMock(return_value="v")
 
-        with ms.tuning_snapshot_cache():
-            assert ms.tuning_cache_get_or_compute("load_prices", "k1", compute) == "v"
-            assert ms.tuning_cache_get_or_compute("load_prices", "k1", compute) == "v"
+        with ms.shared_snapshot_cache():
+            assert ms.shared_cache_get_or_compute("load_prices", "k1", compute) == "v"
+            assert ms.shared_cache_get_or_compute("load_prices", "k1", compute) == "v"
 
         assert compute.call_count == 1
 
     def test_different_keys_both_compute(self):
         import plugins.macro_snapshots as ms
 
-        with ms.tuning_snapshot_cache():
-            assert ms.tuning_cache_get_or_compute("load_prices", "a", lambda: "va") == "va"
-            assert ms.tuning_cache_get_or_compute("load_prices", "b", lambda: "vb") == "vb"
+        with ms.shared_snapshot_cache():
+            assert ms.shared_cache_get_or_compute("load_prices", "a", lambda: "va") == "va"
+            assert ms.shared_cache_get_or_compute("load_prices", "b", lambda: "vb") == "vb"
 
     def test_namespaces_are_isolated(self):
         """同じキーでも名前空間が違えば別エントリ（load_prices と load_macro_levels が
         誤って値を共有しない）。"""
         import plugins.macro_snapshots as ms
 
-        with ms.tuning_snapshot_cache():
-            v1 = ms.tuning_cache_get_or_compute("load_prices", "k", lambda: "prices")
-            v2 = ms.tuning_cache_get_or_compute("load_macro_levels", "k", lambda: "macro")
+        with ms.shared_snapshot_cache():
+            v1 = ms.shared_cache_get_or_compute("load_prices", "k", lambda: "prices")
+            v2 = ms.shared_cache_get_or_compute("load_macro_levels", "k", lambda: "macro")
 
         assert v1 == "prices"
         assert v2 == "macro"
@@ -431,25 +431,25 @@ class TestTuningCacheGetOrCompute:
         import plugins.macro_snapshots as ms
         compute = MagicMock(return_value="v")
 
-        ms.tuning_cache_get_or_compute("load_prices", "k1", compute)
-        ms.tuning_cache_get_or_compute("load_prices", "k1", compute)
+        ms.shared_cache_get_or_compute("load_prices", "k1", compute)
+        ms.shared_cache_get_or_compute("load_prices", "k1", compute)
 
         assert compute.call_count == 2
 
     def test_unknown_namespace_raises(self):
         import plugins.macro_snapshots as ms
 
-        with ms.tuning_snapshot_cache():
+        with ms.shared_snapshot_cache():
             with pytest.raises(KeyError):
-                ms.tuning_cache_get_or_compute("not_a_real_namespace", "k", lambda: "v")
+                ms.shared_cache_get_or_compute("not_a_real_namespace", "k", lambda: "v")
 
     def test_cv_by_selected_features_namespace_exists(self):
         """M-1 の BIC選択結果キャッシュ（cv_by_selected_features）用の名前空間が
-        tuning_snapshot_cache() で確保されている（Issue #304）。"""
+        shared_snapshot_cache() で確保されている（Issue #304）。"""
         import plugins.macro_snapshots as ms
 
-        with ms.tuning_snapshot_cache():
-            v = ms.tuning_cache_get_or_compute("cv_by_selected_features", "k", lambda: "cv")
+        with ms.shared_snapshot_cache():
+            v = ms.shared_cache_get_or_compute("cv_by_selected_features", "k", lambda: "cv")
         assert v == "cv"
 
 

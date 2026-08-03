@@ -519,25 +519,31 @@ def _realized_vol(price_rows: list, ref_date: str, weeks: int = 52) -> float | N
     return statistics.stdev(log_rets) * math.sqrt(52)
 
 
-# ── ハイパーパラメータ探索中のスナップショットキャッシュ（Issue #298）──────────────
-# plugins/tuning.py の search() は各候補を execute_plugin() でフル実行するが、
-# load_data/preload_macro/build_snapshots はいずれも探索軸（モデルのハイパーパラメータ）
-# に依存しない重い処理（DB全件ロード・特徴量スナップショット構築）で、構造パラメータ
-# （fin_features/macro_features/use_momentum/min_coverage 等）が同じ候補間では結果が
-# 完全に一致する（実測: 1候補あたり load_data 約23〜33秒 + build_snapshots 約25秒）。
-# database.tuning_dry_run() と対になる contextvars.ContextVar パターンで、探索中だけ
-# 有効なプロセス内メモリキャッシュ（DB永続化なし）を提供する。
+# ── 1プロセス内で execute を複数回まわすときの共有スナップショットキャッシュ（Issue #298）──
+# load_data/preload_macro/build_snapshots はいずれもモデルのハイパーパラメータに依存しない
+# 重い処理（DB全件ロード・特徴量スナップショット構築）で、構造パラメータ
+# （fin_features/macro_features/use_momentum/min_coverage 等）が同じなら結果が完全に一致する
+# （実測: 1回あたり load_data 約23〜33秒 + build_snapshots 約25秒）。
+# database.tuning_dry_run() と対になる contextvars.ContextVar パターンで、明示的に包んだ
+# ブロックの中だけ有効なプロセス内メモリキャッシュ（DB永続化なし）を提供する。
+#
+# 利用者は2つ:
+#   - ハイパーパラメータ探索（plugins/tuning.py の search()・Issue #298/#304）。各候補を
+#     execute_plugin() でフル実行するため、候補数だけ同じロードが繰り返される。
+#   - 夜間スコア更新バッチ（nightly_scores.py・Issue #443）。1プロセスで複数の producer を
+#     順に回すため、モデルを増やすと週次127万行の再ロードが線形に増え、Supabase の
+#     Egress 上限（5GB/月）を圧迫する。
 #
 # 通常の API 実行（/api/plugins/{name}/run）はこのコンテキストが未設定（None）のため
-# 常に従来通りフル計算する（キャッシュは探索専用・副作用が漏れ出さない）。
+# 常に従来通りフル計算する（キャッシュは明示的に包んだ場合のみ・副作用が漏れ出さない）。
 
 _CACHE_MAXSIZE = 8
 
-_tuning_cache: contextvars.ContextVar = contextvars.ContextVar("_tuning_cache", default=None)
+_shared_cache: contextvars.ContextVar = contextvars.ContextVar("_shared_cache", default=None)
 
 
 class _BoundedCache:
-    """探索専用の簡易 LRU（辞書/リスト引数を含むキーは hashable 化済み前提）。
+    """コンテキスト内専用の簡易 LRU（辞書/リスト引数を含むキーは hashable 化済み前提）。
 
     maxsize 超過時は最も長く使われていないエントリを追い出す。標準ライブラリの
     functools.lru_cache は引数が辞書/リスト（hashable でない）だと使えないため、
@@ -561,9 +567,9 @@ class _BoundedCache:
 
 
 # キャッシュ名前空間の一覧。load_data/preload_macro/build_snapshots は本モジュール内の
-# 専用ラッパー（下記）が直接 _tuning_cache から引く。load_prices/load_macro_levels
+# 専用ラッパー（下記）が直接 _shared_cache から引く。load_prices/load_macro_levels
 # （M-3・plugins/macro_dlm.py）と cv_by_selected_features（M-1・plugins/macro_risk_return.py）
-# は `tuning_cache_get_or_compute` 経由で他モジュールから使う汎用名前空間（Issue #304）。
+# は `shared_cache_get_or_compute` 経由で他モジュールから使う汎用名前空間（Issue #304）。
 _CACHE_NAMESPACES = (
     "load_data", "preload_macro", "build_snapshots",
     "load_prices", "load_macro_levels",
@@ -572,33 +578,39 @@ _CACHE_NAMESPACES = (
 
 
 @contextmanager
-def tuning_snapshot_cache():
-    """このブロック内では探索軸に依存しない重い処理の結果をキャッシュする。
+def shared_snapshot_cache():
+    """このブロック内ではハイパーパラメータに依存しない重い処理の結果をキャッシュする。
 
-    ハイパーパラメータ探索（plugins/tuning.py の search()）専用。load_data/preload_macro/
-    build_snapshots（Issue #298・M-1/M-2 共有）に加え、M-3 の load_prices/load_macro_levels
+    利用者はハイパーパラメータ探索（plugins/tuning.py の search()）と夜間スコア更新バッチ
+    （nightly_scores.py・Issue #443）の2つ。load_data/preload_macro/build_snapshots
+    （Issue #298・M-1/M-2/M-6 共有）に加え、M-3 の load_prices/load_macro_levels
     （plugins/macro_dlm.py）・M-1 の BIC選択結果に紐づく CV 結果（cv_by_selected_features・
     plugins/macro_risk_return.py）も同じコンテキストで管理する（Issue #304・モジュールを
-    またぐ利用は `tuning_cache_get_or_compute` 経由）。ブロックを抜けるとキャッシュは破棄され、
+    またぐ利用は `shared_cache_get_or_compute` 経由）。ブロックを抜けるとキャッシュは破棄され、
     以後の呼び出し（次回の探索・通常の API 実行）には一切影響しない。
+
+    **キャッシュが正しいのは「ブロック中に DB の中身が変わらない」ときだけ**。同じ db
+    セッションに対して load_data の結果は不変という前提を置いている（探索は読むだけ、
+    夜間バッチは producer が自分の出力テーブルへ書くだけで、キャッシュ対象の入力
+    （株価・財務・マクロ）は書き換えない）。収集と同じプロセスで包んではいけない。
     """
-    token = _tuning_cache.set({ns: _BoundedCache() for ns in _CACHE_NAMESPACES})
+    token = _shared_cache.set({ns: _BoundedCache() for ns in _CACHE_NAMESPACES})
     try:
         yield
     finally:
-        _tuning_cache.reset(token)
+        _shared_cache.reset(token)
 
 
-def tuning_cache_get_or_compute(namespace: str, key: Any, compute) -> Any:
-    """`tuning_snapshot_cache()` の名前空間付きキャッシュへ汎用アクセスする（Issue #304）。
+def shared_cache_get_or_compute(namespace: str, key: Any, compute) -> Any:
+    """`shared_snapshot_cache()` の名前空間付きキャッシュへ汎用アクセスする（Issue #304）。
 
     macro_snapshots.py 外のモジュール（plugins/macro_dlm.py の load_prices/load_macro_levels・
     plugins/macro_risk_return.py の BIC選択結果に紐づく CV 結果）が、load_data 等と同じ
-    contextvars パターンを再利用するための公開ヘルパー。`tuning_snapshot_cache()` コンテキスト
+    contextvars パターンを再利用するための公開ヘルパー。`shared_snapshot_cache()` コンテキスト
     外（通常の API 実行）では常に `compute()` を実行しキャッシュしない。namespace は
     `_CACHE_NAMESPACES` に定義済みのもののみ有効（未定義は KeyError）。
     """
-    cache = _tuning_cache.get()
+    cache = _shared_cache.get()
     if cache is None:
         return compute()
     return cache[namespace].get_or_compute(key, compute)
@@ -647,11 +659,11 @@ def load_weekly_prices_chunked(db, batch: int = _WEEKLY_LOAD_BATCH) -> dict:
 def load_data(db) -> tuple:
     """Company / FinancialMetric / StockPriceWeekly を一括ロード。
 
-    tuning_snapshot_cache() コンテキスト内では db セッション単位（id(db)）で結果を
+    shared_snapshot_cache() コンテキスト内では db セッション単位（id(db)）で結果を
     キャッシュし、2回目以降の呼び出しは DB へ再クエリしない（Issue #298）。探索中は
     同一 db セッションに対して結果は不変という前提。コンテキスト外では常にフル計算する。
     """
-    cache = _tuning_cache.get()
+    cache = _shared_cache.get()
     if cache is None:
         return _load_data_impl(db)
     return cache["load_data"].get_or_compute(id(db), lambda: _load_data_impl(db))
@@ -676,10 +688,10 @@ def _load_data_impl(db) -> tuple:
 def preload_macro(db, prices_by_co: dict, macro_names: list[str] | None = None) -> dict:
     """MacroData を一括プリロードしキャッシュ dict を返す。
 
-    tuning_snapshot_cache() コンテキスト内では (id(prices_by_co), macro_names) の
+    shared_snapshot_cache() コンテキスト内では (id(prices_by_co), macro_names) の
     組み合わせで結果をキャッシュする（Issue #298）。コンテキスト外では常にフル計算する。
     """
-    cache = _tuning_cache.get()
+    cache = _shared_cache.get()
     if cache is None:
         return _preload_macro_impl(db, prices_by_co, macro_names)
     key = (id(prices_by_co), tuple(sorted(macro_names)) if macro_names else ())
@@ -776,12 +788,12 @@ def build_snapshots(
       M-1（OLS）は既定の None のままにして OLS 特徴を汚さない。px_* は全て無次元→木で
       単調不変・次元整合 OK。px_high52dev の52週 warmup 分は nan となり coverage で制御される。
 
-    tuning_snapshot_cache() コンテキスト内では、大きいオブジェクト引数（prices_by_co/
+    shared_snapshot_cache() コンテキスト内では、大きいオブジェクト引数（prices_by_co/
     fin_by_co/companies/macro_cache）は id()、それ以外の引数は値そのものからキーを
     構築してキャッシュする（Issue #298）。コンテキスト外では常にフル計算する。
     """
     price_features = list(price_features) if price_features else []
-    cache = _tuning_cache.get()
+    cache = _shared_cache.get()
     if cache is None:
         return _build_snapshots_impl(
             prices_by_co, fin_by_co, companies, macro_cache,
