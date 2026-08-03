@@ -535,13 +535,13 @@ sequenceDiagram
 
     Note over User,DB: ① 業種別OLS分析の実行（target=stock_price 固定・per-share 説明変数）
     User ->> UI  : 説明変数（per-share[円/株]）・業種最低サンプル数・正則化を選択して「実行」
-    UI   ->> API : POST /api/plugins/sector_ols/run { target=stock_price, features:[ps_*...], min_samples }
+    UI   ->> API : POST /api/plugins/sector_ols/run { target=stock_price, features:[ps_*...], min_samples,<br/>sector_missing_rate, zero_fill_no_dividend }
     API  ->> PLG : execute_plugin(p, raw, db)（coerce_params→ensure_dependencies→execute[to_thread]）
 
     PLG  ->> DB  : SELECT financial_records（最新年度）
     DB  -->> PLG : 全レコード
 
-    PLG  ->> PLG : 欠損率の高い説明変数を自動ドロップ（_select_features）<br/>除外列は dropped_features として返す
+    PLG  ->> PLG : ① 全業種一括で高欠損列をドロップ（_select_features・>50%）<br/>② 業種内で高欠損の列をその業種だけドロップ（_sector_feature_sets・>30%）<br/>除外列は dropped_features / sector_stats[].dropped_features として返す（ADR-0027）
     loop 各業種
         PLG  ->> PLG : 各 record で shares を算出（issued_shares 優先／欠損時 bs_total_equity÷bs_bps）<br/>株数を求められない銘柄のみスキップ
         PLG  ->> PLG : 派生 per-share (ps_*) を「絶対額 / shares」で実行時計算

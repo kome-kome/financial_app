@@ -19,6 +19,10 @@ _Avoid_: GUI項目, 表示カラム
 回帰分析モデルの説明変数として使う項目。要件は表示とは別で、per-share の次元整合性・winsorize・パネルでの欠損率（標準間カバレッジ）が効く。GUI 表示の有無とは独立に価値を持つ。
 _Avoid_: （口語の「説明変数」は可。正式にはこちら）
 
+**構造的NULL (structural null)**:
+「未収集だから NULL」ではなく「その企業・業種には会計上そもそも存在しないから NULL」である欠損。銀行業の売上総利益・売上高、無配企業の `dps` が該当する。[[分析特徴量]] の AND フィルタ（選択列が1つでも NULL の銘柄を丸ごと除外）では欠測と区別できず、企業や業種を丸ごと分析対象外にする。sector_ols は業種単位の列ドロップ（`sector_missing_rate`）と無配の 0 埋め（`zero_fill_no_dividend`）で扱いを分ける（ADR-0027）。**欠損率で機械的に判断せず「なぜ NULL なのか」を先に決める**のが要点で、母集団全体の欠損率だけを見ると業種内 100% 欠損（銀行業の粗利＝全体では 7.7%）を取りこぼす。
+_Avoid_: 欠測, 未収集（区別が本質なので言い換えない）
+
 **回帰結果 (regression result)**:
 業種別OLS（producer）が `regression_results` テーブルへ書き込む銘柄×年度の出力（predicted_market_cap / gap_ratio / model[ols|ridge] / sector / computed_at）。バリュエーション分析（consumer・`depends_on=["sector_ols"]`）が消費する seam の通貨。producer 未実行なら乖離分析は前提条件エラー（`plugins.ensure_dependencies` が `depends_on` を runner/専用エンドポイントで強制）。回帰が財務データ更新より古い＝stale。
 _Avoid_: 予測結果, OLS結果（モデル混在を曖昧にするため）

@@ -451,11 +451,23 @@ predicted_market_cap = ŷ_pred / stock_price × market_cap   <span class="sym">[
 
   <p><strong>実行条件:</strong> 業種最小サンプル数（デフォルト: 5社）を満たさない業種はスキップ。各銘柄に発行株数が必要で、<code>issued_shares</code>（XBRL 直接値・fill率100%）を優先し、欠損時のみ <code>bs_total_equity ÷ bs_bps</code> で推計する。どちらでも求められない銘柄のみ対象外（<code>bs_bps</code> 欠損だけでは除外されない）。</p>
 
+  <div class="info-box">
+    <strong>構造的な NULL は「欠測」ではなく「該当なし」として扱う（ADR-0027・#434）:</strong>
+    説明変数は「選択列が1つでも NULL の銘柄を丸ごと除外」する AND フィルタのため、
+    <strong>銀行業に売上総利益が存在しない</strong>（業種内 100% 欠損だが全体では 7.7%）、
+    <strong>無配企業は配当タグ自体が出ない</strong>（欠落が再投資型・赤字企業へ偏る系統的バイアス）
+    といった構造的 NULL が、企業や業種を丸ごと分析対象外にしていた。
+    業種単位の列ドロップと無配の 0 埋めでカバレッジは 74.4% → 93.4%（2,882 → 3,619社・2026-08-03 実測）。
+    全体 R² が下がるのは劣化ではなく<strong>選択バイアスの解消</strong>で、同一分母（両設定でスコアが付く 2,879社）
+    では 0.6014 → 0.5810 に留まる。過学習ゾーン（サンプル数 &lt; 2×パラメータ数）の業種は 12 → 7 に減少。
+  </div>
+
   <div class="warn-box">
     <strong>注意:</strong>
     <ul style="margin: 6px 0 0 18px; padding: 0;">
       <li>発行株数を <code>issued_shares</code>・<code>bs_total_equity ÷ bs_bps</code> のいずれでも推計できない銘柄のみ集計対象から除外</li>
-      <li><strong>説明変数の自動ドロップ:</strong> 選択列のうち欠損率が 50% を超える列、および AND 除外でどの業種も最小サンプル数に届かない場合の欠損最多列を自動除外し、除外内容を画面に警告表示（欠損列を重ねて 0 業種に潰れる事故を防ぐ）</li>
+      <li><strong>説明変数の自動ドロップ（2段階）:</strong> ① 母集団全体での欠損率が 50% を超える列を全業種から除外。② <strong>業種内</strong>での欠損率が <code>sector_missing_rate</code>（既定 30%）を超える列を、その業種の回帰からのみ除外（さらに最小サンプル数に届かない業種は欠損最多列から貪欲に除外）。除外内容は業種別 R² サマリーに表示する</li>
+      <li><strong>無配の 0 埋め（既定 ON・<code>zero_fill_no_dividend</code>）:</strong> XBRL は配当が無いとタグ自体を出さないため、<strong>無配（真の 0）と未収集が同じ NULL に潰れる</strong>。<code>dps</code> の NULL は 0 円/株として回帰へ入れる</li>
       <li>per-share 10項目以上選択時は PL同士・BS同士の比例関係から VIF&gt;10 が頻発する。<code>check_collinearity</code> の警告が出た業種では <strong>Ridge への切替を強く推奨</strong></li>
       <li>株数推計は IFRS/JGAAP 定義差・期中増資・優先株・転換社債存在時に誤差あり（FUTURE_TASKS の J-Quants <code>IssuedShares</code> 取得で根本解決予定）</li>
       <li>バリュエーション分析（gap_analysis）は本プラグインの実行後でなければ利用不可。gap_ratio の収束予測には統計的根拠がない（→「バリュエーション分析」参照）</li>
