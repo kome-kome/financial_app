@@ -1030,12 +1030,11 @@ function showTab(t){
 let marketSSE = null;
 
 async function startMarketUpdate(force = false) {
-  const maxV = document.getElementById('mkt-max').value;
-  const max_companies = maxV ? parseInt(maxV) : null;
+  // 株価テーブル由来の一括反映（#428）。件数指定は無い（DB 側で全社を1クエリ更新）。
   try {
     await apiFetch('/api/collect/market-data', {
       method: 'POST',
-      body: JSON.stringify({ max_companies, force })
+      body: JSON.stringify({ force })
     });
     mktLog('市場データ更新ジョブを開始しました', 'success');
     document.getElementById('market-progress').classList.remove('hidden');

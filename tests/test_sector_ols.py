@@ -626,3 +626,56 @@ class TestShrinkage:
         assert std_shrunk <= std_no_shrink, (
             f"shrunk std={std_shrunk:.2f} should be <= no-shrink std={std_no_shrink:.2f}"
         )
+
+
+# ── 母集団の期種分離（#436）─────────────────────────────────────────────────
+
+class TestPeriodTypeIsolation:
+    """回帰母集団は通期（annual）のみ。H1 が同居しても二重計上しない（#436）。
+
+    H1 のフロー項目（売上・利益・CF）は半期分なので per-share 換算しても年次の
+    説明変数と次元が揃わない（BS は期末値なので揃う）。同じ企業を2回カウントし、
+    片方だけ説明変数が概ね半分、という状態で OLS を推定してしまうのを防ぐ。
+    """
+
+    def test_h1_rows_excluded_from_population(self, db, make_fin):
+        _seed_sector(db, make_fin, n=12)
+        # 同一 (edinet_code, year) に H1 を追加（period_end は annual より新しい）
+        db.add(make_fin(edinet_code="E00001", industry="情報・通信業",
+                        year=2023, period_end="2023-09-30", period_type="H1",
+                        bs_bps=850.0, pl_eps=40.0, stock_price=1600.0,
+                        bs_total_equity=850.0 * 1.05e6))
+        db.commit()
+
+        records = plugin._load_records(db, None)
+        assert all(r.period_type == "annual" for r in records)
+        assert len({r.edinet_code for r in records}) == len(records)
+
+    def test_company_with_newer_h1_year_still_loads_annual(self, db, make_fin):
+        """H1 だけが新しい年度にある社でも annual 行が落ちない。
+
+        サブクエリ側を annual で絞らないと max_year が H1 の年度になり、
+        join 条件（year == max_year）に合う annual 行が 1 つも無くなる。
+        """
+        _seed_sector(db, make_fin, n=12)
+        db.add(make_fin(edinet_code="E00001", industry="情報・通信業",
+                        year=2024, period_end="2024-09-30", period_type="H1",
+                        bs_bps=900.0, pl_eps=45.0, stock_price=1700.0))
+        db.commit()
+
+        records = plugin._load_records(db, None)
+        loaded = {r.edinet_code: r for r in records}
+        assert "E00001" in loaded
+        assert loaded["E00001"].year == 2023
+        assert loaded["E00001"].period_type == "annual"
+
+    def test_explicit_year_also_filters_h1(self, db, make_fin):
+        """year 指定パス（別クエリ）でも H1 を除外する。"""
+        _seed_sector(db, make_fin, n=12)
+        db.add(make_fin(edinet_code="E00001", industry="情報・通信業",
+                        year=2023, period_end="2023-09-30", period_type="H1"))
+        db.commit()
+
+        records = plugin._load_records(db, 2023)
+        assert all(r.period_type == "annual" for r in records)
+        assert len({r.edinet_code for r in records}) == len(records)

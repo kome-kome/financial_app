@@ -327,14 +327,22 @@ class SectorOLSPlugin(AnalysisPlugin):
 
     def _load_records(self, db, year: int | None) -> list:
         from database import FinancialRecord, latest_year_subq
-        subq = latest_year_subq(db, FinancialRecord)
+        # 母集団は **通期（annual）のみ**（#436）。同一 (edinet_code, year) に H1 が
+        # 併存すると同じ企業が2行で回帰に入り、しかも H1 のフロー項目（売上・利益・CF）は
+        # 半期分＝年次の説明変数と次元が揃わない（BS は期末値なので揃う）。
+        # サブクエリ側も絞らないと、H1 だけが新しい年度にある企業で max_year がずれて
+        # annual 行が1行も取れなくなる。
+        subq = latest_year_subq(db, FinancialRecord, period_type="annual")
         query = (
             db.query(FinancialRecord)
+            .filter(FinancialRecord.period_type == "annual")
             .join(subq, (FinancialRecord.edinet_code == subq.c.edinet_code) &
                         (FinancialRecord.year == subq.c.max_year))
         )
         if year:
-            query = db.query(FinancialRecord).filter(FinancialRecord.year == year)
+            query = (db.query(FinancialRecord)
+                     .filter(FinancialRecord.year == year,
+                             FinancialRecord.period_type == "annual"))
         records = query.all()
         if not records:
             raise ValueError("データがありません。先にデータ収集を実行してください。")

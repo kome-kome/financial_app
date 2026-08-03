@@ -102,3 +102,55 @@ class TestStartCollection:
                         json={"years_back": 1, "skip_existing": True})
         log = db_session.get(CollectionLog, r.json()["log_id"])
         assert log.job_type == "incremental"
+
+
+class TestMarketDataUpdate:
+    """/api/collect/market-data は株価テーブル由来の一括反映を呼ぶ（#428）。
+
+    旧実装は stooq へ全社ぶん逐次リクエストしていたが、stooq はクラウド IP から
+    ブロックされ実質動作しない経路だった。収集ワークフローは既に
+    update_market_data_from_history へ一本化されており、GUI もそこへ揃える。
+    """
+
+    def _run_job_body(self, monkeypatch):
+        """jobs.start に渡された body を捕まえて、その場で実行し進捗を返す。"""
+        captured = {}
+
+        def _fake_start(name, background_tasks, body, **kwargs):
+            captured["body"] = body
+
+        monkeypatch.setattr(api.jobs, "start", _fake_start)
+        return captured
+
+    def test_calls_history_based_update(self, monkeypatch):
+        import asyncio
+        import routers.collect as collect_router
+
+        calls = []
+        monkeypatch.setattr(collect_router, "update_market_data_from_history",
+                            lambda db: (calls.append(db) or 42))
+        captured = self._run_job_body(monkeypatch)
+
+        r = client.post("/api/collect/market-data", json={"force": False})
+        assert r.status_code == 200
+
+        progress = []
+        asyncio.run(captured["body"](
+            lambda c, t, m: progress.append(m), lambda: False))
+        assert len(calls) == 1                     # DB 由来の一括更新が1回
+        assert "42社" in progress[-1]
+
+    def test_stooq_path_is_gone(self):
+        """stooq へ現在株価を取りに行く旧関数が復活していないこと。"""
+        import collector
+        import collector_prices
+        assert not hasattr(collector_prices, "update_market_data")
+        assert not hasattr(collector_prices, "fetch_stock_price_stooq")
+        assert not hasattr(collector, "update_market_data")
+
+    def test_legacy_max_companies_is_accepted_and_ignored(self, monkeypatch):
+        """旧クライアントが max_companies を送っても 422 にしない（受理して無視）。"""
+        self._run_job_body(monkeypatch)
+        r = client.post("/api/collect/market-data",
+                        json={"max_companies": 100, "force": False})
+        assert r.status_code == 200

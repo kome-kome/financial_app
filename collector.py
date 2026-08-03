@@ -37,7 +37,9 @@ if __name__ == "__main__":
     parser.add_argument("--years",       type=int, default=5)
     parser.add_argument("--max",         type=int, default=None)
     parser.add_argument("--company",     type=str, default=None)
-    parser.add_argument("--market",      action="store_true", help="市場データのみ更新")
+    parser.add_argument("--market",      action="store_true",
+                        help="株価テーブル（J-Quants/Yahoo 由来）から financial_records の"
+                             "株価・PER/PBR/時価総額を反映する（外部への株価取得はしない）")
     parser.add_argument("--macro",       action="store_true", help="マクロデータのみ収集")
     parser.add_argument("--disclosures", action="store_true", help="会社予想開示（決算短信サマリー）のみ収集")
     parser.add_argument("--interim",     action="store_true", help="半期(H1)財務のみ収集（EDINET 半期報告書・旧四半期Q2・Issue #219②）")
@@ -80,13 +82,15 @@ if __name__ == "__main__":
                 db.close()
         asyncio.run(_refill_machinery())
     elif args.market:
-        async def _market():
-            db = SessionLocal()
-            try:
-                await update_market_data(db, args.max)
-            finally:
-                db.close()
-        asyncio.run(_market())
+        # stock_price_daily/weekly（夜間バッチが J-Quants/Yahoo で蓄積）から反映する。
+        # 旧実装は stooq へ全社ぶん逐次リクエストしていたが、stooq はクラウド IP から
+        # ブロックされるため実質ローカル専用の別経路になっていた（#428 で一本化）。
+        db = SessionLocal()
+        try:
+            n = update_market_data_from_history(db)
+            print(f"financial_records.stock_price: {n}社 更新")
+        finally:
+            db.close()
     elif args.macro:
         async def _run():
             db = SessionLocal()

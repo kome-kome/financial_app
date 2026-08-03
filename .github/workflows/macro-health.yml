@@ -1,0 +1,77 @@
+name: "[定常] マクロ鮮度ゲート"
+
+# 目的（Issue #420）:
+#   collect_macro_data は 1 系列が取れなくても例外を出さず continue するため、部分失敗は
+#   ジョブ exit 0 で通り、#414 のワークフロー失敗通知でも**絶対に拾えない**。マクロは
+#   M-1/M-2/M-3/M-6 すべての入力で、1 系列が静かに欠けると strict の M-1 は学習サンプル
+#   0 件になりうる（#379 の既往）。DB の max(trade_date) を期待更新頻度と突き合わせ、
+#   既定モデルが使う系列が古ければこのジョブだけを failure にして Issue を起票させる。
+#
+# 設計上の注意（触る前に必ず読むこと）:
+#   - **収集パイプライン本体（daily-incremental / full-pipeline）を落とさない**。あちらを
+#     非ゼロ終了させると nightly-scores の workflow_run チェーン（conclusion == 'success'
+#     条件・#432）が発火せず、マクロを一切使わない sector_ols の夜間更新まで巻き添えで
+#     止まる。収集元 A の障害が収集元 B を止めない構造（#425）をワークフロー間にも適用し、
+#     判定だけをこの独立ジョブへ分離している。収集側は同じレポートをログに出すだけ。
+#   - `workflows:` は列挙せず `["**"]`（全マッチ1本）に固定する。GitHub は各要素をフィルタ
+#     パターンとして解釈するため "[定常] …" と角括弧で始まる名前を列挙すると
+#     startup_failure になる（2026-08-02 実測・notify-failure.yml のコメント参照）。
+#     対象の絞り込みは job の if の名前一致で行う。
+#   - workflow_run は **default branch (main) 上のファイルだけ**が実行される。
+#   - 閾値は macro_health.FREQ_STALE_DAYS。誤検知が続くときは EXCLUDED_SERIES へ
+#     理由付きで登録する（黙って外さない＝検知できない欠落を自分で作らないため）。
+
+on:
+  workflow_run:
+    workflows: ["**"]
+    types: [completed]
+  workflow_dispatch:
+
+# 最小権限（判定は Supabase 直結・リポジトリ書込は不要。Issue 起票は notify-failure.yml の担当）
+permissions:
+  contents: read
+
+jobs:
+  check:
+    # 手動 dispatch か、マクロを収集するワークフローが success で終わったときだけ実行する。
+    # 名前一致なので各 yml の name を変えたらここも直す
+    # ＝tests/test_macro_health.py が整合を強制する。
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      ((github.event.workflow_run.name == '[定常] 差分収集・毎日自動実行' ||
+        github.event.workflow_run.name == '[全件] XBRL収集・財務データ全件更新') &&
+       github.event.workflow_run.conclusion == 'success')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10   # macro_data の GROUP BY 集約 1 本のみ
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13.7'  # render.yaml の PYTHON_VERSION と一致させる
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Check macro freshness
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          # 収集対象は API キーの有無で変わる（未設定のグループは判定から外す）。
+          # 収集ジョブと同じキーを渡さないと「収集したのに判定対象外」がずれる。
+          FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
+          ESTAT_API_KEY: ${{ secrets.ESTAT_API_KEY }}
+        run: |
+          set -o pipefail
+          python -m scripts.check_macro_health 2>&1 | tee macro_health.log
+
+      - name: Upload log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: macro-health-log
+          path: macro_health.log
+          retention-days: 30

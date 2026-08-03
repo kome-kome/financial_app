@@ -345,7 +345,10 @@ class ScreenRequest(BaseModel):
 @router.post("/api/screen")
 @api.limiter.limit(api.RATELIMIT_ANALYSIS)
 async def screening(request: Request, req: ScreenRequest, db: Session = Depends(api.get_db)):
-    subq = latest_year_subq(db, FinancialRecord)
+    # max_year は FinancialRecord から取るが、join 先の FinancialMetric VIEW は
+    # period_type='annual' 限定。annual で絞らないと H1 しか持たない新しい年度が
+    # max_year になり、その企業がスクリーニング結果から丸ごと落ちる（#436 と同型）。
+    subq = latest_year_subq(db, FinancialRecord, period_type="annual")
     query = (db.query(FinancialMetric)
                .join(subq, (FinancialMetric.edinet_code == subq.c.edinet_code) &
                            (FinancialMetric.year == subq.c.max_year)))

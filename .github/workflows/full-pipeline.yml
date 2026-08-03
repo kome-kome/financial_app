@@ -60,7 +60,9 @@ jobs:
     needs: collect
     if: ${{ !cancelled() }}   # collect が一部失敗/タイムアウトしても集計は実行
     runs-on: ubuntu-latest
-    timeout-minutes: 330  # Phase3(10分)+Phase4(32分)+Phase5 J-Quants(174分)+update_market_data(〜60分) ≈ 276分。余裕を持って330分
+    # Phase3(10分)+Phase4(32分)+Phase5 Yahoo補完(35〜60分・#426)+J-Quants(174分)
+    # +update_market_data(〜60分) ≈ 311〜336分。GitHub Actions 上限6時間に対し余裕5分。
+    timeout-minutes: 355
 
     steps:
       - name: Checkout
@@ -75,7 +77,7 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Run finalize (成長率/Zスコア/マクロ/市場データ)
+      - name: Run finalize (成長率/Zスコア/マクロ/市場データ=Yahoo鮮度補完→J-Quants)
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           EDINET_API_KEY: ${{ secrets.EDINET_API_KEY }}

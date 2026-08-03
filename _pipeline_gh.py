@@ -10,7 +10,8 @@ SKIP_XBRL_RAW=true（デフォルト）の運用前提:
   --years-back N      収集年数（デフォルト 5）
   --collect-only      Phase 1-2 のみ（XBRL収集）
   --finalize-only     Phase 3-5 のみ（Phase 3=成長率/Zスコアは financial_metrics VIEW が
-                      都度算出のため事前計算なし／Phase 4=マクロ／Phase 5=J-Quants株価）
+                      都度算出のため事前計算なし／Phase 4=マクロ／
+                      Phase 5=Yahoo 鮮度補完→J-Quants株価→financial_records 反映）
   --backfill-yahoo    Phase 6: Yahoo Finance で過去株価をバックフィル
                       （J-Quants カバー外の FY2021〜FY2023 等を補完）
   --refill-cf         Phase 7: CF NULL 補完（capex/net_change_cash を XBRL 再取得で補完）
@@ -30,7 +31,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from collector import (
-    run_full_collection, update_market_data, collect_macro_data, reparse_from_raw,
+    run_full_collection, collect_macro_data, reparse_from_raw,
     collect_stock_price_history_jquants, update_market_data_from_history,
     backfill_historical_stock_prices_yahoo, fill_recent_stock_price_gap_yahoo,
     backfill_weekly_history_yahoo,
@@ -40,6 +41,7 @@ from collector import (
 )
 from database import SessionLocal, init_db
 import _pipeline_utils
+from macro_health import check_macro_freshness, format_report
 
 LOG_FILE = "logs/pipeline_gh.log"
 
@@ -298,27 +300,57 @@ async def main(years_back: int, collect_only: bool = False,
                 on_progress=lambda c, t, m: log(m) if c % 10 == 0 or "完了" in m else None,
             )
             log(f"  マクロデータ {n} 件更新")
+            # 健全性レポート（#420）。collect_macro_data は 1 系列が取れなくても continue する
+            # ため、部分失敗は exit 0 で通り #414 の失敗通知に載らない。その時点の鮮度を
+            # run ログへ残す。非ゼロ終了は独立した macro-health.yml が担う（ここで落とすと
+            # マクロと無関係な Phase 5＝株価鮮度を巻き添えにする・#425）。
+            for line in format_report(check_macro_freshness(db)):
+                log(line)
         finally:
             db.close()
         log(f"[4/5] マクロデータ 完了 ({(time.time()-t0)/60:.1f}分経過)")
 
-        # ─── Phase 5: 市場データ更新（J-Quants 2年分 → stock_price_history → financial_records）
-        # J-Quants 無料プランの最大 JQUANTS_BACKFILL_DAYS 日分を取得。
-        # point_in_time=True で全財務レコードの period_end 近傍株価を設定。
-        # 約 490 営業日 × 20秒 ≈ 163分。timeout-minutes は 240 に設定済み。
-        log(f"[5/5] 市場データ更新 開始（J-Quants days_back={JQUANTS_BACKFILL_DAYS}, point_in_time=True）")
+        # ─── Phase 5: 市場データ更新（Yahoo で鮮度確保 → J-Quants で公式値へ置換 → 反映）
+        # J-Quants 無料プランは直近 84日（12週）を配信しないため、finalize を J-Quants
+        # だけで組むと**全件収集を何度回しても直近12週の株価は1日も前進しない**（#426）。
+        # しかも全件収集中は daily-incremental を止める運用（DEPLOYMENT.md）なので、
+        # その間 Yahoo ギャップ補完＝鮮度の実質唯一の担い手が完全に不在になる。
+        # 差分パイプライン（_pipeline_incremental.py Phase 4）と同じ順序に揃える:
+        #   鮮度担当の Yahoo を先に置き、J-Quants の失敗は握って継続する（#425）。
+        # J-Quants は最大 JQUANTS_BACKFILL_DAYS 日分（約 490 営業日 × 20秒 ≈ 163分）、
+        # Yahoo 補完は約4,000社 ×（YAHOO_STOCK_RATE_SLEEP=0.5秒）で +35〜60分。
+        # point_in_time=True で全財務レコードの period_end 近傍株価を設定する。
+        log(f"[5/5] 市場データ更新 開始（Yahoo 鮮度補完 → J-Quants days_back={JQUANTS_BACKFILL_DAYS} → point_in_time=True 反映）")
         db5 = SessionLocal()
         try:
-            result = await collect_stock_price_history_jquants(
-                db5, days_back=JQUANTS_BACKFILL_DAYS,
-                on_progress=lambda c, t, m: log(m) if c % 10 == 0 or "完了" in m else None,
+            # 鮮度を先に確保する（gap_days=0・起点は銘柄別の最終 trade_date＝#415）。
+            gap_result = await fill_recent_stock_price_gap_yahoo(
+                db5, gap_days=0,
+                on_progress=lambda c, t, m: log(m) if c % 500 == 0 or "完了" in m else None,
             )
-            log(f"  stock_price_history: {result.get('upserted', 0)}件 upsert")
-            if result.get("forbidden"):
-                # 403 はカバレッジ境界の欠測として継続扱い（Issue #412）
-                log(f"  J-Quants 403（カバー範囲外）でスキップ: {result['forbidden']}日")
+            if gap_result.get("skipped"):
+                log(f"  Yahoo Finance gap-fill: スキップ（{gap_result.get('reason')}）")
+            else:
+                log(f"  Yahoo Finance gap-fill: {gap_result.get('upserted', 0)}件 追加"
+                    f"（{gap_result.get('from')} 〜 {gap_result.get('to')}・{gap_result.get('companies')}社）")
+
+            # J-Quants 側の障害（境界403・レート制限等）で鮮度確保と PER/PBR 反映を
+            # 落とさないよう、この呼び出しだけは失敗を握って継続する（#425）。
+            try:
+                result = await collect_stock_price_history_jquants(
+                    db5, days_back=JQUANTS_BACKFILL_DAYS,
+                    on_progress=lambda c, t, m: log(m) if c % 10 == 0 or "完了" in m else None,
+                )
+                log(f"  stock_price_history: {result.get('upserted', 0)}件 upsert")
+                if result.get("forbidden"):
+                    # 403 はカバレッジ境界の欠測として継続扱い（Issue #412）
+                    log(f"  J-Quants 403（カバー範囲外）でスキップ: {result['forbidden']}日"
+                        + ("（全日403＝カバー範囲外）" if result.get("all_forbidden") else ""))
+            except Exception as e:
+                log(f"  J-Quants 株価取得 失敗（継続します）: {type(e).__name__}: {e}")
+
             n_updated = update_market_data_from_history(db5, point_in_time=True)
-            log(f"  financial_records.stock_price: {n_updated}レコード 更新（J-Quants 由来）")
+            log(f"  financial_records.stock_price: {n_updated}レコード 更新")
         finally:
             db5.close()
         log(f"[5/5] 市場データ 完了 ({(time.time()-t0)/60:.1f}分経過)")

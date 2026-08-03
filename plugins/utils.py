@@ -926,6 +926,22 @@ def get_macro_features(
     return result
 
 
+def momentum_cutoffs(ref_date: str, long_months: int = 12,
+                     short_months: int = 1) -> tuple[str, str]:
+    """モメンタム2脚の基準日 `(short_cutoff, long_cutoff)` を返す。
+
+    `get_momentum_return` と、DB 側で必要な2本だけを引く呼び出し側
+    （`recommend.compute_momentum_z`）が同じ境界を使うための単一情報源。
+    ここがズレると「DB から取った行では届かない cutoff」を関数側が要求して
+    静かに欠測が増えるため、定数を二重に持たない。
+    """
+    from datetime import date as _date, timedelta as _td
+
+    ref = _date.fromisoformat(ref_date)
+    return ((ref - _td(days=short_months * 30)).isoformat(),
+            (ref - _td(days=long_months * 30)).isoformat())
+
+
 def get_momentum_return(
     price_rows: list,
     ref_date: str,
@@ -937,15 +953,14 @@ def get_momentum_return(
     log(P_{ref - short_months} / P_{ref - long_months}) を返す。
     price_rows: .trade_date (str "YYYY-MM-DD") と .close (float) を持つオブジェクト列。
     リークなし — ref_date より未来の行は無視する。
-    """
-    from datetime import date as _date, timedelta as _td
 
+    price_rows は「各 cutoff 以下の最終バー」さえ含んでいれば全期間である必要はない
+    （`momentum_cutoffs` で絞った2行だけを渡しても結果は同一）。
+    """
     if not price_rows:
         return None
 
-    ref = _date.fromisoformat(ref_date)
-    short_cutoff = (ref - _td(days=short_months * 30)).isoformat()
-    long_cutoff  = (ref - _td(days=long_months  * 30)).isoformat()
+    short_cutoff, long_cutoff = momentum_cutoffs(ref_date, long_months, short_months)
 
     eligible = [
         (r.trade_date, r.close)
@@ -959,6 +974,13 @@ def get_momentum_return(
     long_cands  = [(d, c) for d, c in eligible if d <= long_cutoff]
 
     if not short_cands or not long_cands:
+        return None
+
+    # 両脚が同一バーに解決されたら測定不能（#430）。株価が止まった銘柄では
+    # short_cutoff / long_cutoff のどちらも同じ最終バーを指し、log(P/P)=0.0 が
+    # 「モメンタム 0 の正常な銘柄」として返る＝呼び出し側（compute_momentum_z）が
+    # winsorize/Zスコアの母集団へ混入させてしまう。0 は測定結果ではなく欠測。
+    if short_cands[-1][0] == long_cands[-1][0]:
         return None
 
     short_price = short_cands[-1][1]

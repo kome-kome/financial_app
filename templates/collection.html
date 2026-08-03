@@ -445,20 +445,16 @@ tr:hover td{background:var(--border-subtle)}
     <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px">
       <div style="width:6px;height:6px;border-radius:50%;background:var(--text-muted)"></div>
       <div style="font-size:14px;font-weight:600;color:var(--text-secondary)">市場データ（株価・バリュエーション）更新</div>
-      <span style="font-size:11px;background:var(--bg-hover);color:var(--text-muted);padding:2px 8px;border-radius:10px;font-weight:500">stooq / APIキー不要</span>
+      <span style="font-size:11px;background:var(--bg-hover);color:var(--text-muted);padding:2px 8px;border-radius:10px;font-weight:500">DB由来 / 外部APIなし</span>
     </div>
     <div class="card" style="border-color:var(--bg-hover)">
       <div style="background:var(--bg-sunken);border-radius:8px;padding:10px 12px;font-size:12px;color:var(--text-muted);border-left:3px solid var(--border-muted);margin-bottom:14px">
-        スクリーニングで使う <strong style="color:var(--text-secondary)">現在株価・PER・PBR・時価総額・配当利回り</strong> を stooq から取得して financial_records に書き込みます。<br>
-        <span style="color:var(--text-muted)">J-Quants（OHLCV履歴）とは別の役割で、このデータは stooq が唯一のソースです。スクリーニング前に実行してください。</span>
+        スクリーニングで使う <strong style="color:var(--text-secondary)">現在株価・PER・PBR・時価総額・配当利回り</strong> を、収集済みの株価テーブル（J-Quants / Yahoo 由来）から financial_records に反映します。<br>
+        <span style="color:var(--text-muted)">外部 API へは接続しません（旧実装の stooq 経路はクラウド IP からブロックされ実質動作しなかったため廃止・#428）。夜間バッチが同じ処理を毎日実行するので、通常は手動実行不要です。</span>
       </div>
           <div class="section-title" style="color:var(--text-muted)">市場データ（株価・バリュエーション）更新</div>
           <div style="font-size:12px;color:var(--text-muted);margin-bottom:14px">
-            stooq.com から現在株価を取得し、PER・PBR・時価総額・配当利回りを計算します。
-          </div>
-          <div class="form-group">
-            <label>最大企業数（空欄=全社）</label>
-            <input type="number" id="mkt-max" placeholder="例: 100（テスト用）">
+            株価テーブルの最新終値で PER・PBR・時価総額・配当利回りを計算します（全社一括・数秒）。
           </div>
           <div class="flex">
             <button class="btn btn-secondary" id="btn-market" data-click="startMarketUpdate">
