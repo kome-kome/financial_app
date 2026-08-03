@@ -148,9 +148,22 @@ class TestVerifier:
         with pytest.raises(VerificationError, match="より古い"):
             _verify_sector_ols(db, future)
 
-    def test_summarize_drops_large_arrays(self):
-        s = _summarize({"n_sectors": 3, "results": [{"a": 1}] * 100, "features_used": ["x"]})
-        assert s == "n_sectors=3"
+    def test_summarize_keeps_scalars_and_short_string_lists(self):
+        """採用特徴量は残し、巨大配列は件数へ畳む（自動ドロップの追跡に必要）。"""
+        s = _summarize({
+            "n_sectors": 3,
+            "features_used": ["pl_eps", "bs_bps"],
+            "results": [{"a": 1}] * 100,
+            "sector_stats": [{"industry": "x"}] * 30,
+        })
+        assert s == "n_sectors=3, features_used=[pl_eps,bs_bps], results(n=100), sector_stats(n=30)"
+
+    def test_summarize_truncates_long_string_lists(self):
+        s = _summarize({"features_used": [f"f{i}" for i in range(21)]})
+        assert s == "features_used(n=21)"
+
+    def test_summarize_handles_empty_result(self):
+        assert _summarize({}) == "(要約できる項目なし)"
 
 
 # ── ワークフロー: 起動条件の不変条件 ────────────────────────────────────────

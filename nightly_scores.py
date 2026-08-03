@@ -79,10 +79,23 @@ VERIFIERS = {
 
 
 def _summarize(result: dict) -> str:
-    """execute の戻り値からスカラー項目だけを拾う（results 等の巨大配列は載せない）。"""
-    return ", ".join(
-        f"{k}={v}" for k, v in result.items() if isinstance(v, (int, float, str, bool))
-    ) or "(スカラー項目なし)"
+    """execute の戻り値をログ1行へ畳む。
+
+    スカラーはそのまま、短い文字列リスト（`features_used` 等）は中身を出す。
+    実際に採用された説明変数は運用上の必須情報で、`sector_ols` の
+    `_select_features` は欠損の多い列を**黙って**自動ドロップするため、
+    ログに残らないと「なぜ対象社数が減ったか」を後から追えない。
+    巨大配列（`results` / `sector_stats`）は件数だけにする。
+    """
+    parts: list[str] = []
+    for k, v in result.items():
+        if isinstance(v, (int, float, str, bool)):
+            parts.append(f"{k}={v}")
+        elif isinstance(v, list) and v and all(isinstance(x, str) for x in v) and len(v) <= 20:
+            parts.append(f"{k}=[{','.join(v)}]")
+        elif isinstance(v, list):
+            parts.append(f"{k}(n={len(v)})")
+    return ", ".join(parts) or "(要約できる項目なし)"
 
 
 async def run_models(models: list[str], db) -> list[dict]:
