@@ -11,6 +11,7 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from database import FinancialRecord
 from plugins import execute_plugin
 from plugins.sector_ols import (
     DB_PER_SHARE_KEYS,
@@ -113,6 +114,28 @@ def _seed_sector(db, make_fin, n=12, industry="情報・通信業"):
             cf_free_cf=8.0e7 + 1.0e7 * i + (i % 4) * 1.5e6,
             stock_price=1500.0 + 100.0 * i + (i % 3) * 50.0,
             market_cap=1000.0 + 200.0 * i + (i % 3) * 50.0,
+        ))
+    db.add_all(recs)
+    db.commit()
+
+
+def _seed_sector2(db, make_fin, n=8, industry="銀行業", n_missing_gp=None, offset=100):
+    """2業種目を投入する。先頭 n_missing_gp 社の pl_gross_profit を NULL にする
+    （既定は全社 NULL＝業種内 100% 欠損。銀行業に売上総利益が存在しない状況の再現）。"""
+    if n_missing_gp is None:
+        n_missing_gp = n
+    recs = []
+    for i in range(1, n + 1):
+        bps_val = 1200.0 + 60.0 * i + (i % 3) * 15.0
+        recs.append(make_fin(
+            edinet_code=f"E{offset + i:05d}", industry=industry,
+            pl_gross_profit=None if i <= n_missing_gp else 6.0e8 + 4.0e7 * i,
+            bs_total_equity=bps_val * (2.0e6 + 1.0e5 * i),
+            bs_bps=bps_val,
+            pl_eps=120.0 + 7.0 * i + (i % 3) * 4.0,
+            dps=30.0 + 3.0 * i,
+            stock_price=2200.0 + 130.0 * i + (i % 3) * 60.0,
+            market_cap=3000.0 + 250.0 * i,
         ))
     db.add_all(recs)
     db.commit()
@@ -253,6 +276,103 @@ class TestExecute:
         res = asyncio.run(execute_plugin(plugin, {}, db))
         # 業種に集計されたサンプル数は bs_bps 有効の 11 社のみ
         assert res["n_total"] == 11
+
+    def test_zero_fill_keeps_no_dividend_companies(self, db, make_fin):
+        """dps NULL（無配）が 0 埋めされ AND フィルタで落ちないこと（Issue #434）。
+
+        XBRL は配当が無いとタグ自体を出さないため、無配（真の0）と未収集が同じ NULL に
+        潰れる。本番実測では dps NULL 662社のうち「実績配当>0 なのに NULL」は1社のみ。
+        """
+        _seed_sector(db, make_fin, n=12)
+        # 12社中3社（25%）を無配にする。業種内欠損率 25% ≤ 既定 0.3 なので
+        # 業種内ドロップは発動せず、0 埋めの有無だけがカバレッジ差になる。
+        for ec in ("E00001", "E00002", "E00003"):
+            db.query(FinancialRecord).filter_by(edinet_code=ec).update({"dps": None})
+        db.commit()
+
+        params = {"features": ["pl_eps", "bs_bps", "dps"], "min_samples": 5}
+        res_on = asyncio.run(execute_plugin(plugin, {**params, "zero_fill_no_dividend": True}, db))
+        assert res_on["n_total"] == 12                      # 無配3社も母集団に残る
+        assert "dps" in res_on["sector_stats"][0]["features"]
+        assert res_on["zero_filled_features"] == ["dps"]
+
+        res_off = asyncio.run(execute_plugin(plugin, {**params, "zero_fill_no_dividend": False}, db))
+        assert res_off["n_total"] == 9                      # 従来挙動: 無配3社は AND で除外
+        assert res_off["zero_filled_features"] == []
+
+    def test_sector_local_feature_drop(self, db, make_fin):
+        """業種内 100% 欠損の列をその業種からのみ外す（銀行業の売上総利益・Issue #434）。
+
+        母集団全体の欠損率は 40% で MAX_FEATURE_MISSING_RATE(50%) に届かないため、
+        全体ドロップでは救えない。業種単位で外すことで業種ごと全滅するのを防ぐ。
+        """
+        _seed_sector(db, make_fin, n=12, industry="情報・通信業")
+        _seed_sector2(db, make_fin, n=8, industry="銀行業", offset=100)
+
+        feats = ["pl_eps", "bs_bps", "ps_gross_profit"]
+        res = asyncio.run(execute_plugin(
+            plugin, {"features": feats, "min_samples": 5}, db))
+
+        stats = {s["industry"]: s for s in res["sector_stats"]}
+        assert set(stats) == {"情報・通信業", "銀行業"}
+        # 銀行業だけ ps_gross_profit が外れ、情報・通信業では残る
+        assert stats["銀行業"]["features"] == ["pl_eps", "bs_bps"]
+        assert "ps_gross_profit" in stats["情報・通信業"]["features"]
+        assert stats["情報・通信業"]["dropped_features"] == []
+        assert [d["feature"] for d in stats["銀行業"]["dropped_features"]] == ["ps_gross_profit"]
+        # 全体ドロップは発動していない（業種内ドロップと混同しないこと）
+        assert res["dropped_features"] == []
+        assert res["n_sectors_with_dropped_features"] == 1
+        assert res["sector_dropped_features"] == ["銀行業:ps_gross_profit"]
+        assert res["n_total"] == 20
+
+    def test_sector_missing_rate_1_disables_rate_drop(self, db, make_fin):
+        """sector_missing_rate=1.0 で率によるドロップが無効になること。
+
+        銀行業 12社中6社（50%）だけ売上総利益が欠損。AND 通過 6社 ≥ min_samples なので
+        貪欲ドロップ（サンプル不足時の救済）は発動せず、率ドロップの有無だけが差になる。
+        """
+        _seed_sector(db, make_fin, n=12, industry="情報・通信業")
+        _seed_sector2(db, make_fin, n=12, industry="銀行業", n_missing_gp=6, offset=100)
+        params = {"features": ["pl_eps", "bs_bps", "ps_gross_profit"], "min_samples": 5}
+
+        res_on = asyncio.run(execute_plugin(plugin, params, db))       # 既定 0.3
+        stats_on = {s["industry"]: s for s in res_on["sector_stats"]}
+        assert stats_on["銀行業"]["n"] == 12                            # 列を外して全社救済
+        assert stats_on["銀行業"]["features"] == ["pl_eps", "bs_bps"]
+
+        res_off = asyncio.run(execute_plugin(
+            plugin, {**params, "sector_missing_rate": 1.0}, db))
+        stats_off = {s["industry"]: s for s in res_off["sector_stats"]}
+        assert stats_off["銀行業"]["n"] == 6                            # 従来挙動: 6社が AND で脱落
+        assert "ps_gross_profit" in stats_off["銀行業"]["features"]
+        assert res_off["n_sectors_with_dropped_features"] == 0
+
+    def test_sector_greedy_drop_survives_rate_disabled(self, db, make_fin):
+        """率ドロップ無効でも、min_samples に届かない業種は貪欲ドロップで救済されること。"""
+        _seed_sector(db, make_fin, n=12, industry="情報・通信業")
+        _seed_sector2(db, make_fin, n=8, industry="銀行業", offset=100)  # 業種内 100% 欠損
+
+        res = asyncio.run(execute_plugin(plugin, {
+            "features": ["pl_eps", "bs_bps", "ps_gross_profit"],
+            "min_samples": 5, "sector_missing_rate": 1.0,
+        }, db))
+        stats = {s["industry"]: s for s in res["sector_stats"]}
+        assert stats["銀行業"]["n"] == 8
+        assert stats["銀行業"]["features"] == ["pl_eps", "bs_bps"]
+
+    def test_resolve_zero_fill_flag(self, make_fin):
+        """_resolve_per_share_value: dps NULL は zero_fill で 0.0 / OFF で None。"""
+        from plugins.sector_ols import ZERO_FILL_FEATURES, _resolve_per_share_value
+
+        assert ZERO_FILL_FEATURES == {"dps"}
+        rec = make_fin(dps=None, pl_eps=None, bs_total_equity=1.0e9, bs_bps=500.0)
+        assert _resolve_per_share_value(rec, "dps", 2.0e6, zero_fill=True) == 0.0
+        assert _resolve_per_share_value(rec, "dps", 2.0e6, zero_fill=False) is None
+        # 0 埋め対象外の列は zero_fill に関わらず None のまま（無配以外へ波及させない）
+        assert _resolve_per_share_value(rec, "pl_eps", 2.0e6, zero_fill=True) is None
+        # 値があればそのまま
+        assert _resolve_per_share_value(rec, "bs_bps", 2.0e6, zero_fill=True) == 500.0
 
     def test_target_default_is_stock_price(self):
         """params_schema の target デフォルトが stock_price であること（market_cap 削除済み）。"""

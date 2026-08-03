@@ -154,6 +154,20 @@ FEATURE_LABELS: dict[str, str] = {o["value"]: o["label"] for o in FEATURE_OPTION
 # 母集団全体での欠損率がしきい値超の列を事前に間引くことでこれを防ぐ。
 MAX_FEATURE_MISSING_RATE = 0.5
 
+# 業種内でこの割合を超えて欠損する説明変数は、その業種の回帰からのみ外す（Issue #434）。
+# 銀行業の「売上総利益 / 売上高」は業種内 100% 欠損（そもそも概念が無い）だが母集団全体では
+# 7.7% / 3.8% に過ぎず MAX_FEATURE_MISSING_RATE では救えない。結果として AND フィルタが
+# 銀行・証券・保険・陸運等を業種ごと全滅させていた。業種別に別の β を推定する本モデルでは
+# 採用列も業種別で構造的に整合する（業種横断で同じ列である必要はない）。
+SECTOR_MAX_FEATURE_MISSING_RATE = 0.3
+
+# 値が NULL のとき「該当なし＝0」とみなす DB永続 per-share 列（Issue #434）。
+# XBRL は配当が無い場合そもそもタグを出さないため、無配（真の 0）と未収集が同じ NULL に潰れる。
+# 本番実測（2026-08-03・dps NULL 662社）を同一年度の FY 開示（statement_disclosure.div_ann）と
+# 突合したところ「実績配当 > 0 なのに dps が NULL」は 1社（0.2%）のみで、残りは真の無配だった。
+# 0 埋めは情報を捨てず（無配という事実が dps=0 として回帰へ入る）、AND フィルタの巻き添えを消す。
+ZERO_FILL_FEATURES: set[str] = {"dps"}
+
 # stock_price ターゲット時のデフォルト10項目
 # PL/BS/CF を網羅しつつ多重共線性を抑える主要指標
 DEFAULT_FEATURES_PRICE = [
@@ -170,17 +184,23 @@ DEFAULT_FEATURES_PRICE = [
 ]
 
 
-def _resolve_per_share_value(record, feat: str, shares: float) -> float | None:
+def _resolve_per_share_value(record, feat: str, shares: float,
+                             zero_fill: bool = True) -> float | None:
     """説明変数キーから per-share[円/株] の値を取得する。
 
     `feat` の種別:
       - DB永続 per-share（pl_eps/bs_bps/dps）: そのまま getattr
       - 派生 per-share（ps_*）: 対応する絶対額カラム ÷ shares
       - 未知キー: None（呼び出し側で record スキップ）
+
+    zero_fill=True のとき ZERO_FILL_FEATURES の NULL は 0.0 として返す
+    （「該当なし」を「未収集」と同じ NULL に潰さない・Issue #434）。
     """
     if feat in DB_PER_SHARE_KEYS:
         v = getattr(record, feat, None)
-        return float(v) if v is not None else None
+        if v is None:
+            return 0.0 if (zero_fill and feat in ZERO_FILL_FEATURES) else None
+        return float(v)
     src = PER_SHARE_DERIVED.get(feat)
     if not src:
         return None
@@ -245,6 +265,30 @@ class SectorOLSPlugin(AnalysisPlugin):
                 "label": "業種最低サンプル数",
                 "default": 5,
                 "min": 5,
+            },
+            "sector_missing_rate": {
+                "type": "number",
+                "dtype": "float",
+                "label": "業種内 欠損率ドロップ閾値（1.0=無効）",
+                "default": SECTOR_MAX_FEATURE_MISSING_RATE,
+                "min": 0.0,
+                "max": 1.0,
+                "description": (
+                    "業種内でこの割合を超えて欠損する説明変数を、その業種の回帰からのみ外す。"
+                    "銀行業の売上総利益のように業種構造上そもそも概念が無い列が、"
+                    "AND フィルタで業種を丸ごと分析対象外にするのを防ぐ。1.0 で率ドロップ無効"
+                    "（ただし min_samples に届かない業種を救う貪欲ドロップは残る）。"
+                ),
+            },
+            "zero_fill_no_dividend": {
+                "type": "checkbox",
+                "label": "配当 NULL を無配（0円/株）とみなす",
+                "default": True,
+                "description": (
+                    "XBRL は配当が無いとタグ自体を出さないため、無配と未収集が同じ NULL に潰れる。"
+                    "ON で dps の NULL を 0 として回帰へ入れる（無配企業が AND フィルタで"
+                    "落ちなくなる）。OFF で従来通り NULL 扱い＝当該企業は分析対象外。"
+                ),
             },
             "year": {
                 "type": "number",
@@ -316,18 +360,29 @@ class SectorOLSPlugin(AnalysisPlugin):
             base.append((r, float(shares), float(y_val)))
         return base
 
+    def _presence_map(self, base: list, features: list,
+                      zero_fill: bool) -> list[tuple[str, set]]:
+        """各企業の (業種, 値が存在する選択列の集合) を前計算する。"""
+        return [
+            (r.industry,
+             {f for f in features
+              if _resolve_per_share_value(r, f, sh, zero_fill) is not None})
+            for (r, sh, _y) in base
+        ]
+
     def _select_features(self, base: list, features: list,
-                         min_samples: int) -> tuple[list, list]:
-        """欠損の多い説明変数を自動ドロップし、採用列集合を返す（AND全滅の根本対策）。
+                         zero_fill: bool = True,
+                         present: list | None = None) -> tuple[list, list]:
+        """母集団全体で欠損率の高い説明変数を一括ドロップし、採用列集合を返す。
 
         _classify_by_sector の AND フィルタは「選択列が1つでも NULL の企業を全除外」
         するため、欠損のある列を重ねるほど全列が揃う企業が積で減り、最終的に 0 業種へ
-        潰れる。これを2段階で防ぐ:
-          段階1: 母集団での欠損率が MAX_FEATURE_MISSING_RATE 超の列を一括ドロップ
-                 （特別損益・社債等の極端に疎な列）。
-          段階2: なお全業種が min_samples 未満なら、欠損最多の列から1つずつ貪欲に
-                 ドロップし、いずれかの業種が min_samples に届くまで繰り返す
-                 （中欠損列の AND 累積による全滅を解消）。
+        潰れる。ここでは母集団での欠損率が MAX_FEATURE_MISSING_RATE 超の列
+        （特別損益・社債等の極端に疎な列）を全業種から一括で外す。
+
+        業種構造上そもそも概念が無い列（銀行業の売上総利益など）は全体欠損率が低く
+        ここでは残るため、業種単位の間引きは _sector_feature_sets が担う（Issue #434）。
+
         (kept_features, dropped_info) を返す。dropped_info は警告表示用の
         [{feature,label,missing,missing_rate}, ...]。
         """
@@ -335,59 +390,85 @@ class SectorOLSPlugin(AnalysisPlugin):
         if n == 0 or not features:
             return list(features), []
 
-        # 各企業の「存在する選択列」集合と、列ごとの欠損数を前計算
-        present: list[tuple[str, set]] = []
-        miss_count: dict[str, int] = {f: 0 for f in features}
-        for (r, sh, _y) in base:
-            s = set()
-            for f in features:
-                if _resolve_per_share_value(r, f, sh) is not None:
-                    s.add(f)
-                else:
-                    miss_count[f] += 1
-            present.append((r.industry, s))
+        if present is None:
+            present = self._presence_map(base, features, zero_fill)
+        miss_count = {f: sum(1 for _ind, s in present if f not in s) for f in features}
 
-        kept = list(features)
-        dropped: list[dict] = []
-
-        def _drop(feat: str) -> None:
-            kept.remove(feat)
-            dropped.append({
-                "feature":      feat,
-                "label":        FEATURE_LABELS.get(feat, feat),
-                "missing":      miss_count[feat],
-                "missing_rate": round(miss_count[feat] / n * 100, 1),
-            })
-
-        def _max_sector_size() -> int:
-            kset = set(kept)
-            counts: dict[str, int] = defaultdict(int)
-            for ind, s in present:
-                if kset <= s:          # kept 列が全て present（=AND を通過）
-                    counts[ind] += 1
-            return max(counts.values(), default=0)
-
-        # 段階1: 欠損率しきい値超を一括ドロップ
-        for f in list(kept):
+        kept, dropped = [], []
+        for f in features:
             if miss_count[f] / n > MAX_FEATURE_MISSING_RATE:
-                _drop(f)
-
-        # 段階2: どの業種も min_samples に届かない間、欠損最多列を貪欲ドロップ
-        while kept and _max_sector_size() < min_samples:
-            worst = max(kept, key=lambda f: miss_count[f])
-            if miss_count[worst] == 0:
-                break  # 残るは欠損ゼロ列のみ＝これ以上は純粋なサンプル不足
-            _drop(worst)
-
+                dropped.append({
+                    "feature":      f,
+                    "label":        FEATURE_LABELS.get(f, f),
+                    "missing":      miss_count[f],
+                    "missing_rate": round(miss_count[f] / n * 100, 1),
+                })
+            else:
+                kept.append(f)
         return kept, dropped
 
-    def _classify_by_sector(self, base: list, features: list) -> dict:
-        """母集団を業種ごとに振り分ける。features が全て揃う企業のみ採用（AND）。"""
+    def _sector_feature_sets(self, present: list, features: list, min_samples: int,
+                             sector_missing_rate: float) -> tuple[dict, dict]:
+        """業種ごとの採用列を決める（Issue #434）。
+
+        業種内欠損率が sector_missing_rate 超の列をその業種からのみ外す。
+        銀行業の売上総利益（業種内 100% 欠損）のように、業種構造上そもそも存在しない
+        列が AND フィルタで業種を丸ごと全滅させるのを防ぐ。なお min_samples に届かない
+        業種は、欠損最多列から1つずつ貪欲にドロップして届くか試す（中欠損列の AND 累積
+        による全滅を解消）。
+
+        (features_by_sector, dropped_by_sector) を返す。値はどちらも業種名キーの dict。
+        """
+        by_sector_present: dict[str, list[set]] = defaultdict(list)
+        for ind, s in present:
+            by_sector_present[ind].append(s)
+
+        features_by_sector: dict[str, list] = {}
+        dropped_by_sector: dict[str, list] = {}
+        for ind, sets in by_sector_present.items():
+            m = len(sets)
+            miss = {f: sum(1 for s in sets if f not in s) for f in features}
+            kept, dropped = [], []
+
+            def _drop(f: str) -> None:
+                dropped.append({
+                    "feature":      f,
+                    "label":        FEATURE_LABELS.get(f, f),
+                    "missing":      miss[f],
+                    "missing_rate": round(miss[f] / m * 100, 1),
+                })
+
+            for f in features:
+                if miss[f] / m > sector_missing_rate:
+                    _drop(f)
+                else:
+                    kept.append(f)
+
+            # 貪欲ドロップ: AND 通過数が min_samples 未満の間、欠損最多列を外す
+            while kept and sum(1 for s in sets if set(kept) <= s) < min_samples:
+                worst = max(kept, key=lambda f: miss[f])
+                if miss[worst] == 0:
+                    break  # 残るは欠損ゼロ列のみ＝これ以上は純粋なサンプル不足
+                kept.remove(worst)
+                _drop(worst)
+
+            features_by_sector[ind] = kept
+            dropped_by_sector[ind] = dropped
+        return features_by_sector, dropped_by_sector
+
+    def _classify_by_sector(self, base: list, features, zero_fill: bool = True) -> dict:
+        """母集団を業種ごとに振り分ける。features が全て揃う企業のみ採用（AND）。
+
+        features はリスト（全業種共通）か、業種名 → 列リストの dict（業種別採用列）。
+        """
         by_sector: dict[str, list] = defaultdict(list)
         for (r, shares, y_val) in base:
+            feats = features.get(r.industry) if isinstance(features, dict) else features
+            if not feats:
+                continue
             row, ok = [], True
-            for feat in features:
-                v = _resolve_per_share_value(r, feat, shares)
+            for feat in feats:
+                v = _resolve_per_share_value(r, feat, shares, zero_fill)
                 if v is None:
                     ok = False
                     break
@@ -531,12 +612,14 @@ class SectorOLSPlugin(AnalysisPlugin):
         return stat_entry
 
     def execute(self, params: dict, db: Any) -> dict:
-        target           = params["target"]
-        features         = params["features"]
-        min_samples      = params["min_samples"]
-        regularization   = params["regularization"]
-        year             = params["year"]
-        shrink_threshold = params["shrink_threshold"]
+        target              = params["target"]
+        features            = params["features"]
+        min_samples         = params["min_samples"]
+        regularization      = params["regularization"]
+        year                = params["year"]
+        shrink_threshold    = params["shrink_threshold"]
+        sector_missing_rate = params["sector_missing_rate"]
+        zero_fill           = params["zero_fill_no_dividend"]
 
         if not features:
             raise ValueError("説明変数を1つ以上選択してください")
@@ -544,8 +627,10 @@ class SectorOLSPlugin(AnalysisPlugin):
         records = self._load_records(db, year)
         base    = self._eligible_base(records, target)
         # 欠損率が高い説明変数を自動ドロップ（1項目の NULL で全社除外される事故を防ぐ）。
-        # 以降の features は採用列のみを指す。
-        features, dropped_features = self._select_features(base, features, min_samples)
+        # 段階1（全業種一括）→ 段階2（業種内）の順。以降の features は段階1の採用列を指す。
+        present = self._presence_map(base, features, zero_fill)
+        features, dropped_features = self._select_features(
+            base, features, zero_fill, present=present)
         if not features:
             raise ValueError(
                 f"選択した説明変数はすべて欠損率が高く（>{int(MAX_FEATURE_MISSING_RATE * 100)}%）"
@@ -554,13 +639,19 @@ class SectorOLSPlugin(AnalysisPlugin):
                 + "）。EPS・BPS・売上高・総資産など欠損の少ない項目を選択してください。"
             )
 
-        by_sector = self._classify_by_sector(base, features)
+        present = [(ind, s & set(features)) for ind, s in present]
+        features_by_sector, dropped_by_sector = self._sector_feature_sets(
+            present, features, min_samples, sector_missing_rate)
+        by_sector = self._classify_by_sector(base, features_by_sector, zero_fill)
 
-        # 部分プーリング: 薄業種の係数安定化のため全社プール OLS を事前フィット
+        # 部分プーリング: 薄業種の係数安定化のため全社プール OLS を事前フィット。
+        # 業種別に採用列が違うと行ベクトルの次元が揃わないため、プール側は段階1採用列
+        # （全業種共通）で別途組み直す。予測値は [円/株] なので業種予測とブレンド可能。
         global_pred_map: dict = {}
         if shrink_threshold > 0:
+            pool_by_sector = self._classify_by_sector(base, features, zero_fill)
             all_eligible = [
-                s for _, samples in by_sector.items()
+                s for _, samples in pool_by_sector.items()
                 if len(samples) >= min_samples
                 for s in samples
             ]
@@ -578,7 +669,9 @@ class SectorOLSPlugin(AnalysisPlugin):
                 n_skipped += 1
                 continue
 
-            X_norm, y_normed, y_mu, y_sd, X_win_cols, _ = self._preprocess_sector(samples, features)
+            sector_features = features_by_sector[sector]
+            X_norm, y_normed, y_mu, y_sd, X_win_cols, _ = self._preprocess_sector(
+                samples, sector_features)
             result, all_yhat = self._fit_and_predict(X_norm, y_normed, y_mu, y_sd, regularization)
             if result is None:
                 n_skipped += 1
@@ -595,8 +688,11 @@ class SectorOLSPlugin(AnalysisPlugin):
 
             sector_preds = self._persist_and_rank(db, sector, samples, all_yhat, regularization)
             stat_entry   = self._build_stat_entry(
-                sector, samples, result, y_sd, X_norm, y_normed, features, regularization, X_win_cols
+                sector, samples, result, y_sd, X_norm, y_normed, sector_features,
+                regularization, X_win_cols
             )
+            stat_entry["features"] = list(sector_features)
+            stat_entry["dropped_features"] = dropped_by_sector.get(sector, [])
             all_predictions.extend(sector_preds)
             sector_stats.append(stat_entry)
 
@@ -612,12 +708,26 @@ class SectorOLSPlugin(AnalysisPlugin):
 
         sector_stats.sort(key=lambda s: s["r2"], reverse=True)
 
+        # 業種別ドロップの要約（採用業種のみ）。運用ログ・UI 警告で「なぜその業種の
+        # 説明変数が減ったか」を追えるようにする（黙って落とすと原因追跡不能・#432 の教訓）。
+        used_sectors = {s["industry"] for s in sector_stats}
+        sector_dropped_summary = sorted(
+            (
+                f"{sec}:{'/'.join(d['feature'] for d in drops)}"
+                for sec, drops in dropped_by_sector.items()
+                if drops and sec in used_sectors
+            )
+        )
+
         return {
             "n_sectors":         len(sector_stats),
             "n_total":           sum(s["n"] for s in sector_stats),
             "n_skipped_sectors": n_skipped,
             "features_used":     features,
             "dropped_features":  dropped_features,
+            "sector_dropped_features": sector_dropped_summary,
+            "n_sectors_with_dropped_features": len(sector_dropped_summary),
+            "zero_filled_features": sorted(ZERO_FILL_FEATURES & set(features)) if zero_fill else [],
             "sector_stats":      sector_stats,
             "results":           all_predictions,
             "shrink_threshold":  shrink_threshold,

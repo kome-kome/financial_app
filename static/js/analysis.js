@@ -1451,6 +1451,13 @@ function renderSectorOls(data) {
       ${data.dropped_features.map(f => `${esc(f.label)}（NULL ${Number(f.missing_rate)}% / ${Number(f.missing)}社）`).join('、')}
     </div>`;
   }
+  // 業種内欠損で外した説明変数の要約（業種ごとに採用列が違うことを明示・#434）
+  if (Number(data.n_sectors_with_dropped_features) > 0) {
+    html += `<div style="margin-bottom:12px;padding:8px 12px;border-left:3px solid ${cssVar('--accent')};background:rgba(124,58,237,0.08);font-size:12px;color:${cssVar('--text-muted')}">
+      業種内の欠損が多く、その業種の回帰からのみ外した説明変数（${Number(data.n_sectors_with_dropped_features)}業種）。
+      業種ごとに別の β を推定するモデルのため、採用列も業種別になります（例: 銀行業に売上総利益は存在しない）。
+    </div>`;
+  }
   // sector_stats サマリーを先に描画
   if (Array.isArray(data.sector_stats) && data.sector_stats.length) {
     html += `<div style="margin-bottom:16px">
@@ -1458,11 +1465,16 @@ function renderSectorOls(data) {
         業種別 R² サマリー（${Number(data.n_sectors||0)}業種 / ${Number(data.n_total||0)}社 / スキップ ${Number(data.n_skipped_sectors||0)}業種）
       </div>
       <div style="overflow-x:auto"><table>
-        <thead><tr><th>業種</th><th>社数</th><th>R²</th><th>調整済みR²</th></tr></thead>
+        <thead><tr><th>業種</th><th>社数</th><th>R²</th><th>調整済みR²</th><th>業種内で除外した説明変数</th></tr></thead>
         <tbody>${data.sector_stats.map(s => `<tr>
           <td>${esc(s.industry)}</td><td>${Number(s.n)}</td>
           <td class="${s.r2 > 0.3 ? 'text-green' : s.r2 >= 0 ? '' : 'text-red'}">${Number(s.r2)}</td>
           <td>${Number(s.adj_r2)}</td>
+          <td style="font-size:11px;color:var(--text-muted)">${
+            (s.dropped_features || []).length
+              ? esc(s.dropped_features.map(d => `${d.label}（${Number(d.missing_rate)}%）`).join('、'))
+              : '—'
+          }</td>
         </tr>`).join('')}</tbody>
       </table></div>
     </div>`;
