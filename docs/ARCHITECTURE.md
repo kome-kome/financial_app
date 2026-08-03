@@ -170,6 +170,16 @@ graph TD
 >   `is_active.isnot(False)` で対象を絞るが、**backtest はフィルタしない**
 >   （as-of の start_date 時点の候補を「現在」の上場状態で絞ると生存者バイアスを逆向きに
 >   持ち込むため）。sell_ranking はユーザー入力の保有銘柄が対象のため除外せず情報表示のみ。
+>
+> **producer/consumer 系の補助テーブル**: `macro_beta_meta`/`macro_beta_loadings`（ADR-0002・
+> `macro_beta_inference.py` が月次バッチで書き込み、`plugins/macro_risk_return.py` が読む）、
+> `recommend_factor_premia`（ADR-0008・`recommend_factor_premia.py` が書き込み、
+> `plugins/recommend.py::resolve_weights()` が「統計的最適化」プリセットとして読む）、
+> `plugin_tuned_params`（ADR-0007・`hyperparameter_search.py` が書き込み、
+> `GET /api/plugins/{name}/tuned` が読む）は、いずれも「重い推論/探索バッチが結果だけを
+> 永続化し、軽量なAPI/プラグインが読む」producer/consumer 分離パターン（`regression_results`
+> と同型）。`statement_disclosure`（Issue #322・`collector_disclosures.py` が J-Quants
+> `/fins/summary` から蓄積する生データ）は `feature_disclosure.py` が特徴量化して読む。
 
 ```mermaid
 erDiagram
@@ -287,6 +297,49 @@ erDiagram
         datetime created_at      "計算日時"
     }
 
+    macro_beta_meta {
+        int      id               PK "自動採番ID"
+        string   run_id           UK "推論ランID（UNIQUE）"
+        string   snapshot_date        "推論実行日 YYYY-MM-DD"
+        json     selected_factors     "選択された共有マクロ因子（pooled BIC・ADR-0002）"
+        json     factor_cov           "因子共分散Σ_macro（R_macro算出用）"
+        json     hyperparams          "推論ハイパラ（draws/tune/target_accept等・収束診断含む）"
+        datetime created_at           "登録日時"
+    }
+
+    macro_beta_loadings {
+        int      id             PK "自動採番ID"
+        string   run_id             "推論ランID（macro_beta_meta と対応・FK的関係）"
+        string   edinet_code        "企業（インデックス）"
+        string   factor_name        "マクロ因子名 or \"_intercept\"（銘柄切片）"
+        float    loading_mean       "事後平均β（μ=intercept+Σβ_f·macro_f の係数・ADR-0002）"
+        float    loading_se         "事後SE（R1'確実性軸の素）"
+        datetime created_at         "登録日時"
+    }
+
+    recommend_factor_premia {
+        int      id             PK "自動採番ID"
+        string   run_id             "算出ランID"
+        string   factor_name        "recommend.METRICS の1つ（z_roe等）"
+        float    mean_b             "期間別β_tの時系列平均（Fama-MacBeth・ADR-0008）"
+        float    newey_west_se      "Newey-West補正済みSE"
+        float    t_stat             "t値"
+        float    p_value            "p値"
+        int      n_periods          "回帰に使った有効期間数"
+        datetime computed_at        "計算日時"
+    }
+
+    plugin_tuned_params {
+        string   plugin_name    PK "プラグイン名（M-1/M-2/M-3等・最新1件のみ）"
+        json     params_json        "自動調整済みベストパラメータ（execute にそのまま渡せる形・ADR-0007）"
+        string   objective_name     "目的関数（rank_ic/ic_ir/long_short）"
+        float    objective_value    "目的関数の達成値（品質ゲート判定用・Issue #291）"
+        json     leaderboard_json   "上位20件の探索結果（肥大化防止）"
+        int      n_combos           "探索した候補数"
+        string   data_fingerprint   "探索データのハッシュ（鮮度警告用）"
+        datetime tuned_at           "調整実行日時"
+    }
+
     stock_price_daily {
         string  edinet_code  PK "企業への紐付け（PK1）"
         string  trade_date   PK "取引日 YYYY-MM-DD（PK2）"
@@ -347,11 +400,48 @@ erDiagram
         datetime fetched_at         "raw保存日時"
     }
 
+    statement_disclosure {
+        string  disc_no      PK "DiscNo（J-Quants開示番号・グローバルに一意）"
+        string  edinet_code  FK "企業への紐付け"
+        string  sec_code         "証券コード"
+        string  disc_date        "DiscDate YYYY-MM-DD（point-in-timeキー）"
+        string  disc_time        "DiscTime HH:MM:SS"
+        string  doc_type          "DocType（FYFinancialStatements_Consolidated_IFRS等）"
+        string  cur_per_type      "当期区分 FY/1Q/2Q/3Q"
+        string  cur_per_st        "当期開始日"
+        string  cur_per_en        "当期終了日"
+        string  cur_fy_st         "当期年度開始日"
+        string  cur_fy_en         "当期年度終了日"
+        string  nxt_fy_st         "翌期年度開始日"
+        string  nxt_fy_en         "翌期年度終了日"
+        float   sales             "実績 売上高"
+        float   op                "実績 営業利益"
+        float   odp               "実績 経常利益（IFRS採用企業は概念なしで空）"
+        float   np                "実績 純利益"
+        float   eps               "実績 EPS"
+        float   deps              "実績 潜在調整後EPS"
+        float   div_ann           "実績 年間配当"
+        float   f_sales           "当期予想 売上高"
+        float   f_op              "当期予想 営業利益"
+        float   f_odp             "当期予想 経常利益"
+        float   f_np              "当期予想 純利益"
+        float   f_eps             "当期予想 EPS"
+        float   f_div_ann         "当期予想 年間配当"
+        float   nxf_sales         "翌期予想 売上高"
+        float   nxf_op            "翌期予想 営業利益"
+        float   nxf_odp           "翌期予想 経常利益"
+        float   nxf_np            "翌期予想 純利益"
+        float   nxf_eps           "翌期予想 EPS"
+        datetime created_at       "登録日時"
+    }
+
     companies         ||--o{  financial_records    : "1社 → 複数年度の財務データ"
     companies         ||--o{  stock_price_daily    : "1社 → 直近6か月の日次終値"
     companies         ||--o{  stock_price_weekly   : "1社 → 全履歴の週次終値"
+    companies         ||--o{  statement_disclosure : "1社 → 複数回の会社予想開示"
     xbrl_raw_documents }o--|| financial_records   : "doc_id で紐付け（再解析用）"
     financial_records ||--o| regression_results  : "(edinet_code,year,period_end) で1対0..1"
+    macro_beta_meta    ||--o{ macro_beta_loadings  : "1推論ラン(run_id) → 複数因子ローディング"
 ```
 
 > **`financial_metrics`（VIEW・物理テーブルではない）**: `financial_records` をソースに、
