@@ -1,0 +1,73 @@
+name: "[定常] 夜間スコア更新（sector_ols）"
+
+# 目的（Issue #432・親 #423）:
+#   朝は「読むだけ」にするため、夜のうちに producer を回して結果を永続化する。
+#   現状 regression_results（gap_ratio）を更新する自動経路が1本も無く、実測で
+#   computed_at が 33〜36 日前だった。gap_ratio はバランス型プリセットの既定重みに
+#   入っており、ユーザーが毎朝必ず踏むパス。
+#
+# 設計上の注意（触る前に必ず読むこと）:
+#   - 起動は daily-incremental の workflow_run チェーン。**success のときだけ**回す。
+#     株価が前進していない日にスコアだけ更新すると、古い株価由来の値が「今日の
+#     ランキング」として出てしまう（#423 の依存関係にある通り、鮮度が先）。
+#   - `workflows:` は列挙せず `["**"]`（全マッチ1本）に固定する。GitHub は各要素を
+#     フィルタパターンとして解釈するため、"[定常] …" と角括弧で始まる名前を列挙すると
+#     startup_failure になる（2026-08-02 実測・notify-failure.yml のコメント参照）。
+#     対象の絞り込みは job の if の名前一致で行う。
+#   - workflow_run は **default branch (main) 上のファイルだけ**が実行される。
+#     feature ブランチでチェーンの実火は検証できない＝main 反映後に確認する。
+#   - `tee` を使うステップは `set -o pipefail` を必ず置く。パイプすると exit code が
+#     tee 側で上書きされ、失敗が success に化ける（Issue #352 の実例）。
+
+on:
+  workflow_run:
+    workflows: ["**"]
+    types: [completed]
+  workflow_dispatch:
+
+# 最小権限（永続化は Supabase 直結・リポジトリ書込は不要）
+permissions:
+  contents: read
+
+jobs:
+  scores:
+    # 手動 dispatch か、daily-incremental が success で終わったときだけ実行する。
+    # 名前一致なので daily-incremental.yml の name を変えたらここも直す
+    # ＝tests/test_nightly_scores.py が整合を強制する。
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.name == '[定常] 差分収集・毎日自動実行' &&
+      github.event.workflow_run.conclusion == 'success')
+    runs-on: ubuntu-latest
+    # sector_ols は最新年度のみ（約4,000社・業種33）の行列回帰で軽いが、GitHub Actions の
+    # ホスト型ランナーは実質2コアでローカル実測より伸びる（tune-hyperparameters.yml の
+    # 既存コメントと同じ理由）。初回実走の実測で見直す。
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13.7'  # render.yaml の PYTHON_VERSION と一致させる
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run nightly scores
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          set -o pipefail
+          python nightly_scores.py 2>&1 | tee nightly_scores.log
+
+      - name: Upload log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-scores-log
+          path: nightly_scores.log
+          retention-days: 30
