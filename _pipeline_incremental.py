@@ -19,6 +19,7 @@ from collector import (
 )
 from database import SessionLocal, init_db
 import _pipeline_utils
+from macro_health import check_macro_freshness, format_report
 
 LOG_FILE = "logs/pipeline_incremental.log"
 
@@ -72,6 +73,16 @@ async def main():
             label="マクロデータ収集",
         )
         log(f"  マクロデータ {n} 件更新")
+
+        # 健全性レポート（#420）: collect_macro_data は 1 系列が取れなくても continue する
+        # ため、部分失敗は exit 0 で通り #414 の失敗通知にも載らない。その時点の鮮度を
+        # run ログへ残しておく（後から「いつ欠け始めたか」を遡れるようにする）。
+        # **ここでは非ゼロ終了しない**。マクロの不調でこのジョブを failure にすると、
+        # マクロを一切使わない sector_ols の夜間更新（nightly-scores の workflow_run
+        # チェーンは conclusion=success 条件・#432）まで巻き添えで止まるため。
+        # 終了コードによる通知は独立した macro-health.yml が担う。
+        for line in format_report(check_macro_freshness(db)):
+            log(line)
     finally:
         db.close()
     log(f"[3/4] マクロデータ 完了 ({(time.time()-t0)/60:.1f}分経過)")

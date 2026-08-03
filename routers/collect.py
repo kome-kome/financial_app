@@ -4,6 +4,7 @@
 共有状態（jobs, limiter, RATELIMIT_* 等）は import api 経由で参照し、
 テストの monkeypatch.setattr(api, ...) と互換性を保つ。
 """
+import asyncio
 import logging
 import httpx
 from datetime import datetime, timezone
@@ -20,7 +21,7 @@ from database import (
     StockPriceWeekly, StockPriceDaily,
 )
 from collector import (
-    run_full_collection, refresh_company, update_market_data,
+    run_full_collection, refresh_company, update_market_data_from_history,
     collect_stock_price_history, collect_stock_price_history_jquants,
     update_industry_from_jpx, collect_macro_data, reparse_from_raw,
 )
@@ -59,6 +60,8 @@ class MacroCollectRequest(BaseModel):
     force:      bool = False
 
 class MarketDataRequest(BaseModel):
+    # max_companies は #428 で廃止（株価テーブル由来の一括更新に一本化し、社数で
+    # 絞る意味が無くなった）。旧クライアントが送っても 422 にしないため受理して無視する。
     max_companies: Optional[int] = None
     force: bool = False
 
@@ -250,11 +253,22 @@ async def start_market_data_update(
     background_tasks: BackgroundTasks,
 ):
     async def body(on_progress, cancel_check):
-        db = SessionLocal()
-        try:
-            await update_market_data(db, req.max_companies, on_progress=on_progress, cancel_check=cancel_check)
-        finally:
-            db.close()
+        # 株価テーブル（J-Quants/Yahoo で夜間に蓄積）から financial_records へ反映する。
+        # 旧実装は stooq へ全社ぶん逐次リクエストしていたが、stooq はクラウド IP から
+        # ブロックされる（GitHub Actions=Azure で 403 実証済み）ため実質動かない経路だった
+        # ＝収集ワークフローは既に update_market_data_from_history へ一本化済み（#428）。
+        # 同期関数なので to_thread でオフロードする（イベントループを塞ぐと SSE の
+        # 進捗配信が完了までハングする）。Session はスレッド内で開閉する。
+        def _run() -> int:
+            db = SessionLocal()
+            try:
+                return update_market_data_from_history(db)
+            finally:
+                db.close()
+
+        on_progress(0, 1, "[市場データ] 株価テーブルから最新株価・PER/PBR/時価総額を反映中…")
+        n = await asyncio.to_thread(_run)
+        on_progress(1, 1, f"[完了] {n}社の株価・バリュエーション指標を更新しました")
     api.jobs.start("market", background_tasks, body,
                    busy_message="市場データ更新ジョブが既に実行中です", force=req.force,
                    error_message="[エラー] 市場データ更新中に問題が発生しました（詳細はサーバーログを確認）")

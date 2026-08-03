@@ -87,30 +87,58 @@ def compute_momentum_z(db: Any, edinet_codes: list, as_of_date: str) -> dict:
     チャンクで行う（Issue #418）。下限は week_start（PK の第2列）へ掛けることで
     (edinet_code, week_start) 複合インデックスの範囲スキャンになる。trade_date は
     nullable かつ非インデックス列なので、上限側（リークガード）だけに使う。
+
+    **転送するのは各社2行だけ**（各 cutoff 以下の最終バー・Issue #423 子3）。全期間を
+    引いていた頃は約4,000社 × 約57週 ≈ 23万行を毎回転送し、本番実測で `/api/recommend`
+    が 37.9秒＝**Render の 30秒リクエスト上限を超えていた**（z_momentum を外すと 3.65秒
+    だったため犯人はここと特定）。`get_momentum_return` は「cutoff 以下の最終バー」しか
+    見ないので、行を絞っても結果は変わらない（両脚が同一バーなら None を返す #430 の
+    ガードもそのまま効く）。Supabase の Egress 節約にもなる。
     """
     if not edinet_codes:
         return {}
     from datetime import date as _date, timedelta as _td
+    from sqlalchemy import func as _sqla_func
     from database import StockPriceWeekly, iso_week_start
-    from .utils import get_momentum_return, winsorize, normalize_transform
+    from .utils import (get_momentum_return, momentum_cutoffs, winsorize,
+                        normalize_transform)
 
     week_from = iso_week_start(
         (_date.fromisoformat(as_of_date) - _td(days=_MOMENTUM_LOOKBACK_DAYS)).isoformat())
+    short_cutoff, long_cutoff = momentum_cutoffs(as_of_date)
     codes = list(edinet_codes)
     price_rows_by_ec = defaultdict(list)
-    for i in range(0, len(codes), _MOMENTUM_CODE_BATCH):
-        chunk = codes[i:i + _MOMENTUM_CODE_BATCH]
-        rows = (
+
+    def _latest_before(chunk: list, cutoff: str) -> list:
+        """chunk 各社について trade_date <= cutoff の最終バー1本を返す。"""
+        rn = _sqla_func.row_number().over(
+            partition_by=StockPriceWeekly.edinet_code,
+            order_by=StockPriceWeekly.trade_date.desc(),
+        ).label("rn")
+        sub = (
             db.query(StockPriceWeekly.edinet_code, StockPriceWeekly.trade_date,
-                     StockPriceWeekly.close_last)
+                     StockPriceWeekly.close_last, rn)
               .filter(StockPriceWeekly.edinet_code.in_(chunk),
                       StockPriceWeekly.week_start >= week_from,
-                      StockPriceWeekly.trade_date <= as_of_date)
-              .order_by(StockPriceWeekly.edinet_code, StockPriceWeekly.trade_date)
-              .all()
+                      StockPriceWeekly.trade_date <= cutoff,
+                      StockPriceWeekly.close_last.isnot(None),
+                      StockPriceWeekly.close_last > 0)
+              .subquery()
         )
-        for ec, td, cl in rows:
-            price_rows_by_ec[ec].append(_MomentumPX(td, cl))
+        return db.query(sub.c.edinet_code, sub.c.trade_date, sub.c.close_last) \
+                 .filter(sub.c.rn == 1).all()
+
+    for i in range(0, len(codes), _MOMENTUM_CODE_BATCH):
+        chunk = codes[i:i + _MOMENTUM_CODE_BATCH]
+        seen = set()
+        # long → short の順に積む（get_momentum_return は昇順を前提にしないが、
+        # 同一バーが両脚に解決されるケースを重複させないため集合で弾く）
+        for cutoff in (long_cutoff, short_cutoff):
+            for ec, td, cl in _latest_before(chunk, cutoff):
+                if (ec, td) in seen:
+                    continue
+                seen.add((ec, td))
+                price_rows_by_ec[ec].append(_MomentumPX(td, cl))
 
     raw = {}
     for ec, price_rows in price_rows_by_ec.items():

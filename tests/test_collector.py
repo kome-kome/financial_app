@@ -29,7 +29,6 @@ from collector import (
     df_to_raw_rows,
     fetch_doc_list,
     fetch_stock_history_stooq,
-    fetch_stock_price_stooq,
     fetch_xbrl_csv,
     parse_raw_rows,
     parse_xbrl_csv,
@@ -558,26 +557,6 @@ class TestFetchXbrlCsv:
     def test_bad_zip_returns_none(self):
         client = _client(_const(httpx.Response(200, content=b"this is not a zip")))
         assert asyncio.run(fetch_xbrl_csv(client, "S100ABCD")) is None
-
-
-class TestFetchStockPriceStooq:
-    def test_parses_close(self):
-        csv = "Symbol,Date,Time,Open,High,Low,Close,Volume\n7203.JP,2023-09-01,22:00:00,2000,2050,1990,2025,1000000\n"
-        client = _client(_const(httpx.Response(200, text=csv)))
-        assert asyncio.run(fetch_stock_price_stooq("7203", client)) == 2025.0
-
-    def test_short_seccode_returns_none(self):
-        client = _client(_const(httpx.Response(200, text="x")))
-        assert asyncio.run(fetch_stock_price_stooq("12", client)) is None
-
-    def test_nonpositive_close_returns_none(self):
-        csv = "Symbol,Date,Time,Open,High,Low,Close,Volume\n7203.JP,2023-09-01,22:00:00,0,0,0,0,0\n"
-        client = _client(_const(httpx.Response(200, text=csv)))
-        assert asyncio.run(fetch_stock_price_stooq("7203", client)) is None
-
-    def test_malformed_returns_none(self):
-        client = _client(_const(httpx.Response(200, text="only-header-no-data")))
-        assert asyncio.run(fetch_stock_price_stooq("7203", client)) is None
 
 
 class TestFetchStockHistoryStooq:

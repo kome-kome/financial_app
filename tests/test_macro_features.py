@@ -329,6 +329,29 @@ class TestGetMomentumReturn:
         val = get_momentum_return(rows, ref.isoformat())
         assert val is None  # long_cands が空になるはず
 
+    def test_stalled_price_returns_none_not_zero(self):
+        """最終バーが long_cutoff より古い（株価停止）銘柄は 0.0 でなく None（#430）。
+
+        両脚が同一バーに解決されると log(P/P)=0.0 が返り、呼び出し側からは
+        「モメンタム 0 の正常な銘柄」と区別できないまま Zスコアの母集団へ混入する。
+        """
+        ref = date(2026, 8, 2)
+        rows = [
+            _make_price_row((ref - timedelta(days=500)).isoformat(), 1000.0),
+            _make_price_row((ref - timedelta(days=380)).isoformat(), 1100.0),  # 最終バー
+        ]
+        assert get_momentum_return(rows, ref.isoformat()) is None
+
+    def test_genuinely_flat_price_still_returns_zero(self):
+        """値動きが無いだけ（両脚は別バー）なら 0.0 を返す＝欠測扱いにしない。"""
+        ref = date(2026, 8, 2)
+        rows = [
+            _make_price_row((ref - timedelta(days=365)).isoformat(), 1000.0),
+            _make_price_row((ref - timedelta(days=30)).isoformat(),  1000.0),
+        ]
+        val = get_momentum_return(rows, ref.isoformat())
+        assert val is not None and abs(val) < 1e-12
+
     def test_log_return_formula(self):
         """算出値が log(short/long) と一致するか厳密に確認。"""
         ref = date(2025, 6, 1)

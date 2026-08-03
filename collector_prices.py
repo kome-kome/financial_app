@@ -29,30 +29,6 @@ from database import (
 from collector_utils import *
 
 
-async def fetch_stock_price_stooq(sec_code: str, client: httpx.AsyncClient) -> Optional[float]:
-    """stooqから日本株の現在株価（終値）を取得する"""
-    if not sec_code or len(sec_code) < 4:
-        return None
-    ticker = f"{sec_code}.jp"
-    url = f"https://stooq.com/q/l/?s={ticker}&f=sd2t2ohlcv&h&e=csv"
-    try:
-        r = await client.get(url, timeout=15)
-        r.raise_for_status()
-        lines = r.text.strip().split("\n")
-        if len(lines) < 2:
-            return None
-        # 形式: Symbol,Date,Time,Open,High,Low,Close,Volume
-        values = lines[1].split(",")
-        if len(values) < 7:
-            return None
-        close = values[6].strip()
-        price = float(close)
-        return price if price > 0 else None
-    except Exception as e:
-        log.debug(f"株価取得失敗 {sec_code}: {e}")
-        return None
-
-
 def _stooq_float(s: str) -> float | None:
     """stooq CSV セルを float 化。パース不能なら None（欠損許容経路用）。"""
     try:
@@ -632,9 +608,15 @@ def _update_market_data_point_in_time(db) -> int:
     # weekly 行だけを取得する（全件メモリ展開を回避）。
     all_records = db.query(FinancialRecord).all()
 
-    # 最新レコード（year最大）を社別にインデックス（最後の上書きステップで使用）
+    # 最新レコード（year最大）を社別にインデックス（最後の上書きステップで使用）。
+    # 対象は **annual のみ**（#421）。H1 を混ぜると同一 year で先着順に決まってしまい、
+    # 現在株価の上書きが H1 行へ吸われて annual の per/pbr が凍結する
+    # （`financial_metrics` VIEW は period_type='annual' しか見ない）。
+    # なお近傍探索そのものは H1 行にも適用する（下の dated_records は絞らない）。
     latest_by_ec: dict = {}
     for rec in all_records:
+        if rec.period_type != "annual":
+            continue
         ec = rec.edinet_code
         if ec not in latest_by_ec or (rec.year or 0) > (latest_by_ec[ec].year or 0):
             latest_by_ec[ec] = rec
@@ -1067,11 +1049,19 @@ def _apply_price_to_record(rec, price: float) -> None:
 
 
 def _fetch_latest_fin_by_ec(db, edinet_codes: list) -> dict:
-    """各社の最新 FinancialRecord を1クエリで取得して {edinet_code: record} を返す。
+    """各社の最新 **通期（annual）** FinancialRecord を1クエリで取得して
+    {edinet_code: record} を返す。
 
     ROW_NUMBER() OVER (PARTITION BY edinet_code ORDER BY year DESC, period_end DESC)
     で最新行を確定するため、同一 year・複数 period_end が存在しても安全。
-    N+1 クエリの代替として update_market_data 系関数で使用。
+    N+1 クエリの代替として update_market_data_from_history から使用。
+
+    `period_type == 'annual'` で絞るのは、株価・per/pbr/market_cap の書き込み先を
+    `financial_metrics` VIEW（`WHERE fr.period_type = 'annual'`）と揃えるため（#421）。
+    絞らないと同一 year に H1 が併存する社で period_end の新しい H1 行が「最新」に
+    選ばれ、更新が H1 へ吸われて **annual 行の per/pbr が凍結する**（VIEW は H1 を
+    見ないので画面上は「古い株価のまま」に見える）。H1 の period_end が annual を
+    追い越すケースは #424 子1（H1 の定期収集）で増えるため、先に塞いでおく。
     """
     if not edinet_codes:
         return {}
@@ -1082,6 +1072,7 @@ def _fetch_latest_fin_by_ec(db, edinet_codes: list) -> dict:
     subq = (
         db.query(FinancialRecord.id, rn)
         .filter(FinancialRecord.edinet_code.in_(edinet_codes))
+        .filter(FinancialRecord.period_type == "annual")
         .subquery()
     )
     return {
@@ -1090,75 +1081,6 @@ def _fetch_latest_fin_by_ec(db, edinet_codes: list) -> dict:
         .join(subq, (FinancialRecord.id == subq.c.id) & (subq.c.rn == 1))
         .all()
     }
-
-
-async def update_market_data(db,
-                             max_companies: Optional[int] = None,
-                             on_progress: Optional[Callable] = None,
-                             cancel_check: Optional[Callable] = None):
-    """
-    全企業の最新財務レコードに株価・バリュエーション指標を書き込む。
-    株価: stooq API
-    time市価総額: stock_price × (bs_total_equity / bs_bps)
-    PER: stock_price / pl_eps
-    PBR: stock_price / bs_bps
-    """
-    companies = (db.query(Company)
-                 .filter(Company.sec_code.isnot(None))
-                 .filter(Company.sec_code != "")
-                 .all())
-    if max_companies:
-        companies = companies[:max_companies]
-
-    total = len(companies)
-    updated = 0
-    log.info(f"市場データ更新開始: {total}社")
-
-    latest_fin_by_ec = _fetch_latest_fin_by_ec(db, [c.edinet_code for c in companies])
-
-    sem = asyncio.Semaphore(STOOQ_CONCURRENCY)
-
-    async def _fetch_price(company, client):
-        async with sem:
-            price = await fetch_stock_price_stooq(company.sec_code, client)
-        return company, price
-
-    async with httpx.AsyncClient(timeout=60) as client:
-        tasks = [asyncio.ensure_future(_fetch_price(c, client)) for c in companies]
-        completed = 0
-        for coro in asyncio.as_completed(tasks):
-            if cancel_check and cancel_check():
-                for t in tasks:
-                    t.cancel()
-                if on_progress:
-                    on_progress(completed, total,
-                                f"[停止] ユーザーによる停止（{completed}/{total}社処理済み）")
-                db.commit()
-                log.info(f"市場データ更新をキャンセルしました（{completed}/{total}社処理済み）")
-                return True
-
-            company, price = await coro
-            completed += 1
-            if on_progress:
-                on_progress(completed, total,
-                            f"[{completed}/{total}] 株価取得: {company.sec_code} {company.name}")
-
-            if price is None:
-                continue
-
-            latest = latest_fin_by_ec.get(company.edinet_code)
-            if not latest:
-                continue
-
-            _apply_price_to_record(latest, price)
-            updated += 1
-            if updated % MARKET_COMMIT_BATCH == 0:
-                db.commit()
-                log.info(f"市場データ更新中: {updated}社完了")
-
-    db.commit()
-    log.info(f"市場データ更新完了: {updated}/{total}社")
-    return False
 
 
 # ── マクロデータ（為替・金利・指数・コモディティ）─────────────────────────

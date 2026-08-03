@@ -183,7 +183,7 @@ from database import (
     CollectionLog, StockPriceDaily, StockPriceWeekly, MacroData,
     prices_on_or_after, latest_prices, latest_year_subq,
 )
-from collector import run_full_collection, refresh_company, update_market_data, collect_stock_price_history, collect_stock_price_history_jquants, update_industry_from_jpx, collect_macro_data, MACRO_SERIES, reparse_from_raw
+from collector import run_full_collection, refresh_company, collect_stock_price_history, collect_stock_price_history_jquants, update_industry_from_jpx, collect_macro_data, MACRO_SERIES, reparse_from_raw
 from collection_jobs import jobs
 import backtest
 import serializers
@@ -457,11 +457,13 @@ from routers import collect as _r_collect
 from routers import market  as _r_market
 from routers import analysis as _r_analysis
 from routers import auth     as _r_auth
+from routers import morning  as _r_morning
 
 app.include_router(_r_collect.router)
 app.include_router(_r_market.router)
 app.include_router(_r_analysis.router)
 app.include_router(_r_auth.router)
+app.include_router(_r_morning.router)
 
 
 # ── システム情報・HTML ページ配信 ──────────────────────────────────────────
@@ -483,6 +485,11 @@ _NO_CACHE = {"Cache-Control": "no-cache, no-store, must-revalidate"}
 @app.get("/")
 async def serve_dashboard():
     return FileResponse(BASE_DIR / "templates" / "dashboard.html", headers=_NO_CACHE)
+
+@app.get("/morning")
+async def serve_morning():
+    """朝の推奨（読むだけ・Issue #423 子3）。計算は夜間バッチ側にあり本ページは表示のみ。"""
+    return FileResponse(BASE_DIR / "templates" / "morning.html", headers=_NO_CACHE)
 
 @app.get("/collection")
 async def serve_collection():

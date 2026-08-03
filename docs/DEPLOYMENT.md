@@ -17,7 +17,7 @@ Render の制約と運用形態に合わせて設計すること。
 | **自動（毎日・チェーン）** | 夜間スコア更新（`sector_ols` → `regression_results`） | `daily-incremental` が **success** で終わった直後（`workflow_run`） | GitHub Actions `nightly-scores.yml` |
 | **自動（毎月）** | M-1/M-2/M-3 ハイパーパラメータ探索・永続化 | UTC 03:00（JST 12:00）毎月1日 | GitHub Actions `tune-hyperparameters.yml` |
 | **自動（毎月）** | M-1 per-stock 階層マクロβ推論・永続化（producer） | UTC 11:00（JST 20:00）毎月1日 | GitHub Actions `macro-beta-inference.yml` |
-| **自動（毎週）** | `stock_price_daily` の VACUUM FULL（index bloat 対策） | UTC 19:00・土（JST 04:00・日） | GitHub Actions `vacuum-maintenance.yml` |
+| **自動（毎週）** | `stock_price_daily` の VACUUM FULL（index bloat 対策） | UTC 22:00・土（JST 07:00・日） | GitHub Actions `vacuum-maintenance.yml` |
 | **手動のみ** | 全件収集（全社 × 5年分） | workflow_dispatch で起動 | GitHub Actions `full-pipeline.yml` |
 | **手動のみ** | マクロのみ収集（為替・金利等） | workflow_dispatch で起動 | GitHub Actions `collect-macro.yml` |
 | **手動のみ** | 会社予想開示収集（J-Quants /fins/summary） | workflow_dispatch で起動 | GitHub Actions `collect-disclosures.yml` |
@@ -35,7 +35,7 @@ Render の制約と運用形態に合わせて設計すること。
 | カテゴリ | workflow 名 | ファイル | 使うタイミング | 所要時間の目安 |
 |---|---|---|---|---|
 | `[CI]` | pytest 自動テスト | `ci.yml` | PR・main push で自動実行（手動起動不要） | 〜1分 |
-| `[定常]` | 差分収集・毎日自動実行 | `daily-incremental.yml` | 毎日 JST 03:00 に自動。手動で即時更新したい場合は `workflow_dispatch` | 5〜15分 |
+| `[定常]` | 差分収集・毎日自動実行 | `daily-incremental.yml` | 毎日 JST 03:00 に自動。手動で即時更新したい場合は `workflow_dispatch` | **2h05m〜2h38m**（2026-08-02 実測） |
 | `[全件]` | XBRL収集・財務データ全件更新 | `full-pipeline.yml` | DB初期構築時・全社バックフィル必要時（`daily-incremental` を `.disabled` に退避して同時実行回避） | 200〜240分 |
 | `[補完]` | マクロのみ収集 | `collect-macro.yml` | `MACRO_SERIES`（為替・金利・指数・コモディティ・ボラ）を Yahoo から収集。新規系列追加や macro_data の鮮度補完。`workflow_dispatch`（years 既定5）。**新系列のバックフィルは years=6 で起動**（yoy は1年+30日で足りるが、将来 zscore 版追加時に再バックフィル不要な余裕幅。#358 コモディティ8系列追加時の運用） | 〜数分 |
 | `[推論]` | M-1 per-stock 階層マクロβ推論（producer） | `macro-beta-inference.yml` | ADR-0002 の PyMC 階層ベイズ推論バッチ（`macro_beta_inference.py`）→ `macro_beta_loadings`/`macro_beta_meta` へ永続化（M-1 `macro_risk_return` が consumer）。本番 `requirements.txt` ではなく `requirements-inference.txt`（+PyMC）を使用。**毎月1日 UTC 11:00（JST 20:00）自動**（Issue #341・鮮度が人力任せで滞留した反省。`tune`(UTC 03:00〜)・`daily-incremental`(UTC 18:00〜)と非重複の時間帯）。手動即時実行は `workflow_dispatch`（draws/tune/target_accept/chains/r_hat_threshold/force 指定可・既定 800/800/0.95/2/1.05/false）。**収束ゲートは `--r-hat-threshold` で可変化**（Issue #341）＝ADR-0002 strict 基準は 1.01 だが、chains=2 では r_hat が構造的に ~1.02 で頭打ち（実 persist 済み 2026-07-04 run も r_hat_max=1.02・n_divergences=0）のため cron 既定を 1.05 とし、構造的 ~1.02 は自動 persist しつつ真の未収束（r_hat が 1.05 を大きく超過）は persist せず失敗させる。閾値を緩めても足りない例外運用時のみ `force=true` | 本番規模で最大 340分（`timeout-minutes: 340`・numpyro で実測 10.5〜11.2秒/draw。ローカル検証: 4銘柄合成データ・draws/tune=50・chains=2・g++無しの Python フォールバックで約8分） |
@@ -43,9 +43,10 @@ Render の制約と運用形態に合わせて設計すること。
 | `[定常]` | M-1/M-2/M-3 ハイパーパラメータ月次自動探索 | `tune-hyperparameters.yml` | `hyperparameter_search.py`（Issue #264/#278/#291）を matrix strategy で3モデル並列実行し `plugin_tuned_params` へ永続化（Issue #292）。`macro_risk_return`/`macro_dlm` は `--strategy grid`、`macro_gbdt` は `--strategy random --n-iter 150`（6時間上限に収める設計判断）。共通 `--objective rank_ic --persist --persist-scores --seed 0`。品質ゲート（#291）でスコア劣化時は該当ジョブが failed 終了（意図した挙動）。毎月1日 UTC 03:00（JST 12:00）自動。手動即時実行は `workflow_dispatch` | macro_risk_return/macro_dlm: 10〜60分、macro_gbdt: 4〜8時間相当を n_iter=150 で圧縮（timeout-minutes: 355） |
 | `[補完]` | 半期(H1)財務収集 | `collect-interim.yml` | EDINET 半期報告書（043A00/docType160）と旧四半期報告書（043000/docType140）の Q2(中間=H1累計)を収集し `financial_records` に `period_type='H1'` で保存（Issue #219② フェーズB）。通期収集とは独立・常に差分（収集済み doc_id をスキップ）。`workflow_dispatch`（years_back 既定6＝既存通期窓に整合）。240分に収まらない場合は years_back を分割 | 数時間（過去6年・事前選別でQ1/Q3を除外し概ね1社1半期1DL） |
 | `[推論]` | recommend Fama-MacBeth ファクタープレミアム推定（producer） | `recommend-factor-premia.yml` | `recommend_factor_premia.py --persist`（Issue #271/#342・ADR-0008）を実行し、月次断面 OLS（Fama & MacBeth 1973・Newey-West HAC）で推定したファクタープレミアムを `recommend_factor_premia` テーブルへ永続化（`plugins.recommend.resolve_weights()` が「統計的最適化」プリセットとして読む consumer）。依存は `requirements.txt` で充足（PyMC 不要）。**当面 `workflow_dispatch` のみ**（cron 要否は別途判断・Issue #342）。`min_companies_per_period`（既定30）・`maxlags`（既定11）指定可。MCMC のような収束ゲートは無し（断面 OLS は決定的） | 未計測（`timeout-minutes: 120`。週次株価 build_snapshots ロード＋月次断面 OLS。計算自体は MCMC より遥かに軽量） |
+| `[定常]` | マクロ鮮度ゲート | `macro-health.yml` | `python -m scripts.check_macro_health`（Issue #420）が `macro_data` の系列別 `max(trade_date)` を期待更新頻度（`macro_health.FREQ_STALE_DAYS`）と突き合わせ、**既定モデルが使う系列**（`DEFAULT_MACRO_FEATURES` から逆引き）が古ければ exit 2 → `notify-failure` が Issue 起票。`collect_macro_data` は 1 系列失敗しても `continue` するため部分失敗が exit 0 で通り、#414 の失敗通知では拾えないのを塞ぐ。**収集本体（`daily-incremental` / `full-pipeline`）を落とさず独立ジョブに分離しているのが要点**——あちらを failure にすると `nightly-scores` の `workflow_run` チェーン（`success` 条件）が発火せず、マクロと無関係な `sector_ols` の夜間更新まで巻き添えで止まる（#425 の構造をワークフロー間へ適用）。収集側は同じレポートを run ログに出すだけ。誤検知が続く系列は `macro_health.EXCLUDED_SERIES` へ**理由付きで**登録する（現在: `JP_IP`＝FRED 凍結 #253／`JP10Y`＝Yahoo ^JGB 廃止／`BCOM`＝Yahoo 配信停止 #438） | 〜2分（GROUP BY 集約1本・`timeout-minutes: 10`） |
 | `[定常]` | ワークフロー失敗の自動 Issue 起票 | `notify-failure.yml` | 上記ワークフロー（`ci.yml` を除く全本数・列挙しない設計）＋セルフテストが `failure` または `cancelled` で終わると自動起票（`workflow_run`）。手動起動しない。詳細は下記「ワークフロー失敗の通知」節 | 〜1分 |
 | `[検証]` | notify-failure セルフテスト | `notify-failure-selftest.yml` | `notify-failure.yml` の変更後に発火を実証するための、意図的に失敗するだけのワークフロー（本番データ不使用）。`workflow_dispatch`（`mode=fail`／`mode=cancel`） | 〜1分（cancel は約1分） |
-| `[定常]` | DBメンテナンス（VACUUM FULL・週次） | `vacuum-maintenance.yml` | `stock_price_daily` の DELETE ベース trim による index bloat 対策（Issue #290）。`_pipeline_vacuum.py` が AUTOCOMMIT 接続で `VACUUM FULL stock_price_daily` を実行、前後の容量をログ出力。毎週 UTC 19:00・土（JST 04:00・日）自動。手動即時実行は `workflow_dispatch`（ローカル・GitHub Actions 双方で Supabase pooler 経由の正常動作を確認済み・2026-07-12） | 数秒〜数分（対象テーブルは実測 ~50MB・42万行） |
+| `[定常]` | DBメンテナンス（VACUUM FULL・週次） | `vacuum-maintenance.yml` | `stock_price_daily` の DELETE ベース trim による index bloat 対策（Issue #290）。`_pipeline_vacuum.py` が AUTOCOMMIT 接続で `VACUUM FULL stock_price_daily` を実行、前後の容量をログ出力。毎週 UTC 22:00・土（JST 07:00・日）自動。手動即時実行は `workflow_dispatch`（ローカル・GitHub Actions 双方で Supabase pooler 経由の正常動作を確認済み・2026-07-12）。**時間帯は #427 で JST 04:00 → 07:00 へ移動**——差分収集（JST 03:00 開始・実測 2h05m〜2h38m）の最中に `VACUUM FULL`（ACCESS EXCLUSIVE ロック）が走っており、ずらす設計意図が成立していなかった。現行チェーンは 03:00 収集 → 最長 05:40 → nightly-scores 約16分 → 06:00 頃完了 | 数秒〜数分（対象テーブルは実測 ~50MB・42万行） |
 
 #### アーカイブ済み（`.github/workflows/old/` 配下・一回性・Actions 対象外）
 
@@ -100,12 +101,12 @@ gh workflow run notify-failure-selftest.yml -f mode=cancel   # timeout 打ち切
 ### daily-incremental の動作詳細
 
 毎日 UTC 18:00 に自動起動する `_pipeline_incremental.py` は:
-1. EDINET API で「60日以内の提出書類」を取得し、未収集書類のみ XBRL 収集・DB保存
+1. EDINET API の書類一覧を **前年1月1日〜前日**の全日スキャンで取得し（`years_back=1`・`collector_financials.py` Phase 3）、未収集 `doc_id` のみ XBRL 収集・DB保存。「60日以内」は旧実装の記述で実態と乖離していた（#422）
 2. 株価更新（Phase 4）: **①Yahoo Finance が銘柄ごとに `その社の最終日+1 〜 today` をギャップ補完**（`fill_recent_stock_price_gap_yahoo`）→ **②J-Quants catchup（`today-90`〜`today-80`）で Yahoo 暫定値を公式値へ置換** → ③`update_market_data_from_history`。<br>**J-Quants 無料は直近84日（12週）を配信しない**ため、旧実装の `days_back=14` はエンバーゴ内で構造的に常に0件かつ全日403となり、中断ガードを誤発火させて Yahoo 補完まで巻き添えで止めていた（#419 / #425）。撤去済み。鮮度を担う Yahoo を先に置き、J-Quants catchup の失敗は握って継続する（片方の収集元の障害がもう片方を止めない）。鮮度はこの Yahoo 補完が担う（J-Quants 制約表の「配信遅延」行を参照）。<br>起点は**銘柄別**（Issue #415）。全社横断の最大日を1つ選んで全社へ適用すると、一部銘柄だけ先行して復旧した場合に遅延銘柄の欠測が永久に埋まらない（2026-07 に発生。2銘柄が 07-31 / 3,677銘柄が 07-13 の状態で 14営業日分が穴のまま残った）。起点は daily 保持窓（`DAILY_WINDOW_DAYS`）でクリップし、それ以前は `backfill-weekly.yml` の管轄とする
 3. 成長率・Zスコアを再計算
-4. 所要時間: 約 5〜15分（差分量による）
+4. 所要時間: **2h05m〜2h38m**（2026-08-02 の success run 2本で実測。大半は EDINET 全日スキャンと Yahoo ギャップ補完の逐次リクエスト。`timeout-minutes: 360`）
 
-> **注（運用パターン）**: 全件収集（`full-pipeline.yml`）を回している間は、Supabase 接続上限での同時実行を避けるため、本ワークフローを一時的に `daily-incremental.yml.disabled` へリネームして停止する（例: コミット `4764d96`「全件収集中の同時実行回避」）。全件収集が終わったら `.yml` に戻して再有効化する。**現在ファイル名が `.disabled` の場合は自動の定時収集が止まっている状態**なので、UI / 手動収集で補う。
+> **注（運用パターン）**: 全件収集（`full-pipeline.yml`）を回している間は、Supabase 接続上限での同時実行を避けるため、本ワークフローを一時的に `daily-incremental.yml.disabled` へリネームして停止する（例: コミット `4764d96`「全件収集中の同時実行回避」）。全件収集が終わったら `.yml` に戻して再有効化する。**現在ファイル名が `.disabled` の場合は自動の定時収集が止まっている状態**なので、UI / 手動収集で補う。<br>停止中の株価鮮度は `full-pipeline` の finalize（Phase 5）が同じ Yahoo ギャップ補完を持つため、全件収集の完了時点で追いつく（#426）。それでも collect フェーズ中（実測 約4時間）は前進しない点は変わらない。
 >
 > **✅ cron 再開済み（2026-06-22〜）**: dual-table 移行後の `workflow_dispatch` 手動実行で Yahoo ギャップ補完・J-Quants 株価取得が GitHub Actions（Azure IP）から正常動作することを確認 → `on.schedule` を有効化。UTC 18:00（JST 03:00）に毎日起動する。
 >
@@ -264,16 +265,16 @@ Render ダッシュボードで管理。
 
 | 項目 | 制約値 | 設計への影響 |
 |---|---|---|
-| 月間利用上限 | **2,000 分/月**（パブリックリポジトリは無制限） | 通常運用は Private。上限到達時は一時的に Public 化し、翌月1日のリセット後に Private 復帰 |
+| 月間利用上限 | **無制限**（本リポジトリは **PUBLIC**・2026-08-03 に `gh repo view --json isPrivate` → `false` で実測） | **分数は制約ではない**（#422）。Private 無料枠 2,000 分だったら `daily-incremental` の実測 2h05m〜2h38m/日 ≈ **4,500分/月** で足りず、そもそも現行運用が回らない。「分数が足りないから夜間バッチを増やせない」という誤った制約認識で方式選定しないこと。真の制約は下記「1ジョブの最大実行時間」と Supabase の Egress 5GB/月 |
 | 1ジョブの最大実行時間 | **6時間（360分）** | 長時間処理は各ジョブを6時間枠内に収める |
 | 同時実行数 | **20並列**（`max-parallel: 1` で逐次化） | full-pipeline は逐次実行。並列化すると Supabase 接続数上限に当たる |
 | Runner の IP | **Azure クラウド IP** | stooq: 完全ブロック。Yahoo Finance: GitHub Actions からは動作。J-Quants / EDINET: 動作 |
 | Artifact 保存期間 | `retention-days: 7` に統一 | — |
 
-**Private ↔ Public 切替**: 通常は Private。月 2,000 分を使い切ったら Public 化 → Actions 実行 → 翌月1日リセット後に Private 復帰（GitHub UI → `Settings → Danger Zone → Change repository visibility`）。secrets は可視性と独立して保護されるため切替時の操作不要。
+**可視性**: 現在 **PUBLIC**（Actions 分数は無制限）。Private へ戻すと無料枠 2,000 分/月に収まらず定常運用が破綻する（上表参照）ため、戻す判断をする場合はワークフローの本数・頻度の再設計とセットで行う。secrets は可視性と独立して保護される。
 
 **ジョブ所要時間（設計参考値）**:
-- `full-pipeline.yml` finalize（Phase 3〜5）: **200分前後**（`timeout-minutes: 240`）。内訳 = 成長率/Zスコア再計算 約2分 ／ マクロ13系列 約27分→系列数に概ね比例（#218 で 9→13・#358 でコモディティ+8＝市場系21系列・要再計測。Yahoo 市場系は1コール/系列のため増分は数十秒で低頻度ソースの sleep が主因は不変） ／ J-Quants 株価（`JQUANTS_BACKFILL_DAYS=730`）約163〜200分。`JQUANTS_BACKFILL_DAYS` 変更時は再計算。
+- `full-pipeline.yml` finalize（Phase 3〜5）: **250〜300分**（`timeout-minutes: 355`）。内訳 = 成長率/Zスコア再計算 約2分 ／ マクロ13系列 約27分→系列数に概ね比例（#218 で 9→13・#358 でコモディティ+8＝市場系21系列・要再計測。Yahoo 市場系は1コール/系列のため増分は数十秒で低頻度ソースの sleep が主因は不変） ／ **Yahoo ギャップ補完 35〜60分（#426 で追加・約4,000社 × `YAHOO_STOCK_RATE_SLEEP=0.5秒`）** ／ J-Quants 株価（`JQUANTS_BACKFILL_DAYS=730`）約163〜200分。`JQUANTS_BACKFILL_DAYS` 変更時は再計算。
 - `backfill-stock-history.yml`: 対象＝stock_price NULL かつ period_end 730日超前（初回 約3,800社）。`YAHOO_STOCK_RATE_SLEEP=0.5秒`・1社1リクエストで **約60〜90分**（`timeout-minutes: 150`）。
 - `backfill-weekly-history.yml`（#198）: 対象＝`stock_price_weekly` の最古日が `today-years` より新しい社。`backfill_weekly_history_yahoo` が Yahoo から過去方向に取得し、**1社ごとに `record_prices_batch(trim=True)`** で daily→weekly 再集約しつつ daily を都度 trim する（5年×全社の daily 同時展開を避け Supabase 500MB を超えない）。`YAHOO_STOCK_RATE_SLEEP=0.5秒`で **約60〜150分**（`timeout-minutes: 150`）。
 
@@ -368,7 +369,7 @@ Supabase 無料プランは **1週間アクセスなしで自動停止**する�
 |---|---|---|
 | レート制限 | **約5リクエスト/60秒** | `JQUANTS_RATE_SLEEP = 20.0` 秒間隔を維持 |
 | 取得可能期間（過去側） | **過去2年分** | `days_back ≤ 730`。UI の選択肢もこれに合わせること |
-| **配信遅延（直近側）** | **直近約12週間は配信されない** | 無料プランは株価を**約12週遅れ**で配信。`today − 12週` より新しい日付は空レスポンスになり、J-Quants だけでは鮮度がここで頭打ちになる（例: 2026-06-10 時点の最新は ≈2026-03-17）。**直近12週の鮮度は Yahoo Finance ギャップ補完（`fill_recent_stock_price_gap_yahoo`）で埋める**。この補完を持つのは差分パイプライン（`_pipeline_incremental.py` Phase 4）のみで、手動 `full-pipeline` の finalize は J-Quants のみ＝12週境界で止まる点に注意 |
+| **配信遅延（直近側）** | **直近約12週間は配信されない** | 無料プランは株価を**約12週遅れ**で配信。`today − 12週` より新しい日付は空レスポンスになり、J-Quants だけでは鮮度がここで頭打ちになる（例: 2026-06-10 時点の最新は ≈2026-03-17）。**直近12週の鮮度は Yahoo Finance ギャップ補完（`fill_recent_stock_price_gap_yahoo`）で埋める**。差分パイプライン（`_pipeline_incremental.py` Phase 4）に加え、**`full-pipeline` の finalize（`_pipeline_gh.py` Phase 5）も #426 で同じ順序（Yahoo → J-Quants → `update_market_data_from_history`）を持つ**。以前は finalize が J-Quants のみで、全件収集を回しても直近12週の株価が1日も前進しなかった |
 | 429 リトライ | 指数バックオフ禁止 | 429 発生時は **90秒待機→1回のみ再試行**。失敗したら skip |
 | 営業日データのみ | 土日祝は空レスポンス | 空レスポンスを skip として扱う |
 | **カバレッジ境界の 403**（#412 / #425） | 過去側の実効境界（730日前付近）も直近84日エンバーゴ内も 400 ではなく **403** を返す | 403 は `JQuantsCoverageError` として送出し、**日付ループ側で欠測扱い（warning ログ）＋継続**。例外を伝播させると `days_back=730` の初日で必ず落ち、finalize 全体が異常終了する。<br>**全日程403でも例外は投げない**（#425）: `log.error` ＋ 戻り値 `all_forbidden: True` で返し、呼び出し側が継続可否を決める。J-Quants の失敗が、同じキーに依存しない Yahoo ギャップ補完まで巻き添えで止めるのを防ぐため |

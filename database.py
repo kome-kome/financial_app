@@ -1980,22 +1980,30 @@ def upsert_financial(db, data: dict) -> FinancialRecord:
 # （計算結果と生データのDB分離）。算出ロジックは FINANCIAL_METRICS_VIEW_SQL を参照。
 
 
-def latest_year_subq(db, model):
+def latest_year_subq(db, model, period_type: str | None = None):
     """企業ごとの最新年度レコードを1行に絞るサブクエリを返す。
 
     model には FinancialRecord または FinancialMetric を渡す。
     用途: 最新年度のみを対象にするクエリで join に利用する。
 
+    period_type を渡すとその期種（'annual' / 'H1'）だけで max(year) を取る。
+    `financial_records` は同一 (edinet_code, year) に annual と H1 を持ちうるため
+    （Issue #219②）、annual 前提の下流（`financial_metrics` VIEW は
+    `period_type='annual'` 限定）へ渡すサブクエリは必ず 'annual' で絞ること。
+    絞らないと H1 しか持たない新しい年度が max_year に選ばれ、その企業の annual 行が
+    join から丸ごと落ちる／annual と H1 が二重計上される（Issue #436・#421）。
+    period_type を持たないモデル（FinancialMetric＝VIEW 側で既に annual 限定）へ
+    渡すと AttributeError で落ちる＝黙って無視しない（fail fast）。
+
     例:
-        subq = latest_year_subq(db, FinancialRecord)
+        subq = latest_year_subq(db, FinancialRecord, period_type="annual")
         rows = db.query(FinancialRecord).join(
             subq,
             (FinancialRecord.edinet_code == subq.c.edinet_code) &
             (FinancialRecord.year == subq.c.max_year)
         ).all()
     """
-    return (
-        db.query(model.edinet_code, func.max(model.year).label("max_year"))
-        .group_by(model.edinet_code)
-        .subquery()
-    )
+    q = db.query(model.edinet_code, func.max(model.year).label("max_year"))
+    if period_type is not None:
+        q = q.filter(model.period_type == period_type)
+    return q.group_by(model.edinet_code).subquery()

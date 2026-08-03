@@ -230,3 +230,39 @@ class TestUpdateMarketDataPointInTimeNearest:
         assert rec1.stock_price == 1500.0      # 各社が自社 period_end 近傍で独立にマッチ
         assert rec2.stock_price == 2500.0
         assert n == 2
+
+
+class TestPeriodTypeIsolation:
+    """annual と H1 が同居する社で、株価・per/pbr の更新が annual へ入ること（#421）。
+
+    `financial_metrics` VIEW は `period_type='annual'` 限定なので、更新が H1 行へ
+    吸われると画面上は「annual の per/pbr が凍結」に見える。H1 の period_end が
+    annual を追い越すケースは #424 子1（H1 の定期収集）で増える。
+    """
+
+    def test_latest_price_goes_to_annual_not_h1(self, db, make_fin, make_price):
+        annual = make_fin(year=2026, period_end="2026-03-31", bs_bps=1000.0)
+        h1 = make_fin(year=2026, period_end="2026-09-30", period_type="H1", bs_bps=1000.0)
+        db.add_all([annual, h1])
+        db.add(make_price(trade_date="2026-08-03", close=2000.0))
+        db.commit()
+
+        assert update_market_data_from_history(db) == 1
+        db.refresh(annual); db.refresh(h1)
+        assert annual.stock_price == 2000.0
+        assert h1.stock_price is None          # H1 は日次の上書き対象外
+
+    def test_point_in_time_overwrite_targets_annual(self, db, make_fin, make_weekly):
+        """point_in_time でも「最新レコードへの現在株価上書き」は annual を選ぶ。"""
+        annual = make_fin(year=2026, period_end="2026-03-31", bs_bps=1000.0)
+        h1 = make_fin(year=2026, period_end="2026-09-30", period_type="H1", bs_bps=1000.0)
+        db.add_all([annual, h1])
+        db.add(make_weekly(trade_date="2026-03-30", close_last=3000.0))
+        db.add(make_weekly(trade_date="2026-09-25", close_last=4000.0))
+        db.add(make_weekly(trade_date="2026-10-30", close_last=5000.0))
+        db.commit()
+
+        update_market_data_from_history(db, point_in_time=True)
+        db.refresh(annual); db.refresh(h1)
+        assert annual.stock_price == 5000.0    # 最新株価で上書きされる
+        assert h1.stock_price == 4000.0        # H1 は自身の period_end 近傍のまま
