@@ -1377,6 +1377,16 @@ rank-IC で有意に上回った**ため正式兄弟へ昇格した（8 候補�
    （`fit_feature_columns`）。y も winsorize→zscore し、予測は元スケールへ逆変換する。
 3. **学習**: `ElasticNetCV`。α と l1_ratio は**学習 fold 内の `TimeSeriesSplit`**（過去→直近の向き）で
    選択する。ランダム K-fold は期間をシャッフルして楽観バイアスを生むため使わない。
+   探索設定（l1_ratios 0.1/0.5/0.9・α パス 20 点・CV 3 分割・`max_iter=50000`）は
+   `model_candidates._EN_*` が**単一ソース**で、M-6 の CV・最終学習と M-4 が同じ値を共有する。
+   `max_iter` は #452 で 5000 → 50000 へ較正した。5000 では α パス末端が収束せず
+   `ConvergenceWarning` が出る（本番パネル 91,482 サンプル・67ヶ月・78特徴量の実測で
+   walk-forward 17 fold 中 10 件 + 最終学習 1 件）。50000 では**警告 0 件のまま指標も所要も不変**
+   ——rank-IC 0.1663 / `short_side_spread` 0.070221 / ターンオーバー 0.340073 が完全一致
+   （per-fold rank-IC の最大差 9.7e-5）、最終学習の μ̂・係数はビット一致、所要は
+   CV 288.5→286.7 秒・最終学習 36.2→36.9 秒。未収束が起きるのは **CV が選ばない極小 α** だけで、
+   そこは係数がほぼ飽和しているため追加反復が安い。α パス下限（`eps`）を切り上げれば警告は
+   同様に消えるが、選択される α・l1_ratio 自体が変わりモデルが別物になるため採らない。
 4. **CV**: `walk_forward_cv_monthly(min_train_months=6, step_months=3, embargo_months=12)`＝M-2 と同値。
    注入する fit_predict は候補実装（`model_candidates.make_elasticnet_fit_predict`）**そのもの**で、
    ADR-0021 の実測値と本プラグインの OOF が同一コードパスであることを保証する。

@@ -145,7 +145,17 @@ def _tail_split(n: int) -> int:
 _EN_L1_RATIOS = (0.1, 0.5, 0.9)
 _EN_N_ALPHAS = 20
 _EN_CV_SPLITS = 3
-_EN_MAX_ITER = 5000
+# 座標降下の反復上限。**M-6（macro_enet）と M-4 の探索設定はここが単一ソース**（Issue #452）。
+# 5000 では α パス末端が収束せず `ConvergenceWarning` が出ていた（duality gap が tolerance の
+# 9〜21 倍）。本番パネル（91,482 サンプル・67ヶ月・78特徴量）の実測 = walk-forward 17 fold で
+# 10 件 + 最終学習で 1 件。50000 では**警告 0 件で、指標も所要も変わらない**:
+#   rank-IC 0.1663 / short_side_spread 0.070221 / ターンオーバー 0.340073 が完全一致
+#   （per-fold rank-IC の最大差 9.7e-5）、最終学習の μ̂・係数はビット一致、
+#   所要は CV 288.5→286.7秒・最終学習 36.2→36.9秒。
+# 追加反復が安いのは、未収束が起きるのが CV の選ばない極小 α に限られ、そこでは係数がほぼ
+# 飽和しているため（最大 fold の実測: α パスは [0.00035, 3.186] で選択 α=0.05）。`eps`
+# （α パス下限）を切り上げる案は選択 α・l1_ratio 自体が変わりモデルが別物になるので採らない。
+_EN_MAX_ITER = 50000
 
 
 def make_elasticnet_fit_predict(l1_ratios: tuple = _EN_L1_RATIOS,

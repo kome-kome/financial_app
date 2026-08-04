@@ -7,6 +7,7 @@ ElasticNet 線形モデル。
   1. meta   : 登録・ui_order=390・未実行時は producer 無し（graceful-degrade）
   2. coerce : l1_ratio の membership 検証・macro_pca_components の bounds 検証
   3. fold   : M-2 と同一の walk-forward 設定（min_train_months=6 / step=3 / embargo=12）で回す
+  3.5 config: 探索設定（l1_ratios / n_alphas / cv_splits / max_iter）が候補実装の単一ソース（#452）
   4. smoke  : execute の出力契約（model_type=elasticnet・係数と特徴量名の対応・results は top_n 以内）
   5. tuning : tuning_objective_only で OOF 算出後に早期 return する（model_comparison の高速化）
   6. compare: model_comparison.COMPARISON_MODELS に M-6 として登録されている
@@ -120,6 +121,27 @@ class TestFoldConfigMatchesM2:
         assert captured["embargo_months"] == LABEL_HORIZON_MONTHS == 12
         assert captured["return_residuals"] is True
         assert callable(captured["fit_predict"])
+
+
+# ── 3.5 探索設定の単一ソース（Issue #452）─────────────────────────────────────
+
+class TestSearchConfigSingleSource:
+    """CV（候補実装）・最終学習・M-4 が同じ ElasticNet 探索設定を見ることを固定する。
+
+    以前は同じ値を `macro_enet` と `model_candidates` の双方で宣言していたため、片方だけ
+    書き換えると「CV は収束するのに最終学習だけ未収束」のような割れ方をしうる状態だった。
+    """
+
+    def test_constants_are_reexported_from_candidate_impl(self):
+        import plugins.macro_enet as me
+        import plugins.model_candidates as mc
+        assert (me._L1_RATIOS, me._N_ALPHAS, me._CV_SPLITS, me._MAX_ITER) == (
+            mc._EN_L1_RATIOS, mc._EN_N_ALPHAS, mc._EN_CV_SPLITS, mc._EN_MAX_ITER)
+
+    def test_max_iter_calibrated_for_convergence(self):
+        """max_iter は本番規模で収束する水準を保つ（#452 実測: 5000 は 17 fold 中 10 件が未収束）。"""
+        import plugins.macro_enet as me
+        assert me._MAX_ITER >= 50_000
 
 
 # ── 4. execute スモーク ───────────────────────────────────────────────────────

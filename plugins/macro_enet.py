@@ -60,10 +60,13 @@ from .macro_risk_return import MacroRiskReturnPlugin as _M1
 from .utils import fit_feature_columns, normalize, transform_feature_row, walk_forward_cv_monthly, winsorize
 
 # CV と最終学習で共有する ElasticNet の探索設定（ADR-0021 の実測と同一値）。
-_L1_RATIOS = (0.1, 0.5, 0.9)
-_N_ALPHAS = 20
-_CV_SPLITS = 3
-_MAX_ITER = 5000
+# 実体は候補実装（`model_candidates`）の定数を**再エクスポート**する（Issue #452）。以前は
+# 同じ値をこちらでも宣言しており、片方だけ書き換えると CV（候補実装）と最終学習
+# （`_fit_final_and_score`）・M-4（`macro_ensemble` が本モジュールを参照）で設定が割れた。
+from .model_candidates import _EN_CV_SPLITS as _CV_SPLITS
+from .model_candidates import _EN_L1_RATIOS as _L1_RATIOS
+from .model_candidates import _EN_MAX_ITER as _MAX_ITER
+from .model_candidates import _EN_N_ALPHAS as _N_ALPHAS
 
 
 class MacroEnetPlugin(AnalysisPlugin):
