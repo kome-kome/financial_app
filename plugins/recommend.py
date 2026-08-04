@@ -16,6 +16,21 @@ PRESETS = {
     "高収益重視":  {"z_roe": 2.0, "z_op_margin": 2.0, "z_cf_ratio": 1.0, "z_equity_ratio": 0.5},
 }
 
+# 表示・フィルタで使う financial_metrics 列（Issue #441）。VIEW は97列あるが recommend が
+# 読むのはここと METRICS だけで、全列×全社（実測 4,430 行）を転送すると本番 Supabase 実測
+# 3.00s、必要列だけなら 1.16s。Render の 30秒リクエスト上限は有料プランでも変わらないため、
+# 余裕は列を絞って確保する。
+_DISPLAY_COLS = (
+    "edinet_code", "sec_code", "company_name", "industry", "year",
+    "market_cap", "per", "pbr", "roe", "op_margin", "rev_growth",
+)
+
+# 実際に SELECT する列。METRICS から導出するので、指標を METRICS へ足せば転送列も自動で
+# 追従する（列リストを二重管理しない）。z_momentum は VIEW 列ではなく実行時計算なので除く。
+# weights のキーは coerce_params が METRICS へ制限するため、ここに無い列は読まれない。
+SELECT_COLS = tuple(dict.fromkeys(
+    _DISPLAY_COLS + tuple(m for m in METRICS if m != "z_momentum")))
+
 _MomentumPX = namedtuple("_MomentumPX", "trade_date close")
 
 # 週次株価ロードの遡及上限日数（Issue #418）。get_momentum_return は long_months=12＝
@@ -36,12 +51,20 @@ STATISTICAL_PRESET_NAME = "統計的最適化"
 
 def get_dynamic_preset(db: Any) -> dict | None:
     """DB永続化済みのFama-MacBethファクタープレミアムから統計的最適化プリセットの重みを
-    組み立てる（recommend_factor_premia.py --persist が書き込む・未実行ならNone）。"""
+    組み立てる（recommend_factor_premia.py --persist が書き込む・未実行ならNone）。
+
+    METRICS 外の factor は採らない（Issue #441）。この重みは coerce_params を通らない
+    経路（execute 内の resolve_weights）で使われる一方、読み取り列は METRICS から導出
+    するため、範囲外のキーが混ざると値が取れず黙って None 扱い＝カバレッジが下がる。
+    全て範囲外なら None を返してバランス型へフォールバックさせる。
+    """
     from database import get_latest_factor_premia
     premia = get_latest_factor_premia(db)
     if not premia:
         return None
-    return {factor: vals["mean_b"] for factor, vals in premia.items()}
+    weights = {factor: vals["mean_b"] for factor, vals in premia.items()
+               if factor in METRICS}
+    return weights or None
 
 
 def get_all_presets(db: Any) -> dict:
@@ -253,7 +276,10 @@ class RecommendPlugin(AnalysisPlugin):
                     "metrics": METRICS, "results": []}
 
         subq = latest_year_subq(db, FinancialMetric)
-        query = (db.query(FinancialMetric)
+        # SELECT は SELECT_COLS だけ（Issue #441）。is_active は WHERE でしか使わないので
+        # 転送しない。戻りは ORM インスタンスではなく Row タプル＝絞っていない列を後から
+        # 読むことが構造的に起きない。
+        query = (db.query(*[getattr(FinancialMetric, c) for c in SELECT_COLS])
                    .join(subq, (FinancialMetric.edinet_code == subq.c.edinet_code) &
                                (FinancialMetric.year == subq.c.max_year))
                    # 上場廃止銘柄は買えないため対象外（Issue #315）。is_active 未設定（旧データ）は
@@ -297,12 +323,17 @@ class RecommendPlugin(AnalysisPlugin):
 
         # 株価 as-of（Issue #416）。z_momentum も PER/PBR も株価由来なので、株価が
         # 止まっていればスコア全体が静かに古くなる。行ごとの齢を返して UI で見せる。
-        asof_by_code = price_asof_by_code(db)
-        price = price_freshness(db, asof_by_code)
+        # 母集団の分位・鮮度レベルは DB 側集約だけで出し（全銘柄の MAX を転送しない）、
+        # 行ごとの as-of は画面に出る上位 top_n 社だけ引く（Issue #441）。
+        price = price_freshness(db)
 
         scored.sort(key=lambda x: x[0], reverse=True)
+        top = scored[:top_n]
+        asof_by_code = price_asof_by_code(
+            db, [r.edinet_code for _, _, r, _ in top if r.edinet_code])
+
         results = []
-        for rank, (score, coverage, r, detail) in enumerate(scored[:top_n], 1):
+        for rank, (score, coverage, r, detail) in enumerate(top, 1):
             results.append({
                 "rank":         rank,
                 "price_asof":   asof_by_code.get(r.edinet_code),

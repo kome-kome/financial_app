@@ -135,6 +135,26 @@ class TestMembership:
         with pytest.raises(ValueError):
             coerce_params(s, {"x": ["a", "zzz"]})
 
+    # ── weights のキー（Issue #441）─────────────────────────────────────────
+    # `metrics` は UI ラベル一覧ではなくキー許可集合。読み取り側は宣言された指標ぶんの
+    # 列しか SELECT しないため、範囲外キーを通すと値が取れず黙って None 扱いになる。
+
+    def test_weights_keys_within_metrics_ok(self):
+        s = {"w": {"type": "weights", "default": None, "optional": True,
+                   "metrics": ["z_roe", "z_eps"]}}
+        assert coerce_params(s, {"w": {"z_roe": 1.0}})["w"] == {"z_roe": 1.0}
+
+    def test_weights_key_outside_metrics_rejected(self):
+        s = {"w": {"type": "weights", "default": None, "optional": True,
+                   "metrics": ["z_roe", "z_eps"]}}
+        with pytest.raises(ValueError, match="z_nc_ratio"):
+            coerce_params(s, {"w": {"z_roe": 1.0, "z_nc_ratio": 0.5}})
+
+    def test_weights_without_metrics_declaration_is_not_checked(self):
+        # metrics 未宣言のフィールドは許可集合が無い＝検証しない（後方互換）
+        s = {"w": {"type": "weights", "default": {}}}
+        assert coerce_params(s, {"w": {"anything": 1.0}})["w"] == {"anything": 1.0}
+
 
 # ── schema バグ検出・未知キー ────────────────────────────────────────────────
 

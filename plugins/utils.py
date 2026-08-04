@@ -112,7 +112,8 @@ def coerce_params(schema: dict, raw: dict) -> dict:
          どちらも無ければ ValueError（必須欠落）
       3. dtype 別 coerce（int/float/str/bool/list[str]/dict）。変換不能は ValueError
       4. bounds（min/max、数値のみ）違反は ValueError（reject）
-      5. membership（select/multiselect の options）違反は ValueError（reject）
+      5. membership（select/multiselect の options・weights の metrics）違反は
+         ValueError（reject）
 
     出力は schema 宣言キーのみ（raw の未知キーは無視）。意味的 validation
     （features 非空・weights 合計≠0 等）は execute 側に残す。
@@ -168,6 +169,19 @@ def coerce_params(schema: dict, raw: dict) -> dict:
                 bad = [v for v in check if v not in allowed]
                 if bad:
                     raise ValueError(f"'{key}' に無効な値があります: {bad}")
+
+        # ── membership（weights のキー・reject・Issue #441）────────
+        # `metrics` は UI ラベルの一覧ではなくキー許可集合（CONTEXT.md「パラメータ契約」）。
+        # 読み取り側は宣言された指標ぶんの列しか引かないため、宣言外のキーを黙って
+        # 受けると値が取れず None 扱いになり、スコアとカバレッジが静かに変わる。
+        if field.get("type") == "weights":
+            allowed = set(field.get("metrics") or [])
+            if allowed:
+                bad = sorted(k for k in val if k not in allowed)
+                if bad:
+                    raise ValueError(
+                        f"'{key}' に無効な指標があります: {bad}"
+                        f"（指定可能: {', '.join(sorted(allowed))}）")
 
         out[key] = val
     return out

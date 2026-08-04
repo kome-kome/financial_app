@@ -904,16 +904,25 @@ def business_days_between(d0: date, d1: date) -> int:
     return n
 
 
-def price_asof_by_code(db) -> dict:
+def price_asof_by_code(db, codes: list | None = None) -> dict:
     """{edinet_code: 最終株価日 "YYYY-MM-DD"} を返す（stock_price_daily の銘柄別 MAX）。
+
+    `codes` を渡すとその銘柄だけへ絞る（Issue #441）。行ごとの as-of を画面へ出すのは
+    ランキング上位 `top_n`（≤100）だけなので、全銘柄（実測 3,700 行）を毎回転送する
+    必要はない。母集団全体の分位・鮮度レベルは `price_freshness(db)` が DB 側集約だけで
+    出す（引数ありの Python 集約と等価であることは tests/test_asof_freshness.py が assert）。
 
     出所を financial_metrics VIEW にしないこと。VIEW の per/pbr/market_cap は
     `update_market_data_from_history` が古い株価を焼き込むため、値からは齢が分からない。
     """
+    if codes is not None and not codes:
+        return {}
     try:
-        rows = (db.query(StockPriceDaily.edinet_code,
-                         func.max(StockPriceDaily.trade_date))
-                  .group_by(StockPriceDaily.edinet_code).all())
+        q = db.query(StockPriceDaily.edinet_code,
+                     func.max(StockPriceDaily.trade_date))
+        if codes is not None:
+            q = q.filter(StockPriceDaily.edinet_code.in_(list(codes)))
+        rows = q.group_by(StockPriceDaily.edinet_code).all()
     except Exception:
         return {}
     return {ec: d for ec, d in rows if ec and d}

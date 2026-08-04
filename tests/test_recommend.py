@@ -13,7 +13,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from plugins import execute_plugin
 from plugins.recommend import (
-    METRICS, PRESETS, STATISTICAL_PRESET_NAME, compute_momentum_z,
+    METRICS, PRESETS, SELECT_COLS, STATISTICAL_PRESET_NAME, compute_momentum_z,
     get_dynamic_preset, plugin, resolve_weights,
 )
 
@@ -35,6 +35,36 @@ class TestConstants:
         for weights in PRESETS.values():
             for w in weights.values():
                 assert isinstance(w, (int, float))
+
+
+# ── 転送列の契約（Issue #441）────────────────────────────────────────────────
+#
+# financial_metrics VIEW は97列あり、全列×全社（実測 4,430 行）の転送が
+# /api/recommend・/api/morning の主コストだった（本番実測 37.9秒＝Render 30秒上限超）。
+# SELECT_COLS は METRICS から導出するので、指標を足せば転送列も自動で追従する。
+
+class TestSelectCols:
+    def test_covers_every_view_backed_metric(self):
+        # z_momentum は VIEW 列ではなく実行時計算（compute_momentum_z）なので対象外
+        for m in METRICS:
+            if m == "z_momentum":
+                assert m not in SELECT_COLS
+            else:
+                assert m in SELECT_COLS, f"{m} が SELECT_COLS に無い＝黙って None になる"
+
+    def test_all_columns_exist_on_the_view_model(self):
+        from database import FinancialMetric
+        for c in SELECT_COLS:
+            assert hasattr(FinancialMetric, c), c
+
+    def test_is_a_strict_subset_of_the_view(self):
+        from database import FinancialMetric
+        all_cols = [c.key for c in FinancialMetric.__table__.columns]
+        assert set(SELECT_COLS) < set(all_cols)
+        assert len(SELECT_COLS) < len(all_cols) / 2   # 97列 → 約20列
+
+    def test_no_duplicates(self):
+        assert len(SELECT_COLS) == len(set(SELECT_COLS))
 
 
 # ── resolve_weights() / get_dynamic_preset(): 統計的最適化プリセット（Issue #271）────
@@ -62,6 +92,31 @@ class TestResolveWeights:
         dynamic = get_dynamic_preset(db)
         assert dynamic == {"z_roe": 0.15, "z_momentum": 0.08}
         assert resolve_weights(db, STATISTICAL_PRESET_NAME) == dynamic
+
+    def test_dynamic_preset_drops_factors_outside_metrics(self, db):
+        """METRICS 外の factor は重みに採らない（Issue #441）。
+
+        この重みは coerce_params を通らない経路（execute 内の resolve_weights）で使われる
+        一方、読み取り列は METRICS から導出するため、範囲外キーが残ると値が取れず黙って
+        カバレッジだけが下がる。
+        """
+        from database import upsert_recommend_factor_premia
+        upsert_recommend_factor_premia(db, "rfp_2", [
+            {"run_id": "rfp_2", "factor_name": "z_roe", "mean_b": 0.2,
+             "newey_west_se": None, "t_stat": None, "p_value": None, "n_periods": 12},
+            {"run_id": "rfp_2", "factor_name": "z_nc_ratio", "mean_b": 0.1,
+             "newey_west_se": None, "t_stat": None, "p_value": None, "n_periods": 12},
+        ])
+        assert get_dynamic_preset(db) == {"z_roe": 0.2}
+
+    def test_dynamic_preset_all_out_of_range_falls_back(self, db):
+        from database import upsert_recommend_factor_premia
+        upsert_recommend_factor_premia(db, "rfp_3", [
+            {"run_id": "rfp_3", "factor_name": "z_nc_ratio", "mean_b": 0.1,
+             "newey_west_se": None, "t_stat": None, "p_value": None, "n_periods": 12},
+        ])
+        assert get_dynamic_preset(db) is None
+        assert resolve_weights(db, STATISTICAL_PRESET_NAME) == PRESETS["バランス型"]
 
     def test_params_schema_includes_statistical_preset_option(self):
         options = plugin.params_schema()["preset"]["options"]
@@ -320,6 +375,42 @@ class TestExecute:
         res = asyncio.run(execute_plugin(plugin,
             {"weights": {"z_roe": 1.0}, "min_coverage": 0.0}, db))
         assert res["total_candidates"] == 1
+
+    def test_weights_key_outside_metrics_rejected(self, db, make_metric):
+        # 転送列は METRICS から導出するため、範囲外キーは黙って None にせず reject する
+        # （Issue #441・パラメータ契約の membership 検証）。
+        db.add(make_metric(edinet_code="E00001", z_roe=1.0))
+        db.commit()
+        with pytest.raises(ValueError, match="z_nc_ratio"):
+            asyncio.run(execute_plugin(
+                plugin, {"weights": {"z_roe": 1.0, "z_nc_ratio": 0.5}}, db))
+
+    def test_price_asof_on_rows_and_freshness_over_population(self, db, make_metric):
+        """行ごとの as-of は上位 top_n 社だけ引き、鮮度判定は母集団全体で行う（Issue #441）。
+
+        絞ったのは「表示に要る as-of」だけで、鮮度の分位・stale 件数は DB 側集約が
+        株価を持つ全銘柄を見る。ここが崩れると「上位10社が新しいから緑」という
+        誤った安全側判定になる。
+        """
+        from datetime import date, timedelta
+        from database import StockPriceDaily
+
+        today = date.today()
+        for i in range(1, 13):
+            ec = f"E{i:05d}"
+            db.add(make_metric(edinet_code=ec, z_roe=float(i)))
+            db.add(StockPriceDaily(edinet_code=ec, trade_date=today.isoformat(), close=100.0))
+        # ランキングには出ないが株価母集団には居る古い銘柄
+        db.add(StockPriceDaily(edinet_code="E99999", close=1.0,
+                               trade_date=(today - timedelta(days=60)).isoformat()))
+        db.commit()
+
+        res = asyncio.run(execute_plugin(
+            plugin, {"weights": {"z_roe": 1.0}, "min_coverage": 0.0, "top_n": 10}, db))
+        assert len(res["results"]) == 10
+        assert all(r["price_asof"] == today.isoformat() for r in res["results"])
+        assert res["price_freshness"]["n_codes"] == 13          # 表示10社ではなく母集団
+        assert res["price_freshness"]["n_stale_over_5d"] == 1
 
     def test_presets_response_includes_statistical_preset_when_available(self, db, make_metric):
         from database import upsert_recommend_factor_premia

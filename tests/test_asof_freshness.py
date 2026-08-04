@@ -179,3 +179,25 @@ class TestPriceFreshness:
         ])
         db.commit()
         assert price_asof_by_code(db) == {"E001": "2026-07-31", "E002": "2026-07-13"}
+
+    # ── codes 指定（Issue #441）─────────────────────────────────────────────
+    # 行ごとの as-of が要るのは画面に出る上位 top_n 社だけ。全銘柄（本番実測 3,700 行）を
+    # 毎回転送しない。
+
+    def test_price_asof_by_code_filters_to_requested_codes(self, db):
+        db.add_all([
+            StockPriceDaily(edinet_code="E001", trade_date="2026-07-13", close=1.0),
+            StockPriceDaily(edinet_code="E001", trade_date="2026-07-31", close=2.0),
+            StockPriceDaily(edinet_code="E002", trade_date="2026-07-13", close=3.0),
+            StockPriceDaily(edinet_code="E003", trade_date="2026-07-30", close=4.0),
+        ])
+        db.commit()
+        assert price_asof_by_code(db, ["E001", "E003"]) == {
+            "E001": "2026-07-31", "E003": "2026-07-30"}
+
+    def test_price_asof_by_code_empty_codes_returns_empty(self, db):
+        # 空リストは「全件」ではなく「対象なし」（IN () で全件に化けさせない）
+        db.add(StockPriceDaily(edinet_code="E001", trade_date="2026-07-31", close=1.0))
+        db.commit()
+        assert price_asof_by_code(db, []) == {}
+        assert price_asof_by_code(db) == {"E001": "2026-07-31"}
