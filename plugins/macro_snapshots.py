@@ -282,12 +282,23 @@ _PENDING_EVAL_FEATURES: set[str] = set()
 # 57,955サンプル・9 fold・honest embargo=12）で4検定すべて非有意——M-2 rank-IC −0.0060
 # (p=0.140) / M-2 売り側 spread −0.0021 (p=0.495) / M-6 rank-IC +0.0010 (p=0.214) / M-6 売り側
 # spread −0.0002 (p=0.623)。strict 母集団は 43ヶ月・57,955サンプルで不変（律速はしない）。
+#
+# #451（ADR-0028）の鉱工業指数2系列: `--features macro_jp_iip_yoy,macro_jp_iip_inventory_yoy`
+# の実測（3,981社・67ヶ月・91,482サンプル・17 fold）で4検定すべて非有意——M-2 rank-IC
+# −0.0027 (p=0.527) / M-2 売り側 spread −0.0008 (p=0.731) / M-6 rank-IC +0.0001 (p=0.942) /
+# M-6 売り側 spread −0.0017 (p=0.472)。4検定中3つは符号がマイナス＝入れると悪化方向。
+# strict 母集団は 67ヶ月・91,482サンプルで不変（外しても 1 サンプルも減らない）。
+# 併せて e-Stat 側が 2026年3月分（trade_date=2026-04-30）で配信を止めており、代替ソース
+# （経産省直接CSV・ESRI 級の工数）を実装する根拠も無いと判断した。収集自体は継続する
+# （e-Stat が年単位で更新されるため・`macro_health.EXCLUDED_SERIES` で鮮度判定からは退避）。
 _GATE_REJECTED_FEATURES: set[str] = {
     "macro_jp_news_tone_zscore",
     "macro_jp_news_econ_tone_zscore",
     "macro_jp_news_econ_vol_zscore",
     "macro_jp_wiki_market_attn_zscore",
     "macro_jp_wiki_macro_attn_zscore",
+    "macro_jp_iip_yoy",
+    "macro_jp_iip_inventory_yoy",
 }
 DEFAULT_MACRO_FEATURES = [o["value"] for o in MACRO_FEATURE_OPTIONS
                           if o["value"] not in _STRICT_TRUNCATED_FEATURES

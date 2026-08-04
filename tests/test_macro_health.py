@@ -136,24 +136,63 @@ class TestFreshnessCheck:
         assert stale["JP10Y_FRED"]["limit"] < mh.FREQ_STALE_DAYS["monthly"]
 
     def test_lag_days_alone_does_not_tighten_limit(self, db, monkeypatch):
-        """freq 既定から `lag_days` を一律に差し引いてはいけない（#444 の回帰防止）。
+        """freq 既定から `lag_days` を一律に差し引いてはいけない（#444 の回帰防止・ADR-0028）。
 
         `lag_days` は先読み防止の保守的シフト量であって実配信ラグの推定値ではない。
-        一律差し引きにすると、2026-08-04 の本番実測 lag で以下4系列が即 CRITICAL になる:
-        JP_REAL_GDP / JP_TRADE_BAL（実測80日 > 210-135=75）、
-        JP_IIP / JP_IIP_INVENTORY（実測96日 > 130-60=70）。
+        一律差し引きにすると JP_REAL_GDP / JP_TRADE_BAL が本番実測 80日で即 CRITICAL になる
+        （210-135=75 < 80）。この 80日は**次の四半期速報の公表を待っている平常運転の値**で
+        あって遅延ではない。検知力は系列個別の `stale_days` で与える。
+
+        （旧版は JP_IIP / JP_IIP_INVENTORY の実測 96日も反例に挙げていたが、あれは e-Stat の
+        配信停止による異常値だった＝#451。停止中の系列を「健全な反例」に使ってはいけない。）
         """
         import collector_prices as cp
         monkeypatch.setattr(cp, "FRED_API_KEY", "dummy")
         monkeypatch.setattr(cp, "ESTAT_API_KEY", "dummy")
         _seed_all_fresh(db)
-        for code, lag in [("JP_REAL_GDP", 80), ("JP_TRADE_BAL", 80),
-                          ("JP_IIP", 96), ("JP_IIP_INVENTORY", 96)]:
+        for code, lag in [("JP_REAL_GDP", 80), ("JP_TRADE_BAL", 80)]:
             db.query(MacroData).filter(MacroData.series_code == code).delete()
             _seed(db, code, AS_OF - timedelta(days=lag))
 
         r = mh.check_macro_freshness(db, as_of=AS_OF)
         assert {e["code"] for e in r["stale"]} == set()
+
+    def test_stopped_series_are_rejected_and_excluded_together(self):
+        """配信停止が確定した系列は「既定特徴量からの棄却」と「鮮度判定の除外」を同期させる。
+
+        片方だけだと穴が残る（#451）:
+          - 棄却のみ → critical からは外れるが stale に出続けレポートが慎重になる
+          - 除外のみ → 既定特徴量に残り、固定値のまま M-1/M-2/M-6 の入力になる
+        """
+        from plugins.macro_snapshots import (
+            DEFAULT_MACRO_FEATURES, _GATE_REJECTED_FEATURES,
+        )
+        stopped = {"JP_IIP", "JP_IIP_INVENTORY"}
+        assert stopped <= set(mh.EXCLUDED_SERIES)
+        assert stopped & mh.critical_series_codes() == set()
+        assert {"macro_jp_iip_yoy", "macro_jp_iip_inventory_yoy"} <= _GATE_REJECTED_FEATURES
+        assert "macro_jp_iip_yoy" not in DEFAULT_MACRO_FEATURES
+
+    def test_large_lag_days_monthly_series_declare_stale_days(self):
+        """月次かつ `lag_days` が大きい系列は個別 `stale_days` を宣言する（ADR-0028）。
+
+        `lag_days` が大きいほど last が新しく見え freq 既定との乖離が開くため、既定のままでは
+        配信停止の検知が鈍る（JP_CLI は理論最大 5日に対し freq 既定 105日＝21倍）。
+        """
+        import collector_prices as cp
+        offenders = []
+        for group_name, series_list in [
+            ("FRED_SERIES", cp.FRED_SERIES), ("OECD_SERIES", cp.OECD_SERIES),
+            ("ESTAT_SERIES", cp.ESTAT_SERIES), ("ESTAT_INDEX_SERIES", cp.ESTAT_INDEX_SERIES),
+            ("BOJ_SERIES", cp.BOJ_SERIES),
+        ]:
+            default_freq = mh._GROUP_DEFAULT_FREQ[group_name]
+            for s in series_list:
+                if s.get("freq", default_freq) != "monthly":
+                    continue
+                if s.get("lag_days", 0) >= 60 and s.get("stale_days") is None:
+                    offenders.append(s["code"])
+        assert offenders == []
 
     def test_excluded_series_never_counted_but_always_reported(self, db):
         """除外系列は判定対象外。ただしレポートには必ず出す（黙って消さない）。"""

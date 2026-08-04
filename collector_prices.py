@@ -1165,7 +1165,10 @@ FRED_SERIES: list[dict] = [
     # lag_days 未指定の既存5系列は 0=シフト無し（完全後方互換）。
     # 採用前に各 fred_id の最終更新日を確認すること（OECD 旧系列は凍結あり：CPALTT01JPM657N 等）。
     {"code": "JP_REAL_GDP",  "name": "日本 実質GDP",        "category": "real_economy", "fred_id": "JPNRGDPEXP",      "freq": "quarterly", "lag_days": 135},
-    {"code": "JP_UNEMP",     "name": "日本 失業率",         "category": "labor",        "fred_id": "LRUNTTTTJPM156S", "freq": "monthly",   "lag_days": 60},
+    # stale_days=60: 健全時の理論最大 30日（観測周期30 + 実配信ラグ60 − lag_days 60）に観測周期
+    # 30日を足した値＝「公表を1回スキップしたら鳴る」（ADR-0028）。lag_days=60 のシフト分だけ
+    # last が新しく見えるため、freq 既定 105日のままでは配信停止の検知が鈍る（#444 と同型）。
+    {"code": "JP_UNEMP",     "name": "日本 失業率",         "category": "labor",        "fred_id": "LRUNTTTTJPM156S", "freq": "monthly",   "lag_days": 60, "stale_days": 60},
     # JP_IP (JPNPROINDMISMEI) は 2024-04-30 で凍結確認済み (#253)。e-Stat コネクタ実装まで除外。
     {"code": "JP_TRADE_BAL", "name": "日本 貿易収支",       "category": "trade",        "fred_id": "XTNTVA01JPQ664S", "freq": "quarterly", "lag_days": 135},
 ]
@@ -1269,6 +1272,11 @@ OECD_SERIES: list[dict] = [
         "dataflow":   "OECD.SDD.STES,DSD_STES@DF_CLI,4.1",
         "series_key": "JPN.M.LI.IX._Z.AA.IX._Z.H",
         "lag_days": 60,
+        # stale_days=35: 健全時の理論最大 5日（観測周期30 + 実配信ラグ35 − lag_days 60）に
+        # 観測周期30日を足した値＝「公表を1回スキップしたら鳴る」（ADR-0028）。lag_days が
+        # 実配信ラグより大きいため freq 既定 105日との乖離が 21倍あり、既定のままでは OECD が
+        # 配信を止めても100日気づけない（2026-08-04 実測 lag は 4日）。
+        "stale_days": 35,
     },
 ]
 
@@ -1329,6 +1337,15 @@ ESTAT_SERIES: list[dict] = [
 # 旧テーブルは更新停止する（FRED 版 JPNPROINDMISMEI が2024-04-30凍結した根本原因と同型・#253）。
 # 次回基準改定時（目安10年ごと）は本節の statsDataId を再調査すること。
 # cd_cat01="0001000" は業種分類（cat01）の「鉱工業総合」（"0002000"=製造工業も選択可）。
+#
+# **2026-08-04 時点で e-Stat 側が停止している（#451）**: 統計表 0004052177 / 0004052179 は
+# `UPDATED_DATE=2026-06-03` を最後に更新されず、収録は2026年3月分（trade_date=2026-04-30）まで。
+# 経産省サイトでは6月分が 2026-07-31 に公表済みなのに API へ来ない。実 API で全162表を確認した
+# ところ世代は3つ（2026-06-03 / 2024-07-05 / 2021-09-08）しかなく**月次更新の痕跡が世代を通じて
+# 存在しない**（世代間隔 約23か月）。収集側は無実で、API が返す 99 行を全て取れている。
+# 昇格ゲート（`--features macro_jp_iip_yoy,macro_jp_iip_inventory_yoy`）でも4検定すべて非有意
+# だったため既定特徴量からは棄却済み（`_GATE_REJECTED_FEATURES`）。**収集は継続する**——
+# e-Stat がいずれ更新すればデータは貯まり、再判定できる。鮮度判定は `EXCLUDED_SERIES` で退避。
 ESTAT_INDEX_SERIES: list[dict] = [
     {
         "code": "JP_IIP",
@@ -1337,6 +1354,10 @@ ESTAT_INDEX_SERIES: list[dict] = [
         "stats_data_id": "0004052177",
         "cd_cat01": "0001000",
         "lag_days": 60,
+        # stale_days=60: 理論最大 30日（観測周期30 + 実配信ラグ60 − lag_days 60）+ 観測周期30
+        # ＝公表1回スキップで鳴る（ADR-0028）。現在は EXCLUDED_SERIES で判定から外しているが、
+        # 除外を解いたときに freq 既定 105日では今回の 96日停止を検知できないため定義に残す。
+        "stale_days": 60,
     },
     {
         "code": "JP_IIP_INVENTORY",
@@ -1345,6 +1366,7 @@ ESTAT_INDEX_SERIES: list[dict] = [
         "stats_data_id": "0004052179",
         "cd_cat01": "0001000",
         "lag_days": 60,
+        "stale_days": 60,
     },
 ]
 
