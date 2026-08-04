@@ -67,10 +67,22 @@ Render の制約と運用形態に合わせて設計すること。
 | 項目 | 仕様 |
 |---|---|
 | トリガー | `workflow_run: types: [completed]`。**`workflows:` は列挙せず全ワークフローを対象**にし、`ci.yml` だけ job の `if` で名前一致除外する |
-| 発火条件 | `conclusion == 'failure'` **または `'cancelled'`**。timeout 打ち切りは failure ではなく **cancelled** で終わるため両方必須（実例: `tune-hyperparameters` 300分・`collect-interim` 4h） |
+| 発火条件 | `conclusion == 'failure'` **または `'cancelled'`**。timeout 打ち切りは failure ではなく **cancelled** で終わるため両方必須（実例: `tune-hyperparameters` 300分・`collect-interim` 4h）。ただし cancelled には**人が Cancel を押した run** も混ざるため、job の annotation で振り分ける（下記） |
 | 起票内容 | タイトル `[ops] ワークフロー失敗: <workflow name>`／ラベル `ops` `priority:high` `ci`／本文に run URL・発火イベント・ブランチ・**失敗ジョブ名**・**失敗ステップのログ末尾30行** |
 | 重複防止 | 同一タイトルの open Issue があれば新規起票せず**コメント追記** |
-| 権限 | `issues: write` は本ワークフローのみ。収集系の `contents: read` 最小権限は崩さない。ログ取得のため `actions: read` |
+| 権限 | `issues: write` は本ワークフローのみ。収集系の `contents: read` 最小権限は崩さない。ログ取得のため `actions: read`、cancelled の annotation 取得のため `checks: read` |
+
+**`cancelled` の振り分け（#453）**: timeout 打ち切りと手動キャンセルは **conclusion も、ログ末尾（`The operation was canceled.`）も同一**で、run/job の JSON にも区別が無い。唯一の判別材料が **job の annotation**（`GET /repos/{repo}/check-runs/{job_id}/annotations`）で、2026-08-04 に両側を実測した。
+
+| annotation | 実測した run | 判定 |
+|---|---|---|
+| `The job has exceeded the maximum execution time of 1m0s` | [30748982170](https://github.com/kome-kome/financial_app/actions/runs/30748982170)（selftest `mode=cancel`） | timeout → **起票する** |
+| `The run was canceled by @kome-kome.` | [30917108939](https://github.com/kome-kome/financial_app/actions/runs/30917108939)（開始4秒後に人が押した） | 手動 → **起票しない** |
+| どちらも無い／annotation 取得に失敗 | — | 不明 → **起票する**（安全側） |
+
+**denylist（手動と確認できたものだけスキップ）から allowlist（timeout と確認できたものだけ起票）へ反転させないこと。** allowlist にすると、GitHub が annotation の文言を変えた瞬間や取得に失敗した瞬間に **timeout 通知が静かに消える**＝#414 と同型の欠落になる。判別できない cancelled は必ず起票側へ倒す。向きは `tests/test_workflow_failure_notification.py::test_manual_cancel_is_the_only_skip_path` が固定する。
+
+> この振り分けが無かった 2026-08-04 に、人が押したキャンセル1件が `priority:high` の Issue #453 として自動起票された。**「復旧すべき障害」ではないノイズが high として積まれると、本物の失敗の優先度が相対的に薄まる**（Issue 本文自身が「open のまま放置すると次の失敗がコメントに埋もれる」と警告している通り）。
 
 **運用ルール（重要）**:
 
@@ -94,9 +106,14 @@ Render の制約と運用形態に合わせて設計すること。
 ```bash
 gh workflow run notify-failure-selftest.yml -f mode=fail     # exit 1 → conclusion: failure
 gh workflow run notify-failure-selftest.yml -f mode=cancel   # timeout 打ち切り → conclusion: cancelled（約1分）
+
+# 手動キャンセルの再現（#453 の振り分けを検証する）: cancel モード（sleep 300）を起動し、
+# timeout-minutes: 1 に達する前に自分で止める＝専用モードは不要
+gh workflow run notify-failure-selftest.yml -f mode=cancel
+gh run cancel <run-id>   # → annotation は "The run was canceled by @…" → 起票されないこと
 ```
 
-`notify-failure.yml` を変更したら main 反映後にこれを1回流し、Issue が起票される（2回目以降はコメント追記になる）ことを確認する。確認後は起票された Issue をクローズすること。
+`notify-failure.yml` を変更したら main 反映後にこれを1回流し、Issue が起票される（2回目以降はコメント追記になる）ことを確認する。確認後は起票された Issue をクローズすること。**cancelled の振り分けを触ったときは両側を流す**（手動キャンセル＝起票されない／timeout 打ち切り＝起票される）。片側だけでは「除外しすぎて timeout まで落としていないか」が実証できない。
 
 ### daily-incremental の動作詳細
 

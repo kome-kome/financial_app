@@ -17,6 +17,8 @@ name: "[定常] ワークフロー失敗の自動 Issue 起票"
 #     「列挙方式に戻っていないか」「ci.yml の name と if の除外文字列が一致するか」を強制する。
 #   - `cancelled` を必ず含める。timeout 打ち切りは failure ではなく cancelled で終わる
 #     （実例: tune-hyperparameters 300分 timeout・collect-interim 4h timeout）。
+#     ただし cancelled には「人が Cancel を押した」も混ざるため、起票するかどうかは
+#     job の annotation で振り分ける（下の run: の「cancelled の振り分け」節・#453）。
 #   - ci.yml は対象外。PR の pytest 失敗は PR 画面で即見えるうえ、
 #     feature ブランチの試行錯誤で Issue が乱立するため（#414 の運用判断）。
 #   - GITHUB_TOKEN で作成した Issue は他のワークフローを再帰トリガーしない（無限ループ無し）。
@@ -42,6 +44,7 @@ permissions:
   contents: read
   issues: write
   actions: read      # 失敗ジョブ名・ログ末尾の取得に必要
+  checks: read       # cancelled の理由（timeout か手動か）を annotation から読むのに必要（#453）
 
 jobs:
   notify:
@@ -72,6 +75,40 @@ jobs:
         # ${{ }} は env 経由でのみ参照する（run: へ直接展開しない＝シェルインジェクション対策）
         run: |
           set -uo pipefail
+
+          # --- cancelled の振り分け（#453）──────────────────────────────────
+          # timeout 打ち切りも手動キャンセルも conclusion: cancelled で終わり、ログ末尾も
+          # 同じ "The operation was canceled." になる＝**ログでは区別できない**。唯一の
+          # 判別材料は job の annotation（2026-08-04 に両側を実測）:
+          #   timeout → "The job has exceeded the maximum execution time of 1m0s"
+          #             （run 30748982170＝selftest mode=cancel）
+          #   手動    → "The run was canceled by @kome-kome."
+          #             （run 30917108939。開始4秒後に人が押したものが priority:high の
+          #               Issue #453 として起票されていた＝これを断つのが本節の目的）
+          # 人が押したキャンセルは押した本人が既に知っている＝Issue にする価値がない。
+          # 一方 timeout は誰も見ていないので必ず起票する。
+          #
+          # **denylist（手動と確認できたものだけスキップ）にすること。** allowlist
+          # （timeout と確認できたものだけ起票）にすると、GitHub が文言を変えた瞬間や
+          # annotation 取得に失敗した瞬間に timeout 通知が静かに消える＝#414 と同型の
+          # 欠落になる。判別できないときは必ず起票側へ倒す。
+          if [ "${CONCLUSION}" = "cancelled" ]; then
+            annotations=$(
+              gh api "repos/${GH_REPO}/actions/runs/${RUN_ID}/jobs" --jq '.jobs[].id' 2>/dev/null \
+              | while read -r job_id; do
+                  gh api "repos/${GH_REPO}/check-runs/${job_id}/annotations" \
+                    --jq '.[].message' 2>/dev/null
+                done
+            ) || true
+            if printf '%s\n' "${annotations:-}" | grep -q 'exceeded the maximum execution time'; then
+              echo "timeout 打ち切りによる cancelled → 起票する"
+            elif printf '%s\n' "${annotations:-}" | grep -q 'The run was canceled by'; then
+              echo "人が Cancel を押した cancelled → 起票しない（#453）"
+              exit 0
+            else
+              echo "cancelled の理由を特定できず（annotation 取得失敗の可能性）→ 安全側で起票する"
+            fi
+          fi
 
           TITLE="[ops] ワークフロー失敗: ${WF_NAME}"
           BODY_FILE="${RUNNER_TEMP}/notify-failure-body.md"
