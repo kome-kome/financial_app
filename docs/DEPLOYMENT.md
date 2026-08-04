@@ -420,7 +420,7 @@ ADR-0002 §4 が求めるクレジット・インフレ・JP金利・期間構�
 | `IG_OAS` | `BAMLC0A0CM` | クレジット（IG・ICE BofA） | 日次 |
 | `BAA_SPREAD` | `BAA10Y` | クレジット（Baa−10Y・Moody's・非truncated） | 日次 |
 | `BREAKEVEN10Y` | `T10YIE` | インフレ期待 | 日次 |
-| `JP10Y_FRED` | `IRLTLT01JPM156N` | JP10年金利 | 月次（`lag_days=70` / `stale_days=60`・#444） |
+| `JP10Y_FRED` | `IRLTLT01JPM156N` | JP10年金利 | 月次（`lag_days=64` / `stale_days=62`・#444/#447） |
 | `T10Y2Y` | `T10Y2Y` | 期間構造 | 日次 |
 | `US_EPU` | `USEPUINDXD` | 政策不確実性（Baker-Bloom-Davis EPU・1985〜） | 日次 |
 | `US_EQUITY_EPU` | `WLEMUINDXD` | 政策不確実性（株式市場関連・1985〜） | 日次 |

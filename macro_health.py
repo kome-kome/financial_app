@@ -44,6 +44,15 @@ FREQ_STALE_DAYS: dict[str, int] = {
     "semiannual": 400,
 }
 
+# 観測周期（日）。`lag_days` の過大を検知する物差しに使う（下記 future 判定）。
+FREQ_PERIOD_DAYS: dict[str, int] = {
+    "daily":      1,
+    "weekly":     7,
+    "monthly":    31,
+    "quarterly":  92,
+    "semiannual": 183,
+}
+
 # ── 系列個別の許容遅延（`stale_days`）──────────────────────────────────────
 # 系列定義（collector_prices.py）が `stale_days` を持つときは freq 既定より優先する。
 # **こちらが検知の本命**で、freq 既定は指定の無い系列を拾う保険（ADR-0028）。
@@ -129,6 +138,9 @@ def expected_series() -> list[dict]:
                 "freq":  s.get("freq", default_freq),
                 # None なら freq 既定を使う（判定側で解決する）。
                 "stale_days": s.get("stale_days"),
+                # 観測基準日（期首/期末/収集日）。`lag_days` はここへ加算されるので、
+                # anchor が違う群の lag_days を横並びで比べてはいけない（#447）。
+                "anchor": cp.SERIES_ANCHOR[group_name],
                 "group": group_name,
             })
     return out
@@ -162,9 +174,17 @@ def check_macro_freshness(db, as_of: Optional[date] = None) -> dict:
           "as_of": date, "checked": int,
           "stale":    [{code, name, freq, last, lag_days, limit, critical, group}, ...],
           "missing":  [同上（last=None・lag_days=None）],
+          "future":   [同上 + {ahead_days, period}（last が未来日＝lag_days 過大）],
           "excluded": [{code, reason, last}, ...],
-          "n_critical_bad": int,   # critical かつ stale/missing の本数
+          "n_critical_bad": int,   # critical かつ stale/missing/周期超過の future の本数
         }
+
+    **未来日（future）を独立に見る理由**: `lag_days` が実配信ラグを超えると `trade_date` が
+    収集日より先になり、その観測はスナップショット（`trade_date <= ref_date`）に現れないまま
+    情報だけが遅れる。しかも経過日数が負の間は stale 判定が構造的に成立しない——#444 で
+    `JP10Y_FRED` に `lag_days=70` を与えて 6 日先の `trade_date` を作り、#447 まで
+    どのゲートにも掛からなかった（ADR-0028 Consequences）。数日のずれは安全側の失敗なので
+    warn に留め、**観測周期を超える**ずれ（＝`lag_days` が丸ごと1周期ぶん過大）だけ落とす。
     """
     as_of = as_of or date.today()
     rows = (
@@ -176,6 +196,7 @@ def check_macro_freshness(db, as_of: Optional[date] = None) -> dict:
 
     stale: list[dict] = []
     missing: list[dict] = []
+    future: list[dict] = []
     excluded: list[dict] = []
     for s in expected_series():
         code = s["code"]
@@ -191,15 +212,21 @@ def check_macro_freshness(db, as_of: Optional[date] = None) -> dict:
             missing.append({**entry, "lag_days": None})
             continue
         lag = (as_of - date.fromisoformat(str(last_str)[:10])).days
+        if lag < 0:
+            period = FREQ_PERIOD_DAYS[s["freq"]]
+            future.append({**entry, "lag_days": lag, "ahead_days": -lag, "period": period})
+            continue
         if lag > limit:
             stale.append({**entry, "lag_days": lag})
 
     bad = [e for e in stale + missing if e["critical"]]
+    bad += [e for e in future if e["critical"] and e["ahead_days"] > e["period"]]
     return {
         "as_of": as_of,
         "checked": len(expected_series()) - len(excluded),
         "stale": sorted(stale, key=lambda e: -(e["lag_days"] or 0)),
         "missing": missing,
+        "future": sorted(future, key=lambda e: -e["ahead_days"]),
         "excluded": excluded,
         "n_critical_bad": len(bad),
     }
@@ -210,12 +237,18 @@ def format_report(result: dict) -> list[str]:
     lines = [
         f"[マクロ健全性] {result['checked']}系列を判定"
         f"（stale={len(result['stale'])} / missing={len(result['missing'])}"
+        f" / future={len(result.get('future', []))}"
         f" / excluded={len(result['excluded'])}・基準日 {result['as_of']}）"
     ]
     for e in result["missing"]:
         mark = "CRITICAL" if e["critical"] else "warn"
         lines.append(f"  [{mark}] {e['code']}: macro_data に1行も無い"
                      f"（{e['group']} / {e['freq']}）")
+    for e in result.get("future", []):
+        mark = "CRITICAL" if e["critical"] and e["ahead_days"] > e["period"] else "warn"
+        lines.append(f"  [{mark}] {e['code']}: last={e['last']} が基準日より"
+                     f" {e['ahead_days']}日先（lag_days が実配信ラグ超過"
+                     f"・観測周期{e['period']}日）")
     for e in result["stale"]:
         mark = "CRITICAL" if e["critical"] else "warn"
         lines.append(f"  [{mark}] {e['code']}: last={e['last']}"

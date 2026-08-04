@@ -1085,6 +1085,32 @@ def _fetch_latest_fin_by_ec(db, edinet_codes: list) -> dict:
 
 # ── マクロデータ（為替・金利・指数・コモディティ）─────────────────────────
 
+# ── 観測基準日（anchor）の群既定 ────────────────────────────────────────────
+# `lag_days` は**この日に加算**されて trade_date になる。基準日が群ごとに違うため、
+# **`lag_days` の数値を群をまたいで直接比較してはならない**（CONTEXT.md「公表ラグ補正」）。
+# 四半期系列なら期首基準と期末基準で 90 日ぶんの下駄が付き、JP_REAL_GDP（FRED・135）と
+# ESRI GDP（60）はどちらも実質「期末+45〜60日」を指す——この差が明文化されていなかった
+# ことが #447 の旧診断（四半期系列に 80〜96 日の先読みがあるという誤り）を招いた。
+#
+#   period_start: 参照期間の**期首**日を基準にする（FRED / 日銀 / e-Stat / OECD）
+#   period_end:   参照期間の**期末**＝翌期初日を基準にする（ESRI・_parse_esri_gdp_csv）
+#   collection:   参照期間を持たず**収集日**そのものを使う（市場系・ニュース系・IMF 継続収集）
+#
+# 新しい収集チャネルを足すときはここへ 1 行加える（`tests/test_collect_macro.py::
+# test_every_series_group_declares_anchor` が未宣言を落とす）。
+SERIES_ANCHOR: dict[str, str] = {
+    "MACRO_SERIES":       "collection",    # Yahoo/stooq の市場系（その日の終値）
+    "FRED_SERIES":        "period_start",
+    "BOJ_SERIES":         "period_start",
+    "OECD_SERIES":        "period_start",
+    "ESTAT_SERIES":       "period_start",
+    "ESTAT_INDEX_SERIES": "period_start",
+    "ESRI_SERIES":        "period_end",    # 参照四半期の翌四半期初日（下記 _parse_esri_gdp_csv）
+    "IMF_SERIES":         "period_start",  # バックフィルは vintage 期首。継続収集は収集日
+    "GDELT_SERIES":       "collection",
+    "WIKIMEDIA_SERIES":   "collection",
+}
+
 # stooq ティッカー定義。category は 'fx' / 'rate' / 'equity' / 'commodity' / 'volatility'。
 # 本番収集は GitHub Actions（Azure IP）上で Yahoo Finance を優先する（stooq は 403 ブロック）。
 # VIX/DXY/US5Y/US30Y は #218 フェーズ1 で追加。Yahoo のみで取得するため stooq ticker は
@@ -1144,12 +1170,16 @@ FRED_SERIES: list[dict] = [
     # IRLTLT01JPM156N は OECD MEI 由来の**月次**系列（末尾 M156N）。freq を省くと
     # _GROUP_DEFAULT_FREQ["FRED_SERIES"]="daily"（許容14日）で判定され、平常運転の
     # 月次ラグ（実測 35〜64日）が毎晩 CRITICAL になる＝#444 の狼少年。
-    # lag_days=70: 2026-08-04 実測で 6月分（obs=2026-06-01）は配信済み・7月分は未配信＝
-    # 実配信ラグの上限が 64日。マージン込みの 70日で先読みバイアスを実質ゼロにする。
-    # stale_days=60: lag_days シフトで trade_date が最大 70日ぶん「新しく」なるため、
-    # freq 既定の 130日をそのまま使うと配信停止の検知が同じだけ遅れる（#438 の BCOM と同型）。
-    # 月次間隔31日＋余裕で 60日を明示し、シフト前と同等の検知力（配信停止から約66日）を保つ。
-    {"code": "JP10Y_FRED",   "name": "日10年金利（FRED）",        "category": "rate",      "fred_id": "IRLTLT01JPM156N", "freq": "monthly", "lag_days": 70, "stale_days": 60},
+    # lag_days=64（#447 で 70 から是正・anchor=period_start）: **実配信ラグの実測上限**。
+    # 2026-08-04 時点で6月分（obs=2026-06-01）は配信済み・7月分は未配信＝6月分は obs+64 には
+    # 確実に存在した。この系列は #444 の再収集で全行の `created_at` が潰れており実測点が無い
+    # （ADR-0028 規則6 の罠にかかった実例）ため、先読みゼロを保証できるのは上限側のこの値だけ。
+    # 参考の推定値は 55（月中平均の確定31 + OECD MEI→FRED 取り込み20〈JP_UNEMP で実測〉+ 4）
+    # だが、推定で下げると検証手段の無い先読みが残るため採らない。
+    # **70 は上限 64 すら超えており trade_date が常に未来日だった**（max=2026-08-10＝6日先）。
+    # 未来日の間は経過日数が負になり stale 判定が構造的に成立しない（ADR-0028 Consequences）。
+    # stale_days=62: 理論最大 31日（観測周期31 + 実配信ラグ64 − lag_days 64）+ 観測周期31。
+    {"code": "JP10Y_FRED",   "name": "日10年金利（FRED）",        "category": "rate",      "fred_id": "IRLTLT01JPM156N", "freq": "monthly", "lag_days": 64, "stale_days": 62},
     {"code": "T10Y2Y",       "name": "米10y−2yスプレッド",       "category": "rate",      "fred_id": "T10Y2Y"},
     # ── 政策不確実性（#404）─────────────────────────────────────────────────
     # Baker-Bloom-Davis の Economic Policy Uncertainty Index（新聞記事ベース）。日次版のため
@@ -1165,10 +1195,14 @@ FRED_SERIES: list[dict] = [
     # lag_days 未指定の既存5系列は 0=シフト無し（完全後方互換）。
     # 採用前に各 fred_id の最終更新日を確認すること（OECD 旧系列は凍結あり：CPALTT01JPM657N 等）。
     {"code": "JP_REAL_GDP",  "name": "日本 実質GDP",        "category": "real_economy", "fred_id": "JPNRGDPEXP",      "freq": "quarterly", "lag_days": 135},
-    # stale_days=60: 健全時の理論最大 30日（観測周期30 + 実配信ラグ60 − lag_days 60）に観測周期
-    # 30日を足した値＝「公表を1回スキップしたら鳴る」（ADR-0028）。lag_days=60 のシフト分だけ
-    # last が新しく見えるため、freq 既定 105日のままでは配信停止の検知が鈍る（#444 と同型）。
-    {"code": "JP_UNEMP",     "name": "日本 失業率",         "category": "labor",        "fred_id": "LRUNTTTTJPM156S", "freq": "monthly",   "lag_days": 60, "stale_days": 60},
+    # lag_days=82（#447 で 60 から是正・anchor=period_start）: 労働力調査は調査月の翌月末に
+    # 公表される（期首基準の最遅 62日）が、**FRED（OECD MEI 経由）への取り込みはさらに遅れる**。
+    # 2026年5月分は総務省が 06-30 に公表し、FRED へ現れたのは 07-20（macro_data.created_at 実測
+    # ＝期首から 80日）。62 + 20 = 82。総務省の公表日で線を引くと取り込み分がそのまま先読みに
+    # なる——**先読みは収集元（FRED）の実配信ラグで判定する**（ADR-0028 規則4・CONTEXT.md
+    # 「実配信ラグ」）。
+    # stale_days=62: 理論最大 31日（観測周期31 + 実配信ラグ82 − lag_days 82）+ 観測周期31。
+    {"code": "JP_UNEMP",     "name": "日本 失業率",         "category": "labor",        "fred_id": "LRUNTTTTJPM156S", "freq": "monthly",   "lag_days": 82, "stale_days": 62},
     # JP_IP (JPNPROINDMISMEI) は 2024-04-30 で凍結確認済み (#253)。e-Stat コネクタ実装まで除外。
     {"code": "JP_TRADE_BAL", "name": "日本 貿易収支",       "category": "trade",        "fred_id": "XTNTVA01JPQ664S", "freq": "quarterly", "lag_days": 135},
 ]
@@ -1185,6 +1219,18 @@ BOJ_RATE_SLEEP = 0.5  # 同一 DB への連続リクエストに備えたバッ�
 
 # freq="monthly" → SURVEY_DATES は YYYYMM（e.g. 202501）
 # freq="quarterly" → SURVEY_DATES は YYYYQQ（01=Q1/4月, 02=Q2/7月, 03=Q3/10月, 04=Q4/翌1月）
+#
+# 公表日＝実配信日（日銀の時系列統計 API は公表と同時に反映される。2026年6月分の実測で
+# M2 が 07-09・CGPI が 07-10 に `macro_data.created_at` へ現れ、下記カレンダーと一致した）:
+#   マネーストック速報    翌月第7営業日（3月・9月分は金融機関からの入手が遅れ第9営業日）
+#   マネタリーベース      翌月第2営業日
+#   企業物価指数（CGPI）  翌月第8営業日（速報値）
+#   短観                  調査月の初旬（4/7/10/12月）＝ lag_days=14 は保守側で余裕あり
+# lag_days は anchor=period_start（SERIES_ANCHOR）＝参照月の**期首**へ加算される。月次3系列は
+# 「月の最大日数 31 + 正月休みを挟む1月の第N営業日」を実配信ラグの理論最大として置き直した（#447）。
+# stale_days は月次3系列とも 62日（ADR-0028 規則5）。lag_days を実配信ラグの理論最大以上に
+# 取っているため健全時の理論最大遅延は観測周期 31 日を超えず、その 2 倍＝「公表を1回
+# スキップしたら鳴る」線になる。
 BOJ_SERIES: list[dict] = [
     {
         "code": "JP_M2",
@@ -1193,7 +1239,10 @@ BOJ_SERIES: list[dict] = [
         "db": "MD02",
         "boj_code": "MAM1NAM2M2MO",
         "freq": "monthly",
-        "lag_days": 21,
+        # 理論最大 45日＝31（月の最大日数）+ 14（正月休みを挟む1月の第7営業日）。マージン込み 47。
+        # 実測 2026年6月分は 07-09 公表＝期首から 38日。旧値 21 は **17日の先読み**だった（#447）。
+        "lag_days": 47,
+        "stale_days": 62,
     },
     {
         "code": "JP_TANKAN_MFG_LARGE",
@@ -1238,7 +1287,10 @@ BOJ_SERIES: list[dict] = [
         "db": "PR01",
         "boj_code": "PRCG20_2200000000",
         "freq": "monthly",
-        "lag_days": 30,
+        # 理論最大 46日＝31 + 15（正月休みを挟む1月の第8営業日）。マージン込み 47。
+        # 実測 2026年6月分は 07-10 公表＝期首から 39日。旧値 30 は **9日の先読み**だった（#447）。
+        "lag_days": 47,
+        "stale_days": 62,
     },
     {
         "code": "JP_MONETARY_BASE",
@@ -1247,7 +1299,11 @@ BOJ_SERIES: list[dict] = [
         "db": "MD01",
         "boj_code": "MABS1AN11",
         "freq": "monthly",
-        "lag_days": 14,
+        # 理論最大 37日＝31 + 6（正月休みを挟む1月の第2営業日）。マージン込み 38。
+        # 2026年6月分の公表は 07-02（翌月第2営業日）＝期首から 31日。旧値 14 は **17日の先読み**
+        # だった（#447。macro_data.created_at は一括収集日 07-08 に潰れており公表日で判定した）。
+        "lag_days": 38,
+        "stale_days": 62,
     },
 ]
 
@@ -1293,6 +1349,12 @@ OECD_SERIES: list[dict] = [
 ESTAT_API_KEY  = os.getenv("ESTAT_API_KEY", "")
 ESTAT_BASE_URL = "https://api.e-stat.go.jp/rest/3.0/app/json/getStatsData"
 
+#
+# 公表日＝実配信日（e-Stat は公表と同時に反映される。2026年6月分の全国 CPI は 2026-07-24 に
+# `macro_data.created_at` へ現れ、総務省の公表カレンダーと一致した）。anchor=period_start:
+#   全国       翌月の「19日を含む週の金曜」8:30（週は日曜始まり＝最遅 25日）
+#   東京都区部 当月の「26日を含む週の金曜」8:30（速報性が高く当月中に出る）
+# lag_days は参照月の**期首**へ加算されるため、理論最大は「月の最大日数 31 + 公表日」で置く。
 ESTAT_SERIES: list[dict] = [
     {
         "code": "JP_CPI_TOTAL",
@@ -1302,7 +1364,13 @@ ESTAT_SERIES: list[dict] = [
         "cd_tab": "1",
         "cd_cat01": "0001",
         "cd_area": "00000",
-        "lag_days": 30,
+        # 理論最大 56日＝31 + 25（19日を含む週の金曜の最遅）。実測 2026年6月分は 07-24 公表
+        # ＝期首から 53日。旧値 30 は **23日の先読み**で、M-1/M-2/M-3/M-6 の学習・バックテスト
+        # 全般を成績が良く見える方向へ歪めていた（#447）。
+        "lag_days": 56,
+        # stale_days=62: 理論最大 31日（観測周期31 + 実配信ラグ56 − lag_days 56）+ 観測周期31
+        # ＝「公表を1回スキップしたら鳴る」（ADR-0028 規則5）。
+        "stale_days": 62,
     },
     {
         "code": "JP_CPI_CORE",
@@ -1312,7 +1380,8 @@ ESTAT_SERIES: list[dict] = [
         "cd_tab": "1",
         "cd_cat01": "0161",
         "cd_area": "00000",
-        "lag_days": 30,
+        "lag_days": 56,   # 全国総合と同一リリース（同上）
+        "stale_days": 62,
     },
     {
         "code": "JP_CPI_TOKYO",
@@ -1322,7 +1391,11 @@ ESTAT_SERIES: list[dict] = [
         "cd_tab": "1",
         "cd_cat01": "0001",
         "cd_area": "13A01",
-        "lag_days": 30,
+        # 都区部は**当月分を当月中**に出す。26日が日曜だと金曜が月末（30日月なら翌月1日）に
+        # ずれ、期首からの最遅が 30日＝旧値 30 はマージンがちょうど 0 だった。祝日ずれの 1 日を
+        # 足して 31 とする（先読みは無かったので再収集は全国 CPI のついで・#447）。
+        "lag_days": 31,
+        "stale_days": 62,
     },
 ]
 

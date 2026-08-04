@@ -107,10 +107,10 @@ class TestFreshnessCheck:
         assert r["n_critical_bad"] == 1
 
     def test_low_frequency_series_use_wider_limit(self, db):
-        """月次・四半期は公表ラグが大きい（JP_IIP 実測 96日）ので日次基準で落とさない。"""
+        """月次・四半期は公表ラグが大きいので日次基準（14日）で落とさない。"""
         _seed_all_fresh(db)
         db.query(MacroData).filter(MacroData.series_code == "JP_M2").delete()
-        _seed(db, "JP_M2", AS_OF - timedelta(days=60))   # 月次: 許容 130日
+        _seed(db, "JP_M2", AS_OF - timedelta(days=40))   # 月次: 許容 62日
 
         r = mh.check_macro_freshness(db, as_of=AS_OF)
         assert "JP_M2" not in {e["code"] for e in r["stale"]}
@@ -118,21 +118,21 @@ class TestFreshnessCheck:
     def test_series_stale_days_overrides_freq_default(self, db, monkeypatch):
         """lag_days でシフトした系列は個別 stale_days で検知力を保つ（#444）。
 
-        JP10Y_FRED は lag_days=70 で trade_date が後ろへずれる＝last が最大70日ぶん
-        「新しく」見える。freq 既定（monthly=130日）のままでは配信停止の検知がその分
-        遅れるため、系列定義の stale_days=60 を優先する。
+        JP10Y_FRED は lag_days=64 で trade_date が後ろへずれる＝last がその分だけ
+        「新しく」見える。freq 既定（monthly=105日）のままでは配信停止の検知が遅れる
+        ため、系列定義の stale_days=62 を優先する。
         """
         import collector_prices as cp
         monkeypatch.setattr(cp, "FRED_API_KEY", "dummy")
         _seed_all_fresh(db)
         db.query(MacroData).filter(MacroData.series_code == "JP10Y_FRED").delete()
-        # monthly 既定（130日）なら通る遅れだが、個別 stale_days=60 を超えるので stale
+        # monthly 既定（105日）なら通る遅れだが、個別 stale_days=62 を超えるので stale
         _seed(db, "JP10Y_FRED", AS_OF - timedelta(days=100))
 
         r = mh.check_macro_freshness(db, as_of=AS_OF)
         stale = {e["code"]: e for e in r["stale"]}
         assert "JP10Y_FRED" in stale
-        assert stale["JP10Y_FRED"]["limit"] == 60
+        assert stale["JP10Y_FRED"]["limit"] == 62
         assert stale["JP10Y_FRED"]["limit"] < mh.FREQ_STALE_DAYS["monthly"]
 
     def test_lag_days_alone_does_not_tighten_limit(self, db, monkeypatch):
@@ -157,6 +157,39 @@ class TestFreshnessCheck:
         r = mh.check_macro_freshness(db, as_of=AS_OF)
         assert {e["code"] for e in r["stale"]} == set()
 
+    def test_future_trade_date_is_reported_as_warning(self, db, monkeypatch):
+        """`trade_date` が基準日より先なら future に出す（stale には混ぜない・#447）。
+
+        `lag_days` が実配信ラグを超えると起きる。数日なら安全側の失敗なので warn 止まりだが、
+        **黙って通してはいけない**——経過日数が負の間は stale 判定が構造的に成立せず、
+        #444 が作った JP10Y_FRED の 6 日先 `trade_date` はどのゲートにも掛からなかった。
+        """
+        import collector_prices as cp
+        monkeypatch.setattr(cp, "FRED_API_KEY", "dummy")
+        _seed_all_fresh(db)
+        db.query(MacroData).filter(MacroData.series_code == "JP10Y_FRED").delete()
+        _seed(db, "JP10Y_FRED", AS_OF + timedelta(days=6))
+
+        r = mh.check_macro_freshness(db, as_of=AS_OF)
+        future = {e["code"]: e for e in r["future"]}
+        assert "JP10Y_FRED" in future
+        assert future["JP10Y_FRED"]["ahead_days"] == 6
+        assert "JP10Y_FRED" not in {e["code"] for e in r["stale"]}
+        assert r["n_critical_bad"] == 0          # 1 周期（31日）以内は落とさない
+        assert "6日先" in "\n".join(mh.format_report(r))
+
+    def test_future_beyond_one_period_is_critical(self, db, monkeypatch):
+        """観測周期を超える未来日は `lag_days` が丸ごと1周期ぶん過大＝設計ミスとして落とす。"""
+        import collector_prices as cp
+        monkeypatch.setattr(cp, "FRED_API_KEY", "dummy")
+        _seed_all_fresh(db)
+        db.query(MacroData).filter(MacroData.series_code == "JP10Y_FRED").delete()
+        _seed(db, "JP10Y_FRED", AS_OF + timedelta(days=40))   # monthly の観測周期 31日 < 40
+
+        r = mh.check_macro_freshness(db, as_of=AS_OF)
+        assert r["future"][0]["code"] == "JP10Y_FRED"
+        assert r["n_critical_bad"] == 1
+
     def test_stopped_series_are_rejected_and_excluded_together(self):
         """配信停止が確定した系列は「既定特徴量からの棄却」と「鮮度判定の除外」を同期させる。
 
@@ -178,6 +211,9 @@ class TestFreshnessCheck:
 
         `lag_days` が大きいほど last が新しく見え freq 既定との乖離が開くため、既定のままでは
         配信停止の検知が鈍る（JP_CLI は理論最大 5日に対し freq 既定 105日＝21倍）。
+        しきい値は**観測周期 31日**。`lag_days` が 1 周期を超えた時点で last は「1 回分の
+        公表を先取りした」ように見えるため、そこから個別指定を必須にする（#447 で月次系列の
+        `lag_days` を実配信ラグベースへ引き上げた際に 60 から下げた）。
         """
         import collector_prices as cp
         offenders = []
@@ -190,9 +226,37 @@ class TestFreshnessCheck:
             for s in series_list:
                 if s.get("freq", default_freq) != "monthly":
                     continue
-                if s.get("lag_days", 0) >= 60 and s.get("stale_days") is None:
+                if (s.get("lag_days", 0) >= mh.FREQ_PERIOD_DAYS["monthly"]
+                        and s.get("stale_days") is None):
                     offenders.append(s["code"])
         assert offenders == []
+
+    def test_lag_days_cover_measured_release_lag(self):
+        """`lag_days` は実測した実配信ラグ以上でなければ先読みが残る（ADR-0028 規則4・#447）。
+
+        値は 2026-08-04 に `macro_data.created_at`（行の初回挿入時刻＝その観測が外部ソース上で
+        取得可能になった日）と公表カレンダーの双方で突き合わせた実測。観測基準日はいずれも
+        参照月の**期首**（`SERIES_ANCHOR` が period_start）。
+
+        JP10Y_FRED は #444 の再収集で全行の `created_at` が潰れており実測点が無いため対象外。
+        新しい観測が入った時点で同じ手順（`created_at` − 観測期首）で測り直す。
+        """
+        import collector_prices as cp
+        measured = {           # 系列 → 実測した実配信ラグ（日・期首起点）
+            "JP_CPI_TOTAL":     53,   # 2026年6月分が 07-24 公表（created_at 一致）
+            "JP_CPI_CORE":      53,   # 同一リリース
+            "JP_CPI_TOKYO":     26,   # 当月26日を含む週の金曜（2026年6月分は 06-26）
+            "JP_M2":            38,   # 2026年6月分が 07-09 公表（翌月第7営業日・created_at 一致）
+            "JP_CGPI":          39,   # 2026年6月分が 07-10 公表（翌月第8営業日）
+            "JP_MONETARY_BASE": 31,   # 2026年6月分が 07-02 公表（翌月第2営業日）
+            "JP_UNEMP":         80,   # 2026年5月分が FRED へ 07-20 に出現（総務省公表は 06-30）
+        }
+        defined = {s["code"]: s.get("lag_days", 0)
+                   for group in (cp.FRED_SERIES, cp.BOJ_SERIES, cp.ESTAT_SERIES)
+                   for s in group}
+        shortfall = {code: (defined[code], lag)
+                     for code, lag in measured.items() if defined[code] < lag}
+        assert shortfall == {}, f"lag_days が実配信ラグ未満＝先読み: {shortfall}"
 
     def test_excluded_series_never_counted_but_always_reported(self, db):
         """除外系列は判定対象外。ただしレポートには必ず出す（黙って消さない）。"""
@@ -242,8 +306,16 @@ class TestFreshnessCheck:
         assert {s["code"] for s in cp.BOJ_SERIES} <= codes
         # freq は全系列で許容遅延表に載っている値
         assert all(s["freq"] in mh.FREQ_STALE_DAYS for s in mh.expected_series())
+        assert all(s["freq"] in mh.FREQ_PERIOD_DAYS for s in mh.expected_series())
         # stale_days は常にキーとして存在する（未指定は None＝freq 既定を使う・#444）
         assert all("stale_days" in s for s in mh.expected_series())
+        # anchor（観測基準日）も定義から引く。lag_days の比較可能性を示すため（#447）
+        assert all(s["anchor"] in {"period_start", "period_end", "collection"}
+                   for s in mh.expected_series())
+        by_code = {s["code"]: s for s in mh.expected_series()}
+        assert by_code["JP_CPI_TOKYO"]["anchor"] == "period_start"
+        assert by_code["JP_GDP_CAPEX"]["anchor"] == "period_end"
+        assert by_code["USDJPY"]["anchor"] == "collection"
 
     def test_api_key_gated_groups_are_skipped_when_unset(self, monkeypatch):
         """キー未設定で収集自体が走らないグループは判定対象から外す（誤検知防止）。"""

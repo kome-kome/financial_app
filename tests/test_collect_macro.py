@@ -201,7 +201,10 @@ def test_japan_macro_fred_series_registered():
     # 第1弾 日本実体経済指標が lag_days 付きで登録されている
     assert by_code["JP_REAL_GDP"]["fred_id"] == "JPNRGDPEXP"
     assert by_code["JP_REAL_GDP"]["lag_days"] == 135
-    assert by_code["JP_UNEMP"]["lag_days"] == 60
+    # 労働力調査は翌月末公表（期首から最遅62日）だが FRED（OECD MEI 経由）への取り込みが
+    # さらに約20日遅れる（2026年5月分＝総務省 06-30 公表 → FRED 07-20 出現の実測・#447）。
+    assert by_code["JP_UNEMP"]["lag_days"] == 82
+    assert by_code["JP_UNEMP"]["stale_days"] == 62
     # JP_IP (JPNPROINDMISMEI) は 2024-04-30 で凍結のため除外中 (#253)
     assert "JP_IP" not in by_code
     assert by_code["JP_TRADE_BAL"]["lag_days"] == 135
@@ -209,10 +212,11 @@ def test_japan_macro_fred_series_registered():
     # FRED_SERIES 既定の daily（許容14日）で判定され平常運転で毎晩 CRITICAL になる。
     assert by_code["JP10Y_FRED"]["fred_id"] == "IRLTLT01JPM156N"
     assert by_code["JP10Y_FRED"]["freq"] == "monthly"
-    # 実配信ラグ上限 64日（2026-08-04 実測）＋マージン
-    assert by_code["JP10Y_FRED"]["lag_days"] == 70
-    # シフトで last が新しく見える分を打ち消す個別許容（freq 既定 130日より短く保つ）
-    assert by_code["JP10Y_FRED"]["stale_days"] == 60
+    # 実配信ラグの実測上限 64日（2026-08-04 時点で6月分は配信済み・7月分は未配信）。
+    # 70 はその上限すら超えており trade_date が常に未来日になっていた（#447）。
+    assert by_code["JP10Y_FRED"]["lag_days"] == 64
+    # シフトで last が新しく見える分を打ち消す個別許容（freq 既定 105日より短く保つ）
+    assert by_code["JP10Y_FRED"]["stale_days"] == 62
     # #381 非ICE代替の信用スプレッド（BAA10Y=Moody's Baa−10Y・日次・truncate されない）
     assert by_code["BAA_SPREAD"]["fred_id"] == "BAA10Y"
     assert by_code["BAA_SPREAD"]["category"] == "credit"
@@ -291,7 +295,8 @@ def test_boj_series_registered():
     assert "JP_M2" in by_code
     assert by_code["JP_M2"]["db"] == "MD02"
     assert by_code["JP_M2"]["freq"] == "monthly"
-    assert by_code["JP_M2"]["lag_days"] == 21
+    # 翌月第7営業日公表（3月・9月分は第9営業日）。期首起点の理論最大 45日 + マージン（#447）
+    assert by_code["JP_M2"]["lag_days"] == 47
     # 短観 4バリアント登録済み
     for code in ("JP_TANKAN_MFG_LARGE", "JP_TANKAN_NONMFG_LARGE",
                  "JP_TANKAN_MFG_SMALL", "JP_TANKAN_NONMFG_SMALL"):
@@ -304,11 +309,16 @@ def test_boj_series_registered():
     assert by_code["JP_CGPI"]["db"] == "PR01"
     assert by_code["JP_CGPI"]["boj_code"] == "PRCG20_2200000000"
     assert by_code["JP_CGPI"]["freq"] == "monthly"
+    assert by_code["JP_CGPI"]["lag_days"] == 47          # 翌月第8営業日（#447）
     # マネタリーベース（#282）
     assert "JP_MONETARY_BASE" in by_code
     assert by_code["JP_MONETARY_BASE"]["db"] == "MD01"
     assert by_code["JP_MONETARY_BASE"]["boj_code"] == "MABS1AN11"
     assert by_code["JP_MONETARY_BASE"]["freq"] == "monthly"
+    assert by_code["JP_MONETARY_BASE"]["lag_days"] == 38  # 翌月第2営業日（#447）
+    # 月次3系列は個別 stale_days=62（観測周期31の2倍・ADR-0028 規則5）
+    for code in ("JP_M2", "JP_CGPI", "JP_MONETARY_BASE"):
+        assert by_code[code]["stale_days"] == 62, code
 
 
 def test_estat_series_registered():
@@ -320,10 +330,35 @@ def test_estat_series_registered():
     assert by_code["JP_CPI_CORE"]["cd_cat01"]  == "0161"   # 生鮮食品を除く総合
     # 表示名は "13100 東京都区部" だが実際の cdArea コードは 13A01（#262 で実API確認）
     assert by_code["JP_CPI_TOKYO"]["cd_area"]  == "13A01"  # 東京都区部
-    assert by_code["JP_CPI_CORE"]["lag_days"]  == 30
+    # 全国は翌月「19日を含む週の金曜」公表＝期首起点の理論最大 56日。旧値 30 は 23日の
+    # 先読みだった（2026年6月分の実公表 07-24 を実測・#447）。都区部は当月中に出るため別値。
+    assert by_code["JP_CPI_CORE"]["lag_days"]  == 56
+    assert by_code["JP_CPI_TOTAL"]["lag_days"] == 56
+    assert by_code["JP_CPI_TOKYO"]["lag_days"] == 31
     # cdTab（表章項目=指数）未指定が年次データのみ返却される原因だった（#262）
     for code in ("JP_CPI_TOTAL", "JP_CPI_CORE", "JP_CPI_TOKYO"):
         assert by_code[code]["cd_tab"] == "1", f"{code} に cd_tab 未設定"
+        assert by_code[code]["stale_days"] == 62, code
+
+
+def test_every_series_group_declares_anchor():
+    """全ての収集チャネルが観測基準日（anchor）を宣言する（#447）。
+
+    `lag_days` は anchor へ加算されるため、anchor が違う群の `lag_days` を横並びで比べては
+    いけない（四半期系列なら期首基準と期末基準で 90日ぶんの下駄が付く）。宣言を必須にして
+    おかないと、新チャネル追加時に基準日が暗黙のまま増え、#447 の旧診断と同じ読み違いが起きる。
+    """
+    import collector_prices as cp
+    import macro_health as mh
+
+    groups = set(mh._GROUP_DEFAULT_FREQ)
+    assert groups <= set(cp.SERIES_ANCHOR), groups - set(cp.SERIES_ANCHOR)
+    assert set(cp.SERIES_ANCHOR) == groups
+    assert all(v in {"period_start", "period_end", "collection"}
+               for v in cp.SERIES_ANCHOR.values())
+    # ESRI だけが期末基準（_parse_esri_gdp_csv が翌四半期初日を返す）
+    assert cp.SERIES_ANCHOR["ESRI_SERIES"] == "period_end"
+    assert cp.SERIES_ANCHOR["FRED_SERIES"] == "period_start"
 
 
 def test_boj_api_error_returns_empty():
