@@ -286,11 +286,24 @@ _PENDING_EVAL_FEATURES: set[str] = set()
 # #451（ADR-0028）の鉱工業指数2系列: `--features macro_jp_iip_yoy,macro_jp_iip_inventory_yoy`
 # の実測（3,981社・67ヶ月・91,482サンプル・17 fold）で4検定すべて非有意——M-2 rank-IC
 # −0.0027 (p=0.527) / M-2 売り側 spread −0.0008 (p=0.731) / M-6 rank-IC +0.0001 (p=0.942) /
-# M-6 売り側 spread −0.0017 (p=0.472)。4検定中3つは符号がマイナス＝入れると悪化方向。
-# strict 母集団は 67ヶ月・91,482サンプルで不変（外しても 1 サンプルも減らない）。
+# M-6 売り側 spread −0.0017 (p=0.472)。strict 母集団は 67ヶ月・91,482サンプルで不変
+# （外しても 1 サンプルも減らない）。
 # 併せて e-Stat 側が 2026年3月分（trade_date=2026-04-30）で配信を止めており、代替ソース
 # （経産省直接CSV・ESRI 級の工数）を実装する根拠も無いと判断した。収集自体は継続する
 # （e-Stat が年単位で更新されるため・`macro_health.EXCLUDED_SERIES` で鮮度判定からは退避）。
+#
+# **#454 の再判定（2026-08-05・lag_days 是正後データ）**: 上の2群はどちらも #447 以前の
+# データで判定しており、`trade_date` が動いた以上は前提が変わっている（asof が拾う値が別物に
+# なるため）。同一パネル（3,981社・67ヶ月・91,482サンプル・17 fold）で測り直し、**両群とも
+# 棄却が維持**された:
+#   attention 5系列 … M-2 rank-IC +0.0054 (p=0.626) / M-2 売り側 +0.0054 (p=0.155) /
+#                     M-6 rank-IC −0.0013 (p=0.146) / M-6 売り側 +0.0012 (p=0.112)
+#   鉱工業指数2系列 … M-2 rank-IC +0.0033 (p=0.229) / M-2 売り側 +0.0055 (p=0.027) /
+#                     M-6 rank-IC −0.0025 (p=0.233) / M-6 売り側 −0.0012 (p=0.653)
+# いずれも Bonferroni α=0.0125 を通らず strict 母集団も不変。ただし**鉱工業指数の符号構成は
+# 是正前後で入れ替わった**（是正前 3負1正 → 是正後 2正2負・最接近は M-2 売り側 p=0.027）。
+# 棄却の根拠は「符号が負」ではなく「補正後 α を通らないこと」＋ e-Stat の配信停止に置く
+# （符号の向きだけを棄却理由に書くと、データ世代が変わるたびに理由が揺れる）。
 _GATE_REJECTED_FEATURES: set[str] = {
     "macro_jp_news_tone_zscore",
     "macro_jp_news_econ_tone_zscore",
@@ -300,6 +313,27 @@ _GATE_REJECTED_FEATURES: set[str] = {
     "macro_jp_iip_yoy",
     "macro_jp_iip_inventory_yoy",
 }
+# **既定入りの再判定（#454・2026-08-05）**: #447 で `lag_days` を引き直した月次6本
+# （`macro_jp_cpi_core_yoy` / `macro_jp_m2_yoy` / `macro_jp_cgpi_yoy` /
+# `macro_jp_monetary_base_yoy` / `macro_jp_unemp_zscore` / `macro_jp10y_fred_zscore`）を
+# leave-out で測り直した（base=既定−6本 vs 既定）。**既定は変更していない**——4検定とも
+# Bonferroni α=0.0125 を通らず、除外を正当化する有意な悪化も無かったため:
+#   M-2 rank-IC +0.0041 (p=0.562) / M-2 売り側 −0.0068 (p=0.270) /
+#   M-6 rank-IC +0.0009 (p=0.714) / M-6 売り側 +0.0023 (p=0.070)
+# strict 母集団は 67ヶ月・91,482サンプルで不変（外してもサンプルは1行も増えない）。
+#
+# **判定規則（既定入りに対する非対称性）**: 昇格ゲートは「候補を足すか否か」の検定であり、
+# 帰無仮説は「base のまま」に置かれる。これを既定入りの特徴量へそのまま当てると帰無が反転し
+# 「残す根拠」を要求する形になるため、スクリプトの `keep as option only` という verdict 文字列を
+# 既定からの除外と読み替えてはならない。**既定を減らす向きの変更も、増やす向きと同じく
+# 補正後 α を通る実測を要する**（#358 の「全選択肢を既定 ON・過剰選択は BIC/正則化が抑える」
+# 方針を、検出力の低い非有意結果で崩さないため）。
+#
+# **M-2 の点差に関する注意（Issue #457）**: leave-out 用法では base と with_cand で特徴量の
+# **列順**が変わる（抜いた6本が末尾へ回る）。XGBoost は `random_state=42` 固定でも列順に依存
+# するため、同一集合・順序違いだけで rank-IC が 0.0014 動く実測がある。M-6（ElasticNet）は
+# 順序不変（同一集合の再実行で差 0.0001）なので、leave-out の解釈は M-6 側を主に読む。
+# 候補追加という本来の用法では共通部分の順序が保たれるため、この交絡は起きない。
 DEFAULT_MACRO_FEATURES = [o["value"] for o in MACRO_FEATURE_OPTIONS
                           if o["value"] not in _STRICT_TRUNCATED_FEATURES
                           and o["value"] not in _PENDING_EVAL_FEATURES

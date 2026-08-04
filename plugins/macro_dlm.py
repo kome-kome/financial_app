@@ -108,6 +108,12 @@ _PENDING_EVAL_FEATURES: set[str] = set()
 # （diff −0.0001・p=0.807）／売り側 spread +0.00131→+0.00126（diff −0.00005・p=0.513）。
 # OOF サンプル数は 652,247 で不変（非正水準による週落ちは起きない）、実行時間のみ
 # 69.3s→75.5s（+9%・状態次元 23→28）。月次（ADR-0024）に続き週次でも効かないと確定。
+#
+# **#454 の再判定（2026-08-05・lag_days 是正後データ）**: 上の判定は #447 以前のデータで
+# 出しており、`dlm_jp10y` の元系列 JP10Y_FRED が `lag_days` 70→64 で動いた以上、base 側の
+# ファクター集合が別物になっている。同一パネル（3,979社・49期・652,247 OOF ペア）で測り直し、
+# **棄却は維持**——rank-IC +0.0002 (p=0.832) / 売り側 spread −0.0002 (p=0.027)。どちらも
+# Bonferroni α=0.025 を通らない（売り側は符号が負＝入れると悪化方向）。
 _GATE_REJECTED_FEATURES: set[str] = {
     "dlm_news_tone",
     "dlm_news_econ_tone",
@@ -115,6 +121,19 @@ _GATE_REJECTED_FEATURES: set[str] = {
     "dlm_wiki_market_attn",
     "dlm_wiki_macro_attn",
 }
+# **既定入りの再判定（#454・2026-08-05）**: #447 の `lag_days` 是正で動いた M-3 側の
+# ファクターは `dlm_jp10y`（JP10Y_FRED・70→64）のみ（他は日次・anchor=collection で無影響）。
+# leave-out で測り直した結果 **既定は変更していない**——2検定とも Bonferroni α=0.025 を
+# 通らないため: rank-IC +0.0121→+0.0115（diff −0.0006・p=0.084）／売り側 spread ±0.0000
+# （p=0.900）。状態次元 21→22 のコストは elapsed 48.6s→47.0s で実質ゼロ、OOF サンプルも
+# 652,247 で不変。
+#
+# **ただし rank-IC の符号は負**（入れると悪化方向）で、2検定中では最も α に近い（p=0.084）。
+# `dlm_jp10y` は本節冒頭の設計（週次高頻度ファクター専用）に対する唯一の例外＝月次系列を
+# 日次ソース不在のやむを得ない代替として入れているもので、週次差分が多くの週でゼロになる。
+# 是正後データで負方向が出たことは設計上の懸念と整合するため、除外可否は追加実測で決める
+# （Issue #456）。**非有意のまま既定を減らす変更はしない**（規則は macro_snapshots.py の
+# `DEFAULT_MACRO_FEATURES` 直上と共通＝増減どちらの向きも補正後 α を通る実測を要する）。
 DEFAULT_MACRO_FEATURES = [o["value"] for o in MACRO_FEATURE_OPTIONS
                           if o["value"] not in _PENDING_EVAL_FEATURES
                           and o["value"] not in _GATE_REJECTED_FEATURES]
