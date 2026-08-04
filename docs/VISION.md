@@ -18,7 +18,7 @@
 - 外出先からブラウザで使えるようにする（外部サーバー運用）
 - 操作は直感的・視覚的なもののみ。コードを書かなくても使えること
 
-電力消費への配慮から、ローカル PC ではなく外部サーバーで常時稼働させる。
+ローカル PC を 24 時間つけっぱなしにしないため、**定期実行は GitHub Actions に置く**（日次の差分収集・夜間のスコア更新）。Render は外出先から結果を見るための口で、15 分アイドルでスリープする＝**常時稼働はしない**（初回アクセスのコールドスタートは許容）。重い分析（sector_ols・M-1〜M-6 の学習）は Render では動かず、GitHub Actions かローカル実行が担う。詳細は [DEPLOYMENT.md](DEPLOYMENT.md)。
 
 ---
 
@@ -56,7 +56,7 @@
 
 ## デプロイ運用状況
 
-**現状**: Render（Free Web Service）+ Supabase（PostgreSQL）で稼働中。
+**現状**: Render（Free Web Service）+ Supabase（PostgreSQL）。Render は**閲覧用**で、15 分アイドルでスリープする（常時稼働ではない）。日次の収集と夜間のスコア更新は GitHub Actions が担う。
 詳細な運用ガイドと制約は [docs/DEPLOYMENT.md](DEPLOYMENT.md) を参照。
 
 | 課題 | 状態 | 対応 |
@@ -67,7 +67,7 @@
 | **環境分離** | ✅ 解決 | Render 環境変数 + `.env` ローカル開発のみ |
 | **DB が接続先固定前提** | ✅ 解決 | `DATABASE_URL` 環境変数で制御 → Supabase に接続 |
 | **EDINET / J-Quants API キー** | ✅ 解決 | Render の環境変数（`sync: false`）で管理 |
-| **スピンダウン回避** | ✅ 解決 | 自動収集は GitHub Actions に移行済みのため Render 停止は収集に無影響。UI コールドスタートのみ許容 |
+| **アイドル時のスピンダウン** | ✅ 許容（回避はしない） | 自動収集は GitHub Actions に移行済みで、Render の停止は収集に無影響。UI 初回アクセスのコールドスタート（実測 73 秒）は許容する設計 |
 | **DB バックアップ運用** | 🔄 未対応 | Supabase は自動バックアップ機能あり、運用ポリシー未確定 |
 
 ---
