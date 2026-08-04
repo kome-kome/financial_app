@@ -1141,7 +1141,15 @@ FRED_SERIES: list[dict] = [
     # M-1/M-4 の既定信用ファクターをこちらへ移し、HY_OAS/IG_OAS は選択肢（直近3年窓）として残す。
     {"code": "BAA_SPREAD",   "name": "米Baa社債スプレッド（Baa−10Y）", "category": "credit", "fred_id": "BAA10Y"},
     {"code": "BREAKEVEN10Y", "name": "米10年BEI（インフレ期待）", "category": "inflation", "fred_id": "T10YIE"},
-    {"code": "JP10Y_FRED",   "name": "日10年金利（FRED）",        "category": "rate",      "fred_id": "IRLTLT01JPM156N"},
+    # IRLTLT01JPM156N は OECD MEI 由来の**月次**系列（末尾 M156N）。freq を省くと
+    # _GROUP_DEFAULT_FREQ["FRED_SERIES"]="daily"（許容14日）で判定され、平常運転の
+    # 月次ラグ（実測 35〜64日）が毎晩 CRITICAL になる＝#444 の狼少年。
+    # lag_days=70: 2026-08-04 実測で 6月分（obs=2026-06-01）は配信済み・7月分は未配信＝
+    # 実配信ラグの上限が 64日。マージン込みの 70日で先読みバイアスを実質ゼロにする。
+    # stale_days=60: lag_days シフトで trade_date が最大 70日ぶん「新しく」なるため、
+    # freq 既定の 130日をそのまま使うと配信停止の検知が同じだけ遅れる（#438 の BCOM と同型）。
+    # 月次間隔31日＋余裕で 60日を明示し、シフト前と同等の検知力（配信停止から約66日）を保つ。
+    {"code": "JP10Y_FRED",   "name": "日10年金利（FRED）",        "category": "rate",      "fred_id": "IRLTLT01JPM156N", "freq": "monthly", "lag_days": 70, "stale_days": 60},
     {"code": "T10Y2Y",       "name": "米10y−2yスプレッド",       "category": "rate",      "fred_id": "T10Y2Y"},
     # ── 政策不確実性（#404）─────────────────────────────────────────────────
     # Baker-Bloom-Davis の Economic Policy Uncertainty Index（新聞記事ベース）。日次版のため
@@ -2242,12 +2250,47 @@ async def collect_macro_data(
     years_back: int = 5,
     on_progress: Optional[Callable[[int, int, str], None]] = None,
     cancel_check: Optional[Callable[[], bool]] = None,
+    only: Optional[list[str]] = None,
 ):
     """MACRO_SERIES（Yahoo/stooq）+ FRED_SERIES + BOJ_SERIES + OECD_SERIES + ESRI_SERIES +
     IMF_SERIES + ESTAT_SERIES + GDELT_SERIES + WIKIMEDIA_SERIES を macro_data に upsert。
     Yahoo Finance 優先（GitHub Actions Azure IP 対応）→ stooq フォールバック。FRED:
     FRED_API_KEY 設定時のみ。BOJ・OECD・ESRI・IMF・GDELT・Wikimedia: 常時収集（認証不要）。
-    e-Stat: ESTAT_API_KEY 設定時のみ。既存レコードは close 等を上書き（最新値で更新）。"""
+    e-Stat: ESTAT_API_KEY 設定時のみ。既存レコードは close 等を上書き（最新値で更新）。
+
+    only: series_code のリスト。指定時はグループ横断で対象系列だけを収集する（#444）。
+    1 系列の定義是正（freq/lag_days の修正など）に伴う再収集で全外部 API を叩き直す
+    副作用——特に GDELT の累積クエリ制限の消費——を避けるための絞り込み。"""
+    # グループ単位で先に絞る。ESRI/IMF は 1 リクエストで全系列ぶんを取るため、
+    # ループ内スキップだけでは重い fetch が残る＝リストを空にして丸ごと回避する。
+    only_codes = set(only) if only else None
+
+    def _sel(series_list: list[dict]) -> list[dict]:
+        """only 指定時は対象 code だけへ絞る（未指定ならそのまま全件）。"""
+        if only_codes is None:
+            return series_list
+        return [s for s in series_list if s["code"] in only_codes]
+
+    macro_list     = _sel(MACRO_SERIES)
+    fred_list      = _sel(FRED_SERIES)
+    boj_list       = _sel(BOJ_SERIES)
+    oecd_list      = _sel(OECD_SERIES)
+    esri_list      = _sel(ESRI_SERIES)
+    imf_list       = _sel(IMF_SERIES)
+    estat_list     = _sel(ESTAT_SERIES)
+    estat_idx_list = _sel(ESTAT_INDEX_SERIES)
+    gdelt_list     = _sel(GDELT_SERIES)
+    wiki_list      = _sel(WIKIMEDIA_SERIES)
+    if only_codes:
+        known = {s["code"] for s in (
+            MACRO_SERIES + FRED_SERIES + BOJ_SERIES + OECD_SERIES + ESRI_SERIES
+            + IMF_SERIES + ESTAT_SERIES + ESTAT_INDEX_SERIES + GDELT_SERIES + WIKIMEDIA_SERIES
+        )}
+        unknown = sorted(only_codes - known)
+        if unknown:
+            # 打ち間違いを「0 件収集・成功」で黙って返さない（fail fast）。
+            raise ValueError(f"未知の series_code: {', '.join(unknown)}")
+
     today      = date.today()
     start      = today - timedelta(days=int(years_back * 365.25))
     d1         = start.strftime("%Y%m%d")
@@ -2273,20 +2316,20 @@ async def collect_macro_data(
     d1_wiki    = max(fred_start.strftime("%Y%m%d"), WIKIMEDIA_START)
     d2_wiki    = today.strftime("%Y%m%d")
     total      = (
-        len(MACRO_SERIES)
-        + (len(FRED_SERIES)  if FRED_API_KEY  else 0)
-        + len(BOJ_SERIES)
-        + len(OECD_SERIES)
-        + len(ESRI_SERIES)
-        + len(IMF_SERIES)
-        + (len(ESTAT_SERIES) + len(ESTAT_INDEX_SERIES) if ESTAT_API_KEY else 0)
-        + len(GDELT_SERIES)
-        + len(WIKIMEDIA_SERIES)
+        len(macro_list)
+        + (len(fred_list)  if FRED_API_KEY  else 0)
+        + len(boj_list)
+        + len(oecd_list)
+        + len(esri_list)
+        + len(imf_list)
+        + (len(estat_list) + len(estat_idx_list) if ESTAT_API_KEY else 0)
+        + len(gdelt_list)
+        + len(wiki_list)
     )
     saved      = 0
 
     async with httpx.AsyncClient(timeout=60) as session:
-        for i, series in enumerate(MACRO_SERIES, 1):
+        for i, series in enumerate(macro_list, 1):
             if cancel_check and cancel_check():
                 if on_progress:
                     on_progress(i-1, total, "[マクロ収集] ユーザー停止")
@@ -2324,10 +2367,10 @@ async def collect_macro_data(
         # ── FRED 収集（FRED_API_KEY が設定されている場合のみ）──────────────────
         if not FRED_API_KEY:
             if on_progress:
-                on_progress(len(MACRO_SERIES), total, "[FRED] FRED_API_KEY 未設定のためスキップ")
+                on_progress(len(macro_list), total, "[FRED] FRED_API_KEY 未設定のためスキップ")
         else:
-            base_i = len(MACRO_SERIES)
-            for j, series in enumerate(FRED_SERIES, 1):
+            base_i = len(macro_list)
+            for j, series in enumerate(fred_list, 1):
                 idx = base_i + j
                 if cancel_check and cancel_check():
                     if on_progress:
@@ -2335,7 +2378,7 @@ async def collect_macro_data(
                     return saved
 
                 if on_progress:
-                    on_progress(idx - 1, total, f"[FRED {j}/{len(FRED_SERIES)}] {series['name']} 取得中")
+                    on_progress(idx - 1, total, f"[FRED {j}/{len(fred_list)}] {series['name']} 取得中")
                 rows = await fetch_fred_series(
                     session, series["fred_id"], d1_iso, d2_iso, series.get("lag_days", 0)
                 )
@@ -2343,7 +2386,7 @@ async def collect_macro_data(
 
                 if not rows:
                     if on_progress:
-                        on_progress(idx, total, f"[FRED {j}/{len(FRED_SERIES)}] {series['name']} データ無し")
+                        on_progress(idx, total, f"[FRED {j}/{len(fred_list)}] {series['name']} データ無し")
                     continue
 
                 vals = [{
@@ -2358,11 +2401,11 @@ async def collect_macro_data(
                 db.commit()
                 saved += n
                 if on_progress:
-                    on_progress(idx, total, f"[FRED {j}/{len(FRED_SERIES)}] {series['name']}: {n}件処理")
+                    on_progress(idx, total, f"[FRED {j}/{len(fred_list)}] {series['name']}: {n}件処理")
 
         # ── 日銀 収集（認証不要・常時）──────────────────────────────────────────
-        boj_base_i = len(MACRO_SERIES) + (len(FRED_SERIES) if FRED_API_KEY else 0)
-        for k, series in enumerate(BOJ_SERIES, 1):
+        boj_base_i = len(macro_list) + (len(fred_list) if FRED_API_KEY else 0)
+        for k, series in enumerate(boj_list, 1):
             idx = boj_base_i + k
             if cancel_check and cancel_check():
                 if on_progress:
@@ -2370,7 +2413,7 @@ async def collect_macro_data(
                 return saved
 
             if on_progress:
-                on_progress(idx - 1, total, f"[BOJ {k}/{len(BOJ_SERIES)}] {series['name']} 取得中")
+                on_progress(idx - 1, total, f"[BOJ {k}/{len(boj_list)}] {series['name']} 取得中")
             rows = await fetch_boj_series(
                 session,
                 series["db"],
@@ -2384,7 +2427,7 @@ async def collect_macro_data(
 
             if not rows:
                 if on_progress:
-                    on_progress(idx, total, f"[BOJ {k}/{len(BOJ_SERIES)}] {series['name']} データ無し")
+                    on_progress(idx, total, f"[BOJ {k}/{len(boj_list)}] {series['name']} データ無し")
                 continue
 
             vals = [{
@@ -2399,11 +2442,11 @@ async def collect_macro_data(
             db.commit()
             saved += n
             if on_progress:
-                on_progress(idx, total, f"[BOJ {k}/{len(BOJ_SERIES)}] {series['name']}: {n}件処理")
+                on_progress(idx, total, f"[BOJ {k}/{len(boj_list)}] {series['name']}: {n}件処理")
 
         # ── OECD 収集（認証不要・常時）────────────────────────────────────────
-        oecd_base_i = boj_base_i + len(BOJ_SERIES)
-        for q, series in enumerate(OECD_SERIES, 1):
+        oecd_base_i = boj_base_i + len(boj_list)
+        for q, series in enumerate(oecd_list, 1):
             idx = oecd_base_i + q
             if cancel_check and cancel_check():
                 if on_progress:
@@ -2411,7 +2454,7 @@ async def collect_macro_data(
                 return saved
 
             if on_progress:
-                on_progress(idx - 1, total, f"[OECD {q}/{len(OECD_SERIES)}] {series['name']} 取得中")
+                on_progress(idx - 1, total, f"[OECD {q}/{len(oecd_list)}] {series['name']} 取得中")
             rows = await fetch_oecd_series(
                 session,
                 series["dataflow"],
@@ -2423,7 +2466,7 @@ async def collect_macro_data(
 
             if not rows:
                 if on_progress:
-                    on_progress(idx, total, f"[OECD {q}/{len(OECD_SERIES)}] {series['name']} データ無し")
+                    on_progress(idx, total, f"[OECD {q}/{len(oecd_list)}] {series['name']} データ無し")
                 continue
 
             vals = [{
@@ -2438,19 +2481,20 @@ async def collect_macro_data(
             db.commit()
             saved += n
             if on_progress:
-                on_progress(idx, total, f"[OECD {q}/{len(OECD_SERIES)}] {series['name']}: {n}件処理")
+                on_progress(idx, total, f"[OECD {q}/{len(oecd_list)}] {series['name']}: {n}件処理")
 
         # ── 内閣府ESRI GDP需要項目 収集（認証不要・常時、1回のfetchで4系列取得）──────
-        esri_base_i = oecd_base_i + len(OECD_SERIES)
+        esri_base_i = oecd_base_i + len(oecd_list)
         if cancel_check and cancel_check():
             if on_progress:
                 on_progress(esri_base_i, total, "[マクロ収集] ユーザー停止")
             return saved
 
-        if on_progress:
-            on_progress(esri_base_i, total, f"[ESRI 1/{len(ESRI_SERIES)}] GDP需要項目CSV 取得中")
-        esri_cache = await fetch_esri_gdp_csv(session)
-        for r_i, series in enumerate(ESRI_SERIES, 1):
+        if esri_list and on_progress:
+            on_progress(esri_base_i, total, f"[ESRI 1/{len(esri_list)}] GDP需要項目CSV 取得中")
+        # 1 リクエストで 4 系列ぶんを取る＝ only で全系列が外れたら fetch ごと省く。
+        esri_cache = await fetch_esri_gdp_csv(session) if esri_list else {}
+        for r_i, series in enumerate(esri_list, 1):
             idx = esri_base_i + r_i
             if cancel_check and cancel_check():
                 if on_progress:
@@ -2462,7 +2506,7 @@ async def collect_macro_data(
 
             if not rows:
                 if on_progress:
-                    on_progress(idx, total, f"[ESRI {r_i}/{len(ESRI_SERIES)}] {series['name']} データ無し")
+                    on_progress(idx, total, f"[ESRI {r_i}/{len(esri_list)}] {series['name']} データ無し")
                 continue
 
             vals = [{
@@ -2477,19 +2521,20 @@ async def collect_macro_data(
             db.commit()
             saved += n
             if on_progress:
-                on_progress(idx, total, f"[ESRI {r_i}/{len(ESRI_SERIES)}] {series['name']}: {n}件処理")
+                on_progress(idx, total, f"[ESRI {r_i}/{len(esri_list)}] {series['name']}: {n}件処理")
 
         # ── IMF WEO 見通し 収集（認証不要・常時、バックフィルは1回のfetchで全系列取得）──
-        imf_base_i = esri_base_i + len(ESRI_SERIES)
+        imf_base_i = esri_base_i + len(esri_list)
         if cancel_check and cancel_check():
             if on_progress:
                 on_progress(imf_base_i, total, "[マクロ収集] ユーザー停止")
             return saved
 
-        if on_progress:
-            on_progress(imf_base_i, total, f"[IMF 1/{len(IMF_SERIES)}] WEO historical 取得中")
-        imf_hist_cache = await fetch_imf_weo_historical(session)
-        for h_i, series in enumerate(IMF_SERIES, 1):
+        if imf_list and on_progress:
+            on_progress(imf_base_i, total, f"[IMF 1/{len(imf_list)}] WEO historical 取得中")
+        # ESRI と同型：バックフィルは 1 回の fetch で全系列ぶん取るので only で空なら省く。
+        imf_hist_cache = await fetch_imf_weo_historical(session) if imf_list else {}
+        for h_i, series in enumerate(imf_list, 1):
             idx = imf_base_i + h_i
             if cancel_check and cancel_check():
                 if on_progress:
@@ -2502,7 +2547,7 @@ async def collect_macro_data(
 
             if not rows:
                 if on_progress:
-                    on_progress(idx, total, f"[IMF {h_i}/{len(IMF_SERIES)}] {series['name']} データ無し")
+                    on_progress(idx, total, f"[IMF {h_i}/{len(imf_list)}] {series['name']} データ無し")
                 continue
 
             vals = [{
@@ -2517,15 +2562,15 @@ async def collect_macro_data(
             db.commit()
             saved += n
             if on_progress:
-                on_progress(idx, total, f"[IMF {h_i}/{len(IMF_SERIES)}] {series['name']}: {n}件処理")
+                on_progress(idx, total, f"[IMF {h_i}/{len(imf_list)}] {series['name']}: {n}件処理")
 
         # ── e-Stat 収集（ESTAT_API_KEY が設定されている場合のみ）────────────────
         if not ESTAT_API_KEY:
             if on_progress:
                 on_progress(total, total, "[e-Stat] ESTAT_API_KEY 未設定のためスキップ")
         else:
-            estat_base_i = imf_base_i + len(IMF_SERIES)
-            for m, series in enumerate(ESTAT_SERIES, 1):
+            estat_base_i = imf_base_i + len(imf_list)
+            for m, series in enumerate(estat_list, 1):
                 idx = estat_base_i + m
                 if cancel_check and cancel_check():
                     if on_progress:
@@ -2533,7 +2578,7 @@ async def collect_macro_data(
                     return saved
 
                 if on_progress:
-                    on_progress(idx - 1, total, f"[e-Stat {m}/{len(ESTAT_SERIES)}] {series['name']} 取得中")
+                    on_progress(idx - 1, total, f"[e-Stat {m}/{len(estat_list)}] {series['name']} 取得中")
                 rows = await fetch_estat_series(
                     session,
                     series["stats_data_id"],
@@ -2547,7 +2592,7 @@ async def collect_macro_data(
 
                 if not rows:
                     if on_progress:
-                        on_progress(idx, total, f"[e-Stat {m}/{len(ESTAT_SERIES)}] {series['name']} データ無し")
+                        on_progress(idx, total, f"[e-Stat {m}/{len(estat_list)}] {series['name']} データ無し")
                     continue
 
                 vals = [{
@@ -2562,11 +2607,11 @@ async def collect_macro_data(
                 db.commit()
                 saved += n
                 if on_progress:
-                    on_progress(idx, total, f"[e-Stat {m}/{len(ESTAT_SERIES)}] {series['name']}: {n}件処理")
+                    on_progress(idx, total, f"[e-Stat {m}/{len(estat_list)}] {series['name']}: {n}件処理")
 
             # ── e-Stat 鉱工業指数（time 軸が連番コード・日付範囲パラメータ無し）────
-            estat_idx_base_i = estat_base_i + len(ESTAT_SERIES)
-            for p, series in enumerate(ESTAT_INDEX_SERIES, 1):
+            estat_idx_base_i = estat_base_i + len(estat_list)
+            for p, series in enumerate(estat_idx_list, 1):
                 idx = estat_idx_base_i + p
                 if cancel_check and cancel_check():
                     if on_progress:
@@ -2574,7 +2619,7 @@ async def collect_macro_data(
                     return saved
 
                 if on_progress:
-                    on_progress(idx - 1, total, f"[e-Stat-idx {p}/{len(ESTAT_INDEX_SERIES)}] {series['name']} 取得中")
+                    on_progress(idx - 1, total, f"[e-Stat-idx {p}/{len(estat_idx_list)}] {series['name']} 取得中")
                 rows = await fetch_estat_index_series(
                     session,
                     series["stats_data_id"],
@@ -2584,7 +2629,7 @@ async def collect_macro_data(
 
                 if not rows:
                     if on_progress:
-                        on_progress(idx, total, f"[e-Stat-idx {p}/{len(ESTAT_INDEX_SERIES)}] {series['name']} データ無し")
+                        on_progress(idx, total, f"[e-Stat-idx {p}/{len(estat_idx_list)}] {series['name']} データ無し")
                     continue
 
                 vals = [{
@@ -2599,16 +2644,16 @@ async def collect_macro_data(
                 db.commit()
                 saved += n
                 if on_progress:
-                    on_progress(idx, total, f"[e-Stat-idx {p}/{len(ESTAT_INDEX_SERIES)}] {series['name']}: {n}件処理")
+                    on_progress(idx, total, f"[e-Stat-idx {p}/{len(estat_idx_list)}] {series['name']}: {n}件処理")
 
         # ── GDELT 収集（認証不要・常時・#406）───────────────────────────────────
         # 1系列＝1リクエストで全履歴が返る。レート制限（1req/5s）は fetch 側でリトライ、
         # 系列間にも GDELT_RATE_SLEEP を挟む。
         gdelt_base_i = (
-            imf_base_i + len(IMF_SERIES)
-            + (len(ESTAT_SERIES) + len(ESTAT_INDEX_SERIES) if ESTAT_API_KEY else 0)
+            imf_base_i + len(imf_list)
+            + (len(estat_list) + len(estat_idx_list) if ESTAT_API_KEY else 0)
         )
-        for g, series in enumerate(GDELT_SERIES, 1):
+        for g, series in enumerate(gdelt_list, 1):
             idx = gdelt_base_i + g
             if cancel_check and cancel_check():
                 if on_progress:
@@ -2616,7 +2661,7 @@ async def collect_macro_data(
                 return saved
 
             if on_progress:
-                on_progress(idx - 1, total, f"[GDELT {g}/{len(GDELT_SERIES)}] {series['name']} 取得中")
+                on_progress(idx - 1, total, f"[GDELT {g}/{len(gdelt_list)}] {series['name']} 取得中")
             rows = await fetch_gdelt_timeline(
                 session, series["query"], series["mode"], d1_gdelt, d2_gdelt
             )
@@ -2624,7 +2669,7 @@ async def collect_macro_data(
 
             if not rows:
                 if on_progress:
-                    on_progress(idx, total, f"[GDELT {g}/{len(GDELT_SERIES)}] {series['name']} データ無し")
+                    on_progress(idx, total, f"[GDELT {g}/{len(gdelt_list)}] {series['name']} データ無し")
                 continue
 
             vals = [{
@@ -2639,11 +2684,11 @@ async def collect_macro_data(
             db.commit()
             saved += n
             if on_progress:
-                on_progress(idx, total, f"[GDELT {g}/{len(GDELT_SERIES)}] {series['name']}: {n}件処理")
+                on_progress(idx, total, f"[GDELT {g}/{len(gdelt_list)}] {series['name']}: {n}件処理")
 
         # ── Wikimedia Pageviews 収集（認証不要・常時・#406）──────────────────────
-        wiki_base_i = gdelt_base_i + len(GDELT_SERIES)
-        for w, series in enumerate(WIKIMEDIA_SERIES, 1):
+        wiki_base_i = gdelt_base_i + len(gdelt_list)
+        for w, series in enumerate(wiki_list, 1):
             idx = wiki_base_i + w
             if cancel_check and cancel_check():
                 if on_progress:
@@ -2652,7 +2697,7 @@ async def collect_macro_data(
 
             if on_progress:
                 on_progress(idx - 1, total,
-                            f"[Wikimedia {w}/{len(WIKIMEDIA_SERIES)}] {series['name']} 取得中")
+                            f"[Wikimedia {w}/{len(wiki_list)}] {series['name']} 取得中")
             rows = await fetch_wikimedia_pageviews(
                 session, series["articles"], d1_wiki, d2_wiki
             )
@@ -2661,7 +2706,7 @@ async def collect_macro_data(
             if not rows:
                 if on_progress:
                     on_progress(idx, total,
-                                f"[Wikimedia {w}/{len(WIKIMEDIA_SERIES)}] {series['name']} データ無し")
+                                f"[Wikimedia {w}/{len(wiki_list)}] {series['name']} データ無し")
                 continue
 
             vals = [{
@@ -2677,6 +2722,6 @@ async def collect_macro_data(
             saved += n
             if on_progress:
                 on_progress(idx, total,
-                            f"[Wikimedia {w}/{len(WIKIMEDIA_SERIES)}] {series['name']}: {n}件処理")
+                            f"[Wikimedia {w}/{len(wiki_list)}] {series['name']}: {n}件処理")
 
     return saved

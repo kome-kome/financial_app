@@ -115,6 +115,46 @@ class TestFreshnessCheck:
         r = mh.check_macro_freshness(db, as_of=AS_OF)
         assert "JP_M2" not in {e["code"] for e in r["stale"]}
 
+    def test_series_stale_days_overrides_freq_default(self, db, monkeypatch):
+        """lag_days でシフトした系列は個別 stale_days で検知力を保つ（#444）。
+
+        JP10Y_FRED は lag_days=70 で trade_date が後ろへずれる＝last が最大70日ぶん
+        「新しく」見える。freq 既定（monthly=130日）のままでは配信停止の検知がその分
+        遅れるため、系列定義の stale_days=60 を優先する。
+        """
+        import collector_prices as cp
+        monkeypatch.setattr(cp, "FRED_API_KEY", "dummy")
+        _seed_all_fresh(db)
+        db.query(MacroData).filter(MacroData.series_code == "JP10Y_FRED").delete()
+        # monthly 既定（130日）なら通る遅れだが、個別 stale_days=60 を超えるので stale
+        _seed(db, "JP10Y_FRED", AS_OF - timedelta(days=100))
+
+        r = mh.check_macro_freshness(db, as_of=AS_OF)
+        stale = {e["code"]: e for e in r["stale"]}
+        assert "JP10Y_FRED" in stale
+        assert stale["JP10Y_FRED"]["limit"] == 60
+        assert stale["JP10Y_FRED"]["limit"] < mh.FREQ_STALE_DAYS["monthly"]
+
+    def test_lag_days_alone_does_not_tighten_limit(self, db, monkeypatch):
+        """freq 既定から `lag_days` を一律に差し引いてはいけない（#444 の回帰防止）。
+
+        `lag_days` は先読み防止の保守的シフト量であって実配信ラグの推定値ではない。
+        一律差し引きにすると、2026-08-04 の本番実測 lag で以下4系列が即 CRITICAL になる:
+        JP_REAL_GDP / JP_TRADE_BAL（実測80日 > 210-135=75）、
+        JP_IIP / JP_IIP_INVENTORY（実測96日 > 130-60=70）。
+        """
+        import collector_prices as cp
+        monkeypatch.setattr(cp, "FRED_API_KEY", "dummy")
+        monkeypatch.setattr(cp, "ESTAT_API_KEY", "dummy")
+        _seed_all_fresh(db)
+        for code, lag in [("JP_REAL_GDP", 80), ("JP_TRADE_BAL", 80),
+                          ("JP_IIP", 96), ("JP_IIP_INVENTORY", 96)]:
+            db.query(MacroData).filter(MacroData.series_code == code).delete()
+            _seed(db, code, AS_OF - timedelta(days=lag))
+
+        r = mh.check_macro_freshness(db, as_of=AS_OF)
+        assert {e["code"] for e in r["stale"]} == set()
+
     def test_excluded_series_never_counted_but_always_reported(self, db):
         """除外系列は判定対象外。ただしレポートには必ず出す（黙って消さない）。"""
         _seed_all_fresh(db)
@@ -163,6 +203,8 @@ class TestFreshnessCheck:
         assert {s["code"] for s in cp.BOJ_SERIES} <= codes
         # freq は全系列で許容遅延表に載っている値
         assert all(s["freq"] in mh.FREQ_STALE_DAYS for s in mh.expected_series())
+        # stale_days は常にキーとして存在する（未指定は None＝freq 既定を使う・#444）
+        assert all("stale_days" in s for s in mh.expected_series())
 
     def test_api_key_gated_groups_are_skipped_when_unset(self, monkeypatch):
         """キー未設定で収集自体が走らないグループは判定対象から外す（誤検知防止）。"""

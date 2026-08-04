@@ -16,6 +16,10 @@ on:
         description: "遡及年数（zscore 用に既定5年）"
         required: false
         default: "5"
+      series:
+        description: "収集する series_code（カンマ区切り・空なら全系列）例: JP10Y_FRED"
+        required: false
+        default: ""
 
 # 最小権限（GITHUB_TOKEN でリポジトリ書込は不要・収集/保守は Supabase 直結）
 permissions:
@@ -45,8 +49,17 @@ jobs:
           JQUANTS_API_KEY: ${{ secrets.JQUANTS_API_KEY }}
           FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
           ESTAT_API_KEY: ${{ secrets.ESTAT_API_KEY }}
+          # 入力は env 経由で渡す（run 内へ直接展開するとシェル解釈の対象になる）
+          MACRO_YEARS: ${{ github.event.inputs.years || '5' }}
+          MACRO_SERIES_FILTER: ${{ github.event.inputs.series }}
         run: |
-          python collector.py --macro --years "${{ github.event.inputs.years || '5' }}" 2>&1 | tee macro_collect.log
+          # tee は最後のコマンドの終了コードを返す＝pipefail が無いと収集失敗を緑で隠す（#352）
+          set -o pipefail
+          ARGS=(--macro --years "$MACRO_YEARS")
+          if [ -n "$MACRO_SERIES_FILTER" ]; then
+            ARGS+=(--macro-series "$MACRO_SERIES_FILTER")
+          fi
+          python collector.py "${ARGS[@]}" 2>&1 | tee macro_collect.log
 
       - name: Upload log
         if: always()

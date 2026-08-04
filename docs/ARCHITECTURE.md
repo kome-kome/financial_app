@@ -1221,7 +1221,7 @@ graph TB
 | `.github/workflows/ci.yml` | GitHub Actions | push/PR で `pytest`（testpaths=tests）を実行する CI | — |
 | `.github/workflows/daily-incremental.yml` | GitHub Actions | 差分収集（毎日 JST 03:00 自動＋手動）。`_pipeline_incremental.py` を起動 | `_pipeline_incremental.py` |
 | `.github/workflows/full-pipeline.yml` | GitHub Actions | 全件収集パイプライン（workflow_dispatch 手動）。`_pipeline_gh.py` の各 refill モードを起動 | `_pipeline_gh.py` |
-| `.github/workflows/collect-macro.yml` | GitHub Actions | マクロ指標収集（e-Stat/日銀/OECD/IMF WEO/GDELT/Wikimedia コネクタ・手動）。`collector.py --macro --years N` を起動 | `collector.py` |
+| `.github/workflows/collect-macro.yml` | GitHub Actions | マクロ指標収集（e-Stat/日銀/OECD/IMF WEO/GDELT/Wikimedia コネクタ・手動）。`collector.py --macro --years N` を起動。入力 `series` に series_code（カンマ区切り）を渡すと `--macro-series` で対象系列だけを収集する（#444） | `collector.py` |
 | `.github/workflows/collect-interim.yml` | GitHub Actions | 半期(H1)財務収集（Issue #219②・手動）。`collector.py --interim` を起動 | `collector_interim.py` |
 | `.github/workflows/collect-disclosures.yml` | GitHub Actions | 会社予想/ガイダンス開示収集（Issue #322・手動の長時間バックフィル）。`collector.py --disclosures` を起動 | `collector_disclosures.py` |
 | `.github/workflows/macro-beta-inference.yml` | GitHub Actions | M-1 per-stock 階層マクロβ推論バッチ（毎月1日 UTC 11:00 自動＋手動・Issue #341）。`macro_beta_inference.py` を起動 | `macro_beta_inference.py` |
