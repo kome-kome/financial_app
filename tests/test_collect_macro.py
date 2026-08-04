@@ -205,8 +205,14 @@ def test_japan_macro_fred_series_registered():
     # JP_IP (JPNPROINDMISMEI) は 2024-04-30 で凍結のため除外中 (#253)
     assert "JP_IP" not in by_code
     assert by_code["JP_TRADE_BAL"]["lag_days"] == 135
-    # 既存系列は lag_days 未設定（= 0 既定で後方互換）
-    assert "lag_days" not in by_code["JP10Y_FRED"]
+    # JP10Y_FRED は IRLTLT01JPM156N＝OECD 由来の月次系列（#444）。freq を省くと
+    # FRED_SERIES 既定の daily（許容14日）で判定され平常運転で毎晩 CRITICAL になる。
+    assert by_code["JP10Y_FRED"]["fred_id"] == "IRLTLT01JPM156N"
+    assert by_code["JP10Y_FRED"]["freq"] == "monthly"
+    # 実配信ラグ上限 64日（2026-08-04 実測）＋マージン
+    assert by_code["JP10Y_FRED"]["lag_days"] == 70
+    # シフトで last が新しく見える分を打ち消す個別許容（freq 既定 130日より短く保つ）
+    assert by_code["JP10Y_FRED"]["stale_days"] == 60
     # #381 非ICE代替の信用スプレッド（BAA10Y=Moody's Baa−10Y・日次・truncate されない）
     assert by_code["BAA_SPREAD"]["fred_id"] == "BAA10Y"
     assert by_code["BAA_SPREAD"]["category"] == "credit"
@@ -1071,3 +1077,34 @@ def test_fetch_wikimedia_pageviews_all_fail_returns_empty():
     with patch.object(collector_prices, "WIKIMEDIA_RATE_SLEEP", 0):
         rows = asyncio.run(run())
     assert rows == []
+
+
+# ── 7. 系列絞り込み（--macro-series / only・#444）────────────────────────────
+# 1 系列の定義是正（freq/lag_days の修正）に伴う再収集で、全外部 API を叩き直す
+# 副作用——特に GDELT の累積クエリ制限の消費——を避けるための絞り込み。
+def test_only_restricts_collection_to_given_codes(db):
+    hosts = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        hosts.append(request.url.host)
+        if request.url.host == "query1.finance.yahoo.com":
+            return httpx.Response(200, json=_yahoo_json([TS1, TS2], [1.0, 2.0]))
+        return httpx.Response(500)
+
+    saved = _run(db, handler, only=["USDJPY"])
+
+    assert saved == 2   # USDJPY × 2日ぶんだけ
+    codes = {c for (c,) in db.query(MacroData.series_code).distinct().all()}
+    assert codes == {"USDJPY"}
+    # BOJ / OECD / ESRI / IMF / GDELT / Wikimedia へは 1 度もリクエストが出ていない
+    # （ESRI/IMF は 1 リクエストで全系列ぶん取るため、ループ内スキップでは防げない）
+    assert set(hosts) == {"query1.finance.yahoo.com"}
+
+
+def test_only_rejects_unknown_series_code(db):
+    """打ち間違いを「0 件収集・成功」で黙って返さない（fail fast）。"""
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500)
+
+    with pytest.raises(ValueError, match="NOPE"):
+        _run(db, handler, only=["NOPE"])

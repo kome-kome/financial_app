@@ -33,6 +33,16 @@ FREQ_STALE_DAYS: dict[str, int] = {
     "semiannual": 400,
 }
 
+# ── 系列個別の許容遅延（`stale_days`）──────────────────────────────────────
+# 系列定義（collector_prices.py）が `stale_days` を持つときは freq 既定より優先する。
+# 用途は `lag_days` で trade_date を後ろへシフトしている系列。シフト分だけ last が
+# 「新しく」見えるため freq 既定のままでは配信停止の検知がその日数ぶん遅れる（#444）。
+# **freq 既定を一律に `- lag_days` してはいけない**：`lag_days` は先読み防止の保守的
+# シフト量であって実配信ラグの推定値ではなく、2026-08-04 の本番実測では
+# JP_REAL_GDP / JP_TRADE_BAL（lag_days=135・実測lag 80日 > 210-135=75）と
+# JP_IIP / JP_IIP_INVENTORY（lag_days=60・実測lag 96日 > 130-60=70）の4系列が
+# 即 CRITICAL に落ちる。検知力を上げたい系列にだけ個別に付ける。
+
 # 系列定義に `freq` が無いグループの既定頻度。
 _GROUP_DEFAULT_FREQ: dict[str, str] = {
     "MACRO_SERIES":       "daily",       # Yahoo/stooq の市場系
@@ -63,7 +73,7 @@ EXCLUDED_SERIES: dict[str, str] = {
 
 
 def expected_series() -> list[dict]:
-    """収集対象の全系列を {code, name, freq, group} の一覧で返す。
+    """収集対象の全系列を {code, name, freq, stale_days, group} の一覧で返す。
 
     系列定義（collector_prices.py）が唯一の情報源。ここに列挙を二重管理しない。
     API キー未設定でスキップされるグループ（FRED / e-Stat）は収集自体が走らないため
@@ -94,6 +104,8 @@ def expected_series() -> list[dict]:
                 "code":  s["code"],
                 "name":  s.get("name", s["code"]),
                 "freq":  s.get("freq", default_freq),
+                # None なら freq 既定を使う（判定側で解決する）。
+                "stale_days": s.get("stale_days"),
                 "group": group_name,
             })
     return out
@@ -149,7 +161,8 @@ def check_macro_freshness(db, as_of: Optional[date] = None) -> dict:
             excluded.append({"code": code, "reason": EXCLUDED_SERIES[code], "last": last_str})
             continue
 
-        limit = FREQ_STALE_DAYS[s["freq"]]
+        # 系列個別の stale_days があれば freq 既定より優先（lag_days でシフトした系列用・#444）。
+        limit = s["stale_days"] or FREQ_STALE_DAYS[s["freq"]]
         entry = {**s, "last": last_str, "limit": limit, "critical": code in critical}
         if not last_str:
             missing.append({**entry, "lag_days": None})

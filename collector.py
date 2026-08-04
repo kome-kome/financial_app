@@ -41,6 +41,9 @@ if __name__ == "__main__":
                         help="株価テーブル（J-Quants/Yahoo 由来）から financial_records の"
                              "株価・PER/PBR/時価総額を反映する（外部への株価取得はしない）")
     parser.add_argument("--macro",       action="store_true", help="マクロデータのみ収集")
+    parser.add_argument("--macro-series", type=str, default=None,
+                        help="--macro と併用し、指定 series_code（カンマ区切り）だけを収集する。"
+                             "系列定義の是正に伴う再収集で全外部APIを叩き直さないための絞り込み（#444）")
     parser.add_argument("--disclosures", action="store_true", help="会社予想開示（決算短信サマリー）のみ収集")
     parser.add_argument("--interim",     action="store_true", help="半期(H1)財務のみ収集（EDINET 半期報告書・旧四半期Q2・Issue #219②）")
     parser.add_argument("--incremental", action="store_true", help="収集済みをスキップ（差分収集）")
@@ -94,9 +97,11 @@ if __name__ == "__main__":
     elif args.macro:
         async def _run():
             db = SessionLocal()
+            only = ([c.strip() for c in args.macro_series.split(",") if c.strip()]
+                    if args.macro_series else None)
             try:
                 n = await collect_macro_data(db, args.years,
-                    on_progress=lambda c, t, m: print(m))
+                    on_progress=lambda c, t, m: print(m), only=only)
                 print(f"完了: {n} 件更新")
             finally:
                 db.close()

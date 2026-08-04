@@ -50,6 +50,8 @@ python collector.py --years 1 --max 10  # テスト用（10社）
 python collector.py --company E02167    # 特定企業更新
 python collector.py --market            # 株価のみ更新
 python collector.py --incremental       # 差分収集
+python collector.py --macro                              # マクロ全系列
+python collector.py --macro --macro-series JP10Y_FRED    # 指定系列のみ（定義是正後の再収集用）
 python edinet_ping.py                    # EDINET API接続テスト
 ```
 

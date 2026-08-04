@@ -37,7 +37,7 @@ Render の制約と運用形態に合わせて設計すること。
 | `[CI]` | pytest 自動テスト | `ci.yml` | PR・main push で自動実行（手動起動不要） | 〜1分 |
 | `[定常]` | 差分収集・毎日自動実行 | `daily-incremental.yml` | 毎日 JST 03:00 に自動。手動で即時更新したい場合は `workflow_dispatch` | **2h05m〜2h38m**（2026-08-02 実測） |
 | `[全件]` | XBRL収集・財務データ全件更新 | `full-pipeline.yml` | DB初期構築時・全社バックフィル必要時（`daily-incremental` を `.disabled` に退避して同時実行回避） | 200〜240分 |
-| `[補完]` | マクロのみ収集 | `collect-macro.yml` | `MACRO_SERIES`（為替・金利・指数・コモディティ・ボラ）を Yahoo から収集。新規系列追加や macro_data の鮮度補完。`workflow_dispatch`（years 既定5）。**新系列のバックフィルは years=6 で起動**（yoy は1年+30日で足りるが、将来 zscore 版追加時に再バックフィル不要な余裕幅。#358 コモディティ8系列追加時の運用） | 〜数分 |
+| `[補完]` | マクロのみ収集 | `collect-macro.yml` | `MACRO_SERIES`（為替・金利・指数・コモディティ・ボラ）を Yahoo から収集。新規系列追加や macro_data の鮮度補完。`workflow_dispatch`（years 既定5）。**新系列のバックフィルは years=6 で起動**（yoy は1年+30日で足りるが、将来 zscore 版追加時に再バックフィル不要な余裕幅。#358 コモディティ8系列追加時の運用）。入力 `series` に series_code（カンマ区切り）を渡すと**その系列だけ**を収集する（#444・定義是正後の再収集で GDELT 累積クエリ制限を消費しないため） | 〜数分 |
 | `[推論]` | M-1 per-stock 階層マクロβ推論（producer） | `macro-beta-inference.yml` | ADR-0002 の PyMC 階層ベイズ推論バッチ（`macro_beta_inference.py`）→ `macro_beta_loadings`/`macro_beta_meta` へ永続化（M-1 `macro_risk_return` が consumer）。本番 `requirements.txt` ではなく `requirements-inference.txt`（+PyMC）を使用。**毎月1日 UTC 11:00（JST 20:00）自動**（Issue #341・鮮度が人力任せで滞留した反省。`tune`(UTC 03:00〜)・`daily-incremental`(UTC 18:00〜)と非重複の時間帯）。手動即時実行は `workflow_dispatch`（draws/tune/target_accept/chains/r_hat_threshold/force 指定可・既定 800/800/0.95/2/1.05/false）。**収束ゲートは `--r-hat-threshold` で可変化**（Issue #341）＝ADR-0002 strict 基準は 1.01 だが、chains=2 では r_hat が構造的に ~1.02 で頭打ち（実 persist 済み 2026-07-04 run も r_hat_max=1.02・n_divergences=0）のため cron 既定を 1.05 とし、構造的 ~1.02 は自動 persist しつつ真の未収束（r_hat が 1.05 を大きく超過）は persist せず失敗させる。閾値を緩めても足りない例外運用時のみ `force=true` | 本番規模で最大 340分（`timeout-minutes: 340`・numpyro で実測 10.5〜11.2秒/draw。ローカル検証: 4銘柄合成データ・draws/tune=50・chains=2・g++無しの Python フォールバックで約8分） |
 | `[定常]` | 夜間スコア更新（`sector_ols` + M-6） | `nightly-scores.yml` | `nightly_scores.py`（Issue #432/#443・親 #423）を実行し、①`sector_ols` → `regression_results`（`predicted_market_cap` / `gap_ratio`）②`macro_enet`（M-6）→ `macro_enet_scores`（μ̂・`sell_ranking` の**既定** mu_source）を更新する。**起動は `daily-incremental` の `workflow_run` チェーンで `conclusion == 'success'` のときだけ**（株価が前進していない日にスコアだけ更新すると、古い株価由来の値が「今日のランキング」として出るため）。`sector_ols` は `regularization=ridge` 固定（既定 features 10項目は VIF>10 が頻発）、M-6 は params_schema の既定のまま（ADR-0021/0022 の実測と同一構成）。1モデルの失敗は他を巻き込まず、実行後に `max(computed_at)` / `max(created_at)` を直接クエリして永続化を確認する（例外なし＝コミット済みとしない）。モデル間の `load_data`（週次127万行）は `shared_snapshot_cache()` で共有し、Egress がモデル数に比例しないようにしている。手動即時実行は `workflow_dispatch` | `sector_ols` は **16.1分**（2026-08-03 本番実走・run 30808053564・30業種/2,837社）。M-6 追加後の総所要は**未実測**（`timeout-minutes: 150` は安全側の暫定値＝初回実走で締める） |
 | `[定常]` | M-1/M-2/M-3 ハイパーパラメータ月次自動探索 | `tune-hyperparameters.yml` | `hyperparameter_search.py`（Issue #264/#278/#291）を matrix strategy で3モデル並列実行し `plugin_tuned_params` へ永続化（Issue #292）。`macro_risk_return`/`macro_dlm` は `--strategy grid`、`macro_gbdt` は `--strategy random --n-iter 150`（6時間上限に収める設計判断）。共通 `--objective rank_ic --persist --persist-scores --seed 0`。品質ゲート（#291）でスコア劣化時は該当ジョブが failed 終了（意図した挙動）。毎月1日 UTC 03:00（JST 12:00）自動。手動即時実行は `workflow_dispatch` | macro_risk_return/macro_dlm: 10〜60分、macro_gbdt: 4〜8時間相当を n_iter=150 で圧縮（timeout-minutes: 355） |
@@ -391,7 +391,7 @@ ADR-0002 §4 が求めるクレジット・インフレ・JP金利・期間構�
 |---|---|---|
 | APIキー | **要無料アカウント登録** | [fred.stlouisfed.org](https://fred.stlouisfed.org/docs/api/api_key.html) でキー発行 → `FRED_API_KEY` 環境変数に設定 |
 | レート制限 | **120 req/分** | `FRED_RATE_SLEEP = 0.6` 秒。11系列なら総所要 < 10秒 |
-| 頻度混在 | 日次（HY/IG/BAA/BEI/T10Y2Y/EPU 2種）+ 月次（JP10Y_FRED） | 月次系列は月初日1レコードのみ保存。M-1 の zscore 計算で年次集計するため支障なし |
+| 頻度混在 | 日次（HY/IG/BAA/BEI/T10Y2Y/EPU 2種）+ 月次（JP10Y_FRED）+ 四半期（JP_REAL_GDP/JP_TRADE_BAL） | 月次・四半期系列は期首日1レコードのみ保存。**低頻度系列は定義に `freq` を必ず明示する**——省くと `_GROUP_DEFAULT_FREQ["FRED_SERIES"]="daily"`（許容14日）で鮮度判定され、平常運転の公表ラグで毎晩 CRITICAL になる（#444 の実害）。`lag_days` を付けた系列は `trade_date` が後ろへシフトする＝保存日付は「期首+lag_days」 |
 | 欠損値 | `"."` で返却 | `fetch_fred_series()` でスキップ |
 | 認証未設定時 | `FRED_API_KEY=""` | `collect_macro_data()` が「FRED_API_KEY 未設定のためスキップ」でパスする（安全弁） |
 
@@ -403,7 +403,7 @@ ADR-0002 §4 が求めるクレジット・インフレ・JP金利・期間構�
 | `IG_OAS` | `BAMLC0A0CM` | クレジット（IG・ICE BofA） | 日次 |
 | `BAA_SPREAD` | `BAA10Y` | クレジット（Baa−10Y・Moody's・非truncated） | 日次 |
 | `BREAKEVEN10Y` | `T10YIE` | インフレ期待 | 日次 |
-| `JP10Y_FRED` | `IRLTLT01JPM156N` | JP10年金利 | 月次 |
+| `JP10Y_FRED` | `IRLTLT01JPM156N` | JP10年金利 | 月次（`lag_days=70` / `stale_days=60`・#444） |
 | `T10Y2Y` | `T10Y2Y` | 期間構造 | 日次 |
 | `US_EPU` | `USEPUINDXD` | 政策不確実性（Baker-Bloom-Davis EPU・1985〜） | 日次 |
 | `US_EQUITY_EPU` | `WLEMUINDXD` | 政策不確実性（株式市場関連・1985〜） | 日次 |
