@@ -87,9 +87,9 @@ EXCLUDED_SERIES: dict[str, str] = {
     # FRED が 2024-04-30 で凍結（#253）。e-Stat の JP_IIP へ移行済みで収集対象からも外れているが、
     # macro_data には過去行が残るため保険として明示除外する。
     "JP_IP":  "FRED 側が 2024-04-30 で凍結（#253）。JP_IIP（e-Stat）へ移行済み",
-    # Yahoo が ^JGB を廃止（404）。MACRO_SERIES には残っているが 1 行も蓄積されない。
-    # M-1/M-3 は JP10Y_FRED（FRED 月次）を使うため既定モデルへの影響は無い。
-    "JP10Y":  "Yahoo ^JGB 廃止で取得不能。既定モデルは JP10Y_FRED を使用",
+    # JP10Y（Yahoo ^JGB / stooq 10jpy.b）は #442 で `MACRO_SERIES` から削除したため、除外指定も
+    # 不要になった（収集しない系列は `total` の分母にも鮮度判定にも出てこない）。既定モデルが使う
+    # のは月次 `JP10Y_FRED` で、こちらは通常どおり critical として監視する。
     # 2026-07-17 以降 Yahoo ^BCOM が新しい行を返さない（2026-08-04 実測で Yahoo 側も同日止まり）。
     # TOPIX ^TPX と同型の配信停止の可能性。代替ティッカー選定は #438。
     "BCOM":   "Yahoo ^BCOM が 2026-07-17 以降配信停止（#438 で代替ティッカーを検討中）",

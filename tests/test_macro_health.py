@@ -264,10 +264,12 @@ class TestFreshnessCheck:
         r = mh.check_macro_freshness(db, as_of=AS_OF)
 
         # 収集定義にまだ残っている除外系列が excluded に出る（JP_IP のように収集対象から
-        # 既に外れた系列は expected_series に現れないため、部分集合であることを見る）
+        # 既に外れた系列は expected_series に現れないため、部分集合であることを見る。
+        # JP10Y も #442 で MACRO_SERIES から削除したので、ここには現れない）
         excluded = {e["code"] for e in r["excluded"]}
         assert excluded <= set(mh.EXCLUDED_SERIES)
-        assert {"JP10Y", "BCOM"} <= excluded
+        assert {"BCOM"} <= excluded
+        assert "JP10Y" not in excluded
         assert excluded & {e["code"] for e in r["stale"] + r["missing"]} == set()
         report = "\n".join(mh.format_report(r))
         for code in excluded:

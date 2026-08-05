@@ -1123,7 +1123,11 @@ MACRO_SERIES: list[dict] = [
     {"code": "US5Y",      "name": "米5年金利",    "category": "rate",       "ticker": "",         "yf_ticker": "^FVX"},
     {"code": "US10Y",     "name": "米10年金利",   "category": "rate",       "ticker": "10usy.b",  "yf_ticker": "^TNX"},
     {"code": "US30Y",     "name": "米30年金利",   "category": "rate",       "ticker": "",         "yf_ticker": "^TYX"},
-    {"code": "JP10Y",     "name": "日10年金利",   "category": "rate",       "ticker": "10jpy.b",  "yf_ticker": "^JGB"},
+    # 日10年金利（JP10Y）は Yahoo `^JGB` 廃止（404）・stooq `10jpy.b` も0件で、**定義だけが残って
+    # 1行も蓄積されない**系列だった（毎回2リクエスト空振りしてから「データ無し」で continue）。
+    # #442 で削除。既定モデルは月次 FRED の `JP10Y_FRED`（下記）を使うため影響は無い。日次ソースは
+    # 財務省「国債金利情報」CSV で取れることを #456 で確認済みだが、CSV パース経路のため
+    # Yahoo/stooq 前提の本リストには乗らない。収集の実装は #458。
     {"code": "NIKKEI225", "name": "日経225",      "category": "equity",     "ticker": "^nkx",     "yf_ticker": "^N225"},
     # TOPIX 指数 ^TPX は Yahoo で配信停止（200 OK だが 0 件）。TOPIX 連動 ETF 1306.T
     # （NEXT FUNDS TOPIX・最長履歴・高流動）を代理に使う＝yoy/logret/zscore は指数と同等に追従。
