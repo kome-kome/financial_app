@@ -21,10 +21,20 @@ M-3 に strict 母集団（`macro_nan_ok=False`）の概念は無い（週ごと
 推定コストと、非正水準ガードによる週落ちを可視化する＝#409 検証項目3）。
 
 **低 Egress 設計**（[[feedback_verification_fullloads_exhaust_egress]]）:
-週次株価（約97万行・volume 込み）と companies / macro_data は `scripts/_cache.py` の
+週次株価（約128万行・volume 込み）と companies / macro_data は `scripts/_cache.py` の
 ローカル pickle を使い、2回目以降は本番 Supabase を一切叩かない。プラグインの
 `load_prices` / `load_macro_levels` をキャッシュ読みへ差し替える（execute 本体のロジックは
 一切変えないため、出る数字は本番 M-3 の oof_backtest と直接比較できる）。
+
+**測る前にパネルの世代を確かめる**（#456 の実例）: `_cache.py` のキーはテーブル・列の形だけで
+決まりデータ世代を含まない（[[feedback_bakeoff_cache_generation_after_data_fix]]）。#456 では
+`weekly_prices_full_v1.pkl` が #411（ADR-0025）の履歴バックフィル**前**（2021-01-08 起点・
+967,004 行）のまま残り、M-3 の昇格ゲートだけが 49 期の短いパネルで判定されていた。退避して
+取り直したら 67 期・964,466 OOF ペア（期 +37%／サンプル +48%）になり、#454 が「負方向・
+p=0.084」と読んだ `dlm_jp10y` の点差は p=0.695 まで戻った。実行時に出る
+`panel src: price_cos=...` は社数しか見せないので、**キャッシュの起点日と行数を直接見ること**。
+`--refresh-cache` は全 `cached()` を無効化して 40MB 級の再 pull を巻き込むため、疑わしい
+pkl だけを `_stale_pre<N>/` へ mv して `--allow-full-pull` で取り直す方が安い。
 
 実行例（`-m` 必須・[[feedback_scripts_dir_needs_module_invocation]]）:
     python -m scripts.macro_dlm_feature_bakeoff --preset attention --smoke   # 5社に1社
