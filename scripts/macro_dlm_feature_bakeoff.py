@@ -195,7 +195,17 @@ def main() -> None:
     # DEFAULT_MACRO_FEATURES は昇格済み系列を含みうるので、候補は必ず引いてから base を作る
     # （保留枠 `_PENDING_EVAL_FEATURES` のファクターは元から既定に入っていない）。
     base = [f for f in dlm.DEFAULT_MACRO_FEATURES if f not in cand]
-    conds = {"base": base, "with_cand": base + cand}
+    # 列順は `DEFAULT_MACRO_FEATURES` の並びを基準に組み直す（#457・M-2 版と同じ作法）。M-3 の
+    # DLM は初期事前分散が全 β 列で同一（`_PRIOR_VAR_BETA`）・遷移行列の β 成分も 1 のため列の
+    # 置換に対して厳密に同変で、この正規化で数値は動かない（#456 実測: 自然順 / 候補を末尾へ
+    # 回した順 / 全反転 の3条件で rank-IC 差 0.000e+00・順位入替 0/652,247 件）。用法を跨いで
+    # 同じ作法に揃えておくための予防的な正規化。
+    _order = dlm.DEFAULT_MACRO_FEATURES + [f for f in cand
+                                           if f not in dlm.DEFAULT_MACRO_FEATURES]
+    _keep = set(base)
+    _all = _keep | set(cand)
+    conds = {"base":      [f for f in _order if f in _keep],
+             "with_cand": [f for f in _order if f in _all]}
     overrides = {"min_weeks": args.min_weeks} if args.min_weeks else {}
 
     db = SessionLocal()

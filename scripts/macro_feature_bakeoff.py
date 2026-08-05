@@ -8,6 +8,15 @@ ADR-0023（#404・EPU）で定式化した「収集 → 保留枠（`_PENDING_EV
     base      … 現行 DEFAULT_MACRO_FEATURES から候補を除いたもの
     with_cand … base + 候補
 
+**2つの用法があり、列順の扱いが判定を左右する（#457）**。候補が既定に無い「候補追加」用法では
+`base == DEFAULT_MACRO_FEATURES` で列順の問題は起きないが、**既定入りの特徴量を leave-out する
+用法**（#454 が既定の存続可否を測るために必要とした使い方）では、素朴に `base + 候補` とすると
+候補が末尾へ回り、with_cand が「現行既定と同じ集合なのに列順だけ違う」条件になる。M-2 は
+`random_state` 固定でも列順に依存するため（同点分割の解決順）、#454 実測では同一 69 特徴量の
+順序違いだけで rank-IC が +0.0014 動き、測ろうとした集合効果の 1/3〜1/4 が交絡として乗っていた。
+現在は両条件を **`DEFAULT_MACRO_FEATURES` の並び**へ組み直すため、leave-out 用法でも with_cand が
+既定と完全一致し交絡は出ない（候補追加用法の並びは従来と同一＝過去の昇格判定は無効化されない）。
+
 候補は `--preset`（`PRESETS` の定義済みセット）か `--features`（カンマ区切り）で指定する。
 初出は #404 の EPU 専用スクリプトだったが、#406（GDELT/Wikimedia）で2件目が必要になった
 ため一般化した（`--preset epu` が旧 `scripts/epu_feature_bakeoff.py` と等価）。
@@ -168,7 +177,25 @@ def main() -> None:
     # DEFAULT_MACRO_FEATURES は昇格済み系列を含みうるので、候補は必ず引いてから base を作る
     # （保留枠 `_PENDING_EVAL_FEATURES` の系列は元から既定に入っていない）。
     base_names = [f for f in DEFAULT_MACRO_FEATURES if f not in cand_features]
-    conds = {"base": base_names, "with_cand": base_names + cand_features}
+    # **列順は `DEFAULT_MACRO_FEATURES` の並びを基準に組み直す（#457）。** 素朴に
+    # `base_names + cand_features` とすると、**既定入りの特徴量を leave-out する用法**（#454 が
+    # 必要とした使い方）で候補が末尾へ回り、with_cand が「現行既定と同じ集合なのに列順だけ違う」
+    # 条件になる。M-2（XGBoost）は `random_state` を固定しても列順に依存し（同点分割の解決順が
+    # 変わる）、#454 実測では同一 69 特徴量の順序違いだけで rank-IC が +0.0014・売り側 +0.0016
+    # 動いた＝測ろうとした集合効果の 1/3〜1/4 が交絡として乗っていた。
+    #
+    # 基準を `MACRO_FEATURE_NAMES`（`_MACRO_MAP` のキー順）にしてはいけない。既定の並びは
+    # `MACRO_FEATURE_OPTIONS`（手書きリスト）由来で **`_MACRO_MAP` の定義順とは別物**であり、
+    # そちらへ正規化すると base 側の列順まで本番 M-2/M-6 の既定と変わってしまう。既定順を基準に
+    # すれば、候補追加用法では `base=既定 / with_cand=既定+候補` と現行のまま（過去の昇格判定が
+    # 無効化されない）、leave-out 用法では with_cand が既定と完全一致して交絡が消える。
+    # M-6（ElasticNet）と M-3（DLM）は列順不変なので、この正規化で数値は動かない。
+    _order = DEFAULT_MACRO_FEATURES + [f for f in cand_features
+                                       if f not in DEFAULT_MACRO_FEATURES]
+    _keep = set(base_names)
+    _all = _keep | set(cand_features)
+    conds = {"base":      [f for f in _order if f in _keep],
+             "with_cand": [f for f in _order if f in _all]}
 
     db = SessionLocal()
     try:
