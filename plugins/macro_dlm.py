@@ -52,7 +52,8 @@ from .utils import macro_risk_exposure
 # 物価・マネー・サーベイ・OECD CLI・IMF WEO 等）はここに追加しない（ADR-0012・Issue #310）。
 # 観測モデルが「週次リターン ~ 各ファクターの週次変化」のため、forward-fill で月内定数になる
 # 低頻度系列は週次変化が大半ゼロ＝情報量が乏しく、_MIN_FACTOR_COVERAGE の自動除外も効かない。
-# 例外は dlm_jp10y（月次 JP10Y_FRED）＝日次の日本10年金利ソースが無いためのやむを得ない代替。
+# **例外はもう無い**（#458）。唯一の例外だった dlm_jp10y（月次 JP10Y_FRED）は財務省の日次
+# 国債金利 CSV（JP10Y_MOF）へ差し替え済みで、全ファクターが日次ソースになった。
 _DLM_MACRO_MAP: dict[str, tuple[str, str, str]] = {
     "dlm_usdjpy":    ("USDJPY",     "logret", "USD/JPY 週次変化"),
     "dlm_eurjpy":    ("EURJPY",     "logret", "EUR/JPY 週次変化"),
@@ -77,10 +78,12 @@ _DLM_MACRO_MAP: dict[str, tuple[str, str, str]] = {
     "dlm_us5y":      ("US5Y",       "diff",   "米5年金利 週次差分"),
     "dlm_us10y":     ("US10Y",      "diff",   "米10年金利 週次差分"),
     "dlm_us30y":     ("US30Y",      "diff",   "米30年金利 週次差分"),
-    # 日次の日本10年金利は Yahoo ^JGB が廃止（404）で取得不能。FRED は月次のみのため
-    # 週次差分は **76.89% がゼロ**＝情報量に限界あり（#456 実測）。日次ソースは財務省の
-    # JGB 金利 CSV（日次・PDL1.0）で確保できることを確認済みで、差し替えは Issue #458。
-    "dlm_jp10y":     ("JP10Y_FRED", "diff",   "日10年金利（FRED・月次）週次差分"),
+    # 日次の日本10年金利。Yahoo ^JGB 廃止（404）・stooq 0件で長らく月次 FRED（JP10Y_FRED）を
+    # 週次差分へ落としており、**週次差分の 76.89% がゼロ**だった（#456 実測・日次の dlm_us10y
+    # は 0.40%）。財務省「国債金利情報」CSV（日次・PDL1.0・1986年〜）へ差し替え（#458・
+    # ADR-0029）。月次 JP10Y_FRED は M-1/M-2/M-6 の `macro_jp10y_fred_zscore` で引き続き使う
+    # （月次スナップショットでは月次で成立しているため触らない）。
+    "dlm_jp10y":     ("JP10Y_MOF",  "diff",   "日10年金利（財務省・日次）週次差分"),
     "dlm_t10y2y":    ("T10Y2Y",     "diff",   "米10y−2yスプレッド 週次差分"),
     # ニューストーン／関心度チャネル（#409・ADR-0024 の未検証仮説）。GDELT / Wikimedia の
     # **日次**系列で、M-3 の週次高頻度要件（本節冒頭 ADR-0012）に適合する唯一の未消化ストック。
@@ -122,12 +125,25 @@ _PENDING_EVAL_FEATURES: set[str] = set()
 # **棄却は維持**——rank-IC +0.0122→+0.0126（diff +0.0004・p=0.165）／売り側 spread
 # +0.0012→+0.0011（diff −0.0000・p=0.599）。期を 49→67（+37%）に増やしても 2 検定とも補正後 α を
 # 通らない。月次（ADR-0024）・週次旧パネル（#454）に続き 3 度目の棄却維持。
+#
+# **`dlm_jp10y` の棄却（#458・2026-08-07）**: 月次 JP10Y_FRED を財務省の日次 CSV
+# （JP10Y_MOF）へ差し替えた直後の leave-out で、**2 検定とも負方向・売り側が補正後 α を通った**
+# ——rank-IC +0.0120→+0.0115（diff −0.0005・95%CI[−0.0011,+0.0001]・p=0.076・ns）／売り側
+# spread +0.0011→+0.0010（diff −0.0001・95%CI[−0.0002,−0.0000]・**p=0.023 < α=0.025**）。
+# 3,982社・67期・964,466 OOF ペアで base と同一（状態次元だけ 21→22）。
+#
+# **情報量が増えたのに成績は下がった**のがこの判定の要点。月次版は週次差分の 76.89% がゼロ＝
+# 「ほぼ何もしない列」だったため #456 の再判定では 2 検定とも完全に非有意（p=0.695 / 0.206）で
+# 害が出ようがなかった。日次化でゼロ率が 0.91% になり**初めて実質的に効くようになった結果、
+# その効きが負だった**。ゼロ差分率の高さは「情報量が乏しい」ことの指標ではあっても、
+# 「差し替えれば成績が上がる」ことの根拠にはならない。
 _GATE_REJECTED_FEATURES: set[str] = {
     "dlm_news_tone",
     "dlm_news_econ_tone",
     "dlm_news_econ_vol",
     "dlm_wiki_market_attn",
     "dlm_wiki_macro_attn",
+    "dlm_jp10y",
 }
 # **既定入りの再判定（#454 → #456・2026-08-06 に確定）**: #447 の `lag_days` 是正で動いた
 # M-3 側のファクターは `dlm_jp10y`（JP10Y_FRED・70→64）のみ（他は日次・anchor=collection で
@@ -148,12 +164,14 @@ _GATE_REJECTED_FEATURES: set[str] = {
 # コストは elapsed 89.7s→93.9s、OOF サンプルは 964,466 で不変。
 #
 # `dlm_jp10y` は本節冒頭の設計（週次高頻度ファクター専用）に対する唯一の例外で、**週次差分の
-# 76.89% がゼロ**（#456 実測・理論値 1−12/52=0.7692 と一致。日次の `dlm_us10y` は 0.40%。
+# 76.89% がゼロ**だった（#456 実測・理論値 1−12/52=0.7692 と一致。日次の `dlm_us10y` は 0.40%。
 # `_MIN_FACTOR_COVERAGE` は観測頻度を見ず初出日以降の割合だけを見るため coverage=0.9938 で
-# 発火しない）。この構造的な弱さは残るが、成績への寄与は 2 検定とも有意でないため既定からは
-# 外さない。根本解決は日次ソースへの差し替えで、財務省の日次 JGB 金利 CSV が使えることは確認済み
-# （**Issue #458**）。**非有意のまま既定を減らす変更はしない**（規則は macro_snapshots.py の
-# `DEFAULT_MACRO_FEATURES` 直上と共通＝増減どちらの向きも補正後 α を通る実測を要する）。
+# 発火しない）。**#458 で財務省の日次 CSV（JP10Y_MOF）へ差し替え、この例外は解消した**
+# （ADR-0029・ADR-0012 Decision 2 を supersede）。ゼロ率は 0.91% まで下がったが、**その状態で
+# 測ると売り側が有意に悪化したため既定からは外した**（上の `_GATE_REJECTED_FEATURES` 参照）。
+# 既定 21 ファクターは全て日次ソース＝ADR-0012 Decision 1 は例外なしで成立している。
+# **増減どちらの向きも補正後 α を通る実測を要する**（規則は macro_snapshots.py の
+# `DEFAULT_MACRO_FEATURES` 直上と共通）。今回は「外す」向きが α を通った初の実例。
 DEFAULT_MACRO_FEATURES = [o["value"] for o in MACRO_FEATURE_OPTIONS
                           if o["value"] not in _PENDING_EVAL_FEATURES
                           and o["value"] not in _GATE_REJECTED_FEATURES]

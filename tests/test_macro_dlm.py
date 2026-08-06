@@ -96,9 +96,14 @@ class TestPluginMeta:
         assert _DLM_MACRO_MAP["dlm_topix"][0] == "TOPIX"
         assert _DLM_MACRO_MAP["dlm_topix"][1] == "logret"
         assert "dlm_topix" in {o["value"] for o in MACRO_FEATURE_OPTIONS}
-        # 日次の日本10年金利は ^JGB 廃止のため月次 FRED を維持（#456 の再実測でも既定維持。
-        # 財務省の日次 JGB 金利 CSV への差し替えは #458 で扱う）
-        assert _DLM_MACRO_MAP["dlm_jp10y"][0] == "JP10Y_FRED"
+        # #458/ADR-0029: 日次の日本10年金利は財務省「国債金利情報」CSV へ差し替え済み。
+        # ADR-0012 Decision 2（月次 FRED の grandfathered な例外）はこれで supersede された。
+        assert _DLM_MACRO_MAP["dlm_jp10y"][0] == "JP10Y_MOF"
+        assert _DLM_MACRO_MAP["dlm_jp10y"][1] == "diff"
+        # 日次化した状態の leave-out で売り側 spread が補正後 α を通って悪化したため既定 OFF。
+        # 選択肢としては残る（再判定は macro_dlm_feature_bakeoff --features dlm_jp10y）。
+        assert "dlm_jp10y" in {o["value"] for o in MACRO_FEATURE_OPTIONS}
+        assert "dlm_jp10y" not in DEFAULT_MACRO_FEATURES
 
     def test_commodity_dlm_factors_registered(self):
         # ADR-0013・#358: コモディティ8系列を dlm へ logret で追加（日次先物＝週次高頻度

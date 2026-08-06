@@ -79,6 +79,7 @@ _GROUP_DEFAULT_FREQ: dict[str, str] = {
     "ESTAT_INDEX_SERIES": "monthly",     # 鉱工業指数
     "GDELT_SERIES":       "daily",
     "WIKIMEDIA_SERIES":   "daily",
+    "MOF_SERIES":         "daily",       # 財務省 国債金利（営業日ごと・#458）
 }
 
 # 鮮度判定から除外する系列（理由必須）。**除外しても警告ログには出す**——
@@ -121,6 +122,7 @@ def expected_series() -> list[dict]:
         ("IMF_SERIES",         cp.IMF_SERIES),
         ("GDELT_SERIES",       cp.GDELT_SERIES),
         ("WIKIMEDIA_SERIES",   cp.WIKIMEDIA_SERIES),
+        ("MOF_SERIES",         cp.MOF_SERIES),
     ]
     if cp.FRED_API_KEY:
         groups.append(("FRED_SERIES", cp.FRED_SERIES))

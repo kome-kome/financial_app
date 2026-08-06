@@ -1109,6 +1109,7 @@ SERIES_ANCHOR: dict[str, str] = {
     "IMF_SERIES":         "period_start",  # バックフィルは vintage 期首。継続収集は収集日
     "GDELT_SERIES":       "collection",
     "WIKIMEDIA_SERIES":   "collection",
+    "MOF_SERIES":         "period_start",  # CSV の「基準日」＝観測日。lag_days で公表時点へ寄せる
 }
 
 # stooq ティッカー定義。category は 'fx' / 'rate' / 'equity' / 'commodity' / 'volatility'。
@@ -1512,6 +1513,50 @@ ESRI_SERIES: list[dict] = [
     },
 ]
 
+# ── 財務省「国債金利情報」CSV（認証不要・#458）──────────────────────────────
+# **日次の日本10年金利**。M-3（ADR-0012）は週次高頻度ファクター専用だが、`dlm_jp10y` だけは
+# 月次 `JP10Y_FRED` を週次差分へ落とす例外として grandfathered されていた（週次差分の 76.89%
+# がゼロ＝#456 実測）。理由は「日次の日本10年金利ソースが無い」だったが、これは Yahoo/stooq が
+# 全滅していたことを一般化した誤りで、**公的機関（財務省）が日次で直配信していた**。
+#
+# 実測（2026-08-07 再確認・#456 と一致）:
+#   全期間版 jgbcm_all.csv  1,174,446B / cp932 / CRLF / データ13,270行・和暦パース失敗0
+#                           10年物は 1986-07-05〜2026-07-31 の 9,909営業日（それ以前は "-"）
+#                           **月次更新**（当月分は入らない）
+#   当月版   jgbcm.csv      565B / 当月の営業日のみ（実測 R8.8.3〜8.5）＝**日次更新**
+# したがって「初回は全期間版で埋め、以降は当月版で差分」の2本立てにする（下の need_full）。
+#
+# パースの注意点（すべて実測で確認済み）:
+#   - 和暦（`R8.8.4` → 2026-08-04）。元号開始年は MOF_ERA_BASE
+#   - cp932 / CRLF / ヘッダ2行（タイトル行＋列名行）/ 欠測は `-`
+#   - 10年物は列 index 10（列名「10年」）。末尾に空行と注意書き行が付くため、
+#     **先頭が元号記号の行だけをデータ行とみなす**
+#
+# ライセンス: PDL1.0（公共データ利用規約 第1.0版）＝出典表示のみで加工・再配布可。
+# 制約が明示されているのは測量法に基づく地図類のみで数値データは対象外。
+MOF_JGB_ALL_URL     = "https://www.mof.go.jp/jgbs/reference/interest_rate/data/jgbcm_all.csv"
+MOF_JGB_CURRENT_URL = "https://www.mof.go.jp/jgbs/reference/interest_rate/jgbcm.csv"
+MOF_ERA_BASE = {"M": 1867, "T": 1911, "S": 1925, "H": 1988, "R": 2018}
+
+MOF_SERIES: list[dict] = [
+    # lag_days=2: 基準日 T の値は **T+1 に公表**される（2026-08-07 JST 01:40 時点で最新が
+    # 08-05＝08-06 分は未掲載＝当日公表ではない）。T+2 なら公表時刻に関わらず確実に既知。
+    #
+    # **日次系列では「安全側に大きく取る」ができない**（#447 と ADR-0028 の Consequences が
+    # 低頻度系列で言っていることの裏返し）。lag_days が実配信ラグを超えると `trade_date` が
+    # 未来日になり、鮮度ゲートは `ahead_days > 観測周期` を CRITICAL にする。日次の観測周期は
+    # **1日**なので、2日以上の過大シフトは即 CRITICAL＝毎晩 exit 2 で自動起票が回り続ける
+    # （実測: lag_days=4 で max(trade_date)=2026-08-09 ＝ today+2）。月次・四半期のように
+    # 理論最大へ寄せる運用はここでは採れず、**上限は実配信ラグそのもの**になる。
+    # 収集が数週間たまったら `macro_data.created_at` で実配信ラグを実測して引き直すこと
+    # （ADR-0028 規則4/6。初回バックフィル行は created_at が潰れるので、バックフィル日より
+    # 後に初出した観測だけを使う）。
+    # freq="daily" 既定（許容14日）で足りる＝個別 `stale_days` は置かない（ADR-0028 の個別
+    # 指定は lag_days が1周期を超える系列の話で、ここは超えない）。
+    {"code": "JP10Y_MOF", "name": "日10年金利（財務省・日次）", "category": "rate",
+     "mof_column": 10, "freq": "daily", "lag_days": 2},
+]
+
 # ── IMF WEO（World Economic Outlook）見通し（認証不要・#284）──────────────────
 # 匿名クエリのみ・APIキー不要（2026-07-11実API検証済み）。既存チャネルは全て実績値
 # （trailing）のため、予測・見通し（forward-looking）チャネルはこれが初。
@@ -1734,6 +1779,67 @@ async def fetch_esri_gdp_csv(session: httpx.AsyncClient) -> dict[str, list[dict]
         ESRI_QUARTERS_BACK, ESRI_REPORTS,
     )
     return {}
+
+
+def parse_mof_jgb_csv(text: str, column: int) -> list[dict]:
+    """財務省「国債金利情報」CSV をパースして [{trade_date, close, ...}] を返す（#458）。
+
+    text: cp932 からデコード済みの本文。column: 年限の列 index（10年物は 10）。
+    ヘッダ2行・末尾の空行/注意書き行・欠測 `-` を落とし、和暦をISO日付へ変換する。
+    **先頭が元号記号の行だけをデータ行とみなす**（注意書き行「最新の csv データが…」を
+    行数や位置で切ると、行が増減したときに黙って壊れる）。
+    """
+    rows: list[dict] = []
+    for cells in csv.reader(io.StringIO(text)):
+        if not cells:
+            continue
+        head = cells[0].strip()
+        if not head or head[0] not in MOF_ERA_BASE:
+            continue          # タイトル行・列名行・空行・注意書き行
+        try:
+            era, rest = head[0], head[1:]
+            y, m, d = rest.split(".")
+            trade_date = date(MOF_ERA_BASE[era] + int(y), int(m), int(d))
+        except (ValueError, KeyError):
+            log.warning("MOF JGB: 和暦のパースに失敗しスキップ: %r", head)
+            continue
+        raw = cells[column].strip() if len(cells) > column else ""
+        if not raw or raw == "-":
+            continue          # 欠測（1986年以前の年限など）
+        try:
+            close = float(raw)
+        except ValueError:
+            log.warning("MOF JGB: 数値のパースに失敗しスキップ: %s %r", trade_date, raw)
+            continue
+        rows.append({"trade_date": trade_date.isoformat(), "close": close,
+                     "open": None, "high": None, "low": None, "volume": None})
+    return rows
+
+
+async def fetch_mof_jgb_csv(session: httpx.AsyncClient, column: int,
+                            full: bool) -> list[dict]:
+    """財務省の国債金利 CSV を取得しパースする（#458）。
+
+    full=True で全期間版（月次更新・1986年〜）、False で当月版（日次更新・当月のみ）。
+    取得・パースの失敗はログ警告のみで空リストを返す（他系列の収集を止めない＝
+    fetch_esri_gdp_csv / fetch_boj_series と同じフェイルセーフ方針）。
+    """
+    url = MOF_JGB_ALL_URL if full else MOF_JGB_CURRENT_URL
+    try:
+        r = await session.get(url, timeout=60)
+        r.raise_for_status()
+    except Exception as e:
+        log.warning("MOF JGB 取得失敗 %s: %s", url, type(e).__name__)
+        return []
+    try:
+        text = r.content.decode("cp932")
+    except UnicodeDecodeError:
+        log.warning("MOF JGB: cp932 でデコードできない %s", url)
+        return []
+    rows = parse_mof_jgb_csv(text, column)
+    if not rows:
+        log.warning("MOF JGB: データ行が1件も取れない %s", url)
+    return rows
 
 
 def _esri_apply_lag(rows: list[dict], lag_days: int) -> list[dict]:
@@ -2364,9 +2470,10 @@ async def collect_macro_data(
     only: Optional[list[str]] = None,
 ):
     """MACRO_SERIES（Yahoo/stooq）+ FRED_SERIES + BOJ_SERIES + OECD_SERIES + ESRI_SERIES +
-    IMF_SERIES + ESTAT_SERIES + GDELT_SERIES + WIKIMEDIA_SERIES を macro_data に upsert。
+    IMF_SERIES + ESTAT_SERIES + GDELT_SERIES + WIKIMEDIA_SERIES + MOF_SERIES を macro_data
+    に upsert。
     Yahoo Finance 優先（GitHub Actions Azure IP 対応）→ stooq フォールバック。FRED:
-    FRED_API_KEY 設定時のみ。BOJ・OECD・ESRI・IMF・GDELT・Wikimedia: 常時収集（認証不要）。
+    FRED_API_KEY 設定時のみ。BOJ・OECD・ESRI・IMF・GDELT・Wikimedia・MOF: 常時収集（認証不要）。
     e-Stat: ESTAT_API_KEY 設定時のみ。既存レコードは close 等を上書き（最新値で更新）。
 
     only: series_code のリスト。指定時はグループ横断で対象系列だけを収集する（#444）。
@@ -2392,10 +2499,12 @@ async def collect_macro_data(
     estat_idx_list = _sel(ESTAT_INDEX_SERIES)
     gdelt_list     = _sel(GDELT_SERIES)
     wiki_list      = _sel(WIKIMEDIA_SERIES)
+    mof_list       = _sel(MOF_SERIES)
     if only_codes:
         known = {s["code"] for s in (
             MACRO_SERIES + FRED_SERIES + BOJ_SERIES + OECD_SERIES + ESRI_SERIES
             + IMF_SERIES + ESTAT_SERIES + ESTAT_INDEX_SERIES + GDELT_SERIES + WIKIMEDIA_SERIES
+            + MOF_SERIES
         )}
         unknown = sorted(only_codes - known)
         if unknown:
@@ -2436,6 +2545,7 @@ async def collect_macro_data(
         + (len(estat_list) + len(estat_idx_list) if ESTAT_API_KEY else 0)
         + len(gdelt_list)
         + len(wiki_list)
+        + len(mof_list)
     )
     saved      = 0
 
@@ -2834,5 +2944,57 @@ async def collect_macro_data(
             if on_progress:
                 on_progress(idx, total,
                             f"[Wikimedia {w}/{len(wiki_list)}] {series['name']}: {n}件処理")
+
+        # ── 財務省 国債金利 収集（認証不要・常時・#458）────────────────────────
+        # 全期間版は月次更新で当月分を含まないため、**初回だけ全期間版で埋め、以降は
+        # 当月版で差分**を取る。判定は「DB の最古 trade_date が要求窓の起点より新しいか」
+        # ＝years_back を伸ばしたときも自然に埋め直しが走る（件数0固定の判定にしない）。
+        mof_base_i = wiki_base_i + len(wiki_list)
+        for f_i, series in enumerate(mof_list, 1):
+            idx = mof_base_i + f_i
+            if cancel_check and cancel_check():
+                if on_progress:
+                    on_progress(idx - 1, total, "[マクロ収集] ユーザー停止")
+                return saved
+
+            existing_min = (
+                db.query(sqla_func.min(MacroData.trade_date))
+                .filter(MacroData.series_code == series["code"]).scalar()
+            )
+            need_full = existing_min is None or existing_min > start.isoformat()
+            if on_progress:
+                on_progress(idx - 1, total,
+                            f"[MOF {f_i}/{len(mof_list)}] {series['name']} "
+                            f"{'全期間版' if need_full else '当月版'} 取得中")
+            # 全期間版は**月次更新で当月分を含まない**ため、初回は当月版も併せて取る
+            # （そうしないと初回収集直後だけ最大1か月ぶん古いまま＝鮮度ゲートが鳴る）。
+            rows = await fetch_mof_jgb_csv(session, series["mof_column"], full=need_full)
+            if need_full:
+                rows = rows + await fetch_mof_jgb_csv(
+                    session, series["mof_column"], full=False)
+            # 基準日は観測日そのもの。公表は翌営業日なので lag_days 分だけ後ろへ寄せて
+            # 「この日には知れた値」へ正規化する（ESRI と同じ扱い・ADR-0028）。
+            rows = _esri_apply_lag(rows, series.get("lag_days", 0))
+
+            if not rows:
+                if on_progress:
+                    on_progress(idx, total,
+                                f"[MOF {f_i}/{len(mof_list)}] {series['name']} データ無し")
+                continue
+
+            vals = [{
+                "series_code": series["code"],
+                "series_name": series["name"],
+                "category":    series["category"],
+                "trade_date":  r["trade_date"],
+                "open": r["open"], "high": r["high"], "low": r["low"],
+                "close": r["close"], "volume": r["volume"],
+            } for r in rows]
+            n = upsert_macro_batch(db, vals)
+            db.commit()
+            saved += n
+            if on_progress:
+                on_progress(idx, total,
+                            f"[MOF {f_i}/{len(mof_list)}] {series['name']}: {n}件処理")
 
     return saved

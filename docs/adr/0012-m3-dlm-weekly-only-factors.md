@@ -4,6 +4,8 @@
 
 accepted（2026-07-12）。Issue #310（M-3 への月次以下マクロ系列組み込みの方針検討）の設計決定。by-design で #310 をクローズする。
 
+**Decision 2 は [ADR-0029](0029-m3-jp10y-daily-mof-source.md)（2026-08-07・#458）に superseded**。`dlm_jp10y` の grandfathered な月次例外は、財務省「国債金利情報」CSV による日次系列（`JP10Y_MOF`）への差し替えで解消した。**Decision 1／3／4 は有効**（M-3 は週次高頻度ファクター専用・設計コメント・#310 の by-design クローズ）。
+
 ## Context
 
 M-1（`macro_risk_return.py`）・M-2（`macro_gbdt.py`）は `plugins/macro_snapshots.py` の `MACRO_FEATURE_OPTIONS`（31系列）を共用し、日本マクロ統計（実質GDP・失業率・貿易収支・鉱工業生産/在庫指数・CPIコア・日銀短観4種・M2・CGPI・マネタリーベース・OECD CLI・IMF WEO見通し）や社債スプレッド・BEI を特徴量として選択できる。

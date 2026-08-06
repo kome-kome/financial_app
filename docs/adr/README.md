@@ -32,6 +32,7 @@
 | [0026](0026-representative-asof-and-price-freshness.md) | 代表 as-of は中央値（max 禁止・最古と古い銘柄数を併記）／株価鮮度は p50 判定で 5・10 営業日の黄赤・実行はブロックしない | #417, #416 | accepted（2026-08-03） |
 | [0027](0027-structural-nulls-in-sector-ols-population.md) | sector_ols の構造的 NULL（業種に概念が無い列・無配の `dps`）を欠測と分けて扱う。業種単位の列ドロップ＋無配 0 埋めでカバレッジ 74.4→93.4% | #434 | accepted（2026-08-03） |
 | [0028](0028-freshness-limits-from-measured-release-lag.md) | 鮮度ゲートの許容遅延は実配信ラグの実測で与え `lag_days` から導出しない。`freq` 既定の較正は**停止していない系列のみ**で行う（`JP_IIP` 停止中の 96 日で `monthly=130` を較正していた） | #451, #447 | accepted（2026-08-04） |
+| [0029](0029-m3-jp10y-daily-mof-source.md) | `dlm_jp10y` を財務省の日次 JGB 金利（`JP10Y_MOF`）へ差し替え ADR-0012 Decision 2 を supersede。週次差分ゼロ率 76.89%→0.91%。ただし**日次化して初めて実質的に効くようになった結果その効きが負**（売り側 p=0.023）だったため既定からは外す。日次系列の `lag_days` 上限は実配信ラグ（超えると未来日 CRITICAL） | #458 | accepted（2026-08-07） |
 
 ## 運用
 
