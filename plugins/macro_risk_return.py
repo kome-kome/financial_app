@@ -232,7 +232,8 @@ class MacroRiskReturnPlugin(AnalysisPlugin):
     # ── テスト後方互換ラッパー（macro_snapshots への thin delegation）────────────
 
     def _load_data(self, db) -> tuple:
-        return load_data(db)
+        # M-1 は価格行動系特徴量（px_*）を持たない＝週次 volume_sum を一度も読まない。
+        return load_data(db, with_volume=False)
 
     def _build_snapshots(self, prices_by_co, fin_by_co, companies, macro_cache,
                          fin_features, macro_names, use_momentum, mom_window, min_coverage) -> tuple:
@@ -262,7 +263,8 @@ class MacroRiskReturnPlugin(AnalysisPlugin):
 
         macro_names = list(macro_features) if use_macro else []
 
-        prices_by_co, fin_by_co, companies = load_data(db)
+        # M-1 に px_* は無いので週次 volume_sum は引かない（Issue #446）。
+        prices_by_co, fin_by_co, companies = load_data(db, with_volume=False)
         if not prices_by_co:
             raise ValueError("株価週次履歴がありません。先に収集を実行してください。")
 

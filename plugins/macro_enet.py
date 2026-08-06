@@ -222,7 +222,10 @@ class MacroEnetPlugin(AnalysisPlugin):
             raise ValueError("財務特徴量を1つ以上選択してください。")
 
         # ── データロード・スナップショット構築（M-2 と同一契約）────────────────
-        prices_by_co, fin_by_co, companies = load_data(db)
+        # 週次 volume_sum は px_volz 専用（既定 OFF）。選ばれていなければ列ごと引かない
+        # ＝夜間バッチの Egress −12.1MB/回（Issue #446）。
+        prices_by_co, fin_by_co, companies = load_data(
+            db, with_volume="px_volz" in price_features)
         if not prices_by_co:
             raise ValueError("株価週次履歴がありません。先に収集を実行してください。")
         macro_cache = preload_macro(db, prices_by_co, macro_names) if macro_names else {}

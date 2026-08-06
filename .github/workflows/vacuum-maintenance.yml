@@ -1,6 +1,6 @@
 name: "[定常] DBメンテナンス（VACUUM FULL・週次）"
 
-# JST 日曜 07:00 = UTC 土曜 22:00
+# JST 日曜 08:30 = UTC 土曜 23:30
 #
 # stock_price_daily は日次収集のたびに DELETE ベースの trim を行い、
 # btree インデックスが bloat し続ける（Issue #290）。VACUUM FULL で
@@ -14,13 +14,22 @@ name: "[定常] DBメンテナンス（VACUUM FULL・週次）"
 # 現行の夜間チェーンは JST 03:00 収集開始 → 最長 05:40 完了 → nightly-scores 約16分
 # → 06:00 頃に全完了。その後の 07:00 へ移動した。収集の所要が延びたらここも見直す。
 #
+# ⏰ 再調整（Issue #446・2026-08-06）: `0 22 * * 6`（JST 日曜 07:00）は**実測では重なって
+# いた**。cron の JST 03:00 は名目で、GitHub のキュー遅延により daily-incremental の実起動は
+# 19:45Z 前後（実測4本）。所要 2h05m〜2h38m で 21:51〜22:03Z 終了 → チェーンの nightly-scores
+# （33分・#446 実測）が 22:24〜22:37Z まで走るため、日曜だけ VACUUM と約24分重なる。
+# ロック対象（stock_price_daily）と夜間バッチの読み先（stock_price_weekly / financial_metrics）
+# が違うので実害は出ていないが、ACCESS EXCLUSIVE を取る処理を重ねたままにしない。
+# **cron の名目時刻ではなくキュー遅延込みの実起動時刻で設計すること。**
+# 23:30Z = チェーン終端（最遅 22:37Z 実測）の 53分後。
+#
 # ✅ 段階導入完了（2026-07-12）: workflow_dispatch でローカル・GitHub Actions
 # （Azure IP）双方から Supabase pooler 経由の VACUUM FULL 正常完了を確認済み
 # （所要 8〜9秒・対象は stock_price_daily のみ・データ変更なし）。定時自動実行を有効化。
 
 on:
   schedule:
-    - cron: '0 22 * * 6'   # UTC 22:00 (土) = JST 07:00 (日)
+    - cron: '30 23 * * 6'   # UTC 23:30 (土) = JST 08:30 (日)
   workflow_dispatch:
 
 # 最小権限（GITHUB_TOKEN でリポジトリ書込は不要・収集/保守は Supabase 直結）

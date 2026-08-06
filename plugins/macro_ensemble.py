@@ -476,7 +476,9 @@ class MacroEnsemblePlugin(AnalysisPlugin):
                                     SUB_PARAM_OVERRIDES.get(name, {}))
                 for name in BASE_MODELS}
 
-        prices_by_co, fin_by_co, companies = load_data(db)
+        # volume_sum は px_volz 専用。基底のどれかが選んでいるときだけ引く（Issue #446）。
+        needs_volume = any("px_volz" in (p.get("price_features") or []) for p in subp.values())
+        prices_by_co, fin_by_co, companies = load_data(db, with_volume=needs_volume)
         if not prices_by_co:
             raise ValueError("株価週次履歴がありません。先に収集を実行してください。")
 

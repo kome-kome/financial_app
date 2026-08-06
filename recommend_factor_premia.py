@@ -94,7 +94,9 @@ def build_period_panel(db, min_companies_per_period: int = DEFAULT_MIN_COMPANIES
 
     fin_metrics = [m for m in METRICS if m not in ("z_momentum", "gap_ratio")]
 
-    prices_by_co, fin_by_co, companies = load_data(db)
+    # px_* を使わない（build_snapshots に price_features を渡さない）ので volume_sum は引かない
+    # （Issue #446）。
+    prices_by_co, fin_by_co, companies = load_data(db, with_volume=False)
     if not prices_by_co:
         raise ValueError("build_period_panel: 株価週次履歴がありません。先に収集を実行してください。")
 

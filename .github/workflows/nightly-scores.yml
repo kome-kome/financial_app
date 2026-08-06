@@ -43,14 +43,15 @@ jobs:
       (github.event.workflow_run.name == '[定常] 差分収集・毎日自動実行' &&
       github.event.workflow_run.conclusion == 'success')
     runs-on: ubuntu-latest
-    # sector_ols は最新年度のみ（約4,000社・業種33）の行列回帰で軽く、本番実走 16.1分
-    # （2026-08-03・run 30808053564）。M-6 はこれに加えて load_data（週次127万行）+
-    # build_snapshots + walk-forward CV（17期）+ 最終学習 + OOF バックテストを回すため
-    # 所要が読めない。GitHub Actions のホスト型ランナーは実質2コアでローカル実測より伸びる
-    # （tune-hyperparameters.yml の既存コメントと同じ理由）ので、まず安全側に置き
-    # **初回実走の実測で締める**（timeout の cancelled は notify-failure が拾うため、
-    # 短すぎる設定は誤通知になる・#414）。
-    timeout-minutes: 150
+    # 実測で締めた値（Issue #446）。M-6 込みの本番実走2本:
+    #   run 30954182465（2026-08-04）sector_ols 30.3分 + macro_enet 3.2分 = 総 33.5分（job 34.5分）
+    #   run 31050406971（2026-08-05）sector_ols 29.4分 + macro_enet 3.2分 = 総 32.6分（job 33.5分）
+    # 重いのは sector_ols（M-6 は 3.2分）。起票時の根拠だった 16.1分（2026-08-03・run
+    # 30808053564）は #434 の構造的NULL対応前の値で、いまは約2倍になっている＝**所要は
+    # 銘柄数・業種数とともに伸びるので、締めた後も実走ログで追うこと**。
+    # 70 = 実測 job wall 最大 34.5分 × 2.0。timeout の cancelled は notify-failure が拾う
+    # （#414・#453）ため、締めすぎると平常運転が誤起票になる。
+    timeout-minutes: 70
 
     steps:
       - name: Checkout

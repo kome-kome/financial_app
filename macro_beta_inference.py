@@ -111,7 +111,9 @@ def build_panel(db, macro_names: list[str] | None = None) -> tuple:
         preload_macro,
     )
 
-    prices_by_co, fin_by_co, companies = load_data(db)
+    # build_snapshots へ price_features を渡さない＝週次 volume_sum を読まないので引かない
+    # （Issue #446・1回 12.1MB）。
+    prices_by_co, fin_by_co, companies = load_data(db, with_volume=False)
     if not prices_by_co:
         raise ValueError("build_panel: 株価週次履歴がありません。先に収集を実行してください。")
 

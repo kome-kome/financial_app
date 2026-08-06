@@ -391,6 +391,14 @@ def build_price_features(px_rows: list, selected: list[str]) -> dict[str, list]:
 
     if "px_volz" in selected:
         w = _PX_VOLZ_WINDOW
+        # 出来高列を落としてロードした行で px_volz を求めようとしたら即落とす（Issue #446）。
+        # 番兵を欠測として扱うと全 nan の px_volz が黙って出来上がる＝壊れたのか薄いのかを
+        # 後から区別できない。
+        if px_rows and getattr(px_rows[0], "volume_sum", None) is _VOLUME_NOT_LOADED:
+            raise ValueError(
+                "px_volz には volume_sum が要る。load_data/load_weekly_prices_chunked を "
+                "with_volume=True でロードすること（Issue #446）"
+            )
         vols = pd.Series(
             [r.volume_sum if getattr(r, "volume_sum", None) and r.volume_sum > 0 else np.nan
              for r in px_rows],
@@ -671,8 +679,15 @@ def shared_cache_get_or_compute(namespace: str, key: Any, compute) -> Any:
 _WEEKLY_LOAD_BATCH = 500
 _WEEKLY_PX = namedtuple("_WeeklyPX", "trade_date close_last volume_sum")
 
+# `with_volume=False` でロードした行の volume_sum に入れる番兵（Issue #446）。
+# **None にしない**——`build_price_features` の欠測扱い（nan）と区別できず、出来高z-score が
+# 全 nan になっただけの状態を「データが薄い」と誤読する。#438 の「静かな固定」と同型の罠なので、
+# 未ロードは値ではなく状態として持ち、参照されたら例外にする。
+_VOLUME_NOT_LOADED = object()
 
-def load_weekly_prices_chunked(db, batch: int = _WEEKLY_LOAD_BATCH) -> dict:
+
+def load_weekly_prices_chunked(db, batch: int = _WEEKLY_LOAD_BATCH,
+                               with_volume: bool = True) -> dict:
     """stock_price_weekly を企業単位のチャンクに分割ロードし {edinet_code: [_WeeklyPX,...]}
     を返す（各社リストは trade_date 昇順）。Issue #311。
 
@@ -680,45 +695,61 @@ def load_weekly_prices_chunked(db, batch: int = _WEEKLY_LOAD_BATCH) -> dict:
     孤立コード無しを実測確認済み。行数が全件 count と一致）。各チャンクは
     `WHERE edinet_code IN (...) ORDER BY edinet_code, trade_date` で PK インデックスを使う。
     M-1/M-2（load_data）と M-3（macro_dlm.load_prices）が共用する唯一の週次ローダー。
-    volume_sum は M-3 の価格行動系特徴量（出来高z-score・Issue #317）専用で、M-1/M-2 は未参照。
+
+    volume_sum は価格行動系特徴量の `px_volz`（出来高z-score・Issue #317）**だけ**が読む。
+    本番実測で 1,282,436 行 × 12.1MB/回の Egress を占めるため、`px_volz` を選んでいない
+    呼び出し（M-1 は price_features 非対応・M-2/M-6 は既定 OFF）は `with_volume=False` で
+    列ごと落とす（Issue #446・無料枠 5GB/月に対し夜間バッチ1回 86MB のうち 14%）。
     """
     from database import Company, StockPriceWeekly
     codes = [c[0] for c in db.query(Company.edinet_code).all()]
     # plain dict + setdefault（defaultdict にしない）: 消費側は .get()/.items()/.values() か
     # 存在キー前提の [] アクセスのみで、欠損キーの暗黙生成に依存しない（従来の M-3 は plain dict）。
     prices_by_co: dict[str, list] = {}
+    cols = [StockPriceWeekly.edinet_code, StockPriceWeekly.trade_date,
+            StockPriceWeekly.close_last]
+    if with_volume:
+        cols.append(StockPriceWeekly.volume_sum)
     for i in range(0, len(codes), batch):
         chunk = codes[i:i + batch]
         rows = (
-            db.query(StockPriceWeekly.edinet_code, StockPriceWeekly.trade_date,
-                     StockPriceWeekly.close_last, StockPriceWeekly.volume_sum)
+            db.query(*cols)
             .filter(StockPriceWeekly.edinet_code.in_(chunk))
             .order_by(StockPriceWeekly.edinet_code, StockPriceWeekly.trade_date)
             .all()
         )
-        for ec, td, cl, vs in rows:
-            prices_by_co.setdefault(ec, []).append(_WEEKLY_PX(td, cl, vs))
+        # 行の幅で分岐せず **要求した列で** 決める。DB をモックするテストは cols に関わらず
+        # 4要素の行を返すため、`for ec, td, cl in rows` と書くと本物だけ通ってモックが落ちる。
+        for row in rows:
+            vs = row[3] if with_volume else _VOLUME_NOT_LOADED
+            prices_by_co.setdefault(row[0], []).append(_WEEKLY_PX(row[1], row[2], vs))
     return prices_by_co
 
 
-def load_data(db) -> tuple:
+def load_data(db, with_volume: bool = True) -> tuple:
     """Company / FinancialMetric / StockPriceWeekly を一括ロード。
 
-    shared_snapshot_cache() コンテキスト内では db セッション単位（id(db)）で結果を
+    shared_snapshot_cache() コンテキスト内では (id(db), with_volume) 単位で結果を
     キャッシュし、2回目以降の呼び出しは DB へ再クエリしない（Issue #298）。探索中は
     同一 db セッションに対して結果は不変という前提。コンテキスト外では常にフル計算する。
+
+    with_volume: 週次の `volume_sum` を引くか。`px_volz` を選んでいる呼び出しだけ True に
+    する（Issue #446）。**キャッシュキーに含める**——False でロードした結果を True の要求へ
+    再利用すると `px_volz` が壊れる（番兵に当たって ValueError）。
     """
     cache = _shared_cache.get()
     if cache is None:
-        return _load_data_impl(db)
-    return cache["load_data"].get_or_compute(id(db), lambda: _load_data_impl(db))
+        return _load_data_impl(db, with_volume)
+    return cache["load_data"].get_or_compute(
+        (id(db), with_volume), lambda: _load_data_impl(db, with_volume)
+    )
 
 
-def _load_data_impl(db) -> tuple:
+def _load_data_impl(db, with_volume: bool = True) -> tuple:
     """load_data の実体（キャッシュなし・毎回フル計算）。"""
     from database import Company, FinancialMetric
     # 週次株価は単一クエリだと本番 pooler で timeout/接続破損するため分割ロード（Issue #311）。
-    prices_by_co = load_weekly_prices_chunked(db)
+    prices_by_co = load_weekly_prices_chunked(db, with_volume=with_volume)
 
     fin_by_co: dict[str, list] = defaultdict(list)
     for r in (db.query(FinancialMetric)
@@ -756,8 +787,11 @@ def _preload_macro_impl(db, prices_by_co: dict, macro_names: list[str] | None = 
     since = (_date.fromisoformat(min_d) - _td(days=5 * 366)).isoformat()
     max_d = max(all_dates)
     series_codes = sorted({_MACRO_MAP[n][0] for n in (macro_names or MACRO_FEATURE_NAMES) if n in _MACRO_MAP})
+    # 戻り値は {series_code: {trade_date: close}} だけなので3列で足りる。ORM 行（open/high/low/
+    # volume/series_name/category/created_at 込み）を引くと本番実測で 8.7MB/回、3列なら 2.6MB
+    # ＝夜間バッチ1回 86MB のうち 7%（Issue #446）。
     q = (
-        db.query(MacroData)
+        db.query(MacroData.series_code, MacroData.trade_date, MacroData.close)
         .filter(
             MacroData.trade_date >= since,
             MacroData.trade_date <= max_d,
@@ -768,6 +802,8 @@ def _preload_macro_impl(db, prices_by_co: dict, macro_names: list[str] | None = 
         q = q.filter(MacroData.series_code.in_(series_codes))
     rows = q.order_by(MacroData.series_code, MacroData.trade_date).all()
     by_series: dict[str, dict[str, float]] = {}
+    # 属性で読む（tuple 展開にしない）: SQLAlchemy の Row は列名で属性アクセスでき、
+    # DB をモックして ORM 風オブジェクトを返すテストとも両立する。
     for r in rows:
         by_series.setdefault(r.series_code, {})[r.trade_date] = r.close
     return by_series

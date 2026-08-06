@@ -692,7 +692,9 @@ class MacroGbdtPlugin(AnalysisPlugin):
             raise ValueError("財務特徴量を1つ以上選択してください。")
 
         # ── データロード ─────────────────────────────────────────────────────
-        prices_by_co, fin_by_co, companies = load_data(db)
+        # volume_sum は px_volz 専用（既定 OFF）。未選択なら列ごと引かない（Issue #446）。
+        prices_by_co, fin_by_co, companies = load_data(
+            db, with_volume="px_volz" in price_features)
         if not prices_by_co:
             raise ValueError("株価週次履歴がありません。先に収集を実行してください。")
 

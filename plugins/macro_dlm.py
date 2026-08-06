@@ -209,6 +209,8 @@ def _load_prices_impl(db) -> tuple[dict, dict]:
     from database import Company
     from .macro_snapshots import load_weekly_prices_chunked
     # 週次株価は単一クエリだと本番 pooler で timeout/接続破損するため分割ロード（Issue #311）。
+    # M-3 は price_features 既定 ON（px_volz 含む）なので volume_sum を引く＝既定の True のまま
+    # （Issue #446 で M-1/M-2/M-6 側だけ列を落とした）。
     prices_by_co = load_weekly_prices_chunked(db)
     companies = {c.edinet_code: c for c in db.query(Company).all()}
     return prices_by_co, companies
