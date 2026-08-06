@@ -99,7 +99,9 @@ def test_commodity_series_defined():
         assert by_code[code]["category"] == "commodity", f"{code} の category が commodity でない"
         assert by_code[code]["yf_ticker"], f"{code} に yf_ticker が無い"
     # 拡張8本の Yahoo ティッカー（Phase 0 疎通検証済み）
-    assert by_code["BCOM"]["yf_ticker"]     == "^BCOM"
+    # BCOM は指数 ^BCOM が 2026-07-17 で配信停止（#438）。TOPIX の 1306.T 代理（#250）と
+    # 同じく連動 ETN DJP を代理に使う（series_code は BCOM のまま＝特徴量名は不変）。
+    assert by_code["BCOM"]["yf_ticker"]     == "DJP"
     assert by_code["COPPER"]["yf_ticker"]   == "HG=F"
     assert by_code["NATGAS"]["yf_ticker"]   == "NG=F"
     assert by_code["PLATINUM"]["yf_ticker"] == "PL=F"

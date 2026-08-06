@@ -1139,11 +1139,23 @@ MACRO_SERIES: list[dict] = [
     # ── コモディティ・チャネル拡張（#358・ADR-0013）───────────────────────────
     # 日本株の業種別コモディティ感応度をカバー（銅=非鉄/電線/機械・天然ガス=電力ガス/化学・
     # 貴金属=商社/触媒/電子材料・穀物=食品/飼料）。Phase 0 疎通検証で全8系列が Yahoo v8 から
-    # 6年 1506-1510 行取得可・^BCOM も生存を確認済み。stooq はコモディティ先物が全滅（ローカル
-    # IP でも 0 件）のため ticker は空文字（Yahoo フォールバック時に安全に skip）。VIX/DXY 同様、
-    # macro_data への蓄積を Actions で実証してから M-1/M-2/M-3 の特徴量（_MACRO_MAP・
-    # _DLM_MACRO_MAP）へ公開する（2PR 構成・#218 の公開フロー準拠）。
-    {"code": "BCOM",      "name": "ブルームバーグ商品指数", "category": "commodity", "ticker": "", "yf_ticker": "^BCOM"},
+    # 6年 1506-1510 行取得可。stooq はコモディティ先物が全滅（ローカル IP でも 0 件）のため
+    # ticker は空文字（Yahoo フォールバック時に安全に skip）。VIX/DXY 同様、macro_data への
+    # 蓄積を Actions で実証してから M-1/M-2/M-3 の特徴量（_MACRO_MAP・_DLM_MACRO_MAP）へ
+    # 公開する（2PR 構成・#218 の公開フロー準拠）。
+    #
+    # BCOM は指数 `^BCOM` が 2026-07-17 を最後に配信停止（#438）。以降も timestamp 行だけは
+    # 返るが close が全 null になるため `fetch_yahoo_history` は 0 件扱いで continue し、
+    # 例外もエラーも出さないまま `macro_bcom_yoy`（M-1/M-2/M-6 既定）と `dlm_bcom`（M-3 既定）
+    # が固定値を返し続けていた。TOPIX `^TPX`→`1306.T`（#250）と同じく**連動商品を代理**にする:
+    # `DJP`（iPath Bloomberg Commodity ETN）は 2016-07-25 以降 BCOM の全 2,509 営業日を
+    # カバーし、追従性は週次 logret corr 0.9906 / yoy corr 0.9957（2026-08-06 実測。次点は
+    # DBC 0.9027・BCI 0.836）。`^BCOMTR`/`^DJUBS` は Yahoo で死亡、`^SPGSCI` は生存だが
+    # エネルギー偏重で WTI と重複＝ADR-0013 が却下済み。
+    # **series_code は BCOM のまま**（特徴量名・既定セットは不変）。DJP はトータルリターン型
+    # ＝旧 ER 指数と水準体系が違うため、切替時は全期間（--years 11）で再収集して旧行を
+    # 上書きすること。期間を絞ると新旧 level が混在し yoy が1年間壊れる。
+    {"code": "BCOM",      "name": "ブルームバーグ商品指数", "category": "commodity", "ticker": "", "yf_ticker": "DJP"},
     {"code": "COPPER",    "name": "銅先物",        "category": "commodity",  "ticker": "",         "yf_ticker": "HG=F"},
     {"code": "NATGAS",    "name": "天然ガス先物",  "category": "commodity",  "ticker": "",         "yf_ticker": "NG=F"},
     {"code": "SILVER",    "name": "銀先物",        "category": "commodity",  "ticker": "",         "yf_ticker": "SI=F"},

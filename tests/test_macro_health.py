@@ -268,7 +268,10 @@ class TestFreshnessCheck:
         # JP10Y も #442 で MACRO_SERIES から削除したので、ここには現れない）
         excluded = {e["code"] for e in r["excluded"]}
         assert excluded <= set(mh.EXCLUDED_SERIES)
-        assert {"BCOM"} <= excluded
+        # JP_IIP は e-Stat 側が止まったまま収集を続けている＝定義に残る除外系列の代表例。
+        # BCOM は #438 で DJP 代理へ差し替えて鮮度が戻ったため除外から外した（2026-08-06）。
+        assert {"JP_IIP"} <= excluded
+        assert "BCOM" not in excluded
         assert "JP10Y" not in excluded
         assert excluded & {e["code"] for e in r["stale"] + r["missing"]} == set()
         report = "\n".join(mh.format_report(r))
