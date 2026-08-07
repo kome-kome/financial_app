@@ -302,7 +302,10 @@ async def _jquants_fetch_date(session: httpx.AsyncClient, api_key: str, date_str
                 log.error(f"J-Quants 429: {date_str} → 再試行も429、スキップ")
                 return []
         if r.status_code == 403:
-            raise JQuantsCoverageError(date_str)
+            # 契約失効はカバレッジ境界と同じ 403 で返るが、ボディの文言で区別できる（#461）。
+            body = (r.text or "").lower()
+            raise JQuantsCoverageError(
+                date_str, no_subscription=JQUANTS_NO_SUBSCRIPTION_MARK in body)
         if r.status_code in (400, 404):
             break  # 非営業日またはサブスクリプション範囲外
         r.raise_for_status()
@@ -428,12 +431,31 @@ async def collect_stock_price_history_jquants(
     }
 
     total = len(dates)
-    fetch_stats = {"forbidden": 0}   # 403（カバレッジ外）で読み飛ばした日数・Issue #412
+    # forbidden: 403 で読み飛ばした日数（Issue #412）
+    # no_subscription: 403 のボディが契約失効を明示した日数（#461）
+    # aborted_days: 連続 403 の早期打ち切りで**叩かずに飛ばした**日数（#461）
+    fetch_stats = {"forbidden": 0, "no_subscription": 0, "aborted_days": 0}
 
     async def _jquants_batch_gen(session):
         completed = 0
         last_req_time: float = 0.0
+        consecutive_forbidden = 0
         for date_str in dates:
+            # 連続 403 が続いたら残りを叩かない（#461）。失効・権限喪失は全日 403 になり、
+            # 1日ごとに JQUANTS_RATE_SLEEP=20秒 を待つため窓の長さぶん丸ごと捨てることになる。
+            if consecutive_forbidden >= JQUANTS_MAX_CONSECUTIVE_FORBIDDEN:
+                fetch_stats["aborted_days"] = total - completed
+                reason = ("契約失効（No active subscription）"
+                          if fetch_stats["no_subscription"] else "カバー範囲外が連続")
+                log.warning(
+                    f"J-Quants: {consecutive_forbidden}日連続で403のため残り "
+                    f"{fetch_stats['aborted_days']}日の取得を打ち切る（{reason}）"
+                )
+                if on_progress:
+                    on_progress(completed, total,
+                                f"[打ち切り] 403が{consecutive_forbidden}日連続（{reason}）"
+                                f"・残り{fetch_stats['aborted_days']}日をスキップ")
+                return
             if cancel_check and cancel_check():
                 if on_progress:
                     on_progress(completed, total, f"[停止] ユーザーによる停止（{completed}/{total}日処理済み）")
@@ -451,17 +473,28 @@ async def collect_stock_price_history_jquants(
             last_req_time = asyncio.get_event_loop().time()
             try:
                 quote_rows = await _jquants_fetch_date(session, api_key, date_str)
-            except JQuantsCoverageError:
+            except JQuantsCoverageError as e:
                 # 無料プランのカバレッジ境界（例: days_back=730 の下限日）は 403 を返す。
                 # 例外を伝播させると収集全体が落ちるため欠測扱いで継続する（Issue #412）。
                 fetch_stats["forbidden"] += 1
+                consecutive_forbidden += 1
                 completed += 1
-                log.warning(f"J-Quants 403: {date_str} をカバー範囲外としてスキップ")
+                if e.no_subscription:
+                    # 契約失効はカバレッジ境界と別物＝**平常運転と読み違えない文言で出す**（#461）
+                    fetch_stats["no_subscription"] += 1
+                    log.error(
+                        f"J-Quants 403: {date_str} — 契約が有効でない"
+                        f"（No active subscription）。カバー範囲外ではなく購読状態の問題"
+                    )
+                else:
+                    log.warning(f"J-Quants 403: {date_str} をカバー範囲外としてスキップ")
                 if on_progress:
                     on_progress(completed, total,
-                                f"[{completed}/{total}] {date_str} スキップ（403 カバー範囲外）")
+                                f"[{completed}/{total}] {date_str} スキップ（403 "
+                                f"{'契約失効' if e.no_subscription else 'カバー範囲外'}）")
                 yield []
                 continue
+            consecutive_forbidden = 0
             completed += 1
 
             if not quote_rows:
@@ -514,23 +547,39 @@ async def collect_stock_price_history_jquants(
         # 価格収集と同じセッションで上場銘柄情報（発行済株式数・現在の上場銘柄集合）も取得（API キー共用）
         listed_info = await _fetch_jquants_listed_info(session, api_key)
 
-    # 403 の切り分け（Issue #412 → #425 で再設計）:
-    # #412 は「全日程 403 かつ listed/info も失敗ならキー失効とみなし中断」していたが、
-    # **`/markets/listed/info` は無料プランで常に 403** であることが実測で判明した
-    # （2026-07-09/12/13 の success run すべてに `listed/info 取得失敗 status=403` が出ている）。
-    # したがって active_codes は常に空＝条件は `forbidden == total` に退化し、84日エンバーゴ内の
-    # 窓（days_back=14 等）では構造的に必ず発火してプロセスを落としていた。
-    # J-Quants（収集元A）の失敗が、同じキーに依存しない Yahoo ギャップ補完（収集元B・株価鮮度の
-    # 実質唯一の担い手）まで巻き添えでブロックするのは誤り。例外は投げず結果で返し、
-    # 呼び出し側が継続可否を判断する。キー失効の可視化は log.error と GH Actions 失敗通知（#414）で担保。
-    all_forbidden = bool(total) and fetch_stats["forbidden"] == total
+    # 403 の切り分け（Issue #412 → #425 で再設計 → #461 で失効を分離）:
+    # #412 は「全日程 403 かつ listed/info も失敗ならキー失効とみなし中断」していた。#425 は
+    # これを「`/markets/listed/info` は無料プランで常に 403」と解釈して撤去したが、**2026-08-07
+    # の実測でその解釈は誤りと判明**——同エンドポイントは
+    # `{"message": "The requested endpoint does not exist..."}` を返しており、**プランの制約では
+    # なく v2 に存在しない URL** だった（正しい URL の確定は契約復旧後・#461）。いずれにせよ
+    # active_codes は常に空で条件は `forbidden == total` に退化するため、#425 の判断
+    # （J-Quants の失敗で例外を投げない）はそのまま維持する。J-Quants（収集元A）の失敗が、
+    # 同じキーに依存しない Yahoo ギャップ補完（収集元B・株価鮮度の実質唯一の担い手）まで
+    # 巻き添えでブロックするのは誤り。例外は投げず結果で返し、呼び出し側が継続可否を判断する。
+    #
+    # **失効は「カバー範囲外」と別文言で出す**（#461）。両者を同じ警告に潰していたため、
+    # 契約が切れた 2026-08 も「エンバーゴ内なら正常」と読めるログが毎晩流れ続けていた。
+    attempted = fetch_stats["forbidden"] + fetch_stats["aborted_days"]
+    all_forbidden = bool(total) and attempted == total
     if fetch_stats["forbidden"]:
         log.warning(
-            f"J-Quants 403（カバー範囲外）: {fetch_stats['forbidden']}/{total}日をスキップ"
+            f"J-Quants 403: {fetch_stats['forbidden']}/{total}日をスキップ"
+            + (f"（うち契約失効 {fetch_stats['no_subscription']}日）"
+               if fetch_stats["no_subscription"] else "（カバー範囲外）")
+            + (f"・連続403で残り {fetch_stats['aborted_days']}日を打ち切り"
+               if fetch_stats["aborted_days"] else "")
         )
-        if all_forbidden and not cancelled:
+        if fetch_stats["no_subscription"]:
             log.error(
-                f"J-Quants が全 {total} 日で 403 を返しました。"
+                "J-Quants の契約が有効ではありません（No active subscription）。"
+                "カバー範囲外の 403 ではなく購読状態の問題で、**日付を変えても取得できません**。"
+                "株価鮮度は Yahoo ギャップ補完が維持しますが、issued_shares / 上場状態同期 /"
+                "会社予想開示は止まります（Issue #461）"
+            )
+        elif all_forbidden and not cancelled:
+            log.error(
+                f"J-Quants が試行した全 {attempted} 日で 403 を返しました。"
                 "無料プランの84日エンバーゴ内の窓を叩いた場合は正常ですが、"
                 "エンバーゴ外の日付を含むならキー失効/権限喪失の可能性があります（Issue #425）"
             )
@@ -551,11 +600,15 @@ async def collect_stock_price_history_jquants(
 
     if cancelled:
         return {"cancelled": True, "upserted": upserted_total,
-                "forbidden": fetch_stats["forbidden"], "all_forbidden": all_forbidden}
+                "forbidden": fetch_stats["forbidden"], "all_forbidden": all_forbidden,
+                "no_subscription": fetch_stats["no_subscription"],
+                "aborted_days": fetch_stats["aborted_days"]}
     if on_progress:
         on_progress(total, total, f"[完了] {total}日処理・{upserted_total}件追加/更新")
     return {"cancelled": False, "upserted": upserted_total, "days": total,
-            "forbidden": fetch_stats["forbidden"], "all_forbidden": all_forbidden}
+            "forbidden": fetch_stats["forbidden"], "all_forbidden": all_forbidden,
+            "no_subscription": fetch_stats["no_subscription"],
+            "aborted_days": fetch_stats["aborted_days"]}
 
 
 def _update_market_data_latest(db) -> int:

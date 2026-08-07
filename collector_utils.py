@@ -56,6 +56,17 @@ YAHOO_BACKFILL_PROGRESS_BATCH = 200 # Yahoo backfill の進捗報告間隔
 SKIP_XBRL_RAW = os.environ.get("SKIP_XBRL_RAW", "true").lower() == "true"
 
 
+# 契約失効時に J-Quants が 403 のボディへ載せる文言（2026-08-07 実測・#461）。
+# 実レスポンス: {"message": "No active subscription found. Please check your subscription status."}
+JQUANTS_NO_SUBSCRIPTION_MARK = "no active subscription"
+# 連続でこの日数だけ 403 が続いたら以降の日付を叩かない（#461）。契約失効・権限喪失は
+# 全日 403 になるため、窓の長さ × JQUANTS_RATE_SLEEP をまるごと捨てることになる
+# （実測: 730日窓＝523営業日 × 20秒 = 174分を空振りに使い full-pipeline finalize が
+# timeout した・run 31126473273）。カバレッジ境界の連続 403（窓の下限側）も同じ扱いで
+# 打ち切れる——境界より過去は定義上どのみち取れない。
+JQUANTS_MAX_CONSECUTIVE_FORBIDDEN = 10
+
+
 class JQuantsCoverageError(Exception):
     """J-Quants が 403 を返した日を表す（Issue #412）。
 
@@ -63,4 +74,13 @@ class JQuantsCoverageError(Exception):
     返すが、APIキー失効でも 403 になる。フェッチ側では欠測と断定せず、日付ループ側が
     「境界の欠測（警告して継続）」か「キー失効（中断）」かを切り分ける。
     株価（collector_prices）・開示（collector_disclosures）の両エンドポイントで共用する。
+
+    `no_subscription`: ボディが契約失効を明示していた場合に True（#461）。**カバレッジ境界の
+    403 と失効の 403 を同じ例外へ潰すと、失効しても平常運転と区別がつかない**——実際 2026-08-07
+    まで、全日 403 のログは「エンバーゴ内の窓なら正常」と読める文言のまま毎晩流れていた。
     """
+
+    def __init__(self, date_str: str, no_subscription: bool = False):
+        super().__init__(date_str)
+        self.date_str = date_str
+        self.no_subscription = no_subscription

@@ -17,6 +17,7 @@ from sqlalchemy import func as sqla_func
 from collector_utils import (
     log, JQUANTS_SUMMARY_ENDPOINT, JQUANTS_RATE_SLEEP,
     JQUANTS_BACKFILL_DAYS, JQUANTS_DISCLOSURE_DELAY_DAYS,
+    JQUANTS_NO_SUBSCRIPTION_MARK,
     JQuantsCoverageError,
 )
 from database import Company, StatementDisclosure, upsert_statement_disclosures
@@ -54,7 +55,10 @@ async def _jquants_fetch_summary_date(session: httpx.AsyncClient, api_key: str, 
                 log.error(f"J-Quants 429: {date_str} → 再試行も429、スキップ")
                 return []
         if r.status_code == 403:
-            raise JQuantsCoverageError(date_str)
+            # 株価側（collector_prices）と同じく契約失効を本文で区別する（#461）。
+            body = (r.text or "").lower()
+            raise JQuantsCoverageError(
+                date_str, no_subscription=JQUANTS_NO_SUBSCRIPTION_MARK in body)
         if r.status_code in (400, 404):
             break
         r.raise_for_status()

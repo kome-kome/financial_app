@@ -15,6 +15,7 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from collector import (
+    JQUANTS_MAX_CONSECUTIVE_FORBIDDEN,
     JQuantsCoverageError,
     backfill_historical_stock_prices_yahoo,
     backfill_weekly_history_yahoo,
@@ -543,6 +544,84 @@ class TestCollectJQuantsHistory:
         assert result["cancelled"] is False
         assert result["forbidden"] == result["days"] == 2
         assert result["all_forbidden"] is True
+
+    # ── 契約失効の分離と連続403の早期打ち切り・Issue #461 ──────────────────
+    def _run_jq_window(self, db, fetch_mock, days: int):
+        """days 営業日ぶんの窓で収集する（早期打ち切りの検証用）。"""
+        with patch("collector_prices._jquants_fetch_date", new=fetch_mock):
+            with patch("collector_prices.record_prices_batch", return_value=1):
+                with patch("collector_prices.trim_daily", return_value=0):
+                    with patch("collector_prices._fetch_jquants_listed_info",
+                               new_callable=AsyncMock,
+                               return_value={"issued_shares": {}, "active_codes": set()}):
+                        with patch.dict(os.environ, {"JQUANTS_API_KEY": "test-key"}):
+                            with patch("collector_prices.JQUANTS_RATE_SLEEP", 0):
+                                return asyncio.run(
+                                    collect_stock_price_history_jquants(
+                                        db, date_from=date(2024, 1, 1),
+                                        date_to=date(2024, 1, 1) + timedelta(days=days),
+                                    )
+                                )
+
+    def test_consecutive_403_aborts_remaining_days(self, db, make_company):
+        """連続 403 が閾値に達したら残り日数を叩かない（#461）。
+
+        契約失効・権限喪失は全日 403 になるため、打ち切らないと窓の長さ ×
+        JQUANTS_RATE_SLEEP(20秒) を丸ごと捨てる（本番実測: 523営業日で174分を空振りに使い
+        full-pipeline finalize が timeout・run 31126473273）。
+        """
+        self._add_company(db, make_company)
+        attempted: list[str] = []
+
+        async def fetch(session, api_key, date_str):
+            attempted.append(date_str)
+            raise JQuantsCoverageError(date_str, no_subscription=True)
+
+        result = self._run_jq_window(db, fetch, days=40)
+
+        assert len(attempted) == JQUANTS_MAX_CONSECUTIVE_FORBIDDEN
+        assert result["aborted_days"] > 0
+        assert result["forbidden"] + result["aborted_days"] == result["days"]
+        assert result["all_forbidden"] is True     # 1日も取れていない事実は保たれる
+        assert result["cancelled"] is False        # 例外は投げない（#425 の構造を維持）
+
+    def test_success_resets_consecutive_counter(self, db, make_company):
+        """間に成功日が挟まれば打ち切らない（カバー範囲外が飛び飛びの窓を捨てない）。"""
+        self._add_company(db, make_company)
+        attempted: list[str] = []
+
+        async def fetch(session, api_key, date_str):
+            attempted.append(date_str)
+            # 5日ごとに1日成功させる＝連続403が閾値へ届かない
+            if len(attempted) % 5 == 0:
+                return [{**self._JQ_ROW, "Date": date_str}]
+            raise JQuantsCoverageError(date_str)
+
+        result = self._run_jq_window(db, fetch, days=40)
+
+        assert result["aborted_days"] == 0
+        assert len(attempted) == result["days"]
+        assert result["all_forbidden"] is False
+
+    def test_no_subscription_is_counted_separately(self, db, make_company):
+        """契約失効はカバー範囲外の403と区別して数える（平常運転と読み違えない・#461）。"""
+        self._add_company(db, make_company)
+
+        async def fetch(session, api_key, date_str):
+            raise JQuantsCoverageError(date_str, no_subscription=True)
+
+        result = self._run_jq(db, fetch, set())
+        assert result["no_subscription"] == result["forbidden"] == 2
+
+    def test_coverage_403_is_not_counted_as_subscription_lapse(self, db, make_company):
+        self._add_company(db, make_company)
+
+        async def fetch(session, api_key, date_str):
+            raise JQuantsCoverageError(date_str)
+
+        result = self._run_jq(db, fetch, set())
+        assert result["no_subscription"] == 0
+        assert result["forbidden"] == 2
 
     def test_partial_403_is_not_all_forbidden(self, db, make_company):
         """一部日だけ 403 なら all_forbidden は False（キー失効の誤検知を避ける）。"""
