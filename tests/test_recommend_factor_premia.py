@@ -146,14 +146,16 @@ class TestBuildPeriodPanel:
     def test_factor_names_match_recommend_metrics_minus_gap_ratio(self):
         # gap_ratio は sector_ols 依存で2025年度以前ほぼ0%充足のため回帰対象から除外する
         # （実データ検証で判明・ADR-0008）。z_momentum は末尾に名前変換されて残る。
+        # mu（producer μ̂）は財務パネルの列ではないので説明変数に入れない（ADR-0030）。
         from plugins.recommend import METRICS
 
         db, _codes = _build_mock_recommend_db()
         period_panel, factor_names = build_period_panel(db, min_companies_per_period=2)
 
-        expected = [m for m in METRICS if m != "gap_ratio"]
+        expected = [m for m in METRICS if m not in ("gap_ratio", "mu")]
         assert factor_names == expected
         assert "gap_ratio" not in factor_names
+        assert "mu" not in factor_names
         assert len(period_panel) > 0
         any_ym = next(iter(period_panel))
         X, y = period_panel[any_ym]

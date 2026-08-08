@@ -311,6 +311,9 @@ const WEIGHT_LABELS = {
   'gap_ratio':      ['割安度（回帰分析後）',  0.5],
   'z_de_ratio':     ['D/Eレシオ低さ',        -0.3],
   'z_momentum':     ['価格モメンタム（12-1ヶ月）', 0.5],
+  // μ̂ は既定 0（＝使わない）。重みを付けるときは下のフィルター欄で「μ̂ の出所」を選ぶ
+  // （未選択のまま重みだけ付けると API が 400 で理由を返す・Issue #423 子4）。
+  'mu':             ['期待リターン μ̂（要モデル選択）', 0.0],
 };
 
 let recResults = [];
@@ -389,6 +392,11 @@ async function runRecommend() {
     recResults = d.results;
     document.getElementById('rec-result-title').textContent =
       `分析結果：上位${d.count}社（候補${d.total_candidates}社中）`;
+    // μ̂ に重みを付けたのに producer 未実行で落ちたケースを明示する（黙って
+    // カバレッジだけ下がると「効いていない」ことが画面から分からない・Issue #423 子4）。
+    if (weights.mu && d.mu_available === false) {
+      showNotif(`μ̂（${d.mu_source}）のスコアが未蓄積のため、この結果は μ̂ 抜きで計算されています`);
+    }
     // レスポンス同梱の鮮度でバーを更新（/api/stats 取得後に株価が進んだ場合の追随）
     const pf = d.price_freshness;
     if (pf) _updatePriceFreshnessBar({

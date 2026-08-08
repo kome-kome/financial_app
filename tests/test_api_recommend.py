@@ -79,6 +79,20 @@ class TestRecommend:
         r = client.post("/api/recommend", json={"preset": "バランス型", "top_n": 9999})
         assert r.status_code == 400
 
+    def test_mu_weight_without_mu_source_returns_400(self):
+        """μ̂ の重みだけ付けて出所未指定は 400（黙って欠測にしない・Issue #423 子4）。"""
+        r = client.post("/api/recommend",
+                        json={"weights": {"z_roe": 1.0, "mu": 1.0}, "min_coverage": 0.0})
+        assert r.status_code == 400
+        assert "mu_source" in r.json()["detail"]
+
+    def test_mu_source_alone_keeps_default_behaviour(self):
+        """出所を選んでも mu 重みが無ければ既定どおり（μ̂ 未使用）で 200。"""
+        r = client.post("/api/recommend",
+                        json={"preset": "バランス型", "mu_source": "macro_enet"})
+        assert r.status_code == 200
+        assert r.json()["mu_available"] is False
+
 
 # ── /api/backtest/multi ─────────────────────────────────────────────────────
 

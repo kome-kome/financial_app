@@ -85,14 +85,18 @@ def build_period_panel(db, min_companies_per_period: int = DEFAULT_MIN_COMPANIES
 
     Returns:
         (period_panel: dict[str, tuple[np.ndarray X, np.ndarray y]], factor_names: list[str])
-        factor_names は recommend.METRICS から gap_ratio を除いた並び（intercept は含まない）。
+        factor_names は recommend.METRICS から gap_ratio と mu（RUNTIME_METRICS の μ̂）を
+        除いた並び（intercept は含まない）。
         min_companies_per_period 未満の期間は破棄する。
     """
     from plugins.macro_snapshots import build_snapshots, load_data
-    from plugins.recommend import METRICS
+    from plugins.recommend import METRICS, RUNTIME_METRICS
     from plugins.utils import normalize_transform, winsorize
 
-    fin_metrics = [m for m in METRICS if m not in ("z_momentum", "gap_ratio")]
+    # RUNTIME_METRICS（z_momentum / mu）は財務パネルの列ではない。z_momentum は build_snapshots
+    # が momentum_12m1 として別途組み込み（下でリネーム）、mu は producer 由来で断面回帰の
+    # 説明変数にならないため、どちらも fin_features から外す（Issue #423 子4）。
+    fin_metrics = [m for m in METRICS if m not in RUNTIME_METRICS and m != "gap_ratio"]
 
     # px_* を使わない（build_snapshots に price_features を渡さない）ので volume_sum は引かない
     # （Issue #446）。
