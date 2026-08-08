@@ -47,6 +47,8 @@ jobs:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           EDINET_API_KEY: ${{ secrets.EDINET_API_KEY }}
         run: |
+          # tee は最後のコマンドの終了コードを返す＝pipefail が無いと収集失敗を緑で隠す（#352）
+          set -o pipefail
           python collector.py --interim --years ${{ github.event.inputs.years_back || '6' }} 2>&1 | tee interim_collect.log
 
       - name: Upload log

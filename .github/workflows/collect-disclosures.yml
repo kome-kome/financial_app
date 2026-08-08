@@ -38,6 +38,8 @@ jobs:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           JQUANTS_API_KEY: ${{ secrets.JQUANTS_API_KEY }}
         run: |
+          # tee は最後のコマンドの終了コードを返す＝pipefail が無いと収集失敗を緑で隠す（#352）
+          set -o pipefail
           python collector.py --disclosures 2>&1 | tee disclosures_collect.log
 
       - name: Upload log
