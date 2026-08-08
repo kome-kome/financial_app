@@ -52,6 +52,8 @@ python collector.py --market            # 株価のみ更新
 python collector.py --incremental       # 差分収集
 python collector.py --macro                              # マクロ全系列
 python collector.py --macro --macro-series JP10Y_FRED    # 指定系列のみ（定義是正後の再収集用）
+python collector.py --repair-price-breaks                # 週次株価の分割段差を検出（dry-run）
+python collector.py --repair-price-breaks --persist      # 同上＋該当銘柄をYahooで取り直し検算
 python edinet_ping.py                    # EDINET API接続テスト
 ```
 

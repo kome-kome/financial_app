@@ -60,6 +60,16 @@ PROGRESS_LOG_BATCH           = 100  # 進捗ログ出力の間隔
 PROGRESS_REPORT_BATCH        = 500  # 進捗コールバック報告の間隔
 YAHOO_BACKFILL_PROGRESS_BATCH = 200 # Yahoo backfill の進捗報告間隔
 
+# --- 週次株価の段差（分割の遡及調整もれ）検出・修復（#465）---
+# 乖離は「ほぼ0」と「1%以上」に二分し、0.1〜1% の帯は実測でほぼ空。したがって閾値は
+# 1% 前後ならどこに置いても同じ集合を拾う（＝「検知したい値」から逆算した数字ではない）。
+PRICE_BREAK_THRESHOLD    = 0.01
+PRICE_BREAK_PROBE_MONTHS = 24    # 契約窓内で突合する月数（月あたり1営業日 × JQUANTS_RATE_SLEEP）
+# 検出がこれを超えたら書かずに中止する安全弁。想定は全体の1〜2%（40〜70社）で、大きく
+# 超えるのは「段差が広がった」ではなく突合側の前提（コード対応・窓・API仕様）が壊れた
+# 疑いが濃い。その状態で全銘柄を上書きするほうが危ない。
+PRICE_BREAK_MAX_REPAIR   = 300
+
 # Supabase Free プランの DB 容量制約(500MB)で xbrl_raw_documents (TOAST 880MB)
 # を持てないため、デフォルトで保存をスキップ。再解析が必要な場合のみ
 # SKIP_XBRL_RAW=false にすると保存される
@@ -114,6 +124,19 @@ def parse_jquants_coverage(body: str) -> tuple:
     """
     m = _JQUANTS_COVERAGE_RE.search(body or "")
     return (m.group(1), m.group(2)) if m else (None, None)
+
+
+def is_common_stock_code(code: str) -> bool:
+    """J-Quants の5桁 `Code` が普通株か（#465）。
+
+    5桁コードは「証券コード4桁＋種類1桁」で、末尾 `0` が普通株、それ以外は優先株・
+    優先出資証券などの別クラス。収集側は `code[:4]` で `sec_code` に落とすため、
+    同一企業に複数クラスがあると 1 つの `edinet_code` に複数行が対応する。
+    **到着順の先着勝ちで潰してはいけない**——レスポンス順が変われば別クラスの終値が
+    普通株の枠に入る（実測で先頭4桁が重複するのは 9434 / 5076 / 2593）。
+    """
+    s = str(code)
+    return len(s) == 5 and s.endswith("0")
 
 
 class JQuantsAccessError(Exception):

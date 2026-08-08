@@ -52,6 +52,17 @@ if __name__ == "__main__":
     parser.add_argument("--refill-pl-bs",    action="store_true", help="pl_pretax 等 NULL の PL/BS 列を EDINET 再取得で補完（タグ修正後の既存データ是正）")
     parser.add_argument("--refill-machinery", action="store_true", help="bs_machinery NULL（かつ bs_ppe_total あり）を EDINET 再取得で補完（MachineryAndVehiclesNet タグ追加後の是正）")
     parser.add_argument("--sleep",           type=float, default=RATE_SLEEP, help="EDINET リクエスト間隔（秒・--refill-* 用）")
+    parser.add_argument("--repair-price-breaks", action="store_true",
+                        help="週次株価の段差（株式分割の遡及調整もれ）を J-Quants 公式値と突合して"
+                             "検出し、該当銘柄だけ Yahoo で取り直す（#465）。既定は dry-run")
+    parser.add_argument("--persist", action="store_true",
+                        help="--repair-price-breaks の結果を実際に書き込む（既定は検出のみ）")
+    parser.add_argument("--probe-months", type=int, default=PRICE_BREAK_PROBE_MONTHS,
+                        help="--repair-price-breaks で突合する月数（月あたり1営業日）")
+    parser.add_argument("--break-threshold", type=float, default=PRICE_BREAK_THRESHOLD,
+                        help="--repair-price-breaks で段差とみなす相対乖離（既定 0.01＝1%%）")
+    parser.add_argument("--max-repair", type=int, default=PRICE_BREAK_MAX_REPAIR,
+                        help="--repair-price-breaks で検出がこの件数を超えたら書かずに中止する")
     args = parser.parse_args()
 
     if args.reparse:
@@ -84,6 +95,48 @@ if __name__ == "__main__":
             finally:
                 db.close()
         asyncio.run(_refill_machinery())
+    elif args.repair_price_breaks:
+        async def _repair_breaks():
+            db = SessionLocal()
+            try:
+                r = await repair_price_scale_breaks(
+                    db, persist=args.persist, months=args.probe_months,
+                    threshold=args.break_threshold, max_repair=args.max_repair,
+                    on_progress=lambda c, t, m: print(m))
+                mode = "書き込み済み" if r["persisted"] else "dry-run（書き込みなし）"
+                print(f"\n=== 段差検出 {r['detected']}社 / 突合 {r['compared']}件 "
+                      f"/ 突合日 {len(r['probe_dates'])}日 — {mode} ===")
+                for b in r["breaks"][:40]:
+                    print(f"  {b['edinet_code']} {str(b.get('sec_code') or ''):5s} "
+                          f"乖離{b['max_dev'] * 100:8.2f}%  JQ/DB {b['ratio']:.4f}  "
+                          f"{b['hits']}日  {b.get('name', '')[:24]}")
+                if len(r["breaks"]) > 40:
+                    print(f"  ... 他 {len(r['breaks']) - 40}社")
+                if r["aborted"]:
+                    print(f"\n上限 {args.max_repair} 超過のため中止（書き込みなし）")
+                elif r["persisted"]:
+                    print(f"\n修復 {r['repaired']}社 / 失敗 {len(r['failed'])}社 "
+                          f"/ 残存 {len(r['remaining'])}社 / 新規 {len(r['introduced'])}社")
+                    for f in r["failed"]:
+                        print(f"  [失敗] {f['edinet_code']}: {f['reason']}")
+                    for b in r["remaining"]:
+                        print(f"  [残存] {b['edinet_code']} {b.get('name', '')[:24]} "
+                              f"乖離{b['max_dev'] * 100:.2f}%（分割以外の要因・要個別確認）")
+                    for b in r["introduced"]:
+                        print(f"  [新規] {b['edinet_code']} {b.get('name', '')[:24]} "
+                              f"乖離{b['max_dev'] * 100:.2f}%")
+                    # 週次を書き換えても financial_records の株価・PER/PBR/時価総額は
+                    # 自動では追随しない。同じ作業内で必ず反映する（#465）。
+                    print("\n次の2つを実行して修復を反映させること:\n"
+                          "  1) update_market_data_from_history(db, point_in_time=True)\n"
+                          "     — financial_records の株価・PER/PBR/時価総額を再計算\n"
+                          "  2) scripts/.cache/weekly_prices_*.pkl を退避\n"
+                          "     — 検証キャッシュはデータ世代を持たず旧値を黙って返す（#454/#456）")
+                else:
+                    print("\n書き込むには --persist を付けて再実行")
+            finally:
+                db.close()
+        asyncio.run(_repair_breaks())
     elif args.market:
         # stock_price_daily/weekly（夜間バッチが J-Quants/Yahoo で蓄積）から反映する。
         # 旧実装は stooq へ全社ぶん逐次リクエストしていたが、stooq はクラウド IP から

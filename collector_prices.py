@@ -593,6 +593,7 @@ async def collect_stock_price_history_jquants(
                     records.append({
                         "edinet_code": edinet_code,
                         "sec_code":    sec_code,
+                        "jq_code":     code,   # 5桁のまま保持（種類株の判別に使う・#465）
                         "trade_date":  q["Date"],
                         "open":        float(q["AdjO"])  if q.get("AdjO")  is not None else None,
                         "high":        float(q["AdjH"])  if q.get("AdjH")  is not None else None,
@@ -604,13 +605,16 @@ async def collect_stock_price_history_jquants(
                     continue
 
             # 同一 edinet_code に複数の J-Quants コードが対応する場合（優先株等）に
-            # ON CONFLICT DO UPDATE の CardinalityViolation を防ぐため重複排除
-            seen: set = set()
-            deduped = []
+            # ON CONFLICT DO UPDATE の CardinalityViolation を防ぐため重複排除。
+            # **先着勝ちにはしない**（#465）: 5桁コードは末尾0が普通株で、それ以外は別クラス。
+            # 到着順に依存すると優先株の終値が普通株の枠に入る（実測で 9434/5076/2593 が該当）。
+            best: dict = {}
             for rec in records:
-                if rec["edinet_code"] not in seen:
-                    seen.add(rec["edinet_code"])
-                    deduped.append(rec)
+                ec, cur = rec["edinet_code"], best.get(rec["edinet_code"])
+                if cur is None or (is_common_stock_code(rec["jq_code"])
+                                   and not is_common_stock_code(cur["jq_code"])):
+                    best[ec] = rec
+            deduped = list(best.values())   # dict は挿入順を保つ＝出力順も決定的
 
             if on_progress:
                 on_progress(completed, total, f"[{completed}/{total}] {date_str} {len(deduped)}件")
@@ -1207,6 +1211,281 @@ async def backfill_weekly_history_yahoo(
 
     log.info(f"backfill_weekly_history_yahoo: {upserted}件の daily を保存し weekly を再集約（{total}社）")
     return {"skipped": False, "upserted": upserted, "companies": total, "floor": floor_str}
+
+
+# ---------------------------------------------------------------------------
+# 週次株価の段差（株式分割の遡及調整もれ）検出・修復 — Issue #465
+#
+# stock_price_weekly は append-only で、分割が起きても過去行は再調整されない。
+# J-Quants の AdjC（JPX公式・調整後）と突合すると 98〜99% は完全一致し、残り1〜2% が
+# 分割係数ぶんずれる（ソニーG E01777 は 2024-09-27 に 13,365 → 2,861 ＝ ×0.214 ＝ 1/5）。
+# 段差はリターン計算を分割日で破綻させるため、週次を入力に持つ M-1 / M-2 / M-6 に効く。
+#
+# 730日ぶんを全銘柄まとめて公式値へ置換する案は採らない: 大半は既に一致していて得るものが無く、
+# trim_daily が収集ループ末尾で1回しか呼ばれないため未 trim の daily が約130万行積み上がり、
+# 413MB / 500MB（余裕87MB）の Supabase Free を超える。段差銘柄だけを個別に直す。
+# ---------------------------------------------------------------------------
+
+async def _learn_jquants_coverage(session: httpx.AsyncClient, api_key: str) -> tuple:
+    """契約カバレッジ窓 (from, to) を1リクエストで学ぶ（#465）。
+
+    今日の日付は必ずエンバーゴ内にあるので 400＋窓の文言が返る（#462）。窓を先に知って
+    突合日を窓内へ絞ることで、窓外を叩いて JQUANTS_RATE_SLEEP をまるごと捨てるのを避ける。
+    文言が得られなければ (None, None)。契約失効等の 403 はそのまま送出する（打ち切り判断は上位）。
+    """
+    try:
+        await _jquants_fetch_date(session, api_key, date.today().isoformat())
+    except JQuantsOutOfCoverage as e:
+        return e.cover_from, e.cover_to
+    except JQuantsAccessError as e:
+        # 契約失効とプラン制約は「日付を変えても直らない」＝突合そのものが成立しない。
+        # 平常運転の warning に紛れさせず、理由を明示して送出する（#461）。
+        log.error(f"J-Quants にアクセスできない（reason={e.reason}）: {e.message}")
+        raise
+    return None, None
+
+
+def _pick_probe_dates(db, months: int, cover_from: str, cover_to: str) -> list:
+    """突合に使う trade_date を月あたり1つ選ぶ（#465）。
+
+    カレンダーから金曜を決め打ちにはしない——weekly の trade_date は「週内最終営業日」で、
+    祝日が入れば木曜にもなる。**weekly に実在する trade_date のうち、その月で最も行数の
+    多い日**を選べば非営業日を叩かずに済み、突合できる銘柄数も最大になる。
+    同数のときは日付で決める（結果が実行ごとに入れ替わらないように・#464 の教訓）。
+    """
+    rows = db.execute(sqla_text(
+        "SELECT trade_date, COUNT(*) AS n FROM stock_price_weekly "
+        "WHERE trade_date BETWEEN :f AND :t GROUP BY trade_date"
+    ), {"f": cover_from, "t": cover_to}).fetchall()
+
+    by_month: dict = {}
+    for td, n in rows:
+        td = str(td)[:10]
+        cur = by_month.get(td[:7])
+        if cur is None or (n, td) > cur:
+            by_month[td[:7]] = (n, td)
+
+    picked = [v[1] for _, v in sorted(by_month.items())]
+    if months and 0 < months < len(picked):
+        # 端から端まで等間隔に間引く（先頭と末尾は必ず残す）
+        step = (len(picked) - 1) / (months - 1) if months > 1 else 0
+        picked = sorted({picked[round(i * step)] for i in range(months)})
+    return picked
+
+
+async def _probe_official_closes(db, session: httpx.AsyncClient, api_key: str,
+                                 probe_dates: list, *, on_progress=None) -> dict:
+    """probe_dates ごとに {edinet_code: 公式終値(AdjC)} を返す（#465）。
+
+    5桁コードのうち**普通株（末尾0）を優先**して edinet_code へ割り当てる。優先しないと
+    種類株の終値が混ざり、段差でない銘柄を段差として拾う（9434/5076/2593 が該当）。
+    """
+    sec_to_ec = {
+        r.sec_code: r.edinet_code
+        for r in db.query(Company.sec_code, Company.edinet_code)
+        .filter(Company.sec_code.isnot(None), Company.sec_code != "").all()
+    }
+    out: dict = {}
+    total = len(probe_dates)
+    for i, d in enumerate(probe_dates, 1):
+        if i > 1:
+            await asyncio.sleep(JQUANTS_RATE_SLEEP)
+        try:
+            rows = await _jquants_fetch_date(session, api_key, d)
+        except JQuantsOutOfCoverage:
+            log.warning(f"突合日 {d} は契約窓の外側 → スキップ")
+            continue
+        picked: dict = {}
+        for q in rows:
+            code = str(q.get("Code", ""))
+            ec   = sec_to_ec.get(code[:4])
+            c    = q.get("AdjC")
+            if not ec or c is None:
+                continue
+            prev = picked.get(ec)
+            if prev is None or (is_common_stock_code(code)
+                                and not is_common_stock_code(prev[0])):
+                picked[ec] = (code, float(c))
+        out[d] = {ec: v[1] for ec, v in picked.items()}
+        if on_progress:
+            on_progress(i, total, f"[突合 {i}/{total}] {d} {len(out[d])}銘柄")
+    return out
+
+
+def compare_official_vs_weekly(db, official: dict, threshold: float) -> dict:
+    """公式終値と weekly.close_last を突合し、閾値以上ずれた銘柄を返す（#465）。
+
+    official: {trade_date: {edinet_code: 公式終値}}（`_probe_official_closes` の戻り値）
+    戻り値の breaks は max_dev 降順・同値は edinet_code 昇順で決定的に並べる。
+    """
+    worst: dict = {}
+    compared = 0
+    for d in sorted(official):
+        jq = official[d]
+        if not jq:
+            continue
+        rows = db.execute(sqla_text(
+            "SELECT edinet_code, close_last FROM stock_price_weekly WHERE trade_date = :d"
+        ), {"d": d}).fetchall()
+        for ec, close_last in rows:
+            if close_last is None or ec not in jq:
+                continue
+            dbv = float(close_last)
+            if dbv <= 0:
+                continue
+            compared += 1
+            jqv = jq[ec]
+            dev = abs(jqv - dbv) / dbv
+            if dev < threshold:
+                continue
+            rec = worst.get(ec)
+            if rec is None:
+                rec = worst[ec] = {"edinet_code": ec, "hits": 0, "max_dev": -1.0}
+            rec["hits"] += 1
+            if dev > rec["max_dev"]:
+                rec.update(max_dev=dev, ratio=jqv / dbv, worst_date=d,
+                           db_close=dbv, jq_close=jqv)
+
+    if worst:
+        meta = {
+            r.edinet_code: (r.sec_code, r.name)
+            for r in db.query(Company.edinet_code, Company.sec_code, Company.name)
+            .filter(Company.edinet_code.in_(list(worst))).all()
+        }
+        for ec, rec in worst.items():
+            rec["sec_code"], rec["name"] = meta.get(ec, (None, ""))
+
+    breaks = sorted(worst.values(), key=lambda r: (-r["max_dev"], r["edinet_code"]))
+    return {"compared": compared, "breaks": breaks}
+
+
+async def detect_price_scale_breaks(
+    db,
+    api_key: Optional[str] = None,
+    *,
+    months: int = PRICE_BREAK_PROBE_MONTHS,
+    threshold: float = PRICE_BREAK_THRESHOLD,
+    probe_dates: Optional[list] = None,
+    on_progress: Optional[Callable] = None,
+) -> dict:
+    """weekly.close_last と J-Quants 公式値を突合し、段差の残る銘柄を返す（#465・読み取りのみ）。
+
+    probe_dates を渡すと窓の学習と日付選定を省く（修復後の検算で同じ日付を使い回すため）。
+    """
+    api_key = api_key or os.environ.get("JQUANTS_API_KEY", "")
+    if not api_key:
+        raise RuntimeError("環境変数 JQUANTS_API_KEY が未設定です")
+    async with httpx.AsyncClient(timeout=60) as session:
+        cover = (None, None)
+        if probe_dates is None:
+            cover = await _learn_jquants_coverage(session, api_key)
+            if not cover[0]:
+                raise RuntimeError(
+                    "J-Quants のカバレッジ窓を取得できなかった（契約状態と API 応答を確認）")
+            probe_dates = _pick_probe_dates(db, months, cover[0], cover[1])
+            log.info(f"突合日 {len(probe_dates)}件を選定（契約窓 {cover[0]} ~ {cover[1]}）")
+        official = await _probe_official_closes(
+            db, session, api_key, probe_dates, on_progress=on_progress)
+
+    result = compare_official_vs_weekly(db, official, threshold)
+    result["probe_dates"] = list(probe_dates)
+    result["coverage"] = cover
+    return result
+
+
+async def repair_price_scale_breaks(
+    db,
+    api_key: Optional[str] = None,
+    *,
+    persist: bool = False,
+    months: int = PRICE_BREAK_PROBE_MONTHS,
+    threshold: float = PRICE_BREAK_THRESHOLD,
+    max_repair: int = PRICE_BREAK_MAX_REPAIR,
+    on_progress: Optional[Callable] = None,
+) -> dict:
+    """段差銘柄を Yahoo の全履歴で取り直し、同じ突合日で検算する（#465）。
+
+    **既定は dry-run**（検出だけして書かない）。`persist=True` で初めて weekly を上書きする。
+    検出が max_repair を超えたら書かずに中止する。
+
+    修復は該当銘柄の weekly 最古日から今日までを Yahoo で取り直し、`record_prices_batch`
+    （daily upsert → 触れた週を再集約 → trim）へ通す。1社ごとに trim=True で回すので
+    daily が同時展開して容量を食うことはない。
+
+    検算で乖離が残った銘柄は `remaining` に入れて**そのまま報告する**（黙って通さない）。
+    分割以外の理由でずれている銘柄は Yahoo で取り直しても収束しない。
+    """
+    found = await detect_price_scale_breaks(
+        db, api_key, months=months, threshold=threshold, on_progress=on_progress)
+    breaks, probe_dates = found["breaks"], found["probe_dates"]
+    out = {
+        "persisted": False, "aborted": False, "detected": len(breaks),
+        "compared": found["compared"], "breaks": breaks,
+        "probe_dates": probe_dates, "coverage": found["coverage"],
+        "repaired": 0, "failed": [], "remaining": [], "introduced": [],
+    }
+
+    if len(breaks) > max_repair:
+        out["aborted"] = True
+        log.error(f"段差 {len(breaks)}社 が上限 {max_repair} を超過 → 書き込まず中止。"
+                  f"突合側の前提（コード対応・契約窓・API 仕様）を先に確認すること")
+        return out
+    if not breaks:
+        log.info(f"段差なし（突合 {found['compared']}件 / {len(probe_dates)}日）")
+        return out
+    if not persist:
+        log.info(f"段差 {len(breaks)}社を検出（dry-run: 書き込みなし）")
+        return out
+
+    # --- 修復 ---
+    target_ecs = [b["edinet_code"] for b in breaks]
+    min_week = dict(
+        db.query(StockPriceWeekly.edinet_code, sqla_func.min(StockPriceWeekly.trade_date))
+        .filter(StockPriceWeekly.edinet_code.in_(target_ecs))
+        .group_by(StockPriceWeekly.edinet_code).all()
+    )
+    d_to = date.today().strftime("%Y%m%d")
+    total = len(breaks)
+    async with httpx.AsyncClient(timeout=60) as session:
+        for i, b in enumerate(breaks, 1):
+            ec, sec = b["edinet_code"], b.get("sec_code")
+            if not sec:
+                out["failed"].append({"edinet_code": ec, "reason": "sec_code なし"})
+                continue
+            oldest = min_week.get(ec)
+            d_from = (date.fromisoformat(str(oldest)[:10]) if oldest
+                      else date.today() - timedelta(days=365 * 10)).strftime("%Y%m%d")
+            rows = await fetch_yahoo_history(session, f"{sec}.T", d_from, d_to)
+            recs = [{"edinet_code": ec, "trade_date": r["trade_date"],
+                     "close": r["close"], "volume": r.get("volume")}
+                    for r in (rows or []) if r.get("close")]
+            if not recs:
+                out["failed"].append({"edinet_code": ec, "reason": "Yahoo が空を返した"})
+            else:
+                try:
+                    # 1社ごとに trim=True：daily を保持窓外に溜めない（容量安全）
+                    record_prices_batch(db, recs, trim=True)
+                    out["repaired"] += 1
+                except Exception as e:
+                    db.rollback()
+                    out["failed"].append({"edinet_code": ec, "reason": str(e)[:150]})
+            if on_progress:
+                on_progress(i, total, f"[修復 {i}/{total}] {sec} 累計{out['repaired']}社")
+            if YAHOO_STOCK_RATE_SLEEP > 0:
+                await asyncio.sleep(YAHOO_STOCK_RATE_SLEEP)
+
+    out["persisted"] = True
+
+    # --- 検算: 同じ突合日で取り直し、修復対象の乖離が消えたかを見る ---
+    after = await detect_price_scale_breaks(
+        db, api_key, threshold=threshold, probe_dates=probe_dates, on_progress=on_progress)
+    targets = set(target_ecs)
+    out["remaining"] = [b for b in after["breaks"] if b["edinet_code"] in targets]
+    out["introduced"] = [b for b in after["breaks"] if b["edinet_code"] not in targets]
+    log.info(f"段差修復: 検出{len(breaks)}社 → 修復{out['repaired']}社 / "
+             f"失敗{len(out['failed'])}社 / 残存{len(out['remaining'])}社 / "
+             f"新規{len(out['introduced'])}社")
+    return out
 
 
 def _nearest_price(sorted_dates: list, price_dict: dict, target_str: str,
