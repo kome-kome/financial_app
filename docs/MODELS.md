@@ -512,6 +512,13 @@ premia.py`・ローカル専用CLI・Issue #271）。手順:
 単一の OLS を学習）とは異なり、期間ごとに別々の断面 OLS を行う点が Fama-MacBeth の本質
 （設計判断の詳細は ADR-0008）。永続化は `macro_beta_inference.py` と同じ producer/consumer
 分離（バッチ→`recommend_factor_premia`テーブル→`plugins.recommend.resolve_weights()`が読む）。
+バッチは **毎月5日 UTC 12:00 の GitHub Actions cron**（`recommend-factor-premia.yml`・#423 子5）
+で自動更新する。Fama-MacBeth の推定は月末スナップショットの積み上げなので、1ヶ月で増える新情報は
+「期間が1つ増える」ことだけ＝月次で過不足ない。**未算出（テーブル空）ならバランス型へ
+graceful degrade** するが、**古い重みが残っている場合は静かにそれが使われる**（フォールバック
+しない）ため、鮮度は cron が担保する。2026-08-08 の実測で有効期間 61・有意な因子は
+`z_revenue`（t=+4.87）のみ、`z_eps` は b=−3.28（t=−1.07）と有意でない係数が最大の重みを
+持っている（多重共線性の signature・縮小推定の要否は ADR-0008 の「未決」を参照）。
 
 **`gap_ratio` は回帰対象から除外**する。`gap_ratio`（sector_ols依存）の非NULL率は本番DBで
 2020〜2024年度=0%・2025年度以降=67%超と極端に偏っており、含めると有効期間が直近2ヶ月分

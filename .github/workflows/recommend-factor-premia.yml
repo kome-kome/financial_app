@@ -13,9 +13,26 @@ name: "[補完] recommend Fama-MacBeth ファクタープレミアム推定バ�
 # 実行有無・頻度が git 履歴にもワークフロー実行ログにも残らず鮮度の実態が不明だったため、
 # 「Actions 経由で実行した記録が残る」状態にする。
 #
-# 実行頻度: 当面は手動（workflow_dispatch）のみ。cron 定期化の要否は別途判断する（Issue #342）。
-# Fama-MacBeth の設計自体は月末スナップショット・52週先リターンの月次 cadence（#271）だが、
-# 定期実行を追加するかは運用実績を見て決める。
+# 実行頻度: **月次 cron（毎月5日 UTC 12:00 = JST 21:00）＋手動**（Issue #423 子5）。
+# Fama-MacBeth の設計自体が月末スナップショット・52週先リターンの月次 cadence（#271）なので、
+# 推定に効く新情報は「月末が1つ増える」ことだけ＝月次で過不足ない。
+#
+# cron 化の根拠（2026-08-08 の手動1回・run 31265047095 で実測）:
+#   - 所要 **job wall 2分54秒**（バッチ本体 1分55秒）。GHA の他バッチ（nightly-scores 33分・
+#     macro-beta-inference 最大340分）に比べ桁で軽く、月次で回しても Actions 時間・Supabase
+#     Egress（load_data 1回分 ≈ 68MB／月・無料枠 5GB/月）とも無視できる。
+#   - 有効期間数 37（2026-07-05 のローカル手動実行）→ **61**（#411 のバックフィル等でパネルが
+#     伸びた分）。**手動運用のままだと「統計的最適化」プリセットが 37期で止まった重みを
+#     使い続ける**＝#438 型の静かな劣化。cron 化はこれを断つのが目的。
+#   - 8因子の符号は 37期版と全て一致し、有意なのは z_revenue（t=+3.18→+4.87）のみ。
+#     月次更新で重みが乱高下しないことも同時に確認した。
+#
+# cron 時刻の選定: 毎月1日は tune-hyperparameters（UTC 03:00〜最大 09:00Z）と
+# macro-beta-inference（UTC 11:00〜最大 16:40Z）で埋まっているため**5日**へ置く。
+# UTC 12:00 は daily-incremental（cron 18:00・実起動 19:45Z 前後→チェーン終端 22:37Z）とも
+# vacuum-maintenance（土 23:30Z）とも重ならない。**cron の名目時刻ではなくキュー遅延込みの
+# 実起動時刻で見ること**（#446 の教訓）。月末から5日空けるのは、最終月末スナップショットの
+# 週次バーが daily-incremental で入り切るまでの余裕（1〜2日 daily が落ちても間に合う）。
 #
 # 依存: numpy / pandas / scipy / statsmodels（Newey-West HAC 標準誤差）はすべて requirements.txt
 # に含まれるため、macro-beta-inference.yml のような専用 requirements（PyMC）は不要。
@@ -25,6 +42,8 @@ name: "[補完] recommend Fama-MacBeth ファクタープレミアム推定バ�
 # 各月の最小社数を担保する（recommend_factor_premia.py の docstring 参照）。
 
 on:
+  schedule:
+    - cron: '0 12 5 * *'   # UTC 12:00 = JST 21:00、毎月5日（day1 の月次2本・daily-incremental と非重複）
   workflow_dispatch:
     inputs:
       min_companies_per_period:
@@ -43,7 +62,11 @@ permissions:
 jobs:
   estimate:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    # 実測 job wall 2分54秒（2026-08-08・run 31265047095）に対し約7倍。起票時の 120 は
+    # 未計測の当て推量で、ハングしても2時間気づけなかった。締めすぎると平常運転の揺らぎが
+    # notify-failure の誤起票になる（#453）ため、pip install の変動と銘柄数増を吸える 20 分。
+    # 所要は銘柄数・期間数とともに伸びるので、実走ログで追って必要なら上げること（#446）。
+    timeout-minutes: 20
 
     steps:
       - name: Checkout
