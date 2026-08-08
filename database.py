@@ -18,6 +18,7 @@ import os, gzip, json, logging, contextvars
 from contextlib import contextmanager
 from datetime import datetime, date, timedelta, timezone
 from pathlib import Path
+from typing import Optional
 from dotenv import load_dotenv
 from sqlalchemy import (
     create_engine, Column, String, Integer, Float, Boolean, DateTime, Date,
@@ -1891,14 +1892,24 @@ def upsert_company(db, data: dict) -> Company:
     return obj
 
 
-def sync_active_status(db, active_sec_codes: set) -> dict:
+def sync_active_status(db, active_sec_codes: set, master_as_of: Optional[str] = None) -> dict:
     """企業マスタの上場状態を、現在の上場銘柄集合（J-Quants `/equities/master` 由来）と同期する（#315・#462）。
 
     is_active=True の企業が active_sec_codes に無ければ delisted 扱い（is_active=False,
     delisted_date=today）。逆に is_active=False の企業が active_sec_codes に含まれていれば
     再上場・誤検出からの復帰とみなし is_active=True・delisted_date=None に戻す（自己修復）。
     sec_code が空の企業は突合不能のため対象外。
-    戻り値: {"delisted": 新規delisted件数, "reactivated": 復帰件数}
+
+    `master_as_of`: マスタの as-of 日（レコードの `Date`・実測では全件同一の単一断面）。
+    **J-Quants 無料プランはマスタもエンバーゴされ、as-of は「今日−84日」だった**（#463）。
+    この日より後に新規上場した銘柄はマスタに載らないため、「載っていない＝廃止」と読むと
+    **IPO 直後の銘柄を誤って delisted にする**（2026-08-08 の本番実走で 589A/607A の2社が該当。
+    前日まで値がついているのに `is_active=False` にされ、recommend / gap_analysis /
+    net_cash_analysis の母集団から落ちた）。**マスタは自分の as-of より後のことを証言できない**
+    ので、価格履歴が as-of より後に始まる銘柄は delisted 判定から除外する。
+
+    戻り値: {"delisted": 新規delisted件数, "reactivated": 復帰件数, "protected": as-of 以降の
+    取引で保護した件数}
     """
     from sqlalchemy import update as sa_update
 
@@ -1915,6 +1926,28 @@ def sync_active_status(db, active_sec_codes: set) -> dict:
     newly_delisted = currently_active - active_sec_codes
     reactivated    = currently_inactive & active_sec_codes
 
+    protected: set = set()
+    if master_as_of and newly_delisted:
+        # 判定基準は「価格履歴の**開始**が as-of より後」＝ as-of 時点でまだ上場していない
+        # ＝マスタに載らなくて当然、というケースだけを保護する。
+        #
+        # 「as-of より後にも取引がある」で判定してはいけない（2026-08-08 の実測で棄却）。
+        # as-of の数日後に上場廃止した銘柄（3593/4917/6901 は 2026-05-19 が最終売買）も
+        # 条件を満たしてしまい、真の廃止まで保護してしまう。逆に、上場から日が浅い銘柄は
+        # 履歴そのものが as-of より後にしか無い（589A=2026-06-30 開始・607A=2026-08-04 開始）。
+        #
+        # 前提: `stock_price_daily` の保持窓（DAILY_WINDOW_DAYS）がエンバーゴ日数より長いこと。
+        # 短いと長期上場銘柄の min(trade_date) も as-of より後になり、全件が保護されてしまう。
+        protected = {
+            sec for (sec,) in db.query(Company.sec_code)
+            .join(StockPriceDaily, StockPriceDaily.edinet_code == Company.edinet_code)
+            .filter(Company.sec_code.in_(newly_delisted))
+            .group_by(Company.sec_code)
+            .having(func.min(StockPriceDaily.trade_date) > master_as_of)
+            .all()
+        }
+        newly_delisted -= protected
+
     if newly_delisted:
         db.execute(
             sa_update(Company).where(Company.sec_code.in_(newly_delisted))
@@ -1929,7 +1962,13 @@ def sync_active_status(db, active_sec_codes: set) -> dict:
         )
     if newly_delisted or reactivated:
         db.commit()
-    return {"delisted": len(newly_delisted), "reactivated": len(reactivated)}
+    if protected:
+        log.info(
+            f"上場状態同期: マスタ as-of {master_as_of} 以降の取引がある {len(protected)}社を"
+            f"delisted 判定から除外（新規上場でマスタ未収載）: {sorted(protected)}"
+        )
+    return {"delisted": len(newly_delisted), "reactivated": len(reactivated),
+            "protected": len(protected)}
 
 
 def upsert_financial(db, data: dict) -> FinancialRecord:

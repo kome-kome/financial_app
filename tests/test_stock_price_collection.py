@@ -445,7 +445,7 @@ class TestCollectJQuantsHistory:
             with patch("collector_prices.record_prices_batch", return_value=0):
                 with patch("collector_prices.trim_daily", return_value=0):
                     with patch("collector_prices._fetch_jquants_equity_master",
-                               new_callable=AsyncMock, return_value={"1001"}):
+                               new_callable=AsyncMock, return_value=({"1001"}, None)):
                         with patch.dict(os.environ, {"JQUANTS_API_KEY": "test-key"}):
                             with patch("collector_prices.JQUANTS_RATE_SLEEP", 0):
                                 asyncio.run(
@@ -471,7 +471,7 @@ class TestCollectJQuantsHistory:
             with patch("collector_prices.record_prices_batch", return_value=0):
                 with patch("collector_prices.trim_daily", return_value=0):
                     with patch("collector_prices._fetch_jquants_equity_master",
-                               new_callable=AsyncMock, return_value=set()):
+                               new_callable=AsyncMock, return_value=(set(), None)):
                         with patch.dict(os.environ, {"JQUANTS_API_KEY": "test-key"}):
                             with patch("collector_prices.JQUANTS_RATE_SLEEP", 0):
                                 asyncio.run(
@@ -495,7 +495,7 @@ class TestCollectJQuantsHistory:
             with patch("collector_prices.record_prices_batch", return_value=1):
                 with patch("collector_prices.trim_daily", return_value=0):
                     with patch("collector_prices._fetch_jquants_equity_master",
-                               new_callable=AsyncMock, return_value=active_codes):
+                               new_callable=AsyncMock, return_value=(active_codes, None)):
                         with patch.dict(os.environ, {"JQUANTS_API_KEY": "test-key"}):
                             with patch("collector_prices.JQUANTS_RATE_SLEEP", 0):
                                 return asyncio.run(
@@ -558,7 +558,7 @@ class TestCollectJQuantsHistory:
             with patch("collector_prices.record_prices_batch", return_value=1):
                 with patch("collector_prices.trim_daily", return_value=0):
                     with patch("collector_prices._fetch_jquants_equity_master",
-                               new_callable=AsyncMock, return_value=set()):
+                               new_callable=AsyncMock, return_value=(set(), None)):
                         with patch.dict(os.environ, {"JQUANTS_API_KEY": "test-key"}):
                             with patch("collector_prices.JQUANTS_RATE_SLEEP", 0):
                                 return asyncio.run(
@@ -667,7 +667,7 @@ class TestJquantsCoverageWindow:
             with patch("collector_prices.record_prices_batch", return_value=1):
                 with patch("collector_prices.trim_daily", return_value=0):
                     with patch("collector_prices._fetch_jquants_equity_master",
-                               new_callable=AsyncMock, return_value=set()):
+                               new_callable=AsyncMock, return_value=(set(), None)):
                         with patch.dict(os.environ, {"JQUANTS_API_KEY": "test-key"}):
                             with patch("collector_prices.JQUANTS_RATE_SLEEP", 0):
                                 return asyncio.run(collect_stock_price_history_jquants(
@@ -775,3 +775,79 @@ class TestJquantsCoverageWindow:
         assert len(attempted) == 1
         assert result["upserted"] == 0
         assert result["out_of_coverage"] == result["days"]
+
+
+class TestMasterAsOfProtectsNewListings:
+    """マスタの as-of より後に上場した銘柄を delisted にしない（#463）。
+
+    J-Quants 無料プランは `/equities/master` もエンバーゴし、実測の as-of は「今日−84日」
+    だった。この日より後に新規上場した銘柄はマスタに載らないため、「載っていない＝廃止」と
+    読むと IPO 直後の銘柄を誤って `is_active=False` にする。2026-08-08 の本番実走で
+    589A / 607A の2社が実際にこれで落ちた（前日まで値がついていた）。
+    """
+
+    def test_recently_listed_company_is_not_delisted(self, db, make_company, make_price):
+        """価格履歴が as-of より後に始まる＝ as-of 時点で未上場 → 保護（589A 実例）。"""
+        from database import Company, sync_active_status
+
+        db.add(make_company(edinet_code="E00001", sec_code="1001", name="既存上場"))
+        db.add(make_company(edinet_code="E00002", sec_code="589A", name="新規上場"))
+        db.commit()
+        db.add(make_price(edinet_code="E00002", trade_date="2026-06-30", close=1500.0))
+        db.add(make_price(edinet_code="E00002", trade_date="2026-08-07", close=1600.0))
+        db.commit()
+
+        # master は 1001 のみ・as-of は 2026-05-15（エンバーゴ境界）
+        result = sync_active_status(db, {"1001"}, master_as_of="2026-05-15")
+
+        assert result["delisted"] == 0
+        assert result["protected"] == 1
+        assert db.query(Company).filter_by(sec_code="589A").one().is_active is True
+
+    def test_delisted_just_after_as_of_is_still_flagged(self, db, make_company, make_price):
+        """as-of の直後に廃止した銘柄は保護しない（3593/4917/6901 実例・#463 の要注意ケース）。
+
+        「as-of より後にも取引がある」を保護条件にするとこの3社まで救ってしまう。
+        as-of 前から履歴がある＝ as-of 時点で上場していた＝マスタに載るはずだった、が正しい読み。
+        """
+        from database import Company, sync_active_status
+
+        db.add(make_company(edinet_code="E00001", sec_code="1001", name="既存上場"))
+        db.add(make_company(edinet_code="E00003", sec_code="3593", name="as-of直後に廃止"))
+        db.commit()
+        db.add(make_price(edinet_code="E00003", trade_date="2026-02-06", close=800.0))
+        db.add(make_price(edinet_code="E00003", trade_date="2026-05-19", close=810.0))
+        db.commit()
+
+        result = sync_active_status(db, {"1001"}, master_as_of="2026-05-15")
+
+        assert result["delisted"] == 1
+        assert result["protected"] == 0
+        assert db.query(Company).filter_by(sec_code="3593").one().is_active is False
+
+    def test_company_without_prices_is_still_flagged(self, db, make_company):
+        """株価が1行も無い社は保護対象外（本番 699件中 648件がこれ）。"""
+        from database import Company, sync_active_status
+
+        db.add(make_company(edinet_code="E00004", sec_code="8888", name="株価なし"))
+        db.commit()
+
+        result = sync_active_status(db, {"1001"}, master_as_of="2026-05-15")
+
+        assert result["protected"] == 0
+        assert db.query(Company).filter_by(sec_code="8888").one().is_active is False
+
+    def test_without_as_of_behaviour_is_unchanged(self, db, make_company, make_price):
+        """as-of 未指定なら従来どおり（呼び出し側が渡し忘れても壊れないこと）。"""
+        from database import Company, sync_active_status
+
+        db.add(make_company(edinet_code="E00002", sec_code="589A", name="新規上場"))
+        db.commit()
+        db.add(make_price(edinet_code="E00002", trade_date="2026-08-07", close=1500.0))
+        db.commit()
+
+        result = sync_active_status(db, set())
+
+        assert result["delisted"] == 1
+        assert result["protected"] == 0
+        assert db.query(Company).filter_by(sec_code="589A").one().is_active is False

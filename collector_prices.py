@@ -326,8 +326,10 @@ async def _jquants_fetch_date(session: httpx.AsyncClient, api_key: str, date_str
     return rows
 
 
-async def _fetch_jquants_equity_master(session: httpx.AsyncClient, api_key: str) -> set:
-    """J-Quants /equities/master から現在の上場銘柄集合（sec_code 4桁）を返す。
+async def _fetch_jquants_equity_master(session: httpx.AsyncClient, api_key: str) -> tuple:
+    """J-Quants /equities/master から上場銘柄集合と、そのマスタの as-of 日を返す。
+
+    戻り値: `(active_codes: set[str], as_of: Optional[str])`。
 
     v1 の `/markets/listed/info` は **v2 に存在しない**（403 `The requested endpoint does not
     exist`）。#425 はこの 403 を「無料プランに権限が無い」と読んだが、2026-08-08 に契約有効な
@@ -337,9 +339,15 @@ async def _fetch_jquants_equity_master(session: httpx.AsyncClient, api_key: str)
     **発行済株式数は master に無い**（Code/CoName/Mkt/Mrgn/ProdCat/S17/S33/ScaleCat/Date のみ）。
     issued_shares は `/fins/summary` の ShOutFY 経由（collector_disclosures）で取る。
 
-    取得失敗時は空集合。呼び出し側は空なら同期をスキップする（全件 delisted 化の防止）。
+    **マスタもエンバーゴされる**（#463）。レコードの `Date` は実測で「今日−84日」＝契約窓の
+    上端であり、それより後に新規上場した銘柄は載らない。呼び出し側はこの as-of を
+    `sync_active_status` へ渡し、**as-of より後に取引のある銘柄を delisted 判定から外す**こと。
+    渡さないと IPO 直後の銘柄が「マスタに無い＝廃止」と誤判定される。
+
+    取得失敗時は `(set(), None)`。呼び出し側は空なら同期をスキップする（全件 delisted 化の防止）。
     """
     headers = {"x-api-key": api_key}
+    empty = (set(), None)
     try:
         r = await session.get(JQUANTS_MASTER_ENDPOINT, headers=headers, timeout=30)
         if r.status_code == 429:
@@ -350,19 +358,25 @@ async def _fetch_jquants_equity_master(session: httpx.AsyncClient, api_key: str)
             log.error(
                 f"J-Quants /equities/master が 403（reason={reason}）: {(r.text or '')[:200]}"
             )
-            return set()
+            return empty
         if not r.is_success:
             log.warning(f"J-Quants /equities/master 取得失敗 status={r.status_code}")
-            return set()
+            return empty
         active_codes: set = set()
+        as_of: Optional[str] = None
         for item in r.json().get("data", []):
             code = str(item.get("Code", ""))
             if code:
                 active_codes.add(code[:4])   # J-Quants は5桁コード。先頭4桁が証券コード
-        return active_codes
+            d = item.get("Date")
+            if d and (as_of is None or d > as_of):
+                as_of = d
+        if as_of:
+            log.info(f"J-Quants /equities/master: {len(active_codes)}銘柄（as-of {as_of}）")
+        return active_codes, as_of
     except Exception as e:
         log.warning(f"J-Quants /equities/master 例外: {e}")
-        return set()
+        return empty
 
 
 def _update_issued_shares(db, sec_to_edinet: dict, issued_shares_map: dict) -> int:
@@ -605,7 +619,7 @@ async def collect_stock_price_history_jquants(
     async with httpx.AsyncClient(timeout=60) as session:
         cancelled, upserted_total = await _price_collection_driver(db, _jquants_batch_gen(session))
         # 価格収集と同じセッションで現在の上場銘柄集合も取得（API キー共用）
-        active_codes = await _fetch_jquants_equity_master(session, api_key)
+        active_codes, master_as_of = await _fetch_jquants_equity_master(session, api_key)
 
     # 403 の切り分け（#412 → #425 で再設計 → #461 で失効を分離 → #462 で境界と分離）:
     # **403 はカバレッジ境界を意味しない**。契約窓の外側は 400（`JQuantsOutOfCoverage`）で、
@@ -646,8 +660,10 @@ async def collect_stock_price_history_jquants(
     # 現在の上場銘柄集合と companies.is_active を同期（廃止銘柄検知・Issue #315）。
     # 取得失敗時（active_codes 空）は同期をスキップし、既存の is_active を誤って
     # 全件 delisted 化しないようにする。
+    # master_as_of を必ず渡す（#463）。マスタもエンバーゴされるため、as-of より後に上場した
+    # 銘柄は載らず、渡さないと IPO 直後の銘柄が「載っていない＝廃止」と誤判定される。
     if active_codes:
-        sync_result = sync_active_status(db, active_codes)
+        sync_result = sync_active_status(db, active_codes, master_as_of=master_as_of)
         if sync_result["delisted"] or sync_result["reactivated"]:
             log.info(
                 f"上場状態同期: 新規delisted={sync_result['delisted']}件, "
