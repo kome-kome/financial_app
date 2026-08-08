@@ -44,6 +44,25 @@ def _triggers(doc: dict) -> dict:
     return doc.get("on", doc.get(True)) or {}
 
 
+@pytest.fixture(autouse=True)
+def _api_keys_present(monkeypatch):
+    """API キーで開閉するグループ（FRED / e-Stat）を常に「有り」に固定する。
+
+    `expected_series()` はキー未設定のグループを列挙から外す（収集が走らない系列を
+    stale と誤検知しないための正しい挙動）。しかしテスト側がそれを素通しにすると、
+    **キーを持つ開発機と持たない CI で検証対象の系列集合が変わる**——実際 CI では
+    JP_CPI_TOKYO / JP_IIP が消えて 2 件が落ち続けていた（ローカルは緑）。
+
+    判定ロジックの不変条件は環境変数に依存しないはずのものなので、ここで固定して
+    どの環境でも同じ系列集合を見る。キー有無そのものの挙動は
+    `test_api_key_gated_groups_are_skipped_when_unset` が明示的に両状態を検証する
+    （関数内の monkeypatch が後勝ちするため、この fixture と衝突しない）。
+    """
+    import collector_prices as cp
+    monkeypatch.setattr(cp, "FRED_API_KEY", cp.FRED_API_KEY or "dummy")
+    monkeypatch.setattr(cp, "ESTAT_API_KEY", cp.ESTAT_API_KEY or "dummy")
+
+
 def _seed(db, code: str, last: date):
     db.add(MacroData(series_code=code, series_name=code, category="test",
                      trade_date=last.isoformat(), close=1.0))
