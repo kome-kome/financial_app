@@ -190,6 +190,11 @@ async def run_backtest(
         raise HTTPException(400, "cost_bps は 0〜100 の範囲で指定してください")
     try:
         return backtest.run(db, preset, months_ago, top_n, industry, min_market_cap, source, cost_bps)
+    except ValueError as e:
+        # 非対応の重み（mu＝μ̂・Issue #423 子4）等のドメイン検証。500 にすると
+        # 「壊れている」と読めてしまうため 400 で理由を返す。
+        log.info("backtest を検証で拒否: %s", e)
+        raise HTTPException(400, str(e))
     except Exception as e:
         log.error("Backtest error: %s", e, exc_info=True)
         raise HTTPException(500, "バックテスト実行エラーが発生しました。")
@@ -215,6 +220,11 @@ async def backtest_multi(
     for m in backtest.MULTI_PERIODS:
         try:
             periods.append(backtest.run(db, preset, m, top_n, industry, min_market_cap, source, cost_bps))
+        except ValueError as e:
+            # 重み由来の非対応（mu）はどの期間でも同じ結論なので、期間ごとに「計算エラー」を
+            # 並べず即 400 で理由を返す（Issue #423 子4）。
+            log.info("backtest multi を検証で拒否: %s", e)
+            raise HTTPException(400, str(e))
         except Exception as e:
             log.error("Backtest multi error (months=%d): %s", m, e, exc_info=True)
             periods.append({"holding_months": m, "summary": None, "results": [],

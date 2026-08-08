@@ -6,7 +6,26 @@ from .base import AnalysisPlugin
 
 METRICS = [
     "z_roe", "z_op_margin", "z_revenue", "z_cf_ratio",
-    "z_equity_ratio", "z_eps", "gap_ratio", "z_de_ratio", "z_momentum",
+    "z_equity_ratio", "z_eps", "gap_ratio", "z_de_ratio", "z_momentum", "mu",
+]
+
+# financial_metrics VIEW の列ではなく実行時計算で埋める指標（SELECT_COLS から除く）。
+# z_momentum = 週次株価から都度計算（compute_momentum_z）
+# mu         = μ producer（M-1/M-2/M-3/M-4/M-6）の永続化スコア（compute_mu_z・Issue #423 子4）
+RUNTIME_METRICS = ("z_momentum", "mu")
+
+# μ̂ の出所（sell_ranking の mu_source と同じ producer 集合・ADR-0004）。
+# 買い側の既定は **None＝μ̂ を使わない**（Issue #423 子4）。売り側は既定 macro_enet だが、
+# 買い側 rank-IC と売り側 spread は順位が逆転しうる（ADR-0022）ため、買いの既定重みへ
+# 無検証で持ち込まない。既定を動かすときは ADR-0028 の昇格ゲート（増減どちらも補正後αを
+# 通す実測）を必ず通すこと。
+MU_SOURCE_OPTIONS = [
+    {"value": "",                  "label": "使わない（既定）"},
+    {"value": "macro_risk_return", "label": "M-1: マクロ×リスク-リターン（OLS）"},
+    {"value": "macro_gbdt",        "label": "M-2: マクロ×財務 勾配ブースティング（XGBoost）"},
+    {"value": "macro_dlm",         "label": "M-3: ベイズ状態空間（時変マクロβ DLM）"},
+    {"value": "macro_ensemble",    "label": "M-4: 兄弟μ̂スタッキング（M-1+M-2 統合）"},
+    {"value": "macro_enet",        "label": "M-6: マクロ×財務 正則化線形（ElasticNet）"},
 ]
 
 PRESETS = {
@@ -26,10 +45,10 @@ _DISPLAY_COLS = (
 )
 
 # 実際に SELECT する列。METRICS から導出するので、指標を METRICS へ足せば転送列も自動で
-# 追従する（列リストを二重管理しない）。z_momentum は VIEW 列ではなく実行時計算なので除く。
+# 追従する（列リストを二重管理しない）。RUNTIME_METRICS は VIEW 列ではなく実行時計算なので除く。
 # weights のキーは coerce_params が METRICS へ制限するため、ここに無い列は読まれない。
 SELECT_COLS = tuple(dict.fromkeys(
-    _DISPLAY_COLS + tuple(m for m in METRICS if m != "z_momentum")))
+    _DISPLAY_COLS + tuple(m for m in METRICS if m not in RUNTIME_METRICS)))
 
 _MomentumPX = namedtuple("_MomentumPX", "trade_date close")
 
@@ -57,13 +76,18 @@ def get_dynamic_preset(db: Any) -> dict | None:
     経路（execute 内の resolve_weights）で使われる一方、読み取り列は METRICS から導出
     するため、範囲外のキーが混ざると値が取れず黙って None 扱い＝カバレッジが下がる。
     全て範囲外なら None を返してバランス型へフォールバックさせる。
+
+    mu は対象外（Issue #423 子4）。Fama-MacBeth の断面回帰は財務・株価由来の factor だけを
+    推定しており（`recommend_factor_premia.build_period_panel` が RUNTIME_METRICS を除外）
+    μ̂ の premium は存在しない。仮に混ざると mu_source 未指定の実行を reject させてしまい、
+    「統計的最適化」プリセットが選べなくなるため、ここで構造的に落とす。
     """
     from database import get_latest_factor_premia
     premia = get_latest_factor_premia(db)
     if not premia:
         return None
     weights = {factor: vals["mean_b"] for factor, vals in premia.items()
-               if factor in METRICS}
+               if factor in METRICS and factor != "mu"}
     return weights or None
 
 
@@ -179,6 +203,74 @@ def compute_momentum_z(db: Any, edinet_codes: list, as_of_date: str) -> dict:
     return {ec: normalize_transform(v, mean_, sd, "zscore") for ec, v in raw.items()}
 
 
+def load_producer_mu(db: Any, mu_source: str) -> dict:
+    """mu_source の producer から {edinet_code: μ̂} を読む（未実行・失敗なら空 dict）。
+
+    sell_ranking.execute の μ 読み出しと同じ契約（ADR-0004）: producer は
+    `read_producer_scores(db, macro_snapshot) -> {edinet_code: {mu, r_macro, r1_prime}}`
+    を返す。買い側が使うのは mu のみ（r_macro は売り側の −Rᴹ 観点専用、r1_prime は
+    売り側 R3 足切り専用）。
+
+    macro_snapshot は共有 macro_beta の selected_factors 分だけを当日値で渡す
+    （M-1 の μ̂ 再構成に必要・他モデルは無視する）。producer 未実行・DB 未 migration・
+    マクロ欠測はいずれも graceful-degrade（空 dict → μ̂ 抜きでスコアリング継続）。
+    """
+    import datetime as _dt
+    from plugins import get_plugin as _get_plugin
+
+    producer = _get_plugin(mu_source)
+    if producer is None or not producer.produced_output(db):
+        return {}
+    try:
+        from database import get_macro_beta
+        from .utils import get_macro_features
+        _meta_m1, _ = get_macro_beta(db)
+        sel_factors = (_meta_m1 or {}).get("selected_factors") or []
+        macro_snap: dict | None = None
+        if sel_factors:
+            raw_snap = get_macro_features(db, _dt.date.today().isoformat(), sel_factors)
+            macro_snap = {k: v for k, v in raw_snap.items() if v is not None} or None
+        scores = producer.read_producer_scores(db, macro_snap)
+    except Exception:
+        return {}
+    return {ec: float(ps["mu"]) for ec, ps in (scores or {}).items()
+            if ps.get("mu") is not None}
+
+
+def compute_mu_z(db: Any, mu_source: str, edinet_codes: list) -> dict:
+    """producer μ̂ を候補集団横断でZスコア化する（Issue #423 子4）。
+
+    μ̂ は週次リターンの期待値[小数]で、他指標（z_*）とスケールが2桁違う。加重和
+    Σ(w·z)/Σ|w| は指標が同一スケールであることを前提にしているため、compute_momentum_z
+    と同じ winsorize(p1-p99)→Zスコアで揃えてから重みを掛ける。
+
+    標準化の母集団は**フィルタ適用後の候補集団**（compute_momentum_z と同一基準）。
+    業種・時価総額で絞ったときは絞った集団内での相対順位になる＝同一画面内の他指標と
+    基準が揃う。売り側（sell_ranking）は保有銘柄がユニバースの一部でしかないため
+    producer 全体を母集団に取っており、そちらとは基準が異なる（意図的）。
+
+    有効サンプルが4件未満なら空 dict（winsorize が機能しない・compute_momentum_z と同じ）。
+    """
+    if not mu_source or not edinet_codes:
+        return {}
+    from .utils import normalize_transform, winsorize
+
+    raw_all = load_producer_mu(db, mu_source)
+    if not raw_all:
+        return {}
+    wanted = set(edinet_codes)
+    raw = {ec: v for ec, v in raw_all.items() if ec in wanted}
+    if len(raw) < 4:
+        return {}
+
+    vals = list(raw.values())
+    wv, _, _ = winsorize(vals)
+    mean_ = sum(wv) / len(wv)
+    var = sum((v - mean_) ** 2 for v in wv) / (len(wv) - 1)
+    sd = var ** 0.5 or 1.0
+    return {ec: normalize_transform(v, mean_, sd, "zscore") for ec, v in raw.items()}
+
+
 class RecommendPlugin(AnalysisPlugin):
     name = "recommend"
     label = "おすすめ銘柄"
@@ -203,7 +295,16 @@ class RecommendPlugin(AnalysisPlugin):
                 "metrics": METRICS,
                 "default": None,
                 "optional": True,   # 未指定なら execute が preset の重みにフォールバック
-                "description": "各指標の重要度（-2〜3）。z_de_ratioは負ウェイト推奨",
+                "description": "各指標の重要度（-2〜3）。z_de_ratioは負ウェイト推奨。muはmu_source必須",
+            },
+            "mu_source": {
+                "type": "select",
+                "label": "μ̂（期待リターン）の出所",
+                "options": MU_SOURCE_OPTIONS,
+                "default": None,           # 既定は μ̂ 不使用（既存プリセットは mu 重み 0）
+                "optional": True,
+                "description": "指標ウェイトの mu に重みを付けたときだけ使う推奨モデル。"
+                               "未指定のまま mu へ重みを付けると reject（黙って無視しない）。",
             },
             "top_n": {
                 "type": "slider",
@@ -264,6 +365,15 @@ class RecommendPlugin(AnalysisPlugin):
         year         = params["year"]
         industry     = params["industry"]
         min_market_cap = params["min_market_cap"]
+        mu_source    = params["mu_source"]
+
+        # μ̂ を使う意思表示（mu 重み≠0）があるのに出所未指定なら reject（Issue #423 子4）。
+        # 黙って None 扱いにすると「重みを付けたのに効いていない」状態が画面から見分けられず、
+        # カバレッジだけが静かに下がる（設計制約の fail fast と同じ思想）。
+        if weights.get("mu") and not mu_source:
+            raise ValueError(
+                "'mu'（μ̂）に重みを付けるときは mu_source を指定してください"
+                "（指定可能: " + ", ".join(o["value"] for o in MU_SOURCE_OPTIONS if o["value"]) + "）")
 
         # UI表示用: 動的プリセット（統計的最適化）が算出済みならPRESETSへマージして返す
         # （フロントエンドのプリセット切替は presets[name] を直接参照するため無改修で動く）。
@@ -273,7 +383,8 @@ class RecommendPlugin(AnalysisPlugin):
         total_weight = sum(abs(w) for w in weights.values())
         if total_weight == 0:
             return {"count": 0, "total_candidates": 0, "presets": all_presets,
-                    "metrics": METRICS, "results": []}
+                    "metrics": METRICS, "results": [],
+                    "mu_source": mu_source, "mu_available": False, "mu_asof": None}
 
         subq = latest_year_subq(db, FinancialMetric)
         # SELECT は SELECT_COLS だけ（Issue #441）。is_active は WHERE でしか使わないので
@@ -294,11 +405,24 @@ class RecommendPlugin(AnalysisPlugin):
 
         records = query.all()
 
+        candidate_codes = [r.edinet_code for r in records if r.edinet_code]
+
         momentum_z = {}
         if "z_momentum" in weights:
-            momentum_z = compute_momentum_z(
-                db, [r.edinet_code for r in records if r.edinet_code],
-                date.today().isoformat())
+            momentum_z = compute_momentum_z(db, candidate_codes, date.today().isoformat())
+
+        # μ̂（producer スコア）。mu へ重みが無ければ producer を読まない＝既定経路のコストは 0。
+        mu_z = {}
+        mu_asof = None
+        if weights.get("mu") and mu_source:
+            mu_z = compute_mu_z(db, mu_source, candidate_codes)
+            if mu_z:
+                # μ̂ の as-of（銘柄ごとの最終週次バー基準・#417）。UI の鮮度表示と /api/morning が読む。
+                try:
+                    from database import get_producer_asof
+                    mu_asof = get_producer_asof(db, mu_source)
+                except Exception:
+                    mu_asof = None
 
         scored = []
         skipped_low_coverage = 0
@@ -307,7 +431,12 @@ class RecommendPlugin(AnalysisPlugin):
             weight_present = 0.0
             detail = {}
             for metric, weight in weights.items():
-                val = momentum_z.get(r.edinet_code) if metric == "z_momentum" else getattr(r, metric, None)
+                if metric == "z_momentum":
+                    val = momentum_z.get(r.edinet_code)
+                elif metric == "mu":
+                    val = mu_z.get(r.edinet_code)
+                else:
+                    val = getattr(r, metric, None)
                 if val is not None:
                     weighted_sum += weight * val
                     weight_present += abs(weight)
@@ -362,6 +491,11 @@ class RecommendPlugin(AnalysisPlugin):
             "presets":          all_presets,
             "metrics":          METRICS,
             "price_freshness":  price,       # as-of 分位・鮮度レベル（Issue #416）
+            # μ̂ の結線状態（Issue #423 子4）。mu_available=False は「重みを付けたが producer
+            # 未実行 or 候補集団に4件未満」＝ graceful-degrade したことを画面へ明示するための旗。
+            "mu_source":        mu_source,
+            "mu_available":     bool(mu_z),
+            "mu_asof":          mu_asof,
             "results":          results,
         }
 

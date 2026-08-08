@@ -105,6 +105,10 @@ _Avoid_: 乖離分析（gap だけを指す旧称・責務が狭い）, 総合�
 分析プラグインの `params_schema()` を UI フォーム定義かつ型契約として使う宣言。各フィールドは `type`（ウィジェット: select/multiselect/slider/number/checkbox/text/weights）と `dtype`（データ型: int/float/str/list[str]/bool/dict）の2軸を持ち、dtype は数値（number/slider）にのみ明示し他は type から推論する。単一の coerce seam（`coerce_params`）がこの契約から raw params の型付け・default 補完・bounds/membership 検証を行い、execute には意味的 validation（features 非空・weights 合計≠0 等）だけが残る。bounds/membership 違反は reject（ValueError）。membership の対象は select/multiselect の `options` と、weights の `metrics`（＝UI ラベルの一覧ではなく**キー許可集合**）であり、宣言に無いキーを含む weights は reject する。スライダー（type=slider）は粒度 `step` を必ず宣言し、int dtype の step は整数とする（未宣言だと HTML range が連続値になり int で端数を吐いて reject されるため。JS 側も dtype から安全側の step を導出する二重防御）。
 _Avoid_: パラメータスキーマ, フォーム定義（型契約の側面が落ちるため）
 
+**実行時指標 (RUNTIME_METRICS)**:
+買い推奨（`plugins/recommend.py`）の `METRICS` のうち、`financial_metrics` VIEW の列ではなく実行時に埋めるもの（`z_momentum`＝週次株価から都度計算／`mu`＝[[μ出所トグル]]で選んだ producer の永続化 μ̂）。転送列 `SELECT_COLS`（#441）と `recommend_factor_premia.build_period_panel` の `fin_features` は**どちらもこの集合を除外して導出する**ため、VIEW 外の指標を `METRICS` へ足すときは同時にここへも入れる（入れ忘れると存在しない列を SELECT しに行く／断面回帰の説明変数に混入する）。
+_Avoid_: 派生列（VIEW が算出する `z_*` も派生なので二義化する）, 非永続指標（`*_scores` は永続化済みで不正確）
+
 **売りスコア (sell score)**:
 売り候補ランキング（`plugins/sell_ranking.py`）が保有銘柄に付ける「手放すべき度合い」。買い系スコアの逆観点（割高度＝`gap_ratio` 反転・業績悪化＝ROE/利益率/CF/成長の低さ・**ネットキャッシュ余力の毀損＝清原式 `nc_ratio` の低さ**）を最新年度ユニバースで winsorize→z 標準化し、非負ウェイトで `Σ w·(−z)/Σ w` として合成する（平均並み≈0、劣る銘柄ほど正に大きい）。`nc_ratio` は VIEW 列でなく実行時計算（`_resolve_metric`）。価格モメンタムはスコアに混ぜず別軸（trend）として扱う。
 _Avoid_: 売り推奨度（ラベルと混同するため）
@@ -159,6 +163,7 @@ _Avoid_: ショートリターン（実際に空売りした収益ではなく�
 
 **μ出所トグル (mu_source) / producer μ̂**:
 [[売りスコア]]の μ（期待リターン）・−R_macro 観点に使う推奨モデルの選択（`macro_risk_return`＝M-1／`macro_gbdt`＝M-2／`macro_dlm`＝M-3／`macro_ensemble`＝M-4／`macro_enet`＝M-6・**既定**）。既定は #402（ADR-0022）で M-2 → M-6 へ切替（[[売り側spread]]が +0.0145・p=0.001 で有意に優位）。各 producer μ̂ は `execute()` が専用テーブル（`macro_gbdt_scores` / `macro_dlm_scores` / `macro_ensemble_scores` / `macro_enet_scores`）へ**全置換（スナップショット置換）で直書き**し（`sector_ols`→`regression_results` と同型）、売り推奨は M-1 と同一契約 `{mu, r_macro, r1_prime}` で read する。−R_macro（[[系統的マクロリスク曝露]]）は共有 `macro_beta` 由来でモデル非依存ゆえ `mu_source` に依らず不変。**R3 足切りゲートが効くのは r1_prime を持つ M-1（予測SE）・M-2・M-6（コンフォーマル区間半幅）のみ**（M-3/M-4 は不在＝無効）。選択モデル未実行なら graceful-degrade（μ 成分を除外）。
+**買い推奨（`recommend`）にも同名の `mu_source` があるが既定が異なる**: 売り側は `macro_enet` 既定、**買い側は既定 None＝μ̂ 不使用**（Issue #423 子4・ADR-0030）。買い側 rank-IC と[[売り側spread]]は順位が一致しないため、売りの既定を買いの既定へ持ち込まない。買い側で μ̂ を使うには「`mu` 指標へ重みを付ける」＋「`mu_source` を選ぶ」の2操作が要り、重みだけ付けて出所未指定なら reject する（黙って欠測にすると効いていないことが画面から分からないため）。
 _Avoid_: モデル選択（汎用すぎる）, M-2売り推奨（μ の出所のみ切替で売りロジック自体は共通のため）
 
 ## マクロ×時変β状態空間（M-3）

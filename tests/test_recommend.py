@@ -13,7 +13,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from plugins import execute_plugin
 from plugins.recommend import (
-    METRICS, PRESETS, SELECT_COLS, STATISTICAL_PRESET_NAME, compute_momentum_z,
+    METRICS, MU_SOURCE_OPTIONS, PRESETS, RUNTIME_METRICS, SELECT_COLS,
+    STATISTICAL_PRESET_NAME, compute_momentum_z, compute_mu_z,
     get_dynamic_preset, plugin, resolve_weights,
 )
 
@@ -22,7 +23,7 @@ from plugins.recommend import (
 
 class TestConstants:
     def test_metrics_unique_and_nonempty(self):
-        assert len(METRICS) == 9
+        assert len(METRICS) == 10
         assert len(set(METRICS)) == len(METRICS)
 
     def test_presets_reference_valid_metrics(self):
@@ -36,6 +37,16 @@ class TestConstants:
             for w in weights.values():
                 assert isinstance(w, (int, float))
 
+    def test_no_preset_carries_mu(self):
+        """μ̂ の既定は OFF（Issue #423 子4・ADR-0030）。
+
+        買い側 rank-IC と売り側 spread は順位が逆転しうる（ADR-0022）ため、売り側の
+        既定 mu_source をそのまま買いの既定重みへ持ち込まない。既定へ入れるときは
+        ADR-0028 の昇格ゲート（補正後αを通す実測）が必要＝このテストを外す前に ADR。
+        """
+        for name, weights in PRESETS.items():
+            assert "mu" not in weights, f"{name} が既定で μ̂ を使っている"
+
 
 # ── 転送列の契約（Issue #441）────────────────────────────────────────────────
 #
@@ -45,9 +56,10 @@ class TestConstants:
 
 class TestSelectCols:
     def test_covers_every_view_backed_metric(self):
-        # z_momentum は VIEW 列ではなく実行時計算（compute_momentum_z）なので対象外
+        # RUNTIME_METRICS（z_momentum=compute_momentum_z / mu=producer スコア）は
+        # VIEW 列ではなく実行時計算なので転送対象外
         for m in METRICS:
-            if m == "z_momentum":
+            if m in RUNTIME_METRICS:
                 assert m not in SELECT_COLS
             else:
                 assert m in SELECT_COLS, f"{m} が SELECT_COLS に無い＝黙って None になる"
@@ -427,3 +439,122 @@ class TestExecute:
         assert res["presets"][STATISTICAL_PRESET_NAME] == {"z_roe": 0.2}
         # 既存4プリセットは変更されず残っていること
         assert res["presets"]["バランス型"] == PRESETS["バランス型"]
+
+    def test_dynamic_preset_never_carries_mu(self, db, make_metric):
+        """Fama-MacBeth 側に mu が混ざっても統計的最適化プリセットへは入れない。
+
+        入れてしまうと mu_source 未指定の実行が reject され、「統計的最適化」を
+        選んだだけで 400 になる（Issue #423 子4）。
+        """
+        from database import upsert_recommend_factor_premia
+        db.add(make_metric(edinet_code="E00001", z_roe=1.0))
+        upsert_recommend_factor_premia(db, "rfp_mu", [
+            {"run_id": "rfp_mu", "factor_name": "z_roe", "mean_b": 0.2,
+             "newey_west_se": None, "t_stat": None, "p_value": None, "n_periods": 12},
+            {"run_id": "rfp_mu", "factor_name": "mu", "mean_b": 0.9,
+             "newey_west_se": None, "t_stat": None, "p_value": None, "n_periods": 12},
+        ])
+        db.commit()
+        assert get_dynamic_preset(db) == {"z_roe": 0.2}
+        res = asyncio.run(execute_plugin(plugin,
+            {"preset": STATISTICAL_PRESET_NAME, "min_coverage": 0.0}, db))
+        assert res["count"] == 1
+
+
+# ── μ̂ の結線（Issue #423 子4）───────────────────────────────────────────────
+#
+# 買い推奨は既定では μ̂ を使わない（PRESETS に mu 重みが無い＝mu_source 既定 None）。
+# ここで検証するのは「opt-in したときだけ効く」「重みを付けたのに効いていない状態を
+# 黙って作らない」の2点。
+
+class TestMuWiring:
+    SNAP = "2026-06-26"
+
+    def _seed(self, db, make_metric, mus: dict, persist: bool = True):
+        db.add_all([make_metric(edinet_code=ec, z_roe=1.0) for ec in mus])
+        db.commit()
+        if persist:
+            from database import replace_macro_enet_scores
+            replace_macro_enet_scores(
+                db, [{"edinet_code": ec, "mu": v, "r1_prime": None}
+                     for ec, v in mus.items()], self.SNAP)
+
+    def test_mu_source_default_is_off(self):
+        schema = plugin.params_schema()
+        assert schema["mu_source"]["default"] is None
+        # 空文字オプション（=使わない）が先頭＝UI の select が既定で μ̂ 無しを指す
+        assert MU_SOURCE_OPTIONS[0]["value"] == ""
+
+    def test_mu_weight_without_source_is_rejected(self, db, make_metric):
+        """重みだけ付けて出所未指定 → 黙って None にせず reject（fail fast）。"""
+        self._seed(db, make_metric, {"E00001": 0.1, "E00002": 0.2,
+                                     "E00003": 0.3, "E00004": 0.4})
+        with pytest.raises(ValueError, match="mu_source"):
+            asyncio.run(execute_plugin(
+                plugin, {"weights": {"z_roe": 1.0, "mu": 1.0}, "min_coverage": 0.0}, db))
+
+    def test_mu_drives_ranking_when_opted_in(self, db, make_metric):
+        mus = {"E00001": 0.10, "E00002": 0.05, "E00003": 0.0,
+               "E00004": -0.05, "E00005": -0.10}
+        self._seed(db, make_metric, mus)
+        res = asyncio.run(execute_plugin(plugin, {
+            "weights": {"mu": 1.0}, "min_coverage": 0.0,
+            "mu_source": "macro_enet", "top_n": 10}, db))
+        assert res["mu_available"] is True
+        assert res["mu_source"] == "macro_enet"
+        # 高 μ̂ ＝買い候補上位（売り側の符号反転とは逆向き）
+        assert [r["edinet_code"] for r in res["results"]] == [
+            "E00001", "E00002", "E00003", "E00004", "E00005"]
+
+    def test_mu_is_zscored_not_raw(self, db, make_metric):
+        """μ̂ は週次リターン[小数]で z_* と2桁スケールが違う。生値のまま加重すると
+        他指標が実質無効化されるため、候補集団内で winsorize→Z 化してから使う。"""
+        mus = {"E00001": 0.10, "E00002": 0.05, "E00003": 0.0,
+               "E00004": -0.05, "E00005": -0.10}
+        self._seed(db, make_metric, mus)
+        res = asyncio.run(execute_plugin(plugin, {
+            "weights": {"mu": 1.0}, "min_coverage": 0.0,
+            "mu_source": "macro_enet", "top_n": 10}, db))
+        top = res["results"][0]
+        assert top["detail"]["mu"] == pytest.approx(1.26, abs=0.2)   # Zスコア（|z|>1）
+        assert abs(top["detail"]["mu"]) > 10 * abs(mus["E00001"])    # 生値ではない
+
+    def test_graceful_degrade_when_producer_not_run(self, db, make_metric):
+        """M-6 未実行なら μ̂ を外して継続し、mu_available=False で明示する（ADR-0004）。"""
+        self._seed(db, make_metric, {"E00001": 0.1, "E00002": 0.2}, persist=False)
+        res = asyncio.run(execute_plugin(plugin, {
+            "weights": {"z_roe": 1.0, "mu": 1.0}, "min_coverage": 0.0,
+            "mu_source": "macro_enet"}, db))
+        assert res["mu_available"] is False
+        assert res["count"] == 2          # μ̂ 抜きで z_roe だけで判定継続
+        assert res["results"][0]["detail"]["mu"] is None
+
+    def test_producer_not_read_when_mu_unweighted(self, db, make_metric, monkeypatch):
+        """mu に重みが無ければ producer を読まない（既定経路のコストを増やさない）。"""
+        import plugins.recommend as recommend_mod
+        self._seed(db, make_metric, {"E00001": 0.1, "E00002": 0.2,
+                                     "E00003": 0.3, "E00004": 0.4})
+        called = []
+        monkeypatch.setattr(recommend_mod, "compute_mu_z",
+                            lambda *a, **kw: called.append(1) or {})
+        res = asyncio.run(execute_plugin(plugin, {
+            "weights": {"z_roe": 1.0}, "min_coverage": 0.0,
+            "mu_source": "macro_enet"}, db))
+        assert called == []
+        assert res["mu_available"] is False
+
+    def test_compute_mu_z_needs_four_samples(self, db, make_metric):
+        """winsorize が機能しない小標本は空 dict（compute_momentum_z と同じ契約）。"""
+        self._seed(db, make_metric, {"E00001": 0.1, "E00002": 0.2, "E00003": 0.3})
+        assert compute_mu_z(db, "macro_enet",
+                            ["E00001", "E00002", "E00003"]) == {}
+
+    def test_compute_mu_z_population_is_the_candidate_set(self, db, make_metric):
+        """標準化母集団は候補集団（フィルタ後）。producer 全体ではない。"""
+        mus = {f"E{i:05d}": i / 100.0 for i in range(1, 9)}
+        self._seed(db, make_metric, mus)
+        subset = [f"E{i:05d}" for i in range(1, 5)]
+        z_sub = compute_mu_z(db, "macro_enet", subset)
+        z_all = compute_mu_z(db, "macro_enet", list(mus))
+        assert set(z_sub) == set(subset)
+        assert z_sub["E00001"] != pytest.approx(z_all["E00001"])

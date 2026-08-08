@@ -111,6 +111,21 @@ class TestScoringSource:
         with pytest.raises(ValueError):
             backtest.run(db, "バランス型", 6, 20, None, None, source="nope")
 
+    def test_mu_weight_is_rejected(self, db, make_metric, monkeypatch):
+        """μ̂ は as-of 再現できないため reject する（Issue #423 子4）。
+
+        producer スコアは最新 snapshot_date の1断面しか持たない。黙って None へ
+        落とすと「μ̂ 込みで検証した」と誤読されるので、理由付きで止める。
+        """
+        import pytest
+        import plugins.recommend as recommend_mod
+        db.add(make_metric(edinet_code="E00001", year=2020, period_end="2020-03-31", z_roe=1.0))
+        db.commit()
+        monkeypatch.setattr(recommend_mod, "PRESETS",
+                            {**recommend_mod.PRESETS, "μ̂検証": {"z_roe": 1.0, "mu": 1.0}})
+        with pytest.raises(ValueError, match="mu"):
+            backtest.run(db, "μ̂検証", 6, 20, None, None)
+
     def test_source_valuation_ranks_by_total_return(self, db, make_metric):
         # 期待総リターン = gap_ratio + 配当利回り。gap_ratio が None の銘柄は除外。
         db.add(make_metric(edinet_code="E00001", year=2020, period_end="2020-03-31",

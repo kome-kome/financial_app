@@ -44,7 +44,11 @@ MU_ALERT_BDAYS = 14
 
 # 既定の μ̂ 出所。売り側 spread の実測で M-6 を既定に採った（ADR-0022）。
 # **買い側 rank-IC と売り側 spread は順位が一致しない**ため、ここは「表示用の as-of を
-# 出す対象」であって買いスコアへの結線ではない（結線は #423 子4 の担当）。
+# 出す対象」であって買いスコアへの結線ではない。
+# #423 子4 で recommend 側に mu 指標＋mu_source を通したが**既定は OFF**（PRESETS の
+# どれにも mu 重みが無い・ADR-0030）。morning は preset 経由でしか重みを渡さないので、
+# μ̂ が朝のランキングへ入るのは「mu 重みを持つプリセットを既定にする」＝昇格ゲート
+# （ADR-0028）を通した後になる。それまでこの値は鮮度表示専用のままでよい。
 DEFAULT_MU_SOURCE = "macro_enet"
 
 _LEVEL_ORDER = {"fresh": 0, "warn": 1, "alert": 2, "empty": 2, "unknown": 2}

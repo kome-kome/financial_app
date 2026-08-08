@@ -103,6 +103,16 @@ def run(
             f"未知の scoring source: {source!r}（{', '.join(SCORING_SOURCES)} のいずれか）"
         )
     weights = resolve_weights(db, preset_name)
+    # μ̂（mu）は as-of 再現ができないため明示的に非対応（Issue #423 子4）。producer スコア
+    # （macro_enet_scores 等）は最新 snapshot_date の1断面しか持たず、months_ago 時点の
+    # μ̂ を復元できない。黙って getattr→None に落とすと「μ̂ 込みで検証した」と誤読される
+    # ため reject する。μ̂ 自体の時系列評価は各 producer の OOF バックテスト側が担う
+    # （plugins/macro_snapshots.py::oof_backtest・ADR-0022）。
+    if weights.get("mu"):
+        raise ValueError(
+            "バックテストは mu（μ̂）を含む重みに対応していません。"
+            "μ̂ は最新スナップショットの1断面のみで過去時点を再現できないため、"
+            "mu の評価は各モデル（M-1〜M-6）の OOF バックテストを使ってください。")
     today = date.today()
     start_date = today - timedelta(days=months_ago * 30)
     start_date_str = start_date.strftime("%Y-%m-%d")
