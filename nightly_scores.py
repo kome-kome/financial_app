@@ -57,6 +57,43 @@ NIGHTLY_PARAMS: dict[str, dict] = {
     "sector_ols": {"regularization": "ridge"},
 }
 
+# ── heavy=True の自動実行レジストリ（ADR-0031・Issue #423 子6）────────────────
+# `heavy=True` は「Render 軽量モードでブロックする」フラグでしかなく、**誰がいつ回すか**
+# は決まっていなかった。そのため heavy を足しても自動実行経路が無いまま放置される事故が
+# 繰り返し起きている（sector_ols は自動経路ゼロで gap_ratio が33〜36日前＝#432／M-6 は
+# 既定 mu_source なのに tune の matrix に無くローカル手動が唯一の更新経路＝#443／
+# factor-premia は GHA 実行履歴ゼロで 37期の重みのまま固着＝#423 子5）。いずれも
+# 「壊れた」のではなく「動かなかった」＝failure が出ないので notify-failure（#414）でも
+# 検知できない。
+#
+# そこで **heavy なプラグインはここへ必ず登録する**ことを契約にする。値は2種類:
+#   - ワークフローファイル名  … そのワークフローが実際にこのモデルを回す
+#   - "exempt: <理由>"        … 自動実行しないと決めた場合。理由を必ず書く
+# 逸脱は `tests/test_nightly_scores.py::TestHeavyAutomationRegistry` が CI で落とす
+# （新しい heavy を足して登録を忘れると赤くなる）。**登録があること ≠ 実際に動いている
+# こと**である点に注意——鮮度そのものの監視は `/api/morning` の as-of ブロック（#416/#417）
+# と macro-health（#420）が担当し、ここが見るのは「経路の有無」だけ。
+HEAVY_AUTOMATION: dict[str, str] = {
+    # 夜間チェーン（daily-incremental 成功 → nightly-scores）
+    "sector_ols": "nightly-scores.yml",
+    "macro_enet": "nightly-scores.yml",
+    # 月次ハイパーパラメータ探索の --persist-scores 副作用で現在 μ̂ が更新される。
+    # cadence が探索に縛られている点は #423 子2 の宿題として残っている（M-1 は 300分
+    # timeout で cancelled が続いており＝子7、登録があっても鮮度は出ていない実例）。
+    "macro_risk_return": "tune-hyperparameters.yml",
+    "macro_gbdt": "tune-hyperparameters.yml",
+    "macro_dlm": "tune-hyperparameters.yml",
+    # 自動実行しないと決めたもの（理由をここに残す＝「後で対応」を prose に書いて終わらせない）
+    "macro_ensemble":
+        "exempt: 基底 M-1/M-2/M-6 を内部で全部回すためコストが合算になるのに、"
+        "M-6 単体を上回らない（+0.0006・p=0.810・ADR-0022）。既定 mu_source でもない",
+    "macro_gbdt_rank":
+        "exempt: producer を持たない（produced_output=False）。スコアが順位で"
+        "リターン単位ではないため永続化する μ̂ が無い（#362）",
+}
+
+EXEMPT_PREFIX = "exempt:"
+
 
 class VerificationError(RuntimeError):
     """execute は成功したが、DB への永続化を確認できなかった。"""

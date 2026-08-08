@@ -139,6 +139,7 @@ web版・ローカル版の双方が同じ Issue を見ることで、**コー�
 
 - **ARCHITECTURE.md**: DBテーブル / 処理フロー / APIエンドポイント / 画面 / プラグインを追加・変更したら対応セクションを更新。
 - **MODELS.md** と `templates/models.html`: 分析モデル追加・変更時に更新。参考文献は原著論文の DOI / 公式 URL（Wikipedia不可）。
+- **`heavy=True` のプラグインを追加したら自動実行を登録する**（ADR-0031）: `nightly_scores.HEAVY_AUTOMATION` へ「回すワークフロー名」か `exempt: <理由>` を必ず足す。未登録・実在しないワークフロー名・空理由は `tests/test_nightly_scores.py::TestHeavyAutomationRegistry` が CI で落とす。**「heavy を足したが自動実行が無い」は失敗しないので通知では拾えない**（#432/#443/#423 子5 で3回発生）。
 - **分析プラグイン追加・変更時のメタ検証網羅性**: 独自のランキング/スコアを出すプラグインは、`/api/backtest` の `SCORING_SOURCES`（backtest.py）へ追加するか、`plugins/macro_snapshots.py::oof_backtest` による OOF 評価を実装するかをその場で判断する。対象外にする場合は理由をコード内コメントまたは ADR に明記する（「後で対応」と ADR の prose に書くだけで終わらせない＝ Issue #272 のように M-1 だけ OOF 未対応のまま放置された実例あり）。比較ファミリー（M-1/M-2/M-3 等）内で1モデルだけ評価手段が欠けていないか確認する。
 - **HTML 構成**: CSS はインライン1ファイル維持（分割禁止）。JS は CSP 対応で `static/js/<page>.js` に外部化（インラインイベントハンドラは `data-*`＋イベント委譲）。
 - ファイル名・URL は機能名で命名（フェーズ番号禁止）。定数はファイル冒頭に集約。

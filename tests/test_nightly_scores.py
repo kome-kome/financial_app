@@ -14,6 +14,11 @@ CLI（nightly_scores.py）
   5. daily-incremental の name と `success` で絞ること（株価が前進していない日に
      スコアだけ更新しない）
   6. `tee` するステップに `set -o pipefail` があること（exit code が化ける・#352）
+
+heavy の自動実行契約（ADR-0031・Issue #423 子6）
+  7. `heavy=True` のプラグインは `HEAVY_AUTOMATION` へ必ず登録されていること。
+     未登録の heavy は「実行手段が無いまま存在する」状態で、failure が出ないため
+     notify-failure でも検知できない（#432/#443/#423 子5 で3回起きた）。
 """
 import asyncio
 import os
@@ -27,6 +32,8 @@ import yaml
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from nightly_scores import (  # noqa: E402
+    EXEMPT_PREFIX,
+    HEAVY_AUTOMATION,
     NIGHTLY_MODELS,
     NIGHTLY_PARAMS,
     VERIFIERS,
@@ -38,8 +45,9 @@ from nightly_scores import (  # noqa: E402
 )
 from tests.test_sector_ols import _seed_sector  # noqa: E402
 
-WORKFLOW = Path(__file__).resolve().parents[1] / ".github" / "workflows" / "nightly-scores.yml"
-DAILY = Path(__file__).resolve().parents[1] / ".github" / "workflows" / "daily-incremental.yml"
+WORKFLOW_DIR = Path(__file__).resolve().parents[1] / ".github" / "workflows"
+WORKFLOW = WORKFLOW_DIR / "nightly-scores.yml"
+DAILY = WORKFLOW_DIR / "daily-incremental.yml"
 
 
 def _load(path: Path) -> dict:
@@ -117,6 +125,78 @@ class TestRegistration:
         """永続化検証の無いモデルを黙って追加させない（#432 の設計上の約束）。"""
         for name in NIGHTLY_MODELS:
             assert name in VERIFIERS, f"{name} の永続化検証（VERIFIERS）が無い"
+
+
+# ── heavy の自動実行契約（ADR-0031・Issue #423 子6）──────────────────────────
+
+class TestHeavyAutomationRegistry:
+    """`heavy=True` を足したのに自動実行経路が無い、を CI で落とす。
+
+    これは3回起きている: `sector_ols`（自動経路ゼロで `gap_ratio` が33〜36日前・#432）、
+    M-6 `macro_enet`（`sell_ranking` の既定 mu_source なのに tune の matrix に無く、
+    ローカル手動実行が唯一の更新経路・#443）、`recommend_factor_premia`（GHA 実行履歴
+    ゼロで 37期の重みのまま固着・#423 子5）。いずれも**失敗ではなく無実行**なので
+    notify-failure（#414）では検知できない＝人間が気づくまで古い値が出続ける。
+    """
+
+    @staticmethod
+    def _heavy_plugins() -> list[str]:
+        from plugins import list_plugins
+
+        return sorted(p.name for p in list_plugins() if p.heavy)
+
+    def test_every_heavy_plugin_is_registered(self):
+        missing = set(self._heavy_plugins()) - set(HEAVY_AUTOMATION)
+        assert not missing, (
+            f"heavy なのに自動実行が未登録: {sorted(missing)}。"
+            "回すワークフロー名か 'exempt: <理由>' を nightly_scores.HEAVY_AUTOMATION へ"
+            "書くこと（exempt でも構わないが、理由をコードに残す）"
+        )
+
+    def test_registry_has_no_stale_entries(self):
+        """heavy でなくなった／削除されたプラグインの残骸を残さない。"""
+        stale = set(HEAVY_AUTOMATION) - set(self._heavy_plugins())
+        assert not stale, f"heavy でないのに登録されている: {sorted(stale)}"
+
+    def test_workflow_entries_point_at_a_file_that_runs_the_model(self):
+        """ワークフロー名を書いたら、実在し**そのモデルを実際に回す**ことまで確かめる。
+
+        存在しないファイル名や、別のモデルしか回さないワークフローを書いても通って
+        しまうと、レジストリが「登録した気になる」だけの飾りになる。
+        """
+        for name, automation in HEAVY_AUTOMATION.items():
+            if automation.startswith(EXEMPT_PREFIX):
+                continue
+            path = WORKFLOW_DIR / automation
+            assert path.is_file(), f"{name}: ワークフロー {automation} が存在しない"
+            if automation == WORKFLOW.name:
+                # 夜間バッチは実行対象を YAML でなく NIGHTLY_MODELS が持つ
+                assert name in NIGHTLY_MODELS, (
+                    f"{name} は {automation} 登録だが NIGHTLY_MODELS に無い"
+                )
+            else:
+                assert name in path.read_text(encoding="utf-8"), (
+                    f"{name}: {automation} の中にモデル名が現れない＝実際には回していない"
+                )
+
+    def test_nightly_models_are_registered_as_nightly(self):
+        """逆向きの整合。夜間バッチに載せたらレジストリ側も夜間になっていること。"""
+        for name in NIGHTLY_MODELS:
+            assert HEAVY_AUTOMATION.get(name) == WORKFLOW.name, (
+                f"{name} は NIGHTLY_MODELS だが HEAVY_AUTOMATION では "
+                f"{HEAVY_AUTOMATION.get(name)!r} になっている"
+            )
+
+    def test_exemptions_state_a_reason(self):
+        """'exempt:' だけ書いて理由を省けないようにする（CLAUDE.md のメタ検証網羅性）。"""
+        for name, automation in HEAVY_AUTOMATION.items():
+            if not automation.startswith(EXEMPT_PREFIX):
+                continue
+            reason = automation[len(EXEMPT_PREFIX):].strip()
+            assert len(reason) >= 20, (
+                f"{name}: exempt の理由が短すぎる（{reason!r}）。"
+                "なぜ自動実行しないかを、後から読む人が判断できる粒度で書くこと"
+            )
 
 
 # ── CLI: 実行と永続化検証 ────────────────────────────────────────────────────

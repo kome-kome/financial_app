@@ -35,6 +35,7 @@
 | [0029](0029-m3-jp10y-daily-mof-source.md) | `dlm_jp10y` を財務省の日次 JGB 金利（`JP10Y_MOF`）へ差し替え ADR-0012 Decision 2 を supersede。週次差分ゼロ率 76.89%→0.91%。ただし**日次化して初めて実質的に効くようになった結果その効きが負**（売り側 p=0.023）だったため既定からは外す。日次系列の `lag_days` 上限は実配信ラグ（超えると未来日 CRITICAL） | #458 | accepted（2026-08-07） |
 
 | [0030](0030-buy-side-mu-wiring-default-off.md) | 買い推奨へ μ̂ を opt-in 結線（`METRICS` へ `mu`＋`mu_source`）。**既定は OFF**＝プリセットは `mu` 重みを持たず既定経路は不変。重みだけ付けて出所未指定は reject、backtest は as-of 再現不能につき `mu` を reject | #423 | accepted（2026-08-08） |
+| [0031](0031-heavy-plugins-require-registered-automation.md) | 重い計算は GitHub Actions が回し Render は読むだけ。**`heavy=True` は `HEAVY_AUTOMATION` への登録を必須**にし（ワークフロー名 or `exempt: 理由`）、未登録・空理由・実在しないワークフローを CI で落とす。「heavy を足したが自動実行が無い」は失敗しないため通知で拾えない | #423 | accepted（2026-08-09） |
 
 ## 運用
 
