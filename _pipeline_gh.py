@@ -63,7 +63,8 @@ async def main(years_back: int, collect_only: bool = False,
                refill_c2_sleep: float = 0.6,
                refill_machinery: bool = False, refill_machinery_limit: Optional[int] = None,
                refill_machinery_sleep: float = 0.6,
-               diagnose_cf: bool = False, diagnose_cf_limit: int = 20):
+               diagnose_cf: bool = False, diagnose_cf_limit: int = 20,
+               jquants_days: int = JQUANTS_BACKFILL_DAYS):
     t0 = time.time()
     log("=" * 60)
     if diagnose_cf:
@@ -338,14 +339,19 @@ async def main(years_back: int, collect_only: bool = False,
             # 落とさないよう、この呼び出しだけは失敗を握って継続する（#425）。
             try:
                 result = await collect_stock_price_history_jquants(
-                    db5, days_back=JQUANTS_BACKFILL_DAYS,
+                    db5, days_back=jquants_days,
                     on_progress=lambda c, t, m: log(m) if c % 10 == 0 or "完了" in m else None,
                 )
                 log(f"  stock_price_history: {result.get('upserted', 0)}件 upsert")
+                if result.get("out_of_coverage"):
+                    # 400＝契約窓の外側。平常運転（無料プランのエンバーゴ・遡及上限）・#462
+                    log(f"  J-Quants 契約窓外でスキップ: {result['out_of_coverage']}日")
                 if result.get("forbidden"):
-                    # 403 はカバレッジ境界の欠測として継続扱い（Issue #412）
-                    log(f"  J-Quants 403（カバー範囲外）でスキップ: {result['forbidden']}日"
-                        + ("（全日403＝カバー範囲外）" if result.get("all_forbidden") else ""))
+                    # 403＝契約失効／プラン対象外／URL 不在。**境界ではない**（境界は 400）・#462
+                    log(f"  J-Quants 403 でスキップ: {result['forbidden']}日"
+                        + (f"（うち契約失効 {result['no_subscription']}日）"
+                           if result.get("no_subscription") else "")
+                        + ("（全日403）" if result.get("all_forbidden") else ""))
             except Exception as e:
                 log(f"  J-Quants 株価取得 失敗（継続します）: {type(e).__name__}: {e}")
 
@@ -368,6 +374,10 @@ if __name__ == "__main__":
                         help="Phase 1-2 のみ実行（XBRL収集）")
     parser.add_argument("--finalize-only", action="store_true",
                         help="Phase 3-5 のみ実行（成長率/Zスコア/マクロ/J-Quants株価）")
+    parser.add_argument("--jquants-days", type=int, default=JQUANTS_BACKFILL_DAYS,
+                        help=(f"Phase 5 の J-Quants 遡及日数（デフォルト {JQUANTS_BACKFILL_DAYS}）。"
+                              "1日あたり JQUANTS_RATE_SLEEP=20秒 かかるため finalize の所要を"
+                              "直接決める。timeout に収めたいときだけ小さくする（#426/#462）"))
     parser.add_argument("--backfill-yahoo", action="store_true",
                         help="Phase 6: Yahoo Finance で過去株価をバックフィル（J-Quants カバー外の旧年度を補完）")
     parser.add_argument("--backfill-weekly", action="store_true",
@@ -426,7 +436,8 @@ if __name__ == "__main__":
             f"  refill_c2_limit={args.refill_c2_limit}"
             f"  refill_machinery={args.refill_machinery}"
             f"  refill_machinery_limit={args.refill_machinery_limit}"
-            f"  diagnose_cf={args.diagnose_cf}\n"
+            f"  diagnose_cf={args.diagnose_cf}"
+            f"  jquants_days={args.jquants_days}\n"
         )
     asyncio.run(main(
         args.years_back,
@@ -451,4 +462,5 @@ if __name__ == "__main__":
         refill_machinery_sleep=args.refill_machinery_sleep,
         diagnose_cf=args.diagnose_cf,
         diagnose_cf_limit=args.diagnose_cf_limit,
+        jquants_days=args.jquants_days,
     ))

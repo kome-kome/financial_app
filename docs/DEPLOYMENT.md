@@ -410,10 +410,10 @@ Supabase 無料プランは **1週間アクセスなしで自動停止**する�
 | 取得可能期間（過去側） | **過去2年分** | `days_back ≤ 730`。UI の選択肢もこれに合わせること |
 | **配信遅延（直近側）** | **直近約12週間は配信されない** | 無料プランは株価を**約12週遅れ**で配信。`today − 12週` より新しい日付は空レスポンスになり、J-Quants だけでは鮮度がここで頭打ちになる（例: 2026-06-10 時点の最新は ≈2026-03-17）。**直近12週の鮮度は Yahoo Finance ギャップ補完（`fill_recent_stock_price_gap_yahoo`）で埋める**。差分パイプライン（`_pipeline_incremental.py` Phase 4）に加え、**`full-pipeline` の finalize（`_pipeline_gh.py` Phase 5）も #426 で同じ順序（Yahoo → J-Quants → `update_market_data_from_history`）を持つ**。以前は finalize が J-Quants のみで、全件収集を回しても直近12週の株価が1日も前進しなかった |
 | 429 リトライ | 指数バックオフ禁止 | 429 発生時は **90秒待機→1回のみ再試行**。失敗したら skip |
-| 営業日データのみ | 土日祝は空レスポンス | 空レスポンスを skip として扱う |
-| **契約失効も 403**（#461・2026-08-07 実測） | サブスクが有効でないと**全日付が 403**（ボディ `{"message": "No active subscription found..."}`）。カバレッジ境界と**同じステータス**なので本文を見ないと平常運転と区別できない | `JQuantsCoverageError.no_subscription` で分離し専用の `log.error` を出す。加えて**連続 `JQUANTS_MAX_CONSECUTIVE_FORBIDDEN`(=10) 日 403 で残りを打ち切る**（打ち切らないと 523営業日 × 20秒 = 174分を空振りに使い finalize が timeout する・run 31126473273 の実例）。株価鮮度は Yahoo ギャップ補完が維持するが `issued_shares` / 上場状態同期 / 会社予想開示は止まる |
-| **カバレッジ境界の 403**（#412 / #425） | 過去側の実効境界（730日前付近）も直近84日エンバーゴ内も 400 ではなく **403** を返す | 403 は `JQuantsCoverageError` として送出し、**日付ループ側で欠測扱い（warning ログ）＋継続**。例外を伝播させると `days_back=730` の初日で必ず落ち、finalize 全体が異常終了する。<br>**全日程403でも例外は投げない**（#425）: `log.error` ＋ 戻り値 `all_forbidden: True` で返し、呼び出し側が継続可否を決める。J-Quants の失敗が、同じキーに依存しない Yahoo ギャップ補完まで巻き添えで止めるのを防ぐため |
-| **`/markets/listed/info` は常に 403**（#425 → #461 で理由を訂正） | ~~無料プランに権限が無い~~ → **v2 に存在しない URL**（2026-08-07 実測でボディが `The requested endpoint does not exist. Please check the URL, HTTP method, and API version` を返すと判明。正しい URL の確定は契約復旧後・#461） | 実測（2026-07-09/12/13 の **success** run すべてに `listed/info 取得失敗 status=403`）。したがって `active_codes` は常に空で、**キー有効性の判定材料に使えない**。#412 の「全日403 かつ listed/info 失敗ならキー失効」ガードはこの前提が成立せず、エンバーゴ内の窓では構造的に必ず発火していた。`issued_shares` 更新と `sync_active_status`（#315）も無料プランでは常にスキップされる |
+| 営業日データのみ | 土日祝は空レスポンス（**covers 文言の無い 400**） | 空レスポンスを skip として扱う。covers 文言があれば窓外なので別扱い（下段） |
+| **カバレッジ境界は 400**（#462・2026-08-08 実測） | 契約窓の外側は過去側・エンバーゴ側とも **400**＋ボディ `Your subscription covers the following dates: A ~ B`。窓は `[today − 84 − 730, today − 84]` のローリング（実測 `2024-05-16 ~ 2026-05-16`） | `JQuantsOutOfCoverage` として送出し、**窓を1日学習したら残りの窓外日は HTTP を投げずに飛ばす**（叩いてから 400 を受けると 1日 20秒＝730日窓で約20分を捨てる）。**エンバーゴ日数をコードに決め打ちしない**——固定値で切るとプランやエンバーゴが変わったとき取れるはずのデータを黙って捨てる（#438/#461 と同型の静かな劣化）。学習コストは境界を踏む1リクエストのみ。**非営業日の 400 と同一視しない**——同一視すると60営業日ぶんの空振りが「祝日」と同じログで消える |
+| **403 は3種すべて「日付非依存」**（#412 → #425 → #461 → #462） | ①`No active subscription found`＝契約失効 ②`This API is not available on your subscription`＝プラン対象外（例 `/fins/details`） ③`The requested endpoint does not exist`＝v2 に存在しない URL。**カバレッジ境界は含まれない** | `JQuantsAccessError.reason` で分類し、失効だけ専用の `log.error` を出す（他と潰すと平常運転と読み違える）。どれも日付を変えても直らないため**連続 `JQUANTS_MAX_CONSECUTIVE_FORBIDDEN`(=10) 日 403 で残りを打ち切る**（打ち切らないと 523営業日 × 20秒 = 174分を空振りに使い finalize が timeout・run 31126473273 の実例）。**全日程403でも例外は投げない**（#425）: `all_forbidden: True` を返し呼び出し側が継続可否を決める——J-Quants の失敗が、同じキーに依存しない Yahoo ギャップ補完まで巻き添えで止めるのを防ぐ |
+| **`/markets/listed/info` は v2 に存在しない**（#425 → #461 → #462 で決着） | ~~無料プランに権限が無い~~ → **URL 不在**。後継は **`/equities/master`**（実測 200・4,446銘柄）。ただし master は**発行済株式数を持たない**（`Code/CoName/Mkt/Mrgn/ProdCat/S17/S33/ScaleCat/Date` のみ） | `sync_active_status`（#315）は `/equities/master` へ移行。`issued_shares` は **`/fins/summary` の `ShOutFY`**（自己株 `TrShFY`・期中平均 `AvgSh` も同梱）へ移行し `statement_disclosure` へ保存する。#425 の v2 移行以降、この2機能は契約とは無関係にずっと停止していた |
 
 **設計制約（実装時の必須ルール）**:
 - **認証情報**: `.env` に `JQUANTS_API_KEY` を設定。未設定時は `ValueError` で明示エラー。
@@ -422,6 +422,7 @@ Supabase 無料プランは **1週間アクセスなしで自動停止**する�
 - **取得単位**: 日付単位で全銘柄を一括取得。1営業日 = 1〜数リクエスト（ページネーション対応済み）。
 - **`close` は nullable=False**: `Close` が `None` の行はスキップ（停止銘柄等）。
 - **CardinalityViolation 対策**: 5桁コードが同じ4桁 sec_code にマップされる場合がある。INSERT前に edinet_code で重複排除（先着1件採用）。
+- **ステータスコードだけ見て理由を推測しない**（#462）: J-Quants は 400 と 403 のどちらにも複数の意味を載せ、**区別できるのはボディの文言だけ**。#425 は `listed/info` の 403 を「無料プランの権限不足」と推測して docs に断定で書き、v2 での URL 変更を1年近く見落とした。#412 は境界の 403 という存在しない事象を前提にし、実際の契約失効（#461）を「平常運転」と読める警告で毎晩流し続けた。**新しいステータスに出会ったらボディを実測してから分類を足す**。
 
 ### FRED API（無料・要アカウント登録）
 

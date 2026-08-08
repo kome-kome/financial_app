@@ -12,6 +12,10 @@ on:
         type: boolean
         required: false
         default: false
+      jquants_days:
+        description: 'finalize の J-Quants 遡及日数（既定730）。1日=20秒で所要が決まるため、timeout に収めたいときだけ小さくする'
+        required: false
+        default: '730'
 
 # 最小権限（GITHUB_TOKEN でリポジトリ書込は不要・収集/保守は Supabase 直結）
 permissions:
@@ -60,8 +64,10 @@ jobs:
     needs: collect
     if: ${{ !cancelled() }}   # collect が一部失敗/タイムアウトしても集計は実行
     runs-on: ubuntu-latest
-    # Phase3(10分)+Phase4(32分)+Phase5 Yahoo補完(35〜60分・#426)+J-Quants(174分)
-    # +update_market_data(〜60分) ≈ 311〜336分。GitHub Actions 上限6時間に対し余裕5分。
+    # Phase3(10分)+Phase4(32分)+Phase5 Yahoo補完(89分・run 31126473273 実測)
+    # +J-Quants(jquants_days に比例・730日=523営業日×20秒=174分)+update_market_data(≧87分・
+    # 前回はここで打ち切られ実所要は未測定) ≈ 355分を超える。**jquants_days を小さくして
+    # 完走させ、update_market_data の実所要を先に測る**（#426/#462）。
     timeout-minutes: 355
 
     steps:
@@ -82,7 +88,7 @@ jobs:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           EDINET_API_KEY: ${{ secrets.EDINET_API_KEY }}
           JQUANTS_API_KEY: ${{ secrets.JQUANTS_API_KEY }}
-        run: python _pipeline_gh.py --finalize-only
+        run: python _pipeline_gh.py --finalize-only --jquants-days ${{ inputs.jquants_days || '730' }}
 
       - name: Upload log
         if: always()

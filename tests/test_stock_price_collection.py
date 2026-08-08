@@ -10,13 +10,24 @@ import sys
 from datetime import date, timedelta
 from unittest.mock import AsyncMock, patch
 
+import httpx
 import pytest
+
+
+def _client(handler) -> httpx.AsyncClient:
+    return httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+
+def _const(response: httpx.Response):
+    def handler(request):
+        return response
+    return handler
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from collector import (
     JQUANTS_MAX_CONSECUTIVE_FORBIDDEN,
-    JQuantsCoverageError,
+    JQuantsAccessError, JQuantsOutOfCoverage,
     backfill_historical_stock_prices_yahoo,
     backfill_weekly_history_yahoo,
     collect_stock_price_history,
@@ -422,8 +433,8 @@ class TestCollectJQuantsHistory:
         # 空レスポンスのため record_prices_batch は呼ばれない
         mock_batch.assert_not_called()
 
-    def test_syncs_is_active_from_listed_info(self, db, make_company):
-        """J-Quants listed/info の現在の上場銘柄集合と companies.is_active を同期する（Issue #315）。"""
+    def test_syncs_is_active_from_equity_master(self, db, make_company):
+        """J-Quants /equities/master の現在の上場銘柄集合と companies.is_active を同期する（#315・#462）。"""
         from database import Company
         self._add_company(db, make_company)   # E00001 / sec_code=1001
         db.add(make_company(edinet_code="E00002", sec_code="1002", name="廃止予定"))
@@ -433,9 +444,8 @@ class TestCollectJQuantsHistory:
                    new_callable=AsyncMock, return_value=[]):
             with patch("collector_prices.record_prices_batch", return_value=0):
                 with patch("collector_prices.trim_daily", return_value=0):
-                    with patch("collector_prices._fetch_jquants_listed_info",
-                               new_callable=AsyncMock,
-                               return_value={"issued_shares": {}, "active_codes": {"1001"}}):
+                    with patch("collector_prices._fetch_jquants_equity_master",
+                               new_callable=AsyncMock, return_value={"1001"}):
                         with patch.dict(os.environ, {"JQUANTS_API_KEY": "test-key"}):
                             with patch("collector_prices.JQUANTS_RATE_SLEEP", 0):
                                 asyncio.run(
@@ -450,8 +460,8 @@ class TestCollectJQuantsHistory:
         assert co2.is_active is False
         assert co2.delisted_date is not None
 
-    def test_listed_info_fetch_failure_skips_sync(self, db, make_company):
-        """listed/info 取得失敗（active_codes 空）時は同期をスキップし、既存 is_active を保つ。"""
+    def test_equity_master_fetch_failure_skips_sync(self, db, make_company):
+        """/equities/master 取得失敗（active_codes 空）時は同期をスキップし、既存 is_active を保つ。"""
         from database import Company
         self._add_company(db, make_company)   # E00001 / sec_code=1001
         db.commit()
@@ -460,9 +470,8 @@ class TestCollectJQuantsHistory:
                    new_callable=AsyncMock, return_value=[]):
             with patch("collector_prices.record_prices_batch", return_value=0):
                 with patch("collector_prices.trim_daily", return_value=0):
-                    with patch("collector_prices._fetch_jquants_listed_info",
-                               new_callable=AsyncMock,
-                               return_value={"issued_shares": {}, "active_codes": set()}):
+                    with patch("collector_prices._fetch_jquants_equity_master",
+                               new_callable=AsyncMock, return_value=set()):
                         with patch.dict(os.environ, {"JQUANTS_API_KEY": "test-key"}):
                             with patch("collector_prices.JQUANTS_RATE_SLEEP", 0):
                                 asyncio.run(
@@ -474,7 +483,8 @@ class TestCollectJQuantsHistory:
         co1 = db.query(Company).filter_by(edinet_code="E00001").one()
         assert co1.is_active is True   # 誤って全件 delisted 化しない
 
-    # ── 403（カバレッジ境界）の扱い・Issue #412 ────────────────────────────
+    # ── 403（契約失効／プラン対象外／URL 不在）の扱い・#412 → #462 ───────────
+    # **カバレッジ境界はここに来ない**（境界は 400・下の TestJquantsCoverageWindow）。
     _JQ_ROW = {
         "Code": "10010", "Date": "2024-01-09",
         "AdjO": 1000.0, "AdjH": 1010.0, "AdjL": 990.0, "AdjC": 1005.0, "AdjVo": 10000.0,
@@ -484,9 +494,8 @@ class TestCollectJQuantsHistory:
         with patch("collector_prices._jquants_fetch_date", new=fetch_mock):
             with patch("collector_prices.record_prices_batch", return_value=1):
                 with patch("collector_prices.trim_daily", return_value=0):
-                    with patch("collector_prices._fetch_jquants_listed_info",
-                               new_callable=AsyncMock,
-                               return_value={"issued_shares": {}, "active_codes": active_codes}):
+                    with patch("collector_prices._fetch_jquants_equity_master",
+                               new_callable=AsyncMock, return_value=active_codes):
                         with patch.dict(os.environ, {"JQUANTS_API_KEY": "test-key"}):
                             with patch("collector_prices.JQUANTS_RATE_SLEEP", 0):
                                 return asyncio.run(
@@ -496,12 +505,12 @@ class TestCollectJQuantsHistory:
                                 )
 
     def test_403_day_is_skipped_and_collection_continues(self, db, make_company):
-        """カバレッジ境界日の 403 は欠測扱いでスキップし、後続日の収集を継続する（Issue #412）。"""
+        """403 の日は欠測扱いでスキップし、後続日の収集を継続する（Issue #412）。"""
         self._add_company(db, make_company)
 
         async def fetch(session, api_key, date_str):
             if date_str == self._MON.strftime("%Y-%m-%d"):
-                raise JQuantsCoverageError(date_str)
+                raise JQuantsAccessError(date_str)
             return [self._JQ_ROW]
 
         result = self._run_jq(db, fetch, {"1001"})
@@ -511,11 +520,11 @@ class TestCollectJQuantsHistory:
         assert result["upserted"] == 1     # 403 の翌営業日は正常に upsert される
 
     def test_all_403_with_valid_key_does_not_raise(self, db, make_company):
-        """全日程 403（＝エンバーゴ内の窓）は範囲外として警告のみで完走する。"""
+        """全日程 403 でも例外は投げず警告のみで完走する（#425 の構造を維持）。"""
         self._add_company(db, make_company)
 
         async def fetch(session, api_key, date_str):
-            raise JQuantsCoverageError(date_str)
+            raise JQuantsAccessError(date_str)
 
         result = self._run_jq(db, fetch, {"1001"})
 
@@ -524,20 +533,17 @@ class TestCollectJQuantsHistory:
         assert result["upserted"] == 0
         assert result["all_forbidden"] is True
 
-    def test_all_403_and_listed_info_failure_does_not_raise(self, db, make_company):
-        """全日程 403 かつ listed/info も失敗しても例外を投げない（Issue #425）。
+    def test_all_403_and_master_failure_does_not_raise(self, db, make_company):
+        """全日程 403 かつ上場銘柄一覧も失敗しても例外を投げない（Issue #425 の構造を維持）。
 
-        #412 はこのケースを「キー失効の疑い」として中断していたが、`/markets/listed/info`
-        は無料プランで**常に 403** であることが実測で判明した（2026-07-09/12/13 の
-        success run すべてに `listed/info 取得失敗 status=403` が出ている）。つまり
-        active_codes は常に空で、条件は「全日 403」だけに退化し、84日エンバーゴ内の窓では
-        構造的に必ず発火する。J-Quants の失敗が、同じキーに依存しない Yahoo ギャップ補完
-        （株価鮮度の実質唯一の担い手）まで巻き添えで止めていた。
+        J-Quants（収集元A）の失敗が、同じキーに依存しない Yahoo ギャップ補完（収集元B・
+        株価鮮度の実質唯一の担い手）まで巻き添えで止めるのは誤り。継続可否は結果を見て
+        呼び出し側が決める。
         """
         self._add_company(db, make_company)
 
         async def fetch(session, api_key, date_str):
-            raise JQuantsCoverageError(date_str)
+            raise JQuantsAccessError(date_str)
 
         result = self._run_jq(db, fetch, set())   # listed/info 失敗＝active_codes 空
 
@@ -551,9 +557,8 @@ class TestCollectJQuantsHistory:
         with patch("collector_prices._jquants_fetch_date", new=fetch_mock):
             with patch("collector_prices.record_prices_batch", return_value=1):
                 with patch("collector_prices.trim_daily", return_value=0):
-                    with patch("collector_prices._fetch_jquants_listed_info",
-                               new_callable=AsyncMock,
-                               return_value={"issued_shares": {}, "active_codes": set()}):
+                    with patch("collector_prices._fetch_jquants_equity_master",
+                               new_callable=AsyncMock, return_value=set()):
                         with patch.dict(os.environ, {"JQUANTS_API_KEY": "test-key"}):
                             with patch("collector_prices.JQUANTS_RATE_SLEEP", 0):
                                 return asyncio.run(
@@ -575,7 +580,7 @@ class TestCollectJQuantsHistory:
 
         async def fetch(session, api_key, date_str):
             attempted.append(date_str)
-            raise JQuantsCoverageError(date_str, no_subscription=True)
+            raise JQuantsAccessError(date_str, reason="no_subscription")
 
         result = self._run_jq_window(db, fetch, days=40)
 
@@ -586,7 +591,7 @@ class TestCollectJQuantsHistory:
         assert result["cancelled"] is False        # 例外は投げない（#425 の構造を維持）
 
     def test_success_resets_consecutive_counter(self, db, make_company):
-        """間に成功日が挟まれば打ち切らない（カバー範囲外が飛び飛びの窓を捨てない）。"""
+        """間に成功日が挟まれば打ち切らない（403 が飛び飛びの窓を捨てない）。"""
         self._add_company(db, make_company)
         attempted: list[str] = []
 
@@ -595,7 +600,7 @@ class TestCollectJQuantsHistory:
             # 5日ごとに1日成功させる＝連続403が閾値へ届かない
             if len(attempted) % 5 == 0:
                 return [{**self._JQ_ROW, "Date": date_str}]
-            raise JQuantsCoverageError(date_str)
+            raise JQuantsAccessError(date_str)
 
         result = self._run_jq_window(db, fetch, days=40)
 
@@ -604,20 +609,21 @@ class TestCollectJQuantsHistory:
         assert result["all_forbidden"] is False
 
     def test_no_subscription_is_counted_separately(self, db, make_company):
-        """契約失効はカバー範囲外の403と区別して数える（平常運転と読み違えない・#461）。"""
+        """契約失効は他の403と区別して数える（平常運転と読み違えない・#461）。"""
         self._add_company(db, make_company)
 
         async def fetch(session, api_key, date_str):
-            raise JQuantsCoverageError(date_str, no_subscription=True)
+            raise JQuantsAccessError(date_str, reason="no_subscription")
 
         result = self._run_jq(db, fetch, set())
         assert result["no_subscription"] == result["forbidden"] == 2
 
-    def test_coverage_403_is_not_counted_as_subscription_lapse(self, db, make_company):
+    def test_other_403_is_not_counted_as_subscription_lapse(self, db, make_company):
+        """プラン対象外・URL 不在の403を失効として数えない（対処が別物・#462）。"""
         self._add_company(db, make_company)
 
         async def fetch(session, api_key, date_str):
-            raise JQuantsCoverageError(date_str)
+            raise JQuantsAccessError(date_str, reason="endpoint_missing")
 
         result = self._run_jq(db, fetch, set())
         assert result["no_subscription"] == 0
@@ -629,10 +635,143 @@ class TestCollectJQuantsHistory:
 
         async def fetch(session, api_key, date_str):
             if date_str == self._MON.strftime("%Y-%m-%d"):
-                raise JQuantsCoverageError(date_str)
+                raise JQuantsAccessError(date_str)
             return [self._JQ_ROW]
 
         result = self._run_jq(db, fetch, set())
 
         assert result["forbidden"] == 1
         assert result["all_forbidden"] is False
+
+
+class TestJquantsCoverageWindow:
+    """契約カバレッジ窓（400）の扱い・#462。
+
+    **403 はカバレッジ境界を意味しない**。2026-08-08 に契約有効な状態で実 API を叩いた結果、
+    窓の外側（過去側・エンバーゴ側の両端）は 400 で
+    `Your subscription covers the following dates: 2024-05-16 ~ 2026-05-16` を返した。
+    #412 / #425 が「403＝カバー範囲外」と読んだ観測は、実際には契約失効だった（#461）。
+    """
+
+    _JQ_ROW = {
+        "Code": "10010", "Date": "2024-01-09",
+        "AdjO": 1000.0, "AdjH": 1010.0, "AdjL": 990.0, "AdjC": 1005.0, "AdjVo": 10000.0,
+    }
+
+    def _add_company(self, db, make_company):
+        db.add(make_company(edinet_code="E00001", sec_code="1001", name="テスト社"))
+        db.commit()
+
+    def _run(self, db, fetch_mock, date_from, date_to):
+        with patch("collector_prices._jquants_fetch_date", new=fetch_mock):
+            with patch("collector_prices.record_prices_batch", return_value=1):
+                with patch("collector_prices.trim_daily", return_value=0):
+                    with patch("collector_prices._fetch_jquants_equity_master",
+                               new_callable=AsyncMock, return_value=set()):
+                        with patch.dict(os.environ, {"JQUANTS_API_KEY": "test-key"}):
+                            with patch("collector_prices.JQUANTS_RATE_SLEEP", 0):
+                                return asyncio.run(collect_stock_price_history_jquants(
+                                    db, date_from=date_from, date_to=date_to))
+
+    def test_400_with_coverage_message_raises_out_of_coverage(self):
+        """400＋covers 文言は非営業日の 400 と区別して送出する（#462）。"""
+        from collector_prices import _jquants_fetch_date
+
+        body = ('{"message": "Your subscription covers the following dates: '
+                '2024-05-16 ~ 2026-05-16. If you want more data..."}')
+        client = _client(_const(httpx.Response(400, text=body)))
+        with pytest.raises(JQuantsOutOfCoverage) as ei:
+            asyncio.run(_jquants_fetch_date(client, "key", "2026-05-18"))
+        assert ei.value.cover_from == "2024-05-16"
+        assert ei.value.cover_to == "2026-05-16"
+
+    def test_400_without_coverage_message_is_holiday(self):
+        """covers 文言の無い 400 は非営業日＝空リストで正常終了（従来どおり）。"""
+        from collector_prices import _jquants_fetch_date
+
+        client = _client(_const(httpx.Response(400, text='{"message": "no data"}')))
+        assert asyncio.run(_jquants_fetch_date(client, "key", "2024-01-01")) == []
+
+    def test_learned_window_skips_without_http_call(self, db, make_company):
+        """窓を1日学習したら、窓外の残り日は**リクエストせず**に飛ばす（#462）。
+
+        叩いてから 400 を受ける実装だと 1日あたり JQUANTS_RATE_SLEEP=20秒 を捨てる。
+        730日窓では上限側の約60営業日が該当し、約20分の空振りになる。
+        """
+        self._add_company(db, make_company)
+        attempted: list = []
+
+        async def fetch(session, api_key, date_str):
+            attempted.append(date_str)
+            # 窓は 2024-01-01 〜 2024-01-05。以降の日付はすべて窓外
+            raise JQuantsOutOfCoverage(date_str, "2024-01-01", "2024-01-05")
+
+        result = self._run(db, fetch, date(2024, 1, 8), date(2024, 1, 19))
+
+        assert len(attempted) == 1                      # 学習は1回で足りる
+        assert result["out_of_coverage"] == result["days"] == 10
+        assert result["forbidden"] == 0                 # 403 とは別集計（#462）
+        assert result["all_forbidden"] is False         # 窓外は異常ではない
+
+    def test_in_window_days_are_still_fetched(self, db, make_company):
+        """窓内の日付は学習後も従来どおり取得する（窓の下限側で1日踏んだだけで止めない）。"""
+        self._add_company(db, make_company)
+        attempted: list = []
+
+        async def fetch(session, api_key, date_str):
+            attempted.append(date_str)
+            if date_str < "2024-01-10":
+                raise JQuantsOutOfCoverage(date_str, "2024-01-10", "2024-01-31")
+            return [{**self._JQ_ROW, "Date": date_str}]
+
+        result = self._run(db, fetch, date(2024, 1, 8), date(2024, 1, 12))
+
+        # 01-08 が窓外 → 学習。01-09 は窓外なので叩かない。01-10〜01-12 は窓内で取得。
+        assert attempted == ["2024-01-08", "2024-01-10", "2024-01-11", "2024-01-12"]
+        assert result["out_of_coverage"] == 2
+        assert result["upserted"] == 3
+
+    def test_embargo_days_are_learned_not_hardcoded(self, db, make_company):
+        """エンバーゴ境界は**API から学習**し、日数をコードに決め打ちしない（#462）。
+
+        `today − 84日` のような固定値で窓を切ると、プランやエンバーゴが変わったときに
+        取れるはずのデータを黙って捨てる（ログは平常時と区別がつかない）＝#438/#461 と
+        同型の静かな劣化。学習型なら境界を1日踏むコスト（20秒）だけで自動追随する。
+        """
+        self._add_company(db, make_company)
+        attempted: list = []
+        today = date.today()
+        # API 側のエンバーゴが 40日へ短縮された想定。決め打ち 84日なら取り逃す領域。
+        cutoff = today - timedelta(days=40)
+
+        async def fetch(session, api_key, date_str):
+            attempted.append(date_str)
+            if date_str > cutoff.strftime("%Y-%m-%d"):
+                raise JQuantsOutOfCoverage(
+                    date_str, "2024-01-01", cutoff.strftime("%Y-%m-%d"))
+            return [{**self._JQ_ROW, "Date": date_str}]
+
+        result = self._run(db, fetch, today - timedelta(days=60), today - timedelta(days=30))
+
+        # 短縮後に取得可能になった 60〜40日前は取り逃さない
+        assert min(attempted) == (today - timedelta(days=60)).strftime("%Y-%m-%d")
+        assert result["upserted"] > 0
+        # 学習後、窓外の残りは叩かない（境界を踏むのは1日だけ）
+        assert sum(1 for d in attempted if d > cutoff.strftime("%Y-%m-%d")) == 1
+
+    def test_fully_embargoed_window_costs_one_request(self, db, make_company):
+        """窓が丸ごとエンバーゴ内なら、1日だけ叩いて残りは学習でスキップする（#462）。"""
+        self._add_company(db, make_company)
+        attempted: list = []
+        today = date.today()
+
+        async def fetch(session, api_key, date_str):
+            attempted.append(date_str)
+            raise JQuantsOutOfCoverage(
+                date_str, "2024-01-01", (today - timedelta(days=84)).strftime("%Y-%m-%d"))
+
+        result = self._run(db, fetch, today - timedelta(days=10), today)
+
+        assert len(attempted) == 1
+        assert result["upserted"] == 0
+        assert result["out_of_coverage"] == result["days"]

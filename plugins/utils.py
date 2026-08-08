@@ -191,7 +191,7 @@ def shares_outstanding(record) -> float | None:
     """発行済株式数を返す（優先順位: XBRL期末値 → J-Quantsマスタ値 → BS推計）。
 
     1. record.issued_shares   — XBRL 直接収集列（期末発行済株式数タグ）
-    2. record.company.issued_shares — J-Quants /markets/listed/info で取得した最新値
+    2. record.company.issued_shares — J-Quants `/fins/summary` の ShOutFY 由来の最新値（#462）
     3. bs_total_equity / bs_bps     — 純資産÷BPS 推計（外れ値リスクあり）
 
     bs_bps が誤った XBRL タグを捕捉すると推計値が実際の数十万倍になる企業が

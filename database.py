@@ -72,7 +72,7 @@ class Company(Base):
     fiscal_month = Column(Integer)                         # 決算月
     accounting_standard = Column(String(20))               # JGAAP/IFRS/US-GAAP
     issued_shares = Column(Float, nullable=True)           # 発行済株式数（J-Quants 取得・最新値）
-    is_active     = Column(Boolean, nullable=False, default=True)  # 上場中フラグ（J-Quants listed/info突合で自動更新。Issue #315）
+    is_active     = Column(Boolean, nullable=False, default=True)  # 上場中フラグ（J-Quants /equities/master 突合で自動更新。#315・#462）
     delisted_date = Column(Date, nullable=True)             # is_active=False へ遷移した日（再上場等で復帰した場合はNoneへ戻す）
     created_at   = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     updated_at   = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
@@ -1356,6 +1356,12 @@ class StatementDisclosure(Base):
     nxf_np    = Column(Float)
     nxf_eps   = Column(Float)
 
+    # 株式数（#462）。v2 の `/equities/master` は株式数を持たないため、J-Quants 経由の
+    # issued_shares 補完はこの列が唯一の入口。主経路は XBRL パース（financial_records）で、
+    # ここは NULL のときだけ埋める副経路である点は従来どおり。
+    sh_out_fy = Column(Float)   # ShOutFY: 期末発行済株式数（自己株含む）
+    tr_sh_fy  = Column(Float)   # TrShFY: 期末自己株式数
+
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
 
@@ -1731,6 +1737,13 @@ def _ensure_tables() -> None:
             conn.execute(text(
                 f"ALTER TABLE {_tbl} ADD COLUMN IF NOT EXISTS n_stale INTEGER"
             ))
+        # 決算短信サマリーの株式数（#462・非破壊・冪等）。v2 の `/equities/master` が株式数を
+        # 持たないため、issued_shares の J-Quants 経路をここへ移した。既存行は NULL のまま
+        # ＝次回の開示収集で埋まる。
+        for _col in ("sh_out_fy", "tr_sh_fy"):
+            conn.execute(text(
+                f"ALTER TABLE statement_disclosure ADD COLUMN IF NOT EXISTS {_col} DOUBLE PRECISION"
+            ))
         # period_end を VARCHAR(20) → DATE 型に変換するマイグレーション（冪等）
         # SKIP_PERIOD_END_MIGRATION=1 で skip できるフェールセーフ付き
         if not os.environ.get("SKIP_PERIOD_END_MIGRATION"):
@@ -1879,7 +1892,7 @@ def upsert_company(db, data: dict) -> Company:
 
 
 def sync_active_status(db, active_sec_codes: set) -> dict:
-    """企業マスタの上場状態を、現在の上場銘柄集合（J-Quants listed/info 由来）と同期する（Issue #315）。
+    """企業マスタの上場状態を、現在の上場銘柄集合（J-Quants `/equities/master` 由来）と同期する（#315・#462）。
 
     is_active=True の企業が active_sec_codes に無ければ delisted 扱い（is_active=False,
     delisted_date=today）。逆に is_active=False の企業が active_sec_codes に含まれていれば

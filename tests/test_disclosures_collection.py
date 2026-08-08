@@ -12,7 +12,8 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from collector_disclosures import (
-    _num, _row_to_record, collect_statement_disclosures, JQuantsCoverageError,
+    _num, _row_to_record, collect_statement_disclosures,
+    JQuantsAccessError, JQuantsOutOfCoverage,
 )
 from database import StatementDisclosure
 
@@ -183,13 +184,13 @@ class TestCollectStatementDisclosures:
                     return asyncio.run(collect_statement_disclosures(db, **kwargs))
 
     def test_403_day_is_skipped_and_collection_continues(self, db, make_company):
-        """遡及境界日の 403 は欠測扱いでスキップし、後続日の収集を継続する（Issue #412）。"""
+        """403 の日は欠測扱いでスキップし、後続日の収集を継続する（Issue #412）。"""
         db.add(make_company(edinet_code="E00001", sec_code="7203", name="トヨタ自動車"))
         db.commit()
 
         async def _fetch(session, api_key, date_str):
             if date_str == "2024-05-06":
-                raise JQuantsCoverageError(date_str)
+                raise JQuantsAccessError(date_str)
             return [_sample_row()]
 
         result = self._collect_with_fetch(
@@ -201,14 +202,131 @@ class TestCollectStatementDisclosures:
         assert db.query(StatementDisclosure).filter_by(disc_no="20240424575411").one()
 
     def test_all_403_raises(self, db, make_company):
-        """全日程 403 は境界の欠測では説明できない（キー失効の疑い）→ 中断する。"""
+        """全日程 403 は窓外では説明できない（窓外は 400・#462）→ 中断する。"""
         db.add(make_company(edinet_code="E00001", sec_code="7203", name="トヨタ自動車"))
         db.commit()
 
         async def _fetch(session, api_key, date_str):
-            raise JQuantsCoverageError(date_str)
+            raise JQuantsAccessError(date_str)
 
         with pytest.raises(ValueError, match="403"):
             self._collect_with_fetch(
                 db, _fetch, date_from=date(2024, 5, 6), date_to=date(2024, 5, 8),
             )
+
+
+class TestIssuedSharesFromSummary:
+    """発行済株式数を /fins/summary の ShOutFY から取る経路（#462）。
+
+    v1 の `/markets/listed/info` は v2 に存在せず（403 `The requested endpoint does not
+    exist`）、後継の `/equities/master` は株式数フィールドを持たない。実測でこの2点が
+    確定したため、J-Quants 経由の issued_shares はここが唯一の入口になった。
+    """
+
+    def _collect(self, db, fetch, **kwargs):
+        with patch("collector_disclosures._jquants_fetch_summary_date", new=fetch):
+            with patch.dict(os.environ, {"JQUANTS_API_KEY": "test-key"}):
+                with patch("collector_disclosures.JQUANTS_RATE_SLEEP", 0):
+                    return asyncio.run(collect_statement_disclosures(db, **kwargs))
+
+    def test_sh_out_fy_is_persisted(self, db, make_company):
+        db.add(make_company(edinet_code="E00001", sec_code="7203", name="トヨタ自動車"))
+        db.commit()
+
+        async def _fetch(session, api_key, date_str):
+            if date_str != "2024-05-08":
+                return []
+            return [_sample_row(ShOutFY="16314987460", TrShFY="520000")]
+
+        self._collect(db, _fetch, date_from=date(2024, 5, 8), date_to=date(2024, 5, 8))
+
+        rec = db.query(StatementDisclosure).filter_by(disc_no="20240424575411").one()
+        assert rec.sh_out_fy == 16314987460.0
+        assert rec.tr_sh_fy == 520000.0
+
+    def test_companies_issued_shares_is_updated(self, db, make_company):
+        from database import Company
+        db.add(make_company(edinet_code="E00001", sec_code="7203", name="トヨタ自動車"))
+        db.commit()
+
+        async def _fetch(session, api_key, date_str):
+            if date_str != "2024-05-08":
+                return []
+            return [_sample_row(ShOutFY="16314987460")]
+
+        self._collect(db, _fetch, date_from=date(2024, 5, 8), date_to=date(2024, 5, 8))
+
+        co = db.query(Company).filter_by(edinet_code="E00001").one()
+        assert co.issued_shares == 16314987460.0
+
+    def test_latest_disclosure_wins(self, db, make_company):
+        """日付は昇順に回るため、後の開示の株式数が残る（自己株消却・増資の反映）。"""
+        from database import Company
+        db.add(make_company(edinet_code="E00001", sec_code="7203", name="トヨタ自動車"))
+        db.commit()
+
+        async def _fetch(session, api_key, date_str):
+            if date_str == "2024-05-08":
+                return [_sample_row(DiscNo="A1", DiscDate="2024-05-08", ShOutFY="16314987460")]
+            if date_str == "2024-05-09":
+                return [_sample_row(DiscNo="A2", DiscDate="2024-05-09", ShOutFY="15794987460")]
+            return []
+
+        self._collect(db, _fetch, date_from=date(2024, 5, 8), date_to=date(2024, 5, 9))
+
+        co = db.query(Company).filter_by(edinet_code="E00001").one()
+        assert co.issued_shares == 15794987460.0
+
+    def test_missing_sh_out_fy_does_not_clobber(self, db, make_company):
+        """ShOutFY が空の開示で既存値を潰さない（IFRS 等で欠損しうる）。"""
+        from database import Company
+        co = make_company(edinet_code="E00001", sec_code="7203", name="トヨタ自動車")
+        co.issued_shares = 999.0
+        db.add(co)
+        db.commit()
+
+        async def _fetch(session, api_key, date_str):
+            if date_str != "2024-05-08":
+                return []
+            return [_sample_row(ShOutFY="")]
+
+        self._collect(db, _fetch, date_from=date(2024, 5, 8), date_to=date(2024, 5, 8))
+
+        assert db.query(Company).filter_by(edinet_code="E00001").one().issued_shares == 999.0
+
+
+class TestDisclosureCoverageWindow:
+    """開示側も契約窓（400）を 403 と分けて扱う（#462）。"""
+
+    def _collect(self, db, fetch, **kwargs):
+        with patch("collector_disclosures._jquants_fetch_summary_date", new=fetch):
+            with patch.dict(os.environ, {"JQUANTS_API_KEY": "test-key"}):
+                with patch("collector_disclosures.JQUANTS_RATE_SLEEP", 0):
+                    return asyncio.run(collect_statement_disclosures(db, **kwargs))
+
+    def test_window_is_learned_and_skips_without_http(self, db, make_company):
+        db.add(make_company(edinet_code="E00001", sec_code="7203", name="トヨタ自動車"))
+        db.commit()
+        attempted: list = []
+
+        async def _fetch(session, api_key, date_str):
+            attempted.append(date_str)
+            raise JQuantsOutOfCoverage(date_str, "2020-01-01", "2020-01-31")
+
+        result = self._collect(db, _fetch, date_from=date(2024, 5, 6), date_to=date(2024, 5, 10))
+
+        assert len(attempted) == 1
+        assert result["out_of_coverage"] == result["days"] == 5
+        assert result["forbidden"] == 0
+
+    def test_all_out_of_coverage_does_not_raise(self, db, make_company):
+        """窓外だけで終わっても中断しない（中断するのは 403 が全日のときだけ・#462）。"""
+        db.add(make_company(edinet_code="E00001", sec_code="7203", name="トヨタ自動車"))
+        db.commit()
+
+        async def _fetch(session, api_key, date_str):
+            raise JQuantsOutOfCoverage(date_str, "2020-01-01", "2020-01-31")
+
+        result = self._collect(db, _fetch, date_from=date(2024, 5, 6), date_to=date(2024, 5, 8))
+        assert result["cancelled"] is False
+        assert result["upserted"] == 0

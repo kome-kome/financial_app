@@ -280,8 +280,9 @@ async def collect_stock_price_history(
 async def _jquants_fetch_date(session: httpx.AsyncClient, api_key: str, date_str: str) -> list:
     """date_str (YYYY-MM-DD) の全銘柄 OHLCV を返す（ページネーション対応）。
     V2 API: x-api-key ヘッダーで認証。レスポンスキーは "data"、フィールドは O/H/L/C/Vo。
-    400 = 非営業日またはサブスクリプション範囲外 → 空リストで正常終了。
-    403 = カバレッジ外またはキー無効 → JQuantsCoverageError を送出（Issue #412）。
+    400 = 非営業日 → 空リストで正常終了。ただしボディにカバレッジ窓の文言があれば
+          契約窓の外側（過去側・エンバーゴ側の両端）→ JQuantsOutOfCoverage を送出（#462）。
+    403 = 契約失効／プラン対象外／URL 不在 → JQuantsAccessError を送出（#412・#461・#462）。
     429 = レート制限 → 90秒待って1回だけ再試行。それでも429 なら skip。
     """
     headers = {"x-api-key": api_key}
@@ -302,12 +303,19 @@ async def _jquants_fetch_date(session: httpx.AsyncClient, api_key: str, date_str
                 log.error(f"J-Quants 429: {date_str} → 再試行も429、スキップ")
                 return []
         if r.status_code == 403:
-            # 契約失効はカバレッジ境界と同じ 403 で返るが、ボディの文言で区別できる（#461）。
-            body = (r.text or "").lower()
-            raise JQuantsCoverageError(
-                date_str, no_subscription=JQUANTS_NO_SUBSCRIPTION_MARK in body)
+            # 403 の3分類（契約失効／プラン対象外／URL 不在）はボディの文言でしか区別できない。
+            # どれも日付非依存なので呼び出し側は打ち切ってよい（#461・#462）。
+            body = r.text or ""
+            raise JQuantsAccessError(
+                date_str, reason=classify_jquants_forbidden(body), message=body[:200])
         if r.status_code in (400, 404):
-            break  # 非営業日またはサブスクリプション範囲外
+            # 400 は「非営業日」と「契約窓の外側」の両方で返る。**同一視しない**（#462）:
+            # 窓外を祝日扱いにすると、エンバーゴにかかる約60営業日が 1日20秒を払いながら
+            # ログ上は祝日と区別できずに消える。窓が読めたら呼び出し側で以降をクリップする。
+            cover_from, cover_to = parse_jquants_coverage(r.text or "")
+            if cover_from:
+                raise JQuantsOutOfCoverage(date_str, cover_from, cover_to)
+            break  # 非営業日
         r.raise_for_status()
         data = r.json()
         rows.extend(data.get("data", []))
@@ -318,44 +326,52 @@ async def _jquants_fetch_date(session: httpx.AsyncClient, api_key: str, date_str
     return rows
 
 
-async def _fetch_jquants_listed_info(session: httpx.AsyncClient, api_key: str) -> dict:
-    """J-Quants /markets/listed/info から全上場銘柄の情報を取得する。
+async def _fetch_jquants_equity_master(session: httpx.AsyncClient, api_key: str) -> set:
+    """J-Quants /equities/master から現在の上場銘柄集合（sec_code 4桁）を返す。
 
-    戻り値: {"issued_shares": {sec_code(4桁): issued_shares(float)}, "active_codes": {sec_code(4桁), ...}}
-    active_codes はレスポンスに現れた全銘柄（発行済株式数の有無を問わない）＝現在の上場銘柄集合
-    （is_active 同期・Issue #315 に使う）。取得失敗時は両方空。
+    v1 の `/markets/listed/info` は **v2 に存在しない**（403 `The requested endpoint does not
+    exist`）。#425 はこの 403 を「無料プランに権限が無い」と読んだが、2026-08-08 に契約有効な
+    状態で叩き直したところ本文は URL 不在を言っており、誤読だった（#462）。後継が本関数の
+    `/equities/master` で、実測 4,446銘柄を返す。
+
+    **発行済株式数は master に無い**（Code/CoName/Mkt/Mrgn/ProdCat/S17/S33/ScaleCat/Date のみ）。
+    issued_shares は `/fins/summary` の ShOutFY 経由（collector_disclosures）で取る。
+
+    取得失敗時は空集合。呼び出し側は空なら同期をスキップする（全件 delisted 化の防止）。
     """
     headers = {"x-api-key": api_key}
-    empty = {"issued_shares": {}, "active_codes": set()}
     try:
-        r = await session.get(JQUANTS_LISTED_INFO_ENDPOINT, headers=headers, timeout=30)
+        r = await session.get(JQUANTS_MASTER_ENDPOINT, headers=headers, timeout=30)
         if r.status_code == 429:
             await asyncio.sleep(90)
-            r = await session.get(JQUANTS_LISTED_INFO_ENDPOINT, headers=headers, timeout=30)
+            r = await session.get(JQUANTS_MASTER_ENDPOINT, headers=headers, timeout=30)
+        if r.status_code == 403:
+            reason = classify_jquants_forbidden(r.text or "")
+            log.error(
+                f"J-Quants /equities/master が 403（reason={reason}）: {(r.text or '')[:200]}"
+            )
+            return set()
         if not r.is_success:
-            log.warning(f"J-Quants listed/info 取得失敗 status={r.status_code}")
-            return empty
-        issued_shares: dict = {}
+            log.warning(f"J-Quants /equities/master 取得失敗 status={r.status_code}")
+            return set()
         active_codes: set = set()
-        for item in r.json().get("info", []):
+        for item in r.json().get("data", []):
             code = str(item.get("Code", ""))
-            if not code:
-                continue
-            sec_code = code[:4]
-            active_codes.add(sec_code)
-            shares = item.get("IssuedShares")
-            if shares is not None:
-                issued_shares[sec_code] = float(shares)
-        return {"issued_shares": issued_shares, "active_codes": active_codes}
+            if code:
+                active_codes.add(code[:4])   # J-Quants は5桁コード。先頭4桁が証券コード
+        return active_codes
     except Exception as e:
-        log.warning(f"J-Quants listed/info 例外: {e}")
-        return empty
+        log.warning(f"J-Quants /equities/master 例外: {e}")
+        return set()
 
 
 def _update_issued_shares(db, sec_to_edinet: dict, issued_shares_map: dict) -> int:
     """companies.issued_shares を J-Quants 値で更新し、
     financial_records.issued_shares が NULL の最新レコードにも補完する。
     戻り値: 更新した companies 行数。
+
+    入力元は `/fins/summary` の ShOutFY（collector_disclosures 側で収集・#462）。主経路は
+    XBRL パースで、本関数は NULL のときだけ埋める副経路である点は変わらない。
     """
     updated = 0
     for sec_code, shares in issued_shares_map.items():
@@ -371,10 +387,13 @@ def _update_issued_shares(db, sec_to_edinet: dict, issued_shares_map: dict) -> i
         db.flush()
         # 最新の financial_record で issued_shares が NULL のものを J-Quants 値で補完
         from sqlalchemy import text as _text
+        # エイリアスは `AS` を明示する（SQLite は `UPDATE t alias` を受け付けない）。
+        # listed/info 経路の頃はテストで常に空 map だったためこの SQL は SQLite を通っておらず、
+        # 入力元を /fins/summary へ移した #462 で初めて露見した。
         db.execute(_text("""
-            UPDATE financial_records fr
+            UPDATE financial_records AS fr
             SET issued_shares = c.issued_shares
-            FROM companies c
+            FROM companies AS c
             WHERE fr.edinet_code = c.edinet_code
               AND c.issued_shares IS NOT NULL
               AND fr.issued_shares IS NULL
@@ -413,6 +432,11 @@ async def collect_stock_price_history_jquants(
     today  = date.today()
     _from  = date_from if date_from is not None else (today - timedelta(days=days_back))
     _to    = date_to   if date_to   is not None else today
+    # **エンバーゴ日数を静的に決め打ちして窓を切らない**（#462）。無料プランは直近約12週を
+    # 配信しないが、この値をコード側に固定すると、プランやエンバーゴが変わったときに
+    # **取れるはずのデータを黙って捨てる**（INFO ログは平常時と区別がつかない）＝#438/#461 と
+    # 同型の静かな劣化。代わりに窓は毎回 API から学習する（下の JQuantsOutOfCoverage）。
+    # 追加コストは境界を1日踏む 1リクエスト（20秒）だけで、残りの窓外日は叩かずに飛ばせる。
     span   = (_to - _from).days + 1
     # 土日は J-Quants も空を返すのでスキップして API コール数を削減
     dates = [
@@ -434,19 +458,26 @@ async def collect_stock_price_history_jquants(
     # forbidden: 403 で読み飛ばした日数（Issue #412）
     # no_subscription: 403 のボディが契約失効を明示した日数（#461）
     # aborted_days: 連続 403 の早期打ち切りで**叩かずに飛ばした**日数（#461）
-    fetch_stats = {"forbidden": 0, "no_subscription": 0, "aborted_days": 0}
+    # out_of_coverage: 契約窓の外側（400＋covers 文言）としてスキップした日数（#462）。
+    #   403 とは別集合＝**平常運転**（無料プランのエンバーゴ・遡及上限）であり異常ではない。
+    fetch_stats = {"forbidden": 0, "no_subscription": 0, "aborted_days": 0,
+                   "out_of_coverage": 0}
 
     async def _jquants_batch_gen(session):
         completed = 0
         last_req_time: float = 0.0
         consecutive_forbidden = 0
+        # 400 のボディから学習した契約窓（#462）。1日でも窓外を踏めば以降は HTTP を投げずに
+        # 判定できるため、エンバーゴ日数を静的に持たなくても空振りは1リクエストで済む。
+        cover_from: Optional[str] = None
+        cover_to: Optional[str] = None
         for date_str in dates:
             # 連続 403 が続いたら残りを叩かない（#461）。失効・権限喪失は全日 403 になり、
             # 1日ごとに JQUANTS_RATE_SLEEP=20秒 を待つため窓の長さぶん丸ごと捨てることになる。
             if consecutive_forbidden >= JQUANTS_MAX_CONSECUTIVE_FORBIDDEN:
                 fetch_stats["aborted_days"] = total - completed
                 reason = ("契約失効（No active subscription）"
-                          if fetch_stats["no_subscription"] else "カバー範囲外が連続")
+                          if fetch_stats["no_subscription"] else "403が連続（要 URL/権限確認）")
                 log.warning(
                     f"J-Quants: {consecutive_forbidden}日連続で403のため残り "
                     f"{fetch_stats['aborted_days']}日の取得を打ち切る（{reason}）"
@@ -463,6 +494,17 @@ async def collect_stock_price_history_jquants(
                 yield None   # cancellation sentinel → driver returns early
                 return
 
+            # 学習済みの契約窓の外なら叩かない（#462）。**sleep も払わない**のがこの分岐の目的で、
+            # 叩いてから 400 を受けると 1日あたり JQUANTS_RATE_SLEEP を捨てることになる。
+            if cover_from and not (cover_from <= date_str <= cover_to):
+                fetch_stats["out_of_coverage"] += 1
+                completed += 1
+                if on_progress:
+                    on_progress(completed, total,
+                                f"[{completed}/{total}] {date_str} スキップ（契約窓外）")
+                yield []
+                continue
+
             # リクエスト開始間隔を最低 JQUANTS_RATE_SLEEP 秒に保つ（高速な祝日レスポンス後も適用）
             if completed > 0:
                 elapsed = asyncio.get_event_loop().time() - last_req_time
@@ -473,25 +515,43 @@ async def collect_stock_price_history_jquants(
             last_req_time = asyncio.get_event_loop().time()
             try:
                 quote_rows = await _jquants_fetch_date(session, api_key, date_str)
-            except JQuantsCoverageError as e:
-                # 無料プランのカバレッジ境界（例: days_back=730 の下限日）は 403 を返す。
-                # 例外を伝播させると収集全体が落ちるため欠測扱いで継続する（Issue #412）。
+            except JQuantsOutOfCoverage as e:
+                # 契約窓の外側（400＋covers 文言）＝平常運転（#462）。窓を学習して以降は
+                # 叩かずに飛ばす。例外を伝播させると 730日窓の下限日で必ず落ちる。
+                if cover_from is None:
+                    cover_from, cover_to = e.cover_from, e.cover_to
+                    log.info(
+                        f"J-Quants の契約カバレッジ窓を検出: {cover_from} 〜 {cover_to}"
+                        f"（{date_str} が窓外）。以降の窓外の日付はリクエストせずスキップする"
+                    )
+                fetch_stats["out_of_coverage"] += 1
+                completed += 1
+                if on_progress:
+                    on_progress(completed, total,
+                                f"[{completed}/{total}] {date_str} スキップ（契約窓外）")
+                yield []
+                continue
+            except JQuantsAccessError as e:
+                # 403＝契約失効／プラン対象外／URL 不在のいずれか（#462）。**カバレッジ境界は
+                # ここに来ない**（境界は 400）。例外を伝播させると収集全体が落ちるため欠測扱いで
+                # 継続し、連続したら上の分岐で打ち切る（Issue #412・#461）。
                 fetch_stats["forbidden"] += 1
                 consecutive_forbidden += 1
                 completed += 1
                 if e.no_subscription:
-                    # 契約失効はカバレッジ境界と別物＝**平常運転と読み違えない文言で出す**（#461）
+                    # 契約失効は他の 403 と別物＝**平常運転と読み違えない文言で出す**（#461）
                     fetch_stats["no_subscription"] += 1
                     log.error(
                         f"J-Quants 403: {date_str} — 契約が有効でない"
-                        f"（No active subscription）。カバー範囲外ではなく購読状態の問題"
+                        f"（No active subscription）。カバレッジではなく購読状態の問題"
                     )
                 else:
-                    log.warning(f"J-Quants 403: {date_str} をカバー範囲外としてスキップ")
+                    log.warning(
+                        f"J-Quants 403: {date_str} をスキップ（reason={e.reason}）: {e.message}"
+                    )
                 if on_progress:
                     on_progress(completed, total,
-                                f"[{completed}/{total}] {date_str} スキップ（403 "
-                                f"{'契約失効' if e.no_subscription else 'カバー範囲外'}）")
+                                f"[{completed}/{total}] {date_str} スキップ（403 {e.reason}）")
                 yield []
                 continue
             consecutive_forbidden = 0
@@ -544,54 +604,50 @@ async def collect_stock_price_history_jquants(
 
     async with httpx.AsyncClient(timeout=60) as session:
         cancelled, upserted_total = await _price_collection_driver(db, _jquants_batch_gen(session))
-        # 価格収集と同じセッションで上場銘柄情報（発行済株式数・現在の上場銘柄集合）も取得（API キー共用）
-        listed_info = await _fetch_jquants_listed_info(session, api_key)
+        # 価格収集と同じセッションで現在の上場銘柄集合も取得（API キー共用）
+        active_codes = await _fetch_jquants_equity_master(session, api_key)
 
-    # 403 の切り分け（Issue #412 → #425 で再設計 → #461 で失効を分離）:
-    # #412 は「全日程 403 かつ listed/info も失敗ならキー失効とみなし中断」していた。#425 は
-    # これを「`/markets/listed/info` は無料プランで常に 403」と解釈して撤去したが、**2026-08-07
-    # の実測でその解釈は誤りと判明**——同エンドポイントは
-    # `{"message": "The requested endpoint does not exist..."}` を返しており、**プランの制約では
-    # なく v2 に存在しない URL** だった（正しい URL の確定は契約復旧後・#461）。いずれにせよ
-    # active_codes は常に空で条件は `forbidden == total` に退化するため、#425 の判断
-    # （J-Quants の失敗で例外を投げない）はそのまま維持する。J-Quants（収集元A）の失敗が、
-    # 同じキーに依存しない Yahoo ギャップ補完（収集元B・株価鮮度の実質唯一の担い手）まで
-    # 巻き添えでブロックするのは誤り。例外は投げず結果で返し、呼び出し側が継続可否を判断する。
+    # 403 の切り分け（#412 → #425 で再設計 → #461 で失効を分離 → #462 で境界と分離）:
+    # **403 はカバレッジ境界を意味しない**。契約窓の外側は 400（`JQuantsOutOfCoverage`）で、
+    # ここに来る 403 は契約失効／プラン対象外／URL 不在のいずれか＝日付を変えても直らない。
+    # #412 / #425 が「403＝カバー範囲外」と読んだ観測は、実際には契約失効だった（#461）。
     #
-    # **失効は「カバー範囲外」と別文言で出す**（#461）。両者を同じ警告に潰していたため、
-    # 契約が切れた 2026-08 も「エンバーゴ内なら正常」と読めるログが毎晩流れ続けていた。
+    # J-Quants（収集元A）の失敗で例外を投げない方針は #425 のまま維持する。同じキーに依存
+    # しない Yahoo ギャップ補完（収集元B・株価鮮度の実質唯一の担い手）まで巻き添えで
+    # ブロックするのは誤りだからで、継続可否は呼び出し側が結果を見て決める。
     attempted = fetch_stats["forbidden"] + fetch_stats["aborted_days"]
     all_forbidden = bool(total) and attempted == total
+    if fetch_stats["out_of_coverage"]:
+        # 平常運転（無料プランのエンバーゴ・遡及上限）なので INFO。403 とは別集計にする（#462）
+        log.info(
+            f"J-Quants: {fetch_stats['out_of_coverage']}/{total}日を契約窓の外側としてスキップ"
+        )
     if fetch_stats["forbidden"]:
         log.warning(
             f"J-Quants 403: {fetch_stats['forbidden']}/{total}日をスキップ"
             + (f"（うち契約失効 {fetch_stats['no_subscription']}日）"
-               if fetch_stats["no_subscription"] else "（カバー範囲外）")
+               if fetch_stats["no_subscription"] else "")
             + (f"・連続403で残り {fetch_stats['aborted_days']}日を打ち切り"
                if fetch_stats["aborted_days"] else "")
         )
         if fetch_stats["no_subscription"]:
             log.error(
                 "J-Quants の契約が有効ではありません（No active subscription）。"
-                "カバー範囲外の 403 ではなく購読状態の問題で、**日付を変えても取得できません**。"
-                "株価鮮度は Yahoo ギャップ補完が維持しますが、issued_shares / 上場状態同期 /"
-                "会社予想開示は止まります（Issue #461）"
+                "**日付を変えても取得できません**。株価鮮度は Yahoo ギャップ補完が維持しますが、"
+                "上場状態同期 / 会社予想開示（＝issued_shares 補完）は止まります（Issue #461）"
             )
         elif all_forbidden and not cancelled:
             log.error(
-                f"J-Quants が試行した全 {attempted} 日で 403 を返しました。"
-                "無料プランの84日エンバーゴ内の窓を叩いた場合は正常ですが、"
-                "エンバーゴ外の日付を含むならキー失効/権限喪失の可能性があります（Issue #425）"
+                f"J-Quants が試行した全 {attempted} 日で 403 を返しました。403 は契約失効・"
+                "プラン対象外・URL 不在のいずれかで、カバレッジ境界ではありません"
+                "（境界は 400）。キーとエンドポイント URL を確認してください（Issue #462）"
             )
-
-    if listed_info["issued_shares"]:
-        _update_issued_shares(db, sec_to_edinet, listed_info["issued_shares"])
 
     # 現在の上場銘柄集合と companies.is_active を同期（廃止銘柄検知・Issue #315）。
     # 取得失敗時（active_codes 空）は同期をスキップし、既存の is_active を誤って
     # 全件 delisted 化しないようにする。
-    if listed_info["active_codes"]:
-        sync_result = sync_active_status(db, listed_info["active_codes"])
+    if active_codes:
+        sync_result = sync_active_status(db, active_codes)
         if sync_result["delisted"] or sync_result["reactivated"]:
             log.info(
                 f"上場状態同期: 新規delisted={sync_result['delisted']}件, "
@@ -602,13 +658,15 @@ async def collect_stock_price_history_jquants(
         return {"cancelled": True, "upserted": upserted_total,
                 "forbidden": fetch_stats["forbidden"], "all_forbidden": all_forbidden,
                 "no_subscription": fetch_stats["no_subscription"],
-                "aborted_days": fetch_stats["aborted_days"]}
+                "aborted_days": fetch_stats["aborted_days"],
+                "out_of_coverage": fetch_stats["out_of_coverage"]}
     if on_progress:
         on_progress(total, total, f"[完了] {total}日処理・{upserted_total}件追加/更新")
     return {"cancelled": False, "upserted": upserted_total, "days": total,
             "forbidden": fetch_stats["forbidden"], "all_forbidden": all_forbidden,
             "no_subscription": fetch_stats["no_subscription"],
-            "aborted_days": fetch_stats["aborted_days"]}
+            "aborted_days": fetch_stats["aborted_days"],
+            "out_of_coverage": fetch_stats["out_of_coverage"]}
 
 
 def _update_market_data_latest(db) -> int:

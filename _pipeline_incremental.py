@@ -118,7 +118,10 @@ async def main():
             )
             log(f"  J-Quants catchup ({_catchup_from}〜{_catchup_to}): "
                 f"{catchup_result.get('upserted', 0)}件 upsert"
-                + ("（全日403＝カバー範囲外）" if catchup_result.get("all_forbidden") else ""))
+                + (f"・契約窓外 {catchup_result['out_of_coverage']}日"
+                   if catchup_result.get("out_of_coverage") else "")
+                # 403 は契約失効／プラン対象外／URL 不在。**カバレッジ境界ではない**（#462）
+                + ("（全日403＝要確認）" if catchup_result.get("all_forbidden") else ""))
         except Exception as e:
             log(f"  J-Quants catchup 失敗（継続します）: {type(e).__name__}: {e}")
 

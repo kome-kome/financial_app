@@ -591,13 +591,27 @@ class TestJquantsFetchDate:
         client = _client(_const(httpx.Response(400)))
         assert asyncio.run(_jquants_fetch_date(client, "key", "2023-01-01")) == []
 
-    def test_403_raises_coverage_error(self):
-        """403（カバレッジ境界 or キー無効）は raise_for_status ではなく
-        JQuantsCoverageError で返し、呼び出し側に切り分けさせる（Issue #412）。"""
-        from collector_prices import JQuantsCoverageError
-        client = _client(_const(httpx.Response(403)))
-        with pytest.raises(JQuantsCoverageError):
-            asyncio.run(_jquants_fetch_date(client, "key", "2024-08-01"))
+    def test_403_raises_access_error_with_reason(self):
+        """403 は raise_for_status ではなく JQuantsAccessError で返し、
+        ボディから理由を分類して呼び出し側に切り分けさせる（#412・#461・#462）。
+
+        **カバレッジ境界はここに来ない**（境界は 400・#462 実測）。403 は契約失効・
+        プラン対象外・URL 不在のいずれかで、どれも日付を変えても直らない。
+        """
+        from collector_prices import JQuantsAccessError
+
+        cases = [
+            ('{"message": "No active subscription found."}', "no_subscription"),
+            ('{"message": "This API is not available on your subscription."}', "plan_restricted"),
+            ('{"message": "The requested endpoint does not exist."}', "endpoint_missing"),
+            ("", "unknown"),
+        ]
+        for body, expected in cases:
+            client = _client(_const(httpx.Response(403, text=body)))
+            with pytest.raises(JQuantsAccessError) as ei:
+                asyncio.run(_jquants_fetch_date(client, "key", "2024-08-01"))
+            assert ei.value.reason == expected
+            assert ei.value.no_subscription is (expected == "no_subscription")
 
     def test_pagination(self, monkeypatch):
         async def _noop(*a, **k):

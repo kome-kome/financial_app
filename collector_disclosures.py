@@ -17,9 +17,10 @@ from sqlalchemy import func as sqla_func
 from collector_utils import (
     log, JQUANTS_SUMMARY_ENDPOINT, JQUANTS_RATE_SLEEP,
     JQUANTS_BACKFILL_DAYS, JQUANTS_DISCLOSURE_DELAY_DAYS,
-    JQUANTS_NO_SUBSCRIPTION_MARK,
-    JQuantsCoverageError,
+    classify_jquants_forbidden, parse_jquants_coverage,
+    JQuantsAccessError, JQuantsOutOfCoverage,
 )
+from collector_prices import _update_issued_shares
 from database import Company, StatementDisclosure, upsert_statement_disclosures
 
 
@@ -35,8 +36,9 @@ def _num(v) -> Optional[float]:
 
 async def _jquants_fetch_summary_date(session: httpx.AsyncClient, api_key: str, date_str: str) -> list:
     """date_str (YYYY-MM-DD) の全銘柄・決算短信サマリーを返す（ページネーション対応）。
-    400 = 非営業日または配信遅延・遡及期間外 → 空リストで正常終了。
-    403 = カバレッジ外またはキー無効 → JQuantsCoverageError を送出（Issue #412）。
+    400 = 非営業日 → 空リストで正常終了。ボディにカバレッジ窓の文言があれば契約窓の外側
+          → JQuantsOutOfCoverage を送出（#462）。
+    403 = 契約失効／プラン対象外／URL 不在 → JQuantsAccessError を送出（#412・#461・#462）。
     429 = レート制限 → 90秒待って1回だけ再試行。それでも429 なら skip。
     """
     headers = {"x-api-key": api_key}
@@ -55,12 +57,15 @@ async def _jquants_fetch_summary_date(session: httpx.AsyncClient, api_key: str, 
                 log.error(f"J-Quants 429: {date_str} → 再試行も429、スキップ")
                 return []
         if r.status_code == 403:
-            # 株価側（collector_prices）と同じく契約失効を本文で区別する（#461）。
-            body = (r.text or "").lower()
-            raise JQuantsCoverageError(
-                date_str, no_subscription=JQUANTS_NO_SUBSCRIPTION_MARK in body)
+            # 株価側（collector_prices）と同じ3分類（#461・#462）。
+            body = r.text or ""
+            raise JQuantsAccessError(
+                date_str, reason=classify_jquants_forbidden(body), message=body[:200])
         if r.status_code in (400, 404):
-            break
+            cover_from, cover_to = parse_jquants_coverage(r.text or "")
+            if cover_from:
+                raise JQuantsOutOfCoverage(date_str, cover_from, cover_to)
+            break   # 非営業日
         r.raise_for_status()
         data = r.json()
         rows.extend(data.get("data", []))
@@ -110,6 +115,10 @@ def _row_to_record(row: dict, sec_to_edinet: dict) -> Optional[dict]:
         "nxf_odp": _num(row.get("NxFOdP")),
         "nxf_np": _num(row.get("NxFNp")),   # J-Quants 側の実フィールド名の大文字小文字表記（"NxFNp"）に合わせる
         "nxf_eps": _num(row.get("NxFEPS")),
+        # 期末発行済株式数（自己株含む）・自己株式数（#462）。v2 では `/equities/master` が
+        # 株式数を持たないため、issued_shares の J-Quants 経路はここが唯一の入口になった。
+        "sh_out_fy": _num(row.get("ShOutFY")),
+        "tr_sh_fy": _num(row.get("TrShFY")),
     }
 
 
@@ -162,15 +171,28 @@ async def collect_statement_disclosures(
 
     upserted_total = 0
     completed = 0
-    forbidden = 0        # 403（カバー範囲外）で読み飛ばした日数・Issue #412
+    forbidden = 0         # 403（契約失効／プラン対象外／URL 不在）で読み飛ばした日数・#412/#462
+    out_of_coverage = 0   # 400＋covers 文言＝契約窓の外側（平常運転）・#462
+    shares_map: dict = {}  # sec_code → ShOutFY（新しい開示ほど後勝ち・#462）
     last_req_time = 0.0
+    cover_from = cover_to = None
     async with httpx.AsyncClient(timeout=60) as session:
         for date_str in dates:
             if cancel_check and cancel_check():
                 if on_progress:
                     on_progress(completed, total, f"[停止] ユーザーによる停止（{completed}/{total}日処理済み）")
                 db.commit()
-                return {"cancelled": True, "upserted": upserted_total, "forbidden": forbidden}
+                return {"cancelled": True, "upserted": upserted_total, "forbidden": forbidden,
+                        "out_of_coverage": out_of_coverage}
+
+            # 学習済みの契約窓の外なら叩かない（#462・sleep も払わない）
+            if cover_from and not (cover_from <= date_str <= cover_to):
+                out_of_coverage += 1
+                completed += 1
+                if on_progress:
+                    on_progress(completed, total,
+                                f"[{completed}/{total}] {date_str} スキップ（契約窓外）")
+                continue
 
             if completed > 0:
                 elapsed = asyncio.get_event_loop().time() - last_req_time
@@ -181,14 +203,28 @@ async def collect_statement_disclosures(
 
             try:
                 raw_rows = await _jquants_fetch_summary_date(session, api_key, date_str)
-            except JQuantsCoverageError:
-                # 遡及境界（JQUANTS_BACKFILL_DAYS の下限日付近）は 403。欠測扱いで継続する（Issue #412）
-                forbidden += 1
+            except JQuantsOutOfCoverage as e:
+                # 契約窓の外側（400＋covers 文言）＝平常運転（#462）。窓を学習して以降は叩かない。
+                if cover_from is None:
+                    cover_from, cover_to = e.cover_from, e.cover_to
+                    log.info(
+                        f"J-Quants の契約カバレッジ窓を検出: {cover_from} 〜 {cover_to}"
+                        f"（{date_str} が窓外）。以降の窓外の日付はリクエストせずスキップする"
+                    )
+                out_of_coverage += 1
                 completed += 1
-                log.warning(f"J-Quants 403: {date_str} をカバー範囲外としてスキップ")
                 if on_progress:
                     on_progress(completed, total,
-                                f"[{completed}/{total}] {date_str} スキップ（403 カバー範囲外）")
+                                f"[{completed}/{total}] {date_str} スキップ（契約窓外）")
+                continue
+            except JQuantsAccessError as e:
+                # 403＝契約失効／プラン対象外／URL 不在。**カバレッジ境界はここに来ない**（#462）
+                forbidden += 1
+                completed += 1
+                log.warning(f"J-Quants 403: {date_str} をスキップ（reason={e.reason}）: {e.message}")
+                if on_progress:
+                    on_progress(completed, total,
+                                f"[{completed}/{total}] {date_str} スキップ（403 {e.reason}）")
                 continue
             completed += 1
 
@@ -201,20 +237,34 @@ async def collect_statement_disclosures(
             if records:
                 upserted_total += upsert_statement_disclosures(db, records)
                 db.commit()
+                for rec in records:
+                    # 日付は昇順に回るので、後の開示ほど新しい＝後勝ちで最新値が残る
+                    if rec.get("sh_out_fy"):
+                        shares_map[rec["sec_code"]] = rec["sh_out_fy"]
 
             if on_progress:
                 on_progress(completed, total, f"[{completed}/{total}] {date_str} {len(records)}件")
 
+    if out_of_coverage:
+        log.info(f"J-Quants: {out_of_coverage}/{total}日を契約窓の外側としてスキップ")
     if forbidden:
-        log.warning(f"J-Quants 403（カバー範囲外）: {forbidden}/{total}日をスキップ")
-        # 全日程 403 は境界の欠測では説明できない（範囲は必ず遅延境界までの最近日を含む）
-        # ＝キー失効・権限喪失の疑いとして中断する（Issue #412）
+        log.warning(f"J-Quants 403: {forbidden}/{total}日をスキップ")
+        # 全日程 403 は「窓外」では説明できない（窓外は 400・#462）＝契約失効・プラン対象外・
+        # URL 不在のいずれかで、日付を変えても直らないため中断する（#412 の判断を維持）。
         if forbidden == total:
             raise ValueError(
-                f"J-Quants /fins/summary が全 {total} 日で 403 を返しました。"
-                "APIキー失効または権限喪失の可能性があるため中断します（Issue #412）"
+                f"J-Quants /fins/summary が全 {total} 日で 403 を返しました。403 はカバレッジ"
+                "境界ではなく（境界は 400）、契約失効・プラン対象外・URL 不在のいずれかです。"
+                "契約状態とエンドポイント URL を確認してください（Issue #462）"
             )
+
+    # 発行済株式数の補完（#462）。v2 の `/equities/master` は株式数を持たないため、
+    # J-Quants 経路はこの ShOutFY が唯一の入口。主経路の XBRL が埋めた値は上書きされる
+    # （`_update_issued_shares` は companies を更新し、financial_records は NULL のみ補完）。
+    if shares_map:
+        _update_issued_shares(db, sec_to_edinet, shares_map)
 
     if on_progress:
         on_progress(total, total, f"[完了] {total}日処理・{upserted_total}件追加/更新")
-    return {"cancelled": False, "upserted": upserted_total, "days": total, "forbidden": forbidden}
+    return {"cancelled": False, "upserted": upserted_total, "days": total,
+            "forbidden": forbidden, "out_of_coverage": out_of_coverage}
