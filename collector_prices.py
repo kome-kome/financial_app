@@ -13,7 +13,7 @@ from urllib.parse import quote as urlquote  # fetch_yahoo_history のローカ�
 import httpx
 import openpyxl
 import pandas as pd
-from sqlalchemy import func as sqla_func
+from sqlalchemy import func as sqla_func, text as sqla_text
 from sqlalchemy.exc import SQLAlchemyError
 
 from database import (
@@ -709,56 +709,141 @@ def _update_market_data_latest(db) -> int:
     valid_ecs = [ec for ec, price in latest_price_rows if price and price > 0]
     latest_fin_by_ec = _fetch_latest_fin_by_ec(db, valid_ecs)
 
-    updated = 0
+    # point_in_time 経路と同じく一括更新にする（#464）。夜間差分は約4,400社＝往復4,400回で、
+    # GHA から回すと往復レイテンシだけで十数分を消費していた（#423 のチェーン所要に直撃）。
+    pending: dict = {}
     for edinet_code, price in latest_price_rows:
         if price is None or price <= 0:
             continue
         latest = latest_fin_by_ec.get(edinet_code)
         if not latest:
             continue
-        _apply_price_to_record(latest, price)
-        updated += 1
-        if updated % PRICE_COMMIT_BATCH == 0:
-            db.commit()
+        pending[latest.id] = _compute_market_values(
+            price, latest.pl_eps, latest.bs_bps, latest.issued_shares,
+            latest.bs_total_equity, latest.dps)
 
-    db.commit()
-    log.info(f"update_market_data_from_history: {updated}社を更新")
-    return updated
+    _bulk_apply_market_values(db, pending)
+    log.info(f"update_market_data_from_history: {len(pending)}社を更新")
+    return len(pending)
+
+
+def _bulk_apply_market_values(db, mappings_by_id: dict) -> None:
+    """{id: {列: 値}} を financial_records へ一括反映する（#464）。
+
+    ORM 属性代入 + commit は**ダーティ1件につき UPDATE 1文**＝件数ぶんの往復になり、
+    実行場所のレイテンシに比例する（GHA↔Supabase で 42,289件が143.1分）。
+
+    **`bulk_update_mappings` では解決しない**。psycopg2 の `executemany_mode` 既定
+    （`values_only`）が `execute_values` で束ねるのは INSERT だけで、UPDATE は
+    `cursor.executemany()` ＝1行1往復のまま。ここでは `UPDATE ... FROM (VALUES ...)` を
+    1文組み立て、**チャンクあたり1往復**にする。
+
+    列の集合は行ごとに違う（per/pbr/market_cap/div_yield は計算できないと落ちる）ので、
+    **全行を同じ列集合に揃えてから**渡す。欠けている列は「更新しない」ではなく
+    **DB の現在値で埋め直す**（既存値を NULL で潰さないため）。
+    """
+    if not mappings_by_id:
+        return
+    cols = ("stock_price", "per", "pbr", "market_cap", "div_yield")
+    # 計算できなかった列は現在値で埋める（列集合を揃えるため・値は実質不変）
+    current = {
+        r[0]: r[1:] for r in db.query(
+            FinancialRecord.id, FinancialRecord.stock_price, FinancialRecord.per,
+            FinancialRecord.pbr, FinancialRecord.market_cap, FinancialRecord.div_yield
+        ).filter(FinancialRecord.id.in_(list(mappings_by_id.keys()))).all()
+    }
+    payload = []
+    for rec_id, vals in mappings_by_id.items():
+        cur = current.get(rec_id)
+        if cur is None:
+            continue
+        payload.append((rec_id, *[vals[c] if c in vals else cur[i]
+                                  for i, c in enumerate(cols)]))
+
+    # 値表は `SELECT ... UNION ALL SELECT ...` で組む。Postgres なら
+    # `FROM (VALUES ...) AS v(id, ...)` の方が速いが、**SQLite は VALUES への列別名を
+    # 受け付けない**。方言で SQL を分岐させると、テスト（SQLite）が本番（Postgres）の文を
+    # 一度も実行しないまま通ってしまう——`_update_issued_shares` の `UPDATE ... FROM` が
+    # まさにそれで、エイリアス構文の誤りが長期間検出されなかった（#462）。同じ1文を両方言で
+    # 実行できる形に揃える方を優先する。
+    # **型を CAST で明示する**。psycopg2 はパラメータをクライアント側で literal 展開するため、
+    # あるチャンクの1列が全行 NULL だと Postgres がその列を text と推論し
+    # `column "pbr" is of type double precision but expression is of type text` で落ちる。
+    # 値が1つでも混ざれば通るので**データ内容次第で落ちる**（チャンク境界で再現性も変わる）
+    # 不安定な失敗になる。SQLite も CAST の型名を受け付ける（affinity 解釈）ので共通で書ける。
+    keys = ("i", "sp", "pe", "pb", "mc", "dy")
+    types = ("integer",) + ("double precision",) * len(cols)
+    set_clause = ", ".join(f"{c} = v.{c}" for c in cols)
+    for i in range(0, len(payload), BULK_UPDATE_CHUNK):
+        chunk = payload[i:i + BULK_UPDATE_CHUNK]
+        selects, params = [], {}
+        for j, row in enumerate(chunk):
+            # 先頭行だけ列名を付ける（UNION ALL は先頭 SELECT の列名を採用する）
+            cells = [f"CAST(:{k}{j} AS {t})" for k, t in zip(keys, types)]
+            if j == 0:
+                cells = [f"{c} AS {name}" for c, name in zip(cells, ("id",) + cols)]
+            selects.append("SELECT " + ", ".join(cells))
+            params.update({f"{k}{j}": v for k, v in zip(keys, row)})
+        db.execute(sqla_text(
+            f"UPDATE financial_records AS fr SET {set_clause} "
+            f"FROM ({' UNION ALL '.join(selects)}) AS v WHERE fr.id = v.id"
+        ), params)
+        db.commit()
 
 
 def _update_market_data_point_in_time(db) -> int:
     """point_in_time=True: 全財務レコードを period_end 近傍の週次株価で更新し、
     最新レコードは現在株価で上書きする。"""
 
-    # ── point_in_time=True: 全レコードを period_end 近傍の株価で更新 ─────────
-    # financial_records を先にロードし、対象会社×日付範囲でフィルタした
-    # weekly 行だけを取得する（全件メモリ展開を回避）。
-    all_records = db.query(FinancialRecord).all()
+    # 必要な列だけを読む（#464）。以前は `db.query(FinancialRecord).all()` で 50,478行を
+    # 全列 ORM ロード（27.3MB）していたが、実際に使うのは読み9列・書き5列だけ。
+    # 併せて更新も一括化したため、ORM オブジェクトは一切作らない。
+    rec_rows = db.query(
+        FinancialRecord.id, FinancialRecord.edinet_code, FinancialRecord.year,
+        FinancialRecord.period_type, FinancialRecord.period_end,
+        FinancialRecord.pl_eps, FinancialRecord.bs_bps, FinancialRecord.issued_shares,
+        FinancialRecord.bs_total_equity, FinancialRecord.dps,
+    ).all()
 
     # 最新レコード（year最大）を社別にインデックス（最後の上書きステップで使用）。
     # 対象は **annual のみ**（#421）。H1 を混ぜると同一 year で先着順に決まってしまい、
     # 現在株価の上書きが H1 行へ吸われて annual の per/pbr が凍結する
     # （`financial_metrics` VIEW は period_type='annual' しか見ない）。
     # なお近傍探索そのものは H1 行にも適用する（下の dated_records は絞らない）。
+    #
+    # 順位付けは **(year, period_end) の辞書順** で行う（#464）。year だけで比較すると、
+    # 同一 year の annual が複数ある社（本番実測: 58組・うち12社は最大 year で同点）で
+    # 勝者が `db.query(...).all()` の行順に依存する。行順は ORDER BY が無い限り保証されず、
+    # **実行のたびに「最新株価で上書きされる行」が入れ替わる**（同一データで2回走らせて
+    # checksum が動くことで発覚）。`_fetch_latest_fin_by_ec` は
+    # `ROW_NUMBER() OVER (ORDER BY year DESC, period_end DESC)` で既にこの規則を使っており、
+    # 2経路で規則が食い違っていた。UniqueConstraint(edinet_code, year, period_end,
+    # period_type) があるので (year, period_end) まで見れば一意に決まる。
+    def _rank(r):
+        return (r.year or 0, r.period_end or date.min)
+
     latest_by_ec: dict = {}
-    for rec in all_records:
-        if rec.period_type != "annual":
+    for r in rec_rows:
+        if r.period_type != "annual":
             continue
-        ec = rec.edinet_code
-        if ec not in latest_by_ec or (rec.year or 0) > (latest_by_ec[ec].year or 0):
-            latest_by_ec[ec] = rec
+        cur = latest_by_ec.get(r.edinet_code)
+        if cur is None or _rank(r) > _rank(cur):
+            latest_by_ec[r.edinet_code] = r
 
     # period_end を持つレコードのみが近傍探索の対象
-    dated_records = [r for r in all_records if r.period_end]
+    dated_records = [r for r in rec_rows if r.period_end]
     if not dated_records:
         log.info("update_market_data_from_history(point_in_time): period_end ありレコードが空のためスキップ")
         # 最新レコードへの現在株価上書きだけ実施（期間探索なし）
+        only_latest: dict = {}
         for ec, info in latest_prices(db, list(latest_by_ec.keys())).items():
             latest_price = info.get("price")
             if not latest_price or latest_price <= 0:
                 continue
-            _apply_price_to_record(latest_by_ec[ec], latest_price)
-        db.commit()
+            r = latest_by_ec[ec]
+            only_latest[r.id] = _compute_market_values(
+                latest_price, r.pl_eps, r.bs_bps, r.issued_shares, r.bs_total_equity, r.dps)
+        _bulk_apply_market_values(db, only_latest)
         return 0
 
     # 対象会社・日付範囲を算出して weekly を必要範囲だけロード
@@ -797,38 +882,37 @@ def _update_market_data_point_in_time(db) -> int:
     for ec in history:
         history[ec].sort()  # trade_date の昇順
 
+    # id → 書き込む列の dict。**最後に1回だけ**一括反映する（#464）。
+    # 途中コミットをやめたのは、per/pbr の途中状態を他プロセスへ見せないため＋往復削減のため。
+    pending: dict = {}
     updated = 0
-    for rec in dated_records:
-        prices = history.get(rec.edinet_code)
-        if not prices:
+    # 銘柄ごとに1回だけ日付配列を作る（旧実装はレコード毎に dates/price_dict を作り直していた）
+    hist_idx: dict = {ec: ([p[0] for p in ps], dict(ps)) for ec, ps in history.items()}
+
+    for r in dated_records:
+        idx = hist_idx.get(r.edinet_code)
+        if not idx:
             continue
-
-        try:
-            target = rec.period_end
-        except (ValueError, TypeError):
-            continue
-
-        dates = [p[0] for p in prices]
-        price_dict = dict(prices)
-        best_price = _nearest_price(dates, price_dict, target.isoformat(), MAX_GAP_DAYS)
-
+        dates, price_dict = idx
+        best_price = _nearest_price(dates, price_dict, r.period_end.isoformat(), MAX_GAP_DAYS)
         if best_price is None:
             continue
-
-        _apply_price_to_record(rec, best_price)
+        pending[r.id] = _compute_market_values(
+            best_price, r.pl_eps, r.bs_bps, r.issued_shares, r.bs_total_equity, r.dps)
         updated += 1
-        if updated % PRICE_COMMIT_BATCH == 0:
-            db.commit()
 
     # 最新レコードは現在株価で上書き（スクリーニング用）。daily（直近窓）を優先し
     # 無ければ weekly にフォールバックする latest_prices で最新終値を引く。
+    # **period_end 近傍の結果より後に適用する**（後勝ち）＝旧実装の順序を保つ。
     for ec, info in latest_prices(db, list(latest_by_ec.keys())).items():
         latest_price = info.get("price")
         if not latest_price or latest_price <= 0:
             continue
-        _apply_price_to_record(latest_by_ec[ec], latest_price)
+        r = latest_by_ec[ec]
+        pending[r.id] = _compute_market_values(
+            latest_price, r.pl_eps, r.bs_bps, r.issued_shares, r.bs_total_equity, r.dps)
 
-    db.commit()
+    _bulk_apply_market_values(db, pending)
     log.info(f"update_market_data_from_history(point_in_time): {updated}レコードを更新")
     return updated
 
@@ -1157,22 +1241,43 @@ def _nearest_price(sorted_dates: list, price_dict: dict, target_str: str,
     return best_price
 
 
-def _apply_price_to_record(rec, price: float) -> None:
-    """財務レコードに株価・バリュエーション指標を書き込む（内部ヘルパー）"""
-    rec.stock_price = price
-    if rec.pl_eps and rec.pl_eps > 0:
-        rec.per = round(price / rec.pl_eps, 2)
-    if rec.bs_bps and rec.bs_bps > 0:
-        rec.pbr = round(price / rec.bs_bps, 2)
-    _sh = (float(rec.issued_shares) if (rec.issued_shares and rec.issued_shares > 0)
-           else ((rec.bs_total_equity / rec.bs_bps)
-                 if (rec.bs_bps and rec.bs_bps > 0
-                     and rec.bs_total_equity and rec.bs_total_equity > 0)
+def _compute_market_values(price: float, pl_eps, bs_bps, issued_shares,
+                           bs_total_equity, dps) -> dict:
+    """株価とバリュエーション指標を計算して書き込む列だけの dict を返す（#464）。
+
+    ORM オブジェクトに触らない純関数にしてあるのは、**一括更新（bulk_update_mappings）と
+    ORM 属性代入の両方から同じ計算を使うため**。ロジックを2箇所に置くと、片方だけ直したときに
+    finalize と夜間差分で per/pbr が食い違う。
+
+    指標が計算できない列はキーごと落とす（None を入れて既存値を潰さない）。
+    """
+    vals: dict = {"stock_price": price}
+    if pl_eps and pl_eps > 0:
+        vals["per"] = round(price / pl_eps, 2)
+    if bs_bps and bs_bps > 0:
+        vals["pbr"] = round(price / bs_bps, 2)
+    _sh = (float(issued_shares) if (issued_shares and issued_shares > 0)
+           else ((bs_total_equity / bs_bps)
+                 if (bs_bps and bs_bps > 0 and bs_total_equity and bs_total_equity > 0)
                  else None))
     if _sh:
-        rec.market_cap = round(price * _sh / 1_000_000, 2)
-    if rec.dps and rec.dps > 0 and price > 0:
-        rec.div_yield = round(rec.dps / price * 100, 2)
+        vals["market_cap"] = round(price * _sh / 1_000_000, 2)
+    if dps and dps > 0 and price > 0:
+        vals["div_yield"] = round(dps / price * 100, 2)
+    return vals
+
+
+def _apply_price_to_record(rec, price: float) -> None:
+    """財務レコードに株価・バリュエーション指標を書き込む（内部ヘルパー）。
+
+    ORM 経路用。大量件数では `_compute_market_values` ＋ 一括更新を使うこと（#464）——
+    ORM 属性代入は commit 時に1件1 UPDATE を発行し、往復レイテンシに比例して遅くなる
+    （GHA↔Supabase で 42,289件が143分・ローカル往復 17.4ms なら約12分と、実行場所で10倍変わる）。
+    """
+    for col, val in _compute_market_values(
+            price, rec.pl_eps, rec.bs_bps, rec.issued_shares,
+            rec.bs_total_equity, rec.dps).items():
+        setattr(rec, col, val)
 
 
 def _fetch_latest_fin_by_ec(db, edinet_codes: list) -> dict:
@@ -1202,9 +1307,16 @@ def _fetch_latest_fin_by_ec(db, edinet_codes: list) -> dict:
         .filter(FinancialRecord.period_type == "annual")
         .subquery()
     )
+    # 必要な列だけを読む（#464）。全列 ORM ロードは転送量が無駄なうえ、返した ORM
+    # オブジェクトを呼び出し側が書き換えると commit 時に1件1 UPDATE になる。
     return {
         r.edinet_code: r
-        for r in db.query(FinancialRecord)
+        for r in db.query(
+            FinancialRecord.id, FinancialRecord.edinet_code,
+            FinancialRecord.pl_eps, FinancialRecord.bs_bps,
+            FinancialRecord.issued_shares, FinancialRecord.bs_total_equity,
+            FinancialRecord.dps,
+        )
         .join(subq, (FinancialRecord.id == subq.c.id) & (subq.c.rn == 1))
         .all()
     }

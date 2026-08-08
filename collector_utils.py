@@ -47,6 +47,10 @@ MAX_GAP_DAYS           = 30    # period_end から±30日以内の株価のみ�
 
 # --- バッチ処理間隔（コミット/スリープ/進捗）。N 件ごとに処理を区切る。値は現状維持。---
 PRICE_COMMIT_BATCH            = 200  # 株価レコード更新のコミット間隔
+# financial_records の株価・バリュエーション列を一括更新する単位（#464）。
+# 1件1 UPDATE だと往復レイテンシに比例し、GHA↔Supabase では 42,289件で143分かかっていた。
+# 大きくするほど往復は減るが、1文の失敗で巻き戻る範囲も広がるためこの程度に留める。
+BULK_UPDATE_CHUNK             = 2000
 MASTER_COMMIT_BATCH          = 200  # 企業マスタ保存のコミット間隔
 REPARSE_COMMIT_BATCH         = 100  # XBRL 再解析・CF 補完のコミット間隔
 MARKET_COMMIT_BATCH          = 50   # 市場データ（株価）更新のコミット間隔

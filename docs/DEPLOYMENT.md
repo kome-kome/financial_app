@@ -291,7 +291,9 @@ Render ダッシュボードで管理。
 **可視性**: 現在 **PUBLIC**（Actions 分数は無制限）。Private へ戻すと無料枠 2,000 分/月に収まらず定常運用が破綻する（上表参照）ため、戻す判断をする場合はワークフローの本数・頻度の再設計とセットで行う。secrets は可視性と独立して保護される。
 
 **ジョブ所要時間（設計参考値）**:
-- `full-pipeline.yml` finalize（Phase 3〜5）: **250〜300分**（`timeout-minutes: 355`）。内訳 = 成長率/Zスコア再計算 約2分 ／ マクロ13系列 約27分→系列数に概ね比例（#218 で 9→13・#358 でコモディティ+8＝市場系21系列・#458 で財務省 CSV 1系列＝要再計測。Yahoo 市場系は1コール/系列、MOF は1〜2コール/回のため増分は数十秒で、低頻度ソースの sleep が主因は不変） ／ **Yahoo ギャップ補完 35〜60分（#426 で追加・約4,000社 × `YAHOO_STOCK_RATE_SLEEP=0.5秒`）** ／ J-Quants 株価（`JQUANTS_BACKFILL_DAYS=730`）約163〜200分。`JQUANTS_BACKFILL_DAYS` 変更時は再計算。
+- `full-pipeline.yml` finalize（Phase 3〜5）: **run 31229841870（2026-08-08・`jquants_days=180`）で 255.8分 実測**（`timeout-minutes: 355`）。内訳 = 成長率/Zスコアは VIEW 算出でスキップ ／ **マクロ 6.0分** ／ **Yahoo ギャップ補完 83.3分**（3,708件・4,437社 × `YAHOO_STOCK_RATE_SLEEP=0.5秒`＝差分が1日でも全社ループの固定費がかかる） ／ **J-Quants 23.4分**（130営業日中70日を取得＝235,359件 upsert・60日は契約窓外でリクエストせずスキップ） ／ **`update_market_data_from_history` 143.1分**（42,289レコード）。
+  - **J-Quants は窓長にほぼ比例**（1営業日 = `JQUANTS_RATE_SLEEP` 20秒）。`jquants_days=730` なら窓内約462営業日＝約154分。`full-pipeline.yml` の `jquants_days` 入力で切り替える。
+  - **`update_market_data_from_history` の143.1分は #464 で解消済み**（1件1 UPDATE → `UPDATE ... FROM` の一括更新でローカル約56秒）。GHA では往復回数が 42,394 → 22 に減るため、この項は数分以下になる見込み。**次回の実走で再計測すること。** 解消後は 730日でも合計約250分で 355分に収まり、公式値置換のために専用ワークフローを分ける必要はない。
 - `backfill-stock-history.yml`: 対象＝stock_price NULL かつ period_end 730日超前（初回 約3,800社）。`YAHOO_STOCK_RATE_SLEEP=0.5秒`・1社1リクエストで **約60〜90分**（`timeout-minutes: 150`）。
 - `backfill-weekly-history.yml`（#198）: 対象＝`stock_price_weekly` の最古日が `today-years` より新しい社。`backfill_weekly_history_yahoo` が Yahoo から過去方向に取得し、**1社ごとに `record_prices_batch(trim=True)`** で daily→weekly 再集約しつつ daily を都度 trim する（5年×全社の daily 同時展開を避け Supabase 500MB を超えない）。`YAHOO_STOCK_RATE_SLEEP=0.5秒`で **約60〜150分**（`timeout-minutes: 150`）。
 

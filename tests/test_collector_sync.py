@@ -266,3 +266,182 @@ class TestPeriodTypeIsolation:
         db.refresh(annual); db.refresh(h1)
         assert annual.stock_price == 5000.0    # 最新株価で上書きされる
         assert h1.stock_price == 4000.0        # H1 は自身の period_end 近傍のまま
+
+
+class TestBulkMarketValueUpdate:
+    """株価・バリュエーション列の一括更新（#464）。
+
+    旧実装は ORM 属性代入 + commit で**1件1 UPDATE**を発行しており、往復レイテンシに比例して
+    遅くなっていた（GHA↔Supabase で 42,289件が143.1分）。`bulk_update_mappings` では解決せず
+    （psycopg2 が束ねるのは INSERT だけ）、`UPDATE ... FROM (VALUES ...)` で 50秒になった。
+    """
+
+    def test_compute_market_values_matches_apply_to_record(self, db, make_fin):
+        """純関数版と ORM 版が同じ値を出す（ロジックを二重持ちしていないこと）。"""
+        from collector_prices import _compute_market_values, _apply_price_to_record
+
+        rec = make_fin(pl_eps=100.0, bs_bps=500.0, issued_shares=1.0e6,
+                       bs_total_equity=5.0e8, dps=20.0)
+        db.add(rec)
+        db.commit()
+
+        vals = _compute_market_values(2000.0, rec.pl_eps, rec.bs_bps, rec.issued_shares,
+                                      rec.bs_total_equity, rec.dps)
+        _apply_price_to_record(rec, 2000.0)
+
+        assert vals == {"stock_price": 2000.0, "per": 20.0, "pbr": 4.0,
+                        "market_cap": 2000.0, "div_yield": 1.0}
+        assert (rec.stock_price, rec.per, rec.pbr, rec.market_cap, rec.div_yield) == \
+               (2000.0, 20.0, 4.0, 2000.0, 1.0)
+
+    def test_uncomputable_columns_are_omitted(self):
+        """計算できない指標はキーごと落とす（None で既存値を潰さないため）。"""
+        from collector_prices import _compute_market_values
+
+        vals = _compute_market_values(1000.0, pl_eps=0, bs_bps=None,
+                                      issued_shares=None, bs_total_equity=None, dps=None)
+        assert vals == {"stock_price": 1000.0}
+
+    def test_bulk_apply_writes_values(self, db, make_fin):
+        from collector_prices import _bulk_apply_market_values
+        from database import FinancialRecord
+
+        r1 = make_fin(edinet_code="E00001", pl_eps=100.0, bs_bps=500.0)
+        r2 = make_fin(edinet_code="E00002", pl_eps=50.0, bs_bps=250.0)
+        db.add_all([r1, r2])
+        db.commit()
+
+        _bulk_apply_market_values(db, {
+            r1.id: {"stock_price": 2000.0, "per": 20.0},
+            r2.id: {"stock_price": 500.0, "per": 10.0},
+        })
+        db.expire_all()
+
+        assert db.query(FinancialRecord).filter_by(id=r1.id).one().stock_price == 2000.0
+        assert db.query(FinancialRecord).filter_by(id=r2.id).one().per == 10.0
+
+    def test_bulk_apply_does_not_null_out_missing_columns(self, db, make_fin):
+        """渡されなかった列は現在値のまま（列集合を揃える実装が既存値を潰さないこと）。"""
+        from collector_prices import _bulk_apply_market_values
+        from database import FinancialRecord
+
+        rec = make_fin(edinet_code="E00001", pl_eps=100.0, bs_bps=500.0)
+        rec.per = 33.3
+        rec.market_cap = 777.0
+        db.add(rec)
+        db.commit()
+        rid = rec.id
+
+        # stock_price だけ渡す＝per/market_cap は計算できなかったケース
+        _bulk_apply_market_values(db, {rid: {"stock_price": 1234.0}})
+        db.expire_all()
+
+        got = db.query(FinancialRecord).filter_by(id=rid).one()
+        assert got.stock_price == 1234.0
+        assert got.per == 33.3          # 潰されない
+        assert got.market_cap == 777.0  # 潰されない
+
+    def test_bulk_apply_is_idempotent(self, db, make_fin):
+        from collector_prices import _bulk_apply_market_values
+        from database import FinancialRecord
+
+        rec = make_fin(edinet_code="E00001", pl_eps=100.0, bs_bps=500.0)
+        db.add(rec)
+        db.commit()
+        rid = rec.id
+
+        for _ in range(2):
+            _bulk_apply_market_values(db, {rid: {"stock_price": 1500.0, "pbr": 3.0}})
+        db.expire_all()
+
+        got = db.query(FinancialRecord).filter_by(id=rid).one()
+        assert (got.stock_price, got.pbr) == (1500.0, 3.0)
+
+    def test_bulk_apply_empty_is_noop(self, db):
+        from collector_prices import _bulk_apply_market_values
+        _bulk_apply_market_values(db, {})   # 例外を出さない
+
+    def test_chunk_with_all_null_column_does_not_break_types(self, db, make_fin):
+        """1列が**チャンク内で全行 NULL** でも型不一致で落ちない（#464）。
+
+        psycopg2 はパラメータをクライアント側で literal 展開するため、CAST を付けないと
+        Postgres がその列を text と推論し
+        `column "pbr" is of type double precision but expression is of type text` で落ちる。
+        値が1つでも混ざれば通るので**データ内容とチャンク境界次第で落ちる**不安定な失敗になる。
+        """
+        from collector_prices import _bulk_apply_market_values
+        from database import FinancialRecord
+
+        # bs_bps を持たない＝pbr が計算できない社だけを集めたチャンク
+        r1 = make_fin(edinet_code="E00001", pl_eps=100.0, bs_bps=None)
+        r2 = make_fin(edinet_code="E00002", pl_eps=50.0, bs_bps=None)
+        db.add_all([r1, r2])
+        db.commit()
+
+        _bulk_apply_market_values(db, {
+            r1.id: {"stock_price": 2000.0, "per": 20.0},
+            r2.id: {"stock_price": 500.0, "per": 10.0},
+        })
+        db.expire_all()
+
+        assert db.query(FinancialRecord).filter_by(id=r1.id).one().pbr is None
+        assert db.query(FinancialRecord).filter_by(id=r2.id).one().stock_price == 500.0
+
+
+class TestLatestRecordTieBreak:
+    """同一 year の annual が複数ある社で、上書き対象が行順に依存しないこと（#464）。
+
+    本番実測で 58組の (edinet_code, year) 重複があり、うち12社は最大 year で同点だった。
+    year だけで比較すると勝者が `db.query(...).all()` の行順（ORDER BY 無しでは無保証）に
+    依存し、同一データで2回走らせるだけで「最新株価で上書きされる行」が入れ替わる。
+    `_fetch_latest_fin_by_ec` は ORDER BY year DESC, period_end DESC を使っており、
+    point_in_time 経路だけ規則が違っていた。
+    """
+
+    def test_tie_on_year_resolved_by_period_end(self, db, make_company, make_fin, make_weekly):
+        from collector_prices import update_market_data_from_history
+        from database import FinancialRecord
+
+        db.add(make_company(edinet_code="E00001", sec_code="1001", name="テスト"))
+        # 同一 year=2025 の annual が2件。period_end が新しい方が勝つべき
+        old = make_fin(edinet_code="E00001", year=2025, period_end="2025-03-31",
+                       pl_eps=100.0, bs_bps=500.0)
+        new = make_fin(edinet_code="E00001", year=2025, period_end="2025-09-30",
+                       pl_eps=100.0, bs_bps=500.0)
+        db.add_all([old, new])
+        db.add(make_weekly(edinet_code="E00001", trade_date="2025-10-03", close_last=3000.0))
+        db.commit()
+        old_id, new_id = old.id, new.id
+
+        update_market_data_from_history(db, point_in_time=True)
+        db.expire_all()
+
+        # 最新株価 3000 は period_end が新しい方へ入る
+        assert db.query(FinancialRecord).filter_by(id=new_id).one().stock_price == 3000.0
+        got_old = db.query(FinancialRecord).filter_by(id=old_id).one().stock_price
+        assert got_old != 3000.0 or got_old is None
+
+    def test_repeated_runs_are_stable(self, db, make_company, make_fin, make_weekly):
+        """同点があっても連続実行で結果が動かない（非決定性の回帰テスト）。"""
+        from collector_prices import update_market_data_from_history
+        from database import FinancialRecord
+
+        db.add(make_company(edinet_code="E00001", sec_code="1001", name="テスト"))
+        db.add_all([
+            make_fin(edinet_code="E00001", year=2025, period_end="2025-03-31",
+                     pl_eps=100.0, bs_bps=500.0),
+            make_fin(edinet_code="E00001", year=2025, period_end="2025-09-30",
+                     pl_eps=100.0, bs_bps=500.0),
+        ])
+        db.add(make_weekly(edinet_code="E00001", trade_date="2025-10-03", close_last=3000.0))
+        db.commit()
+
+        snapshots = []
+        for _ in range(3):
+            update_market_data_from_history(db, point_in_time=True)
+            db.expire_all()
+            snapshots.append(sorted(
+                (r.id, r.stock_price, r.per, r.pbr)
+                for r in db.query(FinancialRecord).all()))
+
+        assert snapshots[0] == snapshots[1] == snapshots[2]
