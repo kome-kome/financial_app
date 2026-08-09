@@ -6,7 +6,7 @@ import traceback
 import zipfile
 import asyncio
 from collections import defaultdict
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from typing import Optional, Callable
 
 import httpx
@@ -976,6 +976,24 @@ async def _phase_process_docs(db, client, all_docs: list,
     return skipped, False
 
 
+def latest_settled_edinet_date(now_jst: datetime) -> date:
+    """書類一覧が確定しているとみなせる最新の **JST 日付**（#476）。
+
+    EDINET の提出受付は平日 9:00〜17:15。受付が終わっていれば当日ぶんの一覧は
+    確定しているので、`EDINET_CUTOFF_JST` を過ぎていれば当日を、まだなら前日を返す。
+
+    旧実装は `date.today() - 1日` ＝ **ランナーの UTC 日付**から引いていた。
+    UTC 18:00 起動（JST 翌03:00）では `end` が JST の前々日まで下がり、**受付が
+    終わって確定済みの JST 前日ぶんを丸ごと落としていた**（提出から反映まで約33時間）。
+    定時実行を JST 17:17 へ移した（#476）ことで、当日提出ぶんが同じ晩に入る。
+
+    締切間際の提出が一覧へ載るまでのラグで取りこぼしても、差分収集（`skip_existing`）が
+    翌日に同じ日付を再スキャンするため欠落にはならない。取りすぎ側へ倒してある。
+    """
+    d = now_jst.date()
+    return d if now_jst.time() >= EDINET_CUTOFF_JST else d - timedelta(days=1)
+
+
 async def run_full_collection(db,
                               years_back: int = 5,
                               max_companies: Optional[int] = None,
@@ -992,11 +1010,11 @@ async def run_full_collection(db,
         # Phase 2: 差分スキップ集合の構築
         existing_doc_ids = _phase_build_skip_ids(db, skip_existing, skip_if_raw_exists)
 
-        # Phase 3: 書類一覧スキャン
-        today = date.today()
-        start = date(today.year - years_back, 1, 1)
-        end   = today - timedelta(days=1)
-        log.info(f"書類一覧収集: {start} ~ {end}")
+        # Phase 3: 書類一覧スキャン。範囲は **JST** で決める（#476）。
+        now_jst = datetime.now(JST)
+        start   = date(now_jst.year - years_back, 1, 1)
+        end     = latest_settled_edinet_date(now_jst)
+        log.info(f"書類一覧収集: {start} ~ {end}（JST {now_jst:%Y-%m-%d %H:%M}）")
         if on_progress:
             on_progress(0, 1, f"[書類スキャン開始] {start} ～ {end}（{(end - start).days + 1}日分）")
         all_docs = await collect_doc_ids_for_period(

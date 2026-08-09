@@ -13,7 +13,7 @@ name: "[補完] recommend Fama-MacBeth ファクタープレミアム推定バ�
 # 実行有無・頻度が git 履歴にもワークフロー実行ログにも残らず鮮度の実態が不明だったため、
 # 「Actions 経由で実行した記録が残る」状態にする。
 #
-# 実行頻度: **月次 cron（毎月5日 UTC 12:00 = JST 21:00）＋手動**（Issue #423 子5）。
+# 実行頻度: **月次 cron（毎月5日 UTC 22:00 = JST 翌07:00）＋手動**（Issue #423 子5）。
 # Fama-MacBeth の設計自体が月末スナップショット・52週先リターンの月次 cadence（#271）なので、
 # 推定に効く新情報は「月末が1つ増える」ことだけ＝月次で過不足ない。
 #
@@ -27,12 +27,16 @@ name: "[補完] recommend Fama-MacBeth ファクタープレミアム推定バ�
 #   - 8因子の符号は 37期版と全て一致し、有意なのは z_revenue（t=+3.18→+4.87）のみ。
 #     月次更新で重みが乱高下しないことも同時に確認した。
 #
-# cron 時刻の選定: 毎月1日は tune-hyperparameters（UTC 03:00〜最大 09:00Z）と
-# macro-beta-inference（UTC 11:00〜最大 16:40Z）で埋まっているため**5日**へ置く。
-# UTC 12:00 は daily-incremental（cron 18:00・実起動 19:45Z 前後→チェーン終端 22:37Z）とも
-# vacuum-maintenance（土 23:30Z）とも重ならない。**cron の名目時刻ではなくキュー遅延込みの
-# 実起動時刻で見ること**（#446 の教訓）。月末から5日空けるのは、最終月末スナップショットの
-# 週次バーが daily-incremental で入り切るまでの余裕（1〜2日 daily が落ちても間に合う）。
+# cron 時刻の選定（#476 で 12:00 → 22:00 へ変更）:
+#   - 日付: 毎月1日は macro-beta-inference（UTC 00:00〜最大 05:40Z）と
+#     tune-hyperparameters（UTC 16:30〜最大 22:25Z）で埋まっているため**5日**へ置く。
+#     月末から5日空けるのは、最終月末スナップショットの週次バーが daily-incremental で
+#     入り切るまでの余裕（1〜2日 daily が落ちても間に合う）。
+#   - 時刻: daily-incremental が UTC 18:00 → 08:17 へ移り（#476）、その最悪ケース
+#     （timeout-minutes: 360 ＝ 14:17Z ＋ nightly-scores 70分 ＝ 15:27Z）が旧設定の
+#     12:00 を飲み込むようになった。所要20分なので 22:00 なら週次 VACUUM（土 23:30Z）にも触れない。
+# **cron の名目時刻ではなくキュー遅延込みの実起動時刻で見ること**（#446 の教訓）。
+# 全ワークフローの占有表は docs/DEPLOYMENT.md「cron 占有表」を参照（時刻を動かす前に必ず見る）。
 #
 # 依存: numpy / pandas / scipy / statsmodels（Newey-West HAC 標準誤差）はすべて requirements.txt
 # に含まれるため、macro-beta-inference.yml のような専用 requirements（PyMC）は不要。
@@ -43,7 +47,7 @@ name: "[補完] recommend Fama-MacBeth ファクタープレミアム推定バ�
 
 on:
   schedule:
-    - cron: '0 12 5 * *'   # UTC 12:00 = JST 21:00、毎月5日（day1 の月次2本・daily-incremental と非重複）
+    - cron: '0 22 5 * *'   # UTC 22:00 = JST 翌07:00、毎月5日（→22:20Z）
   workflow_dispatch:
     inputs:
       min_companies_per_period:

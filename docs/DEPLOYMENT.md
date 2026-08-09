@@ -13,11 +13,11 @@ Render の制約と運用形態に合わせて設計すること。
 
 | 種別 | 処理内容 | 実行タイミング | 実行場所 |
 |---|---|---|---|
-| **自動（毎日）** | 差分収集（新規書類 + 株価更新） | UTC 18:00（JST 03:00）毎日 | GitHub Actions `daily-incremental.yml` |
+| **自動（毎日）** | 差分収集（新規書類 + 株価更新） | **UTC 08:17（JST 17:17）毎日**（#476） | GitHub Actions `daily-incremental.yml` |
 | **自動（毎日・チェーン）** | 夜間スコア更新（`sector_ols` → `regression_results`、M-6 → `macro_enet_scores`） | `daily-incremental` が **success** で終わった直後（`workflow_run`） | GitHub Actions `nightly-scores.yml` |
-| **自動（毎月）** | M-1/M-2/M-3 ハイパーパラメータ探索・永続化 | UTC 03:00（JST 12:00）毎月1日 | GitHub Actions `tune-hyperparameters.yml` |
-| **自動（毎月）** | M-1 per-stock 階層マクロβ推論・永続化（producer） | UTC 11:00（JST 20:00）毎月1日 | GitHub Actions `macro-beta-inference.yml` |
-| **自動（毎月）** | recommend Fama-MacBeth ファクタープレミアム推定・永続化（producer） | UTC 12:00（JST 21:00）毎月5日 | GitHub Actions `recommend-factor-premia.yml` |
+| **自動（毎月）** | M-1/M-2/M-3 ハイパーパラメータ探索・永続化 | UTC 16:30（JST 翌01:30）毎月1日（#476） | GitHub Actions `tune-hyperparameters.yml` |
+| **自動（毎月）** | M-1 per-stock 階層マクロβ推論・永続化（producer） | UTC 00:00（JST 09:00）毎月1日（#476） | GitHub Actions `macro-beta-inference.yml` |
+| **自動（毎月）** | recommend Fama-MacBeth ファクタープレミアム推定・永続化（producer） | UTC 22:00（JST 翌07:00）毎月5日（#476） | GitHub Actions `recommend-factor-premia.yml` |
 | **自動（毎週）** | `stock_price_daily` の VACUUM FULL（index bloat 対策） | UTC 23:30・土（JST 08:30・日）※#446 で 22:00 から後ろ倒し＝夜間チェーン終端（実測 最遅 22:37Z）との重なり解消 | GitHub Actions `vacuum-maintenance.yml` |
 | **手動のみ** | 全件収集（全社 × 5年分） | workflow_dispatch で起動 | GitHub Actions `full-pipeline.yml` |
 | **手動のみ** | マクロのみ収集（為替・金利等） | workflow_dispatch で起動 | GitHub Actions `collect-macro.yml` |
@@ -30,23 +30,39 @@ Render の制約と運用形態に合わせて設計すること。
 
 ### GitHub Actions workflow 早見表（いつ・何を・どれを使うか）
 
+#### cron 占有表（時刻を動かす前に必ずここを見る）
+
+**すべて UTC。** GitHub Actions のランナーは UTC で、東証・EDINET の「日付」は JST（＝UTC+9）。占有は「名目の起動時刻 → `timeout-minutes` の上限」で、**キュー遅延は含まない**。
+
+| UTC | ワークフロー | 頻度 | 占有（上限まで） | JST |
+|---|---|---|---|---|
+| 00:00 | `macro-beta-inference` | 毎月1日 | → 05:40（340分） | 09:00 |
+| **08:17** | **`daily-incremental`** → `nightly-scores` / `macro-health` | **毎日** | → 通常 11:00・最悪 14:17（360分）＋チェーン33〜35分 | **17:17** |
+| 16:30 | `tune-hyperparameters` | 毎月1日 | → 22:25（355分・macro_gbdt） | 翌01:30 |
+| 22:00 | `recommend-factor-premia` | 毎月5日 | → 22:20（20分） | 翌07:00 |
+| 23:30 | `vacuum-maintenance` | 毎週土 | → 24:00 | 日 08:30 |
+
+- 非重複を守る理由は **Supabase の接続上限**（#470 では `daily-incremental` 単独でも pooler 枯渇＝ECHECKOUTTIMEOUT を2回踏んでいる）。
+- **6時間級のジョブが3本ある以上、キュー遅延まで含めた完全な非重複は不可能**（GHA の cron 遅延は実測で最大6時間）。上表が保証するのは名目時刻での非重複＋1時間以上のマージンまで。#446 の「cron の名目時刻で衝突判定しない」は**実起動のログで事後確認せよ**という意味で、設計時の目安としては上表を使う。
+- 2026-08-09（#476）に `daily-incremental` を 18:00 → 08:17 へ前倒ししたのに伴い、月次3本を空いた窓へ再配置した。
+
 #### アクティブ（`.github/workflows/` 直下・Actions 対象）
 
 | カテゴリ | workflow 名 | ファイル | 使うタイミング | 所要時間の目安 |
 |---|---|---|---|---|
 | `[CI]` | pytest 自動テスト | `ci.yml` | PR・main push で自動実行（手動起動不要） | 〜1分 |
-| `[定常]` | 差分収集・毎日自動実行 | `daily-incremental.yml` | 毎日 JST 03:00 に自動。手動で即時更新したい場合は `workflow_dispatch` | **2h05m〜2h38m**（2026-08-02 実測） |
+| `[定常]` | 差分収集・毎日自動実行 | `daily-incremental.yml` | **毎日 UTC 08:17（JST 17:17）** に自動（#476 で JST 03:00 から前倒し＝大引け 15:30 と EDINET 受付終了 17:15 の直後。根拠は下記「daily-incremental の動作詳細」）。手動で即時更新したい場合は `workflow_dispatch` | **2h05m〜2h38m**（2026-08-02 実測）。#474 以降、週末・祝日明けは gap-fill をほぼ飛ばすため大幅に短い |
 | `[全件]` | XBRL収集・財務データ全件更新 | `full-pipeline.yml` | DB初期構築時・全社バックフィル必要時（`daily-incremental` を `.disabled` に退避して同時実行回避） | 200〜240分 |
 | `[補完]` | マクロのみ収集 | `collect-macro.yml` | `MACRO_SERIES`（為替・金利・指数・コモディティ・ボラ）を Yahoo から収集。新規系列追加や macro_data の鮮度補完。`workflow_dispatch`（years 既定5）。**新系列のバックフィルは years=6 で起動**（yoy は1年+30日で足りるが、将来 zscore 版追加時に再バックフィル不要な余裕幅。#358 コモディティ8系列追加時の運用）。入力 `series` に series_code（カンマ区切り）を渡すと**その系列だけ**を収集する（#444・定義是正後の再収集で GDELT 累積クエリ制限を消費しないため） | 〜数分 |
-| `[推論]` | M-1 per-stock 階層マクロβ推論（producer） | `macro-beta-inference.yml` | ADR-0002 の PyMC 階層ベイズ推論バッチ（`macro_beta_inference.py`）→ `macro_beta_loadings`/`macro_beta_meta` へ永続化（M-1 `macro_risk_return` が consumer）。本番 `requirements.txt` ではなく `requirements-inference.txt`（+PyMC）を使用。**毎月1日 UTC 11:00（JST 20:00）自動**（Issue #341・鮮度が人力任せで滞留した反省。`tune`(UTC 03:00〜)・`daily-incremental`(UTC 18:00〜)と非重複の時間帯）。手動即時実行は `workflow_dispatch`（draws/tune/target_accept/chains/r_hat_threshold/force 指定可・既定 800/800/0.95/2/1.05/false）。**収束ゲートは `--r-hat-threshold` で可変化**（Issue #341）＝ADR-0002 strict 基準は 1.01 だが、chains=2 では r_hat が構造的に ~1.02 で頭打ち（実 persist 済み 2026-07-04 run も r_hat_max=1.02・n_divergences=0）のため cron 既定を 1.05 とし、構造的 ~1.02 は自動 persist しつつ真の未収束（r_hat が 1.05 を大きく超過）は persist せず失敗させる。閾値を緩めても足りない例外運用時のみ `force=true` | 本番規模で最大 340分（`timeout-minutes: 340`・numpyro で実測 10.5〜11.2秒/draw。ローカル検証: 4銘柄合成データ・draws/tune=50・chains=2・g++無しの Python フォールバックで約8分） |
+| `[推論]` | M-1 per-stock 階層マクロβ推論（producer） | `macro-beta-inference.yml` | ADR-0002 の PyMC 階層ベイズ推論バッチ（`macro_beta_inference.py`）→ `macro_beta_loadings`/`macro_beta_meta` へ永続化（M-1 `macro_risk_return` が consumer）。本番 `requirements.txt` ではなく `requirements-inference.txt`（+PyMC）を使用。**毎月1日 UTC 00:00（JST 09:00）自動**（Issue #341・鮮度が人力任せで滞留した反省。#476 で 11:00 から移動＝`daily-incremental` の 08:17 前に 340分を収める）。手動即時実行は `workflow_dispatch`（draws/tune/target_accept/chains/r_hat_threshold/force 指定可・既定 800/800/0.95/2/1.05/false）。**収束ゲートは `--r-hat-threshold` で可変化**（Issue #341）＝ADR-0002 strict 基準は 1.01 だが、chains=2 では r_hat が構造的に ~1.02 で頭打ち（実 persist 済み 2026-07-04 run も r_hat_max=1.02・n_divergences=0）のため cron 既定を 1.05 とし、構造的 ~1.02 は自動 persist しつつ真の未収束（r_hat が 1.05 を大きく超過）は persist せず失敗させる。閾値を緩めても足りない例外運用時のみ `force=true` | 本番規模で最大 340分（`timeout-minutes: 340`・numpyro で実測 10.5〜11.2秒/draw。ローカル検証: 4銘柄合成データ・draws/tune=50・chains=2・g++無しの Python フォールバックで約8分） |
 | `[定常]` | 夜間スコア更新（`sector_ols` + M-6） | `nightly-scores.yml` | `nightly_scores.py`（Issue #432/#443・親 #423）を実行し、①`sector_ols` → `regression_results`（`predicted_market_cap` / `gap_ratio`）②`macro_enet`（M-6）→ `macro_enet_scores`（μ̂・`sell_ranking` の**既定** mu_source）を更新する。**起動は `daily-incremental` の `workflow_run` チェーンで `conclusion == 'success'` のときだけ**（株価が前進していない日にスコアだけ更新すると、古い株価由来の値が「今日のランキング」として出るため）。`sector_ols` は `regularization=ridge` 固定（既定 features 10項目は VIF>10 が頻発）、M-6 は params_schema の既定のまま（ADR-0021/0022 の実測と同一構成）。1モデルの失敗は他を巻き込まず、実行後に `max(computed_at)` / `max(created_at)` を直接クエリして永続化を確認する（例外なし＝コミット済みとしない）。モデル間の `load_data`（週次127万行）は `shared_snapshot_cache()` で共有し、Egress がモデル数に比例しないようにしている。手動即時実行は `workflow_dispatch` | **総所要 33.5分**（2026-08-04 本番実走・[run 30954182465](https://github.com/kome-kome/financial_app/actions/runs/30954182465)＝`sector_ols` 30.3分 + M-6 3.2分・job wall 34.5分）／**32.6分**（08-05・[run 31050406971](https://github.com/kome-kome/financial_app/actions/runs/31050406971)＝29.4分 + 3.2分）。`timeout-minutes` は実測 job wall の 2.0倍で **70分**（#446 で 150 から）。重いのは `sector_ols` 側で M-6 は 3.2分。起票時の 16.1分（2026-08-03・run 30808053564・30業種/2,837社）は #434 の構造的NULL対応前の値＝**銘柄数・業種数とともに伸びるので実走ログで追う** |
-| `[定常]` | M-1/M-2/M-3 ハイパーパラメータ月次自動探索 | `tune-hyperparameters.yml` | `hyperparameter_search.py`（Issue #264/#278/#291）を matrix strategy で3モデル並列実行し `plugin_tuned_params` へ永続化（Issue #292）。`macro_risk_return`/`macro_dlm` は `--strategy grid`、`macro_gbdt` は `--strategy random --n-iter 150`（6時間上限に収める設計判断）。共通 `--objective rank_ic --persist --persist-scores --seed 0`。品質ゲート（#291）でスコア劣化時は該当ジョブが failed 終了（意図した挙動）。毎月1日 UTC 03:00（JST 12:00）自動。手動即時実行は `workflow_dispatch` | macro_risk_return/macro_dlm: 10〜60分、macro_gbdt: 4〜8時間相当を n_iter=150 で圧縮（timeout-minutes: 355） |
+| `[定常]` | M-1/M-2/M-3 ハイパーパラメータ月次自動探索 | `tune-hyperparameters.yml` | `hyperparameter_search.py`（Issue #264/#278/#291）を matrix strategy で3モデル並列実行し `plugin_tuned_params` へ永続化（Issue #292）。`macro_risk_return`/`macro_dlm` は `--strategy grid`、`macro_gbdt` は `--strategy random --n-iter 150`（6時間上限に収める設計判断）。共通 `--objective rank_ic --persist --persist-scores --seed 0`。品質ゲート（#291）でスコア劣化時は該当ジョブが failed 終了（意図した挙動）。**毎月1日 UTC 16:30（JST 翌01:30）自動**（#476 で 03:00 から移動＝旧設定は 355分走ると 08:55 まで伸び、`daily-incremental` の 08:17 と毎月確実に38分重なっていた）。手動即時実行は `workflow_dispatch` | macro_risk_return/macro_dlm: 10〜60分、macro_gbdt: 4〜8時間相当を n_iter=150 で圧縮（timeout-minutes: 355） |
 | `[補完]` | 半期(H1)財務収集 | `collect-interim.yml` | EDINET 半期報告書（043A00/docType160）と旧四半期報告書（043000/docType140）の Q2(中間=H1累計)を収集し `financial_records` に `period_type='H1'` で保存（Issue #219② フェーズB）。通期収集とは独立・常に差分（収集済み doc_id をスキップ）。`workflow_dispatch`（years_back 既定6＝既存通期窓に整合）。240分に収まらない場合は years_back を分割 | 数時間（過去6年・事前選別でQ1/Q3を除外し概ね1社1半期1DL） |
-| `[推論]` | recommend Fama-MacBeth ファクタープレミアム推定（producer） | `recommend-factor-premia.yml` | `recommend_factor_premia.py --persist`（Issue #271/#342・ADR-0008）を実行し、月次断面 OLS（Fama & MacBeth 1973・Newey-West HAC）で推定したファクタープレミアムを `recommend_factor_premia` テーブルへ永続化（`plugins.recommend.resolve_weights()` が「統計的最適化」プリセットとして読む consumer）。依存は `requirements.txt` で充足（PyMC 不要）。**毎月5日 UTC 12:00（JST 21:00）自動**（Issue #423 子5）＝Fama-MacBeth 自体が月末スナップショットの月次 cadence なので、増える新情報は「月末が1つ増える」ことだけ。毎月1日は `tune-hyperparameters`（〜09:00Z）と `macro-beta-inference`（〜16:40Z）で埋まっているため5日へ、UTC 12:00 は夜間チェーン帯（18〜23Z）の外。手動即時実行は `workflow_dispatch`（`min_companies_per_period` 既定30・`maxlags` 既定11）。**schedule 起動では `github.event.inputs.*` が空になる**ため run: 側の `|| '既定値'` を外さないこと（`tests/test_recommend_factor_premia_workflow.py` が強制）。MCMC のような収束ゲートは無し（断面 OLS は決定的） | **job wall 2分54秒**（2026-08-08 手動実走・[run 31265047095](https://github.com/kome-kome/financial_app/actions/runs/31265047095)＝バッチ本体 1分55秒）。`timeout-minutes` は実測の約7倍で **20分**（起票時の 120 は未計測の当て推量でハングしても2時間気づけなかった）。Egress は `load_data` 1回分 ≈ 68MB／月 |
+| `[推論]` | recommend Fama-MacBeth ファクタープレミアム推定（producer） | `recommend-factor-premia.yml` | `recommend_factor_premia.py --persist`（Issue #271/#342・ADR-0008）を実行し、月次断面 OLS（Fama & MacBeth 1973・Newey-West HAC）で推定したファクタープレミアムを `recommend_factor_premia` テーブルへ永続化（`plugins.recommend.resolve_weights()` が「統計的最適化」プリセットとして読む consumer）。依存は `requirements.txt` で充足（PyMC 不要）。**毎月5日 UTC 22:00（JST 翌07:00）自動**（Issue #423 子5・#476 で 12:00 から移動）＝Fama-MacBeth 自体が月末スナップショットの月次 cadence なので、増える新情報は「月末が1つ増える」ことだけ。毎月1日は `macro-beta-inference`（〜05:40Z）と `tune-hyperparameters`（16:30〜22:25Z）で埋まっているため5日へ。UTC 12:00 は `daily-incremental` の最悪ケース（08:17〜14:17Z）に飲まれるため 22:00 へ。手動即時実行は `workflow_dispatch`（`min_companies_per_period` 既定30・`maxlags` 既定11）。**schedule 起動では `github.event.inputs.*` が空になる**ため run: 側の `|| '既定値'` を外さないこと（`tests/test_recommend_factor_premia_workflow.py` が強制）。MCMC のような収束ゲートは無し（断面 OLS は決定的） | **job wall 2分54秒**（2026-08-08 手動実走・[run 31265047095](https://github.com/kome-kome/financial_app/actions/runs/31265047095)＝バッチ本体 1分55秒）。`timeout-minutes` は実測の約7倍で **20分**（起票時の 120 は未計測の当て推量でハングしても2時間気づけなかった）。Egress は `load_data` 1回分 ≈ 68MB／月 |
 | `[定常]` | マクロ鮮度ゲート | `macro-health.yml` | `python -m scripts.check_macro_health`（Issue #420）が `macro_data` の系列別 `max(trade_date)` を期待更新頻度（`macro_health.FREQ_STALE_DAYS`）と突き合わせ、**既定モデルが使う系列**（`DEFAULT_MACRO_FEATURES` から逆引き）が古ければ exit 2 → `notify-failure` が Issue 起票。`collect_macro_data` は 1 系列失敗しても `continue` するため部分失敗が exit 0 で通り、#414 の失敗通知では拾えないのを塞ぐ。**収集本体（`daily-incremental` / `full-pipeline`）を落とさず独立ジョブに分離しているのが要点**——あちらを failure にすると `nightly-scores` の `workflow_run` チェーン（`success` 条件）が発火せず、マクロと無関係な `sector_ols` の夜間更新まで巻き添えで止まる（#425 の構造をワークフロー間へ適用）。収集側は同じレポートを run ログに出すだけ。誤検知が続く系列は `macro_health.EXCLUDED_SERIES` へ**理由付きで**登録する（現在: `JP_IP`＝FRED 凍結 #253／`JP_IIP`・`JP_IIP_INVENTORY`＝e-Stat が年単位更新 #451。`JP10Y` は #442 で `MACRO_SERIES` ごと削除したため除外指定も不要になった。`BCOM` は #438 の Yahoo 配信停止で一時除外していたが、収集元を連動 ETN `DJP` へ差し替えて 2026-08-06 に除外解除＝**直った系列は必ず除外から外す**（残すと代替ソース側の停止を検知できなくなる）） | 〜2分（GROUP BY 集約1本・`timeout-minutes: 10`） |
 | `[定常]` | ワークフロー失敗の自動 Issue 起票 | `notify-failure.yml` | 上記ワークフロー（`ci.yml` を除く全本数・列挙しない設計）＋セルフテストが `failure` または `cancelled` で終わると自動起票（`workflow_run`）。手動起動しない。詳細は下記「ワークフロー失敗の通知」節 | 〜1分 |
 | `[検証]` | notify-failure セルフテスト | `notify-failure-selftest.yml` | `notify-failure.yml` の変更後に発火を実証するための、意図的に失敗するだけのワークフロー（本番データ不使用）。`workflow_dispatch`（`mode=fail`／`mode=cancel`） | 〜1分（cancel は約1分） |
-| `[定常]` | DBメンテナンス（VACUUM FULL・週次） | `vacuum-maintenance.yml` | `stock_price_daily` の DELETE ベース trim による index bloat 対策（Issue #290）。`_pipeline_vacuum.py` が AUTOCOMMIT 接続で `VACUUM FULL stock_price_daily` を実行、前後の容量をログ出力。毎週 UTC 23:30・土（JST 08:30・日）自動（#446 で 22:00 から後ろ倒し。**cron の名目時刻ではなくキュー遅延込みの実起動時刻で設計する**——`daily-incremental` は cron UTC 18:00 に対し実起動 19:45Z 前後で、旧設定では夜間チェーン終端と日曜だけ約24分重なっていた）。手動即時実行は `workflow_dispatch`（ローカル・GitHub Actions 双方で Supabase pooler 経由の正常動作を確認済み・2026-07-12）。**時間帯は #427 で JST 04:00 → 07:00 へ移動**——差分収集（JST 03:00 開始・実測 2h05m〜2h38m）の最中に `VACUUM FULL`（ACCESS EXCLUSIVE ロック）が走っており、ずらす設計意図が成立していなかった。現行チェーンは 03:00 収集 → 最長 05:40 → nightly-scores（`sector_ols` 16分 + M-6・総所要は #443 の初回実走で実測）。**M-6 追加でチェーン後端が伸びるため、日曜だけは VACUUM FULL（07:00）と重なりうる**——ただし `VACUUM FULL` が排他ロックを取るのは `stock_price_daily` のみで、夜間バッチが読むのは `stock_price_weekly`／`financial_metrics` ゆえロック競合はしない（I/O は共有）。実測で 07:00 に食い込むようなら時間帯を再調整する | 数秒〜数分（対象テーブルは実測 ~50MB・42万行） |
+| `[定常]` | DBメンテナンス（VACUUM FULL・週次） | `vacuum-maintenance.yml` | `stock_price_daily` の DELETE ベース trim による index bloat 対策（Issue #290）。`_pipeline_vacuum.py` が AUTOCOMMIT 接続で `VACUUM FULL stock_price_daily` を実行、前後の容量をログ出力。毎週 UTC 23:30・土（JST 08:30・日）自動（#446 で 22:00 から後ろ倒し。**cron の名目時刻ではなくキュー遅延込みの実起動時刻で設計する**——`daily-incremental` は cron UTC 18:00 に対し実起動 19:45Z 前後で、旧設定では夜間チェーン終端と日曜だけ約24分重なっていた）。**#476 で `daily-incremental` が 08:17Z へ前倒しされ、この 22:37Z 前提は解消した**（間隔が大きく開いたので時刻は据え置き＝動かす必然が無いものを動かさない）。手動即時実行は `workflow_dispatch`（ローカル・GitHub Actions 双方で Supabase pooler 経由の正常動作を確認済み・2026-07-12）。**時間帯は #427 で JST 04:00 → 07:00 へ移動**——差分収集（JST 03:00 開始・実測 2h05m〜2h38m）の最中に `VACUUM FULL`（ACCESS EXCLUSIVE ロック）が走っており、ずらす設計意図が成立していなかった。現行チェーンは 03:00 収集 → 最長 05:40 → nightly-scores（`sector_ols` 16分 + M-6・総所要は #443 の初回実走で実測）。**M-6 追加でチェーン後端が伸びるため、日曜だけは VACUUM FULL（07:00）と重なりうる**——ただし `VACUUM FULL` が排他ロックを取るのは `stock_price_daily` のみで、夜間バッチが読むのは `stock_price_weekly`／`financial_metrics` ゆえロック競合はしない（I/O は共有）。実測で 07:00 に食い込むようなら時間帯を再調整する | 数秒〜数分（対象テーブルは実測 ~50MB・42万行） |
 
 #### アーカイブ済み（`.github/workflows/old/` 配下・一回性・Actions 対象外）
 
@@ -117,15 +133,34 @@ gh run cancel <run-id>   # → annotation は "The run was canceled by @…" →
 
 ### daily-incremental の動作詳細
 
-毎日 UTC 18:00 に自動起動する `_pipeline_incremental.py` は:
-1. EDINET API の書類一覧を **前年1月1日〜前日**の全日スキャンで取得し（`years_back=1`・`collector_financials.py` Phase 3）、未収集 `doc_id` のみ XBRL 収集・DB保存。「60日以内」は旧実装の記述で実態と乖離していた（#422）
-2. 株価更新（Phase 4）: **①Yahoo Finance が銘柄ごとに `その社の最終日+1 〜 today` をギャップ補完**（`fill_recent_stock_price_gap_yahoo`）→ **②J-Quants catchup（`today-90`〜`today-80`）で Yahoo 暫定値を公式値へ置換** → ③`update_market_data_from_history`。<br>**J-Quants 無料は直近84日（12週）を配信しない**ため、旧実装の `days_back=14` はエンバーゴ内で構造的に常に0件かつ全日403となり、中断ガードを誤発火させて Yahoo 補完まで巻き添えで止めていた（#419 / #425）。撤去済み。鮮度を担う Yahoo を先に置き、J-Quants catchup の失敗は握って継続する（片方の収集元の障害がもう片方を止めない）。鮮度はこの Yahoo 補完が担う（J-Quants 制約表の「配信遅延」行を参照）。<br>起点は**銘柄別**（Issue #415）。全社横断の最大日を1つ選んで全社へ適用すると、一部銘柄だけ先行して復旧した場合に遅延銘柄の欠測が永久に埋まらない（2026-07 に発生。2銘柄が 07-31 / 3,677銘柄が 07-13 の状態で 14営業日分が穴のまま残った）。起点は daily 保持窓（`DAILY_WINDOW_DAYS`）でクリップし、それ以前は `backfill-weekly.yml` の管轄とする。<br>**対象社の判定基準は「閉場済みの最新 JST 営業日」**（`last_closed_session`・#474）。cron が UTC 18:00 ＝ JST 03:00 のため、UTC 日付と比べる旧実装では **UTC 土日（JST 日曜/月曜の早朝）に全社が「1日遅れ」に見え**、全社が既に持つ金曜バーを取り直していた（run 31272807314 で 4,437社 / 2h11m）。本番実測で **4,437社 → 735社**。基準セッションより後の `trade_date`（Yahoo が場中に返す**進行中バー**）は取り込まない
+毎日 **UTC 08:17（JST 17:17）** に自動起動する `_pipeline_incremental.py` は:
+
+> **⏰ 起動時刻の根拠（#476・2026-08-09 に JST 03:00 から移動）**
+>
+> | JST | 確定するもの |
+> |---|---|
+> | 15:30 | 東証 大引け（2024-11-05 のクロージング・オークション導入で 15:00 から延伸） |
+> | 16:30頃 | J-Quants 株価四本値（無料は12週遅延＝当日ぶんは来ない） |
+> | **17:15** | EDINET 提出受付終了 → その日の書類一覧が確定 |
+> | **17:17** | ← 起動 |
+> | 18:00頃 / 24:30頃 | J-Quants 財務情報（速報 / 確報） |
+> | 22:30（夏）/ 23:30（冬） | 米国市場オープン |
+> | 05:00（夏）/ 06:00（冬） | 米国市場クローズ |
+>
+> **市場データの中身は JST 03:00 起動と完全に同じ。** 日本株はどちらも同じ大引けを見る。米国系も、JST 03:00 の時点では米国が**場中**なので直近の確定クローズは同一セッション。変わるのは ①ユーザーが結果を見られる時刻が約9時間早い ②EDINET が当日提出ぶんを拾える の2点だけ。
+>
+> **東証も NYSE も閉じている唯一の窓（JST 16:00〜22:30）**に置いてあるので、#474 で問題にした「進行中セッションの途中経過バー」を平時は踏まない。ただし **GHA の cron 遅延は実測で最大6時間**（18:00Z が 00:08Z 起動＝run 31133560740）なので、**スケジュールは第一防御でしかなく、保証はコード側**（`last_closed_session` / in-progress バー除外）が持つ。分を `:00` からずらしてあるのは毎時ピークの遅延を避けるため。
+>
+> チェーン終端の見込みは JST 21〜22時台（本体 2h05m〜2h38m ＋ `nightly-scores` 実測33〜35分）。週次 VACUUM は 土 23:30Z なので衝突しない。
+
+1. EDINET API の書類一覧を **前年1月1日〜「確定済みの最新 JST 日付」**の全日スキャンで取得し（`years_back=1`・`collector_financials.py` Phase 3）、未収集 `doc_id` のみ XBRL 収集・DB保存。「60日以内」は旧実装の記述で実態と乖離していた（#422）。<br>**終端は `latest_settled_edinet_date`（JST 基準・#476）**: EDINET 提出受付は平日 9:00〜17:15 で、受付終了後はその日の一覧が確定するため、`EDINET_CUTOFF_JST` を過ぎていれば当日を含める。旧実装は `date.today() - 1日` ＝**ランナーの UTC 日付**から引いており、UTC 18:00 起動（JST 翌03:00）では終端が JST の前々日まで下がって、**確定済みの JST 前日ぶんを丸ごと落としていた**（提出から反映まで約33時間）。JST 17:17 起動＋JST 基準の終端で**約10時間**になる。締切間際の提出が一覧へ載るまでのラグで取りこぼしても、差分収集が翌日に同じ日付を再スキャンするので欠落にはならない
+2. 株価更新（Phase 4）: **①Yahoo Finance が銘柄ごとに `その社の最終日+1 〜 today` をギャップ補完**（`fill_recent_stock_price_gap_yahoo`）→ **②J-Quants catchup（`today-90`〜`today-80`）で Yahoo 暫定値を公式値へ置換** → ③`update_market_data_from_history`。<br>**J-Quants 無料は直近84日（12週）を配信しない**ため、旧実装の `days_back=14` はエンバーゴ内で構造的に常に0件かつ全日403となり、中断ガードを誤発火させて Yahoo 補完まで巻き添えで止めていた（#419 / #425）。撤去済み。鮮度を担う Yahoo を先に置き、J-Quants catchup の失敗は握って継続する（片方の収集元の障害がもう片方を止めない）。鮮度はこの Yahoo 補完が担う（J-Quants 制約表の「配信遅延」行を参照）。<br>起点は**銘柄別**（Issue #415）。全社横断の最大日を1つ選んで全社へ適用すると、一部銘柄だけ先行して復旧した場合に遅延銘柄の欠測が永久に埋まらない（2026-07 に発生。2銘柄が 07-31 / 3,677銘柄が 07-13 の状態で 14営業日分が穴のまま残った）。起点は daily 保持窓（`DAILY_WINDOW_DAYS`）でクリップし、それ以前は `backfill-weekly.yml` の管轄とする。<br>**対象社の判定基準は「閉場済みの最新 JST 営業日」**（`last_closed_session`・#474）。当時の cron は UTC 18:00 ＝ JST 03:00 で、UTC 日付と比べる旧実装では **UTC 土日（JST 日曜/月曜の早朝）に全社が「1日遅れ」に見え**、全社が既に持つ金曜バーを取り直していた（run 31272807314 で 4,437社 / 2h11m）。本番実測で **4,437社 → 735社**。基準セッションより後の `trade_date`（Yahoo が場中に返す**進行中バー**）は取り込まない
 3. 成長率・Zスコアを再計算
 4. 所要時間: **2h05m〜2h38m**（2026-08-02 の success run 2本で実測。大半は EDINET 全日スキャンと Yahoo ギャップ補完の逐次リクエスト。`timeout-minutes: 360`）。**#474 以降、週末・祝日明けの run は gap-fill をほぼ丸ごと飛ばすため大きく短くなる**（平日は全社取得のままなので据え置き）
 
 > **注（運用パターン）**: 全件収集（`full-pipeline.yml`）を回している間は、Supabase 接続上限での同時実行を避けるため、本ワークフローを一時的に `daily-incremental.yml.disabled` へリネームして停止する（例: コミット `4764d96`「全件収集中の同時実行回避」）。全件収集が終わったら `.yml` に戻して再有効化する。**現在ファイル名が `.disabled` の場合は自動の定時収集が止まっている状態**なので、UI / 手動収集で補う。<br>停止中の株価鮮度は `full-pipeline` の finalize（Phase 5）が同じ Yahoo ギャップ補完を持つため、全件収集の完了時点で追いつく（#426）。それでも collect フェーズ中（実測 約4時間）は前進しない点は変わらない。
 >
-> **✅ cron 再開済み（2026-06-22〜）**: dual-table 移行後の `workflow_dispatch` 手動実行で Yahoo ギャップ補完・J-Quants 株価取得が GitHub Actions（Azure IP）から正常動作することを確認 → `on.schedule` を有効化。UTC 18:00（JST 03:00）に毎日起動する。
+> **✅ cron 再開済み（2026-06-22〜）**: dual-table 移行後の `workflow_dispatch` 手動実行で Yahoo ギャップ補完・J-Quants 株価取得が GitHub Actions（Azure IP）から正常動作することを確認 → `on.schedule` を有効化。**2026-08-09 に UTC 18:00（JST 03:00）→ UTC 08:17（JST 17:17）へ移動**（#476・上の起動時刻の根拠を参照）。
 >
 > **⚠️ 2026-07-14 〜 08-01 は19日連続で failure していた**（真因: Phase 4 冒頭の J-Quants 403 が例外送出しプロセスが exit 1 → 鮮度の担い手である Yahoo ギャップ補完に一度も到達しなかった）。#412 で 403 をカバレッジ境界の欠測として継続扱いに修正済み。**この障害に19日間誰も気づかなかった**のは全ワークフローに失敗通知が無いためで、#414 で対応する。成功時の所要は実測 2h05m〜2h38m。
 

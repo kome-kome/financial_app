@@ -31,10 +31,6 @@ import yaml
 WORKFLOW_DIR = Path(__file__).resolve().parents[1] / ".github" / "workflows"
 WORKFLOW = WORKFLOW_DIR / "recommend-factor-premia.yml"
 
-# daily-incremental（cron UTC 18:00・実起動 19:45Z 前後）→ nightly-scores チェーンの帯。
-# cron の名目時刻ではなくキュー遅延込みの実起動時刻で見る（#446 で vacuum を 22:00→23:30Z へ）。
-_DAILY_CHAIN_HOURS_UTC = range(18, 24)
-
 
 def _load(path: Path) -> dict:
     return yaml.safe_load(path.read_text(encoding="utf-8"))
@@ -52,6 +48,39 @@ def _crons(doc: dict) -> list[str]:
 
 def _run_scripts(doc: dict) -> str:
     return " ".join(step.get("run", "") for step in doc["jobs"]["estimate"]["steps"])
+
+
+def _max_timeout_minutes(doc: dict) -> int:
+    """そのワークフローが占有しうる最大分数（jobs の timeout-minutes の最大値）。
+
+    matrix で job ごとに違う値を持つ場合（tune-hyperparameters）は式が入りうるので、
+    int に落ちないものは無視する。
+    """
+    vals = []
+    for job in (doc.get("jobs") or {}).values():
+        t = job.get("timeout-minutes")
+        if isinstance(t, int):
+            vals.append(t)
+    return max(vals, default=0)
+
+
+def _daily_chain_hours_utc() -> set[int]:
+    """daily-incremental → nightly-scores チェーンが占有しうる UTC 時刻の集合。
+
+    **ここを定数で持たない**のが要点（#476）。旧実装は `range(18, 24)` を直書きしており、
+    daily-incremental を 18:00Z → 08:17Z へ動かした瞬間に「守っている対象」と実態が
+    ずれた——しかもテストは緑のままではなく**無関係な時間帯を禁止し続けた**。
+    ADR-0031 と同型の「登録と実体の乖離」なので、実ファイルから導出する。
+
+    幅は名目起動時刻 ＋ 両ワークフローの timeout-minutes の合計（最悪ケース）。
+    キュー遅延は含まない＝#446 のとおり最終確認は実起動ログで行う。
+    """
+    daily = _load(WORKFLOW_DIR / "daily-incremental.yml")
+    start = int(_crons(daily)[0].split()[1])
+    minutes = _max_timeout_minutes(daily) + _max_timeout_minutes(
+        _load(WORKFLOW_DIR / "nightly-scores.yml"))
+    span_hours = -(-minutes // 60)                     # 切り上げ
+    return {(start + i) % 24 for i in range(span_hours + 1)}
 
 
 @pytest.fixture(scope="module")
@@ -103,8 +132,8 @@ class TestNoScheduleCollision:
             )
 
     def test_monthly_batches_do_not_share_a_day(self, cron):
-        """毎月1日は tune-hyperparameters（03:00Z〜最大 09:00Z）と
-        macro-beta-inference（11:00Z〜最大 16:40Z）で埋まっている。"""
+        """毎月1日は macro-beta-inference（00:00Z〜最大 05:40Z）と
+        tune-hyperparameters（16:30Z〜最大 22:25Z）で埋まっている（#476 で再配置）。"""
         my_dom = cron[2]
         for path in self._other_workflows():
             for other in _crons(_load(path)):
@@ -116,10 +145,16 @@ class TestNoScheduleCollision:
                     "長時間ジョブ（最大340分）と重ねると本バッチが待たされる"
                 )
 
-    def test_not_inside_the_nightly_chain_window(self, cron):
-        """UTC 18〜23時は daily-incremental → nightly-scores のチェーン帯。"""
-        assert int(cron[1]) not in _DAILY_CHAIN_HOURS_UTC, (
-            "夜間チェーン（daily-incremental 実起動 19:45Z 前後〜終端 22:37Z 実測）と"
+    def test_not_inside_the_daily_chain_window(self, cron):
+        """daily-incremental → nightly-scores のチェーン帯を避ける。
+
+        帯は `daily-incremental.yml` の cron と両ワークフローの timeout-minutes から
+        **実ファイルを読んで導出する**（#476）。定数で持つと収集の時刻を動かした瞬間に
+        守る対象がずれる。
+        """
+        window = _daily_chain_hours_utc()
+        assert int(cron[1]) not in window, (
+            f"daily-incremental → nightly-scores のチェーン帯 {sorted(window)}（UTC 時）と"
             "重なる時間帯。週次株価のフルロードが二重に走る"
         )
 

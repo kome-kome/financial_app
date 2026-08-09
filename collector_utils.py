@@ -6,7 +6,7 @@
 import os
 import logging
 import re
-from datetime import time as dtime
+from datetime import time as dtime, timedelta, timezone
 from typing import Optional
 
 from dotenv import load_dotenv
@@ -42,12 +42,23 @@ YAHOO_STOCK_RATE_SLEEP = 0.5   # Yahoo Finance 銘柄別取得のリクエスト
                                # 銘柄ごとに1リクエスト。3800社×0.5s ≈ 32分
 MAX_GAP_DAYS           = 30    # period_end から±30日以内の株価のみ採用（point_in_time マッチ）
 
-# --- Yahoo ギャップ補完の基準日（#474）-----------------------------------------
+# --- 日本時間の基準（#474 / #476）----------------------------------------------
+# GitHub Actions のランナーは UTC。日本市場・EDINET の「日付」は JST なので、
+# 収集の日付境界は必ずこの tz で判定する（`date.today()` を直接使わない）。
+JST = timezone(timedelta(hours=9))
+
 # 判定を「ランナーの UTC 日付」から「閉場済みの最新 JST 営業日」へ移すための定数。
 # 旧判定 `(today_utc - last_d).days <= 0` は、**その日のセッションがまだ無い時間帯・
 # 非営業日には全社が対象**になる。JST 日曜 03:47 起動の run 31272807314 は、全社が
 # 既に持つ金曜バーを 4,437社ぶん取り直して 2時間11分を使った。
-MARKET_CLOSE_JST         = dtime(15, 10)  # 大引け 15:00 ＋ Yahoo 反映の余裕
+# **大引けは 15:30**（2024-11-05 のクロージング・オークション導入で 15:00 から延伸）。
+# ここに Yahoo が終値を確定させるまでの余裕を足す。定時実行が JST 17:17 に移り
+# （#476）、この境界は「当日ぶんを取りに行くか」を実際に左右するようになった。
+MARKET_CLOSE_JST         = dtime(16, 0)
+# EDINET の提出受付終了（平日 9:00〜17:15）。これを過ぎた JST 日付は書類一覧が確定
+# しているとみなしてスキャン範囲へ含める（#476）。締切間際の提出が一覧へ載るまでの
+# ラグで取りこぼしても、差分収集が翌日同じ日付を再スキャンするので欠落にはならない。
+EDINET_CUTOFF_JST        = dtime(17, 15)
 # 取得する社は起点をこの日数ぶん手前へ倒し、直近セッションを取り直す。
 # `record_prices_batch` は ON CONFLICT DO UPDATE なので、場中実行が書いた暫定終値が
 # あっても確定値で上書きされる。**Yahoo は1社1リクエストのため追加コストはゼロ**

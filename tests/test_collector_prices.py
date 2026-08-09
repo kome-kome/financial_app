@@ -267,16 +267,23 @@ class TestLastClosedSession:
         return cp.last_closed_session(datetime(y, m, d, hh, mm, tzinfo=cp.JST))
 
     def test_weekday_before_close_uses_previous_day(self):
-        """定時実行（JST 03:00）はまだ当日が引けていない → 前営業日。"""
+        """早朝の run はまだ当日が引けていない → 前営業日。"""
         assert self._at(2026, 8, 6, 3) == date(2026, 8, 5)      # 木03:00 → 水
 
     def test_weekday_after_close_uses_same_day(self):
-        assert self._at(2026, 8, 6, 16) == date(2026, 8, 6)     # 木16:00 → 木
+        """定時実行（JST 17:17・#476）は当日の大引け後 → 当日。"""
+        assert self._at(2026, 8, 6, 17, 17) == date(2026, 8, 6)
 
     def test_exactly_at_market_close_boundary(self):
-        """15:10 ちょうどは「引けた」側。大引け15:00＋Yahoo 反映の余裕。"""
-        assert self._at(2026, 8, 6, 15, 10) == date(2026, 8, 6)
-        assert self._at(2026, 8, 6, 15, 9)  == date(2026, 8, 5)
+        """境界は 16:00。**大引けは 15:30**（2024-11-05 に 15:00 から延伸）＋Yahoo 反映の余裕。
+
+        15:00 前提の 15:10 のままだと、15:10〜15:30 の場中に走った run が当日を
+        「引けた」と誤判定し、途中経過バーを確定終値として扱ってしまう。
+        """
+        assert self._at(2026, 8, 6, 16, 0)  == date(2026, 8, 6)
+        assert self._at(2026, 8, 6, 15, 59) == date(2026, 8, 5)
+        # 大引け直後（15:31）はまだ「引けていない」側＝当日を取りに行かない
+        assert self._at(2026, 8, 6, 15, 31) == date(2026, 8, 5)
 
     def test_saturday_and_sunday_fall_back_to_friday(self):
         assert self._at(2026, 8, 8, 3)  == date(2026, 8, 7)     # 土03:00 → 金
@@ -286,6 +293,11 @@ class TestLastClosedSession:
     def test_monday_early_morning_falls_back_to_friday(self):
         """実害が出ていた回。JST 月曜 03:00 の基準は金曜であって日曜ではない。"""
         assert self._at(2026, 8, 10, 3) == date(2026, 8, 7)
+
+    def test_weekend_evening_still_falls_back_to_friday(self):
+        """定時実行が JST 17:17 になっても土日は金曜のまま（#476 で起動時刻が変わった）。"""
+        assert self._at(2026, 8, 8, 17, 17) == date(2026, 8, 7)   # 土
+        assert self._at(2026, 8, 9, 17, 17) == date(2026, 8, 7)   # 日
 
     def test_never_returns_a_weekend(self):
         base = datetime(2026, 8, 3, 0, 0, tzinfo=cp.JST)

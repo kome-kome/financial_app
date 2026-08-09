@@ -6,7 +6,7 @@ import io
 import zipfile
 import asyncio
 from collections import defaultdict
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timedelta
 from typing import Optional, Callable
 from urllib.parse import quote as urlquote  # fetch_yahoo_history のローカル変数 quote と衝突回避
 
@@ -1059,11 +1059,11 @@ async def backfill_historical_stock_prices_yahoo(
     return updated
 
 
-JST = timezone(timedelta(hours=9))
-
-
 def last_closed_session(now_jst: datetime) -> date:
     """閉場済みの最新 JST 営業日を返す（#474）。
+
+    大引けは **15:30**（2024-11-05 のクロージング・オークション導入で 15:00 から延伸）。
+    `MARKET_CLOSE_JST` はそこへ Yahoo が終値を確定させる余裕を足した時刻。
 
     祝日カレンダーは持たない（土日だけを除く）。祝日は「営業日」として返るため、
     祝日明けの夜は全社が取得対象へ落ちる——無駄だが**安全側**（取りに行きすぎるだけで
