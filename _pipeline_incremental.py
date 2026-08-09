@@ -17,7 +17,7 @@ from collector import (
     collect_stock_price_history_jquants, update_market_data_from_history,
     fill_recent_stock_price_gap_yahoo,
 )
-from database import SessionLocal, init_db
+from database import SessionLocal, init_db, price_freshness
 import _pipeline_utils
 from macro_health import check_macro_freshness, format_report
 
@@ -101,9 +101,17 @@ async def main():
             db4, gap_days=0,
             on_progress=lambda c, t, m: log(m) if c % 500 == 0 or "完了" in m else None,
         )
-        if not gap_result.get("skipped"):
-            log(f"  Yahoo Finance gap-fill: {gap_result.get('upserted', 0)}件 追加"
-                f"（{gap_result.get('from')} 〜 {gap_result.get('to')}・{gap_result.get('companies')}社）")
+        if gap_result.get("skipped"):
+            # 週末・祝日明けはここに来る（全社が最新セッションに追いついている＝#474）。
+            # 黙って通すと「2時間かけて空振りしていた」時代と区別がつかない。
+            log(f"  Yahoo Finance gap-fill: スキップ（{gap_result.get('reason')}"
+                f"・基準セッション {gap_result.get('session')}）")
+        else:
+            # upserted は**投入行数**（ON CONFLICT DO UPDATE）。正味の増分は new_rows（#474）。
+            log(f"  Yahoo Finance gap-fill: {gap_result.get('upserted', 0)}件 投入"
+                f"（うち新規日付 {gap_result.get('new_rows', 0)}件・"
+                f"{gap_result.get('from')} 〜 {gap_result.get('to')}・"
+                f"{gap_result.get('companies')}社・基準セッション {gap_result.get('session')}）")
 
         # J-Quants catchup: 12週境界を過ぎた直後（today-90〜today-80日）を再取得し、
         # Yahoo 暫定値を J-Quants 公式値で自動上書きする（毎日走ることで徐々に置換）。
@@ -130,6 +138,13 @@ async def main():
         log("  financial_records へ株価・バリュエーションを反映 開始")
         n_updated = update_market_data_from_history(db4)
         log(f"  financial_records.stock_price: {n_updated}社 更新")
+
+        # 正味の鮮度を run 間で比較できる形で残す（#474）。gap-fill の「投入行数」は
+        # 取り直しを含むため鮮度の指標にならない。p50 は DB 側集約だけで出る（Egress 数行）。
+        fr = price_freshness(db4)
+        log(f"  株価鮮度: p50={fr.get('price_asof_p50')} / p05={fr.get('price_asof_p05')}"
+            f" / max={fr.get('price_asof_max')} / level={fr.get('level')}"
+            f"（{fr.get('n_codes')}銘柄・5営業日超の遅れ {fr.get('n_stale_over_5d')}銘柄）")
     finally:
         db4.close()
     log(f"[4/4] 市場データ 完了 ({(time.time()-t0)/60:.1f}分経過)")

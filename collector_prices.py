@@ -6,7 +6,7 @@ import io
 import zipfile
 import asyncio
 from collections import defaultdict
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Optional, Callable
 from urllib.parse import quote as urlquote  # fetch_yahoo_history のローカル変数 quote と衝突回避
 
@@ -1059,15 +1059,44 @@ async def backfill_historical_stock_prices_yahoo(
     return updated
 
 
+JST = timezone(timedelta(hours=9))
+
+
+def last_closed_session(now_jst: datetime) -> date:
+    """閉場済みの最新 JST 営業日を返す（#474）。
+
+    祝日カレンダーは持たない（土日だけを除く）。祝日は「営業日」として返るため、
+    祝日明けの夜は全社が取得対象へ落ちる——無駄だが**安全側**（取りに行きすぎるだけで
+    鮮度は落ちない）。祝日を推定して skip 側へ倒すと、推定を外したときに欠測が例外を
+    出さずに残る。祝日を営業日として数える方針は `database.business_days_between`
+    と揃えてある。
+
+    時刻は引数で受け取る（関数内で `datetime.now()` を呼ばない）＝テストで注入できる。
+    """
+    d = now_jst.date()
+    if now_jst.time() < MARKET_CLOSE_JST:
+        d -= timedelta(days=1)          # 当日はまだ引けていない
+    while d.weekday() >= 5:             # 土(5) / 日(6)
+        d -= timedelta(days=1)
+    return d
+
+
 async def fill_recent_stock_price_gap_yahoo(
     db,
     gap_days: int = 7,
     on_progress: Optional[Callable[[int, int, str], None]] = None,
+    now_jst: Optional[datetime] = None,
 ) -> dict:
-    """各社の株価が gap_days 日以上古い場合に、Yahoo Finance から不足期間を
+    """各社の株価が最新セッションに追いついていない場合に、Yahoo Finance から不足期間を
     **銘柄ごとに**補完して株価テーブルへ追記する。
     差分収集（incremental）後のフォールバックとして使用。
-    J-Quants データが存在する行は上書きしない（ON CONFLICT DO NOTHING）。
+
+    **`gap_days=0`（毎晩の鮮度確保）のときの基準は「閉場済みの最新 JST 営業日」**
+    （`last_closed_session`・Issue #474）。旧実装は `(date.today() - last_d).days <= 0`
+    ＝ランナーの **UTC 日付**との比較だったため、その日のセッションがまだ無い時間帯・
+    非営業日には全社が対象になった。JST 日曜 03:47 起動の run 31272807314 は、全社が
+    既に持つ金曜バーを 4,437社ぶん取り直すだけで 2時間11分を使っている。
+    `gap_days > 0` の呼び出しは従来どおり「今日から何日古いか」で判定する。
 
     起点は銘柄別の最終 trade_date（Issue #415）。全社横断の最大日を1つ選んで全社へ
     適用すると、収集が数日止まった後に一部銘柄だけ先行して復旧した場合、遅れている
@@ -1082,7 +1111,20 @@ async def fill_recent_stock_price_gap_yahoo(
     プロバイダー固有ロジック（Yahoo 逐次フェッチ）を _yahoo_batch_gen に分離し、
     _price_collection_driver の共通フレームで DB 保存・trim を一元管理する。
     """
-    today = date.today()
+    today   = date.today()
+    now_jst = now_jst or datetime.now(JST)
+    session = last_closed_session(now_jst)
+
+    # 基準セッションで対象を絞るのは gap_days=0（毎晩の鮮度確保）のときだけ。
+    use_session = gap_days == 0
+    # 安全弁: 基準が異常に古く出たら絞らず全社取得へ倒す。現行の last_closed_session は
+    # 最大でも3日（日曜→金曜）しか遡らないので**この分岐は通常発火しない**。
+    # 祝日カレンダー導入などで遡り幅を広げたときに、「誰も取りに行かない」（#415 の静かな
+    # 鮮度死）へ倒れないようにするための不変条件として置く。
+    if use_session and session < now_jst.date() - timedelta(days=SESSION_SANITY_DAYS):
+        log.warning("fill_recent_stock_price_gap_yahoo: 基準セッション %s が JST %s に対して"
+                    "古すぎるため全社取得へフォールバック", session, now_jst.date())
+        use_session = False
 
     # 銘柄別の最終 trade_date。daily は保持窓（DAILY_WINDOW_DAYS）で trim されるため、
     # 長期停止した社は weekly 側にしか残らない。両者の新しい方を起点にする。
@@ -1096,7 +1138,7 @@ async def fill_recent_stock_price_gap_yahoo(
     )
     if not latest_daily and not latest_weekly:
         log.info("fill_recent_stock_price_gap_yahoo: 株価データが空のためスキップ")
-        return {"skipped": True, "reason": "empty"}
+        return {"skipped": True, "reason": "empty", "session": session.isoformat()}
 
     # 起点の下限。これより過去への遡及は backfill_weekly_history_yahoo の管轄
     # （daily 保持窓を超える取得を毎日走らせない＝暴走ガード）。
@@ -1114,45 +1156,76 @@ async def fill_recent_stock_price_gap_yahoo(
         _d, _w = latest_daily.get(edinet_code), latest_weekly.get(edinet_code)
         last = max(x for x in (_d, _w) if x) if (_d or _w) else None
         if last is None:
-            start = floor_d                       # 株価未収集の社は保持窓の先頭から
+            last_iso, start = None, floor_d       # 株価未収集の社は保持窓の先頭から
         else:
             last_d = date.fromisoformat(last[:10])
-            if (today - last_d).days <= gap_days:
-                continue                          # この社はギャップなし
-            start = max(last_d + timedelta(days=1), floor_d)
-        to_fetch.append((sec_code, edinet_code, start.strftime("%Y%m%d")))
+            if use_session:
+                if last_d >= session:
+                    continue                      # 最新セッションぶんを既に持っている
+                # 直近セッションを取り直して、場中実行が書いた暫定終値を確定値で潰す。
+                # ON CONFLICT DO UPDATE なのでリクエスト数は増えず窓が広がるだけ。
+                start = max(last_d + timedelta(days=1 - PRICE_REFRESH_TAIL_DAYS), floor_d)
+            else:
+                if (today - last_d).days <= gap_days:
+                    continue                      # この社はギャップなし
+                start = max(last_d + timedelta(days=1), floor_d)
+            last_iso = last_d.isoformat()
+        to_fetch.append((sec_code, edinet_code, start.strftime("%Y%m%d"), last_iso))
 
     total = len(to_fetch)
     if total == 0:
-        log.info(f"fill_recent_stock_price_gap_yahoo: 全 {len(companies)} 社ギャップなし")
-        return {"skipped": True, "reason": "no_gap", "companies": 0}
+        # 従来は total==0 が事実上起きなかったため trim は driver 末尾だけにあった。
+        # #474 以降は週末・祝日明けにここで抜けるので、保持窓の trim をここでも回す
+        # （skip した夜だけ daily が伸び続けるのを避ける）。
+        with db_timeouts(db, statement=HEAVY_STATEMENT_TIMEOUT):
+            trim_daily(db)
+        log.info(f"fill_recent_stock_price_gap_yahoo: 全 {len(companies)} 社が最新セッション"
+                 f" {session} に追いついている（取得なし）")
+        return {"skipped": True, "reason": "no_gap", "companies": 0,
+                "session": session.isoformat()}
 
-    to_fetch.sort()          # 銘柄順に部分反映されるよう順序を決定的にする
+    to_fetch.sort(key=lambda x: (x[0], x[1]))   # 銘柄順に部分反映されるよう順序を決定的にする
     d_from_min = min(x[2] for x in to_fetch)
-    d_to = today.strftime("%Y%m%d")
+    d_to = max(today, session).strftime("%Y%m%d")
+    # 取り込む上限。use_session=False（安全弁が発火・legacy 呼び出し）のときは today まで。
+    # いずれの場合も**進行中セッションのバーと未来日行は落ちる**（下の _yahoo_batch_gen）。
+    bar_cap = (session if use_session else max(now_jst.date(), today)).isoformat()
     log.info(f"fill_recent_stock_price_gap_yahoo: {total}/{len(companies)}社を補完"
-             f"（最古起点 {d_from_min} 〜 {d_to}）")
+             f"（基準セッション {session} / JST {now_jst:%Y-%m-%d %H:%M} ・"
+             f"最古起点 {d_from_min} 〜 {d_to}）")
 
-    async def _yahoo_batch_gen(session):
-        for i, (sec_code, edinet_code, d_from) in enumerate(to_fetch, 1):
-            rows = await fetch_yahoo_history(session, f"{sec_code}.T", d_from, d_to)
-            # ギャップ補完は各社の最終日より後の新規日付が対象のため衝突は稀。
+    n_new = 0        # 従来の最終日より後の日付＝正味の新規行。投入行数とは別に数える（#474）
+
+    async def _yahoo_batch_gen(http):
+        nonlocal n_new
+        for i, (sec_code, edinet_code, d_from, last_iso) in enumerate(to_fetch, 1):
+            rows = await fetch_yahoo_history(http, f"{sec_code}.T", d_from, d_to)
+            # bar_cap で進行中セッションのバーを捨てる（#474）。Yahoo の interval=1d は
+            # 場中でもその日の**途中経過**を1本返す。J-Quants 無料は直近12週を配信しないので
+            # 暫定値のまま確定せず、対象社を絞った状態では上書きの機会も来ない。
             records = [
                 {"edinet_code": edinet_code, "trade_date": r["trade_date"],
                  "close": r["close"], "volume": r.get("volume")}
-                for r in rows if r["close"]
+                for r in rows if r["close"] and r["trade_date"][:10] <= bar_cap
             ] if rows else []
+            if last_iso is None:
+                n_new += len(records)
+            else:
+                n_new += sum(1 for r in records if r["trade_date"][:10] > last_iso)
             if on_progress and i % PROGRESS_REPORT_BATCH == 0:
                 on_progress(i, total, f"[Yahoo gap-fill {i}/{total}]")
             yield records
             await asyncio.sleep(YAHOO_STOCK_RATE_SLEEP)
 
-    async with httpx.AsyncClient(timeout=60) as session:
-        _, upserted = await _price_collection_driver(db, _yahoo_batch_gen(session))
+    async with httpx.AsyncClient(timeout=60) as http:
+        _, upserted = await _price_collection_driver(db, _yahoo_batch_gen(http))
 
-    log.info(f"fill_recent_stock_price_gap_yahoo: {upserted}件を株価テーブルへ集約保存")
-    return {"skipped": False, "upserted": upserted, "companies": total,
-            "from": d_from_min, "to": d_to}
+    # upserted は record_prices_batch の戻り値＝**投入行数**であって新規行数ではない
+    # （ON CONFLICT DO UPDATE）。2026-08-08 の「3,677件 追加」は実は全社ぶんの取り直しだった。
+    log.info(f"fill_recent_stock_price_gap_yahoo: {upserted}件を株価テーブルへ集約保存"
+             f"（うち新規日付 {n_new}件）")
+    return {"skipped": False, "upserted": upserted, "new_rows": n_new, "companies": total,
+            "from": d_from_min, "to": d_to, "session": session.isoformat()}
 
 
 async def backfill_weekly_history_yahoo(

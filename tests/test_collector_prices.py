@@ -3,11 +3,13 @@
 対象:
   - fetch_fred_series: FRED レスポンスのパース・欠損スキップ・エラー処理
   - _price_collection_driver: 保存失敗の再試行とタイムアウト引き上げ（#470）
+  - last_closed_session: Yahoo ギャップ補完の基準となる JST 営業日（#474）
 """
 import asyncio
 import json
 import os
 import sys
+from datetime import date, datetime, timedelta
 
 import httpx
 import pytest
@@ -249,3 +251,43 @@ class TestPriceBatchRetry:
         assert (cancelled, total) == (True, 1)
         assert calls["trim"] == 0
         assert db.commits == 1
+
+
+# ── last_closed_session（#474）──────────────────────────────────────────────
+
+class TestLastClosedSession:
+    """閉場済みの最新 JST 営業日。
+
+    毎晩の Yahoo ギャップ補完はこの日付を基準に対象社を絞る。旧実装は
+    ランナーの **UTC 日付**と比べていたため、その日のセッションがまだ無い時間帯・
+    非営業日には全社が対象になっていた（run 31272807314 で 4,437社 / 2h11m）。
+    """
+
+    def _at(self, y, m, d, hh, mm=0):
+        return cp.last_closed_session(datetime(y, m, d, hh, mm, tzinfo=cp.JST))
+
+    def test_weekday_before_close_uses_previous_day(self):
+        """定時実行（JST 03:00）はまだ当日が引けていない → 前営業日。"""
+        assert self._at(2026, 8, 6, 3) == date(2026, 8, 5)      # 木03:00 → 水
+
+    def test_weekday_after_close_uses_same_day(self):
+        assert self._at(2026, 8, 6, 16) == date(2026, 8, 6)     # 木16:00 → 木
+
+    def test_exactly_at_market_close_boundary(self):
+        """15:10 ちょうどは「引けた」側。大引け15:00＋Yahoo 反映の余裕。"""
+        assert self._at(2026, 8, 6, 15, 10) == date(2026, 8, 6)
+        assert self._at(2026, 8, 6, 15, 9)  == date(2026, 8, 5)
+
+    def test_saturday_and_sunday_fall_back_to_friday(self):
+        assert self._at(2026, 8, 8, 3)  == date(2026, 8, 7)     # 土03:00 → 金
+        assert self._at(2026, 8, 8, 20) == date(2026, 8, 7)     # 土20:00 → 金（土は非営業）
+        assert self._at(2026, 8, 9, 3)  == date(2026, 8, 7)     # 日03:00 → 金
+
+    def test_monday_early_morning_falls_back_to_friday(self):
+        """実害が出ていた回。JST 月曜 03:00 の基準は金曜であって日曜ではない。"""
+        assert self._at(2026, 8, 10, 3) == date(2026, 8, 7)
+
+    def test_never_returns_a_weekend(self):
+        base = datetime(2026, 8, 3, 0, 0, tzinfo=cp.JST)
+        for h in range(24 * 14):
+            assert cp.last_closed_session(base + timedelta(hours=h)).weekday() < 5

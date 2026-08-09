@@ -5,7 +5,7 @@
 import asyncio
 import os
 import sys
-from datetime import date, timedelta
+from datetime import date, datetime, time as dtime, timedelta
 from unittest.mock import AsyncMock, patch
 
 import pandas as pd
@@ -14,6 +14,18 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from collector import fill_recent_stock_price_gap_yahoo, refill_cf_from_xbrl
+from collector_prices import JST, PRICE_REFRESH_TAIL_DAYS
+
+
+def _monday_anchor():
+    """「直近の月曜 03:00 JST」相当の (now_jst, session) を返す。
+
+    実行日に依存せず基準セッションを金曜に固定するためのアンカー。実 `date.today()` の
+    2週間ほど手前に置き、`floor_d`（DAILY_WINDOW_DAYS のクリップ）に触れないようにする。
+    """
+    base = date.today() - timedelta(days=14)
+    monday = base + timedelta(days=(7 - base.weekday()) % 7)
+    return datetime.combine(monday, dtime(3, 0), JST), monday - timedelta(days=3)
 
 
 # ── refill_cf_from_xbrl (#95) ─────────────────────────────────────────────
@@ -150,8 +162,9 @@ class TestFillRecentStockPriceGapYahoo:
         全社横断の max を1つ選んで全社に適用すると、先行して復旧した1銘柄の日付が
         遅延銘柄にも使われ、遅延銘柄の欠測期間が永久に埋まらない（2026-07 の実障害）。
         """
-        fresh = (date.today() - timedelta(days=1)).isoformat()   # 先行復旧した社
-        stale = (date.today() - timedelta(days=20)).isoformat()  # 19日分遅れている社
+        now_jst, session = _monday_anchor()
+        fresh = (session - timedelta(days=1)).isoformat()   # 1営業日ぶん遅れている社
+        stale = (session - timedelta(days=20)).isoformat()  # 大きく遅れている社
         db.add(make_company(edinet_code="E00001", sec_code="1001"))
         db.add(make_company(edinet_code="E00002", sec_code="1002"))
         db.add(make_price(edinet_code="E00001", trade_date=fresh))
@@ -160,17 +173,114 @@ class TestFillRecentStockPriceGapYahoo:
 
         seen = {}
 
-        async def _fake_fetch(session, ticker, d_from, d_to):
+        async def _fake_fetch(http, ticker, d_from, d_to):
             seen[ticker] = d_from
             return []
 
+        tail = timedelta(days=PRICE_REFRESH_TAIL_DAYS - 1)
         with patch("collector_prices.fetch_yahoo_history", new=_fake_fetch):
-            self._run(fill_recent_stock_price_gap_yahoo(db, gap_days=0))
+            self._run(fill_recent_stock_price_gap_yahoo(db, gap_days=0, now_jst=now_jst))
 
-        # 遅延銘柄は自分の最終日の翌日から取りに行く（全社 max の翌日ではない）
-        assert seen["1002.T"] == (date.fromisoformat(stale) + timedelta(days=1)).strftime("%Y%m%d")
-        # 先行銘柄は自分の最終日の翌日から
-        assert seen["1001.T"] == (date.fromisoformat(fresh) + timedelta(days=1)).strftime("%Y%m%d")
+        # 遅延銘柄は自分の最終日を起点にする（全社 max ではない）。#474 以降は
+        # 暫定終値を潰すため tail ぶん手前へ倒す。
+        assert seen["1002.T"] == (date.fromisoformat(stale) - tail).strftime("%Y%m%d")
+        assert seen["1001.T"] == (date.fromisoformat(fresh) - tail).strftime("%Y%m%d")
+
+    def test_skips_companies_already_at_latest_session(self, db, make_company, make_price):
+        """基準は「閉場済みの最新 JST 営業日」（#474）。
+
+        旧実装は UTC の `date.today()` と比べていたため、JST 日曜 03:47 起動の
+        run 31272807314 は全社が既に持つ金曜バーを 4,437社ぶん取り直して 2h11m を使った。
+        """
+        now_jst, session = _monday_anchor()          # 月曜 03:00 JST → session=金曜
+        db.add(make_company(edinet_code="E00001", sec_code="1001"))
+        db.add(make_company(edinet_code="E00002", sec_code="1002"))
+        db.add(make_price(edinet_code="E00001", trade_date=session.isoformat()))
+        db.add(make_price(edinet_code="E00002", trade_date=session.isoformat()))
+        db.commit()
+
+        seen = []
+
+        async def _fake_fetch(http, ticker, d_from, d_to):
+            seen.append(ticker)
+            return []
+
+        with (
+            patch("collector_prices.fetch_yahoo_history", new=_fake_fetch),
+            patch("collector_prices.trim_daily", return_value=0) as trim,
+        ):
+            result = self._run(
+                fill_recent_stock_price_gap_yahoo(db, gap_days=0, now_jst=now_jst))
+
+        assert seen == []                            # Yahoo を1回も叩かない
+        assert result["skipped"] is True
+        assert result["reason"] == "no_gap"
+        assert result["session"] == session.isoformat()
+        # 取得なしでも保持窓の trim は回す（skip した夜だけ daily が伸びない）
+        assert trim.call_count == 1
+
+    def test_drops_in_progress_session_bar(self, db, make_company, make_price):
+        """場中に走った run が「進行中バー」を終値として書かないこと（#474）。
+
+        Yahoo の interval=1d は場中でもその日の途中経過を1本返す。J-Quants 無料は
+        直近12週を配信しないため暫定値は訂正されず、対象社を絞ると上書きの機会も来ない。
+        """
+        anchor, _ = _monday_anchor()
+        now_jst = anchor + timedelta(days=1, hours=8)     # 火曜 11:00 JST ＝ 場中
+        session = now_jst.date() - timedelta(days=1)      # 引け済みは前日（月曜）
+        db.add(make_company(edinet_code="E00001", sec_code="1001"))
+        db.add(make_price(edinet_code="E00001",
+                          trade_date=(session - timedelta(days=1)).isoformat()))
+        db.commit()
+
+        async def _fake_fetch(http, ticker, d_from, d_to):
+            return [
+                {"trade_date": session.isoformat(), "close": 1500.0, "volume": 10},
+                # 進行中セッション（当日）の途中経過。これが入ってはいけない。
+                {"trade_date": now_jst.date().isoformat(), "close": 1499.0, "volume": 1},
+            ]
+
+        saved = []
+        # record_prices_batch は Postgres 専用（pg_insert）のため保存側はモックする。
+        with (
+            patch("collector_prices.fetch_yahoo_history", new=_fake_fetch),
+            patch("collector_prices.record_prices_batch",
+                  side_effect=lambda _db, batch, **kw: saved.extend(batch) or len(batch)),
+            patch("collector_prices.trim_daily", return_value=0),
+        ):
+            result = self._run(
+                fill_recent_stock_price_gap_yahoo(db, gap_days=0, now_jst=now_jst))
+
+        assert [r["trade_date"] for r in saved] == [session.isoformat()]
+        assert result["new_rows"] == 1
+
+    def test_falls_back_to_all_companies_when_session_too_old(
+            self, db, make_company, make_price, caplog):
+        """基準セッションが異常に古いときは絞らず全社取得へ倒す（#474 の安全弁）。
+
+        判定側の異常が「誰も取りに行かない」＝ #415 の静かな鮮度死へ倒れないこと。
+        """
+        now_jst, session = _monday_anchor()
+        db.add(make_company(edinet_code="E00001", sec_code="1001"))
+        db.add(make_price(edinet_code="E00001", trade_date=session.isoformat()))
+        db.commit()
+
+        seen = []
+
+        async def _fake_fetch(http, ticker, d_from, d_to):
+            seen.append(ticker)
+            return []
+
+        stale_session = session - timedelta(days=30)
+        with (
+            patch("collector_prices.last_closed_session", return_value=stale_session),
+            patch("collector_prices.fetch_yahoo_history", new=_fake_fetch),
+            caplog.at_level("WARNING", logger="collector"),
+        ):
+            self._run(fill_recent_stock_price_gap_yahoo(db, gap_days=0, now_jst=now_jst))
+
+        assert seen == ["1001.T"]                    # skip 側へ倒れていない
+        assert "フォールバック" in caplog.text
 
     def test_skips_only_companies_without_gap(self, db, make_company, make_price):
         """gap_days の判定も銘柄別。ギャップのある社だけが取得対象になる。"""

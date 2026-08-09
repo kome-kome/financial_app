@@ -330,10 +330,14 @@ async def main(years_back: int, collect_only: bool = False,
                 on_progress=lambda c, t, m: log(m) if c % 500 == 0 or "完了" in m else None,
             )
             if gap_result.get("skipped"):
-                log(f"  Yahoo Finance gap-fill: スキップ（{gap_result.get('reason')}）")
+                log(f"  Yahoo Finance gap-fill: スキップ（{gap_result.get('reason')}"
+                    f"・基準セッション {gap_result.get('session')}）")
             else:
-                log(f"  Yahoo Finance gap-fill: {gap_result.get('upserted', 0)}件 追加"
-                    f"（{gap_result.get('from')} 〜 {gap_result.get('to')}・{gap_result.get('companies')}社）")
+                # upserted は**投入行数**（ON CONFLICT DO UPDATE）。正味の増分は new_rows（#474）。
+                log(f"  Yahoo Finance gap-fill: {gap_result.get('upserted', 0)}件 投入"
+                    f"（うち新規日付 {gap_result.get('new_rows', 0)}件・"
+                    f"{gap_result.get('from')} 〜 {gap_result.get('to')}・"
+                    f"{gap_result.get('companies')}社・基準セッション {gap_result.get('session')}）")
 
             # J-Quants 側の障害（境界403・レート制限等）で鮮度確保と PER/PBR 反映を
             # 落とさないよう、この呼び出しだけは失敗を握って継続する（#425）。

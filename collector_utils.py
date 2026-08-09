@@ -6,6 +6,7 @@
 import os
 import logging
 import re
+from datetime import time as dtime
 from typing import Optional
 
 from dotenv import load_dotenv
@@ -40,6 +41,21 @@ JQUANTS_DISCLOSURE_DELAY_DAYS = 84   # /fins/summary 無料プランの配信遅
 YAHOO_STOCK_RATE_SLEEP = 0.5   # Yahoo Finance 銘柄別取得のリクエスト間隔（秒）
                                # 銘柄ごとに1リクエスト。3800社×0.5s ≈ 32分
 MAX_GAP_DAYS           = 30    # period_end から±30日以内の株価のみ採用（point_in_time マッチ）
+
+# --- Yahoo ギャップ補完の基準日（#474）-----------------------------------------
+# 判定を「ランナーの UTC 日付」から「閉場済みの最新 JST 営業日」へ移すための定数。
+# 旧判定 `(today_utc - last_d).days <= 0` は、**その日のセッションがまだ無い時間帯・
+# 非営業日には全社が対象**になる。JST 日曜 03:47 起動の run 31272807314 は、全社が
+# 既に持つ金曜バーを 4,437社ぶん取り直して 2時間11分を使った。
+MARKET_CLOSE_JST         = dtime(15, 10)  # 大引け 15:00 ＋ Yahoo 反映の余裕
+# 取得する社は起点をこの日数ぶん手前へ倒し、直近セッションを取り直す。
+# `record_prices_batch` は ON CONFLICT DO UPDATE なので、場中実行が書いた暫定終値が
+# あっても確定値で上書きされる。**Yahoo は1社1リクエストのため追加コストはゼロ**
+# （窓が広がるだけ・`fill_recent_stock_price_gap_yahoo` の docstring と同じ理屈）。
+PRICE_REFRESH_TAIL_DAYS  = 3
+# 基準セッションがこれ以上古く出たら判定を信用せず全社取得へ倒す。判定側の異常が
+# 「誰も取りに行かない」（＝#415 の静かな鮮度死）へ倒れるのを防ぐ安全弁。
+SESSION_SANITY_DAYS      = 5
                                # 実測：データ日は約8s、非営業日は約3s で応答。
                                # 無料プランの上限が約5リクエスト/60秒のため20s を確保して安全マージンを持たせる。
                                # データ日はダウンロードに~8秒かかるため追加待機ほぼゼロ。
