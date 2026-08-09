@@ -14,7 +14,7 @@ VIEW:
   financial_metrics  — 派生指標・Zスコア・成長率（financial_records から都度算出）
 """
 
-import os, gzip, json, logging, contextvars
+import os, gzip, json, logging, re, contextvars
 from contextlib import contextmanager
 from datetime import datetime, date, timedelta, timezone
 from pathlib import Path
@@ -56,6 +56,61 @@ engine = create_engine(
 )
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
+
+
+# ── タイムアウトの局所上書き（#470 / #471）────────────────────────────────────
+# Supabase の postgres ロールは `statement_timeout=2min` / `lock_timeout=0` が既定
+# （2026-08-09 実測）。この 2min は GHA↔Supabase の高レイテンシで走る重い1文
+# （一括 UPDATE・大量 upsert・VACUUM FULL）には足りず、
+#   - #470: 夜間差分収集が `update_market_data_from_history` で 2分16秒後に落ちた
+#   - #471: 週次 VACUUM FULL が 2分01秒で打ち切られた（過去実測は 92MB→43MB で 9.1秒）
+# として**同じ日に2本のワークフローを落とした**。
+#
+# 引き上げは **その文の実行中だけ**にする。プロセス全体やロール既定を書き換えると、
+# 想定外の暴走クエリまで 2min で止まらなくなり、API/分析経路の安全網が消える。
+#
+# `lock_timeout` も併せて明示できる。既定の 0（無制限待ち）は、ACCESS EXCLUSIVE を取る
+# 処理が「取れるまで待ち続けて statement_timeout で殺される」形になり、**待ち超過なのか
+# 処理自体が重いのかログから区別できない**（#471 がまさにこれ・ADR-0025 に同型の前例）。
+_TIMEOUT_VALUE_RE = re.compile(r"^(0|\d+(ms|s|min))$")
+
+
+@contextmanager
+def db_timeouts(db, *, statement: Optional[str] = None, lock: Optional[str] = None):
+    """`with` の内側だけ Postgres の statement_timeout / lock_timeout を差し替える。
+
+    db: Session でも Connection でもよい（どちらも `.execute()` を持つ）。
+    値は `'0'`（無制限）/ `'90s'` / `'10min'` 形式。**Postgres 以外では no-op**
+    （テストは SQLite で走るため、SET を投げると全件落ちる）。
+
+    抜けるときは `RESET` で必ず戻す。接続はプールへ返って他の処理に再利用されるため、
+    差し替えたまま返すと引き上げが無関係な経路へ漏れる。例外で aborted transaction に
+    なっていると RESET 自体が失敗するが、その場合は呼び出し側の rollback が
+    `SET`（トランザクショナル）ごと巻き戻すので放置してよい。
+    """
+    for v in (statement, lock):
+        if v is not None and not _TIMEOUT_VALUE_RE.match(v):
+            raise ValueError(f"タイムアウト値の書式が不正: {v!r}（例 '0' / '90s' / '10min'）")
+
+    bind = getattr(db, "bind", None) or db
+    if bind.dialect.name != "postgresql":
+        yield
+        return
+
+    applied = []
+    for name, value in (("statement_timeout", statement), ("lock_timeout", lock)):
+        if value is None:
+            continue
+        db.execute(text(f"SET {name} = '{value}'"))
+        applied.append(name)
+    try:
+        yield
+    finally:
+        for name in applied:
+            try:
+                db.execute(text(f"RESET {name}"))
+            except Exception:   # aborted transaction 中。rollback が SET ごと巻き戻す
+                log.debug("RESET %s に失敗（rollback 待ち）", name)
 
 
 # ── 1. 企業マスタ ──────────────────────────────────────────────────────────

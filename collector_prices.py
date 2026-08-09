@@ -23,7 +23,7 @@ from database import (
     build_xbrl_map,
     StockPriceDaily, StockPriceWeekly, DAILY_WINDOW_DAYS,
     record_prices_batch, trim_daily, latest_prices,
-    upsert_macro_batch, sync_active_status,
+    upsert_macro_batch, sync_active_status, db_timeouts,
 )
 
 from collector_utils import *
@@ -115,6 +115,32 @@ async def fetch_stock_history_stooq(
     )
 
 
+async def _save_price_batch_with_retry(db, batch: list) -> int:
+    """1バッチを保存する。失敗しても数回粘る（#470）。
+
+    保存の失敗は**そのバッチの株価が丸ごと落ちる**が、以前は warning 1行で先へ進んでいた。
+    2026-08-08 の夜間 run では pooler 枯渇（ECHECKOUTTIMEOUT）2回と statement_timeout 1回が
+    この経路で起き、鮮度の穴が静かに残った。どちらも一過性なので待って再試行する。
+    全試行を使い切ったときだけ、従来どおり warning を残して次バッチへ進む
+    （1バッチの取りこぼしで収集全体を落とさない方針は維持）。
+    """
+    for attempt in range(1, PRICE_BATCH_MAX_ATTEMPTS + 1):
+        try:
+            with db_timeouts(db, statement=HEAVY_STATEMENT_TIMEOUT):
+                return record_prices_batch(db, batch, trim=False)
+        except Exception as e:
+            db.rollback()   # aborted transaction をリセット。次の試行・trim_daily を救済
+            if attempt == PRICE_BATCH_MAX_ATTEMPTS:
+                log.warning("株価バッチ保存失敗（%d回試行して断念・%d件）: %s",
+                            attempt, len(batch), e)
+                return 0
+            wait = PRICE_BATCH_RETRY_SLEEP * attempt
+            log.warning("株価バッチ保存失敗（%d/%d・%d秒後に再試行）: %s",
+                        attempt, PRICE_BATCH_MAX_ATTEMPTS, wait, e)
+            await asyncio.sleep(wait)
+    return 0
+
+
 async def _price_collection_driver(db, batch_gen) -> tuple[bool, int]:
     """
     Provider-agnostic driver: iterates batch_gen, saves each batch via
@@ -130,12 +156,9 @@ async def _price_collection_driver(db, batch_gen) -> tuple[bool, int]:
             db.commit()
             return True, total
         if batch:
-            try:
-                total += record_prices_batch(db, batch, trim=False)
-            except Exception as e:
-                log.warning("株価バッチ保存失敗: %s", e)
-                db.rollback()  # aborted transaction をリセット。次バッチ・trim_daily を救済
-    trim_daily(db)
+            total += await _save_price_batch_with_retry(db, batch)
+    with db_timeouts(db, statement=HEAVY_STATEMENT_TIMEOUT):
+        trim_daily(db)      # 全社横断 DELETE。件数次第で 2min を超えうる
     return False, total
 
 
@@ -934,10 +957,15 @@ def update_market_data_from_history(db, point_in_time: bool = False) -> int:
         最新レコードは常に最新株価で上書きする。
 
     戻り値: 更新した財務レコード数
+
+    読み（数万行のスキャン）も書き（`UPDATE ... FROM (VALUES ...)` のチャンク）も
+    Supabase 既定の statement_timeout=2min を超えうるので、この関数の実行中だけ
+    引き上げる（#470: 2026-08-08 の夜間差分収集はここで 2分16秒後に落ちた）。
     """
-    if not point_in_time:
-        return _update_market_data_latest(db)
-    return _update_market_data_point_in_time(db)
+    with db_timeouts(db, statement=HEAVY_STATEMENT_TIMEOUT):
+        if not point_in_time:
+            return _update_market_data_latest(db)
+        return _update_market_data_point_in_time(db)
 
 
 async def backfill_historical_stock_prices_yahoo(
@@ -1201,6 +1229,9 @@ async def backfill_weekly_history_yahoo(
                     # 1社ごとに trim=True：daily を都度 trim して保持窓外の過去を残さない
                     upserted += record_prices_batch(db, records, trim=True)
                 except Exception as e:
+                    # rollback しないと aborted transaction が次社以降へ持ち越され、
+                    # 1社の失敗が残り全社を道連れにする（#470 で同型の握り方を点検）
+                    db.rollback()
                     log.warning("週次backfill バッチ保存失敗 %s: %s", sec_code, e)
 
             if on_progress and (i % YAHOO_BACKFILL_PROGRESS_BATCH == 0 or i == total):

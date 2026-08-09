@@ -25,7 +25,14 @@ name: "[定常] DBメンテナンス（VACUUM FULL・週次）"
 #
 # ✅ 段階導入完了（2026-07-12）: workflow_dispatch でローカル・GitHub Actions
 # （Azure IP）双方から Supabase pooler 経由の VACUUM FULL 正常完了を確認済み
-# （所要 8〜9秒・対象は stock_price_daily のみ・データ変更なし）。定時自動実行を有効化。
+# （対象は stock_price_daily のみ・データ変更なし）。定時自動実行を有効化。
+#
+# ⏱ 所要は伸びている（Issue #471）: 43〜92MB で 7.6〜10.4秒（2026-07-18〜08-01）→
+# 79MB で **37.4秒**（2026-08-09 手動実行）。2026-08-08 の定時実行は Supabase 既定の
+# statement_timeout=2min にきっかり 2分01秒で殺されて失敗した。_pipeline_vacuum.py 側で
+# statement_timeout を外した（ADR-0032）ため、**時間の歯止めは下の timeout-minutes だけ**に
+# なっている。所要が数分規模へ伸びたらこの値を見直すこと。
+# ロック待ちは lock_timeout=90s ＋ 120秒あけて最大3回の再試行で吸収する（最悪 約8分）。
 
 on:
   schedule:

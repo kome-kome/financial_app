@@ -36,6 +36,7 @@
 
 | [0030](0030-buy-side-mu-wiring-default-off.md) | 買い推奨へ μ̂ を opt-in 結線（`METRICS` へ `mu`＋`mu_source`）。**既定は OFF**＝プリセットは `mu` 重みを持たず既定経路は不変。重みだけ付けて出所未指定は reject、backtest は as-of 再現不能につき `mu` を reject | #423 | accepted（2026-08-08） |
 | [0031](0031-heavy-plugins-require-registered-automation.md) | 重い計算は GitHub Actions が回し Render は読むだけ。**`heavy=True` は `HEAVY_AUTOMATION` への登録を必須**にし（ワークフロー名 or `exempt: 理由`）、未登録・空理由・実在しないワークフローを CI で落とす。「heavy を足したが自動実行が無い」は失敗しないため通知で拾えない | #423 | accepted（2026-08-09） |
+| [0032](0032-statement-timeout-raised-per-statement.md) | Supabase 既定の `statement_timeout=2min` / `lock_timeout=0` は重い1文に足りない（同日に2本のワークフローが落ちた）。引き上げは `db_timeouts` で**その文の実行中だけ**・ロール既定は変えない。ロックを取る処理は `lock_timeout` を有限にして原因を確定させ、VACUUM の上限はワークフローの `timeout-minutes` が持つ | #470, #471 | accepted（2026-08-09） |
 
 ## 運用
 

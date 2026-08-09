@@ -2,6 +2,7 @@
 
 対象:
   - fetch_fred_series: FRED レスポンスのパース・欠損スキップ・エラー処理
+  - _price_collection_driver: 保存失敗の再試行とタイムアウト引き上げ（#470）
 """
 import asyncio
 import json
@@ -13,6 +14,7 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import collector_prices as cp
 from collector_prices import fetch_fred_series
 
 
@@ -129,3 +131,121 @@ class TestFetchFredSeries:
     @classmethod
     def _fetch(cls, handler):
         return cls._fetch_async(handler)
+
+
+# ── 株価保存ドライバの再試行（#470）──────────────────────────────────────────
+# 2026-08-08 の夜間差分収集は、この経路で pooler 枯渇（ECHECKOUTTIMEOUT）2回と
+# statement_timeout 1回を踏み、いずれも warning 1行だけ残してバッチを捨てていた。
+# 落ちた株価は「収集は成功扱い・データだけ穴」という形で残るため気づけない。
+
+class _FakeDialect:
+    name = "postgresql"
+
+
+class _FakeBind:
+    dialect = _FakeDialect()
+
+
+class _FakeDB:
+    bind = _FakeBind()
+
+    def __init__(self):
+        self.executed: list[str] = []
+        self.rollbacks = 0
+        self.commits = 0
+
+    def execute(self, stmt, params=None):
+        self.executed.append(str(stmt))
+
+    def rollback(self):
+        self.rollbacks += 1
+
+    def commit(self):
+        self.commits += 1
+
+
+async def _gen(batches):
+    for b in batches:
+        yield b
+
+
+def _drive(monkeypatch, db, batches, save_side_effects):
+    """record_prices_batch / trim_daily / sleep を差し替えて driver を回す。"""
+    calls = {"save": 0, "trim": 0, "slept": []}
+
+    def _save(_db, batch, trim=False):
+        calls["save"] += 1
+        effect = save_side_effects[min(calls["save"] - 1, len(save_side_effects) - 1)]
+        if isinstance(effect, Exception):
+            raise effect
+        return effect
+
+    monkeypatch.setattr(cp, "record_prices_batch", _save)
+    monkeypatch.setattr(cp, "trim_daily", lambda _db: calls.__setitem__("trim", calls["trim"] + 1))
+
+    async def _sleep(sec):
+        calls["slept"].append(sec)
+
+    monkeypatch.setattr(cp.asyncio, "sleep", _sleep)
+    cancelled, total = asyncio.run(cp._price_collection_driver(db, _gen(batches)))
+    return cancelled, total, calls
+
+
+ROW = [{"edinet_code": "E00001", "trade_date": "2026-08-07", "close": 100.0}]
+
+
+class TestPriceBatchRetry:
+
+    def test_transient_failure_is_retried_and_recovered(self, monkeypatch):
+        """1回目が落ちても再試行で保存され、件数が失われない。"""
+        db = _FakeDB()
+        err = RuntimeError("FATAL: (ECHECKOUTTIMEOUT) unable to check out connection")
+        _, total, calls = _drive(monkeypatch, db, [ROW], [err, 1])
+
+        assert total == 1
+        assert calls["save"] == 2
+        assert db.rollbacks == 1                       # 失敗のたびに aborted を解消
+        assert calls["slept"] == [cp.PRICE_BATCH_RETRY_SLEEP]
+
+    def test_backoff_grows_per_attempt(self, monkeypatch):
+        db = _FakeDB()
+        err = RuntimeError("statement timeout")
+        _, total, calls = _drive(monkeypatch, db, [ROW], [err, err, 3])
+
+        assert total == 3
+        assert calls["slept"] == [cp.PRICE_BATCH_RETRY_SLEEP, cp.PRICE_BATCH_RETRY_SLEEP * 2]
+
+    def test_gives_up_after_max_attempts_without_killing_collection(self, monkeypatch):
+        """使い切ったらそのバッチは捨てるが、後続バッチと trim は続ける（従来方針）。"""
+        db = _FakeDB()
+        err = RuntimeError("boom")
+        _, total, calls = _drive(monkeypatch, db, [ROW, ROW], [err] * 10)
+
+        assert total == 0
+        assert calls["save"] == cp.PRICE_BATCH_MAX_ATTEMPTS * 2
+        assert calls["trim"] == 1
+
+    def test_success_path_does_not_sleep(self, monkeypatch):
+        db = _FakeDB()
+        _, total, calls = _drive(monkeypatch, db, [ROW, ROW], [1, 1])
+
+        assert (total, calls["save"], calls["slept"]) == (2, 2, [])
+        assert db.rollbacks == 0
+
+    def test_statement_timeout_is_raised_for_save_and_trim(self, monkeypatch):
+        """保存と trim（全社横断 DELETE）はどちらも 2min を超えうる。"""
+        db = _FakeDB()
+        _drive(monkeypatch, db, [ROW], [1])
+
+        sets = [s for s in db.executed if s.startswith("SET statement_timeout")]
+        assert sets == [f"SET statement_timeout = '{cp.HEAVY_STATEMENT_TIMEOUT}'"] * 2
+        assert db.executed.count("RESET statement_timeout") == 2
+
+    def test_cancellation_sentinel_still_commits_and_stops(self, monkeypatch):
+        """None は中断合図。従来どおり commit して打ち切る。"""
+        db = _FakeDB()
+        cancelled, total, calls = _drive(monkeypatch, db, [ROW, None, ROW], [1, 1])
+
+        assert (cancelled, total) == (True, 1)
+        assert calls["trim"] == 0
+        assert db.commits == 1

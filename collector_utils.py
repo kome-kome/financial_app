@@ -51,6 +51,20 @@ PRICE_COMMIT_BATCH            = 200  # 株価レコード更新のコミット�
 # 1件1 UPDATE だと往復レイテンシに比例し、GHA↔Supabase では 42,289件で143分かかっていた。
 # 大きくするほど往復は減るが、1文の失敗で巻き戻る範囲も広がるためこの程度に留める。
 BULK_UPDATE_CHUNK             = 2000
+
+# --- 重い DB 文のタイムアウトと再試行（#470）------------------------------------
+# Supabase の postgres ロール既定 statement_timeout=2min は、GHA↔Supabase から走る
+# 株価 upsert（daily+weekly 再集約+trim の3文）と financial_records の一括 UPDATE には
+# 足りない。2026-08-08 の夜間差分収集は catchup の upsert とこの一括 UPDATE の両方で
+# 2min を踏み、後者で非ゼロ終了して nightly-scores チェーンごと止めた。
+# `db_timeouts`（database.py）で**その文の実行中だけ**引き上げる。
+HEAVY_STATEMENT_TIMEOUT       = "10min"
+# 保存の再試行。同日の run では Supabase pooler の枯渇
+# （FATAL ECHECKOUTTIMEOUT: unable to check out connection from the pool）も2回起きており、
+# どちらも1バッチぶんの株価が**警告だけ出して静かに落ちていた**。プール枯渇は一過性なので、
+# 間を空けて数回粘れば埋まる。
+PRICE_BATCH_MAX_ATTEMPTS      = 3
+PRICE_BATCH_RETRY_SLEEP       = 20   # 秒（試行ごとに倍化）
 MASTER_COMMIT_BATCH          = 200  # 企業マスタ保存のコミット間隔
 REPARSE_COMMIT_BATCH         = 100  # XBRL 再解析・CF 補完のコミット間隔
 MARKET_COMMIT_BATCH          = 50   # 市場データ（株価）更新のコミット間隔

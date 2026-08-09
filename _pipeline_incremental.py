@@ -125,6 +125,9 @@ async def main():
         except Exception as e:
             log(f"  J-Quants catchup 失敗（継続します）: {type(e).__name__}: {e}")
 
+        # 開始も残す（#470）。完了ログしか無かったため、2026-08-08 の失敗は
+        # 「catchup 完了の 2分16秒後に落ちた」から**推定**するしかなかった。
+        log("  financial_records へ株価・バリュエーションを反映 開始")
         n_updated = update_market_data_from_history(db4)
         log(f"  financial_records.stock_price: {n_updated}社 更新")
     finally:

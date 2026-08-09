@@ -302,7 +302,8 @@ Render ダッシュボードで管理。
 | 項目 | 制約値 | 設計への影響 |
 |---|---|---|
 | DB ストレージ | **500 MB** | `SKIP_XBRL_RAW=true` を維持＋株価は close-only 2本立て（下記「容量設計」） |
-| 接続数 | **最大60接続**（pgbouncer 経由） | 並列パイプライン実行を禁止。`max-parallel: 1` を維持 |
+| 接続数 | **最大60接続**（pgbouncer 経由） | 並列パイプライン実行を禁止。`max-parallel: 1` を維持。枯渇時は接続確立自体が `FATAL: (ECHECKOUTTIMEOUT) unable to check out connection from the pool after 15000ms in Session mode` で失敗する（`pool_pre_ping` では救えない＝**再試行で拾う**・#470） |
+| クエリのタイムアウト | **`statement_timeout=2min`** / `lock_timeout=0`（無制限待ち）/ `idle_in_transaction_session_timeout=0`（`postgres` ロールの既定・2026-08-09 実測） | GHA↔Supabase から走る重い1文（一括 UPDATE・大量 upsert・`VACUUM FULL`）はこの 2min に当たる（#470/#471 は**同じ日に2本のワークフローを落とした**）。引き上げは `db_timeouts`（database.py）で**その文の実行中だけ**行い、ロールやプロセス全体の既定は変えない。詳細は [GOTCHAS.md](GOTCHAS.md) |
 | 一時的 read-only 移行 | トランザクションが長すぎると自動移行 | `run_full_collection` は `MASTER_BATCH=200` 件ごとに commit |
 | プロジェクト停止 | **1週間アクセスなしで自動停止** | 長期不使用時は要注意 |
 | **Egress（転送量）** | **5 GB / 月** | 超過で全サービス restricted（402）＝2026-07 に検証系のフルロード反復で 61.2GB（1224%）まで出した実績あり。**日次で回るジョブは1回あたりの転送量が月次上限に直結する**（下記「Egress 設計」） |
@@ -332,7 +333,7 @@ Render ダッシュボードで管理。
 
 旧 `stock_price_history`（日次OHLCV全履歴）が約 359MB / 全体80% を占め、年約220MB で増加して 500MB 上限の主犯だった。**close-only の2本立て**へ移行して恒久対策とする：
 
-- **`stock_price_daily`**：直近 `DAILY_WINDOW_DAYS`（≒6か月）の日次終値のみ。収集のたびにローリング削除（trim）でサイズが頭打ち……のはずだが、DELETE ベースの trim は btree インデックス（`pk_stock_price_daily`/`ix_spd_trade_date`）を bloat させ続け、autovacuum は死領域をテーブル内で再利用するのみでファイルサイズは縮まない（**Issue #290**・実測: 2026-07-09 VACUUM FULL 直後 48MB→3日後 72MB）。週次 `vacuum-maintenance.yml`（VACUUM FULL・毎週自動実行）で物理サイズを頭打ちにする。チャートの日次ズーム・短期バックテスト用。
+- **`stock_price_daily`**：直近 `DAILY_WINDOW_DAYS`（≒6か月）の日次終値のみ。収集のたびにローリング削除（trim）でサイズが頭打ち……のはずだが、DELETE ベースの trim は btree インデックス（`pk_stock_price_daily`/`ix_spd_trade_date`）を bloat させ続け、autovacuum は死領域をテーブル内で再利用するのみでファイルサイズは縮まない（**Issue #290**・実測: 2026-07-09 VACUUM FULL 直後 48MB→3日後 72MB）。週次 `vacuum-maintenance.yml`（VACUUM FULL・毎週自動実行）で物理サイズを頭打ちにする。チャートの日次ズーム・短期バックテスト用。**VACUUM 本体の所要は伸びている**（43〜92MB で 7.6〜10.4秒／2026-07-18〜08-01 → **79MB で 37.4秒**／2026-08-09 手動実行・79MB→49MB・DB 426MB→395MB）。`statement_timeout` は `'0'` にして時間で殺さず、歯止めはワークフローの `timeout-minutes: 30` 側に置く（#471）。
 - **`stock_price_weekly`**：全履歴の週次集約（追記専用・trim しない）。`close_last`＋生集約 `volume_sum`/`turnover_sum`/`n_days` のみ保持し、**VWAP・相対流動性は派生**（保存しない）。チャート全期間・長期バックテスト・将来の予測モデル用。
 - 見通し：5年分 weekly ≈ 145MB、総計 ≈ 285MB / 500MB、+約37MB/年（runway 約6年）。書き込みは単一チョークポイント `record_prices_batch`（daily upsert→触れた週を weekly 再集約→trim）。
 
