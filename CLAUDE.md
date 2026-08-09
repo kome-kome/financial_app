@@ -11,6 +11,7 @@
 | [GOTCHAS.md](docs/GOTCHAS.md) | 既知のハマりどころ（XBRL / CF / capex / 時刻 / 業種 / 認証実装メモ / 進捗仕様） | 収集・分析の実装時 |
 | [DEPLOYMENT.md](docs/DEPLOYMENT.md) | Render デプロイ運用＋データ収集の自動/手動の仕組み＋外部サービス制約（GitHub Actions / Supabase / J-Quants） | デプロイ・収集・インフラ設計時 |
 | [MODELS.md](docs/MODELS.md) | 分析モデル解説＋モデル固有の制約 | 分析モデル変更時 |
+| [PLUGIN_REFERENCE.md](docs/PLUGIN_REFERENCE.md) | `plugins/` 各ファイルの実装リファレンス（内部契約・producer・heavy・実測値）。理論は MODELS.md が正本 | プラグイン実装を触るとき |
 | [M1_MACRO_MODEL_GUIDE.md](docs/M1_MACRO_MODEL_GUIDE.md) | M-1（マクロ×リスク-リターン推奨）の初心者向け副読本。予備知識ゼロから設計思想を解説。正式版は MODELS.md §9 | M-1 の考え方を噛み砕いて把握したいとき |
 | [SKILLS_AND_AGENTS.md](docs/SKILLS_AND_AGENTS.md) | スキル／エージェントの索引マニュアル | スラッシュコマンドや調査エージェントを使うとき |
 | [FUTURE_TASKS.md](docs/FUTURE_TASKS.md) | **Issue 運用ガイド＋設計制約**（残タスクの正本は GitHub Issues。本書はタスク実体を持たない）。完了項目は `docs/archive/IMPROVEMENTS.md` へ集約 | リファクタ着手・改善項目の参照時 |
@@ -76,8 +77,9 @@ pytest tests/test_utils.py  # 単一ファイル
 | `collector_prices.py` | 株価（stooq/J-Quants/Yahoo）・市場データ更新・マクロ収集 |
 | `collector_interim.py` | 半期(H1)財務収集（EDINET 半期報告書043A00/旧四半期Q2・period_type='H1'・Issue #219②） |
 | `collector_disclosures.py` | 会社予想（ガイダンス）開示収集（J-Quants `/fins/summary`・Issue #322）。`statement_disclosure` へ実績/予想値を蓄積し、`feature_disclosure.py` の特徴量化・`recommend_factor_premia.py` の因子プレミア推定の入力元となる |
-| `api.py` | FastAPI REST・SSE・回帰分析 |
-| `plugins/` | 分析モデル（自動検出方式）。詳細は [MODELS.md](docs/MODELS.md) |
+| `api.py` | FastAPI アプリ本体（HTMLページ配信・認証/CORSミドルウェア・`/health`）。REST ルート実体は `routers/` へ委譲 |
+| `routers/` | REST ルーター5本（`auth` / `collect` / `market` / `analysis` / `morning`）。エンドポイント定義の実体 |
+| `plugins/` | 分析モデル（自動検出方式）。理論は [MODELS.md](docs/MODELS.md)、実装詳細は [PLUGIN_REFERENCE.md](docs/PLUGIN_REFERENCE.md) |
 | `templates/*.html` | 画面（`/`=dashboard, `/collection`, `/analysis`, `/company/{code}`, `/models`=モデル解説[技術版], `/guide`=やさしい解説[初心者向け]）。JS は `static/js/<page>.js`（`guide.html` は `models.js` を再利用） |
 | `_pipeline_gh.py` / `_pipeline_incremental.py` | GitHub Actions 用・全件 / 差分収集 |
 
