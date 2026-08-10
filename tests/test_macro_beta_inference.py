@@ -27,13 +27,21 @@ _TEST_SERIES = {"macro_usdjpy_yoy": "USDJPY", "macro_sp500_yoy": "SP500"}
 # ── フィクスチャ ──────────────────────────────────────────────────────────────
 
 def _make_fin(period_end_str: str, **kwargs):
-    defaults = dict(
+    """load_data の列指定クエリが返す行（FIN_LOAD_FIELDS 順の tuple・Issue #459）。
+
+    `_load_data_impl` は ORM 行ではなく tuple を受け取って `_FinRow` へ組み直すので、
+    モックも同じ形にする（**行の幅で分岐せず要求した列で決める**＝本物とズレたら落ちる）。
+    """
+    from plugins.macro_snapshots import FIN_LOAD_FIELDS
+
+    values = {f: None for f in FIN_LOAD_FIELDS}
+    values.update(
         edinet_code="E00000", sec_code="1234", company_name="テスト株式会社",
         industry="製造業", period_end=date.fromisoformat(period_end_str),
         bs_total_assets=1.0e5,
     )
-    defaults.update(kwargs)
-    return SimpleNamespace(**defaults)
+    values.update(kwargs)
+    return tuple(values[f] for f in FIN_LOAD_FIELDS)
 
 
 def _build_mock_db(ref: date = date(2025, 6, 1), n_weeks: int = 120, n_companies: int = 4,
@@ -89,7 +97,7 @@ def _build_mock_db(ref: date = date(2025, 6, 1), n_weeks: int = 120, n_companies
             mock_q.all.return_value = price_tuples
         elif "Company.edinet_code" in s0:       # チャンク分割用のコード列
             mock_q.all.return_value = [(ec,) for ec in codes]
-        elif "FinancialMetric" in s0:           # FinancialMetric（全列）
+        elif "FinancialMetric" in s0:           # FinancialMetric（FIN_LOAD_FIELDS の列指定）
             mock_q.all.return_value = fin_list
         elif "MacroData" in s0:                 # MacroData（マクロ系列）
             mock_q.all.return_value = macro_rows

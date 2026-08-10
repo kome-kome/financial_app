@@ -352,7 +352,7 @@ Render ダッシュボードで管理。
 | 引くもの | 行数 | 削減前 | 削減後 |
 |---|---|---|---|
 | `stock_price_weekly`（M-6 は `volume_sum` を読まない） | 1,282,436 | 51.4 MB | **39.3 MB** |
-| `financial_metrics` VIEW（全列） | 30,285 | 22.5 MB | 22.5 MB |
+| `financial_metrics` VIEW（97列 → 消費36列・#459） | 30,285 | 22.5 MB | 実測は 2026-08-18 以降 |
 | `macro_data`（`{series: {date: close}}` にしか使わない） | 67,906 | 8.7 MB | **2.6 MB** |
 | `financial_records` 最新 annual（`sector_ols`・全列） | 4,430 | 2.8 MB | 2.8 MB |
 | `companies`（全列） | 4,437 | 0.5 MB | 0.5 MB |
@@ -361,8 +361,12 @@ Render ダッシュボードで管理。
 
 - **削減した2列は「消費側が一度も読まない列」だけ**。`volume_sum` は `px_volz`（出来高z-score）専用で、M-1 は price_features を持たず M-2/M-6 は既定 OFF＝`load_data(db, with_volume=...)` で選択時のみ引く。M-3 は既定 ON なので従来どおり引く。
 - **未ロードは `None` ではなく番兵**（`macro_snapshots._VOLUME_NOT_LOADED`）にして、読もうとしたら即 `ValueError`。欠測として扱うと `px_volz` が全 nan になり「データが薄い」と見分けがつかない＝#438 と同型の静かな故障になる。
-- 残る最大項は `financial_metrics` VIEW の全列 22.5MB。#441 が `/api/recommend` で同じ問題を扱っており、`load_data` 側の列絞りは M-1/M-2/M-3/M-6 全波及のため別 Issue とした。
+- **残る最大項だった `financial_metrics` VIEW の全列 22.5MB は #459 で列指定へ切り替えた**（2026-08-10）。`plugins/macro_snapshots.py::FIN_LOAD_FIELDS`（36列＝`FIN_BASE_OPTIONS` の選択肢＋`recommend.METRICS` の非 RUNTIME 列＋突合/メタ6列）だけを引き、軽量 namedtuple `_FinRow` で返す。**削減後の実測は Egress 復旧（2026-08-18）後に取り直して上表を更新すること**（#478 の restricted 中は測定自体が枠を食う）。
+  - 列を落とした結果が黙って欠測に化けないよう、`FIN_LOAD_FIELDS` 外の列を `fin_features` に渡したら `build_snapshots` が `ValueError` を投げる。`getattr(..., None)` 任せだと全社が捨てられて学習0件になり「データが薄い」と誤読する（`volume_sum` の番兵と同じ考え方）。
+  - 消費側との対応（`recommend.METRICS` / `FIN_BASE_OPTIONS` / `scripts/candidate_bakeoff._FIN_FIELDS`）は `tests/test_macro_snapshots_loaders.py` のメタテストが CI で照合する。列の追加漏れは failure ではなく「静かに全社が消える」形で出るため、通知では拾えない（ADR-0031 と同型）。
 - **他の消費**: `daily-incremental`（収集は主に ingress だが `update_market_data_from_history` の読みがある）・ローカルの `scripts/` 検証（`scripts/.cache/` の pickle キャッシュで反復 pull を抑える・Issue #355）。1.98GB は**このワークフロー単独の値**なので、他を足した余裕で判断すること。
+
+**キャッシュが効いているかを見る（#478）**: `scripts/` 系の検証 CLI は実行のたびに `[cache] HIT/MISS/REFRESH <key>` を標準エラーへ出し、終了時に `[cache] summary hits=N misses=M produced=X.XMB` を出す。**MISS と REFRESH は本番 DB を引いた＝Egress を使った**という意味なので、2回目以降の実行で misses が減らないならキーが実質毎回ミスしている。2026-07 と 2026-08 の2回とも、超過後にこの内訳が分からず原因の切り分けに時間を要した（黙ってミスしても気づけない＝#438 と同型）。`produced` は pickle のバイト数であって Egress そのものではない（正本は上記の `octet_length` 実測）。
 
 #### 容量設計（株価 = 最大の消費者）
 

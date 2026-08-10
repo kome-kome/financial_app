@@ -16,8 +16,11 @@ import pytest
 
 from database import Company, MacroData, StockPriceWeekly
 from plugins.macro_snapshots import (
+    FIN_LOAD_FIELDS,
     _VOLUME_NOT_LOADED,
+    _load_data_impl,
     build_price_features,
+    build_snapshots,
     load_data,
     load_weekly_prices_chunked,
     preload_macro,
@@ -107,6 +110,82 @@ class TestPreloadMacroColumnNarrowing:
         prices_by_co = load_weekly_prices_chunked(db, with_volume=False)
         out = preload_macro(db, prices_by_co, ["macro_us10y_zscore"])
         assert out == {"US10Y": {"2026-01-05": 1.5, "2026-01-12": 1.6}}
+
+
+class TestFinancialMetricColumnNarrowing:
+    """Issue #459: financial_metrics VIEW（97列・22.5MB/回）を消費列だけに絞る。
+
+    #446 の `stock_price_weekly` / `macro_data` と同じ方針。ここでも固定するのは
+    「引かない」ことより **引かなかったときに黙らない** こと（下の未知列テスト）。
+    """
+
+    def test_loads_consumed_columns_and_drops_the_rest(self, db, make_metric):
+        _seed(db)
+        db.add(make_metric(edinet_code="E00001", per=10.0, pbr=1.2, bs_cash=999.0))
+        db.commit()
+
+        _prices, fin_by_co, _companies = _load_data_impl(db, with_volume=False)
+        rec = fin_by_co["E00001"][0]
+
+        assert rec._fields == FIN_LOAD_FIELDS          # 引いた列＝消費列そのもの
+        assert (rec.per, rec.pbr) == (10.0, 1.2)
+        assert rec.edinet_code == "E00001"             # グルーピング・突合キーは残す
+        assert not hasattr(rec, "bs_cash")             # VIEW にあるが誰も読まない列は引かない
+
+    def test_meta_columns_used_by_build_snapshots_are_present(self, db, make_metric):
+        """`_build_snapshots_impl` が読むメタ列が欠けていないこと（落とすと現在値が壊れる）。"""
+        _seed(db)
+        db.add(make_metric(edinet_code="E00001", bs_total_assets=1.0e5))
+        db.commit()
+
+        _prices, fin_by_co, _companies = _load_data_impl(db, with_volume=False)
+        rec = fin_by_co["E00001"][0]
+
+        for col in ("period_end", "industry", "sec_code", "company_name", "bs_total_assets"):
+            assert hasattr(rec, col)
+
+    def test_unknown_fin_feature_raises_instead_of_dropping_every_company(self, db, make_metric):
+        """FIN_LOAD_FIELDS 外の列を要求したら即例外。
+
+        `getattr(fin_rec, fn, None)` に任せると欠測と同じ経路で全社が捨てられ、学習0件が
+        「データが薄い」に化ける（#446 の番兵と同型）。
+        """
+        _seed(db)
+        db.add(make_metric(edinet_code="E00001"))
+        db.commit()
+        prices_by_co, fin_by_co, companies = _load_data_impl(db, with_volume=False)
+
+        with pytest.raises(ValueError, match="FIN_LOAD_FIELDS"):
+            build_snapshots(prices_by_co, fin_by_co, companies, {},
+                            ["per", "bs_cash"], [], False, 12, 0.0,
+                            build_interactions=False)
+
+
+class TestFinLoadFieldsCoversAllConsumers:
+    """列の追加漏れは「黙って全社が消える」形で出るので、消費側との対応を CI で照合する。
+
+    `plugins.recommend` を `macro_snapshots` から import すると plugins 自動検出と循環し
+    うるため、対応の担保はコードではなくこのメタテストが持つ（ADR-0031 と同型）。
+    """
+
+    def test_recommend_metrics_are_all_loadable(self):
+        from plugins.recommend import METRICS, RUNTIME_METRICS
+
+        missing = [m for m in METRICS if m not in RUNTIME_METRICS and m not in FIN_LOAD_FIELDS]
+        assert missing == [], f"recommend.METRICS が FIN_LOAD_FIELDS に無い: {missing}"
+
+    def test_fin_base_options_are_all_loadable(self):
+        from plugins.macro_snapshots import FIN_BASE_OPTIONS
+
+        missing = [o["value"] for o in FIN_BASE_OPTIONS if o["value"] not in FIN_LOAD_FIELDS]
+        assert missing == [], f"fin_features の選択肢が FIN_LOAD_FIELDS に無い: {missing}"
+
+    def test_candidate_bakeoff_fields_are_subset(self):
+        """検証スクリプト側の列定義（pkl キャッシュキーに紐づくので別管理）との乖離を検知する。"""
+        from scripts.candidate_bakeoff import _FIN_FIELDS
+
+        missing = [f for f in _FIN_FIELDS if f not in FIN_LOAD_FIELDS]
+        assert missing == [], f"candidate_bakeoff._FIN_FIELDS が FIN_LOAD_FIELDS に無い: {missing}"
 
 
 class TestCallersPassTheRightFlag:

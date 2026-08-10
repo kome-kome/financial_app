@@ -114,7 +114,7 @@ M-1/M-2 共有スナップショット構築モジュール（ADR-0003 §3）。
 - **`FIN_BASE_OPTIONS`**（**#373 で accruals / delta_roe / delta_op_margin / z_roe_sec / z_op_margin_sec を追加＝1行追加で M-1/M-2 双方へ自動反映**）。
 - **`build_snapshots`**（`build_interactions`／`macro_nan_ok` フラグ。後者＝M-2 専用でマクロ欠損を NaN 保持＝企業を落とさず XGBoost に委ねる／`return_stock_ids`＝ADR-0002 M-1' per-stock 階層ベイズ専用で観測ごとの edinet_code を追加返却／`price_features`＝Issue #364 で M-2 に価格行動系 px_* を注入。momentum の直後に snap_idx 時点の既知値を追加）。
 - **`build_price_features`**（px_rvol/px_volz/px_high52dev/px_rev4w の週インデックス整列事前計算。Issue #317 で M-3 に実装→#364 で M-2/M-3 共有化。M-3＝`macro_dlm.py` が re-export）。
-- **`load_data`**（`with_volume` で週次 `volume_sum` の要否を切替＝`px_volz` 選択時のみ引く・Egress 削減 #446。未ロードは番兵 `_VOLUME_NOT_LOADED` で、読むと即 ValueError）・**`preload_macro`**（3列のみ取得）・`_realized_vol`。
+- **`load_data`**（`with_volume` で週次 `volume_sum` の要否を切替＝`px_volz` 選択時のみ引く・Egress 削減 #446。未ロードは番兵 `_VOLUME_NOT_LOADED` で、読むと即 ValueError／**財務は `FIN_LOAD_FIELDS`（36列）だけを引き軽量 namedtuple `_FinRow` で返す**＝VIEW 全97列 22.5MB/回の削減・#459。範囲外の列を `fin_features` に渡すと `build_snapshots` が ValueError＝欠測に化けて全社が静かに消えるのを防ぐ。消費側との対応は `tests/test_macro_snapshots_loaders.py` のメタテストが CI で照合）・**`preload_macro`**（3列のみ取得）・`_realized_vol`。
 - **`select_features_bic`**（pooled BIC 選択の共有実体。`macro_risk_return._select_macro_features` と `macro_beta_inference.select_shared_factors` が共用）・`producer_scores`/`get_producer_scores`。
 - **`oof_backtest`**（アウトオブサンプル検証ヘルパ・ADR-0004。`cost_bps` 往復コスト控除オプション＝Issue #316 で `long_short_spread_net` を併記、M-1/M-2/M-3 共通のため1関数で全モデルへ波及）。
 

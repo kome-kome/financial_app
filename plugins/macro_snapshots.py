@@ -74,6 +74,24 @@ FIN_BASE_OPTIONS = [
 ]
 DEFAULT_FIN_FEATURES = ["per", "pbr", "roe", "equity_ratio", "roa", "eps_growth"]
 
+# `load_data` が financial_metrics VIEW から実際に引く列（Issue #459）。VIEW は 97 列あるが
+# 消費側（`_build_snapshots_impl` が唯一）が読むのはここだけで、ORM の全列ロードは本番実測
+# 22.5MB/回＝夜間バッチ 67.7MB の 33% を占めていた。`load_weekly_prices_chunked`（3列）・
+# `_preload_macro_impl`（3列）と同じ「消費列だけ引く」方針を財務側へ広げる（#446 の続き）。
+#
+# 突合・メタ列: edinet_code（グルーピング）/ period_end（`_find_applicable_fin`）/
+# industry・sec_code・company_name・bs_total_assets（スナップショットのメタ）。
+_FIN_META_FIELDS = ("edinet_code", "period_end", "industry", "sec_code",
+                    "company_name", "bs_total_assets")
+# `recommend.METRICS` の非 RUNTIME 列のうち FIN_BASE_OPTIONS に無いもの。
+# `recommend_factor_premia.build_period_panel` が fin_features として渡す（ADR-0008）。
+# recommend 側との対応は `tests/test_macro_snapshots_loaders.py` のメタテストが CI で照合する
+# （ここで `plugins.recommend` を import すると plugins の自動検出と循環しうるため）。
+_FIN_RECOMMEND_FIELDS = ("z_revenue", "z_equity_ratio", "z_eps", "z_de_ratio", "gap_ratio")
+FIN_LOAD_FIELDS = tuple(dict.fromkeys(
+    tuple(o["value"] for o in FIN_BASE_OPTIONS) + _FIN_RECOMMEND_FIELDS + _FIN_META_FIELDS))
+_FinRow = namedtuple("_FinRow", FIN_LOAD_FIELDS)
+
 # feature_name → (series_code, transform: "yoy" | "zscore") の正本。
 # utils.py の _macro_feature_map() はここから import する（循環依存ハック解消）。
 _MACRO_MAP = {
@@ -746,16 +764,26 @@ def load_data(db, with_volume: bool = True) -> tuple:
 
 
 def _load_data_impl(db, with_volume: bool = True) -> tuple:
-    """load_data の実体（キャッシュなし・毎回フル計算）。"""
+    """load_data の実体（キャッシュなし・毎回フル計算）。
+
+    financial_metrics は ORM 全列（97列）ではなく `FIN_LOAD_FIELDS` だけを引き、軽量な
+    `_FinRow`（namedtuple）で返す（Issue #459）。**行の幅で分岐せず要求した列で決める**——
+    DB をモックするテストは要求列に関わらず固定幅の行を返しうるため、位置展開にしておくと
+    本物とモックのズレがテストで露見する（`load_weekly_prices_chunked` と同じ考え方）。
+
+    `companies` は全列でも実測 0.5MB と小さいので絞らない（#446 の実測表）。
+    """
     from database import Company, FinancialMetric
     # 週次株価は単一クエリだと本番 pooler で timeout/接続破損するため分割ロード（Issue #311）。
     prices_by_co = load_weekly_prices_chunked(db, with_volume=with_volume)
 
+    fin_cols = [getattr(FinancialMetric, f) for f in FIN_LOAD_FIELDS]
     fin_by_co: dict[str, list] = defaultdict(list)
-    for r in (db.query(FinancialMetric)
-              .order_by(FinancialMetric.edinet_code, FinancialMetric.period_end)
-              .all()):
-        fin_by_co[r.edinet_code].append(r)
+    for row in (db.query(*fin_cols)
+                .order_by(FinancialMetric.edinet_code, FinancialMetric.period_end)
+                .all()):
+        rec = _FinRow(*row)
+        fin_by_co[rec.edinet_code].append(rec)
 
     companies = {c.edinet_code: c for c in db.query(Company).all()}
     return prices_by_co, fin_by_co, companies
@@ -927,6 +955,18 @@ def _build_snapshots_impl(
         fin_features + macro_names + momentum_name + list(price_features) + interaction_names
     )
     n_feat = len(all_feat_names)
+
+    # ロードされていない財務列を早期に落とす（Issue #459）。`load_data` は FIN_LOAD_FIELDS
+    # だけを引くため、範囲外の列は `getattr(fin_rec, fn, None)` が None を返し、**欠測と同じ
+    # 経路で全社が静かに捨てられて「データが薄い」に化ける**。属性が無い＝設定ミス、属性が
+    # あって値が None＝欠測、として分ける（#446 の番兵と同じ考え方）。
+    probe = next((recs[0] for recs in fin_by_co.values() if recs), None)
+    if probe is not None:
+        unknown = [fn for fn in fin_features if not hasattr(probe, fn)]
+        if unknown:
+            raise ValueError(
+                f"build_snapshots: ロードされていない財務列が fin_features にあります: {unknown}"
+                "（plugins/macro_snapshots.py の FIN_LOAD_FIELDS へ追加してください・Issue #459）")
 
     samples_by_ym: dict[str, list] = defaultdict(list)
     sample_meta_by_ym: dict[str, list] = defaultdict(list)

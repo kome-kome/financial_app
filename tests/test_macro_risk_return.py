@@ -24,12 +24,19 @@ def _make_price(trade_date: str, close_last: float):
 
 
 def _make_fin(period_end_str: str, **kwargs):
-    defaults = dict(
+    """load_data の列指定クエリが返す行（FIN_LOAD_FIELDS 順の tuple・Issue #459）。
+
+    `_load_data_impl` は ORM 行ではなく tuple を受け取って `_FinRow` へ組み直すので、
+    モックも同じ形にする（**行の幅で分岐せず要求した列で決める**＝本物とズレたら落ちる）。
+    """
+    from plugins.macro_snapshots import FIN_LOAD_FIELDS
+
+    values = {f: None for f in FIN_LOAD_FIELDS}
+    values.update(
         edinet_code="E01234",
         sec_code="1234",
         company_name="テスト株式会社",
         industry="製造業",
-        market="東証プライム",
         period_end=date.fromisoformat(period_end_str),
         per=15.0, pbr=1.2, roe=8.0, roa=4.0, equity_ratio=55.0,
         de_ratio=0.4, cf_ratio=9.0, eps_growth=5.0, op_growth=6.0,
@@ -39,8 +46,8 @@ def _make_fin(period_end_str: str, **kwargs):
         div_yield=2.0, rev_growth=4.0, nc_ratio=0.1,
         bs_total_assets=1.0e5,  # R3 サイズ代理（総資産）
     )
-    defaults.update(kwargs)
-    return SimpleNamespace(**defaults)
+    values.update(kwargs)
+    return tuple(values[f] for f in FIN_LOAD_FIELDS)
 
 
 def _weekly_prices(ref: date, n_weeks: int = 60, base: float = 1000.0, drift: float = 0.001):
@@ -534,7 +541,7 @@ class TestExecuteIntegration:
                 mock_q.all.return_value = price_tuples
             elif "Company.edinet_code" in s0:            # チャンク分割用のコード列
                 mock_q.all.return_value = [(ec,) for ec in codes]
-            elif "FinancialMetric" in s0:                # FinancialMetric（全列）
+            elif "FinancialMetric" in s0:                # FinancialMetric（FIN_LOAD_FIELDS の列指定）
                 mock_q.all.return_value = fin_list
             else:                                        # db.query(Company)
                 mock_q.all.return_value = companies
