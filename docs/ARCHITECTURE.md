@@ -181,6 +181,11 @@ graph TD
 > 永続化し、軽量なAPI/プラグインが読む」producer/consumer 分離パターン（`regression_results`
 > と同型）。`statement_disclosure`（Issue #322・`collector_disclosures.py` が J-Quants
 > `/fins/summary` から蓄積する生データ）は `feature_disclosure.py` が特徴量化して読む。
+> **`disc_date` は常に `today − 84日` が天井**（`JQUANTS_DISCLOSURE_DELAY_DAYS`＝無料プランの
+> 構造的上限）で、収集頻度を上げても前進しない＝齢を「壊れている」と誤診しないこと（#424 子4）。
+> なお `feature_disclosure.py` の現在の呼び出し元は `scripts/event_study_*.py` の2本だけで、
+> **本番の API / プラグイン経路からは読まれていない**（唯一の予定消費者 #323 が wontfix
+> クローズしたため。ADR-0033）。
 
 ```mermaid
 erDiagram
