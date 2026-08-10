@@ -29,6 +29,7 @@ recommend_factor_premia テーブル→ plugins.recommend.resolve_weights() が�
 実行
 ----
     python recommend_factor_premia.py --persist
+    python recommend_factor_premia.py --estimator ridge   # 共線性の比較・診断（persist 不可）
 """
 from __future__ import annotations
 
@@ -56,6 +57,8 @@ class FactorPremiaResult:
     p_value: dict[str, float | None]
     n_periods: int
     per_period_betas: dict[str, list[float]] = field(default_factory=dict)   # 診断用（persist しない）
+    estimator: str = "ols"                                   # 第1段階の推定手法（診断用）
+    condition_numbers: list[float] = field(default_factory=list)   # 期別の設計行列条件数（診断用）
 
 
 def build_period_panel(db, min_companies_per_period: int = DEFAULT_MIN_COMPANIES_PER_PERIOD) -> tuple:
@@ -188,39 +191,97 @@ def average_premia(betas_by_factor: dict[str, list[float]], factor_names: list[s
     )
 
 
-def fama_macbeth_regression(period_panel: dict, factor_names: list[str],
-                            maxlags: int = DEFAULT_MAXLAGS) -> FactorPremiaResult:
-    """期間ごとの断面 OLS（Fama-MacBeth）→ 係数の時系列平均・Newey-West 標準誤差。
+def _cross_section_condition_number(X: np.ndarray, n_factor: int) -> float:
+    """断面設計行列（winsorize→zscore 済み・切片列付き）の条件数。
 
-    各期間 ym について、intercept 付き設計行列で `plugins.utils.ols()` を実行し β_t を得る
-    （walk_forward_cv_monthly のような複数期間プールではなく、期間ごとに独立した断面回帰）。
-    第2段階（HAC 補正付き時系列平均）は `average_premia()` が担う。
+    共線性を推定手法に依らず同じ尺度で見るための診断値（Issue #469 検証1）。生スケールの
+    まま測ると単位差だけで条件数が跳ねるため、`fit_feature_columns` の標準化後に測る。
+    `estimator` に関わらず同じ値になるので ols / ridge の比較にそのまま使える
+    （`plugins.utils.ols` も条件数を返すが切片込み生スケール、`ridge_regression` は NaN
+    を返すため、両者を並べるにはここで測り直すしかない）。
     """
-    from plugins.utils import ols
+    from plugins.utils import fit_feature_columns
+
+    Xn, _, _ = fit_feature_columns(X.tolist(), n_factor)
+    try:
+        return float(np.linalg.cond(np.asarray(Xn, dtype=float)))
+    except np.linalg.LinAlgError:
+        return float("nan")
+
+
+def fama_macbeth_regression(period_panel: dict, factor_names: list[str],
+                            maxlags: int = DEFAULT_MAXLAGS,
+                            estimator: str = "ols") -> FactorPremiaResult:
+    """期間ごとの断面回帰（Fama-MacBeth）→ 係数の時系列平均・Newey-West 標準誤差。
+
+    各期間 ym について β_t を推定する（walk_forward_cv_monthly のような複数期間プールでは
+    なく、期間ごとに独立した断面回帰）。第2段階（HAC 補正付き時系列平均）は `average_premia()`
+    が担い、`estimator` に依らず共有する。
+
+    `estimator`:
+      - `"ols"`（既定・Fama & MacBeth 1973 に忠実）: intercept 付き設計行列で
+        `plugins.utils.ols()` を実行する。**既定を変えていないので永続化される重みは従来と
+        完全に同一**。
+      - `"ridge"`: 第1段階だけ `plugins.utils.ridge_regression`（RidgeCV・L2）へ差し替える
+        （Issue #469）。素の断面 OLS は共線な因子が打ち消し合う巨大係数を出す（本番実測:
+        `z_eps` = −3.28 で p=0.29・唯一有意な `z_revenue` の 239 倍。`z_op_margin` +0.48 と
+        `z_cf_ratio` −0.47 の符号反転ペアは多重共線性の signature）。ADR-0021 は同じ現象を
+        `scripts/candidate_bakeoff.py` で実測し、Ridge 化で λ̄ 最大 5.37→0.027・OOF rank-IC
+        −0.0131→0.1653 へ回復することを確認している。
+
+    **ridge 版の係数は ols 版と単位が違う**（実装は `plugins/model_candidates.py` の
+    Fama-MacBeth ヘッドを踏襲）:
+      - 特徴量を期内で winsorize→zscore してから推定するため、係数は「1sd あたり」であり
+        生スケールの ols 係数と直接は比較できない（比較すべきは順位・相対的な大きさ）。
+      - 切片列を渡さない。`ridge_regression` は `fit_intercept=False` で切片列も**罰則対象**に
+        するため、切片が 0 方向へ縮んだ分を傾きが吸収して λ_t が歪む。標準化で特徴量の平均は
+        0 なので、y を期内平均で中心化すれば切片は構造的に 0 となり、傾きだけを正しく縮小推定
+        できる。
+    """
+    if estimator not in ("ols", "ridge"):
+        raise ValueError(f"estimator は 'ols' か 'ridge': {estimator}")
+
+    from plugins.utils import fit_feature_columns, ols, ridge_regression
 
     n_factor = len(factor_names)
     betas_by_factor: dict[str, list[float]] = {f: [] for f in factor_names}
     used_yms: list[str] = []
+    cond_numbers: list[float] = []
     for ym in sorted(period_panel.keys()):
         X, y = period_panel[ym]
-        X_design = [[1.0] + row.tolist() for row in X]
-        result = ols(X_design, y.tolist())
+        if estimator == "ols":
+            X_design = [[1.0] + row.tolist() for row in X]
+            result = ols(X_design, y.tolist())
+            n_expected = n_factor + 1
+            offset = 1          # beta[0] は intercept
+        else:
+            Xn, _, _ = fit_feature_columns(X.tolist(), n_factor)
+            X_std = [row[1:] for row in Xn]          # 切片列を落とす（上記の理由）
+            y_arr = np.asarray(y, dtype=float)
+            result = ridge_regression(X_std, (y_arr - y_arr.mean()).tolist(), cv_folds=3)
+            n_expected = n_factor
+            offset = 0
         if result is None:
             continue
         beta = result["beta"]
-        if len(beta) != n_factor + 1:
+        if len(beta) != n_expected:
             continue
         for i, f in enumerate(factor_names):
-            betas_by_factor[f].append(beta[i + 1])   # beta[0] は intercept
+            betas_by_factor[f].append(beta[i + offset])
+        cond_numbers.append(_cross_section_condition_number(X, n_factor))
         used_yms.append(ym)
 
     if not used_yms:
         raise ValueError("fama_macbeth_regression: 有効な期間が1つもありません")
-    return average_premia(betas_by_factor, factor_names, len(used_yms), maxlags=maxlags)
+    result = average_premia(betas_by_factor, factor_names, len(used_yms), maxlags=maxlags)
+    result.estimator = estimator
+    result.condition_numbers = cond_numbers
+    return result
 
 
 def compute_factor_premia(db, min_companies_per_period: int = DEFAULT_MIN_COMPANIES_PER_PERIOD,
-                          maxlags: int = DEFAULT_MAXLAGS) -> FactorPremiaResult:
+                          maxlags: int = DEFAULT_MAXLAGS,
+                          estimator: str = "ols") -> FactorPremiaResult:
     """バッチ本体。build_period_panel → 断面回帰・時系列平均。
 
     build_period_panel 後に db.commit() する（#269 と同じ配慮。本バッチは MCMC のような
@@ -228,7 +289,8 @@ def compute_factor_premia(db, min_companies_per_period: int = DEFAULT_MIN_COMPAN
     """
     period_panel, factor_names = build_period_panel(db, min_companies_per_period)
     db.commit()
-    return fama_macbeth_regression(period_panel, factor_names, maxlags=maxlags)
+    return fama_macbeth_regression(period_panel, factor_names, maxlags=maxlags,
+                                   estimator=estimator)
 
 
 def persist(db, result: FactorPremiaResult) -> int:
@@ -258,9 +320,20 @@ def main() -> None:
                     help="この社数未満の月は断面OLSから除外する（既定30）")
     ap.add_argument("--maxlags", type=int, default=DEFAULT_MAXLAGS,
                     help="Newey-West補正のラグ数（既定11＝52週先リターンのオーバーラップ月数-1）")
+    ap.add_argument("--estimator", choices=("ols", "ridge"), default="ols",
+                    help="第1段階（期別の断面回帰）の推定手法。既定 ols＝従来と同一。"
+                         "ridge は共線性診断・比較用で --persist と併用できない（Issue #469）")
     ap.add_argument("--persist", action="store_true",
                     help="recommend_factor_premia テーブルへ保存する（既定は計算結果の表示のみ）")
     args = ap.parse_args()
+
+    # ridge の結果を書くと `get_latest_factor_premia` が最新 run_id を読む仕様上、昇格ゲート
+    # （ADR-0028: 増減どちらの向きも補正後 α を通る実測）を通さないまま「統計的最適化」
+    # プリセットの中身が変わってしまう。DB へ触る前に落とす。
+    if args.estimator == "ridge" and args.persist:
+        raise SystemExit(
+            "--estimator ridge と --persist は併用できません（Issue #469）。ridge は比較・診断用で、"
+            "既定プリセットの重みを入れ替えるには ADR-0028 の昇格ゲートを通す必要があります。")
 
     logging.basicConfig(level=logging.INFO)
     from database import SessionLocal
@@ -268,15 +341,25 @@ def main() -> None:
     db = SessionLocal()
     try:
         result = compute_factor_premia(
-            db, min_companies_per_period=args.min_companies_per_period, maxlags=args.maxlags)
-        logger.info("有効期間数: %d", result.n_periods)
+            db, min_companies_per_period=args.min_companies_per_period, maxlags=args.maxlags,
+            estimator=args.estimator)
+        logger.info("有効期間数: %d（estimator=%s）", result.n_periods, result.estimator)
+        if result.condition_numbers:
+            conds = np.asarray(result.condition_numbers, dtype=float)
+            logger.info("断面設計行列の条件数: median=%.1f max=%.1f（標準化後・共線性診断）",
+                        float(np.nanmedian(conds)), float(np.nanmax(conds)))
         for f in result.factor_names:
             se = result.newey_west_se[f]
             t = result.t_stat[f]
-            logger.info("  %-16s b=%+.4f  NW_se=%s  t=%s",
+            p = result.p_value[f]
+            logger.info("  %-16s b=%+.4f  NW_se=%s  t=%s  p=%s",
                        f, result.mean_b[f],
                        f"{se:.4f}" if se is not None else "n/a",
-                       f"{t:+.2f}" if t is not None else "n/a")
+                       f"{t:+.2f}" if t is not None else "n/a",
+                       f"{p:.3f}" if p is not None else "n/a")
+        if result.estimator == "ridge":
+            logger.info("※ ridge の係数は期内標準化後＝「1sd あたり」。生スケールの ols 係数とは"
+                        "単位が違うので、比べるのは順位と相対的な大きさ")
         if args.persist:
             n = persist(db, result)
             logger.info("recommend_factor_premia へ %d 行 persist 完了（run_id=%s）", n, result.run_id)

@@ -33,6 +33,24 @@ cadence を月次にした根拠: Fama-MacBeth の推定は月末スナップシ
 （`z_op_margin` +0.48 と `z_cf_ratio` −0.47 が符号反転で対になる）の典型的な signature で、
 重みの縮小推定・有意性フィルタの要否は別 Issue で扱う。
 
+**追記（2026-08-10・Issue #469）: 比較する口だけ先に入れた。既定は変えていない。**
+`fama_macbeth_regression(..., estimator="ridge")` / CLI `--estimator ridge` で第1段階だけを
+`plugins/utils.py::ridge_regression`（RidgeCV・L2）へ差し替えられる。第2段階の HAC 平均
+（`average_premia`）は ols と共有し、補正ロジックを二重化しない。ADR-0021 が
+`scripts/candidate_bakeoff.py` で同じ現象（λ̄ 最大 5.37・OOF rank-IC −0.0131）と Ridge での
+回復（0.027 / 0.1653）を既に実測しており、本 ADR の推定だけがその知見の外にあった。
+
+- **既定は `ols` のまま**＝永続化される重みは従来と完全に同一。
+- **`--estimator ridge` は `--persist` と併用できない**（DB へ接続する前に `SystemExit`）。
+  `get_latest_factor_premia` は最新 run_id を読む仕様なので、ridge を書いた瞬間に昇格ゲート
+  未通過の重みが「統計的最適化」プリセットへ入ってしまう。
+- 既定を入れ替えるには **ADR-0028 の昇格ゲート**（増減どちらの向きも補正後 α を通る実測）が
+  要る。ridge 係数は期内標準化後＝「1sd あたり」で ols（生スケール）と単位が違うため、
+  比べるのは順位と相対的な大きさ。
+- 実データでの比較（λ̄・条件数・`/api/backtest` による as-of 再現）は **Supabase の Egress
+  超過が解消する 2026-08-18 以降**に行う（#478）。診断用に期別の設計行列条件数を
+  `FactorPremiaResult.condition_numbers` へ記録し、CLI が median / max を出す。
+
 ## Context
 
 `recommend`（おすすめ銘柄）の4プリセット重みは `docs/MODELS.md` §6「仮定・限界」に

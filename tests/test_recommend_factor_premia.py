@@ -78,18 +78,123 @@ class TestFamaMacBethRegression:
             fama_macbeth_regression({}, ["f1"])
 
 
+# ── 第1段階の estimator 切替（Issue #469）────────────────────────────────────
+
+def _collinear_panel(n_periods: int = 30, n: int = 60, seed: int = 11) -> dict:
+    """相関 0.99 の2列を持つ共線パネル。素の断面OLSが打ち消し合う巨大係数を出す状況を作る。"""
+    rng = np.random.default_rng(seed)
+    panel = {}
+    for t in range(n_periods):
+        f1 = rng.normal(size=n)
+        f2 = 0.99 * f1 + 0.01 * rng.normal(size=n)   # ほぼ同一の説明変数
+        X = np.column_stack([f1, f2])
+        y = 0.02 * f1 + rng.normal(scale=0.05, size=n)
+        panel[f"p{t:03d}"] = (X, y)
+    return panel
+
+
+class TestEstimatorOption:
+    def test_default_is_ols_and_matches_explicit_ols(self):
+        """既定は ols で、明示指定と完全一致する（既定挙動を動かしていないことの回帰防止）。"""
+        panel = _collinear_panel(n_periods=12)
+        implicit = fama_macbeth_regression(panel, ["f1", "f2"])
+        explicit = fama_macbeth_regression(panel, ["f1", "f2"], estimator="ols")
+
+        assert implicit.estimator == "ols"
+        assert implicit.mean_b == explicit.mean_b
+        assert implicit.t_stat == explicit.t_stat
+
+    def test_ridge_shrinks_collinear_coefficients(self):
+        """共線パネルでは ridge の |λ̄| が ols より小さい（ADR-0021 と同じ向き）。"""
+        panel = _collinear_panel()
+        ols_res = fama_macbeth_regression(panel, ["f1", "f2"], estimator="ols")
+        ridge_res = fama_macbeth_regression(panel, ["f1", "f2"], estimator="ridge")
+
+        max_abs_ols = max(abs(v) for v in ols_res.mean_b.values())
+        max_abs_ridge = max(abs(v) for v in ridge_res.mean_b.values())
+
+        assert ridge_res.estimator == "ridge"
+        assert ridge_res.n_periods == ols_res.n_periods
+        assert max_abs_ridge < max_abs_ols
+        # 符号反転ペア（多重共線性の signature）が ols 側に出ていることも確認する
+        assert ols_res.mean_b["f1"] * ols_res.mean_b["f2"] < 0
+
+    def test_unknown_estimator_raises(self):
+        with pytest.raises(ValueError, match="estimator"):
+            fama_macbeth_regression(_collinear_panel(n_periods=3), ["f1", "f2"], estimator="lasso")
+
+    def test_condition_numbers_recorded_per_used_period(self):
+        """条件数は estimator に依らず同じ尺度で記録する（#469 検証1・共線なら大きくなる）。"""
+        panel = _collinear_panel(n_periods=10)
+        ols_res = fama_macbeth_regression(panel, ["f1", "f2"], estimator="ols")
+        ridge_res = fama_macbeth_regression(panel, ["f1", "f2"], estimator="ridge")
+
+        assert len(ols_res.condition_numbers) == ols_res.n_periods
+        assert ols_res.condition_numbers == ridge_res.condition_numbers   # 設計行列の性質
+        assert min(ols_res.condition_numbers) > 5.0                       # 共線パネルなので大きい
+
+
+class TestCliEstimatorPersistGuard:
+    def test_ridge_with_persist_exits_before_touching_db(self, monkeypatch):
+        """--estimator ridge --persist は DB へ接続する前に落ちる（ADR-0028 の昇格ゲート保護）。"""
+        import database
+        import recommend_factor_premia as rfp
+
+        opened = {"n": 0}
+
+        def _boom():
+            opened["n"] += 1
+            raise AssertionError("DB へ接続してはいけない")
+
+        monkeypatch.setattr(database, "SessionLocal", _boom)
+        monkeypatch.setattr("sys.argv", ["recommend_factor_premia.py", "--estimator", "ridge",
+                                         "--persist"])
+        with pytest.raises(SystemExit):
+            rfp.main()
+        assert opened["n"] == 0
+
+    def test_ridge_without_persist_is_allowed(self, monkeypatch):
+        """ridge 単独（表示のみ）は通る＝ガードが estimator 単体を塞いでいないこと。"""
+        import database
+        import recommend_factor_premia as rfp
+
+        called = {"estimator": None}
+
+        def _fake_compute(db, min_companies_per_period, maxlags, estimator):
+            called["estimator"] = estimator
+            return rfp.FactorPremiaResult(
+                run_id="rfp_test", factor_names=["f1"], mean_b={"f1": 0.1},
+                newey_west_se={"f1": 0.05}, t_stat={"f1": 2.0}, p_value={"f1": 0.05},
+                n_periods=5, estimator=estimator, condition_numbers=[3.0, 4.0],
+            )
+
+        monkeypatch.setattr(database, "SessionLocal", lambda: MagicMock())
+        monkeypatch.setattr(rfp, "compute_factor_premia", _fake_compute)
+        monkeypatch.setattr("sys.argv", ["recommend_factor_premia.py", "--estimator", "ridge"])
+        rfp.main()
+        assert called["estimator"] == "ridge"
+
+
 # ── build_period_panel: load_data/build_snapshots 経由（MagicMockでDB模擬）──────
 
 def _make_fin(period_end_str: str, **kwargs):
-    defaults = dict(
+    """load_data の列指定クエリが返す行（FIN_LOAD_FIELDS 順の tuple・Issue #459）。
+
+    `_load_data_impl` は ORM 行ではなく tuple を受け取って `_FinRow` へ組み直すので、
+    モックも同じ形にする（**行の幅で分岐せず要求した列で決める**＝本物とズレたら落ちる）。
+    """
+    from plugins.macro_snapshots import FIN_LOAD_FIELDS
+
+    values = {f: None for f in FIN_LOAD_FIELDS}
+    values.update(
         edinet_code="E00000", sec_code="1234", company_name="テスト株式会社",
         industry="製造業", period_end=date.fromisoformat(period_end_str),
         bs_total_assets=1.0e5,
         z_roe=0.5, z_op_margin=0.3, z_revenue=0.2, z_cf_ratio=0.1,
         z_equity_ratio=0.4, z_eps=0.2, gap_ratio=1.0, z_de_ratio=-0.1,
     )
-    defaults.update(kwargs)
-    return SimpleNamespace(**defaults)
+    values.update(kwargs)
+    return tuple(values[f] for f in FIN_LOAD_FIELDS)
 
 
 def _build_mock_recommend_db(ref: date = date(2025, 6, 1), n_weeks: int = 120, n_companies: int = 3):
@@ -131,7 +236,7 @@ def _build_mock_recommend_db(ref: date = date(2025, 6, 1), n_weeks: int = 120, n
             mock_q.all.return_value = price_tuples
         elif "Company.edinet_code" in s0:       # チャンク分割用のコード列
             mock_q.all.return_value = [(ec,) for ec in codes]
-        elif "FinancialMetric" in s0:           # FinancialMetric（全列）
+        elif "FinancialMetric" in s0:           # FinancialMetric（FIN_LOAD_FIELDS の列指定）
             mock_q.all.return_value = fin_list
         else:                                   # db.query(Company)
             mock_q.all.return_value = companies
