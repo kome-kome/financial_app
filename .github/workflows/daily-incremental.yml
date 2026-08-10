@@ -29,8 +29,15 @@ on:
   # このワークフローの success が nightly-scores / macro-health の workflow_run
   # チェーンを起動する（#432 / #420）ので、name を変えるときは両 yml の if も直す。
   # nightly-scores は実測33〜35分なので、チェーン終端は JST 21〜22時台の見込み。
-  schedule:
-    - cron: '17 8 * * *'   # UTC 08:17 = JST 17:17
+  # ⛔ 2026-08-10: schedule を一時停止中（#477）。Supabase インスタンスが飽和しており、
+  #    count(*) companies=25.9秒 / count(*) macro_data=78.5秒（RTT は 14.5ms で正常）＝
+  #    CPU/Disk IO のバーストクレジット枯渇が疑われる。この状態で 2〜3時間の全社収集を
+  #    走らせると回復をさらに遅らせるため止めた。休場明けの取りこぼしは #474 の
+  #    last_closed_session 基準で翌日以降の run が 183日窓で拾う。
+  #    **復旧条件**: 上記レイテンシが常識的な水準（count(*) companies が 1秒未満）へ戻ったら
+  #    下の schedule を戻す。手動確認は workflow_dispatch で先に1回。
+  # schedule:
+  #   - cron: '17 8 * * *'   # UTC 08:17 = JST 17:17
   workflow_dispatch:
 
 # 最小権限（GITHUB_TOKEN でリポジトリ書込は不要・収集/保守は Supabase 直結）

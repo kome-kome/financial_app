@@ -76,11 +76,37 @@ def _daily_chain_hours_utc() -> set[int]:
     キュー遅延は含まない＝#446 のとおり最終確認は実起動ログで行う。
     """
     daily = _load(WORKFLOW_DIR / "daily-incremental.yml")
-    start = int(_crons(daily)[0].split()[1])
+    daily_crons = _crons(daily)
+    if not daily_crons:
+        # daily-incremental の schedule が一時停止されている（#477 の DB 飽和など）。
+        # チェーンが起動しない以上、占有する時刻も無い＝他ワークフローを禁止しない。
+        # 停止が黙って恒久化しないことは TestDailySchedulePause が担保する。
+        return set()
+    start = int(daily_crons[0].split()[1])
     minutes = _max_timeout_minutes(daily) + _max_timeout_minutes(
         _load(WORKFLOW_DIR / "nightly-scores.yml"))
     span_hours = -(-minutes // 60)                     # 切り上げ
     return {(start + i) % 24 for i in range(span_hours + 1)}
+
+
+class TestDailySchedulePause:
+    """daily-incremental の schedule 停止は、理由と復旧条件が yml に残っている場合だけ許す。
+
+    株価鮮度の担い手（Phase 4 の Yahoo gap-fill）を止めても **failure は一切出ない**ので、
+    notify-failure（#414）でも macro-health（#420）でも拾えない。気づく経路が人間の
+    目視しかない点は ADR-0031 の「heavy を足したが自動実行が無い」と同型なので、
+    「止めるなら理由と戻し方を同じファイルに書く」ことを CI で強制する。
+    """
+
+    def test_pause_is_documented(self):
+        path = WORKFLOW_DIR / "daily-incremental.yml"
+        if _crons(_load(path)):
+            return                                        # 通常運転（schedule 有効）
+        text = path.read_text(encoding="utf-8")
+        assert "一時停止" in text and "復旧条件" in text, (
+            "daily-incremental の schedule が無いのに、停止理由と復旧条件が yml に無い。"
+            "株価鮮度が止まったまま誰も気づかない（失敗が出ないので通知では拾えない）"
+        )
 
 
 @pytest.fixture(scope="module")
