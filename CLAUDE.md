@@ -70,6 +70,7 @@ pytest tests/test_utils.py  # 単一ファイル
 | ファイル | 役割 |
 |---|---|
 | `database.py` | テーブル定義・upsert・成長率/Zスコア計算 |
+| `db_egress.py` | Egress 台帳＋サーキットブレーカ（#478・ADR-0034）。engine の `after_cursor_execute` で全経路の転送を計測し、プロセス予算超過で `EgressBudgetExceeded`。集計は `python -m scripts.egress_report` |
 | `collector.py` | オーケストレータ＋後方互換の再エクスポート層＋CLI（実体は下記6分割） |
 | `collector_utils.py` | 収集系共通の設定定数・ロガー |
 | `collector_master.py` | 企業/業種マスタ収集（EDINET コードリスト・JPX 業種） |
