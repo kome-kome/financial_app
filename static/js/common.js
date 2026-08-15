@@ -113,3 +113,41 @@ async function apiFetch(path, opts = {}) {
   // スリープ・タブ復帰時は即時送信して誤停止を防ぐ
   document.addEventListener('visibilitychange', () => { if (!document.hidden && timer) beat(); });
 })();
+
+// ── 接続先バッジ（#481 B-1） ─────────────────────────────────────────────
+// ローカル読取レプリカへ繋いでいるときだけ右下に常時表示する。ミラーは pull/sync した
+// 時点で止まるため、**どちらの DB を見ているか分からないと古いスコアを最新と誤読する**
+// （#438 の「静かな配信停止」と同型）。本番接続時は何も描画しない＝普段の見た目は不変。
+// テンプレートは触らない（common.js は全9ページが読み込むため、ここ1箇所で全画面に出る）。
+(() => {
+  const show = (info) => {
+    if (!info || !info.db_is_local) return;   // 本番接続時は何も出さない
+    const el = document.createElement('div');
+    el.id = 'db-target-badge';
+    el.textContent = `⛁ ${info.db_label} — 同期時点のデータ`;
+    el.title = '本番（Supabase）ではなくローカル DB を参照しています。'
+             + '最後にミラーを同期した時点のデータで、夜間バッチの最新スコアは含まれません。';
+    Object.assign(el.style, {
+      position: 'fixed', right: '12px', bottom: '12px', zIndex: '9999',
+      padding: '6px 12px', borderRadius: '999px',
+      background: 'var(--status-warn-bg, #78350f)',
+      color: 'var(--status-warn-text, #fef3c7)',
+      border: '1px solid var(--status-warn, #f59e0b)',
+      font: '600 12px/1.4 system-ui, sans-serif',
+      boxShadow: '0 2px 8px rgba(0,0,0,.25)', pointerEvents: 'auto', cursor: 'default',
+    });
+    document.body.appendChild(el);
+  };
+  const load = async () => {
+    try {
+      const r = await fetch('/api/system/info', { credentials: 'same-origin' });
+      if (!r.ok) return;      // ログイン前は 401。認証後の再読込で出るので黙って諦める
+      show(await r.json());
+    } catch (_) { /* サーバー再起動中などは無視 */ }
+  };
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', load);
+  } else {
+    load();
+  }
+})();

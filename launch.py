@@ -67,7 +67,7 @@ def _pick_port() -> int:
         return s.getsockname()[1]
 
 
-def _start_server(port: int):
+def _start_server(port: int, target: str = "prod"):
     log_dir = os.path.join(BASE_DIR, "logs")
     os.makedirs(log_dir, exist_ok=True)
     log_path = os.path.join(log_dir, "server.log")
@@ -80,10 +80,27 @@ def _start_server(port: int):
         stderr=log_file,
         creationflags=subprocess.CREATE_NO_WINDOW,
         # ブラウザ連動自動停止（ハートビート途絶で自動終了）はランチャー経由のみ有効
-        env={**os.environ, "FINAPP_AUTO_SHUTDOWN": "1"},
+        # FINAPP_DB_TARGET は接続先の切替（#481 B-1）。既定は prod＝従来どおり Supabase。
+        env={**os.environ, "FINAPP_AUTO_SHUTDOWN": "1", "FINAPP_DB_TARGET": target},
     )
     proc._log_file = log_file  # type: ignore[attr-defined]
     return proc
+
+
+def _close_proc(proc):
+    if proc is None:
+        return
+    proc.terminate()
+    try:
+        proc.wait(timeout=10)
+    except Exception:
+        pass
+    log_file = getattr(proc, "_log_file", None)
+    if log_file is not None:
+        try:
+            log_file.close()
+        except Exception:
+            pass
 
 
 def _load_icons(root):
@@ -104,12 +121,21 @@ def main():
             hijacked = True
             port = _pick_port()
     url = f"http://127.0.0.1:{port}"
-    proc = None if already_up else _start_server(port)
+
+    # ── 接続先（#481 B-1）──────────────────────────────────────────────
+    # 既定は prod＝環境変数を触らなければ従来どおり Supabase。**選択は永続化しない**——
+    # 毎回 prod から始めるほうが、古いミラーで起動していることに気づかず使い続ける事故を防げる。
+    initial_target = (os.environ.get("FINAPP_DB_TARGET") or "prod").strip().lower()
+    if initial_target not in ("prod", "local"):
+        initial_target = "prod"
+    # proc は再起動で差し替わるので dict に持つ。gen は「再起動由来の停止」を旧監視スレッドが
+    # 誤って『サーバー停止を検知』と表示しないための世代番号。
+    state = {"proc": None if already_up else _start_server(port, initial_target), "gen": 0}
 
     # ── ウィンドウ構築 ──────────────────────────────────────────────────
     root = tk.Tk()
     root.title("財務分析ツール")
-    root.geometry("300x166" if hijacked else "300x148")
+    root.geometry("300x214" if hijacked else "300x196")
     root.resizable(False, False)
 
     # タスクバー・タイトルバーアイコン＋ヘッダーサムネイル
@@ -147,25 +173,53 @@ def main():
                  fg="#f59e0b", font=("", 8), anchor="w"
                  ).grid(row=2, column=0, columnspan=2, sticky="w")
 
+    # 接続先セレクタ。ローカルは「同期時点のデータ」なので、選択中の接続先が常に窓に出続ける
+    # ようにしておく（ブラウザ側は common.js のバッジが担当）。
+    target_var = tk.StringVar(value=initial_target)
+    tgt_frm = tk.Frame(frm)
+    tgt_frm.grid(row=3, column=0, columnspan=2, pady=(8, 0), sticky="w")
+    tk.Label(tgt_frm, text="接続先", fg="#64748b", font=("", 8)).pack(side="left")
+    target_radios = []
+    for value, label in (("prod", "本番"), ("local", "ローカル")):
+        rb = tk.Radiobutton(tgt_frm, text=label, value=value, variable=target_var,
+                            font=("", 9), command=lambda: _switch_target(),
+                            state="disabled" if already_up else "normal")
+        rb.pack(side="left", padx=(6, 0))
+        target_radios.append(rb)
+    if already_up:
+        tk.Label(tgt_frm, text="(起動済みのため変更不可)", fg="#64748b",
+                 font=("", 7)).pack(side="left", padx=(4, 0))
+
     open_btn = tk.Button(frm, text="ブラウザで開く",
                          command=lambda: webbrowser.open(url),
                          state="disabled", width=14)
-    open_btn.grid(row=3, column=0, pady=(10, 0), sticky="w")
+    open_btn.grid(row=4, column=0, pady=(10, 0), sticky="w")
 
     stop_btn = tk.Button(frm, text="停止して閉じる",  # noqa: F841
-                         command=lambda: _shutdown(proc, root),
+                         command=lambda: _shutdown(state, root),
                          width=14)
-    stop_btn.grid(row=3, column=1, pady=(10, 0), padx=(8, 0), sticky="w")
+    stop_btn.grid(row=4, column=1, pady=(10, 0), padx=(8, 0), sticky="w")
+
+    def _set_radios(mode):
+        if already_up:
+            return          # 掌握していないプロセスなので常に無効のまま
+        for rb in target_radios:
+            rb.config(state=mode)
 
     # ── サーバー起動待ち（別スレッド）──────────────────────────────────
-    def _watch_server_exit():
-        """サーバー停止（ブラウザ切断の自動停止等）を検知したらランチャーも閉じる。"""
-        if proc is not None:
-            proc.wait()
+    def _watch_server_exit(gen: int):
+        """サーバー停止（ブラウザ切断の自動停止等）を検知したらランチャーも閉じる。
+
+        gen は世代番号。接続先の切替でプロセスを落としたときは state["gen"] が進むので、
+        旧監視スレッドは「停止を検知」と誤表示せずに黙って抜ける。
+        """
+        p = state["proc"]
+        if p is not None:
+            p.wait()
         else:
             while _is_running(url):
                 time.sleep(5)
-        if _CLOSING["flag"]:
+        if _CLOSING["flag"] or gen != state["gen"]:
             return
         def _on_exit():
             status_var.set("⏻ サーバー停止を検知 — まもなく閉じます")
@@ -177,45 +231,64 @@ def main():
         except Exception:
             pass  # ウィンドウ破棄済みなら何もしない
 
+    def _label_for(target: str) -> str:
+        return "● 稼働中（ローカルDB）" if target == "local" else "● 稼働中"
+
     def _set_ready(label):
         status_var.set(label)
-        status_lbl.config(fg="#10b981")
+        status_lbl.config(fg="#f59e0b" if target_var.get() == "local" else "#10b981")
         root.title("財務分析ツール — 稼働中")
         open_btn.config(state="normal")
-        threading.Thread(target=_watch_server_exit, daemon=True).start()
+        _set_radios("normal")
+        threading.Thread(target=_watch_server_exit, args=(state["gen"],), daemon=True).start()
 
-    def _wait_ready():
+    def _wait_ready(open_browser: bool = True):
         if already_up:
             root.after(0, lambda: _set_ready("● 稼働中（起動済み）"))
             root.after(200, lambda: webbrowser.open(url))
             return
         for _ in range(120):
             if _is_running(url):
-                root.after(0, lambda: _set_ready("● 稼働中"))
-                root.after(200, lambda: webbrowser.open(url))
+                root.after(0, lambda: _set_ready(_label_for(target_var.get())))
+                if open_browser:
+                    root.after(200, lambda: webbrowser.open(url))
                 return
             time.sleep(0.5)
         root.after(0, lambda: [
             status_var.set("⚠ 起動失敗 — logs/server.log を確認してください"),
             status_lbl.config(fg="#ef4444"),
+            _set_radios("normal"),
         ])
+
+    def _switch_target():
+        """接続先ラジオの変更でサーバーを入れ替える（ブラウザは開き直さない）。
+
+        切替中はラジオを無効化する。連打すると `_work` が多重に走り、後続スレッドが
+        直前に起動したばかりのプロセスを掴んで落とす競合になる。
+        """
+        target = target_var.get()
+        status_var.set(f"接続先を切替中… ({'ローカル' if target == 'local' else '本番'})")
+        status_lbl.config(fg="orange")
+        open_btn.config(state="disabled")
+        _set_radios("disabled")
+
+        def _work():
+            state["gen"] += 1            # 旧監視スレッドに「これは再起動」と伝える
+            _close_proc(state["proc"])
+            state["proc"] = _start_server(port, target)
+            _wait_ready(open_browser=False)
+
+        threading.Thread(target=_work, daemon=True).start()
 
     threading.Thread(target=_wait_ready, daemon=True).start()
 
-    root.protocol("WM_DELETE_WINDOW", lambda: _shutdown(proc, root))
+    root.protocol("WM_DELETE_WINDOW", lambda: _shutdown(state, root))
     root.mainloop()
 
 
-def _shutdown(proc, root):
+def _shutdown(state, root):
     _CLOSING["flag"] = True
-    if proc is not None:
-        proc.terminate()
-        log_file = getattr(proc, "_log_file", None)
-        if log_file is not None:
-            try:
-                log_file.close()
-            except Exception:
-                pass
+    _close_proc(state.get("proc"))
     root.destroy()
 
 

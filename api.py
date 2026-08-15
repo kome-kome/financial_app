@@ -178,7 +178,7 @@ def _clear_auth_cookies(response) -> None:
 
 # ── DB / コレクター インポート ──────────────────────────────────────────────
 from database import (
-    SessionLocal, init_db,
+    SessionLocal, init_db, db_target_info,
     Company, FinancialRecord, FinancialMetric, RegressionResult,
     CollectionLog, StockPriceDaily, StockPriceWeekly, MacroData,
     prices_on_or_after, latest_prices, latest_year_subq,
@@ -470,7 +470,13 @@ app.include_router(_r_morning.router)
 
 @app.get("/api/system/info")
 async def system_info():
-    return {"render_light_mode": RENDER_LIGHT_MODE}
+    """環境フラグ。接続先（#481 B-1）も返し、common.js がローカル接続時にバッジを出す。
+
+    ローカルミラーは同期時点で止まるため、**どちらの DB を見ているかが分からないと
+    古いスコアを最新と誤読する**（#438 と同型の静かな劣化）。`db_label` はサーバ側で
+    組み立てた表示用文字列で、接続文字列そのものは返さない。
+    """
+    return {"render_light_mode": RENDER_LIGHT_MODE, **db_target_info()}
 
 
 @app.post("/heartbeat")

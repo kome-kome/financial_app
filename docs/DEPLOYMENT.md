@@ -307,6 +307,37 @@ python -m scripts.setup_local_db --apply    # 実行
 
 同時に DROP した旧4テーブル（`companies` / `financial_records` / `macro_data` / `collection_logs`）は `migration_dumps/legacy_pre_mirror_20260815.dump` へ退避済み（ローカル間なので Egress ゼロ・`.gitignore` 配下）。
 
+#### 接続先の切り替え（`FINAPP_DB_TARGET`・Issue #481 B-1）
+
+**既定は `prod`。環境変数を触らなければ従来どおり Supabase を見る。**
+
+| 変数 | 値 | 解決される接続先 |
+|---|---|---|
+| `FINAPP_DB_TARGET` | 未設定 / `prod` | `DATABASE_URL`（無ければローカル既定へフォールバック＋警告） |
+| `FINAPP_DB_TARGET` | `local` | `DATABASE_URL_LOCAL`（無ければ `postgresql://edinet:edinet@localhost:5432/financial_db`） |
+
+**`DATABASE_URL_LOCAL` の既定はこのマシンの実環境と一致している**ので、`.env` を編集せず `FINAPP_DB_TARGET=local` だけで切り替わる。
+
+```powershell
+$env:FINAPP_DB_TARGET = "local"; python -m uvicorn api:app     # CLI
+```
+
+GUI（`launch.py`）は窓に**接続先ラジオ**を持ち、切り替えるとサーバーを入れ替える（ブラウザは開き直さない）。**選択は永続化しない**——毎回 `prod` から始めるほうが、古いミラーで起動していることに気づかず使い続ける事故を防げる。環境変数で明示した場合のみそれが初期値になる。既に別プロセスが起動済みのときはそのプロセスを掌握していないためラジオは無効化される。
+
+**ガードは強さを2種に分けてある**（[database.py](../database.py) の `resolve_database_url()`）:
+
+- **`local` 指定なのに解決先がリモート → `RuntimeError` で import 時に落とす。** ミラーのつもりで本番へ書く事故を確実に止める。`local` を明示した人しか踏まないので CI に影響しない
+- **`prod` 指定で `DATABASE_URL` 未設定（＝ローカルへフォールバック）→ 警告どまり。** ここを raise にすると `ci.yml`（`DATABASE_URL` を渡さずに走る）が全滅する
+- `FINAPP_DB_TARGET` の**未知の値は `ValueError`**。`localhost` のような打ち間違いを黙って `prod` に落とすと、本人はローカルのつもりで本番を叩き続ける
+
+**接続先は常時見えるようにしてある。** ミラーは pull/sync した時点で止まるため、どちらの DB を見ているか分からないと**古いスコアを最新と誤読する**（#438 の「静かな配信停止」と同型で、`/api/stats` の `freshness` は「データの古さ」は見るが「どちらの DB か」は見ない）。
+
+- `/api/system/info` が `db_target` / `db_is_local` / `db_label` を返す（**接続文字列そのものは返さない**・表示用ラベルのみ）
+- [static/js/common.js](../static/js/common.js) が全9画面でこれを読み、**ローカル接続時だけ**右下にバッジを出す。本番接続時は何も描画しないので普段の見た目は不変
+- ランチャー窓は稼働中ラベルを「● 稼働中（ローカルDB）」に変え、色も橙にする
+
+**ローカル接続中の書き込みは許している**（収集・分析結果の永続化）。Supabase 障害中でも作業を止めないため。ただしミラーは Supabase と乖離しうるので、乖離検知は `mirror_sync`（B-3）側で担保する。
+
 #### 未了（8/18 の Egress リセット後）
 
 `FINAPP_DB_TARGET` による接続先スイッチ、`scripts/mirror_pull.py` / `mirror_sync.py` / `mirror_verify.py`、実際の pull（コア約300MB）。詳細は Issue #481。
