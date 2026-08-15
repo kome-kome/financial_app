@@ -16,6 +16,9 @@ __pycache__/
 # 検証スクリプトのローカルキャッシュ（scripts/_cache.py 生成・本番 Egress 削減用・共有不要）
 scripts/.cache/
 
+# Egress 台帳（db_egress.py が FINAPP_EGRESS_LEDGER 指定時に append・実行環境ごとの記録）
+.egress/
+
 # DB 移行用ダンプ（pg_dump 生成物・サイズ大）
 migration_dumps/
 # stock_price dual-table 移行のローカル退避（migrate_stock_price_dual.py 生成・サイズ大）

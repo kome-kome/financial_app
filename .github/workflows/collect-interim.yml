@@ -45,6 +45,7 @@ jobs:
       - name: Collect interim (H1) financials
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          FINAPP_JOB: collect-interim          # Egress 台帳の帰属ラベル（#478）
           EDINET_API_KEY: ${{ secrets.EDINET_API_KEY }}
         run: |
           # tee は最後のコマンドの終了コードを返す＝pipefail が無いと収集失敗を緑で隠す（#352）

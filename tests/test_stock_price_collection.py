@@ -737,10 +737,18 @@ class TestJquantsCoverageWindow:
         `today − 84日` のような固定値で窓を切ると、プランやエンバーゴが変わったときに
         取れるはずのデータを黙って捨てる（ログは平常時と区別がつかない）＝#438/#461 と
         同型の静かな劣化。学習型なら境界を1日踏むコスト（20秒）だけで自動追随する。
+
+        **窓の下限は平日へ寄せる（#484）**: `collect_stock_price_history_jquants` は
+        `weekday() < 5` で土日をリクエスト対象から外すため、`today − 60日` が週末に
+        当たる週は最古の試行日が翌営業日へずれる。暦日をそのまま期待すると曜日次第で
+        落ちる（2026-08-13 は `today − 60日` が日曜で main が赤になった）。
         """
         self._add_company(db, make_company)
         attempted: list = []
         today = date.today()
+        date_from = today - timedelta(days=60)
+        while date_from.weekday() >= 5:
+            date_from += timedelta(days=1)
         # API 側のエンバーゴが 40日へ短縮された想定。決め打ち 84日なら取り逃す領域。
         cutoff = today - timedelta(days=40)
 
@@ -751,10 +759,10 @@ class TestJquantsCoverageWindow:
                     date_str, "2024-01-01", cutoff.strftime("%Y-%m-%d"))
             return [{**self._JQ_ROW, "Date": date_str}]
 
-        result = self._run(db, fetch, today - timedelta(days=60), today - timedelta(days=30))
+        result = self._run(db, fetch, date_from, today - timedelta(days=30))
 
         # 短縮後に取得可能になった 60〜40日前は取り逃さない
-        assert min(attempted) == (today - timedelta(days=60)).strftime("%Y-%m-%d")
+        assert min(attempted) == date_from.strftime("%Y-%m-%d")
         assert result["upserted"] > 0
         # 学習後、窓外の残りは叩かない（境界を踏むのは1日だけ）
         assert sum(1 for d in attempted if d > cutoff.strftime("%Y-%m-%d")) == 1

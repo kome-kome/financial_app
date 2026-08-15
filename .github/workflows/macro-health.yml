@@ -60,6 +60,7 @@ jobs:
       - name: Check macro freshness
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          FINAPP_JOB: macro-health          # Egress 台帳の帰属ラベル（#478）
           # 収集対象は API キーの有無で変わる（未設定のグループは判定から外す）。
           # 収集ジョブと同じキーを渡さないと「収集したのに判定対象外」がずれる。
           FRED_API_KEY: ${{ secrets.FRED_API_KEY }}

@@ -57,6 +57,12 @@ engine = create_engine(
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
+# Egress 台帳（#478）。全プロセス（GHA バッチ・ローカル CLI・Render）で「どのクエリが何行
+# 引いたか」を常時記録し、プロセス単位の上限を超えたら例外で止める。結果セットを消費しない
+# ので既存の挙動には干渉しない。詳細と較正の由来は db_egress.py の docstring。
+import db_egress          # noqa: E402  （engine 定義後でないと張れない）
+db_egress.install(engine)
+
 
 # ── タイムアウトの局所上書き（#470 / #471）────────────────────────────────────
 # Supabase の postgres ロールは `statement_timeout=2min` / `lock_timeout=0` が既定

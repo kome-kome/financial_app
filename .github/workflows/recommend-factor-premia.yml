@@ -88,6 +88,7 @@ jobs:
       - name: Run Fama-MacBeth factor premia batch
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          FINAPP_JOB: recommend-factor-premia          # Egress 台帳の帰属ラベル（#478）
         run: |
           set -o pipefail   # tee で python の非ゼロ終了がマスクされ失敗が緑表示になるのを防ぐ（Issue #352）
           python recommend_factor_premia.py \

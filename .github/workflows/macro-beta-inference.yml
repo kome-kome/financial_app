@@ -109,6 +109,7 @@ jobs:
       - name: Run inference batch
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          FINAPP_JOB: macro-beta-inference          # Egress 台帳の帰属ラベル（#478）
         run: |
           set -o pipefail   # tee で python の非ゼロ終了がマスクされ失敗が緑表示になるのを防ぐ（Issue #352）
           FORCE_FLAG=""

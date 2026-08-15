@@ -73,6 +73,7 @@ jobs:
       - name: Run pooled r_hat experiment
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          FINAPP_JOB: experiment-pooled-rhat          # Egress 台帳の帰属ラベル（#478）
         run: |
           set -o pipefail   # tee で python の非ゼロ終了がマスクされ失敗が緑表示になるのを防ぐ（Issue #352）
           python -m scripts.experiment_pooled_rhat \

@@ -34,15 +34,16 @@ Render の制約と運用形態に合わせて設計すること。
 
 **すべて UTC。** GitHub Actions のランナーは UTC で、東証・EDINET の「日付」は JST（＝UTC+9）。占有は「名目の起動時刻 → `timeout-minutes` の上限」で、**キュー遅延は含まない**。
 
-| UTC | ワークフロー | 頻度 | 占有（上限まで） | JST |
-|---|---|---|---|---|
-| 00:00 | `macro-beta-inference` | 毎月1日 | → 05:40（340分） | 09:00 |
-| **08:17** | **`daily-incremental`** → `nightly-scores` / `macro-health` | **毎日** | → 通常 11:00・最悪 14:17（360分）＋チェーン33〜35分 | **17:17** |
-| 16:30 | `tune-hyperparameters` | 毎月1日 | → 22:25（355分・macro_gbdt） | 翌01:30 |
-| 22:00 | `recommend-factor-premia` | 毎月5日 | → 22:20（20分） | 翌07:00 |
-| 23:30 | `vacuum-maintenance` | 毎週土 | → 24:00 | 日 08:30 |
+| UTC | ワークフロー | 頻度 | 占有（上限まで） | JST | 1回あたり Egress |
+|---|---|---|---|---|---|
+| 00:00 | `macro-beta-inference` | 毎月1日 | → 05:40（340分） | 09:00 | 約 68MB（`build_panel` = `load_data` 1回） |
+| **08:17** | **`daily-incremental`** → `nightly-scores` / `macro-health` | **毎日** | → 通常 11:00・最悪 14:17（360分）＋チェーン33〜35分 | **17:17** | 収集は主に ingress ／ **`nightly-scores` 67.7MB** ／ `macro-health` ほぼ0 |
+| 16:30 | `tune-hyperparameters` | 毎月1日 | → 22:25（355分・macro_gbdt） | 翌01:30 | 約 68MB **× matrix 3ジョブ**（別プロセス＝`shared_snapshot_cache` は跨がない） |
+| 22:00 | `recommend-factor-premia` | 毎月5日 | → 22:20（20分） | 翌07:00 | 約 68MB（`load_data` 1回） |
+| 23:30 | `vacuum-maintenance` | 毎週土 | → 24:00 | 日 08:30 | ほぼ0（サーバ内処理） |
 
 - 非重複を守る理由は **Supabase の接続上限**（#470 では `daily-incremental` 単独でも pooler 枯渇＝ECHECKOUTTIMEOUT を2回踏んでいる）。
+- **Egress 列は時刻の非重複とは独立に効く**。非重複でも総量は積み上がるため、ワークフローを足すときは占有時間と転送量の**両方**を見る（この列が無かったため、`tune-hyperparameters` の matrix 3並列＝1日で約200MB という項が長らく Egress 設計の表から漏れていた）。実測は下記「Egress 設計」節、常時の内訳は `db_egress` の台帳（#478）。
 - **6時間級のジョブが3本ある以上、キュー遅延まで含めた完全な非重複は不可能**（GHA の cron 遅延は実測で最大6時間）。上表が保証するのは名目時刻での非重複＋1時間以上のマージンまで。#446 の「cron の名目時刻で衝突判定しない」は**実起動のログで事後確認せよ**という意味で、設計時の目安としては上表を使う。
 - 2026-08-09（#476）に `daily-incremental` を 18:00 → 08:17 へ前倒ししたのに伴い、月次3本を空いた窓へ再配置した。
 
@@ -345,7 +346,25 @@ Render ダッシュボードで管理。
 
 #### Egress 設計（日次ジョブ = 最大の消費者・Issue #446）
 
-**測り方**: 行を持ってこずにサーバ側で `octet_length(<列>::text)` を集計する（psycopg2 はテキストプロトコルなので、これが実際に流れるペイロード長。TLS/TCP ヘッダは含まないが誤差は数%）。ダッシュボードの数字は他の消費と混ざって分離できないため、**列単位で積み上げた実測をこちらの正本とする**。
+**測り方は二階建て**（Issue #478・[ADR-0034](adr/0034-client-side-egress-ledger-and-circuit-breaker.md)）。
+
+| 層 | 何を使うか | いつ | 精度 |
+|---|---|---|---|
+| **正本** | サーバ側 `sum(octet_length(<列>::text))` | 手動・設計判断のとき | 実測（誤差数%） |
+| **常時** | `db_egress` のクライアント側台帳（行数 × 較正済み B/行） | 全プロセス・全経路で自動 | 推定 |
+
+**正本**: 行を持ってこずにサーバ側で `octet_length(<列>::text)` を集計する（psycopg2 はテキストプロトコルなので、これが実際に流れるペイロード長。TLS/TCP ヘッダは含まないが誤差は数%）。ダッシュボードの数字は他の消費と混ざって分離できないため、**列単位で積み上げた実測をこちらの正本とする**。
+
+**常時計測（`db_egress.py`）**: `engine` の `after_cursor_execute` フックが「どのクエリが何行・何列を返したか」を全プロセス（GHA バッチ・ローカル CLI・Render）で記録する。psycopg2 の既定カーソルはクライアント側バッファなので、このフックの時点で行は既に転送済み＝`cursor.rowcount` がそのまま転送行数になる（結果は消費しないので既存挙動に干渉しない）。プロセス終了時に `[egress] summary job=... total=...MB rows=... top=<テーブル>:<MB>,...` を標準エラーへ1行出す。ワークフローの帰属は各 yml の `FINAPP_JOB` で付く。
+
+- **なぜ要ったか**: 2026-07（61.2GB）・2026-08（7.312GB）の2回とも、超過後に「誰が食ったか」を答えられなかった。当時の計測は `scripts/_cache.py` の HIT/MISS だけで、**夜間バッチ本体・`routers/`・`collector*.py` は完全に無計測**だった。
+- **推定は正本ではない**。較正値（B/行）は下表の実測から導出しており、未較正の組み合わせは 12 B/列/行 の保守的な既定を使う。**台帳の役目は帰属とブレーカであって、実測の置き換えではない。**
+- **ロールアップ**: `python -m scripts.egress_report`（JSONL 台帳）／`--log <gh run view --log の保存先>`（run ログの `[egress] summary` 行）。DB に繋がないので実行しても Egress は増えない。JSONL を残すには `FINAPP_EGRESS_LEDGER=<path>` を設定する。
+
+**サーキットブレーカ**: プロセス単位で `FINAPP_EGRESS_ROW_LIMIT`（既定 3,000,000 行）/ `FINAPP_EGRESS_MB_LIMIT`（既定 400MB）を超えると `EgressBudgetExceeded` を送出する。既定は既知の最大実行（夜間バッチ ≒ 1.39M 行 / 67.7MB）の約2倍。GHA では例外＝failure ＝ `notify-failure.yml` が Issue を自動起票するので、**ブレーカは自分で自分を報告する**。
+
+- 正当に重い一回性の処理は `db_egress.egress_budget(mb=..., rows=...)` で**その区間だけ**引き上げる（ADR-0032 の `db_timeouts` と同じ原則＝上書きは局所・既定は変えない）。
+- 緊急時の全体解除は `FINAPP_EGRESS_ENFORCE=0`。**計測は続く**ので台帳は埋まる。
 
 夜間スコア更新（`nightly-scores.yml`・`sector_ols` + M-6）の 2026-08-06 実測:
 
