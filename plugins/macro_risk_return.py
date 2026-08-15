@@ -220,7 +220,7 @@ class MacroRiskReturnPlugin(AnalysisPlugin):
         graceful-degrade する。"""
         try:
             from database import get_macro_beta
-            meta, _ = get_macro_beta(db)
+            meta, _ = get_macro_beta(db, with_loadings=False)   # 存在確認だけ（#482）
             return meta is not None
         except Exception:
             return False

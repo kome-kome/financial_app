@@ -69,6 +69,25 @@ class TestMacroBetaStore:
         meta, loadings = get_macro_beta(db)
         assert meta is None and loadings == {}
 
+    def test_with_loadings_false_skips_the_loading_table(self, db):
+        """meta だけ要る呼び出し（存在確認・selected_factors）は loadings を引かない（#482）。
+
+        macro_beta_loadings は約4,400社 × 因子数の行を持ち、4呼び出しのうち3つが
+        戻り値の loadings を捨てている。転送そのものを止める。
+        """
+        upsert_macro_beta(db, _meta(), _loadings())
+        meta, loadings = get_macro_beta(db, with_loadings=False)
+        assert meta["run_id"] == "run1"
+        assert meta["selected_factors"] == ["macro_usdjpy_yoy", "macro_vix_zscore"]
+        assert loadings == {}
+        # 既定は従来どおり loadings 付き（macro_snapshots の producer 経路）
+        _, full = get_macro_beta(db)
+        assert full["E001"]["macro_usdjpy_yoy"] == (0.5, 0.1)
+
+    def test_with_loadings_false_on_empty_db(self, db):
+        meta, loadings = get_macro_beta(db, with_loadings=False)
+        assert meta is None and loadings == {}
+
     def test_missing_run_id_raises(self, db):
         with pytest.raises(ValueError):
             upsert_macro_beta(db, {"snapshot_date": "2026-06-01"}, [])
