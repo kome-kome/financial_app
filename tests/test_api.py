@@ -86,6 +86,18 @@ class TestEndpoints:
         assert r.status_code == 200
         assert "render_light_mode" in r.json()
 
+    def test_system_info_exposes_db_target(self):
+        """接続先（#481 B-1）。common.js がこれを見てローカル接続時のバッジを出す。"""
+        d = client.get("/api/system/info").json()
+        assert d["db_target"] in ("prod", "local")
+        assert isinstance(d["db_is_local"], bool)
+        assert d["db_label"]
+
+    def test_system_info_does_not_leak_the_connection_string(self):
+        """ブラウザへ渡る値なので資格情報・ホストを含めない（表示用ラベルだけ返す）。"""
+        d = client.get("/api/system/info").json()
+        assert "://" not in d["db_label"] and "@" not in d["db_label"]
+
     def test_auth_status(self):
         r = client.get("/api/auth/status")
         assert r.status_code == 200

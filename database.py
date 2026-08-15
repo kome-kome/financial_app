@@ -31,16 +31,87 @@ load_dotenv()
 
 log = logging.getLogger(__name__)
 
-DATABASE_URL = os.environ.get(
-    "DATABASE_URL",
-    "postgresql://edinet:edinet@localhost:5432/financial_db"
-)
-# Supabase/Heroku は "postgres://" を返すが SQLAlchemy 2.x は "postgresql://" が必要
-if DATABASE_URL.startswith("postgres://"):
-    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+# ── 接続先の解決（#481 B-1）──────────────────────────────────────────────
+# Supabase が Egress 超過で restricted になるとアプリも分析も動かせない（2026-07・2026-08 に
+# 2回発生し、2回目は8日間停止）。ローカル読取レプリカへ切り替える口を `FINAPP_DB_TARGET`
+# として持つ。**既定は prod**＝環境変数を触らなければ従来どおり Supabase を見る。
+#
+# 解決ロジックだけを純関数に切り出しているのは、テストが `importlib.reload(database)` を
+# 強いられないようにするため（reload すると engine が作り直され、db_egress のリスナが
+# 死んだ engine ごとに積み上がる）。辞書を渡すだけで全分岐を検証できる。
+_LOCAL_DEFAULT_URL = "postgresql://edinet:edinet@localhost:5432/financial_db"
+_VALID_TARGETS = ("prod", "local")
+
+
+def _looks_local(url: str) -> bool:
+    return "localhost" in url or "127.0.0.1" in url
+
+
+def resolve_database_url(env) -> tuple[str, str]:
+    """(target, url) を返す。副作用なし（`env` は os.environ 相当のマッピング）。
+
+    - `FINAPP_DB_TARGET`: "prod"（既定）| "local"。**未知の値は握りつぶさず ValueError**——
+      `localhost` のような打ち間違いを黙って prod に落とすと、本人はローカルのつもりで
+      本番を叩き続ける（この種の取り違えは事後にログから判別できない）。
+    - local: `DATABASE_URL_LOCAL` → 無ければ `_LOCAL_DEFAULT_URL`。
+    - prod:  `DATABASE_URL` → 無ければ同じローカル既定へフォールバック（後方互換）。
+
+    ガードは2種で**強さを変えてある**:
+
+    - **local 指定なのに解決先がリモート → RuntimeError**。local を明示した人しか踏まないので
+      CI には影響しない。ミラーのつもりで本番へ書く事故を確実に止める。
+    - **prod 指定で DATABASE_URL 未設定（＝ローカルへフォールバック）→ 警告どまり**。
+      ここを raise にしてはいけない——`ci.yml` は `DATABASE_URL` を渡さずに走るため、
+      例外にすると CI が全滅する。代わりに警告と画面バッジ（/api/system/info）で見せる。
+    """
+    target = (env.get("FINAPP_DB_TARGET") or "prod").strip().lower()
+    if target not in _VALID_TARGETS:
+        raise ValueError(
+            f"FINAPP_DB_TARGET が不正: {target!r}（有効なのは {' / '.join(_VALID_TARGETS)}）"
+        )
+
+    if target == "local":
+        url = env.get("DATABASE_URL_LOCAL") or _LOCAL_DEFAULT_URL
+    else:
+        url = env.get("DATABASE_URL") or _LOCAL_DEFAULT_URL
+
+    # Supabase/Heroku は "postgres://" を返すが SQLAlchemy 2.x は "postgresql://" が必要
+    if url.startswith("postgres://"):
+        url = url.replace("postgres://", "postgresql://", 1)
+
+    if target == "local" and not _looks_local(url):
+        raise RuntimeError(
+            "FINAPP_DB_TARGET=local ですが接続先がローカルではありません: "
+            f"{mask_url(url)}\n"
+            "  DATABASE_URL_LOCAL を localhost / 127.0.0.1 のものにするか、指定を外してください"
+            f"（未指定なら {_LOCAL_DEFAULT_URL} が使われます）。"
+        )
+    if target == "prod" and not env.get("DATABASE_URL"):
+        log.warning(
+            "DATABASE_URL が未設定のため、ローカル既定 %s へフォールバックします"
+            "（FINAPP_DB_TARGET=prod）。本番のつもりなら .env を確認してください。",
+            _LOCAL_DEFAULT_URL,
+        )
+    return target, url
+
+
+def mask_url(url: str) -> str:
+    """接続文字列のパスワードを伏せる（ログ・例外メッセージ用）。"""
+    return re.sub(r"://([^:/@]+):[^@]*@", r"://\1:***@", url)
+
+
+DB_TARGET, DATABASE_URL = resolve_database_url(os.environ)
 
 # ローカル以外（クラウドDB）は SSL を強制し、コネクション数を抑える
-_is_local = "localhost" in DATABASE_URL or "127.0.0.1" in DATABASE_URL
+_is_local = _looks_local(DATABASE_URL)
+
+
+def db_target_info() -> dict:
+    """接続先の表示用サマリ。**接続文字列そのものはブラウザへ渡さない**（/api/system/info）。"""
+    label = "ローカル" if _is_local else "本番"
+    where = DATABASE_URL.rsplit("/", 1)[-1].split("?")[0] if _is_local else "Supabase"
+    return {"db_target": DB_TARGET, "db_is_local": _is_local, "db_label": f"{label}（{where}）"}
+
 _connect_args = {} if _is_local else {"sslmode": "require"}
 _pool_size    = 10 if _is_local else 3
 _max_overflow = 20 if _is_local else 5
