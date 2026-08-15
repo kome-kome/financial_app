@@ -105,6 +105,17 @@ Supabase 無料枠の Egress は 5GB/月。**2回続けて超過した**。
   局所上書きの復元・較正値の出所・engine 統合・本番 engine への取り付け）。DB へは繋がない。
   **実数の計上は SQLite では原理的に検証できない**ため、実 PostgreSQL（ローカルミラー）での
   確認を別途行う。
+  - **2026-08-15 追記（#481 B-0 でこの穴は塞いだ）**: ローカル PostgreSQL 18.6 が用意でき、
+    `tests/test_db_egress_postgres.py` を追加した（`FINAPP_TEST_PG_URL` 設定時のみ実行・
+    **CI では skip**＝`ci.yml` の「本番 DB にも外部にも触れない」契約は維持）。実測で確認したのは
+    ①SELECT の `rowcount` が転送行数として実数で積まれる（`unknown_calls == 0`）
+    ②`LIMIT` と集約が行数に正しく反映される
+    ③INSERT/UPDATE/DELETE は計上されない
+    ④**`INSERT ... RETURNING` は計上される**（文字列で SELECT 判定していたら落ちる回帰を固定）
+    ⑤実クエリで `EgressBudgetExceeded` が飛び、`FINAPP_EGRESS_ENFORCE=0` では飛ばずに計上だけ続く。
+    加えて、正本の `sum(octet_length(列::text))` と台帳の推定を並べて残差を出力する足場を入れた
+    （アサートはしない——本番データでの較正は 8/18 以降・#478）。
+    **残るのは較正係数の精度だけで、計上ロジック自体の未検証は解消した。**
 
 ## Considered Options
 
