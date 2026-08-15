@@ -77,7 +77,7 @@ pytest tests/test_utils.py  # 単一ファイル
 | `collector_financials.py` | XBRL 財務収集・パース・CF/PL-BS 補完・全件収集 |
 | `collector_prices.py` | 株価（stooq/J-Quants/Yahoo）・市場データ更新・マクロ収集 |
 | `collector_interim.py` | 半期(H1)財務収集（EDINET 半期報告書043A00/旧四半期Q2・period_type='H1'・Issue #219②） |
-| `collector_disclosures.py` | 会社予想（ガイダンス）開示収集（J-Quants `/fins/summary`・Issue #322）。`statement_disclosure` へ実績/予想値を蓄積し、`feature_disclosure.py` の特徴量化・`recommend_factor_premia.py` の因子プレミア推定の入力元となる |
+| `collector_disclosures.py` | 会社予想（ガイダンス）開示収集（J-Quants `/fins/summary`・Issue #322）。`statement_disclosure` へ実績/予想値を蓄積する。特徴量化層 `feature_disclosure.py` の入力元だが、その呼び出し元は `scripts/event_study_*.py` の2本だけで、**本番の API / プラグイン経路からは使われていない**（親 #323 は 2026-07-16 に wontfix クローズ済み）。`recommend_factor_premia.py` は本テーブルに依存せず、`fin_features` は `financial_metrics` VIEW の `z_*`（`plugins/recommend.py::METRICS`）から取る |
 | `api.py` | FastAPI アプリ本体（HTMLページ配信・認証/CORSミドルウェア・`/health`）。REST ルート実体は `routers/` へ委譲 |
 | `routers/` | REST ルーター5本（`auth` / `collect` / `market` / `analysis` / `morning`）。エンドポイント定義の実体 |
 | `plugins/` | 分析モデル（自動検出方式）。理論は [MODELS.md](docs/MODELS.md)、実装詳細は [PLUGIN_REFERENCE.md](docs/PLUGIN_REFERENCE.md) |
