@@ -21,6 +21,7 @@
 スコアには使わない。
 """
 import re
+from collections import namedtuple
 from typing import Any
 
 from .base import AnalysisPlugin
@@ -29,7 +30,8 @@ from .net_cash_analysis import compute_net_cash, compute_nc_ratio
 
 
 # 売りシグナルに使う指標（すべて「高い＝売る理由が小さい」向き）。
-# 多くは financial_metrics VIEW 列だが、nc_ratio は VIEW 列ではなく実行時計算（_resolve_metric）。
+# 多くは financial_metrics VIEW 列。nc_ratio は VIEW にも同名列があるが実行時計算する
+# （_resolve_metric・理由は下記 _SELL_RUNTIME_METRICS のコメント）。
 # UI のウェイトグリッドと一致させる（static/js/analysis.js: SELL_WEIGHT_LABELS）。
 SELL_METRICS = ["gap_ratio", "roe", "op_margin", "cf_ratio", "rev_growth", "equity_ratio", "nc_ratio", "mu", "neg_r_macro"]
 
@@ -46,6 +48,32 @@ PRESETS = {
     "割高警戒型":   {"gap_ratio": 2.5, "roe": 0.5, "op_margin": 0.5, "rev_growth": 0.3, "nc_ratio": 0.8, "neg_r_macro": 0.8},
     "業績悪化重視": {"roe": 2.0, "op_margin": 1.5, "cf_ratio": 1.0, "rev_growth": 1.5, "gap_ratio": 0.5, "nc_ratio": 0.3, "mu": 0.3},
 }
+
+
+# ── 転送列の契約（Issue #482）────────────────────────────────────────────────
+# financial_metrics は派生値込み97列の計算 VIEW だが、本プラグインが読むのは以下だけ。
+# ORM で全列を引くと 1リクエストあたり 3.45MB（4,430行 × 779B/行・db_egress の
+# EGRESS_COST_TABLE 実測）を転送する。`recommend.SELECT_COLS`（#441）と同じ方式で
+# 消費列から導出する＝指標を SELL_METRICS へ足せば転送列が自動追従し、二重管理しない。
+# 転送しない指標: mu / neg_r_macro は producer 由来で VIEW に列が無い。nc_ratio は VIEW にも
+# 同名列があるが、_resolve_metric は BS3列から実行時計算する（VIEW 側は ROUND(...,4) 付きで
+# 式が一致しない）ため、こちらも引かず _NC_RATIO_COLS を転送する。
+_SELL_RUNTIME_METRICS = ("nc_ratio", "mu", "neg_r_macro")
+_SELL_VIEW_METRICS = tuple(m for m in SELL_METRICS if m not in _SELL_RUNTIME_METRICS)
+_NC_RATIO_COLS = ("bs_current_assets", "bs_investment_securities", "bs_total_liabilities")  # _resolve_metric
+_SELL_DISPLAY_COLS = ("edinet_code", "sec_code", "company_name", "industry", "year",
+                      "market_cap", "stock_price", "is_active", "delisted_date")
+SELL_SELECT_COLS = tuple(dict.fromkeys(
+    _SELL_DISPLAY_COLS + _SELL_VIEW_METRICS + _NC_RATIO_COLS))
+
+# 週次株価の転送量制御（Issue #482）。_compute_trend が読むのは week_start と close_last の
+# 2列だけで、必要な最長窓は 52週ドローダウン（closes[-52:]）＝364日。余裕1ヶ月を足して 400日
+# とする（recommend._MOMENTUM_LOOKBACK_DAYS と同値）。下限は week_start（PK 第2列）へ掛けて
+# (edinet_code, week_start) の範囲スキャンにする——trade_date は非インデックス列。
+# holdings は textarea 入力で件数上限が無く IN 句へ直接載るためチャンクも要る。
+_TREND_LOOKBACK_DAYS = 400
+_TREND_CODE_BATCH = 500
+_WeeklyBar = namedtuple("_WeeklyBar", "week_start close_last")
 
 
 def _resolve_metric(r, m: str) -> float | None:
@@ -114,7 +142,8 @@ def parse_holdings(text: str) -> tuple[list[dict], list[str]]:
 def _compute_trend(weekly_rows: list) -> dict:
     """週次株価から価格モメンタム（タイミング軸）を算出する。
 
-    weekly_rows: StockPriceWeekly の行（同一 edinet_code）。week_start 昇順でなくてよい。
+    weekly_rows: _WeeklyBar（同一 edinet_code・week_start と close_last の2フィールド）。
+                 week_start 昇順でなくてよい。
     Returns: {"trend", "ret_13w"(%|None), "drawdown_52w"(%|None), "last_close"(float|None)}
     """
     series = sorted(
@@ -270,7 +299,8 @@ class SellRankingPlugin(AnalysisPlugin):
         }
 
     def execute(self, params: dict, db: Any) -> dict:
-        from database import FinancialMetric, StockPriceWeekly, latest_year_subq
+        from database import (FinancialMetric, StockPriceWeekly, iso_week_start,
+                              latest_year_subq)
 
         holdings, invalid = parse_holdings(params["holdings"])
         preset       = params["preset"]
@@ -295,7 +325,10 @@ class SellRankingPlugin(AnalysisPlugin):
         # ── ① ユニバース標準化パラメータ（最新年度の全銘柄から winsorize → mean/sd）──
         # 標準化の基準は「現在投資可能な母集団」に合わせるため、上場廃止銘柄は除く（Issue #315）。
         subq = latest_year_subq(db, FinancialMetric)
-        uni_q = (db.query(FinancialMetric)
+        # 転送は SELL_SELECT_COLS だけ（#482）。戻りは ORM インスタンスではなく Row タプル
+        # なので、絞っていない列を後から読むことが構造的に起きない（recommend.py と同方針）。
+        _sell_cols = [getattr(FinancialMetric, c) for c in SELL_SELECT_COLS]
+        uni_q = (db.query(*_sell_cols)
                    .join(subq, (FinancialMetric.edinet_code == subq.c.edinet_code) &
                                (FinancialMetric.year == subq.c.max_year))
                    .filter(FinancialMetric.is_active.isnot(False)))
@@ -316,7 +349,7 @@ class SellRankingPlugin(AnalysisPlugin):
             try:
                 from database import get_macro_beta
                 from plugins.utils import get_macro_features
-                _meta_m1, _ = get_macro_beta(db)
+                _meta_m1, _ = get_macro_beta(db, with_loadings=False)   # 因子名だけ（#482）
                 _sel_factors = (_meta_m1 or {}).get("selected_factors") or []
                 _macro_snap: dict | None = None
                 if _sel_factors:
@@ -356,7 +389,7 @@ class SellRankingPlugin(AnalysisPlugin):
         # ── 保有銘柄の最新年度レコードを sec_code で引く ──
         codes = [h["sec_code"] for h in holdings]
         rows = {r.sec_code: r for r in (
-            db.query(FinancialMetric)
+            db.query(*_sell_cols)
               .join(subq, (FinancialMetric.edinet_code == subq.c.edinet_code) &
                           (FinancialMetric.year == subq.c.max_year))
               .filter(FinancialMetric.sec_code.in_(codes))
@@ -364,12 +397,26 @@ class SellRankingPlugin(AnalysisPlugin):
         )}
 
         # ── 価格モメンタム（保有 edinet_code をまとめて取得）──
+        # 3列＋400日下限＋500社チャンク（#482）。全列・全期間で引いていた頃は保有20銘柄でも
+        # 5,740行 × 74.9B/行 ≈ 0.43MB を転送していた。
+        # recommend.compute_momentum_z のような row_number() OVER は使えない——あちらは各社
+        # cutoff 以下の最終バー1本で足りるが、_compute_trend は13週前と52週高値を見るので
+        # 系列そのものが要る。macro_snapshots.load_weekly_prices_chunked も流用できない
+        # （対象が Company 全社固定・日付下限なし・week_start を返さない・volume 番兵は不要）。
         ecodes = [r.edinet_code for r in rows.values() if r.edinet_code]
         weekly_by_ec: dict[str, list] = {}
         if ecodes:
-            for w in (db.query(StockPriceWeekly)
-                        .filter(StockPriceWeekly.edinet_code.in_(ecodes)).all()):
-                weekly_by_ec.setdefault(w.edinet_code, []).append(w)
+            week_from = iso_week_start(
+                (_dt.date.today() - _dt.timedelta(days=_TREND_LOOKBACK_DAYS)).isoformat())
+            for i in range(0, len(ecodes), _TREND_CODE_BATCH):
+                chunk = ecodes[i:i + _TREND_CODE_BATCH]
+                for ec, ws, cl in (db.query(StockPriceWeekly.edinet_code,
+                                            StockPriceWeekly.week_start,
+                                            StockPriceWeekly.close_last)
+                                     .filter(StockPriceWeekly.edinet_code.in_(chunk),
+                                             StockPriceWeekly.week_start >= week_from)
+                                     .all()):
+                    weekly_by_ec.setdefault(ec, []).append(_WeeklyBar(ws, cl))
 
         not_found: list[str] = []
         scored: list[dict] = []

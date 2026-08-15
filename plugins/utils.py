@@ -886,8 +886,11 @@ def get_macro_features(
     lookback_days = zscore_years * 366 if has_zscore else 365 + window_days + 30
     since = (ref - _td(days=lookback_days)).isoformat()
 
+    # 3列だけ引く（Issue #482）。macro_data は11列あり ORM 全列だと 8.7MB / 3列なら 2.6MB
+    # （db_egress の EGRESS_COST_TABLE 実測）。読むのは直後の3属性だけで、
+    # macro_snapshots._preload_macro_impl も同じ3列に絞っている（非対称の解消）。
     rows = (
-        db.query(MacroData)
+        db.query(MacroData.series_code, MacroData.trade_date, MacroData.close)
         .filter(
             MacroData.series_code.in_(list(series_needed.keys())),
             MacroData.trade_date >= since,

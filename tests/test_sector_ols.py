@@ -6,12 +6,13 @@ execute(): 空DB・サンプル不足→ValueError / 予測値とランクの書
 import asyncio
 import os
 import sys
+from datetime import date
 
 import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from database import FinancialRecord
+from database import Company, FinancialRecord
 from plugins import execute_plugin
 from plugins.sector_ols import (
     DB_PER_SHARE_KEYS,
@@ -19,7 +20,9 @@ from plugins.sector_ols import (
     FEATURE_OPTIONS,
     FEATURE_OPTIONS_PER_SHARE,
     PER_SHARE_DERIVED,
+    _SECTOR_META_FIELDS,
     plugin,
+    sector_load_fields,
 )
 
 _PER_SHARE_VALUES = {o["value"] for o in FEATURE_OPTIONS_PER_SHARE}
@@ -82,6 +85,85 @@ class TestConstants:
         # 重い回帰は Render 軽量モードでブロックするため heavy フラグを持つ
         assert plugin.heavy is True
         assert plugin.to_meta()["heavy"] is True
+
+
+# ── 転送列の契約（Issue #482）───────────────────────────────────────────────
+
+class TestSectorLoadFields:
+    """sector_load_fields が「選択 features を解くのに要る列ちょうど」を返す。
+
+    列が欠けると _resolve_per_share_value の getattr(..., None) が欠測へ倒し、
+    _classify_by_sector の AND フィルタが全社を落として「業種0件」になる（#459 と同型）。
+    """
+
+    def test_meta_fields_are_always_included(self):
+        fields = sector_load_fields(["pl_eps"])
+        for f in _SECTOR_META_FIELDS:
+            assert f in fields
+
+    def test_db_per_share_keys_pass_through(self):
+        fields = sector_load_fields(["pl_eps", "dps"])
+        assert "pl_eps" in fields and "dps" in fields
+
+    def test_derived_keys_map_to_absolute_columns(self):
+        fields = sector_load_fields(["ps_revenue", "ps_free_cf"])
+        assert "pl_revenue" in fields and "cf_free_cf" in fields
+        # per-share キー自体は列ではないので引かない
+        assert "ps_revenue" not in fields
+
+    def test_every_option_resolves_to_a_real_column(self):
+        all_values = [o["value"] for o in FEATURE_OPTIONS_PER_SHARE]
+        fields = sector_load_fields(all_values)
+        cols = set(FinancialRecord.__table__.columns.keys())
+        missing = [f for f in fields if f not in cols]
+        assert not missing, f"financial_records に無い列: {missing}"
+
+    def test_defaults_stay_a_small_subset(self):
+        fields = sector_load_fields(DEFAULT_FEATURES_PRICE)
+        cols = set(FinancialRecord.__table__.columns.keys())
+        assert set(fields) < cols
+        assert len(fields) < len(cols) / 2
+        assert len(fields) == len(set(fields))       # 重複なし
+
+    def test_unknown_feature_raises(self):
+        # 黙って列を落とすと「業種0件」に化けるので fail-fast にする
+        with pytest.raises(ValueError, match="未知の説明変数"):
+            sector_load_fields(["pl_eps", "ps_not_a_real_feature"])
+
+
+class TestSharesOutstandingFallback:
+    def test_company_master_issued_shares_survives_column_scoping(self, db, make_fin,
+                                                                  make_company):
+        """J-Quants マスタ由来の株数（#462）が列指定でも消えないこと。
+
+        shares_outstanding の第2優先は record.company.issued_shares だが、列指定 Row に
+        リレーションは無く getattr が黙って None を返す。_load_records は SQL 側で
+        COALESCE して同じ優先順位を保つ——ここが外れると株数推計不能で母集団から
+        落ちるだけなので、失敗として現れない。
+        """
+        from plugins.utils import shares_outstanding
+
+        db.add(make_company(edinet_code="E00001", issued_shares=1_500_000.0))
+        db.add(make_fin(edinet_code="E00001", issued_shares=None,
+                        bs_total_equity=None, bs_bps=None, stock_price=1500.0))
+        db.commit()
+
+        recs = plugin._load_records(db, None, DEFAULT_FEATURES_PRICE)
+        row = {r.edinet_code: r for r in recs}["E00001"]
+        assert shares_outstanding(row) == 1_500_000.0
+
+    def test_record_issued_shares_wins_over_master(self, db, make_fin, make_company):
+        """XBRL 期末値があればそちらが優先される（COALESCE の順序）。"""
+        from plugins.utils import shares_outstanding
+
+        db.add(make_company(edinet_code="E00001", issued_shares=1_500_000.0))
+        db.add(make_fin(edinet_code="E00001", issued_shares=2_000_000.0,
+                        bs_total_equity=None, bs_bps=None, stock_price=1500.0))
+        db.commit()
+
+        recs = plugin._load_records(db, None, DEFAULT_FEATURES_PRICE)
+        row = {r.edinet_code: r for r in recs}["E00001"]
+        assert shares_outstanding(row) == 2_000_000.0
 
 
 # ── execute(): in-memory SQLite ──────────────────────────────────────────────
@@ -647,9 +729,11 @@ class TestPeriodTypeIsolation:
                         bs_total_equity=850.0 * 1.05e6))
         db.commit()
 
-        records = plugin._load_records(db, None)
-        assert all(r.period_type == "annual" for r in records)
+        # period_type は WHERE 専用で転送しない（#482）ので、H1 の混入は
+        # 「同じ edinet_code が2行になる」形と period_end の値で検出する。
+        records = plugin._load_records(db, None, DEFAULT_FEATURES_PRICE)
         assert len({r.edinet_code for r in records}) == len(records)
+        assert all(r.period_end != date(2023, 9, 30) for r in records)
 
     def test_company_with_newer_h1_year_still_loads_annual(self, db, make_fin):
         """H1 だけが新しい年度にある社でも annual 行が落ちない。
@@ -663,11 +747,12 @@ class TestPeriodTypeIsolation:
                         bs_bps=900.0, pl_eps=45.0, stock_price=1700.0))
         db.commit()
 
-        records = plugin._load_records(db, None)
+        records = plugin._load_records(db, None, DEFAULT_FEATURES_PRICE)
         loaded = {r.edinet_code: r for r in records}
         assert "E00001" in loaded
+        # H1 が拾われていれば year=2024 / period_end=2024-09-30 になる
         assert loaded["E00001"].year == 2023
-        assert loaded["E00001"].period_type == "annual"
+        assert loaded["E00001"].period_end != date(2024, 9, 30)
 
     def test_explicit_year_also_filters_h1(self, db, make_fin):
         """year 指定パス（別クエリ）でも H1 を除外する。"""
@@ -676,6 +761,6 @@ class TestPeriodTypeIsolation:
                         year=2023, period_end="2023-09-30", period_type="H1"))
         db.commit()
 
-        records = plugin._load_records(db, 2023)
-        assert all(r.period_type == "annual" for r in records)
+        records = plugin._load_records(db, 2023, DEFAULT_FEATURES_PRICE)
         assert len({r.edinet_code for r in records}) == len(records)
+        assert all(r.period_end != date(2023, 9, 30) for r in records)

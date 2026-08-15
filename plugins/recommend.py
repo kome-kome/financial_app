@@ -224,7 +224,7 @@ def load_producer_mu(db: Any, mu_source: str) -> dict:
     try:
         from database import get_macro_beta
         from .utils import get_macro_features
-        _meta_m1, _ = get_macro_beta(db)
+        _meta_m1, _ = get_macro_beta(db, with_loadings=False)   # selected_factors だけ（#482）
         sel_factors = (_meta_m1 or {}).get("selected_factors") or []
         macro_snap: dict | None = None
         if sel_factors:

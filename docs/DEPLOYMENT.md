@@ -373,17 +373,39 @@ Render ダッシュボードで管理。
 | `stock_price_weekly`（M-6 は `volume_sum` を読まない） | 1,282,436 | 51.4 MB | **39.3 MB** |
 | `financial_metrics` VIEW（97列 → 消費36列・#459） | 30,285 | 22.5 MB | 実測は 2026-08-18 以降 |
 | `macro_data`（`{series: {date: close}}` にしか使わない） | 67,906 | 8.7 MB | **2.6 MB** |
-| `financial_records` 最新 annual（`sector_ols`・全列） | 4,430 | 2.8 MB | 2.8 MB |
+| `financial_records` 最新 annual（69列 → 消費20列・#482） | 4,430 | 2.8 MB | 実測は 2026-08-18 以降 |
 | `companies`（全列） | 4,437 | 0.5 MB | 0.5 MB |
 | **1回あたり合計** | | **86.0 MB** | **67.7 MB** |
 | **日次30回換算** | | 2.52 GB（枠の50%） | **1.98 GB（枠の40%）** |
+
+> 上表の「削減後」は **2026-08-06 時点の実測**で、#459（`financial_metrics` 97→36列）と #482（`financial_records` 69→20列）の削減はまだ反映されていない。較正値（`financial_metrics` 8.03 B/列/行・`financial_records` 9.61 B/列/行）から机上で置くと **1回 ≈ 52.0 MB（日次30回で 1.56GB・枠の31%）**。**実測は Egress 復旧（2026-08-18）後に取り直して上表を更新すること**（restricted 中は測定自体が枠を食う）。
 
 - **削減した2列は「消費側が一度も読まない列」だけ**。`volume_sum` は `px_volz`（出来高z-score）専用で、M-1 は price_features を持たず M-2/M-6 は既定 OFF＝`load_data(db, with_volume=...)` で選択時のみ引く。M-3 は既定 ON なので従来どおり引く。
 - **未ロードは `None` ではなく番兵**（`macro_snapshots._VOLUME_NOT_LOADED`）にして、読もうとしたら即 `ValueError`。欠測として扱うと `px_volz` が全 nan になり「データが薄い」と見分けがつかない＝#438 と同型の静かな故障になる。
 - **残る最大項だった `financial_metrics` VIEW の全列 22.5MB は #459 で列指定へ切り替えた**（2026-08-10）。`plugins/macro_snapshots.py::FIN_LOAD_FIELDS`（36列＝`FIN_BASE_OPTIONS` の選択肢＋`recommend.METRICS` の非 RUNTIME 列＋突合/メタ6列）だけを引き、軽量 namedtuple `_FinRow` で返す。**削減後の実測は Egress 復旧（2026-08-18）後に取り直して上表を更新すること**（#478 の restricted 中は測定自体が枠を食う）。
   - 列を落とした結果が黙って欠測に化けないよう、`FIN_LOAD_FIELDS` 外の列を `fin_features` に渡したら `build_snapshots` が `ValueError` を投げる。`getattr(..., None)` 任せだと全社が捨てられて学習0件になり「データが薄い」と誤読する（`volume_sum` の番兵と同じ考え方）。
   - 消費側との対応（`recommend.METRICS` / `FIN_BASE_OPTIONS` / `scripts/candidate_bakeoff._FIN_FIELDS`）は `tests/test_macro_snapshots_loaders.py` のメタテストが CI で照合する。列の追加漏れは failure ではなく「静かに全社が消える」形で出るため、通知では拾えない（ADR-0031 と同型）。
+- **残る5経路も列指定へ広げた（#482・2026-08-15）**。#459 と #441 以外は全列 ORM ロードのままで、「静かに枠を食う」形でしか現れないため誰も気づかない状態だった。
+  - `plugins/sector_ols.py::_load_records` — `sector_load_fields(features)` が選択 features から列を導出（既定10項目なら **69列 → 20列**）。`shares_outstanding` の第2優先（`record.company.issued_shares`・#462）は列指定 Row にリレーションが無く消えるため、SQL 側の `COALESCE(FinancialRecord.issued_shares, Company.issued_shares)` で優先順位を保つ。副産物として `issued_shares` が NULL の社ごとに `companies` を引いていた N+1 が JOIN 1本になる。
+  - `plugins/sell_ranking.py` — `SELL_SELECT_COLS`（**97列 → 18列**＝表示9＋VIEW指標6＋`nc_ratio` の入力3）。週次は `week_start >= today − 400日` の下限＋500社チャンク＋3列で、保有20銘柄あたり 0.43 → 0.037 MB。**ユーザーが押すたびに払う経路**なので効き方が日次ジョブと違う（下記）。
+  - `plugins/utils.py::get_macro_features` — `macro_data` 11列 → 3列（`_preload_macro_impl` と同じ。非対称の解消）。
+  - `database.py::get_macro_beta` — `macro_beta_loadings` 7列 → 4列。加えて `with_loadings=False` を新設した。**4呼び出しのうち3つは `meta` の `selected_factors` だけを見て loadings を捨てていた**ので、そこは転送自体を止める。
+- **新規の全列ロードは CI で落とす**: `tests/test_column_scoping.py` が `plugins/` ＋ `routers/` ＋ ルート直下を **AST で走査**し、`db.query(Model)`（＝全列）を検出して許可リスト `FULL_ROW_LOADS` と**双方向差分**を取る（未登録＝fail／実体の消えた登録＝fail／理由文20文字未満＝fail）。`.first()` 等の単一行終端と `with_entities` は対象外。正規表現ではなく AST なのは、`db.query(M.col)` との判別と docstring 内コード例の除外のため。`scripts/` は `scripts/_cache.py`（#355）の別制御下なので対象外。
+  - **静的解析で完結させる理由**: `db_egress._Bucket` は `n_cols` を保持せず、SQLite では `cursor.rowcount = -1` で `unknown_calls` にしか積まれない。「このクエリが何列引いたか」を実行時に測る手段が無い。
 - **他の消費**: `daily-incremental`（収集は主に ingress だが `update_market_data_from_history` の読みがある）・ローカルの `scripts/` 検証（`scripts/.cache/` の pickle キャッシュで反復 pull を抑える・Issue #355）。1.98GB は**このワークフロー単独の値**なので、他を足した余裕で判断すること。
+
+**リクエスト経路の Egress（#482）**: 上表は日次ジョブの話だが、`/api/plugins/sell_ranking/run` と `/api/morning` は**ユーザーが押すたび**に払う。回数が cron ではなく操作頻度で決まるので、1回の重さがそのまま効く。
+
+| 引くもの | 削減前 | 削減後（見積り） |
+|---|---|---|
+| `financial_metrics` ユニバース（97 → 18列・4,430行） | 3.45 MB | 0.64 MB |
+| `financial_metrics` 保有分（同上・20行） | 0.02 MB | 0.003 MB |
+| `stock_price_weekly`（7列全期間 → 3列400日窓） | 0.43 MB | 0.04 MB |
+| `macro_data`（11 → 3列） | 1.34 MB | 0.40 MB |
+| `macro_beta_loadings`（`with_loadings=False` で転送ゼロ） | 3.36 MB | 0 MB |
+| **1リクエスト合計** | **8.60 MB** | **1.08 MB（−87%）** |
+
+`macro_beta_loadings` の B/行は `EGRESS_COST_TABLE` に較正値が無く 12 B/列/行 の保守側既定を当てた推定値（実測は 8/18 以降に `octet_length` で取り、較正表へ足す）。
 
 **キャッシュが効いているかを見る（#478）**: `scripts/` 系の検証 CLI は実行のたびに `[cache] HIT/MISS/REFRESH <key>` を標準エラーへ出し、終了時に `[cache] summary hits=N misses=M produced=X.XMB` を出す。**MISS と REFRESH は本番 DB を引いた＝Egress を使った**という意味なので、2回目以降の実行で misses が減らないならキーが実質毎回ミスしている。2026-07 と 2026-08 の2回とも、超過後にこの内訳が分からず原因の切り分けに時間を要した（黙ってミスしても気づけない＝#438 と同型）。`produced` は pickle のバイト数であって Egress そのものではない（正本は上記の `octet_length` 実測）。
 

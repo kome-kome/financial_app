@@ -8,17 +8,21 @@ not_found / invalid 集約（in-memory SQLite）。依存ゲート（sector_ols�
 import asyncio
 import os
 import sys
+from datetime import date, timedelta
 from types import SimpleNamespace
 
 import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from database import FinancialMetric, iso_week_start
 from plugins import execute_plugin
 from plugins.base import DependencyError
 from plugins.utils import coerce_params
 from plugins.sell_ranking import (
-    SELL_METRICS, PRESETS, plugin,
+    SELL_METRICS, PRESETS, SELL_SELECT_COLS, plugin,
+    _NC_RATIO_COLS, _SELL_RUNTIME_METRICS, _SELL_VIEW_METRICS, _WeeklyBar,
+    _TREND_CODE_BATCH, _TREND_LOOKBACK_DAYS,
     parse_holdings, _compute_trend, _apply_timing, _base_action,
 )
 
@@ -56,6 +60,68 @@ class TestConstants:
     def test_default_preset_is_macro(self):
         # 既定プリセットはマクロ予測型
         assert plugin.params_schema()["preset"]["default"] == "マクロ予測型"
+
+
+# ── 転送列の契約（Issue #482）───────────────────────────────────────────────
+
+class TestSellSelectCols:
+    """SELL_SELECT_COLS が「消費する列ちょうど」であることを固定する。
+
+    列が足りないと Row に無い属性を getattr(..., None) が黙って None にし、指標が
+    全社欠測＝「データ不足」に化ける（failure では出ない・#459 と同型）。逆に増えすぎ
+    たら列絞りの意味が無いので、両側から締める。
+    """
+
+    def test_view_metrics_are_derived_from_sell_metrics(self):
+        # 手書きリストではなく SELL_METRICS − ランタイム指標。指標を足せば自動追従する。
+        assert _SELL_VIEW_METRICS == tuple(
+            m for m in SELL_METRICS if m not in _SELL_RUNTIME_METRICS)
+
+    def test_every_view_metric_is_selected(self):
+        for m in _SELL_VIEW_METRICS:
+            assert m in SELL_SELECT_COLS, f"{m} が転送列に無い＝全社欠測になる"
+
+    def test_runtime_metrics_are_not_transferred(self):
+        view_cols = set(FinancialMetric.__table__.columns.keys())
+        for m in _SELL_RUNTIME_METRICS:
+            assert m not in SELL_SELECT_COLS
+        # mu / neg_r_macro は producer 由来で VIEW に列そのものが無い。
+        assert "mu" not in view_cols
+        assert "neg_r_macro" not in view_cols
+        # nc_ratio は VIEW にも同名列があるが、_resolve_metric は BS3列から実行時計算する
+        # （VIEW 側は ROUND(...,4) 付きで式が一致しない）。「列は在るが使わない」を固定する。
+        assert "nc_ratio" in view_cols
+        assert "nc_ratio" not in SELL_SELECT_COLS
+
+    def test_nc_ratio_inputs_are_selected(self):
+        # _resolve_metric が nc_ratio を組み立てる材料（BS3列＋market_cap）
+        for c in _NC_RATIO_COLS + ("market_cap",):
+            assert c in SELL_SELECT_COLS
+
+    def test_display_columns_used_by_result_are_selected(self):
+        # execute の結果 dict と last_close フォールバックが読む列
+        for c in ("sec_code", "edinet_code", "company_name", "industry", "year",
+                  "gap_ratio", "roe", "op_margin", "rev_growth", "market_cap",
+                  "stock_price", "is_active", "delisted_date"):
+            assert c in SELL_SELECT_COLS
+
+    def test_all_columns_exist_on_the_view(self):
+        view_cols = set(FinancialMetric.__table__.columns.keys())
+        missing = [c for c in SELL_SELECT_COLS if c not in view_cols]
+        assert not missing, f"financial_metrics に無い列: {missing}"
+
+    def test_selection_is_a_proper_subset_and_no_duplicates(self):
+        view_cols = set(FinancialMetric.__table__.columns.keys())
+        assert set(SELL_SELECT_COLS) < view_cols
+        assert len(SELL_SELECT_COLS) < len(view_cols) / 2
+        assert len(SELL_SELECT_COLS) == len(set(SELL_SELECT_COLS))
+
+    def test_weekly_bar_carries_only_what_compute_trend_reads(self):
+        # 本番は2フィールドしか渡らない。_compute_trend がこれ以外を読み始めたら落ちる。
+        assert _WeeklyBar._fields == ("week_start", "close_last")
+        out = _compute_trend([_WeeklyBar("2026-01-05", 100.0),
+                              _WeeklyBar("2026-01-12", 90.0)])
+        assert out["last_close"] == 90.0
 
 
 # ── 純粋: parse_holdings ─────────────────────────────────────────────────────
@@ -218,10 +284,14 @@ class TestExecute:
     def test_timing_escalates_with_downtrend(self, db, make_metric, make_weekly):
         # roe=平均並みで base=HOLD/REDUCE 付近の銘柄が、下落トレンドで一段上がる
         db.add_all(_universe(make_metric, [0.0, 5.0, 10.0, 15.0, 20.0]))
-        # sec_code 1003 (roe=10, ほぼ平均) に下落週次を付与
+        # sec_code 1003 (roe=10, ほぼ平均) に下落週次を付与。
+        # 週次ロードは week_start >= today-_TREND_LOOKBACK_DAYS で絞る（#482）ので、
+        # 固定年の日付を撒くと窓の外へ落ちて trend="不明" になる。today 相対で置く。
+        _today = date.today()
         for i in range(14):
             db.add(make_weekly(edinet_code="E0003",
-                               week_start=f"2023-{(i//4)+1:02d}-{(i%4)*7+1:02d}",
+                               week_start=iso_week_start(
+                                   (_today - timedelta(weeks=13 - i)).isoformat()),
                                close_last=1000 - i * 30))
         db.commit()
         res = _run({"holdings": "1003", "weights": {"roe": 1.0}, "min_coverage": 0.0,
@@ -300,6 +370,53 @@ class TestExecute:
         assert res["results"][1]["sec_code"] == "1005"
         assert res["results"][0]["score"] > 0
         assert res["results"][1]["score"] < 0
+
+
+# ── 週次ロードの窓とチャンク（Issue #482）───────────────────────────────────
+
+class TestWeeklyLoadWindow:
+    def test_bars_older_than_lookback_are_not_loaded(self, db, make_metric, make_weekly):
+        """窓の外の週次は転送しない＝trend は '不明' になる（欠測と同じ扱い）。
+
+        13週ぶんの下落バーを _TREND_LOOKBACK_DAYS より古い位置へ置く。全期間ロード
+        だった頃は '下落' が出ていたので、この差がそのまま窓が効いている証拠になる。
+        """
+        db.add_all(_universe(make_metric, [0.0, 5.0, 10.0, 15.0, 20.0]))
+        old = date.today() - timedelta(days=_TREND_LOOKBACK_DAYS + 30)
+        for i in range(14):
+            db.add(make_weekly(edinet_code="E0003",
+                               week_start=iso_week_start(
+                                   (old - timedelta(weeks=13 - i)).isoformat()),
+                               close_last=1000 - i * 30))
+        db.commit()
+        res = _run({"holdings": "1003", "weights": {"roe": 1.0}, "min_coverage": 0.0}, db)
+        assert res["results"][0]["trend"] == "不明"
+        assert res["results"][0]["ret_13w"] is None
+
+    def test_all_holdings_are_loaded_across_chunk_boundary(
+            self, db, make_metric, make_weekly, monkeypatch):
+        """IN 句を分割しても全保有ぶんのバーが揃う（境界で取り落とさない）。
+
+        本番の _TREND_CODE_BATCH=500 を素直に検証すると 501社の seed が要るので、
+        定数を 2 に差し替えて 5社＝3チャンクで同じ境界を通す。
+        """
+        from plugins import sell_ranking as _sr
+        monkeypatch.setattr(_sr, "_TREND_CODE_BATCH", 2)
+        db.add_all(_universe(make_metric, [0.0, 5.0, 10.0, 15.0, 20.0]))
+        today = date.today()
+        for i in range(1, 6):
+            for w in range(14):
+                db.add(make_weekly(edinet_code=f"E{i:04d}",
+                                   week_start=iso_week_start(
+                                       (today - timedelta(weeks=13 - w)).isoformat()),
+                                   close_last=1000 - w * 30))
+        db.commit()
+        res = _run({"holdings": "1001\n1002\n1003\n1004\n1005",
+                    "weights": {"roe": 1.0}, "min_coverage": 0.0}, db)
+        assert res["count"] == 5
+        # 5社とも週次が届いている＝どのチャンクも取り落としていない
+        assert all(r["trend"] == "下落" for r in res["results"])
+        assert all(r["last_close"] == 610.0 for r in res["results"])
 
 
 # ── 依存ゲート（sector_ols）─────────────────────────────────────────────────
