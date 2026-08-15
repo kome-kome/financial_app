@@ -186,6 +186,23 @@ class TestGetMacroFeatures:
         # (150 - 130) / 130 ≈ 0.1538
         assert abs(val - (150 - 130) / 130) < 0.01
 
+    def test_loads_only_three_columns(self):
+        """macro_data は11列あるが引くのは series_code/trade_date/close だけ（#482）。
+
+        macro_snapshots._preload_macro_impl と同じ3列。ORM 全列だと 8.7MB / 3列なら
+        2.6MB（db_egress の EGRESS_COST_TABLE 実測）。
+        """
+        from database import MacroData
+
+        ref = date(2025, 6, 1)
+        db = _build_mock_db(self._usdjpy_rows(ref))
+        get_macro_features(db, ref.isoformat(), ["macro_usdjpy_yoy"])
+
+        args = db.query.call_args.args
+        assert len(args) == 3, "ORM クラス1個渡し＝全列ロードに戻っている"
+        assert [c.key for c in args] == ["series_code", "trade_date", "close"]
+        assert all(c.table is MacroData.__table__ for c in args)
+
     def test_unknown_feature_returns_none(self):
         db = _build_mock_db([])
         result = get_macro_features(db, "2025-06-01", ["macro_unknown_xyz"])

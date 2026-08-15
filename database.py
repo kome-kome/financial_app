@@ -553,12 +553,16 @@ def upsert_macro_beta(db, meta: dict, loadings: list) -> int:
     return len(loadings)
 
 
-def get_macro_beta(db, run_id: str | None = None):
+def get_macro_beta(db, run_id: str | None = None, *, with_loadings: bool = True):
     """macro_beta 推論結果を読む（M-1 producer 用）。
 
     run_id 未指定なら最新ラン（created_at 最大・同時刻は id で決定）。戻り値:
       (meta: dict | None, loadings: {edinet_code: {factor_name: (mean, se)}})
     未蓄積なら (None, {})。
+
+    with_loadings=False なら loadings を引かず空 dict を返す（Issue #482）。呼び出しの
+    大半は meta の selected_factors だけを見て loadings を捨てており、そこでは
+    macro_beta_loadings 全行（約4,400社 × 因子数）の転送が丸ごと無駄になる。
     """
     if run_id is None:
         row = (db.query(MacroBetaMeta)
@@ -576,8 +580,13 @@ def get_macro_beta(db, run_id: str | None = None):
         "hyperparams":      row.hyperparams,
     }
     loadings: dict = {}
-    for lr in db.query(MacroBetaLoading).filter_by(run_id=row.run_id).all():
-        loadings.setdefault(lr.edinet_code, {})[lr.factor_name] = (lr.loading_mean, lr.loading_se)
+    if with_loadings:
+        # 消費するのは4列だけ（run_id は WHERE 専用・id/created_at は未使用・#482）
+        for ec, fname, mean_, se in (
+                db.query(MacroBetaLoading.edinet_code, MacroBetaLoading.factor_name,
+                         MacroBetaLoading.loading_mean, MacroBetaLoading.loading_se)
+                  .filter(MacroBetaLoading.run_id == row.run_id).all()):
+            loadings.setdefault(ec, {})[fname] = (mean_, se)
     return meta, loadings
 
 
