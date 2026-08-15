@@ -258,6 +258,61 @@ Issue #293 で廃止済みのため、探索の実行手段は本ワークフロ
 重い操作を API レベルでブロックし、UI 上でもボタンを無効化する。
 ローカル `.env` にはこの変数を設定しない（制限なし）。
 
+### ローカル PostgreSQL（読取レプリカの土台・Issue #481）
+
+Supabase が Egress 超過で restricted になると**アプリも分析も一切動かせない**（2026-07・2026-08 に2回発生し、2回目は8日間まるごと停止）。障害時の継続と、検証反復の Egress ゼロ化のために、ローカルへ**読取レプリカ**を置く。**正本は Supabase のまま**で、収集も夜間バッチも GitHub Actions で回す構成は変えない。
+
+#### このマシンの実測（2026-08-15）
+
+| 項目 | 値 |
+|---|---|
+| サーバ | **PostgreSQL 18.6**（Windows サービス `postgresql-x64-18`・port 5432） |
+| クライアント | `C:\Program Files\PostgreSQL\18\bin`。**PATH に無い**ので `pg_dump` 等はフルパスで呼ぶ |
+| 認証 | `pg_hba.conf` は local/host とも `scram-sha-256` |
+| 接続文字列 | `postgresql://edinet:edinet@localhost:5432/financial_db` ＝ [database.py](../database.py) の**既定フォールバックと同一**（`DATABASE_URL` 未設定ならここへ繋がる） |
+| encoding | **UTF8**（collate は `Japanese_Japan.932`＝並び順のみ OS 依存。Supabase と並び順が違う点は text の `ORDER BY` にのみ影響） |
+| `edinet` の権限 | **superuser でも createdb でもない**。所有する `financial_db` 内の CREATE は可 |
+
+**pg_dump のバージョン整合**: クライアントはサーバ以上である必要がある。PG18 クライアントで Supabase（15/17）を dump するのは正方向なので問題ない（逆は不可）。
+
+#### セットアップ（`scripts/setup_local_db.py`）
+
+```powershell
+$env:DATABASE_URL = "postgresql://edinet:edinet@localhost:5432/financial_db"
+python -m scripts.setup_local_db            # ドライラン（何も変更しない）
+python -m scripts.setup_local_db --apply    # 実行
+```
+
+- **接続先ガードが最初に走る**。`database._is_local` がローカルを指していなければ即 `SystemExit`。`init_db()` は起動のたび無条件に DDL（`DROP COLUMN` 移行を含む）を打つため、本番へ誤射すると不可逆。
+- **既定はドライラン**（`--persist` と同じ作法）。
+- **旧スキーマの掃除は1回だけ**走る（マーカー＝「素の `stock_price_history` が在る かつ `stock_price_weekly` が無い」）。2回目以降は `init_db()` だけが走るので、**ミラー投入後に誤って実行しても中身を消さない**。
+
+2026-08-15 の実行結果: 18テーブル ＋ VIEW 2本を生成、`financial_metrics` / `financial_metrics_interim` とも `SELECT` 可、`security_invoker=true` が**非 superuser でも適用できた**、2回目の実行は差分なし。**`sql/financial_metrics_view.sql` の `STDDEV_SAMP` / `::numeric` / 名前付き `WINDOW` 句が PG18 で通ることの実証になっている。**
+
+同日、この空スキーマに対して **Web アプリが起動することも実証済み**（`DATABASE_URL` をローカルへ向けて `uvicorn api:app`）:
+
+| 確認 | 結果 |
+|---|---|
+| `GET /health` | `200 {"status":"ok","db":"ok"}` |
+| `GET /api/stats` | `200`（全件0・`freshness: "empty"`＝データが無いだけで経路は生きている） |
+| `GET /` | `200`（ダッシュボード HTML 17,873 bytes） |
+
+`APP_SECRET_KEY` 未設定の警告が出るが、これは開発用既定鍵で継続する正常な挙動（本番相当環境＝`RENDER`/`RENDER_LIGHT_MODE` でのみ起動を停止する）。**つまり Supabase が restricted でもローカルだけでアプリは動く。あとはデータを入れるだけ**（8/18 以降の mirror pull）。
+
+#### `legacy_stock_price_history_2026_02`（温存した旧日次 OHLCV）
+
+このマシンには Supabase 移行前（2026-02〜05 で凍結）の開発 DB が残っていた。うち旧 `stock_price_history` は **2024-05-17〜2026-02-20・3,960社・1,636,505行の日次 OHLCV** で、**現行 Supabase にはもう存在しない**——`stock_price_daily` は `DAILY_WINDOW_DAYS=183` でローリング削除され、`stock_price_weekly` は `close_last` と集約しか持たず O/H/L を残さない。Yahoo から取り直すと 3,960社ぶんで数十時間かかるため、**DROP せず改名して温存**した（478MB）。
+
+`stock_price_daily` の窓は今日時点で 2026-02-13 以降なので **7日重なって連続する**が、**この旧データに分割の遡及調整が入っているかは未確認**（#465 で週次に段差が見つかっている）。調整済みの現行値と混ぜる前に接合検証が要る。ミラー範囲には含めない。
+
+同時に DROP した旧4テーブル（`companies` / `financial_records` / `macro_data` / `collection_logs`）は `migration_dumps/legacy_pre_mirror_20260815.dump` へ退避済み（ローカル間なので Egress ゼロ・`.gitignore` 配下）。
+
+#### 未了（8/18 の Egress リセット後）
+
+`FINAPP_DB_TARGET` による接続先スイッチ、`scripts/mirror_pull.py` / `mirror_sync.py` / `mirror_verify.py`、実際の pull（コア約300MB）。詳細は Issue #481。
+
+**restore の注意**: `edinet` は superuser でないため `pg_restore --disable-triggers` が使えない。FK は4本ともに `companies.edinet_code` 向きなので、**`companies` を先頭にしたテーブル順の単一スレッド restore** で満たす（並列 `--jobs` は順序が崩れるので使わない）。
+
 ---
 
 ## 現在の構成

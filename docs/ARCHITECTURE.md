@@ -1200,6 +1200,8 @@ graph TB
 | `logs/` | ローカル生成物 | ローカル実行ログの集約先（`.gitignore` 対象・git 管理外）。`server.log`（`launch.py`）・`pipeline_gh.log`（`_pipeline_gh.py`）・`pipeline_incremental.log`（`_pipeline_incremental.py`）。GitHub Actions 実行時も同名で生成され `actions/upload-artifact` で回収 | launch.py, _pipeline_gh.py, _pipeline_incremental.py |
 | `edinet_ping.py` | ユーティリティ | EDINET API 疎通確認ワンショット | EDINET API |
 | `scripts/check_db_state.py` | ユーティリティ | DB 状態確認ワンショット（主要6テーブルの行数＋直近の収集ログ表示）。Supabase 移行差分／パイプライン実行後の件数チェック用（手動実行） | database.py |
+| `scripts/setup_local_db.py` | ユーティリティ | ローカル PostgreSQL を本アプリのスキーマで初期化する（Issue #481 B-0・**Supabase へは接続しない**）。`database._is_local` で接続先を検証してから `init_db()` を呼び、全テーブル＋VIEW 2本の生成・`security_invoker` の適用可否・温存した旧日次 OHLCV の行数を検証レポートで出す。既定はドライラン（`--apply` で実行）。旧スキーマの掃除は「素の `stock_price_history` が在る かつ `stock_price_weekly` が無い」をマーカーに**1回だけ**走るので、ミラー投入後に誤実行しても中身を消さない | database.py |
+| `scripts/egress_report.py` | ユーティリティ | `db_egress` の台帳ロールアップ（Issue #478）。JSONL 台帳（`FINAPP_EGRESS_LEDGER`）と `gh run view --log` を保存したテキストの `[egress] summary` 行を読み、**ジョブ別・テーブル別**に月次で積み上げる。DB へ繋がないので集計自体は Egress を使わない | — |
 | `scripts/_cache.py` | ユーティリティ | `scripts/` 検証系の共通 pickle キャッシュ（Issue #355）。本番 Supabase へのフルロード反復が Egress を枯渇させた実例への恒久対策で、同一キーを各スクリプトが共有し `--refresh-cache` で明示無効化する | — |
 | `scripts/event_study_disclosure_surprise.py` | 検証（実験） | 決算開示サプライズ×フォワードリターンのイベントスタディ（Issue #323 フェーズ0・単一特徴量 m_pm1 で rank-IC 0.031）。本番書込なし・手動実行（`python -m scripts.xxx`） | database.py, feature_disclosure.py, scripts/_cache.py |
 | `scripts/event_study_multivariate_xgboost.py` | 検証（実験） | 同フェーズ1の多変量 XGBoost 版＋target 相対化 ablation（#337）＋断面/自己履歴特徴量×target 軸マトリクス（#336）。本番書込なし・手動実行 | database.py, feature_disclosure.py, scripts/_cache.py |
