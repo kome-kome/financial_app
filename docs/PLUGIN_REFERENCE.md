@@ -85,6 +85,9 @@
 
 業種別OLS回帰分析（次元整合・winsorize+z-score前処理）。`heavy=True`（Render 軽量モードで 403・業種ごとの行列回帰で Render Free では OOM するためローカル実行に限定）。予測値は `regression_results` へ保存。
 
+- **転送列は `sector_load_fields(features)` が選択 features から導出する**（#482）。`financial_records` は69列あるが、既定10項目なら20列で足りる（メタ11列＋features 由来の絶対額列）。未知キーは `ValueError` で fail-fast——列を落としたまま進むと `_resolve_per_share_value` の `getattr(..., None)` が欠測へ倒し、`_classify_by_sector` の AND フィルタが全社を除外して「業種0件」に化ける（#459 と同型で failure としては現れない）。
+- **`shares_outstanding` の J-Quants マスタ経路（#462）は SQL 側の `COALESCE` で温存する**。列指定 Row にリレーションは無いので `record.company.issued_shares` は黙って None になる。`_load_records` が `COALESCE(FinancialRecord.issued_shares, Company.issued_shares)` を `issued_shares` として返すことで、`plugins/utils.py` 側は無改修のまま優先順位（XBRL期末値 → マスタ → 純資産÷BPS）が保たれる。副産物として N+1 遅延ロードが JOIN 1本になる。
+
 依存先: `plugins/utils.py`
 
 ## `plugins/gap_analysis.py`
@@ -97,7 +100,11 @@
 
 売り候補ランキング（保有銘柄の売り時）。買い系の逆観点（割高度 gap_ratio 反転・業績悪化・**ネットキャッシュ余力 nc_ratio 毀損**・価格モメンタム）を最新年度ユニバースで winsorize+z 標準化して合成し、相対ランキング＋SELL/REDUCE/HOLD 絶対ラベル（トレンド補正）を付与。
 
-- `nc_ratio` は VIEW 列でなく `_resolve_metric` が実行時計算（net_cash_analysis の `compute_*` を再利用）。保有は都度入力（サーバ非保存）・購入単価は損益表示のみ。`depends_on=["sector_ols"]`（gap_ratio 用）。価格モメンタムは `stock_price_weekly`。
+- `nc_ratio` は VIEW にも同名列があるが `_resolve_metric` が BS3列から実行時計算する（VIEW 側は `ROUND(...,4)` 付きで式が一致しないため・net_cash_analysis の `compute_*` を再利用）。保有は都度入力（サーバ非保存）・購入単価は損益表示のみ。`depends_on=["sector_ols"]`（gap_ratio 用）。価格モメンタムは `stock_price_weekly`。
+- **転送列は `SELL_SELECT_COLS`（97列 → 18列＝表示9＋VIEW指標6＋`nc_ratio` の入力3）**（#482）。`recommend.SELECT_COLS` と同じく `SELL_METRICS` から導出するので、指標を足せば転送列が自動追従する（列リストの二重管理をしない）。
+- **週次は `week_start >= today − 400日`＋500社チャンク＋3列**（#482）。400日は 52週ドローダウン（`closes[-52:]`＝364日）に余裕1ヶ月を足した値で情報損失ゼロ。下限は PK 第2列の `week_start` へ掛けて範囲スキャンにする（`trade_date` は非インデックス列）。
+  - `recommend.compute_momentum_z` の `row_number() OVER`（各社最終バー1本）は**流用できない**——`_compute_trend` は13週前と52週高値を見るので系列そのものが要る。
+  - `macro_snapshots.load_weekly_prices_chunked` も**流用できない**：①対象が `Company` 全社固定で保有20銘柄には過剰 ②日付下限が無い（学習用ローダーは全履歴が要る） ③`week_start` を返さない ④`_VOLUME_NOT_LOADED` 番兵は volume 用で不要。
 - **μ／−R_macro 観点の出所は `mu_source` トグル**（M-1 `macro_risk_return`／M-2 `macro_gbdt`／M-3 `macro_dlm`／M-4 `macro_ensemble`／M-6 `macro_enet`＝**既定**・#396/#402）で切替——選択 producer の `read_producer_scores` を読み、未実行なら graceful-degrade（`mu_available=false`）。
 - **R3 足切りゲートは `r1_prime`（M-1=予測SE／M-2・M-6=コンフォーマル区間半幅・ADR-0020/#365）で M-1・M-2・M-6 とも機能**（M-3/M-4 は r1_prime 不在で無効・`r1_prime=None` はゲート素通り）。
 - **`mu_asof`（producer スコアの代表 as-of・最古・古い銘柄数）を返却**（`database.get_producer_asof`・#417。M-1 は meta の日付が推論実行日でデータ as-of ではないため None）。

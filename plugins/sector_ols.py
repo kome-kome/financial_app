@@ -17,7 +17,7 @@
 """
 import logging
 import math
-from collections import defaultdict
+from collections import defaultdict, namedtuple
 from typing import Any
 
 from .base import AnalysisPlugin
@@ -184,6 +184,45 @@ DEFAULT_FEATURES_PRICE = [
 ]
 
 
+# ── 転送列の契約（Issue #482）────────────────────────────────────────────────
+# financial_records は69列あり、ORM 全列で最新 annual 4,430行を引くと 2.8MB/回
+# （db_egress の EGRESS_COST_TABLE 実測）。夜間バッチが毎晩払っている。実際に読むのは
+# 下記メタ列と、選択された features に対応する絶対額列だけ。
+_SECTOR_META_FIELDS = (
+    "edinet_code", "sec_code", "company_name", "industry", "year", "period_end",
+    "stock_price",      # target（次元整合のため stock_price 固定）
+    "market_cap",       # 結果テーブル・永続化
+    # shares_outstanding の3経路（XBRL期末値 → J-Quants マスタ → 純資産÷BPS）。
+    # 第2経路は本来 record.company リレーションだが、列指定 Row にリレーションは無く
+    # getattr が黙って None を返す。_load_records 側で COALESCE して同じ優先順位を保つ。
+    "issued_shares", "bs_total_equity", "bs_bps",
+)
+
+
+def sector_load_fields(features: list) -> tuple[str, ...]:
+    """選択 features から FinancialRecord の転送列を導出する。
+
+    features は per-share キー（pl_eps 等の DB永続 / ps_* の派生）なので、派生側は
+    PER_SHARE_DERIVED で絶対額カラム名へ引き当ててから列に混ぜる。未知キーは
+    ValueError（fail-fast）——列を落としたまま進むと _resolve_per_share_value の
+    getattr(..., None) が欠測と同じ経路へ流し、_classify_by_sector の AND フィルタが
+    全社を除外して「業種0件」に化ける（#459 と同型で failure としては現れない）。
+    """
+    src = []
+    unknown = []
+    for f in features:
+        if f in DB_PER_SHARE_KEYS:
+            src.append(f)
+        elif f in PER_SHARE_DERIVED:
+            src.append(PER_SHARE_DERIVED[f])
+        else:
+            unknown.append(f)
+    if unknown:
+        raise ValueError(
+            f"未知の説明変数です: {unknown}。FEATURE_OPTIONS_PER_SHARE の value を使ってください")
+    return tuple(dict.fromkeys(_SECTOR_META_FIELDS + tuple(src)))
+
+
 def _resolve_per_share_value(record, feat: str, shares: float,
                              zero_fill: bool = True) -> float | None:
     """説明変数キーから per-share[円/株] の値を取得する。
@@ -325,8 +364,32 @@ class SectorOLSPlugin(AnalysisPlugin):
             },
         }
 
-    def _load_records(self, db, year: int | None) -> list:
-        from database import FinancialRecord, latest_year_subq
+    def _load_records(self, db, year: int | None, features: list) -> list:
+        from sqlalchemy import func as _sqla_func
+
+        from database import Company, FinancialRecord, latest_year_subq
+
+        # 転送は sector_load_fields(features) の列だけ（#482）。戻りは ORM インスタンス
+        # ではなく _SectorRec なので、絞っていない列を後から読むと AttributeError で露見する。
+        fields = sector_load_fields(features)
+        rec_cls = namedtuple("_SectorRec", fields)
+        cols = []
+        for f in fields:
+            if f == "issued_shares":
+                # shares_outstanding の第2経路（record.company.issued_shares・#462）は
+                # リレーション経由なので Row では消える。SQL 側で COALESCE して優先順位を
+                # 保つ。副産物として NULL 社ごとに companies を引く N+1 が JOIN 1本になる。
+                cols.append(_sqla_func.coalesce(FinancialRecord.issued_shares,
+                                                Company.issued_shares).label("issued_shares"))
+            else:
+                cols.append(getattr(FinancialRecord, f))
+
+        def _base_query():
+            return (db.query(*cols)
+                      .select_from(FinancialRecord)
+                      .outerjoin(Company,
+                                 FinancialRecord.edinet_code == Company.edinet_code))
+
         # 母集団は **通期（annual）のみ**（#436）。同一 (edinet_code, year) に H1 が
         # 併存すると同じ企業が2行で回帰に入り、しかも H1 のフロー項目（売上・利益・CF）は
         # 半期分＝年次の説明変数と次元が揃わない（BS は期末値なので揃う）。
@@ -334,16 +397,16 @@ class SectorOLSPlugin(AnalysisPlugin):
         # annual 行が1行も取れなくなる。
         subq = latest_year_subq(db, FinancialRecord, period_type="annual")
         query = (
-            db.query(FinancialRecord)
+            _base_query()
             .filter(FinancialRecord.period_type == "annual")
             .join(subq, (FinancialRecord.edinet_code == subq.c.edinet_code) &
                         (FinancialRecord.year == subq.c.max_year))
         )
         if year:
-            query = (db.query(FinancialRecord)
+            query = (_base_query()
                      .filter(FinancialRecord.year == year,
                              FinancialRecord.period_type == "annual"))
-        records = query.all()
+        records = [rec_cls(*row) for row in query.all()]
         if not records:
             raise ValueError("データがありません。先にデータ収集を実行してください。")
         return records
@@ -632,7 +695,7 @@ class SectorOLSPlugin(AnalysisPlugin):
         if not features:
             raise ValueError("説明変数を1つ以上選択してください")
 
-        records = self._load_records(db, year)
+        records = self._load_records(db, year, features)
         base    = self._eligible_base(records, target)
         # 欠損率が高い説明変数を自動ドロップ（1項目の NULL で全社除外される事故を防ぐ）。
         # 段階1（全業種一括）→ 段階2（業種内）の順。以降の features は段階1の採用列を指す。
