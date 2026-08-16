@@ -25,10 +25,15 @@ Supabase 無しで検証できる。エンドポイントを引数化してあ�
 「TRUNCATE で掃除する」ではなく**器ごと捨てる**ので、予行演習の合成データが本番ミラーの
 投入先に残る経路が構造的に存在しない。
 
-## 前提: CREATEDB 権限（1回だけ superuser 操作が要る）
+## 前提: CREATEDB 権限
 
 `edinet` は既定で CREATEDB を持たない（2026-08-15 実測 `rolcreatedb=f`）。
-権限が無ければ本スクリプトは**コマンドを表示して止まる**（勝手に superuser 接続はしない）。
+権限が無ければ本スクリプトは**2つの案を表示して止まる**（勝手に superuser 接続はしない）。
+
+**postgres のパスワードが不明でも詰まない**——`initdb` で別ポートに使い捨てクラスタを立てれば、
+OS ユーザーがそのクラスタの bootstrap superuser になるので既存クラスタの認証情報が要らない。
+`DATABASE_URL_LOCAL` をそのクラスタへ向けるだけで本スクリプトはそのまま動く（コード変更ゼロ）。
+2026-08-16 の実走はこの経路（port 5433）で行い、5手順すべて通した。
 
 実行:
     python -m scripts.mirror_rehearse            # 手順を表示するだけ
@@ -92,10 +97,20 @@ def ensure_createdb(conn) -> None:
     raise SystemExit(
         f"中止: ロール {user} に CREATEDB 権限がありません。\n"
         "  予行演習には専用の2 DB が要ります（実 financial_db を汚さないため）。\n"
-        "  superuser で1回だけ次を実行してください:\n"
+        "\n"
+        "  案A: superuser で1回だけ付与する（postgres のパスワードが分かる場合）\n"
         '    & "C:\\Program Files\\PostgreSQL\\18\\bin\\psql.exe" -U postgres -h localhost '
         '-c "ALTER ROLE edinet CREATEDB;"\n'
-        "  （financial_db の中身には触れない付与操作です）")
+        "    （financial_db の中身には触れない付与操作）\n"
+        "\n"
+        "  案B: 使い捨てクラスタを別ポートに立てる（**postgres のパスワードが不明でも可**）\n"
+        "    initdb で作るクラスタは OS ユーザーが superuser になるため、既存クラスタの\n"
+        "    認証情報も管理者権限も要らない。既存クラスタ・サービスには一切触れない。\n"
+        '    & "C:\\Program Files\\PostgreSQL\\18\\bin\\initdb.exe" -D <dir> -U edinet '
+        "-A scram-sha-256 --pwfile=<pwfile> -E UTF8 --locale=C\n"
+        '    & "C:\\Program Files\\PostgreSQL\\18\\bin\\pg_ctl.exe" -D <dir> -o "-p 5433" -w start\n'
+        '    $env:DATABASE_URL_LOCAL = "postgresql://edinet:edinet@localhost:5433/postgres"\n'
+        "    （手順は docs/DEPLOYMENT.md にも記載。コード変更は不要）")
 
 
 def db_exists(conn, name: str) -> bool:

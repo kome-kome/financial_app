@@ -362,11 +362,31 @@ python -m scripts.mirror_rehearse --apply
 python -m scripts.mirror_rehearse --drop
 ```
 
-**予行演習には CREATEDB 権限が要る**（`edinet` は既定で持たない）。superuser で1回だけ:
+**予行演習には CREATEDB 権限が要る**（`edinet` は既定で持たない・実測 `rolcreatedb=f`）。案は2つある。
+
+**案A（postgres のパスワードが分かる場合）**——superuser で1回だけ付与する。`financial_db` の中身には触れない:
 
 ```powershell
 & "C:\Program Files\PostgreSQL\18\bin\psql.exe" -U postgres -h localhost -c "ALTER ROLE edinet CREATEDB;"
 ```
+
+**案B（パスワードが不明でも可・2026-08-16 の実走はこちら）**——別ポートに使い捨てクラスタを立てる。`initdb` で作るクラスタは **OS ユーザーが bootstrap superuser** になるため、既存クラスタの認証情報も管理者権限も要らず、**既存クラスタ・Windows サービス・`financial_db` に一切触れない**。
+
+```powershell
+$PGD = "<使い捨てディレクトリ>"; $B = "C:\Program Files\PostgreSQL\18\bin"
+"edinet" | Out-File -FilePath "<pwfile>" -Encoding ascii -NoNewline   # パスワードは argv に載せない
+& "$B\initdb.exe" -D $PGD -U edinet -A scram-sha-256 --pwfile="<pwfile>" -E UTF8 --locale=C
+Remove-Item "<pwfile>" -Force
+& "$B\pg_ctl.exe" -D $PGD -l "<logfile>" -o "-p 5433" -w start
+
+$env:FINAPP_DB_TARGET   = "local"
+$env:DATABASE_URL_LOCAL = "postgresql://edinet:edinet@localhost:5433/postgres"
+python -m scripts.mirror_rehearse --apply         # コード変更は不要
+
+& "$B\pg_ctl.exe" -D $PGD -m fast stop            # 後片付け（ディレクトリごと削除）
+```
+
+`--locale=C` にすると照合順が既存 `financial_db`（`Japanese_Japan.932`）と違うが、突合のチェックサムは**順序非依存**に組んであるので影響しない（ADR-0035）。
 
 **restore の注意**: `edinet` は superuser でないため `pg_restore --disable-triggers` が使えず、FK は順序だけで満たす。**ダンプの TOC は `--table` の指定順ではなくアルファベット順**（2026-08-16 実測）なので、1回の restore にまとめず **FK 依存順に1表ずつ流す**（並列 `--jobs` も順序が崩れるので使わない）。TRUNCATE は `CASCADE` を使わず、`stock_price_daily`（ミラー範囲外だが `companies` を参照する）まで明示列挙する。
 
