@@ -338,11 +338,45 @@ GUI（`launch.py`）は窓に**接続先ラジオ**を持ち、切り替える�
 
 **ローカル接続中の書き込みは許している**（収集・分析結果の永続化）。Supabase 障害中でも作業を止めないため。ただしミラーは Supabase と乖離しうるので、乖離検知は `mirror_sync`（B-3）側で担保する。
 
+#### ミラー3本（`scripts/mirror_*.py`・Issue #481 B-2〜B-4・[ADR-0035](adr/0035-mirror-endpoints-are-parameterized.md)）
+
+3本とも **source / dest を引数で受ける**。両方をローカルへ向ければ予行演習になり、Supabase へ触れるのは接続文字列1つだけになる。**書き込み先はローカル限定**で、リモートを指すと `SystemExit` で止まる（ミラーが本番へ書く経路をコードとして持たない）。
+
+| スクリプト | 役割 | Egress |
+|---|---|---|
+| `mirror_verify` | 突合。`--level schema`（列差分）/ `counts`（既定・件数と最新キー）/ `checksum`（値レベル） | `schema`・`counts` はほぼ0。`checksum` は両端フルスキャン |
+| `mirror_pull` | 初回一括（`pg_dump --compress=0` → 表ごとに `pg_restore`） | 実測（初回コア約300MB） |
+| `mirror_sync` | 増分。高水位＋オーバーラップで取り直す | 週次で約4MB/回の見込み |
+| `mirror_rehearse` | 予行演習。専用の2 DB を作って一連を回し `--drop` で捨てる | **0** |
+
+```powershell
+# 通常運転（8/18 以降）
+python -m scripts.mirror_verify --level schema      # pull の前に列差分を確認
+python -m scripts.mirror_pull                       # ドライラン（見積りと操作予定）
+python -m scripts.mirror_pull --apply --allow-full-pull
+python -m scripts.mirror_sync --apply               # 以後は増分
+python -m scripts.mirror_verify                     # 0=一致 / 1=乖離 / 2=接続不可
+
+# 予行演習（Supabase 不要・実 financial_db に触れない）
+python -m scripts.mirror_rehearse --apply
+python -m scripts.mirror_rehearse --drop
+```
+
+**予行演習には CREATEDB 権限が要る**（`edinet` は既定で持たない）。superuser で1回だけ:
+
+```powershell
+& "C:\Program Files\PostgreSQL\18\bin\psql.exe" -U postgres -h localhost -c "ALTER ROLE edinet CREATEDB;"
+```
+
+**restore の注意**: `edinet` は superuser でないため `pg_restore --disable-triggers` が使えず、FK は順序だけで満たす。**ダンプの TOC は `--table` の指定順ではなくアルファベット順**（2026-08-16 実測）なので、1回の restore にまとめず **FK 依存順に1表ずつ流す**（並列 `--jobs` も順序が崩れるので使わない）。TRUNCATE は `CASCADE` を使わず、`stock_price_daily`（ミラー範囲外だが `companies` を参照する）まで明示列挙する。
+
+**増分のオーバーラップ**: `stock_price_weekly` は `_recompute_weeks_from_daily` が最大 `DAILY_WINDOW_DAYS=183` 日遡って過去週を上書きするため、**27週（189日）を無条件に取り直す**。Issue #481 / #480 の当初案「末尾8週」では 56 日しか覆えず取り落とす。`macro_data` / `statement_disclosure` は `created_at` が upsert で進まないので日付列＋90日。
+
 #### 未了（8/18 の Egress リセット後）
 
-`FINAPP_DB_TARGET` による接続先スイッチ、`scripts/mirror_pull.py` / `mirror_sync.py` / `mirror_verify.py`、実際の pull（コア約300MB）。詳細は Issue #481。
+実際の pull（コア約300MB）、`mirror_sync` の本番実行、`EGRESS_COST_TABLE` の較正取り直し（#478）。詳細は Issue #481 と復旧当日ランブック。
 
-**restore の注意**: `edinet` は superuser でないため `pg_restore --disable-triggers` が使えない。FK は4本ともに `companies.edinet_code` 向きなので、**`companies` を先頭にしたテーブル順の単一スレッド restore** で満たす（並列 `--jobs` は順序が崩れるので使わない）。
+**未検証の前提**: `pg_dump` が Supabase の session pooler（`...pooler.supabase.com:5432`）越しに通るか（transaction pooler :6543 は不可）。通らなければ `--source-url` で direct 接続へ差し替える＝コード変更は不要。
 
 ---
 

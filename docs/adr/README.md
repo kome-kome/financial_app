@@ -39,6 +39,7 @@
 | [0032](0032-statement-timeout-raised-per-statement.md) | Supabase 既定の `statement_timeout=2min` / `lock_timeout=0` は重い1文に足りない（同日に2本のワークフローが落ちた）。引き上げは `db_timeouts` で**その文の実行中だけ**・ロール既定は変えない。ロックを取る処理は `lock_timeout` を有限にして原因を確定させ、VACUUM の上限はワークフローの `timeout-minutes` が持つ | #470, #471 | accepted（2026-08-09） |
 | [0033](0033-h1-interim-financials-into-analysis.md) | 半期(H1)決算を分析へ反映する方式。`financial_metrics` は `period_type='annual'` 限定で H1 が一切見えない一方、`WHERE` を外すと年度内Zスコアと LAG 成長率が期間混在で壊れる。案A(TTM合成)/案B(並列VIEW)/案C(サプライズ特徴量)/案D(通期のみ)を**比較軸と実測プロトコルまで確定して保留**——決定は H1 サブセットでの OOF 実測（Egress 復旧後）を待つ | #424 | **proposed（2026-08-11）** |
 | [0034](0034-client-side-egress-ledger-and-circuit-breaker.md) | Egress をクライアント側（`engine` の `after_cursor_execute`）で常時計測し、プロセス単位のサーキットブレーカで止める。2回の超過とも「誰が食ったか」を答えられなかったのは、計測が `scripts/` 配下にしか無く夜間バッチ本体・`routers/`・collector が無計測だったため。正本は `octet_length` のまま、台帳の用途は帰属とブレーカに限る | #478, #477 | accepted（2026-08-13） |
+| [0035](0035-mirror-endpoints-are-parameterized.md) | ミラー3本は source/dest を引数で受け、**両方ローカルを指せば予行演習**になる（Supabase へ触れるのは接続文字列1つ）。**書き込み先はローカル限定**＝本番へ書く経路をコードとして持たない。`pg_dump` はブレーカで止められないので歯止めは事前見積り。**ダンプの TOC はアルファベット順**なので restore は1表ずつ FK 依存順に流す。週次の overlap は `DAILY_WINDOW_DAYS` から導出（27週・当初案の8週では 183 日の遡及上書きを取り落とす） | #481 | accepted（2026-08-16） |
 
 ## 運用
 
