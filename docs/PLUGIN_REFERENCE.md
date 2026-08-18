@@ -104,7 +104,7 @@
 - **転送列は `SELL_SELECT_COLS`（97列 → 18列＝表示9＋VIEW指標6＋`nc_ratio` の入力3）**（#482）。`recommend.SELECT_COLS` と同じく `SELL_METRICS` から導出するので、指標を足せば転送列が自動追従する（列リストの二重管理をしない）。
 - **週次は `week_start >= today − 400日`＋500社チャンク＋3列**（#482）。400日は 52週ドローダウン（`closes[-52:]`＝364日）に余裕1ヶ月を足した値で情報損失ゼロ。下限は PK 第2列の `week_start` へ掛けて範囲スキャンにする（`trade_date` は非インデックス列）。
   - `recommend.compute_momentum_z` の `row_number() OVER`（各社最終バー1本）は**流用できない**——`_compute_trend` は13週前と52週高値を見るので系列そのものが要る。
-  - `macro_snapshots.load_weekly_prices_chunked` も**流用できない**：①対象が `Company` 全社固定で保有20銘柄には過剰 ②日付下限が無い（学習用ローダーは全履歴が要る） ③`week_start` を返さない ④`_VOLUME_NOT_LOADED` 番兵は volume 用で不要。
+  - `macro_snapshots.load_weekly_prices_chunked` も**流用できない**：①対象が `Company` 全社固定で保有20銘柄には過剰 ②戻り値は常に全履歴（#480 で DB からは差分だけ引くようになったが、キャッシュとマージして**返す形は全履歴のまま**＝学習用ローダーの契約は不変） ③`week_start` を返さない（#480 後も意図的にそのまま。差分の切り出しは ISO 週の不変条件を使って `trade_date` で行う） ④`_VOLUME_NOT_LOADED` 番兵は volume 用で不要。
 - **μ／−R_macro 観点の出所は `mu_source` トグル**（M-1 `macro_risk_return`／M-2 `macro_gbdt`／M-3 `macro_dlm`／M-4 `macro_ensemble`／M-6 `macro_enet`＝**既定**・#396/#402）で切替——選択 producer の `read_producer_scores` を読み、未実行なら graceful-degrade（`mu_available=false`）。
 - **R3 足切りゲートは `r1_prime`（M-1=予測SE／M-2・M-6=コンフォーマル区間半幅・ADR-0020/#365）で M-1・M-2・M-6 とも機能**（M-3/M-4 は r1_prime 不在で無効・`r1_prime=None` はゲート素通り）。
 - **`mu_asof`（producer スコアの代表 as-of・最古・古い銘柄数）を返却**（`database.get_producer_asof`・#417。M-1 は meta の日付が推論実行日でデータ as-of ではないため None）。

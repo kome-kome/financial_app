@@ -37,7 +37,7 @@ Render の制約と運用形態に合わせて設計すること。
 | UTC | ワークフロー | 頻度 | 占有（上限まで） | JST | 1回あたり Egress |
 |---|---|---|---|---|---|
 | 00:00 | `macro-beta-inference` | 毎月1日 | → 05:40（340分） | 09:00 | 約 68MB（`build_panel` = `load_data` 1回） |
-| **08:17** | **`daily-incremental`** → `nightly-scores` / `macro-health` | **毎日** | → 通常 11:00・最悪 14:17（360分）＋チェーン33〜35分 | **17:17** | 収集は主に ingress ／ **`nightly-scores` 67.7MB** ／ `macro-health` ほぼ0 |
+| **08:17** | **`daily-incremental`** → `nightly-scores` / `macro-health` | **毎日** | → 通常 11:00・最悪 14:17（360分）＋チェーン33〜35分 | **17:17** | 収集は主に ingress ／ **`nightly-scores` 初回 67.7MB・定常 約32MB**（週次は差分ロード・#480）／ `macro-health` ほぼ0 |
 | 16:30 | `tune-hyperparameters` | 毎月1日 | → 22:25（355分・macro_gbdt） | 翌01:30 | 約 68MB **× matrix 3ジョブ**（別プロセス＝`shared_snapshot_cache` は跨がない） |
 | 22:00 | `recommend-factor-premia` | 毎月5日 | → 22:20（20分） | 翌07:00 | 約 68MB（`load_data` 1回） |
 | 23:30 | `vacuum-maintenance` | 毎週土 | → 24:00 | 日 08:30 | ほぼ0（サーバ内処理） |
@@ -46,6 +46,7 @@ Render の制約と運用形態に合わせて設計すること。
 - **Egress 列は時刻の非重複とは独立に効く**。非重複でも総量は積み上がるため、ワークフローを足すときは占有時間と転送量の**両方**を見る（この列が無かったため、`tune-hyperparameters` の matrix 3並列＝1日で約200MB という項が長らく Egress 設計の表から漏れていた）。実測は下記「Egress 設計」節、常時の内訳は `db_egress` の台帳（#478）。
 - **6時間級のジョブが3本ある以上、キュー遅延まで含めた完全な非重複は不可能**（GHA の cron 遅延は実測で最大6時間）。上表が保証するのは名目時刻での非重複＋1時間以上のマージンまで。#446 の「cron の名目時刻で衝突判定しない」は**実起動のログで事後確認せよ**という意味で、設計時の目安としては上表を使う。
 - 2026-08-09（#476）に `daily-incremental` を 18:00 → 08:17 へ前倒ししたのに伴い、月次3本を空いた窓へ再配置した。
+- **週次株価の差分ロード（#480）が入っているのは `nightly-scores` だけ**（`actions/cache` で run 間キャッシュを持ち回る）。月次3本は月1回・合計約400MB で、`tune-hyperparameters` は matrix 3並列＝同一キーへの同時 save が競合するため**意図的にスコープ外**（[ADR-0036](adr/0036-weekly-prices-incremental-load.md) 決定7・`tests/test_nightly_scores.py::TestWeeklyCacheStep` が「他の yml が `actions/cache` を使っていないこと」を固定する＝入れ忘れではないことをコードで示している）。
 
 #### アクティブ（`.github/workflows/` 直下・Actions 対象）
 
@@ -510,7 +511,7 @@ Render ダッシュボードで管理。
 
 | 引くもの | 行数 | 削減前 | 削減後 |
 |---|---|---|---|
-| `stock_price_weekly`（M-6 は `volume_sum` を読まない） | 1,282,436 | 51.4 MB | **39.3 MB** |
+| `stock_price_weekly`（M-6 は `volume_sum` を読まない） | 1,282,436 | 51.4 MB | **39.3 MB**（→ 差分ロードで定常 約3.7MB・#480） |
 | `financial_metrics` VIEW（97列 → 消費36列・#459） | 30,285 | 22.5 MB | 実測は 2026-08-18 以降 |
 | `macro_data`（`{series: {date: close}}` にしか使わない） | 67,906 | 8.7 MB | **2.6 MB** |
 | `financial_records` 最新 annual（69列 → 消費20列・#482） | 4,430 | 2.8 MB | 実測は 2026-08-18 以降 |
@@ -533,6 +534,25 @@ Render ダッシュボードで管理。
 - **新規の全列ロードは CI で落とす**: `tests/test_column_scoping.py` が `plugins/` ＋ `routers/` ＋ ルート直下を **AST で走査**し、`db.query(Model)`（＝全列）を検出して許可リスト `FULL_ROW_LOADS` と**双方向差分**を取る（未登録＝fail／実体の消えた登録＝fail／理由文20文字未満＝fail）。`.first()` 等の単一行終端と `with_entities` は対象外。正規表現ではなく AST なのは、`db.query(M.col)` との判別と docstring 内コード例の除外のため。`scripts/` は `scripts/_cache.py`（#355）の別制御下なので対象外。
   - **静的解析で完結させる理由**: `db_egress._Bucket` は `n_cols` を保持せず、SQLite では `cursor.rowcount = -1` で `unknown_calls` にしか積まれない。「このクエリが何列引いたか」を実行時に測る手段が無い。
 - **他の消費**: `daily-incremental`（収集は主に ingress だが `update_market_data_from_history` の読みがある）・ローカルの `scripts/` 検証（`scripts/.cache/` の pickle キャッシュで反復 pull を抑える・Issue #355）。1.98GB は**このワークフロー単独の値**なので、他を足した余裕で判断すること。
+
+##### 週次株価の差分ロード（#480・[ADR-0036](adr/0036-weekly-prices-incremental-load.md)）
+
+上表の最大項（`stock_price_weekly` 39.3MB）は**毎晩ほぼ同じ行を送り直していた**。1日の増分は約4,400行＝転送の 99.7% が不変データの再送。列を削る（#446/#459/#482）とは別の軸で、**行を送らない**手当てが要った。
+
+| | 転送 | 月30回 |
+|---|---|---|
+| 従来（毎晩フルロード） | 39.3 MB | 1.98 GB（枠の40%） |
+| 差分ロード（定常） | 約 3.7 MB（27週 ≒ 9.3%） | 約 1.06 GB |
+| ＋週1回の強制コールド | 39.3 MB × 4 = 157 MB | **実効 約1.11 GB（枠の22%）** |
+
+- **仕組み**: 指紋（`max(week_start)` + `count(*)`＝サーバ側集約なので Egress は2行ぶん）でキャッシュ世代を判定し、**直近27週は常に再取得**して訂正を吸収する。27週は `database.WEEKLY_OVERLAP_DAYS`（`DAILY_WINDOW_DAYS` からの導出）で、ミラー同期（#481）と**同一オブジェクト**を共有する。
+- **キャッシュの置き場**: ローカルは `.weekly_cache/`、GHA は `actions/cache`（`nightly-scores.yml` のみ）。`scripts/.cache/`（#355）とは別物で、ログ接頭辞も `[wpcache]` と `[cache]` で分けてある。あちらは検証用で TTL 無し・明示リフレッシュのみ＝要求が逆を向いている。
+- **指紋では見えない訂正がある**。`repair_price_scale_breaks`（#465）は該当社の**全期間**を書き換えるので、行数も `max(week_start)` も変わらない。そこで `app_settings.weekly_prices_generation` を世代印とし、**書き手が印を進める**。印を DB に置くのは、修復 CLI がローカルで走りキャッシュは GHA ランナーに載るため（ディスク上の印では届かない）。
+- **印を進めるのは構造的な条件**: `_recompute_weeks_from_daily` が「保持窓より古い週を実際に書き換えた」とき。定常経路は取得開始日を `today − DAILY_WINDOW_DAYS` でクリップするのでここへは来ない。明示フック（repair / backfill-weekly）は保険であって主ではない——列挙は必ず漏れる（ADR-0031「登録≠実行」と同型）。
+- **ログの読み方**: `[wpcache] HIT ... fresh=<行数>` と `[egress] summary` の `top=stock_price_weekly:<MB>` を突き合わせる。乖離したら**キャッシュを通らない別経路が残っている**（#478 で `scripts/_cache.py` について学んだ読み方と同じ）。`nightly-scores.yml` は `FINAPP_EGRESS_LEDGER` を設定して JSONL を artifact に含めるので、`python -m scripts.egress_report` で構造化データから読める。
+- **静かな劣化への歯止め4層**: ①行数照合はハードゲート（不一致は必ずフルロード）②鮮度アサートは raise（GHA では failure ＝自動起票）③週1回の強制コールド（`FINAPP_WEEKLY_CACHE_MAX_AGE_DAYS`・既定7）④コールド時のドリフト監査（差分が触らない過去区間を旧キャッシュと突合・追加 Egress ゼロ）。stale なパネルで μ̂ を出しても failure は出ないので、設計側で塞ぐしかない。
+- **初回は必ずフルロード**。GHA キャッシュが載る翌晩から効く。復帰判断は従来値で行うこと。
+- **緊急停止**: `FINAPP_WEEKLY_CACHE=0`。このとき**指紋クエリすら発行しない**＝従来と1文も変わらない。
 
 **リクエスト経路の Egress（#482）**: 上表は日次ジョブの話だが、`/api/plugins/sell_ranking/run` と `/api/morning` は**ユーザーが押すたび**に払う。回数が cron ではなく操作頻度で決まるので、1回の重さがそのまま効く。
 

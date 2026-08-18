@@ -66,18 +66,46 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      # 週次株価の run 間キャッシュ（#480・ADR-0036）。これが無いと毎晩 1,282,436 行
+      # （39.3MB）を引き直す＝月 1.98GB で無料枠 5GB の 40%。
+      #   - key を run_id でユニークにして**必ず save させる**。固定キーだと初日以降 save が
+      #     起きず、基準が古いまま凍って 27週窓では届かなくなり毎晩フルロードへ退化する。
+      #   - 復元は restore-keys の前方一致で直近世代を拾う（ローリング更新）。
+      #   - **キャッシュが無い/壊れている/古いは、すべて安全側（フルロード）へ倒れる**。
+      #     正しさが依存しているのは指紋と世代印だけで、ここは速さだけを担う。
+      - name: Restore weekly price cache
+        uses: actions/cache/restore@v4
+        with:
+          path: .weekly_cache
+          key: weekly-prices-v1-${{ github.run_id }}
+          restore-keys: |
+            weekly-prices-v1-
+
       - name: Run nightly scores
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           FINAPP_JOB: nightly-scores          # Egress 台帳の帰属ラベル（#478）
+          FINAPP_EGRESS_LEDGER: .egress/nightly-scores.jsonl   # 削減量の突き合わせ用（#478/#480）
         run: |
           set -o pipefail
           python nightly_scores.py 2>&1 | tee nightly_scores.log
+
+      # save を暗黙の post ステップに任せず明示する（job 失敗時の挙動が仕様として保証されて
+      # いないため）。1モデルが落ちても週次キャッシュは保存する＝nightly_scores が例外を
+      # 握って続行する設計と揃える。
+      - name: Save weekly price cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: .weekly_cache
+          key: weekly-prices-v1-${{ github.run_id }}
 
       - name: Upload log
         if: always()
         uses: actions/upload-artifact@v6
         with:
           name: nightly-scores-log
-          path: nightly_scores.log
+          path: |
+            nightly_scores.log
+            .egress/nightly-scores.jsonl
           retention-days: 30

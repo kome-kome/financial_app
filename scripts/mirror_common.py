@@ -47,7 +47,6 @@ Egress 枠が復旧する 2026-08-18 を待たずに、本番と同一のコー�
 """
 from __future__ import annotations
 
-import math
 import os
 import subprocess
 from dataclasses import dataclass
@@ -59,7 +58,9 @@ from urllib.parse import unquote, urlsplit
 from sqlalchemy import text
 
 import database
-from database import DAILY_WINDOW_DAYS, Base, mask_url
+from database import (
+    DAILY_WINDOW_DAYS, WEEKLY_OVERLAP_DAYS, WEEKLY_OVERLAP_WEEKS, Base, mask_url,
+)
 
 # ── ミラー範囲 ────────────────────────────────────────────────────────────────
 # stock_price_daily: DAILY_WINDOW_DAYS=183 のローリング削除で常に再構成される＋weekly から
@@ -71,12 +72,11 @@ MIRROR_EXCLUDED = ("stock_price_daily", "xbrl_raw_documents")
 MODE_FULL = "FULL"            # 全置換（DELETE -> INSERT）。総入替か行数極小の表
 MODE_WATERMARK = "WATERMARK"  # 高水位 - overlap 以降だけ取得して upsert
 
-# `_recompute_weeks_from_daily`（database.py）は `record_prices_batch` が触れた週を
-# **daily の保持窓ぶん遡って再集約 upsert** する。つまり週次バーは最大 DAILY_WINDOW_DAYS 日前まで
-# 黙って書き換わる。オーバーラップをこれ未満にすると訂正を取り落とす。
-# Issue #481 / #480 の当初案「末尾8週」では 56 日しか覆えず**足りない**。
-WEEKLY_OVERLAP_WEEKS = math.ceil(DAILY_WINDOW_DAYS / 7)   # 183/7 -> 27 週（189日 >= 183日）
-WEEKLY_OVERLAP_DAYS = WEEKLY_OVERLAP_WEEKS * 7
+# 週次のオーバーラップ（27週＝189日）は **`database.py` で `DAILY_WINDOW_DAYS` から導出**する。
+# 根拠（`_recompute_weeks_from_daily` が保持窓ぶん遡って上書きする）が database 側にあるため、
+# 定義もそこに置き、ここは再エクスポートに留める。#480 の週次価格キャッシュも同じものを使う
+# ＝導出は1箇所・消費が2箇所。ここで再計算すると「片方だけスラックを足す」変更で黙って乖離する。
+# 旧: WEEKLY_OVERLAP_WEEKS = math.ceil(DAILY_WINDOW_DAYS / 7)  →  database.py へ移動（#480）
 
 # `macro_data` / `statement_disclosure` の `created_at` は upsert の set_ に含まれず、
 # **値だけが訂正されたときに進まない**。日付列の高水位に頼るしかないので窓を広めに取る。

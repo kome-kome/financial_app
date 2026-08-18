@@ -272,6 +272,9 @@ def query_sites(scan_result):
 SCOPED_SITES = {
     "plugins/recommend.py::RecommendPlugin.execute": "FinancialMetric",
     "plugins/macro_snapshots.py::_load_data_impl": "FinancialMetric",
+    # #480 で差分ロードへ変えた週次ローダー。SQL の所有権をここに残すこと自体が担保対象
+    # ——マージ層へ query を追い出すと列指定の歴史（#446/#459/#482）が検査から外れる。
+    "plugins/macro_snapshots.py::load_weekly_prices_chunked": "StockPriceWeekly",
     "plugins/sell_ranking.py::SellRankingPlugin.execute": "FinancialMetric",
     "plugins/sector_ols.py::SectorOLSPlugin._load_records": "FinancialRecord",
     "plugins/utils.py::get_macro_features": "MacroData",

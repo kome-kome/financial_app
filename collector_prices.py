@@ -1580,6 +1580,16 @@ async def repair_price_scale_breaks(
 
     out["persisted"] = True
 
+    # 週次価格キャッシュの世代印を進める（#480・ADR-0036）。
+    # ここは**該当社の全期間**を Yahoo で取り直すため、行数も max(week_start) も変わらないのに
+    # 過去の値だけが変わる＝差分ロードの指紋では**原理的に検出できない**唯一の経路。
+    # `record_prices_batch` 側の構造的トリガ（保持窓より古い週の書き換え）でも拾えるが、
+    # 1社でも失敗して rollback すると印が進まない可能性があるので、ここでも明示的に進める。
+    if out["repaired"]:
+        import weekly_price_cache
+        weekly_price_cache.bump_generation_safely(
+            db, f"repair-price-breaks: {out['repaired']} companies")
+
     # --- 検算: 同じ突合日で取り直し、修復対象の乖離が消えたかを見る ---
     after = await detect_price_scale_breaks(
         db, api_key, threshold=threshold, probe_dates=probe_dates, on_progress=on_progress)
