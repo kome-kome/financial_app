@@ -131,7 +131,9 @@ if __name__ == "__main__":
                           "  1) update_market_data_from_history(db, point_in_time=True)\n"
                           "     — financial_records の株価・PER/PBR/時価総額を再計算\n"
                           "  2) scripts/.cache/weekly_prices_*.pkl を退避\n"
-                          "     — 検証キャッシュはデータ世代を持たず旧値を黙って返す（#454/#456）")
+                          "     — 検証キャッシュはデータ世代を持たず旧値を黙って返す（#454/#456）\n"
+                          "（夜間バッチの週次キャッシュ（#480）は app_settings の世代印を"
+                          "自動で進めたので手当て不要）")
                 else:
                     print("\n書き込むには --persist を付けて再実行")
             finally:

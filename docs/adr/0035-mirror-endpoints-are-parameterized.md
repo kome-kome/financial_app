@@ -169,3 +169,12 @@ SELECT coalesce(sum(('x' || substr(md5(x::text), 1, 8))::bit(32)::bigint), 0) FR
 `stock_price_weekly` は 1.28M 行あり、Supabase の `statement_timeout=2min` に当たる可能性が
 実測できていない。27週の固定窓なら 1 回あたり約 12 万行（約 4MB）で、月30回でも枠の 2.4%
 に収まる。**8/18 に `--level checksum` の所要が実測できた時点で再検討する**（Issue 化済み）。
+
+- **2026-08-17 追記（#480 が同じ判断を踏襲した・[ADR-0036](0036-weekly-prices-incremental-load.md)）**:
+  夜間バッチの週次差分ロードも、バケット指紋ではなく **`max(week_start)`＋`count(*)` の単一集約
+  ＋27週固定窓＋DB 側の世代印**を採った。値だけの訂正（#465 の段差修復）は指紋では原理的に
+  見えないが、そこはフルスキャンの集約を毎晩払う代わりに「**書き手が印を進める**」側で解いている。
+  `--level checksum` の所要実測は依然として宿題で、実測後は両方（ミラー同期と週次キャッシュ）を
+  同時に見直すこと——両者は `database.WEEKLY_OVERLAP_DAYS` を**同一オブジェクトとして共有**
+  しており、片方だけ窓を変えると乖離する（#480 でこの定数を `scripts/mirror_common.py` から
+  `database.py` へ降ろし、根拠と定義の場所のねじれも解消した）。

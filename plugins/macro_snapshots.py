@@ -15,6 +15,7 @@ M-1（macro_risk_return）と M-2（macro_gbdt）の共通面を集約し、M-2�
 import contextvars
 import math
 import statistics
+import sys
 from collections import OrderedDict, defaultdict, namedtuple
 from contextlib import contextmanager
 from datetime import datetime, timedelta
@@ -718,30 +719,61 @@ def load_weekly_prices_chunked(db, batch: int = _WEEKLY_LOAD_BATCH,
     本番実測で 1,282,436 行 × 12.1MB/回の Egress を占めるため、`px_volz` を選んでいない
     呼び出し（M-1 は price_features 非対応・M-2/M-6 は既定 OFF）は `with_volume=False` で
     列ごと落とす（Issue #446・無料枠 5GB/月に対し夜間バッチ1回 86MB のうち 14%）。
+
+    **全件ではなく差分で引く（#480・ADR-0036）。** 毎晩 1,282,436 行を引き直していたが増分は
+    約4,400行＝転送の 99.7% が不変データの再送だった。`weekly_price_cache` が run 間の永続
+    キャッシュを持ち、ここは「DB から何を引くか」だけを担う。戻り値の契約（各社 trade_date
+    昇順・`_WeeklyPX`・番兵）はキャッシュ経由でも素通しでも同一。`FINAPP_WEEKLY_CACHE=0` で
+    従来のフルロードへ戻せる（そのときは指紋クエリすら発行しない＝1文も変わらない）。
     """
+    import weekly_price_cache as wpc
     from database import Company, StockPriceWeekly
-    codes = [c[0] for c in db.query(Company.edinet_code).all()]
-    # plain dict + setdefault（defaultdict にしない）: 消費側は .get()/.items()/.values() か
-    # 存在キー前提の [] アクセスのみで、欠損キーの暗黙生成に依存しない（従来の M-3 は plain dict）。
-    prices_by_co: dict[str, list] = {}
-    cols = [StockPriceWeekly.edinet_code, StockPriceWeekly.trade_date,
-            StockPriceWeekly.close_last]
-    if with_volume:
-        cols.append(StockPriceWeekly.volume_sum)
-    for i in range(0, len(codes), batch):
-        chunk = codes[i:i + batch]
-        rows = (
-            db.query(*cols)
-            .filter(StockPriceWeekly.edinet_code.in_(chunk))
-            .order_by(StockPriceWeekly.edinet_code, StockPriceWeekly.trade_date)
-            .all()
-        )
-        # 行の幅で分岐せず **要求した列で** 決める。DB をモックするテストは cols に関わらず
-        # 4要素の行を返すため、`for ec, td, cl in rows` と書くと本物だけ通ってモックが落ちる。
-        for row in rows:
-            vs = row[3] if with_volume else _VOLUME_NOT_LOADED
-            prices_by_co.setdefault(row[0], []).append(_WEEKLY_PX(row[1], row[2], vs))
-    return prices_by_co
+
+    def _fetch(since):
+        """since 以降（None なら全件）を {edinet_code: [_WeeklyPX,...]} で返す。"""
+        codes = [c[0] for c in db.query(Company.edinet_code).all()]
+        # plain dict + setdefault（defaultdict にしない）: 消費側は .get()/.items()/.values() か
+        # 存在キー前提の [] アクセスのみで、欠損キーの暗黙生成に依存しない（従来の M-3 は plain dict）。
+        prices_by_co: dict[str, list] = {}
+        cols = [StockPriceWeekly.edinet_code, StockPriceWeekly.trade_date,
+                StockPriceWeekly.close_last]
+        if with_volume:
+            cols.append(StockPriceWeekly.volume_sum)
+        for i in range(0, len(codes), batch):
+            chunk = codes[i:i + batch]
+            q = db.query(*cols).filter(StockPriceWeekly.edinet_code.in_(chunk))
+            if since is not None:
+                # 高水位は **week_start**（PK 第2列）。`trade_date` は週内最終営業日で PK に
+                # 含まれず nullable ＝範囲スキャンの索引条件に入らない。かつ、この条件は
+                # `edinet_code IN (...)` の**中に**足すこと——week_start 単独では PK の先頭列に
+                # ならず seq scan になり、チャンク分割の意味が消える。
+                q = q.filter(StockPriceWeekly.week_start >= since)
+            rows = q.order_by(StockPriceWeekly.edinet_code,
+                              StockPriceWeekly.trade_date).all()
+            # 行の幅で分岐せず **要求した列で** 決める。DB をモックするテストは cols に関わらず
+            # 4要素の行を返すため、`for ec, td, cl in rows` と書くと本物だけ通ってモックが落ちる。
+            for row in rows:
+                vs = row[3] if with_volume else _VOLUME_NOT_LOADED
+                prices_by_co.setdefault(row[0], []).append(_WEEKLY_PX(row[1], row[2], vs))
+        return prices_by_co
+
+    # ワイヤ形式は **素のタプル**。namedtuple ごと pickle すると `_VOLUME_NOT_LOADED`（object()）
+    # の同一性が round-trip で壊れ、`is` 判定が False になる＝px_volz が ValueError を投げずに
+    # 全 nan を返す「静かな故障」（#438/#446 が番兵で潰した罠）がキャッシュ経由で復活する。
+    # 番兵の再付与はここで行い、キャッシュ層には行の型を一切知らせない。
+    # trade_date は intern する: 1,282,436 行に対し distinct な日付は約1,500個しかなく、
+    # 同一オブジェクトにしておくと pickle が memo 参照にまとめてファイルが大幅に縮む。
+    def _to_wire(r):
+        td = sys.intern(r.trade_date) if isinstance(r.trade_date, str) else r.trade_date
+        return (td, r.close_last, r.volume_sum) if with_volume else (td, r.close_last)
+
+    def _from_wire(t):
+        return _WEEKLY_PX(t[0], t[1], t[2] if with_volume else _VOLUME_NOT_LOADED)
+
+    return wpc.load_incremental(
+        db, with_volume=with_volume, fetch=_fetch, to_wire=_to_wire,
+        from_wire=_from_wire, trade_date_of=lambda r: r.trade_date,
+    )
 
 
 def load_data(db, with_volume: bool = True) -> tuple:

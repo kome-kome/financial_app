@@ -14,7 +14,7 @@ VIEW:
   financial_metrics  — 派生指標・Zスコア・成長率（financial_records から都度算出）
 """
 
-import os, gzip, json, logging, re, contextvars
+import os, gzip, json, logging, math, re, contextvars
 from contextlib import contextmanager
 from datetime import datetime, date, timedelta, timezone
 from pathlib import Path
@@ -389,6 +389,15 @@ VALID_TARGETS: frozenset[tuple[str, str]] = frozenset(build_xbrl_map().values())
 
 DAILY_WINDOW_DAYS = 183   # daily の保持窓（約6か月）。weekly が全履歴を持つため自由に変更可・移行不要
 
+# 週次バーが「黙って書き換わりうる」窓（#480 / #481・ADR-0035 §5）。
+# `_recompute_weeks_from_daily` は `record_prices_batch` が触れた週を **daily の保持窓ぶん
+# 遡って再集約 upsert** する。つまり過去 DAILY_WINDOW_DAYS 日ぶんの週次バーは、追記ではなく
+# 上書きで変わる。週次を差分取得する側（ミラー同期・週次価格キャッシュ）は、この窓を必ず
+# 無条件で取り直さないと訂正を取り落とす。**定数を直書きしないこと**——保持窓を広げた瞬間に
+# 黙って不足する（当初案の「末尾8週」は 56 日しか覆えず足りなかった）。
+WEEKLY_OVERLAP_WEEKS = math.ceil(DAILY_WINDOW_DAYS / 7)   # 183/7 -> 27 週
+WEEKLY_OVERLAP_DAYS  = WEEKLY_OVERLAP_WEEKS * 7           # 189 日 >= 183 日
+
 
 class StockPriceDaily(Base):
     """直近 DAILY_WINDOW_DAYS 日の日次終値。ローリング削除で一定サイズに保つ。"""
@@ -502,7 +511,7 @@ def record_prices_batch(db, rows: list, *, trim: bool = True) -> int:
     ))
 
     # ② 触れた週を daily から再集約（過去 run の部分週も含めて完全な週で確定）
-    _recompute_weeks_from_daily(db, daily_vals)
+    deep_week = _recompute_weeks_from_daily(db, daily_vals)
 
     # ③ trim（古い daily を削除。weekly が全履歴を持つので情報損失なし）
     if trim:
@@ -511,14 +520,31 @@ def record_prices_batch(db, rows: list, *, trim: bool = True) -> int:
             .where(StockPriceDaily.trade_date < _daily_cutoff())
         )
     db.commit()
+
+    # ④ 保持窓より古い週を書き換えていたら、週次価格キャッシュの世代印を進める（#480・ADR-0036）。
+    # **commit の後に置く**——`upsert_setting` は自前で commit するため、②の途中で呼ぶと
+    # trim 前の状態が確定して手順の原子性が変わる。
+    # 定常経路（Yahoo gap-fill / J-Quants catchup）は取得開始日を `today - DAILY_WINDOW_DAYS`
+    # でクリップするのでここへは来ない。来る＝該当社の過去が書き換わった＝差分ロードの
+    # 27週窓では覆えない、なので次回はフルロードさせる。**明示フックの列挙ではなく構造的な
+    # 条件に載せてあるので、将来あらたな深い書き込み経路が足されても自動で拾える。**
+    if deep_week is not None:
+        import weekly_price_cache
+        weekly_price_cache.bump_generation_safely(
+            db, f"deep weekly rewrite: oldest_week={deep_week}")
+
     return len(daily_vals)
 
 
-def _recompute_weeks_from_daily(db, daily_vals: list) -> None:
-    """daily_vals が触れた (edinet_code, week_start) の週を daily から再集約し weekly へ upsert。"""
+def _recompute_weeks_from_daily(db, daily_vals: list) -> Optional[str]:
+    """daily_vals が触れた (edinet_code, week_start) の週を daily から再集約し weekly へ upsert。
+
+    戻り値: 保持窓（DAILY_WINDOW_DAYS）より古い週を書き換えたなら、その最古 week_start。
+    無ければ None。呼び出し側が週次価格キャッシュの世代印トリガに使う（#480）。
+    """
     affected = {(r["edinet_code"], iso_week_start(r["trade_date"])) for r in daily_vals}
     if not affected:
-        return
+        return None
     ecs   = {ec for ec, _ in affected}
     weeks = sorted(ws for _, ws in affected)
     lo = weeks[0]
@@ -537,7 +563,7 @@ def _recompute_weeks_from_daily(db, daily_vals: list) -> None:
     )
     weekly_vals = [a for a in agg if (a["edinet_code"], a["week_start"]) in affected]
     if not weekly_vals:
-        return
+        return None
     wins = pg_insert(StockPriceWeekly).values(weekly_vals)
     db.execute(wins.on_conflict_do_update(
         constraint="pk_stock_price_weekly",
@@ -549,6 +575,13 @@ def _recompute_weeks_from_daily(db, daily_vals: list) -> None:
             "n_days":       wins.excluded.n_days,
         },
     ))
+
+    # 実際に書いた週のうち保持窓より古いものがあれば、その最古週を返す（#480 の世代印トリガ）。
+    # `affected` ではなく `weekly_vals` を見るのは、集約結果が空で書き込みが起きなかった週を
+    # 「書き換えた」と誤検知しないため。
+    oldest = min(a["week_start"] for a in weekly_vals)
+    floor_week = iso_week_start((date.today() - timedelta(days=DAILY_WINDOW_DAYS)).isoformat())
+    return oldest if oldest < floor_week else None
 
 
 def upsert_macro_batch(db, vals: list) -> int:

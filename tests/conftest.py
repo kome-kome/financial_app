@@ -27,6 +27,21 @@ from database import (  # noqa: E402
 )
 
 
+@pytest.fixture(autouse=True)
+def weekly_cache_sandbox(tmp_path, monkeypatch):
+    """週次価格キャッシュ（#480）はテストでは既定 OFF、書き先は必ず tmp へ隔離する。
+
+    OFF にする理由: DB を MagicMock で差し替えるテスト（test_macro_beta_inference /
+    test_recommend_factor_premia / test_macro_risk_return）は `func.max()/func.count()` の
+    指紋クエリに応えられない。キャッシュ経路そのものは tests/test_weekly_price_cache.py が
+    **明示的に ON にして**検証する。
+
+    tmp へ隔離する理由: pickle がテスト間で共有されると実行順に依存したフレークになる。
+    """
+    monkeypatch.setenv("FINAPP_WEEKLY_CACHE_DIR", str(tmp_path / "weekly_cache"))
+    monkeypatch.setenv("FINAPP_WEEKLY_CACHE", "0")
+
+
 @pytest.fixture
 def db():
     """各テスト独立の in-memory SQLite Session。

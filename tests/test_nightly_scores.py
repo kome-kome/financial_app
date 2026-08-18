@@ -401,3 +401,74 @@ class TestWorkflow:
 
     def test_timeout_is_set(self, workflow):
         assert workflow["jobs"]["scores"]["timeout-minutes"] > 0
+
+
+# ── 週次株価の run 間キャッシュ（#480・ADR-0036）──────────────────────────────
+
+def _steps(workflow) -> list:
+    return workflow["jobs"]["scores"]["steps"]
+
+
+def _cache_steps(workflow, action: str) -> list:
+    return [s for s in _steps(workflow) if str(s.get("uses", "")).startswith(action)]
+
+
+class TestWeeklyCacheStep:
+    """yml と Python 側の定数が食い違うと、キャッシュは**黙って効かないだけ**で
+    failure は出ない（毎晩フルロードに戻り Egress だけ元に戻る）。ADR-0031 の
+    「登録≠実行」と同型なので、CI で縛る。"""
+
+    def test_cache_path_matches_the_python_constant(self, workflow):
+        import weekly_price_cache as wpc
+        paths = [s["with"]["path"].strip()
+                 for s in _cache_steps(workflow, "actions/cache")]
+        assert paths, "週次キャッシュの restore/save ステップが無い（#480 が無効化されている）"
+        assert all(p == wpc.CACHE_DIR_NAME for p in paths), (
+            f"yml のパスと weekly_price_cache.CACHE_DIR_NAME（{wpc.CACHE_DIR_NAME}）が不一致"
+        )
+
+    def test_key_is_unique_per_run_and_restore_key_is_its_prefix(self, workflow):
+        """固定キーだと初日以降 save が起きず、基準が古いまま凍って毎晩フルロードへ退化する。"""
+        restore = _cache_steps(workflow, "actions/cache/restore")
+        assert len(restore) == 1
+        key = restore[0]["with"]["key"]
+        rkeys = restore[0]["with"]["restore-keys"].split()
+        assert "github.run_id" in key, "key が run ごとにユニークでないと save が起きない"
+        assert any(key.startswith(rk) for rk in rkeys), (
+            "restore-keys が key の前方一致になっていない（直近世代を拾えない）"
+        )
+
+    def test_save_runs_even_when_the_batch_failed(self, workflow):
+        """1モデルが落ちてもキャッシュは保存する（nightly_scores が続行する設計と揃える）。"""
+        save = _cache_steps(workflow, "actions/cache/save")
+        assert len(save) == 1
+        assert save[0]["if"] == "always()"
+        assert save[0]["with"]["key"] == \
+            _cache_steps(workflow, "actions/cache/restore")[0]["with"]["key"]
+
+    def test_only_nightly_scores_uses_actions_cache(self):
+        """月次3本は**意図的にスコープ外**（#480・ADR-0036 決定7）＝入れ忘れではない。
+
+        tune-hyperparameters は matrix 3並列で同一キーへ同時 save が競合する。
+        入れるなら競合の扱いを決めてからにすること。
+        """
+        for p in sorted(WORKFLOW_DIR.glob("*.yml")):
+            if p.name == WORKFLOW.name:
+                continue
+            assert "actions/cache@" not in p.read_text(encoding="utf-8"), (
+                f"{p.name} が actions/cache を使っている。ADR-0036 決定7 を読み直すこと"
+            )
+
+    def test_egress_ledger_is_captured_as_an_artifact(self, workflow):
+        """削減量を run ログの grep でなく構造化データで追えること（#478）。"""
+        run_step = next(s for s in _steps(workflow) if "python nightly_scores.py" in s.get("run", ""))
+        ledger = run_step["env"]["FINAPP_EGRESS_LEDGER"]
+        artifact = next(s for s in _steps(workflow)
+                        if str(s.get("uses", "")).startswith("actions/upload-artifact"))
+        assert ledger in artifact["with"]["path"], (
+            "台帳を artifact に含めていない＝実測が run ログからしか取れない"
+        )
+
+    def test_workflow_does_not_disable_the_cache(self, workflow):
+        """テスト側の既定 OFF（conftest）が本番へ写経されていないこと。"""
+        assert "FINAPP_WEEKLY_CACHE" not in yaml.dump(workflow)

@@ -245,6 +245,11 @@ async def main(years_back: int, collect_only: bool = False,
                 on_progress=lambda c, t, m: log(m),
             )
             log(f"  週次backfill 完了: {r}")
+            # 週次を過去方向へ延伸した＝差分ロードの27週窓の外に行が増えた（#480・ADR-0036）。
+            # 行数が増えるので指紋の照合でも拾えるが、印を進めておけば次回1回で確実に直る。
+            import weekly_price_cache
+            weekly_price_cache.bump_generation_safely(
+                dbw, f"backfill-weekly years_back={backfill_weekly_years}")
         finally:
             dbw.close()
         log(f"[週次backfill] 完了 ({(time.time()-t0)/60:.1f}分経過)")

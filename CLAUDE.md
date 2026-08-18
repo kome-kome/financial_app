@@ -72,6 +72,7 @@ pytest tests/test_utils.py  # 単一ファイル
 | `database.py` | テーブル定義・upsert・成長率/Zスコア計算 |
 | `db_egress.py` | Egress 台帳＋サーキットブレーカ（#478・ADR-0034）。engine の `after_cursor_execute` で全経路の転送を計測し、プロセス予算超過で `EgressBudgetExceeded`。集計は `python -m scripts.egress_report` |
 | `scripts/mirror_*.py` | ローカル読取レプリカの pull / sync / verify ＋予行演習（#481 B-2〜B-4・ADR-0035）。共有基盤は `mirror_common.py`。**source/dest を引数で受け、両方ローカルなら Supabase 不要で予行できる** |
+| `weekly_price_cache.py` | 週次株価の run 間差分ロードキャッシュ（#480・ADR-0036）。指紋（`max(week_start)`＋`count(*)`）＋直近27週の再取得＋DB 側の世代印（`app_settings`）。**キャッシュは速さだけを担い、正しさは指紋・世代印・行数照合が持つ**（無い/壊れている/古いは全てフルロードへ倒れる）。緊急停止は `FINAPP_WEEKLY_CACHE=0` |
 | `collector.py` | オーケストレータ＋後方互換の再エクスポート層＋CLI（実体は下記6分割） |
 | `collector_utils.py` | 収集系共通の設定定数・ロガー |
 | `collector_master.py` | 企業/業種マスタ収集（EDINET コードリスト・JPX 業種） |
@@ -123,6 +124,7 @@ web版・ローカル版の双方が同じ Issue を見ることで、**コー�
 - **`params_schema()` はパラメータ契約**（CONTEXT.md「パラメータ契約」）。`type`（ウィジェット）と `dtype`（データ型: int/float/str/list[str]/bool/dict）の2軸を持ち、dtype は `number`/`slider` にのみ明示必須（他は type から推論）。型変換・default 補完・bounds(min/max)/membership(options) 検証は `coerce_params`（`plugins/utils.py`）が一手に担い、**違反は reject（ValueError）**。`execute` は coerce 済み typed params を受け取り、意味的 validation（features 非空・weights 合計≠0 等）だけ持つ。bool ウィジェットは `checkbox` に統一（`boolean`/`bool` 禁止）。
 - **CORS は `ALLOWED_ORIGIN` 環境変数で制御**（デフォルト `http://localhost:8000`）。
 - **ミラー（`scripts/mirror_*.py`）の書き込み先はローカル限定**（#481・ADR-0035）。`guard_dest_local()` がリモート dest を `SystemExit` で弾く＝ミラーは Supabase を正本とする読取レプリカで、逆向きに書く経路をコードとして持たない。エンドポイント解決は `database.resolve_database_url()` へ委譲し**二重実装しない**。restore は **FK 依存順に1表ずつ**（ダンプの TOC はアルファベット順であって `--table` の指定順ではない）。週次の再取得窓は `DAILY_WINDOW_DAYS` から導出（27週）。
+- **週次株価の差分ロード（`weekly_price_cache.py`）は「速さだけ」を担う**（#480・ADR-0036）。正しさは①指紋（`max(week_start)`＋`count(*)`）②DB 側の世代印③行数照合の3つが持ち、**どれかが外れたら必ずフルロードへ倒す**（「不一致だが続行」の分岐を作らない）。触るときの不変条件は3つ: **差分条件 `week_start >= :since` は既存の500社チャンクの中に足す**（単独では PK 先頭列にならず seq scan）／**SELECT の列を増やさない**（`EGRESS_COST_TABLE` の4列較正は volume 込みの値・キャッシュ側は ISO 週の不変条件から `trade_date` で切れる）／**キャッシュのワイヤ形式は素タプル**（`_VOLUME_NOT_LOADED` は pickle で同一性が壊れ `px_volz` が全 nan 化する）。過去週を遡って書き換える処理を足したら世代印を進めること（`_recompute_weeks_from_daily` の構造的条件で自動的に進むが、経路によっては明示 bump が要る）。`27週` の導出は `database.WEEKLY_OVERLAP_DAYS` が唯一の源でミラー同期と共有する。
 - **接続先は `FINAPP_DB_TARGET`（`prod` 既定 / `local`）で切り替える**（#481 B-1・`database.resolve_database_url()`）。`local` は `DATABASE_URL_LOCAL`（未設定ならローカル既定）を使い、**解決先がリモートなら import 時に `RuntimeError`**（ミラーのつもりで本番へ書く事故を止める）。逆に **`prod` で `DATABASE_URL` 未設定は警告どまりで raise しない**——`ci.yml` は `DATABASE_URL` を渡さずに走るため、例外にすると CI が全滅する。未知の target 値は `ValueError`。接続先は `/api/system/info` → `static/js/common.js` のバッジで全画面に出す（ローカル時のみ）。
 - **分析モデルの次元整合性（必須）**: 説明変数と被説明変数は同一次元（per-share財務金額[円/株]→株価[円/株]の Ohlson 型）。OLS学習前に各特徴量を `winsorize`（p1-p99、`plugins/utils.py`）。詳細・根拠は [MODELS.md](docs/MODELS.md)。
 - **科学計算ライブラリ**（numpy/scipy/statsmodels/scikit-learn）は利用可。採用基準は [VISION.md](docs/VISION.md)。
