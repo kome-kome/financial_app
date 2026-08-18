@@ -21,6 +21,7 @@ from database import (
     build_xbrl_map, _parse_period_end,
     StockPriceDaily, StockPriceWeekly,
     record_prices_batch, trim_daily, latest_prices,
+    db_timeouts,
 )
 
 from collector_utils import *
@@ -851,14 +852,26 @@ async def _phase_upsert_master(db, client, on_progress, max_companies) -> tuple:
 
 
 def _phase_build_skip_ids(db, skip_existing: bool, skip_if_raw_exists: bool) -> set:
-    """Phase 2: 差分スキップ対象の doc_id セットを DB から一括取得する。"""
+    """Phase 2: 差分スキップ対象の doc_id セットを DB から一括取得する。
+
+    **どちらの分岐も表を丸ごと1列スキャンする**（`financial_records` は 50,478 行 / 68MB）。
+    平時は数秒で終わるが、Supabase 側の I/O が遅い日には postgres ロール既定の
+    `statement_timeout=2min` を踏む。2026-08-19 の実走（run 32185144206）が実例で、
+    17分走った末にここで `QueryCanceled` を出して収集ごと落ちた。#470 の対策
+    （ADR-0032 の `db_timeouts`）は `collector_prices.py` にしか入っておらず、
+    **同じ死因を持つこの経路に届いていなかった**。
+
+    引き上げは ADR-0032 の原則どおり**この文の実行中だけ**で、ロール既定は変えない。
+    """
     if skip_existing:
-        rows = db.query(FinancialRecord.doc_id).filter(FinancialRecord.doc_id.isnot(None)).all()
+        with db_timeouts(db, statement=HEAVY_STATEMENT_TIMEOUT):
+            rows = db.query(FinancialRecord.doc_id).filter(FinancialRecord.doc_id.isnot(None)).all()
         ids = {r[0] for r in rows}
         log.info(f"差分収集モード: {len(ids)}件の収集済みdoc_idをスキップ対象として読み込み")
         return ids
     if skip_if_raw_exists:
-        rows = db.query(XbrlRawDocument.doc_id).all()
+        with db_timeouts(db, statement=HEAVY_STATEMENT_TIMEOUT):
+            rows = db.query(XbrlRawDocument.doc_id).all()
         ids = {r[0] for r in rows}
         log.info(f"raw_skip モード: xbrl_raw_documents に保存済みの {len(ids)} 件をスキップ")
         return ids
