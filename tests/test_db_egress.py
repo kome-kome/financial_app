@@ -80,7 +80,13 @@ class TestBytesPerRow:
         assert bytes_per_row("financial_metrics", 36) == pytest.approx(rate * 36)
 
     def test_unknown_table_uses_conservative_default(self):
-        assert bytes_per_row("plugin_tuned_params", 5) == DEFAULT_BYTES_PER_COLUMN * 5
+        """較正表に載っていない表（＝これから足される表）は保守側の既定へ倒す。
+
+        実在の表名を書かないこと。#493 で mirror 16 表すべてに実測が入ったため、
+        当時未較正だった plugin_tuned_params を使っていたこのテストは意味を失った。
+        """
+        assert bytes_per_row("table_added_after_the_last_calibration", 5) == \
+            DEFAULT_BYTES_PER_COLUMN * 5
 
     def test_zero_columns_does_not_zero_out_the_estimate(self):
         """列数が取れなくても 0 バイト扱いにしない（過小評価はブレーカを無力化する）。"""
@@ -104,7 +110,10 @@ class TestRecord:
         LEDGER.record("SELECT x FROM companies", 4437, 14)
         snap = LEDGER.snapshot()
         assert snap["rows"] == 4437
-        assert snap["tables"]["companies"]["est_bytes"] == pytest.approx(4437 * 118.0)
+        # 較正値そのものは #446 / #493 のように測り直される。ここの主題は積み上げなので
+        # 数字を直書きせず較正表から引く（直書きすると再較正のたびに無関係に落ちる）。
+        assert snap["tables"]["companies"]["est_bytes"] == \
+            pytest.approx(4437 * bytes_per_row("companies", 14))
         assert snap["unknown_calls"] == 0
 
     def test_negative_rowcount_goes_to_unknown_not_zero(self):

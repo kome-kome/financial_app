@@ -499,7 +499,8 @@ Render ダッシュボードで管理。
 **常時計測（`db_egress.py`）**: `engine` の `after_cursor_execute` フックが「どのクエリが何行・何列を返したか」を全プロセス（GHA バッチ・ローカル CLI・Render）で記録する。psycopg2 の既定カーソルはクライアント側バッファなので、このフックの時点で行は既に転送済み＝`cursor.rowcount` がそのまま転送行数になる（結果は消費しないので既存挙動に干渉しない）。プロセス終了時に `[egress] summary job=... total=...MB rows=... top=<テーブル>:<MB>,...` を標準エラーへ1行出す。ワークフローの帰属は各 yml の `FINAPP_JOB` で付く。
 
 - **なぜ要ったか**: 2026-07（61.2GB）・2026-08（7.312GB）の2回とも、超過後に「誰が食ったか」を答えられなかった。当時の計測は `scripts/_cache.py` の HIT/MISS だけで、**夜間バッチ本体・`routers/`・`collector*.py` は完全に無計測**だった。
-- **推定は正本ではない**。較正値（B/行）は下表の実測から導出しており、未較正の組み合わせは 12 B/列/行 の保守的な既定を使う。**台帳の役目は帰属とブレーカであって、実測の置き換えではない。**
+- **推定は正本ではない**。較正値（B/行）は下表の実測から導出しており、未較正の組み合わせは 17.5 B/列/行 の保守的な既定を使う（#446 時点は 12.0。#493 の全表実測で `macro_beta_loadings` が 17.3 とそれを上回っていたため引き上げた＝**既定は実測レンジの上側に置く**）。**台帳の役目は帰属とブレーカであって、実測の置き換えではない。**
+- **較正には2世代ある**。#446（2026-08-06）は消費側が実際に投げる**部分列**、#493（2026-08-19）は mirror 16 表の**全列**。**部分列エントリを全列エントリで上書きしてはいけない**——列ごとに B/値 が違うため過小評価になる（`stock_price_weekly` は 3列で 10.7 B/列/行、全列平均では 7.8 B/列/行）。
 - **ロールアップ**: `python -m scripts.egress_report`（JSONL 台帳）／`--log <gh run view --log の保存先>`（run ログの `[egress] summary` 行）。DB に繋がないので実行しても Egress は増えない。JSONL を残すには `FINAPP_EGRESS_LEDGER=<path>` を設定する。
 
 **サーキットブレーカ**: プロセス単位で `FINAPP_EGRESS_ROW_LIMIT`（既定 3,000,000 行）/ `FINAPP_EGRESS_MB_LIMIT`（既定 400MB）を超えると `EgressBudgetExceeded` を送出する。既定は既知の最大実行（夜間バッチ ≒ 1.39M 行 / 67.7MB）の約2倍。GHA では例外＝failure ＝ `notify-failure.yml` が Issue を自動起票するので、**ブレーカは自分で自分を報告する**。
@@ -562,10 +563,22 @@ Render ダッシュボードで管理。
 | `financial_metrics` 保有分（同上・20行） | 0.02 MB | 0.003 MB |
 | `stock_price_weekly`（7列全期間 → 3列400日窓） | 0.43 MB | 0.04 MB |
 | `macro_data`（11 → 3列） | 1.34 MB | 0.40 MB |
-| `macro_beta_loadings`（`with_loadings=False` で転送ゼロ） | 3.36 MB | 0 MB |
-| **1リクエスト合計** | **8.60 MB** | **1.08 MB（−87%）** |
+| `macro_beta_loadings`（`with_loadings=False` で転送ゼロ） | 4.86 MB | 0 MB |
+| **1リクエスト合計** | **10.10 MB** | **1.08 MB（−89%）** |
 
-`macro_beta_loadings` の B/行は `EGRESS_COST_TABLE` に較正値が無く 12 B/列/行 の保守側既定を当てた推定値（実測は 8/18 以降に `octet_length` で取り、較正表へ足す）。
+`macro_beta_loadings` の B/行は #493（2026-08-19）で実測へ差し替えた：**121.4 B/行（7列・10.5MB / 90,841 行）**。それまでは較正値が無く 12 B/列/行 = 84.0 B/行 の既定を当てており、**実測はその 1.44 倍＝保守側に置いたつもりの既定が過小だった**（上表の 3.36 MB → 4.86 MB はこの比で引き直した値）。`DEFAULT_BYTES_PER_COLUMN` を 17.5 へ引き上げたのはこの実例が根拠。
+
+**全表較正（#493・2026-08-19）**: Egress リセット直後に mirror 16 表を全列で測り直した。**明細（B/行・列数・行数）の正本は `db_egress.EGRESS_COST_TABLE` のエントリと note**（ここに書き写すと黙って陳腐化する）。設計判断に効く要点だけ:
+
+```powershell
+$env:FINAPP_JOB = "egress-calibration"
+python -m scripts.mirror_verify --level counts --bytes --warn-only   # 表ごとに1行＝Egress ほぼゼロ
+```
+
+- **16 表・全列の合計は 131.1 MB**（1,569,144 行）。これが **ミラー初回 pull（#481 手順3）の見積りの母数**であり、枠 5GB の 2.6%。1,284,465 行の `stock_price_weekly` だけで 66.6MB＝**半分がここ**
+- **通常の表の B/列/行 は 7.9〜17.3 に収まる**。ただし JSON 列を持つ2表（`macro_beta_meta` 492、`plugin_tuned_params` 1238）は桁が違う＝**平均から外して読む**
+- **`statement_timeout=2min`（ADR-0032）には当たらなかった**。128万行の `octet_length` 全走査も含めて全16表が通ったので、`table_stats()` に timeout の局所引き上げは足していない（当たるようになったら `database.db_timeouts` で包む）
+- `financial_metrics` は VIEW でミラー対象外＝この回では未測。#446 の 779 B/行（97列）が引き続き唯一の実測
 
 **キャッシュが効いているかを見る（#478）**: `scripts/` 系の検証 CLI は実行のたびに `[cache] HIT/MISS/REFRESH <key>` を標準エラーへ出し、終了時に `[cache] summary hits=N misses=M produced=X.XMB` を出す。**MISS と REFRESH は本番 DB を引いた＝Egress を使った**という意味なので、2回目以降の実行で misses が減らないならキーが実質毎回ミスしている。2026-07 と 2026-08 の2回とも、超過後にこの内訳が分からず原因の切り分けに時間を要した（黙ってミスしても気づけない＝#438 と同型）。`produced` は pickle のバイト数であって Egress そのものではない（正本は上記の `octet_length` 実測）。
 

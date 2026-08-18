@@ -87,36 +87,86 @@ class EgressCost:
     note: str
 
 
-# (テーブル名, 転送列数) の実測値。docs/DEPLOYMENT.md「Egress 設計」の #446 実測表が正本。
+# (テーブル名, 転送列数) の実測値。docs/DEPLOYMENT.md「Egress 設計」の実測表が正本。
+#
+# 出所は2世代ある。**どちらもサーバ側 `sum(octet_length(列::text))` が正本**（#446 の測り方）:
+#   #446（2026-08-06）… 消費側が実際に転送する**部分列**を測ったもの。部分列の推定はこちらが効く
+#   #493（2026-08-19）… Egress リセット後に mirror 16 表を**全列**で測り直したもの（ランブック手順4）
+# 部分列エントリを全列エントリで上書きしてはいけない（列ごとに B/値 が違うため過小評価になる）。
 EGRESS_COST_TABLE: dict[tuple[str, int], EgressCost] = {
+    # ── #446: 消費側が実際に投げる部分列（この形の SELECT が本番の主経路）
     ("stock_price_weekly", 3): EgressCost(
         32.1, "2026-08-06", "#446", "edinet_code/trade_date/close_last = 39.3MB / 1,282,436 行"),
     ("stock_price_weekly", 4): EgressCost(
         42.0, "2026-08-06", "#446", "+volume_sum = 51.4MB / 1,282,436 行"),
     ("macro_data", 3): EgressCost(
         40.1, "2026-08-06", "#446", "series_code/trade_date/close = 2.6MB / 67,906 行"),
-    ("macro_data", 11): EgressCost(
-        12.2 * 11, "2026-08-06", "#446", "ORM 全列 = 8.7MB / 67,906 行"),
     ("financial_metrics", 97): EgressCost(
-        779.0, "2026-08-06", "#446", "VIEW 全列 = 22.5MB / 30,285 行"),
+        779.0, "2026-08-06", "#446", "VIEW 全列 = 22.5MB / 30,285 行（mirror 対象外＝#493 で未測）"),
+
+    # ── #493: mirror 16 表の全列実測（app_settings は 0 行で測れず未収録）
+    ("stock_price_weekly", 7): EgressCost(
+        54.4, "2026-08-19", "#493", "全列 = 66.6MB / 1,284,465 行"),
     ("financial_records", 69): EgressCost(
-        663.0, "2026-08-06", "#446", "ORM 全列 = 2.8MB / 4,430 行（sector_ols）"),
+        643.3, "2026-08-19", "#493",
+        "全列 = 31.0MB / 50,478 行（#446 の 663.0 は sector_ols がロードする 4,430 行での値）"),
+    ("statement_disclosure", 34): EgressCost(
+        269.8, "2026-08-19", "#493", "全列 = 8.5MB / 32,855 行"),
+    ("macro_data", 11): EgressCost(
+        133.8, "2026-08-19", "#493", "全列 = 12.5MB / 97,776 行（#446 の 134.2 とほぼ一致＝検算）"),
+    ("macro_beta_loadings", 7): EgressCost(
+        121.4, "2026-08-19", "#493", "全列 = 10.5MB / 90,841 行"),
     ("companies", 14): EgressCost(
-        118.0, "2026-08-06", "#446", "ORM 全列 = 0.5MB / 4,437 行"),
+        131.5, "2026-08-19", "#493", "全列 = 0.6MB / 4,437 行（#446 は 118.0・同じ行数で +11%）"),
+    ("regression_results", 8): EgressCost(
+        84.4, "2026-08-19", "#493", "全列 = 0.4MB / 5,336 行"),
+    ("macro_enet_scores", 7): EgressCost(
+        79.8, "2026-08-19", "#493", "全列 = 0.1MB / 1,710 行"),
+    ("macro_gbdt_scores", 7): EgressCost(
+        67.8, "2026-08-19", "#493", "全列 = 0.1MB / 1,687 行"),
+    ("macro_ensemble_scores", 6): EgressCost(
+        58.9, "2026-08-19", "#493", "全列 = 0.1MB / 1,697 行"),
+    ("macro_dlm_scores", 6): EgressCost(
+        57.2, "2026-08-19", "#493", "全列 = 0.2MB / 3,549 行"),
+    ("recommend_factor_premia", 9): EgressCost(
+        139.8, "2026-08-19", "#493", "全列 = 2,236B / 16 行"),
+    ("collection_logs", 9): EgressCost(
+        114.0, "2026-08-19", "#493", "全列 = 228B / 2 行"),
+    # JSON 列が支配的な2表。行数が 2〜3 しかなく B/行 は行の中身で桁が動く（保守側＝大きめ）
+    ("macro_beta_meta", 7): EgressCost(
+        3445.0, "2026-08-19", "#493", "全列 = 6,890B / 2 行。JSON 列が支配的"),
+    ("plugin_tuned_params", 8): EgressCost(
+        9908.0, "2026-08-19", "#493", "全列 = 29,724B / 3 行。JSON 列が支配的"),
 }
 
 # 列数が実測と違う組み合わせ用の B/列/行。上表を列数で割って導出した同じ実測由来の値。
+# **部分列の実測がある表は、そちらから割った値を据え置く**（全列平均で上書きすると
+# 部分列の推定が過小になる＝ブレーカが甘くなる。stock_price_weekly は 3列 10.7 に対し
+# 全列平均 7.8 で、文字列列と数値列で B/値 が違うことがそのまま出ている）。
 EGRESS_BYTES_PER_COLUMN: dict[str, EgressCost] = {
-    "stock_price_weekly": EgressCost(10.7, "2026-08-06", "#446", "32.1 B/行 ÷ 3列"),
-    "macro_data": EgressCost(13.4, "2026-08-06", "#446", "40.1 B/行 ÷ 3列"),
+    "stock_price_weekly": EgressCost(10.7, "2026-08-06", "#446", "32.1 B/行 ÷ 3列（部分列由来を据え置き）"),
+    "macro_data": EgressCost(13.4, "2026-08-06", "#446", "40.1 B/行 ÷ 3列（部分列由来を据え置き）"),
     "financial_metrics": EgressCost(8.03, "2026-08-06", "#446", "779 B/行 ÷ 97列"),
-    "financial_records": EgressCost(9.6, "2026-08-06", "#446", "663 B/行 ÷ 69列"),
-    "companies": EgressCost(8.4, "2026-08-06", "#446", "118 B/行 ÷ 14列"),
+    "financial_records": EgressCost(9.3, "2026-08-19", "#493", "643.3 B/行 ÷ 69列"),
+    "companies": EgressCost(9.4, "2026-08-19", "#493", "131.5 B/行 ÷ 14列"),
+    "macro_beta_loadings": EgressCost(17.3, "2026-08-19", "#493", "121.4 B/行 ÷ 7列"),
+    "recommend_factor_premia": EgressCost(15.5, "2026-08-19", "#493", "139.8 B/行 ÷ 9列"),
+    "collection_logs": EgressCost(12.7, "2026-08-19", "#493", "114.0 B/行 ÷ 9列"),
+    "macro_enet_scores": EgressCost(11.4, "2026-08-19", "#493", "79.8 B/行 ÷ 7列"),
+    "regression_results": EgressCost(10.6, "2026-08-19", "#493", "84.4 B/行 ÷ 8列"),
+    "macro_ensemble_scores": EgressCost(9.8, "2026-08-19", "#493", "58.9 B/行 ÷ 6列"),
+    "macro_gbdt_scores": EgressCost(9.7, "2026-08-19", "#493", "67.8 B/行 ÷ 7列"),
+    "macro_dlm_scores": EgressCost(9.5, "2026-08-19", "#493", "57.2 B/行 ÷ 6列"),
+    "statement_disclosure": EgressCost(7.9, "2026-08-19", "#493", "269.8 B/行 ÷ 34列"),
+    "macro_beta_meta": EgressCost(492.1, "2026-08-19", "#493", "3445.0 B/行 ÷ 7列。JSON 列が支配的"),
+    "plugin_tuned_params": EgressCost(1238.5, "2026-08-19", "#493", "9908.0 B/行 ÷ 8列。JSON 列が支配的"),
 }
 
-# 未較正のテーブル用。上記の実測レンジ（8.0〜13.4）の上側を取り、**保守側＝多めに見積もる**。
-# 過小評価するとブレーカが踏まれず超過を許すので、迷ったら大きい方へ倒す。
-DEFAULT_BYTES_PER_COLUMN = 12.0
+# 未較正のテーブル用。上記の実測レンジ（JSON 表を除いて 7.9〜17.3）の上側を取り、
+# **保守側＝多めに見積もる**。過小評価するとブレーカが踏まれず超過を許すので、
+# 迷ったら大きい方へ倒す。#446 時点は 12.0 だったが、#493 の全表実測で
+# macro_beta_loadings が 17.3 とそれを上回っていたため引き上げた。
+DEFAULT_BYTES_PER_COLUMN = 17.5
 
 # 既定予算。既知の最大実行（夜間バッチ = 週次 1,282,436 + fin 30,285 + macro 67,906
 # + records 4,430 + companies 4,437 ≒ 1.39M 行 / 67.7MB）の約2倍に置く。
