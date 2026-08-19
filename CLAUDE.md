@@ -45,6 +45,9 @@
 # ローカル（Windows）
 .\venv\Scripts\Activate.ps1
 uvicorn api:app --reload                 # → http://localhost:8000/
+python launch.py                         # GUI ランチャー（既定は本番=Supabase）
+.un_local.ps1                          # GUI ランチャーをローカルDB始まりで起動
+.un_local.ps1 -Console -Port 8010      # 同上・ランチャー無しでコンソール起動
 
 python collector.py --years 5           # 全件収集（5年分）
 python collector.py --years 1 --max 10  # テスト用（10社）

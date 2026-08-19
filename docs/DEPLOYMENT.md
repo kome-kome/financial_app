@@ -323,9 +323,17 @@ python -m scripts.setup_local_db --apply    # 実行
 
 ```powershell
 $env:FINAPP_DB_TARGET = "local"; python -m uvicorn api:app     # CLI
+.
+un_local.ps1                                                # GUI（ランチャーをローカル始まりで起動）
+.
+un_local.ps1 -Console -Port 8010                            # ランチャー無し・コンソール起動
 ```
 
 GUI（`launch.py`）は窓に**接続先ラジオ**を持ち、切り替えるとサーバーを入れ替える（ブラウザは開き直さない）。**選択は永続化しない**——毎回 `prod` から始めるほうが、古いミラーで起動していることに気づかず使い続ける事故を防げる。環境変数で明示した場合のみそれが初期値になる。既に別プロセスが起動済みのときはそのプロセスを掌握していないためラジオは無効化される。
+
+**`run_local.ps1`（Supabase 障害中の常用導線）**: ランチャーは毎回 `prod` 始まりなので、restricted 中に素で起動すると**接続先ラジオを切り替える前に Supabase を叩いて固まる**。`run_local.ps1` は `FINAPP_DB_TARGET=local` を先に立ててからランチャーを起動するので、一度も本番へ触らせない。起動前に `companies` の件数と週次株価の最新週を出して**どの世代のミラーを見ているか**を明示し、ローカルへ繋がらなければランチャーを起こす前に落とす。
+
+併せて `FINAPP_EGRESS_ENFORCE=0` / `FINAPP_EGRESS_LEDGER=0` を立てる——ローカル読取は Egress を1バイトも使わないので、400MB のプロセス予算で GUI が `EgressBudgetExceeded` に落ちる意味が無く、`.egress/ledger.jsonl` に混ぜると `scripts.egress_report` の集計が Supabase の実測でなくなる（請求サイクル累計のほうは `_is_local` で自動的に無効）。**`.env` は書き換えない**ので、復旧後は素の `python launch.py` に戻すだけで prod へ復帰する（戻し忘れが起きない）。
 
 **ガードは強さを2種に分けてある**（[database.py](../database.py) の `resolve_database_url()`）:
 
