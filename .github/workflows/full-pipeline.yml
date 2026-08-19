@@ -58,7 +58,9 @@ jobs:
         uses: actions/upload-artifact@v6
         with:
           name: collect-log-yb${{ matrix.years_back }}
-          path: logs/pipeline_gh.log
+          path: |
+            logs/pipeline_gh.log
+            .egress/*.jsonl
           retention-days: 7
 
   finalize:
@@ -97,5 +99,7 @@ jobs:
         uses: actions/upload-artifact@v6
         with:
           name: finalize-log
-          path: logs/pipeline_gh.log
+          path: |
+            logs/pipeline_gh.log
+            .egress/*.jsonl
           retention-days: 7

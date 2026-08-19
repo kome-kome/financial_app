@@ -57,5 +57,7 @@ jobs:
         uses: actions/upload-artifact@v6
         with:
           name: interim-collect-log
-          path: interim_collect.log
+          path: |
+            interim_collect.log
+            .egress/*.jsonl
           retention-days: 7

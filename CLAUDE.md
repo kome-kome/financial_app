@@ -70,7 +70,7 @@ pytest tests/test_utils.py  # 単一ファイル
 | ファイル | 役割 |
 |---|---|
 | `database.py` | テーブル定義・upsert・成長率/Zスコア計算 |
-| `db_egress.py` | Egress 台帳＋サーキットブレーカ（#478・ADR-0034）。engine の `after_cursor_execute` で全経路の転送を計測し、プロセス予算超過で `EgressBudgetExceeded`。集計は `python -m scripts.egress_report` |
+| `db_egress.py` | Egress 台帳＋サーキットブレーカ（#478・ADR-0034/0037）。engine の `after_cursor_execute` で全経路の転送を計測。**歯止めは2軸**＝①プロセス予算超過で `EgressBudgetExceeded` ②**請求サイクル累計**（`app_settings.egress_cycle_bytes`・warn 80%/block 95%）。プロセス予算だけでは「1日12プロセスで 4.8GB」が素通りする。台帳は**既定で `.egress/ledger.jsonl`** へ書く（無効化は `FINAPP_EGRESS_LEDGER=0`）。集計は `python -m scripts.egress_report`、閾値監視は `egress-health.yml`（毎日 UTC 21:00） |
 | `scripts/mirror_*.py` | ローカル読取レプリカの pull / sync / verify ＋予行演習（#481 B-2〜B-4・ADR-0035）。共有基盤は `mirror_common.py`。**source/dest を引数で受け、両方ローカルなら Supabase 不要で予行できる** |
 | `weekly_price_cache.py` | 週次株価の run 間差分ロードキャッシュ（#480・ADR-0036）。指紋（`max(week_start)`＋`count(*)`）＋直近27週の再取得＋DB 側の世代印（`app_settings`）。**キャッシュは速さだけを担い、正しさは指紋・世代印・行数照合が持つ**（無い/壊れている/古いは全てフルロードへ倒れる）。緊急停止は `FINAPP_WEEKLY_CACHE=0` |
 | `collector.py` | オーケストレータ＋後方互換の再エクスポート層＋CLI（実体は下記6分割） |

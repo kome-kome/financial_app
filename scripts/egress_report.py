@@ -5,8 +5,10 @@
 
 入力は2種類:
 
-- **JSONL**（`FINAPP_EGRESS_LEDGER` を設定したプロセスが 1 実行 1 行で append）。
-  テーブル別の完全な内訳を持つ。
+- **JSONL**（各プロセスが 1 実行 1 行で append）。テーブル別の完全な内訳を持つ。
+  **書き先は既定で `.egress/ledger.jsonl`**（#478 の穴3・環境変数は不要）。以前は
+  `FINAPP_EGRESS_LEDGER` を人が手で立てる運用で、過去2回の超過の主因だった
+  ローカル検証の反復が1バイトも残っていなかった。無効化は `FINAPP_EGRESS_LEDGER=0`。
 - **run ログ**（`gh run view <id> --log > run.txt` で落としたテキスト）。
   `[egress] summary ...` 行を拾う。**テーブル別は top3 しか残らない**ので内訳は部分的。
 
@@ -94,7 +96,9 @@ def report(entries: list[dict], month: str | None) -> int:
     if month:
         entries = [e for e in entries if str(e.get("ts", "")).startswith(month)]
     if not entries:
-        print("台帳が空です。FINAPP_EGRESS_LEDGER を設定して実行するか --log を指定してください。")
+        print(f"台帳が空です（既定の書き先は {DEFAULT_LEDGER}）。"
+              "DB を触るプロセスをまだ1度も実行していないか、FINAPP_EGRESS_LEDGER=0 で"
+              "無効化されています。run ログから読むなら --log を指定してください。")
         return 1
 
     by_job: dict[str, dict] = defaultdict(lambda: {"runs": 0, "bytes": 0.0, "rows": 0, "unknown": 0})

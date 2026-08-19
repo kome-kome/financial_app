@@ -130,5 +130,7 @@ jobs:
         uses: actions/upload-artifact@v6
         with:
           name: macro-beta-inference-log
-          path: macro_beta_inference.log
+          path: |
+            macro_beta_inference.log
+            .egress/*.jsonl
           retention-days: 30

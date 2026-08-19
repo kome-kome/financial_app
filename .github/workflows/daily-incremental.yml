@@ -81,5 +81,7 @@ jobs:
         uses: actions/upload-artifact@v6
         with:
           name: incremental-log
-          path: logs/pipeline_incremental.log
+          path: |
+            logs/pipeline_incremental.log
+            .egress/*.jsonl
           retention-days: 7
