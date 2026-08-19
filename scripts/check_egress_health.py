@@ -51,11 +51,18 @@ from database import SessionLocal, get_setting    # noqa: E402
 EXIT_UNHEALTHY = 2
 
 # Database Size の枠と閾値。docs/DEPLOYMENT.md「外部サービス制約」が正本。
-# Egress と違い**超えると read-only** になり収集が止まるので、警告は Egress より
-# 手前（90%）に置く。86% は #290 の再オープントリガー（430MB）を既に踏んだ水準で、
-# ここが 90% を超えたら「VACUUM では戻らなくなった」＝パーティション化の判断時期。
+# Egress と違い**超えると read-only** になり収集が止まるので、警告は Egress より手前に置く。
+#
+# **判定に使う値と課金に使われる値は別物**（2026-08-19 に3つ揃って実測）:
+#   Usage ページ      430MB … 課金クォータの判定値。超えると read-only
+#   Infrastructure    409.8MB
+#   pg_database_size  395MB … このスクリプトが読む値
+# ここで 0.90 を使うと 450MB で発火＝Usage 基準では 485MB（97%）に相当し、
+# 気づいた時には手遅れになる。**約 35MB の差を織り込んで 0.85（425MB ≒ Usage 460MB）**
+# に置き、read-only までに 40MB の余地を残す。差の内訳（WAL・システム領域）は固定では
+# ないので、Usage 側と乖離したらこの係数を測り直すこと。
 DB_QUOTA_BYTES = 500 * 1024 ** 2
-DB_WARN_RATIO = 0.90
+DB_WARN_RATIO = 0.85
 
 
 def collect(db) -> dict:

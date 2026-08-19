@@ -129,9 +129,23 @@ class TestProblems:
     def test_reports_both_when_both_exceed(self):
         assert len(ceh.problems(self._snap(0.9, 0.95))) == 2
 
-    def test_current_86_percent_does_not_fire_yet(self):
-        """2026-08-19 実測は 430MB/500MB (86%)。ここで鳴ると初日から常時 failure になる。"""
-        assert ceh.problems(self._snap(db_ratio=0.86)) == []
+    def test_current_size_does_not_fire_yet(self):
+        """2026-08-19 の `pg_database_size` は 395MB/500MB (79%)。
+
+        **Usage ページの 430MB (86%) とは別の数字**——判定に使うのは `pg_database_size`
+        で、両者には約 35MB の差がある（WAL・システム領域）。ここで鳴ると初日から
+        常時 failure になり、通知そのものが信用されなくなる。
+        """
+        assert ceh.problems(self._snap(db_ratio=0.79)) == []
+
+    def test_threshold_accounts_for_the_usage_page_gap(self):
+        """`pg_database_size` 基準の閾値は、Usage 基準では約 7pt 高く出る。
+
+        0.90 に置くと Usage 基準で 97% 相当＝read-only の直前でしか鳴らない。
+        余地（40MB 以上）を残せる水準であることを固定する。
+        """
+        fires_at = ceh.DB_QUOTA_BYTES * ceh.DB_WARN_RATIO
+        assert ceh.DB_QUOTA_BYTES - fires_at >= 40 * MB
 
     def test_db_threshold_is_stricter_than_egress(self):
         """Egress は翌サイクルで戻るが、Database Size 超過は read-only で収集が止まる。"""
