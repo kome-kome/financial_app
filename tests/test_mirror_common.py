@@ -273,3 +273,76 @@ class TestSelectedTables:
         from scripts.mirror_verify import selected_tables
         with pytest.raises(SystemExit):
             selected_tables(self._args("stock_price_daily"))
+
+
+class TestChecksumExpr:
+    """チェックサム式は**行順にも列順にも**依存してはいけない（2026-08-19 の実障害）。
+
+    `x::text`（行全体のテキスト化）は attnum 順なので、source が
+    `ALTER TABLE ADD COLUMN` の積み重ね、mirror が `Base.metadata.create_all` 由来だと
+    値が完全に一致していてもずれる。初回 pull で **16 表中 7 表が「行数 +0 なのに NG」**
+    になり、`companies` は created_at/updated_at と issued_shares 以降が入れ替わっていた。
+
+    既存の実 PG テスト（test_mirror_postgres.py）は両端を同じ DDL で作るため列順が揃い、
+    **この罠を構造的に検出できなかった**。だから純関数側で式そのものを固定する。
+    """
+
+    def test_column_order_does_not_change_the_expression(self):
+        a = mc.checksum_expr(["id", "name", "created_at"])
+        b = mc.checksum_expr(["created_at", "id", "name"])
+        assert a == b
+
+    def test_does_not_use_whole_row_text(self):
+        """`x::text` を使うと attnum 順に依存する。二度と戻さない。"""
+        expr = mc.checksum_expr(["id", "name"])
+        assert "x::text" not in expr
+        assert "concat_ws" in expr
+
+    def test_every_column_is_quoted_and_present(self):
+        expr = mc.checksum_expr(["id", "trade_date", "close"])
+        for col in ("id", "trade_date", "close"):
+            assert f'"{col}"::text' in expr
+
+    def test_null_is_distinguishable(self):
+        r"""`concat_ws` は NULL を黙って飛ばすので (a,NULL,c) と (a,c) が同じになる。
+
+        `\N` へ落としてから連結していることを固定する。
+        """
+        expr = mc.checksum_expr(["a", "b"])
+        assert expr.count("coalesce(") >= 2
+        assert r"'\N'" in expr
+
+    def test_empty_columns_is_rejected(self):
+        """列が空のまま式を組むと、全行が同じ定数ハッシュになり常に一致してしまう。"""
+        with pytest.raises(ValueError):
+            mc.checksum_expr([])
+
+    def test_aggregate_is_order_independent(self):
+        """行順に依存する `string_agg(... ORDER BY)` へ戻していないこと。"""
+        expr = mc.checksum_expr(["id"])
+        assert "string_agg" not in expr
+        assert expr.startswith("coalesce(sum(")
+
+
+class TestSessionFixesAreAttachedToEngines:
+    """セッション設定は「呼ぶ人が思い出す」ものではなく「接続に付いてくる」ものにする。
+
+    以前は `table_stats()` の中でしか `fix_session()` を呼んでおらず、`mirror_sync` の
+    `fetch_rows()` は既定のまま source を読んでいた。float8 は
+    `extra_float_digits >= 1` でないと有効数字15桁へ丸められる（完全往復には17桁が要る）。
+    `pull` が無事だったのは `pg_dump` が自前で設定するためで、**経路ごとに正しさが違った**。
+    """
+
+    def test_float_precision_is_pinned(self):
+        assert any("extra_float_digits" in s for s in mc._SESSION_FIXES)
+
+    def test_timezone_and_datestyle_are_pinned(self):
+        joined = " ".join(mc._SESSION_FIXES)
+        assert "TimeZone" in joined and "DateStyle" in joined
+
+    def test_make_engine_registers_a_connect_hook(self):
+        """engine を作った時点でフックが張られていること（呼び忘れを構造的に消す）。"""
+        import inspect
+        src = inspect.getsource(mc.make_engine)
+        assert 'listens_for' in src and '"connect"' in src
+        assert "_SESSION_FIXES" in src
