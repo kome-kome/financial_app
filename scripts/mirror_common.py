@@ -268,13 +268,31 @@ def make_engine(ep: Endpoint):
     ミラーは2つの接続先を同時に持つので、モジュールグローバルの engine は使えない。
     `db_egress.install()` を必ず掛ける——source が Supabase のときの SELECT を台帳へ載せる
     ためで、これを忘れると「誰が Egress を食ったか」がまた答えられなくなる（ADR-0034）。
+
+    **`_SESSION_FIXES` は接続時フックで自動適用する。** 以前は `table_stats()` の中でしか
+    呼んでおらず、`mirror_sync` の `fetch_rows()` は既定のまま source を読んでいた。その結果
+    **float8 が有効数字15桁へ丸められ、sync した行だけ値が劣化していた**（2026-08-19 実測:
+    `mean_b` が 0.014484329376308225 → 0.0144843293763082）。float8 の完全往復には17桁＝
+    `extra_float_digits >= 1` が要る。`pull` が無事だったのは `pg_dump` が自前で設定するため
+    で、**経路ごとに正しさが違う状態だった**。セッション設定は「読む人が思い出す」ものでは
+    なく「接続に付いてくる」ものにする。
     """
-    from sqlalchemy import create_engine
+    from sqlalchemy import create_engine, event
     import db_egress
 
     connect_args = {} if ep.is_local else {"sslmode": "require"}
     eng = create_engine(ep.url, pool_pre_ping=True, pool_recycle=180,
                         connect_args=connect_args, echo=False)
+
+    @event.listens_for(eng, "connect")
+    def _apply_session_fixes(dbapi_conn, _record):      # noqa: ANN001
+        cur = dbapi_conn.cursor()
+        try:
+            for sql in _SESSION_FIXES:
+                cur.execute(sql)
+        finally:
+            cur.close()
+
     db_egress.install(eng)
     return eng
 
@@ -438,10 +456,34 @@ _SESSION_FIXES = (
     "SET extra_float_digits = 1",
 )
 
-# 順序に依存しないチェックサム。`string_agg(... ORDER BY pk)` は 1.28M 行でソートと
-# 巨大な文字列連結が要るうえ、**照合順の違い**（ローカルは Japanese_Japan.932）で
-# 両端がずれる。md5 の先頭 32bit を整数化して足し込めばストリームで済み順序も無関係。
-_CHECKSUM_EXPR = "coalesce(sum(('x' || substr(md5(x::text), 1, 8))::bit(32)::bigint), 0)"
+# 行順にも**列順にも**依存しないチェックサム。
+#
+# 行順: `string_agg(... ORDER BY pk)` は 1.28M 行でソートと巨大な文字列連結が要るうえ、
+# **照合順の違い**（ローカルは Japanese_Japan.932）で両端がずれる。md5 の先頭 32bit を
+# 整数化して足し込めばストリームで済み順序も無関係。
+#
+# 列順: **`x::text`（行全体のテキスト化）を使ってはいけない**——これは attnum 順なので、
+# 両端でテーブルの物理列順が違うと値が完全に一致していてもずれる。2026-08-19 の初回 pull で
+# 実際に踏んだ: source は `ALTER TABLE ADD COLUMN` の積み重ね、mirror は
+# `Base.metadata.create_all` 由来で、**16 表中 7 表が「行数 +0 なのに ck が NG」**になった
+# （`companies` は created_at/updated_at と issued_shares 以降が入れ替わっていた）。
+# 列名でソートして明示連結すれば定義順に依存しない。
+#
+# **この失敗の形は下の `_SESSION_FIXES` が警戒していたものと同じ**（値が同一なのに恒常的に
+# 食い違い「常に赤い＝誰も見なくなる」）。TimeZone / DateStyle / float 桁は揃えたのに、
+# 列順という軸だけ見落としていた。表現に依存する軸は1つ残らず潰すこと。
+#
+# NULL: `concat_ws` は NULL 引数を**黙って飛ばす**ので `(a, NULL, c)` と `(a, c)` が同じ
+# 文字列になる。`\N`（COPY の NULL 表現）へ落としてから連結する。
+def checksum_expr(columns: Iterable[str]) -> str:
+    """列の物理順に依存しない行チェックサム式。列名は呼び出し側が渡す。"""
+    names = sorted(columns)
+    if not names:
+        raise ValueError(
+            "チェックサムの対象列が空です（schema_columns の取得に失敗した可能性）")
+    parts = ", ".join(f"""coalesce("{c}"::text, '\\N')""" for c in names)
+    return (f"coalesce(sum(('x' || substr(md5(concat_ws('|', {parts})), 1, 8))"
+            "::bit(32)::bigint), 0)")
 
 
 def fix_session(conn) -> None:
@@ -462,6 +504,9 @@ def table_stats(conn, tables: Iterable[str], *, with_bytes: bool = False,
     Supabase では `statement_timeout=2min` に注意（ADR-0032）。
     """
     fix_session(conn)
+    tables = list(tables)
+    # チェックサムは列名が要る（列順に依存させないため）。メタデータ照会1回でまとめて引く
+    colmap = schema_columns(conn, tables) if with_checksum else {}
     out: dict[str, dict] = {}
     for t in tables:
         sync = SYNC_PLAN.get(t)
@@ -469,7 +514,7 @@ def table_stats(conn, tables: Iterable[str], *, with_bytes: bool = False,
         if with_bytes:
             cols.append("coalesce(sum(octet_length(x::text)), 0) AS nbytes")
         if with_checksum:
-            cols.append(f"{_CHECKSUM_EXPR} AS ck")
+            cols.append(f"{checksum_expr(colmap.get(t, {}))} AS ck")
         if sync and sync.key:
             cols.append(f'max("{sync.key}") AS hi')
             cols.append(f'min("{sync.key}") AS lo')
