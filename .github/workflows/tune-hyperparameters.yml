@@ -110,5 +110,7 @@ jobs:
         uses: actions/upload-artifact@v6
         with:
           name: tune-hyperparameters-log-${{ matrix.model }}
-          path: hyperparameter_search_${{ matrix.model }}.log
+          path: |
+            hyperparameter_search_${{ matrix.model }}.log
+            .egress/*.jsonl
           retention-days: 30

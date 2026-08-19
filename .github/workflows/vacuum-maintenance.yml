@@ -79,5 +79,7 @@ jobs:
         uses: actions/upload-artifact@v6
         with:
           name: vacuum-log
-          path: logs/pipeline_vacuum.log
+          path: |
+            logs/pipeline_vacuum.log
+            .egress/*.jsonl
           retention-days: 30

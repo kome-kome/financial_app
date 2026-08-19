@@ -51,6 +51,27 @@ GitHub Actions では例外＝ワークフロー failure ＝ `notify-failure.yml
 上限の局所上書きは `egress_budget()` コンテキストマネージャで行い、抜けるとき必ず戻す。
 プロセス全体の既定を書き換える口は用意しない（ADR-0032 の `db_timeouts` と同じ原則＝
 「上書きは局所・既定は変えない」。安全網を恒久的に外すと、次に暴走したとき誰も止めない）。
+
+## 歯止めは2軸ある（プロセス予算だけでは月枠を守れない）
+
+**プロセス予算（`DEFAULT_MB_LIMIT`）は「1回の暴走」しか止められない。** 400MB/プロセス
+なので、1日に 12 プロセス走れば 4.8GB/日を流しても一度も踏まれない。
+
+過去2回の超過は種類が違っていた:
+
+| | 形 | プロセス予算 |
+|---|---|---|
+| 2026-07（61.2GB） | 暴走型（検証フルロードの反復） | 効く |
+| 2026-08（7.312GB） | **じわじわ型**（スパイク約2GB＋平常運転 約5GB） | **効かない** |
+
+再発したのはじわじわ型なのに、対策は暴走型にしか効いていなかった。そこで
+**請求サイクル単位の累計**（`cycle_*`）を別軸で持つ。置き場所は DB（`app_settings`）で、
+理由は **ローカル CLI と GitHub Actions ランナーが同じカウンタを見られる唯一の場所**
+だから（`weekly_price_cache` が世代印を DB に置いたのと同じ理屈＝
+「印は書き手と読み手の両方から見える場所に置く」）。
+
+累計は本番（リモート）接続のときだけ積む。ローカルミラー（#481）からの読取は
+Supabase の Egress を1バイトも使わないので、積むと**ミラーへ逃がす動機を自分で壊す**。
 """
 from __future__ import annotations
 
@@ -63,7 +84,7 @@ import threading
 import weakref
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -175,6 +196,33 @@ DEFAULT_MB_LIMIT = 400.0
 _WARN_RATIOS = (0.5, 0.8)
 
 
+# ── 請求サイクル単位の累計（プロセス予算とは別軸・上の docstring 参照）──────────
+
+# Supabase 無料枠。docs/DEPLOYMENT.md「外部サービス制約」が正本。
+QUOTA_BYTES = 5 * 1024 ** 3
+
+# 請求サイクルの境界日。2026-08-19 実測のダッシュボード表記は "18 Aug 2026 - 18 Sep 2026"。
+# **Egress がリセットされる日**であって、restricted が解ける日ではない（解除には
+# "a short delay after your billing period resets" があり 8/18→8/19 に実際にずれた）。
+EGRESS_CYCLE_DAY = 18
+
+CYCLE_START_KEY = "egress_cycle_start"
+CYCLE_BYTES_KEY = "egress_cycle_bytes"
+
+# 累計の閾値。**ブロックを 100% に置かない**——枠を使い切った瞬間に全ジョブが死ぬより、
+# 手前で止めて人が判断できる余地（残り 5%＝256MB）を残す方が復旧が速い。
+# 80% は警告のみ。GHA では egress-health.yml が同じ値で exit 2 し Issue を自動起票する。
+CYCLE_WARN_RATIO = 0.80
+CYCLE_BLOCK_RATIO = 0.95
+
+# 台帳 JSONL の既定の出力先。**環境変数が無くても書く**（#478 の穴3）。
+# 過去2回の超過はどちらもローカル検証の反復が主因だったが、`FINAPP_EGRESS_LEDGER` を
+# 人が手で立てる運用だったため 1バイトも記録が残っていなかった（2026-08-19 時点の
+# .egress/ledger.jsonl は 1,961B・前日の1回のみ）。「覚えていれば計測される」を
+# 「黙っていても計測される」へ倒す。無効化は FINAPP_EGRESS_LEDGER=0。
+DEFAULT_LEDGER_PATH = ".egress/ledger.jsonl"
+
+
 def bytes_per_row(table: str, n_cols: int) -> float:
     """(テーブル, 列数) の B/行。実測 → 列単価 → 既定 の順に解決する。"""
     exact = EGRESS_COST_TABLE.get((table, n_cols))
@@ -245,6 +293,11 @@ class Ledger:
 
     def record(self, statement: str, rowcount: int, n_cols: int) -> None:
         """1文ぶんの転送を計上する。rowcount < 0 は unknown へ隔離（0 に丸めない）。"""
+        # サイクル台帳自身の読み書きは計上しない。計上すると `_check_budget` →
+        # `cycle_snapshot` → `_load_cycle` → SELECT → `record` の無限再帰になる。
+        # スレッドローカルなので、他スレッドの計測は止めない。
+        if _in_cycle_io():
+            return
         table = extract_table(statement)
         with self._lock:
             b = self.buckets.setdefault(table, _Bucket())
@@ -374,6 +427,9 @@ def _check_budget() -> None:
                       "一時的な解除は FINAPP_EGRESS_ENFORCE=0、"
                       "局所的な引き上げは db_egress.egress_budget()")
 
+    # プロセス予算を通っても、請求サイクルの累計が枠に迫っていれば止める（別軸）
+    _check_cycle_budget()
+
 
 @contextmanager
 def egress_budget(*, mb: Optional[float] = None, rows: Optional[float] = None):
@@ -394,6 +450,187 @@ def egress_budget(*, mb: Optional[float] = None, rows: Optional[float] = None):
     finally:
         with _override_lock:
             _override.update(prev)
+
+
+# ── 請求サイクル累計 ───────────────────────────────────────────────────────
+
+# サイクル台帳の読み書き中フラグ。**スレッドローカル**にしてあるのは、フラグを立てて
+# いる間だけ他スレッドの計測まで止めてしまうのを避けるため（execute_plugin が
+# asyncio.to_thread でワーカースレッドへ逃がすので、並行実行は常に起こりうる）。
+_cycle_io = threading.local()
+_cycle_lock = threading.RLock()
+_cycle_state: dict = {"loaded": False, "start": None, "base_bytes": 0.0}
+_cycle_enabled: Optional[bool] = None
+
+
+def _in_cycle_io() -> bool:
+    return getattr(_cycle_io, "active", False)
+
+
+@contextmanager
+def _cycle_io_scope():
+    prev = _in_cycle_io()
+    _cycle_io.active = True
+    try:
+        yield
+    finally:
+        _cycle_io.active = prev
+
+
+def current_cycle_start(today: Optional[date] = None) -> date:
+    """`today` が属する請求サイクルの開始日（直近の `EGRESS_CYCLE_DAY`）。"""
+    d = today or datetime.now(timezone.utc).date()
+    if d.day >= EGRESS_CYCLE_DAY:
+        return d.replace(day=EGRESS_CYCLE_DAY)
+    last_month_end = d.replace(day=1) - timedelta(days=1)
+    # 境界日が存在しない月（29〜31 日を指定した場合）でも末日へ丸めて必ず解ける
+    return last_month_end.replace(day=min(EGRESS_CYCLE_DAY, last_month_end.day))
+
+
+def _running_under_pytest() -> bool:
+    """テスト実行中か。差し替え可能にするため関数に切ってある。"""
+    return "pytest" in sys.modules
+
+
+def cycle_tracking_enabled() -> bool:
+    """本番（リモート）接続のときだけ累計を積むか。
+
+    ローカル PostgreSQL のミラー（#481・`FINAPP_DB_TARGET=local`）からの読取は
+    Supabase の Egress を1バイトも使わない。ここを積むと「ミラーで検証したのに枠が
+    減る」ことになり、**ミラーへ逃がす動機を自分で壊す**。台帳 JSONL には従来どおり
+    残るので、帰属の記録が失われるわけではない。
+
+    緊急停止は `FINAPP_EGRESS_CYCLE=0`（プロセス予算と JSONL 台帳は生きたまま）。
+
+    **pytest 実行中は必ず無効。** ローカルの pytest は `database.py` を import した時点で
+    本番 Supabase 向けの engine を作る（`.env` の `DATABASE_URL` を読むため）。ここを
+    有効なままにすると、`record()` を呼ぶすべてのテストが本番へ接続しに行き、
+    `emit_summary` の atexit が本番へ書き込みまで行う——「ローカルスクリプトは本番DBに
+    直結する」という既知の罠が、そのままテストにも当てはまる（実際に全体テストが
+    10分超ハングして気づいた）。有効時の挙動はこの関数ごと差し替えて検証する。
+    """
+    global _cycle_enabled
+    if _cycle_enabled is not None:
+        return _cycle_enabled
+    if _running_under_pytest():
+        _cycle_enabled = False
+        return False
+    if os.environ.get("FINAPP_EGRESS_CYCLE", "1").strip() == "0":
+        _cycle_enabled = False
+        return False
+    try:
+        from database import _is_local
+    except Exception:
+        _cycle_enabled = False      # database を import できない文脈では積まない
+        return False
+    _cycle_enabled = not _is_local
+    return _cycle_enabled
+
+
+def _load_cycle() -> None:
+    """サイクル累計を **1プロセス1回だけ** DB から読む。
+
+    失敗しても本処理は落とさず、以降は再試行もしない（毎クエリで DB を叩かない）。
+    読めなかった場合は base=0 のまま進む＝**ゲートが甘くなる方向**へ倒れるが、ここで
+    raise すると計測の失敗が本業を止めることになり本末転倒（`_append_jsonl` と同じ原則）。
+    """
+    with _cycle_lock:
+        if _cycle_state["loaded"]:
+            return
+        _cycle_state["loaded"] = True
+        if not cycle_tracking_enabled():
+            return
+        wanted = current_cycle_start().isoformat()
+        _cycle_state["start"] = wanted
+        try:
+            with _cycle_io_scope():
+                from database import SessionLocal, get_setting
+                with SessionLocal() as db:
+                    if get_setting(db, CYCLE_START_KEY) == wanted:
+                        _cycle_state["base_bytes"] = float(
+                            get_setting(db, CYCLE_BYTES_KEY) or 0)
+                    # 印が違う＝サイクルが切り替わった。累計は 0 から数え直す
+        except Exception as exc:
+            _log(f"WARN cycle ledger read failed: {exc}")
+
+
+def cycle_snapshot() -> dict:
+    """サイクル累計の現在値。DB は初回だけ読み、以降はメモリ演算のみ。"""
+    _load_cycle()
+    with _cycle_lock:
+        base = float(_cycle_state["base_bytes"])
+        start = _cycle_state["start"]
+    total = base + LEDGER.est_bytes
+    return {
+        "start": start,
+        "base_bytes": base,
+        "process_bytes": LEDGER.est_bytes,
+        "total_bytes": total,
+        "ratio": (total / QUOTA_BYTES) if QUOTA_BYTES else 0.0,
+    }
+
+
+def _flush_cycle() -> None:
+    """このプロセスの推定転送量をサイクル累計へ加算する（`emit_summary` から1回）。"""
+    if not cycle_tracking_enabled():
+        return
+    # **delta が 0 でも印は進める。** 印が現サイクルに追いついていないと「消費ゼロ」と
+    # 「計測そのものが止まっている」を区別できず（#438 と同型）、`egress-health` の
+    # 「記録がまだ無い」注記が毎日出て本当の異常が埋もれる。加算 0 は無害。
+    delta = max(0, int(LEDGER.est_bytes))
+    start = current_cycle_start().isoformat()
+    try:
+        with _cycle_io_scope():
+            from sqlalchemy import text
+            from database import SessionLocal
+            with SessionLocal() as db:
+                # サイクル印を更新する。**値が変わったときだけ行を返す**ので、
+                # 「サイクルが切り替わったか」を追加の SELECT 無しで判定できる。
+                rolled = db.execute(text(
+                    "INSERT INTO app_settings (key, value, updated_at) "
+                    "VALUES (:k, :v, now()) "
+                    "ON CONFLICT (key) DO UPDATE SET value = excluded.value, updated_at = now() "
+                    "WHERE app_settings.value IS DISTINCT FROM excluded.value "
+                    "RETURNING 1"
+                ), {"k": CYCLE_START_KEY, "v": start}).fetchone() is not None
+
+                # **読んで足して書く3手に分けない。** 夜間バッチと手元の CLI が同時に
+                # 走ると、後から書いた方が相手の加算を潰す。1文の中で加算する。
+                db.execute(text(
+                    "INSERT INTO app_settings (key, value, updated_at) "
+                    "VALUES (:k, :d, now()) "
+                    "ON CONFLICT (key) DO UPDATE SET value = ("
+                    "  CASE WHEN :rolled THEN 0 "
+                    "       ELSE COALESCE(NULLIF(app_settings.value, '')::bigint, 0) END "
+                    "  + :n)::text, updated_at = now()"
+                ), {"k": CYCLE_BYTES_KEY, "d": str(delta), "rolled": rolled, "n": delta})
+                db.commit()
+    except Exception as exc:
+        _log(f"WARN cycle ledger write failed: {exc}")
+
+
+def _check_cycle_budget() -> None:
+    """サイクル累計が閾値を超えたら警告／送出する（プロセス予算とは独立に効く）。"""
+    if not cycle_tracking_enabled():
+        return
+    snap = cycle_snapshot()
+    ratio = snap["ratio"]
+    if ratio < CYCLE_WARN_RATIO:
+        return
+    line = (f"cycle {_mb(snap['total_bytes'])}/{QUOTA_BYTES / 1024 ** 3:.0f}GB "
+            f"({ratio:.0%}) since={snap['start']} - {top_tables_line()}")
+    if ratio >= CYCLE_BLOCK_RATIO:
+        msg = f"Egress cycle budget exceeded: {line}"
+        if not enforcing():
+            if LEDGER.warn_once("cycle:over"):
+                _log(f"OVER (enforce=0, continuing) {msg}")
+        else:
+            raise EgressBudgetExceeded(
+                msg + f" -- 請求サイクルの累計が無料枠の {CYCLE_BLOCK_RATIO:.0%} に達しました。"
+                      "一時的な解除は FINAPP_EGRESS_ENFORCE=0、"
+                      "累計そのものを止めるなら FINAPP_EGRESS_CYCLE=0")
+    if LEDGER.warn_once("cycle:warn"):
+        _log(f"WARN {line}")
 
 
 # ── 報告 ───────────────────────────────────────────────────────────────────
@@ -424,12 +661,31 @@ def summary_line() -> str:
     if snap["external"]:
         ext = sum(e["bytes"] for e in snap["external"])
         parts.append(f"external={_mb(ext)}")
+    if cycle_tracking_enabled():
+        c = cycle_snapshot()
+        parts.append(f"cycle={_mb(c['total_bytes'])}/{QUOTA_BYTES / 1024 ** 3:.0f}GB"
+                     f"({c['ratio']:.0%})")
     parts.append(top_tables_line())
     return " ".join(parts)
 
 
 def job_label() -> str:
     return os.environ.get("FINAPP_JOB") or Path(sys.argv[0]).name or "unknown"
+
+
+def ledger_path() -> Optional[str]:
+    """台帳 JSONL の出力先。**未設定なら既定パスへ書く**（#478 の穴3）。
+
+    明示的な無効化は `FINAPP_EGRESS_LEDGER=0`（空文字も同じ）。
+    既定オンにする理由は `DEFAULT_LEDGER_PATH` のコメントを参照。
+    """
+    raw = os.environ.get("FINAPP_EGRESS_LEDGER")
+    if raw is None:
+        return DEFAULT_LEDGER_PATH
+    raw = raw.strip()
+    if raw in ("", "0"):
+        return None
+    return raw
 
 
 def _append_jsonl(path_str: str) -> None:
@@ -473,8 +729,9 @@ def emit_summary() -> None:
     if LEDGER.calls == 0 and not LEDGER.external:
         return
     _emitted = True
+    _flush_cycle()          # 先に加算する（失敗しても summary は必ず出す）
     _log(summary_line())
-    path = os.environ.get("FINAPP_EGRESS_LEDGER")
+    path = ledger_path()
     if path:
         _append_jsonl(path)
 
@@ -515,10 +772,14 @@ def install(engine) -> bool:
 
 
 def _reset_for_tests() -> None:
-    """テスト専用。台帳・上書き予算・サマリ出力済みフラグを初期化する。"""
-    global _emitted
+    """テスト専用。台帳・上書き予算・サマリ出力済みフラグ・サイクル状態を初期化する。"""
+    global _emitted, _cycle_enabled
     _emitted = False
+    _cycle_enabled = None
     LEDGER.reset()
     with _override_lock:
         _override["rows"] = None
         _override["mb"] = None
+    with _cycle_lock:
+        _cycle_state.update({"loaded": False, "start": None, "base_bytes": 0.0})
+    _cycle_io.active = False

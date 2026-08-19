@@ -91,5 +91,7 @@ jobs:
         uses: actions/upload-artifact@v6
         with:
           name: experiment-pooled-rhat-log
-          path: experiment_pooled_rhat.log
+          path: |
+            experiment_pooled_rhat.log
+            .egress/*.jsonl
           retention-days: 3

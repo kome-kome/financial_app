@@ -58,5 +58,7 @@ jobs:
         uses: actions/upload-artifact@v6
         with:
           name: backfill-weekly-log
-          path: logs/pipeline_gh.log
+          path: |
+            logs/pipeline_gh.log
+            .egress/*.jsonl
           retention-days: 7

@@ -102,5 +102,7 @@ jobs:
         uses: actions/upload-artifact@v6
         with:
           name: recommend-factor-premia-log
-          path: recommend_factor_premia.log
+          path: |
+            recommend_factor_premia.log
+            .egress/*.jsonl
           retention-days: 30

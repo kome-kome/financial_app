@@ -1,0 +1,85 @@
+name: "[定常] Supabase 枠消費ゲート"
+
+# 目的（Issue #478 / #483）:
+#   Egress 超過は **restricted になるまで誰も気づかない**。2026-07（61.2GB）・
+#   2026-08（7.312GB）とも事後に発覚し、2回目は組織全体が8日間 restricted になった。
+#   `notify-failure.yml` は failure しか拾わず、**枠の消費は failure を出さない**。
+#   このジョブが閾値超過で exit 2 することで、枠の消費を failure へ翻訳する。
+#
+# 設計上の注意（触る前に必ず読むこと）:
+#   - **cron で回す（workflow_run チェーンにしない）**。Egress はワークフローの成否と
+#     無関係に積み上がり、開発者のローカル CLI からも積まれる（過去2回の超過はどちらも
+#     ローカル検証の反復が主因）。「収集が成功した後に見る」では見落とす経路が残る。
+#   - 判定材料は Supabase Management API ではなく **DB の `app_settings`**（ADR-0037）。
+#     #483 は PAT の発行がブロッカーで着手できないままだったが、`db_egress` が
+#     プロセス跨ぎの累計を DB に積んでいるので PAT 無しで判定できる。
+#   - **Database Size も同じジョブで見る**。2026-08-19 時点では Egress より先に
+#     Database Size が壁（430MB / 500MB）で、こちらは超えると read-only になる。
+#   - 収集パイプライン本体（daily-incremental / full-pipeline）は落とさない。あちらを
+#     非ゼロ終了させると `nightly-scores` の workflow_run チェーン（success 条件）が
+#     発火せず、無関係な sector_ols の夜間更新まで巻き添えで止まる（#425 / macro-health
+#     と同じ理由でこのジョブを独立させている）。
+#
+# ⏰ 時刻（UTC 21:00 = JST 06:00・docs/DEPLOYMENT.md「cron 占有表」も更新すること）:
+#   `daily-incremental` の最悪ケース終端（14:17 + チェーン35分 = 14:52Z）から約6時間後で、
+#   `recommend-factor-premia`（毎月5日 22:00Z）・`vacuum-maintenance`（土 23:30Z）とも
+#   重ならない。毎月1日の `tune-hyperparameters`（16:30〜22:25Z）とだけ重なりうるが、
+#   このジョブは3行を読むだけ（数秒・1接続）なので接続上限には寄与しない
+#   ——占有表の非重複ルールは「6時間級ジョブ同士」のためのもの。
+#   JST 06:00 は、朝いちばんにランキングを見る前に判定が終わっている時刻でもある。
+
+on:
+  schedule:
+    - cron: '0 21 * * *'   # UTC 21:00 = JST 06:00（毎日）
+  workflow_dispatch:
+    inputs:
+      warn_only:
+        description: '閾値を超えても exit 0（調査・閾値調整用）'
+        type: boolean
+        default: false
+
+# 最小権限（判定は Supabase 直結・リポジトリ書込は不要。Issue 起票は notify-failure.yml の担当）
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10   # app_settings 2行 + pg_database_size 1行のみ
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.13.7'  # render.yaml の PYTHON_VERSION と一致させる
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Check Supabase quota usage
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          FINAPP_JOB: egress-health          # Egress 台帳の帰属ラベル（#478）
+        # schedule 起動では github.event.inputs.* が空になるため || '' を外さないこと
+        # （tests/test_recommend_factor_premia_workflow.py が同型の罠を強制している）
+        run: |
+          set -o pipefail
+          FLAG=""
+          if [ "${{ github.event.inputs.warn_only || 'false' }}" = "true" ]; then
+            FLAG="--warn-only"
+          fi
+          python -m scripts.check_egress_health $FLAG 2>&1 | tee egress_health.log
+
+      - name: Upload log
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: egress-health-log
+          path: |
+            egress_health.log
+            .egress/*.jsonl
+          retention-days: 30

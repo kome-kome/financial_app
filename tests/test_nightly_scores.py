@@ -460,12 +460,17 @@ class TestWeeklyCacheStep:
             )
 
     def test_egress_ledger_is_captured_as_an_artifact(self, workflow):
-        """削減量を run ログの grep でなく構造化データで追えること（#478）。"""
-        run_step = next(s for s in _steps(workflow) if "python nightly_scores.py" in s.get("run", ""))
-        ledger = run_step["env"]["FINAPP_EGRESS_LEDGER"]
+        """削減量を run ログの grep でなく構造化データで追えること（#478）。
+
+        2026-08-19（ADR-0037 決定7）以降、書き先は `db_egress` の既定
+        （`.egress/ledger.jsonl`）で **yml に `FINAPP_EGRESS_LEDGER` は書かない**
+        ——人が環境変数を立てる運用だったせいで、過去2回の超過の主因だった
+        ローカル実行の記録が空だった。artifact 側は `.egress/*.jsonl` で拾う。
+        全ワークフローぶんの網羅は `tests/test_db_egress.py` のメタ検査が持つ。
+        """
         artifact = next(s for s in _steps(workflow)
                         if str(s.get("uses", "")).startswith("actions/upload-artifact"))
-        assert ledger in artifact["with"]["path"], (
+        assert ".egress" in artifact["with"]["path"], (
             "台帳を artifact に含めていない＝実測が run ログからしか取れない"
         )
 

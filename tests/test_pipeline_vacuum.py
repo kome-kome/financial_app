@@ -1,15 +1,20 @@
-"""_pipeline_vacuum.py のユニットテスト — Issue #471。
+"""_pipeline_vacuum.py のユニットテスト — Issue #471 / #290。
 
 週次 VACUUM FULL は 2026-08-08 に**きっかり 2分01秒**で打ち切られた。VACUUM 本体は
 実測 7.6〜10.4秒（43〜92MB）なので、待っていたのは ACCESS EXCLUSIVE ロックである。
 既定は lock_timeout=0（無制限待ち）＋ statement_timeout=2min のため、
 「ロック待ち超過」が「文が重い」と区別できない形で落ちていた。
 
-ここで担保するのは
+2026-08-19（#290 再オープン）に対象を 2 表へ広げ、per-table の autovacuum
+チューニングを前段に足した。ここで担保するのは
+
   - VACUUM を lock_timeout 有限 / statement_timeout 無制限で実行すること
   - ロック待ちで落ちたら保持者を記録して再試行し、使い切ったら送出すること
   - ロック待ち以外（本当のエラー）はリトライせず即送出すること
-の3点。DB へは一切繋がず、接続をフェイクに差し替えて検証する。
+  - **TARGET_TABLES の全表**が VACUUM されること（1表増やしたのに回っていない、を防ぐ）
+  - autovacuum チューニングが **VACUUM より先**に走り、かつ**冪等**であること
+
+の5点。DB へは一切繋がず、接続をフェイクに差し替えて検証する。
 """
 import os
 import sys
@@ -35,12 +40,17 @@ class _DBError(Exception):
 
 
 class _FakeConn:
-    """VACUUM だけが指定回数ロック待ちで落ち、以降は成功する接続。"""
+    """VACUUM だけが指定回数ロック待ちで落ち、以降は成功する接続。
 
-    def __init__(self, lock_failures=0, fatal=False):
+    `reloptions` は {テーブル名: [オプション文字列, ...]}。未指定の表は「未設定」
+    （pg_class.reloptions が NULL）を返す＝本番の初回と同じ状態。
+    """
+
+    def __init__(self, lock_failures=0, fatal=False, reloptions=None):
         self.executed: list[str] = []
         self._lock_failures = lock_failures
         self._fatal = fatal
+        self._reloptions = dict(reloptions or {})
         self.dialect = type("D", (), {"name": "postgresql"})()
 
     def execute(self, stmt, params=None):
@@ -52,7 +62,16 @@ class _FakeConn:
             if self._lock_failures > 0:
                 self._lock_failures -= 1
                 raise _DBError("55P03")           # lock_not_available
-        return _FakeResult(sql)
+            return _FakeResult(None)
+        if "ALTER TABLE" in sql:
+            # 適用後は照会が新しい値を返すようにする（冪等性の検証で効く）
+            for table in pv.TARGET_TABLES:
+                if f"ALTER TABLE {table} " in sql:
+                    self._reloptions[table] = sorted(pv._wanted_reloptions())
+            return _FakeResult(None)
+        if "reloptions" in sql:
+            return _FakeResult(self._reloptions.get((params or {}).get("t")))
+        return _FakeResult("42 MB")
 
     # engine.connect().execution_options(...) as conn: の形に合わせる
     def execution_options(self, **_):
@@ -64,13 +83,21 @@ class _FakeConn:
     def __exit__(self, *exc):
         return False
 
+    # -- 検証用ヘルパ --------------------------------------------------------
+
+    def index_of(self, needle: str) -> int:
+        for i, sql in enumerate(self.executed):
+            if needle in sql:
+                return i
+        return -1
+
 
 class _FakeResult:
-    def __init__(self, sql):
-        self._sql = sql
+    def __init__(self, value):
+        self._value = value
 
     def scalar(self):
-        return "42 MB"
+        return self._value
 
     def fetchall(self):
         # ロック保持者の照会は「1件見つかった」体で返す
@@ -96,6 +123,11 @@ def _run(monkeypatch, conn):
     monkeypatch.setattr(pv, "engine", type("E", (), {"connect": lambda self: conn})())
 
 
+def _first_table() -> str:
+    """1表目。ロック再試行の検証はここで完結する（2表目まで到達しない）。"""
+    return pv.TARGET_TABLES[0]
+
+
 class TestTimeoutKnobs:
     def test_vacuum_runs_with_bounded_lock_and_unbounded_statement(
             self, monkeypatch, no_sleep, logged):
@@ -117,13 +149,84 @@ class TestTimeoutKnobs:
         assert pv.LOCK_TIMEOUT != "0"
 
 
+class TestTargetTables:
+    def test_all_target_tables_are_vacuumed(self, monkeypatch, no_sleep, logged):
+        """表を足したのに回っていない、を防ぐ（#290 で daily のみだった実例）。"""
+        conn = _FakeConn()
+        _run(monkeypatch, conn)
+        pv.main()
+
+        for table in pv.TARGET_TABLES:
+            assert f"VACUUM FULL {table}" in conn.executed
+
+    def test_weekly_is_covered(self):
+        """dead tuple 200,498 を抱えていた実表が対象に入っていること（#290）。"""
+        assert "stock_price_weekly" in pv.TARGET_TABLES
+        assert "stock_price_daily" in pv.TARGET_TABLES
+
+    def test_sizes_are_reported_per_table(self, monkeypatch, no_sleep, logged):
+        """before/after が表ごとに出ること（どの表が縮んだか事後に分かるように）。"""
+        conn = _FakeConn()
+        _run(monkeypatch, conn)
+        pv.main()
+
+        for table in pv.TARGET_TABLES:
+            assert any(f"[before] {table}" in line for line in logged)
+            assert any(f"[after]  {table}" in line for line in logged)
+
+
+class TestAutovacuumTuning:
+    def test_applies_when_unset(self, monkeypatch, no_sleep, logged):
+        """reloptions が NULL（クラスタ既定 0.2）の表には ALTER を投げる。"""
+        conn = _FakeConn()
+        _run(monkeypatch, conn)
+        pv.main()
+
+        for table in pv.TARGET_TABLES:
+            assert any(f"ALTER TABLE {table} SET (" in sql for sql in conn.executed)
+        assert any(f"autovacuum_vacuum_scale_factor = {pv.AUTOVACUUM_SCALE_FACTOR}" in sql
+                   for sql in conn.executed)
+
+    def test_skipped_when_already_tuned(self, monkeypatch, no_sleep, logged):
+        """冪等。既に望みの値なら ALTER を投げない（毎週「変更した」と誤読させない）。"""
+        tuned = {t: sorted(pv._wanted_reloptions()) for t in pv.TARGET_TABLES}
+        conn = _FakeConn(reloptions=tuned)
+        _run(monkeypatch, conn)
+        pv.main()
+
+        assert not any("ALTER TABLE" in sql for sql in conn.executed)
+        for table in pv.TARGET_TABLES:
+            assert any(f"[autovacuum] {table}: 設定済み" in line for line in logged)
+
+    def test_runs_before_vacuum(self, monkeypatch, no_sleep, logged):
+        """チューニングが先。後に回すと、その週の VACUUM FULL は重いままになる。"""
+        conn = _FakeConn()
+        _run(monkeypatch, conn)
+        pv.main()
+
+        assert conn.index_of("ALTER TABLE") < conn.index_of("VACUUM FULL")
+
+    def test_scale_factor_is_below_cluster_default(self):
+        """0.2 のままでは 128万行の表で発火閾値 256,943 行に届かない（#290）。"""
+        assert pv.AUTOVACUUM_SCALE_FACTOR < 0.2
+        assert pv.AUTOVACUUM_ANALYZE_SCALE_FACTOR < 0.2
+
+    def test_alter_is_lock_bounded(self, monkeypatch, no_sleep, logged):
+        """ALTER も ACCESS EXCLUSIVE を取る。無制限待ちだと VACUUM の前で詰まる。"""
+        conn = _FakeConn()
+        _run(monkeypatch, conn)
+        pv.main()
+
+        assert conn.index_of(f"SET lock_timeout = '{pv.LOCK_TIMEOUT}'") < conn.index_of("ALTER TABLE")
+
+
 class TestLockRetry:
     def test_retries_after_lock_timeout_then_succeeds(self, monkeypatch, no_sleep, logged):
         conn = _FakeConn(lock_failures=1)
         _run(monkeypatch, conn)
         pv.main()
 
-        assert conn.executed.count(f"VACUUM FULL {pv.TARGET_TABLE}") == 2
+        assert conn.executed.count(f"VACUUM FULL {_first_table()}") == 2
         assert no_sleep == [pv.RETRY_SLEEP_SEC]
 
     def test_logs_lock_holder_on_failure(self, monkeypatch, no_sleep, logged):
@@ -141,9 +244,20 @@ class TestLockRetry:
         with pytest.raises(_DBError):
             pv.main()
 
-        assert conn.executed.count(f"VACUUM FULL {pv.TARGET_TABLE}") == pv.MAX_ATTEMPTS
+        assert conn.executed.count(f"VACUUM FULL {_first_table()}") == pv.MAX_ATTEMPTS
         # 最終試行のあとは待たない
         assert len(no_sleep) == pv.MAX_ATTEMPTS - 1
+
+    def test_later_tables_are_skipped_when_earlier_one_fails(
+            self, monkeypatch, no_sleep, logged):
+        """1表目が落ちたら送出して止まる（残りを黙って飛ばして成功扱いにしない）。"""
+        conn = _FakeConn(lock_failures=pv.MAX_ATTEMPTS)
+        _run(monkeypatch, conn)
+        with pytest.raises(_DBError):
+            pv.main()
+
+        for table in pv.TARGET_TABLES[1:]:
+            assert f"VACUUM FULL {table}" not in conn.executed
 
     def test_non_lock_error_is_not_retried(self, monkeypatch, no_sleep, logged):
         """ロック待ち以外は粘っても直らない。即送出してワークフローを失敗させる。"""
@@ -152,7 +266,7 @@ class TestLockRetry:
         with pytest.raises(_DBError):
             pv.main()
 
-        assert conn.executed.count(f"VACUUM FULL {pv.TARGET_TABLE}") == 1
+        assert conn.executed.count(f"VACUUM FULL {_first_table()}") == 1
         assert no_sleep == []
 
 

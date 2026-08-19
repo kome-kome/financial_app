@@ -74,5 +74,7 @@ jobs:
         uses: actions/upload-artifact@v6
         with:
           name: macro-health-log
-          path: macro_health.log
+          path: |
+            macro_health.log
+            .egress/*.jsonl
           retention-days: 30
