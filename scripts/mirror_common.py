@@ -381,7 +381,8 @@ class PgConn:
         return env
 
 
-def pg_dump_argv(conn: PgConn, tables: Iterable[str], out_path: str) -> list[str]:
+def pg_dump_argv(conn: PgConn, tables: Iterable[str], out_path: str,
+                 compress: int = 0) -> list[str]:
     """データのみの custom 形式ダンプ。**純関数**（テストで argv をそのまま検証する）。
 
     フラグの根拠（いずれも 2026-08-16 にローカル PG18.6 で実測）:
@@ -391,15 +392,20 @@ def pg_dump_argv(conn: PgConn, tables: Iterable[str], out_path: str) -> list[str
       exit=0・1,433 バイトのダンプが生成された）。8/18 の一回きりの実行で無言で通る事故になる。
     - **`-w`**（パスワードプロンプト禁止）。無いと認証失敗時に子プロセスが標準入力待ちで
       黙ってハングする。
-    - **`--compress=0`** は意図的。custom 形式は既定でローカル側 zlib 圧縮するが、
-      **ワイヤ上を流れるのは非圧縮の COPY ストリーム**である（libpq の通信圧縮は既定 OFF）。
-      圧縮したままだと出来上がったファイルのサイズが実 Egress を大幅に過小申告し、
-      `LEDGER.record_external()` に嘘の数字が載る。
+    - **`compress` の既定 0 は意図的**（ミラーの pull 用）。custom 形式は既定でローカル側
+      zlib 圧縮するが、**ワイヤ上を流れるのは非圧縮の COPY ストリーム**である（libpq の
+      通信圧縮は既定 OFF）。圧縮したままだと出来上がったファイルのサイズが実 Egress を
+      大幅に過小申告し、`LEDGER.record_external()` に嘘の数字が載る。
+      **逆にバックアップ（#503 Phase 3）では圧縮する**——測りたいのが転送量ではなく
+      保管サイズであり、Supabase Storage は 50MB/ファイル・1GB/プロジェクトだから。
+      用途で正解が逆になるので、既定を持たせつつ引数で選べる形にしてある。
     - `--no-owner` / `--no-acl`: Supabase の `postgres` ロールがローカルに存在しない。
     - `--lock-wait-timeout=30s`: Supabase 側の DDL とかち合ったとき無限に待たない。
     """
+    if not 0 <= compress <= 9:
+        raise ValueError(f"compress は 0-9: {compress}")
     argv = [pg_bin("pg_dump"), *conn.conn_argv(),
-            "--strict-names", "--format=custom", "--data-only", "--compress=0",
+            "--strict-names", "--format=custom", "--data-only", f"--compress={compress}",
             "--no-owner", "--no-acl", "--no-large-objects",
             "--lock-wait-timeout=30s", "--file", out_path]
     argv += [f"--table=public.{t}" for t in tables]

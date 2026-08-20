@@ -74,12 +74,17 @@ def steps_for(python: str) -> tuple[Step, ...]:
     スコアは株価・財務を入力に取るので、収集より先に回すと前日のデータで上書きされる。
     #423 の「鮮度が先」と同じ依存順で、GHA では daily-incremental → nightly-scores の
     workflow_run チェーンがこれを表現していた。ローカルでは並びがその契約になる。
+
+    **収集は `_pipeline_incremental.py` を呼ぶ。** `collector.py --incremental` ではない——
+    あちらが回すのは `run_full_collection`（企業マスタ・書類スキャン・XBRL・業種補完）だけで、
+    **株価を1バイトも更新しない**。株価鮮度の担い手は pipeline の Phase 4
+    （`fill_recent_stock_price_gap_yahoo` → J-Quants で公式値へ置換）にある。
+    2026-08-20 に `collector.py --incremental` で12日ぶんの欠測を埋めようとして、
+    財務だけ通り株価が動かないのを実測した。GHA が回していたのと同じ入口を使う。
     """
     return (
-        Step("incremental", (python, "collector.py", "--incremental"),
-             why="株価・財務の差分収集（鮮度の担い手。Yahoo gap-fill を含む）"),
-        Step("macro", (python, "collector.py", "--macro"),
-             why="マクロ系列の収集（M-1/M-2/M-3 の入力）"),
+        Step("pipeline", (python, "_pipeline_incremental.py"),
+             why="XBRL 差分 ＋ マクロ ＋ 市場データ（株価鮮度の担い手・GHA と同じ入口）"),
         Step("scores", (python, "nightly_scores.py"),
              why="sector_ols / macro_enet のスコア更新（producer の永続化）"),
     )

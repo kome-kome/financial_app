@@ -31,8 +31,21 @@ class TestStepOrder:
     def test_freshness_runs_before_scores(self):
         """収集がスコアより先。逆順だと前日データでスコアが確定する（#423 の依存順）。"""
         names = [s.name for s in rn.steps_for(sys.executable)]
-        assert names.index("incremental") < names.index("scores")
-        assert names.index("macro") < names.index("scores")
+        assert names.index("pipeline") < names.index("scores")
+
+    def test_collection_uses_the_pipeline_not_collector_cli(self):
+        """**株価を更新する入口を選ぶ。**
+
+        `collector.py --incremental` が回すのは `run_full_collection`（企業マスタ・書類
+        スキャン・XBRL・業種補完）だけで、株価を1バイトも触らない。鮮度の担い手は
+        `_pipeline_incremental.py` の Phase 4（Yahoo gap-fill → J-Quants 置換）にある。
+        2026-08-20 に前者で12日ぶんの欠測を埋めようとして、財務だけ通り株価が動かないのを
+        実測した。ここを取り違えても**エラーは出ない**（収集は成功する）ので CI で縛る。
+        """
+        argv = next(s.argv for s in rn.steps_for("py") if s.name == "pipeline")
+        assert argv[1] == "_pipeline_incremental.py", (
+            "収集ステップが GHA と同じ入口を使っていない＝株価鮮度が止まる"
+        )
 
     def test_every_step_states_why(self):
         """`why` 必須＝何が止まったかをログの言葉で残す（mirror の note と同じ作法）。"""
@@ -51,7 +64,7 @@ class TestKeepsGoing:
 
         def fake_run(argv, **kw):
             seen.append(Path(argv[1]).name if len(argv) > 1 else argv[0])
-            return _FakeProc(returncode=1 if "collector.py" in argv[1] else 0)
+            return _FakeProc(returncode=1 if "_pipeline_incremental.py" in argv[1] else 0)
 
         monkeypatch.setattr(rn.subprocess, "run", fake_run)
         monkeypatch.setattr(rn, "log_path", lambda now=None: tmp_path / "n.log")
@@ -59,10 +72,10 @@ class TestKeepsGoing:
         monkeypatch.setattr(rn, "notify", lambda results, log, run=None: None)
 
         code = rn.main([])
-        assert seen == ["collector.py", "collector.py", "nightly_scores.py"], (
+        assert seen == ["_pipeline_incremental.py", "nightly_scores.py"], (
             "失敗したステップの後ろが実行されていない＝途中で止まっている"
         )
-        assert code == 2, "失敗数が exit code に出ていない"
+        assert code == 1, "失敗数が exit code に出ていない"
 
     def test_all_success_exits_zero(self, tmp_path, monkeypatch):
         monkeypatch.setattr(rn.subprocess, "run", lambda argv, **kw: _FakeProc(0))
