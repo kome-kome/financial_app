@@ -101,6 +101,10 @@ PRICE_BATCH_MAX_ATTEMPTS      = 3
 PRICE_BATCH_RETRY_SLEEP       = 20   # 秒（試行ごとに倍化）
 MASTER_COMMIT_BATCH          = 200  # 企業マスタ保存のコミット間隔
 REPARSE_COMMIT_BATCH         = 100  # XBRL 再解析・CF 補完のコミット間隔
+# XBRL 再解析で一度にメモリへ載せる gzip BLOB の件数（#507）。
+# ピークメモリを書類数から切り離すための単位で、コミット間隔もこの境界に揃える
+# （commit → expunge_all をチャンクの区切りで行う）。
+REPARSE_FETCH_BATCH          = 100
 MARKET_COMMIT_BATCH          = 50   # 市場データ（株価）更新のコミット間隔
 COLLECT_COMMIT_BATCH         = 50   # 全件収集（財務）のコミット間隔
 COLLECT_SLEEP_BATCH          = 100  # 全件収集で BATCH_PAUSE を挟む間隔

@@ -203,7 +203,9 @@ FULL_ROW_LOADS: dict[str, str] = {
     "collector_financials.py::diagnose_cf_labels::FinancialRecord":
         "exempt: CF ラベル診断の手動 CLI。limit で件数上限があり定常の夜間経路には載らない",
     "collector_financials.py::reparse_from_raw::XbrlRawDocument":
-        "exempt: 生 XBRL（elements_gz）を読み直して financial_records を再構築する経路で blob 列そのものが目的。手動起動のみ",
+        "exempt: 生 XBRL（elements_gz）を読み直して financial_records を再構築する経路で blob 列そのものが目的。手動起動のみ。"
+        "#507 で全件 materialize は解消済み（id を先に引き REPARSE_FETCH_BATCH 件ずつ取得→commit→expunge_all）"
+        "＝ここで免除しているのは列の広さだけで、件数に比例するメモリではない",
 
     # ── D. 台帳・ジョブ状態（行数が企業数にも時間にも比例しない）──
     "api.py::lifespan::CollectionLog":

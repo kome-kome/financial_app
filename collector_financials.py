@@ -757,50 +757,84 @@ async def reparse_from_raw(year: Optional[int] = None,
                             cancel_check: Optional[Callable] = None):
     """xbrl_raw_documents の生データから financial_records を再構築する。
     EDINET への通信は行わないため Render Free プランでも実行可能。
+
+    **BLOB は件数ぶん一度に載せない**（Issue #507）。旧実装は `db.query(XbrlRawDocument).all()`
+    で `elements_gz`（gzip BLOB）を全件 materialize していた。この表は現在 0 行（#219 で
+    `raw_xbrl_json` を落として以降、再取得元は EDINET 側）なので実害は出ていないが、
+    再取得を始めた瞬間に BLOB × 全件がメモリへ載る。
+
+    先に id だけを引き、BLOB は `REPARSE_FETCH_BATCH` 件ずつ取りに行く。`yield_per` を使わない
+    のは、**ループ内で commit するとストリーミング中の結果カーソルが壊れる**ため
+    （進捗を刻む以上 commit は消せない）。チャンクの区切りで commit → `expunge_all()` まで
+    やらないと、identity map が処理済みの BLOB を掴んだままになりメモリが件数に比例する。
     """
     db = SessionLocal()
     try:
-        q = db.query(XbrlRawDocument)
+        q = db.query(XbrlRawDocument.id)
         if year:
             q = q.filter(extract('year', XbrlRawDocument.period_end) == year)
         if edinet_code:
             q = q.filter(XbrlRawDocument.edinet_code == edinet_code)
-        docs = q.order_by(XbrlRawDocument.period_end.desc()).all()
-        total = len(docs)
+        doc_ids = [r[0] for r in q.order_by(XbrlRawDocument.period_end.desc()).all()]
+        total = len(doc_ids)
         log.info(f"XBRL 再解析開始: {total} 書類")
 
-        for i, doc in enumerate(docs, 1):
-            if cancel_check and cancel_check():
+        # 会社属性はループの外で1文にまとめる。旧実装は1書類ごとに
+        # `db.query(Company).filter_by(...).first()` を出しており、書類数ぶん往復していた（#506 と同型）。
+        companies = {
+            row[0]: row[1:] for row in
+            db.query(Company.edinet_code, Company.sec_code, Company.name, Company.industry).all()
+        }
+
+        i = 0
+        for start in range(0, total, REPARSE_FETCH_BATCH):
+            chunk = doc_ids[start:start + REPARSE_FETCH_BATCH]
+            by_id = {d.id: d for d in
+                     db.query(XbrlRawDocument).filter(XbrlRawDocument.id.in_(chunk)).all()}
+
+            for doc_id in chunk:
+                i += 1
+                doc = by_id.get(doc_id)
+                if doc is None:      # 走査中に消えた行。件数だけ進めて飛ばす
+                    continue
+
+                if cancel_check and cancel_check():
+                    if on_progress:
+                        on_progress(i, total, f"[停止] ユーザーによる停止（{i}/{total}件処理済み）")
+                    db.commit()
+                    return True
+
+                rows   = unpack_elements(doc.elements_gz)
+                parsed = parse_raw_rows(rows)
+                if not any(parsed.get(cat) for cat in ("bs", "pl", "cf")):
+                    continue
+
+                rec = calc_derived(parsed)
+                sec_code, co_name, co_industry = companies.get(doc.edinet_code, ("", "", ""))
+                xbrl_industry = rec.get("meta", {}).get("industry_name", "")
+                rec.update({
+                    "edinet_code":  doc.edinet_code,
+                    "sec_code":     sec_code or "",
+                    "company_name": co_name or "",
+                    "industry":     xbrl_industry or (co_industry or ""),
+                    "year":         doc.period_end.year if doc.period_end else 0,
+                    "period_end":   doc.period_end.isoformat() if doc.period_end else "",
+                    "doc_id":       doc.doc_id,
+                    "source":       "EDINET_XBRL",
+                })
+                upsert_financial(db, rec)
+
                 if on_progress:
-                    on_progress(i, total, f"[停止] ユーザーによる停止（{i}/{total}件処理済み）")
-                db.commit()
-                return True
+                    on_progress(i, total, f"[再解析 {i}/{total}] {doc.edinet_code} {doc.period_end}")
 
-            rows   = unpack_elements(doc.elements_gz)
-            parsed = parse_raw_rows(rows)
-            if not any(parsed.get(cat) for cat in ("bs", "pl", "cf")):
-                continue
-
-            rec = calc_derived(parsed)
-            co  = db.query(Company).filter_by(edinet_code=doc.edinet_code).first()
-            xbrl_industry = rec.get("meta", {}).get("industry_name", "")
-            rec.update({
-                "edinet_code":  doc.edinet_code,
-                "sec_code":     co.sec_code if co else "",
-                "company_name": co.name if co else "",
-                "industry":     xbrl_industry or (co.industry if co else ""),
-                "year":         doc.period_end.year if doc.period_end else 0,
-                "period_end":   doc.period_end.isoformat() if doc.period_end else "",
-                "doc_id":       doc.doc_id,
-                "source":       "EDINET_XBRL",
-            })
-            upsert_financial(db, rec)
-
-            if on_progress:
-                on_progress(i, total, f"[再解析 {i}/{total}] {doc.edinet_code} {doc.period_end}")
-            if i % REPARSE_COMMIT_BATCH == 0:
-                db.commit()
-                log.info(f"再解析 commit ({i}/{total})")
+            db.commit()
+            # チャンクぶんの BLOB を明示的に落とす保険。**これが無くても現状はメモリが
+            # 件数に比例しない**——identity map は weak ref で、doc を書き換えていない限り
+            # `by_id` の再代入だけで解放される（実測: expunge_all を潰しても identity map は
+            # 空のまま）。効くのは、この関数が将来 doc を dirty にしたとき。Session が
+            # `_dirty` で strong ref を持ち、黙って件数比例へ戻る。そのときの歯止め。
+            db.expunge_all()
+            log.info(f"再解析 commit ({i}/{total})")
 
         db.commit()
         log.info(f"再解析完了: {total} 書類")

@@ -234,3 +234,106 @@ class TestReparseFromRaw:
         records = db.query(FinancialRecord).filter_by(edinet_code="E00001").all()
         assert len(records) == 1
         assert records[0].doc_id == "S100_2023"
+
+    # ── #507: BLOB を件数ぶん一度に載せない ────────────────────────────────
+
+    @staticmethod
+    def _selects_by_table(db):
+        """発行された SELECT を対象テーブルごとに数えるリスナを張る。"""
+        from sqlalchemy import event
+
+        counts = {}
+
+        def before(conn, cursor, statement, params, context, executemany):
+            s = " ".join(statement.split())
+            if not s.upper().startswith("SELECT"):
+                return
+            for table in ("xbrl_raw_documents", "companies", "financial_records"):
+                if f"FROM {table}" in s or f"from {table}" in s:
+                    counts[table] = counts.get(table, 0) + 1
+
+        event.listen(db.bind, "before_cursor_execute", before)
+        return counts, lambda: event.remove(db.bind, "before_cursor_execute", before)
+
+    def test_blobs_are_fetched_in_chunks_not_all_at_once(self, db, make_company):
+        """**#507 の本旨**。5書類・チャンク2なら BLOB の取得は 1(id引き)+3(チャンク)。
+
+        旧実装は `db.query(XbrlRawDocument).all()` の1文で全件を materialize しており、
+        文の数だけ見ると「1回」で最も少ない。ここで縛りたいのは往復回数ではなく
+        **1文が運ぶ BLOB の件数**なので、少ないほど良いのではなくチャンク数と一致することを見る。
+        """
+        db.add(make_company(edinet_code="E00001", sec_code="1001"))
+        for k in range(5):
+            # 年をずらす。同一 (edinet_code, year, period_end) だと FinancialRecord が
+            # 1行へ upsert され、チャンク境界の取りこぼしを検知できない。
+            self._make_raw_doc(db, doc_id=f"S100_{k}", period_end=date(2023 - k, 3, 31))
+
+        proxy = _NoCloseSession(db)
+        counts, detach = self._selects_by_table(db)
+        try:
+            with (
+                patch("collector_financials.SessionLocal", return_value=proxy),
+                patch("collector_financials.REPARSE_FETCH_BATCH", 2),
+                patch("collector_financials.parse_raw_rows", return_value=_parsed_financial()),
+                patch("collector.asyncio.sleep", new=AsyncMock()),
+            ):
+                self._run(reparse_from_raw())
+        finally:
+            detach()
+
+        assert counts.get("xbrl_raw_documents") == 4, (
+            f"id引き1 + チャンク3 を期待したが {counts.get('xbrl_raw_documents')} 文"
+        )
+        assert db.query(FinancialRecord).count() == 5, "チャンク境界で取りこぼしている"
+
+    def test_company_lookup_does_not_scale_with_documents(self, db, make_company):
+        """会社属性の SELECT が書類数に比例しないこと（旧実装は1書類1文・#506 と同型）。"""
+        db.add(make_company(edinet_code="E00001", sec_code="1001"))
+        for k in range(5):
+            # 年をずらす。同一 (edinet_code, year, period_end) だと FinancialRecord が
+            # 1行へ upsert され、チャンク境界の取りこぼしを検知できない。
+            self._make_raw_doc(db, doc_id=f"S100_{k}", period_end=date(2023 - k, 3, 31))
+
+        proxy = _NoCloseSession(db)
+        counts, detach = self._selects_by_table(db)
+        try:
+            with (
+                patch("collector_financials.SessionLocal", return_value=proxy),
+                patch("collector_financials.REPARSE_FETCH_BATCH", 2),
+                patch("collector_financials.parse_raw_rows", return_value=_parsed_financial()),
+                patch("collector.asyncio.sleep", new=AsyncMock()),
+            ):
+                self._run(reparse_from_raw())
+        finally:
+            detach()
+
+        assert counts.get("companies") == 1, (
+            f"5書類に対して companies を {counts.get('companies')} 回引いている"
+        )
+
+    def test_identity_map_does_not_hold_processed_blobs(self, db, make_company):
+        """チャンクを進めたら前のチャンクの BLOB を Session が掴んでいないこと。
+
+        **このテストは `expunge_all()` の有無では落ちない**（実測で確認した）。identity map は
+        weak ref で、doc を書き換えていない限り `by_id` の再代入だけで解放されるため。
+        ここで縛っているのは「処理済みの BLOB を strong ref で抱える経路が生えていないこと」で、
+        `expunge_all()` はその保険。doc を dirty にする変更が入ると Session の `_dirty` が
+        strong ref を持ち、**結果は正しいままメモリだけ件数比例へ戻る**——それを捕まえる。
+        """
+        db.add(make_company(edinet_code="E00001", sec_code="1001"))
+        for k in range(6):
+            # 年をずらす。同一 (edinet_code, year, period_end) だと FinancialRecord が
+            # 1行へ upsert され、チャンク境界の取りこぼしを検知できない。
+            self._make_raw_doc(db, doc_id=f"S100_{k}", period_end=date(2023 - k, 3, 31))
+
+        proxy = _NoCloseSession(db)
+        with (
+            patch("collector_financials.SessionLocal", return_value=proxy),
+            patch("collector_financials.REPARSE_FETCH_BATCH", 2),
+            patch("collector_financials.parse_raw_rows", return_value=_parsed_financial()),
+            patch("collector.asyncio.sleep", new=AsyncMock()),
+        ):
+            self._run(reparse_from_raw())
+
+        held = [o for o in db.identity_map.values() if isinstance(o, XbrlRawDocument)]
+        assert held == [], f"処理済みの BLOB が {len(held)} 件 identity map に残っている"
