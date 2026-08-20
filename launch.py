@@ -67,7 +67,7 @@ def _pick_port() -> int:
         return s.getsockname()[1]
 
 
-def _start_server(port: int, target: str = "prod"):
+def _start_server(port: int, target: str = "local"):
     log_dir = os.path.join(BASE_DIR, "logs")
     os.makedirs(log_dir, exist_ok=True)
     log_path = os.path.join(log_dir, "server.log")
@@ -80,7 +80,10 @@ def _start_server(port: int, target: str = "prod"):
         stderr=log_file,
         creationflags=subprocess.CREATE_NO_WINDOW,
         # ブラウザ連動自動停止（ハートビート途絶で自動終了）はランチャー経由のみ有効
-        # FINAPP_DB_TARGET は接続先の切替（#481 B-1）。既定は prod＝従来どおり Supabase。
+        # FINAPP_DB_TARGET は接続先の切替（#481 B-1・#503 で既定を反転）。呼び出し元は
+        # 2箇所とも target を明示するので既定引数は使われないが、値は正本（local）へ
+        # 揃えてある——ここだけ prod のまま残すと、次に呼び出しを足した人が
+        # 「既定に任せる」つもりで更新の止まった Supabase 断面を掴む。
         env={**os.environ, "FINAPP_AUTO_SHUTDOWN": "1", "FINAPP_DB_TARGET": target},
     )
     proc._log_file = log_file  # type: ignore[attr-defined]

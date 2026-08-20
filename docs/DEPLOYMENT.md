@@ -380,33 +380,34 @@ python -m scripts.setup_local_db --apply    # 実行
 
 #### 接続先の切り替え（`FINAPP_DB_TARGET`・Issue #481 B-1）
 
-**既定は `prod`。環境変数を触らなければ従来どおり Supabase を見る。**
+**既定は `local`（#503・ADR-0038 で反転）。環境変数を触らなければ正本であるローカル PostgreSQL を見る。**
+反転前の既定は `prod` だったが、正本が移った以上「環境変数を触らなければ Supabase」は危険側の既定になる。
 
 | 変数 | 値 | 解決される接続先 |
 |---|---|---|
-| `FINAPP_DB_TARGET` | 未設定 / `prod` | `DATABASE_URL`（無ければローカル既定へフォールバック＋警告） |
-| `FINAPP_DB_TARGET` | `local` | `DATABASE_URL_LOCAL`（無ければ `postgresql://edinet:edinet@localhost:5432/financial_db`） |
+| `FINAPP_DB_TARGET` | 未設定 / `local` | `DATABASE_URL_LOCAL`（無ければ `postgresql://edinet:edinet@localhost:5432/financial_db`） |
+| `FINAPP_DB_TARGET` | `prod` | `DATABASE_URL`（無ければローカル既定へフォールバック＋警告） |
 
-**`DATABASE_URL_LOCAL` の既定はこのマシンの実環境と一致している**ので、`.env` を編集せず `FINAPP_DB_TARGET=local` だけで切り替わる。
+**`.env` に `DATABASE_URL` があるだけでは Supabase へ行かない。** 向きを決めるのはこの変数だけで、`prod` を明示するのは実質 `render.yaml` の1箇所である（保険として `RENDER` 環境変数があれば prod へ倒す）。
+
+**この反転は「明示しない側が壊れる」向きに効く。** #503 で `render.yaml` には prod を書いたが GHA に残した2本へ書き忘れ、`egress-health` が反転後の初回定時実行で `connection to server at "localhost" ... Connection refused` に落ちた（#508）。**`DATABASE_URL` を渡す定時ワークフローは `FINAPP_DB_TARGET: prod` も渡すこと**——`tests/test_db_target.py::TestWorkflowsPinTheTarget` が CI で縛っている。逆に schedule を止めた手動専用の 14本には**書かない**（既定 local が誤起動の安全弁になる）。
 
 ```powershell
-$env:FINAPP_DB_TARGET = "local"; python -m uvicorn api:app     # CLI
-.
-un_local.ps1                                                # GUI（ランチャーをローカル始まりで起動）
-.
-un_local.ps1 -Console -Port 8010                            # ランチャー無し・コンソール起動
+$env:FINAPP_DB_TARGET = "local"; python -m uvicorn api:app   # CLI（既定と同じなので明示は冗長）
+.\run_local.ps1                                              # GUI（接続先をローカルに固定して起動）
+.\run_local.ps1 -Console -Port 8010                          # ランチャー無し・コンソール起動
 ```
 
-GUI（`launch.py`）は窓に**接続先ラジオ**を持ち、切り替えるとサーバーを入れ替える（ブラウザは開き直さない）。**選択は永続化しない**——毎回 `prod` から始めるほうが、古いミラーで起動していることに気づかず使い続ける事故を防げる。環境変数で明示した場合のみそれが初期値になる。既に別プロセスが起動済みのときはそのプロセスを掌握していないためラジオは無効化される。
+GUI（`launch.py`）は窓に**接続先ラジオ**を持ち、切り替えるとサーバーを入れ替える（ブラウザは開き直さない）。**選択は永続化しない**——毎回**正本**から始めるほうが、更新の止まった断面で起動していることに気づかず使い続ける事故を防げる。環境変数で明示した場合のみそれが初期値になる。既に別プロセスが起動済みのときはそのプロセスを掌握していないためラジオは無効化される。**この「毎回◯◯始まり」の向きは正本がどちらかで反転する**——反転前は同じ理由で `prod` 始まりが正しかった。ランチャーは engine 生成の副作用を避けるため `database` を import せず既定値を文字列で写しているので、`tests/test_db_target.py::test_launcher_default_matches_database_default` が `database._DEFAULT_TARGET` との乖離を CI で落とす。
 
-**`run_local.ps1`（Supabase 障害中の常用導線）**: ランチャーは毎回 `prod` 始まりなので、restricted 中に素で起動すると**接続先ラジオを切り替える前に Supabase を叩いて固まる**。`run_local.ps1` は `FINAPP_DB_TARGET=local` を先に立ててからランチャーを起動するので、一度も本番へ触らせない。起動前に `companies` の件数と週次株価の最新週を出して**どの世代のミラーを見ているか**を明示し、ローカルへ繋がらなければランチャーを起こす前に落とす。
+**`run_local.ps1`**: ランチャー既定が local になった今でも、接続先を明示して起動する導線として残してある。`FINAPP_DB_TARGET=local` を先に立て、起動前に `companies` の件数と週次株価の最新週を出して**どの世代のデータを見ているか**を明示し、ローカルへ繋がらなければランチャーを起こす前に落とす。
 
 併せて `FINAPP_EGRESS_ENFORCE=0` / `FINAPP_EGRESS_LEDGER=0` を立てる——ローカル読取は Egress を1バイトも使わないので、400MB のプロセス予算で GUI が `EgressBudgetExceeded` に落ちる意味が無く、`.egress/ledger.jsonl` に混ぜると `scripts.egress_report` の集計が Supabase の実測でなくなる（請求サイクル累計のほうは `_is_local` で自動的に無効）。**`.env` は書き換えない**ので、復旧後は素の `python launch.py` に戻すだけで prod へ復帰する（戻し忘れが起きない）。
 
 **ガードは強さを2種に分けてある**（[database.py](../database.py) の `resolve_database_url()`）:
 
 - **`local` 指定なのに解決先がリモート → `RuntimeError` で import 時に落とす。** ミラーのつもりで本番へ書く事故を確実に止める。`local` を明示した人しか踏まないので CI に影響しない
-- **`prod` 指定で `DATABASE_URL` 未設定（＝ローカルへフォールバック）→ 警告どまり。** ここを raise にすると `ci.yml`（`DATABASE_URL` を渡さずに走る）が全滅する
+- **`prod` 指定で `DATABASE_URL` 未設定（＝ローカルへフォールバック）→ 警告どまり。** 反転前は `ci.yml`（`DATABASE_URL` を渡さずに走る）がこの経路を踏んでいたため緩くしてある。反転後の CI は既定の local 経路を通るので踏まなくなったが、**緩さ自体は Render 側で生きている**ので raise へ強めていない
 - `FINAPP_DB_TARGET` の**未知の値は `ValueError`**。`localhost` のような打ち間違いを黙って `prod` に落とすと、本人はローカルのつもりで本番を叩き続ける
 
 **接続先は常時見えるようにしてある。** ミラーは pull/sync した時点で止まるため、どちらの DB を見ているか分からないと**古いスコアを最新と誤読する**（#438 の「静かな配信停止」と同型で、`/api/stats` の `freshness` は「データの古さ」は見るが「どちらの DB か」は見ない）。
