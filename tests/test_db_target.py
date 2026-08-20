@@ -18,6 +18,7 @@
 """
 import logging
 import os
+import pathlib
 import sys
 
 import pytest
@@ -27,7 +28,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import database
 from database import _LOCAL_DEFAULT_URL, mask_url, resolve_database_url
 
-REMOTE = "postgresql://postgres.abc:secret@aws-1-ap-northeast-1.pooler.supabase.com:5432/postgres"
+ROOT = pathlib.Path(__file__).resolve().parents[1]
+
+REMOTE ="postgresql://postgres.abc:secret@aws-1-ap-northeast-1.pooler.supabase.com:5432/postgres"
 
 
 class TestDefaults:
@@ -196,3 +199,74 @@ class TestModuleState:
         label = database.db_target_info()["db_label"]
         assert "://" not in label
         assert "@" not in label
+
+
+def _env_blocks(doc: dict):
+    """workflow / job / step のどの階層に置かれた env も拾う。"""
+    if isinstance(doc.get("env"), dict):
+        yield "workflow", doc["env"]
+    for job_name, job in (doc.get("jobs") or {}).items():
+        if isinstance(job.get("env"), dict):
+            yield f"job:{job_name}", job["env"]
+        for step in job.get("steps") or []:
+            if isinstance(step.get("env"), dict):
+                yield f"step:{step.get('name', '?')}", step["env"]
+
+
+def _has_live_schedule(doc: dict) -> bool:
+    """`on.schedule` が生きているか。yaml は `on:` を bool の True へ潰す。"""
+    triggers = doc.get(True) or doc.get("on") or {}
+    return isinstance(triggers, dict) and bool(triggers.get("schedule"))
+
+
+class TestWorkflowsPinTheTarget:
+    """反転の帰結: `DATABASE_URL` を渡すだけの実行環境は localhost を見る（#508）。
+
+    反転前は既定が prod だったので、リモートを見たい実行環境は何も書かなくてよかった。
+    反転後は逆で **明示しない側が壊れる**。#503 で `render.yaml` には prod を書いたが、
+    GHA に残した2本へ書き忘れ、`egress-health` が初回の定時実行でいきなり
+    `connection to server at "localhost" ... Connection refused` で落ちた。
+
+    向きが2つあるので両方縛る:
+
+    - **schedule が生きている ⇒ prod 明示が必須**。GHA ランナーに PostgreSQL は無いので
+      今回は落ちて気づけたが、それは運が良いだけで、DB が居る環境なら
+      「空の DB に繋がって 0 件」に化ける（#481 B-0 で踏んだ形）。
+    - **schedule を止めた `workflow_dispatch` 専用は明示しない**。反転前は「誤って手動起動
+      すると Supabase へ書く」が怖かったが、反転後は既定 local が安全弁になり、
+      誤起動は localhost で落ちる。prod を書き足すとこの安全弁を自分で外すことになる。
+    """
+
+    WORKFLOWS = sorted((ROOT / ".github" / "workflows").glob("*.yml"))
+
+    def _docs_with_database_url(self):
+        import yaml
+
+        for path in self.WORKFLOWS:
+            doc = yaml.safe_load(path.read_text(encoding="utf-8"))
+            for label, env in _env_blocks(doc):
+                if "DATABASE_URL" in env:
+                    yield path, doc, label, env
+
+    def test_the_audit_actually_sees_workflows(self):
+        """走査が空振りしていたら以下2件は「何も検査せず緑」になる。"""
+        found = list(self._docs_with_database_url())
+        assert len(found) >= 10, f"DATABASE_URL を渡す step が {len(found)} 件しか見えていない"
+
+    def test_scheduled_workflows_pin_prod(self):
+        for path, doc, label, env in self._docs_with_database_url():
+            if not _has_live_schedule(doc):
+                continue
+            assert env.get("FINAPP_DB_TARGET") == "prod", (
+                f"{path.name} [{label}]: 定時実行なのに FINAPP_DB_TARGET=prod が無い"
+                "＝既定 local で localhost を見る（#508 の再発）"
+            )
+
+    def test_dispatch_only_workflows_keep_the_local_default_as_a_safety_catch(self):
+        for path, doc, label, env in self._docs_with_database_url():
+            if _has_live_schedule(doc):
+                continue
+            assert "FINAPP_DB_TARGET" not in env, (
+                f"{path.name} [{label}]: schedule を止めた手動専用に prod を書くと、"
+                "誤起動が localhost で落ちる安全弁を自分で外すことになる（#503）"
+            )
