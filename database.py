@@ -31,16 +31,25 @@ load_dotenv()
 
 log = logging.getLogger(__name__)
 
-# ── 接続先の解決（#481 B-1）──────────────────────────────────────────────
+# ── 接続先の解決（#481 B-1・#503 で既定を反転）────────────────────────────
 # Supabase が Egress 超過で restricted になるとアプリも分析も動かせない（2026-07・2026-08 に
-# 2回発生し、2回目は8日間停止）。ローカル読取レプリカへ切り替える口を `FINAPP_DB_TARGET`
-# として持つ。**既定は prod**＝環境変数を触らなければ従来どおり Supabase を見る。
+# 2回発生し、2回目は8日間停止）。切替口が `FINAPP_DB_TARGET`。
+#
+# **2026-08-20（#503・ADR-0038）に既定を prod → local へ反転した。** 正本がローカル
+# PostgreSQL へ移ったので、既定は「正本を見る」でなければならない。2回目の停止の真因は
+# Egress ではなく NANO の実効メモリ 408MB に DB が乗らないことで、VACUUM FULL 後も
+# 余裕 13MB しか無い＝Supabase を正本に置く限り同じ停止が周期的に再発する。
+#
+# 反転はガードの向きも正す: 従来は「うっかり本番を叩く」が既定の側にあったが、いまは
+# 明示的に `prod` と書いた人だけが Supabase へ触れる。prod を要るのは Render だけで、
+# `render.yaml` が env に明示している。
 #
 # 解決ロジックだけを純関数に切り出しているのは、テストが `importlib.reload(database)` を
 # 強いられないようにするため（reload すると engine が作り直され、db_egress のリスナが
 # 死んだ engine ごとに積み上がる）。辞書を渡すだけで全分岐を検証できる。
 _LOCAL_DEFAULT_URL = "postgresql://edinet:edinet@localhost:5432/financial_db"
 _VALID_TARGETS = ("prod", "local")
+_DEFAULT_TARGET = "local"
 
 
 def _looks_local(url: str) -> bool:
@@ -50,21 +59,25 @@ def _looks_local(url: str) -> bool:
 def resolve_database_url(env) -> tuple[str, str]:
     """(target, url) を返す。副作用なし（`env` は os.environ 相当のマッピング）。
 
-    - `FINAPP_DB_TARGET`: "prod"（既定）| "local"。**未知の値は握りつぶさず ValueError**——
-      `localhost` のような打ち間違いを黙って prod に落とすと、本人はローカルのつもりで
-      本番を叩き続ける（この種の取り違えは事後にログから判別できない）。
+    - `FINAPP_DB_TARGET`: "local"（既定・#503）| "prod"。**未知の値は握りつぶさず ValueError**——
+      `localhost` のような打ち間違いを黙って既定へ落とすと、本人は指定したつもりで別の DB を
+      叩き続ける（この種の取り違えは事後にログから判別できない）。
     - local: `DATABASE_URL_LOCAL` → 無ければ `_LOCAL_DEFAULT_URL`。
     - prod:  `DATABASE_URL` → 無ければ同じローカル既定へフォールバック（後方互換）。
 
     ガードは2種で**強さを変えてある**:
 
-    - **local 指定なのに解決先がリモート → RuntimeError**。local を明示した人しか踏まないので
-      CI には影響しない。ミラーのつもりで本番へ書く事故を確実に止める。
+    - **local 指定なのに解決先がリモート → RuntimeError**。ミラーのつもりで本番へ書く事故を
+      確実に止める。既定が local になった（#503）ことでこの経路が既定側へ来たが、
+      `DATABASE_URL_LOCAL` を設定していなければローカル既定に落ちるので発火しない。
+      発火するのは「local と言いながらリモート URL を渡した」場合だけで、それは事故である。
     - **prod 指定で DATABASE_URL 未設定（＝ローカルへフォールバック）→ 警告どまり**。
-      ここを raise にしてはいけない——`ci.yml` は `DATABASE_URL` を渡さずに走るため、
-      例外にすると CI が全滅する。代わりに警告と画面バッジ（/api/system/info）で見せる。
+      ここを raise にしてはいけない——過去に `ci.yml` が `DATABASE_URL` を渡さず prod 既定で
+      走っていた（例外にすると CI が全滅する）。既定反転後の CI は local 経路を通るが、
+      **prod を明示する Render 側でこの分岐が生きている**ので緩さは維持する。
+      代わりに警告と画面バッジ（/api/system/info）で見せる。
     """
-    target = (env.get("FINAPP_DB_TARGET") or "prod").strip().lower()
+    target = (env.get("FINAPP_DB_TARGET") or _DEFAULT_TARGET).strip().lower()
     if target not in _VALID_TARGETS:
         raise ValueError(
             f"FINAPP_DB_TARGET が不正: {target!r}（有効なのは {' / '.join(_VALID_TARGETS)}）"

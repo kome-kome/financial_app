@@ -502,12 +502,16 @@ def cycle_tracking_enabled() -> bool:
 
     緊急停止は `FINAPP_EGRESS_CYCLE=0`（プロセス予算と JSONL 台帳は生きたまま）。
 
-    **pytest 実行中は必ず無効。** ローカルの pytest は `database.py` を import した時点で
-    本番 Supabase 向けの engine を作る（`.env` の `DATABASE_URL` を読むため）。ここを
-    有効なままにすると、`record()` を呼ぶすべてのテストが本番へ接続しに行き、
-    `emit_summary` の atexit が本番へ書き込みまで行う——「ローカルスクリプトは本番DBに
-    直結する」という既知の罠が、そのままテストにも当てはまる（実際に全体テストが
-    10分超ハングして気づいた）。有効時の挙動はこの関数ごと差し替えて検証する。
+    **pytest 実行中は必ず無効。** かつてローカルの pytest は `database.py` を import した
+    時点で本番 Supabase 向けの engine を作っていた（`.env` の `DATABASE_URL` を読むため）。
+    有効なままだと `record()` を呼ぶすべてのテストが本番へ接続しに行き、`emit_summary` の
+    atexit が本番へ書き込みまで行う——実際に全体テストが 10分超ハングして気づいた。
+
+    #503 で既定が `local` へ反転したので、素の pytest はもう本番 engine を作らない。
+    それでもこのガードは残す: `FINAPP_DB_TARGET=prod` を立てたシェルで pytest を回せば
+    同じ経路が復活するし、**ガードを外す理由が「いまは踏まないから」では弱い**（踏んだ
+    ときの被害が本番書込なので、条件の変化で復活する種類の事故である）。
+    有効時の挙動はこの関数ごと差し替えて検証する。
     """
     global _cycle_enabled
     if _cycle_enabled is not None:

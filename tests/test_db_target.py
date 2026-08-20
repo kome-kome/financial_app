@@ -1,7 +1,9 @@
-"""接続先スイッチ `FINAPP_DB_TARGET` の解決とガード（Issue #481 B-1）。
+"""接続先スイッチ `FINAPP_DB_TARGET` の解決とガード（Issue #481 B-1・#503 で既定を反転）。
 
-Supabase が Egress 超過で restricted になったときにローカル読取レプリカへ逃げるための
-切替口。**既定は prod**＝環境変数を触らなければ従来どおり `DATABASE_URL` を見る。
+**既定は local**（2026-08-20・#503・ADR-0038）＝正本であるローカル PostgreSQL を見る。
+反転前の既定は prod だったが、正本が移った以上「環境変数を触らなければ Supabase」は
+危険側の既定になる（収集も分析も既定で正本の外を叩き、内容が分岐する）。prod を踏むのは
+明示した人だけで、実質 Render 1箇所である。
 
 `resolve_database_url()` は副作用の無い純関数なので、辞書を渡すだけで全分岐を検証できる。
 `importlib.reload(database)` を使わずに済むのが要点——reload すると engine が作り直され、
@@ -9,9 +11,10 @@ Supabase が Egress 超過で restricted になったときにローカル読取
 
 ガードの強さを2種に分けている点をここで固定する:
 
-- **local 指定なのにリモート → RuntimeError**（明示した人しか踏まないので CI に無害）
-- **prod 指定で `DATABASE_URL` 未設定 → 警告どまり**（`ci.yml` は `DATABASE_URL` を渡さずに
-  走るため、raise にすると CI が全滅する）
+- **local 指定なのにリモート → RuntimeError**（`DATABASE_URL_LOCAL` にリモートを入れた事故）
+- **prod 指定で `DATABASE_URL` 未設定 → 警告どまり**（raise にすると Render の設定漏れが
+  起動失敗として出ず…ではなく逆で、**過去に ci.yml がこの経路を踏んでいた**ため緩くしてある。
+  反転後の CI は local 経路を通るが、緩さ自体は Render 側で生きている）
 """
 import logging
 import os
@@ -28,17 +31,44 @@ REMOTE = "postgresql://postgres.abc:secret@aws-1-ap-northeast-1.pooler.supabase.
 
 
 class TestDefaults:
-    def test_no_env_falls_back_to_local_default(self):
-        """後方互換: 何も設定しなければ従来どおりローカル既定へ落ちる。"""
-        assert resolve_database_url({}) == ("prod", _LOCAL_DEFAULT_URL)
+    def test_no_env_resolves_to_local(self):
+        """既定は local＝正本を見る（#503 で prod から反転）。"""
+        assert resolve_database_url({}) == ("local", _LOCAL_DEFAULT_URL)
+
+    def test_database_url_alone_does_not_reach_supabase(self):
+        """**反転の要**: `.env` に `DATABASE_URL` があるだけでは Supabase へ行かない。
+
+        反転前はこれが `("prod", REMOTE)` だった。正本がローカルへ移った後に同じ挙動を
+        残すと、収集も分析も既定で Supabase を叩き続けて正本が分岐する。prod は
+        明示した人（＝Render）だけが踏む。
+        """
+        assert resolve_database_url({"DATABASE_URL": REMOTE}) == ("local", _LOCAL_DEFAULT_URL)
 
     def test_prod_uses_database_url(self):
-        assert resolve_database_url({"DATABASE_URL": REMOTE}) == ("prod", REMOTE)
+        assert resolve_database_url(
+            {"FINAPP_DB_TARGET": "prod", "DATABASE_URL": REMOTE}) == ("prod", REMOTE)
 
     def test_empty_string_is_treated_as_unset(self):
         """空文字の env var（PowerShell で消し損ねた等）を URL として採用しない。"""
         assert resolve_database_url({"FINAPP_DB_TARGET": "", "DATABASE_URL": ""}) == (
-            "prod", _LOCAL_DEFAULT_URL)
+            "local", _LOCAL_DEFAULT_URL)
+
+    def test_launcher_default_matches_database_default(self):
+        """`launch.py` が写している既定値が `database._DEFAULT_TARGET` とずれないこと。
+
+        ランチャーは engine 生成の副作用を避けるため database を import せず、既定値を
+        文字列で写している。二重定義は黙って乖離する（ADR-0031 と同型）ので CI で縛る。
+        """
+        import re
+        from pathlib import Path
+        from database import _DEFAULT_TARGET
+
+        src = (Path(__file__).resolve().parents[1] / "launch.py").read_text(encoding="utf-8")
+        found = re.findall(r'os\.environ\.get\("FINAPP_DB_TARGET"\)\s*or\s*"(\w+)"', src)
+        assert found, "launch.py の初期 target を読み取れない（式の形が変わった？）"
+        assert set(found) == {_DEFAULT_TARGET}, (
+            f"launch.py の既定 {found} が database._DEFAULT_TARGET={_DEFAULT_TARGET!r} と違う"
+        )
 
 
 class TestLocalTarget:
@@ -80,14 +110,20 @@ class TestGuards:
             resolve_database_url({"FINAPP_DB_TARGET": bad})
 
     def test_prod_without_database_url_does_not_raise(self, caplog):
-        """**CI 保護の回帰テスト。** ci.yml は DATABASE_URL を渡さずに走るので、
-        ここを raise にすると全テストが import 時点で落ちる。警告どまりに固定する。"""
+        """**Render 保護の回帰テスト。** prod を明示して `DATABASE_URL` を渡し忘れても
+        raise せず警告どまりにする（反転前は ci.yml がこの経路を踏んでいた）。"""
         with caplog.at_level(logging.WARNING, logger="database"):
-            target, url = resolve_database_url({})
+            target, url = resolve_database_url({"FINAPP_DB_TARGET": "prod"})
         assert (target, url) == ("prod", _LOCAL_DEFAULT_URL)
         assert any("DATABASE_URL" in r.message for r in caplog.records), "警告が出ていない"
 
     def test_prod_with_database_url_is_silent(self, caplog):
+        with caplog.at_level(logging.WARNING, logger="database"):
+            resolve_database_url({"FINAPP_DB_TARGET": "prod", "DATABASE_URL": REMOTE})
+        assert not caplog.records
+
+    def test_default_local_is_silent(self, caplog):
+        """既定（local）は警告を出さない＝平常運転がログを汚さない。"""
         with caplog.at_level(logging.WARNING, logger="database"):
             resolve_database_url({"DATABASE_URL": REMOTE})
         assert not caplog.records

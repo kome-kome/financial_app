@@ -10,6 +10,12 @@ services:
       # （秘密情報を IaC にコミットしないため）
       - key: PYTHON_VERSION
         value: 3.13.7
+      - key: FINAPP_DB_TARGET
+        value: "prod"        # 必須（#503・ADR-0038）。正本がローカル PostgreSQL へ移り、
+                             # database.resolve_database_url() の既定は local になった。
+                             # ここで prod を明示しないと Render 上で localhost を見にいき、
+                             # 起動はするが空の DB を掴む＝「接続失敗」ではなく「0件」に化ける。
+                             # Render は Supabase の断面を読む閲覧専用の窓（書込は行わない）。
       - key: DATABASE_URL
         sync: false          # Supabase の接続URL  例: postgresql://postgres:[PW]@db.[PROJ].supabase.co:5432/postgres?sslmode=require
       - key: EDINET_API_KEY

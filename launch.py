@@ -122,12 +122,17 @@ def main():
             port = _pick_port()
     url = f"http://127.0.0.1:{port}"
 
-    # ── 接続先（#481 B-1）──────────────────────────────────────────────
-    # 既定は prod＝環境変数を触らなければ従来どおり Supabase。**選択は永続化しない**——
-    # 毎回 prod から始めるほうが、古いミラーで起動していることに気づかず使い続ける事故を防げる。
-    initial_target = (os.environ.get("FINAPP_DB_TARGET") or "prod").strip().lower()
+    # ── 接続先（#481 B-1・#503 で既定を反転）──────────────────────────────
+    # 既定は local＝正本（ローカル PostgreSQL）を見る。**選択は永続化しない**——毎回
+    # 正本から始めるほうが、古い断面で起動していることに気づかず使い続ける事故を防げる。
+    # 反転前は「毎回 prod から」が同じ理由で正しかった。**どちらが正本かで向きが変わる**
+    # ので、ここを触るときは #503 / ADR-0038 を読むこと。prod を選ぶと Supabase の
+    # 2026-08-07 断面（更新が止まっている Render 用の窓）を見ることになる。
+    # 既定値の源は database.py の `_DEFAULT_TARGET`。ランチャーは database を import
+    # しない（engine 生成の副作用を避ける）ので、ここだけ値を写している。
+    initial_target = (os.environ.get("FINAPP_DB_TARGET") or "local").strip().lower()
     if initial_target not in ("prod", "local"):
-        initial_target = "prod"
+        initial_target = "local"
     # proc は再起動で差し替わるので dict に持つ。gen は「再起動由来の停止」を旧監視スレッドが
     # 誤って『サーバー停止を検知』と表示しないための世代番号。
     state = {"proc": None if already_up else _start_server(port, initial_target), "gen": 0}
