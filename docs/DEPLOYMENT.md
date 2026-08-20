@@ -41,12 +41,16 @@ Render の制約と運用形態に合わせて設計すること。
 
 | JST | タスク | 頻度 | 中身 | 備考 |
 |---|---|---|---|---|
-| **17:20** | `financial_app-nightly`（`run_nightly.ps1` → `scripts/run_nightly.py`） | 毎日 | `_pipeline_incremental.py`（XBRL 差分＋マクロ＋市場データ）→ `nightly_scores.py` | 大引 15:30・J-Quants 四本値 16:30・EDINET 受付終了 17:15 の後（#476 の確定時刻表）。`StartWhenAvailable` で停止していた日は次回起動時に追いつく。上限6時間 |
+| **17:20** | `financial_app-nightly`（`run_nightly.ps1` → `scripts/run_nightly.py`） | 毎日 | `_pipeline_incremental.py`（XBRL 差分＋マクロ＋市場データ）→ `nightly_scores.py` | 大引 15:30・J-Quants 四本値 16:30・EDINET 受付終了 17:15 の後（#476 の確定時刻表）。`StartWhenAvailable` で停止していた日は次回起動時に追いつく。上限6時間（最悪 23:20 終了） |
+| **1日 01:00** | `financial_app-monthly`（`run_monthly.ps1` → `scripts/run_monthly.py`） | 毎月 | `recommend_factor_premia.py` → `macro_beta_inference.py` → `hyperparameter_search.py` ×3（M-1/M-3/M-2） | 日次の最悪ケース（23:20）の後で、翌日の日次 17:20 までの**16時間の窓**。上限もその幅（`PT16H`）。GHA 時代の3本（tune / macro-beta / factor-premia）の移設先（#504） |
 | 任意（週次を想定） | `scripts/backup_push.py` | 週次 | 17表を `--compress=9` でダンプ → Storage へ | 夜間バッチと**別タスク**にする（遅延が道連れにならない）。実測 37.5MB/世代 |
 
 - **Egress はローカル駆動では発生しない**（ローカル読取は Supabase を1バイトも使わない）。
-- ステップ間で止めない設計なので、収集が落ちてもスコア更新は走る。両方の結果が `.logs/nightly_YYYYMMDD.log` に残る。
-- 「走らなかった」ことは `app_settings` の `nightly_last_run` / `nightly_last_success` と、`/api/morning` の as-of ブロック（#416/#417）で見る。
+- ステップ間で止めない設計なので、収集が落ちてもスコア更新は走る。両方の結果が `.logs/<batch>_YYYYMMDD.log` に残る。
+- 「走らなかった」ことは `app_settings` の `nightly_last_run` / `nightly_last_success`（月次は `monthly_*`）と、`/api/morning` の as-of ブロック（#416/#417）で見る。
+- **月次の並びは「依存順 ∧ 軽い順」**＝`macro_beta_loadings` は M-1 の入力なので推論が tune より先、かつ打ち切られても前方が揃うよう軽い順（factor_premia 実測 2.6分 → macro_beta → tune）。
+- **上限で打ち切られても「失敗」としては現れない**（タスクスケジューラがプロセスを止めるだけで Issue も起票されない）。検知できるのは `monthly_last_success` が進まないことだけ。
+- **月次タスクの登録は XML 直渡し**（`scripts/install_monthly_task.ps1`）。PowerShell の `New-ScheduledTaskTrigger` に `-Monthly` は無く、CIM の `MSFT_TaskMonthlyTrigger` を組んでも `schtasks` の産物を渡し直しても `Register`/`Set-ScheduledTask` が "The parameter is incorrect" で弾く（2026-08-21 に実測）。**しかも非終了エラーなので `$ErrorActionPreference=Stop` でも止まらず「登録しました」と嘘が出る**ため、登録後に `Export-ScheduledTask` で日・上限・`StartWhenAvailable` を読み直して検証している。
 
 **GitHub Actions（残っているもの・すべて UTC）**
 
@@ -62,13 +66,13 @@ Render の制約と運用形態に合わせて設計すること。
 | 旧 UTC | ワークフロー | 停止理由 | 代替 |
 |---|---|---|---|
 | 08:17 | `daily-incremental` → `nightly-scores` / `macro-health` | 正本がローカルへ移り、動かすと Supabase だけが前進して分岐する | ローカル `run_nightly.ps1`（JST 17:20） |
-| 00:00 | `macro-beta-inference` | 同上（`macro_beta_loadings` が分岐する） | ローカルの月次バッチへ移す（#503 Phase 2 の残り。それまでは手動） |
-| 16:30 | `tune-hyperparameters` | 同上。M-1/M-2/M-3 の**唯一の自動更新経路**だったので、止めた時点で μ̂ の鮮度も止まる | 同上 |
-| 22:00 | `recommend-factor-premia` | 同上。#423 子5 で「実行履歴ゼロのまま 37 期の重みで固着」を直した cron なので、**止めれば同じ固着へ戻る** | 同上 |
+| 00:00 | `macro-beta-inference` | 同上（`macro_beta_loadings` が分岐する） | ローカル月次の `macro_beta` ステップ（#504・毎月1日 JST 01:00） |
+| 16:30 | `tune-hyperparameters` | 同上。M-1/M-2/M-3 の**唯一の自動更新経路**だったので、止めた時点で μ̂ の鮮度も止まる | ローカル月次の `tune:<model>` ステップ（#504・matrix と同じ探索戦略・同じ `--n-iter`） |
+| 22:00 | `recommend-factor-premia` | 同上。#423 子5 で「実行履歴ゼロのまま 37 期の重みで固着」を直した cron なので、**止めれば同じ固着へ戻る** | ローカル月次の `factor_premia` ステップ（#504・先頭に置いて打ち切りに強くしてある） |
 
 - `nightly-scores` と `macro-health` は `daily-incremental` の `workflow_run` チェーンなので、親を止めれば連動して止まる（yml 側の schedule は元から無い）。
 - `full-pipeline` / `backfill-*` / `collect-interim` / `collect-disclosures` / `collect-macro` は `workflow_dispatch` 専用。放置で害はないが、**手動起動すると Supabase へ書く**＝正本と分岐するので注意。
-- 停止中は `nightly_scores.HEAVY_AUTOMATION` の登録（GHA のワークフロー名）と実態がずれている。**登録があること ≠ 動いていること**（ADR-0031）で、月次をローカルへ移す時点でレジストリ側も直す。
+- `nightly_scores.HEAVY_AUTOMATION` は #504 で語彙に `local:<スクリプト>` を足し、全エントリがローカルバッチを指すようになった。**yml を指すエントリは schedule が生きていることまで CI が確かめる**（`tests/test_nightly_scores.py`）＝「登録はあるが cron は止まっている」という嘘を構造的に作れなくした。ただし `local:` には**タスクスケジューラ登録**という CI から見えない一段が残る（ADR-0031 の「登録があること ≠ 動いていること」は健在）。
 
 #### Storage バックアップの初期設定（#503 Phase 3・初回だけ）
 

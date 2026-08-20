@@ -66,23 +66,33 @@ NIGHTLY_PARAMS: dict[str, dict] = {
 # 「壊れた」のではなく「動かなかった」＝failure が出ないので notify-failure（#414）でも
 # 検知できない。
 #
-# そこで **heavy なプラグインはここへ必ず登録する**ことを契約にする。値は2種類:
-#   - ワークフローファイル名  … そのワークフローが実際にこのモデルを回す
+# そこで **heavy なプラグインはここへ必ず登録する**ことを契約にする。値は3種類:
+#   - "local:<スクリプト>"    … ローカルのバッチが回す（#504 で追加）。そのモジュールの
+#                               `heavy_models()` にモデル名が現れることまで CI が確かめる
+#   - ワークフローファイル名  … その GHA ワークフローが実際にこのモデルを回す
 #   - "exempt: <理由>"        … 自動実行しないと決めた場合。理由を必ず書く
+#
+# `local:` を足したのは #503 で正本がローカル PostgreSQL へ移ったため。GHA はクラウドで
+# 走るので正本へ書けず、**定期実行の主体がこちら側へ来た**。語彙が yml しか無かったあいだ、
+# レジストリは「登録はあるが cron は止まっている」という嘘をついていた（#504）。
+#
 # 逸脱は `tests/test_nightly_scores.py::TestHeavyAutomationRegistry` が CI で落とす
 # （新しい heavy を足して登録を忘れると赤くなる）。**登録があること ≠ 実際に動いている
-# こと**である点に注意——鮮度そのものの監視は `/api/morning` の as-of ブロック（#416/#417）
-# と macro-health（#420）が担当し、ここが見るのは「経路の有無」だけ。
+# こと**である点に注意——`local:` の場合はさらに**タスクスケジューラへの登録**という
+# CI からは見えない一段が挟まる（`scripts/install_*_task.ps1`）。鮮度そのものの監視は
+# `/api/morning` の as-of ブロック（#416/#417）と macro-health（#420）が担当し、
+# ここが見るのは「経路の有無」だけ。
 HEAVY_AUTOMATION: dict[str, str] = {
-    # 夜間チェーン（daily-incremental 成功 → nightly-scores）
-    "sector_ols": "nightly-scores.yml",
-    "macro_enet": "nightly-scores.yml",
-    # 月次ハイパーパラメータ探索の --persist-scores 副作用で現在 μ̂ が更新される。
-    # cadence が探索に縛られている点は #423 子2 の宿題として残っている（M-1 は 300分
-    # timeout で cancelled が続いており＝子7、登録があっても鮮度は出ていない実例）。
-    "macro_risk_return": "tune-hyperparameters.yml",
-    "macro_gbdt": "tune-hyperparameters.yml",
-    "macro_dlm": "tune-hyperparameters.yml",
+    # 日次（タスクスケジューラ JST 17:20 → run_nightly.ps1 → nightly_scores.py）
+    "sector_ols": "local:scripts/run_nightly.py",
+    "macro_enet": "local:scripts/run_nightly.py",
+    # 月次（タスクスケジューラ 毎月1日 JST 01:00 → run_monthly.ps1）。μ̂ は月次探索の
+    # --persist-scores 副作用で更新される。cadence が探索に縛られている点は #423 子2 の
+    # 宿題として残っている（GHA 時代は M-1 が 300分 timeout で cancelled を続けており＝
+    # 子7、**登録があっても鮮度は出ていない**実例になっていた）。
+    "macro_risk_return": "local:scripts/run_monthly.py",
+    "macro_gbdt": "local:scripts/run_monthly.py",
+    "macro_dlm": "local:scripts/run_monthly.py",
     # 自動実行しないと決めたもの（理由をここに残す＝「後で対応」を prose に書いて終わらせない）
     "macro_ensemble":
         "exempt: 基底 M-1/M-2/M-6 を内部で全部回すためコストが合算になるのに、"
@@ -93,6 +103,7 @@ HEAVY_AUTOMATION: dict[str, str] = {
 }
 
 EXEMPT_PREFIX = "exempt:"
+LOCAL_PREFIX = "local:"
 
 
 class VerificationError(RuntimeError):

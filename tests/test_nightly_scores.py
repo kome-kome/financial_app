@@ -34,6 +34,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from nightly_scores import (  # noqa: E402
     EXEMPT_PREFIX,
     HEAVY_AUTOMATION,
+    LOCAL_PREFIX,
     NIGHTLY_MODELS,
     NIGHTLY_PARAMS,
     VERIFIERS,
@@ -45,7 +46,8 @@ from nightly_scores import (  # noqa: E402
 )
 from tests.test_sector_ols import _seed_sector  # noqa: E402
 
-WORKFLOW_DIR = Path(__file__).resolve().parents[1] / ".github" / "workflows"
+ROOT = Path(__file__).resolve().parents[1]
+WORKFLOW_DIR = ROOT / ".github" / "workflows"
 WORKFLOW = WORKFLOW_DIR / "nightly-scores.yml"
 DAILY = WORKFLOW_DIR / "daily-incremental.yml"
 
@@ -159,32 +161,77 @@ class TestHeavyAutomationRegistry:
         assert not stale, f"heavy でないのに登録されている: {sorted(stale)}"
 
     def test_workflow_entries_point_at_a_file_that_runs_the_model(self):
-        """ワークフロー名を書いたら、実在し**そのモデルを実際に回す**ことまで確かめる。
+        """GHA ワークフロー名を書いたら、実在し**そのモデルを実際に回す**ことまで確かめる。
 
         存在しないファイル名や、別のモデルしか回さないワークフローを書いても通って
         しまうと、レジストリが「登録した気になる」だけの飾りになる。
+
+        **さらに schedule が生きていることまで見る**。#503 で正本がローカルへ移り、
+        月次3本の cron を止めたとき、レジストリの値は yml を指したまま残った＝
+        「登録はあるが動かない」という嘘を CI が素通しした（#504）。yml を指すなら
+        その cron が実際に回っていることが登録の意味である。
         """
         for name, automation in HEAVY_AUTOMATION.items():
-            if automation.startswith(EXEMPT_PREFIX):
+            if automation.startswith((EXEMPT_PREFIX, LOCAL_PREFIX)):
                 continue
             path = WORKFLOW_DIR / automation
             assert path.is_file(), f"{name}: ワークフロー {automation} が存在しない"
-            if automation == WORKFLOW.name:
-                # 夜間バッチは実行対象を YAML でなく NIGHTLY_MODELS が持つ
-                assert name in NIGHTLY_MODELS, (
-                    f"{name} は {automation} 登録だが NIGHTLY_MODELS に無い"
-                )
-            else:
-                assert name in path.read_text(encoding="utf-8"), (
-                    f"{name}: {automation} の中にモデル名が現れない＝実際には回していない"
-                )
+            assert name in path.read_text(encoding="utf-8"), (
+                f"{name}: {automation} の中にモデル名が現れない＝実際には回していない"
+            )
+            assert _triggers(_load(path)).get("schedule"), (
+                f"{name}: {automation} の schedule が止まっている＝登録が実体を指していない。"
+                f"ローカルへ移したなら 'local:<スクリプト>' へ書き換えること"
+            )
+
+    def test_local_entries_point_at_a_batch_that_runs_the_model(self):
+        """`local:` を書いたら、そのモジュールが実際にこのモデルを回すことを確かめる。
+
+        照合先は各バッチの `heavy_models()`。**列挙を書き写した定数ではなく実体**
+        （`steps_for()` の argv や `NIGHTLY_MODELS`）から導かれるので、ステップを
+        入れ替えればここが追随する。
+        """
+        import importlib
+
+        for name, automation in HEAVY_AUTOMATION.items():
+            if not automation.startswith(LOCAL_PREFIX):
+                continue
+            rel = automation[len(LOCAL_PREFIX):].strip()
+            path = ROOT / rel
+            assert path.is_file(), f"{name}: ローカルバッチ {rel} が存在しない"
+            module = importlib.import_module(rel.removesuffix(".py").replace("/", "."))
+            fn = getattr(module, "heavy_models", None)
+            assert callable(fn), (
+                f"{name}: {rel} に heavy_models() が無い＝何を回すか機械的に確かめられない"
+            )
+            assert name in fn(), (
+                f"{name}: {rel} の heavy_models() に現れない＝実際には回していない"
+            )
+
+    def test_local_batches_have_a_task_installer(self):
+        """ローカル駆動には**タスクスケジューラ登録**という CI から見えない一段がある。
+
+        「登録があること ≠ 動いていること」の距離が GHA より1段長い。せめて登録手順が
+        再現可能な形で存在することは縛る——手順が人の記憶にしか無いと、PC を入れ替えた
+        時点で黙って消える（そして失敗は出ない）。
+        """
+        for name, automation in HEAVY_AUTOMATION.items():
+            if not automation.startswith(LOCAL_PREFIX):
+                continue
+            stem = Path(automation[len(LOCAL_PREFIX):].strip()).stem   # run_nightly
+            installer = ROOT / "scripts" / f"install_{stem.removeprefix('run_')}_task.ps1"
+            assert installer.is_file(), (
+                f"{name}: 登録スクリプト {installer.name} が無い＝起動手順が再現できない"
+            )
 
     def test_nightly_models_are_registered_as_nightly(self):
-        """逆向きの整合。夜間バッチに載せたらレジストリ側も夜間になっていること。"""
+        """逆向きの整合。夜間バッチに載せたらレジストリ側も夜間バッチを指していること。"""
+        from scripts.run_nightly import heavy_models
+
         for name in NIGHTLY_MODELS:
-            assert HEAVY_AUTOMATION.get(name) == WORKFLOW.name, (
-                f"{name} は NIGHTLY_MODELS だが HEAVY_AUTOMATION では "
-                f"{HEAVY_AUTOMATION.get(name)!r} になっている"
+            entry = HEAVY_AUTOMATION.get(name, "")
+            assert entry.startswith(LOCAL_PREFIX) and name in heavy_models(), (
+                f"{name} は NIGHTLY_MODELS だが HEAVY_AUTOMATION では {entry!r} になっている"
             )
 
     def test_exemptions_state_a_reason(self):

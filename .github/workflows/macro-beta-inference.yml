@@ -57,7 +57,10 @@ name: "[補完] M-1 per-stock 階層マクロ・ベータ推論バッチ"
 on:
   # ⛔ 2026-08-20: schedule を停止（#503・ADR-0038）。**正本がローカル PostgreSQL へ移った**ため、
   #    GHA から回すと `macro_beta_loadings` が Supabase 側だけ前進して正本と分岐する。
-  #    **代替経路**: ローカルの月次バッチへ移す（#503 Phase 2）。移すまでは手動で回す。
+  #    **代替経路**: ローカルの月次バッチ `run_monthly.ps1`（タスクスケジューラ・毎月1日
+  #    JST 01:00・#504）の `macro_beta` ステップ。draws/tune/chains/r-hat-threshold は
+  #    ここと同値で、jax/numpyro をローカル venv へ入れて同じ nuts_sampler で回す
+  #    （純 Python バックエンドは実測 75秒/draw で現実的な時間に収まらない）。
   #    **復旧条件**: 正本を Supabase へ戻す決定をしたときだけ。
   # schedule:
   #   - cron: '0 0 1 * *'   # UTC 00:00 = JST 09:00、毎月1日（→05:40Z・daily-incremental 08:17Z の前に収まる）

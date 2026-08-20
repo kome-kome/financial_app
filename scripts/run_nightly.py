@@ -12,6 +12,9 @@ cp932 扱いになって日本語が化ける／`python -c` に渡す文字列�
 ステップ順や失敗時の扱いを pytest で縛れること（`tests/test_run_nightly.py`）。
 `run_nightly.ps1` はこのモジュールを呼ぶだけの薄い起動口である。
 
+骨格（ステップ間で止めない・足跡を残す・失敗を起票する）は `scripts/batch_common.py`
+にあり、月次（`run_monthly.py`）と共有する。ここが持つのは**何を回すか**だけ。
+
 ## 設計の中心: ステップ間で止めない
 
 収集が落ちてもスコア更新は前日データで走らせ、**両方の結果をログに残す**。片方の失敗で
@@ -33,39 +36,37 @@ GHA の notify-failure（#414）に相当する通知は `gh issue create` で�
 実行:
     python -m scripts.run_nightly              # 全ステップ
     python -m scripts.run_nightly --dry-run    # 実行計画だけ出す
-    python -m scripts.run_nightly --steps incremental,scores
+    python -m scripts.run_nightly --steps pipeline,scores
     python -m scripts.run_nightly --no-issue   # 失敗しても Issue を起票しない
 
 出力は ASCII 記号のみ（Windows cp932 リダイレクト対策）。
 """
 from __future__ import annotations
 
-import argparse
-import os
 import subprocess
 import sys
-from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, Sequence
 
-ROOT = Path(__file__).resolve().parents[1]
-LOG_DIR = ROOT / ".logs"
+from scripts import batch_common as bc
+from scripts.batch_common import LOG_DIR, ROOT, Runner, Step  # noqa: F401 （既存 import 互換）
 
 # 最終成功・最終実行の足跡を置く app_settings のキー。
 KEY_LAST_RUN = "nightly_last_run"
 KEY_LAST_SUCCESS = "nightly_last_success"
 
 # 失敗を起票するときのラベル（GHA の notify-failure と同じ運用に載せる）。
-ISSUE_LABELS = ("ops", "priority:high")
+ISSUE_LABELS = bc.ISSUE_LABELS
 
-
-@dataclass(frozen=True)
-class Step:
-    """1ステップぶんの実行単位。`why` は失敗時のログに出す＝何が止まったかを言葉で残す。"""
-    name: str
-    argv: tuple[str, ...]
-    why: str
+SPEC = bc.BatchSpec(
+    name="夜間バッチ",
+    log_prefix="nightly",
+    key_run=KEY_LAST_RUN,
+    key_success=KEY_LAST_SUCCESS,
+    job_label="nightly-local",
+    issue_title="[ops] ローカル夜間バッチ失敗: {failed}",
+    headline="ローカル夜間バッチ（`scripts/run_nightly.py`）でステップが失敗した。",
+)
 
 
 def steps_for(python: str) -> tuple[Step, ...]:
@@ -90,173 +91,37 @@ def steps_for(python: str) -> tuple[Step, ...]:
     )
 
 
-def _utc_now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+def heavy_models() -> tuple[str, ...]:
+    """このバッチが実際に回す heavy プラグイン名（`HEAVY_AUTOMATION` の照合先）。
+
+    `nightly_scores.py` を引数なしで呼ぶ＝既定の `NIGHTLY_MODELS` がそのまま対象。
+    列挙をここへ書き写すと二重管理になるので、実体から取る。
+    """
+    from nightly_scores import NIGHTLY_MODELS
+
+    return tuple(NIGHTLY_MODELS)
 
 
-def log_path(now: Optional[datetime] = None) -> Path:
-    """日次ローテートのログパス。日付は**ローカル時刻**で切る（人が翌朝見るため）。"""
-    stamp = (now or datetime.now()).strftime("%Y%m%d")
-    return LOG_DIR / f"nightly_{stamp}.log"
-
-
-class Runner:
-    """ステップ実行とログ出力。テストから差し替えられるよう subprocess を1箇所に閉じる。"""
-
-    def __init__(self, log: Path, echo=print):
-        self.log = log
-        self.echo = echo
-        self._fh = None
-
-    def __enter__(self):
-        self.log.parent.mkdir(parents=True, exist_ok=True)
-        self._fh = self.log.open("a", encoding="utf-8")
-        return self
-
-    def __exit__(self, *exc):
-        if self._fh:
-            self._fh.close()
-        return False
-
-    def write(self, line: str) -> None:
-        self.echo(line)
-        if self._fh:
-            self._fh.write(line + "\n")
-            self._fh.flush()
-
-    def run(self, step: Step) -> int:
-        """1ステップ実行し exit code を返す。**例外は投げない**（次のステップへ進むため）。"""
-        self.write(f"[{_utc_now_iso()}] START {step.name}: {step.why}")
-        try:
-            proc = subprocess.run(step.argv, cwd=str(ROOT), capture_output=True, text=True,
-                                  encoding="utf-8", errors="replace")
-        except OSError as e:
-            self.write(f"[{_utc_now_iso()}] ERROR {step.name}: 起動できない: {e}")
-            return 127
-        if self._fh:
-            self._fh.write(proc.stdout or "")
-            self._fh.write(proc.stderr or "")
-            self._fh.flush()
-        tail = (proc.stdout or proc.stderr or "").strip().splitlines()[-1:] or [""]
-        self.write(f"[{_utc_now_iso()}] END   {step.name}: exit={proc.returncode} | {tail[0][:160]}")
-        return proc.returncode
+def log_path(now=None) -> Path:
+    return bc.log_path(SPEC.log_prefix, now)
 
 
 def record_footprint(results: dict[str, int]) -> Optional[str]:
-    """`app_settings` へ足跡を書く。**DB が死んでいてもバッチは落とさない**。
-
-    ここで raise すると「収集は通ったのに記録だけ失敗した」ときに全体が異常終了し、
-    翌朝の判断を誤らせる。書けなかった旨を戻り値で返してログに出すに留める。
-    """
-    try:
-        from database import SessionLocal, upsert_setting
-    except Exception as e:      # noqa: BLE001
-        return f"database を import できない: {e}"
-    db = None
-    try:
-        db = SessionLocal()
-        now = _utc_now_iso()
-        upsert_setting(db, KEY_LAST_RUN, now)
-        if all(code == 0 for code in results.values()):
-            upsert_setting(db, KEY_LAST_SUCCESS, now)
-        return None
-    except Exception as e:      # noqa: BLE001
-        return f"app_settings へ書けない: {e}"
-    finally:
-        if db is not None:
-            db.close()
+    return bc.record_footprint(results, SPEC.key_run, SPEC.key_success)
 
 
 def issue_body(results: dict[str, int], log: Path) -> str:
-    failed = [n for n, c in results.items() if c != 0]
-    lines = [
-        "ローカル夜間バッチ（`scripts/run_nightly.py`）でステップが失敗した。",
-        "",
-        f"- 実行時刻(UTC): {_utc_now_iso()}",
-        f"- ログ: `{log}`",
-        "",
-        "| step | exit |",
-        "|---|---|",
-    ]
-    lines += [f"| {n} | {c} |" for n, c in results.items()]
-    lines += [
-        "",
-        f"失敗したステップ: {', '.join(failed)}",
-        "",
-        "> 正本はローカル PostgreSQL（#503・ADR-0038）。GHA からは回していないので、",
-        "> このバッチが止まると鮮度も止まる（失敗が GitHub 上に現れないことに注意）。",
-    ]
-    return "\n".join(lines)
+    return bc.issue_body(results, log, SPEC.headline)
 
 
 def notify(results: dict[str, int], log: Path, run=subprocess.run) -> Optional[str]:
-    """失敗を Issue として起票する。gh が無い/失敗しても None 以外を返すだけで落とさない。"""
-    failed = [n for n, c in results.items() if c != 0]
-    if not failed:
-        return None
-    argv = ["gh", "issue", "create",
-            "--title", f"[ops] ローカル夜間バッチ失敗: {', '.join(failed)}",
-            "--body", issue_body(results, log)]
-    for label in ISSUE_LABELS:
-        argv += ["--label", label]
-    try:
-        proc = run(argv, cwd=str(ROOT), capture_output=True, text=True,
-                   encoding="utf-8", errors="replace")
-    except OSError as e:
-        return f"gh を起動できない: {e}"
-    if proc.returncode != 0:
-        return f"gh issue create が失敗: {(proc.stderr or '').strip()[:200]}"
-    return None
+    return bc.notify(results, log, SPEC.issue_title, issue_body(results, log), run=run)
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
-    ap = argparse.ArgumentParser(description="夜間バッチのローカル駆動（#503）")
-    ap.add_argument("--steps", help="実行するステップをカンマ区切りで限定（既定は全部）")
-    ap.add_argument("--dry-run", action="store_true", help="実行計画だけ出して何もしない")
-    ap.add_argument("--no-issue", action="store_true", help="失敗しても Issue を起票しない")
-    args = ap.parse_args(argv)
-
-    # 正本はローカル。**明示的に立てる**——親プロセスが prod を持っていても引きずらない。
-    os.environ["FINAPP_DB_TARGET"] = "local"
-    os.environ.setdefault("FINAPP_JOB", "nightly-local")
-
-    all_steps = steps_for(sys.executable)
-    if args.steps:
-        picked = [s.strip() for s in args.steps.split(",") if s.strip()]
-        unknown = [p for p in picked if p not in {s.name for s in all_steps}]
-        if unknown:
-            raise SystemExit(f"中止: 未知のステップ {unknown}"
-                             f"（有効なのは {[s.name for s in all_steps]}）")
-        all_steps = tuple(s for s in all_steps if s.name in picked)
-
-    log = log_path()
-    if args.dry_run:
-        print(f"log: {log}")
-        for s in all_steps:
-            print(f"  {s.name}: {' '.join(s.argv)}  # {s.why}")
-        print("ドライラン（何も実行していない）")
-        return 0
-
-    results: dict[str, int] = {}
-    with Runner(log) as runner:
-        runner.write("=" * 70)
-        runner.write(f"[{_utc_now_iso()}] 夜間バッチ開始（正本=ローカル・#503）")
-        for step in all_steps:
-            results[step.name] = runner.run(step)      # 失敗しても次へ進む
-        runner.write("-" * 70)
-        for name, code in results.items():
-            runner.write(f"  {'OK    ' if code == 0 else 'FAILED'} {name} (exit={code})")
-
-        note = record_footprint(results)
-        if note:
-            runner.write(f"[warn] 足跡を残せなかった: {note}")
-        if not args.no_issue:
-            note = notify(results, log)
-            if note:
-                runner.write(f"[warn] 通知できなかった: {note}")
-        runner.write(f"[{_utc_now_iso()}] 夜間バッチ終了")
-
-    return sum(1 for c in results.values() if c != 0)
+    # フックは**ここでモジュール属性として解決する**——テストが差し替えたときに効くように。
+    hooks = bc.Hooks(log_path=log_path, record_footprint=record_footprint, notify=notify)
+    return bc.run_batch(SPEC, steps_for(sys.executable), hooks, argv)
 
 
 if __name__ == "__main__":
