@@ -36,8 +36,8 @@ Egress 枠が復旧する 2026-08-18 を待たずに、本番と同一のコー�
 
 ## テーブル順序と FK
 
-ミラー範囲は全18表から `stock_price_daily`（183日ローリング・再収集可能）と
-`xbrl_raw_documents`（BLOB で重い）を除いた16表。FK は4本ともに `companies.edinet_code`
+ミラー範囲は全18表から `xbrl_raw_documents`（BLOB・0行）を除いた17表。FK は4本ともに
+`companies.edinet_code`
 向きなので、`Base.metadata.sorted_tables`（依存順）に従えば `companies` が依存側より先に来る。
 **`edinet` は superuser でないため `pg_restore --disable-triggers` が使えず**、順序で満たすしかない。
 並列 `--jobs` は順序が崩れるので使わない。
@@ -63,10 +63,15 @@ from database import (
 )
 
 # ── ミラー範囲 ────────────────────────────────────────────────────────────────
-# stock_price_daily: DAILY_WINDOW_DAYS=183 のローリング削除で常に再構成される＋weekly から
-#   概ね復元できるため、300MB 枠を割く価値がない。
 # xbrl_raw_documents: gzip BLOB。分析経路は一切読まない（財務は financial_records 側）。
-MIRROR_EXCLUDED = ("stock_price_daily", "xbrl_raw_documents")
+#   #219 で raw_xbrl_json を落として以降 0 行のままで、再取得元は EDINET にある。
+#
+# stock_price_daily は 2026-08-20 に**除外から外した**。「183日ローリングで再構成できるから
+# 300MB 枠を割く価値がない」は **Supabase が正本だったとき**の理屈であって、正本がローカルへ
+# 移った後は daily はローカルにしか無い正本データになる（ADR-0038）。しかも
+# `_recompute_weeks_from_daily` の入力かつ gap-fill の基準なので、空のまま収集を始めると
+# 全社が183日窓を Yahoo から引き直すことになる。
+MIRROR_EXCLUDED = ("xbrl_raw_documents",)
 
 # ── 同期モード ────────────────────────────────────────────────────────────────
 MODE_FULL = "FULL"            # 全置換（DELETE -> INSERT）。総入替か行数極小の表
@@ -126,6 +131,11 @@ SYNC_PLAN: dict[str, TableSync] = {
         note="running -> done の後追い UPDATE があるため、未完了行は高水位に関わらず毎回取り直す"),
 
     # × 時刻列が無い / upsert で進まない
+    "stock_price_daily": TableSync(
+        MODE_WATERMARK, "trade_date", DAILY_WINDOW_DAYS,
+        note=f"時刻列を持たない。表そのものが直近 {DAILY_WINDOW_DAYS} 日のローリング窓で、"
+             f"Yahoo の遡及調整（分割）は窓全体を書き換えうるので overlap も窓と同じ"
+             f"{DAILY_WINDOW_DAYS}日＝実質全件になる。取り落とすより取り直す方を選ぶ"),
     "stock_price_weekly": TableSync(
         MODE_WATERMARK, "week_start", WEEKLY_OVERLAP_DAYS,
         note=f"時刻列を持たない。_recompute_weeks_from_daily が最大 DAILY_WINDOW_DAYS"
@@ -166,10 +176,14 @@ def mirror_tables() -> tuple[str, ...]:
 def truncate_targets(tables: Iterable[str]) -> tuple[str, ...]:
     """TRUNCATE に含める必要がある表を**明示列挙**して返す（`CASCADE` は使わない）。
 
-    `companies` を空にするには、それを参照する `stock_price_daily`（ミラー範囲外）も
-    同時に TRUNCATE される必要がある。`CASCADE` で済ませると
-    **「ミラー範囲外の表が黙って消える」ことがコードから読めなくなる**ので、
-    メタデータから機械的に洗い出して名前で並べる。
+    `companies` を空にするには、それを参照する表もすべて同時に TRUNCATE される必要がある。
+    `CASCADE` で済ませると **「ミラー範囲外の表が黙って消える」ことがコードから読めなくなる**
+    ので、メタデータから機械的に洗い出して名前で並べる。
+
+    `stock_price_daily` をミラー範囲へ入れた（2026-08-20）ことで、現在この関数が足す
+    範囲外の表は**無い**（残る除外 `xbrl_raw_documents` は FK を持たない）。それでも関数を
+    残すのは、FK 子を持つ表を将来また範囲外にしたときに黙って TRUNCATE が失敗するのを
+    防ぐため＝ミラー範囲が FK 閉包であることの検査点でもある。
     """
     picked = list(tables)
     targets = list(picked)

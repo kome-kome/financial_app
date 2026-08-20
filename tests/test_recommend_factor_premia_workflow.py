@@ -89,24 +89,10 @@ def _daily_chain_hours_utc() -> set[int]:
     return {(start + i) % 24 for i in range(span_hours + 1)}
 
 
-class TestDailySchedulePause:
-    """daily-incremental の schedule 停止は、理由と復旧条件が yml に残っている場合だけ許す。
-
-    株価鮮度の担い手（Phase 4 の Yahoo gap-fill）を止めても **failure は一切出ない**ので、
-    notify-failure（#414）でも macro-health（#420）でも拾えない。気づく経路が人間の
-    目視しかない点は ADR-0031 の「heavy を足したが自動実行が無い」と同型なので、
-    「止めるなら理由と戻し方を同じファイルに書く」ことを CI で強制する。
-    """
-
-    def test_pause_is_documented(self):
-        path = WORKFLOW_DIR / "daily-incremental.yml"
-        if _crons(_load(path)):
-            return                                        # 通常運転（schedule 有効）
-        text = path.read_text(encoding="utf-8")
-        assert "一時停止" in text and "復旧条件" in text, (
-            "daily-incremental の schedule が無いのに、停止理由と復旧条件が yml に無い。"
-            "株価鮮度が止まったまま誰も気づかない（失敗が出ないので通知では拾えない）"
-        )
+# 停止中の schedule に「理由・復旧条件・代替経路」を課す検査は
+# `tests/test_workflow_schedule_pauses.py` へ集約した（#503 の正本反転で daily-incremental
+# 以外にも3本止めたため、1ファイル専用の検査では足りなくなった）。ここでは cron が
+# **有効なときの形**だけを見る。
 
 
 @pytest.fixture(scope="module")
@@ -116,18 +102,33 @@ def workflow() -> dict:
 
 @pytest.fixture(scope="module")
 def cron(workflow) -> list[str]:
-    return _crons(workflow)[0].split()
+    crons = _crons(workflow)
+    if not crons:
+        pytest.skip("schedule 停止中（停止の作法は test_workflow_schedule_pauses.py が見る）")
+    return crons[0].split()
 
 
 # ── 1. 定期実行の存在 ────────────────────────────────────────────────────────
 
 class TestSchedule:
-    def test_monthly_cron_exists(self, workflow):
-        """cron が消えても「失敗」しない＝無実行は notify-failure で検知できない。"""
-        assert _crons(workflow), (
-            "schedule cron が無い。手動のみへ戻すと、実行されないこと自体に誰も気づかず"
-            "『統計的最適化』プリセットが古い重みで固まる（#423 子5 の発生経緯そのもの）"
+    def test_monthly_cron_exists_or_pause_is_documented(self, workflow):
+        """cron が消えても「失敗」しない＝無実行は notify-failure で検知できない。
+
+        2026-08-20 の正本反転（#503）で、このバッチの自動実行先は GHA からローカルへ
+        移った。**「cron が必ずある」は前提にできなくなった**が、黙って消えるのは依然
+        許さない——停止中なら理由・復旧条件・代替経路が yml にあることを要求する。
+        """
+        if _crons(workflow):
+            return
+        from tests.test_workflow_schedule_pauses import REQUIRED_MARKERS, paused_workflows
+
+        assert WORKFLOW in paused_workflows(), (
+            "cron が無いのに『停止中』としても検出されない＝schedule ごと消されている。"
+            "手動のみへ戻すと、実行されないこと自体に誰も気づかず『統計的最適化』プリセットが"
+            "古い重みで固まる（#423 子5 の発生経緯そのもの）"
         )
+        text = WORKFLOW.read_text(encoding="utf-8")
+        assert all(m in text for m in REQUIRED_MARKERS)
 
     def test_cron_is_monthly_on_a_fixed_day(self, cron):
         minute, hour, dom, month, dow = cron

@@ -84,13 +84,20 @@ class TestOrdering:
                             f"{parent} が {name} より後ろにある（restore で FK 違反）"
 
     def test_truncate_targets_include_out_of_scope_children(self):
-        """`companies` を空にするには `stock_price_daily` も TRUNCATE する必要がある。
+        """ミラー範囲の表を参照する FK 子は、範囲外でも TRUNCATE 対象に入る必要がある。
 
         `CASCADE` に頼らず明示列挙しているので、対象が漏れると TRUNCATE 自体が失敗する。
+        **表名を直書きせずメタデータから導出する**——旧版は `stock_price_daily` を
+        直書きしていたが、2026-08-20 にその表をミラー範囲へ入れた時点で検査の意図
+        （範囲が FK 閉包であること）と文面が食い違った。
         """
-        targets = mc.truncate_targets(mc.mirror_tables())
-        assert "stock_price_daily" in targets
-        assert set(mc.mirror_tables()) <= set(targets)
+        tables = set(mc.mirror_tables())
+        targets = set(mc.truncate_targets(mc.mirror_tables()))
+        assert tables <= targets
+        children = {t.name for t in Base.metadata.tables.values()
+                    for c in t.columns for fk in c.foreign_keys
+                    if fk.column.table.name in tables}
+        assert children <= targets, f"FK 子が TRUNCATE 対象から漏れている: {children - targets}"
 
 
 # ── 3. argv（純関数）──────────────────────────────────────────────────────────
@@ -270,9 +277,15 @@ class TestSelectedTables:
         assert got.index("companies") < got.index("financial_records")
 
     def test_out_of_scope_table_is_rejected(self):
+        """除外表を `--tables` で指定したら弾く（typo が exit 0 で通ると黙って欠ける）。
+
+        対象は `MIRROR_EXCLUDED` から取る。直書きすると、その表を範囲へ入れた日に
+        検査が「範囲内の表を弾け」という別物へ化ける（2026-08-20 の `stock_price_daily`）。
+        """
         from scripts.mirror_verify import selected_tables
+        assert mc.MIRROR_EXCLUDED, "除外が空なら、この検査は成立しない"
         with pytest.raises(SystemExit):
-            selected_tables(self._args("stock_price_daily"))
+            selected_tables(self._args(mc.MIRROR_EXCLUDED[0]))
 
 
 class TestChecksumExpr:

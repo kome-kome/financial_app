@@ -27,10 +27,12 @@ Supabase が Egress 超過で restricted になるとアプリも分析も一切
 
 ## TRUNCATE の連鎖について
 
-`companies` を空にするには、それを参照する `stock_price_daily`（ミラー範囲外）も
-同時に空になる必要がある＝`CASCADE` が必須。ミラー範囲外を消すことになるので
-**ドライランで必ず件数付きで予告する**。`stock_price_daily` は 183 日ローリングで
-再収集可能なため、これは許容できる副作用として設計に織り込んである。
+`companies` を空にするには、それを参照する表も同時に空になる必要がある。範囲外の表を
+巻き込むときは **ドライランで必ず件数付きで予告する**（`collateral_rows`）。
+
+`stock_price_daily` をミラー範囲へ入れた 2026-08-20 以降、巻き込まれる範囲外の表は無い
+（残る除外 `xbrl_raw_documents` は FK を持たない）。予告の仕組みは、FK 子を持つ表を将来
+また範囲外にしたときのために残してある。
 
 実行:
     python -m scripts.mirror_pull                            # ドライラン（既定・何も変更しない）
@@ -87,10 +89,10 @@ def check_versions(conn) -> None:
 def collateral_rows(conn, tables) -> dict[str, int]:
     """TRUNCATE に巻き込まれる「ミラー範囲外」の表とその件数。
 
-    `companies` を空にするには、それを参照する `stock_price_daily`（ミラー範囲外）も
-    同時に TRUNCATE される必要がある。`CASCADE` で済ませると
-    **消える表がコードから読めなくなる**ので `mirror_common.truncate_targets()` が
-    メタデータから明示列挙し、ここで件数を数えてドライランに出す。
+    `companies` を空にするには、それを参照する表も同時に TRUNCATE される必要がある。
+    `CASCADE` で済ませると **消える表がコードから読めなくなる**ので
+    `mirror_common.truncate_targets()` がメタデータから明示列挙し、ここで件数を数えて
+    ドライランに出す。2026-08-20 現在、該当する範囲外の表は無い（空 dict が返る）。
     """
     extra = [t for t in mc.truncate_targets(tables) if t not in tables]
     return {t: conn.execute(text(f'SELECT count(*) FROM public."{t}"')).scalar()

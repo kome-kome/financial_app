@@ -46,8 +46,14 @@ name: "[補完] recommend Fama-MacBeth ファクタープレミアム推定バ�
 # 各月の最小社数を担保する（recommend_factor_premia.py の docstring 参照）。
 
 on:
-  schedule:
-    - cron: '0 22 5 * *'   # UTC 22:00 = JST 翌07:00、毎月5日（→22:20Z）
+  # ⛔ 2026-08-20: schedule を停止（#503・ADR-0038）。**正本がローカル PostgreSQL へ移った**ため、
+  #    GHA から回すと `recommend_factor_premia` が Supabase 側だけ前進して正本と分岐する。
+  #    この cron は #423 子5 で「実行履歴ゼロのまま 37 期の重みで固着していた」のを直した
+  #    ものなので、**止めれば同じ固着へ戻る**（無実行は失敗が出ず通知では拾えない）。
+  #    **代替経路**: ローカルの月次バッチへ移す（#503 Phase 2）。移すまでは手動で回す。
+  #    **復旧条件**: 正本を Supabase へ戻す決定をしたときだけ。
+  # schedule:
+  #   - cron: '0 22 5 * *'   # UTC 22:00 = JST 翌07:00、毎月5日（→22:20Z）
   workflow_dispatch:
     inputs:
       min_companies_per_period:
