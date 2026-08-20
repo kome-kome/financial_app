@@ -127,6 +127,16 @@ stale なパネルで μ̂ を生成しても failure は出ない（ADR-0031/00
 直近世代を拾う。固定キーにすると初日以降 save が起きず、基準が古いまま凍って 27週窓では届かなく
 なり、毎晩フルロードへ退化する。
 
+**2026-08-21 追記（#498 の判断＝「入れない」で確定）**: 月次3本へ `actions/cache` を広げるかは
+#498 で保留していたが、**#503/#504 でその3本ごとローカルのタスクスケジューラへ移した**ため
+論点そのものが消えた。決め手は #498 の論点2——**GitHub のキャッシュは7日アクセスが無いと退避される**
+ので、月1回の run では毎回 `no-cache-file` で MISS ＝入れても効果はゼロだった。ローカルでは
+`.weekly_cache/` がディスクに残り続けるので、月次バッチは**何もしなくても差分ロードの恩恵を受ける**
+（2026-08-21 実測: `[wpcache] HIT weekly_v1_wv0.pkl cached=1,293,208 fresh=103,975`）。
+`tests/test_nightly_scores.py::TestWeeklyCacheStep::test_only_nightly_scores_uses_actions_cache`
+（他の yml が `actions/cache` を使っていないことを固定する検査）はそのまま生かす——GHA へ戻す
+決定をしたときに、同じ論点を踏まずに済むため。
+
 ### 8. `scripts/_cache.py` は再利用しない
 
 `scripts/_cache.py`（#355）は docstring で「検証専用」と宣言し、`tests/test_column_scoping.py` は
