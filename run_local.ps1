@@ -1,23 +1,24 @@
 ﻿<#
 .SYNOPSIS
-    financial_app をローカル PostgreSQL 読取レプリカ（financial_db）で起動する。
+    financial_app を正本のローカル PostgreSQL（financial_db）で起動する。
 
 .DESCRIPTION
-    Supabase が Egress 超過で restricted になるとアプリごと止まる（2026-07・2026-08 に2回発生）。
-    その間も GUI を使えるように、接続先をローカルの読取レプリカへ向けて起動する。
+    **2026-08-20（#503・ADR-0038）に正本がローカルへ移った。** それまでこのスクリプトは
+    「Supabase 障害中の待避先」だったが、いまは平常運転の入口である。
 
-    既定では既存の tkinter ランチャー `launch.py` を **接続先ラジオの初期値をローカルにした状態**で
-    起動する（ブラウザ自動オープン・ポート退避・ブラウザ切断で自動停止まで launch.py の機能）。
-    launch.py は素で起動すると毎回 `prod` 始まり＝Supabase を叩きにいくため、restricted 中は
-    起動直後に固まる。このスクリプトは `FINAPP_DB_TARGET=local` を先に立てて**一度も本番へ触らせない**。
+    既定では既存の tkinter ランチャー `launch.py` を起動する（ブラウザ自動オープン・
+    ポート退避・ブラウザ切断で自動停止まで launch.py の機能）。#503 で launch.py と
+    database.py の既定そのものが `local` になったので `FINAPP_DB_TARGET=local` の明示は
+    冗長だが、**このスクリプトが何を保証するのかを読んで分かるように**残してある。
 
     接続先の切替は database.resolve_database_url() が FINAPP_DB_TARGET で行う（#481 B-1）。
-    **環境変数は自プロセスとその子にしか立てない**。.env は書き換えないので、Supabase 復旧後は
-    素の `python launch.py` に戻すだけで prod へ復帰する（戻し忘れ事故が起きない）。
+    **環境変数は自プロセスとその子にしか立てない**。.env は書き換えない。
 
-    運用方針は「読取専用」。ミラー（scripts/mirror_*.py）は Supabase を正本とする読取レプリカで、
-    逆向きに書く経路をコードとして持たない（ADR-0035）。/collection 画面の収集ボタンや
-    collector.py をローカルへ向けて回すと、復旧後に正本と内容が分岐して手動整合が必要になる。
+    書き込んでよい。収集（/collection 画面のボタン・collector.py・scripts/run_nightly.py）は
+    すべてこのローカル DB に対して行う——それが正本だからである。
+    Supabase 側は 2026-08-07 の断面で更新を止めてあり、Render の閲覧用に残しているだけ。
+    ミラー（scripts/mirror_*.py）の dest がローカル限定である制約（ADR-0035）は維持している
+    ＝ローカルから Supabase へ書き戻す経路はコードとして存在しない。
 
 .PARAMETER Console
     tkinter ランチャーを使わず、uvicorn をこのコンソールで前面起動する（ログを直接見たいとき）。
@@ -64,8 +65,10 @@ if (-not $Console) {
     }
 }
 
-# ── 接続先をローカルへ固定 ────────────────────────────────────────────────
+# ── 接続先をローカル（正本）へ固定 ────────────────────────────────────────
 # launch.py はこの値を接続先ラジオの初期値として読み、uvicorn の子プロセスへも引き継ぐ。
+# #503 以降は既定そのものが local なので冗長だが、親シェルが prod を持っていても
+# 引きずらないことをここで保証する（明示は防御であって重複ではない）。
 $env:FINAPP_DB_TARGET = "local"
 
 # ローカル読取は Supabase の Egress を1バイトも使わない。したがって:
@@ -117,8 +120,8 @@ if ($parts[0] -ne "OK") {
 Write-Host ""
 Write-Host "接続先 : $($parts[1])" -ForegroundColor Green
 Write-Host "データ : companies $($parts[2]) 社 / 週次株価 最新 $($parts[3])" -ForegroundColor Green
-Write-Host "注意   : 読取専用で使う（収集の実行は Supabase 復旧後・正本側で）" -ForegroundColor DarkYellow
-Write-Host "         stock_price_daily はミラー対象外のため空（日次チャートのみ非表示）" -ForegroundColor DarkYellow
+Write-Host "役割   : ここが正本（#503）。収集・スコア更新もこの DB に対して行う" -ForegroundColor DarkYellow
+Write-Host "         夜間バッチは scripts/run_nightly.py（run_nightly.ps1 から起動）" -ForegroundColor DarkYellow
 Write-Host ""
 
 # ── 起動 ──────────────────────────────────────────────────────────────────

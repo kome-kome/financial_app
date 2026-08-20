@@ -57,3 +57,6 @@ build/
 # デプロイ用ローカル設定
 .env.local
 .env.production
+
+# ローカル夜間バッチのログ（#503・scripts/run_nightly.py が日次ローテートで書く）
+.logs/
