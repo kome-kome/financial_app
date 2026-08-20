@@ -55,6 +55,7 @@ class TestMigrationIsComplete:
         "recommend_factor_premia.py",   # recommend-factor-premia.yml
         "macro_beta_inference.py",      # macro-beta-inference.yml
         "hyperparameter_search.py",     # tune-hyperparameters.yml
+        "_pipeline_vacuum.py",          # vacuum-maintenance.yml（正本側の受け皿・#290）
     ])
     def test_every_stopped_workflow_has_a_local_step(self, script):
         entrypoints = {Path(s.argv[1]).name for s in rm.steps_for("py")}
@@ -90,12 +91,20 @@ class TestStepOrder:
         names = _names()
         assert names.index("macro_beta") < names.index("tune:macro_risk_return")
 
+    def test_vacuum_runs_first(self):
+        """VACUUM FULL は ACCESS EXCLUSIVE ロックを取るので先頭（#290）。
+
+        後ろに置くと tune が長引いたぶん実行機会が減り、上限で打ち切られると
+        一度も走らない。**打ち切りは失敗として現れない**ので気づけない。
+        """
+        assert _names()[0] == "vacuum"
+
     def test_lightest_runs_first(self):
         """打ち切られても前方は当月分が揃う（nightly_scores の NIGHTLY_MODELS と同じ思想）。
 
         実測 factor_premia は約2分。tune は GHA で 300〜355分の timeout を積んでいた。
         """
-        names = _names()
+        names = [n for n in _names() if n != "vacuum"]   # vacuum はロック都合で別枠
         assert names[0] == "factor_premia"
 
     def test_m1_is_tuned_before_the_other_models(self):

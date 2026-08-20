@@ -42,13 +42,14 @@ Render の制約と運用形態に合わせて設計すること。
 | JST | タスク | 頻度 | 中身 | 備考 |
 |---|---|---|---|---|
 | **17:20** | `financial_app-nightly`（`run_nightly.ps1` → `scripts/run_nightly.py`） | 毎日 | `_pipeline_incremental.py`（XBRL 差分＋マクロ＋市場データ）→ `nightly_scores.py` | 大引 15:30・J-Quants 四本値 16:30・EDINET 受付終了 17:15 の後（#476 の確定時刻表）。`StartWhenAvailable` で停止していた日は次回起動時に追いつく。上限6時間（最悪 23:20 終了） |
-| **1日 01:00** | `financial_app-monthly`（`run_monthly.ps1` → `scripts/run_monthly.py`） | 毎月 | `recommend_factor_premia.py` → `macro_beta_inference.py` → `hyperparameter_search.py` ×3（M-1/M-3/M-2） | 日次の最悪ケース（23:20）の後で、翌日の日次 17:20 までの**16時間の窓**。上限もその幅（`PT16H`）。GHA 時代の3本（tune / macro-beta / factor-premia）の移設先（#504） |
+| **1日 01:00** | `financial_app-monthly`（`run_monthly.ps1` → `scripts/run_monthly.py`） | 毎月 | `_pipeline_vacuum.py` → `recommend_factor_premia.py` → `macro_beta_inference.py` → `hyperparameter_search.py` ×3（M-1/M-3/M-2） | 日次の最悪ケース（23:20）の後で、翌日の日次 17:20 までの**16時間の窓**。上限もその幅（`PT16H`）。GHA 時代の4本（vacuum / tune / macro-beta / factor-premia）の移設先（#504・#290） |
 | 任意（週次を想定） | `scripts/backup_push.py` | 週次 | 17表を `--compress=9` でダンプ → Storage へ | 夜間バッチと**別タスク**にする（遅延が道連れにならない）。実測 37.5MB/世代 |
 
 - **Egress はローカル駆動では発生しない**（ローカル読取は Supabase を1バイトも使わない）。
 - ステップ間で止めない設計なので、収集が落ちてもスコア更新は走る。両方の結果が `.logs/<batch>_YYYYMMDD.log` に残る。
 - 「走らなかった」ことは `app_settings` の `nightly_last_run` / `nightly_last_success`（月次は `monthly_*`）と、`/api/morning` の as-of ブロック（#416/#417）で見る。
 - **月次の並びは「依存順 ∧ 軽い順」**＝`macro_beta_loadings` は M-1 の入力なので推論が tune より先、かつ打ち切られても前方が揃うよう軽い順（factor_premia 実測 2.6分 → macro_beta → tune）。
+- **`vacuum` だけは別枠で先頭**（#290）。`VACUUM FULL` は ACCESS EXCLUSIVE ロックを取るので、後ろに置くと tune が長引いたぶん実行機会が減り、上限で打ち切られると一度も走らない。**週次ではなく月次で足りる**のは、`_pipeline_vacuum.py` が前段で per-table の `autovacuum_vacuum_scale_factor` を 0.02 へ較正するため dead tuple は 2% で回収され続け、月次で要るのは物理サイズの頭打ちだけだから。Supabase 時代に週次だったのは**枠を超えた瞬間 read-only になる崖**があったからで、ローカルにその崖は無い。
 - **上限で打ち切られても「失敗」としては現れない**（タスクスケジューラがプロセスを止めるだけで Issue も起票されない）。検知できるのは `monthly_last_success` が進まないことだけ。
 - **月次タスクの登録は XML 直渡し**（`scripts/install_monthly_task.ps1`）。PowerShell の `New-ScheduledTaskTrigger` に `-Monthly` は無く、CIM の `MSFT_TaskMonthlyTrigger` を組んでも `schtasks` の産物を渡し直しても `Register`/`Set-ScheduledTask` が "The parameter is incorrect" で弾く（2026-08-21 に実測）。**しかも非終了エラーなので `$ErrorActionPreference=Stop` でも止まらず「登録しました」と嘘が出る**ため、登録後に `Export-ScheduledTask` で日・上限・`StartWhenAvailable` を読み直して検証している。
 

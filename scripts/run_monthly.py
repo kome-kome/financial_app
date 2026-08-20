@@ -17,7 +17,7 @@ notify-failure でも macro-health でも拾えない。ADR-0031 が防ごうと
 
 ## ステップの並び
 
-    factor_premia → macro_beta → tune:macro_risk_return → tune:macro_dlm → tune:macro_gbdt
+    vacuum → factor_premia → macro_beta → tune:macro_risk_return → tune:macro_dlm → tune:macro_gbdt
 
 2つの制約の積:
 
@@ -27,6 +27,16 @@ notify-failure でも macro-health でも拾えない。ADR-0031 が防ごうと
    の `NIGHTLY_MODELS` と同じ思想）。実測 factor_premia は約2分、tune は GHA で
    300〜355分の timeout を積んでいた。tune の中では M-1 を先に置く——止まって困る
    度合いが最も高いのが M-1 の μ̂ だから。
+
+`vacuum` を先頭に置くのは、**ACCESS EXCLUSIVE ロックを取るから**である。後ろに置くと
+tune が長引いたぶんだけ実行機会が減り、上限（既定16時間）で打ち切られると一度も走らない。
+先頭なら必ず走り、他ステップとロックを奪い合うこともない。
+
+週次ではなく月次で足りると判断した理由: `_pipeline_vacuum.py` が前段で per-table の
+`autovacuum_vacuum_scale_factor` を 0.02 へ較正するので、dead tuple は 2% 溜まった時点で
+通常 VACUUM が回収し続ける（テーブル内再利用）。月次で要るのは**物理サイズの頭打ち**だけで、
+ローカルには Supabase の 500MB 枠のような崖が無い。Supabase 時代に週次だったのは、
+枠を超えた瞬間に read-only になる崖があったから。
 
 ## GHA と同じ引数を使う
 
@@ -94,6 +104,10 @@ SPEC = bc.BatchSpec(
 def steps_for(python: str) -> tuple[Step, ...]:
     """実行するステップ列。**順序に意味がある**（依存順 ∧ 軽い順・モジュール docstring 参照）。"""
     steps: list[Step] = [
+        Step("vacuum", (python, "_pipeline_vacuum.py"),
+             why="stock_price_daily / stock_price_weekly の index bloat 回収と "
+                 "per-table autovacuum の較正（#290）。正本がローカルへ移ってから"
+                 "メンテ経路が無かった"),
         Step("factor_premia",
              (python, "recommend_factor_premia.py",
               "--min-companies-per-period", "30", "--maxlags", "11", "--persist"),
