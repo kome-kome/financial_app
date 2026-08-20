@@ -207,3 +207,35 @@ class TestExportCsv:
         r = client.get("/api/export/csv")
         assert r.status_code == 200
         assert "'=IMPORTDATA" in r.text
+
+    def test_header_and_values_stay_aligned(self, db, make_metric):
+        """見出しと値が同じ定義（CSV_COLUMNS）から出ること（#489）。
+
+        見出しの列と値の列を別々に並べていた頃は、片方だけ足すと値が1つ隣へずれる
+        （**エラーにならない**）。1つの対から両方を導く形に変えたので、ここでは
+        「列数が一致する」ことと「代表的な値が正しい位置に出る」ことを縛る。
+        """
+        from routers.market import CSV_COLUMNS, CSV_FIELDS, CSV_HEADER
+
+        db.add(make_metric(pl_revenue=1234.0, per=9.5)); db.commit()
+        r = client.get("/api/export/csv")
+        assert r.status_code == 200
+        lines = [ln for ln in r.text.splitlines() if ln.strip()]
+        head, first = lines[0].split(","), lines[1].split(",")
+        assert head == list(CSV_HEADER)
+        assert len(first) == len(CSV_HEADER) == len(CSV_FIELDS) == len(CSV_COLUMNS)
+        assert first[CSV_FIELDS.index("pl_revenue")] == "1234.0"
+        assert first[CSV_FIELDS.index("per")] == "9.5"
+
+    def test_year_filter_still_applies_after_column_scoping(self, db, make_metric):
+        """列指定クエリへ変えたときに filter_by が使えなくなる（#489）。
+
+        `db.query(*cols)` は `filter_by` のエンティティを持たないため、明示条件へ
+        書き換えた。年で絞れなくなっても CSV は返るので**気づけない**種類の回帰。
+        """
+        db.add(make_metric(year=2023, pl_revenue=111.0))
+        db.add(make_metric(edinet_code="E00002", sec_code="0002", year=2024,
+                           pl_revenue=222.0))
+        db.commit()
+        body = client.get("/api/export/csv?year=2024").text
+        assert "222.0" in body and "111.0" not in body

@@ -830,13 +830,34 @@ def replace_macro_gbdt_scores(db, rows: list, snapshot_date: str | None = None,
     return len(objs)
 
 
+def _producer_score_map(db, model, *, with_r1: bool = False) -> dict:
+    """producer スコアテーブルから**消費列だけ**を引く（Issue #489・親 #478）。
+
+    M-2/M-3/M-4/M-6 の `*_scores` は列構成が同型で、読むのは `mu`（＋ R3 足切りゲートの
+    `r1_prime`）だけ。残りの `snapshot_date` / `snapshot_date_min` / `n_stale` /
+    `created_at` は as-of 表示のためにあり、`get_producer_asof` が別途1行だけ引く。
+    全列 ORM ロードのままだと、**`sell_ranking` / `recommend` / `/api/morning` の
+    リクエストのたび**に読まない4〜5列を銘柄数ぶん運ぶことになる。
+
+    例外を握って {} を返すのは列未 migration・未蓄積での graceful degrade（従来どおり）。
+    """
+    try:
+        if with_r1:
+            return {ec: {"mu": mu, "r1_prime": r1}
+                    for ec, mu, r1 in db.query(model.edinet_code, model.mu,
+                                               model.r1_prime).all()}
+        return {ec: mu for ec, mu in db.query(model.edinet_code, model.mu).all()}
+    except Exception:
+        return {}
+
+
 def get_macro_gbdt_scores(db) -> dict:
     """M-2 producer μ̂ を {edinet_code: mu} で返す（未蓄積なら {}・graceful degrade）。
 
     後方互換のため mu のみを返す（produced_output 判定・既存呼出し用）。確実性軸 r1_prime も
     含めた producer 全体は get_macro_gbdt_producer を使う（Issue #365）。"""
     try:
-        return {r.edinet_code: r.mu for r in db.query(MacroGbdtScore).all()}
+        return _producer_score_map(db, MacroGbdtScore)
     except Exception:
         return {}
 
@@ -847,10 +868,7 @@ def get_macro_gbdt_producer(db) -> dict:
     sell_ranking の R3 足切りゲートが r1_prime（コンフォーマル区間半幅）を読むための拡張版。
     未蓄積・列未migration なら {}（graceful degrade）。"""
     try:
-        return {
-            r.edinet_code: {"mu": r.mu, "r1_prime": r.r1_prime}
-            for r in db.query(MacroGbdtScore).all()
-        }
+        return _producer_score_map(db, MacroGbdtScore, with_r1=True)
     except Exception:
         return {}
 
@@ -904,7 +922,7 @@ def replace_macro_dlm_scores(db, rows: list, snapshot_date: str | None = None,
 def get_macro_dlm_scores(db) -> dict:
     """M-3 producer μ̂ を {edinet_code: mu} で返す（未蓄積なら {}・graceful degrade）。"""
     try:
-        return {r.edinet_code: r.mu for r in db.query(MacroDlmScore).all()}
+        return _producer_score_map(db, MacroDlmScore)
     except Exception:
         return {}
 
@@ -957,7 +975,7 @@ def replace_macro_ensemble_scores(db, rows: list, snapshot_date: str | None = No
 def get_macro_ensemble_scores(db) -> dict:
     """M-4 producer μ̂ を {edinet_code: mu} で返す（未蓄積なら {}・graceful degrade）。"""
     try:
-        return {r.edinet_code: r.mu for r in db.query(MacroEnsembleScore).all()}
+        return _producer_score_map(db, MacroEnsembleScore)
     except Exception:
         return {}
 
@@ -1021,7 +1039,7 @@ def get_macro_enet_scores(db) -> dict:
     後方互換のため mu のみを返す（produced_output 判定用）。確実性軸 r1_prime も含めた
     producer 全体は get_macro_enet_producer を使う（M-2 の get_macro_gbdt_scores と同型）。"""
     try:
-        return {r.edinet_code: r.mu for r in db.query(MacroEnetScore).all()}
+        return _producer_score_map(db, MacroEnetScore)
     except Exception:
         return {}
 
@@ -1032,10 +1050,7 @@ def get_macro_enet_producer(db) -> dict:
     sell_ranking の R3 足切りゲートが r1_prime（コンフォーマル区間半幅）を読むための拡張版。
     未蓄積・列未migration なら {}（graceful degrade）。"""
     try:
-        return {
-            r.edinet_code: {"mu": r.mu, "r1_prime": r.r1_prime}
-            for r in db.query(MacroEnetScore).all()
-        }
+        return _producer_score_map(db, MacroEnetScore, with_r1=True)
     except Exception:
         return {}
 

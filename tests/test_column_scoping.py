@@ -166,8 +166,6 @@ def scan() -> tuple[dict, set]:
 # 理由は「なぜ列を絞っても意味が無いか／絞れないか」を書く（20文字以上）。
 FULL_ROW_LOADS: dict[str, str] = {
     # ── A. 表示・CSV が VIEW を広く要求する（#482 のスコープ外・消費列の棚卸しが先）──
-    "routers/market.py::export_csv::FinancialMetric":
-        "exempt: CSV は全97列引いて21列書く。絞るには出力仕様の確定が要る（#489）。行数は limit 10000 で上限あり",
     "routers/market.py::screening::FinancialMetric":
         "exempt: スクリーニング条件が VIEW の広い範囲を参照し結果も record_to_dict で返す。行数は limit で上限あり",
     "routers/market.py::get_financials::FinancialMetric":
@@ -180,12 +178,6 @@ FULL_ROW_LOADS: dict[str, str] = {
         "exempt: DB ビューアの1社ドリルダウンで全列表示そのものが目的。行数は1社の年度数どまり",
     "routers/market.py::db_company_drilldown::StockPriceDaily":
         "exempt: 同ドリルダウンの直近30行（limit 30）。4列しかなく絞る余地が無い",
-    "plugins/gap_analysis.py::GapAnalysisPlugin.execute::FinancialMetric":
-        "exempt: #482 のスコープ外。結果テーブルと CSV が VIEW を広く出すため消費列の棚卸しが先（#489）",
-    "plugins/net_cash_analysis.py::NetCashAnalysisPlugin._build_query::FinancialMetric":
-        "exempt: #482 のスコープ外。清原式の結果表が BS 内訳を広く出すため消費列の棚卸しが先（#489）",
-    "backtest.py::run::FinancialMetric":
-        "exempt: #482 のスコープ外。resolve_weights の動的プリセットが任意の METRICS を要求しうるため列集合が実行時決定",
 
     # ── B. companies 全列（#446 の実測で「絞らない」と決定済み）──
     "plugins/macro_snapshots.py::_load_data_impl::Company":
@@ -227,19 +219,9 @@ FULL_ROW_LOADS: dict[str, str] = {
     "routers/analysis.py::model_status::RegressionResult":
         "exempt: 同じく with_entities(max(computed_at)) と count() のみ。行そのものは持ってこない",
 
-    # ── F. producer スコア（行数は銘柄数どまり・#489 でまとめて扱う）──
-    "database.py::get_macro_gbdt_scores::MacroGbdtScore":
-        "exempt: #482 のスコープ外。7列×銘柄数で 0.37MB。読むのは edinet_code/mu だけなので絞る余地はあり #489 へ",
-    "database.py::get_macro_gbdt_producer::MacroGbdtScore":
-        "exempt: 同上（読むのは edinet_code/mu/r1_prime の3列）。producer 5系統をまとめて絞る #489 で扱う",
-    "database.py::get_macro_dlm_scores::MacroDlmScore":
-        "exempt: 同上（M-3・6列×銘柄数）。producer 5系統をまとめて絞る #489 で扱う",
-    "database.py::get_macro_ensemble_scores::MacroEnsembleScore":
-        "exempt: 同上（M-4 の合成スコア・6列×銘柄数）。producer 5系統をまとめて絞る #489 で扱う",
-    "database.py::get_macro_enet_scores::MacroEnetScore":
-        "exempt: 同上（M-6・既定 mu_source・7列×銘柄数）。producer 5系統をまとめて絞る #489 で扱う",
-    "database.py::get_macro_enet_producer::MacroEnetScore":
-        "exempt: 同上（M-6 の r1_prime 付き版）。producer 5系統をまとめて絞る #489 で扱う",
+    # ── F. producer スコア（行数は銘柄数どまり）──
+    # M-2/M-3/M-4/M-6 の 6 経路は #489 で `_producer_score_map` へ寄せて列指定にした
+    # （読むのは edinet_code/mu＋R3 ゲートの r1_prime だけ）。ここに残るのは別性質のもの。
     "database.py::get_latest_factor_premia::RecommendFactorPremium":
         "exempt: 1ラン＝ファクタ数（10行程度）。行数が銘柄数にも時間にも比例せず絞る利得が無い",
 

@@ -355,3 +355,63 @@ class TestSurvivorshipBiasMeasurement:
         assert res["results"][0]["is_active"] is True
         assert res["n_delisted_in_top_n"] == 0
         assert res["n_delisted_no_price"] == 0
+
+
+class TestColumnScoping:
+    """`_BACKTEST_FIELDS` が `score_record` の読む列を覆っていること（Issue #489）。
+
+    `score_record` は `getattr(r, metric, None)` で読むため、**列が欠けても例外にならず
+    「その指標だけ黙って 0 扱い」**になる（#482 で踏んだ罠と同型）。スコアが少し変わる
+    だけなので、ランキングを見ても気づけない。ここで構造的に縛る。
+    """
+
+    def test_every_weightable_metric_is_selected(self):
+        from backtest import _BACKTEST_FIELDS
+        from plugins.recommend import METRICS, RUNTIME_METRICS
+
+        # weights のキーは coerce_params が METRICS へ制限する。RUNTIME_METRICS は
+        # VIEW 列ではない（z_momentum は momentum_z 経由・mu は backtest では reject）。
+        missing = [m for m in METRICS
+                   if m not in RUNTIME_METRICS and m not in _BACKTEST_FIELDS]
+        assert not missing, f"weights に来うるのに SELECT していない列: {missing}"
+
+    def test_source_specific_columns_are_selected(self):
+        """`source` ごとに `score_record` が直接読む列（METRICS 経由ではない）。"""
+        from backtest import _BACKTEST_FIELDS
+
+        for col in ("gap_ratio", "div_yield",                          # valuation
+                    "bs_current_assets", "bs_investment_securities",   # net_cash
+                    "bs_total_liabilities", "market_cap",
+                    "is_active", "delisted_date",                      # 生存バイアス（#315）
+                    "period_end", "edinet_code"):                      # 共通
+            assert col in _BACKTEST_FIELDS, f"{col} が SELECT に無い"
+
+    def test_every_attribute_read_from_a_record_is_selected(self):
+        """`r.<attr>` で読む列を**ソースから拾って**照合する（列の足し忘れを CI で落とす）。
+
+        列指定 Row は存在しない属性で AttributeError を投げるので実行時には気づけるが、
+        気づくのは**その source を実際に叩いたとき**だけ。`net_cash` や生存バイアス測定は
+        既定経路では踏まないため、テストで全部まとめて見る。
+        """
+        import re
+        from pathlib import Path
+
+        from backtest import _BACKTEST_FIELDS
+        from database import FinancialMetric
+
+        src = (Path(__file__).resolve().parents[1] / "backtest.py").read_text(encoding="utf-8")
+        view_cols = {c.name for c in FinancialMetric.__table__.columns}
+        read = {m for m in re.findall(r"\br\.([a-z_]+)", src)} & view_cols
+        # **空集合だと何も検査しない**（ が実バックスペース文字へ化けて空回りした実例あり）
+        assert len(read) >= 8, f"読み取り列の抽出に失敗している: {sorted(read)}"
+        missing = sorted(read - set(_BACKTEST_FIELDS))
+        assert not missing, f"レコードから読むのに SELECT していない列: {missing}"
+
+    def test_scoping_actually_drops_most_of_the_view(self):
+        """絞った意味があること（VIEW 97列に対して十分小さい）。"""
+        from backtest import _BACKTEST_FIELDS
+        from database import FinancialMetric
+
+        view_cols = {c.name for c in FinancialMetric.__table__.columns}
+        assert set(_BACKTEST_FIELDS) <= view_cols
+        assert len(_BACKTEST_FIELDS) < len(view_cols) / 2

@@ -55,6 +55,16 @@ NCAV_BARGAIN_RATIO   = 1.5
 # データ品質ガード（推計時価総額の崩れによる異常比率を除外する既定の上限）
 SANITY_MAX_NC_RATIO  = 5.0
 
+# フィルタと結果 dict が読む `financial_metrics` の列（Issue #489）。VIEW は 97 列ある。
+# **列を足すときは _build_row / _apply_filters と一緒に足すこと**——列指定 Row に無い
+# 属性へ触ると AttributeError で落ちる（黙って None にはならない）。
+_NC_FIELDS: tuple[str, ...] = (
+    "edinet_code", "sec_code", "company_name", "industry", "year",
+    "market_cap", "bs_current_assets", "bs_investment_securities",
+    "bs_total_liabilities", "cf_operating_cf", "pl_net_income",
+    "pl_net_income_attr", "per", "pbr", "div_yield", "roe",
+)
+
 
 def compute_net_cash(current_assets: float | None,
                      investment_securities: float | None,
@@ -204,13 +214,16 @@ class NetCashAnalysisPlugin(AnalysisPlugin):
         industry       = params["industry"]
         min_market_cap = params["min_market_cap"]
 
+        # VIEW は 97 列あるが、フィルタと結果 dict が読むのは _NC_FIELDS の 16 列だけ
+        # （Issue #489）。is_active は WHERE 専用なので SELECT には要らない。
+        cols = [getattr(FinancialMetric, f) for f in _NC_FIELDS]
         if year:
-            query = db.query(FinancialMetric).filter(FinancialMetric.year == year)
+            query = db.query(*cols).filter(FinancialMetric.year == year)
         else:
             subq = (db.query(FinancialMetric.edinet_code,
                              func.max(FinancialMetric.year).label("max_year"))
                       .group_by(FinancialMetric.edinet_code).subquery())
-            query = (db.query(FinancialMetric)
+            query = (db.query(*cols)
                        .join(subq,
                              (FinancialMetric.edinet_code == subq.c.edinet_code) &
                              (FinancialMetric.year == subq.c.max_year)))

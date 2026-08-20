@@ -11,7 +11,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from database import FinancialMetric, prices_on_or_after, latest_prices
-from plugins.recommend import compute_momentum_z, resolve_weights
+from plugins.recommend import SELECT_COLS, compute_momentum_z, resolve_weights
 from plugins.net_cash_analysis import compute_net_cash, compute_nc_ratio
 
 # 複数保有期間バックテスト（/api/backtest/multi）の保有月数。
@@ -29,6 +29,26 @@ SCORING_SOURCES = ("recommend", "valuation", "net_cash", "sell")
 
 # 配当利回りの異常値ガード（％）。gap_analysis（バリュエーション分析）と整合。
 _DIV_YIELD_CAP = 30.0
+
+# backtest が読む `financial_metrics` の列（Issue #489）。VIEW は 97 列ある。
+# `recommend.SELECT_COLS`（_DISPLAY_COLS ＋ METRICS − RUNTIME_METRICS）を土台に、
+# `score_record` が source 別に読む列と `period_end` を足す。
+#
+# **weights のキーは `coerce_params` が METRICS へ制限する**ので SELECT_COLS で覆える。
+# RUNTIME_METRICS のうち `z_momentum` は `momentum_z` から取り、`mu` は backtest では
+# reject される（as-of 再現ができない・#423 子4）＝どちらも VIEW 列として引く必要が無い。
+#
+# `score_record` は `getattr(r, metric, None)` で読むため、**列が欠けると例外ではなく
+# 「その指標だけ黙って 0 扱い」になる**（#482 で踏んだ罠と同型）。漏れは
+# `tests/test_backtest.py` のメタテストが CI で落とす。
+_BACKTEST_FIELDS: tuple[str, ...] = tuple(dict.fromkeys(
+    SELECT_COLS + (
+        "period_end",                                       # best 判定と結果 dict
+        "gap_ratio", "div_yield",                           # source="valuation"
+        "bs_current_assets", "bs_investment_securities",    # source="net_cash"
+        "bs_total_liabilities", "market_cap",
+        "is_active", "delisted_date",                        # 生存バイアス測定（#315）
+    )))
 
 
 def score_record(r, source: str, weights: dict, momentum_z: dict | None = None) -> float | None:
@@ -127,8 +147,9 @@ def run(
         .group_by(FinancialMetric.edinet_code)
         .subquery()
     )
+    cols = [getattr(FinancialMetric, f) for f in _BACKTEST_FIELDS]
     query = (
-        db.query(FinancialMetric)
+        db.query(*cols)
         .join(subq, (FinancialMetric.edinet_code == subq.c.edinet_code) &
                     (FinancialMetric.year == subq.c.max_year))
         .filter(FinancialMetric.period_end <= start_date)

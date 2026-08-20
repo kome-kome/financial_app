@@ -22,6 +22,15 @@ from .base import AnalysisPlugin
 logger = logging.getLogger(__name__)
 
 # 配当利回りの異常値ガード（％）。VIEW 由来の極端値を 0 とみなす（旧 total_return 踏襲）。
+# 結果 dict が読む `financial_metrics` の列（Issue #489）。VIEW は 97 列あるが、
+# ここに挙がるものしか使わない。**列を足すときは結果 dict と一緒に足すこと**——
+# 列指定 Row に無い属性へ触ると AttributeError で落ちる（黙って None にはならない）。
+_GAP_FIELDS: tuple[str, ...] = (
+    "edinet_code", "sec_code", "company_name", "industry",
+    "gap_ratio", "div_yield", "stock_price", "pl_eps", "bs_bps",
+    "market_cap", "predicted_market_cap",
+)
+
 _DIV_YIELD_CAP = 30.0
 
 # AR(1) MLE で半減期を推定するための最低観測数
@@ -126,7 +135,10 @@ class GapAnalysisPlugin(AnalysisPlugin):
         min_div_yield = params["min_div_yield"]
 
         # 当該フィルタの最新スナップショット。上場廃止銘柄は買えないため対象外（Issue #315）。
-        query = (db.query(FinancialMetric)
+        # VIEW は 97 列あるが結果 dict が読むのは _GAP_FIELDS の 11 列だけ（Issue #489）。
+        # is_active / year は WHERE 専用なので SELECT には要らない。
+        cols = [getattr(FinancialMetric, f) for f in _GAP_FIELDS]
+        query = (db.query(*cols)
                    .filter(FinancialMetric.gap_ratio.isnot(None))
                    .filter(FinancialMetric.is_active.isnot(False)))
         if year:

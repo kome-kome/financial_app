@@ -700,34 +700,60 @@ async def db_export_table(
 
 # ── CSV エクスポート ──────────────────────────────────────────────────────
 
+# CSV の (見出し, `financial_metrics` の列名)。**ここが唯一の源**——見出しの列と値の列を
+# 別々に並べると、片方だけ足したときに黙って1つ隣へずれる（エラーにならない）。
+# VIEW は 97 列あるがここに挙がる 21 列しか書き出さないので、クエリもこの列だけを引く（#489）。
+CSV_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("証券コード",   "sec_code"),
+    ("企業名",       "company_name"),
+    ("業種",         "industry"),
+    ("期",           "year"),
+    ("決算期末",     "period_end"),
+    ("売上高",       "pl_revenue"),
+    ("営業利益",     "pl_operating_profit"),
+    ("純利益",       "pl_net_income"),
+    ("総資産",       "bs_total_assets"),
+    ("純資産",       "bs_total_equity"),
+    ("営業CF",       "cf_operating_cf"),
+    ("時価総額",     "market_cap"),
+    ("PER",          "per"),
+    ("PBR",          "pbr"),
+    ("ROE",          "roe"),
+    ("自己資本比率", "equity_ratio"),
+    ("営業利益率",   "op_margin"),
+    ("純利益率",     "net_margin"),
+    ("D/Eレシオ",    "de_ratio"),
+    ("予測時価総額", "predicted_market_cap"),
+    ("乖離率%",      "gap_ratio"),
+)
+CSV_HEADER = tuple(h for h, _ in CSV_COLUMNS)
+CSV_FIELDS = tuple(c for _, c in CSV_COLUMNS)
+
+# CSV へ書くときだけ必要な整形。文字列列は _csv_safe（数式インジェクション対策）を通す。
+_CSV_TEXT_FIELDS = frozenset(("company_name", "industry"))
+
+
+def _csv_value(row, field: str):
+    v = getattr(row, field)
+    if field == "period_end":
+        return v.isoformat() if v else ""
+    return _csv_safe(v) if field in _CSV_TEXT_FIELDS else v
+
+
 @router.get("/api/export/csv")
 @api.limiter.limit(api.RATELIMIT_ANALYSIS)
 async def export_csv(request: Request, year: Optional[int] = None, db: Session = Depends(api.get_db)):
-    query = db.query(FinancialMetric)
+    # VIEW は 97 列あるが CSV に出るのは CSV_COLUMNS の 21 列だけ（Issue #489）。
+    cols = [getattr(FinancialMetric, f) for f in CSV_FIELDS]
+    query = db.query(*cols)
     if year:
-        query = query.filter_by(year=year)
+        query = query.filter(FinancialMetric.year == year)
     records = query.limit(10000).all()
 
-    HEADER = [
-        "証券コード", "企業名", "業種", "期", "決算期末",
-        "売上高", "営業利益", "純利益", "総資産", "純資産",
-        "営業CF", "時価総額", "PER", "PBR", "ROE", "自己資本比率",
-        "営業利益率", "純利益率", "D/Eレシオ",
-        "予測時価総額", "乖離率%"
-    ]
-
     def row_gen():
-        yield _csv_row(HEADER)
+        yield _csv_row(CSV_HEADER)
         for r in records:
-            yield _csv_row([
-                r.sec_code, _csv_safe(r.company_name), _csv_safe(r.industry),
-                r.year, r.period_end.isoformat() if r.period_end else "",
-                r.pl_revenue, r.pl_operating_profit, r.pl_net_income,
-                r.bs_total_assets, r.bs_total_equity,
-                r.cf_operating_cf, r.market_cap, r.per, r.pbr, r.roe, r.equity_ratio,
-                r.op_margin, r.net_margin, r.de_ratio,
-                r.predicted_market_cap, r.gap_ratio
-            ])
+            yield _csv_row([_csv_value(r, f) for f in CSV_FIELDS])
 
     return StreamingResponse(
         row_gen(),
