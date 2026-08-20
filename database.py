@@ -1704,6 +1704,64 @@ def upsert_regression_result(db, *, edinet_code: str, year: int, period_end: str
     ))
 
 
+# 1文あたりのバインドパラメータ上限（Postgres 65,535）に対する安全弁。
+# 8列なので 2,000 行で 16,000。業種単位の呼び出しなら1チャンクに収まる。
+REGRESSION_UPSERT_CHUNK = 2000
+
+
+def upsert_regression_results_batch(db, rows) -> int:
+    """`regression_results` をまとめて upsert する（Issue #506）。
+
+    1行1文の `upsert_regression_result`（`db.merge`）を置き換える。merge は行ごとに
+    SELECT→INSERT/UPDATE を出すため、夜間バッチ1回の Egress 台帳で
+    **`calls=3,623` / rows=3,611** になっていた（`companies` は #482 の N+1 潰しで
+    `calls=2`）。転送量は 0.30MB と小さく、効くのは**往復回数**である。ローカル正本では
+    往復が近いので所要 0.5分に吸収されているが、それは接続先が近いから吸収できている
+    だけで、構造としては素通しで効く。
+
+    `bulk_update_mappings` は使わない——**UPDATE を束ねない**ことが #464 で実測済み。
+
+    rows = [{edinet_code, year, period_end, predicted_market_cap, gap_ratio, model, sector}, ...]
+    `period_end` は文字列でも date でもよい（`_parse_period_end` を通す）。
+    戻り値は書き込み行数。
+
+    **単数形と挙動が違う唯一の点**: `period_end` が None の行。`period_end` は PK の一部
+    なので Postgres は NOT NULL 違反で落ちる（merge 経路も同じ）が、PK に NULL を許す
+    SQLite では ON CONFLICT が NULL を一意と見なさず**重複挿入**になる。テストで None を
+    扱う経路は単数形（`test_empty_period_end_normalized`）に残してある。
+    """
+    if not rows:
+        return 0
+    dialect = db.bind.dialect.name if db.bind is not None else "postgresql"
+    if dialect == "sqlite":
+        from sqlalchemy.dialects.sqlite import insert as _insert
+    else:
+        from sqlalchemy.dialects.postgresql import insert as _insert
+
+    now = datetime.now(timezone.utc)
+    vals = [{
+        "edinet_code":          r["edinet_code"],
+        "year":                 r["year"],
+        "period_end":           _parse_period_end(r["period_end"]),
+        "predicted_market_cap": r["predicted_market_cap"],
+        "gap_ratio":            r["gap_ratio"],
+        "model":                r["model"],
+        "sector":               r["sector"],
+        "computed_at":          now,
+    } for r in rows]
+
+    update_cols = ("predicted_market_cap", "gap_ratio", "model", "sector", "computed_at")
+    for i in range(0, len(vals), REGRESSION_UPSERT_CHUNK):
+        chunk = vals[i:i + REGRESSION_UPSERT_CHUNK]
+        stmt = _insert(RegressionResult).values(chunk)
+        stmt = stmt.on_conflict_do_update(
+            index_elements=["edinet_code", "year", "period_end"],
+            set_={col: getattr(stmt.excluded, col) for col in update_cols},
+        )
+        db.execute(stmt)
+    return len(vals)
+
+
 # ── 9. 読み取りモデル: financial_metrics VIEW ──────────────────────────────
 # financial_records（ソース列）から軽い派生（比率・Zスコア・成長率）を「都度SQL算出」し、
 # regression_results を LEFT JOIN して予測値も合成する読み取り専用 VIEW。

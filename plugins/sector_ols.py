@@ -586,8 +586,16 @@ class SectorOLSPlugin(AnalysisPlugin):
 
     def _persist_and_rank(self, db, sector: str, samples: list,
                           all_yhat: list, regularization: str) -> list:
-        """予測値・乖離率を DB に保存し、業種内ランク付きリストを返す。"""
-        from database import upsert_regression_result
+        """予測値・乖離率を DB に保存し、業種内ランク付きリストを返す。
+
+        書き込みは業種ぶんをまとめて1文で出す（Issue #506）。行ごとの `db.merge()` は
+        SELECT→INSERT/UPDATE を行数ぶん往復し、夜間バッチ1回の台帳で `calls=3,623` に
+        なっていた。転送量（0.30MB）ではなく往復回数の問題なので、台帳は `est_bytes` だけ
+        でなく `calls` も所要の指標として読むこと。
+        """
+        from database import upsert_regression_results_batch
+        model = "ridge" if regularization == "ridge" else "ols"
+        pending = []
         sector_preds = []
         for i, (_, actual, r) in enumerate(samples):
             predicted = all_yhat[i]
@@ -596,13 +604,11 @@ class SectorOLSPlugin(AnalysisPlugin):
                 round(predicted / r.stock_price * r.market_cap, 0)
                 if r.market_cap and r.stock_price and r.stock_price > 0 else None
             )
-            upsert_regression_result(
-                db,
-                edinet_code=r.edinet_code, year=r.year, period_end=r.period_end,
-                predicted_market_cap=predicted_mcap, gap_ratio=gap,
-                model=("ridge" if regularization == "ridge" else "ols"),
-                sector=sector,
-            )
+            pending.append({
+                "edinet_code": r.edinet_code, "year": r.year, "period_end": r.period_end,
+                "predicted_market_cap": predicted_mcap, "gap_ratio": gap,
+                "model": model, "sector": sector,
+            })
             sector_preds.append({
                 "sec_code":     r.sec_code or r.edinet_code,
                 "company_name": r.company_name,
@@ -614,6 +620,7 @@ class SectorOLSPlugin(AnalysisPlugin):
                 "sector_rank":  None,
                 "sector_total": len(samples),
             })
+        upsert_regression_results_batch(db, pending)
         db.commit()
         sorted_idxs = sorted(range(len(sector_preds)),
                              key=lambda i: sector_preds[i]["gap_ratio"] or 0)

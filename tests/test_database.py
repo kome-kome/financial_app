@@ -21,6 +21,7 @@ from database import (
     upsert_company,
     upsert_financial,
     upsert_regression_result,
+    upsert_regression_results_batch,
 )
 
 
@@ -271,6 +272,101 @@ class TestUpsertRegressionResult:
         db.commit()
         rr = db.query(RegressionResult).one()
         assert rr.period_end is None
+
+
+class TestUpsertRegressionResultsBatch:
+    """行数ぶん往復しないこと（Issue #506）。
+
+    行ごとの `db.merge()` は SELECT→INSERT/UPDATE を出すため、夜間バッチ1回の Egress 台帳で
+    `regression_results` が `calls=3,623` / rows=3,611 になっていた。転送量は 0.30MB と小さく、
+    **効くのは往復回数**なので、ここで縛るのは「中身が正しい」だけでなく「文の数」でもある。
+    """
+
+    def _rows(self, n, *, year=2023, gap=-15.0, model="ols"):
+        return [{
+            "edinet_code": f"E{i:05d}", "year": year, "period_end": "2023-03-31",
+            "predicted_market_cap": 12000.0 + i, "gap_ratio": gap,
+            "model": model, "sector": "情報・通信業",
+        } for i in range(n)]
+
+    @staticmethod
+    def _count_statements(db, fn):
+        """fn 実行中に発行された SQL 文を種類ごとに数える。"""
+        from sqlalchemy import event
+
+        seen = []
+
+        def before(conn, cursor, statement, params, context, executemany):
+            seen.append(statement.lstrip().split()[0].upper())
+
+        event.listen(db.bind, "before_cursor_execute", before)
+        try:
+            fn()
+        finally:
+            event.remove(db.bind, "before_cursor_execute", before)
+        return seen
+
+    def test_inserts_every_row(self, db):
+        assert upsert_regression_results_batch(db, self._rows(5)) == 5
+        db.commit()
+        assert db.query(RegressionResult).count() == 5
+
+    def test_updates_in_place_on_conflict(self, db):
+        upsert_regression_results_batch(db, self._rows(3, gap=-15.0))
+        db.commit()
+        upsert_regression_results_batch(db, self._rows(3, gap=30.0, model="ridge"))
+        db.commit()
+        rows = db.query(RegressionResult).all()
+        assert len(rows) == 3, "同一キーが重複挿入されている"
+        assert {r.gap_ratio for r in rows} == {30.0}
+        assert {r.model for r in rows} == {"ridge"}
+
+    def test_empty_writes_nothing(self, db):
+        stmts = self._count_statements(db, lambda: upsert_regression_results_batch(db, []))
+        assert stmts == []
+
+    def test_round_trips_do_not_scale_with_rows(self, db):
+        """**この Issue の本旨**。300行を1文で出す（merge なら 300 往復した）。"""
+        rows = self._rows(300)
+        stmts = self._count_statements(db, lambda: upsert_regression_results_batch(db, rows))
+        inserts = [s for s in stmts if s == "INSERT"]
+        assert len(inserts) == 1, f"300行に対して INSERT が {len(inserts)} 文出ている"
+        assert not [s for s in stmts if s == "SELECT"], "merge 相当の事前 SELECT が残っている"
+        db.commit()
+        assert db.query(RegressionResult).count() == 300
+
+    def test_chunks_when_over_the_parameter_limit(self, db):
+        """Postgres のバインドパラメータ上限（65,535）へ当たらないよう分割する。"""
+        from database import REGRESSION_UPSERT_CHUNK
+
+        n = REGRESSION_UPSERT_CHUNK + 7
+        rows = self._rows(n)
+        stmts = self._count_statements(db, lambda: upsert_regression_results_batch(db, rows))
+        assert len([s for s in stmts if s == "INSERT"]) == 2
+        db.commit()
+        assert db.query(RegressionResult).count() == n
+
+    def test_matches_the_single_row_path(self, db):
+        """バッチと単数形が同じ行を作ること（片方だけ直す事故を防ぐ）。"""
+        upsert_regression_result(
+            db, edinet_code="E00001", year=2023, period_end="2023-03-31",
+            predicted_market_cap=12000.0, gap_ratio=-15.0, model="ols", sector="情報・通信業")
+        db.commit()
+        one = db.query(RegressionResult).one()
+        single = (one.edinet_code, one.year, one.period_end,
+                  one.predicted_market_cap, one.gap_ratio, one.model, one.sector)
+
+        db.query(RegressionResult).delete()
+        db.commit()
+        upsert_regression_results_batch(db, [{
+            "edinet_code": "E00001", "year": 2023, "period_end": "2023-03-31",
+            "predicted_market_cap": 12000.0, "gap_ratio": -15.0,
+            "model": "ols", "sector": "情報・通信業",
+        }])
+        db.commit()
+        two = db.query(RegressionResult).one()
+        assert single == (two.edinet_code, two.year, two.period_end,
+                          two.predicted_market_cap, two.gap_ratio, two.model, two.sector)
 
 
 # Zスコア正規化は financial_metrics VIEW（PostgreSQL window function）へ移行した。
