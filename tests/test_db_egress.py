@@ -92,13 +92,21 @@ class TestExtractTable:
 
 class TestBytesPerRow:
     def test_exact_measurement_wins(self):
-        assert bytes_per_row("stock_price_weekly", 3) == 32.1
+        # 3列は #482 で 32.1 → 20.2 へ是正（ローカル正本と Supabase の両側で
+        # avg(octet_length) が 20.19 B/行 で一致し、旧値は再現できなかった）
+        assert bytes_per_row("stock_price_weekly", 3) == 20.2
         assert bytes_per_row("stock_price_weekly", 4) == 42.0
 
     def test_falls_back_to_per_column_rate_of_same_table(self):
-        """実測に無い列数でも、同じテーブルの列単価（実測由来）を使う。"""
+        """実測に無い列数でも、同じテーブルの列単価（実測由来）を使う。
+
+        列数は**較正表に無いもの**を選ぶこと。ここは以前 `financial_metrics` の 36 列を
+        使っていたが、#482 でその組の実測が入りフォールバック経路を通らなくなった。
+        """
+        n_cols = 42
+        assert ("financial_metrics", n_cols) not in EGRESS_COST_TABLE
         rate = EGRESS_BYTES_PER_COLUMN["financial_metrics"].bytes_per_row
-        assert bytes_per_row("financial_metrics", 36) == pytest.approx(rate * 36)
+        assert bytes_per_row("financial_metrics", n_cols) == pytest.approx(rate * n_cols)
 
     def test_unknown_table_uses_conservative_default(self):
         """較正表に載っていない表（＝これから足される表）は保守側の既定へ倒す。

@@ -604,23 +604,37 @@ Render ダッシュボードで管理。
 - 緊急停止は `FINAPP_EGRESS_CYCLE=0`（プロセス予算と JSONL 台帳は生きたまま）。
 - 閾値超過の通知は `egress-health.yml`（毎日 UTC 21:00）が exit 2 → `notify-failure` が Issue 起票。
 
-夜間スコア更新（`nightly-scores.yml`・`sector_ols` + M-6）の 2026-08-06 実測:
+夜間スコア更新（`sector_ols` + M-6）の実測。**2026-08-20 の回は正本＝ローカル PostgreSQL に対する実走**で、
+台帳（`.egress/ledger.jsonl`・job=`nightly-local`）のテーブル別内訳がそのまま取れる:
 
-| 引くもの | 行数 | 削減前 | 削減後 |
+| 引くもの | 行数 | 削減前（2026-08-06） | 実測（2026-08-20・#482） |
 |---|---|---|---|
-| `stock_price_weekly`（M-6 は `volume_sum` を読まない） | 1,282,436 | 51.4 MB | **39.3 MB**（→ 差分ロードで定常 約3.7MB・#480） |
-| `financial_metrics` VIEW（97列 → 消費36列・#459） | 30,285 | 22.5 MB | 実測は 2026-08-18 以降 |
-| `macro_data`（`{series: {date: close}}` にしか使わない） | 67,906 | 8.7 MB | **2.6 MB** |
-| `financial_records` 最新 annual（69列 → 消費20列・#482） | 4,430 | 2.8 MB | 実測は 2026-08-18 以降 |
-| `companies`（全列） | 4,437 | 0.5 MB | 0.5 MB |
-| **1回あたり合計** | | **86.0 MB** | **67.7 MB** |
-| **日次30回換算** | | 2.52 GB（枠の50%） | **1.98 GB（枠の40%）** |
+| `financial_metrics` VIEW（97列 → 消費36列・#459） | 30,298 | 22.5 MB | **8.76 MB**（`octet_length` 実測は 6.69MB） |
+| `macro_data`（`{series: {date: close}}` にしか使わない） | 87,355 | 8.7 MB | **3.50 MB** |
+| `macro_beta_loadings`（7列 → 消費4列・#482） | 49,283 | 4.86 MB | **3.41 MB**（実測 3.18MB） |
+| `stock_price_weekly`（3列・差分ロード後の定常・#480） | 103,976 | 51.4 MB | **3.34 MB** |
+| `financial_records` 最新 annual（69列 → 消費20列・#482） | 4,430 | 2.8 MB | **0.82 MB** |
+| `companies` | 8,876 | 0.5 MB | **0.63 MB**（`calls=2`） |
+| `regression_results`（sector_ols の**書き込み**） | 3,611 | — | 0.30 MB（`calls=3,623`＝1社1文） |
+| **1回あたり合計** | 287,831 | **86.0 MB** | **20.8 MB** |
 
-> 上表の「削減後」は **2026-08-06 時点の実測**で、#459（`financial_metrics` 97→36列）と #482（`financial_records` 69→20列）の削減はまだ反映されていない。較正値（`financial_metrics` 8.03 B/列/行・`financial_records` 9.61 B/列/行）から机上で置くと **1回 ≈ 52.0 MB（日次30回で 1.56GB・枠の31%）**。**実測は Egress 復旧（2026-08-18）後に取り直して上表を更新すること**（restricted 中は測定自体が枠を食う）。
+> **見積り 52.0MB に対し実測 20.8MB**。差の主因は #480（週次差分ロード）で、`stock_price_weekly` が
+> 39.3MB → 3.34MB に落ちた（初回だけフルロード）。#459/#482 の列絞りも効いており、
+> `financial_metrics` は 22.5 → 8.76MB、`financial_records` は 2.8 → 0.82MB。
+>
+> **`companies` の `calls=2` が #482 の副産物の確認になっている**——列指定 Row から `relationship` が
+> 消えて `record.company.issued_shares` が黙って None になる罠を SQL 側 COALESCE で潰した結果、
+> N+1 が JOIN 1本になった（N+1 が残っていれば 4,430 回級の calls が出る）。
+>
+> 一方 **`regression_results` は `calls=3,623`＝1社1文の書き込み**が残っている。読み取り列の話ではないので
+> #482/#489 の対象外だが、所要には効く（→ 別 Issue）。
+>
+> なお **この測定はもう Supabase の枠を1バイトも使わない**（#503 で正本がローカルへ移った）。
+> 「restricted 中は測定自体が枠を食う」という #478 当時の制約は解けている。
 
 - **削減した2列は「消費側が一度も読まない列」だけ**。`volume_sum` は `px_volz`（出来高z-score）専用で、M-1 は price_features を持たず M-2/M-6 は既定 OFF＝`load_data(db, with_volume=...)` で選択時のみ引く。M-3 は既定 ON なので従来どおり引く。
 - **未ロードは `None` ではなく番兵**（`macro_snapshots._VOLUME_NOT_LOADED`）にして、読もうとしたら即 `ValueError`。欠測として扱うと `px_volz` が全 nan になり「データが薄い」と見分けがつかない＝#438 と同型の静かな故障になる。
-- **残る最大項だった `financial_metrics` VIEW の全列 22.5MB は #459 で列指定へ切り替えた**（2026-08-10）。`plugins/macro_snapshots.py::FIN_LOAD_FIELDS`（36列＝`FIN_BASE_OPTIONS` の選択肢＋`recommend.METRICS` の非 RUNTIME 列＋突合/メタ6列）だけを引き、軽量 namedtuple `_FinRow` で返す。**削減後の実測は Egress 復旧（2026-08-18）後に取り直して上表を更新すること**（#478 の restricted 中は測定自体が枠を食う）。
+- **残る最大項だった `financial_metrics` VIEW の全列 22.5MB は #459 で列指定へ切り替えた**（2026-08-10）。`plugins/macro_snapshots.py::FIN_LOAD_FIELDS`（36列＝`FIN_BASE_OPTIONS` の選択肢＋`recommend.METRICS` の非 RUNTIME 列＋突合/メタ6列）だけを引き、軽量 namedtuple `_FinRow` で返す。**削減後の実測は 2026-08-21 に取得済み**＝36列 220.8 B/行（6.69MB / 30,298行）に対し全列 97 は 685.4 B/行（20.77MB）＝**1/3 へ落ちた**（上表）。
   - 列を落とした結果が黙って欠測に化けないよう、`FIN_LOAD_FIELDS` 外の列を `fin_features` に渡したら `build_snapshots` が `ValueError` を投げる。`getattr(..., None)` 任せだと全社が捨てられて学習0件になり「データが薄い」と誤読する（`volume_sum` の番兵と同じ考え方）。
   - 消費側との対応（`recommend.METRICS` / `FIN_BASE_OPTIONS` / `scripts/candidate_bakeoff._FIN_FIELDS`）は `tests/test_macro_snapshots_loaders.py` のメタテストが CI で照合する。列の追加漏れは failure ではなく「静かに全社が消える」形で出るため、通知では拾えない（ADR-0031 と同型）。
 - **残る5経路も列指定へ広げた（#482・2026-08-15）**。#459 と #441 以外は全列 ORM ロードのままで、「静かに枠を食う」形でしか現れないため誰も気づかない状態だった。

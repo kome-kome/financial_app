@@ -113,17 +113,37 @@ class EgressCost:
 # 出所は2世代ある。**どちらもサーバ側 `sum(octet_length(列::text))` が正本**（#446 の測り方）:
 #   #446（2026-08-06）… 消費側が実際に転送する**部分列**を測ったもの。部分列の推定はこちらが効く
 #   #493（2026-08-19）… Egress リセット後に mirror 16 表を**全列**で測り直したもの（ランブック手順4）
+#   #482（2026-08-21）… 列絞り後の消費側を測ったもの。**正本がローカルへ移ったので測定自体が
+#                        Supabase を1バイトも使わない**（#503）＝以後の較正はこちらで足りる
 # 部分列エントリを全列エントリで上書きしてはいけない（列ごとに B/値 が違うため過小評価になる）。
 EGRESS_COST_TABLE: dict[tuple[str, int], EgressCost] = {
     # ── #446: 消費側が実際に投げる部分列（この形の SELECT が本番の主経路）
     ("stock_price_weekly", 3): EgressCost(
-        32.1, "2026-08-06", "#446", "edinet_code/trade_date/close_last = 39.3MB / 1,282,436 行"),
+        20.2, "2026-08-21", "#482",
+        "edinet_code/week_start/close_last = 26.1MB / 1,293,208 行。"
+        "**旧値 32.1（#446・2026-08-06）を是正した**——ローカル正本と Supabase の両側で "
+        "avg(octet_length) を測ると edinet_code 6.00 / date 10.00 / close_last 4.19 = 20.19 B/行 で"
+        "一致する（close_last は `6771.0` 形式で、両側とも extra_float_digits の差は出ない）。"
+        "旧値の出所は再現できていない"),
     ("stock_price_weekly", 4): EgressCost(
         42.0, "2026-08-06", "#446", "+volume_sum = 51.4MB / 1,282,436 行"),
     ("macro_data", 3): EgressCost(
         40.1, "2026-08-06", "#446", "series_code/trade_date/close = 2.6MB / 67,906 行"),
     ("financial_metrics", 97): EgressCost(
         779.0, "2026-08-06", "#446", "VIEW 全列 = 22.5MB / 30,285 行（mirror 対象外＝#493 で未測）"),
+
+    # ── #482: 列絞り後の消費側実測（正本がローカルへ移り、Supabase を叩かずに測れるようになった）
+    ("financial_metrics", 36): EgressCost(
+        220.8, "2026-08-21", "#482",
+        "load_data の FIN_LOAD_FIELDS = 6.7MB / 30,298 行（全列 97 なら 20.8MB＝**1/3**）"),
+    ("financial_records", 20): EgressCost(
+        178.7, "2026-08-21", "#482",
+        "sector_load_fields（既定 features 10項目）= 9.0MB / 50,490 行。"
+        "sector_ols が実際にロードするのは最新年度 4,430 行ぶん"),
+    ("macro_beta_loadings", 4): EgressCost(
+        64.5, "2026-08-21", "#482",
+        "get_macro_beta が消費する edinet_code/factor_name/loading_mean/loading_se = "
+        "3.2MB / 49,283 行（最新 run）。全列 7 なら 115.1 B/行＝**1.8倍**"),
 
     # ── #493: mirror 16 表の全列実測（app_settings は 0 行で測れず未収録）
     ("stock_price_weekly", 7): EgressCost(
