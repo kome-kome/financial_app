@@ -190,3 +190,33 @@ class TestStorageCredentials:
         monkeypatch.setattr(bp.database, "_is_local", True)
         assert bp.main([]) == 0
         assert "ドライラン" in capsys.readouterr().out
+
+
+class TestStorageErrors:
+    """**初回は必ずバケット未作成を踏む。** 生の 400 を出さず、手が動く形で伝える。"""
+
+    class _Resp:
+        def __init__(self, status_code, text=""):
+            self.status_code = status_code
+            self.text = text
+
+    def _store(self):
+        store = object.__new__(bp.Storage)
+        store.bucket = bp.BUCKET
+        store.base = "https://x.supabase.co/storage/v1"
+        return store
+
+    def test_missing_bucket_says_how_to_create_it(self):
+        with pytest.raises(SystemExit) as e:
+            self._store()._fail("一覧取得に失敗", self._Resp(404, '{"error":"Bucket not found"}'))
+        msg = str(e.value)
+        assert bp.BUCKET in msg and "private" in msg.lower()
+
+    def test_anon_key_is_called_out(self):
+        """private バケットへの書き込みは service_role が要る。403 の原因の筆頭。"""
+        with pytest.raises(SystemExit, match="service_role"):
+            self._store()._fail("アップロード失敗", self._Resp(403, "unauthorized"))
+
+    def test_other_errors_keep_the_raw_detail(self):
+        with pytest.raises(SystemExit, match="507"):
+            self._store()._fail("アップロード失敗", self._Resp(507, "quota exceeded"))

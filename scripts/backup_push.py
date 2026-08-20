@@ -256,6 +256,24 @@ class Storage:
             )
         return cls(url, key)
 
+    def _fail(self, what: str, r) -> None:
+        """失敗を**手が動く形**で伝える。初回は必ずバケット未作成を踏むので、そこを名指しする。"""
+        if r.status_code == 404 or "Bucket not found" in r.text:
+            raise SystemExit(
+                f"中止: バケット '{self.bucket}' が見つかりません。\n"
+                "  Supabase ダッシュボード > Storage > New bucket で作成してください:\n"
+                f"    名前   : {self.bucket}\n"
+                "    Public : オフ（**private**。バックアップを公開しない）\n"
+                "  作成後にもう一度実行してください。"
+            )
+        if r.status_code in (401, 403):
+            raise SystemExit(
+                f"中止: {what} が認証で拒否されました（{r.status_code}）。\n"
+                "  SUPABASE_SERVICE_ROLE_KEY が anon key になっていないか確認してください"
+                "（private バケットへの書き込みには service_role が要ります）。"
+            )
+        raise SystemExit(f"中止: {what}: {r.status_code} {r.text[:200]}")
+
     def upload(self, remote_path: str, data: bytes) -> None:
         r = self.client.post(
             f"{self.base}/object/{self.bucket}/{remote_path}",
@@ -263,14 +281,14 @@ class Storage:
             headers={"content-type": "application/octet-stream", "x-upsert": "true"},
         )
         if r.status_code >= 400:
-            raise SystemExit(f"中止: アップロード失敗 {remote_path}: {r.status_code} {r.text[:200]}")
+            self._fail(f"アップロード失敗 {remote_path}", r)
 
     def list_prefixes(self) -> list[str]:
         """世代フォルダ名の一覧。Storage は擬似ディレクトリなので prefix を列挙する。"""
         r = self.client.post(f"{self.base}/object/list/{self.bucket}",
                              json={"prefix": "", "limit": 1000})
         if r.status_code >= 400:
-            raise SystemExit(f"中止: 一覧取得に失敗: {r.status_code} {r.text[:200]}")
+            self._fail("一覧取得に失敗", r)
         return sorted({item["name"].split("/")[0] for item in r.json()})
 
     def remove_prefix(self, prefix: str, names: Iterable[str]) -> None:
@@ -278,7 +296,7 @@ class Storage:
         r = self.client.request("DELETE", f"{self.base}/object/{self.bucket}",
                                 json={"prefixes": paths})
         if r.status_code >= 400:
-            raise SystemExit(f"中止: 削除に失敗 {prefix}: {r.status_code} {r.text[:200]}")
+            self._fail(f"削除に失敗 {prefix}", r)
 
 
 def push_generation(store: Storage, gen: Generation, echo=print) -> None:

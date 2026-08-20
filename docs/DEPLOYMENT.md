@@ -70,6 +70,31 @@ Render の制約と運用形態に合わせて設計すること。
 - `full-pipeline` / `backfill-*` / `collect-interim` / `collect-disclosures` / `collect-macro` は `workflow_dispatch` 専用。放置で害はないが、**手動起動すると Supabase へ書く**＝正本と分岐するので注意。
 - 停止中は `nightly_scores.HEAVY_AUTOMATION` の登録（GHA のワークフロー名）と実態がずれている。**登録があること ≠ 動いていること**（ADR-0031）で、月次をローカルへ移す時点でレジストリ側も直す。
 
+#### Storage バックアップの初期設定（#503 Phase 3・初回だけ）
+
+`scripts/backup_push.py --dest storage` を使う前に、Supabase 側で2つ用意する。
+
+1. **private バケットを作る**（ダッシュボード > Storage > New bucket）
+   - 名前: `db-backups`
+   - Public: **オフ**（バックアップを公開しない）
+2. **`.env` へ2つ追記する**（ダッシュボード > Project Settings > API）
+   ```
+   SUPABASE_URL=https://ndebkuazchtzkxiutiqn.supabase.co
+   SUPABASE_SERVICE_ROLE_KEY=<service_role の値>
+   ```
+   **anon key では private バケットへ書けない**（403 になる）。`backup_push.py` はこの2つを
+   取り違えたときに、そのことを名指しで言う。
+
+未設定のままでも `--dest local`（既定）なら動く——ダンプ生成・マニフェスト・保持ポリシーの
+判定まではローカルだけで検証できる（ミラー3本を Supabase 抜きで実証したのと同じ考え方・ADR-0035）。
+
+| 制約 | 値 | 実測との関係 |
+|---|---|---|
+| ファイルサイズ | **50MB**（Free） | 最大表 `stock_price_weekly` が 17.4MB。表ごとに分けているので余裕がある |
+| Storage 容量 | **1GB**（Free） | 1世代 37.5MB。保持ポリシー（直近4＋月次6＝10世代）で約 375MB |
+| Egress | 5GB/月（DB と共用） | **upload は Egress に載らない**。download は復元時だけ |
+
+
 #### バックアップからの復元（#503 Phase 3）
 
 Supabase Storage に置いた世代から戻す。**復元先はローカル限定**（`guard_dest_local`）。
