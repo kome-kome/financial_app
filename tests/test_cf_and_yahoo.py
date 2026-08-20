@@ -327,3 +327,133 @@ class TestFillRecentStockPriceGapYahoo:
 
         floor_str = (date.today() - timedelta(days=DAILY_WINDOW_DAYS)).strftime("%Y%m%d")
         assert seen["1001.T"] == floor_str
+
+
+class TestDelistedPricelessBackoff:
+    """上場廃止済みで価格ゼロの社を毎晩叩かない（Issue #475）。
+
+    2026-08-21 の実測で、価格を1件も持たない 454社は**全て `is_active=False`** だった。
+    毎晩 454リクエスト ≒ 13分を捨てている。ただし**恒久除外にはしない**——`is_active` は
+    `/equities/master` 由来で、無料プランのエンバーゴにより「as-of より後に上場した銘柄」が
+    誤って delisted に見えることがある（#463）。除外すると新規上場も再開も永久に拾えず、
+    しかも**失敗が出ない**。
+    """
+
+    def _run(self, coro):
+        return asyncio.run(coro)
+
+    def test_fires_exactly_once_per_interval(self):
+        from collector_prices import should_retry_priceless_delisted as retry
+        from collector_utils import DELISTED_RETRY_INTERVAL_DAYS as N
+
+        base = date(2026, 8, 21)
+        hits = [k for k in range(N * 3) if retry("E00001", base + timedelta(days=k))]
+        assert len(hits) == 3
+        assert all(b - a == N for a, b in zip(hits, hits[1:]))
+
+    def test_load_is_spread_across_days(self):
+        """同じ日に全社が固まらないこと（曜日を edinet_code から決定的に散らす）。"""
+        from collector_prices import should_retry_priceless_delisted as retry
+        from collector_utils import DELISTED_RETRY_INTERVAL_DAYS as N
+
+        codes = [f"E{i:05d}" for i in range(454)]
+        base = date(2026, 8, 21)
+        per_day = [sum(1 for c in codes if retry(c, base + timedelta(days=k)))
+                   for k in range(N)]
+        assert sum(per_day) == len(codes), "1周期で全社ちょうど1回"
+        assert max(per_day) < len(codes) / N * 1.5, f"偏りが大きい: {per_day}"
+
+    def test_delisted_priceless_company_is_skipped_on_off_days(
+            self, db, make_company, make_price, monkeypatch):
+        """当たらない日は fetch を呼ばない。生きている社の補完は続ける。"""
+        from collector_prices import should_retry_priceless_delisted
+
+        now_jst, session = _monday_anchor()
+        db.add(make_company(edinet_code="E00001", sec_code="1001", is_active=True))
+        db.add(make_company(edinet_code="E00002", sec_code="1002", is_active=False))
+        db.add(make_price(edinet_code="E00001",
+                          trade_date=(session - timedelta(days=3)).isoformat()))
+        db.commit()
+
+        monkeypatch.setattr("collector_prices.should_retry_priceless_delisted",
+                            lambda ec, today: False)
+        seen = []
+
+        async def fake(http, sec_code, d_from, d_to, **kw):
+            seen.append(sec_code)
+            return []
+
+        with patch("collector_prices.fetch_yahoo_history", new=fake):
+            self._run(fill_recent_stock_price_gap_yahoo(db, gap_days=0, now_jst=now_jst))
+        assert seen == ["1001.T"], f"廃止済み価格ゼロの社を叩いている: {seen}"
+        assert callable(should_retry_priceless_delisted)
+
+    def test_delisted_priceless_company_is_retried_on_its_day(
+            self, db, make_company, make_price, monkeypatch):
+        """当たる日には試す＝恒久除外ではない（#463 の誤 delisted 判定を拾い直せる）。"""
+        now_jst, session = _monday_anchor()
+        db.add(make_company(edinet_code="E00002", sec_code="1002", is_active=False))
+        db.add(make_company(edinet_code="E00001", sec_code="1001", is_active=True))
+        db.add(make_price(edinet_code="E00001",
+                          trade_date=(session - timedelta(days=3)).isoformat()))
+        db.commit()
+
+        monkeypatch.setattr("collector_prices.should_retry_priceless_delisted",
+                            lambda ec, today: True)
+        seen = []
+
+        async def fake(http, sec_code, d_from, d_to, **kw):
+            seen.append(sec_code)
+            return []
+
+        with patch("collector_prices.fetch_yahoo_history", new=fake):
+            self._run(fill_recent_stock_price_gap_yahoo(db, gap_days=0, now_jst=now_jst))
+        assert sorted(seen) == ["1001.T", "1002.T"]
+
+    def test_active_company_without_prices_is_never_skipped(
+            self, db, make_company, make_price, monkeypatch):
+        """`is_active` が True / 未設定の社は毎晩どおり取りに行く。"""
+        now_jst, session = _monday_anchor()
+        db.add(make_company(edinet_code="E00001", sec_code="1001", is_active=True))
+        db.add(make_company(edinet_code="E00003", sec_code="1003"))       # is_active 未設定
+        db.add(make_price(edinet_code="E00001",
+                          trade_date=(session - timedelta(days=3)).isoformat()))
+        db.commit()
+
+        monkeypatch.setattr("collector_prices.should_retry_priceless_delisted",
+                            lambda ec, today: False)
+        seen = []
+
+        async def fake(http, sec_code, d_from, d_to, **kw):
+            seen.append(sec_code)
+            return []
+
+        with patch("collector_prices.fetch_yahoo_history", new=fake):
+            self._run(fill_recent_stock_price_gap_yahoo(db, gap_days=0, now_jst=now_jst))
+        assert sorted(seen) == ["1001.T", "1003.T"]
+
+    def test_backoff_does_not_apply_to_explicit_gap_days(
+            self, db, make_company, monkeypatch):
+        """`gap_days > 0`（バックフィル用の明示呼び出し）では絞らない。
+
+        毎晩の鮮度確保と違い、こちらは「取りに行くこと」自体が目的の呼び出し。
+        """
+        db.add(make_company(edinet_code="E00002", sec_code="1002", is_active=False))
+        db.add(make_company(edinet_code="E00001", sec_code="1001", is_active=True))
+        from database import StockPriceDaily
+        db.add(StockPriceDaily(edinet_code="E00001",
+                               trade_date=(date.today() - timedelta(days=30)).isoformat(),
+                               close=100.0))
+        db.commit()
+
+        monkeypatch.setattr("collector_prices.should_retry_priceless_delisted",
+                            lambda ec, today: False)
+        seen = []
+
+        async def fake(http, sec_code, d_from, d_to, **kw):
+            seen.append(sec_code)
+            return []
+
+        with patch("collector_prices.fetch_yahoo_history", new=fake):
+            self._run(fill_recent_stock_price_gap_yahoo(db, gap_days=7))
+        assert sorted(seen) == ["1001.T", "1002.T"], "gap_days>0 でも絞ってしまっている"

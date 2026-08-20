@@ -1081,6 +1081,22 @@ def last_closed_session(now_jst: datetime) -> date:
     return d
 
 
+def should_retry_priceless_delisted(edinet_code: str, today: date) -> bool:
+    """上場廃止済みで価格ゼロの社を、今日ぶんの gap-fill 対象にするか（Issue #475）。
+
+    `DELISTED_RETRY_INTERVAL_DAYS` 日に1回だけ True を返す。曜日は edinet_code から
+    決定的に決まるので、454社が同じ日に固まらず日ごとに約 1/7 ずつ散る。
+
+    **恒久除外にしない理由**: `is_active` は `/equities/master` 由来で、無料プランの
+    エンバーゴにより「as-of より後に上場した銘柄」が誤って delisted に見えることがある
+    （#463）。除外すると新規上場も再開も永久に拾えなくなり、しかも**失敗が出ない**。
+    """
+    import zlib
+
+    n = DELISTED_RETRY_INTERVAL_DAYS
+    return zlib.crc32(edinet_code.encode()) % n == today.toordinal() % n
+
+
 async def fill_recent_stock_price_gap_yahoo(
     db,
     gap_days: int = 7,
@@ -1145,17 +1161,24 @@ async def fill_recent_stock_price_gap_yahoo(
     floor_d = today - timedelta(days=DAILY_WINDOW_DAYS)
 
     companies = [
-        (row.sec_code, row.edinet_code)
-        for row in db.query(Company.sec_code, Company.edinet_code)
+        (row.sec_code, row.edinet_code, row.is_active)
+        for row in db.query(Company.sec_code, Company.edinet_code, Company.is_active)
         .filter(Company.sec_code.isnot(None))
         .all()
     ]
 
+    n_delisted_skipped = 0
     to_fetch = []
-    for sec_code, edinet_code in companies:
+    for sec_code, edinet_code, is_active in companies:
         _d, _w = latest_daily.get(edinet_code), latest_weekly.get(edinet_code)
         last = max(x for x in (_d, _w) if x) if (_d or _w) else None
         if last is None:
+            # 価格を1件も持たない社。2026-08-21 の実測では該当 454社が全て
+            # is_active=False で、Yahoo も返さない（#475）。毎晩ではなく間隔を空ける。
+            if (use_session and is_active is False
+                    and not should_retry_priceless_delisted(edinet_code, today)):
+                n_delisted_skipped += 1
+                continue
             last_iso, start = None, floor_d       # 株価未収集の社は保持窓の先頭から
         else:
             last_d = date.fromisoformat(last[:10])
@@ -1192,7 +1215,10 @@ async def fill_recent_stock_price_gap_yahoo(
     bar_cap = (session if use_session else max(now_jst.date(), today)).isoformat()
     log.info(f"fill_recent_stock_price_gap_yahoo: {total}/{len(companies)}社を補完"
              f"（基準セッション {session} / JST {now_jst:%Y-%m-%d %H:%M} ・"
-             f"最古起点 {d_from_min} 〜 {d_to}）")
+             f"最古起点 {d_from_min} 〜 {d_to}"
+             + (f" ・廃止済み価格ゼロ {n_delisted_skipped}社は今夜は見送り"
+                f"（{DELISTED_RETRY_INTERVAL_DAYS}日に1回試す・#475）" if n_delisted_skipped else "")
+             + "）")
 
     n_new = 0        # 従来の最終日より後の日付＝正味の新規行。投入行数とは別に数える（#474）
 
