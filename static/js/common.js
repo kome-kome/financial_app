@@ -114,19 +114,25 @@ async function apiFetch(path, opts = {}) {
   document.addEventListener('visibilitychange', () => { if (!document.hidden && timer) beat(); });
 })();
 
-// ── 接続先バッジ（#481 B-1） ─────────────────────────────────────────────
-// ローカル読取レプリカへ繋いでいるときだけ右下に常時表示する。ミラーは pull/sync した
-// 時点で止まるため、**どちらの DB を見ているか分からないと古いスコアを最新と誤読する**
-// （#438 の「静かな配信停止」と同型）。本番接続時は何も描画しない＝普段の見た目は不変。
+// ── 接続先バッジ（#481 B-1・#503 で向きを反転） ──────────────────────────
+// **警告を出す向きは「どちらが正本か」で決まる。** 2026-08-20 に正本がローカル PostgreSQL
+// へ移った（#503・ADR-0038）ので、ローカル接続は平常運転＝何も描画しない。代わりに
+// **Supabase へ繋いでいるとき**に出す——あちらは 2026-08-07 の断面で更新を止めてあり、
+// Render の閲覧用に残しているだけなので、そうと知らずに読むと古いスコアを最新と誤読する
+// （#438 の「静かな配信停止」と同型）。
+//
+// 反転前は逆だった（ローカル接続時に警告）。**その向きのまま残すと、平常運転で毎回警告が
+// 出て狼少年になり、本当に古い断面を見ているときに気づけなくなる。**
 // テンプレートは触らない（common.js は全9ページが読み込むため、ここ1箇所で全画面に出る）。
 (() => {
   const show = (info) => {
-    if (!info || !info.db_is_local) return;   // 本番接続時は何も出さない
+    if (!info || info.db_is_local) return;   // ローカル＝正本。平常運転なので何も出さない
     const el = document.createElement('div');
     el.id = 'db-target-badge';
-    el.textContent = `⛁ ${info.db_label} — 同期時点のデータ`;
-    el.title = '本番（Supabase）ではなくローカル DB を参照しています。'
-             + '最後にミラーを同期した時点のデータで、夜間バッチの最新スコアは含まれません。';
+    el.textContent = `⛁ ${info.db_label} — 2026-08-07 の断面`;
+    el.title = '正本のローカル DB ではなく Supabase を参照しています。'
+             + 'Supabase は 2026-08-07 で更新を止めた閲覧用の断面で、'
+             + 'それ以降の収集結果と夜間バッチのスコアは含まれません（#503・ADR-0038）。';
     Object.assign(el.style, {
       position: 'fixed', right: '12px', bottom: '12px', zIndex: '9999',
       padding: '6px 12px', borderRadius: '999px',
