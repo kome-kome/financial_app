@@ -35,6 +35,21 @@ Supabase 無料枠の障害でサービスが止まったのは 2026-07 と 2026
 正本の外を叩き、内容が黙って分岐する。反転でガードの向きが正しくなり、**明示的に `prod` と
 書いた人だけが Supabase へ触れる**。実質 `render.yaml` の1箇所だけである。
 
+### 1b. Render だけは既定を反転させない（`RENDER` 検知）
+
+`render.yaml` の `envVars` に `FINAPP_DB_TARGET: prod` を書いたが、**既存サービスが Blueprint
+管理下にない場合その値は反映されない**（ダッシュボード側の設定が正）。反映漏れのまま既定の
+local へ落ちると、Render は localhost を見て「接続失敗」ではなく**空の DB に繋がって 0 件**に
+なる——#481 B-0 で一度踏んだのと同型の、起動はするが中身が無い壊れ方である。
+
+`RENDER` は Render が必ず `true` で設定する（[Default Environment Variables](https://render.com/docs/environment-variables)）
+ので、`FINAPP_DB_TARGET` 未設定時のフォールバックに使う。優先順は **明示 > `RENDER` 検知 > 既定（local）**。
+明示指定を最優先に保つのは、Render 上でローカルを見たい検証を塞がないため。開発機・CI には
+`RENDER` が無いので既定の local のまま影響しない。
+
+本番の `/health` は 200 / `db:ok` を返すが、`/api/system/info` は認証必須で**どちらの DB を
+掴んでいるかは外から確認できない**。確認できない以上、設定漏れでも安全側へ倒れる作りにしておく。
+
 ### 2. `stock_price_daily` をミラー範囲へ入れる
 
 「183日ローリングで再構成できるから 300MB 枠を割く価値がない」（ADR-0035）は
