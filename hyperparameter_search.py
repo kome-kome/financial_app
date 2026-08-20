@@ -35,14 +35,27 @@ OBJECTIVES = ("rank_ic", "ic_ir", "long_short")
 
 def _data_fingerprint(db) -> str:
     """探索に使ったデータの簡易フィンガープリント（鮮度警告用。厳密なハッシュではなく
-    「最終trade_date＋行数」の変化を検知できれば十分という設計・Issue #264）。"""
-    from sqlalchemy import func
-    from database import MacroData, StockPriceWeekly
+    「最終週＋行数」の変化を検知できれば十分という設計・Issue #264）。
 
-    max_px = db.query(func.max(StockPriceWeekly.trade_date)).scalar()
-    n_px = db.query(func.count()).select_from(StockPriceWeekly).scalar()
+    週次株価の高水位は `weekly_price_cache.fingerprint()` から取る（Issue #497）。
+    **`max(trade_date)` を自前で書かない**——`trade_date` は週内の最終営業日で PK に含まれず
+    nullable、しかも `_recompute_weeks_from_daily` の再集約で同じ週でも書き換わりうる。
+    高水位は `week_start`（PK 第2列）であり、ADR-0036 でそう決めた。規則が2つ同居すると
+    次に触る人が「前例がある」と言って古い方をコピーする。
+
+    ここでは世代印（`generation`）も含めた3点を使う。値の訂正（#465 の分割段差修復のような
+    過去週の書き換え）は max/count では原理的に見えないので、印が進めば指紋も変わる。
+
+    macro 側は `max(trade_date)` のまま。`macro_data` に `week_start` 相当が無く、
+    こちらは trade_date が素直に高水位である。
+    """
+    from sqlalchemy import func
+    from database import MacroData
+    from weekly_price_cache import fingerprint as weekly_fingerprint
+
+    px = weekly_fingerprint(db)
     max_macro = db.query(func.max(MacroData.trade_date)).scalar()
-    raw = f"{max_px}|{n_px}|{max_macro}"
+    raw = f"{px.max_week_start}|{px.n_rows}|{px.generation}|{max_macro}"
     return hashlib.sha256(raw.encode()).hexdigest()[:16]
 
 

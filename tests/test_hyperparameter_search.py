@@ -178,3 +178,47 @@ class TestQualityGate:
         )
         with pytest.raises(SystemExit):
             asyncio.run(hs._run(args))
+
+
+class TestDataFingerprint:
+    """指紋の高水位を `week_start` へ揃えたこと（Issue #497・ADR-0036）。
+
+    `trade_date` は週内の最終営業日で PK に含まれず nullable、しかも
+    `_recompute_weeks_from_daily` の再集約で同じ週でも書き換わりうる。同じテーブルに
+    対する高水位の規則が2つ同居すると、次に触る人が古い方をコピーする。
+    """
+
+    def test_uses_the_weekly_cache_fingerprint(self, db, monkeypatch):
+        """`weekly_price_cache.fingerprint` を経由すること（自前で max を書かない）。"""
+        import weekly_price_cache
+
+        called = []
+        real = weekly_price_cache.fingerprint
+        monkeypatch.setattr(weekly_price_cache, "fingerprint",
+                            lambda d: (called.append(1), real(d))[1])
+        hs._data_fingerprint(db)
+        assert called, "weekly_price_cache.fingerprint を通っていない"
+
+    def test_is_stable_for_the_same_data(self, db, make_weekly):
+        db.add(make_weekly(week_start="2026-01-05")); db.commit()
+        a = hs._data_fingerprint(db)
+        b = hs._data_fingerprint(db)
+        assert a == b
+
+    def test_changes_when_a_week_is_added(self, db, make_weekly):
+        db.add(make_weekly(week_start="2026-01-05")); db.commit()
+        before = hs._data_fingerprint(db)
+        db.add(make_weekly(week_start="2026-01-12")); db.commit()
+        assert hs._data_fingerprint(db) != before
+
+    def test_changes_when_the_generation_is_bumped(self, db, make_weekly):
+        """**値だけの訂正は max/count では見えない**（#465 の分割段差修復がその形）。
+
+        世代印を指紋へ含めているので、印が進めば探索も「データが変わった」と分かる。
+        """
+        import weekly_price_cache
+
+        db.add(make_weekly(week_start="2026-01-05")); db.commit()
+        before = hs._data_fingerprint(db)
+        weekly_price_cache.bump_generation(db, "test")
+        assert hs._data_fingerprint(db) != before

@@ -137,8 +137,8 @@ def fingerprint(db) -> WeeklyFingerprint:
 
     高水位は **`week_start`**（PK 第2列）であって `trade_date` ではない。`trade_date` は週内の
     最終営業日で PK に含まれず nullable ＝範囲スキャンのインデックス条件に入らない。
-    （`hyperparameter_search._data_fingerprint` は `max(trade_date)` を使っており、あちらは
-    鮮度警告用なので実害は無いが、**この形をコピーしないこと**。）
+    （`hyperparameter_search._data_fingerprint` も #497 でこの関数を使う側へ揃えた。
+    `stock_price_weekly` の高水位の規則はこの1箇所だけにする。）
     """
     from sqlalchemy import func
     from database import StockPriceWeekly, get_setting
