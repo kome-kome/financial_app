@@ -42,18 +42,29 @@
 ## 起動・実行コマンド
 
 ```powershell
-# ローカル（Windows）
-.\venv\Scripts\Activate.ps1
+# ローカル（Windows）— 正本はローカル PostgreSQL（#503・ADR-0038）
+./venv/Scripts/Activate.ps1
 uvicorn api:app --reload                 # → http://localhost:8000/
-python launch.py                         # GUI ランチャー（既定は本番=Supabase）
-.un_local.ps1                          # GUI ランチャーをローカルDB始まりで起動
-.un_local.ps1 -Console -Port 8010      # 同上・ランチャー無しでコンソール起動
+python launch.py                         # GUI ランチャー（既定=ローカル正本）
+./run_local.ps1                          # 接続先をローカルに固定して起動
+./run_local.ps1 -Console -Port 8010      # 同上・ランチャー無しでコンソール起動
 
+# 夜間バッチ（収集 → スコア更新）。GHA の cron は #503 で全停止した
+./run_nightly.ps1                        # 手動で1回
+./run_nightly.ps1 -DryRun                # 実行計画だけ
+./scripts/install_nightly_task.ps1       # タスクスケジューラへ登録（毎日 JST 17:20）
+
+# バックアップ（Supabase Storage・50MB/ファイル・1GB。実測 37.5MB/世代）
+python -m scripts.backup_push --apply                 # ローカルに世代を作る
+python -m scripts.backup_push --apply --dest storage  # Storage へ push
+python -m scripts.backup_restore --apply --create-schema --dest-url <local-url>
+
+python _pipeline_incremental.py         # 差分収集（XBRL＋マクロ＋株価）＝鮮度の担い手
 python collector.py --years 5           # 全件収集（5年分）
 python collector.py --years 1 --max 10  # テスト用（10社）
 python collector.py --company E02167    # 特定企業更新
 python collector.py --market            # 株価のみ更新
-python collector.py --incremental       # 差分収集
+python collector.py --incremental       # XBRL 差分のみ（**株価は更新しない**）
 python collector.py --macro                              # マクロ全系列
 python collector.py --macro --macro-series JP10Y_FRED    # 指定系列のみ（定義是正後の再収集用）
 python collector.py --repair-price-breaks                # 週次株価の分割段差を検出（dry-run）
@@ -126,9 +137,10 @@ web版・ローカル版の双方が同じ Issue を見ることで、**コー�
 - **プラグイン起動は `plugins.execute_plugin(plugin, raw, db)` が単一入口**（runner / `/api/recommend` / `/api/gap-analysis` が共用・テストもこれ）。内部で `coerce_params`→`ensure_dependencies`→`execute` の順。例外（`ValueError`/`DependencyError`）は握らず送出し、各 endpoint の except が HTTP へマップ（gap-analysis→404・runner→400 の差を保つ）。**`execute` は同期（`def`）で実装する（`async def` 禁止・Issue #357）**: execute_plugin が `asyncio.to_thread` でワーカースレッドへオフロードするため、CPU-bound でもイベントループを塞がない（heartbeat watchdog の誤停止防止）。`async def` で実装すると to_thread が未 await のコルーチンを返して壊れる。
 - **`params_schema()` はパラメータ契約**（CONTEXT.md「パラメータ契約」）。`type`（ウィジェット）と `dtype`（データ型: int/float/str/list[str]/bool/dict）の2軸を持ち、dtype は `number`/`slider` にのみ明示必須（他は type から推論）。型変換・default 補完・bounds(min/max)/membership(options) 検証は `coerce_params`（`plugins/utils.py`）が一手に担い、**違反は reject（ValueError）**。`execute` は coerce 済み typed params を受け取り、意味的 validation（features 非空・weights 合計≠0 等）だけ持つ。bool ウィジェットは `checkbox` に統一（`boolean`/`bool` 禁止）。
 - **CORS は `ALLOWED_ORIGIN` 環境変数で制御**（デフォルト `http://localhost:8000`）。
-- **ミラー（`scripts/mirror_*.py`）の書き込み先はローカル限定**（#481・ADR-0035）。`guard_dest_local()` がリモート dest を `SystemExit` で弾く＝ミラーは Supabase を正本とする読取レプリカで、逆向きに書く経路をコードとして持たない。エンドポイント解決は `database.resolve_database_url()` へ委譲し**二重実装しない**。restore は **FK 依存順に1表ずつ**（ダンプの TOC はアルファベット順であって `--table` の指定順ではない）。週次の再取得窓は `DAILY_WINDOW_DAYS` から導出（27週）。
+- **正本はローカル PostgreSQL**（#503・ADR-0038）。Supabase は **2026-08-07 の閲覧用断面（Render 専用）＋ Storage のバックアップ置き場**。2回目の停止の真因は Egress ではなく **NANO の実効メモリ 408MB に DB が乗らないこと**（#500）で、VACUUM FULL 後も余裕は 13〜28MB＝週次株価が増え続ける以上、正本を置く限り必ず再発する。**Supabase の Postgres へ書き戻す経路は作らない**（だから ADR-0035 の dest ローカル限定ガードはそのまま生きる）。収集・スコア更新は `scripts/run_nightly.py`（タスクスケジューラ・JST 17:20）が回し、**収集の入口は `_pipeline_incremental.py`**——`collector.py --incremental` は `run_full_collection` だけで**株価を1バイトも更新しない**（取り違えてもエラーは出ない）。バックアップは `scripts/backup_push.py` / 復元は `scripts/backup_restore.py`（Storage は 50MB/ファイル・1GB。表ごと分割で実測 37.5MB/世代）。
+- **ミラー（`scripts/mirror_*.py`）の書き込み先はローカル限定**（#481・ADR-0035）。`guard_dest_local()` がリモート dest を `SystemExit` で弾く＝**ローカルから本番 DB へ書く経路をコードとして持たない**（#503 の反転後もこの向きは変わらない）。エンドポイント解決は `database.resolve_database_url()` へ委譲し**二重実装しない**。restore は **FK 依存順に1表ずつ**（ダンプの TOC はアルファベット順であって `--table` の指定順ではない）。週次の再取得窓は `DAILY_WINDOW_DAYS` から導出（27週）。ミラー範囲は全18表から `xbrl_raw_documents`（0行）を除いた**17表**＝`stock_price_daily` は #503 で範囲へ入れた（正本が移れば daily はローカルにしか無い正本データになる）。
 - **週次株価の差分ロード（`weekly_price_cache.py`）は「速さだけ」を担う**（#480・ADR-0036）。正しさは①指紋（`max(week_start)`＋`count(*)`）②DB 側の世代印③行数照合の3つが持ち、**どれかが外れたら必ずフルロードへ倒す**（「不一致だが続行」の分岐を作らない）。触るときの不変条件は3つ: **差分条件 `week_start >= :since` は既存の500社チャンクの中に足す**（単独では PK 先頭列にならず seq scan）／**SELECT の列を増やさない**（`EGRESS_COST_TABLE` の4列較正は volume 込みの値・キャッシュ側は ISO 週の不変条件から `trade_date` で切れる）／**キャッシュのワイヤ形式は素タプル**（`_VOLUME_NOT_LOADED` は pickle で同一性が壊れ `px_volz` が全 nan 化する）。過去週を遡って書き換える処理を足したら世代印を進めること（`_recompute_weeks_from_daily` の構造的条件で自動的に進むが、経路によっては明示 bump が要る）。`27週` の導出は `database.WEEKLY_OVERLAP_DAYS` が唯一の源でミラー同期と共有する。
-- **接続先は `FINAPP_DB_TARGET`（`prod` 既定 / `local`）で切り替える**（#481 B-1・`database.resolve_database_url()`）。`local` は `DATABASE_URL_LOCAL`（未設定ならローカル既定）を使い、**解決先がリモートなら import 時に `RuntimeError`**（ミラーのつもりで本番へ書く事故を止める）。逆に **`prod` で `DATABASE_URL` 未設定は警告どまりで raise しない**——`ci.yml` は `DATABASE_URL` を渡さずに走るため、例外にすると CI が全滅する。未知の target 値は `ValueError`。接続先は `/api/system/info` → `static/js/common.js` のバッジで全画面に出す（ローカル時のみ）。
+- **接続先は `FINAPP_DB_TARGET`（`local` 既定 / `prod`）で切り替える**（#481 B-1・**#503 で既定を反転**・`database.resolve_database_url()`）。既定が local なのは正本がローカルだから＝**`.env` に `DATABASE_URL` があるだけでは Supabase へ行かない**。`prod` を明示するのは `render.yaml` の1箇所だけ（無いと Render は localhost を見にいき「接続失敗」ではなく**空の DB に繋がって0件**に化ける）。`local` は `DATABASE_URL_LOCAL`（未設定ならローカル既定）を使い、**解決先がリモートなら import 時に `RuntimeError`**。逆に **`prod` で `DATABASE_URL` 未設定は警告どまりで raise しない**（反転前は `ci.yml` がこの経路を踏んでいた。緩さ自体は Render 側で生きている）。未知の target 値は `ValueError`。接続先は `/api/system/info` → `static/js/common.js` のバッジで全画面に出す（ローカル時のみ）。`launch.py` は既定値を文字列で写しているので `tests/test_db_target.py` が database 側と照合する。
 - **分析モデルの次元整合性（必須）**: 説明変数と被説明変数は同一次元（per-share財務金額[円/株]→株価[円/株]の Ohlson 型）。OLS学習前に各特徴量を `winsorize`（p1-p99、`plugins/utils.py`）。詳細・根拠は [MODELS.md](docs/MODELS.md)。
 - **科学計算ライブラリ**（numpy/scipy/statsmodels/scikit-learn）は利用可。採用基準は [VISION.md](docs/VISION.md)。
 

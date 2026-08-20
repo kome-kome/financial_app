@@ -30,24 +30,60 @@ Render の制約と運用形態に合わせて設計すること。
 
 ### GitHub Actions workflow 早見表（いつ・何を・どれを使うか）
 
-#### cron 占有表（時刻を動かす前に必ずここを見る）
+#### 定期実行の占有表（時刻を動かす前に必ずここを見る）
 
-**すべて UTC。** GitHub Actions のランナーは UTC で、東証・EDINET の「日付」は JST（＝UTC+9）。占有は「名目の起動時刻 → `timeout-minutes` の上限」で、**キュー遅延は含まない**。
+> **2026-08-20（#503・[ADR-0038](adr/0038-local-postgres-is-the-primary.md)）に駆動主体が変わった。**
+> 正本がローカル PostgreSQL へ移り、**GHA はクラウドで走るのでローカル DB へ書けない**ため、
+> 収集とスコア更新の cron を停止してローカルのタスクスケジューラへ移した。
+> 停止した yml には理由・復旧条件・代替経路を書いてある（`tests/test_workflow_schedule_pauses.py` が CI で強制）。
+
+**ローカル（Windows タスクスケジューラ・JST 表記）**
+
+| JST | タスク | 頻度 | 中身 | 備考 |
+|---|---|---|---|---|
+| **17:20** | `financial_app-nightly`（`run_nightly.ps1` → `scripts/run_nightly.py`） | 毎日 | `_pipeline_incremental.py`（XBRL 差分＋マクロ＋市場データ）→ `nightly_scores.py` | 大引 15:30・J-Quants 四本値 16:30・EDINET 受付終了 17:15 の後（#476 の確定時刻表）。`StartWhenAvailable` で停止していた日は次回起動時に追いつく。上限6時間 |
+| 任意（週次を想定） | `scripts/backup_push.py` | 週次 | 17表を `--compress=9` でダンプ → Storage へ | 夜間バッチと**別タスク**にする（遅延が道連れにならない）。実測 37.5MB/世代 |
+
+- **Egress はローカル駆動では発生しない**（ローカル読取は Supabase を1バイトも使わない）。
+- ステップ間で止めない設計なので、収集が落ちてもスコア更新は走る。両方の結果が `.logs/nightly_YYYYMMDD.log` に残る。
+- 「走らなかった」ことは `app_settings` の `nightly_last_run` / `nightly_last_success` と、`/api/morning` の as-of ブロック（#416/#417）で見る。
+
+**GitHub Actions（残っているもの・すべて UTC）**
 
 | UTC | ワークフロー | 頻度 | 占有（上限まで） | JST | 1回あたり Egress |
 |---|---|---|---|---|---|
-| 00:00 | `macro-beta-inference` | 毎月1日 | → 05:40（340分） | 09:00 | 約 68MB（`build_panel` = `load_data` 1回） |
-| **08:17** | **`daily-incremental`** → `nightly-scores` / `macro-health` | **毎日** | → 通常 11:00・最悪 14:17（360分）＋チェーン33〜35分 | **17:17** | 収集は主に ingress ／ **`nightly-scores` 初回 67.7MB・定常 約32MB**（週次は差分ロード・#480）／ `macro-health` ほぼ0 |
-| 16:30 | `tune-hyperparameters` | 毎月1日 | → 22:25（355分・macro_gbdt） | 翌01:30 | 約 68MB **× matrix 3ジョブ**（別プロセス＝`shared_snapshot_cache` は跨がない） |
 | **21:00** | **`egress-health`** | **毎日** | → 21:10（10分） | **翌06:00** | ほぼ0（`app_settings` 2行＋`pg_database_size` 1行） |
-| 22:00 | `recommend-factor-premia` | 毎月5日 | → 22:20（20分） | 翌07:00 | 約 68MB（`load_data` 1回） |
 | 23:30 | `vacuum-maintenance` | 毎週土 | → 24:00 | 日 08:30 | ほぼ0（サーバ内処理） |
+| （push/PR） | `ci.yml` | 随時 | 〜15分 | — | 0（DB へ接続しない） |
+| （失敗時） | `notify-failure` | 随時 | 〜10分 | — | 0 |
 
-- 非重複を守る理由は **Supabase の接続上限**（#470 では `daily-incremental` 単独でも pooler 枯渇＝ECHECKOUTTIMEOUT を2回踏んでいる）。**このルールは「6時間級ジョブ同士」のためのもの**で、`egress-health`（3行を読むだけ・数秒・1接続）のような軽量ジョブは対象外＝毎月1日の `tune-hyperparameters`（16:30〜22:25Z）と重なりうるが接続上限には寄与しない。`macro-health` も同じ理由で `daily-incremental` の直後（`workflow_run` チェーン）に走らせている。
-- **Egress 列は時刻の非重複とは独立に効く**。非重複でも総量は積み上がるため、ワークフローを足すときは占有時間と転送量の**両方**を見る（この列が無かったため、`tune-hyperparameters` の matrix 3並列＝1日で約200MB という項が長らく Egress 設計の表から漏れていた）。実測は下記「Egress 設計」節、常時の内訳は `db_egress` の台帳（#478）。
-- **6時間級のジョブが3本ある以上、キュー遅延まで含めた完全な非重複は不可能**（GHA の cron 遅延は実測で最大6時間）。上表が保証するのは名目時刻での非重複＋1時間以上のマージンまで。#446 の「cron の名目時刻で衝突判定しない」は**実起動のログで事後確認せよ**という意味で、設計時の目安としては上表を使う。
-- 2026-08-09（#476）に `daily-incremental` を 18:00 → 08:17 へ前倒ししたのに伴い、月次3本を空いた窓へ再配置した。
-- **週次株価の差分ロード（#480）が入っているのは `nightly-scores` だけ**（`actions/cache` で run 間キャッシュを持ち回る）。月次3本は月1回・合計約400MB で、`tune-hyperparameters` は matrix 3並列＝同一キーへの同時 save が競合するため**意図的にスコープ外**（[ADR-0036](adr/0036-weekly-prices-incremental-load.md) 決定7・`tests/test_nightly_scores.py::TestWeeklyCacheStep` が「他の yml が `actions/cache` を使っていないこと」を固定する＝入れ忘れではないことをコードで示している）。
+**GitHub Actions（#503 で停止したもの）**
+
+| 旧 UTC | ワークフロー | 停止理由 | 代替 |
+|---|---|---|---|
+| 08:17 | `daily-incremental` → `nightly-scores` / `macro-health` | 正本がローカルへ移り、動かすと Supabase だけが前進して分岐する | ローカル `run_nightly.ps1`（JST 17:20） |
+| 00:00 | `macro-beta-inference` | 同上（`macro_beta_loadings` が分岐する） | ローカルの月次バッチへ移す（#503 Phase 2 の残り。それまでは手動） |
+| 16:30 | `tune-hyperparameters` | 同上。M-1/M-2/M-3 の**唯一の自動更新経路**だったので、止めた時点で μ̂ の鮮度も止まる | 同上 |
+| 22:00 | `recommend-factor-premia` | 同上。#423 子5 で「実行履歴ゼロのまま 37 期の重みで固着」を直した cron なので、**止めれば同じ固着へ戻る** | 同上 |
+
+- `nightly-scores` と `macro-health` は `daily-incremental` の `workflow_run` チェーンなので、親を止めれば連動して止まる（yml 側の schedule は元から無い）。
+- `full-pipeline` / `backfill-*` / `collect-interim` / `collect-disclosures` / `collect-macro` は `workflow_dispatch` 専用。放置で害はないが、**手動起動すると Supabase へ書く**＝正本と分岐するので注意。
+- 停止中は `nightly_scores.HEAVY_AUTOMATION` の登録（GHA のワークフロー名）と実態がずれている。**登録があること ≠ 動いていること**（ADR-0031）で、月次をローカルへ移す時点でレジストリ側も直す。
+
+#### バックアップからの復元（#503 Phase 3）
+
+Supabase Storage に置いた世代から戻す。**復元先はローカル限定**（`guard_dest_local`）。
+
+```powershell
+python -m scripts.backup_push --list --dest storage        # 世代を確認
+python -m scripts.backup_restore                           # 最新世代の内容（ドライラン）
+python -m scripts.backup_restore --apply --create-schema    # 既定のローカル DB へ
+```
+
+- 復元は **FK 依存順に1表ずつ**（`pg_restore --disable-triggers` は非 superuser では使えない）。
+- 復元後にマニフェストの行数と突合し、食い違えば exit 1。
+- **四半期に1度、空の DB へ実際に流す**。`edinet` は `createdb` 権限を持たないので、予行には
+  `initdb` の使い捨てクラスタ（port 5433）を使う——2026-08-20 の実証もこの経路で、17表すべて行数一致を確認した。
 
 #### アクティブ（`.github/workflows/` 直下・Actions 対象）
 
@@ -261,9 +297,11 @@ Issue #293 で廃止済みのため、探索の実行手段は本ワークフロ
 重い操作を API レベルでブロックし、UI 上でもボタンを無効化する。
 ローカル `.env` にはこの変数を設定しない（制限なし）。
 
-### ローカル PostgreSQL（読取レプリカの土台・Issue #481）
+### ローカル PostgreSQL（**正本**・Issue #481 → #503）
 
-Supabase が Egress 超過で restricted になると**アプリも分析も一切動かせない**（2026-07・2026-08 に2回発生し、2回目は8日間まるごと停止）。障害時の継続と、検証反復の Egress ゼロ化のために、ローカルへ**読取レプリカ**を置く。**正本は Supabase のまま**で、収集も夜間バッチも GitHub Actions で回す構成は変えない。
+Supabase が restricted になると**アプリも分析も一切動かせない**（2026-07・2026-08 に2回発生し、2回目は8日間まるごと停止）。#481 は障害時の継続と検証反復の Egress ゼロ化のためにローカルへ**読取レプリカ**を置いた。
+
+**2026-08-20（#503・[ADR-0038](adr/0038-local-postgres-is-the-primary.md)）にこれが正本へ昇格した。**2回目の停止の真因は Egress ではなく **NANO の実効メモリ 408MB に DB 409.8MB が乗らないこと**（#500）で、VACUUM FULL 後も余裕は 13〜28MB しかない——**週次株価は毎週増える**のでこの余裕は自然には戻らず、正本を置く限り同じ停止が周期的に再発する。収集も夜間バッチもローカル（Windows タスクスケジューラ）で回し、Supabase は **2026-08-07 の閲覧用断面（Render 専用）＋ Storage のバックアップ置き場**として残す。**Supabase の Postgres へ書き戻す経路は作らない**（ミラーの dest ローカル限定ガードはそのまま生きる）。
 
 #### このマシンの実測（2026-08-15）
 

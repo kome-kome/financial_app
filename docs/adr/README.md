@@ -43,6 +43,7 @@
 | [0036](0036-weekly-prices-incremental-load.md) | 夜間バッチの週次株価（毎晩 1,282,436 行・39.3MB＝月枠の40%）を差分ロードへ。高水位は **`week_start`**（PK 第2列）で条件は既存の社チャンクの中に足す。**指紋（`max+count`）では値だけの訂正が原理的に見えない**ので、無効化は DB 側の世代印で行い、印は `_recompute_weeks_from_daily` の「保持窓より古い週を書き換えた」という**構造的条件**が主・明示フックが従。行数照合はハードゲートにし、静かな劣化は週1コールド＋ドリフト監査で塞ぐ。SELECT の列は増やさない（番兵は pickle で同一性が壊れるためワイヤは素タプル） | #480, #478 | accepted（2026-08-17） |
 
 | [0037](0037-egress-cycle-budget-is-a-second-axis.md) | Egress の歯止めは2軸。**プロセス予算（400MB/プロセス）は暴走型しか止められず、2回目の超過（じわじわ型＝スパイク2GB＋平常5GB）には原理的に無力だった**。請求サイクル単位の累計を `app_settings` に置く＝ローカル CLI と GHA が同じカウンタを見られる唯一の場所。ブロックは 95%（100% に置かない＝restricted のコストは桁違い）、ミラー接続では積まない、自己計上の再帰はスレッドローカルで止める、**pytest 中は必ず無効**（ローカルの pytest は本番 engine を import するため実際に本番へ書き込んだ）。台帳 JSONL は既定オンにし、閾値超過は独立ジョブが exit 2 で failure へ翻訳する（PAT 不要で #483 を解く） | #478, #483 | accepted（2026-08-19） |
+| [0038](0038-local-postgres-is-the-primary.md) | **正本をローカル PostgreSQL へ反転**し、Supabase を「2026-08-07 の閲覧用断面」と「Storage のバックアップ置き場」へ降格する。2回目の停止の真因は Egress ではなく **NANO の実効メモリ 408MB に DB が乗らないこと**で、VACUUM FULL 後も余裕は 13〜28MB しかない＝週次株価が増え続ける以上、正本を置く限り必ず再発する。`resolve_database_url()` の既定を local へ反転（prod を踏むのは `render.yaml` の1箇所だけ）。`stock_price_daily` はミラー範囲へ入れる（「再収集できるから除外」は正本が向こうにあったときの理屈）。GHA の cron は停止し駆動主体をタスクスケジューラへ。収集の入口は `_pipeline_incremental.py`（`collector.py --incremental` は株価を1バイトも更新しない）。**Postgres へ書き戻す経路は作らない**ので ADR-0035 の dest ローカル限定ガードはそのまま生きる。**cron を止めても failure は出ない**ため、停止中の schedule に理由・復旧条件・代替経路を書くことを CI で強制する | #503, #500, #501 | accepted（2026-08-20） |
 
 ## 運用
 
