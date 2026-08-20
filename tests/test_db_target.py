@@ -53,6 +53,25 @@ class TestDefaults:
         assert resolve_database_url({"FINAPP_DB_TARGET": "", "DATABASE_URL": ""}) == (
             "local", _LOCAL_DEFAULT_URL)
 
+    def test_render_falls_back_to_prod_without_explicit_target(self):
+        """**Render だけは既定を反転させない。**
+
+        `render.yaml` の `FINAPP_DB_TARGET: prod` は、既存サービスが Blueprint 管理下に
+        ない場合に反映されない。反映漏れのまま既定の local へ落ちると、Render は localhost を
+        見て「接続失敗」ではなく**空の DB に繋がって0件**になる（#481 B-0 と同型）。
+        `RENDER` は Render が必ず設定するので、設定漏れの保険として使う。
+        """
+        assert resolve_database_url({"RENDER": "true", "DATABASE_URL": REMOTE}) == ("prod", REMOTE)
+
+    def test_explicit_target_beats_render_detection(self):
+        """明示指定が最優先。Render 上でローカルを見たい場面（検証）を塞がない。"""
+        assert resolve_database_url(
+            {"RENDER": "true", "FINAPP_DB_TARGET": "local"})[0] == "local"
+
+    def test_render_detection_does_not_leak_into_local_dev(self):
+        """`RENDER` が無い環境（開発機・CI）は既定どおり local。"""
+        assert resolve_database_url({"DATABASE_URL": REMOTE})[0] == "local"
+
     def test_launcher_default_matches_database_default(self):
         """`launch.py` が写している既定値が `database._DEFAULT_TARGET` とずれないこと。
 

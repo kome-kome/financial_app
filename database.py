@@ -62,6 +62,8 @@ def resolve_database_url(env) -> tuple[str, str]:
     - `FINAPP_DB_TARGET`: "local"（既定・#503）| "prod"。**未知の値は握りつぶさず ValueError**——
       `localhost` のような打ち間違いを黙って既定へ落とすと、本人は指定したつもりで別の DB を
       叩き続ける（この種の取り違えは事後にログから判別できない）。
+    - **未設定かつ `RENDER` があれば prod**（Render は `RENDER=true` を必ず設定する）。
+      `render.yaml` の env が反映されない構成でも Render が空の DB を掴まないための保険。
     - local: `DATABASE_URL_LOCAL` → 無ければ `_LOCAL_DEFAULT_URL`。
     - prod:  `DATABASE_URL` → 無ければ同じローカル既定へフォールバック（後方互換）。
 
@@ -77,7 +79,21 @@ def resolve_database_url(env) -> tuple[str, str]:
       **prod を明示する Render 側でこの分岐が生きている**ので緩さは維持する。
       代わりに警告と画面バッジ（/api/system/info）で見せる。
     """
-    target = (env.get("FINAPP_DB_TARGET") or _DEFAULT_TARGET).strip().lower()
+    # 明示 > Render 検知 > 既定（local）。**Render だけは既定を反転させない。**
+    #
+    # `render.yaml` の envVars に `FINAPP_DB_TARGET: prod` を書いてあるが、既存サービスが
+    # Blueprint 管理下にない場合、その値は反映されない（ダッシュボード側の設定が正）。
+    # 反映されないまま既定の local へ落ちると、Render は localhost を見て
+    # **「接続失敗」ではなく「空の DB に繋がって 0 件」**になる（#481 B-0 と同型の静かな壊れ方）。
+    # `RENDER` は Render が必ず `true` で設定する環境変数なので、設定漏れの保険になる。
+    # https://render.com/docs/environment-variables
+    explicit = (env.get("FINAPP_DB_TARGET") or "").strip().lower()
+    if explicit:
+        target = explicit
+    elif env.get("RENDER"):
+        target = "prod"
+    else:
+        target = _DEFAULT_TARGET
     if target not in _VALID_TARGETS:
         raise ValueError(
             f"FINAPP_DB_TARGET が不正: {target!r}（有効なのは {' / '.join(_VALID_TARGETS)}）"
