@@ -18,7 +18,7 @@
 - 外出先からブラウザで使えるようにする（外部サーバー運用）
 - 操作は直感的・視覚的なもののみ。コードを書かなくても使えること
 
-ローカル PC を 24 時間つけっぱなしにしないため、**定期実行は GitHub Actions に置く**（日次の差分収集・夜間のスコア更新）。Render は外出先から結果を見るための口で、15 分アイドルでスリープする＝**常時稼働はしない**（初回アクセスのコールドスタートは許容）。重い分析（sector_ols・M-1〜M-6 の学習）は Render では動かず、GitHub Actions かローカル実行が担う。詳細は [DEPLOYMENT.md](DEPLOYMENT.md)。
+**定期実行はローカル PC（Windows タスクスケジューラ）に置く**（#503・[ADR-0038](adr/0038-local-postgres-is-the-primary.md)）。2026-08-20 に正本を Supabase からローカル PostgreSQL へ移したため、GitHub Actions（クラウド）からは正本 DB へ書けない。**この方針は元々「ローカル PC を 24 時間つけっぱなしにしないため定期実行は GitHub Actions へ」だった**——2回のサービス停止（通算2週間超）の真因が Supabase 無料枠のメモリ制約（#500）で、正本を置く限り周期的に再発すると分かったので、前提ごと入れ替えた。PC が停止していた日は `StartWhenAvailable` で次回起動時に追いつく。Render は外出先から結果を見るための口で、15 分アイドルでスリープする＝**常時稼働はしない**（初回アクセスのコールドスタートは許容）。**Render が見るのは 2026-08-07 で更新を止めた Supabase の断面**であり、最新はローカル GUI（`run_local.ps1`）で見る。重い分析（sector_ols・M-1〜M-6 の学習）は Render では動かず、ローカル実行が担う。詳細は [DEPLOYMENT.md](DEPLOYMENT.md)。
 
 ---
 
@@ -56,7 +56,7 @@
 
 ## デプロイ運用状況
 
-**現状**: Render（Free Web Service）+ Supabase（PostgreSQL）。Render は**閲覧用**で、15 分アイドルでスリープする（常時稼働ではない）。日次の収集と夜間のスコア更新は GitHub Actions が担う。
+**現状**: 正本は**ローカル PostgreSQL**（#503・ADR-0038）。Supabase は 2026-08-07 の閲覧用断面（Render 専用）＋ Storage のバックアップ置き場、Render（Free Web Service）はその断面を外出先から見る口で、15 分アイドルでスリープする（常時稼働ではない）。日次の収集と夜間のスコア更新は**ローカルのタスクスケジューラ**が担う（`run_nightly.ps1`）。
 詳細な運用ガイドと制約は [docs/DEPLOYMENT.md](DEPLOYMENT.md) を参照。
 
 | 課題 | 状態 | 対応 |
