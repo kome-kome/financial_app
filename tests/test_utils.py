@@ -21,6 +21,7 @@ from plugins.utils import (
     LOG_PRED_CAP,
     check_collinearity,
     fit_feature_columns,
+    fit_zscore_stats,
     kfold_cv,
     macro_risk_exposure,
     normalize,
@@ -828,3 +829,40 @@ def test_log_pred_cap_is_finite_and_positive():
     assert LOG_PRED_CAP > 0
     # exp(LOG_PRED_CAP) は 100 万円/株オーダー（数百万）を上限とする想定
     assert math.exp(LOG_PRED_CAP) > 1e5
+
+
+# ── fit_zscore_stats（断面標準化パラメータ・Issue #509）──────────────────────
+
+class TestFitZscoreStats:
+    def test_returns_none_below_four_samples(self):
+        """winsorize が n<4 で素通りする＝そこで標準化しても外れ値耐性が無い。"""
+        assert fit_zscore_stats([1.0, 2.0, 3.0]) is None
+        assert fit_zscore_stats([]) is None
+
+    def test_matches_the_inlined_formula(self):
+        """集約前に3箇所へコピーされていた式と数値が完全一致すること。"""
+        vals = [0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 100.0]
+        wv, _, _ = winsorize(vals)
+        mean_ = sum(wv) / len(wv)
+        var = sum((v - mean_) ** 2 for v in wv) / (len(wv) - 1)
+        expected = (mean_, var ** 0.5 or 1.0)
+        assert fit_zscore_stats(vals) == expected
+
+    def test_outlier_does_not_dominate_the_scale(self):
+        """外れ値1件の有無で sd が桁違いに動かない（これが是正の核）。"""
+        base = [float(i) for i in range(1, 101)]
+        _, sd_clean = fit_zscore_stats(base)
+        _, sd_dirty = fit_zscore_stats(base + [1e6])
+        assert sd_dirty < sd_clean * 1.2
+
+    def test_zero_variance_sd_falls_back_to_one(self):
+        """全件同値でも 0 除算しない（sd=0 → 1.0）。"""
+        mean_, sd = fit_zscore_stats([2.0] * 8)
+        assert mean_ == 2.0 and sd == 1.0
+
+    def test_fit_feature_columns_handles_empty_rows(self):
+        """行ゼロの断面（Fama-MacBeth の空期間）で落ちない（Issue #509）。"""
+        X_norm, win_params, norm_params = fit_feature_columns([], 2)
+        assert X_norm == []
+        assert len(win_params) == 2 and len(norm_params) == 2
+        assert all(sd != 0 for _, sd in norm_params)

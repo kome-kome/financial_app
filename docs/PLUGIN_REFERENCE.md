@@ -64,8 +64,9 @@
 
 ## `plugins/recommend.py`
 
-複合スコアによる銘柄推薦（z_roe 等 `financial_metrics` VIEW 8指標＋`RUNTIME_METRICS`＝z_momentum/mu）。
+複合スコアによる銘柄推薦（z_roe 等 `financial_metrics` VIEW 8指標＝`VIEW_METRICS`＋`RUNTIME_METRICS`＝z_momentum/mu）。
 
+- **VIEW 由来指標は加重前に断面で winsorize→標準化する**（`fit_view_metric_stats(records, weights)` → `standardize_metric`・Issue #509）。VIEW の `z_*` は年度窓の `(x-AVG)/STDDEV_SAMP` で **winsorize を通らない**ため、`op_margin` と `cf_ratio`（分母が共に `pl_revenue`）でゼロ近傍の1社が sd を支配し、実測で `z_op_margin` の 99.4% が \|z\|<0.2 まで潰れていた＝**同じ重み 1.0 の実効影響力が列間で最大 73倍違う**（#469 で決着）。`gap_ratio`（％単位で Z ですらない）も同じスコア合成へ入る以上は対象。`RUNTIME_METRICS` は `compute_momentum_z`／`compute_mu_z` が既に期内標準化しているので**除外**（二重標準化しない）。有効サンプル4件未満の列は生値へフォールバック。`results[].detail` は**生値のまま**（画面の表示値とスコアの合成単位は別物・`sell_ranking` と同じ扱い）。`backtest.py` も `run()` が同じ stats を作って `score_record` へ渡す＝as-of 再現が同じ土俵になる。
 - **`mu`（μ̂）は opt-in・既定 OFF**（Issue #423 子4・ADR-0030）— `mu_source`（M-1/M-2/M-3/M-4/M-6・既定 None）で producer を選び、`compute_mu_z` が sell_ranking と同じ producer 契約（`read_producer_scores`）で読んで候補集団内 winsorize→Z化する。**mu に重みがあるのに mu_source 未指定は ValueError→400**（黙って欠測にしない）、producer 未実行は graceful-degrade＋`mu_available=false`／`mu_asof` をレスポンスへ明示。4プリセットは mu 重みを持たず（`test_no_preset_carries_mu` が強制）、mu 重み 0 なら producer を読まない＝**既定経路のコストは 0**。
 - `z_momentum` も VIEW 外の実行時計算（`compute_momentum_z`）で、候補集団の `StockPriceWeekly` を **as_of − 400日の下限付き・500社チャンク**で取得し（Issue #418・下限は PK 第2列の `week_start` へ掛けて範囲スキャン化）`get_momentum_return`（12-1モメンタム）を winsorize+z標準化。`backtest.py` も同関数を as-of 日付付きで再利用（as-of検証のリークセーフ）。
 - `resolve_weights()`（Issue #271）はプリセット名から重みを解決し、静的4プリセットに加え「統計的最適化」（`recommend_factor_premia.py` が永続化した Fama-MacBeth ファクタープレミアム・`get_dynamic_preset` 経由・未算出時はバランス型へフォールバック）を `backtest.py` と共用で提供。

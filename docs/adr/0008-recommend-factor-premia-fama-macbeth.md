@@ -77,6 +77,40 @@ cadence を月次にした根拠: Fama-MacBeth の推定は月末スナップシ
 `recommend.execute` が VIEW 列をそのまま線形結合しているため、同じ是正で「GUI の重み 1.0 の
 意味が列ごとに最大 73倍違う」問題も同時に解ける。既定は本追記時点でも変更していない。
 
+**追記（2026-08-21・Issue #509 で是正を実装）: 消費側で期内 winsorize→標準化するようにした。**
+VIEW（`sql/financial_metrics_view.sql`）は触っていない——年度窓の Z スコアは他の消費者
+（表示・`serializers`）も読んでおり、`recommend` の断面（月末・最新年度）と窓が一致しないため、
+**揃えるべき場所は消費側**という判断。是正したのは3箇所:
+
+| 箇所 | 変更 |
+|---|---|
+| `plugins/recommend.py::execute` | `fit_view_metric_stats(records, weights)` で断面の (mean, sd) を作り、加重前に `standardize_metric` を通す |
+| `backtest.py::score_record` / `run` | 同じ stats を `run` が作って渡す（1レコードでは断面統計を持てないので `momentum_z` と同じ受け渡し） |
+| `recommend_factor_premia.fama_macbeth_regression`（`estimator="ols"`） | 生スケールの設計行列をやめ `fit_feature_columns`（winsorize→zscore・切片列付き）へ |
+
+決めたこと3点:
+
+- **標準化の対象は「VIEW 列かどうか」ではなく「同じスコア合成へ入るかどうか」**。`gap_ratio`
+  （単位は％で Z ですらない）も対象に含める。逆に `z_momentum` / `mu` は `compute_momentum_z` /
+  `compute_mu_z` が既に期内標準化しているので**除外**（二重標準化しない）。境界は
+  `recommend.VIEW_METRICS`（`METRICS` − `RUNTIME_METRICS`）が一元的に持つ。
+- **mean/sd は winsorize 後から求めるが、変換する値は生値**（`plugins/utils.py::fit_zscore_stats`）。
+  クリップ済みの値を Z にすると両端が同点になって順位が潰れる。外れ値は大きい Z を保ったまま
+  （最終的な上限は `normalize_transform` の ±5）、散らばりの尺度だけがその1社に支配されなくなる
+  ——これが是正の核。
+- **`results[].detail` は生値のまま**。画面は指標の実額を見せる場所で、スコアの合成
+  単位とは役割が違う（`sell_ranking` の既存挙動に合わせた）。
+
+副次的に、`compute_momentum_z` / `compute_mu_z` / `sell_ranking.execute` が個別に持っていた
+「winsorize → mean/sd」の4行を `plugins/utils.py::fit_zscore_stats` へ集約した。数値は完全に
+同一（`sum()/len()` の逐次加算を維持）。
+
+**帰結: `mean_b` の単位が「1sd あたり」へ変わる**ので、`resolve_weights` が返す「統計的最適化」
+プリセットの重み値は従来と別物になる。消費側（`recommend.execute`）も標準化後の Z を使うため
+単位は整合するが、**ユーザーが見る推奨順は変わる**。よって ADR-0028 の昇格ゲート（増減どちらの
+向きも補正後 α を通る実測）が要る——実測は #509 で継続中で、本追記時点では未了。
+`--estimator ridge` と `--persist` の併用禁止はそのまま維持している。
+
 ## Context
 
 `recommend`（おすすめ銘柄）の4プリセット重みは `docs/MODELS.md` §6「仮定・限界」に

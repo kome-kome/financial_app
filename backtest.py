@@ -11,7 +11,9 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from database import FinancialMetric, prices_on_or_after, latest_prices
-from plugins.recommend import SELECT_COLS, compute_momentum_z, resolve_weights
+from plugins.recommend import (SELECT_COLS, compute_momentum_z,
+                               fit_view_metric_stats, resolve_weights,
+                               standardize_metric)
 from plugins.net_cash_analysis import compute_net_cash, compute_nc_ratio
 
 # 複数保有期間バックテスト（/api/backtest/multi）の保有月数。
@@ -51,7 +53,8 @@ _BACKTEST_FIELDS: tuple[str, ...] = tuple(dict.fromkeys(
     )))
 
 
-def score_record(r, source: str, weights: dict, momentum_z: dict | None = None) -> float | None:
+def score_record(r, source: str, weights: dict, momentum_z: dict | None = None,
+                 view_stats: dict | None = None) -> float | None:
     """1レコードのスコア（高いほど買い候補）。算出不能なら None（候補から除外）。
 
     各 source は financial_metrics VIEW の as-of スナップショット（FinancialMetric）から
@@ -59,6 +62,12 @@ def score_record(r, source: str, weights: dict, momentum_z: dict | None = None) 
 
     momentum_z: {edinet_code: z} 形式の事前計算済み z_momentum（compute_momentum_z）。
     weights に z_momentum が含まれる場合のみ呼び出し側が渡す（他 source では未使用）。
+
+    view_stats: `fit_view_metric_stats` が断面から作った {metric: (mean, sd)}（Issue #509）。
+    **1レコードでは断面統計を持てない**ため、`momentum_z` と同じく呼び出し側（run）が作って
+    渡す。渡さなければ VIEW 値をそのまま線形結合する是正前の挙動になる——`recommend` プラグイン
+    側だけを是正して here を素通りさせると、**as-of 再現が是正前のスコアを測る**ことになり
+    検証が噛み合わない（#509 検証3）。
     """
     if source == "valuation":
         # 期待総リターン[%] = gap_ratio[%] + 配当利回り[%]（gap_ratio 必須＝sector_ols 実行済み年度のみ）
@@ -77,9 +86,12 @@ def score_record(r, source: str, weights: dict, momentum_z: dict | None = None) 
     score, has_any = 0.0, False
     for metric, weight in weights.items():
         if metric == "z_momentum":
+            # 算出側（compute_momentum_z）で期内標準化済み＝二重に標準化しない。
             val = (momentum_z or {}).get(r.edinet_code)
         else:
             val = getattr(r, metric, None)
+            if val is not None and view_stats is not None:
+                val = standardize_metric(val, metric, view_stats)
         if val is not None:
             score += weight * val
             has_any = True
@@ -167,9 +179,19 @@ def run(
         momentum_z = compute_momentum_z(
             db, [r.edinet_code for r in records if r.edinet_code], start_date_str)
 
+    # VIEW 由来指標の断面標準化パラメータ（Issue #509）。プリセット加重を使う source だけが
+    # 必要とする（valuation / net_cash は専用のスコア式で early return する）。
+    # 母集団は **as-of 断面のレコード全体**で、
+    # 1社1行へ畳む前に作る——`best` の dedup は「スコアが算出できた行のうち period_end 最大」で
+    # あってスコアに依存するため、先に畳むと「最新期は gap_ratio が無いので前期を使う」経路
+    # （source="valuation"）の挙動が変わってしまう。`subq` が edinet_code ごとの max(year) で
+    # join 済みなので重複行は決算期変更などの稀なケースに限られ、統計への影響は無視できる。
+    view_stats = (fit_view_metric_stats(records, weights)
+                  if source in ("recommend", "sell") else {})
+
     best: dict = {}
     for r in records:
-        score = score_record(r, source, weights, momentum_z)
+        score = score_record(r, source, weights, momentum_z, view_stats)
         if score is None:
             continue
         if r.edinet_code not in best or r.period_end > best[r.edinet_code][1].period_end:

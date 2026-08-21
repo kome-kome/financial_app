@@ -415,3 +415,55 @@ class TestColumnScoping:
         view_cols = {c.name for c in FinancialMetric.__table__.columns}
         assert set(_BACKTEST_FIELDS) <= view_cols
         assert len(_BACKTEST_FIELDS) < len(view_cols) / 2
+
+
+# ── 断面標準化を recommend と揃える（Issue #509）─────────────────────────────
+#
+# score_record は1レコードずつなので断面統計を持てない。run() が母集団から作って渡す。
+# **ここを素通りさせると as-of 再現が是正前のスコアを測る**ことになり、#509 の検証3
+# （是正前後のランキング比較）が噛み合わなくなる。
+
+class TestCrossSectionStandardization:
+    def test_run_passes_view_stats_to_score_record(self, db, make_metric, monkeypatch):
+        """run() が view_stats を渡していること（片側だけ是正する事故への歯止め）。"""
+        seen = {}
+        orig = backtest.score_record
+
+        def spy(r, source, weights, momentum_z=None, view_stats=None):
+            seen["view_stats"] = view_stats
+            return orig(r, source, weights, momentum_z, view_stats)
+
+        monkeypatch.setattr(backtest, "score_record", spy)
+        for i in range(1, 9):
+            db.add(make_metric(edinet_code=f"E{i:05d}", year=2020,
+                               period_end="2020-03-31", z_roe=float(i),
+                               z_op_margin=float(i) / 2))
+        db.commit()
+        backtest.run(db, "バランス型", 6, 20, None, None)
+        assert seen["view_stats"], "run() が断面統計を作らずに score_record を呼んでいる"
+        assert "z_roe" in seen["view_stats"]
+
+    def test_score_record_standardizes_only_with_stats(self, make_metric):
+        """view_stats を渡さなければ従来どおり生値の線形結合（後方互換）。"""
+        r = make_metric(edinet_code="E00001", z_roe=2.0)
+        w = {"z_roe": 1.0}
+        assert backtest.score_record(r, "recommend", w) == 2.0
+        # mean=0/sd=2 で標準化すると 1.0
+        assert backtest.score_record(r, "recommend", w, None, {"z_roe": (0.0, 2.0)}) == 1.0
+
+    def test_outlier_no_longer_silences_a_metric(self, db, make_metric):
+        """recommend プラグインと同型: 外れ値1社が他社の重みを呑まない。"""
+        n = 40
+        for i in range(1, n + 1):
+            db.add(make_metric(
+                edinet_code=f"E{i:05d}", year=2020, period_end="2020-03-31",
+                z_op_margin=(-60.0 if i == 1 else (i % 5) * 0.02),
+                z_equity_ratio=float(n - i) / 10.0))
+        db.commit()
+        both = backtest.run(db, "バランス型", 6, n, None, None,
+                            source="recommend")
+        # バランス型は z_equity_ratio(0.5) と z_op_margin(1.0) を両方持つ。
+        # 是正前は z_op_margin が潰れて z_equity_ratio 単独の順位になっていた。
+        order_both = [r["edinet_code"] for r in both["results"]]
+        order_eq = [f"E{i:05d}" for i in range(1, n + 1)]   # z_equity_ratio 降順
+        assert order_both != order_eq

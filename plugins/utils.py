@@ -234,6 +234,35 @@ def winsorize(vals: list[float], lo_pct: float = 1.0, hi_pct: float = 99.0) -> t
     return np.clip(arr, lo, hi).tolist(), lo, hi
 
 
+def fit_zscore_stats(vals: list[float]) -> tuple[float, float] | None:
+    """断面（同一期・同一母集団）の生値から winsorize 済みの (mean, sd) を返す。
+
+    消費側で「期内 winsorize → Zスコア化」を行うための前段。値の変換自体は
+    `normalize_transform(v, mean, sd, "zscore")` が担う（±5 クリップもそちら）。
+
+    **mean/sd は winsorize 後の値から求めるが、変換する値は生値のまま**にする
+    （クリップ済みの値を Z にすると両端が同点になり順位が潰れる）。外れ値は大きい Z を
+    保ったまま（`normalize_transform` の ±5 クリップが最終的な上限）、散らばりの尺度だけが
+    その1社に支配されなくなる——これが Issue #509 の是正の核。
+
+    有効サンプルが4件未満なら None。`winsorize` が n<4 で素通りする（＝外れ値耐性を
+    持たない）ため、そこで標準化を掛けても意味の無い変換になる。呼び出し側は生値のまま
+    扱うか、その指標を使わないかを選ぶ。
+
+    `recommend.compute_momentum_z` / `compute_mu_z` / `sell_ranking.execute` が個別に持って
+    いた同一の4行をここへ集約した（Issue #509）。総和の順序を変えると数値が変わるため、
+    `statistics.mean` ではなく `sum()/len()` の逐次加算を維持する（`normalize` の
+    docstring と同じ理由）。
+    """
+    if len(vals) < 4:
+        return None
+    wv, _, _ = winsorize(vals)
+    mean_ = sum(wv) / len(wv)
+    var = sum((v - mean_) ** 2 for v in wv) / (len(wv) - 1)
+    sd = var ** 0.5 or 1.0
+    return mean_, sd
+
+
 def normalize(vals: list, method: str) -> tuple[list, float, float]:
     """正規化。(normed, param1, param2) を返す。
 
@@ -286,6 +315,12 @@ def fit_feature_columns(
     丸め誤差が生じ得るため、旧実装との数値完全一致要件を満たせない）。
     """
     n_rows = len(X_raw)
+    if n_rows == 0:
+        # 行が1つも無い断面（Fama-MacBeth の空期間など）。`winsorize`/`normalize` は空列で
+        # 落ちる（min() on empty）ので、空の設計行列と中立なパラメータを返して呼び出し側に
+        # 判断させる（`ols([])` は None を返す＝その期間はスキップされる）。
+        # sd=1.0 は `transform_feature_row` が 0 除算しないための中立値。
+        return [], [(0.0, 0.0)] * n_feat, [(0.0, 1.0)] * n_feat
     X_norm = [[1.0] + [0.0] * n_feat for _ in range(n_rows)]
     win_params: list[tuple[float, float]] = []
     norm_params: list[tuple[float, float]] = []
