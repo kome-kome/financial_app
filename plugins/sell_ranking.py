@@ -25,7 +25,7 @@ from collections import namedtuple
 from typing import Any
 
 from .base import AnalysisPlugin
-from .utils import winsorize, normalize_transform
+from .utils import fit_zscore_stats, normalize_transform
 from .net_cash_analysis import compute_net_cash, compute_nc_ratio
 
 
@@ -377,13 +377,9 @@ class SellRankingPlugin(AnalysisPlugin):
                 vals = [-float(ps["r_macro"]) for ps in mu_scores.values() if ps.get("r_macro") is not None]
             else:
                 vals = [v for v in (_resolve_metric(r, m) for r in universe) if v is not None]
-            if len(vals) < 4:
-                continue
-            wv, _, _ = winsorize(vals)
-            mean_ = sum(wv) / len(wv)
-            var = sum((v - mean_) ** 2 for v in wv) / (len(wv) - 1)
-            sd = var ** 0.5 or 1.0
-            stats[m] = (mean_, sd)
+            s = fit_zscore_stats(vals)
+            if s is not None:
+                stats[m] = s
         gap_available = "gap_ratio" not in weights or "gap_ratio" in stats
 
         # ── 保有銘柄の最新年度レコードを sec_code で引く ──

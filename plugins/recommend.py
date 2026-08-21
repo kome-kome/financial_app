@@ -44,11 +44,14 @@ _DISPLAY_COLS = (
     "market_cap", "per", "pbr", "roe", "op_margin", "rev_growth",
 )
 
+# VIEW（financial_metrics）由来の指標。実行時計算の RUNTIME_METRICS の補集合で、
+# **消費側の期内 winsorize→標準化の対象**でもある（Issue #509・fit_view_metric_stats）。
+VIEW_METRICS = tuple(m for m in METRICS if m not in RUNTIME_METRICS)
+
 # 実際に SELECT する列。METRICS から導出するので、指標を METRICS へ足せば転送列も自動で
 # 追従する（列リストを二重管理しない）。RUNTIME_METRICS は VIEW 列ではなく実行時計算なので除く。
 # weights のキーは coerce_params が METRICS へ制限するため、ここに無い列は読まれない。
-SELECT_COLS = tuple(dict.fromkeys(
-    _DISPLAY_COLS + tuple(m for m in METRICS if m not in RUNTIME_METRICS)))
+SELECT_COLS = tuple(dict.fromkeys(_DISPLAY_COLS + VIEW_METRICS))
 
 _MomentumPX = namedtuple("_MomentumPX", "trade_date close")
 
@@ -118,6 +121,53 @@ def resolve_weights(db: Any, preset_name: str) -> dict:
     return PRESETS["バランス型"]
 
 
+def fit_view_metric_stats(records: list, weights: dict) -> dict:
+    """断面レコード集合から VIEW 由来指標の (mean, sd) を作る（Issue #509）。
+
+    `financial_metrics` VIEW の `z_*` は年度窓で `(x - AVG) / STDDEV_SAMP` を掛けるだけで
+    **winsorize を通らない**。`op_margin` と `cf_ratio` は分母が `pl_revenue` で共通なため、
+    それがゼロ近傍の1社が両列で同じ極端値（実測 -61.6）を取り、その1社が `STDDEV_SAMP` を
+    支配して残り全社の Z を 0 近傍へ潰す。実測では `z_op_margin` の 99.4% が |z|<0.2・尖度
+    1562 で、**同じ重み 1.0 の実効的な影響力が列間で最大 73倍違っていた**（#469 で決着）。
+
+    ここで期内（＝同一断面）winsorize→標準化のパラメータを作り直すことで、重み 1.0 の意味を
+    列間で揃える。`gap_ratio` のような Z でない列（単位は％）も同じ扱いにする——揃えるべきは
+    「VIEW 列かどうか」ではなく「同一のスコア合成へ入るかどうか」。
+    `sell_ranking.execute` が保有銘柄のスコアで先に採っていた方式と同型。
+
+    RUNTIME_METRICS（`z_momentum` / `mu`）は `compute_momentum_z` / `compute_mu_z` が既に
+    期内標準化済みなので**除外する**（二重標準化しない）。
+
+    戻りは `{metric: (mean, sd)}`。有効サンプルが4件未満の指標はキーを持たない
+    （`standardize_metric` が生値へフォールバックする）。
+    """
+    from .utils import fit_zscore_stats
+    stats: dict[str, tuple[float, float]] = {}
+    for metric in weights:
+        if metric in RUNTIME_METRICS:
+            continue
+        vals = [float(v) for v in (getattr(r, metric, None) for r in records)
+                if v is not None]
+        s = fit_zscore_stats(vals)
+        if s is not None:
+            stats[metric] = s
+    return stats
+
+
+def standardize_metric(val: float, metric: str, stats: dict) -> float:
+    """`fit_view_metric_stats` のパラメータで1値を Zスコアへ変換する（Issue #509）。
+
+    stats に指標が無い（＝断面の有効サンプルが4件未満）ときは**生値をそのまま返す**。
+    本番の断面は常に3,000社超なので実務上は起きず、小標本（テスト・極端に絞った業種）で
+    意味の無い標準化を掛けないための退避。
+    """
+    from .utils import normalize_transform
+    s = stats.get(metric)
+    if s is None:
+        return float(val)
+    return normalize_transform(float(val), s[0], s[1], "zscore")
+
+
 def compute_momentum_z(db: Any, edinet_codes: list, as_of_date: str) -> dict:
     """12-1モメンタム（get_momentum_return）を候補集団横断でZスコア化する。
 
@@ -147,8 +197,8 @@ def compute_momentum_z(db: Any, edinet_codes: list, as_of_date: str) -> dict:
     from datetime import date as _date, timedelta as _td
     from sqlalchemy import func as _sqla_func
     from database import StockPriceWeekly, iso_week_start
-    from .utils import (get_momentum_return, momentum_cutoffs, winsorize,
-                        normalize_transform)
+    from .utils import (get_momentum_return, momentum_cutoffs,
+                        fit_zscore_stats, normalize_transform)
 
     week_from = iso_week_start(
         (_date.fromisoformat(as_of_date) - _td(days=_MOMENTUM_LOOKBACK_DAYS)).isoformat())
@@ -192,14 +242,11 @@ def compute_momentum_z(db: Any, edinet_codes: list, as_of_date: str) -> dict:
         m = get_momentum_return(price_rows, as_of_date)
         if m is not None:
             raw[ec] = m
-    if len(raw) < 4:
-        return {}
 
-    vals = list(raw.values())
-    wv, _, _ = winsorize(vals)
-    mean_ = sum(wv) / len(wv)
-    var = sum((v - mean_) ** 2 for v in wv) / (len(wv) - 1)
-    sd = var ** 0.5 or 1.0
+    stats = fit_zscore_stats(list(raw.values()))
+    if stats is None:
+        return {}
+    mean_, sd = stats
     return {ec: normalize_transform(v, mean_, sd, "zscore") for ec, v in raw.items()}
 
 
@@ -253,21 +300,18 @@ def compute_mu_z(db: Any, mu_source: str, edinet_codes: list) -> dict:
     """
     if not mu_source or not edinet_codes:
         return {}
-    from .utils import normalize_transform, winsorize
+    from .utils import fit_zscore_stats, normalize_transform
 
     raw_all = load_producer_mu(db, mu_source)
     if not raw_all:
         return {}
     wanted = set(edinet_codes)
     raw = {ec: v for ec, v in raw_all.items() if ec in wanted}
-    if len(raw) < 4:
-        return {}
 
-    vals = list(raw.values())
-    wv, _, _ = winsorize(vals)
-    mean_ = sum(wv) / len(wv)
-    var = sum((v - mean_) ** 2 for v in wv) / (len(wv) - 1)
-    sd = var ** 0.5 or 1.0
+    stats = fit_zscore_stats(list(raw.values()))
+    if stats is None:
+        return {}
+    mean_, sd = stats
     return {ec: normalize_transform(v, mean_, sd, "zscore") for ec, v in raw.items()}
 
 
@@ -347,9 +391,16 @@ class RecommendPlugin(AnalysisPlugin):
         """重み付き指標スコアでランキング。
 
         スコア計算: weighted mean を用いる。
-          score = Σ(w_i × z_i) / Σ|w_i|   (i は値が存在する指標のみ)
+          score = Σ(w_i × ẑ_i) / Σ|w_i|   (i は値が存在する指標のみ)
         これにより指標カバレッジが異なる銘柄を公平に比較できる。
         min_coverage は重み付き指標のうち値が存在する比率（重み総和ベース）の下限。
+
+        ẑ_i は**この断面で winsorize→標準化し直した値**（Issue #509・fit_view_metric_stats）。
+        VIEW の `z_*` をそのまま線形結合していた頃は、外れ値1社が `STDDEV_SAMP` を支配する
+        列とそうでない列が混在し、同じ重み 1.0 の実効的な影響力が最大 73倍違っていた。
+        `z_momentum` / `mu` は算出側（compute_momentum_z / compute_mu_z）で期内標準化済み。
+
+        results[].detail は生値のまま返す＝画面の表示値とスコアの合成単位は別物。
         """
         # Zスコア・gap_ratio・派生指標は financial_metrics VIEW が都度算出/合成する。
         # z_momentum のみ VIEW 外の実行時計算（compute_momentum_z）。
@@ -424,6 +475,10 @@ class RecommendPlugin(AnalysisPlugin):
                 except Exception:
                     mu_asof = None
 
+        # VIEW 由来指標を断面内で winsorize→標準化する（Issue #509）。これを通さないと
+        # 「重み 1.0」の実効的な影響力が列間で最大 73倍違う（詳細は fit_view_metric_stats）。
+        view_stats = fit_view_metric_stats(records, weights)
+
         scored = []
         skipped_low_coverage = 0
         for r in records:
@@ -438,8 +493,12 @@ class RecommendPlugin(AnalysisPlugin):
                 else:
                     val = getattr(r, metric, None)
                 if val is not None:
-                    weighted_sum += weight * val
+                    # RUNTIME_METRICS は compute_momentum_z / compute_mu_z が標準化済み
+                    # ＝ここを通さない（standardize_metric 側でも stats に入っていない）。
+                    weighted_sum += weight * standardize_metric(val, metric, view_stats)
                     weight_present += abs(weight)
+                # detail は **生値**（VIEW 値）のまま返す。画面は指標の実額を見せる場所で、
+                # スコアの合成単位とは役割が違う（sell_ranking も raw を返している）。
                 detail[metric] = round(val, 4) if val is not None else None
             coverage = weight_present / total_weight if total_weight > 0 else 0.0
             if coverage < min_coverage:

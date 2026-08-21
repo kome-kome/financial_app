@@ -197,8 +197,12 @@ def _cross_section_condition_number(X: np.ndarray, n_factor: int) -> float:
     共線性を推定手法に依らず同じ尺度で見るための診断値（Issue #469 検証1）。生スケールの
     まま測ると単位差だけで条件数が跳ねるため、`fit_feature_columns` の標準化後に測る。
     `estimator` に関わらず同じ値になるので ols / ridge の比較にそのまま使える
-    （`plugins.utils.ols` も条件数を返すが切片込み生スケール、`ridge_regression` は NaN
-    を返すため、両者を並べるにはここで測り直すしかない）。
+    （`ridge_regression` は条件数を NaN で返すため、両者を並べるにはここで測り直すしかない）。
+
+    **#509 以前は「ここで測る値」と「OLS が実際に解く行列」が別物だった**——是正前の ols は
+    生スケールを解いており、median 3.4（標準化後）に対し実際は median 53.1 / max 1,880。
+    ログの値だけ見て「共線性は無い」と誤読した前例がある。現在は両 estimator とも
+    `fit_feature_columns` を通すので、この値が実際に解かれる行列の条件数と一致する。
     """
     from plugins.utils import fit_feature_columns
 
@@ -218,25 +222,27 @@ def fama_macbeth_regression(period_panel: dict, factor_names: list[str],
     なく、期間ごとに独立した断面回帰）。第2段階（HAC 補正付き時系列平均）は `average_premia()`
     が担い、`estimator` に依らず共有する。
 
-    `estimator`:
-      - `"ols"`（既定・Fama & MacBeth 1973 に忠実）: intercept 付き設計行列で
-        `plugins.utils.ols()` を実行する。**既定を変えていないので永続化される重みは従来と
-        完全に同一**。
-      - `"ridge"`: 第1段階だけ `plugins.utils.ridge_regression`（RidgeCV・L2）へ差し替える
-        （Issue #469）。素の断面 OLS は共線な因子が打ち消し合う巨大係数を出す（本番実測:
-        `z_eps` = −3.28 で p=0.29・唯一有意な `z_revenue` の 239 倍。`z_op_margin` +0.48 と
-        `z_cf_ratio` −0.47 の符号反転ペアは多重共線性の signature）。ADR-0021 は同じ現象を
-        `scripts/candidate_bakeoff.py` で実測し、Ridge 化で λ̄ 最大 5.37→0.027・OOF rank-IC
-        −0.0131→0.1653 へ回復することを確認している。
+    **両 estimator とも期内 winsorize→zscore を通す**（Issue #509 で ols 側を是正）。
+    `fit_feature_columns` が p1-p99 のクリップと標準化を担い、CLAUDE.md の設計制約
+    「OLS 学習前に各特徴量を winsorize」をここでも守る。よって係数の単位は **「1sd あたり」**。
 
-    **ridge 版の係数は ols 版と単位が違う**（実装は `plugins/model_candidates.py` の
-    Fama-MacBeth ヘッドを踏襲）:
-      - 特徴量を期内で winsorize→zscore してから推定するため、係数は「1sd あたり」であり
-        生スケールの ols 係数と直接は比較できない（比較すべきは順位・相対的な大きさ）。
-      - 切片列を渡さない。`ridge_regression` は `fit_intercept=False` で切片列も**罰則対象**に
+    是正前の ols は VIEW の `z_*` を生スケールのまま解いており、共通分母 `pl_revenue` が
+    ゼロ近傍の1社が `z_op_margin` / `z_cf_ratio` を支配して（実測 r=+0.9993）巨大な係数を
+    生んでいた（`z_eps` = −3.34 で p=0.29・唯一有意な `z_revenue` の 239倍）。#469 の実測では
+    **winsorize+標準化した素の OLS が Ridge とほぼ同じ答えを出す**（`z_eps` −3.3367 → +0.0175、
+    `z_op_margin` +0.4830 → −0.0003）＝効いていたのは L2 ではなく前処理だった。
+
+    `estimator`:
+      - `"ols"`（既定・Fama & MacBeth 1973 に忠実）: `fit_feature_columns` の設計行列
+        （先頭が intercept 列）で `plugins.utils.ols()` を実行する。
+      - `"ridge"`: 第1段階だけ `plugins.utils.ridge_regression`（RidgeCV・L2）へ差し替える
+        （Issue #469）。ADR-0021 は `scripts/candidate_bakeoff.py` で λ̄ 最大 5.37→0.027・
+        OOF rank-IC −0.0131→0.1653 の回復を実測しており、その追試用の口として残している。
+        **ridge だけは切片列を渡さない**（実装は `plugins/model_candidates.py` の Fama-MacBeth
+        ヘッドを踏襲）: `ridge_regression` は `fit_intercept=False` で切片列も**罰則対象**に
         するため、切片が 0 方向へ縮んだ分を傾きが吸収して λ_t が歪む。標準化で特徴量の平均は
         0 なので、y を期内平均で中心化すれば切片は構造的に 0 となり、傾きだけを正しく縮小推定
-        できる。
+        できる。ols は罰則が無いのでこの配慮は要らず、intercept 列をそのまま使う。
     """
     if estimator not in ("ols", "ridge"):
         raise ValueError(f"estimator は 'ols' か 'ridge': {estimator}")
@@ -250,7 +256,8 @@ def fama_macbeth_regression(period_panel: dict, factor_names: list[str],
     for ym in sorted(period_panel.keys()):
         X, y = period_panel[ym]
         if estimator == "ols":
-            X_design = [[1.0] + row.tolist() for row in X]
+            # 期内 winsorize→zscore（Issue #509）。X_design の先頭は intercept 列。
+            X_design, _, _ = fit_feature_columns(X.tolist(), n_factor)
             result = ols(X_design, y.tolist())
             n_expected = n_factor + 1
             offset = 1          # beta[0] は intercept
@@ -357,9 +364,8 @@ def main() -> None:
                        f"{se:.4f}" if se is not None else "n/a",
                        f"{t:+.2f}" if t is not None else "n/a",
                        f"{p:.3f}" if p is not None else "n/a")
-        if result.estimator == "ridge":
-            logger.info("※ ridge の係数は期内標準化後＝「1sd あたり」。生スケールの ols 係数とは"
-                        "単位が違うので、比べるのは順位と相対的な大きさ")
+        logger.info("※ 係数は期内 winsorize→標準化後＝「1sd あたり」（#509 で ols も揃えた）。"
+                    "ridge との差は L2 の有無だけなので、そのまま並べて比較できる")
         if args.persist:
             n = persist(db, result)
             logger.info("recommend_factor_premia へ %d 行 persist 完了（run_id=%s）", n, result.run_id)

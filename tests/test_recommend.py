@@ -14,8 +14,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from plugins import execute_plugin
 from plugins.recommend import (
     METRICS, MU_SOURCE_OPTIONS, PRESETS, RUNTIME_METRICS, SELECT_COLS,
-    STATISTICAL_PRESET_NAME, compute_momentum_z, compute_mu_z,
-    get_dynamic_preset, plugin, resolve_weights,
+    STATISTICAL_PRESET_NAME, VIEW_METRICS, compute_momentum_z, compute_mu_z,
+    fit_view_metric_stats, get_dynamic_preset, plugin, resolve_weights,
+    standardize_metric,
 )
 
 
@@ -558,3 +559,74 @@ class TestMuWiring:
         z_all = compute_mu_z(db, "macro_enet", list(mus))
         assert set(z_sub) == set(subset)
         assert z_sub["E00001"] != pytest.approx(z_all["E00001"])
+
+
+# ── 断面標準化（Issue #509）──────────────────────────────────────────────────
+#
+# VIEW の z_* は年度窓で (x-AVG)/STDDEV_SAMP を掛けるだけで winsorize を通らない。
+# op_margin と cf_ratio は分母が pl_revenue で共通なため、それがゼロ近傍の1社が両列で
+# 同じ極端値を取り、その1社が STDDEV_SAMP を支配して残り全社の Z を 0 近傍へ潰す。
+# 実測では z_op_margin の 99.4% が |z|<0.2・尖度 1562 で、同じ重み 1.0 の実効的な
+# 影響力が列間で最大 73倍違っていた。消費側で期内 winsorize→標準化して揃える。
+
+class TestCrossSectionStandardization:
+    def test_runtime_metrics_are_excluded(self, make_metric):
+        """z_momentum / mu は算出側で標準化済み＝ここで二重に標準化しない。"""
+        records = [make_metric(edinet_code=f"E{i:05d}", z_roe=float(i))
+                   for i in range(1, 9)]
+        stats = fit_view_metric_stats(
+            records, {"z_roe": 1.0, "z_momentum": 1.0, "mu": 1.0})
+        assert "z_roe" in stats
+        assert "z_momentum" not in stats and "mu" not in stats
+
+    def test_view_metrics_constant_matches_metrics_minus_runtime(self):
+        """標準化対象の境界は VIEW_METRICS が一元的に持つ（列リストを二重管理しない）。"""
+        assert set(VIEW_METRICS) == set(METRICS) - set(RUNTIME_METRICS)
+
+    def test_small_sample_falls_back_to_raw(self, make_metric):
+        """有効サンプル4件未満は stats を作らず生値のまま（winsorize が機能しない）。"""
+        records = [make_metric(edinet_code=f"E{i:05d}", z_roe=float(i))
+                   for i in range(1, 4)]
+        stats = fit_view_metric_stats(records, {"z_roe": 1.0})
+        assert stats == {}
+        assert standardize_metric(3.0, "z_roe", stats) == 3.0
+
+    def test_outlier_no_longer_silences_a_metric(self, db, make_metric):
+        """1社の極端値が STDDEV を支配しても、その指標の重みが効き続ける。
+
+        z_op_margin を「外れ値1社が作った見かけの sd」で潰した分布にし、正常な
+        z_equity_ratio と同じ重み 1.0 で合成する。是正前は z_op_margin の寄与が
+        z_equity_ratio に呑まれて**合成順位が z_equity_ratio 単独と一致**していた。
+        """
+        n = 40
+        for i in range(1, n + 1):
+            db.add(make_metric(
+                edinet_code=f"E{i:05d}", year=2020, period_end="2020-03-31",
+                # 潰れた列: 本来の散らばりは ±0.02 だが、外れ値1社(-60)が sd を支配する
+                z_op_margin=(-60.0 if i == 1 else (i % 5) * 0.02),
+                # 正常な列: 素直に順位が付く
+                z_equity_ratio=float(n - i) / 10.0))
+        db.commit()
+
+        weights_both = {"z_op_margin": 1.0, "z_equity_ratio": 1.0}
+        weights_eq = {"z_equity_ratio": 1.0}
+        both = asyncio.run(execute_plugin(
+            plugin, {"weights": weights_both, "min_coverage": 0.0, "top_n": n}, db))
+        eq_only = asyncio.run(execute_plugin(
+            plugin, {"weights": weights_eq, "min_coverage": 0.0, "top_n": n}, db))
+
+        order_both = [r["edinet_code"] for r in both["results"]]
+        order_eq = [r["edinet_code"] for r in eq_only["results"]]
+        assert order_both != order_eq, "z_op_margin の重み 1.0 が順位に効いていない"
+
+    def test_detail_keeps_raw_values(self, db, make_metric):
+        """results[].metrics は生値（VIEW 値）のまま＝画面の表示値は変えない。"""
+        for i in range(1, 9):
+            db.add(make_metric(edinet_code=f"E{i:05d}", year=2020,
+                               period_end="2020-03-31", z_roe=float(i)))
+        db.commit()
+        res = asyncio.run(execute_plugin(
+            plugin, {"weights": {"z_roe": 1.0}, "min_coverage": 0.0, "top_n": 10}, db))
+        top = res["results"][0]
+        assert top["detail"]["z_roe"] == 8.0         # 標準化後の値ではない
+        assert top["score"] != pytest.approx(8.0)    # スコアは標準化後
