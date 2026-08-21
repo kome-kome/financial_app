@@ -244,7 +244,10 @@ class Storage:
 
     @classmethod
     def from_env(cls, env=None) -> "Storage":
-        env = env or os.environ
+        # `env or os.environ` にしない——空 dict は falsy なので**本物の環境変数へ落ちる**。
+        # 「認証情報が無い」を渡すテストが `.env` を読んでしまい、ローカルだけ落ちて CI では
+        # 通る（`feedback_local_green_is_not_ci_green` の逆向き）。
+        env = os.environ if env is None else env
         url = env.get("SUPABASE_URL")
         key = env.get("SUPABASE_SERVICE_ROLE_KEY")
         missing = [n for n, v in (("SUPABASE_URL", url), ("SUPABASE_SERVICE_ROLE_KEY", key)) if not v]
