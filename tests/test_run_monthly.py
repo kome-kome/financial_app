@@ -206,12 +206,22 @@ class TestTaskInstaller:
         assert launcher.is_file()
         assert launcher.read_bytes().startswith(b"\xef\xbb\xbf")
 
-    def test_no_stray_newline_escapes_in_generated_ps1(self):
-        """`\\r` / `\\n` がリテラルのまま混ざると parse は通るのに中身が壊れる（#503）。"""
+    def test_no_stray_cr_in_generated_ps1(self):
+        """`\\r` がリテラルのまま混ざると parse は通るのに中身が壊れる（#503）。
+
+        `.\\run_monthly.ps1` の `\\r` が実際の CR へ化けると `.` + CR + `un_monthly.ps1` になり、
+        CRLF を除いた残りに CR として現れる。実際に `docs/DEPLOYMENT.md` で同じ壊れ方をしていた。
+
+        **改行そのもの（LF か CRLF か）は縛らない。** このリポジトリは `.gitattributes` が無く
+        `core.autocrlf=true` なので、**作業ツリーは CRLF・リポジトリと Linux の CI は LF** になる。
+        当初ここに「孤立した LF が無いこと」も入れていたが、それは
+        **Windows ローカルでしか通らない条件**で、ローカル 2,121 passed の直後に CI だけが落ちた
+        （[[feedback_local_green_is_not_ci_green]] と同型）。改行コードは git の正規化対象なので
+        テストの対象にしない。
+        """
         for path in (self.INSTALLER, ROOT / "run_monthly.ps1"):
             body = path.read_bytes()[3:]
             assert b"\r" not in body.replace(b"\r\n", b""), f"{path.name}: 孤立した CR"
-            assert b"\n" not in body.replace(b"\r\n", b""), f"{path.name}: 孤立した LF"
 
     def test_installer_refuses_days_that_some_months_lack(self):
         """29-31 日を許すと、その月だけ黙って走らない。"""
