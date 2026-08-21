@@ -54,7 +54,7 @@
 
 ## `plugins/utils.py`
 
-`coerce_params()`・`ols()`・`normalize()`・`winsorize()`・`walk_forward_cv()`・`walk_forward_cv_monthly(fit_predict=None, pass_train_groups=False)`（fit_predict コールバックで OLS/XGBoost を切替可・ADR-0003 §3。`pass_train_groups=True` で各学習月のサンプル数配列を3引数コールバックへ渡し XGBRanker の月クエリグループを復元・M-5・#362。既定 False で M-1/M-2/M-3 は不変）・`get_macro_features()`・`get_momentum_return()`・`fit_feature_columns()`・`transform_feature_row()`。
+`coerce_params()`・`ols()`・`normalize()`・`winsorize()`・`walk_forward_cv()`・`walk_forward_cv_monthly(fit_predict=None, pass_train_groups=False)`（fit_predict コールバックで OLS/XGBoost を切替可・ADR-0003 §3。`pass_train_groups=True` で各学習月のサンプル数配列を3引数コールバックへ渡し XGBRanker の月クエリグループを復元・M-5・#362。既定 False で M-1/M-2/M-3 は不変）・`get_macro_features()`・`get_momentum_return()`・`fit_feature_columns()`・`transform_feature_row()`・`fit_zscore_stats()`（断面の生値から winsorize 済み (mean, sd) を返す。消費側の期内標準化の前段で、4件未満は `None`＝生値フォールバック・#509）。
 
 `winsorize`/`normalize`/`fit_feature_columns` は numpy ベクトル化済み（Issue #304）。要素ごとの変換（ソート・比較・クリップ・log・減算・除算）は numpy でベクトル化しつつ、平均・標準偏差の集計（`statistics.mean`/`stdev`・`sum()/len()`）は Pure Python のまま維持し、**旧実装とビット単位で同一の数値を返す**（np.mean/np.sum は総和順序が異なり丸め誤差が生じ得るため）。
 

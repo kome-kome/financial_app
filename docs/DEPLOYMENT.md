@@ -117,6 +117,15 @@ python -m scripts.backup_restore --apply --create-schema    # 既定のローカ
 
 #### アクティブ（`.github/workflows/` 直下・Actions 対象）
 
+> **⚠ 下表の「使うタイミング」には cron 停止前の記述が残っている。** #503 で `daily-incremental` /
+> `macro-beta-inference` / `tune-hyperparameters` / `recommend-factor-premia` の `schedule:` は全て
+> コメントアウトされ、連動して `nightly-scores` / `macro-health` の `workflow_run` チェーンも発火
+> しない。**現在の駆動は `scripts/run_nightly.py`（日次 JST 17:20）と `scripts/run_monthly.py`
+> （月次 毎月1日 JST 01:00）**で、停止と代替の対応は上の「GitHub Actions（#503 で停止したもの）」が
+> 正本。ファイルとしては `workflow_dispatch` の口が生きているが、**GHA からはローカル正本の DB へは
+> 書けない**（書けるのは Supabase 断面だけ＝走らせると正本と分岐する）。定時で生きているのは
+> `egress-health` / `vacuum-maintenance` / `ci` / `notify-failure` の4本。
+
 | カテゴリ | workflow 名 | ファイル | 使うタイミング | 所要時間の目安 |
 |---|---|---|---|---|
 | `[CI]` | pytest 自動テスト | `ci.yml` | PR・main push で自動実行（手動起動不要） | 〜1分 |
