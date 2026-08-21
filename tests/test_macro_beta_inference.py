@@ -12,6 +12,7 @@ from unittest.mock import MagicMock
 import numpy as np
 import pytest
 
+import macro_beta_inference as mbi
 from macro_beta_inference import (
     _drop_unusable_macro,
     build_panel,
@@ -433,3 +434,42 @@ class TestDropUnusableMacro:
         usable, dropped = _drop_unusable_macro(cache, ["macro_usdjpy_yoy"], prices)
         assert usable == ["macro_usdjpy_yoy"]
         assert dropped == []
+
+
+# ── 進捗の可視化（2026-08-21 の消えた7時間・#504）──────────────────────────
+#
+# NUTS は数時間かかるのに progressbar=False で無音になる。**無音は「順調」と「死亡」を
+# 区別しない**——実際に7時間走った形跡がどこにも残らず、プロセスが消えたことに12時間
+# 気づけなかった。heartbeat はその穴を塞ぐためのもの。
+
+class TestHeartbeat:
+    def test_ticks_while_the_block_runs(self, caplog):
+        import time
+        with caplog.at_level("INFO", logger="macro_beta_inference"):
+            with mbi._heartbeat("テスト処理", interval=0.05):
+                time.sleep(0.28)
+        ticks = [r for r in caplog.records if "[heartbeat]" in r.getMessage()]
+        assert len(ticks) >= 2, "長時間ブロック中に heartbeat が刻まれていない"
+        assert "テスト処理" in ticks[0].getMessage()
+
+    def test_stops_after_the_block(self, caplog):
+        import time
+        with caplog.at_level("INFO", logger="macro_beta_inference"):
+            with mbi._heartbeat("テスト処理", interval=0.05):
+                time.sleep(0.12)
+            caplog.clear()
+            time.sleep(0.25)
+        assert not [r for r in caplog.records if "[heartbeat]" in r.getMessage()], \
+            "ブロックを抜けた後も heartbeat が残っている"
+
+    def test_exception_does_not_leak_the_thread(self, caplog):
+        import threading
+        before = threading.active_count()
+        with pytest.raises(ValueError):
+            with mbi._heartbeat("テスト処理", interval=0.05):
+                raise ValueError("boom")
+        assert threading.active_count() <= before, "例外時に heartbeat スレッドが残っている"
+
+    def test_interval_is_five_minutes_by_default(self):
+        """既定を短くしても NUTS の中身は分からない＝細かくする意味がない。"""
+        assert mbi.HEARTBEAT_SEC == 300.0

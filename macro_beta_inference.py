@@ -29,13 +29,50 @@ R1 退化の解消（R1' が銘柄間で分散を持つこと）。詳細は ADR
 from __future__ import annotations
 
 import argparse
+import contextlib
 import logging
+import threading
+import time as _time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
 import numpy as np
 
 logger = logging.getLogger("macro_beta_inference")
+
+# heartbeat の間隔[秒]。5分は「生死の判定に十分な粒度」と「数時間ぶんでもログが読める量
+# （3時間で36行）」の折り合い。短くしても NUTS の中身は分からないので細かくする意味がない。
+HEARTBEAT_SEC = 300.0
+
+
+@contextlib.contextmanager
+def _heartbeat(what: str, interval: float = HEARTBEAT_SEC):
+    """ブロック実行中、`interval` ごとに経過をログへ刻む。
+
+    NUTS は数時間かかるのに `progressbar=False`（tqdm の `\\r` 連打はファイルログを壊す）で
+    無音になる。**無音は「順調」と「死亡」を区別しない**——2026-08-21 の実行は7時間走った
+    形跡がどこにも残らず、プロセスが消えたことに12時間気づけなかった。
+
+    daemon スレッドなので、本体が例外で抜けても・強制終了されても後始末を邪魔しない。
+    """
+    stop = threading.Event()
+    started = _time.monotonic()
+
+    def _tick() -> None:
+        while not stop.wait(interval):
+            logger.info("[heartbeat] %s 継続中: 経過 %.0f分",
+                        what, (_time.monotonic() - started) / 60.0)
+
+    t = threading.Thread(target=_tick, name="heartbeat", daemon=True)
+    t.start()
+    try:
+        yield
+    finally:
+        # set() だけではスレッドは「これから起きる」状態で残る。join まで待って、
+        # ブロックを抜けた時点で確実に居なくなっていることを保証する（daemon なので
+        # 万一 join がタイムアウトしてもプロセス終了は妨げない）。
+        stop.set()
+        t.join(timeout=1.0)
 
 # 永続化テーブル名（DDL は database.py 側で定義する。スキーマは Issue #214 を正本とする）。
 LOADINGS_TABLE = "macro_beta_loadings"   # (edinet_code, factor_name, loading_mean, loading_se, run_id)
@@ -281,6 +318,13 @@ def run_inference(draws: int = 1000, tune: int = 1000, target_accept: float = 0.
     )
     sample_kwargs: dict = dict(draws=draws, tune=tune, target_accept=target_accept,
                                random_seed=seed, chains=chains, progressbar=False)
+    # NUTS は数時間かかるうえ `progressbar=False`（tqdm の \r 連打はファイルログを壊す）。
+    # **無音のまま数時間**では「走っているのか死んでいるのか」が区別できず、2026-08-21 に
+    # 実際に12時間気づけなかった。規模と開始時刻をここで残し、以降は heartbeat が刻む。
+    logger.info("サンプリング開始: n_stock=%d n_sector=%d n_factor=%d n_obs=%d "
+                "draws=%d tune=%d chains=%d sampler=%s",
+                len(edinet_codes), len(sector_names), len(sel), len(returns),
+                draws, tune, chains, nuts_sampler or "pymc")
     if nuts_sampler == "numpyro":
         import os
         import numpyro
@@ -291,8 +335,10 @@ def run_inference(draws: int = 1000, tune: int = 1000, target_accept: float = 0.
         sample_kwargs["nuts_sampler"] = nuts_sampler
     if init:
         sample_kwargs["init"] = init
-    with model:
+    sampling_started = _time.monotonic()
+    with model, _heartbeat("NUTS サンプリング"):
         idata = pm.sample(**sample_kwargs)
+    logger.info("サンプリング完了: %.1f分", (_time.monotonic() - sampling_started) / 60.0)
 
     diagnostics = summarize_diagnostics(idata)
     if diagnostics.get("r_hat_max") is not None and diagnostics["r_hat_max"] > 1.01:

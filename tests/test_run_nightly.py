@@ -191,3 +191,62 @@ class TestLog:
         ignore = (Path(__file__).resolve().parents[1] / ".gitignore").read_text(encoding="utf-8")
         assert any(line.strip().rstrip("/") == ".logs" for line in ignore.splitlines()), \
             ".logs が .gitignore に無い"
+
+
+# ── 子の出力はログへ直結する（2026-08-21 の消えた7時間・#504）────────────────
+#
+# `capture_output=True` で完了まで溜め込んでいた頃は、途中で親ごと落ちると **START 行だけが
+# 残って出力は全部消えた**。macro_beta が7時間走った形跡がどこにも残らず、「走っているのか
+# 死んでいるのか」を12時間区別できなかった。直結なら kill されてもそこまではディスクに残る。
+
+class TestChildOutputReachesTheLog:
+    def test_output_is_written_even_though_we_never_read_stdout(self, tmp_path):
+        import sys
+        log = tmp_path / "n.log"
+        with rn.Runner(log, echo=lambda _: None) as r:
+            code = r.run(rn.Step(
+                "x", (sys.executable, "-c", "print('hello-from-child')"), why="test"))
+        assert code == 0
+        text = log.read_text(encoding="utf-8")
+        assert "hello-from-child" in text
+        assert "END   x: exit=0" in text
+
+    def test_partial_output_survives_a_crash(self, tmp_path):
+        """途中で落ちても、落ちるまでに書いた行はログに残る（今回の核心）。"""
+        import sys
+        log = tmp_path / "n.log"
+        code = (
+            "import sys; print('phase-1'); sys.stdout.flush(); "
+            "raise SystemExit(3)"
+        )
+        with rn.Runner(log, echo=lambda _: None) as r:
+            rc = r.run(rn.Step("x", (sys.executable, "-c", code), why="test"))
+        assert rc == 3
+        assert "phase-1" in log.read_text(encoding="utf-8")
+
+    def test_child_stderr_is_merged_in_order(self, tmp_path):
+        import sys
+        log = tmp_path / "n.log"
+        code = "import sys; print('to-stdout'); print('to-stderr', file=sys.stderr)"
+        with rn.Runner(log, echo=lambda _: None) as r:
+            r.run(rn.Step("x", (sys.executable, "-c", code), why="test"))
+        text = log.read_text(encoding="utf-8")
+        assert "to-stdout" in text and "to-stderr" in text
+
+    def test_non_ascii_child_output_is_not_mojibake(self, tmp_path):
+        """Windows の子は放っておくと cp932 で書く＝utf-8 で開いたログが化ける。"""
+        import sys
+        log = tmp_path / "n.log"
+        with rn.Runner(log, echo=lambda _: None) as r:
+            r.run(rn.Step("x", (sys.executable, "-c", "print('収束診断')"), why="test"))
+        assert "収束診断" in log.read_text(encoding="utf-8")
+
+    def test_end_line_summarises_the_last_child_line(self, tmp_path):
+        import sys
+        log = tmp_path / "n.log"
+        with rn.Runner(log, echo=lambda _: None) as r:
+            r.run(rn.Step("x", (sys.executable, "-c",
+                                "print('first'); print('last-line')"), why="test"))
+        end = [ln for ln in log.read_text(encoding="utf-8").splitlines()
+               if "END   x" in ln][0]
+        assert "last-line" in end

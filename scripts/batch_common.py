@@ -69,6 +69,20 @@ def log_path(prefix: str, now: Optional[datetime] = None) -> Path:
     return LOG_DIR / f"{prefix}_{stamp}.log"
 
 
+def _proc_tail(proc) -> str:
+    """`subprocess.run` を差し替えたテスト用のフォールバック要約行。
+
+    実運用では子の出力をログへ直結する（`Runner.run`）ので `proc.stdout` は None で、
+    要約は `_tail_since` がログから読む。テストが stdout 文字列付きの偽プロセスへ
+    差し替えたときだけここが効く。
+    """
+    text = getattr(proc, "stdout", None) or getattr(proc, "stderr", None) or ""
+    if not isinstance(text, str):
+        return ""
+    lines = text.strip().splitlines()
+    return lines[-1] if lines else ""
+
+
 class Runner:
     """ステップ実行とログ出力。テストから差し替えられるよう subprocess を1箇所に閉じる。"""
 
@@ -94,24 +108,55 @@ class Runner:
             self._fh.flush()
 
     def run(self, step: Step) -> int:
-        """1ステップ実行し exit code を返す。**例外は投げない**（次のステップへ進むため）。"""
+        """1ステップ実行し exit code を返す。**例外は投げない**（次のステップへ進むため）。
+
+        子の出力は**ログファイルへ直結**する（`stdout=self._fh` / `stderr=STDOUT`）。
+        `capture_output=True` で完了まで溜め込んでいた頃は、途中で親ごと落ちると
+        **START 行だけが残って出力は全部消えた**——2026-08-21 の macro_beta がまさにこれで、
+        7時間走った形跡がどこにも残らず「走っているのか死んでいるのか」を12時間区別できなかった。
+        直結なら kill されてもそこまでの出力はディスクに残る。
+
+        `PYTHONUNBUFFERED` / `PYTHONIOENCODING` を子へ渡すのが対で必要:
+          - 前者が無いと子（Python）はブロックバッファリングし、結局まとめて書く＝直結の意味が消える
+          - 後者が無いと Windows の子は cp932 で書き、utf-8 で開いたこのログが化ける
+
+        末尾行（END 行に載せる要約）は proc.stdout ではなく**書かれたログの続きから**読む。
+        """
         self.write(f"[{utc_now_iso()}] START {step.name}: {step.why}")
         started = datetime.now(timezone.utc)
+        pos = None
+        if self._fh:
+            self._fh.flush()          # 子が fd へ直接書くので、親のバッファを先に吐く
+            try:
+                pos = self._fh.tell()
+            except (OSError, ValueError):
+                pos = None
+        env = {**os.environ, "PYTHONUNBUFFERED": "1", "PYTHONIOENCODING": "utf-8"}
         try:
-            proc = subprocess.run(step.argv, cwd=str(ROOT), capture_output=True, text=True,
-                                  encoding="utf-8", errors="replace")
+            proc = subprocess.run(step.argv, cwd=str(ROOT), env=env,
+                                  stdout=self._fh or subprocess.DEVNULL,
+                                  stderr=subprocess.STDOUT)
         except OSError as e:
             self.write(f"[{utc_now_iso()}] ERROR {step.name}: 起動できない: {e}")
             return 127
-        if self._fh:
-            self._fh.write(proc.stdout or "")
-            self._fh.write(proc.stderr or "")
-            self._fh.flush()
-        tail = (proc.stdout or proc.stderr or "").strip().splitlines()[-1:] or [""]
+        tail = self._tail_since(pos) or _proc_tail(proc)
         mins = (datetime.now(timezone.utc) - started).total_seconds() / 60.0
         self.write(f"[{utc_now_iso()}] END   {step.name}: exit={proc.returncode} "
-                   f"({mins:.1f}分) | {tail[0][:160]}")
+                   f"({mins:.1f}分) | {tail[:160]}")
         return proc.returncode
+
+    def _tail_since(self, pos: Optional[int]) -> str:
+        """このステップが書いた範囲の最終行。読めなければ空文字（END 行は必ず出す）。"""
+        if pos is None:
+            return ""
+        try:
+            self._fh.flush()
+            with self.log.open("r", encoding="utf-8", errors="replace") as fh:
+                fh.seek(pos)
+                lines = fh.read().strip().splitlines()
+        except OSError:
+            return ""
+        return lines[-1] if lines else ""
 
 
 def record_footprint(results: dict[str, int], key_run: str, key_success: str) -> Optional[str]:
