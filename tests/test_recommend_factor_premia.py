@@ -123,6 +123,39 @@ class TestEstimatorOption:
         with pytest.raises(ValueError, match="estimator"):
             fama_macbeth_regression(_collinear_panel(n_periods=3), ["f1", "f2"], estimator="lasso")
 
+    def test_preprocesses_each_period_once(self, monkeypatch):
+        """期内前処理は1期あたり1回（Issue #519）。
+
+        条件数の診断が内部で `fit_feature_columns` を呼び直していたため、#509 で ols 経路も
+        標準化を通すようになった時点で 1回→2回に倍化していた。
+        """
+        import plugins.utils as _u
+
+        original = _u.fit_feature_columns
+        calls = []
+
+        def counting(*args, **kwargs):
+            calls.append(1)
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(_u, "fit_feature_columns", counting)
+        panel = _collinear_panel(n_periods=4)
+        result = fama_macbeth_regression(panel, ["f1", "f2"], estimator="ols")
+
+        assert result.n_periods == 4
+        assert len(calls) == 4
+
+    def test_empty_cross_section_is_skipped_by_the_caller(self):
+        """行ゼロの断面は呼び出し側が弾く（Issue #518・共有ヘルパは fail-fast のまま）。"""
+        factor_names = ["f1"]
+        period_panel = {
+            "p000": (np.empty((0, 1)), np.empty((0,))),
+            "p001": (np.array([[1.0], [2.0], [3.0], [4.0]]), np.array([1.0, 2.0, 3.0, 4.1])),
+        }
+        result = fama_macbeth_regression(period_panel, factor_names)
+        assert result.n_periods == 1
+        assert len(result.condition_numbers) == 1
+
     def test_condition_numbers_recorded_per_used_period(self):
         """条件数は estimator に依らず同じ尺度で記録する（#469 検証1・共線なら大きくなる）。"""
         panel = _collinear_panel(n_periods=10)
@@ -267,16 +300,24 @@ class TestBuildPeriodPanel:
         assert X.shape[1] == len(expected)
         assert len(y) == X.shape[0]
 
-    def test_momentum_column_is_zscored_per_period(self):
+    def test_momentum_column_is_left_raw(self):
+        """momentum は **生の log return のまま** 渡す（Issue #519）。
+
+        ここで winsorize→Z スコア化すると、#509 で ols 経路も通るようになった
+        `fit_feature_columns` の p1-p99 が二重に掛かり、この1因子だけ推定時と適用時
+        （`recommend.compute_momentum_z`）で単位が食い違う。
+        """
         db, _codes = _build_mock_recommend_db()
         period_panel, factor_names = build_period_panel(db, min_companies_per_period=2)
         mom_idx = factor_names.index("z_momentum")
 
         for X, _y in period_panel.values():
             col = X[:, mom_idx]
-            if len(col) >= 4:
-                # winsorize→Zスコア化後は期間内平均が概ね0近辺（社数が少ないため厳密0にはならない）
-                assert abs(float(col.mean())) < 1.0
+            if len(col) < 2:
+                continue
+            # Z スコア化済みなら sd は定義上ちょうど 1.0 になる（`normalize` は ddof=1）。
+            assert not math.isclose(float(col.std(ddof=1)), 1.0, rel_tol=1e-9)
+            assert float(abs(col).max()) < 1.0            # log return のオーダー
 
     def test_min_companies_per_period_excludes_all_raises(self):
         db, codes = _build_mock_recommend_db()

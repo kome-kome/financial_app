@@ -81,10 +81,11 @@ def build_period_panel(db, min_companies_per_period: int = DEFAULT_MIN_COMPANIES
     持ち、gap_ratio の重みは持たない（recommend.execute() 側は未指定キーを0重み相当として
     自然に無視するため、コード変更は不要）。
 
-    momentum 列のみ build_snapshots は生の log return を返す（macro_snapshots._momentum）
-    ため、recommend.execute() が実際に重みを掛ける Z スコア済み z_momentum と揃えるべく、
-    期間ごとに winsorize→Z スコア化する後処理をここで行う（macro_snapshots.py 自体は
-    変更しない）。
+    momentum 列は build_snapshots が生の log return を返す（macro_snapshots._momentum）。
+    **ここでは標準化せず生値のまま渡す**（Issue #519）。#509 で ols 経路も
+    `fit_feature_columns` を通すようになったため、ここで先に winsorize→Z スコア化すると
+    p1-p99 クリップが二重に掛かり、この1因子だけ推定時と適用時（`compute_momentum_z`）で
+    単位が食い違う。8因子とも `fama_macbeth_regression` の期内前処理へ一様に委ねる。
 
     Returns:
         (period_panel: dict[str, tuple[np.ndarray X, np.ndarray y]], factor_names: list[str])
@@ -94,7 +95,6 @@ def build_period_panel(db, min_companies_per_period: int = DEFAULT_MIN_COMPANIES
     """
     from plugins.macro_snapshots import build_snapshots, load_data
     from plugins.recommend import METRICS, RUNTIME_METRICS
-    from plugins.utils import normalize_transform, winsorize
 
     # RUNTIME_METRICS（z_momentum / mu）は財務パネルの列ではない。z_momentum は build_snapshots
     # が momentum_12m1 として別途組み込み（下でリネーム）、mu は producer 由来で断面回帰の
@@ -118,22 +118,17 @@ def build_period_panel(db, min_companies_per_period: int = DEFAULT_MIN_COMPANIES
         raise ValueError(
             "build_period_panel: 有効なサンプルがありません（財務・株価データの蓄積状況を確認してください）")
 
-    mom_idx = factor_names.index("momentum_12m1")
+    # momentum 列だけを個別に winsorize→Z スコア化する処理は **持たない**（Issue #519）。
+    # #509 で ols 経路も `fit_feature_columns` を通すようになり、全列が p1-p99 クリップ＋標準化を
+    # 受けるため、ここで先に標準化すると **1回目が意図的に残した裾を2回目の p1-p99 が切る**
+    # ＝この1因子だけ推定時と適用時で単位が食い違っていた。生値のまま渡し、8因子すべてを
+    # `fit_feature_columns` に一様に通す。
     period_panel: dict = {}
     for ym, pairs in samples_by_ym.items():
         if len(pairs) < min_companies_per_period:
             continue
         X = np.asarray([p[0] for p in pairs], dtype=float)
         y = np.asarray([p[1] for p in pairs], dtype=float)
-
-        # momentum 列のみ期間内で winsorize→Z スコア化（recommend.compute_momentum_z と同じ変換）。
-        mom_raw = X[:, mom_idx].tolist()
-        wv, _, _ = winsorize(mom_raw)
-        mean_ = sum(wv) / len(wv)
-        var = sum((v - mean_) ** 2 for v in wv) / (len(wv) - 1) if len(wv) > 1 else 0.0
-        sd = var ** 0.5 or 1.0
-        X[:, mom_idx] = [normalize_transform(v, mean_, sd, "zscore") for v in mom_raw]
-
         period_panel[ym] = (X, y)
 
     if not period_panel:
@@ -191,7 +186,7 @@ def average_premia(betas_by_factor: dict[str, list[float]], factor_names: list[s
     )
 
 
-def _cross_section_condition_number(X: np.ndarray, n_factor: int) -> float:
+def _cross_section_condition_number(X_norm: list[list[float]]) -> float:
     """断面設計行列（winsorize→zscore 済み・切片列付き）の条件数。
 
     共線性を推定手法に依らず同じ尺度で見るための診断値（Issue #469 検証1）。生スケールの
@@ -203,12 +198,12 @@ def _cross_section_condition_number(X: np.ndarray, n_factor: int) -> float:
     生スケールを解いており、median 3.4（標準化後）に対し実際は median 53.1 / max 1,880。
     ログの値だけ見て「共線性は無い」と誤読した前例がある。現在は両 estimator とも
     `fit_feature_columns` を通すので、この値が実際に解かれる行列の条件数と一致する。
-    """
-    from plugins.utils import fit_feature_columns
 
-    Xn, _, _ = fit_feature_columns(X.tolist(), n_factor)
+    引数は **呼び出し側が既に算出した正規化済み設計行列**（切片列付き）。ここで
+    `fit_feature_columns` を呼び直すと ols 経路の前処理が1期あたり2回走る（Issue #519）。
+    """
     try:
-        return float(np.linalg.cond(np.asarray(Xn, dtype=float)))
+        return float(np.linalg.cond(np.asarray(X_norm, dtype=float)))
     except np.linalg.LinAlgError:
         return float("nan")
 
@@ -255,14 +250,19 @@ def fama_macbeth_regression(period_panel: dict, factor_names: list[str],
     cond_numbers: list[float] = []
     for ym in sorted(period_panel.keys()):
         X, y = period_panel[ym]
+        if len(X) == 0:
+            # 行が1つも無い断面はここで弾く（Issue #518）。`fit_feature_columns` 側で中立な
+            # パラメータを返して救うと、params を保持する別の呼び出し側で「どんな入力も 0.0」
+            # という silent-wrong を作る。共有ヘルパは fail-fast のままにする。
+            continue
+        # 期内 winsorize→zscore（Issue #509）。Xn の先頭は intercept 列。
+        # estimator に依らず1回だけ算出し、条件数の診断にも使い回す（Issue #519）。
+        Xn, _, _ = fit_feature_columns(X.tolist(), n_factor)
         if estimator == "ols":
-            # 期内 winsorize→zscore（Issue #509）。X_design の先頭は intercept 列。
-            X_design, _, _ = fit_feature_columns(X.tolist(), n_factor)
-            result = ols(X_design, y.tolist())
+            result = ols(Xn, y.tolist())
             n_expected = n_factor + 1
             offset = 1          # beta[0] は intercept
         else:
-            Xn, _, _ = fit_feature_columns(X.tolist(), n_factor)
             X_std = [row[1:] for row in Xn]          # 切片列を落とす（上記の理由）
             y_arr = np.asarray(y, dtype=float)
             result = ridge_regression(X_std, (y_arr - y_arr.mean()).tolist(), cv_folds=3)
@@ -275,7 +275,7 @@ def fama_macbeth_regression(period_panel: dict, factor_names: list[str],
             continue
         for i, f in enumerate(factor_names):
             betas_by_factor[f].append(beta[i + offset])
-        cond_numbers.append(_cross_section_condition_number(X, n_factor))
+        cond_numbers.append(_cross_section_condition_number(Xn))
         used_yms.append(ym)
 
     if not used_yms:

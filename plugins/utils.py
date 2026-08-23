@@ -245,6 +245,14 @@ def fit_zscore_stats(vals: list[float]) -> tuple[float, float] | None:
     保ったまま（`normalize_transform` の ±5 クリップが最終的な上限）、散らばりの尺度だけが
     その1社に支配されなくなる——これが Issue #509 の是正の核。
 
+    **非有限値（NaN / ±inf）は入口で落とす**（Issue #516）。1件でも混ざると
+    `winsorize` の `np.percentile` が nan を返し → `np.clip(arr, nan, nan)` で全要素が nan
+    → mean も nan → `sd = var ** 0.5 or 1.0` は **nan が truthy** なのでフォールバックが
+    働かず、`standardize_metric` が全レコードで nan を返す。#509 で断面統計を共有させた結果、
+    **1社の破損が断面の全社スコアへ伝播する経路**が同時にできていた（例外もログも出ないまま
+    `scored.sort` がでたらめな順位を返す）。落とすのはここ1箇所にする——呼び出し側5箇所へ
+    散らすと、次に足した経路が漏れる。
+
     有効サンプルが4件未満なら None。`winsorize` が n<4 で素通りする（＝外れ値耐性を
     持たない）ため、そこで標準化を掛けても意味の無い変換になる。呼び出し側は生値のまま
     扱うか、その指標を使わないかを選ぶ。
@@ -254,12 +262,19 @@ def fit_zscore_stats(vals: list[float]) -> tuple[float, float] | None:
     `statistics.mean` ではなく `sum()/len()` の逐次加算を維持する（`normalize` の
     docstring と同じ理由）。
     """
-    if len(vals) < 4:
+    finite = [v for v in vals if math.isfinite(v)]
+    if len(finite) < len(vals):
+        # 無言で除外すると「なぜこの銘柄だけスコアが出ないか」を後から追えない。
+        log.warning("fit_zscore_stats: 非有限値 %d 件を除外（有効 %d 件）",
+                    len(vals) - len(finite), len(finite))
+    if len(finite) < 4:
         return None
-    wv, _, _ = winsorize(vals)
+    wv, _, _ = winsorize(finite)
     mean_ = sum(wv) / len(wv)
     var = sum((v - mean_) ** 2 for v in wv) / (len(wv) - 1)
-    sd = var ** 0.5 or 1.0
+    sd = var ** 0.5
+    if not math.isfinite(sd) or sd == 0:
+        sd = 1.0                      # `or 1.0` では nan を弾けない（nan は truthy）
     return mean_, sd
 
 
@@ -313,14 +328,14 @@ def fit_feature_columns(
     元実装と一致する（値の選択のみで演算を伴わない）。補完平均（col_mean）の集計は
     `sum()/len()`（Python 組み込み・逐次加算）を維持する（`np.sum` は総和順序が異なり
     丸め誤差が生じ得るため、旧実装との数値完全一致要件を満たせない）。
+
+    **行が1つも無い入力は `winsorize` が `min() on empty` で落ちる（＝fail-fast）**。
+    中立なパラメータを返して救わない（Issue #518）: `win_params=(0.0, 0.0)` は
+    `transform_feature_row` の `max(w_lo, min(w_hi, v))` で**どんな入力も 0.0** にするため、
+    params を保持する呼び出し側では切片だけの予測が例外もログも無く出る。空断面を飛ばしたい
+    呼び出し側（Fama-MacBeth の空期間）は自分で先に弾く。
     """
     n_rows = len(X_raw)
-    if n_rows == 0:
-        # 行が1つも無い断面（Fama-MacBeth の空期間など）。`winsorize`/`normalize` は空列で
-        # 落ちる（min() on empty）ので、空の設計行列と中立なパラメータを返して呼び出し側に
-        # 判断させる（`ols([])` は None を返す＝その期間はスキップされる）。
-        # sd=1.0 は `transform_feature_row` が 0 除算しないための中立値。
-        return [], [(0.0, 0.0)] * n_feat, [(0.0, 1.0)] * n_feat
     X_norm = [[1.0] + [0.0] * n_feat for _ in range(n_rows)]
     win_params: list[tuple[float, float]] = []
     norm_params: list[tuple[float, float]] = []
