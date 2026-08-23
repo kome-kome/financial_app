@@ -34,10 +34,15 @@ WORKFLOW_DIR = ROOT / ".github" / "workflows"
 
 
 class _FakeProc:
+    """`subprocess.Popen` の差し替え用。`wait()` は即返る＝heartbeat は刻まれない（#522）。"""
+
     def __init__(self, returncode=0, stdout="ok", stderr=""):
         self.returncode = returncode
         self.stdout = stdout
         self.stderr = stderr
+
+    def wait(self, timeout=None):
+        return self.returncode
 
 
 def _names() -> list[str]:
@@ -181,7 +186,7 @@ class TestKeepsGoing:
             seen.append(Path(argv[1]).name)
             return _FakeProc(returncode=1 if "macro_beta_inference.py" in argv[1] else 0)
 
-        monkeypatch.setattr(rm.subprocess, "run", fake_run)
+        monkeypatch.setattr(rm.subprocess, "Popen", fake_run)
         monkeypatch.setattr(rm, "log_path", lambda now=None: tmp_path / "m.log")
         monkeypatch.setattr(rm, "record_footprint", lambda results: None)
         monkeypatch.setattr(rm, "notify", lambda results, log, run=None: None)
