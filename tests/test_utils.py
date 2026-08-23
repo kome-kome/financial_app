@@ -860,9 +860,36 @@ class TestFitZscoreStats:
         mean_, sd = fit_zscore_stats([2.0] * 8)
         assert mean_ == 2.0 and sd == 1.0
 
-    def test_fit_feature_columns_handles_empty_rows(self):
-        """行ゼロの断面（Fama-MacBeth の空期間）で落ちない（Issue #509）。"""
-        X_norm, win_params, norm_params = fit_feature_columns([], 2)
-        assert X_norm == []
-        assert len(win_params) == 2 and len(norm_params) == 2
-        assert all(sd != 0 for _, sd in norm_params)
+    def test_non_finite_values_are_dropped(self):
+        """NaN / ±inf が1件混ざっても、他社ぶんの統計が壊れない（Issue #516）。
+
+        是正前は `np.percentile` が nan → `np.clip(arr, nan, nan)` で全要素 nan →
+        `sd = var ** 0.5 or 1.0` が **nan は truthy** なので素通りし、断面の全社スコアが
+        nan になっていた（例外もログも出ないまま順位がでたらめになる）。
+        """
+        base = [float(i) for i in range(1, 101)]
+        clean = fit_zscore_stats(base)
+        assert fit_zscore_stats(base + [float("nan")]) == clean
+        assert fit_zscore_stats(base + [float("inf"), float("-inf")]) == clean
+
+    def test_all_non_finite_returns_none(self):
+        """非有限を落とした残りが4件未満なら None（生値フォールバックへ倒す）。"""
+        assert fit_zscore_stats([float("nan")] * 10) is None
+        assert fit_zscore_stats([1.0, 2.0, float("nan"), float("inf")]) is None
+
+    def test_fit_feature_columns_rejects_empty_rows(self):
+        """行ゼロの断面は **fail-fast**（Issue #518・#509 のガードを撤回）。
+
+        中立なパラメータ `win_params=(0.0, 0.0)` を返して救うと、params を保持する
+        呼び出し側で `transform_feature_row` がどんな入力も 0.0 に潰す＝切片だけの予測が
+        無言で出る。空期間を飛ばしたい呼び出し側（`fama_macbeth_regression`）が自分で弾く。
+        """
+        with pytest.raises(ValueError):
+            fit_feature_columns([], 2)
+
+    def test_empty_win_params_would_zero_out_any_input(self):
+        """撤回したガードが silent-wrong だったことを固定する（Issue #518 の機構）。"""
+        from plugins.utils import transform_feature_row
+        neutral_win = [(0.0, 0.0)] * 3
+        neutral_norm = [(0.0, 1.0)] * 3
+        assert transform_feature_row([12.3, -4.5, 99.0], neutral_win, neutral_norm) == [1.0, 0.0, 0.0, 0.0]

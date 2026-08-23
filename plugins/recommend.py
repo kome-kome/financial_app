@@ -2,6 +2,7 @@ from typing import Any
 from collections import defaultdict, namedtuple
 from sqlalchemy import func
 from .base import AnalysisPlugin
+from .utils import fit_zscore_stats, normalize_transform
 
 
 METRICS = [
@@ -141,7 +142,6 @@ def fit_view_metric_stats(records: list, weights: dict) -> dict:
     戻りは `{metric: (mean, sd)}`。有効サンプルが4件未満の指標はキーを持たない
     （`standardize_metric` が生値へフォールバックする）。
     """
-    from .utils import fit_zscore_stats
     stats: dict[str, tuple[float, float]] = {}
     for metric in weights:
         if metric in RUNTIME_METRICS:
@@ -161,7 +161,6 @@ def standardize_metric(val: float, metric: str, stats: dict) -> float:
     本番の断面は常に3,000社超なので実務上は起きず、小標本（テスト・極端に絞った業種）で
     意味の無い標準化を掛けないための退避。
     """
-    from .utils import normalize_transform
     s = stats.get(metric)
     if s is None:
         return float(val)
@@ -197,8 +196,7 @@ def compute_momentum_z(db: Any, edinet_codes: list, as_of_date: str) -> dict:
     from datetime import date as _date, timedelta as _td
     from sqlalchemy import func as _sqla_func
     from database import StockPriceWeekly, iso_week_start
-    from .utils import (get_momentum_return, momentum_cutoffs,
-                        fit_zscore_stats, normalize_transform)
+    from .utils import get_momentum_return, momentum_cutoffs
 
     week_from = iso_week_start(
         (_date.fromisoformat(as_of_date) - _td(days=_MOMENTUM_LOOKBACK_DAYS)).isoformat())
@@ -300,7 +298,6 @@ def compute_mu_z(db: Any, mu_source: str, edinet_codes: list) -> dict:
     """
     if not mu_source or not edinet_codes:
         return {}
-    from .utils import fit_zscore_stats, normalize_transform
 
     raw_all = load_producer_mu(db, mu_source)
     if not raw_all:
