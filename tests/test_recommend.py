@@ -12,6 +12,7 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from plugins import execute_plugin
+from plugins.utils import PREPROCESS_VERSION
 from plugins.recommend import (
     METRICS, MU_SOURCE_OPTIONS, PRESETS, RUNTIME_METRICS, SELECT_COLS,
     STATISTICAL_PRESET_NAME, VIEW_METRICS, compute_momentum_z, compute_mu_z,
@@ -98,13 +99,42 @@ class TestResolveWeights:
         from database import upsert_recommend_factor_premia
         upsert_recommend_factor_premia(db, "rfp_1", [
             {"run_id": "rfp_1", "factor_name": "z_roe", "mean_b": 0.15,
-             "newey_west_se": 0.04, "t_stat": 3.75, "p_value": 0.001, "n_periods": 30},
+             "newey_west_se": 0.04, "t_stat": 3.75, "p_value": 0.001, "n_periods": 30,
+             "preprocess_version": PREPROCESS_VERSION},
             {"run_id": "rfp_1", "factor_name": "z_momentum", "mean_b": 0.08,
-             "newey_west_se": 0.03, "t_stat": 2.6, "p_value": 0.01, "n_periods": 30},
+             "newey_west_se": 0.03, "t_stat": 2.6, "p_value": 0.01, "n_periods": 30,
+             "preprocess_version": PREPROCESS_VERSION},
         ])
         dynamic = get_dynamic_preset(db)
         assert dynamic == {"z_roe": 0.15, "z_momentum": 0.08}
         assert resolve_weights(db, STATISTICAL_PRESET_NAME) == dynamic
+
+    def test_stale_preprocess_version_is_not_adopted(self, db):
+        """前処理世代が一致しない永続化行は採らない（Issue #517）。
+
+        `mean_b` の単位は推定時の断面前処理に依存する（#509 で「生スケール1単位あたり」→
+        「1sd あたり」へ変わった）。世代印が無かったため、是正から次の月次実行までの間、
+        **旧単位の重み × 新単位の特徴量**という昇格ゲートが一度も測っていない組み合わせが
+        本番に出ていた。古い一致ランを探しにいかず、未算出と同じ扱い（バランス型）へ倒す。
+        """
+        from database import upsert_recommend_factor_premia
+        upsert_recommend_factor_premia(db, "rfp_stale", [
+            {"run_id": "rfp_stale", "factor_name": "z_roe", "mean_b": -3.34,
+             "newey_west_se": None, "t_stat": None, "p_value": None, "n_periods": 61,
+             "preprocess_version": None},          # 生スケール時代の行（列そのものが無かった）
+        ])
+        assert get_dynamic_preset(db) is None
+        assert resolve_weights(db, STATISTICAL_PRESET_NAME) == PRESETS["バランス型"]
+
+    def test_unknown_preprocess_version_is_not_adopted(self, db):
+        """未知の世代（将来の前処理で書かれた行）も採らない（Issue #517）。"""
+        from database import upsert_recommend_factor_premia
+        upsert_recommend_factor_premia(db, "rfp_future", [
+            {"run_id": "rfp_future", "factor_name": "z_roe", "mean_b": 0.5,
+             "newey_west_se": None, "t_stat": None, "p_value": None, "n_periods": 61,
+             "preprocess_version": "winsor_z_v99"},
+        ])
+        assert get_dynamic_preset(db) is None
 
     def test_dynamic_preset_drops_factors_outside_metrics(self, db):
         """METRICS 外の factor は重みに採らない（Issue #441）。
@@ -116,9 +146,11 @@ class TestResolveWeights:
         from database import upsert_recommend_factor_premia
         upsert_recommend_factor_premia(db, "rfp_2", [
             {"run_id": "rfp_2", "factor_name": "z_roe", "mean_b": 0.2,
-             "newey_west_se": None, "t_stat": None, "p_value": None, "n_periods": 12},
+             "newey_west_se": None, "t_stat": None, "p_value": None, "n_periods": 12,
+             "preprocess_version": PREPROCESS_VERSION},
             {"run_id": "rfp_2", "factor_name": "z_nc_ratio", "mean_b": 0.1,
-             "newey_west_se": None, "t_stat": None, "p_value": None, "n_periods": 12},
+             "newey_west_se": None, "t_stat": None, "p_value": None, "n_periods": 12,
+             "preprocess_version": PREPROCESS_VERSION},
         ])
         assert get_dynamic_preset(db) == {"z_roe": 0.2}
 
@@ -126,7 +158,8 @@ class TestResolveWeights:
         from database import upsert_recommend_factor_premia
         upsert_recommend_factor_premia(db, "rfp_3", [
             {"run_id": "rfp_3", "factor_name": "z_nc_ratio", "mean_b": 0.1,
-             "newey_west_se": None, "t_stat": None, "p_value": None, "n_periods": 12},
+             "newey_west_se": None, "t_stat": None, "p_value": None, "n_periods": 12,
+             "preprocess_version": PREPROCESS_VERSION},
         ])
         assert get_dynamic_preset(db) is None
         assert resolve_weights(db, STATISTICAL_PRESET_NAME) == PRESETS["バランス型"]
@@ -430,7 +463,8 @@ class TestExecute:
         db.add(make_metric(edinet_code="E00001", z_roe=1.0))
         upsert_recommend_factor_premia(db, "rfp_1", [
             {"run_id": "rfp_1", "factor_name": "z_roe", "mean_b": 0.2,
-             "newey_west_se": None, "t_stat": None, "p_value": None, "n_periods": 12},
+             "newey_west_se": None, "t_stat": None, "p_value": None, "n_periods": 12,
+             "preprocess_version": PREPROCESS_VERSION},
         ])
         db.commit()
 
@@ -451,9 +485,11 @@ class TestExecute:
         db.add(make_metric(edinet_code="E00001", z_roe=1.0))
         upsert_recommend_factor_premia(db, "rfp_mu", [
             {"run_id": "rfp_mu", "factor_name": "z_roe", "mean_b": 0.2,
-             "newey_west_se": None, "t_stat": None, "p_value": None, "n_periods": 12},
+             "newey_west_se": None, "t_stat": None, "p_value": None, "n_periods": 12,
+             "preprocess_version": PREPROCESS_VERSION},
             {"run_id": "rfp_mu", "factor_name": "mu", "mean_b": 0.9,
-             "newey_west_se": None, "t_stat": None, "p_value": None, "n_periods": 12},
+             "newey_west_se": None, "t_stat": None, "p_value": None, "n_periods": 12,
+             "preprocess_version": PREPROCESS_VERSION},
         ])
         db.commit()
         assert get_dynamic_preset(db) == {"z_roe": 0.2}

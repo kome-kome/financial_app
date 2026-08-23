@@ -441,6 +441,25 @@ class TestRecommendFactorPremia:
         assert got["z_momentum"]["t_stat"] == pytest.approx(2.5)
         assert got["z_roe"]["n_periods"] == 40
 
+    def test_preprocess_version_round_trips(self, db):
+        """前処理世代が書き戻しで保たれる（Issue #517）。列が無いと旧単位の重みが黙って使われる。"""
+        from database import get_latest_factor_premia, upsert_recommend_factor_premia
+        upsert_recommend_factor_premia(db, "rfp_v", [
+            {"run_id": "rfp_v", "factor_name": "z_roe", "mean_b": 0.12,
+             "newey_west_se": None, "t_stat": None, "p_value": None, "n_periods": 61,
+             "preprocess_version": "winsor_z_v1"},
+        ])
+        assert get_latest_factor_premia(db)["z_roe"]["preprocess_version"] == "winsor_z_v1"
+
+    def test_preprocess_version_is_null_for_legacy_rows(self, db):
+        """世代を書かない旧経路の行は NULL（＝#509 以前の生スケール）として読める。"""
+        from database import get_latest_factor_premia, upsert_recommend_factor_premia
+        upsert_recommend_factor_premia(db, "rfp_legacy", [
+            {"run_id": "rfp_legacy", "factor_name": "z_roe", "mean_b": -3.34,
+             "newey_west_se": None, "t_stat": None, "p_value": None, "n_periods": 61},
+        ])
+        assert get_latest_factor_premia(db)["z_roe"]["preprocess_version"] is None
+
     def test_get_by_explicit_run_id(self, db):
         from database import get_latest_factor_premia, upsert_recommend_factor_premia
         upsert_recommend_factor_premia(db, "rfp_old", [

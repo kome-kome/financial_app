@@ -1463,13 +1463,18 @@ class RecommendFactorPremium(Base):
     t_stat         = Column(Float)
     p_value        = Column(Float)
     n_periods      = Column(Integer)                        # 回帰に使った有効期間数
+    # 推定に使った断面前処理の世代（plugins.utils.PREPROCESS_VERSION・Issue #517）。
+    # **NULL は「#509 以前の生スケール」**＝消費側は採用せずバランス型へフォールバックする。
+    # 既存行のバックフィルは不要（NULL がそのまま正しい意味を持つ）。
+    preprocess_version = Column(String(20))
     computed_at    = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
 
 def upsert_recommend_factor_premia(db, run_id: str, rows: list) -> int:
     """recommend_factor_premia.py の結果を upsert する（run_id+factor_name で冪等）。
 
-    rows = [{run_id, factor_name, mean_b, newey_west_se, t_stat, p_value, n_periods}, ...]
+    rows = [{run_id, factor_name, mean_b, newey_west_se, t_stat, p_value, n_periods,
+             preprocess_version}, ...]
     Postgres / SQLite 両対応。戻り値は書き込み行数。
     """
     if not rows:
@@ -1489,6 +1494,7 @@ def upsert_recommend_factor_premia(db, run_id: str, rows: list) -> int:
             "t_stat":        stmt.excluded.t_stat,
             "p_value":       stmt.excluded.p_value,
             "n_periods":     stmt.excluded.n_periods,
+            "preprocess_version": stmt.excluded.preprocess_version,
         },
     )
     db.execute(stmt)
@@ -1499,8 +1505,11 @@ def get_latest_factor_premia(db, run_id: str | None = None) -> dict:
     """recommend ファクタープレミアムを読む（recommend.resolve_weights 用）。
 
     run_id 未指定なら最新ラン（computed_at 最大・同時刻は id で決定）。
-    戻り値: {factor_name: {"mean_b", "newey_west_se", "t_stat", "p_value", "n_periods"}}。
-    未蓄積なら空dict。
+    戻り値: {factor_name: {"mean_b", "newey_west_se", "t_stat", "p_value", "n_periods",
+    "preprocess_version"}}。未蓄積なら空dict。
+
+    `preprocess_version` は推定時の断面前処理の世代（Issue #517）。**採否の判断は呼び出し側**
+    （`recommend.get_dynamic_preset`）が行う——ここで弾くと診断用に古いランを読むこともできなくなる。
     """
     if run_id is None:
         latest = (db.query(RecommendFactorPremium)
@@ -1518,6 +1527,7 @@ def get_latest_factor_premia(db, run_id: str | None = None) -> dict:
             "t_stat":        r.t_stat,
             "p_value":       r.p_value,
             "n_periods":     r.n_periods,
+            "preprocess_version": r.preprocess_version,
         }
         for r in rows
     }
@@ -2014,6 +2024,13 @@ def _ensure_tables() -> None:
             conn.execute(text(
                 f"ALTER TABLE {_tbl} ADD COLUMN IF NOT EXISTS n_stale INTEGER"
             ))
+        # ファクタープレミアムの前処理世代（#517・非破壊・冪等）。既存行は NULL のまま
+        # ＝「#509 以前の生スケール」を意味し、`recommend.get_dynamic_preset` が採用せず
+        # バランス型へフォールバックする。次回 factor_premia 実行で新世代の行が入る。
+        conn.execute(text(
+            "ALTER TABLE recommend_factor_premia "
+            "ADD COLUMN IF NOT EXISTS preprocess_version VARCHAR(20)"
+        ))
         # 決算短信サマリーの株式数（#462・非破壊・冪等）。v2 の `/equities/master` が株式数を
         # 持たないため、issued_shares の J-Quants 経路をここへ移した。既存行は NULL のまま
         # ＝次回の開示収集で埋まる。

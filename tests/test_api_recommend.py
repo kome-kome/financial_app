@@ -37,9 +37,11 @@ class TestRecommendPresets:
 
     def test_includes_statistical_preset_when_persisted(self, db):
         from database import upsert_recommend_factor_premia
+        from plugins.utils import PREPROCESS_VERSION
         upsert_recommend_factor_premia(db, "rfp_1", [
             {"run_id": "rfp_1", "factor_name": "z_roe", "mean_b": 0.3,
-             "newey_west_se": None, "t_stat": None, "p_value": None, "n_periods": 5},
+             "newey_west_se": None, "t_stat": None, "p_value": None, "n_periods": 5,
+             "preprocess_version": PREPROCESS_VERSION},
         ])
         db.commit()
 
