@@ -171,6 +171,7 @@ web版・ローカル版の双方が同じ Issue を見ることで、**コー�
 - **MODELS.md** と `templates/models.html`: 分析モデル追加・変更時に更新。参考文献は原著論文の DOI / 公式 URL（Wikipedia不可）。
 - **MODELS.md §9（M-1）の章立てを変えたら初心者向け副読本 `docs/M1_MACRO_MODEL_GUIDE.md` も見直す**（Issue #472）: 副読本は**設計思想・章立てのみ追随**し、マクロ系列の全リスト・既定値・実測値は正本へのリンクに留める（書き写すと黙って陳腐化する）。見直し後、副読本冒頭の `models-sync` マーカーを更新すること。`tests/test_docs_sync.py` が CI で照合し、**乖離は失敗として現れないので通知では拾えない**（ADR-0031 と同型）。
 - **`heavy=True` のプラグインを追加したら自動実行を登録する**（ADR-0031）: `nightly_scores.HEAVY_AUTOMATION` へ「回すワークフロー名」か `exempt: <理由>` を必ず足す。未登録・実在しないワークフロー名・空理由は `tests/test_nightly_scores.py::TestHeavyAutomationRegistry` が CI で落とす。**「heavy を足したが自動実行が無い」は失敗しないので通知では拾えない**（#432/#443/#423 子5 で3回発生）。
+- **断面の前処理を変えたら `plugins/utils.py::PREPROCESS_VERSION` を上げる**（ADR-0039・#517）: `recommend_factor_premia` の `mean_b` は「その前処理での1単位あたり」であり、前処理を変えると**永続化済みの重みの意味が変わる**。世代を上げれば `get_dynamic_preset` が旧世代の行を採らずバランス型へ倒し、`factor_premia` を回すまで安全側に留まる。**上げ忘れは CI で拾えない**（前処理の変更を機械的に検出する手段が無い）＝ #509 で実際に旧単位の重み × 新単位の特徴量が本番へ出た（実測 rank-IC −0.0881）。
 - **分析プラグイン追加・変更時のメタ検証網羅性**: 独自のランキング/スコアを出すプラグインは、`/api/backtest` の `SCORING_SOURCES`（backtest.py）へ追加するか、`plugins/macro_snapshots.py::oof_backtest` による OOF 評価を実装するかをその場で判断する。対象外にする場合は理由をコード内コメントまたは ADR に明記する（「後で対応」と ADR の prose に書くだけで終わらせない＝ Issue #272 のように M-1 だけ OOF 未対応のまま放置された実例あり）。比較ファミリー（M-1/M-2/M-3 等）内で1モデルだけ評価手段が欠けていないか確認する。
 - **HTML 構成**: CSS はインライン1ファイル維持（分割禁止）。JS は CSP 対応で `static/js/<page>.js` に外部化（インラインイベントハンドラは `data-*`＋イベント委譲）。
 - ファイル名・URL は機能名で命名（フェーズ番号禁止）。定数はファイル冒頭に集約。

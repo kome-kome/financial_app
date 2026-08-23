@@ -234,6 +234,14 @@ def winsorize(vals: list[float], lo_pct: float = 1.0, hi_pct: float = 99.0) -> t
     return np.clip(arr, lo, hi).tolist(), lo, hi
 
 
+# 断面の前処理（p1-p99 winsorize → zscore）の世代印。`recommend_factor_premia` が推定時に
+# 使った前処理を永続化行へ書き、`recommend.get_dynamic_preset` が消費時に照合する（Issue #517）。
+# **前処理を変えたらこの値を上げる**——係数の単位が変わるのに永続化行が世代を持たないと、
+# 旧単位の重みが新単位の特徴量へ黙って掛かり続ける（#509 の是正で実際に起きた）。
+# 値の履歴: 生スケール時代の行は NULL（列そのものが無かった）／"winsor_z_v1" = #509 以降。
+PREPROCESS_VERSION = "winsor_z_v1"
+
+
 def fit_zscore_stats(vals: list[float]) -> tuple[float, float] | None:
     """断面（同一期・同一母集団）の生値から winsorize 済みの (mean, sd) を返す。
 

@@ -301,8 +301,14 @@ def compute_factor_premia(db, min_companies_per_period: int = DEFAULT_MIN_COMPAN
 
 
 def persist(db, result: FactorPremiaResult) -> int:
-    """回帰結果を recommend_factor_premia へ upsert する。"""
+    """回帰結果を recommend_factor_premia へ upsert する。
+
+    **推定に使った前処理の世代（`PREPROCESS_VERSION`）を必ず書く**（Issue #517）。これが無いと
+    「係数の単位が変わったのに永続化行からは判別できない」状態になり、旧単位の重みが新単位の
+    特徴量へ静かに掛かり続ける（#509 の是正から次の月次までの間に実際に起きた）。
+    """
     from database import upsert_recommend_factor_premia
+    from plugins.utils import PREPROCESS_VERSION
 
     rows = [
         {
@@ -313,6 +319,7 @@ def persist(db, result: FactorPremiaResult) -> int:
             "t_stat": result.t_stat[f],
             "p_value": result.p_value[f],
             "n_periods": result.n_periods,
+            "preprocess_version": PREPROCESS_VERSION,
         }
         for f in result.factor_names
     ]

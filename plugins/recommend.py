@@ -1,8 +1,11 @@
+import logging
 from typing import Any
 from collections import defaultdict, namedtuple
 from sqlalchemy import func
 from .base import AnalysisPlugin
-from .utils import fit_zscore_stats, normalize_transform
+from .utils import PREPROCESS_VERSION, fit_zscore_stats, normalize_transform
+
+log = logging.getLogger(__name__)
 
 
 METRICS = [
@@ -85,10 +88,26 @@ def get_dynamic_preset(db: Any) -> dict | None:
     推定しており（`recommend_factor_premia.build_period_panel` が RUNTIME_METRICS を除外）
     μ̂ の premium は存在しない。仮に混ざると mu_source 未指定の実行を reject させてしまい、
     「統計的最適化」プリセットが選べなくなるため、ここで構造的に落とす。
+
+    **前処理の世代が一致しない行は採らない**（Issue #517）。`mean_b` の単位は推定時の断面
+    前処理に依存する（#509 で「生スケール1単位あたり」→「1sd あたり」へ変わった）。永続化行が
+    世代を持たなかったため、是正から次の月次実行までの間、**旧単位の重み × 新単位の特徴量**
+    という昇格ゲート（ADR-0028）が一度も測っていない組み合わせが本番に出ていた。
+
+    不一致なら「まだ算出されていない」と同じ扱い（None → バランス型へフォールバック）にする。
+    **古い一致ランを探しにいかない**——鮮度が落ちた重みを黙って使うのは、この Issue が塞ごうと
+    している失敗そのもの。世代を上げたら `factor_premia` を回す、が構造的に強制される。
     """
     from database import get_latest_factor_premia
     premia = get_latest_factor_premia(db)
     if not premia:
+        return None
+    versions = {vals.get("preprocess_version") for vals in premia.values()}
+    if versions != {PREPROCESS_VERSION}:
+        log.warning(
+            "統計的最適化プリセットを採用しない: 永続化された前処理世代 %s が期待値 %r と一致しない"
+            "（recommend_factor_premia を回し直すまでバランス型へフォールバック・#517）",
+            sorted(str(v) for v in versions), PREPROCESS_VERSION)
         return None
     weights = {factor: vals["mean_b"] for factor, vals in premia.items()
                if factor in METRICS and factor != "mu"}
