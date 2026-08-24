@@ -9,6 +9,7 @@
 - ステップ間で止めない（片方の失敗で全部落とすと、翌朝分かるのが最初の失敗だけになる）
 - `app_settings` へ足跡を残す（失敗より「そもそも起動しなかった」の方が静かで危ない）
 - 失敗は `gh issue create` で起票する。**ただし通知の失敗が本業を止めることは無い**
+- 長時間ステップは heartbeat を刻む（**無音は「順調」と「死亡」を区別しない**・#522）
 
 この骨格を2本にコピーすると、片方だけ直す事故が必ず起きる（このリポジトリでは
 `XBRL_MAP` の手書き・`DEFAULT_MACRO_FEATURES` の並び・`27週` の導出などで繰り返し
@@ -37,6 +38,14 @@ LOG_DIR = ROOT / ".logs"
 
 # 失敗を起票するときのラベル（GHA の notify-failure と同じ運用に載せる）。
 ISSUE_LABELS = ("ops", "priority:high")
+
+# 子の待ち合わせ中に経過を刻む間隔（Issue #522）。**無音は「順調」と「死亡」を区別しない**。
+HEARTBEAT_SEC = 300.0
+# heartbeat 行の目印。END 行の要約（`_tail_since`）はこの行を進捗と見なさない。
+HEARTBEAT_MARK = "[heartbeat]"
+# END 行の要約を作るためにログの末尾から読むバイト数（Issue #521）。
+# 全量を読むと、直結にした意味（数時間ぶんをディスクへ流す）が END 行の瞬間に消える。
+TAIL_BYTES = 8192
 
 
 @dataclass(frozen=True)
@@ -70,7 +79,7 @@ def log_path(prefix: str, now: Optional[datetime] = None) -> Path:
 
 
 def _proc_tail(proc) -> str:
-    """`subprocess.run` を差し替えたテスト用のフォールバック要約行。
+    """`subprocess.Popen` を差し替えたテスト用のフォールバック要約行。
 
     実運用では子の出力をログへ直結する（`Runner.run`）ので `proc.stdout` は None で、
     要約は `_tail_since` がログから読む。テストが stdout 文字列付きの偽プロセスへ
@@ -86,9 +95,10 @@ def _proc_tail(proc) -> str:
 class Runner:
     """ステップ実行とログ出力。テストから差し替えられるよう subprocess を1箇所に閉じる。"""
 
-    def __init__(self, log: Path, echo=print):
+    def __init__(self, log: Path, echo=print, heartbeat_sec: float = HEARTBEAT_SEC):
         self.log = log
         self.echo = echo
+        self.heartbeat_sec = heartbeat_sec
         self._fh = None
 
     def __enter__(self):
@@ -102,10 +112,21 @@ class Runner:
         return False
 
     def write(self, line: str) -> None:
+        """1行を echo とログの両方へ。**ログへ書けなくても例外にしない**（Issue #521）。
+
+        閉じたハンドル（`with` の外で使い回された Runner）では `write`/`flush` が `ValueError`
+        を投げる。ここで漏らすと START 行を書いた時点でステップループごと落ち、足跡も起票も
+        走らない＝「黙って走らなかった」を検知するためのモジュールが、それ自体を起こす。
+        echo は先に済ませるので、少なくとも標準出力には残る。
+        """
         self.echo(line)
-        if self._fh:
+        if self._fh is None:
+            return
+        try:
             self._fh.write(line + "\n")
             self._fh.flush()
+        except (OSError, ValueError):
+            pass
 
     def run(self, step: Step) -> int:
         """1ステップ実行し exit code を返す。**例外は投げない**（次のステップへ進むため）。
@@ -121,42 +142,88 @@ class Runner:
           - 後者が無いと Windows の子は cp932 で書き、utf-8 で開いたこのログが化ける
 
         末尾行（END 行に載せる要約）は proc.stdout ではなく**書かれたログの続きから**読む。
+
+        **待ち合わせは heartbeat 付き**（Issue #522）。`HEARTBEAT_SEC` ごとに経過を刻むので、
+        長時間ステップが無音になっても「まだ待っている」ことがログに残る。ここへ置いたのは
+        `Runner.run` が**全ステップを通る唯一の場所**だから——スクリプト側の opt-in にすると
+        登録漏れが構造的に起きる（`macro_beta_inference.py` だけが持っていた状態がまさにそれ）。
+
+        刻むのは待っている**親自身**なので、これは「親が生きていて子がまだ終わっていない」の
+        直接の証拠になる。子の内部が進んでいるかは別問題で、そちらは子が自分で刻む
+        （`macro_beta_inference._heartbeat` は NUTS サンプリング中を刻む＝親＝ステップ生存、
+        子＝サンプリング生存の2階建て）。**heartbeat は生存を示すが進行を示さない**ので、
+        本当に進んでいるかの裏取りは CPU 時間で行う。
         """
         self.write(f"[{utc_now_iso()}] START {step.name}: {step.why}")
         started = datetime.now(timezone.utc)
-        pos = None
-        if self._fh:
+        if self._fh is None:
+            # コンテキストマネージャの外で呼ばれた（＝呼び出し側のバグ）。DEVNULL へ流すと
+            # 子の出力が丸ごと消え、END 行も診断ゼロになる（Issue #521）。**走らせない**で
+            # 失敗として返し、通常の失敗経路（足跡・起票）に乗せて見えるようにする。
+            self.write(f"[{utc_now_iso()}] ERROR {step.name}: "
+                       f"ログハンドルが無い（Runner を with で使っていない）ため実行しない")
+            return 126
+        try:
             self._fh.flush()          # 子が fd へ直接書くので、親のバッファを先に吐く
-            try:
-                pos = self._fh.tell()
-            except (OSError, ValueError):
-                pos = None
+            pos = self._fh.tell()
+        except (OSError, ValueError):
+            # 閉じたハンドル（with の外で使い回された）。flush 自体が ValueError を投げる
+            # ので、tell と同じ try の中に入れる——ここで漏らすと #521 の穴が別の行で開く。
+            pos = None
         env = {**os.environ, "PYTHONUNBUFFERED": "1", "PYTHONIOENCODING": "utf-8"}
         try:
-            proc = subprocess.run(step.argv, cwd=str(ROOT), env=env,
-                                  stdout=self._fh or subprocess.DEVNULL,
-                                  stderr=subprocess.STDOUT)
-        except OSError as e:
+            proc = subprocess.Popen(step.argv, cwd=str(ROOT), env=env,
+                                    stdout=self._fh, stderr=subprocess.STDOUT)
+        except (OSError, ValueError) as e:
+            # 閉じたハンドルを渡すと `fileno()` が **ValueError** を投げる（OSError ではない）。
+            # 取り逃がすと run_batch のステップループごと落ち、足跡も起票も走らない＝
+            # 「黙って走らなかった」を検知するためのモジュールが、それ自体を起こす（#521）。
             self.write(f"[{utc_now_iso()}] ERROR {step.name}: 起動できない: {e}")
             return 127
+        while True:
+            try:
+                returncode = proc.wait(timeout=self.heartbeat_sec)
+                break
+            except subprocess.TimeoutExpired:
+                waited = (datetime.now(timezone.utc) - started).total_seconds() / 60.0
+                self.write(f"{HEARTBEAT_MARK} {step.name} 継続中: 経過 {waited:.0f}分")
         tail = self._tail_since(pos) or _proc_tail(proc)
         mins = (datetime.now(timezone.utc) - started).total_seconds() / 60.0
-        self.write(f"[{utc_now_iso()}] END   {step.name}: exit={proc.returncode} "
+        self.write(f"[{utc_now_iso()}] END   {step.name}: exit={returncode} "
                    f"({mins:.1f}分) | {tail[:160]}")
-        return proc.returncode
+        return returncode
 
     def _tail_since(self, pos: Optional[int]) -> str:
-        """このステップが書いた範囲の最終行。読めなければ空文字（END 行は必ず出す）。"""
+        """このステップが書いた範囲の最終行。読めなければ空文字（END 行は必ず出す）。
+
+        **末尾 `TAIL_BYTES` だけを読む**（Issue #521）。以前は `pos` から EOF まで丸ごと str へ
+        読み、さらに全行の list を作っていた——ログを直結にした理由は「数時間ぶんの出力を
+        ディスクへ流す」ことなのに、END 行を書く瞬間にその全量をメモリへ載せ直していた。
+        `pipeline` は約3,700社を1社ずつ、月次の `tune:*` は1ステップで数十〜数百MBを吐きうる。
+
+        heartbeat 行は進捗ではないので要約に選ばない。ただし窓内が heartbeat しか無いときは、
+        空文字よりマシなので最後の1行をそのまま使う。
+        """
         if pos is None:
             return ""
         try:
             self._fh.flush()
-            with self.log.open("r", encoding="utf-8", errors="replace") as fh:
-                fh.seek(pos)
-                lines = fh.read().strip().splitlines()
-        except OSError:
+            size = self.log.stat().st_size
+            start = max(pos, size - TAIL_BYTES)
+            with self.log.open("rb") as fh:
+                fh.seek(start)
+                chunk = fh.read()
+        except (OSError, ValueError):
             return ""
-        return lines[-1] if lines else ""
+        text = chunk.decode("utf-8", errors="replace")
+        # 窓の先頭は行の途中で切れている可能性がある（マルチバイトの途中も含む）ので落とす。
+        lines = [ln for ln in text.splitlines() if ln.strip()]
+        if start > pos and lines:
+            lines = lines[1:]
+        if not lines:
+            return ""
+        progress = [ln for ln in lines if HEARTBEAT_MARK not in ln]
+        return (progress or lines)[-1]
 
 
 def record_footprint(results: dict[str, int], key_run: str, key_success: str) -> Optional[str]:

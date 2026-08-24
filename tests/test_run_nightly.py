@@ -21,10 +21,15 @@ from scripts import run_nightly as rn
 
 
 class _FakeProc:
+    """`subprocess.Popen` の差し替え用。`wait()` は即返る＝heartbeat は刻まれない（#522）。"""
+
     def __init__(self, returncode=0, stdout="ok", stderr=""):
         self.returncode = returncode
         self.stdout = stdout
         self.stderr = stderr
+
+    def wait(self, timeout=None):
+        return self.returncode
 
 
 class TestStepOrder:
@@ -66,7 +71,7 @@ class TestKeepsGoing:
             seen.append(Path(argv[1]).name if len(argv) > 1 else argv[0])
             return _FakeProc(returncode=1 if "_pipeline_incremental.py" in argv[1] else 0)
 
-        monkeypatch.setattr(rn.subprocess, "run", fake_run)
+        monkeypatch.setattr(rn.subprocess, "Popen", fake_run)
         monkeypatch.setattr(rn, "log_path", lambda now=None: tmp_path / "n.log")
         monkeypatch.setattr(rn, "record_footprint", lambda results: None)
         monkeypatch.setattr(rn, "notify", lambda results, log, run=None: None)
@@ -78,7 +83,7 @@ class TestKeepsGoing:
         assert code == 1, "失敗数が exit code に出ていない"
 
     def test_all_success_exits_zero(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(rn.subprocess, "run", lambda argv, **kw: _FakeProc(0))
+        monkeypatch.setattr(rn.subprocess, "Popen", lambda argv, **kw: _FakeProc(0))
         monkeypatch.setattr(rn, "log_path", lambda now=None: tmp_path / "n.log")
         monkeypatch.setattr(rn, "record_footprint", lambda results: None)
         monkeypatch.setattr(rn, "notify", lambda results, log, run=None: None)
@@ -90,13 +95,12 @@ class TestKeepsGoing:
             raise OSError("no such file")
 
         with rn.Runner(tmp_path / "n.log", echo=lambda _: None) as r:
-            r.run.__globals__  # noqa: B018 - 参照のみ（差し替えは下の monkeypatch 相当）
-            original = rn.subprocess.run
-            rn.subprocess.run = boom
+            original = rn.subprocess.Popen
+            rn.subprocess.Popen = boom
             try:
                 code = r.run(rn.Step("x", ("python", "-c", "pass"), why="test"))
             finally:
-                rn.subprocess.run = original
+                rn.subprocess.Popen = original
         assert code == 127
 
 
@@ -148,7 +152,7 @@ class TestSideEffectsNeverKillTheBatch:
 class TestTargetPinning:
     def test_local_is_forced_even_if_parent_says_prod(self, tmp_path, monkeypatch):
         monkeypatch.setenv("FINAPP_DB_TARGET", "prod")
-        monkeypatch.setattr(rn.subprocess, "run", lambda argv, **kw: _FakeProc(0))
+        monkeypatch.setattr(rn.subprocess, "Popen", lambda argv, **kw: _FakeProc(0))
         monkeypatch.setattr(rn, "log_path", lambda now=None: tmp_path / "n.log")
         monkeypatch.setattr(rn, "record_footprint", lambda results: None)
         monkeypatch.setattr(rn, "notify", lambda results, log, run=None: None)
@@ -160,7 +164,7 @@ class TestTargetPinning:
 
 class TestCli:
     def test_dry_run_executes_nothing(self, monkeypatch, capsys):
-        monkeypatch.setattr(rn.subprocess, "run",
+        monkeypatch.setattr(rn.subprocess, "Popen",
                             lambda *a, **k: pytest.fail("ドライランなのに実行された"))
         assert rn.main(["--dry-run"]) == 0
         assert "ドライラン" in capsys.readouterr().out
@@ -171,7 +175,7 @@ class TestCli:
 
     def test_steps_can_be_limited(self, tmp_path, monkeypatch):
         seen = []
-        monkeypatch.setattr(rn.subprocess, "run",
+        monkeypatch.setattr(rn.subprocess, "Popen",
                             lambda argv, **kw: (seen.append(argv), _FakeProc(0))[1])
         monkeypatch.setattr(rn, "log_path", lambda now=None: tmp_path / "n.log")
         monkeypatch.setattr(rn, "record_footprint", lambda results: None)
@@ -250,3 +254,93 @@ class TestChildOutputReachesTheLog:
         end = [ln for ln in log.read_text(encoding="utf-8").splitlines()
                if "END   x" in ln][0]
         assert "last-line" in end
+
+
+def _end_line(log) -> str:
+    return [ln for ln in log.read_text(encoding="utf-8").splitlines() if "END   x" in ln][0]
+
+
+# ── heartbeat を Runner へ（Issue #522）────────────────────────────────────────
+# PR #511 が入れた heartbeat は macro_beta_inference.py の private な口で、pm.sample 1呼び出しを
+# 包んでいるだけだった。同じ月次バッチが回す tune:* や日次の pipeline は無音のまま＝次に
+# 「死んだのか走っているのか分からない」が起きるのは別ステップで、そのとき同じ調査をやり直す。
+
+class TestHeartbeat:
+    def test_heartbeat_is_written_while_the_child_runs(self, tmp_path):
+        import sys
+        log = tmp_path / "n.log"
+        with rn.Runner(log, echo=lambda _: None, heartbeat_sec=0.05) as r:
+            code = r.run(rn.Step("x", (sys.executable, "-c",
+                                       "import time; time.sleep(0.4)"), why="test"))
+        text = log.read_text(encoding="utf-8")
+        assert code == 0
+        assert "[heartbeat] x 継続中" in text, "長時間ステップが無音のまま＝生死が判定できない"
+        assert "END   x: exit=0" in text, "heartbeat の後で END 行が出ていない"
+
+    def test_no_heartbeat_for_a_quick_child(self, tmp_path):
+        """すぐ終わるステップに heartbeat は出ない（ログを無意味に太らせない）。"""
+        import sys
+        log = tmp_path / "n.log"
+        with rn.Runner(log, echo=lambda _: None, heartbeat_sec=30.0) as r:
+            r.run(rn.Step("x", (sys.executable, "-c", "print('done')"), why="test"))
+        assert "[heartbeat]" not in log.read_text(encoding="utf-8")
+
+    def test_end_summary_ignores_heartbeat_lines(self, tmp_path):
+        """END 行の要約に heartbeat を選ばない（heartbeat は進捗ではない）。"""
+        import sys
+        log = tmp_path / "n.log"
+        child = "print('real-progress', flush=True); import time; time.sleep(0.4)"
+        with rn.Runner(log, echo=lambda _: None, heartbeat_sec=0.05) as r:
+            r.run(rn.Step("x", (sys.executable, "-c", child), why="test"))
+        assert "[heartbeat] x 継続中" in log.read_text(encoding="utf-8")
+        assert "real-progress" in _end_line(log)
+
+
+# ── Runner の堅牢化（Issue #521）──────────────────────────────────────────────
+
+class TestRunnerHardening:
+    def test_run_without_a_log_handle_refuses_instead_of_running_blind(self, tmp_path):
+        """`with` の外で呼ばれたら**走らせない**（Issue #521-3）。
+
+        以前は `stdout=self._fh or subprocess.DEVNULL` で、子の出力が丸ごと捨てられたうえ
+        END 行も診断ゼロになった。数時間のステップでこれが起きると何も残らない。
+        """
+        import sys
+        sentinel = tmp_path / "ran.txt"
+        r = rn.Runner(tmp_path / "n.log", echo=lambda _: None)      # with を使わない
+        child = f"open({str(sentinel)!r}, 'w').close()"
+        code = r.run(rn.Step("x", (sys.executable, "-c", child), why="test"))
+        assert code == 126
+        assert not sentinel.exists(), "ログハンドルが無いのに子を起動している"
+
+    def test_closed_log_handle_is_recorded_not_raised(self, tmp_path):
+        """閉じたハンドルでも例外を漏らさない（Issue #521-1）。
+
+        `subprocess` は閉じたファイルの `fileno()` で **ValueError** を投げる（OSError では
+        ない）。取り逃がすと run_batch のステップループごと落ち、`record_footprint` も
+        `notify` も走らない＝「黙って走らなかった」を検知するためのモジュールが、それ自体を起こす。
+        """
+        import sys
+        log = tmp_path / "n.log"
+        r = rn.Runner(log, echo=lambda _: None)
+        with r:
+            pass                                     # ここで _fh が閉じる（None にはならない）
+        code = r.run(rn.Step("x", (sys.executable, "-c", "print('hi')"), why="test"))
+        assert code == 127, "閉じたハンドルで例外が漏れている（exit code に翻訳されていない）"
+
+    def test_end_summary_is_correct_for_output_larger_than_the_tail_window(self, tmp_path):
+        """末尾窓（TAIL_BYTES）より大きい出力でも、要約は本当の最終行（Issue #521-2）。
+
+        以前は `pos` から EOF まで丸ごと str へ読み全行の list を作っていた＝ログ直結にした
+        理由（数時間ぶんをディスクへ流す）が END 行の瞬間に消えていた。
+        """
+        import sys
+        from scripts.batch_common import TAIL_BYTES
+        log = tmp_path / "n.log"
+        n_lines = (TAIL_BYTES // 20) + 500           # 窓を確実に超える量
+        child = (f"[print('filler-%06d' % i) for i in range({n_lines})]; "
+                 "print('the-true-last-line')")
+        with rn.Runner(log, echo=lambda _: None) as r:
+            r.run(rn.Step("x", (sys.executable, "-c", child), why="test"))
+        assert log.stat().st_size > TAIL_BYTES, "テストが窓を超えていない＝何も検証していない"
+        assert "the-true-last-line" in _end_line(log)
