@@ -107,6 +107,28 @@ class TestExtractSteps:
         assert bmb.summarize_steps(got["steps"])["mean"] is None
 
 
+class TestPickBest:
+    """反復から最速を採る（共有デスクトップの外乱は必ず遅い側へ出る）。"""
+
+    def test_takes_the_fastest_and_keeps_the_spread(self):
+        best = bmb.pick_best([
+            {"seconds": 3.235, "draws": 75},
+            {"seconds": 0.838, "draws": 75},
+            {"seconds": 1.431, "draws": 75},
+        ])
+        assert best["seconds"] == 0.838
+        assert best["repeats"] == 3
+        # ばらつきを捨てない＝大きければ「その測定を信用しない」判断材料になる。
+        assert best["seconds_spread"] == pytest.approx(3.235 / 0.838)
+        assert best["seconds_all"] == [3.235, 0.838, 1.431]
+
+    def test_single_repeat_has_spread_one(self):
+        best = bmb.pick_best([{"seconds": 2.0, "draws": 25}])
+        assert best["seconds"] == 2.0
+        assert best["repeats"] == 1
+        assert best["seconds_spread"] == pytest.approx(1.0)
+
+
 class TestSummarizeSteps:
     def test_max_treedepth_rate(self):
         steps = np.array([1023.0, 1023.0, 7.0, 15.0])
@@ -114,6 +136,34 @@ class TestSummarizeSteps:
         assert s["max_treedepth_rate"] == pytest.approx(0.5)
         assert s["max"] == 1023.0
         assert s["mean"] == pytest.approx(np.mean(steps))
+
+
+class TestRegimeCheck:
+    """run 間で NUTS のレジームが揃っているか（違えば比較が成立しない）。"""
+
+    def _run(self, steps_mean, n_div=0):
+        return {"steps": {"mean": steps_mean}, "n_divergences": n_div}
+
+    def test_same_regime_passes(self):
+        got = bmb.regime_check([self._run(1023.0), self._run(1023.0)])
+        assert got["ok"] is True
+        assert got["steps_ratio"] == pytest.approx(1.0)
+
+    def test_regime_shift_is_flagged(self):
+        # tune=25 の実測: 1023 歩の run と 63 歩の run が混ざり、回帰の傾きが負になった。
+        got = bmb.regime_check([self._run(1023.0), self._run(63.1, n_div=78)])
+        assert got["ok"] is False
+        assert got["steps_ratio"] > 1.2
+        assert got["n_divergences_max"] == 78
+
+    def test_divergences_alone_fail_the_check(self):
+        # 本番（tune=800）は発散0。出ているなら別の状態を測っている。
+        got = bmb.regime_check([self._run(1000.0), self._run(1010.0, n_div=12)])
+        assert got["ok"] is False
+
+    def test_single_run_is_undetermined_not_ok(self):
+        got = bmb.regime_check([self._run(1023.0)])
+        assert got["ok"] is None
 
 
 class TestPredictFullScale:

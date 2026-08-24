@@ -48,6 +48,10 @@ on:
         description: "XLA/BLAS のスレッド上限（0=制限なし）"
         required: false
         default: "0"
+      pytensor_cxx:
+        description: "off にすると PyTensor の C バックエンドを無効化（PYTENSOR_FLAGS=cxx=）。#512 が起票時に立てた「g++ 不在が主因」仮説を Linux 側で直接反証するための条件"
+        required: false
+        default: "on"
       label:
         description: "結果につける識別ラベル"
         required: false
@@ -81,6 +85,11 @@ jobs:
           free -h
 
       - name: Run bench (synthetic panel / no DB)
+        env:
+          # cxx= は「C コンパイラを使わない」＝ローカル Windows と同じ条件。ローカルには
+          # g++ が無く（pytensor.config.cxx=''）、#512 はそれを主因と見立てて起票された。
+          # Linux 側で C バックエンドだけ外して所要が変わらなければ、その仮説は棄却できる。
+          PYTENSOR_FLAGS: ${{ github.event.inputs.pytensor_cxx == 'off' && 'cxx=' || '' }}
         run: |
           set -o pipefail   # tee が python の非ゼロ終了をマスクし失敗が緑表示になるのを防ぐ（Issue #352）
           python -m scripts.bench_macro_beta \

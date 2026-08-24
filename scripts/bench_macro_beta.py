@@ -141,6 +141,23 @@ def extract_steps(stats: dict) -> dict:
     return {"steps": np.array([], dtype=float), "source": "none"}
 
 
+def pick_best(repeats: list) -> dict:
+    """同一条件の反復から**最速**を採る（共有デスクトップでの計測に必須）。
+
+    外乱（他プロセスの CPU / キャッシュ圧・周波数低下）は必ず「遅い側」へ出るので、最小値が
+    最も素の実行コストに近い。平均や中央値は外乱を混ぜ込む。実測 2026-08-24: 同一設定
+    （chains=2・n_stock=250）の限界費が 0.838 と 3.235 s/draw に割れ、**同じ仕事量
+    （steps/draw=1023 固定）に対し CPU 時間まで伸びていた**＝ 1回の観測では比較できない。
+    ばらつき自体も残す（大きければその測定は信用しない材料になる）。
+    """
+    best = dict(min(repeats, key=lambda r: r["seconds"]))
+    secs = [r["seconds"] for r in repeats]
+    best["repeats"] = len(repeats)
+    best["seconds_all"] = secs
+    best["seconds_spread"] = (max(secs) / min(secs)) if min(secs) > 0 else None
+    return best
+
+
 def summarize_steps(steps: np.ndarray) -> dict:
     """歩数配列の要約。空なら全て None（「測れなかった」を 0 と区別する）。"""
     if steps.size == 0:
@@ -148,6 +165,25 @@ def summarize_steps(steps: np.ndarray) -> dict:
     return {"mean": float(np.mean(steps)), "p50": float(np.percentile(steps, 50)),
             "p90": float(np.percentile(steps, 90)), "max": float(np.max(steps)),
             "max_treedepth_rate": float(np.mean(steps >= MAX_TREEDEPTH_STEPS))}
+
+
+def regime_check(runs: list) -> dict:
+    """run 間で NUTS が同じレジームに居るかを見る（違えば比較が成立しない）。
+
+    本番（tune=800）は全 draw が max treedepth に張り付く（steps/draw=1023・発散0）。
+    warmup を切り詰めると適応が終わらず、**同じ設定のはずの run が別レジームへ落ちる**——
+    実測 2026-08-25 の tune=25 では steps/draw が 1023 → 63 まで動き発散が 78 出て、
+    所要の回帰が負の傾きになった。歩数の比が開いていたら、その測定は捨てる。
+    """
+    means = [r["steps"]["mean"] for r in runs
+             if (r.get("steps") or {}).get("mean")]
+    divs = [int(r.get("n_divergences") or 0) for r in runs]
+    if len(means) < 2:
+        return {"ok": None, "steps_ratio": None,
+                "n_divergences_max": max(divs) if divs else None}
+    ratio = float(max(means) / min(means))
+    return {"ok": bool(ratio <= 1.2 and max(divs) == 0), "steps_ratio": ratio,
+            "n_divergences_max": int(max(divs))}
 
 
 def predict_full_minutes(per_draw_sec, n_obs_bench: int) -> dict:
@@ -166,6 +202,48 @@ def predict_full_minutes(per_draw_sec, n_obs_bench: int) -> dict:
             "assumptions": "cost は n_obs へ比例 / tune 1反復 = draw 1反復 / steps per draw は規模で不変",
             "gha_full_minutes": GHA_FULL_MINUTES,
             "local_full_minutes_incomplete": LOCAL_FULL_MINUTES_INCOMPLETE}
+
+
+def peak_rss_mb():
+    """プロセスのピーク常駐メモリ[MB]。取れなければ None。
+
+    本番規模の posterior は `beta` / `beta_raw`（いずれも n_stock x n_factor）が draws x chains
+    ぶん保存されるため GB 級になる。**この PC の空きメモリは 2GB 前後**しかないので、
+    「1歩あたりのコスト」とは別に常駐サイズ自体が律速になりうる。所要と一緒に残す。
+    """
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            class _PMC(ctypes.Structure):
+                _fields_ = [("cb", wintypes.DWORD), ("PageFaultCount", wintypes.DWORD),
+                            ("PeakWorkingSetSize", ctypes.c_size_t),
+                            ("WorkingSetSize", ctypes.c_size_t),
+                            ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+                            ("QuotaPagedPoolUsage", ctypes.c_size_t),
+                            ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+                            ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+                            ("PagefileUsage", ctypes.c_size_t),
+                            ("PeakPagefileUsage", ctypes.c_size_t)]
+
+            counters = _PMC()
+            counters.cb = ctypes.sizeof(_PMC)
+            # ハンドルは c_void_p で渡す（GetCurrentProcess() は擬似ハンドル -1 を返し、
+            # argtypes 無しの int 渡しは 64bit で切り詰められて無効ハンドルになる）。
+            handle = ctypes.c_void_p(ctypes.windll.kernel32.GetCurrentProcess())
+            if not ctypes.WinDLL("psapi").GetProcessMemoryInfo(
+                    handle, ctypes.byref(counters), counters.cb):
+                return None
+            return float(counters.PeakWorkingSetSize) / (1024 * 1024)
+        except Exception:
+            return None
+    try:
+        import resource
+        # Linux は KB、macOS は byte で返す（ここでは Linux ランナー前提）。
+        return float(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss) / 1024.0
+    except Exception:
+        return None
 
 
 def env_fingerprint() -> dict:
@@ -264,10 +342,15 @@ def run_sample(model, draws: int, tune: int, chains: int, target_accept: float,
     if chain_method:
         kwargs["nuts_sampler_kwargs"] = {"chain_method": chain_method}
 
+    # 経過だけでは「並列で速い」と「待っているだけ」を区別できない。**CPU 時間も測る**
+    # （process_time は全スレッドの合計）。cpu/wall が 1 に近ければ実質1コアしか使えておらず、
+    # コア数を超えて伸びていれば競合でCPUを焼いているだけ＝どちらも経過時間からは見えない。
     started = time.monotonic()
+    cpu_started = time.process_time()
     with model:
         idata = pm.sample(**kwargs)
     elapsed = time.monotonic() - started
+    cpu_elapsed = time.process_time() - cpu_started
 
     stats = {}
     for name in idata.sample_stats.data_vars:
@@ -281,8 +364,10 @@ def run_sample(model, draws: int, tune: int, chains: int, target_accept: float,
     if "step_size" in stats:
         step_size = float(np.mean(np.asarray(stats["step_size"], dtype=float)))
 
-    return {"draws": draws, "seconds": elapsed, "steps_source": found["source"],
-            "steps": steps, "n_divergences": divergences, "step_size_mean": step_size,
+    return {"draws": draws, "seconds": elapsed, "cpu_seconds": cpu_elapsed,
+            "cpu_per_wall": (cpu_elapsed / elapsed) if elapsed > 0 else None,
+            "steps_source": found["source"], "steps": steps, "n_divergences": divergences,
+            "step_size_mean": step_size,
             "total_steps": float(np.sum(found["steps"])) if found["steps"].size else None}
 
 
@@ -302,15 +387,27 @@ def format_report(record: dict) -> str:
     lines.append("          init={0} chain_method={1} force_devices={2} threads={3}".format(
         c["init"], c["chain_method"], c["force_devices"], c["threads"]))
     lines.append("-" * 78)
-    lines.append("{0:>8} {1:>10} {2:>12} {3:>12} {4:>8}".format(
-        "draws", "sec", "steps/draw", "max_td_rate", "n_div"))
+    lines.append("{0:>8} {1:>10} {2:>10} {3:>12} {4:>12} {5:>8}".format(
+        "draws", "sec", "cpu/wall", "steps/draw", "max_td_rate", "n_div"))
     for r in record["runs"]:
         st = r["steps"]
-        lines.append("{0:>8} {1:>10.1f} {2:>12} {3:>12} {4:>8}".format(
+        lines.append("{0:>8} {1:>10.1f} {2:>10} {3:>12} {4:>12} {5:>8}".format(
             r["draws"], r["seconds"],
+            "n/a" if r.get("cpu_per_wall") is None else "{0:.2f}".format(r["cpu_per_wall"]),
             "n/a" if st["mean"] is None else "{0:.1f}".format(st["mean"]),
             "n/a" if st["max_treedepth_rate"] is None else "{0:.3f}".format(st["max_treedepth_rate"]),
             "n/a" if r["n_divergences"] is None else r["n_divergences"]))
+    spreads = [r.get("seconds_spread") for r in record["runs"] if r.get("seconds_spread")]
+    if spreads:
+        lines.append("repeats : {0} 回/点・最速を採用（ばらつき max/min = {1}）".format(
+            record["runs"][0].get("repeats"),
+            ", ".join("{0:.2f}".format(s) for s in spreads)))
+    regime = record.get("regime") or {}
+    if regime.get("ok") is False:
+        lines.append("WARNING : run 間で NUTS のレジームが違う"
+                     "（steps/draw 比 {0:.2f}・発散 max {1}）＝この測定は比較に使えない。"
+                     "tune を伸ばすこと".format(regime.get("steps_ratio") or 0.0,
+                                                regime.get("n_divergences_max")))
     lines.append("-" * 78)
     probe = record.get("probe")
     if probe:
@@ -328,6 +425,8 @@ def format_report(record: dict) -> str:
         lines.append("extrapol: full scale {0:.0f} min (GHA {1:.0f} min / local {2:.0f} min unfinished)".format(
             pred["minutes"], pred["gha_full_minutes"], pred["local_full_minutes_incomplete"]))
         lines.append("          assumptions: {0}".format(pred["assumptions"]))
+    if record.get("peak_rss_mb"):
+        lines.append("memory  : peak RSS {0:.0f}MB".format(record["peak_rss_mb"]))
     lines.append("timing  : panel={0:.1f}s model_build={1:.1f}s sample_total={2:.1f}s".format(
         record["stage_sec"]["panel"], record["stage_sec"]["model_build"],
         record["stage_sec"]["sample_total"]))
@@ -352,6 +451,8 @@ def main() -> None:
     ap.add_argument("--draws", default="50,200",
                     help="カンマ区切りの2点以上（固定費と限界費を分離するため）")
     ap.add_argument("--tune", type=int, default=200)
+    ap.add_argument("--repeat", type=int, default=1,
+                    help="各 draws 点の反復回数。最速を採る（共有デスクトップの外乱対策）")
     ap.add_argument("--probe-draws", type=int, default=5,
                     help="計測前に1本流してコンパイル代を先に払う draws 数（0 で無効）")
     ap.add_argument("--chains", type=int, default=2)
@@ -416,23 +517,30 @@ def main() -> None:
 
     runs = []
     for draws in draws_list:
-        logger.info("sampling: draws=%d tune=%d chains=%d", draws, args.tune, args.chains)
-        r = run_sample(model, draws=draws, tune=args.tune, chains=args.chains,
-                       target_accept=args.target_accept, seed=args.seed,
-                       nuts_sampler=args.nuts_sampler, init=args.init,
-                       chain_method=args.chain_method)
-        logger.info("  -> %.1fs steps/draw=%s", r["seconds"],
-                    "n/a" if r["steps"]["mean"] is None else round(r["steps"]["mean"], 1))
-        runs.append(r)
+        repeats = []
+        for rep in range(max(1, args.repeat)):
+            logger.info("sampling: draws=%d tune=%d chains=%d (rep %d/%d)",
+                        draws, args.tune, args.chains, rep + 1, max(1, args.repeat))
+            r = run_sample(model, draws=draws, tune=args.tune, chains=args.chains,
+                           target_accept=args.target_accept, seed=args.seed,
+                           nuts_sampler=args.nuts_sampler, init=args.init,
+                           chain_method=args.chain_method)
+            logger.info("  -> %.1fs cpu/wall=%.2f steps/draw=%s", r["seconds"],
+                        r["cpu_per_wall"] or 0.0,
+                        "n/a" if r["steps"]["mean"] is None else round(r["steps"]["mean"], 1))
+            repeats.append(r)
+        runs.append(pick_best(repeats))
 
     fit = two_point_fit([(r["draws"], r["seconds"]) for r in runs])
+    # **歩数を分母にした回帰**。draws を分母にすると、run 間で steps/draw が変われば傾きが
+    # 汚染される（実測 n_stock=1000: 一方が 1023 歩・他方が 709.6 歩＝ max treedepth を
+    # 抜けた run が混ざった）。総 leapfrog 歩数に対して回帰すれば、傾きがそのまま 1歩の実費。
+    step_fit = two_point_fit([(r["total_steps"], r["seconds"]) for r in runs
+                              if r.get("total_steps")])
     per_step_us = None
     per_step_us_per_obs = None
-    last = runs[-1]
-    if fit["per_draw_sec"] and last["steps"]["mean"]:
-        # 限界費は「全チェーン分の 1 draw」。1 leapfrog あたりへ直すためチェーン数を掛ける
-        # （chains 本が並列に進んでいても、踏んだ歩数の総和は chains 倍だから）。
-        per_step_us = fit["per_draw_sec"] / last["steps"]["mean"] * 1e6 * args.chains
+    if step_fit.get("per_draw_sec"):     # ここでの "per_draw" は「1 leapfrog 歩」の意味
+        per_step_us = step_fit["per_draw_sec"] * 1e6
         per_step_us_per_obs = per_step_us / float(panel["n_obs"])
 
     record = {
@@ -447,12 +555,15 @@ def main() -> None:
                    "seed": args.seed},
         "probe": probe,
         "runs": runs,
+        "regime": regime_check(runs),
         "fit": fit,
+        "step_fit": step_fit,
         "per_step_us": per_step_us,
         "per_step_us_per_obs": per_step_us_per_obs,
         "predicted_full": predict_full_minutes(fit["per_draw_sec"], panel["n_obs"]),
         "stage_sec": {"panel": panel_sec, "model_build": model_sec,
                       "sample_total": float(sum(r["seconds"] for r in runs))},
+        "peak_rss_mb": peak_rss_mb(),
         "env": env_fingerprint(),
     }
 
