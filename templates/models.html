@@ -232,17 +232,19 @@ HC3 SE:          不均一分散に対応したロバスト標準誤差</div>
 
   <p>各指標の Zスコアを重み付け線形結合してスコアを計算し、企業をランキングする。</p>
 
-  <h3>スコア計算式</h3>
+  <h3>スコア計算式（スケール整合）</h3>
+  <p>VIEW の <code>z_*</code>（年度窓の Z）と <code>gap_ratio</code>（単位は％で Z ですらない）が混在し、<strong>そのまま線形結合すると「重み 1.0」の実効的な影響力が列間で最大 73倍違う</strong>（Issue #469 の実測）。次元整合性の原則（共通事項）に従い、<strong>その断面の候補集団全体で winsorize（p1–p99）→ z 標準化</strong>してから合成する（Issue #509・売り候補ランキングと同じ方式）。</p>
   <div class="formula-block"><span class="var">score_i</span> = Σⱼ∈present (weight_j × z_metric_j_i) / Σⱼ∈present |weight_j|
 
 present     : 企業 i において値が NULL でない指標の集合
 weight_j    : 指標 j の重み（ユーザー設定）
-z_metric_j_i: 企業 i の指標 j の Zスコア（年度別正規化済み）</div>
-  <p><strong>weighted mean</strong> で計算するため、指標カバレッジが異なる銘柄を公平に比較できる。</p>
+z_metric_j_i: 企業 i の指標 j の候補集団標準化値（±5 クリップ）</div>
+  <p><strong>weighted mean</strong> で計算するため、指標カバレッジが異なる銘柄を公平に比較できる。<strong>画面に出る指標値（<code>detail</code>）は生値のまま</strong>で、変わったのはスコアの合成単位だけ。</p>
 
   <h3>カバレッジフィルタ</h3>
   <div class="formula-block"><span class="var">coverage_i</span> = Σⱼ∈present |weight_j| / Σⱼ |weight_j|</div>
   <p><code>min_coverage</code>（デフォルト 0.5）未満の企業はランキングから除外する。<code>1.0</code> 指定で全指標が揃った企業のみ対象。</p>
+  <p>母集団は <code>latest_year_subq</code> が返す<strong>各社の最新年度</strong>で、会計年度が混ざる（実測 2025年度 33.5% / 2026年度 66.5%）。これは決算期の違い（12月期・9月期 vs 3月期）であって鮮度の差ではないため、<strong>年度別に標準化し直さない</strong>（Issue #520 で実測して決着）。</p>
 
   <h3>プリセット定義</h3>
   <table>
@@ -254,8 +256,8 @@ z_metric_j_i: 企業 i の指標 j の Zスコア（年度別正規化済み）<
       <tr><td><span class="tag tag-red">高収益重視</span></td><td>2.0</td><td>2.0</td><td>—</td><td>1.0</td><td>0.5</td><td>—</td><td>—</td></tr>
     </tbody>
   </table>
-  <p><code>gap_ratio</code> は業種別OLS乖離率であり、正値 = 割安の指標として機能する。</p>
-  <p><code>z_momentum</code> は他指標と異なり financial_metrics VIEW の列ではなく、<code>compute_momentum_z()</code> が実行時に計算する（sell_ranking の <code>_resolve_metric</code> と同じ方式）。12-1モメンタム（直近1ヶ月を除く12ヶ月の log リターン）を候補集団横断で winsorize→Zスコア化する。</p>
+  <p><code>gap_ratio</code> は業種別OLS乖離率であり、正値 = 割安の指標として機能する。<strong>Z ではなく生の％だが、同じスコア合成へ入る以上は他指標と同じ断面標準化を通す</strong>——揃えるべきは「VIEW 列かどうか」ではなく「同じ合成へ入るかどうか」。</p>
+  <p><code>z_momentum</code> は他指標と異なり financial_metrics VIEW の列ではなく、<code>compute_momentum_z()</code> が実行時に計算する（sell_ranking の <code>_resolve_metric</code> と同じ方式）。12-1モメンタム（直近1ヶ月を除く12ヶ月の log リターン）を候補集団横断で winsorize→Zスコア化する。<strong>算出側で標準化済みなので上の断面標準化は通さない</strong>（二重標準化しない。<code>mu</code> も同じ）。</p>
   <p>上表の4プリセットは <strong>どれも <code>mu</code>（μ̂）重みを持たない</strong>（下記）。</p>
 
   <h3>μ̂（期待リターン）の opt-in 結線</h3>
