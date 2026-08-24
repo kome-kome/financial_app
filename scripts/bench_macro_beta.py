@@ -463,13 +463,15 @@ def main() -> None:
         runs.append(pick_best(repeats))
 
     fit = two_point_fit([(r["draws"], r["seconds"]) for r in runs])
+    # **歩数を分母にした回帰**。draws を分母にすると、run 間で steps/draw が変われば傾きが
+    # 汚染される（実測 n_stock=1000: 一方が 1023 歩・他方が 709.6 歩＝ max treedepth を
+    # 抜けた run が混ざった）。総 leapfrog 歩数に対して回帰すれば、傾きがそのまま 1歩の実費。
+    step_fit = two_point_fit([(r["total_steps"], r["seconds"]) for r in runs
+                              if r.get("total_steps")])
     per_step_us = None
     per_step_us_per_obs = None
-    last = runs[-1]
-    if fit["per_draw_sec"] and last["steps"]["mean"]:
-        # 限界費は「全チェーン分の 1 draw」。1 leapfrog あたりへ直すためチェーン数を掛ける
-        # （chains 本が並列に進んでいても、踏んだ歩数の総和は chains 倍だから）。
-        per_step_us = fit["per_draw_sec"] / last["steps"]["mean"] * 1e6 * args.chains
+    if step_fit.get("per_draw_sec"):     # ここでの "per_draw" は「1 leapfrog 歩」の意味
+        per_step_us = step_fit["per_draw_sec"] * 1e6
         per_step_us_per_obs = per_step_us / float(panel["n_obs"])
 
     record = {
@@ -485,6 +487,7 @@ def main() -> None:
         "probe": probe,
         "runs": runs,
         "fit": fit,
+        "step_fit": step_fit,
         "per_step_us": per_step_us,
         "per_step_us_per_obs": per_step_us_per_obs,
         "predicted_full": predict_full_minutes(fit["per_draw_sec"], panel["n_obs"]),
