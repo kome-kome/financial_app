@@ -1,0 +1,112 @@
+name: "[計測] macro_beta の所要（Linux ランナー基準・Issue #512）"
+
+# Issue #512「macro_beta のローカル実行が GHA の 6.4倍以上遅い」の**基準側**を取るための計測ジョブ。
+#
+# ローカル実測 741.5分（2026-08-21・未完走）に対し GHA 実績 116分（run 30698937879）。
+# パラメータ・依存 pin・パネル規模はすべて突合済みで差が無く、残るのは実行環境そのもの。
+# そこを分離するため、**同一の合成パネル（seed 固定）**を両側で回して比を取る。
+#
+# なぜ合成データか（実データではなく）:
+#   - #503 で正本がローカルへ反転したため、ランナーから見える Supabase は 2026-08-07 の断面で
+#     ローカルとデータ世代が違う。規模が違えば比は無意味になる（#512 の突合でこれを潰すのに往復した）
+#   - 合成なら **DB を一切触らない**＝Egress ゼロ・secrets 不要・`FINAPP_DB_TARGET` 非依存
+#     （`experiment-pooled-rhat.yml` は prod 明示が無く、反転後に dispatch すると runner 上で
+#     localhost を見にいく。本ジョブはその地雷を踏まない）
+#   - seed 固定なので事後幾何が両側で同一＝「規模やデータの言い訳」が入らない
+#
+# 対応するローカル側の実行（同一パラメータで回すこと）:
+#   python -m scripts.bench_macro_beta --mode synth --n-stock 250 --tune 200 --draws 50,200 \
+#       --chains 2 --label A-local --out .logs/bench_512.jsonl
+#
+# 定期実行はしない（計測は必要なときだけ）。結果は JSONL アーティファクトで持ち帰り、
+# Issue #512 へ表として残す。
+
+on:
+  workflow_dispatch:
+    inputs:
+      n_stock:
+        description: "合成パネルの銘柄数（本番は 3795・既定 250 は縮小規模）"
+        required: false
+        default: "250"
+      draws:
+        description: "カンマ区切りの draws 2点以上（固定費と限界費を分離するため）"
+        required: false
+        default: "50,200"
+      tune:
+        description: "NUTS チューニングステップ数"
+        required: false
+        default: "200"
+      chains:
+        description: "チェーン数（本番と同じ 2）"
+        required: false
+        default: "2"
+      target_accept:
+        description: "NUTS target_accept（本番と同じ 0.95）"
+        required: false
+        default: "0.95"
+      threads:
+        description: "XLA/BLAS のスレッド上限（0=制限なし）"
+        required: false
+        default: "0"
+      label:
+        description: "結果につける識別ラベル"
+        required: false
+        default: "B-gha"
+
+# 最小権限（DB へも外部へも書かない・読むのはリポジトリだけ）。
+permissions:
+  contents: read
+
+jobs:
+  bench:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.13.7'  # render.yaml の PYTHON_VERSION と一致させる
+          cache: 'pip'
+
+      - name: Install dependencies (requirements.txt + PyMC + numpyro)
+        run: pip install -r requirements-inference.txt
+
+      - name: Show runner CPU/memory (比の分母を記録する)
+        run: |
+          lscpu | head -20
+          free -h
+
+      - name: Run bench (synthetic panel / no DB)
+        run: |
+          set -o pipefail   # tee が python の非ゼロ終了をマスクし失敗が緑表示になるのを防ぐ（Issue #352）
+          python -m scripts.bench_macro_beta \
+            --mode synth \
+            --n-stock "${{ github.event.inputs.n_stock || '250' }}" \
+            --draws "${{ github.event.inputs.draws || '50,200' }}" \
+            --tune "${{ github.event.inputs.tune || '200' }}" \
+            --chains "${{ github.event.inputs.chains || '2' }}" \
+            --target-accept "${{ github.event.inputs.target_accept || '0.95' }}" \
+            --threads "${{ github.event.inputs.threads || '0' }}" \
+            --nuts-sampler numpyro \
+            --init adapt_diag \
+            --label "${{ github.event.inputs.label || 'B-gha' }}" \
+            --out bench_512.jsonl \
+            2>&1 | tee bench_macro_beta.log
+
+      # `.egress/*.jsonl` は synth モードでは DB を触らないので通常は空。将来 real モードを
+      # 足したときに回収漏れが起きないよう最初から含める（#478・CI のメタ検査が全 artifact に要求する）。
+      - name: Upload result
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: bench-macro-beta
+          path: |
+            bench_512.jsonl
+            bench_macro_beta.log
+            .egress/*.jsonl
+
+          retention-days: 30
