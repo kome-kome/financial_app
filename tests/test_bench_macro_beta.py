@@ -138,6 +138,34 @@ class TestSummarizeSteps:
         assert s["mean"] == pytest.approx(np.mean(steps))
 
 
+class TestRegimeCheck:
+    """run 間で NUTS のレジームが揃っているか（違えば比較が成立しない）。"""
+
+    def _run(self, steps_mean, n_div=0):
+        return {"steps": {"mean": steps_mean}, "n_divergences": n_div}
+
+    def test_same_regime_passes(self):
+        got = bmb.regime_check([self._run(1023.0), self._run(1023.0)])
+        assert got["ok"] is True
+        assert got["steps_ratio"] == pytest.approx(1.0)
+
+    def test_regime_shift_is_flagged(self):
+        # tune=25 の実測: 1023 歩の run と 63 歩の run が混ざり、回帰の傾きが負になった。
+        got = bmb.regime_check([self._run(1023.0), self._run(63.1, n_div=78)])
+        assert got["ok"] is False
+        assert got["steps_ratio"] > 1.2
+        assert got["n_divergences_max"] == 78
+
+    def test_divergences_alone_fail_the_check(self):
+        # 本番（tune=800）は発散0。出ているなら別の状態を測っている。
+        got = bmb.regime_check([self._run(1000.0), self._run(1010.0, n_div=12)])
+        assert got["ok"] is False
+
+    def test_single_run_is_undetermined_not_ok(self):
+        got = bmb.regime_check([self._run(1023.0)])
+        assert got["ok"] is None
+
+
 class TestPredictFullScale:
     """フル規模への外挿（仮定を必ず添えること）。"""
 

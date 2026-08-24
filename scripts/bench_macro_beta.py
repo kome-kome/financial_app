@@ -167,6 +167,25 @@ def summarize_steps(steps: np.ndarray) -> dict:
             "max_treedepth_rate": float(np.mean(steps >= MAX_TREEDEPTH_STEPS))}
 
 
+def regime_check(runs: list) -> dict:
+    """run 間で NUTS が同じレジームに居るかを見る（違えば比較が成立しない）。
+
+    本番（tune=800）は全 draw が max treedepth に張り付く（steps/draw=1023・発散0）。
+    warmup を切り詰めると適応が終わらず、**同じ設定のはずの run が別レジームへ落ちる**——
+    実測 2026-08-25 の tune=25 では steps/draw が 1023 → 63 まで動き発散が 78 出て、
+    所要の回帰が負の傾きになった。歩数の比が開いていたら、その測定は捨てる。
+    """
+    means = [r["steps"]["mean"] for r in runs
+             if (r.get("steps") or {}).get("mean")]
+    divs = [int(r.get("n_divergences") or 0) for r in runs]
+    if len(means) < 2:
+        return {"ok": None, "steps_ratio": None,
+                "n_divergences_max": max(divs) if divs else None}
+    ratio = float(max(means) / min(means))
+    return {"ok": bool(ratio <= 1.2 and max(divs) == 0), "steps_ratio": ratio,
+            "n_divergences_max": int(max(divs))}
+
+
 def predict_full_minutes(per_draw_sec, n_obs_bench: int) -> dict:
     """縮小規模の限界費からフル規模の所要を外挿する。
 
@@ -183,6 +202,48 @@ def predict_full_minutes(per_draw_sec, n_obs_bench: int) -> dict:
             "assumptions": "cost は n_obs へ比例 / tune 1反復 = draw 1反復 / steps per draw は規模で不変",
             "gha_full_minutes": GHA_FULL_MINUTES,
             "local_full_minutes_incomplete": LOCAL_FULL_MINUTES_INCOMPLETE}
+
+
+def peak_rss_mb():
+    """プロセスのピーク常駐メモリ[MB]。取れなければ None。
+
+    本番規模の posterior は `beta` / `beta_raw`（いずれも n_stock x n_factor）が draws x chains
+    ぶん保存されるため GB 級になる。**この PC の空きメモリは 2GB 前後**しかないので、
+    「1歩あたりのコスト」とは別に常駐サイズ自体が律速になりうる。所要と一緒に残す。
+    """
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            class _PMC(ctypes.Structure):
+                _fields_ = [("cb", wintypes.DWORD), ("PageFaultCount", wintypes.DWORD),
+                            ("PeakWorkingSetSize", ctypes.c_size_t),
+                            ("WorkingSetSize", ctypes.c_size_t),
+                            ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+                            ("QuotaPagedPoolUsage", ctypes.c_size_t),
+                            ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+                            ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+                            ("PagefileUsage", ctypes.c_size_t),
+                            ("PeakPagefileUsage", ctypes.c_size_t)]
+
+            counters = _PMC()
+            counters.cb = ctypes.sizeof(_PMC)
+            # ハンドルは c_void_p で渡す（GetCurrentProcess() は擬似ハンドル -1 を返し、
+            # argtypes 無しの int 渡しは 64bit で切り詰められて無効ハンドルになる）。
+            handle = ctypes.c_void_p(ctypes.windll.kernel32.GetCurrentProcess())
+            if not ctypes.WinDLL("psapi").GetProcessMemoryInfo(
+                    handle, ctypes.byref(counters), counters.cb):
+                return None
+            return float(counters.PeakWorkingSetSize) / (1024 * 1024)
+        except Exception:
+            return None
+    try:
+        import resource
+        # Linux は KB、macOS は byte で返す（ここでは Linux ランナー前提）。
+        return float(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss) / 1024.0
+    except Exception:
+        return None
 
 
 def env_fingerprint() -> dict:
@@ -341,6 +402,12 @@ def format_report(record: dict) -> str:
         lines.append("repeats : {0} 回/点・最速を採用（ばらつき max/min = {1}）".format(
             record["runs"][0].get("repeats"),
             ", ".join("{0:.2f}".format(s) for s in spreads)))
+    regime = record.get("regime") or {}
+    if regime.get("ok") is False:
+        lines.append("WARNING : run 間で NUTS のレジームが違う"
+                     "（steps/draw 比 {0:.2f}・発散 max {1}）＝この測定は比較に使えない。"
+                     "tune を伸ばすこと".format(regime.get("steps_ratio") or 0.0,
+                                                regime.get("n_divergences_max")))
     lines.append("-" * 78)
     probe = record.get("probe")
     if probe:
@@ -358,6 +425,8 @@ def format_report(record: dict) -> str:
         lines.append("extrapol: full scale {0:.0f} min (GHA {1:.0f} min / local {2:.0f} min unfinished)".format(
             pred["minutes"], pred["gha_full_minutes"], pred["local_full_minutes_incomplete"]))
         lines.append("          assumptions: {0}".format(pred["assumptions"]))
+    if record.get("peak_rss_mb"):
+        lines.append("memory  : peak RSS {0:.0f}MB".format(record["peak_rss_mb"]))
     lines.append("timing  : panel={0:.1f}s model_build={1:.1f}s sample_total={2:.1f}s".format(
         record["stage_sec"]["panel"], record["stage_sec"]["model_build"],
         record["stage_sec"]["sample_total"]))
@@ -486,6 +555,7 @@ def main() -> None:
                    "seed": args.seed},
         "probe": probe,
         "runs": runs,
+        "regime": regime_check(runs),
         "fit": fit,
         "step_fit": step_fit,
         "per_step_us": per_step_us,
@@ -493,6 +563,7 @@ def main() -> None:
         "predicted_full": predict_full_minutes(fit["per_draw_sec"], panel["n_obs"]),
         "stage_sec": {"panel": panel_sec, "model_build": model_sec,
                       "sample_total": float(sum(r["seconds"] for r in runs))},
+        "peak_rss_mb": peak_rss_mb(),
         "env": env_fingerprint(),
     }
 
