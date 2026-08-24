@@ -232,3 +232,71 @@ class TestTaskInstaller:
         """29-31 日を許すと、その月だけ黙って走らない。"""
         text = self.INSTALLER.read_text(encoding="utf-8-sig")
         assert "-gt 28" in text, "Day の上限チェックが無い"
+
+
+# ── ステップの時間予算（Issue #530）──────────────────────────────────────────
+#
+# ステップ順は「打ち切られても軽い順に並べてあるので前方は当月分が揃う」という設計だが、
+# **前方の1本が窓を食い尽くすとその設計が成立しない**。2026-09-01 がまさにそれで、
+# macro_beta（ローカル実測 741.5分でも未完走・#512）が16時間を使い切り、tune×3 は
+# 一度も起動しないはずだった。μ̂ の最終更新は 2026-07-10。
+
+class TestBudgetFitsTheWindow:
+    INSTALLER = ROOT / "scripts" / "install_monthly_task.ps1"
+
+    def test_every_step_has_a_budget(self):
+        """1本でも無期限があれば窓の保証はその時点で消える。"""
+        missing = [s.name for s in rm.steps_for(sys.executable) if s.budget_min is None]
+        assert not missing, f"予算の無いステップ: {missing}（BUDGET_MIN への追加漏れ）"
+
+    def test_budgets_fit_inside_the_scheduler_window(self):
+        import scripts.batch_common as bc
+        problem = bc.window_problem(rm.steps_for(sys.executable), rm.WINDOW_MIN)
+        assert problem is None, problem
+
+    def test_window_matches_the_installer(self):
+        """`install_monthly_task.ps1` の既定 `-Hours` と `WINDOW_MIN` を照合する。
+
+        窓と予算はセットでしか意味を持たない。片方だけ動かしても**失敗としては現れない**
+        （窓が足りなければ最後のステップが黙って打ち切られ、窓が余れば使われないだけ）ので
+        CI で見るしかない。`tests/test_db_target.py` が `launch.py` の既定を `database` 側と
+        照合しているのと同型。
+        """
+        import re
+        text = self.INSTALLER.read_text(encoding="utf-8-sig")
+        m = re.search(r"\[int\]\$Hours\s*=\s*(\d+)", text)
+        assert m, "install_monthly_task.ps1 から既定の -Hours を読めない（書式が変わった）"
+        assert int(m.group(1)) * 60 == rm.WINDOW_MIN, (
+            f"ps1 の既定 {m.group(1)}時間 と run_monthly.WINDOW_MIN {rm.WINDOW_MIN}分 が食い違う"
+        )
+
+    def test_the_tune_steps_can_still_start_after_everything_before_them(self):
+        """**tune×3 が窓に届く**こと＝本 Issue（#530）の目的そのもの。
+
+        前方（vacuum / factor_premia / macro_beta）の予算を全部使い切っても、後ろの tune が
+        開始でき、かつ最後の1本が窓の中で終われることを見る。ここが崩れたら、並びを
+        変えたか予算を膨らませたかのどちらか。
+        """
+        steps = rm.steps_for(sys.executable)
+        elapsed = 0.0
+        for s in steps:
+            assert elapsed < rm.WINDOW_MIN, f"{s.name} が窓の外で開始することになる"
+            elapsed += s.budget_min
+        assert elapsed <= rm.WINDOW_MIN, "最後のステップが窓から溢れる"
+
+    def test_macro_beta_budget_is_anchored_to_the_measured_gha_run(self):
+        """macro_beta の予算は GHA 実績（116分）の外側に置く。
+
+        ここを 116分未満へ絞ると、**GHA で通っていた仕事すら通らない**予算になる。逆に
+        窓の過半を与えると tune が届かない。#512 が解けたときに「予算が主因だった」と
+        取り違えないための下限。
+        """
+        budget = next(s.budget_min for s in rm.steps_for(sys.executable) if s.name == "macro_beta")
+        assert 116 < budget < rm.WINDOW_MIN / 2, (
+            f"macro_beta の予算 {budget}分 が GHA 実績 116分 と窓の半分の間に無い"
+        )
+
+    def test_dry_run_shows_the_budget(self, capsys):
+        rm.main(["--dry-run"])
+        out = capsys.readouterr().out
+        assert "予算" in out and "macro_beta" in out

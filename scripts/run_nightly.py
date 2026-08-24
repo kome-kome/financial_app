@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+from dataclasses import replace
 from pathlib import Path
 from typing import Optional, Sequence
 
@@ -57,6 +58,24 @@ KEY_LAST_SUCCESS = "nightly_last_success"
 
 # 失敗を起票するときのラベル（GHA の notify-failure と同じ運用に載せる）。
 ISSUE_LABELS = bc.ISSUE_LABELS
+
+# タスクスケジューラの窓（`install_nightly_task.ps1` の `-ExecutionTimeLimit 6時間`）。
+# 窓と予算はセットでしか意味を持たない（#530）。`tests/test_run_nightly.py` が照合する。
+WINDOW_MIN = 6 * 60
+
+# ステップごとの時間予算（分・#530）。**Σ + マージン ≤ WINDOW_MIN**。
+#
+# 実測: 通常は総所要 60〜70分（2026-08-23 は 69分）。1日飛ぶと翌日の Yahoo gap-fill が
+# 4,000社超へ膨らみ 2h11m 級まで伸びる（#475）。pipeline 240分はその最悪ケースの外側で、
+# **通常運転を打ち切らない**ことを優先した値。scores は実測 6.5分。
+#
+# ここで切れる方が良い理由: 窓（6時間）に達するとタスクスケジューラが黙ってプロセスを
+# 止め、`scores` は走った形跡すら残さない。予算で切れば exit=124 の失敗として起票され、
+# `scores` はそのまま走る。
+BUDGET_MIN: dict[str, float] = {
+    "pipeline": 240,
+    "scores": 60,
+}
 
 SPEC = bc.BatchSpec(
     name="夜間バッチ",
@@ -83,12 +102,14 @@ def steps_for(python: str) -> tuple[Step, ...]:
     2026-08-20 に `collector.py --incremental` で12日ぶんの欠測を埋めようとして、
     財務だけ通り株価が動かないのを実測した。GHA が回していたのと同じ入口を使う。
     """
-    return (
+    steps = (
         Step("pipeline", (python, "_pipeline_incremental.py"),
              why="XBRL 差分 ＋ マクロ ＋ 市場データ（株価鮮度の担い手・GHA と同じ入口）"),
         Step("scores", (python, "nightly_scores.py"),
              why="sector_ols / macro_enet のスコア更新（producer の永続化）"),
     )
+    # 予算は名前で引く（月次と同じ理由・#530）。入れ忘れは `window_problem` が CI で落とす。
+    return tuple(replace(s, budget_min=BUDGET_MIN.get(s.name)) for s in steps)
 
 
 def heavy_models() -> tuple[str, ...]:

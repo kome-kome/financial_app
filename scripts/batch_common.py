@@ -47,13 +47,36 @@ HEARTBEAT_MARK = "[heartbeat]"
 # 全量を読むと、直結にした意味（数時間ぶんをディスクへ流す）が END 行の瞬間に消える。
 TAIL_BYTES = 8192
 
+# ステップの時間予算を超えたときの exit code（Issue #530）。GNU `timeout` の慣例に合わせる。
+# 既存の 126（ログハンドルが無い）/ 127（起動できない）と衝突しない値を選んでいる。
+TIMEOUT_EXIT = 124
+# 予算超過で kill したあと、子が終わるのを待つ猶予（秒）。ここを待たないとゾンビが残る。
+KILL_GRACE_SEC = 30.0
+# Σ予算と窓の差として最低限空けておく分数（Issue #530）。予算の合計をぴったり窓に
+# 合わせると、起動のオーバーヘッドや1ステップの端数で最後のステップが窓から溢れる。
+WINDOW_MARGIN_MIN = 30.0
+
 
 @dataclass(frozen=True)
 class Step:
-    """1ステップぶんの実行単位。`why` は失敗時のログに出す＝何が止まったかを言葉で残す。"""
+    """1ステップぶんの実行単位。`why` は失敗時のログに出す＝何が止まったかを言葉で残す。
+
+    `budget_min` は**このステップに許す分数**（Issue #530）。None なら無期限。
+
+    予算が要るのは、バッチ全体の窓（タスクスケジューラの `ExecutionTimeLimit`）が
+    **1ステップに食い尽くされうる**から。窓の終わりに来る打ち切りは「失敗」として現れず
+    （タスクスケジューラがプロセスを止めるだけで `record_footprint` も `notify` も走らない）、
+    後ろのステップは走った形跡すら残さずに消える——2026-09-01 の月次で `macro_beta` が
+    16時間を食い、`tune:*` 3本が一度も起動しない、というのが実際に起きようとしていた形
+    （#512 の実測: GHA 116分に対しローカルは741.5分でも未完走）。
+
+    予算で切れば、それは `TIMEOUT_EXIT` を返す**普通の失敗**になる＝足跡・起票の経路に乗り、
+    後続ステップはそのまま走る。
+    """
     name: str
     argv: tuple[str, ...]
     why: str
+    budget_min: Optional[float] = None
 
 
 @dataclass(frozen=True)
@@ -90,6 +113,41 @@ def _proc_tail(proc) -> str:
         return ""
     lines = text.strip().splitlines()
     return lines[-1] if lines else ""
+
+
+def kill_tree(proc, echo=None) -> None:
+    """子を**プロセスツリーごと**終わらせる（Issue #530）。例外は投げない。
+
+    Windows で `proc.kill()` だけでは足りない: venv の `python.exe` は**ランチャースタブ**で、
+    CPU を持つ実体は子 PID の側にいる（#512 の調査でスタブの CPU 0秒を見て「ハングしている」と
+    誤読しかけた実例がある）。スタブだけ殺すと実体が走り続け、予算で切ったつもりの計算が
+    次のステップと CPU を奪い合う。`taskkill /T` でツリーごと落とせば、親の `wait()` も素直に返る。
+
+    POSIX では `terminate()`（SIGTERM）で猶予を与えてから `kill()`。こちらはテストが走る
+    CI（ubuntu）の経路でもある。
+    """
+    def _say(msg: str) -> None:
+        if echo:
+            echo(msg)
+
+    if os.name == "nt":
+        try:
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                           timeout=KILL_GRACE_SEC)
+            return
+        except Exception as e:      # noqa: BLE001 — kill に失敗してもバッチは続ける
+            _say(f"[warn] taskkill に失敗（{e}）。kill() へフォールバックする")
+    try:
+        proc.terminate()
+        proc.wait(timeout=KILL_GRACE_SEC)
+    except subprocess.TimeoutExpired:
+        try:
+            proc.kill()
+        except Exception:           # noqa: BLE001
+            pass
+    except Exception as e:          # noqa: BLE001
+        _say(f"[warn] 子を終了できなかった: {e}")
 
 
 class Runner:
@@ -153,6 +211,12 @@ class Runner:
         （`macro_beta_inference._heartbeat` は NUTS サンプリング中を刻む＝親＝ステップ生存、
         子＝サンプリング生存の2階建て）。**heartbeat は生存を示すが進行を示さない**ので、
         本当に進んでいるかの裏取りは CPU 時間で行う。
+
+        `step.budget_min` があれば**そこで打ち切る**（Issue #530）。待ち時間を
+        `min(heartbeat_sec, 残り予算)` にしてあるので、刻みは保ったまま予算ちょうどで起きる。
+        超過したら `kill_tree` でツリーごと落とし、`TIMEOUT_EXIT` を返す——**バッチ全体の窓を
+        1ステップに食い尽くさせない**ためで、これが無いと窓の終わりにタスクスケジューラが
+        黙ってプロセスを止め、後続ステップは走った形跡すら残さずに消える。
         """
         self.write(f"[{utc_now_iso()}] START {step.name}: {step.why}")
         started = datetime.now(timezone.utc)
@@ -180,14 +244,39 @@ class Runner:
             # 「黙って走らなかった」を検知するためのモジュールが、それ自体を起こす（#521）。
             self.write(f"[{utc_now_iso()}] ERROR {step.name}: 起動できない: {e}")
             return 127
+        # `if step.budget_min` にしない——0 が falsy で「無期限」へ化ける。
+        budget_sec = None if step.budget_min is None else max(step.budget_min, 0.0) * 60.0
+        killed = False
         while True:
+            waited_sec = (datetime.now(timezone.utc) - started).total_seconds()
+            wait_for = self.heartbeat_sec
+            if budget_sec is not None:
+                # 予算ちょうどで起きる。heartbeat の刻みは保ったまま、最後の待ちだけ短くなる。
+                wait_for = min(wait_for, max(budget_sec - waited_sec, 0.0))
             try:
-                returncode = proc.wait(timeout=self.heartbeat_sec)
+                returncode = proc.wait(timeout=wait_for)
                 break
             except subprocess.TimeoutExpired:
-                waited = (datetime.now(timezone.utc) - started).total_seconds() / 60.0
-                self.write(f"{HEARTBEAT_MARK} {step.name} 継続中: 経過 {waited:.0f}分")
+                waited = (datetime.now(timezone.utc) - started).total_seconds()
+                if budget_sec is not None and waited >= budget_sec:
+                    # 打ち切りの行は**この後**（要約を採ったあと）に書く。先に書くと
+                    # `_tail_since` がそれを拾い、END 行の要約が「打ち切った」になって
+                    # **子がどこまで進んでいたか**が消える——一番知りたいのはそちら。
+                    kill_tree(proc, echo=self.write)
+                    killed = True
+                    try:
+                        returncode = proc.wait(timeout=KILL_GRACE_SEC)
+                    except Exception:      # noqa: BLE001 — 反応しない子で END 行を落とさない
+                        returncode = TIMEOUT_EXIT
+                    break
+                self.write(f"{HEARTBEAT_MARK} {step.name} 継続中: 経過 {waited / 60.0:.0f}分")
         tail = self._tail_since(pos) or _proc_tail(proc)
+        if killed:
+            # 打ち切った子の returncode（Windows なら taskkill の 1、POSIX なら -SIGTERM）は
+            # 「なぜ落ちたか」を伝えない。予算超過であることが分かる値へ翻訳する。
+            returncode = TIMEOUT_EXIT
+            self.write(f"[{utc_now_iso()}] TIMEOUT {step.name}: "
+                       f"予算 {step.budget_min:.0f}分を超過したのでツリーごと打ち切った")
         mins = (datetime.now(timezone.utc) - started).total_seconds() / 60.0
         self.write(f"[{utc_now_iso()}] END   {step.name}: exit={returncode} "
                    f"({mins:.1f}分) | {tail[:160]}")
@@ -266,6 +355,19 @@ def issue_body(results: dict[str, int], log: Path, headline: str) -> str:
     lines += [
         "",
         f"失敗したステップ: {', '.join(failed)}",
+    ]
+    # exit code の凡例は**出た値だけ**出す。全部並べると本文が定型文で埋まり、
+    # 「今回どれが起きたのか」が読み取りにくくなる。
+    legend = {
+        TIMEOUT_EXIT: f"{TIMEOUT_EXIT}: ステップの時間予算を超過して打ち切った（#530）。"
+                      "バッチ全体の窓を守るための打ち切りで、後続ステップはそのまま走っている",
+        126: "126: ログハンドルが無い（`Runner` を `with` で使っていない）ため実行しなかった（#521）",
+        127: "127: プロセスを起動できなかった（コマンド・venv・ログハンドルを疑う）",
+    }
+    hits = [legend[c] for c in sorted(set(results.values())) if c in legend]
+    if hits:
+        lines += ["", "exit code:"] + [f"- {h}" for h in hits]
+    lines += [
         "",
         "> 正本はローカル PostgreSQL（#503・ADR-0038）。GHA からは回していないので、",
         "> このバッチが止まると鮮度も止まる（失敗が GitHub 上に現れないことに注意）。",
@@ -339,7 +441,8 @@ def run_batch(spec: BatchSpec, steps: Sequence[Step], hooks: Hooks,
     if args.dry_run:
         print(f"log: {log}")
         for s in selected:
-            print(f"  {s.name}: {' '.join(s.argv)}  # {s.why}")
+            budget = f"[予算 {s.budget_min:.0f}分] " if s.budget_min is not None else "[予算なし] "
+            print(f"  {s.name}: {budget}{' '.join(s.argv)}  # {s.why}")
         print("ドライラン（何も実行していない）")
         return 0
 
@@ -363,6 +466,26 @@ def run_batch(spec: BatchSpec, steps: Sequence[Step], hooks: Hooks,
         runner.write(f"[{utc_now_iso()}] {spec.name}終了")
 
     return sum(1 for c in results.values() if c != 0)
+
+
+def window_problem(steps: Sequence[Step], window_min: float,
+                   margin_min: float = WINDOW_MARGIN_MIN) -> Optional[str]:
+    """ステップ予算がバッチの窓に収まっているか。問題があれば理由の文字列、無ければ None。
+
+    **窓（タスクスケジューラの `ExecutionTimeLimit`）と予算はセットでしか意味を持たない**
+    （Issue #530）。片方だけ動かすと、窓を広げたのに予算が古いまま（＝窓を使い切れない）か、
+    予算を足したのに窓が足りない（＝最後のステップが黙って打ち切られる）になる。**どちらも
+    失敗としては現れない**ので、CI でここを照合する。
+
+    予算の無いステップを許さないのは、1本でも無期限があれば窓の保証がその時点で消えるから。
+    """
+    missing = [s.name for s in steps if s.budget_min is None]
+    if missing:
+        return f"予算の無いステップがある（窓の保証が消える）: {', '.join(missing)}"
+    total = sum(s.budget_min for s in steps)      # type: ignore[misc]
+    if total + margin_min > window_min:
+        return (f"Σ予算 {total:.0f}分 + マージン {margin_min:.0f}分 が窓 {window_min:.0f}分 を超える")
+    return None
 
 
 def models_from_steps(steps: Sequence[Step], flag: str = "--model") -> tuple[str, ...]:

@@ -68,6 +68,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+from dataclasses import replace
 from pathlib import Path
 from typing import Optional, Sequence
 
@@ -89,6 +90,34 @@ TUNE_MATRIX: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     # 空間を張れないため（GHA では n_iter=200 相当で4〜8時間＝6時間上限に収まらなかった）。
     ("macro_gbdt", "random", ("--n-iter", "150")),
 )
+
+# タスクスケジューラの窓（`install_monthly_task.ps1` の既定 `-Hours 16`）。**この値と
+# 下の予算はセットでしか意味を持たない**ので、`tests/test_run_monthly.py` が ps1 側の
+# 既定と突き合わせる（#530）。窓を動かすときは予算も動かすこと。
+WINDOW_MIN = 16 * 60
+
+# ステップごとの時間予算（分・#530）。**Σ + マージン ≤ WINDOW_MIN**。
+#
+# なぜ要るか: 予算が無いと1ステップが窓を食い尽くし、後続は起動すらしない。しかも窓の
+# 終わりの打ち切りは failure として現れない（タスクスケジューラがプロセスを止めるだけで
+# 足跡も起票も走らない）＝**tune×3 が静かに餓死する**。2026-09-01 にそうなる直前だった。
+#
+# 値は GHA 時代の実績から取った（推定ではなく実測）。GHA は実質2コアなので、ローカルが
+# これを超えるならローカル固有の問題を疑う根拠になる:
+#   macro_beta 116分（run 30698937879）/ tune は run 29118260702 のジョブ別で
+#   macro_risk_return 178分・macro_dlm 175分・macro_gbdt 82分 / factor_premia はローカル実測 1.3〜2.6分
+#
+# macro_beta の 180分は「GHA 実績 116分 ＋ 余裕」であって、ローカルの実測ではない
+# （ローカルは741.5分でも未完走・#512）。**#512 が解けるまで毎月ここで落ちる**のは想定内で、
+# 静かに tune が餓死するより起票される失敗の方が良い、という判断（#530）。
+BUDGET_MIN: dict[str, float] = {
+    "vacuum": 45,
+    "factor_premia": 20,
+    "macro_beta": 180,
+    "tune:macro_risk_return": 250,
+    "tune:macro_dlm": 250,
+    "tune:macro_gbdt": 180,
+}
 
 SPEC = bc.BatchSpec(
     name="月次バッチ",
@@ -127,7 +156,10 @@ def steps_for(python: str) -> tuple[Step, ...]:
              "--strategy", strategy, *extra,
              "--objective", "rank_ic", "--persist", "--persist-scores", "--seed", "0"),
             why=f"{model} の best params 探索と mu-hat の永続化（--persist-scores）"))
-    return tuple(steps)
+    # 予算は**名前で引く**（Step の定義に直書きしない）。ステップを足して `BUDGET_MIN` へ
+    # 入れ忘れると `budget_min=None` のまま残り、`window_problem` が CI で落とす（#530）。
+    # 直書きだと「予算を付け忘れた」ことを機械的に検出できない。
+    return tuple(replace(s, budget_min=BUDGET_MIN.get(s.name)) for s in steps)
 
 
 def heavy_models() -> tuple[str, ...]:
