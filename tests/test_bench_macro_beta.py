@@ -107,6 +107,28 @@ class TestExtractSteps:
         assert bmb.summarize_steps(got["steps"])["mean"] is None
 
 
+class TestPickBest:
+    """反復から最速を採る（共有デスクトップの外乱は必ず遅い側へ出る）。"""
+
+    def test_takes_the_fastest_and_keeps_the_spread(self):
+        best = bmb.pick_best([
+            {"seconds": 3.235, "draws": 75},
+            {"seconds": 0.838, "draws": 75},
+            {"seconds": 1.431, "draws": 75},
+        ])
+        assert best["seconds"] == 0.838
+        assert best["repeats"] == 3
+        # ばらつきを捨てない＝大きければ「その測定を信用しない」判断材料になる。
+        assert best["seconds_spread"] == pytest.approx(3.235 / 0.838)
+        assert best["seconds_all"] == [3.235, 0.838, 1.431]
+
+    def test_single_repeat_has_spread_one(self):
+        best = bmb.pick_best([{"seconds": 2.0, "draws": 25}])
+        assert best["seconds"] == 2.0
+        assert best["repeats"] == 1
+        assert best["seconds_spread"] == pytest.approx(1.0)
+
+
 class TestSummarizeSteps:
     def test_max_treedepth_rate(self):
         steps = np.array([1023.0, 1023.0, 7.0, 15.0])
