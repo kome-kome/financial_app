@@ -41,8 +41,8 @@ Render の制約と運用形態に合わせて設計すること。
 
 | JST | タスク | 頻度 | 中身 | 備考 |
 |---|---|---|---|---|
-| **17:20** | `financial_app-nightly`（`run_nightly.ps1` → `scripts/run_nightly.py`） | 毎日 | `_pipeline_incremental.py`（XBRL 差分＋マクロ＋市場データ）→ `nightly_scores.py` | 大引 15:30・J-Quants 四本値 16:30・EDINET 受付終了 17:15 の後（#476 の確定時刻表）。`StartWhenAvailable` で停止していた日は次回起動時に追いつく。上限6時間（最悪 23:20 終了） |
-| **1日 01:00** | `financial_app-monthly`（`run_monthly.ps1` → `scripts/run_monthly.py`） | 毎月 | `_pipeline_vacuum.py` → `recommend_factor_premia.py` → `macro_beta_inference.py` → `hyperparameter_search.py` ×3（M-1/M-3/M-2） | 日次の最悪ケース（23:20）の後で、翌日の日次 17:20 までの**16時間の窓**。上限もその幅（`PT16H`）。GHA 時代の4本（vacuum / tune / macro-beta / factor-premia）の移設先（#504・#290） |
+| **17:20** | `financial_app-nightly`（`run_nightly.ps1` → `scripts/run_nightly.py`） | 毎日 | `_pipeline_incremental.py`（XBRL 差分＋マクロ＋市場データ）→ `nightly_scores.py` | 大引 15:30・J-Quants 四本値 16:30・EDINET 受付終了 17:15 の後（#476 の確定時刻表）。`StartWhenAvailable` で停止していた日は次回起動時に追いつく。上限6時間（最悪 23:20 終了）。**窓はステップ予算へ分割**（pipeline 240分 / scores 60分・#530・ADR-0040）＝超過は `exit=124` で起票され、後続ステップは走る |
+| **1日 01:00** | `financial_app-monthly`（`run_monthly.ps1` → `scripts/run_monthly.py`） | 毎月 | `_pipeline_vacuum.py` → `recommend_factor_premia.py` → `macro_beta_inference.py` → `hyperparameter_search.py` ×3（M-1/M-3/M-2） | 日次の最悪ケース（23:20）の後で、翌日の日次 17:20 までの**16時間の窓**。上限もその幅（`PT16H`）。GHA 時代の4本（vacuum / tune / macro-beta / factor-premia）の移設先（#504・#290）。**窓はステップ予算へ分割**（vacuum 45 / factor_premia 20 / macro_beta 180 / tune 250・250・180 分・Σ925＜960・#530・ADR-0040）。予算が無いと `macro_beta` が窓を食い尽くし `tune×3` が**一度も起動しない**（打ち切りは failure として現れないので気づけない） |
 | 任意（週次を想定） | `scripts/backup_push.py` | 週次 | 17表を `--compress=9` でダンプ → Storage へ | 夜間バッチと**別タスク**にする（遅延が道連れにならない）。実測 37.5MB/世代 |
 
 - **Egress はローカル駆動では発生しない**（ローカル読取は Supabase を1バイトも使わない）。

@@ -344,3 +344,115 @@ class TestRunnerHardening:
             r.run(rn.Step("x", (sys.executable, "-c", child), why="test"))
         assert log.stat().st_size > TAIL_BYTES, "テストが窓を超えていない＝何も検証していない"
         assert "the-true-last-line" in _end_line(log)
+
+
+# ── ステップの時間予算（Issue #530）──────────────────────────────────────────
+#
+# バッチ全体の窓（タスクスケジューラの ExecutionTimeLimit）は **1ステップに食い尽くされうる**。
+# 窓の終わりの打ち切りは「失敗」として現れない——タスクスケジューラがプロセスを止めるだけで
+# `record_footprint` も `notify` も走らず、後続ステップは走った形跡すら残さずに消える。
+# 2026-09-01 の月次で macro_beta が16時間を食い、tune×3 が一度も起動しない直前だった。
+
+class TestStepBudget:
+    def test_over_budget_step_is_killed_and_reported_as_timeout(self, tmp_path):
+        """予算を超えたら打ち切り、`TIMEOUT_EXIT` を返す。**子は本当に死んでいる**。
+
+        sentinel は sleep の**後**に書く。予算で切れているなら永遠に現れない——
+        「exit code だけ 124 になって子は走り続けている」を弾くための観測点で、
+        venv の python.exe がランチャースタブである以上（#512）ここは実物で見るしかない。
+        """
+        import sys
+        from scripts.batch_common import TIMEOUT_EXIT
+        log = tmp_path / "n.log"
+        sentinel = tmp_path / "finished.txt"
+        child = f"import time; time.sleep(30); open({str(sentinel)!r}, 'w').close()"
+        with rn.Runner(log, echo=lambda _: None, heartbeat_sec=0.05) as r:
+            code = r.run(rn.Step("x", (sys.executable, "-c", child),
+                                 why="test", budget_min=0.02))
+        assert code == TIMEOUT_EXIT
+        text = log.read_text(encoding="utf-8")
+        assert "TIMEOUT x" in text, "打ち切ったことがログに残っていない"
+        assert f"END   x: exit={TIMEOUT_EXIT}" in text
+        assert not sentinel.exists(), "予算で切ったはずの子が生き残って走り切っている"
+
+    def test_end_summary_keeps_the_childs_last_progress_not_our_timeout_line(self, tmp_path):
+        """END 行の要約は**子がどこまで進んだか**を残す（打ち切った旨は別行にある）。
+
+        打ち切りの行を先に書くと `_tail_since` がそれを拾い、一番知りたい「子の最終進捗」が
+        END 行から消える。#521 で heartbeat 行を要約に選ばないようにしたのと同じ理由。
+        """
+        import sys
+        log = tmp_path / "n.log"
+        child = "print('reached-phase-3', flush=True); import time; time.sleep(30)"
+        with rn.Runner(log, echo=lambda _: None, heartbeat_sec=0.05) as r:
+            r.run(rn.Step("x", (sys.executable, "-c", child), why="test", budget_min=0.02))
+        assert "reached-phase-3" in _end_line(log), "END 行の要約が子の最終進捗になっていない"
+        assert "TIMEOUT x" in log.read_text(encoding="utf-8"), "打ち切った旨の行が消えている"
+
+    def test_a_step_inside_its_budget_is_untouched(self, tmp_path):
+        """予算内で終わるステップに副作用を出さない（打ち切りログも出さない）。"""
+        import sys
+        log = tmp_path / "n.log"
+        with rn.Runner(log, echo=lambda _: None, heartbeat_sec=30.0) as r:
+            code = r.run(rn.Step("x", (sys.executable, "-c", "print('done')"),
+                                 why="test", budget_min=10))
+        text = log.read_text(encoding="utf-8")
+        assert code == 0
+        assert "TIMEOUT" not in text
+        assert "END   x: exit=0" in text
+
+    def test_no_budget_means_no_deadline(self, tmp_path):
+        """`budget_min=None` は従来どおり無期限（既存の呼び出しを壊さない）。"""
+        import sys
+        log = tmp_path / "n.log"
+        with rn.Runner(log, echo=lambda _: None, heartbeat_sec=0.05) as r:
+            code = r.run(rn.Step("x", (sys.executable, "-c",
+                                       "import time; time.sleep(0.3)"), why="test"))
+        assert code == 0
+        assert "TIMEOUT" not in log.read_text(encoding="utf-8")
+
+    def test_zero_budget_is_not_treated_as_unlimited(self, tmp_path):
+        """0 を falsy 判定で「無期限」へ落とさない（`if step.budget_min` の罠）。"""
+        import sys
+        from scripts.batch_common import TIMEOUT_EXIT
+        log = tmp_path / "n.log"
+        with rn.Runner(log, echo=lambda _: None, heartbeat_sec=0.05) as r:
+            code = r.run(rn.Step("x", (sys.executable, "-c", "import time; time.sleep(30)"),
+                                 why="test", budget_min=0))
+        assert code == TIMEOUT_EXIT
+
+    def test_dry_run_shows_the_budget(self, capsys):
+        """実行計画に予算が出る＝窓の使い方を実行前に確認できる。"""
+        rn.main(["--dry-run"])
+        out = capsys.readouterr().out
+        assert "予算" in out and "pipeline" in out
+
+
+class TestBudgetFitsTheWindow:
+    """**窓と予算はセットでしか意味を持たない。** 片方だけ動かすと静かに壊れる。"""
+
+    def test_every_step_has_a_budget(self):
+        """1本でも無期限があれば窓の保証はその時点で消える。"""
+        missing = [s.name for s in rn.steps_for(sys.executable) if s.budget_min is None]
+        assert not missing, f"予算の無いステップ: {missing}（BUDGET_MIN への追加漏れ）"
+
+    def test_budgets_fit_inside_the_scheduler_window(self):
+        import scripts.batch_common as bc
+        problem = bc.window_problem(rn.steps_for(sys.executable), rn.WINDOW_MIN)
+        assert problem is None, problem
+
+    def test_window_matches_the_installer(self):
+        """`install_nightly_task.ps1` の `ExecutionTimeLimit` と `WINDOW_MIN` を照合する。
+
+        ここを縛らないと、窓を広げたのに予算が古いまま（窓を使い切れない）／予算を足したのに
+        窓が足りない（最後のステップが黙って打ち切られる）が起きる。**どちらも失敗として
+        現れない**ので CI で見るしかない。
+        """
+        import re
+        ps1 = (Path(__file__).resolve().parents[1]
+               / "scripts" / "install_nightly_task.ps1").read_text(encoding="utf-8-sig")
+        m = re.search(r"-ExecutionTimeLimit\s*\(New-TimeSpan\s+-Hours\s+(\d+)\)", ps1)
+        assert m, "install_nightly_task.ps1 から ExecutionTimeLimit を読めない（書式が変わった）"
+        assert int(m.group(1)) * 60 == rn.WINDOW_MIN, (
+            f"ps1 の窓 {m.group(1)}時間 と run_nightly.WINDOW_MIN {rn.WINDOW_MIN}分 が食い違う"
+        )
