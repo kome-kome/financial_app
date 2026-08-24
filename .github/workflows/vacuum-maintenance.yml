@@ -1,5 +1,9 @@
-name: "[定常] DBメンテナンス（VACUUM FULL・週次）"
+name: "[手動] DBメンテナンス（VACUUM FULL・Supabase 断面用）"
 
+# ⛔ **定時実行は停止中**（2026-08-25・#290 / #505）。停止理由・代替経路・復旧条件は下の
+#    `on:` ブロックに書いてある。以下の設計経緯は Supabase が正本だった時代のもので、
+#    **復旧するときに読む記録**として残してある（時刻設計の失敗が2回あるので消さない）。
+#
 # JST 日曜 08:30 = UTC 土曜 23:30
 #
 # stock_price_daily は日次収集のたびに DELETE ベースの trim を行い、
@@ -42,8 +46,20 @@ name: "[定常] DBメンテナンス（VACUUM FULL・週次）"
 # ロック待ちは lock_timeout=90s ＋ 120秒あけて最大3回の再試行で吸収する（最悪 約8分）。
 
 on:
-  schedule:
-    - cron: '30 23 * * 6'   # UTC 23:30 (土) = JST 08:30 (日)
+  # ⛔ 2026-08-25: schedule を停止（#290 / #505・ADR-0038）。**正本がローカル PostgreSQL へ移り、
+  #    Supabase は 2026-08-07 の断面で凍結された**ので、こちらへ書き込む経路そのものが無い＝
+  #    DELETE ベース trim も走らず bloat も増えない。凍結した断面へ毎週 `VACUUM FULL` を
+  #    打ち続けても、初回以降は何も回収しない実行を繰り返すだけになる。
+  #    **代替経路**: ローカル月次バッチ `run_monthly.ps1`（タスクスケジューラ・毎月1日 JST 01:00・
+  #    #504）の先頭ステップ `vacuum` が、同じ `_pipeline_vacuum.py` を**正本に対して**回す
+  #    （2026-08-25 のローカル実測: daily 59→49MB / weekly 188→165MB / DB 840→807MB・計 13.4秒）。
+  #    **復旧条件**: 正本を Supabase へ戻す決定をしたとき、または断面へ書き戻す経路を作ったとき
+  #    （#503 は「作らない」と決めている）。
+  #    **手動で断面を保守したいときは** step env へ `FINAPP_DB_TARGET: prod` を一時的に足すこと。
+  #    既定 local のまま起動すると localhost を見て落ちる——これは事故防止の安全弁であって
+  #    バグではない（`tests/test_db_target.py` が「dispatch 専用に prod を書かない」を強制する）。
+  # schedule:
+  #   - cron: '30 23 * * 6'   # UTC 23:30 (土) = JST 08:30 (日)
   workflow_dispatch:
 
 # 最小権限（GITHUB_TOKEN でリポジトリ書込は不要・収集/保守は Supabase 直結）
@@ -71,9 +87,10 @@ jobs:
       - name: Run VACUUM FULL maintenance
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
-          # 既定は local（#503 で反転）。明示しないと localhost を見て Connection refused（#508）。
-          # DATABASE_URL があるだけでは Supabase へ行かない——向きを決めるのはこの変数だけ。
-          FINAPP_DB_TARGET: prod
+          # **FINAPP_DB_TARGET は書かない**（#290 / #505・2026-08-25）。schedule を止めた手動専用
+          # なので、既定 local が「誤って起動しても localhost で落ちる」安全弁になる（#503）。
+          # 断面を手で保守するときだけ `FINAPP_DB_TARGET: prod` を一時的に足す——常設すると
+          # 安全弁を自分で外すことになる（`tests/test_db_target.py` が常設を禁じている）。
           FINAPP_JOB: vacuum-maintenance          # Egress 台帳の帰属ラベル（#478）
         run: python _pipeline_vacuum.py
 
