@@ -256,9 +256,11 @@ z_metric_j_i: 企業 i の指標 j の候補集団標準化値（±5 クリッ�
       <tr><td><span class="tag tag-red">高収益重視</span></td><td>2.0</td><td>2.0</td><td>—</td><td>1.0</td><td>0.5</td><td>—</td><td>—</td></tr>
     </tbody>
   </table>
+  <p><code>z_eps</code> と <code>z_de_ratio</code> は<strong>どのプリセットも重みを持たないため列を省いた</strong>（<code>METRICS</code> には含まれ、カスタムウェイトでは指定できる）。</p>
   <p><code>gap_ratio</code> は業種別OLS乖離率であり、正値 = 割安の指標として機能する。<strong>Z ではなく生の％だが、同じスコア合成へ入る以上は他指標と同じ断面標準化を通す</strong>——揃えるべきは「VIEW 列かどうか」ではなく「同じ合成へ入るかどうか」。</p>
   <p><code>z_momentum</code> は他指標と異なり financial_metrics VIEW の列ではなく、<code>compute_momentum_z()</code> が実行時に計算する（sell_ranking の <code>_resolve_metric</code> と同じ方式）。12-1モメンタム（直近1ヶ月を除く12ヶ月の log リターン）を候補集団横断で winsorize→Zスコア化する。<strong>算出側で標準化済みなので上の断面標準化は通さない</strong>（二重標準化しない。<code>mu</code> も同じ）。</p>
   <p>上表の4プリセットは <strong>どれも <code>mu</code>（μ̂）重みを持たない</strong>（下記）。</p>
+  <p>この4プリセットは<strong>性能最適ではない</strong>——位置づけと実測値は本節末尾の「限界」を参照。</p>
 
   <h3>μ̂（期待リターン）の opt-in 結線</h3>
   <p><code>mu</code> は M-1〜M-6 が推定する期待リターン μ̂ を買い推奨へ入れる指標で、<code>z_momentum</code> と同じくVIEW外の実行時計算（<code>compute_mu_z()</code>）。読み出しは sell_ranking と同じ producer 契約（<code>read_producer_scores</code>）を流用する。</p>
@@ -268,13 +270,15 @@ z_metric_j_i: 企業 i の指標 j の候補集団標準化値（±5 クリッ�
     <li>μ̂ は週次リターン[小数]で z 指標と2桁スケールが違うため、候補集団内で winsorize→Zスコア化してから加重する。</li>
     <li><strong>バックテストは <code>mu</code> を含む重みを reject する</strong>（producer スコアは最新スナップショット1断面のみで as-of 再現できない）。μ̂ 自体の評価は M-1〜M-6 の OOF バックテストが担う。</li>
   </ul>
-  <p>買い側 rank-IC は M-6 0.1713 &gt; M-2 0.1419 &gt; M-1 0.1142 だが、これは <strong>μ̂ 単体の順位相関</strong>であって合成スコアにおける最適重みではない。既定へ入れるには昇格ゲート（増減どちらの向きも補正後 α を通る実測）が要る（ADR-0030）。</p>
+  <p>買い側 rank-IC は M-6 0.1713 &gt; M-2 0.1419 &gt; M-1 0.1142 だが、これは <strong>μ̂ 単体の順位相関</strong>であって合成スコアにおける最適重みではない。既定へ入れるには昇格ゲート（増減どちらの向きも補正後 α を通る実測）が要る（<strong>ADR-0028 の昇格ゲート</strong>。既定 OFF にした決定そのものは ADR-0030＝ゲートの規則が 0028・現在の状態が 0030 で、この文は両方に依存する）。</p>
 
   <h3>統計的最適化プリセット（Fama-MacBeth 断面回帰）</h3>
   <p>4プリセットは直感的なヒューリスティックだが、「統計的最適化」プリセットのみ Fama &amp; MacBeth (1973) の断面回帰でデータ駆動に推定した重みを使う（<code>recommend_factor_premia.py</code>・<strong>ローカル月次バッチ <code>scripts/run_monthly.py</code> が毎月1日 JST 01:00 に更新</strong>）。月末スナップショットごとに横断面OLS <code>return_i,t+52w = Σ_k b_k,t・z_k,i,t + e_i,t</code> を実行し（母集団・目的変数・foldはM-1/M-2/M-3と共有）、各因子の時系列平均 <code>b_k = mean(b_k,t)</code> をプリセット重みとする。52週先リターンのオーバーラップに起因する自己相関は Newey-West（HAC）標準誤差で補正する。永続化は producer/consumer 分離（バッチ→<code>recommend_factor_premia</code>テーブル→<code>resolve_weights()</code>が読む）。未算出時はバランス型へフォールバックする。<strong>推定時の断面前処理の世代が現在の実装と一致しない永続化行も採らず、同じくバランス型へフォールバックする</strong>（重みの単位は前処理に依存するため。旧単位の重みを新単位の指標へ掛けると実測で rank-IC が負に落ちる）。<code>gap_ratio</code> は sector_ols依存で2025年度以前ほぼ0%充足のため回帰対象から除外し、残り7指標＋z_momentumの重みのみを持つ（実データ検証で判明）。<code>mu</code> も回帰対象外（断面回帰の説明変数は財務・株価由来 factor のみで μ̂ の premium は存在せず、混ざるとプリセットを選んだだけで 400 になる）。</p>
 
   <div class="warn-box">
-    <strong>限界:</strong> 4つのヒューリスティックプリセットのウェイト設定に数学的根拠はない（「統計的最適化」のみFama-MacBeth断面回帰によるデータ駆動）。モデルの有効性はバックテストで検証すること。
+    <strong>限界: 4プリセットは「意味の分かる配分」であって性能最適ではない</strong>（Issue #513）。ウェイトは直感的なヒューリスティックで、rank-IC を目的に推定した値ではない（「統計的最適化」のみ Fama-MacBeth 断面回帰によるデータ駆動）。61期パネルの実測（Issue #509）では <strong>rank-IC が正なのは成長重視（+0.0605）とバランス型（+0.0210）だけ</strong>で、割安重視（−0.0108）・高収益重視（−0.0108）は負だった。<strong>予測力を求めるなら「統計的最適化」</strong>（同じパネルで <strong>+0.0960</strong>）を選ぶ。手動プリセットが担うのは「なぜこの順位になるか」を重みから説明できることで、そこに価値がある。
+    <br><br>
+    ただし<strong>割安重視の rank-IC は重みの 44.4% を測っていない</strong>（<code>gap_ratio</code> 2.0 が Fama-MacBeth のパネルに無い）ので、この数値だけで「割安重視は効かない」と結論しないこと。<strong>モデルの有効性の検証に <code>/api/backtest</code> は使えない</strong>（3/6/12/18/24ヶ月は終端が今日で共通＝独立でなく検定力が無い）。測るなら <code>python -m scripts.preset_ic_gate</code>（期別 rank-IC ＋ Bonferroni 補正）。
   </div>
 
   <div class="refs">
