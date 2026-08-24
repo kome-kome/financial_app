@@ -1,5 +1,12 @@
 """
-GitHub Actions 用・DB メンテナンスパイプライン（週次自動実行向け）。
+DB メンテナンスパイプライン。**定常の起動元はローカル月次バッチ**
+（`scripts/run_monthly.py` の先頭ステップ `vacuum`・毎月1日 JST 01:00・#504/ADR-0040）。
+
+GHA の `vacuum-maintenance.yml`（週次）は **2026-08-25 に schedule 停止**した（#290 / #505・
+ADR-0038 の追補）。正本がローカルへ移り Supabase 断面は 2026-08-07 で凍結された＝書き込みが
+無いので bloat も増えず、毎週 `VACUUM FULL` を打っても初回以降は何も回収しない。yml は断面を
+手で保守するときの口としてだけ残っている。**このファイルの中身は起動元に依存しない**
+（接続先を決めるのは `FINAPP_DB_TARGET`・既定 local）。
 
 `stock_price_daily` は日次収集のたびに古い行を DELETE する
 ローリング trim（database.py:record_prices_batch）を行っており、
@@ -33,11 +40,11 @@ Database Size が 430MB / 500MB (86%) に達した時点で内訳を測ると、
   2. `VACUUM FULL` の対象を `stock_price_weekly` へも広げる（**既に溜まった分を回収する**）
 
 1 だけでは既存の 200,498 行は物理サイズを返さない（通常 VACUUM は死領域をテーブル内で
-再利用するだけ）。2 だけでは翌週また溜まる。**両方要る。**
+再利用するだけ）。2 だけでは次の回までにまた溜まる。**両方要る。**
 
 > per-table 設定を `init_db()` / `_ensure_tables()` へ入れてはいけない。api.py の lifespan が
 > 無条件に実行するため、ローカル API を起動しただけで本番へ不可逆に反映される
-> （`raw_xbrl_json` 削除の前例）。週次で走りログに残るこのファイルが正しい置き場所。
+> （`raw_xbrl_json` 削除の前例）。定期バッチで走りログに残るこのファイルが正しい置き場所。
 """
 import time
 from datetime import datetime
@@ -135,7 +142,7 @@ def _wanted_reloptions() -> set[str]:
 def _tune_autovacuum(conn) -> None:
     """per-table の autovacuum 発火閾値を下げる（冪等）。
 
-    **VACUUM FULL より先に実行する。** ここが効き始めれば次週以降の VACUUM FULL は
+    **VACUUM FULL より先に実行する。** ここが効き始めれば次回以降の VACUUM FULL は
     軽くなる（＝Disk IO を毎週食う構造そのものを畳みにいく）。
 
     既に望みの値なら ALTER を投げない。ALTER TABLE ... SET は同じ値でも成功するが、

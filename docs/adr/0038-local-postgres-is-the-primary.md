@@ -69,6 +69,9 @@ macro-beta-inference / recommend-factor-premia）を停止し、`daily-increment
 残すのは `ci.yml`（pytest）・`vacuum-maintenance`（Supabase の保全）・`egress-health`
 （Render 経由の消費監視）・`notify-failure`（残す4本の失敗検知）。
 
+> **2026-08-25 に `vacuum-maintenance` も止めた**（下の追補・決定3）。定時で生きているのは
+> `egress-health` / `ci` / `notify-failure` の3本。
+
 ローカル側の入口は `scripts/run_nightly.py`（実体）＋ `run_nightly.ps1`（起動口）。
 収集は **`_pipeline_incremental.py`** を呼ぶ——`collector.py --incremental` が回すのは
 `run_full_collection` だけで**株価を1バイトも更新しない**（2026-08-20 に実測）。
@@ -115,6 +118,69 @@ notify-failure でも macro-health でも拾えない。`tests/test_workflow_sch
 レジストリ側も直す**必要がある。それまでは「登録はあるが cron は止まっている」状態である
 ことをここに明記しておく。
 
+## 追補: 断面をどこまで保守するか（2026-08-25・#505 / #290）
+
+反転から数日ぶんの実測が出たので、保留していた2つの判断をここで確定させる。
+
+### 実測: 断面はほとんど読まれていない
+
+反転1日後（2026-08-21）の請求サイクル累計は **409.9MB / 5.00GB（8.0%）**。ローカル台帳
+（`.egress/ledger.jsonl`）のジョブ別内訳では `mirror-final-pull` 152.9MB ＋ `mirror-pull`
+138.5MB ＋ `mirror-sync` 118.2MB ＝ **409.6MB がミラー移行ぶん**で、累計との差は **0.3MB**。
+つまり **Render の閲覧を含めても、移行以外で Supabase を読んでいるものはほぼ無い**。
+反転前が 7.312GB / 5GB（146%・課金制限）だったことと比べると、**Egress は判断材料として
+成立しなくなった**。
+
+### 決定1（#505）: Supabase Postgres は軽くしない
+
+余裕 13MB（実質 430MB > NANO 実効メモリ 408MB）は解消しないまま残すが、**読まれないので
+実害が出ない**。検討した3案のうち:
+
+- **A. 何もしない（採用）** … コストゼロ。物理サイズの頭打ちは必要なときに手動で打つ（決定3）
+- B. `stock_price_daily`（49MB）を落とす … Render の日次ズームを失うのに、430MB > 408MB を
+  解消できる保証が無い。「読まれていないデータを削って、読まれていない DB を速くする」作業
+- C. Render を止める … #423 の選択肢と同じ判断になるので、そちらで決める話
+
+**再検討トリガー**: #423 の結論が「Render を最新に保つ」へ倒れたとき。そのときは
+「Supabase へ書き戻す経路を作らない」（上の決定4）の是非からやり直しになる。
+
+### 決定2（#290）: パーティション化はしない
+
+#290 は「`stock_price_daily` の DELETE ベース trim が btree を bloat させ、500MB 枠を圧迫する」
+問題で、再オープントリガーを **「DB ≥ 430MB でパーティション化へ」** と定めていた。
+**この 430MB は Supabase のストレージ枠に対する値**であって、反転後はどちらの側にも当てはまらない:
+
+- **正本（ローカル）には 500MB の崖が無い**。超えた瞬間 read-only になる、という前提ごと消えた
+- **断面（Supabase）は 2026-08-07 で凍結**＝書き込みが無いので bloat も増えない
+
+よって**トリガーを正本側の数字へ読み替えて延命しない**（ローカルは現在 807MB で、うち
+`legacy_stock_price_history_2026_02` が 478MB。これは別の話として扱う）。bloat 対策は
+per-table の `autovacuum_vacuum_scale_factor = 0.02` ＋ 月次 `VACUUM FULL` で足りる。
+
+### 決定3: VACUUM の担い手はローカル月次1本にする
+
+`vacuum-maintenance.yml`（週次・UTC 土 23:30）の schedule を停止し、`workflow_dispatch` だけ残す。
+凍結した断面へ毎週 `VACUUM FULL` を打っても、初回以降は何も回収しない実行を繰り返すだけになる。
+正本側は `scripts/run_monthly.py` の先頭ステップ `vacuum`（#504・ADR-0040）が同じ
+`_pipeline_vacuum.py` を回す。
+
+**初回のローカル実走（2026-08-25・この ADR を書くにあたって測った）**:
+
+| | before | after | 所要 |
+|---|---|---|---|
+| `stock_price_daily` | 59MB | 49MB | 4.0秒 |
+| `stock_price_weekly` | 188MB | 165MB | 9.4秒 |
+| DB 全体 | 840MB | 807MB | 計 13.4秒 |
+
+**ここで分かったことが1つある**: ローカル正本の2表は `reloptions = null`＝**per-table の
+autovacuum 較正が入っていなかった**。#290 で Supabase へ 2026-08-19 に適用した `ALTER TABLE`
+は**ミラー移行で運ばれず**、クラスタ既定 0.2（130万行の weekly で発火閾値 ≈ 259,558 行）の
+まま5日間動いていた。今回の実走で 0.02 が入った——**「本番へ入れた対処」は正本が移った先へ
+自動的には付いてこない**。
+
+なお月次の予算 `BUDGET_MIN["vacuum"] = 45分` に対し実測は 0.25分だが、**値はここでは動かさない**。
+予算配分は 9/1 の実走で他ステップとまとめて較正する（#532）。
+
 ## Alternatives considered
 
 - **Supabase 正本のまま容量を削る。** `stock_price_daily`（49MB）を削るなどで一時的に余裕は
@@ -129,6 +195,8 @@ notify-failure でも macro-health でも拾えない。`tests/test_workflow_sch
 ## References
 
 - Issue #503（親）／ #500（NANO のメモリ）／ #501（float8 の丸め）／ #477（Egress 超過）
+- Issue #505（断面を軽くするかの判断＝追補の決定1）／ #290（`stock_price_daily` の bloat＝決定2・3）／ #532（月次ステップ予算の実測）
+- [ADR-0040](0040-batch-window-is-split-into-step-budgets.md)（バッチ窓のステップ予算・`vacuum` はその先頭）
 - [ADR-0034](0034-client-side-egress-ledger-and-circuit-breaker.md)（Egress 台帳）
 - [ADR-0035](0035-mirror-endpoints-are-parameterized.md)（ミラーのエンドポイント引数化・**ガードは維持**）
 - [ADR-0036](0036-weekly-prices-incremental-load.md)（週次株価の差分ロード・ローカルでも有効）

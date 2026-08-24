@@ -18,7 +18,7 @@ Render の制約と運用形態に合わせて設計すること。
 | **自動（毎月）** | M-1/M-2/M-3 ハイパーパラメータ探索・永続化 | UTC 16:30（JST 翌01:30）毎月1日（#476） | GitHub Actions `tune-hyperparameters.yml` |
 | **自動（毎月）** | M-1 per-stock 階層マクロβ推論・永続化（producer） | UTC 00:00（JST 09:00）毎月1日（#476） | GitHub Actions `macro-beta-inference.yml` |
 | **自動（毎月）** | recommend Fama-MacBeth ファクタープレミアム推定・永続化（producer） | UTC 22:00（JST 翌07:00）毎月5日（#476） | GitHub Actions `recommend-factor-premia.yml` |
-| **自動（毎週）** | `stock_price_daily` の VACUUM FULL（index bloat 対策） | UTC 23:30・土（JST 08:30・日）※#446 で 22:00 から後ろ倒し＝夜間チェーン終端（実測 最遅 22:37Z）との重なり解消 | GitHub Actions `vacuum-maintenance.yml` |
+| **自動（毎月）** | `stock_price_daily` / `stock_price_weekly` の VACUUM FULL（index bloat 対策・#290） | 毎月1日 JST 01:00 の月次バッチの**先頭ステップ** | ローカル `run_monthly.ps1` → `_pipeline_vacuum.py` |
 | **手動のみ** | 全件収集（全社 × 5年分） | workflow_dispatch で起動 | GitHub Actions `full-pipeline.yml` |
 | **手動のみ** | マクロのみ収集（為替・金利等） | workflow_dispatch で起動 | GitHub Actions `collect-macro.yml` |
 | **手動のみ** | 会社予想開示収集（J-Quants /fins/summary） | workflow_dispatch で起動 | GitHub Actions `collect-disclosures.yml` |
@@ -58,7 +58,6 @@ Render の制約と運用形態に合わせて設計すること。
 | UTC | ワークフロー | 頻度 | 占有（上限まで） | JST | 1回あたり Egress |
 |---|---|---|---|---|---|
 | **21:00** | **`egress-health`** | **毎日** | → 21:10（10分） | **翌06:00** | ほぼ0（`app_settings` 2行＋`pg_database_size` 1行） |
-| 23:30 | `vacuum-maintenance` | 毎週土 | → 24:00 | 日 08:30 | ほぼ0（サーバ内処理） |
 | （push/PR） | `ci.yml` | 随時 | 〜15分 | — | 0（DB へ接続しない） |
 | （失敗時） | `notify-failure` | 随時 | 〜10分 | — | 0 |
 
@@ -70,6 +69,7 @@ Render の制約と運用形態に合わせて設計すること。
 | 00:00 | `macro-beta-inference` | 同上（`macro_beta_loadings` が分岐する） | ローカル月次の `macro_beta` ステップ（#504・毎月1日 JST 01:00） |
 | 16:30 | `tune-hyperparameters` | 同上。M-1/M-2/M-3 の**唯一の自動更新経路**だったので、止めた時点で μ̂ の鮮度も止まる | ローカル月次の `tune:<model>` ステップ（#504・matrix と同じ探索戦略・同じ `--n-iter`） |
 | 22:00 | `recommend-factor-premia` | 同上。#423 子5 で「実行履歴ゼロのまま 37 期の重みで固着」を直した cron なので、**止めれば同じ固着へ戻る** | ローカル月次の `factor_premia` ステップ（#504・先頭に置いて打ち切りに強くしてある） |
+| 土 23:30 | `vacuum-maintenance` | **2026-08-25 に停止**（#290 / #505）。断面は 2026-08-07 で凍結＝書き込みが無いので bloat も増えず、毎週 `VACUUM FULL` を打っても初回以降は何も回収しない | ローカル月次の `vacuum` ステップ（#504・先頭。実測 daily 59→49MB / weekly 188→165MB / 計13.4秒） |
 
 - `nightly-scores` と `macro-health` は `daily-incremental` の `workflow_run` チェーンなので、親を止めれば連動して止まる（yml 側の schedule は元から無い）。
 - `full-pipeline` / `backfill-*` / `collect-interim` / `collect-disclosures` / `collect-macro` は `workflow_dispatch` 専用。放置で害はないが、**手動起動すると Supabase へ書く**＝正本と分岐するので注意。
@@ -124,7 +124,7 @@ python -m scripts.backup_restore --apply --create-schema    # 既定のローカ
 > （月次 毎月1日 JST 01:00）**で、停止と代替の対応は上の「GitHub Actions（#503 で停止したもの）」が
 > 正本。ファイルとしては `workflow_dispatch` の口が生きているが、**GHA からはローカル正本の DB へは
 > 書けない**（書けるのは Supabase 断面だけ＝走らせると正本と分岐する）。定時で生きているのは
-> `egress-health` / `vacuum-maintenance` / `ci` / `notify-failure` の4本。
+> `egress-health` / `ci` / `notify-failure` の**3本**（`vacuum-maintenance` は 2026-08-25 に停止・#290 / #505）。
 
 | カテゴリ | workflow 名 | ファイル | 使うタイミング | 所要時間の目安 |
 |---|---|---|---|---|
@@ -141,7 +141,7 @@ python -m scripts.backup_restore --apply --create-schema    # 既定のローカ
 | `[定常]` | Supabase 枠消費ゲート | `egress-health.yml` | `python -m scripts.check_egress_health`（Issue #478 / #483・[ADR-0037](adr/0037-egress-cycle-budget-is-a-second-axis.md)）が **Egress のサイクル累計**（`app_settings.egress_cycle_bytes`）と **Database Size**（`pg_database_size`）を閾値と突き合わせ、超過なら exit 2 → `notify-failure` が Issue 起票。**毎日 UTC 21:00（JST 06:00）自動**。閾値は Egress 80%（`db_egress.CYCLE_WARN_RATIO`）／DB 85%（`check_egress_health.DB_WARN_RATIO`）で、**DB 側を厳しくしてある**——Egress は超えても翌サイクルで戻るが、Database Size 超過は read-only で収集そのものが止まるため。**DB の判定値は `pg_database_size` で、Usage ページの課金判定値より約 35MB 低く出る**（2026-08-19 実測: Usage 430MB / Infrastructure 409.8MB / `pg_database_size` 395MB）＝閾値 0.90 のままだと Usage 基準で 97% 相当になり手遅れなので 0.85 に置いた。**この3つの数字を混ぜないこと。****`workflow_run` チェーンにせず cron で回すのが要点**：Egress はワークフローの成否と無関係に積み上がり、開発者のローカル CLI からも積まれる（過去2回の超過はどちらもローカル検証の反復が主因）ので「収集が成功した後に見る」では見落とす経路が残る。Management API の PAT は不要（判定材料は DB の中にある＝#483 のブロッカーを迂回）。手動即時実行は `workflow_dispatch`（`warn_only` で常に exit 0） | 〜2分（`timeout-minutes: 10`） |
 | `[定常]` | ワークフロー失敗の自動 Issue 起票 | `notify-failure.yml` | 上記ワークフロー（`ci.yml` を除く全本数・列挙しない設計）＋セルフテストが `failure` または `cancelled` で終わると自動起票（`workflow_run`）。手動起動しない。詳細は下記「ワークフロー失敗の通知」節 | 〜1分 |
 | `[検証]` | notify-failure セルフテスト | `notify-failure-selftest.yml` | `notify-failure.yml` の変更後に発火を実証するための、意図的に失敗するだけのワークフロー（本番データ不使用）。`workflow_dispatch`（`mode=fail`／`mode=cancel`） | 〜1分（cancel は約1分） |
-| `[定常]` | DBメンテナンス（VACUUM FULL・週次） | `vacuum-maintenance.yml` | `stock_price_daily` の DELETE ベース trim による index bloat 対策（Issue #290）。`_pipeline_vacuum.py` が AUTOCOMMIT 接続で **`TARGET_TABLES`（`stock_price_daily` / `stock_price_weekly`）を1表ずつ** `VACUUM FULL` し、前後の容量をログ出力。**2026-08-19 に対象を2表へ拡大し、前段で per-table の autovacuum チューニング（冪等な `ALTER TABLE ... SET (autovacuum_vacuum_scale_factor = 0.02)`）を行うようにした**——`stock_price_weekly`（195MB）に dead tuple が 200,498 行溜まり autovacuum の最終実行が 2026-07-31 で止まっていたが、これは故障ではなく **per-table 設定が無く（`reloptions = null`）クラスタ既定 0.2 が効いて発火閾値 `50 + 0.2 × 1,284,465 = 256,943` 行に一度も届いていなかった**だけ（当時 200,498 行＝その 78%）。**128万行の表に既定のスケール係数 20% が粗すぎる。** 0.02 で閾値は 25,739 行。チューニングだけでは既存の dead は物理サイズを返さず（通常 VACUUM は死領域をテーブル内で再利用するだけ）、VACUUM FULL だけでは翌週また溜まるので**両方要る**。per-table 設定を `init_db()` / `_ensure_tables()` へ入れてはいけない（lifespan が無条件実行するためローカル API 起動だけで本番へ不可逆反映される）。毎週 UTC 23:30・土（JST 08:30・日）自動（#446 で 22:00 から後ろ倒し。**cron の名目時刻ではなくキュー遅延込みの実起動時刻で設計する**——`daily-incremental` は cron UTC 18:00 に対し実起動 19:45Z 前後で、旧設定では夜間チェーン終端と日曜だけ約24分重なっていた）。**#476 で `daily-incremental` が 08:17Z へ前倒しされ、この 22:37Z 前提は解消した**（間隔が大きく開いたので時刻は据え置き＝動かす必然が無いものを動かさない）。手動即時実行は `workflow_dispatch`（ローカル・GitHub Actions 双方で Supabase pooler 経由の正常動作を確認済み・2026-07-12）。**時間帯は #427 で JST 04:00 → 07:00 へ移動**——差分収集（JST 03:00 開始・実測 2h05m〜2h38m）の最中に `VACUUM FULL`（ACCESS EXCLUSIVE ロック）が走っており、ずらす設計意図が成立していなかった。現行チェーンは 03:00 収集 → 最長 05:40 → nightly-scores（`sector_ols` 16分 + M-6・総所要は #443 の初回実走で実測）。**M-6 追加でチェーン後端が伸びるため、日曜だけは VACUUM FULL（07:00）と重なりうる**——ただし `VACUUM FULL` が排他ロックを取るのは `stock_price_daily` のみで、夜間バッチが読むのは `stock_price_weekly`／`financial_metrics` ゆえロック競合はしない（I/O は共有）。実測で 07:00 に食い込むようなら時間帯を再調整する | 数秒〜数分（対象テーブルは実測 ~50MB・42万行） |
+| `[手動]` | DBメンテナンス（VACUUM FULL・Supabase 断面用） | `vacuum-maintenance.yml` | **⛔ 定時実行は 2026-08-25 に停止（#290 / #505・[ADR-0038](adr/0038-local-postgres-is-the-primary.md) の追補）。正本側の担い手はローカル月次バッチの `vacuum` ステップ**（#504）で、この yml は断面を手で保守するときの口としてだけ残る。**起動するときは step env へ `FINAPP_DB_TARGET: prod` を一時的に足すこと**（常設すると「誤起動が localhost で落ちる」安全弁を外すことになり `tests/test_db_target.py` が落ちる）。以下は Supabase が正本だった時代の設計記録＝**復旧するときに読む**。`stock_price_daily` の DELETE ベース trim による index bloat 対策（Issue #290）。`_pipeline_vacuum.py` が AUTOCOMMIT 接続で **`TARGET_TABLES`（`stock_price_daily` / `stock_price_weekly`）を1表ずつ** `VACUUM FULL` し、前後の容量をログ出力。**2026-08-19 に対象を2表へ拡大し、前段で per-table の autovacuum チューニング（冪等な `ALTER TABLE ... SET (autovacuum_vacuum_scale_factor = 0.02)`）を行うようにした**——`stock_price_weekly`（195MB）に dead tuple が 200,498 行溜まり autovacuum の最終実行が 2026-07-31 で止まっていたが、これは故障ではなく **per-table 設定が無く（`reloptions = null`）クラスタ既定 0.2 が効いて発火閾値 `50 + 0.2 × 1,284,465 = 256,943` 行に一度も届いていなかった**だけ（当時 200,498 行＝その 78%）。**128万行の表に既定のスケール係数 20% が粗すぎる。** 0.02 で閾値は 25,739 行。チューニングだけでは既存の dead は物理サイズを返さず（通常 VACUUM は死領域をテーブル内で再利用するだけ）、VACUUM FULL だけでは翌週また溜まるので**両方要る**。per-table 設定を `init_db()` / `_ensure_tables()` へ入れてはいけない（lifespan が無条件実行するためローカル API 起動だけで本番へ不可逆反映される）。毎週 UTC 23:30・土（JST 08:30・日）自動（#446 で 22:00 から後ろ倒し。**cron の名目時刻ではなくキュー遅延込みの実起動時刻で設計する**——`daily-incremental` は cron UTC 18:00 に対し実起動 19:45Z 前後で、旧設定では夜間チェーン終端と日曜だけ約24分重なっていた）。**#476 で `daily-incremental` が 08:17Z へ前倒しされ、この 22:37Z 前提は解消した**（間隔が大きく開いたので時刻は据え置き＝動かす必然が無いものを動かさない）。手動即時実行は `workflow_dispatch`（ローカル・GitHub Actions 双方で Supabase pooler 経由の正常動作を確認済み・2026-07-12）。**時間帯は #427 で JST 04:00 → 07:00 へ移動**——差分収集（JST 03:00 開始・実測 2h05m〜2h38m）の最中に `VACUUM FULL`（ACCESS EXCLUSIVE ロック）が走っており、ずらす設計意図が成立していなかった。現行チェーンは 03:00 収集 → 最長 05:40 → nightly-scores（`sector_ols` 16分 + M-6・総所要は #443 の初回実走で実測）。**M-6 追加でチェーン後端が伸びるため、日曜だけは VACUUM FULL（07:00）と重なりうる**——ただし `VACUUM FULL` が排他ロックを取るのは `stock_price_daily` のみで、夜間バッチが読むのは `stock_price_weekly`／`financial_metrics` ゆえロック競合はしない（I/O は共有）。実測で 07:00 に食い込むようなら時間帯を再調整する | 数秒〜数分（対象テーブルは実測 ~50MB・42万行） |
 
 #### アーカイブ済み（`.github/workflows/old/` 配下・一回性・Actions 対象外）
 
@@ -707,7 +707,7 @@ python -m scripts.mirror_verify --level counts --bytes --warn-only   # 表ごと
 
 旧 `stock_price_history`（日次OHLCV全履歴）が約 359MB / 全体80% を占め、年約220MB で増加して 500MB 上限の主犯だった。**close-only の2本立て**へ移行して恒久対策とする：
 
-- **`stock_price_daily`**：直近 `DAILY_WINDOW_DAYS`（≒6か月）の日次終値のみ。収集のたびにローリング削除（trim）でサイズが頭打ち……のはずだが、DELETE ベースの trim は btree インデックス（`pk_stock_price_daily`/`ix_spd_trade_date`）を bloat させ続け、autovacuum は死領域をテーブル内で再利用するのみでファイルサイズは縮まない（**Issue #290**・実測: 2026-07-09 VACUUM FULL 直後 48MB→3日後 72MB）。週次 `vacuum-maintenance.yml`（VACUUM FULL・毎週自動実行）で物理サイズを頭打ちにする。チャートの日次ズーム・短期バックテスト用。**VACUUM 本体の所要は伸びている**（43〜92MB で 7.6〜10.4秒／2026-07-18〜08-01 → **79MB で 37.4秒**／2026-08-09 手動実行・79MB→49MB・DB 426MB→395MB）。`statement_timeout` は `'0'` にして時間で殺さず、歯止めはワークフローの `timeout-minutes: 30` 側に置く（#471）。
+- **`stock_price_daily`**：直近 `DAILY_WINDOW_DAYS`（≒6か月）の日次終値のみ。収集のたびにローリング削除（trim）でサイズが頭打ち……のはずだが、DELETE ベースの trim は btree インデックス（`pk_stock_price_daily`/`ix_spd_trade_date`）を bloat させ続け、autovacuum は死領域をテーブル内で再利用するのみでファイルサイズは縮まない（**Issue #290**・実測: 2026-07-09 VACUUM FULL 直後 48MB→3日後 72MB）。**月次バッチの `vacuum` ステップ**（`_pipeline_vacuum.py`・毎月1日 JST 01:00・#504）で物理サイズを頭打ちにする（GHA の `vacuum-maintenance.yml` は 2026-08-25 に停止＝正本がローカルへ移り、断面は凍結して bloat が増えないため・#290 / #505）。チャートの日次ズーム・短期バックテスト用。**VACUUM 本体の所要は伸びている**（43〜92MB で 7.6〜10.4秒／2026-07-18〜08-01 → **79MB で 37.4秒**／2026-08-09 手動実行・79MB→49MB・DB 426MB→395MB）。`statement_timeout` は `'0'` にして時間で殺さず、歯止めはワークフローの `timeout-minutes: 30` 側に置く（#471）。
 - **`stock_price_weekly`**：全履歴の週次集約（追記専用・trim しない）。`close_last`＋生集約 `volume_sum`/`turnover_sum`/`n_days` のみ保持し、**VWAP・相対流動性は派生**（保存しない）。チャート全期間・長期バックテスト・将来の予測モデル用。
 - 見通し：5年分 weekly ≈ 145MB、総計 ≈ 285MB / 500MB、+約37MB/年（runway 約6年）。書き込みは単一チョークポイント `record_prices_batch`（daily upsert→触れた週を weekly 再集約→trim）。
 
