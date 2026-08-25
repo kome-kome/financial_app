@@ -110,6 +110,11 @@ WINDOW_MIN = 16 * 60
 # macro_beta の 180分は「GHA 実績 116分 ＋ 余裕」であって、ローカルの実測ではない
 # （ローカルは741.5分でも未完走・#512）。**#512 が解けるまで毎月ここで落ちる**のは想定内で、
 # 静かに tune が餓死するより起票される失敗の方が良い、という判断（#530）。
+#
+# #540（`--max-tree-depth 8,10`）で総 leapfrog 歩数を 37.5% 削ったが、本番規模ローカルは
+# 約20.2時間 → 約12.6時間で**まだ桁が違う**。予算は実測から逆算しない（ADR-0040）ので 180分は
+# 据え置き＝毎月 exit=124 で起票される状態は継続する。窓の問題は #530 / #532 の担当で、
+# #540 は「軌道長のレバーは使い切った」ことを示したに留まる。
 BUDGET_MIN: dict[str, float] = {
     "vacuum": 45,
     "factor_premia": 20,
@@ -146,7 +151,12 @@ def steps_for(python: str) -> tuple[Step, ...]:
              (python, "macro_beta_inference.py",
               "--draws", "800", "--tune", "800", "--target-accept", "0.95",
               "--chains", "2", "--r-hat-threshold", "1.05",
-              "--nuts-sampler", "numpyro", "--init", "adapt_diag"),
+              "--nuts-sampler", "numpyro", "--init", "adapt_diag",
+              # warmup だけ軌道長を 2**8-1 歩へ切る（#540・ADR-0002）。**draws 側は既定 10 の
+              # まま**＝事後分布の探索能力は変えずに総 leapfrog 歩数だけ 37.5% 減らす。
+              # 一律キャップ（--max-tree-depth 8 等）は ESS/歩 では最良に見えるのに
+              # ess_bulk_min が 3.55 まで落ち r_hat が 1.63 になる＝**採ってはいけない**。
+              "--max-tree-depth", "8,10"),
              why="M-1 の入力 macro_beta_loadings（PyMC/NUTS 階層マクロ・ベータ）"),
     ]
     for model, strategy, extra in TUNE_MATRIX:

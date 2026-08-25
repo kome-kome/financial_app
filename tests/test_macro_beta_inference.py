@@ -258,8 +258,11 @@ class TestRunInferenceEndToEnd:
                 assert fname in fmap
         assert result.diagnostics is not None
         assert result.diagnostics["r_hat_max"] is not None
+        # 完全一致で縛る（hyperparams はそのまま macro_beta_meta へ入る＝「どの設定の run か」の
+        # 記録そのもの）。max_tree_depth は #540 で足した枠で、**既定は None＝サンプラー既定**。
         assert result.hyperparams == {"draws": 50, "tune": 50, "target_accept": 0.9, "seed": 0,
-                                      "chains": 2, "nuts_sampler": "pymc", "init": None}
+                                      "chains": 2, "nuts_sampler": "pymc", "init": None,
+                                      "max_tree_depth": None}
 
     def test_commits_before_mcmc_sampling(self, monkeypatch):
         """Issue #269: build_panel直後にdb.commit()し、数時間に及ぶMCMC計算中はトランザクション・
@@ -290,6 +293,82 @@ class TestRunInferenceEndToEnd:
                           macro_names=MACRO_TEST_NAMES, chains=2)
 
         assert committed_before_sample == [True]
+
+
+class TestMaxTreeDepthWiring:
+    """#540: 軌道長の設定が **pm.sample まで実際に届く**こと。
+
+    `nuts={...}` は外部サンプラー（numpyro）経路では黙って捨てられ、逆に
+    `nuts_sampler_kwargs={...}` は純 PyMC 経路で黙って無視される——**どちらも例外も警告も
+    出さない**ので、取り違えると「指定したのに効いていない run」が測定結果に混ざる。
+    格子の結論が本番へ移るかどうかがここに懸かっている。
+    """
+
+    def test_default_none_changes_nothing(self):
+        # 既定では pm.sample へ渡る引数が現状と1バイトも変わらないこと。
+        assert mbi.nuts_depth_kwargs("numpyro") == {}
+        assert mbi.nuts_depth_kwargs(None) == {}
+
+    def test_numpyro_goes_through_nuts_sampler_kwargs(self):
+        got = mbi.nuts_depth_kwargs("numpyro", 8)
+        assert got == {"nuts_sampler_kwargs": {"nuts_kwargs": {"max_tree_depth": 8}}}
+
+    def test_numpyro_tuple_is_passed_through(self):
+        # numpyro は (warmup, sampling) を受ける＝warmup だけ切る案が本番でも指定できる。
+        got = mbi.nuts_depth_kwargs("numpyro", (8, 10))
+        assert got["nuts_sampler_kwargs"]["nuts_kwargs"]["max_tree_depth"] == (8, 10)
+
+    def test_pymc_path_uses_the_step_kwarg(self):
+        assert mbi.nuts_depth_kwargs(None, 8) == {"nuts": {"max_treedepth": 8}}
+        assert mbi.nuts_depth_kwargs("pymc", (8, 10)) == {
+            "nuts": {"early_max_treedepth": 8, "max_treedepth": 10}}
+
+    def test_unknown_sampler_raises_instead_of_dropping(self):
+        with pytest.raises(ValueError):
+            mbi.nuts_depth_kwargs("blackjax", 8)
+
+    @pytest.mark.parametrize("text,want", [("8", 8), ("8,10", (8, 10)), (None, None), ("", None)])
+    def test_cli_string_parsing(self, text, want):
+        assert mbi.parse_max_tree_depth(text) == want
+
+    @pytest.mark.parametrize("bad", ["abc", "0", "21", "7,8,9", "8.5"])
+    def test_cli_string_parsing_rejects_garbage(self, bad):
+        # 黙って既定へ倒すと「指定したのに効いていない run」が測定へ混ざる。
+        with pytest.raises(ValueError):
+            mbi.parse_max_tree_depth(bad)
+
+    def test_run_inference_forwards_it_to_pm_sample_and_hyperparams(self, monkeypatch):
+        """純 PyMC 経路で実際に pm.sample の kwargs に載ることを実行して確かめる。"""
+        pytest.importorskip("pymc")
+        import pymc as pm
+
+        monkeypatch.setattr(
+            mbi, "select_shared_factors",
+            lambda macro, returns, factor_names, max_features: list(
+                range(min(len(factor_names), max_features))),
+        )
+        db, _codes, _sectors = _build_mock_db(n_weeks=100, n_companies=3)
+
+        seen = {}
+        orig_sample = pm.sample
+
+        def _spy_sample(*args, **kwargs):
+            seen.update(kwargs)
+            return orig_sample(*args, **kwargs)
+
+        monkeypatch.setattr(pm, "sample", _spy_sample)
+
+        result = mbi.run_inference(draws=6, tune=6, target_accept=0.9, seed=0, db=db,
+                                   macro_names=MACRO_TEST_NAMES, chains=2, max_tree_depth=3)
+
+        # pm.sample は `target_accept` を**この同じ dict へその場で合流**させる
+        # （mcmc.py: kwargs["nuts"]["target_accept"] = kwargs.pop("target_accept")）。
+        # 両立していること自体が確認事項——`nuts` の中に target_accept を自前で入れると
+        # 「二重指定」で落ちる仕様なので、こちらは max_treedepth だけを渡すのが正しい。
+        assert seen["nuts"]["max_treedepth"] == 3
+        assert seen["nuts"]["target_accept"] == 0.9
+        # 測定条件は DB へも残す（後から「どの設定の run か」を hyperparams で辿れる）。
+        assert result.hyperparams["max_tree_depth"] == 3
 
 
 class TestSummarizeDiagnostics:

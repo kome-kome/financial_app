@@ -18,6 +18,12 @@ name: "[計測] macro_beta の所要（Linux ランナー基準・Issue #512）"
 #   python -m scripts.bench_macro_beta --mode synth --n-stock 250 --tune 200 --draws 50,200 \
 #       --chains 2 --label A-local --out .logs/bench_512.jsonl
 #
+# #540（軌道長の格子）で使うとき: `max_tree_depth` へ 7 / 8 / 8,10 / 9 / 空欄 を入れて1セル1
+# dispatch する（`probe_draws=0` / `draws` は1点）。ローカルは実データ・こちらは合成パネルで
+# 幾何が違うので**絶対値は比較しない**——比べるのは ESS/1e6step の**順位**であって、
+# 一致すれば「軌道長のレバーはプラットフォームに依らない」と言える（#512 でローカルだけの
+# 観測から機構を断定して外した前例がある）。
+#
 # 定期実行はしない（計測は必要なときだけ）。結果は JSONL アーティファクトで持ち帰り、
 # Issue #512 へ表として残す。
 
@@ -48,6 +54,18 @@ on:
         description: "XLA/BLAS のスレッド上限（0=制限なし）"
         required: false
         default: "0"
+      max_tree_depth:
+        description: "NUTS の軌道長上限（#540）。'8' で一律、'8,10' で warmup だけ 8。空欄は numpyro 既定 10（＝現行本番と同一）。ローカル実データの格子と同じ条件を Linux でも取り、結論がプラットフォームに依らないことを確かめるための入力"
+        required: false
+        default: ""
+      seed:
+        description: "乱数シード。**同一条件を別シードで引き直して差がノイズ床を超えるか見る**ために要る（#540 の格子は md=9 と md=10 が同一軌道になった条件で ESS が 6% 振れた＝それ未満の差は読まない）"
+        required: false
+        default: "0"
+      probe_draws:
+        description: "計測前にコンパイル代を先払いする probe の draws 数。2点回帰（--draws を2点）を取るときだけ要る。1点しか測らない格子では 0（tune ぶんの warmup を1本余計に払わない）"
+        required: false
+        default: "5"
       pytensor_cxx:
         description: "off にすると PyTensor の C バックエンドを無効化（PYTENSOR_FLAGS=cxx=）。#512 が起票時に立てた「g++ 不在が主因」仮説を Linux 側で直接反証するための条件"
         required: false
@@ -100,6 +118,9 @@ jobs:
             --chains "${{ github.event.inputs.chains || '2' }}" \
             --target-accept "${{ github.event.inputs.target_accept || '0.95' }}" \
             --threads "${{ github.event.inputs.threads || '0' }}" \
+            --max-tree-depth "${{ github.event.inputs.max_tree_depth || '' }}" \
+            --probe-draws "${{ github.event.inputs.probe_draws || '5' }}" \
+            --seed "${{ github.event.inputs.seed || '0' }}" \
             --nuts-sampler numpyro \
             --init adapt_diag \
             --label "${{ github.event.inputs.label || 'B-gha' }}" \
