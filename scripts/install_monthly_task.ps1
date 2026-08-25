@@ -11,6 +11,9 @@
     既定の起動は「毎月1日 JST 01:00」。日次バッチ（JST 17:20 開始・上限6時間＝最悪 23:20 終了）
     の後ろで、翌日の日次 17:20 までに16時間の窓が空く。
 
+    **管理者権限（昇格）が必要。** LogonType S4U で登録するため、非昇格だと
+    Register-ScheduledTask が HRESULT 0x80070005（Access is denied）で落ちる（#515）。
+
     ExecutionTimeLimit は既定16時間＝その窓の幅そのもの。GHA 時代の timeout を直列に足すと
     最大22時間（tune 300+355+300 ＋ macro-beta 340 ＋ premia 20 分）だが、GHA ランナーは
     実質2コアでローカルは6コアあるため実測はこれより短くなる見込み。**打ち切られても
@@ -63,6 +66,17 @@ if ($Unregister) {
 
 if (-not (Test-Path $script)) {
     Write-Host "run_monthly.ps1 が見つかりません: $script" -ForegroundColor Red
+    exit 1
+}
+
+# S4U での登録には昇格が要る。非昇格だと Register-ScheduledTask が
+# HRESULT 0x80070005（Access is denied）で落ちる（2026-08-25 実測）。ここで止めないと
+# CIM の生エラーが出るだけで「何が足りないのか」が読めない。
+$isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
+    [Security.Principal.WindowsBuiltInRole]::Administrator)
+if (-not $isAdmin) {
+    Write-Host "管理者権限で実行してください（LogonType S4U の登録には昇格が必要）" -ForegroundColor Red
+    Write-Host "  例: Start-Process powershell -Verb RunAs -ArgumentList '-NoProfile','-File','$PSCommandPath'" -ForegroundColor Cyan
     exit 1
 }
 

@@ -14,6 +14,9 @@
     -StartWhenAvailable（既定オン）で「予定時刻に実行できなかったぶんは次の起動後すぐ」に回す。
     PC がスリープ・停止していた日を翌起動時に追いつかせるためで、**ノート運用ではここが効く**。
 
+    **管理者権限（昇格）が必要。** LogonType S4U で登録するため、非昇格だと
+    Register-ScheduledTask が HRESULT 0x80070005（Access is denied）で落ちる（#515）。
+
 .PARAMETER Time
     起動時刻（既定 17:20）。
 
@@ -48,6 +51,17 @@ if ($Unregister) {
 
 if (-not (Test-Path $script)) {
     Write-Host "run_nightly.ps1 が見つかりません: $script" -ForegroundColor Red
+    exit 1
+}
+
+# S4U での登録には昇格が要る。非昇格だと Register-ScheduledTask が
+# HRESULT 0x80070005（Access is denied）で落ちる（2026-08-25 実測）。ここで止めないと
+# CIM の生エラーが出るだけで「何が足りないのか」が読めない。
+$isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
+    [Security.Principal.WindowsBuiltInRole]::Administrator)
+if (-not $isAdmin) {
+    Write-Host "管理者権限で実行してください（LogonType S4U の登録には昇格が必要）" -ForegroundColor Red
+    Write-Host "  例: Start-Process powershell -Verb RunAs -ArgumentList '-NoProfile','-File','$PSCommandPath'" -ForegroundColor Cyan
     exit 1
 }
 
