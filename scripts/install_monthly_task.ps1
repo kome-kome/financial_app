@@ -179,11 +179,17 @@ $limit = $check.Task.Settings.ExecutionTimeLimit
 $swa   = $check.Task.Settings.StartWhenAvailable
 $days  = $check.Task.Triggers.CalendarTrigger.ScheduleByMonth.DaysOfMonth.Day
 $logon = $check.Task.Principals.Principal.LogonType
-if ($null -eq $info.NextRunTime) { Write-Host "登録されたが次回実行時刻が無い（トリガ不正）" -ForegroundColor Red; exit 1 }
-if ("$days" -ne "$Day")          { Write-Host "月次トリガの日が $days になっている（期待 $Day）" -ForegroundColor Red; exit 1 }
-if ($limit -ne "PT${Hours}H")    { Write-Host "ExecutionTimeLimit が $limit（期待 PT${Hours}H）" -ForegroundColor Red; exit 1 }
-if ($swa -ne "true")             { Write-Host "StartWhenAvailable が乗っていない＝見逃した月を追いつけない" -ForegroundColor Red; exit 1 }
-if ($logon -ne "S4U")            { Write-Host "LogonType が $logon（期待 S4U）＝対話コンソールに巻き込まれる形のまま" -ForegroundColor Red; exit 1 }
+# RunLevel は既定（LeastPrivilege）のとき Windows が XML から要素ごと省略する＝**空が正常**。
+# -ne "LeastPrivilege" で見ると正しい登録を弾くので、昇格側だけを弾く。ここを見るのは、
+# リポジトリがユーザー書き込み可能な場所にあるため、HighestAvailable になると
+# 「誰でも書き換えられるスクリプトが毎月 admin で走る」形になるから。
+$runlevel = $check.Task.Principals.Principal.RunLevel
+if ($null -eq $info.NextRunTime)      { Write-Host "登録されたが次回実行時刻が無い（トリガ不正）" -ForegroundColor Red; exit 1 }
+if ("$days" -ne "$Day")               { Write-Host "月次トリガの日が $days になっている（期待 $Day）" -ForegroundColor Red; exit 1 }
+if ($limit -ne "PT${Hours}H")         { Write-Host "ExecutionTimeLimit が $limit（期待 PT${Hours}H）" -ForegroundColor Red; exit 1 }
+if ($swa -ne "true")                  { Write-Host "StartWhenAvailable が乗っていない＝見逃した月を追いつけない" -ForegroundColor Red; exit 1 }
+if ($logon -ne "S4U")                 { Write-Host "LogonType が $logon（期待 S4U）＝対話コンソールに巻き込まれる形のまま" -ForegroundColor Red; exit 1 }
+if ($runlevel -eq "HighestAvailable") { Write-Host "RunLevel が HighestAvailable＝月次バッチが管理者権限で走る形になっている" -ForegroundColor Red; exit 1 }
 
 Write-Host "登録しました: $TaskName（毎月 $Day 日 $Time・上限 $Hours 時間・LogonType=S4U）" -ForegroundColor Green
 Write-Host "  次回  : $($info.NextRunTime)" -ForegroundColor Cyan

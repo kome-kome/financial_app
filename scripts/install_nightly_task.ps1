@@ -104,9 +104,15 @@ $info = Get-ScheduledTaskInfo -TaskName $TaskName -ErrorAction Stop
 [xml]$check = Export-ScheduledTask -TaskName $TaskName
 $logon = $check.Task.Principals.Principal.LogonType
 $swa   = $check.Task.Settings.StartWhenAvailable
-if ($null -eq $info.NextRunTime) { Write-Host "登録されたが次回実行時刻が無い（トリガ不正）" -ForegroundColor Red; exit 1 }
-if ($logon -ne "S4U")            { Write-Host "LogonType が $logon（期待 S4U）＝対話コンソールに巻き込まれる形のまま" -ForegroundColor Red; exit 1 }
-if ($swa -ne "true")             { Write-Host "StartWhenAvailable が乗っていない＝見逃した日を追いつけない" -ForegroundColor Red; exit 1 }
+# RunLevel は既定（LeastPrivilege）のとき Windows が XML から要素ごと省略する＝**空が正常**。
+# -ne "LeastPrivilege" で見ると正しい登録を弾くので、昇格側だけを弾く。ここを見るのは、
+# リポジトリがユーザー書き込み可能な場所にあるため、HighestAvailable になると
+# 「誰でも書き換えられるスクリプトが毎晩 admin で走る」形になるから。
+$runlevel = $check.Task.Principals.Principal.RunLevel
+if ($null -eq $info.NextRunTime)      { Write-Host "登録されたが次回実行時刻が無い（トリガ不正）" -ForegroundColor Red; exit 1 }
+if ($logon -ne "S4U")                 { Write-Host "LogonType が $logon（期待 S4U）＝対話コンソールに巻き込まれる形のまま" -ForegroundColor Red; exit 1 }
+if ($swa -ne "true")                  { Write-Host "StartWhenAvailable が乗っていない＝見逃した日を追いつけない" -ForegroundColor Red; exit 1 }
+if ($runlevel -eq "HighestAvailable") { Write-Host "RunLevel が HighestAvailable＝夜間バッチが管理者権限で走る形になっている" -ForegroundColor Red; exit 1 }
 
 Write-Host "登録しました: $TaskName（毎日 $Time・LogonType=S4U）" -ForegroundColor Green
 Write-Host "  次回  : $($info.NextRunTime)" -ForegroundColor Cyan
