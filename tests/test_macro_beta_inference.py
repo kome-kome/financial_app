@@ -217,9 +217,15 @@ class TestBuildHierarchicalModel:
             idata = pymc.sample(draws=50, tune=50, chains=2, target_accept=0.9,
                                random_seed=0, progressbar=False)
 
-        assert "beta" in idata.posterior
-        assert idata.posterior["beta"].shape[-2:] == (n_stock, n_factor)
-        assert "mu_sector" in idata.posterior
+        # #541: beta / mu_sector は Deterministic ではないのでトレースに載らない。
+        # ここが載る側に戻ったら約584MB の常駐が復活しているということ。
+        assert "beta" not in idata.posterior
+        assert "mu_sector" not in idata.posterior
+
+        # 代わりに再構成の材料（自由 RV）が揃っていること。
+        for name in ("beta_raw", "sigma_stock", "mu_universe", "mu_sector_raw", "sigma_sector"):
+            assert name in idata.posterior, name
+        assert idata.posterior["beta_raw"].shape[-2:] == (n_stock, n_factor)
 
 
 class TestRunInferenceEndToEnd:
@@ -351,6 +357,134 @@ class TestSummarizeDiagnostics:
         a = summarize_diagnostics(self._idata(az, seed=1))
         b = summarize_diagnostics(self._idata(az, seed=2))
         assert a["r_hat_max"] != b["r_hat_max"]
+
+
+def _raw_idata(az, seed=0, n_chains=4, n_draws=120, n_stock=7, n_sector=3, n_factor=2):
+    """beta を載せず、再構成の材料（自由 RV）だけを持つ合成 idata を返す（#541）。
+
+    dims を明示するのが要点。az.from_dict は省略すると `beta_raw_dim_0` のような自動名を
+    付けるため、本番同様の `stock`/`factor`/`sector` にしておかないと `.isel(stock=...)` も
+    `post.sizes["stock"]` も効かない。
+
+    チェーンごとに平均をずらして r_hat > 1 を確実に作る（全チェーン同分布だと r_hat≈1.00 に
+    張り付き、経路間の一致を見ても何も検証できない）。
+    """
+    rng = np.random.default_rng(seed)
+    off = np.linspace(0.0, 0.25, n_chains).reshape(n_chains, 1, 1)
+    posterior = {
+        "mu_universe":   rng.normal(size=(n_chains, n_draws, n_factor)) + off,
+        "sigma_sector":  np.abs(rng.normal(size=(n_chains, n_draws, n_factor))) + 0.1,
+        "mu_sector_raw": rng.normal(size=(n_chains, n_draws, n_sector, n_factor)) + off[:, :, :, None],
+        "sigma_stock":   np.abs(rng.normal(size=(n_chains, n_draws, n_factor))) + 0.1,
+        "beta_raw":      rng.normal(size=(n_chains, n_draws, n_stock, n_factor)) + off[:, :, :, None],
+        "alpha":         rng.normal(size=(n_chains, n_draws, n_stock)) + off,
+    }
+    coords = {"stock": list(range(n_stock)), "sector": list(range(n_sector)),
+              "factor": list(range(n_factor))}
+    dims = {"mu_universe": ["factor"], "sigma_sector": ["factor"], "sigma_stock": ["factor"],
+            "mu_sector_raw": ["sector", "factor"], "beta_raw": ["stock", "factor"],
+            "alpha": ["stock"]}
+    sample_stats = {"diverging": np.zeros((n_chains, n_draws), dtype=bool)}
+    idata = az.from_dict(posterior=posterior, sample_stats=sample_stats,
+                         coords=coords, dims=dims)
+    sector_idx = np.array([i % n_sector for i in range(n_stock)])
+    return idata, sector_idx
+
+
+def _naive_beta(post, sector_idx):
+    """チャンク分割を使わずに beta 全体を素朴に組む（比較用の参照実装）。"""
+    mu_sector = (post["mu_universe"].values[:, :, None, :]
+                 + post["mu_sector_raw"].values * post["sigma_sector"].values[:, :, None, :])
+    return (mu_sector[:, :, np.asarray(sector_idx), :]
+            + post["beta_raw"].values * post["sigma_stock"].values[:, :, None, :])
+
+
+class TestReconstructBeta:
+    """#541: beta をトレースへ載せずに自由 RV から組み直す。
+
+    再構成が厳密でないと、posterior を削った瞬間に macro_beta_loadings が静かに変わる。
+    素朴な全体計算を参照実装として突き合わせる。
+    """
+
+    def test_chunk_matches_naive_full_reconstruction(self):
+        az = pytest.importorskip("arviz")
+        idata, sector_idx = _raw_idata(az)
+        post = idata.posterior
+        expected = _naive_beta(post, sector_idx)
+
+        n_stock = post.sizes["stock"]
+        got = np.concatenate(
+            [mbi._reconstruct_beta_chunk(post, sector_idx, lo, min(lo + 3, n_stock))
+             for lo in range(0, n_stock, 3)],
+            axis=2,
+        )
+        np.testing.assert_allclose(got, expected, rtol=1e-12, atol=0)
+
+    def test_chunk_boundary_not_a_divisor_of_n_stock(self):
+        """n_stock がチャンク幅の倍数でないとき、末尾の端数が落ちないこと。"""
+        az = pytest.importorskip("arviz")
+        idata, sector_idx = _raw_idata(az, n_stock=7)   # 7 は 3 の倍数ではない
+        post = idata.posterior
+        last = mbi._reconstruct_beta_chunk(post, sector_idx, 6, 7)
+        assert last.shape[2] == 1
+        np.testing.assert_allclose(last[:, :, 0, :],
+                                   _naive_beta(post, sector_idx)[:, :, 6, :],
+                                   rtol=1e-12, atol=0)
+
+    def test_summarize_uses_reconstruction_and_matches_direct_beta(self, monkeypatch):
+        """summarize の mean/sd が「beta を直接持っていた頃」と一致すること。
+
+        sd は ddof=0（xarray の .std(dim=...) と numpy の既定が揃っている）。事後平均から
+        組み直すのでは駄目な理由もここで効く——sigma_stock が確率変数なので
+        mean(beta_raw * sigma_stock) ≠ mean(beta_raw) * mean(sigma_stock)。
+        """
+        az = pytest.importorskip("arviz")
+        monkeypatch.setattr(mbi, "BETA_CHUNK_STOCKS", 3)   # 境界跨ぎを強制
+        idata, sector_idx = _raw_idata(az)
+        beta = _naive_beta(idata.posterior, sector_idx)
+        macro_sel = np.random.default_rng(0).normal(size=(40, 2))
+        codes = [f"E{i:05d}" for i in range(idata.posterior.sizes["stock"])]
+
+        res = mbi.summarize(idata, ["f0", "f1"], macro_sel, codes, sector_idx)
+
+        expected_mean = beta.mean(axis=(0, 1))
+        expected_sd = beta.std(axis=(0, 1))
+        for i, code in enumerate(codes):
+            for j, f in enumerate(["f0", "f1"]):
+                m, s = res.loadings[code][f]
+                assert m == pytest.approx(float(expected_mean[i, j]), rel=1e-12)
+                assert s == pytest.approx(float(expected_sd[i, j]), rel=1e-12)
+
+
+class TestDiagnosticsGateUnchanged:
+    """#541: 診断ゲートの意味が変わっていないこと。
+
+    persist_allowed の strict 1.01 は **beta の r_hat** に対して較正された値。beta_raw で
+    代用すると non-centered の raw パラメータは混合が良いぶん r_hat が小さく出て、ゲートが
+    黙って緩くなる。チャンク経路が「beta を直接持っていた頃」と同じ値を返すことを確かめる。
+    """
+
+    def test_chunked_path_equals_direct_beta_path(self, monkeypatch):
+        az = pytest.importorskip("arviz")
+        monkeypatch.setattr(mbi, "BETA_CHUNK_STOCKS", 3)   # 境界跨ぎを強制
+        idata, sector_idx = _raw_idata(az)
+
+        # 「beta を Deterministic で持っていた頃」の idata を組み直して参照にする。
+        beta = _naive_beta(idata.posterior, sector_idx)
+        direct = az.from_dict(
+            posterior={"beta": beta,
+                       "alpha": idata.posterior["alpha"].values,
+                       "mu_universe": idata.posterior["mu_universe"].values},
+            sample_stats={"diverging": idata.sample_stats["diverging"].values},
+        )
+
+        got = summarize_diagnostics(idata, sector_idx)
+        want = summarize_diagnostics(direct)
+
+        assert got["r_hat_max"] == pytest.approx(want["r_hat_max"], rel=1e-12)
+        assert got["ess_bulk_min"] == pytest.approx(want["ess_bulk_min"], rel=1e-12)
+        assert got["ess_tail_min"] == pytest.approx(want["ess_tail_min"], rel=1e-12)
+        assert got["n_divergences"] == want["n_divergences"]
 
 
 class TestPersistGate:

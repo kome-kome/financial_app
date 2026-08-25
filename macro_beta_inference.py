@@ -44,6 +44,14 @@ logger = logging.getLogger("macro_beta_inference")
 # （3時間で36行）」の折り合い。短くしても NUTS の中身は分からないので細かくする意味がない。
 HEARTBEAT_SEC = 300.0
 
+# beta を事後再構成するときの銘柄チャンク幅（#541）。beta は自由 RV から一意に組み直せる
+# ので**トレースには載せない**が、mean/sd も r_hat も draw ごとの値が要るため、どこかで
+# 一度は (chain, draw, stock, factor) を作る必要がある。全銘柄まとめて作ると、削減した
+# はずの約584MB がそのまま戻る——だから銘柄方向へ刻む。
+# 1チャンクの実体は chain × draw × 256 × n_factor × 8B ＝ 2×800×256×25×8 ≒ 82MB、
+# 4chains×1000draws でも約205MB。この幅なら常駐の山を作らない。
+BETA_CHUNK_STOCKS = 256
+
 
 @contextlib.contextmanager
 def _heartbeat(what: str, interval: float = HEARTBEAT_SEC):
@@ -241,10 +249,15 @@ def build_hierarchical_model(returns: np.ndarray, macro: np.ndarray,
         alpha[i]            ~ Normal(0, 1)                                        # 銘柄切片
         r[obs] ~ Normal(alpha[stock] + sum_f beta[stock,f]*macro[obs,f], sigma_obs)
 
-    non-centered 化（offset×scale の Deterministic 合成）は funnel（漏斗状の事後分布）に
-    起因する発散遷移を抑え、小 n（実効サンプル一桁／銘柄）での NUTS 収束を改善する
-    （Betancourt & Girolami 2013・Neal's funnel）。beta/mu_sector は Deterministic のため
-    idata.posterior からそのまま参照可能（summarize() は変更不要）。
+    non-centered 化（offset×scale の合成）は funnel（漏斗状の事後分布）に起因する発散遷移を
+    抑え、小 n（実効サンプル一桁／銘柄）での NUTS 収束を改善する（Betancourt & Girolami
+    2013・Neal's funnel）。
+
+    **beta / mu_sector は Deterministic にしない**（#541）。Deterministic はトレースへ全 draw
+    保存されるため、本番規模（3,800銘柄・draws 800・chains 2）で beta 単体 約584MB を常駐
+    させていた。両者は自由 RV（mu_universe / mu_sector_raw / sigma_sector / beta_raw /
+    sigma_stock）から一意に再構成できるので、posterior には載せず必要時に組み直す
+    （`_reconstruct_beta_chunk`）。**確率構造は変わっていない**＝統計的な変更ではない。
     """
     import pymc as pm  # 遅延 import（本番ランタイムからの誤 import 事故を防ぐ）
 
@@ -257,15 +270,12 @@ def build_hierarchical_model(returns: np.ndarray, macro: np.ndarray,
         mu_universe = pm.Normal("mu_universe", 0.0, 1.0, dims="factor")
         sigma_sector = pm.HalfNormal("sigma_sector", 1.0, dims="factor")
         mu_sector_raw = pm.Normal("mu_sector_raw", 0.0, 1.0, dims=("sector", "factor"))
-        mu_sector = pm.Deterministic(
-            "mu_sector", mu_universe + mu_sector_raw * sigma_sector, dims=("sector", "factor")
-        )
+        # 素の式（Deterministic にしない）。ここを Deterministic に戻すと #541 の常駐が復活する。
+        mu_sector = mu_universe + mu_sector_raw * sigma_sector
 
         sigma_stock = pm.HalfNormal("sigma_stock", 1.0, dims="factor")
         beta_raw = pm.Normal("beta_raw", 0.0, 1.0, dims=("stock", "factor"))
-        beta = pm.Deterministic(
-            "beta", mu_sector[sector_idx] + beta_raw * sigma_stock, dims=("stock", "factor")
-        )
+        beta = mu_sector[sector_idx] + beta_raw * sigma_stock
         alpha = pm.Normal("alpha", 0.0, 1.0, dims="stock")
 
         macro_data = pm.Data("macro", macro)
@@ -340,7 +350,7 @@ def run_inference(draws: int = 1000, tune: int = 1000, target_accept: float = 0.
         idata = pm.sample(**sample_kwargs)
     logger.info("サンプリング完了: %.1f分", (_time.monotonic() - sampling_started) / 60.0)
 
-    diagnostics = summarize_diagnostics(idata)
+    diagnostics = summarize_diagnostics(idata, sector_idx)
     if diagnostics.get("r_hat_max") is not None and diagnostics["r_hat_max"] > 1.01:
         logger.warning(
             "収束診断: r_hat_max=%.4f が ADR-0002 検証基準（<1.01）を超過。"
@@ -348,7 +358,7 @@ def run_inference(draws: int = 1000, tune: int = 1000, target_accept: float = 0.
             diagnostics["r_hat_max"], diagnostics.get("ess_bulk_min"), diagnostics.get("n_divergences"),
         )
 
-    result = summarize(idata, selected, macro_sel, edinet_codes)
+    result = summarize(idata, selected, macro_sel, edinet_codes, sector_idx)
     if not result.run_id:
         result.run_id = datetime.now(timezone.utc).strftime("mb_%Y%m%dT%H%M%SZ")
     if not result.snapshot_date:
@@ -359,7 +369,40 @@ def run_inference(draws: int = 1000, tune: int = 1000, target_accept: float = 0.
     return result
 
 
-def summarize_diagnostics(idata) -> dict:
+def _reconstruct_mu_sector(post) -> np.ndarray:
+    """posterior の自由 RV から mu_sector を組み直す → (chain, draw, sector, factor)。
+
+    実体は 2×800×34×25×8B ≒ 11MB と小さいので銘柄チャンクの外で1度だけ作る
+    （チャンクごとに作り直すと同じ計算を n_stock/256 回繰り返すことになる）。
+    """
+    mu_universe = post["mu_universe"].values          # (chain, draw, factor)
+    mu_sector_raw = post["mu_sector_raw"].values      # (chain, draw, sector, factor)
+    sigma_sector = post["sigma_sector"].values        # (chain, draw, factor)
+    return mu_universe[:, :, None, :] + mu_sector_raw * sigma_sector[:, :, None, :]
+
+
+def _reconstruct_beta_chunk(post, sector_idx, lo: int, hi: int,
+                            mu_sector: np.ndarray | None = None) -> np.ndarray:
+    """beta[:, :, lo:hi, :] を自由 RV から再構成する → (chain, draw, hi-lo, factor)。
+
+    beta[i, f] = mu_sector[sector(i), f] + beta_raw[i, f] * sigma_stock[f]
+
+    **draw ごとに組む必要がある**。sigma_stock は確率変数なので
+    mean(beta_raw * sigma_stock) ≠ mean(beta_raw) * mean(sigma_stock)——事後平均から
+    組み直しても正しい beta の平均にはならず、SD に至っては全く別物になる。
+
+    beta_raw は (chain, draw, n_stock, factor) と大きいので、`.values` を取る前に
+    `.isel` で銘柄方向を切る（全体を実体化させない）。
+    """
+    if mu_sector is None:
+        mu_sector = _reconstruct_mu_sector(post)
+    sector_idx = np.asarray(sector_idx)
+    beta_raw = post["beta_raw"].isel(stock=slice(lo, hi)).values   # (chain, draw, hi-lo, factor)
+    sigma_stock = post["sigma_stock"].values                       # (chain, draw, factor)
+    return mu_sector[:, :, sector_idx[lo:hi], :] + beta_raw * sigma_stock[:, :, None, :]
+
+
+def summarize_diagnostics(idata, sector_idx=None) -> dict:
     """r_hat・ESS の収束診断サマリ（ADR-0002 検証基準: r_hat<1.01・ESS 十分性・発散遷移数）。
 
     `round_to="none"` は必須（Issue #356）。az.summary は round_to 省略時、列ごとに固定桁で
@@ -374,26 +417,84 @@ def summarize_diagnostics(idata) -> dict:
 
     生値を返すことで、ゲート判定と収束改善の実測（experiment_pooled_rhat.py）の双方が
     ADR-0002 の基準どおりの精度で機能する。
+
+    sector_idx（#541）
+    ------------------
+    beta は posterior に載らなくなったので、診断も再構成して取る。**ゲートの意味を一切
+    変えないこと**が要件——`persist_allowed` の strict 1.01 は beta の r_hat に対して
+    較正された値であり、代わりに beta_raw を見ると non-centered の raw パラメータは混合が
+    良いぶん r_hat が小さく出て**ゲートが黙って緩くなる**。
+
+    r_hat・ESS はスカラーパラメータごとに独立に計算されるため、銘柄チャンクへ分割して
+    max/min を取っても全体と厳密に一致する。これが分割してよいことの根拠。
+
+    sector_idx=None のときは posterior の beta を直接読む従来経路。合成 idata に beta を
+    直接注入するテスト（#356 の arviz 丸め回帰検知）はこちらを通る。
     """
     import arviz as az
 
-    summ = az.summary(idata, var_names=["beta", "alpha", "mu_universe"], kind="diagnostics",
-                      round_to="none")
     diverging = idata.sample_stats.get("diverging") if hasattr(idata, "sample_stats") else None
+    n_div = int(diverging.sum()) if diverging is not None else None
+
+    if sector_idx is None:
+        summ = az.summary(idata, var_names=["beta", "alpha", "mu_universe"], kind="diagnostics",
+                          round_to="none")
+        r_hat_max, ess_bulk_min, ess_tail_min = (
+            float(summ["r_hat"].max()), float(summ["ess_bulk"].min()), float(summ["ess_tail"].min()),
+        )
+    else:
+        post = idata.posterior
+        summ = az.summary(idata, var_names=["alpha", "mu_universe"], kind="diagnostics",
+                          round_to="none")
+        r_hat_max = float(summ["r_hat"].max())
+        ess_bulk_min = float(summ["ess_bulk"].min())
+        ess_tail_min = float(summ["ess_tail"].min())
+
+        n_stock = post.sizes["stock"]
+        mu_sector = _reconstruct_mu_sector(post)
+        for lo in range(0, n_stock, BETA_CHUNK_STOCKS):
+            hi = min(lo + BETA_CHUNK_STOCKS, n_stock)
+            chunk = _reconstruct_beta_chunk(post, sector_idx, lo, hi, mu_sector=mu_sector)
+            csumm = az.summary(az.from_dict(posterior={"beta": chunk}), kind="diagnostics",
+                               round_to="none")
+            r_hat_max = max(r_hat_max, float(csumm["r_hat"].max()))
+            ess_bulk_min = min(ess_bulk_min, float(csumm["ess_bulk"].min()))
+            ess_tail_min = min(ess_tail_min, float(csumm["ess_tail"].min()))
+
     return {
-        "r_hat_max":     float(summ["r_hat"].max()),
-        "ess_bulk_min":  float(summ["ess_bulk"].min()),
-        "ess_tail_min":  float(summ["ess_tail"].min()),
-        "n_divergences": int(diverging.sum()) if diverging is not None else None,
+        "r_hat_max":     r_hat_max,
+        "ess_bulk_min":  ess_bulk_min,
+        "ess_tail_min":  ess_tail_min,
+        "n_divergences": n_div,
     }
 
 
 def summarize(idata, selected: list[str], macro_sel: np.ndarray,
-              edinet_codes: list[str]) -> InferenceResult:
-    """事後分布から per-stock ローディング平均・SE と Sigma_macro を抽出する。"""
+              edinet_codes: list[str], sector_idx=None) -> InferenceResult:
+    """事後分布から per-stock ローディング平均・SE と Sigma_macro を抽出する。
+
+    sector_idx を渡すと beta を自由 RV から再構成する（#541・posterior に載らないため）。
+    銘柄チャンクごとに mean/sd を確定させて捨てるので、(chain, draw, n_stock, factor) を
+    一度に実体化しない——ここでまとめて作ると削減した約584MB がそのまま戻る。
+
+    sector_idx=None は posterior に beta がある場合の従来経路。
+    """
     post = idata.posterior
-    beta_mean = post["beta"].mean(dim=("chain", "draw")).values   # (n_stock, n_factor)
-    beta_sd = post["beta"].std(dim=("chain", "draw")).values
+    if sector_idx is None:
+        beta_mean = post["beta"].mean(dim=("chain", "draw")).values   # (n_stock, n_factor)
+        beta_sd = post["beta"].std(dim=("chain", "draw")).values
+    else:
+        n_stock = post.sizes["stock"]
+        n_factor = post.sizes["factor"]
+        beta_mean = np.empty((n_stock, n_factor))
+        beta_sd = np.empty((n_stock, n_factor))
+        mu_sector = _reconstruct_mu_sector(post)
+        for lo in range(0, n_stock, BETA_CHUNK_STOCKS):
+            hi = min(lo + BETA_CHUNK_STOCKS, n_stock)
+            chunk = _reconstruct_beta_chunk(post, sector_idx, lo, hi, mu_sector=mu_sector)
+            # ddof は xarray の .std(dim=...) と揃えて 0（numpy の既定と同じ）。
+            beta_mean[lo:hi] = chunk.mean(axis=(0, 1))
+            beta_sd[lo:hi] = chunk.std(axis=(0, 1))
     alpha_mean = post["alpha"].mean(dim=("chain", "draw")).values
     alpha_sd = post["alpha"].std(dim=("chain", "draw")).values
 

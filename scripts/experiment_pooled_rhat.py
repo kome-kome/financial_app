@@ -85,12 +85,17 @@ CHAINS_PER_RUN = 2          # 1ランナーに収まる固定値（chains=4 は 
 
 # ── プール集計（純ロジック・MCMC 不要＝高速テスト可能）────────────────────────────
 
-def pool_and_diagnose(idatas: list) -> list[dict]:
+def pool_and_diagnose(idatas: list, sector_idx=None) -> list[dict]:
     """k=1..K で先頭 k 個の idata を chain 次元で連結し、r_hat 等の傾向表を返す。
 
     az.concat(..., dim="chain") は reset_dim=True（既定）で chain 座標を 0..2k-1 へ振り直す
     ため、別 run（それぞれ chain=[0,1]）を素直に積み上げて 2k チェーンにできる。診断計算は
     production の summarize_diagnostics をそのまま再利用する（r_hat_max/ess_bulk_min/n_divergences）。
+
+    sector_idx は build_hierarchical_model へ渡したものをそのまま渡す（#541）。beta は
+    posterior に載らなくなったため、診断側で自由 RV から再構成する必要がある。**省略すると
+    「beta が無い」で落ちる**——ここで本番と同じ量（beta の r_hat）を見続けることが、
+    STRICT_GATE=1.01 の較正を実験側でも保つ条件。
     """
     import arviz as az
 
@@ -99,7 +104,7 @@ def pool_and_diagnose(idatas: list) -> list[dict]:
     rows: list[dict] = []
     for k in range(1, len(idatas) + 1):
         pooled = idatas[0] if k == 1 else az.concat(idatas[:k], dim="chain")
-        diag = summarize_diagnostics(pooled)
+        diag = summarize_diagnostics(pooled, sector_idx)
         rows.append({
             "n_runs": k,
             "n_chains": int(pooled.posterior.sizes["chain"]),
@@ -284,7 +289,7 @@ def main() -> None:
         target_accept=args.target_accept, nuts_sampler=args.nuts_sampler,
         init=args.init, base_seed=args.base_seed,
     )
-    rows = pool_and_diagnose(idatas)
+    rows = pool_and_diagnose(idatas, sector_idx)
     print_report(rows, selected)
 
 

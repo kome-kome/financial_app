@@ -94,7 +94,16 @@ accepted（2026-06-21・**設計決定**）→ **実装・デプロイ完了（2
 いずれもばらつきの範囲で、主因ではない。**両プラットフォームで `steps/draw` が 1023
 （`max_tree_depth=10` の上限）に張り付いている**ことと、`beta` / `mu_sector` が
 `pm.Deterministic` ＝ トレース保存で本番 posterior が約1.2GB になることが、それぞれ別の
-レバーとして残る（#540 / #541）。計測の手順と落とし穴は [GOTCHAS.md](../GOTCHAS.md) を参照。
+レバーとして残った（#540 / #541）。計測の手順と落とし穴は [GOTCHAS.md](../GOTCHAS.md) を参照。
+
+**#541 は解消済み（2026-08-25）**: `beta` / `mu_sector` の `pm.Deterministic` を外し、
+自由 RV（`mu_universe` / `mu_sector_raw` / `sigma_sector` / `beta_raw` / `sigma_stock`）から
+事後に再構成する方式へ変えた（`macro_beta_inference._reconstruct_beta_chunk`）。**確率構造は
+不変＝統計的な変更ではない**ため本 ADR の設計判断は変わらない。収束診断も同じ `beta` に対して
+計算し続ける（銘柄チャンクへ分割し r_hat は max・ESS は min を累積。スカラーパラメータごとに
+独立な統計量なので全体と厳密に一致する）——**strict 1.01 のゲートは `beta` の r_hat に対して
+較正された値**であり、代わりに `beta_raw` を見るとゲートが黙って緩くなるため。残るレバーは
+#540。
 
 ## Context
 
