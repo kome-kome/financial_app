@@ -59,6 +59,14 @@ $action = New-ScheduledTaskAction -Execute "powershell.exe" `
 
 $trigger = New-ScheduledTaskTrigger -Daily -At $Time
 
+# S4U（Service For User）… 既定の InteractiveToken だと対話セッションに紐づくため、
+# 対話コンソール側の CTRL_C 相当に巻き込まれて 0xC000013A（STATUS_CONTROL_C_EXIT）で
+# 即死しうる（#515・2026-08-21 にログ0バイトで実測）。S4U はセッション0で走り、
+# パスワードも保存しない。**副作用として環境が対話セッションと変わる**ので、
+# 初回は .logs のログ先頭で venv・作業ディレクトリ・DB 接続先を必ず確認すること。
+$principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" `
+    -LogonType S4U -RunLevel Limited
+
 # StartWhenAvailable: 見逃した回を次の起動後に実行する（スリープ・停止した日の追いつき）
 # DontStopIfGoingOnBatteries / AllowStartIfOnBatteries: ノートでも走らせる
 # ExecutionTimeLimit: 差分収集は実測 2h11m 級。6時間で打ち切る（GHA の timeout と同じ考え方）
@@ -69,10 +77,25 @@ $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable `
     -MultipleInstances IgnoreNew
 
 Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger `
-    -Settings $settings -Description "financial_app ローカル夜間バッチ（#503・正本=ローカルPG）" `
+    -Settings $settings -Principal $principal `
+    -Description "financial_app ローカル夜間バッチ（#503・正本=ローカルPG）" `
     -Force | Out-Null
 
-Write-Host "登録しました: $TaskName（毎日 $Time）" -ForegroundColor Green
+# **登録できたことを確かめてから成功を出す。** ScheduledTasks の cmdlet は失敗しても
+# 非終了エラーで返すため、確認せずに Write-Host すると「登録しました」と嘘をつく
+# （install_monthly_task.ps1 の実装で実際に嘘をついた）。DB 書き込みを直接クエリで
+# 検証するのと同じ話。S4U は「バッチ ジョブとしてログオン」権限を要求するので、
+# ここで LogonType を見ないと権限不足に登録時点で気づけない。
+$info = Get-ScheduledTaskInfo -TaskName $TaskName -ErrorAction Stop
+[xml]$check = Export-ScheduledTask -TaskName $TaskName
+$logon = $check.Task.Principals.Principal.LogonType
+$swa   = $check.Task.Settings.StartWhenAvailable
+if ($null -eq $info.NextRunTime) { Write-Host "登録されたが次回実行時刻が無い（トリガ不正）" -ForegroundColor Red; exit 1 }
+if ($logon -ne "S4U")            { Write-Host "LogonType が $logon（期待 S4U）＝対話コンソールに巻き込まれる形のまま" -ForegroundColor Red; exit 1 }
+if ($swa -ne "true")             { Write-Host "StartWhenAvailable が乗っていない＝見逃した日を追いつけない" -ForegroundColor Red; exit 1 }
+
+Write-Host "登録しました: $TaskName（毎日 $Time・LogonType=S4U）" -ForegroundColor Green
+Write-Host "  次回  : $($info.NextRunTime)" -ForegroundColor Cyan
 Write-Host "  確認  : Get-ScheduledTask -TaskName $TaskName" -ForegroundColor Cyan
 Write-Host "  即実行: Start-ScheduledTask -TaskName $TaskName" -ForegroundColor Cyan
 Write-Host "  ログ  : .logs ディレクトリの nightly_YYYYMMDD.log" -ForegroundColor Cyan

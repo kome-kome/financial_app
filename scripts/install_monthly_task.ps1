@@ -101,6 +101,10 @@ $monthsXml = ($months | ForEach-Object { "          <$_ />" }) -join "`n"
 #   月次は1か月に1度しか機会が無いので、ここが無いと丸ごと1か月固着する。
 # ExecutionTimeLimit: 日次の開始（翌 17:20）に食い込まないための窓（既定16時間）。
 # MultipleInstancesPolicy IgnoreNew: 前回ぶんが走っている間に次が重ならないようにする。
+# LogonType S4U: 既定の InteractiveToken だと対話セッションに紐づくため、対話コンソール側の
+#   CTRL_C 相当に巻き込まれて 0xC000013A（STATUS_CONTROL_C_EXIT）で即死しうる（#515）。
+#   S4U はセッション0で走りパスワードも保存しない。**環境が対話セッションと変わる**ので、
+#   初回は .logs のログ先頭で venv・作業ディレクトリ・DB 接続先を必ず確認すること。
 $xml = @"
 <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <RegistrationInfo>
@@ -122,7 +126,8 @@ $monthsXml
   </Triggers>
   <Principals>
     <Principal id="Author">
-      <LogonType>InteractiveToken</LogonType>
+      <UserId>$env:USERDOMAIN\$env:USERNAME</UserId>
+      <LogonType>S4U</LogonType>
       <RunLevel>LeastPrivilege</RunLevel>
     </Principal>
   </Principals>
@@ -159,12 +164,14 @@ $info = Get-ScheduledTaskInfo -TaskName $TaskName -ErrorAction Stop
 $limit = $check.Task.Settings.ExecutionTimeLimit
 $swa   = $check.Task.Settings.StartWhenAvailable
 $days  = $check.Task.Triggers.CalendarTrigger.ScheduleByMonth.DaysOfMonth.Day
+$logon = $check.Task.Principals.Principal.LogonType
 if ($null -eq $info.NextRunTime) { Write-Host "登録されたが次回実行時刻が無い（トリガ不正）" -ForegroundColor Red; exit 1 }
 if ("$days" -ne "$Day")          { Write-Host "月次トリガの日が $days になっている（期待 $Day）" -ForegroundColor Red; exit 1 }
 if ($limit -ne "PT${Hours}H")    { Write-Host "ExecutionTimeLimit が $limit（期待 PT${Hours}H）" -ForegroundColor Red; exit 1 }
 if ($swa -ne "true")             { Write-Host "StartWhenAvailable が乗っていない＝見逃した月を追いつけない" -ForegroundColor Red; exit 1 }
+if ($logon -ne "S4U")            { Write-Host "LogonType が $logon（期待 S4U）＝対話コンソールに巻き込まれる形のまま" -ForegroundColor Red; exit 1 }
 
-Write-Host "登録しました: $TaskName（毎月 $Day 日 $Time・上限 $Hours 時間）" -ForegroundColor Green
+Write-Host "登録しました: $TaskName（毎月 $Day 日 $Time・上限 $Hours 時間・LogonType=S4U）" -ForegroundColor Green
 Write-Host "  次回  : $($info.NextRunTime)" -ForegroundColor Cyan
 Write-Host "  確認  : Get-ScheduledTask -TaskName $TaskName" -ForegroundColor Cyan
 Write-Host "  即実行: Start-ScheduledTask -TaskName $TaskName" -ForegroundColor Cyan
