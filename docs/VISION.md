@@ -42,7 +42,7 @@
 
 ### 実装済み（中期完了）
 - **おすすめ銘柄の提示機能** ✅ — `total_return` プラグイン（EPS/BPS/DPS[円/株]→株価OLS、期待リターンランキング）
-- **毎日の自動データ更新** ✅ — GitHub Actions `daily-incremental.yml` で毎日自動収集
+- **毎日の自動データ更新** ✅ — ローカルのタスクスケジューラ（`run_nightly.ps1`・JST 17:20）で毎日自動収集。GitHub Actions の cron は #503 で全停止
 - **認証機能の追加** ✅ — HttpOnly Cookie + CSRF Double-Submit（Tier3-3）
 - **分析手法のプラグイン化** ✅ — `plugins/` ディレクトリ、自動検出方式
 - **外部サーバーへのデプロイ** ✅ — **Render にデプロイ済み**（[docs/DEPLOYMENT.md](DEPLOYMENT.md) 参照）。DB は Supabase PostgreSQL
@@ -63,12 +63,13 @@
 |---|---|---|
 | **認証なし** | ✅ 解決 | HttpOnly Cookie + CSRF Double-Submit（Tier3-3、`APP_PASSWORD` で有効化） |
 | **CORS 全許可** | ✅ 解決 | `ALLOWED_ORIGIN` 環境変数で制限。Render ダッシュボードで設定 |
-| **自動更新の仕組み** | ✅ 解決 | GitHub Actions `daily-incremental.yml` で毎日自動収集（Render 側スケジューラは廃止） |
+| **自動更新の仕組み** | ✅ 解決 | ローカルのタスクスケジューラ（日次 `run_nightly.ps1` / 月次 `run_monthly.ps1`）。GitHub Actions の cron は #503 で全停止 |
 | **環境分離** | ✅ 解決 | Render 環境変数 + `.env` ローカル開発のみ |
-| **DB が接続先固定前提** | ✅ 解決 | `DATABASE_URL` 環境変数で制御 → Supabase に接続 |
+| **DB が接続先固定前提** | ✅ 解決 | `FINAPP_DB_TARGET`（既定 `local`）で制御。`prod` を明示するのは `render.yaml` の1箇所だけ |
 | **EDINET / J-Quants API キー** | ✅ 解決 | Render の環境変数（`sync: false`）で管理 |
-| **アイドル時のスピンダウン** | ✅ 許容（回避はしない） | 自動収集は GitHub Actions に移行済みで、Render の停止は収集に無影響。UI 初回アクセスのコールドスタート（実測 73 秒）は許容する設計 |
-| **DB バックアップ運用** | 🔄 未対応 | Supabase は自動バックアップ機能あり、運用ポリシー未確定 |
+| **アイドル時のスピンダウン** | ✅ 許容（回避はしない） | 収集はローカルで回るため Render の停止は収集に無影響。UI 初回アクセスのコールドスタート（実測 73 秒）は許容する設計 |
+| **DB バックアップ運用** | ✅ 解決 | `scripts/backup_push.py` で Supabase Storage へ世代管理（実測 37.5MB/世代）、復元は `scripts/backup_restore.py`（#503 Phase 3） |
+| **外出先で最新ランキングが見えない** | ⚠️ 受け入れ | 正本がローカルにある以上、Render が見せるのは 2026-08-07 の凍結断面。Supabase の Postgres へ書き戻す経路は作らない（#500 の OOM 再発を避けるため・ADR-0038）。最新を見るにはローカルで `uvicorn` を起動する（#423） |
 
 ---
 
