@@ -146,8 +146,41 @@ def ess_table(records: list) -> str:
                                     c.get("chains"), c.get("tune"), c.get("draws_list"),
                                     c.get("panel_stamp")))
     lines.append("primary metric = ESS/1e6step (time-free; local us/step drifts 2.4x by hour)")
+    lines.append("gate stats = r_hat_max <= 1.05 and ess_MIN (median can look healthy while the "
+                 "min collapses: md=8 gave ess_med 821.6 with ess_min 3.55 / r_hat 1.6347)")
+    note = regime_note(records)
+    if note:
+        lines.append(note)
     lines.append("=" * len(header))
     return chr(10).join(lines)
+
+
+def regime_note(records: list) -> str:
+    """**このパネルが #540 の対象 regime に居るか**を判定して警告を返す（居るなら空文字）。
+
+    #540 の前提は「全 draw が `max_tree_depth` の上限に張り付いている」こと。**上限が最も緩い
+    セル**（＝現行設定に相当）の `td_rate` が 1.000 を割っていたら、その軌道は U ターンで自然に
+    止まっており、上限はそもそも律速ではない——そこで測った順位は本番へ移らない。
+
+    2026-08-25 に実際に踏んだ: 実データを 250銘柄へ間引くと `select_shared_factors` が 5因子
+    しか選ばず、md=9/10 の `td_rate` が 0.000（軌道長 255 で自然停止）になった。表は何事も
+    無かったように並ぶので、**警告が無ければ間違った regime の数字をそのまま ADR へ書いていた**。
+    """
+    worst = None
+    for rec in records:
+        for run in rec.get("runs") or []:
+            st = run.get("steps") or {}
+            cap, rate = st.get("cap_steps"), st.get("max_treedepth_rate")
+            if cap is None or rate is None:
+                continue
+            if worst is None or cap > worst[0]:
+                worst = (cap, rate, rec.get("label"))
+    if worst is None or worst[1] >= 1.0:
+        return ""
+    return ("WARNING: 最も緩い上限のセル（{0} / cap={1} 歩）で td_rate={2:.3f} < 1.000 ＝ 軌道は "
+            "U ターンで自然停止しており上限は律速ではない。**このパネルは #540 が対象とする "
+            "「上限に張り付く」regime に居ない**＝ここでの順位は本番へ移らない（銘柄数・因子数を "
+            "上げて td_rate が 1.000 へ戻る規模で測り直すこと）").format(worst[2], worst[0], worst[1])
 
 
 VIEWS = {"cost": cost_table, "ess": ess_table}

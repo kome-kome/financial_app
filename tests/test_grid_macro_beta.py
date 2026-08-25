@@ -174,3 +174,57 @@ class TestReport:
         text = gmb.report(_jsonl(tmp_path, [_record()]))
         assert "ESS/1e6step" in text
         assert "primary metric" in text
+
+
+class TestRegimeNote:
+    """**測った regime が #540 の対象かどうか**の警告（`bench_macro_beta_report.regime_note`）。
+
+    表の一部なのでここで縛る。2026-08-25 に実際に踏んだ罠——実データを 250銘柄へ間引くと
+    `select_shared_factors` が 5因子しか選ばず、md=9/10 の `td_rate` が 0.000（軌道長 255 で
+    自然停止）になった。**#540 の前提「1023 に張り付く」が成り立っていない**のに、表は何事も
+    無かったように並ぶ。警告が無ければ間違った regime の数字をそのまま ADR へ書いていた。
+    """
+
+    def _run(self, cap, rate):
+        return {"draws": 400, "seconds": 1.0, "n_divergences": 0, "total_steps": 1000,
+                "steps": {"mean": 255.0, "max_treedepth_rate": rate, "cap_steps": cap},
+                "ess": {"r_hat_max": 1.02, "ess_bulk_min": 100.0, "ess_bulk_p10": 200.0,
+                        "ess_bulk_median": 500.0, "ess_tail_min": 150.0, "n_params": 10}}
+
+    def _rec(self, label, cap, rate):
+        return {"label": label, "config": {"max_tree_depth": cap}, "panel": {},
+                "runs": [self._run(cap, rate)]}
+
+    def test_silent_when_the_loosest_cap_is_pinned(self):
+        from scripts.bench_macro_beta_report import regime_note
+        records = [self._rec("md8", 255, 1.0), self._rec("md10", 1023, 1.0)]
+        assert regime_note(records) == ""
+
+    def test_warns_when_the_loosest_cap_is_not_binding(self):
+        from scripts.bench_macro_beta_report import regime_note
+        # 緩い方（cap=1023）が張り付いていない＝上限は律速ではない＝#540 の regime ではない。
+        records = [self._rec("md8", 255, 1.0), self._rec("md10", 1023, 0.0)]
+        note = regime_note(records)
+        assert "regime に居ない" in note
+        assert "md10" in note
+
+    def test_judges_by_the_loosest_cap_not_the_tightest(self):
+        from scripts.bench_macro_beta_report import regime_note
+        # 厳しい方が張り付くのは当たり前（cap が小さいのだから）。判定に使ってはいけない。
+        records = [self._rec("md7", 127, 1.0), self._rec("md10", 1023, 0.0)]
+        assert regime_note(records) != ""
+        records = [self._rec("md7", 127, 0.0), self._rec("md10", 1023, 1.0)]
+        assert regime_note(records) == ""
+
+    def test_missing_measurements_do_not_produce_a_false_all_clear(self):
+        from scripts.bench_macro_beta_report import regime_note
+        # 測れていないものを「問題なし」と読ませない（空文字＝判定不能も同じ扱いだが、
+        # 表には td_rate が n/a として並ぶので人が気づける）。
+        rec = self._rec("x", None, None)
+        rec["runs"][0]["steps"] = {"mean": None, "max_treedepth_rate": None, "cap_steps": None}
+        assert regime_note([rec]) == ""
+
+    def test_report_embeds_the_warning(self, tmp_path):
+        rec = _record()
+        rec["runs"][0]["steps"] = {"mean": 255.0, "max_treedepth_rate": 0.0, "cap_steps": 1023}
+        assert "regime に居ない" in gmb.report(_jsonl(tmp_path, [rec]))

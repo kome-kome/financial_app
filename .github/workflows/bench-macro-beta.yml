@@ -58,6 +58,10 @@ on:
         description: "NUTS の軌道長上限（#540）。'8' で一律、'8,10' で warmup だけ 8。空欄は numpyro 既定 10（＝現行本番と同一）。ローカル実データの格子と同じ条件を Linux でも取り、結論がプラットフォームに依らないことを確かめるための入力"
         required: false
         default: ""
+      seed:
+        description: "乱数シード。**同一条件を別シードで引き直して差がノイズ床を超えるか見る**ために要る（#540 の格子は md=9 と md=10 が同一軌道になった条件で ESS が 6% 振れた＝それ未満の差は読まない）"
+        required: false
+        default: "0"
       probe_draws:
         description: "計測前にコンパイル代を先払いする probe の draws 数。2点回帰（--draws を2点）を取るときだけ要る。1点しか測らない格子では 0（tune ぶんの warmup を1本余計に払わない）"
         required: false
@@ -116,6 +120,7 @@ jobs:
             --threads "${{ github.event.inputs.threads || '0' }}" \
             --max-tree-depth "${{ github.event.inputs.max_tree_depth || '' }}" \
             --probe-draws "${{ github.event.inputs.probe_draws || '5' }}" \
+            --seed "${{ github.event.inputs.seed || '0' }}" \
             --nuts-sampler numpyro \
             --init adapt_diag \
             --label "${{ github.event.inputs.label || 'B-gha' }}" \
