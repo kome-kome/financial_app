@@ -26,6 +26,24 @@ Issue #512 は「pytensor が g++ 不在で Python フォールバック」と�
 3. `sample_stats` から **leapfrog 歩数**・step_size・発散・max treedepth 到達率
 4. 導出値: us/leapfrog-step、steps/draw、n_obs で正規化した us/step/obs
 5. 環境指紋（jax/デバイス数/x64/pytensor.cxx/floatX/CPU/メモリ/XLA_FLAGS）
+6. **統計効率**（#540）: `beta` の ESS_bulk（min / p10 / median）と r_hat_max を生値で。
+   主指標は **ESS / leapfrog 歩** ＝ 時間を含まない量
+
+軌道長を測るときの指標（Issue #540）
+-----------------------------------
+`max_tree_depth` を下げれば1 draw は安くなるが軌道が切られて ESS が落ちる。**wall time で比べては
+いけない**——ローカルの us/step は時間帯で 2.4倍振れる（GOTCHAS）ので、数時間かかる格子を所要で
+並べるとドリフトがそのまま格子の差に化ける。
+
+そこで主指標は **`ESS_bulk / total_leapfrog_steps`（ESS/歩）** とする。
+`ESS/秒 = (ESS/歩) × (歩/秒)` で、`歩/秒` はマシンとパネルの性質であって `max_tree_depth` の
+関数ではない。時間を含まない ESS/歩 で順位を付ければドリフトが順位に混入しない。`ESS/秒` は
+本番所要の見積りに要るので従指標として併記する。
+
+ESS は **`beta` に対して**取る（`alpha` / `mu_universe` も混ぜる）。本番ゲート `persist_allowed` の
+r_hat は `beta` に対して較正された値であり、`beta_raw` で代用すると黙って緩くなる（ADR-0002 の
+#541 節）。なお #541 以降 `beta` は `pm.Deterministic` ではなく posterior に載っていないので、
+`az.ess(idata, var_names=["beta"])` は動かない——自由 RV から再構成する（`diagnose`）。
 
 実行例（必ず -m 形式・feedback_scripts_dir_needs_module_invocation）
 --------------------------------------------------------------------
@@ -39,6 +57,10 @@ Issue #512 は「pytensor が g++ 不在で Python フォールバック」と�
 
     # D: 実データ幾何での外挿（ローカルのみ）
     python -m scripts.bench_macro_beta --mode real --n-stock 250 --tune 800 --draws 200,800 --label D-real --out .logs/bench.jsonl
+
+    # E: 軌道長の1セル（#540）。格子は scripts/grid_macro_beta.py が回す
+    python -m scripts.bench_macro_beta --mode real --n-stock 250 --tune 800 --draws 400 \
+        --max-tree-depth 8 --probe-draws 0 --label md8 --out .logs/bench_540.jsonl
 """
 from __future__ import annotations
 
@@ -158,13 +180,29 @@ def pick_best(repeats: list) -> dict:
     return best
 
 
-def summarize_steps(steps: np.ndarray) -> dict:
+def treedepth_cap_steps(max_tree_depth=None) -> int:
+    """その設定で1 draw が踏みうる最大 leapfrog 歩数（= 2**depth - 1）。
+
+    `max_tree_depth` を下げたのに 1023 を基準に到達率を測ると**常に 0.000** になり、
+    「張り付いていない」と読めてしまう（#540 の観測対象そのものが見えなくなる）。
+    タプル `(warmup, sampling)` のときは **sampling 側**を採る——`sample_stats` は
+    warmup を含まないので、比較すべき上限は draws 側の上限。
+    """
+    if max_tree_depth is None:
+        return MAX_TREEDEPTH_STEPS
+    depth = max_tree_depth[1] if isinstance(max_tree_depth, tuple) else int(max_tree_depth)
+    return 2 ** int(depth) - 1
+
+
+def summarize_steps(steps: np.ndarray, cap_steps: int = MAX_TREEDEPTH_STEPS) -> dict:
     """歩数配列の要約。空なら全て None（「測れなかった」を 0 と区別する）。"""
     if steps.size == 0:
-        return {"mean": None, "p50": None, "p90": None, "max": None, "max_treedepth_rate": None}
+        return {"mean": None, "p50": None, "p90": None, "max": None,
+                "max_treedepth_rate": None, "cap_steps": int(cap_steps)}
     return {"mean": float(np.mean(steps)), "p50": float(np.percentile(steps, 50)),
             "p90": float(np.percentile(steps, 90)), "max": float(np.max(steps)),
-            "max_treedepth_rate": float(np.mean(steps >= MAX_TREEDEPTH_STEPS))}
+            "max_treedepth_rate": float(np.mean(steps >= cap_steps)),
+            "cap_steps": int(cap_steps)}
 
 
 def regime_check(runs: list) -> dict:
@@ -184,6 +222,98 @@ def regime_check(runs: list) -> dict:
     ratio = float(max(means) / min(means))
     return {"ok": bool(ratio <= 1.2 and max(divs) == 0), "steps_ratio": ratio,
             "n_divergences_max": int(max(divs))}
+
+
+def parse_max_tree_depth(text):
+    """`--max-tree-depth` の文字列を numpyro が受ける形へ（#540）。
+
+    実体は `macro_beta_inference.parse_max_tree_depth`。**本番と bench で解釈を分けない**
+    ——分けると「格子で測った条件」と「本番で回る条件」が静かにずれる。
+    """
+    from macro_beta_inference import parse_max_tree_depth as _parse
+    return _parse(text)
+
+
+def sampler_kwargs(nuts_sampler, max_tree_depth=None, chain_method=None) -> dict:
+    """`pm.sample` へ渡す追加 kwargs（軌道長 ＋ bench 専用の chain_method）。
+
+    軌道長の載せ方は本番と同一実装（`macro_beta_inference.nuts_depth_kwargs`）を使う。
+    `chain_method` は計測用のレバーなので bench 側でだけ足す。
+    """
+    from macro_beta_inference import nuts_depth_kwargs
+
+    out: dict = dict(nuts_depth_kwargs(nuts_sampler, max_tree_depth))
+    if chain_method:
+        nested = dict(out.get("nuts_sampler_kwargs") or {})
+        nested["chain_method"] = chain_method
+        out["nuts_sampler_kwargs"] = nested
+    return out
+
+
+def diagnose(idata, sector_idx) -> dict:
+    """`beta` の ESS_bulk / ESS_tail / r_hat を**生値の分布として**取る（#540）。
+
+    本番ゲートと同じ量を測るため、`macro_beta_inference.summarize_diagnostics` と同一の経路を通る:
+    `beta` は #541 以降 posterior に載っていないので自由 RV から銘柄チャンクごとに再構成し、
+    `az.summary(..., kind="diagnostics", round_to="none")` を掛ける。**丸めた表示で判断しない**
+    （#356: 既定の az.summary は r_hat を小数2桁・ess を整数へ丸める）。
+
+    min だけでなく p10 / median も返す理由: `ess_bulk_min` は 3,000 パラメータ
+    （250銘柄 × 12因子）の最小順序統計でノイズが大きく、格子の**順位付け**には向かない。
+    ゲート較正値としての min は残しつつ、順位は median で見る（判断は生値の表で行う）。
+    """
+    import arviz as az
+
+    from macro_beta_inference import (BETA_CHUNK_STOCKS, _reconstruct_beta_chunk,
+                                      _reconstruct_mu_sector)
+
+    post = idata.posterior
+    summ = az.summary(idata, var_names=["alpha", "mu_universe"], kind="diagnostics",
+                      round_to="none")
+    ess_bulk = [np.asarray(summ["ess_bulk"], dtype=float)]
+    ess_tail = [np.asarray(summ["ess_tail"], dtype=float)]
+    r_hat = [np.asarray(summ["r_hat"], dtype=float)]
+
+    n_stock = post.sizes["stock"]
+    mu_sector = _reconstruct_mu_sector(post)
+    for lo in range(0, n_stock, BETA_CHUNK_STOCKS):
+        hi = min(lo + BETA_CHUNK_STOCKS, n_stock)
+        chunk = _reconstruct_beta_chunk(post, sector_idx, lo, hi, mu_sector=mu_sector)
+        csumm = az.summary(az.from_dict(posterior={"beta": chunk}), kind="diagnostics",
+                           round_to="none")
+        ess_bulk.append(np.asarray(csumm["ess_bulk"], dtype=float))
+        ess_tail.append(np.asarray(csumm["ess_tail"], dtype=float))
+        r_hat.append(np.asarray(csumm["r_hat"], dtype=float))
+
+    eb = np.concatenate(ess_bulk)
+    et = np.concatenate(ess_tail)
+    rh = np.concatenate(r_hat)
+    return {"r_hat_max": float(np.nanmax(rh)),
+            "ess_bulk_min": float(np.nanmin(eb)),
+            "ess_bulk_p10": float(np.nanpercentile(eb, 10)),
+            "ess_bulk_median": float(np.nanpercentile(eb, 50)),
+            "ess_tail_min": float(np.nanmin(et)),
+            "n_params": int(eb.size)}
+
+
+def ess_efficiency(ess: dict | None, total_steps, seconds) -> dict:
+    """ESS を「1 leapfrog 歩あたり」「1秒あたり」へ正規化する（#540 の主指標・従指標）。
+
+    測れなかったものは **None**（0 と区別する）。ESS/歩 は時間を含まないのでマシンの
+    時間帯ドリフト（2.4倍）に汚されない＝格子の順位はこちらで付ける。
+    """
+    out = {"ess_bulk_median_per_1e6step": None, "ess_bulk_min_per_1e6step": None,
+           "ess_bulk_median_per_sec": None, "ess_bulk_min_per_sec": None}
+    if not ess:
+        return out
+    med, mn = ess.get("ess_bulk_median"), ess.get("ess_bulk_min")
+    if total_steps:
+        out["ess_bulk_median_per_1e6step"] = float(med) / float(total_steps) * 1e6
+        out["ess_bulk_min_per_1e6step"] = float(mn) / float(total_steps) * 1e6
+    if seconds and seconds > 0:
+        out["ess_bulk_median_per_sec"] = float(med) / float(seconds)
+        out["ess_bulk_min_per_sec"] = float(mn) / float(seconds)
+    return out
 
 
 def predict_full_minutes(per_draw_sec, n_obs_bench: int) -> dict:
@@ -301,16 +431,21 @@ def apply_thread_limits(threads: int) -> None:
 
 # ---- パネル取得 ---------------------------------------------------------------------
 
-def load_real_panel(n_stock: int, seed: int) -> dict:
+def load_real_panel(n_stock: int, seed: int, stamp: str | None = None) -> dict:
     """本番パネル（read-only）を間引き、因子選択まで済ませて返す。
 
     キャッシュキーに**日付印**を入れる: 世代を持たないキャッシュは、データが伸びても黙って
     旧世代を返す（#454 / #456 の実例）。日を跨いだら必ず取り直す。
+
+    `stamp`（#540）: 日付印を外から固定する。格子測定は数時間かかり**日付を跨ぐ**ので、
+    既定のままだと途中のセルだけ別キーでパネルを取り直す＝全セルが同一パネルを見る保証が消える
+    （比較の前提が壊れているのに、出力は何事も無かったように並ぶ）。ドライバが1つの stamp を
+    全セルへ配ることで、世代を**明示的に**固定する。
     """
     from scripts._cache import cached
     from scripts.experiment_pooled_rhat import build_real_panel, subsample_panel
 
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%d")
+    stamp = stamp or datetime.now(timezone.utc).strftime("%Y%m%d")
     panel = cached("macro_beta_panel_" + stamp, build_real_panel)
     if n_stock > 0:
         panel = subsample_panel(panel, n_stock, seed=seed)
@@ -329,8 +464,14 @@ def load_real_panel(n_stock: int, seed: int) -> dict:
 # ---- 計測本体 -----------------------------------------------------------------------
 
 def run_sample(model, draws: int, tune: int, chains: int, target_accept: float,
-               seed: int, nuts_sampler, init, chain_method) -> dict:
-    """1回の pm.sample を計測する。返すのは所要と sample_stats の要約だけ（idata は捨てる）。"""
+               seed: int, nuts_sampler, init, chain_method,
+               max_tree_depth=None, sector_idx=None) -> dict:
+    """1回の pm.sample を計測する。返すのは所要と sample_stats の要約（＋要求されれば ESS）。
+
+    `sector_idx` を渡した run だけ `diagnose` を掛ける（#540）。probe には掛けない——
+    診断は本番規模で分単位かかるので、**サンプリングの wall とは別に `diag_sec` で測る**
+    （所要へ混ぜると us/step が汚れる）。
+    """
     import pymc as pm
 
     kwargs: dict = dict(draws=draws, tune=tune, target_accept=target_accept,
@@ -339,8 +480,7 @@ def run_sample(model, draws: int, tune: int, chains: int, target_accept: float,
         kwargs["nuts_sampler"] = nuts_sampler
     if init:
         kwargs["init"] = init
-    if chain_method:
-        kwargs["nuts_sampler_kwargs"] = {"chain_method": chain_method}
+    kwargs.update(sampler_kwargs(nuts_sampler, max_tree_depth, chain_method))
 
     # 経過だけでは「並列で速い」と「待っているだけ」を区別できない。**CPU 時間も測る**
     # （process_time は全スレッドの合計）。cpu/wall が 1 に近ければ実質1コアしか使えておらず、
@@ -356,7 +496,7 @@ def run_sample(model, draws: int, tune: int, chains: int, target_accept: float,
     for name in idata.sample_stats.data_vars:
         stats[str(name)] = idata.sample_stats[name].values
     found = extract_steps(stats)
-    steps = summarize_steps(found["steps"])
+    steps = summarize_steps(found["steps"], cap_steps=treedepth_cap_steps(max_tree_depth))
     divergences = None
     if "diverging" in stats:
         divergences = int(np.sum(np.asarray(stats["diverging"], dtype=bool)))
@@ -364,11 +504,22 @@ def run_sample(model, draws: int, tune: int, chains: int, target_accept: float,
     if "step_size" in stats:
         step_size = float(np.mean(np.asarray(stats["step_size"], dtype=float)))
 
+    total_steps = float(np.sum(found["steps"])) if found["steps"].size else None
+
+    ess = None
+    diag_sec = None
+    if sector_idx is not None:
+        diag_started = time.monotonic()
+        ess = diagnose(idata, sector_idx)
+        diag_sec = time.monotonic() - diag_started
+
     return {"draws": draws, "seconds": elapsed, "cpu_seconds": cpu_elapsed,
             "cpu_per_wall": (cpu_elapsed / elapsed) if elapsed > 0 else None,
             "steps_source": found["source"], "steps": steps, "n_divergences": divergences,
             "step_size_mean": step_size,
-            "total_steps": float(np.sum(found["steps"])) if found["steps"].size else None}
+            "total_steps": total_steps,
+            "ess": ess, "diag_sec": diag_sec,
+            **ess_efficiency(ess, total_steps, elapsed)}
 
 
 def format_report(record: dict) -> str:
@@ -386,6 +537,8 @@ def format_report(record: dict) -> str:
         c["chains"], c["tune"], c["draws_list"], c["target_accept"], c["nuts_sampler"]))
     lines.append("          init={0} chain_method={1} force_devices={2} threads={3}".format(
         c["init"], c["chain_method"], c["force_devices"], c["threads"]))
+    lines.append("          max_tree_depth={0} (None = numpyro default 10)".format(
+        c.get("max_tree_depth")))
     lines.append("-" * 78)
     lines.append("{0:>8} {1:>10} {2:>10} {3:>12} {4:>12} {5:>8}".format(
         "draws", "sec", "cpu/wall", "steps/draw", "max_td_rate", "n_div"))
@@ -397,6 +550,26 @@ def format_report(record: dict) -> str:
             "n/a" if st["mean"] is None else "{0:.1f}".format(st["mean"]),
             "n/a" if st["max_treedepth_rate"] is None else "{0:.3f}".format(st["max_treedepth_rate"]),
             "n/a" if r["n_divergences"] is None else r["n_divergences"]))
+    # ESS の表（#540）。**主指標は ESS/1e6step**（時間を含まない＝時間帯ドリフトに汚されない）。
+    # ESS/sec は本番所要の見積り用の従指標。判断は生値で行うので有効数字を落とさない。
+    if any(r.get("ess") for r in record["runs"]):
+        lines.append("-" * 78)
+        lines.append("{0:>8} {1:>10} {2:>10} {3:>10} {4:>10} {5:>12} {6:>10}".format(
+            "draws", "ess_min", "ess_p10", "ess_med", "r_hat_max", "ESS/1e6step", "ESS/sec"))
+        for r in record["runs"]:
+            e = r.get("ess")
+            if not e:
+                continue
+            lines.append("{0:>8} {1:>10.4g} {2:>10.4g} {3:>10.4g} {4:>10.4f} {5:>12.4g} {6:>10.4g}".format(
+                r["draws"], e["ess_bulk_min"], e["ess_bulk_p10"], e["ess_bulk_median"],
+                e["r_hat_max"], r.get("ess_bulk_median_per_1e6step") or float("nan"),
+                r.get("ess_bulk_median_per_sec") or float("nan")))
+        diag = [r.get("diag_sec") for r in record["runs"] if r.get("diag_sec")]
+        if diag:
+            lines.append("          ESS は beta+alpha+mu_universe の生値（n_params={0}）・"
+                         "診断所要 {1:.1f}s は上の sec に含めない".format(
+                             next(r["ess"]["n_params"] for r in record["runs"] if r.get("ess")),
+                             max(diag)))
     spreads = [r.get("seconds_spread") for r in record["runs"] if r.get("seconds_spread")]
     if spreads:
         lines.append("repeats : {0} 回/点・最速を採用（ばらつき max/min = {1}）".format(
@@ -457,6 +630,14 @@ def main() -> None:
                     help="計測前に1本流してコンパイル代を先に払う draws 数（0 で無効）")
     ap.add_argument("--chains", type=int, default=2)
     ap.add_argument("--target-accept", type=float, default=0.95)
+    ap.add_argument("--max-tree-depth", default=None,
+                    help="NUTS の軌道長上限（#540）。'8' で一律、'8,10' で warmup だけ 8。"
+                         "未指定は numpyro 既定 10（＝現行本番と同一）")
+    ap.add_argument("--no-ess", action="store_true",
+                    help="ESS 診断を測らない（所要だけ見たいとき。既定は測る）")
+    ap.add_argument("--panel-stamp", default=None,
+                    help="real モードのパネルキャッシュ日付印（YYYYMMDD）を固定する。"
+                         "日を跨ぐ格子で全セルに同一パネルを見せるために使う")
     ap.add_argument("--nuts-sampler", default="numpyro")
     ap.add_argument("--init", default="adapt_diag")
     ap.add_argument("--chain-method", default=None,
@@ -474,6 +655,10 @@ def main() -> None:
     draws_list = [int(x) for x in str(args.draws).split(",") if str(x).strip()]
     if not draws_list:
         raise SystemExit("--draws が空です")
+    try:
+        max_tree_depth = parse_max_tree_depth(args.max_tree_depth)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from None
 
     # スレッド制限は jax の import より前（環境変数は初期化時にしか読まれない）。
     apply_thread_limits(args.threads)
@@ -486,7 +671,7 @@ def main() -> None:
         panel = synth_panel(args.n_stock, args.n_factor, args.obs_per_stock,
                             args.n_sector, args.seed)
     else:
-        panel = load_real_panel(args.n_stock, args.seed)
+        panel = load_real_panel(args.n_stock, args.seed, stamp=args.panel_stamp)
     panel_sec = time.monotonic() - t0
     logger.info("panel: n_stock=%d n_sector=%d n_factor=%d n_obs=%d (%.1fs)",
                 panel["n_stock"], panel["n_sector"], panel["n_factor"], panel["n_obs"], panel_sec)
@@ -512,22 +697,27 @@ def main() -> None:
         probe = run_sample(model, draws=args.probe_draws, tune=args.tune, chains=args.chains,
                            target_accept=args.target_accept, seed=args.seed,
                            nuts_sampler=args.nuts_sampler, init=args.init,
-                           chain_method=args.chain_method)
+                           chain_method=args.chain_method, max_tree_depth=max_tree_depth)
         logger.info("  -> probe %.1fs", probe["seconds"])
 
+    # ESS は本番ゲートと同じ `beta` に対して取るので sector_idx が要る（#540・#541）。
+    diag_sector_idx = None if args.no_ess else panel["sector_idx"]
     runs = []
     for draws in draws_list:
         repeats = []
         for rep in range(max(1, args.repeat)):
-            logger.info("sampling: draws=%d tune=%d chains=%d (rep %d/%d)",
-                        draws, args.tune, args.chains, rep + 1, max(1, args.repeat))
+            logger.info("sampling: draws=%d tune=%d chains=%d max_tree_depth=%s (rep %d/%d)",
+                        draws, args.tune, args.chains, max_tree_depth,
+                        rep + 1, max(1, args.repeat))
             r = run_sample(model, draws=draws, tune=args.tune, chains=args.chains,
                            target_accept=args.target_accept, seed=args.seed,
                            nuts_sampler=args.nuts_sampler, init=args.init,
-                           chain_method=args.chain_method)
-            logger.info("  -> %.1fs cpu/wall=%.2f steps/draw=%s", r["seconds"],
+                           chain_method=args.chain_method, max_tree_depth=max_tree_depth,
+                           sector_idx=diag_sector_idx)
+            logger.info("  -> %.1fs cpu/wall=%.2f steps/draw=%s ess_bulk_med=%s", r["seconds"],
                         r["cpu_per_wall"] or 0.0,
-                        "n/a" if r["steps"]["mean"] is None else round(r["steps"]["mean"], 1))
+                        "n/a" if r["steps"]["mean"] is None else round(r["steps"]["mean"], 1),
+                        "n/a" if not r.get("ess") else round(r["ess"]["ess_bulk_median"], 1))
             repeats.append(r)
         runs.append(pick_best(repeats))
 
@@ -552,7 +742,8 @@ def main() -> None:
                    "target_accept": args.target_accept, "nuts_sampler": args.nuts_sampler,
                    "init": args.init, "chain_method": args.chain_method,
                    "force_devices": not args.no_force_devices, "threads": args.threads,
-                   "seed": args.seed},
+                   "seed": args.seed, "max_tree_depth": max_tree_depth,
+                   "panel_stamp": args.panel_stamp, "probe_draws": args.probe_draws},
         "probe": probe,
         "runs": runs,
         "regime": regime_check(runs),

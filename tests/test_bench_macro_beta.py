@@ -209,6 +209,159 @@ class TestThreadLimits:
         assert "intra_op_parallelism_threads=1" in os.environ["XLA_FLAGS"]
 
 
+class TestParseMaxTreeDepth:
+    """`--max-tree-depth` のパース（#540）。不正値は silent-drop せず raise する。"""
+
+    def test_single_value(self):
+        assert bmb.parse_max_tree_depth("8") == 8
+
+    def test_tuple_is_warmup_then_sampling(self):
+        # numpyro は (warmup, sampling) として解釈する＝warmup だけ切り詰める案が測れる。
+        assert bmb.parse_max_tree_depth("8,10") == (8, 10)
+
+    def test_none_and_empty_keep_current_behaviour(self):
+        # 既定は「現状維持」＝None。0 や 10 を勝手に埋めない（埋めると既定値の変更になる）。
+        assert bmb.parse_max_tree_depth(None) is None
+        assert bmb.parse_max_tree_depth("") is None
+        assert bmb.parse_max_tree_depth("  ") is None
+
+    @pytest.mark.parametrize("bad", ["abc", "8,x", "0", "21", "7,8,9", "8.5"])
+    def test_invalid_values_raise(self, bad):
+        with pytest.raises(ValueError):
+            bmb.parse_max_tree_depth(bad)
+
+
+class TestSamplerKwargs:
+    """軌道長の設定が**届く場所**（サンプラーで違う）。
+
+    `nuts={...}` は外部サンプラー経路では捨てられる（pymc/sampling/mcmc.py は target_accept
+    しか見ない）＝取り違えるとエラーも警告も出ずに設定だけが効かない。ここで縛る。
+    """
+
+    def test_numpyro_goes_through_nuts_sampler_kwargs(self):
+        got = bmb.sampler_kwargs("numpyro", max_tree_depth=8)
+        assert got["nuts_sampler_kwargs"]["nuts_kwargs"] == {"max_tree_depth": 8}
+        assert "nuts" not in got          # numpyro 経路で nuts={} は黙って無視される
+
+    def test_numpyro_passes_tuple_through_unchanged(self):
+        got = bmb.sampler_kwargs("numpyro", max_tree_depth=(8, 10))
+        assert got["nuts_sampler_kwargs"]["nuts_kwargs"] == {"max_tree_depth": (8, 10)}
+
+    def test_pymc_path_uses_nuts_step_kwarg(self):
+        for sampler in (None, "", "pymc"):
+            got = bmb.sampler_kwargs(sampler, max_tree_depth=8)
+            assert got["nuts"] == {"max_treedepth": 8}
+            assert "nuts_sampler_kwargs" not in got
+
+    def test_pymc_tuple_maps_to_early_max_treedepth(self):
+        got = bmb.sampler_kwargs("pymc", max_tree_depth=(8, 10))
+        assert got["nuts"] == {"early_max_treedepth": 8, "max_treedepth": 10}
+
+    def test_chain_method_is_preserved_alongside(self):
+        got = bmb.sampler_kwargs("numpyro", max_tree_depth=9, chain_method="vectorized")
+        assert got["nuts_sampler_kwargs"]["chain_method"] == "vectorized"
+        assert got["nuts_sampler_kwargs"]["nuts_kwargs"] == {"max_tree_depth": 9}
+
+    def test_no_max_tree_depth_changes_nothing(self):
+        # 既定（未指定）では pm.sample へ渡る引数が現状と1バイトも変わらないこと。
+        assert bmb.sampler_kwargs("numpyro") == {}
+        assert bmb.sampler_kwargs("numpyro", chain_method="parallel") == {
+            "nuts_sampler_kwargs": {"chain_method": "parallel"}}
+
+    def test_unknown_sampler_raises_instead_of_dropping(self):
+        with pytest.raises(ValueError):
+            bmb.sampler_kwargs("blackjax", max_tree_depth=8)
+
+
+class TestTreedepthCap:
+    """到達率の基準は設定した上限に追従すること（#540）。"""
+
+    def test_default_is_2_pow_10_minus_1(self):
+        assert bmb.treedepth_cap_steps(None) == bmb.MAX_TREEDEPTH_STEPS == 1023
+
+    def test_scalar_depth(self):
+        assert bmb.treedepth_cap_steps(8) == 255
+        assert bmb.treedepth_cap_steps(7) == 127
+
+    def test_tuple_uses_sampling_side(self):
+        # sample_stats は warmup を含まない＝比較すべき上限は draws 側。
+        assert bmb.treedepth_cap_steps((8, 10)) == 1023
+
+    def test_rate_follows_the_cap_not_the_default(self):
+        steps = np.array([255.0, 255.0, 127.0, 63.0])
+        # 1023 を基準にすると「張り付いていない」と誤読する（観測対象が見えなくなる）。
+        assert bmb.summarize_steps(steps)["max_treedepth_rate"] == pytest.approx(0.0)
+        assert bmb.summarize_steps(steps, cap_steps=255)["max_treedepth_rate"] == pytest.approx(0.5)
+        assert bmb.summarize_steps(steps, cap_steps=255)["cap_steps"] == 255
+
+
+class TestEssEfficiency:
+    """ESS の正規化（主指標＝ESS/歩・従指標＝ESS/秒）。"""
+
+    def test_derives_per_step_and_per_sec(self):
+        ess = {"ess_bulk_median": 500.0, "ess_bulk_min": 100.0}
+        got = bmb.ess_efficiency(ess, total_steps=2_000_000, seconds=250.0)
+        assert got["ess_bulk_median_per_1e6step"] == pytest.approx(250.0)
+        assert got["ess_bulk_min_per_1e6step"] == pytest.approx(50.0)
+        assert got["ess_bulk_median_per_sec"] == pytest.approx(2.0)
+        assert got["ess_bulk_min_per_sec"] == pytest.approx(0.4)
+
+    def test_missing_inputs_are_none_not_zero(self):
+        # 「測れなかった」を 0 と区別する（0 は「効率がゼロ」という別の主張になる）。
+        assert bmb.ess_efficiency(None, 1000, 10.0)["ess_bulk_median_per_1e6step"] is None
+        ess = {"ess_bulk_median": 500.0, "ess_bulk_min": 100.0}
+        assert bmb.ess_efficiency(ess, None, 10.0)["ess_bulk_median_per_1e6step"] is None
+        assert bmb.ess_efficiency(ess, 1000, 0.0)["ess_bulk_median_per_sec"] is None
+
+
+class TestDiagnoseMatchesProductionGate:
+    """bench が測る ESS / r_hat が **本番ゲートと同じ量**であること（#540）。
+
+    別物を測っていたら格子の結論が本番へ移らない。`persist_allowed` の閾値は `beta` の r_hat に
+    対して較正された値なので、`beta_raw` で代用すると黙って緩くなる（ADR-0002 #541 節）。
+    突き合わせ相手は `macro_beta_inference.summarize_diagnostics` そのもの。
+
+    合成 idata は `tests.test_macro_beta_inference._raw_idata` を**共有する**（同じ材料で比べる
+    ことが検証の要件。こちらで作り直すと「両方が同じように間違っている」を見逃しうる）。
+    """
+
+    def _idata(self, az):
+        from tests.test_macro_beta_inference import _raw_idata
+        return _raw_idata(az)
+
+    def test_r_hat_max_and_ess_bulk_min_equal_production(self, monkeypatch):
+        az = pytest.importorskip("arviz")
+        import macro_beta_inference as mbi
+
+        monkeypatch.setattr(mbi, "BETA_CHUNK_STOCKS", 3)   # 境界跨ぎを強制
+        idata, sector_idx = self._idata(az)
+
+        prod = mbi.summarize_diagnostics(idata, sector_idx)
+        got = bmb.diagnose(idata, sector_idx)
+
+        assert got["r_hat_max"] == pytest.approx(prod["r_hat_max"], rel=1e-12)
+        assert got["ess_bulk_min"] == pytest.approx(prod["ess_bulk_min"], rel=1e-12)
+        assert got["ess_tail_min"] == pytest.approx(prod["ess_tail_min"], rel=1e-12)
+
+    def test_reports_the_distribution_not_only_the_min(self):
+        az = pytest.importorskip("arviz")
+        idata, sector_idx = self._idata(az)
+        got = bmb.diagnose(idata, sector_idx)
+
+        # min は最小順序統計でノイズが大きい＝順位付けは median で見る。両方残す。
+        assert got["ess_bulk_min"] <= got["ess_bulk_p10"] <= got["ess_bulk_median"]
+        # beta(7x2) + alpha(7) + mu_universe(2) = 23 パラメータ。
+        assert got["n_params"] == 23
+
+    def test_values_are_raw_not_arviz_rounded(self):
+        """#356 の丸め回帰検知。整数/小数2桁へ量子化されていたら格子の差が消える。"""
+        az = pytest.importorskip("arviz")
+        idata, sector_idx = self._idata(az)
+        got = bmb.diagnose(idata, sector_idx)
+        assert got["ess_bulk_min"] != float(int(got["ess_bulk_min"]))
+        assert round(got["r_hat_max"], 2) != got["r_hat_max"]
+
+
 class TestFormatReport:
     def test_renders_ascii_only(self):
         record = {
@@ -216,7 +369,7 @@ class TestFormatReport:
             "panel": {"n_stock": 250, "n_sector": 34, "n_factor": 12, "n_obs": 6000},
             "config": {"chains": 2, "tune": 200, "draws_list": [50, 200], "target_accept": 0.95,
                        "nuts_sampler": "numpyro", "init": "adapt_diag", "chain_method": None,
-                       "force_devices": True, "threads": 0, "seed": 0},
+                       "force_devices": True, "threads": 0, "seed": 0, "max_tree_depth": None},
             "runs": [{"draws": 50, "seconds": 55.0,
                       "steps": bmb.summarize_steps(np.array([7.0, 15.0])),
                       "n_divergences": 0}],
@@ -233,3 +386,34 @@ class TestFormatReport:
         text.encode("cp932")
         assert "A-local" in text
         assert "us/leapfrog-step" in text
+
+    def _record_with_ess(self):
+        run = {"draws": 400, "seconds": 250.0, "cpu_per_wall": 1.8,
+               "steps": bmb.summarize_steps(np.array([255.0, 255.0]), cap_steps=255),
+               "n_divergences": 0, "total_steps": 2_000_000, "diag_sec": 12.0,
+               "ess": {"r_hat_max": 1.0231, "ess_bulk_min": 101.7, "ess_bulk_p10": 203.4,
+                       "ess_bulk_median": 512.9, "ess_tail_min": 190.2, "n_params": 3012}}
+        run.update(bmb.ess_efficiency(run["ess"], run["total_steps"], run["seconds"]))
+        return {
+            "label": "md8", "mode": "real",
+            "panel": {"n_stock": 250, "n_sector": 33, "n_factor": 12, "n_obs": 6190},
+            "config": {"chains": 2, "tune": 800, "draws_list": [400], "target_accept": 0.95,
+                       "nuts_sampler": "numpyro", "init": "adapt_diag", "chain_method": None,
+                       "force_devices": True, "threads": 0, "seed": 0, "max_tree_depth": 8},
+            "runs": [run], "fit": {"fixed_sec": None, "per_draw_sec": None},
+            "stage_sec": {"panel": 3.0, "model_build": 1.0, "sample_total": 250.0},
+            "env": {"jax": "0.10.2", "cpu_count": 6},
+        }
+
+    def test_ess_table_is_rendered_with_raw_values(self):
+        text = bmb.format_report(self._record_with_ess())
+        text.encode("cp932")
+        assert "ESS/1e6step" in text
+        assert "max_tree_depth=8" in text
+        # 生値のまま出す（整形で桁を落とすと格子の差が消える・#466）。
+        assert "101.7" in text and "512.9" in text
+
+    def test_ess_table_is_absent_when_not_measured(self):
+        record = self._record_with_ess()
+        record["runs"][0]["ess"] = None
+        assert "ESS/1e6step" not in bmb.format_report(record)

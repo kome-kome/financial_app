@@ -53,6 +53,69 @@ HEARTBEAT_SEC = 300.0
 BETA_CHUNK_STOCKS = 256
 
 
+def parse_max_tree_depth(text):
+    """`--max-tree-depth` の文字列を numpyro が受ける形へ（#540）。
+
+    - `"8"`    → `8`（warmup も sampling も 8）
+    - `"8,10"` → `(8, 10)`（**warmup だけ 8・sampling は 10**）。numpyro は `max_tree_depth` に
+      タプルを受け `(warmup, sampling)` として解釈する（`numpyro/infer/hmc.py`）。PyMC 自身も
+      `early_max_treedepth=8` で同じことをしている。warmup は本番で全 iter の半分
+      （tune 800 / draws 800）を占めるので、**draws 側の軌道長を変えずに総コストだけ落とす**候補。
+    - `None` / 空 → `None`（＝**現状維持**。既定値を勝手に埋めない）
+
+    不正値は raise する（`upsert_financial` の未知キーと同じ fail fast。黙って既定へ倒すと
+    「指定したのに効いていない run」が測定結果に混ざる）。
+    """
+    if text is None:
+        return None
+    parts = [p.strip() for p in str(text).split(",") if p.strip()]
+    if not parts:
+        return None
+    if len(parts) > 2:
+        raise ValueError("max_tree_depth は '8' か '8,10'（warmup,sampling）の形式: " + str(text))
+    vals = []
+    for p in parts:
+        try:
+            v = int(p)
+        except ValueError:
+            raise ValueError("max_tree_depth に整数以外が入っている: " + str(text)) from None
+        if not (1 <= v <= 20):
+            raise ValueError("max_tree_depth は 1..20 の範囲（2**20 歩で既に非現実的）: " + str(text))
+        vals.append(v)
+    return vals[0] if len(vals) == 1 else (vals[0], vals[1])
+
+
+def nuts_depth_kwargs(nuts_sampler, max_tree_depth=None) -> dict:
+    """`max_tree_depth` を `pm.sample` の引数へ載せる。**届く場所がサンプラーで違う**（#540）。
+
+    - numpyro: `nuts_sampler_kwargs={"nuts_kwargs": {"max_tree_depth": ...}}` →
+      `pymc.sampling.jax.sample_jax_nuts(nuts_kwargs=...)` → `numpyro.infer.NUTS(...)`
+    - 純 PyMC: `nuts={"max_treedepth": ...}`（step 引数の経路）
+
+    **`nuts={...}` は外部サンプラー経路では捨てられる**（`pymc/sampling/mcmc.py` は
+    `kwargs.pop("nuts", {}).get("target_accept")` しか見ない）＝取り違えるとエラーも警告も
+    出ずに設定だけが効かない。だから経路を明示的に分け、未知のサンプラーには raise する。
+
+    `max_tree_depth=None`（既定）では **空 dict を返す**＝`pm.sample` へ渡る引数は現状と
+    1バイトも変わらない。
+    """
+    if max_tree_depth is None:
+        return {}
+    if nuts_sampler == "numpyro":
+        return {"nuts_sampler_kwargs": {"nuts_kwargs": {"max_tree_depth": max_tree_depth}}}
+    if not nuts_sampler or nuts_sampler == "pymc":
+        if isinstance(max_tree_depth, tuple):
+            # PyMC の early_max_treedepth は warmup の**前半**にだけ効く（numpyro のタプルは
+            # warmup 全体）。厳密には同義でないが、本番経路は numpyro なのでここは
+            # 「同じ意図を最も近い形で通す」に留める。
+            return {"nuts": {"early_max_treedepth": max_tree_depth[0],
+                             "max_treedepth": max_tree_depth[1]}}
+        return {"nuts": {"max_treedepth": int(max_tree_depth)}}
+    raise ValueError(
+        "max_tree_depth の渡し方が未定義のサンプラー: " + str(nuts_sampler)
+        + "（numpyro か pymc のみ対応。黙って無視されるより落とす）")
+
+
 @contextlib.contextmanager
 def _heartbeat(what: str, interval: float = HEARTBEAT_SEC):
     """ブロック実行中、`interval` ごとに経過をログへ刻む。
@@ -288,7 +351,7 @@ def build_hierarchical_model(returns: np.ndarray, macro: np.ndarray,
 def run_inference(draws: int = 1000, tune: int = 1000, target_accept: float = 0.9,
                   seed: int = 0, db=None, macro_names: list[str] | None = None,
                   chains: int = 4, nuts_sampler: str | None = None,
-                  init: str | None = None) -> InferenceResult:
+                  init: str | None = None, max_tree_depth=None) -> InferenceResult:
     """推論バッチの本体。build_panel → 因子選択 → 階層モデル → NUTS → 事後要約。
 
     macro_names はテスト用（小さい候補プールを注入）。省略時は build_panel の既定
@@ -302,6 +365,10 @@ def run_inference(draws: int = 1000, tune: int = 1000, target_accept: float = 0.
     requirements-inference.txt の jax/numpyro 追加が前提）。numpyro 既定初期化は
     この規模のモデルで発散が多発したため、init="adapt_diag"（PyMC 既定と同等）を
     併用すること。詳細は ADR-0002 参照。
+
+    max_tree_depth（#540）は既定 None＝サンプラー既定（numpyro は 10）で、**渡さなければ
+    現状と1バイトも変わらない**。本番で使う値は `scripts/run_monthly.py` の macro_beta ステップ
+    引数に明示する（draws/tune/chains/r-hat-threshold と同じ扱い＝実行条件が1箇所に並ぶ）。
     """
     import pymc as pm  # 遅延 import
 
@@ -332,9 +399,9 @@ def run_inference(draws: int = 1000, tune: int = 1000, target_accept: float = 0.
     # **無音のまま数時間**では「走っているのか死んでいるのか」が区別できず、2026-08-21 に
     # 実際に12時間気づけなかった。規模と開始時刻をここで残し、以降は heartbeat が刻む。
     logger.info("サンプリング開始: n_stock=%d n_sector=%d n_factor=%d n_obs=%d "
-                "draws=%d tune=%d chains=%d sampler=%s",
+                "draws=%d tune=%d chains=%d sampler=%s max_tree_depth=%s",
                 len(edinet_codes), len(sector_names), len(sel), len(returns),
-                draws, tune, chains, nuts_sampler or "pymc")
+                draws, tune, chains, nuts_sampler or "pymc", max_tree_depth)
     if nuts_sampler == "numpyro":
         import os
         import numpyro
@@ -345,6 +412,7 @@ def run_inference(draws: int = 1000, tune: int = 1000, target_accept: float = 0.
         sample_kwargs["nuts_sampler"] = nuts_sampler
     if init:
         sample_kwargs["init"] = init
+    sample_kwargs.update(nuts_depth_kwargs(nuts_sampler, max_tree_depth))
     sampling_started = _time.monotonic()
     with model, _heartbeat("NUTS サンプリング"):
         idata = pm.sample(**sample_kwargs)
@@ -365,7 +433,8 @@ def run_inference(draws: int = 1000, tune: int = 1000, target_accept: float = 0.
         result.snapshot_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     result.diagnostics = diagnostics
     result.hyperparams = {"draws": draws, "tune": tune, "target_accept": target_accept, "seed": seed,
-                          "chains": chains, "nuts_sampler": nuts_sampler or "pymc", "init": init}
+                          "chains": chains, "nuts_sampler": nuts_sampler or "pymc", "init": init,
+                          "max_tree_depth": max_tree_depth}
     return result
 
 
@@ -587,6 +656,10 @@ def main() -> None:
                          "（純 Pythonは実測75秒/draw・GitHub Actionsの6時間上限に収まらない）")
     ap.add_argument("--init", default=None,
                     help="numpyro 使用時は 'adapt_diag' 推奨（既定初期化は発散多発の実測あり）")
+    ap.add_argument("--max-tree-depth", default=None,
+                    help="NUTS の軌道長上限（#540）。'8' で一律、'8,10' で warmup だけ 8。"
+                         "未指定はサンプラー既定（numpyro は 10）＝現行と同一。"
+                         "**下げれば速いが ESS が落ちる**ので、根拠は ADR-0002 の格子実測に依る")
     ap.add_argument("--r-hat-threshold", type=float, default=1.01,
                     help="persist を許可する r_hat_max の上限（既定 1.01＝ADR-0002 strict 基準）。"
                          "chains=2 では r_hat が構造的に ~1.02 で頭打ちのため、無人 cron では 1.05 等へ"
@@ -599,13 +672,20 @@ def main() -> None:
     args = ap.parse_args()
 
     logging.basicConfig(level=logging.INFO)
+    # 引数の検証は DB へ繋ぐ前に済ませる（数時間の run の入口で落とす方が安い）。
+    try:
+        max_tree_depth = parse_max_tree_depth(args.max_tree_depth)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from None
+
     from database import SessionLocal  # 遅延 import（本番と共有のセッションファクトリ）
 
     db = SessionLocal()
     try:
         result = run_inference(draws=args.draws, tune=args.tune, target_accept=args.target_accept,
                                seed=args.seed, db=db, chains=args.chains,
-                               nuts_sampler=args.nuts_sampler, init=args.init)
+                               nuts_sampler=args.nuts_sampler, init=args.init,
+                               max_tree_depth=max_tree_depth)
         logger.info("収束診断: %s", result.diagnostics)
         r_hat_max = result.diagnostics.get("r_hat_max")
         if not persist_allowed(r_hat_max, args.r_hat_threshold, args.force):
