@@ -63,6 +63,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import subprocess
 import sys
 import unicodedata
@@ -102,6 +103,9 @@ KEY_LAST_RUN = "watchdog_last_run"
 # 自己監視の閾値（24h + これ）の源にもなる。**24h より十分小さいこと**が要点で、
 # MultipleInstances IgnoreNew の下ではハングした1本が翌日を抑止するため。
 SELF_WINDOW_MIN = 15
+
+# `gh auth status` の待ち時間。ネットワークが詰まっても watchdog の窓（15分）を食わない値。
+GH_TIMEOUT_SEC = 20.0
 
 
 @dataclass(frozen=True)
@@ -166,6 +170,7 @@ WATCHED: tuple[Watched, ...] = (
 )
 
 DB_ERROR_TITLE = "[ops] watchdog がローカル DB を読めない"
+GH_ERROR_TITLE = "[ops] watchdog が gh を使えない（通知経路が死んでいる）"
 
 
 class _Echo:
@@ -241,7 +246,8 @@ def collect(db, now: datetime, get=None) -> dict:
         }
         row["status"] = _status(row)
         rows.append(row)
-    return {"now": now, "rows": rows, "db_error": None, "db_label": _db_label()}
+    return {"now": now, "rows": rows, "db_error": None, "db_label": _db_label(),
+            "gh_error": None}
 
 
 def _db_label() -> str:
@@ -256,12 +262,45 @@ def _db_label() -> str:
         return f"不明（{e}）"
 
 
+def check_gh(run=subprocess.run, which=None) -> Optional[str]:
+    """通知経路の到達性。使えるなら None、駄目なら理由を返す。
+
+    **健全なときこそ確かめる必要がある。** 異常を検出したときにしか `gh` を呼ばない設計だと、
+    「通知経路が死んでいる」ことは**異常が起きた当日に初めて分かる**——つまり一番届いてほしい
+    回に届かない。#515 が「登録の成功 != 実行の成功」だったのと同じ形で、ここは
+    **実行の成功 != 通知が届く**。
+
+    S4U はセッション0で走るので PATH も `hosts.yml` の解決も対話セッションと変わりうる。
+    実際、2026-08-26 の初回疎通では健全だったために `gh` が1度も起動されず、
+    通知経路は未検証のまま残った。
+    """
+    which = which or shutil.which
+    if which("gh") is None:
+        return "PATH から gh が見つからない（S4U はセッション0で走るので環境が対話時と違う）"
+    try:
+        proc = run(["gh", "auth", "status"], capture_output=True, text=True,
+                   encoding="utf-8", errors="replace", timeout=GH_TIMEOUT_SEC)
+    except OSError as e:
+        return f"gh を起動できない: {e}"
+    except subprocess.TimeoutExpired:
+        return f"gh auth status が {GH_TIMEOUT_SEC:.0f}秒で返らない"
+    if proc.returncode != 0:
+        return f"gh の認証が通っていない: {((proc.stderr or '') + (proc.stdout or ''))[:200]}"
+    return None
+
+
 def problems(snap: dict) -> list[dict]:
     """起票に値する事象だけを返す（空なら健全）。対象ごとに1件＝Issue も対象ごとに1本。"""
     if snap["db_error"]:
         return [{"title": DB_ERROR_TITLE, "row": None, "status": "db_error",
                  "message": f"ローカル DB を読めない: {snap['db_error']}"}]
     found = []
+    if snap.get("gh_error"):
+        # **これ自体は起票できない**（起票の手段が死んでいる）。notify が失敗して exit 3 になり、
+        # タスクの LastTaskResult とログだけが観測点として残る——それが正しい姿で、
+        # 「通知できないことを黙る」よりは痕跡が残る。
+        found.append({"title": GH_ERROR_TITLE, "row": None, "status": "gh_error",
+                      "message": f"通知経路が使えない: {snap['gh_error']}"})
     for row in snap["rows"]:
         w, status = row["watched"], row["status"]
         if status == "ok":
@@ -301,6 +340,8 @@ def format_report(snap: dict) -> list[str]:
     lines = [
         f"== バッチ鮮度（判定時刻 {snap['now'].isoformat(timespec='seconds')}） ==",
         f"接続先: {snap['db_label']}",
+        # **健全な回にも必ず出す。** 通知経路の生死は、異常が起きた日に初めて分かるのでは遅い。
+        "通知経路: " + ("gh 到達可" if not snap.get("gh_error") else f"使えない（{snap['gh_error']}）"),
     ]
     if snap["db_error"]:
         lines.append(f"DB を読めない: {snap['db_error']}")
@@ -328,7 +369,17 @@ def issue_body(problem: dict, snap: dict) -> str:
         "",
     ]
     row = problem["row"]
-    if row is None:
+    if problem["status"] == "gh_error":
+        # この本文が Issue になることは無い（起票の手段が死んでいる）。ログに残す用。
+        body = head + [
+            "**この検出自体は起票できない**——通知の手段そのものが使えないため。"
+            "痕跡はタスクの `LastTaskResult`（exit 3）と `.logs/watchdog_YYYYMMDD.log` にだけ残る。",
+            "",
+            "S4U はセッション0で走るので、PATH も `gh` の `hosts.yml` の解決も対話セッションと"
+            "変わりうる。対話セッションで `gh auth status` が通っても、"
+            "**セッション0で通るとは限らない**。",
+        ]
+    elif row is None:
         body = head + [
             "ローカル PostgreSQL へ接続できないため足跡を読めなかった。"
             "Postgres が落ちているなら夜間バッチも同時に死んでいる。",
@@ -445,6 +496,18 @@ def _open_session():
     return SessionLocal()
 
 
+def _log_path() -> Path:
+    """ログの置き場。**継ぎ目にしてあるのはテストが差し替えるため。**
+
+    ここを `bc.log_path("watchdog")` の直呼びにしていた間、`main()` を通るテストが
+    **本番の `.logs/watchdog_YYYYMMDD.log` へ書き込んでいた**（2026-08-26 に実測）。
+    このログは「異常時に何を見て判断したか」の唯一の記録なので、`pytest` を回すたびに
+    偽の行——固定した判定時刻、フェイクの接続先、意図的に落とした DB——が混ざると、
+    運用中に読んでも何が本物か分からなくなる。テストは副作用を持ってはいけない。
+    """
+    return bc.log_path("watchdog")
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     ap = argparse.ArgumentParser(description="ローカル駆動バッチの鮮度ゲート（#515）")
     ap.add_argument("--warn-only", action="store_true",
@@ -463,7 +526,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 1
 
     try:
-        fh = bc.log_path("watchdog").open("a", encoding="utf-8")
+        fh = _log_path().open("a", encoding="utf-8")
     except OSError:
         fh = None
     say = _Echo(fh)
@@ -477,10 +540,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 footprint_error = record_self(db)
         except Exception as e:      # noqa: BLE001 — 接続不能も「判定結果」として扱う
             snap = {"now": now, "rows": [], "db_error": str(e)[:300],
-                    "db_label": _db_label()}
+                    "db_label": _db_label(), "gh_error": None}
         finally:
             if db is not None:
                 db.close()
+
+        # 通知経路は**健全な回にも**確かめる（--dry-run は gh を叩かないので見送る）。
+        # ここを異常検出時だけにすると、通知が死んでいることは一番届いてほしい回に判明する。
+        snap["gh_error"] = None if args.dry_run else check_gh()
 
         if args.now:
             say(f"[鮮度] --now で判定時刻を差し替えている: {args.now}")
@@ -497,7 +564,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         for problem in found:
             say(f"[鮮度] 停止: {problem['message']}")
 
-        errors = notify(found, snap, say=say, run=subprocess.run, dry_run=args.dry_run)
+        if snap.get("gh_error") and not args.dry_run:
+            # 通知の手段が死んでいると分かっている。その手段で起票を試すのは無駄なので
+            # 叩かない——**痕跡は exit code とログにだけ残す**、が唯一できること。
+            errors = [f"通知経路が使えないため起票を試みない: {snap['gh_error']}"]
+        else:
+            errors = notify(found, snap, say=say, run=subprocess.run, dry_run=args.dry_run)
         for error in errors:
             say(f"[warn] {error}")
 
