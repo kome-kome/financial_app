@@ -21,8 +21,9 @@
     tune は M-1 から）。実測が出たら窓・上限とも見直すこと。
 
     打ち切りは「失敗」としては現れない（タスクスケジューラがプロセスを止めるだけで、
-    Issue も起票されない）。検知できるのは app_settings の monthly_last_success が
-    進まないことだけなので、初回は必ずログ（.logs/monthly_YYYYMMDD.log）を見る。
+    Issue も起票されない）。ただし打ち切られると足跡（app_settings）が1つも進まないので、
+    毎日 20:00 の financial_app-watchdog が monthly_last_run の鮮度として検知し起票する
+    （#515 手順3・ADR-0042）。初回は必ずログ（.logs/monthly_YYYYMMDD.log）も見ること。
 
 .PARAMETER Time
     起動時刻（既定 01:00）。
