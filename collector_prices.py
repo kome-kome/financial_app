@@ -1173,8 +1173,10 @@ async def fill_recent_stock_price_gap_yahoo(
         _d, _w = latest_daily.get(edinet_code), latest_weekly.get(edinet_code)
         last = max(x for x in (_d, _w) if x) if (_d or _w) else None
         if last is None:
-            # 価格を1件も持たない社。2026-08-21 の実測では該当 454社が全て
-            # is_active=False で、Yahoo も返さない（#475）。毎晩ではなく間隔を空ける。
+            # 価格を1件も持たない社。2026-08-27 の全数実測では該当 454社が全て
+            # is_active=False だが、**全件が上場廃止済みという意味ではない**——うち38社は
+            # 札証/福証の単独上場で現に取引がある。取れないのは上のティッカーが .T 固定で
+            # あって銘柄が死んでいるからではない（#555）。毎晩ではなく間隔を空ける。
             if (use_session and is_active is False
                     and not should_retry_priceless_delisted(edinet_code, today)):
                 n_delisted_skipped += 1
