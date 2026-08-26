@@ -440,6 +440,9 @@ def run_batch(spec: BatchSpec, steps: Sequence[Step], hooks: Hooks,
     log = hooks.log_path()
     if args.dry_run:
         print(f"log: {log}")
+        # 実走前に接続先とセッションを確認できる（本番へ向いていないかを叩く前に見る）。
+        for line in env_lines():
+            print(line)
         for s in selected:
             budget = f"[予算 {s.budget_min:.0f}分] " if s.budget_min is not None else "[予算なし] "
             print(f"  {s.name}: {budget}{' '.join(s.argv)}  # {s.why}")
@@ -450,6 +453,10 @@ def run_batch(spec: BatchSpec, steps: Sequence[Step], hooks: Hooks,
     with Runner(log) as runner:
         runner.write("=" * 70)
         runner.write(f"[{utc_now_iso()}] {spec.name}開始（正本=ローカル・#503）")
+        # **どこで走ったかを最初に残す**（#550）。S4U はセッション0で走り、`.env` も PATH も
+        # 対話セッションと変わりうるのに、これまでログから一切読めなかった。
+        for line in env_lines():
+            runner.write(line)
         for step in selected:
             results[step.name] = runner.run(step)      # 失敗しても次へ進む
         runner.write("-" * 70)
@@ -466,6 +473,57 @@ def run_batch(spec: BatchSpec, steps: Sequence[Step], hooks: Hooks,
         runner.write(f"[{utc_now_iso()}] {spec.name}終了")
 
     return sum(1 for c in results.values() if c != 0)
+
+
+# 値に機微が入りうる環境変数名の手掛かり。**プレフィックス一致で全部出す**方針なので、
+# 将来 FINAPP_*_KEY のようなものが増えても素通りしないよう、名前の側で伏せる。
+_SECRET_HINTS = ("KEY", "TOKEN", "SECRET", "PASSWORD", "PASS", "CRED")
+
+
+def _session_id() -> str:
+    """Windows のセッション ID。S4U はセッション0で走るので対話実行と区別できる。
+
+    S4U 化（#515）以降、**バッチは対話セッションと別の環境で走る**。どちらで走ったかは
+    切り分けの最初の分岐なのに、これまでログのどこにも出ていなかった。
+    """
+    try:
+        import ctypes
+        sid = ctypes.c_ulong()
+        if ctypes.windll.kernel32.ProcessIdToSessionId(os.getpid(), ctypes.byref(sid)):
+            return f"{sid.value}{'（S4U/サービス側）' if sid.value == 0 else '（対話）'}"
+    except Exception:      # noqa: BLE001 — 診断用の1行のためにバッチを落とさない
+        pass
+    return "不明"
+
+
+def env_lines() -> list[str]:
+    """実行環境の要点。ログの先頭に置いて「どこで走ったか」を残す（#550）。
+
+    **生の接続文字列は絶対に出さない**（`db_target_info()` の表示名だけ使う）。`.logs` の中身は
+    Issue 本文へ貼られうるし、リポジトリは public である。
+
+    なぜ要るか: S4U（#515）でバッチはセッション0で走るようになり、`.env` の解決も PATH も
+    対話セッションと変わりうる。**取り落としても書き込み自体は成功する**ので、別の DB を見て
+    いても静かに正常終了する——#503 の反転で `render.yaml` に prod を書き忘れ、空の DB に
+    繋がって0件に化けた（#508）のと同型で、接続先の食い違いは沈黙する。
+    """
+    lines = [
+        f"[env] python : {sys.executable}"
+        f"{' (venv)' if sys.prefix != getattr(sys, 'base_prefix', sys.prefix) else ' (venv ではない)'}",
+        f"[env] cwd    : {os.getcwd()}",
+    ]
+    try:
+        from database import db_target_info
+        lines.append(f"[env] DB     : {db_target_info().get('db_label', '不明')}")
+    except Exception as e:     # noqa: BLE001 — ここで落ちるとバッチが始まらない
+        lines.append(f"[env] DB     : 解決できない（{type(e).__name__}: {str(e)[:120]}）")
+    lines.append(f"[env] session: {_session_id()}")
+    finapp = {k: v for k, v in sorted(os.environ.items()) if k.startswith("FINAPP_")}
+    shown = " ".join(
+        f"{k}={'***' if any(h in k.upper() for h in _SECRET_HINTS) else v}"
+        for k, v in finapp.items())
+    lines.append(f"[env] FINAPP : {shown or '(未設定)'}")
+    return lines
 
 
 def window_problem(steps: Sequence[Step], window_min: float,
@@ -507,4 +565,5 @@ __all__ = [
     "ROOT", "LOG_DIR", "ISSUE_LABELS", "Step", "BatchSpec", "Hooks", "Runner",
     "utc_now_iso", "log_path", "record_footprint", "issue_body", "notify",
     "build_parser", "select_steps", "run_batch", "models_from_steps",
+    "env_lines", "window_problem",
 ]

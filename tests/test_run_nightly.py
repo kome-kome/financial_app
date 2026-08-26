@@ -63,6 +63,61 @@ class TestStepOrder:
             assert s.argv[0] == "/x/py.exe"
 
 
+class TestExecutionEnvIsRecorded:
+    """**どこで走ったか**をログの先頭に残す（#550）。
+
+    S4U 化（#515）でバッチはセッション0で走るようになり、`.env` の解決も PATH も対話
+    セッションと変わりうる。取り落としても**書き込み自体は成功する**ので、別の DB を見て
+    いても静かに正常終了する（#508 と同型で、接続先の食い違いは沈黙する）。
+    """
+
+    def test_the_log_opens_with_the_environment(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(rn.subprocess, "Popen", lambda argv, **kw: _FakeProc(0))
+        monkeypatch.setattr(rn, "log_path", lambda now=None: tmp_path / "n.log")
+        monkeypatch.setattr(rn, "record_footprint", lambda results: None)
+        monkeypatch.setattr(rn, "notify", lambda results, log, run=None: None)
+        rn.main([])
+        text = (tmp_path / "n.log").read_text(encoding="utf-8")
+        for key in ("[env] python", "[env] cwd", "[env] DB", "[env] session", "[env] FINAPP"):
+            assert key in text, f"{key} がログに無い＝どこで走ったか読めない"
+
+    def test_no_connection_string_leaks_into_the_log(self, monkeypatch):
+        """`.logs` は Issue へ貼られうるし、リポジトリは public。生 URL を出さない。"""
+        import scripts.batch_common as bc
+        monkeypatch.setenv("FINAPP_DB_TARGET", "local")
+        text = "\n".join(bc.env_lines())
+        assert "postgresql://" not in text and "@" not in text
+
+    def test_secret_looking_env_vars_are_masked(self, monkeypatch):
+        import scripts.batch_common as bc
+        monkeypatch.setenv("FINAPP_SOME_API_KEY", "s3cr3t-value")
+        monkeypatch.setenv("FINAPP_DB_TARGET", "local")
+        text = "\n".join(bc.env_lines())
+        assert "s3cr3t-value" not in text, "機微な値がそのまま出ている"
+        assert "FINAPP_SOME_API_KEY=***" in text
+        assert "FINAPP_DB_TARGET=local" in text, "普通のフラグまで伏せている"
+
+    def test_an_unresolvable_database_does_not_stop_the_batch(self, monkeypatch):
+        """ここで落ちるとバッチが**始まらない**＝診断行のために本業を壊す。"""
+        import builtins
+        import scripts.batch_common as bc
+        real_import = builtins.__import__
+
+        def boom(name, *a, **kw):
+            if name == "database":
+                raise RuntimeError("解決先がリモート")
+            return real_import(name, *a, **kw)
+
+        monkeypatch.setattr(builtins, "__import__", boom)
+        text = "\n".join(bc.env_lines())
+        assert "解決できない" in text and "RuntimeError" in text
+
+    def test_dry_run_shows_the_environment_before_running(self, capsys):
+        """本番へ向いていないかを、叩く前に確認できる。"""
+        rn.main(["--dry-run"])
+        assert "[env] DB" in capsys.readouterr().out
+
+
 class TestKeepsGoing:
     def test_a_failing_step_does_not_stop_the_rest(self, tmp_path, monkeypatch):
         seen = []
