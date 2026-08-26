@@ -48,6 +48,8 @@ Render の制約と運用形態に合わせて設計すること。
 
 - **Egress はローカル駆動では発生しない**（ローカル読取は Supabase を1バイトも使わない）。
 - ステップ間で止めない設計なので、収集が落ちてもスコア更新は走る。両方の結果が `.logs/<batch>_YYYYMMDD.log` に残る。
+- **ログの先頭に実行環境が出る**（`batch_common.env_lines()`・#550）＝python パス（venv か否か）・cwd・**DB 接続先の表示名**・セッション ID・`FINAPP_*`。S4U はセッション0で走るので、`session: 0（S4U/サービス側）` と出るのが自動実行、`1（対話）` が手動実行。**接続先が想定と違っても書き込みは成功して静かに正常終了する**ので、切り分けの最初にここを見る。`./run_nightly.ps1 -DryRun` なら実走せずに同じ行が出る。
+- **実行中のログはエクスプローラ上のサイズが 0 のまま**（Windows がオープン中ファイルのサイズをメタデータへ反映しない）。`Get-ChildItem` の `Length` を見て「空＝即死」と読まないこと。中身は `[System.IO.File]::Open($f,'Open','Read','ReadWrite')` で読める。
 - 「走らなかった」ことは **毎日 20:00 の `financial_app-watchdog`（`scripts/check_batch_freshness.py`）が `app_settings` の `*_last_run` を見て起票する**（#515 手順3）。`/api/morning` の as-of ブロック（#416/#417）は人が開いたときの最後の環として残る。**閾値は `cadence + 窓` の導出**（夜間 24h+6h=30h／月次 31日+16h=760h）で、窓を広げれば閾値も自動で広がる＝乖離が原理的に起きない。副産物として「実行中は鳴らない」が構造的に成立する（窓の項がそのまま「まだ走っていてよい時間」の許容）。**見るのは `*_last_run` であって `*_last_success` ではない**——後者は #512 が解けるまで `monthly_last_success` が設計上ずっと古く、そこで鳴らすと恒久的に open な Issue ができて通知そのものが信用されなくなる（成功側は報告と Issue 本文には必ず載る）。
 - **月次の並びは「依存順 ∧ 軽い順」**＝`macro_beta_loadings` は M-1 の入力なので推論が tune より先、かつ打ち切られても前方が揃うよう軽い順（factor_premia 実測 2.6分 → macro_beta → tune）。
 - **`vacuum` だけは別枠で先頭**（#290）。`VACUUM FULL` は ACCESS EXCLUSIVE ロックを取るので、後ろに置くと tune が長引いたぶん実行機会が減り、上限で打ち切られると一度も走らない。**週次ではなく月次で足りる**のは、`_pipeline_vacuum.py` が前段で per-table の `autovacuum_vacuum_scale_factor` を 0.02 へ較正するため dead tuple は 2% で回収され続け、月次で要るのは物理サイズの頭打ちだけだから。Supabase 時代に週次だったのは**枠を超えた瞬間 read-only になる崖**があったからで、ローカルにその崖は無い。
