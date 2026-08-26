@@ -47,8 +47,12 @@ class _FakeDB:
 
 
 @pytest.fixture
-def settings(monkeypatch):
-    """app_settings の中身を差し替える。既定は「全部健全」。"""
+def settings(monkeypatch, tmp_path):
+    """app_settings の中身を差し替える。既定は「全部健全」。
+
+    **ログと gh も必ず隔離する。** ここを差し替えないと `main()` を通るテストが本番の
+    `.logs/watchdog_YYYYMMDD.log` へ書き込み、実際に 2026-08-26 に汚染した。
+    """
     store = {
         run_nightly.KEY_LAST_RUN: _iso(1.0),
         run_nightly.KEY_LAST_SUCCESS: _iso(1.0),
@@ -61,11 +65,22 @@ def settings(monkeypatch):
                         lambda db, key, value: store.__setitem__(key, value))
     monkeypatch.setattr(cbf, "_open_session", lambda: _FakeDB())
     monkeypatch.setattr(cbf, "_db_label", lambda: "ローカル（financial_app）")
+    monkeypatch.setattr(cbf, "_log_path", lambda: tmp_path / "watchdog.log")
+    monkeypatch.setattr(cbf, "check_gh", lambda **_k: None)
+    # **実プロセスを構造的に遮断する。** ここを個々のテストの monkeypatch に任せていたため、
+    # notify を潰し忘れた1本が本物の `gh` を起動し、**GitHub へ Issue を立てた**
+    # （2026-08-26・#552 を誤起票）。書き忘れうる場所に依存させない。
+    def _no_subprocess(argv, **_k):
+        raise AssertionError(f"テストから実プロセスを起動しようとした: {argv}")
+
+    monkeypatch.setattr(cbf.subprocess, "run", _no_subprocess)
     return store
 
 
-def _snap(store, now=NOW):
-    return cbf.collect(_FakeDB(), now, get=lambda db, key: store.get(key))
+def _snap(store, now=NOW, gh_error=None):
+    snap = cbf.collect(_FakeDB(), now, get=lambda db, key: store.get(key))
+    snap["gh_error"] = gh_error
+    return snap
 
 
 class _FakeRun:
@@ -215,6 +230,69 @@ class TestUnreachableDatabase:
         snap = {"now": NOW, "rows": [], "db_error": "connection refused",
                 "db_label": "ローカル（financial_app）"}
         assert cbf.problems(snap)[0]["title"] == cbf.DB_ERROR_TITLE
+
+
+class TestTheNotificationPathIsCheckedWhileHealthy:
+    """**実行の成功 != 通知が届く。** 異常時にしか gh を呼ばないと、通知の死は
+    一番届いてほしい回に判明する（#515 の「登録 != 実行」の一段先）。"""
+
+    def test_a_healthy_run_still_reports_the_notification_path(self, settings):
+        report = "\n".join(cbf.format_report(_snap(settings)))
+        assert "通知経路" in report and "gh 到達可" in report
+
+    def test_a_dead_gh_is_reported_even_when_batches_are_fine(self, settings):
+        snap = _snap(settings, gh_error="PATH から gh が見つからない")
+        found = cbf.problems(snap)
+        assert [p["title"] for p in found] == [cbf.GH_ERROR_TITLE]
+        assert "gh 到達可" not in "\n".join(cbf.format_report(snap))
+
+    def test_missing_gh_binary_is_detected(self):
+        assert "PATH" in cbf.check_gh(which=lambda _n: None)
+
+    def test_failed_auth_is_detected(self):
+        def unauth(argv, **_k):
+            return subprocess.CompletedProcess(argv, 1, stdout="", stderr="not logged in")
+
+        msg = cbf.check_gh(run=unauth, which=lambda _n: "C:/gh.exe")
+        assert msg and "認証" in msg
+
+    def test_a_reachable_gh_returns_none(self):
+        def ok(argv, **_k):
+            return subprocess.CompletedProcess(argv, 0, stdout="Logged in", stderr="")
+
+        assert cbf.check_gh(run=ok, which=lambda _n: "C:/gh.exe") is None
+
+    def test_a_hanging_gh_does_not_eat_the_window(self):
+        """15分の窓を gh の待ちで食い潰さない。"""
+        def hang(argv, **kwargs):
+            assert kwargs.get("timeout") == cbf.GH_TIMEOUT_SEC
+            raise subprocess.TimeoutExpired(argv, cbf.GH_TIMEOUT_SEC)
+
+        assert "返らない" in cbf.check_gh(run=hang, which=lambda _n: "C:/gh.exe")
+        assert cbf.GH_TIMEOUT_SEC * 2 < cbf.SELF_WINDOW_MIN * 60
+
+    def test_the_gh_problem_cannot_be_filed_but_still_exits_nonzero(self, settings, monkeypatch):
+        """起票の手段が死んでいるので Issue は立たない。痕跡は exit code とログだけ。"""
+        monkeypatch.setattr(cbf, "check_gh", lambda **_k: "PATH から gh が見つからない")
+        assert cbf.main(["--now", NOW.isoformat()]) == cbf.EXIT_NOTIFY_FAILED
+
+    def test_dry_run_does_not_probe_gh(self, settings, monkeypatch):
+        monkeypatch.setattr(cbf, "check_gh",
+                            lambda **_k: pytest.fail("--dry-run で gh を叩いてはいけない"))
+        cbf.main(["--now", NOW.isoformat(), "--dry-run"])
+
+
+class TestTestsMustNotTouchTheRealLog:
+    """テストが本番ログを汚した実害があった（2026-08-26）。運用中の記録が読めなくなる。"""
+
+    def test_main_takes_its_log_path_from_the_seam(self, settings, tmp_path, monkeypatch):
+        monkeypatch.setattr(cbf, "notify", lambda *a, **k: [])
+        cbf.main(["--now", NOW.isoformat()])
+        assert (tmp_path / "watchdog.log").exists(), "差し替えた場所へ書いていない"
+
+    def test_the_seam_points_at_the_batch_log_dir_by_default(self):
+        import scripts.batch_common as bc
+        assert cbf._log_path() == bc.log_path("watchdog")
 
 
 class TestIssueIsNotDuplicatedDaily:
