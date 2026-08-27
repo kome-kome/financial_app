@@ -236,6 +236,12 @@ class Company(Base):
     issued_shares = Column(Float, nullable=True)           # 発行済株式数（J-Quants 取得・最新値）
     is_active     = Column(Boolean, nullable=False, default=True)  # 上場中フラグ（J-Quants /equities/master 突合で自動更新。#315・#462）
     delisted_date = Column(Date, nullable=True)             # is_active=False へ遷移した日（再上場等で復帰した場合はNoneへ戻す）
+    # 解決済みの Yahoo ティッカーサフィックス（".S"=札証 / ".F"=福証・#555）。
+    # **NULL は「未解決＝.T（東証）で試す」の1つの意味しか持たない**（3状態目を作らない
+    # ＝#475 のバックオフが状態を DB に持たない利点を壊さない）。値が入るのは
+    # scripts/resolve_price_suffix.py が meta.exchangeName を突合して採用した社だけ。
+    # `market` 列（プライム/スタンダード/グロース）とは別物なので混同しないこと。
+    yahoo_suffix  = Column(String(4), nullable=True)
     created_at   = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     updated_at   = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
@@ -1963,6 +1969,11 @@ def _ensure_tables() -> None:
         ))
         conn.execute(text(
             "ALTER TABLE companies ADD COLUMN IF NOT EXISTS delisted_date DATE"
+        ))
+        # 地方取引所の単独上場を Yahoo から取るためのサフィックス（#555・非破壊・冪等）。
+        # 既存全行は NULL のまま＝".T"（従来どおり）＝この列を足しただけでは挙動が変わらない。
+        conn.execute(text(
+            "ALTER TABLE companies ADD COLUMN IF NOT EXISTS yahoo_suffix VARCHAR(4)"
         ))
         for col in _NEW_COLS:
             conn.execute(text(

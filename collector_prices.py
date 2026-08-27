@@ -997,20 +997,23 @@ async def backfill_historical_stock_prices_yahoo(
         log.info("backfill_historical_stock_prices_yahoo: 対象レコードなし")
         return 0
 
-    # edinet_code → sec_code マッピング
+    # edinet_code → (sec_code, yahoo_suffix) マッピング。
+    # サフィックスは既存クエリに列を1本足すだけで運ぶ（#555）＝追加の往復を作らない。
     sec_map = {
-        c.edinet_code: c.sec_code
-        for c in db.query(Company.edinet_code, Company.sec_code)
+        c.edinet_code: (c.sec_code, c.yahoo_suffix)
+        for c in db.query(Company.edinet_code, Company.sec_code, Company.yahoo_suffix)
         .filter(Company.sec_code.isnot(None))
         .all()
     }
 
     # 企業ごとにグループ化（1企業=1 Yahoo リクエストで複数 period_end をカバー）
     by_company: dict = defaultdict(list)
+    suffix_of: dict = {}
     for rec in target_records:
-        sec_code = sec_map.get(rec.edinet_code)
+        sec_code, suffix = sec_map.get(rec.edinet_code, (None, None))
         if sec_code and sec_code.strip():
             by_company[sec_code].append(rec)
+            suffix_of[sec_code] = suffix
 
     total   = len(by_company)
     updated = 0
@@ -1028,9 +1031,11 @@ async def backfill_historical_stock_prices_yahoo(
             d_from = (period_ends[0]  - timedelta(days=MAX_GAP_DAYS)).strftime("%Y%m%d")
             d_to   = (period_ends[-1] + timedelta(days=MAX_GAP_DAYS)).strftime("%Y%m%d")
 
-            # Yahoo Finance ティッカー（東証: {sec_code}.T）
-            ticker = f"{sec_code}.T"
-            rows = await fetch_yahoo_history(session, ticker, d_from, d_to)
+            # Yahoo Finance ティッカー（既定は東証 .T・解決済みなら .S/.F・#555）
+            suffix = suffix_of.get(sec_code)
+            ticker = yahoo_ticker(sec_code, suffix)
+            rows = await fetch_yahoo_history(session, ticker, d_from, d_to,
+                                             **yahoo_guard_kwargs(suffix))
 
             if rows:
                 # {trade_date_str: close} の辞書
@@ -1161,15 +1166,16 @@ async def fill_recent_stock_price_gap_yahoo(
     floor_d = today - timedelta(days=DAILY_WINDOW_DAYS)
 
     companies = [
-        (row.sec_code, row.edinet_code, row.is_active)
-        for row in db.query(Company.sec_code, Company.edinet_code, Company.is_active)
+        (row.sec_code, row.edinet_code, row.is_active, row.yahoo_suffix)
+        for row in db.query(Company.sec_code, Company.edinet_code, Company.is_active,
+                            Company.yahoo_suffix)
         .filter(Company.sec_code.isnot(None))
         .all()
     ]
 
     n_delisted_skipped = 0
     to_fetch = []
-    for sec_code, edinet_code, is_active in companies:
+    for sec_code, edinet_code, is_active, yahoo_suffix in companies:
         _d, _w = latest_daily.get(edinet_code), latest_weekly.get(edinet_code)
         last = max(x for x in (_d, _w) if x) if (_d or _w) else None
         if last is None:
@@ -1195,7 +1201,8 @@ async def fill_recent_stock_price_gap_yahoo(
                     continue                      # この社はギャップなし
                 start = max(last_d + timedelta(days=1), floor_d)
             last_iso = last_d.isoformat()
-        to_fetch.append((sec_code, edinet_code, start.strftime("%Y%m%d"), last_iso))
+        to_fetch.append((sec_code, edinet_code, start.strftime("%Y%m%d"), last_iso,
+                         yahoo_suffix))
 
     total = len(to_fetch)
     if total == 0:
@@ -1226,8 +1233,9 @@ async def fill_recent_stock_price_gap_yahoo(
 
     async def _yahoo_batch_gen(http):
         nonlocal n_new
-        for i, (sec_code, edinet_code, d_from, last_iso) in enumerate(to_fetch, 1):
-            rows = await fetch_yahoo_history(http, f"{sec_code}.T", d_from, d_to)
+        for i, (sec_code, edinet_code, d_from, last_iso, suffix) in enumerate(to_fetch, 1):
+            rows = await fetch_yahoo_history(http, yahoo_ticker(sec_code, suffix),
+                                             d_from, d_to, **yahoo_guard_kwargs(suffix))
             # bar_cap で進行中セッションのバーを捨てる（#474）。Yahoo の interval=1d は
             # 場中でもその日の**途中経過**を1本返す。J-Quants 無料は直近12週を配信しないので
             # 暫定値のまま確定せず、対象社を絞った状態では上書きの機会も来ない。
@@ -1289,14 +1297,14 @@ async def backfill_weekly_history_yahoo(
     )
 
     companies = (
-        db.query(Company.sec_code, Company.edinet_code)
+        db.query(Company.sec_code, Company.edinet_code, Company.yahoo_suffix)
         .filter(Company.sec_code.isnot(None), Company.sec_code != "")
         .all()
     )
 
     # 取得対象: weekly 未収集、または最古日が floor より新しい（過去が不足する）社のみ
     to_fetch = []
-    for sec_code, edinet_code in companies:
+    for sec_code, edinet_code, yahoo_suffix in companies:
         oldest = min_week.get(edinet_code)
         if oldest is None:
             d_to = today
@@ -1304,7 +1312,7 @@ async def backfill_weekly_history_yahoo(
             d_to = date.fromisoformat(oldest) - timedelta(days=1)
         else:
             continue  # 既に years_back 以上カバー済み
-        to_fetch.append((sec_code, edinet_code, d_to.strftime("%Y%m%d")))
+        to_fetch.append((sec_code, edinet_code, d_to.strftime("%Y%m%d"), yahoo_suffix))
 
     total = len(to_fetch)
     if total == 0:
@@ -1313,13 +1321,14 @@ async def backfill_weekly_history_yahoo(
 
     upserted = 0
     async with httpx.AsyncClient(timeout=60) as session:
-        for i, (sec_code, edinet_code, d_to) in enumerate(sorted(to_fetch), 1):
+        for i, (sec_code, edinet_code, d_to, suffix) in enumerate(sorted(to_fetch), 1):
             if cancel_check and cancel_check():
                 if on_progress:
                     on_progress(i - 1, total, f"[週次backfill] 停止（{upserted}件保存済み）")
                 return {"cancelled": True, "upserted": upserted, "companies": i - 1}
 
-            rows = await fetch_yahoo_history(session, f"{sec_code}.T", d_from, d_to)
+            rows = await fetch_yahoo_history(session, yahoo_ticker(sec_code, suffix),
+                                             d_from, d_to, **yahoo_guard_kwargs(suffix))
             records = [
                 {"edinet_code": edinet_code, "trade_date": r["trade_date"],
                  "close": r["close"], "volume": r.get("volume")}
@@ -1480,12 +1489,13 @@ def compare_official_vs_weekly(db, official: dict, threshold: float) -> dict:
 
     if worst:
         meta = {
-            r.edinet_code: (r.sec_code, r.name)
-            for r in db.query(Company.edinet_code, Company.sec_code, Company.name)
+            r.edinet_code: (r.sec_code, r.name, r.yahoo_suffix)
+            for r in db.query(Company.edinet_code, Company.sec_code, Company.name,
+                              Company.yahoo_suffix)
             .filter(Company.edinet_code.in_(list(worst))).all()
         }
         for ec, rec in worst.items():
-            rec["sec_code"], rec["name"] = meta.get(ec, (None, ""))
+            rec["sec_code"], rec["name"], rec["yahoo_suffix"] = meta.get(ec, (None, "", None))
 
     breaks = sorted(worst.values(), key=lambda r: (-r["max_dev"], r["edinet_code"]))
     return {"compared": compared, "breaks": breaks}
@@ -1587,7 +1597,9 @@ async def repair_price_scale_breaks(
             oldest = min_week.get(ec)
             d_from = (date.fromisoformat(str(oldest)[:10]) if oldest
                       else date.today() - timedelta(days=365 * 10)).strftime("%Y%m%d")
-            rows = await fetch_yahoo_history(session, f"{sec}.T", d_from, d_to)
+            suffix = b.get("yahoo_suffix")
+            rows = await fetch_yahoo_history(session, yahoo_ticker(sec, suffix),
+                                             d_from, d_to, **yahoo_guard_kwargs(suffix))
             recs = [{"edinet_code": ec, "trade_date": r["trade_date"],
                      "close": r["close"], "volume": r.get("volume")}
                     for r in (rows or []) if r.get("close")]
@@ -3051,14 +3063,43 @@ async def fetch_wikimedia_pageviews(
     } for d, v in sorted(totals.items())]
 
 
-async def fetch_yahoo_history(
+def _meta_matches(meta: dict,
+                  exchanges: Optional[frozenset] = None,
+                  currency: Optional[str] = None) -> bool:
+    """Yahoo の `meta` が期待する取引所・通貨かどうか（#555）。
+
+    期待値が None なら**検証しない**（常に True）＝`.T` 経路の従来挙動。
+    逆に検証を要求したのに `meta` が空なら False——「取れたが素性が分からない」ものを
+    採ると、`.F` が Frankfurt の同記号銘柄を返す誤爆（454社中2社・実測）が
+    「1社だけ救えた」というもっともらしい形で通ってしまう。
+    HTTP を張らずに単体テストできるよう純関数として切り出す（is_common_stock_code と同じ作法）。
+    """
+    if exchanges is None and currency is None:
+        return True
+    if not meta:
+        return False
+    if exchanges is not None and meta.get("exchangeName") not in exchanges:
+        return False
+    if currency is not None and meta.get("currency") != currency:
+        return False
+    return True
+
+
+async def fetch_yahoo_chart(
     session: httpx.AsyncClient,
     yf_ticker: str,
     date_from: str,   # "YYYYMMDD"
     date_to:   str,   # "YYYYMMDD"
-) -> list:
-    """Yahoo Finance v8 API から日次 OHLCV を取得する。
-    GitHub Actions（Azure IP）からも動作する。stooq の代替として使用。"""
+) -> tuple:
+    """Yahoo Finance v8 API から日次 OHLCV と `meta` を取得する → (rows, meta)。
+
+    `fetch_yahoo_history` の実装本体。**全エラー経路で ([], {}) を返す**（例外は投げない）。
+
+    `meta` を `timestamp` より**先に**読むのが要点（#555）。名証（`.NG`）は
+    HTTP200・timestamp 0行・`exchangeName=YHD` を返すため、timestamp の KeyError で
+    即 return する実装だと「Yahoo が 200 を返すが中身が無い」が 404 と区別できず、
+    調査レポートから消える（#438 の `^BCOM` と同型の、例外を出さない壊れ方）。
+    """
     try:
         # date → Unix timestamp（JST 00:00 = UTC 前日15:00、余裕を持って+1日）
         y1, m1, d1_ = int(date_from[:4]), int(date_from[4:6]), int(date_from[6:8])
@@ -3067,7 +3108,7 @@ async def fetch_yahoo_history(
         period2 = int(calendar.timegm((y2, m2, d2_, 23, 59, 59)))
     except (ValueError, IndexError) as e:
         log.debug(f"Yahoo Finance 日付変換失敗 {yf_ticker}: {e}")
-        return []
+        return [], {}
 
     url = (f"https://query1.finance.yahoo.com/v8/finance/chart/{yf_ticker}"
            f"?interval=1d&period1={period1}&period2={period2}")
@@ -3079,15 +3120,23 @@ async def fetch_yahoo_history(
         data = r.json()
     except Exception as e:
         log.debug(f"Yahoo Finance 取得失敗 {yf_ticker}: {e}")
-        return []
+        return [], {}
 
     try:
         result = data["chart"]["result"][0]
+    except (KeyError, IndexError, TypeError) as e:
+        log.debug(f"Yahoo Finance レスポンス解析失敗 {yf_ticker}: {e}")
+        return [], {}
+
+    # meta は timestamp より先に読む（上の docstring 参照）
+    meta = result.get("meta") or {} if isinstance(result, dict) else {}
+
+    try:
         timestamps = result["timestamp"]
         quote = result["indicators"]["quote"][0]
     except (KeyError, IndexError, TypeError) as e:
         log.debug(f"Yahoo Finance レスポンス解析失敗 {yf_ticker}: {e}")
-        return []
+        return [], meta
 
     def _sf(lst, i):
         v = lst[i] if i < len(lst) else None
@@ -3106,6 +3155,31 @@ async def fetch_yahoo_history(
             "close":  close,
             "volume": _sf(quote.get("volume", []), i),
         })
+    return rows, meta
+
+
+async def fetch_yahoo_history(
+    session: httpx.AsyncClient,
+    yf_ticker: str,
+    date_from: str,   # "YYYYMMDD"
+    date_to:   str,   # "YYYYMMDD"
+    *,
+    expect_exchanges: Optional[frozenset] = None,
+    expect_currency:  Optional[str] = None,
+) -> list:
+    """Yahoo Finance v8 API から日次 OHLCV を取得する。
+    GitHub Actions（Azure IP）からも動作する。stooq の代替として使用。
+
+    `expect_exchanges` / `expect_currency` は**キーワード専用・既定 None＝検証しない**
+    ＝東証（`.T`）経路の意味論は1ビットも変わらない（#555）。地方取引所として
+    解決済みの社にだけ突合を課し、素性が合わなければ「取得できなかった」の一形態として
+    **空リストへ畳む**（呼び出し側の分岐を増やさないため）。
+    """
+    rows, meta = await fetch_yahoo_chart(session, yf_ticker, date_from, date_to)
+    if rows and not _meta_matches(meta, expect_exchanges, expect_currency):
+        log.debug(f"Yahoo Finance 取引所/通貨が不一致のため棄却 {yf_ticker}: "
+                  f"exchangeName={meta.get('exchangeName')} currency={meta.get('currency')}")
+        return []
     return rows
 
 

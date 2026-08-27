@@ -200,6 +200,7 @@ erDiagram
         string    accounting_standard "会計基準（JGAAP/IFRS/US-GAAP）"
         bool      is_active         "上場中フラグ（既定true。J-Quants listed/info突合で自動更新）"
         date      delisted_date     "is_active=false へ遷移した日（再上場等で復帰時はnullへ戻す）"
+        string    yahoo_suffix      "解決済みYahooティッカーのサフィックス（.S=札証/.F=福証）。nullは未解決＝.T（#555）"
         datetime  created_at        "登録日時"
         datetime  updated_at        "更新日時"
     }

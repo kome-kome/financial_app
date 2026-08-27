@@ -42,6 +42,60 @@ YAHOO_STOCK_RATE_SLEEP = 0.5   # Yahoo Finance 銘柄別取得のリクエスト
                                # 銘柄ごとに1リクエスト。3800社×0.5s ≈ 32分
 MAX_GAP_DAYS           = 30    # period_end から±30日以内の株価のみ採用（point_in_time マッチ）
 
+# --- Yahoo ティッカーのサフィックス（#555）------------------------------------
+# 生成箇所を1つに寄せるための定数群。かつては collector_prices.py の4箇所が
+# それぞれ `f"{sec_code}.T"` を直書きしており、**東証以外の単独上場は原理的に
+# 取得できない**という欠測が「例外を出さずに落ちる」形で常設化していた
+# （札証/福証の単独上場38社が全モデルの母集団から静かに脱落・#555）。
+YAHOO_SUFFIX_TSE = ".T"
+
+# サフィックス → Yahoo `meta.exchangeName` の期待値（2026-08-27 実測）。
+# **採用ガードの正本**。`.F` は Frankfurt と名前空間が衝突し、`377A.F` / `6461.F` は
+# HTTP200 で61バーを返すが `exchangeName=FRA`＝同記号の欧州銘柄（454社中2社が誤爆）。
+# 「取れた」ように見えるので件数だけ見ていると**別会社の株価を書き込む**。
+# `.T`（東証）は #555 で exchangeName を実測していないので**ここには載せない**
+# （未実測の定数を置かない＝db_egress.EgressCost が measured_on を必須にするのと同じ作法）。
+# 名証（`.NG`）は HTTP200・timestamp 0行・`exchangeName=YHD` で取得手段が無く、
+# 英数字コード8社は Yahoo 未収録。いずれも #555 のスコープ外（docs/GOTCHAS.md に記録）。
+YAHOO_LOCAL_EXCHANGES = {".S": "SAP", ".F": "FKA"}
+
+YAHOO_EXPECT_CURRENCY = "JPY"   # 誤爆は通貨でも弾ける（FRA 銘柄は EUR 建て）
+
+
+def yahoo_ticker(sec_code: str, suffix: Optional[str] = None) -> str:
+    """Yahoo Finance のティッカー文字列。suffix が None/空なら東証（.T）。
+
+    `suffix` は `companies.yahoo_suffix` の値をそのまま渡す想定で、**NULL は
+    「未解決＝.T で試す」の1つの意味しか持たない**（3状態目を作らない）。
+    DB は引かない純関数——gap-fill の内側ループは4,000社を逐次回るため、
+    ここで1クエリでも投げると4,000回の往復になる。
+    """
+    return f"{sec_code}{suffix or YAHOO_SUFFIX_TSE}"
+
+
+def yahoo_expect_exchanges(suffix: Optional[str]) -> Optional[frozenset]:
+    """そのサフィックスで受け入れてよい `meta.exchangeName` の集合。
+
+    `.T`（＝未解決を含む）は None＝**検証しない**。従来どおりの挙動を保つための
+    既定であり、地方取引所として解決済みの社にだけ突合を課す。
+    """
+    ex = YAHOO_LOCAL_EXCHANGES.get(suffix or YAHOO_SUFFIX_TSE)
+    return frozenset({ex}) if ex else None
+
+
+def yahoo_guard_kwargs(suffix: Optional[str]) -> dict:
+    """`fetch_yahoo_history` へ渡す誤爆ガードの kwargs。
+
+    **`.T`（未解決を含む）では空 dict を返す**——キーワードを1つも渡さないので、
+    東証経路の呼び出しはシグネチャの見た目まで従来と同一になる。これは審査上の
+    都合ではなく、「検証は解決済みの社にだけ課す」という意図を呼び出し側の形で
+    表しておくためのもの（新しい引数が既定で全社に効き始める事故を構造的に防ぐ）。
+    """
+    ex = yahoo_expect_exchanges(suffix)
+    if ex is None:
+        return {}
+    return {"expect_exchanges": ex, "expect_currency": YAHOO_EXPECT_CURRENCY}
+
 # --- 日本時間の基準（#474 / #476）----------------------------------------------
 # GitHub Actions のランナーは UTC。日本市場・EDINET の「日付」は JST なので、
 # 収集の日付境界は必ずこの tz で判定する（`date.today()` を直接使わない）。
