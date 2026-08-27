@@ -1174,16 +1174,27 @@ async def fill_recent_stock_price_gap_yahoo(
     ]
 
     n_delisted_skipped = 0
+    # 「価格を1件も持たない社」の母数（#555）。従来はスキップ数しかログに出ておらず、
+    # **454 → 416 のような改善を run ログから追えなかった**（アドホック SQL が要った）。
+    n_priceless = 0
+    n_priceless_resolved = 0
     to_fetch = []
     for sec_code, edinet_code, is_active, yahoo_suffix in companies:
         _d, _w = latest_daily.get(edinet_code), latest_weekly.get(edinet_code)
         last = max(x for x in (_d, _w) if x) if (_d or _w) else None
         if last is None:
+            n_priceless += 1
+            if yahoo_suffix:
+                n_priceless_resolved += 1
             # 価格を1件も持たない社。2026-08-27 の全数実測では該当 454社が全て
             # is_active=False だが、**全件が上場廃止済みという意味ではない**——うち38社は
             # 札証/福証の単独上場で現に取引がある。取れないのは上のティッカーが .T 固定で
             # あって銘柄が死んでいるからではない（#555）。毎晩ではなく間隔を空ける。
-            if (use_session and is_active is False
+            #
+            # **解決済み（yahoo_suffix 非 NULL）はバックオフを通り抜けて毎晩取りに行く**。
+            # 初回の夜に価格が入れば以降この分岐へ来なくなり通常の流れへ合流するので、
+            # 恒久的なコスト増にはならない。未解決は従来どおり7日に1回（#475 の挙動を保存）。
+            if (use_session and is_active is False and yahoo_suffix is None
                     and not should_retry_priceless_delisted(edinet_code, today)):
                 n_delisted_skipped += 1
                 continue
@@ -1212,9 +1223,11 @@ async def fill_recent_stock_price_gap_yahoo(
         with db_timeouts(db, statement=HEAVY_STATEMENT_TIMEOUT):
             trim_daily(db)
         log.info(f"fill_recent_stock_price_gap_yahoo: 全 {len(companies)} 社が最新セッション"
-                 f" {session} に追いついている（取得なし）")
+                 f" {session} に追いついている（取得なし）"
+                 f"・価格ゼロ {n_priceless}社（うち解決済み {n_priceless_resolved}社）")
         return {"skipped": True, "reason": "no_gap", "companies": 0,
-                "session": session.isoformat()}
+                "priceless": n_priceless, "priceless_resolved": n_priceless_resolved,
+                "exchange_rejected": 0, "session": session.isoformat()}
 
     to_fetch.sort(key=lambda x: (x[0], x[1]))   # 銘柄順に部分反映されるよう順序を決定的にする
     d_from_min = min(x[2] for x in to_fetch)
@@ -1225,17 +1238,24 @@ async def fill_recent_stock_price_gap_yahoo(
     log.info(f"fill_recent_stock_price_gap_yahoo: {total}/{len(companies)}社を補完"
              f"（基準セッション {session} / JST {now_jst:%Y-%m-%d %H:%M} ・"
              f"最古起点 {d_from_min} 〜 {d_to}"
+             + f" ・価格ゼロ {n_priceless}社（うち解決済み {n_priceless_resolved}社）"
              + (f" ・廃止済み価格ゼロ {n_delisted_skipped}社は今夜は見送り"
                 f"（{DELISTED_RETRY_INTERVAL_DAYS}日に1回試す・#475）" if n_delisted_skipped else "")
              + "）")
 
     n_new = 0        # 従来の最終日より後の日付＝正味の新規行。投入行数とは別に数える（#474）
+    # 解決済みサフィックスで叩いたのに取引所/通貨が合わず空になった社（#555）。
+    # 将来 Yahoo が記号を張り替えると、その社は**静かに priceless へ戻る**——それを
+    # 黙らせないための番人。通常は 0 で、0 以外が続いたら --reprobe を回す。
+    n_exchange_rejected = 0
 
     async def _yahoo_batch_gen(http):
-        nonlocal n_new
+        nonlocal n_new, n_exchange_rejected
         for i, (sec_code, edinet_code, d_from, last_iso, suffix) in enumerate(to_fetch, 1):
             rows = await fetch_yahoo_history(http, yahoo_ticker(sec_code, suffix),
                                              d_from, d_to, **yahoo_guard_kwargs(suffix))
+            if suffix and not rows:
+                n_exchange_rejected += 1
             # bar_cap で進行中セッションのバーを捨てる（#474）。Yahoo の interval=1d は
             # 場中でもその日の**途中経過**を1本返す。J-Quants 無料は直近12週を配信しないので
             # 暫定値のまま確定せず、対象社を絞った状態では上書きの機会も来ない。
@@ -1259,8 +1279,14 @@ async def fill_recent_stock_price_gap_yahoo(
     # upserted は record_prices_batch の戻り値＝**投入行数**であって新規行数ではない
     # （ON CONFLICT DO UPDATE）。2026-08-08 の「3,677件 追加」は実は全社ぶんの取り直しだった。
     log.info(f"fill_recent_stock_price_gap_yahoo: {upserted}件を株価テーブルへ集約保存"
-             f"（うち新規日付 {n_new}件）")
+             f"（うち新規日付 {n_new}件）"
+             + (f" ・**解決済みなのに空だった {n_exchange_rejected}社**"
+                f"（取引所/通貨の不一致か、Yahoo がその銘柄のバーを落とした。"
+                f"scripts.resolve_price_suffix --reprobe で測り直す・#555）"
+                if n_exchange_rejected else ""))
     return {"skipped": False, "upserted": upserted, "new_rows": n_new, "companies": total,
+            "priceless": n_priceless, "priceless_resolved": n_priceless_resolved,
+            "exchange_rejected": n_exchange_rejected,
             "from": d_from_min, "to": d_to, "session": session.isoformat()}
 
 
@@ -1269,6 +1295,7 @@ async def backfill_weekly_history_yahoo(
     years_back: int = 5,
     on_progress: Optional[Callable[[int, int, str], None]] = None,
     cancel_check: Optional[Callable[[], bool]] = None,
+    only: Optional[list] = None,
 ) -> dict:
     """stock_price_weekly を過去方向へ years_back 年まで延伸する（Yahoo Finance / #198）。
 
@@ -1282,6 +1309,13 @@ async def backfill_weekly_history_yahoo(
     Supabase Free 500MB を超えるのを防ぐ。weekly は古い daily から再集約済みのため情報損失なし。
     既存 weekly 行は ON CONFLICT UPDATE で同値上書き（破壊なし）。
     J-Quants カバー外の過去も Yahoo で取得でき、GitHub Actions（Azure IP）から動作する。
+
+    `only`（edinet_code のリスト）を渡すとその社だけに絞る（#555）。用途は
+    `scripts/resolve_price_suffix.py` からの呼び出し——サフィックスを解決しても
+    毎晩の gap-fill が付けられるのは `today - DAILY_WINDOW_DAYS`（183日）＝約26週ぶんだけで、
+    `z_momentum`（52週）にも `build_snapshots` の52週先ラベルにも届かない。
+    全社を回すと数十時間かかるので、解決できた社だけを対象にする
+    （`collect_macro_data(only=...)` と同じ絞り込みの作法）。
     """
     today     = date.today()
     floor_d   = date(today.year - years_back, today.month, today.day)
@@ -1296,11 +1330,15 @@ async def backfill_weekly_history_yahoo(
         .all()
     )
 
-    companies = (
+    q = (
         db.query(Company.sec_code, Company.edinet_code, Company.yahoo_suffix)
         .filter(Company.sec_code.isnot(None), Company.sec_code != "")
-        .all()
     )
+    # `only is not None` で判定する。**空リストは「全社」ではなく「対象なし」**——
+    # `if only:` にすると、解決0社だった回に全社 5年ぶんを取りに行って数十時間かかる。
+    if only is not None:
+        q = q.filter(Company.edinet_code.in_(list(only)))
+    companies = q.all()
 
     # 取得対象: weekly 未収集、または最古日が floor より新しい（過去が不足する）社のみ
     to_fetch = []

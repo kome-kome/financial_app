@@ -81,6 +81,11 @@ python collector.py --macro                              # マクロ全系列
 python collector.py --macro --macro-series JP10Y_FRED    # 指定系列のみ（定義是正後の再収集用）
 python collector.py --repair-price-breaks                # 週次株価の分割段差を検出（dry-run）
 python collector.py --repair-price-breaks --persist      # 同上＋該当銘柄をYahooで取り直し検算
+
+# 地方取引所の単独上場を拾う（#555）。既定はドライラン＝棄却理由まで出す
+python -m scripts.resolve_price_suffix                            # 何も書かない
+python -m scripts.resolve_price_suffix --apply --backfill-weekly  # 採用＋5年weekly
+python -m scripts.resolve_price_suffix --reprobe                  # 解決済みも測り直す
 python edinet_ping.py                    # EDINET API接続テスト
 ```
 

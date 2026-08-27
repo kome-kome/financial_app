@@ -112,6 +112,13 @@ async def main():
                 f"（うち新規日付 {gap_result.get('new_rows', 0)}件・"
                 f"{gap_result.get('from')} 〜 {gap_result.get('to')}・"
                 f"{gap_result.get('companies')}社・基準セッション {gap_result.get('session')}）")
+        # 価格ゼロの母数を毎晩残す（#555）。従来はスキップ数しか出ておらず、
+        # 「454 → 416 に減ったか」をアドホック SQL 無しに追えなかった。
+        # exchange_rejected は通常0で、0以外は解決済み社が静かに脱落し始めた合図。
+        log(f"  価格ゼロ {gap_result.get('priceless', 0)}社"
+            f"（うち解決済み {gap_result.get('priceless_resolved', 0)}社）"
+            + (f"・**解決済みなのに空 {gap_result.get('exchange_rejected')}社**"
+               if gap_result.get("exchange_rejected") else ""))
 
         # J-Quants catchup: 12週境界を過ぎた直後（today-90〜today-80日）を再取得し、
         # Yahoo 暫定値を J-Quants 公式値で自動上書きする（毎日走ることで徐々に置換）。
