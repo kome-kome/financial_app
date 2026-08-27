@@ -303,3 +303,208 @@ class TestNoRawTickerLiteralsRemain:
             src = f.read()
         assert src.count("yahoo_ticker(") >= 4, \
             "yahoo_ticker() の利用が4箇所未満＝どこかが直書きへ戻っている可能性がある"
+
+
+# ── 5. gap-fill が解決済みサフィックスを使う（#555 PR2）─────────────────────
+from datetime import date, datetime, timedelta, time as dtime      # noqa: E402
+from unittest.mock import patch                                     # noqa: E402
+
+from collector_prices import fill_recent_stock_price_gap_yahoo, JST  # noqa: E402
+
+
+def _monday_anchor():
+    """「直近の月曜 03:00 JST」相当の (now_jst, session)。実行日に依存させない。
+
+    test_cf_and_yahoo.py と同じアンカー（実 today の2週間手前に置き floor_d に触れない）。
+    """
+    base = date.today() - timedelta(days=14)
+    monday = base + timedelta(days=(7 - base.weekday()) % 7)
+    return datetime.combine(monday, dtime(3, 0), JST), monday - timedelta(days=3)
+
+
+class TestGapFillUsesResolvedSuffix:
+    """毎晩の gap-fill が `companies.yahoo_suffix` を引くこと。
+
+    捕捉するのは「叩いたティッカー列」と「渡された kwargs」の2つ。
+    ここが壊れると **38社が黙って priceless へ戻る**（例外は出ない）。
+
+    どのテストも「基準セッション当日の価格を持つアンカー社」を1社置く。
+    株価テーブルが完全に空だと `fill_recent_stock_price_gap_yahoo` は
+    `reason="empty"` で早期 return する（異常時に全社取得へ暴走させないためのガード）ので、
+    それを踏まずに本経路へ入るために要る。アンカーは `last_d >= session` で
+    スキップされるので、観測する `seen` には現れない。
+    """
+
+    def _seed_anchor(self, db, make_company, make_price, session):
+        db.add(make_company(edinet_code="E09999", sec_code="9999", is_active=True))
+        db.add(make_price(edinet_code="E09999", trade_date=session.isoformat()))
+
+    def _run(self, db, now_jst):
+        seen, kwargs_seen = [], []
+
+        async def fake(http, ticker, d_from, d_to, **kw):
+            seen.append(ticker)
+            kwargs_seen.append(kw)
+            return []
+
+        with patch("collector_prices.fetch_yahoo_history", new=fake):
+            res = asyncio.run(fill_recent_stock_price_gap_yahoo(
+                db, gap_days=0, now_jst=now_jst))
+        return res, seen, kwargs_seen
+
+    def test_anchor_alone_is_not_fetched(self, db, make_company, make_price):
+        """前提の確認: アンカーは最新セッションに追いついているので叩かれない。"""
+        now_jst, session = _monday_anchor()
+        self._seed_anchor(db, make_company, make_price, session)
+        db.commit()
+
+        res, seen, _kw = self._run(db, now_jst)
+        assert seen == []
+        assert res.get("reason") != "empty", "早期 return を踏んでいる（アンカーが効いていない）"
+
+    def test_resolved_company_uses_its_suffix(self, db, make_company, make_price):
+        now_jst, session = _monday_anchor()
+        self._seed_anchor(db, make_company, make_price, session)
+        db.add(make_company(edinet_code="E00001", sec_code="1001",
+                            is_active=False, yahoo_suffix=".S"))
+        db.commit()
+
+        _res, seen, kw = self._run(db, now_jst)
+        assert seen == ["1001.S"]
+        assert kw[0] == {"expect_exchanges": frozenset({"SAP"}), "expect_currency": "JPY"}
+
+    def test_unresolved_company_uses_tokyo_without_kwargs(self, db, make_company,
+                                                          make_price):
+        """未解決は `.T` かつ**キーワード無し**＝従来経路そのまま。"""
+        now_jst, session = _monday_anchor()
+        self._seed_anchor(db, make_company, make_price, session)
+        db.add(make_company(edinet_code="E00001", sec_code="1001", is_active=True))
+        db.add(make_price(edinet_code="E00001",
+                          trade_date=(session - timedelta(days=3)).isoformat()))
+        db.commit()
+
+        _res, seen, kw = self._run(db, now_jst)
+        assert seen == ["1001.T"]
+        assert kw[0] == {}
+
+    def test_resolved_company_bypasses_the_backoff(self, db, make_company, make_price,
+                                                   monkeypatch):
+        """**解決済みはバックオフの非該当日でも叩く**（#555 の要件）。"""
+        now_jst, session = _monday_anchor()
+        monkeypatch.setattr("collector_prices.should_retry_priceless_delisted",
+                            lambda ec, today: False)
+        self._seed_anchor(db, make_company, make_price, session)
+        db.add(make_company(edinet_code="E00002", sec_code="1002",
+                            is_active=False, yahoo_suffix=".F"))
+        db.commit()
+
+        _res, seen, _kw = self._run(db, now_jst)
+        assert seen == ["1002.F"], f"解決済みなのに見送られた: {seen}"
+
+    def test_unresolved_priceless_still_backs_off(self, db, make_company, make_price,
+                                                  monkeypatch):
+        """未解決は従来どおり7日に1回＝#475 の資産を壊していない。"""
+        now_jst, session = _monday_anchor()
+        monkeypatch.setattr("collector_prices.should_retry_priceless_delisted",
+                            lambda ec, today: False)
+        self._seed_anchor(db, make_company, make_price, session)
+        db.add(make_company(edinet_code="E00002", sec_code="1002", is_active=False))
+        db.commit()
+
+        _res, seen, _kw = self._run(db, now_jst)
+        assert seen == [], f"見送るべき社を叩いている: {seen}"
+
+    def test_priceless_counters_are_reported(self, db, make_company, make_price,
+                                             monkeypatch):
+        """母数が戻り値に載ること（454→416 を run ログから追えるようにする）。"""
+        now_jst, session = _monday_anchor()
+        monkeypatch.setattr("collector_prices.should_retry_priceless_delisted",
+                            lambda ec, today: True)
+        self._seed_anchor(db, make_company, make_price, session)
+        db.add(make_company(edinet_code="E00001", sec_code="1001",
+                            is_active=False, yahoo_suffix=".S"))
+        db.add(make_company(edinet_code="E00002", sec_code="1002", is_active=False))
+        db.commit()
+
+        res, seen, _kw = self._run(db, now_jst)
+        assert res["priceless"] == 2, "アンカーは価格を持つので母数へ入れない"
+        assert res["priceless_resolved"] == 1
+        assert sorted(seen) == ["1001.S", "1002.T"]
+
+    def test_exchange_rejected_is_counted(self, db, make_company, make_price):
+        """解決済みなのに空が返ったら数える＝静かな脱落を黙らせない。"""
+        now_jst, session = _monday_anchor()
+        self._seed_anchor(db, make_company, make_price, session)
+        db.add(make_company(edinet_code="E00001", sec_code="1001",
+                            is_active=False, yahoo_suffix=".S"))
+        db.commit()
+
+        res, _seen, _kw = self._run(db, now_jst)   # fake は常に [] を返す
+        assert res["exchange_rejected"] == 1
+
+    def test_unresolved_empty_is_not_counted_as_rejected(self, db, make_company,
+                                                         make_price, monkeypatch):
+        """未解決の空振りは `exchange_rejected` に混ぜない（意味が違う）。"""
+        now_jst, session = _monday_anchor()
+        monkeypatch.setattr("collector_prices.should_retry_priceless_delisted",
+                            lambda ec, today: True)
+        self._seed_anchor(db, make_company, make_price, session)
+        db.add(make_company(edinet_code="E00002", sec_code="1002", is_active=False))
+        db.commit()
+
+        res, _seen, _kw = self._run(db, now_jst)
+        assert res["exchange_rejected"] == 0
+
+
+class TestWeeklyBackfillOnlyFilter:
+    """`backfill_weekly_history_yahoo(only=...)` が対象を絞ること（#555）。
+
+    これが効かないと、解決した37社のために**全社 5年ぶん**を取りに行って数十時間かかる。
+    逆に絞りすぎると「解決したのに px_* が出ない」——daily 保持窓は183日＝約26週しかなく、
+    `z_momentum` の52週にも `build_snapshots` の52週先ラベルにも届かないため。
+    """
+
+    def _run(self, db, only=None):
+        from collector_prices import backfill_weekly_history_yahoo
+
+        seen = []
+
+        async def fake(session, ticker, d_from, d_to, **kw):
+            seen.append(ticker)
+            return []
+
+        with patch("collector_prices.fetch_yahoo_history", new=fake), \
+                patch("collector_prices.record_prices_batch", return_value=0), \
+                patch("collector_prices.YAHOO_STOCK_RATE_SLEEP", 0):
+            res = asyncio.run(backfill_weekly_history_yahoo(db, years_back=5, only=only))
+        return res, seen
+
+    def _seed(self, db, make_company):
+        db.add(make_company(edinet_code="E00001", sec_code="1001", yahoo_suffix=".S"))
+        db.add(make_company(edinet_code="E00002", sec_code="1002", yahoo_suffix=".F"))
+        db.add(make_company(edinet_code="E00003", sec_code="1003"))
+        db.commit()
+
+    def test_without_only_all_companies_are_targeted(self, db, make_company):
+        self._seed(db, make_company)
+        _res, seen = self._run(db)
+        assert sorted(seen) == ["1001.S", "1002.F", "1003.T"]
+
+    def test_only_restricts_to_the_listed_companies(self, db, make_company):
+        self._seed(db, make_company)
+        _res, seen = self._run(db, only=["E00001", "E00002"])
+        assert sorted(seen) == ["1001.S", "1002.F"], "絞り込みが効いていない"
+
+    def test_only_keeps_the_resolved_suffix(self, db, make_company):
+        """絞り込んでもサフィックスは保たれる（`.T` へ戻らない）。"""
+        self._seed(db, make_company)
+        _res, seen = self._run(db, only=["E00002"])
+        assert seen == ["1002.F"]
+
+    def test_empty_only_targets_nothing(self, db, make_company):
+        """空リストは「全社」ではなく「対象なし」。`if only:` の分岐を固定する。"""
+        self._seed(db, make_company)
+        res, seen = self._run(db, only=[])
+        assert seen == []
+        assert sorted(seen) == []
+        assert res.get("companies") in (0, None)
