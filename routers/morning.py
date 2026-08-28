@@ -29,9 +29,29 @@ from database import (
 router = APIRouter()
 log = logging.getLogger(__name__)
 
-# GitHub Actions の該当 run へ誘導するためのリポジトリ URL。
 # 「赤いのは分かったが次に何を見ればいいのか」で止まらせないための導線（#423 子3）。
-_ACTIONS_BASE = "https://github.com/kome-kome/financial_app/actions/workflows"
+#
+# **#503 で駆動が GitHub Actions からローカルのタスクスケジューラへ移った。** 以前ここは
+# `actions/workflows/<name>.yml` を指していたが、それらの cron は全てコメントアウト済みで
+# （`.github/workflows/` で生きている cron は `egress-health.yml` の1本だけ）、
+# **押すともう動いていないページに着く**。復旧手順の正本は DEPLOYMENT.md なのでそちらへ送る
+# （#561）。アンカーは付けない——見出しを直した瞬間に静かに壊れるため。
+_RUNBOOK_URL = "https://github.com/kome-kome/financial_app/blob/main/docs/DEPLOYMENT.md"
+
+# 各ブロックを前進させる駆動主体。表記は `nightly_scores.HEAVY_AUTOMATION` の
+# `local:<スクリプト>` 語彙と揃える（画面と登録簿で別の名前を使わない）。
+_DRIVER_NIGHTLY = "local:scripts/run_nightly.py"
+_DRIVER_MONTHLY = "local:scripts/run_monthly.py"
+
+# 手で回すときのコマンド。画面から読める場所に置く（DEPLOYMENT.md を開かずとも打てる）。
+_CMD_NIGHTLY = "./run_nightly.ps1"
+_CMD_MONTHLY = "./run_monthly.ps1"
+_CMD_MACRO = "python collector.py --macro"
+
+# 足跡の status を画面の語彙へ。**「まだ一度も走っていない」と「止まった」を同じ顔にしない**
+# のは watchdog 側と同じで、ここが決めるのは色だけ。
+_BATCH_LEVEL = {"ok": "fresh", "stale": "alert",
+                "missing": "alert", "unreadable": "alert"}
 
 # gap_ratio（sector_ols・nightly-scores が毎晩更新）の許容鮮度。夜間バッチが毎日
 # 走る前提なので、丸2日以上動いていなければ何かが壊れている。
@@ -64,6 +84,17 @@ def _worst(*levels: str) -> str:
     return {0: "fresh", 1: "warn", 2: "alert"}[worst]
 
 
+def _parse_iso(raw: Optional[str]) -> Optional[datetime]:
+    """足跡の ISO 文字列を datetime へ（表示用）。読めなければ None を返して素通しする。"""
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except (ValueError, TypeError):
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
 def _age_bdays(d: Optional[str]) -> Optional[int]:
     if not d:
         return None
@@ -84,8 +115,7 @@ def _gap_ratio_block(db: Session) -> dict:
     computed_at, n_rows = (row or (None, 0))
     if not computed_at:
         return {"computed_at": None, "n_rows": 0, "age_days": None, "level": "empty",
-                "workflow": "nightly-scores.yml",
-                "url": f"{_ACTIONS_BASE}/nightly-scores.yml"}
+                "driver": _DRIVER_NIGHTLY, "command": _CMD_NIGHTLY, "url": _RUNBOOK_URL}
     ref = computed_at if computed_at.tzinfo else computed_at.replace(tzinfo=timezone.utc)
     age_days = (datetime.now(timezone.utc) - ref).days
     level = ("alert" if age_days > GAP_ALERT_DAYS
@@ -95,16 +125,22 @@ def _gap_ratio_block(db: Session) -> dict:
         "n_rows": n_rows or 0,
         "age_days": age_days,
         "level": level,
-        "workflow": "nightly-scores.yml",
-        "url": f"{_ACTIONS_BASE}/nightly-scores.yml",
+        "driver": _DRIVER_NIGHTLY,
+        "command": _CMD_NIGHTLY,
+        "url": _RUNBOOK_URL,
     }
 
 
 def _mu_block(db: Session, mu_source: str) -> dict:
     """producer スコア（μ̂）の as-of。未蓄積なら level=empty で返す（例外にしない）。"""
     asof = get_producer_asof(db, mu_source)
-    base = {"source": mu_source, "workflow": "nightly-scores.yml",
-            "url": f"{_ACTIONS_BASE}/nightly-scores.yml"}
+    # μ̂ の更新主体は producer で違う（macro_enet は夜間、M-1 系は月次探索の
+    # --persist-scores 副作用）。毎晩前進するのは既定の macro_enet だけ。
+    is_nightly = mu_source == DEFAULT_MU_SOURCE
+    base = {"source": mu_source,
+            "driver": _DRIVER_NIGHTLY if is_nightly else _DRIVER_MONTHLY,
+            "command": _CMD_NIGHTLY if is_nightly else _CMD_MONTHLY,
+            "url": _RUNBOOK_URL}
     if not asof:
         return {**base, "snapshot_date": None, "snapshot_date_min": None,
                 "n_stale": 0, "age_bdays": None, "level": "empty"}
@@ -126,8 +162,7 @@ def _macro_block(db: Session) -> dict:
     except Exception as e:                     # 判定不能でも朝の表示は止めない
         log.info("マクロ鮮度の判定に失敗（表示は継続）: %s", e)
         return {"level": "unknown", "n_critical_bad": None, "worst": [],
-                "workflow": "macro-health.yml",
-                "url": f"{_ACTIONS_BASE}/macro-health.yml"}
+                "driver": _DRIVER_NIGHTLY, "command": _CMD_MACRO, "url": _RUNBOOK_URL}
     bad = [e for e in r["stale"] + r["missing"] if e["critical"]]
     return {
         "level": "alert" if bad else "fresh",
@@ -135,14 +170,84 @@ def _macro_block(db: Session) -> dict:
         "n_stale_total": len(r["stale"]) + len(r["missing"]),
         "worst": [{"code": e["code"], "last": e["last"], "lag_days": e["lag_days"]}
                   for e in bad[:5]],
-        "workflow": "macro-health.yml",
-        "url": f"{_ACTIONS_BASE}/macro-health.yml",
+        "driver": _DRIVER_NIGHTLY,
+        "command": _CMD_MACRO,
+        "url": _RUNBOOK_URL,
     }
 
 
-def _reasons(price: dict, gap: dict, mu: dict, macro: dict) -> list[str]:
+def _batch_block(db: Session, get=None, now: Optional[datetime] = None) -> dict:
+    """ローカル駆動バッチの足跡（#561）。「昨夜そもそも走ったのか」を画面へ出す。
+
+    **判定は `batch_freshness.collect()` と共有する**（watchdog と同じ閾値・同じ語彙）。
+    自前で経過を測ると、窓を広げたときに片方だけ黙って古くなる。
+
+    ここが無かった間、鮮度ブロックは「スコアが古い」までは言えたが「バッチが走っていない」
+    とは言えなかった。両者は原因が違う（前者は producer の失敗、後者は起動の失敗）のに
+    画面では同じ顔をする。結果として**健全なのに「止まっているのでは」と疑われ**、
+    正本をローカルへ移した後にアプリが使われなくなった（#561 の発端）。
+    ADR-0031「登録があること != 動いていること」の裏返しで、ここは
+    **動いていること != 動いていると分かること**にあたる。
+
+    `get` は `app_settings` 読み取りの継ぎ目（テストが足跡を注入する）。
+    """
+    # `batch_freshness` は import 時副作用を持たないが、API 起動時のコストは増やさない
+    # （`_macro_block` と同じ作法）。**`scripts/check_batch_freshness.py` の方を import
+    # しないこと**——あちらは import 時に FINAPP_DB_TARGET を書き換える。
+    from batch_freshness import collect
+    from scripts.run_nightly import KEY_LAST_RUN as _NIGHTLY_KEY
+
+    now = now or datetime.now(timezone.utc)
+    try:
+        snap = collect(db, now, get=get)
+    except Exception as e:                     # 判定不能でも朝の表示は止めない
+        log.info("バッチ鮮度の判定に失敗（表示は継続）: %s", e)
+        return {"level": "unknown", "rows": [], "driver": _DRIVER_NIGHTLY,
+                "command": _CMD_NIGHTLY, "url": _RUNBOOK_URL}
+
+    rows, level = [], "unknown"
+    for row in snap["rows"]:
+        w = row["watched"]
+        if row["status"] == "missing" and not w.missing_is_problem:
+            # 自分の行を書くのは自分だけ＝watchdog の初回 missing は正常
+            row_level = "fresh"
+        else:
+            row_level = _BATCH_LEVEL.get(row["status"], "alert")
+        gates = w.key_run == _NIGHTLY_KEY
+        if gates:
+            level = row_level
+        rows.append({
+            "label": w.label,
+            "task_name": w.task_name,
+            "status": row["status"],
+            "level": row_level,
+            "last_run": api._utc_to_jst_str(_parse_iso(row["run_raw"])),
+            "last_success": api._utc_to_jst_str(_parse_iso(row["success_raw"])),
+            "age_h": row["run_age_h"],
+            "stale_h": w.stale_h,
+            "gates_verdict": gates,
+        })
+    return {"level": level, "rows": rows, "db_label": snap["db_label"],
+            "driver": _DRIVER_NIGHTLY, "command": _CMD_NIGHTLY, "url": _RUNBOOK_URL}
+
+
+def _reasons(price: dict, gap: dict, mu: dict, macro: dict, batch: dict) -> list[str]:
     """赤・黄の理由を人が読める順で並べる（画面はこれをそのまま出す）。"""
     out = []
+    # **バッチの停止は先頭に置く。** gap_ratio や μ̂ の古さはその結果でしかないので、
+    # 原因を先に読ませないと下流の症状から順に辿ることになる（#561）。
+    night = next((r for r in batch.get("rows", []) if r.get("gates_verdict")), None)
+    if night and night["level"] != "fresh":
+        if night["status"] == "stale":
+            out.append(f"夜間バッチが {night['age_h']:.0f}時間 走っていない"
+                       f"（閾値 {night['stale_h']:.0f}時間・最終実行 {night['last_run']}）")
+        elif night["status"] == "missing":
+            out.append("夜間バッチの足跡が app_settings に無い"
+                       "（一度も走っていないか、行が消えた）")
+        else:
+            out.append("夜間バッチの足跡を日時として読めない")
+    elif batch.get("level") == "unknown":
+        out.append("バッチの足跡を判定できなかった（DB かモジュールの読み取りに失敗）")
     if price.get("level") in ("warn", "alert"):
         out.append(f"株価の中央値が {price.get('price_asof_p50')}"
                    f"（{price.get('stale_bdays')}営業日前・{price.get('n_stale_over_5d')}銘柄が"
@@ -190,8 +295,15 @@ async def morning(
     gap   = _gap_ratio_block(db)
     mu    = _mu_block(db, mu_source)
     macro = _macro_block(db)
+    batch = _batch_block(db)
 
-    verdict = _worst(price.get("level", "empty"), gap["level"], mu["level"], macro["level"])
+    # **verdict へ混ぜるのは夜間バッチだけ**（`batch["level"]` がそれ）。月次と watchdog は
+    # 表示に留める——既定の推奨経路（recommend / sector_ols / macro_enet）は月次成果物に
+    # 依存せず、月次で更新される M-1 系 μ̂ の鮮度は `_mu_block` が別に見ている。ここで月次を
+    # 混ぜると次の月次まで毎日 warn が出続けて狼少年になり、**本当に止まった回に効かなくなる**
+    # （`common.js` が接続先バッジの向きで避けたのと同じ失敗）。
+    verdict = _worst(price.get("level", "empty"), gap["level"], mu["level"],
+                     macro["level"], batch["level"])
     return {
         "generated_at": api._utc_to_jst_str(datetime.now(timezone.utc)),
         "preset": preset,
@@ -200,12 +312,14 @@ async def morning(
             "gap_ratio": gap,
             "mu": mu,
             "macro": macro,
+            "batch": batch,
             "overall_verdict": verdict,
             # 赤でもランキングは返す（隠すと別経路で古い値を見に行くだけ）。
             # 「発注してよいか」だけを明示する。
             "tradable": verdict == "fresh",
-            "reasons": _reasons(price, gap, mu, macro),
-            "actions_url": f"{_ACTIONS_BASE}/daily-incremental.yml",
+            "reasons": _reasons(price, gap, mu, macro, batch),
+            # #503 以降、次に見るべきはワークフローの実行履歴ではなくローカル運用の手順書。
+            "runbook_url": _RUNBOOK_URL,
         },
         "recommend": rec,
     }

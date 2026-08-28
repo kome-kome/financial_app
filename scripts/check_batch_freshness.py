@@ -67,7 +67,6 @@ import shutil
 import subprocess
 import sys
 import unicodedata
-from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, Sequence
@@ -89,85 +88,23 @@ os.environ.setdefault("FINAPP_EGRESS_LEDGER", "0")
 os.environ.setdefault("FINAPP_JOB", "watchdog")
 
 from scripts import batch_common as bc                       # noqa: E402
-from scripts import run_monthly, run_nightly                 # noqa: E402
+# 判定ロジック（`Watched` / `WATCHED` / `collect`）は `batch_freshness.py`（ルート）へ
+# 切り出し、`/api/morning` と共有する（#561）。**このモジュールは import 時に
+# `FINAPP_DB_TARGET` を書き換える**ので、API プロセスからは import させない——接続先の
+# 食い違いは #508 と同型で静かに壊れる。ここは起票・CLI・ログだけを担う。
+from batch_freshness import (                                # noqa: E402,F401
+    KEY_LAST_RUN, SELF_WINDOW_MIN, WATCHED, Watched, _parse, collect, db_label, status_of,
+)
 
 EXIT_UNHEALTHY = 2
 # 「問題を見つけているのに誰にも伝えられていない」は最も静かな故障で、他のどこにも現れない。
 # タスクスケジューラの LastTaskResult が唯一の常時観測点なので、そこで見分けられるようにする。
 EXIT_NOTIFY_FAILED = 3
 
-# この watchdog 自身の足跡。監視対象と同じ表に置く（見る場所を分けない）。
-KEY_LAST_RUN = "watchdog_last_run"
-
-# 自分の ExecutionTimeLimit（分）。`install_watchdog_task.ps1` と CI が照合し、同時に
-# 自己監視の閾値（24h + これ）の源にもなる。**24h より十分小さいこと**が要点で、
-# MultipleInstances IgnoreNew の下ではハングした1本が翌日を抑止するため。
-SELF_WINDOW_MIN = 15
 
 # `gh auth status` の待ち時間。ネットワークが詰まっても watchdog の窓（15分）を食わない値。
 GH_TIMEOUT_SEC = 20.0
 
-
-@dataclass(frozen=True)
-class Watched:
-    """監視対象1本。閾値は `cadence + 窓` の導出であって、直接置く定数ではない。"""
-    label: str
-    key_run: str
-    key_success: Optional[str]
-    cadence_h: float
-    window_min: float
-    issue_title: str
-    task_name: str
-    log_prefix: str
-    missing_is_problem: bool = True
-
-    @property
-    def stale_h(self) -> float:
-        return self.cadence_h + self.window_min / 60.0
-
-
-# cadence の根拠:
-#   nightly … daily トリガ（install_nightly_task.ps1）＝24時間
-#   monthly … 同一日付の最長間隔。12/28->01/28 も 31日で、インストーラが -Day 1..28 に
-#             制限しているのでこの上限は -Day を動かしても成立する
-#   自分     … daily トリガ。**初回は missing になるが、それは正常**（自分の行を書くのは
-#             自分だけで、第三者の書き手が居ない＝missing は「まだ1回目」を意味する）
-#
-# キー名と窓は run_nightly / run_monthly から import する。書き写した瞬間、typo が
-# 「永久に警告が出ない」形で現れる——この watchdog がまさに検知したい失敗モードを自分で踏む。
-WATCHED: tuple[Watched, ...] = (
-    Watched(
-        label="夜間バッチ",
-        key_run=run_nightly.KEY_LAST_RUN,
-        key_success=run_nightly.KEY_LAST_SUCCESS,
-        cadence_h=24.0,
-        window_min=run_nightly.WINDOW_MIN,
-        issue_title="[ops] ローカル夜間バッチが走っていない",
-        task_name="financial_app-nightly",
-        log_prefix="nightly",
-    ),
-    Watched(
-        label="月次バッチ",
-        key_run=run_monthly.KEY_LAST_RUN,
-        key_success=run_monthly.KEY_LAST_SUCCESS,
-        cadence_h=31 * 24.0,
-        window_min=run_monthly.WINDOW_MIN,
-        issue_title="[ops] ローカル月次バッチが走っていない",
-        task_name="financial_app-monthly",
-        log_prefix="monthly",
-    ),
-    Watched(
-        label="watchdog 自身",
-        key_run=KEY_LAST_RUN,
-        key_success=None,
-        cadence_h=24.0,
-        window_min=SELF_WINDOW_MIN,
-        issue_title="[ops] watchdog 自身が走っていなかった",
-        task_name="financial_app-watchdog",
-        log_prefix="watchdog",
-        missing_is_problem=False,
-    ),
-)
 
 DB_ERROR_TITLE = "[ops] watchdog がローカル DB を読めない"
 GH_ERROR_TITLE = "[ops] watchdog が gh を使えない（通知経路が死んでいる）"
@@ -193,73 +130,6 @@ class _Echo:
             self._fh.flush()
         except (OSError, ValueError):
             pass
-
-
-def _parse(raw: Optional[str]) -> Optional[datetime]:
-    """足跡の文字列を datetime へ。読めなければ None（呼び出し側が raw と突き合わせる）。"""
-    if not raw:
-        return None
-    try:
-        parsed = datetime.fromisoformat(raw)
-    except (ValueError, TypeError):
-        return None
-    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
-
-
-def _age_hours(then: Optional[datetime], now: datetime) -> Optional[float]:
-    return None if then is None else (now - then).total_seconds() / 3600.0
-
-
-def _status(row: dict) -> str:
-    """ok / missing / unreadable / stale のどれか。
-
-    **「まだ一度も走っていない」と「止まった」を同じ顔にしない**（`check_egress_health.py`
-    の「消費ゼロと計測停止は台帳の上で同じ顔をする」と同型）。どちらも異常だが原因が違う
-    ——前者はタスク登録を疑い、後者は実行環境の破損を疑う。
-    """
-    if row["run_raw"] is None:
-        return "missing"
-    if row["run_age_h"] is None:
-        return "unreadable"
-    return "ok" if row["run_age_h"] <= row["watched"].stale_h else "stale"
-
-
-def _get_setting(db, key: str) -> Optional[str]:
-    """DB アクセスの継ぎ目。ここに閉じておくとテストが DB 環境なしで import できる。"""
-    from database import get_setting
-    return get_setting(db, key)
-
-
-def collect(db, now: datetime, get=None) -> dict:
-    """足跡を読む。閾値判定はしない（測るのと決めるのを分ける）。"""
-    get = get or _get_setting
-    rows = []
-    for w in WATCHED:
-        run_raw = get(db, w.key_run)
-        success_raw = get(db, w.key_success) if w.key_success else None
-        row = {
-            "watched": w,
-            "run_raw": run_raw,
-            "success_raw": success_raw,
-            "run_age_h": _age_hours(_parse(run_raw), now),
-            "success_age_h": _age_hours(_parse(success_raw), now),
-        }
-        row["status"] = _status(row)
-        rows.append(row)
-    return {"now": now, "rows": rows, "db_error": None, "db_label": _db_label(),
-            "gh_error": None}
-
-
-def _db_label() -> str:
-    """接続先の表示名。**生の接続文字列は絶対に出さない**（Issue は公開されうる）。
-
-    「見ている DB が違う」は「走っていない」と全く同じ顔をするので、この1行が最大の疑いを消す。
-    """
-    try:
-        from database import db_target_info
-        return db_target_info().get("db_label", "不明")
-    except Exception as e:      # noqa: BLE001 — 表示のために判定を落とさない
-        return f"不明（{e}）"
 
 
 def check_gh(run=subprocess.run, which=None) -> Optional[str]:
@@ -540,7 +410,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 footprint_error = record_self(db)
         except Exception as e:      # noqa: BLE001 — 接続不能も「判定結果」として扱う
             snap = {"now": now, "rows": [], "db_error": str(e)[:300],
-                    "db_label": _db_label(), "gh_error": None}
+                    "db_label": db_label(), "gh_error": None}
         finally:
             if db is not None:
                 db.close()

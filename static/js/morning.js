@@ -32,7 +32,8 @@ function renderVerdict(f) {
     (f.reasons || []).map(r => `<li>${esc(r)}</li>`).join('') ||
     '<li>株価・スコア・マクロのいずれも鮮度基準を満たしています</li>';
   const link = document.getElementById('verdict-link');
-  link.href = f.actions_url || '#';
+  // #503 以降、次に見るのはワークフローの実行履歴ではなくローカル運用の手順書（#561）
+  link.href = f.runbook_url || '#';
 }
 
 function freshCard(label, level, value, sub, url) {
@@ -40,8 +41,38 @@ function freshCard(label, level, value, sub, url) {
     <div class="fresh-card-label">${esc(label)}</div>
     <div class="fresh-card-value">${esc(value)}</div>
     <div class="fresh-card-sub">${sub}</div>
-    ${url ? `<a href="${esc(url)}" target="_blank" rel="noopener">実行履歴を見る →</a>` : ''}
+    ${url ? `<a href="${esc(url)}" target="_blank" rel="noopener">復旧手順を見る →</a>` : ''}
   </div>`;
+}
+
+/* 「昨夜そもそもバッチが走ったのか」（#561）。
+ *
+ * スコアが古いことと、バッチが起動していないことは原因が違う（前者は producer の失敗、
+ * 後者は起動の失敗）のに、これが無い間は画面上で同じ顔をしていた。**健全なのに
+ * 「止まっているのでは」と疑われる**のを防ぐのがこのカードの役目なので、
+ * 正常時も「いつ走ったか」を必ず出す（異常時だけ出すと沈黙が読めない）。
+ *
+ * verdict へ効くのは夜間バッチだけ。月次と watchdog は同じカードの中に併記する
+ * （カードを3枚に割ると主役の株価鮮度が埋もれる）。
+ */
+function batchCard(b) {
+  const rows = b.rows || [];
+  const night = rows.find(r => r.gates_verdict) || {};
+  const others = rows.filter(r => !r.gates_verdict);
+  if (b.level === 'unknown') {
+    return freshCard('夜間バッチ', 'unknown', '判定不能',
+      '足跡（app_settings）を読めませんでした', b.url);
+  }
+  const age = (night.age_h === null || night.age_h === undefined)
+    ? '—' : `${Math.round(night.age_h)}時間前`;
+  const sub = [
+    `${LEVEL_LABEL[night.level] || '—'}・${age}（閾値 ${Math.round(night.stale_h || 0)}時間）`,
+    `最終成功 ${esc(night.last_success || '—')}`,
+    ...others.map(r => `${esc(r.label)}: ${esc(r.last_run || '未実行')}`
+      + (r.level === 'fresh' ? '' : `（${LEVEL_LABEL[r.level] || '要確認'}）`)),
+    b.command ? `手動実行 <code>${esc(b.command)}</code>` : '',
+  ].filter(Boolean).join('<br>');
+  return freshCard('夜間バッチ', b.level, night.last_run || '未実行', sub, b.url);
 }
 
 function renderFreshness(f) {
@@ -50,6 +81,8 @@ function renderFreshness(f) {
   const m = f.mu || {};
   const mac = f.macro || {};
   document.getElementById('fresh-grid').innerHTML = [
+    // **バッチを先頭に置く。** 下流（株価・スコア）の古さはバッチが走らなかった結果でしかない
+    batchCard(f.batch || {}),
     freshCard('株価 as-of（中央値）', p.level,
       p.price_asof_p50 || '—',
       `${LEVEL_LABEL[p.level] || '—'}・${p.stale_bdays ?? '—'}営業日前<br>${p.n_stale_over_5d ?? 0}銘柄が5営業日超の遅れ`,
