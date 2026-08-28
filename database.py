@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Optional
 from dotenv import load_dotenv
 from sqlalchemy import (
-    create_engine, Column, String, Integer, Float, Boolean, DateTime, Date,
+    create_engine, event, Column, String, Integer, Float, Boolean, DateTime, Date,
     Text, UniqueConstraint, PrimaryKeyConstraint, Index, JSON, LargeBinary, ForeignKey, text, func
 )
 from sqlalchemy.orm import declarative_base, sessionmaker, relationship
@@ -145,6 +145,30 @@ _connect_args = {} if _is_local else {"sslmode": "require"}
 _pool_size    = 10 if _is_local else 3
 _max_overflow = 20 if _is_local else 5
 
+# ── セッション設定（#565・ADR-0043）─────────────────────────────────────────
+# **接続先ごとの既定値に依存した仮定は、例外を出さずに壊れる。**
+#
+# DateTime 列は `timestamp without time zone`（naive）なのに、Python 側は
+# `datetime.now(timezone.utc)`（aware UTC）を渡している。psycopg2 は aware のまま送るので、
+# PG は naive 列へキャストする際に**セッション TZ でローカル時刻へ変換して tz を落とす**。
+# セッション TZ が UTC なら UTC naive、`Asia/Tokyo` なら **JST naive** が入る。
+# 表示側（`api._utc_to_jst_str`）は前者を仮定して +9h するので、後者だと 9 時間先の時刻が出る。
+#
+# Supabase は既定 `TimeZone=UTC` なので仮定が成立していたが、#503 で正本をローカル PG
+# （実測 `TimeZone=Asia/Tokyo`・サーバ設定なので全クライアントが継承）へ移した瞬間に崩れた。
+# **どちらも「接続できて書き込みも成功する」ので沈黙する**（#508 と同型）。
+#
+# したがって設定は「読む人が思い出すもの」ではなく**接続に付いてくるもの**にする。
+# ここが唯一の源で、`scripts/mirror_common._SESSION_FIXES` はこれを再利用する
+# （かつて mirror 側だけが TimeZone を固定していた＝経路ごとに正しさが違う状態だった）。
+#
+# `extra_float_digits` はここには含めない。ミラーはチェックサムのために float の text 表現を
+# 17桁へ固定する必要があるが、アプリ経路でそれを変えるのは #565 の範囲外。
+SESSION_FIXES = (
+    "SET TimeZone = 'UTC'",
+    "SET DateStyle = 'ISO, YMD'",
+)
+
 engine = create_engine(
     DATABASE_URL,
     pool_size=_pool_size,
@@ -154,6 +178,19 @@ engine = create_engine(
     connect_args=_connect_args,
     echo=False,
 )
+
+
+@event.listens_for(engine, "connect")
+def _apply_session_fixes(dbapi_conn, _record):      # noqa: ANN001
+    """新しい DBAPI 接続ごとに `SESSION_FIXES` を流す（プールの再接続でも効く）。"""
+    cur = dbapi_conn.cursor()
+    try:
+        for sql in SESSION_FIXES:
+            cur.execute(sql)
+    finally:
+        cur.close()
+
+
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 

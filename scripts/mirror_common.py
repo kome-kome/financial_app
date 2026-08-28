@@ -487,9 +487,13 @@ def run_pg(argv: list[str], conn: PgConn, *, what: str) -> str:
 # チェックサムが恒常的に食い違い「常に赤い＝誰も見なくなる」という最悪の劣化になる。
 # 実測（2026-08-16）: ローカルは TimeZone=Asia/Tokyo / extra_float_digits=1 / DateStyle='ISO, YMD'、
 # Supabase はほぼ確実に TimeZone=UTC。timestamptz を持つのは app_settings.updated_at。
-_SESSION_FIXES = (
-    "SET TimeZone = 'UTC'",
-    "SET DateStyle = 'ISO, YMD'",
+#
+# **TimeZone/DateStyle は `database.SESSION_FIXES` が唯一の源**（#565・ADR-0043）。
+# ここで書き写していた頃は「ミラーだけ TimeZone を固定していて `database.engine` は素通し」
+# ＝経路ごとに正しさが違う状態で、正本がローカル PG（Asia/Tokyo）へ移った瞬間に
+# アプリ側の naive DateTime 列が JST で保存されるようになった（#503 → #565）。
+# `extra_float_digits` はミラー固有（float8 の完全往復には 17桁＝ >= 1 が要る）なのでここで足す。
+_SESSION_FIXES = database.SESSION_FIXES + (
     "SET extra_float_digits = 1",
 )
 
