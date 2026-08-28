@@ -26,6 +26,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import batch_freshness as bf
 from scripts import check_batch_freshness as cbf
 from scripts import run_monthly, run_nightly
 
@@ -60,11 +61,11 @@ def settings(monkeypatch, tmp_path):
         run_monthly.KEY_LAST_SUCCESS: _iso(90 * 24),   # #512 で成功はずっと古い（正常）
         cbf.KEY_LAST_RUN: _iso(24.0),
     }
-    monkeypatch.setattr(cbf, "_get_setting", lambda db, key: store.get(key))
+    monkeypatch.setattr(bf, "_get_setting", lambda db, key: store.get(key))
     monkeypatch.setattr(cbf, "_upsert_setting",
                         lambda db, key, value: store.__setitem__(key, value))
     monkeypatch.setattr(cbf, "_open_session", lambda: _FakeDB())
-    monkeypatch.setattr(cbf, "_db_label", lambda: "ローカル（financial_app）")
+    monkeypatch.setattr(bf, "db_label", lambda: "ローカル（financial_app）")
     monkeypatch.setattr(cbf, "_log_path", lambda: tmp_path / "watchdog.log")
     monkeypatch.setattr(cbf, "check_gh", lambda **_k: None)
     # **実プロセスを構造的に遮断する。** ここを個々のテストの monkeypatch に任せていたため、
@@ -425,7 +426,7 @@ class TestOutputSafety:
 
     def test_no_connection_string_reaches_the_output(self, settings, monkeypatch):
         """Issue は公開されうる。生 URL を1文字も出さない。"""
-        monkeypatch.setattr(cbf, "_db_label", lambda: "ローカル（financial_app）")
+        monkeypatch.setattr(bf, "db_label", lambda: "ローカル（financial_app）")
         settings[run_nightly.KEY_LAST_RUN] = _iso(48.0)
         snap = _snap(settings)
         text = "\n".join(cbf.format_report(snap))
