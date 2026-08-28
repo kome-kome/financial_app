@@ -48,11 +48,6 @@ _CMD_NIGHTLY = "./run_nightly.ps1"
 _CMD_MONTHLY = "./run_monthly.ps1"
 _CMD_MACRO = "python collector.py --macro"
 
-# 足跡の status を画面の語彙へ。**「まだ一度も走っていない」と「止まった」を同じ顔にしない**
-# のは watchdog 側と同じで、ここが決めるのは色だけ。
-_BATCH_LEVEL = {"ok": "fresh", "stale": "alert",
-                "missing": "alert", "unreadable": "alert"}
-
 # gap_ratio（sector_ols・nightly-scores が毎晩更新）の許容鮮度。夜間バッチが毎日
 # 走る前提なので、丸2日以上動いていなければ何かが壊れている。
 GAP_WARN_DAYS  = 2
@@ -82,17 +77,6 @@ def _worst(*levels: str) -> str:
     """
     worst = max(_LEVEL_ORDER.get(lv, 2) for lv in levels)
     return {0: "fresh", 1: "warn", 2: "alert"}[worst]
-
-
-def _parse_iso(raw: Optional[str]) -> Optional[datetime]:
-    """足跡の ISO 文字列を datetime へ（表示用）。読めなければ None を返して素通しする。"""
-    if not raw:
-        return None
-    try:
-        parsed = datetime.fromisoformat(raw)
-    except (ValueError, TypeError):
-        return None
-    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
 
 def _age_bdays(d: Optional[str]) -> Optional[int]:
@@ -194,8 +178,7 @@ def _batch_block(db: Session, get=None, now: Optional[datetime] = None) -> dict:
     # `batch_freshness` は import 時副作用を持たないが、API 起動時のコストは増やさない
     # （`_macro_block` と同じ作法）。**`scripts/check_batch_freshness.py` の方を import
     # しないこと**——あちらは import 時に FINAPP_DB_TARGET を書き換える。
-    from batch_freshness import collect
-    from scripts.run_nightly import KEY_LAST_RUN as _NIGHTLY_KEY
+    from batch_freshness import collect, summarize
 
     now = now or datetime.now(timezone.utc)
     try:
@@ -205,29 +188,9 @@ def _batch_block(db: Session, get=None, now: Optional[datetime] = None) -> dict:
         return {"level": "unknown", "rows": [], "driver": _DRIVER_NIGHTLY,
                 "command": _CMD_NIGHTLY, "url": _RUNBOOK_URL}
 
-    rows, level = [], "unknown"
-    for row in snap["rows"]:
-        w = row["watched"]
-        if row["status"] == "missing" and not w.missing_is_problem:
-            # 自分の行を書くのは自分だけ＝watchdog の初回 missing は正常
-            row_level = "fresh"
-        else:
-            row_level = _BATCH_LEVEL.get(row["status"], "alert")
-        gates = w.key_run == _NIGHTLY_KEY
-        if gates:
-            level = row_level
-        rows.append({
-            "label": w.label,
-            "task_name": w.task_name,
-            "status": row["status"],
-            "level": row_level,
-            "last_run": api._utc_to_jst_str(_parse_iso(row["run_raw"])),
-            "last_success": api._utc_to_jst_str(_parse_iso(row["success_raw"])),
-            "age_h": row["run_age_h"],
-            "stale_h": w.stale_h,
-            "gates_verdict": gates,
-        })
-    return {"level": level, "rows": rows, "db_label": snap["db_label"],
+    # 整形は `/api/stats`（ダッシュボードの「自動収集」・#563）と共有する。
+    # 表示の語彙をルータごとに書くと、片方だけ黙って古くなる。
+    return {**summarize(snap, fmt_time=api._utc_to_jst_str),
             "driver": _DRIVER_NIGHTLY, "command": _CMD_NIGHTLY, "url": _RUNBOOK_URL}
 
 

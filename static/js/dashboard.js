@@ -1,5 +1,54 @@
 function apiBase() { return ''; }
 
+/* 「自動収集」カード（#563）。
+ *
+ * **静的な予定表を持たない。** 以前ここは「GitHub Actions で毎日 03:00 JST」と緑ドット付きで
+ * 固定表示していたが、#503 で駆動がローカルのタスクスケジューラへ移った後もそのまま残り、
+ * **トップページの最初に目に入る場所が嘘をついていた**（しかも 03:00 は GHA 時代ですら誤り）。
+ * 名目の起動時刻も書かない——実起動は最大 +1h41m ずれる（#551）ので、足跡そのものを出す。
+ *
+ * 判定と語彙は /api/morning と同じ（batch_freshness.summarize が両方へ配る）。
+ */
+const SCHED_LEVEL = {
+  fresh:   { dot: 'dot-green', head: 'ローカルのタスクスケジューラが毎日実行しています' },
+  alert:   { dot: 'dot-red',   head: '夜間バッチが動いていません' },
+  unknown: { dot: 'dot-amber', head: 'バッチの足跡を読めませんでした' },
+};
+
+function renderSchedule(b) {
+  const dot  = document.getElementById('sched-dot');
+  const head = document.getElementById('sched-headline');
+  const grid = document.getElementById('sched-grid');
+  if (!dot || !head || !grid) return;
+
+  const rows  = (b && b.rows) || [];
+  const night = rows.find(r => r.gates_verdict);
+  const lv    = SCHED_LEVEL[(b && b.level)] || SCHED_LEVEL.unknown;
+  dot.className = 'dot ' + lv.dot;
+
+  if (!night) {
+    head.textContent = lv.head;
+    grid.innerHTML = '';
+    return;
+  }
+  const age = night.age_h === null || night.age_h === undefined
+    ? '' : `・${Math.round(night.age_h)}時間前`;
+  head.textContent = night.level === 'fresh'
+    ? `${lv.head}（最終実行 ${night.last_run}${age}）`
+    : `${lv.head}（最終実行 ${night.last_run || '記録なし'}${age}・閾値 ${Math.round(night.stale_h || 0)}時間）`;
+
+  grid.innerHTML = rows.map(r => `
+      <div class="sched-item">
+        <div class="sched-item-label">${esc(r.label)}</div>
+        <div class="sched-item-value"${r.level === 'fresh' ? '' : ' style="color:var(--status-bad-text)"'}>${esc(r.last_run || '未実行')}</div>
+        <div class="sched-item-label">${esc(r.task_name)}</div>
+      </div>`).join('') + `
+      <div class="sched-item">
+        <div class="sched-item-label">手動差分収集</div>
+        <div class="sched-item-value"><a href="/collection" style="color:var(--status-info);text-decoration:none">収集画面から実行</a></div>
+      </div>`;
+}
+
 
 async function loadStats() {
   try {
@@ -77,6 +126,8 @@ async function loadStats() {
     } else {
       banner.classList.remove('show');
     }
+
+    renderSchedule(d.batch);
 
     document.getElementById('api-dot').className = 'dot dot-green';
     document.getElementById('api-label').textContent = 'API接続中';
