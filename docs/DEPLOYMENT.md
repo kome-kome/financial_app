@@ -388,7 +388,7 @@ python -m scripts.setup_local_db --apply    # 実行
 
 `stock_price_daily` の窓は今日時点で 2026-02-13 以降なので **7日重なって連続する**が、**この旧データに分割の遡及調整が入っているかは未確認**（#465 で週次に段差が見つかっている）。調整済みの現行値と混ぜる前に接合検証が要る。ミラー範囲には含めない。
 
-同時に DROP した旧4テーブル（`companies` / `financial_records` / `macro_data` / `collection_logs`）は `migration_dumps/legacy_pre_mirror_20260815.dump` へ退避済み（ローカル間なので Egress ゼロ・`.gitignore` 配下）。
+同時に DROP した旧4テーブル（`companies` / `financial_records` / `macro_data` / `collection_logs`）は `migration_dumps/legacy_pre_mirror_20260815.dump` へ退避していたが、**2026-08-29 にユーザー判断で削除した**（7.8MB）。**この4テーブルの 2026-08-15 断面はもう復元できない**——`.backups` と Supabase Storage が持つのは現行スキーマのバックアップで、DROP 済みのテーブルは入っていない。`migration_dumps/` 自体は `mirror_pull.py` が`mkdir(exist_ok=True)` で作り直すので、ミラーの動作には影響しない。
 
 #### 接続先の切り替え（`FINAPP_DB_TARGET`・Issue #481 B-1）
 
