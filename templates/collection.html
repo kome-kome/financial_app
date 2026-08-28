@@ -178,7 +178,7 @@ tr:hover td{background:var(--border-subtle)}
     </div>
     <div style="font-size:12px;color:var(--text-muted);line-height:1.6">
       過去1年・収集済みスキップ＋成長率/Zスコア＋市場・マクロデータを一括更新します。<br>
-      <span style="color:var(--status-info)">🔄 自動収集は GitHub Actions（毎日 03:00 JST）で実行されます。</span>
+      <span style="color:var(--status-info)">🔄 自動収集はローカルの夜間バッチ（タスクスケジューラ）が毎日実行します。最終実行は<a href="/" style="color:inherit">ダッシュボード</a>の「自動収集」で確認できます。</span>
     </div>
   </div>
 
@@ -566,7 +566,7 @@ tr:hover td{background:var(--border-subtle)}
     </div>
     <div style="font-size:12px;color:var(--text-muted);margin-bottom:14px">
       USD/JPY・米日10年金利・日経/TOPIX/S&P500・WTI/金 の日次データを取得します。<br>
-      <span style="color:var(--text-muted)">※ 既存日付は上書き更新。自動取得は GitHub Actions（毎日 03:00 JST）で実行されます。</span>
+      <span style="color:var(--text-muted)">※ 既存日付は上書き更新。自動取得はローカルの夜間バッチが毎日実行します（最終実行はダッシュボードの「自動収集」）。</span>
     </div>
 
     <div class="form-group" style="max-width:280px">

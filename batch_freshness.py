@@ -166,6 +166,52 @@ def db_label() -> str:
         return f"不明（{e}）"
 
 
+# 足跡の status を画面の語彙へ。**「まだ一度も走っていない」と「止まった」を同じ顔に
+# しない**のは判定側と同じで、ここが決めるのは色だけ。
+BATCH_LEVEL = {"ok": "fresh", "stale": "alert",
+               "missing": "alert", "unreadable": "alert"}
+
+
+def summarize(snap: dict, fmt_time=None) -> dict:
+    """`collect()` の結果を**画面表示用**の形へ畳む（#561 / #563）。
+
+    読み手は `/api/morning` の鮮度カードと `/api/stats`（ダッシュボードの「自動収集」）の
+    2つで、**両方で同じ語彙・同じ閾値を使う**ためにここへ置く。片方に「何時間前なら緑」を
+    書くと、窓を広げたときにもう片方だけが黙って古くなる。
+
+    `level` は**夜間バッチの鮮度**（`gates_verdict` が立つ行）。月次と watchdog は行として
+    返すだけで総合判定には効かせない——既定の推奨経路は月次成果物に依存せず、混ぜると
+    次の月次まで毎日 warn が出続けて狼少年になる。
+
+    `fmt_time` は時刻の整形関数（既定は ISO 文字列のまま）。ここで `api` を import しないのは
+    循環（api -> routers -> batch_freshness）を作らないためで、**依存は呼び出し側から注入する**。
+    """
+    fmt_time = fmt_time or (lambda dt: dt.isoformat() if dt else None)
+    rows, level = [], "unknown"
+    for row in snap["rows"]:
+        w = row["watched"]
+        if row["status"] == "missing" and not w.missing_is_problem:
+            # 自分の行を書くのは自分だけ＝watchdog の初回 missing は正常
+            row_level = "fresh"
+        else:
+            row_level = BATCH_LEVEL.get(row["status"], "alert")
+        gates = w.key_run == run_nightly.KEY_LAST_RUN
+        if gates:
+            level = row_level
+        rows.append({
+            "label": w.label,
+            "task_name": w.task_name,
+            "status": row["status"],
+            "level": row_level,
+            "last_run": fmt_time(_parse(row["run_raw"])),
+            "last_success": fmt_time(_parse(row["success_raw"])),
+            "age_h": row["run_age_h"],
+            "stale_h": w.stale_h,
+            "gates_verdict": gates,
+        })
+    return {"level": level, "rows": rows, "db_label": snap["db_label"]}
+
+
 def collect(db, now: datetime, get=None) -> dict:
     """足跡を読む。閾値判定はしない（測るのと決めるのを分ける）。"""
     get = get or _get_setting

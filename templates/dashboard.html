@@ -249,7 +249,7 @@ body{font-family:'Segoe UI',sans-serif;background:var(--bg);color:var(--text);mi
         収集 & スクリーニング
       </div>
       <div class="nav-card-desc">
-        財務・株価データは毎日 03:00 JST に GitHub Actions が自動収集します。このページは手動の差分収集・再収集や、条件スクリーニングなど補助的な操作用です。
+        財務・株価データはローカルの夜間バッチが毎日自動収集します。このページは手動の差分収集・再収集や、条件スクリーニングなど補助的な操作用です。
       </div>
       <ul class="feature-list">
         <li>EDINET / stooq からの財務・株価データ手動収集</li>
@@ -295,27 +295,15 @@ body{font-family:'Segoe UI',sans-serif;background:var(--bg);color:var(--text);mi
     </a>
   </div>
 
-  <!-- 自動収集: GitHub Actions -->
+  <!-- 自動収集。**静的な予定表は持たない**（#563・経緯は dashboard.js の renderSchedule）。
+       中身は /api/stats の足跡から描く。 -->
   <div class="section-title">自動収集</div>
   <div class="scheduler-card">
     <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">
-      <span class="dot dot-green"></span>
-      <span style="font-size:13px;color:var(--text-secondary)">GitHub Actions で毎日 03:00 JST に差分収集を自動実行</span>
+      <span class="dot" id="sched-dot"></span>
+      <span style="font-size:13px;color:var(--text-secondary)" id="sched-headline">読み込み中…</span>
     </div>
-    <div class="sched-grid">
-      <div class="sched-item">
-        <div class="sched-item-label">自動収集スケジュール</div>
-        <div class="sched-item-value" style="color:var(--status-info)">毎日 03:00 JST</div>
-      </div>
-      <div class="sched-item">
-        <div class="sched-item-label">ワークフロー</div>
-        <div class="sched-item-value">daily-incremental.yml</div>
-      </div>
-      <div class="sched-item">
-        <div class="sched-item-label">手動差分収集</div>
-        <div class="sched-item-value"><a href="/collection" style="color:var(--status-info);text-decoration:none">収集画面から実行</a></div>
-      </div>
-    </div>
+    <div class="sched-grid" id="sched-grid"></div>
   </div>
 
 </div>

@@ -136,6 +136,71 @@ class TestHealth:
 
 # ── DB-backed エンドポイント（get_db を SQLite fixture に差し替え）─────────────
 
+# `_batch_status` の**本物**を import 時に1度だけ捕まえる（monkeypatch 後に読むと
+# 差し替え済みの側が返り、包んだ `get` が捨てられる）。
+from routers import market as _market  # noqa: E402
+
+_ORIG_BATCH_STATUS = _market._batch_status
+
+
+class TestStatsBatchFootprint:
+    """ダッシュボードの「自動収集」は**足跡から描く**（#563）。
+
+    以前ここは「GitHub Actions で毎日 03:00 JST」を緑ドット付きで固定表示しており、
+    #503 で cron が止まった後もトップページが嘘をつき続けていた。静的な予定表を
+    持たせない限り同じことが再発するので、`/api/stats` が実データを返すことを縛る。
+    """
+
+    @staticmethod
+    def _stats(db, monkeypatch, ages_h: dict):
+        from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+        now = _dt.now(_tz.utc)
+        store = {k: (now - _td(hours=h)).isoformat() if h is not None else None
+                 for k, h in ages_h.items()}
+        monkeypatch.setattr(
+            _market, "_batch_status",
+            lambda db_, get=None: _ORIG_BATCH_STATUS(
+                db_, get=lambda _db, key: store.get(key)))
+        api.app.dependency_overrides[api.get_db] = lambda: db
+        r = client.get("/api/stats")
+        assert r.status_code == 200
+        return r.json()
+
+    @staticmethod
+    def _healthy(**over):
+        base = {"nightly_last_run": 1.0, "nightly_last_success": 1.0,
+                "monthly_last_run": 25 * 24, "monthly_last_success": 90 * 24,
+                "watchdog_last_run": 20.0}
+        base.update(over)
+        return base
+
+    def test_stats_carries_the_batch_footprint(self, db, monkeypatch):
+        b = self._stats(db, monkeypatch, self._healthy())["batch"]
+        assert b["level"] == "fresh"
+        night = next(r for r in b["rows"] if r["gates_verdict"])
+        assert night["task_name"] == "financial_app-nightly"
+        assert night["last_run"] and "JST" in night["last_run"]
+
+    def test_a_stopped_batch_turns_the_dot_red(self, db, monkeypatch):
+        """閾値は `/api/morning` と同じ（24h + 窓6h = 30h）＝ `batch_freshness` が両方へ配る。"""
+        b = self._stats(db, monkeypatch, self._healthy(nightly_last_run=31.0))["batch"]
+        assert b["level"] == "alert"
+        night = next(r for r in b["rows"] if r["gates_verdict"])
+        assert night["status"] == "stale"
+
+    def test_a_broken_lookup_keeps_stats_alive(self, db, monkeypatch):
+        """足跡を読めなくても統計表示は止めない（`/api/morning` と同じ作法）。"""
+        def _boom(db_, key):
+            raise RuntimeError("app_settings を読めない")
+
+        monkeypatch.setattr(_market, "_batch_status",
+                            lambda db_, get=None: _ORIG_BATCH_STATUS(db_, get=_boom))
+        api.app.dependency_overrides[api.get_db] = lambda: db
+        r = client.get("/api/stats")
+        assert r.status_code == 200
+        assert r.json()["batch"] == {"level": "unknown", "rows": []}
+
+
 class TestStatsEndpoint:
     def test_counts_and_freshness(self, db, make_company, make_fin):
         db.add(make_company(edinet_code="E00001"))

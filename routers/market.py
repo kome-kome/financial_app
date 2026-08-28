@@ -195,6 +195,23 @@ async def get_macro_data(series_code: str, days: int = 365, db: Session = Depend
 
 # ── 統計サマリー ──────────────────────────────────────────────────────────
 
+def _batch_status(db: Session, get=None) -> dict:
+    """ローカル駆動バッチの足跡（#563）。判定・整形とも `batch_freshness` と共有する。
+
+    ここで「何時間前なら緑」を書くと、窓（`run_*.WINDOW_MIN`）を広げたときに
+    ダッシュボードだけが黙って古くなる。**表示は足跡から導出し、静的な予定表は持たない。**
+    """
+    from datetime import datetime as _dt, timezone as _timezone
+
+    from batch_freshness import collect, summarize
+    try:
+        snap = collect(db, _dt.now(_timezone.utc), get=get)
+    except Exception as e:                     # 判定不能でも統計表示は止めない
+        log.info("バッチ鮮度の判定に失敗（統計表示は継続）: %s", e)
+        return {"level": "unknown", "rows": []}
+    return summarize(snap, fmt_time=api._utc_to_jst_str)
+
+
 @router.get("/api/stats")
 async def get_stats(db: Session = Depends(api.get_db)):
     from datetime import date, timezone as _tz
@@ -237,6 +254,12 @@ async def get_stats(db: Session = Depends(api.get_db)):
     from database import price_freshness
     price = price_freshness(db)
 
+    # ダッシュボードの「自動収集」カードは、#503 の後も **停止済みの GitHub Actions を
+    # 緑ドットで宣伝し続けていた**（毎日 03:00 JST——GHA 時代ですら 17:17 JST で、
+    # 03:00 は更に前の世代の残骸）。最初に目に入る場所が嘘をついていたので、静的な文言を
+    # 書き直すのではなく**足跡そのものを出す**（#563）。判定と語彙は `/api/morning` と共有。
+    batch = _batch_status(db)
+
     return {
         "companies":            n_companies,
         "records":              n_records,
@@ -255,6 +278,7 @@ async def get_stats(db: Session = Depends(api.get_db)):
         "days_since_update":    days_since,
         "expected_latest_year": expected_year,
         "freshness":            freshness,
+        "batch":                batch,
     }
 
 
