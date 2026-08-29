@@ -12,7 +12,17 @@
     このため 17:20 なら当日ぶんが揃っており、かつ EDINET の当日提出も拾える。
 
     -StartWhenAvailable（既定オン）で「予定時刻に実行できなかったぶんは次の起動後すぐ」に回す。
-    PC がスリープ・停止していた日を翌起動時に追いつかせるためで、**ノート運用ではここが効く**。
+
+    **この環境では既定時刻 17:20 に PC が点いていないので、毎日この経路で走っている**（#551）。
+    実測（2026-08-26〜28）では PC は毎朝 08:00 頃シャットダウンされ夕方 17:40 前後に電源投入され、
+    バッチはその 4〜10分後に開始している。**したがって 17:20 は「実起動時刻」ではなく
+    「これより前には走らせない」という下限**である。名目時刻を基準に「走ったか」を判定しないこと
+    （watchdog が `cadence + 窓` の経過ベースなのはこのため・ADR-0042）。
+
+    **`WakeToRun` を足しても解決しない。** Windows のウェイクタイマはスリープ／休止からの復帰に
+    しか働かず、**ユーザーが行ったシャットダウンからは起動できない**（高速スタートアップでも同じ）。
+    電源オフから起こすには BIOS の RTC アラームか Wake-on-LAN が要る＝ここでは扱えない。
+    名目を電源投入後（例 18:00）へ寄せるのも**現状より遅くなるだけ**なので、17:20 のままが最速。
 
     **管理者権限（昇格）が必要。** LogonType S4U で登録するため、非昇格だと
     Register-ScheduledTask が HRESULT 0x80070005（Access is denied）で落ちる（#515）。
@@ -81,8 +91,11 @@ $trigger = New-ScheduledTaskTrigger -Daily -At $Time
 $principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" `
     -LogonType S4U -RunLevel Limited
 
-# StartWhenAvailable: 見逃した回を次の起動後に実行する（スリープ・停止した日の追いつき）
+# StartWhenAvailable: 見逃した回を次の起動後に実行する（スリープ・停止した日の追いつき）。
+#   **例外ではなく常用経路**——17:20 は電源オン窓（実測 ~17:40〜翌 ~08:00）の外なので毎日ここを通る。
+#   複数日ぶん見逃しても追いつきは1回に畳まれる（収集側が gap-fill で埋めるので問題ない）。
 # DontStopIfGoingOnBatteries / AllowStartIfOnBatteries: ノートでも走らせる
+#   （この PC はバッテリ無しのデスクトップなので実際には効いていないが、移設先で効く）
 # ExecutionTimeLimit: 差分収集は実測 2h11m 級。6時間で打ち切る（GHA の timeout と同じ考え方）
 # MultipleInstances IgnoreNew: 前夜のぶんが走っている間に次が重ならないようにする
 $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable `
