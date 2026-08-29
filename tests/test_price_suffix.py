@@ -456,6 +456,72 @@ class TestGapFillUsesResolvedSuffix:
         assert res["exchange_rejected"] == 0
 
 
+class TestLocalExchangeCompaniesAreNotProbedOnTokyo:
+    """`.T` が永久に当たらないと分かっている社は、7日に1回すら叩かない（#560）。
+
+    `empty` は「Yahoo が期待した取引所（SAP/FKA）と実名を返すのにバーが0本」＝
+    札証/福証に**実在する**社。東証には居ないのでバックオフで間隔を空けても当たらない。
+    正しい取引所での再プローブは月次（`--bucket empty`）が担う。
+
+    **`placeholder` / `not_found` は従来どおり7日に1回**＝#475 の挙動を保存する。
+    ここを一緒くたにすると、取得手段が無いだけの群まで永久に諦めることになる。
+    """
+
+    def _run(self, db, now_jst):
+        seen = []
+
+        async def fake(http, ticker, d_from, d_to, **kw):
+            seen.append(ticker)
+            return []
+
+        with patch("collector_prices.fetch_yahoo_history", new=fake):
+            res = asyncio.run(fill_recent_stock_price_gap_yahoo(
+                db, gap_days=0, now_jst=now_jst))
+        return res, seen
+
+    def _seed(self, db, make_company, make_price, session, bucket):
+        db.add(make_company(edinet_code="E09999", sec_code="9999", is_active=True))
+        db.add(make_price(edinet_code="E09999", trade_date=session.isoformat()))
+        db.add(make_company(edinet_code="E00003", sec_code="1734",
+                            is_active=False, yahoo_probe_bucket=bucket))
+        db.commit()
+
+    def test_empty_bucket_is_never_probed_on_tokyo(self, db, make_company, make_price,
+                                                   monkeypatch):
+        """バックオフの**当たり日**でも叩かないこと（間隔の問題ではないから）。"""
+        now_jst, session = _monday_anchor()
+        monkeypatch.setattr("collector_prices.should_retry_priceless_delisted",
+                            lambda ec, today: True)      # 今日は試す日
+        self._seed(db, make_company, make_price, session, "empty")
+
+        _res, seen = self._run(db, now_jst)
+        assert seen == [], f".T を叩いている: {seen}"
+
+    @pytest.mark.parametrize("bucket", ["placeholder", "not_found", None])
+    def test_other_buckets_keep_the_seven_day_backoff(self, db, make_company, make_price,
+                                                      monkeypatch, bucket):
+        """#475 の挙動を保存していること（当たり日には叩く）。"""
+        now_jst, session = _monday_anchor()
+        monkeypatch.setattr("collector_prices.should_retry_priceless_delisted",
+                            lambda ec, today: True)
+        self._seed(db, make_company, make_price, session, bucket)
+
+        _res, seen = self._run(db, now_jst)
+        assert seen == ["1734.T"], f"{bucket} が叩かれていない: {seen}"
+
+    def test_resolved_suffix_wins_over_the_bucket(self, db, make_company, make_price):
+        """解決済みなら棄却理由が残っていても正しい取引所で叩く（順序の担保）。"""
+        now_jst, session = _monday_anchor()
+        db.add(make_company(edinet_code="E09999", sec_code="9999", is_active=True))
+        db.add(make_price(edinet_code="E09999", trade_date=session.isoformat()))
+        db.add(make_company(edinet_code="E00003", sec_code="1734", is_active=False,
+                            yahoo_suffix=".S", yahoo_probe_bucket="empty"))
+        db.commit()
+
+        _res, seen = self._run(db, now_jst)
+        assert seen == ["1734.S"]
+
+
 class TestWeeklyBackfillOnlyFilter:
     """`backfill_weekly_history_yahoo(only=...)` が対象を絞ること（#555）。
 

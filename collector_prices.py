@@ -1219,20 +1219,24 @@ async def fill_recent_stock_price_gap_yahoo(
     floor_d = today - timedelta(days=DAILY_WINDOW_DAYS)
 
     companies = [
-        (row.sec_code, row.edinet_code, row.is_active, row.yahoo_suffix)
+        (row.sec_code, row.edinet_code, row.is_active, row.yahoo_suffix,
+         row.yahoo_probe_bucket)
         for row in db.query(Company.sec_code, Company.edinet_code, Company.is_active,
-                            Company.yahoo_suffix)
+                            Company.yahoo_suffix, Company.yahoo_probe_bucket)
         .filter(Company.sec_code.isnot(None))
         .all()
     ]
 
     n_delisted_skipped = 0
+    # 地方取引所に実在すると分かっている社（#560）。バックオフの回数と**混ぜない**——
+    # 混ぜると「なぜスキップ数が変わったか」がログから読めなくなる。
+    n_local_exchange_skipped = 0
     # 「価格を1件も持たない社」の母数（#555）。従来はスキップ数しかログに出ておらず、
     # **454 → 416 のような改善を run ログから追えなかった**（アドホック SQL が要った）。
     n_priceless = 0
     n_priceless_resolved = 0
     to_fetch = []
-    for sec_code, edinet_code, is_active, yahoo_suffix in companies:
+    for sec_code, edinet_code, is_active, yahoo_suffix, probe_bucket in companies:
         _d, _w = latest_daily.get(edinet_code), latest_weekly.get(edinet_code)
         last = max(x for x in (_d, _w) if x) if (_d or _w) else None
         if last is None:
@@ -1247,6 +1251,17 @@ async def fill_recent_stock_price_gap_yahoo(
             # **解決済み（yahoo_suffix 非 NULL）はバックオフを通り抜けて毎晩取りに行く**。
             # 初回の夜に価格が入れば以降この分岐へ来なくなり通常の流れへ合流するので、
             # 恒久的なコスト増にはならない。未解決は従来どおり7日に1回（#475 の挙動を保存）。
+            # **`.T` が永久に当たらないと分かっている社は、7日に1回すら叩かない**（#560）。
+            # `empty` は「Yahoo が期待した取引所（SAP/FKA）と実名を返すのにバーが0本」＝
+            # 札証/福証に実在する社で、東証には居ない。バックオフで間隔を空けても当たらない
+            # 相手に投げ続ける意味は無い。正しい取引所での再プローブは月次が担う
+            # （`resolve_price_suffix --apply --bucket empty`）。
+            #
+            # `placeholder`（Yahoo の空箱）と `not_found` は**従来どおり7日に1回**＝
+            # #475 の挙動を保存する（取得手段が無いだけで、将来 Yahoo が載せる可能性は残る）。
+            if yahoo_suffix is None and probe_bucket == "empty":
+                n_local_exchange_skipped += 1
+                continue
             if (use_session and is_active is False and yahoo_suffix is None
                     and not should_retry_priceless_delisted(edinet_code, today)):
                 n_delisted_skipped += 1
@@ -1294,6 +1309,8 @@ async def fill_recent_stock_price_gap_yahoo(
              + f" ・価格ゼロ {n_priceless}社（うち解決済み {n_priceless_resolved}社）"
              + (f" ・廃止済み価格ゼロ {n_delisted_skipped}社は今夜は見送り"
                 f"（{DELISTED_RETRY_INTERVAL_DAYS}日に1回試す・#475）" if n_delisted_skipped else "")
+             + (f" ・地方取引所に実在 {n_local_exchange_skipped}社は .T を叩かない"
+                f"（月次が正しい取引所で再プローブ・#560）" if n_local_exchange_skipped else "")
              + "）")
 
     n_new = 0        # 従来の最終日より後の日付＝正味の新規行。投入行数とは別に数える（#474）
