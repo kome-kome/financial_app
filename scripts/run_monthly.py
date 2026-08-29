@@ -117,6 +117,10 @@ WINDOW_MIN = 16 * 60
 # #540 は「軌道長のレバーは使い切った」ことを示したに留まる。
 BUDGET_MIN: dict[str, float] = {
     "vacuum": 45,
+    # 5社 × 2サフィックス × YAHOO_STOCK_RATE_SLEEP(0.5s) ≒ 5秒（#560）。3分は十分な余裕。
+    # **全数 454社の `--reprobe` は約8分で入らない**——Σ925 + マージン30 = 955 に対し窓 960 で
+    # 余裕が5分しかなく、窓の拡張も日次 17:20 起動と衝突するため不可（だから対象を絞った）。
+    "price_suffix": 3,
     "factor_premia": 20,
     "macro_beta": 180,
     "tune:macro_risk_return": 250,
@@ -142,6 +146,16 @@ def steps_for(python: str) -> tuple[Step, ...]:
              why="stock_price_daily / stock_price_weekly の index bloat 回収と "
                  "per-table autovacuum の較正（#290）。正本がローカルへ移ってから"
                  "メンテ経路が無かった"),
+        Step("price_suffix",
+             (python, "-m", "scripts.resolve_price_suffix", "--apply", "--bucket", "empty",
+              "--backfill-weekly"),
+             why="地方取引所に実在すると分かっている社（Yahoo が SAP/FKA と実名を返すのに"
+                 "バーが0本）を、正しい取引所で再プローブする（#560）。バーが供給され始めた"
+                 "瞬間に自動で拾う。**全数 454社は約8分で月次の窓に入らない**ので "
+                 "`--bucket empty` の数社だけに絞ってある（約5秒）。"
+                 "**`--backfill-weekly` は採用できた社にだけ走る**——解決しただけでは "
+                 "daily 保持窓183日＝約26週しか付かず z_momentum の52週に届かない（#555）。"
+                 "対象は最大でもバケットの社数なので窓を脅かさない"),
         Step("factor_premia",
              (python, "recommend_factor_premia.py",
               "--min-companies-per-period", "30", "--maxlags", "11", "--persist"),

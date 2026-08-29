@@ -279,6 +279,18 @@ class Company(Base):
     # scripts/resolve_price_suffix.py が meta.exchangeName を突合して採用した社だけ。
     # `market` 列（プライム/スタンダード/グロース）とは別物なので混同しないこと。
     yahoo_suffix  = Column(String(4), nullable=True)
+    # プローブの棄却理由（#560）。`scripts/resolve_price_suffix.reject_bucket` の4分類
+    # （mismatch / empty / placeholder / not_found）。**採用できた社と未プローブの社は NULL**。
+    #
+    # **`yahoo_suffix` の NULL の意味は変えない**（未解決＝.T で試す）。この列が答えるのは
+    # 「**なぜ**未解決なのか」だけで、解決の3状態目ではない。分けてあるのは打ち手が違うから:
+    #   empty       … 取引所も実名も正しく返るがバーが0本＝**その取引所で再プローブする価値がある**
+    #                  （札証/福証の5社。東証には居ないので .T は永久に当たらない）
+    #   placeholder … Yahoo の空箱（YHD・currency も名前も無い）＝東証を廃止された大型株
+    #   not_found   … Yahoo が知らない
+    # 分類自体は #555 から `reject_bucket` が持っていたが、**printf されて消えていた**ため
+    # 「取引所は分かっているのに絞り込めない」状態だった（#560）。
+    yahoo_probe_bucket = Column(String(16), nullable=True)
     created_at   = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     updated_at   = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
@@ -2011,6 +2023,12 @@ def _ensure_tables() -> None:
         # 既存全行は NULL のまま＝".T"（従来どおり）＝この列を足しただけでは挙動が変わらない。
         conn.execute(text(
             "ALTER TABLE companies ADD COLUMN IF NOT EXISTS yahoo_suffix VARCHAR(4)"
+        ))
+        # プローブの棄却理由（#560・非破壊・冪等）。既存全行は NULL＝未プローブ扱いで、
+        # 足しただけでは毎晩のバックオフも月次の対象も変わらない
+        # （`resolve_price_suffix --apply` が1度走って初めて値が入る）。
+        conn.execute(text(
+            "ALTER TABLE companies ADD COLUMN IF NOT EXISTS yahoo_probe_bucket VARCHAR(16)"
         ))
         for col in _NEW_COLS:
             conn.execute(text(

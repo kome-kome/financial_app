@@ -257,6 +257,101 @@ class TestDryRunWritesNothing:
             Company.edinet_code == "E00001").one().yahoo_suffix is None
 
 
+class TestProbeBucketIsPersisted:
+    """棄却理由を DB へ残す（#560）。
+
+    分類する `reject_bucket` は #555 からあったが **printf されて消えていた**ため、
+    「取引所は分かっているのに絞り込めない」状態だった。永続化して初めて月次が
+    `--bucket empty` の5社だけを叩ける（全数 454社の約8分は月次の窓に入らない）。
+    """
+
+    def _seed(self, db, make_company, make_price):
+        db.add(make_company(edinet_code="E00001", sec_code="1734", is_active=False))
+        db.add(make_company(edinet_code="E00003", sec_code="1003", is_active=True))
+        db.add(make_price(edinet_code="E00003", trade_date="2026-08-01"))
+        db.commit()
+
+    def _run(self, db, monkeypatch, chart, apply=True):
+        import asyncio
+        import scripts.resolve_price_suffix as rps
+
+        monkeypatch.setattr(rps, "fetch_yahoo_chart", chart)
+        targets = _targets(db, False, None, None)
+        return asyncio.run(rps._resolve(db, targets, "20260101", "20260301",
+                                        sleep=0, apply=apply))
+
+    def test_empty_bucket_is_written(self, db, make_company, make_price, monkeypatch):
+        """`SAP` と実名は返るがバーが0本＝再プローブの価値がある社。"""
+        from database import Company
+
+        self._seed(db, make_company, make_price)
+
+        async def chart(http, ticker, d_from, d_to):
+            return ([], SAP_JPY) if ticker.endswith(".S") else ([], {})
+
+        res = self._run(db, monkeypatch, chart)
+        assert res["adopted"] == []
+        assert db.query(Company).filter(
+            Company.edinet_code == "E00001").one().yahoo_probe_bucket == "empty"
+
+    def test_not_found_bucket_is_written(self, db, make_company, make_price, monkeypatch):
+        from database import Company
+
+        self._seed(db, make_company, make_price)
+
+        async def chart(http, ticker, d_from, d_to):
+            return ([], {})
+
+        self._run(db, monkeypatch, chart)
+        assert db.query(Company).filter(
+            Company.edinet_code == "E00001").one().yahoo_probe_bucket == "not_found"
+
+    def test_adoption_clears_the_bucket(self, db, make_company, make_price, monkeypatch):
+        """採用できたら棄却理由は消す。**残すと解決済みなのに not_found という
+        読めない状態になり、月次の `--bucket empty` が解決済みを拾い続ける。**"""
+        from database import Company
+
+        self._seed(db, make_company, make_price)
+        db.query(Company).filter(Company.edinet_code == "E00001").update(
+            {"yahoo_probe_bucket": "empty"})
+        db.commit()
+
+        async def chart(http, ticker, d_from, d_to):
+            return (_bars(10), SAP_JPY) if ticker.endswith(".S") else ([], {})
+
+        self._run(db, monkeypatch, chart)
+        row = db.query(Company).filter(Company.edinet_code == "E00001").one()
+        assert row.yahoo_suffix == ".S"
+        assert row.yahoo_probe_bucket is None
+
+    def test_dry_run_writes_no_bucket(self, db, make_company, make_price, monkeypatch):
+        from database import Company
+
+        self._seed(db, make_company, make_price)
+
+        async def chart(http, ticker, d_from, d_to):
+            return ([], {})
+
+        self._run(db, monkeypatch, chart, apply=False)
+        assert db.query(Company).filter(
+            Company.edinet_code == "E00001").one().yahoo_probe_bucket is None
+
+    def test_bucket_filter_narrows_the_targets(self, db, make_company, make_price):
+        """月次が5社だけを叩けること＝この Issue の目的そのもの。"""
+        db.add(make_company(edinet_code="E00001", sec_code="1734",
+                            is_active=False, yahoo_probe_bucket="empty"))
+        db.add(make_company(edinet_code="E00002", sec_code="9062",
+                            is_active=False, yahoo_probe_bucket="placeholder"))
+        db.add(make_company(edinet_code="E00004", sec_code="1005", is_active=False))
+        db.commit()
+
+        assert [r[1] for r in _targets(db, False, None, None, bucket="empty")] == ["1734"]
+        assert [r[1] for r in _targets(db, False, None, None,
+                                       bucket="placeholder")] == ["9062"]
+        # 絞らなければ従来どおり全件（未プローブを含む）
+        assert len(_targets(db, False, None, None)) == 3
+
+
 class TestRejectBucket:
     """棄却の3分類。**強い信号を優先する**（mismatch > empty > not_found）。"""
 

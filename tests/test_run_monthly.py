@@ -107,10 +107,18 @@ class TestStepOrder:
     def test_lightest_runs_first(self):
         """打ち切られても前方は当月分が揃う（nightly_scores の NIGHTLY_MODELS と同じ思想）。
 
-        実測 factor_premia は約2分。tune は GHA で 300〜355分の timeout を積んでいた。
+        実測 price_suffix は約5秒・factor_premia は約2分。tune は GHA で 300〜355分の
+        timeout を積んでいた。
+
+        **名前で固定しない**——ステップを足すたびにここを書き換える形にすると、
+        「軽い順」という不変条件ではなく「そのときの並び」を検査することになる
+        （実際 #560 で price_suffix を足したとき、意図は満たしているのに落ちた）。
         """
-        names = [n for n in _names() if n != "vacuum"]   # vacuum はロック都合で別枠
-        assert names[0] == "factor_premia"
+        steps = [s for s in rm.steps_for(sys.executable) if s.name != "vacuum"]
+        assert steps[0].budget_min == min(s.budget_min for s in steps), (
+            f"先頭が最軽量でない: {steps[0].name}({steps[0].budget_min}分) / "
+            f"最小 {min(s.budget_min for s in steps)}分"
+        )
 
     def test_m1_is_tuned_before_the_other_models(self):
         """tune の中では M-1 が先。止まって最も困るのが M-1 の μ̂ だから。"""

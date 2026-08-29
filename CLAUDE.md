@@ -91,6 +91,7 @@ python -m scripts.repair_splits_from_jquants --apply
 python -m scripts.resolve_price_suffix                            # 何も書かない
 python -m scripts.resolve_price_suffix --apply --backfill-weekly  # 採用＋5年weekly
 python -m scripts.resolve_price_suffix --reprobe                  # 解決済みも測り直す
+python -m scripts.resolve_price_suffix --apply --bucket empty     # 取引所判明・バー0本の5社だけ（月次が回す・#560）
 python edinet_ping.py                    # EDINET API接続テスト
 ```
 

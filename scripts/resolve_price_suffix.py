@@ -80,6 +80,7 @@ WHERE c.sec_code IS NOT NULL
   AND NOT EXISTS (SELECT 1 FROM stock_price_daily  d WHERE d.edinet_code = c.edinet_code)
   AND NOT EXISTS (SELECT 1 FROM stock_price_weekly w WHERE w.edinet_code = c.edinet_code)
   {resolved_filter}
+  {bucket_filter}
 ORDER BY c.sec_code
 """
 
@@ -173,12 +174,19 @@ async def probe_company(http, sec_code: str, d_from: str, d_to: str,
     return got, reason, bars
 
 
-def _targets(db, reprobe: bool, only: Optional[list], limit: Optional[int]) -> list:
+def _targets(db, reprobe: bool, only: Optional[list], limit: Optional[int],
+             bucket: Optional[str] = None) -> list:
     """プローブ対象。`yahoo_suffix IS NULL` 条件だけで再開可能性が成立する
-    （途中で落ちても、書けたぶんは次回の対象から自動的に外れる＝状態ファイル不要）。"""
+    （途中で落ちても、書けたぶんは次回の対象から自動的に外れる＝状態ファイル不要）。
+
+    `bucket` を渡すと `yahoo_probe_bucket` で絞る（#560）。**月次バッチが使うのはこれ**——
+    全数 454社は約8分かかり月次の窓に入らない（Σ予算 925 + マージン 30 に対し窓 960＝
+    余裕5分）。`empty`（取引所は判明・バー0本）の5社だけなら約5秒で収まる。
+    """
     sql = PRICELESS_SQL.format(
-        resolved_filter="" if reprobe else "AND c.yahoo_suffix IS NULL")
-    rows = db.execute(text(sql)).fetchall()
+        resolved_filter="" if reprobe else "AND c.yahoo_suffix IS NULL",
+        bucket_filter="AND c.yahoo_probe_bucket = :bucket" if bucket else "")
+    rows = db.execute(text(sql), {"bucket": bucket} if bucket else {}).fetchall()
     if only:
         want = {s.strip() for s in only}
         rows = [r for r in rows if r[1] in want]
@@ -202,13 +210,28 @@ async def _resolve(db, targets: list, d_from: str, d_to: str, sleep: float,
                     # `updated_at` は mirror の増分キー（scripts/mirror_common.py）なので
                     # 必ず進める。**`now()` は使わない**——Postgres 専用で、テストの
                     # in-memory SQLite が `no such function: now` で落ちる。
+                    #
+                    # 採用できたら棄却理由は消す（#560）。**残すと「解決済みなのに
+                    # not_found」という読めない状態になる**し、月次の `--bucket empty` が
+                    # 解決済みの社を拾い続ける。
                     db.execute(
                         text("UPDATE companies SET yahoo_suffix = :s, "
+                             "yahoo_probe_bucket = NULL, "
                              "updated_at = :ts WHERE edinet_code = :ec"),
                         {"s": suffix, "ec": ec,
                          "ts": datetime.now(timezone.utc)})
             else:
+                rec["bucket"] = reject_bucket(reason)
                 rejected.append(rec)
+                if apply:
+                    # **棄却理由を永続化する（#560）。** 分類する `reject_bucket` は #555 から
+                    # あったが printf されて消えており、「取引所は分かっているのに絞り込めない」
+                    # 状態だった。ここで残すことで、月次が `empty` の5社だけを叩ける。
+                    db.execute(
+                        text("UPDATE companies SET yahoo_probe_bucket = :b, "
+                             "updated_at = :ts WHERE edinet_code = :ec"),
+                        {"b": rec["bucket"], "ec": ec,
+                         "ts": datetime.now(timezone.utc)})
             if apply and i % PRICE_COMMIT_BATCH == 0:
                 db.commit()   # 途中で落ちても、ここまでは残る
             if i % YAHOO_BACKFILL_PROGRESS_BATCH == 0:
@@ -279,6 +302,8 @@ def main() -> int:
     ap.add_argument("--only", help="証券コードをカンマ区切りで指定")
     ap.add_argument("--reprobe", action="store_true",
                     help="解決済みの社も測り直す（Yahoo が記号を張り替えた疑いがあるとき）")
+    ap.add_argument("--bucket", choices=REJECT_BUCKET_ORDER,
+                    help="前回の棄却理由で対象を絞る（月次は empty＝取引所判明・バー0本の5社）")
     ap.add_argument("--sleep", type=float, default=YAHOO_STOCK_RATE_SLEEP,
                     help=f"リクエスト間隔（秒・既定{YAHOO_STOCK_RATE_SLEEP}）")
     ap.add_argument("--json", action="store_true", help="機械可読出力")
@@ -290,8 +315,9 @@ def main() -> int:
 
     db = D.SessionLocal()
     try:
-        targets = _targets(db, args.reprobe, 
-                           args.only.split(",") if args.only else None, args.limit)
+        targets = _targets(db, args.reprobe,
+                           args.only.split(",") if args.only else None, args.limit,
+                           bucket=args.bucket)
         n_req = len(targets) * len(PROBE_SUFFIXES)
         print(f"接続先: {'ローカル' if D._is_local else 'リモート'}")
         print(f"対象: {len(targets)}社（プローブ窓 {d_from}〜{d_to}）")
