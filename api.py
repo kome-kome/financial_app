@@ -28,10 +28,24 @@ from pathlib import Path
 from typing import Optional
 from datetime import date, datetime, timedelta, timezone
 
+_JST = timezone(timedelta(hours=9))
+
+
 def _utc_to_jst_str(dt: Optional[datetime]) -> Optional[str]:
-    """DB に UTC 保存された naive datetime を 'YYYY-MM-DD HH:MM:SS JST' に整形"""
+    """DB に UTC 保存された naive datetime を 'YYYY-MM-DD HH:MM:SS JST' に整形
+
+    aware な値（`app_settings.updated_at` は唯一の timestamptz 列・
+    `routers/morning.py` は `datetime.now(timezone.utc)` を直接渡す）は
+    `astimezone` で正しく変換する。naive 経路の結果は従来と同一（#565）。
+
+    **naive 値が UTC であることは `database.SESSION_FIXES` が接続時に担保している。**
+    セッション TZ が Asia/Tokyo だと書き込みが JST naive になり、ここが更に +9h する
+    ＝画面に 9 時間先の時刻が出る（#565・ADR-0043）。
+    """
     if dt is None:
         return None
+    if dt.tzinfo is not None:
+        return dt.astimezone(_JST).strftime("%Y-%m-%d %H:%M:%S") + " JST"
     return (dt + timedelta(hours=9)).strftime("%Y-%m-%d %H:%M:%S") + " JST"
 
 from fastapi import FastAPI, BackgroundTasks, Depends, HTTPException, Request, Response
