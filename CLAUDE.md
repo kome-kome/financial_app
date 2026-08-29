@@ -82,6 +82,11 @@ python collector.py --macro --macro-series JP10Y_FRED    # 指定系列のみ（
 python collector.py --repair-price-breaks                # 週次株価の分割段差を検出（dry-run）
 python collector.py --repair-price-breaks --persist      # 同上＋該当銘柄をYahooで取り直し検算
 
+# Yahoo が遡及反映しない分割を公式(J-Quants AdjFactor)の裏付け付きで直す（#466）。既定はドライラン
+python -m scripts.repair_splits_from_jquants                   # 検出→判定（書かない）
+python -m scripts.repair_splits_from_jquants --only E03137     # 1社だけ（検出を省く）
+python -m scripts.repair_splits_from_jquants --apply
+
 # 地方取引所の単独上場を拾う（#555）。既定はドライラン＝棄却理由まで出す
 python -m scripts.resolve_price_suffix                            # 何も書かない
 python -m scripts.resolve_price_suffix --apply --backfill-weekly  # 採用＋5年weekly

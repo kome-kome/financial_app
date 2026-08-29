@@ -24,6 +24,7 @@ from collector import (
     TSE_INDUSTRY,
     XBRL_MAP,
     _detect_xbrl_columns,
+    _jquants_fetch_code,
     _jquants_fetch_date,
     calc_derived,
     df_to_raw_rows,
@@ -634,3 +635,77 @@ class TestJquantsFetchDate:
         ))
         rows = asyncio.run(_jquants_fetch_date(client, "key", "2023-09-01"))
         assert [d["Code"] for d in rows] == ["13010"]
+
+
+class TestJquantsFetchCode:
+    """銘柄単位の履歴取得（#466）。**日付単位経路しか無かったため**、#466 本文は
+    「523営業日の全走査（≒174分）が公式値を取る唯一の経路」と書いていたが、これは
+    v1 時点の記述で、v2 は `code=` で1銘柄ぶんを1リクエストで返す（実測 487行）。
+
+    エラー処理は `_jquants_fetch_date` と**同じ規約**であること。揃っていないと、
+    片方だけが知っている失敗の形が出たときに握りつぶす。
+    """
+
+    def test_sends_code_and_period(self):
+        seen = {}
+
+        def handler(request):
+            seen.update(dict(request.url.params))
+            return httpx.Response(200, json={"data": [{"Date": "2025-01-06", "AdjC": 1.0}]})
+
+        rows = asyncio.run(_jquants_fetch_code(
+            _client(handler), "key", "82270", "2024-06-06", "2026-06-06"))
+        assert seen["code"] == "82270"
+        assert seen["from"] == "2024-06-06" and seen["to"] == "2026-06-06"
+        assert len(rows) == 1
+
+    def test_pagination_is_followed(self, monkeypatch):
+        async def _noop(*a, **k):
+            pass
+        monkeypatch.setattr(collector.asyncio, "sleep", _noop)
+        client = _client(_queue(
+            httpx.Response(200, json={"data": [{"Date": "2025-01-06"}], "pagination_key": "K2"}),
+            httpx.Response(200, json={"data": [{"Date": "2025-01-07"}]}),
+        ))
+        rows = asyncio.run(_jquants_fetch_code(client, "key", "82270", "a", "b"))
+        assert [r["Date"] for r in rows] == ["2025-01-06", "2025-01-07"]
+
+    def test_429_then_success(self, monkeypatch):
+        async def _noop(*a, **k):
+            pass
+        monkeypatch.setattr(collector.asyncio, "sleep", _noop)
+        client = _client(_queue(
+            httpx.Response(429),
+            httpx.Response(200, json={"data": [{"Date": "2025-01-06"}]}),
+        ))
+        rows = asyncio.run(_jquants_fetch_code(client, "key", "82270", "a", "b"))
+        assert len(rows) == 1
+
+    def test_400_without_coverage_text_is_empty(self):
+        """上場前・廃止後などは空で正常終了する（例外にしない）。"""
+        rows = asyncio.run(_jquants_fetch_code(
+            _client(_const(httpx.Response(400, text="no data"))), "key", "99990", "a", "b"))
+        assert rows == []
+
+
+class TestCliOutputSurvivesCp932:
+    """**cp932 コンソールへリダイレクトすると出力済みの内容ごとクラッシュする。**
+
+    2026-08-29 に `--repair-price-breaks` の結果表示が `U+2014 EM DASH` で
+    `UnicodeEncodeError` を投げ、**8分ぶんの J-Quants 突合結果が丸ごと捨てられた**
+    （cp932 に EM DASH は無い。見た目が同じ `U+2015 HORIZONTAL BAR` は在る）。
+    個別の記号を1つずつ直すのは過去に2度繰り返しているので、ここで縛る。
+    """
+
+    def test_collector_source_is_cp932_encodable(self):
+        src = io.open(
+            os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                         "collector.py"), encoding="utf-8").read()
+        try:
+            src.encode("cp932")
+        except UnicodeEncodeError as e:
+            bad = src[e.start:e.end]
+            raise AssertionError(
+                f"collector.py に cp932 で出せない文字がある: {bad!r} "
+                f"(U+{ord(bad[0]):04X})。リダイレクト時に出力ごとクラッシュする"
+            ) from None

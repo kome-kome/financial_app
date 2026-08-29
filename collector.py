@@ -25,7 +25,7 @@ from collector_interim import run_interim_collection  # 半期(H1)財務収集
 # （`from module import *` は先頭 _ の名前を取り込まないため）。
 from collector_master import _read_jpx_excel
 from collector_financials import _match_capex_by_label, _phase_process_docs, _detect_xbrl_columns
-from collector_prices import _nearest_price, _jquants_fetch_date
+from collector_prices import _nearest_price, _jquants_fetch_date, _jquants_fetch_code
 from collector_prices import _esri_candidate_urls, _parse_esri_gdp_csv, _esri_apply_lag
 from collector_prices import _parse_imf_weo_sheet
 from database import SessionLocal
@@ -105,7 +105,7 @@ if __name__ == "__main__":
                     on_progress=lambda c, t, m: print(m))
                 mode = "書き込み済み" if r["persisted"] else "dry-run（書き込みなし）"
                 print(f"\n=== 段差検出 {r['detected']}社 / 突合 {r['compared']}件 "
-                      f"/ 突合日 {len(r['probe_dates'])}日 — {mode} ===")
+                      f"/ 突合日 {len(r['probe_dates'])}日 ― {mode} ===")
                 for b in r["breaks"][:40]:
                     print(f"  {b['edinet_code']} {str(b.get('sec_code') or ''):5s} "
                           f"乖離{b['max_dev'] * 100:8.2f}%  JQ/DB {b['ratio']:.4f}  "
@@ -129,9 +129,9 @@ if __name__ == "__main__":
                     # 自動では追随しない。同じ作業内で必ず反映する（#465）。
                     print("\n次の2つを実行して修復を反映させること:\n"
                           "  1) update_market_data_from_history(db, point_in_time=True)\n"
-                          "     — financial_records の株価・PER/PBR/時価総額を再計算\n"
+                          "     ― financial_records の株価・PER/PBR/時価総額を再計算\n"
                           "  2) scripts/.cache/weekly_prices_*.pkl を退避\n"
-                          "     — 検証キャッシュはデータ世代を持たず旧値を黙って返す（#454/#456）\n"
+                          "     ― 検証キャッシュはデータ世代を持たず旧値を黙って返す（#454/#456）\n"
                           "（夜間バッチの週次キャッシュ（#480）は app_settings の世代印を"
                           "自動で進めたので手当て不要）")
                 else:
