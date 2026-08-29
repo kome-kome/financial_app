@@ -349,6 +349,59 @@ async def _jquants_fetch_date(session: httpx.AsyncClient, api_key: str, date_str
     return rows
 
 
+async def _jquants_fetch_code(session: httpx.AsyncClient, api_key: str, code: str,
+                              date_from: str, date_to: str) -> list:
+    """1銘柄ぶんの日次バーを期間指定で返す（#466）。`code` は5桁（普通株は末尾0）。
+
+    **v2 は `code=` で銘柄単位の履歴を返す。** `_jquants_fetch_date` の日付単位経路しか
+    無かったため、#466 本文は「日付単位の窓全走査（523営業日 × JQUANTS_RATE_SLEEP=20秒
+    ≒ 174分）が公式値を取る唯一の経路」と書いていたが、**これは v1 時点の記述**である。
+    銘柄単位なら12社を12リクエスト（約4分）で取れる。
+
+    返る行には **`AdjFactor`（JPX 公式の調整係数）** が入る。`AdjFactor != 1.0` の日が
+    企業イベント日で、値が比率そのもの。**株価比から分割比を推測してはいけない**——
+    #466 の調査で、公式イベントが無いのに株価が 5/6 ずれている銘柄（E32779）と、
+    時期も比率も公式と食い違う銘柄（E02086）が実在すると分かっている。
+
+    エラー処理は `_jquants_fetch_date` と同じ規約に揃える（429 は90秒待って1回だけ再試行・
+    403 は `classify_jquants_forbidden` で分類して送出・400 は窓外なら
+    `JQuantsOutOfCoverage`）。**揃えないと、片方だけ知っている失敗の形が出たときに
+    握りつぶす。**
+    """
+    headers = {"x-api-key": api_key}
+    rows: list = []
+    pagination_key = None
+    while True:
+        params: dict = {"code": code, "from": date_from, "to": date_to}
+        if pagination_key:
+            params["pagination_key"] = pagination_key
+        r = await session.get(JQUANTS_ENDPOINT, headers=headers, params=params, timeout=30)
+        if r.status_code == 429:
+            log.warning(f"J-Quants 429: {code} → 90秒後に再試行")
+            await asyncio.sleep(90)
+            r = await session.get(JQUANTS_ENDPOINT, headers=headers, params=params, timeout=30)
+            if r.status_code == 429:
+                log.error(f"J-Quants 429: {code} → 再試行も429、スキップ")
+                return []
+        if r.status_code == 403:
+            body = r.text or ""
+            raise JQuantsAccessError(
+                code, reason=classify_jquants_forbidden(body), message=body[:200])
+        if r.status_code in (400, 404):
+            cover_from, cover_to = parse_jquants_coverage(r.text or "")
+            if cover_from:
+                raise JQuantsOutOfCoverage(code, cover_from, cover_to)
+            break   # 該当なし（上場前・廃止後など）
+        r.raise_for_status()
+        data = r.json()
+        rows.extend(data.get("data", []))
+        pagination_key = data.get("pagination_key")
+        if not pagination_key:
+            break
+        await asyncio.sleep(JQUANTS_RATE_SLEEP)
+    return rows
+
+
 async def _fetch_jquants_equity_master(session: httpx.AsyncClient, api_key: str) -> tuple:
     """J-Quants /equities/master から上場銘柄集合と、そのマスタの as-of 日を返す。
 
