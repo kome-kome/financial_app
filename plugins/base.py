@@ -25,6 +25,14 @@ class AnalysisPlugin(ABC):
     # カテゴリの表示順は所属エントリの ui_order 昇順で決まる。未設定は末尾。
     category: str = ""
     ui_order: int = 999
+    # True: サイドバーへ出さない＝**退役したモデルの置き場**（ADR-0044）。`heavy` とは別軸で、
+    # heavy が「Render 軽量モードでブロックする（＝実行環境の制約）」なのに対し、hidden は
+    # 「選択肢として勧めない（＝評価の結論）」を表す。レジストリ登録・`get_plugin` /
+    # `execute_plugin` / `POST /api/plugins/{name}/run` / `model_comparison` の比較行は**残る**
+    # ので、いつでも再評価・復帰できる。削除ではなく hidden にするのは、比較ファミリーの
+    # 一員としての役割（ADR-0021「並置して実データで決める」）が退役後も残るため。
+    # フィルタは消費側（`routers/analysis.py` の `/api/plugins`）が行う。
+    hidden: bool = False
 
     @abstractmethod
     def params_schema(self) -> dict:
@@ -61,5 +69,6 @@ class AnalysisPlugin(ABC):
             "heavy": self.heavy,
             "category": self.category,
             "ui_order": self.ui_order,
+            "hidden": self.hidden,
             "params_schema": self.params_schema(),
         }

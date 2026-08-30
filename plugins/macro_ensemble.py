@@ -250,6 +250,12 @@ class MacroEnsemblePlugin(AnalysisPlugin):
     heavy = True
     category = "③ 将来リターンを予測"
     ui_order = 370                       # M-3=360 の後（M-1→M-2→M-3→M-4 順・#378）
+    # 退役（ADR-0044）: 統合は **M-6 単体を上回らない**（rank-IC +0.0006・p=0.810／売り側
+    # spread p=0.655・ADR-0015 の実測）のに、実行コストは基底 M-1+M-2+M-6 の合算になる。
+    # ADR-0015 本文の「統合が単体最良を上回らなければ単体で十分」判定にそのまま該当する。
+    # サイドバーと `mu_source` から外すだけで、コード・テスト・`COMPARISON_MODELS` は残す
+    # （基底を足したときの再評価は `python -m scripts.model_comparison_run` で再開できる）。
+    hidden = True
 
     def params_schema(self) -> dict:
         return {

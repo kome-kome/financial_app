@@ -160,6 +160,25 @@ class TestHeavyAutomationRegistry:
         stale = set(HEAVY_AUTOMATION) - set(self._heavy_plugins())
         assert not stale, f"heavy でないのに登録されている: {sorted(stale)}"
 
+    def test_hidden_heavy_plugins_are_exempt(self):
+        """退役（hidden・ADR-0044）したモデルを自動実行し続けない。
+
+        hidden は「選択肢として勧めない」という評価の結論なので、夜間・月次が回し続けて
+        いるのに UI から消えている状態は矛盾する（消えたモデルの μ̂ だけが更新され続け、
+        誰も見ないまま計算資源と Egress を食う）。逆向き（exempt なら hidden）は縛らない
+        ——M-4/M-5 以前から exempt な heavy は普通にありうる。
+        """
+        from plugins import list_plugins
+
+        for p in list_plugins():
+            if not (p.hidden and p.heavy):
+                continue
+            entry = HEAVY_AUTOMATION.get(p.name, "")
+            assert entry.startswith(EXEMPT_PREFIX), (
+                f"{p.name} は退役（hidden）なのに自動実行が登録されている: {entry!r}。"
+                "HEAVY_AUTOMATION を 'exempt: <理由>' へ変えること"
+            )
+
     def test_workflow_entries_point_at_a_file_that_runs_the_model(self):
         """GHA ワークフロー名を書いたら、実在し**そのモデルを実際に回す**ことまで確かめる。
 

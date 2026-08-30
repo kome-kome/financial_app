@@ -46,9 +46,9 @@ SPECIAL_ANALYSES = [
     {
         "name": "model_comparison",
         "label": "モデル比較（OOF）",
-        "description": "将来リターン予測モデル M-1/M-2/M-3 の予測力（rank-IC・ロングショート spread・hit-rate）を無リーク OOF で横並び比較します（/api/backtest の as-of 上位N とは別手法）",
+        "description": "将来リターン予測モデル M-1〜M-6 の予測力（rank-IC・ロングショート spread・hit-rate）を無リーク OOF で横並び比較します（/api/backtest の as-of 上位N とは別手法）。退役した M-4/M-5 もここには並びます",
         "depends_on": [],
-        "heavy": True,   # 3モデル（heavy）を実行するため。Render では各モデルがスキップされる
+        "heavy": True,   # 全モデル（heavy）を実行するため。Render では各モデルがスキップされる
         "category": "④ 戦略を検証",
         "ui_order": 420,
         "params_schema": {},  # 専用UI（静的タブ）を使用するため空
@@ -58,8 +58,12 @@ SPECIAL_ANALYSES = [
 
 @router.get("/api/plugins")
 async def list_plugins():
-    """分析メタ一覧。プラグイン + 特例エントリ(screen/backtest)を ui_order 昇順で返す。"""
-    metas = [p.to_meta() for p in plugin_registry.list_plugins()]
+    """分析メタ一覧。プラグイン + 特例エントリ(screen/backtest)を ui_order 昇順で返す。
+
+    `hidden=True` のプラグインは除外する（ADR-0044 の退役＝サイドバーに出さない）。除外は
+    ここだけで、レジストリ・`/api/plugins/{name}/run`・`model_comparison` には残る。
+    """
+    metas = [p.to_meta() for p in plugin_registry.list_plugins() if not p.hidden]
     metas.extend(SPECIAL_ANALYSES)
     metas.sort(key=lambda m: m.get("ui_order", 999))
     return {"plugins": metas}

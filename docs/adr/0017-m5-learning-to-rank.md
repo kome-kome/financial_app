@@ -3,6 +3,10 @@
 ## Status
 
 accepted（2026-07-24）。Issue #362 の設計決定。
+**2026-08-30: 実測により「MSE で十分」を確定し、M-5 を退役**（本 ADR 末尾の実測節・#570・
+[ADR-0044](0044-retire-underperforming-models-by-hiding.md)）。設計判断そのものは有効なまま
+（＝この比較を可能にした `pass_train_groups` などの拡張は残る）で、覆されたのは「rank 目的が
+効くはず」という仮説のほう。
 
 ## Context
 
@@ -88,11 +92,60 @@ fit_predict コールバックへは月境界を持たない `train_samples` を
   の非負/上限クリップ/順序保存・`pass_train_groups` の3引数呼び出しとグループ合計整合・
   既定 False の2引数後方互換・execute の `model_type=xgboost_ranker` と producer 非永続化を固定。
 
-### 実測（本番 model_comparison・未実施）
+### 実測（2026-08-30・`python -m scripts.model_comparison_run --models macro_gbdt,macro_gbdt_rank`）
 
-本番 full-config（週次株価＋マクロ5年蓄積）での `POST /api/backtest/model-comparison` により
-M-2(MSE) と M-5(rank) の honest OOF rank-IC を同一 fold・同一特徴量で取得し、ここに追記する。
-上回れば `mu_source` 統合（順位→水準写像）の検討へ、上回らなければ MSE 維持を確定する。
+本番パネル・既定 config・honest（embargo=12）。**17 fold / 共通 OOF 25,738 ペア / test 月
+2021-06〜2025-06**（#411・ADR-0025 の履歴延伸後の世代）。両モデルは同一 fold・同一特徴量・
+同一 `oof_backtest` を通っており、n_periods / n_oof が完全に一致する:
+
+| 指標 | M-2（MSE・`reg:squarederror`） | M-5（rank・`rank:pairwise`） |
+|---|---|---|
+| rank-IC（mean / std） | **0.1578** / 0.1006 | 0.0808 / 0.0710 |
+| 業種中立 rank-IC | **0.1309** | 0.0759 |
+| ロングショート spread | **0.1209** | 0.0729 |
+| 売り側 spread | **0.0676** | 0.0302 |
+| 分位リターン（Q1→Q5） | 0.0145 → 0.1354 | 0.0520 → 0.1249 |
+| 分位単調性（Spearman 平均） | **0.8235** | 0.5824 |
+| hit-rate | **0.9412** | 0.8824 |
+| 実効ターンオーバー | 0.5655 | 0.5567 |
+| ブレークイーブンコスト | **10.7bp** | 6.5bp |
+| 区間被覆（τ=0.9） | 0.8855 | 0.9142 |
+
+差の検定（`model_stats.significance_matrix`・定常ブートストラップ・ADR-0018・n=17 期）:
+
+- **M-2 − M-5 = +0.0771・95%CI [+0.0558, +0.0995]・p=0.001 → 有意に M-2 が優位**
+  （p=0.001 はブートストラップの下限 `2/(n_boot+1)` であって「それ以上小さい p」ではない）。
+
+**判定: 「MSE で十分」を確定**。本 ADR の Consequences が定めた二択のうち後者に該当する。
+学習目的（MSE）と評価指標（rank-IC）を揃えるという動機自体は ADR-0007 と同型で正しかったが、
+**この実装では逆に半減した**。効いていない箇所は分位の下側に最も強く出ており、M-5 の最下位分位
+リターンは 0.0520 と M-2 の 0.0145 から大きく持ち上がっている＝**負けそうな銘柄を下に置けて
+いない**（売り側 spread が 0.0676→0.0302 と半減するのはこれの帰結で、`sell_ranking` へ統合
+しなかった判断は結果的に正しかった）。
+
+考えられる機構（**いずれも仮説であり本実測では切り分けていない**）:
+
+1. **正則化の非対称**。ADR-0017 の決定5で M-5 は early_stopping を使わず固定 `n_estimators`
+   で学習する（ランカーの eval_set が group 付き検証を要するため）。M-2 は early_stopping で
+   実効的な木数が絞られるため、**「同一 fold・同一特徴量」ではあっても「同一の正則化」では
+   ない**。この差だけで説明がつく可能性は排除できていない。
+2. **pairwise 損失が水準情報を捨てること**。低 S/N な日本株の 52 週先リターンでは、月内の
+   順位そのものが大半ノイズである。二乗損失は大きな残差にペナルティを集中させる分、
+   ノイズ順位の入れ替えを追いにくい。ADR-0021 の確定知見「木の非線形性より縮小推定が効く」
+   とも整合する（縮小の効かない目的関数へ替えたことになる）。
+
+したがって「learning-to-rank は日本株のクロスセクション予測で無効」とまでは言えない。言えるのは
+**この実装（rank:pairwise・固定木数・M-2 と同一特徴量）では M-2 を有意に下回った**ことである。
+再挑戦するなら、まず 1 の非対称を潰す（group 付き eval_set を組んで early_stopping を効かせる）
+のが先。
+
+### 退役（2026-08-30・Issue #570）
+
+上の判定を受け、[ADR-0044](0044-retire-underperforming-models-by-hiding.md) の手続きで
+`plugins/macro_gbdt_rank.py` に `hidden = True` を設定した。サイドバー「③ 将来リターンを
+予測」から外れる。producer を持たないため下流（`sell_ranking` / `recommend` / M-4 の
+`BASE_MODELS`）の切断作業は発生しない。**プラグイン・テスト・`COMPARISON_MODELS` の M-5 行は
+残す**ので、上記「再挑戦するなら」を実行するときは `hidden` を外して測り直せばよい。
 
 参考: Burges, C. J. C. (2010). "From RankNet to LambdaRank to LambdaMART: An Overview."
 Microsoft Research Technical Report MSR-TR-2010-82.

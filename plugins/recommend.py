@@ -28,7 +28,7 @@ MU_SOURCE_OPTIONS = [
     {"value": "macro_risk_return", "label": "M-1: マクロ×リスク-リターン（OLS）"},
     {"value": "macro_gbdt",        "label": "M-2: マクロ×財務 勾配ブースティング（XGBoost）"},
     {"value": "macro_dlm",         "label": "M-3: ベイズ状態空間（時変マクロβ DLM）"},
-    {"value": "macro_ensemble",    "label": "M-4: 兄弟μ̂スタッキング（M-1+M-2 統合）"},
+    # M-4（macro_ensemble）は退役につき選択肢から除去（ADR-0044・p=0.810 で M-6 単体と互角）。
     {"value": "macro_enet",        "label": "M-6: マクロ×財務 正則化線形（ElasticNet）"},
 ]
 

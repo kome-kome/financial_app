@@ -284,7 +284,9 @@ class SellRankingPlugin(AnalysisPlugin):
                     {"value": "macro_risk_return", "label": "M-1: マクロ×リスク-リターン（OLS）"},
                     {"value": "macro_gbdt",        "label": "M-2: マクロ×財務 勾配ブースティング（XGBoost）"},
                     {"value": "macro_dlm",         "label": "M-3: ベイズ状態空間（時変マクロβ DLM）"},
-                    {"value": "macro_ensemble",    "label": "M-4: 兄弟μ̂スタッキング（M-1+M-2 統合）"},
+                    # M-4（macro_ensemble）は退役につき選択肢から除去（ADR-0044）。統合は
+                    # M-6 単体を上回らない（p=0.810・ADR-0015）。`templates/analysis.html` の
+                    # 静的 select と二重管理なので、増減は必ず両方＋テストで照合すること。
                     {"value": "macro_enet",        "label": "M-6: マクロ×財務 正則化線形（ElasticNet）"},
                 ],
                 "default": "macro_enet",
@@ -294,7 +296,7 @@ class SellRankingPlugin(AnalysisPlugin):
                 "type": "slider", "dtype": "float",
                 "label": "R3 足切り（μ 予測の確実性）",
                 "min": 0.0, "max": 0.5, "step": 0.05, "default": 0.0,
-                "description": "μ 予測の確実性軸 r1_prime（M-1=予測SE／M-2・M-6=コンフォーマル区間半幅）がこの値を超える銘柄は SELL を出さない（0=無効・M-3/M-4選択時は無効）",
+                "description": "μ 予測の確実性軸 r1_prime（M-1=予測SE／M-2・M-6=コンフォーマル区間半幅）がこの値を超える銘柄は SELL を出さない（0=無効・M-3選択時は無効）",
             },
         }
 

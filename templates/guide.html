@@ -61,6 +61,7 @@ body{font-family:'Segoe UI',sans-serif;background:var(--bg);color:var(--text);mi
 .model-section:target{border-color:var(--status-good);box-shadow:0 0 0 2px rgba(16,185,129,.2)}
 h2{font-size:18px;font-weight:700;color:var(--status-good-text);margin-bottom:4px;display:flex;align-items:center;gap:10px;flex-wrap:wrap}
 h2 .model-tag{font-size:10px;background:var(--bg-hover);border:1px solid var(--border-muted);color:var(--text-muted);padding:2px 8px;border-radius:10px;font-weight:400}
+h2 .model-tag.retired{background:var(--status-warn-bg);border-color:var(--status-warn);color:var(--status-warn-text)}
 h3{font-size:14px;font-weight:600;color:var(--status-good-text);margin:18px 0 8px;display:flex;align-items:center;gap:7px}
 p{font-size:13px;color:var(--text-body);margin-bottom:10px}
 ul{margin:6px 0 12px 20px}
@@ -132,8 +133,8 @@ td code,p code,li code{background:var(--bg-sunken);border:1px solid var(--border
     <a href="#macro_risk_return">マクロ×リスク-リターン</a>
     <a href="#macro_gbdt">マクロ×財務 勾配ブースティング（M-2）</a>
     <a href="#macro_dlm">ベイズ状態空間（時変マクロβ）</a>
-    <a href="#macro_ensemble">兄弟モデルの合わせ技（M-4）</a>
-    <a href="#macro_gbdt_rank">ランク学習版 勾配ブースティング（M-5）</a>
+    <a href="#macro_ensemble">兄弟モデルの合わせ技（M-4・退役）</a>
+    <a href="#macro_gbdt_rank">ランク学習版 勾配ブースティング（M-5・退役）</a>
     <a href="#macro_enet">正則化線形 ElasticNet（M-6）</a>
     <div class="toc-section-title">④ 戦略を検証</div>
     <a href="#backtest">バックテスト</a>
@@ -345,7 +346,9 @@ td code,p code,li code{background:var(--bg-sunken);border:1px solid var(--border
 
 <!-- M-4 兄弟μ̂スタッキング・アンサンブル ─────────── -->
 <div class="model-section" id="macro_ensemble">
-  <h2>兄弟モデルの合わせ技 <span class="model-tag">③ 将来リターンを予測</span></h2>
+  <h2>兄弟モデルの合わせ技 <span class="model-tag">③ 将来リターンを予測</span> <span class="model-tag retired">退役</span></h2>
+
+  <div class="warn-box"><strong>2026-08-30 に退役しました（Issue #570）</strong>: 分析ページの一覧には出てきません。実際に混ぜて測ってみたところ、<strong>M-6（正則化した線形）1本と成績が変わらなかった</strong>ためです（差はほぼゼロで、統計的にも「違いがあるとは言えない」判定）。一方で計算は3モデル分かかります。「混ぜても単独最良を超えないなら単独で十分」というのは、このモデルを作るときにあらかじめ決めておいた判定基準で、それに素直に従った形です。<strong>考え方の説明としてこのページには残しています</strong>し、モデル自体も消していないので、混ぜる相手（基底モデル）の顔ぶれが変われば測り直せます。</div>
 
   <h3>🟢 ひとことで言うと</h3>
   <div class="analogy">
@@ -370,7 +373,9 @@ td code,p code,li code{background:var(--bg-sunken);border:1px solid var(--border
 
 <!-- M-5 マクロ×財務 ランク学習 ─────────────────── -->
 <div class="model-section" id="macro_gbdt_rank">
-  <h2>ランク学習版 勾配ブースティング <span class="model-tag">③ 将来リターンを予測</span></h2>
+  <h2>ランク学習版 勾配ブースティング <span class="model-tag">③ 将来リターンを予測</span> <span class="model-tag retired">退役</span></h2>
+
+  <div class="warn-box"><strong>2026-08-30 に退役しました（Issue #570）</strong>: 分析ページの一覧には出てきません。同じデータ・同じ条件で測った結果、<strong>順位の当たり具合（rank-IC）が元の M-2 のおよそ半分</strong>にとどまったためです（0.0808 対 0.1578・統計的にもはっきりした差）。とくに弱かったのは<strong>「下がりそうな銘柄を下位に置く」ほうで</strong>、上位を当てる力より先にこちらが崩れていました。ねらい（「順位で使うなら順位で学習させたほうがいい」）自体は筋が通っていましたが、<strong>実データがそうならないと答えた</strong>ということです。ただし学習の打ち切り条件が M-2 と揃っていない実装上の差もあるため、「ランク学習という考え方がダメ」ではなく「この作りでは届かなかった」と理解してください。</div>
 
   <h3>🟢 ひとことで言うと</h3>
   <div class="analogy">

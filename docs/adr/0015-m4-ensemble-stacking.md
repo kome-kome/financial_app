@@ -228,6 +228,28 @@ M-6 へ切り替えるか**を `/api/backtest`（`source=sell`）で検証する
 既定を M-2 に据え置いた判断に、実測根拠が揃ったため）。M-4 自体は M-2/M-1 に対しては有意に
 優れるため据え置く（比較ファミリーの一員としての役割も変わらない）。
 
+## 追記（2026-08-30・Issue #570）: M-4 を退役（GUI 非表示・`mu_source` から除去）
+
+上の実測（`grid − M-6`: +0.0006・p=0.810／売り側 spread p=0.655）は、本 ADR 本文が定めた
+**「統合が単体最良を上回らなければ『単体で十分』が確定知見」に該当する**。ADR-0022 が既定
+`mu_source` を M-6 単体へ切り替えて以降、M-4 は「選択肢としては残っているが誰も選ばない・
+`HEAVY_AUTOMATION` でも exempt＝自動更新経路が無い」状態で、**実行コストだけが基底
+M-1+M-2+M-6 の合算**という非対称が続いていた。
+
+[ADR-0044](0044-retire-underperforming-models-by-hiding.md) の手続きで退役させる:
+
+- `plugins/macro_ensemble.py` に `hidden = True`。サイドバー「③ 将来リターンを予測」から消える。
+- `sell_ranking` / `recommend` の `mu_source` options と `templates/analysis.html` の静的
+  select から除去（既定 `macro_enet` は不変）。
+- **プラグイン本体・テスト・`model_comparison.COMPARISON_MODELS` の M-4 行は残す**。基底を
+  増やしたときの再評価は `python -m scripts.model_comparison_run --models macro_ensemble,macro_enet`
+  で再開でき、`scripts/ensemble_base_bakeoff.py` も従来どおり使える。
+
+退役は「統合という発想が誤り」を意味しない。本 ADR の実測は **M-1+M-2+M-6 という基底構成での
+結論**であって、誤差の低相関な基底（例: 週次の M-3 を水準へ写像できたとき、あるいは M-2 と
+異なる情報源を持つ新兄弟）が現れれば前提は変わる。そのときは hidden を外す前に、
+base-on-common（同一共通域での各基底との比較）で測り直すこと。
+
 参考: Wolpert, D. H. (1992). "Stacked Generalization." *Neural Networks*, 5(2), 241–259.
 https://doi.org/10.1016/S0893-6080(05)80023-1 / Breiman, L. (1996). "Stacked Regressions."
 *Machine Learning*, 24, 49–64. https://doi.org/10.1007/BF00117832
