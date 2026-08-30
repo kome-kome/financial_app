@@ -20,10 +20,49 @@ for _noisy_logger in ("httpx", "httpcore"):
     logging.getLogger(_noisy_logger).setLevel(logging.WARNING)
 log = logging.getLogger("collector")
 
-EDINET_BASE   = "https://disclosure.edinet-fsa.go.jp/api/v2"
+# --- 例外・ログからの機微値の除去（#577）--------------------------------------
+# 値に機微が入りうる環境変数名の手掛かり。`scripts/batch_common._SECRET_HINTS` と**同じ語彙**だが
+# 機構は別物で、あちらは変数名を出すときに**名前**で伏せ、こちらは任意の文字列から**値**を消す。
+# 一致は `tests/test_collector.py::TestRedactSecrets` が CI で照合する（写しが黙って割れるのを防ぐ）。
+SECRET_HINTS = ("KEY", "TOKEN", "SECRET", "PASSWORD", "PASS", "CRED")
+
+
+def redact_secrets(text: str) -> str:
+    """環境変数の機微な**値**を伏せる（`database.mask_url` と同じ役どころ）。
+
+    上の httpx ロガー抑制は「クエリ付き URL がログへ出ない」ことを狙ったものだが、
+    **例外メッセージは素通りする**。httpx の `HTTPStatusError` は `for url '...'` として
+    クエリごと URL を持つため、`log.warning(f"...{e}")` の1行で
+    `Subscription-Key` が平文で `.logs/` へ落ちる。実際 2026-08-29〜30 の夜間ログ2本に
+    EDINET のキーが 3,568 箇所残った（`.logs` は Issue へ貼られうる・リポジトリは public）。
+
+    短い値は誤爆する（`PASS=1` で "1" が全部消える）ので 8 文字未満は対象外にする。
+    """
+    if not text:
+        return text
+    for name, value in os.environ.items():
+        if len(value) < 8 or not any(h in name.upper() for h in SECRET_HINTS):
+            continue
+        text = text.replace(value, f"<{name}:redacted>")
+    return text
+
+# EDINET API のホスト。2026-08-29 に `disclosure.edinet-fsa.go.jp` が **301** を返すように
+# なり、全収集経路が同日から無言で 0 件になった（#577）。
+# **`follow_redirects=True` では直らない**——リダイレクト先の `disclosure2.edinet-fsa.go.jp` は
+# API ではなく**人間用画面**へ 302 で送る（`wzek0130.aspx`）。追従すると HTML を JSON として
+# パースして「その日は提出ゼロ」に化けるので、いまより悪い失敗の仕方になる。
+# 移設先は `api.edinet-fsa.go.jp`（2026-08-30 実測: documents.json 200・documents/{id} 200）。
+EDINET_BASE   = "https://api.edinet-fsa.go.jp/api/v2"
 JPX_EXCEL_URL = "https://www.jpx.co.jp/markets/statistics-equities/misc/tvdivq0000001vg2-att/data_j.xls"
 API_KEY       = os.environ.get("EDINET_API_KEY", "")
 RATE_SLEEP             = 0.6   # EDINET API のリクエスト間隔（秒）
+# 連続でこの回数だけ書類一覧の取得に失敗したら以降の日付を叩かない（#577）。
+# `JQUANTS_MAX_CONSECUTIVE_FORBIDDEN` と**同じ理屈**で置いた値＝連続失敗は構造的（ホスト移設・
+# キー失効・ネットワーク断）で、日付を変えても直らない。実測から逆算した数字ではない。
+# **単発の失敗は従来どおり握って続行する**（EDINET は個別日でしばしば失敗し、差分収集は翌日
+# 同じ日付を再スキャンするので取りこぼしにならない）。この寛容さは意図的なので壊さない。
+# 効果: 2026-08-29 は 892日ぶんを 0.6秒間隔で叩き切って約9分を捨てたうえ exit=0 で通った。
+EDINET_MAX_CONSECUTIVE_FAILURES = 10
 BATCH_PAUSE            = 3.0   # 100件ごとの追加ポーズ（秒）
 STOOQ_CONCURRENCY      = 30    # stooq 現在株価の同時接続数
 STOOQ_HIST_CONCURRENCY = 20    # stooq 履歴の同時接続数（1リクエストが重いため控えめ）
@@ -243,6 +282,23 @@ def is_common_stock_code(code: str) -> bool:
     """
     s = str(code)
     return len(s) == 5 and s.endswith("0")
+
+
+class EdinetAccessError(Exception):
+    """EDINET が構造的に応答しない＝日付を変えても直らない状態（#577）。
+
+    **「その日の提出がゼロ」と「取得に失敗した」を型で分ける**ために要る。旧実装は失敗を
+    `except Exception` で握って `[]` を返しており、呼び出し側から両者を区別する手段が無かった。
+    その結果 2026-08-29 のホスト移設（301）では 892/892 の失敗が「提出ゼロの日が892日続いた」に
+    化け、`exit=0` ／ `OK pipeline` ／ watchdog `[鮮度] OK` のまま2晩気づかれなかった。
+
+    「走らなかったこと」の検知（#515・ADR-0042）はこれを拾わない——**走ってはいる**からである。
+    """
+
+    def __init__(self, reason: str, consecutive: int = 0):
+        super().__init__(f"{reason}（連続 {consecutive} 回）" if consecutive else reason)
+        self.reason = reason
+        self.consecutive = consecutive
 
 
 class JQuantsAccessError(Exception):

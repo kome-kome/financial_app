@@ -9,7 +9,7 @@ import io
 import os
 import sys
 import zipfile
-from datetime import date
+from datetime import date, timedelta
 
 import httpx
 import numpy as np
@@ -19,6 +19,8 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import collector
+import collector_financials
+import collector_utils
 from collector import (
     CONSOLIDATED_KEYS,
     TSE_INDUSTRY,
@@ -27,12 +29,18 @@ from collector import (
     _jquants_fetch_code,
     _jquants_fetch_date,
     calc_derived,
+    collect_doc_ids_for_period,
     df_to_raw_rows,
     fetch_doc_list,
     fetch_stock_history_stooq,
     fetch_xbrl_csv,
     parse_raw_rows,
     parse_xbrl_csv,
+)
+from collector_utils import (
+    EDINET_MAX_CONSECUTIVE_FAILURES,
+    EdinetAccessError,
+    redact_secrets,
 )
 
 
@@ -529,9 +537,135 @@ class TestFetchDocList:
         out = asyncio.run(fetch_doc_list(client, date(2023, 6, 30)))
         assert [d["edinetCode"] for d in out] == ["E00001"]
 
-    def test_http_error_returns_empty(self):
+    def test_http_error_raises_instead_of_returning_empty(self):
+        """失敗は `[]` にしない（#577）。
+
+        旧実装は `except Exception` で `[]` を返しており、このテスト自身が
+        「失敗も空リスト」という**穴のほうをピン留め**していた。EDINET が 2026-08-29 に
+        ホストを移設して 301 を返し始めたとき、892/892 の失敗が「提出ゼロの日が892日続いた」
+        に化けて `exit=0` で通ったのはこの契約が原因である。
+        """
         client = _client(_const(httpx.Response(500)))
-        assert asyncio.run(fetch_doc_list(client, date(2023, 6, 30))) == []
+        with pytest.raises(EdinetAccessError):
+            asyncio.run(fetch_doc_list(client, date(2023, 6, 30)))
+
+    def test_redirect_is_not_silently_empty(self):
+        """301/302 を黙って空にしない（旧ホストの再発を型で止める）。
+
+        `disclosure.edinet-fsa.go.jp` は 301 を返すようになったが、リダイレクト先は
+        API ではなく人間用画面なので `follow_redirects=True` も解ではない。どちらにせよ
+        **JSON が取れないことが例外として現れる**ことだけをここで固定する。
+        """
+        client = _client(_const(httpx.Response(
+            301, headers={"location": "https://disclosure2.edinet-fsa.go.jp/api/v2/documents.json"})))
+        with pytest.raises(EdinetAccessError):
+            asyncio.run(fetch_doc_list(client, date(2023, 6, 30)))
+
+    def test_error_message_redacts_api_key(self):
+        """例外文字列にクエリ付き URL が乗るので、キーが素通りしないこと（#577）。"""
+        key = "s3cret-edinet-subscription-key"
+        os.environ["EDINET_API_KEY"] = key
+        try:
+            client = _client(_const(httpx.Response(
+                401, request=httpx.Request(
+                    "GET", f"https://api.edinet-fsa.go.jp/api/v2/documents.json?Subscription-Key={key}"))))
+            with pytest.raises(EdinetAccessError) as ei:
+                asyncio.run(fetch_doc_list(client, date(2023, 6, 30)))
+            assert key not in str(ei.value)
+        finally:
+            os.environ.pop("EDINET_API_KEY", None)
+
+
+class TestScanAbortsOnConsecutiveFailures:
+    """`collect_doc_ids_for_period` は単発失敗を許し、連続失敗で打ち切る（#577）。"""
+
+    def _run(self, handler, days: int):
+        client = _client(handler)
+        return asyncio.run(collect_doc_ids_for_period(
+            client, date(2023, 6, 1), date(2023, 6, 1) + timedelta(days=days - 1)))
+
+    def test_isolated_failure_is_tolerated(self, monkeypatch):
+        # 差分収集は翌日に同じ日付を再スキャンするので、単発の失敗で全体を止めない。
+        monkeypatch.setattr(collector_financials, "RATE_SLEEP", 0)
+        ok = {"results": [
+            {"ordinanceCode": "010", "formCode": "030000", "secCode": "1301", "edinetCode": "E00001"}]}
+        out = self._run(_queue(httpx.Response(500),
+                               httpx.Response(200, json=ok),
+                               httpx.Response(200, json=ok)), days=3)
+        assert [d["edinetCode"] for d in out] == ["E00001", "E00001"]
+
+    def test_consecutive_failures_abort_the_scan(self, monkeypatch):
+        monkeypatch.setattr(collector_financials, "RATE_SLEEP", 0)
+        # 窓は上限よりずっと長いが、上限に達した時点で送出するので全部は叩かない。
+        with pytest.raises(EdinetAccessError) as ei:
+            self._run(_const(httpx.Response(500)), days=EDINET_MAX_CONSECUTIVE_FAILURES * 5)
+        assert ei.value.consecutive == EDINET_MAX_CONSECUTIVE_FAILURES
+
+    def test_success_resets_the_counter(self, monkeypatch):
+        """成功を挟めばカウンタは 0 へ戻る（「通算 N 回」で誤爆させない）。"""
+        monkeypatch.setattr(collector_financials, "RATE_SLEEP", 0)
+        ok = httpx.Response(200, json={"results": []})
+        n = EDINET_MAX_CONSECUTIVE_FAILURES
+        # 失敗 N-1 → 成功 → 失敗 N-1。通算は 2N-2 回だが連続は一度も N に達しない。
+        seq = [httpx.Response(500)] * (n - 1) + [ok] + [httpx.Response(500)] * (n - 1)
+        assert self._run(_queue(*seq), days=len(seq)) == []
+
+
+class TestRedactSecrets:
+    def test_masks_long_secret_values(self):
+        os.environ["FAKE_API_KEY"] = "abcdefgh-very-secret"
+        try:
+            assert "abcdefgh-very-secret" not in redact_secrets("boom: abcdefgh-very-secret")
+        finally:
+            os.environ.pop("FAKE_API_KEY", None)
+
+    def test_ignores_short_values(self):
+        # 短い値を消すと無関係な文字列まで壊れる（`PASS=1` で "1" が全滅する）。
+        os.environ["FAKE_PASSWORD"] = "1234"
+        try:
+            assert redact_secrets("port 1234") == "port 1234"
+        finally:
+            os.environ.pop("FAKE_PASSWORD", None)
+
+    def test_ignores_non_secret_names(self):
+        os.environ["FAKE_PUBLIC_URL"] = "https://example.com/public"
+        try:
+            assert redact_secrets("https://example.com/public") == "https://example.com/public"
+        finally:
+            os.environ.pop("FAKE_PUBLIC_URL", None)
+
+    def test_hints_match_batch_common(self):
+        """`scripts/batch_common._SECRET_HINTS` の写しが黙って割れないよう CI で照合する。
+
+        機構は別（あちらは**名前**で伏せる／こちらは**値**を消す）だが語彙は同じであるべきで、
+        片方にだけ新しい手掛かりが足されると、もう片方が素通りし始める。
+        """
+        from scripts import batch_common
+        assert collector_utils.SECRET_HINTS == batch_common._SECRET_HINTS
+
+
+class TestEdinetBase:
+    def test_points_at_migrated_host(self):
+        # 旧ホストは 301 を返す（#577）。戻したら収集が無言で 0 件になる。
+        assert collector_utils.EDINET_BASE == "https://api.edinet-fsa.go.jp/api/v2"
+
+    def test_no_hardcoded_edinet_urls_remain(self):
+        """URL 直書きが再び散らないこと（`yahoo_ticker` 集約・#555 と同じ作法）。
+
+        ホスト移設で実際に取り残されたのは `edinet_ping.py` の2箇所だった＝**疎通確認**
+        だけが旧ホストを見ていると、本体が直っているのに ping が落ちて切り分けが濁る。
+        """
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        offenders = []
+        for name in os.listdir(root):
+            if not name.endswith(".py"):
+                continue
+            body = open(os.path.join(root, name), encoding="utf-8").read()
+            for line in body.splitlines():
+                if "edinet-fsa.go.jp" in line and "EDINET_BASE   =" not in line \
+                        and not line.lstrip().startswith("#"):
+                    offenders.append(f"{name}: {line.strip()}")
+        assert not offenders, "EDINET の URL は collector_utils.EDINET_BASE 経由にする: " + str(offenders)
 
 
 class TestFetchXbrlCsv:

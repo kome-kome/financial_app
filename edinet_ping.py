@@ -2,6 +2,9 @@ import asyncio, httpx, zipfile, io, pandas as pd, os
 from datetime import date, timedelta
 from dotenv import load_dotenv
 load_dotenv()
+# URL は直書きしない（#577）。ホスト移設のときに疎通確認スクリプトだけ旧ホストへ
+# 残ると、**本体が直っているのに ping が落ちる**（逆も同じ）で切り分けが濁る。
+from collector_utils import EDINET_BASE
 API_KEY = os.environ['EDINET_API_KEY']
 
 def _recent_weekday() -> str:
@@ -16,7 +19,7 @@ async def check():
     print(f"確認対象日: {target_date}")
     async with httpx.AsyncClient() as client:
         r = await client.get(
-            'https://disclosure.edinet-fsa.go.jp/api/v2/documents.json',
+            f'{EDINET_BASE}/documents.json',
             params={'date': target_date, 'type': 2, 'Subscription-Key': API_KEY},
             timeout=30
         )
@@ -29,7 +32,7 @@ async def check():
 
         doc_id = doc['docID']
         r2 = await client.get(
-            f'https://disclosure.edinet-fsa.go.jp/api/v2/documents/{doc_id}',
+            f'{EDINET_BASE}/documents/{doc_id}',
             params={'type': 5, 'Subscription-Key': API_KEY},
             timeout=60
         )
