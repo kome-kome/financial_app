@@ -32,6 +32,7 @@ async def fetch_edinet_code_list(client: httpx.AsyncClient) -> pd.DataFrame:
     log.info("書類一覧APIから上場企業リストを構築中（直近400日）...")
     companies: dict = {}
     today = date.today()
+    consecutive_failures = 0
     for i in range(400):
         target = today - timedelta(days=i + 1)
         if target.weekday() >= 5:  # 土日はEDINET提出なし
@@ -52,9 +53,19 @@ async def fetch_edinet_code_list(client: httpx.AsyncClient) -> pd.DataFrame:
                         "company_name": name,
                         "industry":     "",
                     }
+            consecutive_failures = 0
             await asyncio.sleep(RATE_SLEEP)
         except Exception as e:
-            log.warning(f"書類一覧取得失敗 {target}: {e}")
+            # 単発は握って続行・**連続**は構造的なので送出する（#577。理屈は
+            # `collect_doc_ids_for_period` と同じ）。例外文字列はクエリ付き URL＝
+            # `Subscription-Key` を含むので必ず伏せる。
+            consecutive_failures += 1
+            detail = redact_secrets(f"{type(e).__name__}: {e}")
+            log.warning(f"書類一覧取得失敗 {target}: {detail}")
+            if consecutive_failures >= EDINET_MAX_CONSECUTIVE_FAILURES:
+                raise EdinetAccessError(
+                    f"企業マスタを構築できない（{target} まで走査・最後の理由: {detail}）",
+                    consecutive_failures) from e
 
     df = pd.DataFrame(list(companies.values()))
     log.info(f"上場企業候補: {len(df)}社")

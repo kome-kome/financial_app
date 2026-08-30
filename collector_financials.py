@@ -91,19 +91,27 @@ def _match_capex_by_label(label) -> bool:
 
 
 async def fetch_doc_list(client: httpx.AsyncClient, target_date: date) -> list:
+    """その日の有価証券報告書（010/030000・secCode 有り）を返す。
+
+    **失敗は握らず `EdinetAccessError` で送出する**（#577）。旧実装は `except Exception` で
+    `[]` を返しており、「提出がゼロの日」と「取得に失敗した日」が呼び出し側から同一に見えた。
+    連続失敗の打ち切り判断はループ側（`collect_doc_ids_for_period`）の仕事なので、
+    単発失敗を許容するかどうかもそちらで決める。
+    """
     url = f"{EDINET_BASE}/documents.json"
     params = {"date": target_date.isoformat(), "type": 2, "Subscription-Key": API_KEY}
     try:
         r = await client.get(url, params=params, timeout=30)
         r.raise_for_status()
         results = r.json().get("results") or []
-        return [d for d in results
-                if d.get("ordinanceCode") == "010"
-                and d.get("formCode") == "030000"
-                and d.get("secCode")]
     except Exception as e:
-        log.warning(f"書類一覧取得失敗 {target_date}: {e}")
-        return []
+        # 例外文字列にはクエリ付き URL＝`Subscription-Key` が入る。必ず伏せる（#577）。
+        raise EdinetAccessError(
+            f"書類一覧取得失敗 {target_date}: {redact_secrets(f'{type(e).__name__}: {e}')}") from e
+    return [d for d in results
+            if d.get("ordinanceCode") == "010"
+            and d.get("formCode") == "030000"
+            and d.get("secCode")]
 
 
 async def collect_doc_ids_for_period(client, start: date, end: date,
@@ -115,12 +123,27 @@ async def collect_doc_ids_for_period(client, start: date, end: date,
     total_days = (end - start).days + 1
     cur = start
     day_idx = 0
+    consecutive_failures = 0
     while cur <= end:
         day_idx += 1
         if on_progress:
             on_progress(day_idx, total_days,
                         f"[書類スキャン {day_idx}/{total_days}日] {cur}  累計 {len(seen_order)}社")
-        daily = await fetch_doc_list(client, cur)
+        try:
+            daily = await fetch_doc_list(client, cur)
+        except EdinetAccessError as e:
+            # 単発の失敗は握って続行する（差分収集は翌日この日付を再スキャンする）。
+            # ただし**連続**すると構造的な障害なので、窓ぶんを叩き切らずに送出する（#577）。
+            consecutive_failures += 1
+            log.warning(str(e))
+            if consecutive_failures >= EDINET_MAX_CONSECUTIVE_FAILURES:
+                raise EdinetAccessError(
+                    f"書類一覧が連続で取得できない（{cur} まで走査・"
+                    f"最後の理由: {e}）", consecutive_failures) from e
+            await asyncio.sleep(RATE_SLEEP)
+            cur += timedelta(days=1)
+            continue
+        consecutive_failures = 0
         matched = daily if edinet_codes is None else [d for d in daily if d.get("edinetCode") in edinet_codes]
         for d in matched:
             ec = d.get("edinetCode")
@@ -849,6 +872,13 @@ async def _phase_upsert_master(db, client, on_progress, max_companies) -> tuple:
     """
     companies_df = await fetch_edinet_code_list(client)
     master_total = len(companies_df)
+    # 「`df_master` は常に全件」（CLAUDE.md の設計制約）を**実行時にも効かせる**（#577）。
+    # 空でも upsert ループが 0 回回るだけで例外は出ず、以降の全 Phase が静かに no-op になる。
+    # 2026-08-29 のホスト移設ではここを 0 社で通過し、バッチは exit=0 で成功を報告した。
+    if master_total == 0:
+        raise EdinetAccessError(
+            "企業マスタが 0 社（EDINET から1社も取得できていない）。"
+            "収集を続けても全 Phase が no-op になるので中止する")
     log.info(f"企業マスタをDBに保存中... ({master_total}社)")
     if on_progress:
         on_progress(0, master_total, f"[企業マスタ保存] {master_total}社をDBに登録中...")
@@ -1068,6 +1098,14 @@ async def run_full_collection(db,
             client, start, end, edinet_set, max_companies=max_companies, on_progress=on_progress
         )
         log.info(f"対象書類数: {len(all_docs)}")
+        # 母集団全体を走査したのに1件も無い＝収集経路が壊れている（#577）。健全時は
+        # 4,700社規模が返るので誤検知しない。**`edinet_set` が指定された経路（`max_companies`
+        # 指定・`refresh_company` の1社指定）はこの判定に入れない**——数社なら0件は正常であり、
+        # 区別しないと誤爆する。`skip_existing` は Phase 4 の話で `all_docs` は絞る前の値。
+        if edinet_set is None and not all_docs:
+            raise EdinetAccessError(
+                f"書類一覧が 0 件（{start} ~ {end} の {(end - start).days + 1}日を走査）。"
+                "全件走査で1件も無いのは収集経路の異常なので中止する")
 
         # Phase 4: XBRL 取得 / パース / DB 保存
         skipped, cancelled = await _phase_process_docs(

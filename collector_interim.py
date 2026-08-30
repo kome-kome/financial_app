@@ -22,7 +22,8 @@ import httpx
 
 from collector_utils import (
     API_KEY, BATCH_PAUSE, COLLECT_COMMIT_BATCH, COLLECT_SLEEP_BATCH,
-    EDINET_BASE, RATE_SLEEP, log,
+    EDINET_BASE, EDINET_MAX_CONSECUTIVE_FAILURES, EdinetAccessError,
+    RATE_SLEEP, log, redact_secrets,
 )
 from collector_financials import (
     _col_as_str_list, _detect_xbrl_columns, calc_derived, fetch_xbrl_csv, parse_xbrl_csv,
@@ -47,6 +48,9 @@ async def fetch_interim_doc_list(client: httpx.AsyncClient, target_date: date) -
 
     通期用 `fetch_doc_list`(formCode=030000 固定)とは別に、四半期/半期の書類種別で絞る。
     Q1/Q3 の除外は DEI を見るまで確定しないため、ここでは docType でのみ粗く絞る。
+
+    **失敗は握らず `EdinetAccessError` で送出する**（#577）——「提出ゼロの日」と
+    「取得に失敗した日」を呼び出し側から区別できるようにするため。
     """
     url = f"{EDINET_BASE}/documents.json"
     params = {"date": target_date.isoformat(), "type": 2, "Subscription-Key": API_KEY}
@@ -54,13 +58,15 @@ async def fetch_interim_doc_list(client: httpx.AsyncClient, target_date: date) -
         r = await client.get(url, params=params, timeout=30)
         r.raise_for_status()
         results = r.json().get("results") or []
-        return [d for d in results
-                if d.get("ordinanceCode") == "010"
-                and d.get("docTypeCode") in INTERIM_DOC_TYPES
-                and d.get("secCode")]
     except Exception as e:
-        log.warning(f"半期書類一覧取得失敗 {target_date}: {e}")
-        return []
+        # 例外文字列にはクエリ付き URL＝`Subscription-Key` が入る。必ず伏せる（#577）。
+        raise EdinetAccessError(
+            f"半期書類一覧取得失敗 {target_date}: "
+            f"{redact_secrets(f'{type(e).__name__}: {e}')}") from e
+    return [d for d in results
+            if d.get("ordinanceCode") == "010"
+            and d.get("docTypeCode") in INTERIM_DOC_TYPES
+            and d.get("secCode")]
 
 
 def _extract_dei(df) -> dict:
@@ -144,12 +150,27 @@ async def collect_interim_docs_for_period(
     total_days = (end - start).days + 1
     cur = start
     day_idx = 0
+    consecutive_failures = 0
     while cur <= end:
         day_idx += 1
         if on_progress:
             on_progress(day_idx, total_days,
                         f"[半期書類スキャン {day_idx}/{total_days}日] {cur} 累計{len(seen_codes)}社")
-        daily = await fetch_interim_doc_list(client, cur)
+        try:
+            daily = await fetch_interim_doc_list(client, cur)
+        except EdinetAccessError as e:
+            # 単発は握って続行・**連続**は構造的なので送出する（#577。理屈は
+            # `collect_doc_ids_for_period` と同じ）。
+            consecutive_failures += 1
+            log.warning(str(e))
+            if consecutive_failures >= EDINET_MAX_CONSECUTIVE_FAILURES:
+                raise EdinetAccessError(
+                    f"半期書類一覧が連続で取得できない（{cur} まで走査・"
+                    f"最後の理由: {e}）", consecutive_failures) from e
+            await asyncio.sleep(RATE_SLEEP)
+            cur += timedelta(days=1)
+            continue
+        consecutive_failures = 0
         kept = prefilter_interim_docs(daily, fy_end_month_map)
         for d in kept:
             seen_codes.add(d.get("edinetCode"))

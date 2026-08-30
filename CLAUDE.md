@@ -114,7 +114,7 @@ pytest tests/test_utils.py  # 単一ファイル
 | `scripts/mirror_*.py` | ミラーの pull / sync / verify ＋予行演習（#481 B-2〜B-4・ADR-0035）。共有基盤は `mirror_common.py`。**source/dest を引数で受け、両方ローカルなら Supabase 不要で予行できる**。#503 で正本が反転したため **pull / sync は定常運転では使わない**（2026-08-20 の pull が引き渡し点）。`verify` はバックアップの復元先突合に転用する |
 | `weekly_price_cache.py` | 週次株価の run 間差分ロードキャッシュ（#480・ADR-0036）。指紋（`max(week_start)`＋`count(*)`）＋直近27週の再取得＋DB 側の世代印（`app_settings`）。**キャッシュは速さだけを担い、正しさは指紋・世代印・行数照合が持つ**（無い/壊れている/古いは全てフルロードへ倒れる）。緊急停止は `FINAPP_WEEKLY_CACHE=0` |
 | `collector.py` | オーケストレータ＋後方互換の再エクスポート層＋CLI（実体は下記6分割） |
-| `collector_utils.py` | 収集系共通の設定定数・ロガー |
+| `collector_utils.py` | 収集系共通の設定定数・ロガー。**`EDINET_BASE` は `api.edinet-fsa.go.jp`**（旧 `disclosure.` は 301→人間用画面なので `follow_redirects` では直らない・#577）。`redact_secrets()` は例外文字列から API キーを消す（httpx のログ抑制は例外を素通りする）。`EdinetAccessError` ＋ `EDINET_MAX_CONSECUTIVE_FAILURES` で**「走ったが全部失敗した」を失敗として現す**——単発は握って続行・連続のみ送出。詳細は [GOTCHAS.md](docs/GOTCHAS.md) |
 | `collector_master.py` | 企業/業種マスタ収集（EDINET コードリスト・JPX 業種） |
 | `collector_financials.py` | XBRL 財務収集・パース・CF/PL-BS 補完・全件収集 |
 | `collector_prices.py` | 株価（stooq/J-Quants/Yahoo）・市場データ更新・マクロ収集 |
