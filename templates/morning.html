@@ -148,6 +148,12 @@ body{font-family:'Segoe UI',sans-serif;background:var(--bg);color:var(--text);mi
 .controls{display:flex;gap:10px;align-items:center;margin-bottom:16px;flex-wrap:wrap}
 .controls select{background:var(--bg-elevated);color:var(--text);border:1px solid var(--border-muted);border-radius:6px;padding:7px 10px;font-size:12px}
 .muted{font-size:11px;color:var(--text-muted)}
+.gnav{display:flex;align-items:center;gap:2px;background:var(--bg-elevated);border-bottom:1px solid var(--border);padding:0 24px;flex-wrap:wrap}
+.gnav-link{padding:10px 14px;font-size:13px;color:var(--text-secondary);text-decoration:none;border-bottom:2px solid transparent;transition:color .15s,border-color .15s}
+.gnav-link:hover{color:var(--text)}
+.gnav-link.active{color:var(--text);border-bottom-color:var(--accent)}
+.gnav-ref{color:var(--text-muted)}
+.gnav-spacer{margin-left:auto}
 </style>
 </head>
 <body>
@@ -164,6 +170,17 @@ body{font-family:'Segoe UI',sans-serif;background:var(--bg);color:var(--text);mi
   </div>
   <button id="theme-toggle" class="theme-toggle-btn" title="ライト/ダーク切替" aria-label="テーマ切替">🌙</button>
 </div>
+
+<nav class="gnav">
+  <a href="/" class="gnav-link">ホーム</a>
+  <a href="/morning" class="gnav-link active">朝の推奨</a>
+  <a href="/analysis" class="gnav-link">分析</a>
+  <a href="/company" class="gnav-link">企業詳細</a>
+  <a href="/collection" class="gnav-link">収集</a>
+  <span class="gnav-spacer"></span>
+  <a href="/guide" class="gnav-link gnav-ref" style="color:var(--status-good-text)">やさしい解説</a>
+  <a href="/models" class="gnav-link gnav-ref" style="color:var(--accent-text)">モデル解説</a>
+</nav>
 
 <div class="container">
 
