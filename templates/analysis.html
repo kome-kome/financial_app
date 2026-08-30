@@ -395,7 +395,10 @@ tr:hover td{background:var(--border-subtle)}
         <option value="macro_risk_return">M-1: マクロ×リスク-リターン（OLS）</option>
         <option value="macro_gbdt">M-2: マクロ×財務 勾配ブースティング（XGBoost）</option>
         <option value="macro_dlm">M-3: ベイズ状態空間（時変マクロβ DLM）</option>
-        <option value="macro_ensemble">M-4: 兄弟μ̂スタッキング（M-1+M-2 統合）</option>
+        <!-- M-4（macro_ensemble）は退役につき除去（ADR-0044）。この select は
+             params_schema から動的注入されず sell_ranking.py と二重管理なので、
+             増減は必ず両方を直す（tests/test_analysis_meta.py::TestHiddenPlugins
+             ::test_static_select_matches_sell_ranking_options が CI で照合する）。 -->
         <option value="macro_enet" selected>M-6: マクロ×財務 正則化線形（ElasticNet）</option>
       </select>
       <div style="font-size:11px;color:var(--text-muted);margin-top:4px">

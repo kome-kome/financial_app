@@ -58,6 +58,7 @@ body{font-family:'Segoe UI',sans-serif;background:var(--bg);color:var(--text);mi
 .model-section:target{border-color:var(--accent);box-shadow:0 0 0 2px rgba(124,58,237,.2)}
 h2{font-size:18px;font-weight:700;color:var(--accent-text);margin-bottom:4px;display:flex;align-items:center;gap:10px}
 h2 .model-tag{font-size:10px;background:var(--bg-hover);border:1px solid var(--border-muted);color:var(--text-muted);padding:2px 8px;border-radius:10px;font-weight:400}
+h2 .model-tag.retired{background:var(--status-warn-bg);border-color:var(--status-warn);color:var(--status-warn-text)}
 h3{font-size:14px;font-weight:600;color:var(--accent-soft-text);margin:18px 0 8px;border-bottom:1px solid var(--border);padding-bottom:6px}
 h4{font-size:13px;font-weight:600;color:var(--text-secondary);margin:12px 0 6px}
 p{font-size:13px;color:var(--text-body);margin-bottom:10px}
@@ -141,8 +142,8 @@ td code{background:var(--bg-sunken);border:1px solid var(--border-subtle);paddin
     <a href="#m9">マクロ×リスク-リターン推奨</a>
     <a href="#m11">M-2: マクロ×財務 勾配ブースティング</a>
     <a href="#m12">M-3: ベイズ状態空間（時変マクロβ）</a>
-    <a href="#m13">M-4: 兄弟μ̂スタッキング</a>
-    <a href="#m14">M-5: マクロ×財務 ランク学習</a>
+    <a href="#m13">M-4: 兄弟μ̂スタッキング（退役）</a>
+    <a href="#m14">M-5: マクロ×財務 ランク学習（退役）</a>
     <a href="#m15">M-6: マクロ×財務 正則化線形（ElasticNet）</a>
     <div class="toc-section-title">④ 戦略を検証（メタ検証）</div>
     <a href="#m7">バックテスト</a>
@@ -731,8 +732,10 @@ conv_score₁₂ₘ = max(<span class="val">5</span>, min(<span class="val">95</
 </div>
 
 <div class="model-section" id="m13">
-  <h2>M-4: 兄弟μ̂スタッキング・アンサンブル <span class="model-tag">将来リターンを予測</span></h2>
+  <h2>M-4: 兄弟μ̂スタッキング・アンサンブル <span class="model-tag">将来リターンを予測</span> <span class="model-tag retired">退役</span></h2>
   <span class="file-tag">plugins/macro_ensemble.py — POST /api/plugins/macro_ensemble/run</span>
+
+  <div class="warn-box"><strong>退役（2026-08-30・Issue #570）</strong>: 分析ページのサイドバーには表示されません。統合した μ̂ が <strong>M-6 単体を上回らない</strong>（rank-IC の差 +0.0006・p=0.810／売り側 spread も p=0.655＝互角）のに、実行コストは基底 M-1+M-2+M-6 の合算になるためです。これは下の「仮定・限界」に書いた<strong>「統合が単体最良を上回らなければ単体で十分」という判定基準にそのまま該当した</strong>結果で、失敗ではなく<strong>実データが出した答え</strong>です。モデル自体は残してあり、<code>POST /api/plugins/macro_ensemble/run</code> と「モデル比較（OOF）」からは今までどおり使えます（基底の顔ぶれを変えたら測り直す前提）。</div>
 
   <p>M-1（線形 OLS+BIC）・M-2（非線形 XGBoost）・M-6（正則化線形 ElasticNet）の<strong>アウト・オブ・サンプル（OOF）予測 μ̂ を統合するメタモデル</strong>（スタッキング）。予測誤差が低相関な基底を、制約付き（非負・和1）の加重合成で相殺でき単体を超えうる。重みは実績から学習されるため<strong>効かない基底は自動的に重み ~0 へ落ちる</strong>＝基底追加の下振れリスクが小さい。<strong>M-3 は除外</strong>（週次専用で目的頻度・母集団が異なる・ADR-0012/0015）、<strong>M-5 も除外</strong>（順位スコアで水準を持たない・ADR-0017）。M-6 は #397 で基底に追加した。</p>
 
@@ -762,8 +765,10 @@ conv_score₁₂ₘ = max(<span class="val">5</span>, min(<span class="val">95</
 </div>
 
 <div class="model-section" id="m14">
-  <h2>M-5: マクロ×財務 ランク学習（learning-to-rank） <span class="model-tag">将来リターンを予測</span></h2>
+  <h2>M-5: マクロ×財務 ランク学習（learning-to-rank） <span class="model-tag">将来リターンを予測</span> <span class="model-tag retired">退役</span></h2>
   <span class="file-tag">plugins/macro_gbdt_rank.py — POST /api/plugins/macro_gbdt_rank/run</span>
+
+  <div class="warn-box"><strong>退役（2026-08-30・Issue #570）</strong>: 分析ページのサイドバーには表示されません。同一 fold・同一特徴量で測った結果、<strong>rank-IC 0.0808 に対し M-2（MSE 版）は 0.1578</strong>——差 −0.0771（95%CI [−0.0995, −0.0558]・p=0.001・17期／OOF 25,738ペア）で<strong>有意に下回りました</strong>。学習の目的関数を評価指標へ揃えるという狙いは理屈としては正しかったものの、実データでは効かず、とくに<strong>下位分位（値下がりしそうな銘柄）を下に置けていない</strong>のが弱点でした（最下位分位のリターンが M-2 の 0.0145 に対し 0.0520）。ただし M-5 は早期打ち切り（early stopping）を使わない固定木数で学習しており<strong>正則化の条件が M-2 と揃っていない</strong>ため、「ランク学習が無効」ではなく「<strong>この実装では</strong>下回った」と読むのが正確です。</div>
 
   <p>M-2（マクロ×財務 勾配ブースティング）の<strong>rank-IC 整合版</strong>。M-2 は<strong>MSE 最小化</strong>で学習する一方、評価・ハイパラ探索・モデル比較はすべて<strong>期内クロスセクションの順位相関（Spearman rank-IC）</strong>で測る。この「学習の目的関数 ≠ 評価指標」のズレ（MSE は外れリターンに引きずられ順位を歪める）を、XGBoost の<strong>learning-to-rank</strong>（<code>rank:pairwise</code> 既定）で解消し、<strong>各月を1つのクエリグループ</strong>として期内順位を直接最適化する。</p>
 

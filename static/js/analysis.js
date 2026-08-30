@@ -1416,6 +1416,8 @@ const RESULT_RENDERERS = {
   'macro_risk_return': renderMacroRiskReturn,
   'macro_gbdt':        renderMacroGbdt,
   'macro_dlm':         renderMacroDlm,
+  // M-4 は退役（hidden=True・ADR-0044）でサイドバーにタブが生えないため、現状このレンダラは
+  // 使われない。復帰時に書き直さずに済むよう残す（退役は削除ではない）。
   'macro_ensemble':    renderMacroEnsemble,
 };
 

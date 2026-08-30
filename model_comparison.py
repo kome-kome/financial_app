@@ -1,8 +1,12 @@
-"""将来リターン予測モデル（M-1/M-2/M-3）の OOF バックテスト横並び比較。
+"""将来リターン予測モデル（M-1〜M-6）の OOF バックテスト横並び比較。
 
 `/api/backtest`（as-of 上位 N 社の実現リターン）とは**別手法**。各モデルの execute() が
 既に返す `oof_backtest`（無リーク walk-forward・rank-IC / 分位リターン / ロングショート
-spread / hit-rate）を 3 モデル分まとめて集約するだけで、追加の学習・価格取得はしない。
+spread / hit-rate）をまとめて集約するだけで、追加の学習・価格取得はしない。
+
+**退役した（`hidden=True`・ADR-0044）モデルもここには残す**。比較の基準線としての役割は
+UI から降ろした後も続くため（M-2 が「無改変のベースライン」として価値を持つのと同じ理由）。
+`COMPARISON_MODELS` は評価の土俵であって、サイドバーの品揃えではない。
 
 効率化と副作用抑止（plugins/tuning.py と同じ仕組みを流用）:
   - `tuning_objective_only()`: execute() を oof_backtest 算出後に早期 return させ、
@@ -10,7 +14,7 @@ spread / hit-rate）を 3 モデル分まとめて集約するだけで、追加
   - `tuning_dry_run()`: producer スコア（macro_gbdt_scores / macro_dlm_scores）の永続化を
     no-op にする。既定パラメータの中間予測で本番テーブルを上書きしないため。
 
-Render 軽量モードでは 3 モデルとも heavy=True のため全てスキップ（ローカル実行専用）。
+Render 軽量モードでは全モデルが heavy=True のため全てスキップ（ローカル実行専用）。
 その旨を各モデルの `reason="heavy_render"` で返し、UI が案内する。interface は
 `(db, render_light_mode) -> dict` で FastAPI に依存せず直接テストできる（tests/test_model_comparison.py）。
 """
@@ -38,15 +42,30 @@ def _safe_rollback(db) -> None:
         pass
 
 
-async def run_comparison(db: Session, render_light_mode: bool = False) -> dict:
-    """M-1/M-2/M-3 を既定パラメータで実行し oof_backtest を横並びに集約して返す。
+async def run_comparison(db: Session, render_light_mode: bool = False,
+                         only_models: list[str] | tuple[str, ...] | None = None) -> dict:
+    """COMPARISON_MODELS を既定パラメータで実行し oof_backtest を横並びに集約して返す。
 
     各モデルは per-model で graceful-degrade する（1 モデルの失敗が全体を落とさない）:
       - 未登録            → available=False, reason="not_registered"
       - Render×heavy      → available=False, reason="heavy_render"
       - 依存未充足/契約違反 → available=False, reason="dependency"/"value_error", error=詳細
       - その他例外         → available=False, reason="error", error=詳細
+
+    `only_models`（プラグイン名の列）を渡すと**その部分集合だけ**を走らせる（既定 None=全件）。
+    UI からは常に None＝全件で、部分集合は `scripts/model_comparison_run.py`（CLI）用。
+    2モデルだけ測りたいとき（例: M-2 vs M-5 の rank-IC 差）に6モデル分の計算を払わずに済み、
+    **fold・特徴量・embargo・significance_matrix の手続きは全件時と同一**のまま比較できる。
+    アドホックな測定スクリプトを書き起こすと手続きが本番と別物になる（ADR-0041）ため、
+    測る側の入口はここに集約する。順序・short ラベルは COMPARISON_MODELS 側が持つ。
     """
+    if only_models is None:
+        targets = list(COMPARISON_MODELS)
+    else:
+        unknown = set(only_models) - {n for n, _ in COMPARISON_MODELS}
+        if unknown:   # 黙って空の比較を返さない（typo が「全モデル失敗」に化けるのを防ぐ）
+            raise ValueError(f"COMPARISON_MODELS に無いモデル名: {sorted(unknown)}")
+        targets = [(n, s) for n, s in COMPARISON_MODELS if n in set(only_models)]
     from plugins import get_plugin, execute_plugin, DependencyError
     from database import tuning_objective_only, tuning_dry_run
     from plugins.macro_snapshots import shared_snapshot_cache
@@ -54,10 +73,10 @@ async def run_comparison(db: Session, render_light_mode: bool = False) -> dict:
     models: list[dict] = []
     # shared_snapshot_cache: 探索軸に依存しない重い共有ロード（M-1/M-2 の load_data、
     # M-3 の load_prices/load_macro_levels）を同一 db セッション内で1回に集約する（Issue
-    # #298/#304）。比較ビューは 3モデルを連続実行するため、これが無いと 95万行の
+    # #298/#304）。比較ビューは全モデルを連続実行するため、これが無いと 130万行の
     # stock_price_weekly フルロードがモデルごとに走り本番の statement_timeout に当たる。
     with shared_snapshot_cache():
-        for name, short in COMPARISON_MODELS:
+        for name, short in targets:
             entry: dict = {"name": name, "short": short}
             p = get_plugin(name)
             if p is None:

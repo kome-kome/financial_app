@@ -20,8 +20,8 @@
 10. [売り候補ランキング（保有銘柄の売り時）](#10-売り候補ランキング保有銘柄の売り時)
 11. [M-2 マクロ×財務 勾配ブースティング（macro_gbdt）](#11-m-2-マクロ財務-勾配ブースティングmacro_gbdt)
 12. [M-3 ベイズ状態空間モデル（時変マクロβ DLM・macro_dlm）](#12-m-3-ベイズ状態空間モデル時変マクロβ-dlmmacro_dlm)
-13. [M-4 兄弟μ̂スタッキング・アンサンブル（macro_ensemble）](#13-m-4-兄弟μ̂スタッキングアンサンブルmacro_ensemble)
-14. [M-5 マクロ×財務 ランク学習（learning-to-rank・macro_gbdt_rank）](#14-m-5-マクロ財務-ランク学習learning-to-rankmacro_gbdt_rank)
+13. [M-4 兄弟μ̂スタッキング・アンサンブル（macro_ensemble）](#13-m-4-兄弟μ̂スタッキングアンサンブルmacro_ensemble) **（退役・ADR-0044）**
+14. [M-5 マクロ×財務 ランク学習（learning-to-rank・macro_gbdt_rank）](#14-m-5-マクロ財務-ランク学習learning-to-rankmacro_gbdt_rank) **（退役・ADR-0044）**
 15. [兄弟モデル候補メニュー（探索枠・model_candidates）](#15-兄弟モデル候補メニュー探索枠model_candidates)
 16. [M-6 マクロ×財務 正則化線形（ElasticNet・macro_enet）](#16-m-6-マクロ財務-正則化線形elasticnetmacro_enet)
 
@@ -1335,6 +1335,15 @@ DLM のフォワードパスは各週 y_t を**観測前**に予測する。標�
 
 カテゴリ: ③ 将来リターンを予測（`ui_order=370`・`heavy=True`・ローカル実行専用）。Issue #367・ADR-0015。
 
+> **退役（2026-08-30・#570・[ADR-0044](adr/0044-retire-underperforming-models-by-hiding.md)）**:
+> `hidden=True` によりサイドバーと `mu_source` の選択肢から外した。統合が **M-6 単体を
+> 上回らない**（rank-IC +0.0006・p=0.810／売り側 spread p=0.655）ことが本節 §13.4 の
+> 「上回らなければ単体で十分」判定にそのまま該当する一方、実行コストは基底
+> M-1+M-2+M-6 の合算のままだったため。**プラグイン本体・テスト・`model_comparison` の
+> 比較行（M-4）は残してある**ので、`POST /api/plugins/macro_ensemble/run` と
+> `python -m scripts.model_comparison_run --models macro_ensemble,macro_enet` で
+> いつでも測り直せる。基底構成を変えたら再評価すること（ADR-0015 追記）。
+
 ### 13.1 概要
 
 M-1（線形 OLS+BIC）・M-2（非線形 XGBoost）・M-6（正則化線形 ElasticNet・#397 で追加）の **OOF 予測 μ̂ を統合するメタモデル**（Wolpert 1992 / Breiman 1996 のスタッキング）。予測誤差が低相関な基底を、制約付き（非負・和1）の加重で相殺でき単体を超えうる。重みは NNLS で学習するため**効かない基底は自動的に重み ~0 へ落ちる**＝基底追加の下振れリスクが構造的に小さい。**M-3 は除外**（週次専用・ADR-0012 で目的頻度と母集団が異なる＝論証された非適用）、**M-5 も除外**（順位スコアで水準を持たない・ADR-0017）。
@@ -1371,6 +1380,14 @@ M-1（線形 OLS+BIC）・M-2（非線形 XGBoost）・M-6（正則化線形 Ela
 
 カテゴリ: ③ 将来リターンを予測（`ui_order=380`・`heavy=True`・ローカル実行専用）。Issue #362・ADR-0017。
 
+> **退役（2026-08-30・#570・[ADR-0044](adr/0044-retire-underperforming-models-by-hiding.md)）**:
+> ADR-0017 が約束したまま未実施だった実測をようやく取り、**M-2(MSE) に有意に劣後**した
+> （rank-IC **0.0808 vs 0.1578**・差 −0.0771・95%CI [−0.0995, −0.0558]・p=0.001／17期・
+> OOF 25,738ペア）。ADR-0017 の「上回らなければ MSE で十分を確定」に該当するため
+> `hidden=True` でサイドバーから外した。producer を持たないため下流の切断は不要。
+> **プラグイン・テスト・`model_comparison` の比較行（M-5）は残す**——再挑戦する価値が
+> あるとすれば、まず early_stopping の非対称（§14.4）を潰してから測り直すこと。
+
 ### 14.1 概要
 
 M-2（macro_gbdt）の **rank-IC 整合版**。M-2 が **MSE 最小化**（`reg:squarederror`）で学習する一方、評価・ハイパラ探索・VISION 比較はすべて **期内クロスセクション Spearman rank-IC**。この「学習目的 ≠ 評価指標」不一致（ADR-0007 が `auto_hyperparams` を撤去した理由「周辺尤度 ≠ OOF rank-IC」と同型）を、M-2 自身が学習側に抱えていた。MSE 最小化は期内クロスセクション順位の最適化を保証せず、外れリターンに MSE が引きずられて順位が歪む。M-5 は XGBoost の **learning-to-rank 目的**（`rank:pairwise` 既定）で **各 test 月を1クエリグループ**として期内順位を直接最適化する（Burges 2010）。
@@ -1393,7 +1410,17 @@ M-2 のスキーマを継承（リスク-リターン幾何・財務/マクロ/�
 
 - 実行コスト ≈ M-2 と同等（同一 CV 骨格・SHAP は XGBRanker でも算出可）。
 - 予測は順位のみで**水準を持たない**ため、期待リターン水準が要る用途（分位期待値・効用計算）には未対応（producer 見送りの理由）。
-- rank-IC が M-2(MSE) を上回るかは実データ次第。`model_comparison` で honest 値を実測し ADR-0017 に記録する（上回らなければ「MSE で十分」が確定知見）。
+- **実測の結論（2026-08-30・ADR-0017 の実測節）**: rank-IC は **0.0808** で M-2(MSE) の
+  **0.1578** を有意に下回った（差 −0.0771・95%CI [−0.0995, −0.0558]・p=0.001・17期／
+  OOF 25,738ペア）。**「MSE で十分」が確定知見**。効かなかった箇所は分位の下側に最も強く出て
+  おり、最下位分位リターンが 0.0145（M-2）→ 0.0520（M-5）と持ち上がる＝負ける銘柄を下に
+  置けていない（売り側 spread も 0.0676→0.0302 と半減）。`sell_ranking` へ統合しなかった
+  判断は結果的に正しかったことになる。
+- **比較に残る非対称（再挑戦するなら最初に潰すべき点）**: M-5 は early_stopping を使わず固定
+  `n_estimators` で学習する（ランカーの eval_set が group 付き検証を要するため・§14.2 の 3）。
+  M-2 は early_stopping で実効木数が絞られるので、「同一 fold・同一特徴量」ではあっても
+  **「同一の正則化」ではない**。上の差がこの非対称だけで説明できる可能性は排除できていない
+  ＝「learning-to-rank が日本株で無効」ではなく「**この実装では**下回った」と読む。
 
 ### 14.5 参考文献
 
@@ -1611,3 +1638,4 @@ rank-IC で有意に上回った**ため正式兄弟へ昇格した（8 候補�
 | 2026-07-26 | **兄弟モデル候補メニュー（§15・探索枠）と M-6 正則化線形（§16）を追加**（#372・ADR-0021）。`walk_forward_cv_monthly(fit_predict=…)` 注入点へ差し込む候補（ElasticNet／ExtraTrees・QRF／Fama-MacBeth 予測ヘッド／マクロfold内PCA／regime-switch閾値線形／LightGBM・CatBoost）を `plugins/model_candidates.py` に集約し、`scripts/candidate_bakeoff.py` で同一fold・同一特徴量・同一指標の OOF 横並び実測を行う枠組みを新設。本番パネル（43ヶ月/57,955サンプル/71特徴量/9fold）の実測で **ElasticNet が M-2(XGBoost) を有意に上回った**（rank-IC 0.1713 vs 0.1419・差 +0.0294・95%CI [+0.0116,+0.0469]・p=0.002・多重比較補正 α/8 も通過）ため **M-6（macro_enet）として昇格**。他候補は据え置き。確定知見: 木の非線形性より縮小推定が効く／代替GBDTは誤差レベル／Fama-MacBeth は第1段階の正則化が必須（素の断面OLSは rank-IC 負）／マクロPCA圧縮は効果なし／木予測分布の区間は名目80%に対し実測被覆40.6%で使えず分割コンフォーマル(ADR-0020)が正解 |
 | 2026-07-29 | **M-6 を producer 化し売り候補ランキング（§10）の `mu_source` へ統合**（#396・ADR-0021 の残タスク）。`macro_enet_scores`（`macro_gbdt_scores` と同型・`r1_prime` 付き）を追加し、`execute` 末尾で現在μ̂と確実性軸（コンフォーマル区間半幅・ADR-0020）を全置換永続化。`produced_output`/`read_producer_scores` は M-2 と同一形＝`mu_source="macro_enet"` で選択でき、**R3 足切りゲートも M-1・M-2 と同様に機能**する（M-3/M-4 は `r1_prime` 不在で無効のまま）。未実行時は graceful-degrade（ADR-0004）。探索中は `tuning_dry_run` で永続化 no-op（#264）。**既定 `mu_source` は M-2 のまま**＝切替は `/api/backtest` の `sell` source で事後検証してから別途判断する |
 | 2026-07-30 | **M-4（§13）の基底に M-6 を追加し、重み既定を rank-IC 最大化へ変更**（#397・ADR-0015 追記）。レグを `BASE_MODELS` 定数駆動へ一般化（build/CV/現在μ̂ を名前でディスパッチ・`_fit_weights`/`_stack_walk_forward` は n 基底対応・`rank_ic_grid` は n 次元シンプレックス格子 `_simplex_grid`）。M-2/M-6 は build 契約が同じため config 同値ならスナップショット共有（`_same_build_config`）＝増分コストは ElasticNet の CV のみ。本番実測（3,979社/9fold/OOF 13,539ペア・honest）で **M-4 は 0.1468→0.1720（+0.0252・p=0.002）と有意に改善**し、M-2（+0.0301・p=0.001）・M-1（+0.0578・p=0.040）も有意に上回った。共通域は基底追加でも 13,539 で不変（M-6 は M-2 と build を共有するため。なお狭いレグは M-1 strict ではなく M-2 契約側＝2026-08-01 実測・#411）。**重み既定を nnls→rank_ic_grid へ変更**: NNLS は MSE 最小化で縮小推定の M-6 を重み 0 で捨て（最終重み M-6=0.0）、OOF の改善が現在μ̂＝producer へ届かない非整合が出たため（OOF 性能自体は誤差レベル・p=0.326／rank_ic_grid の最終重みは M-1 0.30/M-2 0.10/M-6 0.60）。確定知見: **M-4 は M-6 単体を上回らない**（+0.0006・p=0.810＝互角）→ 売り候補の既定 μ 出所を M-6 へ切り替えるかは Issue #402 で `source=sell` バックテスト検証 |
+| 2026-08-30 | **M-4・M-5 を退役（GUI 非表示）し、M-5 の未実施だった実測を取った**（#570・ADR-0044）。`AnalysisPlugin.hidden` を新設して `/api/plugins` から除外＝サイドバー「③ 将来リターンを予測」は 6本→4本（M-1/M-2/M-3/M-6）。**削除ではない**のでレジストリ・`POST /api/plugins/{name}/run`・`model_comparison` の比較行・テストは残り、`python -m scripts.model_comparison_run --models a,b`（新設 CLI・`run_comparison(only_models=...)` を薄く包むだけ）で測り直せる。M-4 は統合が M-6 単体を上回らない（+0.0006・p=0.810・ADR-0015 の「単体で十分」判定に該当）ため退役し、`mu_source` 選択肢からも除去。M-5 は **ADR-0017 が約束したまま1ヶ月未実施だった実測**をようやく取り、rank-IC **0.0808 vs M-2 0.1578**（差 −0.0771・95%CI [−0.0995, −0.0558]・p=0.001・17期/OOF 25,738ペア）で**有意に劣後**＝「MSE で十分」を確定して退役。効かなかったのは分位の下側（最下位分位 0.0145→0.0520・売り側 spread 0.0676→0.0302）。ただし M-5 は early_stopping 不使用の固定木数で**正則化が M-2 と非対称**なため、「learning-to-rank が無効」ではなく「この実装では下回った」と読む（§14.4） |

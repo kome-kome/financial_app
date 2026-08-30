@@ -28,8 +28,8 @@
 | [`plugins/macro_risk_return.py`](#pluginsmacro_risk_returnpy) | M-1 | ✅ | `macro_beta`（共有） | 330 |
 | [`plugins/macro_gbdt.py`](#pluginsmacro_gbdtpy) | M-2 | ✅ | `macro_gbdt_scores` | 340 |
 | [`plugins/macro_dlm.py`](#pluginsmacro_dlmpy) | M-3 | ✅ | `macro_dlm_scores` | 360 |
-| [`plugins/macro_ensemble.py`](#pluginsmacro_ensemblepy) | M-4 | ✅ | `macro_ensemble_scores` | 370 |
-| [`plugins/macro_gbdt_rank.py`](#pluginsmacro_gbdt_rankpy) | M-5 | ✅ | **なし**（OOF 比較専用） | 380 |
+| [`plugins/macro_ensemble.py`](#pluginsmacro_ensemblepy) | M-4 **（退役）** | ✅ | `macro_ensemble_scores` | 370 |
+| [`plugins/macro_gbdt_rank.py`](#pluginsmacro_gbdt_rankpy) | M-5 **（退役）** | ✅ | **なし**（OOF 比較専用） | 380 |
 | [`plugins/macro_enet.py`](#pluginsmacro_enetpy) | M-6 | ✅ | `macro_enet_scores` | 390 |
 | [`plugins/sell_ranking.py`](#pluginssell_rankingpy) | — | | — | 510 |
 | [`plugins/macro_snapshots.py`](#pluginsmacro_snapshotspy) | 共有基盤 | — | — | — |
@@ -38,11 +38,13 @@
 
 `heavy=True` は Render 軽量モードで 403（ローカル / GitHub Actions 実行に限定）。**heavy を追加したら `nightly_scores.HEAVY_AUTOMATION` への自動実行登録が必須**（ADR-0031・未登録は CI が落とす）。
 
+**（退役）** は `hidden=True`（#570・[ADR-0044](adr/0044-retire-underperforming-models-by-hiding.md)）＝`/api/plugins` から除外されサイドバーに出ない。**削除ではない**ので `get_plugin` / `POST /api/plugins/{name}/run` / `model_comparison.COMPARISON_MODELS` / テストは従来どおり生きており、`python -m scripts.model_comparison_run --models <a>,<b>` で測り直せる。`hidden` は「選択肢として勧めない」＝評価の結論で、`heavy`（実行環境の制約）とは別軸。
+
 ---
 
 ## `plugins/base.py`
 
-分析プラグインの抽象基底クラス。`heavy`（既定 False・True なら Render 軽量モードでブロックしローカル実行を促す）・`ui_order`（既定 999）・`produced_output(db)` 等の共通契約を定義する。
+分析プラグインの抽象基底クラス。`heavy`（既定 False・True なら Render 軽量モードでブロックしローカル実行を促す）・`hidden`（既定 False・True なら `/api/plugins` から除外＝サイドバーに出ない**退役**・ADR-0044）・`ui_order`（既定 999）・`produced_output(db)` 等の共通契約を定義する。`heavy` は実行環境の制約、`hidden` は評価の結論で**別軸**（hidden にしてもレジストリ・`execute_plugin`・`model_comparison` には残る）。
 
 依存先: —
 
@@ -184,7 +186,9 @@ producer は共有 `macro_beta`（`read_producer_scores` は `macro_snapshots.ge
 
 ## `plugins/macro_ensemble.py`
 
-**M-4 兄弟μ̂スタッキング・アンサンブル**（#367・ADR-0015、#397 で M-6 を基底追加）。`heavy=True`・`ui_order=370`（M-3 の後・#378）。
+**M-4 兄弟μ̂スタッキング・アンサンブル**（#367・ADR-0015、#397 で M-6 を基底追加）。`heavy=True`・`hidden=True`（**退役**・#570/ADR-0044）・`ui_order=370`（M-3 の後・#378）。
+
+- **退役の根拠**: 統合は M-6 単体を上回らない（rank-IC +0.0006・p=0.810／売り側 spread p=0.655）のに、実行コストは基底 M-1+M-2+M-6 の合算。ADR-0015 本文の「上回らなければ単体で十分」判定に該当する。サイドバーと `mu_source`（`sell_ranking` / `recommend` / `templates/analysis.html` の静的 select）から外したが、**プラグイン・テスト・`COMPARISON_MODELS` の M-4 行は残す**。基底構成を変えたら `scripts/ensemble_base_bakeoff.py` か `python -m scripts.model_comparison_run` で測り直す。
 
 - **基底は `BASE_MODELS` 定数駆動（M-1+M-2+M-6）**——レグの build/CV/現在μ̂ を名前でディスパッチするため、基底の増減は定数変更だけで済む（`scripts/ensemble_base_bakeoff.py` が構成間 OOF を同一 honest 前提で横並び実測）。重みは非負・和1（NNLS／`rank_ic_grid` は n 次元シンプレックス格子 `_simplex_grid`）ゆえ効かない基底は重み ~0 へ落ちる。M-2/M-6 は build 契約が同じで config 同値ならスナップショットを共有（`_same_build_config`）。
 - M-1（BIC+OLS）と M-2（`_make_xgb_fit_predict`）と M-6（`make_elasticnet_fit_predict`）の per-(ym,銘柄) OOF を `build_snapshots(return_stock_ids=True)`＋`walk_forward_cv_monthly(return_residuals=True, embargo_months=12)` で自前再現し、(ym, edinet_code) の intersection を母集団に**二段ウォークフォワード**（月 t の統合重みは t 未満の共通 OOF だけで NNLS 学習＝無リーク・`_stack_walk_forward`）で統合。統合残差を共有 `oof_backtest` に通し model_comparison に M-4 として並ぶ。
@@ -195,7 +199,9 @@ producer は共有 `macro_beta`（`read_producer_scores` は `macro_snapshots.ge
 
 ## `plugins/macro_gbdt_rank.py`
 
-**M-5 マクロ×財務 ランク学習**（learning-to-rank・#362・ADR-0017）。M-2 の rank-IC 整合版。`heavy=True`・`ui_order=380`。
+**M-5 マクロ×財務 ランク学習**（learning-to-rank・#362・ADR-0017）。M-2 の rank-IC 整合版。`heavy=True`・`hidden=True`（**退役**・#570/ADR-0044）・`ui_order=380`。
+
+- **退役の根拠（2026-08-30 実測・ADR-0017 の実測節）**: rank-IC **0.0808 vs M-2 0.1578**（差 −0.0771・95%CI [−0.0995, −0.0558]・p=0.001・17期／OOF 25,738ペア）＝ADR-0017 の「上回らなければ MSE で十分」に該当。弱いのは下位分位（最下位分位リターン 0.0145→0.0520・売り側 spread 0.0676→0.0302）。**ただし early_stopping 不使用の固定木数で正則化が M-2 と非対称**なので「learning-to-rank が無効」ではなく「この実装では下回った」と読む（再挑戦は group 付き eval_set を組んでから）。producer が無いため下流の切断は不要で、サイドバーから外しただけ。
 
 学習目的を MSE→XGBoost の learning-to-rank（`rank:pairwise` 既定・`rank:ndcg` 選択可）へ差し替え、各 test 月を1クエリグループとして期内順位を直接最適化。M-2 を無改変ベースラインとして残すため `MacroGbdtPlugin` を継承し `execute()` 本体を共有、4フック（`_objective`/`_make_cv_callback`/`_fit_final_model`/`_persist_producer`）＋`_model_type`/`params_schema` のみ override。`walk_forward_cv_monthly(pass_train_groups=True)` で月クエリグループ境界を `XGBRanker.fit(group=…)` へ受け渡す。ラベルは pairwise＝生リターン素通し／ndcg＝期内分位グレード（`_prep_rank_labels`・2^rel 発散回避）。
 

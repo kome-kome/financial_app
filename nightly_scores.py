@@ -96,10 +96,12 @@ HEAVY_AUTOMATION: dict[str, str] = {
     # 自動実行しないと決めたもの（理由をここに残す＝「後で対応」を prose に書いて終わらせない）
     "macro_ensemble":
         "exempt: 基底 M-1/M-2/M-6 を内部で全部回すためコストが合算になるのに、"
-        "M-6 単体を上回らない（+0.0006・p=0.810・ADR-0022）。既定 mu_source でもない",
+        "M-6 単体を上回らない（+0.0006・p=0.810・ADR-0022）。既定 mu_source でもない。"
+        "#570 で退役（hidden=True・ADR-0044）＝UI からも外れたので回す相手が居ない",
     "macro_gbdt_rank":
         "exempt: producer を持たない（produced_output=False）。スコアが順位で"
-        "リターン単位ではないため永続化する μ̂ が無い（#362）",
+        "リターン単位ではないため永続化する μ̂ が無い（#362）。"
+        "#570 で退役（hidden=True・ADR-0044）",
 }
 
 EXEMPT_PREFIX = "exempt:"

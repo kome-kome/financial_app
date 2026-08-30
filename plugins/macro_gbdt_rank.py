@@ -114,6 +114,15 @@ class MacroGbdtRankPlugin(MacroGbdtPlugin):
     heavy: bool = True
     category = "③ 将来リターンを予測"
     ui_order = 380                       # M-4=370 の後（M-1→M-2→M-3→M-4→M-5 順）
+    # 退役（#570・ADR-0044）: ADR-0017 が約束していた実測をようやく取ったところ、
+    # **M-2(MSE) に有意に劣後**した（rank-IC 0.0808 vs 0.1578・差 −0.0771・
+    # 95%CI [−0.0995, −0.0558]・p=0.001／17期・OOF 25,738ペア・2026-08-30）。ADR-0017 の
+    # 「上回らなければ MSE で十分を確定」に該当する。学習目的を評価指標へ揃えるという
+    # 動機は正しかったが、**この実装では**効かなかった（early_stopping 不使用の非対称が
+    # 残る点は ADR-0017 の実測節に caveat として記録）。サイドバーからは外すが、
+    # コード・テスト・COMPARISON_MODELS の M-5 行は残す（再評価は
+    # `python -m scripts.model_comparison_run --models macro_gbdt,macro_gbdt_rank`）。
+    hidden = True
 
     def params_schema(self) -> dict:
         """M-2 のスキーマ＋ learning-to-rank 目的関数の選択軸。"""

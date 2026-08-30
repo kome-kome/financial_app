@@ -72,6 +72,75 @@ class TestPluginsEndpoint:
         assert seen == EXPECTED_CATEGORY_ORDER
 
 
+class TestHiddenPlugins:
+    """`hidden=True`（退役・ADR-0044）の契約。
+
+    退役は**削除ではなく非表示**で行う。よって「サイドバーから消えている」ことと
+    「レジストリ・API・model_comparison には残っている」ことを**両方**縛る必要がある。
+    片方だけだと、退役したつもりで実行経路まで壊す／消したつもりで UI に残る、の
+    どちらにも倒れうる。加えて `mu_source` の選択肢は sell_ranking の params_schema と
+    analysis.html の静的 select の**二重管理**なので、その一致もここで機械照合する
+    （退役したモデルが select にだけ残ると、選んだ瞬間 coerce_params が reject する）。
+    """
+
+    @staticmethod
+    def _hidden_names() -> set[str]:
+        return {p.name for p in list_plugins() if p.hidden}
+
+    @staticmethod
+    def _mu_source_options(plugin_name: str) -> set[str]:
+        from plugins import get_plugin
+
+        schema = get_plugin(plugin_name).params_schema()
+        return {o["value"] for o in schema["mu_source"]["options"] if o["value"]}
+
+    def test_to_meta_exposes_hidden(self):
+        for p in list_plugins():
+            assert isinstance(p.to_meta().get("hidden"), bool), f"{p.name} の hidden が bool でない"
+
+    def test_hidden_plugins_are_absent_from_api(self):
+        names = {m["name"] for m in client.get("/api/plugins").json()["plugins"]}
+        leaked = self._hidden_names() & names
+        assert not leaked, f"hidden なのに /api/plugins に出ている: {sorted(leaked)}"
+
+    def test_hidden_plugins_stay_in_the_registry(self):
+        """退役しても実行経路は残す（再評価・復帰できる）。"""
+        from plugins import get_plugin
+
+        for name in self._hidden_names():
+            assert get_plugin(name) is not None, f"{name} がレジストリから消えている"
+
+    def test_hidden_plugins_stay_in_model_comparison(self):
+        """比較ファミリーの一員としての役割は退役後も残る（ADR-0021）。"""
+        from model_comparison import COMPARISON_MODELS
+
+        compared = {n for n, _ in COMPARISON_MODELS}
+        for name in self._hidden_names():
+            assert name in compared, (
+                f"{name} は hidden だが COMPARISON_MODELS から外れている。"
+                "退役は非表示であって削除ではない（ADR-0044）"
+            )
+
+    def test_hidden_plugins_are_not_offered_as_mu_source(self):
+        hidden = self._hidden_names()
+        for consumer in ("sell_ranking", "recommend"):
+            leaked = hidden & self._mu_source_options(consumer)
+            assert not leaked, f"{consumer} の mu_source に退役モデルが残っている: {sorted(leaked)}"
+
+    def test_static_select_matches_sell_ranking_options(self):
+        """analysis.html の静的 select と sell_ranking の options の二重管理を照合する。"""
+        import re
+
+        body = client.get("/analysis").text
+        m = re.search(r'<select id="sell-mu-source".*?</select>', body, re.S)
+        assert m, "sell-mu-source の select が見つからない"
+        in_html = set(re.findall(r'<option value="([^"]+)"', m.group(0)))
+        assert in_html == self._mu_source_options("sell_ranking"), (
+            "analysis.html の mu_source option と sell_ranking.params_schema() が食い違う"
+            f"（html={sorted(in_html)} / schema={sorted(self._mu_source_options('sell_ranking'))}）"
+        )
+
+
 class TestModelStatusEndpoint:
     """/api/model/status は DB を参照するため、get_db を in-memory SQLite fixture に
     差し替えて本番 DB 非依存で検証する（空 DB → computed_at None・n_results 0）。"""
