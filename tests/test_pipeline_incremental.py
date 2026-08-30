@@ -11,9 +11,12 @@ import sys
 from datetime import date, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import _pipeline_incremental as pinc
+from collector_utils import EdinetAccessError
 
 
 def _run_main_with_mocks(*, cancelled=False):
@@ -118,3 +121,66 @@ class TestPhase1Cancellation:
         assert mocks["collect_stock_price_history_jquants"].await_count == 0
         assert mocks["fill_recent_stock_price_gap_yahoo"].await_count == 0
         assert mocks["update_market_data_from_history"].call_count == 0
+
+
+class TestEdinetFailureDoesNotBlockPricesOrMacro:
+    """EDINET の障害が株価・マクロを巻き添えにしない（#425 の原則・#580）。
+
+    #577 で「全件失敗を失敗として現す」ために `EdinetAccessError` を送出するようにしたが、
+    それを `main()` で素通りさせると Phase 3（マクロ）と Phase 4（株価）が丸ごと走らなくなる。
+    2026-08-30 は EDINET が全滅していてもマクロ 41,306件・Yahoo gap-fill 341社・鮮度 fresh を
+    取れており、その半分を落とすのは直した穴より高くつく。
+    """
+
+    def _mocks(self):
+        return {
+            "log": MagicMock(),
+            "init_db": MagicMock(),
+            "SessionLocal": MagicMock(return_value=MagicMock()),
+            "run_full_collection": AsyncMock(
+                side_effect=EdinetAccessError("書類一覧が連続で取得できない", 10)),
+            "collect_macro_data": AsyncMock(return_value=41306),
+            "collect_stock_price_history_jquants": AsyncMock(return_value={"upserted": 0}),
+            "fill_recent_stock_price_gap_yahoo": AsyncMock(
+                return_value={"skipped": False, "upserted": 26, "from": "a", "to": "b"}),
+            "update_market_data_from_history": MagicMock(return_value=3),
+        }
+
+    def test_macro_and_prices_still_run(self):
+        mocks = self._mocks()
+        with patch.multiple(pinc, **mocks):
+            with pytest.raises(SystemExit):
+                asyncio.run(pinc.main())
+        assert mocks["collect_macro_data"].await_count == 1
+        assert mocks["fill_recent_stock_price_gap_yahoo"].await_count == 1
+        assert mocks["update_market_data_from_history"].call_count == 1
+
+    def test_exits_non_zero_so_the_failure_is_filed(self):
+        """握って続けるが**成功にはしない**——さもないと #577 で塞いだ穴がそのまま戻る。
+
+        非ゼロで抜ければ `batch_common` が `nightly_last_success` を進めず起票する。
+        """
+        with patch.multiple(pinc, **self._mocks()):
+            with pytest.raises(SystemExit) as ei:
+                asyncio.run(pinc.main())
+        assert ei.value.code != 0
+
+    def test_healthy_run_still_exits_zero(self):
+        """正常時に SystemExit を投げない（失敗フラグが立ちっぱなしにならないこと）。"""
+        mocks = self._mocks()
+        mocks["run_full_collection"] = AsyncMock(return_value=False)
+        with patch.multiple(pinc, **mocks):
+            asyncio.run(pinc.main())   # 例外が出ないこと自体が検証対象
+
+
+class TestFullPipelineKeepsFailFast:
+    def test_gh_pipeline_does_not_swallow_edinet_error(self):
+        """全件収集（`_pipeline_gh.py`）は握らない＝意図的な非対称（#580）。
+
+        XBRL が取れないなら全件収集は走らせる意味が無いので、早く落ちるほうが正しい。
+        差分側と揃えようとして握りを足すと、手動実行が黙って空振りするようになる。
+        """
+        body = open(os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "_pipeline_gh.py"), encoding="utf-8").read()
+        assert "except EdinetAccessError" not in body

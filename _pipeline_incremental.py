@@ -7,6 +7,7 @@ GitHub Actions 用・差分収集パイプライン（毎日自動実行向け�
 全件収集は _pipeline_gh.py で workflow_dispatch 手動実行。
 """
 import asyncio, sys, time
+from typing import Optional
 from datetime import datetime, date, timedelta
 from functools import partial
 from dotenv import load_dotenv
@@ -17,6 +18,7 @@ from collector import (
     collect_stock_price_history_jquants, update_market_data_from_history,
     fill_recent_stock_price_gap_yahoo,
 )
+from collector_utils import EdinetAccessError
 from database import SessionLocal, init_db, price_freshness
 import _pipeline_utils
 from macro_health import check_macro_freshness, format_report
@@ -39,7 +41,15 @@ async def main():
     init_db()
 
     # ─── Phase 1: XBRL 差分収集（過去1年・収集済みスキップ）───────────────
+    # **EDINET の障害で株価・マクロを巻き添えにしない**（#425 と同じ原則・#580）。
+    # #577 で「全件失敗を失敗として現す」ために EdinetAccessError を送出するようにしたが、
+    # ここで素通りさせると Phase 3（マクロ）と Phase 4（株価）が**丸ごと走らなくなる**。
+    # 2026-08-30 は EDINET が全滅していてもマクロ 41,306件・Yahoo gap-fill 341社・鮮度 fresh を
+    # 収集できており、その半分を落とすのは直した穴より高くつく。10連続失敗＝わずか6秒の断で
+    # 発火するので、これは理論上の話ではない。
+    # したがって**握って続行し、最後に非ゼロで抜ける**——検知（#577）と非巻き添え（#425）を両立させる。
     log("[1/4] XBRL 差分収集 開始（過去1年・skip_existing=True）")
+    xbrl_failure: Optional[str] = None
     db1 = SessionLocal()
     try:
         cancelled = await _run_with_retry(
@@ -51,12 +61,18 @@ async def main():
             ),
             label="XBRL差分収集",
         )
+    except EdinetAccessError as e:
+        # 収集経路が構造的に壊れている。**ここでは return しない**（後続が本体の鮮度を担う）。
+        cancelled = False
+        xbrl_failure = str(e)
+        log(f"[1/4] XBRL 差分収集 失敗（株価・マクロは継続する）: {xbrl_failure}")
     finally:
         db1.close()
     if cancelled:
         log("[1/4] 収集が停止されました")
         return
-    log(f"[1/4] XBRL 差分収集 完了 ({(time.time()-t0)/60:.1f}分経過)")
+    if not xbrl_failure:
+        log(f"[1/4] XBRL 差分収集 完了 ({(time.time()-t0)/60:.1f}分経過)")
 
     # ─── Phase 2: 成長率・Zスコアは financial_metrics VIEW が都度算出するため事前計算は不要 ───
     log("[2/4] 成長率・Zスコアは financial_metrics VIEW で都度算出（事前計算スキップ）")
@@ -159,6 +175,14 @@ async def main():
     log("=" * 60)
     log(f"差分収集パイプライン完了  総所要時間: {(time.time()-t0)/60:.1f}分")
     log("=" * 60)
+
+    # 巻き添えを避けるために握った失敗を、**ここで初めて終了コードにする**（#580）。
+    # 握りっぱなしにすると #577 で塞いだ「全件失敗が exit=0」がそのまま戻る。
+    # 非ゼロで抜ければ `batch_common` が pipeline を失敗と記録し（`nightly_last_success` は
+    # 進めない）`gh issue create` する＝**株価は取れているが XBRL は死んでいる**が読み取れる。
+    if xbrl_failure:
+        log(f"[FAIL] XBRL 差分収集が失敗している: {xbrl_failure}")
+        raise SystemExit(1)
 
 if __name__ == "__main__":
     with open(LOG_FILE, "w", encoding="utf-8") as f:
