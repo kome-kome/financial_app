@@ -260,6 +260,10 @@ async def main(years_back: int, collect_only: bool = False,
 
     if not finalize_only:
         # ─── Phase 1: XBRL 収集（financial_records.doc_id でスキップ）──────────
+        # **ここは `_pipeline_incremental` と違い EdinetAccessError を握らない**（#580）。
+        # 意図的な非対称であって直し忘れではない: あちらは毎晩走る鮮度の担い手で、EDINET が
+        # 死んでも株価・マクロは取り続けさせる価値がある（#425）。こちらは手動の全件収集で、
+        # XBRL が取れないなら走らせる意味そのものが無いので、早く落ちるほうが正しい。
         log(f"[1/5] XBRL 収集 開始（skip_existing=True, years_back={years_back}）")
         db1 = SessionLocal()
         try:
