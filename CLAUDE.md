@@ -123,7 +123,7 @@ pytest tests/test_utils.py  # 単一ファイル
 | `api.py` | FastAPI アプリ本体（HTMLページ配信・認証/CORSミドルウェア・`/health`）。REST ルート実体は `routers/` へ委譲 |
 | `routers/` | REST ルーター5本（`auth` / `collect` / `market` / `analysis` / `morning`）。エンドポイント定義の実体 |
 | `plugins/` | 分析モデル（自動検出方式）。理論は [MODELS.md](docs/MODELS.md)、実装詳細は [PLUGIN_REFERENCE.md](docs/PLUGIN_REFERENCE.md) |
-| `templates/*.html` | 画面（`/`=dashboard, `/collection`, `/analysis`, `/company/{code}`, `/models`=モデル解説[技術版], `/guide`=やさしい解説[初心者向け]）。JS は `static/js/<page>.js`（`guide.html` は `models.js` を再利用） |
+| `templates/*.html` | 画面（`/`=dashboard, `/morning`=朝の推奨, `/collection`, `/analysis`, `/company/{code}`, `/db`=DBビューア, `/models`=モデル解説[技術版], `/guide`=やさしい解説[初心者向け]）。JS は `static/js/<page>.js`（`guide.html` は `models.js` を再利用）。**ダッシュボードとログイン以外の全画面はグローバルナビ `.gnav` を持つ**——Jinja の継承を使わずコピペで重複しているため、貼り忘れ・色ズレは失敗として現れない（`/morning` が実際に出口の無い袋小路になっていた）。`tests/test_templates_nav.py` が全テンプレートを分類の上で canonical と照合する |
 | `_pipeline_gh.py` / `_pipeline_incremental.py` | GitHub Actions 用・全件 / 差分収集 |
 
 完全なファイル役割一覧・処理フロー・ER図は [ARCHITECTURE.md](docs/ARCHITECTURE.md) を参照。
