@@ -34,7 +34,7 @@ Claude Code で使える **スキル（Skill）** と **エージェント（Age
 | `/security-review` | セキュリティ観点でレビュー | 認証・入力処理を触ったとき |
 | `/simplify` | コードの単純化・重複削減 | レビュー後の手直し |
 | `/review` | プルリクをレビュー | PR の最終確認 |
-| `/verify` | アプリを実起動して動作確認 | 「テストは通ったが本当に動く？」 |
+| `/run` | アプリを実起動して動作確認 | 「テストは通ったが本当に動く？」 |
 
 ### 🚀 開発ワークフロー
 
@@ -83,7 +83,11 @@ Claude Code で使える **スキル（Skill）** と **エージェント（Age
 
 | コマンド | 何をする | 使う場面 |
 |---|---|---|
-| `/caveman` | 超簡潔モード（トークン節約） | 短いやり取りで節約したい |
+| `/genshijin` | 日本語の超圧縮モード（原始人・強度3段階） | **本 PJ の既定**。SessionStart フックで自動 ON |
+| `/genshijin-commit` | 圧縮コミットメッセージを生成 | Conventional Commits で件名を作る |
+| `/genshijin-review` | 1行1指摘の圧縮レビューコメント | 指摘だけ素早く欲しいとき |
+| `/genshijin-compress` | `CLAUDE.md` 等のメモリファイルを圧縮 | 入力トークンを減らしたいとき |
+| `/caveman` | 超簡潔モード（英語出力向け） | 英語でやり取りするとき |
 
 ### 🔧 その他
 
@@ -91,6 +95,8 @@ Claude Code で使える **スキル（Skill）** と **エージェント（Age
 |---|---|---|
 | `/claude-api` | Anthropic SDK の使い方・モデル更新支援 | API コードを書く・移行する |
 | `/loop` | プロンプトを定期実行 | 「5分ごとにデプロイ確認」など |
+| `/schedule` | cron でクラウドエージェントを定期実行 | 定時ジョブを Claude 側に持たせる |
+| `/teach` | 概念・スキルを教わる | 知らない仕組みを学びたいとき |
 | `/migrate-to-shoehorn` | テストの `as` を shoehorn に置換 | TS テスト改善（汎用・本 PJ 非使用） |
 | `/scaffold-exercises` | 練習問題スキャフォールド生成 | 教材作成用（汎用・本 PJ 非使用） |
 
@@ -110,6 +116,19 @@ Claude Code で使える **スキル（Skill）** と **エージェント（Age
 | **claude-code-guide** | Claude Code/SDK/API の質問回答 | 「フックの書き方は？」 |
 | **statusline-setup** | ステータスライン設定 | 表示カスタム |
 
+**ユーザーレベル（`~/.claude/agents/`）で追加済みのもの**——役割分担用。`implementer` 以外はすべて read-only。
+
+| エージェント | 役割 | 使い分け |
+|---|---|---|
+| **implementer** | 承認済み方針をコードに落とす | **唯一の書込担当**。最小差分で既存パターンを踏襲 |
+| **code-explorer** | 構造・データフローを把握して要約 | 実装・監査の前提として全体像が要るとき |
+| **architecture-strategist** | 複数ファイル横断の構造再設計を深考察 | 「この密結合をどうすべき」。`solution-proposer` より広く `Plan` より上流 |
+| **solution-proposer** | 解決案を複数出しトレードオフを付ける | 「どう直すべき？」。実装はせず方針まで |
+| **security-auditor** | 差分のセキュリティ監査（深刻度付き） | 認証・入力処理・依存を触ったとき |
+| **genshijin-investigator** | 圧縮出力の read-only コードロケータ | 「X の定義どこ」に `file:line` だけで答えてほしい |
+| **genshijin-builder** | 1〜2 ファイル限定の外科的編集 | typo・単関数書換・機械的 rename。3 ファイル以上は `implementer` |
+| **genshijin-reviewer** | 1指摘1行の圧縮レビュー | 主スレッドのトークンを使わずバグ指摘だけ欲しいとき |
+
 > 本プロジェクトでは **大規模調査は `financial-app-explorer` または `Explore` に逃がす**のがルール（`CLAUDE.md` 参照）。
 
 ---
@@ -119,7 +138,7 @@ Claude Code で使える **スキル（Skill）** と **エージェント（Age
 | やりたいこと | 推奨コマンド |
 |---|---|
 | バグ直したい | `/diagnose` → `/tdd` → `/code-review` |
-| 新機能を作る | `/grill-me`（設計） → `/tdd` → `/verify` → `/code-review` |
+| 新機能を作る | `/grill-me`（設計） → `/tdd` → `/run` → `/code-review` |
 | 大改修の前 | `/zoom-out` → `/improve-codebase-architecture` → `/to-prd` → `/to-issues` |
 | PR レビュー | `/review`（または `/code-review`） → `/security-review` |
 | 後片付け | `/tidy` → `/simplify` |
