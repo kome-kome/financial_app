@@ -24,7 +24,9 @@ Claude Code で使える **スキル（Skill）** と **エージェント（Age
 
 ## 2. スキル一覧（用途別）
 
-> **凡例**: 末尾 † のコマンドは現在この環境に未収録（呼び出しても動かない）。利用するには別途セットアップが必要。それ以外は組み込みコマンド、または `.claude/skills/` に収録済み。
+> **凡例**: 末尾 † のコマンドは現在この環境に未収録（呼び出しても動かない）。利用するには別途セットアップが必要。それ以外は組み込みコマンド、または `.claude/skills/`・`~/.claude/{skills,commands}` に収録済み。
+>
+> **この表は `tests/test_docs_sync.py` が実体と照合する**（#575）。リポジトリ内 `.claude/` は CI で、ユーザーレベル `~/.claude/` はローカルの pytest でのみ縛られる（CI の checkout に `~/.claude/` は無い）。スキル・エージェントを足したらこの表にも1行足すこと。
 
 ### 🛠 コード品質チェック
 
@@ -33,7 +35,6 @@ Claude Code で使える **スキル（Skill）** と **エージェント（Age
 | `/code-review` | 差分のバグ・改善点をレビュー | コミット前、PR 出す前 |
 | `/security-review` | セキュリティ観点でレビュー | 認証・入力処理を触ったとき |
 | `/simplify` | コードの単純化・重複削減 | レビュー後の手直し |
-| `/review` | プルリクをレビュー | PR の最終確認 |
 | `/run` | アプリを実起動して動作確認 | 「テストは通ったが本当に動く？」 |
 
 ### 🚀 開発ワークフロー
@@ -100,6 +101,17 @@ Claude Code で使える **スキル（Skill）** と **エージェント（Age
 | `/migrate-to-shoehorn` | テストの `as` を shoehorn に置換 | TS テスト改善（汎用・本 PJ 非使用） |
 | `/scaffold-exercises` | 練習問題スキャフォールド生成 | 教材作成用（汎用・本 PJ 非使用） |
 
+### 🗒 生活記録（本 PJ 外・`~/.claude/commands/` のカスタムコマンド）
+
+スキルではなくユーザーレベルのスラッシュコマンド。本プロジェクトとは無関係だが、**同じ `/名前` で呼べる以上ここに載っていないと「知らないまま」か「取り違え」になる**ため一覧に含める。
+
+| コマンド | 何をする | 使う場面 |
+|---|---|---|
+| `/life-log` | 今日の生活記録を Obsidian のデイリーノートへ追記 | 一日の終わりに |
+| `/life-review` | 生活記録から週次・月次の振り返りノートを生成 | 週末・月末 |
+| `/life-plan` | 生活記録に基づいて計画・改善案を提案 | 次週の段取りを決めるとき |
+| `/life-decide` | 過去の記録を踏まえた判断材料を出し、意思決定ログを残す | 迷っていることがあるとき |
+
 ---
 
 ## 3. エージェント一覧
@@ -140,10 +152,10 @@ Claude Code で使える **スキル（Skill）** と **エージェント（Age
 | バグ直したい | `/diagnose` → `/tdd` → `/code-review` |
 | 新機能を作る | `/grill-me`（設計） → `/tdd` → `/run` → `/code-review` |
 | 大改修の前 | `/zoom-out` → `/improve-codebase-architecture` → `/to-prd` → `/to-issues` |
-| PR レビュー | `/review`（または `/code-review`） → `/security-review` |
+| PR レビュー | `/code-review` → `/security-review` |
 | 後片付け | `/tidy` → `/simplify` |
 | 設定を変えたい | `/update-config` / `/fewer-permission-prompts` |
-| 技術調査 | `/deep-research` |
+| 技術調査 | `/deep-research` †（未収録。`WebSearch` で代替） |
 | 短く話して | `/caveman`（戻すときは「normal mode」） |
 
 ---
