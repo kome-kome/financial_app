@@ -218,6 +218,7 @@ producer は共有 `macro_beta`（`read_producer_scores` は `macro_snapshots.ge
 - CV の fit_predict は候補実装 `model_candidates.make_elasticnet_fit_predict` を**そのまま注入**し、ADR-0021 の実測と同一コードパスであることを保証する（本番データで rank-IC 0.1713 の再現を確認済み）。スナップショット・fold（`min_train_months=6`/`step=3`/`embargo=12`）は M-2 と同値。α・l1_ratio は**学習 fold 内 `TimeSeriesSplit`** で選択（ランダム K-fold の楽観バイアス回避）。`feature_coefs` に符号付き係数（L1 でゼロ＝未使用がそのまま読める）。
 - **per-stock μ̂ と確実性軸 `r1_prime`（コンフォーマル区間半幅）を `macro_enet_scores` へ全置換で永続化**（producer・#396・`tuning_dry_run` no-op）。`produced_output`/`read_producer_scores` は M-2 と同一形＝売り推奨が `mu_source=macro_enet` で読み、**R3 足切りゲートも機能する**（**既定 `mu_source`＝M-6**・#402/ADR-0022 で M-2 から切替＝売り側 OOF 指標 `short_side_spread` で有意優位）。
 - `results` は上位 `top_n` のみ返す（汎用レンダラの DOM 肥大回避）。マクロ fold 内 PCA は実測で無効果のため**非搭載**。
+- **`use_momentum` は既定 OFF＝実測で棄却**（ADR-0045・測定入口 `python -m scripts.momentum_gate`）。M-2/M-6 の ON/OFF を共通 (ym,ec) 域で比較して4検定すべて非有意かつ符号が負。**raw の母集団のままだと ON が改善して見える**（モメンタム不可の行＝履歴の浅い銘柄が落ちる効果）ため、この軸を測り直すときは共通月＋共通 (ym,ec) の2段の制限を外さないこと。
 
 依存先: `plugins/model_candidates.py`, `plugins/macro_snapshots.py`, `plugins/utils.py`, scikit-learn
 

@@ -148,8 +148,10 @@ class MacroRiskReturnPlugin(AnalysisPlugin):
                 "label": "モメンタム特徴量を使用",
                 "description": (
                     "12-1ヶ月モメンタムを特徴量に加える。ON は各スナップショットに過去履歴を要求"
-                    "するため、週次株価の蓄積が浅い環境では walk-forward CV のフォールド数が減る"
-                    "（既定 OFF＝マクロ ON のままでも CV が成立する）。マクロとは独立に切替可能。"
+                    "するため、週次株価の蓄積が浅い環境では walk-forward CV のフォールド数が減る。"
+                    "マクロとは独立に切替可能。週次履歴は現在7年分あるので ON でも CV は成立する"
+                    "が、M-2/M-6 で ON/OFF を実測した結果は改善なし（ADR-0045）。M-1 は strict"
+                    "母集団で条件が異なり未実測のため、既定 OFF を据え置いている。"
                 ),
                 "default": False,
             },

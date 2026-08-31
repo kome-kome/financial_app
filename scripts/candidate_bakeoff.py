@@ -195,8 +195,14 @@ def build_panel(db, args) -> tuple:
 
 
 def run_one(name: str, samples_by_ym: dict, meta_by_ym: dict, ids_by_ym: dict,
-            feat_names: list, pca: int) -> dict:
-    """候補1件を walk-forward → oof_backtest まで回して指標 dict を返す。"""
+            feat_names: list, pca: int, *, return_parts: bool = False) -> dict:
+    """候補1件を walk-forward → oof_backtest まで回して指標 dict を返す。
+
+    return_parts=True のとき `out["_parts"] = (residuals, oof_meta)` を添える
+    （`scripts/momentum_gate.py` が2条件を**共通 (ym,ec) 域**へ制限して測り直すために使う。
+    母集団が動く条件比較では、この制限をしないと「特徴量の効果」と「母集団が変わった効果」が
+    分離できない）。**JSON へは載せない**（残差全件でファイルが肥大する）。既定 False＝
+    既存の呼び出し（本スクリプト・macro_feature_bakeoff）は一切変わらない。"""
     t0 = time.time()
     eff_names = pca_feature_names(feat_names, pca) if pca > 0 else feat_names
     errors: list[str] = []
@@ -240,6 +246,8 @@ def run_one(name: str, samples_by_ym: dict, meta_by_ym: dict, ids_by_ym: dict,
         out["fold_errors"] = {"n": len(errors), "first": errors[0]}
         if not folds:
             out["error"] = f"全 fold 失敗: {errors[0]}"
+    if return_parts:
+        out["_parts"] = (residuals, meta)
     return out
 
 

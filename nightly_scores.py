@@ -51,7 +51,10 @@ NIGHTLY_MODELS: tuple[str, ...] = ("sector_ols", "macro_enet")
 # macro_enet（M-6）は**エントリを持たない＝params_schema の default をそのまま使う**。
 # ADR-0021（昇格ゲート）・ADR-0022（既定 mu_source 切替）の実測はいずれも既定構成
 # （use_momentum=False / price_features=[] / min_coverage=0.5 / l1_ratio=auto）で取った値で、
-# ここで変えると本番の μ̂ が「評価していない構成」で生成される。M-6 は
+# ここで変えると本番の μ̂ が「評価していない構成」で生成される。**`use_momentum=False` は
+# 惰性ではなく実測の結論**——ADR-0045 で M-2/M-6 の ON/OFF を honest OOF で比較し、共通
+# (ym,ec) 域では4検定すべて補正後 α を通らず符号も負だった（`python -m scripts.momentum_gate`）。
+# M-6 は
 # tune-hyperparameters.yml の matrix（M-1/M-2/M-3）に入っておらず tuned params も持たない。
 NIGHTLY_PARAMS: dict[str, dict] = {
     "sector_ols": {"regularization": "ridge"},

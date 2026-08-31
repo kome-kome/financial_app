@@ -88,6 +88,17 @@ class TestParamsContract:
         """PCA 圧縮は実測で昇格ゲートを通らなかったため本モデルには載せない（ADR-0021）。"""
         assert "macro_pca_components" not in plugin.params_schema()
 
+    def test_use_momentum_default_off(self):
+        """モメンタムの既定 OFF は実測の結論（ADR-0045）＝惰性ではない。
+
+        ON/OFF を同一 fold・同一 (ym,ec) 域で比較して4検定すべて補正後 α を通らず符号も負
+        （M-6 rank-IC −0.0104 p=0.100 / 売り側 −0.0043 p=0.269）。**この既定は UI の初期値
+        であると同時に本番 producer の設定**でもあり（`nightly_scores.NIGHTLY_PARAMS` は M-6 の
+        default をそのまま使う）、変えると `macro_enet_scores` が「評価していない構成」で
+        生成される。再検討するなら `python -m scripts.momentum_gate` を回してから。
+        """
+        assert coerce_params(plugin.params_schema(), {})["use_momentum"] is False
+
     def test_empty_fin_features_rejected(self):
         with pytest.raises(ValueError, match="財務特徴量"):
             _run(_params(fin_features=[], use_macro=False))

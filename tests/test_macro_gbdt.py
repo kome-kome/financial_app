@@ -1114,6 +1114,17 @@ class TestPriceFeatures:
         assert schema["price_features"]["type"] == "multiselect"
         assert schema["price_features"]["default"] == []
 
+    def test_use_momentum_default_off(self):
+        """モメンタムの既定 OFF は実測の結論（ADR-0045）＝惰性ではない。
+
+        `use_momentum` は px_* と同じ保守ゲートの下にあり、こちらは**ゲートを通した**：
+        ON/OFF を同一 fold・同一 (ym,ec) 域で比較して4検定すべて補正後 α を通らず符号も負
+        （M-2 rank-IC −0.0056 p=0.528 / 売り側 −0.0051 p=0.178）。raw の母集団のままだと
+        ON が改善して見える（履歴の浅い銘柄が落ちる効果）ので、測り直すときは
+        `python -m scripts.momentum_gate` を使い共通域制限を外さないこと。
+        """
+        assert plugin.params_schema()["use_momentum"]["default"] is False
+
     def test_default_empty_is_noop(self):
         """price_features 未指定と空指定で feature 名・サンプル母集団が完全一致（既定無変更）。"""
         prices_by_co, fin_by_co, companies = self._inputs()

@@ -362,7 +362,13 @@ class TestParamsSchema:
         assert _MACRO_MAP["macro_nikkei225_yoy"] == ("NIKKEI225", "yoy")
 
     def test_use_momentum_default_off(self):
-        """use_momentum の既定は OFF（マクロ ON のままで walk-forward CV を成立させるため）。"""
+        """use_momentum の既定は OFF。
+
+        導入時の理由は「マクロ ON のままで walk-forward CV を成立させる」（週次株価が約2年
+        しかなく ON では 0 fold だった）。**その制約は #198 のバックフィルで解けている**が、
+        M-1 は strict（`macro_nan_ok=False`）で母集団が別条件のため ADR-0045 の実測
+        （M-2/M-6 で改善なし）は M-1 の既定を支持も否定もしない＝未実測のまま据え置き。
+        """
         result = coerce_params(self.schema, {})
         assert result["use_momentum"] is False
 

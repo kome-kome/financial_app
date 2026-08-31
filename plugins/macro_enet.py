@@ -105,6 +105,12 @@ class MacroEnetPlugin(AnalysisPlugin):
             "use_momentum": {
                 "type": "checkbox",
                 "label": "モメンタム特徴量を使用",
+                "description": (
+                    "12-1ヶ月モメンタムを特徴量に加える。既定 OFF は実測の結論（ADR-0045）＝"
+                    "ON/OFF を同一 fold・同一 (ym,ec) 域で比較したところ、買い側 rank-IC も"
+                    "売り側 spread も改善せず（4検定すべて補正後 α 未達・符号は負）、"
+                    "ターンオーバーが増えてコスト耐性が落ちた。"
+                ),
                 "default": False,
             },
             "momentum_window": {
