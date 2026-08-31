@@ -156,6 +156,22 @@ SSEエンドポイント（進捗のリアルタイム配信・全6本）: 収�
 
 ---
 
+## ローカルバッチの実行環境（Windows・タスクスケジューラ）
+
+2026-09-01、月次バッチ（`financial_app-monthly`）のタスクスケジューラ経由**初実走**で表面化した罠。いずれも「所要が伸びた」「exit code が非ゼロ」という形でしか現れず、原因はログに残っていなかった。
+
+- **Smart App Control が未評価 DLL を初回ロードでブロックする（`macro_beta` が 1.4分・exit=1）**: `ImportError: DLL load failed while importing _ifrt_proxy: アプリケーション制御ポリシーによってこのファイルがブロックされました`。SAC は Enforced（`(Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\CI\Policy').VerifiedAndReputablePolicyState` が `1`）で、8/21 の jaxlib 更新で入った `_ifrt_proxy.pyd`（8,704バイト）を弾いた。CodeIntegrity ログ（`Microsoft-Windows-CodeIntegrity/Operational` の **3118 / 3077 / 3033**）に記録は**その1回だけ**で、以後は同じ DLL の import が通る＝**未評価バイナリを1度弾いてから評価を取得する一過性の挙動**。
+  - **問題は「月1回しか走らないバッチに当たった」こと**。初回ロードの1回きりの失敗が `macro_beta_loadings` の1か月ぶんの固着になる。`deps_smoke` ステップ（`scripts/check_heavy_imports.py`）を月次の先頭付近へ置き、**未評価 DLL の初回ロードを本番ステップの手前で消化する**。それでも落ちるなら 180分の予算を待たず起票される。
+  - **pip でパッケージを更新したら、対話セッションで一度 import して評価を通しておく**（`python -m scripts.check_heavy_imports`）。バッチはセッション0（S4U）で走るので、そこで初めて触るのが一番まずい。
+  - **Smart App Control は OFF にしない**。一度切ると Windows の再インストール無しに再び ON にできず（不可逆）、マルウェア防御が恒久に一段下がる。1回きりのブロックに対して代償が大きすぎる。
+- **`venv\Scripts\python.exe` はランチャースタブ＝`Popen` の pid を測ると実体を測り損ねる**: 子の常駐メモリを親から測ると、実体が 313MB でも **4MB**（ページフォールト千件台）と返る。エラーにならず「静かに正しく見える」のが厄介。実体はベース Python（`AppData\Local\Programs\Python\Python313\python.exe`）の**孫**として動く——CodeIntegrity のイベントもプロセス名をベース Python で記録する。**計測はプロセスツリーの合計で行う**（`sysmem.tree_rss_mb`）。`taskkill /F /T` がツリーごと落とす必要があるのと同じ根。
+- **CPU が余っていてもメモリが枯れれば止まる**: `tune:macro_risk_return` は **156分間 heartbeat を出し続けながら探索候補を1件も進めなかった**。CPU は 39%（i5-8400・6コア6スレッド）で余っており、空き物理メモリが 0.6GB（総量 7.9GB）まで枯れて WorkingSetSize が測るたび減っていた（1974MB → 1013MB → 799MB＝ページアウト）。**所要だけを記録したログからは「遅い」と「止まっている」も、その原因も読み取れない**。`batch_common` の heartbeat と `env_lines()` は `sysmem.format_line()` でツリー常駐量と空き物理メモリを刻む。
+  - **`heartbeat` は生存を示すが進行を示さない**（既知）。今回はそれが実害として出た最初の例で、予算 250分は進捗ゼロでも満額待つ。**資源はログに出ていなければ無かったことになる**。
+  - GHA（2コア7GB）とローカル（6コア8GB）を所要で比べるときは、**空きメモリが前提条件**。`scripts/bench_macro_beta.py` の `env_fingerprint()` は `mem_total_mb` / `mem_avail_mb` を残す。
+- **`Stop-ScheduledTask` は S4U タスクのプロセスツリーを落とさない（2026-09-01 実測）**: タスクの `State` は `Ready` に戻り `LastTaskResult` も `267014`（終了処理中）になるのに、**python のツリーは走り続ける**（ログへの書き込みが継続する）。さらに悪いことに、孤児化したツリーは**非昇格の対話セッションからは `taskkill /F /T` できない**（`Access is denied`）——同じユーザーでもセッション0の S4U ログオンはトークンが別だから。**タスクが Ready に戻ると窓（`ExecutionTimeLimit`）による打ち切りも効かなくなる**ので、止める手段が予算 kill だけになる（親の `Runner` は生きているので `Step.budget_min` は機能し続ける）。**止めるなら最初から管理者権限で `taskkill /F /T /PID <ルート>`**。`Stop-ScheduledTask` を「安全な停止」と思って叩くと、止まったつもりで走り続ける状態を作る。
+  - **`Start-Process -Verb RunAs` が UAC でキャンセルされても、PowerShell 全体の exit code は 0 になりうる**。`The operation was canceled by the user` は本文にしか出ない＝**exit code だけ見ると成功に見える**（`pytest | tail` が pytest の失敗を隠すのと同型）。昇格を伴う操作は、実行後に**状態そのもの**（プロセスが消えたか）で確かめる。
+- **セッション0（S4U）と対話セッションでは挙動が変わる**: 上記の jax は**対話セッションでは正常に import できた**（0.10.2）。逆に、対話セッションから他セッションのプロセスは `OpenProcess` できないので pid 指定の計測が拒否される。**「手元で試したら動いた」はバッチで動く証明にならない**（`.env` や PATH が変わりうる #550 と同型）。
+
 ## 認証・セキュリティ実装メモ
 
 - **【実装済み（Tier3-3）】** 認証を HttpOnly Cookie 方式へ移行（`localStorage` 廃止＝XSS によるトークン盗難を防止）。`auth_token`（HttpOnly）＋`csrf_token`（JS可読）の2 Cookie、`SameSite=Lax`、本番は `COOKIE_SECURE=true` で Secure 属性。`Authorization: Bearer` は廃止。

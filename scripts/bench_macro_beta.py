@@ -340,40 +340,12 @@ def peak_rss_mb():
     本番規模の posterior は `beta` / `beta_raw`（いずれも n_stock x n_factor）が draws x chains
     ぶん保存されるため GB 級になる。**この PC の空きメモリは 2GB 前後**しかないので、
     「1歩あたりのコスト」とは別に常駐サイズ自体が律速になりうる。所要と一緒に残す。
+
+    実装は `sysmem` が唯一の源（**ここへ書き写さない**）。2026-09-01 に月次バッチの heartbeat
+    でも同じ計測が要ることが分かり、ctypes の重複を作る前に切り出した。
     """
-    if sys.platform == "win32":
-        try:
-            import ctypes
-            from ctypes import wintypes
-
-            class _PMC(ctypes.Structure):
-                _fields_ = [("cb", wintypes.DWORD), ("PageFaultCount", wintypes.DWORD),
-                            ("PeakWorkingSetSize", ctypes.c_size_t),
-                            ("WorkingSetSize", ctypes.c_size_t),
-                            ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
-                            ("QuotaPagedPoolUsage", ctypes.c_size_t),
-                            ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
-                            ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
-                            ("PagefileUsage", ctypes.c_size_t),
-                            ("PeakPagefileUsage", ctypes.c_size_t)]
-
-            counters = _PMC()
-            counters.cb = ctypes.sizeof(_PMC)
-            # ハンドルは c_void_p で渡す（GetCurrentProcess() は擬似ハンドル -1 を返し、
-            # argtypes 無しの int 渡しは 64bit で切り詰められて無効ハンドルになる）。
-            handle = ctypes.c_void_p(ctypes.windll.kernel32.GetCurrentProcess())
-            if not ctypes.WinDLL("psapi").GetProcessMemoryInfo(
-                    handle, ctypes.byref(counters), counters.cb):
-                return None
-            return float(counters.PeakWorkingSetSize) / (1024 * 1024)
-        except Exception:
-            return None
-    try:
-        import resource
-        # Linux は KB、macOS は byte で返す（ここでは Linux ランナー前提）。
-        return float(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss) / 1024.0
-    except Exception:
-        return None
+    import sysmem
+    return sysmem.peak_rss_mb()
 
 
 def env_fingerprint() -> dict:
@@ -387,6 +359,12 @@ def env_fingerprint() -> dict:
         "xla_flags": os.environ.get("XLA_FLAGS", ""),
         "omp_num_threads": os.environ.get("OMP_NUM_THREADS", ""),
     }
+    # 物理メモリは**比較の前提そのもの**。GHA（2コア7GB）とローカルを所要で並べたとき、
+    # 空きが枯れていればページアウトが所要に化ける。docstring は「CPU/メモリ」と言いながら
+    # メモリを残していなかったため、#512 の「6.4倍遅い」は原因を切り分けられずに残った。
+    import sysmem
+    fp["mem_total_mb"] = sysmem.total_mb()
+    fp["mem_avail_mb"] = sysmem.available_mb()
     try:
         import jax
         fp["jax"] = jax.__version__

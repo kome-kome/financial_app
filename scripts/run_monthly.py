@@ -17,9 +17,16 @@ notify-failure でも macro-health でも拾えない。ADR-0031 が防ごうと
 
 ## ステップの並び
 
-    vacuum → factor_premia → macro_beta → tune:macro_risk_return → tune:macro_dlm → tune:macro_gbdt
+    vacuum → price_suffix → deps_smoke → factor_premia → macro_beta
+           → tune:macro_risk_return → tune:macro_dlm → tune:macro_gbdt
 
-2つの制約の積:
+`deps_smoke` は**重い依存を import できるかだけを確かめる軽いステップ**。2026-09-01 の初実走で
+Smart App Control が未評価の jaxlib DLL を初回ロードで弾き、`macro_beta` が exit=1 で落ちた
+（`scripts/check_heavy_imports.py`）。ここで消化すれば本番ステップは通り、消化できなければ
+180分の予算を待たずに失敗として現れる。**`macro_beta` より前**でありさえすれば役目は果たすので、
+位置は下の「軽い順」に従う。
+
+残りは2つの制約の積:
 
 1. **依存順**: `macro_beta_loadings` は M-1（`macro_risk_return`）の入力なので、
    推論が tune より先。
@@ -116,7 +123,16 @@ WINDOW_MIN = 16 * 60
 # 据え置き＝毎月 exit=124 で起票される状態は継続する。窓の問題は #530 / #532 の担当で、
 # #540 は「軌道長のレバーは使い切った」ことを示したに留まる。
 BUDGET_MIN: dict[str, float] = {
-    "vacuum": 45,
+    # 実測 0.3分（2026-09-01 の初実走・DB 839→831MB）／0.25分（2026-08-25 の手動 1回目）。
+    # ADR-0040 は「予算値は実測が出たら見直す。特に vacuum はローカルでの実測を持っていない」
+    # と留保していた枠で、その実測が出たので 45 → 15 へ引く。**実測へ寄せるのではなく桁の
+    # 余裕を残す**（50倍）——VACUUM FULL はテーブルサイズに比例し、週次株価は増え続ける。
+    # ここで空けた30分が deps_smoke の枠と窓の余裕になる。
+    "vacuum": 15,
+    # 重い依存を import するだけ（実測 20秒級）。**本番ステップの手前で未評価 DLL の初回
+    # ロードを消化するのが役目**なので、ここが遅いこと自体は起きない。5分は起動と
+    # jax.devices() の初期化を含めた余裕。
+    "deps_smoke": 5,
     # 5社 × 2サフィックス × YAHOO_STOCK_RATE_SLEEP(0.5s) ≒ 5秒（#560）。3分は十分な余裕。
     # **全数 454社の `--reprobe` は約8分で入らない**——Σ925 + マージン30 = 955 に対し窓 960 で
     # 余裕が5分しかなく、窓の拡張も日次 17:20 起動と衝突するため不可（だから対象を絞った）。
@@ -156,6 +172,16 @@ def steps_for(python: str) -> tuple[Step, ...]:
                  "**`--backfill-weekly` は採用できた社にだけ走る**——解決しただけでは "
                  "daily 保持窓183日＝約26週しか付かず z_momentum の52週に届かない（#555）。"
                  "対象は最大でもバケットの社数なので窓を脅かさない"),
+        Step("deps_smoke", (python, "-m", "scripts.check_heavy_imports"),
+             why="重い依存（pymc / jax / numpyro 等）が実際に import できるかを確かめる。"
+                 "2026-09-01 の初実走では Smart App Control が 8/21 の jaxlib 更新で入った"
+                 "未評価の `_ifrt_proxy.pyd` を**初回ロードでブロック**し、`macro_beta` が "
+                 "exit=1 で落ちて 1か月ぶんの `macro_beta_loadings` が固着した"
+                 "（CodeIntegrity 3118/3077/3033・以後は同じ DLL が通る一過性の挙動）。"
+                 "**未評価 DLL の初回ロードをここが引き受ける**ので本番ステップの手前で消化でき、"
+                 "それでも落ちるなら 180分の予算を待たず起票される。"
+                 "位置は「軽い順」の原則に従う（vacuum を除く先頭は最軽量の price_suffix）——"
+                 "重い依存を実際に使う最初のステップ `macro_beta` より前でありさえすれば役目は果たす"),
         Step("factor_premia",
              (python, "recommend_factor_premia.py",
               "--min-companies-per-period", "30", "--maxlags", "11", "--persist"),
