@@ -120,6 +120,19 @@ class TestStepOrder:
             f"最小 {min(s.budget_min for s in steps)}分"
         )
 
+    def test_deps_smoke_runs_before_the_steps_that_need_those_imports(self):
+        """重い依存の import 確認は、それを実際に使うステップより前（2026-09-01）。
+
+        後ろに置くと役目が消える——Smart App Control が未評価の jaxlib DLL を初回ロードで
+        ブロックしたとき、`macro_beta` は 180分の予算ではなく **1.4分の exit=1** で落ち、
+        その月の `macro_beta_loadings` が丸ごと固着した。先に消化しておけば本番ステップは
+        通り、消化できなければ予算を待たずに失敗として現れる。
+        """
+        names = _names()
+        assert names.index("deps_smoke") < names.index("macro_beta")
+        for name in (n for n in names if n.startswith("tune:")):
+            assert names.index("deps_smoke") < names.index(name)
+
     def test_m1_is_tuned_before_the_other_models(self):
         """tune の中では M-1 が先。止まって最も困るのが M-1 の μ̂ だから。"""
         names = [n for n in _names() if n.startswith("tune:")]

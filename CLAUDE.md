@@ -8,7 +8,7 @@
 |---|---|---|
 | [VISION.md](docs/VISION.md) | プロジェクト目的・ロードマップ・ライブラリ採用基準 | 方針・採用判断時 |
 | [ARCHITECTURE.md](docs/ARCHITECTURE.md) | 全体構成・ER図・各種フロー図・APIエンドポイント・ファイル役割 | 設計詳細が必要なとき |
-| [GOTCHAS.md](docs/GOTCHAS.md) | 既知のハマりどころ（XBRL / CF / capex / 時刻 / 業種 / 認証実装メモ / 進捗仕様） | 収集・分析の実装時 |
+| [GOTCHAS.md](docs/GOTCHAS.md) | 既知のハマりどころ（XBRL / CF / capex / 時刻 / 業種 / 認証実装メモ / 進捗仕様 / **ローカルバッチの実行環境**） | 収集・分析の実装時 |
 | [DEPLOYMENT.md](docs/DEPLOYMENT.md) | Render デプロイ運用＋データ収集の自動/手動の仕組み＋外部サービス制約（GitHub Actions / Supabase / J-Quants） | デプロイ・収集・インフラ設計時 |
 | [MODELS.md](docs/MODELS.md) | 分析モデル解説＋モデル固有の制約 | 分析モデル変更時 |
 | [PLUGIN_REFERENCE.md](docs/PLUGIN_REFERENCE.md) | `plugins/` 各ファイルの実装リファレンス（内部契約・producer・heavy・実測値）。理論は MODELS.md が正本 | プラグイン実装を触るとき |
@@ -113,6 +113,7 @@ pytest tests/test_utils.py  # 単一ファイル
 | `scripts/check_batch_freshness.py` | **バッチ鮮度 watchdog**（#515 手順3・ADR-0042）。**判定は `batch_freshness.py` へ切り出し `/api/morning` と共有**（#561）。ここは起票・CLI・ログ。`app_settings` の `*_last_run` を読み、止まっていれば Issue へ起票する（同一タイトルの open があればコメント追記＝毎日走っても積み上がらない）。**足跡を書く仕組みはあったが読む側が無かった**＝バッチが起動前に死ぬと failure が出ず `batch_common.notify` は発火しない。**閾値は `cadence + 窓` の導出**（`run_*.WINDOW_MIN` から引く）＝窓を広げれば閾値も自動で広がり、**「実行中は鳴らない」が構造的に成立**し、判定が watchdog の起動時刻に依存しない（実測から逆算しない）。**判定は `*_last_run` のみ**——`monthly_last_success` は #512 まで設計上ずっと古く、鳴らすと恒久 open な Issue になる。自分も監視対象で `watchdog_last_run` を**読んでから書く**。**通知経路（`gh`）は健全な回にも毎回確かめてレポートへ出す**＝異常時にしか叩かないと「通知が死んでいる」は一番届いてほしい回に判明する（実行の成功 ≠ 通知が届く）。exit 0/2/3（3＝検出したが起票できなかった） |
 | `scripts/mirror_*.py` | ミラーの pull / sync / verify ＋予行演習（#481 B-2〜B-4・ADR-0035）。共有基盤は `mirror_common.py`。**source/dest を引数で受け、両方ローカルなら Supabase 不要で予行できる**。#503 で正本が反転したため **pull / sync は定常運転では使わない**（2026-08-20 の pull が引き渡し点）。`verify` はバックアップの復元先突合に転用する |
 | `weekly_price_cache.py` | 週次株価の run 間差分ロードキャッシュ（#480・ADR-0036）。指紋（`max(week_start)`＋`count(*)`）＋直近27週の再取得＋DB 側の世代印（`app_settings`）。**キャッシュは速さだけを担い、正しさは指紋・世代印・行数照合が持つ**（無い/壊れている/古いは全てフルロードへ倒れる）。緊急停止は `FINAPP_WEEKLY_CACHE=0` |
+| `sysmem.py` | プロセス常駐メモリと物理メモリの実測（2026-09-01）。`batch_common` の heartbeat／`env_lines()` と `scripts/bench_macro_beta.py` が共有する唯一の源（**ctypes を書き写さない**）。**測るのはプロセスツリーの合計**——venv の `python.exe` はランチャースタブで、`Popen` の pid を単体で測ると実体が GB 級でも 4MB と返り、エラーにならず「静かに正しく見える」。**取れなければ None**（計測の失敗が本業を止めない・欠測は `?` で出して 0.0 と混ぜない）。psutil は入れない（本番 footprint） |
 | `collector.py` | オーケストレータ＋後方互換の再エクスポート層＋CLI（実体は下記6分割） |
 | `collector_utils.py` | 収集系共通の設定定数・ロガー。**`EDINET_BASE` は `api.edinet-fsa.go.jp`**（旧 `disclosure.` は 301→人間用画面なので `follow_redirects` では直らない・#577）。`redact_secrets()` は例外文字列から API キーを消す（httpx のログ抑制は例外を素通りする）。`EdinetAccessError` ＋ `EDINET_MAX_CONSECUTIVE_FAILURES` で**「走ったが全部失敗した」を失敗として現す**——単発は握って続行・連続のみ送出。詳細は [GOTCHAS.md](docs/GOTCHAS.md) |
 | `collector_master.py` | 企業/業種マスタ収集（EDINET コードリスト・JPX 業種） |

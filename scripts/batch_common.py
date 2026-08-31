@@ -57,6 +57,20 @@ KILL_GRACE_SEC = 30.0
 WINDOW_MARGIN_MIN = 30.0
 
 
+def _mem_line(root_pid: Optional[int] = None) -> str:
+    """heartbeat / env 行へ載せるメモリ実測。**測れなくてもバッチを止めない**。
+
+    `root_pid` はステップの子プロセス。**ツリー合計で測る**必要がある——`venv` の
+    `python.exe` はランチャースタブで、`Popen` が持つ pid を単体で測ると実体が GB 級でも
+    4MB と返る（`sysmem._win_process_tree` 参照）。
+    """
+    try:
+        import sysmem
+        return sysmem.format_line(root_pid)
+    except Exception as e:      # noqa: BLE001 — 計測は本業ではない。失敗も黙らせず1行で出す
+        return f"mem 測定不可（{type(e).__name__}）"
+
+
 @dataclass(frozen=True)
 class Step:
     """1ステップぶんの実行単位。`why` は失敗時のログに出す＝何が止まったかを言葉で残す。
@@ -212,6 +226,12 @@ class Runner:
         子＝サンプリング生存の2階建て）。**heartbeat は生存を示すが進行を示さない**ので、
         本当に進んでいるかの裏取りは CPU 時間で行う。
 
+        heartbeat には**子ツリーの常駐メモリと機械の空き物理メモリ**を併記する（`_mem_line`）。
+        2026-09-01 の初実走で `tune:macro_risk_return` は 156分間 heartbeat を出し続けながら
+        探索候補を1件も進めなかったが、CPU は 39% で余っており空きメモリが 0.6GB まで枯れて
+        ページアウトしていた——**所要だけを記録したログからは「遅い」と「止まっている」も、
+        その原因も読み取れない**。資源はログに出ていなければ無かったことになる。
+
         `step.budget_min` があれば**そこで打ち切る**（Issue #530）。待ち時間を
         `min(heartbeat_sec, 残り予算)` にしてあるので、刻みは保ったまま予算ちょうどで起きる。
         超過したら `kill_tree` でツリーごと落とし、`TIMEOUT_EXIT` を返す——**バッチ全体の窓を
@@ -269,7 +289,8 @@ class Runner:
                     except Exception:      # noqa: BLE001 — 反応しない子で END 行を落とさない
                         returncode = TIMEOUT_EXIT
                     break
-                self.write(f"{HEARTBEAT_MARK} {step.name} 継続中: 経過 {waited / 60.0:.0f}分")
+                self.write(f"{HEARTBEAT_MARK} {step.name} 継続中: 経過 {waited / 60.0:.0f}分"
+                           f" | {_mem_line(proc.pid)}")
         tail = self._tail_since(pos) or _proc_tail(proc)
         if killed:
             # 打ち切った子の returncode（Windows なら taskkill の 1、POSIX なら -SIGTERM）は
@@ -518,6 +539,10 @@ def env_lines() -> list[str]:
     except Exception as e:     # noqa: BLE001 — ここで落ちるとバッチが始まらない
         lines.append(f"[env] DB     : 解決できない（{type(e).__name__}: {str(e)[:120]}）")
     lines.append(f"[env] session: {_session_id()}")
+    # 資源も「どこで走ったか」の一部。GHA（2コア7GB）とローカルを所要で比べるときの前提で、
+    # ここが無いと「ローカルは N 倍遅い」がマシンの話なのかコードの話なのか後から切り分け
+    # られない（#512 はこの区別が付かないまま残った）。
+    lines.append(f"[env] {_mem_line()}")
     finapp = {k: v for k, v in sorted(os.environ.items()) if k.startswith("FINAPP_")}
     shown = " ".join(
         f"{k}={'***' if any(h in k.upper() for h in _SECRET_HINTS) else v}"
