@@ -640,7 +640,12 @@ conv_score₁₂ₘ = max(<span class="val">5</span>, min(<span class="val">95</
     <div><span class="spec-label">X winsorize</span> <strong>撤去</strong>（木は単調変換不変のためクリップ不要）、y winsorize は維持</div>
     <div><span class="spec-label">符号事前知識</span> <code>use_monotone_constraints</code>（既定 OFF）で確信のある財務比率のみ単調性制約（#366）</div>
     <div><span class="spec-label">セクター/サイズ</span> <code>use_sector_features</code>（既定 OFF）で業種のリークフリー target encoding＋log(総資産)を木の入力へ追加（#370）</div>
+    <div><span class="spec-label">モメンタム</span> <code>use_momentum</code>（既定 OFF）<strong>＝実測で棄却済み。ON にしても成績は良くならない</strong>（ADR-0045・下記）</div>
   </div>
+
+  <h3>モメンタム特徴量は ON にしても成績が良くならない（実測・ADR-0045）</h3>
+  <div class="warn-box"><strong><code>use_momentum</code> を ON にしても予測成績は改善しません。</strong>12-1ヶ月モメンタムは文献（Jegadeesh-Titman 1993）では単独最強級のアノマリーとして知られますが、<strong>本モデルの母集団・予測期間（52週先）ではそのまま効きません</strong>。2026-08-31 に M-2/M-6 で ON/OFF を<strong>同一 fold・同一銘柄集合</strong>で実測した結果（22,907ペア・15期）：M-2 の rank-IC は 0.1954→0.1898、売り側 spread は 0.0837→0.0786 と<strong>いずれも悪化方向で、4検定すべて有意差なし</strong>（Bonferroni 補正 α=0.0125）。加えて<strong>銘柄の入れ替わりが増えて売買コスト耐性が落ちます</strong>（breakeven 14.8bp→13.5bp）。</div>
+  <p><strong>注意：素の母集団のまま比べると ON が改善して見えます</strong>（M-2 の rank-IC 0.1641→0.1898・fold 間 std も 0.1049→0.0809 と低下＝「頑健化した」ように見える）。しかしこれは特徴量の効果ではなく<strong>母集団が変わった効果</strong>です。<code>build_snapshots</code> はモメンタムを計算できない行を落とすため、ON では株価履歴の浅い銘柄（新規上場・地方単独上場＝もともと予測が当たりにくい銘柄）が集団から抜けます。集団を揃えると改善は消え、符号が反転します。測り直すときは <code>python -m scripts.momentum_gate</code> を使い、共通月（fold の位相合わせ）＋共通 (月, 銘柄) の2段の制限を外さないこと。</p>
 
   <h3>セクター/サイズのカテゴリ特徴量（#370）</h3>
   <p>XGBoost は<strong>セクター×マクロ交互作用</strong>（素材×WTI・ハイテク×DXY 等）を木で暗黙学習できるが、業種情報がモデル入力に無ければ学習しようがない（M-1 は交差項を ADR-0002 で却下＝これは<strong>木ならではの拡張</strong>）。<code>use_sector_features</code>（既定 OFF）を ON にすると、<code>build_snapshots</code> が既に持つ業種・総資産メタから 2 列を M-2 の <code>execute</code> 内で後付け連結する（<code>build_snapshots</code> 無改変＝M-1 の OLS 特徴は不干渉）。<strong>log_size</strong>＝log(総資産)（欠損は NaN で XGBoost がネイティブ処理）。<strong>sector_te</strong>＝業種の<strong>リークフリー target encoding</strong>（業種を「その業種の平均リターン」で数値化）。target encoding は<strong>リークが最大リスク</strong>のため、<strong>必ず学習 fold 内の業種平均のみ</strong>で数値化する（test 自身のラベルは使わない／未知・不明業種は全体平均へフォールバック）。ON/OFF を OOF rank-IC で比較し SHAP でセクター/サイズ寄与を確認してから既定化する（<code>use_monotone_constraints</code>/px_* と同じ保守ゲート・追加収集ゼロ・native categorical(A) は effort M で見送り target encoding(B) を採用）。設計の記録は ADR-0003。</p>
@@ -804,6 +809,10 @@ conv_score₁₂ₘ = max(<span class="val">5</span>, min(<span class="val">95</
 
   <h3>正則化の強さは自分で決める（学習期間内のみで選択）</h3>
   <p>α（罰則の強さ）と L1 比率は、<strong>学習期間内をさらに時系列分割した交差検証</strong>で自動選択する（過去で学習→直近で検証の向き。期間をシャッフルするランダム分割は未来の情報を混ぜるため使わない）。実測では 71 特徴量のうち平均 29 本だけが非ゼロになり、残りは L1 が自動的に落とした。副次的な利点として<strong>銘柄入れ替え（ターンオーバー）が M-2 の 0.52 に対し 0.30 と低く、売買コストで超過収益が消えるまでの余裕が 10.7bp→22.9bp へ広がる</strong>（縮小推定でランキングが安定するため）。</p>
+
+  <h3>モメンタム特徴量は ON にしても成績が良くならない（実測・ADR-0045）</h3>
+  <div class="warn-box"><strong><code>use_momentum</code> を ON にしても予測成績は改善しません。</strong>12-1ヶ月モメンタムは文献（Jegadeesh-Titman 1993）では単独最強級のアノマリーとして知られますが、<strong>本モデルの母集団・予測期間（52週先）ではそのまま効きません</strong>。2026-08-31 に M-2/M-6 で ON/OFF を<strong>同一 fold・同一銘柄集合</strong>で実測した結果（22,907ペア・15期）：M-6 の rank-IC は 0.2172→0.2068、売り側 spread は 0.0936→0.0894 と<strong>いずれも悪化方向で、4検定すべて有意差なし</strong>（Bonferroni 補正 α=0.0125）。さらに<strong>本モデルの強みであるターンオーバーの低さが損なわれます</strong>（0.300→0.371・breakeven 28.9bp→22.6bp）。</div>
+  <p><strong>注意：素の母集団のまま比べると ON が改善して見えます</strong>（M-6 の rank-IC 0.1866→0.2068）。しかしこれは特徴量の効果ではなく<strong>母集団が変わった効果</strong>で、<code>build_snapshots</code> がモメンタムを計算できない行を落とすため、株価履歴の浅い銘柄（＝もともと予測が当たりにくい銘柄）が集団から抜けたことによります。集団を揃えると改善は消えます。測り直すときは <code>python -m scripts.momentum_gate</code> を使い共通域の制限を外さないこと（詳細は M-2 の同名セクション）。</p>
 
   <h3>試したが採用しなかったこと</h3>
   <p>マクロ 46 系列を<strong>学習期間内の主成分分析</strong>で少数の直交因子へ圧縮する案も同じ土俵で比較したが、5 主成分でマクロ変動の 90.9% を説明しても予測精度は変わらず（0.1713→0.1714）、木モデルではむしろ悪化した。効果が確認できなかったため本モデルには組み込んでいない。</p>
