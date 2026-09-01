@@ -18,6 +18,7 @@ from typing import Any
 
 import numpy as np
 
+from . import progress
 from .base import AnalysisPlugin
 from .utils import (
     normalize,
@@ -284,6 +285,7 @@ class MacroRiskReturnPlugin(AnalysisPlugin):
             raise ValueError(f"学習サンプルが不足（{total_samples}件）。データを収集してから再実行してください。")
 
         # --- LassoLarsIC(BIC) 特徴量選択 ---
+        progress.emit("特徴量を選択（BIC）")
         selected_names = self._select_macro_features(
             samples_by_ym, all_feat_names, max_features=max_features
         )
@@ -356,12 +358,14 @@ class MacroRiskReturnPlugin(AnalysisPlugin):
             }
 
         # --- 最終モデル学習 ---
+        progress.emit("最終モデルを学習")
         beta, win_params, norm_params, y_mu, y_sd, XtX_inv, sigma2 = self._fit_final(
             samples_sel, n_sel
         )
 
         # --- スコアリング（全社の raw 値を返す。効用 U・パレート・並べ替え・top_n は
         #     λ/リスク軸に依存する後処理のためクライアント側で算出する）---
+        progress.emit("全社をスコアリング")
         results = self._score_companies(
             current_snaps, sel_idx, n_sel,
             beta, win_params, norm_params, y_mu, y_sd,

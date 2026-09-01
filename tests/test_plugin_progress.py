@@ -187,6 +187,22 @@ class TestSharedPipelineEmits:
             )
         assert any("スナップショット" in step for step, _c, _t in seen)
 
+    def test_cache_hit_is_announced(self):
+        """キャッシュヒットは黙って飛ばさない。
+
+        ヒットすると重い段が丸ごと飛ぶので進捗は件数ゼロのまま次へ移る。黙ると
+        画面では「0件のまま終わった」と見分けがつかない（探索の2回目以降は毎回これ）。
+        """
+        from plugins.macro_snapshots import _BoundedCache, _cached_or_computed
+
+        cache = _BoundedCache()
+        seen = []
+        with progress.progress_sink(lambda s, c, t: seen.append(s)):
+            _cached_or_computed(cache, "k", lambda: 1, "財務・株価")   # ミス
+            assert seen == [], "計算した回は復元を名乗らない"
+            _cached_or_computed(cache, "k", lambda: 1, "財務・株価")   # ヒット
+        assert seen == ["財務・株価: キャッシュから復元"]
+
 
 class TestExecuteWithProgress:
     """routers.analysis が JobState へ配線されていること。"""

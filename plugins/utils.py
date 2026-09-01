@@ -16,6 +16,8 @@ log = logging.getLogger(__name__)
 import numpy as np
 from scipy import stats as scipy_stats
 
+from . import progress
+
 # 予測値の log-space 上限（exp(LOG_PRED_CAP) ≈ 3.3 百万円/株）
 LOG_PRED_CAP = 15.0
 
@@ -845,7 +847,12 @@ def walk_forward_cv_monthly(
 
     fold_results = []
     residuals_by_ym: dict[str, list[tuple[float, float]]] = {}
-    for i in range(min_train_months + embargo_months, len(all_yms), step_months):
+    # 進捗（#545）。ここは M-1/M-2/M-6 が共有する CV ループで、**実行時間の後半を占める**
+    # （M-1 の実測では全体の6割がスナップショット構築より後段）。刻まないと画面は
+    # 「構築 4024/4024」のまま静止し、固まっているのと区別できない。
+    fold_idx = [i for i in range(min_train_months + embargo_months, len(all_yms), step_months)]
+    for done, i in enumerate(fold_idx):
+        progress.emit("交差検証（walk-forward）", done, len(fold_idx))
         test_ym = all_yms[i]
         train_yms = all_yms[:max(0, i - embargo_months)]
 
@@ -892,6 +899,7 @@ def walk_forward_cv_monthly(
         if return_residuals:
             residuals_by_ym[test_ym] = list(zip(yhat_orig, y_test_orig))
 
+    progress.emit("交差検証（walk-forward）", len(fold_idx), len(fold_idx))
     if return_residuals:
         return fold_results, residuals_by_ym
     return fold_results
