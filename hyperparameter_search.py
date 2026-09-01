@@ -8,10 +8,17 @@ walk-forward OOF（rank-IC 等）を最大化する best params を選ぶ。
     python hyperparameter_search.py --model macro_gbdt --strategy random --n-iter 200 \\
         --objective rank_ic --seed 0 --persist --persist-scores
 
-品質ゲート（Issue #291）: --persist 時、plugin_tuned_params に既存行があれば
-その objective_value と今回の best_score を比較し、劣化していれば persist
-（persist_scores 込み）をスキップして非ゼロ終了する。GitHub Actions での
-月次自動実行を人手レビュー無しで運用しても本番値が悪化しないようにするため。
+品質ゲート（Issue #291 → #590 で作り直し・ADR-0047）: 「人手レビュー無しの月次自動実行で
+本番値を悪化させない」という目的は同じだが、**手段が保存値との比較から候補プールへの
+champion 投入に変わった**。永続化済みの objective_value は「そのとき存在したパネルでの値」で
+あり、パネルは毎晩伸びるので月をまたいだ単純比較は成立しない（実測: macro_gbdt の 0.5068 は
+10 fold・macro_dlm の 0.0221 は 55 fold＝fold が少ない候補ほど高く出ていた）。単純比較は
+一度たまたま高い値が入ると永久に閉じる。
+
+いまは本番稼働中の params を今回の探索へ投入し（plugins.tuning.search の champion_params）、
+**同一パネル上で** best を選ぶ。best >= champion が構造的に成立するので persist は常に行い、
+終了コードは 0 のまま。「水準が落ちた」ことは WARNING ログと plugin_tuned_params の
+prev_objective_value / champion_objective_value / n_periods / n_oof_samples に残す。
 
 新規 pip 依存は不要（scikit-learn/xgboost は本番 requirements.txt に既存）。
 """
@@ -75,6 +82,10 @@ async def run_search(
     persist=True で plugin_tuned_params へ永続化し、persist_scores=True なら
     best params での最終 execute も行い producer スコアを永続化する
     （persist=False のとき persist_scores は無視される）。
+
+    persist=True のときは既存行の params を champion として探索へ投入する（#590）。
+    persist=False（試し撃ち）では投入しない——本番値を巻き込まずに空間だけを見たい用途で、
+    champion を混ぜると探索1件ぶんの時間を余分に使う。
     """
     from database import get_tuned_params, upsert_tuned_params
     from plugins import execute_plugin, get_plugin
@@ -88,34 +99,46 @@ async def run_search(
         raise ValueError(f"プラグイン '{model}' は tuning_search_space() 未実装です")
     base_params, dims = space_fn()
 
+    prev = get_tuned_params(db, model) if persist else None
+
     result = await search(
         plugin, base_params, dims, db,
         objective=objective, strategy=strategy, n_iter=n_iter, seed=seed,
+        champion_params=prev["params"] if prev else None,
     )
     result["persisted"] = False
-    result["skipped_reason"] = None
 
     if persist and result["best_params"] is not None:
-        prev = get_tuned_params(db, model)
-        prev_score = prev["objective_value"] if prev is not None else None
+        # 前回値との比較は「同じ目的関数で測ったもの同士」でのみ意味を持つ
+        # （rank_ic と long_short は次元が違う）。
+        prev_score = None
+        if prev is not None and prev["objective_name"] == objective:
+            prev_score = prev["objective_value"]
 
+        best_oof = result.get("best_oof") or {}
         if prev_score is not None and result["best_score"] < prev_score:
-            # 品質ゲート（Issue #291）: 探索結果が既存の永続値より劣化している場合は
-            # 人手レビュー抜きで本番 plugin_tuned_params / producer スコアを
-            # 上書きしない（GitHub Actions 月次自動実行を見据えた劣化防止）。
-            reason = (
-                f"前回スコア{prev_score:.4f}を下回ったため persist をスキップしました"
-                f"（今回={result['best_score']:.4f}）"
+            # persist は止めない（ADR-0047）。champion は候補プールに居るので
+            # best >= champion が成立しており、本番より悪い params を選ぶことはない。
+            # ここで下がっているのは**パネルが変わったこと**による水準の移動なので、
+            # バッチを失敗させずに履歴として残す。
+            logger.warning(
+                "前回の保存値%.4f（%s・%s fold）を下回りました: 今回=%.4f（%s fold）"
+                "・champion 再測定=%s。パネル世代が変わった可能性があります"
+                "（ADR-0047・比較は同一パネル上の champion で行っています）",
+                prev_score, prev["tuned_at"], prev.get("n_periods"),
+                result["best_score"], best_oof.get("n_periods"),
+                result.get("champion_score"),
             )
-            logger.warning(reason)
-            result["skipped_reason"] = reason
-            return result
 
         fp = _data_fingerprint(db)
         upsert_tuned_params(
             db, model, result["best_params"], objective,
             result["best_score"], result["leaderboard"][:20],
             result["config"]["n_combos"], fp,
+            prev_objective_value=prev["objective_value"] if prev else None,
+            champion_objective_value=result.get("champion_score"),
+            n_periods=best_oof.get("n_periods"),
+            n_oof_samples=best_oof.get("n_oof_samples"),
         )
         result["persisted"] = True
 
@@ -144,12 +167,13 @@ async def _run(args: argparse.Namespace) -> None:
         logger.info("リーダーボード上位%d件:\n%s", len(top5),
                    json.dumps(top5, ensure_ascii=False, indent=2, default=str))
 
+        if result["champion_injected"]:
+            logger.info("champion 再測定スコア=%s（同一パネル上の比較・ADR-0047）",
+                        result["champion_score"])
         if result["persisted"]:
             logger.info("plugin_tuned_params へ永続化しました（plugin_name=%s）", args.model)
             if args.persist_scores:
                 logger.info("best params で最終 execute を実行し、producer スコアを永続化しました")
-        elif result["skipped_reason"]:
-            raise SystemExit(f"品質ゲートによりスキップされました: {result['skipped_reason']}")
     finally:
         db.close()
 

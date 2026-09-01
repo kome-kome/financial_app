@@ -1320,16 +1320,31 @@ class PluginTunedParams(Base):
     data_fingerprint = Column(String(64))              # 探索に使ったデータのハッシュ（鮮度警告用）
     tuned_at         = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
+    # 比較可能性の根拠（#590・ADR-0047）。objective_value は「そのとき存在したパネルでの値」で
+    # あり、単体では月をまたいだ比較に使えない。fold 数を列で持つのは、今回の診断
+    # （0.5068=10 fold / 0.0221=55 fold）が leaderboard_json を展開しないと見えなかったため。
+    prev_objective_value     = Column(Float)    # 直前の保存値（WARNING を出した根拠）
+    champion_objective_value = Column(Float)    # 今回のパネル上で測り直した champion の値
+    n_periods                = Column(Integer)  # best の OOF fold 数
+    n_oof_samples            = Column(Integer)  # best の OOF サンプル数
+
 
 def upsert_tuned_params(db, plugin_name: str, params: dict, objective_name: str,
                         objective_value: float | None, leaderboard: list,
-                        n_combos: int, data_fingerprint: str | None = None) -> None:
+                        n_combos: int, data_fingerprint: str | None = None, *,
+                        prev_objective_value: float | None = None,
+                        champion_objective_value: float | None = None,
+                        n_periods: int | None = None,
+                        n_oof_samples: int | None = None) -> None:
     """探索結果を plugin_tuned_params へ upsert する（plugin_name で冪等・db.merge）。"""
     db.merge(PluginTunedParams(
         plugin_name=plugin_name, params_json=params, objective_name=objective_name,
         objective_value=objective_value, leaderboard_json=leaderboard[:20],
         n_combos=n_combos, data_fingerprint=data_fingerprint,
         tuned_at=datetime.now(timezone.utc),
+        prev_objective_value=prev_objective_value,
+        champion_objective_value=champion_objective_value,
+        n_periods=n_periods, n_oof_samples=n_oof_samples,
     ))
     db.commit()
 
@@ -1346,6 +1361,10 @@ def get_tuned_params(db, plugin_name: str) -> dict | None:
         "n_combos":         row.n_combos,
         "data_fingerprint": row.data_fingerprint,
         "tuned_at":         row.tuned_at.isoformat() if row.tuned_at else None,
+        "prev_objective_value":     row.prev_objective_value,
+        "champion_objective_value": row.champion_objective_value,
+        "n_periods":                row.n_periods,
+        "n_oof_samples":            row.n_oof_samples,
     }
 
 
@@ -2103,6 +2122,15 @@ def _ensure_tables() -> None:
         for _col in ("sh_out_fy", "tr_sh_fy"):
             conn.execute(text(
                 f"ALTER TABLE statement_disclosure ADD COLUMN IF NOT EXISTS {_col} DOUBLE PRECISION"
+            ))
+        # 探索スコアの比較可能性の根拠（#590・ADR-0047・非破壊・冪等）。既存行は NULL のまま
+        # ＝「fold 数が記録されていない世代」を意味する。次回の探索実行で埋まる。
+        for _col, _type in (("prev_objective_value", "DOUBLE PRECISION"),
+                            ("champion_objective_value", "DOUBLE PRECISION"),
+                            ("n_periods", "INTEGER"),
+                            ("n_oof_samples", "INTEGER")):
+            conn.execute(text(
+                f"ALTER TABLE plugin_tuned_params ADD COLUMN IF NOT EXISTS {_col} {_type}"
             ))
         # period_end を VARCHAR(20) → DATE 型に変換するマイグレーション（冪等）
         # SKIP_PERIOD_END_MIGRATION=1 で skip できるフェールセーフ付き
