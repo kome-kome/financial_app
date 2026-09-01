@@ -21,6 +21,7 @@
 | [`plugins/base.py`](#pluginsbasepy) | — | — | — | — |
 | [`plugins/__init__.py`](#plugins__init__py) | — | — | — | — |
 | [`plugins/utils.py`](#pluginsutilspy) | — | — | — | — |
+| [`plugins/progress.py`](#pluginsprogresspy) | — | — | — | — |
 | [`plugins/recommend.py`](#pluginsrecommendpy) | — | | — | 110 |
 | [`plugins/net_cash_analysis.py`](#pluginsnet_cash_analysispy) | — | | — | 120 |
 | [`plugins/sector_ols.py`](#pluginssector_olspy) | — | ✅ | `regression_results` | 210 |
@@ -59,6 +60,22 @@
 `coerce_params()`・`ols()`・`normalize()`・`winsorize()`・`walk_forward_cv()`・`walk_forward_cv_monthly(fit_predict=None, pass_train_groups=False)`（fit_predict コールバックで OLS/XGBoost を切替可・ADR-0003 §3。`pass_train_groups=True` で各学習月のサンプル数配列を3引数コールバックへ渡し XGBRanker の月クエリグループを復元・M-5・#362。既定 False で M-1/M-2/M-3 は不変）・`get_macro_features()`・`get_momentum_return()`・`fit_feature_columns()`・`transform_feature_row()`・`fit_zscore_stats()`（断面の生値から winsorize 済み (mean, sd) を返す。消費側の期内標準化の前段で、4件未満は `None`＝生値フォールバック・#509。**非有限値（NaN / ±inf）は入口で落とす**——1件混ざると winsorize の `np.percentile` 経由で全要素が nan になり、`sd = var ** 0.5 or 1.0` は nan が truthy なので守れず、断面の全社スコアが無言で nan 化する・#516）。**`fit_feature_columns()` は行ゼロの入力を fail-fast で落とす**（`min() on empty`）。中立な `win_params=(0.0, 0.0)` を返して救うと `transform_feature_row` がどんな入力も 0.0 へ潰し、切片だけの予測が例外もログも無く出るため（#518・#509 のガードは撤回）。空断面を飛ばしたい呼び出し側が自分で弾く。
 
 `winsorize`/`normalize`/`fit_feature_columns` は numpy ベクトル化済み（Issue #304）。要素ごとの変換（ソート・比較・クリップ・log・減算・除算）は numpy でベクトル化しつつ、平均・標準偏差の集計（`statistics.mean`/`stdev`・`sum()/len()`）は Pure Python のまま維持し、**旧実装とビット単位で同一の数値を返す**（np.mean/np.sum は総和順序が異なり丸め誤差が生じ得るため）。
+
+依存先: —
+
+---
+
+## `plugins/progress.py`
+
+heavy プラグイン実行の進捗を画面へ流す唯一の経路（#545）。`emit(step, current, total, every=)` / `progress_sink(fn)` / `active()` ＋ カバレッジ表 `PROGRESS_COVERAGE`。
+
+sink は **ContextVar**。`execute` のシグネチャは `(params, db)` に固定されていて引数を増やせず、`execute_plugin` は execute を `asyncio.to_thread` へ逃がす（#357）が、**to_thread はコンテキストを複製するので ContextVar は素通しで伝播する**（`tuning_dry_run` / `shared_snapshot_cache` と同じ手）＝ `execute_plugin` は無改造。包むのは `routers/analysis.py::_execute_with_progress`（heavy のときだけ）で、**sink 未設定なら emit は完全な no-op**——月次バッチ（`scripts/run_monthly*.py`）や `/api/recommend`・`/api/gap-analysis` 経路は進捗機構に一切触られない。
+
+発生源は共通骨格に置く（M-1/M-2/M-3/M-6 系は全部 `load_data → preload_macro → build_snapshots` を通るため、ここに入れれば一括で進捗を持つ）: `load_weekly_prices_chunked`（500社チャンク）・`_preload_macro_impl`・`_build_snapshots_impl`（全社ループ・`EVERY_COMPANIES=100` で間引き）。`sector_ols`（業種ループ）と `macro_dlm`（銘柄ループ）は自前で足す。**キャッシュヒット時は `_cached_or_computed` が「キャッシュから復元」を出す**——黙って飛ばすと件数ゼロのまま完了し「0件で終わった」と区別できない。
+
+間引きは **最初（current=0）と最後（current=total）を必ず通す**。終端を落とすと「4300/4400 のまま完了」に見え、止まったのか終わったのか分からなくなる。
+
+`PROGRESS_COVERAGE` は heavy 名 → `common`（共通骨格を通る）/ `own`（自前 emit）/ `exempt: <理由>`。**「heavy を足したが進捗が無い」は画面が沈黙するだけで例外もログも出ない**ため、`tests/test_plugin_progress.py::TestProgressCoverageRegistry` が表と実体（MRO を辿ったモジュールソース）を CI で照合する（ADR-0031 の `HEAVY_AUTOMATION` と同型）。
 
 依存先: —
 

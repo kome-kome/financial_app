@@ -20,6 +20,7 @@ import math
 from collections import defaultdict, namedtuple
 from typing import Any
 
+from . import progress
 from .base import AnalysisPlugin
 from .utils import (
     check_collinearity,
@@ -702,6 +703,7 @@ class SectorOLSPlugin(AnalysisPlugin):
         if not features:
             raise ValueError("説明変数を1つ以上選択してください")
 
+        progress.emit("財務データをロード")
         records = self._load_records(db, year, features)
         base    = self._eligible_base(records, target)
         # 欠損率が高い説明変数を自動ドロップ（1項目の NULL で全社除外される事故を防ぐ）。
@@ -742,7 +744,13 @@ class SectorOLSPlugin(AnalysisPlugin):
 
         sector_stats, all_predictions, n_skipped = [], [], 0
 
-        for sector, samples in sorted(by_sector.items()):
+        # 進捗（#545）。業種数は数十なので間引かず1業種1件流す（業種名がそのまま
+        # 「いまどこを回帰しているか」になる）。
+        sectors = sorted(by_sector.items())
+        n_sectors = len(sectors)
+        for done, (sector, samples) in enumerate(sectors):
+            progress.emit(f"業種別に回帰: {sector}", done, n_sectors,
+                          every=progress.EVERY_SECTORS)
             if len(samples) < min_samples:
                 n_skipped += 1
                 continue
@@ -774,6 +782,7 @@ class SectorOLSPlugin(AnalysisPlugin):
             all_predictions.extend(sector_preds)
             sector_stats.append(stat_entry)
 
+        progress.emit("業種別に回帰", n_sectors, n_sectors)
         if not sector_stats:
             msg = (
                 f"分析可能な業種がありません（各業種 {min_samples}社以上が必要）。"

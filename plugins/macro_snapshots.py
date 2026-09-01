@@ -24,6 +24,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from . import progress
 from .utils import macro_risk_exposure, normalize, winsorize
 
 # ── 定数 ──────────────────────────────────────────────────────────────────
@@ -708,6 +709,25 @@ def shared_cache_get_or_compute(namespace: str, key: Any, compute) -> Any:
     return cache[namespace].get_or_compute(key, compute)
 
 
+def _cached_or_computed(cache: "_BoundedCache", key: Any, compute, label: str) -> Any:
+    """`get_or_compute` のラッパ。**キャッシュから返ったときだけ**進捗へ1行出す（#545）。
+
+    ヒットすると重い段が丸ごと飛ぶため、進捗は件数ゼロのまま次の段へ移る。それを黙って
+    やると画面では「0件のまま終わった」と見分けがつかない（探索の2回目以降は毎回これに
+    なる）ので、復元したことを明示する。ミス時は `compute` 側のループが進捗を出す。
+    """
+    computed: list[bool] = []
+
+    def _compute():
+        computed.append(True)
+        return compute()
+
+    result = cache.get_or_compute(key, _compute)
+    if not computed:
+        progress.emit(f"{label}: キャッシュから復元")
+    return result
+
+
 # ── データロード ───────────────────────────────────────────────────────────
 
 # 週次株価ロードのチャンクサイズ（edinet_code を N 社ずつ IN 句で分割・Issue #311）。
@@ -760,6 +780,7 @@ def load_weekly_prices_chunked(db, batch: int = _WEEKLY_LOAD_BATCH,
         if with_volume:
             cols.append(StockPriceWeekly.volume_sum)
         for i in range(0, len(codes), batch):
+            progress.emit("週次株価をロード", i, len(codes), every=progress.EVERY_CHUNKS)
             chunk = codes[i:i + batch]
             q = db.query(*cols).filter(StockPriceWeekly.edinet_code.in_(chunk))
             if since is not None:
@@ -775,6 +796,7 @@ def load_weekly_prices_chunked(db, batch: int = _WEEKLY_LOAD_BATCH,
             for row in rows:
                 vs = row[3] if with_volume else _VOLUME_NOT_LOADED
                 prices_by_co.setdefault(row[0], []).append(_WEEKLY_PX(row[1], row[2], vs))
+        progress.emit("週次株価をロード", len(codes), len(codes))
         return prices_by_co
 
     # ワイヤ形式は **素のタプル**。namedtuple ごと pickle すると `_VOLUME_NOT_LOADED`（object()）
@@ -810,8 +832,9 @@ def load_data(db, with_volume: bool = True) -> tuple:
     cache = _shared_cache.get()
     if cache is None:
         return _load_data_impl(db, with_volume)
-    return cache["load_data"].get_or_compute(
-        (id(db), with_volume), lambda: _load_data_impl(db, with_volume)
+    return _cached_or_computed(
+        cache["load_data"], (id(db), with_volume),
+        lambda: _load_data_impl(db, with_volume), "財務・株価",
     )
 
 
@@ -829,6 +852,7 @@ def _load_data_impl(db, with_volume: bool = True) -> tuple:
     # 週次株価は単一クエリだと本番 pooler で timeout/接続破損するため分割ロード（Issue #311）。
     prices_by_co = load_weekly_prices_chunked(db, with_volume=with_volume)
 
+    progress.emit("財務指標をロード")
     fin_cols = [getattr(FinancialMetric, f) for f in FIN_LOAD_FIELDS]
     fin_by_co: dict[str, list] = defaultdict(list)
     for row in (db.query(*fin_cols)
@@ -851,13 +875,15 @@ def preload_macro(db, prices_by_co: dict, macro_names: list[str] | None = None) 
     if cache is None:
         return _preload_macro_impl(db, prices_by_co, macro_names)
     key = (id(prices_by_co), tuple(sorted(macro_names)) if macro_names else ())
-    return cache["preload_macro"].get_or_compute(
-        key, lambda: _preload_macro_impl(db, prices_by_co, macro_names)
+    return _cached_or_computed(
+        cache["preload_macro"], key,
+        lambda: _preload_macro_impl(db, prices_by_co, macro_names), "マクロ系列",
     )
 
 
 def _preload_macro_impl(db, prices_by_co: dict, macro_names: list[str] | None = None) -> dict:
     """preload_macro の実体（キャッシュなし・毎回フル計算）。"""
+    progress.emit("マクロ系列をロード")
     from database import MacroData
     from datetime import date as _date, timedelta as _td
     all_dates = [row.trade_date for rows in prices_by_co.values() for row in rows]
@@ -967,13 +993,14 @@ def build_snapshots(
         min_coverage, build_interactions, macro_nan_ok, return_stock_ids,
         tuple(price_features),
     )
-    return cache["build_snapshots"].get_or_compute(
-        key,
+    return _cached_or_computed(
+        cache["build_snapshots"], key,
         lambda: _build_snapshots_impl(
             prices_by_co, fin_by_co, companies, macro_cache,
             fin_features, macro_names, use_momentum, mom_window, min_coverage,
             build_interactions, macro_nan_ok, return_stock_ids, price_features,
         ),
+        "スナップショット",
     )
 
 
@@ -1027,7 +1054,10 @@ def _build_snapshots_impl(
     min_rows = HORIZON_WEEKS + 4
     macro_memo: dict[str, dict] = {}
 
-    for edinet_code, price_rows in prices_by_co.items():
+    n_companies = len(prices_by_co)
+    for done, (edinet_code, price_rows) in enumerate(prices_by_co.items()):
+        progress.emit("スナップショットを構築", done, n_companies,
+                      every=progress.EVERY_COMPANIES)
         n = len(price_rows)
         if n < min_rows:
             continue
@@ -1138,6 +1168,7 @@ def _build_snapshots_impl(
                     "snap_date":    snap_date,
                 })
 
+    progress.emit("スナップショットを構築", n_companies, n_companies)
     if return_stock_ids:
         return (dict(samples_by_ym), dict(sample_meta_by_ym), current_snaps,
                 all_feat_names, dict(stock_ids_by_ym))
