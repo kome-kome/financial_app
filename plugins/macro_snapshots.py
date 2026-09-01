@@ -611,6 +611,19 @@ def _realized_vol(price_rows: list, ref_date: str, weeks: int = 52) -> float | N
 
 _CACHE_MAXSIZE = 8
 
+# **`build_snapshots` だけは1エントリが約 1.7GB**（2026-09-01 実測・#584）。`min_coverage` が
+# 変わるたびに断面が作り直されるので、上限8では 0.3/0.5/0.7 の3ぶん＝約 5GB が同時に常駐し、
+# 8GB のマシンが詰む。実走では **`[13/288]`（min_coverage 0.7 の最初）の直後から 156分間
+# 1件も進まなくなった**——CPU は 39% で余っており、枯れていたのはメモリだった。
+#
+# 1 で足りる理由: 探索では `min_coverage` が**外側ループ**なので、古い断面へ戻ることがない。
+# 夜間バッチ（`nightly_scores`・#443）と `model_comparison` は**全モデルで同一の断面**を使う
+# ため、そもそもエントリを1つしか作らず、この上限の影響を受けない。
+#
+# 他の namespace は軽いので 8 のまま（実測: `cv_by_selected_features` は8エントリで 8MB、
+# `preload_macro` は 1MB）。**上限は「1エントリの大きさ」で決まる**ので、名前空間ごとに持つ。
+_CACHE_MAXSIZE_BY_NS: dict[str, int] = {"build_snapshots": 1}
+
 _shared_cache: contextvars.ContextVar = contextvars.ContextVar("_shared_cache", default=None)
 
 
@@ -623,18 +636,23 @@ class _BoundedCache:
     """
 
     def __init__(self, maxsize: int = _CACHE_MAXSIZE):
-        self._maxsize = maxsize
+        # 0 以下を許すと get_or_compute の追い出しが空の辞書を回して止まらない。
+        self._maxsize = max(1, int(maxsize))
         self._data: OrderedDict = OrderedDict()
 
     def get_or_compute(self, key: Any, compute) -> Any:
         if key in self._data:
             self._data.move_to_end(key)
             return self._data[key]
+        # **compute() の前に空きを作る**（#584）。作ってから捨てる順序だと、compute 中は
+        # 常に maxsize+1 エントリぶんが同時に存在する——1エントリ 1.7GB の build_snapshots
+        # では、上限をいくつにしても peak が下がらない（実測: 8→2 で 4,908→4,645MB の
+        # わずか 5% 減）。ピークを決めるのは上限そのものではなく「同時に生きている数」。
+        while len(self._data) >= self._maxsize:
+            self._data.popitem(last=False)
         value = compute()
         self._data[key] = value
         self._data.move_to_end(key)
-        if len(self._data) > self._maxsize:
-            self._data.popitem(last=False)
         return value
 
 
@@ -666,7 +684,9 @@ def shared_snapshot_cache():
     夜間バッチは producer が自分の出力テーブルへ書くだけで、キャッシュ対象の入力
     （株価・財務・マクロ）は書き換えない）。収集と同じプロセスで包んではいけない。
     """
-    token = _shared_cache.set({ns: _BoundedCache() for ns in _CACHE_NAMESPACES})
+    token = _shared_cache.set({
+        ns: _BoundedCache(_CACHE_MAXSIZE_BY_NS.get(ns, _CACHE_MAXSIZE))
+        for ns in _CACHE_NAMESPACES})
     try:
         yield
     finally:

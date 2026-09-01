@@ -265,6 +265,41 @@ class TestBoundedCache:
         assert "b" in cache._data
         assert "c" in cache._data
 
+    def test_evicts_before_compute_so_peak_stays_at_maxsize(self):
+        """**追い出しは compute の前**（#584）。ここが本修正の本体。
+
+        作ってから捨てる順序だと compute 実行中は maxsize+1 エントリぶんが同時に生きる。
+        `build_snapshots` は1エントリ約 1.7GB（実測）なので、この1個の差が 8GB のマシンでは
+        致命的になる——実走では `min_coverage` が3値ぶん常駐して約 5GB を占め、
+        `[13/288]` の直後から 156分間 1件も進まなくなった。**上限をいくつにしても直らない**
+        （8→2 で peak は 4,908→4,645MB の 5% 減でしかなかった）のは、ピークを決めるのが
+        上限そのものではなく「同時に生きている数」だから。
+        """
+        from plugins.macro_snapshots import _BoundedCache
+        cache = _BoundedCache(maxsize=1)
+        cache.get_or_compute("a", lambda: "va")
+
+        during = {}
+
+        def compute_b():
+            during.update(cache._data)      # compute の最中に何が生きているか
+            return "vb"
+
+        cache.get_or_compute("b", compute_b)
+
+        assert during == {}, (
+            "compute の実行中に古いエントリが生きている＝peak が maxsize+1 になる"
+        )
+        assert cache._data == {"b": "vb"}
+
+    def test_maxsize_below_one_is_clamped(self):
+        """0 以下を許すと追い出しループが空の辞書を回して止まらない。"""
+        from plugins.macro_snapshots import _BoundedCache
+        cache = _BoundedCache(maxsize=0)
+
+        assert cache.get_or_compute("a", lambda: "va") == "va"
+        assert cache._data == {"a": "va"}
+
     def test_get_or_compute_refreshes_recency(self):
         from plugins.macro_snapshots import _BoundedCache
         cache = _BoundedCache(maxsize=2)
@@ -283,6 +318,38 @@ class TestBoundedCache:
 # （DB全件ロード・特徴量スナップショット構築）。shared_snapshot_cache() コンテキスト内では
 # 同一引数の呼び出しをキャッシュし、コンテキスト外（通常の /api/plugins/{name}/run 相当）
 # では毎回フル計算される（副作用が漏れ出さない）ことを確認する。
+
+class TestSnapshotCacheCaps:
+    """名前空間ごとの上限（#584）。**上限は「1エントリの大きさ」で決まる**。"""
+
+    def test_build_snapshots_has_a_tighter_cap(self):
+        import plugins.macro_snapshots as ms
+
+        with ms.shared_snapshot_cache():
+            cache = ms._shared_cache.get()
+            assert cache["build_snapshots"]._maxsize == 1, (
+                "build_snapshots は1エントリ約 1.7GB（実測）なので上限1でなければ "
+                "min_coverage の3値ぶんが常駐して 8GB のマシンが詰む"
+            )
+
+    def test_other_namespaces_keep_the_default_cap(self):
+        import plugins.macro_snapshots as ms
+
+        with ms.shared_snapshot_cache():
+            cache = ms._shared_cache.get()
+            for ns in ("load_data", "preload_macro", "cv_by_selected_features"):
+                assert cache[ns]._maxsize == ms._CACHE_MAXSIZE, (
+                    f"{ns} は軽い（実測: cv_by_selected_features は8エントリで 8MB）ので "
+                    "既定の上限のままでよい"
+                )
+
+    def test_every_namespace_has_a_cache(self):
+        import plugins.macro_snapshots as ms
+
+        with ms.shared_snapshot_cache():
+            cache = ms._shared_cache.get()
+            assert set(cache) == set(ms._CACHE_NAMESPACES)
+
 
 class TestTuningSnapshotCache:
 
