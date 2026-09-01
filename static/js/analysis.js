@@ -1306,6 +1306,15 @@ function _createDynamicTab(plugin, tabId) {
       <button class="btn btn-primary" style="margin-top:16px${blocked ? ';opacity:0.4' : ''}" data-click="runDynamicPlugin" data-arg="${esc(plugin.name)}" data-arg2="${esc(tabId)}"${blocked ? ' disabled title="Render環境ではローカルPCから実行してください"' : ''}>
         ${esc(plugin.label)}を実行
       </button>
+      ${plugin.heavy ? `
+      <div id="dynprogress-${esc(tabId)}" class="hidden progress-wrap">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+          <span class="text-sm" id="dynprogress-label-${esc(tabId)}">実行中...</span>
+          <span class="text-sm" id="dynprogress-count-${esc(tabId)}"></span>
+        </div>
+        <div class="progress-bar" role="progressbar" aria-valuemin="0" aria-valuemax="100"><div class="progress-fill" id="dynprogress-fill-${esc(tabId)}" style="width:0%"></div></div>
+        <div class="log-box" id="dynprogress-log-${esc(tabId)}" style="margin-top:10px" role="log" aria-live="polite" aria-label="分析の実行ログ"></div>
+      </div>` : ''}
     </div>
     <div class="card hidden" id="dynresult-${tabId}">
       <div class="section-title">結果</div>
@@ -1385,6 +1394,8 @@ async function runDynamicPlugin(pluginName, tabId) {
   const origHTML = btn ? btn.innerHTML : null;
   if (btn) { btn.disabled = true; btn.textContent = '実行中...'; }
   const params = _collectParamValues(tabId, plugin.params_schema);
+  // 進捗 SSE は POST の応答を待たずに開く（POST は完了まで返らないため・#545）。
+  const stopProgress = plugin.heavy ? _startPluginProgress(pluginName, tabId) : null;
   try {
     const d = await apiFetch(`/api/plugins/${pluginName}/run`, {method:'POST', body:JSON.stringify(params)});
     const card = document.getElementById(`dynresult-${tabId}`);
@@ -1405,8 +1416,50 @@ async function runDynamicPlugin(pluginName, tabId) {
     }
   } catch(e) { showNotif(`実行失敗: ${e.message}`); }
   finally {
+    if (stopProgress) stopProgress();
     if (btn) { btn.disabled = false; btn.innerHTML = origHTML; }
   }
+}
+
+// heavy プラグインの進捗 SSE を開き、閉じるための関数を返す（Issue #545）。
+// heavy は分〜十数分かかるため、完了まで沈黙すると「走っている」と「死んだ」を
+// 利用者が区別できない。**経過時間ではなくステップ名と処理済み件数**を出す
+// （heartbeat は生存を示すが進行を示さない・#504 の実測）。
+function _startPluginProgress(pluginName, tabId) {
+  const wrap = document.getElementById(`dynprogress-${tabId}`);
+  if (!wrap) return null;
+  const label  = document.getElementById(`dynprogress-label-${tabId}`);
+  const count  = document.getElementById(`dynprogress-count-${tabId}`);
+  const fill   = document.getElementById(`dynprogress-fill-${tabId}`);
+  const logBox = document.getElementById(`dynprogress-log-${tabId}`);
+  wrap.classList.remove('hidden');
+  logBox.innerHTML = '';
+  label.textContent = '実行中...';
+  count.textContent = '';
+  fill.style.width = '0%';
+
+  const es = new EventSource(apiBase() + `/api/plugins/${encodeURIComponent(pluginName)}/progress`);
+  es.onmessage = (ev) => {
+    let d;
+    try { d = JSON.parse(ev.data); } catch(_) { return; }
+    if (d.total > 0) {
+      fill.style.width = Math.min(100, Math.round(d.progress / d.total * 100)) + '%';
+      count.textContent = `${d.progress} / ${d.total}`;
+    }
+    for (const msg of (d.new_logs || [])) {
+      const line = document.createElement('div');
+      line.className = 'log-entry' + (msg.startsWith('[エラー]') ? ' error' : '');
+      line.textContent = msg;
+      logBox.appendChild(line);
+      label.textContent = msg;
+    }
+    logBox.scrollTop = logBox.scrollHeight;
+    // サーバは running=false を終端として1件配ってから閉じる。閉じられたままにすると
+    // EventSource が自動再接続を繰り返すので、こちらから明示的に切る。
+    if (!d.running) es.close();
+  };
+  es.onerror = () => es.close();
+  return () => es.close();
 }
 
 // 結果レンダラ登録制: 動的タブ（プラグイン runner）の結果描画を plugin名 → 描画関数で対応付ける。

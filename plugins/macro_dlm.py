@@ -40,6 +40,7 @@ from typing import Any
 import numpy as np
 from scipy import stats
 
+from . import progress
 from .base import AnalysisPlugin
 from .utils import macro_risk_exposure
 
@@ -657,7 +658,12 @@ class MacroDlmPlugin(AnalysisPlugin):
         # 分位メンバーシップは stock_id 集合で dedup するため Jaccard は安全（近似的だが頑健）。
         oof_meta: dict[str, list] = {}
 
-        for ec, px_rows in prices_by_co.items():
+        # 進捗（#545）。M-3 は build_snapshots を通らず、この1銘柄1フォワードパスが
+        # 実行時間の大半を占めるため、共通骨格のロード進捗だけでは沈黙する区間が残る。
+        n_companies = len(prices_by_co)
+        for done, (ec, px_rows) in enumerate(prices_by_co.items()):
+            progress.emit("銘柄ごとに DLM を回す", done, n_companies,
+                          every=progress.EVERY_COMPANIES)
             if len(px_rows) < min_weeks + 1:
                 continue
             comp0 = companies.get(ec)
@@ -760,6 +766,7 @@ class MacroDlmPlugin(AnalysisPlugin):
                 "_path_src": (m_path, sd_path, used_dates, b0),
             })
 
+        progress.emit("銘柄ごとに DLM を回す", n_companies, n_companies)
         if not rows:
             raise ValueError(
                 f"推定可能な銘柄がありません（最低 {min_weeks} 週・マクロ整列後）。"

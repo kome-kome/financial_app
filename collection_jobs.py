@@ -27,6 +27,10 @@ log = logging.getLogger(__name__)
 _LOG_MAX = 500
 _SSE_HEADERS = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
 
+# ジョブの開始を待つ猶予（`stream_awaiting_start`・Issue #545）。
+_START_GRACE_SEC = 10.0
+_START_POLL_SEC = 0.2
+
 # body は registry が注入する progress(current, total, msg) と cancel() -> bool を使って収集を実行する。
 ProgressFn = Callable[[int, int, str], None]
 CancelFn = Callable[[], bool]
@@ -83,6 +87,21 @@ async def _sse_stream(state: JobState):
         if not state.running:
             break
         await asyncio.sleep(1)
+
+
+async def _sse_stream_awaiting_start(state: JobState, grace: float = _START_GRACE_SEC):
+    """開始を最大 grace 秒待ってから `_sse_stream` へ委譲する（Issue #545）。
+
+    待っても始まらなければそのまま `_sse_stream` へ落ちる＝「実行中でない」1件を
+    配って閉じる。**待ち続けない**——開始しないまま接続を保持すると、実行が
+    弾かれた（依存不足で 400 等）ときに画面のストリームだけが生き残る。
+    """
+    waited = 0.0
+    while not state.running and waited < grace:
+        await asyncio.sleep(_START_POLL_SEC)
+        waited += _START_POLL_SEC
+    async for chunk in _sse_stream(state):
+        yield chunk
 
 
 class CollectionJobs:
@@ -161,6 +180,22 @@ class CollectionJobs:
     def stream(self, name: str) -> StreamingResponse:
         return StreamingResponse(
             _sse_stream(self.state(name)),
+            media_type="text/event-stream",
+            headers=_SSE_HEADERS,
+        )
+
+    def stream_awaiting_start(self, name: str) -> StreamingResponse:
+        """まだ開始していないジョブの SSE（Issue #545）。
+
+        収集系は `start()` が同期で running を立ててから 200 を返すため、画面が
+        レスポンス後にストリームを開けば必ず running=True に間に合う。**heavy
+        プラグインの実行は完了まで返らない POST** なので同じ順序が取れず、画面は
+        POST の応答を待たずにストリームを開くしかない。素の `_sse_stream` は
+        running=False を見た瞬間に切れるため、そのままでは開始前の接続が空振りで
+        閉じ、進捗が1件も届かないまま「沈黙」に戻る。
+        """
+        return StreamingResponse(
+            _sse_stream_awaiting_start(self.state(name)),
             media_type="text/event-stream",
             headers=_SSE_HEADERS,
         )

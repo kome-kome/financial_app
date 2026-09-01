@@ -12,9 +12,20 @@ import api
 import backtest
 import model_comparison
 import plugins as plugin_registry
+from collection_jobs import jobs
+from plugins import progress
 
 router = APIRouter()
 log = logging.getLogger(__name__)
+
+
+def _progress_job(plugin_name: str) -> str:
+    """進捗 JobState のスロット名。収集ジョブと同じ registry へ相乗りする（#545）。
+
+    プラグイン名でスロットを分けるのは「種別ごとに独立スロット」という registry の
+    設計に合わせるため（別モデルを続けて回しても互いのログを踏まない）。
+    """
+    return f"plugin:{plugin_name}"
 
 
 # サイドバーIA用の「特例エントリ」。AnalysisPlugin ではない分析（スクリーニング・バックテスト）を
@@ -110,6 +121,8 @@ async def run_plugin(
         raise HTTPException(403, f"「{p.label}」は計算が重いためローカル環境で実行してください"
                                  "（Render Free プラン制限。結果は共有DBに保存され本番に反映されます）")
     try:
+        if getattr(p, "heavy", False):
+            return await _execute_with_progress(p, plugin_name, params, db)
         return await plugin_registry.execute_plugin(p, params, db)
     except (plugin_registry.DependencyError, ValueError) as e:
         # パラメータ契約違反・依存不足のドメイン検証メッセージ（内部実装は露出しない）。
@@ -119,6 +132,49 @@ async def run_plugin(
     except Exception as e:
         log.error("Plugin '%s' error: %s", plugin_name, e, exc_info=True)
         raise HTTPException(500, "分析エラーが発生しました。")
+
+
+async def _execute_with_progress(p, plugin_name: str, params: dict, db):
+    """heavy プラグインを進捗 sink で包んで実行する（Issue #545）。
+
+    包むのは **heavy だけ**。軽いプラグインまで JobState を回すと、画面が開いていない
+    実行（`/api/recommend` 等）でも状態が残り続けて意味が無い。sink は ContextVar 経由で
+    execute の内側（`asyncio.to_thread` の先）まで伝播する。
+
+    例外は握らず送出する（呼び出し側の except が HTTP ステータスへマップする契約を保つ）
+    が、**閉じる前に最後の1行として画面へ残す**——ここで黙って落ちると、画面は
+    ストリームが切れただけになり「終わった」と区別できない。
+    """
+    st = jobs.state(_progress_job(plugin_name))
+    st.reset_for_run()
+    st.append_log(f"「{p.label}」を開始しました")
+
+    def sink(step: str, current: int, total: int) -> None:
+        st.progress, st.total = current, total
+        st.append_log(f"{step} {current}/{total}" if total else step)
+
+    try:
+        with progress.progress_sink(sink):
+            return await plugin_registry.execute_plugin(p, params, db)
+    except Exception as e:
+        st.append_log(f"[エラー] {e}")
+        raise
+    finally:
+        # running=False が SSE の終端。append_log より後（最後の1件に載せるため）。
+        st.running = False
+
+
+@router.get("/api/plugins/{plugin_name}/progress")
+async def stream_plugin_progress(plugin_name: str):
+    """heavy プラグイン実行の進捗を SSE で流す（Issue #545）。
+
+    画面は POST の応答を待たずにこれを開く（POST は完了まで返らないため）。開始前に
+    開かれても `stream_awaiting_start` が数秒待ち合わせる。
+    """
+    p = plugin_registry.get_plugin(plugin_name)
+    if p is None:
+        raise HTTPException(404, f"プラグイン '{plugin_name}' が見つかりません")
+    return jobs.stream_awaiting_start(_progress_job(plugin_name))
 
 
 @router.get("/api/plugins/{plugin_name}/tuned")
