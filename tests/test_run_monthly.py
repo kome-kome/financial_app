@@ -69,8 +69,23 @@ class TestMigrationIsComplete:
         )
 
     def test_tune_covers_the_same_three_models(self):
-        """tune-hyperparameters.yml の matrix と同じ3モデルを回すこと。"""
-        assert set(rm.heavy_models()) == {"macro_risk_return", "macro_gbdt", "macro_dlm"}
+        """tune-hyperparameters.yml の matrix と同じ3モデルを回すこと。
+
+        **M-1 は別タスク**（`scripts/run_monthly_m1.py`・#584）なので、網羅は2本の合併で見る。
+        片方だけを見ると「M-1 が消えた」ことに気づけない——移設の穴は失敗として現れない。
+        """
+        from scripts import run_monthly_m1 as rm1
+
+        assert set(rm.heavy_models()) | set(rm1.heavy_models()) == {
+            "macro_risk_return", "macro_gbdt", "macro_dlm"}
+
+    def test_m1_is_not_in_the_monthly_body(self):
+        """M-1 は月次本体に**居ない**（#584）。
+
+        実測 2.61分/件 × 288件 ＝ 約752分で窓（960分）に入らず、`hyperparameter_search` は
+        完走してからしか永続化しないため、月次に置くと 250分を使って何も残さない。
+        """
+        assert "macro_risk_return" not in rm.heavy_models()
 
     def test_heavy_models_come_from_the_steps_not_a_copy(self):
         """`heavy_models()` は argv から導く＝列挙を二重に持たない（ADR-0031 の照合先）。"""
@@ -92,9 +107,18 @@ class TestMigrationIsComplete:
 
 class TestStepOrder:
     def test_inference_runs_before_tuning(self):
-        """`macro_beta_loadings` は M-1 の入力。推論が後だと当月の tune が前月の β を使う。"""
-        names = _names()
-        assert names.index("macro_beta") < names.index("tune:macro_risk_return")
+        """`macro_beta_loadings` は M-1 の入力。推論が後だと当月の tune が前月の β を使う。
+
+        **M-1 が別タスクへ出た（#584）ので、この依存は日をまたぐ**——月次本体（毎月1日）で
+        `macro_beta` を回し、M-1 タスク（毎月2日）がその出力を使う。順序は「本体に macro_beta が
+        あり、M-1 本体には無い」ことで担保する（起動日の前後は `install_*_task.ps1` の既定 Day）。
+        """
+        from scripts import run_monthly_m1 as rm1
+
+        assert "macro_beta" in _names()
+        assert "macro_beta" not in [s.name for s in rm1.steps_for("py")], (
+            "macro_beta を両方で回すと同じ月に2回推論することになる"
+        )
 
     def test_vacuum_runs_first(self):
         """VACUUM FULL は ACCESS EXCLUSIVE ロックを取るので先頭（#290）。
@@ -133,10 +157,14 @@ class TestStepOrder:
         for name in (n for n in names if n.startswith("tune:")):
             assert names.index("deps_smoke") < names.index(name)
 
-    def test_m1_is_tuned_before_the_other_models(self):
-        """tune の中では M-1 が先。止まって最も困るのが M-1 の μ̂ だから。"""
+    def test_remaining_tunes_are_ordered_lightest_first(self):
+        """M-1 が別タスクへ出た後、本体に残る tune は M-3 → M-2（#584）。
+
+        打ち切られても前方は当月分が揃う、という「軽い順」の思想は変わらない。
+        M-1 の「止まって最も困る」優先は、専用タスクを持たせたことで満たされている。
+        """
         names = [n for n in _names() if n.startswith("tune:")]
-        assert names[0] == "tune:macro_risk_return"
+        assert names == ["tune:macro_dlm", "tune:macro_gbdt"]
 
     def test_every_step_states_why(self):
         for s in rm.steps_for(sys.executable):
