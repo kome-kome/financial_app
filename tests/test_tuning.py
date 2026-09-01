@@ -4,7 +4,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from plugins.tuning import SearchDim, _grid_combos, _random_combos, _score, search
+from plugins.tuning import (SearchDim, _grid_combos, _project_champion, _random_combos,
+                            _score, search)
 from plugins.utils import coerce_params
 
 
@@ -593,3 +594,75 @@ class TestSearchReusesSnapshotsAcrossCandidates:
         ms.load_data("db1")
 
         assert load_mock.call_count == 2
+
+
+class _SchemaPlugin:
+    """`_project_champion` 用の最小プラグイン（`params_schema()` だけ持てばよい）。"""
+
+    def __init__(self, schema: dict):
+        self._schema = schema
+
+    def params_schema(self) -> dict:
+        return self._schema
+
+
+class TestProjectChampion:
+    """`_project_champion()` の投影規則（#590・ADR-0047）。"""
+
+    def test_conditional_axis_degenerates_like_the_grid(self):
+        """only_if を満たさない軸は values[0] へ縮退させる（`_grid_combos` と同じ規則）。
+
+        揃えないと、無効な軸の値違いだけで combos と一致せず、同じ結果を出す候補を1件余分に
+        評価する（M-3 の alpha_phi が alpha_ar1=False のときこの形になる）。
+        """
+        dims = [
+            SearchDim("alpha_ar1", [False, True]),
+            SearchDim("alpha_phi", [0.9, 0.95], only_if=lambda c: c.get("alpha_ar1")),
+        ]
+        plugin = _SchemaPlugin({
+            "alpha_ar1": {"type": "checkbox", "default": False},
+            "alpha_phi": {"type": "number", "dtype": "float", "default": 0.9},
+        })
+        champion = {"alpha_ar1": False, "alpha_phi": 0.95}
+        assert _project_champion(plugin, champion, dims) == {"alpha_ar1": False, "alpha_phi": 0.9}
+
+    def test_extra_keys_in_champion_are_dropped(self):
+        """combo は軸名だけを持つ（base_params 由来のキーは投影で落とす）。"""
+        dims = [SearchDim("x", [0, 3, 5, 7])]
+        plugin = _SchemaPlugin({
+            "x": {"type": "slider", "dtype": "int", "default": 0, "min": 0, "max": 10},
+            "use_macro": {"type": "checkbox", "default": True},
+        })
+        assert _project_champion(plugin, {"x": 3, "use_macro": True}, dims) == {"x": 3}
+
+    def test_axis_added_after_the_champion_was_saved_is_filled_from_the_default(self):
+        """後から足された軸は schema の default で補う（**実測: macro_gbdt がこの形**）。
+
+        2026-07-19 に保存された `macro_gbdt` の params には、その後 #366/#402 で足された
+        `use_monotone_constraints` / `use_sector_features` が無い。本番の
+        `execute_plugin` も `coerce_params` で default を補うので、補完後の姿が
+        「いま本番で動いている設定」である。ここを素通りさせると、**軸を1本足しただけで
+        champion 再測定が黙って止まる**（#590 が直したのと同じ「失敗として現れない」形）。
+        """
+        dims = [SearchDim("x", [0, 3, 5, 7]), SearchDim("newer_axis", [False, True])]
+        plugin = _SchemaPlugin({
+            "x": {"type": "slider", "dtype": "int", "default": 0, "min": 0, "max": 10},
+            "newer_axis": {"type": "checkbox", "default": False},
+        })
+        assert _project_champion(plugin, {"x": 3}, dims) == {"x": 3, "newer_axis": False}
+
+    def test_value_removed_from_the_space_is_not_resurrected(self):
+        """値域から外された値は投入しない（軸の追加とは扱いを分ける＝退役の尊重）。"""
+        dims = [SearchDim("momentum_window", [3, 6, 12])]
+        plugin = _SchemaPlugin({
+            "momentum_window": {"type": "slider", "dtype": "int", "default": 3, "min": 1, "max": 60},
+        })
+        assert _project_champion(plugin, {"momentum_window": 18}, dims) is None
+
+    def test_contract_violation_skips_injection(self):
+        """保存値が現在のパラメータ契約を満たさないなら投入しない（例外を漏らさない）。"""
+        dims = [SearchDim("x", [0, 3, 5, 7])]
+        plugin = _SchemaPlugin({
+            "x": {"type": "slider", "dtype": "int", "default": 0, "min": 0, "max": 10},
+        })
+        assert _project_champion(plugin, {"x": 999}, dims) is None  # bounds 違反

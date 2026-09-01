@@ -33,11 +33,14 @@ name: "[定常] M-1/M-2/M-3 ハイパーパラメータ月次自動探索"
 # 評価方法論（Walk-Forward CV のフォールド数削減等）には手を付けず、単純な安全マージン
 # 拡大で対応する（254分に対し300分で約46分の余裕）。
 #
-# 品質ゲート（Issue #291）: --persist 時、plugin_tuned_params に既存行があれば
-# objective_value を比較し、劣化していれば persist をスキップして非ゼロ終了する
-# （hyperparameter_search.py の SystemExit）。これは意図した挙動であり、
-# ジョブを failed 扱いにして GitHub 標準の失敗通知を飛ばすため continue-on-error 等で
-# 握りつぶさない。
+# 品質ゲート（Issue #291 → #590 で作り直し・ADR-0047）: **保存値との比較はもうしない。**
+# 永続化済みの objective_value は「そのとき存在したパネルでの値」で、パネルは毎晩伸びるので
+# 月をまたいだ比較が成立しなかった（実測: 0.5068=10 fold / 0.0221=55 fold＝fold が少ない
+# 候補ほど高く出る）＝一度たまたま高い値が入ると永久に閉じる。いまは本番稼働中の params を
+# 候補プールへ投入して**同一パネル上で** best を選ぶので、best >= champion が構造的に成立し
+# **persist は常に成功して exit 0** になる。したがって**このジョブは品質ゲートでは失敗しない**
+# （失敗するのは探索そのものが落ちたとき）。水準の低下は WARNING ログと
+# plugin_tuned_params の prev_objective_value / n_periods に残る。
 #
 # cron 時刻（#476 で 03:00 → 16:30 へ変更）: 最長ジョブ（macro_gbdt）が 355分＝約6時間走る。
 # daily-incremental が UTC 18:00 → **08:17** へ移った（JST 17:17・#476）ことで、旧設定の
@@ -55,7 +58,8 @@ on:
   #    **代替経路**: ローカルの月次バッチ `run_monthly.ps1`（タスクスケジューラ・毎月1日
   #    JST 01:00・#504）。`scripts/run_monthly.py` の `tune:<model>` ステップが、この yml の
   #    matrix と**同じ探索戦略・同じ --n-iter** で3モデルを回す（移設のついでに探索規模を
-  #    変えると #291 の品質ゲートが別条件の objective_value と比較されるため据え置いた）。
+  #    変えると #291 の品質ゲートが別条件の objective_value と比較されるため据え置いた。
+  #    #590・ADR-0047 でその比較自体を廃したので、この制約はもう探索規模を縛らない）。
   #    **復旧条件**: 正本を Supabase へ戻す決定をしたときだけ。
   # schedule:
   #   - cron: '30 16 1 * *'   # UTC 16:30 = JST 翌01:30、毎月1日（→22:25Z・日次チェーンの後）
@@ -69,7 +73,7 @@ jobs:
   tune:
     runs-on: ubuntu-latest
     strategy:
-      fail-fast: false   # 1モデルの品質ゲート失敗が他モデルの正常完了を妨げないようにする
+      fail-fast: false   # 1モデルの探索失敗が他モデルの正常完了を妨げないようにする
       matrix:
         include:
           - model: macro_risk_return

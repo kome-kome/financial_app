@@ -29,6 +29,11 @@ class SearchDim:
     only_if: Callable[[dict], bool] | None = None
 
 
+def _combo_key(combo: dict) -> tuple:
+    """combo の同一性キー（`_random_combos` の重複排除と champion 投入で共有する）。"""
+    return tuple(sorted(combo.items()))
+
+
 def _grid_combos(dims: list) -> list[dict]:
     """全組合せグリッドを構築する。
 
@@ -64,12 +69,56 @@ def _random_combos(dims: list, n_iter: int, rng: random.Random) -> list[dict]:
                 combo[d.name] = d.values[0]
             else:
                 combo[d.name] = rng.choice(d.values)
-        key = tuple(sorted(combo.items()))
+        key = _combo_key(combo)
         if key in seen:
             continue
         seen.add(key)
         out.append(combo)
     return out
+
+
+def _project_champion(plugin: Any, champion_params: dict, dims: list) -> dict | None:
+    """本番稼働中の params を、今回の `dims` が張る combo の形へ投影する（Issue #590）。
+
+    combo は軸名だけを持つ辞書（`search()` が `{**base_params, **combo}` で組み立てる）なので、
+    champion の全 params から軸名分を抜き出す。
+
+    **まず `coerce_params` を通す**——保存された params には「その時点の探索空間」しか入って
+    おらず、後から足された軸のキーは無い（実測: `macro_gbdt` の 2026-07-19 の行には
+    `use_monotone_constraints` / `use_sector_features` が無い）。本番の
+    `GET /api/plugins/{name}/tuned` → `execute_plugin` も同じ経路で default を補うので、
+    **補完後の姿が「いま本番で動いている設定」**である。ここを素通りさせると、軸を1本足した
+    だけで champion 再測定が黙って止まる（#590 が直したのと同じ「失敗として現れない」形）。
+
+    **値域外なら None を返す**（`dims` を意図的に狭めた後＝ADR-0045 のモメンタム既定・#583）。
+    投入すると退役させたはずの設定が毎月「前回勝ったから」で復活し続ける。**軸の追加は
+    default で補い、値域の縮小では投入しない**——前者は本番の姿の再現、後者は退役の尊重。
+    """
+    from plugins.utils import coerce_params
+
+    try:
+        champion_params = coerce_params(plugin.params_schema(), champion_params)
+    except ValueError as e:
+        log.warning("champion が現在のパラメータ契約を満たさないため再測定しません: %s", e)
+        return None
+
+    combo: dict = {}
+    for d in dims:
+        # 条件を満たさない軸は values[0] へ縮退させる（`_grid_combos` と同じ規則）。揃えないと
+        # 無効な軸の値違いだけで combos と一致せず、同じ結果を出す候補を1件余分に評価する。
+        if d.only_if is not None and not d.only_if(combo):
+            combo[d.name] = d.values[0]
+            continue
+        if d.name not in champion_params:
+            # schema にすら無い軸＝探索空間と契約が食い違っている（default で補えない）。
+            log.warning("champion に軸 '%s' が無く default も引けないため再測定しません", d.name)
+            return None
+        v = champion_params[d.name]
+        if v not in d.values:
+            log.warning("champion の %s=%r が現在の値域 %r の外なので再測定しません", d.name, v, d.values)
+            return None
+        combo[d.name] = v
+    return combo
 
 
 def _score(oof: dict, objective: str) -> float | None:
@@ -96,8 +145,9 @@ async def search(
     strategy: str = "random",
     n_iter: int = 50,
     seed: int = 0,
+    champion_params: dict | None = None,
 ) -> dict:
-    """探索空間を評価し {best_params, best_score, objective, leaderboard, config} を返す。
+    """探索空間を評価し {best_params, best_score, objective, leaderboard, config, ...} を返す。
 
     各候補は execute_plugin（内部で coerce_params による契約検証→ensure_dependencies→
     execute の順に実行・plugins/__init__.py の単一入口）をフル実行し、その oof_backtest
@@ -129,6 +179,14 @@ async def search(
     M-3: 全社分のβ経路整形）を省略できる。best params での本採用実行
     （hyperparameter_search.py::run_search の persist_scores=True 時の execute_plugin 呼び出し）
     はこの with ブロックの外側で呼ばれるため、このコンテキストは無効＝フルスコアリングされる。
+
+    `champion_params`（Issue #590）: 本番稼働中の params。渡すと候補プールの先頭へ投入し、
+    **今回のパネル上で測り直した値**を `champion_score` として返す。これが要るのは、
+    永続化済みの `objective_value` が「そのとき存在したパネルでの値」であり、パネルは毎晩
+    伸びるので月をまたいだ単純比較が成立しないため（実測: `macro_gbdt` の 0.5068 は
+    10 fold・`macro_dlm` の 0.0221 は 55 fold で、fold が少ない候補ほど高く出ていた＝
+    ADR-0045 の「母集団が縮む側は必ず有利に見える」と同型）。投入できない場合
+    （軸が無い・値域外）は `_project_champion` が None を返し、`champion_score` も None になる。
     """
     if objective not in OBJECTIVES:
         raise ValueError(f"objective は {OBJECTIVES} のいずれかを指定してください: {objective!r}")
@@ -141,6 +199,14 @@ async def search(
     combos = _grid_combos(dims) if strategy == "grid" else _random_combos(dims, n_iter, rng)
     if not combos:
         raise ValueError("探索空間が空です（dims または only_if 条件を確認してください）")
+
+    # champion を候補プールへ入れる。既に含まれていれば追加しない（grid ではほぼ常にこちら＝
+    # 追加コストゼロ）。プールに居ることで best >= champion が構造的に成立し、劣化した値で
+    # 本番を上書きすることが「比較」ではなく「探索の性質」として防がれる。
+    champion_combo = _project_champion(plugin, champion_params, dims) if champion_params else None
+    if champion_combo is not None and _combo_key(champion_combo) not in {_combo_key(c) for c in combos}:
+        combos = [champion_combo, *combos]
+        log.info("champion を候補へ投入しました: %s", champion_combo)
 
     leaderboard: list[dict] = []
     with shared_snapshot_cache(), tuning_objective_only():
@@ -169,10 +235,23 @@ async def search(
     scored.sort(key=lambda e: e["score"], reverse=True)
     best = scored[0]
 
+    champion_score = None
+    if champion_combo is not None:
+        key = _combo_key(champion_combo)
+        # 失敗候補は scored から落ちるので leaderboard 全体から探す（None のまま返る＝
+        # 「投入したが測れなかった」と「投入しなかった」を score では区別しない。区別が要る
+        # ときは champion_injected を見る）。
+        champion_score = next(
+            (e["score"] for e in leaderboard if _combo_key(e["params"]) == key), None
+        )
+
     return {
         "best_params": {**base_params, **best["params"]},
         "best_score":  best["score"],
+        "best_oof":    best.get("oof") or {},
         "objective":   objective,
         "leaderboard": scored,
         "config": config,
+        "champion_injected": champion_combo is not None,
+        "champion_score": champion_score,
     }
