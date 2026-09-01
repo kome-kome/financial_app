@@ -34,6 +34,12 @@
 .PARAMETER TaskName
     タスク名（既定 financial_app-monthly）。
 
+.PARAMETER Script
+    起動するランチャー（既定 run_monthly.ps1）。M-1 の探索は月次の窓に入らないため別タスクへ
+    切り出してあり（#584）、その登録にも**このスクリプトを使い回す**——ps1 を2本に増やすと
+    片方だけ直す事故が起きる。M-1 は
+    `-Script run_monthly_m1.ps1 -Day 2 -TaskName financial_app-monthly-m1` で登録する。
+
 .PARAMETER Hours
     ExecutionTimeLimit の時間数（既定 16）。
 
@@ -43,6 +49,7 @@
 .EXAMPLE
     PS> ./scripts/install_monthly_task.ps1
     PS> ./scripts/install_monthly_task.ps1 -Time 02:00 -Day 5
+    PS> ./scripts/install_monthly_task.ps1 -Script run_monthly_m1.ps1 -Day 2 -TaskName financial_app-monthly-m1
     PS> ./scripts/install_monthly_task.ps1 -Unregister
 #>
 [CmdletBinding()]
@@ -50,6 +57,7 @@ param(
     [string]$Time = "01:00",
     [int]$Day = 1,
     [string]$TaskName = "financial_app-monthly",
+    [string]$Script = "run_monthly.ps1",
     [int]$Hours = 16,
     [switch]$Unregister
 )
@@ -57,7 +65,7 @@ param(
 $ErrorActionPreference = "Stop"
 
 $root = Split-Path -Parent $PSScriptRoot
-$script = Join-Path $root "run_monthly.ps1"
+$script = Join-Path $root $Script
 
 if ($Unregister) {
     Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
@@ -66,7 +74,7 @@ if ($Unregister) {
 }
 
 if (-not (Test-Path $script)) {
-    Write-Host "run_monthly.ps1 が見つかりません: $script" -ForegroundColor Red
+    Write-Host "$Script が見つかりません: $script" -ForegroundColor Red
     exit 1
 }
 

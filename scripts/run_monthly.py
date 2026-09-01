@@ -18,7 +18,12 @@ notify-failure でも macro-health でも拾えない。ADR-0031 が防ごうと
 ## ステップの並び
 
     vacuum → price_suffix → deps_smoke → factor_premia → macro_beta
-           → tune:macro_risk_return → tune:macro_dlm → tune:macro_gbdt
+           → tune:macro_dlm → tune:macro_gbdt
+
+**M-1（macro_risk_return）の探索はここに無い**。実測 約752分で窓（960分）に入らず、
+`hyperparameter_search` は完走してからしか永続化しないため、予算内に終わらないステップは
+時間を使い切って何も残さない。「完走見込みのあるステップにだけ予算を与える」を原則に、
+`scripts/run_monthly_m1.py`（毎月2日 01:00）へ切り出した（#584）。
 
 `deps_smoke` は**重い依存を import できるかだけを確かめる軽いステップ**。2026-09-01 の初実走で
 Smart App Control が未評価の jaxlib DLL を初回ロードで弾き、`macro_beta` が exit=1 で落ちた
@@ -90,8 +95,9 @@ ISSUE_LABELS = bc.ISSUE_LABELS
 # tune の matrix（GHA の tune-hyperparameters.yml から移設）。
 # (モデル名, 探索戦略, 追加引数) — 並びがそのまま実行順になる。
 TUNE_MATRIX: tuple[tuple[str, str, tuple[str, ...]], ...] = (
-    # M-1: 止まって最も困る（`sell_ranking` の mu_source 候補・macro_beta_loadings の消費者）
-    ("macro_risk_return", "grid", ()),
+    # **M-1（macro_risk_return）はここに無い**——実測 2.61分/件 × 288件 ＝ 約752分で月次の窓に
+    # 入らず、`hyperparameter_search` は完走してからしか永続化しないので中途半端な予算は全損に
+    # なる。`scripts/run_monthly_m1.py`（毎月2日）へ切り出した（#584）。
     ("macro_dlm", "grid", ()),
     # M-2 だけ random なのは、grid では 1イテレーションの walk-forward OOF 評価が重すぎて
     # 空間を張れないため（GHA では n_iter=200 相当で4〜8時間＝6時間上限に収まらなかった）。
@@ -139,9 +145,15 @@ BUDGET_MIN: dict[str, float] = {
     "price_suffix": 3,
     "factor_premia": 20,
     "macro_beta": 180,
-    "tune:macro_risk_return": 250,
-    "tune:macro_dlm": 250,
-    "tune:macro_gbdt": 180,
+    # 実測 1.04分/件（クリーンな状態・12候補）〜1.26分/件（9/1 実走・M-1 と同居でメモリ枯渇下）。
+    # 294件で 306〜369分なので 400分＝約30%の余裕。**M-1 が抜けたぶんクリーン側に寄る**。
+    # 9/1 は 250分で 199/294 まで進んで打ち切られ、完走しなかったので何も残らなかった。
+    "tune:macro_dlm": 400,
+    # 9/1 実走で **176.3分で150件を完走**した（n_failed=0）。予算180分では余裕2%しかなく、
+    # パネルが伸びれば次回は落ちる。240分＝約36%の余裕。
+    # なお同 run は完走したのに exit=1——#291 の品質ゲートが前回スコア 0.5068 を下回った
+    # （今回 0.2359）として persist をスキップしたため。所要とは別の論点。
+    "tune:macro_gbdt": 240,
 }
 
 SPEC = bc.BatchSpec(
