@@ -178,7 +178,9 @@ class MacroRiskReturnPlugin(AnalysisPlugin):
                 "type": "slider",
                 "dtype": "float",
                 "label": "特徴量充足率下限",
-                "description": "全特徴量が揃っているサンプルの最低割合。",
+                "description": "全特徴量が揃っているサンプルの最低割合。"
+                               "M-1 では動かしても結果は変わらない（マクロ欠損の断面は"
+                               "この判定の手前で破棄されるため充足率は常に 1.0・#596）。",
                 "default": 0.5,
                 "min": 0.1,
                 "max": 1.0,
@@ -195,13 +197,28 @@ class MacroRiskReturnPlugin(AnalysisPlugin):
         }
 
     def tuning_search_space(self) -> tuple:
-        """ハイパーパラメータ自動探索の探索空間（Issue #265）。
+        """ハイパーパラメータ自動探索の探索空間（Issue #265・#596 で min_coverage を除外）。
 
-        構造トグル（use_macro/use_momentum）・充足率下限（min_coverage）・BIC最大採用数
-        （max_features）の少数軸グリッド。`fin_features`/`macro_features` の部分集合探索は
-        2^N で不可能なため対象外（既定の候補プールを固定・#264 設計方針）。表示専用の
-        lambda_risk/risk_axis/r3_gate/top_n も対象外。空間が小さいため
-        strategy="grid"（全探索）を推奨。
+        構造トグル（use_macro/use_momentum）と BIC 最大採用数（max_features）の少数軸グリッド。
+        `fin_features`/`macro_features` の部分集合探索は 2^N で不可能なため対象外
+        （既定の候補プールを固定・#264 設計方針）。表示専用の lambda_risk/risk_axis/r3_gate/top_n
+        も対象外。空間が小さいため strategy="grid"（全探索）を推奨。
+
+        **`min_coverage` は軸にしない（#596）。** M-1 は `build_snapshots` を
+        `macro_nan_ok=False` で呼ぶ＝マクロ特徴量が1つでも欠損した断面を**充足率チェックの
+        手前で破棄する**ため、フィルタへ到達する行の充足率は常に厳密に 1.0 になる。
+        実測（2026-09-02・本番データ）:
+
+            min_coverage | 0.0 / 0.3 / 0.5 / 0.7 / 0.9 / 0.95 / 1.0
+            サンプル総数 | 181,862（**全て同一**。1.0＝全特徴量が非欠損を要求しても1行も落ちない）
+
+        探索スコア側でも 2026-09-02 の完走ログ 288件全件で確認済み——`min_coverage` 以外の
+        4軸が同じ候補を1群（72群）にまとめると、**群内でスコアが変わった群はゼロ**だった。
+        つまり 72通りの結果を 288回計算していた。軸を落として 288 → 72 件にする。
+
+        `min_coverage` は `params_schema()` には残す（M-2 のように `macro_nan_ok=True` で
+        呼ぶモデルでは実際に効く共通パラメータで、契約から消すと消費側が壊れる）。
+        M-1 でこの値を動かしても結果は変わらない旨は schema の description に書いてある。
         """
         from .tuning import SearchDim
 
@@ -211,7 +228,6 @@ class MacroRiskReturnPlugin(AnalysisPlugin):
             SearchDim("use_momentum",     [True, False]),
             SearchDim("momentum_window",  [3, 6, 12, 18, 24],
                       only_if=lambda c: c.get("use_momentum") is True),
-            SearchDim("min_coverage",     [0.3, 0.5, 0.7, 0.9]),
             SearchDim("max_features",     [5, 10, 15, 20, 30, 40]),
         ]
         return base_params, dims
@@ -244,6 +260,9 @@ class MacroRiskReturnPlugin(AnalysisPlugin):
             prices_by_co, fin_by_co, companies, macro_cache,
             fin_features, macro_names, use_momentum, mom_window, min_coverage,
             build_interactions=True,
+            # 既定値だが**明示する**（#596）。M-1 が strict である前提の上で
+            # `min_coverage` を探索軸から外しているので、前提を呼び出し側から見えるようにする。
+            macro_nan_ok=False,
         )
 
     def execute(self, params: dict, db: Any) -> dict:
@@ -277,6 +296,9 @@ class MacroRiskReturnPlugin(AnalysisPlugin):
             prices_by_co, fin_by_co, companies, macro_cache,
             fin_features, macro_names, use_momentum, mom_window, min_coverage,
             build_interactions=True,
+            # strict（マクロ欠損の断面を破棄）。**これが `min_coverage` を探索軸から
+            # 外せる根拠**なので既定任せにせず明示する（#596）。
+            macro_nan_ok=False,
             return_stock_ids=True,   # Issue #368: OOF ターンオーバー用に stock_id を回収
         )
 
