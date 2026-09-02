@@ -14,8 +14,9 @@ VIEW:
   financial_metrics  — 派生指標・Zスコア・成長率（financial_records から都度算出）
 """
 
-import os, gzip, json, logging, math, re, contextvars
+import os, gzip, hashlib, inspect, json, logging, math, re, contextvars
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import datetime, date, timedelta, timezone
 from pathlib import Path
 from typing import Optional
@@ -216,6 +217,13 @@ db_egress.install(engine)
 # 処理が「取れるまで待ち続けて statement_timeout で殺される」形になり、**待ち超過なのか
 # 処理自体が重いのかログから区別できない**（#471 がまさにこれ・ADR-0025 に同型の前例）。
 _TIMEOUT_VALUE_RE = re.compile(r"^(0|\d+(ms|s|min))$")
+
+# スキーマ移行（DDL）が待つ上限（#597・ADR-0048）。既定 0（無制限）のままだと、長時間バッチが
+# AccessShareLock を握っている間に `init_db()` を呼んだ側が**無言で待ち続ける**。さらに待機中の
+# ACCESS EXCLUSIVE の後ろに後続のロック要求が並ぶため、同じ表に触る新しいクエリまで詰まる。
+# 短く切って明示的な失敗にする＝ハングより診断できる。指紋ゲートが効いている定常状態では
+# そもそも DDL を発行しないので、ここが効くのは実際に移行が要る回だけ。
+DDL_LOCK_TIMEOUT = os.environ.get("FINAPP_DDL_LOCK_TIMEOUT", "5s")
 
 
 @contextmanager
@@ -2024,7 +2032,10 @@ def _ensure_tables() -> None:
     """Phase 1: テーブル作成・インデックス・カラムマイグレーション（すべて冪等）"""
     import re as _re
     Base.metadata.create_all(bind=engine)
-    with engine.connect() as conn:
+    # `db_timeouts` を同じ with 文へ並べる＝**本体を再インデントせずに**ロック上限を掛ける
+    # （`with A() as a, B(a):` は後段が前段の名前を参照できる）。ACCESS EXCLUSIVE を待ち続けて
+    # ハングするのを防ぐ（#597・ADR-0048）。
+    with engine.connect() as conn, db_timeouts(conn, lock=DDL_LOCK_TIMEOUT):
         conn.execute(text(
             "CREATE INDEX IF NOT EXISTS ix_companies_name_gin "
             "ON companies USING gin(to_tsvector('simple', name))"
@@ -2175,33 +2186,20 @@ def _ensure_tables() -> None:
 
 
 def _ensure_one_view(view_name: str, view_sql: str) -> None:
-    """VIEW を定義変更時のみ DROP+再作成する（毎起動 DROP を避ける）。
+    """VIEW を DROP して作り直す（**呼ばれたら必ず再作成する**）。
 
-    pg_get_viewdef() で現行定義を取得して view_sql と比較し、差異がなければスキップ。
-    VIEW 未存在・比較不能（SQLite等）の場合は無条件に再作成する。
+    「定義が変わったときだけ再作成する」責務は `init_db()` の指紋ゲート（ADR-0048）が持つ。
+    ここに同じ判断を置かない——かつて `pg_get_viewdef()` と手書きの `view_sql` を正規化して
+    比較していたが、前者は **Postgres が再構成して返す文字列**で後者と一致することはなく、
+    docstring は「毎起動 DROP を避ける」と言いながら**実際には毎回 DROP していた**
+    （2026-09-02 実測・#597）。判断が2箇所にあると、効いていない方が生き残る。
+
     列の追加・並び替えは CREATE OR REPLACE が「末尾追加のみ可」で失敗するため DROP→再作成する
-    （両 VIEW とも依存オブジェクトは無く安全）。
+    （両 VIEW とも依存オブジェクトは無く安全）。DROP は ACCESS EXCLUSIVE を取るので
+    `db_timeouts(lock=...)` で囲む＝バッチと重なったとき**無言で待ち続けずに失敗する**。
     """
-    import re as _re
-
-    def _norm(s: str) -> str:
-        return _re.sub(r"\s+", " ", s.strip().rstrip(";"))
-
-    needs_recreate = True
-    try:
-        with engine.connect() as conn:
-            row = conn.execute(
-                text("SELECT pg_get_viewdef(:v, true)").bindparams(v=view_name)
-            ).first()
-            if row and row[0]:
-                needs_recreate = (_norm(row[0]) != _norm(view_sql))
-    except Exception as e:
-        # pg_get_viewdef 未対応（SQLite 等）・VIEW 未存在・接続エラーのいずれか → 再作成。
-        log.debug(f"{view_name} VIEW 定義の取得失敗 → 再作成する（理由: {e!r}）")
-        needs_recreate = True
-
-    if needs_recreate:
-        with engine.connect() as conn:
+    with engine.connect() as conn:
+        with db_timeouts(conn, lock=DDL_LOCK_TIMEOUT):
             conn.execute(text(f"DROP VIEW IF EXISTS {view_name}"))
             conn.execute(text(view_sql))
             conn.commit()
@@ -2221,21 +2219,157 @@ def _ensure_one_view(view_name: str, view_sql: str) -> None:
         log.debug(f"{view_name} の security_invoker 設定をスキップ（SQLite 等・理由: {e!r}）")
 
 
+def _managed_views() -> tuple[tuple[str, str], ...]:
+    """`init_db()` が面倒を見る VIEW と、その定義 SQL。
+
+    **関数にしてあるのはモジュール属性を呼び出し時に引くため**——定数タプルにすると
+    定義 SQL を差し替えても束縛済みの古い値が残り、指紋が変化しない。
+    """
+    return (("financial_metrics", FINANCIAL_METRICS_VIEW_SQL),
+            ("financial_metrics_interim", FINANCIAL_METRICS_INTERIM_VIEW_SQL))
+
+
 def _ensure_view() -> None:
-    """Phase 2: 読み取り専用 VIEW を定義変更時のみ再作成する。
+    """Phase 2: 読み取り専用 VIEW を作り直す。
 
     financial_metrics（通期）と financial_metrics_interim（非通期=半期H1等・Issue #219② フェーズC）
     の両方。両者は独立で依存関係が無いため順序は任意。regression_results は create_all 後なので
-    financial_metrics の LEFT JOIN は可能。
+    financial_metrics の LEFT JOIN は可能。呼ぶか否かは `init_db()` の指紋ゲートが決める。
     """
-    _ensure_one_view("financial_metrics", FINANCIAL_METRICS_VIEW_SQL)
-    _ensure_one_view("financial_metrics_interim", FINANCIAL_METRICS_INTERIM_VIEW_SQL)
+    for name, sql in _managed_views():
+        _ensure_one_view(name, sql)
+
+
+# ── スキーマ指紋ゲート（#597・ADR-0048）──────────────────────────────────────
+# `init_db()` は呼ばれるたび無条件に DDL を打っていた。冪等ではあるが、**冪等であることと
+# ロックを取らないことは別**——`ALTER TABLE ... ADD COLUMN IF NOT EXISTS` は列が既に存在しても
+# ACCESS EXCLUSIVE を取る（Postgres はロックを取ってから存在を確認する）。呼び出し元は
+# `api.py::lifespan`（画面を開くたび）・`_pipeline_incremental.py`（毎晩 17:20）・
+# `_pipeline_gh.py`・`scripts/setup_local_db.py` の4つあり、長時間バッチが AccessShareLock を
+# 握っている間に呼ぶと無言で待ち続ける（2026-09-02 実測。#411 で実害の前例）。
+
+_SCHEMA_FINGERPRINT_KEY = "schema_fingerprint"
+
+
+@dataclass(frozen=True)
+class _SchemaState:
+    """DB から読み取った実体の状態（判定はしない）。"""
+    stored_fingerprint: Optional[str]
+    missing_tables: tuple[str, ...]
+    missing_views: tuple[str, ...]
+    views_without_security_invoker: tuple[str, ...]
+
+
+def _schema_fingerprint() -> Optional[str]:
+    """移行を決めている**入力すべて**から指紋を作る。取れなければ None（＝不一致側へ倒す）。
+
+    DDL 文をリストへ移し替えて列挙する設計は採らない——機械的な移動はタイプミスを持ち込むし、
+    `Base.metadata` 経由の列追加（CLAUDE.md「再分類項目の追加は `FinancialRecord` の列に
+    足すだけ」）を拾えない。ここでは4つを混ぜる:
+
+      1. 移行関数のソース（`_ensure_tables` / `_ensure_one_view` / `_ensure_view`）
+      2. 関数の外にある DDL 由来の定数（`_NEW_COLS` / `_LEGACY_COMPUTED_COLS` / `_DEBUG_ONLY_COLS`）
+      3. VIEW 定義 SQL
+      4. ORM の全 (テーブル, 列, 型)
+
+    **DDL を書き換えれば指紋は自動的に変わる**ので「移行を足したがゲートの更新を忘れる」が
+    構造的に起きない。副作用としてコメントだけの編集でも変わる（移行が1回余計に走るだけ＝安全側）。
+    """
+    try:
+        parts = [inspect.getsource(f)
+                 for f in (_ensure_tables, _ensure_one_view, _ensure_view)]
+    except (OSError, TypeError) as e:
+        # ソースが取れない環境（凍結・.pyc のみ等）。**例外にせず不一致へ倒す**＝
+        # 移行が余計に走るだけで済ませ、「指紋が作れないので起動できない」にはしない。
+        log.debug("移行関数のソースを取得できないので指紋を作らない: %r", e)
+        return None
+    parts.append(repr(tuple(_NEW_COLS)))
+    parts.append(repr(tuple(_LEGACY_COMPUTED_COLS)))
+    parts.append(repr(tuple(_DEBUG_ONLY_COLS)))
+    parts.extend(sql for _name, sql in _managed_views())
+    parts.append(repr(sorted(
+        (tname, col.name, str(col.type))
+        for tname, tbl in Base.metadata.tables.items() for col in tbl.columns
+    )))
+    return hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest()[:32]
+
+
+def _read_schema_state() -> _SchemaState:
+    """実体を読むだけの層。**AccessShare しか取らない**ので走行中のバッチと競合しない。"""
+    managed = [name for name, _sql in _managed_views()]
+    with engine.connect() as conn:
+        stored = conn.execute(
+            text("SELECT value FROM app_settings WHERE key = :k")
+            .bindparams(k=_SCHEMA_FINGERPRINT_KEY)
+        ).scalar()
+        actual = set(conn.execute(text(
+            "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'"
+        )).scalars().all())
+        missing_tables = tuple(sorted(t for t in Base.metadata.tables if t not in actual))
+        missing_views: list[str] = []
+        no_invoker: list[str] = []
+        for v in managed:
+            row = conn.execute(text(
+                "SELECT c.reloptions FROM pg_class c "
+                "WHERE c.relname = :v AND c.relkind = 'v' "
+                "AND c.relnamespace = 'public'::regnamespace"
+            ).bindparams(v=v)).first()
+            if row is None:
+                missing_views.append(v)
+            elif not any("security_invoker=true" in opt for opt in (row[0] or ())):
+                # security_invoker は RLS の前提（#344）。`ALTER VIEW` は再作成経路でしか
+                # 打たないので、復元済み DB などで落ちていたらここで拾って作り直す。
+                no_invoker.append(v)
+    return _SchemaState(stored, missing_tables, tuple(missing_views), tuple(no_invoker))
+
+
+def _schema_is_current(state: _SchemaState, expected: str) -> bool:
+    """純関数の判定。**指紋の一致だけでは足りない**。
+
+    `_ensure_tables()` の period_end 移行は条件付きで `DROP VIEW financial_metrics` を打つため、
+    指紋が一致していても VIEW が存在しないことがありうる。実在確認を必ず併せる。
+    """
+    return (state.stored_fingerprint == expected
+            and not state.missing_tables
+            and not state.missing_views
+            and not state.views_without_security_invoker)
+
+
+def _record_schema_fingerprint(fingerprint: str) -> None:
+    """移行が**最後まで通ってから**指紋を書く（途中で落ちたら書かない）。"""
+    now = datetime.now(timezone.utc)
+    with engine.connect() as conn:
+        conn.execute(
+            pg_insert(AppSetting.__table__)
+            .values(key=_SCHEMA_FINGERPRINT_KEY, value=fingerprint, updated_at=now)
+            .on_conflict_do_update(index_elements=["key"],
+                                   set_={"value": fingerprint, "updated_at": now})
+        )
+        conn.commit()
 
 
 def init_db():
-    """テーブル作成・インデックス構築・カラムマイグレーション"""
+    """テーブル作成・インデックス構築・カラムマイグレーション。
+
+    **指紋と実体が揃っているときは DDL を1本も発行しない**（ADR-0048）。
+    定常状態でロックを取らなくなるので、バッチ実行中に呼んでも競合しない。
+    """
+    expected = _schema_fingerprint()
+    try:
+        state = _read_schema_state()
+    except Exception as e:
+        # app_settings が無い新規 DB・SQLite・接続エラー。**必ず移行を走らせる側へ倒す**。
+        log.debug("スキーマ状態を読めないので移行を実行する: %r", e)
+        state = None
+
+    if state is not None and expected is not None and _schema_is_current(state, expected):
+        log.debug("スキーマ指紋が一致（%s）。DDL を発行しない（ADR-0048）", expected)
+        return
+
     _ensure_tables()
     _ensure_view()
+    if expected is not None:
+        _record_schema_fingerprint(expected)
 
 
 # ── 7. Upsert 処理 ─────────────────────────────────────────────────────────
