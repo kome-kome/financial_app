@@ -391,7 +391,7 @@ python -m scripts.setup_local_db            # ドライラン（何も変更し�
 python -m scripts.setup_local_db --apply    # 実行
 ```
 
-- **接続先ガードが最初に走る**。`database._is_local` がローカルを指していなければ即 `SystemExit`。`init_db()` は起動のたび無条件に DDL（`DROP COLUMN` 移行を含む）を打つため、本番へ誤射すると不可逆。
+- **接続先ガードが最初に走る**。`database._is_local` がローカルを指していなければ即 `SystemExit`。`init_db()` はスキーマ指紋が一致しないとき DDL（`DROP COLUMN` 移行を含む）を打つため、本番へ誤射すると不可逆（#597 / ADR-0048 以降、**指紋と実体が揃っていれば DDL は1本も出ない**が、接続先が違えば指紋も違うので誤射時はまさに全部打たれる＝このガードは引き続き必要）。
 - **既定はドライラン**（`--persist` と同じ作法）。
 - **旧スキーマの掃除は1回だけ**走る（マーカー＝「素の `stock_price_history` が在る かつ `stock_price_weekly` が無い」）。2回目以降は `init_db()` だけが走るので、**ミラー投入後に誤って実行しても中身を消さない**。
 
