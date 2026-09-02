@@ -743,8 +743,64 @@ class TestTuningSearchSpace:
         base_params, dims = self.plugin.tuning_search_space()
         assert isinstance(base_params, dict)
         names = {d.name for d in dims}
-        assert names == {"use_macro", "use_momentum", "momentum_window",
-                         "min_coverage", "max_features"}
+        assert names == {"use_macro", "use_momentum", "momentum_window", "max_features"}
+
+    def test_min_coverage_is_not_a_search_axis(self):
+        """M-1 で `min_coverage` を振っても結果が1ミリも動かない（#596）。
+
+        `build_snapshots` を `macro_nan_ok=False` で呼ぶため、マクロ欠損の断面は充足率
+        チェックの**手前**で破棄され、到達する行の充足率は常に 1.0 になる。実測でも
+        0.0〜1.0 のどの値でもサンプル総数 181,862 で同一、探索スコアも 288件全件
+        （72群 × 4値）で群内不変だった。**72通りの結果を288回計算していた。**
+        """
+        _base_params, dims = self.plugin.tuning_search_space()
+        assert "min_coverage" not in {d.name for d in dims}
+
+    def test_min_coverage_stays_in_the_params_contract(self):
+        """探索から外すのと契約から消すのは別。消費側（UI・coerce_params）は使い続ける。"""
+        assert "min_coverage" in self.plugin.params_schema()
+
+    def test_m1_stays_strict_so_dropping_the_axis_stays_valid(self):
+        """M-1 が strict（`macro_nan_ok=False`）である前提を縛る（#596）。
+
+        `min_coverage` を探索軸から外せるのは「マクロ欠損の断面が充足率チェックの手前で
+        破棄される」からで、**strict をやめた瞬間にこの軸は再び意味を持つ**。ところが
+        軸はもう無いので探索されず、**誰も気づかないまま探索空間が不完全になる**
+        （ADR-0031 と同型の「失敗として現れない」形）。ここで前提ごと縛る。
+
+        判定は AST で行う（`tests/test_column_scoping.py` と同じ手）。文字列一致だと
+        docstring の散文（「M-2 のように macro_nan_ok=True で呼ぶモデル」）で誤爆する
+        ——実際に最初の実装がそれで落ちた。
+        """
+        import ast
+        import inspect
+
+        import plugins.macro_risk_return as m1
+
+        tree = ast.parse(inspect.getsource(m1))
+        calls = [n for n in ast.walk(tree)
+                 if isinstance(n, ast.Call)
+                 and getattr(n.func, "id", getattr(n.func, "attr", None)) == "build_snapshots"]
+        assert calls, "build_snapshots の呼び出しが見つからない（テストの前提が壊れている）"
+        for call in calls:
+            kw = {k.arg: k.value for k in call.keywords}
+            assert "macro_nan_ok" in kw, (
+                f"行 {call.lineno}: macro_nan_ok を明示していない。既定任せだと "
+                "`build_snapshots` 側の既定変更で M-1 が黙って strict でなくなる（#596）"
+            )
+            val = kw["macro_nan_ok"]
+            assert isinstance(val, ast.Constant) and val.value is False, (
+                f"行 {call.lineno}: M-1 が strict でなくなった。min_coverage が再び効くので、"
+                "tuning_search_space へ軸を戻すか、効かない根拠を測り直すこと（#596）"
+            )
+
+    def test_grid_is_72_combos(self):
+        """軸を落として 288 → 72。所要は実測ペースで 513.9分 → 約112分になる。"""
+        from plugins.tuning import _grid_combos
+
+        _base_params, dims = self.plugin.tuning_search_space()
+        # use_macro 2 × (use_momentum False 1 + True 5) × max_features 6 = 72
+        assert len(_grid_combos(dims)) == 72
 
     def test_display_only_params_excluded(self):
         _base_params, dims = self.plugin.tuning_search_space()

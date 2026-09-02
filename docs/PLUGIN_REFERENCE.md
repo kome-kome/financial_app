@@ -173,7 +173,7 @@ M-1/M-2/M-3 共有ハイパーパラメータ自動探索エンジン（ADR-0007
 
 **M-1 マクロ×リスク-リターン推奨**（交差項OLS+`LassoLarsIC(BIC)`選択+OLS再フィット+Walk-forward CV）。**全社 raw を返却し JS 後処理**。`heavy=True`・`ui_order=330`。
 
-共有ロジックは `macro_snapshots.py` に移管（ADR-0003）。**`oof_backtest` 結線済み（#272）**・`tuning_search_space()`（use_macro/use_momentum/momentum_window/min_coverage/max_features の少数軸グリッド・#265）。探索中（`shared_snapshot_cache()`）は異なる `max_features` 候補で BIC 選択結果（`selected_names`）が偶然一致した場合、後続の `walk_forward_cv_monthly()` を再実行せず使い回す（`cv_by_selected_features`・Issue #304。真の重複排除＝近似ではない）。
+共有ロジックは `macro_snapshots.py` に移管（ADR-0003）。**`oof_backtest` 結線済み（#272）**・`tuning_search_space()`（use_macro/use_momentum/momentum_window/max_features の少数軸グリッド・**72件**・#265）。**`min_coverage` は軸にしない**（#596・ADR-0049）——M-1 は `build_snapshots` を `macro_nan_ok=False` で呼びマクロ欠損の断面を充足率チェックの手前で破棄するため、到達行の充足率は常に 1.0（実測: 0.0〜1.0 のどの値でもサンプル総数 181,862 で不変／2026-09-02 の完走ログ288件でも72群すべて群内不変）。軸を足しても失敗として現れないので、**288件のうち216件が同一結果の再計算だった**。`params_schema()` には残す（M-2 では実際に効く）。探索中（`shared_snapshot_cache()`）は異なる `max_features` 候補で BIC 選択結果（`selected_names`）が偶然一致した場合、後続の `walk_forward_cv_monthly()` を再実行せず使い回す（`cv_by_selected_features`・Issue #304。真の重複排除＝近似ではない）。
 
 producer は共有 `macro_beta`（`read_producer_scores` は `macro_snapshots.get_producer_scores` の thin wrapper）。
 
