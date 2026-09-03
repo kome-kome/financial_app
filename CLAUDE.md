@@ -112,24 +112,24 @@ pytest tests/test_utils.py  # 単一ファイル
 | ファイル | 役割 |
 |---|---|
 | `database.py` | テーブル定義・upsert・成長率/Zスコア計算 |
-| `db_egress.py` | Egress 台帳＋サーキットブレーカ（#478・ADR-0034/0037）。engine の `after_cursor_execute` で全経路の転送を計測。**歯止めは2軸**＝①プロセス予算超過で `EgressBudgetExceeded` ②**請求サイクル累計**（`app_settings.egress_cycle_bytes`・warn 80%/block 95%）。プロセス予算だけでは「1日12プロセスで 4.8GB」が素通りする。台帳は**既定で `.egress/ledger.jsonl`** へ書く（無効化は `FINAPP_EGRESS_LEDGER=0`）。集計は `python -m scripts.egress_report`、閾値監視は `egress-health.yml`（毎日 UTC 21:00） |
-| `scripts/batch_common.py` | ローカル駆動バッチ（`run_nightly.py` 日次 / `run_monthly.py` 月次）の**共通骨格**（#504）。`Step` / `Runner` / `BatchSpec` / `run_batch()`。**「走らなかったことを検知する」仕組みの唯一の源**＝ステップ間で止めない・`app_settings` へ足跡（`*_last_run` / `*_last_success`）・失敗は `gh issue create`（通知の失敗は本業を止めない）。**子の出力はログファイルへ直結**する（`PYTHONUNBUFFERED` / `PYTHONIOENCODING` を子へ渡すのが対で必要）＝途中で kill されてもそこまでが残る。溜め込む実装だと「順調に長い」と「死んだ」が区別できない。**待ち合わせは `Popen` ＋ `wait(timeout=HEARTBEAT_SEC)`**（#522）で全ステップに heartbeat が効く（スクリプト側の opt-in にすると登録漏れが構造的に起きる）。ただし**heartbeat は生存を示すが進行を示さない**＝進行の裏取りは CPU 時間。**ログの先頭に実行環境を刻む**（`env_lines()`・#550）＝python パス（venv か否か）・cwd・DB 接続先の**表示名**・Windows のセッション ID・`FINAPP_*` の一覧。S4U（#515）でバッチはセッション0で走り `.env` も PATH も対話時と変わりうるが、**取り落としても書き込みは成功する**ので別の DB を見ていても静かに正常終了する（#508 と同型＝接続先の食い違いは沈黙する）。**生の接続文字列は出さない**（`.logs` は Issue へ貼られうる・リポジトリは public）。値に機微が入りうる変数名（KEY/TOKEN/SECRET 等）は伏せる。**窓はステップ予算（`Step.budget_min`）へ分割する**（#530・ADR-0040）＝超過は `taskkill /F /T` でツリーごと打ち切り `exit=124` を返す。**窓の終わりの打ち切りは failure として現れない**（タスクスケジューラがプロセスを止めるだけで足跡も起票も走らず、後続ステップは走った形跡すら残さない）。Σ予算+マージン ≤ 窓 と `install_*_task.ps1` の窓は `window_problem()` と CI が照合する |
-| `batch_freshness.py` | バッチ足跡（`app_settings` の `*_last_run`）を**測る**層（#561）。`Watched` / `WATCHED` / `collect()` / `status_of()` を持ち、読み手は watchdog と `/api/morning` の2人。**`scripts/check_batch_freshness.py` は import 時に `load_dotenv()` と `FINAPP_DB_TARGET=local` を実行する**ので、API から import すると Render（prod）の接続先を書き換えかねない（接続先の食い違いは #508 と同型で沈黙する）＝副作用の無いこちらを共有し、watchdog は re-export で受ける。閾値の源は `run_*.WINDOW_MIN` のまま（**書き写さない**） |
-| `scripts/check_batch_freshness.py` | **バッチ鮮度 watchdog**（#515 手順3・ADR-0042）。**判定は `batch_freshness.py` へ切り出し `/api/morning` と共有**（#561）。ここは起票・CLI・ログ。`app_settings` の `*_last_run` を読み、止まっていれば Issue へ起票する（同一タイトルの open があればコメント追記＝毎日走っても積み上がらない）。**足跡を書く仕組みはあったが読む側が無かった**＝バッチが起動前に死ぬと failure が出ず `batch_common.notify` は発火しない。**閾値は `cadence + 窓` の導出**（`run_*.WINDOW_MIN` から引く）＝窓を広げれば閾値も自動で広がり、**「実行中は鳴らない」が構造的に成立**し、判定が watchdog の起動時刻に依存しない（実測から逆算しない）。**判定は `*_last_run` のみ**——`monthly_last_success` は #512 まで設計上ずっと古く、鳴らすと恒久 open な Issue になる。自分も監視対象で `watchdog_last_run` を**読んでから書く**。**通知経路（`gh`）は健全な回にも毎回確かめてレポートへ出す**＝異常時にしか叩かないと「通知が死んでいる」は一番届いてほしい回に判明する（実行の成功 ≠ 通知が届く）。exit 0/2/3（3＝検出したが起票できなかった） |
-| `scripts/mirror_*.py` | ミラーの pull / sync / verify ＋予行演習（#481 B-2〜B-4・ADR-0035）。共有基盤は `mirror_common.py`。**source/dest を引数で受け、両方ローカルなら Supabase 不要で予行できる**。#503 で正本が反転したため **pull / sync は定常運転では使わない**（2026-08-20 の pull が引き渡し点）。`verify` はバックアップの復元先突合に転用する |
-| `weekly_price_cache.py` | 週次株価の run 間差分ロードキャッシュ（#480・ADR-0036）。指紋（`max(week_start)`＋`count(*)`）＋直近27週の再取得＋DB 側の世代印（`app_settings`）。**キャッシュは速さだけを担い、正しさは指紋・世代印・行数照合が持つ**（無い/壊れている/古いは全てフルロードへ倒れる）。緊急停止は `FINAPP_WEEKLY_CACHE=0` |
-| `sysmem.py` | プロセス常駐メモリと物理メモリの実測（2026-09-01）。`batch_common` の heartbeat／`env_lines()` と `scripts/bench_macro_beta.py` が共有する唯一の源（**ctypes を書き写さない**）。**測るのはプロセスツリーの合計**——venv の `python.exe` はランチャースタブで、`Popen` の pid を単体で測ると実体が GB 級でも 4MB と返り、エラーにならず「静かに正しく見える」。**取れなければ None**（計測の失敗が本業を止めない・欠測は `?` で出して 0.0 と混ぜない）。psutil は入れない（本番 footprint） |
+| `db_egress.py` | Egress 台帳＋サーキットブレーカ（ADR-0034/0037）。engine の `after_cursor_execute` で全経路を計測。**歯止めは2軸**＝プロセス予算と**請求サイクル累計**（前者だけでは日をまたぐ累積が素通りする）。集計は `python -m scripts.egress_report`。詳細は [ARCHITECTURE.md](docs/ARCHITECTURE.md) |
+| `scripts/batch_common.py` | ローカル駆動バッチ（日次／月次／M-1）の共通骨格＝**「走らなかったことを検知する」仕組みの唯一の源**（足跡・通知・heartbeat・ステップ予算）。**子の出力はログへ直結する／生の接続文字列は出さない／Σ予算＋マージン ≤ 窓**。詳細は [ARCHITECTURE.md](docs/ARCHITECTURE.md) |
+| `batch_freshness.py` | バッチ足跡（`*_last_run`）を**測る**層（#561）。watchdog と `/api/morning` の2人が共有する。**閾値は `run_*.WINDOW_MIN` から導出し書き写さない**。**API から `scripts/check_batch_freshness.py` を import しない**（import 時に接続先を書き換える）。詳細は [ARCHITECTURE.md](docs/ARCHITECTURE.md) |
+| `scripts/check_batch_freshness.py` | **バッチ鮮度 watchdog**（ADR-0042）。起票・CLI・ログを持ち、判定は `batch_freshness.py` と共有する。**閾値は `cadence + 窓` の導出（実測から逆算しない）／判定は `*_last_run` のみ／通知経路（`gh`）は健全な回にも毎回確かめる**。exit 0/2/3。詳細は [ARCHITECTURE.md](docs/ARCHITECTURE.md) |
+| `scripts/mirror_*.py` | ミラーの pull / sync / verify（ADR-0035・共有基盤 `mirror_common.py`）。**書き込み先はローカル限定**。#503 の正本反転により **pull / sync は定常運転では使わない**（`verify` はバックアップ復元先の突合へ転用）。詳細は [ARCHITECTURE.md](docs/ARCHITECTURE.md) |
+| `weekly_price_cache.py` | 週次株価の run 間差分ロードキャッシュ（ADR-0036）。**速さだけを担い、正しさは指紋・世代印・行数照合が持つ**＝どれかが外れたら必ずフルロードへ倒す。緊急停止は `FINAPP_WEEKLY_CACHE=0`。詳細は [ARCHITECTURE.md](docs/ARCHITECTURE.md) |
+| `sysmem.py` | 常駐メモリ／物理メモリ実測の**唯一の源**（`batch_common` の heartbeat・`bench_macro_beta` が共有）。**ctypes を書き写さない／psutil は入れない／測るのはプロセスツリーの合計**（単体 pid は静かに誤る）。詳細は [ARCHITECTURE.md](docs/ARCHITECTURE.md) |
 | `collector.py` | オーケストレータ＋後方互換の再エクスポート層＋CLI（実体は下記6分割） |
-| `collector_utils.py` | 収集系共通の設定定数・ロガー。**`EDINET_BASE` は `api.edinet-fsa.go.jp`**（旧 `disclosure.` は 301→人間用画面なので `follow_redirects` では直らない・#577）。`redact_secrets()` は例外文字列から API キーを消す（httpx のログ抑制は例外を素通りする）。`EdinetAccessError` ＋ `EDINET_MAX_CONSECUTIVE_FAILURES` で**「走ったが全部失敗した」を失敗として現す**——単発は握って続行・連続のみ送出。詳細は [GOTCHAS.md](docs/GOTCHAS.md) |
+| `collector_utils.py` | 収集系共通の設定定数・ロガー。**`EDINET_BASE` は `api.edinet-fsa.go.jp`**（旧 `disclosure.` は `follow_redirects` では直らない・#577）。**例外文字列は `redact_secrets()` で API キーを消す**／**「走ったが全部失敗した」を失敗として現す**。詳細は [GOTCHAS.md](docs/GOTCHAS.md) |
 | `collector_master.py` | 企業/業種マスタ収集（EDINET コードリスト・JPX 業種） |
 | `collector_financials.py` | XBRL 財務収集・パース・CF/PL-BS 補完・全件収集 |
 | `collector_prices.py` | 株価（stooq/J-Quants/Yahoo）・市場データ更新・マクロ収集 |
 | `collector_interim.py` | 半期(H1)財務収集（EDINET 半期報告書043A00/旧四半期Q2・period_type='H1'・Issue #219②） |
-| `collector_disclosures.py` | 会社予想（ガイダンス）開示収集（J-Quants `/fins/summary`・Issue #322）。`statement_disclosure` へ実績/予想値を蓄積する。特徴量化層 `feature_disclosure.py` の入力元だが、その呼び出し元は `scripts/event_study_*.py` の2本だけで、**本番の API / プラグイン経路からは使われていない**（親 #323 は 2026-07-16 に wontfix クローズ済み）。`recommend_factor_premia.py` は本テーブルに依存せず、`fin_features` は `financial_metrics` VIEW の `z_*`（`plugins/recommend.py::METRICS`）から取る |
+| `collector_disclosures.py` | 会社予想（ガイダンス）開示収集（J-Quants `/fins/summary`）。`statement_disclosure` へ蓄積する。**本番の API / プラグイン経路からは使われていない**（利用は `scripts/event_study_*.py` の2本のみ・親 #323 は wontfix）。詳細は [ARCHITECTURE.md](docs/ARCHITECTURE.md) |
 | `api.py` | FastAPI アプリ本体（HTMLページ配信・認証/CORSミドルウェア・`/health`）。REST ルート実体は `routers/` へ委譲 |
 | `routers/` | REST ルーター5本（`auth` / `collect` / `market` / `analysis` / `morning`）。エンドポイント定義の実体 |
 | `plugins/` | 分析モデル（自動検出方式）。理論は [MODELS.md](docs/MODELS.md)、実装詳細は [PLUGIN_REFERENCE.md](docs/PLUGIN_REFERENCE.md) |
-| `templates/*.html` | 画面（`/`=dashboard, `/morning`=朝の推奨, `/collection`, `/analysis`, `/company/{code}`, `/db`=DBビューア, `/models`=モデル解説[技術版], `/guide`=やさしい解説[初心者向け]）。JS は `static/js/<page>.js`（`guide.html` は `models.js` を再利用）。**ダッシュボードとログイン以外の全画面はグローバルナビ `.gnav` を持つ**——Jinja の継承を使わずコピペで重複しているため、貼り忘れ・色ズレは失敗として現れない（`/morning` が実際に出口の無い袋小路になっていた）。`tests/test_templates_nav.py` が全テンプレートを分類の上で canonical と照合する |
+| `templates/*.html` | 画面テンプレート。JS は CSP 対応で `static/js/<page>.js` へ外部化。**ダッシュボードとログイン以外の全画面はグローバルナビ `.gnav` を持つ**——貼り忘れは失敗として現れないので `tests/test_templates_nav.py` が照合する。画面一覧は [ARCHITECTURE.md](docs/ARCHITECTURE.md) |
 | `_pipeline_gh.py` / `_pipeline_incremental.py` | GitHub Actions 用・全件 / 差分収集 |
 
 完全なファイル役割一覧・処理フロー・ER図は [ARCHITECTURE.md](docs/ARCHITECTURE.md) を参照。
@@ -193,12 +193,20 @@ web版・ローカル版の双方が同じ Issue を見ることで、**コー�
 
 ## ドキュメント更新ルール（コード変更と同じ作業内で必須）
 
+- **どこに書くかの判定**: 「これを読まないと Claude は**別の行動をとるか**？」——とるなら CLAUDE.md（**行動を変える命令**だけ・1項目 120字目安）、とらないなら [ARCHITECTURE.md](docs/ARCHITECTURE.md)（仕組み・経緯・実測値）か [GOTCHAS.md](docs/GOTCHAS.md)（再現条件と回避手順）へ。**教訓は捨てず、命令形の1行だけ残して「なぜ」を移す**。CLAUDE.md は冒頭で宣言したとおり**索引＋必須ルール**に限る（#576）。
 - **ARCHITECTURE.md**: DBテーブル / 処理フロー / APIエンドポイント / 画面 / プラグインを追加・変更したら対応セクションを更新。
 - **MODELS.md** と `templates/models.html`: 分析モデル追加・変更時に更新。参考文献は原著論文の DOI / 公式 URL（Wikipedia不可）。
 - **MODELS.md §9（M-1）の章立てを変えたら初心者向け副読本 `docs/M1_MACRO_MODEL_GUIDE.md` も見直す**（Issue #472）: 副読本は**設計思想・章立てのみ追随**し、マクロ系列の全リスト・既定値・実測値は正本へのリンクに留める（書き写すと黙って陳腐化する）。見直し後、副読本冒頭の `models-sync` マーカーを更新すること。`tests/test_docs_sync.py` が CI で照合し、**乖離は失敗として現れないので通知では拾えない**（ADR-0031 と同型）。
-- **`heavy=True` のプラグインを追加したら自動実行を登録する**（ADR-0031）: `nightly_scores.HEAVY_AUTOMATION` へ「回すワークフロー名」か `exempt: <理由>` を必ず足す。未登録・実在しないワークフロー名・空理由は `tests/test_nightly_scores.py::TestHeavyAutomationRegistry` が CI で落とす。**「heavy を足したが自動実行が無い」は失敗しないので通知では拾えない**（#432/#443/#423 子5 で3回発生）。
-- **`heavy=True` のプラグインを追加したら進捗カバレッジ表へ1行足す**（#545）: `plugins/progress.py::PROGRESS_COVERAGE` へ `common`（macro_snapshots の共通骨格を通るので自動で進捗を持つ）／`own`（自前で `progress.emit` を呼ぶ）／`exempt: <理由>` のいずれかを足す。未登録・空理由・名乗りと実体の食い違い（`common` なのに共通骨格を通らない等）は `tests/test_plugin_progress.py::TestProgressCoverageRegistry` が CI で落とす。**「heavy を足したが進捗が無い」は画面が沈黙するだけで例外もログも出ない**（ADR-0031 と同型）。進捗は必ず**ステップ名**を持たせること——経過時間だけでは固まっていても健全に見える（**heartbeat は生存を示すが進行を示さない**・#504）。
-- **新しいローカル駆動バッチ（`BatchSpec`）を足したら watchdog の監視表へ1行足す**（#515・ADR-0042）: `batch_freshness.py::WATCHED` へ `Watched(...)` を追加する（#561 で `scripts/check_batch_freshness.py` から移動。`/api/morning` の鮮度カードもこの表から生えるので、足せば画面にも自動で出る）。閾値は書かず `cadence` と `WINDOW_MIN` を渡す（`cadence + 窓` の導出）。**載せ忘れは「走らなかったのに誰も気づかない」という形でしか現れない**（ADR-0031 と同型）ので、`tests/test_check_batch_freshness.py::TestEveryLocalBatchIsWatched` が `scripts/run_*.py` の集合と監視表を CI で照合する。
+- **「増やしたら登録表へ1行足す」ルール（共通形）**: いずれも**忘れても失敗として現れない**ので、CI が実体と表を照合する。理由を書いた `exempt:` は可・空理由は不可。
+
+  | 増やしたもの | 登録先 | 照合するテスト |
+  |---|---|---|
+  | `heavy=True` のプラグイン | `nightly_scores.HEAVY_AUTOMATION`（回す経路 or `exempt:`） | `test_nightly_scores.py::TestHeavyAutomationRegistry` |
+  | 同上 | `plugins/progress.py::PROGRESS_COVERAGE`（`common` / `own` / `exempt:`） | `test_plugin_progress.py::TestProgressCoverageRegistry` |
+  | ローカル駆動バッチ（`BatchSpec`） | `batch_freshness.py::WATCHED`（閾値は書かず `cadence` と `WINDOW_MIN` を渡す） | `test_check_batch_freshness.py::TestEveryLocalBatchIsWatched` |
+  | スキル／エージェント | `docs/SKILLS_AND_AGENTS.md` へ1行（#575） | `test_docs_sync.py`（**`~/.claude/` は CI の checkout に無くローカル pytest でのみ照合**） |
+
+  進捗は必ず**ステップ名**を持たせる（経過時間だけでは固まっていても健全に見える）。経緯は各 ADR と [ARCHITECTURE.md](docs/ARCHITECTURE.md)。
 - **断面の前処理を変えたら `plugins/utils.py::PREPROCESS_VERSION` を上げる**（ADR-0039・#517）: `recommend_factor_premia` の `mean_b` は「その前処理での1単位あたり」であり、前処理を変えると**永続化済みの重みの意味が変わる**。世代を上げれば `get_dynamic_preset` が旧世代の行を採らずバランス型へ倒し、`factor_premia` を回すまで安全側に留まる。**上げ忘れは CI で拾えない**（前処理の変更を機械的に検出する手段が無い）＝ #509 で実際に旧単位の重み × 新単位の特徴量が本番へ出た（実測 rank-IC −0.0881）。
 - **プリセット/重みの rank-IC は `scripts/preset_ic_gate.py` で測る**（ADR-0041・#529）: ADR-0028 の昇格ゲートは #509 と #517 で2回適用されたが**どちらもアドホックなスクリプトで、実体が残らなかった**。標準化経路の選択（消費側の `fit_zscore_stats`＋`normalize_transform` か学習系の `fit_feature_columns` か）で測るものが本番と別物になるため、**書き直さずこの CLI を使う**。パネルは毎晩伸びるので過去の実測と比べるときは `--until <ym>` で期を揃える（揃えないと 0.002 程度ずれて「手続きが違う」ように見える）。**ADR に並ぶ p=0.001 はブートストラップの下限**（`2/(n_boot+1)`）であって強さではない。
 - **分析プラグイン追加・変更時のメタ検証網羅性**: 独自のランキング/スコアを出すプラグインは、`/api/backtest` の `SCORING_SOURCES`（backtest.py）へ追加するか、`plugins/macro_snapshots.py::oof_backtest` による OOF 評価を実装するかをその場で判断する。対象外にする場合は理由をコード内コメントまたは ADR に明記する（「後で対応」と ADR の prose に書くだけで終わらせない＝ Issue #272 のように M-1 だけ OOF 未対応のまま放置された実例あり）。比較ファミリー（M-1/M-2/M-3 等）内で1モデルだけ評価手段が欠けていないか確認する。
