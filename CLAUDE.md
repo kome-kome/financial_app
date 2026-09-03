@@ -202,7 +202,7 @@ web版・ローカル版の双方が同じ Issue を見ることで、**コー�
   | 増やしたもの | 登録先 | 照合するテスト |
   |---|---|---|
   | `heavy=True` のプラグイン | `nightly_scores.HEAVY_AUTOMATION`（回す経路 or `exempt:`） | `test_nightly_scores.py::TestHeavyAutomationRegistry` |
-  | 同上 | `plugins/progress.py::PROGRESS_COVERAGE`（`common` / `own` / `exempt:`） | `test_plugin_progress.py::TestProgressCoverageRegistry` |
+  | heavy な分析（プラグイン **および `SPECIAL_ANALYSES` の特例エントリ**・#593） | `plugins/progress.py::PROGRESS_COVERAGE`（`common` / `own` / `exempt:`） | `test_plugin_progress.py::TestProgressCoverageRegistry` |
   | ローカル駆動バッチ（`BatchSpec`） | `batch_freshness.py::WATCHED`（閾値は書かず `cadence` と `WINDOW_MIN` を渡す） | `test_check_batch_freshness.py::TestEveryLocalBatchIsWatched` |
   | スキル／エージェント | `docs/SKILLS_AND_AGENTS.md` へ1行（#575） | `test_docs_sync.py`（**`~/.claude/` は CI の checkout に無くローカル pytest でのみ照合**） |
 
