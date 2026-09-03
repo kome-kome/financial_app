@@ -238,6 +238,7 @@ producer は共有 `macro_beta`（`read_producer_scores` は `macro_snapshots.ge
 - **per-stock μ̂ と確実性軸 `r1_prime`（コンフォーマル区間半幅）を `macro_enet_scores` へ全置換で永続化**（producer・#396・`tuning_dry_run` no-op）。`produced_output`/`read_producer_scores` は M-2 と同一形＝売り推奨が `mu_source=macro_enet` で読み、**R3 足切りゲートも機能する**（**既定 `mu_source`＝M-6**・#402/ADR-0022 で M-2 から切替＝売り側 OOF 指標 `short_side_spread` で有意優位）。
 - `results` は上位 `top_n` のみ返す（汎用レンダラの DOM 肥大回避）。マクロ fold 内 PCA は実測で無効果のため**非搭載**。
 - **`use_momentum` は既定 OFF＝実測で棄却**（ADR-0045・測定入口 `python -m scripts.momentum_gate`）。M-2/M-6 の ON/OFF を共通 (ym,ec) 域で比較して4検定すべて非有意かつ符号が負。**raw の母集団のままだと ON が改善して見える**（モメンタム不可の行＝履歴の浅い銘柄が落ちる効果）ため、この軸を測り直すときは共通月＋共通 (ym,ec) の2段の制限を外さないこと。
+- **`momentum_window` も実測で棄却**（ADR-0050・#592/#583）。窓 [3,6,12,18,24] を M-1（strict 母集団）と M-2 で測り、**20検定のうち基準を上回って補正後 α=0.00500 を通ったものは 0件**。探索が毎月選ぶ窓18 は共通域で M-1 +0.0039（p=0.757）／M-2 −0.0072（**符号反転**）で、M-2 窓24 は **−0.0264（p=0.001）で有意に悪化**。`hyperparameter_search` は各候補を**その候補自身の母集団**で評価するため、warmup で行を削る軸はスコアと母集団が交絡したまま最大化される（`n_periods` と `n_oof_samples` の Spearman が完全一致＝分離不能）。**行を落とす軸を探索へ足すときは、先に `momentum_gate --windows` で共通域を測ること**（列を選ぶだけの `max_features` 等は行が落ちないのでこの制約は掛からない）。`--smoke` の共通域は間引きで壊れるので読まない（実測 483件＝7% vs stride=1 の 32,438件＝97.4%）。
 
 依存先: `plugins/model_candidates.py`, `plugins/macro_snapshots.py`, `plugins/utils.py`, scikit-learn
 

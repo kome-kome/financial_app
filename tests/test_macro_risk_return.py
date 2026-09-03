@@ -362,12 +362,18 @@ class TestParamsSchema:
         assert _MACRO_MAP["macro_nikkei225_yoy"] == ("NIKKEI225", "yoy")
 
     def test_use_momentum_default_off(self):
-        """use_momentum の既定は OFF。
+        """use_momentum の既定は OFF。**M-1 でも実測して棄却した**（#583・2026-09-04）。
 
         導入時の理由は「マクロ ON のままで walk-forward CV を成立させる」（週次株価が約2年
-        しかなく ON では 0 fold だった）。**その制約は #198 のバックフィルで解けている**が、
-        M-1 は strict（`macro_nan_ok=False`）で母集団が別条件のため ADR-0045 の実測
-        （M-2/M-6 で改善なし）は M-1 の既定を支持も否定もしない＝未実測のまま据え置き。
+        しかなく ON では 0 fold だった）。**その制約は #198 のバックフィルで解けている**ので、
+        M-1 の strict（`macro_nan_ok=False`）母集団で測り直した（`python -m
+        scripts.momentum_gate --models risk_return --windows 3,6,12,18,24`）:
+
+          共通 (ym,ec) 域 32,438件・全条件 11 fold で **10検定すべて非有意**
+          （補正後 α=0.00500）。標準の 12-1 モメンタムは共通域で **−0.0792**（p=0.093）と負。
+
+        raw の母集団のままなら窓を伸ばすほど改善して見える（+0.1334 → +0.1793）が、
+        **差の 91〜93% は母集団が縮んだ効果**だった（ADR-0045 と同型）。
         """
         result = coerce_params(self.schema, {})
         assert result["use_momentum"] is False
