@@ -139,11 +139,17 @@ class TestRealM1Space:
         assert "use_momentum" in changed and "momentum_window" in changed
 
     def test_searched_axes_survive(self):
-        """いま探索している軸（`use_macro` / `max_features`）は保存値のまま残る。"""
+        """いま探索している軸（`use_macro` / `max_features`）は保存値のまま残る。
+
+        **射影は「常に既定へ倒す」ではない。** 探索中の軸まで既定へ倒すと、自動調整の
+        意味そのものが消える。実物のプラグインでこの側を縛るのはここ
+        （かつては M-2 で縛っていたが、#604 で M-2 の2軸も外したため M-1 の探索軸へ移した）。
+        """
         stored = {"use_macro": False, "max_features": 30}
-        out, _changed = project_tuned_params(self._m1(), stored)
+        out, changed = project_tuned_params(self._m1(), stored)
         assert out["use_macro"] is False
         assert out["max_features"] == 30
+        assert changed == []
 
     def test_min_coverage_also_drops(self):
         """#596 で外した軸も同じ規則で落ちる（この射影は特定の軸を知らない）。"""
@@ -197,17 +203,33 @@ class TestFrontendWiring:
         assert "stale_params" in self._js()
 
 
-class TestM2KeepsItsAxes:
-    """M-2 は2軸を探索し続けているので、射影しても値が変わらないこと。
+class TestRealM2Space:
+    """M-2 も #604 で2軸を外した。保存値（2026-07-19・`use_momentum=True`）が射影されること。
 
-    「射影＝常に既定へ倒す」ではない。**探索中の軸は触らない**——ここを取り違えると
-    自動調整の意味そのものが消える。
+    M-1 と違い M-2 は木モデルで特徴量選択が無く、**外すと μ̂ が変わる**（M-1 は BIC が
+    モメンタム列を選ばないのでモデルが変わらなかった）。変わる向きは共通域の実測では
+    改善側——全窓が基準以下で、窓24 は −0.0264（p=0.001）で有意に悪化していた。
     """
 
-    def test_momentum_is_untouched_for_m2(self):
+    def test_stored_momentum_on_becomes_off(self):
         from plugins import get_plugin
-        stored = {"use_momentum": True, "momentum_window": 18}
+        stored = {"use_momentum": True, "momentum_window": 18, "max_depth": 8}
         out, changed = project_tuned_params(get_plugin("macro_gbdt"), stored)
-        assert out["use_momentum"] is True
-        assert out["momentum_window"] == 18
-        assert changed == []
+        assert out["use_momentum"] is False
+        assert "momentum_window" not in out
+        assert out["max_depth"] == 8          # 探索中の軸は保存値のまま
+        assert set(changed) == {"use_momentum", "momentum_window"}
+
+    def test_m5_inherits_the_same_space(self):
+        """M-5（`macro_gbdt_rank`）は M-2 を継承するので同じ射影が効く。
+
+        #570 で退役済み（hidden=True）だが、継承で同じ穴を持つ以上ここも塞がっている
+        ことを確かめる——**波及に気づかないまま片方だけ直す**のがこの種の事故の形。
+        """
+        from plugins import get_plugin
+        p = get_plugin("macro_gbdt_rank")
+        if p is None:
+            pytest.skip("macro_gbdt_rank は登録されていない")
+        base, dims = p.tuning_search_space()
+        assert base.get("use_momentum") is False
+        assert "use_momentum" not in {d.name for d in dims}

@@ -214,7 +214,10 @@ class TestTunedParamsEndpoint:
         r = client.get("/api/plugins/macro_gbdt/tuned")
         assert r.status_code == 200
         d = r.json()
-        assert d["params"] == {"max_depth": 4}
+        # 探索中の軸は保存値のまま。`base_params` の固定値（#604 で足した
+        # `use_momentum=False`）は射影で必ず添えられる＝探索条件を完全に再現するため。
+        assert d["params"]["max_depth"] == 4
+        assert d["params"]["use_momentum"] is False
         assert d["objective_name"] == "rank_ic"
         assert d["objective_value"] == pytest.approx(0.083)
         assert d["n_combos"] == 42
@@ -248,12 +251,13 @@ class TestTunedParamsEndpoint:
         assert set(d["stale_params"]) == {"use_momentum", "momentum_window"}
         assert d["params_as_tuned"]["use_momentum"] is True  # 生値は監査用に残す
 
-    def test_unprojected_plugin_still_returns_params(self, db):
-        """射影対象外（探索空間を持たない特例）でも従来どおり params を返す。"""
+    def test_searched_axis_survives_projection(self, db):
+        """いま探索している軸は射影で触らない（射影＝常に既定へ倒す、ではない）。"""
         from database import upsert_tuned_params
         upsert_tuned_params(db, "macro_gbdt", {"max_depth": 4}, "rank_ic", 0.083, [], 1, None)
         d = client.get("/api/plugins/macro_gbdt/tuned").json()
         assert d["params"]["max_depth"] == 4
+        assert d["stale_params"] == []
 
 
 class TestTunedBadgeHtml:
