@@ -562,31 +562,46 @@ class MacroGbdtPlugin(AnalysisPlugin):
         }
 
     def tuning_search_space(self) -> tuple:
-        """ハイパーパラメータ自動探索の探索空間（Issue #266）。
+        """ハイパーパラメータ自動探索の探索空間（Issue #266・#604 でモメンタム2軸を除外）。
 
-        XGBoost 7軸（木構造・正則化）＋モメンタム2軸（use_momentum/momentum_window・
-        M-1 と同一候補・ADR-0007 §5 のチャネル単位トグル）＋符号事前知識1軸
-        （use_monotone_constraints・#366）＋セクター/サイズ特徴1軸（use_sector_features・#370）
-        の11軸。use_monotone_constraints / use_sector_features はいずれも build_snapshots
-        のキャッシュキーに影響しない execute 内後処理（前者は純 xgb_param・後者は特徴量後付け
-        連結）のため再構築を誘発せず LRU も圧迫しない。
-        momentum を探索できる
-        のは build_snapshots のキャッシュキーが use_momentum/mom_window を含む（#298）ため
-        ＝再構築は momentum 構成6種（off＋窓5種）ごとに1回だけで `_CACHE_MAXSIZE=8` 内に
-        収まる。他の構造パラメータ（fin_features/macro_features/use_macro/min_coverage）は
-        引き続き既定値に固定（min_coverage 併用はキー数 6×4=24 > 8 で LRU スラッシュ）。
+        XGBoost 7軸（木構造・正則化）＋符号事前知識1軸（use_monotone_constraints・#366）
+        ＋セクター/サイズ特徴1軸（use_sector_features・#370）の9軸。この2軸はいずれも
+        build_snapshots のキャッシュキーに影響しない execute 内後処理（前者は純 xgb_param・
+        後者は特徴量後付け連結）のため再構築を誘発せず LRU も圧迫しない。
+        他の構造パラメータ（fin_features/macro_features/use_macro/min_coverage）は
+        引き続き既定値に固定。
         `n_estimators_max`/`early_stopping_rounds` は early_stopping が自動決定するため
         対象外（#264 設計方針）。全グリッドは組合せ爆発するため、呼び出し側
         （hyperparameter_search.py）は既定 strategy="random" を推奨。
+
+        **モメンタム2軸（`use_momentum` / `momentum_window`）は外した（#604・ADR-0050）。**
+        この2軸は warmup で行を落とす＝母集団を動かす軸で、`hyperparameter_search` は各候補を
+        **その候補自身の母集団**で評価するため、探索は構造的に「母集団が縮む側」を選ぶ。
+        実測（2026-09-04・`python -m scripts.momentum_gate --models xgb_m2
+        --windows 3,6,12,18,24`）:
+
+            共通 (ym,ec) 域 16,867件・全条件 11 fold で **全窓が基準（モメンタム無し）以下**。
+            探索が選んでいた窓18 は raw の +0.0314 が共通域では **−0.0072（符号反転）**、
+            窓24 は **−0.0264（p=0.001）で補正後 α を通って有意に悪化**。
+
+        M-1 と違い M-2 は木モデルで特徴量選択が無く、外すと列が実際に消えて **μ̂ が変わる**
+        （M-1 は BIC がモメンタム列を選ばないのでモデルが変わらなかった）。変わる向きは
+        上の実測では改善側。
+
+        **副次効果としてスナップショットのキャッシュが軽くなる。** 以前は
+        `build_snapshots` のキャッシュキーが use_momentum/mom_window を含むため
+        momentum 構成6種（off＋窓5種）ぶんのパネルを保持しており、`_CACHE_MAXSIZE=8` の
+        大半を占めていた（min_coverage を併用できなかったのもこれが理由＝6×4=24 > 8 で
+        LRU スラッシュ）。いまは off の1種だけになる。
+
+        `params_schema()` からは**消さない**（UI から手動で ON にできる。#599 で
+        `min_coverage` を探索から外しつつ契約に残したのと同じ判断）。
         """
         from .tuning import SearchDim
 
-        base_params: dict = {}
+        # モメンタムは探索せず OFF で固定する（上記 docstring・#604）
+        base_params: dict = {"use_momentum": False}
         dims = [
-            # only_if は自分より前の軸しか参照できない → use_momentum を先に置く
-            SearchDim("use_momentum",    [True, False]),
-            SearchDim("momentum_window", [3, 6, 12, 18, 24],
-                      only_if=lambda c: c.get("use_momentum") is True),
             SearchDim("max_depth",          [2, 4, 6, 8, 10]),
             SearchDim("learning_rate",      [0.01, 0.03, 0.05, 0.1, 0.2, 0.3]),
             SearchDim("subsample",          [0.4, 0.6, 0.8, 1.0]),

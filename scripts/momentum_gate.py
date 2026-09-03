@@ -56,6 +56,37 @@ paired_ic_significance`（ADR-0018 の定常ブートストラップ）、(ym,ec
     python -m scripts.momentum_gate --models elasticnet        # M-6 だけ
     python -m scripts.momentum_gate --json scripts/.cache/momentum_gate.json
 
+## 窓モード（`--windows`・#592）
+
+上の昇格ゲートは **ON/OFF の2条件**で、窓は 12 に固定している（同時に振ると「窓を選んだこと」
+自体が過剰適合になるため）。ところが**その窓選びは `tuning_search_space` の探索へ丸投げされ、
+そちらには共通域制限が無い**。実際 M-1 の leaderboard は
+
+    mw=18 → 13 fold → 0.3003 ／ mw=12 → 15 fold → 0.2846 ／ mw=6 → 17 fold → 0.2817
+    ／ モメンタム無し → 19 fold → 0.2605
+
+と、**窓が長い＝母集団が縮む＝スコアが高い**が完全に単調で、窓の効果と母集団が縮む効果が
+分離できていない（`n_oof_samples` と `n_periods` の Spearman が完全一致）。`--windows` は
+その分離を**この昇格ゲートと同じ手続き**（共通月 → 共通 (ym,ec) 域）で行うためのモードである:
+
+    python -m scripts.momentum_gate --models risk_return --windows 3,6,12,18,24 --smoke
+    python -m scripts.momentum_gate --models risk_return,xgb_m2 --windows 6,12,18
+
+窓モードは既定の判定に一切影響しない（`--windows` 未指定なら条件も alpha も従来どおり）。
+alpha は検定数から導出するので、窓を5本振れば 1/5 に締まる。
+
+**`--smoke` の共通域の数値は読んではいけない**（経路確認専用）。`_thin` は各月の先頭から
+stride 刻みで**並び順**に選ぶため、母集団が条件ごとに1社ずれるだけで選ばれる銘柄が総入れ替えに
+なる。実測（2026-09-04・M-1）では各条件が互いに 97% 重なっているのに 6条件の交差が **483件**
+＝7% しか残らなかった（97% を5回掛ければ 86% のはずで桁が合わない）。stride=1 では
+**32,438件＝97.4%** が残り、期待どおりになる。**間引きは条件間の突合と両立しない。**
+
+## M-1 を測るときの注意
+
+M-1 は `macro_nan_ok=False`（strict）で**母集団自体が M-2/M-6 と別物**なので、パネルを共有
+できない（`MODEL_SPECS` のパネル種別で分ける）。CV の設定（min_train=6 / step=3 / embargo=12）
+は M-2 と同値なので `run_one` をそのまま使えるが、**BIC 特徴量選択を挟む点だけが違う**。
+
 出力は ASCII のみ（Windows cp932 リダイレクト対策・[[feedback_windows_cp932_stdout_symbols]]）。
 """
 from __future__ import annotations
@@ -84,18 +115,63 @@ from scripts.candidate_bakeoff import (  # noqa: E402
 
 _OUT_DIR = Path(__file__).resolve().parent / ".cache"
 
-# 12-1 モメンタムの標準形（Jegadeesh-Titman 1993）。窓の最適化は本ゲートの対象外＝
+# 12-1 モメンタムの標準形（Jegadeesh-Titman 1993）。窓の最適化は**既定のゲートでは**対象外＝
 # まず「入れるか否か」を clean に判定する（窓も同時に振ると検定数が5倍になり、
-# 「窓を選んだこと」自体が過剰適合になりうる）。通過後に別途 tuning_search_space で探索する。
+# 「窓を選んだこと」自体が過剰適合になりうる）。`--windows` はその過剰適合を
+# **わざと再現して測る**ためのモードで、既定の判定には一切影響しない（#592）。
 MOM_WINDOW = 12
 
 CONDS: dict[str, bool] = {"off": False, "on": True}
 MODELS = ["xgb_m2", "elasticnet"]
-MODEL_LABELS = {"xgb_m2": "M-2(XGBoost)", "elasticnet": "M-6(ElasticNet)"}
+MODEL_LABELS = {"xgb_m2": "M-2(XGBoost)", "elasticnet": "M-6(ElasticNet)",
+                "risk_return": "M-1(RiskReturn)"}
 METRICS = (("rank_ic", "rank_ic_by_period"),
            ("short_side_spread", "short_side_spread_by_period"))
 # 昇格ゲート: 2モデル × 2指標 = 4 検定を Bonferroni 補正。
 N_TESTS = 4
+
+# ── モデル → (config を持つプラグイン, run_one へ渡す推定器, パネル種別) ────────────
+#
+# **パネル種別が同じモデルだけがパネルを共有できる。** M-2/M-6 は `macro_enet.py:20` が
+# 「`walk_forward_cv_monthly(min_train_months=6, step_months=3, embargo_months=12)` は M-2 と同値」
+# と宣言しているので1枚を共有してよい。M-1 は `macro_nan_ok=False`（strict）で**母集団自体が
+# 別物**なうえ `build_interactions=True`・BIC 特徴量選択が入るため、共有すると本番と違うものを
+# 測る。推定器が "ols" なのは M-1 の CV が `fit_predict` を渡さない素の OLS だからで、
+# `run_one` の MIN_TRAIN_MONTHS=6 / STEP_MONTHS=3 / embargo=LABEL_HORIZON_MONTHS は
+# `macro_risk_return.py` の CV 呼び出しと完全に一致する（手続きを書き写していない）。
+MODEL_SPECS: dict[str, tuple[str, str, str]] = {
+    "xgb_m2":      ("macro_gbdt",        "xgb_m2",     "gbdt"),
+    "elasticnet":  ("macro_gbdt",        "elasticnet", "gbdt"),
+    "risk_return": ("macro_risk_return", "ols",        "m1"),
+}
+BASE_COND = "off"    # 比較の分母。窓モードでも「モメンタム無し」が基準
+
+
+def build_conditions(windows: list[int] | None = None) -> dict[str, tuple[bool, int]]:
+    """条件集合 {名前: (use_momentum, momentum_window)} を作る。
+
+    `windows` 未指定なら **ADR-0045 の昇格ゲートと完全に同じ2条件**を返す（既定を変えない）。
+    指定するとモメンタム無し＋各窓の多条件モードになる。窓は昇順に並べ、重複は落とす
+    （同じ窓を2回測っても検定数だけが増えて alpha が不当に厳しくなる）。
+    """
+    if not windows:
+        return {name: (use_mom, MOM_WINDOW) for name, use_mom in CONDS.items()}
+    ws = sorted({int(w) for w in windows})
+    if any(w < 1 for w in ws):
+        raise ValueError(f"モメンタム窓は1以上の整数で指定してください: {ws}")
+    return {BASE_COND: (False, MOM_WINDOW), **{f"mw{w}": (True, w) for w in ws}}
+
+
+def bonferroni_alpha(n_models: int, n_conds: int) -> float:
+    """検定数から補正後 alpha を導出する（**定数を書き写さない**）。
+
+    検定数 = モデル数 × 指標数 × 基準以外の条件数。既定（2モデル・2条件）では
+    2×2×1 = 4 となり `ALPHA` と一致する。窓を5本振れば 2×2×5 = 20 検定になり
+    alpha は 1/5 に締まる——**窓を同時に振ると「窓を選んだこと」自体が過剰適合になる**
+    という docstring 冒頭の懸念を、判定側でも数として現す。
+    """
+    n_tests = max(n_models, 1) * len(METRICS) * max(n_conds - 1, 1)
+    return 0.05 / n_tests
 ALPHA = 0.05 / N_TESTS
 
 
@@ -172,29 +248,77 @@ def _row(o: dict) -> dict:
     }
 
 
-def _fmt_sig(sig: dict | None) -> str:
+def _fmt_sig(sig: dict | None, alpha: float = ALPHA) -> str:
+    """有意差の1行表示。**alpha は呼び出し側から渡す**（窓モードで検定数が変わるため）。"""
     if not sig:
         return "n/a (common test periods < 2)"
     p = sig.get("p_value")
-    star = "SIG" if (p is not None and p < ALPHA) else "ns"
+    star = "SIG" if (p is not None and p < alpha) else "ns"
     return (f"diff={sig['mean']:+.4f} 95%CI[{sig['ci_lo']:+.4f},{sig['ci_hi']:+.4f}] "
             f"p={p if p is not None else float('nan'):.3f} n={sig['n_common']} "
-            f"{star}(alpha={ALPHA:.4f})")
+            f"{star}(alpha={alpha:.5f})")
 
 
-def _build(db, args, prices_by_co, fin_by_co, companies, macro_cache,
-           macro_names: list, use_momentum: bool) -> tuple:
-    """M-2 既定 config のまま use_momentum だけ差し替えてスナップショットを構築する。"""
-    params = coerce_params(get_plugin("macro_gbdt").params_schema(), {})
+def macro_names_for(kind: str) -> list:
+    """パネル種別が使うマクロ系列名（各プラグインの既定 config が唯一の源）。"""
+    plugin_name = "macro_risk_return" if kind == "m1" else "macro_gbdt"
+    params = coerce_params(get_plugin(plugin_name).params_schema(), {})
+    return list(params["macro_features"]) if params["use_macro"] else []
+
+
+def _build(kind: str, args, prices_by_co, fin_by_co, companies, macro_cache,
+           use_momentum: bool, mom_window: int) -> tuple:
+    """種別の本番 config のまま `use_momentum` / `momentum_window` だけ差し替えて構築する。
+
+    **config は各プラグインの `params_schema()` から取り、ここへ書き写さない**（書き写すと
+    本番が変わったときに黙って別物を測る）。種別ごとの差は本番コードの差そのもの:
+
+      gbdt … `macro_nan_ok=True` / 交互作用なし（M-2・M-6 が共有）
+      m1   … `macro_nan_ok=False`（strict）/ 交互作用あり / BIC 特徴量選択あり。
+             `price_features` は渡さない（M-1 に px_* は無い・#446）
+
+    M-1 の BIC 選択は**間引いた後のパネル**に対して行う。CV も同じパネルで回るので、
+    「選んだ特徴量」と「評価に使う特徴量」が一致する（本番の順序と同じ）。
+    """
+    plugin_name = "macro_risk_return" if kind == "m1" else "macro_gbdt"
+    params = coerce_params(get_plugin(plugin_name).params_schema(), {})
+    macro_names = macro_names_for(kind)
+    extra = {} if kind == "m1" else {
+        "price_features": list(params.get("price_features") or [])}
     samples_by_ym, meta_by_ym, _current, feats, ids_by_ym = build_snapshots(
         prices_by_co, fin_by_co, companies, macro_cache,
         params["fin_features"], macro_names,
-        use_momentum, MOM_WINDOW, params["min_coverage"],
-        build_interactions=False, macro_nan_ok=True,
-        price_features=list(params.get("price_features") or []),
+        use_momentum, mom_window, params["min_coverage"],
+        build_interactions=(kind == "m1"),
+        macro_nan_ok=(kind != "m1"),
         return_stock_ids=True,
+        **extra,
     )
-    return _thin(samples_by_ym, meta_by_ym, ids_by_ym, args.stride) + (feats,)
+    s, m, i = _thin(samples_by_ym, meta_by_ym, ids_by_ym, args.stride)
+    if kind == "m1":
+        s, feats = _select_bic(s, feats, params["max_features"])
+    return s, m, i, feats
+
+
+def _select_bic(samples_by_ym: dict, feat_names: list, max_features: int) -> tuple:
+    """M-1 の LassoLarsIC(BIC) 選択をかけ、選ばれた列だけのパネルへ絞る。
+
+    選択そのものは `macro_risk_return._select_macro_features` を呼ぶ（`macro_snapshots.
+    select_features_bic` への薄いラッパ）。**ここで BIC を書き直さない**——書き直すと
+    本番の M-1 とは別のモデルを測ることになる（ADR-0041 の教訓）。
+
+    サンプル順は保存する。`_restrict` / `_align` / `build_oof_meta` が
+    `samples_by_ym[ym]` と `ids_by_ym[ym]` の index 1:1 対応に依拠しているため、
+    ここで順序を崩すと共通 (ym,ec) 域の突合が静かに壊れる。
+    """
+    selected = get_plugin("macro_risk_return")._select_macro_features(
+        samples_by_ym, feat_names, max_features=max_features)
+    if not selected:
+        raise SystemExit("BIC 選択で特徴量が1つも選ばれませんでした（パネルを確認）")
+    idx = [feat_names.index(n) for n in selected]
+    sel = {ym: [([row[i] for i in idx], tgt) for row, tgt in pairs]
+           for ym, pairs in samples_by_ym.items()}
+    return sel, selected
 
 
 def main() -> None:
@@ -208,7 +332,12 @@ def main() -> None:
 
     ap = argparse.ArgumentParser(
         description="モメンタム特徴量（use_momentum）の既定 ON/OFF 昇格ゲート実測")
-    ap.add_argument("--models", help="測るモデルをカンマ区切りで指定（既定: xgb_m2,elasticnet）")
+    ap.add_argument("--models",
+                    help=f"測るモデルをカンマ区切りで指定（既定: {','.join(MODELS)}／"
+                         f"選べるのは {','.join(MODEL_SPECS)}）")
+    ap.add_argument("--windows",
+                    help="モメンタム窓をカンマ区切りで指定すると多条件モードになる"
+                         "（例: 3,6,12,18,24）。既定は ON/OFF の2条件のまま")
     ap.add_argument("--smoke", action="store_true", help="サンプルを間引いた短時間確認")
     ap.add_argument("--stride", type=int, default=1, help="各月のサンプル間引き幅")
     ap.add_argument("--allow-full-pull", action="store_true",
@@ -222,14 +351,21 @@ def main() -> None:
 
     models = ([m.strip() for m in args.models.split(",") if m.strip()]
               if args.models else list(MODELS))
-    unknown = [m for m in models if m not in MODEL_LABELS]
+    unknown = [m for m in models if m not in MODEL_SPECS]
     if unknown:
-        raise SystemExit(f"未知のモデル: {', '.join(unknown)}（{', '.join(MODELS)} のみ）")
-    n_tests = len(models) * len(METRICS)
+        raise SystemExit(
+            f"未知のモデル: {', '.join(unknown)}（{', '.join(MODEL_SPECS)} のみ）")
+    windows = ([int(w) for w in args.windows.replace(" ", "").split(",") if w]
+               if args.windows else None)
+    conds = build_conditions(windows)
+    # **alpha は検定数から導出する**（定数 ALPHA を窓モードへ流用すると、条件を増やした
+    # ぶんの多重比較が補正されないまま「有意」が出る）。
+    alpha = bonferroni_alpha(len(models), len(conds))
+    n_tests = len(models) * len(METRICS) * max(len(conds) - 1, 1)
     if n_tests != N_TESTS:
-        print(f"[warn] 検定数が {n_tests}（既定 {N_TESTS}）です。表示している alpha は "
-              f"{N_TESTS} 検定前提の {ALPHA:.4f} のままなので、判定はこの値で読むこと。",
-              flush=True)
+        print(f"[warn] 検定数が {n_tests} です（既定のゲートは {N_TESTS}）。"
+              f"alpha は {alpha:.5f} へ導出し直しました。ADR-0045 の昇格判定と"
+              f"直接は比較できません。", flush=True)
     out_path = Path(args.json_path) if args.json_path else _OUT_DIR / "momentum_gate.json"
 
     db = SessionLocal()
@@ -248,34 +384,42 @@ def main() -> None:
         fin_by_co, companies = _load_financials(db)
         print(f"panel src: fin_cos={len(fin_by_co)} companies={len(companies)}", flush=True)
 
-        params = coerce_params(get_plugin("macro_gbdt").params_schema(), {})
-        macro_names = list(params["macro_features"]) if params["use_macro"] else []
-        mkey = hashlib.md5(",".join(sorted(macro_names)).encode()).hexdigest()[:10]
+        # マクロは**必要な種別の和集合**を1度だけ読む（M-1 の44系列は M-2 の53系列の
+        # 部分集合だが、それに寄りかからず和集合を取る＝将来どちらかが増えても壊れない）。
+        kinds = sorted({MODEL_SPECS[m][2] for m in models})
+        macro_names = sorted({n for k in kinds for n in macro_names_for(k)})
+        mkey = hashlib.md5(",".join(macro_names).encode()).hexdigest()[:10]
         macro_cache = (cached(f"bakeoff_macro_{mkey}",
                               lambda: preload_macro(db, prices_by_co, macro_names))
                        if macro_names else {})
         db.commit()   # 以降の CPU 計算中に読取トランザクションを残さない（#411）
 
-        # ── 1. 2条件でパネルを構築し、母集団の差をそのまま現す ──────────────────
-        panels: dict[str, tuple] = {}
+        # ── 1. 各条件 × 各パネル種別を構築し、母集団の差をそのまま現す ────────────
+        #
+        # **パネルは (条件, 種別) で持つ。** M-2/M-6 は同じ種別なので1枚を共有し（従来どおり）、
+        # M-1 は strict のため別の1枚になる。ここを共有すると M-1 を M-2 の母集団で測る。
+        panels: dict[tuple, tuple] = {}
         stats: dict[str, dict] = {}
-        for cond, use_mom in CONDS.items():
-            s, m, i, feats = _build(db, args, prices_by_co, fin_by_co, companies,
-                                    macro_cache, macro_names, use_mom)
-            panels[cond] = (s, m, i, feats)
-            stats[cond] = _panel_stats(s, i, feats)
-            st = stats[cond]
-            print(f"[{cond}] months={st['months']} ({st['first_ym']}..{st['last_ym']}) "
-                  f"samples={st['samples']} companies={st['companies']} "
-                  f"features={st['n_features']}", flush=True)
+        for cond, (use_mom, mw) in conds.items():
+            for kind in kinds:
+                s, m, i, feats = _build(kind, args, prices_by_co, fin_by_co, companies,
+                                        macro_cache, use_mom, mw)
+                panels[(cond, kind)] = (s, m, i, feats)
+                st = _panel_stats(s, i, feats)
+                stats[f"{cond}|{kind}"] = st
+                print(f"[{cond}/{kind}] mw={mw if use_mom else '-'} "
+                      f"months={st['months']} ({st['first_ym']}..{st['last_ym']}) "
+                      f"samples={st['samples']} companies={st['companies']} "
+                      f"features={st['n_features']}", flush=True)
 
         # ── 2. 各条件 × 各モデルを走らせる（残差も受け取る）────────────────────
         results: dict[str, dict] = {}
         parts: dict[str, tuple] = {}
-        for cond in CONDS:
-            s, m, i, feats = panels[cond]
+        for cond in conds:
             for model in models:
-                out = run_one(model, s, m, i, feats, pca=0, return_parts=True)
+                estimator, kind = MODEL_SPECS[model][1], MODEL_SPECS[model][2]
+                s, m, i, feats = panels[(cond, kind)]
+                out = run_one(estimator, s, m, i, feats, pca=0, return_parts=True)
                 parts[f"{cond}|{model}"] = out.pop("_parts")
                 if out.get("error"):
                     print(f"  {model}: ERROR {out['error']}", flush=True)
@@ -298,19 +442,30 @@ def main() -> None:
     # on=2020-07 起点/62ヶ月 で共通 (ym,ec) が 0 件）。よって共通月へ制限したパネルで
     # 走らせ直す。ここまでが「fold を揃える」段で、そのあと同一 fold の中で銘柄集合を
     # 揃えるのが (ym,ec) 制限の段になる。
-    common_yms = set(panels["off"][0]) & set(panels["on"][0])
-    print(f"\n=== common months: {len(common_yms)} "
-          f"({min(common_yms, default='-')}..{max(common_yms, default='-')}) ===", flush=True)
-    cpanels = {cond: _restrict_months(panels[cond], common_yms) for cond in CONDS}
+    # 共通月は**パネル種別ごと**に取る。M-1（strict）と M-2 の月を交差させると、
+    # どちらの比較にも要らない月まで落ちて両方が不当に狭くなる（比較したいのは
+    # 「同じモデルの条件間」であって「モデル間」ではない）。
+    common_yms = {kind: set.intersection(*[set(panels[(c, kind)][0]) for c in conds])
+                  for kind in kinds}
+    for kind in kinds:
+        ys = common_yms[kind]
+        print(f"\n=== common months [{kind}]: {len(ys)} "
+              f"({min(ys, default='-')}..{max(ys, default='-')}) ===", flush=True)
+    cpanels = {(cond, kind): _restrict_months(panels[(cond, kind)], common_yms[kind])
+               for cond in conds for kind in kinds}
     cparts: dict[str, tuple] = {}
     cruns: dict[str, dict] = {}
-    for cond in CONDS:
-        s, m, i, feats = cpanels[cond]
-        st = _panel_stats(s, i, feats)
-        print(f"[{cond}/common-months] months={st['months']} samples={st['samples']} "
-              f"companies={st['companies']} features={st['n_features']}", flush=True)
+    for cond in conds:
+        for kind in kinds:
+            cs, _cm, ci, cfeats = cpanels[(cond, kind)]
+            st = _panel_stats(cs, ci, cfeats)
+            print(f"[{cond}/{kind}/common-months] months={st['months']} "
+                  f"samples={st['samples']} companies={st['companies']} "
+                  f"features={st['n_features']}", flush=True)
         for model in models:
-            out = run_one(model, s, m, i, feats, pca=0, return_parts=True)
+            estimator, kind = MODEL_SPECS[model][1], MODEL_SPECS[model][2]
+            s, m, i, feats = cpanels[(cond, kind)]
+            out = run_one(estimator, s, m, i, feats, pca=0, return_parts=True)
             cparts[f"{cond}|{model}"] = out.pop("_parts")
             cruns[f"{cond}|{model}"] = out
             if out.get("error"):
@@ -320,23 +475,25 @@ def main() -> None:
     common_results: dict[str, dict] = {}
     common_info: dict[str, dict] = {}
     for model in models:
-        aligned = {cond: _align(cparts[f"{cond}|{model}"][0], cpanels[cond][2])
-                   for cond in CONDS}
-        keys = set(aligned["off"]) & set(aligned["on"])
-        folds = {c: cruns[f"{c}|{model}"]["n_folds"] for c in CONDS}
+        kind = MODEL_SPECS[model][2]
+        aligned = {cond: _align(cparts[f"{cond}|{model}"][0], cpanels[(cond, kind)][2])
+                   for cond in conds}
+        # **全条件の交差**を取る。2条件のときは従来と同じ off ∩ on。
+        keys = set.intersection(*[set(aligned[c]) for c in conds])
+        folds = {c: cruns[f"{c}|{model}"]["n_folds"] for c in conds}
         common_info[model] = {
             "n_common": len(keys),
-            "n_off": len(aligned["off"]),
-            "n_on": len(aligned["on"]),
+            "n_by_cond": {c: len(aligned[c]) for c in conds},
             "n_folds": folds,
         }
+        per_cond = " ".join(f"{c}={len(aligned[c])}" for c in conds)
         print(f"  {MODEL_LABELS[model]:<18} common={len(keys)} "
-              f"(off={len(aligned['off'])} on={len(aligned['on'])}) folds={folds}", flush=True)
-        if folds["off"] != folds["on"]:
+              f"({per_cond}) folds={folds}", flush=True)
+        if len(set(folds.values())) > 1:
             print("    [warn] fold 数が一致していません（位相が揃っていない可能性）", flush=True)
-        for cond in CONDS:
+        for cond in conds:
             resid, meta = cparts[f"{cond}|{model}"]
-            r2, m2 = _restrict(resid, meta, cpanels[cond][2], keys)
+            r2, m2 = _restrict(resid, meta, cpanels[(cond, kind)][2], keys)
             bt = oof_backtest(r2, n_quantiles=5, meta_by_ym=m2, rebalance_per_year=4)
             common_results[f"{cond}|{model}"] = bt
             print(f"    [{cond}] rank-IC={_num(bt['rank_ic']['mean'])} "
@@ -352,36 +509,51 @@ def main() -> None:
     sigs: dict[str, dict] = {}
     passed: list[str] = []
     regressed: list[str] = []
-    print(f"\n=== on - off / common [PRIMARY] "
-          f"(Bonferroni alpha={ALPHA:.4f}, {N_TESTS} tests) ===", flush=True)
+    test_conds = [c for c in conds if c != BASE_COND]
+    print(f"\n=== cond - {BASE_COND} / common [PRIMARY] "
+          f"(Bonferroni alpha={alpha:.5f}, {n_tests} tests) ===", flush=True)
     for model in models:
-        a = common_results[f"on|{model}"]
-        b = common_results[f"off|{model}"]
-        for metric, key in METRICS:
-            sig = paired_ic_significance(a.get(key) or {}, b.get(key) or {})
-            sigs[f"common|{model}|{metric}"] = sig
-            p = sig.get("p_value") if sig else None
-            hit = bool(sig and p is not None and p < ALPHA)
-            if hit and sig["mean"] > 0:
-                passed.append(f"{MODEL_LABELS[model]}/{metric}")
-            elif hit:
-                regressed.append(f"{MODEL_LABELS[model]}/{metric}")
-            print(f"  {MODEL_LABELS[model]:<18} {metric:<18} {_fmt_sig(sig)}", flush=True)
+        b = common_results[f"{BASE_COND}|{model}"]
+        for cond in test_conds:
+            a = common_results[f"{cond}|{model}"]
+            for metric, key in METRICS:
+                sig = paired_ic_significance(a.get(key) or {}, b.get(key) or {})
+                sigs[f"common|{cond}|{model}|{metric}"] = sig
+                p = sig.get("p_value") if sig else None
+                hit = bool(sig and p is not None and p < alpha)
+                label = f"{MODEL_LABELS[model]}/{cond}/{metric}"
+                if hit and sig["mean"] > 0:
+                    passed.append(label)
+                elif hit:
+                    regressed.append(label)
+                print(f"  {MODEL_LABELS[model]:<18} {cond:<6} {metric:<18} "
+                      f"{_fmt_sig(sig, alpha)}", flush=True)
 
     print("\n=== raw levels (each condition's own population; NOT testable across "
           "conditions: fold phases differ) ===", flush=True)
-    print(f"  {'cond':<5} {'model':<18} {'rank-IC':>9} {'IC std':>9} {'short':>9} "
-          f"{'LS spread':>10} {'folds':>6}", flush=True)
-    for cond in CONDS:
+    print(f"  {'cond':<6} {'model':<18} {'rank-IC':>9} {'IC std':>9} {'short':>9} "
+          f"{'LS spread':>10} {'folds':>6} {'samples':>9}", flush=True)
+    for cond in conds:
         for model in models:
             r = results[f"{cond}|{model}"]
             o = r["oof"]
-            print(f"  {cond:<5} {MODEL_LABELS[model]:<18} {_num(o['rank_ic']['mean']):>9} "
+            st = stats[f"{cond}|{MODEL_SPECS[model][2]}"]
+            print(f"  {cond:<6} {MODEL_LABELS[model]:<18} {_num(o['rank_ic']['mean']):>9} "
                   f"{_num(o['rank_ic'].get('std')):>9} "
                   f"{_num(o.get('short_side_spread')):>9} "
-                  f"{_num(o.get('long_short_spread')):>10} {r['n_folds']:>6}", flush=True)
+                  f"{_num(o.get('long_short_spread')):>10} {r['n_folds']:>6} "
+                  f"{st['samples']:>9}", flush=True)
 
-    if passed:
+    if len(conds) > 2:
+        # 窓モードは「どの窓を既定にするか」を決める場ではない（それを共通域抜きでやって
+        # いるのが #592 の指摘そのもの）。ここで出すのは**母集団を揃えても差が残るか**だけ。
+        verdict = (("WINDOW SCAN: effects that survive the common-domain restriction: "
+                    + ", ".join(passed)) if passed else
+                   "WINDOW SCAN: no window beat the no-momentum baseline on the common "
+                   "(ym,ec) domain at the corrected alpha")
+        if regressed:
+            verdict += " | significantly WORSE: " + ", ".join(regressed)
+    elif passed:
         verdict = "PROMOTE (default use_momentum=True): " + ", ".join(passed)
     elif regressed:
         verdict = ("REJECT (keep default use_momentum=False): no improvement passed "
@@ -394,14 +566,17 @@ def main() -> None:
 
     payload = {
         "momentum_window": MOM_WINDOW,
-        "alpha": ALPHA,
-        "n_tests": N_TESTS,
+        "conditions": {c: {"use_momentum": u, "window": w} for c, (u, w) in conds.items()},
+        "windows": windows,
+        "alpha": alpha,
+        "n_tests": n_tests,
         "models": models,
         "stride": args.stride,
         "panel": stats,
-        "common_months": {"n": len(common_yms),
-                          "first": min(common_yms, default=None),
-                          "last": max(common_yms, default=None)},
+        "common_months": {kind: {"n": len(ys),
+                                 "first": min(ys, default=None),
+                                 "last": max(ys, default=None)}
+                          for kind, ys in common_yms.items()},
         "common_info": common_info,
         "raw": {k: _row(v["oof"]) for k, v in results.items()},
         "common": {k: _row(v) for k, v in common_results.items()},

@@ -177,7 +177,13 @@ graph TD
 > `recommend_factor_premia`（ADR-0008・`recommend_factor_premia.py` が書き込み、
 > `plugins/recommend.py::resolve_weights()` が「統計的最適化」プリセットとして読む）、
 > `plugin_tuned_params`（ADR-0007・`hyperparameter_search.py` が書き込み、
-> `GET /api/plugins/{name}/tuned` が読む）は、いずれも「重い推論/探索バッチが結果だけを
+> `GET /api/plugins/{name}/tuned` が読む。**保存値は「そのとき探索した空間」の記録**なので、
+> 読む側が `project_tuned_params()` で現在の探索空間へ射影してから返す——`base_params` の
+> キーはその値で上書き、dims にある軸は保存値のまま、どちらにも無いキーは落として
+> `params_schema` の既定へ倒す。生値は `params_as_tuned`、扱いが変わったキーは
+> `stale_params` に載せ、画面が注記として出す。**射影が無いと、探索から外した軸の古い値が
+> 「🔧 自動調整済み」として推奨され続ける**＝M-1 のモメンタムが実際にそうなっていた。
+> ADR-0050・#604）は、いずれも「重い推論/探索バッチが結果だけを
 > 永続化し、軽量なAPI/プラグインが読む」producer/consumer 分離パターン（`regression_results`
 > と同型）。`statement_disclosure`（Issue #322・`collector_disclosures.py` が J-Quants
 > `/fins/summary` から蓄積する生データ）は `feature_disclosure.py` が特徴量化して読む。
@@ -1076,7 +1082,7 @@ graph LR
         AN1["GET /api/plugins\nプラグイン + 特例エントリ(screen/backtest/model_comparison)のメタ一覧\n（category/ui_order/heavy/hidden 含む・ui_order 昇順）\n退役（hidden=True・ADR-0044）は除外"]
         AN2["POST /api/plugins/{name}/run\nプラグインを実行\n（heavy かつ RENDER_LIGHT_MODE は 403）\nheavy は実行中の進捗を JobState へ流す（#545）"]
         AN12["GET /api/plugins/{name}/progress\nheavy プラグイン実行の進捗 SSE（#545）\n{running, progress, total, new_logs}\n画面は POST の応答を待たずに開く\n（POST が完了まで返らないため）"]
-        AN11["GET /api/plugins/{name}/tuned\n自動調整済みハイパーパラメータ\n（hyperparameter_search.py --persist が書込・未調整は404）\n読取専用・軽量。探索自体はGitHub Actions月次実行(#292)経由"]
+        AN11["GET /api/plugins/{name}/tuned\n自動調整済みハイパーパラメータ\n（hyperparameter_search.py --persist が書込・未調整は404）\n読取専用・軽量。探索自体はローカル月次バッチ経由\nparams は現在の探索空間へ射影して返す(#604)\n生値=params_as_tuned・変えたキー=stale_params"]
         AN10["GET /api/model/status\n業種別OLSモデルの鮮度情報\n（computed_at/staleness_days/n_results/is_stale）\n鮮度バーUI用の軽量GET"]
         AN4["GET /api/gap-analysis\nバリュエーション分析（旧互換エンドポイント）"]
         AN5["POST /api/screen\nスクリーニング（条件絞り込み）"]

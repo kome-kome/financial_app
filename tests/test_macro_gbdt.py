@@ -1035,41 +1035,68 @@ class TestTuningSearchSpace:
     def test_returns_base_params_and_dims(self):
         base_params, dims = plugin.tuning_search_space()
         assert isinstance(base_params, dict)
-        assert len(dims) == 11
+        assert len(dims) == 9
 
-    def test_dims_cover_xgb_and_momentum_axes(self):
+    def test_dims_cover_xgb_axes(self):
         _base_params, dims = plugin.tuning_search_space()
         names = {d.name for d in dims}
         assert names == {
-            "use_momentum", "momentum_window",
             "max_depth", "learning_rate", "subsample", "colsample_bytree",
             "min_child_weight", "reg_lambda", "reg_alpha",
             "use_monotone_constraints",   # 符号事前知識 1軸（Issue #366）
             "use_sector_features",        # セクター/サイズ 1軸（Issue #370）
         }
-        # モメンタム以外の構造・表示専用パラメータは対象外
+        # 構造・表示専用パラメータは対象外
         assert "fin_features" not in names
         assert "n_estimators_max" not in names
         assert "lambda_risk" not in names
 
-    def test_momentum_window_only_active_when_use_momentum_true(self):
-        """momentum_window は use_momentum=True のときのみ展開される（only_if 縮退）。
-        全グリッドは 216,000 combo と巨大なため random サンプリングで検証する。"""
-        import random
+    def test_momentum_is_not_a_search_axis(self):
+        """モメンタム2軸は探索しない（#604・ADR-0050）。
 
-        from plugins.tuning import _random_combos
+        warmup で行を落とす＝母集団を動かす軸で、`hyperparameter_search` は各候補を
+        その候補自身の母集団で評価するため、探索は構造的に「母集団が縮む側」を選ぶ。
+        共通 (ym,ec) 域の実測（16,867件・11 fold）では**全窓が基準以下**で、探索が
+        選んでいた窓18 は −0.0072（符号反転）、窓24 は −0.0264（p=0.001）で有意に悪化した。
 
+        M-1（#604 で同時に外した）と違い M-2 は木モデルで特徴量選択が無いため、
+        外すと列が実際に消えて μ̂ が変わる。変わる向きは上の実測では改善側。
+        """
         _base_params, dims = plugin.tuning_search_space()
-        # only_if は自分より前の軸しか参照できない → 並び順の回帰防止
-        names = [d.name for d in dims]
-        assert names.index("use_momentum") < names.index("momentum_window")
+        names = {d.name for d in dims}
+        assert "use_momentum" not in names
+        assert "momentum_window" not in names
 
-        combos = _random_combos(dims, n_iter=300, rng=random.Random(0))
-        off_combos = [c for c in combos if c["use_momentum"] is False]
-        on_combos = [c for c in combos if c["use_momentum"] is True]
-        assert off_combos and on_combos
-        assert all(c["momentum_window"] == 3 for c in off_combos)  # values[0] に縮退
-        assert len({c["momentum_window"] for c in on_combos}) > 1  # 複数窓が展開
+    def test_momentum_is_pinned_off_in_base_params(self):
+        """外すだけでなく OFF で固定する。
+
+        明示すると `plugin_tuned_params.params_json` へ「探索がこの値を固定した」ことが残り、
+        `params_schema()` の既定が将来変わっても探索条件が動かない。
+        """
+        base_params, _dims = plugin.tuning_search_space()
+        assert base_params.get("use_momentum") is False
+
+    def test_momentum_stays_in_the_params_contract(self):
+        """探索から外すのと契約から消すのは別（UI から手動で ON にできる）。"""
+        schema = plugin.params_schema()
+        assert "use_momentum" in schema
+        assert "momentum_window" in schema
+
+    def test_snapshot_cache_now_needs_one_panel(self):
+        """**副次効果**: スナップショットのキャッシュキーが1種類になる。
+
+        `build_snapshots` のキャッシュキーは `use_momentum`/`mom_window` を含むため、
+        以前は momentum 構成6種（off＋窓5種）ぶんのパネルを保持して `_CACHE_MAXSIZE=8` の
+        大半を占めていた（`min_coverage` を併用できなかったのもこれが理由＝6×4=24 > 8 で
+        LRU スラッシュ）。軸が消えたので off の1種だけになる。
+        """
+        base_params, dims = plugin.tuning_search_space()
+        names = {d.name for d in dims}
+        momentum_keys = {"use_momentum", "momentum_window"} & names
+        assert not momentum_keys, (
+            f"{momentum_keys} が探索軸に戻っている。パネルのキャッシュが 6種へ膨らむので、"
+            "_CACHE_MAXSIZE との関係を測り直すこと（#298・#588）")
+        assert base_params.get("use_momentum") is False
 
     def test_dim_values_within_schema_bounds(self):
         schema = plugin.params_schema()

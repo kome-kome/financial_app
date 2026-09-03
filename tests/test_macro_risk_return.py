@@ -362,12 +362,18 @@ class TestParamsSchema:
         assert _MACRO_MAP["macro_nikkei225_yoy"] == ("NIKKEI225", "yoy")
 
     def test_use_momentum_default_off(self):
-        """use_momentum の既定は OFF。
+        """use_momentum の既定は OFF。**M-1 でも実測して棄却した**（#583・2026-09-04）。
 
         導入時の理由は「マクロ ON のままで walk-forward CV を成立させる」（週次株価が約2年
-        しかなく ON では 0 fold だった）。**その制約は #198 のバックフィルで解けている**が、
-        M-1 は strict（`macro_nan_ok=False`）で母集団が別条件のため ADR-0045 の実測
-        （M-2/M-6 で改善なし）は M-1 の既定を支持も否定もしない＝未実測のまま据え置き。
+        しかなく ON では 0 fold だった）。**その制約は #198 のバックフィルで解けている**ので、
+        M-1 の strict（`macro_nan_ok=False`）母集団で測り直した（`python -m
+        scripts.momentum_gate --models risk_return --windows 3,6,12,18,24`）:
+
+          共通 (ym,ec) 域 32,438件・全条件 11 fold で **10検定すべて非有意**
+          （補正後 α=0.00500）。標準の 12-1 モメンタムは共通域で **−0.0792**（p=0.093）と負。
+
+        raw の母集団のままなら窓を伸ばすほど改善して見える（+0.1334 → +0.1793）が、
+        **差の 91〜93% は母集団が縮んだ効果**だった（ADR-0045 と同型）。
         """
         result = coerce_params(self.schema, {})
         assert result["use_momentum"] is False
@@ -743,7 +749,7 @@ class TestTuningSearchSpace:
         base_params, dims = self.plugin.tuning_search_space()
         assert isinstance(base_params, dict)
         names = {d.name for d in dims}
-        assert names == {"use_macro", "use_momentum", "momentum_window", "max_features"}
+        assert names == {"use_macro", "max_features"}
 
     def test_min_coverage_is_not_a_search_axis(self):
         """M-1 で `min_coverage` を振っても結果が1ミリも動かない（#596）。
@@ -794,13 +800,49 @@ class TestTuningSearchSpace:
                 "tuning_search_space へ軸を戻すか、効かない根拠を測り直すこと（#596）"
             )
 
-    def test_grid_is_72_combos(self):
-        """軸を落として 288 → 72。所要は実測ペースで 513.9分 → 約112分になる。"""
+    def test_momentum_is_not_a_search_axis(self):
+        """モメンタム2軸は探索しない（#604・ADR-0050）。
+
+        `min_coverage`（#596）と違い、この2軸は**スコアを動かす**。動かしているのが
+        特徴量の効果ではなく母集団だという点が理由で、`hyperparameter_search` は各候補を
+        その候補自身の母集団で評価するため、探索は構造的に「母集団が縮む側」を選ぶ。
+        共通 (ym,ec) 域では10検定すべて非有意（探索が選んでいた窓18 は +0.0039・p=0.757）。
+        """
+        _base_params, dims = self.plugin.tuning_search_space()
+        names = {d.name for d in dims}
+        assert "use_momentum" not in names
+        assert "momentum_window" not in names
+
+    def test_momentum_is_pinned_off_in_base_params(self):
+        """外すだけでなく **OFF で固定**する。
+
+        `coerce_params` の既定補完に任せても今は同じ値になるが、明示すると
+        `plugin_tuned_params.params_json` へ「探索がこの値を固定した」ことが残り、
+        `params_schema()` の既定が将来変わっても探索条件が動かない。
+        """
+        base_params, _dims = self.plugin.tuning_search_space()
+        assert base_params.get("use_momentum") is False
+
+    def test_momentum_stays_in_the_params_contract(self):
+        """探索から外すのと契約から消すのは別（`min_coverage` と同じ判断）。
+
+        UI からは手動で ON にできる。消すと消費側（フォーム・`coerce_params`）が壊れる。
+        """
+        schema = self.plugin.params_schema()
+        assert "use_momentum" in schema
+        assert "momentum_window" in schema
+
+    def test_grid_is_12_combos(self):
+        """モメンタム2軸を落として 72 → 12（**6分の1**）。
+
+        72 の内訳は use_macro 2 × (use_momentum False 1 + True × 窓5) × max_features 6。
+        窓の展開が消えるので 2 × 6 = 12 になる。BIC がモメンタム列を一度も選ばない以上、
+        **モデルは1ミリも変わらない**（ADR-0050 §1-b）。
+        """
         from plugins.tuning import _grid_combos
 
         _base_params, dims = self.plugin.tuning_search_space()
-        # use_macro 2 × (use_momentum False 1 + True 5) × max_features 6 = 72
-        assert len(_grid_combos(dims)) == 72
+        assert len(_grid_combos(dims)) == 12
 
     def test_display_only_params_excluded(self):
         _base_params, dims = self.plugin.tuning_search_space()
@@ -812,15 +854,30 @@ class TestTuningSearchSpace:
         assert "fin_features" not in names
         assert "macro_features" not in names
 
-    def test_momentum_window_only_active_when_use_momentum_true(self):
+    def test_no_dim_depends_on_a_removed_axis(self):
+        """`only_if` が探索空間に無い軸を参照していないこと（#604 の後始末）。
+
+        以前は `momentum_window` が `only_if=lambda c: c.get("use_momentum") is True` で
+        `use_momentum` に依存していた。両方まとめて外したので依存は残っていないが、
+        **片方だけ外すと `only_if` は例外を出さず `c.get(...)` が None を返して
+        全 combo で条件が False になり、その軸が values[0] へ静かに縮退する**
+        （＝探索したつもりで1点しか見ない）。ここで構造的に縛る。
+        """
         from plugins.tuning import _grid_combos
 
         _base_params, dims = self.plugin.tuning_search_space()
+        names = {d.name for d in dims}
         combos = _grid_combos(dims)
-        off_combos = [c for c in combos if c["use_momentum"] is False]
-        on_combos = [c for c in combos if c["use_momentum"] is True]
-        assert all(c["momentum_window"] == 3 for c in off_combos)  # values[0] に縮退
-        assert len({c["momentum_window"] for c in on_combos}) == 5  # 全展開
+        for d in dims:
+            if d.only_if is None:
+                continue
+            # only_if が参照するキーは、必ず探索空間の中に在ること
+            for c in combos:
+                assert set(c) <= names, f"{d.name} の combo に未知のキー: {set(c) - names}"
+        # 縮退が起きていない＝各軸が全値ぶん展開されている
+        for d in dims:
+            assert len({c[d.name] for c in combos}) == len(d.values), (
+                f"{d.name} が {len(d.values)} 値あるのに combo では縮退している")
 
     def test_dim_values_within_schema_bounds(self):
         schema = self.plugin.params_schema()

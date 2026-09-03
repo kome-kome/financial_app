@@ -214,7 +214,10 @@ class TestTunedParamsEndpoint:
         r = client.get("/api/plugins/macro_gbdt/tuned")
         assert r.status_code == 200
         d = r.json()
-        assert d["params"] == {"max_depth": 4}
+        # 探索中の軸は保存値のまま。`base_params` の固定値（#604 で足した
+        # `use_momentum=False`）は射影で必ず添えられる＝探索条件を完全に再現するため。
+        assert d["params"]["max_depth"] == 4
+        assert d["params"]["use_momentum"] is False
         assert d["objective_name"] == "rank_ic"
         assert d["objective_value"] == pytest.approx(0.083)
         assert d["n_combos"] == 42
@@ -226,6 +229,35 @@ class TestTunedParamsEndpoint:
         from database import upsert_tuned_params
         upsert_tuned_params(db, "macro_gbdt", {"max_depth": 4}, "rank_ic", 0.083, [], 1, None)
         assert client.get("/api/plugins/macro_risk_return/tuned").status_code == 404
+
+    def test_stale_axis_is_projected_and_reported(self, db):
+        """探索から外れた軸は既定へ射影し、**変えたことを申告する**（#604）。
+
+        画面はこの応答をフォームへプリフィルする。黙って値を変えると「調整済みと
+        言いながら別の値」という逆の混乱になるので、`stale_params` と生値
+        （`params_as_tuned`）を必ず添える。
+        """
+        from database import upsert_tuned_params
+        upsert_tuned_params(
+            db, "macro_risk_return",
+            {"use_macro": True, "use_momentum": True, "momentum_window": 18,
+             "max_features": 5},
+            "rank_ic", 0.3003, [], 72, None,
+        )
+        d = client.get("/api/plugins/macro_risk_return/tuned").json()
+        assert d["params"]["use_momentum"] is False          # 探索が固定した値へ
+        assert "momentum_window" not in d["params"]          # 空間から消えた軸は落とす
+        assert d["params"]["max_features"] == 5              # 探索中の軸は保存値のまま
+        assert set(d["stale_params"]) == {"use_momentum", "momentum_window"}
+        assert d["params_as_tuned"]["use_momentum"] is True  # 生値は監査用に残す
+
+    def test_searched_axis_survives_projection(self, db):
+        """いま探索している軸は射影で触らない（射影＝常に既定へ倒す、ではない）。"""
+        from database import upsert_tuned_params
+        upsert_tuned_params(db, "macro_gbdt", {"max_depth": 4}, "rank_ic", 0.083, [], 1, None)
+        d = client.get("/api/plugins/macro_gbdt/tuned").json()
+        assert d["params"]["max_depth"] == 4
+        assert d["stale_params"] == []
 
 
 class TestTunedBadgeHtml:
