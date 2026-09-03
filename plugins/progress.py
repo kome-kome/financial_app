@@ -89,4 +89,9 @@ PROGRESS_COVERAGE: dict[str, str] = {
     "macro_ensemble":    "common",
     "macro_dlm":         "common",
     "sector_ols":        "own",
+    # `AnalysisPlugin` ではなく `routers/analysis.py::SPECIAL_ANALYSES` の特例エントリ（#593）。
+    # 内部で heavy 3本を順に回すので**実行が最も長いのがここ**。共通骨格の進捗はそのまま
+    # 流れるが「3本のどれを回しているか」は出ないため、`model_comparison.run_comparison`
+    # がモデル単位で自前に emit する。
+    "model_comparison":  "own",
 }

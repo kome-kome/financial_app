@@ -45,6 +45,22 @@ def _heavy_plugins() -> list:
     return [p for p in plugin_registry.list_plugins() if getattr(p, "heavy", False)]
 
 
+def _heavy_special_names() -> set:
+    """`SPECIAL_ANALYSES` のうち heavy なもの（#593）。
+
+    `model_comparison` は `AnalysisPlugin` ではないので `list_plugins()` に出ず、
+    **カバレッジ表の照合から丸ごと漏れていた**（#545 の対象外だった理由でもある）。
+    実行が最も長いのがここなので、表の対象へ含める。名前は書き写さず
+    `SPECIAL_ANALYSES` から引く。
+    """
+    return {e["name"] for e in analysis.SPECIAL_ANALYSES if e.get("heavy")}
+
+
+def _covered_names() -> set:
+    """カバレッジ表が縛るべき名前の集合＝heavy プラグイン ∪ heavy 特例エントリ。"""
+    return {p.name for p in _heavy_plugins()} | _heavy_special_names()
+
+
 def _sources_of(plugin) -> str:
     """プラグインクラスの MRO を辿って定義モジュールのソースを連結して返す。
 
@@ -68,24 +84,34 @@ class TestProgressCoverageRegistry:
     """PROGRESS_COVERAGE（表）と heavy プラグイン（実体）を照合する。"""
 
     def test_every_heavy_plugin_is_registered(self):
-        missing = [p.name for p in _heavy_plugins()
-                   if p.name not in progress.PROGRESS_COVERAGE]
+        missing = [n for n in _covered_names() if n not in progress.PROGRESS_COVERAGE]
         assert not missing, (
-            f"heavy=True なのに進捗カバレッジ表に無いプラグイン: {missing}。"
+            f"heavy=True なのに進捗カバレッジ表に無い分析: {missing}。"
             "plugins/progress.py の PROGRESS_COVERAGE へ "
-            "'common' / 'own' / 'exempt: <理由>' を追加してください（Issue #545）"
+            "'common' / 'own' / 'exempt: <理由>' を追加してください（Issue #545・#593）"
         )
 
+    def test_heavy_special_entries_are_covered(self):
+        """特例エントリ（`SPECIAL_ANALYSES`）も表の対象であること（#593）。
+
+        `model_comparison` は `AnalysisPlugin` ではないため `list_plugins()` に出ず、
+        **表からも CI からも丸ごと漏れていた**。実行が最も長いのがここなので、
+        「載っていない」を落とせる状態を保つ。
+        """
+        specials = _heavy_special_names()
+        assert specials, "SPECIAL_ANALYSES に heavy なエントリが無い（前提が変わった）"
+        missing = [n for n in specials if n not in progress.PROGRESS_COVERAGE]
+        assert not missing, f"heavy な特例エントリが表に無い: {missing}"
+
     def test_registry_has_no_phantom_entries(self):
-        known = {p.name for p in plugin_registry.list_plugins()}
+        known = {p.name for p in plugin_registry.list_plugins()} | _heavy_special_names()
         phantom = [n for n in progress.PROGRESS_COVERAGE if n not in known]
-        assert not phantom, f"実在しないプラグインが表に残っています: {phantom}"
+        assert not phantom, f"実在しない分析が表に残っています: {phantom}"
 
     def test_registered_plugins_are_still_heavy(self):
-        heavy = {p.name for p in _heavy_plugins()}
-        stale = [n for n in progress.PROGRESS_COVERAGE if n not in heavy]
+        stale = [n for n in progress.PROGRESS_COVERAGE if n not in _covered_names()]
         assert not stale, (
-            f"heavy=False になったのに表へ残っているプラグイン: {stale}"
+            f"heavy=False になったのに表へ残っている分析: {stale}"
         )
 
     def test_values_use_known_vocabulary(self):
@@ -119,6 +145,26 @@ class TestProgressCoverageRegistry:
             src = _sources_of(plugin)
             assert "progress.emit(" in src, (
                 f"{plugin.name} は 'own' だが progress.emit を呼んでいません"
+            )
+
+    def test_own_special_entries_emit_progress_themselves(self):
+        """特例エントリの 'own' も空手形でないこと（#593）。
+
+        `_sources_of` はプラグインの MRO を辿るので特例には効かない。名乗りだけ表に
+        載って実体が無い状態は、**表を作った意味がそのまま消える**（ADR-0031 と同型）。
+        実体のモジュールは `SPECIAL_ANALYSES` の名前と同名の .py に置く規約とする。
+        """
+        root = Path(__file__).resolve().parent.parent
+        for name in _heavy_special_names():
+            if progress.PROGRESS_COVERAGE.get(name) != "own":
+                continue
+            src_file = root / f"{name}.py"
+            assert src_file.exists(), (
+                f"{name} は 'own' だが実体 {src_file.name} が見つかりません"
+            )
+            src = src_file.read_text(encoding="utf-8")
+            assert "progress.emit(" in src, (
+                f"{name} は 'own' だが {src_file.name} が progress.emit を呼んでいません"
             )
 
 
@@ -338,3 +384,50 @@ class TestStreamAwaitingStart:
         asyncio.run(asyncio.wait_for(consume(), timeout=5))
         assert len(frames) == 1
         assert '"running": false' in frames[0]
+
+
+class TestProgressStreamAcceptsSpecialEntries:
+    """進捗 SSE が特例エントリでも 404 にならないこと（#593）。
+
+    `stream_plugin_progress` は `get_plugin()` が None なら 404 を返していた。
+    `model_comparison` は `AnalysisPlugin` ではないので**必ず 404 になり、画面が
+    ストリームを開けなかった**——進捗が最も要る（heavy 3本を順に回す）のがここなのに、
+    配線が通らない理由がこれだった。
+
+    本文は読まない。`stream_awaiting_start` は開始を数秒待ち合わせるので、
+    TestClient で消費するとその間ブロックする。ここで縛りたいのは**入口の判定**だけ。
+    """
+
+    def test_special_heavy_entry_does_not_404(self):
+        from fastapi.responses import StreamingResponse
+
+        for name in _heavy_special_names():
+            res = asyncio.run(analysis.stream_plugin_progress(name))
+            assert isinstance(res, StreamingResponse), f"{name} がストリームを返さない"
+            assert res.media_type == "text/event-stream"
+
+    def test_heavy_plugin_still_streams(self):
+        from fastapi.responses import StreamingResponse
+
+        heavy = _heavy_plugins()
+        assert heavy, "heavy プラグインが1つも無い（前提が変わった）"
+        res = asyncio.run(analysis.stream_plugin_progress(heavy[0].name))
+        assert isinstance(res, StreamingResponse)
+
+    def test_unknown_name_still_404s(self):
+        from fastapi import HTTPException
+
+        with pytest.raises(HTTPException) as ei:
+            asyncio.run(analysis.stream_plugin_progress("no_such_analysis"))
+        assert ei.value.status_code == 404
+
+    def test_light_special_entry_still_404s(self):
+        """heavy でない特例（screen / backtest）は通さない——進捗を持たないため。"""
+        from fastapi import HTTPException
+
+        light = [e["name"] for e in analysis.SPECIAL_ANALYSES if not e.get("heavy")]
+        assert light, "heavy でない特例エントリが無い（前提が変わった）"
+        for name in light:
+            with pytest.raises(HTTPException) as ei:
+                asyncio.run(analysis.stream_plugin_progress(name))
+            assert ei.value.status_code == 404, f"{name} が 404 にならない"

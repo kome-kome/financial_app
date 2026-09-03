@@ -66,7 +66,7 @@ async def run_comparison(db: Session, render_light_mode: bool = False,
         if unknown:   # 黙って空の比較を返さない（typo が「全モデル失敗」に化けるのを防ぐ）
             raise ValueError(f"COMPARISON_MODELS に無いモデル名: {sorted(unknown)}")
         targets = [(n, s) for n, s in COMPARISON_MODELS if n in set(only_models)]
-    from plugins import get_plugin, execute_plugin, DependencyError
+    from plugins import get_plugin, execute_plugin, DependencyError, progress
     from database import tuning_objective_only, tuning_dry_run
     from plugins.macro_snapshots import shared_snapshot_cache
 
@@ -76,7 +76,11 @@ async def run_comparison(db: Session, render_light_mode: bool = False,
     # #298/#304）。比較ビューは全モデルを連続実行するため、これが無いと 130万行の
     # stock_price_weekly フルロードがモデルごとに走り本番の statement_timeout に当たる。
     with shared_snapshot_cache():
-        for name, short in targets:
+        for i, (name, short) in enumerate(targets, 1):
+            # どのモデルを回しているかを画面へ出す（#593）。共通骨格（macro_snapshots）の
+            # 進捗はそのまま流れるが、**それだけでは3本のどれを回しているかが分からない**。
+            # sink 未設定（CLI・バッチ経路）では emit は完全な no-op。
+            progress.emit(f"{short}（{name}）を実行", i - 1, len(targets))
             entry: dict = {"name": name, "short": short}
             p = get_plugin(name)
             if p is None:
@@ -110,6 +114,10 @@ async def run_comparison(db: Session, render_light_mode: bool = False,
                 entry.update(available=False, reason=reason, error=str(e))
                 _safe_rollback(db)
             models.append(entry)
+
+    # 終端を必ず流す（#593）。`emit` は間引きでも最後（current==total）を落とさない約束で、
+    # ここを出さないと画面は「2/3 のまま完了」に見え、止まったのか終わったのか区別できない。
+    progress.emit("モデル間の有意性を集計", len(targets), len(targets))
 
     # モデル間 rank-IC 差の有意性マトリクス（Issue #369）。各モデルの per-fold IC 系列
     # （oof_backtest.rank_ic_by_period）を共通 test 期でペアリングし、系列相関を保存する

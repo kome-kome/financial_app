@@ -660,6 +660,18 @@ tr:hover td{background:var(--border-subtle)}
       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
       3モデルを実行して比較
     </button>
+
+    <!-- 進捗（#593）。動的タブ側は analysis.js が同じ形を生成するが、ここは静的タブなので
+         markup を持つ。id は dynprogress-<tabId> の規約に合わせる＝_startPluginProgress を
+         そのまま使えるようにするため（配線を2本に増やさない）。 -->
+    <div id="dynprogress-model_comparison" class="hidden progress-wrap">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+        <span class="text-sm" id="dynprogress-label-model_comparison">実行中...</span>
+        <span class="text-sm" id="dynprogress-count-model_comparison"></span>
+      </div>
+      <div class="progress-bar" role="progressbar" aria-valuemin="0" aria-valuemax="100"><div class="progress-fill" id="dynprogress-fill-model_comparison" style="width:0%"></div></div>
+      <div class="log-box" id="dynprogress-log-model_comparison" style="margin-top:10px" role="log" aria-live="polite" aria-label="モデル比較の実行ログ"></div>
+    </div>
   </div>
 
   <div class="card hidden" id="mc-results-card">
