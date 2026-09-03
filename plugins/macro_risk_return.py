@@ -197,9 +197,10 @@ class MacroRiskReturnPlugin(AnalysisPlugin):
         }
 
     def tuning_search_space(self) -> tuple:
-        """ハイパーパラメータ自動探索の探索空間（Issue #265・#596 で min_coverage を除外）。
+        """ハイパーパラメータ自動探索の探索空間（Issue #265・#596 で min_coverage を除外・
+        #604 でモメンタム2軸を除外）。
 
-        構造トグル（use_macro/use_momentum）と BIC 最大採用数（max_features）の少数軸グリッド。
+        構造トグル（use_macro）と BIC 最大採用数（max_features）の少数軸グリッド。
         `fin_features`/`macro_features` の部分集合探索は 2^N で不可能なため対象外
         （既定の候補プールを固定・#264 設計方針）。表示専用の lambda_risk/risk_axis/r3_gate/top_n
         も対象外。空間が小さいため strategy="grid"（全探索）を推奨。
@@ -219,15 +220,37 @@ class MacroRiskReturnPlugin(AnalysisPlugin):
         `min_coverage` は `params_schema()` には残す（M-2 のように `macro_nan_ok=True` で
         呼ぶモデルでは実際に効く共通パラメータで、契約から消すと消費側が壊れる）。
         M-1 でこの値を動かしても結果は変わらない旨は schema の description に書いてある。
+
+        **モメンタム2軸（`use_momentum` / `momentum_window`）も軸にしない（#604・ADR-0050）。**
+        `min_coverage` と違い、この2軸は**スコアを動かす**。しかし動かしているのは特徴量の
+        効果ではなく母集団で、`hyperparameter_search` は各候補を**その候補自身の母集団**で
+        評価するため、探索は構造的に「母集団が縮む側」を選ぶ。実測（2026-09-04・
+        `python -m scripts.momentum_gate --models risk_return --windows 3,6,12,18,24`）:
+
+            共通 (ym,ec) 域 32,438件・全条件 11 fold で **10検定すべて非有意**（補正後 α=0.00500）。
+            探索が選んでいた窓18 は raw の +0.0435 が共通域では **+0.0039**（p=0.757）＝ 91% が母集団効果。
+
+        **さらに BIC は `momentum_12m1` を一度も選ばない**——`max_features=20` の上限まで
+        選んだうえで全6条件（無し/3/6/12/18/24）で落選する。つまりこの軸を外しても
+        **M-1 のモデルは1ミリも変わらない**（選ばれない列を候補から消すだけ）。窓3の選択結果は
+        OFF と完全一致し、窓18 では代わりに `macro_us5y_zscore` / `macro_us30y_zscore` が入る、
+        という「他の特徴量の選択が変わる」効果だけが出ていた。
+
+        `base_params` で `use_momentum=False` を**明示的に固定**する。`coerce_params` の
+        既定補完に任せても同じ値になるが、明示すると `plugin_tuned_params.params_json` へ
+        「探索がこの値を固定した」ことが残る（既定が将来変わっても探索条件が動かない）。
+
+        M-2 は木モデルで特徴量選択が無く、この論拠（BIC が選ばない）が使えないため
+        2軸を残している。M-2 側は共通域の実測（符号反転・窓24 は有意に悪化）で別途判断する。
+
+        グリッドは 72 → **12通り**（`use_macro` 2 × `max_features` 6）。
         """
         from .tuning import SearchDim
 
-        base_params: dict = {}
+        # モメンタムは探索せず OFF で固定する（上記 docstring・#604）
+        base_params: dict = {"use_momentum": False}
         dims = [
             SearchDim("use_macro",        [True, False]),
-            SearchDim("use_momentum",     [True, False]),
-            SearchDim("momentum_window",  [3, 6, 12, 18, 24],
-                      only_if=lambda c: c.get("use_momentum") is True),
             SearchDim("max_features",     [5, 10, 15, 20, 30, 40]),
         ]
         return base_params, dims

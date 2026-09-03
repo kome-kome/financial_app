@@ -1217,6 +1217,10 @@ $\overline{y}_t$ は期 $t$ の**全サンプル平均**実現リターン（分
   で、20検定のうち基準を上回って補正後 α を通ったものは 0件（唯一通ったのは M-2 窓24 の
   **悪化** −0.0264・p=0.001）。測定入口は
   `python -m scripts.momentum_gate --models risk_return,xgb_m2 --windows 3,6,12,18,24`
+  <br>**M-1 はこの2軸を探索空間から外した**（#604・72 → **12通り**）——M-1 は BIC が
+  `momentum_12m1` を一度も選ばないので、外してもモデルは1ミリも変わらない。**M-2 は残している**
+  ——木モデルで特徴量選択が無く「BIC が選ばない」という論拠が使えず、外すとモデル自体が
+  変わる（再実測が要る）
   （`use_monotone_constraints`・#366・§11.4.1）の10軸
 - ~~quantile regression（`reg:quantileerror`）による予測区間（R1' 代替）~~ → #365 で**分割コンフォーマル区間**として対応済み（§11.7.1・ADR-0020）。quantile regression（再学習要）ではなく OOF 残差ベースのコンフォーマル（再学習不要・family-wide・被覆保証）を採用
 - ~~SHAP interaction values（特徴量ペアの交互作用可視化）~~ → #371 で対応済み（§11.5・`feature_interactions`）。あわせて signed SHAP（`feature_coefs_signed`）＋学習方向 corr（`feature_shap_dir`）も追加
