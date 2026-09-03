@@ -19,6 +19,15 @@ router = APIRouter()
 log = logging.getLogger(__name__)
 
 
+def _heavy_special_names() -> set:
+    """`SPECIAL_ANALYSES` のうち heavy なもの（#593）。
+
+    進捗 SSE は `AnalysisPlugin` だけでなくここも通す。**名前を書き写さず
+    `SPECIAL_ANALYSES` から引く**——特例を足したときに片方だけ直す事故を防ぐ。
+    """
+    return {e["name"] for e in SPECIAL_ANALYSES if e.get("heavy")}
+
+
 def _progress_job(plugin_name: str) -> str:
     """進捗 JobState のスロット名。収集ジョブと同じ registry へ相乗りする（#545）。
 
@@ -134,20 +143,24 @@ async def run_plugin(
         raise HTTPException(500, "分析エラーが発生しました。")
 
 
-async def _execute_with_progress(p, plugin_name: str, params: dict, db):
-    """heavy プラグインを進捗 sink で包んで実行する（Issue #545）。
+async def _run_with_progress(job_name: str, label: str, run):
+    """重い分析を進捗 sink で包んで実行する（Issue #545・#593 で特例エントリへも拡張）。
 
-    包むのは **heavy だけ**。軽いプラグインまで JobState を回すと、画面が開いていない
+    包むのは **heavy だけ**。軽い分析まで JobState を回すと、画面が開いていない
     実行（`/api/recommend` 等）でも状態が残り続けて意味が無い。sink は ContextVar 経由で
     execute の内側（`asyncio.to_thread` の先）まで伝播する。
+
+    `run` は引数なしのコルーチン関数。**プラグインと特例エントリで実体を2本に増やさない**
+    ——`model_comparison` は `AnalysisPlugin` ではなく `SPECIAL_ANALYSES` の特例で
+    `/api/plugins/{name}/run` を通らないが、進捗の配線だけはここを共有する（#593）。
 
     例外は握らず送出する（呼び出し側の except が HTTP ステータスへマップする契約を保つ）
     が、**閉じる前に最後の1行として画面へ残す**——ここで黙って落ちると、画面は
     ストリームが切れただけになり「終わった」と区別できない。
     """
-    st = jobs.state(_progress_job(plugin_name))
+    st = jobs.state(_progress_job(job_name))
     st.reset_for_run()
-    st.append_log(f"「{p.label}」を開始しました")
+    st.append_log(f"「{label}」を開始しました")
 
     def sink(step: str, current: int, total: int) -> None:
         st.progress, st.total = current, total
@@ -155,13 +168,19 @@ async def _execute_with_progress(p, plugin_name: str, params: dict, db):
 
     try:
         with progress.progress_sink(sink):
-            return await plugin_registry.execute_plugin(p, params, db)
+            return await run()
     except Exception as e:
         st.append_log(f"[エラー] {e}")
         raise
     finally:
         # running=False が SSE の終端。append_log より後（最後の1件に載せるため）。
         st.running = False
+
+
+async def _execute_with_progress(p, plugin_name: str, params: dict, db):
+    """heavy プラグインを進捗つきで実行する（`_run_with_progress` の薄い入口）。"""
+    return await _run_with_progress(
+        plugin_name, p.label, lambda: plugin_registry.execute_plugin(p, params, db))
 
 
 @router.get("/api/plugins/{plugin_name}/progress")
@@ -171,8 +190,7 @@ async def stream_plugin_progress(plugin_name: str):
     画面は POST の応答を待たずにこれを開く（POST は完了まで返らないため）。開始前に
     開かれても `stream_awaiting_start` が数秒待ち合わせる。
     """
-    p = plugin_registry.get_plugin(plugin_name)
-    if p is None:
+    if plugin_registry.get_plugin(plugin_name) is None and plugin_name not in _heavy_special_names():
         raise HTTPException(404, f"プラグイン '{plugin_name}' が見つかりません")
     return jobs.stream_awaiting_start(_progress_job(plugin_name))
 
@@ -300,8 +318,15 @@ async def backtest_model_comparison(request: Request, db: Session = Depends(api.
     3モデルとも heavy=True のため、Render 軽量モードでは各モデルが reason="heavy_render" で
     スキップされる（ローカル実行専用）。個々のモデル失敗は per-model で握り、比較全体は継続する。
     """
+    # 進捗つきで包む（#593）。内部で heavy 3本を順に回すので**実行が最も長いのがここ**
+    # なのに、#545 の配線は `/api/plugins/{name}/run` 経路にしか通っていなかった。
+    label = next((e["label"] for e in SPECIAL_ANALYSES if e["name"] == "model_comparison"),
+                 "モデル比較（OOF）")
     try:
-        return await model_comparison.run_comparison(db, render_light_mode=api.RENDER_LIGHT_MODE)
+        return await _run_with_progress(
+            "model_comparison", label,
+            lambda: model_comparison.run_comparison(
+                db, render_light_mode=api.RENDER_LIGHT_MODE))
     except Exception as e:
         log.error("Model comparison error: %s", e, exc_info=True)
         raise HTTPException(500, "モデル比較の実行エラーが発生しました。")

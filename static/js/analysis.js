@@ -985,6 +985,10 @@ async function runModelComparison() {
   const btn = document.getElementById('btn-model-comparison');
   btn.disabled = true;
   btn.innerHTML = '<span class="spinner"></span> 3モデル実行中（計算が重いため時間がかかります）...';
+  // 進捗 SSE（#593）。内部で heavy 3本を順に回すので実行が最も長く、進捗が最も要るのがここ。
+  // タブ id は静的タブ名 'model_comparison' で、SSE の名前も同じ（特例エントリは
+  // routers/analysis.py::SPECIAL_ANALYSES 側が heavy として持つ）。
+  const stopProgress = _startPluginProgress('model_comparison', 'model_comparison');
   try {
     const d = await apiFetch('/api/backtest/model-comparison', {method:'POST', body:'{}'});
     _renderModelComparison(d);
@@ -992,6 +996,7 @@ async function runModelComparison() {
   } catch(e) {
     showNotif('モデル比較に失敗: ' + e.message);
   } finally {
+    if (stopProgress) stopProgress();
     btn.disabled = false;
     btn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg> 3モデルを実行して比較';
   }
