@@ -195,15 +195,72 @@ async def stream_plugin_progress(plugin_name: str):
     return jobs.stream_awaiting_start(_progress_job(plugin_name))
 
 
+def project_tuned_params(plugin, params: dict) -> tuple[dict, list[str]]:
+    """保存済みの調整値を**現在の探索空間へ射影**する（#604）。
+
+    `plugin_tuned_params` は「そのとき探索した空間」の記録なので、**軸を外すと古い値が
+    残り続ける**。画面はこれを「🔧 自動調整済み」としてフォームへプリフィルするため、
+    探索をやめた設定が推奨値として出続ける——実際 M-1 は 2026-09-04 に
+    `use_momentum`/`momentum_window` を軸から外したが、保存値は
+    `use_momentum=True, momentum_window=18`（2026-09-02 の探索）のままで、
+    次の月次探索（毎月2日）まで画面に出続ける状態だった。
+
+    射影の規則:
+      - `base_params` にあるキー … **その値で上書き**（探索が固定した測定条件そのもの）
+      - dims にある軸           … 保存値をそのまま使う（探索で選ばれた値）
+      - どちらにも無いキー       … 落とす（`coerce_params` が `params_schema` の既定を補完）
+
+    第2要素は「保存値と違う扱いになったキー」。画面はこれを注記に使う。**黙って値を
+    変えると、今度は「調整済みと言いながら別の値」という逆の混乱になる。**
+
+    `tuning_search_space()` を持たないプラグインは射影せずそのまま返す。
+    """
+    space_fn = getattr(plugin, "tuning_search_space", None)
+    if space_fn is None:
+        return dict(params), []
+    try:
+        base, dims = space_fn()
+    except Exception:                                  # 探索空間が壊れていても表示は殺さない
+        log.warning("tuning_search_space() の取得に失敗（射影せず生値を返す）", exc_info=True)
+        return dict(params), []
+
+    dim_names = {d.name for d in dims}
+    out: dict = {}
+    changed: list[str] = []
+    for k, v in (params or {}).items():
+        if k in base:
+            out[k] = base[k]
+            if base[k] != v:
+                changed.append(k)
+        elif k in dim_names:
+            out[k] = v
+        else:
+            changed.append(k)                          # 空間から消えた＝落として既定へ
+    for k, v in base.items():                          # 保存値に無い固定値も足す
+        out.setdefault(k, v)
+    return out, sorted(changed)
+
+
 @router.get("/api/plugins/{plugin_name}/tuned")
 async def get_plugin_tuned(plugin_name: str, db: Session = Depends(api.get_db)):
     """自動調整済みハイパーパラメータ（Issue #264・hyperparameter_search.py --persist が
-    書き込む）を読む。読取専用・軽量（重い計算は起こさない）。未調整なら404。"""
+    書き込む）を読む。読取専用・軽量（重い計算は起こさない）。未調整なら404。
+
+    `params` は**現在の探索空間へ射影した値**を返す（#604・`project_tuned_params`）。
+    生の保存値は `params_as_tuned`、射影で扱いが変わったキーは `stale_params` に載せる
+    ——画面はこの2つで「保存された値」と「いま推奨できる値」を区別して見せられる。
+    """
     from database import get_tuned_params
 
     tuned = get_tuned_params(db, plugin_name)
     if tuned is None:
         raise HTTPException(404, f"'{plugin_name}' は自動調整されていません")
+    plugin = plugin_registry.get_plugin(plugin_name)
+    if plugin is not None:
+        raw = tuned.get("params") or {}
+        projected, changed = project_tuned_params(plugin, raw)
+        tuned = {**tuned, "params": projected,
+                 "params_as_tuned": raw, "stale_params": changed}
     return tuned
 
 

@@ -1172,23 +1172,28 @@ async function _loadTunedBadge(pluginName) {
   _tunedParamsCache[pluginName] = tuned;
   const dt = tuned.tuned_at ? new Date(tuned.tuned_at).toLocaleString('ja-JP') : '-';
   const val = tuned.objective_value != null ? tuned.objective_value.toFixed(4) : '-';
-  host.innerHTML = `<div style="display:inline-flex;align-items:center;gap:8px;padding:4px 10px;background:var(--bg-sunken);border-radius:999px;font-size:12px;color:var(--text-secondary)">
+  // 探索空間から外れた軸は API 側で既定へ射影される（#604）。黙って値を変えると
+  // 「調整済みと言いながら別の値」という逆の混乱になるので、変わったキーを必ず出す。
+  const stale = Array.isArray(tuned.stale_params) ? tuned.stale_params : [];
+  const staleNote = stale.length
+    ? `<span title="保存時から探索対象が変わったため、これらは既定値で表示しています">⚠ 探索対象外: ${esc(stale.join(', '))}</span>`
+    : '';
+  host.innerHTML = `<div style="display:inline-flex;align-items:center;gap:8px;padding:4px 10px;background:var(--bg-sunken);border-radius:999px;font-size:12px;color:var(--text-secondary);flex-wrap:wrap">
     <span>🔧 自動調整済み: ${esc(tuned.objective_name)}=${esc(val)}（${esc(dt)}）</span>
-    <button type="button" class="btn btn-secondary btn-sm" data-click="applyTunedParams" data-arg="${esc(pluginName)}">初期値にリセット</button>
+    ${staleNote}
+    <button type="button" class="btn btn-secondary btn-sm" data-click="applyTunedParams" data-arg="${esc(pluginName)}">調整済みの値に戻す</button>
+    <button type="button" class="btn btn-secondary btn-sm" data-click="applyDefaultParams" data-arg="${esc(pluginName)}">既定値に戻す</button>
   </div>`;
   // 調整済みパラメータが存在する場合はページ読込時点でフォームへ自動反映する（Issue #294）
   applyTunedParams(pluginName);
 }
 
-// フォームへ調整値を書き込むだけ（再計算はしない。「実行」ボタンはユーザーが別途押す）。
-// _loadTunedBadge からページ読込時に自動呼び出しされるほか、「初期値にリセット」ボタンからも
-// 手動で呼び出せる（ユーザーが値をいじった後に調整済み値へ戻す用途、Issue #294）。
-function applyTunedParams(pluginName) {
-  const tuned = _tunedParamsCache[pluginName];
+// フォームへ値を書き込む共通処理（再計算はしない。「実行」ボタンはユーザーが別途押す）。
+function _writeParamsToForm(pluginName, params) {
   const meta = _pluginMeta[pluginName];
-  if (!tuned || !meta) return;
+  if (!meta) return;
   const schema = meta.params_schema || {};
-  for (const [key, value] of Object.entries(tuned.params || {})) {
+  for (const [key, value] of Object.entries(params || {})) {
     const field = schema[key];
     const el = document.getElementById(`param-${pluginName}-${key}`);
     if (!field || !el) continue;
@@ -1205,6 +1210,34 @@ function applyTunedParams(pluginName) {
       el.value = value;
     }
   }
+}
+
+// 調整済みの値をフォームへ書く。_loadTunedBadge からページ読込時に自動呼び出しされるほか、
+// 「調整済みの値に戻す」ボタンからも手動で呼べる（Issue #294）。
+//
+// **ボタンのラベルはかつて「初期値にリセット」だった**（#604 で改名）。押すとチューナの
+// 選んだ値へ戻るのに「初期値」と読めるため、探索が選んだ設定が製品の既定だと誤解される。
+// 実際 M-1 のモメンタムは params_schema の既定が OFF なのに、探索が選んだ ON が
+// 「初期値」として表示・復元されていた。
+function applyTunedParams(pluginName) {
+  const tuned = _tunedParamsCache[pluginName];
+  if (!tuned) return;
+  _writeParamsToForm(pluginName, tuned.params);
+}
+
+// params_schema が定める既定値へ戻す（#604）。調整済みの値と既定を行き来できるようにして、
+// 「いま画面に出ている値がどちらなのか」を確かめられるようにする。
+function applyDefaultParams(pluginName) {
+  const meta = _pluginMeta[pluginName];
+  if (!meta) return;
+  const schema = meta.params_schema || {};
+  const defaults = {};
+  for (const [key, field] of Object.entries(schema)) {
+    if (field && Object.prototype.hasOwnProperty.call(field, 'default')) {
+      defaults[key] = field.default;
+    }
+  }
+  _writeParamsToForm(pluginName, defaults);
 }
 
 // ── プラグイン動的読み込み（メタ駆動サイドバー）─────────────────────────
