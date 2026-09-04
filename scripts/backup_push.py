@@ -294,6 +294,18 @@ class Storage:
             self._fail("一覧取得に失敗", r)
         return sorted({item["name"].split("/")[0] for item in r.json()})
 
+    def download(self, remote_path: str) -> bytes:
+        """1オブジェクトを取ってくる（`backup_restore --source storage` が使う）。
+
+        **上げる側と同じクラスに置く。** 取る経路だけ別実装にすると、バケット名・認証・
+        エラーの読み方が2箇所に分かれ、`_fail` が名指ししてくれる「バケット未作成」
+        「anon key を渡している」がダウンロード側では出なくなる。
+        """
+        r = self.client.get(f"{self.base}/object/{self.bucket}/{remote_path}")
+        if r.status_code >= 400:
+            self._fail(f"ダウンロード失敗 {remote_path}", r)
+        return r.content
+
     def remove_prefix(self, prefix: str, names: Iterable[str]) -> None:
         paths = [f"{prefix}/{n}" for n in names]
         r = self.client.request("DELETE", f"{self.base}/object/{self.bucket}",

@@ -134,14 +134,25 @@ Supabase Storage に置いた世代から戻す。**復元先はローカル限�
 
 ```powershell
 python -m scripts.backup_push --list --dest storage        # 世代を確認
-python -m scripts.backup_restore                           # 最新世代の内容（ドライラン）
-python -m scripts.backup_restore --apply --create-schema    # 既定のローカル DB へ
+python -m scripts.backup_restore                           # ローカル世代の内容（ドライラン）
+python -m scripts.backup_restore --source storage          # Storage 側の内容（マニフェストだけ落とす）
+python -m scripts.backup_restore --apply --create-schema    # ローカル世代を既定のローカル DB へ
+python -m scripts.backup_restore --source storage --apply --create-schema `
+    --dest-url postgresql://postgres@localhost:5433/restore_drill   # Storage から使い捨てクラスタへ
 ```
 
 - 復元は **FK 依存順に1表ずつ**（`pg_restore --disable-triggers` は非 superuser では使えない）。
 - 復元後にマニフェストの行数と突合し、食い違えば exit 1。
+- `--source storage` は世代を `.backups/_from_storage/<stamp>/` へ落とす。**ローカル世代と同じ
+  場所へ置かない**——`backup_push` の保持ポリシーは `.backups/` 直下を数えるので、複製が枠を
+  食うと本物の世代が消える。落とした直後にマニフェストの `bytes` と突合し、欠けていれば
+  復元へ進まない（マニフェストにチェックサムは無いのでサイズまで。中身の担保は行数一致側）。
 - **四半期に1度、空の DB へ実際に流す**。`edinet` は `createdb` 権限を持たないので、予行には
-  `initdb` の使い捨てクラスタ（port 5433）を使う——2026-08-20 の実証もこの経路で、17表すべて行数一致を確認した。
+  `initdb` の使い捨てクラスタ（port 5433）を使う——正本のインスタンス（5432）に触れないことが要点。
+- **2026-09-04 に Storage 経路を初めて通した**（#503 検証8）: `20260821T013818Z` を落として
+  使い捨てクラスタへ復元し、**17表すべて行数一致**。さらに `DATABASE_URL_LOCAL` を復元先へ向けて
+  API を起動し、`/health` と全9画面が 200・`/api/stats` が `companies 4,438 / records 50,490 /
+  stock_price 1,293,208` を返すことまで確認した（**戻せたことの本体は「サービスが再開できる」こと**）。
 
 #### アクティブ（`.github/workflows/` 直下・Actions 対象）
 

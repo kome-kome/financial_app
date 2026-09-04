@@ -75,6 +75,7 @@ python -m scripts.check_batch_freshness             # 判定（停止なら起�
 python -m scripts.backup_push --apply                 # ローカルに世代を作る
 python -m scripts.backup_push --apply --dest storage  # Storage へ push
 python -m scripts.backup_restore --apply --create-schema --dest-url <local-url>
+python -m scripts.backup_restore --source storage --apply --create-schema --dest-url <local-url>  # Storage から
 
 python _pipeline_incremental.py         # 差分収集（XBRL＋マクロ＋株価）＝鮮度の担い手
 python collector.py --years 5           # 全件収集（5年分）

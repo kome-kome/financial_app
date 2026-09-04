@@ -23,9 +23,20 @@ FK は順序だけで満たす。**ダンプの TOC はアルファベット順�
 `mirror_common.guard_dest_local()` をそのまま使う。#503 で正本はローカルへ移ったが、
 **この方向の制約は変わらない**——本番 Postgres へ書き込む経路はコードとして持たない。
 
+## Storage から落として戻す（#503 検証8）
+
+`--source storage` で Supabase Storage の世代を `.backups/_from_storage/<stamp>/` へ落として
+から同じ復元経路へ合流する。**ローカル世代と同じ場所へ置かない**——`backup_push` の保持
+ポリシーは `.backups/` 直下の世代を数えるので、複製が枠を食って本物の世代が消える。
+
+落とした直後にマニフェストの `bytes` と突合する。マニフェストにチェックサムは無いので
+サイズまでしか言えず、中身の担保は復元後の `verify_counts`（行数一致）が持つ。
+
 実行:
     python -m scripts.backup_restore                       # 最新世代の内容を表示（ドライラン）
     python -m scripts.backup_restore --apply               # 既定のローカル DB へ復元
+    python -m scripts.backup_restore --source storage --apply --create-schema \
+        --dest-url postgresql://u:p@localhost:5433/scratch  # Storage から使い捨てクラスタへ
     python -m scripts.backup_restore --apply --dest-url postgresql://u:p@localhost:5433/scratch
     python -m scripts.backup_restore --generation 20260820T111003Z --apply
 
@@ -46,6 +57,46 @@ from sqlalchemy import text
 import database
 from scripts import backup_push as bp
 from scripts import mirror_common as mc
+
+
+# Storage から落とした世代の置き場。**ローカルで取った世代と混ぜない**——`backup_push` の
+# 保持ポリシー（`generations_to_delete`）は `.backups/` 直下の世代を数えるので、複製がそこに
+# 混じると「直近N世代」の枠を食って本物が消える。1階層下げると `local_generations()`
+# （直下に manifest.json を持つディレクトリだけを世代とみなす）から構造的に外れる。
+FROM_STORAGE_STORE = bp.LOCAL_STORE / "_from_storage"
+
+
+def pull_generation(store: "bp.Storage", stamp: str, dest_root: Path = FROM_STORAGE_STORE,
+                    *, manifest_only: bool = False, echo=print) -> Path:
+    """Storage の1世代を `dest_root/<stamp>/` へ落とし、マニフェストの `bytes` と突合する。
+
+    **落とした直後に照合する。** 途中で切れた転送をそのまま `pg_restore` へ渡すと
+    「復元に失敗した」としか見えず、転送の問題かダンプ自体の問題かの切り分けが後ろへ倒れる。
+    マニフェストにチェックサムは無い（`backup_push.Generation.manifest`）ので、ここで言えるのは
+    サイズまで。中身の担保は復元後の `verify_counts` が持つ＝**2段構えで、どちらも省かない**。
+
+    `manifest_only=True` はドライラン用。37MB を落とさずに「何が入っているか」だけ見る。
+    """
+    out = dest_root / stamp
+    out.mkdir(parents=True, exist_ok=True)
+    raw = store.download(f"{stamp}/{bp.MANIFEST_NAME}")
+    (out / bp.MANIFEST_NAME).write_bytes(raw)
+    if manifest_only:
+        return out
+
+    problems = []
+    for t in json.loads(raw.decode("utf-8"))["tables"]:
+        name = f"{t['table']}.dump"
+        blob = store.download(f"{stamp}/{name}")
+        (out / name).write_bytes(blob)
+        echo(f"  download {stamp}/{name} ({len(blob) / 1024 / 1024:.1f}MB)")
+        if len(blob) != t["bytes"]:
+            problems.append(f"{t['table']}: マニフェスト {t['bytes']:,} バイト"
+                            f" / 実際 {len(blob):,} バイト")
+    if problems:
+        raise SystemExit("中止: 落としたダンプがマニフェストとサイズ不一致です"
+                         "（転送が途中で切れた疑い。復元へ進みません）:\n  " + "\n  ".join(problems))
+    return out
 
 
 def latest_generation(store: Path = bp.LOCAL_STORE) -> Optional[str]:
@@ -98,6 +149,9 @@ def verify_counts(engine, manifest: dict) -> list[str]:
 def main(argv: Optional[list[str]] = None) -> int:
     ap = argparse.ArgumentParser(description="バックアップ世代からローカルへ復元する（#503）")
     ap.add_argument("--generation", help="世代スタンプ（既定は最新）")
+    ap.add_argument("--source", choices=("local", "storage"), default="local",
+                    help="世代の取得元。local=.backups/（既定） / "
+                         "storage=Supabase Storage から落として復元する")
     ap.add_argument("--dest", default="local", help="復元先のエンドポイント（既定 local）")
     ap.add_argument("--dest-url", help="--dest の代わりに接続URLを直接指定（使い捨てクラスタ用）")
     ap.add_argument("--apply", action="store_true", help="実際に復元する（既定はドライラン）")
@@ -105,11 +159,25 @@ def main(argv: Optional[list[str]] = None) -> int:
                     help="復元先に器（テーブル）が無ければ作る。ダンプは data-only なので空の DB には必須")
     args = ap.parse_args(argv)
 
-    stamp = args.generation or latest_generation()
-    if not stamp:
-        raise SystemExit(f"中止: 世代が1つも無い（{bp.LOCAL_STORE}）。"
-                         " まず python -m scripts.backup_push --apply を実行してください。")
-    manifest = load_manifest(stamp)
+    if args.source == "storage":
+        remote = bp.Storage.from_env()
+        stamps = remote.list_prefixes()
+        if not stamps:
+            raise SystemExit("中止: Storage に世代が1つも無い。"
+                             " まず python -m scripts.backup_push --apply --dest storage を実行してください。")
+        stamp = args.generation or stamps[-1]
+        if stamp not in stamps:
+            raise SystemExit(f"中止: Storage にその世代が無い: {stamp}"
+                             f"（在るのは {', '.join(stamps)}）")
+        print(f"[pull] Storage から {stamp} を取得しています → {FROM_STORAGE_STORE}")
+        store = pull_generation(remote, stamp, manifest_only=not args.apply).parent
+    else:
+        store = bp.LOCAL_STORE
+        stamp = args.generation or latest_generation()
+        if not stamp:
+            raise SystemExit(f"中止: 世代が1つも無い（{bp.LOCAL_STORE}）。"
+                             " まず python -m scripts.backup_push --apply を実行してください。")
+    manifest = load_manifest(stamp, store)
     tables = restore_order(manifest)
 
     dest = (mc.Endpoint("url", args.dest_url) if args.dest_url
@@ -118,6 +186,8 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     total_mb = manifest["total_bytes"] / 1024 / 1024
     print(f"世代   : {stamp}（作成 {manifest['created_at']}）")
+    print(f"取得元 : {args.source}"
+          + (f"（{store}）" if args.source == "storage" else ""))
     print(f"元     : {manifest['source']}")
     print(f"復元先 : {database.mask_url(dest.url)}")
     print(f"内容   : {len(tables)} 表 / {total_mb:.1f}MB")
@@ -138,7 +208,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     conn = mc.PgConn.from_url(dest.url)
     print("\n[restore] FK 依存順に1表ずつ流しています...")
     for i, table in enumerate(tables, 1):
-        dump = bp.LOCAL_STORE / stamp / f"{table}.dump"
+        dump = store / stamp / f"{table}.dump"
         if not dump.is_file():
             raise SystemExit(f"中止: ダンプが無い: {dump}")
         mc.run_pg(mc.pg_restore_argv(conn, str(dump), table), conn,
