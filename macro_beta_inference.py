@@ -31,6 +31,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import logging
+import re
 import threading
 import time as _time
 from dataclasses import dataclass
@@ -418,13 +419,18 @@ def run_inference(draws: int = 1000, tune: int = 1000, target_accept: float = 0.
         idata = pm.sample(**sample_kwargs)
     logger.info("サンプリング完了: %.1f分", (_time.monotonic() - sampling_started) / 60.0)
 
-    diagnostics = summarize_diagnostics(idata, sector_idx)
+    diagnostics = summarize_diagnostics(idata, sector_idx, edinet_codes=edinet_codes,
+                                        factor_names=selected)
     if diagnostics.get("r_hat_max") is not None and diagnostics["r_hat_max"] > 1.01:
         logger.warning(
             "収束診断: r_hat_max=%.4f が ADR-0002 検証基準（<1.01）を超過。"
             "draws/tune を増やすか再実行を検討してください（ess_bulk_min=%s, n_divergences=%s）",
             diagnostics["r_hat_max"], diagnostics.get("ess_bulk_min"), diagnostics.get("n_divergences"),
         )
+    # 極値を出している母数まで出す（#600）。beta なら永続化対象そのもの＝ゲートの見方を
+    # 変える案は採れない。これが無いと本番を1回（実測 6.7時間）回し直すまで分からない。
+    logger.info("収束診断の極値: ess_bulk_min=%s / r_hat_max=%s",
+                diagnostics.get("ess_bulk_argmin"), diagnostics.get("r_hat_argmax"))
 
     result = summarize(idata, selected, macro_sel, edinet_codes, sector_idx)
     if not result.run_id:
@@ -471,7 +477,84 @@ def _reconstruct_beta_chunk(post, sector_idx, lo: int, hi: int,
     return mu_sector[:, :, sector_idx[lo:hi], :] + beta_raw * sigma_stock[:, :, None, :]
 
 
-def summarize_diagnostics(idata, sector_idx=None) -> dict:
+_PARAM_INDEX_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)\[([0-9,\s]+)\]$")
+
+
+def locate_extreme(values, labels, kind: str, stock_offset: int = 0) -> dict | None:
+    """診断値の1ブロックから極値を出している母数を1件だけ拾う（#600）。
+
+    `ess_bulk_min` / `r_hat_max` は本番規模では 49,893 個の順序統計であって、**どの母数が
+    出しているかは値からは分からない**。`alpha`（銘柄切片）ならゲートの見方を変える余地が
+    あるが、`beta` なら `macro_beta_loadings` の永続化対象そのもの——判断が変わるのに、
+    これまでは本番を1回（実測 6.7時間）回し直さないと分からなかった。
+
+    ブロックごとに1件だけ拾い、呼び側がグローバルの極値を `pick_extreme` で更新する
+    （49,893 要素ぶんのラベル配列は作らない）。`stock_offset` は beta チャンクのローカル
+    銘柄 index を全体の index へ直すためのもの——**足し忘れても値は正しいままラベルだけ
+    静かにずれる**ので、tests がチャンク境界をまたぐケースで縛っている。
+
+    ラベルの解釈に失敗しても落とさない（`stock`/`factor` を None にして生ラベルを残す）。
+    ここはゲート量ではなく付帯情報であり、arviz の表記が変わったときに本番を止める価値がない。
+    """
+    arr = np.asarray(values, dtype=float)
+    if arr.size == 0:
+        return None
+    try:
+        pos = int(np.nanargmin(arr) if kind == "min" else np.nanargmax(arr))
+    except ValueError:      # 全 nan（極値が存在しない）
+        return None
+
+    raw = str(list(labels)[pos])
+    out = {"label": raw, "param": raw.split("[")[0], "stock": None, "factor": None,
+           "value": float(arr[pos])}
+    m = _PARAM_INDEX_RE.match(raw)
+    if not m:
+        return out
+    dims = [int(p) for p in m.group(2).split(",") if p.strip()]
+    if out["param"] == "beta" and len(dims) == 2:
+        out["stock"], out["factor"] = dims[0] + int(stock_offset), dims[1]
+        out["label"] = "beta[{0}, {1}]".format(out["stock"], out["factor"])
+    elif out["param"] == "alpha" and len(dims) == 1:
+        out["stock"] = dims[0]
+    elif out["param"] == "mu_universe" and len(dims) == 1:
+        out["factor"] = dims[0]
+    return out
+
+
+def pick_extreme(current: dict | None, candidate: dict | None, kind: str) -> dict | None:
+    """ブロックごとの極値からグローバルの極値を選ぶ（`locate_extreme` の畳み込み）。"""
+    if candidate is None:
+        return current
+    if current is None:
+        return candidate
+    better = (candidate["value"] < current["value"]) if kind == "min" \
+        else (candidate["value"] > current["value"])
+    return candidate if better else current
+
+
+def annotate_extreme(loc: dict | None, edinet_codes=None, factor_names=None) -> dict | None:
+    """極値の位置へ銘柄コード・因子名を解決して足す（**畳み込みが終わってから1回だけ**）。
+
+    ラベルだけでは `beta[1234, 3]` が何なのか人には読めない。範囲外・未指定は None のまま
+    にする（診断の付帯情報なので、名前が引けないことを失敗にしない）。
+    """
+    if loc is None:
+        return None
+    out = dict(loc)
+    idx = out.get("stock")
+    if edinet_codes is not None and idx is not None and 0 <= idx < len(edinet_codes):
+        out["edinet_code"] = str(edinet_codes[idx])
+    else:
+        out["edinet_code"] = None
+    idx = out.get("factor")
+    if factor_names is not None and idx is not None and 0 <= idx < len(factor_names):
+        out["factor_name"] = str(factor_names[idx])
+    else:
+        out["factor_name"] = None
+    return out
+
+
+def summarize_diagnostics(idata, sector_idx=None, edinet_codes=None, factor_names=None) -> dict:
     """r_hat・ESS の収束診断サマリ（ADR-0002 検証基準: r_hat<1.01・ESS 十分性・発散遷移数）。
 
     `round_to="none"` は必須（Issue #356）。az.summary は round_to 省略時、列ごとに固定桁で
@@ -499,6 +582,13 @@ def summarize_diagnostics(idata, sector_idx=None) -> dict:
 
     sector_idx=None のときは posterior の beta を直接読む従来経路。合成 idata に beta を
     直接注入するテスト（#356 の arviz 丸め回帰検知）はこちらを通る。
+
+    極値の位置（#600）
+    ------------------
+    `ess_bulk_argmin` / `r_hat_argmax` に「その値を出している母数」を付ける。`edinet_codes` /
+    `factor_names` を渡せば銘柄コード・因子名まで解決する（省略すれば index だけ）。
+    **ゲートが読む `r_hat_max` / `ess_bulk_min` / `ess_tail_min` / `n_divergences` の値は
+    一切変えない**——追加は付帯情報だけで、`persist_allowed` の較正はそのまま生きる。
     """
     import arviz as az
 
@@ -511,6 +601,8 @@ def summarize_diagnostics(idata, sector_idx=None) -> dict:
         r_hat_max, ess_bulk_min, ess_tail_min = (
             float(summ["r_hat"].max()), float(summ["ess_bulk"].min()), float(summ["ess_tail"].min()),
         )
+        ess_argmin = locate_extreme(summ["ess_bulk"], summ.index, "min")
+        r_hat_argmax = locate_extreme(summ["r_hat"], summ.index, "max")
     else:
         post = idata.posterior
         summ = az.summary(idata, var_names=["alpha", "mu_universe"], kind="diagnostics",
@@ -518,6 +610,8 @@ def summarize_diagnostics(idata, sector_idx=None) -> dict:
         r_hat_max = float(summ["r_hat"].max())
         ess_bulk_min = float(summ["ess_bulk"].min())
         ess_tail_min = float(summ["ess_tail"].min())
+        ess_argmin = locate_extreme(summ["ess_bulk"], summ.index, "min")
+        r_hat_argmax = locate_extreme(summ["r_hat"], summ.index, "max")
 
         n_stock = post.sizes["stock"]
         mu_sector = _reconstruct_mu_sector(post)
@@ -529,12 +623,20 @@ def summarize_diagnostics(idata, sector_idx=None) -> dict:
             r_hat_max = max(r_hat_max, float(csumm["r_hat"].max()))
             ess_bulk_min = min(ess_bulk_min, float(csumm["ess_bulk"].min()))
             ess_tail_min = min(ess_tail_min, float(csumm["ess_tail"].min()))
+            # チャンク内のローカル銘柄 index を全体へ直す（lo を足す）。
+            ess_argmin = pick_extreme(
+                ess_argmin, locate_extreme(csumm["ess_bulk"], csumm.index, "min", lo), "min")
+            r_hat_argmax = pick_extreme(
+                r_hat_argmax, locate_extreme(csumm["r_hat"], csumm.index, "max", lo), "max")
 
     return {
         "r_hat_max":     r_hat_max,
         "ess_bulk_min":  ess_bulk_min,
         "ess_tail_min":  ess_tail_min,
         "n_divergences": n_div,
+        # 極値“そのもの”ではなく**それを出している母数**（#600）。alpha か beta かで対策が変わる。
+        "ess_bulk_argmin": annotate_extreme(ess_argmin, edinet_codes, factor_names),
+        "r_hat_argmax":    annotate_extreme(r_hat_argmax, edinet_codes, factor_names),
     }
 
 

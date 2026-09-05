@@ -686,3 +686,112 @@ class TestHeartbeat:
     def test_interval_is_five_minutes_by_default(self):
         """既定を短くしても NUTS の中身は分からない＝細かくする意味がない。"""
         assert mbi.HEARTBEAT_SEC == 300.0
+
+
+class TestExtremeLocation:
+    """#600: `ess_bulk_min` / `r_hat_max` を **出している母数** を特定する。
+
+    値だけでは `alpha`（銘柄切片）か `beta`（＝`macro_beta_loadings` の永続化対象）かが
+    分からず、対策の選び方が決まらない。本番を1回回すのに実測 6.7時間かかるので、
+    「もう一度測れば分かる」では済まない。
+    """
+
+    def test_parses_beta_index_and_applies_chunk_offset(self):
+        """チャンク内ローカル index に `stock_offset` を足すこと（**忘れても値は正しい**）。"""
+        loc = mbi.locate_extreme([5.0, 1.0, 9.0],
+                                 ["beta[0, 0]", "beta[1, 1]", "beta[2, 0]"], "min",
+                                 stock_offset=256)
+        assert loc["param"] == "beta"
+        assert (loc["stock"], loc["factor"]) == (257, 1)
+        assert loc["label"] == "beta[257, 1]"
+        assert loc["value"] == 1.0
+
+    def test_alpha_is_per_stock_and_mu_universe_is_per_factor(self):
+        alpha = mbi.locate_extreme([3.0, 0.5], ["alpha[0]", "alpha[4]"], "min")
+        assert (alpha["param"], alpha["stock"], alpha["factor"]) == ("alpha", 4, None)
+        mu = mbi.locate_extreme([1.0, 7.0], ["mu_universe[0]", "mu_universe[1]"], "max")
+        assert (mu["param"], mu["stock"], mu["factor"]) == ("mu_universe", None, 1)
+
+    def test_unparsable_label_keeps_the_value(self):
+        """arviz の表記が変わってもゲートは止めない（付帯情報なので fail-soft）。"""
+        loc = mbi.locate_extreme([2.0, 0.25], ["sigma_stock", "sigma_stock<0>"], "min")
+        assert loc["value"] == 0.25
+        assert loc["stock"] is None and loc["factor"] is None
+        assert loc["label"] == "sigma_stock<0>"
+
+    def test_all_nan_returns_none(self):
+        assert mbi.locate_extreme([np.nan, np.nan], ["alpha[0]", "alpha[1]"], "min") is None
+        assert mbi.locate_extreme([], [], "min") is None
+
+    def test_pick_extreme_folds_blocks(self):
+        a = {"label": "alpha[0]", "value": 10.0}
+        b = {"label": "beta[1, 0]", "value": 3.0}
+        assert mbi.pick_extreme(a, b, "min") is b
+        assert mbi.pick_extreme(a, b, "max") is a
+        assert mbi.pick_extreme(None, b, "min") is b
+        assert mbi.pick_extreme(a, None, "min") is a
+
+    def test_annotate_resolves_names_and_tolerates_missing(self):
+        loc = {"label": "beta[1, 0]", "param": "beta", "stock": 1, "factor": 0, "value": 13.4}
+        got = mbi.annotate_extreme(loc, ["E00001", "E00002"], ["JP10Y", "USDJPY"])
+        assert got["edinet_code"] == "E00002" and got["factor_name"] == "JP10Y"
+        # 範囲外・未指定は None（名前が引けないことを失敗にしない）。
+        assert mbi.annotate_extreme(loc)["edinet_code"] is None
+        out_of_range = dict(loc, stock=99)
+        assert mbi.annotate_extreme(out_of_range, ["E00001"], ["JP10Y"])["edinet_code"] is None
+        assert mbi.annotate_extreme(None) is None
+
+    def test_matches_chunk_free_reference(self, monkeypatch):
+        """**本命の回帰検知**: チャンク分割した診断の極値が、分割しない参照実装と同じ母数を指す。
+
+        `stock_offset` を落としても `ess_bulk_min` の**値は正しいまま**なので、既存の
+        値ベースのテストでは絶対に落ちない。ここだけが位置のずれを捕まえる。
+        """
+        az = pytest.importorskip("arviz")
+        monkeypatch.setattr(mbi, "BETA_CHUNK_STOCKS", 3)     # 7銘柄 → 3チャンク
+        idata, sector_idx = _raw_idata(az)
+
+        summ = az.summary(idata, var_names=["alpha", "mu_universe"], kind="diagnostics",
+                          round_to="none")
+        naive = az.summary(az.from_dict(posterior={"beta": _naive_beta(idata.posterior, sector_idx)}),
+                           kind="diagnostics", round_to="none")
+        labels = list(summ.index) + list(naive.index)
+        ref_min = mbi.locate_extreme(list(summ["ess_bulk"]) + list(naive["ess_bulk"]), labels, "min")
+        ref_max = mbi.locate_extreme(list(summ["r_hat"]) + list(naive["r_hat"]), labels, "max")
+
+        diag = summarize_diagnostics(idata, sector_idx)
+        for got, ref in ((diag["ess_bulk_argmin"], ref_min), (diag["r_hat_argmax"], ref_max)):
+            assert (got["param"], got["stock"], got["factor"]) == \
+                   (ref["param"], ref["stock"], ref["factor"])
+            assert got["value"] == pytest.approx(ref["value"], rel=1e-12)
+            # **arviz の実 index を実際にパースできていること**。両方 None でも上の比較は
+            # 通ってしまうので、index が解けている側を明示的に縛る。
+            assert got["param"] in ("alpha", "beta", "mu_universe")
+            if got["param"] == "beta":
+                assert got["stock"] is not None and got["factor"] is not None
+            elif got["param"] == "alpha":
+                assert got["stock"] is not None
+            else:
+                assert got["factor"] is not None
+
+    def test_extremes_agree_with_the_gate_values(self, monkeypatch):
+        """付帯情報を足してもゲート量は動かない（値と argmin の値が同一であること）。"""
+        az = pytest.importorskip("arviz")
+        monkeypatch.setattr(mbi, "BETA_CHUNK_STOCKS", 3)
+        idata, sector_idx = _raw_idata(az)
+        diag = summarize_diagnostics(idata, sector_idx)
+        assert diag["ess_bulk_argmin"]["value"] == pytest.approx(diag["ess_bulk_min"], rel=1e-12)
+        assert diag["r_hat_argmax"]["value"] == pytest.approx(diag["r_hat_max"], rel=1e-12)
+
+    def test_names_are_resolved_when_labels_are_given(self, monkeypatch):
+        az = pytest.importorskip("arviz")
+        monkeypatch.setattr(mbi, "BETA_CHUNK_STOCKS", 3)
+        idata, sector_idx = _raw_idata(az)
+        codes = ["E{0:05d}".format(i) for i in range(7)]
+        diag = summarize_diagnostics(idata, sector_idx, edinet_codes=codes,
+                                     factor_names=["JP10Y", "USDJPY"])
+        loc = diag["ess_bulk_argmin"]
+        if loc["stock"] is not None:
+            assert loc["edinet_code"] == codes[loc["stock"]]
+        if loc["factor"] is not None:
+            assert loc["factor_name"] in ("JP10Y", "USDJPY")
