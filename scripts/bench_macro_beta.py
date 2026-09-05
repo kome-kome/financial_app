@@ -195,7 +195,19 @@ def treedepth_cap_steps(max_tree_depth=None) -> int:
 
 
 def summarize_steps(steps: np.ndarray, cap_steps: int = MAX_TREEDEPTH_STEPS) -> dict:
-    """歩数配列の要約。空なら全て None（「測れなかった」を 0 と区別する）。"""
+    """歩数配列の要約。空なら全て None（「測れなかった」を 0 と区別する）。
+
+    **`max_treedepth_rate` は「上限で切られた率」ではない**（#600・2026-09-05）。NUTS は木を
+    倍々に伸ばして U ターンで止めるので、**深さ d で自然停止した軌道の歩数もちょうど
+    2**d - 1 になる**——`steps >= cap_steps` はその2つを区別できない。1500銘柄で
+    `max_tree_depth` を 10 → 11 へ上げて実測すると、歩数は mean も max も 1023 のまま
+    （cap 2047 に対して率は 0.000）で `step_size`・ESS・r_hat が**ビット単位で同一**だった
+    ＝上限は律速ではなく、1023 は深さ 10 の U ターンだった。#512 以来の「1023 に 100%
+    張り付いている＝毎 draw が構造的に最大コストを払っている」という読みは誤りである。
+
+    率が 1.000 のときに「切られている」と言えるのは、**上限を1つ上げて歩数が伸びることを
+    確かめた場合だけ**。numpyro の `sample_stats` に木の深さそのものが出るならそちらを見ること。
+    """
     if steps.size == 0:
         return {"mean": None, "p50": None, "p90": None, "max": None,
                 "max_treedepth_rate": None, "cap_steps": int(cap_steps)}
