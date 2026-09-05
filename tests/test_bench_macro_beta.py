@@ -353,6 +353,28 @@ class TestDiagnoseMatchesProductionGate:
         # beta(7x2) + alpha(7) + mu_universe(2) = 23 パラメータ。
         assert got["n_params"] == 23
 
+    def test_argmin_points_at_the_same_parameter_as_production(self, monkeypatch):
+        """#600: 極値の**位置**も本番と同じであること。
+
+        位置の解決は `macro_beta_inference` 側の1実装（`locate_extreme`）を共有している。
+        bench 側へ書き写すと、格子で見た母数と本番で起きている母数が別物になりうる。
+        """
+        az = pytest.importorskip("arviz")
+        import macro_beta_inference as mbi
+
+        monkeypatch.setattr(mbi, "BETA_CHUNK_STOCKS", 3)   # 境界跨ぎを強制
+        idata, sector_idx = self._idata(az)
+
+        prod = mbi.summarize_diagnostics(idata, sector_idx)
+        got = bmb.diagnose(idata, sector_idx)
+
+        for key in ("ess_bulk_argmin", "r_hat_argmax"):
+            assert got[key]["label"] == prod[key]["label"]
+            assert got[key]["value"] == pytest.approx(prod[key]["value"], rel=1e-12)
+        # 値そのものとも整合していること（別の母数を指していたらここで落ちる）。
+        assert got["ess_bulk_argmin"]["value"] == pytest.approx(got["ess_bulk_min"], rel=1e-12)
+        assert got["r_hat_argmax"]["value"] == pytest.approx(got["r_hat_max"], rel=1e-12)
+
     def test_values_are_raw_not_arviz_rounded(self):
         """#356 の丸め回帰検知。整数/小数2桁へ量子化されていたら格子の差が消える。"""
         az = pytest.importorskip("arviz")
