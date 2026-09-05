@@ -28,7 +28,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import batch_freshness as bf
 from scripts import check_batch_freshness as cbf
-from scripts import run_monthly, run_monthly_m1, run_nightly
+from scripts import run_monthly, run_monthly_beta, run_monthly_m1, run_nightly
 
 ROOT = Path(__file__).resolve().parent.parent
 NOW = datetime(2026, 8, 26, 11, 0, 0, tzinfo=timezone.utc)      # JST 20:00 = watchdog の起動時刻
@@ -59,6 +59,8 @@ def settings(monkeypatch, tmp_path):
         run_nightly.KEY_LAST_SUCCESS: _iso(1.0),
         run_monthly.KEY_LAST_RUN: _iso(25 * 24),
         run_monthly.KEY_LAST_SUCCESS: _iso(90 * 24),   # #512 で成功はずっと古い（正常）
+        run_monthly_beta.KEY_LAST_RUN: _iso(25 * 24),
+        run_monthly_beta.KEY_LAST_SUCCESS: _iso(25 * 24),
         run_monthly_m1.KEY_LAST_RUN: _iso(25 * 24),
         run_monthly_m1.KEY_LAST_SUCCESS: _iso(25 * 24),
         cbf.KEY_LAST_RUN: _iso(24.0),
@@ -463,7 +465,7 @@ class TestEveryLocalBatchIsWatched:
     def test_the_table_covers_the_run_scripts_on_disk(self):
         """`scripts/run_*.py` が増えたら監視表も増える（ADR-0031 型の穴を塞ぐ）。"""
         found = {p.stem for p in (ROOT / "scripts").glob("run_*.py")}
-        assert found == {"run_nightly", "run_monthly", "run_monthly_m1"}, (
+        assert found == {"run_nightly", "run_monthly", "run_monthly_beta", "run_monthly_m1"}, (
             f"ローカル駆動バッチが増減した: {found}。cbf.WATCHED を見直すこと")
 
 

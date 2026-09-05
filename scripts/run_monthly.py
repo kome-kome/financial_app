@@ -17,7 +17,7 @@ notify-failure でも macro-health でも拾えない。ADR-0031 が防ごうと
 
 ## ステップの並び
 
-    vacuum → price_suffix → deps_smoke → factor_premia → macro_beta
+    vacuum → price_suffix → deps_smoke → factor_premia → tune（M-2 / M-3）
            → tune:macro_dlm → tune:macro_gbdt
 
 **M-1（macro_risk_return）の探索はここに無い**。実測 約752分で窓（960分）に入らず、
@@ -124,10 +124,12 @@ WINDOW_MIN = 16 * 60
 # （ローカルは741.5分でも未完走・#512）。**#512 が解けるまで毎月ここで落ちる**のは想定内で、
 # 静かに tune が餓死するより起票される失敗の方が良い、という判断（#530）。
 #
-# #540（`--max-tree-depth 8,10`）で総 leapfrog 歩数を 37.5% 削ったが、本番規模ローカルは
-# 約20.2時間 → 約12.6時間で**まだ桁が違う**。予算は実測から逆算しない（ADR-0040）ので 180分は
-# 据え置き＝毎月 exit=124 で起票される状態は継続する。窓の問題は #530 / #532 の担当で、
-# #540 は「軌道長のレバーは使い切った」ことを示したに留まる。
+# **`macro_beta` は 2026-09-06 にここから出た**（#579）。本番規模の実測 360分に対し本体の
+# 予算は 180分で、増やす空きも窓に無かった（Σ863 + マージン30）。所要が縮む見込みが無いことは
+# #600 で確定している（`target_accept` を下げる案も `max_tree_depth` を上げる案も実測で棄却・
+# そもそも「1023 への張り付き」は上限ではなく深さ10の U ターンだった）。
+# 実体は `scripts/run_monthly_beta.py`（毎月2日 01:00）。**M-1 探索より前**でなければ
+# ならないので、`run_monthly_m1.py` は2日から3日へずらしてある。
 BUDGET_MIN: dict[str, float] = {
     # 実測 0.3分（2026-09-01 の初実走・DB 839→831MB）／0.25分（2026-08-25 の手動 1回目）。
     # ADR-0040 は「予算値は実測が出たら見直す。特に vacuum はローカルでの実測を持っていない」
@@ -144,7 +146,6 @@ BUDGET_MIN: dict[str, float] = {
     # 余裕が5分しかなく、窓の拡張も日次 17:20 起動と衝突するため不可（だから対象を絞った）。
     "price_suffix": 3,
     "factor_premia": 20,
-    "macro_beta": 180,
     # 実測 1.04分/件（クリーンな状態・12候補）〜1.26分/件（9/1 実走・M-1 と同居でメモリ枯渇下）。
     # 294件で 306〜369分なので 400分＝約30%の余裕。**M-1 が抜けたぶんクリーン側に寄る**。
     # 9/1 は 250分で 199/294 まで進んで打ち切られ、完走しなかったので何も残らなかった。
@@ -193,25 +194,16 @@ def steps_for(python: str) -> tuple[Step, ...]:
                  "exit=1 で落ちて 1か月ぶんの `macro_beta_loadings` が固着した"
                  "（CodeIntegrity 3118/3077/3033・以後は同じ DLL が通る一過性の挙動）。"
                  "**未評価 DLL の初回ロードをここが引き受ける**ので本番ステップの手前で消化でき、"
-                 "それでも落ちるなら 180分の予算を待たず起票される。"
+                 "それでも落ちるなら数百分の予算を待たず起票される。"
                  "位置は「軽い順」の原則に従う（vacuum を除く先頭は最軽量の price_suffix）——"
-                 "重い依存を実際に使う最初のステップ `macro_beta` より前でありさえすれば役目は果たす"),
+                 "重い依存を実際に使う最初のステップより前でありさえすれば役目は果たす。"
+                 "**`macro_beta` は #579 で `run_monthly_beta.py` へ出た**が、tune 系も同じ"
+                 "依存群を使うのでここは残す"),
         Step("factor_premia",
              (python, "recommend_factor_premia.py",
               "--min-companies-per-period", "30", "--maxlags", "11", "--persist"),
              why="recommend「統計的最適化」プリセットの Fama-MacBeth 重み"
                  "（止めると #423 子5 で直した 37期固着へ戻る）"),
-        Step("macro_beta",
-             (python, "macro_beta_inference.py",
-              "--draws", "800", "--tune", "800", "--target-accept", "0.95",
-              "--chains", "2", "--r-hat-threshold", "1.05",
-              "--nuts-sampler", "numpyro", "--init", "adapt_diag",
-              # warmup だけ軌道長を 2**8-1 歩へ切る（#540・ADR-0002）。**draws 側は既定 10 の
-              # まま**＝事後分布の探索能力は変えずに総 leapfrog 歩数だけ 37.5% 減らす。
-              # 一律キャップ（--max-tree-depth 8 等）は ESS/歩 では最良に見えるのに
-              # ess_bulk_min が 3.55 まで落ち r_hat が 1.63 になる＝**採ってはいけない**。
-              "--max-tree-depth", "8,10"),
-             why="M-1 の入力 macro_beta_loadings（PyMC/NUTS 階層マクロ・ベータ）"),
     ]
     for model, strategy, extra in TUNE_MATRIX:
         steps.append(Step(

@@ -63,7 +63,17 @@ class TestMigrationIsComplete:
         "_pipeline_vacuum.py",          # vacuum-maintenance.yml（正本側の受け皿・#290）
     ])
     def test_every_stopped_workflow_has_a_local_step(self, script):
-        entrypoints = {Path(s.argv[1]).name for s in rm.steps_for("py")}
+        """受け皿は**ローカル駆動バッチ全体**で見る（1本のファイルに限らない）。
+
+        `macro_beta` は #579 で `run_monthly_beta.py` へ出た。ここを本体だけで見ていると、
+        別タスクへ切り出した瞬間に「GHA を止めたぶんの穴」と区別が付かなくなる。
+        """
+        from scripts import run_monthly_beta as rmb
+        from scripts import run_monthly_m1 as rm1
+
+        entrypoints = {Path(s.argv[1]).name
+                       for mod in (rm, rmb, rm1)
+                       for s in mod.steps_for("py")}
         assert script in entrypoints, (
             f"{script} を回すステップが無い＝GHA を止めたぶんの穴が空いたまま"
         )
@@ -109,15 +119,31 @@ class TestStepOrder:
     def test_inference_runs_before_tuning(self):
         """`macro_beta_loadings` は M-1 の入力。推論が後だと当月の tune が前月の β を使う。
 
-        **M-1 が別タスクへ出た（#584）ので、この依存は日をまたぐ**——月次本体（毎月1日）で
-        `macro_beta` を回し、M-1 タスク（毎月2日）がその出力を使う。順序は「本体に macro_beta が
-        あり、M-1 本体には無い」ことで担保する（起動日の前後は `install_*_task.ps1` の既定 Day）。
+        **推論も探索も別タスクへ出た**（#584 / #579）ので、この依存は日をまたぐ形で成立する:
+        macro_beta は毎月2日・M-1 探索は毎月3日。順序の根拠は `install_*_task.ps1` の既定 Day で、
+        **ここを読まずに「本体にあるか」で代用すると、切り出したときに黙って壊れる**
+        （実際 #579 で本体から出したときこのテストが落ちた）。
         """
+        import re
+
+        from scripts import run_monthly_beta as rmb
         from scripts import run_monthly_m1 as rm1
 
-        assert "macro_beta" in _names()
-        assert "macro_beta" not in [s.name for s in rm1.steps_for("py")], (
-            "macro_beta を両方で回すと同じ月に2回推論することになる"
+        owners = {name: [s.name for s in mod.steps_for("py")]
+                  for name, mod in (("beta", rmb), ("m1", rm1), ("monthly", rm))}
+        assert "macro_beta" in owners["beta"]
+        assert "macro_beta" not in owners["m1"] and "macro_beta" not in owners["monthly"], (
+            "macro_beta を複数のバッチで回すと同じ月に2回推論することになる"
+        )
+
+        def _day(ps1_name: str) -> int:
+            text = (ROOT / "scripts" / ps1_name).read_text(encoding="utf-8-sig")
+            m = re.search(r"\[int\]\$Day\s*=\s*(\d+)", text)
+            assert m, f"{ps1_name} から既定 Day を読めない（書式が変わった）"
+            return int(m.group(1))
+
+        assert _day("install_monthly_beta_task.ps1") < _day("install_monthly_m1_task.ps1"), (
+            "macro_beta が M-1 探索より後の日に起動する＝探索が常に前月の loadings を見る"
         )
 
     def test_vacuum_runs_first(self):
@@ -153,9 +179,13 @@ class TestStepOrder:
         通り、消化できなければ予算を待たずに失敗として現れる。
         """
         names = _names()
-        assert names.index("deps_smoke") < names.index("macro_beta")
         for name in (n for n in names if n.startswith("tune:")):
             assert names.index("deps_smoke") < names.index(name)
+        # macro_beta を持つバッチ側でも同じ不変条件が要る（#579 で出ていった先）。
+        from scripts import run_monthly_beta as rmb
+
+        beta_names = [s.name for s in rmb.steps_for("py")]
+        assert beta_names.index("deps_smoke") < beta_names.index("macro_beta")
 
     def test_remaining_tunes_are_ordered_lightest_first(self):
         """M-1 が別タスクへ出た後、本体に残る tune は M-3 → M-2（#584）。
@@ -195,19 +225,6 @@ class TestArgsMatchTheWorkflowsTheyReplace:
         argv = _argv("tune:macro_gbdt")
         assert argv[argv.index("--n-iter") + 1] == "150"
 
-    def test_inference_uses_numpyro(self):
-        """純 Python バックエンドは実測 75秒/draw＝現実的な時間で終わらない。"""
-        argv = _argv("macro_beta")
-        assert argv[argv.index("--nuts-sampler") + 1] == "numpyro"
-        assert argv[argv.index("--init") + 1] == "adapt_diag", (
-            "numpyro の既定初期化は発散多発（1/100〜91/100 divergence の実測）"
-        )
-
-    def test_inference_keeps_the_relaxed_rhat_gate(self):
-        """chains=2 では r_hat が構造的に ~1.02 で頭打ちする（#341）。閾値も据え置く。"""
-        argv = _argv("macro_beta")
-        assert argv[argv.index("--chains") + 1] == "2"
-        assert argv[argv.index("--r-hat-threshold") + 1] == "1.05"
 
 
 class TestFootprintIsSeparateFromNightly:
@@ -233,7 +250,9 @@ class TestKeepsGoing:
 
         def fake_run(argv, **kw):
             seen.append(Path(argv[1]).name)
-            return _FakeProc(returncode=1 if "macro_beta_inference.py" in argv[1] else 0)
+            # **本体に実在するステップで失敗させる**（#579 で macro_beta が出ていったので、
+            # 存在しない名前を書くと「全部成功」になってこのテスト自体が無意味になる）。
+            return _FakeProc(returncode=1 if "recommend_factor_premia.py" in argv[1] else 0)
 
         monkeypatch.setattr(rm.subprocess, "Popen", fake_run)
         monkeypatch.setattr(rm, "log_path", lambda now=None: tmp_path / "m.log")
@@ -333,19 +352,16 @@ class TestBudgetFitsTheWindow:
             elapsed += s.budget_min
         assert elapsed <= rm.WINDOW_MIN, "最後のステップが窓から溢れる"
 
-    def test_macro_beta_budget_is_anchored_to_the_measured_gha_run(self):
-        """macro_beta の予算は GHA 実績（116分）の外側に置く。
+    def test_macro_beta_is_no_longer_budgeted_here(self):
+        """`macro_beta` は #579 で `run_monthly_beta.py` へ出た。
 
-        ここを 116分未満へ絞ると、**GHA で通っていた仕事すら通らない**予算になる。逆に
-        窓の過半を与えると tune が届かない。#512 が解けたときに「予算が主因だった」と
-        取り違えないための下限。
+        本体に予算だけ残っていると「Σ が窓に収まる」判定が実態とずれる（走らないものに
+        180分を積んだまま tune の余地を狭める）。**出したら予算も消す**ことをここで縛る。
         """
-        budget = next(s.budget_min for s in rm.steps_for(sys.executable) if s.name == "macro_beta")
-        assert 116 < budget < rm.WINDOW_MIN / 2, (
-            f"macro_beta の予算 {budget}分 が GHA 実績 116分 と窓の半分の間に無い"
-        )
+        assert "macro_beta" not in rm.BUDGET_MIN
+        assert "macro_beta" not in [s.name for s in rm.steps_for(sys.executable)]
 
     def test_dry_run_shows_the_budget(self, capsys):
         rm.main(["--dry-run"])
         out = capsys.readouterr().out
-        assert "予算" in out and "macro_beta" in out
+        assert "予算" in out and "factor_premia" in out

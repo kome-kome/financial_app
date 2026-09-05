@@ -203,7 +203,7 @@ def project_tuned_params(plugin, params: dict) -> tuple[dict, list[str]]:
     探索をやめた設定が推奨値として出続ける——実際 M-1 は 2026-09-04 に
     `use_momentum`/`momentum_window` を軸から外したが、保存値は
     `use_momentum=True, momentum_window=18`（2026-09-02 の探索）のままで、
-    次の月次探索（毎月2日）まで画面に出続ける状態だった。
+    次の月次探索（毎月3日・#579 で2日から移動）まで画面に出続ける状態だった。
 
     射影の規則:
       - `base_params` にあるキー … **その値で上書き**（探索が固定した測定条件そのもの）

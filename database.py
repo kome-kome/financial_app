@@ -23,7 +23,8 @@ from typing import Optional
 from dotenv import load_dotenv
 from sqlalchemy import (
     create_engine, event, Column, String, Integer, Float, Boolean, DateTime, Date,
-    Text, UniqueConstraint, PrimaryKeyConstraint, Index, JSON, LargeBinary, ForeignKey, text, func
+    Text, UniqueConstraint, PrimaryKeyConstraint, Index, JSON, LargeBinary, ForeignKey, text, func,
+    or_
 )
 from sqlalchemy.orm import declarative_base, sessionmaker, relationship
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -732,6 +733,7 @@ def upsert_macro_beta(db, meta: dict, loadings: list) -> int:
             "selected_factors": mstmt.excluded.selected_factors,
             "factor_cov":       mstmt.excluded.factor_cov,
             "hyperparams":      mstmt.excluded.hyperparams,
+            "status":           mstmt.excluded.status,
         },
     )
     db.execute(mstmt)
@@ -759,9 +761,19 @@ def get_macro_beta(db, run_id: str | None = None, *, with_loadings: bool = True)
     with_loadings=False なら loadings を引かず空 dict を返す（Issue #482）。呼び出しの
     大半は meta の selected_factors だけを見て loadings を捨てており、そこでは
     macro_beta_loadings 全行（約4,400社 × 因子数）の転送が丸ごと無駄になる。
+
+    status（#609）
+    --------------
+    run_id 未指定のときは **live な run だけ**を候補にする（`status IS NULL` は列が無かった
+    時代の run ＝ live 扱い）。収束ゲートに落ちた run は `quarantined` で persist されており、
+    **保全はされるが producer からは見えない**——ここを絞らないと「persist した瞬間ライブ反映」
+    に戻り、ゲートが persist 自体を止めるしかなくなる（reject のたびに6時間が消える）。
+    run_id を明示した場合は status で絞らない（隔離された run を人が読んで昇格判断できる）。
     """
     if run_id is None:
         row = (db.query(MacroBetaMeta)
+               .filter(or_(MacroBetaMeta.status.is_(None),
+                           MacroBetaMeta.status == MACRO_BETA_STATUS_LIVE))
                .order_by(MacroBetaMeta.created_at.desc(), MacroBetaMeta.id.desc())
                .first())
     else:
@@ -774,6 +786,7 @@ def get_macro_beta(db, run_id: str | None = None, *, with_loadings: bool = True)
         "selected_factors": row.selected_factors,
         "factor_cov":       row.factor_cov,
         "hyperparams":      row.hyperparams,
+        "status":           row.status,
     }
     loadings: dict = {}
     if with_loadings:
@@ -1509,8 +1522,14 @@ class MacroBetaLoading(Base):
     created_at   = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
 
+# macro_beta の収束ゲート結果（#609）。**文字列を直接書かない**——`get_macro_beta` の
+# フィルタと `macro_beta_inference` の persist が同じ語を見ている必要がある。
+MACRO_BETA_STATUS_LIVE = "live"
+MACRO_BETA_STATUS_QUARANTINED = "quarantined"
+
+
 class MacroBetaMeta(Base):
-    """推論ラン単位のメタ（選択因子集合・因子共分散 Σ_macro・ハイパラ）。"""
+    """推論ラン単位のメタ（選択因子集合・因子共分散 Σ_macro・ハイパラ・ゲート結果）。"""
     __tablename__ = "macro_beta_meta"
     __table_args__ = (
         UniqueConstraint("run_id", name="uq_macro_beta_meta_run"),
@@ -1522,6 +1541,11 @@ class MacroBetaMeta(Base):
     selected_factors = Column(JSON)                     # list[str]
     factor_cov       = Column(JSON)                     # list[list[float]]（Σ_macro・R_macro 用）
     hyperparams      = Column(JSON)                     # dict（draws/tune/target_accept 等）
+    # 収束ゲートの判定結果（#609）。"live" = producer が読む / "quarantined" = 保全のみ。
+    # **NULL は status 列が無かった時代の run** で live として扱う（既存2件の意味を変えない）。
+    # 隔離を持つ理由: これが無いとゲートは persist 自体を止めるしかなく、reject のたびに
+    # 6時間の計算が丸ごと消えていた（2026-09-03 に実際そうなった）。
+    status           = Column(String(16))
     created_at       = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
 
@@ -2120,6 +2144,12 @@ def _ensure_tables() -> None:
             conn.execute(text(
                 f"ALTER TABLE {_tbl} ADD COLUMN IF NOT EXISTS n_stale INTEGER"
             ))
+        # macro_beta の収束ゲート結果（#609・非破壊・冪等）。既存行は NULL のまま
+        # ＝「status が無かった時代の run」で `get_macro_beta` は live として扱う（現状維持）。
+        # 以降の run は live / quarantined を必ず入れる。
+        conn.execute(text(
+            "ALTER TABLE macro_beta_meta ADD COLUMN IF NOT EXISTS status VARCHAR(16)"
+        ))
         # ファクタープレミアムの前処理世代（#517・非破壊・冪等）。既存行は NULL のまま
         # ＝「#509 以前の生スケール」を意味し、`recommend.get_dynamic_preset` が採用せず
         # バランス型へフォールバックする。次回 factor_premia 実行で新世代の行が入る。

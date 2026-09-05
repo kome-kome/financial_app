@@ -46,7 +46,8 @@ if str(ROOT) not in sys.path:                      # `python -m scripts.*` か�
 # **import 時に副作用を持つモジュールをここから呼ばない。** 参照するのは定数だけで、
 # `scripts/run_*.py` と `scripts/batch_common.py` はトップレベルが定数定義に限られている
 # （`SPEC` は純 dataclass）。この前提が崩れると API プロセスが巻き込まれる。
-from scripts import run_monthly, run_monthly_m1, run_nightly       # noqa: E402
+from scripts import (run_monthly, run_monthly_beta, run_monthly_m1,  # noqa: E402
+                     run_nightly)
 
 # watchdog 自身の足跡。監視対象と同じ表に置く（見る場所を分けない）。
 KEY_LAST_RUN = "watchdog_last_run"
@@ -104,6 +105,18 @@ WATCHED: tuple[Watched, ...] = (
         issue_title="[ops] ローカル月次バッチが走っていない",
         task_name="financial_app-monthly",
         log_prefix="monthly",
+    ),
+    Watched(
+        label="月次バッチ（マクロ・ベータ）",
+        key_run=run_monthly_beta.KEY_LAST_RUN,
+        key_success=run_monthly_beta.KEY_LAST_SUCCESS,
+        cadence_h=31 * 24.0,
+        window_min=run_monthly_beta.WINDOW_MIN,
+        # 走らないと M-1 の入力（`macro_beta_loadings`）が固着する——それが #579 の症状
+        # そのもので、2026-08-01 から5週間気づけなかった。
+        issue_title="[ops] ローカルのマクロ・ベータ推論バッチが走っていない",
+        task_name="financial_app-monthly-beta",
+        log_prefix="monthly_beta",
     ),
     Watched(
         label="月次バッチ（M-1 探索）",
