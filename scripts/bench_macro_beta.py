@@ -250,7 +250,7 @@ def sampler_kwargs(nuts_sampler, max_tree_depth=None, chain_method=None) -> dict
     return out
 
 
-def diagnose(idata, sector_idx) -> dict:
+def diagnose(idata, sector_idx, edinet_codes=None, factor_names=None) -> dict:
     """`beta` の ESS_bulk / ESS_tail / r_hat を**生値の分布として**取る（#540）。
 
     本番ゲートと同じ量を測るため、`macro_beta_inference.summarize_diagnostics` と同一の経路を通る:
@@ -261,11 +261,19 @@ def diagnose(idata, sector_idx) -> dict:
     min だけでなく p10 / median も返す理由: `ess_bulk_min` は 3,000 パラメータ
     （250銘柄 × 12因子）の最小順序統計でノイズが大きく、格子の**順位付け**には向かない。
     ゲート較正値としての min は残しつつ、順位は median で見る（判断は生値の表で行う）。
+
+    極値の位置（#600）
+    ------------------
+    `ess_bulk_argmin` / `r_hat_argmax` に「その値を出している母数」も付ける。位置の解決は
+    `macro_beta_inference.locate_extreme` / `pick_extreme` / `annotate_extreme` が唯一の実装で、
+    **ここへ書き写さない**——本番と bench で極値の指し方がずれたら、格子で見た母数と本番で
+    起きている母数が別物になる（`parse_max_tree_depth` を共有しているのと同じ理由）。
     """
     import arviz as az
 
     from macro_beta_inference import (BETA_CHUNK_STOCKS, _reconstruct_beta_chunk,
-                                      _reconstruct_mu_sector)
+                                      _reconstruct_mu_sector, annotate_extreme, locate_extreme,
+                                      pick_extreme)
 
     post = idata.posterior
     summ = az.summary(idata, var_names=["alpha", "mu_universe"], kind="diagnostics",
@@ -273,6 +281,8 @@ def diagnose(idata, sector_idx) -> dict:
     ess_bulk = [np.asarray(summ["ess_bulk"], dtype=float)]
     ess_tail = [np.asarray(summ["ess_tail"], dtype=float)]
     r_hat = [np.asarray(summ["r_hat"], dtype=float)]
+    ess_argmin = locate_extreme(summ["ess_bulk"], summ.index, "min")
+    r_hat_argmax = locate_extreme(summ["r_hat"], summ.index, "max")
 
     n_stock = post.sizes["stock"]
     mu_sector = _reconstruct_mu_sector(post)
@@ -284,6 +294,11 @@ def diagnose(idata, sector_idx) -> dict:
         ess_bulk.append(np.asarray(csumm["ess_bulk"], dtype=float))
         ess_tail.append(np.asarray(csumm["ess_tail"], dtype=float))
         r_hat.append(np.asarray(csumm["r_hat"], dtype=float))
+        # lo を足してチャンク内ローカル index を全体へ直す（忘れると値は正しいままラベルがずれる）。
+        ess_argmin = pick_extreme(
+            ess_argmin, locate_extreme(csumm["ess_bulk"], csumm.index, "min", lo), "min")
+        r_hat_argmax = pick_extreme(
+            r_hat_argmax, locate_extreme(csumm["r_hat"], csumm.index, "max", lo), "max")
 
     eb = np.concatenate(ess_bulk)
     et = np.concatenate(ess_tail)
@@ -293,7 +308,9 @@ def diagnose(idata, sector_idx) -> dict:
             "ess_bulk_p10": float(np.nanpercentile(eb, 10)),
             "ess_bulk_median": float(np.nanpercentile(eb, 50)),
             "ess_tail_min": float(np.nanmin(et)),
-            "n_params": int(eb.size)}
+            "n_params": int(eb.size),
+            "ess_bulk_argmin": annotate_extreme(ess_argmin, edinet_codes, factor_names),
+            "r_hat_argmax": annotate_extreme(r_hat_argmax, edinet_codes, factor_names)}
 
 
 def ess_efficiency(ess: dict | None, total_steps, seconds) -> dict:
@@ -436,14 +453,17 @@ def load_real_panel(n_stock: int, seed: int, stamp: str | None = None) -> dict:
     return {"returns": np.asarray(returns), "macro": macro[:, sel], "stock_idx": stock_idx,
             "sector_idx": sector_idx, "n_stock": len(edinet_codes),
             "n_sector": len(sector_names), "n_factor": len(sel), "n_obs": len(returns),
-            "selected": [factor_names[i] for i in sel]}
+            "selected": [factor_names[i] for i in sel],
+            # 極値がどの銘柄で起きているかを診断に載せるため（#600）。synth は持たない。
+            "edinet_codes": list(edinet_codes)}
 
 
 # ---- 計測本体 -----------------------------------------------------------------------
 
 def run_sample(model, draws: int, tune: int, chains: int, target_accept: float,
                seed: int, nuts_sampler, init, chain_method,
-               max_tree_depth=None, sector_idx=None) -> dict:
+               max_tree_depth=None, sector_idx=None,
+               edinet_codes=None, factor_names=None) -> dict:
     """1回の pm.sample を計測する。返すのは所要と sample_stats の要約（＋要求されれば ESS）。
 
     `sector_idx` を渡した run だけ `diagnose` を掛ける（#540）。probe には掛けない——
@@ -488,7 +508,7 @@ def run_sample(model, draws: int, tune: int, chains: int, target_accept: float,
     diag_sec = None
     if sector_idx is not None:
         diag_started = time.monotonic()
-        ess = diagnose(idata, sector_idx)
+        ess = diagnose(idata, sector_idx, edinet_codes=edinet_codes, factor_names=factor_names)
         diag_sec = time.monotonic() - diag_started
 
     return {"draws": draws, "seconds": elapsed, "cpu_seconds": cpu_elapsed,
@@ -542,6 +562,16 @@ def format_report(record: dict) -> str:
                 r["draws"], e["ess_bulk_min"], e["ess_bulk_p10"], e["ess_bulk_median"],
                 e["r_hat_max"], r.get("ess_bulk_median_per_1e6step") or float("nan"),
                 r.get("ess_bulk_median_per_sec") or float("nan")))
+        # 極値“を出している母数”（#600）。alpha なら永続化対象ではないのでゲートの見方を
+        # 変える余地があり、beta なら macro_beta_loadings そのもの＝対策が変わる。
+        for r in record["runs"]:
+            e = r.get("ess") or {}
+            for key, title in (("ess_bulk_argmin", "ess_min "), ("r_hat_argmax", "r_hat_max")):
+                loc = e.get(key)
+                if loc:
+                    lines.append("  {0} at {1} (edinet={2} factor={3}) = {4:.4g}".format(
+                        title, loc.get("label"), loc.get("edinet_code") or "-",
+                        loc.get("factor_name") or "-", loc.get("value")))
         diag = [r.get("diag_sec") for r in record["runs"] if r.get("diag_sec")]
         if diag:
             lines.append("          ESS は beta+alpha+mu_universe の生値（n_params={0}）・"
@@ -691,7 +721,9 @@ def main() -> None:
                            target_accept=args.target_accept, seed=args.seed,
                            nuts_sampler=args.nuts_sampler, init=args.init,
                            chain_method=args.chain_method, max_tree_depth=max_tree_depth,
-                           sector_idx=diag_sector_idx)
+                           sector_idx=diag_sector_idx,
+                           edinet_codes=panel.get("edinet_codes"),
+                           factor_names=panel.get("selected"))
             logger.info("  -> %.1fs cpu/wall=%.2f steps/draw=%s ess_bulk_med=%s", r["seconds"],
                         r["cpu_per_wall"] or 0.0,
                         "n/a" if r["steps"]["mean"] is None else round(r["steps"]["mean"], 1),
