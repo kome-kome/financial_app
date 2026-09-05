@@ -795,3 +795,82 @@ class TestExtremeLocation:
             assert loc["edinet_code"] == codes[loc["stock"]]
         if loc["factor"] is not None:
             assert loc["factor_name"] in ("JP10Y", "USDJPY")
+
+
+class TestByParamStats:
+    """変数別の診断統計（#609）。**ゲートを「何に課すか」で見直すための根拠**。
+
+    本番規模の `ess_bulk_min=13.39` も `r_hat_max=1.1156` も、49,893個のうち `alpha` の
+    1個が出していた（#600）。`beta`（永続化してリスク量に効く）は健全なのに、全変数を
+    混ぜた max/min ではそれが見えない。本番規模の測り直しは約6時間かかるので、**極値だけ
+    残して後から「分位も見たかった」となると6時間をもう一度払う**——だからここで縛る。
+    """
+
+    def test_stats_are_ordered_and_complete(self):
+        st = mbi.param_group_stats([1.0, 1.1, 1.2], [13.0, 200.0, 500.0])
+        assert st["n"] == 3
+        assert st["ess_bulk_min"] <= st["ess_bulk_p1"] <= st["ess_bulk_p10"]             <= st["ess_bulk_median"]
+        assert st["r_hat_median"] <= st["r_hat_p99"] <= st["r_hat_max"]
+
+    def test_empty_group_is_not_an_error(self):
+        """変数が1つも無いブロックは「測れなかった」＝ n=0（0 と混同しない）。"""
+        assert mbi.param_group_stats([], []) == {"n": 0}
+
+    def test_split_by_param_reads_the_arviz_labels(self):
+        got = mbi._split_by_param(["alpha[0]", "beta[1, 2]", "alpha[3]", "mu_universe[0]"])
+        assert got == {"alpha": [0, 2], "beta": [1], "mu_universe": [3]}
+
+    def test_beta_chunks_accumulate_without_labels(self):
+        """beta チャンクは全行 beta と分かっているのでラベルを分割しない（46,044行ぶんの無駄）。"""
+        acc = {}
+        mbi._accumulate_param_stats(acc, [1.0, 1.1], [100.0, 200.0])
+        mbi._accumulate_param_stats(acc, [1.2], [50.0])
+        assert set(acc) == {"beta"}
+        st = mbi.param_group_stats(np.concatenate(acc["beta"]["r"]),
+                                   np.concatenate(acc["beta"]["e"]))
+        assert st["n"] == 3 and st["ess_bulk_min"] == 50.0
+
+    def test_global_extremes_equal_the_per_param_extremes(self, monkeypatch):
+        """**整合性の要**: 全体の max/min は変数別の max/min の最大/最小に一致する。
+
+        ここがずれるなら、どちらかの集計が母集団を取りこぼしている。
+        """
+        az = pytest.importorskip("arviz")
+        monkeypatch.setattr(mbi, "BETA_CHUNK_STOCKS", 3)
+        idata, sector_idx = _raw_idata(az)
+        diag = summarize_diagnostics(idata, sector_idx)
+
+        by = diag["by_param"]
+        assert set(by) == {"alpha", "beta", "mu_universe"}
+        assert diag["r_hat_max"] == pytest.approx(
+            max(st["r_hat_max"] for st in by.values()), rel=1e-12)
+        assert diag["ess_bulk_min"] == pytest.approx(
+            min(st["ess_bulk_min"] for st in by.values()), rel=1e-12)
+
+    def test_every_parameter_is_counted_exactly_once(self, monkeypatch):
+        """beta 7x2 + alpha 7 + mu_universe 2 = 23。
+
+        チャンク分割で二重計上すると分位が歪む（極値は一致したまま）ので、**数で縛る**。
+        """
+        az = pytest.importorskip("arviz")
+        monkeypatch.setattr(mbi, "BETA_CHUNK_STOCKS", 3)
+        idata, sector_idx = _raw_idata(az)
+        by = summarize_diagnostics(idata, sector_idx)["by_param"]
+        assert by["beta"]["n"] == 14 and by["alpha"]["n"] == 7 and by["mu_universe"]["n"] == 2
+        assert sum(st["n"] for st in by.values()) == 23
+
+    def test_gate_values_are_unchanged_by_the_addition(self, monkeypatch):
+        """付帯情報を足してもゲート量は動かない（`persist_allowed` の較正を守る）。"""
+        az = pytest.importorskip("arviz")
+        monkeypatch.setattr(mbi, "BETA_CHUNK_STOCKS", 3)
+        idata, sector_idx = _raw_idata(az)
+        summ = az.summary(idata, var_names=["alpha", "mu_universe"], kind="diagnostics",
+                          round_to="none")
+        naive = az.summary(
+            az.from_dict(posterior={"beta": _naive_beta(idata.posterior, sector_idx)}),
+            kind="diagnostics", round_to="none")
+        diag = summarize_diagnostics(idata, sector_idx)
+        assert diag["r_hat_max"] == pytest.approx(
+            max(float(summ["r_hat"].max()), float(naive["r_hat"].max())), rel=1e-12)
+        assert diag["ess_bulk_min"] == pytest.approx(
+            min(float(summ["ess_bulk"].min()), float(naive["ess_bulk"].min())), rel=1e-12)

@@ -7,8 +7,10 @@
     （月次トリガの XML 生成・S4U・窓の検証は片方だけ直す事故が起きやすい）。ここは
     「M-1 タスクの既定値はこれ」を1か所に固定するための薄い入口。
 
-    既定は毎月2日 JST 01:00・16時間の窓。月次本体（1日 01:00）の翌日に置くことで、
-    本体（Sigma 863分）と重ならず、翌日の日次バッチ（17:20）の手前で終わる。
+    既定は毎月3日 JST 01:00・16時間の窓。**2日から3日へ移した**（#579）——同じ2日に
+    macro_beta（M-1 の入力）を置いたため。macro_beta_loadings は tune:macro_risk_return の
+    入力なので、探索が先に走ると常に1か月前の loadings を見ることになる。
+    本体（1日・Sigma 683分）とも重ならず、翌日の日次バッチ（17:20）の手前で終わる。
 
     なぜ別タスクなのか: tune:macro_risk_return は実測 2.61分/件 x 288件 = 約752分で
     月次の窓（960分）のほぼ全部を1本で食う。hyperparameter_search は完走してからしか
@@ -24,7 +26,7 @@
 [CmdletBinding()]
 param(
     [string]$Time = "01:00",
-    [int]$Day = 2,
+    [int]$Day = 3,
     [string]$TaskName = "financial_app-monthly-m1",
     [int]$Hours = 16,
     [switch]$Unregister

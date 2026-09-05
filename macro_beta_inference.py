@@ -554,6 +554,61 @@ def annotate_extreme(loc: dict | None, edinet_codes=None, factor_names=None) -> 
     return out
 
 
+def param_group_stats(r_hat, ess_bulk) -> dict:
+    """1変数ぶんの診断統計（極値と分位）を作る（#609）。
+
+    **なぜ変数別に要るのか**: 本番規模の `ess_bulk_min=13.39` も `r_hat_max=1.1156` も、
+    49,893個のうち `alpha` の1個が出していた（#600）。`beta`（`macro_beta_loadings` として
+    永続化しリスク量に効く）は健全なのに、全変数を混ぜた max/min では両者が区別できない。
+    ゲートの定義を「何に対して課すか」から見直すには、変数別の分布が要る。
+
+    分位まで持つのは**測り直しのコストが本番規模で約6時間**だから——極値だけ残して後から
+    「分位も見たかった」となると、その6時間をもう一度払うことになる（#600 で実際に払った）。
+    """
+    r = np.asarray(r_hat, dtype=float)
+    e = np.asarray(ess_bulk, dtype=float)
+    if r.size == 0 or e.size == 0:
+        return {"n": 0}
+    return {
+        "n":            int(e.size),
+        "r_hat_max":    float(np.nanmax(r)),
+        "r_hat_p99":    float(np.nanpercentile(r, 99)),
+        "r_hat_median": float(np.nanpercentile(r, 50)),
+        "ess_bulk_min":    float(np.nanmin(e)),
+        "ess_bulk_p1":     float(np.nanpercentile(e, 1)),
+        "ess_bulk_p10":    float(np.nanpercentile(e, 10)),
+        "ess_bulk_median": float(np.nanpercentile(e, 50)),
+    }
+
+
+def _split_by_param(labels) -> dict:
+    """az.summary の index を変数名ごとの位置リストへ分ける（`alpha[3]` → "alpha"）。"""
+    groups: dict[str, list[int]] = {}
+    for i, lbl in enumerate(labels):
+        groups.setdefault(str(lbl).split("[")[0], []).append(i)
+    return groups
+
+
+def _accumulate_param_stats(acc: dict, r_hat, ess_bulk, labels=None) -> None:
+    """診断値の1ブロックを変数名ごとに貯める（`labels=None` は beta チャンク＝全行 beta）。
+
+    beta は本番規模で 46,044 行あり、チャンクごとにラベルを文字列分割すると無駄が大きい。
+    呼び側が「このブロックは全部 beta」と分かっているときは labels を渡さない。
+    """
+    r = np.asarray(r_hat, dtype=float)
+    e = np.asarray(ess_bulk, dtype=float)
+    if labels is None:
+        bucket = acc.setdefault("beta", {"r": [], "e": []})
+        bucket["r"].append(r)
+        bucket["e"].append(e)
+        return
+    for name, idxs in _split_by_param(labels).items():
+        bucket = acc.setdefault(name, {"r": [], "e": []})
+        idx = np.asarray(idxs, dtype=int)
+        bucket["r"].append(r[idx])
+        bucket["e"].append(e[idx])
+
+
 def summarize_diagnostics(idata, sector_idx=None, edinet_codes=None, factor_names=None) -> dict:
     """r_hat・ESS の収束診断サマリ（ADR-0002 検証基準: r_hat<1.01・ESS 十分性・発散遷移数）。
 
@@ -594,6 +649,7 @@ def summarize_diagnostics(idata, sector_idx=None, edinet_codes=None, factor_name
 
     diverging = idata.sample_stats.get("diverging") if hasattr(idata, "sample_stats") else None
     n_div = int(diverging.sum()) if diverging is not None else None
+    by_param: dict = {}
 
     if sector_idx is None:
         summ = az.summary(idata, var_names=["beta", "alpha", "mu_universe"], kind="diagnostics",
@@ -603,6 +659,7 @@ def summarize_diagnostics(idata, sector_idx=None, edinet_codes=None, factor_name
         )
         ess_argmin = locate_extreme(summ["ess_bulk"], summ.index, "min")
         r_hat_argmax = locate_extreme(summ["r_hat"], summ.index, "max")
+        _accumulate_param_stats(by_param, summ["r_hat"], summ["ess_bulk"], summ.index)
     else:
         post = idata.posterior
         summ = az.summary(idata, var_names=["alpha", "mu_universe"], kind="diagnostics",
@@ -612,6 +669,7 @@ def summarize_diagnostics(idata, sector_idx=None, edinet_codes=None, factor_name
         ess_tail_min = float(summ["ess_tail"].min())
         ess_argmin = locate_extreme(summ["ess_bulk"], summ.index, "min")
         r_hat_argmax = locate_extreme(summ["r_hat"], summ.index, "max")
+        _accumulate_param_stats(by_param, summ["r_hat"], summ["ess_bulk"], summ.index)
 
         n_stock = post.sizes["stock"]
         mu_sector = _reconstruct_mu_sector(post)
@@ -628,6 +686,7 @@ def summarize_diagnostics(idata, sector_idx=None, edinet_codes=None, factor_name
                 ess_argmin, locate_extreme(csumm["ess_bulk"], csumm.index, "min", lo), "min")
             r_hat_argmax = pick_extreme(
                 r_hat_argmax, locate_extreme(csumm["r_hat"], csumm.index, "max", lo), "max")
+            _accumulate_param_stats(by_param, csumm["r_hat"], csumm["ess_bulk"])
 
     return {
         "r_hat_max":     r_hat_max,
@@ -637,6 +696,10 @@ def summarize_diagnostics(idata, sector_idx=None, edinet_codes=None, factor_name
         # 極値“そのもの”ではなく**それを出している母数**（#600）。alpha か beta かで対策が変わる。
         "ess_bulk_argmin": annotate_extreme(ess_argmin, edinet_codes, factor_names),
         "r_hat_argmax":    annotate_extreme(r_hat_argmax, edinet_codes, factor_names),
+        # 変数別の極値と分位（#609）。ゲートを「何に対して課すか」で見直すための根拠で、
+        # 本番規模の再測定は約6時間かかるので**この1回で取り切る**。
+        "by_param": {name: param_group_stats(np.concatenate(v["r"]), np.concatenate(v["e"]))
+                     for name, v in by_param.items()},
     }
 
 
@@ -691,13 +754,47 @@ def summarize(idata, selected: list[str], macro_sel: np.ndarray,
     )
 
 
-def persist(db, result: InferenceResult) -> None:
+# `persist` が書く meta の列。**推論の前に存在を確かめる**ためだけに持つ（#609）。
+PERSIST_META_COLUMNS = ("run_id", "snapshot_date", "selected_factors", "factor_cov",
+                        "hyperparams", "status")
+
+
+def assert_persist_schema(db) -> None:
+    """書き込み先が今のコードの列を受け付けるか、**推論を始める前に**確かめる（#609）。
+
+    DDL を打つのは `database.init_db()`（API 起動時に走る）であって、バッチではない。
+    だがバッチは DDL 未適用の DB に対しても**6時間走り切ってから** persist で
+    「column does not exist」に当たる——結果は返らず、run は丸ごと無駄になる。
+    ここは「足りないことを早く言う」役に徹する（`deps_smoke` が重い依存に対してやるのと同じ）。
+    """
+    from sqlalchemy import inspect
+
+    if db.bind is None:
+        return
+    have = {c["name"] for c in inspect(db.bind).get_columns("macro_beta_meta")}
+    missing = [c for c in PERSIST_META_COLUMNS if c not in have]
+    if missing:
+        raise SystemExit(
+            "中止: macro_beta_meta に列が足りない {0}（DDL が未適用）。"
+            "`init_db()` を一度走らせてから再実行すること——"
+            "このまま進めても数時間後の persist で落ちて結果が消える。".format(missing)
+        )
+
+
+def persist(db, result: InferenceResult, status: str | None = None) -> None:
     """推論結果を macro_beta_meta / macro_beta_loadings へ upsert する（#214）。
 
     per-stock 切片は factor_name="_intercept" 行として格納し、producer が μ を復元する。
     スキーマ・upsert 本体は database.upsert_macro_beta（縦持ち・DDL 追加のみ・Supabase 容量軽微）。
+
+    status（#609）
+    --------------
+    `live` なら producer が読む。`quarantined` は**保全のみ**で `get_macro_beta` からは見えない。
+    収束ゲートに落ちた run をここへ書けるようにしたのは、**落とすことと捨てることを分ける**
+    ため——2026-09-03 は 6時間かけて完走した run が reject されて丸ごと消えた。省略時は live
+    （テストや手動の呼び出しが黙って隔離されないように、明示した側だけが隔離する）。
     """
-    from database import upsert_macro_beta  # 遅延 import（バッチ実行時のみ DB へ接続）
+    from database import MACRO_BETA_STATUS_LIVE, upsert_macro_beta  # 遅延 import
 
     meta = {
         "run_id":           result.run_id,
@@ -705,6 +802,7 @@ def persist(db, result: InferenceResult) -> None:
         "selected_factors": result.selected_factors,
         "factor_cov":       result.factor_cov,
         "hyperparams":      {**(result.hyperparams or {}), "diagnostics": result.diagnostics},
+        "status":           status or MACRO_BETA_STATUS_LIVE,
     }
     rows: list[dict] = []
     for code, fmap in result.loadings.items():
@@ -784,6 +882,8 @@ def main() -> None:
 
     db = SessionLocal()
     try:
+        # **数時間の推論を始める前に**書き込み先を確かめる（#609）。
+        assert_persist_schema(db)
         result = run_inference(draws=args.draws, tune=args.tune, target_accept=args.target_accept,
                                seed=args.seed, db=db, chains=args.chains,
                                nuts_sampler=args.nuts_sampler, init=args.init,
@@ -791,13 +891,23 @@ def main() -> None:
         logger.info("収束診断: %s", result.diagnostics)
         r_hat_max = result.diagnostics.get("r_hat_max")
         if not persist_allowed(r_hat_max, args.r_hat_threshold, args.force):
+            # **落とすことと捨てることを分ける**（#609）。ゲートの役目は「品質の悪い結果が
+            # 即ライブ反映されるのを防ぐ」ことであって、6時間の計算を消すことではない。
+            # quarantined で書けば producer からは見えないまま結果が残り、後から
+            # `get_macro_beta(db, run_id=...)` で読んで精査できる（2026-09-03 は捨てて
+            # 測り直しになった）。昇格が要るなら status を live へ更新する。
+            from database import MACRO_BETA_STATUS_QUARANTINED
+
+            persist(db, result, status=MACRO_BETA_STATUS_QUARANTINED)
             logger.error(
-                "persist を拒否: r_hat_max=%.4f が threshold（<=%.4f）を超過（n_divergences=%s）。"
-                "macro_risk_return の producer には品質ゲートが無く persist 即ライブ反映されるため、"
-                "既定では書き込まない。draws/tune/target_accept を見直すか、--r-hat-threshold を"
-                "緩和するか、--force で強制書き込み可能。",
+                "persist を隔離: r_hat_max=%.4f が threshold（<=%.4f）を超過（n_divergences=%s）。"
+                "run_id=%s を status=quarantined で保存した（producer は読まない）。"
+                "結果は残っているので精査でき、再実行するなら --force で live として書ける。",
                 r_hat_max, args.r_hat_threshold, result.diagnostics.get("n_divergences"),
+                result.run_id,
             )
+            # **exit を非0のままにする**のが要点。status を入れたことで隔離は正常終了に見えるが、
+            # 「M-1 が更新されていない」は運用上の失敗であり、静かに固着させない（#579 の再来を防ぐ）。
             raise SystemExit(1)
         persist(db, result)
         logger.info("推論完了・DB永続化済み: %d 銘柄 / 因子 %s", len(result.loadings), result.selected_factors)

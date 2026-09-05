@@ -93,7 +93,8 @@ HEAVY_AUTOMATION: dict[str, str] = {
     # --persist-scores 副作用で更新される。cadence が探索に縛られている点は #423 子2 の
     # 宿題として残っている（GHA 時代は M-1 が 300分 timeout で cancelled を続けており＝
     # 子7、**登録があっても鮮度は出ていない**実例になっていた）。
-    # M-1 だけ別タスク（毎月2日 JST 01:00 → run_monthly_m1.ps1）。実測 約752分で月次本体の
+    # M-1 だけ別タスク（毎月3日 JST 01:00 → run_monthly_m1.ps1・#579 で2日から移動）。
+    # 2日は macro_beta（M-1 の入力）が使う。実測 約752分で月次本体の
     # 窓に入らず、hyperparameter_search は完走してからしか永続化しないため切り出した（#584）。
     "macro_risk_return": "local:scripts/run_monthly_m1.py",
     "macro_gbdt": "local:scripts/run_monthly.py",

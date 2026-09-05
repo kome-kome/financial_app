@@ -283,8 +283,9 @@ def diagnose(idata, sector_idx, edinet_codes=None, factor_names=None) -> dict:
     """
     import arviz as az
 
-    from macro_beta_inference import (BETA_CHUNK_STOCKS, _reconstruct_beta_chunk,
-                                      _reconstruct_mu_sector, annotate_extreme, locate_extreme,
+    from macro_beta_inference import (BETA_CHUNK_STOCKS, _accumulate_param_stats,
+                                      _reconstruct_beta_chunk, _reconstruct_mu_sector,
+                                      annotate_extreme, locate_extreme, param_group_stats,
                                       pick_extreme)
 
     post = idata.posterior
@@ -295,6 +296,8 @@ def diagnose(idata, sector_idx, edinet_codes=None, factor_names=None) -> dict:
     r_hat = [np.asarray(summ["r_hat"], dtype=float)]
     ess_argmin = locate_extreme(summ["ess_bulk"], summ.index, "min")
     r_hat_argmax = locate_extreme(summ["r_hat"], summ.index, "max")
+    by_param: dict = {}
+    _accumulate_param_stats(by_param, summ["r_hat"], summ["ess_bulk"], summ.index)
 
     n_stock = post.sizes["stock"]
     mu_sector = _reconstruct_mu_sector(post)
@@ -311,6 +314,7 @@ def diagnose(idata, sector_idx, edinet_codes=None, factor_names=None) -> dict:
             ess_argmin, locate_extreme(csumm["ess_bulk"], csumm.index, "min", lo), "min")
         r_hat_argmax = pick_extreme(
             r_hat_argmax, locate_extreme(csumm["r_hat"], csumm.index, "max", lo), "max")
+        _accumulate_param_stats(by_param, csumm["r_hat"], csumm["ess_bulk"])
 
     eb = np.concatenate(ess_bulk)
     et = np.concatenate(ess_tail)
@@ -322,7 +326,11 @@ def diagnose(idata, sector_idx, edinet_codes=None, factor_names=None) -> dict:
             "ess_tail_min": float(np.nanmin(et)),
             "n_params": int(eb.size),
             "ess_bulk_argmin": annotate_extreme(ess_argmin, edinet_codes, factor_names),
-            "r_hat_argmax": annotate_extreme(r_hat_argmax, edinet_codes, factor_names)}
+            "r_hat_argmax": annotate_extreme(r_hat_argmax, edinet_codes, factor_names),
+            # 変数別の極値と分位（#609）。本番の summarize_diagnostics と同じ形にする
+            # ——格子で見た分布と本番で起きている分布が別物にならないように。
+            "by_param": {name: param_group_stats(np.concatenate(v["r"]), np.concatenate(v["e"]))
+                         for name, v in by_param.items()}}
 
 
 def ess_efficiency(ess: dict | None, total_steps, seconds) -> dict:

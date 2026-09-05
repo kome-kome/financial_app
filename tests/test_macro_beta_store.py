@@ -11,7 +11,8 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from database import upsert_macro_beta, get_macro_beta, MacroBetaLoading
+from database import (MACRO_BETA_STATUS_LIVE, MACRO_BETA_STATUS_QUARANTINED,
+                      MacroBetaLoading, get_macro_beta, upsert_macro_beta)
 
 
 def _meta(run_id="run1"):
@@ -106,3 +107,120 @@ class TestMacroBetaStore:
         assert meta["selected_factors"] == ["macro_usdjpy_yoy"]
         assert loadings["E001"]["macro_usdjpy_yoy"] == (0.4, 0.05)
         assert loadings["E001"]["_intercept"] == (0.01, 0.002)     # 切片が格納される
+
+
+class TestQuarantine:
+    """収束ゲートに落ちた run を**捨てずに隔離する**（#609）。
+
+    2026-09-03 は 6時間かけて完走した run が `r_hat_max=1.1179 > 1.05` で reject され、
+    loadings ごと消えて測り直しになった。ゲートの役目は「品質の悪い結果が即ライブ反映
+    されるのを防ぐ」ことであって、計算を捨てることではない。
+    """
+
+    def test_quarantined_run_is_invisible_to_the_producer(self, db):
+        upsert_macro_beta(db, dict(_meta("live1"), status=MACRO_BETA_STATUS_LIVE),
+                          _loadings("live1"))
+        upsert_macro_beta(db, dict(_meta("bad1"), status=MACRO_BETA_STATUS_QUARANTINED),
+                          _loadings("bad1"))
+        meta, loadings = get_macro_beta(db)
+        assert meta["run_id"] == "live1", "隔離した run が最新として producer に返っている"
+        assert loadings, "live な loadings まで消えている"
+
+    def test_quarantined_run_is_still_readable_by_run_id(self, db):
+        """**保全されていること自体**が隔離の目的。読めなければ捨てたのと同じ。"""
+        upsert_macro_beta(db, dict(_meta("bad1"), status=MACRO_BETA_STATUS_QUARANTINED),
+                          _loadings("bad1"))
+        meta, loadings = get_macro_beta(db, "bad1")
+        assert meta["status"] == MACRO_BETA_STATUS_QUARANTINED
+        assert loadings["E001"]["macro_usdjpy_yoy"] == (0.5, 0.1)
+
+    def test_null_status_is_treated_as_live(self, db):
+        """既存2件（2026-07-04 / 08-01）は status 列が無かった時代の run。
+
+        ここを quarantined 側へ倒すと、**列を足した瞬間に M-1 の入力が消える**。
+        """
+        upsert_macro_beta(db, _meta("old1"), _loadings("old1"))   # status を渡さない
+        meta, _ = get_macro_beta(db)
+        assert meta["run_id"] == "old1"
+
+    def test_all_quarantined_means_no_producer_input(self, db):
+        """隔離しか無いときは「未蓄積」と同じ扱い（producer は graceful degrade）。"""
+        upsert_macro_beta(db, dict(_meta("bad1"), status=MACRO_BETA_STATUS_QUARANTINED),
+                          _loadings("bad1"))
+        meta, loadings = get_macro_beta(db)
+        assert meta is None and loadings == {}
+
+    def test_status_can_be_promoted_by_reupsert(self, db):
+        """人が精査して昇格させる経路（同じ run_id を live で書き直す）。"""
+        upsert_macro_beta(db, dict(_meta("bad1"), status=MACRO_BETA_STATUS_QUARANTINED),
+                          _loadings("bad1"))
+        assert get_macro_beta(db)[0] is None
+        upsert_macro_beta(db, dict(_meta("bad1"), status=MACRO_BETA_STATUS_LIVE),
+                          _loadings("bad1"))
+        assert get_macro_beta(db)[0]["run_id"] == "bad1"
+
+    def test_persist_defaults_to_live(self, db):
+        """`persist` の status 省略は live（テストや手動呼び出しが黙って隔離されない）。"""
+        from macro_beta_inference import InferenceResult, persist
+
+        res = InferenceResult(
+            run_id="mb_live", snapshot_date="2026-06-01",
+            selected_factors=["macro_usdjpy_yoy"],
+            loadings={"E001": {"macro_usdjpy_yoy": (0.4, 0.05)}},
+            alpha={"E001": (0.01, 0.002)}, mu_pred={"E001": 0.03},
+            factor_cov=[[1.0]],
+        )
+        persist(db, res)
+        assert get_macro_beta(db)[0]["status"] == MACRO_BETA_STATUS_LIVE
+
+    def test_persist_can_quarantine(self, db):
+        from macro_beta_inference import InferenceResult, persist
+
+        res = InferenceResult(
+            run_id="mb_bad", snapshot_date="2026-06-01",
+            selected_factors=["macro_usdjpy_yoy"],
+            loadings={"E001": {"macro_usdjpy_yoy": (0.4, 0.05)}},
+            alpha={"E001": (0.01, 0.002)}, mu_pred={"E001": 0.03},
+            factor_cov=[[1.0]],
+        )
+        persist(db, res, status=MACRO_BETA_STATUS_QUARANTINED)
+        assert get_macro_beta(db)[0] is None                      # producer からは見えない
+        assert get_macro_beta(db, "mb_bad")[0]["status"] == MACRO_BETA_STATUS_QUARANTINED
+
+
+class TestSchemaIsCheckedBeforeTheLongRun:
+    """**6時間走ってから「列が無い」で落ちない**こと（#609）。
+
+    `status` を足したとき、DDL を打つのは `init_db()`（API 起動時）だけでバッチは呼ばない。
+    列が無い DB に対してもバッチは走り切ってしまい、persist の瞬間に落ちて結果が消える。
+    """
+
+    def test_passes_when_the_columns_exist(self, db):
+        from macro_beta_inference import assert_persist_schema
+
+        assert_persist_schema(db)      # 例外が出ないこと
+
+    def test_fails_fast_when_a_column_is_missing(self, db, monkeypatch):
+        import macro_beta_inference as mbi
+
+        real_inspect = None
+
+        class _FakeInspector:
+            def get_columns(self, table):
+                return [{"name": c} for c in ("run_id", "snapshot_date", "hyperparams")]
+
+        monkeypatch.setattr("sqlalchemy.inspect", lambda bind: _FakeInspector())
+        with pytest.raises(SystemExit) as exc:
+            mbi.assert_persist_schema(db)
+        assert "status" in str(exc.value) and "init_db" in str(exc.value)
+        assert real_inspect is None
+
+    def test_checked_columns_match_what_persist_writes(self):
+        """チェックする列と `persist` が実際に書く列がずれたら意味が無い。"""
+        import inspect as _inspect
+
+        import macro_beta_inference as mbi
+
+        src = _inspect.getsource(mbi.persist)
+        for col in mbi.PERSIST_META_COLUMNS:
+            assert f'"{col}":' in src, f"persist が書かない列 {col} をチェックしている"
