@@ -46,8 +46,8 @@ if str(ROOT) not in sys.path:                      # `python -m scripts.*` か�
 # **import 時に副作用を持つモジュールをここから呼ばない。** 参照するのは定数だけで、
 # `scripts/run_*.py` と `scripts/batch_common.py` はトップレベルが定数定義に限られている
 # （`SPEC` は純 dataclass）。この前提が崩れると API プロセスが巻き込まれる。
-from scripts import (run_monthly, run_monthly_beta, run_monthly_m1,  # noqa: E402
-                     run_nightly)
+from scripts import (run_backup, run_monthly, run_monthly_beta,  # noqa: E402
+                     run_monthly_m1, run_nightly)
 
 # watchdog 自身の足跡。監視対象と同じ表に置く（見る場所を分けない）。
 KEY_LAST_RUN = "watchdog_last_run"
@@ -80,6 +80,7 @@ class Watched:
 #   nightly … daily トリガ（install_nightly_task.ps1）＝24時間
 #   monthly … 同一日付の最長間隔。12/28->01/28 も 31日で、インストーラが -Day 1..28 に
 #             制限しているのでこの上限は -Day を動かしても成立する
+#   backup  … weekly トリガ（install_backup_task.ps1）＝7日
 #   自分     … daily トリガ。**初回は missing になるが、それは正常**（自分の行を書くのは
 #             自分だけで、第三者の書き手が居ない＝missing は「まだ1回目」を意味する）
 #
@@ -129,6 +130,18 @@ WATCHED: tuple[Watched, ...] = (
         issue_title="[ops] ローカルのマクロ×リスク-リターン探索バッチが走っていない",
         task_name="financial_app-monthly-m1",
         log_prefix="monthly_m1",
+    ),
+    Watched(
+        label="週次バックアップ",
+        key_run=run_backup.KEY_LAST_RUN,
+        key_success=run_backup.KEY_LAST_SUCCESS,
+        cadence_h=7 * 24.0,
+        window_min=run_backup.WINDOW_MIN,
+        # 走らないと、#503 で通した復元経路があっても**戻せるのは最後に人が手で叩いた日まで**
+        # になる。取り忘れは失敗として現れないので、ここに載せる以外に現す手段が無い（#606）。
+        issue_title="[ops] ローカルのバックアップバッチが走っていない",
+        task_name="financial_app-backup",
+        log_prefix="backup",
     ),
     Watched(
         label="watchdog 自身",

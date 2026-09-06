@@ -227,6 +227,27 @@ def generations_to_delete(stamps: list[str], keep_recent: int = KEEP_RECENT,
     return [s for s in ordered if s not in keep]
 
 
+def prune_local(keep_recent: int = KEEP_RECENT, keep_monthly: int = KEEP_MONTHLY,
+                echo=print) -> list[str]:
+    """ローカル世代へ保持ポリシーを適用し、消した世代を返す。
+
+    **dest によらず必ず呼ぶ。** `--dest storage` は「ローカルへダンプしてから上げる」
+    実装なので、掃除を storage 側だけにかけるとローカルは溜まる一方になる。週次で
+    自動実行する（#606）と 37.5MB/週＝年 1.9GB が正本と同じディスクに積み上がった。
+
+    `.backups/_from_storage/`（`backup_restore --source storage` の落とし先）は
+    `local_generations()` が「直下に manifest.json を持つディレクトリ」だけを数えるため
+    ここには現れない＝**復元予行の産物を掃除で消さない**。
+    """
+    drop = generations_to_delete(local_generations(), keep_recent, keep_monthly)
+    for s in drop:
+        for p in sorted((LOCAL_STORE / s).iterdir()):
+            p.unlink()
+        (LOCAL_STORE / s).rmdir()
+        echo(f"[retain] 削除（ローカル）: {s}")
+    return drop
+
+
 # ── Supabase Storage（REST・新規依存なし）──────────────────────────────────
 
 class Storage:
@@ -387,14 +408,11 @@ def main(argv: Optional[list[str]] = None) -> int:
         for s in drop:
             names = [f"{t}.dump" for t in mc.mirror_tables()] + [MANIFEST_NAME]
             store.remove_prefix(s, names)
-            print(f"[retain] 削除: {s}")
-    else:
-        drop = generations_to_delete(local_generations(), args.keep_recent, args.keep_monthly)
-        for s in drop:
-            for p in sorted((LOCAL_STORE / s).iterdir()):
-                p.unlink()
-            (LOCAL_STORE / s).rmdir()
-            print(f"[retain] 削除: {s}")
+            print(f"[retain] 削除（storage）: {s}")
+
+    # ローカル側は **dest によらず** 掃除する。storage 経路もいったんローカルへ
+    # ダンプしてから上げるので、ここを storage の中に入れると溜まる一方になる（#606）。
+    prune_local(args.keep_recent, args.keep_monthly)
 
     print(f"\n完了: 世代 {stamp}（{total_mb:.1f}MB / {len(tables)} 表）")
     print("  復元手順は docs/DEPLOYMENT.md の「バックアップからの復元」を参照")

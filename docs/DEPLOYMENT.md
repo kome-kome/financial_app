@@ -44,7 +44,7 @@ Render の制約と運用形態に合わせて設計すること。
 | **17:20** | `financial_app-nightly`（`run_nightly.ps1` → `scripts/run_nightly.py`） | 毎日 | `_pipeline_incremental.py`（XBRL 差分＋マクロ＋市場データ）→ `nightly_scores.py` | 大引 15:30・J-Quants 四本値 16:30・EDINET 受付終了 17:15 の後（#476 の確定時刻表）。`StartWhenAvailable` で停止していた日は次回起動時に追いつく。上限6時間（最悪 23:20 終了）。**窓はステップ予算へ分割**（pipeline 240分 / scores 60分・#530・ADR-0040）＝超過は `exit=124` で起票され、後続ステップは走る |
 | **1日 01:00** | `financial_app-monthly`（`run_monthly.ps1` → `scripts/run_monthly.py`） | 毎月 | `_pipeline_vacuum.py` → `scripts/resolve_price_suffix.py` → `recommend_factor_premia.py` → `macro_beta_inference.py` → `hyperparameter_search.py` ×3（M-1/M-3/M-2） | 日次の最悪ケース（23:20）の後で、翌日の日次 17:20 までの**16時間の窓**。上限もその幅（`PT16H`）。GHA 時代の4本（vacuum / tune / macro-beta / factor-premia）の移設先（#504・#290）。**窓はステップ予算へ分割**（vacuum 45 / price_suffix 3 / factor_premia 20 / macro_beta 180 / tune 250・250・180 分・Σ928＜960・#530・ADR-0040）。**余裕は 2分しかない**ので、ステップを足すときは必ず `window_problem()` を通ること（#560 で `--reprobe` 全数 8分が入らなかった）。予算が無いと `macro_beta` が窓を食い尽くし `tune×3` が**一度も起動しない**（打ち切りは failure として現れないので気づけない） |
 | **20:00** | `financial_app-watchdog`（`run_watchdog.ps1` → `scripts/check_batch_freshness.py`） | 毎日 | `app_settings` の `*_last_run` を読み、閾値超過なら Issue へ起票（既存 open があればコメント追記） | **走らなかったことを検知する唯一の役**（#515 手順3・ADR-0042）。バッチが起動前に死ぬと failure が出ないので `batch_common.notify` は発火しない。上限15分。時刻は判定に影響しない（閾値が観測時刻に依存しない導出）ので、選ぶ基準は**その時刻に PC が点いている確率**だけ |
-| 任意（週次を想定） | `scripts/backup_push.py` | 週次 | 17表を `--compress=9` でダンプ → Storage へ | 夜間バッチと**別タスク**にする（遅延が道連れにならない）。実測 37.5MB/世代 |
+| **日曜 21:00** | `financial_app-backup`（`run_backup.ps1` → `scripts/run_backup.py`） | 毎週 | `scripts/backup_push.py --apply --dest storage`（17表を `--compress=9` でダンプ → Storage へ） | 夜間バッチと**別タスク**にする（遅延が道連れにならない）。実測 38.1MB/世代・所要は数分規模だが、窓2時間・ステップ予算90分は**窓から導出**する（ADR-0040・実測へ寄せると伸びた週に打ち切られて世代が残らない）。自動化前は手動 CLI で、実効 RPO が「最後に人が思い出した日」だった（#606）。夜間バッチ（17:20 開始・実測約70分）とは時間帯が重ならない |
 
 - **名目時刻は「これより前には走らせない」下限であって、実起動時刻の予測ではない（#551）。** 実起動を決めるのは **PC の電源オン窓**で、実測（2026-08-26〜28 の System ログ 6005/6006）は **~17:40 → 翌 ~08:00**。この1つの変数で3タスクすべての挙動が説明できる:
 
@@ -67,9 +67,9 @@ Render の制約と運用形態に合わせて設計すること。
   | 週次株価 | `_recompute_weeks_from_daily` が daily から再集約（`WEEKLY_OVERLAP_DAYS`） | 189日 |
   | 検知 | watchdog が `*_last_run` を見て 30h 超で起票。**watchdog 自身が止まっても同じく追いつく** | 閾値 = `cadence + 窓` |
   | Supabase / Render | **同期は起きない。** Supabase は 2026-08-07 の凍結断面で書き戻す経路をコードとして持たない（ADR-0035/0038）＝PC の停止有無に関わらず Render の表示は変わらない | — |
-  | バックアップ | `scripts/backup_push.py` は**手動**（登録済みタスクは nightly / monthly / watchdog の3本だけ）＝止まっていた間のぶんが自動で取られることはない | — |
+  | バックアップ | `financial_app-backup` が毎週日曜 21:00 に取る（#606）。`StartWhenAvailable` で、その日曜に PC が止まっていても次回起動後に**1回だけ**追いつく | 7日 |
 
-  要点は「**183日以内に1度でも PC を起動すれば株価は自力で埋まる。埋まらないのは Supabase 断面とバックアップだけで、どちらも元から手動**」。
+  要点は「**183日以内に1度でも PC を起動すれば株価は自力で埋まる。自力で埋まらないのは Supabase 断面だけ**」。バックアップは #606 で週次の自動実行になり、走らなければ watchdog が起票する。
 
 - **Egress はローカル駆動では発生しない**（ローカル読取は Supabase を1バイトも使わない）。
 - ステップ間で止めない設計なので、収集が落ちてもスコア更新は走る。両方の結果が `.logs/<batch>_YYYYMMDD.log` に残る。
