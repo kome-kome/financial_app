@@ -40,9 +40,10 @@ Issue #512 は「pytensor が g++ 不在で Python フォールバック」と�
 関数ではない。時間を含まない ESS/歩 で順位を付ければドリフトが順位に混入しない。`ESS/秒` は
 本番所要の見積りに要るので従指標として併記する。
 
-ESS は **`beta` に対して**取る（`alpha` / `mu_universe` も混ぜる）。本番ゲート `persist_allowed` の
-r_hat は `beta` に対して較正された値であり、`beta_raw` で代用すると黙って緩くなる（ADR-0002 の
-#541 節）。なお #541 以降 `beta` は `pm.Deterministic` ではなく posterior に載っていないので、
+ESS は **`beta` に対して**取る（`alpha` / `mu_universe` も混ぜる）。本番ゲート
+`persist_allowed` は **変数ごとの `r_hat` の p99**（`beta` / `alpha` / `mu_universe` それぞれ）を
+見るので、`beta` を `beta_raw` で代用すると比べる相手が本番と別物になる（ADR-0002 の
+#541 節・#609 節）。なお #541 以降 `beta` は `pm.Deterministic` ではなく posterior に載っていないので、
 `az.ess(idata, var_names=["beta"])` は動かない——自由 RV から再構成する（`diagnose`）。
 
 実行例（必ず -m 形式・feedback_scripts_dir_needs_module_invocation）
