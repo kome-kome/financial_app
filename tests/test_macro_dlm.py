@@ -829,8 +829,13 @@ class TestProducer:
                         side_effect=ImportError, create=True):
                 pass  # import は通常通り走る
 
-        # 実際に execute を呼んで macro_dlm plugin の read_producer_scores が呼ばれるか確認
+        # 実際に execute を呼んで macro_dlm plugin の read_producer_scores が呼ばれるか確認。
+        # `tradable_filters`（#605）は `sub.c.d < cutoff` を組むので MagicMock では
+        # TypeError になる（MagicMock に `<` が無い）。**母集団条件はこのテストの主題では
+        # ないので条件ゼロで通す**——ここを空にしても producer 呼び出しの検証は成立し、
+        # 条件そのものは tests/test_tradable_universe.py が実 DB（SQLite）で縛る。
         with _patch("plugins.get_plugin", return_value=FakeDlmPlugin()), \
+             _patch("database.tradable_filters", return_value=[]), \
              _patch("database.FinancialMetric", create=True), \
              _patch("database.StockPriceWeekly", create=True), \
              _patch("database.latest_year_subq", return_value=_MM()):
