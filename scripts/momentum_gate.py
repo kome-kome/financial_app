@@ -81,6 +81,33 @@ stride 刻みで**並び順**に選ぶため、母集団が条件ごとに1社�
 ＝7% しか残らなかった（97% を5回掛ければ 86% のはずで桁が合わない）。stride=1 では
 **32,438件＝97.4%** が残り、期待どおりになる。**間引きは条件間の突合と両立しない。**
 
+## マクロ軸モード（`--macro`・#604）
+
+窓モードと同じ問題が `use_macro` にもある。M-1 は `build_snapshots` を
+`macro_nan_ok=False`（strict）で呼ぶので、**マクロ特徴量を持つ条件のほうが母集団が縮む**
+——`macro_risk_return.execute` の `macro_names = list(macro_features) if use_macro else []`
+により、OFF ではマクロ特徴量が0個になり「1つでも欠損したら断面を破棄」の条件が成立しない。
+つまり ON は「当てにくい銘柄が落ちた集合」で測られており、`momentum_window` と同型の交絡がある。
+
+    python -m scripts.momentum_gate --macro                       # M-1 のマクロ ON/OFF
+    python -m scripts.momentum_gate --macro --models risk_return  # 同上（明示）
+
+**測る対象は M-1 だけ**（`MACRO_MODELS`）。M-2/M-6 は `macro_nan_ok=True` で欠損を nan として
+保持するため母集団がほとんど動かず、そもそも `tuning_search_space()` で `use_macro` を
+探索していない（既定固定）。strict × 探索軸の組み合わせを持つのは M-1 だけである。
+
+**基準は「マクロ無し」側**（`MACRO_BASE_COND`）。窓モードで基準をモメンタム無しに置いたのと
+同じ理由で、母集団が広い側を分母にする。縮む側を分母にすると母集団効果が「改善」として
+符号ごと出る。
+
+**`--windows` と `--macro` は同時に指定できない。** 母集団を動かす軸を2つ同時に振ると、
+共通域へ制限してもどちらの効果かが分離できない——それは #592/#604 が指摘している当のもので、
+測る側で再現しては意味がない。
+
+**このモードは「マクロを外せ」と言うためのものではない。** M-1 はマクロ×リスク-リターンで、
+マクロを外したらモデルの前提そのものが消える（モメンタム2軸のように探索空間から落とす
+選択肢が無い）。出すのは母集団を揃えても差が残るかどうかだけである。
+
 ## M-1 を測るときの注意
 
 M-1 は `macro_nan_ok=False`（strict）で**母集団自体が M-2/M-6 と別物**なので、パネルを共有
@@ -96,6 +123,7 @@ import hashlib
 import json
 import sys
 from pathlib import Path
+from typing import NamedTuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -121,7 +149,33 @@ _OUT_DIR = Path(__file__).resolve().parent / ".cache"
 # **わざと再現して測る**ためのモードで、既定の判定には一切影響しない（#592）。
 MOM_WINDOW = 12
 
+
+class Cond(NamedTuple):
+    """1条件ぶんの構築パラメータ。
+
+    **タプルではなく名前付きにするのは、軸が3つになったから**（#604 で `use_macro` を足した）。
+    位置引数のタプルのままだと `(False, 12)` と `(False, 12, True)` が混在し、
+    どちらが何の軸かを読み手が数えることになる。既定 `use_macro=True` は本番構成
+    （M-1・M-2 とも `params_schema()` の既定が True）で、モメンタムの判定は
+    従来どおりマクロ ON の下で行われる＝ADR-0045 の実測条件が動かない。
+    """
+    use_momentum: bool
+    momentum_window: int
+    use_macro: bool = True
+
+
 CONDS: dict[str, bool] = {"off": False, "on": True}
+
+# マクロ軸モード（`--macro`・#604）。**基準は「マクロ無し」側**——M-1 は
+# `macro_nan_ok=False`（strict）なので、マクロ特徴量を持つ条件のほうが母集団が縮む。
+# モメンタムの窓モードで基準を「モメンタム無し」に置いたのと同じ理由で、広い側を分母にする。
+MACRO_CONDS: dict[str, bool] = {"nomacro": False, "macro": True}
+MACRO_BASE_COND = "nomacro"
+# マクロ軸を測る意味があるのは M-1 だけ。M-2/M-6 は `macro_nan_ok=True` で欠損を nan として
+# 保持するため `use_macro` が母集団をほとんど動かさず、そもそも `tuning_search_space()` で
+# 探索していない（既定固定）。M-1 だけが strict × 探索軸の組み合わせを持つ。
+MACRO_MODELS = ["risk_return"]
+
 MODELS = ["xgb_m2", "elasticnet"]
 MODEL_LABELS = {"xgb_m2": "M-2(XGBoost)", "elasticnet": "M-6(ElasticNet)",
                 "risk_return": "M-1(RiskReturn)"}
@@ -147,19 +201,46 @@ MODEL_SPECS: dict[str, tuple[str, str, str]] = {
 BASE_COND = "off"    # 比較の分母。窓モードでも「モメンタム無し」が基準
 
 
-def build_conditions(windows: list[int] | None = None) -> dict[str, tuple[bool, int]]:
-    """条件集合 {名前: (use_momentum, momentum_window)} を作る。
+def build_conditions(windows: list[int] | None = None,
+                    macro: bool = False) -> dict[str, Cond]:
+    """条件集合 {名前: Cond} を作る。
 
-    `windows` 未指定なら **ADR-0045 の昇格ゲートと完全に同じ2条件**を返す（既定を変えない）。
-    指定するとモメンタム無し＋各窓の多条件モードになる。窓は昇順に並べ、重複は落とす
-    （同じ窓を2回測っても検定数だけが増えて alpha が不当に厳しくなる）。
+    3つのモードがある。**同時には使えない**（下記）:
+
+      既定       … ADR-0045 の昇格ゲートと完全に同じ2条件（`off` / `on`・マクロは ON のまま）
+      `windows`  … モメンタム無し ＋ 各窓（#592・ADR-0050）
+      `macro`    … マクロ無し ＋ マクロ有り（#604）。モメンタムは既定 OFF に固定
+
+    **`windows` と `macro` は同時に指定できない。** 母集団を動かす軸を2つ同時に振ると、
+    どちらの効果かが分離できない——それは共通域制限をかけても解けない（共通域は
+    「全条件で測れる銘柄」に揃えるだけで、条件間の差が2軸ぶん混ざっている事実は残る）。
+    この分離不能こそ #592/#604 が指摘している当のもので、測る側で再現しては意味がない。
+
+    窓は昇順に並べ、重複は落とす（同じ窓を2回測っても検定数だけが増えて alpha が不当に
+    厳しくなる）。
     """
+    if windows and macro:
+        raise ValueError(
+            "--windows と --macro は同時に指定できません（母集団を動かす軸を2つ同時に"
+            "振ると、共通域へ制限してもどちらの効果か分離できない）")
+    if macro:
+        return {name: Cond(False, MOM_WINDOW, use_macro)
+                for name, use_macro in MACRO_CONDS.items()}
     if not windows:
-        return {name: (use_mom, MOM_WINDOW) for name, use_mom in CONDS.items()}
+        return {name: Cond(use_mom, MOM_WINDOW) for name, use_mom in CONDS.items()}
     ws = sorted({int(w) for w in windows})
     if any(w < 1 for w in ws):
         raise ValueError(f"モメンタム窓は1以上の整数で指定してください: {ws}")
-    return {BASE_COND: (False, MOM_WINDOW), **{f"mw{w}": (True, w) for w in ws}}
+    return {BASE_COND: Cond(False, MOM_WINDOW), **{f"mw{w}": Cond(True, w) for w in ws}}
+
+
+def base_of(conds: dict[str, Cond]) -> str:
+    """比較の分母になる条件名を返す。
+
+    **どのモードでも「母集団が最も広い条件」が分母**になる（モメンタム無し／マクロ無し）。
+    縮む側を分母に置くと、母集団効果が「改善」として符号ごと出てしまう。
+    """
+    return BASE_COND if BASE_COND in conds else MACRO_BASE_COND
 
 
 def bonferroni_alpha(n_models: int, n_conds: int) -> float:
@@ -267,8 +348,14 @@ def macro_names_for(kind: str) -> list:
 
 
 def _build(kind: str, args, prices_by_co, fin_by_co, companies, macro_cache,
-           use_momentum: bool, mom_window: int) -> tuple:
-    """種別の本番 config のまま `use_momentum` / `momentum_window` だけ差し替えて構築する。
+           use_momentum: bool, mom_window: int, use_macro: bool = True) -> tuple:
+    """種別の本番 config のまま、条件の軸（モメンタム／マクロ）だけ差し替えて構築する。
+
+    `use_macro=False` は本番の M-1 が `use_macro=False` で走るときと同じ状態にする——
+    `macro_risk_return.execute` の `macro_names = list(macro_features) if use_macro else []`
+    と同じ形で、マクロ系列名を空にする（#604）。**strict（`macro_nan_ok=False`）では、
+    これが母集団を変える**: マクロ特徴量が0個なら「1つでも欠損したら断面を破棄」の条件が
+    成立せず、欠損由来の脱落が消えて母集団が広がる。だからこの軸は共通域で測る必要がある。
 
     **config は各プラグインの `params_schema()` から取り、ここへ書き写さない**（書き写すと
     本番が変わったときに黙って別物を測る）。種別ごとの差は本番コードの差そのもの:
@@ -282,7 +369,7 @@ def _build(kind: str, args, prices_by_co, fin_by_co, companies, macro_cache,
     """
     plugin_name = "macro_risk_return" if kind == "m1" else "macro_gbdt"
     params = coerce_params(get_plugin(plugin_name).params_schema(), {})
-    macro_names = macro_names_for(kind)
+    macro_names = macro_names_for(kind) if use_macro else []
     extra = {} if kind == "m1" else {
         "price_features": list(params.get("price_features") or [])}
     samples_by_ym, meta_by_ym, _current, feats, ids_by_ym = build_snapshots(
@@ -338,6 +425,9 @@ def main() -> None:
     ap.add_argument("--windows",
                     help="モメンタム窓をカンマ区切りで指定すると多条件モードになる"
                          "（例: 3,6,12,18,24）。既定は ON/OFF の2条件のまま")
+    ap.add_argument("--macro", action="store_true",
+                    help="マクロ軸モード（use_macro の ON/OFF を共通域で測る・#604）。"
+                         f"モデル既定は {','.join(MACRO_MODELS)}。--windows とは併用不可")
     ap.add_argument("--smoke", action="store_true", help="サンプルを間引いた短時間確認")
     ap.add_argument("--stride", type=int, default=1, help="各月のサンプル間引き幅")
     ap.add_argument("--allow-full-pull", action="store_true",
@@ -349,15 +439,23 @@ def main() -> None:
         args.stride = 5
     set_refresh(args.refresh_cache)
 
+    # マクロ軸モードの既定モデルは M-1 だけ（`MACRO_MODELS`）。M-2/M-6 は
+    # `macro_nan_ok=True` で欠損を nan として保持するため `use_macro` が母集団をほとんど
+    # 動かさず、そもそも探索軸に持っていない＝測る動機が無い。
+    default_models = MACRO_MODELS if args.macro else MODELS
     models = ([m.strip() for m in args.models.split(",") if m.strip()]
-              if args.models else list(MODELS))
+              if args.models else list(default_models))
     unknown = [m for m in models if m not in MODEL_SPECS]
     if unknown:
         raise SystemExit(
             f"未知のモデル: {', '.join(unknown)}（{', '.join(MODEL_SPECS)} のみ）")
     windows = ([int(w) for w in args.windows.replace(" ", "").split(",") if w]
                if args.windows else None)
-    conds = build_conditions(windows)
+    try:
+        conds = build_conditions(windows, macro=args.macro)
+    except ValueError as e:
+        raise SystemExit(str(e))
+    base = base_of(conds)
     # **alpha は検定数から導出する**（定数 ALPHA を窓モードへ流用すると、条件を増やした
     # ぶんの多重比較が補正されないまま「有意」が出る）。
     alpha = bonferroni_alpha(len(models), len(conds))
@@ -366,7 +464,11 @@ def main() -> None:
         print(f"[warn] 検定数が {n_tests} です（既定のゲートは {N_TESTS}）。"
               f"alpha は {alpha:.5f} へ導出し直しました。ADR-0045 の昇格判定と"
               f"直接は比較できません。", flush=True)
-    out_path = Path(args.json_path) if args.json_path else _OUT_DIR / "momentum_gate.json"
+    # 既定の出力先はモードで分ける。同じファイルへ上書きすると、あとから JSON を見たときに
+    # 「どの軸を測った結果か」が中身を読むまで分からない（`mode` フィールドはあるが、
+    # ファイル名で取り違えたまま比較するほうが起きやすい）。
+    default_out = f"momentum_gate{'_macro' if args.macro else ''}.json"
+    out_path = Path(args.json_path) if args.json_path else _OUT_DIR / default_out
 
     db = SessionLocal()
     try:
@@ -400,14 +502,16 @@ def main() -> None:
         # M-1 は strict のため別の1枚になる。ここを共有すると M-1 を M-2 の母集団で測る。
         panels: dict[tuple, tuple] = {}
         stats: dict[str, dict] = {}
-        for cond, (use_mom, mw) in conds.items():
+        for cond, c in conds.items():
             for kind in kinds:
                 s, m, i, feats = _build(kind, args, prices_by_co, fin_by_co, companies,
-                                        macro_cache, use_mom, mw)
+                                        macro_cache, c.use_momentum, c.momentum_window,
+                                        c.use_macro)
                 panels[(cond, kind)] = (s, m, i, feats)
                 st = _panel_stats(s, i, feats)
                 stats[f"{cond}|{kind}"] = st
-                print(f"[{cond}/{kind}] mw={mw if use_mom else '-'} "
+                print(f"[{cond}/{kind}] mw={c.momentum_window if c.use_momentum else '-'} "
+                      f"macro={'on' if c.use_macro else 'off'} "
                       f"months={st['months']} ({st['first_ym']}..{st['last_ym']}) "
                       f"samples={st['samples']} companies={st['companies']} "
                       f"features={st['n_features']}", flush=True)
@@ -509,11 +613,11 @@ def main() -> None:
     sigs: dict[str, dict] = {}
     passed: list[str] = []
     regressed: list[str] = []
-    test_conds = [c for c in conds if c != BASE_COND]
-    print(f"\n=== cond - {BASE_COND} / common [PRIMARY] "
+    test_conds = [c for c in conds if c != base]
+    print(f"\n=== cond - {base} / common [PRIMARY] "
           f"(Bonferroni alpha={alpha:.5f}, {n_tests} tests) ===", flush=True)
     for model in models:
-        b = common_results[f"{BASE_COND}|{model}"]
+        b = common_results[f"{base}|{model}"]
         for cond in test_conds:
             a = common_results[f"{cond}|{model}"]
             for metric, key in METRICS:
@@ -544,7 +648,18 @@ def main() -> None:
                   f"{_num(o.get('long_short_spread')):>10} {r['n_folds']:>6} "
                   f"{st['samples']:>9}", flush=True)
 
-    if len(conds) > 2:
+    if args.macro:
+        # **ここは「マクロを外せ」と言う場ではない。** M-1 はマクロ×リスク-リターンで、
+        # マクロを外したらモデルの前提そのものが消える（モメンタム2軸のように
+        # 探索空間から落とす選択肢が無い）。出すのは**母集団を揃えても差が残るか**だけで、
+        # 残らなかった場合に何をするかは実測を見てから決める（#604）。
+        verdict = (("MACRO AXIS: effects that survive the common-domain restriction: "
+                    + ", ".join(passed)) if passed else
+                   "MACRO AXIS: use_macro did not beat the no-macro baseline on the "
+                   "common (ym,ec) domain at the corrected alpha")
+        if regressed:
+            verdict += " | significantly WORSE: " + ", ".join(regressed)
+    elif len(conds) > 2:
         # 窓モードは「どの窓を既定にするか」を決める場ではない（それを共通域抜きでやって
         # いるのが #592 の指摘そのもの）。ここで出すのは**母集団を揃えても差が残るか**だけ。
         verdict = (("WINDOW SCAN: effects that survive the common-domain restriction: "
@@ -566,7 +681,12 @@ def main() -> None:
 
     payload = {
         "momentum_window": MOM_WINDOW,
-        "conditions": {c: {"use_momentum": u, "window": w} for c, (u, w) in conds.items()},
+        "conditions": {name: {"use_momentum": c.use_momentum,
+                              "window": c.momentum_window,
+                              "use_macro": c.use_macro}
+                       for name, c in conds.items()},
+        "mode": "macro" if args.macro else ("windows" if windows else "default"),
+        "base_cond": base,
         "windows": windows,
         "alpha": alpha,
         "n_tests": n_tests,

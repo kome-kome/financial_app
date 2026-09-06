@@ -26,8 +26,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from scripts import candidate_bakeoff, momentum_gate
 from scripts.momentum_gate import (
-    ALPHA, BASE_COND, CONDS, METRICS, MODEL_LABELS, MODEL_SPECS, MODELS, MOM_WINDOW,
-    N_TESTS, _select_bic, bonferroni_alpha, build_conditions,
+    ALPHA, BASE_COND, CONDS, MACRO_BASE_COND, MACRO_CONDS, MACRO_MODELS, METRICS,
+    MODEL_LABELS, MODEL_SPECS, MODELS, MOM_WINDOW, N_TESTS, Cond, _select_bic,
+    base_of, bonferroni_alpha, build_conditions,
 )
 
 
@@ -37,7 +38,8 @@ class TestBuildConditions:
         conds = build_conditions()
         assert set(conds) == set(CONDS)
         for name, use_mom in CONDS.items():
-            assert conds[name] == (use_mom, MOM_WINDOW)
+            assert conds[name] == Cond(use_mom, MOM_WINDOW, use_macro=True), (
+                "既定条件が変わっている（マクロは ON のまま＝ADR-0045 の実測条件）")
 
     def test_none_and_empty_list_are_the_same(self):
         assert build_conditions(None) == build_conditions([])
@@ -46,9 +48,11 @@ class TestBuildConditions:
         """基準（モメンタム無し）が必ず入る。無いと「何と比べたのか」が消える。"""
         conds = build_conditions([6, 12])
         assert BASE_COND in conds
-        assert conds[BASE_COND][0] is False
-        assert conds["mw6"] == (True, 6)
-        assert conds["mw12"] == (True, 12)
+        assert conds[BASE_COND].use_momentum is False
+        assert conds["mw6"] == Cond(True, 6)
+        assert conds["mw12"] == Cond(True, 12)
+        assert all(c.use_macro for c in conds.values()), (
+            "窓モードでマクロ軸まで動くと、どちらの効果か分離できない")
 
     def test_windows_are_sorted_and_deduplicated(self):
         """重複した窓を測っても情報は増えず、検定数だけ増えて alpha が不当に締まる。"""
@@ -64,6 +68,64 @@ class TestBuildConditions:
         """窓 0 は `build_snapshots` 側で静かに別解釈されうるので入口で弾く。"""
         with pytest.raises(ValueError):
             build_conditions(bad)
+
+
+class TestMacroAxisMode:
+    """マクロ軸モード（`--macro`・#604）。
+
+    M-1 は `macro_nan_ok=False`（strict）なので `use_macro` が母集団を動かす——OFF では
+    マクロ特徴量が0個になり「1つでも欠損したら断面を破棄」の条件が成立しない。窓軸と
+    同型の交絡なので、同じ手続き（共通月 → 共通 (ym,ec) 域）で測る。
+    """
+
+    def test_macro_mode_builds_both_sides(self):
+        conds = build_conditions(macro=True)
+        assert set(conds) == set(MACRO_CONDS)
+        assert conds["nomacro"].use_macro is False
+        assert conds["macro"].use_macro is True
+
+    def test_momentum_is_pinned_off_in_macro_mode(self):
+        """**モメンタムを同時に動かさない。** 動かすと母集団を変える軸が2つになり、
+        共通域へ制限してもどちらの効果かが分離できない。
+        """
+        conds = build_conditions(macro=True)
+        assert all(c.use_momentum is False for c in conds.values())
+
+    def test_windows_and_macro_are_mutually_exclusive(self):
+        """軸を2つ同時に振るのは #592/#604 が指摘している当のもの。入口で弾く。"""
+        with pytest.raises(ValueError):
+            build_conditions([6, 12], macro=True)
+
+    def test_macro_mode_measures_m1_only(self):
+        """M-2/M-6 は `macro_nan_ok=True` で母集団が動かず、探索軸にも持っていない。"""
+        assert MACRO_MODELS == ["risk_return"]
+        assert set(MACRO_MODELS) <= set(MODEL_SPECS)
+        assert MODEL_SPECS["risk_return"][2] == "m1"
+
+    def test_alpha_follows_the_test_count(self):
+        """1モデル × 2指標 × 1条件 = 2検定 → alpha = 0.025。定数を流用しない。"""
+        conds = build_conditions(macro=True)
+        assert bonferroni_alpha(len(MACRO_MODELS), len(conds)) == pytest.approx(0.05 / 2)
+
+
+class TestBaseCondition:
+    """分母はどのモードでも**母集団が最も広い条件**。
+
+    縮む側を分母にすると、母集団効果が「改善」として符号ごと出る——それが #592 で
+    探索が窓18 を選んでいた仕組みそのもの。
+    """
+
+    def test_default_and_windows_use_the_no_momentum_baseline(self):
+        assert base_of(build_conditions()) == BASE_COND
+        assert base_of(build_conditions([6, 12])) == BASE_COND
+
+    def test_macro_mode_uses_the_no_macro_baseline(self):
+        assert base_of(build_conditions(macro=True)) == MACRO_BASE_COND
+
+    def test_the_baseline_is_always_present_in_its_own_conditions(self):
+        for conds in (build_conditions(), build_conditions([6]),
+                      build_conditions(macro=True)):
+            assert base_of(conds) in conds
 
 
 class TestBonferroniAlpha:
