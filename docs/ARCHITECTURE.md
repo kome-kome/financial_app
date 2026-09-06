@@ -167,10 +167,25 @@ graph TD
 >   `collect_stock_price_history_jquants`（`--market`・日次収集）が J-Quants `/equities/master`
 >   （現在の上場銘柄集合・実測4,446銘柄）と突合し `sync_active_status()`（database.py）で自動更新する。
 >   v1 の `/markets/listed/info` は **v2 に存在せず**、#425 の v2 移行以降この同期は停止していた（#462）。
->   「今買える銘柄」を選ぶプラグイン（recommend / gap_analysis / net_cash_analysis）は
->   `is_active.isnot(False)` で対象を絞るが、**backtest はフィルタしない**
->   （as-of の start_date 時点の候補を「現在」の上場状態で絞ると生存者バイアスを逆向きに
->   持ち込むため）。sell_ranking はユーザー入力の保有銘柄が対象のため除外せず情報表示のみ。
+>   「今買える銘柄」を選ぶプラグイン（recommend / gap_analysis / net_cash_analysis）と
+>   sell_ranking の**標準化の基準となる母集団**は `database.tradable_filters(db)` で対象を絞るが、
+>   **backtest はフィルタしない**（as-of の start_date 時点の候補を「現在」の上場状態で絞ると
+>   生存者バイアスを逆向きに持ち込むため）。sell_ranking のユーザー入力の保有銘柄自体は
+>   除外せず情報表示のみ（`is_active` を行の属性として返す）。
+> - **価格が止まった社の除外（Issue #605）**: `is_active` だけでは足りない。`/equities/master` の
+>   as-of は「今日−84日」（J-Quants のエンバーゴ）で、**廃止の反映が最大12週遅れる**。
+>   実測（2026-09-04）では値の付かない29社が `is_active=True` のまま残り、`regression_results`
+>   29社 / `macro_beta_loadings` 28社 / `macro_enet_scores` 6社へ入って μ̂ 付きで推奨候補に
+>   並んでいた（#315 の生存者バイアスの裏返し＝ゾンビ銘柄）。`delisted_date` の実測は
+>   「as-of が停止日を追い越した日」と一致し、毎日1〜5社ずつ落ちる待ち行列になっている。
+>   マスタは自分の as-of より後のことを証言できない（#463 が逆向きで書いたのと同じ制約）が、
+>   **価格が止まったという事実は今日わかる**ので、判定を「マスタ収載」から「価格が生きている」へ
+>   寄せた。閾値は `PRICE_STALE_ALERT_BDAYS`（=10営業日）を再利用する——`price_freshness` が
+>   「この結果で発注しない」と言う線と別に持つと片方だけ動いたときに黙ってずれる。WARN(=5)は
+>   連休や一時取得失敗で生きた銘柄を落とす危険が最も高い（#555 と同型の静かな欠測）。
+>   価格行を1本も持たない銘柄は落とさない（判定できるのは「止まった」であって「無い」ではない）。
+>   4経路が同じ `tradable_filters` を共有することは `tests/test_tradable_universe.py` が AST で
+>   縛る——1箇所だけ直すと「推奨には出ないが売却候補には出る」形で静かに食い違う。
 >
 > **producer/consumer 系の補助テーブル**: `macro_beta_meta`/`macro_beta_loadings`（ADR-0002・
 > `macro_beta_inference.py` が月次バッチで書き込み、`plugins/macro_risk_return.py` が読む）、

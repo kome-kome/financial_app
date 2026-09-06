@@ -440,7 +440,7 @@ class RecommendPlugin(AnalysisPlugin):
         # Zスコア・gap_ratio・派生指標は financial_metrics VIEW が都度算出/合成する。
         # z_momentum のみ VIEW 外の実行時計算（compute_momentum_z）。
         from database import (FinancialMetric, latest_year_subq,
-                              price_asof_by_code, price_freshness)
+                              price_asof_by_code, price_freshness, tradable_filters)
         from datetime import date
 
         # params はパラメータ契約に従い coerce 済み。weights 未指定時は preset の重みへ。
@@ -479,9 +479,10 @@ class RecommendPlugin(AnalysisPlugin):
         query = (db.query(*[getattr(FinancialMetric, c) for c in SELECT_COLS])
                    .join(subq, (FinancialMetric.edinet_code == subq.c.edinet_code) &
                                (FinancialMetric.year == subq.c.max_year))
-                   # 上場廃止銘柄は買えないため対象外（Issue #315）。is_active 未設定（旧データ）は
-                   # 対象に含める（isnot(False) で NULL を許容）。
-                   .filter(FinancialMetric.is_active.isnot(False)))
+                   # 買えない銘柄は対象外＝上場廃止（#315）と、価格が止まって12週の廃止
+                   # 待ち行列に居る社（#605）。条件は tradable_filters が唯一の源で、
+                   # gap_analysis / net_cash_analysis / sell_ranking と共有する。
+                   .filter(*tradable_filters(db)))
         if year:
             query = query.filter(FinancialMetric.year == int(year))
         if industry:

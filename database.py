@@ -1324,6 +1324,49 @@ def _freshness_result(p50: str, p05: str, dmax: str, n: int, n_stale: int) -> di
     }
 
 
+# ── 5f-4. 投資可能な母集団の生存条件（Issue #605）──────────────────────────────
+# `is_active` だけでは足りない。`/equities/master` の as-of は「今日−84日」（J-Quants の
+# エンバーゴ）なので、**廃止の反映が最大12週遅れる**。実測（2026-09-04）では値の付かない
+# 29社が `is_active=True` のまま残り、`regression_results` 29社 /`macro_beta_loadings` 28社 /
+# `macro_enet_scores` 6社へ入って μ̂ 付きで推奨候補に並んでいた（#315 の生存者バイアスの裏返し）。
+#
+# マスタは自分の as-of より後のことを証言できない（#463 が逆向きで書いたのと同じ制約）が、
+# **価格が止まったという事実は今日わかる**。判定を「マスタ収載」から「価格が生きている」へ
+# 寄せれば、84日の待ちを踏まずに実害だけ消える。
+
+def stale_price_codes(db, bdays: int = PRICE_STALE_ALERT_BDAYS) -> set:
+    """最終株価日が `bdays` 営業日超古い銘柄の edinet_code 集合。
+
+    閾値に `PRICE_STALE_ALERT_BDAYS`（=10）を**再利用する**理由（#605）: `price_freshness`
+    が「この結果で発注しない」と言う線と母集団から外す線を別々に持つと、片方だけ動かした
+    ときに黙ってずれる。`PRICE_STALE_WARN_BDAYS`（=5）は連休や一時的な取得失敗で
+    **生きた銘柄を落とす**危険が最も高いので採らない（#555 と同型の静かな欠測になる）。
+
+    例外は握らない。ここで空集合へ倒すとフィルタが黙って無効化され、「除外できなかった」が
+    「除外対象が無かった」と同じ見た目になる（#605 が消したい沈黙そのもの）。
+    """
+    sub = (db.query(StockPriceDaily.edinet_code.label("ec"),
+                    func.max(StockPriceDaily.trade_date).label("d"))
+             .group_by(StockPriceDaily.edinet_code).subquery())
+    cutoff = stale_cutoff_date(date.today(), bdays)
+    return {ec for (ec,) in db.query(sub.c.ec).filter(sub.c.d < cutoff).all() if ec}
+
+
+def tradable_filters(db) -> list:
+    """「買える銘柄」の WHERE 条件（#315 の上場廃止除外 ＋ #605 の価格停止除外）。
+
+    **推奨・ギャップ・ネットキャッシュ・売却ランキングの4経路が必ずこれを共有する。**
+    1箇所だけ直すと「推奨には出ないが売却候補には出る」状態になる。
+
+    `is_active` 未設定（旧データ）は対象に含める（`isnot(False)` で NULL を許容）。
+    """
+    conds = [FinancialMetric.is_active.isnot(False)]
+    codes = stale_price_codes(db)
+    if codes:
+        conds.append(FinancialMetric.edinet_code.notin_(codes))
+    return conds
+
+
 # ── 5g. ハイパーパラメータ自動探索の結果永続化（Issue #264）─────────────────────
 # hyperparameter_search.py（ローカル専用CLI）が walk-forward OOF rank-IC 等を目的関数として
 # 探索した best params を保存する。plugin_name 単位で最新1件のみ保持（履歴不要）。

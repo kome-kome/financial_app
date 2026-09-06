@@ -209,7 +209,7 @@ class NetCashAnalysisPlugin(AnalysisPlugin):
 
     def _build_query(self, db, params: dict):
         """年度・市場時価・業種フィルタを適用した SQLAlchemy クエリを返す。"""
-        from database import FinancialMetric
+        from database import FinancialMetric, tradable_filters
         year           = params["year"]
         industry       = params["industry"]
         min_market_cap = params["min_market_cap"]
@@ -230,8 +230,9 @@ class NetCashAnalysisPlugin(AnalysisPlugin):
 
         query = query.filter(FinancialMetric.market_cap.isnot(None))
         query = query.filter(FinancialMetric.market_cap > 0)
-        # 上場廃止銘柄は買えないため対象外（Issue #315）。is_active 未設定（旧データ）は対象に含める。
-        query = query.filter(FinancialMetric.is_active.isnot(False))
+        # 買えない銘柄は対象外＝上場廃止（#315）と、価格が止まって12週の廃止待ち行列に
+        # 居る社（#605）。条件は tradable_filters が唯一の源で、他3経路と共有する。
+        query = query.filter(*tradable_filters(db))
         if industry:
             query = query.filter(FinancialMetric.industry == industry)
         if min_market_cap is not None and min_market_cap > 0:

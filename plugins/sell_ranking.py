@@ -302,7 +302,7 @@ class SellRankingPlugin(AnalysisPlugin):
 
     def execute(self, params: dict, db: Any) -> dict:
         from database import (FinancialMetric, StockPriceWeekly, iso_week_start,
-                              latest_year_subq)
+                              latest_year_subq, tradable_filters)
 
         holdings, invalid = parse_holdings(params["holdings"])
         preset       = params["preset"]
@@ -325,7 +325,9 @@ class SellRankingPlugin(AnalysisPlugin):
                     "mu_source": mu_source}
 
         # ── ① ユニバース標準化パラメータ（最新年度の全銘柄から winsorize → mean/sd）──
-        # 標準化の基準は「現在投資可能な母集団」に合わせるため、上場廃止銘柄は除く（Issue #315）。
+        # 標準化の基準は「現在投資可能な母集団」に合わせるため、上場廃止銘柄（#315）と
+        # 価格が止まって12週の廃止待ち行列に居る社（#605）を除く。**保有銘柄の評価では
+        # なく母集団の標準化基準**なので、他3経路と同じ tradable_filters を共有する。
         subq = latest_year_subq(db, FinancialMetric)
         # 転送は SELL_SELECT_COLS だけ（#482）。戻りは ORM インスタンスではなく Row タプル
         # なので、絞っていない列を後から読むことが構造的に起きない（recommend.py と同方針）。
@@ -333,7 +335,7 @@ class SellRankingPlugin(AnalysisPlugin):
         uni_q = (db.query(*_sell_cols)
                    .join(subq, (FinancialMetric.edinet_code == subq.c.edinet_code) &
                                (FinancialMetric.year == subq.c.max_year))
-                   .filter(FinancialMetric.is_active.isnot(False)))
+                   .filter(*tradable_filters(db)))
         if year:
             uni_q = uni_q.filter(FinancialMetric.year == int(year))
         universe = uni_q.all()

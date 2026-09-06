@@ -127,20 +127,21 @@ class GapAnalysisPlugin(AnalysisPlugin):
     def execute(self, params: dict, db: Any) -> dict:
         # gap_ratio / predicted_market_cap は regression_results 由来。
         # financial_metrics VIEW が LEFT JOIN して合成するため VIEW を読む。
-        from database import FinancialMetric
+        from database import FinancialMetric, tradable_filters
 
         # params はパラメータ契約に従い coerce 済み（year:int|None・sort:str・min_div_yield:float）。
         year = params["year"]
         sort = params["sort"]
         min_div_yield = params["min_div_yield"]
 
-        # 当該フィルタの最新スナップショット。上場廃止銘柄は買えないため対象外（Issue #315）。
+        # 当該フィルタの最新スナップショット。買えない銘柄は対象外＝上場廃止（#315）と、
+        # 価格が止まって12週の廃止待ち行列に居る社（#605・tradable_filters が唯一の源）。
         # VIEW は 97 列あるが結果 dict が読むのは _GAP_FIELDS の 11 列だけ（Issue #489）。
         # is_active / year は WHERE 専用なので SELECT には要らない。
         cols = [getattr(FinancialMetric, f) for f in _GAP_FIELDS]
         query = (db.query(*cols)
                    .filter(FinancialMetric.gap_ratio.isnot(None))
-                   .filter(FinancialMetric.is_active.isnot(False)))
+                   .filter(*tradable_filters(db)))
         if year:
             query = query.filter(FinancialMetric.year == year)
         records = query.all()
