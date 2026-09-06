@@ -566,40 +566,152 @@ class TestDiagnosticsGateUnchanged:
         assert got["n_divergences"] == want["n_divergences"]
 
 
+def _diag(r_hat_max=None, by_param=None):
+    """persist_allowed へ渡す診断 dict（必要な鍵だけ持つ最小形）。"""
+    out = {"r_hat_max": r_hat_max}
+    if by_param is not None:
+        out["by_param"] = by_param
+    return out
+
+
+def _grp(n, p99, r_hat_max=None):
+    return {"n": n, "r_hat_p99": p99, "r_hat_max": r_hat_max if r_hat_max is not None else p99}
+
+
+# 2026-09-06 の本番 run（mb_20260906T055243Z・3,837銘柄・12因子・draws=800・ta=0.95・seed 0）
+# の実測。全体の r_hat_max は 1.1242 だが、**変数別の p99 はどれも 1.05 以下**（#609 / ADR-0002）。
+PROD_BY_PARAM_20260906 = {
+    "beta":        _grp(46_044, 1.0192854311419859, 1.073546832466667),
+    "alpha":       _grp(3_837,  1.0462810889549843, 1.1242346687861646),
+    "mu_universe": _grp(12,     1.037251967716491,  1.0381113646117754),
+}
+
+# `max_tree_depth=8` の崩壊ケース（合成250銘柄・.logs/bench_609_gate.jsonl・ADR-0002）。
+# 壊れているのは mu_universe（12個）だけで beta も alpha も健全＝**全体の p99 では見逃す**。
+COLLAPSED_BY_PARAM_MD8 = {
+    "beta":        _grp(3_000, 1.0129, 1.0411),
+    "alpha":       _grp(250,   1.0370, 1.0659),
+    "mu_universe": _grp(12,    1.6791, 1.7157),
+}
+
+
 class TestPersistGate:
-    """persist_allowed: r_hat ゲート判定（Issue #341 で threshold 可変化）。
+    """persist_allowed: r_hat ゲート判定（#341 で threshold 可変化・#609 で変数別 p99 へ）。
 
     純関数のため PyMC 不要（build_panel と同様に requirements.txt のみの CI でも実行される）。
     """
 
     def test_converged_persists_at_strict_default(self):
         # strict 既定 1.01：基準を満たす run は persist 許可
-        assert persist_allowed(1.005, threshold=1.01, force=False) is True
+        assert persist_allowed(_diag(1.005), threshold=1.01, force=False) is True
 
     def test_marginal_1_02_rejected_at_strict_default(self):
-        # chains=2 の構造的 ~1.02 は strict 既定では reject（cron が毎回落ちる原因）
-        assert persist_allowed(1.02, threshold=1.01, force=False) is False
+        # chains=2 の構造的 ~1.02 は strict 既定では reject
+        assert persist_allowed(_diag(1.02), threshold=1.01, force=False) is False
 
     def test_marginal_1_02_persists_under_relaxed_cron_threshold(self):
-        # 月次 cron が渡す 1.05：構造的 ~1.02 は自動 persist される
-        assert persist_allowed(1.02, threshold=1.05, force=False) is True
+        # 月次実行が渡す 1.05：構造的 ~1.02 は自動 persist される
+        assert persist_allowed(_diag(1.02), threshold=1.05, force=False) is True
 
     def test_genuinely_unconverged_rejected_even_when_relaxed(self):
         # 緩和 1.05 でも、真に収束していない run（r_hat 大幅超過）は依然 reject
-        assert persist_allowed(1.20, threshold=1.05, force=False) is False
+        assert persist_allowed(_diag(1.20), threshold=1.05, force=False) is False
 
     def test_threshold_boundary_is_inclusive(self):
         # threshold ちょうどは許可（<= 判定）、僅かに超えると reject
-        assert persist_allowed(1.05, threshold=1.05, force=False) is True
-        assert persist_allowed(1.0501, threshold=1.05, force=False) is False
+        assert persist_allowed(_diag(1.05), threshold=1.05, force=False) is True
+        assert persist_allowed(_diag(1.0501), threshold=1.05, force=False) is False
 
     def test_force_overrides_any_threshold(self):
         # force=True は threshold を無視して常に persist（人手精査後の例外運用）
-        assert persist_allowed(1.20, threshold=1.01, force=True) is True
+        assert persist_allowed(_diag(1.20), threshold=1.01, force=True) is True
 
     def test_none_r_hat_is_gate_exempt(self):
-        # r_hat_max が算出不能（None）はゲート対象外＝従来挙動を踏襲
+        # 診断が取れない（None）はゲート対象外＝従来挙動を踏襲
+        assert persist_allowed(_diag(None), threshold=1.01, force=False) is True
         assert persist_allowed(None, threshold=1.01, force=False) is True
+
+    # ── #609: 変数別 × p99 ────────────────────────────────────────────────
+
+    def test_production_run_passes_although_overall_max_exceeds(self):
+        """本番の実測（2026-09-06）は通る。全体の max（1.1242）では落ちていた run。
+
+        ここが #609 の目的そのもの——`--force` 無しで自動 persist へ戻すこと。
+        """
+        d = _diag(1.1242346687861646, PROD_BY_PARAM_20260906)
+        assert persist_allowed(d, threshold=1.05, force=False) is True
+
+    def test_collapsed_run_still_rejected(self):
+        """ADR-0002 の崩壊ケース（max_tree_depth=8）は引き続き reject。
+
+        **ここを通す基準は採らない**——ess_med 803.7 と健全に見えるのに mu_universe が
+        完全に固着している形で、緩めれば壊れた事後分布がそのまま本番へ出る。
+        """
+        d = _diag(1.7157, COLLAPSED_BY_PARAM_MD8)
+        assert persist_allowed(d, threshold=1.05, force=False) is False
+
+    def test_overall_p99_alone_would_miss_the_collapse(self):
+        """「変数別」を落として全体の p99 にすると崩壊を見逃すことを固定する。
+
+        本番規模なら mu_universe の12個は 49,893 個の 0.024% で p99 に現れない。
+        後から「p99 だけで十分では」と戻されないための杭（ADR-0002 の #609 節）。
+        """
+        # 崩壊ケースを全パラメータ 1 本のプールとして見た場合の p99 は 1.05 を下回る
+        pooled = np.concatenate([
+            np.full(3_000, 1.0129), np.full(250, 1.0370), np.full(12, 1.6791),
+        ])
+        assert float(np.percentile(pooled, 99)) <= 1.05
+        # 変数別に見れば mu_universe が超える＝ reject される
+        assert persist_allowed(_diag(1.7157, COLLAPSED_BY_PARAM_MD8),
+                               threshold=1.05, force=False) is False
+
+    def test_one_bad_variable_rejects_even_if_others_are_clean(self):
+        # 判定は「全変数の p99 の最大」＝1変数でも超えたら reject
+        by_param = {**PROD_BY_PARAM_20260906, "mu_universe": _grp(12, 1.30)}
+        assert persist_allowed(_diag(1.30, by_param), threshold=1.05, force=False) is False
+
+    def test_falls_back_to_r_hat_max_without_by_param(self):
+        # by_param が無い旧 run は従来どおり全体の max で判定する
+        assert persist_allowed(_diag(1.02), threshold=1.05, force=False) is True
+        assert persist_allowed(_diag(1.20), threshold=1.05, force=False) is False
+
+    def test_empty_param_groups_are_ignored(self):
+        # n=0 の変数（分位が定義できない）は判定へ混ぜない＝ max へフォールバック
+        d = _diag(1.02, {"beta": {"n": 0}})
+        assert persist_allowed(d, threshold=1.05, force=False) is True
+
+    def test_gate_values_reports_each_variable(self):
+        got = mbi.gate_values(_diag(1.1242, PROD_BY_PARAM_20260906))
+        assert set(got) == {"beta", "alpha", "mu_universe"}
+        assert got["alpha"] == pytest.approx(1.0462810889549843)
+
+
+class TestGateReportLogging:
+    """log_gate_report: 余裕と「p99 の裏を通った個体」をログへ出す（#609・決定4）。"""
+
+    def test_thin_margin_warns(self, caplog):
+        # alpha の p99 は 1.0463＝閾値 1.05 まで 0.0037 しかない（PERSIST_MARGIN_WARN=0.005）
+        with caplog.at_level("WARNING", logger="macro_beta_inference"):
+            mbi.log_gate_report(_diag(1.1242, PROD_BY_PARAM_20260906), threshold=1.05)
+        msgs = [r.getMessage() for r in caplog.records]
+        assert any("余裕が薄い" in m and "alpha" in m for m in msgs)
+        # beta（1.0193）は余裕があるので警告しない
+        assert not any("余裕が薄い" in m and "beta" in m for m in msgs)
+
+    def test_offenders_above_threshold_are_named(self, caplog):
+        by_param = {"alpha": {**_grp(3_837, 1.0463, 1.1242),
+                              "r_hat_worst": [
+                                  {"label": "alpha[883]", "value": 1.1242,
+                                   "edinet_code": "E01659", "factor_name": None},
+                                  {"label": "alpha[12]", "value": 1.0201,
+                                   "edinet_code": "E00012", "factor_name": None},
+                              ]}}
+        with caplog.at_level("WARNING", logger="macro_beta_inference"):
+            mbi.log_gate_report(_diag(1.1242, by_param), threshold=1.05)
+        joined = "\n".join(r.getMessage() for r in caplog.records)
+        # 閾値を超えた個体だけが名前で出る（1.0201 は出さない）
+        assert "E01659" in joined and "alpha[883]" in joined
+        assert "E00012" not in joined
 
 
 class TestDropUnusableMacro:
@@ -731,6 +843,60 @@ class TestExtremeLocation:
         assert mbi.pick_extreme(None, b, "min") is b
         assert mbi.pick_extreme(a, None, "min") is a
 
+
+class TestWorstLocation:
+    """#609: p99 ゲートの裏を通った個体を「悪い順 上位N件」で残す。
+
+    ゲートが p99 になると、p99 と max のあいだの個体は通る。通ること自体は設計どおりだが、
+    `alpha` は `_intercept` 行として永続化され producer が μ の復元に使うので、
+    **誰が通ったかを名前で残さないと後から追えない**。
+    """
+
+    def test_returns_worst_first_and_respects_k(self):
+        got = mbi.locate_worst([1.0, 9.0, 5.0, 7.0],
+                               ["alpha[0]", "alpha[1]", "alpha[2]", "alpha[3]"], "max", k=2)
+        assert [d["value"] for d in got] == [9.0, 7.0]
+        assert [d["stock"] for d in got] == [1, 3]
+
+    def test_applies_chunk_offset_like_locate_extreme(self):
+        got = mbi.locate_worst([1.0, 9.0], ["beta[0, 1]", "beta[1, 0]"], "max",
+                               stock_offset=256)
+        assert got[0]["label"] == "beta[257, 0]"
+
+    def test_idx_selects_a_subset(self):
+        labels = ["alpha[0]", "mu_universe[0]", "alpha[1]"]
+        got = mbi.locate_worst([1.0, 9.0, 5.0], labels, "max", idx=[0, 2])
+        assert [d["label"] for d in got] == ["alpha[1]", "alpha[0]"]
+
+    def test_nan_entries_are_skipped(self):
+        got = mbi.locate_worst([np.nan, 2.0], ["alpha[0]", "alpha[1]"], "max")
+        assert [d["value"] for d in got] == [2.0]
+        assert mbi.locate_worst([np.nan], ["alpha[0]"], "max") == []
+        assert mbi.locate_worst([], [], "max") == []
+
+    def test_accumulator_keeps_the_global_top_across_blocks(self):
+        """ブロックごとに上位を取って畳み込んでも、全体の上位が残ること。"""
+        acc: dict = {}
+        mbi._accumulate_worst(acc, [1.0, 2.0], ["beta[0, 0]", "beta[1, 0]"], param="beta")
+        mbi._accumulate_worst(acc, [9.0, 3.0], ["beta[0, 0]", "beta[1, 0]"],
+                              stock_offset=2, param="beta")
+        vals = [d["value"] for d in acc["beta"]["w"]]
+        assert vals == sorted(vals, reverse=True)
+        assert vals[0] == 9.0
+        assert acc["beta"]["w"][0]["label"] == "beta[2, 0]"
+
+    def test_accumulator_splits_by_param_when_labels_are_mixed(self):
+        acc: dict = {}
+        mbi._accumulate_worst(acc, [1.0, 9.0], ["alpha[0]", "mu_universe[3]"])
+        assert set(acc) == {"alpha", "mu_universe"}
+        assert acc["mu_universe"]["w"][0]["value"] == 9.0
+
+    def test_keeps_at_most_worst_keep_entries(self):
+        acc: dict = {}
+        n = mbi.WORST_KEEP * 3
+        mbi._accumulate_worst(acc, list(range(n)), ["alpha[{0}]".format(i) for i in range(n)])
+        assert len(acc["alpha"]["w"]) == mbi.WORST_KEEP
+
     def test_annotate_resolves_names_and_tolerates_missing(self):
         loc = {"label": "beta[1, 0]", "param": "beta", "stock": 1, "factor": 0, "value": 13.4}
         got = mbi.annotate_extreme(loc, ["E00001", "E00002"], ["JP10Y", "USDJPY"])
@@ -858,6 +1024,28 @@ class TestByParamStats:
         by = summarize_diagnostics(idata, sector_idx)["by_param"]
         assert by["beta"]["n"] == 14 and by["alpha"]["n"] == 7 and by["mu_universe"]["n"] == 2
         assert sum(st["n"] for st in by.values()) == 23
+
+    def test_worst_list_is_populated_and_agrees_with_the_global_argmax(self, monkeypatch):
+        """`r_hat_worst` の先頭が全体の `r_hat_argmax` と一致すること（#609）。
+
+        チャンク境界をまたいで畳み込むので、**オフセットを足し忘れても値だけは正しい**——
+        ラベルが静かにずれる形でしか出ない。全体の argmax と突き合わせて縛る。
+        """
+        az = pytest.importorskip("arviz")
+        monkeypatch.setattr(mbi, "BETA_CHUNK_STOCKS", 3)
+        idata, sector_idx = _raw_idata(az)
+        diag = summarize_diagnostics(idata, sector_idx)
+
+        worst = {n: st["r_hat_worst"] for n, st in diag["by_param"].items()}
+        assert all(w for w in worst.values())
+        # 各変数の先頭は、その変数の r_hat_max と一致する
+        for name, st in diag["by_param"].items():
+            assert worst[name][0]["value"] == pytest.approx(st["r_hat_max"], rel=1e-12)
+            vals = [w["value"] for w in worst[name]]
+            assert vals == sorted(vals, reverse=True)
+        # 全体の argmax は、変数別の先頭のうち最大のものと同じラベルを指す
+        top = max((w[0] for w in worst.values()), key=lambda d: d["value"])
+        assert diag["r_hat_argmax"]["label"] == top["label"]
 
     def test_gate_values_are_unchanged_by_the_addition(self, monkeypatch):
         """付帯情報を足してもゲート量は動かない（`persist_allowed` の較正を守る）。"""

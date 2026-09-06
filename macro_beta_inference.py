@@ -53,6 +53,18 @@ HEARTBEAT_SEC = 300.0
 # 4chains×1000draws でも約205MB。この幅なら常駐の山を作らない。
 BETA_CHUNK_STOCKS = 256
 
+# 収束ゲート（`persist_allowed`）が変数ごとに保持する「悪い順」の件数（#609）。
+# ゲートは p99 で判定するので、p99 と max のあいだにいる個体は**通ってしまう**——
+# 誰がそこに居たかを名前で残さないと、後から「この銘柄の μ がおかしい」となったときの
+# 手がかりが無い。本番規模では beta が 46,044 個あり全件は診断 JSON に載せられないので
+# 上位だけ残す。10件なのは、変数3つで30行＝ログ1画面に収まる量。
+WORST_KEEP = 10
+
+# 閾値までの余裕がこれを切ったら警告する（#609）。`alpha` の p99 は本番実測で 1.0463＝
+# 閾値 1.05 まで 0.0037 しかなく、銘柄が増えれば縮む方向にある。**落ちてから気づくと
+# 6.7時間の run が隔離される**ので、落ちる前の回で予告を出す。
+PERSIST_MARGIN_WARN = 0.005
+
 
 def parse_max_tree_depth(text):
     """`--max-tree-depth` の文字列を numpyro が受ける形へ（#540）。
@@ -422,9 +434,13 @@ def run_inference(draws: int = 1000, tune: int = 1000, target_accept: float = 0.
     diagnostics = summarize_diagnostics(idata, sector_idx, edinet_codes=edinet_codes,
                                         factor_names=selected)
     if diagnostics.get("r_hat_max") is not None and diagnostics["r_hat_max"] > 1.01:
-        logger.warning(
-            "収束診断: r_hat_max=%.4f が ADR-0002 検証基準（<1.01）を超過。"
-            "draws/tune を増やすか再実行を検討してください（ess_bulk_min=%s, n_divergences=%s）",
+        # **これはゲートではない**（ゲートは変数別 p99・#609）。本番規模では
+        # `r_hat_max` は 49,893 個の順序統計で 1.01 を超えるのが常態なので、
+        # 過去 run と同じ定義の量として記録するだけに留める。
+        logger.info(
+            "収束診断（参考値）: r_hat_max=%.4f が ADR-0002 の strict 基準（<1.01）を超過。"
+            "順序統計なので規模とともに上がる量であり、persist の可否は変数別の p99 が決める"
+            "（ess_bulk_min=%s, n_divergences=%s）",
             diagnostics["r_hat_max"], diagnostics.get("ess_bulk_min"), diagnostics.get("n_divergences"),
         )
     # 極値を出している母数まで出す（#600）。beta なら永続化対象そのもの＝ゲートの見方を
@@ -503,10 +519,19 @@ def locate_extreme(values, labels, kind: str, stock_offset: int = 0) -> dict | N
         pos = int(np.nanargmin(arr) if kind == "min" else np.nanargmax(arr))
     except ValueError:      # 全 nan（極値が存在しない）
         return None
+    return describe_param(labels[pos], float(arr[pos]), stock_offset)
 
-    raw = str(list(labels)[pos])
+
+def describe_param(raw_label, value: float, stock_offset: int = 0) -> dict:
+    """`alpha[883]` のようなラベル1件を、銘柄 index・因子 index つきの dict へ解く。
+
+    `locate_extreme`（極値1件）と `locate_worst`（悪い順 上位N件）の共通部分。ラベルの
+    解釈に失敗しても落とさない（`stock`/`factor` を None にして生ラベルを残す）——ここは
+    ゲート量ではなく付帯情報であり、arviz の表記が変わったときに本番を止める価値がない。
+    """
+    raw = str(raw_label)
     out = {"label": raw, "param": raw.split("[")[0], "stock": None, "factor": None,
-           "value": float(arr[pos])}
+           "value": float(value)}
     m = _PARAM_INDEX_RE.match(raw)
     if not m:
         return out
@@ -519,6 +544,31 @@ def locate_extreme(values, labels, kind: str, stock_offset: int = 0) -> dict | N
     elif out["param"] == "mu_universe" and len(dims) == 1:
         out["factor"] = dims[0]
     return out
+
+
+def locate_worst(values, labels, kind: str, k: int = WORST_KEEP,
+                 stock_offset: int = 0, idx=None) -> list[dict]:
+    """診断値の1ブロックから「悪い順」上位 k 件を拾う（#609）。
+
+    ゲートが p99 を見るようになると、**p99 と max のあいだの個体はゲートを通る**。
+    通ったこと自体は設計どおりだが、誰が通ったかを名前で残さないと後から追えない
+    （`alpha` は `_intercept` 行として永続化され producer が μ の復元に使う）。
+
+    ラベルは**拾った k 件だけ**を文字列化する。ブロックは本番規模で 6,000 行あり、
+    全件を `list(labels)` するのは無駄（`locate_extreme` が1件でそうしているのと同じ理由）。
+    `idx` を渡すと `values` / `labels` の一部だけを見る（変数ごとに分けて拾う用）。
+    """
+    arr = np.asarray(values, dtype=float)
+    sel = np.arange(arr.size) if idx is None else np.asarray(idx, dtype=int)
+    if sel.size == 0:
+        return []
+    finite = sel[~np.isnan(arr[sel])]
+    if finite.size == 0:
+        return []
+    vals = arr[finite]
+    order = np.argsort(vals if kind == "min" else -vals, kind="stable")[:max(int(k), 0)]
+    return [describe_param(labels[int(p)], float(arr[int(p)]), stock_offset)
+            for p in finite[order]]
 
 
 def pick_extreme(current: dict | None, candidate: dict | None, kind: str) -> dict | None:
@@ -609,6 +659,23 @@ def _accumulate_param_stats(acc: dict, r_hat, ess_bulk, labels=None) -> None:
         bucket["e"].append(e[idx])
 
 
+def _accumulate_worst(acc: dict, r_hat, labels, stock_offset: int = 0,
+                      param: str | None = None) -> None:
+    """`r_hat` の悪い順 上位 `WORST_KEEP` 件を変数ごとに貯める（#609）。
+
+    `param` を渡すとラベルの変数名分割を省く（beta チャンクは全行 beta と分かっている）。
+    ブロックごとに上位 k を取って畳み込むので、全体の上位 k は正しく残る。
+    """
+    groups = ({param: None} if param is not None
+              else {n: np.asarray(i, dtype=int) for n, i in _split_by_param(labels).items()})
+    for name, idx in groups.items():
+        bucket = acc.setdefault(name, {"r": [], "e": []})
+        got = locate_worst(r_hat, labels, "max", stock_offset=stock_offset, idx=idx)
+        merged = bucket.setdefault("w", []) + got
+        merged.sort(key=lambda d: d["value"], reverse=True)
+        bucket["w"] = merged[:WORST_KEEP]
+
+
 def summarize_diagnostics(idata, sector_idx=None, edinet_codes=None, factor_names=None) -> dict:
     """r_hat・ESS の収束診断サマリ（ADR-0002 検証基準: r_hat<1.01・ESS 十分性・発散遷移数）。
 
@@ -642,8 +709,13 @@ def summarize_diagnostics(idata, sector_idx=None, edinet_codes=None, factor_name
     ------------------
     `ess_bulk_argmin` / `r_hat_argmax` に「その値を出している母数」を付ける。`edinet_codes` /
     `factor_names` を渡せば銘柄コード・因子名まで解決する（省略すれば index だけ）。
-    **ゲートが読む `r_hat_max` / `ess_bulk_min` / `ess_tail_min` / `n_divergences` の値は
-    一切変えない**——追加は付帯情報だけで、`persist_allowed` の較正はそのまま生きる。
+
+    収束ゲートが読む量（#609）
+    --------------------------
+    `persist_allowed` が見るのは **`by_param[*]["r_hat_p99"]`**（変数別の p99）であって
+    `r_hat_max` ではない。`r_hat_max` / `ess_bulk_min` / `ess_tail_min` / `n_divergences` は
+    ログと過去 run との比較のために従来どおりの定義で残す——**定義を変えると 2026-07 以前の
+    実測値と並べられなくなる**（#356 で丸め値と生値を混ぜて一度この過ちを踏んでいる）。
     """
     import arviz as az
 
@@ -660,6 +732,7 @@ def summarize_diagnostics(idata, sector_idx=None, edinet_codes=None, factor_name
         ess_argmin = locate_extreme(summ["ess_bulk"], summ.index, "min")
         r_hat_argmax = locate_extreme(summ["r_hat"], summ.index, "max")
         _accumulate_param_stats(by_param, summ["r_hat"], summ["ess_bulk"], summ.index)
+        _accumulate_worst(by_param, summ["r_hat"], summ.index)
     else:
         post = idata.posterior
         summ = az.summary(idata, var_names=["alpha", "mu_universe"], kind="diagnostics",
@@ -670,6 +743,7 @@ def summarize_diagnostics(idata, sector_idx=None, edinet_codes=None, factor_name
         ess_argmin = locate_extreme(summ["ess_bulk"], summ.index, "min")
         r_hat_argmax = locate_extreme(summ["r_hat"], summ.index, "max")
         _accumulate_param_stats(by_param, summ["r_hat"], summ["ess_bulk"], summ.index)
+        _accumulate_worst(by_param, summ["r_hat"], summ.index)
 
         n_stock = post.sizes["stock"]
         mu_sector = _reconstruct_mu_sector(post)
@@ -687,6 +761,8 @@ def summarize_diagnostics(idata, sector_idx=None, edinet_codes=None, factor_name
             r_hat_argmax = pick_extreme(
                 r_hat_argmax, locate_extreme(csumm["r_hat"], csumm.index, "max", lo), "max")
             _accumulate_param_stats(by_param, csumm["r_hat"], csumm["ess_bulk"])
+            _accumulate_worst(by_param, csumm["r_hat"], csumm.index, stock_offset=lo,
+                              param="beta")
 
     return {
         "r_hat_max":     r_hat_max,
@@ -696,9 +772,13 @@ def summarize_diagnostics(idata, sector_idx=None, edinet_codes=None, factor_name
         # 極値“そのもの”ではなく**それを出している母数**（#600）。alpha か beta かで対策が変わる。
         "ess_bulk_argmin": annotate_extreme(ess_argmin, edinet_codes, factor_names),
         "r_hat_argmax":    annotate_extreme(r_hat_argmax, edinet_codes, factor_names),
-        # 変数別の極値と分位（#609）。ゲートを「何に対して課すか」で見直すための根拠で、
-        # 本番規模の再測定は約6時間かかるので**この1回で取り切る**。
-        "by_param": {name: param_group_stats(np.concatenate(v["r"]), np.concatenate(v["e"]))
+        # 変数別の極値と分位（#609）。**収束ゲート `persist_allowed` はここの `r_hat_p99` を
+        # 読む**（全体の max ではない）。`r_hat_worst` は p99 と max のあいだを通った個体の
+        # 名前で、ゲートには効かないがログへ出す。本番規模の再測定は約6時間かかるので
+        # **この1回で取り切る**。
+        "by_param": {name: {**param_group_stats(np.concatenate(v["r"]), np.concatenate(v["e"])),
+                            "r_hat_worst": [annotate_extreme(d, edinet_codes, factor_names)
+                                            for d in v.get("w", [])]}
                      for name, v in by_param.items()},
     }
 
@@ -816,32 +896,108 @@ def persist(db, result: InferenceResult, status: str | None = None) -> None:
     db.commit()
 
 
-def persist_allowed(r_hat_max: float | None, threshold: float, force: bool) -> bool:
+def gate_values(diagnostics: dict | None) -> dict[str, float]:
+    """収束ゲートが比べる量を診断から取り出す（変数名 → `r_hat_p99`）。
+
+    `by_param` が無い診断（列を足す前の run・診断を手で組んだテスト）では、従来どおり
+    全体の `r_hat_max` を1本だけ返す。空 dict は「診断不能＝ゲート対象外」を意味する。
+    """
+    d = diagnostics or {}
+    by_param = d.get("by_param") or {}
+    out = {name: float(g["r_hat_p99"]) for name, g in by_param.items()
+           if isinstance(g, dict) and g.get("n") and g.get("r_hat_p99") is not None}
+    if out:
+        return out
+    r_hat_max = d.get("r_hat_max")
+    return {} if r_hat_max is None else {"r_hat_max": float(r_hat_max)}
+
+
+def persist_allowed(diagnostics: dict | None, threshold: float, force: bool) -> bool:
     """収束診断に基づく persist 可否判定（純関数・テスト可能に切り出し）。
 
     persist を許可するのは以下のいずれか:
     - `force=True`（人手で結果を精査した上での強制書き込み）
-    - `r_hat_max` が算出できない（診断不能＝ゲート対象外・従来挙動を踏襲）
-    - `r_hat_max <= threshold`（収束基準を満たす）
+    - 診断が取れない（ゲート対象外・従来挙動を踏襲）
+    - **変数ごとの `r_hat` の p99 が全部 threshold 以下**
+
+    なぜ p99 で、しかも変数別なのか（#609）
+    ---------------------------------------
+    以前は全パラメータの `r_hat_max` 1本で見ていたが、**max 順序統計はパラメータが増えれば
+    必ず上がる**。本番規模は 49,893 個あり、そこから最大を取れば「最も混ざらなかった1個」が
+    必ず現れる——実測でも `alpha` のたった1個（26観測しかない平凡な銘柄の切片）が
+    `r_hat_max=1.1242` を出し、2026-08-01 から5週間 persist できずに `macro_beta_loadings` が
+    固着した。これはモデルの不具合ではなくゲートの定義に由来する（#600）。
+
+    かといって全体の p99 へ緩めると、**本物の崩壊を見逃す**。`max_tree_depth=8` の崩壊ケース
+    （ADR-0002）で壊れていたのは `mu_universe`（12個）だけで、本番規模ならそれは全体の
+    0.024% ＝ p99 には現れない。
+
+    変数別 × p99 なら両方を満たす（実測は ADR-0002 の #609 節）:
+
+    | ゲート | 本番の run | 崩壊ケース |
+    |---|---|---|
+    | 全体の max（旧） | 落ちる（1.1242） | reject |
+    | 全体の p99 | 通る | **見逃す** |
+    | 変数別 × p99 | 通る（beta 1.0193 / alpha 1.0463 / mu 1.0373） | reject（mu 1.6791） |
+
+    この形は**パラメータ数に応じて厳しさが自動的に決まる**——12個の `mu_universe` では
+    p99 が実質 max になり、46,044個の `beta` では外れ値1個を無視できる。だから閾値は
+    変数共通のまま（規模の関数にしない）でよい。
+
+    ESS はゲートに入れない。実測した2ケース（本番・崩壊）はどちらも `r_hat` だけで正しく
+    判定でき、ESS を足しても結論は動かない。「何個あれば十分か」を根拠なく決めた閾値は
+    偽の安心になる。変数別 `ess_bulk_p1` は診断へ残してあるので、必要になったら測って決める。
 
     threshold は既定 1.01（ADR-0002 の strict 基準）。chains=2 のランナーでは r_hat が
     構造的に 1.02 前後で頭打ちになる（PyMC も「信頼できる r_hat には4 chain以上推奨」と
-    警告する通り 2 chain では保守的に出る）ため、月次 cron 等の無人自動実行では緩和した
-    threshold（例 1.05）を渡し、構造的な ~1.02 は自動 persist しつつ、本当に収束していない
-    run（r_hat が threshold を大きく超過）は依然 reject する運用にできる（Issue #341）。
+    警告する通り 2 chain では保守的に出る）ため、無人の月次実行では緩和した threshold
+    （1.05）を渡す（Issue #341）。
 
     注記（Issue #356）: 上記「~1.02 で頭打ち」の根拠となった 2026-07 以前の観測値は、
     summarize_diagnostics が az.summary の既定丸め（r_hat は小数2桁）を経ていたときのもので、
     真値ではなく 1.00/1.01/1.02 の3値へ量子化された表示だった。診断は生値へ修正済みのため、
-    本関数が受け取る r_hat_max は現在 4桁精度の実値である。したがって strict 1.01 は文字どおり
+    本関数が受け取る r_hat は現在 4桁精度の実値である。したがって strict 1.01 は文字どおり
     「真値 <= 1.01」を要求する（丸め時代の実効基準は「真値 < 1.015」と緩かった）。閾値の
     再設定は生値での再実測（experiment_pooled_rhat.py）に基づいて判断すること。
     """
     if force:
         return True
-    if r_hat_max is None:
+    values = gate_values(diagnostics)
+    if not values:
         return True
-    return r_hat_max <= threshold
+    return max(values.values()) <= threshold
+
+
+def log_gate_report(diagnostics: dict | None, threshold: float) -> None:
+    """ゲートが見た量と、その裏に隠れた個体をログへ出す（#609）。
+
+    2つのことを現す:
+
+    1. **余裕**——`p99` が `threshold - PERSIST_MARGIN_WARN` を超えた変数を警告する。
+       `alpha` は本番実測で余裕 0.0037 しかなく、銘柄が増えれば縮む。落ちてから気づくと
+       6.7時間の run が隔離されるので、落ちる前の回で予告する
+    2. **p99 と max のあいだを通った個体**——p99 で判定する以上、`alpha` なら 3,837 個中
+       38番目まで悪い値は通る。その切片は `_intercept` 行として永続化され producer が μ の
+       復元に使うので、**通ったこと自体は設計どおりでも、誰が通ったかは残す**
+    """
+    d = diagnostics or {}
+    for name, p99 in sorted(gate_values(d).items(), key=lambda kv: -kv[1]):
+        if p99 > threshold - PERSIST_MARGIN_WARN:
+            logger.warning("収束ゲートの余裕が薄い: %s の r_hat p99=%.4f（threshold %.4f まで %.4f）",
+                           name, p99, threshold, threshold - p99)
+    for name, group in (d.get("by_param") or {}).items():
+        if not isinstance(group, dict):
+            continue
+        over = [w for w in (group.get("r_hat_worst") or [])
+                if w and w.get("value") is not None and w["value"] > threshold]
+        if over:
+            logger.warning(
+                "%s: r_hat が threshold（%.4f）を超えた個体（p99 では通る・上位%d件まで）: %s",
+                name, threshold, WORST_KEEP,
+                [{"label": w["label"], "edinet_code": w.get("edinet_code"),
+                  "factor_name": w.get("factor_name"), "r_hat": round(w["value"], 4)}
+                 for w in over],
+            )
 
 
 def main() -> None:
@@ -861,13 +1017,15 @@ def main() -> None:
                          "未指定はサンプラー既定（numpyro は 10）＝現行と同一。"
                          "**下げれば速いが ESS が落ちる**ので、根拠は ADR-0002 の格子実測に依る")
     ap.add_argument("--r-hat-threshold", type=float, default=1.01,
-                    help="persist を許可する r_hat_max の上限（既定 1.01＝ADR-0002 strict 基準）。"
-                         "chains=2 では r_hat が構造的に ~1.02 で頭打ちのため、無人 cron では 1.05 等へ"
+                    help="persist を許可する r_hat の上限（既定 1.01＝ADR-0002 strict 基準）。"
+                         "**比べるのは変数ごとの p99**（beta / alpha / mu_universe それぞれ）で、"
+                         "全パラメータの最大値ではない（#609＝max はパラメータが増えれば必ず閉じる）。"
+                         "chains=2 では r_hat が構造的に ~1.02 で頭打ちのため、無人の月次実行では 1.05 へ"
                          "緩和して構造的 ~1.02 を自動 persist しつつ真の未収束は reject する（Issue #341）。"
-                         "なお比較対象の r_hat_max は #356 で生値化済み（2026-07 以前のログ値は"
+                         "なお比較対象の r_hat は #356 で生値化済み（2026-07 以前のログ値は"
                          "arviz の小数2桁丸めを経た表示値なので閾値の根拠に流用しない）")
     ap.add_argument("--force", action="store_true",
-                    help="収束診断が threshold（既定 r_hat_max<=1.01）未達でも DB へ persist する"
+                    help="収束診断が threshold（既定は変数別 r_hat p99 <= 1.01）未達でも DB へ persist する"
                          "（既定は拒否。producer に品質ゲートが無く即座にライブ推奨へ反映されるため）")
     args = ap.parse_args()
 
@@ -889,8 +1047,8 @@ def main() -> None:
                                nuts_sampler=args.nuts_sampler, init=args.init,
                                max_tree_depth=max_tree_depth)
         logger.info("収束診断: %s", result.diagnostics)
-        r_hat_max = result.diagnostics.get("r_hat_max")
-        if not persist_allowed(r_hat_max, args.r_hat_threshold, args.force):
+        log_gate_report(result.diagnostics, args.r_hat_threshold)
+        if not persist_allowed(result.diagnostics, args.r_hat_threshold, args.force):
             # **落とすことと捨てることを分ける**（#609）。ゲートの役目は「品質の悪い結果が
             # 即ライブ反映されるのを防ぐ」ことであって、6時間の計算を消すことではない。
             # quarantined で書けば producer からは見えないまま結果が残り、後から
@@ -899,12 +1057,16 @@ def main() -> None:
             from database import MACRO_BETA_STATUS_QUARANTINED
 
             persist(db, result, status=MACRO_BETA_STATUS_QUARANTINED)
+            over = {n: v for n, v in gate_values(result.diagnostics).items()
+                    if v > args.r_hat_threshold}
             logger.error(
-                "persist を隔離: r_hat_max=%.4f が threshold（<=%.4f）を超過（n_divergences=%s）。"
-                "run_id=%s を status=quarantined で保存した（producer は読まない）。"
-                "結果は残っているので精査でき、再実行するなら --force で live として書ける。",
-                r_hat_max, args.r_hat_threshold, result.diagnostics.get("n_divergences"),
-                result.run_id,
+                "persist を隔離: r_hat の p99 が threshold（<=%.4f）を超えた変数 %s"
+                "（n_divergences=%s）。run_id=%s を status=quarantined で保存した"
+                "（producer は読まない）。結果は残っているので精査でき、再実行するなら"
+                " --force で live として書ける。",
+                args.r_hat_threshold,
+                {n: round(v, 4) for n, v in sorted(over.items(), key=lambda kv: -kv[1])},
+                result.diagnostics.get("n_divergences"), result.run_id,
             )
             # **exit を非0のままにする**のが要点。status を入れたことで隔離は正常終了に見えるが、
             # 「M-1 が更新されていない」は運用上の失敗であり、静かに固着させない（#579 の再来を防ぐ）。
