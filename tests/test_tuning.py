@@ -666,3 +666,59 @@ class TestProjectChampion:
             "x": {"type": "slider", "dtype": "int", "default": 0, "min": 0, "max": 10},
         })
         assert _project_champion(plugin, {"x": 999}, dims) is None  # bounds 違反
+
+
+# ── 母集団を動かす軸は探索空間に置かない（#604・ADR-0050）──────────────────────
+
+# 共通域の実測で「行を落とす」と確定している軸（ADR-0050）。**構造から推論して足さない**
+# ——`use_macro` は strict の破棄条件を持つのに実データでは1行も落とさなかった（#604・
+# PR #616）し、`min_coverage` は逆に効くはずが一度も発火しなかった（#596）。ここへ足す
+# 前に `python -m scripts.momentum_gate` で測ること。
+POPULATION_MOVING_AXES = frozenset({"use_momentum", "momentum_window"})
+
+
+def _searched_models() -> set:
+    """月次で**実際に探索が走る**モデル名。列挙を二重に持たず argv から取る。"""
+    from scripts import run_monthly, run_monthly_m1
+
+    return set(run_monthly.heavy_models()) | set(run_monthly_m1.heavy_models())
+
+
+class TestSearchAxesDoNotMovePopulations:
+    """探索が走るモデルの探索空間に、母集団を動かす軸が入っていないこと（#604）。
+
+    `hyperparameter_search` は各候補を**その候補自身の母集団**で評価して最大を採るので、
+    行を落とす軸はスコアと交絡し、探索は構造的に「母集団が縮む側」を選ぶ。ADR-0050 の
+    実測では20検定のうち基準を上回ったものが0件で、唯一通ったのは M-2 窓24 の**悪化**だった。
+
+    個別プラグインの `test_momentum_is_not_a_search_axis`（M-1 / M-2）と役割が違う: あちらは
+    「この2軸が今どうなっているか」を縛り、ここは **`TUNE_MATRIX` へモデルを足したとき**に
+    落ちる。M-6（`macro_enet`）は現在この2軸を持ったまま探索対象外で、matrix へ入れた瞬間に
+    ここが失敗する＝「先に測れ」の強制になる（ADR-0050 §5）。
+    """
+
+    def test_no_searched_model_tunes_a_population_moving_axis(self):
+        import importlib
+
+        offenders = {}
+        for model in sorted(_searched_models()):
+            module = importlib.import_module("plugins." + model)
+            for obj in vars(module).values():
+                if not (isinstance(obj, type) and obj.__module__ == module.__name__):
+                    continue
+                if not hasattr(obj, "tuning_search_space"):
+                    continue
+                _base, dims = obj().tuning_search_space()
+                bad = {d.name for d in dims} & POPULATION_MOVING_AXES
+                if bad:
+                    offenders[model] = sorted(bad)
+        assert not offenders, (
+            "母集団を動かす軸が探索空間に入っている: {0}。"
+            "`python -m scripts.momentum_gate` で共通域を測ってから判断すること"
+            "（ADR-0050・#604）".format(offenders))
+
+    def test_the_guard_covers_the_models_that_actually_run(self):
+        """守備範囲が空になっていないこと（モデルが取れなければ上のテストは常に通る）。"""
+        models = _searched_models()
+        assert "macro_risk_return" in models, "M-1 の専用タスクを見ていない（#584）"
+        assert len(models) >= 3, "月次で探索が走るモデルを取り漏らしている: {0}".format(models)

@@ -65,6 +65,14 @@ WORST_KEEP = 10
 # 6.7時間の run が隔離される**ので、落ちる前の回で予告を出す。
 PERSIST_MARGIN_WARN = 0.005
 
+# 無人の月次実行（`scripts/run_monthly_beta.py`）が渡す緩和閾値（Issue #341）。CLI 既定の
+# 1.01（ADR-0002 の strict 基準）ではなくこちらを使う理由は `persist_allowed` の docstring。
+# **これが唯一の源**——格子（`scripts/bench_macro_beta_report.py`）が本番の合否を出すのに
+# 同じ値を要るので、両者が別々に 1.05 を書くと片方だけ動いたとき黙ってずれる（#613）。
+# `run_monthly_beta.py` は子プロセスの argv にリテラルで持つが、一致は
+# `tests/test_run_monthly_beta.py` が照合する。
+MONTHLY_RHAT_THRESHOLD = 1.05
+
 
 def parse_max_tree_depth(text):
     """`--max-tree-depth` の文字列を numpyro が受ける形へ（#540）。
@@ -966,6 +974,25 @@ def persist_allowed(diagnostics: dict | None, threshold: float, force: bool) -> 
     if not values:
         return True
     return max(values.values()) <= threshold
+
+
+def gate_verdict(diagnostics: dict | None, threshold: float | None = None) -> tuple:
+    """ゲートの合否と**それを決めた変数**を返す: `("PASS"|"FAIL"|"n/a", "alpha 1.0463")`。
+
+    格子（`scripts/bench_macro_beta*.py`）が表へ本番の合否を出すために使う（#613）。判定を
+    向こうへ書き写さないための共有点で、**ここが唯一の源**——本番と格子で基準がずれたら
+    格子を回す意味が無くなる。`threshold` 省略時は無人の月次実行と同じ `MONTHLY_RHAT_THRESHOLD`。
+
+    値だけでは対策が選べないので変数名を併せて返す。`alpha` なら永続化対象ではないので
+    ゲートの見方を変える余地があり、`beta` なら `macro_beta_loadings` そのもの＝対策が変わる。
+    """
+    values = gate_values(diagnostics)
+    if not values:
+        return "n/a", ""
+    th = MONTHLY_RHAT_THRESHOLD if threshold is None else threshold
+    name, p99 = max(values.items(), key=lambda kv: kv[1])
+    ok = persist_allowed(diagnostics, th, force=False)
+    return ("PASS" if ok else "FAIL"), "{0} {1:.4f}".format(name, p99)
 
 
 def log_gate_report(diagnostics: dict | None, threshold: float) -> None:

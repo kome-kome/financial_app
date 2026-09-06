@@ -474,6 +474,24 @@ max になり、46,044個の `beta` では外れ値1個を無視できる。し�
 戻されないための杭）。実地の確認は次回の月次（`financial_app-monthly-beta`）が `--force` 無しで
 `status=live` に到達するかで取る。
 
+**格子の表を本番のゲートへ揃えた（2026-09-07・Issue #613）**: 上の改訂で本番の合否は
+「変数別 × p99」になったが、`bench_macro_beta_report --view ess` の表は `r_hat_max` を出した
+ままだった。**人は表の値を 1.05 と見比べて `max_tree_depth` 等を選ぶ**ので、その基準が本番と
+違えば格子を回す意味が消える。ずれる向きは「通る側」だけ＝良い設定を誤って捨てる
+（本番の run は `r_hat_max=1.1242` で表の上では失格に見えるが、新ゲートでは通る）。
+
+- `macro_beta_inference.gate_verdict(diagnostics, threshold=None)` を追加し、両 bench が
+  `gate` / `gate_worst` 列としてそれを出す。**判定を bench 側へ書き写さない**——`locate_extreme`
+  を共有しているのと同じ理由で、本番と格子で基準がずれたら格子が用を成さない
+- 閾値も `MONTHLY_RHAT_THRESHOLD = 1.05` を唯一の源にした。`run_monthly_beta.py` は子プロセスの
+  argv にリテラルで持つが、一致は `tests/test_run_monthly_beta.py` が照合する
+- **新しい計測は要らなかった**。`diagnose` は #608 の時点で `by_param` を返しており、
+  `.logs/bench_609_gate.jsonl` を report にかけ直すだけで `md=8` が FAIL（`mu_universe` 1.6791）・
+  `8,10` が PASS（`mu_universe` 1.0213）と出る（2026-09-07 実測）
+- `by_param` を持たない古い run（#608 以前）は `gate_values` が全体の `r_hat_max` 1本へ
+  フォールバックする。表では `gate_worst` のラベルが `r_hat_max` になるので**旧い＝より厳しい
+  基準で判定された行だと分かる**（`.logs/bench_600_argmin.jsonl` がその実例）
+
 ## Context
 
 M-1（マクロ×リスク-リターン推奨）は現状、**ユニバース全体で単一の β**（BIC 選択も OLS 再フィットも全銘柄プール）を学習し、銘柄固有なのは R1（断面レバレッジ）と R2（実現ボラ）だけだった。これに起因する構造的限界が判明した。

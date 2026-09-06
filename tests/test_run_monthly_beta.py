@@ -103,9 +103,18 @@ class TestInferenceArgs:
         )
 
     def test_keeps_the_relaxed_rhat_gate(self):
-        """無人実行の閾値は 1.05（strict 1.01 は chains=2 では構造的に届かない・#341）。"""
+        """無人実行の閾値は 1.05（strict 1.01 は chains=2 では構造的に届かない・#341）。
+
+        値の源は `macro_beta_inference.MONTHLY_RHAT_THRESHOLD`（#613）。格子
+        （`scripts/bench_macro_beta*.py`）が本番の合否を出すのに同じ値を要るので、
+        **ここと定数が別々に 1.05 を持つと片方だけ動いたとき黙ってずれる**。
+        """
+        import macro_beta_inference as mb
+
         argv = _argv("macro_beta")
-        assert argv[argv.index("--r-hat-threshold") + 1] == "1.05"
+        passed = argv[argv.index("--r-hat-threshold") + 1]
+        assert float(passed) == mb.MONTHLY_RHAT_THRESHOLD
+        assert mb.MONTHLY_RHAT_THRESHOLD == 1.05
 
     def test_keeps_the_warmup_only_treedepth_cap(self):
         """`8,10` は **warmup だけ** 2**8-1 歩に切る（ADR-0002）。

@@ -686,6 +686,39 @@ class TestPersistGate:
         assert got["alpha"] == pytest.approx(1.0462810889549843)
 
 
+class TestGateVerdict:
+    """gate_verdict: 格子（bench）が本番の合否を表へ出すための共有点（#613）。
+
+    格子で `max_tree_depth` 等を選ぶとき、人は表の値を閾値と見比べて判断する。**その基準が
+    本番と違えば格子を回す意味が消える**ので、判定は persist_allowed へ委譲し、閾値は
+    MONTHLY_RHAT_THRESHOLD を既定にする。
+    """
+
+    def test_production_run_passes_and_names_the_deciding_variable(self):
+        verdict, worst = mbi.gate_verdict(_diag(1.1242346687861646, PROD_BY_PARAM_20260906))
+        assert verdict == "PASS"
+        # 決めたのは alpha（p99 1.0463・閾値まで 0.0037）。値だけでは対策が選べない。
+        assert worst.startswith("alpha ")
+        assert "1.0463" in worst
+
+    def test_collapsed_run_fails_and_names_mu_universe(self):
+        verdict, worst = mbi.gate_verdict(_diag(1.7157, COLLAPSED_BY_PARAM_MD8))
+        assert verdict == "FAIL"
+        assert worst.startswith("mu_universe ")
+
+    def test_default_threshold_is_the_monthly_one(self):
+        """既定は無人の月次実行と同じ値。**strict 1.05 と 1.01 を取り違えない**。"""
+        assert mbi.MONTHLY_RHAT_THRESHOLD == 1.05
+        # 1.02 は strict では落ちるが月次既定では通る＝既定が strict でないことの実測。
+        assert mbi.gate_verdict(_diag(1.02))[0] == "PASS"
+        assert mbi.gate_verdict(_diag(1.02), threshold=1.01)[0] == "FAIL"
+
+    def test_missing_diagnostics_is_not_a_verdict(self):
+        """診断が無い run は PASS でも FAIL でもない（ゲート対象外を PASS と混ぜない）。"""
+        assert mbi.gate_verdict(None) == ("n/a", "")
+        assert mbi.gate_verdict({}) == ("n/a", "")
+
+
 class TestGateReportLogging:
     """log_gate_report: 余裕と「p99 の裏を通った個体」をログへ出す（#609・決定4）。"""
 

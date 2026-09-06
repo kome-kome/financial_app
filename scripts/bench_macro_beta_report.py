@@ -45,6 +45,10 @@ import json  # noqa: E402
 
 import numpy as np  # noqa: E402
 
+# 本番の収束ゲートそのもの（`gate_values` / `persist_allowed` / `MONTHLY_RHAT_THRESHOLD`）。
+# pymc は同モジュール内で遅延 import されるので、ここでの import は実測 0.43 秒で済む。
+import macro_beta_inference as mb  # noqa: E402
+
 
 def per_step_seconds(record: dict):
     """総 leapfrog 歩数に対する回帰の傾き＝1歩の実費[秒]。2点未満・歩数が同じなら None。"""
@@ -109,13 +113,19 @@ def ess_table(records: list) -> str:
 
     `td_rate` は**その run の上限に対する**到達率。1.000 なら軌道はまだ切られている側にあり、
     下回っていれば U ターンで自然に止まり始めている＝上限がもう律速でないことの合図。
+
+    `gate` / `p99_worst` は #613 で足した。#611 で本番のゲートが「変数ごとの `r_hat` の p99」に
+    なったのに、この表は `r_hat_max` を出したままだった——人は表の値を 1.05 と見比べて設定を
+    選ぶので、**その基準はもう本番の合否と一致しない**。ずれる向きは「通る側」だけ＝良い設定を
+    誤って捨てる。実例: 本番の run（`mb_20260906T055243Z`）は `r_hat_max=1.1242` で表の上では
+    失格に見えるが、新ゲートでは通る。
     """
     if not records:
         return "入力が空です（JSONL がまだ無いか、1行も書かれていない）"
-    header = ("{0:<14} {1:>7} {2:>6} {3:>9} {4:>7} {5:>6} {6:>9} {7:>9} {8:>9} {9:>12} "
-              "{10:>10} {11:>9}").format(
-        "label", "md", "ta", "steps/dr", "td_rate", "n_div", "r_hat_max", "ess_min",
-        "ess_med", "ESS/1e6step", "ESS/sec", "sec")
+    header = ("{0:<14} {1:>7} {2:>6} {3:>9} {4:>7} {5:>6} {6:>6} {7:>16} {8:>9} {9:>9} "
+              "{10:>9} {11:>12} {12:>10} {13:>9}").format(
+        "label", "md", "ta", "steps/dr", "td_rate", "n_div", "gate", "gate_worst",
+        "r_hat_max", "ess_min", "ess_med", "ESS/1e6step", "ESS/sec", "sec")
     lines = ["=" * len(header), "bench ESS grid (raw values)", "=" * len(header),
              header, "-" * len(header)]
     for rec in records:
@@ -123,15 +133,17 @@ def ess_table(records: list) -> str:
         for run in rec.get("runs") or []:
             st = run.get("steps") or {}
             ess = run.get("ess") or {}
+            verdict, worst = mb.gate_verdict(ess)
             lines.append(
-                ("{0:<14} {1:>7} {2:>6} {3:>9} {4:>7} {5:>6} {6:>9} {7:>9} {8:>9} {9:>12} "
-                 "{10:>10} {11:>9}").format(
+                ("{0:<14} {1:>7} {2:>6} {3:>9} {4:>7} {5:>6} {6:>6} {7:>16} {8:>9} {9:>9} "
+                 "{10:>9} {11:>12} {12:>10} {13:>9}").format(
                     str(rec.get("label"))[:14],
                     str(cfg.get("max_tree_depth")),
                     fmt(cfg.get("target_accept"), "{0:.2f}"),
                     fmt(st.get("mean"), "{0:.1f}"),
                     fmt(st.get("max_treedepth_rate"), "{0:.3f}"),
                     fmt(run.get("n_divergences"), "{0:d}"),
+                    verdict, worst or "n/a",
                     fmt(ess.get("r_hat_max"), "{0:.4f}"),
                     fmt(ess.get("ess_bulk_min"), "{0:.4g}"),
                     fmt(ess.get("ess_bulk_median"), "{0:.4g}"),
@@ -146,8 +158,15 @@ def ess_table(records: list) -> str:
                                     c.get("chains"), c.get("tune"), c.get("draws_list"),
                                     c.get("panel_stamp")))
     lines.append("primary metric = ESS/1e6step (time-free; local us/step drifts 2.4x by hour)")
-    lines.append("gate stats = r_hat_max <= 1.05 and ess_MIN (median can look healthy while the "
-                 "min collapses: md=8 gave ess_med 821.6 with ess_min 3.55 / r_hat 1.6347)")
+    lines.append("gate = persist_allowed(): per-variable r_hat p99 <= {0} (#611). "
+                 "gate_worst names the variable that decides the verdict. A row labelled "
+                 "`r_hat_max` predates by_param (#608) and falls back to the single global max, "
+                 "so its verdict is the OLD, stricter one".format(mb.MONTHLY_RHAT_THRESHOLD))
+    lines.append("NOTE: r_hat_max is NOT the gate quantity (#613). It is a max over ~50k params, "
+                 "so it always rises with scale: the production run had r_hat_max 1.1242 yet "
+                 "PASSes. Read `gate`, not r_hat_max.")
+    lines.append("also watch ess_MIN (median can look healthy while the min collapses: "
+                 "md=8 gave ess_med 821.6 with ess_min 3.55 / r_hat 1.6347)")
     note = regime_note(records)
     if note:
         lines.append(note)

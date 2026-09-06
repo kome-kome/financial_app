@@ -84,6 +84,10 @@ from datetime import datetime, timezone  # noqa: E402
 
 import numpy as np  # noqa: E402
 
+# 本番の収束ゲートそのもの（#613）。格子で設定を選ぶ以上、**合否の基準は本番と同じ関数**で
+# なければ回す意味が無い。pymc は同モジュール内で遅延 import されるので実測 0.43 秒で済む。
+import macro_beta_inference as mb  # noqa: E402
+
 logger = logging.getLogger("bench_macro_beta")
 
 # 合成パネルの既定形状。本番（n_stock=3795 / n_sector=34 / n_factor=12 / n_obs=90449 ＝
@@ -573,16 +577,24 @@ def format_report(record: dict) -> str:
     # ESS/sec は本番所要の見積り用の従指標。判断は生値で行うので有効数字を落とさない。
     if any(r.get("ess") for r in record["runs"]):
         lines.append("-" * 78)
-        lines.append("{0:>8} {1:>10} {2:>10} {3:>10} {4:>10} {5:>12} {6:>10}".format(
-            "draws", "ess_min", "ess_p10", "ess_med", "r_hat_max", "ESS/1e6step", "ESS/sec"))
+        lines.append("{0:>8} {1:>6} {2:>16} {3:>10} {4:>10} {5:>10} {6:>10} {7:>12} {8:>10}".format(
+            "draws", "gate", "gate_worst", "ess_min", "ess_p10", "ess_med", "r_hat_max",
+            "ESS/1e6step", "ESS/sec"))
         for r in record["runs"]:
             e = r.get("ess")
             if not e:
                 continue
-            lines.append("{0:>8} {1:>10.4g} {2:>10.4g} {3:>10.4g} {4:>10.4f} {5:>12.4g} {6:>10.4g}".format(
-                r["draws"], e["ess_bulk_min"], e["ess_bulk_p10"], e["ess_bulk_median"],
+            verdict, worst = mb.gate_verdict(e)
+            lines.append(("{0:>8} {1:>6} {2:>16} {3:>10.4g} {4:>10.4g} {5:>10.4g} {6:>10.4f} "
+                          "{7:>12.4g} {8:>10.4g}").format(
+                r["draws"], verdict, worst or "n/a",
+                e["ess_bulk_min"], e["ess_bulk_p10"], e["ess_bulk_median"],
                 e["r_hat_max"], r.get("ess_bulk_median_per_1e6step") or float("nan"),
                 r.get("ess_bulk_median_per_sec") or float("nan")))
+        # 表の `r_hat_max` はゲート量ではない（#613）。約5万個の max なので規模とともに必ず
+        # 上がり、本番の run は 1.1242 でも PASS する。判断は `gate` 列で行うこと。
+        lines.append("          gate = persist_allowed(): 変数ごとの r_hat p99 <= {0}（#611）。"
+                     "**r_hat_max はゲート量ではない**（#613）".format(mb.MONTHLY_RHAT_THRESHOLD))
         # 極値“を出している母数”（#600）。alpha なら永続化対象ではないのでゲートの見方を
         # 変える余地があり、beta なら macro_beta_loadings そのもの＝対策が変わる。
         for r in record["runs"]:

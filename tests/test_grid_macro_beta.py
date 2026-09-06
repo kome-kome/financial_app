@@ -176,6 +176,58 @@ class TestReport:
         assert "primary metric" in text
 
 
+class TestGateColumn:
+    """格子の表は**本番の合否**を出す（#613）。
+
+    #611 で本番のゲートが「変数ごとの `r_hat` の p99」になったのに表は `r_hat_max` を
+    出したままだった。人は表の値を 1.05 と見比べて `max_tree_depth` 等を選ぶので、
+    **その基準が本番と違えば格子を回す意味が消える**。ずれる向きは「通る側」だけ＝
+    良い設定を誤って捨てる。
+    """
+
+    def _by_param(self, mu_p99):
+        return {"beta":        {"n": 3000, "r_hat_p99": 1.0129, "r_hat_max": 1.0411},
+                "alpha":       {"n": 250,  "r_hat_p99": 1.0370, "r_hat_max": 1.0659},
+                "mu_universe": {"n": 12,   "r_hat_p99": mu_p99, "r_hat_max": mu_p99}}
+
+    def _rec(self, label, mu_p99, r_hat_max):
+        rec = _record(label)
+        rec["runs"][0]["ess"]["by_param"] = self._by_param(mu_p99)
+        rec["runs"][0]["ess"]["r_hat_max"] = r_hat_max
+        return rec
+
+    def test_collapsed_cell_is_marked_fail(self, tmp_path):
+        # .logs/bench_609_gate.jsonl の md=8（mu_universe が固着）。新規計測は要らない。
+        text = gmb.report(_jsonl(tmp_path, [self._rec("md8-ta095", 1.6791, 1.7157)]))
+        assert "FAIL" in text
+        assert "mu_universe" in text
+
+    def test_healthy_cell_is_marked_pass_even_with_high_r_hat_max(self, tmp_path):
+        """`r_hat_max` が閾値超えでも新ゲートでは通る＝**旧基準なら誤って捨てていた**行。"""
+        text = gmb.report(_jsonl(tmp_path, [self._rec("md8w10", 1.0213, 1.1242)]))
+        assert "PASS" in text
+        assert "FAIL" not in text
+
+    def test_says_r_hat_max_is_not_the_gate(self, tmp_path):
+        # 表だけ切り出して貼られても「max を閾値と見比べない」意図が残ること。
+        text = gmb.report(_jsonl(tmp_path, [self._rec("md8w10", 1.0213, 1.1242)]))
+        assert "r_hat_max is NOT the gate quantity" in text
+
+    def test_gate_verdict_is_not_reimplemented_in_the_report(self):
+        """判定と閾値を report 側へ書き写していないこと（本番と格子で基準がずれる）。"""
+        import ast
+
+        src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                                "scripts", "bench_macro_beta_report.py"), encoding="utf-8").read()
+        tree = ast.parse(src)
+        defined = {n.name for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)}
+        assert "gate_verdict" not in defined, "判定は macro_beta_inference が唯一の源"
+        # 閾値のリテラルを持たない（MONTHLY_RHAT_THRESHOLD 経由で参照する）。
+        literals = {n.value for n in ast.walk(tree)
+                    if isinstance(n, ast.Constant) and isinstance(n.value, float)}
+        assert 1.05 not in literals, "閾値を書き写している（MONTHLY_RHAT_THRESHOLD を使うこと）"
+
+
 class TestRegimeNote:
     """**測った regime が #540 の対象かどうか**の警告（`bench_macro_beta_report.regime_note`）。
 
