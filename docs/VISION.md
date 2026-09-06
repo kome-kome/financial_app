@@ -68,7 +68,7 @@
 | **DB が接続先固定前提** | ✅ 解決 | `FINAPP_DB_TARGET`（既定 `local`）で制御。`prod` を明示するのは `render.yaml` の1箇所だけ |
 | **EDINET / J-Quants API キー** | ✅ 解決 | Render の環境変数（`sync: false`）で管理 |
 | **アイドル時のスピンダウン** | ✅ 許容（回避はしない） | 収集はローカルで回るため Render の停止は収集に無影響。UI 初回アクセスのコールドスタート（実測 73 秒）は許容する設計 |
-| **DB バックアップ運用** | ✅ 解決 | `scripts/backup_push.py` で Supabase Storage へ世代管理（実測 37.5MB/世代）、復元は `scripts/backup_restore.py`（#503 Phase 3） |
+| **DB バックアップ運用** | ✅ 解決 | `scripts/run_backup.py`（毎週日曜 JST 21:00・#606）が `backup_push` を回して Supabase Storage へ世代管理（実測 38.1MB/世代）、復元は `scripts/backup_restore.py`（#503 Phase 3）。走らなければ watchdog が起票する |
 | **外出先で最新ランキングが見えない** | ⚠️ 受け入れ | 正本がローカルにある以上、Render が見せるのは 2026-08-07 の凍結断面。Supabase の Postgres へ書き戻す経路は作らない（#500 の OOM 再発を避けるため・ADR-0038）。最新を見るにはローカルで `uvicorn` を起動する（#423） |
 
 ---
