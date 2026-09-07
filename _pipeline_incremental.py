@@ -135,6 +135,14 @@ async def main():
             f"（うち解決済み {gap_result.get('priceless_resolved', 0)}社）"
             + (f"・**解決済みなのに空 {gap_result.get('exchange_rejected')}社**"
                if gap_result.get("exchange_rejected") else ""))
+        # 並行フェッチの安全弁（#556）。Yahoo は絞ると「200 OK・close が全 null」を返し
+        # **例外を出さない**ので、429/5xx の件数を毎晩残す。0 以外が続いたら
+        # `FINAPP_YAHOO_CONCURRENCY` を下げる（1 で逐次に戻る）。
+        _he = gap_result.get("http_errors") or {}
+        if not gap_result.get("skipped"):
+            log(f"  Yahoo 並行度 {gap_result.get('concurrency')}・"
+                f"HTTP失敗 429={_he.get('429', 0)} 5xx={_he.get('5xx', 0)} "
+                f"4xx={_he.get('4xx', 0)} その他={_he.get('other', 0)}")
 
         # J-Quants catchup: 12週境界を過ぎた直後（today-90〜today-80日）を再取得し、
         # Yahoo 暫定値を J-Quants 公式値で自動上書きする（毎日走ることで徐々に置換）。

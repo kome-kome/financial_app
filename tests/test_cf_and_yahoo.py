@@ -457,3 +457,151 @@ class TestDelistedPricelessBackoff:
         with patch("collector_prices.fetch_yahoo_history", new=fake):
             self._run(fill_recent_stock_price_gap_yahoo(db, gap_days=7))
         assert sorted(seen) == ["1001.T", "1002.T"], "gap_days>0 でも絞ってしまっている"
+
+
+# ── Yahoo gap-fill の並行フェッチ (#556) ────────────────────────────────────
+
+class TestYahooGapFillConcurrency:
+    """並行フェッチ（#556）の不変条件。
+
+    速くすること自体はテストできない（実測は夜間バッチのログが持つ）。ここで縛るのは
+    **速くしても壊れていないこと**の3点:
+
+    1. `YAHOO_STOCK_CONCURRENCY=1` で従来の逐次と同じ順序になる（緊急停止が本当に効く）
+    2. 並行度を上げると実際に複数リクエストが同時に飛ぶ（設定が素通りしていない）
+    3. **完了順が入れ替わってもカウンタと投入行が変わらない**——`n_new` の加算を
+       タスク側へ動かすと並行度に依存して壊れるので、消費側に残してあることを縛る
+    """
+
+    def _run(self, coro):
+        return asyncio.run(coro)
+
+    def _seed(self, db, make_company, make_price, n=6):
+        now_jst, session = _monday_anchor()
+        stale = (session - timedelta(days=20)).isoformat()
+        for i in range(n):
+            db.add(make_company(edinet_code=f"E{i:05d}", sec_code=f"{1001 + i}"))
+            db.add(make_price(edinet_code=f"E{i:05d}", trade_date=stale))
+        db.commit()
+        return now_jst
+
+    def test_concurrency_one_fetches_in_ticker_order(self, db, make_company, make_price):
+        now_jst = self._seed(db, make_company, make_price)
+        seen = []
+
+        async def _fake(http, ticker, d_from, d_to):
+            seen.append(ticker)
+            return []
+
+        with (
+            patch("collector_prices.fetch_yahoo_history", new=_fake),
+            patch("collector_prices.YAHOO_STOCK_CONCURRENCY", 1),
+            patch("collector_prices.YAHOO_STOCK_RATE_SLEEP", 0),
+        ):
+            self._run(fill_recent_stock_price_gap_yahoo(db, gap_days=0, now_jst=now_jst))
+
+        assert seen == sorted(seen), "並行度1では従来どおり銘柄順に叩く"
+        assert len(seen) == 6
+
+    def test_requests_actually_overlap_when_concurrency_raised(
+            self, db, make_company, make_price):
+        now_jst = self._seed(db, make_company, make_price)
+        inflight, peak = 0, 0
+
+        async def _fake(http, ticker, d_from, d_to):
+            nonlocal inflight, peak
+            inflight += 1
+            peak = max(peak, inflight)
+            await asyncio.sleep(0)          # 他のタスクへ制御を渡す
+            inflight -= 1
+            return []
+
+        with (
+            patch("collector_prices.fetch_yahoo_history", new=_fake),
+            patch("collector_prices.YAHOO_STOCK_CONCURRENCY", 4),
+            patch("collector_prices.YAHOO_STOCK_RATE_SLEEP", 0),
+        ):
+            self._run(fill_recent_stock_price_gap_yahoo(db, gap_days=0, now_jst=now_jst))
+
+        assert peak > 1, "並行度を上げても1本ずつしか飛んでいない（設定が効いていない）"
+        assert peak <= 4, "Semaphore の上限を超えている"
+
+    def test_counters_survive_out_of_order_completion(self, db, make_company, make_price):
+        """完了順を逆にしても `new_rows` は同じ。
+
+        `n_new` は「その社の従来の最終日より後の日付」を数えるので、**どの社の
+        `last_iso` と突き合わせるか**を取り違えると壊れる。並行化で完了順が変わっても
+        社と `last_iso` の対応が保たれることを、遅延を逆順に入れて確かめる。
+        """
+        now_jst, session = _monday_anchor()
+        for i in range(4):
+            db.add(make_company(edinet_code=f"E{i:05d}", sec_code=f"{2001 + i}"))
+            db.add(make_price(edinet_code=f"E{i:05d}",
+                              trade_date=(session - timedelta(days=20)).isoformat()))
+        db.commit()
+
+        order = {"2001.T": 0.004, "2002.T": 0.003, "2003.T": 0.002, "2004.T": 0.001}
+
+        async def _fake(http, ticker, d_from, d_to):
+            await asyncio.sleep(order[ticker])       # 銘柄順と完了順を逆にする
+            return [{"trade_date": session.isoformat(), "close": 100.0, "volume": 1}]
+
+        with (
+            patch("collector_prices.fetch_yahoo_history", new=_fake),
+            patch("collector_prices.YAHOO_STOCK_CONCURRENCY", 4),
+            patch("collector_prices.YAHOO_STOCK_RATE_SLEEP", 0),
+        ):
+            res = self._run(fill_recent_stock_price_gap_yahoo(db, gap_days=0, now_jst=now_jst))
+
+        assert res["new_rows"] == 4          # 4社 × 1日ぶんの新規日付
+        assert res["companies"] == 4
+        assert res["concurrency"] == 4
+
+
+class TestYahooHttpErrorStats:
+    """`fetch_yahoo_chart` の HTTP 失敗を数える器（#556）。
+
+    この関数は**全エラー経路を `([], {})` へ畳む**ため、429（レート制限）と
+    「その銘柄のデータが無い」が呼び出し側から区別できない。並行度を上げる前に、
+    絞られたことがログに出る状態を作る必要がある。
+    """
+
+    def _run(self, coro):
+        return asyncio.run(coro)
+
+    def _session_raising(self, exc):
+        class _S:
+            async def get(self, *a, **kw):
+                raise exc
+        return _S()
+
+    def test_counts_429_separately(self):
+        import httpx as _httpx
+        from collector_prices import fetch_yahoo_chart, yahoo_http_stats
+
+        resp = _httpx.Response(429, request=_httpx.Request("GET", "https://x"))
+        exc = _httpx.HTTPStatusError("rate limited", request=resp.request, response=resp)
+        with yahoo_http_stats() as stats:
+            rows, meta = self._run(fetch_yahoo_chart(
+                self._session_raising(exc), "1001.T", "20260101", "20260131"))
+        assert (rows, meta) == ([], {})      # 戻り値の契約は変えない
+        assert stats == {"429": 1, "5xx": 0, "4xx": 0, "other": 0}
+
+    def test_unclassifiable_failures_are_still_counted(self):
+        """分類できない失敗も必ず1つ数える（0 を「起きなかった」の意味に保つ）。"""
+        from collector_prices import fetch_yahoo_chart, yahoo_http_stats
+
+        with yahoo_http_stats() as stats:
+            self._run(fetch_yahoo_chart(
+                self._session_raising(OSError("connection reset")),
+                "1001.T", "20260101", "20260131"))
+        assert stats == {"429": 0, "5xx": 0, "4xx": 0, "other": 1}
+
+    def test_counting_is_off_outside_the_context(self):
+        """with の外では数えない＝他の呼び出し元（macro / backfill）に副作用を持たせない。"""
+        from collector_prices import fetch_yahoo_chart
+
+        # 例外を出さずに完走すること（カウンタが None でも落ちない）
+        rows, meta = self._run(fetch_yahoo_chart(
+            self._session_raising(OSError("boom")), "1001.T", "20260101", "20260131"))
+        assert (rows, meta) == ([], {})

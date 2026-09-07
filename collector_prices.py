@@ -6,6 +6,7 @@ import io
 import zipfile
 import asyncio
 from collections import defaultdict
+from contextlib import contextmanager
 from datetime import date, datetime, timedelta
 from typing import Optional, Callable
 from urllib.parse import quote as urlquote  # fetch_yahoo_history のローカル変数 quote と衝突回避
@@ -1297,7 +1298,10 @@ async def fill_recent_stock_price_gap_yahoo(
                 "priceless": n_priceless, "priceless_resolved": n_priceless_resolved,
                 "exchange_rejected": 0, "session": session.isoformat()}
 
-    to_fetch.sort(key=lambda x: (x[0], x[1]))   # 銘柄順に部分反映されるよう順序を決定的にする
+    # 取得の**開始**順を決定的にする。並行フェッチ（#556）では完了順に yield するので
+    # **DB へ入る順は銘柄順にならない**——upsert なので最終状態は同じだが、途中で落ちた回に
+    # 「どこまで入ったか」を銘柄順で読むことはできない。並行度1なら従来どおり銘柄順になる。
+    to_fetch.sort(key=lambda x: (x[0], x[1]))
     d_from_min = min(x[2] for x in to_fetch)
     d_to = max(today, session).strftime("%Y%m%d")
     # 取り込む上限。use_session=False（安全弁が発火・legacy 呼び出し）のときは today まで。
@@ -1320,10 +1324,30 @@ async def fill_recent_stock_price_gap_yahoo(
     n_exchange_rejected = 0
 
     async def _yahoo_batch_gen(http):
+        """並行フェッチ（#556）。**取得だけをタスク化し、判定と集計は消費側に残す。**
+
+        既存の `_stooq_batch_gen` と同じ `Semaphore` + `as_completed` の形を踏襲する
+        （新しい流儀を持ち込まない）。`records` の組み立てと `n_new` / `n_exchange_rejected` の
+        加算をタスク側へ動かさないのは、**カウンタの意味を並行度に依存させないため**。
+
+        スリープは各タスクが取得後に払う＝実効レートは「並行度 ÷ 1リクエストの所要」。
+        `YAHOO_STOCK_CONCURRENCY=1` なら従来の逐次と同じ順序・同じレートになる。
+        """
         nonlocal n_new, n_exchange_rejected
-        for i, (sec_code, edinet_code, d_from, last_iso, suffix) in enumerate(to_fetch, 1):
-            rows = await fetch_yahoo_history(http, yahoo_ticker(sec_code, suffix),
-                                             d_from, d_to, **yahoo_guard_kwargs(suffix))
+        sem = asyncio.Semaphore(YAHOO_STOCK_CONCURRENCY)
+
+        async def _fetch(item):
+            sec_code, edinet_code, d_from, last_iso, suffix = item
+            async with sem:
+                rows = await fetch_yahoo_history(http, yahoo_ticker(sec_code, suffix),
+                                                 d_from, d_to, **yahoo_guard_kwargs(suffix))
+                if YAHOO_STOCK_RATE_SLEEP > 0:
+                    await asyncio.sleep(YAHOO_STOCK_RATE_SLEEP)
+            return edinet_code, last_iso, suffix, rows
+
+        tasks = [asyncio.ensure_future(_fetch(item)) for item in to_fetch]
+        for i, coro in enumerate(asyncio.as_completed(tasks), 1):
+            edinet_code, last_iso, suffix, rows = await coro
             if suffix and not rows:
                 n_exchange_rejected += 1
             # bar_cap で進行中セッションのバーを捨てる（#474）。Yahoo の interval=1d は
@@ -1341,15 +1365,16 @@ async def fill_recent_stock_price_gap_yahoo(
             if on_progress and i % PROGRESS_REPORT_BATCH == 0:
                 on_progress(i, total, f"[Yahoo gap-fill {i}/{total}]")
             yield records
-            await asyncio.sleep(YAHOO_STOCK_RATE_SLEEP)
 
     async with httpx.AsyncClient(timeout=60) as http:
-        _, upserted = await _price_collection_driver(db, _yahoo_batch_gen(http))
+        with yahoo_http_stats() as http_stats:
+            _, upserted = await _price_collection_driver(db, _yahoo_batch_gen(http))
 
     # upserted は record_prices_batch の戻り値＝**投入行数**であって新規行数ではない
     # （ON CONFLICT DO UPDATE）。2026-08-08 の「3,677件 追加」は実は全社ぶんの取り直しだった。
     log.info(f"fill_recent_stock_price_gap_yahoo: {upserted}件を株価テーブルへ集約保存"
-             f"（うち新規日付 {n_new}件）"
+             f"（うち新規日付 {n_new}件・並行度 {YAHOO_STOCK_CONCURRENCY}・"
+             f"{format_yahoo_http_stats(http_stats)}）"
              + (f" ・**解決済みなのに空だった {n_exchange_rejected}社**"
                 f"（取引所/通貨の不一致か、Yahoo がその銘柄のバーを落とした。"
                 f"scripts.resolve_price_suffix --reprobe で測り直す・#555）"
@@ -1357,6 +1382,7 @@ async def fill_recent_stock_price_gap_yahoo(
     return {"skipped": False, "upserted": upserted, "new_rows": n_new, "companies": total,
             "priceless": n_priceless, "priceless_resolved": n_priceless_resolved,
             "exchange_rejected": n_exchange_rejected,
+            "concurrency": YAHOO_STOCK_CONCURRENCY, "http_errors": dict(http_stats),
             "from": d_from_min, "to": d_to, "session": session.isoformat()}
 
 
@@ -3193,6 +3219,59 @@ def _meta_matches(meta: dict,
     return True
 
 
+# ── Yahoo の HTTP 失敗を数える（#556）────────────────────────────────────────
+# `fetch_yahoo_chart` は**全エラー経路を `([], {})` へ畳む**（呼び出し側の分岐を増やさない
+# ための意図的な設計）。ところがそのせいで **429（レート制限）と「その銘柄のデータが無い」が
+# 区別できない**。逐次のうちは実害が無かったが、並行度を上げると「絞られて空が返り、
+# 例外は1つも出ず、鮮度だけが静かに死ぬ」経路が開く（#438 の壊れ方と同型）。
+#
+# そこで **status code 別に数えるだけ**の器を1つ置く。関数の署名も戻り値も変えない
+# （`fetch_yahoo_chart` は macro・weekly backfill・probe からも呼ばれるため、引数を増やすと
+# 呼び出し側を全部触ることになる）。run 単位の集計は `yahoo_http_stats()` で囲って取る。
+_YAHOO_HTTP_ERRORS: Optional[dict] = None
+
+
+@contextmanager
+def yahoo_http_stats():
+    """この with の中で `fetch_yahoo_chart` が踏んだ HTTP 失敗を数える。
+
+    yield される dict は `{"429": n, "5xx": n, "4xx": n, "other": n}`。**入れ子にしない**
+    （内側が外側の集計を奪う）。集計は「数える」だけで、判断は呼び出し側が持つ。
+    """
+    global _YAHOO_HTTP_ERRORS
+    prev = _YAHOO_HTTP_ERRORS
+    stats: dict = {"429": 0, "5xx": 0, "4xx": 0, "other": 0}
+    _YAHOO_HTTP_ERRORS = stats
+    try:
+        yield stats
+    finally:
+        _YAHOO_HTTP_ERRORS = prev
+
+
+def _count_yahoo_http_error(exc: Exception) -> None:
+    """例外を粗く分類して数える。**分類できない失敗も必ず1つ数える**（0 は「起きなかった」の意味に保つ）。"""
+    if _YAHOO_HTTP_ERRORS is None:
+        return
+    code = None
+    resp = getattr(exc, "response", None)
+    if resp is not None:
+        code = getattr(resp, "status_code", None)
+    if code == 429:
+        _YAHOO_HTTP_ERRORS["429"] += 1
+    elif code is not None and 500 <= code < 600:
+        _YAHOO_HTTP_ERRORS["5xx"] += 1
+    elif code is not None and 400 <= code < 500:
+        _YAHOO_HTTP_ERRORS["4xx"] += 1
+    else:
+        _YAHOO_HTTP_ERRORS["other"] += 1
+
+
+def format_yahoo_http_stats(stats: dict) -> str:
+    """ログ用の1行。**0 のときも出す**——「出ていない」ことが読めないと監視にならない。"""
+    return (f"HTTP失敗 429={stats['429']} 5xx={stats['5xx']} "
+            f"4xx={stats['4xx']} その他={stats['other']}")
+
+
 async def fetch_yahoo_chart(
     session: httpx.AsyncClient,
     yf_ticker: str,
@@ -3227,6 +3306,7 @@ async def fetch_yahoo_chart(
         r.raise_for_status()
         data = r.json()
     except Exception as e:
+        _count_yahoo_http_error(e)
         log.debug(f"Yahoo Finance 取得失敗 {yf_ticker}: {e}")
         return [], {}
 
