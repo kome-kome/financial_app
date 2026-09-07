@@ -46,8 +46,8 @@ if str(ROOT) not in sys.path:                      # `python -m scripts.*` か�
 # **import 時に副作用を持つモジュールをここから呼ばない。** 参照するのは定数だけで、
 # `scripts/run_*.py` と `scripts/batch_common.py` はトップレベルが定数定義に限られている
 # （`SPEC` は純 dataclass）。この前提が崩れると API プロセスが巻き込まれる。
-from scripts import (run_backup, run_monthly, run_monthly_beta,  # noqa: E402
-                     run_monthly_m1, run_nightly)
+from scripts import (run_backup, run_daytime, run_monthly,  # noqa: E402
+                     run_monthly_beta, run_monthly_m1, run_nightly)
 
 # watchdog 自身の足跡。監視対象と同じ表に置く（見る場所を分けない）。
 KEY_LAST_RUN = "watchdog_last_run"
@@ -142,6 +142,21 @@ WATCHED: tuple[Watched, ...] = (
         issue_title="[ops] ローカルのバックアップバッチが走っていない",
         task_name="financial_app-backup",
         log_prefix="backup",
+    ),
+    Watched(
+        label="日中バッチ",
+        key_run=run_daytime.KEY_LAST_RUN,
+        key_success=run_daytime.KEY_LAST_SUCCESS,
+        # 平日 8:15 のトリガ（`install_daytime_task.ps1`）。**24 ではなく 72**——金曜に
+        # 走ると次は月曜なので、土日を挟む間隔が正常な最長になる。24 にすると毎週土曜に
+        # 「走っていない」と鳴り、鳴りっぱなしの警告は読まれなくなる。
+        cadence_h=72.0,
+        window_min=run_daytime.WINDOW_MIN,
+        # 走らないと、重い計算を進める場所そのものが消える。キューが空の日も足跡は残るので、
+        # ここが鳴るのは「タスクが起動しなかった」ときだけ（空振りとは区別できる）。
+        issue_title="[ops] ローカル日中バッチが走っていない",
+        task_name="financial_app-daytime",
+        log_prefix="daytime",
     ),
     Watched(
         label="watchdog 自身",
