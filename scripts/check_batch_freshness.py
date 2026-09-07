@@ -30,6 +30,18 @@ ADR-0040 が「窓の終わりの打ち切りは failure として現れない�
 （`WakeToRun` 未設定 + `StartWhenAvailable` で PC がスリープなら復帰後に走る）、
 **名目時刻を基準にすると誤検知する**が、経過ベースなら遅延は窓の項が吸収する。
 
+## 2つの事実を見る: 「走ったか」と「値が前進したか」
+
+足跡（`*_last_run`）が答えるのは前者だけ。2026-09-01 の月次は `tune:macro_dlm` が予算切れ
+（exit=124）・`tune:macro_gbdt` が品質ゲートで persist スキップ（exit=1）となり、失敗自体は
+#587 として起票・クローズされた。**だが穴はその後も埋まらず**、`plugin_tuned_params` は
+macro_gbdt が 50日・macro_dlm が 59日 古いまま誰にも気づかれなかった（2026-09-07 実測・#504）。
+バッチ側の起票は「その回が失敗した」ことしか言わないので、**閉じた後に残る固着**は
+成果物そのものを見ないと現れない。判定は `batch_freshness.PRODUCERS` が持つ。
+
+`macro_beta` は `status=quarantined` で保全されると run は残るが producer は読まない（#609）
+ので、**live の行だけ**を数える＝隔離が続けば固着として鳴る。
+
 ## 見るのは `*_last_run` であって `*_last_success` ではない
 
 `monthly_last_success` は**設計上ずっと古い**。`run_monthly.py:111` のとおり #512 が解けるまで
@@ -93,7 +105,8 @@ from scripts import batch_common as bc                       # noqa: E402
 # `FINAPP_DB_TARGET` を書き換える**ので、API プロセスからは import させない——接続先の
 # 食い違いは #508 と同型で静かに壊れる。ここは起票・CLI・ログだけを担う。
 from batch_freshness import (                                # noqa: E402,F401
-    KEY_LAST_RUN, SELF_WINDOW_MIN, WATCHED, Watched, _parse, collect, db_label, status_of,
+    KEY_LAST_RUN, PRODUCERS, SELF_WINDOW_MIN, WATCHED, Produced, Watched, _parse,
+    collect, collect_producers, db_label, producer_status_of, status_of,
 )
 
 EXIT_UNHEALTHY = 2
@@ -189,6 +202,25 @@ def problems(snap: dict) -> list[dict]:
                        f" + 窓 {w.window_min / 60.0:.1f}時間）")
         found.append({"title": w.issue_title, "row": row,
                       "status": status, "message": message})
+    # 成果物の固着（#504）。**「走ったか」とは別の事実**なので、バッチ側が ok でもここは鳴る
+    # ——2026-09-01 の月次はまさにそれで、失敗の起票（#587）が閉じた後も穴が残り続けた。
+    for row in snap.get("producers") or []:
+        prod, status = row["produced"], row["status"]
+        if status == "ok":
+            continue
+        if status == "missing":
+            message = (f"{prod.label}: {prod.source} に行が無い"
+                       f"（一度も永続化されていない）")
+        elif status == "unreadable":
+            message = f"{prod.label}: {prod.source} を読めない（{row['error']}）"
+        else:
+            message = (f"{prod.label}: 最後の更新が {row['age_h'] / 24.0:.1f}日前"
+                       f"（閾値 {prod.stale_h / 24.0:.1f}日 = cadence"
+                       f" {prod.cadence_h / 24.0:.0f}日 + 窓"
+                       f" {prod.window_min / 60.0:.1f}時間）。"
+                       f"{prod.batch_label}が走っていても成果物は前進していない")
+        found.append({"title": prod.issue_title, "row": None, "producer": row,
+                      "status": status, "message": message})
     return found
 
 
@@ -222,6 +254,14 @@ def format_report(snap: dict) -> list[str]:
         lines.append(
             f"{_pad(w.label, 16)}: 実行 {_pad(_fmt_age(row['run_age_h']), 12)}"
             f"成功 {_pad(success, 12)}[閾値 {w.stale_h:.1f}時間]")
+    producers = snap.get("producers") or []
+    if producers:
+        lines.append("-- 成果物の鮮度（走った結果として値が前進したか） --")
+        for row in producers:
+            prod = row["produced"]
+            lines.append(
+                f"{_pad(prod.label, 30)}: 更新 {_pad(_fmt_age(row['age_h']), 12)}"
+                f"[閾値 {prod.stale_h / 24.0:.1f}日]")
     return lines
 
 
@@ -248,6 +288,28 @@ def issue_body(problem: dict, snap: dict) -> str:
             "S4U はセッション0で走るので、PATH も `gh` の `hosts.yml` の解決も対話セッションと"
             "変わりうる。対話セッションで `gh auth status` が通っても、"
             "**セッション0で通るとは限らない**。",
+        ]
+    elif problem.get("producer") is not None:
+        prow = problem["producer"]
+        prod = prow["produced"]
+        body = head + [
+            "| 項目 | 値 |",
+            "|---|---|",
+            f"| 読んだ場所 | `{prod.source}` |",
+            f"| 最終更新 | {prow['last'].isoformat() if prow['last'] else '(無し)'} |",
+            f"| 閾値 | {prod.stale_h / 24.0:.1f}日（cadence"
+            f" {prod.cadence_h / 24.0:.0f}日 + 窓 {prod.window_min / 60.0:.1f}時間） |",
+            f"| 更新する経路 | {prod.batch_label}（`{prod.task_name}`） |",
+            f"| 検出 | {problem['status']} |",
+            "",
+            "### 確認すること",
+            "",
+            "1. **成果物を直接クエリする**（ログの「永続化済み」は書けた証明にならない）",
+            f"2. {prod.batch_label}の直近ログでステップの exit を見る。"
+            "`exit=124` は窓の打ち切り、`exit=1` は品質ゲート・収束ゲートでの隔離"
+            "（`status=quarantined` の run は残るが producer は読まない・#609）",
+            "3. **バッチ自体は走っていることがある**ので、「走っていない」と"
+            "「走ったが値が書けていない」を混同しない（上の実行鮮度の表を参照）",
         ]
     elif row is None:
         body = head + [
@@ -406,10 +468,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         try:
             db = _open_session()
             snap = collect(db, now)
+            snap["producers"] = collect_producers(db, now)
             if not (args.dry_run or args.no_footprint):
                 footprint_error = record_self(db)
         except Exception as e:      # noqa: BLE001 — 接続不能も「判定結果」として扱う
-            snap = {"now": now, "rows": [], "db_error": str(e)[:300],
+            snap = {"now": now, "rows": [], "producers": [],
+                    "db_error": str(e)[:300],
                     "db_label": db_label(), "gh_error": None}
         finally:
             if db is not None:

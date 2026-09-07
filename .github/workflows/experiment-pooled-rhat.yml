@@ -9,7 +9,8 @@ name: "[実験] M-1 マクロβ 複数runプール → r_hat 検証（Issue #341
 # 呼ばない（本番 DB への書き込みゼロ）。production コード（macro_beta_inference.py 等）も無改修で、
 # その公開部品を組み直して生 idata を保持する。
 #
-# 依存は macro-beta-inference.yml と同じ requirements-inference.txt（PyMC/numpyro/arviz）。
+# 依存は `requirements-inference.txt`（PyMC/numpyro/arviz）。かつて macro-beta-inference.yml が
+# 同じものを使っていたが、そちらは #504 で削除した（推論はローカルの `run_monthly_beta.ps1`）。
 # 縮小規模（既定 500 銘柄）を1ジョブ内で K=4 回サンプリング（各 chains=2・別 seed）→ プールし、
 # 2/4/6/8 チェーンの r_hat_max 傾向をログ出力する。判定は experiment_pooled_rhat.py の
 # print_report（strict gate <1.01 に対する PASS/FAIL＋傾向）を参照。

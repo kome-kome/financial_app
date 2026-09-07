@@ -84,6 +84,12 @@ def settings(monkeypatch, tmp_path):
         raise AssertionError(f"テストから実プロセスを起動しようとした: {argv}")
 
     monkeypatch.setattr(cbf.subprocess, "run", _no_subprocess)
+    # producer の読み取りは実 DB クエリなので**ここでも構造的に遮断する**（#504）。
+    # `_FakeDB` は `execute` を持たないので素通しにすると全件 unreadable になるが、それは
+    # 「テストが本物の DB へ届きかけた」印でしかなく、判定の検証にはならない。既定は
+    # 「全部健全」で、固着を試すテストは snap["producers"] を自分で組む。
+    monkeypatch.setattr(cbf, "collect_producers",
+                        lambda db, now: _producers(FRESH_PRODUCERS, now))
     return store
 
 
@@ -523,3 +529,170 @@ class TestWatchdogInstaller:
     def test_launcher_pins_the_local_target(self):
         """正本はローカル。別の DB を読むと足跡が古く見えて毎日誤警報になる。"""
         assert 'FINAPP_DB_TARGET = "local"' in self.LAUNCHER.read_text(encoding="utf-8-sig")
+
+
+# ── producer の鮮度（#504）──────────────────────────────────────────────────
+# 「走ったか」と「走った結果として値が前進したか」は別の事実。2026-09-01 の月次は前者が
+# 健全・後者が固着という状態を作り、`plugin_tuned_params` が 50〜59日 古いまま
+# 誰にも気づかれなかった。失敗（#587）は起票・クローズされたのに穴だけが残った。
+
+M2_LABEL = "マクロ勾配ブースティング探索の結果"
+FRESH_PRODUCERS = {p.label: 1.0 for p in bf.PRODUCERS}
+
+
+def _producers(ages_days: dict, now=NOW):
+    """成果物の最終更新を差し替えて測る。値は「何日前か」・`None` は行が無い。"""
+    def read(db, produced):
+        days = ages_days[produced.label]
+        return None if days is None else now - timedelta(days=days)
+    return bf.collect_producers(_FakeDB(), now, read=read)
+
+
+def _by_label(label):
+    return next(p for p in bf.PRODUCERS if p.label == label)
+
+
+class TestProducerThresholdIsDerived:
+    """`Watched` と同じく閾値は `cadence + 窓` の導出。実測から逆算しない。"""
+
+    def test_threshold_is_cadence_plus_window(self):
+        for p in bf.PRODUCERS:
+            assert p.stale_h == p.cadence_h + p.window_min / 60.0
+
+    def test_windows_come_from_the_batch_modules(self):
+        """書き写すと、窓を広げたときに閾値だけが古いまま残る。"""
+        assert _by_label(M2_LABEL).window_min == run_monthly.WINDOW_MIN
+        assert _by_label("マクロ・ベータの推論結果").window_min == run_monthly_beta.WINDOW_MIN
+        assert _by_label("マクロ×リスク-リターン探索の結果").window_min == run_monthly_m1.WINDOW_MIN
+
+    def test_widening_the_window_widens_the_threshold(self):
+        p = _by_label(M2_LABEL)
+        widened = bf.Produced(**{**p.__dict__, "window_min": p.window_min + 60})
+        assert widened.stale_h == p.stale_h + 1.0
+
+
+class TestRunningIsNotTheSameAsProducing:
+    """足跡が健全でも成果物は固着しうる（#504 で実際に起きた形）。"""
+
+    def test_a_fresh_producer_is_silent(self, settings):
+        snap = _snap(settings)
+        snap["producers"] = _producers(FRESH_PRODUCERS)
+        assert cbf.problems(snap) == []
+
+    def test_a_stale_producer_fires_even_when_the_batch_ran(self, settings):
+        snap = _snap(settings)
+        snap["producers"] = _producers({**FRESH_PRODUCERS, M2_LABEL: 50.0})
+        found = cbf.problems(snap)
+        assert [f["title"] for f in found] == [_by_label(M2_LABEL).issue_title]
+        assert "前進していない" in found[0]["message"]
+
+    def test_a_producer_just_inside_the_threshold_is_silent(self):
+        """cadence + 窓 の内側では鳴らない（実行中に鳴らないのと同じ理屈）。"""
+        p = _by_label(M2_LABEL)
+        rows = _producers({**FRESH_PRODUCERS, M2_LABEL: p.stale_h / 24.0 - 0.01})
+        assert all(r["status"] == "ok" for r in rows)
+
+    def test_an_empty_table_is_missing_not_stale(self, settings):
+        """「一度も永続化されていない」と「止まった」を同じ顔にしない。"""
+        snap = _snap(settings)
+        snap["producers"] = _producers({**FRESH_PRODUCERS, M2_LABEL: None})
+        assert [f["status"] for f in cbf.problems(snap)] == ["missing"]
+
+    def test_an_unreadable_producer_is_a_problem_not_a_traceback(self, settings):
+        def boom(db, produced):
+            raise RuntimeError("列が無い")
+
+        snap = _snap(settings)
+        snap["producers"] = bf.collect_producers(_FakeDB(), NOW, read=boom)
+        found = cbf.problems(snap)
+        assert found and all(f["status"] == "unreadable" for f in found)
+
+    def test_a_naive_timestamp_is_read_as_utc(self):
+        """接続は `SESSION_FIXES` で UTC 固定（ADR-0043）。JST とみなすと9時間若く見える。"""
+        naive = NOW.replace(tzinfo=None) - timedelta(days=50)
+        rows = bf.collect_producers(_FakeDB(), NOW, read=lambda db, p: naive)
+        assert all(abs(r["age_h"] - 50 * 24) < 1e-6 for r in rows)
+
+    def test_the_morning_payload_is_untouched(self, settings):
+        """producer は watchdog だけに出す。`/api/morning` の行が増えると画面契約が変わる。"""
+        summary = bf.summarize(_snap(settings))
+        assert len(summary["rows"]) == len(bf.WATCHED)
+
+
+class TestMacroBetaCountsOnlyLiveRuns:
+    """隔離（quarantined）は producer が読まない＝残っていても鮮度としては固着（#609）。"""
+
+    class _CaptureDB:
+        def __init__(self):
+            self.sql = []
+
+        def execute(self, stmt):
+            self.sql.append(str(stmt.compile(compile_kwargs={"literal_binds": True})))
+            return self
+
+        def scalar(self):
+            return None
+
+    def test_the_query_filters_on_live_status(self):
+        import database
+
+        db = self._CaptureDB()
+        bf._macro_beta_live_at(db)
+        sql = " ".join(db.sql)
+        assert "status" in sql, "status で絞っていない＝隔離された run も新しさとして数える"
+        assert database.MACRO_BETA_STATUS_LIVE in sql
+        assert database.MACRO_BETA_STATUS_QUARANTINED not in sql
+
+
+class TestEveryHeavyProducerIsCovered:
+    """増やしたら登録表へ1行。忘れても失敗として現れないので CI が実体と照合する。"""
+
+    def test_every_heavy_plugin_is_in_the_coverage_table(self):
+        from nightly_scores import HEAVY_AUTOMATION
+
+        missing = set(HEAVY_AUTOMATION) - set(bf.PRODUCER_COVERAGE)
+        assert not missing, (
+            f"heavy なのに producer 鮮度の扱いが未登録: {sorted(missing)}。"
+            "batch_freshness.PRODUCER_COVERAGE へ 'watched' か 'exempt: <理由>' を足すこと")
+
+    def test_the_table_has_no_stale_entries(self):
+        from nightly_scores import HEAVY_AUTOMATION
+
+        stale = set(bf.PRODUCER_COVERAGE) - set(HEAVY_AUTOMATION)
+        assert not stale, f"heavy でないのに登録されている: {sorted(stale)}"
+
+    def test_watched_entries_have_a_real_producer(self):
+        """`watched` と書いたら実体があること（飾りの登録を作らない）。"""
+        sources = " ".join(p.source for p in bf.PRODUCERS)
+        for name, how in bf.PRODUCER_COVERAGE.items():
+            if how != "watched":
+                continue
+            assert name in sources, f"{name} は watched だが PRODUCERS が読んでいない"
+
+    def test_exempt_entries_carry_a_reason(self):
+        for name, how in bf.PRODUCER_COVERAGE.items():
+            if how == "watched":
+                continue
+            assert how.startswith(bf.PRODUCER_EXEMPT_PREFIX), f"{name}: {how!r}"
+            assert how[len(bf.PRODUCER_EXEMPT_PREFIX):].strip(), f"{name}: 理由が空"
+
+
+class TestProducerIssuesAreNotDuplicated:
+    @pytest.mark.parametrize("produced", bf.PRODUCERS, ids=lambda p: p.source)
+    def test_title_has_no_date_or_count(self, produced):
+        assert not re.search(r"\d", produced.issue_title), produced.issue_title
+        assert "{" not in produced.issue_title
+
+    def test_titles_differ_from_the_batch_titles(self):
+        """「走っていない」と「値が前進していない」で別の Issue が開くこと。"""
+        titles = ([w.issue_title for w in cbf.WATCHED]
+                  + [p.issue_title for p in bf.PRODUCERS] + [cbf.DB_ERROR_TITLE])
+        assert len(set(titles)) == len(titles)
+
+    def test_the_body_points_at_the_batch_that_updates_it(self, settings):
+        snap = _snap(settings)
+        snap["producers"] = _producers({**FRESH_PRODUCERS, M2_LABEL: 50.0})
+        body = cbf.issue_body(cbf.problems(snap)[0], snap)
+        assert "financial_app-monthly" in body
+        assert "plugin_tuned_params" in body
+        assert "直接クエリ" in body, "ログの表示で判定させない誘導が本文に無い"
