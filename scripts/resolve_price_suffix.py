@@ -46,7 +46,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import io
 import json
 import sys
 from datetime import date, datetime, timedelta, timezone
@@ -62,7 +61,8 @@ import database as D
 from collector_prices import fetch_yahoo_chart
 from collector_utils import (
     YAHOO_LOCAL_EXCHANGES, YAHOO_EXPECT_CURRENCY, YAHOO_STOCK_RATE_SLEEP,
-    PRICE_COMMIT_BATCH, YAHOO_BACKFILL_PROGRESS_BATCH, yahoo_ticker,
+    PRICE_COMMIT_BATCH, YAHOO_BACKFILL_PROGRESS_BATCH,
+    force_utf8_stdout, yahoo_ticker,
 )
 
 # プローブする順序。`.S` が採用できたら `.F` は叩かない（早期打ち切り）。
@@ -273,21 +273,8 @@ def _print_report(res: dict, targets: list, applied: bool) -> None:
         print("\nドライラン（何も変更していない）。実行するには --apply を付けてください。")
 
 
-def _force_utf8_stdout() -> None:
-    """cp932 の Windows コンソールへリダイレクトすると非 ASCII は UnicodeEncodeError で
-    **出力済みの内容ごとクラッシュ**する（既知の罠）。社名を出すので UTF-8 へ倒す。
-
-    **import 時ではなく `main()` からだけ呼ぶ。** モジュールレベルで `sys.stdout` を
-    差し替えると pytest のキャプチャが `I/O operation on closed file` で壊れる
-    （テストがこのモジュールを import して純関数を直接叩くため）。
-    """
-    if hasattr(sys.stdout, "buffer"):
-        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8",
-                                      errors="replace")
-
-
 def main() -> int:
-    _force_utf8_stdout()
+    force_utf8_stdout()
     ap = argparse.ArgumentParser(
         description="株価ゼロの社を .S/.F でプローブし、解決したサフィックスを永続化する（#555）")
     ap.add_argument("--apply", action="store_true",

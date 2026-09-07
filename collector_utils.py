@@ -176,12 +176,15 @@ def rounding_tolerance(a: float, b: float) -> float:
 
 
 def force_utf8_stdout() -> None:
-    """cp932 コンソールへリダイレクトすると非 ASCII は出力済みの内容ごとクラッシュする。
+    """cp932 の Windows コンソールへリダイレクトすると非 ASCII は UnicodeEncodeError で
+    **出力済みの内容ごとクラッシュ**する。日本語を出す CLI はここを通して UTF-8 へ倒す。
 
-    CLI の `main()` からだけ呼ぶ（import 時に差し替えると pytest のキャプチャが壊れる）。
-    `scripts/` の既存3本（`repair_splits_from_jquants` / `resolve_price_suffix` /
-    `fix_naive_jst_timestamps`）は同じ関数を各自で持っている。**写しをこれ以上増やさない**
-    ための置き場で、既存の統合は別途（#623）。
+    **import 時ではなく `main()` からだけ呼ぶ。** モジュールレベルで `sys.stdout` を
+    差し替えると pytest のキャプチャが `I/O operation on closed file` で壊れる
+    （テストが CLI モジュールを import して純関数を直接叩くため）。
+
+    写しを作らない（#623）。同じ4行が割れても**失敗としては現れず**、リダイレクト先が
+    cp932 のときにだけ出力ごと落ちる形で出る。
     """
     if hasattr(sys.stdout, "buffer"):
         sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")

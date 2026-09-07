@@ -41,7 +41,6 @@ UTC 値しか持たないので、この空白が空である限り対象から�
 from __future__ import annotations
 
 import argparse
-import io
 import json
 import sys
 from datetime import datetime, timedelta, timezone
@@ -53,6 +52,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from sqlalchemy import DateTime, text
 
 import database as D
+from collector_utils import force_utf8_stdout
 
 # 正本反転（#503）の直後・ローカル初回書き込み（2026-08-20 19:43:32）の直前。
 # 左側の最も近い行は 2026-08-18 21:10:23 なので 24時間の guard band は空になる。
@@ -206,17 +206,8 @@ def print_report(probes: list[dict], orphans: list[tuple[str, str]],
 
 # ── CLI ─────────────────────────────────────────────────────────────────────
 
-def _force_utf8_stdout() -> None:
-    """cp932 コンソールへリダイレクトすると非 ASCII は UnicodeEncodeError で
-    **出力済みの内容ごとクラッシュ**する。`main()` からだけ呼ぶ（import 時に
-    差し替えると pytest のキャプチャが壊れる）。"""
-    if hasattr(sys.stdout, "buffer"):
-        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8",
-                                      errors="replace")
-
-
 def main() -> int:
-    _force_utf8_stdout()
+    force_utf8_stdout()
     ap = argparse.ArgumentParser(
         description="naive DateTime 列の JST 値を UTC へ引き直す（#565）")
     ap.add_argument("--apply", action="store_true",
