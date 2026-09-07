@@ -553,8 +553,10 @@ async def collect_stock_price_history_jquants(
     #   403 とは別集合＝**平常運転**（無料プランのエンバーゴ・遡及上限）であり異常ではない。
     # scale_mismatch: AdjC が未調整 C と食い違うため**書かずに捨てた**行数（#620）。
     #   0 以外は異常ではなく「Yahoo と JPX で調整の中身が違う社が居る」という平常の観測。
+    # scale_unknown: `C` が無く突き合わせられなかった行数。実 API は必ず返すので、
+    #   ここが伸びるのは API 仕様の変化＝**別の打ち手が要る**ため mismatch と分けて数える。
     fetch_stats = {"forbidden": 0, "no_subscription": 0, "aborted_days": 0,
-                   "out_of_coverage": 0, "scale_mismatch": 0}
+                   "out_of_coverage": 0, "scale_mismatch": 0, "scale_unknown": 0}
     # 捨てた社（行ではなく社で数えたいのでここに溜める）。件数はログと戻り値に必ず出す——
     # 弾いた社は「公式値による是正の機会を失う」側に倒れるので、黙って捨てると
     # 「なぜこの社だけ古い誤りが残るのか」を後から追えない。
@@ -681,6 +683,12 @@ async def collect_stock_price_history_jquants(
                 # ＝この壊れ方はエラーとして現れない。
                 # 判定は返ってきた行の中だけで完結させる（DB の既存値は前夜までの上書きで
                 # 既に汚れている可能性があり、基準にすると自己参照になる）。
+                if q.get("C") is None:
+                    # 比較する相手が無い＝判定できない。**「食い違い」とは別に数える**——
+                    # 同じ箱に入れると、API が `C` を返さなくなった日に「調整差のある社が
+                    # 全社へ広がった」と読めてしまい、打ち手を取り違える。
+                    fetch_stats["scale_unknown"] += 1
+                    continue
                 if not same_price_scale(q.get("C"), close_val):
                     fetch_stats["scale_mismatch"] += 1
                     scale_mismatch_ecs.add(edinet_code)
@@ -745,6 +753,13 @@ async def collect_stock_price_history_jquants(
             f"（{len(scale_mismatch_ecs)}社）を書かずにスキップ（例: {_sample}）。"
             "Yahoo と調整の中身が違う社＝同じ列へ別スケールを書かないための選別（#620）"
         )
+    if fetch_stats["scale_unknown"]:
+        # 実 API は `C` を必ず返す。ここが伸びるのは応答仕様が変わった合図で、
+        # 放っておくと catchup が**静かに何も書かなくなる**（#620）。
+        log.warning(
+            f"J-Quants: 未調整 C を持たない {fetch_stats['scale_unknown']}行を"
+            "スケール判定できず不採用。応答仕様を確認すること（#620）"
+        )
     if fetch_stats["forbidden"]:
         log.warning(
             f"J-Quants 403: {fetch_stats['forbidden']}/{total}日をスキップ"
@@ -786,6 +801,7 @@ async def collect_stock_price_history_jquants(
                 "aborted_days": fetch_stats["aborted_days"],
                 "out_of_coverage": fetch_stats["out_of_coverage"],
                 "scale_mismatch": fetch_stats["scale_mismatch"],
+                "scale_unknown": fetch_stats["scale_unknown"],
                 "scale_mismatch_companies": sorted(scale_mismatch_ecs)}
     if on_progress:
         on_progress(total, total, f"[完了] {total}日処理・{upserted_total}件追加/更新")
@@ -795,6 +811,7 @@ async def collect_stock_price_history_jquants(
             "aborted_days": fetch_stats["aborted_days"],
             "out_of_coverage": fetch_stats["out_of_coverage"],
             "scale_mismatch": fetch_stats["scale_mismatch"],
+            "scale_unknown": fetch_stats["scale_unknown"],
             "scale_mismatch_companies": sorted(scale_mismatch_ecs)}
 
 
