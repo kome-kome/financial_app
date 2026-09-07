@@ -579,6 +579,27 @@ sequenceDiagram
 
 制約値・優先度ルールは [DEPLOYMENT.md「外部サービス制約」](DEPLOYMENT.md) 参照。
 
+### `close` 列のスケールを1つに保つ選別（#620・ADR-0053）
+
+`stock_price_daily.close` は**2人が書く列**である。毎晩の差分収集（`_pipeline_incremental.py` Phase 4）で
+Yahoo gap-fill が直近セッションを、J-Quants catchup が `today-90 〜 today-80` を書く。どちらも
+「調整済み終値」だが調整に含まれるイベントが違うため（Yahoo は無償割当を splits として持たない・#466）、
+そのままでは調整差のある社で**帯の両端に企業イベントではない段差**ができる。
+
+そこで `_jquants_batch_gen`（collector_prices.py）は、返ってきた行の未調整 `C` と調整後 `AdjC` を
+`collector_utils.rounding_tolerance` の許容で突き合わせ、**食い違う行を書かない**。
+
+| 経路 | 何を数えるか | どこに出るか |
+|---|---|---|
+| `AdjC != C` | `scale_mismatch`（行）＋ `scale_mismatch_companies`（社） | catchup ログ・戻り値 |
+| `C` が無い | `scale_unknown`（行） | WARNING（API 仕様変化の合図） |
+| 往復段差 | 上の社と交差した結果 | Phase 4 末尾の1行 |
+
+往復段差の検知（`detect_roundtrip_scale_bands`）は段差の抽出を **SQL の `LAG` で DB 側に寄せる**
+（全社の日次を素で引くと約68万行を毎晩転送することになる）。**形だけでは本物を選べない**ので、
+毎晩の判定は「その晩 `AdjC != C` を報告した社」との交差で行う（`only_ecs`）。既に入っている帯は
+`scripts/repair_scale_mixture.py` が公式突合で確定させてから Yahoo で取り直す。
+
 ---
 
 ## 4-3. 認証フロー

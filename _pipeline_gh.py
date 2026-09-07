@@ -359,6 +359,11 @@ async def main(years_back: int, collect_only: bool = False,
                 if result.get("out_of_coverage"):
                     # 400＝契約窓の外側。平常運転（無料プランのエンバーゴ・遡及上限）・#462
                     log(f"  J-Quants 契約窓外でスキップ: {result['out_of_coverage']}日")
+                if result.get("scale_mismatch"):
+                    # AdjC が未調整 C と食い違うため**書かなかった**行（#620）。
+                    # 同じ列へ Yahoo と別スケールを混ぜないための選別で、異常ではない。
+                    log(f"  J-Quants スケール不一致で不採用: {result['scale_mismatch']}行"
+                        f"（{len(result.get('scale_mismatch_companies') or [])}社）")
                 if result.get("forbidden"):
                     # 403＝契約失効／プラン対象外／URL 不在。**境界ではない**（境界は 400）・#462
                     log(f"  J-Quants 403 でスキップ: {result['forbidden']}日"

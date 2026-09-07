@@ -59,9 +59,11 @@ class TestJquantsDedupPrefersCommonStock:
         captured: list = []
 
         async def fetch(session, api_key, date_str):
+            # 未調整 C も調整後と同値で持たせる（実 API は必ず返す）。無いと #620 の
+            # 選別が「スケールを突き合わせられない行」として不採用にする。
             return [{"Code": c, "Date": date_str,
                      "AdjO": None, "AdjH": None, "AdjL": None,
-                     "AdjC": self._PX[c], "AdjVo": None} for c in order]
+                     "C": self._PX[c], "AdjC": self._PX[c], "AdjVo": None} for c in order]
 
         def capture(db_, rows, **kw):
             captured.extend(rows)

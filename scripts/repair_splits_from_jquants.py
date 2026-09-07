@@ -95,13 +95,14 @@ import database as D
 from collector_prices import (
     _jquants_fetch_code, _learn_jquants_coverage, detect_price_scale_breaks,
 )
-from collector_utils import JQUANTS_RATE_SLEEP
+from collector_utils import (
+    JQUANTS_RATE_SLEEP,
+    # 丸め許容は収集側（J-Quants catchup の選別・#620）と共有する。ここで書き写すと、
+    # 片方が「同じ値」と見た行をもう片方が「段差」と読む（#466 の実測: 株価 21円の
+    # E01300 は観測幅 3.5e-3 で、`ROUND_UNIT / 株価` だと 4.8e-2）。
+    REL_TOL_FLOOR, ROUND_UNIT, rounding_tolerance,
+)
 
-# 丸め由来の許容相対誤差の下限。株価が高いほどこちらが効く。
-REL_TOL_FLOOR = 2.0e-3
-# 丸め幅（円）。低位株では `ROUND_UNIT / 株価` がそのまま許容誤差になる。
-# #466 の実測では E01300（株価 21円）の観測幅が 3.5e-3 に対し、この式だと 4.8e-2。
-ROUND_UNIT = 1.0
 # `AdjFactor` がイベントとみなされる下限（浮動小数の 1.0 ゆらぎを拾わない）。
 EVENT_EPS = 1.0e-6
 
@@ -109,14 +110,6 @@ STAMP_KEY = "splits_repaired_from_jquants"
 
 
 # ── 純関数（ネットワークにも DB にも触らない・ここがテスト対象）─────────────────
-
-def rounding_tolerance(a: float, b: float) -> float:
-    """2つの終値を比べるときの許容相対誤差。低位株ほど大きく取る。"""
-    base = min(abs(a), abs(b))
-    if base <= 0:
-        return REL_TOL_FLOOR
-    return max(REL_TOL_FLOOR, ROUND_UNIT / base)
-
 
 def extract_events(rows: list) -> list:
     """J-Quants の日次バーから公式の企業イベント [(date, factor)] を取り出す。"""

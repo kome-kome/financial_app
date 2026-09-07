@@ -363,8 +363,16 @@ class TestCollectJQuantsHistory:
         assert result["upserted"] == 1
         mock_batch.assert_called_once()
 
-    def test_uses_adjusted_close_not_unadjusted(self, db, make_company):
-        """株式分割で AdjC と C が乖離するケース: 保存される close は調整後 AdjC を使う（Issue #314）。"""
+    def test_skips_rows_whose_adjustment_differs(self, db, make_company):
+        """AdjC と C が乖離する行は**書かない**（#620。旧 test_uses_adjusted_close_not_unadjusted）。
+
+        #314 は「未調整 C を使うと分割日で系列が段差になる」として調整後 AdjC を採った。
+        列マッピングはそのままだが、**同じ `close` 列を毎晩 Yahoo も埋める**ことが #620 で
+        分かった。Yahoo は無償割当を splits として持たないので、調整差のある社では2つの
+        スケールが日付で交互に入り、帯の両端に企業イベントではない段差ができる。
+        したがって「調整の中身が食い違う行」は採らず、Yahoo スケールで一貫させる。
+        書かれた行では AdjC == C なので、#314 の懸念（分割日の段差）はそのまま消える。
+        """
         self._add_company(db, make_company)
         jquants_row = {
             "Code": "10010", "Date": "2024-01-08",
@@ -379,15 +387,15 @@ class TestCollectJQuantsHistory:
                 with patch("collector_prices.trim_daily", return_value=0):
                     with patch.dict(os.environ, {"JQUANTS_API_KEY": "test-key"}):
                         with patch("collector_prices.JQUANTS_RATE_SLEEP", 0):
-                            asyncio.run(
+                            result = asyncio.run(
                                 collect_stock_price_history_jquants(
                                     db, date_from=self._MON, date_to=self._MON,
                                 )
                             )
 
-        saved_batch = mock_batch.call_args[0][1]
-        assert saved_batch[0]["close"] == 1005.0
-        assert saved_batch[0]["volume"] == 10000.0
+        mock_batch.assert_not_called()
+        assert result["scale_mismatch"] == 1
+        assert result["scale_mismatch_companies"] == ["E00001"]
 
     def test_cancel_check_stops_jquants(self, db, make_company):
         """cancel_check が True を返すと処理が中断され cancelled: True が返る。"""
@@ -487,6 +495,9 @@ class TestCollectJQuantsHistory:
     # **カバレッジ境界はここに来ない**（境界は 400・下の TestJquantsCoverageWindow）。
     _JQ_ROW = {
         "Code": "10010", "Date": "2024-01-09",
+        # 未調整の C も持たせる（実 API は必ず返す）。持たせないと #620 の選別で
+        # 「スケールを突き合わせられない行」として不採用になる。
+        "O": 1000.0, "H": 1010.0, "L": 990.0, "C": 1005.0, "Vo": 10000.0,
         "AdjO": 1000.0, "AdjH": 1010.0, "AdjL": 990.0, "AdjC": 1005.0, "AdjVo": 10000.0,
     }
 
@@ -655,6 +666,9 @@ class TestJquantsCoverageWindow:
 
     _JQ_ROW = {
         "Code": "10010", "Date": "2024-01-09",
+        # 未調整の C も持たせる（実 API は必ず返す）。持たせないと #620 の選別で
+        # 「スケールを突き合わせられない行」として不採用になる。
+        "O": 1000.0, "H": 1010.0, "L": 990.0, "C": 1005.0, "Vo": 10000.0,
         "AdjO": 1000.0, "AdjH": 1010.0, "AdjL": 990.0, "AdjC": 1005.0, "AdjVo": 10000.0,
     }
 

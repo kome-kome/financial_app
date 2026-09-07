@@ -3,9 +3,11 @@
 収集系モジュール（collector_prices / collector_financials / collector_master）が
 共有する設定値とロガーを集約する。ドメイン固有の定数は各モジュール側に置く。
 """
+import io
 import os
 import logging
 import re
+import sys
 from datetime import time as dtime, timedelta, timezone
 from typing import Optional
 
@@ -154,6 +156,46 @@ def yahoo_guard_kwargs(suffix: Optional[str]) -> dict:
         return {}
     return {"expect_exchanges": ex, "expect_currency": YAHOO_EXPECT_CURRENCY}
 
+# --- 価格スケールの突合（#466 / #620）------------------------------------------
+# 2つの終値が「同じ値か」を判定するときの許容相対誤差。DB も外部 API も終値を丸めて
+# 持つので、比が厳密に 1.0 になることはない。低位株ほど丸め幅の相対値が大きくなるため
+# 株価に応じて広げる（#466 の実測: 株価 21円の E01300 は観測幅 3.5e-3）。
+# **この判定は `collector_prices` の J-Quants catchup（#620）と
+# `scripts/repair_splits_from_jquants`（#466）が共有する**——別々に持つと、
+# 片方が「同じ」と見た行をもう片方が「段差」と読む。
+REL_TOL_FLOOR = 2.0e-3   # 許容相対誤差の下限。株価が高いほどこちらが効く
+ROUND_UNIT    = 1.0      # 丸め幅（円）。低位株では ROUND_UNIT / 株価 がそのまま許容誤差になる
+
+
+def rounding_tolerance(a: float, b: float) -> float:
+    """2つの終値を比べるときの許容相対誤差。低位株ほど大きく取る。"""
+    base = min(abs(a), abs(b))
+    if base <= 0:
+        return REL_TOL_FLOOR
+    return max(REL_TOL_FLOOR, ROUND_UNIT / base)
+
+
+def force_utf8_stdout() -> None:
+    """cp932 コンソールへリダイレクトすると非 ASCII は出力済みの内容ごとクラッシュする。
+
+    CLI の `main()` からだけ呼ぶ（import 時に差し替えると pytest のキャプチャが壊れる）。
+    `scripts/` の既存3本（`repair_splits_from_jquants` / `resolve_price_suffix` /
+    `fix_naive_jst_timestamps`）は同じ関数を各自で持っている。**写しをこれ以上増やさない**
+    ための置き場で、既存の統合は別途（#623）。
+    """
+    if hasattr(sys.stdout, "buffer"):
+        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+
+
+def same_price_scale(a: float, b: float) -> bool:
+    """2つの終値が同じスケールか（丸め差だけか）を返す。片方でも非正なら判定しない＝False。"""
+    if a is None or b is None:
+        return False
+    a, b = float(a), float(b)
+    if a <= 0 or b <= 0:
+        return False
+    return abs(a - b) <= rounding_tolerance(a, b) * max(a, b)
+
 # --- 日本時間の基準（#474 / #476）----------------------------------------------
 # GitHub Actions のランナーは UTC。日本市場・EDINET の「日付」は JST なので、
 # 収集の日付境界は必ずこの tz で判定する（`date.today()` を直接使わない）。
@@ -233,6 +275,26 @@ PRICE_BREAK_PROBE_MONTHS = 24    # 契約窓内で突合する月数（月あた
 # 超えるのは「段差が広がった」ではなく突合側の前提（コード対応・窓・API仕様）が壊れた
 # 疑いが濃い。その状態で全銘柄を上書きするほうが危ない。
 PRICE_BREAK_MAX_REPAIR   = 300
+
+# --- 往復段差（1つの列に2つのスケールが混ざった帯）の検知（#620）---
+# 「隣り合う営業日で大きく飛び、少し後に同じ比で戻る」形は企業イベントでは説明できない
+# ——分割も無償割当も戻らないため。これは書き手が2人いる列にだけ現れる（#620 の実測は
+# J-Quants catchup が上書きした 11営業日の帯）。**この検知は候補を出す道具**であって、
+# 実際の値動きで往復した社（#620 の E02293）も拾う。確定は公式値との突合が要る。
+# 段差とみなす1日リターンの下限（|比 - 1|）。**実測から決めている**——#620 の E32779 は
+# 帯の左端が 2861.0 → 2306.7 で 19.4%（公式の調整比 5/6 ＝ 16.7% に、その日の実際の
+# 値動きが乗った値）。20% に置くとこの実例を取りこぼす。下げるほど日常の値動きを拾うが、
+# 「逆向き」「近い」「積が 1.0 近傍」の3条件が落とすので、ここは低めに置いて構わない。
+ROUNDTRIP_THRESHOLD      = 0.12
+# 帯の長さの下限（暦日）。**1日下げて翌日戻す形はただの値動き**で、実測ではそれが
+# 雑音の大半だった。catchup が作る帯は窓ぶん（実測 11営業日＝暦 14日）の長さを必ず持つ。
+ROUNDTRIP_MIN_GAP_DAYS   = 4
+# 帯の長さの上限（暦日）。catchup の窓は 10日ぶんだが、境界の非営業日と
+# 契約窓のクリップで実際の帯はこれより伸びる。3週間を超える往復は実際の値動きの疑いが濃い。
+ROUNDTRIP_MAX_GAP_DAYS   = 21
+# 往復して「元へ戻った」とみなす正味変化の許容幅。帯の前後には**実際の値動き**が
+# 挟まるため、2つの段差の積は 1.0 ちょうどにならない（#620 の E32779 は 0.967）。
+ROUNDTRIP_NET_TOL        = 0.15
 
 # Supabase Free プランの DB 容量制約(500MB)で xbrl_raw_documents (TOAST 880MB)
 # を持てないため、デフォルトで保存をスキップ。再解析が必要な場合のみ
