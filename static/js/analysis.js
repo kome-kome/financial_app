@@ -569,11 +569,11 @@ function renderSellRanking(d) {
   if (d.gap_available === false)
     notes.push(`<span style="color:var(--text-muted)">※ 割高度は業種別OLS未実行のため売り判定から除外されています</span>`);
   if (d.mu_available === false) {
+    // mu_source の選択肢と対になる辞書。M-2（ADR-0052）と M-4（ADR-0044）は
+    // 選択肢から外れているので載せない（載せると「選べないのに案内が出る」）。
     const _MU_LABELS = {
       macro_risk_return: ['M-1（マクロリスク-リターン）', 'M-1 を実行してください'],
-      macro_gbdt:        ['M-2（勾配ブースティング）', 'M-2 を分析タブでローカル実行してください'],
       macro_dlm:         ['M-3（時変マクロβ DLM）', 'M-3 を分析タブでローカル実行してください'],
-      macro_ensemble:    ['M-4（兄弟μ̂スタッキング）', 'M-4 を分析タブでローカル実行してください'],
       macro_enet:        ['M-6（正則化線形 ElasticNet）', 'M-6 を分析タブでローカル実行してください'],
     };
     const [_lbl, _act] = _MU_LABELS[d.mu_source] || _MU_LABELS.macro_enet;   // 既定 M-6（#402）

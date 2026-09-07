@@ -442,7 +442,7 @@ class TestDependencyGate:
         assert res["count"] == 1
 
 
-# ── μ 出所トグル（M-1/M-2・ADR-0004）─────────────────────────────────────────
+# ── μ 出所トグル（M-1/M-3/M-6・ADR-0004／M-2 は ADR-0052 で降格）──────────────
 
 class TestMuSource:
     def _seed_universe(self, db, make_metric):
@@ -459,66 +459,30 @@ class TestMuSource:
             "2026-06-26",
         )
 
-    def test_macro_gbdt_mu_used_when_available(self, db, make_metric):
+    def test_macro_gbdt_is_rejected_as_mu_source(self, db, make_metric):
+        """M-2 は供給者から降ろした（#572・ADR-0052）＝options に無い値は reject する。
+
+        **黙って既定へ倒さない**——倒すと「M-2 を選んだのに M-6 の μ̂ が効いていた」が
+        画面から分からなくなる（ADR-0030 と同じ作法）。M-2 自体は退役ではないので
+        分析タブ・SHAP・COMPARISON_MODELS は生きている（tests/test_analysis_meta.py が縛る）。
+        """
         self._seed_universe(db, make_metric)
-        # 低μ=保有理由小=売る理由大 → 売りスコア高
+        # 永続化は続いている（M-4 の基底として読まれるため・ADR-0052）＝
+        # 「スコアはあるのに供給者としては選べない」ことを確かめている。
         self._seed_m2(db, {"E0001": -0.10, "E0002": -0.05, "E0003": 0.0,
                            "E0004": 0.05, "E0005": 0.10})
-        res = _run({"holdings": "1001\n1005", "weights": {"mu": 1.0},
-                    "min_coverage": 0.0, "mu_source": "macro_gbdt",
-                    "timing_adjust": False}, db)
-        assert res["mu_available"] is True
-        assert res["mu_source"] == "macro_gbdt"
-        by = {r["sec_code"]: r for r in res["results"]}
-        assert by["1001"]["score"] > by["1005"]["score"]   # 低μ → 売り上位
-        assert by["1001"]["score"] > 0
-        assert by["1005"]["score"] < 0
-
-    def test_macro_gbdt_graceful_when_not_run(self, db, make_metric):
-        self._seed_universe(db, make_metric)
-        # macro_gbdt_scores 空 → graceful（mu 除外・roe で判定継続）
-        res = _run({"holdings": "1001", "weights": {"mu": 1.0, "roe": 0.5},
-                    "min_coverage": 0.0, "mu_source": "macro_gbdt"}, db)
-        assert res["mu_available"] is False
-        assert res["mu_source"] == "macro_gbdt"
-        assert res["count"] == 1
+        with pytest.raises(ValueError):
+            _run({"holdings": "1001", "weights": {"mu": 1.0},
+                  "min_coverage": 0.0, "mu_source": "macro_gbdt"}, db)
 
     def test_default_mu_source_is_m6(self, db, make_metric):
         """既定 μ 出所は M-6（#402・ADR-0022）。売り側 OOF 指標で M-2 を有意に上回るため
-        切替済み（M-2 は選択肢として残る）。"""
+        切替済み。M-2 は #572（ADR-0052）で選択肢からも外れた。"""
         self._seed_universe(db, make_metric)
         # mu_source 未指定 → coerce が default=macro_enet（M-6）補完
         res = _run({"holdings": "1001", "weights": {"roe": 1.0},
                     "min_coverage": 0.0}, db)
         assert res["mu_source"] == "macro_enet"
-
-    def test_r3_gate_active_under_macro_gbdt(self, db, make_metric):
-        """R3 足切りゲート再有効化（Issue #365）: M-2 は r1_prime=コンフォーマル区間半幅を
-        持つため、r1_prime > r3_gate の SELL 銘柄は REDUCE へ格下げされる。"""
-        self._seed_universe(db, make_metric)
-        # E0001 は売りスコア最高（低μ）だが r1_prime=0.30 > gate=0.1 → 確実性低で格下げ。
-        self._seed_m2(db, {"E0001": -0.20, "E0002": -0.05, "E0003": 0.0,
-                           "E0004": 0.05, "E0005": 0.10},
-                      r1_primes={"E0001": 0.30})
-        res = _run({"holdings": "1001", "weights": {"mu": 1.0}, "min_coverage": 0.0,
-                    "sell_threshold": 0.8, "reduce_threshold": 0.3,
-                    "r3_gate": 0.1, "mu_source": "macro_gbdt", "timing_adjust": False}, db)
-        row = res["results"][0]
-        assert row["sec_code"] == "1001"
-        assert row["action"] == "REDUCE"   # 区間半幅超過 → SELL を抑制
-
-    def test_r3_gate_passes_low_uncertainty_under_macro_gbdt(self, db, make_metric):
-        """r1_prime <= r3_gate（確実性高）の SELL 銘柄はゲートを素通りし SELL のまま。"""
-        self._seed_universe(db, make_metric)
-        self._seed_m2(db, {"E0001": -0.20, "E0002": -0.05, "E0003": 0.0,
-                           "E0004": 0.05, "E0005": 0.10},
-                      r1_primes={"E0001": 0.05})
-        res = _run({"holdings": "1001", "weights": {"mu": 1.0}, "min_coverage": 0.0,
-                    "sell_threshold": 0.8, "reduce_threshold": 0.3,
-                    "r3_gate": 0.1, "mu_source": "macro_gbdt", "timing_adjust": False}, db)
-        row = res["results"][0]
-        assert row["sec_code"] == "1001"
-        assert row["action"] == "SELL"
 
     def _seed_m6(self, db, mus, r1_primes=None):
         from database import replace_macro_enet_scores
@@ -573,14 +537,19 @@ class TestMuSource:
                     "r3_gate": 0.1, "mu_source": "macro_enet", "timing_adjust": False}, db)
         assert res["results"][0]["action"] == "SELL"
 
-    def test_r3_gate_noop_when_r1_prime_missing_macro_gbdt(self, db, make_metric):
-        """r1_prime=None（列未 migration / 旧スナップショット）はゲート素通り（graceful）。"""
+    def test_r3_gate_noop_when_r1_prime_missing_macro_enet(self, db, make_metric):
+        """r1_prime=None（列未 migration / 旧スナップショット）はゲート素通り（graceful）。
+
+        #572 以前は M-2 で測っていたが、M-2 は mu_source から外れた（ADR-0052）ので
+        同じ r1_prime を持つ M-6 へ移した。**確かめているのは「値が無いときの挙動」**で、
+        どの producer かではない。
+        """
         self._seed_universe(db, make_metric)
-        self._seed_m2(db, {"E0001": -0.20, "E0002": -0.05, "E0003": 0.0,
+        self._seed_m6(db, {"E0001": -0.20, "E0002": -0.05, "E0003": 0.0,
                            "E0004": 0.05, "E0005": 0.10})   # r1_prime 全 None
         res = _run({"holdings": "1001", "weights": {"mu": 1.0}, "min_coverage": 0.0,
                     "sell_threshold": 0.8, "reduce_threshold": 0.3,
-                    "r3_gate": 0.1, "mu_source": "macro_gbdt", "timing_adjust": False}, db)
+                    "r3_gate": 0.1, "mu_source": "macro_enet", "timing_adjust": False}, db)
         row = res["results"][0]
         assert row["sec_code"] == "1001"
         assert row["action"] == "SELL"
