@@ -78,7 +78,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import io
 import json
 import os
 import sys
@@ -100,7 +99,7 @@ from collector_utils import (
     # 丸め許容は収集側（J-Quants catchup の選別・#620）と共有する。ここで書き写すと、
     # 片方が「同じ値」と見た行をもう片方が「段差」と読む（#466 の実測: 株価 21円の
     # E01300 は観測幅 3.5e-3 で、`ROUND_UNIT / 株価` だと 4.8e-2）。
-    REL_TOL_FLOOR, ROUND_UNIT, rounding_tolerance,
+    REL_TOL_FLOOR, ROUND_UNIT, force_utf8_stdout, rounding_tolerance,
 )
 
 # `AdjFactor` がイベントとみなされる下限（浮動小数の 1.0 ゆらぎを拾わない）。
@@ -294,13 +293,6 @@ async def collect_official(targets: list, cover: tuple, *, on_progress=None) -> 
 
 # ── CLI ─────────────────────────────────────────────────────────────────────
 
-def _force_utf8_stdout() -> None:
-    """cp932 コンソールへリダイレクトすると非 ASCII は出力済みの内容ごとクラッシュする。
-    `main()` からだけ呼ぶ（import 時に差し替えると pytest のキャプチャが壊れる）。"""
-    if hasattr(sys.stdout, "buffer"):
-        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
-
-
 async def _run(args) -> dict:
     db = D.SessionLocal()
     try:
@@ -440,7 +432,7 @@ def print_report(rep: dict, applied: bool) -> None:
 
 
 def main() -> int:
-    _force_utf8_stdout()
+    force_utf8_stdout()
     ap = argparse.ArgumentParser(
         description="Yahoo が遡及反映しない分割で残る週次段差を公式の裏付け付きで直す（#466）")
     ap.add_argument("--apply", action="store_true", help="実際に UPDATE する（既定はドライラン）")
