@@ -51,7 +51,6 @@ import json
 import os
 import statistics
 import sys
-import unicodedata
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -67,22 +66,13 @@ from plugins.recommend import (   # noqa: E402
 from plugins.utils import PREPROCESS_VERSION, fit_zscore_stats   # noqa: E402
 from recommend_factor_premia import build_period_panel   # noqa: E402
 from scripts._cache import cached   # noqa: E402
+from scripts._textwidth import display_width as _w, pad as _pad   # noqa: E402
 
 _OUT_DIR = Path(__file__).resolve().parent / ".cache"
 DEFAULT_MAX_MISSING_WEIGHT = 0.20
 DEFAULT_MIN_COMPANIES = 30
 DEFAULT_N_BOOT = 2000
 DEFAULT_BASELINE = "バランス型"
-
-
-# ── 表示ヘルパ（日本語ラベルが混ざるので表示幅で揃える）──────────────────────
-
-def _w(s) -> int:
-    return sum(2 if unicodedata.east_asian_width(c) in "WF" else 1 for c in str(s))
-
-
-def _pad(s, width: int) -> str:
-    return str(s) + " " * max(0, width - _w(s))
 
 
 # ── パネル ────────────────────────────────────────────────────────────────
