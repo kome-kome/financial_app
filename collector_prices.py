@@ -551,8 +551,14 @@ async def collect_stock_price_history_jquants(
     # aborted_days: 連続 403 の早期打ち切りで**叩かずに飛ばした**日数（#461）
     # out_of_coverage: 契約窓の外側（400＋covers 文言）としてスキップした日数（#462）。
     #   403 とは別集合＝**平常運転**（無料プランのエンバーゴ・遡及上限）であり異常ではない。
+    # scale_mismatch: AdjC が未調整 C と食い違うため**書かずに捨てた**行数（#620）。
+    #   0 以外は異常ではなく「Yahoo と JPX で調整の中身が違う社が居る」という平常の観測。
     fetch_stats = {"forbidden": 0, "no_subscription": 0, "aborted_days": 0,
-                   "out_of_coverage": 0}
+                   "out_of_coverage": 0, "scale_mismatch": 0}
+    # 捨てた社（行ではなく社で数えたいのでここに溜める）。件数はログと戻り値に必ず出す——
+    # 弾いた社は「公式値による是正の機会を失う」側に倒れるので、黙って捨てると
+    # 「なぜこの社だけ古い誤りが残るのか」を後から追えない。
+    scale_mismatch_ecs: set = set()
 
     async def _jquants_batch_gen(session):
         completed = 0
@@ -666,6 +672,19 @@ async def collect_stock_price_history_jquants(
                 close_val = q.get("AdjC")
                 if close_val is None:
                     continue   # close は nullable=False のためスキップ
+                # 調整後 AdjC が未調整 C と食い違う行は**書かない**（#620）。食い違いは
+                # 「この行より後に JPX の調整イベントがある」ことを示すが、同じ `close` 列を
+                # 毎晩埋める Yahoo が同じ調整を持つ保証は無い（Yahoo は 1:1.2 のような
+                # 無償割当を splits として持たない・#466）。書くと1つの列に2つのスケールが
+                # 日付で交互に入り、**帯の両端に企業イベントではない段差**ができる。
+                # どちらの値も妥当な株価なので upsert は成功し、行数も鮮度も正常に見える
+                # ＝この壊れ方はエラーとして現れない。
+                # 判定は返ってきた行の中だけで完結させる（DB の既存値は前夜までの上書きで
+                # 既に汚れている可能性があり、基準にすると自己参照になる）。
+                if not same_price_scale(q.get("C"), close_val):
+                    fetch_stats["scale_mismatch"] += 1
+                    scale_mismatch_ecs.add(edinet_code)
+                    continue
                 try:
                     records.append({
                         "edinet_code": edinet_code,
@@ -717,6 +736,15 @@ async def collect_stock_price_history_jquants(
         log.info(
             f"J-Quants: {fetch_stats['out_of_coverage']}/{total}日を契約窓の外側としてスキップ"
         )
+    if fetch_stats["scale_mismatch"]:
+        # 平常の観測（異常ではない）。ただし社数が増えたら「Yahoo が別の社の調整を
+        # 落とし始めた」合図なので、代表コードまで出して追えるようにする（#620）。
+        _sample = ", ".join(sorted(scale_mismatch_ecs)[:5])
+        log.info(
+            f"J-Quants: AdjC が未調整 C と食い違う {fetch_stats['scale_mismatch']}行"
+            f"（{len(scale_mismatch_ecs)}社）を書かずにスキップ（例: {_sample}）。"
+            "Yahoo と調整の中身が違う社＝同じ列へ別スケールを書かないための選別（#620）"
+        )
     if fetch_stats["forbidden"]:
         log.warning(
             f"J-Quants 403: {fetch_stats['forbidden']}/{total}日をスキップ"
@@ -756,14 +784,18 @@ async def collect_stock_price_history_jquants(
                 "forbidden": fetch_stats["forbidden"], "all_forbidden": all_forbidden,
                 "no_subscription": fetch_stats["no_subscription"],
                 "aborted_days": fetch_stats["aborted_days"],
-                "out_of_coverage": fetch_stats["out_of_coverage"]}
+                "out_of_coverage": fetch_stats["out_of_coverage"],
+                "scale_mismatch": fetch_stats["scale_mismatch"],
+                "scale_mismatch_companies": sorted(scale_mismatch_ecs)}
     if on_progress:
         on_progress(total, total, f"[完了] {total}日処理・{upserted_total}件追加/更新")
     return {"cancelled": False, "upserted": upserted_total, "days": total,
             "forbidden": fetch_stats["forbidden"], "all_forbidden": all_forbidden,
             "no_subscription": fetch_stats["no_subscription"],
             "aborted_days": fetch_stats["aborted_days"],
-            "out_of_coverage": fetch_stats["out_of_coverage"]}
+            "out_of_coverage": fetch_stats["out_of_coverage"],
+            "scale_mismatch": fetch_stats["scale_mismatch"],
+            "scale_mismatch_companies": sorted(scale_mismatch_ecs)}
 
 
 def _update_market_data_latest(db) -> int:
@@ -1633,6 +1665,139 @@ def compare_official_vs_weekly(db, official: dict, threshold: float) -> dict:
 
     breaks = sorted(worst.values(), key=lambda r: (-r["max_dev"], r["edinet_code"]))
     return {"compared": compared, "breaks": breaks}
+
+
+def _steps_from_closes(rows: list, threshold: float = ROUNDTRIP_THRESHOLD) -> list:
+    """1社ぶんの日次終値から「隣接営業日の大きな段差」を抜き出す（#620）。
+
+    `rows`: `[(trade_date "YYYY-MM-DD", close)]` の昇順。
+    戻り値: `[(前日, 当日, 比)]`。比は `当日 / 前日`。
+
+    `detect_roundtrip_scale_bands` の SQL（`LAG` で同じものを DB 側で計算する）と
+    **同じ定義**であること。ここはその等価物をテストへ置くために切り出してある。
+    """
+    steps = []
+    for (d0, c0), (d1, c1) in zip(rows, rows[1:]):
+        if c0 is None or c1 is None:
+            continue
+        c0, c1 = float(c0), float(c1)
+        if c0 <= 0 or c1 <= 0:
+            continue
+        r = c1 / c0
+        if abs(r - 1.0) >= threshold:
+            steps.append((d0, d1, r))
+    return steps
+
+
+def _pair_roundtrip_steps(
+    steps: list,
+    *,
+    min_gap_days: int = ROUNDTRIP_MIN_GAP_DAYS,
+    max_gap_days: int = ROUNDTRIP_MAX_GAP_DAYS,
+    net_tol: float = ROUNDTRIP_NET_TOL,
+) -> list:
+    """段差を「飛んで戻る帯」へ組む（#620）。`steps` は `_steps_from_closes` の出力。
+
+    帯とみなす条件は3つ。**企業イベントでは1つも説明できない形**であることが要点で、
+    分割も無償割当も併合も「戻らない」——戻るのは、その区間だけ別のスケールで書かれた
+    ときだけである。
+
+    1. 2つの段差の向きが逆（片方が下げ、もう片方が上げ）
+    2. 間隔が `min_gap_days` 以上 `max_gap_days` 以内——下限があるのは、catchup が作る帯は
+       必ず窓ぶん（実測 11営業日）の長さを持つのに対し、**1日下げて翌日戻す形は
+       ただの値動き**だからで、実測ではここが雑音の大半を占めた
+    3. 2つの比の積が 1.0 の近傍（`net_tol`）＝往復して元へ戻っている
+
+    **これは候補を出す道具**で、実際の値動きで往復した社も拾う（#620 の E02293 は
+    `C == AdjC` ＝調整差が無く、6/16 の 808→1108 は本物の値動きだった）。確定は
+    公式値との突合が要る。1つの段差は1つの帯にしか使わず、相手が複数成立するときは
+    **最も戻り切っている（積が 1.0 に最も近い）相手**を採る——先着で確定させると、
+    帯の内側にもう1つ段差があったときに誤った組を掴む。
+    """
+    bands, used = [], set()
+    for i, (a0, a1, r_out) in enumerate(steps):
+        if i in used:
+            continue
+        best = None
+        for j in range(i + 1, len(steps)):
+            if j in used:
+                continue
+            b0, b1, r_back = steps[j]
+            gap = (date.fromisoformat(b1) - date.fromisoformat(a1)).days
+            if gap > max_gap_days:
+                break            # steps は日付昇順＝これ以降はもっと遠い
+            if gap < min_gap_days:
+                continue         # 数日で往復するのは値動き
+            if (r_out - 1.0) * (r_back - 1.0) >= 0:
+                continue         # 同じ向き＝往復ではない
+            net = abs(r_out * r_back - 1.0)
+            if net > net_tol:
+                continue         # 戻り切っていない
+            if best is None or net < best[0]:
+                best = (net, j, b0, gap, r_back)
+        if best is None:
+            continue
+        _, j, b0, gap, r_back = best
+        bands.append({"start": a1, "end": b0, "days": gap,
+                      "ratio_out": r_out, "ratio_back": r_back})
+        used.update({i, j})
+    return bands
+
+
+def detect_roundtrip_scale_bands(
+    db,
+    *,
+    only_ecs: Optional[list] = None,
+    threshold: float = ROUNDTRIP_THRESHOLD,
+    min_gap_days: int = ROUNDTRIP_MIN_GAP_DAYS,
+    max_gap_days: int = ROUNDTRIP_MAX_GAP_DAYS,
+    net_tol: float = ROUNDTRIP_NET_TOL,
+) -> dict:
+    """`stock_price_daily` から往復段差の帯を探す（読み取りのみ・#620）。
+
+    段差の抽出は **SQL の `LAG` で DB 側に寄せる**。全社の日次を素で引くと約68万行を
+    毎晩転送することになり、拾いたいのはそのうち数十行しかない。
+
+    `only_ecs` を渡すとその社だけを見る。**毎晩の再発検知はこれを使う**——形だけでは
+    「1つの列に2つのスケール」と「実際の値動きの往復」を分けられず（実測: 全社走査で
+    283社が候補になり、そのうち本物は2社だった）、`AdjC != C` を今夜観測した社
+    （`collect_stock_price_history_jquants` の `scale_mismatch_companies`）と
+    交差させて初めて意味のある集合になる。
+
+    戻り値: `{"companies": [{"edinet_code", "bands": [...]}], "steps": 段差の総数}`。
+    """
+    where_ec = "AND edinet_code = ANY(:ecs)" if only_ecs else ""
+    params: dict = {"threshold": threshold}
+    if only_ecs:
+        params["ecs"] = list(only_ecs)
+    rows = db.execute(sqla_text(f"""
+        WITH d AS (
+            SELECT edinet_code, trade_date, close,
+                   LAG(close)      OVER w AS prev_close,
+                   LAG(trade_date) OVER w AS prev_date
+            FROM stock_price_daily
+            WHERE TRUE {where_ec}
+            WINDOW w AS (PARTITION BY edinet_code ORDER BY trade_date)
+        )
+        SELECT edinet_code, prev_date, trade_date, close / prev_close AS ratio
+        FROM d
+        WHERE prev_close > 0 AND close > 0
+          AND ABS(close / prev_close - 1) >= :threshold
+        ORDER BY edinet_code, trade_date
+    """), params).all()
+
+    by_ec: dict = defaultdict(list)
+    for r in rows:
+        by_ec[r.edinet_code].append((r.prev_date, r.trade_date, float(r.ratio)))
+
+    companies = []
+    for ec, steps in by_ec.items():
+        bands = _pair_roundtrip_steps(steps, min_gap_days=min_gap_days,
+                                      max_gap_days=max_gap_days, net_tol=net_tol)
+        if bands:
+            companies.append({"edinet_code": ec, "bands": bands})
+    companies.sort(key=lambda c: c["edinet_code"])
+    return {"companies": companies, "steps": len(rows)}
 
 
 async def detect_price_scale_breaks(

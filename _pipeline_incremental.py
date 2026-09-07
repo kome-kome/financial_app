@@ -16,7 +16,7 @@ load_dotenv()
 from collector import (
     run_full_collection, collect_macro_data,
     collect_stock_price_history_jquants, update_market_data_from_history,
-    fill_recent_stock_price_gap_yahoo,
+    fill_recent_stock_price_gap_yahoo, detect_roundtrip_scale_bands,
 )
 from collector_utils import EdinetAccessError
 from database import SessionLocal, init_db, price_freshness
@@ -150,6 +150,7 @@ async def main():
         # 落とさないよう、この呼び出しだけは失敗を握って継続する。
         _catchup_to   = date.today() - timedelta(days=80)
         _catchup_from = date.today() - timedelta(days=90)
+        catchup_result: dict = {}   # 失敗経路でも下の往復段差の検知が参照する
         try:
             catchup_result = await collect_stock_price_history_jquants(
                 db4, date_from=_catchup_from, date_to=_catchup_to,
@@ -159,6 +160,11 @@ async def main():
                 f"{catchup_result.get('upserted', 0)}件 upsert"
                 + (f"・契約窓外 {catchup_result['out_of_coverage']}日"
                    if catchup_result.get("out_of_coverage") else "")
+                # スケール不一致で**書かなかった**行（#620）。0 が続いていたのに増えたら、
+                # Yahoo が別の社の調整を落とし始めた合図。
+                + (f"・スケール不一致で不採用 {catchup_result['scale_mismatch']}行"
+                   f"（{len(catchup_result.get('scale_mismatch_companies') or [])}社）"
+                   if catchup_result.get("scale_mismatch") else "")
                 # 403 は契約失効／プラン対象外／URL 不在。**カバレッジ境界ではない**（#462）
                 + ("（全日403＝要確認）" if catchup_result.get("all_forbidden") else ""))
         except Exception as e:
@@ -176,6 +182,30 @@ async def main():
         log(f"  株価鮮度: p50={fr.get('price_asof_p50')} / p05={fr.get('price_asof_p05')}"
             f" / max={fr.get('price_asof_max')} / level={fr.get('level')}"
             f"（{fr.get('n_codes')}銘柄・5営業日超の遅れ {fr.get('n_stale_over_5d')}銘柄）")
+
+        # 「飛んで数日で戻る」帯の検知（#620）。**この壊れ方は例外を出さない**——
+        # どちらの値も妥当な株価で、upsert は成功し、行数も鮮度も上の指標も正常に見える。
+        #
+        # **今夜 J-Quants が調整差を報告した社に絞って見る。** 形だけで全社を走査すると
+        # 実際の値動きの往復まで拾って意味を失う（実測 283社中、本物は2社）。調整差の無い
+        # 社では誰が書いても同じ値になる＝混ざりようがないので、この交差が過不足のない網。
+        _susp = (catchup_result or {}).get("scale_mismatch_companies") or []
+        try:
+            if _susp:
+                rt = detect_roundtrip_scale_bands(db4, only_ecs=_susp)
+                n_rt = len(rt["companies"])
+                if n_rt:
+                    _names = ", ".join(c["edinet_code"] for c in rt["companies"][:5])
+                    log(f"  **往復段差 {n_rt}社**（例: {_names}）＝調整差のある社の日次に"
+                        f"「飛んで戻る」帯がある。1つの列に2つのスケールが混ざった疑い。"
+                        f"`python -m scripts.repair_scale_mixture` で確認する（#620）")
+                else:
+                    log(f"  往復段差: なし（調整差のある {len(_susp)}社を検査）")
+            else:
+                log("  往復段差: 検査対象なし（今夜は AdjC≠C の社が無かった）")
+        except Exception as e:
+            # 検知は収集の付随物。ここで落として株価収集を失敗にはしない。
+            log(f"  往復段差の検知に失敗（継続します）: {type(e).__name__}: {e}")
     finally:
         db4.close()
     log(f"[4/4] 市場データ 完了 ({(time.time()-t0)/60:.1f}分経過)")
