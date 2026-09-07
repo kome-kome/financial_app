@@ -129,7 +129,10 @@ JOBS: dict[str, Job] = {
         why="会社予想（決算短信サマリー）の差分収集（J-Quants /fins/summary）。"
             "`statement_disclosure` の最終 disc_date から今日までを日付単位で埋める。"
             "ADR-0051 の案C（サプライズ特徴量）を将来採るなら入力になる。",
-        measured_min=120.0,      # **未実測**。最終 2026-04-17 から約100営業日ぶんの見積り
+        # 2026-09-07 の見積り: 最終 disc_date 2026-04-17 から 143暦日 ×
+        # `JQUANTS_RATE_SLEEP`(20秒) = 47.7分が**上限**（非営業日は HTTP 400 で即返り
+        # sleep も払わないので実際は短い）。60 は余裕込み。**実走で差し替える。**
+        measured_min=60.0,
     ),
     "tune:macro_dlm": Job(
         name="tune:macro_dlm",
