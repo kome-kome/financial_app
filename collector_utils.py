@@ -79,6 +79,25 @@ JQUANTS_DISCLOSURE_DELAY_DAYS = 84   # /fins/summary 無料プランの配信遅
 
 YAHOO_STOCK_RATE_SLEEP = 0.5   # Yahoo Finance 銘柄別取得のリクエスト間隔（秒）
                                # 銘柄ごとに1リクエスト。3800社×0.5s ≈ 32分
+
+# Yahoo 銘柄別取得の同時接続数（#556）。**レートは未実測なので控えめに置く**——
+# 実測できているのは「逐次で 0.894〜1.030 s/社、うちスリープ 0.5秒を引いた 0.39〜0.53秒が
+# HTTP 往復」までで、Yahoo が何並列まで許すかは分かっていない。並行度を上げる前に、
+# `fetch_yahoo_chart` の HTTP エラー内訳（429/5xx）が run ログに 0 で出ることを確かめること。
+#
+# **`1` を渡せば逐次と厳密に同じ挙動へ戻る**（緊急停止。`FINAPP_WEEKLY_CACHE=0` と同じ形）。
+# 絞りすぎは例外を出さない——Yahoo は「200 OK・timestamp 行は返るが close が全 null」を返す
+# （#438）ので、判断材料は `new_rows` と `price_freshness` の p50/p05、そして 429/5xx の件数。
+def _yahoo_concurrency() -> int:
+    raw = os.environ.get("FINAPP_YAHOO_CONCURRENCY", "")
+    try:
+        n = int(raw)
+    except (TypeError, ValueError):
+        return 4
+    return max(1, min(n, 32))
+
+
+YAHOO_STOCK_CONCURRENCY = _yahoo_concurrency()
 MAX_GAP_DAYS           = 30    # period_end から±30日以内の株価のみ採用（point_in_time マッチ）
 
 # --- Yahoo ティッカーのサフィックス（#555）------------------------------------
