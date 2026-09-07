@@ -105,6 +105,32 @@ JOBS: dict[str, Job] = {
             "スキップした（#590・ADR-0047 で解消済み）。**引数は run_monthly.py と同一**。",
         measured_min=176.3,
     ),
+    # ── 最新業績の供給（#424 の子タスク1・ADR-0051）────────────────────────
+    # #503 で GHA cron を止めて以降、H1 と会社予想は**どこからも収集されていない**
+    # （呼び出し元が `collect-interim.yml` / `collect-disclosures.yml` の手動トリガだけ）。
+    # 実測 2026-09-07: H1 は period_end MAX 2025-09-30（11.2ヶ月）・会社予想は
+    # disc_date MAX 2026-04-17（4.7ヶ月）。**月次本体の空きは 67分しかなく入らない**
+    # （GHA 実測 2h31m）ので、日中枠（予算445分）で回す。
+    #
+    # `measured_min` は**ローカル未実測**で、GHA の値を暫定で置いている。比は律速要因を
+    # またいで移らない（GHA 0.847 対 ローカル 0.422 で見込みを64%外した前例がある）ので、
+    # **初回の実走で実測へ差し替えること**。
+    "interim": Job(
+        name="collect_interim",
+        argv=("{python}", "collector.py", "--interim", "--years", "2"),
+        why="半期(H1)財務の差分収集（EDINET 半期報告書・旧四半期Q2）。`skip_existing=True` で"
+            "収集済み doc_id は再取得しない＝冪等。`--years 2` は 2025-10 以降の欠落を埋める幅で、"
+            "GHA の既定 6 年は初回バックフィル用の値。",
+        measured_min=151.0,      # GHA 6年 2h31m。**ローカル未実測**
+    ),
+    "disclosures": Job(
+        name="collect_disclosures",
+        argv=("{python}", "collector.py", "--disclosures"),
+        why="会社予想（決算短信サマリー）の差分収集（J-Quants /fins/summary）。"
+            "`statement_disclosure` の最終 disc_date から今日までを日付単位で埋める。"
+            "ADR-0051 の案C（サプライズ特徴量）を将来採るなら入力になる。",
+        measured_min=120.0,      # **未実測**。最終 2026-04-17 から約100営業日ぶんの見積り
+    ),
     "tune:macro_dlm": Job(
         name="tune:macro_dlm",
         argv=("{python}", "hyperparameter_search.py", "--model", "macro_dlm",

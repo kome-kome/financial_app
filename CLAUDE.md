@@ -80,7 +80,7 @@ python -m scripts.check_batch_freshness             # 判定（停止なら起�
 # 平日日中バッチ（重い計算をキューから1日1件）。#618・平日 JST 08:00・窓8h
 # **人が PC を触らない時間帯で回すこと自体が再現性の条件**（並走すると NUTS の発散が 0→344 に増えた実測）
 ./run_daytime.ps1 -Queue                 # キューの中身
-./run_daytime.ps1 -Enqueue beta          # 積む（beta / tune:macro_gbdt / tune:macro_dlm）
+./run_daytime.ps1 -Enqueue beta          # 積む（beta / tune:macro_gbdt / tune:macro_dlm / interim / disclosures）
 ./run_daytime.ps1 -DryRun                # 実行計画だけ（キューは減らさない）
 ./scripts/install_daytime_task.ps1       # 登録（平日 JST 08:00・上限8h）。**登録後に1回手動実行して足跡を入れる**
 
