@@ -60,6 +60,10 @@ python -m scripts.check_batch_freshness             # 判定（停止なら起�
 ./run_watchdog.ps1 -DryRun -Now 2026-08-28T00:00:00+00:00   # 欠落を再現（DB を汚さない）
 ./scripts/install_watchdog_task.ps1                 # タスクスケジューラへ登録（毎日 JST 20:00）
 
+# 夜間バッチの収集ログを晩ごとに並べて読む（#556 の並行フェッチ・#620 のスケール選別）。DB に触らない
+python -m scripts.check_nightly_collect             # 直近3晩・警告があれば exit 2
+python -m scripts.check_nightly_collect --nights 5
+
 # 月次バッチ（Fama-MacBeth 重み → M-1 マクロβ推論 → M-1/M-2/M-3 探索）。#504
 ./run_monthly.ps1                        # 手動で1回
 ./run_monthly.ps1 -DryRun                # 実行計画だけ

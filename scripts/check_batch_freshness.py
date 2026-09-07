@@ -78,7 +78,6 @@ import os
 import shutil
 import subprocess
 import sys
-import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, Sequence
@@ -100,6 +99,7 @@ os.environ.setdefault("FINAPP_EGRESS_LEDGER", "0")
 os.environ.setdefault("FINAPP_JOB", "watchdog")
 
 from scripts import batch_common as bc                       # noqa: E402
+from scripts._textwidth import pad                           # noqa: E402
 # 判定ロジック（`Watched` / `WATCHED` / `collect`）は `batch_freshness.py`（ルート）へ
 # 切り出し、`/api/morning` と共有する（#561）。**このモジュールは import 時に
 # `FINAPP_DB_TARGET` を書き換える**ので、API プロセスからは import させない——接続先の
@@ -225,9 +225,13 @@ def problems(snap: dict) -> list[dict]:
 
 
 def _pad(text: str, width: int) -> str:
-    """表示幅で揃える。`f"{s:<14}"` は文字数で数えるので全角混じりだと列が崩れる。"""
-    shown = sum(2 if unicodedata.east_asian_width(c) in "FWA" else 1 for c in text)
-    return text + " " * max(0, width - shown)
+    """表示幅で揃える。`f"{s:<14}"` は文字数で数えるので全角混じりだと列が崩れる。
+
+    **Ambiguous を全角として数える**（`scripts/_textwidth.py` の既定は半角）。この出力は
+    タスクスケジューラから cp932 のコンソールへリダイレクトされる経路が主で、そこでは
+    `×` などが2幅で描かれるため。
+    """
+    return pad(text, width, ambiguous=2)
 
 
 def _fmt_age(age_h: Optional[float]) -> str:
