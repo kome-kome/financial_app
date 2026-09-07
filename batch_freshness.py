@@ -24,6 +24,14 @@ Render（prod）の接続先設定を書き換えかねない**——接続先�
 **窓を広げれば閾値も自動で広がる**。副産物として「実行中は鳴らない」が構造的に成立し、
 判定が観測時刻に依存しない（実起動は名目 17:20 から +31分〜+1h41m ずれる・#551）。
 
+## 測るのは2軸ある: 「走ったか」と「値が前進したか」
+
+`WATCHED` / `collect()` が見るのは**足跡**で、答えるのは「バッチが起動したか」だけ。
+`PRODUCERS` / `collect_producers()` が見るのは**成果物の最終更新**で、答えるのは
+「走った結果として値が前進したか」。2026-09-01 の月次は前者が ok・後者が固着という状態を
+作り、`plugin_tuned_params` が 50〜59日 古いまま誰にも気づかれなかった（#504）。
+producer 側は watchdog の起票だけに出す（`/api/morning` のレスポンス構造は変えない）。
+
 ## 見るのは `*_last_run` であって `*_last_success` ではない
 
 `monthly_last_success` は #512 が解けるまで**設計上ずっと古い**（`macro_beta` が毎月
@@ -283,3 +291,183 @@ def collect(db, now: datetime, get=None) -> dict:
         rows.append(row)
     return {"now": now, "rows": rows, "db_error": None, "db_label": db_label(),
             "gh_error": None}
+
+
+# ── producer の鮮度（#504）──────────────────────────────────────────────────
+# 上の `Watched` が見るのは「バッチが走ったか」（`*_last_run`）で、**走った結果として値が
+# 前進したか**は見ていない。2026-09-01 の月次は `tune:macro_dlm` が予算切れ（exit=124）・
+# `tune:macro_gbdt` が品質ゲートで persist スキップ（exit=1）となり、失敗自体は #587 として
+# 起票・クローズされた。だが**穴はその後も埋まらず**、`plugin_tuned_params` は macro_gbdt が
+# 50日・macro_dlm が 59日 古いまま誰にも気づかれなかった（2026-09-07 実測）。
+# 「走った」と「値が前進した」は別の事実で、前者だけを見ていると後者は静かに固着する。
+#
+# `macro_beta` は `status=quarantined` で保全されると run 自体は残るが producer は読まない
+# （#609）ので、**live の行だけ**を見る＝隔離が続けば固着として現れる。
+
+
+@dataclass(frozen=True)
+class Produced:
+    """月次バッチが更新する成果物1つ。閾値は `Watched` と同じく `cadence + 窓` の導出。"""
+    label: str
+    issue_title: str
+    cadence_h: float
+    window_min: float
+    batch_label: str        # 誰が更新するか（Issue 本文の誘導先）
+    task_name: str          # 確認コマンド用
+    source: str             # どこを読んだか（テーブルと条件）
+    read: object            # (db) -> Optional[datetime]
+
+    @property
+    def stale_h(self) -> float:
+        return self.cadence_h + self.window_min / 60.0
+
+
+def _tuned_at(plugin_name: str):
+    """`plugin_tuned_params` の1行。**`database` の import は関数内に閉じる**（副作用回避）。"""
+    def read(db):
+        from sqlalchemy import select
+        from database import PluginTunedParams
+        return db.execute(select(PluginTunedParams.tuned_at)
+                          .where(PluginTunedParams.plugin_name == plugin_name)).scalar()
+    return read
+
+
+def _macro_beta_live_at(db):
+    """**live の行だけ**を見る。隔離（quarantined）は producer が読まない＝固着と同じ。
+
+    `status IS NULL` は列が無かった時代の run で、`database.py` の定義どおり live 扱い。
+    語は `database.MACRO_BETA_STATUS_LIVE` から取る（文字列を直接書かない）。
+    """
+    from sqlalchemy import func, or_, select
+    from database import MACRO_BETA_STATUS_LIVE, MacroBetaMeta
+    return db.execute(
+        select(func.max(MacroBetaMeta.created_at)).where(
+            or_(MacroBetaMeta.status == MACRO_BETA_STATUS_LIVE,
+                MacroBetaMeta.status.is_(None)))).scalar()
+
+
+def _factor_premia_at(db):
+    from sqlalchemy import func, select
+    from database import RecommendFactorPremium
+    return db.execute(select(func.max(RecommendFactorPremium.computed_at))).scalar()
+
+
+# cadence は `Watched` と同じ「同一日付の最長間隔」＝31日。窓は各バッチの `WINDOW_MIN` から
+# 取る（書き写さない）。**探索は完走してからしか永続化しない**ので、窓を広げれば閾値も広がる
+# という関係はここでも成立する。
+PRODUCERS: tuple[Produced, ...] = (
+    Produced(
+        label="マクロ×リスク-リターン探索の結果",
+        issue_title="[ops] マクロ×リスク-リターン探索の結果が更新されていない",
+        cadence_h=31 * 24.0,
+        window_min=run_monthly_m1.WINDOW_MIN,
+        batch_label="月次バッチ（M-1 探索）",
+        task_name="financial_app-monthly-m1",
+        source="plugin_tuned_params.tuned_at (plugin_name='macro_risk_return')",
+        read=_tuned_at("macro_risk_return"),
+    ),
+    Produced(
+        label="マクロ勾配ブースティング探索の結果",
+        issue_title="[ops] マクロ勾配ブースティング探索の結果が更新されていない",
+        cadence_h=31 * 24.0,
+        window_min=run_monthly.WINDOW_MIN,
+        batch_label="月次バッチ",
+        task_name="financial_app-monthly",
+        source="plugin_tuned_params.tuned_at (plugin_name='macro_gbdt')",
+        read=_tuned_at("macro_gbdt"),
+    ),
+    Produced(
+        label="動的線形モデル探索の結果",
+        issue_title="[ops] 動的線形モデル探索の結果が更新されていない",
+        cadence_h=31 * 24.0,
+        window_min=run_monthly.WINDOW_MIN,
+        batch_label="月次バッチ",
+        task_name="financial_app-monthly",
+        source="plugin_tuned_params.tuned_at (plugin_name='macro_dlm')",
+        read=_tuned_at("macro_dlm"),
+    ),
+    Produced(
+        label="マクロ・ベータの推論結果",
+        issue_title="[ops] マクロ・ベータの推論結果が live で更新されていない",
+        cadence_h=31 * 24.0,
+        window_min=run_monthly_beta.WINDOW_MIN,
+        batch_label="月次バッチ（マクロ・ベータ）",
+        task_name="financial_app-monthly-beta",
+        source="macro_beta_meta.created_at (status=live)",
+        read=_macro_beta_live_at,
+    ),
+    Produced(
+        label="ファクタープレミアムの重み",
+        issue_title="[ops] ファクタープレミアムの重みが更新されていない",
+        cadence_h=31 * 24.0,
+        window_min=run_monthly.WINDOW_MIN,
+        batch_label="月次バッチ",
+        task_name="financial_app-monthly",
+        source="max(recommend_factor_premia.computed_at)",
+        read=_factor_premia_at,
+    ),
+)
+
+
+# heavy プラグインの成果物をここで見るか、見ないなら理由は何か。**忘れても失敗として
+# 現れない**ので `tests/test_check_batch_freshness.py` が `HEAVY_AUTOMATION` と照合する
+# （`plugins/progress.py::PROGRESS_COVERAGE` と同じ作法）。理由を書いた `exempt:` は可・
+# 空理由は不可。
+PRODUCER_COVERAGE: dict[str, str] = {
+    "macro_risk_return": "watched",
+    "macro_gbdt": "watched",
+    "macro_dlm": "watched",
+    "sector_ols":
+        "exempt: 日次（run_nightly）で毎晩回り、`nightly_scores.VerificationError` が"
+        "「execute は成功したが DB への永続化を確認できなかった」をその場で失敗にする。"
+        "2経路で見ると同じ事実に Issue が二重に立つ",
+    "macro_enet":
+        "exempt: 同上（日次・VerificationError が毎晩検証する）",
+    "macro_ensemble":
+        "exempt: #570 で退役（hidden・ADR-0044）＝回す相手が居らず、成果物も更新されない",
+    "macro_gbdt_rank":
+        "exempt: producer を持たない（produced_output=False）。永続化する μ̂ が無い（#362）",
+}
+
+PRODUCER_EXEMPT_PREFIX = "exempt:"
+
+
+def _as_utc(value):
+    """DB から返る naive datetime を UTC とみなす。
+
+    `SESSION_FIXES`（ADR-0043）で接続の TimeZone は UTC に固定されており、書き手も
+    `datetime.now(timezone.utc)` なので naive 値の意味は UTC。**ここで JST とみなすと
+    9時間ぶん若く見え、固着を見逃す**（#565 と同型の壊れ方）。
+    """
+    if value is None:
+        return None
+    return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+
+
+def producer_status_of(row: dict) -> str:
+    """ok / missing / stale。`Watched` と同じ語彙を使う（読む人が覚え直さなくて済む）。"""
+    if row["last"] is None:
+        return "missing"
+    return "ok" if row["age_h"] <= row["produced"].stale_h else "stale"
+
+
+def collect_producers(db, now: datetime, read=None) -> list[dict]:
+    """成果物の最終更新を読む。**`collect()` とは別関数**にしてある。
+
+    `collect()` の戻りは `/api/morning` が `summarize()` 経由で画面に出しており、行を
+    混ぜるとレスポンス構造が変わる。producer の固着は月単位でしか起きないので毎朝の
+    カードには載せず、watchdog の起票だけに出す（#504 の判断）。
+    """
+    rows = []
+    for p in PRODUCERS:
+        try:
+            last = _as_utc((read or (lambda db, p: p.read(db)))(db, p))
+        except Exception as e:      # noqa: BLE001 — 1つの読み損ねで全体を落とさない
+            rows.append({"produced": p, "last": None, "age_h": None,
+                         "status": "unreadable", "error": str(e)[:200]})
+            continue
+        row = {"produced": p, "last": last, "error": None,
+               "age_h": _age_hours(last, now)}
+        row["status"] = producer_status_of(row)
+        rows.append(row)
+    return rows

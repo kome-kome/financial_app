@@ -78,6 +78,22 @@ class TestMigrationIsComplete:
             f"{script} を回すステップが無い＝GHA を止めたぶんの穴が空いたまま"
         )
 
+    def test_factor_premia_matches_the_cli_defaults(self):
+        """月次が渡す値と CLI の既定が一致すること（#504 で GHA から移した検査）。
+
+        かつては `recommend-factor-premia.yml` の入力既定と CLI 定数の一致を
+        `tests/test_recommend_factor_premia_workflow.py` が見ていた。yml を削除したので
+        同じ不変条件をこちらで持つ。**人が手で CLI を叩いて測った重みと、月次が本番へ書く
+        重みが別のパラメータで計算されていても、どちらもエラーを出さない**——
+        `scripts/preset_ic_gate.py`（ADR-0041）が「本番と別物を測るな」と言うのと同じ穴。
+        """
+        import recommend_factor_premia as rfp
+
+        argv = _argv("factor_premia")
+        pairs = {argv[i]: argv[i + 1] for i in range(len(argv) - 1)}
+        assert pairs["--min-companies-per-period"] == str(rfp.DEFAULT_MIN_COMPANIES_PER_PERIOD)
+        assert pairs["--maxlags"] == str(rfp.DEFAULT_MAXLAGS)
+
     def test_tune_covers_the_same_three_models(self):
         """tune-hyperparameters.yml の matrix と同じ3モデルを回すこと。
 

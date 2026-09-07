@@ -131,8 +131,8 @@ pytest tests/test_utils.py  # 単一ファイル
 | `database.py` | テーブル定義・upsert・成長率/Zスコア計算 |
 | `db_egress.py` | Egress 台帳＋サーキットブレーカ（ADR-0034/0037）。engine の `after_cursor_execute` で全経路を計測。**歯止めは2軸**＝プロセス予算と**請求サイクル累計**（前者だけでは日をまたぐ累積が素通りする）。集計は `python -m scripts.egress_report`。詳細は [ARCHITECTURE.md](docs/ARCHITECTURE.md) |
 | `scripts/batch_common.py` | ローカル駆動バッチ（日次／月次／M-1）の共通骨格＝**「走らなかったことを検知する」仕組みの唯一の源**（足跡・通知・heartbeat・ステップ予算）。**子の出力はログへ直結する／生の接続文字列は出さない／Σ予算＋マージン ≤ 窓**。詳細は [ARCHITECTURE.md](docs/ARCHITECTURE.md) |
-| `batch_freshness.py` | バッチ足跡（`*_last_run`）を**測る**層（#561）。watchdog と `/api/morning` の2人が共有する。**閾値は `run_*.WINDOW_MIN` から導出し書き写さない**。**API から `scripts/check_batch_freshness.py` を import しない**（import 時に接続先を書き換える）。詳細は [ARCHITECTURE.md](docs/ARCHITECTURE.md) |
-| `scripts/check_batch_freshness.py` | **バッチ鮮度 watchdog**（ADR-0042）。起票・CLI・ログを持ち、判定は `batch_freshness.py` と共有する。**閾値は `cadence + 窓` の導出（実測から逆算しない）／判定は `*_last_run` のみ／通知経路（`gh`）は健全な回にも毎回確かめる**。exit 0/2/3。詳細は [ARCHITECTURE.md](docs/ARCHITECTURE.md) |
+| `batch_freshness.py` | バッチ足跡（`*_last_run`）を**測る**層（#561）。watchdog と `/api/morning` の2人が共有する。**測るのは2軸**＝足跡（走ったか）と `PRODUCERS`（走った結果として値が前進したか・#504）。**producer は watchdog の起票にだけ出す**（`collect()` / `summarize()` を触らない＝画面契約を変えない）。`macro_beta` は **live の行だけ**数える。**閾値は `run_*.WINDOW_MIN` から導出し書き写さない**。**API から `scripts/check_batch_freshness.py` を import しない**（import 時に接続先を書き換える）。詳細は [ARCHITECTURE.md](docs/ARCHITECTURE.md) |
+| `scripts/check_batch_freshness.py` | **バッチ鮮度 watchdog**（ADR-0042）。起票・CLI・ログを持ち、判定は `batch_freshness.py` と共有する。**閾値は `cadence + 窓` の導出（実測から逆算しない）／バッチの判定は `*_last_run` のみ／成果物の固着は `PRODUCERS` で別に起票する（バッチ失敗の Issue を閉じても穴は残る・#504）／通知経路（`gh`）は健全な回にも毎回確かめる**。exit 0/2/3。詳細は [ARCHITECTURE.md](docs/ARCHITECTURE.md) |
 | `scripts/mirror_*.py` | ミラーの pull / sync / verify（ADR-0035・共有基盤 `mirror_common.py`）。**書き込み先はローカル限定**。#503 の正本反転により **pull / sync は定常運転では使わない**（`verify` はバックアップ復元先の突合へ転用）。詳細は [ARCHITECTURE.md](docs/ARCHITECTURE.md) |
 | `weekly_price_cache.py` | 週次株価の run 間差分ロードキャッシュ（ADR-0036）。**速さだけを担い、正しさは指紋・世代印・行数照合が持つ**＝どれかが外れたら必ずフルロードへ倒す。緊急停止は `FINAPP_WEEKLY_CACHE=0`。詳細は [ARCHITECTURE.md](docs/ARCHITECTURE.md) |
 | `sysmem.py` | 常駐メモリ／物理メモリ実測の**唯一の源**（`batch_common` の heartbeat・`bench_macro_beta` が共有）。**ctypes を書き写さない／psutil は入れない／測るのはプロセスツリーの合計**（単体 pid は静かに誤る）。詳細は [ARCHITECTURE.md](docs/ARCHITECTURE.md) |
@@ -223,6 +223,7 @@ web版・ローカル版の双方が同じ Issue を見ることで、**コー�
   | `heavy=True` のプラグイン | `nightly_scores.HEAVY_AUTOMATION`（回す経路 or `exempt:`） | `test_nightly_scores.py::TestHeavyAutomationRegistry` |
   | heavy な分析（プラグイン **および `SPECIAL_ANALYSES` の特例エントリ**・#593） | `plugins/progress.py::PROGRESS_COVERAGE`（`common` / `own` / `exempt:`） | `test_plugin_progress.py::TestProgressCoverageRegistry` |
   | ローカル駆動バッチ（`BatchSpec`） | `batch_freshness.py::WATCHED`（閾値は書かず `cadence` と `WINDOW_MIN` を渡す） | `test_check_batch_freshness.py::TestEveryLocalBatchIsWatched` |
+  | 月次が更新する producer（heavy プラグイン・`macro_beta` / `factor_premia`） | `batch_freshness.py::PRODUCER_COVERAGE`（`watched` / `exempt:`）＋ `PRODUCERS` | `test_check_batch_freshness.py::TestEveryHeavyProducerIsCovered` |
   | スキル／エージェント | `docs/SKILLS_AND_AGENTS.md` へ1行（#575） | `test_docs_sync.py`（**`~/.claude/` は CI の checkout に無くローカル pytest でのみ照合**） |
 
   進捗は必ず**ステップ名**を持たせる（経過時間だけでは固まっていても健全に見える）。経緯は各 ADR と [ARCHITECTURE.md](docs/ARCHITECTURE.md)。

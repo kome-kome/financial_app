@@ -11,13 +11,18 @@ Render の制約と運用形態に合わせて設計すること。
 
 ### 自動実行 vs 手動実行の整理
 
+> **⚠ GitHub Actions の定時実行は #503 で全て止まった。** 生きている cron は
+> `egress-health` の1本だけで、月次3本（`tune-hyperparameters` / `macro-beta-inference` /
+> `recommend-factor-premia`）は **#504 でファイル自体を削除した**。下表の「実行場所」は
+> **現在の駆動元**を示す。
+
 | 種別 | 処理内容 | 実行タイミング | 実行場所 |
 |---|---|---|---|
-| **自動（毎日）** | 差分収集（新規書類 + 株価更新） | **UTC 08:17（JST 17:17）毎日**（#476） | GitHub Actions `daily-incremental.yml` |
-| **自動（毎日・チェーン）** | 夜間スコア更新（`sector_ols` → `regression_results`、M-6 → `macro_enet_scores`） | `daily-incremental` が **success** で終わった直後（`workflow_run`） | GitHub Actions `nightly-scores.yml` |
-| **自動（毎月）** | M-1/M-2/M-3 ハイパーパラメータ探索・永続化 | UTC 16:30（JST 翌01:30）毎月1日（#476） | GitHub Actions `tune-hyperparameters.yml` |
-| **自動（毎月）** | M-1 per-stock 階層マクロβ推論・永続化（producer） | UTC 00:00（JST 09:00）毎月1日（#476） | GitHub Actions `macro-beta-inference.yml` |
-| **自動（毎月）** | recommend Fama-MacBeth ファクタープレミアム推定・永続化（producer） | UTC 22:00（JST 翌07:00）毎月5日（#476） | GitHub Actions `recommend-factor-premia.yml` |
+| **自動（毎日）** | 差分収集（新規書類 + 株価更新）→ 夜間スコア更新（`sector_ols` → `regression_results`、M-6 → `macro_enet_scores`） | **毎日 JST 17:20**（窓6時間） | ローカル `run_nightly.ps1` → `scripts/run_nightly.py` |
+| **自動（毎月）** | M-2/M-3 ハイパーパラメータ探索・永続化 ＋ Fama-MacBeth ファクタープレミアム（producer）＋ VACUUM | 毎月1日 JST 01:00（窓16時間） | ローカル `run_monthly.ps1` → `scripts/run_monthly.py` |
+| **自動（毎月）** | M-1 per-stock 階層マクロβ推論・永続化（producer） | 毎月2日 JST 01:00（#579・実測 360〜419分） | ローカル `run_monthly_beta.ps1` |
+| **自動（毎月）** | M-1 ハイパーパラメータ探索・永続化 | 毎月3日 JST 01:00（#584・[ADR-0046](adr/0046-steps-that-cannot-finish-get-their-own-task.md)・実測 約752分） | ローカル `run_monthly_m1.ps1` |
+| **自動（平日）** | 重い計算をキューから1日1件（`beta` / `tune:*` / `interim` / `disclosures` / `gate:*`） | 平日 JST 08:00（窓8時間・#618） | ローカル `run_daytime.ps1` |
 | **自動（毎月）** | `stock_price_daily` / `stock_price_weekly` の VACUUM FULL（index bloat 対策・#290） | 毎月1日 JST 01:00 の月次バッチの**先頭ステップ** | ローカル `run_monthly.ps1` → `_pipeline_vacuum.py` |
 | **手動のみ** | 全件収集（全社 × 5年分） | workflow_dispatch で起動 | GitHub Actions `full-pipeline.yml` |
 | **手動のみ** | マクロのみ収集（為替・金利等） | workflow_dispatch で起動 | GitHub Actions `collect-macro.yml` |
@@ -94,13 +99,14 @@ Render の制約と運用形態に合わせて設計すること。
 | 旧 UTC | ワークフロー | 停止理由 | 代替 |
 |---|---|---|---|
 | 08:17 | `daily-incremental` → `nightly-scores` / `macro-health` | 正本がローカルへ移り、動かすと Supabase だけが前進して分岐する | ローカル `run_nightly.ps1`（JST 17:20） |
-| 00:00 | `macro-beta-inference` | 同上（`macro_beta_loadings` が分岐する） | ローカル月次の `macro_beta` ステップ（#504・毎月1日 JST 01:00） |
-| 16:30 | `tune-hyperparameters` | 同上。M-1/M-2/M-3 の**唯一の自動更新経路**だったので、止めた時点で μ̂ の鮮度も止まる | ローカル月次の `tune:<model>` ステップ（#504・matrix と同じ探索戦略・同じ `--n-iter`） |
-| 22:00 | `recommend-factor-premia` | 同上。#423 子5 で「実行履歴ゼロのまま 37 期の重みで固着」を直した cron なので、**止めれば同じ固着へ戻る** | ローカル月次の `factor_premia` ステップ（#504・先頭に置いて打ち切りに強くしてある） |
+| 00:00 | `macro-beta-inference`（**#504 で削除**） | 同上（`macro_beta_loadings` が分岐する） | `run_monthly_beta.ps1`（#579・毎月2日 JST 01:00） |
+| 16:30 | `tune-hyperparameters`（**#504 で削除**） | 同上。M-1/M-2/M-3 の**唯一の自動更新経路**だったので、止めた時点で μ̂ の鮮度も止まる | 月次本体の `tune:macro_gbdt` / `tune:macro_dlm` と `run_monthly_m1.ps1`（M-1・#584） |
+| 22:00 | `recommend-factor-premia`（**#504 で削除**） | 同上。#423 子5 で「実行履歴ゼロのまま 37 期の重みで固着」を直した cron なので、**止めれば同じ固着へ戻る** | 月次本体の `factor_premia` ステップ（先頭に置いて打ち切りに強くしてある） |
 | 土 23:30 | `vacuum-maintenance` | **2026-08-25 に停止**（#290 / #505）。断面は 2026-08-07 で凍結＝書き込みが無いので bloat も増えず、毎週 `VACUUM FULL` を打っても初回以降は何も回収しない | ローカル月次の `vacuum` ステップ（#504・先頭。実測 daily 59→49MB / weekly 188→165MB / 計13.4秒） |
 
 - `nightly-scores` と `macro-health` は `daily-incremental` の `workflow_run` チェーンなので、親を止めれば連動して止まる（yml 側の schedule は元から無い）。
 - `full-pipeline` / `backfill-*` / `collect-interim` / `collect-disclosures` / `collect-macro` は `workflow_dispatch` 専用。放置で害はないが、**手動起動すると Supabase へ書く**＝正本と分岐するので注意。
+- **月次3本は #504 で削除した**（「停止中」のまま残さなかった）。理由は3つ。①`workflow_dispatch` が生きている限り誰でも手動起動でき、その1回で Supabase 側だけが前進して正本と分岐する（ADR-0038 が禁じた向き）。②yml に書いた「代替経路」が #579・#584 の分離で実体とずれており（`macro_beta` は `run_monthly.ps1` ではなく `run_monthly_beta.ps1`、M-1 は `run_monthly_m1.ps1`）、`tests/test_workflow_schedule_pauses.py` は⛔・復旧条件・代替経路という**語の有無しか見ない**ので乖離が失敗として現れなかった。③停止中として残す条件は「復旧条件が書けること」だが、この3本の復旧条件は「正本を Supabase へ戻すとき」＝ADR-0038 がしないと決めた事象だった。
 - `nightly_scores.HEAVY_AUTOMATION` は #504 で語彙に `local:<スクリプト>` を足し、全エントリがローカルバッチを指すようになった。**yml を指すエントリは schedule が生きていることまで CI が確かめる**（`tests/test_nightly_scores.py`）＝「登録はあるが cron は止まっている」という嘘を構造的に作れなくした。ただし `local:` には**タスクスケジューラ登録**という CI から見えない一段が残る（ADR-0031 の「登録があること ≠ 動いていること」は健在）。
 
 #### Storage バックアップの初期設定（#503 Phase 3・初回だけ）
@@ -156,12 +162,14 @@ python -m scripts.backup_restore --source storage --apply --create-schema `
 
 #### アクティブ（`.github/workflows/` 直下・Actions 対象）
 
-> **⚠ 下表の「使うタイミング」には cron 停止前の記述が残っている。** #503 で `daily-incremental` /
-> `macro-beta-inference` / `tune-hyperparameters` / `recommend-factor-premia` の `schedule:` は全て
-> コメントアウトされ、連動して `nightly-scores` / `macro-health` の `workflow_run` チェーンも発火
-> しない。**現在の駆動は `scripts/run_nightly.py`（日次 JST 17:20）と `scripts/run_monthly.py`
-> （月次 毎月1日 JST 01:00）**で、停止と代替の対応は上の「GitHub Actions（#503 で停止したもの）」が
-> 正本。ファイルとしては `workflow_dispatch` の口が生きているが、**GHA からはローカル正本の DB へは
+> **⚠ 下表の「使うタイミング」には cron 停止前の記述が残っている。** #503 で `daily-incremental` の
+> `schedule:` はコメントアウトされ、連動して `nightly-scores` / `macro-health` の `workflow_run`
+> チェーンも発火しない。月次3本（`macro-beta-inference` / `tune-hyperparameters` /
+> `recommend-factor-premia`）は **#504 でファイルごと削除した**ので下表にも無い。
+> **現在の駆動は `scripts/run_nightly.py`（日次 JST 17:20）・`scripts/run_monthly.py`
+> （月次 毎月1日 JST 01:00）・`run_monthly_beta.ps1`（2日）・`run_monthly_m1.ps1`（3日）・
+> `run_daytime.ps1`（平日 08:00）**で、停止と代替の対応は上の「GitHub Actions（#503 で停止したもの）」が
+> 正本。残っているファイルは `workflow_dispatch` の口が生きているが、**GHA からはローカル正本の DB へは
 > 書けない**（書けるのは Supabase 断面だけ＝走らせると正本と分岐する）。定時で生きているのは
 > `egress-health` / `ci` / `notify-failure` の**3本**（`vacuum-maintenance` は 2026-08-25 に停止・#290 / #505）。
 
@@ -171,11 +179,8 @@ python -m scripts.backup_restore --source storage --apply --create-schema `
 | `[定常]` | 差分収集・毎日自動実行 | `daily-incremental.yml` | **毎日 UTC 08:17（JST 17:17）** に自動（#476 で JST 03:00 から前倒し＝大引け 15:30 と EDINET 受付終了 17:15 の直後。根拠は下記「daily-incremental の動作詳細」）。手動で即時更新したい場合は `workflow_dispatch` | **2h05m〜2h38m**（2026-08-02 実測）。#474 以降、週末・祝日明けは gap-fill をほぼ飛ばすため大幅に短い |
 | `[全件]` | XBRL収集・財務データ全件更新 | `full-pipeline.yml` | DB初期構築時・全社バックフィル必要時（`daily-incremental` を `.disabled` に退避して同時実行回避） | 200〜240分 |
 | `[補完]` | マクロのみ収集 | `collect-macro.yml` | `MACRO_SERIES`（為替・金利・指数・コモディティ・ボラ）を Yahoo から収集。新規系列追加や macro_data の鮮度補完。`workflow_dispatch`（years 既定5）。**新系列のバックフィルは years=6 で起動**（yoy は1年+30日で足りるが、将来 zscore 版追加時に再バックフィル不要な余裕幅。#358 コモディティ8系列追加時の運用）。入力 `series` に series_code（カンマ区切り）を渡すと**その系列だけ**を収集する（#444・定義是正後の再収集で GDELT 累積クエリ制限を消費しないため） | 〜数分 |
-| `[推論]` | M-1 per-stock 階層マクロβ推論（producer） | `macro-beta-inference.yml` | ADR-0002 の PyMC 階層ベイズ推論バッチ（`macro_beta_inference.py`）→ `macro_beta_loadings`/`macro_beta_meta` へ永続化（M-1 `macro_risk_return` が consumer）。本番 `requirements.txt` ではなく `requirements-inference.txt`（+PyMC）を使用。**毎月1日 UTC 00:00（JST 09:00）自動**（Issue #341・鮮度が人力任せで滞留した反省。#476 で 11:00 から移動＝`daily-incremental` の 08:17 前に 340分を収める）。手動即時実行は `workflow_dispatch`（draws/tune/target_accept/chains/r_hat_threshold/force 指定可・既定 800/800/0.95/2/1.05/false）。**収束ゲートは `--r-hat-threshold` で可変化**（Issue #341）＝ADR-0002 strict 基準は 1.01 だが、chains=2 では r_hat が構造的に ~1.02 で頭打ち（実 persist 済み 2026-07-04 run も r_hat_max=1.02・n_divergences=0）のため cron 既定を 1.05 とし、構造的 ~1.02 は自動 persist しつつ真の未収束（r_hat が 1.05 を大きく超過）は persist せず失敗させる。閾値を緩めても足りない例外運用時のみ `force=true` | 本番規模で最大 340分（`timeout-minutes: 340`・numpyro で実測 10.5〜11.2秒/draw。ローカル検証: 4銘柄合成データ・draws/tune=50・chains=2・g++無しの Python フォールバックで約8分） |
 | `[定常]` | 夜間スコア更新（`sector_ols` + M-6） | `nightly-scores.yml` | `nightly_scores.py`（Issue #432/#443・親 #423）を実行し、①`sector_ols` → `regression_results`（`predicted_market_cap` / `gap_ratio`）②`macro_enet`（M-6）→ `macro_enet_scores`（μ̂・`sell_ranking` の**既定** mu_source）を更新する。**起動は `daily-incremental` の `workflow_run` チェーンで `conclusion == 'success'` のときだけ**（株価が前進していない日にスコアだけ更新すると、古い株価由来の値が「今日のランキング」として出るため）。`sector_ols` は `regularization=ridge` 固定（既定 features 10項目は VIF>10 が頻発）、M-6 は params_schema の既定のまま（ADR-0021/0022 の実測と同一構成）。1モデルの失敗は他を巻き込まず、実行後に `max(computed_at)` / `max(created_at)` を直接クエリして永続化を確認する（例外なし＝コミット済みとしない）。モデル間の `load_data`（週次127万行）は `shared_snapshot_cache()` で共有し、Egress がモデル数に比例しないようにしている。手動即時実行は `workflow_dispatch` | **総所要 33.5分**（2026-08-04 本番実走・[run 30954182465](https://github.com/kome-kome/financial_app/actions/runs/30954182465)＝`sector_ols` 30.3分 + M-6 3.2分・job wall 34.5分）／**32.6分**（08-05・[run 31050406971](https://github.com/kome-kome/financial_app/actions/runs/31050406971)＝29.4分 + 3.2分）。`timeout-minutes` は実測 job wall の 2.0倍で **70分**（#446 で 150 から）。重いのは `sector_ols` 側で M-6 は 3.2分。起票時の 16.1分（2026-08-03・run 30808053564・30業種/2,837社）は #434 の構造的NULL対応前の値＝**銘柄数・業種数とともに伸びるので実走ログで追う** |
-| `[定常]` | M-1/M-2/M-3 ハイパーパラメータ月次自動探索 | `tune-hyperparameters.yml` | `hyperparameter_search.py`（Issue #264/#278/#291）を matrix strategy で3モデル並列実行し `plugin_tuned_params` へ永続化（Issue #292）。`macro_risk_return`/`macro_dlm` は `--strategy grid`、`macro_gbdt` は `--strategy random --n-iter 150`（6時間上限に収める設計判断）。共通 `--objective rank_ic --persist --persist-scores --seed 0`。品質ゲート（#291）でスコア劣化時は該当ジョブが failed 終了（意図した挙動）。**毎月1日 UTC 16:30（JST 翌01:30）自動**（#476 で 03:00 から移動＝旧設定は 355分走ると 08:55 まで伸び、`daily-incremental` の 08:17 と毎月確実に38分重なっていた）。手動即時実行は `workflow_dispatch` | macro_risk_return/macro_dlm: 10〜60分、macro_gbdt: 4〜8時間相当を n_iter=150 で圧縮（timeout-minutes: 355） |
 | `[補完]` | 半期(H1)財務収集 | `collect-interim.yml` | EDINET 半期報告書（043A00/docType160）と旧四半期報告書（043000/docType140）の Q2(中間=H1累計)を収集し `financial_records` に `period_type='H1'` で保存（Issue #219② フェーズB）。通期収集とは独立・常に差分（収集済み doc_id をスキップ）。`workflow_dispatch`（years_back 既定6＝既存通期窓に整合）。240分に収まらない場合は years_back を分割 | 数時間（過去6年・事前選別でQ1/Q3を除外し概ね1社1半期1DL） |
-| `[推論]` | recommend Fama-MacBeth ファクタープレミアム推定（producer） | `recommend-factor-premia.yml` | `recommend_factor_premia.py --persist`（Issue #271/#342・ADR-0008）を実行し、月次断面 OLS（Fama & MacBeth 1973・Newey-West HAC）で推定したファクタープレミアムを `recommend_factor_premia` テーブルへ永続化（`plugins.recommend.resolve_weights()` が「統計的最適化」プリセットとして読む consumer）。依存は `requirements.txt` で充足（PyMC 不要）。**毎月5日 UTC 22:00（JST 翌07:00）自動**（Issue #423 子5・#476 で 12:00 から移動）＝Fama-MacBeth 自体が月末スナップショットの月次 cadence なので、増える新情報は「月末が1つ増える」ことだけ。毎月1日は `macro-beta-inference`（〜05:40Z）と `tune-hyperparameters`（16:30〜22:25Z）で埋まっているため5日へ。UTC 12:00 は `daily-incremental` の最悪ケース（08:17〜14:17Z）に飲まれるため 22:00 へ。手動即時実行は `workflow_dispatch`（`min_companies_per_period` 既定30・`maxlags` 既定11）。**schedule 起動では `github.event.inputs.*` が空になる**ため run: 側の `|| '既定値'` を外さないこと（`tests/test_recommend_factor_premia_workflow.py` が強制）。MCMC のような収束ゲートは無し（断面 OLS は決定的） | **job wall 2分54秒**（2026-08-08 手動実走・[run 31265047095](https://github.com/kome-kome/financial_app/actions/runs/31265047095)＝バッチ本体 1分55秒）。`timeout-minutes` は実測の約7倍で **20分**（起票時の 120 は未計測の当て推量でハングしても2時間気づけなかった）。Egress は `load_data` 1回分 ≈ 68MB／月 |
 | `[定常]` | マクロ鮮度ゲート | `macro-health.yml` | `python -m scripts.check_macro_health`（Issue #420）が `macro_data` の系列別 `max(trade_date)` を期待更新頻度（`macro_health.FREQ_STALE_DAYS`）と突き合わせ、**既定モデルが使う系列**（`DEFAULT_MACRO_FEATURES` から逆引き）が古ければ exit 2 → `notify-failure` が Issue 起票。`collect_macro_data` は 1 系列失敗しても `continue` するため部分失敗が exit 0 で通り、#414 の失敗通知では拾えないのを塞ぐ。**収集本体（`daily-incremental` / `full-pipeline`）を落とさず独立ジョブに分離しているのが要点**——あちらを failure にすると `nightly-scores` の `workflow_run` チェーン（`success` 条件）が発火せず、マクロと無関係な `sector_ols` の夜間更新まで巻き添えで止まる（#425 の構造をワークフロー間へ適用）。収集側は同じレポートを run ログに出すだけ。誤検知が続く系列は `macro_health.EXCLUDED_SERIES` へ**理由付きで**登録する（現在: `JP_IP`＝FRED 凍結 #253／`JP_IIP`・`JP_IIP_INVENTORY`＝e-Stat が年単位更新 #451。`JP10Y` は #442 で `MACRO_SERIES` ごと削除したため除外指定も不要になった。`BCOM` は #438 の Yahoo 配信停止で一時除外していたが、収集元を連動 ETN `DJP` へ差し替えて 2026-08-06 に除外解除＝**直った系列は必ず除外から外す**（残すと代替ソース側の停止を検知できなくなる）） | 〜2分（GROUP BY 集約1本・`timeout-minutes: 10`） |
 | `[定常]` | Supabase 枠消費ゲート | `egress-health.yml` | `python -m scripts.check_egress_health`（Issue #478 / #483・[ADR-0037](adr/0037-egress-cycle-budget-is-a-second-axis.md)）が **Egress のサイクル累計**（`app_settings.egress_cycle_bytes`）と **Database Size**（`pg_database_size`）を閾値と突き合わせ、超過なら exit 2 → `notify-failure` が Issue 起票。**毎日 UTC 21:00（JST 06:00）自動**。閾値は Egress 80%（`db_egress.CYCLE_WARN_RATIO`）／DB 85%（`check_egress_health.DB_WARN_RATIO`）で、**DB 側を厳しくしてある**——Egress は超えても翌サイクルで戻るが、Database Size 超過は read-only で収集そのものが止まるため。**DB の判定値は `pg_database_size` で、Usage ページの課金判定値より約 35MB 低く出る**（2026-08-19 実測: Usage 430MB / Infrastructure 409.8MB / `pg_database_size` 395MB）＝閾値 0.90 のままだと Usage 基準で 97% 相当になり手遅れなので 0.85 に置いた。**この3つの数字を混ぜないこと。****`workflow_run` チェーンにせず cron で回すのが要点**：Egress はワークフローの成否と無関係に積み上がり、開発者のローカル CLI からも積まれる（過去2回の超過はどちらもローカル検証の反復が主因）ので「収集が成功した後に見る」では見落とす経路が残る。Management API の PAT は不要（判定材料は DB の中にある＝#483 のブロッカーを迂回）。手動即時実行は `workflow_dispatch`（`warn_only` で常に exit 0） | 〜2分（`timeout-minutes: 10`） |
 | `[定常]` | ワークフロー失敗の自動 Issue 起票 | `notify-failure.yml` | 上記ワークフロー（`ci.yml` を除く全本数・列挙しない設計）＋セルフテストが `failure` または `cancelled` で終わると自動起票（`workflow_run`）。手動起動しない。詳細は下記「ワークフロー失敗の通知」節 | 〜1分 |
@@ -324,37 +329,35 @@ gh run cancel <run-id>   # → annotation は "The run was canceled by @…" →
 | 本番バックフィル実行 | ✅ **完了**（2026-06-24 実測: 全年度 82〜87% カバレッジ。残 NULL はサービス業・金融等の構造的欠損） |
 | 完了判定 | 全年度で一様な欠損率（≒13〜18%）になっており旧コホート偏りは解消済み |
 
-### tune-hyperparameters の運用詳細（`.github/workflows/tune-hyperparameters.yml`）
+### ハイパーパラメータ探索の運用詳細（ローカル月次）
 
 M-1（`macro_risk_return`）・M-2（`macro_gbdt`）・M-3（`macro_dlm`）のハイパーパラメータ
-自動探索（ADR-0007／ADR-0010）を GitHub Actions で月次実行する。GUI からの手動トリガーは
-Issue #293 で廃止済みのため、探索の実行手段は本ワークフローの自動実行と
-`workflow_dispatch` による手動実行のみ。
+自動探索（ADR-0007／ADR-0010）は、#503 の正本反転までは GitHub Actions
+（`tune-hyperparameters.yml`）が回していた。現在はローカルのタスクスケジューラが回し、
+**yml は #504 で削除した**。GUI からの手動トリガーは Issue #293 で廃止済み。
 
-- **実行頻度**: `cron: '0 3 1 * *'`（UTC 03:00 = JST 12:00、毎月1日）。matrix で3モデルを
-  並列ジョブに分割し（`fail-fast: false`）、`macro_risk_return`/`macro_dlm` は
-  `--strategy grid`（`timeout-minutes: 240`）、`macro_gbdt` は
-  `--strategy random --n-iter 150`（`timeout-minutes: 355`＝6時間上限ギリギリを避ける値）。
-- **品質ゲートの挙動（Issue #291）**: `hyperparameter_search.py --persist` は
-  `plugin_tuned_params` の既存 `objective_value` と今回の `best_score` を比較し、劣化して
-  いれば永続化（`--persist-scores` 併用時の producer スコア更新も含む）をスキップして
-  `SystemExit` で非ゼロ終了する。**この場合ジョブは `failed` 扱いになり GitHub 標準の
-  失敗通知（Actions の通知設定に従いメール等）が飛ぶ**——これは意図した挙動であり、
-  `continue-on-error` 等では握りつぶさない。1モデルの品質ゲートスキップ・実行失敗は
-  `fail-fast: false` により他モデルのジョブへ波及しない。
+- **実行**: M-2/M-3 は月次本体（`run_monthly.ps1`・毎月1日 JST 01:00）の `tune:<model>`
+  ステップ。M-1 は実測 約752分で本体の窓（960分）に入らないため専用タスク
+  （`run_monthly_m1.ps1`・毎月3日・#584・[ADR-0046](adr/0046-steps-that-cannot-finish-get-their-own-task.md)）。
+  ステップ予算は `scripts/run_monthly.py::BUDGET_MIN` が持ち、**Σ予算＋マージン ≤ 窓** を CI が照合する。
+- **品質ゲート（#291 → #590 で作り直し・[ADR-0047](adr/0047-persisted-scores-need-their-panel.md)）**:
+  旧実装は永続化済みの `objective_value` と比較し、劣化していれば persist をスキップして
+  非ゼロ終了した。だが保存値は「そのとき存在したパネルでの値」で、パネルは毎晩伸びるため
+  月をまたいだ比較が成立しない（実測 0.5068=10 fold / 0.0221=55 fold＝**fold が少ない候補ほど
+  高く出る**）。実際 `macro_gbdt` はこれで 2026-07-19 の値のまま閉じ続けた。現在は champion を
+  **同一パネル上で**測り直して候補プールへ入れるので `best >= champion` が構造的に成立し、
+  persist は常に行い exit は 0。水準の移動は WARNING と `plugin_tuned_params` の
+  `prev_objective_value` / `champion_objective_value` / `n_periods` / `n_oof_samples` に残す。
 - **失敗時の対応手順**:
-  1. GitHub リポジトリの Actions タブ → `[定常] M-1/M-2/M-3 ハイパーパラメータ月次自動探索`
-     の該当実行を開き、失敗した matrix ジョブ（`model` 名で識別）を確認する。
-  2. 各ジョブの `Upload log` ステップが `hyperparameter_search_<model>.log` を
-     artifact として30日間保持する（`actions/upload-artifact`・`if: always()` のため
-     ジョブ失敗時も取得可能）。ダウンロードして探索の詳細ログ（各候補のスコア・
-     品質ゲートでスキップされた場合はその理由）を確認する。
-  3. 品質ゲートによる意図的なスキップ（データの一時的な劣化等）であれば、次回月次実行を
-     待つか、原因（マクロデータの欠損・異常値等）を先に是正してから
-     `workflow_dispatch` で手動再実行する（GitHub UI の Actions タブ → 対象ワークフロー →
-     `Run workflow`、または `gh workflow run tune-hyperparameters.yml`）。
-  4. 品質ゲート以外の失敗（DB接続エラー・依存関係エラー等）はログから原因を特定し、
-     修正後に同様の手順で再実行する。
+  1. `.logs/monthly_YYYYMMDD.log`（M-1 は `monthly_m1_*`）の `END tune:<model>: exit=...` を見る。
+     **`exit=124` はステップ予算での打ち切り**＝完走していないので何も永続化されていない
+     （`hyperparameter_search` は `search()` が完走してからしか書かない）。
+  2. 失敗は `scripts/batch_common.py` が `gh issue create` で起票する（#587 が実例）。
+     **ただしその Issue を閉じても穴は残る**——2026-09-01 の打ち切り後、`plugin_tuned_params` は
+     M-2 が 50日・M-3 が 59日 古いまま誰も気づかなかった。成果物の固着は
+     `batch_freshness.PRODUCERS` を watchdog が見て別に起票する（#504）。
+  3. 予算切れが続くなら `BUDGET_MIN` を実測から見直すか、そのステップを日中枠
+     （`run_daytime.ps1 -Enqueue tune:macro_gbdt`・#618）へ逃がす。
 
 ---
 
