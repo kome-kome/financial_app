@@ -171,6 +171,8 @@ web版・ローカル版の双方が同じ Issue を見ることで、**コー�
 - **完了の同期**: PR 本文に `Closes #N` を書く。**main マージで Issue が自動クローズ**＝コード状態と残タスクが構造的に一致する。
 - 運用詳細は [FUTURE_TASKS.md](docs/FUTURE_TASKS.md)。
 
+**セッション開始時**: `./run_daytime.ps1 -Queue` と `.logs/daytime_*.log` の最新を見る。実測待ちの Issue は日中枠（#618）が平日1日1件ずつ進めており、**前回セッション以降に結果が出ている**ことがある。見ないまま同じ実測を手で回すと、並走で結果を汚したうえに丸1日ぶんの計算を捨てる。見積りで置いた `measured_min` は実走ログの `END <step>: exit=0 (N.N分)` から**実測へ差し替える**。
+
 **セッション終了時**: `git status` →（`.env`・機密を除外して）`git add` → `git commit` → `git push`。**残タスクが生じたら Issue 化**してから終了する。
 
 ---
