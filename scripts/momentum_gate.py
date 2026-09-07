@@ -158,10 +158,17 @@ class Cond(NamedTuple):
     どちらが何の軸かを読み手が数えることになる。既定 `use_macro=True` は本番構成
     （M-1・M-2 とも `params_schema()` の既定が True）で、モメンタムの判定は
     従来どおりマクロ ON の下で行われる＝ADR-0045 の実測条件が動かない。
+
+    #615 で軸が5つになった。`build_interactions` / `max_features` の既定も本番構成
+    （M-1 は交互作用あり・列数はプラグインの `params_schema()` 既定）で、
+    **既存3モードの測定条件は1ビットも動かない**。`max_features=None` は
+    「プラグインの既定に従う」の意味で、数値を書き写さないための表現。
     """
     use_momentum: bool
     momentum_window: int
     use_macro: bool = True
+    build_interactions: bool = True
+    max_features: int | None = None
 
 
 CONDS: dict[str, bool] = {"off": False, "on": True}
@@ -175,6 +182,29 @@ MACRO_BASE_COND = "nomacro"
 # 保持するため `use_macro` が母集団をほとんど動かさず、そもそも `tuning_search_space()` で
 # 探索していない（既定固定）。M-1 だけが strict × 探索軸の組み合わせを持つ。
 MACRO_MODELS = ["risk_return"]
+
+# 交互作用モード（`--interactions`・#615）。**基準は「交互作用なし」側**——M-1 は strict
+# なので、列が増えるほど「1つでも欠損したら断面を破棄」に当たりやすく母集団が縮みうる。
+# 広い側を分母にする原則は窓モード・マクロ軸モードと同じ。
+#
+# なぜこの軸を測るのか: #604 の実測でマクロ特徴量は共通域で rank-IC を **−0.0920**
+# 下げているが、`use_macro` は主効果と交差項を**同時に**動かす。M-1 は
+# `build_interactions=True` で財務 × マクロの交差項を作るため列数が一気に増える
+# （実測: nomacro 4列 に対し macro は max_features=20 の上限いっぱい）。
+# 悪化しているのが「マクロ主効果」なのか「交差項が上限を食い尽くしたこと」なのかは、
+# この軸を分けないと決まらない。
+INTERACTION_CONDS: dict[str, bool] = {"nointer": False, "inter": True}
+INTERACTION_BASE_COND = "nointer"
+# 交互作用も列数上限も M-1 にしか無い（M-2/M-6 は `build_interactions=False` が本番構成で、
+# BIC 選択も持たない）。測る意味があるのは M-1 だけ。
+INTERACTION_MODELS = ["risk_return"]
+
+# 列数モード（`--max-features`・#615）。**基準は本番値**（`params_schema()` の既定）。
+# 他モードの「母集団が広い側を分母に」という原則がここでは使えない——`max_features` は
+# 列を選ぶだけで**母集団を動かさない**ことが ADR-0050 の実測で確定しているため。
+# 代わりに「本番から動かすとどうなるか」を見る形にする。
+MAXFEAT_MODELS = ["risk_return"]
+MAXFEAT_BASE_PREFIX = "mf"
 
 MODELS = ["xgb_m2", "elasticnet"]
 MODEL_LABELS = {"xgb_m2": "M-2(XGBoost)", "elasticnet": "M-6(ElasticNet)",
@@ -201,31 +231,57 @@ MODEL_SPECS: dict[str, tuple[str, str, str]] = {
 BASE_COND = "off"    # 比較の分母。窓モードでも「モメンタム無し」が基準
 
 
+def maxfeat_cond_name(n: int) -> str:
+    """列数モードの条件名（`mf20` 等）。名前の作り方を1箇所に閉じる。"""
+    return f"{MAXFEAT_BASE_PREFIX}{n}"
+
+
 def build_conditions(windows: list[int] | None = None,
-                    macro: bool = False) -> dict[str, Cond]:
+                    macro: bool = False,
+                    interactions: bool = False,
+                    max_features: list[int] | None = None) -> dict[str, Cond]:
     """条件集合 {名前: Cond} を作る。
 
-    3つのモードがある。**同時には使えない**（下記）:
+    5つのモードがある。**同時に使えるのは1つだけ**（下記）:
 
-      既定       … ADR-0045 の昇格ゲートと完全に同じ2条件（`off` / `on`・マクロは ON のまま）
-      `windows`  … モメンタム無し ＋ 各窓（#592・ADR-0050）
-      `macro`    … マクロ無し ＋ マクロ有り（#604）。モメンタムは既定 OFF に固定
+      既定           … ADR-0045 の昇格ゲートと完全に同じ2条件（`off` / `on`・マクロは ON のまま）
+      `windows`      … モメンタム無し ＋ 各窓（#592・ADR-0050）
+      `macro`        … マクロ無し ＋ マクロ有り（#604）。モメンタムは既定 OFF に固定
+      `interactions` … 交互作用なし ＋ あり（#615）。モメンタム OFF・マクロ ON に固定
+      `max_features` … BIC の列数上限を振る（#615）。他の軸は本番構成に固定
 
-    **`windows` と `macro` は同時に指定できない。** 母集団を動かす軸を2つ同時に振ると、
-    どちらの効果かが分離できない——それは共通域制限をかけても解けない（共通域は
-    「全条件で測れる銘柄」に揃えるだけで、条件間の差が2軸ぶん混ざっている事実は残る）。
-    この分離不能こそ #592/#604 が指摘している当のもので、測る側で再現しては意味がない。
+    **2つ以上を同時に指定できない。** 母集団を動かしうる軸を2つ同時に振ると、どちらの
+    効果かが分離できない——それは共通域制限をかけても解けない（共通域は「全条件で測れる
+    銘柄」に揃えるだけで、条件間の差が2軸ぶん混ざっている事実は残る）。この分離不能こそ
+    #592/#604 が指摘している当のもので、測る側で再現しては意味がない。
 
-    窓は昇順に並べ、重複は落とす（同じ窓を2回測っても検定数だけが増えて alpha が不当に
-    厳しくなる）。
+    `max_features` は ADR-0050 の実測で「母集団を動かさない」と確定しているが、**それでも
+    他モードと併用させない**——動かさないのは M-1 の現行パネルでの実測であって、
+    データが伸びれば変わりうる。併用を許す形にすると、変わった日に静かに交絡する。
+
+    窓・列数はいずれも昇順に並べ、重複は落とす（同じ値を2回測っても検定数だけが増えて
+    alpha が不当に厳しくなる）。
     """
-    if windows and macro:
+    modes = [("--windows", bool(windows)), ("--macro", macro),
+             ("--interactions", interactions), ("--max-features", bool(max_features))]
+    picked = [name for name, on in modes if on]
+    if len(picked) > 1:
         raise ValueError(
-            "--windows と --macro は同時に指定できません（母集団を動かす軸を2つ同時に"
+            f"{' と '.join(picked)} は同時に指定できません（母集団を動かしうる軸を2つ同時に"
             "振ると、共通域へ制限してもどちらの効果か分離できない）")
     if macro:
         return {name: Cond(False, MOM_WINDOW, use_macro)
                 for name, use_macro in MACRO_CONDS.items()}
+    if interactions:
+        # モメンタムは OFF・マクロは ON に固定する。マクロを切ると交互作用の相手が
+        # 消えて軸そのものが無くなる（`build_interactions=True` でも交差項が作られない）。
+        return {name: Cond(False, MOM_WINDOW, True, build_inter)
+                for name, build_inter in INTERACTION_CONDS.items()}
+    if max_features:
+        ns = sorted({int(n) for n in max_features})
+        if any(n < 1 for n in ns):
+            raise ValueError(f"列数上限は1以上の整数で指定してください: {ns}")
+        return {maxfeat_cond_name(n): Cond(False, MOM_WINDOW, True, True, n) for n in ns}
     if not windows:
         return {name: Cond(use_mom, MOM_WINDOW) for name, use_mom in CONDS.items()}
     ws = sorted({int(w) for w in windows})
@@ -234,13 +290,24 @@ def build_conditions(windows: list[int] | None = None,
     return {BASE_COND: Cond(False, MOM_WINDOW), **{f"mw{w}": Cond(True, w) for w in ws}}
 
 
-def base_of(conds: dict[str, Cond]) -> str:
+def base_of(conds: dict[str, Cond], default_max_features: int | None = None) -> str:
     """比較の分母になる条件名を返す。
 
-    **どのモードでも「母集団が最も広い条件」が分母**になる（モメンタム無し／マクロ無し）。
-    縮む側を分母に置くと、母集団効果が「改善」として符号ごと出てしまう。
+    **多くのモードでは「母集団が最も広い条件」が分母**になる（モメンタム無し／マクロ無し／
+    交互作用無し）。縮む側を分母に置くと、母集団効果が「改善」として符号ごと出てしまう。
+
+    **列数モードだけは原則が使えない**——`max_features` は列を選ぶだけで母集団を動かさない
+    （ADR-0050 の実測）。そこで分母は**本番値**（プラグインの `params_schema()` 既定）に置き、
+    「本番から動かすとどうなるか」を見る形にする。本番値が条件集合に無いときは最小値へ倒す
+    （比較の向きが読み手に伝わればよく、どれを選んでも母集団は同じ）。
     """
-    return BASE_COND if BASE_COND in conds else MACRO_BASE_COND
+    for cand in (BASE_COND, MACRO_BASE_COND, INTERACTION_BASE_COND):
+        if cand in conds:
+            return cand
+    prod = maxfeat_cond_name(default_max_features) if default_max_features else None
+    if prod and prod in conds:
+        return prod
+    return sorted(conds, key=lambda k: int(k[len(MAXFEAT_BASE_PREFIX):]))[0]
 
 
 def bonferroni_alpha(n_models: int, n_conds: int) -> float:
@@ -274,6 +341,11 @@ def _restrict_months(panel: tuple, yms: set) -> tuple:
             {ym: v for ym, v in m.items() if ym in yms},
             {ym: v for ym, v in i.items() if ym in yms},
             feats)
+
+
+# 標準出力へ出す特徴量名の件数（#615）。JSON には全件残すので、ここは「1行に収まる範囲で
+# 中身の見当がつく」ことだけを狙う。M-1 の本番は max_features=20 で、全部出すと折り返す。
+_FEATURE_PREVIEW = 6
 
 
 def _panel_stats(samples_by_ym: dict, ids_by_ym: dict, feats: list) -> dict:
@@ -348,14 +420,19 @@ def macro_names_for(kind: str) -> list:
 
 
 def _build(kind: str, args, prices_by_co, fin_by_co, companies, macro_cache,
-           use_momentum: bool, mom_window: int, use_macro: bool = True) -> tuple:
-    """種別の本番 config のまま、条件の軸（モメンタム／マクロ）だけ差し替えて構築する。
+           use_momentum: bool, mom_window: int, use_macro: bool = True,
+           build_interactions: bool = True, max_features: int | None = None) -> tuple:
+    """種別の本番 config のまま、条件の軸だけ差し替えて構築する。
 
     `use_macro=False` は本番の M-1 が `use_macro=False` で走るときと同じ状態にする——
     `macro_risk_return.execute` の `macro_names = list(macro_features) if use_macro else []`
     と同じ形で、マクロ系列名を空にする（#604）。**strict（`macro_nan_ok=False`）では、
     これが母集団を変える**: マクロ特徴量が0個なら「1つでも欠損したら断面を破棄」の条件が
     成立せず、欠損由来の脱落が消えて母集団が広がる。だからこの軸は共通域で測る必要がある。
+
+    `build_interactions=False` / `max_features` は #615 の切り分け用の軸。**どちらも M-1
+    にしか効かない**——M-2/M-6 は交互作用を持たないのが本番構成で、BIC 選択も無い。
+    引数が渡っても `kind != "m1"` なら無視する（種別の本番構成のほうが優先される）。
 
     **config は各プラグインの `params_schema()` から取り、ここへ書き写さない**（書き写すと
     本番が変わったときに黙って別物を測る）。種別ごとの差は本番コードの差そのもの:
@@ -376,14 +453,16 @@ def _build(kind: str, args, prices_by_co, fin_by_co, companies, macro_cache,
         prices_by_co, fin_by_co, companies, macro_cache,
         params["fin_features"], macro_names,
         use_momentum, mom_window, params["min_coverage"],
-        build_interactions=(kind == "m1"),
+        # M-2/M-6 は交互作用を持たないのが本番構成なので、条件が True でも入れない。
+        build_interactions=(kind == "m1" and build_interactions),
         macro_nan_ok=(kind != "m1"),
         return_stock_ids=True,
         **extra,
     )
     s, m, i = _thin(samples_by_ym, meta_by_ym, ids_by_ym, args.stride)
     if kind == "m1":
-        s, feats = _select_bic(s, feats, params["max_features"])
+        # 列数上限は条件が指定したものを優先し、無ければプラグインの既定（本番値）。
+        s, feats = _select_bic(s, feats, max_features or params["max_features"])
     return s, m, i, feats
 
 
@@ -428,6 +507,13 @@ def main() -> None:
     ap.add_argument("--macro", action="store_true",
                     help="マクロ軸モード（use_macro の ON/OFF を共通域で測る・#604）。"
                          f"モデル既定は {','.join(MACRO_MODELS)}。--windows とは併用不可")
+    ap.add_argument("--interactions", action="store_true",
+                    help="交互作用モード（build_interactions の ON/OFF を共通域で測る・#615）。"
+                         "マクロの悪化が「主効果」なのか「交差項が列数上限を食い尽くしたこと」"
+                         f"なのかを分ける。モデル既定は {','.join(INTERACTION_MODELS)}。他モードと併用不可")
+    ap.add_argument("--max-features", dest="max_features",
+                    help="列数モード（BIC の max_features をカンマ区切りで振る・#615。"
+                         "例: 5,10,20,30,40）。分母は本番値。他モードと併用不可")
     ap.add_argument("--smoke", action="store_true", help="サンプルを間引いた短時間確認")
     ap.add_argument("--stride", type=int, default=1, help="各月のサンプル間引き幅")
     ap.add_argument("--allow-full-pull", action="store_true",
@@ -439,10 +525,17 @@ def main() -> None:
         args.stride = 5
     set_refresh(args.refresh_cache)
 
-    # マクロ軸モードの既定モデルは M-1 だけ（`MACRO_MODELS`）。M-2/M-6 は
-    # `macro_nan_ok=True` で欠損を nan として保持するため `use_macro` が母集団をほとんど
-    # 動かさず、そもそも探索軸に持っていない＝測る動機が無い。
-    default_models = MACRO_MODELS if args.macro else MODELS
+    # M-1 専用モードの既定モデルは M-1 だけ。M-2/M-6 は `macro_nan_ok=True` で欠損を nan
+    # として保持するため `use_macro` が母集団をほとんど動かさず、交互作用も BIC の列数上限も
+    # 持たない（本番構成が `build_interactions=False`）＝いずれも測る動機が無い。
+    if args.macro:
+        default_models = MACRO_MODELS
+    elif args.interactions:
+        default_models = INTERACTION_MODELS
+    elif args.max_features:
+        default_models = MAXFEAT_MODELS
+    else:
+        default_models = MODELS
     models = ([m.strip() for m in args.models.split(",") if m.strip()]
               if args.models else list(default_models))
     unknown = [m for m in models if m not in MODEL_SPECS]
@@ -451,11 +544,17 @@ def main() -> None:
             f"未知のモデル: {', '.join(unknown)}（{', '.join(MODEL_SPECS)} のみ）")
     windows = ([int(w) for w in args.windows.replace(" ", "").split(",") if w]
                if args.windows else None)
+    max_features = ([int(n) for n in args.max_features.replace(" ", "").split(",") if n]
+                    if args.max_features else None)
     try:
-        conds = build_conditions(windows, macro=args.macro)
+        conds = build_conditions(windows, macro=args.macro,
+                                 interactions=args.interactions, max_features=max_features)
     except ValueError as e:
         raise SystemExit(str(e))
-    base = base_of(conds)
+    # 列数モードの分母は本番値（プラグイン既定）。**ここで数値を書き写さない**。
+    prod_max_features = coerce_params(
+        get_plugin(MODEL_SPECS[models[0]][0]).params_schema(), {}).get("max_features")
+    base = base_of(conds, prod_max_features)
     # **alpha は検定数から導出する**（定数 ALPHA を窓モードへ流用すると、条件を増やした
     # ぶんの多重比較が補正されないまま「有意」が出る）。
     alpha = bonferroni_alpha(len(models), len(conds))
@@ -467,7 +566,10 @@ def main() -> None:
     # 既定の出力先はモードで分ける。同じファイルへ上書きすると、あとから JSON を見たときに
     # 「どの軸を測った結果か」が中身を読むまで分からない（`mode` フィールドはあるが、
     # ファイル名で取り違えたまま比較するほうが起きやすい）。
-    default_out = f"momentum_gate{'_macro' if args.macro else ''}.json"
+    suffix = ("_macro" if args.macro else
+              "_interactions" if args.interactions else
+              "_maxfeat" if args.max_features else "")
+    default_out = f"momentum_gate{suffix}.json"
     out_path = Path(args.json_path) if args.json_path else _OUT_DIR / default_out
 
     db = SessionLocal()
@@ -506,15 +608,23 @@ def main() -> None:
             for kind in kinds:
                 s, m, i, feats = _build(kind, args, prices_by_co, fin_by_co, companies,
                                         macro_cache, c.use_momentum, c.momentum_window,
-                                        c.use_macro)
+                                        c.use_macro, c.build_interactions, c.max_features)
                 panels[(cond, kind)] = (s, m, i, feats)
                 st = _panel_stats(s, i, feats)
+                # **選ばれた列名を残す**（#615）。M-1 は BIC が列を選ぶので、数だけでは
+                # 「マクロ無しの4列が何か」「交差項が上限を食い尽くしているか」が分からない。
+                # 標準出力は先頭だけ・JSON には全件（判断は生値で行う）。
+                st["features"] = list(feats)
                 stats[f"{cond}|{kind}"] = st
+                head = ", ".join(feats[:_FEATURE_PREVIEW])
+                more = f", +{len(feats) - _FEATURE_PREVIEW}" if len(feats) > _FEATURE_PREVIEW else ""
                 print(f"[{cond}/{kind}] mw={c.momentum_window if c.use_momentum else '-'} "
                       f"macro={'on' if c.use_macro else 'off'} "
+                      f"inter={'on' if c.build_interactions else 'off'} "
+                      f"maxfeat={c.max_features or '-'} "
                       f"months={st['months']} ({st['first_ym']}..{st['last_ym']}) "
                       f"samples={st['samples']} companies={st['companies']} "
-                      f"features={st['n_features']}", flush=True)
+                      f"features={st['n_features']} [{head}{more}]", flush=True)
 
         # ── 2. 各条件 × 各モデルを走らせる（残差も受け取る）────────────────────
         results: dict[str, dict] = {}
