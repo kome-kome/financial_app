@@ -93,6 +93,11 @@ _Avoid_: 検証分析, 評価（メタ＝分析の分析である性質が落ち
 **退役（モデル） (model retirement)**:
 [[比較ファミリー]]のメンバーを **UI の選択肢から降ろすが、コードと比較の土俵には残す**こと（`AnalysisPlugin.hidden = True`・ADR-0044）。`/api/plugins` の1箇所で除外するだけなので、レジストリ・`execute_plugin`・`POST /api/plugins/{name}/run`・`model_comparison.COMPARISON_MODELS`・テストは生き続ける＝**退役は削除ではない**。降ろす根拠は昇格ゲートと同じ土俵の実測（補正後 α を通る劣後）か、producer も下流参照も持たないこと。**未実測のまま退役させない**（実測は `python -m scripts.model_comparison_run --models a,b`）。削除しないのは、比較の基準線としての役割が退役後も残り、前提（マクロ系列・学習窓・前処理世代）が変われば結論が動きうるため。2026-08-30 に M-4（統合が M-6 単体を上回らない・p=0.810）と M-5（M-2 に有意劣後・p=0.001）を退役させた（#570）。
 _Avoid_: 削除（コードが残る点が落ちる）, 非表示（評価の結論であることが落ちる）, 廃止（復帰しうる含意が落ちる）
+
+**供給者から降ろす (demotion from supply)**:
+[[比較ファミリー]]のメンバーを **[[μ出所トグル]]の選択肢から外すが、画面のタブ・[[退役（モデル）]]の対象にはしない**こと（ADR-0052）。`hidden = True` を立てないので `/api/plugins` にも出続け、分析タブで実行でき、`model_comparison.COMPARISON_MODELS` にも並ぶ。降ろすのは「そのモデルが下流のアクション（売り判定・買い推奨）へ μ̂ を供給する役」だけで、**解釈（SHAP 等）と比較の基準線という役は残す**。[[退役（モデル）]]との違いは**画面から消えるかどうか**で、実測の根拠（補正後 α を通る劣後）を要求する点は同じ。2026-09-07 に M-2（`macro_gbdt`）を降ろした（#572）——M-6 に honest OOF rank-IC で有意劣後（ADR-0021）、M-2 固有だった 分割コンフォーマル区間 `r1_prime`（ADR-0020） は M-6 も持ち（#396）、M-4 の基底という支えは #570 の退役で弱まったため。**μ̂ の永続化は止めない**（M-4 の基底として読まれるため月次探索の `--persist-scores` は据え置き）。
+_Avoid_: 退役（画面から消える含意が入る）, 無効化（実行できなくなる含意が入る）, 格下げ（何を下げたのかが落ちる）
+
 _Avoid_: 冗長モデル群（比較価値が落ちる）, モデル乱立（意図的並置の含意が落ちる）
 
 **対照モデル (control model)**:
@@ -166,7 +171,7 @@ _Avoid_: バックテスト（preset/as-of の別機能と二義化するため�
 _Avoid_: ショートリターン（実際に空売りした収益ではなく「回避価値」のため）, bottom分位リターン（水準そのものは市場全体の地合いを含み期・モデル横断で比較できないため）
 
 **μ出所トグル (mu_source) / producer μ̂**:
-[[売りスコア]]の μ（期待リターン）・−R_macro 観点に使う推奨モデルの選択（`macro_risk_return`＝M-1／`macro_gbdt`＝M-2／`macro_dlm`＝M-3／`macro_enet`＝M-6・**既定**。`macro_ensemble`＝M-4 は 2026-08-30 に[[退役（モデル）]]し選択肢から除去・#570）。既定は #402（ADR-0022）で M-2 → M-6 へ切替（[[売り側spread]]が +0.0145・p=0.001 で有意に優位）。各 producer μ̂ は `execute()` が専用テーブル（`macro_gbdt_scores` / `macro_dlm_scores` / `macro_ensemble_scores` / `macro_enet_scores`）へ**全置換（スナップショット置換）で直書き**し（`sector_ols`→`regression_results` と同型）、売り推奨は M-1 と同一契約 `{mu, r_macro, r1_prime}` で read する。−R_macro（[[系統的マクロリスク曝露]]）は共有 `macro_beta` 由来でモデル非依存ゆえ `mu_source` に依らず不変。**R3 足切りゲートが効くのは r1_prime を持つ M-1（予測SE）・M-2・M-6（コンフォーマル区間半幅）のみ**（M-3 は不在＝無効。退役した M-4 も同じく不在）。選択モデル未実行なら graceful-degrade（μ 成分を除外）。
+[[売りスコア]]の μ（期待リターン）・−R_macro 観点に使う推奨モデルの選択（`macro_risk_return`＝M-1／`macro_dlm`＝M-3／`macro_enet`＝M-6・**既定**。`macro_ensemble`＝M-4 は 2026-08-30 に[[退役（モデル）]]し選択肢から除去・#570。`macro_gbdt`＝M-2 は 2026-09-07 に[[供給者から降ろす]]・#572/ADR-0052）。既定は #402（ADR-0022）で M-2 → M-6 へ切替（[[売り側spread]]が +0.0145・p=0.001 で有意に優位）。各 producer μ̂ は `execute()` が専用テーブル（`macro_gbdt_scores` / `macro_dlm_scores` / `macro_ensemble_scores` / `macro_enet_scores`）へ**全置換（スナップショット置換）で直書き**し（`sector_ols`→`regression_results` と同型）、売り推奨は M-1 と同一契約 `{mu, r_macro, r1_prime}` で read する。−R_macro（[[系統的マクロリスク曝露]]）は共有 `macro_beta` 由来でモデル非依存ゆえ `mu_source` に依らず不変。**R3 足切りゲートが効くのは r1_prime を持つ M-1（予測SE）・M-6（コンフォーマル区間半幅）のみ**（M-3 は不在＝無効。退役した M-4 も同じく不在。M-2 は r1_prime を持つがトグルから外れたので到達しない）。選択モデル未実行なら graceful-degrade（μ 成分を除外）。
 **買い推奨（`recommend`）にも同名の `mu_source` があるが既定が異なる**: 売り側は `macro_enet` 既定、**買い側は既定 None＝μ̂ 不使用**（Issue #423 子4・ADR-0030）。買い側 rank-IC と[[売り側spread]]は順位が一致しないため、売りの既定を買いの既定へ持ち込まない。買い側で μ̂ を使うには「`mu` 指標へ重みを付ける」＋「`mu_source` を選ぶ」の2操作が要り、重みだけ付けて出所未指定なら reject する（黙って欠測にすると効いていないことが画面から分からないため）。
 _Avoid_: モデル選択（汎用すぎる）, M-2売り推奨（μ の出所のみ切替で売りロジック自体は共通のため）
 

@@ -86,7 +86,7 @@ sink は **ContextVar**。`execute` のシグネチャは `(params, db)` に固�
 複合スコアによる銘柄推薦（z_roe 等 `financial_metrics` VIEW 8指標＝`VIEW_METRICS`＋`RUNTIME_METRICS`＝z_momentum/mu）。
 
 - **VIEW 由来指標は加重前に断面で winsorize→標準化する**（`fit_view_metric_stats(records, weights)` → `standardize_metric`・Issue #509）。VIEW の `z_*` は年度窓の `(x-AVG)/STDDEV_SAMP` で **winsorize を通らない**ため、`op_margin` と `cf_ratio`（分母が共に `pl_revenue`）でゼロ近傍の1社が sd を支配し、実測で `z_op_margin` の 99.4% が \|z\|<0.2 まで潰れていた＝**同じ重み 1.0 の実効影響力が列間で最大 73倍違う**（#469 で決着）。`gap_ratio`（％単位で Z ですらない）も同じスコア合成へ入る以上は対象。`RUNTIME_METRICS` は `compute_momentum_z`／`compute_mu_z` が既に期内標準化しているので**除外**（二重標準化しない）。有効サンプル4件未満の列は生値へフォールバック。`results[].detail` は**生値のまま**（画面の表示値とスコアの合成単位は別物・`sell_ranking` と同じ扱い）。`backtest.py` も `run()` が同じ stats を作って `score_record` へ渡す＝as-of 再現が同じ土俵になる。
-- **`mu`（μ̂）は opt-in・既定 OFF**（Issue #423 子4・ADR-0030）— `mu_source`（M-1/M-2/M-3/M-4/M-6・既定 None）で producer を選び、`compute_mu_z` が sell_ranking と同じ producer 契約（`read_producer_scores`）で読んで候補集団内 winsorize→Z化する。**mu に重みがあるのに mu_source 未指定は ValueError→400**（黙って欠測にしない）、producer 未実行は graceful-degrade＋`mu_available=false`／`mu_asof` をレスポンスへ明示。4プリセットは mu 重みを持たず（`test_no_preset_carries_mu` が強制）、mu 重み 0 なら producer を読まない＝**既定経路のコストは 0**。
+- **`mu`（μ̂）は opt-in・既定 OFF**（Issue #423 子4・ADR-0030）— `mu_source`（M-1/M-3/M-6・既定 None）で producer を選び、`compute_mu_z` が sell_ranking と同じ producer 契約（`read_producer_scores`）で読んで候補集団内 winsorize→Z化する。**mu に重みがあるのに mu_source 未指定は ValueError→400**（黙って欠測にしない）、producer 未実行は graceful-degrade＋`mu_available=false`／`mu_asof` をレスポンスへ明示。4プリセットは mu 重みを持たず（`test_no_preset_carries_mu` が強制）、mu 重み 0 なら producer を読まない＝**既定経路のコストは 0**。
 - `z_momentum` も VIEW 外の実行時計算（`compute_momentum_z`）で、候補集団の `StockPriceWeekly` を **as_of − 400日の下限付き・500社チャンク**で取得し（Issue #418・下限は PK 第2列の `week_start` へ掛けて範囲スキャン化）`get_momentum_return`（12-1モメンタム）を winsorize+z標準化。`backtest.py` も同関数を as-of 日付付きで再利用（as-of検証のリークセーフ）。
 - `resolve_weights()`（Issue #271）はプリセット名から重みを解決し、静的4プリセットに加え「統計的最適化」（`recommend_factor_premia.py` が永続化した Fama-MacBeth ファクタープレミアム・`get_dynamic_preset` 経由・未算出時はバランス型へフォールバック）を `backtest.py` と共用で提供。**`get_dynamic_preset` は永続化行の `preprocess_version` が `plugins/utils.py::PREPROCESS_VERSION` と一致しない限り採らない**（#517・ADR-0039）——`mean_b` の単位は推定時の断面前処理に依存し（#509 で「生スケール1単位あたり」→「1sd あたり」へ変わった）、世代印が無かったため**旧単位の重み × 新単位の特徴量**という昇格ゲート未測定の組み合わせが実際に本番へ出た（実測 rank-IC −0.0881）。不一致時は古い一致ランを探さずバランス型へ倒す（実測でフォールバック先の方が有意に良い）。
 - **レスポンスに株価 as-of を同梱**（`price_freshness`＝p50/p05/max・stale_bdays・level、各行に `price_asof`＝その銘柄の最終株価日・#416）＝件数だけでは「19日古いランキング」を見分けられないため。判定軸は p50（max は少数銘柄で新しく見える）。
@@ -125,7 +125,7 @@ sink は **ContextVar**。`execute` のシグネチャは `(params, db)` に固�
 - **週次は `week_start >= today − 400日`＋500社チャンク＋3列**（#482）。400日は 52週ドローダウン（`closes[-52:]`＝364日）に余裕1ヶ月を足した値で情報損失ゼロ。下限は PK 第2列の `week_start` へ掛けて範囲スキャンにする（`trade_date` は非インデックス列）。
   - `recommend.compute_momentum_z` の `row_number() OVER`（各社最終バー1本）は**流用できない**——`_compute_trend` は13週前と52週高値を見るので系列そのものが要る。
   - `macro_snapshots.load_weekly_prices_chunked` も**流用できない**：①対象が `Company` 全社固定で保有20銘柄には過剰 ②戻り値は常に全履歴（#480 で DB からは差分だけ引くようになったが、キャッシュとマージして**返す形は全履歴のまま**＝学習用ローダーの契約は不変） ③`week_start` を返さない（#480 後も意図的にそのまま。差分の切り出しは ISO 週の不変条件を使って `trade_date` で行う） ④`_VOLUME_NOT_LOADED` 番兵は volume 用で不要。
-- **μ／−R_macro 観点の出所は `mu_source` トグル**（M-1 `macro_risk_return`／M-2 `macro_gbdt`／M-3 `macro_dlm`／M-4 `macro_ensemble`／M-6 `macro_enet`＝**既定**・#396/#402）で切替——選択 producer の `read_producer_scores` を読み、未実行なら graceful-degrade（`mu_available=false`）。
+- **μ／−R_macro 観点の出所は `mu_source` トグル**（M-1 `macro_risk_return`／M-3 `macro_dlm`／M-6 `macro_enet`＝**既定**・#396/#402。M-4 は退役・ADR-0044／M-2 は供給者から降ろした・ADR-0052）で切替——選択 producer の `read_producer_scores` を読み、未実行なら graceful-degrade（`mu_available=false`）。
 - **R3 足切りゲートは `r1_prime`（M-1=予測SE／M-2・M-6=コンフォーマル区間半幅・ADR-0020/#365）で M-1・M-2・M-6 とも機能**（M-3/M-4 は r1_prime 不在で無効・`r1_prime=None` はゲート素通り）。
 - **`mu_asof`（producer スコアの代表 as-of・最古・古い銘柄数）を返却**（`database.get_producer_asof`・#417。M-1 は meta の日付が推論実行日でデータ as-of ではないため None）。
 
@@ -185,7 +185,7 @@ producer は共有 `macro_beta`（`read_producer_scores` は `macro_snapshots.ge
 
 - **価格行動系特徴量 `price_features`（px_*・M-3 と共有・既定 OFF・#364）を `use_momentum` と同型でゲート**（`build_snapshots(price_features=...)` 経由）。
 - **セクター/サイズのカテゴリ特徴量 `use_sector_features`（既定 OFF・#370）**: 業種のリークフリー target encoding（各 fold 内の業種平均リターン・`_wrap_sector_target_encoding` が per-fold fit＝リーク厳禁）＋`log_size`（log 総資産・欠損 NaN）を `execute` 内で後付け連結（`build_snapshots` 無改変＝M-1 の OLS 特徴不干渉／OLS ベースラインは sector-free）。native categorical(A) は np.array→pandas category 改修が要るため見送り target encoding(B) を採用。
-- **`oof_backtest`（アウトオブサンプル検証＝無リーク OOF 予測の分位/rank-IC/LS/hit-rate＋コンフォーマル区間被覆率 `interval_coverage`・ADR-0020）を返却**し、**per-stock μ̂ と確実性軸 `r1_prime`（コンフォーマル区間半幅・#365）を `macro_gbdt_scores` へ全置換で永続化**（producer）。`produced_output`/`read_producer_scores`（M-1 と同一形）で売り推奨が `mu_source` 経由で読み、**R3 足切りゲートが機能する**。
+- **`oof_backtest`（アウトオブサンプル検証＝無リーク OOF 予測の分位/rank-IC/LS/hit-rate＋コンフォーマル区間被覆率 `interval_coverage`・ADR-0020）を返却**し、**per-stock μ̂ と確実性軸 `r1_prime`（コンフォーマル区間半幅・#365）を `macro_gbdt_scores` へ全置換で永続化**（producer）。`produced_output`/`read_producer_scores`（M-1 と同一形）は残るが、**`mu_source` の選択肢からは外れた**（#572・ADR-0052）＝売り推奨からは読まれない。永続化を続けるのは M-4 が基底として読むためで、R3 足切りゲートの実装も無改変のまま残る（到達しないだけ）。
 - `tuning_search_space()`（XGBoost 7軸・ランダムサーチ既定・#266）。
 
 依存先: `plugins/utils.py`, `macro_snapshots.py`, xgboost, shap

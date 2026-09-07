@@ -4,6 +4,8 @@
 
 accepted（2026-06-26・grill/Opus で設計確定）。実装は GitHub Issue #234 系列で追跡。ADR-0003（M-2 本体）の続編。
 
+**一部 superseded（2026-09-07・[ADR-0052](0052-m2-stays-for-interpretation-not-supply.md)）**: 本 ADR が決めた「M-2 を `mu_source` トグルへ載せる」部分のみ撤回した（#572）。OOF 連動・producer 契約（`produced_output` / `read_producer_scores`）・R1' による R3 足切りゲートはそのまま生きており、M-2 は `hidden` にもしていない（分析タブ・SHAP・`COMPARISON_MODELS` は無改変）。
+
 ## Context
 
 ADR-0003 で M-2（`macro_gbdt`）を M-1 の非線形兄弟として実装したが、M-2 は**単独実行のみ**で下流機能に繋がっていなかった。要望は M-2 を「売り推奨（`sell_ranking`）」と「バックテスト」の双方へ連動させること。

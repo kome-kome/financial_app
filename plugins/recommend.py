@@ -26,9 +26,10 @@ RUNTIME_METRICS = ("z_momentum", "mu")
 MU_SOURCE_OPTIONS = [
     {"value": "",                  "label": "使わない（既定）"},
     {"value": "macro_risk_return", "label": "M-1: マクロ×リスク-リターン（OLS）"},
-    {"value": "macro_gbdt",        "label": "M-2: マクロ×財務 勾配ブースティング（XGBoost）"},
     {"value": "macro_dlm",         "label": "M-3: ベイズ状態空間（時変マクロβ DLM）"},
     # M-4（macro_ensemble）は退役につき選択肢から除去（ADR-0044・p=0.810 で M-6 単体と互角）。
+    # M-2（macro_gbdt）は**退役ではない**が供給者から降ろした（ADR-0052）。画面のタブも
+    # COMPARISON_MODELS も残り、SHAP による解釈と比較の基準線として動き続ける。
     {"value": "macro_enet",        "label": "M-6: マクロ×財務 正則化線形（ElasticNet）"},
 ]
 

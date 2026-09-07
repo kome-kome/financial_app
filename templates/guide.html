@@ -467,7 +467,7 @@ td code,p code,li code{background:var(--bg-sunken);border:1px solid var(--border
     <li>実行すると、売り点数の高い順に並び、<strong>売却 / 一部売却 / 保有継続</strong>の札が付きます。</li>
   </ul>
   <div class="info-box">各観点は同じ年の全社の中で「平均よりどれくらい良い／悪いか」（<span class="term" data-tip="平均=0、+で平均以上、−で平均以下の点数。">Zスコア</span>）に直してから合計するので、観点の単位の違いに引きずられません。「割高度」を使うには先に<a href="/guide#sector_ols" style="color:var(--status-good-text)">業種別OLS分析</a>を実行してください。</div>
-  <div class="info-box">売り判断に加味する「<strong>今後の伸びしろ（期待リターン）</strong>」の見立ては、<a href="/guide#macro_risk_return" style="color:var(--status-good-text)">M-1</a>・<a href="/guide#macro_gbdt" style="color:var(--status-good-text)">M-2</a>・<a href="/guide#macro_dlm" style="color:var(--status-good-text)">M-3</a>・<a href="/guide#macro_ensemble" style="color:var(--status-good-text)">M-4</a>・<a href="/guide#macro_enet" style="color:var(--status-good-text)">M-6</a> の予測モデルから「μ の出所」トグルで選べます（既定は M-6）。<strong>手元（ローカル）で一度動かしたモデルだけが選択肢に出ます</strong>。未実行のモデルを選んでもその成分は自動で外れるので、まずは既定のままでも問題ありません。</div>
+  <div class="info-box">売り判断に加味する「<strong>今後の伸びしろ（期待リターン）</strong>」の見立ては、<a href="/guide#macro_risk_return" style="color:var(--status-good-text)">M-1</a>・<a href="/guide#macro_dlm" style="color:var(--status-good-text)">M-3</a>・<a href="/guide#macro_enet" style="color:var(--status-good-text)">M-6</a> の予測モデルから「μ の出所」トグルで選べます（既定は M-6）。M-2 と M-4 はこのトグルからは外れています（M-4 は退役・M-2 は解釈と比較の基準線に役割を絞ったため）。<strong>手元（ローカル）で一度動かしたモデルだけが選択肢に出ます</strong>。未実行のモデルを選んでもその成分は自動で外れるので、まずは既定のままでも問題ありません。</div>
 
   <h3>⚠ 注意点・落とし穴</h3>
   <div class="warn-box">これは「いつ売れば儲かる」を当てるものではなく、<strong>持ち株を見直すきっかけ</strong>です。全部が優良なら全銘柄「保有継続」になります。ETF や外国株など未収録の銘柄は判定できません。</div>

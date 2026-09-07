@@ -67,10 +67,13 @@ _OUT = Path(__file__).resolve().parent / ".cache" / "sell_mu_source_bakeoff.json
 BASES = ["macro_risk_return", "macro_gbdt", "macro_enet"]
 LABELS = {
     "macro_risk_return": "M-1",
-    "macro_gbdt":        "M-2（現既定）",
+    "macro_gbdt":        "M-2（ADR-0022 まで既定）",
     "macro_enet":        "M-6",
 }
-# 現既定と切替候補（結論の自動判定に使う）。
+# ADR-0022 で比較した「当時の既定」と「切替候補」（結論の自動判定に使う）。**この対は
+# 決定そのものの記録なので現在の既定へ追随させない**（両方 macro_enet になれば検定は
+# 自明に無意味になる）。M-2 は #572/ADR-0052 で mu_source から外れたが、BASES は
+# M-4 の基底＝比較の土俵であって画面の品揃えではないため据え置く。
 CURRENT = "macro_gbdt"
 CANDIDATE = "macro_enet"
 

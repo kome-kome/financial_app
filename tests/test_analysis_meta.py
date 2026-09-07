@@ -127,6 +127,47 @@ class TestHiddenPlugins:
             leaked = hidden & self._mu_source_options(consumer)
             assert not leaked, f"{consumer} の mu_source に退役モデルが残っている: {sorted(leaked)}"
 
+    # `mu_source` に載る producer の期待集合（ADR-0052）。**hidden とは独立に縛る**——
+    # 上の test_hidden_plugins_are_not_offered_as_mu_source は「hidden ⇒ options から
+    # 外れる」の一方向しか見ておらず、**hidden でない M-2（macro_gbdt）が外れている状態は
+    # 誰も守っていない**（黙って1行足せば復活し、失敗としては現れない）。
+    # 増減させるときは ADR を添えてこの集合を直すこと。
+    EXPECTED_MU_SOURCES = {"macro_risk_return", "macro_dlm", "macro_enet"}
+
+    def test_mu_source_options_match_the_expected_set(self):
+        """mu_source の品揃えを期待集合で直接縛る（ADR-0044 の hidden とは別軸）。"""
+        for consumer in ("sell_ranking", "recommend"):
+            assert self._mu_source_options(consumer) == self.EXPECTED_MU_SOURCES, (
+                f"{consumer} の mu_source が期待集合と食い違う"
+                f"（actual={sorted(self._mu_source_options(consumer))} / "
+                f"expected={sorted(self.EXPECTED_MU_SOURCES)}）。"
+                "M-4 は退役（ADR-0044）、M-2 は供給者から降ろした（ADR-0052）"
+            )
+
+    def test_demoted_m2_is_visible_but_not_a_supplier(self):
+        """M-2 は「表示するが供給者ではない」第3の状態（ADR-0052）。
+
+        hidden にしていないことと mu_source に無いことを**同時に**縛る。片方だけだと
+        「退役させたつもりでタブごと消す」「戻したつもりで供給者へ復活する」の
+        どちらにも倒れうる。
+        """
+        from plugins import get_plugin
+
+        m2 = get_plugin("macro_gbdt")
+        assert m2 is not None and not m2.hidden, "M-2 は退役ではない（分析タブと SHAP は残す）"
+        assert "macro_gbdt" not in self._mu_source_options("sell_ranking")
+        assert "macro_gbdt" not in self._mu_source_options("recommend")
+
+        # 比較の基準線としての役は残る（ADR-0021 の bake-off が基準線に使う）
+        from model_comparison import COMPARISON_MODELS
+
+        assert "macro_gbdt" in {n for n, _ in COMPARISON_MODELS}
+
+        # M-4 の基底としての役も残る＝μ̂ の永続化を止めない根拠（ADR-0052）
+        from plugins.macro_ensemble import BASE_MODELS
+
+        assert "macro_gbdt" in BASE_MODELS
+
     def test_static_select_matches_sell_ranking_options(self):
         """analysis.html の静的 select と sell_ranking の options の二重管理を照合する。"""
         import re
