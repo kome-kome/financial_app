@@ -55,7 +55,22 @@ def redact_secrets(text: str) -> str:
 # パースして「その日は提出ゼロ」に化けるので、いまより悪い失敗の仕方になる。
 # 移設先は `api.edinet-fsa.go.jp`（2026-08-30 実測: documents.json 200・documents/{id} 200）。
 EDINET_BASE   = "https://api.edinet-fsa.go.jp/api/v2"
-JPX_EXCEL_URL = "https://www.jpx.co.jp/markets/statistics-equities/misc/tvdivq0000001vg2-att/data_j.xls"
+
+# JPX 上場会社一覧（TSE 33業種）。**URL は一覧ページから解決する**（#632）。
+# 2026-09-03 に JPX が `data_j.xls` を `data_j.xlsx` へ切り替え、6晩連続で 404 になったが
+# 夜間バッチは `exit=0` のまま完走していた（既存値が残るので画面も壊れない）。ディレクトリ
+# （`tvdivq0000001vg2-att`）は変わっておらず、変わったのは拡張子だけだった。
+# `JPX_EXCEL_URL` は**一覧ページを読めなかったときのフォールバック**として残す。
+JPX_LISTING_URL = "https://www.jpx.co.jp/markets/statistics-equities/misc/01.html"
+JPX_EXCEL_URL   = "https://www.jpx.co.jp/markets/statistics-equities/misc/tvdivq0000001vg2-att/data_j.xlsx"
+# 一覧ページから拾うリンク。`.xls` / `.xlsx` の両方を受ける（次に戻されても追随する）。
+JPX_EXCEL_LINK_RE = re.compile(r'href="([^"]*data_j\.xlsx?)"')
+# 業種列は埋まっているのにコード列を解釈できなかった行の許容割合（#632）。
+# **正常なファイルではこの数は 0**。2026-09-08 実測で、openpyxl が `int` を返すのに
+# `float`/`str` しか受けていなかった読み手は業種を持つ 3,899行のうち 3,606行を落とし、
+# それでも例外を出さずに「293件」を返していた。5% は「一桁違う」を分ける位置で、
+# 端数行（脚注・小計）で誤爆しない程度の余裕を持たせた値。
+JPX_CODE_DROP_LIMIT = 0.05
 API_KEY       = os.environ.get("EDINET_API_KEY", "")
 RATE_SLEEP             = 0.6   # EDINET API のリクエスト間隔（秒）
 # 連続でこの回数だけ書類一覧の取得に失敗したら以降の日付を叩かない（#577）。
@@ -422,3 +437,16 @@ class JQuantsOutOfCoverage(Exception):
         self.date_str = date_str
         self.cover_from = cover_from
         self.cover_to = cover_to
+
+
+class JpxIndustryError(Exception):
+    """JPX 業種マスタを取得・解釈できなかった＝業種が前進しない状態（#632）。
+
+    `EdinetAccessError` と同じ役どころ＝**「変化が無かった」と「取れなかった」を型で分ける**。
+    旧実装は `except Exception` で握って `(0, 0)` を返しており、両者を区別する手段が無かった。
+    その結果 2026-09-03 の拡張子変更（`data_j.xls` → `.xlsx`）は 6晩連続の 404 になったのに、
+    夜間バッチは `exit=0`・watchdog も `*_last_run` が入るので `[鮮度] OK` のまま通った。
+
+    「走らなかったこと」の検知（#515・ADR-0042）はこれを拾わない——**走ってはいる**からで、
+    現すのは `batch_freshness.PRODUCERS`（成果物が前進したか）の側になる。
+    """

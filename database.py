@@ -1518,6 +1518,12 @@ class AppSetting(Base):
     updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
 
+# JPX 業種マスタを最後に取得できた時刻（ISO・UTC）。書き手は `update_industry_from_jpx`、
+# 読み手は `batch_freshness.PRODUCERS`（#632）。**キーをここに置く**のは、batch_freshness が
+# 「import 時に副作用を持つモジュールを呼ばない」制約を持ち、collector 系を参照できないため。
+KEY_JPX_INDUSTRY_LAST_SUCCESS = "jpx_industry_last_success"
+
+
 # ── 5. マクロデータ（為替・金利・指数・コモディティ） ──────────────────────
 
 class MacroData(Base):

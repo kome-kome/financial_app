@@ -1118,7 +1118,13 @@ async def run_full_collection(db,
         log.info(f"全収集完了（スキップ: {skipped}件 / 取得: {len(all_docs) - skipped}件）")
 
         # Phase 5: 業種補完（JPX 上場会社一覧から XBRL で取れない業種を補完）
-        await update_industry_from_jpx(client, db, on_progress=on_progress)
+        # **ここで送出しない**（#632）——この関数は `_pipeline_incremental._run_with_retry` の
+        # 内側にあり、最後の1歩で raise すると XBRL 差分収集を丸ごと retry させてしまう。
+        # 失敗は足跡（`jpx_industry_last_success`）が進まないことで watchdog に現れる。
+        try:
+            await update_industry_from_jpx(client, db, on_progress=on_progress)
+        except JpxIndustryError as e:
+            log.warning(f"業種補完をスキップ（収集は継続する）: {e}")
     return False
 
 

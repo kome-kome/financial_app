@@ -25,6 +25,7 @@ from collector import (
     collect_stock_price_history, collect_stock_price_history_jquants,
     update_industry_from_jpx, collect_macro_data, reparse_from_raw,
 )
+from collector_utils import JpxIndustryError
 
 router = APIRouter()
 log = logging.getLogger(__name__)
@@ -392,7 +393,11 @@ async def cancel_reparse():
 @api.limiter.limit(api.RATELIMIT_COLLECT)
 async def collect_industry(request: Request, db: Session = Depends(api.get_db)):
     async with httpx.AsyncClient(timeout=60) as client:
-        updated_co, updated_fr = await update_industry_from_jpx(client, db)
+        try:
+            updated_co, updated_fr = await update_industry_from_jpx(client, db)
+        except JpxIndustryError as e:
+            # 「0件更新」と「取れなかった」を同じ 200 に潰さない（#632）。
+            raise HTTPException(502, f"JPX 業種マスタを取得できませんでした: {e}")
     return {"updated_companies": updated_co, "updated_records": updated_fr}
 
 

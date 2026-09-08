@@ -357,6 +357,10 @@ M-1（`macro_risk_return`）・M-2（`macro_gbdt`）・M-3（`macro_dlm`）の�
      **ただしその Issue を閉じても穴は残る**——2026-09-01 の打ち切り後、`plugin_tuned_params` は
      M-2 が 50日・M-3 が 59日 古いまま誰も気づかなかった。成果物の固着は
      `batch_freshness.PRODUCERS` を watchdog が見て別に起票する（#504）。
+     **`PRODUCERS` は月次の成果物だけではない**——夜間バッチが更新する `JPX 業種マスタ`
+     （`app_settings.jpx_industry_last_success`）も同じ表で見る。取得が止まっても既存の業種は
+     DB に残り、`nightly_last_run` も画面も健全なままなので、ここ以外に現れる場所が無い
+     （#632・2026-09-03 の拡張子変更は6晩連続の 404 を `exit=0` で通した）。
   3. 予算切れが続くなら `BUDGET_MIN` を実測から見直すか、そのステップを日中枠
      （`run_daytime.ps1 -Enqueue tune:macro_gbdt`・#618）へ逃がす。
 

@@ -352,6 +352,17 @@ def _factor_premia_at(db):
     return db.execute(select(func.max(RecommendFactorPremium.computed_at))).scalar()
 
 
+def _jpx_industry_at(db):
+    """JPX 業種マスタを最後に取得できた時刻（#632）。
+
+    **`companies.industry` の中身は見ない**——既存値は取得が止まっても残り続けるので、
+    「更新できているか」の証拠にならない（実測で業種が空なのは 3,725社中2社のまま6晩動かず、
+    画面も壊れなかった）。見るのは取得側が書く足跡だけ。
+    """
+    from database import KEY_JPX_INDUSTRY_LAST_SUCCESS
+    return _parse(_get_setting(db, KEY_JPX_INDUSTRY_LAST_SUCCESS))
+
+
 # cadence は `Watched` と同じ「同一日付の最長間隔」＝31日。窓は各バッチの `WINDOW_MIN` から
 # 取る（書き写さない）。**探索は完走してからしか永続化しない**ので、窓を広げれば閾値も広がる
 # という関係はここでも成立する。
@@ -405,6 +416,20 @@ PRODUCERS: tuple[Produced, ...] = (
         task_name="financial_app-monthly",
         source="max(recommend_factor_premia.computed_at)",
         read=_factor_premia_at,
+    ),
+    Produced(
+        # 唯一、月次ではなく**夜間バッチ**が更新する producer（#632）。取得が止まっても
+        # 既存の業種は残るため、画面にも `*_last_run` にも現れない——2026-09-03 の拡張子変更は
+        # 6晩連続の 404 になりながら `exit=0` で通った。業種は `sector_ols` の分割キーなので、
+        # 止まっている間に上場した社は業種別回帰の母集団から静かに漏れ続ける。
+        label="JPX 業種マスタ",
+        issue_title="[ops] JPX 業種マスタが更新されていない",
+        cadence_h=24.0,
+        window_min=run_nightly.WINDOW_MIN,
+        batch_label="夜間バッチ",
+        task_name="financial_app-nightly",
+        source="app_settings.jpx_industry_last_success",
+        read=_jpx_industry_at,
     ),
 )
 

@@ -22,10 +22,15 @@ SSEエンドポイント（進捗のリアルタイム配信・全6本）: 収�
 ## 業種データの取得方法
 
 - **業種はXBRLから取得できない**。EDINETのXBRLに TSE 33業種コードは含まれていない。
-- **正規ソース**: JPX上場会社一覧Excel（`JPX_EXCEL_URL` = `data_j.xls`、33業種コード列=col4/col5）
+- **正規ソース**: JPX上場会社一覧Excel（`data_j.xlsx`、33業種コード列=col4/col5）
 - `update_industry_from_jpx(client, db)` が `run_full_collection` の末尾で自動実行される。
 - 証券コードは4桁数字（`1301`）とアルファベット混在（`350A`）の両形式に対応済み。
-- **xlrd は .xls 専用**（`xlrd==2.0.2` は `.xlsx` を読めず `XLRDError` を送出）。JPX が将来 .xlsx に切り替えた場合の fallback として `openpyxl` による再読み込みを `update_industry_from_jpx` に実装済み（`xlrd.XLRDError` を捕捉 → `openpyxl.load_workbook` でリトライ）。
+- **URL は一覧ページから解決する。定数で持つと変わった晩から静かに 404 になる（#632・2026-09-03）**: JPX は `data_j.xls` を `data_j.xlsx` へ切り替えた。ディレクトリ（`tvdivq0000001vg2-att`）は変わっておらず、変わったのは拡張子だけ。6晩連続で 404 になったが、`update_industry_from_jpx` が `except Exception: return 0, 0` で握っていたため **WARNING 止まりで `exit=0`**、足跡（`nightly_last_run`）も入るので watchdog（#515）にも引っかからなかった。既存の業種は DB に残るので画面も壊れず（実測で業種が空なのは 3,725社中2社）、現れるのは「新規上場社の業種が入らない」という静かな陳腐化だけ。解決は `resolve_jpx_excel_url()` が `JPX_LISTING_URL`（一覧ページ）から `href="...data_j.xls|xlsx"` を拾う。ページを読めない／リンクが無いときは `JPX_EXCEL_URL` へ倒す（解決の失敗を致命傷にしない）。
+- **xlrd は .xls 専用**（`xlrd==2.0.2` は `.xlsx` を読めず `XLRDError` を送出）。`openpyxl` へのフォールバックが `_read_jpx_excel` にある。
+- **その fallback は「動く」のに 93% を落としていた（#632）**: **xlrd は数値セルを `float` で返すが、openpyxl は `int` で返す**。コード列の判定が `float` / `str` しか受けていなかったため、xlsx 経路では数値コードの社が全部 `continue` に落ちた。実測（2026-09-08）で、業種を持つ 3,899行のうち拾えたのは **293件**——`130A` のような英字混じり（文字列で返る新形式）だけ。**件数が減るだけで例外は出ない**ので、URL だけ直すと「JPX業種マップ: 293件」と INFO を出して正常終了する＝404 という分かりやすい症状が消えて欠落だけが残る。対処は2つ:
+  - `_read_jpx_excel` は **業種は埋まっているのにコード列を解釈できなかった行を数え**、`JPX_CODE_DROP_LIMIT`（5%）を超えたら `JpxIndustryError` を送出する。**正常なファイルではこの数は 0** なので閾値をどこに置いても誤検知しない（今回の壊れ方は 3,606/3,899＝一桁違い）。`bool` は `int` の派生なので判定から除く（`True` が `"0001"` に化ける）。
+  - 取得・解釈の失敗は `JpxIndustryError` として型にする（`EdinetAccessError` と同じ役どころ＝「変化が無かった」と「取れなかった」を分ける）。
+- **失敗の現れ方は watchdog の producer 側（#632）**: 成功時だけ `app_settings.jpx_industry_last_success` を書き、`batch_freshness.PRODUCERS` がその鮮度を見る（閾値は `cadence 24h + run_nightly.WINDOW_MIN`）。**`companies.industry` の中身は見ない**——既存値は取得が止まっても残るので「更新できているか」の証拠にならない。**Phase 5 で例外を送出してはいけない**——`run_full_collection` は `_pipeline_incremental._run_with_retry` の内側にあり、最後の1歩で raise すると XBRL 差分収集を丸ごと retry させる。捕捉して収集は継続し、失敗は足跡が進まないことで翌日以降に現れる。手動経路（`POST /api/collect/industry`）だけは 502 で即返す（「0件更新」と区別する）。
 
 ---
 

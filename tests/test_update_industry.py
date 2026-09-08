@@ -14,7 +14,18 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from collector import _read_jpx_excel, update_industry_from_jpx
+from collector import _read_jpx_excel, resolve_jpx_excel_url, update_industry_from_jpx
+from collector_utils import JPX_EXCEL_URL, JPX_LISTING_URL, JpxIndustryError
+from database import KEY_JPX_INDUSTRY_LAST_SUCCESS, get_setting
+
+# 一覧ページの検体。**実物から写す**（`href` の形が違えば解決は静かに既定値へ倒れる）。
+# 2026-09-08 実測: リンクは相対パスで、拡張子は `.xlsx`。
+LISTING_HTML = (
+    '<html><body><a href="/markets/statistics-equities/misc/'
+    'tvdivq0000001vg2-att/data_j.xlsx">その他統計資料</a></body></html>'
+)
+RESOLVED_URL = ("https://www.jpx.co.jp/markets/statistics-equities/misc/"
+                "tvdivq0000001vg2-att/data_j.xlsx")
 
 
 def _make_jpx_xlsx(rows: list) -> bytes:
@@ -29,8 +40,14 @@ def _make_jpx_xlsx(rows: list) -> bytes:
     return buf.getvalue()
 
 
-def _mock_client(content: bytes) -> httpx.AsyncClient:
+def _mock_client(content: bytes, listing: str = LISTING_HTML) -> httpx.AsyncClient:
+    """一覧ページと Excel を**URL で出し分ける**モック。
+
+    1つの応答を全リクエストに返すと、URL 解決の経路が素通りして検証にならない。
+    """
     def handler(request):
+        if str(request.url) == JPX_LISTING_URL:
+            return httpx.Response(200, text=listing)
         return httpx.Response(200, content=content)
     return httpx.AsyncClient(transport=httpx.MockTransport(handler))
 
@@ -150,10 +167,115 @@ class TestUpdateIndustryFromJpx:
         co_updated, _ = self._run(update_industry_from_jpx(client, db))
         assert co_updated == 1
 
-    def test_http_error_returns_zeros(self, db):
+    def test_http_error_raises(self, db):
+        """**握って (0,0) を返さない**（#632）。「変化が無かった」と区別できなくなる。"""
         def handler(request):
             return httpx.Response(500)
         client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-        co_updated, fr_updated = self._run(update_industry_from_jpx(client, db))
+        with pytest.raises(JpxIndustryError):
+            self._run(update_industry_from_jpx(client, db))
+
+
+class TestOpenpyxlReturnsInts:
+    """xlsx を読む openpyxl は数値セルを **`int`** で返す（#632）。
+
+    旧実装は `float` / `str` しか受けておらず、JPX が `.xls` から `.xlsx` へ切り替えた
+    2026-09-03 以降、業種を持つ 3,899行のうち 3,606行を黙って捨てて 293件を返していた。
+    **検体は実出力に合わせる**——コードを文字列で書いた検体は、この欠落を検出できない。
+    """
+
+    def test_int_codes_are_accepted(self):
+        content = _make_jpx_xlsx([(1301, "水産・農林業"), (101, "建設業")])
+        assert _read_jpx_excel(content) == {"1301": "水産・農林業", "0101": "建設業"}
+
+    def test_int_and_alphanumeric_codes_coexist(self):
+        """英字混じりの新形式（`130A`）は文字列で返る。旧実装が拾えていたのはこれだけ。"""
+        content = _make_jpx_xlsx([(1301, "水産・農林業"), ("130A", "医薬品")])
+        assert _read_jpx_excel(content) == {"1301": "水産・農林業", "130A": "医薬品"}
+
+    def test_booleans_are_not_codes(self):
+        """`bool` は `int` の派生。True が "0001" に化けないこと。"""
+        content = _make_jpx_xlsx([(1301, "水産・農林業")] + [(True, "小売業")] * 30)
+        with pytest.raises(JpxIndustryError):
+            _read_jpx_excel(content)
+
+
+class TestUnreadableCodeColumnIsAFailure:
+    """業種はあるのにコードを解釈できない行が多い＝読み手か列構成の異常（#632）。
+
+    件数が減るだけでは失敗として現れないので、取りこぼし率で止める。
+    """
+
+    def test_mostly_unreadable_raises(self):
+        rows = [(1301, "水産・農林業")] + [(None, "小売業")] * 30
+        with pytest.raises(JpxIndustryError) as ei:
+            _read_jpx_excel(_make_jpx_xlsx(rows))
+        assert "30/31" in str(ei.value)
+
+    def test_a_few_unreadable_rows_are_tolerated(self):
+        """脚注・小計のような端数行では鳴らない（正常なファイルでは 0 行）。"""
+        rows = [(1300 + i, "水産・農林業") for i in range(99)] + [(None, "小売業")]
+        result = _read_jpx_excel(_make_jpx_xlsx(rows))
+        assert len(result) == 99
+
+    def test_an_all_blank_industry_sheet_is_not_a_drop(self):
+        """業種列が全部 '-'（ETF だけの断面）は候補0件＝割り算をしない。"""
+        assert _read_jpx_excel(_make_jpx_xlsx([(1305, "-"), (1306, "-")])) == {}
+
+
+class TestResolveJpxExcelUrl:
+    """URL は一覧ページから解決する。定数で持つと変わった晩から静かに 404 になる（#632）。"""
+
+    def _run(self, coro):
+        return asyncio.run(coro)
+
+    def test_resolves_from_the_listing_page(self):
+        client = _mock_client(b"", listing=LISTING_HTML)
+        assert self._run(resolve_jpx_excel_url(client)) == RESOLVED_URL
+
+    def test_follows_a_changed_filename(self):
+        """次に `.xls` へ戻されても、ハッシュが変わっても追随する。"""
+        listing = ('<a href="/markets/statistics-equities/misc/'
+                   'newhash0000000000-att/data_j.xls">一覧</a>')
+        client = _mock_client(b"", listing=listing)
+        assert self._run(resolve_jpx_excel_url(client)).endswith(
+            "/newhash0000000000-att/data_j.xls")
+
+    def test_falls_back_when_the_page_is_gone(self):
+        def handler(request):
+            return httpx.Response(404)
+        client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        assert self._run(resolve_jpx_excel_url(client)) == JPX_EXCEL_URL
+
+    def test_falls_back_when_the_link_is_missing(self):
+        client = _mock_client(b"", listing="<html><body>リンクなし</body></html>")
+        assert self._run(resolve_jpx_excel_url(client)) == JPX_EXCEL_URL
+
+
+class TestSuccessLeavesAFootprint:
+    """成功の足跡が `batch_freshness.PRODUCERS` の見る唯一の証拠（#632）。"""
+
+    def _run(self, coro):
+        return asyncio.run(coro)
+
+    def test_footprint_is_written_on_success(self, db, make_company):
+        db.add(make_company(edinet_code="E00001", sec_code="1301", industry=""))
+        db.commit()
+        client = _mock_client(_make_jpx_xlsx([(1301, "水産・農林業")]))
+        self._run(update_industry_from_jpx(client, db))
+        assert get_setting(db, KEY_JPX_INDUSTRY_LAST_SUCCESS)
+
+    def test_footprint_is_written_even_when_nothing_changed(self, db):
+        """更新0件は「変化が無かった」であって失敗ではない。"""
+        client = _mock_client(_make_jpx_xlsx([(1301, "水産・農林業")]))
+        co_updated, _ = self._run(update_industry_from_jpx(client, db))
         assert co_updated == 0
-        assert fr_updated == 0
+        assert get_setting(db, KEY_JPX_INDUSTRY_LAST_SUCCESS)
+
+    def test_no_footprint_when_the_fetch_fails(self, db):
+        def handler(request):
+            return httpx.Response(404)
+        client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        with pytest.raises(JpxIndustryError):
+            self._run(update_industry_from_jpx(client, db))
+        assert get_setting(db, KEY_JPX_INDUSTRY_LAST_SUCCESS) is None

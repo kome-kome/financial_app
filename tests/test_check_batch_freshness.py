@@ -564,6 +564,8 @@ class TestProducerThresholdIsDerived:
         assert _by_label(M2_LABEL).window_min == run_monthly.WINDOW_MIN
         assert _by_label("マクロ・ベータの推論結果").window_min == run_monthly_beta.WINDOW_MIN
         assert _by_label("マクロ×リスク-リターン探索の結果").window_min == run_monthly_m1.WINDOW_MIN
+        # 唯一、月次ではなく夜間バッチが更新する producer（#632）
+        assert _by_label("JPX 業種マスタ").window_min == run_nightly.WINDOW_MIN
 
     def test_widening_the_window_widens_the_threshold(self):
         p = _by_label(M2_LABEL)
@@ -696,3 +698,40 @@ class TestProducerIssuesAreNotDuplicated:
         assert "financial_app-monthly" in body
         assert "plugin_tuned_params" in body
         assert "直接クエリ" in body, "ログの表示で判定させない誘導が本文に無い"
+
+
+class TestJpxIndustryProducer:
+    """JPX 業種マスタは夜間バッチが更新する producer（#632）。
+
+    取得が止まっても既存の業種は残るので、画面にも `nightly_last_run` にも現れない
+    ——2026-09-03 の拡張子変更（`data_j.xls` → `.xlsx`）は6晩連続の 404 になりながら
+    `exit=0` で通った。ここが唯一の現れ方になる。
+    """
+
+    LABEL = "JPX 業種マスタ"
+
+    def test_it_reads_the_footprint_not_the_industry_column(self, monkeypatch):
+        """既存値は取得が止まっても残る＝`companies.industry` は証拠にならない。"""
+        from database import KEY_JPX_INDUSTRY_LAST_SUCCESS
+        seen = {}
+
+        def fake_get(db, key):
+            seen["key"] = key
+            return NOW.isoformat()
+
+        monkeypatch.setattr(bf, "_get_setting", fake_get)
+        assert bf._jpx_industry_at(_FakeDB()) == NOW
+        assert seen["key"] == KEY_JPX_INDUSTRY_LAST_SUCCESS
+
+    def test_a_stale_footprint_fires(self, settings):
+        """夜間バッチ自体は毎晩走っている（足跡は健全）のに、業種だけ止まっている形。"""
+        snap = _snap(settings)
+        snap["producers"] = _producers({**FRESH_PRODUCERS, self.LABEL: 3.0})
+        found = cbf.problems(snap)
+        assert [f["title"] for f in found] == [_by_label(self.LABEL).issue_title]
+
+    def test_a_single_missed_night_is_silent(self):
+        """cadence(24h) + 窓 の内側では鳴らない（実行中に鳴らないのと同じ理屈）。"""
+        p = _by_label(self.LABEL)
+        rows = _producers({**FRESH_PRODUCERS, self.LABEL: p.stale_h / 24.0 - 0.01})
+        assert all(r["status"] == "ok" for r in rows)

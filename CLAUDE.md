@@ -148,7 +148,7 @@ pytest tests/test_utils.py  # 単一ファイル
 | `sysmem.py` | 常駐メモリ／物理メモリ実測の**唯一の源**（`batch_common` の heartbeat・`bench_macro_beta` が共有）。**ctypes を書き写さない／psutil は入れない／測るのはプロセスツリーの合計**（単体 pid は静かに誤る）。詳細は [ARCHITECTURE.md](docs/ARCHITECTURE.md) |
 | `collector.py` | オーケストレータ＋後方互換の再エクスポート層＋CLI（実体は下記6分割） |
 | `collector_utils.py` | 収集系共通の設定定数・ロガー。**`EDINET_BASE` は `api.edinet-fsa.go.jp`**（旧 `disclosure.` は `follow_redirects` では直らない・#577）。**例外文字列は `redact_secrets()` で API キーを消す**／**「走ったが全部失敗した」を失敗として現す**。詳細は [GOTCHAS.md](docs/GOTCHAS.md) |
-| `collector_master.py` | 企業/業種マスタ収集（EDINET コードリスト・JPX 業種） |
+| `collector_master.py` | 企業/業種マスタ収集（EDINET コードリスト・JPX 業種）。**JPX の Excel URL は一覧ページから解決する**（定数へ書き戻さない・#632。拡張子変更で6晩 404 になったが exit=0 で通った）／**xlsx 経路は数値コードを `int` で返す**（`float` だけ見ると 93% を黙って落とす）。詳細は [GOTCHAS.md](docs/GOTCHAS.md) |
 | `collector_financials.py` | XBRL 財務収集・パース・CF/PL-BS 補完・全件収集 |
 | `collector_prices.py` | 株価（stooq/J-Quants/Yahoo）・市場データ更新・マクロ収集 |
 | `collector_interim.py` | 半期(H1)財務収集（EDINET 半期報告書043A00/旧四半期Q2・period_type='H1'・Issue #219②） |
