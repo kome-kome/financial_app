@@ -381,3 +381,65 @@ class TestBudgetFitsTheWindow:
         rm.main(["--dry-run"])
         out = capsys.readouterr().out
         assert "予算" in out and "factor_premia" in out
+
+
+# 予算が実測に対して確保していなければならない倍率（#633）。
+#
+# **なぜ「窓に収まる」だけでは足りないのか**: `window_problem` は Σ が窓を超えないことしか
+# 見ない。1本の予算が実測ぎりぎりでも Σ さえ収まれば通る——そして超過は `exit=124` の
+# 打ち切りになり、`hyperparameter_search` は完走してからしか永続化しないので、
+# **その月ぶんの探索結果が丸ごと消える**。実際 2026-09-01 の `tune:macro_dlm` がそうなり、
+# μ̂ は 7/10 のまま 59.5日 固着した（#633・watchdog が拾うまで誰も気づかなかった）。
+#
+# 値の根拠は `macro_gbdt` の現行値（240 / 179.4 = 1.34倍）。「余裕2%では次回落ちる」として
+# 積んだ実績があり、それを下回らない範囲で、実測を差し替えるたびに落ちない緩さとして
+# 1.25 を採る。**パネルは毎晩伸びるので所要は据え置かず伸びる**＝余裕は据え置きでは足りない。
+MIN_BUDGET_RATIO = 1.25
+
+
+class TestTuneBudgetsMatchTheMeasurement:
+    """月次の tune 予算を、日中枠が持つ**実測**（`run_daytime.JOBS[...].measured_min`）と結ぶ。
+
+    実測値をここへ書き写さないのは、書き写すと2箇所が黙って食い違うから。日中枠の `Job` が
+    実測の唯一の源で、月次はそれを参照する側に回る。
+
+    **その実測が月次と同じ計算を測った値であること**は
+    `tests/test_run_daytime.py::TestArgumentsMatchTheExistingBatches` が argv の一致で
+    別に縛っている（片方の引数だけ動くと、ここは別物の所要と比べることになる）。
+    """
+
+    @staticmethod
+    def _daytime_jobs():
+        from scripts import run_daytime as rd
+        return rd.JOBS
+
+    def test_tune_budgets_keep_a_margin_over_the_measurement(self):
+        jobs = self._daytime_jobs()
+        thin = []
+        for model, _strategy, _extra in rm.TUNE_MATRIX:
+            name = f"tune:{model}"
+            job = jobs.get(name)
+            if job is None:
+                # 日中枠に無い＝実測が無い。ここでは判定できないので別テストの領分。
+                continue
+            budget = rm.BUDGET_MIN[name]
+            need = job.measured_min * MIN_BUDGET_RATIO
+            if budget < need:
+                thin.append(
+                    f"{name}: 予算 {budget}分 < 実測 {job.measured_min}分 × {MIN_BUDGET_RATIO} "
+                    f"= {need:.0f}分（余裕 {budget / job.measured_min - 1:.1%}）")
+        assert not thin, (
+            "実測に対して予算が薄いステップがある（超過は exit=124 で打ち切られ、"
+            "完走前提の永続化なのでその月ぶんが丸ごと消える・#633）:\n  " + "\n  ".join(thin))
+
+    def test_every_tune_step_has_a_measurement(self):
+        """**実測を持たない tune ステップを作らない。**
+
+        上のマージン検査は日中枠に同名の `Job` がある分しか見ない。月次にだけ tune を足すと
+        検査対象から静かに外れ、「予算が薄い」ことが失敗として現れなくなる。
+        """
+        jobs = self._daytime_jobs()
+        missing = [f"tune:{m}" for m, _s, _e in rm.TUNE_MATRIX if f"tune:{m}" not in jobs]
+        assert not missing, (
+            f"日中枠に対応する Job が無い tune ステップ: {missing}"
+            "（`run_daytime.JOBS` が実測の唯一の源。無いと予算の妥当性を誰も検査しない・#633）")
