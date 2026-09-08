@@ -27,8 +27,10 @@ J-Quants catchup が `today-90 〜 today-80` を。どちらも「調整済み�
 （#620 の E02293 は `C == AdjC` ＝調整差が無く、6/16 の 808→1108 は本物の値動き）。
 帯の長さでも、帯の内側が一定比かでも分離できない——E32779 は帯の中で株価が 13% 動いている。
 
-したがって確定は公式値との突合で行う。`AdjC != C`（その社は Yahoo と調整の中身が違う）
-かつ **帯の日の DB 値が `AdjC` と一致する**（帯の正体が公式値そのもの）を両方確かめる。
+したがって確定は公式値と **Yahoo の現値**の両方との突合で行う。`AdjC != C`（分割がある）
+・**帯の日の DB 値が `AdjC` と一致する**（帯の値は公式値そのもの）・**その日の Yahoo 値は
+`AdjC` と一致しない**（Yahoo と公式のスケールが実際に食い違う）の3つを確かめる。
+3つ目を落とすと分割のあった高ボラ銘柄を必ず誤検知する（実測: E01717）。
 
 突合は1社1リクエスト＝`JQUANTS_RATE_SLEEP`（20秒）かかるので、**候補が `--max-verify` を
 超えたら突合せずに候補一覧だけ出して止まる**。日常の入口は毎晩のバッチログで、そちらは
@@ -50,6 +52,7 @@ import os
 import sys
 from datetime import date, timedelta
 from pathlib import Path
+from typing import Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -74,25 +77,35 @@ def band_dates(bands: list) -> list:
     return [(b["start"], b["end"]) for b in bands]
 
 
-def confirm_official_scale(official_rows: list, db_closes: dict, bands: list) -> tuple:
+def confirm_official_scale(official_rows: list, db_closes: dict, bands: list,
+                           yahoo_closes: Optional[dict] = None) -> tuple:
     """帯の中身が**公式スケールで書かれている**かを判定する。戻り値 `(ok, reason)`。
 
     `official_rows`: `_jquants_fetch_code` の戻り（`Date` / `C` / `AdjC` を持つ）。
     `db_closes`: `{trade_date: close}`（DB の日次終値）。
+    `yahoo_closes`: `{trade_date: close}`（Yahoo が**今**返す終値）。`None` は取得を
+    省いた場合で、そのときは条件3を課さない（`--skip-yahoo-check`）。
 
-    条件は2つ。両方そろって初めて「この帯は公式値で上書きされた」と言える。
+    条件は3つ。すべてそろって初めて「この帯は公式値で上書きされた」と言える。
 
-    1. 帯の中に `AdjC != C` の日がある＝**その社は Yahoo と調整の中身が食い違う**
-       （食い違わない社なら、公式値で上書きされていても段差は出ない）
-    2. その日の DB 値が `AdjC` と一致する＝**帯の正体が公式値そのもの**である
+    1. 帯の中に `AdjC != C` の日がある＝その社に**分割がある**
+    2. その日の DB 値が `AdjC` と一致する＝帯の値は公式値そのもの
+    3. **その日の Yahoo 値が `AdjC` と一致しない**＝Yahoo と公式のスケースが実際に食い違う
 
-    2 を要求するのが要点で、1 だけでは「調整差のある社が、たまたま実際の値動きで
-    往復した」場合と区別がつかない。
+    **3 を落とすと、分割のあった高ボラ銘柄を必ず誤検知する。** 分割があると
+    `AdjC != C` はその日より前の全期間で成り立つので、条件1 は「分割があった」としか
+    言っていない。そして Yahoo がその分割を正しく遡及調整していれば Yahoo 値 = `AdjC`
+    となり、DB が Yahoo 由来でも条件2 が成り立ってしまう。実測: E01717（6834 日本工機）
+    は 2026-05-15〜05-21 と 06-10〜06-18 が確定と判定されたが、Yahoo が返す値は DB と
+    1円まで同じで、OHLC も内部整合していた（6/10 は `open 5436 / low 4940 / close 4986`
+    の実際の値動き）。**混在の証拠になるのは「公式と一致し、かつ Yahoo と一致しない」
+    ときだけ**で、E32779・E05716 で判定が効いていたのは #466 の恒常ずれを持つ社だから。
     """
     if not official_rows:
         return False, "公式値を1行も取得できなかった（契約窓の外側か銘柄コード不一致）"
     ranges = band_dates(bands)
-    hit_adj, hit_match = 0, 0
+    hit_adj, hit_match, hit_yahoo_differs = 0, 0, 0
+    yahoo_seen = 0
     for r in official_rows:
         d = str(r.get("Date") or "")[:10]
         c, adjc = r.get("C"), r.get("AdjC")
@@ -104,14 +117,35 @@ def confirm_official_scale(official_rows: list, db_closes: dict, bands: list) ->
             continue          # 調整差なし＝この日は誰が書いても同じ値になる
         hit_adj += 1
         dbv = db_closes.get(d)
-        if dbv is not None and same_price_scale(dbv, adjc):
-            hit_match += 1
+        if dbv is None or not same_price_scale(dbv, adjc):
+            continue
+        hit_match += 1
+        if yahoo_closes is None:
+            continue
+        yv = yahoo_closes.get(d)
+        if yv is None:
+            continue
+        yahoo_seen += 1
+        if not same_price_scale(yv, adjc):
+            hit_yahoo_differs += 1
     if not hit_adj:
         return False, "帯の期間に AdjC≠C の日が無い＝調整差が無く、往復は実際の値動きの疑い"
     if not hit_match:
         return False, (f"帯に AdjC≠C の日が {hit_adj}件あるが、DB 値が AdjC と一致しない"
                        "＝帯の正体は公式値ではない")
-    return True, f"帯の {hit_match}/{hit_adj}日で DB 値が公式 AdjC と一致"
+    if yahoo_closes is None:
+        return True, (f"帯の {hit_match}/{hit_adj}日で DB 値が公式 AdjC と一致"
+                      "（Yahoo 突合は省略）")
+    if not yahoo_seen:
+        return False, (f"帯の {hit_match}/{hit_adj}日で DB 値が公式 AdjC と一致するが、"
+                       "Yahoo の値を1日も取得できず**混在かどうか判定できない**"
+                       "（取れないことを「一致しない」と読むと誤検知になる）")
+    if not hit_yahoo_differs:
+        return False, (f"帯の {hit_match}/{hit_adj}日で DB 値が公式 AdjC と一致するが、"
+                       f"Yahoo の値も {yahoo_seen}日すべて AdjC と一致する＝"
+                       "Yahoo と公式が同じスケール＝混ざりようがない（実際の値動きの疑い）")
+    return True, (f"帯の {hit_match}/{hit_adj}日で DB 値が公式 AdjC と一致し、"
+                  f"うち {hit_yahoo_differs}/{yahoo_seen}日は Yahoo 値と食い違う")
 
 
 # ── DB / ネットワーク ────────────────────────────────────────────────────────
@@ -136,8 +170,32 @@ def load_tickers(db, ecs: list) -> dict:
     }
 
 
-async def verify_targets(db, targets: dict, *, on_progress=None) -> dict:
-    """候補社を公式値と突合する。{edinet_code: (ok, reason)}。1社1リクエスト。"""
+async def fetch_yahoo_closes(session, sec: str, suffix, bands: list) -> Optional[dict]:
+    """帯を覆う期間の Yahoo 終値 `{trade_date: close}`。取れなければ `None`。
+
+    **`{}`（空辞書）と `None` を区別する**——前者は「取れたが帯の日が無い」、後者は
+    「そもそも取得に失敗した」。判定側はどちらも確定させないが、理由の文言が変わる。
+    """
+    ranges = band_dates(bands)
+    if not ranges:
+        return None
+    lo = min(lo for lo, _ in ranges).replace("-", "")
+    hi = max(hi for _, hi in ranges).replace("-", "")
+    rows = await fetch_yahoo_history(session, yahoo_ticker(sec, suffix),
+                                     lo, hi, **yahoo_guard_kwargs(suffix))
+    if rows is None:
+        return None
+    return {r["trade_date"]: float(r["close"]) for r in rows if r.get("close")}
+
+
+async def verify_targets(db, targets: dict, *, on_progress=None,
+                         with_yahoo: bool = True) -> dict:
+    """候補社を公式値と突合する。{edinet_code: (ok, reason)}。
+
+    1社あたり J-Quants 1リクエスト（`JQUANTS_RATE_SLEEP` 秒待つ）＋ Yahoo 1リクエスト。
+    **Yahoo 側を省くと分割のあった高ボラ銘柄を誤検知する**（`confirm_official_scale`
+    の条件3）ので、`with_yahoo=False` は突合を明示的に諦めるときだけ使う。
+    """
     api_key = os.environ.get("JQUANTS_API_KEY", "")
     if not api_key:
         raise RuntimeError("環境変数 JQUANTS_API_KEY が未設定です（--skip-verify で省けます）")
@@ -156,7 +214,14 @@ async def verify_targets(db, targets: dict, *, on_progress=None) -> dict:
                 await asyncio.sleep(JQUANTS_RATE_SLEEP)
             rows = await _jquants_fetch_code(session, api_key, f"{sec}0",
                                              cover_from, cover_to)
-            out[ec] = confirm_official_scale(rows, load_daily_closes(db, ec), bands)
+            y_closes = None
+            if with_yahoo:
+                suffix = (tickers.get(ec) or (None, None))[1]
+                if YAHOO_STOCK_RATE_SLEEP > 0:
+                    await asyncio.sleep(YAHOO_STOCK_RATE_SLEEP)
+                y_closes = await fetch_yahoo_closes(session, sec, suffix, bands)
+            out[ec] = confirm_official_scale(rows, load_daily_closes(db, ec),
+                                             bands, y_closes)
             if on_progress:
                 on_progress(i, len(targets), f"[突合 {i}/{len(targets)}] {ec} {out[ec][1]}")
     return out
@@ -234,7 +299,8 @@ async def _run(args) -> dict:
         else:
             verdicts = await verify_targets(
                 db, targets,
-                on_progress=lambda i, n, m: print(f"  {m}"))
+                on_progress=lambda i, n, m: print(f"  {m}"),
+                with_yahoo=not args.skip_yahoo_check)
             rep["verified"] = {ec: {"ok": ok, "reason": why}
                                for ec, (ok, why) in verdicts.items()}
             confirmed = sorted(ec for ec, (ok, _) in verdicts.items() if ok)
@@ -294,6 +360,9 @@ def main() -> int:
     ap.add_argument("--only", help="edinet_code をカンマ区切りで指定")
     ap.add_argument("--skip-verify", action="store_true",
                     help="公式値との突合を省く（--only と併用必須）")
+    ap.add_argument("--skip-yahoo-check", action="store_true",
+                    help="公式突合だけで確定させる（Yahoo 値との食い違いを確かめない）。"
+                         "**分割のあった高ボラ銘柄を誤検知するので通常は使わない**")
     ap.add_argument("--max-verify", type=int, default=30,
                     help="突合する社数の上限（既定30・1社20秒）。超えたら候補一覧だけ出す")
     ap.add_argument("--days", type=int, default=D.DAILY_WINDOW_DAYS,

@@ -174,3 +174,46 @@ class TestConfirmOfficialScale:
         ok, why = confirm_official_scale([], {}, self._BANDS)
         assert ok is False
         assert "1行も取得できなかった" in why
+
+
+class TestYahooCrossCheck:
+    """条件3（Yahoo 値が AdjC と食い違うこと）。**これを落とすと分割のあった
+    高ボラ銘柄を必ず誤検知する**——実測 E01717（6834 日本工機）。"""
+
+    _BANDS = [{"start": "2026-06-10", "end": "2026-06-18"}]
+
+    def test_rejects_when_yahoo_also_matches_official(self):
+        """E01717 型: 分割はあるが Yahoo もその分割を遡及調整済み。
+
+        `AdjC != C` は「分割がある」としか言っておらず、Yahoo が正しく調整していれば
+        Yahoo 値 = AdjC になる。すると DB が Yahoo 由来でも「DB 値 == AdjC」が
+        成り立ってしまい、**実際の値動きの往復を混在と誤断する**。
+        """
+        rows = [{"Date": "2026-06-10", "C": 9972.0, "AdjC": 4986.0}]
+        ok, why = confirm_official_scale(
+            rows, {"2026-06-10": 4986.0}, self._BANDS, {"2026-06-10": 4986.0})
+        assert ok is False
+        assert "Yahoo と公式が同じスケール" in why
+
+    def test_confirms_when_yahoo_disagrees_with_official(self):
+        """E32779 型: Yahoo が無償割当を落としており、公式と恒常的にずれる（#466）。"""
+        rows = [{"Date": "2026-06-10", "C": 2768.0, "AdjC": 2306.7}]
+        ok, why = confirm_official_scale(
+            rows, {"2026-06-10": 2306.7}, self._BANDS, {"2026-06-10": 2768.0})
+        assert ok is True
+        assert "Yahoo 値と食い違う" in why
+
+    def test_rejects_when_yahoo_could_not_be_fetched(self):
+        """**取れないことを「一致しない」と読むと誤検知になる。** 判定不能は棄却側へ。"""
+        rows = [{"Date": "2026-06-10", "C": 2768.0, "AdjC": 2306.7}]
+        ok, why = confirm_official_scale(
+            rows, {"2026-06-10": 2306.7}, self._BANDS, {})
+        assert ok is False
+        assert "判定できない" in why
+
+    def test_skipping_the_yahoo_check_is_visible_in_the_reason(self):
+        """`None` は「突合を省いた」。確定はするが理由にそう書く（黙って緩めない）。"""
+        rows = [{"Date": "2026-06-10", "C": 2768.0, "AdjC": 2306.7}]
+        ok, why = confirm_official_scale(rows, {"2026-06-10": 2306.7}, self._BANDS, None)
+        assert ok is True
+        assert "Yahoo 突合は省略" in why
