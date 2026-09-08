@@ -6,13 +6,15 @@
 XLA が使うコア数は実行時の混み具合で変わる。つまり**「重い計算の裏で作業をしない」という
 運用条件が結果の再現性に直結している**。人が PC を触らない平日日中を専用の枠にした。
 
-守るのは5点:
+守るのは7点:
 
 1. **キューは先頭を取り除いてから返す**（失敗しても戻さない＝同じ計算を繰り返さない）
 2. **窓に入らない仕事は積ませない**（走ってから打ち切られると何も残らない）
 3. **予算が窓に収まり、窓は installer の既定と一致する**
 4. **監視表に載っている**（走らなかったことに気づけるのはここだけ）
 5. **重い計算の引数が既存バッチと同一**（片方だけ動かすと同じ名前の別物を測る）
+6. **並走で結果が変わる仕事に印が付いている**（`-Now` の手動キックはここで分岐する）
+7. **手動キックはタスク経由で走る**（直に走らせると端末を閉じた瞬間に死ぬ・#515 と同型）
 """
 import json
 import os
@@ -39,6 +41,9 @@ class _FakeDB:
 
     def __init__(self, initial=None):
         self.store = dict(initial or {})
+
+    def close(self):
+        """`_session()` 経由（db 引数なし）の呼び出しが閉じにくるので受ける。"""
 
 
 @pytest.fixture
@@ -85,7 +90,7 @@ class TestQueue:
     def test_job_that_cannot_fit_the_window_is_rejected(self, fake_db, monkeypatch):
         """窓に入らない仕事は積ませない（打ち切られると何も残らない）。"""
         big = rd.Job(name="huge", argv=("{python}", "-c", "pass"), why="test",
-                     measured_min=rd.JOB_BUDGET_MIN + 1)
+                     measured_min=rd.JOB_BUDGET_MIN + 1, parallel_sensitive=True)
         monkeypatch.setitem(rd.JOBS, "huge", big)
         with pytest.raises(SystemExit):
             rd.enqueue(["huge"], db=fake_db)
@@ -230,3 +235,118 @@ class TestTaskInstaller:
     def test_runs_in_session_zero(self):
         """S4U でないと対話コンソールの終了に巻き込まれて即死する（#515）。"""
         assert "S4U" in self.INSTALLER.read_text(encoding="utf-8-sig")
+
+
+class TestParallelSensitivity:
+    """**並走で結果が変わる仕事と、遅くなるだけの仕事を混ぜない**（#618）。
+
+    `-Now` の手動キックは人が PC を触っている時間帯に叩かれる前提なので、この区別が
+    そのまま「確認を挟むか素通しか」の分岐になる。
+    """
+
+    def test_the_flag_has_no_default(self):
+        """既定値があると、新しい仕事を足したとき黙って非敏感側へ倒れる。
+
+        忘れたことが失敗として現れないので、**必須フィールドにして TypeError で落とす**
+        （CLAUDE.md「増やしたら登録表へ1行足す」と同じ狙い）。
+        """
+        import dataclasses
+
+        field = next(f for f in dataclasses.fields(rd.Job) if f.name == "parallel_sensitive")
+        assert field.default is dataclasses.MISSING
+        assert field.default_factory is dataclasses.MISSING
+
+    @pytest.mark.parametrize("key", ["beta", "tune:macro_gbdt", "tune:macro_dlm",
+                                     "gate:interactions"])
+    def test_computations_are_sensitive(self, key):
+        """MCMC も探索も昇格ゲートも、数値の揺れが**採否や重みそのもの**を変える。"""
+        assert rd.JOBS[key].parallel_sensitive is True
+
+    @pytest.mark.parametrize("key", ["interim", "disclosures"])
+    def test_collection_is_not_sensitive(self, key):
+        """収集は外部 API の応答待ちが所要の大半で、取れる中身は裏で何が動いても同じ。"""
+        assert rd.JOBS[key].parallel_sensitive is False
+
+
+class TestPeek:
+    """`-Now` が判断に使う機械可読口。**キューを減らさない**ことが不変条件。"""
+
+    @pytest.fixture
+    def db(self, fake_db, monkeypatch):
+        monkeypatch.setattr(rd, "_session", lambda: fake_db)
+        return fake_db
+
+    def _peek(self, capsys):
+        assert rd.main(["--peek"]) == 0
+        line = next(ln for ln in capsys.readouterr().out.splitlines()
+                    if ln.lstrip().startswith("{"))
+        return json.loads(line)
+
+    def test_empty_queue_reports_no_key(self, db, capsys):
+        got = self._peek(capsys)
+        assert got["key"] is None and got["remaining"] == 0
+        assert got["sensitive"] is False, "空を敏感扱いすると空振りのたびに止まる"
+
+    def test_reports_the_head_without_consuming_it(self, db, capsys):
+        rd.enqueue(["interim", "beta"], db=db)
+        got = self._peek(capsys)
+        assert got["key"] == "interim"
+        assert got["sensitive"] is False and got["known"] is True
+        assert got["remaining"] == 2
+        assert rd.read_queue(db=db) == ["interim", "beta"], "peek がキューを減らしている"
+
+    def test_sensitive_head_is_reported_as_such(self, db, capsys):
+        rd.enqueue(["beta"], db=db)
+        assert self._peek(capsys)["sensitive"] is True
+
+    def test_unknown_job_falls_to_the_sensitive_side(self, db, capsys):
+        """判断材料が無いときに**黙って走らせない**（積んだ後で定義が消えた場合）。"""
+        rd.write_queue(["vanished"], db=db)
+        got = self._peek(capsys)
+        assert got["known"] is False and got["sensitive"] is True
+
+    def test_output_is_ascii(self, db, capsys):
+        """cp932 へリダイレクトされても落ちない（このモジュールの出力規約）。"""
+        rd.enqueue(["beta"], db=db)
+        assert rd.main(["--peek"]) == 0
+        capsys.readouterr().out.encode("ascii")
+
+
+class TestManualKick:
+    """`-Now` は**タスクを叩く**（自分で走らない）。ここが崩れると長時間ジョブが端末と心中する。"""
+
+    LAUNCHER = ROOT / "run_daytime.ps1"
+    INSTALLER = ROOT / "scripts" / "install_daytime_task.ps1"
+
+    @pytest.fixture(scope="class")
+    def text(self):
+        return self.LAUNCHER.read_text(encoding="utf-8-sig")
+
+    def test_now_and_force_are_parameters(self, text):
+        assert re.search(r"\[switch\]\$Now", text)
+        assert re.search(r"\[switch\]\$Force", text)
+
+    def test_now_starts_the_scheduled_task(self, text):
+        """対話ターミナルで直に走らせると、画面を閉じた瞬間に死ぬ（#515 と同型）。"""
+        assert "Start-ScheduledTask" in text
+
+    def test_now_verifies_the_task_actually_started(self, text):
+        """Start-ScheduledTask は起動しなくても例外を投げない＝確認しないと嘘をつく。"""
+        assert 'State -ne "Running"' in text
+
+    def test_now_refuses_to_stack_on_a_running_task(self, text):
+        """走っている最中に叩くと重い計算が2本並ぶ（IgnoreNew は理由を返さない）。"""
+        assert 'State -eq "Running"' in text
+
+    def test_now_consults_peek_and_gates_on_sensitivity(self, text):
+        assert "--peek" in text
+        assert re.search(r"\$peek\.sensitive\s+-and\s+-not\s+\$Force", text), (
+            "敏感な仕事を -Force 無しで素通しする形になっている")
+
+    def test_task_name_default_matches_the_installer(self, text):
+        """既定がずれると -Now が『登録されていないタスク』を叩き続ける。"""
+        here = re.search(r'\[string\]\$TaskName\s*=\s*"([^"]+)"', text)
+        there = re.search(r'\[string\]\$TaskName\s*=\s*"([^"]+)"',
+                          self.INSTALLER.read_text(encoding="utf-8-sig"))
+        assert here and there, "TaskName の既定を読めない（書式が変わった）"
+        assert here.group(1) == there.group(1)

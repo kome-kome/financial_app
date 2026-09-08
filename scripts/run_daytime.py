@@ -22,6 +22,18 @@
 **失敗しても先頭は取り除く。** 残すと同じ計算を毎日繰り返して先へ進まなくなる（それが
 このバッチを作る動機そのもの）。失敗は Issue で起票されるので、再試行したいときは積み直す。
 
+## 平日以外に消化したいとき（`run_daytime.ps1 -Now`）
+
+休暇などで平日昼に PC を触れる日は、枠を1回ぶん前倒しできると消化が進む。ただし
+`run_daytime.ps1` を対話ターミナルで直に叩くと、プロセスが端末の子孫になって画面を
+閉じた瞬間に死ぬ（#515 と同型）。`-Now` は**登録済みタスクを `Start-ScheduledTask` で
+叩く**形にしてあり、セッション0・実行上限8時間・二重起動防止（`MultipleInstances
+IgnoreNew`）がそのまま効く。
+
+**`parallel_sensitive=True` の仕事は `-Force` 無しでは起動しない。** 手動キックは人が
+PC を触っている時間帯に叩かれるのが前提で、それはこのバッチが避けるために作られた条件
+そのものだから。収集系（`interim` / `disclosures`）は所要が延びるだけなので素通しする。
+
 ## 窓に入らない仕事は積ませない
 
 窓は 8時間（480分・1件あたりの予算 445分）。実測は macro_beta 385〜419分・M-3 探索
@@ -32,6 +44,7 @@
     python -m scripts.run_daytime                       # キュー先頭を1件
     python -m scripts.run_daytime --dry-run             # 実行計画だけ
     python -m scripts.run_daytime --queue               # キューの中身を見る
+    python -m scripts.run_daytime --peek                # 次の1件を JSON で（キューは減らさない）
     python -m scripts.run_daytime --enqueue beta        # 末尾へ積む
     python -m scripts.run_daytime --enqueue beta,tune:macro_gbdt
     python -m scripts.run_daytime --clear-queue         # 空にする
@@ -79,6 +92,16 @@ class Job:
     argv: tuple[str, ...]
     why: str
     measured_min: float          # 直近の実測所要（分）。窓に入るかの判断材料
+
+    # **裏で作業されると結果そのものが変わるか。** True は「所要が延びる」ではなく
+    # 「同じ入力から違う答えが出る」を意味する（#618・macro_beta で発散が 0 → 344 回）。
+    # 平日8時の自動枠はどちらでも同じだが、`-Now` の手動キックはここで分岐する——
+    # 人が PC を触っている時間帯に叩かれるのが手動キックの前提だから。
+    #
+    # **既定値を置かない。** 置くと新しい仕事を足したときに黙って非敏感側へ倒れ、
+    # 忘れたことが失敗として現れない（CLAUDE.md「増やしたら登録表へ1行足す」と同型）。
+    parallel_sensitive: bool
+
     needs_deps_smoke: bool = False
 
 
@@ -94,6 +117,7 @@ JOBS: dict[str, Job] = {
             "**引数は scripts/run_monthly_beta.py と同一**（片方だけ動かすと、"
             "同じ名前の別物を測ることになる）。`--force` は渡さない＝通常のゲート判定。",
         measured_min=419.2,      # 2026-09-07 実測（並走あり・隔離された回）
+        parallel_sensitive=True,  # 発散 0 → 344 の実測そのもの
         needs_deps_smoke=True,
     ),
     "tune:macro_gbdt": Job(
@@ -104,6 +128,9 @@ JOBS: dict[str, Job] = {
         why="M-2 の探索。9/1 の月次では 176.3分で150件を完走したが品質ゲートで persist を"
             "スキップした（#590・ADR-0047 で解消済み）。**引数は run_monthly.py と同一**。",
         measured_min=176.3,
+        # 探索は CV を回して rank-IC の大小で候補を選ぶ。数値のわずかな揺れが順位を
+        # 入れ替えれば、**永続化される重みが変わる**（所要ではなく結論が変わる）。
+        parallel_sensitive=True,
     ),
     # ── 昇格ゲートの実測（#615）────────────────────────────────────────────
     # M-1 のマクロ特徴量は共通域で rank-IC を −0.0920 下げている（#604 の実測）。
@@ -120,6 +147,9 @@ JOBS: dict[str, Job] = {
         # **未実測**。スモーク（stride=5）は約10分で終わったが、本測定はサンプルが5倍
         # （36,396 → 181,833）。パネル構築も CV も伸びるので保守的に置く。**実走で差し替える。**
         measured_min=300.0,
+        # 昇格ゲートの実測。差が −0.1615 か −0.16 かではなく「符号と CI が 0 をまたぐか」で
+        # 採否が決まるので、並走で揺れた値を根拠に採否を決めると判断ごと誤る。
+        parallel_sensitive=True,
     ),
 
     # ── 最新業績の供給（#424 の子タスク1・ADR-0051）────────────────────────
@@ -139,6 +169,9 @@ JOBS: dict[str, Job] = {
             "収集済み doc_id は再取得しない＝冪等。`--years 2` は 2025-10 以降の欠落を埋める幅で、"
             "GHA の既定 6 年は初回バックフィル用の値。",
         measured_min=151.0,      # GHA 6年 2h31m。**ローカル未実測**
+        # 収集は EDINET の応答待ちが所要の大半で、CPU の取り合いは所要を延ばすだけ。
+        # 取得した XBRL の中身は裏で何が動いていても同じ＝結論は変わらない。
+        parallel_sensitive=False,
     ),
     "disclosures": Job(
         name="collect_disclosures",
@@ -149,7 +182,10 @@ JOBS: dict[str, Job] = {
         # 2026-09-07 の見積り: 最終 disc_date 2026-04-17 から 143暦日 ×
         # `JQUANTS_RATE_SLEEP`(20秒) = 47.7分が**上限**（非営業日は HTTP 400 で即返り
         # sleep も払わないので実際は短い）。60 は余裕込み。**実走で差し替える。**
-        measured_min=60.0,
+        # 2026-09-08 実測 14.1分（43日・4052件）。上の見積りは最終 disc_date が
+        # 4.7ヶ月前だった初回ぶんで、以後は毎回この程度に収まる。
+        measured_min=14.1,
+        parallel_sensitive=False,   # interim と同じ理由（J-Quants の応答待ちが所要の大半）
     ),
     "tune:macro_dlm": Job(
         name="tune:macro_dlm",
@@ -159,6 +195,7 @@ JOBS: dict[str, Job] = {
         why="M-3 の探索。実測 1.04〜1.26分/件 × 294件 ＝ 306〜369分。9/1 の月次では"
             "250分の予算で 199/294 まで進んで打ち切られ、完走しないので何も残らなかった。",
         measured_min=369.0,
+        parallel_sensitive=True,   # tune:macro_gbdt と同じ理由（順位が入れ替わると重みが変わる）
     ),
 }
 
@@ -310,6 +347,22 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             print(f"  {i}. {name}  ({note})")
         if not items:
             print("  （空）積むには --enqueue <名前>。積める名前: " + ", ".join(sorted(JOBS)))
+        return 0
+    if "--peek" in args:
+        # `run_daytime.ps1 -Now` が「次の1件を今すぐ叩いてよいか」を判断するための機械可読口。
+        # **キューは減らさない**（判断だけして走らせないことがある）。
+        items = read_queue()
+        head = items[0] if items else None
+        job = JOBS.get(head) if head is not None else None
+        print(json.dumps({
+            "key": head,
+            "name": job.name if job else None,
+            "known": job is not None,
+            # **未知の仕事は敏感側に倒す。** 判断材料が無いときに黙って走らせない。
+            "sensitive": job.parallel_sensitive if job else (head is not None),
+            "measured_min": job.measured_min if job else None,
+            "remaining": len(items),
+        }))
         return 0
     if "--clear-queue" in args:
         write_queue([])
