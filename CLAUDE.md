@@ -84,8 +84,10 @@ python -m scripts.check_nightly_collect --nights 5
 # 平日日中バッチ（重い計算をキューから1日1件）。#618・平日 JST 08:00・窓8h
 # **人が PC を触らない時間帯で回すこと自体が再現性の条件**（並走すると NUTS の発散が 0→344 に増えた実測）
 ./run_daytime.ps1 -Queue                 # キューの中身
-./run_daytime.ps1 -Enqueue beta          # 積む（beta / tune:macro_gbdt / tune:macro_dlm / interim / disclosures）
+./run_daytime.ps1 -Enqueue beta          # 積む（beta / tune:macro_gbdt / tune:macro_dlm / gate:interactions / interim / disclosures）
 ./run_daytime.ps1 -DryRun                # 実行計画だけ（キューは減らさない）
+./run_daytime.ps1 -Now                   # 枠を待たず次の1件（休暇等）。**タスク経由＝セッション0で走る**
+./run_daytime.ps1 -Now -Force            # 並走に敏感な仕事（beta / tune:* / gate:*）も叩く。**叩いたら PC を触らない**
 ./scripts/install_daytime_task.ps1       # 登録（平日 JST 08:00・上限8h）。**登録後に1回手動実行して足跡を入れる**
 
 # バックアップ（週次バッチ・毎週日曜 JST 21:00。Storage は 50MB/ファイル・1GB。実測 38.1MB/世代）

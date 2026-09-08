@@ -23,6 +23,7 @@ Render の制約と運用形態に合わせて設計すること。
 | **自動（毎月）** | M-1 per-stock 階層マクロβ推論・永続化（producer） | 毎月2日 JST 01:00（#579・実測 360〜419分） | ローカル `run_monthly_beta.ps1` |
 | **自動（毎月）** | M-1 ハイパーパラメータ探索・永続化 | 毎月3日 JST 01:00（#584・[ADR-0046](adr/0046-steps-that-cannot-finish-get-their-own-task.md)・実測 約752分） | ローカル `run_monthly_m1.ps1` |
 | **自動（平日）** | 重い計算をキューから1日1件（`beta` / `tune:*` / `interim` / `disclosures` / `gate:*`） | 平日 JST 08:00（窓8時間・#618） | ローカル `run_daytime.ps1` |
+| **手動（前倒し）** | 上記の次の1件を枠を待たずに消化（休暇などで平日昼に PC を触れる日） | 随時。**タスク経由で起動＝セッション0** | ローカル `run_daytime.ps1 -Now`（並走に敏感な仕事は `-Force` が要る） |
 | **自動（毎月）** | `stock_price_daily` / `stock_price_weekly` の VACUUM FULL（index bloat 対策・#290） | 毎月1日 JST 01:00 の月次バッチの**先頭ステップ** | ローカル `run_monthly.ps1` → `_pipeline_vacuum.py` |
 | **手動のみ** | 全件収集（全社 × 5年分） | workflow_dispatch で起動 | GitHub Actions `full-pipeline.yml` |
 | **手動のみ** | マクロのみ収集（為替・金利等） | workflow_dispatch で起動 | GitHub Actions `collect-macro.yml` |
