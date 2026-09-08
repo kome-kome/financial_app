@@ -694,6 +694,45 @@ class TestFetchXbrlCsv:
         assert asyncio.run(fetch_xbrl_csv(client, "S100ABCD")) is None
 
 
+class TestXbrlFetchStats:
+    """失敗を理由別に数える（#630）。理由を1つに畳むと恒久的失敗と一時的失敗が区別できない。"""
+
+    def test_counts_badzip(self):
+        # EDINET は CSV 形式を持たない書類へ HTTP 200 で JSON 本文を返す（実測・#630）。
+        body = b'{"metadata":{"status":"404","message":"Not Found"}}'
+        client = _client(_const(httpx.Response(200, content=body)))
+        with collector_financials.xbrl_fetch_stats() as stats:
+            assert asyncio.run(fetch_xbrl_csv(client, "S100T096")) is None
+        assert stats["badzip"] == 1
+        assert stats["no_csv"] == stats["http"] == stats["other"] == 0
+
+    def test_counts_no_csv(self):
+        client = _client(_const(httpx.Response(200, content=_zip_bytes("readme.txt", b"hello"))))
+        with collector_financials.xbrl_fetch_stats() as stats:
+            assert asyncio.run(fetch_xbrl_csv(client, "S100ABCD")) is None
+        assert stats["no_csv"] == 1
+        assert stats["badzip"] == 0
+
+    def test_counts_http_error(self):
+        client = _client(_const(httpx.Response(503, content=b"upstream down")))
+        with collector_financials.xbrl_fetch_stats() as stats:
+            assert asyncio.run(fetch_xbrl_csv(client, "S100ABCD")) is None
+        assert stats["http"] == 1
+        assert stats["badzip"] == stats["no_csv"] == 0
+
+    def test_outside_context_does_not_raise(self):
+        # 集計を張っていない経路（通期収集・単社更新）からも従来どおり呼べる。
+        client = _client(_const(httpx.Response(200, content=b"not a zip")))
+        assert asyncio.run(fetch_xbrl_csv(client, "S100ABCD")) is None
+
+    def test_format_emits_zero_counts(self):
+        # 0 のときも出す。出ていないことが読めないと監視にならない。
+        line = collector_financials.format_xbrl_fetch_stats({"badzip": 2})
+        assert "badzip=2" in line
+        for k in ("no_csv", "oversize", "http", "other"):
+            assert f"{k}=0" in line
+
+
 class TestFetchStockHistoryStooq:
     def test_parses_rows(self):
         csv = ("Date,Open,High,Low,Close,Volume\n"

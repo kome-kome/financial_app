@@ -26,7 +26,8 @@ from collector_utils import (
     RATE_SLEEP, log, redact_secrets,
 )
 from collector_financials import (
-    _col_as_str_list, _detect_xbrl_columns, calc_derived, fetch_xbrl_csv, parse_xbrl_csv,
+    _col_as_str_list, _detect_xbrl_columns, calc_derived, fetch_xbrl_csv,
+    format_xbrl_fetch_stats, parse_xbrl_csv, xbrl_fetch_stats,
 )
 from database import Company, FinancialRecord, upsert_company, upsert_financial
 
@@ -111,6 +112,28 @@ def _h1_month(fy_end_month: int) -> int:
     return ((fy_end_month - 6 - 1) % 12) + 1
 
 
+def split_by_csv_availability(docs: list) -> tuple:
+    """書類一覧を「CSV 形式を持つ」「持たない」へ分ける → `(with_csv, without_csv)`（#630）。
+
+    EDINET の書類一覧は書類ごとに `csvFlag` を持ち、CSV 形式が存在しない書類では `'0'` になる。
+    これを見ずに `type=5`（CSV）を要求すると、EDINET は **HTTP 200 で ZIP ではない JSON 本文**
+    を返すため `zipfile.BadZipFile` へ落ちる。失敗した doc_id は `skip_existing`（成功した
+    doc_id しか記録しない）に載らないので、**回すたびに同じ書類を落とし続ける**。
+
+    実測（2026-09-08・16件）: いずれも `csvFlag='0'` / `xbrlFlag='0'` / `pdfFlag='1'` で、
+    本文書 ZIP に XBRL インスタンスを1つも含まない（外国会社等の HTML のみ提出）。
+    CSV は原理的に存在せず、待っても現れない＝恒久的失敗。
+
+    **`csvFlag` が明示的に `'0'` のときだけ除外する。** 欠損・None は除外しない——
+    `prefilter_interim_docs` が「年度末不明の企業は候補に残して DEI 判定に委ねる」としているのと
+    同じ、取りこぼしを避ける向き。
+    """
+    with_csv, without_csv = [], []
+    for d in docs:
+        (without_csv if str(d.get("csvFlag")) == "0" else with_csv).append(d)
+    return with_csv, without_csv
+
+
 def prefilter_interim_docs(docs: list, fy_end_month_map: dict) -> list:
     """半期候補を metadata だけで事前選別する(ダウンロード数の削減)。
 
@@ -147,6 +170,7 @@ async def collect_interim_docs_for_period(
     """指定期間を日次スキャンし、半期候補書類(事前選別済み)を返す。"""
     docs = []
     seen_codes: set = set()
+    no_csv_ids: list = []          # CSV 形式を持たない書類（#630）。件数と doc_id を最後に出す
     total_days = (end - start).days + 1
     cur = start
     day_idx = 0
@@ -171,6 +195,9 @@ async def collect_interim_docs_for_period(
             cur += timedelta(days=1)
             continue
         consecutive_failures = 0
+        # CSV 形式を持たない書類は取りに行っても必ず失敗する（#630）。**選別の一番手前で外す。**
+        daily, no_csv = split_by_csv_availability(daily)
+        no_csv_ids.extend(d.get("docID") for d in no_csv)
         kept = prefilter_interim_docs(daily, fy_end_month_map)
         for d in kept:
             seen_codes.add(d.get("edinetCode"))
@@ -179,6 +206,10 @@ async def collect_interim_docs_for_period(
             log.info(f"{cur} -> 半期候補{len(kept)}件(累計{len(seen_codes)}社)")
         await asyncio.sleep(RATE_SLEEP)
         cur += timedelta(days=1)
+
+    # **0 件のときも出す**（出ていないことが読めないと、除外が効いているのか分からない）。
+    log.info(f"CSV 無しで除外 {len(no_csv_ids)}件"
+             + (f": {' '.join(sorted(no_csv_ids))}" if no_csv_ids else ""))
     return docs
 
 
@@ -197,14 +228,44 @@ async def process_interim_docs(db, client, docs: list,
     """半期候補を1件ずつ処理: XBRL取得→DEI判定(Q2のみ)→parse→upsert(period_type='H1')。
 
     通期の `_phase_process_docs` と同様のフェイルソフト方針(個社失敗でも継続)。
-    戻り値は集計 {saved, skipped_notq2, skipped_existing, failed}。
+    戻り値は集計 {saved, skipped_notq2, skipped_existing, attempted, failed, failed_*}。
     known_edinet に無い企業は FK(companies)を満たすため最小情報で upsert_company する。
+
+    失敗は**理由別に**数える（#630）。理由を1つに畳むと、恒久的に取れない書類と一時的な
+    ネットワーク断が同じ顔になり、再試行を止めてよいか判断できない。`failed` は合計として
+    残す（過去ログと突き合わせるため）。
+
+    **連続失敗は握らず送出する。** 単発は個社の事情だが、連続は構造的（EDINET 側の障害・
+    API キー失効等）で、握ると「走ったが全部失敗した」が exit=0 で沈黙する。閾値は書類一覧
+    スキャンと同じ `EDINET_MAX_CONSECUTIVE_FAILURES` を使う（#577 の約束の再利用）。
     """
     total = len(docs)
     stat = Counter()
     skip_ids = skip_existing_doc_ids or set()
     known = known_edinet if known_edinet is not None else set()
+    consecutive_failures = 0
+
+    last_failure = ("", "")     # (reason, doc_id)。連続失敗で送出するときの文面に使う
+
+    def _fail(reason: str, doc_id: str) -> None:
+        """失敗を理由別と合計の両方へ数える。**送出の判断はループ側が持つ**——ここで raise すると
+        try の中から投げることになり、下の `except Exception` が自分の例外を拾ってしまう。"""
+        nonlocal consecutive_failures, last_failure
+        stat[f"failed_{reason}"] += 1
+        stat["failed"] += 1
+        consecutive_failures += 1
+        last_failure = (reason, doc_id)
+
+    def _check_consecutive() -> None:
+        if consecutive_failures >= EDINET_MAX_CONSECUTIVE_FAILURES:
+            reason, doc_id = last_failure
+            raise EdinetAccessError(
+                f"半期書類が連続で処理できない（{doc_id} まで・直近の理由: {reason}）",
+                consecutive_failures)
+
     for i, doc in enumerate(docs):
+        # 失敗の直後ではなくここで見る（各分岐の `continue` を跨いで必ず通る唯一の地点）。
+        _check_consecutive()
         if cancel_check and cancel_check():
             db.commit()
             log.info(f"半期収集をキャンセル({i}/{total}件処理済み)")
@@ -224,28 +285,30 @@ async def process_interim_docs(db, client, docs: list,
             on_progress(i + 1, total, f"[半期 {i+1}/{total}] {filer_name}({sec_code})")
 
         try:
+            stat["attempted"] += 1
             xbrl_df = await fetch_xbrl_csv(client, doc_id)
             await asyncio.sleep(RATE_SLEEP)
             if xbrl_df is None or xbrl_df.empty:
-                stat["failed"] += 1
+                _fail("fetch", doc_id)
                 continue
 
             dei = _extract_dei(xbrl_df)
             # H1(中間=Q2)以外は除外(旧四半期の Q1/Q3)。
             if dei.get(_DEI_TYPE) != H1_PERIOD_TYPE_DEI:
                 stat["skipped_notq2"] += 1
+                consecutive_failures = 0    # 取得自体は成功している
                 continue
 
             period_end = (dei.get(_DEI_PEND) or "")[:10]        # 真の H1 期末(DEI)
             fy_end     = (dei.get(_DEI_FYEND) or "")[:10]
             if not period_end or not fy_end:
-                stat["failed"] += 1
+                _fail("dei", doc_id)
                 continue
             year = int(fy_end[:4])   # 同一会計年度の通期行と同じ year でグルーピング
 
             raw = parse_xbrl_csv(xbrl_df, edinet_code, period_end)
             if not any(raw.get(cat) for cat in ("bs", "pl", "cf")):
-                stat["failed"] += 1
+                _fail("parse", doc_id)
                 continue
             rec = calc_derived(raw)
 
@@ -273,6 +336,7 @@ async def process_interim_docs(db, client, docs: list,
             })
             upsert_financial(db, rec)
             stat["saved"] += 1
+            consecutive_failures = 0
 
             if stat["saved"] % COLLECT_COMMIT_BATCH == 0:
                 db.commit()
@@ -281,14 +345,22 @@ async def process_interim_docs(db, client, docs: list,
         except httpx.HTTPError as e:
             log.error(f"[半期取得失敗] {edinet_code}/{doc_id} {filer_name}: {e.__class__.__name__}: {e}")
             _safe_rollback(db)
-            stat["failed"] += 1
+            _fail("http", doc_id)
         except Exception as e:
             log.error(f"[半期処理失敗] {edinet_code}/{doc_id} {filer_name}: {e.__class__.__name__}: {e}",
                       exc_info=True)
             _safe_rollback(db)
-            stat["failed"] += 1
+            _fail("other", doc_id)
 
     db.commit()
+    # 末尾で連続失敗が起きた場合はループ先頭の判定を通らない。**ここでもう一度見る。**
+    _check_consecutive()
+    # 0 の項目も含めて必ず出す（内訳が読めないと、恒久的失敗と一時的失敗を分けられない）。
+    # 戻り値の形を実行ごとに変えないことで、読む側が `in` を書かずに済む。
+    for key in ("saved", "skipped_existing", "skipped_notq2", "attempted", "failed"):
+        stat.setdefault(key, 0)
+    for reason in ("fetch", "dei", "parse", "http", "other"):
+        stat.setdefault(f"failed_{reason}", 0)
     return dict(stat)
 
 
@@ -324,8 +396,10 @@ async def run_interim_collection(db,
             client, start, end, fy_end_month_map, on_progress=on_progress)
         log.info(f"半期候補書類: {len(docs)}件")
 
-        stat = await process_interim_docs(
-            db, client, docs, on_progress=on_progress, cancel_check=cancel_check,
-            skip_existing_doc_ids=existing_ids, known_edinet=known_edinet)
-        log.info(f"半期収集完了: {stat}")
+        with xbrl_fetch_stats() as fetch_stats:
+            stat = await process_interim_docs(
+                db, client, docs, on_progress=on_progress, cancel_check=cancel_check,
+                skip_existing_doc_ids=existing_ids, known_edinet=known_edinet)
+        log.info(f"半期収集完了: {stat} / {format_xbrl_fetch_stats(fetch_stats)}")
+        stat["xbrl_fetch_errors"] = dict(fetch_stats)
         return stat
