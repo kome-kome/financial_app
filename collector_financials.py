@@ -6,6 +6,7 @@ import traceback
 import zipfile
 import asyncio
 from collections import defaultdict
+from contextlib import contextmanager
 from datetime import date, datetime, timedelta
 from typing import Optional, Callable
 
@@ -164,6 +165,49 @@ async def collect_doc_ids_for_period(client, start: date, end: date,
     return docs
 
 
+# ── XBRL 取得失敗の理由別集計（#630）─────────────────────────────────────────
+# `fetch_xbrl_csv` は失敗を全部 `None` へ畳む（呼び出し側の分岐を増やさないための設計）。
+# そのままだと「CSV 形式を持たない書類（恒久）」と「ネットワーク断（一時）」が区別できず、
+# 再試行を止めてよいかも判断できない。**署名は変えずに run 単位で数える**——`fetch_xbrl_csv`
+# は通期収集・半期収集・単社更新の3経路から呼ばれるため。形は `yahoo_http_stats()`（#556）と同じ。
+_XBRL_FETCH_ERRORS: Optional[dict] = None
+
+# EDINET は CSV 形式を持たない書類（`csvFlag='0'`＝外国会社等の HTML のみ提出）に対して、
+# **HTTP 200 で ZIP ではない JSON 本文**（`{"metadata":{"status":"404",...}}`）を返す。
+# raise_for_status を通り抜けて `zipfile.BadZipFile` に落ちるので、`badzip` は恒久的失敗が主。
+XBRL_FETCH_REASONS = ("badzip", "no_csv", "oversize", "http", "other")
+
+
+@contextmanager
+def xbrl_fetch_stats():
+    """この with の中で `fetch_xbrl_csv` が踏んだ失敗を理由別に数える。
+
+    yield される dict は `{"badzip": n, "no_csv": n, "oversize": n, "http": n, "other": n}`。
+    **入れ子にしない**（内側が外側の集計を奪う）。集計は「数える」だけで、判断は呼び出し側が持つ。
+    """
+    global _XBRL_FETCH_ERRORS
+    prev = _XBRL_FETCH_ERRORS
+    stats: dict = {k: 0 for k in XBRL_FETCH_REASONS}
+    _XBRL_FETCH_ERRORS = stats
+    try:
+        yield stats
+    finally:
+        _XBRL_FETCH_ERRORS = prev
+
+
+def _count_xbrl_fetch_failure(reason: str) -> None:
+    """失敗を1つ数える。**未知の理由も必ず `other` として数える**（0 を「起きなかった」の意味に保つ）。"""
+    if _XBRL_FETCH_ERRORS is None:
+        return
+    key = reason if reason in _XBRL_FETCH_ERRORS else "other"
+    _XBRL_FETCH_ERRORS[key] += 1
+
+
+def format_xbrl_fetch_stats(stats: dict) -> str:
+    """ログ1行へ整形する。**0 のときも出す**（出ていないことが読めないと監視にならない）。"""
+    return "XBRL取得失敗 " + " ".join(f"{k}={stats.get(k, 0)}" for k in XBRL_FETCH_REASONS)
+
+
 async def fetch_xbrl_csv(client: httpx.AsyncClient, doc_id: str):
     url = f"{EDINET_BASE}/documents/{doc_id}"
     params = {"type": 5, "Subscription-Key": API_KEY}
@@ -174,10 +218,12 @@ async def fetch_xbrl_csv(client: httpx.AsyncClient, doc_id: str):
         with zipfile.ZipFile(io.BytesIO(r.content)) as z:
             csv_files = [n for n in z.namelist() if n.endswith(".csv")]
             if not csv_files:
+                _count_xbrl_fetch_failure("no_csv")
                 return None
             total_uncompressed = sum(z.getinfo(n).file_size for n in z.namelist())
             if total_uncompressed > _ZIP_MAX_BYTES:
                 log.warning(f"ZIPサイズ超過（{total_uncompressed // 1024 // 1024}MB）: {doc_id}")
+                _count_xbrl_fetch_failure("oversize")
                 return None
             # EDINET XBRL ZIP には概要ファイルと詳細（CF 明細等）の複数 CSV が存在する。
             # 最大ファイルだけでは CF 明細（capex 等）を取り逃がすため全 CSV を結合する。
@@ -197,15 +243,23 @@ async def fetch_xbrl_csv(client: httpx.AsyncClient, doc_id: str):
                 if df_part is not None and not df_part.empty:
                     all_dfs.append(df_part)
         if not all_dfs:
+            _count_xbrl_fetch_failure("no_csv")
             return None
         if len(all_dfs) == 1:
             return all_dfs[0]
         return pd.concat(all_dfs, ignore_index=True, sort=False)
     except zipfile.BadZipFile:
+        # EDINET が CSV 形式を持たない書類へ返す JSON 本文（HTTP 200）もここへ落ちる（#630）。
         log.warning(f"ZIPエラー: {doc_id}")
+        _count_xbrl_fetch_failure("badzip")
+        return None
+    except httpx.HTTPError as e:
+        log.warning(f"XBRL取得失敗 {doc_id}: {redact_secrets(f'{type(e).__name__}: {e}')}")
+        _count_xbrl_fetch_failure("http")
         return None
     except Exception as e:
-        log.warning(f"XBRL取得失敗 {doc_id}: {e}")
+        log.warning(f"XBRL取得失敗 {doc_id}: {redact_secrets(f'{type(e).__name__}: {e}')}")
+        _count_xbrl_fetch_failure("other")
         return None
 
 

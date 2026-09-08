@@ -181,9 +181,17 @@ if __name__ == "__main__":
                     skip_existing=True,
                     on_progress=lambda c, t, m: print(m))
                 print(r)
+                return r
             finally:
                 db.close()
-        asyncio.run(_interim())
+        stat = asyncio.run(_interim())
+        # 「走ったが全部失敗した」を失敗として現す（#630）。取りに行った件数が0なら
+        # 収穫が無いだけ（H1 は 11月提出なので、時期によっては新規0件が正常）＝成功のまま。
+        attempted, failed = stat.get("attempted", 0), stat.get("failed", 0)
+        if attempted > 0 and failed == attempted:
+            raise SystemExit(
+                f"半期収集: 取りに行った {attempted}件が全部失敗した"
+                f"（内訳 {', '.join(f'{k}={v}' for k, v in sorted(stat.items()) if k.startswith('failed_'))}）")
     elif args.company:
         asyncio.run(refresh_company(args.company, args.years))
     else:

@@ -3,6 +3,7 @@
 ネットワークを使わない純関数・DB選別ロジックを検証する。実 EDINET 収集の E2E は
 scripts/investigate_*_edinet*.py の実データ de-risk で別途確認済み。
 """
+import asyncio
 import os
 import sys
 from datetime import date
@@ -12,8 +13,11 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import collector_interim  # noqa: E402
+from collector_utils import EDINET_MAX_CONSECUTIVE_FAILURES, EdinetAccessError  # noqa: E402
 from collector_interim import (  # noqa: E402
     _extract_dei, _h1_month, build_fy_end_month_map, prefilter_interim_docs,
+    process_interim_docs, split_by_csv_availability,
     INTERIM_DOC_TYPES,
 )
 
@@ -98,3 +102,105 @@ class TestBuildFyEndMonthMap:
         m = build_fy_end_month_map(db)
         assert m["E00001"] == 3
         assert m["E00002"] == 12
+
+
+class TestSplitByCsvAvailability:
+    """CSV 形式を持たない書類を候補の手前で外す（#630）。
+
+    実測（2026-09-08・16件）はいずれも csvFlag='0' / xbrlFlag='0' の外国会社等の
+    HTML のみ提出で、EDINET は type=5 に HTTP 200 + JSON を返す＝恒久的失敗。
+    """
+
+    def _doc(self, doc_id, **o):
+        d = dict(docID=doc_id, edinetCode="E00001", docTypeCode="160", csvFlag="1")
+        d.update(o)
+        return d
+
+    def test_drops_only_explicit_zero(self):
+        with_csv, without = split_by_csv_availability([
+            self._doc("S1", csvFlag="1"),
+            self._doc("S2", csvFlag="0"),
+        ])
+        assert [d["docID"] for d in with_csv] == ["S1"]
+        assert [d["docID"] for d in without] == ["S2"]
+
+    def test_missing_flag_is_kept(self):
+        # 欠損・None は除外しない（取りこぼし防止。prefilter_interim_docs と同じ向き）。
+        docs = [self._doc("S1", csvFlag=None), {"docID": "S2", "edinetCode": "E1"}]
+        with_csv, without = split_by_csv_availability(docs)
+        assert [d["docID"] for d in with_csv] == ["S1", "S2"]
+        assert without == []
+
+    def test_integer_zero_is_dropped(self):
+        # JSON が数値で返ってきても落とせる（str 比較で正規化している）。
+        with_csv, without = split_by_csv_availability([self._doc("S1", csvFlag=0)])
+        assert with_csv == []
+        assert [d["docID"] for d in without] == ["S1"]
+
+
+# ── 失敗の理由別カウントと連続失敗の送出（#630）──────────────────────────────
+
+def _interim_doc(n: int) -> dict:
+    return {"docID": f"S{n:06d}", "edinetCode": "E00001", "secCode": "1234",
+            "filerName": "テスト社", "submitDateTime": "2024-11-14 10:00"}
+
+
+class _StubDb:
+    """process_interim_docs が触る最小の DB。**本物のセッションへは触れない。**"""
+    def commit(self): pass
+    def rollback(self): pass
+
+
+class TestFailureBreakdown:
+    def _run(self, monkeypatch, fetch_side_effect, n_docs=1):
+        async def fake_fetch(client, doc_id):
+            return fetch_side_effect(doc_id)
+        monkeypatch.setattr(collector_interim, "fetch_xbrl_csv", fake_fetch)
+        monkeypatch.setattr(collector_interim, "RATE_SLEEP", 0)
+        docs = [_interim_doc(i) for i in range(n_docs)]
+        return asyncio.run(process_interim_docs(
+            _StubDb(), None, docs, known_edinet={"E00001"}))
+
+    def test_fetch_failure_is_counted_by_reason(self, monkeypatch):
+        stat = self._run(monkeypatch, lambda doc_id: None)
+        assert stat["attempted"] == 1
+        assert stat["failed"] == 1
+        assert stat["failed_fetch"] == 1
+        # 0 の理由も鍵として必ず出る（内訳が読めないと恒久/一時を分けられない）。
+        for reason in ("dei", "parse", "http", "other"):
+            assert stat[f"failed_{reason}"] == 0
+
+    def test_missing_dei_is_counted_separately(self, monkeypatch):
+        df = pd.DataFrame([["jpdei_cor:TypeOfCurrentPeriodDEI", "FilingDateInstant", "Q2"]],
+                          columns=["要素ID", "コンテキストID", "値"])
+        stat = self._run(monkeypatch, lambda doc_id: df)
+        assert stat["failed_dei"] == 1
+        assert stat["failed_fetch"] == 0
+
+    def test_not_q2_is_not_a_failure(self, monkeypatch):
+        df = pd.DataFrame([["jpdei_cor:TypeOfCurrentPeriodDEI", "FilingDateInstant", "Q3"]],
+                          columns=["要素ID", "コンテキストID", "値"])
+        stat = self._run(monkeypatch, lambda doc_id: df)
+        assert stat["skipped_notq2"] == 1
+        assert stat["failed"] == 0
+
+    def test_consecutive_failures_raise(self, monkeypatch):
+        # 単発は握って続行・**連続は構造的なので送出する**（#577 の約束を再利用）。
+        with pytest.raises(EdinetAccessError):
+            self._run(monkeypatch, lambda doc_id: None,
+                      n_docs=EDINET_MAX_CONSECUTIVE_FAILURES + 1)
+
+    def test_below_threshold_does_not_raise(self, monkeypatch):
+        stat = self._run(monkeypatch, lambda doc_id: None,
+                         n_docs=EDINET_MAX_CONSECUTIVE_FAILURES - 1)
+        assert stat["failed"] == EDINET_MAX_CONSECUTIVE_FAILURES - 1
+
+    def test_success_resets_the_streak(self, monkeypatch):
+        # 「連続」であることが送出の条件。間に成功が挟まれば構造的ではない。
+        ok = pd.DataFrame([["jpdei_cor:TypeOfCurrentPeriodDEI", "FilingDateInstant", "Q3"]],
+                          columns=["要素ID", "コンテキストID", "値"])
+        n = EDINET_MAX_CONSECUTIVE_FAILURES
+        seq = {f"S{i:06d}": (ok if i == n - 1 else None) for i in range(2 * n - 1)}
+        stat = self._run(monkeypatch, lambda doc_id: seq[doc_id], n_docs=2 * n - 1)
+        assert stat["skipped_notq2"] == 1
+        assert stat["failed"] == 2 * n - 2
