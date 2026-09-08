@@ -22,16 +22,19 @@ LOG_BEFORE = """\
 [18:24:41]   株価鮮度: p50=2026-09-07 / p05=2026-09-07 / max=2026-09-07 / level=fresh（3823銘柄・5営業日超の遅れ 88銘柄）
 """
 
-# #622／#620 の適用後（今夜以降に出るはずの形）。
-LOG_AFTER = """\
-2026-09-08 17:30:00,000 INFO fill_recent_stock_price_gap_yahoo: 4080/4440社を補完（基準セッション 2026-09-08）
-2026-09-08 17:45:30,000 INFO fill_recent_stock_price_gap_yahoo: 15000件を株価テーブルへ集約保存（うち新規日付 3700件）
-[17:45:30]   Yahoo Finance gap-fill: 15000件 投入（うち新規日付 3700件・20260309 〜 20260908・4080社・基準セッション 2026-09-08）
-[17:45:30]   価格ゼロ 416社（うち解決済み 0社）
-[17:45:31]   Yahoo 並行度 4・HTTP失敗 429=0 5xx=0 4xx=2 その他=0
-[17:46:00]   J-Quants catchup (2026-06-10〜2026-06-20): 18400件 upsert・スケール不一致で不採用 37行（2社）
-[17:47:00]   株価鮮度: p50=2026-09-08 / p05=2026-09-08 / max=2026-09-08 / level=fresh（3823銘柄・5営業日超の遅れ 88銘柄）
-[17:47:05]   往復段差: なし（調整差のある 2社を検査）
+# #622／#620 の適用後（**2026-09-08 の実ログから写した**）。
+# 初版は #622 の適用前に「出るはずの形」を推測で書いており、実際とは3点ずれていた——
+# 並行度・HTTP失敗は独立行ではなく集約保存の行に**併記**され、そのぶん `新規日付 N件` の
+# 後ろに閉じ括弧が来ない。**推測で書いた検体は本物のログを読めないことを検出できない。**
+LOG_AFTER = """\n2026-09-08 17:36:10,507 INFO fill_recent_stock_price_gap_yahoo: 4105/4441社を補完（基準セッション 2026-09-08 / JST 2026-09-08 17:36 ・最古起点 20260309 〜 20260908 ・価格ゼロ 417社（うち解決済み 0社） ・廃止済み価格ゼロ 332社は今夜は見送り（7日に1回試す・#475） ・地方取引所に実在 4社は .T を叩かない（月次が正しい取引所で再プローブ・#560））
+[17:37:32] [Yahoo gap-fill 500/4105]
+2026-09-08 17:47:20,603 INFO fill_recent_stock_price_gap_yahoo: 7621件を株価テーブルへ集約保存（うち新規日付 3720件・並行度 4・HTTP失敗 429=0 5xx=0 4xx=350 その他=0）
+[17:47:20]   Yahoo Finance gap-fill: 7621件 投入（うち新規日付 3720件・20260309 〜 20260908・4105社・基準セッション 2026-09-08）
+[17:47:20]   価格ゼロ 417社（うち解決済み 0社）
+[17:47:20]   Yahoo 並行度 4・HTTP失敗 429=0 5xx=0 4xx=350 その他=0
+[17:49:02]   J-Quants catchup (2026-06-10〜2026-06-20): 18265件 upsert・契約窓外 3日・スケール不一致で不採用 218行（44社）
+[17:49:05]   株価鮮度: p50=2026-09-08 / p05=2026-09-08 / max=2026-09-08 / level=fresh（3823銘柄・5営業日超の遅れ 88銘柄）
+[17:49:05]   往復段差: なし（調整差のある 44社を検査）
 """
 
 
@@ -48,14 +51,24 @@ class TestParse:
     def test_seconds_per_company(self):
         assert seconds_per_company(parse_nightly_log(LOG_BEFORE)) == pytest.approx(0.649, abs=1e-3)
 
+    def test_gap_fill_parsed_after_concurrency_shipped(self):
+        """#622 で `新規日付 N件` の後ろに「・並行度 …」が続くようになった。
+
+        閉じ括弧まで要求していた旧パターンはここを黙って読み落とし、投入行数・所要が
+        丸ごと `-` になったうえ「収集が終わっていない可能性」という偽の警告を出していた。
+        """
+        r = parse_nightly_log(LOG_AFTER)
+        assert (r["upserted"], r["new_rows"]) == (7621, 3720)
+        assert r["gap_minutes"] == pytest.approx(11.2, abs=0.1)
+
     def test_concurrency_and_http(self):
         r = parse_nightly_log(LOG_AFTER)
         assert r["concurrency"] == 4
-        assert (r["http_429"], r["http_5xx"], r["http_4xx"]) == (0, 0, 2)
+        assert (r["http_429"], r["http_5xx"], r["http_4xx"]) == (0, 0, 350)
 
     def test_scale_mismatch_and_roundtrip(self):
         r = parse_nightly_log(LOG_AFTER)
-        assert (r["scale_mismatch_rows"], r["scale_mismatch_companies"]) == (37, 2)
+        assert (r["scale_mismatch_rows"], r["scale_mismatch_companies"]) == (218, 44)
         assert r["roundtrip"] == "なし" and r["roundtrip_companies"] == 0
 
 
@@ -81,7 +94,7 @@ class TestUnknownIsNotZero:
         assert parse_nightly_log(LOG_BEFORE)["scale_mismatch_rows"] is None
 
     def test_scale_mismatch_zero_after_the_guard_shipped(self):
-        log = LOG_AFTER.replace("・スケール不一致で不採用 37行（2社）", "")
+        log = LOG_AFTER.replace("・スケール不一致で不採用 218行（44社）", "")
         r = parse_nightly_log(log)
         assert r["roundtrip"] == "なし"            # #620 が入っている晩である証拠
         assert r["scale_mismatch_rows"] == 0        # 記載が無い＝本物の 0
@@ -112,8 +125,8 @@ class TestWarnings:
 
     def test_roundtrip_band_is_flagged(self):
         log = LOG_AFTER.replace(
-            "往復段差: なし（調整差のある 2社を検査）",
-            "**往復段差 2社**（例: E32779, E05716）＝調整差のある社の日次に")
+            "往復段差: なし（調整差のある 44社を検査）",
+            "**往復段差 2社**（例: E01332, E01717）＝調整差のある社の日次に")
         r = parse_nightly_log(log)
         assert r["roundtrip_companies"] == 2
         assert any("repair_scale_mixture" in w for w in warnings_for(r))
@@ -124,7 +137,7 @@ class TestWarnings:
 
     def test_volume_change_is_not_a_warning(self):
         """社数や所要の増減は警告にしない——夜ごとに ±45% 振れた前例がある（#556）。"""
-        r = parse_nightly_log(LOG_AFTER.replace("4080/4440", "120/4440"))
+        r = parse_nightly_log(LOG_AFTER.replace("4105/4441", "120/4441"))
         assert warnings_for(r) == []
 
 

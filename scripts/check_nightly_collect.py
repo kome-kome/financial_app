@@ -51,8 +51,11 @@ WEEKDAY_JA = "月火水木金土日"
 #     出しているものだけ。ここで表現を変えると黙って読めなくなるので写さず合わせる）──
 RE_STAMP      = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}),\d+ INFO")
 RE_GAP_START  = re.compile(r"fill_recent_stock_price_gap_yahoo: (\d+)/(\d+)社を補完")
+# `新規日付 N件` の後ろは #622 で「・並行度 …・HTTP失敗 …」が続くようになった。
+# **閉じ括弧まで要求すると新形式を黙って読み落とす**（実測: 2026-09-08 の実ログで
+# 投入行数・所要が丸ごと `-` になり、「収集が終わっていない可能性」という偽の警告が出た）。
 RE_GAP_END    = re.compile(r"fill_recent_stock_price_gap_yahoo: (\d+)件を株価テーブルへ"
-                           r"集約保存（うち新規日付 (\d+)件）")
+                           r"集約保存（うち新規日付 (\d+)件")
 RE_GAP_SKIP   = re.compile(r"Yahoo Finance gap-fill: スキップ（(.+?)・基準セッション")
 RE_PRICELESS  = re.compile(r"価格ゼロ (\d+)社（うち解決済み (\d+)社）")
 RE_REJECTED   = re.compile(r"解決済みなのに空 (\d+)社")
