@@ -22,6 +22,10 @@
 **失敗しても先頭は取り除く。** 残すと同じ計算を毎日繰り返して先へ進まなくなる（それが
 このバッチを作る動機そのもの）。失敗は Issue で起票されるので、再試行したいときは積み直す。
 
+ただし**結論を出して失敗した**のと**結論を出す前にプロセスごと消された**のは別物で、
+後者は Issue にも足跡にも現れない（#639）。in-flight マーカーがこの2つを見分け、消された
+仕事だけを**1回だけ**キュー先頭へ戻す。2回目は戻さず起票して捨てる。
+
 ## 平日以外に消化したいとき（`run_daytime.ps1 -Now`）
 
 休暇などで平日昼に PC を触れる日は、枠を1回ぶん前倒しできると消化が進む。ただし
@@ -66,6 +70,15 @@ from scripts.batch_common import LOG_DIR, ROOT, Runner, Step  # noqa: F401 （�
 KEY_LAST_RUN = "daytime_last_run"
 KEY_LAST_SUCCESS = "daytime_last_success"
 KEY_QUEUE = "daytime_queue"
+
+# 取り出したが結論を出していない仕事の印（#639）。値は
+# `{"job": ..., "started_at": ..., "requeued": 0}`。詳細は `reclaim_inflight` を参照。
+KEY_INFLIGHT = "daytime_inflight"
+
+# 中断で消えた仕事をキューへ戻す回数の上限。**1回だけ**——2回続けて消えるのは環境側の
+# 問題で、戻し続けると `pop_queue` の docstring が警告している「毎日同じ計算を繰り返して
+# 先へ進まない」状態そのものになる。
+MAX_REQUEUE = 1
 
 ISSUE_LABELS = bc.ISSUE_LABELS
 
@@ -280,6 +293,9 @@ def pop_queue(db=None) -> Optional[str]:
 
     **失敗しても戻さない。** 戻すと同じ計算を毎日繰り返して先へ進まなくなる——この
     バッチを作った動機がまさにそれで、失敗は Issue に残るので再試行は積み直しで行う。
+
+    戻すのは `reclaim_inflight` が扱う**中断**（結論を出す前にプロセスごと消えた場合）だけで、
+    それも1回に限る。ここでの「失敗」＝ exit≠0・品質ゲート・予算打ち切りは対象外。
     """
     items = read_queue(db)
     if not items:
@@ -287,6 +303,168 @@ def pop_queue(db=None) -> Optional[str]:
     head, rest = items[0], items[1:]
     write_queue(rest, db)
     return head
+
+
+# ── in-flight マーカー（#639）────────────────────────────────────────────────
+#
+# `pop_queue` は「失敗しても戻さない」。この判断は正しいが、**結論を出して失敗した**のと
+# **結論を出す前にプロセスごと消された**のを同一視していた。前者は Issue に残るので人が
+# 判断できる。後者は何も残らない——2026-09-09 に Windows Update の再起動が
+# `tune:macro_dlm` を 285分（255/294件）で殺し、285分の計算とキューの1件が同時に消えた。
+# `daytime_last_run` は閾値の内側だったので watchdog も起票しなかった。
+#
+# 2つを見分ける印がこのマーカー。pop の直後に書き、**Python が生きていれば finally で必ず
+# 消える**。OS ごと消されたときだけ残るので、残っていること自体が「中断された」証拠になる。
+
+_STATE_RUNNING = "running"    # pop して実行中。残っていたら中断された
+_STATE_QUEUED = "queued"      # 中断されてキューへ戻した。次に pop されるのを待っている
+
+
+def read_inflight(db=None) -> Optional[dict]:
+    """マーカーの中身。**壊れた値は無いものとして扱う**（`read_queue` と同じ方針）。
+
+    ここで例外にすると、値が1つ壊れただけでバッチが起動不能になる——「走らなかったことを
+    検知する」ための仕組みが、それ自体を起こしてしまう。
+    """
+    from database import get_setting
+
+    own = db is None
+    db = db or _session()
+    try:
+        raw = get_setting(db, KEY_INFLIGHT)
+    finally:
+        if own:
+            db.close()
+    if not raw:
+        return None
+    try:
+        mark = json.loads(raw)
+    except (ValueError, TypeError):
+        return None
+    return mark if isinstance(mark, dict) else None
+
+
+def write_inflight(job: str, state: str, requeued: int, db=None) -> None:
+    from database import upsert_setting
+
+    payload = {
+        "job": job,
+        "state": state,
+        "requeued": int(requeued),
+        "at": bc.utc_now_iso(),
+    }
+    own = db is None
+    db = db or _session()
+    try:
+        upsert_setting(db, KEY_INFLIGHT, json.dumps(payload, ensure_ascii=False))
+    finally:
+        if own:
+            db.close()
+
+
+def clear_inflight(db=None) -> None:
+    from database import upsert_setting
+
+    own = db is None
+    db = db or _session()
+    try:
+        upsert_setting(db, KEY_INFLIGHT, "")
+    finally:
+        if own:
+            db.close()
+
+
+def notify_interrupted(job: str, mark: dict, run=subprocess.run) -> Optional[str]:
+    """戻す上限に達した仕事を起票する。**gh が無くても落とさない**（`bc.notify` と同じ）。"""
+    body = "\n".join([
+        f"日中バッチが `{job}` を **{MAX_REQUEUE + 1} 回続けて、結論を出す前に**失っている。",
+        "",
+        "| 項目 | 値 |",
+        "|---|---|",
+        f"| 仕事 | `{job}` |",
+        f"| 最後に取り出した時刻 | {mark.get('at', '不明')} |",
+        f"| キューへ戻した回数 | {mark.get('requeued', 0)} |",
+        "",
+        "1回目の中断はキュー先頭へ自動で戻すが、2回目は戻さず捨てる（#639）。"
+        "戻し続けると毎日同じ計算を繰り返して先へ進まなくなるため。",
+        "",
+        "### 確認すること",
+        "",
+        "1. `.logs/daytime_*.log` の末尾に `END` 行があるか"
+        "（無ければプロセスごと消えている＝バッチの失敗ではない）",
+        "2. System イベントログの Kernel-Power 109 / Windows Update の再起動",
+        "3. Windows Update のアクティブ時間"
+        "（`HKLM\\SOFTWARE\\Microsoft\\WindowsUpdate\\UX\\Settings`）が窓を覆っているか",
+        "4. 原因が解消したら `run_daytime.ps1 -Enqueue " + job + "` で積み直す",
+        "",
+        "---",
+        "この Issue は `scripts/run_daytime.py` による自動起票（#639）。",
+    ])
+    argv = ["gh", "issue", "create",
+            "--title", f"[ops] 日中バッチが {job} を繰り返し失っている",
+            "--body", body]
+    for label in ISSUE_LABELS:
+        argv += ["--label", label]
+    try:
+        proc = run(argv, cwd=str(bc.ROOT), capture_output=True, text=True,
+                   encoding="utf-8", errors="replace")
+    except OSError as e:
+        return f"gh を起動できない: {e}"
+    if proc.returncode != 0:
+        return f"gh issue create が失敗: {(proc.stderr or '').strip()[:200]}"
+    return None
+
+
+def reclaim_inflight(db=None, run=subprocess.run) -> list[str]:
+    """前回の中断を回収する。戻り値はログへ書く行（何も起きなければ空）。
+
+    `state` が `running` のまま残っているマーカーだけが「中断された」を意味する。
+    `queued`（＝すでに戻してある）はまだ pop されていないだけなので触らない。
+    """
+    mark = read_inflight(db)
+    if not mark or mark.get("state") != _STATE_RUNNING:
+        return []
+
+    job = mark.get("job")
+    requeued = mark.get("requeued", 0)
+    requeued = requeued if isinstance(requeued, int) else 0
+    at = mark.get("at", "不明")
+
+    if not isinstance(job, str) or job not in JOBS:
+        clear_inflight(db)
+        return [f"[inflight] 前回取り出した {job!r} が JOBS に無い（定義が消えたか typo）。"
+                f"戻さず捨てる"]
+
+    if requeued >= MAX_REQUEUE:
+        clear_inflight(db)
+        # 出力に cp932 で表現できない記号を混ぜない（em dash など）。`Runner.write` は
+        # print を先に呼ぶので、ここで落ちると回収そのものが走らなくなる。
+        lines = [f"[inflight] {job} は {MAX_REQUEUE + 1} 回続けて結論を出す前に消えた"
+                 f"（最後の取り出し {at}）。戻さず捨てる。"
+                 f"戻し続けると毎日同じ計算を繰り返して先へ進まないため"]
+        note = notify_interrupted(job, mark, run=run)
+        lines.append(f"[warn] 通知できなかった: {note}" if note
+                     else "[inflight] 起票した")
+        return lines
+
+    items = [x for x in read_queue(db) if x != job]     # 重複を作らない
+    write_queue([job] + items, db)
+    write_inflight(job, _STATE_QUEUED, requeued + 1, db)
+    return [f"[inflight] 前回 {job} が結論を出す前に消えた（最後の取り出し {at}）。"
+            f"キュー先頭へ戻した（{requeued + 1}/{MAX_REQUEUE} 回目）"]
+
+
+def carried_requeue(job: str, db=None) -> int:
+    """`job` がキューへ戻された仕事なら、その回数。無関係なら 0。
+
+    回数を引き継がないと `MAX_REQUEUE` が数えられず、戻すたびに 0 から数え直して
+    無限に戻り続ける。
+    """
+    mark = read_inflight(db)
+    if not mark or mark.get("state") != _STATE_QUEUED or mark.get("job") != job:
+        return 0
+    n = mark.get("requeued", 0)
+    return n if isinstance(n, int) else 0
 
 
 # ── ステップ組み立て ─────────────────────────────────────────────────────────
@@ -357,6 +535,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             print(f"  {i}. {name}  ({note})")
         if not items:
             print("  （空）積むには --enqueue <名前>。積める名前: " + ", ".join(sorted(JOBS)))
+        # **中断はここに出す**（セッション開始時に必ず見る画面・#639）。マーカーが
+        # running のまま残っているのは「前回プロセスごと消えた」を意味する。
+        mark = read_inflight()
+        if mark:
+            state = mark.get("state")
+            if state == _STATE_RUNNING:
+                print(f"  [inflight] 前回 {mark.get('job')!r} が結論を出す前に消えている"
+                      f"（最後の取り出し {mark.get('at', '不明')}）。次の実走で回収する")
+            elif state == _STATE_QUEUED:
+                print(f"  [inflight] {mark.get('job')!r} は中断から戻した仕事"
+                      f"（{mark.get('requeued', 0)}/{MAX_REQUEUE} 回目）")
         return 0
     if "--peek" in args:
         # `run_daytime.ps1 -Now` が「次の1件を今すぐ叩いてよいか」を判断するための機械可読口。
@@ -376,6 +565,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 0
     if "--clear-queue" in args:
         write_queue([])
+        # **マーカーも消す。** 残すと、消したはずの仕事を次の実走が黙って積み直す。
+        clear_inflight()
         print("日中枠のキューを空にした")
         return 0
     for i, a in enumerate(args):
@@ -388,6 +579,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             return 0
 
     dry = "--dry-run" in args
+
+    # **キューを読む前に回収する**（#639）。戻した仕事がそのまま今日の1件になる。
+    # ドライランは「何も実行していない」を守るので読み書きしない。
+    notes = [] if dry else reclaim_inflight()
+    if notes:
+        # ログは追記モードなので、この後の run_batch の出力の前に並ぶ。
+        with bc.Runner(log_path()) as runner:
+            for line in notes:
+                runner.write(line)
+
     job_key = read_queue()[0] if dry else pop_queue()
     if job_key is None:
         # **空を失敗にしない**（平日毎日走るので、積んでいない日に毎回起票すると煩い）。
@@ -397,7 +598,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 0
 
     hooks = bc.Hooks(log_path=log_path, record_footprint=record_footprint, notify=notify)
-    return bc.run_batch(SPEC, steps_for(sys.executable, job_key), hooks, args)
+    if dry:
+        return bc.run_batch(SPEC, steps_for(sys.executable, job_key), hooks, args)
+
+    # マーカーは pop の直後に立て、**戻り値によらず finally で消す**。Python が生きていれば
+    # 必ず消えるので、残っていること自体が「OS ごと消された」証拠になる（#639）。
+    write_inflight(job_key, _STATE_RUNNING, carried_requeue(job_key))
+    try:
+        return bc.run_batch(SPEC, steps_for(sys.executable, job_key), hooks, args)
+    finally:
+        clear_inflight()
 
 
 if __name__ == "__main__":
