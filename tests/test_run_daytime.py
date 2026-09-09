@@ -350,3 +350,223 @@ class TestManualKick:
                           self.INSTALLER.read_text(encoding="utf-8-sig"))
         assert here and there, "TaskName の既定を読めない（書式が変わった）"
         assert here.group(1) == there.group(1)
+
+
+class TestInflightReclaim:
+    """中断（結論を出す前にプロセスごと消えた）だけをキューへ戻す（#639）。
+
+    2026-09-09 に Windows Update の再起動が `tune:macro_dlm` を 285分（255/294件）で殺し、
+    285分の計算とキューの1件が同時に消えた。`daytime_last_run` は閾値の内側だったので
+    watchdog も起票せず、**失敗としてはどこにも現れなかった**。
+    """
+
+    @pytest.fixture
+    def db(self, fake_db, monkeypatch):
+        monkeypatch.setattr(rd, "_session", lambda: fake_db)
+        return fake_db
+
+    @staticmethod
+    def _mark(db, job, state, requeued=0):
+        db.store[rd.KEY_INFLIGHT] = json.dumps(
+            {"job": job, "state": state, "requeued": requeued, "at": "2026-09-09T08:00:04+00:00"})
+
+    def test_no_marker_reclaims_nothing(self, db):
+        rd.write_queue(["beta"], db=db)
+        assert rd.reclaim_inflight(db=db) == []
+        assert rd.read_queue(db=db) == ["beta"]
+
+    def test_interrupted_job_goes_back_to_the_head(self, db):
+        """先頭へ戻す。末尾だと、消えた仕事が数日後まで進まない。"""
+        rd.write_queue(["beta", "interim"], db=db)
+        self._mark(db, "tune:macro_dlm", rd._STATE_RUNNING, requeued=0)
+
+        lines = rd.reclaim_inflight(db=db)
+
+        assert rd.read_queue(db=db) == ["tune:macro_dlm", "beta", "interim"]
+        assert any("tune:macro_dlm" in ln for ln in lines)
+
+    def test_requeue_count_is_carried_so_the_cap_can_be_counted(self, db):
+        """引き継がないと毎回 0 から数え直して無限に戻り続ける。"""
+        self._mark(db, "beta", rd._STATE_RUNNING, requeued=0)
+        rd.reclaim_inflight(db=db)
+
+        mark = rd.read_inflight(db=db)
+        assert mark["state"] == rd._STATE_QUEUED
+        assert mark["requeued"] == 1
+        assert rd.carried_requeue("beta", db=db) == 1
+        assert rd.carried_requeue("interim", db=db) == 0, "無関係な仕事に回数が漏れている"
+
+    def test_a_queued_marker_is_left_alone(self, db):
+        """戻したがまだ pop されていないだけ。触ると毎回キューの先頭へ積み直してしまう。"""
+        rd.write_queue(["beta"], db=db)
+        self._mark(db, "beta", rd._STATE_QUEUED, requeued=1)
+
+        assert rd.reclaim_inflight(db=db) == []
+        assert rd.read_queue(db=db) == ["beta"]
+
+    def test_second_interruption_is_dropped_and_filed(self, db):
+        """2回続けて消えるのは環境側の問題。戻し続けると先へ進まない。"""
+        calls = []
+
+        def _run(argv, **kw):
+            calls.append(argv)
+            return type("P", (), {"returncode": 0, "stderr": ""})()
+
+        rd.write_queue(["interim"], db=db)
+        self._mark(db, "beta", rd._STATE_RUNNING, requeued=rd.MAX_REQUEUE)
+
+        lines = rd.reclaim_inflight(db=db, run=_run)
+
+        assert rd.read_queue(db=db) == ["interim"], "上限を超えても戻している"
+        assert rd.read_inflight(db=db) is None
+        assert calls and calls[0][:3] == ["gh", "issue", "create"]
+        assert any("戻さず捨てる" in ln for ln in lines)
+
+    def test_filing_failure_does_not_raise(self, db):
+        """gh が無くてもバッチは走り続ける（`bc.notify` と同じ方針）。"""
+        def _run(argv, **kw):
+            raise OSError("gh not found")
+
+        self._mark(db, "beta", rd._STATE_RUNNING, requeued=rd.MAX_REQUEUE)
+        lines = rd.reclaim_inflight(db=db, run=_run)
+        assert any("通知できなかった" in ln for ln in lines)
+
+    def test_corrupt_marker_reads_as_absent(self, db):
+        """例外にすると、値が1つ壊れただけでバッチが起動不能になる。"""
+        db.store[rd.KEY_INFLIGHT] = "{壊れている"
+        assert rd.read_inflight(db=db) is None
+        assert rd.reclaim_inflight(db=db) == []
+
+    def test_marker_for_a_job_that_lost_its_definition_is_dropped(self, db):
+        rd.write_queue(["beta"], db=db)
+        self._mark(db, "gone", rd._STATE_RUNNING, requeued=0)
+
+        lines = rd.reclaim_inflight(db=db)
+
+        assert rd.read_queue(db=db) == ["beta"]
+        assert rd.read_inflight(db=db) is None
+        assert any("JOBS に無い" in ln for ln in lines)
+
+    def test_requeue_does_not_duplicate_an_already_queued_job(self, db):
+        rd.write_queue(["beta", "interim"], db=db)
+        self._mark(db, "beta", rd._STATE_RUNNING, requeued=0)
+
+        rd.reclaim_inflight(db=db)
+
+        assert rd.read_queue(db=db) == ["beta", "interim"]
+
+    @pytest.mark.parametrize("job,requeued,gh", [
+        ("beta", 0, "ok"),                     # 戻す
+        ("beta", rd.MAX_REQUEUE, "ok"),        # 上限で捨てる
+        ("beta", rd.MAX_REQUEUE, "missing"),   # 捨てるが gh が無い
+        ("gone", 0, "ok"),                     # 定義が消えた
+    ])
+    def test_every_message_survives_cp932(self, db, job, requeued, gh):
+        """回収の出力は cp932 で書ける文字だけで組む（このモジュールの出力規約）。
+
+        `bc.Runner.write` は**ログへ書く前に print を呼び**、その例外は try の外にある。
+        em dash 1文字で `UnicodeEncodeError` が漏れ、**回収そのものが走らなくなる**——
+        「走らなかったことを検知する」ための仕組みが、それ自体を起こす形になる。
+        """
+        def _run(argv, **kw):
+            if gh == "missing":
+                raise OSError("gh not found")
+            return type("P", (), {"returncode": 0, "stderr": ""})()
+
+        self._mark(db, job, rd._STATE_RUNNING, requeued)
+        for line in rd.reclaim_inflight(db=db, run=_run):
+            line.encode("cp932")
+
+
+class TestInflightLifecycleInMain:
+    """マーカーは Python が生きていれば必ず消える。**残ること自体が中断の証拠**（#639）。"""
+
+    @pytest.fixture
+    def db(self, fake_db, monkeypatch, tmp_path):
+        monkeypatch.setattr(rd, "_session", lambda: fake_db)
+        monkeypatch.setattr(rd, "log_path", lambda *a, **k: tmp_path / "daytime.log")
+        monkeypatch.setattr(rd, "record_footprint", lambda results: None)
+        return fake_db
+
+    def test_marker_is_written_while_the_job_runs(self, db, monkeypatch):
+        seen = {}
+
+        def _run_batch(spec, steps, hooks, argv):
+            seen["mark"] = rd.read_inflight(db=db)
+            return 0
+
+        monkeypatch.setattr(rd.bc, "run_batch", _run_batch)
+        rd.write_queue(["interim"], db=db)
+        rd.main([])
+
+        assert seen["mark"]["job"] == "interim"
+        assert seen["mark"]["state"] == rd._STATE_RUNNING
+
+    def test_marker_is_cleared_after_a_failing_run(self, db, monkeypatch):
+        """結論を出した失敗は戻さない（`pop_queue` の設計判断をそのまま残す）。"""
+        monkeypatch.setattr(rd.bc, "run_batch", lambda *a, **k: 1)
+        rd.write_queue(["interim"], db=db)
+
+        assert rd.main([]) == 1
+        assert rd.read_inflight(db=db) is None
+        assert rd.read_queue(db=db) == []
+
+    def test_marker_is_cleared_when_the_run_raises(self, db, monkeypatch):
+        def _boom(*a, **k):
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(rd.bc, "run_batch", _boom)
+        rd.write_queue(["interim"], db=db)
+
+        with pytest.raises(RuntimeError):
+            rd.main([])
+        assert rd.read_inflight(db=db) is None
+
+    def test_dry_run_touches_neither_queue_nor_marker(self, db, monkeypatch):
+        monkeypatch.setattr(rd.bc, "run_batch", lambda *a, **k: 0)
+        rd.write_queue(["interim"], db=db)
+
+        rd.main(["--dry-run"])
+
+        assert rd.read_queue(db=db) == ["interim"], "ドライランがキューを減らした"
+        assert rd.read_inflight(db=db) is None
+
+    def test_a_reclaimed_job_becomes_todays_run(self, db, monkeypatch):
+        """回収はキューを読む前。戻した仕事がその場で今日の1件になる。"""
+        seen = {}
+
+        def _run_batch(spec, steps, hooks, argv):
+            seen["steps"] = [s.name for s in steps]
+            return 0
+
+        monkeypatch.setattr(rd.bc, "run_batch", _run_batch)
+        rd.write_queue(["interim"], db=db)
+        db.store[rd.KEY_INFLIGHT] = json.dumps(
+            {"job": "tune:macro_dlm", "state": rd._STATE_RUNNING, "requeued": 0, "at": "x"})
+
+        rd.main([])
+
+        assert "tune:macro_dlm" in seen["steps"]
+        assert rd.read_queue(db=db) == ["interim"]
+        assert rd.read_inflight(db=db) is None
+
+    @pytest.mark.parametrize("state", [rd._STATE_RUNNING, rd._STATE_QUEUED])
+    def test_queue_listing_with_a_marker_survives_cp932(self, db, capsys, state):
+        """`--queue` は毎セッション叩く。マーカーの行で落ちるとキューが読めなくなる。"""
+        rd.write_queue(["interim"], db=db)
+        db.store[rd.KEY_INFLIGHT] = json.dumps(
+            {"job": "interim", "state": state, "requeued": 1, "at": "x"})
+
+        assert rd.main(["--queue"]) == 0
+        capsys.readouterr().out.encode("cp932")
+
+    def test_clear_queue_also_clears_the_marker(self, db, capsys):
+        """残すと、消したはずの仕事を次の実走が黙って積み直す。"""
+        rd.write_queue(["interim"], db=db)
+        db.store[rd.KEY_INFLIGHT] = json.dumps(
+            {"job": "interim", "state": rd._STATE_QUEUED, "requeued": 1, "at": "x"})
+
+        rd.main(["--clear-queue"])
+
+        assert rd.read_queue(db=db) == []
+        assert rd.read_inflight(db=db) is None
