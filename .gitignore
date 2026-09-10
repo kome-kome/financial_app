@@ -53,6 +53,7 @@ build/
 .claude/settings.local.json
 .claude/scheduled_tasks.lock
 .claude/worktrees/
+.claude/*.bak
 
 # デプロイ用ローカル設定
 .env.local
