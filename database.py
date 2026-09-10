@@ -1392,6 +1392,11 @@ class PluginTunedParams(Base):
     n_periods                = Column(Integer)  # best の OOF fold 数
     n_oof_samples            = Column(Integer)  # best の OOF サンプル数
 
+    # 探索を予算の手前で畳んだか（#638・ADR-0054）。`n_combos` は**実際に評価した件数**で、
+    # こちらは**計画した件数**。両者が一致すれば完走、`n_combos < n_combos_planned` なら
+    # 空間の一部しか見ていない＝champion と比べるときの条件そのものになる。
+    n_combos_planned         = Column(Integer)
+
 
 def upsert_tuned_params(db, plugin_name: str, params: dict, objective_name: str,
                         objective_value: float | None, leaderboard: list,
@@ -1399,8 +1404,14 @@ def upsert_tuned_params(db, plugin_name: str, params: dict, objective_name: str,
                         prev_objective_value: float | None = None,
                         champion_objective_value: float | None = None,
                         n_periods: int | None = None,
-                        n_oof_samples: int | None = None) -> None:
-    """探索結果を plugin_tuned_params へ upsert する（plugin_name で冪等・db.merge）。"""
+                        n_oof_samples: int | None = None,
+                        n_combos_planned: int | None = None) -> None:
+    """探索結果を plugin_tuned_params へ upsert する（plugin_name で冪等・db.merge）。
+
+    **完走した結果とは限らない**（#638・ADR-0054）。探索は予算の手前で畳むことがあり、
+    途中の暫定ベストもここへ書く。何件まで見た結果かは `n_combos`（評価した件数）と
+    `n_combos_planned`（計画した件数）の対で読む。
+    """
     db.merge(PluginTunedParams(
         plugin_name=plugin_name, params_json=params, objective_name=objective_name,
         objective_value=objective_value, leaderboard_json=leaderboard[:20],
@@ -1409,6 +1420,7 @@ def upsert_tuned_params(db, plugin_name: str, params: dict, objective_name: str,
         prev_objective_value=prev_objective_value,
         champion_objective_value=champion_objective_value,
         n_periods=n_periods, n_oof_samples=n_oof_samples,
+        n_combos_planned=n_combos_planned,
     ))
     db.commit()
 
@@ -1429,6 +1441,7 @@ def get_tuned_params(db, plugin_name: str) -> dict | None:
         "champion_objective_value": row.champion_objective_value,
         "n_periods":                row.n_periods,
         "n_oof_samples":            row.n_oof_samples,
+        "n_combos_planned":         row.n_combos_planned,
     }
 
 
@@ -2218,7 +2231,10 @@ def _ensure_tables() -> None:
         for _col, _type in (("prev_objective_value", "DOUBLE PRECISION"),
                             ("champion_objective_value", "DOUBLE PRECISION"),
                             ("n_periods", "INTEGER"),
-                            ("n_oof_samples", "INTEGER")):
+                            ("n_oof_samples", "INTEGER"),
+                            # 探索を畳んだかの判別（#638・ADR-0054）。既存行は NULL＝
+                            # 「完走前提だった世代」で、次回の探索実行で埋まる。
+                            ("n_combos_planned", "INTEGER")):
             conn.execute(text(
                 f"ALTER TABLE plugin_tuned_params ADD COLUMN IF NOT EXISTS {_col} {_type}"
             ))

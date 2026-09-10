@@ -1,5 +1,6 @@
 """tests/test_tuning.py — 共有ハイパーパラメータ探索エンジン（Issue #264・スナップショットキャッシュ #298）"""
 import asyncio
+from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock
 
 import pytest
@@ -722,3 +723,91 @@ class TestSearchAxesDoNotMovePopulations:
         models = _searched_models()
         assert "macro_risk_return" in models, "M-1 の専用タスクを見ていない（#584）"
         assert len(models) >= 3, "月次で探索が走るモデルを取り漏らしている: {0}".format(models)
+
+
+# ── 予算の手前で畳む・途中経過の通知（Issue #638・ADR-0054）──────────────────
+
+class TestDeadlineFold:
+    """`search()` は締切の手前で自分から探索を畳む。
+
+    打ち切りは猶予を与えない（`batch_common.kill_tree` は Windows で `taskkill /F /T`）ので、
+    途中経過を残せるのは子が自分で止まったときだけ。2026-09-01 に 250分ぶんの計算が2回とも
+    成果ゼロで消えたのがこの穴。
+    """
+
+    def _past(self):
+        return datetime.now(timezone.utc) - timedelta(hours=1)
+
+    def test_past_deadline_still_evaluates_the_first_candidate(self):
+        """**1件目は締切を見ない。** 見ると有効なスコアが0件になり ValueError へ落ちる。"""
+        dims = [SearchDim("x", [0, 3, 5, 7, 10])]
+        result = asyncio.run(search(_QuadraticPlugin(), {"y": 2}, dims, db=None,
+                                    strategy="grid", deadline=self._past()))
+        assert result["config"]["n_combos"] == 1
+        assert result["config"]["n_combos_planned"] == 5
+        assert result["config"]["truncated"] is True
+        assert result["best_params"]["x"] == 0      # 先頭の候補がそのまま best
+
+    def test_no_deadline_evaluates_every_candidate(self):
+        """締切なしは従来どおり全件（既存の回に意味を変えない）。"""
+        dims = [SearchDim("x", [0, 3, 5, 7, 10])]
+        result = asyncio.run(search(_QuadraticPlugin(), {"y": 2}, dims, db=None,
+                                    strategy="grid"))
+        cfg = result["config"]
+        assert cfg["truncated"] is False
+        assert cfg["n_combos"] == cfg["n_combos_planned"] == 5
+
+    def test_champion_is_evaluated_first_even_when_it_sits_inside_the_grid(self):
+        """champion は候補列の**先頭**へ移す（#638）。
+
+        これが「途中で畳んだ暫定ベストを本番へ採ってよい」ことの根拠になる。中間に埋めた
+        ままだと「まだ champion を測っていない」区間ができ、そこで止まると本番より悪い
+        params を書きうる（grid では常にこの形だった）。
+        """
+        dims = [SearchDim("x", [0, 3, 5, 7, 10])]
+        result = asyncio.run(search(_QuadraticPlugin(), {"y": 2}, dims, db=None,
+                                    strategy="grid", champion_params={"x": 7, "y": 2},
+                                    deadline=self._past()))
+        assert result["config"]["n_combos"] == 1
+        assert result["leaderboard"][0]["params"] == {"x": 7}
+        assert result["champion_injected"] is True
+        assert result["champion_score"] == result["best_score"]
+        # 既に grid にある champion を先頭へ「移した」だけ＝候補は増えない
+        assert result["config"]["n_combos_planned"] == 5
+
+    def test_champion_outside_the_grid_is_added_at_the_front(self):
+        dims = [SearchDim("x", [0, 3, 5])]
+        result = asyncio.run(search(_QuadraticPlugin(), {"y": 2}, dims, db=None,
+                                    strategy="grid", champion_params={"x": 3, "y": 2}))
+        assert result["config"]["n_combos_planned"] == 3
+        assert result["leaderboard"] and result["champion_score"] is not None
+
+
+class TestOnProgress:
+    """候補ごとの途中経過通知（#638）。外から殺されてもパラメータだけは残すための足場。"""
+
+    def test_called_once_per_candidate_with_monotone_best(self):
+        dims = [SearchDim("x", [0, 3, 5])]
+        seen: list = []
+        asyncio.run(search(_QuadraticPlugin(), {"y": 2}, dims, db=None, strategy="grid",
+                           on_progress=lambda p: seen.append(p["best_score"])))
+        assert len(seen) == 3
+        assert seen == sorted(seen)            # 暫定ベストは単調非減少
+        assert seen[-1] == 0.0                 # x=5 が真の最適解
+
+    def test_silent_until_something_scores(self):
+        """スコアが1件も無い間は呼ばない（`None` を「ベスト」として書かせない）。"""
+        dims = [SearchDim("x", [3, 4])]        # _PartialFailPlugin は x=3 で失敗する
+        seen: list = []
+        asyncio.run(search(_PartialFailPlugin(), {}, dims, db=None, strategy="grid",
+                           on_progress=lambda p: seen.append(p["config"]["n_combos"])))
+        assert seen == [2]                     # 1件目（失敗）では呼ばれない
+
+    def test_progress_payload_has_the_same_shape_as_the_return_value(self):
+        """途中と最終で形が違うと、途中で書いた行の意味が静かにずれる。"""
+        dims = [SearchDim("x", [0, 5])]
+        seen: list = []
+        final = asyncio.run(search(_QuadraticPlugin(), {"y": 2}, dims, db=None, strategy="grid",
+                                   on_progress=lambda p: seen.append(p)))
+        assert set(seen[-1]) == set(final)
+        assert set(seen[-1]["config"]) == set(final["config"])

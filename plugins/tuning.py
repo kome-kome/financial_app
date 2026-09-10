@@ -10,6 +10,7 @@ plugins.execute_plugin() でフル実行して walk-forward OOF（oof_backtest�
 import logging
 import random
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
 log = logging.getLogger(__name__)
@@ -121,6 +122,61 @@ def _project_champion(plugin: Any, champion_params: dict, dims: list) -> dict | 
     return combo
 
 
+def _assemble(
+    base_params: dict,
+    leaderboard: list[dict],
+    champion_combo: dict | None,
+    *,
+    objective: str,
+    strategy: str,
+    n_iter: int,
+    seed: int,
+    n_planned: int,
+    truncated: bool,
+) -> dict | None:
+    """ここまでの leaderboard から `search()` の戻り値の形を組み立てる（Issue #638）。
+
+    有効なスコアが1件も無ければ None（＝まだ何も言えない）。**途中経過の通知と最終戻り値で
+    同じ関数を使う**——別々に組むと、途中で書いた行と完走で書いた行の意味が静かにずれる。
+
+    `config` の数え方は2本立てで、**`n_combos` は実際に評価した件数・`n_combos_planned` は
+    計画した件数**。畳んだかどうかは `truncated` を見なくても `n_combos < n_combos_planned`
+    から導ける（完走した回は両者が一致するので、既存行の `n_combos` の解釈は変わらない）。
+    """
+    scored = sorted((e for e in leaderboard if e["score"] is not None),
+                    key=lambda e: e["score"], reverse=True)
+    if not scored:
+        return None
+    best = scored[0]
+
+    champion_score = None
+    if champion_combo is not None:
+        key = _combo_key(champion_combo)
+        # 失敗候補は scored から落ちるので leaderboard 全体から探す（None のまま返る＝
+        # 「投入したが測れなかった」と「投入しなかった」を score では区別しない。区別が要る
+        # ときは champion_injected を見る）。
+        champion_score = next(
+            (e["score"] for e in leaderboard if _combo_key(e["params"]) == key), None
+        )
+
+    return {
+        "best_params": {**base_params, **best["params"]},
+        "best_score":  best["score"],
+        "best_oof":    best.get("oof") or {},
+        "objective":   objective,
+        "leaderboard": scored,
+        "config": {
+            "strategy": strategy, "n_iter": n_iter, "seed": seed,
+            "n_combos": len(leaderboard),
+            "n_combos_planned": n_planned,
+            "n_failed": len(leaderboard) - len(scored),
+            "truncated": truncated,
+        },
+        "champion_injected": champion_combo is not None,
+        "champion_score": champion_score,
+    }
+
+
 def _score(oof: dict, objective: str) -> float | None:
     """oof_backtest 辞書から目的関数スコアを抽出する。算出不能なら None（探索から除外）。"""
     if objective == "rank_ic":
@@ -146,6 +202,8 @@ async def search(
     n_iter: int = 50,
     seed: int = 0,
     champion_params: dict | None = None,
+    deadline: datetime | None = None,
+    on_progress: Callable[[dict], None] | None = None,
 ) -> dict:
     """探索空間を評価し {best_params, best_score, objective, leaderboard, config, ...} を返す。
 
@@ -187,6 +245,18 @@ async def search(
     10 fold・`macro_dlm` の 0.0221 は 55 fold で、fold が少ない候補ほど高く出ていた＝
     ADR-0045 の「母集団が縮む側は必ず有利に見える」と同型）。投入できない場合
     （軸が無い・値域外）は `_project_champion` が None を返し、`champion_score` も None になる。
+
+    `deadline`（Issue #638）: **この時刻までに抜ける**。残り候補が入らないと見たら探索を畳み、
+    `config["truncated"]=True` を立てて返る。None なら従来どおり全候補を回す。呼び出し元は
+    永続化と最終 execute のぶんを**引いた**時刻を渡すこと（`hyperparameter_search.FINAL_RESERVE_MIN`）。
+    見積りは**観測した所要の最大値**を使う——候補ごとの所要にはばらつきがあり、平均で見ると
+    最後の1件で超える。**1件目だけは締切を見ずに必ず評価する**（見ると、締切を既に過ぎて
+    入ってきた回で有効なスコアが0件になり `ValueError` へ落ちる。1件目は champion なので
+    最低限「現状維持」の行は書ける）。
+
+    `on_progress`（Issue #638）: 候補を1件評価するたびに、その時点の戻り値と同じ形の辞書を
+    渡す。呼び出し元はこれを使って暫定ベストを逐次永続化できる（外から強制終了されても
+    パラメータだけは残る）。有効なスコアが1件も無い間は呼ばれない。
     """
     if objective not in OBJECTIVES:
         raise ValueError(f"objective は {OBJECTIVES} のいずれかを指定してください: {objective!r}")
@@ -200,17 +270,40 @@ async def search(
     if not combos:
         raise ValueError("探索空間が空です（dims または only_if 条件を確認してください）")
 
-    # champion を候補プールへ入れる。既に含まれていれば追加しない（grid ではほぼ常にこちら＝
-    # 追加コストゼロ）。プールに居ることで best >= champion が構造的に成立し、劣化した値で
-    # 本番を上書きすることが「比較」ではなく「探索の性質」として防がれる。
+    # champion を候補プールの**先頭へ置く**（既に含まれていれば移動・Issue #638）。プールに
+    # 居ることで best >= champion が構造的に成立し、劣化した値で本番を上書きすることが
+    # 「比較」ではなく「探索の性質」として防がれる——**先頭でなければ途中で止めたときに
+    # その性質が成立しない**。grid では champion が候補列の中間に埋まるので、そこで畳むと
+    # 「まだ champion を測っていない」区間ができ、本番より悪い params を書きうる。
     champion_combo = _project_champion(plugin, champion_params, dims) if champion_params else None
-    if champion_combo is not None and _combo_key(champion_combo) not in {_combo_key(c) for c in combos}:
-        combos = [champion_combo, *combos]
-        log.info("champion を候補へ投入しました: %s", champion_combo)
+    if champion_combo is not None:
+        ckey = _combo_key(champion_combo)
+        combos = [champion_combo, *(c for c in combos if _combo_key(c) != ckey)]
+        log.info("champion を候補の先頭へ置きました: %s", champion_combo)
 
+    n_planned = len(combos)
     leaderboard: list[dict] = []
+    worst_sec = 0.0          # 観測した1候補あたり所要の最大値（次の1件の見積り）
+    truncated = False
+
+    def _snapshot() -> dict | None:
+        return _assemble(base_params, leaderboard, champion_combo,
+                         objective=objective, strategy=strategy, n_iter=n_iter, seed=seed,
+                         n_planned=n_planned, truncated=truncated)
+
     with shared_snapshot_cache(), tuning_objective_only():
         for i, combo in enumerate(combos):
+            if deadline is not None and i > 0:
+                est = timedelta(seconds=worst_sec)
+                if datetime.now(timezone.utc) + est > deadline:
+                    truncated = True
+                    log.warning(
+                        "予算の手前で探索を畳みます（#638）: %d/%d 件まで評価済み・"
+                        "締切=%s・次の1件の見積り=%.1f分（観測した最大値）",
+                        i, n_planned, deadline.isoformat(), worst_sec / 60.0,
+                    )
+                    break
+            t0 = datetime.now(timezone.utc)
             raw = {**base_params, **combo}
             try:
                 with tuning_dry_run():
@@ -218,40 +311,21 @@ async def search(
             except Exception as e:
                 leaderboard.append({"params": combo, "score": None, "error": str(e)})
                 log.info("[%d/%d] 失敗（契約違反 or 実行時例外）: %s params=%s",
-                          i + 1, len(combos), e, combo)
-                continue
-            oof = result.get("oof_backtest") or {}
-            score = _score(oof, objective)
-            leaderboard.append({"params": combo, "score": score, "oof": oof})
-            log.info("[%d/%d] score=%s params=%s", i + 1, len(combos), score, combo)
+                          i + 1, n_planned, e, combo)
+            else:
+                oof = result.get("oof_backtest") or {}
+                score = _score(oof, objective)
+                leaderboard.append({"params": combo, "score": score, "oof": oof})
+                log.info("[%d/%d] score=%s params=%s", i + 1, n_planned, score, combo)
+            # **失敗した候補の所要も数える**。契約違反で即返る候補ばかり見ていると見積りが
+            # 0 に張り付き、重い候補が1件でも残っていれば締切を踏み越える。
+            worst_sec = max(worst_sec, (datetime.now(timezone.utc) - t0).total_seconds())
+            if on_progress is not None:
+                partial = _snapshot()
+                if partial is not None:
+                    on_progress(partial)
 
-    scored = [e for e in leaderboard if e["score"] is not None]
-    config = {
-        "strategy": strategy, "n_iter": n_iter, "seed": seed,
-        "n_combos": len(combos), "n_failed": len(leaderboard) - len(scored),
-    }
-    if not scored:
+    final = _snapshot()
+    if final is None:
         raise ValueError("有効なスコアが1件も得られませんでした（全候補が失敗/契約違反/スコア算出不能）")
-    scored.sort(key=lambda e: e["score"], reverse=True)
-    best = scored[0]
-
-    champion_score = None
-    if champion_combo is not None:
-        key = _combo_key(champion_combo)
-        # 失敗候補は scored から落ちるので leaderboard 全体から探す（None のまま返る＝
-        # 「投入したが測れなかった」と「投入しなかった」を score では区別しない。区別が要る
-        # ときは champion_injected を見る）。
-        champion_score = next(
-            (e["score"] for e in leaderboard if _combo_key(e["params"]) == key), None
-        )
-
-    return {
-        "best_params": {**base_params, **best["params"]},
-        "best_score":  best["score"],
-        "best_oof":    best.get("oof") or {},
-        "objective":   objective,
-        "leaderboard": scored,
-        "config": config,
-        "champion_injected": champion_combo is not None,
-        "champion_score": champion_score,
-    }
+    return final

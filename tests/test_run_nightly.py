@@ -511,3 +511,48 @@ class TestBudgetFitsTheWindow:
         assert int(m.group(1)) * 60 == rn.WINDOW_MIN, (
             f"ps1 の窓 {m.group(1)}時間 と run_nightly.WINDOW_MIN {rn.WINDOW_MIN}分 が食い違う"
         )
+
+
+# ── 予算の締切を子へ渡す（Issue #638・ADR-0054）──────────────────────────────
+#
+# 打ち切り（`kill_tree`）は Windows で `taskkill /F /T`＝猶予ゼロなので、途中経過を残せるのは
+# **子が自分で畳んだとき**だけ。その判断に要る唯一の情報が締切で、渡す場所は `Runner.run`＝
+# 全ステップが必ず通る唯一の場所（heartbeat と予算打ち切りを置いたのと同じ理由）。
+
+class TestBudgetDeadlineReachesTheChild:
+
+    @staticmethod
+    def _probe():
+        from scripts import batch_common as bc
+        # 改行付きで出す。付けないと直後の END 行が同じ行に連結して読めなくなる。
+        return "import os; print('DEADLINE=' + os.environ.get({0!r}, 'MISSING'))".format(
+            bc.ENV_DEADLINE)
+
+    def _read(self, log):
+        line = [x for x in log.read_text(encoding="utf-8").splitlines()
+                if x.startswith("DEADLINE=")]
+        assert line, "子が環境変数を報告していない"
+        return line[0].split("=", 1)[1]
+
+    def test_step_with_a_budget_gets_a_deadline(self, tmp_path):
+        import sys
+        from datetime import datetime, timedelta, timezone
+        log = tmp_path / "n.log"
+        before = datetime.now(timezone.utc)
+        with rn.Runner(log, echo=lambda _: None) as r:
+            r.run(rn.Step("x", (sys.executable, "-c", self._probe()),
+                          why="test", budget_min=30))
+        got = datetime.fromisoformat(self._read(log))
+        # 予算の起点はステップ開始時刻。多少の実行時間ぶんは前後するので幅で見る。
+        assert before + timedelta(minutes=29) <= got <= before + timedelta(minutes=31)
+
+    def test_step_without_a_budget_does_not_inherit_a_stale_deadline(self, tmp_path, monkeypatch):
+        """**継承した古い値を消す。** 残すと無期限のはずのステップが勝手に畳む（沈黙する）。"""
+        import sys
+        from scripts import batch_common as bc
+        monkeypatch.setenv(bc.ENV_DEADLINE, "2026-01-01T00:00:00+00:00")
+        log = tmp_path / "n.log"
+        with rn.Runner(log, echo=lambda _: None) as r:
+            r.run(rn.Step("x", (sys.executable, "-c", self._probe()),
+                          why="test", budget_min=None))
+        assert self._read(log) == "MISSING"

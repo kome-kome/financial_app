@@ -5,6 +5,7 @@ run_search() が、persist/persist_scores を正しく plugins.tuning.search() �
 橋渡しすることを検証する。
 """
 import asyncio
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -207,7 +208,7 @@ class TestQualityGate:
 
         args = argparse.Namespace(
             model="fake_model", strategy="grid", n_iter=50, objective="rank_ic",
-            seed=0, persist=True, persist_scores=False,
+            seed=0, persist=True, persist_scores=False, budget_min=None,
         )
         asyncio.run(hs._run(args))  # SystemExit を送出しない
         assert get_tuned_params(db, "fake_model")["objective_value"] == 0.0
@@ -378,3 +379,146 @@ class TestDataFingerprint:
         before = hs._data_fingerprint(db)
         weekly_price_cache.bump_generation(db, "test")
         assert hs._data_fingerprint(db) != before
+
+
+# ── 予算の手前で畳む・逐次永続化（Issue #638・ADR-0054）─────────────────────
+
+class TestDeadlineResolution:
+    """締切の入手経路（`--budget-min` と親バッチの環境変数）。"""
+
+    def test_env_variable_name_matches_the_batch_that_writes_it(self):
+        """親（`scripts/batch_common`）と子（ここ）で名前がずれたら締切は黙って渡らない。
+
+        root 側から `scripts/` を import する向きは作らないので、定数は2箇所にある。
+        **ずれても例外は出ず、畳まなくなるだけ**なので CI が突き合わせる。
+        """
+        from scripts import batch_common as bc
+        assert hs.ENV_DEADLINE == bc.ENV_DEADLINE
+
+    def test_no_budget_and_no_env_means_no_deadline(self, monkeypatch):
+        monkeypatch.delenv(hs.ENV_DEADLINE, raising=False)
+        assert hs.resolve_deadline(None) is None
+
+    def test_env_is_read_when_no_budget_is_given(self, monkeypatch):
+        when = datetime(2026, 9, 11, 3, 0, tzinfo=timezone.utc)
+        monkeypatch.setenv(hs.ENV_DEADLINE, when.isoformat())
+        assert hs.resolve_deadline(None) == when
+
+    def test_naive_env_value_is_read_as_utc(self, monkeypatch):
+        monkeypatch.setenv(hs.ENV_DEADLINE, "2026-09-11T03:00:00")
+        assert hs.resolve_deadline(None) == datetime(2026, 9, 11, 3, 0, tzinfo=timezone.utc)
+
+    def test_budget_min_wins_over_the_env(self, monkeypatch):
+        """手動 CLI が、バッチから継承した締切に邪魔されないこと。"""
+        monkeypatch.setenv(hs.ENV_DEADLINE, "2026-09-11T03:00:00+00:00")
+        got = hs.resolve_deadline(30.0)
+        assert got > datetime.now(timezone.utc) + timedelta(minutes=25)
+
+    def test_unparsable_env_falls_back_to_no_deadline(self, monkeypatch):
+        """1文字壊れただけで探索が起動しなくなる、という方向へは倒さない。"""
+        monkeypatch.setenv(hs.ENV_DEADLINE, "not-a-timestamp")
+        assert hs.resolve_deadline(None) is None
+
+
+class TestFoldedSearchStillPersists:
+    """畳んだ結果が `plugin_tuned_params` に残り、何件見たかが判別できること。"""
+
+    def _past(self):
+        return datetime.now(timezone.utc) - timedelta(hours=1)
+
+    def test_row_survives_a_fold_and_records_how_far_it_got(self, db, monkeypatch):
+        import plugins
+        monkeypatch.setattr(plugins, "get_plugin", lambda name: _FakePlugin())
+        result = asyncio.run(hs.run_search(
+            "fake_model", "grid", 50, "rank_ic", 0, db,
+            persist=True, deadline=self._past(),
+        ))
+        assert result["config"]["truncated"] is True
+        from database import get_tuned_params
+        tuned = get_tuned_params(db, "fake_model")
+        assert tuned is not None                       # ログではなく行そのものを見る
+        assert tuned["n_combos"] == 1
+        assert tuned["n_combos_planned"] == 4
+        assert tuned["n_combos"] < tuned["n_combos_planned"]   # 畳んだことが読み取れる
+
+    def test_producer_scores_are_still_written_after_a_fold(self, db, monkeypatch):
+        """畳むのは探索だけ。最終 execute まで終えてから抜ける（μ̂ の固着を直す本体）。"""
+        import plugins
+        monkeypatch.setattr(plugins, "get_plugin", lambda name: _FakePlugin())
+        asyncio.run(hs.run_search(
+            "fake_model", "grid", 50, "rank_ic", 0, db,
+            persist=True, persist_scores=True, deadline=self._past(),
+        ))
+        # 探索1候補 + best params での最終 execute 1回 = 2回
+        assert _FakePlugin.execute_calls == 2
+
+    def test_completed_search_reports_planned_equals_evaluated(self, db, monkeypatch):
+        import plugins
+        monkeypatch.setattr(plugins, "get_plugin", lambda name: _FakePlugin())
+        asyncio.run(hs.run_search("fake_model", "grid", 50, "rank_ic", 0, db, persist=True))
+        from database import get_tuned_params
+        tuned = get_tuned_params(db, "fake_model")
+        assert tuned["n_combos"] == tuned["n_combos_planned"] == 4
+
+    def test_reserve_is_subtracted_before_the_search_deadline(self, db, monkeypatch):
+        """`search()` へ渡す締切は、永続化と最終 execute のぶんだけ手前でなければならない。"""
+        seen: dict = {}
+
+        async def _fake_search(*a, **kw):
+            seen["deadline"] = kw.get("deadline")
+            raise ValueError("ここで止める")
+
+        import plugins
+        import plugins.tuning
+        monkeypatch.setattr(plugins, "get_plugin", lambda name: _FakePlugin())
+        monkeypatch.setattr(plugins.tuning, "search", _fake_search)
+        deadline = datetime.now(timezone.utc) + timedelta(minutes=60)
+        with pytest.raises(ValueError):
+            asyncio.run(hs.run_search("fake_model", "grid", 50, "rank_ic", 0, db,
+                                      deadline=deadline))
+        assert seen["deadline"] == deadline - timedelta(minutes=hs.FINAL_RESERVE_MIN)
+
+
+class TestIncrementalPersist:
+    """候補ごとの保全（#638 の案A）。外から殺されてもパラメータだけは残す。"""
+
+    def test_partial_best_is_written_while_the_search_is_still_running(self, db, monkeypatch):
+        import plugins
+        from database import get_tuned_params
+        monkeypatch.setattr(plugins, "get_plugin", lambda name: _FakePlugin())
+
+        seen: list = []
+        orig = _FakePlugin.execute
+
+        def _spy(self, params, db_):
+            # 候補を1件評価した「直後」ではなく「次の候補の手前」で観測する＝
+            # 探索が終わる前に行が書かれていることの確認になる。
+            seen.append(get_tuned_params(db, "fake_model"))
+            return orig(self, params, db_)
+
+        monkeypatch.setattr(_FakePlugin, "execute", _spy)
+        asyncio.run(hs.run_search("fake_model", "grid", 50, "rank_ic", 0, db, persist=True))
+        # 2件目の評価に入る時点で既に1件目の結果が書かれている
+        assert seen[0] is None
+        assert seen[1] is not None and seen[1]["n_combos"] == 1
+
+    def test_only_improvements_are_written(self, db, monkeypatch):
+        """暫定ベストが改善しない回は書かない（`tuned_at` を意味のない更新で埋めない）。"""
+        import plugins
+        import database
+        monkeypatch.setattr(plugins, "get_plugin", lambda name: _FakePlugin())
+        calls: list = []
+        orig = database.upsert_tuned_params
+        monkeypatch.setattr(database, "upsert_tuned_params",
+                            lambda *a, **kw: (calls.append(a[3]), orig(*a, **kw))[1])
+        asyncio.run(hs.run_search("fake_model", "grid", 50, "rank_ic", 0, db, persist=True))
+        # 候補は x=0,3,5,7（score = -25, -4, 0, -4）。改善するのは 1・2・3件目の3回、
+        # 4件目は改善しないので書かない。最後に完走ぶんの1回が加わって計4回。
+        assert len(calls) == 4
+
+    def test_nothing_is_written_when_persist_is_off(self, db, monkeypatch):
+        import plugins
+        from database import get_tuned_params
+        monkeypatch.setattr(plugins, "get_plugin", lambda name: _FakePlugin())
+        asyncio.run(hs.run_search("fake_model", "grid", 50, "rank_ic", 0, db, persist=False))
+        assert get_tuned_params(db, "fake_model") is None

@@ -351,8 +351,11 @@ M-1（`macro_risk_return`）・M-2（`macro_gbdt`）・M-3（`macro_dlm`）の�
   `prev_objective_value` / `champion_objective_value` / `n_periods` / `n_oof_samples` に残す。
 - **失敗時の対応手順**:
   1. `.logs/monthly_YYYYMMDD.log`（M-1 は `monthly_m1_*`）の `END tune:<model>: exit=...` を見る。
-     **`exit=124` はステップ予算での打ち切り**＝完走していないので何も永続化されていない
-     （`hyperparameter_search` は `search()` が完走してからしか書かない）。
+     **`exit=124` はステップ予算での打ち切り**。#638・ADR-0054 以後は、その手前で子が自分から
+     探索を畳んで永続化まで終える（`WARNING 予算の手前で探索を畳みます` が出る）ので、
+     `exit=124` はむしろ**畳む判断が間に合わなかった**（1候補が取り置き15分より長い等）ことを
+     意味する。何件まで見た結果かは `plugin_tuned_params` の
+     `n_combos` / `n_combos_planned` で読む（`n_combos < n_combos_planned` なら畳んだ回）。
   2. 失敗は `scripts/batch_common.py` が `gh issue create` で起票する（#587 が実例）。
      **ただしその Issue を閉じても穴は残る**——2026-09-01 の打ち切り後、`plugin_tuned_params` は
      M-2 が 50日・M-3 が 59日 古いまま誰も気づかなかった。成果物の固着は

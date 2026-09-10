@@ -20,6 +20,13 @@ champion 投入に変わった**。永続化済みの objective_value は「そ�
 終了コードは 0 のまま。「水準が落ちた」ことは WARNING ログと plugin_tuned_params の
 prev_objective_value / champion_objective_value / n_periods / n_oof_samples に残す。
 
+**完走してからしか永続化しない設計はやめた**（Issue #638・ADR-0054）。予算を超えると
+`batch_common.kill_tree()` が `taskkill /F /T` でツリーごと落とすため子に猶予は無く、
+2026-09-01 には 250分ぶんの計算が2回とも成果ゼロで消えた（うち片方は M-3 の μ̂ が
+59.5日固着する直接の原因）。いまは①締切の手前で自分から探索を畳んで永続化まで終える
+②候補ごとに暫定ベストを保全する、の2本立てで途中経過を残す。畳んだかどうかは
+`plugin_tuned_params` の `n_combos < n_combos_planned` で判別できる。
+
 新規 pip 依存は不要（scikit-learn/xgboost は本番 requirements.txt に既存）。
 """
 from __future__ import annotations
@@ -29,8 +36,27 @@ import asyncio
 import hashlib
 import json
 import logging
+import os
+from datetime import datetime, timedelta, timezone
 
 logger = logging.getLogger("hyperparameter_search")
+
+# 親バッチ（`scripts/batch_common.Runner`）が渡すこのステップの締切（ISO8601・UTC）。
+# **予算の数字を argv へ書き写さない**——唯一の源は `Step.budget_min` で、親がそこから
+# 導いた時刻だけを渡す。書き写すと予算を動かしたときに片方だけ残る。
+# 名前は `scripts/batch_common.ENV_DEADLINE` と同じ文字列でなければならないが、root 側の
+# モジュールから `scripts/` を import する向きは作らない（前例が無い）。片方だけ変えても
+# **エラーは出ず、締切が黙って渡らなくなるだけ**なので、`tests/test_hyperparameter_search.py`
+# が2つの定数を照合する（`launch.py` の DB target 既定を `tests/test_db_target.py` が
+# 照合しているのと同じ形）。
+ENV_DEADLINE = "FINAPP_STEP_DEADLINE_UTC"
+
+# `search()` を抜けた後に残る仕事（`upsert_tuned_params` ＋ `--persist-scores` の最終 execute）の
+# ための取り置き（分）。**実測**: `tune:macro_dlm` は最終候補から END 行まで3分未満
+# （2026-09-10・全体303.8分）、`tune:macro_gbdt` は4.4分未満（2026-09-08・全体179.4分）。
+# 約3倍の余裕を採った。日中枠の予算445分に対して3.4%で、しかもこの取り置きを実際に使うのは
+# 畳んだ回だけ（完走した回は締切より手前で終わっている）。
+FINAL_RESERVE_MIN = 15.0
 
 # CLI で探索できるモデル（`tuning_search_space()` を実装しているもの）。
 # GitHub Actions（tune-hyperparameters.yml）の matrix は M-1/M-2/M-3 の3本のままで、
@@ -66,6 +92,26 @@ def _data_fingerprint(db) -> str:
     return hashlib.sha256(raw.encode()).hexdigest()[:16]
 
 
+def resolve_deadline(budget_min: float | None = None) -> datetime | None:
+    """このプロセスに許された終了時刻（Issue #638）。無ければ None＝無期限。
+
+    `--budget-min` の**明示指定が環境変数より優先**する（手動 CLI で確かめるときに、
+    バッチから継承した締切に邪魔されないため）。読めない値は警告して締切なしに倒す——
+    ここで落とすと、環境変数が1文字壊れただけで探索が起動しなくなる。
+    """
+    if budget_min is not None:
+        return datetime.now(timezone.utc) + timedelta(minutes=budget_min)
+    raw = os.environ.get(ENV_DEADLINE)
+    if not raw:
+        return None
+    try:
+        dt = datetime.fromisoformat(raw)
+    except ValueError:
+        logger.warning("%s を解釈できないので締切なしで走ります: %r", ENV_DEADLINE, raw)
+        return None
+    return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
+
+
 async def run_search(
     model: str,
     strategy: str,
@@ -76,6 +122,7 @@ async def run_search(
     *,
     persist: bool = False,
     persist_scores: bool = False,
+    deadline: datetime | None = None,
 ) -> dict:
     """1モデル分の探索を実行する共有ロジック（CLI・GitHub Actionsから呼ぶ・Issue #264）。
 
@@ -86,6 +133,11 @@ async def run_search(
     persist=True のときは既存行の params を champion として探索へ投入する（#590）。
     persist=False（試し撃ち）では投入しない——本番値を巻き込まずに空間だけを見たい用途で、
     champion を混ぜると探索1件ぶんの時間を余分に使う。
+
+    `deadline`（Issue #638）: このプロセスの締切。`search()` へは `FINAL_RESERVE_MIN` を
+    引いた時刻を渡す＝**探索を畳んだあとに永続化と最終 execute を終える時間を残す**。
+    加えて persist=True のときは候補ごとの暫定ベストを逐次永続化する（外から強制終了
+    されてもパラメータだけは残る・#639 で 285分が消えた形への保険）。
     """
     from database import get_tuned_params, upsert_tuned_params
     from plugins import execute_plugin, get_plugin
@@ -101,10 +153,51 @@ async def run_search(
 
     prev = get_tuned_params(db, model) if persist else None
 
+    # 指紋は**探索の開始時点のデータ**を指す。候補ごとに測り直すと `count(*)` を何百回も
+    # 打つことになるうえ、探索中にパネルは動かない（動く夜間バッチとは時間帯で分けてある）。
+    fp_cache: dict = {}
+
+    def _fingerprint() -> str:
+        if "v" not in fp_cache:
+            fp_cache["v"] = _data_fingerprint(db)
+        return fp_cache["v"]
+
+    def _write(res: dict) -> None:
+        best_oof = res.get("best_oof") or {}
+        cfg = res.get("config") or {}
+        upsert_tuned_params(
+            db, model, res["best_params"], objective,
+            res["best_score"], res["leaderboard"][:20],
+            cfg.get("n_combos"), _fingerprint(),
+            prev_objective_value=prev["objective_value"] if prev else None,
+            champion_objective_value=res.get("champion_score"),
+            n_periods=best_oof.get("n_periods"),
+            n_oof_samples=best_oof.get("n_oof_samples"),
+            n_combos_planned=cfg.get("n_combos_planned"),
+        )
+
+    # 逐次永続化は**暫定ベストが改善したときだけ**書く（Issue #638）。毎回書いても1行の
+    # upsert はミリ秒だが、書く理由が無い回まで書くとログと `tuned_at` が意味を失う。
+    last_written: list = [None]
+
+    def _on_progress(partial: dict) -> None:
+        score = partial.get("best_score")
+        if score is None:
+            return
+        if last_written[0] is not None and score <= last_written[0]:
+            return
+        _write(partial)
+        last_written[0] = score
+        logger.info("暫定ベストを保全しました（%d/%s 件時点・score=%.4f）",
+                    (partial.get("config") or {}).get("n_combos") or 0,
+                    (partial.get("config") or {}).get("n_combos_planned"), score)
+
     result = await search(
         plugin, base_params, dims, db,
         objective=objective, strategy=strategy, n_iter=n_iter, seed=seed,
         champion_params=prev["params"] if prev else None,
+        deadline=None if deadline is None else deadline - timedelta(minutes=FINAL_RESERVE_MIN),
+        on_progress=_on_progress if persist else None,
     )
     result["persisted"] = False
 
@@ -130,16 +223,7 @@ async def run_search(
                 result.get("champion_score"),
             )
 
-        fp = _data_fingerprint(db)
-        upsert_tuned_params(
-            db, model, result["best_params"], objective,
-            result["best_score"], result["leaderboard"][:20],
-            result["config"]["n_combos"], fp,
-            prev_objective_value=prev["objective_value"] if prev else None,
-            champion_objective_value=result.get("champion_score"),
-            n_periods=best_oof.get("n_periods"),
-            n_oof_samples=best_oof.get("n_oof_samples"),
-        )
+        _write(result)
         result["persisted"] = True
 
         if persist_scores:
@@ -152,14 +236,25 @@ async def _run(args: argparse.Namespace) -> None:
     from database import SessionLocal
 
     db = SessionLocal()
+    deadline = resolve_deadline(args.budget_min)
+    if deadline is not None:
+        logger.info("締切=%s（取り置き %.0f分を引いた時刻まで探索する・#638）",
+                    deadline.isoformat(), FINAL_RESERVE_MIN)
     try:
         try:
             result = await run_search(
                 args.model, args.strategy, args.n_iter, args.objective, args.seed, db,
                 persist=args.persist, persist_scores=args.persist_scores,
+                deadline=deadline,
             )
         except ValueError as e:
             raise SystemExit(str(e))
+        cfg = result["config"]
+        if cfg.get("truncated"):
+            # **「畳んだ」を成功のログに埋もれさせない**。exit は 0 のままだが、
+            # 見た候補が計画の一部であることは次回の比較条件そのもの。
+            logger.warning("予算の手前で畳みました: %s/%s 件を評価（#638）",
+                           cfg.get("n_combos"), cfg.get("n_combos_planned"))
         logger.info("探索完了: best_score=%.4f（objective=%s）", result["best_score"], args.objective)
         logger.info("best_params=%s", json.dumps(result["best_params"], ensure_ascii=False))
         logger.info("config=%s", result["config"])
@@ -193,6 +288,10 @@ def main() -> None:
     ap.add_argument("--persist-scores", action="store_true", dest="persist_scores",
                     help="--persist と併用。best params で最終 execute を1回実行し"
                          "producer スコア（macro_gbdt_scores 等）を永続化する")
+    ap.add_argument("--budget-min", type=float, default=None, dest="budget_min",
+                    help=f"このプロセスに許す分数（Issue #638）。残り候補が入らないと見たら"
+                         f"探索を畳み、そこまでの best を永続化する。省略時は環境変数 "
+                         f"{ENV_DEADLINE}（親バッチが渡す）を見る。どちらも無ければ無期限")
     args = ap.parse_args()
 
     if args.persist_scores and not args.persist:
