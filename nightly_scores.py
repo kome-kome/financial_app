@@ -94,8 +94,9 @@ HEAVY_AUTOMATION: dict[str, str] = {
     # 宿題として残っている（GHA 時代は M-1 が 300分 timeout で cancelled を続けており＝
     # 子7、**登録があっても鮮度は出ていない**実例になっていた）。
     # M-1 だけ別タスク（毎月3日 JST 01:00 → run_monthly_m1.ps1・#579 で2日から移動）。
-    # 2日は macro_beta（M-1 の入力）が使う。実測 約752分で月次本体の
-    # 窓に入らず、hyperparameter_search は完走してからしか永続化しないため切り出した（#584）。
+    # 2日は macro_beta（M-1 の入力）が使う。実測 約752分で月次本体の窓に入らないため
+    # 切り出した（#584）。**切り出しの判断は #638 以後も変わらない**——畳めば結果は残るが、
+    # 残るのは探索空間の一部を見た結果であって、毎月それでよいわけではない。
     "macro_risk_return": "local:scripts/run_monthly_m1.py",
     "macro_gbdt": "local:scripts/run_monthly.py",
     "macro_dlm": "local:scripts/run_monthly.py",

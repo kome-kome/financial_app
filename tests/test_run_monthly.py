@@ -108,8 +108,9 @@ class TestMigrationIsComplete:
     def test_m1_is_not_in_the_monthly_body(self):
         """M-1 は月次本体に**居ない**（#584）。
 
-        実測 2.61分/件 × 288件 ＝ 約752分で窓（960分）に入らず、`hyperparameter_search` は
-        完走してからしか永続化しないため、月次に置くと 250分を使って何も残さない。
+        実測 2.61分/件 × 288件 ＝ 約752分で窓（960分）に入らない。当時は完走してからしか
+        永続化しなかったので月次に置くと 250分を使って何も残さなかった。#638・ADR-0054 で
+        畳んで残すようにしたが**切り出しは覆さない**——残るのは探索空間のごく一部を見た結果。
         """
         assert "macro_risk_return" not in rm.heavy_models()
 

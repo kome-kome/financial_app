@@ -29,7 +29,7 @@ import os
 import subprocess
 import sys
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Optional, Sequence
 
@@ -52,6 +52,10 @@ TAIL_BYTES = 8192
 TIMEOUT_EXIT = 124
 # 予算超過で kill したあと、子が終わるのを待つ猶予（秒）。ここを待たないとゾンビが残る。
 KILL_GRACE_SEC = 30.0
+# 予算の締切を子へ伝える環境変数（Issue #638・ADR-0054）。**打ち切りは猶予を与えない**
+# （Windows は `taskkill /F /T`）ので、途中経過を残したい子は自分で畳むしかない。その判断に
+# 要る唯一の情報がこの時刻。読む側は `hyperparameter_search.resolve_deadline()`。
+ENV_DEADLINE = "FINAPP_STEP_DEADLINE_UTC"
 # Σ予算と窓の差として最低限空けておく分数（Issue #530）。予算の合計をぴったり窓に
 # 合わせると、起動のオーバーヘッドや1ステップの端数で最後のステップが窓から溢れる。
 WINDOW_MARGIN_MIN = 30.0
@@ -255,6 +259,17 @@ class Runner:
             # ので、tell と同じ try の中に入れる——ここで漏らすと #521 の穴が別の行で開く。
             pos = None
         env = {**os.environ, "PYTHONUNBUFFERED": "1", "PYTHONIOENCODING": "utf-8"}
+        # 予算の**締切**を子へ渡す（Issue #638・ADR-0054）。`kill_tree` は `taskkill /F /T` で
+        # 猶予を与えないので、途中経過を残せるのは子が自分で畳んだときだけ。渡すのは時刻
+        # であって分数ではない——子が自分の起動時刻から数え直すと、起動の遅れぶんだけ甘くなる。
+        # **予算が無いステップでは明示的に消す**。継承した古い値が残ると、無期限のはずの
+        # ステップが親から漏れた締切で勝手に畳む（失敗として現れない）。
+        if step.budget_min is None:
+            env.pop(ENV_DEADLINE, None)
+        else:
+            env[ENV_DEADLINE] = (
+                started + timedelta(minutes=max(step.budget_min, 0.0))
+            ).isoformat()
         try:
             proc = subprocess.Popen(step.argv, cwd=str(ROOT), env=env,
                                     stdout=self._fh, stderr=subprocess.STDOUT)
