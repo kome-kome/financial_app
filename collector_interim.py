@@ -8,10 +8,13 @@ docType=140)のうち Q2(中間=H1累計)を収集し、`financial_records` に 
 de-risk 実証で確認した前提(検証スクリプトは Issue #219② 完了後に削除・git 履歴参照):
   - 新旧いずれも P/L・CF は context `CurrentYTDDuration`(=H1累計)、BS は `CurrentQuarterInstant` で、
     既存 `parse_xbrl_csv` が無改修で H1 累計を抽出できる(前期比較 `Prior1*` は既存フィルタが skip)。
+    2025年提出の新式には context が `InterimDuration` / `Prior1InterimDuration` のものもあるが、
+    フィルタは `Prior*` を除外する方式なので同じく当期だけが残る(#647・S100WXIT で実測)。
   - 真の H1 期末は DEI 要素 `CurrentPeriodEndDateDEI`。metadata の periodEnd は新式では
     会計年度末を返し不正確なため使わない。
-  - H1 判定は DEI `TypeOfCurrentPeriodDEI == 'Q2'`(新式の半期報告書も自己申告は Q2)。
-    旧四半期の Q1/Q3 はここで除外する。
+  - H1 判定は DEI `TypeOfCurrentPeriodDEI` が `Q2` または `HY`。#219② 当時(2024年提出分)の新式は
+    Q2 を名乗ったが、2025年提出分には HY を名乗るものがある(#647。Q2 だけ見ていたため 3,905件を
+    捨てて保存0件・exit=0 で終わっていた)。旧四半期の Q1/Q3 はここで除外する。
 """
 import asyncio
 from collections import Counter
@@ -33,8 +36,10 @@ from database import Company, FinancialRecord, upsert_company, upsert_financial
 
 # 半期(H1)を含む書類種別。160=半期報告書(新式043A00/旧式050000)、140=旧四半期報告書。
 INTERIM_DOC_TYPES = {"140", "160"}
-# H1(中間)と判定する DEI の当期種別。新式半期報告書も自己申告は Q2。
-H1_PERIOD_TYPE_DEI = "Q2"
+# H1(中間)と判定する DEI の当期種別。旧四半期の中間は Q2、新式半期報告書は Q2 と HY が混在する(#647)。
+H1_PERIOD_TYPES_DEI = frozenset({"Q2", "HY"})
+# 半期報告書の書類種別。年1回＝定義上 H1 なので、当期種別が H1 の値でなければ判定側の想定が古い。
+HALF_YEAR_REPORT_DOC_TYPE = "160"
 # financial_records.period_type に格納する半期ラベル。
 INTERIM_PERIOD_TYPE = "H1"
 
@@ -144,7 +149,7 @@ def prefilter_interim_docs(docs: list, fy_end_month_map: dict) -> list:
     """
     out = []
     for d in docs:
-        if d.get("docTypeCode") == "160":
+        if d.get("docTypeCode") == HALF_YEAR_REPORT_DOC_TYPE:
             out.append(d)
             continue
         ec = d.get("edinetCode")
@@ -293,8 +298,16 @@ async def process_interim_docs(db, client, docs: list,
                 continue
 
             dei = _extract_dei(xbrl_df)
-            # H1(中間=Q2)以外は除外(旧四半期の Q1/Q3)。
-            if dei.get(_DEI_TYPE) != H1_PERIOD_TYPE_DEI:
+            period_kind = dei.get(_DEI_TYPE)
+            if period_kind not in H1_PERIOD_TYPES_DEI:
+                # 半期報告書が H1 と名乗らないのは除外ではなく判定の取りこぼし（#647）。
+                # スキップとして数えると「取ったのに全部捨てた」が exit=0 で沈黙する。
+                if doc.get("docTypeCode") == HALF_YEAR_REPORT_DOC_TYPE:
+                    log.warning(f"[半期種別不一致] {edinet_code}/{doc_id} {filer_name}: "
+                                f"半期報告書なのに DEI 当期種別={period_kind!r}")
+                    _fail("dei_type", doc_id)
+                    continue
+                # 旧四半期の Q1/Q3 は正当な除外。
                 stat["skipped_notq2"] += 1
                 consecutive_failures = 0    # 取得自体は成功している
                 continue
@@ -359,7 +372,7 @@ async def process_interim_docs(db, client, docs: list,
     # 戻り値の形を実行ごとに変えないことで、読む側が `in` を書かずに済む。
     for key in ("saved", "skipped_existing", "skipped_notq2", "attempted", "failed"):
         stat.setdefault(key, 0)
-    for reason in ("fetch", "dei", "parse", "http", "other"):
+    for reason in ("fetch", "dei", "dei_type", "parse", "http", "other"):
         stat.setdefault(f"failed_{reason}", 0)
     return dict(stat)
 
