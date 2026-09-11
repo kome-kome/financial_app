@@ -15,6 +15,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import collector_interim  # noqa: E402
 from collector_utils import EDINET_MAX_CONSECUTIVE_FAILURES, EdinetAccessError  # noqa: E402
+from database import FinancialRecord  # noqa: E402
 from collector_interim import (  # noqa: E402
     _extract_dei, _h1_month, build_fy_end_month_map, prefilter_interim_docs,
     process_interim_docs, split_by_csv_availability,
@@ -167,7 +168,7 @@ class TestFailureBreakdown:
         assert stat["failed"] == 1
         assert stat["failed_fetch"] == 1
         # 0 の理由も鍵として必ず出る（内訳が読めないと恒久/一時を分けられない）。
-        for reason in ("dei", "parse", "http", "other"):
+        for reason in ("dei", "dei_type", "parse", "http", "other"):
             assert stat[f"failed_{reason}"] == 0
 
     def test_missing_dei_is_counted_separately(self, monkeypatch):
@@ -204,3 +205,76 @@ class TestFailureBreakdown:
         stat = self._run(monkeypatch, lambda doc_id: seq[doc_id], n_docs=2 * n - 1)
         assert stat["skipped_notq2"] == 1
         assert stat["failed"] == 2 * n - 2
+
+
+# ── 当期種別 HY の受理と、半期報告書の種別不一致を失敗として数える（#647）────────────
+
+def _dei_df(period_kind: str, extra_rows=()) -> pd.DataFrame:
+    """DEI 3要素＋任意の財務行。行の形は実物 S100WXIT（2025-10-30 提出の半期報告書）から写した。"""
+    rows = [
+        ["jpdei_cor:TypeOfCurrentPeriodDEI", "FilingDateInstant", period_kind],
+        ["jpdei_cor:CurrentPeriodEndDateDEI", "FilingDateInstant", "2025-09-30"],
+        ["jpdei_cor:CurrentFiscalYearEndDateDEI", "FilingDateInstant", "2026-03-31"],
+        *extra_rows,
+    ]
+    return pd.DataFrame(rows, columns=["要素ID", "コンテキストID", "値"])
+
+
+class TestHalfYearPeriodKind:
+    """2025年提出の新式半期報告書は DEI 当期種別を `HY` と名乗る（#647）。
+
+    `Q2` だけを H1 とみなしていたため、2026-09-08 の日中枠は 3,921件を取得して
+    3,905件を「Q2 ではない」として捨て、保存0件のまま exit=0 で終わった。
+    """
+
+    def _run(self, monkeypatch, db, df, doc_type="160", n_docs=1):
+        async def fake_fetch(client, doc_id):
+            return df
+        monkeypatch.setattr(collector_interim, "fetch_xbrl_csv", fake_fetch)
+        monkeypatch.setattr(collector_interim, "RATE_SLEEP", 0)
+        docs = [{**_interim_doc(i), "docTypeCode": doc_type} for i in range(n_docs)]
+        return asyncio.run(process_interim_docs(db, None, docs, known_edinet={"E00001"}))
+
+    def test_hy_is_saved_as_h1(self, monkeypatch, db):
+        # 新式の context は InterimDuration / Prior1InterimDuration。前中間期の値を採らないこと。
+        df = _dei_df("HY", [
+            ["jppfs_cor:NetSales", "Prior1InterimDuration_NonConsolidatedMember", "3312000000"],
+            ["jppfs_cor:NetSales", "InterimDuration_NonConsolidatedMember", "3758000000"],
+        ])
+        stat = self._run(monkeypatch, db, df)
+        assert stat["saved"] == 1
+        assert stat["failed"] == 0
+        assert stat["skipped_notq2"] == 0
+
+        rec = db.query(FinancialRecord).one()
+        assert rec.period_type == "H1"
+        assert rec.period_end == date(2025, 9, 30)
+        assert rec.year == 2026           # 同一会計年度の通期行（2026-03-31）と同じ year
+        assert rec.pl_revenue == 3758000000
+
+    def test_q2_is_still_saved(self, monkeypatch, db):
+        df = _dei_df("Q2", [["jppfs_cor:NetSales", "CurrentYTDDuration", "100"]])
+        assert self._run(monkeypatch, db, df)["saved"] == 1
+
+    def test_half_year_report_with_unknown_kind_is_a_failure(self, monkeypatch, db):
+        # 半期報告書は定義上 H1。H1 と名乗らないのは判定側の想定が古い＝スキップではなく失敗。
+        stat = self._run(monkeypatch, db, _dei_df("XX"))
+        assert stat["failed_dei_type"] == 1
+        assert stat["failed"] == 1
+        assert stat["skipped_notq2"] == 0
+        assert stat["saved"] == 0
+
+    def test_old_quarterly_q3_is_still_skipped(self, monkeypatch, db):
+        # 旧四半期（140）の Q1/Q3 は正当な除外。失敗として数えない。
+        stat = self._run(monkeypatch, db, _dei_df("Q3"), doc_type="140")
+        assert stat["skipped_notq2"] == 1
+        assert stat["failed"] == 0
+
+    def test_consecutive_kind_mismatch_raises(self, monkeypatch, db):
+        # 9/8 の状況（半期報告書が軒並み不一致）は、62分走り切る前に止まる。
+        with pytest.raises(EdinetAccessError, match="dei_type"):
+            self._run(monkeypatch, db, _dei_df("XX"),
+                      n_docs=EDINET_MAX_CONSECUTIVE_FAILURES + 1)
+
+    def test_accepted_kinds(self):
+        assert collector_interim.H1_PERIOD_TYPES_DEI == {"Q2", "HY"}
