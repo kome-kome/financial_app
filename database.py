@@ -1536,6 +1536,11 @@ class AppSetting(Base):
 # 「import 時に副作用を持つモジュールを呼ばない」制約を持ち、collector 系を参照できないため。
 KEY_JPX_INDUSTRY_LAST_SUCCESS = "jpx_industry_last_success"
 
+# 公式突合で**非該当**と判定済みの往復段差の帯（JSON・#644）。書き手は
+# `scripts/repair_scale_mixture.py`、読み手は夜間の往復段差の検知（`_pipeline_incremental.py`）。
+# 書式は `collector_prices.record_scale_band_verdicts` / `load_judged_scale_bands` が一手に持つ。
+KEY_SCALE_BAND_VERDICTS = "scale_band_verdicts"
+
 
 # ── 5. マクロデータ（為替・金利・指数・コモディティ） ──────────────────────
 

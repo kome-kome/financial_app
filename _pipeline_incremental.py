@@ -17,6 +17,7 @@ from collector import (
     run_full_collection, collect_macro_data,
     collect_stock_price_history_jquants, update_market_data_from_history,
     fill_recent_stock_price_gap_yahoo, detect_roundtrip_scale_bands,
+    load_judged_scale_bands, exclude_judged_bands, roundtrip_log_line,
 )
 from collector_utils import EdinetAccessError
 from database import SessionLocal, init_db, price_freshness
@@ -189,18 +190,16 @@ async def main():
         # **今夜 J-Quants が調整差を報告した社に絞って見る。** 形だけで全社を走査すると
         # 実際の値動きの往復まで拾って意味を失う（実測 283社中、本物は2社）。調整差の無い
         # 社では誰が書いても同じ値になる＝混ざりようがないので、この交差が過不足のない網。
+        #
+        # ただし交差は**社単位**で、ADR-0053 の確定条件1・3（帯の中に AdjC≠C の日があるか・
+        # Yahoo が AdjC と食い違うか）は見ていない。分割のある社で実際の値動きが往復すると
+        # 毎晩鳴り続けるので、`repair_scale_mixture` が非該当と判定済みの**帯**は除く（#644）。
         _susp = (catchup_result or {}).get("scale_mismatch_companies") or []
         try:
             if _susp:
                 rt = detect_roundtrip_scale_bands(db4, only_ecs=_susp)
-                n_rt = len(rt["companies"])
-                if n_rt:
-                    _names = ", ".join(c["edinet_code"] for c in rt["companies"][:5])
-                    log(f"  **往復段差 {n_rt}社**（例: {_names}）＝調整差のある社の日次に"
-                        f"「飛んで戻る」帯がある。1つの列に2つのスケールが混ざった疑い。"
-                        f"`python -m scripts.repair_scale_mixture` で確認する（#620）")
-                else:
-                    log(f"  往復段差: なし（調整差のある {len(_susp)}社を検査）")
+                rt, n_judged = exclude_judged_bands(rt, load_judged_scale_bands(db4))
+                log(f"  {roundtrip_log_line(len(_susp), rt, n_judged)}")
             else:
                 log("  往復段差: 検査対象なし（今夜は AdjC≠C の社が無かった）")
         except Exception as e:
