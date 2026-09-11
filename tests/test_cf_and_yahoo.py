@@ -459,6 +459,121 @@ class TestDelistedPricelessBackoff:
         assert sorted(seen) == ["1001.T", "1002.T"], "gap_days>0 でも絞ってしまっている"
 
 
+class TestDelistedStaleHistoryBackoff:
+    """株価履歴を持つ廃止社も価格ゼロ社と同じ間隔で試す（#556）。
+
+    #475 は価格ゼロ社だけを絞ったので、止まった廃止社（2026-09-11 実測 263社）は毎晩
+    対象に残り、Yahoo は 404 を返し続けていた（毎晩の 4xx 約320件の大半）。
+    **最終株価の古さを条件に入れる**ことで、#463 の誤 delisted（新規上場）——当たり日に
+    一度履歴を得れば lag 1日に戻る——を巻き込まない。
+    """
+
+    def _run(self, db, now_jst=None, gap_days=0):
+        seen = []
+
+        async def fake(http, ticker, d_from, d_to, **kw):
+            seen.append(ticker)
+            return []
+
+        with patch("collector_prices.fetch_yahoo_history", new=fake):
+            asyncio.run(fill_recent_stock_price_gap_yahoo(
+                db, gap_days=gap_days, now_jst=now_jst))
+        return sorted(seen)
+
+    def _seed(self, db, make_company, make_price, session, *, lag_days,
+              is_active=False, yahoo_suffix=None):
+        # 対照: 生きている社は毎晩叩かれる
+        db.add(make_company(edinet_code="E00001", sec_code="1001", is_active=True))
+        db.add(make_price(edinet_code="E00001",
+                          trade_date=(session - timedelta(days=3)).isoformat()))
+        db.add(make_company(edinet_code="E00002", sec_code="1002",
+                            is_active=is_active, yahoo_suffix=yahoo_suffix))
+        db.add(make_price(edinet_code="E00002",
+                          trade_date=(session - timedelta(days=lag_days)).isoformat()))
+        db.commit()
+
+    @staticmethod
+    def _stale():
+        from collector_utils import DELISTED_STALE_DAYS
+        return DELISTED_STALE_DAYS + 10
+
+    def test_stale_delisted_is_skipped_on_off_days(
+            self, db, make_company, make_price, monkeypatch):
+        now_jst, session = _monday_anchor()
+        monkeypatch.setattr("collector_prices.should_retry_priceless_delisted",
+                            lambda ec, today: False)
+        self._seed(db, make_company, make_price, session, lag_days=self._stale())
+        assert self._run(db, now_jst) == ["1001.T"], "止まった廃止社を毎晩叩いている"
+
+    def test_stale_delisted_is_retried_on_its_day(
+            self, db, make_company, make_price, monkeypatch):
+        """当たり日には試す＝恒久除外ではない（#463 の誤 delisted を拾い直せる）。"""
+        now_jst, session = _monday_anchor()
+        monkeypatch.setattr("collector_prices.should_retry_priceless_delisted",
+                            lambda ec, today: True)
+        self._seed(db, make_company, make_price, session, lag_days=self._stale())
+        assert self._run(db, now_jst) == ["1001.T", "1002.T"]
+
+    def test_recent_history_is_fetched_every_night(
+            self, db, make_company, make_price, monkeypatch):
+        """廃止扱いでも最終株価が閾値以内なら毎晩叩く。
+
+        #463: エンバーゴで新規上場が delisted に見える。当たり日に一度履歴を得れば lag は
+        1日に戻るので、「古さ」を条件に入れていればここで巻き込まない。境界（ちょうど
+        `DELISTED_STALE_DAYS` 日）も叩く側に倒す。
+        """
+        from collector_utils import DELISTED_STALE_DAYS
+
+        monkeypatch.setattr("collector_prices.should_retry_priceless_delisted",
+                            lambda ec, today: False)
+        now_jst, session = _monday_anchor()
+        self._seed(db, make_company, make_price, session, lag_days=DELISTED_STALE_DAYS)
+        assert self._run(db, now_jst) == ["1001.T", "1002.T"]
+
+    def test_resolved_suffix_passes_through(
+            self, db, make_company, make_price, monkeypatch):
+        """解決済みサフィックスの社（地方取引所で現に取引がある）は古くても叩く。"""
+        now_jst, session = _monday_anchor()
+        monkeypatch.setattr("collector_prices.should_retry_priceless_delisted",
+                            lambda ec, today: False)
+        self._seed(db, make_company, make_price, session, lag_days=self._stale(),
+                   yahoo_suffix=".S")
+        assert self._run(db, now_jst) == ["1001.T", "1002.S"]
+
+    def test_active_stale_company_is_not_backed_off(
+            self, db, make_company, make_price, monkeypatch):
+        """`is_active=True` で止まった社は本 Issue の対象外＝従来どおり毎晩叩く。"""
+        now_jst, session = _monday_anchor()
+        monkeypatch.setattr("collector_prices.should_retry_priceless_delisted",
+                            lambda ec, today: False)
+        self._seed(db, make_company, make_price, session, lag_days=self._stale(),
+                   is_active=True)
+        assert self._run(db, now_jst) == ["1001.T", "1002.T"]
+
+    def test_backoff_does_not_apply_to_explicit_gap_days(
+            self, db, make_company, make_price, monkeypatch):
+        """`gap_days > 0`（取りに行くこと自体が目的の呼び出し）では絞らない。"""
+        _now, session = _monday_anchor()
+        monkeypatch.setattr("collector_prices.should_retry_priceless_delisted",
+                            lambda ec, today: False)
+        self._seed(db, make_company, make_price, session, lag_days=self._stale())
+        assert self._run(db, gap_days=7) == ["1001.T", "1002.T"]
+
+    def test_skip_count_is_logged_apart_from_priceless(
+            self, db, make_company, make_price, monkeypatch, caplog):
+        """見送り数は価格ゼロ社の見送り（#475）と別の断片で出る。"""
+        from collector_utils import DELISTED_STALE_DAYS
+
+        now_jst, session = _monday_anchor()
+        monkeypatch.setattr("collector_prices.should_retry_priceless_delisted",
+                            lambda ec, today: False)
+        self._seed(db, make_company, make_price, session, lag_days=self._stale())
+        with caplog.at_level("INFO", logger="collector"):
+            self._run(db, now_jst)
+        assert f"株価が{DELISTED_STALE_DAYS}日超前に止まった 1社は今夜は見送り" in caplog.text
+        assert "廃止済み価格ゼロ" not in caplog.text
+
+
 # ── Yahoo gap-fill の並行フェッチ (#556) ────────────────────────────────────
 
 class TestYahooGapFillConcurrency:
@@ -575,27 +690,48 @@ class TestYahooHttpErrorStats:
                 raise exc
         return _S()
 
-    def test_counts_429_separately(self):
+    def _status_error(self, code):
         import httpx as _httpx
+
+        resp = _httpx.Response(code, request=_httpx.Request("GET", "https://x"))
+        return _httpx.HTTPStatusError(f"status {code}", request=resp.request, response=resp)
+
+    def _count(self, exc):
         from collector_prices import fetch_yahoo_chart, yahoo_http_stats
 
-        resp = _httpx.Response(429, request=_httpx.Request("GET", "https://x"))
-        exc = _httpx.HTTPStatusError("rate limited", request=resp.request, response=resp)
         with yahoo_http_stats() as stats:
             rows, meta = self._run(fetch_yahoo_chart(
                 self._session_raising(exc), "1001.T", "20260101", "20260131"))
         assert (rows, meta) == ([], {})      # 戻り値の契約は変えない
-        assert stats == {"429": 1, "5xx": 0, "4xx": 0, "other": 0}
+        return stats
+
+    def test_counts_429_separately(self):
+        stats = self._count(self._status_error(429))
+        assert stats == {"429": 1, "5xx": 0, "4xx": 0, "404": 0, "other": 0}
+
+    def test_404_is_counted_within_4xx(self):
+        """404 は 4xx の総数に入れたうえで内訳にも数える（#556）。
+
+        総数から外すと、内訳を持たない過去の晩（9/8〜9/11）と 4xx の数字が比べられなくなる。
+        """
+        stats = self._count(self._status_error(404))
+        assert stats == {"429": 0, "5xx": 0, "4xx": 1, "404": 1, "other": 0}
+
+    def test_other_4xx_is_not_counted_as_404(self):
+        """403 のような拒否は 404 の内訳に入れない＝上場廃止社の 404 に埋もれさせない。"""
+        stats = self._count(self._status_error(403))
+        assert stats == {"429": 0, "5xx": 0, "4xx": 1, "404": 0, "other": 0}
+
+    def test_format_carries_the_404_breakdown(self):
+        from collector_prices import format_yahoo_http_stats
+
+        line = format_yahoo_http_stats({"429": 0, "5xx": 0, "4xx": 320, "404": 318, "other": 0})
+        assert line == "HTTP失敗 429=0 5xx=0 4xx=320（うち404=318） その他=0"
 
     def test_unclassifiable_failures_are_still_counted(self):
         """分類できない失敗も必ず1つ数える（0 を「起きなかった」の意味に保つ）。"""
-        from collector_prices import fetch_yahoo_chart, yahoo_http_stats
-
-        with yahoo_http_stats() as stats:
-            self._run(fetch_yahoo_chart(
-                self._session_raising(OSError("connection reset")),
-                "1001.T", "20260101", "20260131"))
-        assert stats == {"429": 0, "5xx": 0, "4xx": 0, "other": 1}
+        stats = self._count(OSError("connection reset"))
+        assert stats == {"429": 0, "5xx": 0, "4xx": 0, "404": 0, "other": 1}
 
     def test_counting_is_off_outside_the_context(self):
         """with の外では数えない＝他の呼び出し元（macro / backfill）に副作用を持たせない。"""

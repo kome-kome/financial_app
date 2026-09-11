@@ -59,8 +59,10 @@ RE_GAP_END    = re.compile(r"fill_recent_stock_price_gap_yahoo: (\d+)件を株�
 RE_GAP_SKIP   = re.compile(r"Yahoo Finance gap-fill: スキップ（(.+?)・基準セッション")
 RE_PRICELESS  = re.compile(r"価格ゼロ (\d+)社（うち解決済み (\d+)社）")
 RE_REJECTED   = re.compile(r"解決済みなのに空 (\d+)社")
+# `（うち404=N）` は #556 で足した内訳。**任意グループにする**——無い晩（旧書式）は
+# 404 の内訳が「不明」であって 0 ではない。
 RE_HTTP       = re.compile(r"Yahoo 並行度 (\d+)・HTTP失敗 "
-                           r"429=(\d+) 5xx=(\d+) 4xx=(\d+) その他=(\d+)")
+                           r"429=(\d+) 5xx=(\d+) 4xx=(\d+)(?:（うち404=(\d+)）)? その他=(\d+)")
 RE_CATCHUP    = re.compile(r"J-Quants catchup \((.+?)〜(.+?)\): (\d+)件 upsert")
 RE_MISMATCH   = re.compile(r"スケール不一致で不採用 (\d+)行（(\d+)社）")
 RE_RT_HIT     = re.compile(r"\*\*往復段差 (\d+)社\*\*")
@@ -88,7 +90,7 @@ def parse_nightly_log(text: str) -> dict:
         "upserted": None, "new_rows": None, "gap_minutes": None,
         "priceless": None, "priceless_resolved": None, "exchange_rejected": None,
         "concurrency": None, "http_429": None, "http_5xx": None,
-        "http_4xx": None, "http_other": None,
+        "http_4xx": None, "http_404": None, "http_other": None,
         "catchup_upserted": None, "scale_mismatch_rows": None,
         "scale_mismatch_companies": None,
         "roundtrip": None, "roundtrip_companies": None, "roundtrip_excluded": None,
@@ -116,7 +118,9 @@ def parse_nightly_log(text: str) -> dict:
         if (m := RE_HTTP.search(line)):
             r["concurrency"] = int(m.group(1))
             r["http_429"], r["http_5xx"] = int(m.group(2)), int(m.group(3))
-            r["http_4xx"], r["http_other"] = int(m.group(4)), int(m.group(5))
+            r["http_4xx"] = int(m.group(4))
+            r["http_404"] = int(m.group(5)) if m.group(5) is not None else None
+            r["http_other"] = int(m.group(6))
         if (m := RE_CATCHUP.search(line)):
             r["catchup_upserted"] = int(m.group(3))
             if (m2 := RE_MISMATCH.search(line)):
@@ -169,6 +173,14 @@ def warnings_for(row: dict) -> list:
         if row.get(key):
             w.append(f"Yahoo {label} が {row[key]}件"
                      "＝並行度を下げる（FINAPP_YAHOO_CONCURRENCY=1 で逐次）")
+    # 404 は上場廃止社が毎晩一定数返す値（#556・実測 約320件）。それ以外の 4xx は拒否
+    # （401/403 等）の疑いで、429 と同じく絞られた合図になりうる。内訳が無い晩（旧書式）は
+    # 判定しない——「不明」を 0 と読んで健全へ倒さない。
+    if row.get("http_4xx") is not None and row.get("http_404") is not None:
+        n_other_4xx = row["http_4xx"] - row["http_404"]
+        if n_other_4xx > 0:
+            w.append(f"Yahoo 404以外の 4xx が {n_other_4xx}件＝アクセス拒否（401/403 等）の疑い"
+                     "＝並行度を下げる（FINAPP_YAHOO_CONCURRENCY=1 で逐次）")
     if row.get("exchange_rejected"):
         w.append(f"解決済みなのに空 {row['exchange_rejected']}社＝取引所が張り替わった合図")
     if row.get("roundtrip_companies"):
@@ -214,7 +226,8 @@ ROWS = [
     ("秒/社",                lambda r: _fmt(seconds_per_company(r))),
     ("Yahoo 並行度",         lambda r: _fmt(r["concurrency"])),
     ("HTTP 429 / 5xx",       lambda r: f"{_fmt(r['http_429'])} / {_fmt(r['http_5xx'])}"),
-    ("HTTP 4xx / その他",    lambda r: f"{_fmt(r['http_4xx'])} / {_fmt(r['http_other'])}"),
+    ("HTTP 4xx（404）/ その他", lambda r: f"{_fmt(r['http_4xx'])}（{_fmt(r['http_404'])}）"
+                                          f" / {_fmt(r['http_other'])}"),
     ("catchup upsert",       lambda r: _fmt(r["catchup_upserted"])),
     ("スケール不採用 行(社)", lambda r: f"{_fmt(r['scale_mismatch_rows'])}"
                                        f"（{_fmt(r['scale_mismatch_companies'])}）"),

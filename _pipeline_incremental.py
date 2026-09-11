@@ -19,6 +19,7 @@ from collector import (
     fill_recent_stock_price_gap_yahoo, detect_roundtrip_scale_bands,
     load_judged_scale_bands, exclude_judged_bands, roundtrip_log_line,
 )
+from collector_prices import format_yahoo_http_stats
 from collector_utils import EdinetAccessError
 from database import SessionLocal, init_db, price_freshness
 import _pipeline_utils
@@ -139,11 +140,12 @@ async def main():
         # 並行フェッチの安全弁（#556）。Yahoo は絞ると「200 OK・close が全 null」を返し
         # **例外を出さない**ので、429/5xx の件数を毎晩残す。0 以外が続いたら
         # `FINAPP_YAHOO_CONCURRENCY` を下げる（1 で逐次に戻る）。
+        # 書式は `format_yahoo_http_stats` が唯一の源（点検 CLI の正規表現が読む形）。
+        # ここで書き写すと、片方だけ変えた日に CLI が黙って読み落とす（#622 の前例）。
         _he = gap_result.get("http_errors") or {}
         if not gap_result.get("skipped"):
             log(f"  Yahoo 並行度 {gap_result.get('concurrency')}・"
-                f"HTTP失敗 429={_he.get('429', 0)} 5xx={_he.get('5xx', 0)} "
-                f"4xx={_he.get('4xx', 0)} その他={_he.get('other', 0)}")
+                f"{format_yahoo_http_stats(_he)}")
 
         # J-Quants catchup: 12週境界を過ぎた直後（today-90〜today-80日）を再取得し、
         # Yahoo 暫定値を J-Quants 公式値で自動上書きする（毎日走ることで徐々に置換）。
