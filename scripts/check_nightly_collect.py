@@ -64,7 +64,10 @@ RE_HTTP       = re.compile(r"Yahoo 並行度 (\d+)・HTTP失敗 "
 RE_CATCHUP    = re.compile(r"J-Quants catchup \((.+?)〜(.+?)\): (\d+)件 upsert")
 RE_MISMATCH   = re.compile(r"スケール不一致で不採用 (\d+)行（(\d+)社）")
 RE_RT_HIT     = re.compile(r"\*\*往復段差 (\d+)社\*\*")
-RE_RT_NONE    = re.compile(r"往復段差: なし（調整差のある (\d+)社を検査）")
+# #644 で括弧の中に「・判定済みの非該当 N帯を除外」が続くようになった。**閉じ括弧まで
+# 要求すると新形式を黙って読み落とす**（#622 の `RE_GAP_END` と同じ轍）。
+RE_RT_NONE    = re.compile(r"往復段差: なし（調整差のある (\d+)社を検査")
+RE_RT_EXCLUDED = re.compile(r"判定済みの非該当 (\d+)帯を除外")
 RE_RT_NOTGT   = re.compile(r"往復段差: 検査対象なし")
 RE_RT_FAIL    = re.compile(r"往復段差の検知に失敗")
 RE_FRESH      = re.compile(r"株価鮮度: p50=(\S+) / p05=(\S+) / max=(\S+) / level=(\S+)"
@@ -88,7 +91,7 @@ def parse_nightly_log(text: str) -> dict:
         "http_4xx": None, "http_other": None,
         "catchup_upserted": None, "scale_mismatch_rows": None,
         "scale_mismatch_companies": None,
-        "roundtrip": None, "roundtrip_companies": None,
+        "roundtrip": None, "roundtrip_companies": None, "roundtrip_excluded": None,
         "fresh_p50": None, "fresh_p05": None, "fresh_max": None,
         "fresh_level": None, "fresh_codes": None, "fresh_stale5d": None,
     }
@@ -129,6 +132,9 @@ def parse_nightly_log(text: str) -> dict:
             r["roundtrip"], r["roundtrip_companies"] = "検査対象なし", 0
         elif RE_RT_FAIL.search(line):
             r["roundtrip"] = "検知失敗"
+        # 除いた帯の数は 0 でも必ず出る（#644）＝記載の無い晩は記録が入る前の書式で「不明」
+        if (m := RE_RT_EXCLUDED.search(line)):
+            r["roundtrip_excluded"] = int(m.group(1))
         if (m := RE_FRESH.search(line)):
             r["fresh_p50"], r["fresh_p05"] = m.group(1), m.group(2)
             r["fresh_max"], r["fresh_level"] = m.group(3), m.group(4)
@@ -215,6 +221,7 @@ ROWS = [
     ("往復段差",             lambda r: f"{_fmt(r['roundtrip'])}"
                                        + (f" {r['roundtrip_companies']}社"
                                           if r.get("roundtrip_companies") else "")),
+    ("往復段差 除外帯",      lambda r: _fmt(r["roundtrip_excluded"])),
     ("鮮度 p50",             lambda r: _fmt(r["fresh_p50"])),
     ("鮮度 p05",             lambda r: _fmt(r["fresh_p05"])),
     ("鮮度 level",           lambda r: _fmt(r["fresh_level"])),

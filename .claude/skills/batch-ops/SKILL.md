@@ -87,7 +87,9 @@ python -m scripts.repair_splits_from_jquants --only E03137     # 1社だけ（�
 python -m scripts.repair_splits_from_jquants --apply
 
 # 1つの価格列に2つのスケールが混ざった帯を Yahoo で取り直して均す（#620）。既定はドライラン
+# （株価は書かないが、突合で非該当と決まった帯は記録し、夜間の往復段差の警告から除く・#644）
 python -m scripts.repair_scale_mixture                          # 候補（多いときは突合せず止まる）
+python -m scripts.repair_scale_mixture --only E01332,E01717     # 夜間ログが警告した社を突合→判定を記録
 python -m scripts.repair_scale_mixture --only E32779 --apply    # 公式突合で確定してから取り直す
 
 # 地方取引所の単独上場を拾う（#555）。既定はドライラン＝棄却理由まで出す

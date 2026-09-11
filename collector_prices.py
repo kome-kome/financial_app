@@ -5,9 +5,10 @@ import csv
 import io
 import zipfile
 import asyncio
+import json
 from collections import defaultdict
 from contextlib import contextmanager
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Optional, Callable
 from urllib.parse import quote as urlquote  # fetch_yahoo_history のローカル変数 quote と衝突回避
 
@@ -25,6 +26,7 @@ from database import (
     StockPriceDaily, StockPriceWeekly, DAILY_WINDOW_DAYS,
     record_prices_batch, trim_daily, latest_prices,
     upsert_macro_batch, sync_active_status, db_timeouts,
+    get_setting, upsert_setting, KEY_SCALE_BAND_VERDICTS,
 )
 
 from collector_utils import *
@@ -1815,6 +1817,106 @@ def detect_roundtrip_scale_bands(
             companies.append({"edinet_code": ec, "bands": bands})
     companies.sort(key=lambda c: c["edinet_code"])
     return {"companies": companies, "steps": len(rows)}
+
+
+# ── 判定済みの帯の記録（#644）───────────────────────────────────────────────────
+#
+# 毎晩の検知は「形 ∩ 今夜 `AdjC != C` を報告した社」で、交差が**社単位**である。ADR-0053 の
+# 確定条件のうち「帯の中に `AdjC≠C` の日がある」「その日の Yahoo 値が `AdjC` と食い違う」を
+# 見ていないので、分割のある社で実際の値動きが往復すると毎晩警告される（実測 9/8〜9/11 に
+# E01332・E01717・E34165）。常に点灯している警告は、本物が出ても見分けがつかない。
+#
+# そこで `repair_scale_mixture` の公式突合で**非該当**と決まった帯を記録し、夜間はそれを除いて
+# 数える。記録するのは**社ではなく帯**で、鍵に帯の端の比を含める——同じ社に新しい帯が出れば、
+# あるいは帯の値が書き換われば（再取得・分割修復）鍵が変わって再び警告される。ADR-0053 が
+# 退けた「社の名簿」（古くなったことが失敗として現れない）とはここが違う。
+
+def scale_band_key(ec: str, band: dict) -> tuple:
+    """往復段差の帯の同一性。`(edinet_code, start, end, 往き比, 戻り比)`（比は小数4桁）。"""
+    return (ec, str(band["start"]), str(band["end"]),
+            round(float(band["ratio_out"]), 4), round(float(band["ratio_back"]), 4))
+
+
+def _read_scale_band_verdicts(db) -> list:
+    """記録の中身（帯の dict の一覧）。未設定は空。**壊れていたら送出する**——空扱いに
+    すると「記録が読めない」が「判定済みが無い」に化ける（警告が増えるだけで済むが、
+    読めなくなったこと自体に誰も気づかない）。"""
+    raw = get_setting(db, KEY_SCALE_BAND_VERDICTS)
+    if raw is None:
+        return []
+    doc = json.loads(raw)
+    bands = doc.get("bands") if isinstance(doc, dict) else None
+    if not isinstance(bands, list):
+        raise ValueError(f"app_settings.{KEY_SCALE_BAND_VERDICTS} の書式が不正（bands が無い）")
+    return bands
+
+
+def load_judged_scale_bands(db) -> set:
+    """非該当と判定済みの帯の鍵（`scale_band_key`）の集合。"""
+    return {scale_band_key(e["edinet_code"], e) for e in _read_scale_band_verdicts(db)}
+
+
+def record_scale_band_verdicts(db, rejected: list, confirmed: list = (), *,
+                               today: Optional[date] = None) -> dict:
+    """公式突合の結果を記録へ反映してコミットする。
+
+    `rejected`: `[(edinet_code, band, reason)]`——非該当と決まった帯。追加（同じ鍵は上書き）。
+    `confirmed`: `[(edinet_code, band)]`——確定した帯。記録にあれば外す。
+    **判定不能の帯は渡さない**（取れなかったことを「非該当」と記録すると警告が消える）。
+    保持窓（`DAILY_WINDOW_DAYS`）より古い帯は検知に現れようがないので、ここで掃除する。
+    """
+    today = today or date.today()
+    horizon = (today - timedelta(days=DAILY_WINDOW_DAYS)).isoformat()
+    entries = {scale_band_key(e["edinet_code"], e): e for e in _read_scale_band_verdicts(db)}
+
+    cleared = sum(1 for ec, band in confirmed
+                  if entries.pop(scale_band_key(ec, band), None) is not None)
+    judged_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    for ec, band, reason in rejected:
+        k = scale_band_key(ec, band)
+        entries[k] = {"edinet_code": ec, "start": k[1], "end": k[2],
+                      "ratio_out": k[3], "ratio_back": k[4],
+                      "reason": reason, "judged_at": judged_at}
+    stale = [k for k, e in entries.items() if e["end"] < horizon]
+    for k in stale:
+        del entries[k]
+
+    doc = {"version": 1,
+           "bands": sorted(entries.values(),
+                           key=lambda e: (e["edinet_code"], e["start"], e["end"]))}
+    upsert_setting(db, KEY_SCALE_BAND_VERDICTS, json.dumps(doc, ensure_ascii=False))
+    return {"recorded": len(rejected), "cleared": cleared,
+            "pruned": len(stale), "total": len(entries)}
+
+
+def exclude_judged_bands(found: dict, judged: set) -> tuple:
+    """`detect_roundtrip_scale_bands` の結果から判定済みの帯を落とす。`(結果, 除いた帯の数)`。
+
+    落とすのは**帯**であって社ではない。帯が1本も残らない社だけが一覧から消える。
+    """
+    companies, n_excluded = [], 0
+    for c in found["companies"]:
+        keep = [b for b in c["bands"] if scale_band_key(c["edinet_code"], b) not in judged]
+        n_excluded += len(c["bands"]) - len(keep)
+        if keep:
+            companies.append({**c, "bands": keep})
+    return {**found, "companies": companies}, n_excluded
+
+
+def roundtrip_log_line(n_checked: int, found: dict, n_excluded: int) -> str:
+    """夜間ログの往復段差の1行（`scripts/check_nightly_collect.py` が読む）。
+
+    **除いた帯の数は 0 でも必ず出す。** 出ていない晩＝この記録が入る前の書式＝「不明」と
+    読めるようにするため（0 のとき行を省くと、旧書式の晩まで「除外 0」に見える）。
+    """
+    excluded = f"判定済みの非該当 {n_excluded}帯を除外"
+    comps = found["companies"]
+    if not comps:
+        return f"往復段差: なし（調整差のある {n_checked}社を検査・{excluded}）"
+    names = ", ".join(c["edinet_code"] for c in comps[:5])
+    return (f"**往復段差 {len(comps)}社**（例: {names}）＝調整差のある社の日次に"
+            f"「飛んで戻る」帯がある。1つの列に2つのスケールが混ざった疑い。"
+            f"`python -m scripts.repair_scale_mixture` で確認する（#620）・{excluded}")
 
 
 async def detect_price_scale_breaks(

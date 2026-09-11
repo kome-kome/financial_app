@@ -601,6 +601,13 @@ Yahoo gap-fill が直近セッションを、J-Quants catchup が `today-90 〜 
 毎晩の判定は「その晩 `AdjC != C` を報告した社」との交差で行う（`only_ecs`）。既に入っている帯は
 `scripts/repair_scale_mixture.py` が公式突合で確定させてから Yahoo で取り直す。
 
+交差は社単位なので、突合で**非該当**と決まった帯は `app_settings.scale_band_verdicts`（JSON・
+キーは `database.KEY_SCALE_BAND_VERDICTS`）に記録し、夜間は `exclude_judged_bands` で除いてから数える
+（#644）。書き手は `repair_scale_mixture`（ドライランでも書く）、読み手は Phase 4 の検知で、書式は
+`collector_prices` の `record_scale_band_verdicts` / `load_judged_scale_bands` が一手に持つ。鍵は
+`(edinet_code, start, end, 往き比, 戻り比)` で、帯の値が書き換われば再び警告される。判定不能の帯は
+記録しない。保持窓（`DAILY_WINDOW_DAYS`）の外へ出た帯は書き込み時に掃除する。
+
 ---
 
 ## 4-3. 認証フロー

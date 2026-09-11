@@ -6,6 +6,7 @@
 """
 import pytest
 
+from collector_prices import roundtrip_log_line
 from scripts._textwidth import display_width, pad
 from scripts.check_nightly_collect import (
     parse_nightly_log, seconds_per_company, warnings_for,
@@ -36,6 +37,21 @@ LOG_AFTER = """\n2026-09-08 17:36:10,507 INFO fill_recent_stock_price_gap_yahoo:
 [17:49:05]   株価鮮度: p50=2026-09-08 / p05=2026-09-08 / max=2026-09-08 / level=fresh（3823銘柄・5営業日超の遅れ 88銘柄）
 [17:49:05]   往復段差: なし（調整差のある 44社を検査）
 """
+
+# 2026-09-11 の実ログ（`.logs/nightly_20260911.log`）の往復段差の行。判定済みの非該当が
+# 毎晩ここに出続けていた（#644）。
+LINE_RT_HIT_0911 = "[17:50:19]   **往復段差 3社**（例: E01332, E01717, E34165）＝調整差のある社の日次に「飛んで戻る」帯がある。1つの列に2つのスケールが混ざった疑い。`python -m scripts.repair_scale_mixture` で確認する（#620）"
+
+
+def _night_with(line: str) -> str:
+    """LOG_AFTER の往復段差の行を差し替える。行は `_pipeline_incremental.py` と同じく
+    `roundtrip_log_line` の**実出力**を渡す——推測で写した検体は、書式が変わったときに
+    読めなくなったことを検出できない。"""
+    return LOG_AFTER.replace("往復段差: なし（調整差のある 44社を検査）", line)
+
+
+_BAND = {"start": "2026-08-20", "end": "2026-08-28", "days": 8,
+         "ratio_out": 0.85, "ratio_back": 1.17}
 
 
 class TestParse:
@@ -131,6 +147,14 @@ class TestWarnings:
         assert r["roundtrip_companies"] == 2
         assert any("repair_scale_mixture" in w for w in warnings_for(r))
 
+    def test_roundtrip_hit_line_from_a_real_night(self):
+        """2026-09-11 の実ログの検出行（#644 の前の書式）。除外数は書式に無い＝不明。"""
+        log = LOG_AFTER.replace(
+            "[17:49:05]   往復段差: なし（調整差のある 44社を検査）", LINE_RT_HIT_0911)
+        r = parse_nightly_log(log)
+        assert r["roundtrip"] == "検出" and r["roundtrip_companies"] == 3
+        assert r["roundtrip_excluded"] is None
+
     def test_stale_freshness_is_flagged(self):
         r = parse_nightly_log(LOG_AFTER.replace("level=fresh", "level=stale"))
         assert any("stale" in w for w in warnings_for(r))
@@ -139,6 +163,40 @@ class TestWarnings:
         """社数や所要の増減は警告にしない——夜ごとに ±45% 振れた前例がある（#556）。"""
         r = parse_nightly_log(LOG_AFTER.replace("4105/4441", "120/4441"))
         assert warnings_for(r) == []
+
+
+class TestJudgedBandsExcluded:
+    """#644: 夜間は判定済みの非該当の帯を除いて数え、除いた数を行に残す。"""
+
+    def test_none_line_with_exclusions_is_read(self):
+        line = roundtrip_log_line(45, {"companies": [], "steps": 9}, 5)
+        r = parse_nightly_log(_night_with(line))
+        assert r["roundtrip"] == "なし" and r["roundtrip_companies"] == 0
+        assert r["roundtrip_excluded"] == 5
+        assert warnings_for(r) == []      # 判定済みしか無い晩は警告しない（完了条件1）
+
+    def test_hit_line_with_exclusions_is_read_and_flagged(self):
+        found = {"companies": [{"edinet_code": "E01717", "bands": [_BAND]}], "steps": 9}
+        r = parse_nightly_log(_night_with(roundtrip_log_line(45, found, 5)))
+        assert r["roundtrip"] == "検出" and r["roundtrip_companies"] == 1
+        assert r["roundtrip_excluded"] == 5
+        assert any("repair_scale_mixture" in w for w in warnings_for(r))   # 完了条件2
+
+    def test_zero_exclusions_is_zero_not_unknown(self):
+        """0 のときも行に出す＝記載の無い晩（旧書式）だけが `None` になる。"""
+        r = parse_nightly_log(_night_with(
+            roundtrip_log_line(45, {"companies": [], "steps": 9}, 0)))
+        assert r["roundtrip_excluded"] == 0
+
+    def test_old_format_is_unknown(self):
+        assert parse_nightly_log(LOG_AFTER)["roundtrip_excluded"] is None
+        assert parse_nightly_log(LOG_BEFORE)["roundtrip_excluded"] is None
+
+    def test_scale_mismatch_zero_inference_still_works_on_the_new_format(self):
+        """スケール不一致の「0 と不明」の区別は往復段差の行を手掛かりにしている。"""
+        log = _night_with(roundtrip_log_line(45, {"companies": [], "steps": 9}, 5)) \
+            .replace("・スケール不一致で不採用 218行（44社）", "")
+        assert parse_nightly_log(log)["scale_mismatch_rows"] == 0
 
 
 class TestTextWidth:

@@ -36,6 +36,17 @@ J-Quants catchup が `today-90 〜 today-80` を。どちらも「調整済み�
 超えたら突合せずに候補一覧だけ出して止まる**。日常の入口は毎晩のバッチログで、そちらは
 「今夜 `AdjC != C` を報告した社」と交差済みの短い一覧を出す。それを `--only` へ渡す。
 
+## 判定の記録（#644）
+
+夜間の交差は社単位なので、分割のある社で実際の値動きが往復すると毎晩警告される。そこで
+突合の結果を**帯ごとに3値**（確定 / 非該当 / 判定不能）で出し、**非該当の帯を
+`app_settings.scale_band_verdicts` へ記録する**。夜間の検知はそれを除いて数える。
+
+- 記録は**ドライランでも書く**（突合は1社20秒かかり、捨てると翌晩も同じ警告が出る）。
+  株価を書き換えるのは従来どおり `--apply` のときだけ
+- 判定不能（公式値・Yahoo が取れない）は記録しない＝警告が残る。確定した帯は記録から外す
+- 鍵は帯の日付と端の比。帯の値が書き換われば鍵が変わり、再び警告される
+
 ## 実行
 
     python -m scripts.repair_scale_mixture                  # ドライラン（既定）
@@ -62,7 +73,7 @@ from sqlalchemy import text as sqla_text
 import database as D
 from collector_prices import (
     _jquants_fetch_code, _learn_jquants_coverage,
-    detect_roundtrip_scale_bands, fetch_yahoo_history,
+    detect_roundtrip_scale_bands, fetch_yahoo_history, record_scale_band_verdicts,
 )
 from collector_utils import (
     JQUANTS_RATE_SLEEP, YAHOO_STOCK_RATE_SLEEP,
@@ -77,14 +88,28 @@ def band_dates(bands: list) -> list:
     return [(b["start"], b["end"]) for b in bands]
 
 
-def confirm_official_scale(official_rows: list, db_closes: dict, bands: list,
-                           yahoo_closes: Optional[dict] = None) -> tuple:
-    """帯の中身が**公式スケールで書かれている**かを判定する。戻り値 `(ok, reason)`。
+CONFIRMED, REJECTED, UNDETERMINED = "confirmed", "rejected", "undetermined"
+VERDICT_LABEL = {CONFIRMED: "確定", REJECTED: "非該当", UNDETERMINED: "判定不能"}
+
+
+def judge_official_scale(official_rows: list, db_closes: dict, bands: list,
+                         yahoo_closes: Optional[dict] = None, *,
+                         cover_to: Optional[str] = None) -> tuple:
+    """帯の中身が**公式スケールで書かれている**かを3値で判定する。戻り値 `(status, reason)`。
+
+    `status` は `CONFIRMED`（混在と確定）/ `REJECTED`（非該当と判定できた）/
+    `UNDETERMINED`（材料が取れず判定できない）。**非該当と判定不能を分ける**のは、
+    非該当だけを記録して夜間の警告から除く（#644）ため——取れなかったことを非該当と
+    記録すると、本物の帯まで黙る。
 
     `official_rows`: `_jquants_fetch_code` の戻り（`Date` / `C` / `AdjC` を持つ）。
     `db_closes`: `{trade_date: close}`（DB の日次終値）。
     `yahoo_closes`: `{trade_date: close}`（Yahoo が**今**返す終値）。`None` は取得を
-    省いた場合で、そのときは条件3を課さない（`--skip-yahoo-check`）。
+    省いた場合で、そのときは条件3を課さない（`--skip-yahoo-check`）。**取得に失敗した
+    ときは `{}` を渡す**（`None` を渡すと「省いた」と読まれて確定する）。
+    `cover_to`: 公式値の契約窓の右端（ISO 日付）。帯の期間に公式値が1行も無いとき、
+    帯が窓より新しいのか（＝catchup が一度も書いていない）、窓の内側なのに欠けたのかを
+    分けるのに使う。
 
     条件は3つ。すべてそろって初めて「この帯は公式値で上書きされた」と言える。
 
@@ -100,18 +125,24 @@ def confirm_official_scale(official_rows: list, db_closes: dict, bands: list,
     1円まで同じで、OHLC も内部整合していた（6/10 は `open 5436 / low 4940 / close 4986`
     の実際の値動き）。**混在の証拠になるのは「公式と一致し、かつ Yahoo と一致しない」
     ときだけ**で、E32779・E05716 で判定が効いていたのは #466 の恒常ずれを持つ社だから。
+
+    **帯が契約窓より新しいときは非該当**とする。catchup が書けるのは契約窓の内側だけで、
+    窓は日ごとに前へ進むので、今の窓より新しい日付は一度も公式値で上書きされていない＝
+    混ざりようがない（実測: E34165 の 7/06〜7/17 は 9/11 時点の窓 〜6/19 の外）。
     """
     if not official_rows:
-        return False, "公式値を1行も取得できなかった（契約窓の外側か銘柄コード不一致）"
+        return UNDETERMINED, "公式値を1行も取得できなかった（契約窓の外側か銘柄コード不一致）"
     ranges = band_dates(bands)
+    in_band = 0
     hit_adj, hit_match, hit_yahoo_differs = 0, 0, 0
     yahoo_seen = 0
     for r in official_rows:
         d = str(r.get("Date") or "")[:10]
-        c, adjc = r.get("C"), r.get("AdjC")
-        if not d or c is None or adjc is None:
+        if not d or not any(lo <= d <= hi for lo, hi in ranges):
             continue
-        if not any(lo <= d <= hi for lo, hi in ranges):
+        in_band += 1
+        c, adjc = r.get("C"), r.get("AdjC")
+        if c is None or adjc is None:
             continue
         if same_price_scale(c, adjc):
             continue          # 調整差なし＝この日は誰が書いても同じ値になる
@@ -128,24 +159,41 @@ def confirm_official_scale(official_rows: list, db_closes: dict, bands: list,
         yahoo_seen += 1
         if not same_price_scale(yv, adjc):
             hit_yahoo_differs += 1
+    if not in_band:
+        if cover_to and ranges and min(lo for lo, _ in ranges) > str(cover_to)[:10]:
+            return REJECTED, (f"帯が公式値の契約窓（〜{str(cover_to)[:10]}）より新しい"
+                              "＝catchup が一度も書いていない期間で、混ざりようがない")
+        if cover_to:
+            return UNDETERMINED, ("契約窓の内側なのに帯の期間の公式値が1行も返らなかった"
+                                  "（欠落。混在かどうか判定できない）")
+        return UNDETERMINED, "帯の期間に公式値の行が無い（契約窓の外か欠落か判別できない）"
     if not hit_adj:
-        return False, "帯の期間に AdjC≠C の日が無い＝調整差が無く、往復は実際の値動きの疑い"
+        return REJECTED, "帯の期間に AdjC≠C の日が無い＝調整差が無く、往復は実際の値動きの疑い"
     if not hit_match:
-        return False, (f"帯に AdjC≠C の日が {hit_adj}件あるが、DB 値が AdjC と一致しない"
-                       "＝帯の正体は公式値ではない")
+        return REJECTED, (f"帯に AdjC≠C の日が {hit_adj}件あるが、DB 値が AdjC と一致しない"
+                          "＝帯の正体は公式値ではない")
     if yahoo_closes is None:
-        return True, (f"帯の {hit_match}/{hit_adj}日で DB 値が公式 AdjC と一致"
-                      "（Yahoo 突合は省略）")
+        return CONFIRMED, (f"帯の {hit_match}/{hit_adj}日で DB 値が公式 AdjC と一致"
+                           "（Yahoo 突合は省略）")
     if not yahoo_seen:
-        return False, (f"帯の {hit_match}/{hit_adj}日で DB 値が公式 AdjC と一致するが、"
-                       "Yahoo の値を1日も取得できず**混在かどうか判定できない**"
-                       "（取れないことを「一致しない」と読むと誤検知になる）")
+        return UNDETERMINED, (f"帯の {hit_match}/{hit_adj}日で DB 値が公式 AdjC と一致するが、"
+                              "Yahoo の値を1日も取得できず**混在かどうか判定できない**"
+                              "（取れないことを「一致しない」と読むと誤検知になる）")
     if not hit_yahoo_differs:
-        return False, (f"帯の {hit_match}/{hit_adj}日で DB 値が公式 AdjC と一致するが、"
-                       f"Yahoo の値も {yahoo_seen}日すべて AdjC と一致する＝"
-                       "Yahoo と公式が同じスケール＝混ざりようがない（実際の値動きの疑い）")
-    return True, (f"帯の {hit_match}/{hit_adj}日で DB 値が公式 AdjC と一致し、"
-                  f"うち {hit_yahoo_differs}/{yahoo_seen}日は Yahoo 値と食い違う")
+        return REJECTED, (f"帯の {hit_match}/{hit_adj}日で DB 値が公式 AdjC と一致するが、"
+                          f"Yahoo の値も {yahoo_seen}日すべて AdjC と一致する＝"
+                          "Yahoo と公式が同じスケール＝混ざりようがない（実際の値動きの疑い）")
+    return CONFIRMED, (f"帯の {hit_match}/{hit_adj}日で DB 値が公式 AdjC と一致し、"
+                       f"うち {hit_yahoo_differs}/{yahoo_seen}日は Yahoo 値と食い違う")
+
+
+def confirm_official_scale(official_rows: list, db_closes: dict, bands: list,
+                           yahoo_closes: Optional[dict] = None, *,
+                           cover_to: Optional[str] = None) -> tuple:
+    """`judge_official_scale` の2値版。戻り値 `(ok, reason)`——確定したときだけ `ok`。"""
+    status, reason = judge_official_scale(official_rows, db_closes, bands, yahoo_closes,
+                                          cover_to=cover_to)
+    return status == CONFIRMED, reason
 
 
 # ── DB / ネットワーク ────────────────────────────────────────────────────────
@@ -190,10 +238,15 @@ async def fetch_yahoo_closes(session, sec: str, suffix, bands: list) -> Optional
 
 async def verify_targets(db, targets: dict, *, on_progress=None,
                          with_yahoo: bool = True) -> dict:
-    """候補社を公式値と突合する。{edinet_code: (ok, reason)}。
+    """候補社を公式値と突合する。{edinet_code: (ok, reason, band_verdicts)}。
+
+    `ok`/`reason` は社としての判定（`--apply` の対象選び）。`band_verdicts` は
+    `[(band, status, reason)]` で、同じ公式値・Yahoo 値を帯ごとに判定し直したもの
+    （非該当の帯を記録する・#644）。「どれか1本の帯が確定 ⇔ 社として確定」は
+    条件の形から等価なので、帯ごとに見ても社の判定は変わらない。
 
     1社あたり J-Quants 1リクエスト（`JQUANTS_RATE_SLEEP` 秒待つ）＋ Yahoo 1リクエスト。
-    **Yahoo 側を省くと分割のあった高ボラ銘柄を誤検知する**（`confirm_official_scale`
+    **Yahoo 側を省くと分割のあった高ボラ銘柄を誤検知する**（`judge_official_scale`
     の条件3）ので、`with_yahoo=False` は突合を明示的に諦めるときだけ使う。
     """
     api_key = os.environ.get("JQUANTS_API_KEY", "")
@@ -208,7 +261,8 @@ async def verify_targets(db, targets: dict, *, on_progress=None,
         for i, (ec, bands) in enumerate(sorted(targets.items()), 1):
             sec = (tickers.get(ec) or (None, None))[0]
             if not sec:
-                out[ec] = (False, "sec_code なし")
+                out[ec] = (False, "sec_code なし",
+                           [(b, UNDETERMINED, "sec_code なし") for b in bands])
                 continue
             if i > 1:
                 await asyncio.sleep(JQUANTS_RATE_SLEEP)
@@ -219,9 +273,18 @@ async def verify_targets(db, targets: dict, *, on_progress=None,
                 suffix = (tickers.get(ec) or (None, None))[1]
                 if YAHOO_STOCK_RATE_SLEEP > 0:
                     await asyncio.sleep(YAHOO_STOCK_RATE_SLEEP)
+                # 取得失敗（None）は「取れなかった」＝ `{}` として渡す。`None` のまま渡すと
+                # 判定側は「突合を省いた」と読んで**確定**させてしまう（#644）。
                 y_closes = await fetch_yahoo_closes(session, sec, suffix, bands)
-            out[ec] = confirm_official_scale(rows, load_daily_closes(db, ec),
-                                             bands, y_closes)
+                if y_closes is None:
+                    y_closes = {}
+            closes = load_daily_closes(db, ec)
+            ok, why = confirm_official_scale(rows, closes, bands, y_closes,
+                                             cover_to=cover_to)
+            per_band = [(b, *judge_official_scale(rows, closes, [b], y_closes,
+                                                  cover_to=cover_to))
+                        for b in bands]
+            out[ec] = (ok, why, per_band)
             if on_progress:
                 on_progress(i, len(targets), f"[突合 {i}/{len(targets)}] {ec} {out[ec][1]}")
     return out
@@ -301,9 +364,20 @@ async def _run(args) -> dict:
                 db, targets,
                 on_progress=lambda i, n, m: print(f"  {m}"),
                 with_yahoo=not args.skip_yahoo_check)
-            rep["verified"] = {ec: {"ok": ok, "reason": why}
-                               for ec, (ok, why) in verdicts.items()}
-            confirmed = sorted(ec for ec, (ok, _) in verdicts.items() if ok)
+            rep["verified"] = {
+                ec: {"ok": ok, "reason": why,
+                     "bands": [dict(b, verdict=st, verdict_reason=r)
+                               for b, st, r in per_band]}
+                for ec, (ok, why, per_band) in verdicts.items()}
+            confirmed = sorted(ec for ec, (ok, _, _) in verdicts.items() if ok)
+            # 突合は1社20秒かかる。その結果を捨てると翌晩も同じ警告が出るので、
+            # **ドライランでも**判定は記録する（株価は --apply まで書かない）。#644
+            rep["recorded"] = record_scale_band_verdicts(
+                db,
+                rejected=[(ec, b, r) for ec, (_, _, pb) in verdicts.items()
+                          for b, st, r in pb if st == REJECTED],
+                confirmed=[(ec, b) for ec, (_, _, pb) in verdicts.items()
+                           for b, st, _ in pb if st == CONFIRMED])
         rep["confirmed"] = confirmed
 
         if not args.apply or not confirmed:
@@ -331,21 +405,29 @@ def print_report(rep: dict, applied: bool) -> None:
         v = (rep.get("verified") or {}).get(c["edinet_code"])
         mark = "" if v is None else ("[確定] " if v["ok"] else "[棄却] ")
         print(f"  {mark}{c['edinet_code']}")
-        for b in c["bands"]:
+        for b in (v["bands"] if v is not None else c["bands"]):
+            verdict = (f"・判定: {VERDICT_LABEL[b['verdict']]}" if "verdict" in b else "")
             print(f"      帯 {b['start']} 〜 {b['end']}（{b['days']}日）"
                   f"・比 {b['ratio_out']:.4f} → {b['ratio_back']:.4f}"
-                  f"・往復後 {b['ratio_out'] * b['ratio_back']:.4f}")
+                  f"・往復後 {b['ratio_out'] * b['ratio_back']:.4f}{verdict}")
+            if b.get("verdict") == UNDETERMINED:
+                print(f"        {b['verdict_reason']}")
         if v is not None:
             print(f"      {v['reason']}")
     if len(rep["candidates"]) > 50:
         print(f"  … ほか {len(rep['candidates']) - 50}社")
+    if rep.get("recorded"):
+        r = rep["recorded"]
+        print(f"判定を記録: 非該当 {r['recorded']}帯（夜間の往復段差の警告から除外される）"
+              f"・確定で記録から外した {r['cleared']}帯・保持窓外を掃除 {r['pruned']}帯"
+              f"・記録の総数 {r['total']}帯（#644）")
     if rep.get("aborted"):
         print("公式値との突合をしていません＝どれが本物かまだ分かりません。"
               "毎晩のバッチログが出す社を --only へ渡すか、--max-verify を上げてください"
               "（1社あたり20秒かかります）")
         return
     if not applied:
-        print("ドライラン（書き込みなし）。--apply で Yahoo から取り直します")
+        print("ドライラン（株価の書き込みなし）。--apply で Yahoo から取り直します")
         return
     ok = sum(1 for n in rep["repaired"].values() if n)
     print(f"取り直し: {ok}/{len(rep['repaired'])}社"
