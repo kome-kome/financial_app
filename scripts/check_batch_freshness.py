@@ -66,6 +66,26 @@ macro_gbdt が 50日・macro_dlm が 59日 古いまま誰にも気づかれな�
 残余（PC の恒久停止・タスク削除・venv 消滅）は検知できない。最後の環は人で、それは既に
 `/api/morning` の as-of ブロック（#416/#417）が担っている。
 
+## 復旧したら閉じる（#635）
+
+起票だけして閉じるのを人に任せると、**修正の直前に立った起票が修正済みのまま残る**（#634 は
+起票の16分後に解消したが翌日まで open だった）。open のまま放置された Issue へ次の欠落が
+コメント追記されると、「過去に直った話」と「今起きている話」が同じスレッドに混ざって埋もれる。
+
+対象が `ok` の回に、同じタイトルの open な起票を**復旧の根拠（読んだ場所・値・判定時刻）を
+コメントしたうえで閉じる**。**1回の ok で閉じる**——ok は約束（`cadence + 窓`）からの導出で、
+stale の後に ok へ戻るのは「検出後にバッチが実際に走って足跡を書いた」ときだけ。連続回数の
+カウンタは持たない（状態を持つとその状態が壊れたときに嘘をつく・ADR-0042 §3）。
+
+**人の手が入った Issue は閉じない。** 起票も人（Claude 経由を含む）のコメントも同じ gh
+アカウントから投稿されるので、投稿者では見分けられない。watchdog が書く本文すべてに
+`WATCHDOG_MARKER` を埋め込み、**目印の無い本文＝人の手**とみなす。その場合は閉じずに
+復旧コメントを1回だけ残す（最新コメントが既に復旧コメントなら何もしない＝毎日積み上がらない）。
+
+**`--now` の回は閉じない。** 過去の時刻を渡すと、いま stale の対象が ok に見えて本物の
+open Issue を閉じてしまう。起票は安全側の方向なので従来どおり `--now` でも行う。
+閉じ損ねは起票の失敗と同じ扱い（exit 3）＝沈黙させない。
+
 読取のみ（自分の足跡1行の upsert を除く）。出力は ASCII 記号のみ（Windows cp932 対策）。
 
 実行: `python -m scripts.check_batch_freshness`（`-m` 必須）
@@ -112,6 +132,8 @@ from batch_freshness import (                                # noqa: E402,F401
 EXIT_UNHEALTHY = 2
 # 「問題を見つけているのに誰にも伝えられていない」は最も静かな故障で、他のどこにも現れない。
 # タスクスケジューラの LastTaskResult が唯一の常時観測点なので、そこで見分けられるようにする。
+# 復旧の通知（自動クローズ・#635）が届かなかった回も同じ扱い——閉じ損ねた Issue は
+# 次の欠落を埋もれさせる。
 EXIT_NOTIFY_FAILED = 3
 
 
@@ -121,6 +143,13 @@ GH_TIMEOUT_SEC = 20.0
 
 DB_ERROR_TITLE = "[ops] watchdog がローカル DB を読めない"
 GH_ERROR_TITLE = "[ops] watchdog が gh を使えない（通知経路が死んでいる）"
+
+# watchdog が書いた本文の目印（#635）。起票も人のコメントも同じ gh アカウントから出るので、
+# **投稿者では見分けられない**。HTML コメントなので画面には出ない。目印の無い本文は
+# 人の手（議論中）とみなし、自動では閉じない。
+WATCHDOG_MARKER = "<!-- finapp-watchdog -->"
+# 復旧コメントの目印。最新コメントがこれなら「もう伝えた」＝毎日積み上げない。
+RECOVERY_MARKER = "<!-- finapp-watchdog:recovered -->"
 
 
 class _Echo:
@@ -221,6 +250,28 @@ def problems(snap: dict) -> list[dict]:
                        f"{prod.batch_label}が走っていても成果物は前進していない")
         found.append({"title": prod.issue_title, "row": None, "producer": row,
                       "status": status, "message": message})
+    return found
+
+
+def recoveries(snap: dict) -> list[dict]:
+    """今回 `ok` と判定できた対象（#635）。open な起票があれば閉じる候補になる。
+
+    **`problems()` の補集合として作らない**——DB を読めなかった回は `rows` が空なので、
+    補集合にすると全対象が「問題なし」に見えて全部閉じてしまう。ok を**積極的に言えた**
+    対象だけを返す。`GH_ERROR_TITLE` は含めない（通知手段が死んでいるときの題なので、
+    原理的に自動起票されない）。
+    """
+    if snap["db_error"]:
+        return []
+    found = [{"title": DB_ERROR_TITLE, "row": None}]
+    for row in snap["rows"]:
+        w, status = row["watched"], row["status"]
+        # 自分の初回 missing は正常（problems() と同じ扱い）。
+        if status == "ok" or (status == "missing" and not w.missing_is_problem):
+            found.append({"title": w.issue_title, "row": row})
+    for row in snap.get("producers") or []:
+        if row["status"] == "ok":
+            found.append({"title": row["produced"].issue_title, "row": None, "producer": row})
     return found
 
 
@@ -345,35 +396,159 @@ def issue_body(problem: dict, snap: dict) -> str:
         "---",
         "この Issue は `scripts/check_batch_freshness.py` による自動起票（#515 手順3）。",
         "同じ対象の再検出は新規起票せず本 Issue へコメント追記される。",
-        "**復旧を確認したらクローズしてください**"
-        "（open のまま放置すると次の欠落がコメントに埋もれます）。",
+        "対象が ok へ戻ると watchdog が復旧の根拠を添えて自動でクローズする（#635）。",
+        "**コメントを付けると自動クローズは止まる**"
+        "（議論中とみなし、復旧コメントを1回だけ残す）。",
+        WATCHDOG_MARKER,
     ])
+
+
+def recovery_body(target: dict, snap: dict, human_touched: bool) -> str:
+    """復旧コメントの本文。**何を読んで ok と言ったか**を残す（閉じた理由を後から検証できる）。"""
+    head = [
+        f"判定時刻: {snap['now'].isoformat(timespec='seconds')}",
+        f"接続先: {snap['db_label']}",
+        "",
+    ]
+    row = target["row"]
+    if target.get("producer") is not None:
+        prow = target["producer"]
+        prod = prow["produced"]
+        body = head + [
+            f"**復旧: {prod.label}の最終更新が閾値の内側へ戻った**",
+            "",
+            "| 項目 | 値 |",
+            "|---|---|",
+            f"| 読んだ場所 | `{prod.source}` |",
+            f"| 最終更新 | {prow['last'].isoformat() if prow['last'] else '(無し)'} |",
+            f"| 経過 | {_fmt_age(prow['age_h'])} |",
+            f"| 閾値 | {prod.stale_h / 24.0:.1f}日（cadence"
+            f" {prod.cadence_h / 24.0:.0f}日 + 窓 {prod.window_min / 60.0:.1f}時間） |",
+            "| 判定 | ok |",
+        ]
+    elif row is None:
+        body = head + ["**復旧: ローカル PostgreSQL へ接続でき、足跡を読めた**"]
+    else:
+        w = row["watched"]
+        body = head + [
+            f"**復旧: {w.label}の足跡が閾値の内側へ戻った**",
+            "",
+            "| 項目 | 値 |",
+            "|---|---|",
+            f"| `{w.key_run}` | {row['run_raw'] or '(未設定)'} |",
+            f"| 経過 | {_fmt_age(row['run_age_h'])} |",
+            f"| 閾値 | {w.stale_h:.1f}時間（cadence {w.cadence_h:.0f}時間"
+            f" + 窓 {w.window_min / 60.0:.1f}時間） |",
+            "| 判定 | ok |",
+        ]
+    if human_touched:
+        tail = [
+            "人のコメントがあるため、**自動ではクローズしない**（議論中とみなす・#635）。"
+            "確認のうえ手で閉じてください。",
+        ]
+    else:
+        tail = [
+            "対象が ok へ戻ったため `scripts/check_batch_freshness.py` が自動でクローズした（#635）。",
+            "再発すると新しい Issue が立つ。",
+        ]
+    return "\n".join(body + ["", "---"] + tail + [WATCHDOG_MARKER, RECOVERY_MARKER])
 
 
 def _gh(run, argv: Sequence[str]) -> subprocess.CompletedProcess:
     return run(list(argv), capture_output=True, text=True, encoding="utf-8", errors="replace")
 
 
-def _find_open_issue(run, title: str) -> tuple[Optional[int], Optional[str]]:
-    """同一タイトルの open Issue 番号を返す。見つからない・失敗なら None。
+def _list_open_issues(run) -> tuple[Optional[list], Optional[str]]:
+    """open な Issue の `[{number, title}]`。失敗なら (None, 理由)。
 
     **ラベルで絞らない**——誰かが `ops` を外した瞬間に重複起票が始まる
     （`.github/workflows/notify-failure.yml:165` の理由をそのまま継ぐ）。突き合わせは
     `--jq` に任せず Python 側で行う（シェル依存を持ち込まずテストできる）。
-    **listing が失敗したら新規起票へ倒す**（重複より沈黙の方が悪い）。
     """
     proc = _gh(run, ["gh", "issue", "list", "--state", "open", "--limit", "200",
                      "--json", "number,title"])
     if proc.returncode != 0:
-        return None, f"gh issue list が失敗（新規起票へ倒す）: {(proc.stderr or '')[:200]}"
+        return None, f"gh issue list が失敗: {(proc.stderr or '')[:200]}"
     try:
-        issues = json.loads(proc.stdout or "[]")
+        return json.loads(proc.stdout or "[]"), None
     except json.JSONDecodeError as e:
-        return None, f"gh issue list の出力を JSON として読めない（新規起票へ倒す）: {e}"
+        return None, f"gh issue list の出力を JSON として読めない: {e}"
+
+
+def _find_open_issue(run, title: str) -> tuple[Optional[int], Optional[str]]:
+    """同一タイトルの open Issue 番号を返す。見つからない・失敗なら None。
+
+    **listing が失敗したら新規起票へ倒す**（重複より沈黙の方が悪い）。
+    """
+    issues, warn = _list_open_issues(run)
+    if issues is None:
+        return None, f"{warn}（新規起票へ倒す）"
     for issue in issues:
         if issue.get("title") == title:
             return issue.get("number"), None
     return None, None
+
+
+def _view_issue(run, number: int) -> tuple[Optional[dict], Optional[str]]:
+    """Issue の本文とコメント。失敗なら (None, 理由)。"""
+    proc = _gh(run, ["gh", "issue", "view", str(number), "--json", "body,comments"])
+    if proc.returncode != 0:
+        return None, f"gh issue view #{number} が失敗: {(proc.stderr or '')[:200]}"
+    try:
+        return json.loads(proc.stdout or "{}"), None
+    except json.JSONDecodeError as e:
+        return None, f"gh issue view #{number} の出力を JSON として読めない: {e}"
+
+
+def close_recovered(targets: list[dict], snap: dict, say=print, run=subprocess.run,
+                    dry_run: bool = False) -> list[str]:
+    """ok へ戻った対象の open な起票を、復旧コメント付きで閉じる（#635）。
+
+    `notify` と同じく**失敗しても例外にしない**。閉じ損ねは errors として返し、呼び出し側が
+    起票の失敗と同じ exit 3 にする——閉じ損ねた Issue は次の欠落を埋もれさせる。
+
+    人の手（目印の無い本文・コメント）が入っていれば閉じず、復旧コメントを1回だけ残す。
+    """
+    if dry_run:
+        for target in targets:
+            say(f"[dry-run] 復旧（open な Issue があれば復旧コメント付きでクローズ）: "
+                f"{target['title']}")
+        return []
+    errors: list[str] = []
+    by_title = {target["title"]: target for target in targets}
+    try:
+        issues, warn = _list_open_issues(run)
+        if issues is None:
+            return [f"{warn}（復旧した起票を閉じられない）"]
+        for issue in issues:
+            target = by_title.get(issue.get("title"))
+            if target is None:
+                continue
+            number = issue.get("number")
+            detail, warn = _view_issue(run, number)
+            if detail is None:
+                errors.append(warn)
+                continue
+            comments = [c.get("body") or "" for c in detail.get("comments") or []]
+            human_touched = (WATCHDOG_MARKER not in (detail.get("body") or "")
+                             or any(WATCHDOG_MARKER not in c for c in comments))
+            if human_touched and comments and RECOVERY_MARKER in comments[-1]:
+                continue        # もう伝えてある。毎日積み上げない
+            body = recovery_body(target, snap, human_touched)
+            if human_touched:
+                proc = _gh(run, ["gh", "issue", "comment", str(number), "--body", body])
+                action = f"復旧コメント（人のコメントがあるため閉じない）#{number}"
+            else:
+                proc = _gh(run, ["gh", "issue", "close", str(number),
+                                 "--comment", body, "--reason", "completed"])
+                action = f"復旧により自動クローズ #{number}"
+            if proc.returncode != 0:
+                errors.append(f"{action}に失敗: {(proc.stderr or '')[:200]}")
+            else:
+                say(f"[鮮度] {action}: {target['title']}")
+    except OSError as e:
+        errors.append(f"gh を起動できない: {e}")
+    return errors
 
 
 def notify(found: list[dict], snap: dict, say=print, run=subprocess.run,
@@ -444,6 +619,12 @@ def _log_path() -> Path:
     return bc.log_path("watchdog")
 
 
+def _utcnow() -> datetime:
+    """判定時刻の既定値。継ぎ目にしてあるのは、`--now` を使わずに `main()` を通すテストのため
+    （`--now` の回は自動クローズしないので、`--now` 付きではクローズの配線を試せない）。"""
+    return datetime.now(timezone.utc)
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     ap = argparse.ArgumentParser(description="ローカル駆動バッチの鮮度ゲート（#515）")
     ap.add_argument("--warn-only", action="store_true",
@@ -456,7 +637,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     help="判定時刻を ISO8601 で差し替える（欠落状態の再現・検証用）")
     args = ap.parse_args(argv)
 
-    now = datetime.now(timezone.utc) if not args.now else _parse(args.now)
+    now = _utcnow() if not args.now else _parse(args.now)
     if now is None:
         print(f"[鮮度] --now を日時として読めない: {args.now!r}")
         return 1
@@ -495,22 +676,35 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             say(f"[warn] {footprint_error}")
 
         found = problems(snap)
-        if not found:
-            say("[鮮度] OK")
-            return 0
-
         for problem in found:
             say(f"[鮮度] 停止: {problem['message']}")
 
-        if snap.get("gh_error") and not args.dry_run:
-            # 通知の手段が死んでいると分かっている。その手段で起票を試すのは無駄なので
-            # 叩かない——**痕跡は exit code とログにだけ残す**、が唯一できること。
-            errors = [f"通知経路が使えないため起票を試みない: {snap['gh_error']}"]
-        else:
-            errors = notify(found, snap, say=say, run=subprocess.run, dry_run=args.dry_run)
+        errors: list[str] = []
+        gh_dead = bool(snap.get("gh_error")) and not args.dry_run
+        if found:
+            if gh_dead:
+                # 通知の手段が死んでいると分かっている。その手段で起票を試すのは無駄なので
+                # 叩かない——**痕跡は exit code とログにだけ残す**、が唯一できること。
+                errors.append(f"通知経路が使えないため起票を試みない: {snap['gh_error']}")
+            else:
+                errors += notify(found, snap, say=say, run=subprocess.run,
+                                 dry_run=args.dry_run)
+
+        # 復旧した対象の起票を閉じる（#635）。gh が死んでいる回は上で exit 3 が確定している。
+        recovered = recoveries(snap)
+        if args.dry_run:
+            close_recovered(recovered, snap, say=say, dry_run=True)
+        elif args.now:
+            # 過去の時刻を渡すと、いま stale の対象が ok に見えて本物の Issue を閉じてしまう。
+            say("[鮮度] --now を指定した回は復旧した起票を自動クローズしない")
+        elif not gh_dead:
+            errors += close_recovered(recovered, snap, say=say, run=subprocess.run)
         for error in errors:
             say(f"[warn] {error}")
 
+        if not found and not errors:
+            say("[鮮度] OK")
+            return 0
         if args.warn_only:
             say("[鮮度] --warn-only のため exit 0")
             return 0
