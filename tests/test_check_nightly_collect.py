@@ -6,7 +6,7 @@
 """
 import pytest
 
-from collector_prices import roundtrip_log_line
+from collector_prices import format_yahoo_http_stats, roundtrip_log_line
 from scripts._textwidth import display_width, pad
 from scripts.check_nightly_collect import (
     parse_nightly_log, seconds_per_company, warnings_for,
@@ -197,6 +197,55 @@ class TestJudgedBandsExcluded:
         log = _night_with(roundtrip_log_line(45, {"companies": [], "steps": 9}, 5)) \
             .replace("・スケール不一致で不採用 218行（44社）", "")
         assert parse_nightly_log(log)["scale_mismatch_rows"] == 0
+
+
+class TestHttp404Breakdown:
+    """#556: 4xx の内訳として 404 を読み、404 以外の 4xx だけを警告する。
+
+    404 は上場廃止社が毎晩一定数返す値（実測 約320件）で、一緒くたに数えると 401/403 の
+    ような拒否が埋もれる。行は `_pipeline_incremental.py` と同じく `format_yahoo_http_stats`
+    の**実出力**で組み立てる——推測で写した検体は、書式が変わったときに読めなくなったことを
+    検出できない。
+    """
+
+    OLD_LINE = "[17:47:20]   Yahoo 並行度 4・HTTP失敗 429=0 5xx=0 4xx=350 その他=0"
+
+    def _night(self, stats: dict) -> str:
+        line = f"[17:47:20]   Yahoo 並行度 4・{format_yahoo_http_stats(stats)}"
+        assert self.OLD_LINE in LOG_AFTER      # 差し替えが空振りしていないこと
+        return LOG_AFTER.replace(self.OLD_LINE, line)
+
+    def test_breakdown_is_read(self):
+        r = parse_nightly_log(self._night(
+            {"429": 0, "5xx": 0, "4xx": 320, "404": 320, "other": 0}))
+        assert (r["http_4xx"], r["http_404"], r["http_other"]) == (320, 320, 0)
+        assert r["concurrency"] == 4
+
+    def test_404_only_is_not_flagged(self):
+        """上場廃止社の 404 だけの晩は健全。"""
+        r = parse_nightly_log(self._night(
+            {"429": 0, "5xx": 0, "4xx": 320, "404": 320, "other": 0}))
+        assert warnings_for(r) == []
+
+    def test_non_404_4xx_is_flagged(self):
+        r = parse_nightly_log(self._night(
+            {"429": 0, "5xx": 0, "4xx": 325, "404": 320, "other": 0}))
+        w = [x for x in warnings_for(r) if "404以外" in x]
+        assert len(w) == 1 and "5件" in w[0]
+
+    def test_old_format_breakdown_is_unknown_and_not_flagged(self):
+        """内訳の無い晩（9/8〜9/11）は「不明」。0 と読んで 350件すべてを拒否扱いにしない。"""
+        r = parse_nightly_log(LOG_AFTER)
+        assert r["http_4xx"] == 350 and r["http_404"] is None
+        assert warnings_for(r) == []
+
+    def test_table_marks_unknown_breakdown(self):
+        from scripts.check_nightly_collect import ROWS
+
+        get = dict(ROWS)["HTTP 4xx（404）/ その他"]
+        assert get(parse_nightly_log(LOG_AFTER)) == "350（-） / 0"
+        assert get(parse_nightly_log(self._night(
+            {"429": 0, "5xx": 0, "4xx": 320, "404": 318, "other": 0}))) == "320（318） / 0"
 
 
 class TestTextWidth:

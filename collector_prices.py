@@ -1194,6 +1194,9 @@ def last_closed_session(now_jst: datetime) -> date:
 def should_retry_priceless_delisted(edinet_code: str, today: date) -> bool:
     """上場廃止済みで価格ゼロの社を、今日ぶんの gap-fill 対象にするか（Issue #475）。
 
+    **株価履歴を持つ廃止社（最終株価が `DELISTED_STALE_DAYS` より前）にも使う**（#556）。
+    名前は #475 当時のまま（テストが monkeypatch でこの名前を参照している）。
+
     `DELISTED_RETRY_INTERVAL_DAYS` 日に1回だけ True を返す。曜日は edinet_code から
     決定的に決まるので、454社が同じ日に固まらず日ごとに約 1/7 ずつ散る。
 
@@ -1283,6 +1286,9 @@ async def fill_recent_stock_price_gap_yahoo(
     # 地方取引所に実在すると分かっている社（#560）。バックオフの回数と**混ぜない**——
     # 混ぜると「なぜスキップ数が変わったか」がログから読めなくなる。
     n_local_exchange_skipped = 0
+    # 株価履歴を持つ廃止社の見送り（#556）。価格ゼロ社の見送り（#475）とは**混ぜない**——
+    # 前者は「止まった社」、後者は「一度も取れていない社」で、増減の意味が違う。
+    n_delisted_stale_skipped = 0
     # 「価格を1件も持たない社」の母数（#555）。従来はスキップ数しかログに出ておらず、
     # **454 → 416 のような改善を run ログから追えなかった**（アドホック SQL が要った）。
     n_priceless = 0
@@ -1324,6 +1330,16 @@ async def fill_recent_stock_price_gap_yahoo(
             if use_session:
                 if last_d >= session:
                     continue                      # 最新セッションぶんを既に持っている
+                # 株価履歴を持つ廃止社も価格ゼロ社と同じ間隔で試す（#556）。#475 は価格ゼロ
+                # 社だけを絞ったので、止まった廃止社は毎晩 404 を返し続けていた（実測 263社）。
+                # 解決済みサフィックスは通り抜ける（地方取引所で現に取引がある社・#555）。
+                # **最終株価が古いことを条件に入れる**——#463 の誤 delisted（新規上場）は
+                # 一度履歴を得れば lag 1日に戻るので、ここへ来ずに毎晩取りに行ける。
+                if (is_active is False and yahoo_suffix is None
+                        and (session - last_d).days > DELISTED_STALE_DAYS
+                        and not should_retry_priceless_delisted(edinet_code, today)):
+                    n_delisted_stale_skipped += 1
+                    continue
                 # 直近セッションを取り直して、場中実行が書いた暫定終値を確定値で潰す。
                 # ON CONFLICT DO UPDATE なのでリクエスト数は増えず窓が広がるだけ。
                 start = max(last_d + timedelta(days=1 - PRICE_REFRESH_TAIL_DAYS), floor_d)
@@ -1364,6 +1380,9 @@ async def fill_recent_stock_price_gap_yahoo(
              + f" ・価格ゼロ {n_priceless}社（うち解決済み {n_priceless_resolved}社）"
              + (f" ・廃止済み価格ゼロ {n_delisted_skipped}社は今夜は見送り"
                 f"（{DELISTED_RETRY_INTERVAL_DAYS}日に1回試す・#475）" if n_delisted_skipped else "")
+             + (f" ・廃止済みで株価が{DELISTED_STALE_DAYS}日超前に止まった {n_delisted_stale_skipped}社は"
+                f"今夜は見送り（{DELISTED_RETRY_INTERVAL_DAYS}日に1回試す・#556）"
+                if n_delisted_stale_skipped else "")
              + (f" ・地方取引所に実在 {n_local_exchange_skipped}社は .T を叩かない"
                 f"（月次が正しい取引所で再プローブ・#560）" if n_local_exchange_skipped else "")
              + "）")
@@ -3519,12 +3538,14 @@ _YAHOO_HTTP_ERRORS: Optional[dict] = None
 def yahoo_http_stats():
     """この with の中で `fetch_yahoo_chart` が踏んだ HTTP 失敗を数える。
 
-    yield される dict は `{"429": n, "5xx": n, "4xx": n, "other": n}`。**入れ子にしない**
-    （内側が外側の集計を奪う）。集計は「数える」だけで、判断は呼び出し側が持つ。
+    yield される dict は `{"429": n, "5xx": n, "4xx": n, "404": n, "other": n}`。
+    **`4xx` は 404 を含む総数で、`404` はその内訳**（#556）。404 は「その銘柄が Yahoo に
+    無い」＝上場廃止社が毎晩一定数返す値で、分けないと 401/403 のような**拒否**が埋もれる。
+    **入れ子にしない**（内側が外側の集計を奪う）。集計は「数える」だけで、判断は呼び出し側が持つ。
     """
     global _YAHOO_HTTP_ERRORS
     prev = _YAHOO_HTTP_ERRORS
-    stats: dict = {"429": 0, "5xx": 0, "4xx": 0, "other": 0}
+    stats: dict = {"429": 0, "5xx": 0, "4xx": 0, "404": 0, "other": 0}
     _YAHOO_HTTP_ERRORS = stats
     try:
         yield stats
@@ -3546,14 +3567,22 @@ def _count_yahoo_http_error(exc: Exception) -> None:
         _YAHOO_HTTP_ERRORS["5xx"] += 1
     elif code is not None and 400 <= code < 500:
         _YAHOO_HTTP_ERRORS["4xx"] += 1
+        if code == 404:
+            _YAHOO_HTTP_ERRORS["404"] += 1
     else:
         _YAHOO_HTTP_ERRORS["other"] += 1
 
 
 def format_yahoo_http_stats(stats: dict) -> str:
-    """ログ用の1行。**0 のときも出す**——「出ていない」ことが読めないと監視にならない。"""
-    return (f"HTTP失敗 429={stats['429']} 5xx={stats['5xx']} "
-            f"4xx={stats['4xx']} その他={stats['other']}")
+    """ログ用の1行。**0 のときも出す**——「出ていない」ことが読めないと監視にならない。
+
+    `4xx` は 404 を含む総数のまま出し、404 は `（うち404=N）` として内訳を添える（#556）。
+    4xx の意味を「404 以外」へ変えると、内訳を持たない過去の晩と数字が比べられなくなる。
+    書式は `scripts/check_nightly_collect.py::RE_HTTP` が読むので、変えたらそちらも合わせる。
+    """
+    return (f"HTTP失敗 429={stats.get('429', 0)} 5xx={stats.get('5xx', 0)} "
+            f"4xx={stats.get('4xx', 0)}（うち404={stats.get('404', 0)}） "
+            f"その他={stats.get('other', 0)}")
 
 
 async def fetch_yahoo_chart(
