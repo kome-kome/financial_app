@@ -16,6 +16,7 @@
 
 DB へは繋がない（`_get_setting` / `_open_session` の継ぎ目を差し替える）。
 """
+import json
 import re
 import subprocess
 import sys
@@ -77,6 +78,9 @@ def settings(monkeypatch, tmp_path):
     monkeypatch.setattr(bf, "db_label", lambda: "ローカル（financial_app）")
     monkeypatch.setattr(cbf, "_log_path", lambda: tmp_path / "watchdog.log")
     monkeypatch.setattr(cbf, "check_gh", lambda **_k: None)
+    # `--now` の回は自動クローズしない（#635）ので、クローズの配線は `--now` 無しで試す。
+    # そのとき判定時刻が実時計へ流れないよう、既定値の継ぎ目も固定する。
+    monkeypatch.setattr(cbf, "_utcnow", lambda: NOW)
     # **実プロセスを構造的に遮断する。** ここを個々のテストの monkeypatch に任せていたため、
     # notify を潰し忘れた1本が本物の `gh` を起動し、**GitHub へ Issue を立てた**
     # （2026-08-26・#552 を誤起票）。書き忘れうる場所に依存させない。
@@ -735,3 +739,235 @@ class TestJpxIndustryProducer:
         p = _by_label(self.LABEL)
         rows = _producers({**FRESH_PRODUCERS, self.LABEL: p.stale_h / 24.0 - 0.01})
         assert all(r["status"] == "ok" for r in rows)
+
+
+# ── 復旧したら閉じる（#635）────────────────────────────────────────────────
+# #634 は起票の16分後に解消したが、閉じるのが人の手だったので翌日まで open のまま残った。
+# 閉じ忘れた Issue へ次の欠落が追記されると、直った話と今の話が同じスレッドに混ざって埋もれる。
+
+
+def _by_watchdog(text="自動起票"):
+    return f"{text}\n{cbf.WATCHDOG_MARKER}"
+
+
+RECOVERY_NOTE = f"復旧\n{cbf.WATCHDOG_MARKER}\n{cbf.RECOVERY_MARKER}"
+
+
+class _GhIssues:
+    """gh の代役。open な Issue ごとに本文とコメントを持ち、呼ばれた argv を全部残す。
+
+    `issues` は `{番号: (タイトル, 本文, [コメント本文, ...])}`。`fail` に入れたサブコマンド
+    （`list` / `view` / `close` / `comment`）は returncode=1 で返す。
+    """
+
+    def __init__(self, issues=None, fail=()):
+        self.issues = issues or {}
+        self.fail = set(fail)
+        self.calls: list[list[str]] = []
+
+    def __call__(self, argv, **kwargs):
+        self.calls.append(list(argv))
+        sub = argv[2]
+        if sub in self.fail:
+            return subprocess.CompletedProcess(argv, 1, stdout="", stderr=f"{sub} boom")
+        stdout = ""
+        if sub == "list":
+            stdout = json.dumps([{"number": n, "title": t}
+                                 for n, (t, _b, _c) in self.issues.items()])
+        elif sub == "view":
+            _t, body, comments = self.issues[int(argv[3])]
+            stdout = json.dumps({"body": body, "comments": [{"body": c} for c in comments]})
+        return subprocess.CompletedProcess(argv, 0, stdout=stdout, stderr="")
+
+    def writes(self):
+        return [c for c in self.calls if c[2] in ("close", "comment", "create")]
+
+
+def _arg(call, flag):
+    return call[call.index(flag) + 1]
+
+
+class TestRecoveredIssuesAreClosed:
+    """ok へ戻った対象の起票は、復旧の根拠を添えて watchdog が閉じる。"""
+
+    @staticmethod
+    def _close(gh, snap):
+        return cbf.close_recovered(cbf.recoveries(snap), snap, say=lambda _: None, run=gh)
+
+    def test_a_recovered_target_is_closed_with_its_evidence(self, settings):
+        """1回の ok で閉じる。何を読んで ok と言ったかを本文に残す。"""
+        gh = _GhIssues({42: (NIGHTLY.issue_title, _by_watchdog(), [_by_watchdog("追記")])})
+        assert self._close(gh, _snap(settings)) == []
+        (call,) = gh.writes()
+        assert call[:4] == ["gh", "issue", "close", "42"]
+        assert _arg(call, "--reason") == "completed"
+        body = _arg(call, "--comment")
+        assert NOW.isoformat(timespec="seconds") in body         # 判定時刻
+        assert NIGHTLY.key_run in body                           # 読んだ場所
+        assert settings[run_nightly.KEY_LAST_RUN] in body        # 読んだ値
+        assert cbf.RECOVERY_MARKER in body
+
+    def test_nothing_open_means_nothing_but_the_listing(self, settings):
+        gh = _GhIssues({7: ("無関係な Issue", "人が書いた", [])})
+        assert self._close(gh, _snap(settings)) == []
+        assert [c[2] for c in gh.calls] == ["list"]
+
+    def test_a_still_stale_target_stays_open(self, settings):
+        settings[run_nightly.KEY_LAST_RUN] = _iso(48.0)
+        gh = _GhIssues({42: (NIGHTLY.issue_title, _by_watchdog(), [])})
+        assert self._close(gh, _snap(settings)) == []
+        assert gh.writes() == []
+
+    def test_a_human_comment_stops_the_close_but_gets_a_note(self, settings):
+        """投稿者は同じアカウントなので見分けられない。目印の無い本文＝人の手。"""
+        gh = _GhIssues({42: (NIGHTLY.issue_title, _by_watchdog(), ["原因を調べている"])})
+        assert self._close(gh, _snap(settings)) == []
+        (call,) = gh.writes()
+        assert call[:4] == ["gh", "issue", "comment", "42"]
+        body = _arg(call, "--body")
+        assert cbf.RECOVERY_MARKER in body
+        assert "自動ではクローズしない" in body
+
+    def test_the_note_is_left_only_once(self, settings):
+        """毎日走るので、最新コメントが復旧コメントなら何もしない（積み上げない）。"""
+        gh = _GhIssues({42: (NIGHTLY.issue_title, _by_watchdog(),
+                             ["原因を調べている", RECOVERY_NOTE])})
+        assert self._close(gh, _snap(settings)) == []
+        assert gh.writes() == []
+
+    def test_a_relapse_after_the_note_is_noted_again(self, settings):
+        """復旧コメントの後に再検出の追記があれば、次の復旧はまた伝える。"""
+        gh = _GhIssues({42: (NIGHTLY.issue_title, _by_watchdog(),
+                             ["原因を調べている", RECOVERY_NOTE, _by_watchdog("再検出")])})
+        assert self._close(gh, _snap(settings)) == []
+        assert [c[2] for c in gh.writes()] == ["comment"]
+
+    def test_a_hand_filed_issue_is_not_closed(self, settings):
+        """同じタイトルで人が手で立てた Issue（本文に目印が無い）を閉じない。"""
+        gh = _GhIssues({42: (NIGHTLY.issue_title, "人が立てた", [])})
+        assert self._close(gh, _snap(settings)) == []
+        assert [c[2] for c in gh.writes()] == ["comment"]
+
+    def test_a_recovered_producer_is_closed(self, settings):
+        snap = _snap(settings)
+        snap["producers"] = _producers(FRESH_PRODUCERS)
+        prod = _by_label(M2_LABEL)
+        gh = _GhIssues({9: (prod.issue_title, _by_watchdog(), [])})
+        assert self._close(gh, snap) == []
+        (call,) = gh.writes()
+        assert call[:4] == ["gh", "issue", "close", "9"]
+        assert prod.source in _arg(call, "--comment")
+
+    def test_a_stale_producer_stays_open(self, settings):
+        snap = _snap(settings)
+        snap["producers"] = _producers({**FRESH_PRODUCERS, M2_LABEL: 50.0})
+        assert _by_label(M2_LABEL).issue_title not in [t["title"] for t in cbf.recoveries(snap)]
+
+    def test_a_dead_database_recovers_nothing(self):
+        """補集合で作ると、行が空の回に全対象が「問題なし」に見えて全部閉じる。"""
+        snap = {"now": NOW, "rows": [], "producers": [], "db_error": "boom",
+                "db_label": "x", "gh_error": None}
+        assert cbf.recoveries(snap) == []
+
+    def test_a_readable_database_recovers_the_db_issue(self, settings):
+        titles = [t["title"] for t in cbf.recoveries(_snap(settings))]
+        assert cbf.DB_ERROR_TITLE in titles
+        assert cbf.GH_ERROR_TITLE not in titles     # 原理的に自動起票されない
+
+    def test_a_first_ever_watchdog_run_counts_as_recovered(self, settings):
+        """自分の初回 missing は正常（problems() と同じ扱い）。"""
+        del settings[cbf.KEY_LAST_RUN]
+        assert SELF.issue_title in [t["title"] for t in cbf.recoveries(_snap(settings))]
+
+
+class TestAFailedCloseIsNotSilent:
+    """閉じ損ねは起票の失敗と同じ扱い（exit 3）。閉じ損ねた Issue は次の欠落を埋もれさせる。"""
+
+    @pytest.mark.parametrize("step", ["list", "view", "close"])
+    def test_each_failed_step_is_returned(self, settings, step):
+        gh = _GhIssues({42: (NIGHTLY.issue_title, _by_watchdog(), [])}, fail=[step])
+        snap = _snap(settings)
+        errors = cbf.close_recovered(cbf.recoveries(snap), snap, say=lambda _: None, run=gh)
+        assert errors and f"{step} boom" in errors[0]
+
+    def test_missing_gh_is_returned_not_raised(self, settings):
+        def boom(*_a, **_k):
+            raise OSError("gh が無い")
+
+        snap = _snap(settings)
+        errors = cbf.close_recovered(cbf.recoveries(snap), snap, say=lambda _: None, run=boom)
+        assert errors and "gh を起動できない" in errors[0]
+
+    def test_a_failed_close_exits_three_even_when_healthy(self, settings, monkeypatch):
+        monkeypatch.setattr(cbf, "close_recovered", lambda *a, **k: ["閉じ損ねた"])
+        assert cbf.main([]) == cbf.EXIT_NOTIFY_FAILED
+        assert cbf.main(["--warn-only"]) == 0
+
+
+class TestCloseWiring:
+    def test_a_healthy_run_closes(self, settings, monkeypatch):
+        seen = []
+        monkeypatch.setattr(cbf, "close_recovered",
+                            lambda targets, snap, **k: seen.append((targets, k)) or [])
+        assert cbf.main([]) == 0
+        (targets, kwargs), = seen
+        assert NIGHTLY.issue_title in [t["title"] for t in targets]
+        assert not kwargs.get("dry_run")
+
+    def test_an_unhealthy_run_still_closes_the_others(self, settings, monkeypatch):
+        """1本が止まっていても、戻った別の対象は閉じる。"""
+        settings[run_nightly.KEY_LAST_RUN] = _iso(48.0)
+        seen = []
+        monkeypatch.setattr(cbf, "notify", lambda *a, **k: [])
+        monkeypatch.setattr(cbf, "close_recovered",
+                            lambda targets, snap, **k: seen.append(targets) or [])
+        assert cbf.main([]) == cbf.EXIT_UNHEALTHY
+        titles = [t["title"] for t in seen[0]]
+        assert NIGHTLY.issue_title not in titles
+        assert MONTHLY.issue_title in titles
+
+    def test_now_never_closes(self, settings, monkeypatch):
+        """過去の時刻を渡すと、いま stale の対象が ok に見えて本物の Issue を閉じてしまう。"""
+        def must_not_close(*_a, **_k):
+            raise AssertionError("--now の回にクローズしようとした")
+
+        monkeypatch.setattr(cbf, "close_recovered", must_not_close)
+        assert cbf.main(["--now", NOW.isoformat()]) == 0
+
+    def test_a_dead_gh_never_closes(self, settings, monkeypatch):
+        def must_not_close(*_a, **_k):
+            raise AssertionError("gh が死んでいる回にクローズしようとした")
+
+        monkeypatch.setattr(cbf, "check_gh", lambda **_k: "gh が無い")
+        monkeypatch.setattr(cbf, "close_recovered", must_not_close)
+        assert cbf.main([]) == cbf.EXIT_NOTIFY_FAILED
+
+    def test_dry_run_lists_the_targets_without_gh(self, settings, capsys):
+        """subprocess は fixture が遮断しているので、gh を叩けばここで落ちる。"""
+        assert cbf.main(["--dry-run"]) == 0
+        out = capsys.readouterr().out
+        assert f"[dry-run] 復旧（open な Issue があれば復旧コメント付きでクローズ）: " \
+               f"{NIGHTLY.issue_title}" in out
+
+
+class TestMarkers:
+    def test_filed_bodies_carry_the_marker(self, settings):
+        """目印が無いと、次の復旧で自分の起票を「人の手」とみなして閉じられない。"""
+        settings[run_nightly.KEY_LAST_RUN] = _iso(48.0)
+        snap = _snap(settings)
+        body = cbf.issue_body(cbf.problems(snap)[0], snap)
+        assert cbf.WATCHDOG_MARKER in body
+        assert cbf.RECOVERY_MARKER not in body
+
+    def test_the_markers_are_distinct(self):
+        assert cbf.WATCHDOG_MARKER not in cbf.RECOVERY_MARKER
+        assert cbf.RECOVERY_MARKER not in cbf.WATCHDOG_MARKER
+
+    @pytest.mark.parametrize("human_touched", [True, False])
+    def test_recovery_bodies_encode_as_cp932(self, settings, human_touched):
+        snap = _snap(settings)
+        snap["producers"] = _producers(FRESH_PRODUCERS)
+        for target in cbf.recoveries(snap):
+            body = cbf.recovery_body(target, snap, human_touched)
+            body.encode("cp932")
+            assert cbf.WATCHDOG_MARKER in body and cbf.RECOVERY_MARKER in body
