@@ -6,7 +6,7 @@
    一致しないなら原因が別にある（E32779: 公式イベント none なのに 5/6 ずれ）。
 2. **公式イベントで説明できない段差は直さない。** 直すと**分割の無い銘柄にニセの分割を
    作る**行為になり、週次リターンを入力に持つ M-1 / M-2 / M-6 へ誤った企業イベントを
-   伝播させる（E02086: 段差は 2024-10 頃なのに公式イベントは 2026-03-30）。
+   伝播させる。ただし公式が持たないスピンオフは測る前に換算する（E02086・#568）。
 3. **公式イベントがあるのに段差が無いのは正常。** Yahoo が既に知っている分割は DB 側で
    調整済みなので比が動かない（E02978 の 2024-07-30）。ここを「イベントには段差が対応
    するはず」と書くと、正しく調整済みの銘柄を弾く。
@@ -105,7 +105,8 @@ class TestValidate:
         assert "直近で公式と一致しない" in reason
 
     def test_rejects_a_step_with_no_official_event(self):
-        """E02086 型: 段差の時期に公式イベントが無い。"""
+        """段差の時期に公式イベントが無い（#466 当時の E02086 の見え方。#568 でスピンオフと
+        判明し換算で解消したが、登録の無い社ではこの型のまま棄却する）。"""
         ratios = [("2024-09-27", 1.854000, 1000.0, 1854.0),
                   ("2024-10-04", 1.000000, 1000.0, 1000.0)]
         ok, reason = R.validate(ratios, [("2026-03-30", 0.5)])
@@ -127,6 +128,41 @@ class TestValidate:
         assert not ok
 
 
+# ── 公式が持たないスピンオフの換算（#568）──────────────────────────────────
+
+class TestSpinoffConversion:
+    """**換算しないと、補正計画が DB からスピンオフ調整を剥がす向きの係数を出す。**
+
+    E02086 は Yahoo（= DB）だけが権利落ち日 2024-09-27 より前へ (3820 − 1760) / 3820 を掛けており、
+    DB 側が正しい。公式値を DB のスケールへ換算すれば比は平らになり、何も補正しない。
+    """
+
+    F = (3820.0 - 1760.0) / 3820.0
+    ROWS = bars(("2024-09-20", 1890.0, 1.0),
+                ("2024-09-27", 1140.0, 1.0),
+                ("2026-06-12", 1500.0, 1.0))
+    WEEKLY = {"2024-09-20": 1890.0 * F, "2024-09-27": 1140.0, "2026-06-12": 1500.0}
+
+    def test_without_ec_the_spinoff_looks_like_an_unexplained_step(self):
+        ratios = R.measured_ratios(self.ROWS, self.WEEKLY)
+        assert len(R.find_steps(ratios)) == 1
+        ok, reason = R.validate(ratios, [])
+        assert not ok
+        assert "公式イベントが無い" in reason
+
+    def test_with_ec_the_ratios_are_flat_and_nothing_is_corrected(self):
+        ratios = R.measured_ratios(self.ROWS, self.WEEKLY, "E02086")
+        assert [r for _, r, _, _ in ratios] == pytest.approx([1.0, 1.0, 1.0])
+        assert R.find_steps(ratios) == []
+        assert R.validate(ratios, []) == (True, "")
+        factors = R.plan_corrections(ratios, list(self.WEEKLY))
+        assert all(abs(f - 1.0) <= R.REL_TOL_FLOOR for f in factors.values())
+
+    def test_unregistered_company_is_measured_as_is(self):
+        ratios = R.measured_ratios(self.ROWS, self.WEEKLY, "E00001")
+        assert ratios == R.measured_ratios(self.ROWS, self.WEEKLY)
+
+
 # ── エンバーゴ群の判別 ──────────────────────────────────────────────────────
 
 class TestPostWindowAdjustment:
@@ -135,7 +171,7 @@ class TestPostWindowAdjustment:
     公式が窓内の `AdjC` を遡及調整済みで返すのに `AdjFactor` の行が無いのは、分割が
     J-Quants 無料プランのエンバーゴ（直近12週）の中で起きているため。普通の分割なら
     Yahoo も遡及調整するので **#466 の現象ではなく既存の Yahoo 経路の担当**であり、
-    「公式イベントが無いから説明できない」群（E32779・E02086）と混ぜてはいけない。
+    「公式イベントが無いから説明できない」群（E32779）と混ぜてはいけない。
     """
 
     def test_detects_a_post_window_split(self):

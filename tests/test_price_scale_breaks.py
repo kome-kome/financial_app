@@ -23,8 +23,10 @@ from collector_prices import (            # noqa: E402
     repair_price_scale_breaks,
 )
 from collector_utils import (             # noqa: E402
+    SPINOFF_ADJUSTMENTS,
     JQuantsOutOfCoverage,
     is_common_stock_code,
+    spinoff_factor,
 )
 
 
@@ -234,6 +236,69 @@ class TestCompareOfficialVsWeekly:
         r = compare_official_vs_weekly(db, {"2025-01-10": {"E00001": 200.0}}, 0.01)
         assert r["compared"] == 0
         assert r["breaks"] == []
+
+
+class TestSpinoffAdjustment:
+    """公式 `AdjFactor` が持たないスピンオフの換算（#568）。
+
+    E02086（6676 バッファロー）はシマダヤ（250A）の株式分配型スピンオフで、Yahoo（= DB）だけが
+    権利落ち日 2024-09-27 より前へ (3820 − 1760) / 3820 を掛ける。週次リターンには DB 側が
+    正しいので、突合では公式値を DB のスケールへ換算してから比べる。
+    """
+
+    EC = "E02086"
+    F = (3820.0 - 1760.0) / 3820.0
+    OFFICIAL = {"2024-09-20": {"E02086": 1890.0}, "2024-10-04": {"E02086": 1140.0}}
+
+    def _setup(self, db, make_company, make_weekly, before, after):
+        db.add(make_company(edinet_code=self.EC, sec_code="6676", name="株式会社バッファロー"))
+        db.add(make_weekly(edinet_code=self.EC, trade_date="2024-09-20", close_last=before))
+        db.add(make_weekly(edinet_code=self.EC, trade_date="2024-10-04", close_last=after))
+        db.commit()
+
+    def test_factor_applies_only_before_ex_date(self):
+        assert spinoff_factor(self.EC, "2024-09-26") == pytest.approx(self.F)
+        assert spinoff_factor(self.EC, "2024-09-27") == 1.0
+        assert spinoff_factor(self.EC, "2026-06-12") == 1.0
+
+    def test_unregistered_company_is_untouched(self):
+        assert spinoff_factor("E00001", "2020-01-10") == 1.0
+
+    def test_factor_matches_the_ratio_measured_in_466(self):
+        """係数の逆数は #466 の実測（公式 / DB = 1.854369）と一致する＝根拠の2値の書き誤りを縛る。"""
+        assert 1.0 / spinoff_factor(self.EC, "2024-09-20") == pytest.approx(1.854369, abs=1e-6)
+
+    def test_registry_entries_are_well_formed(self):
+        for events in SPINOFF_ADJUSTMENTS.values():
+            for ex_date, factor, reason in events:
+                date.fromisoformat(ex_date)
+                assert 0.0 < factor < 1.0       # スピンオフは権利落ち前の株価を必ず下げる
+                assert reason.strip()
+
+    def test_yahoo_scale_db_is_not_reported(self, db, make_company, make_weekly):
+        """権利落ち前は DB = 公式 × 係数（Yahoo が調整済み）＝段差ではない。"""
+        self._setup(db, make_company, make_weekly, before=1890.0 * self.F, after=1140.0)
+        r = compare_official_vs_weekly(db, self.OFFICIAL, 0.01)
+        assert r["breaks"] == []
+        assert r["compared"] == 2
+
+    def test_db_without_the_adjustment_is_reported(self, db, make_company, make_weekly):
+        """DB が公式と同値（Yahoo が調整をやめた・未調整値で取り直した）なら段差として出す。
+
+        登録は「社を除外する」ではなく「換算して比べる」＝DB が変われば再び検出される。
+        """
+        self._setup(db, make_company, make_weekly, before=1890.0, after=1140.0)
+        r = compare_official_vs_weekly(db, self.OFFICIAL, 0.01)
+        assert [b["edinet_code"] for b in r["breaks"]] == [self.EC]
+        assert r["breaks"][0]["worst_date"] == "2024-09-20"
+        assert r["breaks"][0]["ratio"] == pytest.approx(self.F)
+
+    def test_after_ex_date_the_official_value_is_used_as_is(self, db, make_company, make_weekly):
+        """権利落ち日以降は換算しない（掛けると、正しい DB 値を段差と読む）。"""
+        self._setup(db, make_company, make_weekly,
+                    before=1890.0 * self.F, after=1140.0 * self.F)
+        r = compare_official_vs_weekly(db, self.OFFICIAL, 0.01)
+        assert [b["worst_date"] for b in r["breaks"]] == ["2024-10-04"]
 
 
 class TestDetectPriceScaleBreaks:

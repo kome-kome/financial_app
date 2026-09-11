@@ -363,8 +363,9 @@ async def _jquants_fetch_code(session: httpx.AsyncClient, api_key: str, code: st
 
     返る行には **`AdjFactor`（JPX 公式の調整係数）** が入る。`AdjFactor != 1.0` の日が
     企業イベント日で、値が比率そのもの。**株価比から分割比を推測してはいけない**——
-    #466 の調査で、公式イベントが無いのに株価が 5/6 ずれている銘柄（E32779）と、
-    時期も比率も公式と食い違う銘柄（E02086）が実在すると分かっている。
+    #466 の調査で、公式イベントが無いのに株価が 5/6 ずれている銘柄（E32779）が実在すると
+    分かっている。**逆に `AdjFactor` が持たない企業イベントもある**: 株式分配型スピンオフは
+    公式が調整せず Yahoo が調整する（E02086・#568・`collector_utils.SPINOFF_ADJUSTMENTS`）。
 
     エラー処理は `_jquants_fetch_date` と同じ規約に揃える（429 は90秒待って1回だけ再試行・
     403 は `classify_jquants_forbidden` で分類して送出・400 は窓外なら
@@ -1662,6 +1663,7 @@ def compare_official_vs_weekly(db, official: dict, threshold: float) -> dict:
 
     official: {trade_date: {edinet_code: 公式終値}}（`_probe_official_closes` の戻り値）
     戻り値の breaks は max_dev 降順・同値は edinet_code 昇順で決定的に並べる。
+    `jq_close` / `ratio` はスピンオフ換算（`spinoff_factor`・#568）後の公式値で表す。
     """
     worst: dict = {}
     compared = 0
@@ -1679,7 +1681,9 @@ def compare_official_vs_weekly(db, official: dict, threshold: float) -> dict:
             if dbv <= 0:
                 continue
             compared += 1
-            jqv = jq[ec]
+            # 公式が持たないスピンオフ調整を掛けて DB のスケールへ換算してから比べる（#568）。
+            # 登録は除外ではなく換算＝DB が調整を失えば、ここで再び段差として出る。
+            jqv = jq[ec] * spinoff_factor(ec, d)
             dev = abs(jqv - dbv) / dbv
             if dev < threshold:
                 continue
