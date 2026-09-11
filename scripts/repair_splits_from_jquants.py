@@ -29,8 +29,12 @@ J-Quants（JPX 公式）の `AdjC` が正しい側。
 **比の段差は、すべて公式イベント日で説明できなければならない。** 説明できない段差を
 直すのは、分割の無い銘柄にニセの分割を作る行為であり、週次リターンを入力に持つ
 M-1 / M-2 / M-6 へ誤った企業イベントを伝播させる。#466 の調査で、公式イベントが
-無いのに 5/6 ずれている銘柄（E32779）と、時期も比率も公式と食い違う銘柄（E02086）が
-実在すると分かっている。
+無いのに 5/6 ずれている銘柄（E32779）が実在すると分かっている。
+
+**公式イベントが無い段差のすべてが「説明できない」わけではない。** 株式分配型スピンオフは
+公式 `AdjFactor` が持たず、Yahoo（= DB）だけが調整する（E02086・#568）。この場合は DB が
+正しいので、公式値の側へ係数を掛けて換算してから測る（`measured_ratios` の `ec`・
+`collector_utils.SPINOFF_ADJUSTMENTS`）。
 
 **逆向き（公式イベントがあるのに段差が無い）は正常。** Yahoo が既に知っている分割は
 DB 側で調整済みなので比が動かない（E02978 の 2024-07-30 が該当）。したがって
@@ -51,7 +55,8 @@ DB 側で調整済みなので比が動かない（E02978 の 2024-07-30 が該�
 がこれを `AdjC / C != 1.0` で見分け、`embargoed` として別枠に出す。
 
 **「直せなかった」を1つの箱に入れると打ち手を取り違える**——エンバーゴ群は12週待つか
-Yahoo 経路で直り、真に説明できない群（E32779・E02086）は第3のソースが要る。
+Yahoo 経路で直り、真に説明できない群（E32779）は第3のソースが要る（E02086 は第3のソースで
+スピンオフと判明し、換算で解消した・#568）。
 
 ## 触らないもの
 
@@ -100,6 +105,8 @@ from collector_utils import (
     # 片方が「同じ値」と見た行をもう片方が「段差」と読む（#466 の実測: 株価 21円の
     # E01300 は観測幅 3.5e-3 で、`ROUND_UNIT / 株価` だと 4.8e-2）。
     REL_TOL_FLOOR, ROUND_UNIT, force_utf8_stdout, rounding_tolerance,
+    # 公式が持たないスピンオフ調整（#568）。検出器（compare_official_vs_weekly）と共有する。
+    spinoff_factor,
 )
 
 # `AdjFactor` がイベントとみなされる下限（浮動小数の 1.0 ゆらぎを拾わない）。
@@ -124,11 +131,15 @@ def extract_events(rows: list) -> list:
     return sorted(out)
 
 
-def measured_ratios(rows: list, weekly: dict) -> list:
+def measured_ratios(rows: list, weekly: dict, ec: Optional[str] = None) -> list:
     """weekly の trade_date と一致する日で `AdjC / close_last` を測る。
 
     `weekly`: {trade_date: close_last}。戻り値は日付昇順の [(date, ratio, db, official)]。
     **比は推測ではなく実測**である（この関数が #466 の「株価比は検算に使う」の実体）。
+
+    `ec` を渡すと、公式が持たないスピンオフ調整（`collector_utils.SPINOFF_ADJUSTMENTS`・#568）を
+    `AdjC` へ掛けて DB のスケールへ換算してから比べる。換算しないと、DB が正しく調整済みの
+    社でも段差に見え、補正計画が DB からスピンオフ調整を剥がす向きの係数を出す。
     """
     out = []
     for r in rows:
@@ -138,6 +149,8 @@ def measured_ratios(rows: list, weekly: dict) -> list:
         if not d or adjc is None or dbv is None:
             continue
         dbv, adjc = float(dbv), float(adjc)
+        if ec:
+            adjc *= spinoff_factor(ec, d)
         if dbv <= 0 or adjc <= 0:
             continue
         out.append((d, adjc / dbv, dbv, adjc))
@@ -186,7 +199,8 @@ def validate(ratios: list, events: list) -> tuple:
     1. **最新の測定比が 1.0 であること。** 直近で公式と食い違うのは「過去の分割が
        未反映」ではなく別の原因（E32779: 公式イベント none なのに 5/6 ずれ）。
     2. **比の段差がすべて公式イベント日で説明できること。** 説明できない段差を直すのは
-       ニセの分割を作る行為（E02086: 段差は 2024-10 頃なのに公式イベントは 2026-03-30）。
+       ニセの分割を作る行為。公式が持たないスピンオフは `measured_ratios` の換算で比から
+       消えるので、ここへは届かない（E02086・#568）。
 
     **「全イベントに段差が対応すること」は要求しない。** Yahoo が既に知っている分割は
     DB 側で調整済みなので段差が出ないのが正しい（E02978 の 2024-07-30）。
@@ -343,7 +357,7 @@ async def _run(args) -> dict:
             wk = {td: cl for td, _, cl in rows}
             jq = official.get(ec) or []
             events = extract_events(jq)
-            ratios = measured_ratios(jq, wk)
+            ratios = measured_ratios(jq, wk, ec)
             ok, reason = validate(ratios, events)
             entry = {"edinet_code": ec, "sec_code": sec, "weeks": len(rows),
                      "events": [{"date": d, "factor": f} for d, f in events],
