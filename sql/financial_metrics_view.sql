@@ -16,8 +16,29 @@ WITH d AS (
         fr.pl_rd_expenses, fr.pl_depreciation, fr.pl_extraordinary_income, fr.pl_extraordinary_loss,
         fr.cf_operating_cf, fr.cf_investing_cf, fr.cf_financing_cf, fr.cf_free_cf,
         fr.cf_net_change_cash, fr.cf_capex,
-        fr.stock_price, fr.market_cap, fr.per, fr.pbr, fr.div_yield, fr.dps,
+        fr.stock_price,
+        -- バリュエーション基準の不一致の補正（#655・ADR-0055）。株価は遡及調整済みだが分母の
+        -- 1株指標（pl_eps / bs_bps / dps / issued_shares）は提出当時の基準なので、分割より前の
+        -- 年の行だけ分子と分母で基準が食い違う。向きは列ごとに逆で、唯一の源は
+        -- scripts/measure_split_valuation_bias.py::COLUMN_DIRECTION:
+        --   調整済み株価が分子または係数の列（per / pbr / market_cap）→ ×F
+        --   調整済み株価が分母の列（div_yield / nc_ratio）            → ÷F
+        -- **fr.stock_price は補正しない**——COLUMN_DIRECTION に入っておらず、調整済み株価
+        -- そのものとして sector_ols の目的変数や画面が読む値である。その結果、補正された行では
+        -- `per <> stock_price / pl_eps` になる（意図した非対称・docs/GOTCHAS.md に記載）。
+        -- **`::double precision` へ戻すのを省かない。** `ROUND(x::numeric, n)` は numeric を返すので、
+        -- 付けないと補正前まで double precision だった4列の型が変わる。ORM（`Column(Float)`）経由の
+        -- 読み取りは Decimal を float へ直すので気づかないが、生 SQL で読む経路だけが Decimal を
+        -- 受け取り、float との演算で静かに落ちる。型を変えずに値だけ直す。
+        ROUND((fr.market_cap * COALESCE(saf.factor, 1.0))::numeric, 2)::double precision AS market_cap,
+        ROUND((fr.per        * COALESCE(saf.factor, 1.0))::numeric, 2)::double precision AS per,
+        ROUND((fr.pbr        * COALESCE(saf.factor, 1.0))::numeric, 2)::double precision AS pbr,
+        ROUND((fr.div_yield  / NULLIF(COALESCE(saf.factor, 1.0), 0))::numeric, 2)::double precision AS div_yield,
+        fr.dps,
         fr.employees, fr.issued_shares,
+        -- 適用した F を露出する（補正が効いた行を SQL と API から見えるようにする）。
+        -- 消費側が重ねて掛けてはいけない＝上の4列には既に反映済み。
+        COALESCE(saf.factor, 1.0::double precision) AS split_factor,
         c.is_active, c.delisted_date,
         CASE WHEN COALESCE(fr.pl_revenue,0) <> 0
              THEN ROUND((COALESCE(fr.pl_operating_profit,0) / fr.pl_revenue * 100)::numeric, 2) END AS op_margin,
@@ -52,6 +73,12 @@ WITH d AS (
                          / fr.bs_total_assets)::numeric, 4) END AS accruals
     FROM financial_records fr
     LEFT JOIN companies c ON c.edinet_code = fr.edinet_code
+    -- 分割補正係数（#655・ADR-0055）。**LEFT JOIN なのは F=1.0 の行を持たないから**＝
+    -- 歪んでいる行（実測 1,947 / 30,379）だけを持ち、残りは COALESCE が 1.0 で埋める。
+    -- 表は毎晩 _pipeline_incremental.py の Phase 4 直後に全置換される（F はその行の年より
+    -- 後に起きたイベントの積なので、新しい分割が1件起きると過去全行の値が変わる）。
+    LEFT JOIN split_adjustment_factors saf
+           ON saf.edinet_code = fr.edinet_code AND saf.year = fr.year
     -- 通期のみを露出（Issue #219② フェーズA）。半期(H1)等の非通期行を同一テーブルに同居させても、
     -- 年度単位の Zスコア(PARTITION BY year)・成長率LAG(ORDER BY year,period_end)が期間混在で
     -- 壊れないよう、VIEW 段でソースを通期に限定する。非通期行は period_type<>'annual' で別途参照。

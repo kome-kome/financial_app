@@ -49,8 +49,8 @@ Egress 枠が復旧する 2026-08-18 を待たずに、本番と同一のコー�
 
 ## テーブル順序と FK
 
-ミラー範囲は全18表から `xbrl_raw_documents`（BLOB・0行）を除いた17表。FK は4本ともに
-`companies.edinet_code`
+ミラー範囲は全19表から `xbrl_raw_documents`（BLOB・0行）を除いた18表
+（`split_adjustment_factors` を #655 で追加）。FK は4本ともに `companies.edinet_code`
 向きなので、`Base.metadata.sorted_tables`（依存順）に従えば `companies` が依存側より先に来る。
 **`edinet` は superuser でないため `pg_restore --disable-triggers` が使えず**、順序で満たすしかない。
 並列 `--jobs` は順序が崩れるので使わない。
@@ -166,6 +166,13 @@ SYNC_PLAN: dict[str, TableSync] = {
     "macro_enet_scores": TableSync(MODE_FULL, note="同上"),
     "macro_ensemble_scores": TableSync(MODE_FULL, note="同上"),
     "macro_gbdt_scores": TableSync(MODE_FULL, note="同上"),
+
+    "split_adjustment_factors": TableSync(
+        MODE_FULL,
+        note="毎晩の全置換（#655・ADR-0055）。computed_at は持つが高水位では**消えた行を運べない**"
+             "——訂正提出で検出イベントが消えれば F は 1.0 へ戻り、その行は表から落ちる。"
+             "upsert だけのミラーでは古い補正係数が残り二重補正になる（どの値も妥当な株価指標"
+             "なのでエラーは出ない）。実測 1,947 行で FULL でも軽い"),
 
     # 行数極小
     "plugin_tuned_params": TableSync(MODE_FULL, note="plugin ごとに1行。全件でも数十行"),

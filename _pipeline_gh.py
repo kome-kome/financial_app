@@ -33,6 +33,7 @@ load_dotenv()
 from collector import (
     run_full_collection, collect_macro_data, reparse_from_raw,
     collect_stock_price_history_jquants, update_market_data_from_history,
+    rebuild_split_adjustment_factors,
     backfill_historical_stock_prices_yahoo, fill_recent_stock_price_gap_yahoo,
     backfill_weekly_history_yahoo,
     refill_cf_from_xbrl, refill_pl_bs_from_xbrl, refill_c2_from_xbrl,
@@ -375,6 +376,12 @@ async def main(years_back: int, collect_only: bool = False,
 
             n_updated = update_market_data_from_history(db5, point_in_time=True)
             log(f"  financial_records.stock_price: {n_updated}レコード 更新")
+
+            # 分割補正係数（#655・ADR-0055）。**入口を揃えるために差分側と同じ位置へ置く**——
+            # ここを欠かすと、手動の全件実行のあとだけ係数が古いまま VIEW に残る。
+            # point_in_time=True は過去行の株価も焼き直すので、歪みが入り直す経路そのもの。
+            n_factors = rebuild_split_adjustment_factors(db5)
+            log(f"  split_adjustment_factors: {n_factors}行 全置換")
         finally:
             db5.close()
         log(f"[5/5] 市場データ 完了 ({(time.time()-t0)/60:.1f}分経過)")

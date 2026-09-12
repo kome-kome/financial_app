@@ -1945,6 +1945,56 @@ def upsert_regression_results_batch(db, rows) -> int:
     return len(vals)
 
 
+# ── 8.5 分割補正係数（バリュエーション基準の不一致・#655・ADR-0055）────────────
+# `financial_records` の per / pbr / market_cap / div_yield は「遡及調整済み株価 ÷ 提出当時の
+# 1株指標」で**分子と分母の基準が食い違う**（用語は CONTEXT.md「バリュエーション基準の不一致」）。
+# 補正は `financial_metrics` VIEW が LEFT JOIN でその場で当てる＝生値は壊さない。
+#
+# **この表の1行は (edinet_code, year) ごとの累積倍率で、その行の年より後に起きた
+# イベントの積**（`scripts/measure_split_valuation_bias.cumulative_factors` が唯一の源）。
+# 新しい分割が1件起きればその会社の過去全行の値が変わるので、`financial_records` に列として
+# 焼き付ける形は採らず毎晩全置換する。**F=1.0 の行は書かない**（VIEW が COALESCE(...,1.0) で
+# 埋めるので、歪んでいる 1,947 行だけを持てば足りる）。
+SPLIT_FACTOR_INSERT_CHUNK = 2000
+
+
+class SplitAdjustmentFactor(Base):
+    __tablename__ = "split_adjustment_factors"
+    __table_args__ = (
+        PrimaryKeyConstraint("edinet_code", "year", name="pk_split_adjustment_factors"),
+    )
+
+    edinet_code = Column(String(10), nullable=False)
+    year        = Column(Integer, nullable=False)
+    # 累積 F。per / pbr / market_cap は ×F、div_yield / nc_ratio は ÷F
+    # （向きの唯一の源は measure_split_valuation_bias.COLUMN_DIRECTION）。
+    factor      = Column(Float, nullable=False)
+    n_events    = Column(Integer, nullable=False)   # 寄与したイベント数（gap_years>=2 の積も1行に畳む）
+    kinds       = Column(String(64))                # 寄与イベントの種別（"split" / "composite,split"・昇順）
+    computed_at = Column(DateTime, default=lambda: datetime.now(timezone.utc),
+                         onupdate=lambda: datetime.now(timezone.utc))
+
+
+def replace_split_adjustment_factors(db, rows) -> int:
+    """`split_adjustment_factors` を全置換する。戻り値は書いた行数。
+
+    **upsert ではなく全置換なのは F が減ることもあるから**——訂正報告や提出値の修正で検出
+    イベントが消えればその行の F は 1.0 へ戻るべきだが、upsert だけだと古い補正係数が残り
+    **静かに二重補正になる**。補正前後どちらの値も妥当な株価指標なのでエラーは出ない
+    （#508 と同型の沈黙する壊れ方）。
+
+    `rows` は `{edinet_code, year, factor, n_events, kinds}` の dict 列。F=1.0 の行は
+    呼び出し側で落としてから渡す（この関数は受け取った行をそのまま書く）。
+    """
+    vals = list(rows)
+    now = datetime.now(timezone.utc)
+    db.query(SplitAdjustmentFactor).delete(synchronize_session=False)
+    for i in range(0, len(vals), SPLIT_FACTOR_INSERT_CHUNK):
+        chunk = [dict(v, computed_at=now) for v in vals[i:i + SPLIT_FACTOR_INSERT_CHUNK]]
+        db.bulk_insert_mappings(SplitAdjustmentFactor, chunk)
+    return len(vals)
+
+
 # ── 9. 読み取りモデル: financial_metrics VIEW ──────────────────────────────
 # financial_records（ソース列）から軽い派生（比率・Zスコア・成長率）を「都度SQL算出」し、
 # regression_results を LEFT JOIN して予測値も合成する読み取り専用 VIEW。
@@ -2000,6 +2050,10 @@ class FinancialMetric(ViewBase):
     stock_price = Column(Float); market_cap = Column(Float)
     per = Column(Float); pbr = Column(Float); div_yield = Column(Float); dps = Column(Float)
     employees = Column(Float); issued_shares = Column(Float)
+    # 適用された分割補正係数（#655・ADR-0055）。1.0 なら無補正。per/pbr/market_cap は
+    # 既に ×F、div_yield/nc_ratio は ÷F された値が上の列に入っている＝**この列は
+    # 「補正が効いたか」を見るためのもので、消費側が重ねて掛けてはいけない**。
+    split_factor = Column(Float)
     # 軽い派生（VIEW が都度算出）
     op_margin = Column(Float); net_margin = Column(Float)
     roe = Column(Float); roa = Column(Float)
@@ -2333,8 +2387,9 @@ def _ensure_view() -> None:
     """Phase 2: 読み取り専用 VIEW を作り直す。
 
     financial_metrics（通期）と financial_metrics_interim（非通期=半期H1等・Issue #219② フェーズC）
-    の両方。両者は独立で依存関係が無いため順序は任意。regression_results は create_all 後なので
-    financial_metrics の LEFT JOIN は可能。呼ぶか否かは `init_db()` の指紋ゲートが決める。
+    の両方。両者は独立で依存関係が無いため順序は任意。regression_results と
+    split_adjustment_factors（#655・ADR-0055）は create_all 後なので financial_metrics の
+    LEFT JOIN は可能。呼ぶか否かは `init_db()` の指紋ゲートが決める。
     """
     for name, sql in _managed_views():
         _ensure_one_view(name, sql)

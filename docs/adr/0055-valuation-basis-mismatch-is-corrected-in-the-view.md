@@ -1,0 +1,247 @@
+# バリュエーション基準の不一致は VIEW で補正する（生値は書き換えない）
+
+## Status
+
+accepted（2026-09-12）。Issue [#655](https://github.com/kome-kome/financial_app/issues/655)、
+被害の測定は [#653](https://github.com/kome-kome/financial_app/issues/653) と
+[#654](https://github.com/kome-kome/financial_app/issues/654)、隣接する事象は
+[#568](https://github.com/kome-kome/financial_app/issues/568) と
+[#464](https://github.com/kome-kome/financial_app/issues/464)。
+[ADR-0053](0053-one-scale-per-price-column.md) の「スケール」の語義をそのまま保ち、
+この問題には別の語（[[バリュエーション基準の不一致]]）を立てる。
+
+## Context
+
+`collector_prices._compute_market_values` が `financial_records` へ焼き込む
+`per` / `pbr` / `market_cap` / `div_yield` は、**分子と分母が別の基準を名乗っている**。
+株価は Yahoo / J-Quants 由来で企業イベントを遡及調整済みだが、分母になる 1 株指標
+（`pl_eps` / `bs_bps` / `dps` / `issued_shares`）は提出当時の株数基準のままである。
+分割より前の年の行だけが「調整後株価 ÷ 旧基準の 1 株指標」になり、
+per / pbr / market_cap が分割比ぶん小さく、`market_cap` を分母に持つ
+`nc_ratio` / `z_nc_ratio` と `div_yield` が同じだけ大きく出る。
+
+**この壊れ方はエラーを出さない。** 保存された PER は妥当な数字であり、行数も鮮度も正常で、
+`financial_records` に「どの基準で焼いたか」を示す列が無いので事後に判別できない。
+最新行は現在株価と最新の提出値で基準が揃うため、既定の画面（最新年度のスクリーニング・
+推奨）には出ない。出るのは学習・バックテストのパネルと、**年度を指定した**画面である。
+
+#654 の測定で被害量が確定した（ローカル正本・読み取りのみ・2026-09-12）:
+
+- **1,948 行 / 451 社 = 全 annual 行の 6.41%**
+- 歪み倍率 F は p50 = **2.00** / p90 = 5.00 / max = 12.50。`F>=2` が 1,812 行、`F>=5` が 302 行。
+  逆側（併合）は `F<=0.5` が 61 行
+- 断面順位の移動（モデルが使うのは水準ではなく断面の相対位置）: `per` 中央値 27.9pt・
+  25pt 超動く行 **940**、`pbr` 24.8pt、`div_yield` 31.8pt、`nc_ratio` 13.2pt
+- 株価基準の内訳は adjusted 1,399 / unknown 549 / **raw 0**。「分割前に焼かれてそのままなので
+  実は無害」な行は 1 件も無い
+- 公式 `AdjFactor` との突合は一致率 **0.967**（agree 29 / disagree_magnitude 1・
+  陰性対照の見逃し 0 社）。スナップ（観測比を定番比へ寄せる処理）は 1 件も誤動作していない
+  （`agree_rate` と生比も許容した `agree_rate_raw_ok` が完全一致＝`agree_raw_only` が 0 件）
+
+読む側は M-1 `macro_risk_return`（`per` / `pbr` が既定特徴量）と
+M-2 `macro_gbdt` / M-6 `macro_enet`（`per` / `pbr` / `div_yield` / `nc_ratio` が既定で全部 ON）。
+M-3 `macro_dlm` は `fin_features` を持たないため影響 0。
+画面側は年度指定のスクリーニングと CSV、M-8 ネットキャッシュ分析、`/api/backtest`、
+買い推奨の `min_market_cap` フィルタ。
+
+**`scripts/preset_ic_gate.py` ではこの歪みを測れない。** `recommend_factor_premia.build_period_panel`
+のパネルは `z_roe` / `z_op_margin` / `z_revenue` / `z_cf_ratio` / `z_equity_ratio` /
+`z_eps` / `z_de_ratio` の 7 列だけで、per / pbr / div_yield / market_cap / nc_ratio を
+1 つも含まない。
+
+## Decision
+
+### 1. 補正は `financial_metrics` VIEW が当て、`financial_records` の生値は書き換えない
+
+決め手は **F が行の固有値ではない**こと。F は「その行の年より**後**に起きたイベントの
+累積積」なので、新しい分割が 1 件起きればその会社の過去全行の F が増える。
+実列へ焼き付ける方式を採ると、分割のたびに過去行を修復し直す運用が必要になり、
+**回し忘れは失敗として現れない**（#504 と同型）。VIEW で当てれば係数表の洗い替えだけで
+自動追従する。
+
+副次的な利点が 2 つある。`nc_ratio` / `z_nc_ratio` は VIEW の中で補正後 `market_cap` から
+計算されるので、別途何もしなくても整合する。そして生値が無傷なので、検出器の偽陽性が
+後から判明したときに取り消せる。
+
+### 2. 係数は専用テーブル `split_adjustment_factors` に持ち、VIEW が LEFT JOIN する
+
+`regression_results` を LEFT JOIN して `predicted_market_cap` / `gap_ratio` を載せている
+既存の書き方と同型。行は `(edinet_code, year)` の累積 F で、**F = 1.0 の行は持たない**
+（VIEW が `COALESCE(saf.factor, 1.0)` で埋めるので、歪んでいる 1,947 行だけ持てば足りる）。
+寄与したイベント数 `n_events` と種別 `kinds` を併記する＝「なぜ補正したか」を SQL で追える。
+
+`financial_records` に列を足す形は採らない。`split_factor` はその行自身の属性ではなく
+「その後に起きた別の年の企業イベント」から導かれる値で、行を書いた収集器には知りようがない。
+
+補正の向きは列ごとに逆で、**唯一の源は
+`scripts/measure_split_valuation_bias.py::COLUMN_DIRECTION`**（per / pbr / market_cap は ×F、
+div_yield / nc_ratio は ÷F）。VIEW がこれに従っているかは
+`tests/test_split_adjustment_factors.py::TestViewAppliesTheDirections` が定義 SQL を
+ソース照合する。**向きの取り違えは符号が逆の歪みを新しく作る**ので、実値の突合が
+Postgres でしかできない以上、演算子だけでも CI で縛る。
+
+**`stock_price` は補正しない。** `COLUMN_DIRECTION` に入っておらず、調整済み株価そのものとして
+`sector_ols` の目的変数や画面が読む値である。その結果、補正された行では
+`per <> stock_price / pl_eps` になる——**意図した非対称**で、GOTCHAS へ記す。
+
+### 3. 検出アルゴリズムは #654 の測定器の純関数を import して再利用する
+
+`detect_events` / `cumulative_factors` をコピーしない。あちらの純関数ブロックは
+`database` / `collector_prices` / `httpx` をトップレベルで import しないことを
+テストが固定しており、そのまま使える。`kinds` / `n_events` だけは寄与集合を
+`collector_prices` 側で引き直すため、**寄与集合の積が `factor` に一致すること**を
+テストで照合する（`e.year > row.year` の述語が正本から乖離したらそこで落ちる）。
+
+### 4. 全種別を補正し、`unsnapped` だけ外す
+
+検出 491 イベントの内訳は split 394 / composite 77 / reverse 16 / unsnapped 4。
+**偽陽性（深い割引での増資を分割と見間違える）は composite 側に残る**。既知の 2 例
+（E01121 日本板硝子・株数 ×1.5545・純資産 +30% ／ E05716 地域新聞社・×1.4013・+116%）は
+`bs_bps` 逆比とのずれが 8.2% / 7.4% で許容 15% の内側に入る。
+
+それでも補正する側を採るのは、**誤差の種類が非対称**だから。未補正の歪みは「後に分割した社
+だけが一律に割安に見える」系統誤差で、モデルはこれを規則として学習する。誤補正は増資の
+深さ次第のランダム誤差に近い。系統誤差 1,948 行を消してランダム誤差を数十行入れるのは、
+断面順位を使うモデルにとって明確な改善である。`kinds` を持つので、あとから composite だけ
+外す変更は 1 行で済む。
+
+**形（比の値）だけでは本物を選べない。** 観測比 1.5545 は定番比 1.5 から対数距離で 3.6% しか
+離れておらず、本物の 1:1.5 分割（canonical_hist で 20 件）と見分けがつかない。
+ADR-0053 が往復段差で確定させた教訓と同型で、分離には独立した第 2 の信号が要る
+（純資産総額の前年比が候補。分割は純資産を変えないが増資は増やす）。これは #654 の測定器の
+アルゴリズム変更になるため [#657](https://github.com/kome-kome/financial_app/issues/657) へ切り出した。
+
+なお「偽陽性率およそ 5%」は**測定で裏が取れた数字ではない**。`verify-sample` の集計は
+`agree` 29 / `disagree_magnitude` 1 のみで `no_official_event` が 0 件であり、
+上の 2 社は契約窓（2024-06-20〜2026-06-20）の外でサンプルに入っていない。手で観察した概算である。
+
+### 5. 係数の洗い替えは収集パイプラインの内側（Phase 4 の直後）に置く
+
+`_pipeline_incremental.py` の `update_market_data_from_history(db4)` の直後、および
+`_pipeline_gh.py` の `point_in_time=True` 版の直後。**入力の近さで決めた**——係数は
+`issued_shares` と `bs_bps` から復元するので、直前の工程がそれを更新した直後が唯一ずれない
+位置である。独立ステップへ切り出すと「収集は成功したが係数だけ古い」状態が作れてしまう。
+入口を 2 本とも揃えるのは、手動の全件実行のあとだけ係数が古くなるのを防ぐため。
+
+**例外は握らない**（直前の株価反映と同じ扱い）。この工程の自己検証だけが係数表の固着を
+検知する仕組みなので、黙って続けると #504 と同型の穴になる。検出 0 件のときは
+**既存の表に触らずに失敗する**——全置換の順序で「消してから失敗」にすると、補正が静かに
+全部外れた VIEW が残り、しかもどの値も妥当な株価指標なのでエラーとしては現れない。
+
+`batch_freshness.PRODUCERS` へは登録しない。あの表のエントリはすべて月次バッチの producer で、
+`PRODUCER_COVERAGE` は heavy プラグイン名をキーに持つ dict のため、この工程は対象外である。
+`sector_ols` / `macro_enet` が `nightly_scores.VerificationError` で「execute は成功したが
+永続化を確認できなかった」をその場で失敗にしているのと同じ考え方を採る。
+
+### 6. `plugins/utils.py::PREPROCESS_VERSION` は上げない
+
+ADR-0039 が守るのは `recommend_factor_premia` の `mean_b` の単位だが、その推定に使う
+`build_period_panel` のパネルは z_* 7 列だけで per / pbr / div_yield / market_cap / nc_ratio を
+含まない（上の Context）。**永続化済みの重みの意味は変わらない。**
+この判断を明記しておくのは、上げ忘れと区別がつかないため。
+
+永続化された μ̂ の陳腐化も実害にならない。既定の μ 出所である M-6 `macro_enet` は
+`nightly_scores.HEAVY_AUTOMATION` で毎晩の `run_nightly.py` に登録されており、
+翌晩には補正後のデータで学習し直した μ̂ に入れ替わる。
+
+### 7. rank-IC の変化は採否の条件にしない（リーク量の測定として読む）
+
+**この歪みは単なるノイズではなく、未来情報のリーク（先読み）である可能性が高い。**
+2019 年断面のある行の PER が小さいのは「2019 年時点で割安だった」からではなく
+「2019 年より後に分割が起きた」からで、分割を行うのは株価が上がって単位金額が大きく
+なりすぎた会社である。つまり歪んだ PER は「この先この会社の株価は上がる」という未来の
+事実を過去の断面へ持ち込んでいる。併合は逆向きに同じことをする。
+
+この読みが正しければ、**補正すると rank-IC は下がり、下がるのが正しい**。
+ADR-0028 の昇格ゲート（成績が上がったものを採用する）をそのまま当てると、
+リークを残す判断になる。
+
+名乗るだけでは証拠にならないので、直接証拠を 1 つ取る——補正量 F とラベル（52 週先
+リターン）の関係を、**分割が起きるまでの年数で層別**して並べる。リークなら「直近の分割ほど
+強く、遠い分割ほど弱い」という単調な形が出るはずで、出なければこの読み自体を捨てる。
+測定は `python -m scripts.model_comparison_run --models macro_gbdt,macro_enet`
+（`oof_backtest` は再学習も追加の株価取得もしない純後処理でコストはほぼゼロ・重いのは
+上流の walk-forward 学習）。M-1 は strict（`macro_nan_ok=False`）でパネルを M-2 / M-6 と
+共有できず同一共通域の比較が成立しないため（ADR-0045 / ADR-0050 と同じ制約）参考値として別に測る。
+
+## Consequences
+
+- 過去断面の per / pbr / div_yield / market_cap / nc_ratio / z_nc_ratio が基準の揃った値に
+  なる。恩恵を受けるのは M-1 / M-2 / M-6 の学習パネル、年度指定のスクリーニングと CSV、
+  M-8、`/api/backtest`、`min_market_cap` フィルタ。
+- **`scripts/measure_split_valuation_bias detect` は回帰テストにならない。** 測定器は
+  `financial_records` の生値を読むので、VIEW 補正後も同じ行数を報告し続ける。
+  #655 本文の「測定器がそのまま回帰テストになる」は実列書き換え方式を前提にした記述で、
+  この方式には当たらない。代わりに `financial_metrics.per = ROUND(financial_records.per ×
+  split_factor, 2)` の突合（2026-09-12 実測で per / pbr / market_cap / div_yield とも
+  **不一致 0 行**）と、**E01777 ソニーG の 2024 年 per 3.29 → 16.45**（F=5.0・#653 の
+  「実際は 17〜20 倍台」と整合し、翌期の 20.30 と連続する）で受け入れ判定する。
+  **突合の join は `fm.id = fr.id` で取る**——`(edinet_code, year)` で結ぶと、同じ year に
+  annual 行が 2 本ある社（会計期間変更・実測 58 組）で別の行と比べてしまい、F=1.0 の行が
+  「不一致」として 56 件出る。
+- **書いた行数は 1,947（451 社）で、#655 本文の 1,948 と 1 行ずれる。** 同じ year に annual 行が
+  2 本ある社でペアの向きが入力順に依存するためで、こちらは `ORDER BY edinet_code, year,
+  period_end` まで指定して**再現性を取る側**を選んだ（測定器の `_SQL_ANNUAL` は
+  `edinet_code, year` まで）。
+- 補正された行では `per <> stock_price / pl_eps` になる（決定 2 の意図した非対称）。
+- **H1（半期）行は範囲外。** `financial_metrics_interim` VIEW は「H1 行は市場データが未収集の
+  ため nc_ratio 等の市場依存派生は NULL になる（想定内）」であり、値が入っていないものは
+  歪みようがない。ただし `point_in_time=True` を回すと H1 行にも株価が焼かれて歪む
+  （GOTCHAS へ記載）。
+- 新テーブルと VIEW の変更はどちらも ADR-0048 の指紋へ効くので、`init_db()` が自動で移行する。
+  手書きの移行 SQL は持たない。
+- 偽陽性がおよそ数十行の誤補正として残る。`kinds` と `split_factor` が残るので、
+  独立した第 2 の信号（純資産総額の前年比）で分離する改良は後から差分で入れられる。
+- **検出器は `issued_shares` が分割に追随しない社を取りこぼす（2026-09-12 に実測で判明・
+  #655 の作業中に発見）。** 候補ゲートが `issued_shares` の年次比なので、`bs_bps` と `pl_eps` は
+  分割を反映しているのに株数が据え置きの社では**候補にすら上がらない**。
+  **#653 の看板例だった E03137 しまむらがこれ**——`shares ×1.0000` のまま
+  `bps ×1.8670 / eps ×1.8971`（→1:2）と `bps ×2.8965 / eps ×2.8159`（→1:3・#653 が記録した
+  2026-02 の分割）で、2 件とも F=1.0 のまま残る。規模は **161 行 / 156 社**（検出できているのは
+  451 社）。必要条件「`bs_bps` が 1.4 倍以上下がったのに株数が動かない」だけなら
+  1,117 行 / 826 社だが、減損・大幅赤字・タグ基準の変更が混ざる（実測 E39487 は bps ×129.75）。
+  上の数字は `pl_eps` が同じ倍率で動いたこと（許容 15%）と定番比へ寄ることを交差させて絞った値で、
+  推定比の分布（×2.0 が 56・×2.5 が 29・×1.5 が 24・×3.0 が 23・×4.0 が 16・×5.0 が 11）は
+  検出済みイベントの分布と同じ形をしている。**`per` の比は第 3 の検証に使えない**
+  （株価の値動きが混ざる。実測 E00313 は snap ×3.0 に対し per ×8.05）。
+  **この PR では直さない**——検出経路を足すのは #654 の測定器のアルゴリズム変更であり、
+  公式 `AdjFactor` との突合で裏を取ってからでないと 161 行ぶんの未検証の補正を VIEW へ流すことに
+  なる。[#656](https://github.com/kome-kome/financial_app/issues/656) へ切り出した。
+- `sector_ols` は per-share 財務金額を説明変数・調整済み株価を目的変数にしており**同型の
+  歪みを持つ**が、現在は `latest_year_subq` で最新年度だけを回すため `gap_ratio` へ届いて
+  いない。#626 が過去年度への遡及計算を予定しており、そのとき同じ問題が出る。
+
+## Considered Options
+
+### 案A: valuation 用に未調整株価を別に持つ
+
+**既存行に対して原理的に実行できない。** 2018 年まで遡った未調整株価の入手手段が無い——
+J-Quants の未調整終値 `C` は契約窓 2 年ぶんのみ（実測 2024-06-20〜2026-06-20）、
+Yahoo は調整済み系列しか配信せず、`stock_price_daily` / `stock_price_weekly` は
+ADR-0053 の決定により調整済み単一スケールのみを保持する。
+
+効くのは今後焼く行だけだが、毎晩焼かれるのは `point_in_time=False` 経路の最新 annual 行
+のみで、そこは元々基準が揃っていて歪まない。**列を増やす費用を払って効果がゼロ。**
+
+### 案B': `financial_records` の実列を一括 UPDATE する
+
+画面も学習も一度に直り、読み出し時の計算コストも無い。だが決定 1 のとおり F が陳腐化する
+ので修復を回し続ける運用が要り、回し忘れは失敗として現れない。加えて偽陽性が生値を
+上書きしてしまう（取り消せない）。
+
+### 案B'': 1 株指標（`pl_eps` / `bs_bps`）の側を遡及調整する
+
+#653 が案B として挙げた形だが、`pl_eps` / `bs_bps` は `sector_ols` の説明変数・`z_eps` /
+`eps_growth` の元であり、XBRL の提出値そのものである。書き換えると影響範囲が
+バリュエーション列の外へ広がる。歪んでいるのは比であって提出値ではない。
+
+### 案C: 学習パネル構築側（`macro_snapshots.load_data`）だけで補正する
+
+変更範囲は最小だが、年度指定のスクリーニング・M-8・`/api/backtest` は歪んだまま残り、
+同じ銘柄・同じ年度について画面と学習で違う PER が出る二重帳簿になる。
+
+### 案D: 現状維持（#653 の案C）
+
+F の中央値がちょうど 2.00 で、断面順位が 25pt 超動く行が per だけで 940 ある。
+#466 の「説明できない乖離は直さない」とは違い、**原因は説明でき、公式値との突合で
+一致率 0.967 まで裏が取れている**。採る根拠が無い。
