@@ -397,6 +397,52 @@ class TestCollectJQuantsHistory:
         assert result["scale_mismatch"] == 1
         assert result["scale_mismatch_companies"] == ["E00001"]
 
+    def _run_spinoff_row(self, db, make_company, day: date, close: float):
+        """登録済みスピンオフ社 E02086（6676・権利落ち 2024-09-27・#568）の1行を流す。"""
+        db.add(make_company(edinet_code="E02086", sec_code="6676", name="株式会社バッファロー"))
+        db.commit()
+        # 公式はスピンオフを調整しない＝`AdjC == C`（#620 の選別を素通りする形）
+        jquants_row = {
+            "Code": "66760", "Date": day.isoformat(),
+            "O": close, "H": close, "L": close, "C": close, "Vo": 1000.0,
+            "AdjO": close, "AdjH": close, "AdjL": close, "AdjC": close, "AdjVo": 1000.0,
+            "AdjFactor": 1.0,
+        }
+        with patch("collector_prices._jquants_fetch_date",
+                   new_callable=AsyncMock, return_value=[jquants_row]):
+            with patch("collector_prices.record_prices_batch", return_value=1) as mock_batch:
+                with patch("collector_prices.trim_daily", return_value=0):
+                    with patch.dict(os.environ, {"JQUANTS_API_KEY": "test-key"}):
+                        with patch("collector_prices.JQUANTS_RATE_SLEEP", 0):
+                            result = asyncio.run(
+                                collect_stock_price_history_jquants(
+                                    db, date_from=day, date_to=day,
+                                )
+                            )
+        return result, mock_batch
+
+    def test_skips_rows_before_registered_spinoff_ex_date(self, db, make_company):
+        """登録済みスピンオフの権利落ち日より前は**書かない**（#651）。
+
+        公式 `AdjC` はスピンオフを調整せず `AdjC == C` のままなので #620 の選別を素通りするが、
+        DB（Yahoo）は権利落ち前へ係数を掛けたスケールで持つ＝書けば1列に2つのスケールが入る。
+        3820円は権利付最終日 2024-09-26 の終値（登録表の根拠）。
+        """
+        result, mock_batch = self._run_spinoff_row(db, make_company, date(2024, 9, 26), 3820.0)
+
+        mock_batch.assert_not_called()
+        assert result["spinoff_unadjusted"] == 1
+        assert result["spinoff_unadjusted_companies"] == ["E02086"]
+        assert result["scale_mismatch"] == 0   # 分割の選別とは混ぜない
+
+    def test_writes_registered_spinoff_rows_on_or_after_ex_date(self, db, make_company):
+        """権利落ち日以降は公式と Yahoo のスケールが一致する＝従来どおり書く（#651）。"""
+        result, mock_batch = self._run_spinoff_row(db, make_company, date(2024, 10, 4), 1140.0)
+
+        mock_batch.assert_called_once()
+        assert result["spinoff_unadjusted"] == 0
+        assert result["spinoff_unadjusted_companies"] == []
+
     def test_cancel_check_stops_jquants(self, db, make_company):
         """cancel_check が True を返すと処理が中断され cancelled: True が返る。"""
         self._add_company(db, make_company)

@@ -205,6 +205,10 @@ def rounding_tolerance(a: float, b: float) -> float:
 # やめる・未調整値で取り直す等）再び段差として検出される（ADR-0053 の「名簿」にしない）。
 # 係数は丸めた小数を書き写さず、根拠の2つの値から式で持つ。
 #
+# 収集経路（J-Quants）はこの表を**書き込みを止める向きにだけ**使う（#651・`before_spinoff_ex_date`）。
+# 係数を掛けて書かないのは、登録の誤りを本番の株価へ入れないため——止める向きなら、誤登録で
+# 起きるのは「公式値で上書きされない行が残る」ことだけで、値そのものは壊れない。
+#
 # {edinet_code: ((権利落ち日, 係数, 根拠), ...)}
 SPINOFF_ADJUSTMENTS: dict = {
     # メルコHD（現バッファロー・6676）→ シマダヤ（250A）を 1:1 で分配。権利付最終日 2024-09-26
@@ -226,6 +230,17 @@ def spinoff_factor(edinet_code: str, trade_date: str) -> float:
         if str(trade_date)[:10] < ex_date:
             f *= factor
     return f
+
+
+def before_spinoff_ex_date(edinet_code: str, trade_date: str) -> bool:
+    """登録済みスピンオフの権利落ち日**より前**の日付か（#651）。登録が無ければ False。
+
+    この日付の公式 `AdjC` はスピンオフを調整しておらず `AdjC == C` のままなので、#620 の
+    「`AdjC != C` を書かない」選別を素通りする。一方 DB（Yahoo）は係数を掛けたスケールで
+    持つ＝書けば同じ列に2つのスケールが入る。J-Quants の取得経路はこの行を書かない。
+    """
+    d = str(trade_date)[:10]
+    return any(d < ex_date for ex_date, _, _ in SPINOFF_ADJUSTMENTS.get(edinet_code, ()))
 
 
 def force_utf8_stdout() -> None:

@@ -365,6 +365,11 @@ async def main(years_back: int, collect_only: bool = False,
                     # 同じ列へ Yahoo と別スケールを混ぜないための選別で、異常ではない。
                     log(f"  J-Quants スケール不一致で不採用: {result['scale_mismatch']}行"
                         f"（{len(result.get('scale_mismatch_companies') or [])}社）")
+                if result.get("spinoff_unadjusted"):
+                    # 登録済みスピンオフの権利落ち前として**書かなかった**行（#651）。
+                    # 2年窓の手動収集では登録済みの社の権利落ち前が必ず入りうる
+                    log(f"  J-Quants スピンオフ権利落ち前で不採用: {result['spinoff_unadjusted']}行"
+                        f"（{len(result.get('spinoff_unadjusted_companies') or [])}社）")
                 if result.get("forbidden"):
                     # 403＝契約失効／プラン対象外／URL 不在。**境界ではない**（境界は 400）・#462
                     log(f"  J-Quants 403 でスキップ: {result['forbidden']}日"

@@ -559,12 +559,16 @@ async def collect_stock_price_history_jquants(
     #   0 以外は異常ではなく「Yahoo と JPX で調整の中身が違う社が居る」という平常の観測。
     # scale_unknown: `C` が無く突き合わせられなかった行数。実 API は必ず返すので、
     #   ここが伸びるのは API 仕様の変化＝**別の打ち手が要る**ため mismatch と分けて数える。
+    # spinoff_unadjusted: 登録済みスピンオフの権利落ち日より前の日付として**書かずに捨てた**
+    #   行数（#651）。`AdjC == C` のまま scale_mismatch を素通りする行なので、別に数える。
     fetch_stats = {"forbidden": 0, "no_subscription": 0, "aborted_days": 0,
-                   "out_of_coverage": 0, "scale_mismatch": 0, "scale_unknown": 0}
+                   "out_of_coverage": 0, "scale_mismatch": 0, "scale_unknown": 0,
+                   "spinoff_unadjusted": 0}
     # 捨てた社（行ではなく社で数えたいのでここに溜める）。件数はログと戻り値に必ず出す——
     # 弾いた社は「公式値による是正の機会を失う」側に倒れるので、黙って捨てると
     # 「なぜこの社だけ古い誤りが残るのか」を後から追えない。
     scale_mismatch_ecs: set = set()
+    spinoff_unadjusted_ecs: set = set()
 
     async def _jquants_batch_gen(session):
         completed = 0
@@ -697,6 +701,15 @@ async def collect_stock_price_history_jquants(
                     fetch_stats["scale_mismatch"] += 1
                     scale_mismatch_ecs.add(edinet_code)
                     continue
+                # 登録済みスピンオフの権利落ち日より前の日付も**書かない**（#651）。公式は
+                # スピンオフを調整しない（`AdjC == C`）ので上の選別を素通りするが、Yahoo は
+                # 権利落ち日より前へ係数を掛けている＝書けば同じ列に2つのスケールが入る。
+                # **係数を掛けて書かない**のは、登録の誤りを本番の株価へ入れないため。
+                # 手動収集（`/api/collect/jquants/start`・`_pipeline_gh.py`）も同じ生成器を通る。
+                if before_spinoff_ex_date(edinet_code, q.get("Date", "")):
+                    fetch_stats["spinoff_unadjusted"] += 1
+                    spinoff_unadjusted_ecs.add(edinet_code)
+                    continue
                 try:
                     records.append({
                         "edinet_code": edinet_code,
@@ -757,6 +770,14 @@ async def collect_stock_price_history_jquants(
             f"（{len(scale_mismatch_ecs)}社）を書かずにスキップ（例: {_sample}）。"
             "Yahoo と調整の中身が違う社＝同じ列へ別スケールを書かないための選別（#620）"
         )
+    if fetch_stats["spinoff_unadjusted"]:
+        # 平常の観測（登録済みの社の権利落ち前が取得範囲に入っただけ）。#651
+        _sample = ", ".join(sorted(spinoff_unadjusted_ecs)[:5])
+        log.info(
+            f"J-Quants: 登録済みスピンオフの権利落ち前 {fetch_stats['spinoff_unadjusted']}行"
+            f"（{len(spinoff_unadjusted_ecs)}社）を書かずにスキップ（例: {_sample}）。"
+            "公式 AdjC はスピンオフを調整しない＝Yahoo のスケールと食い違うための選別（#651）"
+        )
     if fetch_stats["scale_unknown"]:
         # 実 API は `C` を必ず返す。ここが伸びるのは応答仕様が変わった合図で、
         # 放っておくと catchup が**静かに何も書かなくなる**（#620）。
@@ -806,7 +827,9 @@ async def collect_stock_price_history_jquants(
                 "out_of_coverage": fetch_stats["out_of_coverage"],
                 "scale_mismatch": fetch_stats["scale_mismatch"],
                 "scale_unknown": fetch_stats["scale_unknown"],
-                "scale_mismatch_companies": sorted(scale_mismatch_ecs)}
+                "scale_mismatch_companies": sorted(scale_mismatch_ecs),
+                "spinoff_unadjusted": fetch_stats["spinoff_unadjusted"],
+                "spinoff_unadjusted_companies": sorted(spinoff_unadjusted_ecs)}
     if on_progress:
         on_progress(total, total, f"[完了] {total}日処理・{upserted_total}件追加/更新")
     return {"cancelled": False, "upserted": upserted_total, "days": total,
@@ -816,7 +839,9 @@ async def collect_stock_price_history_jquants(
             "out_of_coverage": fetch_stats["out_of_coverage"],
             "scale_mismatch": fetch_stats["scale_mismatch"],
             "scale_unknown": fetch_stats["scale_unknown"],
-            "scale_mismatch_companies": sorted(scale_mismatch_ecs)}
+            "scale_mismatch_companies": sorted(scale_mismatch_ecs),
+            "spinoff_unadjusted": fetch_stats["spinoff_unadjusted"],
+            "spinoff_unadjusted_companies": sorted(spinoff_unadjusted_ecs)}
 
 
 def _update_market_data_latest(db) -> int:

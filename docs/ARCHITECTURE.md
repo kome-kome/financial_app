@@ -618,7 +618,13 @@ Yahoo gap-fill が直近セッションを、J-Quants catchup が `today-90 〜 
 |---|---|---|
 | `AdjC != C` | `scale_mismatch`（行）＋ `scale_mismatch_companies`（社） | catchup ログ・戻り値 |
 | `C` が無い | `scale_unknown`（行） | WARNING（API 仕様変化の合図） |
+| 登録済みスピンオフの権利落ち前（#651） | `spinoff_unadjusted`（行）＋ `spinoff_unadjusted_companies`（社） | catchup ログ・戻り値 |
 | 往復段差 | 上の社と交差した結果 | Phase 4 末尾の1行 |
+
+スピンオフの行は `AdjC == C` のまま上の選別を素通りするので、`collector_utils.SPINOFF_ADJUSTMENTS`
+の登録から `before_spinoff_ex_date` で判定して書かない（係数を掛けて書かない＝登録の誤りを本番値へ
+入れない・ADR-0053 追記）。この生成器は手動の J-Quants 収集（`/api/collect/jquants/start`・
+`_pipeline_gh.py --finalize-only`）も通るので、選別は毎晩の catchup に限らず効く。
 
 往復段差の検知（`detect_roundtrip_scale_bands`）は段差の抽出を **SQL の `LAG` で DB 側に寄せる**
 （全社の日次を素で引くと約68万行を毎晩転送することになる）。**形だけでは本物を選べない**ので、

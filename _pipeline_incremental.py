@@ -169,6 +169,11 @@ async def main():
                 + (f"・スケール不一致で不採用 {catchup_result['scale_mismatch']}行"
                    f"（{len(catchup_result.get('scale_mismatch_companies') or [])}社）"
                    if catchup_result.get("scale_mismatch") else "")
+                # 登録済みスピンオフの権利落ち前として**書かなかった**行（#651）。
+                # `AdjC == C` のまま上の選別を素通りする行なので別に数える
+                + (f"・スピンオフ権利落ち前で不採用 {catchup_result['spinoff_unadjusted']}行"
+                   f"（{len(catchup_result.get('spinoff_unadjusted_companies') or [])}社）"
+                   if catchup_result.get("spinoff_unadjusted") else "")
                 # 403 は契約失効／プラン対象外／URL 不在。**カバレッジ境界ではない**（#462）
                 + ("（全日403＝要確認）" if catchup_result.get("all_forbidden") else ""))
         except Exception as e:
