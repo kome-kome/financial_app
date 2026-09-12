@@ -25,6 +25,7 @@ from collector_prices import (            # noqa: E402
 from collector_utils import (             # noqa: E402
     SPINOFF_ADJUSTMENTS,
     JQuantsOutOfCoverage,
+    before_spinoff_ex_date,
     is_common_stock_code,
     spinoff_factor,
 )
@@ -263,6 +264,13 @@ class TestSpinoffAdjustment:
 
     def test_unregistered_company_is_untouched(self):
         assert spinoff_factor("E00001", "2020-01-10") == 1.0
+
+    def test_before_ex_date_predicate(self):
+        """収集経路が書かない日付の判定（#651）。権利落ち当日は Yahoo も係数を掛けない＝書いてよい。"""
+        assert before_spinoff_ex_date(self.EC, "2024-09-26") is True
+        assert before_spinoff_ex_date(self.EC, "2024-09-27") is False
+        assert before_spinoff_ex_date(self.EC, "2026-06-12") is False
+        assert before_spinoff_ex_date("E00001", "2020-01-10") is False
 
     def test_factor_matches_the_ratio_measured_in_466(self):
         """係数の逆数は #466 の実測（公式 / DB = 1.854369）と一致する＝根拠の2値の書き誤りを縛る。"""
