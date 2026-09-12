@@ -192,6 +192,68 @@ class TestRebuild:
             rebuild_split_adjustment_factors(db)
 
 
+def _seed_bps_path_company(db, make_fin, ec="E00004"):
+    """株数が分割に追随しない社（#656）。E03137 しまむらの形。
+
+    2022 に 1:2 分割したが `issued_shares` は据え置きで、`bs_bps` と `pl_eps` だけが半分に
+    なる。第1経路は候補にすら上げられない＝第2経路だけが拾える。
+    """
+    spec = [
+        (2020, 1000.0, 2000.0, 200.0),
+        (2021, 1000.0, 2100.0, 210.0),
+        (2022, 1000.0, 1050.0, 105.0),   # bps_ratio=2.0 / eps_ratio=2.0 → split
+        (2023, 1000.0, 1100.0, 110.0),
+    ]
+    for year, shares, bps, eps in spec:
+        db.add(make_fin(edinet_code=ec, year=year, period_end=date(year, 3, 31),
+                        issued_shares=shares, bs_bps=bps, pl_eps=eps, dps=20.0,
+                        stock_price=1000.0, per=10.0, pbr=0.5,
+                        div_yield=2.0, market_cap=5000.0))
+    db.commit()
+
+
+class TestBpsPathReachesTheTable:
+    """第2経路（#656）が係数表まで届くこと。既定の ON/OFF は検出器側が唯一の源。"""
+
+    def test_default_follows_the_detector(self, db, make_fin):
+        """呼び出し側は既定を**書き写さない**。写すと2箇所が乖離する。"""
+        _seed_bps_path_company(db, make_fin)
+        _seed_split_company(db, make_fin)      # 検出0件で失敗しないよう第1経路の社も置く
+
+        rebuild_split_adjustment_factors(db)
+
+        got = db.query(SplitAdjustmentFactor).filter_by(edinet_code="E00004").count()
+        assert (got > 0) is M.DEFAULT_BPS_PATH
+
+    def test_enabled_writes_the_factor_and_kinds(self, db, make_fin):
+        _seed_bps_path_company(db, make_fin)
+        rebuild_split_adjustment_factors(db, bps_path=True)
+
+        got = {(r.year, r.factor, r.n_events, r.kinds)
+               for r in db.query(SplitAdjustmentFactor).filter_by(edinet_code="E00004").all()}
+        assert got == {(2020, 2.0, 1, "split"), (2021, 2.0, 1, "split")}
+
+    def test_disabled_leaves_the_company_alone(self, db, make_fin):
+        _seed_bps_path_company(db, make_fin)
+        _seed_split_company(db, make_fin)
+
+        rebuild_split_adjustment_factors(db, bps_path=False)
+
+        assert db.query(SplitAdjustmentFactor).filter_by(edinet_code="E00004").count() == 0
+        # 第1経路の社は影響を受けない
+        assert {(r.year, r.factor) for r in db.query(SplitAdjustmentFactor)
+                .filter_by(edinet_code="E00001").all()} == {(2019, 2.0), (2020, 2.0)}
+
+    def test_both_paths_do_not_square_the_factor(self, db, make_fin):
+        """株数も bps も動く普通の分割は 1 件へ畳む。畳み損ねると F が 2.0 -> 4.0 になる。"""
+        _seed_split_company(db, make_fin)
+        rebuild_split_adjustment_factors(db, bps_path=True)
+
+        got = {(r.year, r.factor, r.n_events)
+               for r in db.query(SplitAdjustmentFactor).filter_by(edinet_code="E00001").all()}
+        assert got == {(2019, 2.0, 1), (2020, 2.0, 1)}
+
+
 class TestViewAppliesTheDirections:
     """VIEW 定義 SQL の補正の向きを照合する。
 

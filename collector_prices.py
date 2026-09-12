@@ -1075,7 +1075,7 @@ def update_market_data_from_history(db, point_in_time: bool = False) -> int:
         return _update_market_data_point_in_time(db)
 
 
-def rebuild_split_adjustment_factors(db) -> int:
+def rebuild_split_adjustment_factors(db, *, bps_path: Optional[bool] = None) -> int:
     """`split_adjustment_factors` を作り直す。戻り値は書いた行数（F≠1.0 の行数）。
 
     バリュエーション基準の不一致（#655・ADR-0055）を `financial_metrics` VIEW が補正する
@@ -1083,9 +1083,16 @@ def rebuild_split_adjustment_factors(db) -> int:
     「その行の年より後に起きたイベントの累積積」なので、新しい分割が1件起きればその会社の
     過去全行の値が変わる。焼き付けた値は必ず陳腐化する。
 
-    入力は `financial_records.issued_shares` と `bs_bps`（ともに XBRL 由来）だけで、
-    J-Quants の契約窓（2年）に依存しない＝2018年まで遡って復元できる。この復元は #654 が
-    公式 `AdjFactor` と突合して**一致率 0.967（29/30・陰性対照の見逃し 0 社）**を確認した。
+    入力は `financial_records.issued_shares` と `bs_bps` と `pl_eps`（いずれも XBRL 由来）
+    だけで、J-Quants の契約窓（2年）に依存しない＝2018年まで遡って復元できる。この復元は
+    #654 が公式 `AdjFactor` と突合して**一致率 0.967（29/30・陰性対照の見逃し 0 社）**を
+    確認した。
+
+    `bps_path` は株数が追随しない社を拾う第2経路（#656）の ON/OFF。**None なら検出器側の
+    既定（`measure_split_valuation_bias.DEFAULT_BPS_PATH`）に従う**——呼び出し側が既定を
+    書き写すと2箇所が乖離する。明示するのは前後を測り比べるときだけである
+    （`scripts/measure_split_bias_oof.py`）。**2026-09-12 時点の既定は False**で、理由は
+    一致率が 0.367 しか出なかったこと（倍率が系統的に小さく出る）。根拠は検出器側の定数へ。
 
     **「入力が無い」と「入力はあるのに作れない」を分ける**。annual 行が0件ならスキップして
     0 を返す（初回ブートストラップ前・テストのスタブ DB）。行はあるのに係数が1件も作れない
@@ -1122,7 +1129,8 @@ def rebuild_split_adjustment_factors(db) -> int:
         log.warning("分割補正係数: annual 行が0件のためスキップした（係数表は温存）")
         return 0
 
-    events, stats = detect_events(rows)
+    kw = {} if bps_path is None else {"bps_path": bps_path}
+    events, stats = detect_events(rows, **kw)
     # use_canonical=True（既定）＝定番比へ寄せられなかった `unsnapped` を積から外す。
     factors = cumulative_factors(rows, events)
 
@@ -1153,9 +1161,9 @@ def rebuild_split_adjustment_factors(db) -> int:
 
     n = replace_split_adjustment_factors(db, out)
     db.commit()
-    log.info("分割補正係数: %d 行 / %d 社 を全置換（イベント %d 件・種別 %s）",
+    log.info("分割補正係数: %d 行 / %d 社 を全置換（イベント %d 件・種別 %s・経路 %s）",
              n, len({r["edinet_code"] for r in out}), stats.get("n_events"),
-             stats.get("by_kind"))
+             stats.get("by_kind"), stats.get("n_events_by_source"))
     return n
 
 
