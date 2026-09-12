@@ -349,7 +349,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                     help="local=ローカルに世代を作るだけ（既定） / storage=Supabase Storage へ push")
     ap.add_argument("--apply", action="store_true", help="実際に実行する（既定はドライラン）")
     ap.add_argument("--list", action="store_true", help="置いてある世代を一覧して終了")
-    ap.add_argument("--tables", help="対象表をカンマ区切りで限定（既定は全17表）")
+    ap.add_argument("--tables", help="対象表をカンマ区切りで限定（既定はミラー範囲の全表＝`mirror_common.mirror_tables()`）")
     ap.add_argument("--keep-recent", type=int, default=KEEP_RECENT)
     ap.add_argument("--keep-monthly", type=int, default=KEEP_MONTHLY)
     args = ap.parse_args(argv)

@@ -27,6 +27,7 @@ from database import (
     record_prices_batch, trim_daily, latest_prices,
     upsert_macro_batch, sync_active_status, db_timeouts,
     get_setting, upsert_setting, KEY_SCALE_BAND_VERDICTS,
+    replace_split_adjustment_factors,
 )
 
 from collector_utils import *
@@ -1072,6 +1073,90 @@ def update_market_data_from_history(db, point_in_time: bool = False) -> int:
         if not point_in_time:
             return _update_market_data_latest(db)
         return _update_market_data_point_in_time(db)
+
+
+def rebuild_split_adjustment_factors(db) -> int:
+    """`split_adjustment_factors` を作り直す。戻り値は書いた行数（F≠1.0 の行数）。
+
+    バリュエーション基準の不一致（#655・ADR-0055）を `financial_metrics` VIEW が補正する
+    ための係数表を全置換する。**毎晩作り直すのは F が行の固有値ではないから**——F は
+    「その行の年より後に起きたイベントの累積積」なので、新しい分割が1件起きればその会社の
+    過去全行の値が変わる。焼き付けた値は必ず陳腐化する。
+
+    入力は `financial_records.issued_shares` と `bs_bps`（ともに XBRL 由来）だけで、
+    J-Quants の契約窓（2年）に依存しない＝2018年まで遡って復元できる。この復元は #654 が
+    公式 `AdjFactor` と突合して**一致率 0.967（29/30・陰性対照の見逃し 0 社）**を確認した。
+
+    **「入力が無い」と「入力はあるのに作れない」を分ける**。annual 行が0件ならスキップして
+    0 を返す（初回ブートストラップ前・テストのスタブ DB）。行はあるのに係数が1件も作れない
+    のは検出が壊れた側なので `RuntimeError` を上げる。**どちらの場合も既存の表には触らない**
+    ——全置換の順序で「消してから失敗」にすると、補正が静かに全部外れた VIEW が残る
+    （どの値も妥当な株価指標なのでエラーは出ない）。
+    """
+    # 検出アルゴリズムは scripts/measure_split_valuation_bias.py の純関数が唯一の源で、
+    # ここへ写さない。遅延 import なのは収集モジュールが scripts/ へ静的に依存しないため
+    # （あちらの純関数ブロックは database / httpx を引かないことをテストが固定している）。
+    from scripts.measure_split_valuation_bias import (
+        AnnualRow, detect_events, cumulative_factors,
+    )
+
+    # **ORDER BY を省かない。** `detect_events` は `sorted(rs, key=lambda r: r.year)` で並べるが
+    # Python のソートは安定なので、**同じ year に annual 行が2本ある社**（会計期間変更。実測
+    # 30,379 行に対し (ec, year) は 30,321＝58 組）ではペアの向きが入力順で決まる。
+    # 無指定だと run ごとに検出結果が 1〜数件ぶれる。`period_end` まで入れて完全に決める
+    # （測定器の `_SQL_ANNUAL` は `edinet_code, year` までなので、この 58 組ぶんだけ
+    #  結果が食い違いうる＝再現性を取る側を選ぶ）。
+    rows = [AnnualRow(*r) for r in db.query(
+        FinancialRecord.edinet_code, FinancialRecord.year, FinancialRecord.period_end,
+        FinancialRecord.issued_shares, FinancialRecord.bs_bps, FinancialRecord.pl_eps,
+        FinancialRecord.dps, FinancialRecord.stock_price, FinancialRecord.per,
+        FinancialRecord.pbr, FinancialRecord.div_yield, FinancialRecord.market_cap,
+    ).filter(FinancialRecord.period_type == "annual").order_by(
+        FinancialRecord.edinet_code, FinancialRecord.year, FinancialRecord.period_end,
+    ).all()]
+
+    if not rows:
+        # 入力そのものが無い＝初回ブートストラップ前、またはテストのスタブ DB。ここで失敗に
+        # すると空の DB からの立ち上げが通らない。**「走らなかった」の検知はここではなく
+        # 収集本体が担う**（annual 行が消えていれば前段がとうに失敗している）。
+        log.warning("分割補正係数: annual 行が0件のためスキップした（係数表は温存）")
+        return 0
+
+    events, stats = detect_events(rows)
+    # use_canonical=True（既定）＝定番比へ寄せられなかった `unsnapped` を積から外す。
+    factors = cumulative_factors(rows, events)
+
+    # 寄与イベントの種別を行ごとに引く。**F の値は上の正本をそのまま使い、ここで積を取り直さない**
+    # （`tests/test_split_adjustment_factors.py` が「寄与集合の積 == factor」を照合して乖離を捕まえる）。
+    ev_by_ec: dict = defaultdict(list)
+    for e in events:
+        if e.canonical is not None:
+            ev_by_ec[e.edinet_code].append(e)
+
+    out = []
+    for (ec, year), f in sorted(factors.items()):
+        if f == 1.0:
+            continue                      # 無補正の行は持たない（VIEW 側が COALESCE で 1.0 を埋める）
+        contrib = [e for e in ev_by_ec.get(ec, ()) if e.year > year]
+        out.append({
+            "edinet_code": ec, "year": year, "factor": f,
+            "n_events": len(contrib),
+            "kinds": ",".join(sorted({e.kind for e in contrib})) or None,
+        })
+
+    if not out:
+        # 入力はあるのに1件も作れなかった＝検出が壊れた側。**既存の表に触らず失敗する**。
+        raise RuntimeError(
+            "分割補正係数が1件も作れなかった（annual 行 %d / 候補ペア %s / 検出イベント %s）。"
+            "既存の係数表は温存する" % (len(rows), stats.get("n_candidate_pairs"),
+                                        stats.get("n_events")))
+
+    n = replace_split_adjustment_factors(db, out)
+    db.commit()
+    log.info("分割補正係数: %d 行 / %d 社 を全置換（イベント %d 件・種別 %s）",
+             n, len({r["edinet_code"] for r in out}), stats.get("n_events"),
+             stats.get("by_kind"))
+    return n
 
 
 async def backfill_historical_stock_prices_yahoo(

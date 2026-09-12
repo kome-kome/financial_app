@@ -16,6 +16,7 @@ load_dotenv()
 from collector import (
     run_full_collection, collect_macro_data,
     collect_stock_price_history_jquants, update_market_data_from_history,
+    rebuild_split_adjustment_factors,
     fill_recent_stock_price_gap_yahoo, detect_roundtrip_scale_bands,
     load_judged_scale_bands, exclude_judged_bands, roundtrip_log_line,
 )
@@ -178,6 +179,15 @@ async def main():
         log("  financial_records へ株価・バリュエーションを反映 開始")
         n_updated = update_market_data_from_history(db4)
         log(f"  financial_records.stock_price: {n_updated}社 更新")
+
+        # 分割補正係数の作り直し（#655・ADR-0055）。**ここに置くのは入力の近さ**——係数は
+        # `issued_shares` と `bs_bps` から復元するので、直前の工程がそれを更新した直後が
+        # 唯一ずれない位置。別ステップへ切り出すと「収集は成功したが係数だけ古い」状態が
+        # 作れてしまう。例外は握らない（上の株価反映と同じ扱い）＝この工程の自己検証だけが
+        # 係数表の固着を検知する仕組みなので、黙って続けると #504 と同型の穴になる。
+        # 検出0件のときは既存の表に触らず raise するため、失敗しても VIEW は前夜の係数で動く。
+        n_factors = rebuild_split_adjustment_factors(db4)
+        log(f"  split_adjustment_factors: {n_factors}行 全置換")
 
         # 正味の鮮度を run 間で比較できる形で残す（#474）。gap-fill の「投入行数」は
         # 取り直しを含むため鮮度の指標にならない。p50 は DB 側集約だけで出る（Egress 数行）。
