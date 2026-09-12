@@ -341,7 +341,7 @@ M-1（`macro_risk_return`）・M-2（`macro_gbdt`）・M-3（`macro_dlm`）の�
   ステップ。M-1 は実測 約752分で本体の窓（960分）に入らないため専用タスク
   （`run_monthly_m1.ps1`・毎月3日・#584・[ADR-0046](adr/0046-steps-that-cannot-finish-get-their-own-task.md)）。
   ステップ予算は `scripts/run_monthly.py::BUDGET_MIN` が持ち、**Σ予算＋マージン ≤ 窓** を CI が照合する。
-- **品質ゲート（#291 → #590 で作り直し・[ADR-0047](adr/0047-persisted-scores-need-their-panel.md)）**:
+- **品質ゲート（#291 → #590 で作り直し・[ADR-0047](adr/0047-tuning-gate-compares-on-one-panel.md)）**:
   旧実装は永続化済みの `objective_value` と比較し、劣化していれば persist をスキップして
   非ゼロ終了した。だが保存値は「そのとき存在したパネルでの値」で、パネルは毎晩伸びるため
   月をまたいだ比較が成立しない（実測 0.5068=10 fold / 0.0221=55 fold＝**fold が少ない候補ほど

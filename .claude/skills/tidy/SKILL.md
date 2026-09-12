@@ -30,7 +30,7 @@ description: >
 ### 1-2. 壊れた内部リンク
 - `*.md` ファイル内の `[...](...)` が指すファイルが実在するか
 - 特に `docs/archive/` 移動後のリンク更新漏れ
-- `daily-incremental.yml.disabled` など `.disabled` ファイルへの言及（一時停止中・再有効化が必要なものは「運用ノートあり」と区別する）
+- `.disabled` ファイルへの言及（一時停止中・再有効化が必要なものは「運用ノートあり」と区別する）。**言及されているファイル名が実在するかを必ず確かめる**（停止方式が `.disabled` リネームから schedule コメントアウトへ変わっても、文書側は追随しない）
 
 ### 1-3. デッドファイル検出
 - `*.disabled` の workflow ファイル（一時停止以外の理由のもの）
@@ -78,8 +78,10 @@ description: >
 ## ステップ 4: 検証
 
 実施後に以下を確認:
-1. `git grep CONSTRAINTS` → 削除済みなら 0 件であること（DEPLOYMENT.md に統合済み）
-2. 主要な `*.md` 内リンク先の実在確認（`git grep` でパターンマッチ）
+1. `ls CONSTRAINTS.md` → **ファイルが存在しない**こと（DEPLOYMENT.md へ統合済み。
+   `git grep CONSTRAINTS` は「旧 `CONSTRAINTS.md` を統合」という履歴記述に当たるので 0 件にはならない）
+2. `pytest tests/test_docs_links.py` — **`*.md` の相対リンクの実在検査**（2026-09-12 に CI 化）。
+   手で `git grep` して回らない。リネーム追随漏れは候補付きで失敗メッセージに出る
 3. `pytest`（`testpaths=tests`）— 全件パス
 4. `uvicorn api:app --reload` で起動確認 → `/`, `/collection`, `/analysis`, `/company/{code}` が 200
 
@@ -91,7 +93,8 @@ description: >
 - `.env` / `.env.local` 等の機密ファイル
 - `collector.py` / `api.py` / `database.py` / `plugins/` の中核ロジック
 - `requirements.txt`（完全 pin 維持）
-- `daily-incremental.yml.disabled`（全件収集中の一時停止。運用ノートは DEPLOYMENT.md に記載）
+- `.github/workflows/daily-incremental.yml`（**schedule をコメントアウトして停止中**。#503 で正本がローカル PostgreSQL へ移り、動かすと Supabase だけが前進して分岐するため。運用ノートは DEPLOYMENT.md に記載）
+  - 全件収集中は同時実行回避のため `.yml.disabled` へリネームする運用手順が DEPLOYMENT.md にあるが、**現在そのファイル名は存在しない**（停止は schedule のコメントアウトで実現している）
 
 **archive は削除しない**（統合・整理のみ）:
 - `docs/archive/` 配下は完了済み作業記録。現行参照には使わないが git 履歴の補助として残す。

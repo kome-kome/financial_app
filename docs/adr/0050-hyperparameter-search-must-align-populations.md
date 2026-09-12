@@ -3,8 +3,8 @@
 ## Status
 
 accepted（2026-09-04）。[ADR-0045](0045-momentum-gains-vanish-when-the-population-is-aligned.md)
-を M-1 と窓軸へ拡張する（supersede ではない）。関連: [ADR-0019](0019-conservative-feature-gate.md)（保守ゲート）、
-[ADR-0041](0041-preset-promotion-gate-has-a-cli.md)（測る手続きを書き直さない）、
+を M-1 と窓軸へ拡張する（supersede ではない）。関連: [ADR-0019](0019-m2-monotone-constraints-economic-sign-priors.md)（保守ゲート）、
+[ADR-0041](0041-preset-weight-gate-has-an-implementation.md)（測る手続きを書き直さない）、
 [ADR-0049](0049-search-axes-must-be-shown-to-move-the-score.md)（効かない軸は落とす）。
 
 ## Context
