@@ -47,6 +47,12 @@ python -m scripts.check_nightly_collect --nights 5
 ./run_monthly_beta.ps1 -Force            # 収束ゲートを無視して live で persist（人手で精査した1回だけ）
 ./scripts/install_monthly_beta_task.ps1  # 登録（毎月2日 JST 01:00・上限16h）。**登録後に1回手動実行して足跡を入れる**
 
+# macro_beta の収束ゲートの余裕を run 横断で読む（#612）。読み取り専用・DB へ書かない
+# **DB を手で引かない**（判定は本番の gate_verdict と共有される）。div=N / old-gate の印が付いた run は推移へ混ぜない
+python -m scripts.macro_beta_gate_history            # 全変数の p99 と閾値までの余裕を古い順に
+python -m scripts.macro_beta_gate_history --limit 10 # 読む run 数（既定 20）
+python -m scripts.macro_beta_gate_history --threshold 1.01  # strict 基準で見直す
+
 # M-1 探索も別タスク（毎月3日 JST 01:00）。実測 約752分で月次本体の窓に入らない（#584・ADR-0046）
 ./run_monthly_m1.ps1                     # 手動で1回
 ./run_monthly_m1.ps1 -DryRun             # 実行計画だけ

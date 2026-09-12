@@ -586,6 +586,17 @@ PROD_BY_PARAM_20260906 = {
     "mu_universe": _grp(12,     1.037251967716491,  1.0381113646117754),
 }
 
+# 2026-09-11 の本番 run（mb_20260911T051941Z・同じ 3,837銘柄・12因子・draws=800・ta=0.95・
+# seed 0・max_tree_depth=(8,10)）の実測。**現行コードで `--force` 無しに status=live へ
+# 到達した初めての run**（#612）。日中枠（#618）で並走なしに回した回で n_divergences=0。
+# 上の 9/06 が `--force` でゲートを迂回していたため、**通る側の実測はこれが2点目**になる。
+# 閾値に最も近いのは alpha（余裕 0.0183）ではなく mu_universe（0.0147）。
+PROD_BY_PARAM_20260911 = {
+    "beta":        _grp(46_044, 1.014176215790639,  1.0675122362666312),
+    "alpha":       _grp(3_837,  1.0317391544527446, 1.0647366065724613),
+    "mu_universe": _grp(12,     1.0352686321877826, 1.0354104156245563),
+}
+
 # `max_tree_depth=8` の崩壊ケース（合成250銘柄・.logs/bench_609_gate.jsonl・ADR-0002）。
 # 壊れているのは mu_universe（12個）だけで beta も alpha も健全＝**全体の p99 では見逃す**。
 COLLAPSED_BY_PARAM_MD8 = {
@@ -640,6 +651,29 @@ class TestPersistGate:
         """
         d = _diag(1.1242346687861646, PROD_BY_PARAM_20260906)
         assert persist_allowed(d, threshold=1.05, force=False) is True
+
+    def test_production_run_20260911_passes_without_force(self):
+        """実地確認の run（2026-09-11）も通る。**通る側の実測の2点目**（#612）。
+
+        9/06 は `--force` でゲートを迂回していたので、ゲートが本番規模で実際に通した
+        run はこれが初めて。全体の `r_hat_max` は 1.0675 で旧ゲートなら落ちていた。
+        """
+        d = _diag(1.0675122362666312, PROD_BY_PARAM_20260911)
+        assert persist_allowed(d, threshold=1.05, force=False) is True
+
+    def test_healthy_runs_at_the_same_scale_differ_by_more_than_the_warn_band(self):
+        """同一規模（n_stock=3837）の健全な2点で `alpha` の p99 は 0.0146 動いた（#612）。
+
+        `PERSIST_MARGIN_WARN`（0.005）より大きい＝**予告なしに次の回で落ちうる**。それでも
+        帯を広げないのは、閾値を実測から逆算しないため（ADR-0042 §1）。ここは「余裕の推移が
+        規模依存ではなく run 間ばらつきだった」ことを数字で残す杭で、3案（alpha だけ別閾値／
+        MCSE／p95）を選べない根拠そのもの。
+        """
+        a06 = PROD_BY_PARAM_20260906["alpha"]
+        a11 = PROD_BY_PARAM_20260911["alpha"]
+        assert a06["n"] == a11["n"] == 3_837          # 規模は動いていない
+        assert abs(a06["r_hat_p99"] - a11["r_hat_p99"]) == pytest.approx(0.0145419, abs=1e-6)
+        assert abs(a06["r_hat_p99"] - a11["r_hat_p99"]) > mbi.PERSIST_MARGIN_WARN
 
     def test_collapsed_run_still_rejected(self):
         """ADR-0002 の崩壊ケース（max_tree_depth=8）は引き続き reject。
@@ -730,6 +764,19 @@ class TestGateReportLogging:
         assert any("余裕が薄い" in m and "alpha" in m for m in msgs)
         # beta（1.0193）は余裕があるので警告しない
         assert not any("余裕が薄い" in m and "beta" in m for m in msgs)
+
+    def test_no_warning_when_every_margin_is_wide(self, caplog):
+        """2026-09-11 の run はどの変数も余裕があり警告を出さない（#612 の実測）。
+
+        `.logs/daytime_20260911.log` に `余裕が薄い` が0件だったこと（実地確認のチェック
+        リスト）を、ログではなく判定の側で固定する。最も薄いのは mu_universe の 0.0147 で、
+        `PERSIST_MARGIN_WARN`（0.005）より広い。
+        """
+        with caplog.at_level("WARNING", logger="macro_beta_inference"):
+            mbi.log_gate_report(_diag(1.0675122362666312, PROD_BY_PARAM_20260911),
+                                threshold=1.05)
+        msgs = [r.getMessage() for r in caplog.records]
+        assert not any("余裕が薄い" in m for m in msgs)
 
     def test_offenders_above_threshold_are_named(self, caplog):
         by_param = {"alpha": {**_grp(3_837, 1.0463, 1.1242),

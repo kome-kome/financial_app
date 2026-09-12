@@ -1099,7 +1099,14 @@ def main() -> None:
             # 「M-1 が更新されていない」は運用上の失敗であり、静かに固着させない（#579 の再来を防ぐ）。
             raise SystemExit(1)
         persist(db, result)
-        logger.info("推論完了・DB永続化済み: %d 銘柄 / 因子 %s", len(result.loadings), result.selected_factors)
+        from database import MACRO_BETA_STATUS_LIVE  # 遅延 import（"live" を書き写さない）
+
+        # **run_id と status を出す**（#612）。隔離の分岐は run_id を名乗るのに成功側は
+        # 名乗っていなかったため、「DB を直接クエリして live を確かめる」確認が**成功した
+        # 回に限って**ログと突き合わせられなかった（ログの「永続化済み」は証明にならない）。
+        logger.info("推論完了・DB永続化済み: run_id=%s status=%s / %d 銘柄 / 因子 %s",
+                    result.run_id, MACRO_BETA_STATUS_LIVE,
+                    len(result.loadings), result.selected_factors)
     finally:
         db.close()
 
