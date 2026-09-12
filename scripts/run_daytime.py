@@ -227,11 +227,11 @@ JOBS: dict[str, Job] = {
     # **1プロセスで前後を回すのは、補正前の断面がもう DB に残っていないから**——補正は
     # VIEW が係数表を LEFT JOIN して当てているので、見るには作り直すしかない。
     #
-    # **今はキューへ積んでいない。** 第2経路は公式 `AdjFactor` との一致率が 0.367 しか出ず
-    # 既定 OFF で入っている（`measure_split_valuation_bias.DEFAULT_BPS_PATH`）ので、
-    # 今これを回すと**本番に入っていない設定の rank-IC** を 3 時間かけて測ることになる。
-    # 倍率の取り方が直って既定が True へ倒れたときに積む。ここに置いてあるのは、そのとき
-    # 「どう測るか」を決め直さずに済ませるため（ADR-0041 と同じ理由）。
+    # **#659 で既定が True へ倒れたのでキューへ積んだ**（2026-09-12）。倍率を `bs_bps` の
+    # 年次比ではなく翌年の `issued_shares` 比から取るようにして、公式 `AdjFactor` との
+    # 一致率が 0.367 -> 0.962 になった（`measure_split_valuation_bias.DEFAULT_BPS_PATH`）。
+    # それまで積まなかったのは、**本番に入っていない設定の rank-IC** を 3 時間かけて
+    # 測ることになるからである。
     "oof:split-bias": Job(
         name="oof_split_bias",
         argv=("{python}", "-m", "scripts.measure_split_bias_oof",
