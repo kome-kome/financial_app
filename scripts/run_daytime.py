@@ -221,6 +221,32 @@ JOBS: dict[str, Job] = {
         measured_min=369.0,
         parallel_sensitive=True,   # tune:macro_gbdt と同じ理由（順位が入れ替わると重みが変わる）
     ),
+
+    # ── 分割補正の第2経路が学習へ与える影響の実測（#656・ADR-0055 決定7）──────
+    # 係数表を bps_path=False / True で往復させ、同じ手続きで OOF rank-IC を2回測る。
+    # **1プロセスで前後を回すのは、補正前の断面がもう DB に残っていないから**——補正は
+    # VIEW が係数表を LEFT JOIN して当てているので、見るには作り直すしかない。
+    #
+    # **今はキューへ積んでいない。** 第2経路は公式 `AdjFactor` との一致率が 0.367 しか出ず
+    # 既定 OFF で入っている（`measure_split_valuation_bias.DEFAULT_BPS_PATH`）ので、
+    # 今これを回すと**本番に入っていない設定の rank-IC** を 3 時間かけて測ることになる。
+    # 倍率の取り方が直って既定が True へ倒れたときに積む。ここに置いてあるのは、そのとき
+    # 「どう測るか」を決め直さずに済ませるため（ADR-0041 と同じ理由）。
+    "oof:split-bias": Job(
+        name="oof_split_bias",
+        argv=("{python}", "-m", "scripts.measure_split_bias_oof",
+              "--models", "macro_gbdt,macro_enet"),
+        why="第2経路（#656）を入れる前後の OOF rank-IC。M-1 は strict（macro_nan_ok=False）で"
+            "パネルを M-2/M-6 と共有できず同一共通域の比較が成立しないため対象外"
+            "（ADR-0045/ADR-0050 と同じ制約）。**差の符号は採否の条件にしない**"
+            "（ADR-0055 決定7。歪みは未来情報のリークでありうるので補正で下がるのが正しい）。",
+        # **未実測**。`oof_backtest` 自体は純後処理で軽く、重いのは上流の walk-forward 学習。
+        # それを**2回**払ううえ係数表の全置換も2回入る。実走で差し替える。
+        measured_min=180.0,
+        # 測った rank-IC そのものが成果物なので、並走で揺れた値を根拠に読むと判断ごと誤る
+        # （#618・macro_beta で発散が 0 → 344 回）。
+        parallel_sensitive=True,
+    ),
 }
 
 SPEC = bc.BatchSpec(

@@ -45,11 +45,17 @@
 ただしこれは「株数と1株純資産が両方動いた」という**必要条件**しか見ていないので、
 `verify-sample` で公式 `AdjFactor` とサンプル突合して一致率を出す（陰性対照つき）。
 
+**株数が分割に追随しない社のために第2経路がある**（#656）。`bs_bps` の年次比を候補ゲートに、
+`pl_eps` の比を交差検証にする。株数と1株指標が同じ年に動く前提を外した経路で、
+`--bps-path` / `--no-bps-path` で切り替える（既定は `DEFAULT_BPS_PATH`）。
+
 実行:
     python -m scripts.measure_split_valuation_bias detect
     python -m scripts.measure_split_valuation_bias detect --sweep --price-basis
+    python -m scripts.measure_split_valuation_bias detect --bps-path        # 第2経路つき
     python -m scripts.measure_split_valuation_bias verify-sample --dry-run
     python -m scripts.measure_split_valuation_bias verify-sample        # 約14分
+    python -m scripts.measure_split_valuation_bias verify-sample --bps-path --source bps
 
 出力は ASCII 記号のみ（Windows cp932 リダイレクト対策）。
 """
@@ -77,6 +83,24 @@ DEFAULT_MIN_RATIO = 1.4
 DEFAULT_BPS_TOL = 0.15
 # 定番比へのスナップ許容（対数距離）。
 DEFAULT_SNAP_TOL = 0.02
+# 第2経路（`bs_bps` を候補ゲート・`pl_eps` を交差検証にする経路・#656）を既定で使うか。
+# **`rebuild_split_adjustment_factors` が既定のまま呼ぶ＝ここが毎晩の係数表の中身を決める。**
+#
+# **False のままなのは実測で倒したからである**（2026-09-12・
+# `verify-sample --bps-path --source bps --n 30 --controls 10`）。公式 `AdjFactor` との
+# 一致率は **0.367（11/30）**で、#654 の第1経路の 0.967 に届かない。
+#
+# **外れ方はランダムではなく、見つけた 16 件すべてで検出 < 公式だった。**
+# `bs_bps` は分割以外（内部留保・有価証券の評価差額）でも増えるので、年次比は
+# 真の分割比 F に対し `F / (1 + g)` になる（g は bps の成長率）。実測の g は
+# **18%〜67%** と幅が広く、隣り合う定番比の間隔（例 2.0 と 2.5）を超える。
+# 「`raw` 以上で最小の定番比を採る」上向きスナップでも **0.778（21/27）**で止まる。
+# つまり **bps 比は「分割があった」は言えるが「何倍か」を決められない**。
+#
+# 存在の検出としては優秀で、抽出 30 社のうち 27 社に公式イベントがあり
+# （偽陽性 3 社）、**陰性対照の見逃しは 0 社**だった。倍率を独立な第3の信号から
+# 取る改良は #656 のコメントと後継 issue へ送った。True へ倒すのはそれが済んでから。
+DEFAULT_BPS_PATH = False
 # 合成（分割＋増資）とみなす残差の範囲。これを外れたら丸めずに unsnapped で別枠へ出す。
 COMPOSITE_LO, COMPOSITE_HI = 0.8, 1.25
 
@@ -146,13 +170,17 @@ class ShareEvent(NamedTuple):
     canonical: Optional[float]
     residual: float
     kind: str            # split | reverse | composite | unsnapped
+    # どちらの経路が拾ったか（#656）。"shares" は株数比を候補ゲートにした第1経路、
+    # "bps" は `bs_bps` の年次比を候補ゲートにし `pl_eps` の比で交差検証した第2経路。
+    # 既定値を持つのは、既存の呼び出し（テストの `ev()` ヘルパー含む）を壊さないため。
+    source: str = "shares"
 
 
 class MatchResult(NamedTuple):
     edinet_code: str
     year: int
-    detected: float               # canonical（無ければ sh_ratio）
-    raw_detected: float           # スナップ前の sh_ratio
+    detected: float               # canonical（無ければ生比）
+    raw_detected: float           # スナップ前の生比（経路の候補ゲートに使った量）
     official: Optional[float]
     n_official_events: int
     status: str
@@ -205,12 +233,26 @@ def detect_events(rows: Sequence[AnnualRow], *,
                   min_ratio: float = DEFAULT_MIN_RATIO,
                   bps_tol: float = DEFAULT_BPS_TOL,
                   snap_tol: float = DEFAULT_SNAP_TOL,
+                  bps_path: bool = DEFAULT_BPS_PATH,
                   ) -> tuple[list[ShareEvent], dict]:
     """株数基準が変わった年を検出する。戻り値 (events, stats)。
 
-    条件は2つ。`issued_shares` の年次比が閾値を超えること（候補ゲート）と、`bs_bps` の
-    逆比が同じ倍率で一致すること（交差検証）。後者が偽陽性（時価発行増資・自社株買い）を
-    止める本体で、閾値ではない。
+    経路は2本あり、**どちらも「候補ゲート1つ ＋ 独立した第2の書き手による交差検証1つ」**と
+    いう同じ形をしている。閾値が偽陽性を止めているのではなく、交差検証が止めている。
+
+    - 第1経路（`source="shares"`）: `issued_shares` の年次比が閾値を超えること（候補ゲート）と、
+      `bs_bps` の逆比が同じ倍率で一致すること（交差検証）。増資・自社株買いはここで落ちる。
+    - 第2経路（`source="bps"`・#656）: `bs_bps` の年次比が閾値を超えること（候補ゲート）と、
+      `pl_eps` の比が同じ倍率で一致すること（交差検証）。減損・大幅赤字はここで落ちる。
+
+    **第2経路が要るのは、株数と1株指標が同じ年に動くとは限らないから。** 分割を 1 株指標には
+    反映しているのに `issued_shares` が据え置きの社は第1経路の候補にすら上がらない
+    （実測 E03137 しまむらは `shares x1.0000` のまま `bps x1.8670 / eps x1.8971`）。
+    逆にこの社は株数が動いた年の `bs_bps` が**上がって**いるため、第1経路の交差検証でも落ちる。
+    同一年ペアの中で株数と bps を突き合わせる設計では原理的に拾えない。
+
+    **同じ (edinet_code, year) を両経路が拾ったら第1経路を採る**（畳む）。株数は分割で必ず動く
+    量で、bps のように内部留保や配当で毎年動く量より基準として素直だからである。
 
     欠損年があるときは `year-1` ではなく**直前の使える行**とペアを組み、`gap_years` を残す。
     2以上なら複数イベントの積を1件と見ている可能性があるので、突合サンプルへ優先的に入れる。
@@ -224,6 +266,9 @@ def detect_events(rows: Sequence[AnnualRow], *,
     skipped: Counter = Counter()
     candidate_ecs: set[str] = set()
     n_candidates = 0
+    bps_candidate_ecs: set[str] = set()
+    n_bps_candidates = 0
+    bps_rejected: Counter = Counter()
     for ec, rs in by_ec.items():
         prev: Optional[AnnualRow] = None
         for cur in sorted(rs, key=lambda r: r.year):
@@ -232,11 +277,12 @@ def detect_events(rows: Sequence[AnnualRow], *,
                 skipped[why] += 1
                 continue
             if prev is not None:
+                took = False
                 sh_ratio = cur.issued_shares / prev.issued_shares
+                bps_ratio = prev.bs_bps / cur.bs_bps
                 if abs(_log(sh_ratio)) >= gate:
                     n_candidates += 1
                     candidate_ecs.add(ec)
-                    bps_ratio = prev.bs_bps / cur.bs_bps
                     if abs(bps_ratio / sh_ratio - 1.0) <= bps_tol:
                         canonical, residual, kind = snap_to_canonical(sh_ratio, tol=snap_tol)
                         events.append(ShareEvent(
@@ -244,9 +290,41 @@ def detect_events(rows: Sequence[AnnualRow], *,
                             gap_years=cur.year - prev.year,
                             period_end=cur.period_end, prev_period_end=prev.period_end,
                             sh_ratio=sh_ratio, bps_ratio=bps_ratio,
-                            canonical=canonical, residual=residual, kind=kind))
+                            canonical=canonical, residual=residual, kind=kind,
+                            source="shares"))
+                        took = True
+
+                if bps_path and abs(_log(bps_ratio)) >= gate:
+                    n_bps_candidates += 1
+                    bps_candidate_ecs.add(ec)
+                    if took:
+                        # 第1経路が同じペアを既に採った。両方が同じ実体を指しているので
+                        # 2件に数えない（数えると `cumulative_factors` が比を二乗する）。
+                        bps_rejected["dup_with_shares"] += 1
+                    elif (prev.pl_eps is None or cur.pl_eps is None
+                            or prev.pl_eps <= 0 or cur.pl_eps <= 0):
+                        # **符号が跨ぐ年・赤字の年は比の意味が壊れる。** 赤字継続（両年とも負）でも
+                        # 比は数学的には出るが、赤字幅の増減が分割比に化けるので落とす側を採る。
+                        bps_rejected["eps_sign"] += 1
+                    elif abs((prev.pl_eps / cur.pl_eps) / bps_ratio - 1.0) > bps_tol:
+                        # 交差検証で落ちた本体。減損・大幅赤字・タグ基準の変更はここへ来る
+                        # （bps だけが動いて eps が追随しない）。
+                        bps_rejected["eps_mismatch"] += 1
+                    else:
+                        canonical, residual, kind = snap_to_canonical(bps_ratio, tol=snap_tol)
+                        if canonical is None:
+                            bps_rejected["unsnapped"] += 1
+                        else:
+                            events.append(ShareEvent(
+                                edinet_code=ec, year=cur.year, prev_year=prev.year,
+                                gap_years=cur.year - prev.year,
+                                period_end=cur.period_end, prev_period_end=prev.period_end,
+                                sh_ratio=sh_ratio, bps_ratio=bps_ratio,
+                                canonical=canonical, residual=residual, kind=kind,
+                                source="bps"))
             prev = cur
 
+    bps_events = [e for e in events if e.source == "bps"]
     stats = {
         "n_candidate_pairs": n_candidates,
         "n_events": len(events),
@@ -255,6 +333,16 @@ def detect_events(rows: Sequence[AnnualRow], *,
         "skipped": dict(skipped),
         "by_kind": dict(Counter(e.kind for e in events)),
         "n_gap_years_ge2": sum(1 for e in events if e.gap_years >= 2),
+        "n_events_by_source": dict(Counter(e.source for e in events)),
+        "bps_path": {
+            "enabled": bool(bps_path),
+            "n_candidate_pairs": n_bps_candidates,
+            "n_candidate_companies": len(bps_candidate_ecs),
+            "n_events": len(bps_events),
+            "n_event_companies": len({e.edinet_code for e in bps_events}),
+            "by_kind": dict(Counter(e.kind for e in bps_events)),
+            "rejected": dict(bps_rejected),
+        },
     }
     return events, stats
 
@@ -443,16 +531,20 @@ def match_event(ev: ShareEvent, official: Sequence[tuple[str, float]], *,
     窓は (前期末 - slack, 当期末 + slack]。分割の効力発生日と株数の計上期のズレを吸収する。
     契約窓の外は `out_of_coverage` にして**一致率の分母から外す**（混ぜると理由なく下がる）。
     """
-    detected = ev.canonical if ev.canonical is not None else ev.sh_ratio
+    # 生比は**そのイベントを拾った経路の候補ゲートに使った量**を採る（#656）。
+    # bps 経路の `sh_ratio` は 1.0 近傍なので、そちらを見ると `agree_raw_only` が原理的に
+    # 立たなくなり、「スナップが悪さをしている」を分けて数える仕組みが黙って死ぬ。
+    raw = ev.bps_ratio if ev.source == "bps" else ev.sh_ratio
+    detected = ev.canonical if ev.canonical is not None else raw
     win = event_window(ev, slack_days=slack_days)
     if win is None or not in_coverage(ev, coverage, slack_days=slack_days):
-        return MatchResult(ev.edinet_code, ev.year, detected, ev.sh_ratio,
+        return MatchResult(ev.edinet_code, ev.year, detected, raw,
                            None, 0, "out_of_coverage")
     w0, w1 = win
 
     inside = [f for d, f in official if w0 < d <= w1 and f and f > 0]
     if not inside:
-        return MatchResult(ev.edinet_code, ev.year, detected, ev.sh_ratio,
+        return MatchResult(ev.edinet_code, ev.year, detected, raw,
                            None, 0, "no_official_event")
     prod = 1.0
     for f in inside:
@@ -461,13 +553,13 @@ def match_event(ev: ShareEvent, official: Sequence[tuple[str, float]], *,
 
     lim = _log(1 + tol)
     if abs(_log(official_ratio / detected)) <= lim:
-        return MatchResult(ev.edinet_code, ev.year, detected, ev.sh_ratio,
+        return MatchResult(ev.edinet_code, ev.year, detected, raw,
                            official_ratio, len(inside), "agree")
-    if abs(_log(official_ratio / ev.sh_ratio)) <= lim:
+    if abs(_log(official_ratio / raw)) <= lim:
         # 生比では合うがスナップ後で外れる＝スナップが悪さをしている側。分けて数える。
-        return MatchResult(ev.edinet_code, ev.year, detected, ev.sh_ratio,
+        return MatchResult(ev.edinet_code, ev.year, detected, raw,
                            official_ratio, len(inside), "agree_raw_only")
-    return MatchResult(ev.edinet_code, ev.year, detected, ev.sh_ratio,
+    return MatchResult(ev.edinet_code, ev.year, detected, raw,
                        official_ratio, len(inside), "disagree_magnitude")
 
 
@@ -592,6 +684,16 @@ def render_text(report: dict) -> str:
     add("  種別: " + ", ".join("%s=%s" % kv for kv in sorted(det.get("by_kind", {}).items())))
     add("  gap_years>=2: %s / 除外: %s"
         % (det.get("n_gap_years_ge2"), det.get("skipped") or "なし"))
+    bp = det.get("bps_path") or {}
+    if bp.get("enabled"):
+        add("  経路別: " + ", ".join("%s=%s" % kv
+                                     for kv in sorted(det.get("n_events_by_source", {}).items())))
+        add("  bps経路: 候補ペア=%s (%s社) -> 通過=%s (%s社) / 種別 %s"
+            % (bp.get("n_candidate_pairs"), bp.get("n_candidate_companies"),
+               bp.get("n_events"), bp.get("n_event_companies"), bp.get("by_kind") or {}))
+        add("  bps経路の棄却: %s" % (bp.get("rejected") or "なし"))
+    else:
+        add("  bps経路: 無効 (--bps-path で有効化)")
     hist = det.get("canonical_hist", {})
     if hist:
         add("  canonical: " + ", ".join(
@@ -803,7 +905,8 @@ def _cmd_detect(args) -> int:
         print("annual %d行を読み込み（接続先=%s）" % (len(rows), D.DB_TARGET), flush=True)
 
         events, stats = detect_events(rows, min_ratio=args.min_ratio,
-                                      bps_tol=args.bps_tol, snap_tol=args.snap_tol)
+                                      bps_tol=args.bps_tol, snap_tol=args.snap_tol,
+                                      bps_path=args.bps_path)
         stats["canonical_hist"] = dict(
             Counter("%g" % e.canonical for e in events if e.canonical is not None))
 
@@ -852,7 +955,8 @@ def _cmd_detect(args) -> int:
             "detect": stats, "nc_ratio": nc, "price_basis": price_basis, "top": top,
             "min_cross_n": args.min_cross_n,
             "settings": {"min_ratio": args.min_ratio, "bps_tol": args.bps_tol,
-                         "snap_tol": args.snap_tol, "price_basis": bool(args.price_basis)},
+                         "snap_tol": args.snap_tol, "price_basis": bool(args.price_basis),
+                         "bps_path": bool(args.bps_path)},
         })
         report["verdict"] = build_verdict(report)
 
@@ -864,7 +968,8 @@ def _cmd_detect(args) -> int:
             for mr in (1.05, 1.1, 1.2, 1.4, 1.5, 2.0):
                 cells = []
                 for bt in (0.05, 0.10, 0.15, 0.25):
-                    ev, st = detect_events(rows, min_ratio=mr, bps_tol=bt, snap_tol=args.snap_tol)
+                    ev, st = detect_events(rows, min_ratio=mr, bps_tol=bt,
+                                           snap_tol=args.snap_tol, bps_path=args.bps_path)
                     ff = cumulative_factors(rows, ev)
                     n2 = sum(1 for v in ff.values() if v >= 2.0)
                     cells.append("%4d/%4d/%5d" % (st["n_events"], st["n_event_companies"], n2))
@@ -889,7 +994,8 @@ def _cmd_verify_sample(args) -> int:
     try:
         rows = load_annual_rows(db, year_from=args.year_from, year_to=args.year_to)
         all_events, _ = detect_events(rows, min_ratio=args.min_ratio,
-                                      bps_tol=args.bps_tol, snap_tol=args.snap_tol)
+                                      bps_tol=args.bps_tol, snap_tol=args.snap_tol,
+                                      bps_path=args.bps_path)
         # **抽出より先に契約窓を学習する**。窓の外から引いたサンプルは公式が判定できず、
         # `out_of_coverage` で分母だけが消える（実測 2026-09-12: 30件中 21件が窓外）。
         cover = asyncio.run(learn_coverage())
@@ -898,6 +1004,15 @@ def _cmd_verify_sample(args) -> int:
                   if in_coverage(e, cover, slack_days=args.window_slack_days)]
         print("検出イベント %d件のうち、公式が判定できるのは %d件（この中から抽出）"
               % (len(all_events), len(events)))
+        if args.source != "any":
+            # **その経路が「新たに」拾った社に絞る。** 経路でイベントを選ぶだけでは足りない
+            # ——両経路が別の年で同じ社を拾っていると、既に #654 が突合済みの社が
+            # 分母へ混ざって一致率が薄まる。社ごと他方の経路を持たないものだけ残す。
+            other = {e.edinet_code for e in all_events if e.source != args.source}
+            events = [e for e in events
+                      if e.source == args.source and e.edinet_code not in other]
+            print("  うち source=%s だけで拾った社のイベント: %d件 (%d社)"
+                  % (args.source, len(events), len({e.edinet_code for e in events})))
         if not events:
             raise SystemExit("契約窓の内側に検出イベントがありません")
         ev_ecs = {e.edinet_code for e in all_events}
@@ -970,7 +1085,9 @@ def _cmd_verify_sample(args) -> int:
             p = Path(args.json)
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_text(json.dumps({
-                "coverage": list(cover), "positives": pos, "controls": ctrl,
+                "coverage": list(cover), "source": args.source,
+                "bps_path": bool(args.bps_path),
+                "positives": pos, "controls": ctrl,
                 "no_sec_code": no_sec, "tally": dict(tally),
                 "agree_rate": rate, "agree_rate_raw_ok": rate_raw,
                 "control_misses": misses,
@@ -994,6 +1111,13 @@ def build_parser() -> argparse.ArgumentParser:
     common.add_argument("--min-ratio", type=float, default=DEFAULT_MIN_RATIO)
     common.add_argument("--bps-tol", type=float, default=DEFAULT_BPS_TOL)
     common.add_argument("--snap-tol", type=float, default=DEFAULT_SNAP_TOL)
+    # 第2経路（#656）。既定は `DEFAULT_BPS_PATH`＝毎晩の係数表と同じ設定で測れるようにする。
+    # ON/OFF を両方回して factors を差分照合するのが「既存の検出が変わっていない」の確かめ方。
+    common.add_argument("--bps-path", dest="bps_path", action="store_true",
+                        default=DEFAULT_BPS_PATH,
+                        help="bs_bps を候補ゲートにする第2経路も使う（#656）")
+    common.add_argument("--no-bps-path", dest="bps_path", action="store_false",
+                        help="第2経路を使わない（#655 までの検出と同一）")
 
     d = sub.add_parser("detect", parents=[common], help="全件の検出と指標の出力")
     d.add_argument("--sweep", action="store_true", help="閾値感度表も出す")
@@ -1009,6 +1133,8 @@ def build_parser() -> argparse.ArgumentParser:
     v.add_argument("--seed", type=int, default=0)
     v.add_argument("--match-tol", type=float, default=0.05)
     v.add_argument("--window-slack-days", type=int, default=45)
+    v.add_argument("--source", choices=("any", "shares", "bps"), default="any",
+                   help="突合する経路を絞る（#656 の第2経路だけの一致率を出すときは bps）")
     v.add_argument("--only", default="")
     v.add_argument("--dry-run", action="store_true", help="抽出される社だけ出して API を叩かない")
     v.add_argument("--json", nargs="?", const=str(DEFAULT_VERIFY_JSON),

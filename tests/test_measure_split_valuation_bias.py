@@ -119,6 +119,123 @@ class TestDetectEvents:
         assert stats["skipped"]["negative_bps"] == 1
 
 
+class TestBpsPath:
+    """第2経路（`bs_bps` 候補ゲート x `pl_eps` 交差検証）— Issue #656。
+
+    検体は E03137 しまむらの `financial_records` 実値をそのまま写した（2026-09-12・
+    接続先 local）。**推測で書いた検体は「本物を読めないこと」を検出できない。**
+
+        year | issued_shares | bs_bps   | pl_eps
+        2023 |    36,913,299 | 11973.98 | 1034.57
+        2024 |    36,913,299 |  6413.61 |  545.35
+        2025 |    73,826,598 |  6815.66 |  569.83
+        2026 |    73,826,598 |  2353.09 |  202.36
+
+    株数は 2025 に x2 されるが、1 株指標は 2024（→1:2）と 2026（→1:3）に動く。
+    つまり**株数と 1 株指標が 1 年ずれて報告されている**ので、第1経路は 2025 の候補を
+    交差検証で落とし（bps は下がるどころか上がっている）、2024 と 2026 は候補にすら上がらない。
+    """
+
+    SHIMAMURA = (
+        (2023, 36913299.0, 11973.98, 1034.57),
+        (2024, 36913299.0, 6413.61, 545.35),
+        (2025, 73826598.0, 6815.66, 569.83),
+        (2026, 73826598.0, 2353.09, 202.36),
+    )
+
+    def _rows(self):
+        return [row(y, sh, bps, eps=eps, ec="E03137") for y, sh, bps, eps in self.SHIMAMURA]
+
+    def test_shares_path_alone_finds_nothing(self):
+        """#656 が報告した取りこぼしそのもの。第2経路が無ければ 1 件も立たない。"""
+        assert M.detect_events(self._rows(), bps_path=False)[0] == []
+
+    def test_bps_path_finds_both_splits(self):
+        events, stats = M.detect_events(self._rows(), bps_path=True)
+        assert [(e.year, e.canonical) for e in sorted(events, key=lambda e: e.year)] == [
+            (2024, pytest.approx(2.0)), (2026, pytest.approx(3.0))]
+        assert all(e.source == "bps" for e in events)
+        assert stats["n_events_by_source"] == {"bps": 2}
+        assert stats["bps_path"]["n_events"] == 2
+
+    def test_composite_is_accepted_because_bps_drifts_on_its_own(self):
+        """**2% スナップでは看板例が落ちる。**
+
+        `bs_bps` は内部留保・配当でも毎年動くので、株数比と違って定番比ぴったりにならない。
+        実測 bps 比 1.8670 は 2.0 から対数距離 6.9% 離れており、`snap_to_canonical` の
+        厳密側（tol=2%）を外れて `composite`（残差 0.80〜1.25）で拾われる。
+        ここを split/reverse だけに絞ると 161 行の大半が埋まらない。
+        """
+        e = [e for e in M.detect_events(self._rows(), bps_path=True)[0] if e.year == 2024][0]
+        assert e.kind == "composite"
+        assert e.bps_ratio == pytest.approx(1.8670, abs=1e-4)
+        assert e.residual == pytest.approx(0.9335, abs=1e-4)
+        # 株数比は捏造せず観測値のまま残す（あとから「株数が動いていない」が読める）
+        assert e.sh_ratio == pytest.approx(1.0)
+
+    def test_cumulative_factor_is_the_product_of_later_events(self):
+        """F は**その行より後**のイベントの積。2024 の行が見るのは 2026 の 1 件だけ。"""
+        rows = self._rows()
+        f = M.cumulative_factors(rows, M.detect_events(rows, bps_path=True)[0])
+        assert f[("E03137", 2023)] == pytest.approx(6.0)
+        assert f[("E03137", 2024)] == pytest.approx(3.0)
+        assert f[("E03137", 2025)] == pytest.approx(3.0)
+        assert f[("E03137", 2026)] == pytest.approx(1.0)
+
+    def test_impairment_is_rejected_by_the_eps_cross_check(self):
+        """bps だけが半分になる（減損・資産再評価）。eps が追随しないので立たない。"""
+        rows = [row(2020, 1000.0, 200.0, eps=100.0), row(2021, 1000.0, 100.0, eps=100.0)]
+        events, stats = M.detect_events(rows, bps_path=True)
+        assert events == []
+        assert stats["bps_path"]["rejected"]["eps_mismatch"] == 1
+
+    @pytest.mark.parametrize("eps_prev,eps_cur", [(100.0, -50.0), (-100.0, -50.0),
+                                                  (100.0, 0.0), (None, 50.0), (100.0, None)])
+    def test_non_positive_eps_is_rejected(self, eps_prev, eps_cur):
+        """赤字・ゼロ・欠損の年は比の意味が壊れる。赤字幅の増減が分割比に化ける。"""
+        rows = [row(2020, 1000.0, 200.0, eps=eps_prev), row(2021, 1000.0, 100.0, eps=eps_cur)]
+        events, stats = M.detect_events(rows, bps_path=True)
+        assert events == []
+        assert stats["bps_path"]["rejected"]["eps_sign"] == 1
+
+    def test_unsnappable_bps_ratio_is_not_rounded(self):
+        """どの定番比にも合成としても寄らない比は捨てる（第1経路と同じ扱い）。"""
+        rows = [row(2020, 1000.0, 700.0, eps=70.0), row(2021, 1000.0, 100.0, eps=10.0)]
+        events, stats = M.detect_events(rows, bps_path=True)
+        assert events == []
+        assert stats["bps_path"]["rejected"]["unsnapped"] == 1
+
+    def test_clean_split_is_not_counted_twice(self):
+        """株数も bps も同じ年に動く普通の分割。両経路が拾うが 1 件へ畳む。"""
+        rows = [row(2020, 1000.0, 200.0, eps=20.0), row(2021, 2000.0, 100.0, eps=10.0)]
+        events, stats = M.detect_events(rows, bps_path=True)
+        assert len(events) == 1
+        assert events[0].source == "shares"       # 株数の方が基準として素直
+        assert stats["bps_path"]["rejected"]["dup_with_shares"] == 1
+        # 畳み損ねると F が比の二乗（4.0）になる。そこが実害。
+        assert M.cumulative_factors(rows, events)[("E00001", 2020)] == pytest.approx(2.0)
+
+    def test_disabled_path_reproduces_the_previous_behaviour(self):
+        """`bps_path=False` は #655 までの検出と 1 件も違わないこと。"""
+        rows = [row(2020, 1000.0, 200.0, eps=20.0), row(2021, 2000.0, 100.0, eps=10.0),
+                row(2022, 2000.0, 50.0, eps=5.0)]
+        off, off_stats = M.detect_events(rows, bps_path=False)
+        assert [(e.year, e.canonical, e.source) for e in off] == [(2021, 2.0, "shares")]
+        assert off_stats["bps_path"]["enabled"] is False
+        assert off_stats["bps_path"]["n_events"] == 0
+        # 第2経路を入れると 2022 の分割（株数据え置き）が増える
+        on, _ = M.detect_events(rows, bps_path=True)
+        assert [(e.year, e.source) for e in on] == [(2021, "shares"), (2022, "bps")]
+
+    def test_reverse_split_via_bps(self):
+        """1:10 併合（株数据え置き）。bps と eps が 10 倍になり canonical は 0.1。"""
+        rows = [row(2020, 1000.0, 100.0, eps=10.0), row(2021, 1000.0, 1000.0, eps=100.0)]
+        events, _ = M.detect_events(rows, bps_path=True)
+        assert len(events) == 1
+        assert events[0].canonical == pytest.approx(0.1)
+        assert events[0].kind == "reverse" and events[0].source == "bps"
+
+
 class TestCumulativeFactors:
     def test_only_later_events_count(self):
         """`e.year > y` であって `>=` ではない。分割当年の行は既に新基準で歪んでいない。"""
