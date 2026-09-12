@@ -1091,8 +1091,10 @@ def rebuild_split_adjustment_factors(db, *, bps_path: Optional[bool] = None) -> 
     `bps_path` は株数が追随しない社を拾う第2経路（#656）の ON/OFF。**None なら検出器側の
     既定（`measure_split_valuation_bias.DEFAULT_BPS_PATH`）に従う**——呼び出し側が既定を
     書き写すと2箇所が乖離する。明示するのは前後を測り比べるときだけである
-    （`scripts/measure_split_bias_oof.py`）。**2026-09-12 時点の既定は False**で、理由は
-    一致率が 0.367 しか出なかったこと（倍率が系統的に小さく出る）。根拠は検出器側の定数へ。
+    （`scripts/measure_split_bias_oof.py`）。**2026-09-12 時点の既定は True**で、根拠は
+    公式 `AdjFactor` との一致率 0.962（25/26・陰性対照の見逃し 0 社）。倍率を `bs_bps` の
+    年次比ではなく**翌年の `issued_shares` 比**から取るようにして 0.367 から上がった（#659）。
+    数字と経緯は検出器側の定数へ。
 
     **「入力が無い」と「入力はあるのに作れない」を分ける**。annual 行が0件ならスキップして
     0 を返す（初回ブートストラップ前・テストのスタブ DB）。行はあるのに係数が1件も作れない

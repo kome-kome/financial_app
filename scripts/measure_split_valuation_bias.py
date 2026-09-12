@@ -49,6 +49,11 @@
 `pl_eps` の比を交差検証にする。株数と1株指標が同じ年に動く前提を外した経路で、
 `--bps-path` / `--no-bps-path` で切り替える（既定は `DEFAULT_BPS_PATH`）。
 
+**第2経路の倍率は候補ゲートから取らず、翌年の `issued_shares` 比から取る**（#659）。
+`bs_bps` は分割以外（内部留保・評価差額）でも増えるので年次比は `F / (1 + g)` になり、
+「分割があった」は言えても「何倍か」を決められない（実測の一致率 0.367）。倍率だけを
+独立な第3の信号＝1年遅れの株数比へ移し、その信号が無い年は**採らない**。
+
 実行:
     python -m scripts.measure_split_valuation_bias detect
     python -m scripts.measure_split_valuation_bias detect --sweep --price-basis
@@ -56,6 +61,8 @@
     python -m scripts.measure_split_valuation_bias verify-sample --dry-run
     python -m scripts.measure_split_valuation_bias verify-sample        # 約14分
     python -m scripts.measure_split_valuation_bias verify-sample --bps-path --source bps
+    python -m scripts.measure_split_valuation_bias verify-sample --bps-path --source bps \
+        --coverage partial        # 第2経路の倍率を測るときはこちら（#659）
 
 出力は ASCII 記号のみ（Windows cp932 リダイレクト対策）。
 """
@@ -86,21 +93,21 @@ DEFAULT_SNAP_TOL = 0.02
 # 第2経路（`bs_bps` を候補ゲート・`pl_eps` を交差検証にする経路・#656）を既定で使うか。
 # **`rebuild_split_adjustment_factors` が既定のまま呼ぶ＝ここが毎晩の係数表の中身を決める。**
 #
-# **False のままなのは実測で倒したからである**（2026-09-12・
-# `verify-sample --bps-path --source bps --n 30 --controls 10`）。公式 `AdjFactor` との
-# 一致率は **0.367（11/30）**で、#654 の第1経路の 0.967 に届かない。
+# **True にしたのは実測で倒したからである**（2026-09-12・`verify-sample --bps-path
+# --source bps --coverage partial --n 30 --controls 10`）。公式 `AdjFactor` との一致率は
+# **0.962（25/26）**・陰性対照の見逃し **0 社**で、#654 の第1経路の 0.967 とほぼ同水準。
 #
-# **外れ方はランダムではなく、見つけた 16 件すべてで検出 < 公式だった。**
-# `bs_bps` は分割以外（内部留保・有価証券の評価差額）でも増えるので、年次比は
-# 真の分割比 F に対し `F / (1 + g)` になる（g は bps の成長率）。実測の g は
-# **18%〜67%** と幅が広く、隣り合う定番比の間隔（例 2.0 と 2.5）を超える。
-# 「`raw` 以上で最小の定番比を採る」上向きスナップでも **0.778（21/27）**で止まる。
-# つまり **bps 比は「分割があった」は言えるが「何倍か」を決められない**。
+# **この経路が使えるようになったのは倍率の出どころを変えたからである**（#659）。
+# `bs_bps` の年次比を倍率に使っていた頃の一致率は **0.367（11/30）**で、外れた 16 件
+# すべてで検出 < 公式だった。`bs_bps` は分割以外（内部留保・有価証券の評価差額）でも
+# 増えるので、年次比は真の分割比 F に対し `F / (1 + g)` になる。実測の g は **18%〜67%**
+# と幅が広く、隣り合う定番比の間隔（例 2.0 と 2.5）を超える。上向きスナップでも
+# **0.778（21/27）**で止まった。**bps 比は「分割があった」は言えるが「何倍か」を
+# 決められない**——だから倍率だけを翌年の `issued_shares` 比へ移した（`detect_events`）。
 #
-# 存在の検出としては優秀で、抽出 30 社のうち 27 社に公式イベントがあり
-# （偽陽性 3 社）、**陰性対照の見逃しは 0 社**だった。倍率を独立な第3の信号から
-# 取る改良は #656 のコメントと後継 issue へ送った。True へ倒すのはそれが済んでから。
-DEFAULT_BPS_PATH = False
+# 第3信号を要求したぶん件数は減る（257 イベント/245社 -> 114/113）。**減ったのは
+# 倍率の根拠が無い分**で、最新年のイベントは翌年の決算が入れば自動的に係数表へ入る。
+DEFAULT_BPS_PATH = True
 # 合成（分割＋増資）とみなす残差の範囲。これを外れたら丸めずに unsnapped で別枠へ出す。
 COMPOSITE_LO, COMPOSITE_HI = 0.8, 1.25
 
@@ -174,6 +181,9 @@ class ShareEvent(NamedTuple):
     # "bps" は `bs_bps` の年次比を候補ゲートにし `pl_eps` の比で交差検証した第2経路。
     # 既定値を持つのは、既存の呼び出し（テストの `ev()` ヘルパー含む）を壊さないため。
     source: str = "shares"
+    # 第2経路の倍率を決めた第3の信号＝**翌年**の `issued_shares` 比（#659）。
+    # 第1経路では None（倍率は当年の `sh_ratio` そのもの）。
+    lagged_sh_ratio: Optional[float] = None
 
 
 class MatchResult(NamedTuple):
@@ -185,7 +195,7 @@ class MatchResult(NamedTuple):
     n_official_events: int
     status: str
     # status: agree | agree_raw_only | disagree_magnitude | no_official_event
-    #         | official_only | out_of_coverage | no_sec_code
+    #         | no_official_event_partial | official_only | out_of_coverage | no_sec_code
 
 
 def _log(x: float) -> float:
@@ -245,6 +255,17 @@ def detect_events(rows: Sequence[AnnualRow], *,
     - 第2経路（`source="bps"`・#656）: `bs_bps` の年次比が閾値を超えること（候補ゲート）と、
       `pl_eps` の比が同じ倍率で一致すること（交差検証）。減損・大幅赤字はここで落ちる。
 
+    **倍率の出どころは経路ごとに違う**（#659）。第1経路は候補ゲートに使った `sh_ratio` を
+    そのまま倍率にできるが、第2経路はできない。`bs_bps` は分割以外（内部留保・有価証券の
+    評価差額）でも増えるので、年次比は真の分割比 F に対し `F / (1 + g)` になる。実測の g は
+    18%〜67% と幅が広く、隣り合う定番比の間隔（例 2.0 と 2.5）を超えるため、スナップ先が
+    系統的に1段小さい側へ落ちる（公式との一致率 0.367・外れた16件すべてで検出 < 公式）。
+    そこで第2経路の倍率は**翌年の `issued_shares` 比という独立な第3の信号**から取る。
+    しまむら型は bps が動いた翌年に株数が動くので、そこに真の分割比が現れる。
+    **第3の信号が取れない年（翌年の行がまだ無い等）は採らない**——倍率を間違えた補正は
+    系統誤差を別の系統誤差へ置き換えるだけで、ADR-0055 決定4 が採った取引とは別物になる。
+    係数表は毎晩全置換なので、翌年の決算が入れば自動で補正が入る。
+
     **第2経路が要るのは、株数と1株指標が同じ年に動くとは限らないから。** 分割を 1 株指標には
     反映しているのに `issued_shares` が据え置きの社は第1経路の候補にすら上がらない
     （実測 E03137 しまむらは `shares x1.0000` のまま `bps x1.8670 / eps x1.8971`）。
@@ -269,60 +290,103 @@ def detect_events(rows: Sequence[AnnualRow], *,
     bps_candidate_ecs: set[str] = set()
     n_bps_candidates = 0
     bps_rejected: Counter = Counter()
+    # bps 経路が「翌年の株数の動き」を倍率に使ったとき、その動きの年を覚えておく。
+    # 第1経路が同じ動きを別イベントとして採っていたら、あとで畳む（#659）。
+    lagged_year_of: dict[int, int] = {}          # events の添字 -> 倍率に使った翌年の year
+    shares_pairs: set[tuple[str, int]] = set()   # 第1経路が採った (ec, year)
+
     for ec, rs in by_ec.items():
-        prev: Optional[AnnualRow] = None
+        # **使える行だけを先に並べる。** 翌年の株数を見るには次の行を先読みする必要があり、
+        # 逐次ループのままでは書けない（`prev` は持てても `next` は持てない）。
+        usable: list[AnnualRow] = []
         for cur in sorted(rs, key=lambda r: r.year):
             why = _usable(cur)
             if why:
                 skipped[why] += 1
                 continue
-            if prev is not None:
-                took = False
-                sh_ratio = cur.issued_shares / prev.issued_shares
-                bps_ratio = prev.bs_bps / cur.bs_bps
-                if abs(_log(sh_ratio)) >= gate:
-                    n_candidates += 1
-                    candidate_ecs.add(ec)
-                    if abs(bps_ratio / sh_ratio - 1.0) <= bps_tol:
-                        canonical, residual, kind = snap_to_canonical(sh_ratio, tol=snap_tol)
-                        events.append(ShareEvent(
-                            edinet_code=ec, year=cur.year, prev_year=prev.year,
-                            gap_years=cur.year - prev.year,
-                            period_end=cur.period_end, prev_period_end=prev.period_end,
-                            sh_ratio=sh_ratio, bps_ratio=bps_ratio,
-                            canonical=canonical, residual=residual, kind=kind,
-                            source="shares"))
-                        took = True
+            usable.append(cur)
 
-                if bps_path and abs(_log(bps_ratio)) >= gate:
-                    n_bps_candidates += 1
-                    bps_candidate_ecs.add(ec)
-                    if took:
-                        # 第1経路が同じペアを既に採った。両方が同じ実体を指しているので
-                        # 2件に数えない（数えると `cumulative_factors` が比を二乗する）。
-                        bps_rejected["dup_with_shares"] += 1
-                    elif (prev.pl_eps is None or cur.pl_eps is None
-                            or prev.pl_eps <= 0 or cur.pl_eps <= 0):
-                        # **符号が跨ぐ年・赤字の年は比の意味が壊れる。** 赤字継続（両年とも負）でも
-                        # 比は数学的には出るが、赤字幅の増減が分割比に化けるので落とす側を採る。
-                        bps_rejected["eps_sign"] += 1
-                    elif abs((prev.pl_eps / cur.pl_eps) / bps_ratio - 1.0) > bps_tol:
-                        # 交差検証で落ちた本体。減損・大幅赤字・タグ基準の変更はここへ来る
-                        # （bps だけが動いて eps が追随しない）。
-                        bps_rejected["eps_mismatch"] += 1
+        for i in range(1, len(usable)):
+            prev, cur = usable[i - 1], usable[i]
+            nxt = usable[i + 1] if i + 1 < len(usable) else None
+            took = False
+            sh_ratio = cur.issued_shares / prev.issued_shares
+            bps_ratio = prev.bs_bps / cur.bs_bps
+            if abs(_log(sh_ratio)) >= gate:
+                n_candidates += 1
+                candidate_ecs.add(ec)
+                if abs(bps_ratio / sh_ratio - 1.0) <= bps_tol:
+                    canonical, residual, kind = snap_to_canonical(sh_ratio, tol=snap_tol)
+                    events.append(ShareEvent(
+                        edinet_code=ec, year=cur.year, prev_year=prev.year,
+                        gap_years=cur.year - prev.year,
+                        period_end=cur.period_end, prev_period_end=prev.period_end,
+                        sh_ratio=sh_ratio, bps_ratio=bps_ratio,
+                        canonical=canonical, residual=residual, kind=kind,
+                        source="shares"))
+                    shares_pairs.add((ec, cur.year))
+                    took = True
+
+            if bps_path and abs(_log(bps_ratio)) >= gate:
+                n_bps_candidates += 1
+                bps_candidate_ecs.add(ec)
+                if took:
+                    # 第1経路が同じペアを既に採った。両方が同じ実体を指しているので
+                    # 2件に数えない（数えると `cumulative_factors` が比を二乗する）。
+                    bps_rejected["dup_with_shares"] += 1
+                elif (prev.pl_eps is None or cur.pl_eps is None
+                        or prev.pl_eps <= 0 or cur.pl_eps <= 0):
+                    # **符号が跨ぐ年・赤字の年は比の意味が壊れる。** 赤字継続（両年とも負）でも
+                    # 比は数学的には出るが、赤字幅の増減が分割比に化けるので落とす側を採る。
+                    bps_rejected["eps_sign"] += 1
+                elif abs((prev.pl_eps / cur.pl_eps) / bps_ratio - 1.0) > bps_tol:
+                    # 交差検証で落ちた本体。減損・大幅赤字・タグ基準の変更はここへ来る
+                    # （bps だけが動いて eps が追随しない）。
+                    bps_rejected["eps_mismatch"] += 1
+                elif nxt is None:
+                    # **倍率の出どころが無い。** 最新年のイベントはここへ来る（翌年の決算が
+                    # まだ提出されていない）。採らずに次回へ送る＝係数表は毎晩全置換なので、
+                    # 翌年の行が入れば自動で補正が入る（#659）。
+                    bps_rejected["no_lagged_row"] += 1
+                else:
+                    lag = nxt.issued_shares / cur.issued_shares
+                    if abs(_log(lag)) < gate:
+                        # 翌年も株数が動いていない。1株指標だけが動いた理由を分割だと
+                        # 言い切れる材料が無いので採らない。
+                        bps_rejected["lagged_flat"] += 1
+                    elif _log(lag) * _log(bps_ratio) < 0:
+                        # 向きが逆（bps は分割方向・株数は併合方向）。同じ事象ではない。
+                        bps_rejected["lagged_direction"] += 1
                     else:
-                        canonical, residual, kind = snap_to_canonical(bps_ratio, tol=snap_tol)
+                        canonical, residual, kind = snap_to_canonical(lag, tol=snap_tol)
                         if canonical is None:
-                            bps_rejected["unsnapped"] += 1
+                            bps_rejected["lagged_unsnapped"] += 1
                         else:
+                            # **倍率は `lag` から決め、`bps_ratio` / `sh_ratio` は観測値の
+                            # まま残す**（あとから「当年は株数が動いていない」が読める）。
+                            lagged_year_of[len(events)] = nxt.year
                             events.append(ShareEvent(
                                 edinet_code=ec, year=cur.year, prev_year=prev.year,
                                 gap_years=cur.year - prev.year,
                                 period_end=cur.period_end, prev_period_end=prev.period_end,
                                 sh_ratio=sh_ratio, bps_ratio=bps_ratio,
                                 canonical=canonical, residual=residual, kind=kind,
-                                source="bps"))
-            prev = cur
+                                source="bps", lagged_sh_ratio=lag))
+
+    # **同じ株数の動きを2回数えない。** bps 経路が翌年の動きを倍率に使い、かつ第1経路が
+    # その翌年を独立したイベントとして採っていたら、`cumulative_factors` が比を二乗する
+    # （`dup_with_shares` と同じ実害）。第1経路を残す側に倒すのは、株数が分割で必ず動く量で
+    # 基準として素直だからである。判定はループを抜けてから——第1経路が採るかどうかは
+    # 翌年のペアを処理するまで決まらない。
+    if lagged_year_of:
+        kept: list[ShareEvent] = []
+        for i, e in enumerate(events):
+            ly = lagged_year_of.get(i)
+            if ly is not None and (e.edinet_code, ly) in shares_pairs:
+                bps_rejected["dup_lagged_with_shares"] += 1
+                continue
+            kept.append(e)
+        events = kept
 
     bps_events = [e for e in events if e.source == "bps"]
     stats = {
@@ -510,19 +574,37 @@ def event_window(ev: ShareEvent, *, slack_days: int = 45) -> Optional[tuple[str,
 
 
 def in_coverage(ev: ShareEvent, coverage: Optional[tuple[str, str]], *,
-                slack_days: int = 45) -> bool:
-    """公式がこのイベントを判定できるか。窓が契約期間へ完全に収まるときだけ True。"""
+                slack_days: int = 45, mode: str = "full") -> bool:
+    """公式がこのイベントを判定できるか。
+
+    `mode="full"`（既定）は窓が契約期間へ**完全に**収まるときだけ True。公式にイベントが
+    無ければ「分割は無かった」と読めるので、偽陽性率まで測れる代わりに範囲が狭い。
+
+    `mode="partial"` は窓が契約期間と**重なって**いれば True（#659）。
+    **倍率が合っているかだけを測るための緩め方**で、重なりの中で公式イベントが見つかった件
+    だけを分母に数える（見つからなかった件は「分割が無かった」と「契約窓の外で起きた」を
+    区別できないので分母から外す＝`match_event` が `no_official_event_partial` を返す）。
+
+    なぜ緩める必要があるか: 第2経路の倍率は翌年の `issued_shares` から取るので、突合には
+    「公式が判定できる」と「翌年の行が提出済み」の両方が要る。契約窓は直近2年なので
+    full では当期末が窓の後ろ寄りのイベントしか残らず、その翌年の決算はまだ存在しない
+    ——**2つの条件は full のままでは今日の時点で排他**である（実測 2026-09-12: 契約窓
+    2024-06-20〜2026-06-20 に対し、窓内の bps 経路イベント 57件はいずれも最新年）。
+    """
     win = event_window(ev, slack_days=slack_days)
     if win is None:
         return False
     if not coverage or not coverage[0] or not coverage[1]:
         return True
+    if mode == "partial":
+        return win[0] <= coverage[1] and coverage[0] <= win[1]
     return coverage[0] <= win[0] and win[1] <= coverage[1]
 
 
 def match_event(ev: ShareEvent, official: Sequence[tuple[str, float]], *,
                 slack_days: int = 45, tol: float = 0.05,
-                coverage: Optional[tuple[str, str]] = None) -> MatchResult:
+                coverage: Optional[tuple[str, str]] = None,
+                coverage_mode: str = "full") -> MatchResult:
     """検出したイベントを公式 `AdjFactor` と突き合わせる。
 
     公式の `AdjFactor` は**過去株価に掛ける係数**なので 1:2 分割は 0.5 で返る。株数比へ
@@ -530,22 +612,35 @@ def match_event(ev: ShareEvent, official: Sequence[tuple[str, float]], *,
 
     窓は (前期末 - slack, 当期末 + slack]。分割の効力発生日と株数の計上期のズレを吸収する。
     契約窓の外は `out_of_coverage` にして**一致率の分母から外す**（混ぜると理由なく下がる）。
+
+    `coverage_mode="partial"` では窓と契約窓の重なりの中だけを探し、公式イベントが無ければ
+    `no_official_event_partial` を返す（#659）。**この status は分母に入れない**——重なりの
+    外で起きた分割は公式が返さないので、「分割が無かった」と区別できないためである。
     """
-    # 生比は**そのイベントを拾った経路の候補ゲートに使った量**を採る（#656）。
-    # bps 経路の `sh_ratio` は 1.0 近傍なので、そちらを見ると `agree_raw_only` が原理的に
-    # 立たなくなり、「スナップが悪さをしている」を分けて数える仕組みが黙って死ぬ。
-    raw = ev.bps_ratio if ev.source == "bps" else ev.sh_ratio
+    # 生比は**そのイベントの倍率を決めた量**を採る。bps 経路は #659 で倍率の出どころが
+    # 翌年の株数比へ移ったので、そちらを見る（`bps_ratio` を見ると `agree_raw_only` が
+    # 「もう倍率に使っていない量では合う」を数えることになり、意味が黙って壊れる）。
+    # 第1経路は候補ゲート＝倍率なので `sh_ratio` のまま。
+    if ev.source == "bps":
+        raw = ev.lagged_sh_ratio if ev.lagged_sh_ratio is not None else ev.bps_ratio
+    else:
+        raw = ev.sh_ratio
     detected = ev.canonical if ev.canonical is not None else raw
     win = event_window(ev, slack_days=slack_days)
-    if win is None or not in_coverage(ev, coverage, slack_days=slack_days):
+    if win is None or not in_coverage(ev, coverage, slack_days=slack_days,
+                                      mode=coverage_mode):
         return MatchResult(ev.edinet_code, ev.year, detected, raw,
                            None, 0, "out_of_coverage")
     w0, w1 = win
+    if coverage_mode == "partial" and coverage and coverage[0] and coverage[1]:
+        w0, w1 = max(w0, coverage[0]), min(w1, coverage[1])
 
     inside = [f for d, f in official if w0 < d <= w1 and f and f > 0]
     if not inside:
-        return MatchResult(ev.edinet_code, ev.year, detected, raw,
-                           None, 0, "no_official_event")
+        return MatchResult(
+            ev.edinet_code, ev.year, detected, raw, None, 0,
+            "no_official_event_partial" if coverage_mode == "partial"
+            else "no_official_event")
     prod = 1.0
     for f in inside:
         prod *= f
@@ -561,6 +656,26 @@ def match_event(ev: ShareEvent, official: Sequence[tuple[str, float]], *,
                            official_ratio, len(inside), "agree_raw_only")
     return MatchResult(ev.edinet_code, ev.year, detected, raw,
                        official_ratio, len(inside), "disagree_magnitude")
+
+
+#: 一致率の分母に入れる status。**ここが分母の唯一の源**で、CLI へ書き写さない。
+#: `no_official_event` が入るのは full 窓のときだけ——公式が返さない＝分割が無かったと
+#: 読めるので「検出が間違い」として数える。partial 窓の同じ状況は契約窓の外で起きた分割と
+#: 区別できないので `no_official_event_partial` にして分母から外す（#659）。
+MATCH_DENOMINATOR = ("agree", "agree_raw_only", "disagree_magnitude", "no_official_event")
+
+
+def tally_rates(results: Sequence[MatchResult]) -> tuple[Counter, int, float, float]:
+    """突合結果を数える。戻り値 (tally, denom, 一致率, 生比も許容した一致率)。
+
+    CLI から切り出してあるのは**分母の規則をテストで固定するため**。
+    分母が1件も無ければ率は 0.0（0除算を避ける）。
+    """
+    tally: Counter = Counter(r.status for r in results)
+    denom = sum(tally[k] for k in MATCH_DENOMINATOR)
+    rate = (tally["agree"] / denom) if denom else 0.0
+    rate_raw = ((tally["agree"] + tally["agree_raw_only"]) / denom) if denom else 0.0
+    return tally, denom, rate, rate_raw
 
 
 def choose_sample(events: Sequence[ShareEvent], flat_ecs: Sequence[str], *,
@@ -999,9 +1114,10 @@ def _cmd_verify_sample(args) -> int:
         # **抽出より先に契約窓を学習する**。窓の外から引いたサンプルは公式が判定できず、
         # `out_of_coverage` で分母だけが消える（実測 2026-09-12: 30件中 21件が窓外）。
         cover = asyncio.run(learn_coverage())
-        print("契約窓: %s 〜 %s" % cover)
+        print("契約窓: %s 〜 %s（突合の窓=%s）" % (cover[0], cover[1], args.coverage))
         events = [e for e in all_events
-                  if in_coverage(e, cover, slack_days=args.window_slack_days)]
+                  if in_coverage(e, cover, slack_days=args.window_slack_days,
+                                 mode=args.coverage)]
         print("検出イベント %d件のうち、公式が判定できるのは %d件（この中から抽出）"
               % (len(all_events), len(events)))
         if args.source != "any":
@@ -1060,14 +1176,11 @@ def _cmd_verify_sample(args) -> int:
                 continue
             results.append(match_event(e, official.get(e.edinet_code, []),
                                        slack_days=args.window_slack_days,
-                                       tol=args.match_tol, coverage=cover))
+                                       tol=args.match_tol, coverage=cover,
+                                       coverage_mode=args.coverage))
         misses = [ec for ec in ctrl if official.get(ec)]
 
-        tally = Counter(r.status for r in results)
-        denom = sum(tally[k] for k in ("agree", "agree_raw_only",
-                                       "disagree_magnitude", "no_official_event"))
-        rate = (tally["agree"] / denom) if denom else 0.0
-        rate_raw = ((tally["agree"] + tally["agree_raw_only"]) / denom) if denom else 0.0
+        tally, denom, rate, rate_raw = tally_rates(results)
 
         print()
         print("突合結果: " + ", ".join("%s=%d" % kv for kv in sorted(tally.items())))
@@ -1085,8 +1198,8 @@ def _cmd_verify_sample(args) -> int:
             p = Path(args.json)
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_text(json.dumps({
-                "coverage": list(cover), "source": args.source,
-                "bps_path": bool(args.bps_path),
+                "coverage": list(cover), "coverage_mode": args.coverage,
+                "source": args.source, "bps_path": bool(args.bps_path),
                 "positives": pos, "controls": ctrl,
                 "no_sec_code": no_sec, "tally": dict(tally),
                 "agree_rate": rate, "agree_rate_raw_ok": rate_raw,
@@ -1135,6 +1248,11 @@ def build_parser() -> argparse.ArgumentParser:
     v.add_argument("--window-slack-days", type=int, default=45)
     v.add_argument("--source", choices=("any", "shares", "bps"), default="any",
                    help="突合する経路を絞る（#656 の第2経路だけの一致率を出すときは bps）")
+    # 既定は full＝今日までと同じ意味。partial は倍率が合っているかだけを測る緩め方で、
+    # 「公式が判定できる」と「翌年の行が提出済み」が full では排他になる第2経路のために足した（#659）。
+    v.add_argument("--coverage", choices=("full", "partial"), default="full",
+                   help="突合の窓。full=契約窓へ完全に収まる窓だけ / "
+                        "partial=重なりの中で公式イベントが見つかった件だけを分母にする（#659）")
     v.add_argument("--only", default="")
     v.add_argument("--dry-run", action="store_true", help="抽出される社だけ出して API を叩かない")
     v.add_argument("--json", nargs="?", const=str(DEFAULT_VERIFY_JSON),

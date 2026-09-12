@@ -120,7 +120,7 @@ class TestDetectEvents:
 
 
 class TestBpsPath:
-    """第2経路（`bs_bps` 候補ゲート x `pl_eps` 交差検証）— Issue #656。
+    """第2経路（`bs_bps` 候補ゲート x `pl_eps` 交差検証）— Issue #656 / #659。
 
     検体は E03137 しまむらの `financial_records` 実値をそのまま写した（2026-09-12・
     接続先 local）。**推測で書いた検体は「本物を読めないこと」を検出できない。**
@@ -134,6 +134,10 @@ class TestBpsPath:
     株数は 2025 に x2 されるが、1 株指標は 2024（→1:2）と 2026（→1:3）に動く。
     つまり**株数と 1 株指標が 1 年ずれて報告されている**ので、第1経路は 2025 の候補を
     交差検証で落とし（bps は下がるどころか上がっている）、2024 と 2026 は候補にすら上がらない。
+
+    **倍率は翌年の株数比から取る**（#659）。2024 のイベントは 2025 の株数 x2.0000 が倍率になる。
+    2026 のイベントは 2027 の行がまだ無いので**採らない**——bps 比 2.8965 をスナップすれば
+    3.0 が出るが、bps は内部留保でも動くため「何倍か」の根拠にならない。
     """
 
     SHIMAMURA = (
@@ -150,36 +154,56 @@ class TestBpsPath:
         """#656 が報告した取りこぼしそのもの。第2経路が無ければ 1 件も立たない。"""
         assert M.detect_events(self._rows(), bps_path=False)[0] == []
 
-    def test_bps_path_finds_both_splits(self):
+    def test_bps_path_finds_the_split_with_a_third_signal(self):
+        """翌年の株数が裏を取れる 2024 だけが立つ。2026 は第3信号が無いので採らない。"""
         events, stats = M.detect_events(self._rows(), bps_path=True)
-        assert [(e.year, e.canonical) for e in sorted(events, key=lambda e: e.year)] == [
-            (2024, pytest.approx(2.0)), (2026, pytest.approx(3.0))]
-        assert all(e.source == "bps" for e in events)
-        assert stats["n_events_by_source"] == {"bps": 2}
-        assert stats["bps_path"]["n_events"] == 2
+        assert [(e.year, e.canonical) for e in events] == [(2024, pytest.approx(2.0))]
+        assert events[0].source == "bps"
+        assert stats["n_events_by_source"] == {"bps": 1}
+        assert stats["bps_path"]["n_events"] == 1
+        assert stats["bps_path"]["rejected"]["no_lagged_row"] == 1
 
-    def test_composite_is_accepted_because_bps_drifts_on_its_own(self):
-        """**2% スナップでは看板例が落ちる。**
+    def test_magnitude_comes_from_the_lagged_shares_not_from_bps(self):
+        """**倍率の出どころが `bs_bps` から翌年の `issued_shares` へ移ったこと**（#659）。
 
-        `bs_bps` は内部留保・配当でも毎年動くので、株数比と違って定番比ぴったりにならない。
-        実測 bps 比 1.8670 は 2.0 から対数距離 6.9% 離れており、`snap_to_canonical` の
-        厳密側（tol=2%）を外れて `composite`（残差 0.80〜1.25）で拾われる。
-        ここを split/reverse だけに絞ると 161 行の大半が埋まらない。
+        bps 比 1.8670 をスナップすると残差 0.9335 の `composite` になり、値としては 2.0 に
+        寄るが、これは「たまたま同じ定番比へ落ちた」だけである（実測では 1.7032 が 1.5 へ
+        落ちて公式 2.0 を外す）。ここでは倍率が翌年の株数比 2.0000 ちょうどから決まるので
+        `kind` は `split`・残差は 1.0 になる。bps 比と株数比は観測値のまま残す。
         """
         e = [e for e in M.detect_events(self._rows(), bps_path=True)[0] if e.year == 2024][0]
-        assert e.kind == "composite"
+        assert e.lagged_sh_ratio == pytest.approx(2.0)
+        assert e.kind == "split"
+        assert e.residual == pytest.approx(1.0)
         assert e.bps_ratio == pytest.approx(1.8670, abs=1e-4)
-        assert e.residual == pytest.approx(0.9335, abs=1e-4)
-        # 株数比は捏造せず観測値のまま残す（あとから「株数が動いていない」が読める）
+        # 株数比は捏造せず観測値のまま残す（あとから「当年は株数が動いていない」が読める）
         assert e.sh_ratio == pytest.approx(1.0)
 
+    def test_a_half_ratio_snaps_to_the_lagged_shares_answer(self):
+        """#659 の表そのもの。bps 比 1.7036 だけ見ると 1.5 へ落ちるが、公式は 2.0。
+
+        翌年の株数比を倍率にすれば 2.0 が出る。**bps 比は「分割があった」は言えるが
+        「何倍か」を決められない**、という本 issue の主張を固定する。
+        """
+        rows = [row(2020, 1000.0, 100.0, eps=10.0),
+                row(2021, 1000.0, 58.7, eps=5.87),
+                row(2022, 2000.0, 58.7, eps=5.87)]
+        # bps 比だけを見たときのスナップ先（＝#659 が直した誤り）を先に押さえておく
+        assert M.snap_to_canonical(100.0 / 58.7)[0] == pytest.approx(1.5)
+        events, _ = M.detect_events(rows, bps_path=True)
+        assert [(e.year, e.canonical, e.source) for e in events] == [(2021, 2.0, "bps")]
+
     def test_cumulative_factor_is_the_product_of_later_events(self):
-        """F は**その行より後**のイベントの積。2024 の行が見るのは 2026 の 1 件だけ。"""
+        """F は**その行より後**のイベントの積。立つのは 2024 の 1 件だけ。
+
+        2026 の 1:3 は第3信号が無いので今回は入らない。**係数表は毎晩全置換**なので、
+        2027 の決算が提出されて株数が x3 になった時点で自動的に F へ入る（#659）。
+        """
         rows = self._rows()
         f = M.cumulative_factors(rows, M.detect_events(rows, bps_path=True)[0])
-        assert f[("E03137", 2023)] == pytest.approx(6.0)
-        assert f[("E03137", 2024)] == pytest.approx(3.0)
-        assert f[("E03137", 2025)] == pytest.approx(3.0)
+        assert f[("E03137", 2023)] == pytest.approx(2.0)
+        assert f[("E03137", 2024)] == pytest.approx(1.0)
+        assert f[("E03137", 2025)] == pytest.approx(1.0)
         assert f[("E03137", 2026)] == pytest.approx(1.0)
 
     def test_impairment_is_rejected_by_the_eps_cross_check(self):
@@ -198,12 +222,36 @@ class TestBpsPath:
         assert events == []
         assert stats["bps_path"]["rejected"]["eps_sign"] == 1
 
-    def test_unsnappable_bps_ratio_is_not_rounded(self):
-        """どの定番比にも合成としても寄らない比は捨てる（第1経路と同じ扱い）。"""
-        rows = [row(2020, 1000.0, 700.0, eps=70.0), row(2021, 1000.0, 100.0, eps=10.0)]
+    def test_latest_year_event_is_not_taken(self):
+        """翌年の決算がまだ提出されていない年は倍率の出どころが無い。採らずに次回へ送る。"""
+        rows = [row(2020, 1000.0, 200.0, eps=20.0), row(2021, 1000.0, 100.0, eps=10.0)]
         events, stats = M.detect_events(rows, bps_path=True)
         assert events == []
-        assert stats["bps_path"]["rejected"]["unsnapped"] == 1
+        assert stats["bps_path"]["rejected"]["no_lagged_row"] == 1
+
+    def test_flat_lagged_shares_is_rejected(self):
+        """翌年も株数が動かない。1 株指標だけが動いた理由を分割と言い切れない。"""
+        rows = [row(2020, 1000.0, 200.0, eps=20.0), row(2021, 1000.0, 100.0, eps=10.0),
+                row(2022, 1000.0, 100.0, eps=10.0)]
+        events, stats = M.detect_events(rows, bps_path=True)
+        assert events == []
+        assert stats["bps_path"]["rejected"]["lagged_flat"] == 1
+
+    def test_opposite_direction_lagged_shares_is_rejected(self):
+        """bps は分割方向・翌年の株数は併合方向。同じ事象ではないので採らない。"""
+        rows = [row(2020, 1000.0, 200.0, eps=20.0), row(2021, 1000.0, 100.0, eps=10.0),
+                row(2022, 100.0, 100.0, eps=10.0)]
+        events, stats = M.detect_events(rows, bps_path=True)
+        assert events == []
+        assert stats["bps_path"]["rejected"]["lagged_direction"] == 1
+
+    def test_unsnappable_lagged_ratio_is_not_rounded(self):
+        """どの定番比にも合成としても寄らない比は捨てる（第1経路と同じ扱い）。"""
+        rows = [row(2020, 1000.0, 700.0, eps=70.0), row(2021, 1000.0, 100.0, eps=10.0),
+                row(2022, 7000.0, 100.0, eps=10.0)]
+        events, stats = M.detect_events(rows, bps_path=True)
+        assert events == []
+        assert stats["bps_path"]["rejected"]["lagged_unsnapped"] == 1
 
     def test_clean_split_is_not_counted_twice(self):
         """株数も bps も同じ年に動く普通の分割。両経路が拾うが 1 件へ畳む。"""
@@ -215,25 +263,41 @@ class TestBpsPath:
         # 畳み損ねると F が比の二乗（4.0）になる。そこが実害。
         assert M.cumulative_factors(rows, events)[("E00001", 2020)] == pytest.approx(2.0)
 
+    def test_lagged_move_already_taken_by_the_shares_path_is_folded(self):
+        """**同じ株数の動きを2回数えない**（#659）。
+
+        2021 で bps だけが半分になり、2022 で株数 x2 と bps 半減が揃う。株数の動きは
+        1 回しか起きていないのに、bps 経路が 2021 の倍率として同じ動きを使い、第1経路が
+        2022 のイベントとして採ると、F が比の二乗（4.0）になる。第1経路を残す側へ畳む。
+        """
+        rows = [row(2020, 1000.0, 200.0, eps=20.0), row(2021, 1000.0, 100.0, eps=10.0),
+                row(2022, 2000.0, 50.0, eps=5.0)]
+        events, stats = M.detect_events(rows, bps_path=True)
+        assert [(e.year, e.source) for e in events] == [(2022, "shares")]
+        assert stats["bps_path"]["rejected"]["dup_lagged_with_shares"] == 1
+        assert M.cumulative_factors(rows, events)[("E00001", 2020)] == pytest.approx(2.0)
+
     def test_disabled_path_reproduces_the_previous_behaviour(self):
         """`bps_path=False` は #655 までの検出と 1 件も違わないこと。"""
         rows = [row(2020, 1000.0, 200.0, eps=20.0), row(2021, 2000.0, 100.0, eps=10.0),
-                row(2022, 2000.0, 50.0, eps=5.0)]
+                row(2022, 2000.0, 50.0, eps=5.0), row(2023, 4000.0, 50.0, eps=5.0)]
         off, off_stats = M.detect_events(rows, bps_path=False)
         assert [(e.year, e.canonical, e.source) for e in off] == [(2021, 2.0, "shares")]
         assert off_stats["bps_path"]["enabled"] is False
         assert off_stats["bps_path"]["n_events"] == 0
-        # 第2経路を入れると 2022 の分割（株数据え置き）が増える
+        # 第2経路を入れると 2022 の分割（株数は 2023 に追随）が増える
         on, _ = M.detect_events(rows, bps_path=True)
         assert [(e.year, e.source) for e in on] == [(2021, "shares"), (2022, "bps")]
 
     def test_reverse_split_via_bps(self):
-        """1:10 併合（株数据え置き）。bps と eps が 10 倍になり canonical は 0.1。"""
-        rows = [row(2020, 1000.0, 100.0, eps=10.0), row(2021, 1000.0, 1000.0, eps=100.0)]
+        """1:10 併合（株数は翌年に追随）。bps と eps が 10 倍になり canonical は 0.1。"""
+        rows = [row(2020, 1000.0, 100.0, eps=10.0), row(2021, 1000.0, 1000.0, eps=100.0),
+                row(2022, 100.0, 1000.0, eps=100.0)]
         events, _ = M.detect_events(rows, bps_path=True)
         assert len(events) == 1
         assert events[0].canonical == pytest.approx(0.1)
         assert events[0].kind == "reverse" and events[0].source == "bps"
+        assert events[0].lagged_sh_ratio == pytest.approx(0.1)
 
 
 class TestCumulativeFactors:
@@ -350,6 +414,80 @@ class TestMatchEvent:
     def test_magnitude_disagreement(self):
         e = ev(2024, canonical=2.0, sh_ratio=2.0, **self.E)
         assert M.match_event(e, [("2023-10-02", 0.2)]).status == "disagree_magnitude"
+
+    def test_bps_event_is_matched_on_the_lagged_shares_ratio(self):
+        """第2経路の生比は倍率を決めた量＝翌年の株数比（#659）。
+
+        `bps_ratio` を生比に使っていた頃の意味のままにすると、`agree_raw_only` が
+        「もう倍率に使っていない量では合う」を数えることになり、指標が黙って壊れる。
+        """
+        e = ev(2024, canonical=2.0, sh_ratio=1.0, **self.E)._replace(
+            source="bps", bps_ratio=1.7036, lagged_sh_ratio=2.0)
+        r = M.match_event(e, [("2023-10-02", 0.5)])
+        assert r.status == "agree"
+        assert r.raw_detected == pytest.approx(2.0)
+
+
+class TestPartialCoverage:
+    """`coverage_mode="partial"` — 倍率が合っているかだけを測るための緩め方（#659）。
+
+    第2経路の倍率は翌年の `issued_shares` から取るので、突合には「公式が判定できる」と
+    「翌年の行が提出済み」の両方が要る。契約窓は直近2年しかないため、full のままでは
+    この2条件が排他になり分母が 0 になる。
+    """
+
+    def _ev(self):
+        # 窓 = (2024-03-31 - 45日, 2025-03-31 + 45日] = 2024-02-15 〜 2025-05-15
+        return ev(2025, canonical=2.0, sh_ratio=2.0,
+                  prev_period_end="2024-03-31", period_end="2025-03-31")
+
+    COVER = ("2024-06-20", "2026-06-20")
+
+    def test_full_rejects_what_partial_accepts(self):
+        """窓の左端が契約窓より前。full は判定できないと見なし、partial は重なりを見る。"""
+        e = self._ev()
+        assert M.in_coverage(e, self.COVER) is False
+        assert M.in_coverage(e, self.COVER, mode="partial") is True
+
+    def test_official_event_inside_the_overlap_is_compared(self):
+        e = self._ev()
+        r = M.match_event(e, [("2024-10-01", 0.5)], coverage=self.COVER,
+                          coverage_mode="partial")
+        assert r.status == "agree" and r.official == pytest.approx(2.0)
+
+    def test_official_event_before_the_overlap_is_not_used(self):
+        """重なりの外にある公式イベントは、そもそも API が返さない。拾いにいかない。"""
+        e = self._ev()
+        r = M.match_event(e, [("2024-04-01", 0.5)], coverage=self.COVER,
+                          coverage_mode="partial")
+        assert r.status == "no_official_event_partial"
+
+    def test_partial_miss_is_excluded_from_the_denominator(self):
+        """**ここが partial の肝**。「分割が無かった」と「窓の外で起きた」を区別できない。
+
+        full の `no_official_event` は分母に入る（公式が返さない＝分割が無かったと読めるので
+        検出が間違いだと言える）。partial の同じ状況は分母から外す。
+        """
+        rows = [M.MatchResult("E1", 2025, 2.0, 2.0, 2.0, 1, "agree"),
+                M.MatchResult("E2", 2025, 2.0, 2.0, 3.0, 1, "disagree_magnitude"),
+                M.MatchResult("E3", 2025, 2.0, 2.0, None, 0, "no_official_event_partial"),
+                M.MatchResult("E4", 2025, 2.0, 2.0, None, 0, "out_of_coverage")]
+        tally, denom, rate, rate_raw = M.tally_rates(rows)
+        assert denom == 2
+        assert rate == pytest.approx(0.5)
+        assert rate_raw == pytest.approx(0.5)
+        assert tally["no_official_event_partial"] == 1
+
+    def test_full_miss_stays_in_the_denominator(self):
+        rows = [M.MatchResult("E1", 2025, 2.0, 2.0, 2.0, 1, "agree"),
+                M.MatchResult("E2", 2025, 2.0, 2.0, None, 0, "no_official_event")]
+        _, denom, rate, _ = M.tally_rates(rows)
+        assert denom == 2 and rate == pytest.approx(0.5)
+
+    def test_empty_denominator_does_not_divide_by_zero(self):
+        rows = [M.MatchResult("E1", 2025, 2.0, 2.0, None, 0, "out_of_coverage")]
+        _, denom, rate, rate_raw = M.tally_rates(rows)
+        assert denom == 0 and rate == 0.0 and rate_raw == 0.0
 
 
 class TestChooseSample:
