@@ -1119,7 +1119,8 @@ def rebuild_split_adjustment_factors(db, *, bps_path: Optional[bool] = None) -> 
     （`scripts/measure_split_bias_oof.py`）。**2026-09-12 時点の既定は True**で、根拠は
     公式 `AdjFactor` との一致率 0.962（25/26・陰性対照の見逃し 0 社）。倍率を `bs_bps` の
     年次比ではなく**翌年の `issued_shares` 比**から取るようにして 0.367 から上がった（#659）。
-    数字と経緯は検出器側の定数へ。
+    数字と経緯は検出器側の定数へ。第1経路の純資産総額チェック（#657）も同じく検出器側の
+    `DEFAULT_EQUITY_TOL` に従い、ここでは `bs_total_equity` を読んで渡すだけである。
 
     **「入力が無い」と「入力はあるのに作れない」を分ける**。annual 行が0件ならスキップして
     0 を返す（初回ブートストラップ前・テストのスタブ DB）。行はあるのに係数が1件も作れない
@@ -1145,6 +1146,8 @@ def rebuild_split_adjustment_factors(db, *, bps_path: Optional[bool] = None) -> 
         FinancialRecord.issued_shares, FinancialRecord.bs_bps, FinancialRecord.pl_eps,
         FinancialRecord.dps, FinancialRecord.stock_price, FinancialRecord.per,
         FinancialRecord.pbr, FinancialRecord.div_yield, FinancialRecord.market_cap,
+        # 純資産総額は第1経路の増資チェック（#657）が読む。`AnnualRow` の末尾の列なので末尾に置く。
+        FinancialRecord.bs_total_equity,
     ).filter(FinancialRecord.period_type == "annual").order_by(
         FinancialRecord.edinet_code, FinancialRecord.year, FinancialRecord.period_end,
     ).all()]

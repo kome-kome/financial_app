@@ -77,7 +77,7 @@ class TestRebuild:
 
         rows = [M.AnnualRow(
             r.edinet_code, r.year, r.period_end, r.issued_shares, r.bs_bps, r.pl_eps,
-            r.dps, r.stock_price, r.per, r.pbr, r.div_yield, r.market_cap,
+            r.dps, r.stock_price, r.per, r.pbr, r.div_yield, r.market_cap, r.bs_total_equity,
         ) for r in db.query(FinancialRecord).filter_by(period_type="annual").all()]
         events, _ = M.detect_events(rows)
         expected = {k: v for k, v in M.cumulative_factors(rows, events).items() if v != 1.0}
@@ -115,7 +115,7 @@ class TestRebuild:
 
         rows = [M.AnnualRow(
             r.edinet_code, r.year, r.period_end, r.issued_shares, r.bs_bps, r.pl_eps,
-            r.dps, r.stock_price, r.per, r.pbr, r.div_yield, r.market_cap,
+            r.dps, r.stock_price, r.per, r.pbr, r.div_yield, r.market_cap, r.bs_total_equity,
         ) for r in db.query(FinancialRecord).filter_by(period_type="annual").all()]
         events, _ = M.detect_events(rows)
 
@@ -256,6 +256,52 @@ class TestBpsPathReachesTheTable:
         got = {(r.year, r.factor, r.n_events)
                for r in db.query(SplitAdjustmentFactor).filter_by(edinet_code="E00001").all()}
         assert got == {(2019, 2.0, 1), (2020, 2.0, 1)}
+
+
+def _seed_issuance_company(db, make_fin, ec="E00005"):
+    """株数 x2・bps 半減で第1経路の交差検証は通るが、純資産総額が x2.16 になっている社（#657）。
+
+    `bs_bps` と純資産総額が食い違う形で、純資産比は E05716 地域新聞社の実測（x2.1611）に揃えた。
+    既定の許容（1.0＝2倍超）の外側なので、純資産比チェックが有効なら増資と読んで採らない。
+    """
+    for year, shares, bps, equity in ((2020, 1000.0, 2000.0, 2.0e6),
+                                      (2021, 2000.0, 1000.0, 4.32e6)):
+        db.add(make_fin(edinet_code=ec, year=year, period_end=date(year, 3, 31),
+                        issued_shares=shares, bs_bps=bps, pl_eps=100.0, dps=20.0,
+                        stock_price=1000.0, per=10.0, pbr=0.5,
+                        div_yield=2.0, market_cap=5000.0, bs_total_equity=equity))
+    db.commit()
+
+
+class TestEquityCheckReachesTheTable:
+    """純資産比チェック（#657）の入力と既定が係数表まで届くこと。既定は検出器側が唯一の源。"""
+
+    def test_rebuild_passes_the_total_equity(self, db, make_fin, monkeypatch):
+        """SELECT に列を足し忘れると、チェックは全社で「判定不能」になり黙って効かない。"""
+        _seed_issuance_company(db, make_fin)
+        _seed_split_company(db, make_fin)      # 既定で増資型が落ちても検出0件で失敗しないように
+        seen: list = []
+        real = M.detect_events
+
+        def spy(rows, **kw):
+            seen.extend(rows)
+            return real(rows, **kw)
+
+        monkeypatch.setattr(M, "detect_events", spy)
+        rebuild_split_adjustment_factors(db)
+        assert sorted((r.year, r.bs_total_equity) for r in seen
+                      if r.edinet_code == "E00005") == [(2020, 2.0e6), (2021, 4.32e6)]
+
+    def test_default_follows_the_detector(self, db, make_fin):
+        """呼び出し側は既定を**書き写さない**。写すと2箇所が乖離する。"""
+        _seed_issuance_company(db, make_fin)
+        _seed_split_company(db, make_fin)      # 検出0件で失敗しないよう普通の分割も置く
+
+        rebuild_split_adjustment_factors(db)
+
+        got = db.query(SplitAdjustmentFactor).filter_by(edinet_code="E00005").count()
+        assert (got > 0) is (M.DEFAULT_EQUITY_TOL is None)
+        assert db.query(SplitAdjustmentFactor).filter_by(edinet_code="E00001").count() == 2
 
 
 class TestViewAppliesTheDirections:
