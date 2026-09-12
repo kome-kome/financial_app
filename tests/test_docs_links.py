@@ -18,6 +18,15 @@
 
 外部 URL（http/https/mailto）と同一ファイル内アンカー（`#…`）は対象外。前者はネットワーク
 に依存して CI を不安定にし、後者は見出しの表記ゆれで偽陽性を量産するため。
+
+**コードスパンとフェンスブロックの中は読まない**。Markdown はどちらの中でもリンクを解釈せず、
+文書はリンク構文そのものを説明するのに使う（本テストを足した初回、`.claude/skills/tidy/SKILL.md`
+の「`[...](...)` が指すファイルが実在するか」という説明文を実リンクとして拾って落ちた）。
+
+**存在判定は Windows のパス解決差を吸収する**。Windows は末尾の連続ドットを落として解決するため、
+`.../tidy/...` のような擬似パスに対し `exists()` が **True を返す**。上記の `...` はそれでローカル
+（Windows）を素通りし CI（Linux）でだけ落ちた＝**ローカル全件 green は CI green の証明にならない**
+型の差。解決後の実名がリンクに書かれた名前と一致することまで確かめる。
 """
 
 from __future__ import annotations
@@ -43,6 +52,12 @@ EXTERNAL_PREFIXES = ("http://", "https://", "mailto:", "tel:", "data:")
 # `[label](target)` — target に空白は含めず、末尾の `"title"` は捨てる。
 LINK_RE = re.compile(r"\[([^\]\[]*)\]\(([^)\s]+?)(?:\s+\"[^\"]*\")?\)")
 
+# インラインコード（`…` / ``…``）。Markdown はこの中でリンクを解釈しない。
+CODE_SPAN_RE = re.compile(r"`+[^`]*`+")
+
+# フェンスの開始・終了（``` / ~~~ ・言語指定つきも可）。
+FENCE_RE = re.compile(r"^\s*(```+|~~~+)")
+
 # 空振り検知の下限。正規表現や走査が壊れて 0 件になったとき、「リンク切れゼロ」
 # として静かに通るのを防ぐ（"空を返すハンドラは全件失敗を隠す" 型）。
 MIN_MARKDOWN_FILES = 40
@@ -62,10 +77,21 @@ def markdown_files() -> list[Path]:
 
 
 def relative_links(path: Path) -> list[tuple[int, str, str]]:
-    """`path` 内の相対リンクを `(行番号, リンクテキスト, リンク先)` で返す。"""
+    """`path` 内の相対リンクを `(行番号, リンクテキスト, リンク先)` で返す。
+
+    コードスパンとフェンスブロックの中は読まない（Markdown がそこでリンクを
+    解釈しないため。文書はリンク構文の説明にそれを使う）。
+    """
     out: list[tuple[int, str, str]] = []
     text = path.read_text(encoding="utf-8")
+    in_fence = False
     for lineno, line in enumerate(text.splitlines(), 1):
+        if FENCE_RE.match(line):
+            in_fence = not in_fence
+            continue
+        if in_fence:
+            continue
+        line = CODE_SPAN_RE.sub("", line)
         for label, target in LINK_RE.findall(line):
             if target.startswith(EXTERNAL_PREFIXES) or target.startswith("#"):
                 continue
@@ -74,6 +100,25 @@ def relative_links(path: Path) -> list[tuple[int, str, str]]:
                 continue
             out.append((lineno, label, target))
     return out
+
+
+def target_exists(source: Path, target: str) -> bool:
+    """`source` から見て `target` が実在するか。Windows のパス解決差を吸収する。
+
+    Windows は末尾の連続ドットを落として解決するため `dir/...` に対し
+    `exists()` が True を返す。解決後の実名が書かれた名前と一致することまで見る。
+    """
+    body = target.split("#", 1)[0]
+    candidate = source.parent / body
+    if not candidate.exists():
+        return False
+    expected = Path(body).name
+    if expected in ("", ".", ".."):
+        return True
+    try:
+        return candidate.resolve().name == expected
+    except OSError:
+        return False
 
 
 def rename_candidates(target: str) -> list[str]:
@@ -99,8 +144,7 @@ def broken_links(files: list[Path] | None = None) -> list[tuple[Path, int, str, 
     out: list[tuple[Path, int, str, str]] = []
     for path in files if files is not None else markdown_files():
         for lineno, label, target in relative_links(path):
-            body = target.split("#", 1)[0]
-            if not (path.parent / body).exists():
+            if not target_exists(path, target):
                 out.append((path, lineno, label, target))
     return out
 
@@ -184,6 +228,39 @@ class TestCheckerActuallyDetects:
         doc = tmp_path / "a.md"
         doc.write_text('[B](b.md "タイトル")\n', encoding="utf-8")
         assert broken_links([doc]) == []
+
+    def test_link_syntax_inside_a_code_span_is_not_a_link(self, tmp_path):
+        """コードスパンはリンク構文の説明に使われる（初回 CI を落とした形）。"""
+        doc = tmp_path / "a.md"
+        doc.write_text(
+            "- `*.md` 内の `[...](...)` が指すファイルが実在するか\n",
+            encoding="utf-8",
+        )
+        assert relative_links(doc) == []
+
+    def test_links_inside_a_fenced_block_are_not_links(self, tmp_path):
+        doc = tmp_path / "a.md"
+        doc.write_text(
+            "```markdown\n[例](nope.md)\n```\n[本物](b.md)\n",
+            encoding="utf-8",
+        )
+        assert [t for _, _, t in relative_links(doc)] == ["b.md"]
+
+    def test_a_link_outside_a_code_span_on_the_same_line_still_counts(self, tmp_path):
+        """コードスパン除去が行ごと捨てていないこと。"""
+        doc = tmp_path / "a.md"
+        doc.write_text("`code` と [本物](nope.md)\n", encoding="utf-8")
+        assert [t for _, _, t in relative_links(doc)] == ["nope.md"]
+
+    def test_dot_only_target_does_not_resolve_to_its_parent(self, tmp_path):
+        """Windows は末尾の連続ドットを落とすので `exists()` だけでは True になる。
+
+        この差でローカル（Windows）は素通りし CI（Linux）だけが落ちた。
+        どちらのプラットフォームでも「壊れている」と判定されること。
+        """
+        doc = tmp_path / "a.md"
+        doc.write_text("[x](...)\n", encoding="utf-8")
+        assert broken_links([doc]) == [(doc, 1, "x", "...")]
 
     def test_rename_candidate_is_offered_by_adr_number(self):
         """ADR 番号が同じ実ファイルを候補として出す（今回の3件の直し方そのもの）。"""
