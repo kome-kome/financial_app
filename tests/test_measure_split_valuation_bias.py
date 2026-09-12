@@ -21,12 +21,13 @@ from scripts import measure_split_valuation_bias as M  # noqa: E402
 
 def row(year: int, shares, bps, *, eps=100.0, dps=10.0, price=1000.0,
         per=10.0, pbr=1.0, div_yield=1.0, market_cap=500.0, ec="E00001",
-        period_end=None) -> M.AnnualRow:
+        period_end=None, equity=None) -> M.AnnualRow:
     return M.AnnualRow(
         edinet_code=ec, year=year,
         period_end=period_end or ("%d-03-31" % year),
         issued_shares=shares, bs_bps=bps, pl_eps=eps, dps=dps,
-        stock_price=price, per=per, pbr=pbr, div_yield=div_yield, market_cap=market_cap)
+        stock_price=price, per=per, pbr=pbr, div_yield=div_yield, market_cap=market_cap,
+        bs_total_equity=equity)
 
 
 def ev(year, *, canonical=2.0, sh_ratio=2.0, kind="split", ec="E00001",
@@ -298,6 +299,216 @@ class TestBpsPath:
         assert events[0].canonical == pytest.approx(0.1)
         assert events[0].kind == "reverse" and events[0].source == "bps"
         assert events[0].lagged_sh_ratio == pytest.approx(0.1)
+
+
+class TestEquityCheck:
+    """第1経路の純資産総額チェック — Issue #657。
+
+    検体は `financial_records` の実値をそのまま写した（2026-09-13・接続先 local）。
+
+        E01121 日本板硝子 | year | issued_shares | bs_bps  | pl_eps  | bs_total_equity
+                          | 2025 |    91,568,599 | 3182.04 | -173.20 | 142,411,000,000
+                          | 2026 |   142,341,906 | 2230.45 |   44.51 | 185,519,000,000
+        E05716 地域新聞社 | 2024 |     2,670,276 |  113.20 |    1.55 |     302,271,000
+                          | 2025 |     3,741,914 |   87.22 |    5.52 |     653,233,000
+        E01777 ソニーG    | 2024 | 1,261,231,889 | 2661.69 |  788.29 | 7,756,105,000,000
+                          | 2025 | 6,149,810,645 |  540.61 |  188.71 | 8,510,151,000,000
+
+    **この信号で分離できるのは `bs_bps` と純資産総額が食い違う社だけ**である。
+    `bps逆比 / 株数比 = 1 / 純資産比` なので、`bs_bps ≈ 純資産 / 株数` が成り立つ社では
+    bps の交差検証（許容 15%）が既に「純資産の伸びが ±15% 程度」を見ている。E01121 は
+    `(bps逆比/株数比) x 純資産比 = 1.196`、E05716 は 2.002 で、ここが食い違っている。
+    """
+
+    NSG = ((2025, 91568599.0, 3182.04, -173.2, 142411000000.0),
+           (2026, 142341906.0, 2230.45, 44.51, 185519000000.0))
+    CHIIKI = ((2024, 2670276.0, 113.2, 1.55, 302271000.0),
+              (2025, 3741914.0, 87.22, 5.52, 653233000.0))
+    SONY = ((2024, 1261231889.0, 2661.69, 788.29, 7756105000000.0),
+            (2025, 6149810645.0, 540.61, 188.71, 8510151000000.0))
+
+    def _rows(self, table, ec):
+        return [row(y, sh, bps, eps=eps, equity=eq, ec=ec) for y, sh, bps, eps, eq in table]
+
+    @pytest.mark.parametrize("table,ec,eq_ratio", [
+        (NSG, "E01121", 1.3027), (CHIIKI, "E05716", 2.1611)])
+    def test_equity_jump_rejects_the_known_false_positives(self, table, ec, eq_ratio):
+        """株数と同じ向きに純資産が許容を超えて動いた。増資と読んで採らない。"""
+        rows = self._rows(table, ec)
+        off, _ = M.detect_events(rows, bps_path=False, equity_tol=None)
+        assert len(off) == 1 and off[0].kind == "composite"          # 今日までは採っていた
+        assert off[0].equity_ratio == pytest.approx(eq_ratio, abs=1e-4)
+        on, stats = M.detect_events(rows, bps_path=False, equity_tol=0.25)
+        assert on == []
+        eq = stats["equity"]
+        assert eq["enabled"] is True and eq["tol"] == 0.25
+        assert eq["n_rejected"] == 1 and eq["rejected_by_kind"] == {"composite": 1}
+        assert [(r["edinet_code"], r["year"]) for r in eq["rejected"]] == [(ec, table[1][0])]
+        assert eq["rejected"][0]["equity_ratio"] == pytest.approx(eq_ratio, abs=1e-4)
+
+    def test_real_split_with_organic_growth_is_kept(self):
+        """ソニーG の 1:5。純資産は業績で +9.7% 伸びているが、許容の内側なので残る。"""
+        events, stats = M.detect_events(self._rows(self.SONY, "E01777"),
+                                        bps_path=False, equity_tol=0.15)
+        assert [(e.year, e.canonical, e.kind) for e in events] == [(2025, 5.0, "composite")]
+        assert events[0].equity_ratio == pytest.approx(1.0972, abs=1e-4)
+        assert stats["equity"]["n_rejected"] == 0
+
+    def test_equity_falling_while_shares_rise_is_not_evidence_of_issuance(self):
+        """赤字・減損で純資産が減るのは増資の証拠にならない。片側でしか判定しない。"""
+        rows = [row(2020, 1000.0, 200.0, equity=200000.0),
+                row(2021, 2000.0, 100.0, equity=100000.0)]
+        events, stats = M.detect_events(rows, bps_path=False, equity_tol=0.25)
+        assert len(events) == 1
+        assert events[0].equity_ratio == pytest.approx(0.5)
+        assert stats["equity"]["n_rejected"] == 0
+
+    def test_reverse_direction_rejects_a_same_direction_drop(self):
+        """併合側は株数と純資産が一緒に減ったときに落ちる（減資・自己株式の取得）。"""
+        rows = [row(2020, 2000.0, 100.0, equity=200000.0),
+                row(2021, 1000.0, 200.0, equity=100000.0)]
+        assert M.detect_events(rows, bps_path=False, equity_tol=0.25)[0] == []
+        flat = [row(2020, 2000.0, 100.0, equity=200000.0),
+                row(2021, 1000.0, 200.0, equity=200000.0)]
+        events, _ = M.detect_events(flat, bps_path=False, equity_tol=0.25)
+        assert len(events) == 1 and events[0].kind == "reverse"
+
+    @pytest.mark.parametrize("eq_prev,eq_cur", [(None, 100000.0), (200000.0, None),
+                                                (0.0, 100000.0), (-5.0, 100000.0)])
+    def test_unknown_equity_keeps_the_event_and_is_counted(self, eq_prev, eq_cur):
+        """判定できない社を「増資でない」とも「増資だ」とも読まない。今日までどおり採って数える。"""
+        rows = [row(2020, 1000.0, 200.0, equity=eq_prev), row(2021, 2000.0, 100.0, equity=eq_cur)]
+        events, stats = M.detect_events(rows, bps_path=False, equity_tol=0.25)
+        assert len(events) == 1 and events[0].equity_ratio is None
+        assert stats["equity"]["n_unknown"] == 1
+        assert stats["equity"]["n_rejected"] == 0
+
+    def test_unknown_is_not_counted_when_the_check_is_off(self):
+        rows = [row(2020, 1000.0, 200.0), row(2021, 2000.0, 100.0)]
+        _, stats = M.detect_events(rows, bps_path=False, equity_tol=None)
+        assert stats["equity"] == {"enabled": False, "tol": None, "n_rejected": 0,
+                                   "rejected_by_kind": {}, "n_unknown": 0, "rejected": []}
+
+    def test_disabled_check_reproduces_the_previous_behaviour(self):
+        """`equity_tol=None` は #659 までの検出と 1 件も違わないこと（倍率・種別・経路）。"""
+        rows = (self._rows(self.NSG, "E01121") + self._rows(self.CHIIKI, "E05716")
+                + self._rows(self.SONY, "E01777") + TestBpsPath()._rows())
+        plain = [r._replace(bs_total_equity=None) for r in rows]
+        a, _ = M.detect_events(rows, equity_tol=None)
+        b, _ = M.detect_events(plain, equity_tol=None)
+        strip = lambda evs: [e._replace(equity_ratio=None) for e in evs]  # noqa: E731
+        assert strip(a) == strip(b)
+        assert len(a) == 4
+
+    def test_bps_path_is_not_gated(self):
+        """第2経路は倍率を翌年の株数から取る別の主張なので、純資産比では落とさない。"""
+        rows = [row(y, sh, bps, eps=eps, ec="E03137", equity=eq) for (y, sh, bps, eps), eq
+                in zip(TestBpsPath.SHIMAMURA, (1.0e11, 1.0e11, 3.0e11, 3.0e11))]
+        a, _ = M.detect_events(rows, bps_path=True, equity_tol=None)
+        b, _ = M.detect_events(rows, bps_path=True, equity_tol=0.15)
+        assert a == b and [(e.year, e.source) for e in b] == [(2024, "bps")]
+
+    def test_rejected_pair_can_still_be_taken_by_the_bps_path(self):
+        """第1経路が落としたペアを第2経路が独立に拾うことは妨げない（畳む規則と揃える）。
+
+        2021 は株数 x2・bps 半減・純資産 x2（増資型）。2022 に株数がもう一度 x2 になり、
+        bps 経路は「2021 に 1 株指標が動き、翌年に株数が追随した」と主張する。
+        """
+        rows = [row(2020, 1000.0, 200.0, eps=20.0, equity=200000.0),
+                row(2021, 2000.0, 100.0, eps=10.0, equity=400000.0),
+                row(2022, 4000.0, 100.0, eps=10.0, equity=400000.0)]
+        events, stats = M.detect_events(rows, bps_path=True, equity_tol=0.25)
+        assert [(e.year, e.source) for e in events] == [(2021, "bps")]
+        assert stats["equity"]["n_rejected"] == 1
+
+    # E36173 の実値（2026-09-13・接続先 local）。純資産 x1.9848 だが Yahoo に 2023-05-16 の
+    # 1:2 分割がある本物。**既定の許容を 1.0 より下げられない理由そのもの**（決定4-4）。
+    E36173 = ((2022, 4939380.0, 175.99, -53.7, 879146000.0),
+              (2023, 10072890.0, 94.1, -20.47, 1744943000.0))
+
+    def test_default_drops_only_what_the_census_allowed(self):
+        """既定（1.0）で落ちるのは E05716 だけ。E01121 は偽陽性と確定しているが残る。
+
+        E01121 を落とせる許容（< 0.30）では、本物の E36173 も一緒に落ちる。
+        """
+        assert M.DEFAULT_EQUITY_TOL == 1.0
+        rows = (self._rows(self.NSG, "E01121") + self._rows(self.CHIIKI, "E05716")
+                + self._rows(self.E36173, "E36173") + self._rows(self.SONY, "E01777"))
+        events, stats = M.detect_events(rows)
+        assert sorted(e.edinet_code for e in events if e.source == "shares") == [
+            "E01121", "E01777", "E36173"]
+        assert [r["edinet_code"] for r in stats["equity"]["rejected"]] == ["E05716"]
+        # 0.25 まで下げると本物の E36173 を巻き込む
+        _, low = M.detect_events(rows, equity_tol=0.25)
+        assert {r["edinet_code"] for r in low["equity"]["rejected"]} >= {"E01121", "E36173"}
+
+    def test_default_is_declared_in_one_place(self):
+        """既定は定数1つ。`rebuild_split_adjustment_factors` は書き写さずこれに従う。"""
+        import inspect
+        sig = inspect.signature(M.detect_events)
+        assert sig.parameters["equity_tol"].default == M.DEFAULT_EQUITY_TOL
+        assert M.DEFAULT_EQUITY_TOL is None or M.DEFAULT_EQUITY_TOL in M.EQUITY_TOL_GRID
+
+    def test_annual_row_still_accepts_twelve_positional_fields(self):
+        """`collector_prices` とテストの位置指定生成（12 列）を壊さない。"""
+        r = M.AnnualRow("E1", 2020, "2020-03-31", 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0)
+        assert r.bs_total_equity is None
+
+
+class TestEquityGateCrosstab:
+    """チェックが落とすイベントを突合ステータスで数える — Issue #657 の既定判定の材料。"""
+
+    def _ungated(self):
+        return [ev(2025, ec="E1"), ev(2025, ec="E2"), ev(2025, ec="E3"),
+                ev(2025, ec="E4"), ev(2025, ec="E5")]
+
+    def _results(self):
+        return [M.MatchResult("E1", 2025, 2.0, 2.0, 2.0, 1, "agree"),
+                M.MatchResult("E2", 2025, 2.0, 2.0, None, 0, "no_official_event"),
+                M.MatchResult("E3", 2025, 2.0, 2.0, 3.0, 1, "disagree_magnitude"),
+                M.MatchResult("E4", 2025, 2.0, 2.0, 2.0, 1, "agree")]
+
+    def test_harm_and_benefit_are_counted_from_the_dropped_events(self):
+        gated = [ev(2025, ec="E4")]
+        ct = M.equity_gate_crosstab(self._results(), self._ungated(), gated)
+        assert ct["dropped"] == [("E1", 2025), ("E2", 2025), ("E3", 2025), ("E5", 2025)]
+        assert ct["dropped_status"] == {"agree": 1, "no_official_event": 1,
+                                        "disagree_magnitude": 1, "not_in_census": 1}
+        assert ct["harm"] == 1               # 公式と一致する本物を落とした
+        assert ct["benefit"] == 1            # 公式に無いイベントを落とした
+        assert ct["not_in_census"] == [("E5", 2025)]
+
+    def test_raw_only_agreement_counts_as_harm(self):
+        results = [M.MatchResult("E1", 2025, 2.0, 2.0, 2.0, 1, "agree_raw_only")]
+        ct = M.equity_gate_crosstab(results, [ev(2025, ec="E1")], [])
+        assert ct["harm"] == 1 and ct["benefit"] == 0
+
+    def test_readmission_by_another_path_is_not_a_drop(self):
+        """同じ (ec, year) を第2経路が拾い直したら、そのイベントは消えていない。"""
+        gated = [ev(2025, ec=ec) for ec in ("E1", "E3", "E4", "E5")]
+        gated.append(ev(2025, ec="E2")._replace(source="bps"))
+        ct = M.equity_gate_crosstab(self._results(), self._ungated(), gated)
+        assert ct["dropped"] == []
+        assert ct["readmitted"] == [("E2", 2025)]
+        assert ct["benefit"] == 0
+
+    def test_events_that_only_appear_after_gating_are_listed(self):
+        """落としたことで畳まれなくなった第2経路のイベントは、黙って増やさない。"""
+        gated = self._ungated() + [ev(2024, ec="E1")._replace(source="bps")]
+        ct = M.equity_gate_crosstab(self._results(), self._ungated(), gated)
+        assert ct["added"] == [("E1", 2024)]
+
+
+class TestTallyByGroup:
+    def test_groups_by_source_and_kind(self):
+        events = [ev(2025, ec="E1", kind="split"), ev(2025, ec="E2", kind="composite"),
+                  ev(2025, ec="E3", kind="composite")]
+        results = [M.MatchResult("E1", 2025, 2.0, 2.0, 2.0, 1, "agree"),
+                   M.MatchResult("E2", 2025, 2.0, 2.0, None, 0, "no_official_event"),
+                   M.MatchResult("E3", 2025, 2.0, 2.0, 2.0, 1, "agree")]
+        got = M.tally_by_group(results, events)
+        assert got == {"shares:composite": {"agree": 1, "no_official_event": 1},
+                       "shares:split": {"agree": 1}}
 
 
 class TestCumulativeFactors:

@@ -54,6 +54,12 @@
 「分割があった」は言えても「何倍か」を決められない（実測の一致率 0.367）。倍率だけを
 独立な第3の信号＝1年遅れの株数比へ移し、その信号が無い年は**採らない**。
 
+**第1経路には純資産総額のチェックがある**（#657・既定 `DEFAULT_EQUITY_TOL`・`--equity-tol`）。株数と同じ向きに
+`bs_total_equity` が許容を超えて動いたら増資と読んで採らない。ただし `bs_bps ≈ 純資産 / 株数`
+が成り立つ社では bps の交差検証と同じものを見ているので、**落とせるのは両者が食い違う社だけ**
+で、深い割引の増資（純資産がほとんど増えない）は分離できない。偽陽性率は
+`verify-sample --census` が契約窓内の全イベントで測る（抽出では候補が入る保証が無い）。
+
 実行:
     python -m scripts.measure_split_valuation_bias detect
     python -m scripts.measure_split_valuation_bias detect --sweep --price-basis
@@ -63,6 +69,8 @@
     python -m scripts.measure_split_valuation_bias verify-sample --bps-path --source bps
     python -m scripts.measure_split_valuation_bias verify-sample --bps-path --source bps \
         --coverage partial        # 第2経路の倍率を測るときはこちら（#659）
+    python -m scripts.measure_split_valuation_bias detect --no-equity-check  # 純資産比チェック無し
+    python -m scripts.measure_split_valuation_bias verify-sample --census    # 窓内を全数（約30分）
 
 出力は ASCII 記号のみ（Windows cp932 リダイレクト対策）。
 """
@@ -108,6 +116,27 @@ DEFAULT_SNAP_TOL = 0.02
 # 第3信号を要求したぶん件数は減る（257 イベント/245社 -> 114/113）。**減ったのは
 # 倍率の根拠が無い分**で、最新年のイベントは翌年の決算が入れば自動的に係数表へ入る。
 DEFAULT_BPS_PATH = True
+# 第1経路の純資産総額チェック（#657）の許容。`None` は無効。
+# **`rebuild_split_adjustment_factors` が既定のまま呼ぶ＝ここが毎晩の係数表の中身を決める。**
+#
+# 株数と同じ向きに `bs_total_equity` が `1 + tol` 倍を超えて動いたら、増資（併合側なら減資）と
+# 読んで採らない。**この信号で分離できるのは `bs_bps` と純資産総額が食い違う社だけ**である
+# ——`bps逆比 / 株数比 = 1 / 純資産比` なので、`bs_bps ≈ 純資産 / 株数` が成り立つ社では
+# bps の交差検証（`DEFAULT_BPS_TOL`）が既に純資産の伸びを見ている（2026-09-13 実測: 第1経路
+# 492 件の整合度の中央値 1.000・5〜95% 0.951〜1.077）。深い割引の増資は純資産をほとんど
+# 増やさないので、どちらの信号でも分離できない。
+#
+# **1.0（純資産が株数と同じ向きに2倍を超えて動いたら採らない）にしたのは、実測の前に宣言した
+# 規則を当てはめた結果である**（2026-09-13・ADR-0055 決定4-4）。格子のうち (a) 契約窓内の全数
+# 突合で公式と一致する本物を1件も落とさない (b) 公式に無いイベントを1件以上落とす (c) 窓外で
+# 落とす第1経路のイベントに Yahoo の一致する split が無い、を全部満たす最小値を採った。
+# 0.25〜0.60 は (c) で落ちた——E36173 は純資産 x1.9848 だが Yahoo に 1:2 分割があり本物。
+# 全数突合の偽陽性 6/94 のうち、この値で落とせるのは E05716（純資産 x2.1611）の1件だけで、
+# **E01121 は偽陽性と確定したが落とせない**（x1.3027 で落とすと E36173 も落ちる）。
+# 余裕は両側とも薄い（E36173 まで 0.015・E05716 まで 0.16）ので、動かすなら測り直すこと。
+DEFAULT_EQUITY_TOL: Optional[float] = 1.0
+# 感度表と既定判定に使う格子。0.15 は本物の分割の伸び（第1経路 split の p95 1.168）に掛かる。
+EQUITY_TOL_GRID: tuple[float, ...] = (0.15, 0.25, 0.40, 0.60, 1.00)
 # 合成（分割＋増資）とみなす残差の範囲。これを外れたら丸めずに unsnapped で別枠へ出す。
 COMPOSITE_LO, COMPOSITE_HI = 0.8, 1.25
 
@@ -163,6 +192,9 @@ class AnnualRow(NamedTuple):
     pbr: Optional[float]
     div_yield: Optional[float]
     market_cap: Optional[float]
+    # 純資産総額（#657）。末尾に既定値付きで置くのは、12 列の位置指定で作る既存の呼び出しを
+    # 壊さないため。
+    bs_total_equity: Optional[float] = None
 
 
 class ShareEvent(NamedTuple):
@@ -184,6 +216,9 @@ class ShareEvent(NamedTuple):
     # 第2経路の倍率を決めた第3の信号＝**翌年**の `issued_shares` 比（#659）。
     # 第1経路では None（倍率は当年の `sh_ratio` そのもの）。
     lagged_sh_ratio: Optional[float] = None
+    # 第1経路のペアの純資産総額比（#657）。チェックの有無によらず記録する（判定できなければ
+    # None）。第2経路では None——倍率の出どころが別の年のペアなので、同じ量ではない。
+    equity_ratio: Optional[float] = None
 
 
 class MatchResult(NamedTuple):
@@ -239,11 +274,30 @@ def _usable(row: AnnualRow) -> Optional[str]:
     return None
 
 
+def equity_ratio(prev: AnnualRow, cur: AnnualRow) -> Optional[float]:
+    """純資産総額の前年比。どちらかが欠損・0 以下なら判定できないので None。"""
+    a, b = prev.bs_total_equity, cur.bs_total_equity
+    if a is None or b is None or a <= 0 or b <= 0:
+        return None
+    return b / a
+
+
+def equity_contradicts_split(sh_ratio: float, eq_ratio: float, tol: float) -> bool:
+    """株数の動きを「分割ではなく増資（併合側なら減資）」と読む純資産の動きか（#657）。
+
+    **片側でしか判定しない。** 分割は純資産を変えないが、増資は株数と純資産を同じ向きに動かす。
+    株数が増えた年に純資産が減るのは赤字・減損であって、増資の証拠にはならない。
+    """
+    le = _log(eq_ratio)
+    return le * _log(sh_ratio) > 0 and abs(le) > _log(1 + tol)
+
+
 def detect_events(rows: Sequence[AnnualRow], *,
                   min_ratio: float = DEFAULT_MIN_RATIO,
                   bps_tol: float = DEFAULT_BPS_TOL,
                   snap_tol: float = DEFAULT_SNAP_TOL,
                   bps_path: bool = DEFAULT_BPS_PATH,
+                  equity_tol: Optional[float] = DEFAULT_EQUITY_TOL,
                   ) -> tuple[list[ShareEvent], dict]:
     """株数基準が変わった年を検出する。戻り値 (events, stats)。
 
@@ -277,6 +331,14 @@ def detect_events(rows: Sequence[AnnualRow], *,
 
     欠損年があるときは `year-1` ではなく**直前の使える行**とペアを組み、`gap_years` を残す。
     2以上なら複数イベントの積を1件と見ている可能性があるので、突合サンプルへ優先的に入れる。
+
+    **`equity_tol` を与えると、第1経路に純資産総額のチェックが加わる**（#657）。bps の交差検証を
+    通ったあと、株数と同じ向きに `bs_total_equity` が `1 + equity_tol` 倍を超えて動いていたら
+    採らない（`stats["equity"]["rejected"]` に残す）。純資産が欠損・0 以下で判定できない社は
+    **今日までどおり採って** `n_unknown` に数える——「増資でない」とも「増資だ」とも読まない。
+    第2経路には掛けない（倍率は翌年のペアから取る別の主張で、成長企業の本物の分割を巻き込む）。
+    第1経路が落としたペアを第2経路が独立に拾うことは妨げない（畳むのは第1経路が**採った**とき
+    だけ、という上の規則と揃える）。
     """
     gate = _log(min_ratio)
     by_ec: dict[str, list[AnnualRow]] = defaultdict(list)
@@ -294,6 +356,8 @@ def detect_events(rows: Sequence[AnnualRow], *,
     # 第1経路が同じ動きを別イベントとして採っていたら、あとで畳む（#659）。
     lagged_year_of: dict[int, int] = {}          # events の添字 -> 倍率に使った翌年の year
     shares_pairs: set[tuple[str, int]] = set()   # 第1経路が採った (ec, year)
+    equity_rejected: list[dict] = []
+    n_equity_unknown = 0
 
     for ec, rs in by_ec.items():
         # **使える行だけを先に並べる。** 翌年の株数を見るには次の行を先読みする必要があり、
@@ -317,15 +381,29 @@ def detect_events(rows: Sequence[AnnualRow], *,
                 candidate_ecs.add(ec)
                 if abs(bps_ratio / sh_ratio - 1.0) <= bps_tol:
                     canonical, residual, kind = snap_to_canonical(sh_ratio, tol=snap_tol)
-                    events.append(ShareEvent(
-                        edinet_code=ec, year=cur.year, prev_year=prev.year,
-                        gap_years=cur.year - prev.year,
-                        period_end=cur.period_end, prev_period_end=prev.period_end,
-                        sh_ratio=sh_ratio, bps_ratio=bps_ratio,
-                        canonical=canonical, residual=residual, kind=kind,
-                        source="shares"))
-                    shares_pairs.add((ec, cur.year))
-                    took = True
+                    eq_ratio = equity_ratio(prev, cur)
+                    if equity_tol is not None and eq_ratio is None:
+                        n_equity_unknown += 1
+                    if (equity_tol is not None and eq_ratio is not None
+                            and equity_contradicts_split(sh_ratio, eq_ratio, equity_tol)):
+                        # 純資産が株数と一緒に動いた＝増資（併合側なら減資）と読む（#657）。
+                        # 種別はスナップしてから決めたものを残す（どの種別を落としたかが要る）。
+                        equity_rejected.append({
+                            "edinet_code": ec, "year": cur.year, "prev_year": prev.year,
+                            "period_end": cur.period_end, "prev_period_end": prev.period_end,
+                            "kind": kind, "canonical": canonical, "sh_ratio": sh_ratio,
+                            "bps_ratio": bps_ratio, "equity_ratio": eq_ratio,
+                        })
+                    else:
+                        events.append(ShareEvent(
+                            edinet_code=ec, year=cur.year, prev_year=prev.year,
+                            gap_years=cur.year - prev.year,
+                            period_end=cur.period_end, prev_period_end=prev.period_end,
+                            sh_ratio=sh_ratio, bps_ratio=bps_ratio,
+                            canonical=canonical, residual=residual, kind=kind,
+                            source="shares", equity_ratio=eq_ratio))
+                        shares_pairs.add((ec, cur.year))
+                        took = True
 
             if bps_path and abs(_log(bps_ratio)) >= gate:
                 n_bps_candidates += 1
@@ -406,6 +484,14 @@ def detect_events(rows: Sequence[AnnualRow], *,
             "n_event_companies": len({e.edinet_code for e in bps_events}),
             "by_kind": dict(Counter(e.kind for e in bps_events)),
             "rejected": dict(bps_rejected),
+        },
+        "equity": {
+            "enabled": equity_tol is not None,
+            "tol": equity_tol,
+            "n_rejected": len(equity_rejected),
+            "rejected_by_kind": dict(Counter(r["kind"] for r in equity_rejected)),
+            "n_unknown": n_equity_unknown,
+            "rejected": equity_rejected,
         },
     }
     return events, stats
@@ -678,6 +764,52 @@ def tally_rates(results: Sequence[MatchResult]) -> tuple[Counter, int, float, fl
     return tally, denom, rate, rate_raw
 
 
+def tally_by_group(results: Sequence[MatchResult], events: Sequence[ShareEvent]
+                   ) -> dict[str, dict[str, int]]:
+    """突合結果を `経路:種別` ごとに数える（#657）。偽陽性がどの種別に偏るかを見るため。"""
+    group_of = {(e.edinet_code, e.year): "%s:%s" % (e.source, e.kind) for e in events}
+    out: dict[str, Counter] = defaultdict(Counter)
+    for r in results:
+        out[group_of.get((r.edinet_code, r.year), "?")][r.status] += 1
+    return {k: dict(v) for k, v in out.items()}
+
+
+#: 落とすと害になる status（公式と倍率が一致した本物）と、落とすと利益になる status
+#: （公式に分割が無い＝偽陽性）。`disagree_magnitude` はどちらにも入れない——落としても
+#: F=1.0 という別の誤りに置き換わるだけで、良くなったとも悪くなったとも言えない。
+GATE_HARM_STATUSES = ("agree", "agree_raw_only")
+GATE_BENEFIT_STATUSES = ("no_official_event",)
+
+
+def equity_gate_crosstab(results: Sequence[MatchResult], ungated: Sequence[ShareEvent],
+                         gated: Sequence[ShareEvent]) -> dict:
+    """純資産比チェックが**実際に消した**イベントを、突合ステータスで数える（#657）。
+
+    `ungated` はチェック無し・`gated` はチェック有りの検出結果（他の設定は同じ）。
+    消えたかどうかは `(edinet_code, year)` にイベントが残っているかで決める——第1経路が
+    落としたペアを第2経路が拾い直したら、そのイベントは消えていない（`readmitted`）。
+    逆に、第1経路が落としたことで畳まれなくなった第2経路のイベントは `added` に出す
+    （黙って増やさない）。突合の対象外（契約窓の外など）で消えたものは `not_in_census`。
+    """
+    src_before = {(e.edinet_code, e.year): e.source for e in ungated}
+    src_after = {(e.edinet_code, e.year): e.source for e in gated}
+    dropped = sorted(k for k in src_before if k not in src_after)
+    readmitted = sorted(k for k in src_before
+                        if k in src_after and src_after[k] != src_before[k])
+    added = sorted(k for k in src_after if k not in src_before)
+    status_of = {(r.edinet_code, r.year): r.status for r in results}
+    dropped_status = Counter(status_of.get(k, "not_in_census") for k in dropped)
+    return {
+        "dropped": dropped,
+        "dropped_status": dict(dropped_status),
+        "harm": sum(dropped_status[s] for s in GATE_HARM_STATUSES),
+        "benefit": sum(dropped_status[s] for s in GATE_BENEFIT_STATUSES),
+        "not_in_census": [k for k in dropped if k not in status_of],
+        "readmitted": readmitted,
+        "added": added,
+    }
+
+
 def choose_sample(events: Sequence[ShareEvent], flat_ecs: Sequence[str], *,
                   n: int = 30, controls: int = 10, seed: int = 0
                   ) -> tuple[list[str], list[str]]:
@@ -809,6 +941,17 @@ def render_text(report: dict) -> str:
         add("  bps経路の棄却: %s" % (bp.get("rejected") or "なし"))
     else:
         add("  bps経路: 無効 (--bps-path で有効化)")
+    eq = det.get("equity") or {}
+    if eq.get("enabled"):
+        add("  純資産比チェック(第1経路): tol=%s -> 棄却=%s %s / 判定不能=%s"
+            % (eq.get("tol"), eq.get("n_rejected"), eq.get("rejected_by_kind") or {},
+               eq.get("n_unknown")))
+        for r in eq.get("rejected") or []:
+            add("    - %-9s %4s %-10s 株数 x%.4f / bps逆比 x%.4f / 純資産 x%.4f"
+                % (r["edinet_code"], r["year"], r["kind"], r["sh_ratio"], r["bps_ratio"],
+                   r["equity_ratio"]))
+    else:
+        add("  純資産比チェック: 無効 (--equity-tol で有効化)")
     hist = det.get("canonical_hist", {})
     if hist:
         add("  canonical: " + ", ".join(
@@ -904,7 +1047,7 @@ def build_verdict(report: dict) -> str:
 
 _SQL_ANNUAL = """
 SELECT edinet_code, year, period_end, issued_shares, bs_bps, pl_eps, dps,
-       stock_price, per, pbr, div_yield, market_cap
+       stock_price, per, pbr, div_yield, market_cap, bs_total_equity
   FROM financial_records
  WHERE period_type = 'annual' AND year >= :yf
    AND (:yt = 0 OR year <= :yt)
@@ -928,6 +1071,7 @@ def load_annual_rows(db, *, year_from: int = 2018, year_to: Optional[int] = None
         edinet_code=r[0], year=int(r[1]), period_end=_iso(r[2]),
         issued_shares=r[3], bs_bps=r[4], pl_eps=r[5], dps=r[6],
         stock_price=r[7], per=r[8], pbr=r[9], div_yield=r[10], market_cap=r[11],
+        bs_total_equity=r[12],
     ) for r in rows]
 
 
@@ -1021,7 +1165,7 @@ def _cmd_detect(args) -> int:
 
         events, stats = detect_events(rows, min_ratio=args.min_ratio,
                                       bps_tol=args.bps_tol, snap_tol=args.snap_tol,
-                                      bps_path=args.bps_path)
+                                      bps_path=args.bps_path, equity_tol=args.equity_tol)
         stats["canonical_hist"] = dict(
             Counter("%g" % e.canonical for e in events if e.canonical is not None))
 
@@ -1071,7 +1215,7 @@ def _cmd_detect(args) -> int:
             "min_cross_n": args.min_cross_n,
             "settings": {"min_ratio": args.min_ratio, "bps_tol": args.bps_tol,
                          "snap_tol": args.snap_tol, "price_basis": bool(args.price_basis),
-                         "bps_path": bool(args.bps_path)},
+                         "bps_path": bool(args.bps_path), "equity_tol": args.equity_tol},
         })
         report["verdict"] = build_verdict(report)
 
@@ -1084,12 +1228,30 @@ def _cmd_detect(args) -> int:
                 cells = []
                 for bt in (0.05, 0.10, 0.15, 0.25):
                     ev, st = detect_events(rows, min_ratio=mr, bps_tol=bt,
-                                           snap_tol=args.snap_tol, bps_path=args.bps_path)
+                                           snap_tol=args.snap_tol, bps_path=args.bps_path,
+                                           equity_tol=args.equity_tol)
                     ff = cumulative_factors(rows, ev)
                     n2 = sum(1 for v in ff.values() if v >= 2.0)
                     cells.append("%4d/%4d/%5d" % (st["n_events"], st["n_event_companies"], n2))
                 print("  min_ratio=%-5g | %s" % (mr, " | ".join(cells)))
-            print("  (列は bps_tol=0.05 / 0.10 / 0.15 / 0.25)")
+            print("  (列は bps_tol=0.05 / 0.10 / 0.15 / 0.25・equity_tol=%s)" % args.equity_tol)
+
+            # 純資産比の軸は別表にする（#657）。3 軸の格子は読めない。他の設定は現在値に固定。
+            print()
+            print("純資産比の感度 (min_ratio=%g / bps_tol=%g 固定 -> "
+                  "通過イベント/社数/F>=2 の被害行 | 被害行/社 | 棄却の種別内訳)"
+                  % (args.min_ratio, args.bps_tol))
+            for et in (None,) + EQUITY_TOL_GRID:
+                ev, st = detect_events(rows, min_ratio=args.min_ratio, bps_tol=args.bps_tol,
+                                       snap_tol=args.snap_tol, bps_path=args.bps_path,
+                                       equity_tol=et)
+                ff = cumulative_factors(rows, ev)
+                dmg = [k for k, v in ff.items() if v != 1.0]
+                n2 = sum(1 for v in ff.values() if v >= 2.0)
+                print("  equity_tol=%-5s | %4d/%4d/%5d | %5d/%4d | %s"
+                      % ("none" if et is None else "%g" % et, st["n_events"],
+                         st["n_event_companies"], n2, len(dmg), len({ec for ec, _ in dmg}),
+                         st["equity"]["rejected_by_kind"] or "-"))
 
         if args.json:
             p = Path(args.json)
@@ -1108,9 +1270,12 @@ def _cmd_verify_sample(args) -> int:
     db = D.SessionLocal()
     try:
         rows = load_annual_rows(db, year_from=args.year_from, year_to=args.year_to)
-        all_events, _ = detect_events(rows, min_ratio=args.min_ratio,
-                                      bps_tol=args.bps_tol, snap_tol=args.snap_tol,
-                                      bps_path=args.bps_path)
+        # **母集団は常に純資産比チェック無しで作る**（#657）。チェックが落とすイベントを
+        # 突合に含めないと、チェックの害（本物を落とす）も利益（偽陽性を落とす）も測れない。
+        # チェック有りの結果は、突合の後で `equity_gate_crosstab` が許容値ごとに引き直す。
+        detect_kw = dict(min_ratio=args.min_ratio, bps_tol=args.bps_tol,
+                         snap_tol=args.snap_tol, bps_path=args.bps_path)
+        all_events, _ = detect_events(rows, equity_tol=None, **detect_kw)
         # **抽出より先に契約窓を学習する**。窓の外から引いたサンプルは公式が判定できず、
         # `out_of_coverage` で分母だけが消える（実測 2026-09-12: 30件中 21件が窓外）。
         cover = asyncio.run(learn_coverage())
@@ -1149,6 +1314,12 @@ def _cmd_verify_sample(args) -> int:
         if args.only:
             pos = [e.strip() for e in args.only.split(",") if e.strip()]
             ctrl: list[str] = []
+        elif args.census:
+            # **窓内の全社を陽性にする**（#657）。抽出だと数件しかない偽陽性の候補が入る保証が
+            # 無く、#654 の 30 社突合は `no_official_event` 0 件で偽陽性率を測れなかった。
+            # 陰性対照は抽出と同じ関数で引く（n=0 なら陽性を選ばず対照だけを返す）。
+            pos = sorted({e.edinet_code for e in events})
+            _, ctrl = choose_sample(events, flat, n=0, controls=args.controls, seed=args.seed)
         else:
             pos, ctrl = choose_sample(events, flat, n=args.n, controls=args.controls,
                                       seed=args.seed)
@@ -1171,8 +1342,9 @@ def _cmd_verify_sample(args) -> int:
             targets, cover, on_progress=lambda i, t, m: print("  %s" % m, flush=True)))
 
         results: list[MatchResult] = []
+        pos_set = set(pos)
         for e in events:
-            if e.edinet_code not in set(pos):
+            if e.edinet_code not in pos_set:
                 continue
             results.append(match_event(e, official.get(e.edinet_code, []),
                                        slack_days=args.window_slack_days,
@@ -1188,11 +1360,44 @@ def _cmd_verify_sample(args) -> int:
               % (rate, rate_raw, denom))
         print("対照群の見逃し（公式にイベントがあった社）= %d 社 %s"
               % (len(misses), misses or ""))
+        by_group = tally_by_group(results, events)
+        for g in sorted(by_group):
+            t = Counter(by_group[g])
+            d = sum(t[k] for k in MATCH_DENOMINATOR)
+            print("  %-18s 分母 %3d / 偽陽性(no_official_event) %3d / %s"
+                  % (g, d, t["no_official_event"], dict(t)))
+        ev_of = {(e.edinet_code, e.year): e for e in events}
         for r in results:
             if r.status not in ("agree",):
-                print("  %-9s year=%s 検出=%s 生比=%s 公式=%s ev=%d %s"
+                e = ev_of.get((r.edinet_code, r.year))
+                print("  %-9s year=%s 検出=%s 生比=%s 公式=%s ev=%d %s 純資産=%s"
                       % (r.edinet_code, r.year, _fmt(r.detected), _fmt(r.raw_detected),
-                         _fmt(r.official), r.n_official_events, r.status))
+                         _fmt(r.official), r.n_official_events, r.status,
+                         _fmt(e.equity_ratio if e else None)))
+
+        # 純資産比チェック（#657）が消すイベントを、許容値ごとに突合ステータスで数える。
+        # 害=公式と一致する本物を落とした件数 / 利益=公式に無いイベントを落とした件数。
+        # 突合の外（契約窓の外など）で消えるものは Yahoo 等で別に確かめる材料として並べる。
+        print()
+        print("純資産比チェックが消すイベント (チェック無しの母集団との差)")
+        ev_all = {(e.edinet_code, e.year): e for e in all_events}
+        gate: dict[str, dict] = {}
+        for et in EQUITY_TOL_GRID:
+            gated, _ = detect_events(rows, equity_tol=et, **detect_kw)
+            gate["%g" % et] = equity_gate_crosstab(results, all_events, gated)
+        outside = sorted({k[0] for ct in gate.values() for k in ct["not_in_census"]})
+        meta_out = load_company_meta(db, outside)
+        for key, ct in gate.items():
+            print("  equity_tol=%-5s 消えた %3d 件 / 害 %d / 利益 %d / 内訳 %s / "
+                  "拾い直し %d / 増えた %d"
+                  % (key, len(ct["dropped"]), ct["harm"], ct["benefit"],
+                     ct["dropped_status"] or "-", len(ct["readmitted"]), len(ct["added"])))
+            for k in ct["not_in_census"]:
+                e = ev_all[k]
+                print("    突合外: %-9s %-6s %4s %-6s %-10s 倍率 %s 窓 %s"
+                      % (k[0], meta_out.get(k[0], ("", ""))[0] or "-", k[1], e.source,
+                         e.kind, _fmt(e.canonical),
+                         event_window(e, slack_days=args.window_slack_days)))
 
         if args.json:
             p = Path(args.json)
@@ -1200,8 +1405,10 @@ def _cmd_verify_sample(args) -> int:
             p.write_text(json.dumps({
                 "coverage": list(cover), "coverage_mode": args.coverage,
                 "source": args.source, "bps_path": bool(args.bps_path),
+                "census": bool(args.census),
                 "positives": pos, "controls": ctrl,
                 "no_sec_code": no_sec, "tally": dict(tally),
+                "tally_by_group": by_group, "equity_gate": gate,
                 "agree_rate": rate, "agree_rate_raw_ok": rate_raw,
                 "control_misses": misses,
                 "rows": [r._asdict() for r in results],
@@ -1231,6 +1438,13 @@ def build_parser() -> argparse.ArgumentParser:
                         help="bs_bps を候補ゲートにする第2経路も使う（#656）")
     common.add_argument("--no-bps-path", dest="bps_path", action="store_false",
                         help="第2経路を使わない（#655 までの検出と同一）")
+    # 第1経路の純資産比チェック（#657）。既定は `DEFAULT_EQUITY_TOL`＝毎晩の係数表と同じ。
+    # verify-sample は母集団を常にチェック無しで作り、許容値ごとの差を別に出す。
+    common.add_argument("--equity-tol", dest="equity_tol", type=float,
+                        default=DEFAULT_EQUITY_TOL,
+                        help="株数と同じ向きに純資産総額が 1+tol 倍を超えて動いたら採らない（#657）")
+    common.add_argument("--no-equity-check", dest="equity_tol", action="store_const",
+                        const=None, help="純資産比チェックを使わない（#659 までの検出と同一）")
 
     d = sub.add_parser("detect", parents=[common], help="全件の検出と指標の出力")
     d.add_argument("--sweep", action="store_true", help="閾値感度表も出す")
@@ -1254,6 +1468,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="突合の窓。full=契約窓へ完全に収まる窓だけ / "
                         "partial=重なりの中で公式イベントが見つかった件だけを分母にする（#659）")
     v.add_argument("--only", default="")
+    v.add_argument("--census", action="store_true",
+                   help="抽出せず、突合の窓に収まる全イベントの社を陽性にする（#657・--only が優先）")
     v.add_argument("--dry-run", action="store_true", help="抽出される社だけ出して API を叩かない")
     v.add_argument("--json", nargs="?", const=str(DEFAULT_VERIFY_JSON),
                    default=str(DEFAULT_VERIFY_JSON))
