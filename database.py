@@ -2065,6 +2065,35 @@ def load_jquants_adj_factor_events(db) -> dict:
     return out
 
 
+def load_price_series(db, *, min_hole_days: int) -> dict:
+    """`{edinet_code: (最初の week_start, ((空白直前の週, 空白直後の週), ...))}`。検出器の `price_series` の形（#672）。
+
+    分割補正の検出器が「上場廃止をまたいで別の実体の行が隣り合うペア」を比べないために読む。
+    上場廃止→再上場は週次株価に2つの形で現れる——系列の開始が遅い（旧社の価格が表に無い・実測
+    E05714）か、系列の途中に空白がある（旧社の価格が残っている・実測 E03530）。
+    空白は隣り合う週の間隔が `min_hole_days` 以上のものだけを返す（閾値は検出器の定数を呼び出し側が渡す）。
+    週次株価を1行も持たない社は含まない＝検出器は判定できないとして今日どおり採る。
+
+    **全行を Python へ持ってこない**（週次は約 140万行）。間隔は SQL の LAG で測り、該当する数行だけを返す。
+    """
+    starts = {ec: str(ws)[:10] for ec, ws in db.query(
+        StockPriceWeekly.edinet_code, func.min(StockPriceWeekly.week_start),
+    ).group_by(StockPriceWeekly.edinet_code).all()}
+    dialect = db.bind.dialect.name if db.bind is not None else "postgresql"
+    days = ("julianday(week_start) - julianday(prev_ws)" if dialect == "sqlite"
+            else "week_start::date - prev_ws::date")
+    holes: dict = {}
+    for ec, a, b in db.execute(text(
+        "SELECT edinet_code, prev_ws, week_start FROM ("
+        " SELECT edinet_code, week_start,"
+        "        LAG(week_start) OVER (PARTITION BY edinet_code ORDER BY week_start) AS prev_ws"
+        "   FROM stock_price_weekly) t"
+        " WHERE prev_ws IS NOT NULL AND " + days + " >= :d"
+        " ORDER BY edinet_code, week_start"), {"d": min_hole_days}).fetchall():
+        holes.setdefault(ec, []).append((str(a)[:10], str(b)[:10]))
+    return {ec: (s, tuple(holes.get(ec, ()))) for ec, s in starts.items()}
+
+
 # ── 9. 読み取りモデル: financial_metrics VIEW ──────────────────────────────
 # financial_records（ソース列）から軽い派生（比率・Zスコア・成長率）を「都度SQL算出」し、
 # regression_results を LEFT JOIN して予測値も合成する読み取り専用 VIEW。

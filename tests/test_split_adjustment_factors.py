@@ -30,8 +30,8 @@ if str(ROOT) not in sys.path:
 
 from collector_prices import rebuild_split_adjustment_factors  # noqa: E402
 from database import (  # noqa: E402
-    FinancialRecord, JQuantsAdjFactorEvent, SplitAdjustmentFactor,
-    load_jquants_adj_factor_events, replace_split_adjustment_factors,
+    FinancialRecord, JQuantsAdjFactorEvent, SplitAdjustmentFactor, StockPriceWeekly,
+    load_jquants_adj_factor_events, load_price_series, replace_split_adjustment_factors,
     upsert_jquants_adj_factor_events,
 )
 from scripts import measure_split_valuation_bias as M  # noqa: E402
@@ -345,6 +345,69 @@ class TestOfficialEventsReachTheTable:
         monkeypatch.setattr(M, "detect_events", spy)
         rebuild_split_adjustment_factors(db)
         assert seen["official_events"] == {"E00001": [("2020-10-01", 0.5)]}
+
+
+def _seed_relisted_company(db, make_fin, ec="E00007"):
+    """E05714 型: 上場廃止した旧社の行と、再上場した新社の行が欠損年をまたいで隣り合う社（#672）。
+
+    株数比 15.56・bps 逆比 16.91 は E05714 の実値。週次は再上場の週から始まる。
+    """
+    for year, shares, bps, equity in ((2020, 435087405.0, 1584.9, 691978000000.0),
+                                      (2026, 6770358214.0, 93.74, 629284000000.0)):
+        db.add(make_fin(edinet_code=ec, year=year, period_end=date(year, 3, 31),
+                        issued_shares=shares, bs_bps=bps, pl_eps=100.0, dps=20.0,
+                        stock_price=1000.0, per=10.0, pbr=0.5,
+                        div_yield=2.0, market_cap=5000.0, bs_total_equity=equity))
+    _seed_weekly(db, {ec: ["2025-09-29", "2025-10-06"], "E00001": ["2019-07-29"]})
+
+
+def _seed_weekly(db, weeks_by_ec):
+    for ec, weeks in weeks_by_ec.items():
+        for ws in weeks:
+            db.add(StockPriceWeekly(edinet_code=ec, week_start=ws, trade_date=ws, close_last=100.0))
+    db.commit()
+
+
+class TestListingGapReachesTheTable:
+    """上場廃止をまたぐペアの判定（#672）の入力が係数表まで届くこと。"""
+
+    def test_load_price_series_returns_the_first_week_and_the_holes(self, db):
+        """空白は隣り合う週の間隔が閾値以上のものだけ。E03530 型（途中で途切れる）を拾う入力。"""
+        _seed_weekly(db, {
+            "E00001": ["2020-01-06", "2019-07-29", "2019-08-05"],
+            "E00002": ["2025-09-29"],
+            # 2023-09-25 の次が 2025-11-17（784 日）。364 日の間隔は空白に数えない
+            "E00003": ["2022-09-26", "2023-09-25", "2025-11-17", "2025-11-24"],
+        })
+        assert load_price_series(db, min_hole_days=365) == {
+            "E00001": ("2019-07-29", ()),
+            "E00002": ("2025-09-29", ()),
+            "E00003": ("2022-09-26", (("2023-09-25", "2025-11-17"),)),
+        }
+
+    def test_rebuild_passes_the_series_starts(self, db, make_fin, monkeypatch):
+        """読み込みを書き忘れると判定は黙って無効になり、15 が E05714 型を補正へ入れる。"""
+        _seed_split_company(db, make_fin)
+        _seed_relisted_company(db, make_fin)
+        seen: dict = {}
+        real = M.detect_events
+
+        def spy(rows, **kw):
+            seen.update(kw)
+            return real(rows, **kw)
+
+        monkeypatch.setattr(M, "detect_events", spy)
+        rebuild_split_adjustment_factors(db)
+        assert seen["price_series"] == {"E00007": ("2025-09-29", ()), "E00001": ("2019-07-29", ())}
+
+    def test_relisted_company_gets_no_factor(self, db, make_fin):
+        _seed_split_company(db, make_fin)          # 検出0件で失敗しないよう普通の分割も置く
+        _seed_relisted_company(db, make_fin)
+
+        rebuild_split_adjustment_factors(db)
+
+        assert db.query(SplitAdjustmentFactor).filter_by(edinet_code="E00007").count() == 0
+        assert db.query(SplitAdjustmentFactor).filter_by(edinet_code="E00001").count() == 2
 
 
 class TestAdjFactorEventTable:

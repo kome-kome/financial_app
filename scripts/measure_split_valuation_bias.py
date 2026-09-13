@@ -60,6 +60,11 @@
 で、深い割引の増資（純資産がほとんど増えない）は分離できない。偽陽性率は
 `verify-sample --census` が契約窓内の全イベントで測る（抽出では候補が入る保証が無い）。
 
+**上場廃止をまたいで別の実体の行が隣り合うペアは、どちらの経路でも比べない**（#672）。
+同じ EDINET コードのまま上場廃止→再上場した社（実測 E05714）は、欠損年をまたいで旧社と新社の行が
+ペアになり、株数と `bs_bps` がたまたま逆向きに動くと交差検証を通る。判定は週次株価に1年以上の
+空白（系列の開始が遅い、または途中で途切れる）がペアの期間の中にあるかで行う（`listing_gap_in_pair`）。
+
 実行:
     python -m scripts.measure_split_valuation_bias detect
     python -m scripts.measure_split_valuation_bias detect --sweep --price-basis
@@ -140,21 +145,36 @@ EQUITY_TOL_GRID: tuple[float, ...] = (0.15, 0.25, 0.40, 0.60, 1.00)
 # 合成（分割＋増資）とみなす残差の範囲。これを外れたら丸めずに unsnapped で別枠へ出す。
 COMPOSITE_LO, COMPOSITE_HI = 0.8, 1.25
 
+# 上場廃止をまたぐペアの判定（#672・ADR-0055 決定4-7・`listing_gap_in_pair`）。
+# **欠損年の長さだけでは切らない**——本物の分割にも欠損年はある（XBRL の取りこぼし・決算期変更。
+# 実測 E03078 は 2018→2020 で gap_years 2）。長さは「少なくとも1期ぶんの通期行が無い」という
+# 前提条件にだけ使い、別実体と読む根拠は**ペアの期間の中にこの社の市場価格が無い区間がある**
+# ことに置く。上場廃止→再上場は週次株価に2つの形で現れる: 系列の開始が遅い（旧社の価格が
+# 表に無い・E05714）と、系列の途中で途切れる（旧社の価格が残る・E03530 SBI新生銀行）。
+# 365 日は「少なくとも1年、この社に市場価格が無かった」＝欠損した1期と釣り合う長さ。
+# 実測（2026-09-14）で annual 全 30,379 行の隣接ペアのうち該当は E05714 2020→2026 と
+# E03530 2023→2026 の2件（後者は交差検証で落ちるので今はイベントにならない）。
+LISTING_GAP_MIN_YEARS = 2
+LISTING_GAP_MIN_DAYS = 365
+
 # 実在する分割・併合比。0.05 は 1:20 併合。
 #
 # **比を足すのは「検出したイベントの本物の比が公式 `AdjFactor` か Yahoo で確かめられ、かつ
-# 足した前後で倍率が変わるイベントが全部確かめられたとき」だけ**（#669・ADR-0055 決定4-6）。
+# 足した前後で F が変わる行が全部確かめられたとき」だけ**（#669・ADR-0055 決定4-6／4-7）。
 # 表の比は既存イベントの丸め先も変える（間に比が入ると composite の寄り先が動く）ので、
 # 1社の裏付けだけで足すと、分割でない株数の動きまで補正へ入ることがある。足したら
 # `verify-sample --census` の一致率・偽陽性をやり直すこと。
 #   1/3  : E03717 unbanked の 3:1 併合（2024-09-27・公式 1/3・Yahoo 1:3）
 #   1/15 : E37831 INEST の 15:1 併合（2025-09-29・公式 1/15・Yahoo 1:15）
-# **15 は足していない**。E05698 UT グループの 1:15（2025-12-29・公式/Yahoo とも一致）は本物だが、
-# 足すと E05714（2020年に上場廃止し 2026年に別の株数で再上場・分割なし）が composite で
-# 補正へ入る。**6 も足していない**——E05426 の 5.768 は 1:5 分割（Yahoo 2024-03-28）＋増資で、
+#   15   : E05698 UT グループの 1:15（2025-12-29・公式/Yahoo とも 15）。#669 では E05714
+#          （2020年に上場廃止し 2026年に別の株数で再上場・分割なし）が composite で巻き込まれる
+#          ので保留し、#672 で上場廃止をまたぐペアを比べないようにしてから足した。第2経路で
+#          E23634 アミタ HD も 15 で入るが、Yahoo の 5:1（2021-12-29）と 3:1（2022-09-29）は
+#          どちらも F が変わる 2018〜2020 年の行より後にあるので、その3行の F=15 は正しい。
+# **6 は足していない**——E05426 の 5.768 は 1:5 分割（Yahoo 2024-03-28）＋増資で、
 # 今の composite 5.0 が正しい。
 CANONICAL_RATIOS: tuple[float, ...] = (
-    1.1, 1.2, 1.25, 1.5, 2.0, 2.5, 3.0, 4.0, 5.0, 10.0,
+    1.1, 1.2, 1.25, 1.5, 2.0, 2.5, 3.0, 4.0, 5.0, 10.0, 15.0,
     1 / 2, 1 / 3, 1 / 4, 1 / 5, 1 / 10, 1 / 15, 1 / 20,
 )
 
@@ -307,6 +327,55 @@ def equity_contradicts_split(sh_ratio: float, eq_ratio: float, tol: float) -> bo
     return le * _log(sh_ratio) > 0 and abs(le) > _log(1 + tol)
 
 
+def listing_gap_in_pair(prev: AnnualRow, cur: AnnualRow,
+                        series: Optional[tuple[str, Sequence[tuple[str, str]]]],
+                        coverage_start: Optional[str], *,
+                        min_gap_years: int = LISTING_GAP_MIN_YEARS,
+                        min_hole_days: int = LISTING_GAP_MIN_DAYS
+                        ) -> Optional[tuple[Optional[str], str]]:
+    """このペアは上場廃止をまたいで別の実体の行が隣り合ったものか（#672）。該当すれば価格の空白を返す。
+
+    同じ EDINET コードのまま上場廃止→再上場すると、欠損年をまたいで旧社と新社の行がペアになる
+    （実測 E05714: 2020-03-31 の旧ソニーフィナンシャルHD と 2026-03-31 の新社・株数比 15.56）。
+    **ペアの期間の中に、この社の市場価格が1年以上無く、当期末までに価格が戻っている区間があれば、
+    その間この銘柄は取引されていなかった**と読む。条件は次の2つ:
+
+    - `gap_years >= min_gap_years`（少なくとも1期ぶんの通期行が無い）
+    - 価格の空白 (a, b) のうち、b（価格が戻った週）が窓 `(max(前期末, coverage_start), 当期末]` の
+      中にあり、窓の中に入っている長さ `b - max(a, 窓の始まり)` が `min_hole_days` 日以上のものがある
+
+    空白は2種類: 系列の開始前 `(None, 最初の週)`（旧社の価格が表に無い・E05714）と、系列の途中の
+    `series[1]` の各区間（旧社の価格が残っている・E03530）。`series` の形は
+    `(最初の week_start, ((空白直前の週, 空白直後の週), ...))`（`database.load_price_series`）。
+
+    戻り値は該当した空白 `(a, b)`（系列の開始前なら a は None）。該当しなければ None。
+
+    価格が当期末より後に戻る空白は数えない——当期末の行が上場廃止中に提出されたものなら、旧社と
+    同じ実体でありうるので何も言えない。`coverage_start` は週次株価表全体の開始日＝「価格が無い」を
+    観測できる下限で、それより前はどの社にも価格が無いので空白に数えない。**系列を持たない社
+    （`series` が None）は判定しない**——上場廃止済みで価格が消えた社と区別できないので、今日どおり
+    比べる側へ倒す。
+    """
+    if series is None or coverage_start is None:
+        return None
+    if cur.year - prev.year < min_gap_years:
+        return None
+    p0, p1 = _iso(prev.period_end), _iso(cur.period_end)
+    if not p0 or not p1:
+        return None
+    start, holes = series
+    w0 = max(date.fromisoformat(p0), date.fromisoformat(coverage_start[:10]))
+    w1 = date.fromisoformat(p1)
+    for a, b in ((None, start), *holes):
+        back = date.fromisoformat(b[:10])
+        if not (w0 < back <= w1):
+            continue
+        since = w0 if a is None else max(date.fromisoformat(a[:10]), w0)
+        if (back - since).days >= min_hole_days:
+            return (a, b)
+    return None
+
+
 def detect_events(rows: Sequence[AnnualRow], *,
                   min_ratio: float = DEFAULT_MIN_RATIO,
                   bps_tol: float = DEFAULT_BPS_TOL,
@@ -314,6 +383,7 @@ def detect_events(rows: Sequence[AnnualRow], *,
                   bps_path: bool = DEFAULT_BPS_PATH,
                   equity_tol: Optional[float] = DEFAULT_EQUITY_TOL,
                   official_events: Optional[Mapping[str, Sequence[tuple[str, float]]]] = None,
+                  price_series: Optional[Mapping[str, tuple[str, Sequence[tuple[str, str]]]]] = None,
                   ) -> tuple[list[ShareEvent], dict]:
     """株数基準が変わった年を検出する。戻り値 (events, stats)。
 
@@ -367,8 +437,20 @@ def detect_events(rows: Sequence[AnnualRow], *,
     `stats["bps_path"]["official_crosscheck"]` に数えるだけにする。
     None（既定）なら公式を一切見ない＝測定器の CLI はこちらを使う。公式から倍率を決めた
     イベントを公式と突合すると、定義上必ず一致して一致率が黙って膨らむためである。
+
+    **`price_series` を与えると、上場廃止をまたいで別の実体の行が隣り合うペアを比べない**
+    （#672・ADR-0055 決定4-7）。形は
+    `{edinet_code: (最初の week_start, ((空白直前の週, 空白直後の週), ...))}`
+    （`database.load_price_series`）。判定は `listing_gap_in_pair` で、週次株価表全体の開始日は
+    各社の最初の週の最小値を使う。該当ペアは**どちらの経路にも渡さず**
+    `stats["listing_gap"]["rejected"]` に残す。第2経路が翌年の株数を先読みするときも、
+    (当年, 翌年) が該当ペアなら「同じ実体の翌年の行は無い」として扱う（翌年の行が無い年と同じ
+    分岐＝公式か倍率待ちへ）。写像に居ない社は判定しない。None（既定）なら判定しない。
     """
     gate = _log(min_ratio)
+    coverage_start = min(v[0] for v in price_series.values()) if price_series else None
+    listing_gap_rejected: list[dict] = []
+    n_lagged_listing_gap = 0
     by_ec: dict[str, list[AnnualRow]] = defaultdict(list)
     for r in rows:
         by_ec[r.edinet_code].append(r)
@@ -401,9 +483,26 @@ def detect_events(rows: Sequence[AnnualRow], *,
                 continue
             usable.append(cur)
 
+        series = price_series.get(ec) if price_series else None
         for i in range(1, len(usable)):
             prev, cur = usable[i - 1], usable[i]
+            hole = listing_gap_in_pair(prev, cur, series, coverage_start)
+            if hole is not None:
+                # 旧社と新社の行を比べても分割の証拠にならない（#672）。**経路に渡す前に外す**
+                # ——株数も bps も実体が替わったぶん動くので、どちらの交差検証も素通りしうる。
+                listing_gap_rejected.append({
+                    "edinet_code": ec, "year": cur.year, "prev_year": prev.year,
+                    "prev_period_end": _iso(prev.period_end), "period_end": _iso(cur.period_end),
+                    "no_price_after": hole[0], "price_back": hole[1],
+                    "sh_ratio": cur.issued_shares / prev.issued_shares,
+                    "bps_ratio": prev.bs_bps / cur.bs_bps,
+                })
+                continue
             nxt = usable[i + 1] if i + 1 < len(usable) else None
+            next_crosses = (nxt is not None
+                            and listing_gap_in_pair(cur, nxt, series, coverage_start) is not None)
+            if next_crosses:
+                nxt = None          # 別の実体の翌年行は、倍率を決める第3の信号にならない
             took = False
             sh_ratio = cur.issued_shares / prev.issued_shares
             bps_ratio = prev.bs_bps / cur.bs_bps
@@ -453,6 +552,8 @@ def detect_events(rows: Sequence[AnnualRow], *,
                     # （bps だけが動いて eps が追随しない）。
                     bps_rejected["eps_mismatch"] += 1
                 elif nxt is None:
+                    if next_crosses:
+                        n_lagged_listing_gap += 1
                     # **翌年の株数が無い。** 最新年のイベントはここへ来る（翌年の決算がまだ
                     # 提出されていない）。公式 `AdjFactor` が窓の中にあればそれを第3の信号に
                     # する（#661）。無ければ採らずに次回へ送る＝係数表は毎晩全置換なので、
@@ -584,6 +685,14 @@ def detect_events(rows: Sequence[AnnualRow], *,
             "rejected_by_kind": dict(Counter(r["kind"] for r in equity_rejected)),
             "n_unknown": n_equity_unknown,
             "rejected": equity_rejected,
+        },
+        "listing_gap": {
+            "enabled": price_series is not None,
+            "coverage_start": coverage_start,
+            "n_rejected": len(listing_gap_rejected),
+            "rejected": listing_gap_rejected,
+            # 第2経路が翌年の株数を先読みしようとして、そのペアが該当したので使わなかった件数。
+            "n_lagged": n_lagged_listing_gap,
         },
     }
     return events, stats
@@ -1063,6 +1172,15 @@ def render_text(report: dict) -> str:
                    r["equity_ratio"]))
     else:
         add("  純資産比チェック: 無効 (--equity-tol で有効化)")
+    lg = det.get("listing_gap") or {}
+    if lg.get("enabled"):
+        add("  上場廃止をまたぐペア(比べない): %s件 / 翌年先読みで外した %s件 / 週次の開始 %s"
+            % (lg.get("n_rejected"), lg.get("n_lagged"), lg.get("coverage_start")))
+        for r in lg.get("rejected") or []:
+            add("    - %-9s %4s->%4s 価格の空白 %s -> %s / 株数 x%.4f / bps逆比 x%.4f"
+                % (r["edinet_code"], r["prev_year"], r["year"],
+                   r["no_price_after"] or "系列開始前", r["price_back"],
+                   r["sh_ratio"], r["bps_ratio"]))
     hist = det.get("canonical_hist", {})
     if hist:
         add("  canonical: " + ", ".join(
@@ -1272,11 +1390,15 @@ def _cmd_detect(args) -> int:
     try:
         rows = load_annual_rows(db, year_from=args.year_from, year_to=args.year_to)
         nc = load_nc_ratio(db, args.year_from, args.year_to)
+        # 本番の係数表と同じ検出で測る（#672）。読み終えたら commit する（GOTCHAS #411）。
+        series = D.load_price_series(db, min_hole_days=LISTING_GAP_MIN_DAYS)
+        db.commit()
         print("annual %d行を読み込み（接続先=%s）" % (len(rows), D.DB_TARGET), flush=True)
 
         events, stats = detect_events(rows, min_ratio=args.min_ratio,
                                       bps_tol=args.bps_tol, snap_tol=args.snap_tol,
-                                      bps_path=args.bps_path, equity_tol=args.equity_tol)
+                                      bps_path=args.bps_path, equity_tol=args.equity_tol,
+                                      price_series=series)
         stats["canonical_hist"] = dict(
             Counter("%g" % e.canonical for e in events if e.canonical is not None))
 
@@ -1340,7 +1462,8 @@ def _cmd_detect(args) -> int:
                 for bt in (0.05, 0.10, 0.15, 0.25):
                     ev, st = detect_events(rows, min_ratio=mr, bps_tol=bt,
                                            snap_tol=args.snap_tol, bps_path=args.bps_path,
-                                           equity_tol=args.equity_tol)
+                                           equity_tol=args.equity_tol,
+                                           price_series=series)
                     ff = cumulative_factors(rows, ev)
                     n2 = sum(1 for v in ff.values() if v >= 2.0)
                     cells.append("%4d/%4d/%5d" % (st["n_events"], st["n_event_companies"], n2))
@@ -1355,7 +1478,7 @@ def _cmd_detect(args) -> int:
             for et in (None,) + EQUITY_TOL_GRID:
                 ev, st = detect_events(rows, min_ratio=args.min_ratio, bps_tol=args.bps_tol,
                                        snap_tol=args.snap_tol, bps_path=args.bps_path,
-                                       equity_tol=et)
+                                       equity_tol=et, price_series=series)
                 ff = cumulative_factors(rows, ev)
                 dmg = [k for k, v in ff.items() if v != 1.0]
                 n2 = sum(1 for v in ff.values() if v >= 2.0)
@@ -1384,8 +1507,12 @@ def _cmd_verify_sample(args) -> int:
         # **母集団は常に純資産比チェック無しで作る**（#657）。チェックが落とすイベントを
         # 突合に含めないと、チェックの害（本物を落とす）も利益（偽陽性を落とす）も測れない。
         # チェック有りの結果は、突合の後で `equity_gate_crosstab` が許容値ごとに引き直す。
+        # 上場廃止をまたぐペアの判定は本番と同じく入れる（#672）。偽陽性率を本番の検出で測るため。
+        series = D.load_price_series(db, min_hole_days=LISTING_GAP_MIN_DAYS)
+        db.commit()
         detect_kw = dict(min_ratio=args.min_ratio, bps_tol=args.bps_tol,
-                         snap_tol=args.snap_tol, bps_path=args.bps_path)
+                         snap_tol=args.snap_tol, bps_path=args.bps_path,
+                         price_series=series)
         all_events, _ = detect_events(rows, equity_tol=None, **detect_kw)
         # **抽出より先に契約窓を学習する**。窓の外から引いたサンプルは公式が判定できず、
         # `out_of_coverage` で分母だけが消える（実測 2026-09-12: 30件中 21件が窓外）。
