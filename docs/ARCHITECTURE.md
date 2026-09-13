@@ -532,6 +532,9 @@ erDiagram
 > `jquants_adj_factor_events`（J-Quants catchup が受け取った行から残す公式 `AdjFactor`・#661）の
 > イベント窓内の値から取る。作り直しはこの表を読むだけで J-Quants を叩かず、表に値が無ければ
 > そのイベントは採らない（ADR-0055 決定4-5）。
+> 作り直しは `stock_price_weekly` から社ごとの系列の開始日と 365 日以上の空白も読み、ペアの期間の中に
+> 価格の空白がある欠損年またぎのペア（上場廃止→再上場で旧社と新社の行が隣り合ったもの）を比べない
+> （`database.load_price_series`・#672・ADR-0055 決定4-7）。
 > **通期のみを露出（`WHERE period_type='annual'`・Issue #219② フェーズA）**: 半期(H1)等の非通期行を
 > `financial_records` に同居させても、年度単位の Zスコア（`PARTITION BY year`）・成長率 LAG
 > （`ORDER BY year, period_end`）が期間混在で壊れないよう VIEW 段でソースを通期に限定する。

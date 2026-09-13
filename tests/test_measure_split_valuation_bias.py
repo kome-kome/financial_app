@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import math
 import sys
+from datetime import date, timedelta
 from pathlib import Path
 
 import pytest
@@ -109,28 +110,45 @@ class TestDetectEvents:
             ("shares", "reverse", pytest.approx(expected))]
         assert M.cumulative_factors(rows, events)[(ec, y0)] == pytest.approx(expected)
 
-    @pytest.mark.parametrize("ec,y0,prev,y1,cur", [
-        # E05698 UT グループの 1:15（2025-12-29・公式/Yahoo とも一致）。**本物だが補正されない**
-        ("E05698", 2025, (39860383.0, 741.37, 225.32, 36323000000.0),
-         2026, (601193745.0, 44.26, 12.37, 32141000000.0)),
-        # E05714 ソニーフィナンシャルグループ。2020 年に上場廃止し 2026 年に別の株数で再上場した
-        # 行が隣り合っただけで、分割ではない（公式・Yahoo ともイベント無し）
-        ("E05714", 2020, (435087405.0, 1584.9, 171.09, 691978000000.0),
-         2026, (6770358214.0, 93.74, 7.96, 629284000000.0)),
-    ])
-    def test_fifteen_is_not_in_the_table(self, ec, y0, prev, y1, cur):
-        """**15 は定番比の表に足さない**（#669・ADR-0055 決定4-6）。
+    def test_real_one_to_fifteen_split_is_corrected(self):
+        """E05698 UT グループの 1:15（2025-12-29・公式/Yahoo とも 15）。値は DB の実値。
 
-        足すと E05698 の本物の 1:15 は split で入るが、E05714 の株数比 15.56 も composite で
-        15 へ寄り、分割の無い 2019〜2020 年の断面へ F=15 が掛かる。比を足すのは、前後で倍率が
-        変わるイベントが全部確かめられたときだけ、という規則でここは落とした。
+        #669 では E05714 を巻き込むので 15 を足せず、2019〜2025 年の 7 行が未補正だった（#672）。
         """
-        rows = [row(y0, prev[0], prev[1], eps=prev[2], equity=prev[3], ec=ec),
-                row(y1, cur[0], cur[1], eps=cur[2], equity=cur[3], ec=ec)]
+        ec = "E05698"
+        rows = [row(2025, 39860383.0, 741.37, eps=225.32, equity=36323000000.0, ec=ec),
+                row(2026, 601193745.0, 44.26, eps=12.37, equity=32141000000.0, ec=ec)]
         events, _ = M.detect_events(rows)
-        assert [(e.kind, e.canonical) for e in events] == [("unsnapped", None)]
-        assert M.cumulative_factors(rows, events)[(ec, y0)] == 1.0
-        assert 15.0 not in M.CANONICAL_RATIOS
+        assert [(e.source, e.kind, e.canonical) for e in events] == [
+            ("shares", "split", pytest.approx(15.0))]
+        assert M.cumulative_factors(rows, events)[(ec, 2025)] == pytest.approx(15.0)
+        assert 15.0 in M.CANONICAL_RATIOS
+
+    def test_real_split_across_two_fiscal_years_is_fifteen_before_both(self):
+        """E23634 アミタ HD。Yahoo は 5:1（2021-12-29）と 3:1（2022-09-29）。値は DB の実値。
+
+        第2経路が 2021 年の bps の動きを拾い、翌年の株数比 15.0086 を倍率にする。5:1 と 3:1 は
+        どちらも 2018〜2020 年の行より後なので、この 3 行の F=15 は分割の積と一致する
+        （ADR-0055 決定4-7）。2021 年の行は bps が既に 5:1 後の基準で本来 F=3 だが、この形では
+        拾えず F=1 のまま残る（限界として固定する）。
+        """
+        ec = "E23634"
+        spec = [
+            (2018, 1169424.0, 228.4, 20.78, 267051000.0),
+            (2019, 1169424.0, 363.16, 139.03, 424609000.0),
+            (2020, 1169424.0, 691.99, 332.43, 809085000.0),
+            (2021, 1169424.0, 248.9, 108.25, 1455024000.0),
+            (2022, 17551360.0, 113.69, 30.29, 2001050000.0),
+            (2023, 17556360.0, 128.77, 17.57, 2266204000.0),
+        ]
+        rows = [row(y, sh, bps, eps=eps, equity=eq, ec=ec, period_end="%d-12-31" % y)
+                for y, sh, bps, eps, eq in spec]
+        events, _ = M.detect_events(rows, bps_path=True)
+        assert [(e.source, e.year, e.kind, e.canonical) for e in events] == [
+            ("bps", 2021, "split", pytest.approx(15.0))]
+        f = M.cumulative_factors(rows, events)
+        assert [f[(ec, y)] for y in (2018, 2019, 2020)] == [pytest.approx(15.0)] * 3
+        assert f[(ec, 2021)] == 1.0
 
     def test_share_count_ratio_near_six_stays_composite_five(self):
         """E05426 みずほリースの翌年株数比 5.7682 は 1:5 分割（Yahoo 2024-03-28）＋増資。
@@ -167,6 +185,146 @@ class TestDetectEvents:
         assert stats["skipped"]["missing_shares"] == 1
         assert stats["skipped"]["missing_bps"] == 1
         assert stats["skipped"]["negative_bps"] == 1
+
+
+class TestListingGap:
+    """上場廃止をまたいで別の実体の行が隣り合うペアを比べない — Issue #672（ADR-0055 決定4-7）。"""
+
+    COVER = "2019-07-29"   # 週次株価表全体の開始日（2026-09-14 の実測）
+
+    # E05714 ソニーフィナンシャルグループの実値。2020-03-31 は旧ソニーフィナンシャルHD（2020 年に
+    # 上場廃止）、2026-03-31 は 2025-09-29 に再上場した新社。週次の系列開始も 2025-09-29。
+    SONY_FG = [(2019, 435062983.0, 1505.2, 142.69, 656846000000.0),
+               (2020, 435087405.0, 1584.9, 171.09, 691978000000.0),
+               (2026, 6770358214.0, 93.74, 7.96, 629284000000.0)]
+
+    def _sony(self):
+        return [row(y, sh, bps, eps=eps, equity=eq, ec="E05714")
+                for y, sh, bps, eps, eq in self.SONY_FG]
+
+    def _series(self, **kw):
+        """`price_series` の写像。値は開始日の文字列か `(開始日, 空白の列)`。
+
+        週次株価表全体の開始日は各社の最初の週の最小値から取るので、開始日から系列を持つ社を1社置く。
+        """
+        out = {"E99999": (self.COVER, ())}
+        for ec, v in kw.items():
+            out[ec] = (v, ()) if isinstance(v, str) else v
+        return out
+
+    def _after_cover(self, days):
+        return (date.fromisoformat(self.COVER) + timedelta(days=days)).isoformat()
+
+    def _n_rejected(self, rows, series):
+        ps = self._series() if series is None else self._series(E00001=series)
+        events, stats = M.detect_events(rows, price_series=ps)
+        assert len(events) + stats["listing_gap"]["n_rejected"] == 1   # どちらか一方にだけ入る
+        return stats["listing_gap"]["n_rejected"]
+
+    def test_without_price_series_the_fifteen_takes_the_relisted_pair(self):
+        """判定が要る理由: 系列を渡さないと、株数比 15.56 が composite 15 で F=15 になる。"""
+        rows = self._sony()
+        events, stats = M.detect_events(rows)
+        assert [(e.year, e.kind, e.canonical) for e in events] == [
+            (2026, "composite", pytest.approx(15.0))]
+        assert M.cumulative_factors(rows, events)[("E05714", 2020)] == pytest.approx(15.0)
+        assert stats["listing_gap"]["enabled"] is False
+
+    def test_relisted_company_pair_is_not_compared(self):
+        rows = self._sony()
+        events, stats = M.detect_events(rows, price_series=self._series(E05714="2025-09-29"))
+        assert events == []
+        lg = stats["listing_gap"]
+        assert lg["enabled"] and lg["n_rejected"] == 1 and lg["coverage_start"] == self.COVER
+        r = lg["rejected"][0]
+        assert (r["edinet_code"], r["prev_year"], r["year"]) == ("E05714", 2020, 2026)
+        assert (r["no_price_after"], r["price_back"]) == (None, "2025-09-29")
+        assert r["sh_ratio"] == pytest.approx(15.5609, abs=1e-4)
+        assert M.cumulative_factors(rows, events)[("E05714", 2020)] == 1.0
+
+    def test_hole_inside_the_series_is_a_listing_gap_too(self):
+        """E03530 SBI新生銀行の実値。2023 年に上場廃止し 2025 年に再上場、旧社の価格が表に残る形。
+
+        週次は 2023-09-25 の次が 2025-11-17（784 日）。このペアは交差検証（株数 x4.3676 に対し
+        bps 逆比 x3.4118）で落ちるので今もイベントにはならないが、判定は系列の開始だけでなく
+        途中の空白でも効くこと。
+        """
+        ec = "E03530"
+        rows = [row(2023, 205034689.0, 4712.33, eps=209.47, equity=966506000000.0, ec=ec),
+                row(2026, 895500000.0, 1381.19, eps=137.66, equity=1233041000000.0, ec=ec)]
+        series = self._series(E03530=(self.COVER, (("2023-09-25", "2025-11-17"),)))
+        events, stats = M.detect_events(rows, price_series=series)
+        assert events == []
+        r = stats["listing_gap"]["rejected"][0]
+        assert (r["prev_year"], r["year"], r["no_price_after"], r["price_back"]) == (
+            2023, 2026, "2023-09-25", "2025-11-17")
+
+    def test_internal_hole_suppresses_a_split_shaped_pair(self):
+        rows = [row(2020, 1000.0, 200.0), row(2023, 2000.0, 100.0)]
+        assert self._n_rejected(rows, (self.COVER, (("2020-09-28", "2022-10-03"),))) == 1
+
+    def test_internal_hole_resuming_after_the_current_period_says_nothing(self):
+        rows = [row(2020, 1000.0, 200.0), row(2023, 2000.0, 100.0)]
+        assert self._n_rejected(rows, (self.COVER, (("2021-09-27", "2023-05-01"),))) == 0
+
+    def test_only_the_part_of_the_hole_inside_the_pair_counts(self):
+        """空白の大半が前期末より前なら、ペアの期間の中の価格の無い長さは短い。"""
+        rows = [row(2021, 1000.0, 200.0), row(2023, 2000.0, 100.0)]
+        # 空白 2019-10-07 -> 2022-03-30 のうち前期末 2021-03-31 より後は 364 日
+        assert self._n_rejected(rows, (self.COVER, (("2019-10-07", "2022-03-30"),))) == 0
+        # 前期末から 365 日で戻る
+        assert self._n_rejected(rows, (self.COVER, (("2019-10-07", "2022-03-31"),))) == 1
+
+    def test_date_objects_are_accepted(self):
+        """係数表の経路は ORM から `datetime.date` を渡し、CLI は ISO 文字列を渡す。"""
+        rows = [r._replace(period_end=date.fromisoformat(r.period_end)) for r in self._sony()]
+        events, stats = M.detect_events(rows, price_series=self._series(E05714="2025-09-29"))
+        assert events == [] and stats["listing_gap"]["n_rejected"] == 1
+
+    def test_one_year_gap_is_never_a_listing_gap(self):
+        """決算期変更で期末が 15 か月離れ、系列がその途中で始まっても gap_years 1 なら比べる。"""
+        rows = [row(2020, 1000.0, 200.0, period_end="2019-12-31"),
+                row(2021, 2000.0, 100.0, period_end="2021-03-31")]
+        assert self._n_rejected(rows, "2021-01-05") == 0     # 空白は 371 日
+
+    def test_series_from_the_start_of_the_table_is_not_a_gap(self):
+        """欠損年があっても、系列が表の開始から途切れずに続いていれば同じ実体（XBRL の取りこぼし等）。"""
+        rows = [row(2019, 1000.0, 200.0), row(2021, 2000.0, 100.0)]
+        assert self._n_rejected(rows, self.COVER) == 0
+
+    def test_company_without_series_is_not_judged(self):
+        """週次を持たない社（上場廃止で価格が消えた社など）は判定できないので今日どおり比べる。"""
+        rows = [row(2019, 1000.0, 200.0), row(2021, 2000.0, 100.0)]
+        assert self._n_rejected(rows, None) == 0
+
+    def test_series_starting_after_the_current_period_says_nothing(self):
+        rows = [row(2020, 1000.0, 200.0), row(2022, 2000.0, 100.0)]
+        assert self._n_rejected(rows, "2022-05-01") == 0
+
+    def test_hole_boundary_is_365_days(self):
+        rows = [row(2020, 1000.0, 200.0), row(2022, 2000.0, 100.0)]
+        assert self._n_rejected(rows, "2021-03-30") == 0     # 前期末 2020-03-31 から 364 日
+        assert self._n_rejected(rows, "2021-03-31") == 1     # 365 日
+
+    def test_hole_is_measured_from_the_start_of_the_table(self):
+        """前期末が表の開始より前なら、その間はどの社にも価格が無いので空白に数えない。"""
+        rows = [row(2018, 1000.0, 200.0), row(2021, 2000.0, 100.0)]
+        assert self._n_rejected(rows, self._after_cover(364)) == 0
+        assert self._n_rejected(rows, self._after_cover(365)) == 1
+
+    def test_bps_path_does_not_borrow_the_next_row_across_a_listing_gap(self):
+        """第2経路の翌年先読みも、(当年, 翌年) が別実体のペアなら翌年の行として使わない。"""
+        rows = [row(2020, 1000.0, 200.0, eps=100.0), row(2021, 1000.0, 100.0, eps=50.0),
+                row(2024, 2000.0, 80.0, eps=40.0)]
+        base, _ = M.detect_events(rows, bps_path=True)
+        assert [(e.source, e.year, e.canonical) for e in base] == [("bps", 2021, 2.0)]
+
+        events, stats = M.detect_events(rows, bps_path=True,
+                                        price_series=self._series(E00001="2023-06-01"))
+        assert events == []
+        assert stats["listing_gap"]["n_rejected"] == 1        # 2021 -> 2024 のペア
+        assert stats["listing_gap"]["n_lagged"] == 1          # 2020 -> 2021 の先読み
+        assert stats["bps_path"]["rejected"]["no_lagged_row"] == 1
 
 
 class TestBpsPath:

@@ -28,7 +28,7 @@ from database import (
     upsert_macro_batch, sync_active_status, db_timeouts,
     get_setting, upsert_setting, KEY_SCALE_BAND_VERDICTS,
     replace_split_adjustment_factors,
-    upsert_jquants_adj_factor_events, load_jquants_adj_factor_events,
+    upsert_jquants_adj_factor_events, load_jquants_adj_factor_events, load_price_series,
 )
 
 from collector_utils import *
@@ -1143,7 +1143,8 @@ def rebuild_split_adjustment_factors(db, *, bps_path: Optional[bool] = None) -> 
     入力は `financial_records.issued_shares` と `bs_bps` と `pl_eps`（いずれも XBRL 由来）
     だけで、J-Quants の契約窓（2年）に依存しない＝2018年まで遡って復元できる。この復元は
     #654 が公式 `AdjFactor` と突合して**一致率 0.967（29/30・陰性対照の見逃し 0 社）**を
-    確認した。
+    確認した。上場廃止をまたいで別の実体の行が隣り合うペアを比べないために、週次株価の系列の開始日と
+    途中の空白（`stock_price_weekly`）も読む（#672）。
 
     `bps_path` は株数が追随しない社を拾う第2経路（#656）の ON/OFF。**None なら検出器側の
     既定（`measure_split_valuation_bias.DEFAULT_BPS_PATH`）に従う**——呼び出し側が既定を
@@ -1164,7 +1165,7 @@ def rebuild_split_adjustment_factors(db, *, bps_path: Optional[bool] = None) -> 
     # ここへ写さない。遅延 import なのは収集モジュールが scripts/ へ静的に依存しないため
     # （あちらの純関数ブロックは database / httpx を引かないことをテストが固定している）。
     from scripts.measure_split_valuation_bias import (
-        AnnualRow, detect_events, cumulative_factors,
+        AnnualRow, detect_events, cumulative_factors, LISTING_GAP_MIN_DAYS,
     )
 
     # **ORDER BY を省かない。** `detect_events` は `sorted(rs, key=lambda r: r.year)` で並べるが
@@ -1196,7 +1197,11 @@ def rebuild_split_adjustment_factors(db, *, bps_path: Optional[bool] = None) -> 
     # **ここでは J-Quants を叩かない**——外部サービスが落ちた晩に補正が静かに外れる経路を作らない
     # ための分業で、表が空なら検出器は今日までどおり採らない側へ倒れる。DB エラーは握らない（決定5）。
     official = load_jquants_adj_factor_events(db)
-    events, stats = detect_events(rows, official_events=official, **kw)
+    # 上場廃止をまたいで別の実体の行が隣り合うペアを比べないための週次株価の系列（開始日と途中の
+    # 空白・#672・決定4-7）。**読み忘れると判定は黙って無効になり**、定番比の 15 が E05714 型の
+    # 偽陽性を入れる。
+    series = load_price_series(db, min_hole_days=LISTING_GAP_MIN_DAYS)
+    events, stats = detect_events(rows, official_events=official, price_series=series, **kw)
     # use_canonical=True（既定）＝定番比へ寄せられなかった `unsnapped` を積から外す。
     factors = cumulative_factors(rows, events)
 
@@ -1241,6 +1246,14 @@ def rebuild_split_adjustment_factors(db, *, bps_path: Optional[bool] = None) -> 
                  len(official), cc.get("agree", 0), cc.get("disagree", 0))
         for d in cc.get("disagreements") or ():
             log.info("分割補正係数（第2経路）: 公式と食い違い %s", d)
+    # 比べなかったペアは**毎晩出す**（#672）。週次の系列が収集の都合で遅く始まる社（2024-05-27 に
+    # 225 社）や、取得の失敗で途中が抜けた社が欠損年をまたぐと本物の分割まで外しうるので、
+    # 一覧が増えたら中身を確かめる。
+    lg = stats.get("listing_gap") or {}
+    log.info("分割補正係数: 上場廃止をまたぐペアとして比べなかった %d 件（翌年先読み %d 件）",
+             lg.get("n_rejected", 0), lg.get("n_lagged", 0))
+    for r in lg.get("rejected") or ():
+        log.info("分割補正係数: 上場廃止をまたぐペア %s", r)
     return n
 
 
