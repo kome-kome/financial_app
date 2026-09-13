@@ -92,6 +92,55 @@ class TestDetectEvents:
         assert c is None
         assert residual == pytest.approx(7.0)
 
+    @pytest.mark.parametrize("ec,y0,prev,y1,cur,expected", [
+        # E03717 unbanked の 3:1 併合（2024-09-27・公式 AdjFactor 1/3・Yahoo 1:3）。値は DB の実値
+        ("E03717", 2024, (30070543.0, 185.21, 13.17, 5569522000.0),
+         2025, (10023514.0, 552.41, 23.63, 5752092000.0), 1 / 3),
+        # E37831 INEST の 15:1 併合（2025-09-29・公式 1/15・Yahoo 1:15）
+        ("E37831", 2025, (109596485.0, 30.42, 0.39, 4944000000.0),
+         2026, (7306432.0, 458.87, 24.74, 5103000000.0), 1 / 15),
+    ])
+    def test_confirmed_reverse_splits_snap_to_added_ratios(self, ec, y0, prev, y1, cur, expected):
+        """#669 で足した比。足す前は `unsnapped` で F に入らず、併合前の断面が補正されなかった。"""
+        rows = [row(y0, prev[0], prev[1], eps=prev[2], equity=prev[3], ec=ec),
+                row(y1, cur[0], cur[1], eps=cur[2], equity=cur[3], ec=ec)]
+        events, _ = M.detect_events(rows)
+        assert [(e.source, e.kind, e.canonical) for e in events] == [
+            ("shares", "reverse", pytest.approx(expected))]
+        assert M.cumulative_factors(rows, events)[(ec, y0)] == pytest.approx(expected)
+
+    @pytest.mark.parametrize("ec,y0,prev,y1,cur", [
+        # E05698 UT グループの 1:15（2025-12-29・公式/Yahoo とも一致）。**本物だが補正されない**
+        ("E05698", 2025, (39860383.0, 741.37, 225.32, 36323000000.0),
+         2026, (601193745.0, 44.26, 12.37, 32141000000.0)),
+        # E05714 ソニーフィナンシャルグループ。2020 年に上場廃止し 2026 年に別の株数で再上場した
+        # 行が隣り合っただけで、分割ではない（公式・Yahoo ともイベント無し）
+        ("E05714", 2020, (435087405.0, 1584.9, 171.09, 691978000000.0),
+         2026, (6770358214.0, 93.74, 7.96, 629284000000.0)),
+    ])
+    def test_fifteen_is_not_in_the_table(self, ec, y0, prev, y1, cur):
+        """**15 は定番比の表に足さない**（#669・ADR-0055 決定4-6）。
+
+        足すと E05698 の本物の 1:15 は split で入るが、E05714 の株数比 15.56 も composite で
+        15 へ寄り、分割の無い 2019〜2020 年の断面へ F=15 が掛かる。比を足すのは、前後で倍率が
+        変わるイベントが全部確かめられたときだけ、という規則でここは落とした。
+        """
+        rows = [row(y0, prev[0], prev[1], eps=prev[2], equity=prev[3], ec=ec),
+                row(y1, cur[0], cur[1], eps=cur[2], equity=cur[3], ec=ec)]
+        events, _ = M.detect_events(rows)
+        assert [(e.kind, e.canonical) for e in events] == [("unsnapped", None)]
+        assert M.cumulative_factors(rows, events)[(ec, y0)] == 1.0
+        assert 15.0 not in M.CANONICAL_RATIOS
+
+    def test_share_count_ratio_near_six_stays_composite_five(self):
+        """E05426 みずほリースの翌年株数比 5.7682 は 1:5 分割（Yahoo 2024-03-28）＋増資。
+
+        #669 は 1:6 を疑ったが本物の比は 5 で、今の composite 5.0 が正しい。6 は足さない。
+        """
+        c, residual, kind = M.snap_to_canonical(282666300.0 / 49004000.0)
+        assert (c, kind) == (pytest.approx(5.0), "composite")
+        assert residual == pytest.approx(5.7682 / 5.0, abs=1e-4)   # 増資の分（純資産 +21.7%）
+
     def test_gate_boundary_is_log_symmetric(self):
         """閾値は対数対称。予備クエリの `< 0.72` との差がここに出る。"""
         # 上側 1.4 ちょうどは通り、1.399 は通らない
