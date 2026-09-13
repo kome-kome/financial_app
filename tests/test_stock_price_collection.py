@@ -33,7 +33,7 @@ from collector import (
     collect_stock_price_history,
     collect_stock_price_history_jquants,
 )
-from database import FinancialRecord
+from database import FinancialRecord, JQuantsAdjFactorEvent, load_jquants_adj_factor_events
 
 
 def _collect_with_capture(db, **kwargs):
@@ -442,6 +442,75 @@ class TestCollectJQuantsHistory:
         mock_batch.assert_called_once()
         assert result["spinoff_unadjusted"] == 0
         assert result["spinoff_unadjusted_companies"] == []
+
+    def _run_rows(self, db, rows):
+        with patch("collector_prices._jquants_fetch_date",
+                   new_callable=AsyncMock, return_value=rows):
+            with patch("collector_prices.record_prices_batch", return_value=1):
+                with patch("collector_prices.trim_daily", return_value=0):
+                    with patch.dict(os.environ, {"JQUANTS_API_KEY": "test-key"}):
+                        with patch("collector_prices.JQUANTS_RATE_SLEEP", 0):
+                            return asyncio.run(collect_stock_price_history_jquants(
+                                db, date_from=self._MON, date_to=self._MON))
+
+    @staticmethod
+    def _bar(code, *, adj_factor, c=1005.0, adjc=1005.0, date_str="2024-01-08"):
+        return {"Code": code, "Date": date_str, "O": c, "H": c, "L": c, "C": c, "Vo": 1.0,
+                "AdjO": adjc, "AdjH": adjc, "AdjL": adjc, "AdjC": adjc, "AdjVo": 1.0,
+                "AdjFactor": adj_factor}
+
+    def test_official_adj_factor_events_are_kept(self, db, make_company):
+        """捨てていた公式 `AdjFactor` のイベントを残す（#661）。API 呼び出しは増えない。
+
+        分割の日は `AdjC != C` で価格行を**書かない**日と重なりやすいので、選別の後ろではなく
+        前で拾う。価格行が捨てられても、イベントは残ること。
+        """
+        self._add_company(db, make_company)
+        result = self._run_rows(db, [self._bar("10010", adj_factor=0.5, c=2010.0, adjc=1005.0)])
+
+        assert result["scale_mismatch"] == 1              # 価格行は従来どおり書かない
+        assert result["adj_factor_events"] == 1
+        assert load_jquants_adj_factor_events(db) == {"E00001": [("2024-01-08", 0.5)]}
+        assert db.query(JQuantsAdjFactorEvent).one().jq_code == "10010"
+
+    def test_non_events_and_other_share_classes_are_not_kept(self, db, make_company):
+        """`AdjFactor` が 1 のゆらぎの範囲・欠損の行と、優先株など末尾0でないコードは残さない
+        （別クラスの係数を普通株の社へ付けない・#465）。"""
+        self._add_company(db, make_company)
+        result = self._run_rows(db, [
+            self._bar("10010", adj_factor=1.0 + 1e-9),
+            self._bar("10010", adj_factor=None),
+            self._bar("10015", adj_factor=0.5),
+        ])
+        assert result["adj_factor_events"] == 0
+        assert load_jquants_adj_factor_events(db) == {}
+
+    def test_spinoff_filtered_rows_still_keep_their_event(self, db, make_company):
+        """スピンオフの選別（#651）で価格行を捨てる日でも、イベントの記録は選別と独立。"""
+        db.add(make_company(edinet_code="E02086", sec_code="6676", name="株式会社バッファロー"))
+        db.commit()
+        with patch("collector_prices._jquants_fetch_date", new_callable=AsyncMock,
+                   return_value=[self._bar("66760", adj_factor=0.5, c=3820.0, adjc=3820.0,
+                                           date_str="2024-09-26")]):
+            with patch("collector_prices.record_prices_batch", return_value=1):
+                with patch("collector_prices.trim_daily", return_value=0):
+                    with patch.dict(os.environ, {"JQUANTS_API_KEY": "test-key"}):
+                        with patch("collector_prices.JQUANTS_RATE_SLEEP", 0):
+                            result = asyncio.run(collect_stock_price_history_jquants(
+                                db, date_from=date(2024, 9, 26), date_to=date(2024, 9, 26)))
+        assert result["spinoff_unadjusted"] == 1
+        assert load_jquants_adj_factor_events(db) == {"E02086": [("2024-09-26", 0.5)]}
+
+    def test_failed_event_write_does_not_hide_the_price_result(self, db, make_company):
+        """イベントを書けなくても価格収集の結果は返し、失敗は 0 件ではなく None で示す。"""
+        from sqlalchemy.exc import OperationalError
+
+        self._add_company(db, make_company)
+        with patch("collector_prices.upsert_jquants_adj_factor_events",
+                   side_effect=OperationalError("stmt", {}, Exception("boom"))):
+            result = self._run_rows(db, [self._bar("10010", adj_factor=0.5)])
+        assert result["upserted"] == 1
+        assert result["adj_factor_events"] is None
 
     def test_cancel_check_stops_jquants(self, db, make_company):
         """cancel_check が True を返すと処理が中断され cancelled: True が返る。"""

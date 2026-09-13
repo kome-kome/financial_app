@@ -444,6 +444,27 @@ def is_common_stock_code(code: str) -> bool:
     return len(s) == 5 and s.endswith("0")
 
 
+#: `AdjFactor` をイベントとみなす下限（浮動小数の 1.0 ゆらぎを拾わない）。
+#: 収集（#661・catchup が残す）と修復（`repair_splits_from_jquants.extract_events`）が共有する。
+ADJ_FACTOR_EVENT_EPS = 1.0e-6
+
+
+def adj_factor_event(q: dict) -> Optional[float]:
+    """J-Quants の日次バー1行が公式の企業イベントなら、その `AdjFactor` を返す。無ければ None。
+
+    `AdjFactor` は**過去の株価に掛ける係数**（1:2 分割なら 0.5）で、分割補正係数 F とは向きが
+    逆（CONTEXT.md）。スピンオフは載らない（#568）。数値に読めない値はイベントとみなさない。
+    """
+    f = q.get("AdjFactor")
+    if f is None:
+        return None
+    try:
+        f = float(f)
+    except (TypeError, ValueError):
+        return None
+    return f if abs(f - 1.0) > ADJ_FACTOR_EVENT_EPS else None
+
+
 class EdinetAccessError(Exception):
     """EDINET が構造的に応答しない＝日付を変えても直らない状態（#577）。
 

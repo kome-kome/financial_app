@@ -107,10 +107,12 @@ from collector_utils import (
     REL_TOL_FLOOR, ROUND_UNIT, force_utf8_stdout, rounding_tolerance,
     # 公式が持たないスピンオフ調整（#568）。検出器（compare_official_vs_weekly）と共有する。
     spinoff_factor,
+    # `AdjFactor` のイベント判定は夜間 catchup が残す側（#661）と共有する。
+    ADJ_FACTOR_EVENT_EPS, adj_factor_event,
 )
 
-# `AdjFactor` がイベントとみなされる下限（浮動小数の 1.0 ゆらぎを拾わない）。
-EVENT_EPS = 1.0e-6
+# `AdjFactor` がイベントとみなされる下限。唯一の源は collector_utils（ここは互換の別名）。
+EVENT_EPS = ADJ_FACTOR_EVENT_EPS
 
 STAMP_KEY = "splits_repaired_from_jquants"
 
@@ -121,12 +123,9 @@ def extract_events(rows: list) -> list:
     """J-Quants の日次バーから公式の企業イベント [(date, factor)] を取り出す。"""
     out = []
     for r in rows:
-        f = r.get("AdjFactor")
         d = r.get("Date")
-        if f is None or not d:
-            continue
-        f = float(f)
-        if abs(f - 1.0) > EVENT_EPS:
+        f = adj_factor_event(r)
+        if f is not None and d:
             out.append((str(d)[:10], f))
     return sorted(out)
 

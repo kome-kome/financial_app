@@ -219,6 +219,9 @@ class ShareEvent(NamedTuple):
     # 第1経路のペアの純資産総額比（#657）。チェックの有無によらず記録する（判定できなければ
     # None）。第2経路では None——倍率の出どころが別の年のペアなので、同じ量ではない。
     equity_ratio: Optional[float] = None
+    # 第2経路で**翌年の行が無い**ときに倍率を決めた公式 `AdjFactor` の株数比（#661）。
+    # イベント窓の中の公式イベントの積の逆数。`lagged_sh_ratio` とは排他（翌年があれば翌年を使う）。
+    official_ratio: Optional[float] = None
 
 
 class MatchResult(NamedTuple):
@@ -298,6 +301,7 @@ def detect_events(rows: Sequence[AnnualRow], *,
                   snap_tol: float = DEFAULT_SNAP_TOL,
                   bps_path: bool = DEFAULT_BPS_PATH,
                   equity_tol: Optional[float] = DEFAULT_EQUITY_TOL,
+                  official_events: Optional[Mapping[str, Sequence[tuple[str, float]]]] = None,
                   ) -> tuple[list[ShareEvent], dict]:
     """株数基準が変わった年を検出する。戻り値 (events, stats)。
 
@@ -339,6 +343,18 @@ def detect_events(rows: Sequence[AnnualRow], *,
     第2経路には掛けない（倍率は翌年のペアから取る別の主張で、成長企業の本物の分割を巻き込む）。
     第1経路が落としたペアを第2経路が独立に拾うことは妨げない（畳むのは第1経路が**採った**とき
     だけ、という上の規則と揃える）。
+
+    **`official_events` を与えると、翌年の行が無い第2経路のペアだけ公式 `AdjFactor` から倍率を
+    取る**（#661・ADR-0055 決定4-5）。形は `{edinet_code: [(日付, AdjFactor), ...]}`。
+    イベント窓（`event_window`）の中の公式イベントの積の逆数を第3の信号として、動いているか・
+    向きが合うかを翌年の株数と同じ規則で判定し、**比は定番比へ丸めずそのまま倍率にする**
+    （`AdjFactor` は株価の遡及調整に使われた係数そのもので、増資の分が混ざらない）。**窓の中に公式イベントが
+    無ければ今日までどおり採らない**——行が無いことを「分割は無かった」とは読まない（取り込み前・
+    夜の取りこぼし・エンバーゴ中と区別できない）ので、公式が落ちた晩も補正が誤るのではなく
+    採らない側へ倒れる。翌年の行があるペアは公式を倍率に使わず、食い違いを
+    `stats["bps_path"]["official_crosscheck"]` に数えるだけにする。
+    None（既定）なら公式を一切見ない＝測定器の CLI はこちらを使う。公式から倍率を決めた
+    イベントを公式と突合すると、定義上必ず一致して一致率が黙って膨らむためである。
     """
     gate = _log(min_ratio)
     by_ec: dict[str, list[AnnualRow]] = defaultdict(list)
@@ -358,6 +374,9 @@ def detect_events(rows: Sequence[AnnualRow], *,
     shares_pairs: set[tuple[str, int]] = set()   # 第1経路が採った (ec, year)
     equity_rejected: list[dict] = []
     n_equity_unknown = 0
+    # 倍率の出どころが無くて採らなかった第2経路のペア（#661）。取り込み CLI の対象選びと
+    # 夜間ログが読む。件数は `bps_rejected["no_lagged_row"]` と常に一致する。
+    awaiting: list[dict] = []
 
     for ec, rs in by_ec.items():
         # **使える行だけを先に並べる。** 翌年の株数を見るには次の行を先読みする必要があり、
@@ -422,10 +441,41 @@ def detect_events(rows: Sequence[AnnualRow], *,
                     # （bps だけが動いて eps が追随しない）。
                     bps_rejected["eps_mismatch"] += 1
                 elif nxt is None:
-                    # **倍率の出どころが無い。** 最新年のイベントはここへ来る（翌年の決算が
-                    # まだ提出されていない）。採らずに次回へ送る＝係数表は毎晩全置換なので、
-                    # 翌年の行が入れば自動で補正が入る（#659）。
-                    bps_rejected["no_lagged_row"] += 1
+                    # **翌年の株数が無い。** 最新年のイベントはここへ来る（翌年の決算がまだ
+                    # 提出されていない）。公式 `AdjFactor` が窓の中にあればそれを第3の信号に
+                    # する（#661）。無ければ採らずに次回へ送る＝係数表は毎晩全置換なので、
+                    # 公式が入るか翌年の行が入れば自動で補正が入る（#659）。
+                    cand = ShareEvent(
+                        edinet_code=ec, year=cur.year, prev_year=prev.year,
+                        gap_years=cur.year - prev.year,
+                        period_end=cur.period_end, prev_period_end=prev.period_end,
+                        sh_ratio=sh_ratio, bps_ratio=bps_ratio,
+                        canonical=None, residual=bps_ratio, kind="unsnapped", source="bps")
+                    off, _ = (official_ratio_in_window(official_events.get(ec, ()),
+                                                       event_window(cand))
+                              if official_events is not None else (None, 0))
+                    if off is None:
+                        bps_rejected["no_lagged_row"] += 1
+                        awaiting.append({
+                            "edinet_code": ec, "year": cur.year,
+                            "prev_period_end": _iso(prev.period_end),
+                            "period_end": _iso(cur.period_end), "bps_ratio": bps_ratio,
+                        })
+                    elif abs(_log(off)) < gate:
+                        # 公式は窓の中で動いているが、1株指標の動きを説明するほどではない
+                        # （1:1.1 の無償割当など）。`lagged_flat` と同じ理由で採らない。
+                        bps_rejected["official_flat"] += 1
+                    elif _log(off) * _log(bps_ratio) < 0:
+                        bps_rejected["official_direction"] += 1
+                    else:
+                        # **公式の比は定番比へ丸めない。** 丸めは「株数比に増資の分が混ざる」のを
+                        # 切り離すための仕組みで、`AdjFactor` は株価の遡及調整に使われた係数
+                        # そのもの＝F の正本である。丸めると定番比の表に無い 1:6 が 5 へ寄って
+                        # F が 17% 小さく入り、1:7 は採られない（実測 2026-09-13: E38205 /
+                        # E38979 / E02128）。
+                        events.append(cand._replace(
+                            canonical=off, residual=1.0,
+                            kind="split" if off > 1 else "reverse", official_ratio=off))
                 else:
                     lag = nxt.issued_shares / cur.issued_shares
                     if abs(_log(lag)) < gate:
@@ -466,6 +516,26 @@ def detect_events(rows: Sequence[AnnualRow], *,
             kept.append(e)
         events = kept
 
+    # 翌年の株数から倍率を決めたイベントを公式と突き合わせる（#661）。**イベントは変えず数えるだけ**
+    # ——両方が取れる年で2つの書き手が合っているかを、毎晩追加の取得なしに測り続けるため。
+    # 公式イベントが窓に無いものは数えない（取り込み前・エンバーゴ中と区別できない）。
+    crosscheck = {"agree": 0, "disagree": 0, "disagreements": []}
+    if official_events is not None:
+        for e in events:
+            if e.source != "bps" or e.lagged_sh_ratio is None:
+                continue
+            m = match_event(e, official_events.get(e.edinet_code, ()))
+            if m.official is None:
+                continue
+            if m.status == "agree":
+                crosscheck["agree"] += 1
+            else:
+                crosscheck["disagree"] += 1
+                crosscheck["disagreements"].append({
+                    "edinet_code": e.edinet_code, "year": e.year, "status": m.status,
+                    "lagged": e.canonical, "official": m.official,
+                })
+
     bps_events = [e for e in events if e.source == "bps"]
     stats = {
         "n_candidate_pairs": n_candidates,
@@ -484,6 +554,16 @@ def detect_events(rows: Sequence[AnnualRow], *,
             "n_event_companies": len({e.edinet_code for e in bps_events}),
             "by_kind": dict(Counter(e.kind for e in bps_events)),
             "rejected": dict(bps_rejected),
+            # 倍率の出どころ（#661）。official は翌年の行が無い年に公式 AdjFactor で埋めた件数。
+            "magnitude_source": {
+                "lagged_shares": sum(1 for e in bps_events if e.lagged_sh_ratio is not None),
+                "official": sum(1 for e in bps_events if e.official_ratio is not None),
+            },
+            "awaiting_magnitude": awaiting,
+            "official": {
+                "enabled": official_events is not None,
+                "crosscheck": crosscheck,
+            },
         },
         "equity": {
             "enabled": equity_tol is not None,
@@ -659,6 +739,27 @@ def event_window(ev: ShareEvent, *, slack_days: int = 45) -> Optional[tuple[str,
             (date.fromisoformat(p1) + timedelta(days=slack_days)).isoformat())
 
 
+def official_ratio_in_window(official: Sequence[tuple[str, float]],
+                             window: Optional[tuple[str, str]]
+                             ) -> tuple[Optional[float], int]:
+    """窓 (w0, w1] の中の公式イベントを株数比へ直した値と件数。無ければ (None, 0)。
+
+    公式の `AdjFactor` は**過去株価に掛ける係数**なので 1:2 分割は 0.5 で返る。株数比へ
+    直すため逆数を取る。同一窓に複数イベントがあれば積になる（DB 側の年次比も積なので整合する）。
+    突合（`match_event`）と本番の倍率決め（`detect_events`・#661）が共有する＝窓の意味を割らない。
+    """
+    if window is None:
+        return None, 0
+    w0, w1 = window
+    inside = [f for d, f in official if w0 < d <= w1 and f and f > 0]
+    if not inside:
+        return None, 0
+    prod = 1.0
+    for f in inside:
+        prod *= f
+    return 1.0 / prod, len(inside)
+
+
 def in_coverage(ev: ShareEvent, coverage: Optional[tuple[str, str]], *,
                 slack_days: int = 45, mode: str = "full") -> bool:
     """公式がこのイベントを判定できるか。
@@ -708,7 +809,9 @@ def match_event(ev: ShareEvent, official: Sequence[tuple[str, float]], *,
     # 「もう倍率に使っていない量では合う」を数えることになり、意味が黙って壊れる）。
     # 第1経路は候補ゲート＝倍率なので `sh_ratio` のまま。
     if ev.source == "bps":
-        raw = ev.lagged_sh_ratio if ev.lagged_sh_ratio is not None else ev.bps_ratio
+        # 翌年の株数 → 公式（#661・翌年の行が無い年だけ） → bps の年次比、の順。
+        raw = next(r for r in (ev.lagged_sh_ratio, ev.official_ratio, ev.bps_ratio)
+                   if r is not None)
     else:
         raw = ev.sh_ratio
     detected = ev.canonical if ev.canonical is not None else raw
@@ -721,27 +824,23 @@ def match_event(ev: ShareEvent, official: Sequence[tuple[str, float]], *,
     if coverage_mode == "partial" and coverage and coverage[0] and coverage[1]:
         w0, w1 = max(w0, coverage[0]), min(w1, coverage[1])
 
-    inside = [f for d, f in official if w0 < d <= w1 and f and f > 0]
-    if not inside:
+    official_ratio, n_inside = official_ratio_in_window(official, (w0, w1))
+    if official_ratio is None:
         return MatchResult(
             ev.edinet_code, ev.year, detected, raw, None, 0,
             "no_official_event_partial" if coverage_mode == "partial"
             else "no_official_event")
-    prod = 1.0
-    for f in inside:
-        prod *= f
-    official_ratio = 1.0 / prod
 
     lim = _log(1 + tol)
     if abs(_log(official_ratio / detected)) <= lim:
         return MatchResult(ev.edinet_code, ev.year, detected, raw,
-                           official_ratio, len(inside), "agree")
+                           official_ratio, n_inside, "agree")
     if abs(_log(official_ratio / raw)) <= lim:
         # 生比では合うがスナップ後で外れる＝スナップが悪さをしている側。分けて数える。
         return MatchResult(ev.edinet_code, ev.year, detected, raw,
-                           official_ratio, len(inside), "agree_raw_only")
+                           official_ratio, n_inside, "agree_raw_only")
     return MatchResult(ev.edinet_code, ev.year, detected, raw,
-                       official_ratio, len(inside), "disagree_magnitude")
+                       official_ratio, n_inside, "disagree_magnitude")
 
 
 #: 一致率の分母に入れる status。**ここが分母の唯一の源**で、CLI へ書き写さない。
