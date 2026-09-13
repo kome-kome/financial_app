@@ -370,6 +370,11 @@ async def main(years_back: int, collect_only: bool = False,
                     # 2年窓の手動収集では登録済みの社の権利落ち前が必ず入りうる
                     log(f"  J-Quants スピンオフ権利落ち前で不採用: {result['spinoff_unadjusted']}行"
                         f"（{len(result.get('spinoff_unadjusted_companies') or [])}社）")
+                if result.get("adj_factor_events"):
+                    # 残した公式 AdjFactor のイベント（#661）。2年窓なら契約窓ぶんが揃う
+                    log(f"  J-Quants 公式 AdjFactor イベント: {result['adj_factor_events']}件")
+                elif "adj_factor_events" in result and result["adj_factor_events"] is None:
+                    log("  J-Quants 公式 AdjFactor イベントの保存に失敗（分割補正の最新年は倍率待ち）")
                 if result.get("forbidden"):
                     # 403＝契約失効／プラン対象外／URL 不在。**境界ではない**（境界は 400）・#462
                     log(f"  J-Quants 403 でスキップ: {result['forbidden']}日"

@@ -28,6 +28,7 @@ from database import (
     upsert_macro_batch, sync_active_status, db_timeouts,
     get_setting, upsert_setting, KEY_SCALE_BAND_VERDICTS,
     replace_split_adjustment_factors,
+    upsert_jquants_adj_factor_events, load_jquants_adj_factor_events,
 )
 
 from collector_utils import *
@@ -569,6 +570,9 @@ async def collect_stock_price_history_jquants(
     # 「なぜこの社だけ古い誤りが残るのか」を後から追えない。
     scale_mismatch_ecs: set = set()
     spinoff_unadjusted_ecs: set = set()
+    # 公式 `AdjFactor` のイベント（#661）。{(edinet_code, 日付): (AdjFactor, 5桁コード)}。
+    # 応答には全銘柄ぶん載っているのに捨てていた値で、分割補正の第2経路が最新年の倍率に使う。
+    adj_events: dict = {}
 
     async def _jquants_batch_gen(session):
         completed = 0
@@ -677,6 +681,13 @@ async def collect_stock_price_history_jquants(
                 edinet_code = sec_to_edinet.get(sec_code)
                 if not edinet_code:
                     continue
+                # 公式のイベントは**価格行の選別より前に**溜める（#661）。分割の前後は
+                # 下の `AdjC != C` で価格行を捨てる日と重なりやすく、選別の後ろで拾うと
+                # ちょうど欲しい行を落とす。普通株（末尾0）だけ——優先株の係数を普通株の
+                # 社へ付けない（#465 と同じ理由）。
+                _f = adj_factor_event(q)
+                if _f is not None and is_common_stock_code(code) and q.get("Date"):
+                    adj_events[(edinet_code, str(q["Date"])[:10])] = (_f, code)
                 # V2: AdjC 等は株式分割・併合を遡及反映した調整後値（Issue #314）。
                 # 未調整の C/O/H/L/Vo を使うと分割日を境に系列が段差になりリターン計算が破綻する。
                 close_val = q.get("AdjC")
@@ -819,6 +830,25 @@ async def collect_stock_price_history_jquants(
                 f"復帰={sync_result['reactivated']}件"
             )
 
+    # 公式 AdjFactor のイベントを残す（#661・ADR-0055 決定4-5）。停止された回も取れた分は残す。
+    # **ここで落ちても価格収集の結果は返す**——書けなかった晩は分割補正が「倍率待ち」のまま
+    # 残るだけで（採らない側）、往復段差の検知へ渡す `scale_mismatch_companies` まで道連れに
+    # しない。失敗は件数ではなく None で返し、「0件だった」と区別する。
+    adj_factor_events: Optional[int] = 0
+    if adj_events:
+        try:
+            adj_factor_events = upsert_jquants_adj_factor_events(db, [
+                {"edinet_code": ec, "event_date": d, "adj_factor": f, "jq_code": c}
+                for (ec, d), (f, c) in sorted(adj_events.items())])
+            db.commit()
+            log.info(f"J-Quants: 公式 AdjFactor のイベント {adj_factor_events}件"
+                     f"（{len({ec for ec, _ in adj_events})}社）を残した（#661）")
+        except SQLAlchemyError as e:
+            db.rollback()
+            adj_factor_events = None
+            log.error(f"J-Quants: 公式 AdjFactor のイベント {len(adj_events)}件を保存できなかった"
+                      f"（分割補正の最新年は倍率待ちのまま残る・#661）: {e}")
+
     if cancelled:
         return {"cancelled": True, "upserted": upserted_total,
                 "forbidden": fetch_stats["forbidden"], "all_forbidden": all_forbidden,
@@ -829,7 +859,8 @@ async def collect_stock_price_history_jquants(
                 "scale_unknown": fetch_stats["scale_unknown"],
                 "scale_mismatch_companies": sorted(scale_mismatch_ecs),
                 "spinoff_unadjusted": fetch_stats["spinoff_unadjusted"],
-                "spinoff_unadjusted_companies": sorted(spinoff_unadjusted_ecs)}
+                "spinoff_unadjusted_companies": sorted(spinoff_unadjusted_ecs),
+                "adj_factor_events": adj_factor_events}
     if on_progress:
         on_progress(total, total, f"[完了] {total}日処理・{upserted_total}件追加/更新")
     return {"cancelled": False, "upserted": upserted_total, "days": total,
@@ -841,7 +872,8 @@ async def collect_stock_price_history_jquants(
             "scale_unknown": fetch_stats["scale_unknown"],
             "scale_mismatch_companies": sorted(scale_mismatch_ecs),
             "spinoff_unadjusted": fetch_stats["spinoff_unadjusted"],
-            "spinoff_unadjusted_companies": sorted(spinoff_unadjusted_ecs)}
+            "spinoff_unadjusted_companies": sorted(spinoff_unadjusted_ecs),
+            "adj_factor_events": adj_factor_events}
 
 
 def _update_market_data_latest(db) -> int:
@@ -1160,7 +1192,11 @@ def rebuild_split_adjustment_factors(db, *, bps_path: Optional[bool] = None) -> 
         return 0
 
     kw = {} if bps_path is None else {"bps_path": bps_path}
-    events, stats = detect_events(rows, **kw)
+    # 翌年の行が無い第2経路の倍率は、catchup が残した公式 AdjFactor から取る（#661・決定4-5）。
+    # **ここでは J-Quants を叩かない**——外部サービスが落ちた晩に補正が静かに外れる経路を作らない
+    # ための分業で、表が空なら検出器は今日までどおり採らない側へ倒れる。DB エラーは握らない（決定5）。
+    official = load_jquants_adj_factor_events(db)
+    events, stats = detect_events(rows, official_events=official, **kw)
     # use_canonical=True（既定）＝定番比へ寄せられなかった `unsnapped` を積から外す。
     factors = cumulative_factors(rows, events)
 
@@ -1194,6 +1230,17 @@ def rebuild_split_adjustment_factors(db, *, bps_path: Optional[bool] = None) -> 
     log.info("分割補正係数: %d 行 / %d 社 を全置換（イベント %d 件・種別 %s・経路 %s）",
              n, len({r["edinet_code"] for r in out}), stats.get("n_events"),
              stats.get("by_kind"), stats.get("n_events_by_source"))
+    bp = stats.get("bps_path") or {}
+    if bp.get("enabled"):
+        # 倍率待ちの残りと公式との食い違いは**毎晩出す**（#661）。倍率待ちが減らないまま
+        # 公式イベント 0 社が続くなら、catchup が残せていない（あるいは表が消えた）合図。
+        cc = (bp.get("official") or {}).get("crosscheck") or {}
+        log.info("分割補正係数（第2経路）: 倍率の出どころ %s・倍率待ち %d 件・"
+                 "公式イベントを持つ社 %d・翌年株数と公式の突合 一致 %d / 食い違い %d",
+                 bp.get("magnitude_source"), len(bp.get("awaiting_magnitude") or ()),
+                 len(official), cc.get("agree", 0), cc.get("disagree", 0))
+        for d in cc.get("disagreements") or ():
+            log.info("分割補正係数（第2経路）: 公式と食い違い %s", d)
     return n
 
 

@@ -49,8 +49,8 @@ Egress 枠が復旧する 2026-08-18 を待たずに、本番と同一のコー�
 
 ## テーブル順序と FK
 
-ミラー範囲は全19表から `xbrl_raw_documents`（BLOB・0行）を除いた18表
-（`split_adjustment_factors` を #655 で追加）。FK は4本ともに `companies.edinet_code`
+ミラー範囲は全20表から `xbrl_raw_documents`（BLOB・0行）を除いた19表
+（`split_adjustment_factors` を #655、`jquants_adj_factor_events` を #661 で追加）。FK は4本ともに `companies.edinet_code`
 向きなので、`Base.metadata.sorted_tables`（依存順）に従えば `companies` が依存側より先に来る。
 **`edinet` は superuser でないため `pg_restore --disable-triggers` が使えず**、順序で満たすしかない。
 並列 `--jobs` は順序が崩れるので使わない。
@@ -173,6 +173,10 @@ SYNC_PLAN: dict[str, TableSync] = {
              "——訂正提出で検出イベントが消えれば F は 1.0 へ戻り、その行は表から落ちる。"
              "upsert だけのミラーでは古い補正係数が残り二重補正になる（どの値も妥当な株価指標"
              "なのでエラーは出ない）。実測 1,947 行で FULL でも軽い"),
+    "jquants_adj_factor_events": TableSync(
+        MODE_FULL,
+        note="公式 AdjFactor のイベント（#661）。upsert の追記型で last_seen_at は進むが、"
+             "全社の分割イベントを窓2年ぶん持っても数百行なので高水位を持つ意味が無い"),
 
     # 行数極小
     "plugin_tuned_params": TableSync(MODE_FULL, note="plugin ごとに1行。全件でも数十行"),

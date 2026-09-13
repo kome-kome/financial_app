@@ -30,7 +30,9 @@ if str(ROOT) not in sys.path:
 
 from collector_prices import rebuild_split_adjustment_factors  # noqa: E402
 from database import (  # noqa: E402
-    FinancialRecord, SplitAdjustmentFactor, replace_split_adjustment_factors,
+    FinancialRecord, JQuantsAdjFactorEvent, SplitAdjustmentFactor,
+    load_jquants_adj_factor_events, replace_split_adjustment_factors,
+    upsert_jquants_adj_factor_events,
 )
 from scripts import measure_split_valuation_bias as M  # noqa: E402
 
@@ -256,6 +258,117 @@ class TestBpsPathReachesTheTable:
         got = {(r.year, r.factor, r.n_events)
                for r in db.query(SplitAdjustmentFactor).filter_by(edinet_code="E00001").all()}
         assert got == {(2019, 2.0, 1), (2020, 2.0, 1)}
+
+
+def _seed_latest_year_bps_company(db, make_fin, ec="E00006"):
+    """最新年（2022）に bps / eps だけが半分になり、翌年の行がまだ無い社（#661）。
+
+    翌年の株数という第3の信号が無いので #659 までは採らない。公式 `AdjFactor` が
+    イベント窓 (2021-03-31 - 45日, 2022-03-31 + 45日] の中にあれば、そこから倍率を取る。
+    """
+    for year, shares, bps, eps in ((2020, 1000.0, 2000.0, 200.0),
+                                   (2021, 1000.0, 2100.0, 210.0),
+                                   (2022, 1000.0, 1050.0, 105.0)):
+        db.add(make_fin(edinet_code=ec, year=year, period_end=date(year, 3, 31),
+                        issued_shares=shares, bs_bps=bps, pl_eps=eps, dps=20.0,
+                        stock_price=1000.0, per=10.0, pbr=0.5,
+                        div_yield=2.0, market_cap=5000.0))
+    db.commit()
+
+
+class TestOfficialEventsReachTheTable:
+    """catchup が残した公式 AdjFactor（#661）が係数表まで届くこと。rebuild は DB だけを読む。"""
+
+    def _official(self, db, rows):
+        upsert_jquants_adj_factor_events(db, rows)
+        db.commit()
+
+    def test_empty_table_leaves_the_latest_year_alone(self, db, make_fin):
+        """表が空の夜（取り込み前・catchup が書けなかった）は #659 と同じく採らない。"""
+        _seed_latest_year_bps_company(db, make_fin)
+        _seed_split_company(db, make_fin)      # 検出0件で失敗しないよう第1経路の社も置く
+
+        rebuild_split_adjustment_factors(db, bps_path=True)
+
+        assert db.query(SplitAdjustmentFactor).filter_by(edinet_code="E00006").count() == 0
+
+    def test_official_event_fills_the_latest_year(self, db, make_fin):
+        _seed_latest_year_bps_company(db, make_fin)
+        self._official(db, [{"edinet_code": "E00006", "event_date": "2021-10-01",
+                             "adj_factor": 0.5, "jq_code": "99990"}])
+
+        rebuild_split_adjustment_factors(db, bps_path=True)
+
+        got = {(r.year, r.factor, r.n_events, r.kinds)
+               for r in db.query(SplitAdjustmentFactor).filter_by(edinet_code="E00006").all()}
+        assert got == {(2020, 2.0, 1, "split"), (2021, 2.0, 1, "split")}
+
+    def test_factor_matches_the_pure_functions_given_the_same_official_events(self, db, make_fin):
+        """表の値は、同じ公式イベントを純関数に渡した結果と厳密に一致する（写していない証拠）。"""
+        _seed_latest_year_bps_company(db, make_fin)
+        _seed_bps_path_company(db, make_fin)
+        _seed_split_company(db, make_fin)
+        self._official(db, [
+            {"edinet_code": "E00006", "event_date": "2021-10-01", "adj_factor": 0.5, "jq_code": None},
+            # 翌年の株数がある社の公式イベント（食い違い）。倍率は翌年の株数のまま動かない
+            {"edinet_code": "E00004", "event_date": "2021-10-01", "adj_factor": 0.2, "jq_code": None},
+        ])
+
+        rebuild_split_adjustment_factors(db, bps_path=True)
+
+        rows = [M.AnnualRow(
+            r.edinet_code, r.year, r.period_end, r.issued_shares, r.bs_bps, r.pl_eps,
+            r.dps, r.stock_price, r.per, r.pbr, r.div_yield, r.market_cap, r.bs_total_equity,
+        ) for r in db.query(FinancialRecord).filter_by(period_type="annual")
+            .order_by(FinancialRecord.edinet_code, FinancialRecord.year).all()]
+        events, _ = M.detect_events(rows, bps_path=True,
+                                    official_events=load_jquants_adj_factor_events(db))
+        expected = {k: v for k, v in M.cumulative_factors(rows, events).items() if v != 1.0}
+        stored = {(r.edinet_code, r.year): r.factor
+                  for r in db.query(SplitAdjustmentFactor).all()}
+        assert stored == expected
+        # 食い違った公式値は E00004 の係数を動かさない（翌年の株数 x2 のまま）
+        assert stored[("E00004", 2020)] == pytest.approx(2.0)
+
+    def test_rebuild_passes_what_the_table_holds(self, db, make_fin, monkeypatch):
+        """読み込みを書き忘れると、公式の値は表にあるのに黙って使われない。"""
+        _seed_split_company(db, make_fin)
+        self._official(db, [{"edinet_code": "E00001", "event_date": "2020-10-01",
+                             "adj_factor": 0.5, "jq_code": "12340"}])
+        seen: dict = {}
+        real = M.detect_events
+
+        def spy(rows, **kw):
+            seen.update(kw)
+            return real(rows, **kw)
+
+        monkeypatch.setattr(M, "detect_events", spy)
+        rebuild_split_adjustment_factors(db)
+        assert seen["official_events"] == {"E00001": [("2020-10-01", 0.5)]}
+
+
+class TestAdjFactorEventTable:
+    def test_upsert_updates_the_value_and_keeps_first_seen(self, db):
+        upsert_jquants_adj_factor_events(db, [{"edinet_code": "E00001", "event_date": "2020-10-01",
+                                               "adj_factor": 0.5, "jq_code": "12340"}])
+        db.commit()
+        first = db.query(JQuantsAdjFactorEvent).one().first_seen_at
+        upsert_jquants_adj_factor_events(db, [{"edinet_code": "E00001", "event_date": "2020-10-01",
+                                               "adj_factor": 0.25, "jq_code": "12340"},
+                                              {"edinet_code": "E00001", "event_date": "2019-04-01",
+                                               "adj_factor": 0.5, "jq_code": "12340"}])
+        db.commit()
+        db.expire_all()
+        got = db.query(JQuantsAdjFactorEvent).filter_by(event_date="2020-10-01").one()
+        assert got.adj_factor == 0.25
+        assert got.first_seen_at == first
+        # 読み出しは社ごとに日付順
+        assert load_jquants_adj_factor_events(db) == {
+            "E00001": [("2019-04-01", 0.5), ("2020-10-01", 0.25)]}
+
+    def test_empty_upsert_writes_nothing(self, db):
+        assert upsert_jquants_adj_factor_events(db, []) == 0
+        assert load_jquants_adj_factor_events(db) == {}
 
 
 def _seed_issuance_company(db, make_fin, ec="E00005"):

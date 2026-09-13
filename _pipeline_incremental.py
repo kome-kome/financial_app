@@ -174,6 +174,13 @@ async def main():
                 + (f"・スピンオフ権利落ち前で不採用 {catchup_result['spinoff_unadjusted']}行"
                    f"（{len(catchup_result.get('spinoff_unadjusted_companies') or [])}社）"
                    if catchup_result.get("spinoff_unadjusted") else "")
+                # 残した公式 AdjFactor のイベント（#661）。分割補正の第2経路が最新年の倍率に使う。
+                # None は保存に失敗した晩（0件とは別）
+                + (f"・公式 AdjFactor イベント {catchup_result['adj_factor_events']}件"
+                   if catchup_result.get("adj_factor_events") else "")
+                + ("・公式 AdjFactor イベントの保存に失敗"
+                   if "adj_factor_events" in catchup_result
+                   and catchup_result["adj_factor_events"] is None else "")
                 # 403 は契約失効／プラン対象外／URL 不在。**カバレッジ境界ではない**（#462）
                 + ("（全日403＝要確認）" if catchup_result.get("all_forbidden") else ""))
         except Exception as e:

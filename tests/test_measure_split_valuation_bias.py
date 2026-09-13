@@ -301,6 +301,178 @@ class TestBpsPath:
         assert events[0].lagged_sh_ratio == pytest.approx(0.1)
 
 
+class TestOfficialMagnitude:
+    """翌年の行が無い第2経路の倍率を公式 `AdjFactor` から取る — Issue #661。
+
+    公式の値は DB に残したもの（`jquants_adj_factor_events`）を呼び出し側が渡す。検出器は
+    純関数のままで、**渡されなければ #659 と1件も違わない**。
+    """
+
+    # 最新年（2021）に bps / eps が半分・株数は据え置き・翌年の行は無い。窓は
+    # (2020-03-31 - 45日, 2021-03-31 + 45日] = (2020-02-15, 2021-05-15]。
+    ROWS = (
+        (2020, 1000.0, 200.0, 20.0),
+        (2021, 1000.0, 100.0, 10.0),
+    )
+
+    def _rows(self, ec="E00001"):
+        return [row(y, sh, bps, eps=eps, ec=ec) for y, sh, bps, eps in self.ROWS]
+
+    def test_official_event_in_the_window_fills_the_magnitude(self):
+        events, stats = M.detect_events(self._rows(), bps_path=True,
+                                        official_events={"E00001": [("2020-10-01", 0.5)]})
+        assert [(e.year, e.canonical, e.kind, e.source) for e in events] == [
+            (2021, pytest.approx(2.0), "split", "bps")]
+        e = events[0]
+        assert e.official_ratio == pytest.approx(2.0)
+        assert e.lagged_sh_ratio is None
+        # 観測値は捏造せずそのまま残す
+        assert e.sh_ratio == pytest.approx(1.0) and e.bps_ratio == pytest.approx(2.0)
+        assert stats["bps_path"]["magnitude_source"] == {"lagged_shares": 0, "official": 1}
+        assert stats["bps_path"]["awaiting_magnitude"] == []
+        assert "no_lagged_row" not in stats["bps_path"]["rejected"]
+
+    @pytest.mark.parametrize("official", [
+        {},                                         # 取り込み前・その晩に取れなかった
+        {"E00001": []},
+        {"E09999": [("2020-10-01", 0.5)]},          # 別の社のイベント
+        {"E00001": [("2020-02-15", 0.5)]},          # 窓の左端は開区間
+        {"E00001": [("2021-05-16", 0.5)]},          # 窓の右端より後
+    ])
+    def test_no_official_event_in_the_window_is_not_taken(self, official):
+        """**行が無いことを「分割は無かった」とも「倍率は1」とも読まない**。今日までどおり採らず、
+        倍率待ちとして残す＝公式が落ちた晩も補正が誤るのではなく採らない側へ倒れる。"""
+        events, stats = M.detect_events(self._rows(), bps_path=True, official_events=official)
+        assert events == []
+        assert stats["bps_path"]["rejected"]["no_lagged_row"] == 1
+        assert stats["bps_path"]["awaiting_magnitude"] == [{
+            "edinet_code": "E00001", "year": 2021, "prev_period_end": "2020-03-31",
+            "period_end": "2021-03-31", "bps_ratio": pytest.approx(2.0)}]
+
+    def test_none_and_empty_mapping_reproduce_the_previous_behaviour(self):
+        """`official_events=None`（測定器の CLI）と `{}`（表が空の夜）は #659 と完全に一致する。"""
+        rows = TestBpsPath()._rows()
+        base, base_stats = M.detect_events(rows, bps_path=True)
+        for official in (None, {}):
+            events, stats = M.detect_events(rows, bps_path=True, official_events=official)
+            assert events == base
+            assert stats["bps_path"]["rejected"] == base_stats["bps_path"]["rejected"]
+        assert base_stats["bps_path"]["official"]["enabled"] is False
+
+    def test_flat_official_ratio_is_rejected(self):
+        """公式は 1:1.1 しか動いていない。bps の半減を説明しないので採らない。"""
+        events, stats = M.detect_events(
+            self._rows(), bps_path=True,
+            official_events={"E00001": [("2020-10-01", 1.0 / 1.1)]})
+        assert events == []
+        assert stats["bps_path"]["rejected"]["official_flat"] == 1
+        assert stats["bps_path"]["awaiting_magnitude"] == []
+
+    def test_opposite_direction_official_ratio_is_rejected(self):
+        """bps は分割方向・公式は併合方向（別の社の値が付いた等）。同じ事象ではない。"""
+        events, stats = M.detect_events(
+            self._rows(), bps_path=True, official_events={"E00001": [("2020-10-01", 2.0)]})
+        assert events == []
+        assert stats["bps_path"]["rejected"]["official_direction"] == 1
+
+    @pytest.mark.parametrize("prev_pe,cur_pe,adj_factors,expected", [
+        # E38205 の実値（1:6 が1件）。定番比の表に 6 は無く、丸めると 5（composite）へ寄る
+        ("2024-06-30", "2025-06-30", [("2025-06-27", 1.0 / 6.0)], 6.0),
+        # E38979 の実値（1:2 と 1:3 が同じ窓 (2024-05-16, 2025-08-14] に2件・積 6）
+        ("2024-06-30", "2025-06-30", [("2024-12-27", 0.5), ("2025-06-27", 1.0 / 3.0)], 6.0),
+        # E02128 の実値（1:7）。丸めると残差 1.4 で unsnapped になり採られない
+        ("2025-03-31", "2026-03-31", [("2025-09-29", 1.0 / 7.0)], 7.0),
+    ])
+    def test_official_ratio_is_used_as_is_without_snapping(self, prev_pe, cur_pe,
+                                                           adj_factors, expected):
+        """**公式の比は定番比へ丸めない**（#661・2026-09-13 実測で判明）。丸めは株数比に増資の分が
+        混ざるのを切り離す仕組みで、`AdjFactor` は株価の遡及調整に使われた係数そのものである。"""
+        # 日付の実値は取り込んだ `jquants_adj_factor_events`。株数・bps は形だけ（bps 比 = 0.9F）
+        y0, y1 = int(prev_pe[:4]), int(cur_pe[:4])
+        rows = [row(y0, 1000.0, 100.0 * expected * 0.9, eps=10.0 * expected * 0.9,
+                    period_end=prev_pe),
+                row(y1, 1000.0, 100.0, eps=10.0, period_end=cur_pe)]
+        assert M.snap_to_canonical(expected)[0] != expected   # 丸めると真の比から外れる、を先に押さえる
+        events, _ = M.detect_events(rows, bps_path=True, official_events={"E00001": adj_factors})
+        assert [(e.canonical, e.kind, e.residual) for e in events] == [
+            (pytest.approx(expected), "split", 1.0)]
+        assert M.cumulative_factors(rows, events)[("E00001", y0)] == pytest.approx(expected)
+
+    def test_several_official_events_in_the_window_multiply(self):
+        """同じ窓に 1:2 が2回ある。株数比は積の 4.0（`match_event` と同じ定義）。"""
+        rows = [row(2020, 1000.0, 400.0, eps=40.0), row(2021, 1000.0, 100.0, eps=10.0)]
+        events, _ = M.detect_events(
+            rows, bps_path=True,
+            official_events={"E00001": [("2020-06-01", 0.5), ("2020-12-01", 0.5)]})
+        assert [(e.canonical, e.official_ratio) for e in events] == [
+            (pytest.approx(4.0), pytest.approx(4.0))]
+
+    def test_lagged_shares_win_and_disagreement_is_only_counted(self):
+        """翌年の株数があるペアは公式を倍率に使わない。**食い違っても同じイベントのまま**、
+        交差検証の件数と中身だけが変わる（既存の係数表を公式で動かさない）。"""
+        rows = TestBpsPath()._rows()
+        base, _ = M.detect_events(rows, bps_path=True)
+        # 2024 のイベント（翌年の株数 x2）の窓 (2023-02-14, 2024-05-15] に公式 1:3 を置く
+        events, stats = M.detect_events(rows, bps_path=True,
+                                        official_events={"E03137": [("2023-10-01", 1.0 / 3.0)]})
+        assert events == base
+        cc = stats["bps_path"]["official"]["crosscheck"]
+        assert (cc["agree"], cc["disagree"]) == (0, 1)
+        assert cc["disagreements"][0]["edinet_code"] == "E03137"
+        assert cc["disagreements"][0]["year"] == 2024
+        assert cc["disagreements"][0]["official"] == pytest.approx(3.0)
+
+    def test_agreeing_official_event_is_counted_as_agree(self):
+        rows = TestBpsPath()._rows()
+        _, stats = M.detect_events(rows, bps_path=True,
+                                   official_events={"E03137": [("2023-10-01", 0.5)]})
+        cc = stats["bps_path"]["official"]["crosscheck"]
+        assert (cc["agree"], cc["disagree"], cc["disagreements"]) == (1, 0, [])
+
+    def test_latest_year_official_event_reaches_the_cumulative_factor(self):
+        """しまむら型の 2026（翌年の行が無い 1:3）が公式で埋まると、2025 以前の F に掛かる。
+
+        公式イベントは E03137 の `jquants_adj_factor_events` 実値（2026-09-13 取り込み・
+        `2026-02-19` の `AdjFactor` 1/3）。2024 のイベントは翌年の株数で決まったままで、
+        公式を渡しても変わらない。
+        """
+        rows = TestBpsPath()._rows()
+        events, stats = M.detect_events(rows, bps_path=True,
+                                        official_events={"E03137": [("2026-02-19", 1.0 / 3.0)]})
+        assert [(e.year, e.canonical) for e in events] == [
+            (2024, pytest.approx(2.0)), (2026, pytest.approx(3.0))]
+        assert stats["bps_path"]["magnitude_source"] == {"lagged_shares": 1, "official": 1}
+        f = M.cumulative_factors(rows, events)
+        assert f[("E03137", 2023)] == pytest.approx(6.0)
+        assert f[("E03137", 2024)] == pytest.approx(3.0)
+        assert f[("E03137", 2025)] == pytest.approx(3.0)
+        assert f[("E03137", 2026)] == pytest.approx(1.0)
+
+    def test_shares_path_is_untouched_by_official_events(self):
+        """第1経路（当年の株数比）は公式を見ない。公式が食い違っても同じイベントのまま。"""
+        rows = [row(2020, 1000.0, 200.0), row(2021, 2000.0, 100.0)]
+        base, _ = M.detect_events(rows)
+        events, _ = M.detect_events(rows, official_events={"E00001": [("2020-10-01", 0.2)]})
+        assert events == base
+
+
+class TestOfficialRatioInWindow:
+    def test_reciprocal_of_the_product_inside_the_half_open_window(self):
+        official = [("2020-01-01", 0.5), ("2020-06-01", 0.5), ("2021-01-01", 0.1)]
+        assert M.official_ratio_in_window(official, ("2020-01-01", "2020-12-31")) == (
+            pytest.approx(2.0), 1)
+        assert M.official_ratio_in_window(official, ("2019-12-31", "2020-12-31")) == (
+            pytest.approx(4.0), 2)
+
+    def test_nothing_inside_or_no_window(self):
+        assert M.official_ratio_in_window([("2020-06-01", 0.5)], ("2021-01-01", "2021-12-31")) == (
+            None, 0)
+        assert M.official_ratio_in_window([("2020-06-01", 0.5)], None) == (None, 0)
+        # 0 以下の係数は壊れた値として数えない
+        assert M.official_ratio_in_window([("2020-06-01", 0.0)], ("2020-01-01", "2020-12-31")) == (
+            None, 0)
+
+
 class TestEquityCheck:
     """第1経路の純資産総額チェック — Issue #657。
 
@@ -637,6 +809,12 @@ class TestMatchEvent:
         r = M.match_event(e, [("2023-10-02", 0.5)])
         assert r.status == "agree"
         assert r.raw_detected == pytest.approx(2.0)
+
+    def test_bps_event_without_a_lagged_row_is_matched_on_the_official_ratio(self):
+        """翌年の行が無く公式で倍率を決めたイベント（#661）の生比は公式の比。bps 比へ落ちない。"""
+        e = ev(2024, canonical=2.0, sh_ratio=1.0, **self.E)._replace(
+            source="bps", bps_ratio=1.7036, official_ratio=2.0)
+        assert M.match_event(e, [("2023-10-02", 0.5)]).raw_detected == pytest.approx(2.0)
 
 
 class TestPartialCoverage:

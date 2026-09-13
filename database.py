@@ -1995,6 +1995,76 @@ def replace_split_adjustment_factors(db, rows) -> int:
     return len(vals)
 
 
+# ── 8.6 公式 AdjFactor のイベント（#661・ADR-0055 決定4-5）──────────────────────
+# J-Quants の日次バーで `AdjFactor != 1` の日＝公式が持つ企業イベント。分割補正の第2経路で
+# **翌年の決算がまだ無い最新年**の倍率を、ここから取る（翌年の株数が取れる年は使わない）。
+#
+# 書き手は2つで、どちらも J-Quants を叩く経路の側にいる:
+#   - 毎晩の J-Quants catchup（`collect_stock_price_history_jquants`）が、受け取った行から残す
+#     ＝API 呼び出しを1回も増やさない
+#   - 一回きりの取り込み `scripts/backfill_adj_factor_events.py`（契約窓の過去2年ぶん）
+# 読み手の `rebuild_split_adjustment_factors` は**この表だけを読み J-Quants を叩かない**。
+# 外部サービスが落ちた晩は行が増えないだけで、既に残した値と補正は消えない。
+#
+# **行が無いことを「分割は無かった」と読まない**（夜の取りこぼし・取り込み前・エンバーゴ中と
+# 区別できない）。あれば使い、無ければそのイベントを採らない側へ倒れる。
+# 値は API の生値で人手の登録を経ないが、誤った社へ付いた値が単独で補正を作らないよう、
+# 検出器は bps と eps の交差検証を通ったペアにだけ、向きと定番比が合うときに使う。
+class JQuantsAdjFactorEvent(Base):
+    __tablename__ = "jquants_adj_factor_events"
+    __table_args__ = (
+        PrimaryKeyConstraint("edinet_code", "event_date", name="pk_jquants_adj_factor_events"),
+    )
+
+    edinet_code   = Column(String(10), nullable=False)
+    event_date    = Column(String(10), nullable=False)   # "YYYY-MM-DD"（J-Quants の `Date`）
+    # 過去の株価に掛ける係数（1:2 分割なら 0.5）。分割補正係数 F とは向きが逆（CONTEXT.md）。
+    adj_factor    = Column(Float, nullable=False)
+    jq_code       = Column(String(6))                    # 5桁コード（普通株＝末尾0だけを残す・#465）
+    first_seen_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    last_seen_at  = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+
+def upsert_jquants_adj_factor_events(db, rows) -> int:
+    """`jquants_adj_factor_events` を (edinet_code, event_date) で upsert する。戻り値は行数。
+
+    `rows` は `{edinet_code, event_date, adj_factor, jq_code}` の dict 列。**全置換にしない**
+    ——書き手はどちらも窓の一部しか見ないので、消すと他の晩・他の社の値が失われる。
+    既存行は `adj_factor` / `jq_code` / `last_seen_at` を更新し、`first_seen_at` は残す。
+    commit は呼び出し側。
+    """
+    vals = list(rows)
+    if not vals:
+        return 0
+    dialect = db.bind.dialect.name if db.bind is not None else "postgresql"
+    if dialect == "sqlite":
+        from sqlalchemy.dialects.sqlite import insert as _insert
+    else:
+        from sqlalchemy.dialects.postgresql import insert as _insert
+
+    now = datetime.now(timezone.utc)
+    stmt = _insert(JQuantsAdjFactorEvent).values(
+        [dict(v, first_seen_at=now, last_seen_at=now) for v in vals])
+    stmt = stmt.on_conflict_do_update(
+        index_elements=["edinet_code", "event_date"],
+        set_={"adj_factor": stmt.excluded.adj_factor, "jq_code": stmt.excluded.jq_code,
+              "last_seen_at": stmt.excluded.last_seen_at},
+    )
+    db.execute(stmt)
+    return len(vals)
+
+
+def load_jquants_adj_factor_events(db) -> dict:
+    """`{edinet_code: [(event_date, adj_factor), ...]}`（日付順）。検出器の `official_events` の形。"""
+    out: dict = {}
+    for ec, d, f in db.query(
+        JQuantsAdjFactorEvent.edinet_code, JQuantsAdjFactorEvent.event_date,
+        JQuantsAdjFactorEvent.adj_factor,
+    ).order_by(JQuantsAdjFactorEvent.edinet_code, JQuantsAdjFactorEvent.event_date).all():
+        out.setdefault(ec, []).append((str(d)[:10], float(f)))
+    return out
+
+
 # ── 9. 読み取りモデル: financial_metrics VIEW ──────────────────────────────
 # financial_records（ソース列）から軽い派生（比率・Zスコア・成長率）を「都度SQL算出」し、
 # regression_results を LEFT JOIN して予測値も合成する読み取り専用 VIEW。
