@@ -69,7 +69,7 @@ Render の制約と運用形態に合わせて設計すること。
   | タスクスケジューラ | `StartWhenAvailable` が次回起動後に**1回だけ**追いつく（`MultipleInstances IgnoreNew` で重複しない） | 何日ぶん見逃しても1回に畳まれる |
   | XBRL 差分 | `run_full_collection(years_back=1, skip_existing=True)` が過去1年を再スキャンし未取得だけ拾う | 1年 |
   | 株価 Yahoo gap-fill | `last_closed_session` 基準で欠測日を埋める。起点は `today - DAILY_WINDOW_DAYS` | **183日** |
-  | 株価 J-Quants catchup | 12週エンバーゴを抜けた `today-90 〜 today-80` を公式値へ置換 | 固定10日窓・毎晩前進 |
+  | 株価 J-Quants catchup | 12週エンバーゴを抜けた `today-90 〜 today-80` を公式値へ置換 | 暦日11日（両端を含む）・毎晩前進 |
   | 週次株価 | `_recompute_weeks_from_daily` が daily から再集約（`WEEKLY_OVERLAP_DAYS`） | 189日 |
   | 検知 | watchdog が `*_last_run` を見て 30h 超で起票。**watchdog 自身が止まっても同じく追いつく** | 閾値 = `cadence + 窓` |
   | Supabase / Render | **同期は起きない。** Supabase は 2026-08-07 の凍結断面で書き戻す経路をコードとして持たない（ADR-0035/0038）＝PC の停止有無に関わらず Render の表示は変わらない | — |
@@ -850,7 +850,7 @@ Supabase 無料プランは **1週間アクセスなしで自動停止**する�
 - **コード変換**: J-Quants は5桁コード（例 `"13010"`）。先頭4桁が証券コード（`code[:4]`）。
 - **取得単位**: 日付単位で全銘柄を一括取得。1営業日 = 1〜数リクエスト（ページネーション対応済み）。
 - **`close` は nullable=False**: `Close` が `None` の行はスキップ（停止銘柄等）。
-- **CardinalityViolation 対策**: 5桁コードが同じ4桁 sec_code にマップされる場合がある。INSERT前に edinet_code で重複排除（先着1件採用）。
+- **CardinalityViolation 対策**: 5桁コードが同じ4桁 sec_code にマップされる場合がある。INSERT前に edinet_code で重複排除し、**普通株（5桁コードの末尾 `0`）を優先する**（#465・`collector_utils.is_common_stock_code`）。先着勝ちにするとレスポンス順しだいで優先株の終値が普通株の枠に入る（実測で 9434 / 5076 / 2593 が該当）。
 - **ステータスコードだけ見て理由を推測しない**（#462）: J-Quants は 400 と 403 のどちらにも複数の意味を載せ、**区別できるのはボディの文言だけ**。#425 は `listed/info` の 403 を「無料プランの権限不足」と推測して docs に断定で書き、v2 での URL 変更を1年近く見落とした。#412 は境界の 403 という存在しない事象を前提にし、実際の契約失効（#461）を「平常運転」と読める警告で毎晩流し続けた。**新しいステータスに出会ったらボディを実測してから分類を足す**。
 
 ### FRED API（無料・要アカウント登録）
@@ -1049,7 +1049,7 @@ ADR-0006 §Decision-1 が定める CPI チャネル。
 
 | 項目 | Render での実装方針 |
 |---|---|
-| **G**: J-Quants IssuedShares 取得 | ✅ **実装済み（Tier2-G・PR #181・2026-06-16）**。`Company.issued_shares` 追加 + `_ensure_tables()` の冪等 ALTER + J-Quants `/v2/markets/listed/info` から取得 |
+| **G**: J-Quants IssuedShares 取得 | ✅ **実装済み（Tier2-G・PR #181・2026-06-16）**。`Company.issued_shares` 追加 + `_ensure_tables()` の冪等 ALTER + J-Quants `/v2/markets/listed/info` から取得。→ **このエンドポイントは v2 に存在しない**（#462・上の J-Quants 節の 403 分類を参照）。現在の issued_shares は `/fins/summary` の `ShOutFY` から取る（`collector_disclosures`） |
 | **H**: `period_end` を DATE 型に | ✅ **実装済み（Tier2-H・PR #182・2026-06-16）**。`init_db()` 内の冪等 DDL（`USING ...::DATE`・`SKIP_PERIOD_END_MIGRATION=1` フェールセーフ）で起動時 1 度だけ移行 |
 | **F**: HttpOnly Cookie 認証 | ✅ **実装済み（Tier3-3）**。`auth_token`（HttpOnly）＋`csrf_token` の2 Cookie + CSRF Double-Submit。本番は `COOKIE_SECURE=true` |
 | **E**: 本番デプロイ対応 | **大部分が完了済み**。残るのは Supabase の DB バックアップ運用ポリシー策定（Supabase の自動バックアップ機能を利用）と監視（Render ダッシュボード + UptimeRobot 等） |
