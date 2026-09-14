@@ -238,6 +238,10 @@ SSEエンドポイント（進捗のリアルタイム配信・全6本）: 収�
 - **`Stop-ScheduledTask` は S4U タスクのプロセスツリーを落とさない（2026-09-01 実測）**: タスクの `State` は `Ready` に戻り `LastTaskResult` も `267014`（終了処理中）になるのに、**python のツリーは走り続ける**（ログへの書き込みが継続する）。さらに悪いことに、孤児化したツリーは**非昇格の対話セッションからは `taskkill /F /T` できない**（`Access is denied`）——同じユーザーでもセッション0の S4U ログオンはトークンが別だから。**タスクが Ready に戻ると窓（`ExecutionTimeLimit`）による打ち切りも効かなくなる**ので、止める手段が予算 kill だけになる（親の `Runner` は生きているので `Step.budget_min` は機能し続ける）。**止めるなら最初から管理者権限で `taskkill /F /T /PID <ルート>`**。`Stop-ScheduledTask` を「安全な停止」と思って叩くと、止まったつもりで走り続ける状態を作る。
   - **`Start-Process -Verb RunAs` が UAC でキャンセルされても、PowerShell 全体の exit code は 0 になりうる**。`The operation was canceled by the user` は本文にしか出ない＝**exit code だけ見ると成功に見える**（`pytest | tail` が pytest の失敗を隠すのと同型）。昇格を伴う操作は、実行後に**状態そのもの**（プロセスが消えたか）で確かめる。
 - **セッション0（S4U）と対話セッションでは挙動が変わる**: 上記の jax は**対話セッションでは正常に import できた**（0.10.2）。逆に、対話セッションから他セッションのプロセスは `OpenProcess` できないので pid 指定の計測が拒否される。**「手元で試したら動いた」はバッチで動く証明にならない**（`.env` や PATH が変わりうる #550 と同型）。
+- **日中キューに積んだ探索スクリプトは、待っている間にキャッシュが退避されると即死する（#674・2026-09-14）**: `candidate_bakeoff._load_prices` を使う系統（`momentum_gate` ほか探索・bakeoff 系）は、`scripts/.cache/weekly_prices_close.pkl` が無いと既定で読み込みを拒否して `exit=1` になる。9/7 に `gate:interactions` を積んだ時点ではキャッシュがあったが、9/8 に #620 の修復で `_stale_pre620/` へ退避され、9/14 に順番が来たジョブは 0.1分で落ちた。日中枠は1日1件なので**その日の枠が丸ごと消え**、結論を出した失敗なので**キューにも戻らない**（#639 の in-flight 回収は「プロセスごと消えた」場合だけ）。
+  - **回避**: 日中枠の `Job.argv` には `--allow-full-pull` と `--refresh-cache` を**両方**書く。前者だけだと株価だけ新しい世代になり、世代の印を持たない財務・マクロのキャッシュ（このときは #655 の分割補正より前）と混ざったパネルを測る。書き忘れは `tests/test_run_daytime.py::TestJobsBuildTheirOwnInputs` が落とす。
+  - 「97万行の pull はストールしやすい」という拒否理由は Supabase 時代のもの。ローカル PG からの全件読込は**実測 12.5秒・131.8万行**（2026-09-14）。
+  - **キャッシュを `_stale_pre<N>/` へ退避したら、日中キューに探索系の仕事が残っていないかも見る**（`python -m scripts.run_daytime --queue`）。
 
 ## 認証・セキュリティ実装メモ
 
