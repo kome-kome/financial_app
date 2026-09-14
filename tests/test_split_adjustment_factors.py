@@ -30,8 +30,9 @@ if str(ROOT) not in sys.path:
 
 from collector_prices import rebuild_split_adjustment_factors  # noqa: E402
 from database import (  # noqa: E402
-    FinancialRecord, JQuantsAdjFactorEvent, SplitAdjustmentFactor, StockPriceWeekly,
-    load_jquants_adj_factor_events, load_price_series, replace_split_adjustment_factors,
+    FinancialRecord, JQuantsAdjFactorCoverage, JQuantsAdjFactorEvent, SplitAdjustmentFactor,
+    StockPriceWeekly, load_jquants_adj_factor_coverage, load_jquants_adj_factor_events,
+    load_price_series, replace_split_adjustment_factors, upsert_jquants_adj_factor_coverage,
     upsert_jquants_adj_factor_events,
 )
 from scripts import measure_split_valuation_bias as M  # noqa: E402
@@ -432,6 +433,115 @@ class TestAdjFactorEventTable:
     def test_empty_upsert_writes_nothing(self, db):
         assert upsert_jquants_adj_factor_events(db, []) == 0
         assert load_jquants_adj_factor_events(db) == {}
+
+
+
+def _seed_false_positive_company(db, make_fin, ec="E00008"):
+    """E01121 日本板硝子の実値を写した偽陽性の社（#668）。株数 x1.5545・bps の交差検証も
+    純資産比（x1.3027）も通るので、公式の不在を確かめない限り composite 1.5 で補正される。
+
+    2024 年の行は 2025 と同じ株数で置き、F=1.5 の行が 2024 / 2025 の2本になるようにした。
+    """
+    for year, shares, bps, eps, equity in (
+            (2024, 91431499.0, 3111.09, 100.0, 153838000000.0),
+            (2025, 91568599.0, 3182.04, -173.2, 142411000000.0),
+            (2026, 142341906.0, 2230.45, 44.51, 185519000000.0)):
+        db.add(make_fin(edinet_code=ec, year=year, period_end=date(year, 3, 31),
+                        issued_shares=shares, bs_bps=bps, pl_eps=eps, dps=20.0,
+                        stock_price=1000.0, per=10.0, pbr=0.5,
+                        div_yield=2.0, market_cap=5000.0, bs_total_equity=equity))
+    db.commit()
+
+
+class TestOfficialAbsenceReachesTheTable:
+    """公式の取得区間（#668）が係数表まで届くこと。rebuild は DB だけを読み J-Quants を叩かない。"""
+
+    # E01121 に J-Quants が実際に返した区間（2026-09-14・486 本）
+    SPAN = {"edinet_code": "E00008", "first_bar_date": "2024-06-24",
+            "last_bar_date": "2026-06-22", "n_bars": 486, "jq_code": "52020"}
+
+    def test_no_record_keeps_the_correction(self, db, make_fin):
+        """記録表が空の夜は今日までどおり（公式イベントが無いだけでは外さない・決定4-5）。"""
+        _seed_false_positive_company(db, make_fin)
+        _seed_split_company(db, make_fin)
+
+        rebuild_split_adjustment_factors(db)
+
+        got = {(r.year, r.factor, r.kinds)
+               for r in db.query(SplitAdjustmentFactor).filter_by(edinet_code="E00008").all()}
+        assert got == {(2024, 1.5, "composite"), (2025, 1.5, "composite")}
+
+    def test_confirmed_absence_removes_the_correction(self, db, make_fin):
+        _seed_false_positive_company(db, make_fin)
+        _seed_split_company(db, make_fin)          # 本物の分割（記録なし）は残る
+        upsert_jquants_adj_factor_coverage(db, [self.SPAN])
+        db.commit()
+
+        rebuild_split_adjustment_factors(db)
+
+        assert db.query(SplitAdjustmentFactor).filter_by(edinet_code="E00008").count() == 0
+        assert db.query(SplitAdjustmentFactor).filter_by(edinet_code="E00001").count() == 2
+
+    def test_real_split_with_an_official_event_is_kept(self, db, make_fin):
+        """本物の分割は、区間があっても窓の中に公式イベントがあるので外れない。"""
+        _seed_split_company(db, make_fin)          # 2021 の 1:2・窓 (2020-02-15, 2021-05-15]
+        upsert_jquants_adj_factor_coverage(db, [dict(self.SPAN, edinet_code="E00001",
+                                                     first_bar_date="2019-06-24",
+                                                     last_bar_date="2021-06-22")])
+        upsert_jquants_adj_factor_events(db, [{"edinet_code": "E00001", "event_date": "2020-09-29",
+                                               "adj_factor": 0.5, "jq_code": "12340"}])
+        db.commit()
+
+        rebuild_split_adjustment_factors(db)
+
+        assert db.query(SplitAdjustmentFactor).filter_by(edinet_code="E00001").count() == 2
+
+    def test_rebuild_merges_the_spans_before_passing(self, db, make_fin, monkeypatch):
+        """区間は取り込みのたびに追記される。併合せずに渡すと、2本にまたがる窓が確かめられない。"""
+        _seed_split_company(db, make_fin)
+        upsert_jquants_adj_factor_coverage(db, [
+            dict(self.SPAN, first_bar_date="2025-01-06", last_bar_date="2026-06-22"),
+            dict(self.SPAN, first_bar_date="2024-06-24", last_bar_date="2025-06-30"),
+        ])
+        db.commit()
+        seen: dict = {}
+        real = M.detect_events
+
+        def spy(rows, **kw):
+            seen.update(kw)
+            return real(rows, **kw)
+
+        monkeypatch.setattr(M, "detect_events", spy)
+        rebuild_split_adjustment_factors(db)
+        assert seen["official_coverage"] == {"E00008": [("2024-06-24", "2026-06-22")]}
+
+
+class TestAdjFactorCoverageTable:
+    SPAN = {"edinet_code": "E00001", "first_bar_date": "2024-06-24",
+            "last_bar_date": "2026-06-22", "n_bars": 486, "jq_code": "12340"}
+
+    def test_same_span_is_updated_not_duplicated(self, db):
+        upsert_jquants_adj_factor_coverage(db, [self.SPAN])
+        db.commit()
+        upsert_jquants_adj_factor_coverage(db, [dict(self.SPAN, n_bars=487)])
+        db.commit()
+        db.expire_all()
+        got = db.query(JQuantsAdjFactorCoverage).one()
+        assert got.n_bars == 487
+
+    def test_other_spans_are_kept_and_returned_raw(self, db):
+        """**追記であって上書きではない**。古い期間の「確かめた」が消えると外した補正が黙って戻る。"""
+        upsert_jquants_adj_factor_coverage(db, [self.SPAN])
+        db.commit()
+        upsert_jquants_adj_factor_coverage(db, [dict(self.SPAN, first_bar_date="2024-09-02",
+                                                     last_bar_date="2026-09-01", n_bars=480)])
+        db.commit()
+        assert load_jquants_adj_factor_coverage(db) == {
+            "E00001": [("2024-06-24", "2026-06-22"), ("2024-09-02", "2026-09-01")]}
+
+    def test_empty_upsert_writes_nothing(self, db):
+        assert upsert_jquants_adj_factor_coverage(db, []) == 0
+        assert load_jquants_adj_factor_coverage(db) == {}
 
 
 def _seed_issuance_company(db, make_fin, ec="E00005"):

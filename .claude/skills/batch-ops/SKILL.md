@@ -96,6 +96,7 @@ python -m scripts.repair_splits_from_jquants --apply
 # 通常は不要＝初回と、PC 停止で取りこぼした後だけ。**夜間バッチ（JST 17:20〜）と重ねない**（レート制限）
 python -m scripts.backfill_adj_factor_events --dry-run          # 対象社だけ出す
 python -m scripts.backfill_adj_factor_events                    # 約100社・約35分（係数表へは次の夜間が反映）
+python -m scripts.backfill_adj_factor_events --reasons absence  # 第1経路の偽陽性を公式の不在で確かめる社だけ（#668・約93社・約31分）
 
 # 1つの価格列に2つのスケールが混ざった帯を Yahoo で取り直して均す（#620）。既定はドライラン
 # （株価は書かないが、突合で非該当と決まった帯は記録し、夜間の往復段差の警告から除く・#644）

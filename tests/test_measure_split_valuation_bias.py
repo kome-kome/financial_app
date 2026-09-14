@@ -1182,3 +1182,241 @@ def test_canonical_ratios_are_log_sorted_and_unique():
     assert len(set(M.CANONICAL_RATIOS)) == len(M.CANONICAL_RATIOS)
     assert all(r > 0 for r in M.CANONICAL_RATIOS)
     assert math.isclose(min(M.CANONICAL_RATIOS), 1 / 20)
+
+
+class TestBarsSpans:
+    """公式の日次バーを受け取った区間 — Issue #668。「イベントが無い」と読めるのはこの中だけ。"""
+
+    def _bars(self, *dates):
+        return [{"Date": d, "AdjFactor": 1.0} for d in dates]
+
+    def test_consecutive_bars_make_one_span(self):
+        # 年末年始の休場（2024-12-31〜2025-01-03）をまたいでも1本（暦日 6 日）
+        got = M.bars_spans(self._bars("2024-12-27", "2024-12-30", "2025-01-06", "2025-01-07"))
+        assert got == [("2024-12-27", "2025-01-07", 4)]
+
+    def test_long_gap_splits_the_span(self):
+        """取得漏れ・売買停止の中で起きたイベントを見落としうるので、空白をまたいで1本にしない。"""
+        got = M.bars_spans(self._bars("2025-01-06", "2025-01-07", "2025-02-03", "2025-02-04"))
+        assert got == [("2025-01-06", "2025-01-07", 2), ("2025-02-03", "2025-02-04", 2)]
+
+    def test_gap_of_exactly_the_limit_does_not_split(self):
+        d0 = date(2025, 3, 3)
+        d1 = d0 + timedelta(days=M.MAX_BAR_GAP_DAYS)
+        assert M.bars_spans(self._bars(d0.isoformat(), d1.isoformat())) == [
+            (d0.isoformat(), d1.isoformat(), 2)]
+        d2 = d0 + timedelta(days=M.MAX_BAR_GAP_DAYS + 1)
+        assert len(M.bars_spans(self._bars(d0.isoformat(), d2.isoformat()))) == 2
+
+    def test_zero_bars_is_no_span(self):
+        """**E03474（3032）は契約窓で 0 本**（2026-09-14 実測）。「イベントが無い」と同じ形で返るので、
+        区間を作らない＝公式で確かめたことにしない。429 が続いた社の `[]` も同じ。"""
+        assert M.bars_spans([]) == []
+        assert M.bars_spans([{"AdjFactor": 1.0}]) == []          # Date の無い行は数えない
+
+    def test_order_and_duplicates_do_not_matter(self):
+        got = M.bars_spans(self._bars("2025-01-08", "2025-01-06", "2025-01-07", "2025-01-07"))
+        assert got == [("2025-01-06", "2025-01-08", 3)]
+
+
+class TestMergeSpans:
+    def test_overlapping_and_adjacent_spans_merge(self):
+        """取り込みを回すたびに区間を追記するので、同じ社に重なる行が並ぶ。読む側で1本にする。"""
+        got = M.merge_spans([("2025-01-01", "2025-06-30"), ("2024-06-24", "2025-03-01"),
+                             ("2025-07-01", "2025-08-01")])
+        assert got == [("2024-06-24", "2025-08-01")]
+
+    def test_disjoint_spans_stay_apart(self):
+        got = M.merge_spans([("2025-02-03", "2025-03-01"), ("2024-06-24", "2025-01-07")])
+        assert got == [("2024-06-24", "2025-01-07"), ("2025-02-03", "2025-03-01")]
+
+    def test_bars_spans_output_can_be_passed_as_is(self):
+        assert M.merge_spans([("2024-06-24", "2026-06-22", 486)]) == [("2024-06-24", "2026-06-22")]
+        assert M.merge_spans([]) == []
+
+
+class TestWindowConfirmed:
+    # 窓 = (2025-03-31 - 45日, 2026-03-31 + 45日] = (2025-02-14, 2026-05-15]
+    E = dict(prev_period_end="2025-03-31", period_end="2026-03-31")
+
+    def test_window_inside_a_span(self):
+        e = ev(2026, **self.E)
+        assert M.window_confirmed(e, [("2024-06-24", "2026-06-22")]) is True
+
+    @pytest.mark.parametrize("spans", [
+        [("2025-03-01", "2026-06-22")],        # 窓の頭が外（途中から上場した社）
+        [("2024-06-24", "2026-05-14")],        # 窓の尻が外
+        [("2024-06-24", "2025-09-30"), ("2025-10-20", "2026-06-22")],   # 空白で切れた2本
+        [],
+        None,
+    ])
+    def test_window_not_inside_any_span(self, spans):
+        assert M.window_confirmed(ev(2026, **self.E), spans) is False
+
+    def test_unmerged_spans_must_be_merged_first(self):
+        spans = [("2024-06-24", "2025-10-01"), ("2025-10-02", "2026-06-22")]
+        assert M.window_confirmed(ev(2026, **self.E), spans) is False
+        assert M.window_confirmed(ev(2026, **self.E), M.merge_spans(spans)) is True
+
+
+class TestOfficialAbsence:
+    """第1経路のイベントを、公式に分割が無いと**確かめられた**ときだけ外す — Issue #668。
+
+    検体は `financial_records` の実値（`TestEquityCheck.NSG`）と、J-Quants から実際に返った区間
+    （2026-09-14・契約窓 2024-06-22〜2026-06-22）。
+
+        E01121 日本板硝子（5202） | バー 486 本 2024-06-24〜2026-06-22 | AdjFactor イベント 0 件
+        E03474 ゴルフ・ドゥ（3032）| バー 0 本（J-Quants が扱っていない・2026-08-08 上場廃止）
+
+    E01121 は #657 の全数突合で偽陽性と確定したが、純資産比（x1.3027）では落とせなかった社。
+    """
+
+    SPAN = [("2024-06-24", "2026-06-22")]
+    # E03474 の実値（2025→2026 で株数がちょうど 2 倍・bps はほぼ半分）。eps は検体に無いので既定値
+    GOLF_DO = ((2025, 2605642.0, 311.94, 822899000.0), (2026, 5211284.0, 169.82, 878844000.0))
+
+    def _nsg(self):
+        return TestEquityCheck()._rows(TestEquityCheck.NSG, "E01121")
+
+    def _golf_do(self):
+        return [row(y, sh, bps, equity=eq, ec="E03474") for y, sh, bps, eq in self.GOLF_DO]
+
+    def test_confirmed_absence_rejects_the_known_false_positive(self):
+        rows = self._nsg()
+        before, _ = M.detect_events(rows, official_events={})
+        assert [(e.year, e.kind, e.source) for e in before] == [(2026, "composite", "shares")]
+
+        events, stats = M.detect_events(rows, official_events={},
+                                        official_coverage={"E01121": self.SPAN})
+        assert events == []
+        oa = stats["official_absence"]
+        assert oa["enabled"] is True and oa["n_companies_with_record"] == 1
+        assert oa["n_rejected"] == 1
+        r = oa["rejected"][0]
+        assert (r["edinet_code"], r["year"], r["prev_year"], r["kind"]) == (
+            "E01121", 2026, 2025, "composite")
+        assert r["canonical"] == pytest.approx(1.5)
+        assert r["window"] == ("2025-02-14", "2026-05-15")
+
+    def test_zero_bars_company_is_kept(self):
+        """**E03474 は公式のバーが 0 本なので区間が無い**。#657 の突合はこれを偽陽性に数えていたが、
+        「分割が無かった」とは読めないので今日までどおり採る。"""
+        rows = self._golf_do()
+        base, _ = M.detect_events(rows)
+        assert [(e.year, e.kind) for e in base] == [(2026, "split")]
+        spans = M.bars_spans([])
+        for coverage in ({}, {"E03474": spans}):
+            events, stats = M.detect_events(rows, official_events={}, official_coverage=coverage)
+            assert events == base
+            assert stats["official_absence"]["n_rejected"] == 0
+
+    def test_official_event_inside_the_window_keeps_the_event(self):
+        """公式にイベントがあれば（倍率が違っても、#652 のような分割以外の事象でも）補正を残す。"""
+        events, stats = M.detect_events(
+            self._nsg(), official_events={"E01121": [("2025-09-29", 1 / 1.5)]},
+            official_coverage={"E01121": self.SPAN})
+        assert [(e.year, e.kind) for e in events] == [(2026, "composite")]
+        assert stats["official_absence"]["n_rejected"] == 0
+
+    @pytest.mark.parametrize("span", [
+        [("2025-03-03", "2026-06-22")],        # 窓の頭が区間の外
+        [("2024-06-24", "2026-05-01")],        # 窓の尻が区間の外
+    ])
+    def test_window_sticking_out_of_the_span_keeps_the_event(self, span):
+        """区間の外で起きた分割は公式が返さない。窓が区間に収まらなければ不在を読まない。"""
+        events, stats = M.detect_events(self._nsg(), official_events={},
+                                        official_coverage={"E01121": span})
+        assert len(events) == 1
+        assert stats["official_absence"]["n_rejected"] == 0
+
+    def test_record_of_another_company_does_not_apply(self):
+        events, _ = M.detect_events(self._nsg(), official_events={},
+                                    official_coverage={"E09999": self.SPAN})
+        assert len(events) == 1
+
+    def test_none_reproduces_the_previous_behaviour(self):
+        """`official_coverage=None`（測定器の CLI・記録表が無い頃）は #672 と1件も違わない。"""
+        rows = self._nsg() + self._golf_do() + TestBpsPath()._rows()
+        base, base_stats = M.detect_events(rows, official_events={})
+        events, stats = M.detect_events(rows, official_events={}, official_coverage=None)
+        assert events == base
+        assert stats["official_absence"] == {"enabled": False, "n_companies_with_record": 0,
+                                             "n_rejected": 0, "rejected": []}
+        assert base_stats["bps_path"] == stats["bps_path"]
+
+    def test_coverage_without_official_events_is_rejected(self):
+        """不在を読む相手（公式イベント）が無いのに判定したことにしない。"""
+        with pytest.raises(ValueError):
+            M.detect_events(self._nsg(), official_coverage={"E01121": self.SPAN})
+
+    def test_bps_path_is_not_affected(self):
+        """第2経路には掛けない。期末後・提出前の分割を1株指標だけが先取りする社を拾う経路で、
+        効力日がイベント窓の外に出うる（同じ窓の不在は「分割が無い」の証拠にならない）。"""
+        # 2021 に bps / eps が半分・株数は据え置き、2022 に株数 x2。窓 (2020-02-15, 2021-05-15]
+        rows = [row(2020, 1000.0, 200.0, eps=20.0), row(2021, 1000.0, 100.0, eps=10.0),
+                row(2022, 2000.0, 100.0, eps=10.0)]
+        base, _ = M.detect_events(rows, bps_path=True, official_events={})
+        assert [(e.year, e.source) for e in base] == [(2021, "bps")]
+        events, stats = M.detect_events(rows, bps_path=True, official_events={},
+                                        official_coverage={"E00001": [("2019-01-04", "2023-06-30")]})
+        assert events == base
+        assert stats["official_absence"]["n_rejected"] == 0
+
+
+class TestNoOfficialBars:
+    """全数突合が「公式のバーが無い」を偽陽性に数えない — Issue #668。
+
+    #657 の census は E03474 を `no_official_event`（偽陽性）に数えたが、J-Quants はこの社のバーを
+    契約窓で 1 本も返していなかった（2026-09-14 実測）。判定できないものは分母から外す。
+    """
+
+    E = dict(prev_period_end="2025-03-31", period_end="2026-03-31")
+    COVER = ("2024-06-22", "2026-06-22")
+
+    def test_zero_bars_is_not_a_false_positive(self):
+        e = ev(2026, **self.E)
+        r = M.match_event(e, [], coverage=self.COVER, official_spans=[])
+        assert r.status == "no_official_bars"
+        assert "no_official_bars" not in M.MATCH_DENOMINATOR
+        assert "no_official_bars" not in M.GATE_BENEFIT_STATUSES
+
+    def test_bars_covering_the_window_keep_the_false_positive(self):
+        e = ev(2026, **self.E)
+        r = M.match_event(e, [], coverage=self.COVER,
+                          official_spans=[("2024-06-24", "2026-06-22", 486)])
+        assert r.status == "no_official_event"
+
+    def test_bars_not_covering_the_window_are_excluded_in_full_mode(self):
+        """途中から上場した社・長い空白のある社。窓の一部しかバーが無ければ不在と読まない。"""
+        e = ev(2026, **self.E)
+        r = M.match_event(e, [], coverage=self.COVER,
+                          official_spans=[("2025-09-01", "2026-06-22", 200)])
+        assert r.status == "no_official_bars"
+
+    def test_official_event_wins_over_missing_spans(self):
+        e = ev(2026, canonical=2.0, sh_ratio=2.0, **self.E)
+        assert M.match_event(e, [("2025-09-29", 0.5)], coverage=self.COVER,
+                             official_spans=[]).status == "agree"
+
+    def test_partial_mode_only_excludes_zero_bars(self):
+        """partial は重なりの中だけを見る緩め方（#659）。区間が窓を覆わないのは前提なので、
+        0 本のときだけ `no_official_bars` にし、それ以外は従来の `no_official_event_partial`。"""
+        e = ev(2025, prev_period_end="2024-03-31", period_end="2025-03-31")
+        cover = ("2024-06-20", "2026-06-20")
+        assert M.match_event(e, [], coverage=cover, coverage_mode="partial",
+                             official_spans=[]).status == "no_official_bars"
+        assert M.match_event(e, [], coverage=cover, coverage_mode="partial",
+                             official_spans=[("2024-06-21", "2026-06-19", 480)]
+                             ).status == "no_official_event_partial"
+
+    def test_none_keeps_the_previous_behaviour(self):
+        e = ev(2026, **self.E)
+        assert M.match_event(e, [], coverage=self.COVER).status == "no_official_event"
+
+    def test_tally_excludes_it_from_the_denominator(self):
+        rows = [M.MatchResult("E1", 2026, 2.0, 2.0, 2.0, 1, "agree"),
+                M.MatchResult("E2", 2026, 2.0, 2.0, None, 0, "no_official_event"),
+                M.MatchResult("E3", 2026, 2.0, 2.0, None, 0, "no_official_bars")]
+        tally, denom, rate, _ = M.tally_rates(rows)
+        assert denom == 2 and rate == pytest.approx(0.5)
+        assert tally["no_official_bars"] == 1

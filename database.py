@@ -2065,6 +2065,79 @@ def load_jquants_adj_factor_events(db) -> dict:
     return out
 
 
+# ── 8.7 公式 AdjFactor の取得記録（#668・ADR-0055 決定4-8）──────────────────────
+# 「この社はこの期間の日次バーを**実際に**受け取った」の記録。`jquants_adj_factor_events` は
+# 行が無いことを「分割は無かった」と読めない（上の注記）ので、読めるのはこの記録がイベント窓を
+# 覆うときだけにする。第1経路の偽陽性（増資を分割と見間違えたもの）を、公式の不在で外すのに使う。
+#
+# **区間は要求した期間ではなく、返ってきたバーの最初と最後の日付で持つ。** J-Quants が扱わない
+# 市場の社はバーが0本で返り（実測 E03474・契約窓内 0 本）、429 が続いた社も `[]` になる
+# ——どちらも「イベントが無い」と同じ形なので、要求した期間で書くと「確かめた」に化ける。
+# バーの空白が長い箇所で区間を切るのは検出器の純関数（`bars_spans`）の役目。
+#
+# 書き手は社単位で取る取り込み CLI（`scripts/backfill_adj_factor_events.py`）だけ。夜間 catchup は
+# 1晩に 11 日ぶんしか見ず、止まっていた晩を検出できないので書かない。
+# **1社に複数行を持つ**（取得のたびに追記し、読む側が `merge_spans` で重なりを併合する）。1行へ
+# 上書きすると、契約窓が進んだあとに回し直したとき古い期間の「確かめた」が消え、外した補正が
+# 黙って戻る。
+class JQuantsAdjFactorCoverage(Base):
+    __tablename__ = "jquants_adj_factor_coverage"
+    __table_args__ = (
+        PrimaryKeyConstraint("edinet_code", "first_bar_date", "last_bar_date",
+                             name="pk_jquants_adj_factor_coverage"),
+    )
+
+    edinet_code    = Column(String(10), nullable=False)
+    first_bar_date = Column(String(10), nullable=False)   # "YYYY-MM-DD"（受け取った最初のバー）
+    last_bar_date  = Column(String(10), nullable=False)   # "YYYY-MM-DD"（受け取った最後のバー）
+    n_bars         = Column(Integer, nullable=False)
+    jq_code        = Column(String(6))                    # 取得に使った5桁コード
+    fetched_at     = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+
+def upsert_jquants_adj_factor_coverage(db, rows) -> int:
+    """`jquants_adj_factor_coverage` を (edinet_code, first_bar_date, last_bar_date) で upsert する。
+
+    `rows` は `{edinet_code, first_bar_date, last_bar_date, n_bars, jq_code}` の dict 列。
+    同じ区間を取り直したら `n_bars` / `jq_code` / `fetched_at` だけ更新する。**消さない**
+    （別の区間の記録は別の取得の証拠）。commit は呼び出し側。戻り値は行数。
+    """
+    vals = list(rows)
+    if not vals:
+        return 0
+    dialect = db.bind.dialect.name if db.bind is not None else "postgresql"
+    if dialect == "sqlite":
+        from sqlalchemy.dialects.sqlite import insert as _insert
+    else:
+        from sqlalchemy.dialects.postgresql import insert as _insert
+
+    now = datetime.now(timezone.utc)
+    stmt = _insert(JQuantsAdjFactorCoverage).values([dict(v, fetched_at=now) for v in vals])
+    stmt = stmt.on_conflict_do_update(
+        index_elements=["edinet_code", "first_bar_date", "last_bar_date"],
+        set_={"n_bars": stmt.excluded.n_bars, "jq_code": stmt.excluded.jq_code,
+              "fetched_at": stmt.excluded.fetched_at},
+    )
+    db.execute(stmt)
+    return len(vals)
+
+
+def load_jquants_adj_factor_coverage(db) -> dict:
+    """`{edinet_code: [(first_bar_date, last_bar_date), ...]}`（日付順・**併合しない生の区間**）。
+
+    重なる区間の併合は検出器の純関数 `measure_split_valuation_bias.merge_spans` が唯一の源で、
+    呼び出し側が通す（database は scripts/ へ依存しない）。
+    """
+    out: dict = {}
+    for ec, d0, d1 in db.query(
+        JQuantsAdjFactorCoverage.edinet_code, JQuantsAdjFactorCoverage.first_bar_date,
+        JQuantsAdjFactorCoverage.last_bar_date,
+    ).order_by(JQuantsAdjFactorCoverage.edinet_code, JQuantsAdjFactorCoverage.first_bar_date,
+               JQuantsAdjFactorCoverage.last_bar_date).all():
+        out.setdefault(ec, []).append((str(d0)[:10], str(d1)[:10]))
+    return out
+
+
 def load_price_series(db, *, min_hole_days: int) -> dict:
     """`{edinet_code: (最初の week_start, ((空白直前の週, 空白直後の週), ...))}`。検出器の `price_series` の形（#672）。
 

@@ -157,6 +157,11 @@ COMPOSITE_LO, COMPOSITE_HI = 0.8, 1.25
 LISTING_GAP_MIN_YEARS = 2
 LISTING_GAP_MIN_DAYS = 365
 
+# 公式の日次バーの「連続して受け取った区間」を切る空白（暦日・#668・ADR-0055 決定4-8・`bars_spans`）。
+# 東証の休場は年末年始・GW でも暦日 6〜7 日なので、これを超える空白は取得漏れか売買停止と読み、
+# **その空白をまたぐイベント窓は「公式で確かめた」に数えない**（外す側へ倒さない＝補正を残す）。
+MAX_BAR_GAP_DAYS = 10
+
 # 実在する分割・併合比。0.05 は 1:20 併合。
 #
 # **比を足すのは「検出したイベントの本物の比が公式 `AdjFactor` か Yahoo で確かめられ、かつ
@@ -265,7 +270,8 @@ class MatchResult(NamedTuple):
     n_official_events: int
     status: str
     # status: agree | agree_raw_only | disagree_magnitude | no_official_event
-    #         | no_official_event_partial | official_only | out_of_coverage | no_sec_code
+    #         | no_official_event_partial | no_official_bars | official_only | out_of_coverage
+    #         | no_sec_code
 
 
 def _log(x: float) -> float:
@@ -384,6 +390,7 @@ def detect_events(rows: Sequence[AnnualRow], *,
                   equity_tol: Optional[float] = DEFAULT_EQUITY_TOL,
                   official_events: Optional[Mapping[str, Sequence[tuple[str, float]]]] = None,
                   price_series: Optional[Mapping[str, tuple[str, Sequence[tuple[str, str]]]]] = None,
+                  official_coverage: Optional[Mapping[str, Sequence[Sequence[str]]]] = None,
                   ) -> tuple[list[ShareEvent], dict]:
     """株数基準が変わった年を検出する。戻り値 (events, stats)。
 
@@ -446,7 +453,22 @@ def detect_events(rows: Sequence[AnnualRow], *,
     `stats["listing_gap"]["rejected"]` に残す。第2経路が翌年の株数を先読みするときも、
     (当年, 翌年) が該当ペアなら「同じ実体の翌年の行は無い」として扱う（翌年の行が無い年と同じ
     分岐＝公式か倍率待ちへ）。写像に居ない社は判定しない。None（既定）なら判定しない。
+
+    **`official_coverage` を与えると、第1経路のイベントを公式の不在で外す**（#668・ADR-0055 決定4-8）。
+    形は `{edinet_code: [(最初のバーの日, 最後のバーの日), ...]}`（併合済み・`merge_spans`）で、
+    `official_events` と一緒に渡す（片方だけなら `ValueError`）。bps の交差検証と純資産比チェックを
+    通って採る直前に、その社の区間がイベント窓を覆い（`window_confirmed`）、かつ窓の中に公式イベントが
+    無ければ採らず `stats["official_absence"]["rejected"]` に残す。**区間が無い社・窓がはみ出す社・
+    窓の中に公式イベントがある社は今日までどおり採る**——`jquants_adj_factor_events` に行が無いだけでは
+    「分割は無かった」と読めない（決定4-5）ので、読めるのは社単位で取得した記録が窓を覆うときだけ。
+    公式にある事象が分割でなくても（#652 の新株予約権無償割当）、この規則は補正を残す向きにしか効かない。
+    **第2経路には掛けない**——期末後・提出前の分割を1株指標だけが先取りする社を拾う経路で、効力日が
+    イベント窓の外に出うる。第1経路が不在で落としたペアを第2経路が独立に拾うことは妨げない（純資産比
+    チェックと同じ規則）。測定器の CLI には渡さない（渡すと偽陽性が突合から消え、偽陽性率を測れない）。
     """
+    if official_coverage is not None and official_events is None:
+        raise ValueError("official_coverage は official_events と一緒に渡す"
+                         "（不在を読む相手が無いのに判定したことにしない）")
     gate = _log(min_ratio)
     coverage_start = min(v[0] for v in price_series.values()) if price_series else None
     listing_gap_rejected: list[dict] = []
@@ -471,6 +493,8 @@ def detect_events(rows: Sequence[AnnualRow], *,
     # 倍率の出どころが無くて採らなかった第2経路のペア（#661）。取り込み CLI の対象選びと
     # 夜間ログが読む。件数は `bps_rejected["no_lagged_row"]` と常に一致する。
     awaiting: list[dict] = []
+    # 公式の不在で外した第1経路のイベント（#668）。
+    absence_rejected: list[dict] = []
 
     for ec, rs in by_ec.items():
         # **使える行だけを先に並べる。** 翌年の株数を見るには次の行を先読みする必要があり、
@@ -525,15 +549,29 @@ def detect_events(rows: Sequence[AnnualRow], *,
                             "bps_ratio": bps_ratio, "equity_ratio": eq_ratio,
                         })
                     else:
-                        events.append(ShareEvent(
+                        ev = ShareEvent(
                             edinet_code=ec, year=cur.year, prev_year=prev.year,
                             gap_years=cur.year - prev.year,
                             period_end=cur.period_end, prev_period_end=prev.period_end,
                             sh_ratio=sh_ratio, bps_ratio=bps_ratio,
                             canonical=canonical, residual=residual, kind=kind,
-                            source="shares", equity_ratio=eq_ratio))
-                        shares_pairs.add((ec, cur.year))
-                        took = True
+                            source="shares", equity_ratio=eq_ratio)
+                        win = event_window(ev)
+                        if (official_coverage is not None
+                                and window_confirmed(ev, official_coverage.get(ec))
+                                and official_ratio_in_window(official_events.get(ec, ()),
+                                                             win)[0] is None):
+                            # 公式のバーを窓の全期間ぶん受け取ったのに企業イベントが無い＝分割ではない
+                            # （#668）。深い割引の増資は形でも純資産比でも本物と分けられない（決定4-4）。
+                            absence_rejected.append({
+                                "edinet_code": ec, "year": cur.year, "prev_year": prev.year,
+                                "kind": kind, "canonical": canonical, "sh_ratio": sh_ratio,
+                                "window": win,
+                            })
+                        else:
+                            events.append(ev)
+                            shares_pairs.add((ec, cur.year))
+                            took = True
 
             if bps_path and abs(_log(bps_ratio)) >= gate:
                 n_bps_candidates += 1
@@ -685,6 +723,12 @@ def detect_events(rows: Sequence[AnnualRow], *,
             "rejected_by_kind": dict(Counter(r["kind"] for r in equity_rejected)),
             "n_unknown": n_equity_unknown,
             "rejected": equity_rejected,
+        },
+        "official_absence": {
+            "enabled": official_coverage is not None,
+            "n_companies_with_record": len(official_coverage or {}),
+            "n_rejected": len(absence_rejected),
+            "rejected": absence_rejected,
         },
         "listing_gap": {
             "enabled": price_series is not None,
@@ -909,10 +953,65 @@ def in_coverage(ev: ShareEvent, coverage: Optional[tuple[str, str]], *,
     return coverage[0] <= win[0] and win[1] <= coverage[1]
 
 
+def bars_spans(rows: Sequence[Mapping], *, max_gap_days: int = MAX_BAR_GAP_DAYS
+               ) -> list[tuple[str, str, int]]:
+    """公式の日次バーを、実際に受け取った連続区間 `[(最初の日, 最後の日, 本数), ...]` へ畳む（#668）。
+
+    **「公式にイベントが無い」と読めるのは、この区間の中だけ**である。要求した期間ではなく受け取った
+    バーで決めるのは、J-Quants が扱わない社（実測 E03474・契約窓内 0 本）も 429 が続いた社も `[]` で
+    返り、「イベントが無い」と同じ形になるから。0 本なら `[]`。隣り合うバーの間隔が `max_gap_days`
+    を超えたら区間を切る（取得漏れ・売買停止の中で起きたイベントを見落としうる）。
+    """
+    ds = sorted({str(r.get("Date"))[:10] for r in rows if r.get("Date")})
+    out: list[tuple[str, str, int]] = []
+    if not ds:
+        return out
+    start = prev = ds[0]
+    n = 1
+    for d in ds[1:]:
+        if (date.fromisoformat(d) - date.fromisoformat(prev)).days > max_gap_days:
+            out.append((start, prev, n))
+            start, n = d, 0
+        prev = d
+        n += 1
+    out.append((start, prev, n))
+    return out
+
+
+def merge_spans(spans: Iterable[Sequence[str]]) -> list[tuple[str, str]]:
+    """重なる・接する区間 `(from, to)` を併合する（日付順）。**取得記録の併合の唯一の源**（#668）。
+
+    取り込みを回すたびに区間を追記するので、同じ社に重なる区間が複数行ある。`to` の翌日から次の区間が
+    始まる場合も1本にする。3要素以上の組は先頭2つだけを使う（`bars_spans` の出力をそのまま渡せる）。
+    """
+    out: list[list[str]] = []
+    for s in sorted((str(x[0])[:10], str(x[1])[:10]) for x in spans):
+        if out and date.fromisoformat(s[0]) <= date.fromisoformat(out[-1][1]) + timedelta(days=1):
+            out[-1][1] = max(out[-1][1], s[1])
+        else:
+            out.append([s[0], s[1]])
+    return [(a, b) for a, b in out]
+
+
+def window_confirmed(ev: ShareEvent, spans: Optional[Sequence[Sequence[str]]], *,
+                     slack_days: int = 45) -> bool:
+    """イベント窓 `(w0, w1]` が、公式のバーを受け取った区間のどれか1本に完全に収まるか（#668）。
+
+    包含の規則は `in_coverage(mode="full")` と同じ `from <= w0 and w1 <= to`。窓が週末に掛かると
+    数日ぶん厳しくなるが、偽になる側は「確かめていない＝補正を残す」なので安全側である。
+    `spans` は併合済み（`merge_spans`）を渡すこと——併合前の2本にまたがる窓は偽になる。
+    """
+    win = event_window(ev, slack_days=slack_days)
+    if win is None or not spans:
+        return False
+    return any(str(s[0])[:10] <= win[0] and win[1] <= str(s[1])[:10] for s in spans)
+
+
 def match_event(ev: ShareEvent, official: Sequence[tuple[str, float]], *,
                 slack_days: int = 45, tol: float = 0.05,
                 coverage: Optional[tuple[str, str]] = None,
-                coverage_mode: str = "full") -> MatchResult:
+                coverage_mode: str = "full",
+                official_spans: Optional[Sequence[Sequence[str]]] = None) -> MatchResult:
     """検出したイベントを公式 `AdjFactor` と突き合わせる。
 
     公式の `AdjFactor` は**過去株価に掛ける係数**なので 1:2 分割は 0.5 で返る。株数比へ
@@ -924,6 +1023,12 @@ def match_event(ev: ShareEvent, official: Sequence[tuple[str, float]], *,
     `coverage_mode="partial"` では窓と契約窓の重なりの中だけを探し、公式イベントが無ければ
     `no_official_event_partial` を返す（#659）。**この status は分母に入れない**——重なりの
     外で起きた分割は公式が返さないので、「分割が無かった」と区別できないためである。
+
+    **`official_spans`（その社の公式バーを受け取った区間・`bars_spans` の出力）を渡すと、バーが窓を
+    覆っていないときに `no_official_bars` を返す**（#668）。full 窓では窓が区間のどれにも収まらない
+    とき、partial 窓ではバーが0本のとき。これも分母に入れない——J-Quants が扱わない社（実測 E03474・
+    契約窓内 0 本）は「公式にイベントが無い」と同じ形で返り、#657 の全数突合はそれを偽陽性に数えていた。
+    None なら従来どおり区間を見ない。
     """
     # 生比は**そのイベントの倍率を決めた量**を採る。bps 経路は #659 で倍率の出どころが
     # 翌年の株数比へ移ったので、そちらを見る（`bps_ratio` を見ると `agree_raw_only` が
@@ -946,6 +1051,10 @@ def match_event(ev: ShareEvent, official: Sequence[tuple[str, float]], *,
         w0, w1 = max(w0, coverage[0]), min(w1, coverage[1])
 
     official_ratio, n_inside = official_ratio_in_window(official, (w0, w1))
+    if official_ratio is None and official_spans is not None and (
+            not official_spans if coverage_mode == "partial"
+            else not window_confirmed(ev, merge_spans(official_spans), slack_days=slack_days)):
+        return MatchResult(ev.edinet_code, ev.year, detected, raw, None, 0, "no_official_bars")
     if official_ratio is None:
         return MatchResult(
             ev.edinet_code, ev.year, detected, raw, None, 0,
@@ -968,6 +1077,7 @@ def match_event(ev: ShareEvent, official: Sequence[tuple[str, float]], *,
 #: `no_official_event` が入るのは full 窓のときだけ——公式が返さない＝分割が無かったと
 #: 読めるので「検出が間違い」として数える。partial 窓の同じ状況は契約窓の外で起きた分割と
 #: 区別できないので `no_official_event_partial` にして分母から外す（#659）。
+#: 公式のバーが窓を覆っていない `no_official_bars` も同じ理由で外す（#668）。
 MATCH_DENOMINATOR = ("agree", "agree_raw_only", "disagree_magnitude", "no_official_event")
 
 
@@ -1372,13 +1482,17 @@ async def learn_coverage() -> tuple[str, str]:
     return cover
 
 
-async def fetch_official_events(ec_secs: Sequence[tuple[str, str]], cover: tuple[str, str], *,
-                                on_progress=None) -> dict[str, list]:
-    """公式の企業イベントを取る。**レート制御も認証も既存実装を再利用する**（二重実装しない）。"""
+async def fetch_official(ec_secs: Sequence[tuple[str, str]], cover: tuple[str, str], *,
+                         on_progress=None) -> dict[str, tuple[list, list]]:
+    """`{edinet_code: (公式の企業イベント, バーを受け取った区間)}`。
+
+    **イベントと区間は必ず同じバーから作る**（#668）。イベントだけ返すと「バーが0本」と「イベントが
+    無い」を呼び出し側が区別できない。レート制御も認証も既存実装を再利用する（二重実装しない）。
+    """
     from scripts.repair_splits_from_jquants import collect_official, extract_events
 
     bars = await collect_official(list(ec_secs), cover, on_progress=on_progress)
-    return {ec: extract_events(rows) for ec, rows in bars.items()}
+    return {ec: (extract_events(rows), bars_spans(rows)) for ec, rows in bars.items()}
 
 
 # ── CLI ─────────────────────────────────────────────────────────────────────
@@ -1576,8 +1690,10 @@ def _cmd_verify_sample(args) -> int:
                   "本番は約 %.0f 分）" % (len(targets) * 20 / 60.0))
             return 0
 
-        official = asyncio.run(fetch_official_events(
+        fetched = asyncio.run(fetch_official(
             targets, cover, on_progress=lambda i, t, m: print("  %s" % m, flush=True)))
+        official = {ec: ev for ec, (ev, _) in fetched.items()}
+        spans_of = {ec: sp for ec, (_, sp) in fetched.items()}
 
         results: list[MatchResult] = []
         pos_set = set(pos)
@@ -1587,8 +1703,11 @@ def _cmd_verify_sample(args) -> int:
             results.append(match_event(e, official.get(e.edinet_code, []),
                                        slack_days=args.window_slack_days,
                                        tol=args.match_tol, coverage=cover,
-                                       coverage_mode=args.coverage))
+                                       coverage_mode=args.coverage,
+                                       official_spans=spans_of.get(e.edinet_code, [])))
         misses = [ec for ec in ctrl if official.get(ec)]
+        # 対照群でバーが0本の社は「見逃し 0」の根拠にならない（#668）。数だけ並べる。
+        ctrl_no_bars = [ec for ec in ctrl if not spans_of.get(ec)]
 
         tally, denom, rate, rate_raw = tally_rates(results)
 
@@ -1598,6 +1717,9 @@ def _cmd_verify_sample(args) -> int:
               % (rate, rate_raw, denom))
         print("対照群の見逃し（公式にイベントがあった社）= %d 社 %s"
               % (len(misses), misses or ""))
+        if ctrl_no_bars:
+            print("対照群のうち公式のバーが0本で判定できない社 = %d 社 %s"
+                  % (len(ctrl_no_bars), ctrl_no_bars))
         by_group = tally_by_group(results, events)
         for g in sorted(by_group):
             t = Counter(by_group[g])
@@ -1648,7 +1770,7 @@ def _cmd_verify_sample(args) -> int:
                 "no_sec_code": no_sec, "tally": dict(tally),
                 "tally_by_group": by_group, "equity_gate": gate,
                 "agree_rate": rate, "agree_rate_raw_ok": rate_raw,
-                "control_misses": misses,
+                "control_misses": misses, "control_no_bars": ctrl_no_bars,
                 "rows": [r._asdict() for r in results],
             }, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
             print("JSON: %s" % p)

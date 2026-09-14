@@ -29,6 +29,7 @@ from database import (
     get_setting, upsert_setting, KEY_SCALE_BAND_VERDICTS,
     replace_split_adjustment_factors,
     upsert_jquants_adj_factor_events, load_jquants_adj_factor_events, load_price_series,
+    load_jquants_adj_factor_coverage,
 )
 
 from collector_utils import *
@@ -1165,7 +1166,7 @@ def rebuild_split_adjustment_factors(db, *, bps_path: Optional[bool] = None) -> 
     # ここへ写さない。遅延 import なのは収集モジュールが scripts/ へ静的に依存しないため
     # （あちらの純関数ブロックは database / httpx を引かないことをテストが固定している）。
     from scripts.measure_split_valuation_bias import (
-        AnnualRow, detect_events, cumulative_factors, LISTING_GAP_MIN_DAYS,
+        AnnualRow, detect_events, cumulative_factors, merge_spans, LISTING_GAP_MIN_DAYS,
     )
 
     # **ORDER BY を省かない。** `detect_events` は `sorted(rs, key=lambda r: r.year)` で並べるが
@@ -1201,7 +1202,12 @@ def rebuild_split_adjustment_factors(db, *, bps_path: Optional[bool] = None) -> 
     # 空白・#672・決定4-7）。**読み忘れると判定は黙って無効になり**、定番比の 15 が E05714 型の
     # 偽陽性を入れる。
     series = load_price_series(db, min_hole_days=LISTING_GAP_MIN_DAYS)
-    events, stats = detect_events(rows, official_events=official, price_series=series, **kw)
+    # 公式のバーを社単位で受け取った区間（#668・決定4-8）。第1経路の偽陽性を「公式に分割が無い」と
+    # **確かめられた**ときだけ外す。区間は取り込み CLI が追記するので、併合してから渡す（併合の唯一の源は
+    # 検出器の `merge_spans`）。表が空なら何も外さない＝今日までどおり採る側へ倒れる。
+    coverage = {ec: merge_spans(sp) for ec, sp in load_jquants_adj_factor_coverage(db).items()}
+    events, stats = detect_events(rows, official_events=official, price_series=series,
+                                  official_coverage=coverage, **kw)
     # use_canonical=True（既定）＝定番比へ寄せられなかった `unsnapped` を積から外す。
     factors = cumulative_factors(rows, events)
 
@@ -1254,6 +1260,13 @@ def rebuild_split_adjustment_factors(db, *, bps_path: Optional[bool] = None) -> 
              lg.get("n_rejected", 0), lg.get("n_lagged", 0))
     for r in lg.get("rejected") or ():
         log.info("分割補正係数: 上場廃止をまたぐペア %s", r)
+    # 公式の不在で外した第1経路も**毎晩出す**（#668）。外れる社は取り込み CLI を回したときにしか増えない
+    # ので、取り込み後の最初の晩に一覧が変わっていなければ区間の書き込みか読み込みが壊れている。
+    oa = stats.get("official_absence") or {}
+    log.info("分割補正係数: 公式に分割が無いと確かめて外した第1経路 %d 件（取得記録のある社 %d）",
+             oa.get("n_rejected", 0), oa.get("n_companies_with_record", 0))
+    for r in oa.get("rejected") or ():
+        log.info("分割補正係数: 公式に分割が無い第1経路 %s", r)
     return n
 
 
