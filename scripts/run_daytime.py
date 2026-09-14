@@ -153,9 +153,18 @@ JOBS: dict[str, Job] = {
     # `use_macro` は主効果と交差項を**同時に**動かすので、どちらが効いているのかを
     # 分ける軸を #615 で足した。**この実測は対話セッション中に回してはいけない**——
     # 並走すると結果そのものが変わる（#618・macro_beta で発散が 0 → 344 回）。
+    #
+    # **入力は毎回ローカル DB から作り直す（#674）。** 9/7 に積んだ時点では週次株価の
+    # キャッシュがあったが、待っている間の 9/8 に #620 の修復で `_stale_pre620/` へ退避され、
+    # 9/14 に順番が来たジョブは `--allow-full-pull` が無く 0.1分で exit=1 になった（1日ぶんの
+    # 枠が消え、キューにも戻らない）。`--refresh-cache` も要る——キャッシュは世代の印を
+    # 持たず、財務（8/31）とマクロ（9/3）が #655 の分割補正より前のまま黙って返る。
+    # 「97万行の pull はストールしやすい」は Supabase 時代の理由で、正本がローカルに
+    # 移った（#503）いまは当てはまらない。
     "gate:interactions": Job(
         name="gate_interactions",
-        argv=("{python}", "-m", "scripts.momentum_gate", "--interactions", "--stride", "1"),
+        argv=("{python}", "-m", "scripts.momentum_gate", "--interactions", "--stride", "1",
+              "--allow-full-pull", "--refresh-cache"),
         why="交互作用（財務 × マクロの交差項）の有無を共通 (ym,ec) 域で測る（#615）。"
             "スモーク（stride=5）では nointer +0.2603 に対し inter +0.0989 で "
             "diff=-0.1615（95%CI[-0.2719,-0.0467]）と出たが、**--smoke の共通域は "

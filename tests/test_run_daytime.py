@@ -6,7 +6,7 @@
 XLA が使うコア数は実行時の混み具合で変わる。つまり**「重い計算の裏で作業をしない」という
 運用条件が結果の再現性に直結している**。人が PC を触らない平日日中を専用の枠にした。
 
-守るのは7点:
+守るのは8点:
 
 1. **キューは先頭を取り除いてから返す**（失敗しても戻さない＝同じ計算を繰り返さない）
 2. **窓に入らない仕事は積ませない**（走ってから打ち切られると何も残らない）
@@ -15,6 +15,7 @@ XLA が使うコア数は実行時の混み具合で変わる。つまり**「�
 5. **重い計算の引数が既存バッチと同一**（片方だけ動かすと同じ名前の別物を測る）
 6. **並走で結果が変わる仕事に印が付いている**（`-Now` の手動キックはここで分岐する）
 7. **手動キックはタスク経由で走る**（直に走らせると端末を閉じた瞬間に死ぬ・#515 と同型）
+8. **仕事は手で作ったキャッシュに依存しない**（待っている間に退避されると即死する・#674）
 """
 import json
 import os
@@ -151,6 +152,55 @@ class TestArgumentsMatchTheExistingBatches:
         here = self._argv_of(rd.steps_for("py", key), key)
         there = self._argv_of(rm.steps_for("py"), key)
         assert here == there
+
+
+class TestJobsBuildTheirOwnInputs:
+    """**積んだ時点のキャッシュを当てにしない**（#674）。
+
+    2026-09-07 に `gate:interactions` を積んだ時点では `scripts/.cache/weekly_prices_close.pkl`
+    があったが、順番を待つ間の 9/8 に #620 の株価修復で `_stale_pre620/` へ退避された。
+    9/14 に順番が来たジョブは `--allow-full-pull` を持たず、`candidate_bakeoff._load_prices` が
+    読み込みを拒否して 0.1分で exit=1——平日1日ぶんの枠が消え、「結論を出した失敗」なので
+    キューにも戻らなかった。
+
+    `--allow-full-pull` だけでも足りない。キャッシュは**世代の印を持たず古い世代を黙って返す**
+    ので、財務（8/31）とマクロ（9/3）は #655 の分割補正より前のまま、株価だけ新しい世代という
+    混ざったパネルを測ることになる。だから `--refresh-cache` も要る。
+
+    判定はスクリプトのソースから取る＝同じ系統のスクリプトを呼ぶ仕事を後から足しても
+    自動で対象になる（書き忘れは失敗として現れない）。
+    """
+
+    FLAGS = ("--allow-full-pull", "--refresh-cache")
+
+    @staticmethod
+    def _script_of(argv):
+        """`-m scripts.X` なら `scripts/X.py` を返す（それ以外の起動形は対象外）。"""
+        if "-m" not in argv:
+            return None
+        module = argv[argv.index("-m") + 1]
+        path = ROOT.joinpath(*module.split(".")).with_suffix(".py")
+        return path if path.is_file() else None
+
+    @pytest.mark.parametrize("key", sorted(rd.JOBS))
+    def test_cache_flags_the_script_accepts_are_passed(self, key):
+        argv = rd.JOBS[key].argv
+        script = self._script_of(argv)
+        if script is None:
+            pytest.skip("scripts/ 配下のモジュール起動ではない")
+        source = script.read_text(encoding="utf-8")
+        missing = [f for f in self.FLAGS if f'"{f}"' in source and f not in argv]
+        assert not missing, (
+            f"{key}: {script.name} は {missing} を受け付けるのに argv に無い。"
+            "積んだ時点のキャッシュは待っている間に退避されうる（即死する）し、"
+            "世代の印が無いので古い世代を黙って返す（#674）")
+
+    def test_the_rule_actually_covers_the_gate(self):
+        """照合が空振りしていないこと（対象0件でも上のテストは全部通ってしまう）。"""
+        script = self._script_of(rd.JOBS["gate:interactions"].argv)
+        assert script is not None and script.name == "momentum_gate.py"
+        source = script.read_text(encoding="utf-8")
+        assert all(f'"{f}"' in source for f in self.FLAGS)
 
 
 class TestBudgetFitsTheWindow:
