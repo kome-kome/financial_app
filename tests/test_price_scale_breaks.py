@@ -24,6 +24,7 @@ from collector_prices import (            # noqa: E402
 )
 from collector_utils import (             # noqa: E402
     SPINOFF_ADJUSTMENTS,
+    WITHHELD_OFFICIAL_ADJUSTMENTS,
     JQuantsOutOfCoverage,
     before_spinoff_ex_date,
     is_common_stock_code,
@@ -281,6 +282,20 @@ class TestSpinoffAdjustment:
             for ex_date, factor, reason in events:
                 date.fromisoformat(ex_date)
                 assert 0.0 < factor < 1.0       # スピンオフは権利落ち前の株価を必ず下げる
+                assert reason.strip()
+
+    def test_withheld_registry_entries_are_well_formed(self):
+        """公式調整を当てない表（#652）。窓は ISO 日付の両端含み・根拠は空にしない。
+
+        書き込みを止める向きにしか効かない表なので、形の誤りが「黙って止まらない」形で出ないよう縛る
+        （例: 始まりと終わりを逆に書くと、どの日付も窓に入らずガードが消える）。
+        """
+        for windows in WITHHELD_OFFICIAL_ADJUSTMENTS.values():
+            assert windows
+            for start, end, expected, reason in windows:
+                assert date.fromisoformat(start) <= date.fromisoformat(end)
+                assert len(start) == len(end) == 10     # 文字列比較で窓を判定するため
+                assert expected > 0.0
                 assert reason.strip()
 
     def test_yahoo_scale_db_is_not_reported(self, db, make_company, make_weekly):

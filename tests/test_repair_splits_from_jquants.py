@@ -192,6 +192,137 @@ class TestPostWindowAdjustment:
         assert R.post_window_adjustment(rows) is None
 
 
+# ── 1社ぶんの群分け（書いてよいのは fixed だけ）───────────────────────────────
+
+def jq_bars(*items) -> list:
+    """(date, C, AdjC, AdjFactor) から J-Quants 風の行を作る（`post_window_adjustment` は C を読む）。"""
+    return [{"Date": d, "C": c, "AdjC": a, "AdjFactor": f} for d, c, a, f in items]
+
+
+def weekly(*items) -> list:
+    """(trade_date, close_last) から `weekly_rows` の形 (trade_date, week_start, close_last) を作る。"""
+    return [(d, d, c) for d, c in items]
+
+
+RIGHTS = 1.0 / (1.0 + 0.5)   # 1株につき1個・目的株式 0.5株の全員行使時の理論係数（#652）
+
+
+def rights_allotment_case(ex_date: str, dates: tuple) -> tuple:
+    """公式だけが権利落ち日より前へ 2/3 を掛け、DB（実約定値）は調整しない社のデータ。
+
+    `dates` は ex_date を挟む4週（前2つ・後2つ）。AdjC は公式らしく小数1桁に丸める。
+    """
+    closes = (370.0, 365.0, 357.0, 340.0)
+    bars_ = [(d, c, round(c * RIGHTS, 1) if d < ex_date else c, 1.0) for d, c in zip(dates, closes)]
+    bars_.append((ex_date, 360.0, 360.0, round(RIGHTS, 6)))
+    return weekly(*zip(dates, closes)), jq_bars(*sorted(bars_))
+
+
+class TestWithheldOfficialAdjustments:
+    """**公式イベントで説明できる段差でも、DB が正しい側の企業イベントは直さない**（#652）。
+
+    E34165（1447）の新株予約権無償割当は、公式が権利落ち日より前へ理論係数 2/3 を掛けるが、
+    DB（= Yahoo = 実約定値）は調整しない。イベントが契約窓に入ると `validate` は**綺麗に通る**ので、
+    登録表で止めないと `--apply` が実際の取引に無い +45% の跳ねを週次リターンへ入れる。
+
+    仕組みのテストは架空の社（E99999）を登録して行う。実登録（E34165）は根拠の Issue で
+    外されうるので、実登録そのものの確認は1本に閉じ込めてある。
+    """
+
+    EC = "E99999"
+    DATES = ("2026-08-28", "2026-09-04", "2026-09-18", "2026-12-04")
+
+    @pytest.fixture
+    def registered(self, monkeypatch):
+        import collector_utils
+        monkeypatch.setitem(collector_utils.WITHHELD_OFFICIAL_ADJUSTMENTS, self.EC,
+                            (("2026-09-01", "2026-12-31", RIGHTS, "テスト用の登録・#652"),))
+
+    def test_validate_alone_would_accept_the_official_adjustment(self):
+        """前提の確認: このデータは validate を通り、登録が無ければ書き込みを誘発する形である。"""
+        rows, jq = rights_allotment_case("2026-09-11", self.DATES)
+        ratios = R.measured_ratios(jq, {d: c for d, _, c in rows})
+        assert R.validate(ratios, R.extract_events(jq)) == (True, "")
+
+    def test_unregistered_company_is_fixed(self):
+        """対照: 同じデータの未登録社は fixed になり、権利落ち前の週へ 2/3 を掛ける計画が出る。"""
+        rows, jq = rights_allotment_case("2026-09-11", self.DATES)
+        bucket, entry, factors = R.judge_company("E00001", "0000", rows, jq)
+        assert bucket == "fixed"
+        assert entry["would_change"] == 2
+        assert factors["2026-08-28"] == pytest.approx(RIGHTS, rel=5e-3)
+
+    def test_registered_event_is_withheld_and_nothing_is_planned(self, registered):
+        rows, jq = rights_allotment_case("2026-09-11", self.DATES)
+        bucket, entry, factors = R.judge_company(self.EC, "9999", rows, jq)
+        assert bucket == "withheld"
+        assert factors == {}
+        assert [w["date"] for w in entry["withheld"]] == ["2026-09-11"]
+        assert entry["withheld"][0]["expected_factor"] == pytest.approx(RIGHTS)
+        assert "#652" in entry["withheld"][0]["reason"]
+
+    def test_event_outside_the_window_is_judged_as_before(self, registered):
+        """鍵は社ではなく社＋窓（ADR-0053 の案C「社の名簿」にしない）。窓の外の分割は今までどおり直す。"""
+        dates = ("2027-02-19", "2027-02-26", "2027-03-05", "2027-03-12")
+        rows, jq = rights_allotment_case("2027-03-01", dates)
+        bucket, entry, _ = R.judge_company(self.EC, "9999", rows, jq)
+        assert bucket == "fixed"
+        assert "withheld" not in entry
+
+    def test_window_bounds_are_inclusive(self, registered):
+        got = R.withheld_official_events(self.EC, [("2026-08-31", 0.5), ("2026-09-01", 0.5),
+                                                   ("2026-12-31", 0.5), ("2027-01-01", 0.5)])
+        assert [d for d, *_ in got] == ["2026-09-01", "2026-12-31"]
+
+    def test_unregistered_company_has_no_withheld_events(self):
+        assert R.withheld_official_events("E00001", [("2026-09-11", RIGHTS)]) == []
+
+    def test_embargo_phase_stays_embargoed_with_the_registration_shown(self, registered):
+        """イベントがまだ契約窓に入っていない時期（`AdjFactor` 行なし・`AdjC/C = 2/3`）は従来どおり
+        書かない群のまま。案内を取り違えないよう、登録の理由を entry に付ける。"""
+        rows = weekly(("2026-06-12", 400.0), ("2026-06-19", 410.0))
+        jq = jq_bars(("2026-06-12", 400.0, 266.7, 1.0), ("2026-06-19", 410.0, 273.3, 1.0))
+        bucket, entry, factors = R.judge_company(self.EC, "9999", rows, jq)
+        assert bucket == "embargoed"
+        assert factors == {}
+        assert entry["post_window_factor"] == pytest.approx(RIGHTS, rel=5e-3)
+        assert entry["registered"][0]["window"] == ["2026-09-01", "2026-12-31"]
+
+    def test_e34165_is_registered_over_the_observed_schedule(self):
+        """実登録の確認（#652）。公式の段差は 9/8〜9/12 の間に現れ、基準日には 9/14 説と 9/24 説がある。
+        どの候補日の公式イベントも止まること。登録を外すときはこのテストも外す。"""
+        for d in ("2026-09-09", "2026-09-11", "2026-09-18", "2026-09-22"):
+            assert R.withheld_official_events("E34165", [(d, RIGHTS)]), d
+
+
+class TestJudgeCompanyBuckets:
+    """切り出し前の `_run` と同じ群分けになること（withheld 以外の回帰）。"""
+
+    def test_flat_ratio_is_clean(self):
+        rows = weekly(("2025-01-10", 100.0), ("2025-01-17", 101.0))
+        jq = jq_bars(("2025-01-10", 100.0, 100.0, 1.0), ("2025-01-17", 101.0, 101.0, 1.0))
+        bucket, entry, _ = R.judge_company("E00001", "0000", rows, jq)
+        assert bucket == "clean"
+        assert entry["would_change"] == 0
+
+    def test_latest_mismatch_without_post_window_adjustment_is_skipped(self):
+        """E32779 型: 公式イベントも窓外調整も無いのに DB が 5/6 ずれている。"""
+        rows = weekly(("2025-01-10", 120.0), ("2025-01-17", 120.0))
+        jq = jq_bars(("2025-01-10", 100.0, 100.0, 1.0), ("2025-01-17", 100.0, 100.0, 1.0))
+        bucket, entry, factors = R.judge_company("E00001", "0000", rows, jq)
+        assert bucket == "skipped"
+        assert factors == {}
+        assert "公式と一致しない" in entry["reason"]
+
+    def test_post_window_adjustment_is_embargoed(self):
+        """E03178 型: 窓全体で AdjC = C/2 なのに AdjFactor は全日 1.0。"""
+        rows = weekly(("2026-06-05", 1529.0))
+        jq = jq_bars(("2026-06-05", 1529.0, 764.5, 1.0))
+        bucket, entry, _ = R.judge_company("E00001", "0000", rows, jq)
+        assert bucket == "embargoed"
+        assert "registered" not in entry
+
+
 # ── 補正計画 ────────────────────────────────────────────────────────────────
 
 class TestPlanCorrections:
