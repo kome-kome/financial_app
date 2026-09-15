@@ -203,6 +203,31 @@ class TestJobsBuildTheirOwnInputs:
         assert all(f'"{f}"' in source for f in self.FLAGS)
 
 
+class TestMaxFeaturesGateComparesAgainstProduction:
+    """**列数ジョブの値に本番の既定を含める**（#615）。
+
+    列数モードの分母は「本番値」（`params_schema()` の `max_features` 既定）で、条件集合に
+    無いと `base_of` は最小値へ黙って倒れる。本番の既定を 20 から動かしたのにジョブの値を
+    直し忘れると、**本番との比較のつもりで `mf5` との比較を測る**——例外は出ず、数値も
+    もっともらしい。
+    """
+
+    def test_production_default_is_among_the_values(self):
+        from plugins import get_plugin
+        from plugins.utils import coerce_params
+
+        argv = rd.JOBS["gate:max-features"].argv
+        values = [int(v) for v in argv[argv.index("--max-features") + 1].split(",")]
+        prod = coerce_params(get_plugin("macro_risk_return").params_schema(), {})["max_features"]
+        assert prod in values, f"本番の既定 {prod} がジョブの値 {values} に無い"
+
+    def test_the_job_measures_at_full_resolution(self):
+        """`--smoke` の共通域は間引きで壊れるので読まない（ADR-0050 Decision 3）。"""
+        argv = rd.JOBS["gate:max-features"].argv
+        assert "--smoke" not in argv
+        assert argv[argv.index("--stride") + 1] == "1"
+
+
 class TestBudgetFitsTheWindow:
     INSTALLER = ROOT / "scripts" / "install_daytime_task.ps1"
 
@@ -307,7 +332,7 @@ class TestParallelSensitivity:
         assert field.default_factory is dataclasses.MISSING
 
     @pytest.mark.parametrize("key", ["beta", "tune:macro_gbdt", "tune:macro_dlm",
-                                     "gate:interactions"])
+                                     "gate:interactions", "gate:max-features"])
     def test_computations_are_sensitive(self, key):
         """MCMC も探索も昇格ゲートも、数値の揺れが**採否や重みそのもの**を変える。"""
         assert rd.JOBS[key].parallel_sensitive is True
