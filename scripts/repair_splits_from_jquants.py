@@ -58,6 +58,19 @@ DB 側で調整済みなので比が動かない（E02978 の 2024-07-30 が該�
 Yahoo 経路で直り、真に説明できない群（E32779）は第3のソースが要る（E02086 は第3のソースで
 スピンオフと判明し、換算で解消した・#568）。
 
+## 公式イベントで説明できても直さないもの（#652）
+
+**公式だけが調整し、DB（= Yahoo = 実際の約定値）が正しい企業イベントがある。** 実例は
+E34165（1447）の新株予約権無償割当（買収防衛策）で、公式 `AdjC` は権利落ち日より前へ
+全員行使時の理論係数 2/3 を掛けるが、市場はほとんど織り込まず Yahoo も split として持たない。
+イベントが契約窓に入ると `validate` は「段差が公式イベント日で説明できる」ので**綺麗に通り**、
+`--apply` は実際の取引に無い +45% の跳ねを週次リターンへ入れる。
+
+そこで `collector_utils.WITHHELD_OFFICIAL_ADJUSTMENTS` に**社＋日付の窓**で登録し、窓の中に公式
+イベントがある社は `validate` より前に `withheld` へ分けて**書かない**（`judge_company`）。
+スピンオフのような換算にしないのは、この種のイベントは日程が変わりやすく、日付を誤って換算すると
+残った段差を公式イベントが説明して誤った係数を書くため。止める向きなら誤登録でも値は壊れない。
+
 ## 触らないもの
 
 `volume_sum` / `turnover_sum` は**補正しない**（#466 のスコープ外）。分割では株数が変わる
@@ -109,6 +122,8 @@ from collector_utils import (
     spinoff_factor,
     # `AdjFactor` のイベント判定は夜間 catchup が残す側（#661）と共有する。
     ADJ_FACTOR_EVENT_EPS, adj_factor_event,
+    # 公式だけが当て、DB へ当ててはいけない調整（#652）。書き込みを止める向きにだけ使う。
+    WITHHELD_OFFICIAL_ADJUSTMENTS, withheld_official_events,
 )
 
 # `AdjFactor` がイベントとみなされる下限。唯一の源は collector_utils（ここは互換の別名）。
@@ -176,6 +191,10 @@ def post_window_adjustment(rows: list) -> Optional[float]:
     この群は **#466 が対象とする現象（Yahoo が無償割当を splits として持たない）とは別物**で、
     普通の分割なら Yahoo も遡及調整するので既存の Yahoo 経路
     （`collector.py --repair-price-breaks --persist`）で直る。ここでは触らず、理由を分けて出す。
+
+    **この群は分割とは限らない**（#652）。Yahoo が split として持たない企業イベント（新株予約権の
+    無償割当など）がエンバーゴ内で起きても同じ形になり、そのときは DB と Yahoo が既に一致していて
+    Yahoo 経路で取り直しても何も変わらない。
     """
     if not rows:
         return None
@@ -253,6 +272,56 @@ def extension_span(ratios: list, weekly_dates: list) -> int:
         return 0
     oldest = ratios[0][0]
     return sum(1 for d in weekly_dates if d < oldest)
+
+
+def judge_company(ec: str, sec: str, rows: list, jq: list) -> tuple:
+    """1社ぶんの群分け。戻り値 `(bucket, entry, factors)`。
+
+    `rows` は `weekly_rows` の出力、`jq` はその社の J-Quants 日次バー。`bucket` は
+    `"withheld"` / `"embargoed"` / `"skipped"` / `"clean"` / `"fixed"` のいずれかで、
+    **書いてよいのは `"fixed"` だけ**（`_run` はそれ以外で `apply_corrections` を呼ばない）。
+    `factors` は `"fixed"` / `"clean"` のときだけ `{trade_date: 係数}`、それ以外は `{}`。
+
+    **登録済みの公式調整（`collector_utils.WITHHELD_OFFICIAL_ADJUSTMENTS`・#652）は validate より
+    前に見る。** validate は「段差が公式イベント日で説明できるか」しか問わないので、公式だけが
+    調整して DB が正しい企業イベント（新株予約権の無償割当）ほど綺麗に通ってしまう。
+    """
+    wk = {td: cl for td, _, cl in rows}
+    events = extract_events(jq)
+    ratios = measured_ratios(jq, wk, ec)
+    entry = {"edinet_code": ec, "sec_code": sec, "weeks": len(rows),
+             "events": [{"date": d, "factor": f} for d, f in events],
+             "measured": len(ratios),
+             "steps": [{"from": a, "to": b, "before": r0, "after": r1}
+                       for a, b, r0, r1 in find_steps(ratios)]}
+    registered = WITHHELD_OFFICIAL_ADJUSTMENTS.get(ec)
+    if registered:
+        # 窓の中に公式イベントがまだ無い時期（エンバーゴ中など）にも、登録の理由を見せる。
+        entry["registered"] = [{"window": [s, e], "expected_factor": x, "reason": r}
+                               for s, e, x, r in registered]
+
+    withheld = withheld_official_events(ec, events)
+    if withheld:
+        entry["withheld"] = [{"date": d, "factor": f, "expected_factor": x, "reason": r}
+                             for d, f, x, r in withheld]
+        return "withheld", {**entry, "reason": (
+            "公式イベントが登録済みの窓に入る＝公式だけが当てる調整で、DB（実約定値）が正しい")}, {}
+
+    ok, reason = validate(ratios, events)
+    if not ok:
+        # 棄却の理由を2群に分ける。**「直せない」の中身が違うと打ち手も違う。**
+        post = post_window_adjustment(jq)
+        if post is not None:
+            entry["post_window_factor"] = post
+            return "embargoed", {**entry, "reason": reason}, {}
+        return "skipped", {**entry, "reason": reason}, {}
+
+    dates = [td for td, _, _ in rows]
+    factors = plan_corrections(ratios, dates)
+    n_change = sum(1 for f in factors.values() if abs(f - 1.0) > REL_TOL_FLOOR)
+    entry["would_change"] = n_change
+    entry["extended"] = extension_span(ratios, dates)
+    return ("fixed" if n_change else "clean"), entry, factors
 
 
 # ── DB / ネットワーク ───────────────────────────────────────────────────────
@@ -349,39 +418,14 @@ async def _run(args) -> dict:
         official = await collect_official(
             targets, cover, on_progress=lambda i, t, m: print(f"  {m}", flush=True))
 
-        report = {"cover": list(cover), "fixed": [], "skipped": [],
+        report = {"cover": list(cover), "fixed": [], "withheld": [], "skipped": [],
                   "embargoed": [], "clean": []}
         for ec, sec in targets:
             rows = weekly_rows(db, ec)
-            wk = {td: cl for td, _, cl in rows}
-            jq = official.get(ec) or []
-            events = extract_events(jq)
-            ratios = measured_ratios(jq, wk, ec)
-            ok, reason = validate(ratios, events)
-            entry = {"edinet_code": ec, "sec_code": sec, "weeks": len(rows),
-                     "events": [{"date": d, "factor": f} for d, f in events],
-                     "measured": len(ratios),
-                     "steps": [{"from": a, "to": b, "before": r0, "after": r1}
-                               for a, b, r0, r1 in find_steps(ratios)]}
-            if not ok:
-                # 棄却の理由を2群に分ける。**「直せない」の中身が違うと打ち手も違う。**
-                post = post_window_adjustment(jq)
-                if post is not None:
-                    entry["post_window_factor"] = post
-                    report["embargoed"].append({**entry, "reason": reason})
-                else:
-                    report["skipped"].append({**entry, "reason": reason})
-                continue
-            factors = plan_corrections(ratios, [td for td, _, _ in rows])
-            n_change = sum(1 for f in factors.values() if abs(f - 1.0) > REL_TOL_FLOOR)
-            entry["would_change"] = n_change
-            entry["extended"] = extension_span(ratios, [td for td, _, _ in rows])
-            if not n_change:
-                report["clean"].append(entry)
-                continue
-            if args.apply:
+            bucket, entry, factors = judge_company(ec, sec, rows, official.get(ec) or [])
+            if bucket == "fixed" and args.apply:
                 entry["updated"] = apply_corrections(db, ec, rows, factors)
-            report["fixed"].append(entry)
+            report[bucket].append(entry)
 
         if args.apply and report["fixed"]:
             # **過去週を書き換えたので世代印を進める**（#480・ADR-0036）。進めないと
@@ -412,6 +456,16 @@ def print_report(rep: dict, applied: bool) -> None:
         print(f"      段差 {len(e['steps'])}件・窓外へ延長した週 {e['extended']}"
               f"（仮定: 履歴開始〜窓最古の間に取り落としイベントが無い）")
 
+    if rep.get("withheld"):
+        print(f"\n=== 当てないと決めた公式調整 {len(rep['withheld'])}社（書かない・#652）===")
+        print("  公式イベントが collector_utils.WITHHELD_OFFICIAL_ADJUSTMENTS の窓に入る。")
+        print("  公式だけが調整し DB（実約定値）が正しい企業イベントなので、段差が公式イベントで")
+        print("  説明できても補正しない（--apply でも書かない）。登録の見直しは根拠の Issue で行う。")
+        for e in rep["withheld"]:
+            for w in e["withheld"]:
+                print(f"  {e['edinet_code']} {e['sec_code']}: 公式 {w['date']} x{w['factor']:g}"
+                      f"（理論 x{w['expected_factor']:.6g}）/ {w['reason']}")
+
     if rep["clean"]:
         print(f"\n=== 乖離なし {len(rep['clean'])}社（触らない）===")
         for e in rep["clean"]:
@@ -420,13 +474,19 @@ def print_report(rep: dict, applied: bool) -> None:
     if rep.get("embargoed"):
         print(f"\n=== この Issue の対象外 {len(rep['embargoed'])}社（別の現象）===")
         print("  公式は窓内の AdjC を遡及調整済みで返すのに AdjFactor の行が無い")
-        print("  ＝**分割が J-Quants 無料プランのエンバーゴ（直近12週）の中で起きている**。")
+        print("  ＝**企業イベントが J-Quants 無料プランのエンバーゴ（直近12週）の中で起きている**。")
         print("  普通の分割なら Yahoo も遡及調整するので、これは #466 が対象とする")
         print("  「Yahoo が無償割当を splits として持たない」現象ではない。")
-        print("  → 既存の Yahoo 経路 `collector.py --repair-price-breaks --persist` の担当。")
+        print("  → 分割なら既存の Yahoo 経路 `collector.py --repair-price-breaks --persist` の担当。")
+        print("    **ただし取り直す前に DB と Yahoo が既に一致していないか確かめる**——Yahoo が split と")
+        print("    して持たない企業イベント（新株予約権の無償割当など）も同じ群に入り、一致していれば")
+        print("    取り直しは無意味（#652）。")
         for e in rep["embargoed"]:
             print(f"  {e['edinet_code']} {e['sec_code']}: 窓外調整 x{e['post_window_factor']:.6g}"
                   f" / {e['reason']}")
+            for r in e.get("registered", ()):
+                print(f"      登録済み（窓 {r['window'][0]}〜{r['window'][1]}・公式調整を当てない）:"
+                      f" {r['reason']}")
 
     if rep["skipped"]:
         print(f"\n=== 修正しないと決めた {len(rep['skipped'])}社 ===")
