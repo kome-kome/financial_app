@@ -12,6 +12,7 @@ M-1 は `build_interactions=True` で財務 × マクロの交差項を作り、
   - 各モードの分母が正しいこと（縮む側を分母にすると母集団効果が改善に化ける）
   - `_build` が Cond の値を実際に使い、**M-2 では交互作用が入らない**こと
   - 既定モードの条件が1ビットも動いていないこと（ADR-0045 の実測条件）
+  - 出力（判定行・JSON の `mode`）が**測ったモードの名前**を出すこと
 
 パネル構築の本体は DB フルロードが要るのでここでは触らない（既存の窓モードテストと同じ）。
 """
@@ -26,8 +27,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from scripts import momentum_gate  # noqa: E402
 from scripts.momentum_gate import (  # noqa: E402
     BASE_COND, CONDS, INTERACTION_BASE_COND, INTERACTION_CONDS, INTERACTION_MODELS,
-    MACRO_BASE_COND, MAXFEAT_MODELS, METRICS, MOM_WINDOW, Cond,
-    base_of, bonferroni_alpha, build_conditions, maxfeat_cond_name,
+    MACRO_BASE_COND, MAXFEAT_MODELS, METRICS, MODE_SUFFIX, MOM_WINDOW, Cond,
+    base_of, bonferroni_alpha, build_conditions, maxfeat_cond_name, mode_of, verdict_text,
 )
 
 
@@ -226,6 +227,79 @@ class TestBuildUsesTheConditionAxes:
         from plugins import get_plugin
         want = coerce_params(get_plugin("macro_risk_return").params_schema(), {})["max_features"]
         assert seen["mf"] == want
+
+
+class TestOutputNamesTheModeThatWasMeasured:
+    """**出力は測ったモードの名前を出す。**
+
+    2026-09-15 の `--interactions` 本測定は、JSON の `mode` が `"default"`、判定行が
+    `REJECT (keep default use_momentum=False)` だった——測ったのは交互作用なのに、
+    モメンタムの昇格ゲートの結果に見える。列数モード（5条件）なら `WINDOW SCAN: no window
+    beat the no-momentum baseline` と出ていた。**どちらも例外は出ず、数値は正しい**ので、
+    読み違いは ADR や Issue へ書き写すときにしか起きない。
+    """
+
+    @pytest.mark.parametrize("kwargs, want", [
+        (dict(), "default"),
+        (dict(windows=[3, 12]), "windows"),
+        (dict(macro=True), "macro"),
+        (dict(interactions=True), "interactions"),
+        (dict(max_features=[5, 20]), "max_features"),
+    ])
+    def test_mode_follows_the_flag(self, kwargs, want):
+        assert mode_of(**kwargs) == want
+
+    def test_every_mode_has_a_file_suffix(self):
+        assert set(MODE_SUFFIX) == {"default", "windows", "macro", "interactions", "max_features"}
+
+    def test_existing_output_files_do_not_move(self):
+        """過去の結果の置き場所を変えない（窓モードは #592 以来、既定と同じファイル）。"""
+        assert MODE_SUFFIX["default"] == MODE_SUFFIX["windows"] == ""
+        assert MODE_SUFFIX["macro"] == "_macro"
+
+    @pytest.mark.parametrize("mode, n_conds, head", [
+        ("interactions", 2, "INTERACTIONS AXIS"),
+        ("max_features", 5, "MAX_FEATURES SCAN"),
+        ("max_features", 2, "MAX_FEATURES SCAN"),
+    ])
+    def test_new_modes_do_not_borrow_the_momentum_wording(self, mode, n_conds, head):
+        for passed, regressed in (([], []), (["x"], []), ([], ["y"])):
+            v = verdict_text(mode, n_conds, passed, regressed)
+            assert v.startswith(head + ":"), v
+            assert "use_momentum" not in v and "window" not in v, v
+
+    def test_regressions_are_reported_on_axis_modes(self):
+        v = verdict_text("max_features", 5, [], ["M-1(RiskReturn)/mf40/rank_ic"])
+        assert v.endswith("| significantly WORSE: M-1(RiskReturn)/mf40/rank_ic")
+
+    @pytest.mark.parametrize("mode, n_conds, passed, regressed, want", [
+        ("default", 2, [], [],
+         "REJECT (keep default use_momentum=False): no metric passed corrected alpha"),
+        ("default", 2, ["a"], [], "PROMOTE (default use_momentum=True): a"),
+        ("default", 2, [], ["b"],
+         "REJECT (keep default use_momentum=False): no improvement passed corrected alpha; "
+         "significantly WORSE on b"),
+        # `--windows 12` は2条件＝既定ゲートと同じ文言（切り出す前からの挙動）
+        ("windows", 2, [], [],
+         "REJECT (keep default use_momentum=False): no metric passed corrected alpha"),
+        ("windows", 3, [], [],
+         "WINDOW SCAN: no window beat the no-momentum baseline on the common (ym,ec) domain "
+         "at the corrected alpha"),
+        ("windows", 3, ["a"], ["b"],
+         "WINDOW SCAN: effects that survive the common-domain restriction: a"
+         " | significantly WORSE: b"),
+        ("macro", 2, [], [],
+         "MACRO AXIS: use_macro did not beat the no-macro baseline on the common (ym,ec) "
+         "domain at the corrected alpha"),
+    ])
+    def test_existing_wording_is_unchanged(self, mode, n_conds, passed, regressed, want):
+        """既存3モードの文言は1文字も変えない（過去のログ・JSON と突き合わせるため）。"""
+        assert verdict_text(mode, n_conds, passed, regressed) == want
+
+    @pytest.mark.parametrize("mode", sorted(MODE_SUFFIX))
+    def test_verdicts_survive_cp932(self, mode):
+        """日中枠のログはリダイレクト先へ書かれる（cp932 で落ちる記号を使わない）。"""
+        verdict_text(mode, 5, ["a"], ["b"]).encode("cp932")
 
 
 class _Args:

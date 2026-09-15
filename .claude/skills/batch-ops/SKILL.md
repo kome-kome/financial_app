@@ -61,7 +61,7 @@ python -m scripts.macro_beta_gate_history --threshold 1.01  # strict 基準で�
 # 平日日中バッチ（重い計算をキューから1日1件）。#618・平日 JST 08:00・窓8h
 # **人が PC を触らない時間帯で回すこと自体が再現性の条件**（並走すると NUTS の発散が 0→344 に増えた実測）
 ./run_daytime.ps1 -Queue                 # キューの中身
-./run_daytime.ps1 -Enqueue beta          # 積む（beta / tune:macro_gbdt / tune:macro_dlm / gate:interactions / interim / disclosures）
+./run_daytime.ps1 -Enqueue beta          # 積む（beta / tune:macro_gbdt / tune:macro_dlm / gate:interactions / gate:max-features / oof:split-bias / interim / disclosures）
 ./run_daytime.ps1 -DryRun                # 実行計画だけ（キューは減らさない）
 ./run_daytime.ps1 -Now                   # 枠を待たず次の1件（休暇等）。**タスク経由＝セッション0で走る**
 ./run_daytime.ps1 -Now -Force            # 並走に敏感な仕事（beta / tune:* / gate:*）も叩く。**叩いたら PC を触らない**

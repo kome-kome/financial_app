@@ -323,6 +323,71 @@ def bonferroni_alpha(n_models: int, n_conds: int) -> float:
 ALPHA = 0.05 / N_TESTS
 
 
+# 既定の出力先の接尾辞。同じファイルへ上書きすると、あとから JSON を見たときに
+# 「どの軸を測った結果か」が中身を読むまで分からない。窓モードは既定と同じファイルを使う
+# （#592 以来の挙動で、ここで変えると過去の結果の置き場所が変わる）。
+MODE_SUFFIX: dict[str, str] = {"default": "", "windows": "", "macro": "_macro",
+                               "interactions": "_interactions", "max_features": "_maxfeat"}
+
+
+def mode_of(windows: list[int] | None = None, macro: bool = False,
+            interactions: bool = False, max_features: list[int] | None = None) -> str:
+    """測定モードの名前を返す（`build_conditions` と同じ引数から1箇所で導出する）。
+
+    **#615 で足した2モードは、ここを持たないまま別モードの名前で出力されていた**——
+    2026-09-15 の `--interactions` 本測定は JSON の `mode` が `"default"`、判定行が
+    `REJECT (keep default use_momentum=False)` だった。測ったのは交互作用なのに、
+    モメンタムの昇格ゲートの結果に見える。併用の検査は `build_conditions` が持つので、
+    ここでは優先順を決めるだけでよい。
+    """
+    if macro:
+        return "macro"
+    if interactions:
+        return "interactions"
+    if max_features:
+        return "max_features"
+    return "windows" if windows else "default"
+
+
+# 多条件・軸モードの判定文（見出し, 何も基準を上回らなかったときの文）。
+# **どれも「既定をこう変えよ」とは言わない**——ここで出すのは母集団を揃えても差が残るかだけで、
+# 既定を動かすかは実測を見てから決める。窓モードは「どの窓を既定にするか」を決める場ではなく
+# （それを共通域抜きでやっていたのが #592 の指摘そのもの）、マクロ軸は「マクロを外せ」と言う場
+# ではない（M-1 はマクロ×リスク-リターンで、外したらモデルの前提が消える・#604）。
+_AXIS_VERDICTS: dict[str, tuple[str, str]] = {
+    "macro": ("MACRO AXIS",
+              "use_macro did not beat the no-macro baseline"),
+    "interactions": ("INTERACTIONS AXIS",
+                     "build_interactions did not beat the no-interaction baseline"),
+    "max_features": ("MAX_FEATURES SCAN",
+                     "no limit beat the baseline limit"),
+    "windows": ("WINDOW SCAN",
+                "no window beat the no-momentum baseline"),
+}
+
+
+def verdict_text(mode: str, n_conds: int, passed: list[str], regressed: list[str]) -> str:
+    """判定行の文言を組み立てる（出力の読み違いをテストで縛るために純関数にしてある）。
+
+    窓モードは**窓が2本以上のときだけ** WINDOW SCAN になる（`--windows 12` は2条件で、
+    既定ゲートと同じ PROMOTE/REJECT の文言になる）。これは切り出す前からの挙動で変えない。
+    """
+    if mode in ("macro", "interactions", "max_features") or (mode == "windows" and n_conds > 2):
+        head, none = _AXIS_VERDICTS[mode]
+        verdict = (f"{head}: effects that survive the common-domain restriction: "
+                   + ", ".join(passed)) if passed else (
+                   f"{head}: {none} on the common (ym,ec) domain at the corrected alpha")
+        if regressed:
+            verdict += " | significantly WORSE: " + ", ".join(regressed)
+        return verdict
+    if passed:
+        return "PROMOTE (default use_momentum=True): " + ", ".join(passed)
+    if regressed:
+        return ("REJECT (keep default use_momentum=False): no improvement passed "
+                "corrected alpha; significantly WORSE on " + ", ".join(regressed))
+    return "REJECT (keep default use_momentum=False): no metric passed corrected alpha"
+
+
 def _num(v, nd: int = 4) -> str:
     """None 安全な数値整形（欠測は '-'）。cp932 で落ちる記号は使わない。"""
     if v is None:
@@ -563,13 +628,11 @@ def main() -> None:
         print(f"[warn] 検定数が {n_tests} です（既定のゲートは {N_TESTS}）。"
               f"alpha は {alpha:.5f} へ導出し直しました。ADR-0045 の昇格判定と"
               f"直接は比較できません。", flush=True)
-    # 既定の出力先はモードで分ける。同じファイルへ上書きすると、あとから JSON を見たときに
-    # 「どの軸を測った結果か」が中身を読むまで分からない（`mode` フィールドはあるが、
-    # ファイル名で取り違えたまま比較するほうが起きやすい）。
-    suffix = ("_macro" if args.macro else
-              "_interactions" if args.interactions else
-              "_maxfeat" if args.max_features else "")
-    default_out = f"momentum_gate{suffix}.json"
+    # 既定の出力先はモードで分ける（`MODE_SUFFIX`）。`mode` フィールドはあるが、
+    # ファイル名で取り違えたまま比較するほうが起きやすい。
+    mode = mode_of(windows, macro=args.macro, interactions=args.interactions,
+                   max_features=max_features)
+    default_out = f"momentum_gate{MODE_SUFFIX[mode]}.json"
     out_path = Path(args.json_path) if args.json_path else _OUT_DIR / default_out
 
     db = SessionLocal()
@@ -758,46 +821,24 @@ def main() -> None:
                   f"{_num(o.get('long_short_spread')):>10} {r['n_folds']:>6} "
                   f"{st['samples']:>9}", flush=True)
 
-    if args.macro:
-        # **ここは「マクロを外せ」と言う場ではない。** M-1 はマクロ×リスク-リターンで、
-        # マクロを外したらモデルの前提そのものが消える（モメンタム2軸のように
-        # 探索空間から落とす選択肢が無い）。出すのは**母集団を揃えても差が残るか**だけで、
-        # 残らなかった場合に何をするかは実測を見てから決める（#604）。
-        verdict = (("MACRO AXIS: effects that survive the common-domain restriction: "
-                    + ", ".join(passed)) if passed else
-                   "MACRO AXIS: use_macro did not beat the no-macro baseline on the "
-                   "common (ym,ec) domain at the corrected alpha")
-        if regressed:
-            verdict += " | significantly WORSE: " + ", ".join(regressed)
-    elif len(conds) > 2:
-        # 窓モードは「どの窓を既定にするか」を決める場ではない（それを共通域抜きでやって
-        # いるのが #592 の指摘そのもの）。ここで出すのは**母集団を揃えても差が残るか**だけ。
-        verdict = (("WINDOW SCAN: effects that survive the common-domain restriction: "
-                    + ", ".join(passed)) if passed else
-                   "WINDOW SCAN: no window beat the no-momentum baseline on the common "
-                   "(ym,ec) domain at the corrected alpha")
-        if regressed:
-            verdict += " | significantly WORSE: " + ", ".join(regressed)
-    elif passed:
-        verdict = "PROMOTE (default use_momentum=True): " + ", ".join(passed)
-    elif regressed:
-        verdict = ("REJECT (keep default use_momentum=False): no improvement passed "
-                   "corrected alpha; significantly WORSE on " + ", ".join(regressed))
-    else:
-        verdict = "REJECT (keep default use_momentum=False): no metric passed corrected alpha"
+    verdict = verdict_text(mode, len(conds), passed, regressed)
     print(f"\n=== verdict === {verdict}", flush=True)
     print("判定は common スコープで読む（同一 fold・同一 (ym,ec) 域）。raw は水準のみ。",
           flush=True)
 
     payload = {
         "momentum_window": MOM_WINDOW,
+        # 全軸を出す。#615 の2軸が無いと、列数モードの5条件が同じ中身に見える。
         "conditions": {name: {"use_momentum": c.use_momentum,
                               "window": c.momentum_window,
-                              "use_macro": c.use_macro}
+                              "use_macro": c.use_macro,
+                              "build_interactions": c.build_interactions,
+                              "max_features": c.max_features}
                        for name, c in conds.items()},
-        "mode": "macro" if args.macro else ("windows" if windows else "default"),
+        "mode": mode,
         "base_cond": base,
         "windows": windows,
+        "max_features": max_features,
         "alpha": alpha,
         "n_tests": n_tests,
         "models": models,
