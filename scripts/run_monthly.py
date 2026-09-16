@@ -110,6 +110,11 @@ TUNE_MATRIX: tuple[tuple[str, str, tuple[str, ...]], ...] = (
 # 既定と突き合わせる（#530）。窓を動かすときは予算も動かすこと。
 WINDOW_MIN = 16 * 60
 
+# 起動日時（`install_monthly_task.ps1` の既定 `-Day 1` / `-Time 01:00`）。日中枠が
+# 「月次と時間が重なる日」を導くのに使う（#681）。`tests/test_run_daytime.py` が ps1 と照合する。
+TRIGGER_DAY = 1
+TRIGGER_TIME = "01:00"
+
 # ステップごとの時間予算（分・#530）。**Σ + マージン ≤ WINDOW_MIN**。
 #
 # なぜ要るか: 予算が無いと1ステップが窓を食い尽くし、後続は起動すらしない。しかも窓の

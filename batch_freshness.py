@@ -158,7 +158,7 @@ WATCHED: tuple[Watched, ...] = (
         # 平日 8:15 のトリガ（`install_daytime_task.ps1`）。**24 ではなく 72**——金曜に
         # 走ると次は月曜なので、土日を挟む間隔が正常な最長になる。24 にすると毎週土曜に
         # 「走っていない」と鳴り、鳴りっぱなしの警告は読まれなくなる。
-        cadence_h=72.0,
+        cadence_h=run_daytime.CADENCE_H,
         window_min=run_daytime.WINDOW_MIN,
         # 走らないと、重い計算を進める場所そのものが消える。キューが空の日も足跡は残るので、
         # ここが鳴るのは「タスクが起動しなかった」ときだけ（空振りとは区別できる）。
@@ -307,7 +307,7 @@ def collect(db, now: datetime, get=None) -> dict:
 
 @dataclass(frozen=True)
 class Produced:
-    """月次バッチが更新する成果物1つ。閾値は `Watched` と同じく `cadence + 窓` の導出。"""
+    """バッチが更新する成果物1つ（月次・夜間・日中の暦）。閾値は `Watched` と同じく `cadence + 窓` の導出。"""
     label: str
     issue_title: str
     cadence_h: float
@@ -361,6 +361,11 @@ def _jpx_industry_at(db):
     """
     from database import KEY_JPX_INDUSTRY_LAST_SUCCESS
     return _parse(_get_setting(db, KEY_JPX_INDUSTRY_LAST_SUCCESS))
+
+
+def _scheduled(job: str):
+    """日中バッチの暦の1行。読み手と読む場所は暦側が持つ（書き写さない・#681）。"""
+    return next(s for s in run_daytime.SCHEDULE if s.job == job)
 
 
 # cadence は `Watched` と同じ「同一日付の最長間隔」＝31日。窓は各バッチの `WINDOW_MIN` から
@@ -431,6 +436,31 @@ PRODUCERS: tuple[Produced, ...] = (
         task_name="financial_app-nightly",
         source="app_settings.jpx_industry_last_success",
         read=_jpx_industry_at,
+    ),
+    # ── 日中バッチの暦が積む収集（#681・ADR-0056）─────────────────────────────
+    # 積み忘れ・暦の故障・収集の失敗のどれでも「新しい行が入らない」として現れる。読み手は
+    # 暦が「今月ぶんは入ったか」の判定に使うものと同じ（`Scheduled.produced`）＝2つの判断が
+    # 別の列を見てずれることがない。閾値は `SCHEDULE_CADENCE_H`（月の最長31日＋週末＋
+    # 同日のもう1件）＋日中枠の窓。
+    Produced(
+        label="半期財務（H1）",
+        issue_title="[ops] 半期財務の収集が前進していない",
+        cadence_h=run_daytime.SCHEDULE_CADENCE_H,
+        window_min=run_daytime.WINDOW_MIN,
+        batch_label="日中バッチ（暦が毎月 interim を積む）",
+        task_name="financial_app-daytime",
+        source=_scheduled("interim").source,
+        read=_scheduled("interim").produced,
+    ),
+    Produced(
+        label="会社予想（決算短信サマリー）",
+        issue_title="[ops] 会社予想の収集が前進していない",
+        cadence_h=run_daytime.SCHEDULE_CADENCE_H,
+        window_min=run_daytime.WINDOW_MIN,
+        batch_label="日中バッチ（暦が毎月 disclosures を積む）",
+        task_name="financial_app-daytime",
+        source=_scheduled("disclosures").source,
+        read=_scheduled("disclosures").produced,
     ),
 )
 

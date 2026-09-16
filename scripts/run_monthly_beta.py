@@ -73,6 +73,11 @@ ISSUE_LABELS = bc.ISSUE_LABELS
 # `tests/test_run_monthly_beta.py` が ps1 側の既定と突き合わせる。
 WINDOW_MIN = 16 * 60
 
+# 起動日時（`install_monthly_beta_task.ps1` の既定 `-Day 2` / `-Time 01:00`）。日中枠が
+# 「月次と時間が重なる日」を導くのに使う（#681）。`tests/test_run_daytime.py` が ps1 と照合する。
+TRIGGER_DAY = 2
+TRIGGER_TIME = "01:00"
+
 # ステップごとの時間予算（分・#530・ADR-0040）。**Σ + マージン ≤ WINDOW_MIN**。
 #
 # 900分は窓から導出した値（960 − マージン30 − deps_smoke 5 ＝ 925 が上限）であって、

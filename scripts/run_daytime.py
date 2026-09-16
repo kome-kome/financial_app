@@ -44,6 +44,21 @@ PC を触っている時間帯に叩かれるのが前提で、それはこの�
 306〜369分・M-2 探索 176〜179分でいずれも収まるが、**M-1 探索は 752分で入らない**（ADR-0046 で専用タスクへ出したまま）。
 `JOBS` に無い名前と、予算が窓を超える仕事は `enqueue` の時点で弾く。
 
+## 暦（#681・ADR-0056）
+
+キューは「積み忘れても何も起きない」を解くために作ったが、**積むのが人である限り、同じ穴は
+キューの手前に残る**。H1（半期）と会社予想の収集は手で積んだときにしか走らず、次の提出の波を
+逃しても失敗として現れなかった。日付で決まる仕事は暦（`SCHEDULE`）が積む。
+
+- **毎月 `day` 日以降の最初の実走で、キューの先頭へ1回だけ積む。** 先頭なので待ちに上限があり、
+  watchdog の閾値（`batch_freshness.PRODUCERS`）を約束から導ける。末尾だと待ちに上限が無い
+- **今月ぶんが既に入っていれば積まない**（手で回した月に二重に回さない）。判定は成果物の
+  `created_at` で行い、watchdog と同じ読み手（`Scheduled.produced`）を使う
+- **月次系のバッチと時間が重なる日は、並走に敏感な仕事を取り出さない。** 月次（1日）・
+  マクロ・ベータ（2日）・M-1 探索（3日）は 01:00 起動・16時間の窓で、8:00 からの日中枠と
+  重なる。並走は所要ではなく結論を変える（#618）。重なる日は `run_monthly*.TRIGGER_*` と
+  `WINDOW_MIN` から導く（書き写さない）。その日は敏感でない仕事（収集）だけを探して回す
+
 実行:
     python -m scripts.run_daytime                       # キュー先頭を1件
     python -m scripts.run_daytime --dry-run             # 実行計画だけ
@@ -61,10 +76,12 @@ import json
 import subprocess
 import sys
 from dataclasses import dataclass, replace
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Optional, Sequence
+from typing import Callable, Optional, Sequence
 
 from scripts import batch_common as bc
+from scripts import run_monthly, run_monthly_beta, run_monthly_m1
 from scripts.batch_common import LOG_DIR, ROOT, Runner, Step  # noqa: F401 （既存 import 互換）
 
 KEY_LAST_RUN = "daytime_last_run"
@@ -90,6 +107,17 @@ ISSUE_LABELS = bc.ISSUE_LABELS
 # 長引いた日に夜間とメモリを取り合う——それは 2026-09-07 に macro_beta の発散を
 # 0 → 344 回へ増やした条件そのものなので、広げない。
 WINDOW_MIN = 8 * 60
+
+# 起動時刻（`install_daytime_task.ps1` の既定 `-Time 08:00`）。月次と重なる日の導出に使う
+# （#681）。`tests/test_run_daytime.py` が ps1 側の既定と突き合わせる。
+TRIGGER_TIME = "08:00"
+
+# 平日トリガの正常な最長間隔（金 -> 月の 72時間）。`batch_freshness.WATCHED` と暦の
+# producer（`SCHEDULE_CADENCE_H`）が共有する。
+CADENCE_H = 72.0
+
+# 暦と「今日」は JST で数える（トリガが JST の 8:00 なので）。tzdata に依存しない固定オフセット。
+JST = timezone(timedelta(hours=9))
 
 # 窓からマージンと deps_smoke を引いた、1件あたりの上限（ADR-0040）。
 # **実測から逆算した値ではない**——パネルは毎晩伸びるので所要は据え置かず伸びる。
@@ -209,7 +237,7 @@ JOBS: dict[str, Job] = {
     # #647 で、新様式の半期報告書は DEI の当期種別を `HY` と名乗るのに `Q2` だけを H1 と
     # みなし、3905件を捨てていた。修正後の 2026-09-16 の実走は saved=3967・failed=0 で、
     # H1 の `year=2026` は 298 → 3875行、`max(period_end)` は 2026-07-31 まで進んだ。
-    # **この仕事はキューに積んだときだけ走る**（定期実行ではない。定常化は #681）。
+    # **積むのは暦（`SCHEDULE`・毎月16日以降）で、手では積まない**（#681）。
     #
     # ZIP 失敗 16件は #630 で決着した。**CSV 形式を持たない書類**（`csvFlag='0'`＝外国会社等の
     # HTML のみ提出）で、EDINET は `type=5` に HTTP 200 + JSON を返すため `BadZipFile` に化けていた。
@@ -239,6 +267,8 @@ JOBS: dict[str, Job] = {
         # 2026-09-08 実測 14.1分（43日・4052件）。上の見積りは最終 disc_date が
         # 4.7ヶ月前だった初回ぶんで、以後は毎回この程度に収まる。
         measured_min=14.1,
+        # 積むのは暦（`SCHEDULE`・毎月1日以降）。読む消費者はまだ無いが、無料プランは2年より
+        # 古い日を返さないので、止めた期間はあとから埋められない（#681）。
         parallel_sensitive=False,   # interim と同じ理由（J-Quants の応答待ちが所要の大半）
     ),
     "tune:macro_dlm": Job(
@@ -528,6 +558,249 @@ def carried_requeue(job: str, db=None) -> int:
     return n if isinstance(n, int) else 0
 
 
+# ── 暦（#681・ADR-0056）──────────────────────────────────────────────────────
+#
+# 日付で決まる仕事を積む側と、月次系バッチと重なる日に重い計算を出さない側の2つ。
+# どちらも「今日」を引数に取る純関数を芯にして、実走・ドライラン・`--peek`・`--queue` が
+# 同じ判断を共有する（見せる計画と実際に走る1件がずれない）。
+
+KEY_SCHEDULE = "daytime_schedule"   # {job: "YYYY-MM"}＝その月の暦を処理済みか
+
+# 月をまたいだ間隔の上限（31日）に足す余裕。**先頭へ積んでも当日に走るとは限らない**:
+#   - 平日トリガなので、day 日が土曜なら月曜まで待つ（CADENCE_H）
+#   - 暦の仕事が同じ日に2つ期限を迎えると、2つめは翌営業日（+24時間）
+# `batch_freshness.PRODUCERS` の閾値はこれに窓を足して導く（実測から逆算しない・ADR-0042）。
+SCHEDULE_CADENCE_H = 31 * 24.0 + CADENCE_H + 24.0
+
+MONTHLY_BATCHES = (run_monthly, run_monthly_beta, run_monthly_m1)
+
+
+def _utc(value: Optional[datetime]) -> Optional[datetime]:
+    """DB の naive datetime を UTC とみなす（接続の TimeZone は UTC 固定・ADR-0043）。"""
+    if value is None:
+        return None
+    return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+
+
+def _cp932(text: str) -> str:
+    """ログ行を cp932 で書ける文字だけにする（`Runner.write` は print を先に呼ぶ）。"""
+    return text.encode("cp932", "replace").decode("cp932")
+
+
+def h1_created_at(db) -> Optional[datetime]:
+    """半期（H1）の行が最後に**新しく**入った時刻。
+
+    `updated_at` は使わない——株価の補完など既存行の更新でも進むので、収集が前進した証拠に
+    ならない（JPX 業種マスタで `companies.industry` を見ないのと同じ理由・#632）。
+    `'H1'` は `collector_interim.INTERIM_PERIOD_TYPE` と同じ値。あちらは import 時に `.env` を
+    読むのでここからは import せず、一致はテストが照合する。
+    """
+    from sqlalchemy import func, select
+    from database import FinancialRecord
+    return _utc(db.execute(
+        select(func.max(FinancialRecord.created_at))
+        .where(FinancialRecord.period_type == "H1")).scalar())
+
+
+def disclosure_created_at(db) -> Optional[datetime]:
+    """会社予想（`statement_disclosure`）の行が最後に新しく入った時刻。
+
+    upsert は `created_at` を上書きしない（`upsert_statement_disclosures`）ので、同じ日を
+    取り直しても進まない。
+    """
+    from sqlalchemy import func, select
+    from database import StatementDisclosure
+    return _utc(db.execute(select(func.max(StatementDisclosure.created_at))).scalar())
+
+
+@dataclass(frozen=True)
+class Scheduled:
+    """日付で決まる仕事1つ。**毎月 `day` 日以降の最初の実走で、キュー先頭へ1回だけ積む。**"""
+    job: str                                            # JOBS のキー
+    day: int                                            # 1〜28（2月にも必ず来る日）
+    produced: Callable[[object], Optional[datetime]]    # 今月ぶんが入ったか（watchdog と共有）
+    source: str                                         # produced が読む場所（起票の本文へ出す）
+    why: str
+
+
+SCHEDULE: tuple[Scheduled, ...] = (
+    Scheduled(
+        job="disclosures",
+        day=1,
+        produced=disclosure_created_at,
+        source="max(statement_disclosure.created_at)",
+        why="J-Quants 無料プランは84日遅れで届き、提出日の集中が無いので月1回で取りこぼさない。"
+            "1日を選んだのは月次本体と時間が重なる日だから（その日は重い計算を取り出さないので、"
+            "枠を収集で使えば日中枠がまるごと空かない）",
+    ),
+    Scheduled(
+        job="interim",
+        day=16,
+        produced=h1_created_at,
+        source="max(financial_records.created_at) WHERE period_type='H1'",
+        why="半期報告書の提出期限は期末+45日で、月末が期末なら各月14〜15日に集中する"
+            "（3月期の H1 は 11/14）。その直後に取り込む",
+    ),
+)
+
+
+def read_schedule_marks(db=None) -> dict[str, str]:
+    """暦の処理済み印。**壊れた値は空として扱う**（`read_queue` と同じ方針）。
+
+    空に倒すと今月ぶんをもう一度判定するだけで、成果物が入っていれば積まない。
+    """
+    from database import get_setting
+
+    own = db is None
+    db = db or _session()
+    try:
+        raw = get_setting(db, KEY_SCHEDULE)
+    finally:
+        if own:
+            db.close()
+    try:
+        marks = json.loads(raw) if raw else {}
+    except (ValueError, TypeError):
+        return {}
+    if not isinstance(marks, dict):
+        return {}
+    return {str(k): v for k, v in marks.items() if isinstance(v, str)}
+
+
+def write_schedule_marks(marks: dict[str, str], db=None) -> None:
+    from database import upsert_setting
+
+    own = db is None
+    db = db or _session()
+    try:
+        upsert_setting(db, KEY_SCHEDULE, json.dumps(marks, ensure_ascii=False, sort_keys=True))
+    finally:
+        if own:
+            db.close()
+
+
+def plan_schedule(queue: Sequence[str], marks: dict[str, str], today: date,
+                  produced_at: Callable[[Scheduled], Optional[datetime]],
+                  ) -> tuple[list[str], dict[str, str], list[str]]:
+    """暦を当てたあとの (キュー, 印, ログ行)。**書き込まない**。
+
+    `produced_at` が例外を出したら「測れない」とみなし、**積む側へ倒す**——収集は冪等なので
+    余計に1回走るだけだが、積まない側へ倒すと次に気づくのは watchdog の閾値（1か月超）になる。
+    """
+    month = today.strftime("%Y-%m")
+    marks = dict(marks)
+    due: list[str] = []
+    notes: list[str] = []
+    for s in SCHEDULE:
+        if today.day < s.day or marks.get(s.job) == month:
+            continue
+        marks[s.job] = month
+        anchor = datetime(today.year, today.month, s.day, tzinfo=JST)
+        try:
+            last = produced_at(s)
+        except Exception as e:      # noqa: BLE001 — 測れないことで暦ごと止めない
+            last = None
+            notes.append(_cp932(f"[schedule] {s.job}: 今月ぶんが入ったか測れない"
+                                f"（{str(e)[:120]}）。積む側へ倒す"))
+        if last is not None and last >= anchor:
+            notes.append(f"[schedule] {s.job}: 今月ぶんは {last.astimezone(JST):%Y-%m-%d %H:%M} JST"
+                         f" に入っている。積まない")
+            continue
+        due.append(s.job)
+        prev = "無し" if last is None else f"{last.astimezone(JST):%Y-%m-%d} JST"
+        notes.append(f"[schedule] {s.job}: 毎月{s.day}日以降の定期投入。キュー先頭へ積む（前回 {prev}）")
+    items = due + [x for x in queue if x not in due] if due else list(queue)
+    return items, marks, notes
+
+
+def apply_schedule(today: date, db=None, write: bool = True) -> tuple[list[str], list[str]]:
+    """暦を当てる。戻り値は (当てたあとのキュー, ログ行)。`write=False` は読むだけ。"""
+    own = db is None
+    db = db or _session()
+
+    def produced_at(s: Scheduled) -> Optional[datetime]:
+        try:
+            return s.produced(db)
+        except Exception:
+            # 失敗した文の後始末をしないと、この後のキュー書き込みまで巻き込まれる。
+            rollback = getattr(db, "rollback", None)
+            if rollback is not None:
+                rollback()
+            raise
+
+    try:
+        items, marks, notes = plan_schedule(read_queue(db), read_schedule_marks(db),
+                                            today, produced_at)
+        if write and notes:
+            write_queue(items, db)
+            write_schedule_marks(marks, db)
+    finally:
+        if own:
+            db.close()
+    return items, notes
+
+
+def _minutes(hhmm: str) -> int:
+    hour, minute = hhmm.split(":")
+    return int(hour) * 60 + int(minute)
+
+
+def monthly_overlap_days() -> frozenset[int]:
+    """日中枠と時間が重なりうる月次系バッチの起動日（月の何日か）。
+
+    **約束（起動時刻＋窓）から導き、実測の所要では判定しない。** マクロ・ベータは実測 380分で
+    8:00 前に終わる月が多いが、窓は16時間あり、延びた月には重なる。
+    """
+    start = _minutes(TRIGGER_TIME)
+    end = start + WINDOW_MIN
+    days: set[int] = set()
+    for mod in MONTHLY_BATCHES:
+        s = _minutes(mod.TRIGGER_TIME)
+        e = s + mod.WINDOW_MIN
+        if s < end and start < e:
+            days.add(mod.TRIGGER_DAY)
+        if e > 24 * 60 and start < e - 24 * 60:     # 窓が日をまたぐ
+            days.add(mod.TRIGGER_DAY + 1)
+    return frozenset(days)
+
+
+def select_job(queue: Sequence[str], today: date) -> tuple[Optional[str], Optional[str]]:
+    """今日取り出す1件と、先頭以外を選んだ／何も選ばなかった理由（ログ行）。
+
+    月次と重なる日は、**並走に敏感でない仕事を先頭から探す**（残りの順番は崩さない）。
+    未知の名前は判断材料が無いので敏感側に倒す（`--peek` と同じ方針）。
+    """
+    if not queue:
+        return None, None
+    if today.day not in monthly_overlap_days():
+        return queue[0], None
+    for key in queue:
+        job = JOBS.get(key)
+        if job is not None and not job.parallel_sensitive:
+            if key == queue[0]:
+                return key, None
+            return key, (f"[calendar] {today.day}日は月次系のバッチと時間が重なるので、"
+                         f"並走に敏感な仕事を飛ばして {key} を取り出す")
+    return None, (f"[calendar] {today.day}日は月次系のバッチと時間が重なるので、"
+                  f"並走に敏感な仕事は取り出さない（キューの {len(queue)}件は重ならない日に回す）")
+
+
+def take(key: str, db=None) -> None:
+    """`key` の最初の1件をキューから取り除く（月次と重なる日は先頭とは限らない）。
+
+    `pop_queue` と同じく**取り除いてから走らせる**——失敗しても戻さない。
+    """
+    items = read_queue(db)
+    if key in items:
+        items.remove(key)
+    write_queue(items, db)
+
+
+def _today() -> date:
+    """JST の今日。テストが差し替える継ぎ目。"""
+    return datetime.now(JST).date()
+
+
 # ── ステップ組み立て ─────────────────────────────────────────────────────────
 
 def steps_for(python: str, job_key: Optional[str]) -> tuple[Step, ...]:
@@ -607,21 +880,38 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             elif state == _STATE_QUEUED:
                 print(f"  [inflight] {mark.get('job')!r} は中断から戻した仕事"
                       f"（{mark.get('requeued', 0)}/{MAX_REQUEUE} 回目）")
+        # **暦と月次の重なりもここに出す**（#681）。次の実走で何が積まれ、何が見送られるかを
+        # セッション開始時に読めるようにする。読むだけで書かない。
+        today = _today()
+        print("  [schedule] 暦: " + " / ".join(f"{s.job}=毎月{s.day}日以降" for s in SCHEDULE))
+        planned, notes = apply_schedule(today, write=False)
+        for line in notes:
+            print("  " + line)
+        _, why = select_job(planned, today)
+        if why:
+            print("  " + why)
+        elif today.day in monthly_overlap_days():
+            print(f"  [calendar] 今日（{today.day}日）は月次系のバッチと時間が重なる日。"
+                  "並走に敏感な仕事は取り出さない")
         return 0
     if "--peek" in args:
         # `run_daytime.ps1 -Now` が「次の1件を今すぐ叩いてよいか」を判断するための機械可読口。
-        # **キューは減らさない**（判断だけして走らせないことがある）。
-        items = read_queue()
-        head = items[0] if items else None
-        job = JOBS.get(head) if head is not None else None
+        # **キューは減らさない**（判断だけして走らせないことがある）。暦と月次の重なりは
+        # 実走と同じ関数で当てる＝見せた1件と実際に走る1件がずれない（#681）。
+        today = _today()
+        items, _ = apply_schedule(today, write=False)
+        key, _ = select_job(items, today)
+        job = JOBS.get(key) if key is not None else None
         print(json.dumps({
-            "key": head,
+            "key": key,
             "name": job.name if job else None,
             "known": job is not None,
             # **未知の仕事は敏感側に倒す。** 判断材料が無いときに黙って走らせない。
-            "sensitive": job.parallel_sensitive if job else (head is not None),
+            "sensitive": job.parallel_sensitive if job else (key is not None),
             "measured_min": job.measured_min if job else None,
             "remaining": len(items),
+            # キューに仕事があるのに今日は何も取り出さない（月次系のバッチと重なる日）。
+            "blocked": key is None and bool(items),
         }))
         return 0
     if "--clear-queue" in args:
@@ -640,23 +930,38 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             return 0
 
     dry = "--dry-run" in args
+    today = _today()
 
     # **キューを読む前に回収する**（#639）。戻した仕事がそのまま今日の1件になる。
     # ドライランは「何も実行していない」を守るので読み書きしない。
     notes = [] if dry else reclaim_inflight()
+    # 暦は回収の後に当てる（#681）。期限を迎えた収集は回収した仕事よりも前に並ぶ——
+    # 収集は短く、先頭で待たせないことが watchdog の閾値の前提になっている。
+    items, sched_notes = apply_schedule(today, write=not dry)
+    job_key, why = select_job(items, today)
+    notes += sched_notes + ([why] if why else [])
     if notes:
-        # ログは追記モードなので、この後の run_batch の出力の前に並ぶ。
-        with bc.Runner(log_path()) as runner:
+        if dry:
             for line in notes:
-                runner.write(line)
+                print(line)
+        else:
+            # ログは追記モードなので、この後の run_batch の出力の前に並ぶ。
+            with bc.Runner(log_path()) as runner:
+                for line in notes:
+                    runner.write(line)
 
-    job_key = read_queue()[0] if dry else pop_queue()
     if job_key is None:
         # **空を失敗にしない**（平日毎日走るので、積んでいない日に毎回起票すると煩い）。
-        # 空だったことは watchdog のレポートと足跡に出る。
-        print("日中枠のキューが空。今日は何もしない（積むには --enqueue <名前>）")
-        record_footprint({})
+        # 空だったこと・見送ったことは watchdog のレポートと足跡に出る。
+        if items:
+            print("今日は取り出せる仕事が無い（月次系のバッチと時間が重なる日）。キューはそのまま")
+        else:
+            print("日中枠のキューが空。今日は何もしない（積むには --enqueue <名前>）")
+        if not dry:
+            record_footprint({})
         return 0
+    if not dry:
+        take(job_key)
 
     hooks = bc.Hooks(log_path=log_path, record_footprint=record_footprint, notify=notify)
     if dry:

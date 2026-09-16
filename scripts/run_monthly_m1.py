@@ -81,6 +81,11 @@ STRATEGY = "grid"
 # 意味を持たない**ので `tests/test_run_monthly_m1.py` が ps1 側の既定と突き合わせる。
 WINDOW_MIN = 16 * 60
 
+# 起動日時（`install_monthly_m1_task.ps1` の既定 `-Day 3` / `-Time 01:00`）。日中枠が
+# 「月次と時間が重なる日」を導くのに使う（#681）。`tests/test_run_daytime.py` が ps1 と照合する。
+TRIGGER_DAY = 3
+TRIGGER_TIME = "01:00"
+
 # ステップごとの時間予算（分・#530・ADR-0040）。**Σ + マージン ≤ WINDOW_MIN**。
 #
 # `tune:macro_risk_return` の 900分は **実測 752分（2.61分/件 × 288件）＋ 約20%の余裕**。

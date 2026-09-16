@@ -704,6 +704,57 @@ class TestProducerIssuesAreNotDuplicated:
         assert "直接クエリ" in body, "ログの表示で判定させない誘導が本文に無い"
 
 
+class TestScheduledCollectionIsWatched:
+    """日中バッチの暦が積む収集は、成果物の前進で見る（#681・ADR-0056）。
+
+    積み忘れ・暦の故障・収集の失敗のどれでも「新しい行が入らない」として現れる。
+    """
+
+    def test_every_scheduled_job_has_a_producer(self):
+        """暦に足したら PRODUCERS にも1行。忘れると、止まっても誰も気づかない。"""
+        reads = {p.read for p in bf.PRODUCERS}
+        for s in run_daytime.SCHEDULE:
+            assert s.produced in reads, f"暦の {s.job} を PRODUCERS が見ていない"
+
+    def test_threshold_is_derived_from_the_schedule(self):
+        """暦の判定と watchdog が同じ読み手・同じ場所を見る（2つの判断が別の列でずれない）。"""
+        for s in run_daytime.SCHEDULE:
+            p = next(p for p in bf.PRODUCERS if p.read is s.produced)
+            assert p.cadence_h == run_daytime.SCHEDULE_CADENCE_H
+            assert p.window_min == run_daytime.WINDOW_MIN
+            assert p.source == s.source
+            assert p.task_name == "financial_app-daytime"
+
+    def test_the_daytime_cadence_is_shared(self):
+        w = next(w for w in bf.WATCHED if w.key_run == run_daytime.KEY_LAST_RUN)
+        assert w.cadence_h == run_daytime.CADENCE_H
+
+    def test_a_late_month_does_not_fire(self):
+        """前月は当日に走り、今月は16日が土曜で月曜・さらに同日のもう1件で火曜に回った形。
+
+        2026-12-16（水）の次は 2027-01-16（土）-> 19日（火）。窓の終わりに行が入っても鳴らない。
+        """
+        p = next(p for p in bf.PRODUCERS if p.read is run_daytime.h1_created_at)
+        prev = datetime(2026, 12, 16, 8, 0)
+        late = datetime(2027, 1, 19, 8, 0) + timedelta(minutes=run_daytime.WINDOW_MIN)
+        assert (late - prev).total_seconds() / 3600.0 <= p.stale_h
+
+    def test_a_skipped_month_fires(self):
+        """1か月まるごと積まれなければ鳴る（閾値が緩すぎて2か月を見逃さない）。"""
+        p = next(p for p in bf.PRODUCERS if p.read is run_daytime.h1_created_at)
+        assert p.stale_h < 2 * 28 * 24
+
+    def test_a_stale_scheduled_producer_fires(self, settings):
+        label = next(p.label for p in bf.PRODUCERS if p.read is run_daytime.h1_created_at)
+        snap = _snap(settings)
+        snap["producers"] = _producers({**FRESH_PRODUCERS, label: 40.0})
+        found = cbf.problems(snap)
+        assert [f["title"] for f in found] == ["[ops] 半期財務の収集が前進していない"]
+        body = cbf.issue_body(found[0], snap)
+        assert "financial_app-daytime" in body
+        assert "period_type='H1'" in body
+
+
 class TestJpxIndustryProducer:
     """JPX 業種マスタは夜間バッチが更新する producer（#632）。
 

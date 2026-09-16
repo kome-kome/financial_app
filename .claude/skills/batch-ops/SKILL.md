@@ -60,7 +60,9 @@ python -m scripts.macro_beta_gate_history --threshold 1.01  # strict 基準で�
 
 # 平日日中バッチ（重い計算をキューから1日1件）。#618・平日 JST 08:00・窓8h
 # **人が PC を触らない時間帯で回すこと自体が再現性の条件**（並走すると NUTS の発散が 0→344 に増えた実測）
-./run_daytime.ps1 -Queue                 # キューの中身
+# **暦（#681・ADR-0056）**: disclosures は毎月1日以降・interim は毎月16日以降に自動でキュー先頭へ積まれる＝手で積まない。
+# 月次系の起動日（1〜3日）は並走に敏感な仕事を取り出さない（-Now -Force でも同じ）。どちらも -Queue に出る
+./run_daytime.ps1 -Queue                 # キューの中身＋暦の予定＋今日の見送り
 ./run_daytime.ps1 -Enqueue beta          # 積む（beta / tune:macro_gbdt / tune:macro_dlm / gate:interactions / gate:max-features / oof:split-bias / interim / disclosures）
 ./run_daytime.ps1 -DryRun                # 実行計画だけ（キューは減らさない）
 ./run_daytime.ps1 -Now                   # 枠を待たず次の1件（休暇等）。**タスク経由＝セッション0で走る**
