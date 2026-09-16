@@ -224,8 +224,10 @@ async def get_stats(db: Session = Depends(api.get_db)):
         .scalar()
     ) or 0
 
+    # 最新年度は通期で測る（#680）。H1 だけの新しい年度を拾うと「年度遅れ」警告を覆い隠す。
     latest_fr = (
         db.query(FinancialRecord.year, FinancialRecord.period_end, FinancialRecord.updated_at)
+        .filter(FinancialRecord.period_type == "annual")
         .order_by(FinancialRecord.year.desc(), FinancialRecord.period_end.desc())
         .first()
     )
@@ -313,9 +315,12 @@ async def list_companies(
              for c in rows]
     if include_latest and rows:
         codes = [c.edinet_code for c in rows]
+        # annual で絞る（#680・latest_year_subq と同じ理由）。絞らないと H1 だけの新しい
+        # 年度が選ばれ、annual 限定の financial_metrics と JOIN できず latest が消える。
         subq = (
             db.query(FinancialRecord.edinet_code, func.max(FinancialRecord.year).label("max_year"))
             .filter(FinancialRecord.edinet_code.in_(codes))
+            .filter(FinancialRecord.period_type == "annual")
             .group_by(FinancialRecord.edinet_code)
             .subquery()
         )
