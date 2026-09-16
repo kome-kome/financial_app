@@ -6,7 +6,7 @@
 XLA が使うコア数は実行時の混み具合で変わる。つまり**「重い計算の裏で作業をしない」という
 運用条件が結果の再現性に直結している**。人が PC を触らない平日日中を専用の枠にした。
 
-守るのは8点:
+守るのは10点:
 
 1. **キューは先頭を取り除いてから返す**（失敗しても戻さない＝同じ計算を繰り返さない）
 2. **窓に入らない仕事は積ませない**（走ってから打ち切られると何も残らない）
@@ -16,11 +16,15 @@ XLA が使うコア数は実行時の混み具合で変わる。つまり**「�
 6. **並走で結果が変わる仕事に印が付いている**（`-Now` の手動キックはここで分岐する）
 7. **手動キックはタスク経由で走る**（直に走らせると端末を閉じた瞬間に死ぬ・#515 と同型）
 8. **仕事は手で作ったキャッシュに依存しない**（待っている間に退避されると即死する・#674）
+9. **日付で決まる仕事は暦が積む**（積むのが人だと、積み忘れが失敗として現れない・#681）
+10. **月次系のバッチと時間が重なる日は、並走に敏感な仕事を取り出さない**（#681）
 """
 import json
 import os
 import re
 import sys
+from dataclasses import replace
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -35,6 +39,17 @@ from scripts import run_monthly_beta as rmb  # noqa: E402
 from scripts import run_monthly_m1 as rm1  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
+
+# 暦と月次の重なりは「今日」で結果が変わる。**テストの結果を実行日に依存させない**ため、
+# 既定では暦を空にし、月次と重ならず暦の期限も来ない日へ固定する。暦のテストは本物を戻す。
+REAL_SCHEDULE = rd.SCHEDULE
+QUIET_DAY = date(2026, 9, 10)      # 木曜・10日（月次系は 1〜3日、暦は 1日と16日）
+
+
+@pytest.fixture(autouse=True)
+def _quiet_calendar(monkeypatch):
+    monkeypatch.setattr(rd, "_today", lambda: QUIET_DAY)
+    monkeypatch.setattr(rd, "SCHEDULE", ())
 
 
 class _FakeDB:
@@ -418,6 +433,16 @@ class TestManualKick:
         assert re.search(r"\$peek\.sensitive\s+-and\s+-not\s+\$Force", text), (
             "敏感な仕事を -Force 無しで素通しする形になっている")
 
+    def test_now_stops_on_a_blocked_day_before_starting(self, text):
+        """月次と重なる日は、キューに仕事があっても起動しない（-Force でも同じ・#681）。
+
+        `key` が空なので、見ないと「キューが空です」と誤った理由を出してしまう。
+        """
+        blocked = text.find("$peek.blocked")
+        assert blocked != -1, "-Now が --peek の blocked を見ていない"
+        assert blocked < text.find("-not $peek.key"), "空の判定より後ろで見ている"
+        assert blocked < text.find("Start-ScheduledTask -TaskName"), "起動の後ろで見ている"
+
     def test_task_name_default_matches_the_installer(self, text):
         """既定がずれると -Now が『登録されていないタスク』を叩き続ける。"""
         here = re.search(r'\[string\]\$TaskName\s*=\s*"([^"]+)"', text)
@@ -645,3 +670,457 @@ class TestInflightLifecycleInMain:
 
         assert rd.read_queue(db=db) == []
         assert rd.read_inflight(db=db) is None
+
+
+# ── 暦（#681・ADR-0056）──────────────────────────────────────────────────────
+# H1（半期）と会社予想の収集は、人が積んだときにしか走らなかった。積み忘れは失敗として
+# 現れず、次の提出の波（3月期の H1・提出期限 11/14）を逃しても誰も気づけない。
+
+
+def _utc(*args):
+    return datetime(*args, tzinfo=timezone.utc)
+
+
+def _const(value):
+    """`Scheduled.produced` の代役。例外を渡すとそれを送出する。"""
+    def read(_db):
+        if isinstance(value, Exception):
+            raise value
+        return value
+    return read
+
+
+def _with_produced(**last):
+    """本物の暦の読み手だけを差し替えたもの（日・順序は本物のまま）。"""
+    return tuple(replace(s, produced=_const(last.get(s.job))) for s in REAL_SCHEDULE)
+
+
+@pytest.fixture
+def real_schedule(monkeypatch):
+    monkeypatch.setattr(rd, "SCHEDULE", REAL_SCHEDULE)
+    return REAL_SCHEDULE
+
+
+class TestScheduleDefinition:
+    def test_scheduled_jobs_are_offerable(self):
+        for s in REAL_SCHEDULE:
+            assert s.job in rd.JOBS, f"暦の {s.job} が JOBS に無い"
+            assert rd.JOBS[s.job].measured_min <= rd.JOB_BUDGET_MIN, s.job
+
+    def test_scheduled_jobs_are_not_parallel_sensitive(self):
+        """暦は先頭へ割り込ませる。重い計算を割り込ませると、並走の条件を暦が作る。
+
+        会社予想を月次と重なる1日に置いた根拠（その日でも走れる）もこれに依存する。
+        """
+        for s in REAL_SCHEDULE:
+            assert rd.JOBS[s.job].parallel_sensitive is False, s.job
+
+    def test_days_exist_in_every_month(self):
+        for s in REAL_SCHEDULE:
+            assert 1 <= s.day <= 28, s.job
+
+    def test_jobs_are_unique(self):
+        jobs = [s.job for s in REAL_SCHEDULE]
+        assert len(jobs) == len(set(jobs))
+
+    def test_interim_comes_after_the_filing_deadlines(self):
+        """半期報告書の期限は期末+45日。月末期末の12通りのうち11通りが16日より前に来る。
+
+        残る1通り（1月末期末 -> 3/17）は翌月の実走で取る。
+        """
+        s = next(s for s in REAL_SCHEDULE if s.job == "interim")
+        month_ends = [date(2026, m + 1, 1) - timedelta(days=1) for m in range(1, 12)]
+        month_ends.append(date(2026, 12, 31))
+        before = [e for e in month_ends if (e + timedelta(days=45)).day < s.day]
+        assert len(before) == 11
+
+
+class TestProducedReaders:
+    """暦の「今月ぶんは入ったか」と watchdog の「前進したか」が共有する読み手。"""
+
+    def test_h1_reads_only_h1_rows(self, db, make_fin):
+        import collector_interim
+
+        db.add(make_fin(edinet_code="E00001", year=2026, period_end="2026-03-31",
+                        created_at=datetime(2026, 9, 20)))
+        db.add(make_fin(edinet_code="E00001", year=2026, period_end="2025-09-30",
+                        period_type=collector_interim.INTERIM_PERIOD_TYPE,
+                        created_at=datetime(2026, 9, 16, 0, 4)))
+        db.commit()
+        assert rd.h1_created_at(db) == _utc(2026, 9, 16, 0, 4)
+
+    def test_h1_ignores_updates_to_existing_rows(self, db, make_fin):
+        """株価の補完などで `updated_at` が進んでも、収集が前進したことにはならない。"""
+        db.add(make_fin(edinet_code="E00001", year=2026, period_end="2025-09-30",
+                        period_type="H1", created_at=datetime(2026, 8, 1),
+                        updated_at=datetime(2026, 9, 20)))
+        db.commit()
+        assert rd.h1_created_at(db) == _utc(2026, 8, 1)
+
+    def test_empty_tables_read_as_none(self, db):
+        assert rd.h1_created_at(db) is None
+        assert rd.disclosure_created_at(db) is None
+
+    def test_disclosure_created_at_survives_a_re_fetch(self, db):
+        """同じ日を取り直しても進まない（upsert が `created_at` を上書きしない）。"""
+        from database import upsert_statement_disclosures
+
+        row = {"disc_no": "1", "edinet_code": "E00001", "disc_date": "2026-06-16"}
+        upsert_statement_disclosures(db, [row])
+        db.commit()
+        first = rd.disclosure_created_at(db)
+        upsert_statement_disclosures(db, [{**row, "sales": 1.0}])
+        db.commit()
+        assert first is not None
+        assert rd.disclosure_created_at(db) == first
+
+
+class TestPlanSchedule:
+    @staticmethod
+    def _plan(today, queue=(), marks=None, **last):
+        calls = []
+
+        def produced_at(s):
+            calls.append(s.job)
+            return _const(last.get(s.job))(None)
+
+        items, new_marks, notes = rd.plan_schedule(list(queue), marks or {}, today, produced_at)
+        return items, new_marks, notes, calls
+
+    def test_not_due_before_the_day(self, real_schedule):
+        items, marks, notes, _ = self._plan(date(2026, 10, 15), ["beta"], {"disclosures": "2026-10"})
+        assert items == ["beta"]
+        assert "interim" not in marks
+        assert notes == []
+
+    def test_due_on_the_day_goes_to_the_head(self, real_schedule):
+        """先頭へ積む。末尾だと待ちに上限が無く、watchdog の閾値を約束から導けない。"""
+        items, marks, _, _ = self._plan(date(2026, 10, 16), ["beta", "gate:max-features"],
+                                        {"disclosures": "2026-10"}, interim=_utc(2026, 9, 16))
+        assert items == ["interim", "beta", "gate:max-features"]
+        assert marks["interim"] == "2026-10"
+
+    def test_handled_once_a_month(self, real_schedule):
+        marks = {"disclosures": "2026-10", "interim": "2026-10"}
+        items, _, notes, calls = self._plan(date(2026, 10, 19), ["beta"], marks)
+        assert items == ["beta"] and notes == [] and calls == []
+
+    def test_a_late_start_still_catches_up(self, real_schedule):
+        """「16日ちょうど」ではなく「16日以降の最初の実走」。土日や休暇を挟んでも取りこぼさない。"""
+        items, *_ = self._plan(date(2026, 11, 30), [], {"disclosures": "2026-11"},
+                               interim=_utc(2026, 10, 16))
+        assert items == ["interim"]
+
+    def test_already_produced_this_month_is_not_queued(self, real_schedule):
+        """手で回した月に二重に回さない（2026-09-16 の手動実走の直後にデプロイする形）。"""
+        items, marks, notes, _ = self._plan(date(2026, 9, 17), ["oof:split-bias"], {},
+                                            disclosures=_utc(2026, 9, 7, 23, 14),
+                                            interim=_utc(2026, 9, 16, 0, 4))
+        assert items == ["oof:split-bias"]
+        assert marks == {"disclosures": "2026-09", "interim": "2026-09"}
+        assert len(notes) == 2 and all("積まない" in n for n in notes)
+
+    def test_the_anchor_is_midnight_jst(self, real_schedule):
+        """16日 00:30 JST（＝15日 15:30 UTC）に入った行は今月ぶん。UTC の日付で比べると取り違える。"""
+        marks = {"disclosures": "2026-10"}
+        items, *_ = self._plan(date(2026, 10, 16), [], marks, interim=_utc(2026, 10, 15, 15, 30))
+        assert items == []
+        items, *_ = self._plan(date(2026, 10, 16), [], marks, interim=_utc(2026, 10, 15, 14, 30))
+        assert items == ["interim"]
+
+    def test_already_queued_is_moved_not_duplicated(self, real_schedule):
+        items, *_ = self._plan(date(2026, 10, 16), ["beta", "interim"], {"disclosures": "2026-10"},
+                               interim=_utc(2026, 9, 16))
+        assert items == ["interim", "beta"]
+
+    def test_two_due_jobs_keep_the_schedule_order(self, real_schedule):
+        items, *_ = self._plan(date(2026, 10, 16), ["beta"], {})
+        assert items == [s.job for s in REAL_SCHEDULE] + ["beta"]
+
+    def test_never_produced_is_queued(self, real_schedule):
+        items, *_ = self._plan(date(2026, 10, 1), [], {})
+        assert items == ["disclosures"]
+
+    def test_unmeasurable_falls_to_the_enqueue_side(self, real_schedule):
+        """積まない側へ倒すと、次に気づくのは1か月以上先の watchdog になる。収集は冪等。"""
+        items, marks, notes, _ = self._plan(date(2026, 10, 16), [], {"disclosures": "2026-10"},
+                                            interim=RuntimeError("接続できない"))
+        assert items == ["interim"]
+        assert marks["interim"] == "2026-10"
+        assert any("測れない" in n for n in notes)
+
+    def test_notes_survive_cp932(self, real_schedule):
+        """暦の行は `Runner.write` を通る＝print が先に走る。1文字で暦ごと落とさない。"""
+        _, _, notes, _ = self._plan(date(2026, 10, 16), [], {},
+                                    disclosures=RuntimeError("壊れた — 値"),
+                                    interim=_utc(2026, 10, 16))
+        assert notes
+        for n in notes:
+            n.encode("cp932")
+
+
+class TestApplySchedule:
+    @pytest.fixture
+    def db(self, fake_db, monkeypatch, real_schedule):
+        monkeypatch.setattr(rd, "_session", lambda: fake_db)
+        return fake_db
+
+    def test_writes_queue_and_marks(self, db, monkeypatch):
+        monkeypatch.setattr(rd, "SCHEDULE", _with_produced())
+        rd.write_queue(["beta"], db=db)
+
+        items, notes = rd.apply_schedule(date(2026, 10, 16), db=db)
+
+        assert rd.read_queue(db=db) == items == ["disclosures", "interim", "beta"]
+        assert rd.read_schedule_marks(db=db) == {"disclosures": "2026-10", "interim": "2026-10"}
+        assert len(notes) == 2
+
+    def test_read_only_writes_nothing(self, db, monkeypatch):
+        """`--peek` / `--queue` / ドライランは見せるだけ。書くと見ただけで今月ぶんが消費される。"""
+        monkeypatch.setattr(rd, "SCHEDULE", _with_produced())
+        rd.write_queue(["beta"], db=db)
+
+        items, _ = rd.apply_schedule(date(2026, 10, 16), db=db, write=False)
+
+        assert items[:2] == ["disclosures", "interim"]
+        assert rd.read_queue(db=db) == ["beta"]
+        assert rd.KEY_SCHEDULE not in db.store
+
+    def test_a_failed_read_is_rolled_back_before_writing(self, db, monkeypatch):
+        """後始末しないと、続くキュー書き込みが失敗した文に巻き込まれる（PostgreSQL）。"""
+        rolled = []
+        db.rollback = lambda: rolled.append(True)
+        monkeypatch.setattr(rd, "SCHEDULE", _with_produced(
+            disclosures=RuntimeError("boom"), interim=RuntimeError("boom")))
+
+        rd.apply_schedule(date(2026, 10, 16), db=db)
+
+        assert len(rolled) == 2
+        assert rd.read_queue(db=db) == ["disclosures", "interim"]
+
+    def test_corrupt_marks_read_as_empty(self, db):
+        """例外にすると、値が1つ壊れただけで日中バッチが起動不能になる。"""
+        db.store[rd.KEY_SCHEDULE] = "{壊れている"
+        assert rd.read_schedule_marks(db=db) == {}
+        db.store[rd.KEY_SCHEDULE] = json.dumps(["not", "a", "dict"])
+        assert rd.read_schedule_marks(db=db) == {}
+
+
+class TestMonthlyOverlap:
+    """月次系のバッチ（01:00 起動・16時間の窓）と日中枠（8:00〜）は時間が重なる。
+
+    並走は所要ではなく結論を変える（#618・macro_beta の発散 0 -> 344）。
+    """
+
+    @pytest.mark.parametrize("mod,ps1", [
+        (rm, "install_monthly_task.ps1"),
+        (rmb, "install_monthly_beta_task.ps1"),
+        (rm1, "install_monthly_m1_task.ps1"),
+    ])
+    def test_trigger_matches_the_installer(self, mod, ps1):
+        """書き写した起動日がずれると、重なる日を見送らず重ならない日を見送る。"""
+        text = (ROOT / "scripts" / ps1).read_text(encoding="utf-8-sig")
+        day = re.search(r"\[int\]\$Day\s*=\s*(\d+)", text)
+        time = re.search(r'\[string\]\$Time\s*=\s*"([^"]+)"', text)
+        assert day and time, f"{ps1} から既定の -Day / -Time を読めない（書式が変わった）"
+        assert mod.TRIGGER_DAY == int(day.group(1))
+        assert mod.TRIGGER_TIME == time.group(1)
+
+    def test_daytime_trigger_matches_the_installer(self):
+        text = (ROOT / "scripts" / "install_daytime_task.ps1").read_text(encoding="utf-8-sig")
+        m = re.search(r'\[string\]\$Time\s*=\s*"([^"]+)"', text)
+        assert m, "install_daytime_task.ps1 から既定の -Time を読めない（書式が変わった）"
+        assert m.group(1) == rd.TRIGGER_TIME
+
+    def test_every_monthly_batch_is_considered(self):
+        """月次系のバッチを足したらここへ。忘れると、その日に重い計算が並走する。"""
+        monthly = {w.key_run for w in batch_freshness.WATCHED if w.cadence_h >= 28 * 24}
+        assert {m.KEY_LAST_RUN for m in rd.MONTHLY_BATCHES} == monthly
+
+    def test_the_days_are_derived_from_the_promises(self):
+        assert rd.monthly_overlap_days() == frozenset({1, 2, 3})
+
+    def test_a_batch_that_ends_before_the_slot_does_not_block(self, monkeypatch):
+        monkeypatch.setattr(rmb, "WINDOW_MIN", 6 * 60)       # 01:00〜07:00
+        assert 2 not in rd.monthly_overlap_days()
+
+    def test_a_window_crossing_midnight_blocks_the_next_day(self, monkeypatch):
+        monkeypatch.setattr(rm1, "TRIGGER_TIME", "20:00")    # 翌日 12:00 まで
+        days = rd.monthly_overlap_days()
+        assert 4 in days and 3 not in days
+
+    def test_other_days_take_the_head(self):
+        assert rd.select_job(["beta", "interim"], QUIET_DAY) == ("beta", None)
+
+    @pytest.mark.parametrize("day", [1, 2, 3])
+    def test_monthly_days_skip_sensitive_jobs(self, day):
+        key, why = rd.select_job(["beta", "tune:macro_dlm", "interim", "disclosures"],
+                                 date(2026, 10, day))
+        assert key == "interim"
+        assert why and "interim" in why
+        why.encode("cp932")
+
+    def test_a_collection_head_needs_no_note(self):
+        assert rd.select_job(["interim", "beta"], date(2026, 10, 1)) == ("interim", None)
+
+    def test_nothing_runnable_is_none_with_a_reason(self):
+        key, why = rd.select_job(["beta"], date(2026, 10, 2))
+        assert key is None and why
+        why.encode("cp932")
+
+    def test_unknown_jobs_are_not_taken_on_monthly_days(self):
+        """判断材料が無い名前は敏感側に倒す（`--peek` と同じ方針）。"""
+        assert rd.select_job(["vanished", "interim"], date(2026, 10, 1))[0] == "interim"
+        assert rd.select_job(["vanished"], date(2026, 10, 1))[0] is None
+
+    def test_empty_queue(self):
+        assert rd.select_job([], date(2026, 10, 1)) == (None, None)
+
+
+class TestCalendarInMain:
+    """実走・ドライラン・`--peek`・`--queue` が同じ暦と同じ選び方を使う。"""
+
+    @pytest.fixture
+    def db(self, fake_db, monkeypatch, tmp_path):
+        monkeypatch.setattr(rd, "_session", lambda: fake_db)
+        monkeypatch.setattr(rd, "log_path", lambda *a, **k: tmp_path / "daytime.log")
+        self.log = tmp_path / "daytime.log"
+        self.footprints = []
+        monkeypatch.setattr(rd, "record_footprint", lambda results: self.footprints.append(results))
+        self.ran = []
+
+        def _run_batch(spec, steps, hooks, argv):
+            self.ran.append([s.name for s in steps])
+            return 0
+
+        monkeypatch.setattr(rd.bc, "run_batch", _run_batch)
+        return fake_db
+
+    @staticmethod
+    def _on(monkeypatch, day, **last):
+        monkeypatch.setattr(rd, "_today", lambda: day)
+        monkeypatch.setattr(rd, "SCHEDULE", _with_produced(**last))
+
+    @staticmethod
+    def _settled(day):
+        """暦が何もしない月（両方とも今月ぶんが入っている）。"""
+        return {"disclosures": _utc(day.year, day.month, 1, 0, 0),
+                "interim": _utc(day.year, day.month, 16, 0, 0)}
+
+    def test_a_monthly_day_leaves_sensitive_jobs_queued(self, db, monkeypatch):
+        day = date(2026, 10, 2)
+        self._on(monkeypatch, day, **self._settled(day))
+        rd.write_queue(["beta"], db=db)
+
+        assert rd.main([]) == 0
+
+        assert self.ran == []
+        assert rd.read_queue(db=db) == ["beta"], "見送った仕事がキューから消えた"
+        assert self.footprints == [{}], "見送った日にも足跡は残す（起動しなかった、と区別する）"
+        assert rd.read_inflight(db=db) is None
+        assert "[calendar]" in self.log.read_text(encoding="utf-8")
+
+    def test_a_monthly_day_runs_collection_from_the_middle(self, db, monkeypatch):
+        day = date(2026, 10, 2)
+        self._on(monkeypatch, day, **self._settled(day))
+        rd.write_queue(["beta", "interim"], db=db)
+
+        rd.main([])
+
+        assert self.ran == [["collect_interim"]]
+        assert rd.read_queue(db=db) == ["beta"]
+
+    def test_the_scheduled_job_is_todays_run(self, db, monkeypatch):
+        self._on(monkeypatch, date(2026, 10, 16),
+                 disclosures=_utc(2026, 10, 1, 0, 0), interim=_utc(2026, 9, 16, 0, 4))
+        rd.write_queue(["oof:split-bias"], db=db)
+
+        rd.main([])
+
+        assert self.ran == [["collect_interim"]]
+        assert rd.read_queue(db=db) == ["oof:split-bias"]
+        assert rd.read_schedule_marks(db=db) == {"disclosures": "2026-10", "interim": "2026-10"}
+        assert "[schedule] interim" in self.log.read_text(encoding="utf-8")
+
+    def test_the_scheduled_job_goes_ahead_of_a_reclaimed_job(self, db, monkeypatch):
+        self._on(monkeypatch, date(2026, 10, 16),
+                 disclosures=_utc(2026, 10, 1, 0, 0), interim=_utc(2026, 9, 16, 0, 4))
+        rd.write_queue(["gate:max-features"], db=db)
+        db.store[rd.KEY_INFLIGHT] = json.dumps(
+            {"job": "beta", "state": rd._STATE_RUNNING, "requeued": 0, "at": "x"})
+
+        rd.main([])
+
+        assert self.ran == [["collect_interim"]]
+        assert rd.read_queue(db=db) == ["beta", "gate:max-features"]
+
+    def test_the_first_run_after_deploy_does_not_rerun_september(self, db, monkeypatch):
+        """2026-09-16 に手で回した直後の形。暦は印だけ付け、キューの先頭がそのまま走る。"""
+        self._on(monkeypatch, date(2026, 9, 17),
+                 disclosures=_utc(2026, 9, 7, 23, 14), interim=_utc(2026, 9, 16, 0, 4))
+        rd.write_queue(["oof:split-bias", "gate:max-features"], db=db)
+
+        rd.main([])
+
+        assert self.ran == [["oof_split_bias"]]
+        assert rd.read_queue(db=db) == ["gate:max-features"]
+        assert rd.read_schedule_marks(db=db) == {"disclosures": "2026-09", "interim": "2026-09"}
+
+    def test_dry_run_writes_neither_queue_marks_nor_footprint(self, db, monkeypatch, capsys):
+        self._on(monkeypatch, date(2026, 10, 16))
+        rd.write_queue(["beta"], db=db)
+
+        rd.main(["--dry-run"])
+
+        assert self.ran == [["collect_disclosures"]], "ドライランが実走と違う1件を見せている"
+        assert rd.read_queue(db=db) == ["beta"]
+        assert rd.KEY_SCHEDULE not in db.store
+        assert self.footprints == []
+        assert "[schedule]" in capsys.readouterr().out
+
+    def test_dry_run_on_an_empty_queue_does_not_crash(self, db, monkeypatch):
+        day = date(2026, 10, 20)
+        self._on(monkeypatch, day, **self._settled(day))
+
+        assert rd.main(["--dry-run"]) == 0
+        assert self.footprints == [], "ドライランが足跡を書いた"
+
+    def _peek(self, capsys):
+        assert rd.main(["--peek"]) == 0
+        line = next(ln for ln in capsys.readouterr().out.splitlines()
+                    if ln.lstrip().startswith("{"))
+        return json.loads(line)
+
+    def test_peek_shows_the_scheduled_job(self, db, monkeypatch, capsys):
+        self._on(monkeypatch, date(2026, 10, 16),
+                 disclosures=_utc(2026, 10, 1, 0, 0), interim=_utc(2026, 9, 16, 0, 4))
+        rd.write_queue(["beta"], db=db)
+
+        got = self._peek(capsys)
+
+        assert got["key"] == "interim" and got["sensitive"] is False
+        assert got["remaining"] == 2 and got["blocked"] is False
+        assert rd.read_queue(db=db) == ["beta"], "peek がキューを書き換えた"
+        assert rd.KEY_SCHEDULE not in db.store, "peek が暦の印を書いた"
+
+    def test_peek_reports_a_blocked_day(self, db, monkeypatch, capsys):
+        day = date(2026, 10, 2)
+        self._on(monkeypatch, day, **self._settled(day))
+        rd.write_queue(["beta"], db=db)
+
+        got = self._peek(capsys)
+
+        assert got["key"] is None and got["blocked"] is True and got["remaining"] == 1
+
+    def test_queue_listing_shows_the_calendar(self, db, monkeypatch, capsys):
+        """セッション開始時に必ず見る画面。次の実走で何が積まれ、何が見送られるかを出す。"""
+        self._on(monkeypatch, date(2026, 10, 2))
+        rd.write_queue(["beta"], db=db)
+
+        assert rd.main(["--queue"]) == 0
+
+        out = capsys.readouterr().out
+        assert "[schedule]" in out and "[calendar]" in out
+        out.encode("cp932")
+        assert rd.read_queue(db=db) == ["beta"]
+        assert rd.KEY_SCHEDULE not in db.store

@@ -18,6 +18,11 @@
 
     ログは .logs ディレクトリに daytime_YYYYMMDD.log として残る。
 
+    日付で決まる仕事は暦が積む（#681・ADR-0056）。会社予想（disclosures）は毎月1日以降、
+    半期（interim）は毎月16日以降の最初の実走でキュー先頭へ1回だけ積まれるので、手で積まない。
+    月次系のバッチと時間が重なる日（1〜3日）は、並走に敏感な仕事を取り出さない。
+    暦の予定と今日の見送りは -Queue に出る。
+
 .PARAMETER DryRun
     実行計画だけ表示して何もしない（キューは減らさない）。
 
@@ -126,6 +131,15 @@ if ($Now) {
         exit 1
     }
     $peek = $peekLine | ConvertFrom-Json
+
+    if ($peek.blocked) {
+        # 月次系のバッチ（1〜3日・01:00 起動・16時間の窓）と重なる日は、並走に敏感な仕事を
+        # 取り出さない（#681）。**-Force でも同じ**——-Force は「人が PC を触らない」約束で、
+        # 月次バッチが同じ時間に走ることは変えられない。
+        Write-Host "今日は月次系のバッチと時間が重なる日なので、並走に敏感な仕事は取り出しません（残り $($peek.remaining)件）。" -ForegroundColor Yellow
+        Write-Host "  -Force を付けても同じです。重ならない日に改めて -Now を叩くか、平日8時の枠に任せてください。" -ForegroundColor Cyan
+        exit 0
+    }
 
     if (-not $peek.key) {
         Write-Host "日中枠のキューが空です。積むには ./run_daytime.ps1 -Enqueue <名前>" -ForegroundColor Yellow
