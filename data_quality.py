@@ -74,21 +74,26 @@ def _check_outliers(db: Session) -> list:
 def _check_year_summary(db: Session) -> dict:
     total = db.query(FinancialRecord.edinet_code).distinct().count()
 
+    # 年数と市場データは通期で数える（#680）。H1 行は同じ year を名乗るので年数を
+    # 水増しし、市場データを入れない（#421）ので H1 を持つ全社が「欠落」に化ける。
+    is_annual = FinancialRecord.period_type == "annual"
     single = (
         db.query(FinancialRecord.edinet_code)
+        .filter(is_annual)
         .group_by(FinancialRecord.edinet_code)
         .having(func.count(FinancialRecord.year) == 1)
         .count()
     )
     multi = (
         db.query(FinancialRecord.edinet_code)
+        .filter(is_annual)
         .group_by(FinancialRecord.edinet_code)
         .having(func.count(FinancialRecord.year) >= 3)
         .count()
     )
     no_market = (
         db.query(FinancialRecord.edinet_code)
-        .filter(FinancialRecord.market_cap.is_(None))
+        .filter(is_annual, FinancialRecord.market_cap.is_(None))
         .distinct()
         .count()
     )

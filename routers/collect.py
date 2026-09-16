@@ -185,6 +185,7 @@ async def edinet_coverage(db: Session = Depends(api.get_db)):
     year_stats = (
         db.query(FinancialRecord.year, func.count(func.distinct(FinancialRecord.edinet_code)))
         .filter(FinancialRecord.year >= 2019)
+        .filter(FinancialRecord.period_type == "annual")   # H1 だけの年度を出さない（#680）
         .group_by(FinancialRecord.year)
         .order_by(FinancialRecord.year.desc())
         .all()

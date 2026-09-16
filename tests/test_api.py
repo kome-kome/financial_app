@@ -231,6 +231,20 @@ class TestStatsEndpoint:
         body = client.get("/api/stats").json()
         assert body["records_with_prediction"] == 1
 
+    def test_latest_year_ignores_newer_h1(self, db, make_fin):
+        """H1 だけの新しい年度を最新年度と読まない（#680）。
+
+        12月期の H1（2026-06-30）は year=2026 を名乗るが、通期の最新は 2025。
+        H1 を拾うと「年度遅れ」警告を H1 が覆い隠す。"""
+        db.add(make_fin(edinet_code="E00001", year=2025, period_end="2025-12-31"))
+        db.add(make_fin(edinet_code="E00001", year=2026, period_end="2026-06-30",
+                        period_type="H1"))
+        db.commit()
+        api.app.dependency_overrides[api.get_db] = lambda: db
+        body = client.get("/api/stats").json()
+        assert body["latest_year"] == 2025
+        assert body["latest_period_end"] == "2025-12-31"
+
     def test_price_asof_is_p50_not_max(self, db, make_company):
         """株価 as-of は p50 で判定する（max だけ新しいケースで警告が消えない・Issue #416）。"""
         from datetime import timedelta
@@ -361,6 +375,37 @@ class TestCompaniesEndpoint:
         api.app.dependency_overrides[api.get_db] = lambda: db
         assert client.get("/api/companies", params={"limit": 1, "offset": 0}).status_code == 200
         assert client.get("/api/companies", params={"limit": 500, "offset": 0}).status_code == 200
+
+    def test_include_latest_survives_newer_h1(self, db, make_company, make_fin, make_metric):
+        """H1 だけの新しい年度があっても latest は通期の最新行を返す（#680）。
+
+        最新年度を期種で絞らないと max(year)=2026（H1）が選ばれ、annual 限定の
+        financial_metrics と year で JOIN できず latest が NULL になる。同業比較は
+        latest の無い社を黙って除外するので、エラーにならず表から消える。"""
+        db.add(make_company(edinet_code="E00001"))
+        db.add(make_fin(edinet_code="E00001", year=2025, period_end="2025-12-31"))
+        db.add(make_fin(edinet_code="E00001", year=2026, period_end="2026-06-30",
+                        period_type="H1"))
+        db.add(make_metric(edinet_code="E00001", year=2025, period_end="2025-12-31"))
+        db.commit()
+        api.app.dependency_overrides[api.get_db] = lambda: db
+        items = client.get("/api/companies", params={"include_latest": "true"}).json()["items"]
+        assert items[0]["latest"] is not None
+        assert items[0]["latest"]["year"] == 2025
+
+
+class TestEdinetCoverageEndpoint:
+    def test_year_coverage_counts_annual_only(self, db, make_company, make_fin):
+        """年度別カバレッジは通期の年度で数える（H1 だけの年度を出さない・#680）。"""
+        db.add(make_company(edinet_code="E00001"))
+        db.add(make_fin(edinet_code="E00001", year=2025, period_end="2025-12-31"))
+        db.add(make_fin(edinet_code="E00001", year=2026, period_end="2026-06-30",
+                        period_type="H1"))
+        db.commit()
+        api.app.dependency_overrides[api.get_db] = lambda: db
+        body = client.get("/api/collect/edinet-coverage").json()
+        assert body["year_coverage"] == [{"year": 2025, "count": 1}]
+        assert body["with_records"] == 1
 
 
 class TestFinancialsEndpoint:

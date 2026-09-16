@@ -131,6 +131,21 @@ class TestCheckYearSummary:
         db.commit()
         assert _check_year_summary(db)["no_market_data"] == 1
 
+    def test_h1_rows_are_not_counted_as_years_or_missing_market(self, db, make_fin):
+        """H1 行は年数にも市場データ欠落にも数えない（#680）。
+
+        H1 行には市場データを入れない（#421）ので、数えると H1 を持つ全社が
+        「市場データなし」に化け、年数も半期ぶん水増しされる。"""
+        db.add(make_fin(year=2025, period_end="2025-12-31"))
+        db.add(make_fin(year=2025, period_end="2025-06-30", period_type="H1", market_cap=None))
+        db.add(make_fin(year=2026, period_end="2026-06-30", period_type="H1", market_cap=None))
+        db.commit()
+        result = _check_year_summary(db)
+        assert result["total_companies"] == 1
+        assert result["single_year_only"] == 1
+        assert result["three_or_more_years"] == 0
+        assert result["no_market_data"] == 0
+
     def test_two_companies(self, db, make_fin):
         db.add(make_fin(edinet_code="E00001"))
         db.add(make_fin(edinet_code="E00002", year=2022, period_end="2022-03-31"))
