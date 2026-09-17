@@ -306,9 +306,20 @@ def persist(db, result: FactorPremiaResult) -> int:
     **推定に使った前処理の世代（`PREPROCESS_VERSION`）を必ず書く**（Issue #517）。これが無いと
     「係数の単位が変わったのに永続化行からは判別できない」状態になり、旧単位の重みが新単位の
     特徴量へ静かに掛かり続ける（#509 の是正から次の月次までの間に実際に起きた）。
+
+    **TTM の断面（`use_fin_rows("with_ttm")`）で推定した重みは書かない**（#424 子2・
+    ADR-0051 決定3）。永続化行は「どの行の基準で推定したか」を持たないので、書くと
+    本番の推薦が**TTM で推定した重み × 通期の断面**を読む——`PREPROCESS_VERSION` では
+    検出できない食い違いで、#509 と同型に静かに効く。
     """
     from database import upsert_recommend_factor_premia
+    from plugins.macro_snapshots import current_fin_rows
     from plugins.utils import PREPROCESS_VERSION
+
+    if current_fin_rows() != "annual":
+        raise RuntimeError(
+            "TTM の断面で推定した factor_premia は永続化しない"
+            f"（行の基準: {current_fin_rows()}）。測るだけなら persist を呼ばないこと")
 
     rows = [
         {
