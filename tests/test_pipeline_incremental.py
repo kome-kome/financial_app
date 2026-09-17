@@ -173,6 +173,47 @@ class TestEdinetFailureDoesNotBlockPricesOrMacro:
             asyncio.run(pinc.main())   # 例外が出ないこと自体が検証対象
 
 
+class TestTtmRebuildFailureIsContainedButReported:
+    """TTM の作り直し（#424 子2）が失敗しても、後続の自己検証は続けて最後に非0で抜ける。
+
+    TTM は既定では誰も読まない側の表（学習パネルが `use_fin_rows("with_ttm")` の内側でだけ
+    読む）なので、ここで抜けると株価鮮度と往復段差の検知——**本番の画面が依存する側**——まで
+    巻き添えで止まる。一方、黙って成功にすると前夜の TTM 行が「新しい半期を反映したもの」に
+    見え続ける（#504 と同型）。
+    """
+
+    def _mocks(self):
+        return {
+            "log": MagicMock(),
+            "init_db": MagicMock(),
+            "SessionLocal": MagicMock(return_value=MagicMock()),
+            "run_full_collection": AsyncMock(return_value=False),
+            "collect_macro_data": AsyncMock(return_value=0),
+            "collect_stock_price_history_jquants": AsyncMock(return_value={"upserted": 0}),
+            "fill_recent_stock_price_gap_yahoo": AsyncMock(
+                return_value={"skipped": False, "upserted": 0, "from": "a", "to": "b"}),
+            "update_market_data_from_history": MagicMock(return_value=0),
+            "rebuild_ttm_financial_records": MagicMock(
+                side_effect=RuntimeError("TTM 行が1件も作れなかった")),
+            "price_freshness": MagicMock(return_value={}),
+        }
+
+    def test_later_self_checks_still_run_and_exit_is_non_zero(self):
+        mocks = self._mocks()
+        with patch.multiple(pinc, **mocks):
+            with pytest.raises(SystemExit) as ei:
+                asyncio.run(pinc.main())
+        assert mocks["price_freshness"].call_count == 1      # 後続は巻き添えにしない
+        assert ei.value.code != 0
+
+    def test_success_exits_zero(self):
+        mocks = self._mocks()
+        mocks["rebuild_ttm_financial_records"] = MagicMock(return_value=17268)
+        with patch.multiple(pinc, **mocks):
+            asyncio.run(pinc.main())
+        assert mocks["rebuild_ttm_financial_records"].call_count == 1
+
+
 class TestFullPipelineKeepsFailFast:
     def test_gh_pipeline_does_not_swallow_edinet_error(self):
         """全件収集（`_pipeline_gh.py`）は握らない＝意図的な非対称（#580）。

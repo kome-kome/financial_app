@@ -184,7 +184,7 @@ def main() -> int:
     if legacy_present:
         steps.append(f'ALTER TABLE {LEGACY_TABLE} RENAME TO {LEGACY_RENAMED}   （日次 OHLCV を温存）')
         steps.append("DROP TABLE " + ", ".join(LEGACY_DROP_TABLES) + " CASCADE   （旧世代・退避済み）")
-    steps.append("init_db()   （全テーブル ＋ VIEW 2本を冪等生成）")
+    steps.append("init_db()   （全テーブル ＋ VIEW 3本を冪等生成）")
     for i, s in enumerate(steps, 1):
         print(f"  {i}. {s}")
 

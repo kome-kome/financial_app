@@ -2167,6 +2167,96 @@ def load_price_series(db, *, min_hole_days: int) -> dict:
     return {ec: (s, tuple(holes.get(ec, ()))) for ec, s in starts.items()}
 
 
+# ── 8.8 TTM 合成の行（最新業績を分析へ入れる・#424 子2・ADR-0051）─────────────
+# 「前期の通期 − 前期の半期 + 今期の半期」で作った直近12か月ぶんの行（CONTEXT.md「TTM 行」）。
+# 合成の規則と弾く判定は `ttm_composite.py` が唯一の源で、この表は**その出力を置くだけ**である。
+#
+# **毎晩全置換する**（分割補正係数と同じ理由）——行は材料（半期・通期）と F の両方に依存し、
+# 新しい半期が入れば増え、新しい分割が1件起きれば F が変わる。焼き付ければ必ず陳腐化する。
+#
+# **財務列は `FinancialRecord` の列定義から複製する。** 再分類項目を増やすときに触るのは
+# 1箇所（`FinancialRecord`）だけ、という設計制約（CLAUDE.md）をこちらへも通すため、ここに
+# 列を書き写さない。列が食い違ったときは `init_db()` が表ごと作り直す（派生データなので
+# 消しても翌晩に戻る）。
+TTM_INSERT_CHUNK = 1000
+
+# 複製しないメタ列。`period_type` は基準が `basis` 列（VIEW 側）で表されるので持たない
+# ——同じ社の同じ年度が 2 つの期種で並ぶ表ではない（一意キーが (edinet_code, year)）。
+_TTM_SKIP_COLUMNS = frozenset({
+    "id", "edinet_code", "sec_code", "company_name", "industry", "market", "year",
+    "period_end", "doc_id", "source", "accounting_standard", "period_type", "filing_date",
+    # 行そのものの記録（材料の値ではない）。TTM 側は `computed_at` を自分で持つ。
+    "created_at", "updated_at",
+})
+
+
+def ttm_financial_columns() -> tuple[str, ...]:
+    """TTM 表が持つ財務列（bs_/pl_/cf_ と val/nonfin）。唯一の源は `FinancialRecord` の列定義。"""
+    return tuple(c.name for c in FinancialRecord.__table__.columns
+                 if c.name not in _TTM_SKIP_COLUMNS)
+
+
+def _ttm_table_columns() -> dict:
+    """`type()` へ渡す列定義。財務列は型ごと複製し、`info`（XBRL 生タグ）は持たせない
+    ——持たせると `build_xbrl_map()` が 2 つの表から同じ生タグを拾って ValueError になる。"""
+    cols = {name: Column(FinancialRecord.__table__.columns[name].type)
+            for name in ttm_financial_columns()}
+    cols.update(
+        id=Column(Integer, primary_key=True, autoincrement=True),
+        edinet_code=Column(String(10), nullable=False),
+        sec_code=Column(String(6)),
+        company_name=Column(String(200)),
+        industry=Column(String(100)),
+        market=Column(String(50)),
+        year=Column(Integer, nullable=False),
+        # 期末日・提出日は**今期 H1 のもの**（決定6）。学習パネルは期末＋45日で行を使い始めるので、
+        # ここを通期の期末にすると TTM が半年遅れて効き始める。
+        period_end=Column(Date),
+        filing_date=Column(Date),
+        doc_id=Column(String(20)),
+        source=Column(String(50), default="TTM_COMPOSITE"),
+        # 合成に使った材料の期末日（どの行から作ったかを後から辿れるようにする）。
+        prev_annual_period_end=Column(Date),
+        prev_h1_period_end=Column(Date),
+        # 今期 H1 の提出日より後に起きたイベントの積（VIEW が per/pbr/market_cap へ掛ける）。
+        split_factor=Column(Float),
+        computed_at=Column(DateTime, default=lambda: datetime.now(timezone.utc)),
+        __tablename__="ttm_financial_records",
+        __table_args__=(
+            UniqueConstraint("edinet_code", "year", name="uq_ttm_edinet_year"),
+        ),
+    )
+    return cols
+
+
+TtmFinancialRecord = type("TtmFinancialRecord", (Base,), _ttm_table_columns())
+
+
+def replace_ttm_financial_records(db, rows) -> int:
+    """`ttm_financial_records` を全置換する。戻り値は書いた行数。commit は呼び出し側。
+
+    **upsert ではなく全置換なのは、行が消えることがあるから**——訂正報告で分割が見つかれば
+    その社・年度は「合成しない」へ変わる。upsert だけだと前夜の TTM 行が残り、**判定が
+    変わったのに古い合成値が生き続ける**（値としては妥当なのでエラーは出ない）。
+
+    未知のキーは `ValueError`（`upsert_financial` と同じ fail fast）。silent-drop にすると、
+    列を増やしたときに「書いたつもりで入っていない」が静かに起きる。
+    """
+    vals = list(rows)
+    cols = {c.name for c in TtmFinancialRecord.__table__.columns}
+    now = datetime.now(timezone.utc)
+    prepared = []
+    for v in vals:
+        unknown = set(v) - cols
+        if unknown:
+            raise ValueError(f"TTM 行に未知のキー: {sorted(unknown)}")
+        prepared.append(dict(v, source="TTM_COMPOSITE", computed_at=now))
+    db.query(TtmFinancialRecord).delete(synchronize_session=False)
+    for i in range(0, len(prepared), TTM_INSERT_CHUNK):
+        db.bulk_insert_mappings(TtmFinancialRecord, prepared[i:i + TTM_INSERT_CHUNK])
+    return len(prepared)
+
+
 # ── 9. 読み取りモデル: financial_metrics VIEW ──────────────────────────────
 # financial_records（ソース列）から軽い派生（比率・Zスコア・成長率）を「都度SQL算出」し、
 # regression_results を LEFT JOIN して予測値も合成する読み取り専用 VIEW。
@@ -2305,10 +2395,30 @@ class FinancialMetricInterim(ViewBase):
     rev_growth = Column(Float); op_growth = Column(Float); eps_growth = Column(Float)
 
 
+# financial_metrics_with_ttm VIEW（通期 ＋ TTM 行・#424 子2・ADR-0051）の読み取り専用 ORM。
+#
+# **列は `FinancialMetric` から複製する**（`basis` と `filing_date` だけ足す）。VIEW の SQL も
+# `financial_metrics_view.sql` と同じ式を使っているので、片方にだけ列を足すと静かに食い違う
+# ——`tests/test_financial_metrics_with_ttm.py` が両者を照合して落とす。
+FinancialMetricWithTTM = type("FinancialMetricWithTTM", (ViewBase,), dict(
+    {c.name: Column(c.type, primary_key=c.primary_key)
+     for c in FinancialMetric.__table__.columns},
+    __tablename__="financial_metrics_with_ttm",
+    __doc__=("financial_metrics_with_ttm VIEW（通期＋TTM 行）の読み取り専用 ORM。"
+             "学習パネルが `plugins/macro_snapshots.use_fin_rows(\"with_ttm\")` の内側でだけ読む。"),
+    # 行の基準（CONTEXT.md「行の基準」）: 'annual'（通期の決算）/ 'ttm'（直近12か月の合成）。
+    basis=Column(String(10)),
+    # TTM 行のもとになった H1 の提出日。通期の行では NULL（`financial_records` が持たない）。
+    filing_date=Column(Date),
+))
+
+
 # financial_metrics VIEW DDL（sql/financial_metrics_view.sql から読み込み）
 FINANCIAL_METRICS_VIEW_SQL = (Path(__file__).parent / "sql" / "financial_metrics_view.sql").read_text(encoding="utf-8")
 # financial_metrics_interim VIEW DDL（Issue #219② フェーズC）
 FINANCIAL_METRICS_INTERIM_VIEW_SQL = (Path(__file__).parent / "sql" / "financial_metrics_interim_view.sql").read_text(encoding="utf-8")
+# financial_metrics_with_ttm VIEW DDL（#424 子2・ADR-0051）
+FINANCIAL_METRICS_WITH_TTM_VIEW_SQL = (Path(__file__).parent / "sql" / "financial_metrics_with_ttm_view.sql").read_text(encoding="utf-8")
 
 
 # ── 10. DB初期化 ───────────────────────────────────────────────────────────
@@ -2345,9 +2455,44 @@ _DEBUG_ONLY_COLS = [
 ]
 
 
+def _drop_stale_derived_tables() -> None:
+    """列が ORM と食い違った**派生表**を、依存する VIEW ごと落とす（直後の create_all が作り直す）。
+
+    対象は `ttm_financial_records` だけである。ここだけ「作り直してよい」のは、中身が毎晩の
+    全置換で復元される派生データだからで、収集した生データの表には決して広げない。
+
+    **なぜ要るか**: 財務列は `FinancialRecord` から複製している（設計制約「再分類項目の追加は
+    1箇所」）。列が1つ増えると ORM の形だけが変わり、`create_all` は既存の表に列を足さないので
+    **その晩の挿入が落ちる**か、`financial_metrics_with_ttm` の作成が「列が無い」で失敗する。
+    指紋ゲート（ADR-0048）が拾うのは同じ理由——ORM の列は指紋に入っているので、列を足した
+    次の `init_db()` でここが走る。
+    """
+    from sqlalchemy import inspect as _sa_inspect
+    table = TtmFinancialRecord.__tablename__
+    try:
+        insp = _sa_inspect(engine)
+        if not insp.has_table(table):
+            return
+        actual = {c["name"] for c in insp.get_columns(table)}
+        expected = {c.name for c in TtmFinancialRecord.__table__.columns}
+        if actual == expected:
+            return
+        with engine.connect() as conn, db_timeouts(conn, lock=DDL_LOCK_TIMEOUT):
+            conn.execute(text("DROP VIEW IF EXISTS financial_metrics_with_ttm"))
+            conn.execute(text(f"DROP TABLE IF EXISTS {table}"))
+            conn.commit()
+        log.warning("%s の列が ORM と食い違うので作り直す（差分: %s）。中身は次の夜間で戻る",
+                    table, sorted(actual ^ expected))
+    except Exception as e:
+        # ここで落とすと空の DB からの立ち上げまで巻き込む。作り直せなければ、この後の
+        # create_all / VIEW 作成が本来の失敗を出す。
+        log.warning("%s の作り直し判定に失敗（続行）: %r", table, e)
+
+
 def _ensure_tables() -> None:
     """Phase 1: テーブル作成・インデックス・カラムマイグレーション（すべて冪等）"""
     import re as _re
+    _drop_stale_derived_tables()     # create_all より前（落とした表をここで作り直させる）
     Base.metadata.create_all(bind=engine)
     # `db_timeouts` を同じ with 文へ並べる＝**本体を再インデントせずに**ロック上限を掛ける
     # （`with A() as a, B(a):` は後段が前段の名前を参照できる）。ACCESS EXCLUSIVE を待ち続けて
@@ -2552,16 +2697,19 @@ def _managed_views() -> tuple[tuple[str, str], ...]:
     定義 SQL を差し替えても束縛済みの古い値が残り、指紋が変化しない。
     """
     return (("financial_metrics", FINANCIAL_METRICS_VIEW_SQL),
-            ("financial_metrics_interim", FINANCIAL_METRICS_INTERIM_VIEW_SQL))
+            ("financial_metrics_interim", FINANCIAL_METRICS_INTERIM_VIEW_SQL),
+            ("financial_metrics_with_ttm", FINANCIAL_METRICS_WITH_TTM_VIEW_SQL))
 
 
 def _ensure_view() -> None:
     """Phase 2: 読み取り専用 VIEW を作り直す。
 
-    financial_metrics（通期）と financial_metrics_interim（非通期=半期H1等・Issue #219② フェーズC）
-    の両方。両者は独立で依存関係が無いため順序は任意。regression_results と
-    split_adjustment_factors（#655・ADR-0055）は create_all 後なので financial_metrics の
-    LEFT JOIN は可能。呼ぶか否かは `init_db()` の指紋ゲートが決める。
+    financial_metrics（通期）・financial_metrics_interim（非通期=半期H1等・Issue #219② フェーズC）・
+    financial_metrics_with_ttm（通期＋TTM 行・#424 子2）の3本。**3本とも実テーブルだけを読み、
+    VIEW どうしの依存が無いため順序は任意**（依存を作ると `_ensure_one_view` の
+    `DROP VIEW`（CASCADE なし）が依存元で失敗し、起動そのものが止まる）。regression_results・
+    split_adjustment_factors（#655・ADR-0055）・ttm_financial_records は create_all 後なので
+    LEFT JOIN / UNION は可能。呼ぶか否かは `init_db()` の指紋ゲートが決める。
     """
     for name, sql in _managed_views():
         _ensure_one_view(name, sql)
@@ -2594,7 +2742,8 @@ def _schema_fingerprint() -> Optional[str]:
     `Base.metadata` 経由の列追加（CLAUDE.md「再分類項目の追加は `FinancialRecord` の列に
     足すだけ」）を拾えない。ここでは4つを混ぜる:
 
-      1. 移行関数のソース（`_ensure_tables` / `_ensure_one_view` / `_ensure_view`）
+      1. 移行関数のソース（`_ensure_tables` / `_ensure_one_view` / `_ensure_view` /
+         `_drop_stale_derived_tables`）
       2. 関数の外にある DDL 由来の定数（`_NEW_COLS` / `_LEGACY_COMPUTED_COLS` / `_DEBUG_ONLY_COLS`）
       3. VIEW 定義 SQL
       4. ORM の全 (テーブル, 列, 型)
@@ -2604,7 +2753,8 @@ def _schema_fingerprint() -> Optional[str]:
     """
     try:
         parts = [inspect.getsource(f)
-                 for f in (_ensure_tables, _ensure_one_view, _ensure_view)]
+                 for f in (_ensure_tables, _ensure_one_view, _ensure_view,
+                           _drop_stale_derived_tables)]
     except (OSError, TypeError) as e:
         # ソースが取れない環境（凍結・.pyc のみ等）。**例外にせず不一致へ倒す**＝
         # 移行が余計に走るだけで済ませ、「指紋が作れないので起動できない」にはしない。

@@ -49,7 +49,8 @@ Egress 枠が復旧する 2026-08-18 を待たずに、本番と同一のコー�
 
 ## テーブル順序と FK
 
-ミラー範囲は全21表から `xbrl_raw_documents`（BLOB・0行）を除いた20表
+ミラー範囲は全22表から `xbrl_raw_documents`（BLOB・0行）と `ttm_financial_records`
+（派生・毎晩全置換）を除いた20表
 （`split_adjustment_factors` を #655、`jquants_adj_factor_events` を #661、`jquants_adj_factor_coverage` を #668
 で追加）。FK は4本ともに `companies.edinet_code`
 向きなので、`Base.metadata.sorted_tables`（依存順）に従えば `companies` が依存側より先に来る。
@@ -85,7 +86,11 @@ from database import (
 # 移った後は daily はローカルにしか無い正本データになる（ADR-0038）。しかも
 # `_recompute_weeks_from_daily` の入力かつ gap-fill の基準なので、空のまま収集を始めると
 # 全社が183日窓を Yahoo から引き直すことになる。
-MIRROR_EXCLUDED = ("xbrl_raw_documents",)
+# `ttm_financial_records`（#424 子2・ADR-0051）も範囲外。**派生表で、毎晩の夜間バッチが
+# 材料（半期・通期）と分割イベントから全置換する**＝リモートから引くものが無い。むしろ引くと、
+# TTM を作らない側（Supabase の閲覧用断面）の空の表で**ローカルの TTM が全消えする**
+# （全置換モードなので消えたことに気づく手がかりも残らない）。
+MIRROR_EXCLUDED = ("xbrl_raw_documents", "ttm_financial_records")
 
 # ── 同期モード ────────────────────────────────────────────────────────────────
 MODE_FULL = "FULL"            # 全置換（DELETE -> INSERT）。総入替か行数極小の表
