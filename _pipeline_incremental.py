@@ -21,6 +21,7 @@ from collector import (
     load_judged_scale_bands, exclude_judged_bands, roundtrip_log_line,
 )
 from collector_prices import format_yahoo_http_stats
+from ttm_composite import rebuild_ttm_financial_records
 from collector_utils import EdinetAccessError
 from database import SessionLocal, init_db, price_freshness
 import _pipeline_utils
@@ -53,6 +54,7 @@ async def main():
     # したがって**握って続行し、最後に非ゼロで抜ける**——検知（#577）と非巻き添え（#425）を両立させる。
     log("[1/4] XBRL 差分収集 開始（過去1年・skip_existing=True）")
     xbrl_failure: Optional[str] = None
+    ttm_failure: Optional[str] = None
     db1 = SessionLocal()
     try:
         cancelled = await _run_with_retry(
@@ -201,6 +203,22 @@ async def main():
         n_factors = rebuild_split_adjustment_factors(db4)
         log(f"  split_adjustment_factors: {n_factors}行 全置換")
 
+        # TTM 行の作り直し（#424 子2・ADR-0051）。**係数表の直後**に置くのは、TTM 行の F が
+        # 同じ検出イベントから決まるためで、間に別の工程を挟むと「係数は今夜・TTM は前夜」の
+        # 組み合わせが作れてしまう。
+        #
+        # **ここだけは失敗を握って先へ進む**（係数表とは扱いを変える）。TTM は既定では誰も
+        # 読まない側の表（学習パネルが `use_fin_rows("with_ttm")` の内側でだけ読む）なので、
+        # ここで抜けると後ろの株価鮮度・往復段差の検知——**本番の画面が依存する側の自己検証**
+        # ——まで巻き添えで止まる。失敗は最後に非0の終了コードとして必ず現れる（#580）。
+        try:
+            n_ttm = rebuild_ttm_financial_records(db4)
+            log(f"  ttm_financial_records: {n_ttm}行 全置換")
+        except Exception as e:
+            db4.rollback()      # 後続の price_freshness が同じセッションを使う
+            ttm_failure = f"{type(e).__name__}: {e}"
+            log(f"  TTM 行の作り直し 失敗（継続します）: {ttm_failure}")
+
         # 正味の鮮度を run 間で比較できる形で残す（#474）。gap-fill の「投入行数」は
         # 取り直しを含むため鮮度の指標にならない。p50 は DB 側集約だけで出る（Egress 数行）。
         fr = price_freshness(db4)
@@ -243,6 +261,11 @@ async def main():
     # 進めない）`gh issue create` する＝**株価は取れているが XBRL は死んでいる**が読み取れる。
     if xbrl_failure:
         log(f"[FAIL] XBRL 差分収集が失敗している: {xbrl_failure}")
+        raise SystemExit(1)
+    if ttm_failure:
+        # TTM が古いまま残るのは「作れなかった」であって「作らなかった」ではない。静かに
+        # exit=0 にすると、前夜の TTM 行が**新しい半期を反映したもの**に見え続ける。
+        log(f"[FAIL] TTM 行の作り直しが失敗している: {ttm_failure}")
         raise SystemExit(1)
 
 if __name__ == "__main__":

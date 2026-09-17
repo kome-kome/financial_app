@@ -818,22 +818,73 @@ def load_weekly_prices_chunked(db, batch: int = _WEEKLY_LOAD_BATCH,
     )
 
 
+# ── 行の基準の切替（#424 子2・ADR-0051 決定3）────────────────────────────────
+# 学習パネルが読む VIEW を選ぶ。`annual` は通期の行だけ（`financial_metrics`）、`with_ttm` は
+# 通期＋TTM 行（`financial_metrics_with_ttm`）。**既定は `annual`** ＝この切替を入れても、
+# 画面・推薦・夜間スコアの結果は 1 つも変わらない。
+#
+# **プラグインの param にしない。** param は `params_schema()` がそのまま UI のフォームになり、
+# 誰でも本番の実行で TTM を選べてしまう。M-2 / M-6 は実行すると μ̂ を本番の表へ保存し
+# `sell_ranking` がそれを読むので、昇格ゲート（子3）を通る前の値が本番へ出る。
+FIN_ROW_SOURCES = ("annual", "with_ttm")
+_fin_rows: contextvars.ContextVar = contextvars.ContextVar("_fin_rows", default="annual")
+
+
+@contextmanager
+def use_fin_rows(source: str):
+    """このブロック内で学習パネルが読む行の基準を選ぶ（`annual` / `with_ttm`）。
+
+    **`with_ttm` の内側では producer スコアの永続化を止める**（`database.tuning_dry_run`）。
+    測るために TTM で回した結果が `macro_gbdt_scores` / `macro_enet_scores` を上書きすると、
+    本番の売りランキングが「測定用の断面で作られた μ̂」を読む——どの値ももっともらしいので
+    エラーは出ない（#509 と同型）。
+
+    **`shared_snapshot_cache()` の内側で基準を変えることは禁止する。** 断面キャッシュの上限は
+    1 で、M-1 の CV キャッシュ（`cv_by_selected_features`）は `id(samples_by_ym)` をキーに
+    している。解放されたオブジェクトの id は再利用されうるので、切替の前の結果が返りうる。
+    """
+    if source not in FIN_ROW_SOURCES:
+        raise ValueError(f"未知の行の基準: {source!r}（{FIN_ROW_SOURCES} のどれか）")
+    if _shared_cache.get() is not None and source != _fin_rows.get():
+        raise RuntimeError(
+            "shared_snapshot_cache() の内側で行の基準を変えられない"
+            "（キャッシュが前の基準のパネルを返しうる）。外側で use_fin_rows() を張ること")
+    from database import tuning_dry_run
+    token = _fin_rows.set(source)
+    try:
+        if source == "annual":
+            yield
+        else:
+            with tuning_dry_run():
+                yield
+    finally:
+        _fin_rows.reset(token)
+
+
+def current_fin_rows() -> str:
+    """いま学習パネルが読む行の基準。"""
+    return _fin_rows.get()
+
+
 def load_data(db, with_volume: bool = True) -> tuple:
     """Company / FinancialMetric / StockPriceWeekly を一括ロード。
 
-    shared_snapshot_cache() コンテキスト内では (id(db), with_volume) 単位で結果を
+    shared_snapshot_cache() コンテキスト内では (id(db), with_volume, 行の基準) 単位で結果を
     キャッシュし、2回目以降の呼び出しは DB へ再クエリしない（Issue #298）。探索中は
     同一 db セッションに対して結果は不変という前提。コンテキスト外では常にフル計算する。
 
     with_volume: 週次の `volume_sum` を引くか。`px_volz` を選んでいる呼び出しだけ True に
     する（Issue #446）。**キャッシュキーに含める**——False でロードした結果を True の要求へ
     再利用すると `px_volz` が壊れる（番兵に当たって ValueError）。
+
+    行の基準（`use_fin_rows`）も同じ理由でキーに含める——通期だけのパネルを「通期＋TTM」の
+    要求へ再利用すると、**測っているつもりのものが入れ替わる**（こちらは例外が出ない）。
     """
     cache = _shared_cache.get()
     if cache is None:
         return _load_data_impl(db, with_volume)
     return _cached_or_computed(
-        cache["load_data"], (id(db), with_volume),
+        cache["load_data"], (id(db), with_volume, current_fin_rows()),
         lambda: _load_data_impl(db, with_volume), "財務・株価",
     )
 
@@ -846,18 +897,27 @@ def _load_data_impl(db, with_volume: bool = True) -> tuple:
     DB をモックするテストは要求列に関わらず固定幅の行を返しうるため、位置展開にしておくと
     本物とモックのズレがテストで露見する（`load_weekly_prices_chunked` と同じ考え方）。
 
+    読む VIEW は `use_fin_rows()` が決める。**引数ではなく ContextVar から読む**のは、
+    呼び出し経路（M-1〜M-6・`macro_beta_inference`・`recommend_factor_premia`）のすべてに
+    引数を通す必要が無く、テストの偽の `load_data` も壊れないため。
+
     `companies` は全列でも実測 0.5MB と小さいので絞らない（#446 の実測表）。
     """
-    from database import Company, FinancialMetric
+    from database import Company, FinancialMetric, FinancialMetricWithTTM
+    model = FinancialMetric if current_fin_rows() == "annual" else FinancialMetricWithTTM
     # 週次株価は単一クエリだと本番 pooler で timeout/接続破損するため分割ロード（Issue #311）。
     prices_by_co = load_weekly_prices_chunked(db, with_volume=with_volume)
 
     progress.emit("財務指標をロード")
-    fin_cols = [getattr(FinancialMetric, f) for f in FIN_LOAD_FIELDS]
+    fin_cols = [getattr(model, f) for f in FIN_LOAD_FIELDS]
+    # **並びを一つに決める**。`_find_applicable_fin` は period_end 昇順の前提で「最後の行」を
+    # 選ぶ。通期＋TTM では同じ社の行が 2 つの基準から来るので、同じ period_end で並びが
+    # 揺れると run ごとに選ばれる行が変わりうる（id まで入れれば完全に決まる）。
+    order = [model.edinet_code, model.period_end]
+    if model is not FinancialMetric:
+        order.append(model.id)
     fin_by_co: dict[str, list] = defaultdict(list)
-    for row in (db.query(*fin_cols)
-                .order_by(FinancialMetric.edinet_code, FinancialMetric.period_end)
-                .all()):
+    for row in db.query(*fin_cols).order_by(*order).all():
         rec = _FinRow(*row)
         fin_by_co[rec.edinet_code].append(rec)
 
