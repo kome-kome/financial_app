@@ -58,6 +58,11 @@ PC を触っている時間帯に叩かれるのが前提で、それはこの�
   マクロ・ベータ（2日）・M-1 探索（3日）は 01:00 起動・16時間の窓で、8:00 からの日中枠と
   重なる。並走は所要ではなく結論を変える（#618）。重なる日は `run_monthly*.TRIGGER_*` と
   `WINDOW_MIN` から導く（書き写さない）。その日は敏感でない仕事（収集）だけを探して回す
+- **祝日と年末年始も、並走に敏感な仕事を取り出さない**（#684）。トリガは月〜金の固定で
+  祝日を知らず、「人が会社に居て PC を触らない」という前提がその日だけ崩れる。
+  祝日は表（`HOLIDAYS`）で持ち、表が今日の年を持たなければ見送らずにそう出す。
+  `-Now -Force`（叩いたら触らないという約束）だけが、当日限りの解除印で祝日の見送りを外せる。
+  月次の重なりは人の有無と関係が無いので外せない
 
 実行:
     python -m scripts.run_daytime                       # キュー先頭を1件
@@ -67,6 +72,7 @@ PC を触っている時間帯に叩かれるのが前提で、それはこの�
     python -m scripts.run_daytime --enqueue beta        # 末尾へ積む
     python -m scripts.run_daytime --enqueue beta,tune:macro_gbdt
     python -m scripts.run_daytime --clear-queue         # 空にする
+    python -m scripts.run_daytime --allow-holiday       # 今日だけ祝日の見送りを外す（-Now -Force が使う）
 
 出力は ASCII 記号のみ（Windows cp932 リダイレクト対策）。
 """
@@ -221,6 +227,21 @@ JOBS: dict[str, Job] = {
         # **未実測**。2条件の gate:interactions が 6.9分（CV は1条件あたり約45秒）なので、
         # 5条件でも20分前後と見て余裕を置いた。**実走で差し替える。**
         measured_min=30.0,
+        parallel_sensitive=True,   # gate:interactions と同じ理由（採否が CI の符号で決まる）
+    ),
+    # #604（2026-09-06）の `use_macro` の測定は**分割補正（#655・#656）より前のデータ**だった。
+    # 補正が消したリーク（ADR-0055 決定7）は per/pbr＝財務列を通って入っていたので、財務だけの
+    # `nomacro`（+0.2254）の優位は目減りしている可能性がある。`gate:max-features` と同じ
+    # データ世代で並べてから #615 の既定を決める（#684）。
+    "gate:macro": Job(
+        name="gate_macro",
+        argv=("{python}", "-m", "scripts.momentum_gate", "--macro",
+              "--stride", "1", "--allow-full-pull", "--refresh-cache"),
+        why="マクロ特徴量の有無（use_macro）を共通 (ym,ec) 域で測り直す（#615・#604 の再測定）。"
+            "9/6 の本測定は分割補正（#655/#656）より前のデータで、補正が消したリークは財務列を"
+            "通っていた。**列数上限の本測定と同じデータ世代で並べる**ために今のデータで測る。",
+        # **未実測**。2条件の `gate:interactions` が 6.9分だったので同じと置いた。実走で差し替える。
+        measured_min=7.0,
         parallel_sensitive=True,   # gate:interactions と同じ理由（採否が CI の符号で決まる）
     ),
 
@@ -765,25 +786,126 @@ def monthly_overlap_days() -> frozenset[int]:
     return frozenset(days)
 
 
-def select_job(queue: Sequence[str], today: date) -> tuple[Optional[str], Optional[str]]:
+# ── 祝日（#684）──────────────────────────────────────────────────────────────
+#
+# タスクのトリガは月〜金の固定で、祝日を知らない。日中枠の前提「人が会社に居て PC を
+# 触らない」はその日だけ崩れるので、月次の重なりと同じ形で並走に敏感な仕事を見送る。
+#
+# 国民の祝日・振替休日・国民の休日は内閣府「国民の祝日について」
+# （https://www8.cao.go.jp/chosei/shukujitsu/gaiyou.html）と 2026-09-17 に照合した。
+# **計算で導かない**——春分・秋分は前年2月の官報で決まり、祝日そのものも法改正で動く
+# （2020・2021 年の移動）。内閣府は翌年分を毎年2月に公表するので、
+# `tests/test_run_daytime.py` はその年の10月以降に翌年ぶんが無ければ落ちる（足し忘れを失敗にする）。
+HOLIDAYS: dict[int, tuple[date, ...]] = {
+    2026: (
+        date(2026, 1, 1), date(2026, 1, 12), date(2026, 2, 11), date(2026, 2, 23),
+        date(2026, 3, 20), date(2026, 4, 29), date(2026, 5, 3), date(2026, 5, 4),
+        date(2026, 5, 5), date(2026, 5, 6), date(2026, 7, 20), date(2026, 8, 11),
+        date(2026, 9, 21), date(2026, 9, 22), date(2026, 9, 23), date(2026, 10, 12),
+        date(2026, 11, 3), date(2026, 11, 23),
+    ),
+    2027: (
+        date(2027, 1, 1), date(2027, 1, 11), date(2027, 2, 11), date(2027, 2, 23),
+        date(2027, 3, 21), date(2027, 3, 22), date(2027, 4, 29), date(2027, 5, 3),
+        date(2027, 5, 4), date(2027, 5, 5), date(2027, 7, 19), date(2027, 8, 11),
+        date(2027, 9, 20), date(2027, 9, 23), date(2027, 10, 11), date(2027, 11, 3),
+        date(2027, 11, 23),
+    ),
+}
+
+# 年末年始（祝日ではないが、人が家に居る前提は同じ）。見送る側への誤りは数日の遅れで済み、
+# 見送らない側への誤りは結論を変える（#618）ので、休みの会社が多い範囲を安全側に取る。
+YEAR_END_DAYS: tuple[tuple[int, int], ...] = (
+    (12, 29), (12, 30), (12, 31), (1, 1), (1, 2), (1, 3))
+
+# `-Now -Force` が書く当日限りの解除印。値は JST の日付（`YYYY-MM-DD`）。
+# **効く範囲を日付で閉じる**——消し忘れても翌日には効かない。
+KEY_HOLIDAY_OVERRIDE = "daytime_holiday_override"
+
+
+def is_holiday(today: date) -> Optional[bool]:
+    """祝日・年末年始なら True。**表が今日の年を持っていなければ None**（分からない）。"""
+    table = HOLIDAYS.get(today.year)
+    if table is None:
+        return None
+    return today in table or (today.month, today.day) in YEAR_END_DAYS
+
+
+def holiday_table_note(today: date) -> Optional[str]:
+    """表が今日の年を持たないときのログ行。**見送らない側へ倒す**ので、黙らせない。"""
+    if is_holiday(today) is not None:
+        return None
+    return (f"[calendar] 祝日表（run_daytime.HOLIDAYS）が {today.year} 年を持っていない。"
+            f"祝日の見送りが効かない（内閣府の一覧から足すこと）")
+
+
+def read_holiday_override(today: date, db=None) -> bool:
+    """今日の解除印があるか。壊れた値・別の日の値は「無い」とみなす。"""
+    from database import get_setting
+
+    own = db is None
+    db = db or _session()
+    try:
+        raw = get_setting(db, KEY_HOLIDAY_OVERRIDE)
+    finally:
+        if own:
+            db.close()
+    return raw == today.isoformat()
+
+
+def write_holiday_override(today: date, db=None) -> None:
+    from database import upsert_setting
+
+    own = db is None
+    db = db or _session()
+    try:
+        upsert_setting(db, KEY_HOLIDAY_OVERRIDE, today.isoformat())
+    finally:
+        if own:
+            db.close()
+
+
+def blocked_by(today: date, holiday_override: bool = False) -> Optional[str]:
+    """並走に敏感な仕事を今日取り出さない理由の種類（`monthly` / `holiday`）。無ければ None。
+
+    **月次を先に見る。** 月次の重なりは人の有無と関係が無いので、解除印では外れない。
+    """
+    if today.day in monthly_overlap_days():
+        return "monthly"
+    if not holiday_override and is_holiday(today):
+        return "holiday"
+    return None
+
+
+def _block_reason(kind: str, today: date) -> tuple[str, str]:
+    """(理由, 残りをいつに回すか)。ログ行の組み立てにだけ使う。"""
+    if kind == "monthly":
+        return f"{today.day}日は月次系のバッチと時間が重なる", "重ならない日"
+    return f"{today:%m/%d} は祝日・年末年始で人が PC を触りうる", "次の平日"
+
+
+def select_job(queue: Sequence[str], today: date, holiday_override: bool = False,
+               ) -> tuple[Optional[str], Optional[str]]:
     """今日取り出す1件と、先頭以外を選んだ／何も選ばなかった理由（ログ行）。
 
-    月次と重なる日は、**並走に敏感でない仕事を先頭から探す**（残りの順番は崩さない）。
+    月次と重なる日と祝日は、**並走に敏感でない仕事を先頭から探す**（残りの順番は崩さない）。
     未知の名前は判断材料が無いので敏感側に倒す（`--peek` と同じ方針）。
     """
     if not queue:
         return None, None
-    if today.day not in monthly_overlap_days():
+    kind = blocked_by(today, holiday_override)
+    if kind is None:
         return queue[0], None
+    reason, later = _block_reason(kind, today)
     for key in queue:
         job = JOBS.get(key)
         if job is not None and not job.parallel_sensitive:
             if key == queue[0]:
                 return key, None
-            return key, (f"[calendar] {today.day}日は月次系のバッチと時間が重なるので、"
+            return key, (f"[calendar] {reason}ので、"
                          f"並走に敏感な仕事を飛ばして {key} を取り出す")
-    return None, (f"[calendar] {today.day}日は月次系のバッチと時間が重なるので、"
-                  f"並走に敏感な仕事は取り出さない（キューの {len(queue)}件は重ならない日に回す）")
+    return None, (f"[calendar] {reason}ので、"
+                  f"並走に敏感な仕事は取り出さない（キューの {len(queue)}件は{later}に回す）")
 
 
 def take(key: str, db=None) -> None:
@@ -888,12 +1010,22 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         planned, notes = apply_schedule(today, write=False)
         for line in notes:
             print("  " + line)
-        _, why = select_job(planned, today)
+        override = read_holiday_override(today)
+        _, why = select_job(planned, today, override)
+        kind = blocked_by(today, override)
         if why:
             print("  " + why)
-        elif today.day in monthly_overlap_days():
+        elif kind == "monthly":
             print(f"  [calendar] 今日（{today.day}日）は月次系のバッチと時間が重なる日。"
                   "並走に敏感な仕事は取り出さない")
+        elif kind == "holiday":
+            print(f"  [calendar] 今日（{today:%m/%d}）は祝日・年末年始。"
+                  "並走に敏感な仕事は取り出さない（-Now -Force で今日だけ外せる）")
+        if override and is_holiday(today):
+            print("  [calendar] 今日は祝日の見送りを解除してある（-Now -Force の解除印）")
+        note = holiday_table_note(today)
+        if note:
+            print("  " + note)
         return 0
     if "--peek" in args:
         # `run_daytime.ps1 -Now` が「次の1件を今すぐ叩いてよいか」を判断するための機械可読口。
@@ -901,7 +1033,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         # 実走と同じ関数で当てる＝見せた1件と実際に走る1件がずれない（#681）。
         today = _today()
         items, _ = apply_schedule(today, write=False)
-        key, _ = select_job(items, today)
+        override = read_holiday_override(today)
+        key, _ = select_job(items, today, override)
+        kind = blocked_by(today, override)
         job = JOBS.get(key) if key is not None else None
         print(json.dumps({
             "key": key,
@@ -911,9 +1045,20 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "sensitive": job.parallel_sensitive if job else (key is not None),
             "measured_min": job.measured_min if job else None,
             "remaining": len(items),
-            # キューに仕事があるのに今日は何も取り出さない（月次系のバッチと重なる日）。
+            # キューに仕事があるのに今日は何も取り出さない（月次系のバッチと重なる日・祝日）。
             "blocked": key is None and bool(items),
+            "blocked_by": kind if (key is None and items) else None,
+            # 祝日の見送りが効いている（`-Now -Force` は解除印を書いてから叩く・#684）。
+            "holiday_skip": kind == "holiday",
         }))
+        return 0
+    if "--allow-holiday" in args:
+        # `run_daytime.ps1 -Now -Force` が叩く。**今日（JST）だけ**祝日の見送りを外す。
+        # 月次の重なりは外れない（`blocked_by` が月次を先に見る）。
+        today = _today()
+        write_holiday_override(today)
+        state = {True: "祝日", False: "祝日ではない", None: "祝日表の範囲外"}[is_holiday(today)]
+        print(f"今日（{today.isoformat()}・{state}）の祝日の見送りを解除した（翌日には効かない）")
         return 0
     if "--clear-queue" in args:
         write_queue([])
@@ -939,8 +1084,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     # 暦は回収の後に当てる（#681）。期限を迎えた収集は回収した仕事よりも前に並ぶ——
     # 収集は短く、先頭で待たせないことが watchdog の閾値の前提になっている。
     items, sched_notes = apply_schedule(today, write=not dry)
-    job_key, why = select_job(items, today)
-    notes += sched_notes + ([why] if why else [])
+    job_key, why = select_job(items, today, read_holiday_override(today))
+    table_note = holiday_table_note(today)
+    notes += sched_notes + ([why] if why else []) + ([table_note] if table_note else [])
     if notes:
         if dry:
             for line in notes:
@@ -955,7 +1101,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         # **空を失敗にしない**（平日毎日走るので、積んでいない日に毎回起票すると煩い）。
         # 空だったこと・見送ったことは watchdog のレポートと足跡に出る。
         if items:
-            print("今日は取り出せる仕事が無い（月次系のバッチと時間が重なる日）。キューはそのまま")
+            print("今日は取り出せる仕事が無い（月次系のバッチと重なる日か祝日）。キューはそのまま")
         else:
             print("日中枠のキューが空。今日は何もしない（積むには --enqueue <名前>）")
         if not dry:

@@ -20,7 +20,8 @@
 
     日付で決まる仕事は暦が積む（#681・ADR-0056）。会社予想（disclosures）は毎月1日以降、
     半期（interim）は毎月16日以降の最初の実走でキュー先頭へ1回だけ積まれるので、手で積まない。
-    月次系のバッチと時間が重なる日（1〜3日）は、並走に敏感な仕事を取り出さない。
+    月次系のバッチと時間が重なる日（1〜3日）と、祝日・年末年始（#684）は、並走に敏感な
+    仕事を取り出さない。タスクは月〜金の固定で祝日を知らないので、祝日は表で見送る。
     暦の予定と今日の見送りは -Queue に出る。
 
 .PARAMETER DryRun
@@ -30,7 +31,9 @@
     キューの中身を表示する。
 
 .PARAMETER Enqueue
-    末尾へ積む。カンマ区切りで複数可（beta / tune:macro_gbdt / tune:macro_dlm）。
+    末尾へ積む。カンマ区切りで複数可（beta / tune:macro_gbdt / tune:macro_dlm /
+    gate:interactions / gate:max-features / gate:macro / oof:split-bias）。
+    interim / disclosures は暦が積むので手で積まない。
 
 .PARAMETER ClearQueue
     キューを空にする。
@@ -51,6 +54,8 @@
 
 .PARAMETER Force
     -Now で、並走に敏感な仕事でも起動する。**叩いたら PC を触らないこと**が条件。
+    祝日・年末年始に付けると、その日だけ祝日の見送りを外してから起動する（#684）。
+    月次系のバッチと重なる日（1〜3日）の見送りは -Force でも外れない。
 
 .PARAMETER TaskName
     -Now が叩くタスク名。既定は install_daytime_task.ps1 の既定と同じ。
@@ -120,17 +125,40 @@ if ($Now) {
 
     # 次の1件を見る（**キューは減らさない**＝見た結果として走らせないことがある）。
     # egress の要約行が前後に混じるので JSON 行だけ拾う。
-    $peekRaw = & $py @("-m", "scripts.run_daytime", "--peek")
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host "キューを読めませんでした（exit=$LASTEXITCODE）" -ForegroundColor Red
+    # 祝日の解除印を書いたあとに読み直すので、読む手順を1箇所にまとめる。
+    $readPeek = {
+        $peekRaw = & $py @("-m", "scripts.run_daytime", "--peek")
+        if ($LASTEXITCODE -ne 0) { return $null }
+        $peekLine = $peekRaw | Where-Object { $_.TrimStart().StartsWith("{") } | Select-Object -First 1
+        if (-not $peekLine) { return $null }
+        return ($peekLine | ConvertFrom-Json)
+    }
+    $peek = & $readPeek
+    if (-not $peek) {
+        Write-Host "キューの状態を読めませんでした（--peek が失敗したか JSON を返していない）" -ForegroundColor Red
         exit 1
     }
-    $peekLine = $peekRaw | Where-Object { $_.TrimStart().StartsWith("{") } | Select-Object -First 1
-    if (-not $peekLine) {
-        Write-Host "キューの状態を読めませんでした（--peek が JSON を返していない）" -ForegroundColor Red
-        exit 1
+
+    # 祝日・年末年始（#684）。見送る理由は「人が PC を触りうる」ことなので、-Force（叩いたら
+    # 触らないという約束）が付いていれば**今日だけ**外す。解除印は日付つきで、翌日には効かない。
+    if ($peek.holiday_skip -and $Force) {
+        & $py @("-m", "scripts.run_daytime", "--allow-holiday")
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "祝日の見送りを外せませんでした（exit=$LASTEXITCODE）" -ForegroundColor Red
+            exit 1
+        }
+        $peek = & $readPeek
+        if (-not $peek) {
+            Write-Host "キューの状態を読めませんでした（--peek が失敗したか JSON を返していない）" -ForegroundColor Red
+            exit 1
+        }
     }
-    $peek = $peekLine | ConvertFrom-Json
+
+    if ($peek.blocked -and $peek.blocked_by -eq "holiday") {
+        Write-Host "今日は祝日・年末年始なので、並走に敏感な仕事は取り出しません（残り $($peek.remaining)件）。" -ForegroundColor Yellow
+        Write-Host "  叩いたあと PC を触らないなら: ./run_daytime.ps1 -Now -Force（今日だけ見送りを外します）" -ForegroundColor Cyan
+        exit 0
+    }
 
     if ($peek.blocked) {
         # 月次系のバッチ（1〜3日・01:00 起動・16時間の窓）と重なる日は、並走に敏感な仕事を
