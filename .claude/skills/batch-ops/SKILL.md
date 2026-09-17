@@ -62,11 +62,13 @@ python -m scripts.macro_beta_gate_history --threshold 1.01  # strict 基準で�
 # **人が PC を触らない時間帯で回すこと自体が再現性の条件**（並走すると NUTS の発散が 0→344 に増えた実測）
 # **暦（#681・ADR-0056）**: disclosures は毎月1日以降・interim は毎月16日以降に自動でキュー先頭へ積まれる＝手で積まない。
 # 月次系の起動日（1〜3日）は並走に敏感な仕事を取り出さない（-Now -Force でも同じ）。どちらも -Queue に出る
+# **祝日・年末年始（#684）も取り出さない**（トリガは月〜金固定で祝日を知らない）。-Now -Force だけが今日の祝日の見送りを外す。
+# 祝日表 `run_daytime.HOLIDAYS` は内閣府の一覧から毎年足す（10月以降に翌年が無いと CI が落ちる）
 ./run_daytime.ps1 -Queue                 # キューの中身＋暦の予定＋今日の見送り
-./run_daytime.ps1 -Enqueue beta          # 積む（beta / tune:macro_gbdt / tune:macro_dlm / gate:interactions / gate:max-features / oof:split-bias / interim / disclosures）
+./run_daytime.ps1 -Enqueue beta          # 積む（beta / tune:macro_gbdt / tune:macro_dlm / gate:interactions / gate:max-features / gate:macro / oof:split-bias / interim / disclosures）
 ./run_daytime.ps1 -DryRun                # 実行計画だけ（キューは減らさない）
 ./run_daytime.ps1 -Now                   # 枠を待たず次の1件（休暇等）。**タスク経由＝セッション0で走る**
-./run_daytime.ps1 -Now -Force            # 並走に敏感な仕事（beta / tune:* / gate:*）も叩く。**叩いたら PC を触らない**
+./run_daytime.ps1 -Now -Force            # 並走に敏感な仕事（beta / tune:* / gate:* / oof:*）も叩く。**叩いたら PC を触らない**。祝日は今日だけ見送りを外す
 ./scripts/install_daytime_task.ps1       # 登録（平日 JST 08:00・上限8h）。**登録後に1回手動実行して足跡を入れる**
 
 # バックアップ（週次バッチ・毎週日曜 JST 21:00。Storage は 50MB/ファイル・1GB。実測 38.1MB/世代）

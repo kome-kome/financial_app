@@ -6,7 +6,7 @@
 XLA が使うコア数は実行時の混み具合で変わる。つまり**「重い計算の裏で作業をしない」という
 運用条件が結果の再現性に直結している**。人が PC を触らない平日日中を専用の枠にした。
 
-守るのは10点:
+守るのは11点:
 
 1. **キューは先頭を取り除いてから返す**（失敗しても戻さない＝同じ計算を繰り返さない）
 2. **窓に入らない仕事は積ませない**（走ってから打ち切られると何も残らない）
@@ -18,6 +18,7 @@ XLA が使うコア数は実行時の混み具合で変わる。つまり**「�
 8. **仕事は手で作ったキャッシュに依存しない**（待っている間に退避されると即死する・#674）
 9. **日付で決まる仕事は暦が積む**（積むのが人だと、積み忘れが失敗として現れない・#681）
 10. **月次系のバッチと時間が重なる日は、並走に敏感な仕事を取り出さない**（#681）
+11. **祝日・年末年始も取り出さない。`-Now -Force` だけが今日の祝日の見送りを外す**（#684）
 """
 import json
 import os
@@ -442,6 +443,19 @@ class TestManualKick:
         assert blocked != -1, "-Now が --peek の blocked を見ていない"
         assert blocked < text.find("-not $peek.key"), "空の判定より後ろで見ている"
         assert blocked < text.find("Start-ScheduledTask -TaskName"), "起動の後ろで見ている"
+
+    def test_force_lifts_only_the_holiday_before_blocked_is_read(self, text):
+        """祝日の見送りは -Force で今日だけ外す（#684）。月次の重なりは外さない。
+
+        解除印を書くのが blocked の判定より後ろだと、祝日に -Force を付けても止まる。
+        """
+        lift = text.find("--allow-holiday")
+        assert lift != -1, "-Now -Force が祝日の解除印を書いていない"
+        assert re.search(r"\$peek\.holiday_skip\s+-and\s+\$Force", text), (
+            "解除印を -Force 無しでも書く形になっている")
+        assert lift < text.find("$peek.blocked"), "blocked を見た後で解除している"
+        assert lift < text.find("Start-ScheduledTask -TaskName"), "起動の後ろで解除している"
+        assert 'blocked_by -eq "holiday"' in text, "祝日と月次を同じ文言で止めている"
 
     def test_task_name_default_matches_the_installer(self, text):
         """既定がずれると -Now が『登録されていないタスク』を叩き続ける。"""
@@ -977,6 +991,95 @@ class TestMonthlyOverlap:
         assert rd.select_job([], date(2026, 10, 1)) == (None, None)
 
 
+class TestHolidays:
+    """祝日・年末年始は並走に敏感な仕事を取り出さない（#684）。
+
+    トリガは月〜金の固定で祝日を知らない。見送りを忘れても値はもっともらしいまま出るので、
+    失敗としては現れない。
+    """
+
+    SILVER_WEEK = (date(2026, 9, 21), date(2026, 9, 22), date(2026, 9, 23))
+
+    @pytest.mark.parametrize("day", SILVER_WEEK)
+    def test_the_2026_silver_week_is_a_holiday(self, day):
+        assert rd.is_holiday(day) is True
+
+    @pytest.mark.parametrize("day", [date(2026, 9, 24), date(2026, 12, 28), date(2027, 1, 4)])
+    def test_ordinary_weekdays_are_not(self, day):
+        assert rd.is_holiday(day) is False
+
+    @pytest.mark.parametrize("day", [date(2026, 12, 29), date(2026, 12, 31),
+                                     date(2027, 1, 2), date(2027, 1, 3)])
+    def test_the_year_end_break_counts(self, day):
+        assert rd.is_holiday(day) is True
+
+    def test_a_year_outside_the_table_is_unknown(self):
+        assert rd.is_holiday(date(2030, 5, 6)) is None
+
+    def test_the_quiet_day_used_by_other_tests_is_not_a_holiday(self):
+        """既定の「今日」が祝日だと、他のテストが黙って見送りの経路を通る。"""
+        assert rd.is_holiday(QUIET_DAY) is False
+
+    def test_the_table_is_well_formed(self):
+        for year, days in rd.HOLIDAYS.items():
+            assert all(d.year == year for d in days), f"{year} 年の表に別の年が混ざっている"
+            assert list(days) == sorted(set(days)), f"{year} 年の表が昇順・重複なしでない"
+
+    def test_the_table_covers_next_year_from_october(self):
+        """**実行日に依存する（意図して）。** 内閣府は翌年分を毎年2月に公表するので、
+        10月になっても翌年が無いのは足し忘れ。表が切れると祝日の見送りが黙って外れる。"""
+        today = date.today()
+        need = today.year + (1 if today.month >= 10 else 0)
+        assert need in rd.HOLIDAYS, (
+            f"run_daytime.HOLIDAYS に {need} 年が無い。"
+            "https://www8.cao.go.jp/chosei/shukujitsu/gaiyou.html から足すこと")
+
+    def test_a_holiday_skips_sensitive_jobs_but_takes_collection(self):
+        key, why = rd.select_job(["beta", "gate:macro", "interim"], date(2026, 9, 21))
+        assert key == "interim"
+        assert why and "祝日" in why and "interim" in why
+        why.encode("cp932")
+
+    def test_nothing_runnable_on_a_holiday_waits_for_a_weekday(self):
+        key, why = rd.select_job(["beta"], date(2026, 9, 22))
+        assert key is None
+        assert why and "次の平日" in why
+        why.encode("cp932")
+
+    def test_the_override_lifts_the_holiday(self):
+        assert rd.select_job(["beta", "interim"], date(2026, 9, 21), True) == ("beta", None)
+
+    def test_the_override_does_not_lift_a_monthly_day(self):
+        """2027-01-01 は元日で、かつ月次の起動日。月次は人の有無と関係が無い。"""
+        day = date(2027, 1, 1)
+        assert rd.blocked_by(day, holiday_override=True) == "monthly"
+        assert rd.select_job(["beta"], day, True)[0] is None
+
+    def test_a_weekday_is_unchanged(self):
+        assert rd.blocked_by(date(2026, 9, 24)) is None
+        assert rd.select_job(["beta", "interim"], date(2026, 9, 24)) == ("beta", None)
+
+    def test_outside_the_table_does_not_block_but_says_so(self):
+        day = date(2030, 5, 6)
+        assert rd.blocked_by(day) is None
+        note = rd.holiday_table_note(day)
+        assert note and "2030" in note
+        note.encode("cp932")
+        assert rd.holiday_table_note(QUIET_DAY) is None
+
+    def test_the_override_is_only_valid_on_its_day(self, fake_db):
+        today = date(2026, 9, 21)
+        assert rd.read_holiday_override(today, db=fake_db) is False
+        rd.write_holiday_override(today, db=fake_db)
+        assert rd.read_holiday_override(today, db=fake_db) is True
+        assert rd.read_holiday_override(date(2026, 9, 22), db=fake_db) is False
+
+    @pytest.mark.parametrize("raw", ["", "garbage", "2026-09-21T00:00:00", None])
+    def test_a_broken_override_reads_as_absent(self, fake_db, raw):
+        fake_db.store[rd.KEY_HOLIDAY_OVERRIDE] = raw
+        assert rd.read_holiday_override(date(2026, 9, 21), db=fake_db) is False
+
+
 class TestCalendarInMain:
     """実走・ドライラン・`--peek`・`--queue` が同じ暦と同じ選び方を使う。"""
 
@@ -1029,6 +1132,52 @@ class TestCalendarInMain:
 
         assert self.ran == [["collect_interim"]]
         assert rd.read_queue(db=db) == ["beta"]
+
+    def test_a_holiday_leaves_sensitive_jobs_queued(self, db, monkeypatch):
+        day = date(2026, 9, 21)
+        self._on(monkeypatch, day, **self._settled(day))
+        rd.write_queue(["gate:max-features", "gate:macro"], db=db)
+
+        assert rd.main([]) == 0
+
+        assert self.ran == []
+        assert rd.read_queue(db=db) == ["gate:max-features", "gate:macro"]
+        assert self.footprints == [{}]
+        assert "祝日" in self.log.read_text(encoding="utf-8")
+
+    def test_allow_holiday_lets_todays_run_take_the_head(self, db, monkeypatch, capsys):
+        day = date(2026, 9, 21)
+        self._on(monkeypatch, day, **self._settled(day))
+        rd.write_queue(["gate:macro"], db=db)
+
+        assert rd.main(["--allow-holiday"]) == 0
+        assert db.store[rd.KEY_HOLIDAY_OVERRIDE] == "2026-09-21"
+        capsys.readouterr().out.encode("cp932")
+        rd.main([])
+
+        assert self.ran == [["gate_macro"]]
+        assert rd.read_queue(db=db) == []
+
+    def test_yesterdays_override_does_not_carry_over(self, db, monkeypatch):
+        day = date(2026, 9, 22)
+        self._on(monkeypatch, day, **self._settled(day))
+        db.store[rd.KEY_HOLIDAY_OVERRIDE] = "2026-09-21"
+        rd.write_queue(["beta"], db=db)
+
+        rd.main([])
+
+        assert self.ran == []
+        assert rd.read_queue(db=db) == ["beta"]
+
+    def test_a_year_outside_the_table_is_logged(self, db, monkeypatch):
+        day = date(2030, 5, 7)
+        self._on(monkeypatch, day, **self._settled(day))
+        rd.write_queue(["gate:macro"], db=db)
+
+        rd.main([])
+
+        assert self.ran == [["gate_macro"]], "表が切れた年に見送る側へ倒すとキューが止まる"
+        assert "2030" in self.log.read_text(encoding="utf-8")
 
     def test_the_scheduled_job_is_todays_run(self, db, monkeypatch):
         self._on(monkeypatch, date(2026, 10, 16),
@@ -1111,6 +1260,44 @@ class TestCalendarInMain:
         got = self._peek(capsys)
 
         assert got["key"] is None and got["blocked"] is True and got["remaining"] == 1
+        assert got["blocked_by"] == "monthly" and got["holiday_skip"] is False
+
+    def test_peek_reports_a_holiday(self, db, monkeypatch, capsys):
+        """`-Now -Force` はこれを見て解除印を書く。月次と区別できないと外してはいけない方を外す。"""
+        day = date(2026, 9, 23)
+        self._on(monkeypatch, day, **self._settled(day))
+        rd.write_queue(["beta"], db=db)
+
+        got = self._peek(capsys)
+
+        assert got["key"] is None and got["blocked"] is True
+        assert got["blocked_by"] == "holiday" and got["holiday_skip"] is True
+
+        db.store[rd.KEY_HOLIDAY_OVERRIDE] = day.isoformat()
+        got = self._peek(capsys)
+        assert got["key"] == "beta" and got["blocked"] is False
+        assert got["blocked_by"] is None and got["holiday_skip"] is False
+
+    def test_peek_on_a_holiday_with_collection_still_flags_the_skip(self, db, monkeypatch, capsys):
+        day = date(2026, 9, 21)
+        self._on(monkeypatch, day, **self._settled(day))
+        rd.write_queue(["beta", "interim"], db=db)
+
+        got = self._peek(capsys)
+
+        assert got["key"] == "interim" and got["blocked"] is False
+        assert got["holiday_skip"] is True, "-Force でも先頭の beta に届かなくなる"
+
+    def test_queue_listing_shows_a_holiday(self, db, monkeypatch, capsys):
+        day = date(2026, 9, 21)
+        self._on(monkeypatch, day, **self._settled(day))
+        rd.write_queue(["beta"], db=db)
+
+        assert rd.main(["--queue"]) == 0
+
+        out = capsys.readouterr().out
+        assert "祝日" in out
+        out.encode("cp932")
 
     def test_queue_listing_shows_the_calendar(self, db, monkeypatch, capsys):
         """セッション開始時に必ず見る画面。次の実走で何が積まれ、何が見送られるかを出す。"""
