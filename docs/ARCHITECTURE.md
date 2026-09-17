@@ -62,6 +62,7 @@ graph LR
         FM["financial_metrics（VIEW）\n派生指標を都度SQL算出\n＋regression_results をJOIN\n＋split_adjustment_factors で基準補正"]
         RR[("regression_results\nOLS予測値\npredicted/gap（重い派生）")]
         SAF[("split_adjustment_factors\n分割補正係数 F\n歪んだ行のみ・毎晩全置換")]
+        TTM[("ttm_financial_records\nTTM 行（直近12か月）\n毎晩全置換・#424 子2")]
         JAF[("jquants_adj_factor_events\n公式 AdjFactor のイベント\ncatchup が残す・upsert")]
         JAC[("jquants_adj_factor_coverage\n公式バーを受け取った区間\n取り込み CLI が追記")]
         SPH[("stock_price_daily / _weekly\nclose-only 2本立て\n直近6か月日次 + 全履歴週次")]
@@ -70,6 +71,10 @@ graph LR
         FR --> FM
         RR --> FM
         SAF --> FM
+        FR -->|前期通期 − 前期H1 + 今期H1| TTM
+        TTM --> FMT["financial_metrics_with_ttm（VIEW）\n通期＋TTM 行・basis 列\n学習パネルが切替で読む（既定は通期）"]
+        FR --> FMT
+        SAF --> FMT
         JAF -.->|最新年の倍率| SAF
         JAC -.->|不在の確認| SAF
     end
@@ -303,6 +308,21 @@ erDiagram
         datetime computed_at     "全置換した日時"
     }
 
+    ttm_financial_records {
+        int     id            PK "自動採番"
+        string  edinet_code      "企業（(edinet_code, year) で一意）"
+        int     year             "今期 H1 の年度"
+        date    period_end       "今期 H1 の期末日（学習パネルの as-of はここ＋45日）"
+        date    filing_date      "今期 H1 の提出日"
+        date    prev_annual_period_end "材料: 前期の通期の期末日"
+        date    prev_h1_period_end     "材料: 前期の H1 の期末日"
+        float   split_factor     "今期 H1 の提出日より後に起きたイベントの積（VIEW が掛ける）"
+        float   bs_xxx           "ストック: 今期 H1 の期末値（欠けた列は前期通期から引き継ぐ）"
+        float   pl_xxx           "フロー: 前期通期 − 前期H1 + 今期H1"
+        float   cf_xxx           "同上"
+        datetime computed_at     "全置換した日時"
+    }
+
     jquants_adj_factor_events {
         string  edinet_code   PK "企業（複合PK）"
         string  event_date    PK "公式の企業イベント日 YYYY-MM-DD（複合PK）"
@@ -513,6 +533,7 @@ erDiagram
     xbrl_raw_documents }o--|| financial_records   : "doc_id で紐付け（再解析用）"
     financial_records ||--o| regression_results  : "(edinet_code,year,period_end) で1対0..1"
     financial_records ||--o| split_adjustment_factors : "(edinet_code,year) で1対0..1（歪んだ行のみ）"
+    financial_records ||--o| ttm_financial_records : "材料3行（前期通期・前期H1・今期H1）から1行を合成"
     companies         ||--o{ jquants_adj_factor_events : "1社 → 公式 AdjFactor のイベント（#661）"
     companies         ||--o{ jquants_adj_factor_coverage : "1社 → 公式バーを受け取った区間（#668・追記）"
     macro_beta_meta    ||--o{ macro_beta_loadings  : "1推論ラン(run_id) → 複数因子ローディング"
@@ -558,6 +579,18 @@ erDiagram
 > （`ORDER BY year, period_end`）が期間混在で壊れないよう VIEW 段でソースを通期に限定する。
 > 全プラグインはこの VIEW 経由のため、非通期行の導入後も挙動は完全不変。非通期行は
 > `period_type<>'annual'` で別途参照する（下記 `financial_metrics_interim`）。
+
+> **`financial_metrics_with_ttm`（VIEW・#424 子2・ADR-0051）**: 通期の行と [[TTM 行]]（直近12か月の
+> 合成）を `basis` 列（`annual` / `ttm`）付きで並べる VIEW。**`financial_metrics` は変えない**——
+> あちらは画面・スクリーニング・M-1〜M-6・推薦・バックテストの共通の入口で、TTM を混ぜると測る前に
+> 全部の結果が変わる。読むのは学習パネルが `plugins.macro_snapshots.use_fin_rows("with_ttm")` の内側で
+> 読むときだけで、**既定は通期のみ**（昇格ゲート＝子3 は未実施）。比率・Zスコア・成長率の式は
+> `financial_metrics_view.sql` と同じ文面で、違いは 4 つ: ①入口が UNION ALL（通期＋`ttm_financial_records`）
+> で F が行ごとに来る ②窓が `(year, basis)` / `(year, industry, basis)` / `(edinet_code, basis ...)`
+> ③TTM 行の成長率・前年差は直前の行が前年度のときだけ出す ④`regression_results` は通期の行にだけ結合。
+> TTM 行の id は負（`financial_records.id` と衝突させない）。読み取り ORM は `FinancialMetricWithTTM`
+> （`FinancialMetric` の列＋`basis`＋`filing_date`）。通期の行が `financial_metrics` と一致することは
+> 実 PostgreSQL の双方向 `EXCEPT` で確かめる（`tests/test_financial_metrics_with_ttm_postgres.py`）。
 
 > **`financial_metrics_interim`（VIEW・Issue #219② フェーズC）**: `financial_metrics` と対をなす
 > **非通期（半期H1等）専用**の読み取り VIEW。ソースは `financial_records` の `period_type<>'annual'`
@@ -1291,6 +1324,7 @@ graph TB
 | `database.py` | バックエンド | DBテーブル定義・upsert。8テーブル（Company / FinancialRecord / StockPriceDaily / StockPriceWeekly / MacroData / CollectionLog / XbrlRawDocument / **RegressionResult**）＋ **`financial_metrics` VIEW**（通期・派生指標を都度SQL算出・読み取り専用 ORM `FinancialMetric`）＋ **`financial_metrics_interim` VIEW**（非通期=半期H1等・ORM `FinancialMetricInterim`・#219②フェーズC）。両 VIEW は `_ensure_view`→`_ensure_one_view` が**呼ばれたら必ず**再作成する（再作成の要否は `init_db()` のスキーマ指紋ゲートが決める・#597 / ADR-0048。かつてここに `pg_get_viewdef()` との比較があったが一致することがなく、「定義差分時のみ」は実際には成立していなかった）。`upsert_financial` は **ソース列のみ**保存（derived 取り込み廃止）。`upsert_regression_result`（merge・方言非依存・単数）と `upsert_regression_results_batch`（ON CONFLICT の一括 upsert・`sector_ols` の永続化経路・#506）。派生指標は VIEW へ移行し旧 `calc_growth_rates`/`calc_zscore_normalization` は削除、旧計算列は `init_db` の冪等 `DROP COLUMN` で除去。`pack_elements`/`unpack_elements`/`upsert_xbrl_raw` ヘルパを含む | PostgreSQL |
 | `db_egress.py` | バックエンド | **Egress 台帳とサーキットブレーカ**（#478・[ADR-0034](adr/0034-client-side-egress-ledger-and-circuit-breaker.md)）。`database.py` が import 時に `install(engine)` で `after_cursor_execute` リスナを1本張り、全プロセス（GHA バッチ・ローカル CLI・Render）で「どのテーブルから何行・何列を引いたか」を記録する。結果は消費しないので既存挙動に干渉しない。プロセス終了時に `[egress] summary` を標準エラーへ1行、**既定で `.egress/ledger.jsonl`** へ1行 append（帰属は `FINAPP_JOB`・無効化は `FINAPP_EGRESS_LEDGER=0`）。**歯止めは2軸**（#478・[ADR-0037](adr/0037-egress-cycle-budget-is-a-second-axis.md)）＝①行数/MB のプロセス予算を超えると `EgressBudgetExceeded`（局所解除は `egress_budget()` CM・全体解除は `FINAPP_EGRESS_ENFORCE=0`）、②**請求サイクル累計**を `app_settings.egress_cycle_bytes` に持ち warn 80% / block 95%（プロセス予算 400MB では「1日12プロセスで 4.8GB」が素通りする＝2026-08 の超過はこの形だった）。累計を DB に置くのは**ローカル CLI と GHA が同じカウンタを見られる唯一の場所**だから。ミラー接続（`_is_local`）と **pytest 実行中は積まない**（後者を怠ると全テストが本番へ接続し atexit が本番へ書き込む）。**`database` を import しない**（逆向き依存を作らない）。なお**列スコープの静的検査には使えない**（`_Bucket` は n_cols を保持せず SQLite は rowcount=-1）ため、そちらは `tests/test_column_scoping.py` の AST 検査が担う | sqlalchemy.event |
 | `weekly_price_cache.py` | バックエンド | **週次株価の run 間差分ロードキャッシュ**（#480・[ADR-0036](adr/0036-weekly-prices-incremental-load.md)）。夜間バッチが毎晩引き直していた 1,282,436 行（39.3MB／月 1.98GB＝枠の40%）を、指紋（`max(week_start)`＋`count(*)` のサーバ側集約）＋直近27週の再取得＋DB 側の世代印（`app_settings.weekly_prices_generation`）で差分化する。**キャッシュは速さだけを担い、正しさは指紋・世代印・行数照合が持つ**（無い／壊れている／古い／保存失敗はすべてフルロードへ倒れる）。歯止めは4層＝行数照合のハードゲート・鮮度アサートの raise・週1回の強制コールド・コールド時のドリフト監査。**行の型を知らない**（`_VOLUME_NOT_LOADED` 番兵は pickle で同一性が壊れるため、ワイヤは素タプルで番兵の再付与は呼び出し側の責務）。`scripts/_cache.py`（検証専用・TTL 無し）とは別物 | database（遅延 import のみ） |
+| `ttm_composite.py` | バックエンド | **TTM 行の合成**（#424 子2・[ADR-0051](adr/0051-latest-results-enter-analysis-as-a-ttm-composite.md)）。「前期の通期 − 前期の H1 + 今期の H1」で 12 か月ぶんのフローを作り、ストックは今期 H1 の期末値を使う行を `ttm_financial_records` へ**毎晩全置換**する（夜間の分割補正係数の直後・入口は差分と全件の2本）。上半分は DB を引かない純関数で、検出器（`scripts/measure_split_valuation_bias`）と `collector_prices` は遅延 import する。**材料の間に分割があると1株指標の基準が混ざるので作らない**——危ない窓は（前期 H1 の提出日, 今期 H1 の提出日]で、判定は①株数比と「純利益÷EPS」の逆算株数が 1.4 倍以上②検出器のイベント窓が重なる（倍率待ちを含む）③公式 `AdjFactor` の日付が窓の中、の3信号。会計基準・連結範囲の変更（`statement_disclosure.doc_type`）・決算期の変更・提出が期末＋45日より遅い行・桁の外れ（前期通期比が5倍/1/5の外）でも作らず、**理由ごとに件数を毎晩ログへ出す**。H1 で空になる列は、翌年の通期にあると確かめた列だけ引き継ぐ（`bs_bps` は通期の BPS を純資産比で伸ばす）。F は今期 H1 の**提出日より後**のイベントの積。実測 17,250 行 / 4,026 社・15.4 秒（2026-09-18） | database.py, collector_prices.py, scripts/measure_split_valuation_bias.py |
 | `sysmem.py` | バックエンド | **プロセス常駐メモリと物理メモリの実測**（2026-09-01）。`rss_mb` / `peak_rss_mb` / `available_mb` / `total_mb` / `tree_rss_mb` / `format_line` を持ち、Windows は ctypes（`GetProcessMemoryInfo` / `GlobalMemoryStatusEx` / `CreateToolhelp32Snapshot`）、Linux は `/proc` を読む（**psutil を入れない**＝本番 `requirements.txt` の footprint を増やさない）。**測るのはプロセスツリーの合計**——`venv\Scripts\python.exe` はランチャースタブで、`Popen` の pid を単体で測ると実体が 313MB でも 4MB と返り、エラーにならず「静かに正しく見える」。**取れなければ例外ではなく None**（計測の失敗が本業を止めない／`format_line` は欠測を `?` で出す＝0.0 と混ぜない）。消費者は `scripts/batch_common.py` の heartbeat・`env_lines()` と `scripts/bench_macro_beta.py` の `peak_rss_mb` / `env_fingerprint`（**ctypes をあちらへ書き写さない**）。月次バッチ初実走で `tune` が 156分間 heartbeat を出しながら1件も進まず、CPU 39% に対し空き物理メモリ 0.6GB でページアウトしていた——所要だけのログでは「遅い」と「止まっている」を区別できない | （標準ライブラリのみ） |
 | `collector.py` | バックエンド | **オーケストレータ＋後方互換の再エクスポート層**。CLI エントリ（`python collector.py ...`）を保持し、責務別5モジュールの全シンボルを再エクスポートする（`from collector import X` / `collector.X` は従来どおり）。実体は下記5ファイル | collector_utils/master/financials/prices/disclosures |
 | `collector_utils.py` | バックエンド | 収集系モジュール共通の設定定数（EDINET/J-Quants/Yahoo/stooq のレート・並列数・バッチ閾値）とロガー `log`。価格スケール突合の共有定義（丸め許容 `rounding_tolerance`・公式 `AdjFactor` が持たないスピンオフ調整の登録表 `SPINOFF_ADJUSTMENTS` / `spinoff_factor`・#568）もここに置き、検出器と修復スクリプトが書き写さずに共有する | dotenv |
@@ -1340,8 +1374,8 @@ graph TB
 | `logs/` | ローカル生成物 | ローカル実行ログの集約先（`.gitignore` 対象・git 管理外）。`server.log`（`launch.py`）・`pipeline_gh.log`（`_pipeline_gh.py`）・`pipeline_incremental.log`（`_pipeline_incremental.py`）。GitHub Actions 実行時も同名で生成され `actions/upload-artifact` で回収 | launch.py, _pipeline_gh.py, _pipeline_incremental.py |
 | `edinet_ping.py` | ユーティリティ | EDINET API 疎通確認ワンショット | EDINET API |
 | `scripts/check_db_state.py` | ユーティリティ | DB 状態確認ワンショット（主要6テーブルの行数＋直近の収集ログ表示）。Supabase 移行差分／パイプライン実行後の件数チェック用（手動実行） | database.py |
-| `scripts/setup_local_db.py` | ユーティリティ | ローカル PostgreSQL を本アプリのスキーマで初期化する（Issue #481 B-0・**Supabase へは接続しない**）。`database._is_local` で接続先を検証してから `init_db()` を呼び、全テーブル＋VIEW 2本の生成・`security_invoker` の適用可否・温存した旧日次 OHLCV の行数を検証レポートで出す。既定はドライラン（`--apply` で実行）。旧スキーマの掃除は「素の `stock_price_history` が在る かつ `stock_price_weekly` が無い」をマーカーに**1回だけ**走るので、ミラー投入後に誤実行しても中身を消さない | database.py |
-| `scripts/mirror_common.py` | ユーティリティ | ミラー3本の共有基盤（**source/dest を引数で受けるので、両方ローカルなら Supabase 不要で予行できる**・Issue #481 B-2〜B-4・[ADR-0035](adr/0035-mirror-endpoints-are-parameterized.md)）。ミラー範囲（`Base.metadata.sorted_tables` の全表から `MIRROR_EXCLUDED`＝`xbrl_raw_documents` だけを除く。`stock_price_daily` は #503 で範囲へ入れた。表の数は表を足すたびに変わるので書かない）を**FK 依存順で導出**、テーブル別の同期方針 `SYNC_PLAN`、`pg_dump`/`pg_restore` の argv 組み立て（純関数・`--strict-names` / `--compress=0` / 表ごと restore）、エンドポイント解決（`database.resolve_database_url()` へ委譲）、**dest ローカル限定ガード**、サーバ側の件数/バイト数/順序非依存チェックサム、`decode_pg_output`（utf-8 → cp932 フォールバック） | database.py, db_egress.py |
+| `scripts/setup_local_db.py` | ユーティリティ | ローカル PostgreSQL を本アプリのスキーマで初期化する（Issue #481 B-0・**Supabase へは接続しない**）。`database._is_local` で接続先を検証してから `init_db()` を呼び、全テーブル＋VIEW 3本の生成・`security_invoker` の適用可否・温存した旧日次 OHLCV の行数を検証レポートで出す。既定はドライラン（`--apply` で実行）。旧スキーマの掃除は「素の `stock_price_history` が在る かつ `stock_price_weekly` が無い」をマーカーに**1回だけ**走るので、ミラー投入後に誤実行しても中身を消さない | database.py |
+| `scripts/mirror_common.py` | ユーティリティ | ミラー3本の共有基盤（**source/dest を引数で受けるので、両方ローカルなら Supabase 不要で予行できる**・Issue #481 B-2〜B-4・[ADR-0035](adr/0035-mirror-endpoints-are-parameterized.md)）。ミラー範囲（`Base.metadata.sorted_tables` の全表から `MIRROR_EXCLUDED`＝`xbrl_raw_documents` と `ttm_financial_records`（派生・毎晩全置換なので引く必要が無く、TTM を作らない側から全置換で引くとローカルの TTM が全消えする）を除く。`stock_price_daily` は #503 で範囲へ入れた。表の数は表を足すたびに変わるので書かない）を**FK 依存順で導出**、テーブル別の同期方針 `SYNC_PLAN`、`pg_dump`/`pg_restore` の argv 組み立て（純関数・`--strict-names` / `--compress=0` / 表ごと restore）、エンドポイント解決（`database.resolve_database_url()` へ委譲）、**dest ローカル限定ガード**、サーバ側の件数/バイト数/順序非依存チェックサム、`decode_pg_output`（utf-8 → cp932 フォールバック） | database.py, db_egress.py |
 | `scripts/mirror_pull.py` | ユーティリティ | 正本 → ミラーの一括取り込み（B-2）。列差分プリフライト → `octet_length` 見積り → `egress_budget()` 内で `pg_dump --compress=0` → TRUNCATE（明示列挙・CASCADE 不使用）→ **FK 依存順に1表ずつ `pg_restore`** → シーケンス再同期 → `ANALYZE` → 突合。既定ドライラン、`--apply` ＋ 見積り超過時は `--allow-full-pull` が要る | scripts/mirror_common.py, scripts/mirror_verify.py |
 | `scripts/mirror_sync.py` | ユーティリティ | 正本 → ミラーの増分同期（B-3）。dest の高水位から `SYNC_PLAN` のオーバーラップぶん遡って取り直し、PK で upsert（`FULL` 指定表は全置換）。週次は `DAILY_WINDOW_DAYS` 由来の27週窓 | scripts/mirror_common.py, scripts/mirror_verify.py |
 | `scripts/mirror_verify.py` | ユーティリティ | ミラーと正本の突合（B-4）。`--level schema`（`information_schema.columns` の列差分＝pull の事前確認）/ `counts`（既定・`count(*)` と最新キー）/ `checksum`（値レベル）。終了コード 0=一致 / 1=乖離 / 2=接続不可。エンドポイント引数の定義元でもある | scripts/mirror_common.py |
