@@ -22,14 +22,34 @@
 3. その財務行より後で最も近いイベントまでの年数と向き（分割 F>1 / 併合 F<1）で層に分ける
 4. 月ごとに全サンプルの平均を引いた超過リターンを層ごとに平均し、社単位のブートストラップで CI を付ける
 
-## 判定（結果を見る前に決めた・Issue #685 の本文と同じ）
+## 判定（結果を見る前に決めた・Issue #685 の本文と同じ）— **退役した（#687）**
 
 分割側の点推定が **1年 > 2年 > 3年 > 4年以上** の順に並び、かつ **1年の 95%CI の下限が 0 を超える**
 なら、リークの読みを維持する。どちらかが崩れれば読みを捨てる。併合の層は件数が少ないので参考値。
 
-**注意**: 1年の層には、形成月の時点で分割が既に起きている（未来ではない）サンプルが混ざる。
-イベントの正確な日付を持たないので分けられない。判定を「単調性」に置いたのはこのためで、
-1年の層だけの大きさでは読まない。
+2026-09-17 の実走は単調でなく（2年 +0.1581 が頂点・1年 +0.0283）「読みを捨てる」になった。
+
+**この判定は #687 で退役した。原理的に通らない層を含んでいたためである。**
+`_find_applicable_fin` が年 Y の行を返す形成日の範囲は `[期末_Y + 45日, 期末_{Y+1} + 45日)` で、
+年 Y+1 のイベントの窓（`measure_split_valuation_bias.event_window`）は
+`(期末_Y - 45日, 期末_{Y+1} + 45日]`。**前者は必ず後者に含まれる**ので、「分割まで1年」の層は
+**全サンプルが**「分割が形成月より前か後か」を `period_end` から判定できない。
+2年以上離れた層は形成日が必ず窓より前なので、この曖昧さを持たない（`is_separable`）。
+
+`verdict()` は #685 時点の記録として残してあり、計算も出力も変えていないが、**新しい判断の
+根拠にしない**。決定7 の根拠は定義へ置き直した（ADR-0055 の追記 2026-09-18）——保存された
+per は「今日まで遡及調整された株価 ÷ 当時の EPS」で、F はその期より後の分割で決まる＝
+補正前の値は時点情報でない。これは測定に依らない。
+
+## 再測定の着手条件（#687 で測る前に登録した）
+
+**`split_1` の層のうち**、公式 `AdjFactor` の日付（`jquants_adj_factor_events`）で「形成月より後」
+と言い切れる分割だけを集め、**それが `RETRY_MIN_COMPANIES` 社以上**になったら測り直す。
+本スクリプトは実行のたびにその社数を数えて出す（`count_datable_future_companies`）。
+層別の平均は出さない——着手条件を満たす前に結果を見ると、事前登録が意味を失う。
+
+**数えるのを 1年層に限るのは、公式の日付が新しい情報を足すのがそこだけだから**である。
+2年以上の層は元から綺麗なので、混ぜて数えると閾値を即座に満たしたように見えるだけになる。
 
 実行:
     python -m scripts.measure_split_leak
@@ -59,6 +79,15 @@ MAX_YEARS_BUCKET = 4        # 4年以上は1つの層に畳む
 SPLIT_ORDER = ("split_1", "split_2", "split_3", "split_4+")
 REVERSE_ORDER = ("reverse_1", "reverse_2+")
 STRATA_ORDER = SPLIT_ORDER + REVERSE_ORDER + ("none",)
+
+# 形成日がイベント窓より前だと `period_end` だけで言い切れる最小の年差（#687）。
+# 年差 1 は窓の内側に必ず入る（上の docstring の包含関係）ので分けられない。
+SEPARABLE_MIN_YEARS = 2
+# 再測定の着手条件（#687 で測る前に登録した）。#685 の実測で `split_2` は 494 社・CI 半幅
+# 0.0224 だった。半幅は概ね 1/√社数 で縮むので、最小検出効果を +0.05（`split_4+` の +0.0696 と
+# 同程度）に置くと 494 x (0.0224 / 0.05)^2 = 99 社。**外挿なので、実際に測るときは達成された
+# CI 半幅を確かめる**（効果量が小さければこの社数でも足りない）。
+RETRY_MIN_COMPANIES = 100
 
 
 class Sample(NamedTuple):
@@ -107,6 +136,34 @@ def stratum_of(event, row_year: int) -> str:
     return "reverse_2+" if years >= 2 else "reverse_1"
 
 
+class _GapEvent(NamedTuple):
+    """`stratum_of` へ年差だけを渡すための最小のイベント（`AMBIGUOUS_STRATA` の導出用）。"""
+    year: int
+    canonical: float
+
+
+# 形成月と分割日の前後を `period_end` から分けられない層（#687）。**層名を書き写さない**
+# ——`stratum_of` から導出するので、層の刻み方（`MAX_YEARS_BUCKET`）を変えても追随する。
+AMBIGUOUS_STRATA = frozenset(
+    stratum_of(_GapEvent(years, ratio), 0)
+    for years in range(1, SEPARABLE_MIN_YEARS)
+    for ratio in (2.0, 0.5)
+)
+
+
+def is_separable(stratum: str) -> bool:
+    """その層で「分割が形成月より前か後か」を `period_end` から言い切れるか（#687）。
+
+    `_find_applicable_fin` が年 Y の行を返す形成日の範囲 `[期末_Y + 45日, 期末_{Y+1} + 45日)` は、
+    年 Y+1 のイベントの窓 `(期末_Y - 45日, 期末_{Y+1} + 45日]` に**必ず含まれる**。
+    よって年差 1 の層（`split_1` / `reverse_1`）は全サンプルが曖昧で、そこへ単調性の判定を
+    置くと原理的に通らない。年差 2 以上なら形成日は必ず窓より前になる。
+
+    `none`（将来のイベントが無い）は分ける対象そのものが無いので True を返す。
+    """
+    return stratum not in AMBIGUOUS_STRATA
+
+
 def build_samples(prices_by_co: Mapping[str, Sequence], rows_by_ec: Mapping[str, Sequence],
                   evs_by_ec: Mapping[str, Sequence], factors: Mapping[tuple[str, int], float],
                   find_applicable_fin) -> list[Sample]:
@@ -118,29 +175,98 @@ def build_samples(prices_by_co: Mapping[str, Sequence], rows_by_ec: Mapping[str,
     """
     out: list[Sample] = []
     for ec, price_rows in prices_by_co.items():
-        fin_recs = rows_by_ec.get(ec)
-        if not fin_recs:
-            continue
-        n = len(price_rows)
-        dates = [r.trade_date for r in price_rows]
-        closes = [r.close_last for r in price_rows]
-        month_ends = [i for i in range(n - 1) if dates[i][:7] != dates[i + 1][:7]] + [n - 1]
         evs = evs_by_ec.get(ec, ())
-        for i in month_ends:
-            if i < 4 or i + HORIZON_WEEKS >= n:
-                continue
-            c0, c1 = closes[i], closes[i + HORIZON_WEEKS]
-            if not c0 or not c1 or c0 <= 0 or c1 <= 0:
-                continue
-            fin = find_applicable_fin(fin_recs, dates[i])
-            if fin is None:
-                continue
+        for d, c0, c1, fin in usable_formation_points(
+                price_rows, rows_by_ec.get(ec), find_applicable_fin):
             f = factors.get((ec, fin.year), 1.0)
             ev = nearest_future_event(evs, fin.year)
-            out.append(Sample(dates[i][:7], ec, stratum_of(ev, fin.year),
+            out.append(Sample(d[:7], ec, stratum_of(ev, fin.year),
                               math.log(f) if f > 0 else float("nan"),
                               math.log(c1 / c0)))
     return out
+
+
+def usable_formation_points(price_rows: Optional[Sequence], fin_recs: Optional[Sequence],
+                            find_applicable_fin):
+    """52週先ラベルが作れる形成日を `(形成日, 当時の終値, 52週先の終値, 効いている財務行)` で返す。
+
+    `build_samples` と着手条件のカウンタ（`count_datable_future_companies`）が**共有する**
+    ——片方だけで条件を変えると、数えている母集団と測っている母集団が静かにずれる。
+    """
+    if not fin_recs or not price_rows:
+        return
+    n = len(price_rows)
+    dates = [r.trade_date for r in price_rows]
+    closes = [r.close_last for r in price_rows]
+    month_ends = [i for i in range(n - 1) if dates[i][:7] != dates[i + 1][:7]] + [n - 1]
+    for i in month_ends:
+        if i < 4 or i + HORIZON_WEEKS >= n:
+            continue
+        c0, c1 = closes[i], closes[i + HORIZON_WEEKS]
+        if not c0 or not c1 or c0 <= 0 or c1 <= 0:
+            continue
+        fin = find_applicable_fin(fin_recs, dates[i])
+        if fin is None:
+            continue
+        yield dates[i], c0, c1, fin
+
+
+def count_datable_future_companies(prices_by_co: Mapping[str, Sequence],
+                                   rows_by_ec: Mapping[str, Sequence],
+                                   evs_by_ec: Mapping[str, Sequence],
+                                   official_by_ec: Mapping[str, Sequence],
+                                   find_applicable_fin, window_of) -> dict:
+    """再測定の着手条件を数える（#687 で測る前に登録した条件）。**平均は出さない。**
+
+    数えるのは **`split_1`（分割まで1年）の層だけ**である。公式の日付が新しい情報を足すのは
+    この層に限られる——2年以上の層は形成日が必ず窓より前で元から綺麗なので、そこを数えても
+    検定力は増えず、**閾値を即座に満たしたように見せるだけ**になる（実測 全層だと 177 社 /
+    11,057 件で、1年層だけなら桁が違う）。`RETRY_MIN_COMPANIES` は 1年層に必要な社数として
+    導いた値である。
+
+    採る条件は、公式 `AdjFactor` の日付（`jquants_adj_factor_events`）が最寄り未来イベントの
+    窓の中に**ちょうど1件**あり、その日付が形成日より**後**であること。窓の中に2件以上あると
+    どれが層を決めたイベントか分けられないので採らない。併合（`reverse_1`）は事前登録した
+    判定式の対象外なので数えない。
+
+    `window_of` には `measure_split_valuation_bias.event_window` を渡す（窓の定義を写さない）。
+    戻り値は `{"companies": 社数, "samples": 件数, "threshold": RETRY_MIN_COMPANIES,
+    "ready": bool}`。
+    """
+    companies: set[str] = set()
+    months: set[str] = set()
+    n_samples = 0
+    for ec, price_rows in prices_by_co.items():
+        evs = evs_by_ec.get(ec)
+        official = official_by_ec.get(ec)
+        if not evs or not official:
+            continue
+        for d, _c0, _c1, fin in usable_formation_points(
+                price_rows, rows_by_ec.get(ec), find_applicable_fin):
+            ev = nearest_future_event(evs, fin.year)
+            if ev is None or ev.canonical is None or ev.canonical <= 1.0:
+                continue
+            # 公式の日付で新しく綺麗になるのは、`period_end` では分けられない層だけ
+            if is_separable(stratum_of(ev, fin.year)):
+                continue
+            win = window_of(ev)
+            if win is None:
+                continue
+            w0, w1 = win
+            inside = [dt for dt, _f in official if w0 < dt <= w1]
+            if len(inside) != 1 or inside[0] <= d:
+                continue
+            companies.add(ec)
+            months.add(d[:7])
+            n_samples += 1
+    return {"companies": len(companies), "samples": n_samples,
+            "threshold": RETRY_MIN_COMPANIES,
+            # 形成月の広さ。公式の日付は契約窓（2024-06 以降）にしか無いので、社数が閾値を
+            # 超えても**月が数えるほどしか無い**ことがある。そのときは社単位の CI が
+            # 月をまたぐ相関を拾えず、外挿した検定力より実際は弱い。
+            "months": len(months),
+            "month_range": [min(months), max(months)] if months else None,
+            "ready": len(companies) >= RETRY_MIN_COMPANIES}
 
 
 def demean_by_month(samples: Sequence[Sample]) -> list[Sample]:
@@ -183,7 +309,7 @@ def summarize(samples: Sequence[Sample], *, n_boot: int = N_BOOT, seed: int = SE
         groups = by.get(name)
         if not groups:
             out[name] = {"n": 0, "n_companies": 0, "mean": None, "ci": [None, None],
-                         "mean_log_f": None}
+                         "mean_log_f": None, "separable": is_separable(name)}
             continue
         vals = [v for g in groups.values() for v in g]
         lo, hi = cluster_bootstrap_ci(groups, n_boot=n_boot, seed=seed)
@@ -194,16 +320,31 @@ def summarize(samples: Sequence[Sample], *, n_boot: int = N_BOOT, seed: int = SE
             "mean": sum(vals) / len(vals),
             "ci": [lo, hi],
             "mean_log_f": (sum(lf) / len(lf)) if lf else None,
+            # 形成月と分割日の前後を分けられる層か（#687）。分けられない層に判定を置くと
+            # 原理的に通らない。
+            "separable": is_separable(name),
         }
     return out
 
 
+RETIRED_REASON = (
+    "分割まで1年の層は形成日が必ずイベント窓の内側に入るので、分割が既に起きたサンプルと"
+    "未来のサンプルを period_end からは分けられない。この判定は原理的に通らない層を"
+    "含んでいた。この行は #685 時点の記録であって、新しい判断の根拠にしない"
+    "（ADR-0055 決定7・#687）")
+
+
 def verdict(summary: Mapping[str, Mapping]) -> dict:
-    """結果を見る前に決めた判定（Issue #685）。"""
+    """結果を見る前に決めた判定（Issue #685）。**#687 で退役した**。
+
+    計算も出力も #685 のまま変えない——当時の記録を再現できること自体が、退役の説明の
+    裏付けになる。読み手が新しい判断へ使わないよう `retired` を返し、`report` が明示する。
+    """
     means = [summary.get(k, {}).get("mean") for k in SPLIT_ORDER]
+    retired = {"retired": True, "superseded_by": 687, "retired_reason": RETIRED_REASON}
     if any(m is None for m in means):
         return {"keep_leak_reading": False,
-                "reason": "分割側の層に空きがあり、単調性を判定できない"}
+                "reason": "分割側の層に空きがあり、単調性を判定できない", **retired}
     monotone = all(a > b for a, b in zip(means, means[1:]))
     lo = (summary["split_1"].get("ci") or [None])[0]
     ci_ok = lo is not None and lo > 0
@@ -214,7 +355,7 @@ def verdict(summary: Mapping[str, Mapping]) -> dict:
     else:
         reason = "1年の層の CI が 0 を含む（または下回る）"
     return {"keep_leak_reading": bool(monotone and ci_ok), "monotone": monotone,
-            "split_1_ci_above_zero": ci_ok, "reason": reason}
+            "split_1_ci_above_zero": ci_ok, "reason": reason, **retired}
 
 
 def compare_factors(computed: Mapping[tuple[str, int], float],
@@ -238,7 +379,8 @@ def _num(v, digits: int = 4) -> str:
     return f"{v:+.{digits}f}" if isinstance(v, float) else str(v)
 
 
-def report(summary: Mapping[str, Mapping], check: Mapping, result: Mapping) -> None:
+def report(summary: Mapping[str, Mapping], check: Mapping, result: Mapping,
+           trigger: Optional[Mapping] = None) -> None:
     print("")
     print("=== F の突合（作り直した値 vs split_adjustment_factors） ===")
     print(f"  computed={check['n_computed']} table={check['n_table']} "
@@ -246,15 +388,28 @@ def report(summary: Mapping[str, Mapping], check: Mapping, result: Mapping) -> N
           f"differ={check['differ']} -> {'MATCH' if check['match'] else 'MISMATCH'}")
     print("")
     print("=== 52週先の超過リターン（月内平均を引いた log リターン）を層別 ===")
-    print("stratum        samples  companies     mean     ci_lo     ci_hi  mean_logF")
+    print("stratum        samples  companies     mean     ci_lo     ci_hi  mean_logF  separable")
     for name in STRATA_ORDER:
         r = summary[name]
         lo, hi = r["ci"]
+        sep = "yes" if r.get("separable", is_separable(name)) else "NO"
         print(f"{name:<12} {r['n']:>9} {r['n_companies']:>10} {_num(r['mean']):>8} "
-              f"{_num(lo):>9} {_num(hi):>9} {_num(r['mean_log_f'], 3):>10}")
+              f"{_num(lo):>9} {_num(hi):>9} {_num(r['mean_log_f'], 3):>10} {sep:>10}")
+    print("  separable=NO は形成月と分割日の前後を period_end から分けられない層（#687）")
     print("")
-    print(f"=== verdict === {'KEEP' if result['keep_leak_reading'] else 'DROP'} the leak reading: "
+    print(f"=== verdict (RETIRED #685 -> #687) === "
+          f"{'KEEP' if result['keep_leak_reading'] else 'DROP'} the leak reading: "
           f"{result['reason']}")
+    print(f"  [retired] {result.get('retired_reason', RETIRED_REASON)}")
+    if trigger is not None:
+        print("")
+        print("=== 再測定の着手条件（#687 で測る前に登録した） ===")
+        rng = trigger.get("month_range")
+        print(f"  公式の分割日で「形成月より後」と言い切れる社数 = {trigger['companies']}"
+              f" / {trigger['threshold']}（サンプル {trigger['samples']}・"
+              f"形成月 {trigger.get('months', 0)}"
+              f"{'（' + rng[0] + '〜' + rng[1] + '）' if rng else ''}）"
+              f" -> {'READY' if trigger['ready'] else 'NOT YET'}")
     if not check["match"]:
         print("  [warn] F が係数表と一致しない。この結果で判断しないこと")
 
@@ -276,10 +431,11 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
 
     from collector_prices import compute_split_adjustments
-    from database import SessionLocal, SplitAdjustmentFactor
+    from database import SessionLocal, SplitAdjustmentFactor, load_jquants_adj_factor_events
     from plugins.macro_snapshots import _find_applicable_fin
     from scripts._cache import set_refresh
     from scripts.candidate_bakeoff import _load_prices
+    from scripts.measure_split_valuation_bias import event_window
 
     db = SessionLocal()
     try:
@@ -291,6 +447,9 @@ def main(argv: list[str] | None = None) -> int:
         table = {(ec, int(y)): float(f) for ec, y, f in db.query(
             SplitAdjustmentFactor.edinet_code, SplitAdjustmentFactor.year,
             SplitAdjustmentFactor.factor).all()}
+        # 着手条件（#687）を数えるための公式の分割日。`compute_split_adjustments` も内部で
+        # 読んでいるが返さないので、同じセッションで読み直す（表は小さい）。
+        official = load_jquants_adj_factor_events(db)
         db.commit()
     finally:
         db.close()
@@ -305,17 +464,21 @@ def main(argv: list[str] | None = None) -> int:
 
     set_refresh(args.refresh_cache)
     prices = _load_prices(args.allow_full_pull)
+    evs_by_ec = events_by_company(events)
     samples = demean_by_month(build_samples(
-        prices, rows_by_ec, events_by_company(events), factors, _find_applicable_fin))
+        prices, rows_by_ec, evs_by_ec, factors, _find_applicable_fin))
     summary = summarize(samples, n_boot=args.n_boot)
     result = verdict(summary)
-    report(summary, check, result)
+    trigger = count_datable_future_companies(
+        prices, rows_by_ec, evs_by_ec, official, _find_applicable_fin, event_window)
+    report(summary, check, result, trigger)
 
     if args.json_out:
         p = Path(args.json_out)
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(json.dumps({
             "factor_check": check, "summary": summary, "verdict": result,
+            "retry_trigger": trigger,
             "n_samples": len(samples), "n_boot": args.n_boot, "seed": SEED,
             "months": [min(s.ym for s in samples), max(s.ym for s in samples)] if samples else None,
         }, ensure_ascii=False, indent=2), encoding="utf-8")

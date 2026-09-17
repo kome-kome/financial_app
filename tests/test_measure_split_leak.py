@@ -14,8 +14,9 @@ from plugins import macro_snapshots as ms
 from scripts import measure_split_leak as L
 
 
-def ev(ec, year, canonical):
-    return SimpleNamespace(edinet_code=ec, year=year, canonical=canonical)
+def ev(ec, year, canonical, prev_period_end=None, period_end=None):
+    return SimpleNamespace(edinet_code=ec, year=year, canonical=canonical,
+                           prev_period_end=prev_period_end, period_end=period_end)
 
 
 def fin(year, period_end):
@@ -73,6 +74,43 @@ class TestStratum:
         assert names <= set(L.STRATA_ORDER)
 
 
+class TestSeparability:
+    """#687: 年差1の層は形成日が必ずイベント窓の内側に入る＝前後を分けられない。"""
+
+    def test_only_the_one_year_strata_are_ambiguous(self):
+        assert L.AMBIGUOUS_STRATA == {"split_1", "reverse_1"}
+
+    def test_derived_from_stratum_of_not_hand_written(self):
+        """層の刻み方を変えても追随する（書き写した名前を持たない）。"""
+        assert all(name in L.STRATA_ORDER for name in L.AMBIGUOUS_STRATA)
+        assert all(L.stratum_of(L._GapEvent(1, r), 0) in L.AMBIGUOUS_STRATA for r in (2.0, 0.5))
+
+    @pytest.mark.parametrize("stratum,expected", [
+        ("split_1", False), ("reverse_1", False),
+        ("split_2", True), ("split_3", True), ("split_4+", True),
+        ("reverse_2+", True), ("none", True),
+    ])
+    def test_is_separable(self, stratum, expected):
+        assert L.is_separable(stratum) is expected
+
+    def test_the_window_contains_every_one_year_formation_date(self):
+        """包含関係そのものを実データの定義で確かめる（#687 の証明の実行版）。
+
+        年 2020 の行が効く形成日の範囲は [2020-12-31+45日, 2021-12-31+45日)。
+        年 2021 のイベントの窓は (2020-12-31-45日, 2021-12-31+45日]。
+        """
+        from scripts.measure_split_valuation_bias import event_window
+
+        w0, w1 = event_window(ev("A", 2021, 2.0, "2020-12-31", "2021-12-31"))
+        prices = {"A": weekly(2020, 200, growth=0.001)}
+        rows = {"A": [fin(2020, "2020-12-31"), fin(2021, "2021-12-31")]}
+        points = [d for d, _c0, _c1, f in
+                  L.usable_formation_points(prices["A"], rows["A"], ms._find_applicable_fin)
+                  if f.year == 2020]
+        assert points, "年 2020 の行が効く形成日が1つも無い"
+        assert all(w0 < d <= w1 for d in points), "窓の外に出た形成日がある"
+
+
 class TestBuildSamples:
     def test_label_and_applicable_row_follow_the_panel(self):
         prices = {"A": weekly(2020, 160, growth=0.01)}
@@ -122,6 +160,12 @@ class TestDemeanAndSummary:
         assert got["split_1"]["mean"] == pytest.approx(0.2)
         assert got["none"]["n"] == 0 and got["none"]["mean"] is None
 
+    def test_every_stratum_carries_separability(self):
+        """空の層でも `separable` が落ちない（#687・report が読む）。"""
+        got = L.summarize([L.Sample("m", "A", "split_1", 0.7, 0.2)], n_boot=200)
+        assert all("separable" in got[k] for k in L.STRATA_ORDER)
+        assert got["split_1"]["separable"] is False and got["split_2"]["separable"] is True
+
     def test_bootstrap_resamples_companies_not_rows(self):
         """1社だけの層は社単位では CI が作れない（行で引くと偽の精度が出る）。"""
         assert L.cluster_bootstrap_ci({"A": [0.1, 0.2, 0.3]}) == (None, None)
@@ -160,6 +204,16 @@ class TestVerdict:
         for means in ([0.3, 0.2, 0.1, 0.05], [0.1, 0.2, 0.3, 0.4], [0.3, None, 0.1, 0.0]):
             L.verdict(_summary(means))["reason"].encode("cp932")
 
+    def test_every_path_says_it_is_retired(self):
+        """#687: 再実行した人が新しい判断の根拠として読まないための印。"""
+        for means in ([0.3, 0.2, 0.1, 0.05], [0.3, 0.1, 0.2, 0.05], [0.3, None, 0.1, 0.05]):
+            got = L.verdict(_summary(means))
+            assert got["retired"] is True and got["superseded_by"] == 687
+            assert got["retired_reason"] == L.RETIRED_REASON
+
+    def test_retired_reason_survives_cp932(self):
+        L.RETIRED_REASON.encode("cp932")
+
 
 class TestCompareFactors:
     def test_match(self):
@@ -173,8 +227,86 @@ class TestCompareFactors:
         assert got["match"] is False
 
 
+class TestRetryTrigger:
+    """#687 で測る前に登録した着手条件を数える（層別の平均は出さない）。"""
+
+    def _window(self):
+        from scripts.measure_split_valuation_bias import event_window
+        return event_window
+
+    def _fixture(self, official):
+        prices = {"A": weekly(2020, 200, growth=0.001)}
+        rows = {"A": [fin(2020, "2020-12-31"), fin(2021, "2021-12-31")]}
+        evs = {"A": [ev("A", 2021, 2.0, "2020-12-31", "2021-12-31")]}
+        return L.count_datable_future_companies(
+            prices, rows, evs, official, ms._find_applicable_fin, self._window())
+
+    def test_counts_only_dates_after_the_formation_day(self):
+        """窓の中の公式イベントが形成日より後のサンプルだけ数える。"""
+        got = self._fixture({"A": [("2021-06-30", 0.5)]})
+        assert got["companies"] == 1
+        # 2021-02-14（=2020-12-31+45日）以降 2021-06-30 までの形成日だけが数えられる
+        assert 0 < got["samples"] < 12
+        assert got["threshold"] == L.RETRY_MIN_COMPANIES and got["ready"] is False
+
+    def test_separable_strata_are_not_counted(self):
+        """2年以上の層は元から綺麗＝公式の日付が情報を足さないので数えない（#687）。
+
+        混ぜて数えると閾値を即座に満たしたように見える（実測 全層 177 社 / 11,057 件）。
+        """
+        prices = {"A": weekly(2019, 260, growth=0.001)}
+        rows = {"A": [fin(2019, "2019-12-31"), fin(2020, "2020-12-31"),
+                      fin(2021, "2021-12-31")]}
+        evs = {"A": [ev("A", 2021, 2.0, "2020-12-31", "2021-12-31")]}
+        points = list(L.usable_formation_points(prices["A"], rows["A"], ms._find_applicable_fin))
+        assert any(f.year == 2019 for _d, _c0, _c1, f in points), "2年離れた行のサンプルが無い"
+        got = L.count_datable_future_companies(
+            prices, rows, evs, {"A": [("2021-06-30", 0.5)]},
+            ms._find_applicable_fin, self._window())
+        # 2019 年の行（split_2）は数えず、2020 年の行（split_1）だけを数える
+        counted = [d for d, _c0, _c1, f in points
+                   if f.year == 2020 and d < "2021-06-30"]
+        assert got["samples"] == len(counted)
+
+    def test_two_events_in_the_window_are_not_countable(self):
+        """どちらが層を決めたイベントか分けられないので採らない。"""
+        got = self._fixture({"A": [("2021-06-30", 0.5), ("2021-09-30", 0.5)]})
+        assert (got["companies"], got["samples"], got["months"], got["month_range"],
+                got["ready"]) == (0, 0, 0, None, False)
+
+    def test_date_outside_the_window_is_not_countable(self):
+        assert self._fixture({"A": [("2023-06-30", 0.5)]})["companies"] == 0
+
+    def test_no_official_rows_means_zero(self):
+        assert self._fixture({})["companies"] == 0
+
+    def test_ready_flips_at_the_threshold(self, monkeypatch):
+        monkeypatch.setattr(L, "RETRY_MIN_COMPANIES", 1)
+        assert self._fixture({"A": [("2021-06-30", 0.5)]})["ready"] is True
+
+    def test_reverse_events_are_not_counted(self):
+        """事前登録した判定式は分割側だけを対象にしている。"""
+        prices = {"A": weekly(2020, 200, growth=0.001)}
+        rows = {"A": [fin(2020, "2020-12-31"), fin(2021, "2021-12-31")]}
+        evs = {"A": [ev("A", 2021, 0.5, "2020-12-31", "2021-12-31")]}
+        got = L.count_datable_future_companies(
+            prices, rows, evs, {"A": [("2021-06-30", 2.0)]},
+            ms._find_applicable_fin, self._window())
+        assert got["companies"] == 0
+
+    def test_shares_the_sample_definition_with_build_samples(self):
+        """母集団がずれない（同じ `usable_formation_points` を通る）。"""
+        prices = {"A": weekly(2020, 200, growth=0.001)}
+        rows = {"A": [fin(2020, "2020-12-31"), fin(2021, "2021-12-31")]}
+        points = list(L.usable_formation_points(prices["A"], rows["A"], ms._find_applicable_fin))
+        built = L.build_samples(prices, rows, {}, {}, ms._find_applicable_fin)
+        assert len(points) == len(built)
+
+
 def test_report_survives_cp932(capsys):
-    summary = {k: {"n": 0, "n_companies": 0, "mean": None, "ci": [None, None],
-                   "mean_log_f": None} for k in L.STRATA_ORDER}
-    L.report(summary, L.compare_factors({}, {}), L.verdict(summary))
-    capsys.readouterr().out.encode("cp932")
+    summary = L.summarize([], n_boot=10)
+    trigger = {"companies": 0, "samples": 0, "threshold": L.RETRY_MIN_COMPANIES, "ready": False}
+    L.report(summary, L.compare_factors({}, {}), L.verdict(summary), trigger)
+    out = capsys.readouterr().out
+    out.encode("cp932")
+    assert "RETIRED" in out and "separable" in out and "NOT YET" in out
