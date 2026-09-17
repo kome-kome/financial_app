@@ -28,7 +28,9 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from collector_prices import rebuild_split_adjustment_factors  # noqa: E402
+from collector_prices import (  # noqa: E402
+    compute_split_adjustments, rebuild_split_adjustment_factors,
+)
 from database import (  # noqa: E402
     FinancialRecord, JQuantsAdjFactorCoverage, JQuantsAdjFactorEvent, SplitAdjustmentFactor,
     StockPriceWeekly, load_jquants_adj_factor_coverage, load_jquants_adj_factor_events,
@@ -193,6 +195,35 @@ class TestRebuild:
 
         with pytest.raises(RuntimeError, match="1件も作れなかった"):
             rebuild_split_adjustment_factors(db)
+
+
+class TestComputeIsWhatRebuildWrites:
+    """`compute_split_adjustments` は書き込まずに、係数表と同じ F を返す（#685）。
+
+    リークの測定（`scripts/measure_split_leak.py`）はこの関数で F とイベントを作る。係数表の
+    入力を読み手ごとに揃え直すと、読み忘れがあっても値はもっともらしいまま出る。
+    """
+
+    def test_empty_db_is_none(self, db):
+        assert compute_split_adjustments(db) is None
+
+    def test_does_not_write(self, db, make_fin):
+        _seed_split_company(db, make_fin)
+        compute_split_adjustments(db)
+        assert db.query(SplitAdjustmentFactor).count() == 0
+
+    def test_nontrivial_factors_equal_the_table(self, db, make_fin):
+        _seed_split_company(db, make_fin)
+        _seed_quiet_company(db, make_fin)
+        rows, events, stats, factors = compute_split_adjustments(db)
+        assert events and "n_official_companies" in stats
+        assert {r.edinet_code for r in rows} == {"E00001", "E00002"}
+
+        rebuild_split_adjustment_factors(db)
+
+        table = {(r.edinet_code, r.year): r.factor
+                 for r in db.query(SplitAdjustmentFactor).all()}
+        assert table == {k: v for k, v in factors.items() if v != 1.0}
 
 
 def _seed_bps_path_company(db, make_fin, ec="E00004"):
