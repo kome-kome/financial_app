@@ -27,6 +27,14 @@ _Avoid_: 欠測, 未収集（区別が本質なので言い換えない）
 業種別OLS（producer）が `regression_results` テーブルへ書き込む銘柄×年度の出力（predicted_market_cap / gap_ratio / model[ols|ridge] / sector / computed_at）。バリュエーション分析（consumer・`depends_on=["sector_ols"]`）が消費する seam の通貨。producer 未実行なら乖離分析は前提条件エラー（`plugins.ensure_dependencies` が `depends_on` を runner/専用エンドポイントで強制）。回帰が財務データ更新より古い＝stale。
 _Avoid_: 予測結果, OLS結果（モデル混在を曖昧にするため）
 
+**TTM 行 (trailing-twelve-months row)**:
+半期報告（H1）が出てから次の通期決算が出るまでの期間について、**直近12か月ぶんの業績**を表す合成の行（#424 子2・ADR-0051）。フロー（PL・CF）は「前期の通期 − 前期の H1 + 今期の H1」、ストック（BS）は今期 H1 の期末値。**通期の行とは別の行として過去の年度にも残す**——最新の断面にだけ置くと、学習とバックテストが見る過去の断面に一度も現れず、効果を測れないため。通期の行か TTM 行かの別を[[行の基準]]と呼ぶ。
+_Avoid_: 半期行（H1 の生値の行と混同するため）, 最新業績（鮮度の話と合成の話が混ざるため）
+
+**行の基準 (row basis)**:
+分析用の財務の行が、通期決算そのもの（`annual`）か、[[TTM 行]]（`ttm`）かの別。どちらも12か月ぶんのフローを持つので次元は揃うが、期末日・提出時期・材料が違うので、**消費側が知らないまま混ぜて使える状態を作らない**。
+_Avoid_: 期種 / period_type（`financial_records` の収集単位＝通期・半期の別を指す語で、合成の別とは一致しない）
+
 ## データソースと収集
 
 **全件収集 (full collection)**:
