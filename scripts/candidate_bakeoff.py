@@ -35,7 +35,7 @@ import time
 from collections import defaultdict, namedtuple
 
 import database
-from database import Company, FinancialMetric, SessionLocal
+from database import Company, SessionLocal
 from plugins import get_plugin
 from plugins.model_candidates import (
     CANDIDATES,
@@ -79,6 +79,13 @@ _FinRow = namedtuple("_FinRow", _FIN_FIELDS)
 _CompanyRow = namedtuple("_CompanyRow", ("edinet_code", "sec_code", "name", "industry"))
 # キャッシュ形式を素 tuple へ変えたためキーを更新する（旧 pickle は読めないので作り直す）。
 _FIN_CACHE_KEY = "bakeoff_fin_metrics_v2"
+# **行の基準（`ms.use_fin_rows`）ごとにキーを分ける**（#424 子3）。キーが1つだと、通期で作った
+# pickle が「通期＋TTM」の要求へそのまま返り、測っているつもりのものが入れ替わる（例外は出ない）。
+# 通期のキーは据え置く＝既存のキャッシュも、これまでのゲートの測定条件も変わらない。
+_FIN_CACHE_KEYS: dict[str, str] = {
+    "annual": _FIN_CACHE_KEY,
+    "with_ttm": "bakeoff_fin_metrics_with_ttm_v1",
+}
 _CO_CACHE_KEY = "bakeoff_companies_v2"
 
 
@@ -134,15 +141,23 @@ def _thin(samples_by_ym: dict, meta_by_ym: dict, ids_by_ym: dict, stride: int) -
     return s2, m2, i2
 
 
-def _load_financials(db) -> tuple[dict, dict]:
+def _load_financials(db, use_cache: bool = True) -> tuple[dict, dict]:
     """financial_metrics / companies を軽量 namedtuple でキャッシュして返す。
 
     2回目以降の実行は本番 Supabase を一切叩かない（`--refresh-cache` で再取得）。
+
+    **読む VIEW は `ms.use_fin_rows()` の基準に従う**（#424 子3）。対応と並びは
+    `ms.fin_rows_model()` が唯一の源で、ここへ書き写さない。キャッシュのキーも基準ごとに分ける。
+
+    `use_cache=False` は財務だけキャッシュを通さずに読む（会社マスタは従来どおり）。2つの基準を
+    比べるときに使う——片方の pickle だけが古い世代だと、差に「データの鮮度の差」が混ざる
+    （キーは形状だけで世代を持たないので、黙って旧世代を返す）。同じ実行で両方を読めば構造的に揃う。
     """
+    model, order = ms.fin_rows_model()
+
     def _pull_fin():
         out: dict[str, list] = defaultdict(list)
-        for r in (db.query(FinancialMetric)
-                  .order_by(FinancialMetric.edinet_code, FinancialMetric.period_end).all()):
+        for r in db.query(model).order_by(*order).all():
             out[r.edinet_code].append(tuple(getattr(r, f, None) for f in _FIN_FIELDS))
         return dict(out)
 
@@ -150,7 +165,8 @@ def _load_financials(db) -> tuple[dict, dict]:
         return {c.edinet_code: (c.edinet_code, c.sec_code, c.name, c.industry)
                 for c in db.query(Company).all()}
 
-    fin_raw = cached(_FIN_CACHE_KEY, _pull_fin)
+    fin_raw = (cached(_FIN_CACHE_KEYS[ms.current_fin_rows()], _pull_fin)
+               if use_cache else _pull_fin())
     co_raw = cached(_CO_CACHE_KEY, _pull_companies)
     fin_by_co = {ec: [_FinRow(*vals) for vals in rows] for ec, rows in fin_raw.items()}
     companies = {ec: _CompanyRow(*vals) for ec, vals in co_raw.items()}

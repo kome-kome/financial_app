@@ -108,6 +108,39 @@ stride 刻みで**並び順**に選ぶため、母集団が条件ごとに1社�
 マクロを外したらモデルの前提そのものが消える（モメンタム2軸のように探索空間から落とす
 選択肢が無い）。出すのは母集団を揃えても差が残るかどうかだけである。
 
+## 行の基準モード（`--fin-rows`・#424 子3）
+
+最新業績を「直近12か月（TTM）」の行として学習パネルへ入れるか（`plugins.macro_snapshots.
+use_fin_rows`）の昇格ゲート。ADR-0051 決定9 の形そのもので、切替の両側を共通 (ym, ec) 域で比べる:
+
+    annual   … 通期の行だけ（`financial_metrics`・本番の既定）＝基準
+    with_ttm … 通期＋TTM 行（`financial_metrics_with_ttm`）
+
+    python -m scripts.momentum_gate --fin-rows                    # M-2 / M-6（4検定・alpha 0.0125）
+    python -m scripts.momentum_gate --fin-rows --models risk_return  # M-1 の参考値（別に回す）
+
+**対象は M-2 / M-6**（`FIN_ROWS_MODELS`）。M-1 は strict でパネルを共有できないので、決定9 は
+「別に参考値」としている。混ぜると検定数が変わり、昇格の alpha が決定9 と食い違う。
+
+**基準は `annual`**（本番の構成）。**TTM は母集団を動かす**（2026-09-18 実測・M-2 パネル
+stride=1: 通期のみ 95,254 → 通期＋TTM 85,533・共通 85,012・うち特徴量が変わる行 23,410）。
+TTM 行は成長率などの欠けが通期より多く（前年の TTM が無い年は成長率を作らない）、M-2/M-6 は
+財務列が1つでも欠けた行を**通期の行へ戻さず行ごと落とす**（`_build_snapshots_impl`）。だから
+主判定は共通域で読み、raw の水準は「縮む側は有利に見える」（ADR-0045）に当たる前提で読む。
+
+**このモードでは財務をキャッシュせずに読む。** `_load_financials` の pickle はキーが形状だけで
+世代を持たないので、片方だけが古い世代だと差に「データの鮮度の差」が混ざる。同じ実行で両方を
+読めば構造的に揃う（ローカルの正本からなので数秒で読める）。
+
+**黙って同じものを比べる形を2段で止める。** どちらもエラーの出ない壊れ方で、放っておくと
+「差なし」という結論だけが残る:
+
+  1. TTM 行が0件（夜間の再構築の失敗など）→ `ttm_row_count` が 0 以下で停止
+  2. TTM 行はあるのに断面へ1行も届かない（as-of の選び方の変化など）→ `count_changed_rows` が 0 で停止
+
+判定文は他の軸と同じく中立（`FIN ROWS AXIS`）。**既定を切り替えるかは実測を見て人が決め、
+ADR-0051 に記録する**（決定9「既定を切り替えるのはゲートを通ってから」）。
+
 ## M-1 を測るときの注意
 
 M-1 は `macro_nan_ok=False`（strict）で**母集団自体が M-2/M-6 と別物**なので、パネルを共有
@@ -131,7 +164,13 @@ from database import SessionLocal  # noqa: E402
 from model_stats import paired_ic_significance  # noqa: E402
 from plugins import get_plugin  # noqa: E402
 from plugins.macro_ensemble import _align  # noqa: E402
-from plugins.macro_snapshots import build_snapshots, oof_backtest, preload_macro  # noqa: E402
+from plugins.macro_snapshots import (  # noqa: E402
+    FIN_ROW_SOURCES,
+    build_snapshots,
+    oof_backtest,
+    preload_macro,
+    use_fin_rows,
+)
 from plugins.utils import coerce_params  # noqa: E402
 from scripts._cache import cached, set_refresh  # noqa: E402
 from scripts.candidate_bakeoff import (  # noqa: E402
@@ -163,12 +202,16 @@ class Cond(NamedTuple):
     （M-1 は交互作用あり・列数はプラグインの `params_schema()` 既定）で、
     **既存3モードの測定条件は1ビットも動かない**。`max_features=None` は
     「プラグインの既定に従う」の意味で、数値を書き写さないための表現。
+
+    `fin_rows`（#424 子3）は学習パネルが読む行の基準（`use_fin_rows`）。既定 `annual` は
+    本番の構成なので、既存モードの測定条件はやはり動かない。
     """
     use_momentum: bool
     momentum_window: int
     use_macro: bool = True
     build_interactions: bool = True
     max_features: int | None = None
+    fin_rows: str = "annual"
 
 
 CONDS: dict[str, bool] = {"off": False, "on": True}
@@ -206,6 +249,13 @@ INTERACTION_MODELS = ["risk_return"]
 MAXFEAT_MODELS = ["risk_return"]
 MAXFEAT_BASE_PREFIX = "mf"
 
+# 行の基準モード（`--fin-rows`・#424 子3・ADR-0051 決定9）。条件名は切替の値そのもの
+# （`FIN_ROW_SOURCES` から作り、書き写さない）。**基準は本番の構成（通期のみ）**。
+# 対象は M-2 / M-6——決定9 が「M-1 は strict でパネルを共有できないので別に参考値」としている。
+FIN_ROWS_CONDS: tuple[str, ...] = FIN_ROW_SOURCES
+FIN_ROWS_BASE_COND = "annual"
+FIN_ROWS_MODELS = ["xgb_m2", "elasticnet"]
+
 MODELS = ["xgb_m2", "elasticnet"]
 MODEL_LABELS = {"xgb_m2": "M-2(XGBoost)", "elasticnet": "M-6(ElasticNet)",
                 "risk_return": "M-1(RiskReturn)"}
@@ -239,16 +289,18 @@ def maxfeat_cond_name(n: int) -> str:
 def build_conditions(windows: list[int] | None = None,
                     macro: bool = False,
                     interactions: bool = False,
-                    max_features: list[int] | None = None) -> dict[str, Cond]:
+                    max_features: list[int] | None = None,
+                    fin_rows: bool = False) -> dict[str, Cond]:
     """条件集合 {名前: Cond} を作る。
 
-    5つのモードがある。**同時に使えるのは1つだけ**（下記）:
+    6つのモードがある。**同時に使えるのは1つだけ**（下記）:
 
       既定           … ADR-0045 の昇格ゲートと完全に同じ2条件（`off` / `on`・マクロは ON のまま）
       `windows`      … モメンタム無し ＋ 各窓（#592・ADR-0050）
       `macro`        … マクロ無し ＋ マクロ有り（#604）。モメンタムは既定 OFF に固定
       `interactions` … 交互作用なし ＋ あり（#615）。モメンタム OFF・マクロ ON に固定
       `max_features` … BIC の列数上限を振る（#615）。他の軸は本番構成に固定
+      `fin_rows`     … 通期のみ ＋ 通期＋TTM（#424 子3）。他の軸は本番構成に固定
 
     **2つ以上を同時に指定できない。** 母集団を動かしうる軸を2つ同時に振ると、どちらの
     効果かが分離できない——それは共通域制限をかけても解けない（共通域は「全条件で測れる
@@ -263,7 +315,8 @@ def build_conditions(windows: list[int] | None = None,
     alpha が不当に厳しくなる）。
     """
     modes = [("--windows", bool(windows)), ("--macro", macro),
-             ("--interactions", interactions), ("--max-features", bool(max_features))]
+             ("--interactions", interactions), ("--max-features", bool(max_features)),
+             ("--fin-rows", fin_rows)]
     picked = [name for name, on in modes if on]
     if len(picked) > 1:
         raise ValueError(
@@ -282,6 +335,10 @@ def build_conditions(windows: list[int] | None = None,
         if any(n < 1 for n in ns):
             raise ValueError(f"列数上限は1以上の整数で指定してください: {ns}")
         return {maxfeat_cond_name(n): Cond(False, MOM_WINDOW, True, True, n) for n in ns}
+    if fin_rows:
+        # 行の基準だけを差し替える。他の軸はすべて本番構成（モメンタム OFF・マクロ ON・
+        # 交互作用と列数はプラグインの既定）＝決定9 は「本番の断面に TTM を足すか」を問う。
+        return {src: Cond(False, MOM_WINDOW, fin_rows=src) for src in FIN_ROWS_CONDS}
     if not windows:
         return {name: Cond(use_mom, MOM_WINDOW) for name, use_mom in CONDS.items()}
     ws = sorted({int(w) for w in windows})
@@ -300,8 +357,10 @@ def base_of(conds: dict[str, Cond], default_max_features: int | None = None) -> 
     （ADR-0050 の実測）。そこで分母は**本番値**（プラグインの `params_schema()` 既定）に置き、
     「本番から動かすとどうなるか」を見る形にする。本番値が条件集合に無いときは最小値へ倒す
     （比較の向きが読み手に伝わればよく、どれを選んでも母集団は同じ）。
+
+    行の基準モードの分母も**本番の構成**（`annual`）。TTM を足したときに本番から何が変わるかを見る。
     """
-    for cand in (BASE_COND, MACRO_BASE_COND, INTERACTION_BASE_COND):
+    for cand in (BASE_COND, MACRO_BASE_COND, INTERACTION_BASE_COND, FIN_ROWS_BASE_COND):
         if cand in conds:
             return cand
     prod = maxfeat_cond_name(default_max_features) if default_max_features else None
@@ -327,11 +386,13 @@ ALPHA = 0.05 / N_TESTS
 # 「どの軸を測った結果か」が中身を読むまで分からない。窓モードは既定と同じファイルを使う
 # （#592 以来の挙動で、ここで変えると過去の結果の置き場所が変わる）。
 MODE_SUFFIX: dict[str, str] = {"default": "", "windows": "", "macro": "_macro",
-                               "interactions": "_interactions", "max_features": "_maxfeat"}
+                               "interactions": "_interactions", "max_features": "_maxfeat",
+                               "fin_rows": "_fin_rows"}
 
 
 def mode_of(windows: list[int] | None = None, macro: bool = False,
-            interactions: bool = False, max_features: list[int] | None = None) -> str:
+            interactions: bool = False, max_features: list[int] | None = None,
+            fin_rows: bool = False) -> str:
     """測定モードの名前を返す（`build_conditions` と同じ引数から1箇所で導出する）。
 
     **#615 で足した2モードは、ここを持たないまま別モードの名前で出力されていた**——
@@ -346,6 +407,8 @@ def mode_of(windows: list[int] | None = None, macro: bool = False,
         return "interactions"
     if max_features:
         return "max_features"
+    if fin_rows:
+        return "fin_rows"
     return "windows" if windows else "default"
 
 
@@ -363,6 +426,8 @@ _AXIS_VERDICTS: dict[str, tuple[str, str]] = {
                      "no limit beat the baseline limit"),
     "windows": ("WINDOW SCAN",
                 "no window beat the no-momentum baseline"),
+    "fin_rows": ("FIN ROWS AXIS",
+                 "with_ttm did not beat the annual-only baseline"),
 }
 
 
@@ -372,7 +437,8 @@ def verdict_text(mode: str, n_conds: int, passed: list[str], regressed: list[str
     窓モードは**窓が2本以上のときだけ** WINDOW SCAN になる（`--windows 12` は2条件で、
     既定ゲートと同じ PROMOTE/REJECT の文言になる）。これは切り出す前からの挙動で変えない。
     """
-    if mode in ("macro", "interactions", "max_features") or (mode == "windows" and n_conds > 2):
+    if (mode in ("macro", "interactions", "max_features", "fin_rows")
+            or (mode == "windows" and n_conds > 2)):
         head, none = _AXIS_VERDICTS[mode]
         verdict = (f"{head}: effects that survive the common-domain restriction: "
                    + ", ".join(passed)) if passed else (
@@ -448,6 +514,56 @@ def _restrict(resid_by_ym: dict, oof_meta: dict, ids_by_ym: dict, keys: set) -> 
             r2[ym] = rr
             m2[ym] = mm
     return r2, m2
+
+
+def ttm_row_count(fins: dict[str, dict]) -> int | None:
+    """「通期＋TTM」側が通期側より何行多いか（＝読めた TTM 行の数）。
+
+    `fins` は {行の基準: fin_by_co}。両方が揃っていなければ None（比べていない）。
+    **0 以下は「TTM 行が1件も読めていない」**——夜間の再構築が失敗して表が空でも、VIEW の通期側は
+    `financial_metrics` と同じ行を返すので、比較は例外なく走って「差なし」になる（#424 子3）。
+    """
+    if not all(src in fins for src in FIN_ROWS_CONDS):
+        return None
+    n = {src: sum(len(rows) for rows in fins[src].values()) for src in FIN_ROWS_CONDS}
+    return n["with_ttm"] - n["annual"]
+
+
+def _same_value(a, b) -> bool:
+    """特徴量の値が同じか（nan 同士・None 同士は同じとみなす）。"""
+    if a is None or b is None:
+        return a is None and b is None
+    if a == b:
+        return True
+    return isinstance(a, float) and isinstance(b, float) and a != a and b != b
+
+
+def count_changed_rows(panel_a: tuple, panel_b: tuple) -> int:
+    """両パネルに共通する (ym, ec) のうち、特徴量の値が1つでも違う行の数。
+
+    パネルは `_build` の返り値 `(samples_by_ym, meta_by_ym, ids_by_ym, feats)`。特徴量は
+    **列名で**突き合わせる（M-1 のように条件ごとに選ばれる列が違っても比べられる）。目的変数は
+    行の基準では変わらないので見ない。
+
+    **0 は「切替が断面に1行も届いていない」**——TTM 行が表にあっても、as-of の選び方などで
+    1行も選ばれなければ両条件は同じパネルになり、「差なし」という結論だけが残る（#424 子3）。
+    """
+    sa, _ma, ia, fa = panel_a
+    sb, _mb, ib, fb = panel_b
+    changed = 0
+    for ym, pairs_a in sa.items():
+        pairs_b = sb.get(ym)
+        if not pairs_b:
+            continue
+        rows_b = {ec: row for ec, (row, _tgt) in zip(ib.get(ym, []), pairs_b)}
+        for ec, (row_a, _tgt) in zip(ia.get(ym, []), pairs_a):
+            row_b = rows_b.get(ec)
+            if row_b is None:
+                continue
+            va, vb = dict(zip(fa, row_a)), dict(zip(fb, row_b))
+            if va.keys() != vb.keys() or not all(_same_value(va[k], vb[k]) for k in va):
+                changed += 1
+    return changed
 
 
 def _row(o: dict) -> dict:
@@ -579,6 +695,10 @@ def main() -> None:
     ap.add_argument("--max-features", dest="max_features",
                     help="列数モード（BIC の max_features をカンマ区切りで振る・#615。"
                          "例: 5,10,20,30,40）。分母は本番値。他モードと併用不可")
+    ap.add_argument("--fin-rows", dest="fin_rows", action="store_true",
+                    help="行の基準モード（通期のみ と 通期＋TTM を共通域で比べる・#424 子3・"
+                         f"ADR-0051 決定9）。モデル既定は {','.join(FIN_ROWS_MODELS)}。"
+                         "財務はキャッシュせずに読む。他モードと併用不可")
     ap.add_argument("--smoke", action="store_true", help="サンプルを間引いた短時間確認")
     ap.add_argument("--stride", type=int, default=1, help="各月のサンプル間引き幅")
     ap.add_argument("--allow-full-pull", action="store_true",
@@ -599,6 +719,8 @@ def main() -> None:
         default_models = INTERACTION_MODELS
     elif args.max_features:
         default_models = MAXFEAT_MODELS
+    elif args.fin_rows:
+        default_models = FIN_ROWS_MODELS
     else:
         default_models = MODELS
     models = ([m.strip() for m in args.models.split(",") if m.strip()]
@@ -612,8 +734,8 @@ def main() -> None:
     max_features = ([int(n) for n in args.max_features.replace(" ", "").split(",") if n]
                     if args.max_features else None)
     try:
-        conds = build_conditions(windows, macro=args.macro,
-                                 interactions=args.interactions, max_features=max_features)
+        conds = build_conditions(windows, macro=args.macro, interactions=args.interactions,
+                                 max_features=max_features, fin_rows=args.fin_rows)
     except ValueError as e:
         raise SystemExit(str(e))
     # 列数モードの分母は本番値（プラグイン既定）。**ここで数値を書き写さない**。
@@ -631,7 +753,7 @@ def main() -> None:
     # 既定の出力先はモードで分ける（`MODE_SUFFIX`）。`mode` フィールドはあるが、
     # ファイル名で取り違えたまま比較するほうが起きやすい。
     mode = mode_of(windows, macro=args.macro, interactions=args.interactions,
-                   max_features=max_features)
+                   max_features=max_features, fin_rows=args.fin_rows)
     default_out = f"momentum_gate{MODE_SUFFIX[mode]}.json"
     out_path = Path(args.json_path) if args.json_path else _OUT_DIR / default_out
 
@@ -648,8 +770,25 @@ def main() -> None:
         print(f"weekly px cache: cos={len(prices_by_co)} rows={n_rows} "
               f"range={first}..{last}", flush=True)
 
-        fin_by_co, companies = _load_financials(db)
-        print(f"panel src: fin_cos={len(fin_by_co)} companies={len(companies)}", flush=True)
+        # 財務は**条件が使う行の基準ごと**に読む（#424 子3）。基準は `use_fin_rows` の内側で
+        # 決まり、`_load_financials` はそれに従う。行の基準モードでは両方をキャッシュせずに
+        # 同じ実行の中で読む（片方の pickle だけが古い世代だと、差に鮮度の差が混ざる）。
+        fins: dict[str, dict] = {}
+        companies: dict = {}
+        for src in [x for x in FIN_ROW_SOURCES if any(c.fin_rows == x for c in conds.values())]:
+            with use_fin_rows(src):
+                fins[src], companies = _load_financials(db, use_cache=(mode != "fin_rows"))
+            n_rows = sum(len(rows) for rows in fins[src].values())
+            print(f"panel src[{src}]: fin_cos={len(fins[src])} fin_rows={n_rows} "
+                  f"companies={len(companies)}", flush=True)
+        ttm_rows = ttm_row_count(fins)
+        if mode == "fin_rows":
+            if not ttm_rows or ttm_rows <= 0:
+                raise SystemExit(
+                    f"中止: 通期＋TTM 側に TTM 行が読めていません（差 {ttm_rows} 行）。"
+                    "このまま比べると両側が同じデータになり「差なし」だけが残る。"
+                    "ttm_financial_records（夜間の rebuild_ttm_financial_records）を確認してください")
+            print(f"ttm rows: {ttm_rows}", flush=True)
 
         # マクロは**必要な種別の和集合**を1度だけ読む（M-1 の44系列は M-2 の53系列の
         # 部分集合だが、それに寄りかからず和集合を取る＝将来どちらかが増えても壊れない）。
@@ -669,7 +808,7 @@ def main() -> None:
         stats: dict[str, dict] = {}
         for cond, c in conds.items():
             for kind in kinds:
-                s, m, i, feats = _build(kind, args, prices_by_co, fin_by_co, companies,
+                s, m, i, feats = _build(kind, args, prices_by_co, fins[c.fin_rows], companies,
                                         macro_cache, c.use_momentum, c.momentum_window,
                                         c.use_macro, c.build_interactions, c.max_features)
                 panels[(cond, kind)] = (s, m, i, feats)
@@ -682,12 +821,30 @@ def main() -> None:
                 head = ", ".join(feats[:_FEATURE_PREVIEW])
                 more = f", +{len(feats) - _FEATURE_PREVIEW}" if len(feats) > _FEATURE_PREVIEW else ""
                 print(f"[{cond}/{kind}] mw={c.momentum_window if c.use_momentum else '-'} "
+                      f"rows={c.fin_rows} "
                       f"macro={'on' if c.use_macro else 'off'} "
                       f"inter={'on' if c.build_interactions else 'off'} "
                       f"maxfeat={c.max_features or '-'} "
                       f"months={st['months']} ({st['first_ym']}..{st['last_ym']}) "
                       f"samples={st['samples']} companies={st['companies']} "
                       f"features={st['n_features']} [{head}{more}]", flush=True)
+
+        # 行の基準モードでは、切替が**断面まで届いたか**を確かめてから CV に入る。TTM 行が
+        # 表にあっても1行も選ばれなければ両条件は同じパネルで、「差なし」だけが残る。
+        changed_rows: dict[str, int] = {}
+        if mode == "fin_rows":
+            for cond in conds:
+                if cond == base:
+                    continue
+                for kind in kinds:
+                    n = count_changed_rows(panels[(base, kind)], panels[(cond, kind)])
+                    changed_rows[f"{cond}|{kind}"] = n
+                    print(f"[{cond}/{kind}] rows whose features differ from {base}: {n}",
+                          flush=True)
+            if not all(changed_rows.values()):
+                raise SystemExit(
+                    f"中止: 行の基準を切り替えても特徴量が1行も変わっていません {changed_rows}。"
+                    "TTM 行が as-of の選択で1行も選ばれていない可能性がある")
 
         # ── 2. 各条件 × 各モデルを走らせる（残差も受け取る）────────────────────
         results: dict[str, dict] = {}
@@ -833,12 +990,16 @@ def main() -> None:
                               "window": c.momentum_window,
                               "use_macro": c.use_macro,
                               "build_interactions": c.build_interactions,
-                              "max_features": c.max_features}
+                              "max_features": c.max_features,
+                              "fin_rows": c.fin_rows}
                        for name, c in conds.items()},
         "mode": mode,
         "base_cond": base,
         "windows": windows,
         "max_features": max_features,
+        # 行の基準モードの健全性（#424 子3）。他モードでは None / 空。
+        "ttm_rows": ttm_rows,
+        "changed_rows": changed_rows,
         "alpha": alpha,
         "n_tests": n_tests,
         "models": models,

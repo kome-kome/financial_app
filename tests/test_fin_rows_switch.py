@@ -114,3 +114,67 @@ class TestLoadData:
             assert list(cache["load_data"]._data)[0][2] == "annual"
         finally:
             ms._shared_cache.reset(token)
+
+
+class TestFinRowsModel:
+    """基準 → VIEW の対応は `fin_rows_model` だけに置く（検証スクリプトと共有する）。"""
+
+    def test_annual_reads_financial_metrics(self):
+        model, order = ms.fin_rows_model()
+        assert model is database.FinancialMetric
+        assert [c.key for c in order] == ["edinet_code", "period_end"]
+
+    def test_with_ttm_reads_the_union_view_in_a_fixed_order(self):
+        with ms.use_fin_rows("with_ttm"):
+            model, order = ms.fin_rows_model()
+        assert model is database.FinancialMetricWithTTM
+        assert [c.key for c in order] == ["edinet_code", "period_end", "id"]
+
+
+class TestBakeoffFinancials:
+    """検証スクリプトの財務ロード（`candidate_bakeoff._load_financials`・#424 子3）。
+
+    かつては `FinancialMetric` を直に読み、キャッシュのキーにも基準が無かった。
+    `use_fin_rows("with_ttm")` で包んでも**黙って通期だけを測る**——どちらの基準でも妥当な
+    パネルができるので例外は出ず、昇格ゲートは「差なし」を返す。
+    """
+
+    def test_every_source_has_its_own_cache_key(self):
+        from scripts import candidate_bakeoff as cb
+        assert set(cb._FIN_CACHE_KEYS) == set(ms.FIN_ROW_SOURCES)
+        assert len(set(cb._FIN_CACHE_KEYS.values())) == len(ms.FIN_ROW_SOURCES)
+        # 通期のキーは据え置く＝既存のキャッシュもこれまでのゲートの測定条件も変わらない
+        assert cb._FIN_CACHE_KEYS["annual"] == "bakeoff_fin_metrics_v2"
+
+    def test_follows_the_switch(self, db, monkeypatch):
+        from scripts import candidate_bakeoff as cb
+        # 会社マスタは `scripts/.cache` の実 pickle を読みにいく。テストから本物に触らない。
+        monkeypatch.setattr(cb, "cached", lambda key, producer: producer())
+        seed_both_views(db)
+        annual, companies = cb._load_financials(db, use_cache=False)
+        with ms.use_fin_rows("with_ttm"):
+            ttm, _ = cb._load_financials(db, use_cache=False)
+        assert len(annual["E00001"]) == 1
+        # period_end 昇順＝`_find_applicable_fin` が「その時点で最新の行」を選べる並び
+        assert [r.period_end for r in ttm["E00001"]] == [date(2025, 3, 31), date(2025, 9, 30)]
+        assert "E00001" in companies
+
+    def test_cache_key_follows_the_switch(self, db, monkeypatch):
+        """キーが1つだと、先に作った基準の pickle がもう一方の要求へ返る。"""
+        from scripts import candidate_bakeoff as cb
+        keys = []
+        monkeypatch.setattr(cb, "cached", lambda key, producer: (keys.append(key), {})[1])
+        cb._load_financials(db)
+        with ms.use_fin_rows("with_ttm"):
+            cb._load_financials(db)
+        fin_keys = [k for k in keys if k != cb._CO_CACHE_KEY]
+        assert fin_keys == [cb._FIN_CACHE_KEYS["annual"], cb._FIN_CACHE_KEYS["with_ttm"]]
+
+    def test_use_cache_false_bypasses_only_the_financials(self, db, monkeypatch):
+        """2つの基準を比べるときは同じ実行で読む（片方だけ古い世代だと鮮度の差が混ざる）。"""
+        from scripts import candidate_bakeoff as cb
+        seed_both_views(db)
+        keys = []
+        monkeypatch.setattr(cb, "cached", lambda key, producer: (keys.append(key), producer())[1])
+        cb._load_financials(db, use_cache=False)
+        assert keys == [cb._CO_CACHE_KEY]

@@ -32,7 +32,7 @@
 
 .PARAMETER Enqueue
     末尾へ積む。カンマ区切りで複数可（beta / tune:macro_gbdt / tune:macro_dlm /
-    gate:interactions / gate:max-features / gate:macro / oof:split-bias）。
+    gate:interactions / gate:max-features / gate:macro / gate:ttm / oof:split-bias）。
     interim / disclosures は暦が積むので手で積まない。
 
 .PARAMETER ClearQueue
