@@ -170,6 +170,47 @@ class TestArgumentsMatchTheExistingBatches:
         assert here == there
 
 
+class TestRhatScaleSamplesLikeProduction:
+    """規模依存の格子（#664）は**本番の `beta` と同じサンプリング設定**で回す。
+
+    測りたいのは本番の収束ゲートの余裕が規模で縮むか。tune・draws・軌道長・target_accept の
+    どれかが違えば `r_hat` の分布そのものが変わり、本番のゲートの話ではなくなる——しかも
+    例外は出ず、もっともらしい p99 が並ぶ。旗の名前はドライバ側で違うので値で突き合わせる。
+    """
+
+    # (beta の旗, 格子の旗)
+    PAIRS = (("--draws", "--draws"), ("--tune", "--tune"), ("--chains", "--chains"),
+             ("--target-accept", "--target-accepts"), ("--max-tree-depth", "--depths"),
+             ("--nuts-sampler", "--nuts-sampler"), ("--init", "--init"))
+
+    def _value(self, argv, flag):
+        return argv[argv.index(flag) + 1]
+
+    @pytest.mark.parametrize("beta_flag,grid_flag", PAIRS)
+    def test_sampling_config_matches_beta(self, beta_flag, grid_flag):
+        beta = rd.JOBS["beta"].argv
+        grid = rd.JOBS["bench:rhat-scale"].argv
+        assert self._value(grid, grid_flag) == self._value(beta, beta_flag)
+
+    def test_grid_takes_single_values_where_beta_does(self):
+        """格子の旗は複数値を取れる。本番と揃えるなら1値だけ（2値目があれば別の条件を足している）。"""
+        grid = list(rd.JOBS["bench:rhat-scale"].argv)
+        for _, flag in self.PAIRS:
+            nxt = grid[grid.index(flag) + 2]
+            assert nxt.startswith("--"), f"{flag} に2つ目の値がある: {nxt}"
+
+    def test_measures_only_the_sampler_seed(self):
+        """反復は chain の乱数だけを振る（パネル固定）＝本番の run 間差と同じ種類の揺れ。"""
+        argv = rd.JOBS["bench:rhat-scale"].argv
+        assert "--panel-seed" in argv
+        assert "--resume" in argv          # 積み直しで続きから回る前提
+        assert argv[argv.index("--mode") + 1] == "synth"
+
+    def test_scale_job_gets_the_dependency_smoke_first(self):
+        names = [s.name for s in rd.steps_for("py", "bench:rhat-scale")]
+        assert names == ["deps_smoke", "bench_rhat_scale"]
+
+
 class TestJobsBuildTheirOwnInputs:
     """**積んだ時点のキャッシュを当てにしない**（#674）。
 
@@ -348,7 +389,8 @@ class TestParallelSensitivity:
         assert field.default_factory is dataclasses.MISSING
 
     @pytest.mark.parametrize("key", ["beta", "tune:macro_gbdt", "tune:macro_dlm",
-                                     "gate:interactions", "gate:max-features", "gate:ttm"])
+                                     "gate:interactions", "gate:max-features", "gate:ttm",
+                                     "bench:rhat-scale"])
     def test_computations_are_sensitive(self, key):
         """MCMC も探索も昇格ゲートも、数値の揺れが**採否や重みそのもの**を変える。"""
         assert rd.JOBS[key].parallel_sensitive is True

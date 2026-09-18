@@ -1,4 +1,4 @@
-"""計測結果（bench_macro_beta の JSONL）を1枚の表に畳む（Issue #512 / #540）。
+"""計測結果（bench_macro_beta の JSONL）を1枚の表に畳む（Issue #512 / #540 / #664）。
 
 なぜ別スクリプトか
 ------------------
@@ -10,7 +10,7 @@
   run が混ざった）
 - **観測1件あたり**（us/step/obs）。銘柄数の違う run を横に並べるための正規化
 
-2つのビュー
+3つのビュー
 -----------
 - `--view cost`（既定・#512）: 上記のコスト表。**`--draws` を2点以上振った run 用**
   （1点しか無い run は傾きが出ないので us/step が n/a になる）
@@ -18,8 +18,10 @@
   **主指標は `ESS/1e6step`＝時間を含まない量**——`ESS/秒 = (ESS/歩) × (歩/秒)` で `歩/秒` は
   マシンとパネルの性質であって `max_tree_depth` の関数ではなく、ローカルの us/step は
   **時間帯で 2.4倍振れる**（GOTCHAS）。数時間かかる格子を所要で並べるとドリフトが差に化ける。
+- `--view scale`（#664）: 収束ゲートの量（変数別 `r_hat` p99）を銘柄数に対して並べ、seed 間の
+  幅と `p99 ~ ln(n_stock)` の傾き（95%CI・判定規則は事前固定）を出す。本番規模への外挿は参考値。
 
-どちらのビューも**生値を出す**（丸めた表示で判断しない・#466）。
+どのビューも**生値を出す**（丸めた表示で判断しない・#466）。
 
 読む先は `--inputs` で与える JSONL（ローカル実行と GHA アーティファクトの両方）。
 
@@ -28,6 +30,7 @@
     python -m scripts.bench_macro_beta_report --inputs .logs/bench_512.jsonl \\
         .logs/gha_bench/b0/bench-macro-beta/bench_512.jsonl
     python -m scripts.bench_macro_beta_report --view ess --inputs .logs/bench_540.jsonl
+    python -m scripts.bench_macro_beta_report --view scale --inputs .logs/bench_664_scale.jsonl
 """
 from __future__ import annotations
 
@@ -202,14 +205,178 @@ def regime_note(records: list) -> str:
             "上げて td_rate が 1.000 へ戻る規模で測り直すこと）").format(worst[2], worst[0], worst[1])
 
 
-VIEWS = {"cost": cost_table, "ess": ess_table}
+# ---- 規模依存（#664）------------------------------------------------------------------
+#
+# 収束ゲート（変数別 × `r_hat` p99）の余裕が**銘柄数とともに縮むか**を測るビュー。#609 の3案
+# （alpha だけ別閾値／MCSE／p95）はどれも「縮む」を前提にしているが、#612 の時点で健全な
+# run は同一規模（3,837銘柄）の2点しかなく、その向きは一度も測られていなかった。
+
+# 本番の run 間差（ADR-0002 #612 節）。9/06 と 9/11 の `alpha` p99（1.0463 → 1.0317）＝同一規模・
+# seed 固定・並走なしの2回の差。**seed 間の幅がこれと同程度なら、1点ずつの比較は幅に埋もれる**。
+PROD_RUN_TO_RUN_ALPHA = 0.0146
+
+# 本番の規模（外挿の参考点）。`mb_20260911T051941Z` の `alpha` の個数＝銘柄数。
+PROD_N_STOCK = 3837
+
+# 傾きの信頼区間（事前に固定した判定規則。データを見てから水準を選ばない）。
+SCALE_CI_LEVEL = 0.95
+
+
+def _config_signature(rec: dict) -> tuple:
+    """銘柄数と seed **以外**の条件。これが違う record を1本の傾きへ混ぜない。"""
+    cfg = rec.get("config") or {}
+    md = cfg.get("max_tree_depth")
+    return (rec.get("mode"), cfg.get("chains"), cfg.get("tune"),
+            tuple(cfg.get("draws_list") or ()), cfg.get("target_accept"),
+            tuple(md) if isinstance(md, list) else md)
+
+
+def scale_points(records: list) -> list:
+    """record から (銘柄数, seed, 変数, p99) の点を取り出す（純関数）。
+
+    `healthy` は `n_divergences == 0`。発散した run は**推移に混ぜない**が、点としては返して
+    表に印付きで出す（`macro_beta_gate_history` と同じ扱い＝落とすと何点あったかが見えない）。
+    `by_param` を持たない run（#608 以前・`--no-ess`）は点を作らない。
+    """
+    points = []
+    for rec in records:
+        panel, cfg = rec.get("panel") or {}, rec.get("config") or {}
+        for run in rec.get("runs") or []:
+            by_param = (run.get("ess") or {}).get("by_param") or {}
+            n_div = run.get("n_divergences")
+            for var, g in by_param.items():
+                if not isinstance(g, dict) or g.get("r_hat_p99") is None:
+                    continue
+                points.append({"signature": _config_signature(rec),
+                               "n_stock": panel.get("n_stock"), "seed": cfg.get("seed"),
+                               "var": var, "p99": float(g["r_hat_p99"]),
+                               "n_params": g.get("n"), "n_divergences": n_div,
+                               "healthy": n_div == 0, "label": rec.get("label")})
+    return points
+
+
+def scale_fit(points: list, level: float = SCALE_CI_LEVEL) -> dict:
+    """1変数ぶんの点へ `p99 = a + b·ln(n_stock)` を当て、傾きの信頼区間と判定を返す（純関数）。
+
+    健全な点だけを使う。判定は**事前に固定**: CI が 0 をまたげば `NOT DETECTED`、下端が正なら
+    `INCREASING`（規模とともに悪化）、上端が負なら `DECREASING`。seed 違いの点は独立な反復
+    として扱う（同じパネルで chain の乱数だけが違う）。
+    """
+    use = [p for p in points if p["healthy"] and p["n_stock"]]
+    ns = sorted({p["n_stock"] for p in use})
+    out = {"k": len(use), "n_values": ns, "slope": None, "intercept": None,
+           "ci": None, "verdict": "n/a"}
+    if len(use) < 3 or len(ns) < 2:
+        return out
+    x = np.log(np.array([p["n_stock"] for p in use], dtype=float))
+    y = np.array([p["p99"] for p in use], dtype=float)
+    b, a = np.polyfit(x, y, 1)
+    out["slope"], out["intercept"] = float(b), float(a)
+    dof = len(use) - 2
+    sxx = float(np.sum((x - x.mean()) ** 2))
+    if dof < 1 or sxx <= 0.0:
+        return out
+    from scipy import stats
+
+    resid = y - (a + b * x)
+    se = float(np.sqrt(float(np.sum(resid ** 2)) / dof / sxx))
+    half = float(stats.t.ppf(0.5 + level / 2.0, dof)) * se
+    lo, hi = float(b) - half, float(b) + half
+    out["se"] = se
+    out["ci"] = (lo, hi)
+    out["verdict"] = ("INCREASING" if lo > 0 else "DECREASING" if hi < 0 else "NOT DETECTED")
+    return out
+
+
+def scale_table(records: list) -> str:
+    """#664 の規模依存の表: 銘柄数 × seed の p99、seed 間の幅、傾きと判定、本番規模への外挿。"""
+    points = scale_points(records)
+    if not points:
+        return ("規模の表を作れる run がありません（by_param を持つ run が無い。"
+                "--no-ess で測ったか、#608 以前の JSONL）")
+    th = mb.MONTHLY_RHAT_THRESHOLD
+    lines = []
+    for sig in sorted({p["signature"] for p in points}, key=str):
+        pts = [p for p in points if p["signature"] == sig]
+        mode, chains, tune, draws, ta, md = sig
+        lines += ["=" * 78,
+                  "r_hat p99 vs n_stock (#664)  mode={0} chains={1} tune={2} draws={3} "
+                  "ta={4} md={5}".format(mode, chains, tune, list(draws), ta, md),
+                  "=" * 78]
+
+        # 1) セルごと（本番と同じ合否つき）。
+        lines.append("{0:<26} {1:>7} {2:>5} {3:>6} {4:>6} {5:>18} {6:>10} {7:>10} {8:>12}".format(
+            "label", "n_stock", "seed", "n_div", "gate", "gate_worst",
+            "alpha", "beta", "mu_universe"))
+        for rec in records:
+            if _config_signature(rec) != sig:
+                continue
+            for run in rec.get("runs") or []:
+                ess = run.get("ess") or {}
+                by_param = ess.get("by_param") or {}
+                if not by_param:
+                    continue
+                verdict, worst = mb.gate_verdict(ess)
+                vals = [fmt((by_param.get(v) or {}).get("r_hat_p99"), "{0:.4f}")
+                        for v in ("alpha", "beta", "mu_universe")]
+                lines.append("{0:<26} {1:>7} {2:>5} {3:>6} {4:>6} {5:>18} {6:>10} {7:>10} "
+                             "{8:>12}".format(
+                                 str(rec.get("label"))[:26], (rec.get("panel") or {}).get("n_stock"),
+                                 fmt((rec.get("config") or {}).get("seed"), "{0}"),
+                                 fmt(run.get("n_divergences"), "{0}"), verdict, worst or "n/a",
+                                 *vals))
+
+        # 2) 変数ごと: 銘柄数別の seed 間の幅と、傾き。
+        for var in sorted({p["var"] for p in pts}):
+            vp = [p for p in pts if p["var"] == var]
+            lines += ["-" * 78, "[{0}] r_hat p99 by n_stock (healthy runs only)".format(var)]
+            for n in sorted({p["n_stock"] for p in vp if p["n_stock"]}):
+                at = [p for p in vp if p["n_stock"] == n]
+                ok = [p["p99"] for p in at if p["healthy"]]
+                bad = len(at) - len(ok)
+                lines.append("  n={0:<6} k={1}  p99={2}  spread(max-min)={3}{4}".format(
+                    n, len(ok), ", ".join("{0:.4f}".format(v) for v in ok) or "n/a",
+                    fmt(max(ok) - min(ok) if len(ok) >= 2 else None, "{0:.4f}"),
+                    "  [excluded {0} run(s) with divergences]".format(bad) if bad else ""))
+            fit = scale_fit(vp)
+            if fit["slope"] is None:
+                lines.append("  slope: n/a（健全な点が3未満、または銘柄数が1種類）")
+                continue
+            ci = fit.get("ci")
+            lines.append("  slope per ln(n) = {0:+.5f}  ({1:+.5f} per doubling)  {2:.0%} CI {3}  "
+                         "-> {4}".format(
+                             fit["slope"], fit["slope"] * np.log(2.0), SCALE_CI_LEVEL,
+                             "n/a" if ci is None else "[{0:+.5f}, {1:+.5f}]".format(*ci),
+                             fit["verdict"]))
+            pred = fit["intercept"] + fit["slope"] * np.log(PROD_N_STOCK)
+            lines.append("  extrapolated p99 at n={0} = {1:.4f}  (margin to {2} = {3:+.4f})  "
+                         "[reference only: synth geometry != production]".format(
+                             PROD_N_STOCK, pred, th, th - pred))
+
+        lines += ["-" * 78,
+                  "verdict rule (fixed before measuring): {0:.0%} CI of the slope crosses 0 -> "
+                  "NOT DETECTED / lower bound > 0 -> INCREASING (worse with scale) / "
+                  "upper bound < 0 -> DECREASING".format(SCALE_CI_LEVEL),
+                  "production run-to-run difference of alpha p99 (9/06 vs 9/11, same n={0}) = "
+                  "{1:.4f}: compare it with the seed spread above".format(
+                      PROD_N_STOCK, PROD_RUN_TO_RUN_ALPHA),
+                  "mu_universe has 12 params at every scale = the control: a slope there means the "
+                  "posterior geometry changed (step size etc.), not the order statistic",
+                  "gate = persist_allowed(): per-variable r_hat p99 <= {0} (#611). production "
+                  "history: python -m scripts.macro_beta_gate_history".format(th)]
+    lines.append("=" * 78)
+    return chr(10).join(lines)
+
+
+VIEWS = {"cost": cost_table, "ess": ess_table, "scale": scale_table}
 
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="bench_macro_beta の JSONL を1枚の表へ")
     ap.add_argument("--inputs", nargs="+", required=True, help="JSONL（glob 可）")
     ap.add_argument("--view", choices=sorted(VIEWS), default="cost",
-                    help="cost=1歩の実費（#512・draws 2点以上が要る） / ess=統計効率（#540）")
+                    help="cost=1歩の実費（#512・draws 2点以上が要る） / ess=統計効率（#540） / "
+                         "scale=r_hat p99 の規模依存（#664）")
     args = ap.parse_args()
 
     records = load(args.inputs)

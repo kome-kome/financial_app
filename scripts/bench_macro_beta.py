@@ -251,6 +251,17 @@ def parse_max_tree_depth(text):
     return _parse(text)
 
 
+def panel_seed_of(seed: int, panel_seed=None) -> int:
+    """パネル（合成の生成・real の間引き）に使う seed。未指定なら sampler と同じ `seed`。
+
+    #664 で分けた。本番の run 間差（9/06 → 9/11 の `alpha` p99 0.0146）は「ほぼ同じデータ・
+    seed 固定・実行ごとの揺れ」なので、それに対応する反復は**同じパネルで chain の乱数だけ
+    変える**もの。`--seed` 1本でパネルまで変わると、データの差と chain の差が混ざって
+    「1点ぶんの幅」を測れない。未指定を従来どおりにしてあるので、既存の格子は不変。
+    """
+    return int(seed) if panel_seed is None else int(panel_seed)
+
+
 def sampler_kwargs(nuts_sampler, max_tree_depth=None, chain_method=None) -> dict:
     """`pm.sample` へ渡す追加 kwargs（軌道長 ＋ bench 専用の chain_method）。
 
@@ -687,6 +698,9 @@ def main() -> None:
                     help="XLA_FLAGS のホストデバイス強制と set_host_device_count を行わない")
     ap.add_argument("--threads", type=int, default=0, help="0 より大きい値で XLA/BLAS のスレッド数を縛る")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--panel-seed", type=int, default=None,
+                    help="パネル（synth の生成・real の間引き）の seed。未指定は --seed と同じ"
+                         "（#664: 同じパネルで chain の乱数だけ振るときに使う）")
     ap.add_argument("--label", default="bench")
     ap.add_argument("--out", default=None, help="JSONL の追記先（1実行=1行）")
     args = ap.parse_args()
@@ -707,12 +721,13 @@ def main() -> None:
         os.environ.setdefault(
             "XLA_FLAGS", "--xla_force_host_platform_device_count=" + str(args.chains))
 
+    panel_seed = panel_seed_of(args.seed, args.panel_seed)
     t0 = time.monotonic()
     if args.mode == "synth":
         panel = synth_panel(args.n_stock, args.n_factor, args.obs_per_stock,
-                            args.n_sector, args.seed)
+                            args.n_sector, panel_seed)
     else:
-        panel = load_real_panel(args.n_stock, args.seed, stamp=args.panel_stamp)
+        panel = load_real_panel(args.n_stock, panel_seed, stamp=args.panel_stamp)
     panel_sec = time.monotonic() - t0
     logger.info("panel: n_stock=%d n_sector=%d n_factor=%d n_obs=%d (%.1fs)",
                 panel["n_stock"], panel["n_sector"], panel["n_factor"], panel["n_obs"], panel_sec)
@@ -785,7 +800,8 @@ def main() -> None:
                    "target_accept": args.target_accept, "nuts_sampler": args.nuts_sampler,
                    "init": args.init, "chain_method": args.chain_method,
                    "force_devices": not args.no_force_devices, "threads": args.threads,
-                   "seed": args.seed, "max_tree_depth": max_tree_depth,
+                   "seed": args.seed, "panel_seed": panel_seed,
+                   "max_tree_depth": max_tree_depth,
                    "panel_stamp": args.panel_stamp, "probe_draws": args.probe_draws},
         "probe": probe,
         "runs": runs,

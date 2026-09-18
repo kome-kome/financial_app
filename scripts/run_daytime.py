@@ -346,6 +346,37 @@ JOBS: dict[str, Job] = {
         # （#618・macro_beta で発散が 0 → 344 回）。
         parallel_sensitive=True,
     ),
+
+    # ── 収束ゲートの余裕の規模依存（#664・ADR-0002 #612 節）────────────────────
+    # #609 の3案（alpha だけ別閾値／MCSE／p95）は「銘柄数が増えると p99 の余裕が縮む」を
+    # 前提にしているが、健全な run は同一規模（3,837銘柄）の2点しかなく一度も測られていない。
+    # 合成パネル（DB を触らない）で銘柄数 × sampler seed を振る。**サンプリング設定は `beta` と
+    # 同一**（`tests/test_run_daytime.py` が照合する）——違えば本番のゲートの話にならない。
+    # 1セル1プロセスで JSONL へ追記し、締切の手前で畳み、`--resume` で済んだセルを飛ばすので、
+    # **終わらなければ積み直せば続きから回る**（全セル済みなら即 exit 0）。
+    "bench:rhat-scale": Job(
+        name="bench_rhat_scale",
+        argv=("{python}", "-m", "scripts.grid_macro_beta", "--mode", "synth",
+              "--n-stock", "250", "500", "1000", "2000",
+              "--seed", "0", "1", "2", "--panel-seed", "0",
+              "--chains", "2", "--tune", "800", "--draws", "800",
+              "--depths", "8,10", "--target-accepts", "0.95",
+              "--nuts-sampler", "numpyro", "--init", "adapt_diag",
+              # 合成 250銘柄・md 8,10 の実測（`.logs/bench_609_gate.jsonl`・draws 400 で 233.2秒 /
+              # 1,226,400歩）。見積りは並べ替えと締切判定にだけ使い、実測で較正される。
+              "--us-per-step", "190.2",
+              "--resume", "--view", "scale", "--out", ".logs/bench_664_scale.jsonl"),
+        why="収束ゲート（変数別 r_hat p99）の余裕が銘柄数とともに縮むかを測る（#664）。"
+            "合成パネルで 250/500/1000/2000 銘柄 × seed 3つ。#609 の3案を選ぶ前提の実測。"
+            "表は `python -m scripts.bench_macro_beta_report --view scale "
+            "--inputs .logs/bench_664_scale.jsonl`。",
+        # **未実測**。見積りは全12セルで約13.5時間＝2〜3回ぶん。締切で畳む仕事なので1回は窓
+        # いっぱいまで使う前提で置いた。初回の実走で差し替える。
+        measured_min=440.0,
+        # MCMC そのもの。並走で発散が 0 → 344 回に増えた実測がある（#618）。
+        parallel_sensitive=True,
+        needs_deps_smoke=True,     # beta と同じ依存（pymc / numpyro / jax）
+    ),
 }
 
 SPEC = bc.BatchSpec(
