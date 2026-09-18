@@ -57,6 +57,29 @@ class TestSynthPanel:
         assert p["sector_idx"].max() == 2
 
 
+class TestPanelSeed:
+    """パネルの seed と sampler の seed を分けられること（#664）。
+
+    本番の run 間差（9/06 → 9/11）は「ほぼ同じデータで chain の乱数だけが違う」2回の差。
+    それに対応する反復を作るには、パネルを固定したまま sampler の seed だけを振れる必要がある。
+    """
+
+    def test_defaults_to_the_sampler_seed(self):
+        # 未指定なら従来どおり（既存の格子・既存の JSONL の意味を変えない）。
+        assert bmb.panel_seed_of(3) == 3
+        assert bmb.panel_seed_of(3, None) == 3
+
+    def test_explicit_panel_seed_wins(self):
+        assert bmb.panel_seed_of(2, 0) == 0
+
+    def test_fixed_panel_seed_gives_the_same_panel_across_sampler_seeds(self):
+        a = bmb.synth_panel(n_stock=12, n_factor=3, obs_per_stock=4, n_sector=4,
+                            seed=bmb.panel_seed_of(1, 0))
+        b = bmb.synth_panel(n_stock=12, n_factor=3, obs_per_stock=4, n_sector=4,
+                            seed=bmb.panel_seed_of(2, 0))
+        np.testing.assert_array_equal(a["returns"], b["returns"])
+
+
 class TestTwoPointFit:
     """固定費（コンパイル＋warmup）と 1 draw の限界費の分離。"""
 

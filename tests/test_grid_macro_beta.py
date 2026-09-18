@@ -8,6 +8,8 @@
 2. コスト見積りと**安い順**の並べ替え（窓が足りないとき失うのが高いセルだけで済む）
 3. bench へ渡す引数（`--probe-draws 0` / 全セル同一の `--panel-stamp` / tune・draws の転記）
 4. レポートが**生値**を出すこと（丸めた表示で判断しない・#466）
+5. 規模の軸（#664）: 直積とラベル、`--resume` の照合（条件で照合し、違う条件・ESS の無い
+   record を済みにしない）、締切判定、所要見積りの較正、規模の表の判定規則
 
 NUTS は CI で回せないので、サンプリングを含まない純粋部分だけを見る。
 """
@@ -280,3 +282,242 @@ class TestRegimeNote:
         rec = _record()
         rec["runs"][0]["steps"] = {"mean": 255.0, "max_treedepth_rate": 0.0, "cap_steps": 1023}
         assert "regime に居ない" in gmb.report(_jsonl(tmp_path, [rec]))
+
+
+# ---- 規模の軸（#664）--------------------------------------------------------------------
+
+class TestScaleAxis:
+    """銘柄数 × seed の直積。**振った軸だけ**をラベルに付ける（1値なら従来ラベルのまま）。"""
+
+    def _cells(self, n_stocks=(250, 500), seeds=(0, 1)):
+        return gmb.build_cells(["8,10"], [0.95], tune=800, draws=800, chains=2,
+                               us_per_step=190.2, n_stocks=n_stocks, seeds=seeds)
+
+    def test_product_of_the_axes(self):
+        cells = self._cells()
+        assert {(c["n_stock"], c["seed"]) for c in cells} == {
+            (250, 0), (250, 1), (500, 0), (500, 1)}
+
+    def test_labels_name_only_the_varied_axes(self):
+        labels = {c["label"] for c in self._cells()}
+        assert "md8w10-ta095-n0250-s0" in labels
+        only_seed = {c["label"] for c in self._cells(n_stocks=(250,))}
+        assert only_seed == {"md8w10-ta095-s0", "md8w10-ta095-s1"}
+
+    def test_single_values_keep_the_old_label(self):
+        # 既存の JSONL・表の見え方を変えない（#540 の格子はこれまでどおり）。
+        cells = self._cells(n_stocks=(250,), seeds=(0,))
+        assert [c["label"] for c in cells] == ["md8w10-ta095"]
+
+    def test_cheapest_first_across_stock_counts(self):
+        cells = self._cells(n_stocks=(2000, 250, 1000), seeds=(1, 0))
+        assert [c["n_stock"] for c in cells] == [250, 250, 1000, 1000, 2000, 2000]
+        # 同じ費用の中は seed の昇順（並びが実行ごとに揺れない）。
+        assert [c["seed"] for c in cells[:2]] == [0, 1]
+
+    def test_estimate_scales_with_stock_count(self):
+        small, big = self._cells(n_stocks=(250, 1000), seeds=(0,))
+        assert big["est_minutes"] / small["est_minutes"] == pytest.approx(4 ** gmb.SCALE_EXP)
+        # 基準銘柄数では係数が効かない（#540 の見積りを変えない）。
+        steps = gmb.cell_total_steps("8,10", 800, 800, 2)
+        assert small["est_minutes"] == pytest.approx(steps * 190.2 / 1e6 / 60.0)
+
+
+class TestBenchCommandScaleAxis:
+    def test_cell_values_win_over_args(self):
+        cell = {"label": "x", "max_tree_depth": "8,10", "target_accept": 0.95,
+                "n_stock": 1000, "seed": 2}
+        cmd = gmb.bench_command("py", cell, _Args(mode="synth", n_stock=[250], seed=[0]))
+        assert cmd[cmd.index("--n-stock") + 1] == "1000"
+        assert cmd[cmd.index("--seed") + 1] == "2"
+
+    def test_panel_seed_is_forwarded_only_when_given(self):
+        cell = {"label": "x", "max_tree_depth": "8", "target_accept": 0.95}
+        assert "--panel-seed" not in gmb.bench_command("py", cell, _Args(mode="synth"))
+        cmd = gmb.bench_command("py", cell, _Args(mode="synth", panel_seed=0))
+        assert cmd[cmd.index("--panel-seed") + 1] == "0"
+
+
+def _scale_record(n_stock, seed, alpha, beta=1.01, mu=1.02, n_div=0, panel_seed=0,
+                  md=(8, 10), draws=800, ess=True, seconds=600.0):
+    run = {"draws": draws, "seconds": seconds, "n_divergences": n_div, "diag_sec": 30.0,
+           "steps": {"mean": 1023.0, "max_treedepth_rate": 1.0, "cap_steps": 1023},
+           "ess": {"r_hat_max": alpha + 0.02, "ess_bulk_min": 100.0, "ess_bulk_p10": 200.0,
+                   "ess_bulk_median": 500.0, "ess_tail_min": 150.0, "n_params": 10,
+                   "by_param": {
+                       "alpha": {"n": n_stock, "r_hat_p99": alpha, "r_hat_max": alpha + 0.02},
+                       "beta": {"n": n_stock * 12, "r_hat_p99": beta, "r_hat_max": beta + 0.02},
+                       "mu_universe": {"n": 12, "r_hat_p99": mu, "r_hat_max": mu}}}}
+    if not ess:
+        run["ess"] = None
+    return {"label": "md8w10-ta095-n{0:04d}-s{1}".format(n_stock, seed), "mode": "synth",
+            "panel": {"n_stock": n_stock, "n_sector": 34, "n_factor": 12, "n_obs": n_stock * 24},
+            "config": {"chains": 2, "tune": 800, "draws_list": [draws], "target_accept": 0.95,
+                       "max_tree_depth": list(md), "seed": seed, "panel_seed": panel_seed,
+                       "panel_stamp": None},
+            "stage_sec": {"panel": 0.1, "model_build": 3.0, "sample_total": seconds},
+            "runs": [run]}
+
+
+class _GridArgs:
+    mode, chains, tune, draws, panel_stamp, panel_seed = "synth", 2, 800, 800, "20260919", 0
+
+
+class TestResume:
+    """`--resume` の照合は**条件**で行う（ラベルではない）。違う条件の record を済みにしない。"""
+
+    def _cell(self, n=250, seed=0, md="8,10"):
+        return {"label": "whatever", "max_tree_depth": md, "target_accept": 0.95,
+                "n_stock": n, "seed": seed}
+
+    def test_matching_record_marks_the_cell_done(self):
+        done = gmb.done_keys([_scale_record(250, 0, 1.02)])
+        assert gmb.key_of(self._cell(), _GridArgs) in done
+
+    def test_other_seed_or_stock_count_is_not_done(self):
+        done = gmb.done_keys([_scale_record(250, 0, 1.02)])
+        assert gmb.key_of(self._cell(seed=1), _GridArgs) not in done
+        assert gmb.key_of(self._cell(n=500), _GridArgs) not in done
+
+    def test_different_sampling_config_is_not_done(self):
+        # draws 400 で測った record は、draws 800 のセルの代わりにならない。
+        done = gmb.done_keys([_scale_record(250, 0, 1.02, draws=400)])
+        assert gmb.key_of(self._cell(), _GridArgs) not in done
+        done = gmb.done_keys([_scale_record(250, 0, 1.02, md=(10, 10))])
+        assert gmb.key_of(self._cell(), _GridArgs) not in done
+
+    def test_other_panel_seed_is_not_done(self):
+        done = gmb.done_keys([_scale_record(250, 0, 1.02, panel_seed=7)])
+        assert gmb.key_of(self._cell(), _GridArgs) not in done
+
+    def test_record_without_ess_is_not_done(self):
+        # 規模の表に点を作れない＝測ったことにならない。
+        done = gmb.done_keys([_scale_record(250, 0, 1.02, ess=False)])
+        assert gmb.key_of(self._cell(), _GridArgs) not in done
+
+    def test_old_record_without_panel_seed_means_panel_seed_equals_seed(self):
+        rec = _scale_record(250, 3, 1.02)
+        del rec["config"]["panel_seed"]
+        key = gmb.record_key(rec)
+        assert key[7] == 3 and key[9] == 3
+
+    def test_depth_forms_are_equivalent(self):
+        assert gmb.depth_key("8,10") == gmb.depth_key([8, 10]) == (8, 10)
+        assert gmb.depth_key(None) == gmb.depth_key("10") == gmb.depth_key(10) == (10, 10)
+
+    def test_broken_lines_are_skipped(self, tmp_path):
+        # 殺されたセルの書きかけ1行で再開ごと止めない。
+        path = os.path.join(str(tmp_path), "x.jsonl")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(json.dumps(_scale_record(250, 0, 1.02)) + chr(10))
+            f.write('{"label": "trunc')
+        assert len(gmb.load_records(path)) == 1
+        assert gmb.load_records(os.path.join(str(tmp_path), "nope.jsonl")) == []
+
+
+class TestEstimate:
+    def _cell(self, n):
+        return gmb.build_cells(["8,10"], [0.95], tune=800, draws=800, chains=2,
+                               us_per_step=190.2, n_stocks=(n,), seeds=(0,))[0]
+
+    def test_no_measurement_uses_the_model_plus_overhead(self):
+        c = self._cell(500)
+        want = c["est_minutes"] + gmb.CELL_OVERHEAD_MIN
+        assert gmb.estimate_minutes(c, []) == pytest.approx(want)
+
+    def test_same_stock_count_uses_the_slowest_measurement(self):
+        recs = [_scale_record(500, 0, 1.02, seconds=600.0),
+                _scale_record(500, 1, 1.02, seconds=900.0)]
+        got = gmb.estimate_minutes(self._cell(500), recs)
+        assert got == pytest.approx(gmb.record_minutes(recs[1]))
+
+    def test_other_stock_counts_calibrate_the_model(self):
+        # 250銘柄の実測が見積りの2倍なら、1000銘柄の見積りも2倍にする。
+        c250, c1000 = self._cell(250), self._cell(1000)
+        model_250 = c250["est_minutes"] + gmb.CELL_OVERHEAD_MIN
+        rec = _scale_record(250, 0, 1.02)
+        # record_minutes = (stage 合計 + diag) / 60 + overhead を model の2倍へ合わせる。
+        rec["stage_sec"]["sample_total"] = (2 * model_250 - gmb.CELL_OVERHEAD_MIN) * 60.0 - 33.1
+        assert gmb.record_minutes(rec) == pytest.approx(2 * model_250)
+        got = gmb.estimate_minutes(c1000, [rec])
+        assert got == pytest.approx(2 * (c1000["est_minutes"] + gmb.CELL_OVERHEAD_MIN))
+
+
+class TestFitsBefore:
+    def test_no_deadline_always_fits(self):
+        from datetime import datetime, timezone
+        assert gmb.fits_before(None, datetime.now(timezone.utc), 1e9)
+
+    def test_safety_and_margin_are_applied(self):
+        from datetime import datetime, timedelta, timezone
+        now = datetime(2026, 9, 28, 0, 0, tzinfo=timezone.utc)
+        est = 100.0
+        need = est * gmb.DEADLINE_SAFETY + gmb.DEADLINE_MARGIN_MIN
+        assert gmb.fits_before(now + timedelta(minutes=need), now, est)
+        assert not gmb.fits_before(now + timedelta(minutes=need - 0.5), now, est)
+        # 見積りそのものより長い残りがあっても、安全率ぶん足りなければ始めない。
+        assert not gmb.fits_before(now + timedelta(minutes=est + 1), now, est)
+
+
+class TestScaleView:
+    """#664 の規模の表（`bench_macro_beta_report.scale_table`）。"""
+
+    def _records(self, slope_alpha, n_values=(250, 500, 1000, 2000), seeds=(0, 1, 2)):
+        import math
+        recs = []
+        for n in n_values:
+            for s in seeds:
+                jitter = (s - 1) * 0.001
+                recs.append(_scale_record(n, s, 1.02 + slope_alpha * math.log(n / 250) + jitter,
+                                          mu=1.02 + jitter))
+        return recs
+
+    def _alpha(self, recs, var="alpha"):
+        from scripts.bench_macro_beta_report import scale_points
+        return [p for p in scale_points(recs) if p["var"] == var]
+
+    def test_increasing_slope_is_detected(self):
+        from scripts.bench_macro_beta_report import scale_fit
+        fit = scale_fit(self._alpha(self._records(0.01)))
+        assert fit["slope"] == pytest.approx(0.01, abs=1e-6)
+        assert fit["verdict"] == "INCREASING"
+
+    def test_flat_control_is_not_detected(self):
+        from scripts.bench_macro_beta_report import scale_fit
+        fit = scale_fit(self._alpha(self._records(0.01), "mu_universe"))
+        assert fit["verdict"] == "NOT DETECTED"
+
+    def test_divergent_runs_are_excluded_from_the_fit(self):
+        from scripts.bench_macro_beta_report import scale_fit
+        recs = self._records(0.0)
+        # 発散した run が大きな p99 を出しても傾きを作らない（並走の汚染を規模と読まない）。
+        recs.append(_scale_record(2000, 9, 1.30, n_div=344))
+        fit = scale_fit(self._alpha(recs))
+        assert fit["verdict"] == "NOT DETECTED"
+        assert fit["k"] == 12
+
+    def test_too_few_points_is_na_not_a_verdict(self):
+        from scripts.bench_macro_beta_report import scale_fit
+        fit = scale_fit(self._alpha(self._records(0.01, n_values=(250,))))
+        assert fit["verdict"] == "n/a"
+
+    def test_table_shows_spread_verdict_and_gate(self, tmp_path):
+        recs = self._records(0.01)
+        recs.append(_scale_record(2000, 9, 1.30, n_div=344))
+        text = gmb.report(_jsonl(tmp_path, recs), "scale")
+        assert "INCREASING" in text
+        assert "spread(max-min)" in text
+        assert "excluded 1 run(s) with divergences" in text
+        assert "PASS" in text and "FAIL" in text      # 本番と同じ合否（1.30 の alpha は落ちる）
+        assert "0.0146" in text                        # 本番の run 間差と並べて読む
+        text.encode("cp932")
+
+    def test_different_configs_are_not_mixed(self, tmp_path):
+        recs = self._records(0.0) + [_scale_record(250, 0, 1.5, draws=400)]
+        text = gmb.report(_jsonl(tmp_path, recs), "scale")
+        # draws 400 の record は別の節になる（1本の傾きへ混ぜない）。
+        assert text.count("r_hat p99 vs n_stock") == 2
+
+    def test_no_by_param_is_reported_not_raised(self, tmp_path):
+        text = gmb.report(_jsonl(tmp_path, [_record()]), "scale")
+        assert "by_param" in text
