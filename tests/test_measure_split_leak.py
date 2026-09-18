@@ -303,6 +303,161 @@ class TestRetryTrigger:
         assert len(points) == len(built)
 
 
+class TestDatablePointsAreShared:
+    """再測定（#690）の層は、着手条件で数えたのと同じ述語から作る。"""
+
+    def _args(self, official):
+        from scripts.measure_split_valuation_bias import event_window
+        prices = {"A": weekly(2020, 200, growth=0.001)}
+        rows = {"A": [fin(2020, "2020-12-31"), fin(2021, "2021-12-31")]}
+        evs = {"A": [ev("A", 2021, 2.0, "2020-12-31", "2021-12-31")]}
+        return prices, rows, evs, official, ms._find_applicable_fin, event_window
+
+    def test_counter_counts_exactly_the_points(self):
+        args = self._args({"A": [("2021-06-30", 0.5)]})
+        points = list(L.datable_future_points(*args))
+        assert L.count_datable_future_companies(*args)["samples"] == len(points) > 0
+        assert all(ec == "A" and d < "2021-06-30" for ec, d in points)
+
+    def test_no_points_when_the_official_date_is_ambiguous(self):
+        args = self._args({"A": [("2021-06-30", 0.5), ("2021-09-30", 0.5)]})
+        assert list(L.datable_future_points(*args)) == []
+
+    def test_dated_layer_is_exactly_the_counted_samples(self):
+        """数えた `(社, 形成日)` と、測る層の `(社, 形成月)` が一致する。"""
+        args = self._args({"A": [("2021-06-30", 0.5)]})
+        prices, rows, evs, _official, find, _window = args
+        samples = L.demean_by_month(L.build_samples(prices, rows, evs, {}, find))
+        points = list(L.datable_future_points(*args))
+        dated = L.dated_split_samples(samples, points)
+        assert len(dated) == len(points)
+        assert {s.stratum for s in dated} == {L.DATED_STRATUM}
+        assert {(s.edinet_code, s.ym) for s in dated} == {(ec, d[:7]) for ec, d in points}
+
+
+class TestDatedSplitSamples:
+    SAMPLES = [L.Sample("2024-01", "A", "split_1", 0.7, 0.3),
+               L.Sample("2024-02", "A", "split_1", 0.7, -0.1),
+               L.Sample("2024-01", "B", "none", 0.0, 0.0)]
+
+    def test_takes_only_the_keyed_samples_and_keeps_the_demeaned_label(self):
+        got = L.dated_split_samples(self.SAMPLES, [("A", "2024-01-26")])
+        assert got == [L.Sample("2024-01", "A", L.DATED_STRATUM, 0.7, 0.3)]
+
+    def test_a_key_outside_split_1_is_a_definition_drift(self):
+        with pytest.raises(RuntimeError, match="split_1"):
+            L.dated_split_samples(self.SAMPLES, [("B", "2024-01-26")])
+
+    def test_a_missing_key_is_a_definition_drift(self):
+        with pytest.raises(RuntimeError, match="見つからない"):
+            L.dated_split_samples(self.SAMPLES, [("C", "2024-01-26")])
+
+    def test_the_dated_stratum_is_not_in_the_685_table(self):
+        """#685 の表の再現性を壊さない（別の節に出す）。"""
+        assert L.DATED_STRATUM not in L.STRATA_ORDER
+
+
+def _stats(mean, lo=None, hi=None):
+    return {"mean": mean, "ci": [lo, hi]}
+
+
+class TestRetryVerdict:
+    """#687 で測る前に登録した判定式（#690）。"""
+
+    def test_both_conditions_keep_the_reading(self):
+        got = L.retry_verdict(_stats(0.08, 0.02, 0.14), _stats(-0.01))
+        assert got["keep_leak_reading"] is True
+        assert got["ci_lo_above_zero"] is True and got["beats_none"] is True
+        assert got["preregistered"] == 690
+
+    def test_ci_touching_zero_drops_it(self):
+        got = L.retry_verdict(_stats(0.08, 0.0, 0.16), _stats(-0.01))
+        assert got["keep_leak_reading"] is False and got["ci_lo_above_zero"] is False
+
+    def test_not_beating_none_drops_it_even_with_a_positive_ci(self):
+        """平均が `none` と同値でも上回ったことにはしない（厳密な不等号）。"""
+        got = L.retry_verdict(_stats(0.05, 0.01, 0.09), _stats(0.05))
+        assert got["keep_leak_reading"] is False
+        assert got["ci_lo_above_zero"] is True and got["beats_none"] is False
+
+    def test_both_failing_says_so(self):
+        got = L.retry_verdict(_stats(-0.02, -0.05, 0.01), _stats(0.0))
+        assert got["keep_leak_reading"] is False
+        assert "含み" in got["reason"] and "上回らなかった" in got["reason"]
+
+    def test_an_empty_stratum_cannot_be_judged(self):
+        got = L.retry_verdict(_stats(None), _stats(-0.01))
+        assert got["keep_leak_reading"] is False and got["ci_lo_above_zero"] is None
+        assert got["ci_half_width"] is None and got["powered"] is False
+
+    @pytest.mark.parametrize("lo,hi,powered", [(0.01, 0.09, True), (0.00, 0.12, False)])
+    def test_half_width_is_reported_but_does_not_decide(self, lo, hi, powered):
+        got = L.retry_verdict(_stats(0.05, lo, hi), _stats(-0.01))
+        assert got["ci_half_width"] == pytest.approx((hi - lo) / 2)
+        assert got["powered"] is powered
+        assert got["min_detectable_effect"] == L.MIN_DETECTABLE_EFFECT
+
+    def test_reasons_survive_cp932(self):
+        for dated, none in [(_stats(0.08, 0.02, 0.14), _stats(-0.01)),
+                            (_stats(0.08, 0.0, 0.16), _stats(-0.01)),
+                            (_stats(0.05, 0.01, 0.09), _stats(0.05)),
+                            (_stats(-0.02, -0.05, 0.01), _stats(0.0)),
+                            (_stats(None), _stats(-0.01))]:
+            L.retry_verdict(dated, none)["reason"].encode("cp932")
+
+
+def _retry_samples():
+    """日付で確定した層（A・B の 2024-01/02）と、3か月にまたがる `none`。"""
+    return [L.Sample("2024-01", "A", "split_1", 0.7, 0.10),
+            L.Sample("2024-02", "A", "split_1", 0.7, 0.20),
+            L.Sample("2024-01", "B", "split_1", 0.7, 0.30),
+            L.Sample("2024-01", "C", "none", 0.0, -0.01),
+            L.Sample("2024-02", "D", "none", 0.0, -0.02),
+            L.Sample("2023-06", "E", "none", 0.0, 0.05)]
+
+
+_RETRY_KEYS = [("A", "2024-01-26"), ("A", "2024-02-23"), ("B", "2024-01-26")]
+
+
+class TestMeasureRetry:
+    def test_not_ready_computes_no_means(self):
+        """READY まで層別の平均は出さない（#687 の事前登録）。"""
+        assert L.measure_retry(_retry_samples(), _RETRY_KEYS, False, n_boot=50) == {
+            "ready": False}
+
+    def test_ready_compares_against_the_whole_none_stratum(self):
+        got = L.measure_retry(_retry_samples(), _RETRY_KEYS, True, n_boot=50)
+        assert got["ready"] is True
+        assert got[L.DATED_STRATUM]["n"] == 3 and got[L.DATED_STRATUM]["n_companies"] == 2
+        assert got["none"]["n"] == 3
+        # 参考値は同じ形成月（2024-01 / 2024-02）に限る。2023-06 の E は入らない
+        assert got["none_same_months"]["n"] == 2
+        assert got["none_same_months"]["reference_only"] is True
+        assert (got["months"], got["month_range"]) == (2, ["2024-01", "2024-02"])
+        assert got["verdict"] == L.retry_verdict(got[L.DATED_STRATUM], got["none"])
+
+
+class TestReportRetry:
+    def _report(self, retry):
+        summary = L.summarize([], n_boot=10)
+        trigger = {"companies": 0, "samples": 0, "threshold": L.RETRY_MIN_COMPANIES,
+                   "ready": bool(retry.get("ready"))}
+        L.report(summary, L.compare_factors({}, {}), L.verdict(summary), trigger, retry)
+
+    def test_ready_prints_the_preregistered_verdict(self, capsys):
+        self._report(L.measure_retry(_retry_samples(), _RETRY_KEYS, True, n_boot=50))
+        out = capsys.readouterr().out
+        out.encode("cp932")
+        assert "#690" in out and L.DATED_STRATUM in out and "none(same months,ref)" in out
+        assert "verdict (#690 preregistered)" in out
+
+    def test_not_ready_prints_no_dated_row(self, capsys):
+        self._report({"ready": False})
+        out = capsys.readouterr().out
+        out.encode("cp932")
+        assert "層別の平均は出さない" in out and L.DATED_STRATUM not in out
+
+
 def test_report_survives_cp932(capsys):
     summary = L.summarize([], n_boot=10)
     trigger = {"companies": 0, "samples": 0, "threshold": L.RETRY_MIN_COMPANIES, "ready": False}
