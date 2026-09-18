@@ -348,7 +348,7 @@ class TestParallelSensitivity:
         assert field.default_factory is dataclasses.MISSING
 
     @pytest.mark.parametrize("key", ["beta", "tune:macro_gbdt", "tune:macro_dlm",
-                                     "gate:interactions", "gate:max-features"])
+                                     "gate:interactions", "gate:max-features", "gate:ttm"])
     def test_computations_are_sensitive(self, key):
         """MCMC も探索も昇格ゲートも、数値の揺れが**採否や重みそのもの**を変える。"""
         assert rd.JOBS[key].parallel_sensitive is True

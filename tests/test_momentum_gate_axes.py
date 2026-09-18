@@ -47,6 +47,11 @@ class TestModesAreMutuallyExclusive:
         (dict(macro=True, interactions=True)),
         (dict(macro=True, max_features=[5])),
         (dict(interactions=True, max_features=[5])),
+        # 行の基準モード（#424 子3）も同じ扱い。TTM は as-of で母集団を動かしうる。
+        (dict(windows=[3], fin_rows=True)),
+        (dict(macro=True, fin_rows=True)),
+        (dict(interactions=True, fin_rows=True)),
+        (dict(max_features=[5], fin_rows=True)),
     ]
 
     @pytest.mark.parametrize("kwargs", PAIRS)
@@ -165,6 +170,15 @@ class TestExistingModesAreUnchanged:
             assert c.build_interactions is True
             assert c.max_features is None
 
+    @pytest.mark.parametrize("kwargs", [
+        dict(), dict(windows=[3, 12]), dict(macro=True), dict(interactions=True),
+        dict(max_features=[5, 20]),
+    ])
+    def test_existing_modes_read_annual_rows_only(self, kwargs):
+        """行の基準（#424 子3）の既定は本番の構成＝通期のみ。既存モードは TTM を読まない。"""
+        for c in build_conditions(**kwargs).values():
+            assert c.fin_rows == "annual"
+
 
 class TestBuildUsesTheConditionAxes:
     """`_build` が Cond の値を実際に使うこと。
@@ -245,12 +259,14 @@ class TestOutputNamesTheModeThatWasMeasured:
         (dict(macro=True), "macro"),
         (dict(interactions=True), "interactions"),
         (dict(max_features=[5, 20]), "max_features"),
+        (dict(fin_rows=True), "fin_rows"),
     ])
     def test_mode_follows_the_flag(self, kwargs, want):
         assert mode_of(**kwargs) == want
 
     def test_every_mode_has_a_file_suffix(self):
-        assert set(MODE_SUFFIX) == {"default", "windows", "macro", "interactions", "max_features"}
+        assert set(MODE_SUFFIX) == {"default", "windows", "macro", "interactions", "max_features",
+                                    "fin_rows"}
 
     def test_existing_output_files_do_not_move(self):
         """過去の結果の置き場所を変えない（窓モードは #592 以来、既定と同じファイル）。"""
@@ -261,6 +277,7 @@ class TestOutputNamesTheModeThatWasMeasured:
         ("interactions", 2, "INTERACTIONS AXIS"),
         ("max_features", 5, "MAX_FEATURES SCAN"),
         ("max_features", 2, "MAX_FEATURES SCAN"),
+        ("fin_rows", 2, "FIN ROWS AXIS"),
     ])
     def test_new_modes_do_not_borrow_the_momentum_wording(self, mode, n_conds, head):
         for passed, regressed in (([], []), (["x"], []), ([], ["y"])):

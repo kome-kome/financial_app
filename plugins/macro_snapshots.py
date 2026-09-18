@@ -866,6 +866,25 @@ def current_fin_rows() -> str:
     return _fin_rows.get()
 
 
+def fin_rows_model() -> tuple:
+    """いまの行の基準で読む ORM と並び順 `(model, order_by)` を返す。
+
+    **基準 → VIEW の対応はここだけに置く**（`load_data` と検証スクリプトの
+    `candidate_bakeoff._load_financials` が共有する）。検証スクリプトが `FinancialMetric` を
+    直に読んでいた間は、`use_fin_rows("with_ttm")` で包んでも**黙って通期だけを測った**
+    （#424 子3 で見つけた。どちらの基準でも妥当なパネルができるので例外は出ない）。
+
+    並びを一つに決める理由: `_find_applicable_fin` は period_end 昇順の前提で「最後の行」を
+    選ぶ。通期＋TTM では同じ社の行が 2 つの基準から来るので、同じ period_end で並びが
+    揺れると run ごとに選ばれる行が変わりうる（id まで入れれば完全に決まる）。
+    """
+    from database import FinancialMetric, FinancialMetricWithTTM
+    if current_fin_rows() == "annual":
+        return FinancialMetric, [FinancialMetric.edinet_code, FinancialMetric.period_end]
+    m = FinancialMetricWithTTM
+    return m, [m.edinet_code, m.period_end, m.id]
+
+
 def load_data(db, with_volume: bool = True) -> tuple:
     """Company / FinancialMetric / StockPriceWeekly を一括ロード。
 
@@ -903,19 +922,14 @@ def _load_data_impl(db, with_volume: bool = True) -> tuple:
 
     `companies` は全列でも実測 0.5MB と小さいので絞らない（#446 の実測表）。
     """
-    from database import Company, FinancialMetric, FinancialMetricWithTTM
-    model = FinancialMetric if current_fin_rows() == "annual" else FinancialMetricWithTTM
+    from database import Company
+    # 読む VIEW と並び（id まで入れて一意に決める）は `fin_rows_model` が唯一の源。
+    model, order = fin_rows_model()
     # 週次株価は単一クエリだと本番 pooler で timeout/接続破損するため分割ロード（Issue #311）。
     prices_by_co = load_weekly_prices_chunked(db, with_volume=with_volume)
 
     progress.emit("財務指標をロード")
     fin_cols = [getattr(model, f) for f in FIN_LOAD_FIELDS]
-    # **並びを一つに決める**。`_find_applicable_fin` は period_end 昇順の前提で「最後の行」を
-    # 選ぶ。通期＋TTM では同じ社の行が 2 つの基準から来るので、同じ period_end で並びが
-    # 揺れると run ごとに選ばれる行が変わりうる（id まで入れれば完全に決まる）。
-    order = [model.edinet_code, model.period_end]
-    if model is not FinancialMetric:
-        order.append(model.id)
     fin_by_co: dict[str, list] = defaultdict(list)
     for row in db.query(*fin_cols).order_by(*order).all():
         rec = _FinRow(*row)
