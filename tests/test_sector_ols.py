@@ -764,3 +764,61 @@ class TestPeriodTypeIsolation:
         records = plugin._load_records(db, 2023, DEFAULT_FEATURES_PRICE)
         assert len({r.edinet_code for r in records}) == len(records)
         assert all(r.period_end != date(2023, 9, 30) for r in records)
+
+    def test_all_years_loads_every_annual_row_but_not_h1(self, db, make_fin):
+        """all_years=True は全年度の通期行を返す（時点再現 `sector_gap_asof` 用・#626）。"""
+        _seed_sector(db, make_fin, n=12)
+        db.add(make_fin(edinet_code="E00001", industry="情報・通信業",
+                        year=2022, period_end="2022-03-31",
+                        bs_bps=800.0, pl_eps=70.0, stock_price=1400.0))
+        db.add(make_fin(edinet_code="E00001", industry="情報・通信業",
+                        year=2023, period_end="2023-09-30", period_type="H1"))
+        db.commit()
+
+        records = plugin._load_records(db, None, DEFAULT_FEATURES_PRICE, all_years=True)
+        e1 = sorted(r.year for r in records if r.edinet_code == "E00001")
+        assert e1 == [2022, 2023]
+        assert all(r.period_end != date(2023, 9, 30) for r in records)
+
+
+# ── predict_gaps(): 保存しない計算経路（#626）──────────────────────────────────
+
+class TestPredictGaps:
+    """`predict_gaps` は `execute` と同じ手続きで、DB へは書かない。"""
+
+    @staticmethod
+    def _params(**raw):
+        from plugins.utils import coerce_params
+        return coerce_params(plugin.params_schema(), raw)
+
+    @pytest.mark.parametrize("raw", [{}, {"regularization": "ridge"},
+                                     {"features": ["pl_eps", "bs_bps"], "shrink_threshold": 30}])
+    def test_matches_what_execute_persists(self, db, make_fin, raw):
+        # 2業種（銀行業は売上総利益が業種内 100% 欠損＝業種別の採用列が効く）。
+        # shrink_threshold=30 で両業種とも縮約が掛かる経路も通す。
+        from database import RegressionResult
+        _seed_sector(db, make_fin, n=12)
+        _seed_sector2(db, make_fin, n=8)
+        records = plugin._load_records(db, None, self._params(**raw)["features"])
+        gaps = plugin.predict_gaps(records, self._params(**raw))
+
+        asyncio.run(execute_plugin(plugin, raw, db))
+        persisted = {(r.edinet_code, r.year, r.period_end): r.gap_ratio
+                     for r in db.query(RegressionResult).all()}
+        assert gaps == persisted
+        assert len(gaps) == 20
+
+    def test_writes_nothing(self, db, make_fin):
+        from database import RegressionResult
+        _seed_sector(db, make_fin, n=12)
+        records = plugin._load_records(db, None, DEFAULT_FEATURES_PRICE)
+        gaps = plugin.predict_gaps(records, self._params())
+        assert len(gaps) == 12
+        assert db.query(RegressionResult).count() == 0
+
+    def test_sector_below_min_samples_yields_no_gap(self, db, make_fin):
+        _seed_sector(db, make_fin, n=12)
+        _seed_sector2(db, make_fin, n=3)          # min_samples=5 未満の業種
+        records = plugin._load_records(db, None, DEFAULT_FEATURES_PRICE)
+        gaps = plugin.predict_gaps(records, self._params())
+        assert {k[0] for k in gaps} == {f"E{i:05d}" for i in range(1, 13)}

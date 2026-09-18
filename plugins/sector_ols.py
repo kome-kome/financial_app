@@ -18,6 +18,7 @@
 import logging
 import math
 from collections import defaultdict, namedtuple
+from dataclasses import dataclass
 from typing import Any
 
 from . import progress
@@ -250,6 +251,38 @@ def _resolve_per_share_value(record, feat: str, shares: float,
     return float(src_val) / shares
 
 
+def gap_ratio_pct(predicted: float, actual: float) -> float | None:
+    """乖離率 [%] = (理論株価 − 実株価) / 実株価 × 100。正なら割安。
+
+    保存経路（`_persist_and_rank`）と時点再現（`sector_gap_asof`・#626）が共有する。
+    式を二重に持つと、片方だけ丸めや符号を変えたときに学習パネルと本番の gap が別物になる。
+    """
+    return round((predicted - actual) / actual * 100, 2) if actual else None
+
+
+@dataclass
+class _FitInputs:
+    """業種ごとの当てはめに入る前の共通部分（母集団・採用列・プール予測）。"""
+    features: list              # 段階1（全業種一括）の採用列
+    dropped_features: list
+    features_by_sector: dict
+    dropped_by_sector: dict
+    by_sector: dict             # 業種名 → [(row, y, record), ...]
+    global_pred_map: dict       # (edinet_code, year) → プール予測 [円/株]
+
+
+@dataclass
+class _SectorFit:
+    samples: list
+    all_yhat: list
+    result: dict
+    X_norm: list
+    y_normed: list
+    y_sd: float
+    X_win_cols: list
+    features: list              # この業種の採用列
+
+
 class SectorOLSPlugin(AnalysisPlugin):
     name = "sector_ols"
     label = "業種別OLS"
@@ -365,7 +398,13 @@ class SectorOLSPlugin(AnalysisPlugin):
             },
         }
 
-    def _load_records(self, db, year: int | None, features: list) -> list:
+    def _load_records(self, db, year: int | None, features: list, *,
+                      all_years: bool = False) -> list:
+        """回帰の母集団を読む。既定は各社の最新の通期行、`year` 指定でその年度の通期行。
+
+        `all_years=True` は**全年度の通期行**を返す（時点再現 `sector_gap_asof` 用・#626）。
+        どの行を使うかは呼び出し側が月末ごとに選ぶので、ここでは絞らない。
+        """
         from sqlalchemy import func as _sqla_func
 
         from database import Company, FinancialRecord, latest_year_subq
@@ -407,6 +446,8 @@ class SectorOLSPlugin(AnalysisPlugin):
             query = (_base_query()
                      .filter(FinancialRecord.year == year,
                              FinancialRecord.period_type == "annual"))
+        elif all_years:
+            query = _base_query().filter(FinancialRecord.period_type == "annual")
         records = [rec_cls(*row) for row in query.all()]
         if not records:
             raise ValueError("データがありません。先にデータ収集を実行してください。")
@@ -600,7 +641,7 @@ class SectorOLSPlugin(AnalysisPlugin):
         sector_preds = []
         for i, (_, actual, r) in enumerate(samples):
             predicted = all_yhat[i]
-            gap = round((predicted - actual) / actual * 100, 2) if actual else None
+            gap = gap_ratio_pct(predicted, actual)
             predicted_mcap = (
                 round(predicted / r.stock_price * r.market_cap, 0)
                 if r.market_cap and r.stock_price and r.stock_price > 0 else None
@@ -690,21 +731,20 @@ class SectorOLSPlugin(AnalysisPlugin):
             }
         return stat_entry
 
-    def execute(self, params: dict, db: Any) -> dict:
+    def _prepare_fit(self, records: list, params: dict) -> _FitInputs:
+        """母集団の選別・採用列の決定・プール予測までの共通部分（DB に触れない）。
+
+        `execute`（保存する）と `predict_gaps`（保存しない・#626）が共有する。片方にだけ
+        手を入れると、学習パネルの時点再現 gap と本番の gap が黙って別の手続きになる。
+        """
         target              = params["target"]
         features            = params["features"]
         min_samples         = params["min_samples"]
         regularization      = params["regularization"]
-        year                = params["year"]
         shrink_threshold    = params["shrink_threshold"]
         sector_missing_rate = params["sector_missing_rate"]
         zero_fill           = params["zero_fill_no_dividend"]
 
-        if not features:
-            raise ValueError("説明変数を1つ以上選択してください")
-
-        progress.emit("財務データをロード")
-        records = self._load_records(db, year, features)
         base    = self._eligible_base(records, target)
         # 欠損率が高い説明変数を自動ドロップ（1項目の NULL で全社除外される事故を防ぐ）。
         # 段階1（全業種一括）→ 段階2（業種内）の順。以降の features は段階1の採用列を指す。
@@ -742,42 +782,94 @@ class SectorOLSPlugin(AnalysisPlugin):
                     for i, s in enumerate(all_eligible):
                         global_pred_map[(s[2].edinet_code, s[2].year)] = g_yhat[i]
 
+        return _FitInputs(
+            features=features, dropped_features=dropped_features,
+            features_by_sector=features_by_sector, dropped_by_sector=dropped_by_sector,
+            by_sector=by_sector, global_pred_map=global_pred_map,
+        )
+
+    def _fit_sector(self, prep: _FitInputs, sector: str, samples: list,
+                    params: dict) -> _SectorFit | None:
+        """1業種を当てはめて予測値を返す。社数不足・当てはめ失敗は None（DB に触れない）。"""
+        regularization   = params["regularization"]
+        shrink_threshold = params["shrink_threshold"]
+        if len(samples) < params["min_samples"]:
+            return None
+
+        sector_features = prep.features_by_sector[sector]
+        X_norm, y_normed, y_mu, y_sd, X_win_cols, _ = self._preprocess_sector(
+            samples, sector_features)
+        result, all_yhat = self._fit_and_predict(X_norm, y_normed, y_mu, y_sd, regularization)
+        if result is None:
+            return None
+
+        # 薄業種: グローバル予測へ縮約（w = 1 - n/threshold、n=0 → 完全グローバル）
+        n = len(samples)
+        if prep.global_pred_map and n < shrink_threshold:
+            w = 1.0 - n / shrink_threshold
+            all_yhat = [
+                w * prep.global_pred_map.get((s[2].edinet_code, s[2].year), yhat) + (1.0 - w) * yhat
+                for s, yhat in zip(samples, all_yhat)
+            ]
+        return _SectorFit(samples=samples, all_yhat=all_yhat, result=result,
+                          X_norm=X_norm, y_normed=y_normed, y_sd=y_sd,
+                          X_win_cols=X_win_cols, features=sector_features)
+
+    def predict_gaps(self, records: list, params: dict) -> dict:
+        """読み込み済みレコードから乖離率だけを返す。**DB へは書かない**（#626・ADR-0057）。
+
+        学習パネルの時点再現（`sector_gap_asof`）が月末ごとに呼ぶ。手続きは `execute` と
+        同じ `_prepare_fit` → `_fit_sector` を通るので、本番の gap と同じ意味の値になる。
+        戻りのキーは `(edinet_code, year, period_end)`。
+        """
+        prep = self._prepare_fit(records, params)
+        out: dict = {}
+        for sector, samples in sorted(prep.by_sector.items()):
+            fit = self._fit_sector(prep, sector, samples, params)
+            if fit is None:
+                continue
+            for (_row, actual, r), predicted in zip(fit.samples, fit.all_yhat):
+                out[(r.edinet_code, r.year, r.period_end)] = gap_ratio_pct(predicted, actual)
+        return out
+
+    def execute(self, params: dict, db: Any) -> dict:
+        features            = params["features"]
+        min_samples         = params["min_samples"]
+        regularization      = params["regularization"]
+        year                = params["year"]
+        shrink_threshold    = params["shrink_threshold"]
+        zero_fill           = params["zero_fill_no_dividend"]
+
+        if not features:
+            raise ValueError("説明変数を1つ以上選択してください")
+
+        progress.emit("財務データをロード")
+        records = self._load_records(db, year, features)
+        prep = self._prepare_fit(records, params)
+        features, dropped_features = prep.features, prep.dropped_features
+        dropped_by_sector = prep.dropped_by_sector
+
         sector_stats, all_predictions, n_skipped = [], [], 0
 
         # 進捗（#545）。業種数は数十なので間引かず1業種1件流す（業種名がそのまま
         # 「いまどこを回帰しているか」になる）。
-        sectors = sorted(by_sector.items())
+        sectors = sorted(prep.by_sector.items())
         n_sectors = len(sectors)
         for done, (sector, samples) in enumerate(sectors):
             progress.emit(f"業種別に回帰: {sector}", done, n_sectors,
                           every=progress.EVERY_SECTORS)
-            if len(samples) < min_samples:
+            fit = self._fit_sector(prep, sector, samples, params)
+            if fit is None:
                 n_skipped += 1
                 continue
 
-            sector_features = features_by_sector[sector]
-            X_norm, y_normed, y_mu, y_sd, X_win_cols, _ = self._preprocess_sector(
-                samples, sector_features)
-            result, all_yhat = self._fit_and_predict(X_norm, y_normed, y_mu, y_sd, regularization)
-            if result is None:
-                n_skipped += 1
-                continue
-
-            # 薄業種: グローバル予測へ縮約（w = 1 - n/threshold、n=0 → 完全グローバル）
-            n = len(samples)
-            if global_pred_map and n < shrink_threshold:
-                w = 1.0 - n / shrink_threshold
-                all_yhat = [
-                    w * global_pred_map.get((s[2].edinet_code, s[2].year), yhat) + (1.0 - w) * yhat
-                    for s, yhat in zip(samples, all_yhat)
-                ]
-
-            sector_preds = self._persist_and_rank(db, sector, samples, all_yhat, regularization)
+            sector_preds = self._persist_and_rank(db, sector, fit.samples, fit.all_yhat,
+                                                  regularization)
             stat_entry   = self._build_stat_entry(
-                sector, samples, result, y_sd, X_norm, y_normed, sector_features,
-                regularization, X_win_cols
+                sector, fit.samples, fit.result, fit.y_sd, fit.X_norm, fit.y_normed,
+                fit.features, regularization, fit.X_win_cols
             )
-            stat_entry["features"] = list(sector_features)
+            stat_entry["features"] = list(fit.features)
             stat_entry["dropped_features"] = dropped_by_sector.get(sector, [])
             all_predictions.extend(sector_preds)
             sector_stats.append(stat_entry)
