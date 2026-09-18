@@ -995,11 +995,41 @@ def notify(results: dict[str, int], log: Path, run=subprocess.run) -> Optional[s
     return bc.notify(results, log, SPEC.issue_title, issue_body(results, log), run=run)
 
 
+def build_parser():
+    """共通パーサ（`--steps` / `--dry-run` / `--no-issue`）にキュー操作を足したもの（#692）。
+
+    **キューに触る前に解析し終える**ために、全部の引数をここへ載せる。以前は `"--x" in args`
+    の手書き判定のあと、実走経路の最後（`bc.run_batch` の中）で初めて解析していたため、
+    `--help` や打ち間違いの引数が `take` の後で `SystemExit` になり、キュー先頭の仕事が
+    黙って消えた（exit 0 でヘルプが出るだけで、in-flight マーカーも `finally` で消える）。
+
+    `--steps` のヘルプに並べる名前は JOBS 全体から作る。検証は取り出す1件が決まってから、
+    `take` の前に実際のステップ列に対して行う（`main` 参照）。
+    """
+    names = ["deps_smoke"] + [j.name for j in JOBS.values()]
+    ap = bc.build_parser(SPEC, list(dict.fromkeys(names)))
+    # 2つ渡したときに片方が黙って勝たないよう、互いに排他にする。
+    ops = ap.add_mutually_exclusive_group()
+    ops.add_argument("--queue", action="store_true",
+                     help="キューの中身・暦の予定・今日の見送りを表示する（書き込まない）")
+    ops.add_argument("--peek", action="store_true",
+                     help="次の1件を JSON で出す（キューは減らさない。run_daytime.ps1 -Now が使う）")
+    ops.add_argument("--allow-holiday", action="store_true",
+                     help="今日だけ祝日の見送りを外す（run_daytime.ps1 -Now -Force が使う）")
+    ops.add_argument("--clear-queue", action="store_true",
+                     help="キューと in-flight マーカーを空にする")
+    ops.add_argument("--enqueue", metavar="NAMES",
+                     help="末尾へ積む（カンマ区切りで複数可）。積める名前: " + ", ".join(sorted(JOBS)))
+    return ap
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
+    # **DB に触る前に解析する**（#692）。`--help` と未知の引数はここで終わる。
+    ns = build_parser().parse_args(args)
 
-    # キュー操作は共通パーサの守備範囲外なので先に処理する（バッチを起動しない）。
-    if "--queue" in args:
+    # キュー操作はバッチを起動しない。
+    if ns.queue:
         items = read_queue()
         print(f"日中枠のキュー: {len(items)}件")
         for i, name in enumerate(items, 1):
@@ -1043,7 +1073,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if note:
             print("  " + note)
         return 0
-    if "--peek" in args:
+    if ns.peek:
         # `run_daytime.ps1 -Now` が「次の1件を今すぐ叩いてよいか」を判断するための機械可読口。
         # **キューは減らさない**（判断だけして走らせないことがある）。暦と月次の重なりは
         # 実走と同じ関数で当てる＝見せた1件と実際に走る1件がずれない（#681）。
@@ -1068,7 +1098,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "holiday_skip": kind == "holiday",
         }))
         return 0
-    if "--allow-holiday" in args:
+    if ns.allow_holiday:
         # `run_daytime.ps1 -Now -Force` が叩く。**今日（JST）だけ**祝日の見送りを外す。
         # 月次の重なりは外れない（`blocked_by` が月次を先に見る）。
         today = _today()
@@ -1076,22 +1106,21 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         state = {True: "祝日", False: "祝日ではない", None: "祝日表の範囲外"}[is_holiday(today)]
         print(f"今日（{today.isoformat()}・{state}）の祝日の見送りを解除した（翌日には効かない）")
         return 0
-    if "--clear-queue" in args:
+    if ns.clear_queue:
         write_queue([])
         # **マーカーも消す。** 残すと、消したはずの仕事を次の実走が黙って積み直す。
         clear_inflight()
         print("日中枠のキューを空にした")
         return 0
-    for i, a in enumerate(args):
-        if a == "--enqueue":
-            names = [x for x in args[i + 1].split(",") if x] if i + 1 < len(args) else []
-            if not names:
-                raise SystemExit("--enqueue には仕事の名前が要る（カンマ区切りで複数可）")
-            items = enqueue(names)
-            print(f"積んだ: {', '.join(names)} / キューは {len(items)}件")
-            return 0
+    if ns.enqueue is not None:
+        names = [x for x in ns.enqueue.split(",") if x]
+        if not names:
+            raise SystemExit("--enqueue には仕事の名前が要る（カンマ区切りで複数可）")
+        items = enqueue(names)
+        print(f"積んだ: {', '.join(names)} / キューは {len(items)}件")
+        return 0
 
-    dry = "--dry-run" in args
+    dry = ns.dry_run
     today = _today()
 
     # **キューを読む前に回収する**（#639）。戻した仕事がそのまま今日の1件になる。
@@ -1123,18 +1152,24 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if not dry:
             record_footprint({})
         return 0
+    # `--steps` の打ち間違いも **取り除く前に** 弾く（#692）。後だと `select_steps` の
+    # SystemExit で仕事が戻らない。
+    steps = steps_for(sys.executable, job_key)
+    bc.select_steps(steps, ns.steps)
     if not dry:
         take(job_key)
 
+    # 実走経路に届く引数は `--steps` / `--dry-run` / `--no-issue` だけ（キュー操作は上で
+    # return 済み）で、`run_batch` 側の共通パーサが受け付ける集合と同じ＝二度目の解析は必ず通る。
     hooks = bc.Hooks(log_path=log_path, record_footprint=record_footprint, notify=notify)
     if dry:
-        return bc.run_batch(SPEC, steps_for(sys.executable, job_key), hooks, args)
+        return bc.run_batch(SPEC, steps, hooks, args)
 
     # マーカーは pop の直後に立て、**戻り値によらず finally で消す**。Python が生きていれば
     # 必ず消えるので、残っていること自体が「OS ごと消された」証拠になる（#639）。
     write_inflight(job_key, _STATE_RUNNING, carried_requeue(job_key))
     try:
-        return bc.run_batch(SPEC, steps_for(sys.executable, job_key), hooks, args)
+        return bc.run_batch(SPEC, steps, hooks, args)
     finally:
         clear_inflight()
 

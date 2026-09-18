@@ -1311,3 +1311,125 @@ class TestCalendarInMain:
         out.encode("cp932")
         assert rd.read_queue(db=db) == ["beta"]
         assert rd.KEY_SCHEDULE not in db.store
+
+
+# ── 引数はキューに触る前に解析する（#692）──────────────────────────────────
+# 以前は `"--x" in args` の手書き判定のあと、実走経路の最後（`bc.run_batch` の中）で
+# 初めて解析していた。`--help` は `take` の後で `SystemExit(0)` になり、キュー先頭の仕事が
+# 黙って消えた（ヘルプが出て exit 0。in-flight マーカーも `finally` で消えるので #639 の
+# 回収にも引っかからない）。2026-09-18 に実際に踏んだ。
+
+
+class TestArgumentsAreParsedBeforeTheQueue:
+    LAUNCHER = ROOT / "run_daytime.ps1"
+
+    @pytest.fixture
+    def db(self, fake_db, monkeypatch, tmp_path):
+        monkeypatch.setattr(rd, "_session", lambda: fake_db)
+        self.log = tmp_path / "daytime.log"
+        monkeypatch.setattr(rd, "log_path", lambda *a, **k: self.log)
+        self.footprints = []
+        monkeypatch.setattr(rd, "record_footprint", lambda results: self.footprints.append(results))
+        self.ran = []
+
+        def _run_batch(spec, steps, hooks, argv):
+            self.ran.append([s.name for s in steps])
+            return 0
+
+        monkeypatch.setattr(rd.bc, "run_batch", _run_batch)
+        return fake_db
+
+    def _loaded(self, db, monkeypatch):
+        """触られたら必ず跡が残る状態: 暦が積む日・回収すべきマーカー・キューに仕事。"""
+        monkeypatch.setattr(rd, "_today", lambda: date(2026, 10, 16))
+        monkeypatch.setattr(rd, "SCHEDULE", _with_produced())      # 成果物なし＝両方積む日
+        rd.write_queue(["gate:macro"], db=db)
+        db.store[rd.KEY_INFLIGHT] = json.dumps(
+            {"job": "beta", "state": rd._STATE_RUNNING, "requeued": 0, "at": "x"})
+        return dict(db.store)
+
+    def _untouched(self, db, before):
+        assert db.store == before, "キュー・暦の印・in-flight マーカーのどれかが書き換わった"
+        assert self.ran == [], "バッチが起動した"
+        assert self.footprints == [], "足跡を書いた"
+        assert not self.log.exists(), "ログへ書いた"
+
+    @pytest.mark.parametrize("argv,code", [
+        (["--help"], 0),
+        (["-h"], 0),
+        (["--no-such-flag"], 2),
+        (["--dry-run", "--typo"], 2),
+        (["--steps"], 2),                      # 値の欠落
+        (["--enqueue"], 2),
+    ])
+    def test_help_and_bad_arguments_touch_nothing(self, db, monkeypatch, capsys, argv, code):
+        before = self._loaded(db, monkeypatch)
+
+        with pytest.raises(SystemExit) as e:
+            rd.main(argv)
+
+        assert e.value.code == code
+        self._untouched(db, before)
+        captured = capsys.readouterr()
+        (captured.out + captured.err).encode("cp932")
+
+    def test_help_lists_the_queue_operations(self, db, monkeypatch, capsys):
+        with pytest.raises(SystemExit):
+            rd.main(["--help"])
+        out = capsys.readouterr().out
+        for flag in ("--queue", "--peek", "--allow-holiday", "--clear-queue", "--enqueue",
+                     "--steps", "--dry-run", "--no-issue"):
+            assert flag in out, f"ヘルプに {flag} が無い"
+
+    def test_two_queue_operations_are_rejected_not_resolved_silently(self, db, monkeypatch):
+        """以前は先に判定した `--queue` が黙って勝った。`--clear-queue` を含むので止める側へ倒す。"""
+        before = self._loaded(db, monkeypatch)
+
+        with pytest.raises(SystemExit) as e:
+            rd.main(["--queue", "--clear-queue"])
+
+        assert e.value.code == 2
+        self._untouched(db, before)
+
+    def test_an_unknown_step_is_rejected_before_the_job_is_taken(self, db, monkeypatch):
+        """`--steps` の検証は取り出す1件が決まってからでないとできないが、`take` の前に置く。"""
+        monkeypatch.setattr(rd, "_today", lambda: QUIET_DAY)
+        monkeypatch.setattr(rd, "SCHEDULE", _with_produced(
+            disclosures=_utc(QUIET_DAY.year, QUIET_DAY.month, 1, 0, 0)))
+        rd.write_queue(["gate:macro"], db=db)
+
+        with pytest.raises(SystemExit):
+            rd.main(["--steps", "no_such_step"])
+
+        assert rd.read_queue(db=db) == ["gate:macro"], "打ち間違いの --steps で仕事が消えた"
+        assert rd.read_inflight(db=db) is None
+        assert self.ran == []
+
+    def test_a_known_step_still_runs(self, db, monkeypatch):
+        monkeypatch.setattr(rd, "_today", lambda: QUIET_DAY)
+        monkeypatch.setattr(rd, "SCHEDULE", _with_produced(
+            disclosures=_utc(QUIET_DAY.year, QUIET_DAY.month, 1, 0, 0)))
+        rd.write_queue(["gate:macro"], db=db)
+
+        assert rd.main(["--steps", "gate_macro", "--no-issue"]) == 0
+
+        assert self.ran == [["gate_macro"]]
+        assert rd.read_queue(db=db) == []
+
+    def test_enqueue_splits_on_commas(self, db):
+        assert rd.main(["--enqueue", "beta,gate:ttm"]) == 0
+        assert rd.read_queue(db=db) == ["beta", "gate:ttm"]
+
+    def test_enqueue_with_no_names_is_refused(self, db):
+        with pytest.raises(SystemExit) as e:
+            rd.main(["--enqueue", ","])
+        assert "--enqueue" in str(e.value.code)
+        assert rd.read_queue(db=db) == []
+
+    def test_every_flag_the_launcher_passes_is_known(self):
+        """ps1 が渡す引数をパーサが知らないと、今後は exit 2 で止まる（黙って実走へは進まない）。"""
+        text = self.LAUNCHER.read_text(encoding="utf-8-sig")
+        passed = set(re.findall(r'"(--[a-z][a-z-]*)"', text))
+        assert passed, "run_daytime.ps1 から引数を読めない（書式が変わった）"
+        known = {s for a in rd.build_parser()._actions for s in a.option_strings}
+        assert passed <= known, f"パーサが知らない引数: {sorted(passed - known)}"
