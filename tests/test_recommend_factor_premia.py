@@ -332,3 +332,62 @@ class TestBuildPeriodPanel:
         db.query.side_effect = lambda *a: mock_q
         with pytest.raises(ValueError, match="株価週次履歴"):
             build_period_panel(db)
+
+
+class TestBuildPeriodPanelWithGapRatio:
+    """`with_gap_ratio=True`（#626・ADR-0057）。gap の計算自体は test_sector_gap_asof が縛る。"""
+
+    @staticmethod
+    def _fake_gaps(monkeypatch, keep):
+        """時点再現の gap を差し替える。keep(edinet_code, ym) が真の行にだけ gap を返す。"""
+        import sector_gap_asof
+
+        def _build(db, prices_by_co, yms):
+            yms = list(yms)
+            return ({(ec, ym): 1.5 for ec in prices_by_co for ym in yms if keep(ec, ym)},
+                    {ym: {} for ym in yms})
+        monkeypatch.setattr(sector_gap_asof, "build_asof_gaps", _build)
+
+    def test_default_is_unchanged(self, monkeypatch):
+        import sector_gap_asof
+
+        def _must_not_run(*_a, **_k):
+            raise AssertionError("既定（with_gap_ratio=False）で時点再現を回してはいけない")
+        monkeypatch.setattr(sector_gap_asof, "build_asof_gaps", _must_not_run)
+        db, _codes = _build_mock_recommend_db()
+        _panel, factor_names = build_period_panel(db, min_companies_per_period=2)
+        assert "gap_ratio" not in factor_names
+
+    def test_gap_column_is_appended_last(self, monkeypatch):
+        self._fake_gaps(monkeypatch, lambda ec, ym: True)
+        db, _codes = _build_mock_recommend_db()
+        base, base_names = build_period_panel(db, min_companies_per_period=2)
+        db, _codes = _build_mock_recommend_db()
+        panel, names = build_period_panel(db, min_companies_per_period=2, with_gap_ratio=True)
+        assert names == base_names + ["gap_ratio"]
+        assert set(panel) == set(base)
+        for ym, (X, y) in panel.items():
+            X0, y0 = base[ym]
+            assert np.array_equal(X[:, :-1], X0)
+            assert np.array_equal(y, y0)
+            assert (X[:, -1] == 1.5).all()
+
+    def test_rows_without_gap_are_dropped_and_counted(self, monkeypatch):
+        self._fake_gaps(monkeypatch, lambda ec, ym: ec != "E00001")
+        db, _codes = _build_mock_recommend_db()
+        base, _ = build_period_panel(db, min_companies_per_period=2)
+        db, _codes = _build_mock_recommend_db()
+        coverage: dict = {}
+        panel, _names = build_period_panel(db, min_companies_per_period=2, with_gap_ratio=True,
+                                           gap_coverage=coverage)
+        assert set(coverage) >= set(base)
+        for ym, (X, _y) in panel.items():
+            before, after = coverage[ym]
+            assert before == len(base[ym][1])
+            assert after == before - 1 == X.shape[0]
+
+    def test_refused_inside_ttm_basis(self):
+        from plugins.macro_snapshots import use_fin_rows
+        db, _codes = _build_mock_recommend_db()
+        with use_fin_rows("with_ttm"), pytest.raises(ValueError, match="annual"):
+            build_period_panel(db, min_companies_per_period=2, with_gap_ratio=True)

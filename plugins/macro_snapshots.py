@@ -480,6 +480,19 @@ def representative_snapshot_date(snap_dates) -> dict:
     }
 
 
+def month_end_indices(dates: list) -> list[int]:
+    """週次足の日付列（昇順・'YYYY-MM-DD'）から、各月の最後の足の位置を返す。
+
+    スナップショットの月末はこの位置で決まる。`build_snapshots` と時点再現の乖離率
+    （`sector_gap_asof`・#626）が共有する——片方だけ月末の定義を変えると、パネルの行と
+    その行に付ける gap_ratio が別の日付の株価を見る。
+    """
+    n = len(dates)
+    if n == 0:
+        return []
+    return [i for i in range(n - 1) if dates[i][:7] != dates[i + 1][:7]] + [n - 1]
+
+
 def _find_applicable_fin(fin_recs: list, snap_date: str):
     """snap_date より FINANCIAL_LAG_DAYS 前以前に period_end がある最新の財務レコードを返す。"""
     result = None
@@ -1146,11 +1159,7 @@ def _build_snapshots_impl(
         # 各 snap_idx 時点の既知値（未来を覗かない）を feat_row 末尾側へ追加する。
         px_feats = build_price_features(price_rows, price_features) if price_features else {}
 
-        month_ends = [
-            i for i in range(n - 1) if dates[i][:7] != dates[i + 1][:7]
-        ] + [n - 1]
-
-        for snap_idx in month_ends:
+        for snap_idx in month_end_indices(dates):
             if snap_idx < 4:
                 continue
             snap_date = dates[snap_idx]

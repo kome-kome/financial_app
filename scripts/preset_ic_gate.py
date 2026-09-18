@@ -17,9 +17,12 @@ ADR-0028 の昇格ゲート（期別 rank-IC 系列 ＋ `paired_ic_significance`
    本番と別物になる（#529 の指摘そのもの）。パネルは numpy 配列なので `_panel_rows` で
    属性アクセスできる形へ写す薄いアダプタだけを挟む。
 2. **パネルは `recommend_factor_premia.build_period_panel`**。#509/#517 の実測がこの61期
-   パネル上で行われたため、再現には同じものが要る。gap_ratio を持たない（ADR-0008
+   パネル上で行われたため、再現には同じものが要る。既定は gap_ratio を持たない（ADR-0008
    Decision 1）ので、**測れなかった重みの比率を必ず出力**し、閾値超の行は判定を n/a へ落とす。
    黙って落とすと「割安重視は rank-IC 負」という嘘の結論が独り歩きする。
+   `--with-gap-ratio` は時点再現の gap_ratio（`sector_gap_asof`・#626・ADR-0057）を足した
+   パネルで測る。gap の無い社は全プリセットの評価から落ちるので、**母集団の減少率と事前に
+   固定した基準の成否を必ず印字する**（減った母集団で良く見えるのは ADR-0045 の罠）。
 3. **momentum の単位を本番へ揃える**。パネルの `z_momentum` は生の log return（#519 で
    build_period_panel は標準化しない）。本番は `compute_momentum_z` が期内 winsorize→
    標準化した値を渡すため、ここでも同じ2関数で断面標準化してから合成する（`--raw-momentum`
@@ -39,6 +42,7 @@ DB へは書かない（読み取りのみ）。
     python -m scripts.preset_ic_gate --no-cross-section-standardize    # #509 是正前の再現
     python -m scripts.preset_ic_gate --compare-standardization         # #509 型の対比較
     python -m scripts.preset_ic_gate --preset バランス型 --premia-run-id rfp_20260820T183244Z
+    python -m scripts.preset_ic_gate --with-gap-ratio --panel-info-only  # 載せる基準の成否
 
 パネルは株価の蓄積で毎晩伸びる。過去の実測（ADR-0008 は61期・2020-07..2025-07）と突き合わせる
 ときは `--until 2025-07` で期を揃えること——揃えないと 0.002 程度の差が出て「手続きが違う」の
@@ -74,15 +78,75 @@ DEFAULT_MIN_COMPANIES = 30
 DEFAULT_N_BOOT = 2000
 DEFAULT_BASELINE = "バランス型"
 
+# gap_ratio をパネルへ載せてよい基準（ADR-0057・**測る前に固定した値**）。有効期間が
+# GAP_MIN_PERIODS を超え、かつ各月の母集団の減少率の中央値が GAP_MAX_MEDIAN_SHRINK 以内。
+# 他7指標の充足率（96〜100%）とほぼ同じ水準を求める。結果を見てから動かさないこと。
+GAP_MIN_PERIODS = 60
+GAP_MAX_MEDIAN_SHRINK = 0.05
+
 
 # ── パネル ────────────────────────────────────────────────────────────────
 
-def load_panel(db, min_companies: int, use_cache: bool) -> tuple:
-    """(period_panel, factor_names) を得る。既定はフルビルド（キャッシュは opt-in）。"""
+def load_panel(db, min_companies: int, use_cache: bool,
+               with_gap_ratio: bool = False) -> tuple:
+    """(period_panel, factor_names, gap_coverage) を得る。既定はフルビルド（キャッシュは opt-in）。
+
+    gap_coverage は `with_gap_ratio=True` のときだけ `{ym: (付ける前, 付けた後)}`、それ以外は None。
+    キャッシュキーは gap の有無で分ける（gap なしは従来のキーのまま＝過去のキャッシュと同じ中身）。
+    """
+    if not with_gap_ratio:
+        if use_cache:
+            panel, names = cached(f"preset_ic_panel_v1_min{min_companies}",
+                                  lambda: build_period_panel(db, min_companies))
+        else:
+            panel, names = build_period_panel(db, min_companies)
+        return panel, names, None
+
+    def _build_with_gap():
+        coverage: dict = {}
+        panel, names = build_period_panel(db, min_companies, with_gap_ratio=True,
+                                          gap_coverage=coverage)
+        return panel, names, coverage
+
     if use_cache:
-        key = f"preset_ic_panel_v1_min{min_companies}"
-        return cached(key, lambda: build_period_panel(db, min_companies))
-    return build_period_panel(db, min_companies)
+        return cached(f"preset_ic_panel_gap_v1_min{min_companies}", _build_with_gap)
+    return _build_with_gap()
+
+
+def gap_coverage_summary(coverage: dict, min_companies: int, until: str | None = None) -> dict:
+    """gap を付けたことによる母集団の減少と、載せる基準（ADR-0057）の成否。
+
+    減少率は「gap を付ける前に `min_companies` 以上あった月」ごとの `(前 − 後) / 前`
+    （`1 − 後/前` と書くと 950/1000 が 0.05000000000000004 になり、基準のちょうど上で落ちる）。
+    有効期間は付けた後に `min_companies` 以上残った月の数。`until` で期を揃える（パネルと同じ切り方）。
+    """
+    months = {ym: v for ym, v in coverage.items() if until is None or ym <= until}
+    shrink = sorted((before - after) / before for before, after in months.values()
+                    if before >= min_companies)
+    n_periods = sum(1 for _before, after in months.values() if after >= min_companies)
+    median = statistics.median(shrink) if shrink else None
+    worst = shrink[-1] if shrink else None
+    meets = (n_periods > GAP_MIN_PERIODS and median is not None
+             and median <= GAP_MAX_MEDIAN_SHRINK)
+    return {
+        "n_periods":           n_periods,
+        "median_shrink":       median,
+        "max_shrink":          worst,
+        "min_periods":         GAP_MIN_PERIODS,
+        "max_median_shrink":   GAP_MAX_MEDIAN_SHRINK,
+        "meets_criterion":     meets,
+    }
+
+
+def print_gap_summary(summary: dict) -> None:
+    med, worst = summary["median_shrink"], summary["max_shrink"]
+    med_s = "n/a" if med is None else f"{med:.2%}"
+    worst_s = "n/a" if worst is None else f"{worst:.2%}"
+    verdict = "MEETS" if summary["meets_criterion"] else "FAILS"
+    print(f"gap_ratio (as-of): periods={summary['n_periods']} "
+          f"shrink(median={med_s} max={worst_s}) -> {verdict} criterion "
+          f"(periods>{summary['min_periods']} and median shrink<="
+          f"{summary['max_median_shrink']:.0%}, ADR-0057)", flush=True)
 
 
 def panel_info(panel: dict, factor_names: list) -> dict:
@@ -317,6 +381,9 @@ def main() -> None:
                     help="パネルを scripts/.cache へ保存/再利用する（既定はフルビルド）")
     ap.add_argument("--panel-info-only", action="store_true",
                     help="パネルの世代だけ出して終わる")
+    ap.add_argument("--with-gap-ratio", action="store_true",
+                    help="時点再現の gap_ratio を足したパネルで測る（#626・ADR-0057）。"
+                         "母集団の減少率と載せる基準の成否を併せて印字する")
     ap.add_argument("--json", nargs="?", const=str(_OUT_DIR / "preset_ic_gate.json"),
                     default=None, help="判定を JSON で書き出す")
     args = ap.parse_args()
@@ -326,13 +393,18 @@ def main() -> None:
 
     db = SessionLocal()
     try:
-        panel, factor_names = load_panel(db, args.min_companies, args.cache_panel)
+        panel, factor_names, coverage = load_panel(db, args.min_companies, args.cache_panel,
+                                                   with_gap_ratio=args.with_gap_ratio)
         if args.until:
             panel = {ym: v for ym, v in panel.items() if ym <= args.until}
             if not panel:
                 raise SystemExit(f"--until {args.until} で残る期がありません")
         info = panel_info(panel, factor_names)
         print_panel_info(info)
+        gap_summary = None
+        if coverage is not None:
+            gap_summary = gap_coverage_summary(coverage, args.min_companies, args.until)
+            print_gap_summary(gap_summary)
         if args.panel_info_only:
             db.commit()
             return
@@ -442,7 +514,12 @@ def main() -> None:
     if args.json:
         payload = {
             "panel": info,
+            "gap_ratio_coverage": None if coverage is None else {
+                "summary": gap_summary,
+                "by_ym":   {ym: list(v) for ym, v in sorted(coverage.items())},
+            },
             "settings": {
+                "with_gap_ratio":            args.with_gap_ratio,
                 "cross_section_standardize": standardize,
                 "raw_momentum":              args.raw_momentum,
                 "preprocess_version":        PREPROCESS_VERSION,

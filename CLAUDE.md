@@ -59,6 +59,7 @@
 | `scripts/mirror_*.py` | ミラーの pull / sync / verify（ADR-0035・共有基盤 `mirror_common.py`）。**書き込み先はローカル限定**。#503 の正本反転により **pull / sync は定常運転では使わない**（`verify` はバックアップ復元先の突合へ転用）。詳細は [ARCHITECTURE.md](docs/ARCHITECTURE.md) |
 | `weekly_price_cache.py` | 週次株価の run 間差分ロードキャッシュ（ADR-0036）。**速さだけを担い、正しさは指紋・世代印・行数照合が持つ**＝どれかが外れたら必ずフルロードへ倒す。緊急停止は `FINAPP_WEEKLY_CACHE=0`。詳細は [ARCHITECTURE.md](docs/ARCHITECTURE.md) |
 | `ttm_composite.py` | TTM 行（直近12か月）の合成（#424 子2・ADR-0051）。夜間に `ttm_financial_records` を全置換し、`financial_metrics_with_ttm` VIEW が通期の行と並べる。**材料の間に分割があると作らない**（1株指標の基準が混ざる）／**弾いた理由は毎晩数えて出す**／純関数ブロックは database・scripts を import しない。詳細は [ARCHITECTURE.md](docs/ARCHITECTURE.md)・[GOTCHAS.md](docs/GOTCHAS.md) |
+| `sector_gap_asof.py` | 学習パネル用の**時点再現の gap_ratio**（#626・ADR-0057）。`build_period_panel(with_gap_ratio=True)` だけが使う。**`regression_results` へ書かない／株価は `financial_records.stock_price` を読まず月末の週次終値×F（過去行には最大1年先の株価が残る）／回帰の設定は `NIGHTLY_PARAMS` を借りる／行は edinet_code 順に固定する**（ridge の fold が並びで決まる・#697）。詳細は [ARCHITECTURE.md](docs/ARCHITECTURE.md) |
 | `sysmem.py` | 常駐メモリ／物理メモリ実測の**唯一の源**（`batch_common` の heartbeat・`bench_macro_beta` が共有）。**ctypes を書き写さない／psutil は入れない／測るのはプロセスツリーの合計**（単体 pid は静かに誤る）。詳細は [ARCHITECTURE.md](docs/ARCHITECTURE.md) |
 | `collector.py` | オーケストレータ＋後方互換の再エクスポート層＋CLI（実体は下記6分割） |
 | `collector_utils.py` | 収集系共通の設定定数・ロガー。**`EDINET_BASE` は `api.edinet-fsa.go.jp`**（旧 `disclosure.` は `follow_redirects` では直らない・#577）。**例外文字列は `redact_secrets()` で API キーを消す**／**「走ったが全部失敗した」を失敗として現す**。詳細は [GOTCHAS.md](docs/GOTCHAS.md) |

@@ -582,7 +582,7 @@ ridge は `--persist` と併用できず（DB 接続前に終了する）、既�
 **`gap_ratio` は回帰対象から除外**する。`gap_ratio`（sector_ols依存）の非NULL率は本番DBで
 2020〜2024年度=0%・2025年度以降=67%超と極端に偏っており、含めると有効期間が直近2ヶ月分
 しか残らず統計的に無意味になるため（実データ検証で判明・ADR-0008）。「統計的最適化」
-プリセットは残り7指標＋z_momentumの重みのみを持つ。**`mu` も回帰対象から除外**する
+プリセットは残り7指標＋z_momentumの重みのみを持つ（月次の `--persist` はこの既定のパネル）。評価用には、月末ごとの**時点再現**で作った gap_ratio を足したパネル（`build_period_panel(with_gap_ratio=True)`・`regression_results` の過去年度は先読みがあるので使わない・[ADR-0057](adr/0057-past-gap-ratio-is-reconstructed-as-of-each-month.md)）がある。**`mu` も回帰対象から除外**する
 （断面回帰の説明変数は財務・株価由来 factor のみで μ̂ の premium は存在しない。混ざると
 `mu_source` 未指定の実行が reject され、プリセットを選んだだけで 400 になる・ADR-0030）。
 
@@ -598,7 +598,10 @@ ridge は `--persist` と併用できず（DB 接続前に終了する）、既�
   重みから説明できることで、そこに価値がある。
   ただし**割安重視の rank-IC は重みの 44.4% を測っていない**（`gap_ratio` 2.0 が
   Fama-MacBeth のパネルに無い・Decision 1）ので、この数値だけで「割安重視は効かない」と
-  結論しないこと。**検証に `/api/backtest` は使えない**（3/6/12/18/24ヶ月は終端が今日で共通
+  結論しないこと。時点再現の gap_ratio を足したパネル（`python -m scripts.preset_ic_gate --with-gap-ratio`・
+  ADR-0057・2026-09-19 の62期）では**割安重視 +0.0526**（gap なしパネルでは −0.0075・n/a）、
+  gap_ratio 単独は +0.1012（62か月すべて正）で、同じ母集団で gap の重みを 0 にした比較でも
+  3プリセットとも寄与が有意だった。**検証に `/api/backtest` は使えない**（3/6/12/18/24ヶ月は終端が今日で共通
   ＝独立でなく検定力が無い・ADR-0028）。測るなら `python -m scripts.preset_ic_gate`
   （期別 rank-IC ＋ Bonferroni 補正・[ADR-0041](adr/0041-preset-weight-gate-has-an-implementation.md)）。
   重みの再設計そのものは #513 で扱う。

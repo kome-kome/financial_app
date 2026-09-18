@@ -27,6 +27,10 @@ _Avoid_: 欠測, 未収集（区別が本質なので言い換えない）
 業種別OLS（producer）が `regression_results` テーブルへ書き込む銘柄×年度の出力（predicted_market_cap / gap_ratio / model[ols|ridge] / sector / computed_at）。バリュエーション分析（consumer・`depends_on=["sector_ols"]`）が消費する seam の通貨。producer 未実行なら乖離分析は前提条件エラー（`plugins.ensure_dependencies` が `depends_on` を runner/専用エンドポイントで強制）。回帰が財務データ更新より古い＝stale。
 _Avoid_: 予測結果, OLS結果（モデル混在を曖昧にするため）
 
+**時点再現の乖離率 (as-of gap ratio)**:
+学習パネルの各月末について、「その月末に見えていた各社の最新の通期行（期末＋45日）」と「その月末の週次終値 × 分割補正係数 F」で業種別OLSをやり直して得る gap_ratio（#626・ADR-0057・`sector_gap_asof.py`）。本番の[[回帰結果]]と同じ意味（最新の財務 × その時点の株価）の値を過去の月にも作るためのもので、**`regression_results` へは書かずメモリ上でパネルへ付けるだけ**。過去行の `financial_records.stock_price` は最大1年先の株価が残っていることがあり、年度ごとに回すと先読みになるため、この形にした。
+_Avoid_: 遡及 gap, 過去年度の回帰結果（`regression_results` に過去年度の行があると誤解させるため）
+
 **TTM 行 (trailing-twelve-months row)**:
 半期報告（H1）が出てから次の通期決算が出るまでの期間について、**直近12か月ぶんの業績**を表す合成の行（#424 子2・ADR-0051）。フロー（PL・CF）は「前期の通期 − 前期の H1 + 今期の H1」、ストック（BS）は今期 H1 の期末値。**通期の行とは別の行として過去の年度にも残す**——最新の断面にだけ置くと、学習とバックテストが見る過去の断面に一度も現れず、効果を測れないため。通期の行か TTM 行かの別を[[行の基準]]と呼ぶ。実体は `ttm_financial_records` テーブル（毎晩の全置換・合成は `ttm_composite.py`）と `financial_metrics_with_ttm` VIEW（通期＋TTM）で、読むのは `plugins.macro_snapshots.use_fin_rows("with_ttm")` の内側だけ（既定は通期のみ）。**材料の間に分割があると1株指標の基準が混ざるので、その社・年度は作らない**（理由ごとの件数を毎晩ログへ出す）。
 _Avoid_: 半期行（H1 の生値の行と混同するため）, 最新業績（鮮度の話と合成の話が混ざるため）
