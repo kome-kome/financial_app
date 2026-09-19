@@ -66,9 +66,9 @@ def asof_records(fin_by_co: Mapping[str, list],
     `fin_by_co` の値は `period_end` 昇順の `_SectorRec`（namedtuple）。見える行の判定は
     パネルの財務特徴量と同じ `_find_applicable_fin`（期末＋45日）を使う。
 
-    **戻りは edinet_code 順に固定する。** ridge の α 選択（`RidgeCV` の KFold・シャッフルなし）は
-    行の並び順で fold が決まるので、並びが変わるだけで業種ごと gap が動く（実測: 行をシャッフル
-    すると 33業種中 11〜14業種が変わる）。辞書の順に任せるとパネルが再現しない。
+    **戻りは edinet_code 順に固定する。** 回帰の結果は行の並びに依存しない（ridge の α は LOO で
+    選ぶ・#697・ADR-0058）が、浮動小数の加算順まで揃えるとパネルがビット単位で再現する。
+    以前の KFold（シャッフルなし）では、並びが変わるだけで業種ごと gap が動いていた。
     """
     from plugins.macro_snapshots import _find_applicable_fin
 

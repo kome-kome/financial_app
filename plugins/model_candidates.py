@@ -426,7 +426,7 @@ def make_fama_macbeth_fit_predict(min_companies: int = _FM_MIN_COMPANIES,
                 # 切片列を渡すと切片が 0 方向へ縮み、その分を傾きが吸収して λ_t が歪む。
                 # 特徴量は断面標準化で平均 0 なので、y を期内平均で中心化すれば切片は
                 # 構造的に 0 となり、切片列なしで傾きだけを正しく縮小推定できる。
-                res = ridge_regression(X.tolist(), (y - y.mean()).tolist(), cv_folds=3)
+                res = ridge_regression(X.tolist(), (y - y.mean()).tolist())
                 if res is None or len(res["beta"]) != len(factor_names):
                     continue
                 for i, f in enumerate(factor_names):
@@ -506,7 +506,7 @@ def make_regime_linear_fit_predict(feature_names: list[str],
         Xn, win_p, norm_p = fit_feature_columns(rows, n_feat)
         y_w, _, _ = winsorize(y_rows)
         y_z, y_mu, y_sd = normalize(y_w, "zscore")
-        res = (ridge_regression(Xn, y_z, cv_folds=3) if estimator == "ridge"
+        res = (ridge_regression(Xn, y_z) if estimator == "ridge"
                else ols(Xn, y_z))
         if not res:
             return None

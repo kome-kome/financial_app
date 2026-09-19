@@ -260,6 +260,15 @@ def gap_ratio_pct(predicted: float, actual: float) -> float | None:
     return round((predicted - actual) / actual * 100, 2) if actual else None
 
 
+def _row_key(r) -> tuple:
+    """1行を一意に指すキー。`regression_results` と `predict_gaps` の戻りと同じ3つ組。
+
+    (edinet_code, year) では足りない——決算期変更で同じ年度に期末違いの通期行が2本ある社が
+    実在する（2026-09 時点で12件・#697）。
+    """
+    return (r.edinet_code, r.year, r.period_end)
+
+
 @dataclass
 class _FitInputs:
     """業種ごとの当てはめに入る前の共通部分（母集団・採用列・プール予測）。"""
@@ -268,7 +277,7 @@ class _FitInputs:
     features_by_sector: dict
     dropped_by_sector: dict
     by_sector: dict             # 業種名 → [(row, y, record), ...]
-    global_pred_map: dict       # (edinet_code, year) → プール予測 [円/株]
+    global_pred_map: dict       # (edinet_code, year, period_end) → プール予測 [円/株]
 
 
 @dataclass
@@ -375,7 +384,7 @@ class SectorOLSPlugin(AnalysisPlugin):
                 "label": "正則化（多重共線性対策）",
                 "options": [
                     {"value": "none",  "label": "なし（OLS）"},
-                    {"value": "ridge", "label": "Ridge（L2 正則化、α は CV で自動選択）"},
+                    {"value": "ridge", "label": "Ridge（L2 正則化、α は一個抜き CV で自動選択）"},
                 ],
                 "default": "none",
                 "description": (
@@ -779,8 +788,11 @@ class SectorOLSPlugin(AnalysisPlugin):
                 X_g, y_g, y_g_mu, y_g_sd, _, _ = self._preprocess_sector(all_eligible, features)
                 g_result, g_yhat = self._fit_and_predict(X_g, y_g, y_g_mu, y_g_sd, regularization)
                 if g_result is not None:
+                    # キーに period_end まで含める。決算期変更で同じ年度に期末違いの2行を持つ社が
+                    # 実在し、(edinet_code, year) だと後の行が前の行を上書きして、どちらの予測で
+                    # 縮約されるかが行の並びで決まる（#697）。
                     for i, s in enumerate(all_eligible):
-                        global_pred_map[(s[2].edinet_code, s[2].year)] = g_yhat[i]
+                        global_pred_map[_row_key(s[2])] = g_yhat[i]
 
         return _FitInputs(
             features=features, dropped_features=dropped_features,
@@ -808,7 +820,7 @@ class SectorOLSPlugin(AnalysisPlugin):
         if prep.global_pred_map and n < shrink_threshold:
             w = 1.0 - n / shrink_threshold
             all_yhat = [
-                w * prep.global_pred_map.get((s[2].edinet_code, s[2].year), yhat) + (1.0 - w) * yhat
+                w * prep.global_pred_map.get(_row_key(s[2]), yhat) + (1.0 - w) * yhat
                 for s, yhat in zip(samples, all_yhat)
             ]
         return _SectorFit(samples=samples, all_yhat=all_yhat, result=result,
@@ -829,7 +841,7 @@ class SectorOLSPlugin(AnalysisPlugin):
             if fit is None:
                 continue
             for (_row, actual, r), predicted in zip(fit.samples, fit.all_yhat):
-                out[(r.edinet_code, r.year, r.period_end)] = gap_ratio_pct(predicted, actual)
+                out[_row_key(r)] = gap_ratio_pct(predicted, actual)
         return out
 
     def execute(self, params: dict, db: Any) -> dict:
