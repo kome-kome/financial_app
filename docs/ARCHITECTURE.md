@@ -1450,7 +1450,7 @@ graph TB
 | `CLAUDE.md` | 設定 | Claude Codeへの動作指示（索引＋必須ルール） | — |
 | `.claude/agents/financial-app-explorer.md` | 設定 | read-only 探索サブエージェント定義（多ファイル調査・大ドキュメント精読をトークン節約で委譲） | — |
 | `.claude/skills/*/SKILL.md` | 設定 | プロジェクト固有スキル（`/tidy` 軽量化点検 等）＋汎用スキル群。索引・各スキルの説明は [SKILLS_AND_AGENTS.md](SKILLS_AND_AGENTS.md) を参照 | — |
-| `.github/workflows/ci.yml` | GitHub Actions | push/PR で `pytest`（testpaths=tests）を実行する CI | — |
+| `.github/workflows/ci.yml` | GitHub Actions | push/PR で `pytest --durations=20`（testpaths=tests）を実行する CI。`timeout-minutes: 15` はハング止め（#703）——ランナー準備の空白（実測最大 114秒）も算入される。1本の call が 60秒を超えたテストは `tests/conftest.py` が失敗にし、意図的に重いテストは `@pytest.mark.slow(reason=...)` で外す（空理由は収集時に使用エラー）。経緯は [GOTCHAS.md](GOTCHAS.md)「テスト・CI」 | — |
 | `.github/workflows/daily-incremental.yml` | GitHub Actions | 差分収集（毎日 **JST 17:17**＝UTC 08:17 自動＋手動・#476）。`_pipeline_incremental.py` を起動。**schedule は #477 以降コメントアウトで停止中**（復帰手順は #493） | `_pipeline_incremental.py` |
 | `.github/workflows/full-pipeline.yml` | GitHub Actions | 全件収集パイプライン（workflow_dispatch 手動）。`_pipeline_gh.py` の各 refill モードを起動 | `_pipeline_gh.py` |
 | `.github/workflows/collect-macro.yml` | GitHub Actions | マクロ指標収集（e-Stat/日銀/OECD/IMF WEO/GDELT/Wikimedia コネクタ・手動）。`collector.py --macro --years N` を起動。入力 `series` に series_code（カンマ区切り）を渡すと `--macro-series` で対象系列だけを収集する（#444） | `collector.py` |
