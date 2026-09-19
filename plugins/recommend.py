@@ -33,9 +33,15 @@ MU_SOURCE_OPTIONS = [
     {"value": "macro_enet",        "label": "M-6: マクロ×財務 正則化線形（ElasticNet）"},
 ]
 
+# 成長重視だけは walk-forward 推定（scripts/preset_weight_walkforward.py）の重みを反映した
+# （#546・ADR-0059 追記）。OOF の対比較で補正後 α を通ったのが成長重視だけで、残り3つは ns
+# なので静的のまま。反映値は推定の比（2.504 : 0.449 = 5.58）を 0.1 刻みに乗せた 2.8 : 0.5。
+# スコアは重みの合計で割るので定数倍は順位を変えないが、分析画面のプリセットボタンは重みを
+# 0.1 刻みのスライダーへ入れてから送る＝刻みに乗っていないと画面経由だけ黙って別の重みになる
+# （test_recommend.py::TestConstants が analysis.js の刻みと照合する）。
 PRESETS = {
     "バランス型":  {"z_roe": 1.0, "z_op_margin": 1.0, "z_revenue": 0.8, "z_cf_ratio": 0.8, "z_equity_ratio": 0.5, "gap_ratio": 0.5, "z_momentum": 0.5},
-    "成長重視":    {"z_revenue": 2.0, "z_roe": 1.0, "z_op_margin": 0.5, "z_cf_ratio": 0.5, "gap_ratio": 0.3},
+    "成長重視":    {"z_revenue": 2.8, "z_roe": 0.5, "z_op_margin": 0.5, "z_cf_ratio": 0.5, "gap_ratio": 0.5},
     "割安重視":    {"gap_ratio": 2.0, "z_roe": 1.0, "z_op_margin": 1.0, "z_equity_ratio": 0.5},
     "高収益重視":  {"z_roe": 2.0, "z_op_margin": 2.0, "z_cf_ratio": 1.0, "z_equity_ratio": 0.5},
 }

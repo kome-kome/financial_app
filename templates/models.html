@@ -253,7 +253,7 @@ z_metric_j_i: 企業 i の指標 j の候補集団標準化値（±5 クリッ�
     <thead><tr><th>プリセット</th><th>z_roe</th><th>z_op_margin</th><th>z_revenue</th><th>z_cf_ratio</th><th>z_equity_ratio</th><th>gap_ratio</th><th>z_momentum</th></tr></thead>
     <tbody>
       <tr><td><span class="tag tag-purple">バランス型</span></td><td>1.0</td><td>1.0</td><td>0.8</td><td>0.8</td><td>0.5</td><td>0.5</td><td>0.5</td></tr>
-      <tr><td><span class="tag tag-green">成長重視</span></td><td>1.0</td><td>0.5</td><td>2.0</td><td>0.5</td><td>—</td><td>0.3</td><td>—</td></tr>
+      <tr><td><span class="tag tag-green">成長重視</span></td><td>0.5</td><td>0.5</td><td>2.8</td><td>0.5</td><td>—</td><td>0.5</td><td>—</td></tr>
       <tr><td><span class="tag tag-amber">割安重視</span></td><td>1.0</td><td>1.0</td><td>—</td><td>—</td><td>0.5</td><td>2.0</td><td>—</td></tr>
       <tr><td><span class="tag tag-red">高収益重視</span></td><td>2.0</td><td>2.0</td><td>—</td><td>1.0</td><td>0.5</td><td>—</td><td>—</td></tr>
     </tbody>
@@ -262,7 +262,7 @@ z_metric_j_i: 企業 i の指標 j の候補集団標準化値（±5 クリッ�
   <p><code>gap_ratio</code> は業種別OLS乖離率であり、正値 = 割安の指標として機能する。<strong>Z ではなく生の％だが、同じスコア合成へ入る以上は他指標と同じ断面標準化を通す</strong>——揃えるべきは「VIEW 列かどうか」ではなく「同じ合成へ入るかどうか」。</p>
   <p><code>z_momentum</code> は他指標と異なり financial_metrics VIEW の列ではなく、<code>compute_momentum_z()</code> が実行時に計算する（sell_ranking の <code>_resolve_metric</code> と同じ方式）。12-1モメンタム（直近1ヶ月を除く12ヶ月の log リターン）を候補集団横断で winsorize→Zスコア化する。<strong>算出側で標準化済みなので上の断面標準化は通さない</strong>（二重標準化しない。<code>mu</code> も同じ）。</p>
   <p>上表の4プリセットは <strong>どれも <code>mu</code>（μ̂）重みを持たない</strong>（下記）。</p>
-  <p>この4プリセットは<strong>性能最適ではない</strong>——位置づけと実測値は本節末尾の「限界」を参照。</p>
+  <p>この4プリセットは<strong>性能最適ではない</strong>——位置づけと実測値は本節末尾の「限界」を参照。<strong>成長重視だけは walk-forward で推定した重みを反映済み</strong>（Issue #546。推定の比 2.504 : 0.449 を画面のスライダーの 0.1 刻みに乗せて 2.8 : 0.5）。</p>
 
   <h3>μ̂（期待リターン）の opt-in 結線</h3>
   <p><code>mu</code> は M-1〜M-6 が推定する期待リターン μ̂ を買い推奨へ入れる指標で、<code>z_momentum</code> と同じくVIEW外の実行時計算（<code>compute_mu_z()</code>）。読み出しは sell_ranking と同じ producer 契約（<code>read_producer_scores</code>）を流用する。</p>
@@ -278,11 +278,11 @@ z_metric_j_i: 企業 i の指標 j の候補集団標準化値（±5 クリッ�
   <p>4プリセットは直感的なヒューリスティックだが、「統計的最適化」プリセットのみ Fama &amp; MacBeth (1973) の断面回帰でデータ駆動に推定した重みを使う（<code>recommend_factor_premia.py</code>・<strong>ローカル月次バッチ <code>scripts/run_monthly.py</code> が毎月1日 JST 01:00 に更新</strong>）。月末スナップショットごとに横断面OLS <code>return_i,t+52w = Σ_k b_k,t・z_k,i,t + e_i,t</code> を実行し（母集団・目的変数・foldはM-1/M-2/M-3と共有）、各因子の時系列平均 <code>b_k = mean(b_k,t)</code> をプリセット重みとする。52週先リターンのオーバーラップに起因する自己相関は Newey-West（HAC）標準誤差で補正する。永続化は producer/consumer 分離（バッチ→<code>recommend_factor_premia</code>テーブル→<code>resolve_weights()</code>が読む）。未算出時はバランス型へフォールバックする。<strong>推定時の断面前処理の世代が現在の実装と一致しない永続化行も採らず、同じくバランス型へフォールバックする</strong>（重みの単位は前処理に依存するため。旧単位の重みを新単位の指標へ掛けると実測で rank-IC が負に落ちる）。<code>gap_ratio</code> は sector_ols依存で2025年度以前ほぼ0%充足のため回帰対象から除外し、残り7指標＋z_momentumの重みのみを持つ（実データ検証で判明）。評価用には、月末ごとに「その時点で見えていた財務 × その月末の株価」で業種別OLSをやり直した<strong>時点再現の <code>gap_ratio</code></strong> を足したパネルがある（<code>regression_results</code> の過去年度は株価に先読みが入るので使わない）。<code>mu</code> も回帰対象外（断面回帰の説明変数は財務・株価由来 factor のみで μ̂ の premium は存在せず、混ざるとプリセットを選んだだけで 400 になる）。</p>
 
   <div class="warn-box">
-    <strong>限界: 4プリセットは「意味の分かる配分」であって性能最適ではない</strong>（Issue #513）。ウェイトは直感的なヒューリスティックで、rank-IC を目的に推定した値ではない（「統計的最適化」のみ Fama-MacBeth 断面回帰によるデータ駆動）。61期パネルの実測（Issue #509）では <strong>rank-IC が正なのは成長重視（+0.0605）とバランス型（+0.0210）だけ</strong>で、割安重視（−0.0108）・高収益重視（−0.0108）は負だった。<strong>予測力を求めるなら「統計的最適化」</strong>（同じパネルで <strong>+0.0960</strong>）を選ぶ。手動プリセットが担うのは「なぜこの順位になるか」を重みから説明できることで、そこに価値がある。
+    <strong>限界: 4プリセットは「意味の分かる配分」であって性能最適ではない</strong>（Issue #513）。バランス型・割安重視・高収益重視のウェイトは直感的なヒューリスティックで、rank-IC を目的に推定した値ではない（「統計的最適化」は Fama-MacBeth 断面回帰によるデータ駆動。成長重視だけは下記の walk-forward 推定の重みへ差し替えた）。61期パネルの実測（Issue #509・成長重視の差し替え前）では <strong>rank-IC が正なのは成長重視（+0.0605）とバランス型（+0.0210）だけ</strong>で、割安重視（−0.0108）・高収益重視（−0.0108）は負だった。<strong>予測力を求めるなら「統計的最適化」</strong>（同じパネルで <strong>+0.0960</strong>）を選ぶ。手動プリセットが担うのは「なぜこの順位になるか」を重みから説明できることで、そこに価値がある。
     <br><br>
     ただし<strong>割安重視の rank-IC は重みの 44.4% を測っていない</strong>（<code>gap_ratio</code> 2.0 が Fama-MacBeth のパネルに無い）ので、この数値だけで「割安重視は効かない」と結論しないこと。時点再現の <code>gap_ratio</code> を足したパネル（62期）では<strong>割安重視 +0.0526</strong>、<code>gap_ratio</code> 単独は +0.1012（62か月すべて正）だった。<strong>モデルの有効性の検証に <code>/api/backtest</code> は使えない</strong>（3/6/12/18/24ヶ月は終端が今日で共通＝独立でなく検定力が無い）。測るなら <code>python -m scripts.preset_ic_gate</code>（期別 rank-IC ＋ Bonferroni 補正）。
     <br><br>
-    重みを推定し直す道具は <code>python -m scripts.preset_weight_walkforward</code>（Issue #625）。学習期間の rank-IC を直接高める重みを、<strong>静的重みの大小順（プリセットの性格）を保ったまま</strong>月ごとに推定し、12か月の空白（embargo）を空けた学習に使っていない月の rank-IC を、同じ月の静的重みと対にして検定する。<strong>プリセットの重みはこの比較で補正後の有意水準を通るまで変えない</strong>（Issue #546）。
+    重みを推定し直す道具は <code>python -m scripts.preset_weight_walkforward</code>（Issue #625）。学習期間の rank-IC を直接高める重みを、<strong>静的重みの大小順（プリセットの性格）を保ったまま</strong>月ごとに推定し、12か月の空白（embargo）を空けた学習に使っていない月の rank-IC を、同じ月の静的重みと対にして検定する。<strong>プリセットの重みはこの比較で補正後の有意水準を通ったものだけ変える</strong>（Issue #546）。2026-09-19 の62期（学習に使っていない32か月）で通ったのは<strong>成長重視だけ</strong>（推定 +0.1470 対 旧重み +0.1113・32か月すべてで上回る）で、反映した。推定では ROE・営業利益率・CF余力・割安度の4つが毎回同じ重みになったので、成長重視は「売上が主軸・残り4指標は同格」の配分になっている。バランス型・割安重視・高収益重視は有意でなく、元の重みのまま。
   </div>
 
   <div class="refs">
