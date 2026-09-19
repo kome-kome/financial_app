@@ -8,7 +8,9 @@ M-1 は `build_interactions=True` で財務 × マクロの交差項を作り、
 
 このファイルが縛るのは**既存モードを壊さずに軸を2つ足した**部分:
 
-  - 4モードが互いに排他であること（母集団を動かしうる軸を2つ振ると分離できない）
+  - 6モード（既定を除く）が互いに排他であること（母集団を動かしうる軸を2つ振ると分離できない）
+  - 目的変数の月平均除去（`--demean-target`・#615 の 9/18 の見立て）の変換と、判定指標が
+    月ごとの平行移動で変わらないという前提
   - 各モードの分母が正しいこと（縮む側を分母にすると母集団効果が改善に化ける）
   - `_build` が Cond の値を実際に使い、**M-2 では交互作用が入らない**こと
   - 既定モードの条件が1ビットも動いていないこと（ADR-0045 の実測条件）
@@ -26,9 +28,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from scripts import momentum_gate  # noqa: E402
 from scripts.momentum_gate import (  # noqa: E402
-    BASE_COND, CONDS, INTERACTION_BASE_COND, INTERACTION_CONDS, INTERACTION_MODELS,
-    MACRO_BASE_COND, MAXFEAT_MODELS, METRICS, MODE_SUFFIX, MOM_WINDOW, Cond,
-    base_of, bonferroni_alpha, build_conditions, maxfeat_cond_name, mode_of, verdict_text,
+    BASE_COND, CONDS, DEMEAN_BASE_COND, DEMEAN_CONDS, DEMEAN_MODELS, INTERACTION_BASE_COND,
+    INTERACTION_CONDS, INTERACTION_MODELS, MACRO_BASE_COND, MAXFEAT_MODELS, METRICS,
+    MODE_SUFFIX, MOM_WINDOW, Cond, base_of, bonferroni_alpha, build_conditions,
+    demean_reach_problems, demean_target_by_month, max_abs_month_mean, maxfeat_cond_name,
+    mode_of, verdict_text,
 )
 
 
@@ -52,6 +56,12 @@ class TestModesAreMutuallyExclusive:
         (dict(macro=True, fin_rows=True)),
         (dict(interactions=True, fin_rows=True)),
         (dict(max_features=[5], fin_rows=True)),
+        # 目的変数モード（#615）も同じ扱い。行は落とさないが、軸を2つ振ると分離できない点は同じ。
+        (dict(windows=[3], demean_target=True)),
+        (dict(macro=True, demean_target=True)),
+        (dict(interactions=True, demean_target=True)),
+        (dict(max_features=[5], demean_target=True)),
+        (dict(fin_rows=True, demean_target=True)),
     ]
 
     @pytest.mark.parametrize("kwargs", PAIRS)
@@ -139,6 +149,162 @@ class TestMaxFeaturesMode:
         assert MAXFEAT_MODELS == ["risk_return"]
 
 
+class TestDemeanTargetMode:
+    """目的変数モード（`--demean-target`・#615）。
+
+    9/18 の列数上限の本測定で「上限が財務の列を締め出している」は否定され、残った見立ては
+    「BIC（二乗誤差）は相場全体の変動を説明するマクロ列を選ぶが、評価は月内の順位」だった。
+    目的変数だけを差し替えた2条件で、その見立てを測る。
+    """
+
+    def test_builds_both_sides(self):
+        conds = build_conditions(demean_target=True)
+        assert set(conds) == set(DEMEAN_CONDS) == {"raw", "demean"}
+        assert conds["raw"].demean_target is False
+        assert conds["demean"].demean_target is True
+
+    def test_other_axes_stay_at_the_production_shape(self):
+        """差し替えるのは目的変数だけ。他の軸が動くと2軸ぶんの差が混ざる。"""
+        for c in build_conditions(demean_target=True).values():
+            assert c.use_momentum is False
+            assert c.momentum_window == MOM_WINDOW
+            assert c.use_macro is True
+            assert c.build_interactions is True
+            assert c.max_features is None
+            assert c.fin_rows == "annual"
+
+    def test_baseline_is_the_production_target(self):
+        conds = build_conditions(demean_target=True)
+        assert base_of(conds) == DEMEAN_BASE_COND == "raw"
+        assert conds[base_of(conds)].demean_target is False
+
+    def test_measures_m1_only_by_default(self):
+        """見立ては BIC 選択を持つ M-1 のもの。"""
+        assert DEMEAN_MODELS == ["risk_return"]
+
+    def test_alpha_matches_a_two_condition_single_model_gate(self):
+        conds = build_conditions(demean_target=True)
+        assert bonferroni_alpha(1, len(conds)) == pytest.approx(0.05 / (1 * len(METRICS) * 1))
+
+
+def _panel():
+    """{ym: [(特徴量の行, 目的変数)]}。月ごとに平均が違う（相場全体の上げ下げがある）形。"""
+    return {
+        "2024-01": [([1.0, 2.0], 0.30), ([3.0, 4.0], 0.10), ([5.0, 6.0], 0.20)],
+        "2024-02": [([7.0, 8.0], -0.40), ([9.0, 1.0], -0.20)],
+        "2024-03": [([2.0, 2.0], 0.05)],
+        "2024-04": [],
+    }
+
+
+class TestDemeanTargetByMonth:
+    def test_every_month_has_zero_mean(self):
+        out = demean_target_by_month(_panel())
+        for ym, pairs in out.items():
+            if pairs:
+                assert sum(t for _r, t in pairs) / len(pairs) == pytest.approx(0.0, abs=1e-15)
+
+    def test_values_are_the_monthly_mean_subtracted(self):
+        out = demean_target_by_month(_panel())
+        assert [t for _r, t in out["2024-01"]] == pytest.approx([0.10, -0.10, 0.0])
+        assert [t for _r, t in out["2024-02"]] == pytest.approx([-0.10, 0.10])
+
+    def test_order_and_feature_rows_are_kept(self):
+        """`ids_by_ym` との index 1:1 対応が崩れると共通域の突合が静かに壊れる。"""
+        src = _panel()
+        out = demean_target_by_month(src)
+        assert list(out) == list(src)
+        for ym in src:
+            assert [r for r, _t in out[ym]] == [r for r, _t in src[ym]]
+
+    def test_input_is_not_mutated(self):
+        """raw の条件と同じオブジェクトを持っていても壊さない。"""
+        src = _panel()
+        before = {ym: [(list(r), t) for r, t in pairs] for ym, pairs in src.items()}
+        demean_target_by_month(src)
+        assert src == before
+
+    def test_single_sample_month_becomes_zero_and_empty_month_stays_empty(self):
+        out = demean_target_by_month(_panel())
+        assert [t for _r, t in out["2024-03"]] == [0.0]
+        assert out["2024-04"] == []
+
+    def test_max_abs_month_mean(self):
+        assert max_abs_month_mean(_panel()) == pytest.approx(0.30)   # 2024-02 の平均 −0.30
+        assert max_abs_month_mean(demean_target_by_month(_panel())) == pytest.approx(0.0, abs=1e-15)
+        assert max_abs_month_mean({}) == 0.0
+        assert max_abs_month_mean({"2024-01": []}) == 0.0
+
+
+class TestDemeanReachIsChecked:
+    """**変換が断面に届いていなければ CV の前に止める。**
+
+    両条件が同じパネルのまま走っても例外は出ず、「差なし」だけが残る。`count_changed_rows` は
+    特徴量しか見ないので、目的変数の差し替えは拾えない。
+    """
+
+    CONDS = build_conditions(demean_target=True)
+
+    def test_healthy_panels_pass(self):
+        assert demean_reach_problems({"raw|m1": 0.12, "demean|m1": 1e-17}, self.CONDS) == []
+
+    def test_demean_side_that_was_not_demeaned_is_caught(self):
+        problems = demean_reach_problems({"raw|m1": 0.12, "demean|m1": 0.12}, self.CONDS)
+        assert len(problems) == 1 and problems[0].startswith("demean|m1")
+
+    def test_raw_side_with_nothing_to_remove_is_caught(self):
+        """素の月平均が全部0なら、変換しても何も変わらない＝同じものを比べている。"""
+        problems = demean_reach_problems({"raw|m1": 0.0, "demean|m1": 0.0}, self.CONDS)
+        assert len(problems) == 1 and problems[0].startswith("raw|m1")
+
+
+class TestDemeanMainWiring:
+    def test_main_passes_the_flag_and_checks_the_reach(self):
+        """**渡し忘れても例外は出ない**（両条件が素の目的変数で組まれ、差なしになる）。"""
+        src = inspect.getsource(momentum_gate.main)
+        assert src.count("demean_target=args.demean_target") == 2   # build_conditions / mode_of
+        assert "c.demean_target)" in src                              # _build へ渡す
+        assert "demean_reach_problems(" in src
+        assert "DEMEAN_MODELS" in src
+
+
+class TestEvaluationIsInvariantToMonthlyShift:
+    """**評価側の y を素へ戻さなくてよい、という前提を縛る。**
+
+    demean 条件では CV の残差が持つ y_true も月平均を引いた値になる。判定の3指標は月の中で
+    完結する（rank-IC＝月ごとの Spearman・long_short＝top−bottom・short_side＝期内全体平均−bottom）
+    ので、月ごとの平行移動で変わらない。`oof_backtest` がこの性質を失えば（例: 期をまたいで
+    プールした指標へ変わる）、demean 条件の判定は raw と別の物差しで測ることになる。
+    """
+
+    @staticmethod
+    def _residuals(shift_by_ym: dict[str, float]) -> dict:
+        import random
+        rng = random.Random(0)
+        out = {}
+        for ym, shift in shift_by_ym.items():
+            pairs = []
+            for _ in range(25):
+                yhat = rng.gauss(0.0, 1.0)
+                pairs.append((yhat, 0.3 * yhat + rng.gauss(0.0, 1.0) + shift))
+            out[ym] = pairs
+        return out
+
+    def test_decision_metrics_do_not_move(self):
+        from plugins.macro_snapshots import oof_backtest
+        yms = ["2023-01", "2023-04", "2023-07", "2023-10"]
+        raw = oof_backtest(self._residuals({ym: 0.0 for ym in yms}), n_quantiles=5)
+        shifted = oof_backtest(
+            self._residuals(dict(zip(yms, [0.8, -1.5, 0.05, 3.0]))), n_quantiles=5)
+        assert shifted["rank_ic"]["mean"] == pytest.approx(raw["rank_ic"]["mean"], abs=2e-6)
+        for key in ("short_side_spread", "long_short_spread"):
+            assert shifted[key] == pytest.approx(raw[key], abs=2e-6), key
+        for key in ("rank_ic_by_period", "short_side_spread_by_period"):
+            assert shifted[key].keys() == raw[key].keys()
+            for ym in raw[key]:
+                assert shifted[key][ym] == pytest.approx(raw[key][ym], abs=2e-6), (key, ym)
+
+
 class TestExistingModesAreUnchanged:
     """**ADR-0045 / ADR-0050 の実測条件を1ビットも動かさない。**
 
@@ -178,6 +344,15 @@ class TestExistingModesAreUnchanged:
         """行の基準（#424 子3）の既定は本番の構成＝通期のみ。既存モードは TTM を読まない。"""
         for c in build_conditions(**kwargs).values():
             assert c.fin_rows == "annual"
+
+    @pytest.mark.parametrize("kwargs", [
+        dict(), dict(windows=[3, 12]), dict(macro=True), dict(interactions=True),
+        dict(max_features=[5, 20]), dict(fin_rows=True),
+    ])
+    def test_existing_modes_keep_the_raw_target(self, kwargs):
+        """目的変数（#615）の既定は本番の構成＝素の52週先リターン。既存モードは変換しない。"""
+        for c in build_conditions(**kwargs).values():
+            assert c.demean_target is False
 
 
 class TestBuildUsesTheConditionAxes:
@@ -242,6 +417,35 @@ class TestBuildUsesTheConditionAxes:
         want = coerce_params(get_plugin("macro_risk_return").params_schema(), {})["max_features"]
         assert seen["mf"] == want
 
+    @pytest.mark.parametrize("demean, want_mean_zero", [(True, True), (False, False)])
+    def test_demean_reaches_the_bic_selection(self, monkeypatch, demean, want_mean_zero):
+        """**変換は BIC 選択の前に掛かる**（#615）。選択に届かないと「選ばれる列が変わるか」を
+        測れず、学習だけに掛かっても見立ての半分しか測れない。"""
+        panel = _panel()
+        seen = {}
+        monkeypatch.setattr(momentum_gate, "build_snapshots",
+                            lambda *a, **k: (panel, {}, None, ["a", "b"], {}))
+        monkeypatch.setattr(momentum_gate, "_thin", lambda s, m, i, stride: (s, m, i))
+
+        def fake_select(s, f, max_features):
+            seen["s"] = s
+            return s, f
+
+        monkeypatch.setattr(momentum_gate, "_select_bic", fake_select)
+        s, _, _, _ = momentum_gate._build(
+            "m1", _Args(), {}, {}, [], {},
+            use_momentum=False, mom_window=12, use_macro=True,
+            build_interactions=True, max_features=None, demean_target=demean)
+        assert seen["s"] is s
+        assert (max_abs_month_mean(seen["s"]) < 1e-12) is want_mean_zero
+        if not demean:
+            assert seen["s"] is panel, "raw 条件でパネルを作り替えている"
+
+    def test_build_accepts_the_target_axis(self):
+        sig = inspect.signature(momentum_gate._build).parameters
+        assert "demean_target" in sig
+        assert sig["demean_target"].default is False
+
 
 class TestOutputNamesTheModeThatWasMeasured:
     """**出力は測ったモードの名前を出す。**
@@ -260,13 +464,20 @@ class TestOutputNamesTheModeThatWasMeasured:
         (dict(interactions=True), "interactions"),
         (dict(max_features=[5, 20]), "max_features"),
         (dict(fin_rows=True), "fin_rows"),
+        (dict(demean_target=True), "demean_target"),
     ])
     def test_mode_follows_the_flag(self, kwargs, want):
         assert mode_of(**kwargs) == want
 
     def test_every_mode_has_a_file_suffix(self):
         assert set(MODE_SUFFIX) == {"default", "windows", "macro", "interactions", "max_features",
-                                    "fin_rows"}
+                                    "fin_rows", "demean_target"}
+
+    def test_demean_mode_writes_its_own_file(self):
+        """既定の `momentum_gate.json` を上書きしない（どの軸の結果かがファイル名で分かる）。"""
+        suffixes = [v for k, v in MODE_SUFFIX.items() if k != "windows"]
+        assert MODE_SUFFIX["demean_target"] == "_demean"
+        assert len(suffixes) == len(set(suffixes))
 
     def test_existing_output_files_do_not_move(self):
         """過去の結果の置き場所を変えない（窓モードは #592 以来、既定と同じファイル）。"""
@@ -278,6 +489,7 @@ class TestOutputNamesTheModeThatWasMeasured:
         ("max_features", 5, "MAX_FEATURES SCAN"),
         ("max_features", 2, "MAX_FEATURES SCAN"),
         ("fin_rows", 2, "FIN ROWS AXIS"),
+        ("demean_target", 2, "DEMEAN TARGET AXIS"),
     ])
     def test_new_modes_do_not_borrow_the_momentum_wording(self, mode, n_conds, head):
         for passed, regressed in (([], []), (["x"], []), ([], ["y"])):
