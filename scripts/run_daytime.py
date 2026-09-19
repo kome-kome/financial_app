@@ -377,6 +377,23 @@ JOBS: dict[str, Job] = {
         parallel_sensitive=True,
         needs_deps_smoke=True,     # beta と同じ依存（pymc / numpyro / jax）
     ),
+
+    # ── 静的プリセットの重みの walk-forward 推定（#625・#546 の前提1・ADR-0059）──
+    # 推定は大小順（プリセットの性格）を保ったまま rank-IC を直接高め、embargo 12か月を
+    # 空けた OOF の rank-IC を同じ月の静的重みと対にして検定する。`PRESETS` は変えない
+    # （反映は #546 が補正後 α を通ったものだけ行う）。パネルは毎晩伸びるので、#546 の判断の
+    # 直前に回し直す用に置く。
+    "wf:preset-weights": Job(
+        name="preset_weight_walkforward",
+        argv=("{python}", "-m", "scripts.preset_weight_walkforward", "--json", "--weights-out"),
+        why="静的4プリセットの重みを walk-forward で推定し、OOF で静的と比べる（#625・ADR-0059）。"
+            "昇格の根拠は OOF の対比較だけで、最終重みを preset_ic_gate で測るのは in-sample。",
+        # 2026-09-19 ローカル実測（夜間バッチ終了後・並走なし・時点再現の gap 込みのパネル構築）。
+        measured_min=1.9,
+        # 閉形式のモーメント・SLSQP・seed 固定のブートストラップ＝同じ入力から同じ答えが出る。
+        # 裏で何が動いていても所要が延びるだけで、結論は変わらない。
+        parallel_sensitive=False,
+    ),
 }
 
 SPEC = bc.BatchSpec(
