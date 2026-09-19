@@ -141,6 +141,34 @@ TTM 行は成長率などの欠けが通期より多く（前年の TTM が無�
 判定文は他の軸と同じく中立（`FIN ROWS AXIS`）。**既定を切り替えるかは実測を見て人が決め、
 ADR-0051 に記録する**（決定9「既定を切り替えるのはゲートを通ってから」）。
 
+## 目的変数の月平均除去モード（`--demean-target`・#615）
+
+M-1 の目的変数は市場平均を引かない素の52週先対数リターンで、BIC（二乗誤差）は全銘柄に共通する
+時系列の変動（相場全体の上げ下げ）を説明するマクロ列を選ぶ。一方で評価は月内の順位である。
+**学習で最適化しているものと評価しているものがずれている**という見立て（ADR-0050 の 2026-09-18
+追記・未実測）を、目的変数だけを差し替えた2条件で測る:
+
+    raw    … 素の目的変数（本番の構成）＝基準
+    demean … 各月の全銘柄の算術平均を引いた目的変数
+
+    python -m scripts.momentum_gate --demean-target               # M-1（2検定・alpha 0.025）
+
+**変換は `_thin` の後・BIC 選択の前に掛ける**（`_build`）。選択と学習の両方に効かせないと、
+「選ばれる列が変わるか」を測れない。算術平均にするのは、二乗誤差を「月の間」と「月の中」の成分に
+分けたとき前者をちょうど消すのが算術平均だから（見立てそのものを測る形）。
+
+**評価側の y は素へ戻さない。** 判定の3指標（rank-IC＝月ごとの Spearman・long_short＝top−bottom・
+short_side＝期内全体平均−bottom）はどれも月の中で完結するので、y を月ごとに一定値ずらしても
+値は変わらない（`test_momentum_gate_axes.py` が縛る）。変わるのは `bottom_q_return` /
+`quantile_returns` の水準だけで、demean 側では「月平均からの超過」になる。
+
+**この軸は行を1行も落とさない**（母集団は同一）。基準は本番の構成（`raw`）。**変換が断面に
+届いたかを CV の前に確かめる**——raw 側の月平均が全部0（変換しても何も変わらない）か、
+demean 側の月平均が0になっていなければ停止する。どちらも「差なし」だけが残る壊れ方である。
+
+**このモードも既定を動かさない。** 本番の M-1 は素の目的変数のままで、採るなら ADR-0050 の
+2026-09-19 追記に並べた変更（パラメータ契約・CV キャッシュのキー・画面の μ の意味）が要る。
+
 ## M-1 を測るときの注意
 
 M-1 は `macro_nan_ok=False`（strict）で**母集団自体が M-2/M-6 と別物**なので、パネルを共有
@@ -205,6 +233,9 @@ class Cond(NamedTuple):
 
     `fin_rows`（#424 子3）は学習パネルが読む行の基準（`use_fin_rows`）。既定 `annual` は
     本番の構成なので、既存モードの測定条件はやはり動かない。
+
+    `demean_target`（#615）は目的変数から月ごとの全銘柄平均を引くか。既定 False は本番の
+    構成（素の52週先リターン）で、既存モードの測定条件はやはり動かない。
     """
     use_momentum: bool
     momentum_window: int
@@ -212,6 +243,7 @@ class Cond(NamedTuple):
     build_interactions: bool = True
     max_features: int | None = None
     fin_rows: str = "annual"
+    demean_target: bool = False
 
 
 CONDS: dict[str, bool] = {"off": False, "on": True}
@@ -256,7 +288,19 @@ FIN_ROWS_CONDS: tuple[str, ...] = FIN_ROW_SOURCES
 FIN_ROWS_BASE_COND = "annual"
 FIN_ROWS_MODELS = ["xgb_m2", "elasticnet"]
 
-MODELS = ["xgb_m2", "elasticnet"]
+# 目的変数の月平均除去モード（`--demean-target`・#615）。**基準は本番の構成（素の目的変数）**。
+# この軸は行を1行も落とさない（母集団は同一）ので、`--max-features` / `--fin-rows` と同じく
+# 「本番から動かすとどうなるか」を見る。対象は M-1——見立て（BIC が相場全体の変動を説明する
+# マクロ列を選ぶ）は BIC 選択を持つ M-1 のものだから。変換そのものは種別を問わず掛かる。
+DEMEAN_CONDS: dict[str, bool] = {"raw": False, "demean": True}
+DEMEAN_BASE_COND = "raw"
+DEMEAN_MODELS = ["risk_return"]
+# 月平均除去が届いたかの許容（`demean_reach_problems`）。素の側は「全部0」だけを弾き、除去した
+# 側は浮動小数の丸めを十分に上回る幅で 0 とみなす（どちらの値も実行時に出力と JSON へ出る）。
+DEMEAN_RAW_MIN = 1e-12
+DEMEAN_TOL = 1e-9
+
+MODELS =["xgb_m2", "elasticnet"]
 MODEL_LABELS = {"xgb_m2": "M-2(XGBoost)", "elasticnet": "M-6(ElasticNet)",
                 "risk_return": "M-1(RiskReturn)"}
 METRICS = (("rank_ic", "rank_ic_by_period"),
@@ -290,10 +334,11 @@ def build_conditions(windows: list[int] | None = None,
                     macro: bool = False,
                     interactions: bool = False,
                     max_features: list[int] | None = None,
-                    fin_rows: bool = False) -> dict[str, Cond]:
+                    fin_rows: bool = False,
+                    demean_target: bool = False) -> dict[str, Cond]:
     """条件集合 {名前: Cond} を作る。
 
-    6つのモードがある。**同時に使えるのは1つだけ**（下記）:
+    7つのモードがある。**同時に使えるのは1つだけ**（下記）:
 
       既定           … ADR-0045 の昇格ゲートと完全に同じ2条件（`off` / `on`・マクロは ON のまま）
       `windows`      … モメンタム無し ＋ 各窓（#592・ADR-0050）
@@ -301,6 +346,7 @@ def build_conditions(windows: list[int] | None = None,
       `interactions` … 交互作用なし ＋ あり（#615）。モメンタム OFF・マクロ ON に固定
       `max_features` … BIC の列数上限を振る（#615）。他の軸は本番構成に固定
       `fin_rows`     … 通期のみ ＋ 通期＋TTM（#424 子3）。他の軸は本番構成に固定
+      `demean_target` … 素の目的変数 ＋ 月平均を引いた目的変数（#615）。他の軸は本番構成に固定
 
     **2つ以上を同時に指定できない。** 母集団を動かしうる軸を2つ同時に振ると、どちらの
     効果かが分離できない——それは共通域制限をかけても解けない（共通域は「全条件で測れる
@@ -316,7 +362,7 @@ def build_conditions(windows: list[int] | None = None,
     """
     modes = [("--windows", bool(windows)), ("--macro", macro),
              ("--interactions", interactions), ("--max-features", bool(max_features)),
-             ("--fin-rows", fin_rows)]
+             ("--fin-rows", fin_rows), ("--demean-target", demean_target)]
     picked = [name for name, on in modes if on]
     if len(picked) > 1:
         raise ValueError(
@@ -339,6 +385,11 @@ def build_conditions(windows: list[int] | None = None,
         # 行の基準だけを差し替える。他の軸はすべて本番構成（モメンタム OFF・マクロ ON・
         # 交互作用と列数はプラグインの既定）＝決定9 は「本番の断面に TTM を足すか」を問う。
         return {src: Cond(False, MOM_WINDOW, fin_rows=src) for src in FIN_ROWS_CONDS}
+    if demean_target:
+        # 目的変数だけを差し替える。他の軸はすべて本番構成（モメンタム OFF・マクロ ON・
+        # 交互作用と列数はプラグインの既定・通期のみ）＝「本番の M-1 の学習目標を変えたら」を問う。
+        return {name: Cond(False, MOM_WINDOW, demean_target=flag)
+                for name, flag in DEMEAN_CONDS.items()}
     if not windows:
         return {name: Cond(use_mom, MOM_WINDOW) for name, use_mom in CONDS.items()}
     ws = sorted({int(w) for w in windows})
@@ -359,8 +410,10 @@ def base_of(conds: dict[str, Cond], default_max_features: int | None = None) -> 
     （比較の向きが読み手に伝わればよく、どれを選んでも母集団は同じ）。
 
     行の基準モードの分母も**本番の構成**（`annual`）。TTM を足したときに本番から何が変わるかを見る。
+    目的変数モードの分母も**本番の構成**（`raw`）。この軸も母集団を動かさない。
     """
-    for cand in (BASE_COND, MACRO_BASE_COND, INTERACTION_BASE_COND, FIN_ROWS_BASE_COND):
+    for cand in (BASE_COND, MACRO_BASE_COND, INTERACTION_BASE_COND, FIN_ROWS_BASE_COND,
+                 DEMEAN_BASE_COND):
         if cand in conds:
             return cand
     prod = maxfeat_cond_name(default_max_features) if default_max_features else None
@@ -387,12 +440,12 @@ ALPHA = 0.05 / N_TESTS
 # （#592 以来の挙動で、ここで変えると過去の結果の置き場所が変わる）。
 MODE_SUFFIX: dict[str, str] = {"default": "", "windows": "", "macro": "_macro",
                                "interactions": "_interactions", "max_features": "_maxfeat",
-                               "fin_rows": "_fin_rows"}
+                               "fin_rows": "_fin_rows", "demean_target": "_demean"}
 
 
 def mode_of(windows: list[int] | None = None, macro: bool = False,
             interactions: bool = False, max_features: list[int] | None = None,
-            fin_rows: bool = False) -> str:
+            fin_rows: bool = False, demean_target: bool = False) -> str:
     """測定モードの名前を返す（`build_conditions` と同じ引数から1箇所で導出する）。
 
     **#615 で足した2モードは、ここを持たないまま別モードの名前で出力されていた**——
@@ -409,6 +462,8 @@ def mode_of(windows: list[int] | None = None, macro: bool = False,
         return "max_features"
     if fin_rows:
         return "fin_rows"
+    if demean_target:
+        return "demean_target"
     return "windows" if windows else "default"
 
 
@@ -428,6 +483,8 @@ _AXIS_VERDICTS: dict[str, tuple[str, str]] = {
                 "no window beat the no-momentum baseline"),
     "fin_rows": ("FIN ROWS AXIS",
                  "with_ttm did not beat the annual-only baseline"),
+    "demean_target": ("DEMEAN TARGET AXIS",
+                      "the month-demeaned target did not beat the raw target"),
 }
 
 
@@ -437,7 +494,7 @@ def verdict_text(mode: str, n_conds: int, passed: list[str], regressed: list[str
     窓モードは**窓が2本以上のときだけ** WINDOW SCAN になる（`--windows 12` は2条件で、
     既定ゲートと同じ PROMOTE/REJECT の文言になる）。これは切り出す前からの挙動で変えない。
     """
-    if (mode in ("macro", "interactions", "max_features", "fin_rows")
+    if (mode in ("macro", "interactions", "max_features", "fin_rows", "demean_target")
             or (mode == "windows" and n_conds > 2)):
         head, none = _AXIS_VERDICTS[mode]
         verdict = (f"{head}: effects that survive the common-domain restriction: "
@@ -602,7 +659,8 @@ def macro_names_for(kind: str) -> list:
 
 def _build(kind: str, args, prices_by_co, fin_by_co, companies, macro_cache,
            use_momentum: bool, mom_window: int, use_macro: bool = True,
-           build_interactions: bool = True, max_features: int | None = None) -> tuple:
+           build_interactions: bool = True, max_features: int | None = None,
+           demean_target: bool = False) -> tuple:
     """種別の本番 config のまま、条件の軸だけ差し替えて構築する。
 
     `use_macro=False` は本番の M-1 が `use_macro=False` で走るときと同じ状態にする——
@@ -624,6 +682,11 @@ def _build(kind: str, args, prices_by_co, fin_by_co, companies, macro_cache,
 
     M-1 の BIC 選択は**間引いた後のパネル**に対して行う。CV も同じパネルで回るので、
     「選んだ特徴量」と「評価に使う特徴量」が一致する（本番の順序と同じ）。
+
+    `demean_target`（#615）は**間引いた後・BIC 選択の前**に掛ける。選択と学習の両方に
+    効かせないと「目的変数を変えたら選ばれる列が変わるか」を測れない。月平均は学習が
+    見る行（間引いた後）で取る。変換は種別を問わず掛かる（M-2/M-6 の目的変数も同じ素の
+    リターン）が、既定で測るのは M-1 だけ（`DEMEAN_MODELS`）。
     """
     plugin_name = "macro_risk_return" if kind == "m1" else "macro_gbdt"
     params = coerce_params(get_plugin(plugin_name).params_schema(), {})
@@ -641,6 +704,8 @@ def _build(kind: str, args, prices_by_co, fin_by_co, companies, macro_cache,
         **extra,
     )
     s, m, i = _thin(samples_by_ym, meta_by_ym, ids_by_ym, args.stride)
+    if demean_target:
+        s = demean_target_by_month(s)
     if kind == "m1":
         # 列数上限は条件が指定したものを優先し、無ければプラグインの既定（本番値）。
         s, feats = _select_bic(s, feats, max_features or params["max_features"])
@@ -666,6 +731,55 @@ def _select_bic(samples_by_ym: dict, feat_names: list, max_features: int) -> tup
     sel = {ym: [([row[i] for i in idx], tgt) for row, tgt in pairs]
            for ym, pairs in samples_by_ym.items()}
     return sel, selected
+
+
+def demean_target_by_month(samples_by_ym: dict) -> dict:
+    """各月の目的変数から、その月の全サンプルの算術平均を引いた**新しい**パネルを返す（#615）。
+
+    全銘柄に共通する時系列の変動（相場全体の上げ下げ）を目的変数から消す。二乗誤差を
+    「月の間」と「月の中」の成分に分けたとき、前者をちょうど消すのが算術平均である。
+
+    **入力は書き換えない**（呼び出し側が raw の条件と同じオブジェクトを持っていても壊さない）。
+    **月内の並び順と特徴量の行はそのまま保つ**——`_restrict` / `_align` / `build_oof_meta` が
+    `samples_by_ym[ym]` と `ids_by_ym[ym]` の index 1:1 対応に依拠しているため。空の月は空のまま。
+    """
+    out: dict = {}
+    for ym, pairs in samples_by_ym.items():
+        if not pairs:
+            out[ym] = []
+            continue
+        mean = sum(tgt for _row, tgt in pairs) / len(pairs)
+        out[ym] = [(row, tgt - mean) for row, tgt in pairs]
+    return out
+
+
+def max_abs_month_mean(samples_by_ym: dict) -> float:
+    """月ごとの目的変数の平均の絶対値の最大（空の月は数えない・全部空なら 0.0）。
+
+    `--demean-target` が断面に届いたかを CV の前に確かめるための値。raw 側で 0 なら変換しても
+    何も変わらず、demean 側で 0 でなければ変換が掛かっていない——どちらも「差なし」だけが残る。
+    """
+    means = [abs(sum(tgt for _row, tgt in pairs) / len(pairs))
+             for pairs in samples_by_ym.values() if pairs]
+    return max(means, default=0.0)
+
+
+def demean_reach_problems(panel_means: dict[str, float], conds: dict[str, Cond]) -> list[str]:
+    """`{"条件|種別": max_abs_month_mean}` から、変換が届いていないパネルを列挙する（#615）。
+
+    空リストなら健全。**両方向を見る**——除去した側の月平均が0でなければ変換が掛かっておらず、
+    素の側の月平均が全部0なら変換しても何も変わらない。どちらも両条件が同じパネルになり、
+    エラーを出さずに「差なし」だけが残る（`count_changed_rows` は目的変数を見ないので拾えない）。
+    """
+    problems = []
+    for key, v in panel_means.items():
+        cond = key.split("|", 1)[0]
+        if conds[cond].demean_target:
+            if v > DEMEAN_TOL:
+                problems.append(f"{key}: 月平均が0になっていない（max|mean|={v:.3e}）")
+        elif v <= DEMEAN_RAW_MIN:
+            problems.append(f"{key}: 素の目的変数の月平均が全部0（変換しても何も変わらない）")
+    return problems
 
 
 def main() -> None:
@@ -699,6 +813,10 @@ def main() -> None:
                     help="行の基準モード（通期のみ と 通期＋TTM を共通域で比べる・#424 子3・"
                          f"ADR-0051 決定9）。モデル既定は {','.join(FIN_ROWS_MODELS)}。"
                          "財務はキャッシュせずに読む。他モードと併用不可")
+    ap.add_argument("--demean-target", dest="demean_target", action="store_true",
+                    help="目的変数モード（素の目的変数 と 月ごとの全銘柄平均を引いた目的変数を"
+                         "共通域で比べる・#615）。変換は BIC 選択の前に掛かる。"
+                         f"モデル既定は {','.join(DEMEAN_MODELS)}。他モードと併用不可")
     ap.add_argument("--smoke", action="store_true", help="サンプルを間引いた短時間確認")
     ap.add_argument("--stride", type=int, default=1, help="各月のサンプル間引き幅")
     ap.add_argument("--allow-full-pull", action="store_true",
@@ -721,6 +839,8 @@ def main() -> None:
         default_models = MAXFEAT_MODELS
     elif args.fin_rows:
         default_models = FIN_ROWS_MODELS
+    elif args.demean_target:
+        default_models = DEMEAN_MODELS
     else:
         default_models = MODELS
     models = ([m.strip() for m in args.models.split(",") if m.strip()]
@@ -735,7 +855,8 @@ def main() -> None:
                     if args.max_features else None)
     try:
         conds = build_conditions(windows, macro=args.macro, interactions=args.interactions,
-                                 max_features=max_features, fin_rows=args.fin_rows)
+                                 max_features=max_features, fin_rows=args.fin_rows,
+                                 demean_target=args.demean_target)
     except ValueError as e:
         raise SystemExit(str(e))
     # 列数モードの分母は本番値（プラグイン既定）。**ここで数値を書き写さない**。
@@ -753,7 +874,8 @@ def main() -> None:
     # 既定の出力先はモードで分ける（`MODE_SUFFIX`）。`mode` フィールドはあるが、
     # ファイル名で取り違えたまま比較するほうが起きやすい。
     mode = mode_of(windows, macro=args.macro, interactions=args.interactions,
-                   max_features=max_features, fin_rows=args.fin_rows)
+                   max_features=max_features, fin_rows=args.fin_rows,
+                   demean_target=args.demean_target)
     default_out = f"momentum_gate{MODE_SUFFIX[mode]}.json"
     out_path = Path(args.json_path) if args.json_path else _OUT_DIR / default_out
 
@@ -810,7 +932,8 @@ def main() -> None:
             for kind in kinds:
                 s, m, i, feats = _build(kind, args, prices_by_co, fins[c.fin_rows], companies,
                                         macro_cache, c.use_momentum, c.momentum_window,
-                                        c.use_macro, c.build_interactions, c.max_features)
+                                        c.use_macro, c.build_interactions, c.max_features,
+                                        c.demean_target)
                 panels[(cond, kind)] = (s, m, i, feats)
                 st = _panel_stats(s, i, feats)
                 # **選ばれた列名を残す**（#615）。M-1 は BIC が列を選ぶので、数だけでは
@@ -825,6 +948,7 @@ def main() -> None:
                       f"macro={'on' if c.use_macro else 'off'} "
                       f"inter={'on' if c.build_interactions else 'off'} "
                       f"maxfeat={c.max_features or '-'} "
+                      f"target={'demean' if c.demean_target else 'raw'} "
                       f"months={st['months']} ({st['first_ym']}..{st['last_ym']}) "
                       f"samples={st['samples']} companies={st['companies']} "
                       f"features={st['n_features']} [{head}{more}]", flush=True)
@@ -845,6 +969,22 @@ def main() -> None:
                 raise SystemExit(
                     f"中止: 行の基準を切り替えても特徴量が1行も変わっていません {changed_rows}。"
                     "TTM 行が as-of の選択で1行も選ばれていない可能性がある")
+
+        # 目的変数モードでも、変換が**断面まで届いたか**を CV の前に確かめる（#615）。
+        # 両条件が同じパネルのまま走ると、fin_rows と同じく「差なし」だけが残る。
+        target_month_mean: dict[str, float] = {}
+        if mode == "demean_target":
+            for (cond, kind), (s, _m, _i, _f) in panels.items():
+                target_month_mean[f"{cond}|{kind}"] = max_abs_month_mean(s)
+                print(f"[{cond}/{kind}] max |monthly mean of target| = "
+                      f"{target_month_mean[f'{cond}|{kind}']:.3e}", flush=True)
+            problems = demean_reach_problems(target_month_mean, conds)
+            if problems:
+                raise SystemExit("中止: 目的変数の月平均除去が断面に届いていません: "
+                                 + " / ".join(problems))
+            print("[note] bottom_q_return / quantile_returns are excess over the monthly "
+                  "mean on the demean side; rank_ic / long_short / short_side are "
+                  "within-month and unaffected by the shift", flush=True)
 
         # ── 2. 各条件 × 各モデルを走らせる（残差も受け取る）────────────────────
         results: dict[str, dict] = {}
@@ -991,7 +1131,8 @@ def main() -> None:
                               "use_macro": c.use_macro,
                               "build_interactions": c.build_interactions,
                               "max_features": c.max_features,
-                              "fin_rows": c.fin_rows}
+                              "fin_rows": c.fin_rows,
+                              "demean_target": c.demean_target}
                        for name, c in conds.items()},
         "mode": mode,
         "base_cond": base,
@@ -1000,6 +1141,8 @@ def main() -> None:
         # 行の基準モードの健全性（#424 子3）。他モードでは None / 空。
         "ttm_rows": ttm_rows,
         "changed_rows": changed_rows,
+        # 目的変数モードの健全性（#615）。{"条件|種別": 月平均の絶対値の最大}。他モードでは空。
+        "target_month_mean": target_month_mean,
         "alpha": alpha,
         "n_tests": n_tests,
         "models": models,

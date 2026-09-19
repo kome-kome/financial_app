@@ -65,7 +65,7 @@ python -m scripts.macro_beta_gate_history --threshold 1.01  # strict 基準で�
 # **祝日・年末年始（#684）も取り出さない**（トリガは月〜金固定で祝日を知らない）。-Now -Force だけが今日の祝日の見送りを外す。
 # 祝日表 `run_daytime.HOLIDAYS` は内閣府の一覧から毎年足す（10月以降に翌年が無いと CI が落ちる）
 ./run_daytime.ps1 -Queue                 # キューの中身＋暦の予定＋今日の見送り
-./run_daytime.ps1 -Enqueue beta          # 積む（beta / tune:macro_gbdt / tune:macro_dlm / gate:interactions / gate:max-features / gate:macro / gate:ttm / oof:split-bias / bench:rhat-scale / interim / disclosures）
+./run_daytime.ps1 -Enqueue beta          # 積む（beta / tune:macro_gbdt / tune:macro_dlm / gate:interactions / gate:max-features / gate:macro / gate:ttm / gate:demean / oof:split-bias / bench:rhat-scale / interim / disclosures）
 ./run_daytime.ps1 -DryRun                # 実行計画だけ（キューは減らさない）
 ./run_daytime.ps1 -Now                   # 枠を待たず次の1件（休暇等）。**タスク経由＝セッション0で走る**
 ./run_daytime.ps1 -Now -Force            # 並走に敏感な仕事（beta / tune:* / gate:* / oof:*）も叩く。**叩いたら PC を触らない**。祝日は今日だけ見送りを外す
