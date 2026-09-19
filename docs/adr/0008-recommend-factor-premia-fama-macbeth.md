@@ -221,6 +221,8 @@ python -m scripts.preset_ic_gate --cache-panel --until 2025-07 --preset バラ�
 `scripts/preset_ic_gate.py` の対象外——あちらは期別 rank-IC のゲートであって母集団の
 構成を見る道具ではない）。
 
+**一部 superseded（2026-09-19・Issue #626）**: Decision 1 の gap_ratio 除外は**既定として維持**したうえで、月末ごとの時点再現で作った gap_ratio をパネルへ足す評価用の切替を [ADR-0057](0057-past-gap-ratio-is-reconstructed-as-of-each-month.md) が足した。`regression_results` を過去年度へ遡る形は先読みがあるので採っていない。
+
 ## Context
 
 `recommend`（おすすめ銘柄）の4プリセット重みは `docs/MODELS.md` §6「仮定・限界」に

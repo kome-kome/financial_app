@@ -20,7 +20,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from plugins import execute_plugin
 from plugins.recommend import PRESETS, plugin
 from scripts.preset_ic_gate import (
-    _panel_rows, build_view_stats, collect_weights, fmt_sig, ic_series,
+    GAP_MAX_MEDIAN_SHRINK, GAP_MIN_PERIODS,
+    _panel_rows, build_view_stats, collect_weights, fmt_sig, gap_coverage_summary, ic_series,
     missing_weight_ratio, panel_info, score_period,
 )
 
@@ -135,6 +136,50 @@ class TestMissingWeight:
 
     def test_zero_weights_do_not_divide_by_zero(self):
         assert missing_weight_ratio({}, PANEL_FACTORS) == 0.0
+
+    def test_with_gap_ratio_every_preset_is_measurable(self):
+        """`--with-gap-ratio`（#626）のパネルでは割安重視も含め測れない重みが 0。"""
+        for name, weights in PRESETS.items():
+            assert missing_weight_ratio(weights, PANEL_FACTORS + ["gap_ratio"]) == 0.0, name
+
+
+# ── gap_ratio を載せる基準（ADR-0057・測る前に固定）──────────────────────────
+
+class TestGapCoverageSummary:
+    @staticmethod
+    def _coverage(n_months, before, after, start=2020):
+        return {f"{start + i // 12}-{i % 12 + 1:02d}": (before, after) for i in range(n_months)}
+
+    def test_fixed_thresholds(self):
+        # 結果を見てから動かさない値。変えるなら ADR-0057 を先に直すこと。
+        assert GAP_MIN_PERIODS == 60
+        assert GAP_MAX_MEDIAN_SHRINK == 0.05
+
+    def test_meets_when_long_and_little_shrink(self):
+        s = gap_coverage_summary(self._coverage(61, 1000, 960), min_companies=30)
+        assert s["n_periods"] == 61
+        assert s["median_shrink"] == pytest.approx(0.04)
+        assert s["meets_criterion"] is True
+
+    def test_exactly_60_periods_is_not_enough(self):
+        s = gap_coverage_summary(self._coverage(60, 1000, 1000), min_companies=30)
+        assert s["meets_criterion"] is False
+
+    def test_median_shrink_boundary(self):
+        assert gap_coverage_summary(self._coverage(61, 1000, 950), 30)["meets_criterion"] is True
+        assert gap_coverage_summary(self._coverage(61, 1000, 949), 30)["meets_criterion"] is False
+
+    def test_months_below_min_companies_after_gap_do_not_count(self):
+        cov = self._coverage(61, 1000, 990)
+        cov["2020-01"] = (100, 10)                  # gap を付けて min_companies 未満へ落ちた月
+        s = gap_coverage_summary(cov, min_companies=30)
+        assert s["n_periods"] == 60
+        assert s["max_shrink"] == pytest.approx(0.9)
+        assert s["meets_criterion"] is False
+
+    def test_until_cuts_like_the_panel(self):
+        s = gap_coverage_summary(self._coverage(72, 1000, 990), 30, until="2024-12")
+        assert s["n_periods"] == 60
 
 
 # ── 重みの収集と reject ───────────────────────────────────────────────────

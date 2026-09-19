@@ -61,7 +61,9 @@ class FactorPremiaResult:
     condition_numbers: list[float] = field(default_factory=list)   # 期別の設計行列条件数（診断用）
 
 
-def build_period_panel(db, min_companies_per_period: int = DEFAULT_MIN_COMPANIES_PER_PERIOD) -> tuple:
+def build_period_panel(db, min_companies_per_period: int = DEFAULT_MIN_COMPANIES_PER_PERIOD,
+                       *, with_gap_ratio: bool = False,
+                       gap_coverage: dict | None = None) -> tuple:
     """月末スナップショットごとの横断面パネルを構築する（Fama-MacBeth 用）。
 
     `plugins.macro_snapshots.build_snapshots` を無改修で再利用する。fin_features に
@@ -69,17 +71,20 @@ def build_period_panel(db, min_companies_per_period: int = DEFAULT_MIN_COMPANIES
     M-1/M-2/M-3 と同一の月末 cadence・52週先 log return 目的変数・fill-forward 済み
     財務データを共有する（Issue #271 要求）。
 
-    **gap_ratio は回帰の特徴量から除外する**（実データ検証で判明・ADR-0008）。
-    `gap_ratio` は sector_ols の回帰結果に依存するが、本番DBでは 2020〜2024年度が
-    0%・2025年度以降で初めて 67%超という極端な分布だった（sector_ols が直近年度しか
-    遡及計算されていないため）。build_snapshots の fin_features は全指標が同時に非NULL
-    という条件のため、gap_ratio を含めると 2025年度の財務データが適用可能になる直近
-    2ヶ月分の月末スナップショットしか有効サンプルが残らず、Fama-MacBeth の時系列平均・
-    Newey-West補正が統計的に無意味になる（実測: 有効期間2、係数が非現実的な値に発散）。
-    他7指標は2020年以降96〜100%の充足率があり、gap_ratio を除くことで60ヶ月超の
-    期間数を確保できる。「統計的最適化」プリセットはこの7指標＋z_momentumの重みのみを
-    持ち、gap_ratio の重みは持たない（recommend.execute() 側は未指定キーを0重み相当として
-    自然に無視するため、コード変更は不要）。
+    **既定では gap_ratio を回帰の特徴量から除外する**（実データ検証で判明・ADR-0008）。
+    `regression_results.gap_ratio` は sector_ols が各社の最新年度しか計算しないため
+    2020〜2024年度が 0% で、build_snapshots の「全指標が同時に非NULL」条件に入れると
+    有効期間が2に落ちて係数が発散した。「統計的最適化」プリセットはこの7指標＋z_momentum の
+    重みのみを持ち、gap_ratio の重みは持たない（recommend.execute() 側は未指定キーを0重み
+    相当として自然に無視する）。月次バッチの `--persist` はこの既定のまま回る。
+
+    **`with_gap_ratio=True` は時点再現の gap_ratio を末尾の列に足す**（#626・ADR-0057）。
+    VIEW の gap ではなく、月末ごとに「その時点で見えていた財務 × 月末株価（×F）」で
+    sector_ols をやり直した値（`sector_gap_asof`）で、gap の無い行は落とす。昇格ゲートを
+    通っていないので、評価（`scripts/preset_ic_gate.py --with-gap-ratio`）専用にする。
+    `gap_coverage` を渡すと `{ym: (付ける前の行数, 付けた後の行数)}` を書き込む。
+    sector_ols は通期の行でしか回らないので、TTM 行の基準（`use_fin_rows("with_ttm")`）の
+    内側では拒否する（行の基準を混ぜない）。
 
     momentum 列は build_snapshots が生の log return を返す（macro_snapshots._momentum）。
     **ここでは標準化せず生値のまま渡す**（Issue #519）。#509 で ols 経路も
@@ -90,11 +95,16 @@ def build_period_panel(db, min_companies_per_period: int = DEFAULT_MIN_COMPANIES
     Returns:
         (period_panel: dict[str, tuple[np.ndarray X, np.ndarray y]], factor_names: list[str])
         factor_names は recommend.METRICS から gap_ratio と mu（RUNTIME_METRICS の μ̂）を
-        除いた並び（intercept は含まない）。
+        除いた並び（intercept は含まない）。`with_gap_ratio=True` のときは末尾に gap_ratio。
         min_companies_per_period 未満の期間は破棄する。
     """
-    from plugins.macro_snapshots import build_snapshots, load_data
+    from plugins.macro_snapshots import build_snapshots, current_fin_rows, load_data
     from plugins.recommend import METRICS, RUNTIME_METRICS
+
+    if with_gap_ratio and current_fin_rows() != "annual":
+        raise ValueError(
+            "build_period_panel: with_gap_ratio は通期の行（annual）でしか使えません"
+            f"（現在の行の基準 = {current_fin_rows()!r}。sector_ols は通期のみ・ADR-0057）")
 
     # RUNTIME_METRICS（z_momentum / mu）は財務パネルの列ではない。z_momentum は build_snapshots
     # が momentum_12m1 として別途組み込み（下でリネーム）、mu は producer 由来で断面回帰の
@@ -107,7 +117,7 @@ def build_period_panel(db, min_companies_per_period: int = DEFAULT_MIN_COMPANIES
     if not prices_by_co:
         raise ValueError("build_period_panel: 株価週次履歴がありません。先に収集を実行してください。")
 
-    samples_by_ym, _meta, _current, factor_names, _stock_ids = build_snapshots(
+    samples_by_ym, _meta, _current, factor_names, stock_ids = build_snapshots(
         prices_by_co, fin_by_co, companies, macro_cache={},
         fin_features=fin_metrics, macro_names=[],
         use_momentum=True, mom_window=12, min_coverage=0.0,
@@ -117,6 +127,12 @@ def build_period_panel(db, min_companies_per_period: int = DEFAULT_MIN_COMPANIES
     if not samples_by_ym:
         raise ValueError(
             "build_period_panel: 有効なサンプルがありません（財務・株価データの蓄積状況を確認してください）")
+
+    if with_gap_ratio:
+        from sector_gap_asof import attach_gap_ratio, build_asof_gaps
+        gaps, _stats = build_asof_gaps(db, prices_by_co, samples_by_ym.keys())
+        samples_by_ym = attach_gap_ratio(samples_by_ym, stock_ids, gaps, gap_coverage)
+        factor_names = list(factor_names) + ["gap_ratio"]
 
     # momentum 列だけを個別に winsorize→Z スコア化する処理は **持たない**（Issue #519）。
     # #509 で ols 経路も `fit_feature_columns` を通すようになり、全列が p1-p99 クリップ＋標準化を

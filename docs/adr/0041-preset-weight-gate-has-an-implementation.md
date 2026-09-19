@@ -6,6 +6,8 @@ accepted（2026-08-24）。Issue #529 の設計決定。ADR-0028（昇格ゲー�
 （#509 の実測）・ADR-0039（#517 の実測）の**測定手段**を成文化するもので、ゲートの規則自体は
 変えない。
 
+**一部 superseded（2026-09-19・Issue #626）**: Decision 3 と却下案「`gap_ratio` を載せたパネルを別に作る」は [ADR-0057](0057-past-gap-ratio-is-reconstructed-as-of-each-month.md) が置き換えた。却下の理由（2024年度以前 0%）は時点再現では成り立たない。`--with-gap-ratio` で割安重視も判定に入る（測れない重みの表示は gap なしのパネルでは従来どおり）。
+
 ## Context
 
 ADR-0028 の昇格ゲート（期別 rank-IC 系列 ＋ `model_stats.paired_ic_significance` の定常
