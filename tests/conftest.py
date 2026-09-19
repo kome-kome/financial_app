@@ -26,6 +26,52 @@ from database import (  # noqa: E402
     StockPriceDaily, StockPriceWeekly, iso_week_start, _parse_period_end,
 )
 
+# ── 1本あたりの所要の上限（#703）──────────────────────────────────────────────
+# test_collect_macro の3本が本番用のリトライ待ちを本物の秒数で消費し、CI の pytest
+# 約735秒のうち626秒を占めていた。遅さは失敗として現れず、ci.yml の timeout-minutes に
+# 当たって初めて表に出た＝ここで失敗へ変える。意図的に重いテストは
+# @pytest.mark.slow(reason="...") で外す（空理由は不可）。見るのは call だけ（fixture の
+# setup は含めない）。CI の正常なテストの最大は 2.4秒（2026-09-19 実測）。
+SLOW_TEST_BUDGET_S = 60.0
+
+
+def pytest_addoption(parser):
+    # 既定値の唯一の源は上の定数。ini にしてあるのはガード自身のテスト（pytester）が
+    # 内側のセッションだけ上限を下げられるようにするため。
+    parser.addini("slow_test_budget", "1本の call の上限秒（#703）", default=str(SLOW_TEST_BUDGET_S))
+
+
+def pytest_configure(config):
+    config.addinivalue_line(
+        "markers",
+        "slow(reason): 1本で slow_test_budget 秒を超えてよい重いテスト（reason 必須・#703）",
+    )
+
+
+def pytest_collection_modifyitems(config, items):
+    # 理由の無い除外は、速いうちは誰も気づかず、遅くなってから素通しになる＝収集時に落とす。
+    bad = [item.nodeid for item in items
+           if (m := item.get_closest_marker("slow")) is not None
+           and not str(m.kwargs.get("reason", "")).strip()]
+    if bad:
+        raise pytest.UsageError(
+            '@pytest.mark.slow には reason="..." が必須です（#703）: ' + ", ".join(bad))
+
+
+@pytest.hookimpl(wrapper=True)
+def pytest_runtest_makereport(item, call):
+    report = yield
+    budget = float(item.config.getini("slow_test_budget"))
+    if (report.when == "call" and report.passed and call.duration > budget
+            and item.get_closest_marker("slow") is None):
+        report.outcome = "failed"
+        report.longrepr = (
+            f"所要 {call.duration:.1f}秒が上限 {budget:.0f}秒を超えました（#703）。"
+            "本物の待機（asyncio.sleep / time.sleep・リトライ待ち）が走っていないか確かめ、"
+            '意図的に重いなら @pytest.mark.slow(reason="...") を付けてください。'
+        )
+    return report
+
 
 @pytest.fixture(autouse=True)
 def weekly_cache_sandbox(tmp_path, monkeypatch):

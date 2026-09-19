@@ -24,6 +24,11 @@ from macro_beta_inference import (
 MACRO_TEST_NAMES = ["macro_usdjpy_yoy", "macro_sp500_yoy"]
 _TEST_SERIES = {"macro_usdjpy_yoy": "USDJPY", "macro_sp500_yoy": "SP500"}
 
+# conftest の所要上限（#703）から外す。pm.sample を実際に回すので、pytensor が C で
+# コンパイルできるかで所要の桁が変わる（#512。Windows ローカル実測 296/176/17/16秒）。
+# CI は pymc を入れないのでスキップされる。
+_REAL_MCMC = pytest.mark.slow(reason="pm.sample を実際に回す（#512・#703）")
+
 
 # ── フィクスチャ ──────────────────────────────────────────────────────────────
 
@@ -198,6 +203,7 @@ class TestSelectSharedFactors:
 
 class TestBuildHierarchicalModel:
 
+    @_REAL_MCMC
     def test_model_builds_and_samples_small(self):
         pymc = pytest.importorskip("pymc")
         from macro_beta_inference import build_hierarchical_model
@@ -230,6 +236,7 @@ class TestBuildHierarchicalModel:
 
 class TestRunInferenceEndToEnd:
 
+    @_REAL_MCMC
     def test_run_inference_small_converges(self, monkeypatch):
         """小規模合成データで build_panel→select→階層モデル→NUTS→summarize が一気通貫で動くことを確認。
         select_shared_factors 自体は TestSelectSharedFactors で別途検証済み。合成テストデータの
@@ -264,6 +271,7 @@ class TestRunInferenceEndToEnd:
                                       "chains": 2, "nuts_sampler": "pymc", "init": None,
                                       "max_tree_depth": None}
 
+    @_REAL_MCMC
     def test_commits_before_mcmc_sampling(self, monkeypatch):
         """Issue #269: build_panel直後にdb.commit()し、数時間に及ぶMCMC計算中はトランザクション・
         ロックを保持しないこと。pm.sample呼び出し時点でdb.commitが既に呼ばれているかで検証する
@@ -337,6 +345,7 @@ class TestMaxTreeDepthWiring:
         with pytest.raises(ValueError):
             mbi.parse_max_tree_depth(bad)
 
+    @_REAL_MCMC
     def test_run_inference_forwards_it_to_pm_sample_and_hyperparams(self, monkeypatch):
         """純 PyMC 経路で実際に pm.sample の kwargs に載ることを実行して確かめる。"""
         pytest.importorskip("pymc")

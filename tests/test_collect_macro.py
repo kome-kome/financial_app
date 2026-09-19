@@ -63,9 +63,21 @@ def _patch_client(handler):
     return patch("collector.httpx.AsyncClient", new=factory)
 
 
+async def _no_sleep(*_args, **_kwargs):
+    return None
+
+
 def _run(db, handler, **kwargs):
+    """全ソース込みで collect_macro_data を回す。
+
+    待機は即時に返す（#703）: handler が Yahoo/stooq 以外へ 500/404 を返すため、GDELT の
+    リトライ待ち・系列間の *_RATE_SLEEP が本物の秒数で走り、1本 208秒（CI の pytest の
+    86〜90%）を消費していた。検証しているのは取得経路と件数であって待機ではない。
+    定数ではなく sleep そのものを潰すのは、ソースを足したときに同じ穴が再発しないため
+    （差し替えは asyncio モジュールの属性＝この呼び出しの間はプロセス全体に効く）。
+    """
     import asyncio
-    with _patch_client(handler):
+    with _patch_client(handler), patch("asyncio.sleep", new=_no_sleep):
         return asyncio.run(collect_macro_data(db, years_back=1, **kwargs))
 
 
