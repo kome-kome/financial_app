@@ -285,6 +285,23 @@ class TestMaxFeaturesGateComparesAgainstProduction:
         assert argv[argv.index("--stride") + 1] == "1"
 
 
+class TestDemeanGateMeasuresTheTargetAxis:
+    """目的変数のジョブ（#615）は目的変数モードで、間引かずに測る。
+
+    フラグを落とすと既定モード（モメンタムの昇格ゲート・M-2/M-6）が走り、exit 0 のまま
+    別の軸の結果が `momentum_gate.json` に残る。
+    """
+
+    def test_the_job_runs_the_target_mode(self):
+        assert "--demean-target" in rd.JOBS["gate:demean"].argv
+
+    def test_the_job_measures_at_full_resolution(self):
+        """`--smoke` の共通域は間引きで壊れるので読まない（ADR-0050 Decision 3）。"""
+        argv = rd.JOBS["gate:demean"].argv
+        assert "--smoke" not in argv
+        assert argv[argv.index("--stride") + 1] == "1"
+
+
 class TestBudgetFitsTheWindow:
     INSTALLER = ROOT / "scripts" / "install_daytime_task.ps1"
 
@@ -390,7 +407,7 @@ class TestParallelSensitivity:
 
     @pytest.mark.parametrize("key", ["beta", "tune:macro_gbdt", "tune:macro_dlm",
                                      "gate:interactions", "gate:max-features", "gate:ttm",
-                                     "bench:rhat-scale"])
+                                     "gate:demean", "bench:rhat-scale"])
     def test_computations_are_sensitive(self, key):
         """MCMC も探索も昇格ゲートも、数値の揺れが**採否や重みそのもの**を変える。"""
         assert rd.JOBS[key].parallel_sensitive is True
