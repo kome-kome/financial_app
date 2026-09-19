@@ -281,6 +281,8 @@ z_metric_j_i: 企業 i の指標 j の候補集団標準化値（±5 クリッ�
     <strong>限界: 4プリセットは「意味の分かる配分」であって性能最適ではない</strong>（Issue #513）。ウェイトは直感的なヒューリスティックで、rank-IC を目的に推定した値ではない（「統計的最適化」のみ Fama-MacBeth 断面回帰によるデータ駆動）。61期パネルの実測（Issue #509）では <strong>rank-IC が正なのは成長重視（+0.0605）とバランス型（+0.0210）だけ</strong>で、割安重視（−0.0108）・高収益重視（−0.0108）は負だった。<strong>予測力を求めるなら「統計的最適化」</strong>（同じパネルで <strong>+0.0960</strong>）を選ぶ。手動プリセットが担うのは「なぜこの順位になるか」を重みから説明できることで、そこに価値がある。
     <br><br>
     ただし<strong>割安重視の rank-IC は重みの 44.4% を測っていない</strong>（<code>gap_ratio</code> 2.0 が Fama-MacBeth のパネルに無い）ので、この数値だけで「割安重視は効かない」と結論しないこと。時点再現の <code>gap_ratio</code> を足したパネル（62期）では<strong>割安重視 +0.0526</strong>、<code>gap_ratio</code> 単独は +0.1012（62か月すべて正）だった。<strong>モデルの有効性の検証に <code>/api/backtest</code> は使えない</strong>（3/6/12/18/24ヶ月は終端が今日で共通＝独立でなく検定力が無い）。測るなら <code>python -m scripts.preset_ic_gate</code>（期別 rank-IC ＋ Bonferroni 補正）。
+    <br><br>
+    重みを推定し直す道具は <code>python -m scripts.preset_weight_walkforward</code>（Issue #625）。学習期間の rank-IC を直接高める重みを、<strong>静的重みの大小順（プリセットの性格）を保ったまま</strong>月ごとに推定し、12か月の空白（embargo）を空けた学習に使っていない月の rank-IC を、同じ月の静的重みと対にして検定する。<strong>プリセットの重みはこの比較で補正後の有意水準を通るまで変えない</strong>（Issue #546）。
   </div>
 
   <div class="refs">

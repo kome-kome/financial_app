@@ -138,6 +138,10 @@ _Avoid_: パラメータスキーマ, フォーム定義（型契約の側面が
 買い推奨（`plugins/recommend.py`）の `METRICS` のうち、`financial_metrics` VIEW の列ではなく実行時に埋めるもの（`z_momentum`＝週次株価から都度計算／`mu`＝[[μ出所トグル]]で選んだ producer の永続化 μ̂）。転送列 `SELECT_COLS`（#441）と `recommend_factor_premia.build_period_panel` の `fin_features` は**どちらもこの集合を除外して導出する**ため、VIEW 外の指標を `METRICS` へ足すときは同時にここへも入れる（入れ忘れると存在しない列を SELECT しに行く／断面回帰の説明変数に混入する）。
 _Avoid_: 派生列（VIEW が算出する `z_*` も派生なので二義化する）, 非永続指標（`*_scores` は永続化済みで不正確）
 
+**プリセットの性格 (preset character)**:
+買い推奨の静的プリセット（`plugins/recommend.py::PRESETS`）の**重みの大小順**のこと（例: 成長重視は `z_revenue` ≧ `z_roe` ≧ `z_op_margin`・`z_cf_ratio` ≧ `gap_ratio`）。重みを推定し直す（`scripts/preset_weight_walkforward.py`・#625・ADR-0059）ときに保つ制約で、使う指標の集合・非負・大小順（同じ重みの指標同士は自由）を守る。数値そのものは性格ではない。無制約で推定すると4つが同じ重みへ寄って区別が消えるため、推定が動かしてよいのは大小順の内側だけ。
+_Avoid_: プリセットの方針（重みの値まで含むと読めるため）, 主軸（最大の指標だけを指し、下位の順序が落ちるため）
+
 **売りスコア (sell score)**:
 売り候補ランキング（`plugins/sell_ranking.py`）が保有銘柄に付ける「手放すべき度合い」。買い系スコアの逆観点（割高度＝`gap_ratio` 反転・業績悪化＝ROE/利益率/CF/成長の低さ・**ネットキャッシュ余力の毀損＝清原式 `nc_ratio` の低さ**）を最新年度ユニバースで winsorize→z 標準化し、非負ウェイトで `Σ w·(−z)/Σ w` として合成する（平均並み≈0、劣る銘柄ほど正に大きい）。`nc_ratio` は VIEW 列でなく実行時計算（`_resolve_metric`）。価格モメンタムはスコアに混ぜず別軸（trend）として扱う。
 _Avoid_: 売り推奨度（ラベルと混同するため）
