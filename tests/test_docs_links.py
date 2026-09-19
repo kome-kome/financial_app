@@ -37,7 +37,10 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 # 走査から外すディレクトリ。venv は依存パッケージ同梱の .md が数百本あり、
-# こちらの責任範囲ではない。
+# こちらの責任範囲ではない。`worktrees` も同じ理由で外す——`.claude/worktrees/` 配下は
+# 過去セッションが作った**このリポジトリ自身の複製**（`.gitignore` 済み・git の追跡対象外）で、
+# 本体と同じ .md を二重に走査したうえ、古い世代のリンク切れで本体が無実のまま落ちる。
+# CI の checkout には存在しないので、除外しないとローカルと CI で検査対象が食い違う。
 EXCLUDED_DIRS = {
     ".git",
     ".logs",
@@ -45,6 +48,7 @@ EXCLUDED_DIRS = {
     "__pycache__",
     "node_modules",
     "venv",
+    "worktrees",
 }
 
 EXTERNAL_PREFIXES = ("http://", "https://", "mailto:", "tel:", "data:")
