@@ -1093,6 +1093,25 @@ classDiagram
         +execute() 交差項OLS(財務×マクロ)+LassoLarsIC(BIC)選択+OLS再フィット+Walk-forward CV+James-Stein縮小。全社raw+selected_features+feature_coefs(標準化係数)を返却(効用U/Pareto/top_nはJS後処理)
     }
 
+    class MacroEnetPlugin {
+        +name = "macro_enet"
+        +label = "M-6: マクロ×財務 正則化線形（ElasticNet）"
+        +depends_on = []
+        +heavy = True
+        +ui_order = 390
+        +params_schema() 正則化強度・l1_ratio/fin_features/use_macro/macro_features 等
+        +execute() 交差項+ElasticNet で μ̂ 推定 → macro_enet_scores へ保存（売り推奨の既定 mu_source）
+    }
+
+    class MacroGbdtRankPlugin {
+        +name = "macro_gbdt_rank"
+        +label = "M-5: マクロ×財務 ランク学習（learning-to-rank）"
+        +heavy = True
+        +hidden = True
+        +ui_order = 380
+        +execute() M-2 を継承し4フックのみ override（producer なし＝OOF 比較専用）
+    }
+
     class PluginRegistry {
         -dict _registry
         +_load() プラグインファイルを自動スキャン
@@ -1122,6 +1141,8 @@ classDiagram
     AnalysisPlugin <|-- MacroGbdtPlugin
     AnalysisPlugin <|-- MacroDlmPlugin
     AnalysisPlugin <|-- MacroEnsemblePlugin
+    AnalysisPlugin <|-- MacroEnetPlugin
+    MacroGbdtPlugin <|-- MacroGbdtRankPlugin
 
     PluginRegistry --> AnalysisPlugin : 管理・呼び出し
 
@@ -1133,6 +1154,9 @@ classDiagram
     note for GapAnalysisPlugin "業種別OLSの実行後でないと\nregression_results が空のため結果が出ない\n（financial_metrics VIEW 経由で gap_ratio を読む）"
     note for NetCashAnalysisPlugin "清原達郎『わが投資術』式\nNC = 流動資産 + 投資有価証券×0.7 − 総負債\nOLS不使用・会計値からの直接計算"
     note for MacroRiskReturnPlugin "交差項OLS+LassoLarsIC(BIC)選択+OLS再フィット+walk-forward CV+James-Stein縮小\nリスク軸 R1/R2/R3 を risk_axis で切替（効用U/Pareto/top_nはクライアント側後処理＝即時切替）\n期待リターン基準は μ_raw（μ_shrunk は低シグナル時に全社セクター平均へ潰れるため表の参考列のみ）。散布図は全社描画＋効用上位N強調・両軸[p1,p99]固定（効用上位Nのみだとリスク方向に潰れるため）。軸外れ値は三角マーカーで端に境界表示・フロンティア線は実値描画（chartArea で切断）・対数X軸トグルあり（M-1/M-2/M-3共通・analysis.js の _mrrGeom/_mrrLogAxisRange）\n（R3=セクター×サイズ別バケットの CV 残差 RMSE・サイズ代理 bs_total_assets）\nマクロ計算は日付メモ化で高速化（既定219s→29s）\nheavy=True / use_macro=False で純財務モデルにも縮退"
+    note for MacroEnetPlugin "ADR-0021 の bake-off で M-2 に有意優位＝正式兄弟へ昇格\nproducer = macro_enet_scores・売り推奨の既定 mu_source"
+    note for MacroGbdtRankPlugin "退役＝hidden=True（#570・ADR-0044）\n実測で M-2 に有意劣後（rank-IC 0.0808 vs 0.1578・p=0.001）\nサイドバーから除外・実行経路と比較行は残す"
+    note for MacroEnsemblePlugin "退役＝hidden=True（#570・ADR-0044）\n統合が M-6 単体を上回らない（p=0.810）\nサイドバーと mu_source から除外・実行経路と比較行は残す"
     note for AnalysisPlugin "params_schema() はパラメータ契約（CONTEXT.md）:\ntype=ウィジェット / dtype=データ型 の2軸。\nexecute は coerce 済み typed params を受け取り、\n意味的 validation だけ持つ（型変換・default・\nbounds/membership は coerce_params が担う）"
     note for Utils "統計は numpy / scipy / statsmodels / sklearn を使用。\ncoerce_params（パラメータ契約の coerce seam）と\nwalk_forward_cv_monthly() を含む"
 ```
@@ -1367,9 +1391,9 @@ graph TB
 | `guide.html` | フロントエンド | 初心者向け「やさしい解説」ページ（`/guide`）。各分析を数式なし・たとえ話で説明（ひとことで言うと／何が分かる／どう使う／注意点）。セクションidはプラグイン名（`recommend`/`net_cash_analysis`/`gap_analysis`/`sector_ols`/`macro_risk_return`/`macro_dlm`/`backtest`/`sell_ranking`/`zscore`）でディープリンク可能（`gap_analysis`=バリュエーション分析、旧 total_return は統合）。分析画面の各タブの「❓ やさしい解説」リンクから該当セクションへ飛ぶ。各セクション末尾から技術版 `/models#mN` へ相互リンク。TOC追従は `models.js` を再利用（専用JSなし）。 | — |
 | `db.html` | フロントエンド | DBビューア（`/db`）。4テーブルのスキーマ・プレビュー・統計サマリー・ER 風リレーション・企業ドリルダウン・CSV エクスポート。 | api.py |
 | `company.html` | フロントエンド | 企業詳細（`/company`・`/company/{edinet_code}`）。個別企業の業績・財務(BS)・CF・per-share/配当・バリュエーション（理論時価総額乖離）・日次株価・業種内Zスコアレーダー・清原式ネットキャッシュ・同業比較を Chart.js の時系列グラフで可視化。企業名・証券コード検索付き。財務(BS)タブはバフェットコード型で各年「左＝資産（借方）／右＝負債・純資産（貸方）」を並列表示し、粒度（粗/中/細）切替で内訳の細かさを変更できる（どの粒度でも資産バー＝負債純資産バー＝総資産になるよう補正）。業績(PL)タブは売上高を費用・利益に分解した積み上げ棒（最上部＝純利益）を粒度（粗/中/細）切替で表示（合計＝売上高、信頼性の低い stored gross_profit は不使用）。CFタブも粒度（粗＝フリー+財務／中＝営業/投資/財務／細＝営業/設備投資/その他投資/財務）切替に対応し、CFデータ未収集の企業には明示メッセージを表示。同業比較タブは選択企業を必ず表示し業種内時価総額順位を併記。**相互リンク**：理論時価総額/乖離率チャート→`/analysis?tab=gap`・Zスコアチャート→`/analysis?tab=recommend`・ネットキャッシュチャート→`/analysis?tab=net_cash`（逆方向のバリュエーション分析表→`/company/{code}` は既存） | api.py, Chart.js (CDN) |
-| `static/js/*.js` | フロントエンド | 各HTMLテンプレから外部化したページ別JS（CSP対応）。common（`esc`/`apiFetch`/`initAuth`/`logout` 等の共通ユーティリティ・全ページ読込）+ theme-init（`localStorage`/`prefers-color-scheme` から `data-theme` を描画前に適用する FOUC 防止・全ページ `<head>` 読込）+ dashboard / collection / analysis / company / db / models / login の9ファイル。`/static` で配信（api.py の `StaticFiles` マウント）。`<style>` とインラインイベントハンドラ（`onclick=` 等）はHTML側に残置（後者は将来 addEventListener 化予定）。 | api.py |
+| `static/js/*.js` | フロントエンド | 各HTMLテンプレから外部化したページ別JS（CSP対応）。common（`esc`/`apiFetch`/`initAuth`/`logout` 等の共通ユーティリティ・全ページ読込）+ theme-init（`localStorage`/`prefers-color-scheme` から `data-theme` を描画前に適用する FOUC 防止・全ページ `<head>` 読込）+ dashboard / collection / analysis / company / db / models / login / morning の10ファイル。`/static` で配信（api.py の `StaticFiles` マウント）。`<style>` とインラインイベントハンドラ（`onclick=` 等）はHTML側に残置（後者は将来 addEventListener 化予定）。 | api.py |
 | `_pipeline_gh.py` | GitHub Actions | 全件収集パイプライン（full-pipeline.yml から workflow_dispatch 手動起動）。`--refill-cf`（CF NULL 補完: 投資CF/現金増減/capex）・`--refill-capex-only`（capex のみワンショット）・`--refill-cf-missing`（CF全NULL社=IFRS決算大企業の営業/投資/財務CFを補完）・`--refill-pl-bs`（bs_inventory NULL 補完: 旧コホート〜2022の PL/BS 列を XBRL 再取得で是正・古い順／`refill-pl-bs.yml`）・`--diagnose-cf`（CF ラベル診断）モードを持つ。`normal` CF補完は 2026-05-31 に完了（capex 88.8%充足）、IFRS/US-GAAP決算企業の CF全NULL は 2026-06-03 に `--refill-cf-missing` で補完し CF未収集 268社→0社（詳細は GOTCHAS.md「IFRS/US-GAAP決算のCF・売上要素名」「CF NULL補完の運用」「bs_inventory バックフィルの運用」）。 | collector.py, database.py |
-| `_pipeline_incremental.py` | GitHub Actions | 差分収集パイプライン（daily-incremental.yml で毎日 **JST 17:17**＝UTC 08:17 自動実行・#476 で JST 03:00 から前倒し）。**2026-08-19 現在 schedule はコメントアウトで停止中**（#477 の Egress 超過で止めたまま。復帰手順は #493） | collector.py, database.py |
+| `_pipeline_incremental.py` | GitHub Actions | 差分収集パイプライン（`daily-incremental.yml` から起動。停止前の cron は **JST 17:17**＝UTC 08:17・#476 で JST 03:00 から前倒し＝**起動時刻の根拠としてだけ残す値**）。**schedule はコメントアウトで恒久停止**（#503・ADR-0038 で正本がローカル PostgreSQL へ移ったため。動かすと Supabase だけが前進して正本と分岐する。停止の発端は #477 の Egress 超過だったが、#503 の反転で復帰の前提そのものが消えた＝**復帰条件は「正本を Supabase へ戻す決定をしたとき」だけ**で、その場合は #503 を再オープンしローカル→Supabase の引き渡し経路を先に用意する。`workflow_dispatch` は残っているが**手動起動すると Supabase へ書く**） | collector.py, database.py |
 | `_pipeline_vacuum.py` | ローカル月次バッチ | 月次 DB メンテナンス（`scripts/run_monthly.py` の先頭ステップ `vacuum` から起動・Issue #290 / #504。GHA の `vacuum-maintenance.yml` は 2026-08-25 に schedule 停止＝断面用の手動口だけ残る・#505）。AUTOCOMMIT 接続で **`TARGET_TABLES`（`stock_price_daily` / `stock_price_weekly`）を1表ずつ `VACUUM FULL`** し、前後の容量をログに残す。前段の `_tune_autovacuum()` が per-table の `autovacuum_vacuum_scale_factor` を 0.02 へ揃える（**冪等**＝既に望みの値なら ALTER を投げない）。クラスタ既定 0.2 では 128万行の `stock_price_weekly` の発火閾値が 256,943 行になり、dead 200,498 行を抱えたまま autovacuum が一度も回らなかった（2026-08-19・**故障ではなく閾値未達**）。チューニングは「これから溜まるのを止める」、VACUUM FULL は「既に溜まった分を回収する」で**両方要る**。ロック待ち（55P03）だけ 120秒間隔で最大3回再試行し、それ以外は即送出。`lock_timeout=90s` / `statement_timeout=0`（ADR-0032・上限はワークフローの `timeout-minutes`） | database.py, _pipeline_utils.py |
 | `_pipeline_utils.py` | GitHub Actions | 全件/差分パイプライン共通基盤。ファイルロガー生成（`make_logger`。出力先ディレクトリが無ければ自動作成）・Supabase の read-only/一時エラー検出（`_is_readonly_error`）・指数バックオフ付きリトライラッパ（`_run_with_retry`） | collector.py |
 | `logs/` | ローカル生成物 | ローカル実行ログの集約先（`.gitignore` 対象・git 管理外）。`server.log`（`launch.py`）・`pipeline_gh.log`（`_pipeline_gh.py`）・`pipeline_incremental.log`（`_pipeline_incremental.py`）。GitHub Actions 実行時も同名で生成され `actions/upload-artifact` で回収 | launch.py, _pipeline_gh.py, _pipeline_incremental.py |
@@ -1451,7 +1475,7 @@ graph TB
 | `.claude/agents/financial-app-explorer.md` | 設定 | read-only 探索サブエージェント定義（多ファイル調査・大ドキュメント精読をトークン節約で委譲） | — |
 | `.claude/skills/*/SKILL.md` | 設定 | プロジェクト固有スキル（`/tidy` 軽量化点検 等）＋汎用スキル群。索引・各スキルの説明は [SKILLS_AND_AGENTS.md](SKILLS_AND_AGENTS.md) を参照 | — |
 | `.github/workflows/ci.yml` | GitHub Actions | push/PR で `pytest --durations=20`（testpaths=tests）を実行する CI。`timeout-minutes: 15` はハング止め（#703）——ランナー準備の空白（実測最大 114秒）も算入される。1本の call が 60秒を超えたテストは `tests/conftest.py` が失敗にし、意図的に重いテストは `@pytest.mark.slow(reason=...)` で外す（空理由は収集時に使用エラー）。経緯は [GOTCHAS.md](GOTCHAS.md)「テスト・CI」 | — |
-| `.github/workflows/daily-incremental.yml` | GitHub Actions | 差分収集（毎日 **JST 17:17**＝UTC 08:17 自動＋手動・#476）。`_pipeline_incremental.py` を起動。**schedule は #477 以降コメントアウトで停止中**（復帰手順は #493） | `_pipeline_incremental.py` |
+| `.github/workflows/daily-incremental.yml` | GitHub Actions（**手動のみ**） | 差分収集。`_pipeline_incremental.py` を起動。**schedule は #503（ADR-0038）で恒久停止**＝正本がローカル PostgreSQL へ移り、動かすと Supabase だけが前進して分岐する（停止の発端は #477 の Egress 超過だが、#503 の反転で復帰の前提が消えた。**復帰条件は「正本を Supabase へ戻す決定をしたとき」だけ**で、その場合は #503 を再オープンする）。停止前の cron は **JST 17:17**＝UTC 08:17（#476）＝**起動時刻の根拠としてだけ残す値**。`workflow_dispatch` は残るが**手動起動すると Supabase へ書く** | `_pipeline_incremental.py` |
 | `.github/workflows/full-pipeline.yml` | GitHub Actions | 全件収集パイプライン（workflow_dispatch 手動）。`_pipeline_gh.py` の各 refill モードを起動 | `_pipeline_gh.py` |
 | `.github/workflows/collect-macro.yml` | GitHub Actions | マクロ指標収集（e-Stat/日銀/OECD/IMF WEO/GDELT/Wikimedia コネクタ・手動）。`collector.py --macro --years N` を起動。入力 `series` に series_code（カンマ区切り）を渡すと `--macro-series` で対象系列だけを収集する（#444） | `collector.py` |
 | `.github/workflows/collect-interim.yml` | GitHub Actions | 半期(H1)財務収集（Issue #219②・手動）。`collector.py --interim` を起動 | `collector_interim.py` |

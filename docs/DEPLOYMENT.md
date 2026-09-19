@@ -282,9 +282,9 @@ gh run cancel <run-id>   # → annotation は "The run was canceled by @…" →
 3. 成長率・Zスコアを再計算
 4. 所要時間: **2h05m〜2h38m**（2026-08-02 の success run 2本で実測。大半は EDINET 全日スキャンと Yahoo ギャップ補完の逐次リクエスト。`timeout-minutes: 360`）。**#474 以降、週末・祝日明けの run は gap-fill をほぼ丸ごと飛ばすため大きく短くなる**（平日は全社取得のままなので据え置き）
 
-> **注（運用パターン）**: 全件収集（`full-pipeline.yml`）を回している間は、Supabase 接続上限での同時実行を避けるため、本ワークフローを一時的に `daily-incremental.yml.disabled` へリネームして停止する（例: コミット `4764d96`「全件収集中の同時実行回避」）。全件収集が終わったら `.yml` に戻して再有効化する。**現在ファイル名が `.disabled` の場合は自動の定時収集が止まっている状態**なので、UI / 手動収集で補う。<br>停止中の株価鮮度は `full-pipeline` の finalize（Phase 5）が同じ Yahoo ギャップ補完を持つため、全件収集の完了時点で追いつく（#426）。それでも collect フェーズ中（実測 約4時間）は前進しない点は変わらない。
+> **注（運用パターン）**: 全件収集（`full-pipeline.yml`）を回している間は、Supabase 接続上限での同時実行を避けるため、本ワークフローを一時的に `daily-incremental.yml.disabled` へリネームして停止する（例: コミット `4764d96`「全件収集中の同時実行回避」）。全件収集が終わったら `.yml` に戻して再有効化する。**現在ファイル名が `.disabled` の場合は自動の定時収集が止まっている状態**なので、UI / 手動収集で補う。<br>**ただし 2026-08 以降の恒久停止はこの方式ではない**——ファイル名は `.yml` のままで、`schedule:` をコメントアウトして止めている（#503）。「ファイル名が `.yml` だから動いている」とは読めないので、停止の有無は必ず yml 本文の `schedule:` を見て判断すること。<br>停止中の株価鮮度は `full-pipeline` の finalize（Phase 5）が同じ Yahoo ギャップ補完を持つため、全件収集の完了時点で追いつく（#426）。それでも collect フェーズ中（実測 約4時間）は前進しない点は変わらない。
 >
-> **✅ cron 再開済み（2026-06-22〜）**: dual-table 移行後の `workflow_dispatch` 手動実行で Yahoo ギャップ補完・J-Quants 株価取得が GitHub Actions（Azure IP）から正常動作することを確認 → `on.schedule` を有効化。**2026-08-09 に UTC 18:00（JST 03:00）→ UTC 08:17（JST 17:17）へ移動**（#476・上の起動時刻の根拠を参照）。
+> **cron の履歴（2026-06-22 再開 → 2026-08 停止・現在は停止中）**: dual-table 移行後の `workflow_dispatch` 手動実行で Yahoo ギャップ補完・J-Quants 株価取得が GitHub Actions（Azure IP）から正常動作することを確認 → `on.schedule` を有効化。**2026-08-09 に UTC 18:00（JST 03:00）→ UTC 08:17（JST 17:17）へ移動**（#476・上の起動時刻の根拠を参照）。その後 **#503 で正本がローカル PostgreSQL へ移り `schedule:` はコメントアウト**＝上の時刻は「停止時点の設定値」であって現在の挙動ではない（起動時刻の根拠としてだけ残す）。
 >
 > **⚠️ 2026-07-14 〜 08-01 は19日連続で failure していた**（真因: Phase 4 冒頭の J-Quants 403 が例外送出しプロセスが exit 1 → 鮮度の担い手である Yahoo ギャップ補完に一度も到達しなかった）。#412 で 403 をカバレッジ境界の欠測として継続扱いに修正済み。**この障害に19日間誰も気づかなかった**のは全ワークフローに失敗通知が無いためで、#414 で対応する。成功時の所要は実測 2h05m〜2h38m。
 
@@ -575,9 +575,9 @@ Render ダッシュボードで管理。
 ### 2. アイドル時のスピンダウン
 - 15 分間アクセスがないとインスタンスが停止する
 - 次回アクセス時に **コールドスタート**（数秒〜数十秒）が発生
-- 自動収集は **GitHub Actions に統一済み** のため Render の常時稼働は不要:
-  - 差分収集: `.github/workflows/daily-incremental.yml` が UTC 18:00 (JST 03:00) に実行
-  - 全件収集: `.github/workflows/full-pipeline.yml` を `workflow_dispatch` で手動起動
+- 自動収集は Render の外で回るため Render の常時稼働は不要:
+  - 差分収集: **ローカルの `scripts/run_nightly.py`（タスクスケジューラ・JST 17:20）**。`.github/workflows/daily-incremental.yml` の `schedule:` は #503 で恒久停止（正本がローカル PostgreSQL へ移り、動かすと Supabase だけが前進して分岐する）
+  - 全件収集: `.github/workflows/full-pipeline.yml` を `workflow_dispatch` で手動起動（**起動すると Supabase へ書く**＝正本と分岐する点は同じ）
   - Render 側の `_daily_scheduler` / `_startup_catchup` および keepalive ワークフローは廃止済み
   - ユーザーが Web UI を開いたときのコールドスタートは許容する設計
 
@@ -825,7 +825,7 @@ Supabase 無料プランは **1週間アクセスなしで自動停止**する�
 1. Supabase ダッシュボード → 該当プロジェクト → "Restore project" ボタン
 2. 起動完了まで数分待つ
 3. Render は `DATABASE_URL` で再接続を自動リトライするため、Render 側の操作は不要
-4. GitHub Actions の差分収集（`daily-incremental.yml`）が翌日から再開されることを確認
+4. **GitHub Actions の差分収集は再開しない**（`daily-incremental.yml` の `schedule:` は #503 で恒久停止）。Supabase は 2026-08-07 の閲覧用断面なので、復旧後も中身は停止前のまま＝**前進を期待して待たない**。正本の前進はローカル `scripts/run_nightly.py` が担う
 
 **長期離席時の対策**: UptimeRobot 等で `/health` を定期 ping する（O-2 参照）と自動停止を防げる。
 
