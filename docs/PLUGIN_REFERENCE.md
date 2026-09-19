@@ -108,7 +108,7 @@ sink は **ContextVar**。`execute` のシグネチャは `(params, db)` に固�
 - **転送列は `sector_load_fields(features)` が選択 features から導出する**（#482）。`financial_records` は69列あるが、既定10項目なら20列で足りる（メタ11列＋features 由来の絶対額列）。未知キーは `ValueError` で fail-fast——列を落としたまま進むと `_resolve_per_share_value` の `getattr(..., None)` が欠測へ倒し、`_classify_by_sector` の AND フィルタが全社を除外して「業種0件」に化ける（#459 と同型で failure としては現れない）。
 - **`shares_outstanding` の J-Quants マスタ経路（#462）は SQL 側の `COALESCE` で温存する**。列指定 Row にリレーションは無いので `record.company.issued_shares` は黙って None になる。`_load_records` が `COALESCE(FinancialRecord.issued_shares, Company.issued_shares)` を `issued_shares` として返すことで、`plugins/utils.py` 側は無改修のまま優先順位（XBRL期末値 → マスタ → 純資産÷BPS）が保たれる。副産物として N+1 遅延ロードが JOIN 1本になる。
 - **計算と保存は分かれている**（#626）。`_prepare_fit`（母集団・採用列・プール予測）→ `_fit_sector`（1業種の当てはめ・縮約）が計算の実体で、`execute` はその結果を `_persist_and_rank` で保存し、`predict_gaps(records, params)` は**保存せずに** `{(edinet_code, year, period_end): gap_ratio}` を返す。後者は学習パネルの時点再現（`sector_gap_asof.py`・ADR-0057）が月末ごとに呼ぶ。乖離率の式は `gap_ratio_pct` の1か所。`_load_records(..., all_years=True)` は全年度の通期行を返す（どの行を使うかは呼び出し側が選ぶ）。
-- **ridge の結果は入力行の並び順に依存する**（#697）。`RidgeCV` の α 選択が KFold（シャッフルなし）で、fold が並びで決まるため。`_load_records` は ORDER BY を持たないので、本番の値は DB の返す順で揺れうる。時点再現は `edinet_code` 順に固定している。
+- **結果は入力行の並び順に依存しない**（#697・ADR-0058）。`_load_records` は ORDER BY を持たず、DB の返す順は夜ごとに変わりうる。ridge の α は `RidgeCV(cv=None)`（LOO）で選ぶ——以前はシャッフルなしの KFold で、fold が並びで決まり業種ごと gap が跳ねていた。縮約用の `global_pred_map` のキーは `_row_key`＝`(edinet_code, year, period_end)`（決算期変更で同じ年度に期末違いの2行を持つ社がある）。`tests/test_sector_ols.py::test_gaps_ignore_row_order` が並べ替えで縛る。時点再現の edinet_code 順の固定は、浮動小数の加算順まで揃えるために残している。
 
 依存先: `plugins/utils.py`
 

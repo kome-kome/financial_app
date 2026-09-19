@@ -204,8 +204,8 @@ HC3 SE:          不均一分散に対応したロバスト標準誤差</div>
 
   <h3>Ridge 回帰（L2 正則化）</h3>
   <div class="formula-block"><span class="var">β</span><span class="sym">ridge</span> = arg min ‖<span class="var">X</span><span class="var">β</span> - <span class="var">y</span>‖² + <span class="var">α</span>‖<span class="var">β</span>‖²
-  <span class="comment"># 最適 α は CV で自動選択</span></div>
-  <p>業種別 OLS の <code>regularization="ridge"</code> パラメータで切替可能。多重共線性が顕著な業種では予測安定性が向上するが、SE / t / p 値は定義されない（NaN）。実装は <code>sklearn.linear_model.RidgeCV</code>。</p>
+  <span class="comment"># 最適 α は一個抜き交差検証（LOO）で自動選択</span></div>
+  <p>業種別 OLS の <code>regularization="ridge"</code> パラメータで切替可能。多重共線性が顕著な業種では予測安定性が向上するが、SE / t / p 値は定義されない（NaN）。実装は <code>sklearn.linear_model.RidgeCV</code>（<code>cv=None</code>＝効率的な LOO）。α の選択は行の並び順に依存しない（以前のシャッフルなし KFold は並びで fold が決まり、同じデータでも gap が変わった・#697）。</p>
 </div>
 
 <div class="common-section" id="layers">

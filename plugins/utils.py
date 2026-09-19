@@ -543,11 +543,15 @@ def ols_with_diagnostics(X: list, y: list, cov_type: str = "nonrobust") -> dict 
 
 
 def ridge_regression(X: list, y: list,
-                     alphas: list[float] | None = None,
-                     cv_folds: int = 5) -> dict | None:
+                     alphas: list[float] | None = None) -> dict | None:
     """Ridge 回帰（L2 正則化）。多重共線性が高い特徴量で OLS が不安定な場合の代替。
 
-    `sklearn.linear_model.RidgeCV` で `alphas` から GCV 経由で最適 α を選択する。
+    `sklearn.linear_model.RidgeCV` で `alphas` から最適 α を選択する。選び方は
+    **効率的な一個抜き交差検証（LOO・`cv=None`）で、行の並び順に依存しない**。
+    KFold（`cv=整数`）へ戻さないこと——シャッフルなしの KFold は fold が行の並びで決まり、
+    同じデータでも DB の返す順だけで業種ごと α と gap_ratio が変わっていた（#697・ADR-0058）。
+    `shuffle=True, random_state=固定` でも置換が行番号に掛かるので並び依存は消えない。
+
     返り値は `ols()` と同じスキーマ（beta, yhat, r2, adj_r2, rmse, mae, df,
     rank, condition_number）。SE / t / p 値は Ridge では伝統的に定義されないため
     NaN を返す（推論より予測精度を重視する場合に適切）。
@@ -557,7 +561,6 @@ def ridge_regression(X: list, y: list,
         X: 設計行列（切片列を含む）
         y: 目的変数
         alphas: 探索する α 候補（None なら `[1e-3, 1e-2, 0.1, 1, 10, 100, 1000]`）
-        cv_folds: alpha 選択時の CV fold 数（≥ 2）
     """
     from sklearn.linear_model import RidgeCV
 
@@ -575,7 +578,7 @@ def ridge_regression(X: list, y: list,
         model = RidgeCV(
             alphas=alphas,
             fit_intercept=False,
-            cv=min(cv_folds, max(2, n // 5)) if n >= 10 else None,
+            cv=None,                       # LOO（並び順に依存しない・#697）
             scoring="neg_mean_squared_error",
         )
         model.fit(X_np, y_np)

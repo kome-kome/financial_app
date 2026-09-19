@@ -281,7 +281,7 @@ def fama_macbeth_regression(period_panel: dict, factor_names: list[str],
         else:
             X_std = [row[1:] for row in Xn]          # 切片列を落とす（上記の理由）
             y_arr = np.asarray(y, dtype=float)
-            result = ridge_regression(X_std, (y_arr - y_arr.mean()).tolist(), cv_folds=3)
+            result = ridge_regression(X_std, (y_arr - y_arr.mean()).tolist())
             n_expected = n_factor
             offset = 0
         if result is None:

@@ -90,6 +90,11 @@ issue の文面は「sector_ols を過去年度へ遡及計算する」＝ `year
 時点再現は `asof_records` の戻りを edinet_code 順に固定し、パネルが再現するようにした。
 本番側（`_load_records` に ORDER BY が無い）の同じ問題は #697 で扱う。
 
+> **追記（2026-09-19・#697）**: α の選択は LOO（`RidgeCV(cv=None)`）へ切り替え、回帰の結果は
+> 行の並びに依存しなくなった（[ADR-0058](0058-ridge-alpha-is-chosen-by-loo.md)）。edinet_code 順の固定は
+> 残すが、目的は浮動小数の加算順まで揃えてパネルをビット単位で再現することに変わる。
+> 下の「実測」は切替前（KFold・edinet_code 順）の値。
+
 ### 5. パネルへは切替で載せる（既定は載せない）
 
 `build_period_panel(..., with_gap_ratio=True)` で末尾の列に gap_ratio を足し、gap の無い行は落とす

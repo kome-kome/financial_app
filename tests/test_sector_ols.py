@@ -822,3 +822,63 @@ class TestPredictGaps:
         records = plugin._load_records(db, None, DEFAULT_FEATURES_PRICE)
         gaps = plugin.predict_gaps(records, self._params())
         assert {k[0] for k in gaps} == {f"E{i:05d}" for i in range(1, 13)}
+
+    @staticmethod
+    def _noisy_records():
+        """ノイズのある30社の業種＋縮約が掛かる6社の業種（うち1社は同じ年度に期末違いの2行）。
+
+        本番には同じ (edinet_code, year) に期末違いの通期行を持つ社が実在する（決算期変更・
+        実測12件）。DB を通さず `_SectorRec` 形の行を直接組む（`_load_records` の戻りと同じ形）。
+        """
+        import random
+        from collections import namedtuple
+        rec_cls = namedtuple("_SectorRec", sector_load_fields(DEFAULT_FEATURES_PRICE))
+        rng = random.Random(11)
+
+        def _row(ec, industry, period_end, i):
+            bps = 800.0 + 40.0 * i + rng.gauss(0, 60.0)
+            shares = 1.0e6 + 5.0e4 * i
+            vals = dict.fromkeys(rec_cls._fields)
+            vals.update(
+                edinet_code=ec, sec_code=ec[-4:], company_name=ec, industry=industry,
+                year=2024, period_end=period_end,
+                stock_price=max(100.0, 1500.0 + 60.0 * i + rng.gauss(0, 400.0)),
+                market_cap=1000.0 + 50.0 * i, issued_shares=shares,
+                bs_total_equity=bps * shares, bs_bps=bps,
+                pl_eps=80.0 + 4.0 * i + rng.gauss(0, 15.0), dps=20.0 + rng.gauss(0, 5.0),
+                pl_revenue=1.0e9 + 1.0e8 * i + rng.gauss(0, 2.0e8),
+                pl_gross_profit=4.0e8 + 4.0e7 * i + rng.gauss(0, 8.0e7),
+                pl_operating_profit=1.0e8 + 1.5e7 * i + rng.gauss(0, 3.0e7),
+                bs_total_assets=2.0e9 + 1.0e8 * i + rng.gauss(0, 3.0e8),
+                bs_total_liabilities=1.0e9 + 5.0e7 * i + rng.gauss(0, 2.0e8),
+                cf_operating_cf=1.2e8 + 1.2e7 * i + rng.gauss(0, 4.0e7),
+                cf_free_cf=8.0e7 + 8.0e6 * i + rng.gauss(0, 3.0e7),
+            )
+            return rec_cls(**vals)
+
+        recs = [_row(f"E{i:05d}", "情報・通信業", date(2025, 3, 31), i) for i in range(1, 31)]
+        recs += [_row(f"E{100 + i:05d}", "小売業", date(2025, 3, 31), i) for i in range(1, 6)]
+        # 決算期変更: 同じ 2024 年度に 2024-03-31 と 2024-12-31 の2行
+        recs.append(_row("E00199", "小売業", date(2024, 3, 31), 7))
+        recs.append(_row("E00199", "小売業", date(2024, 12, 31), 9))
+        return recs
+
+    @pytest.mark.parametrize("regularization", ["none", "ridge"])
+    def test_gaps_ignore_row_order(self, regularization):
+        # #697: 同じ行を並べ替えただけで gap が変わってはいけない。
+        # - ridge: α を選ぶ CV の fold が並びで決まっていた（シャッフルなしの KFold）
+        # - none(OLS) / ridge 共通: 縮約に使う全社プール予測を (edinet_code, year) で引いていたので、
+        #   期末違いの2行はどちらの予測で縮約されるかが並びで決まっていた
+        import random
+        params = self._params(regularization=regularization, shrink_threshold=15)
+        recs = self._noisy_records()
+        base = plugin.predict_gaps(recs, params)
+        assert ("E00199", 2024, date(2024, 3, 31)) in base
+        assert ("E00199", 2024, date(2024, 12, 31)) in base
+        for seed in range(6):
+            shuffled = recs[:]
+            random.Random(seed).shuffle(shuffled)
+            got = plugin.predict_gaps(shuffled, params)
+            assert got.keys() == base.keys()
+            for k, v in base.items():
+                assert got[k] == pytest.approx(v, abs=0.01), (seed, k)

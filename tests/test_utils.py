@@ -756,6 +756,26 @@ class TestRidgeRegression:
         # alpha が選択されている
         assert result["alpha"] > 0
 
+    def test_ridge_ignores_row_order(self):
+        # #697: 同じ標本を並べ替えただけで α・係数・予測値が変わってはいけない。
+        # シャッフルなしの KFold で α を選んでいた頃は、この構成（効果が弱く CV 曲線が平ら）で
+        # 並びによって α が 10 と 100 に割れた。業種別回帰の gap が夜ごとに跳ねた原因そのもの。
+        import random
+        rng = random.Random(3)
+        n = 60
+        X = [[1.0] + [rng.gauss(0, 1) for _ in range(4)] for _ in range(n)]
+        y = [0.3 * r[1] - 0.2 * r[2] + rng.gauss(0, 1.0) for r in X]
+        base = ridge_regression(X, y)
+        assert base is not None
+        for seed in range(8):
+            idx = list(range(n))
+            random.Random(seed).shuffle(idx)
+            res = ridge_regression([X[i] for i in idx], [y[i] for i in idx])
+            assert res["alpha"] == base["alpha"]
+            assert res["beta"] == pytest.approx(base["beta"], abs=1e-9)
+            assert [res["yhat"][idx.index(i)] for i in range(n)] == \
+                pytest.approx(base["yhat"], abs=1e-9)
+
 
 # ── shares_outstanding ───────────────────────────────────────────────────
 
