@@ -28,7 +28,8 @@
    rank-IC を `paired_ic_significance` で対にし、Bonferroni（プリセット数）で判定する。
    `--weights-out` の最終重みを `preset_ic_gate --weights-json` で測るのは in-sample
    （学習に使った期間での成績）なので、並べて眺める以上の意味を持たせない。
-7. `PRESETS` は変えない。変えるかは #546 がこの結果を見て決める。DB へは書かない。
+7. このスクリプトは `PRESETS` を書き換えない。反映は補正後 α を通ったものだけ人が行う
+   （#546 で成長重視を反映・ADR-0059 追記）。DB へは書かない。
    書き出しは全計算の完走後（日中枠 `run_daytime.JOBS["wf:preset-weights"]`）。
 
 実行
@@ -462,7 +463,7 @@ def main() -> None:
 
     verdict = verdict_of(results, alpha)
     print(f"\n=== VERDICT: {verdict} ===", flush=True)
-    print("PRESETS は変えていない（反映は #546 が補正後 α を通ったものだけ行う）。"
+    print("PRESETS は変えていない（反映は補正後 α を通ったものだけ人が行う・ADR-0059）。"
           "最終重みを preset_ic_gate で測る比較は in-sample なので昇格の根拠にしない。", flush=True)
     elapsed_min = (time.monotonic() - started) / 60
     print(f"elapsed {elapsed_min:.1f} min", flush=True)

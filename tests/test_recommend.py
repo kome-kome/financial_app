@@ -49,6 +49,28 @@ class TestConstants:
         for name, weights in PRESETS.items():
             assert "mu" not in weights, f"{name} が既定で μ̂ を使っている"
 
+    def test_presets_fit_the_analysis_page_sliders(self):
+        """分析画面のプリセットボタンは重みをスライダーへ入れてから送る（#546）。
+
+        `<input type="range">` は刻みに乗らない値を黙って丸めるので、乗っていないと
+        画面経由だけ別の重みで動き、名前で引く経路（/morning・バックテスト）と食い違う。
+        エラーは出ないので失敗として現れない。範囲と刻みは analysis.js から読む（書き写さない）。
+        """
+        import re
+        from decimal import Decimal
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        with open(os.path.join(root, "static", "js", "analysis.js"), encoding="utf-8") as f:
+            js = f.read()
+        body = js[js.index("function renderWeightGrid"):js.index("function applyPreset")]
+        m = re.search(r'type="range" min="(-?[\d.]+)" max="(-?[\d.]+)" step="([\d.]+)"', body)
+        assert m, "renderWeightGrid のスライダー定義が見つからない"
+        lo, hi, step = (Decimal(v) for v in m.groups())
+        for name, weights in PRESETS.items():
+            for metric, w in weights.items():
+                d = Decimal(repr(w))
+                assert lo <= d <= hi, f"{name} の {metric}={w} がスライダーの範囲 [{lo}, {hi}] の外"
+                assert d % step == 0, f"{name} の {metric}={w} がスライダーの刻み {step} に乗らない"
+
 
 # ── 転送列の契約（Issue #441）────────────────────────────────────────────────
 #

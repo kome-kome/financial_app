@@ -29,6 +29,12 @@ from scripts.preset_ic_gate import _panel_rows, build_view_stats, collect_weight
 FACTORS = ["z_roe", "z_op_margin", "z_revenue", "z_cf_ratio",
            "z_equity_ratio", "z_eps", "z_de_ratio", "z_momentum", "gap_ratio"]
 
+# 大小順の仕組みを確かめる検体。**本番の値ではない**（#546 以前の成長重視）。段が4つあり、
+# 同値の組（z_op_margin と z_cf_ratio）も持つので、隣り合う段だけを結ぶこと・同値は自由なこと・
+# 最下位が上の段で止まることを1つで試せる。本番の成長重視は #546 で「主軸＋同格4指標」の
+# 2段になったので、これらのテストを PRESETS に追随させると検証が空振りする。
+LAYERED = {"z_revenue": 2.0, "z_roe": 1.0, "z_op_margin": 0.5, "z_cf_ratio": 0.5, "gap_ratio": 0.3}
+
 
 def _months(start: str, n: int) -> list:
     year, month = map(int, start.split("-"))
@@ -138,7 +144,7 @@ class TestScoreMatchesConsumer:
 
 class TestCharacterConstraints:
     def test_order_pairs_link_adjacent_levels_only(self):
-        pairs = set(wf.order_pairs(PRESETS["成長重視"]))
+        pairs = set(wf.order_pairs(LAYERED))
         assert pairs == {
             ("z_revenue", "z_roe"),
             ("z_roe", "z_op_margin"), ("z_roe", "z_cf_ratio"),
@@ -147,7 +153,7 @@ class TestCharacterConstraints:
 
     def test_tied_weights_get_no_pair(self):
         """同じ重みの指標同士は入れ替わってよい（z_op_margin と z_cf_ratio は 0.5 で同値）。"""
-        pairs = set(wf.order_pairs(PRESETS["成長重視"]))
+        pairs = set(wf.order_pairs(LAYERED))
         assert ("z_op_margin", "z_cf_ratio") not in pairs
         assert ("z_cf_ratio", "z_op_margin") not in pairs
 
@@ -187,9 +193,9 @@ class TestCharacterConstraints:
 
 class TestOptimizationMovesTowardTheSignal:
     def test_informative_low_rank_metric_rises_to_its_ceiling(self):
-        """成長重視で最下位の gap_ratio だけが信号を持つとき、gap は上位の水準まで上がり、
+        """最下位の gap_ratio だけが信号を持つとき、gap は上位の水準まで上がり、
         大小順の制約で止まる（上回らない）。代理 IC は静的重みより上がる。"""
-        static = PRESETS["成長重視"]
+        static = LAYERED
         panel = _panel(seed=8, months=_months("2019-01", 30), n=300, signal={"gap_ratio": 1.0})
         fit = wf.fit_weights(static, list(_moments_for(panel, static).values()))
         assert fit.success, fit.message
@@ -201,7 +207,7 @@ class TestOptimizationMovesTowardTheSignal:
 
     def test_uninformative_top_metric_cannot_fall_below_the_next(self):
         """主軸（z_revenue）に信号が無くても、z_roe を下回らない（性格が残る）。"""
-        static = PRESETS["成長重視"]
+        static = LAYERED
         panel = _panel(seed=9, months=_months("2019-01", 30), n=300, signal={"z_roe": 1.0})
         fit = wf.fit_weights(static, list(_moments_for(panel, static).values()))
         assert fit.success, fit.message
