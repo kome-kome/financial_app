@@ -749,15 +749,17 @@ class TestTuningSearchSpace:
         base_params, dims = self.plugin.tuning_search_space()
         assert isinstance(base_params, dict)
         names = {d.name for d in dims}
-        assert names == {"use_macro", "max_features"}
+        assert names == {"max_features"}
 
     def test_min_coverage_is_not_a_search_axis(self):
         """M-1 で `min_coverage` を振っても結果が1ミリも動かない（#596）。
 
-        `build_snapshots` を `macro_nan_ok=False` で呼ぶため、マクロ欠損の断面は充足率
-        チェックの**手前**で破棄され、到達する行の充足率は常に 1.0 になる。実測でも
-        0.0〜1.0 のどの値でもサンプル総数 181,862 で同一、探索スコアも 288件全件
-        （72群 × 4値）で群内不変だった。**72通りの結果を288回計算していた。**
+        到達する行の充足率は常に 1.0 になる。**根拠は #615 で既定が変わった前後で
+        入れ替わったが、結論は変わらない**——`use_macro=ON` のときは `macro_nan_ok=False`
+        でマクロ欠損の断面が充足率チェックの**手前**で破棄され、`use_macro=OFF`（現在の
+        既定）ではマクロ列も交差項も作らないので**そもそも NaN 源が無い**。
+        実測（当時の既定 ON）でも 0.0〜1.0 のどの値でもサンプル総数 181,862 で同一、
+        探索スコアも 288件全件（72群 × 4値）で群内不変だった。
         """
         _base_params, dims = self.plugin.tuning_search_space()
         assert "min_coverage" not in {d.name for d in dims}
@@ -769,10 +771,13 @@ class TestTuningSearchSpace:
     def test_m1_stays_strict_so_dropping_the_axis_stays_valid(self):
         """M-1 が strict（`macro_nan_ok=False`）である前提を縛る（#596）。
 
-        `min_coverage` を探索軸から外せるのは「マクロ欠損の断面が充足率チェックの手前で
-        破棄される」からで、**strict をやめた瞬間にこの軸は再び意味を持つ**。ところが
-        軸はもう無いので探索されず、**誰も気づかないまま探索空間が不完全になる**
-        （ADR-0031 と同型の「失敗として現れない」形）。ここで前提ごと縛る。
+        `min_coverage` を探索軸から外した根拠の片側が「マクロ欠損の断面が充足率チェックの
+        手前で破棄される」であり、**strict をやめた瞬間に `use_macro=ON` の経路でこの軸が
+        再び意味を持つ**。ところが軸はもう無いので探索されず、**誰も気づかないまま探索空間が
+        不完全になる**（ADR-0031 と同型の「失敗として現れない」形）。ここで前提ごと縛る。
+
+        既定が OFF になった（#615）あとも縛り続ける。OFF 側の根拠は「NaN 源が無い」だが、
+        ユーザーが画面で ON にする経路は残っており、そこでは strict が効いている。
 
         判定は AST で行う（`tests/test_column_scoping.py` と同じ手）。文字列一致だと
         docstring の散文（「M-2 のように macro_nan_ok=True で呼ぶモデル」）で誤爆する
@@ -832,17 +837,50 @@ class TestTuningSearchSpace:
         assert "use_momentum" in schema
         assert "momentum_window" in schema
 
-    def test_grid_is_12_combos(self):
-        """モメンタム2軸を落として 72 → 12（**6分の1**）。
+    def test_macro_is_not_a_search_axis(self):
+        """`use_macro` は探索しない（#615・ADR-0050 の 2026-09-20 追記）。
+
+        モメンタム2軸と違い、この軸は**母集団を動かさない**（2回の実測で months /
+        samples / companies / 共通域がすべて一致）。外したのは**効果を測り終えたから**で、
+        共通 (ym,ec) 域で ON は rank-IC を有意に下げた（−0.0706・p=0.015）。交互作用を
+        切る・列の枠を増やす・目的変数から月平均を引く、のどれでも改善しなかった。
+        """
+        _base_params, dims = self.plugin.tuning_search_space()
+        assert "use_macro" not in {d.name for d in dims}
+
+    def test_macro_is_pinned_off_in_base_params(self):
+        """外すだけでなく **OFF で固定**する。これが無いと既定 OFF が本番へ届かない。
+
+        `hyperparameter_search` は保存値を champion として投入し、`_project_champion` は
+        dims にある軸の保存値をそのまま使う。軸に残したままだと ON が勝った回に
+        `plugin_tuned_params` へ再び書かれ、その行は `/api/plugins/{name}/tuned` 経由で
+        画面のフォームへ**ページ読込時に自動適用**される。実行時は全フィールドが明示値と
+        して POST されるので、**既定はフォームの初期 HTML にしか効かない**。
+        base で False を固定すると保存値が `stale_params` に落ちて還流が止まる。
+        """
+        base_params, _dims = self.plugin.tuning_search_space()
+        assert base_params.get("use_macro") is False
+
+    def test_macro_stays_in_the_params_contract(self):
+        """探索から外すのと契約から消すのは別（`min_coverage`・モメンタムと同じ判断）。
+
+        UI からは手動で ON にできる。`macro_features` も効かないつまみとして残す。
+        """
+        schema = self.plugin.params_schema()
+        assert "use_macro" in schema
+        assert "macro_features" in schema
+
+    def test_grid_is_6_combos(self):
+        """モメンタム2軸（#604）と `use_macro`（#615）を落として 72 → **6**。
 
         72 の内訳は use_macro 2 × (use_momentum False 1 + True × 窓5) × max_features 6。
-        窓の展開が消えるので 2 × 6 = 12 になる。BIC がモメンタム列を一度も選ばない以上、
-        **モデルは1ミリも変わらない**（ADR-0050 §1-b）。
+        窓の展開が消えて 12（#604）、マクロの2値が消えて 6 になる。残る軸は
+        `max_features` だけで、これは母集団を動かさず BIC の列数上限を選ぶだけである。
         """
         from plugins.tuning import _grid_combos
 
         _base_params, dims = self.plugin.tuning_search_space()
-        assert len(_grid_combos(dims)) == 12
+        assert len(_grid_combos(dims)) == 6
 
     def test_display_only_params_excluded(self):
         _base_params, dims = self.plugin.tuning_search_space()

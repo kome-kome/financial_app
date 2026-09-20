@@ -598,3 +598,52 @@ False にする判断は M-1（マクロ×リスク-リターン推奨）の設�
 
 `--macro` 5.4分 / `--demean-target` 8.1分（いずれも `--refresh-cache` 込み・stride=1）。`scripts/run_daytime.py`
 の `measured_min` は実測へ差し替えた（見積りはどちらも 7.0 だった）。
+
+## 追記（2026-09-20・その2）: 既定を動かした（#615 の決定）
+
+上の実測を受けて **M-1 の `use_macro` の既定を False にした**。変えたのは μ（期待リターン）側の
+OLS 説明変数だけで、**リスク側のマクロ起因リスク `r_macro` は `risk_axis` で選べるまま残る**
+（`macro_beta` の producer 経路で別に入る）。モデル名も変えない。
+
+### 既定を変えるだけでは効かなかった——3経路を同時に塞いだ
+
+着手前の調査で、`params_schema()` の `default` を False にするだけでは本番が True のまま走り
+続けることが分かった。しかも1つは**測定ツールが黙って壊れる**形だった。
+
+1. **画面**: `plugin_tuned_params` の M-1 行が `use_macro: true` を持つ（2026-09-02 の探索・
+   rank_ic 0.3003）。`/api/plugins/{name}/tuned` の射影は「dims にある軸は保存値のまま」なので
+   True が残り、`static/js/analysis.js` の `_loadTunedBadge` が**ページ読込時に自動で**フォームへ
+   適用する。実行時は全フィールドが明示値として POST される＝**既定はフォームの初期 HTML に
+   しか効かない**
+2. **月次探索**: `run_monthly_m1.py` が保存値を champion として投入し（`_project_champion` は
+   dims にある軸の保存値をそのまま使う）、軸が両方の値を毎回評価する。True が勝てば再永続化
+   されて 1 へ還流する
+3. **測定ツール**: `scripts/momentum_gate.py` の `macro_names_for` が `params_schema()` の既定を
+   読んでいた。既定を False にすると `--macro` ゲートの **`macro` 側まで空**になり、両側が同一
+   条件になって「差なし」だけが残る。**数値はもっともらしく出るので失敗として現れない**
+
+1 と 2 は `use_momentum` の先例（#604）がそのまま塞ぐ——探索軸から外し `base_params` で False を
+明示固定すると、保存値が `stale_params` に落ちて画面のプリフィルが False になり、champion も
+base の False を使う。3 は `macro_names_for` から `use_macro` の判定を外し、**ON / OFF を持つのは
+呼び出し側の引数だけ**にした（系列の顔ぶれ `macro_features` は本番の既定が唯一の源のまま）。
+
+**この軸の ON/OFF を決めるのは、もはや探索ではなくゲートである。** `max_features` には既定追従を
+縛るテストがあったが `use_macro` には無かったので、同型のものを足した。
+
+グリッドは 12 → **6通り**（`max_features` だけ）。
+
+### `min_coverage` の結論は変わらない（根拠だけ入れ替わる）
+
+ADR-0049 が `min_coverage` を探索軸から外した根拠は「M-1 は strict なので到達行の充足率が
+常に 1.0」だった。`use_macro=False` では strict の破棄が発火しないが、**マクロ列も交差項も
+作らないので NaN 源がそもそも無い**——財務値が None の行はフィルタの手前で落ちる。よって
+到達行の充足率は 1.0 のままで、軸を戻す必要はない。`macro_nan_ok=False` の明示と AST テストは
+残す（画面から手動で ON にする経路では strict が効いている）。
+
+### 残した課題
+
+`plugin_tuned_params` の M-1 行は `max_features=5` も持つ。これは `SearchDim` に残る軸なので
+射影を通り抜け、**画面のプリフィルに出る**。2026-09-02 の探索（n_periods=13・分割補正前の
+パネル）で選ばれた値で、9/20 の実測では rank-IC +0.0052・fold 間 std 0（予測値が月内で全銘柄
+同じ）という最悪の条件だった。ADR-0047「永続化スコアは測ったパネルとセット」の問題として
+別に扱う。
