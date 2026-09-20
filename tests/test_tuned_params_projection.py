@@ -26,7 +26,7 @@ os.environ.setdefault("APP_SECRET_KEY", "test-secret-key")
 
 import api  # noqa: E402,F401  （routers を直接 import すると循環するので先に読む）
 from plugins.tuning import SearchDim  # noqa: E402
-from routers.analysis import project_tuned_params  # noqa: E402
+from routers.analysis import panel_changed, project_tuned_params  # noqa: E402
 
 
 class _Space:
@@ -158,6 +158,42 @@ class TestRealM1Space:
         assert "min_coverage" in changed
 
 
+class TestPanelFreshness:
+    """測ったパネルの照合（#711・ADR-0047）。
+
+    射影は**探索空間の形しか見ない**ので、いま探索中の軸に残った古い値は素通りする。
+    実際 M-1 の `max_features=5`（2026-09-02・分割補正前のパネル）は #615 で `use_macro` が
+    base へ落ちた後も画面へプリフィルされ続けた——9/20 の実測で rank-IC +0.0052・
+    fold 間 std 0（予測値が月内で全銘柄同じ）という最悪の条件だったのに、である。
+
+    **判定は「同じ」と積極的に言えたときだけ False。** 指紋を持たない古い行と、指紋を
+    読めなかった回を「一致した」と同じ扱いにすると、判定できない状況が自動適用として
+    現れる＝失敗として見えない。
+    """
+
+    def test_same_fingerprint_is_not_changed(self):
+        assert panel_changed("abc123", "abc123") is False
+
+    def test_different_fingerprint_is_changed(self):
+        assert panel_changed("e3e3b334da49e8f4", "abc123") is True
+
+    def test_missing_stored_fingerprint_is_undecidable(self):
+        """指紋を持たない世代の行（列が無かった頃・テストの `None` 保存）。"""
+        assert panel_changed(None, "abc123") is None
+
+    def test_missing_current_fingerprint_is_undecidable(self):
+        """現在の指紋が読めなかった回（DB エラー等）。"""
+        assert panel_changed("abc123", None) is None
+
+    def test_both_missing_is_undecidable(self):
+        assert panel_changed(None, None) is None
+
+    def test_empty_string_is_undecidable(self):
+        """空文字は「指紋がある」に数えない（`!=` で比較すると誤って True になる）。"""
+        assert panel_changed("", "abc123") is None
+        assert panel_changed("abc123", "") is None
+
+
 class TestFrontendWiring:
     """画面側の配線（`static/js/analysis.js`）。
 
@@ -201,6 +237,36 @@ class TestFrontendWiring:
     def test_stale_params_is_surfaced(self):
         """射影で値を変えたことを画面が出すこと（黙って変えない）。"""
         assert "stale_params" in self._js()
+
+    def test_auto_apply_requires_a_positive_panel_match(self):
+        """自動適用は `panel_changed === false` のときだけ（#711）。
+
+        **肯定でしか適用しない**のが要点。`!== true` や `!tuned.panel_changed` で書くと、
+        判定不能（`null`）が自動適用として通る——指紋が読めなかっただけの回に、測った
+        パネルの分からない値が「自動調整済み」の顔で推奨される。
+        """
+        js = self._js()
+        assert "tuned.panel_changed === false" in js
+        assert "tuned.panel_changed !== true" not in js
+
+    def test_auto_apply_is_not_unconditional(self):
+        """ページ読込時の無条件プリフィルが残っていないこと。
+
+        `_loadTunedBadge` の末尾にあった裸の `applyTunedParams(pluginName);` がこの
+        Issue の実害そのものだった。ボタン（`data-click`）からの呼び出しは残るので、
+        **行頭の裸呼び出しだけ**を見る。
+        """
+        js = self._js()
+        assert "\n  applyTunedParams(pluginName);" not in js
+        assert "if (autoApply) applyTunedParams(pluginName);" in js
+
+    def test_lead_label_does_not_claim_auto_applied_when_it_did_not(self):
+        """自動適用しなかったときに「自動調整済み」と名乗らないこと。
+
+        #604 のボタン改名（「初期値にリセット」）と同型の嘘になる——画面の値が調整済み
+        でないのに調整済みと書けば、読んだ人は実行前の値を確かめない。
+        """
+        assert "'🔧 前回の探索結果'" in self._js()
 
 
 class TestRealM2Space:

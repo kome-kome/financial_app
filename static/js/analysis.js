@@ -1178,14 +1178,26 @@ async function _loadTunedBadge(pluginName) {
   const staleNote = stale.length
     ? `<span title="保存時から探索対象が変わったため、これらは既定値で表示しています">⚠ 探索対象外: ${esc(stale.join(', '))}</span>`
     : '';
+  // 測ったパネルが現在と同じだと**積極的に言えた**ときだけ自動適用する（#711・ADR-0047）。
+  // 射影（stale_params）は探索空間の形しか見ないので、いま探索中の軸に残った古い値は
+  // 素通りする——M-1 の max_features=5 が実際にそうだった。パネルは毎晩伸びるので
+  // この条件は探索当日しか成立しない＝自動適用はほぼ止まるが、消えるのは「黙って推す」
+  // ことだけで、下の「調整済みの値に戻す」ボタンから手動で適用できる。
+  const autoApply = tuned.panel_changed === false;
+  const panelNote = autoApply ? '' : (tuned.panel_changed === true
+    ? '<span title="保存された値は別のデータ断面で測ったものです。「調整済みの値に戻す」で手動適用できます">⚠ 測ったデータが現在と違うため自動適用していません</span>'
+    : '<span title="現在のデータ断面を確認できませんでした。「調整済みの値に戻す」で手動適用できます">⚠ 測ったデータを確認できないため自動適用していません</span>');
+  const lead = autoApply ? '🔧 自動調整済み' : '🔧 前回の探索結果';
   host.innerHTML = `<div style="display:inline-flex;align-items:center;gap:8px;padding:4px 10px;background:var(--bg-sunken);border-radius:999px;font-size:12px;color:var(--text-secondary);flex-wrap:wrap">
-    <span>🔧 自動調整済み: ${esc(tuned.objective_name)}=${esc(val)}（${esc(dt)}）</span>
+    <span>${lead}: ${esc(tuned.objective_name)}=${esc(val)}（${esc(dt)}）</span>
+    ${panelNote}
     ${staleNote}
     <button type="button" class="btn btn-secondary btn-sm" data-click="applyTunedParams" data-arg="${esc(pluginName)}">調整済みの値に戻す</button>
     <button type="button" class="btn btn-secondary btn-sm" data-click="applyDefaultParams" data-arg="${esc(pluginName)}">既定値に戻す</button>
   </div>`;
-  // 調整済みパラメータが存在する場合はページ読込時点でフォームへ自動反映する（Issue #294）
-  applyTunedParams(pluginName);
+  // 調整済みパラメータをページ読込時点でフォームへ自動反映する（Issue #294）。ただし
+  // 上記のとおりパネルが一致したときだけ（#711）。
+  if (autoApply) applyTunedParams(pluginName);
 }
 
 // フォームへ値を書き込む共通処理（再計算はしない。「実行」ボタンはユーザーが別途押す）。

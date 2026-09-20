@@ -3,6 +3,7 @@
 /api/plugins/*, /api/gap-analysis, /api/recommend, /api/backtest を担当。
 """
 import logging
+import time
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -241,6 +242,68 @@ def project_tuned_params(plugin, params: dict) -> tuple[dict, list[str]]:
     return out, sorted(changed)
 
 
+# ── 測ったパネルの照合（#711・ADR-0047）──────────────────────────────────────
+# 保存値は「そのとき存在したパネルで測った結果」で、パネルが動けば根拠は消える。射影
+# （`project_tuned_params`）が見るのは**探索空間の形だけ**なので、いま探索中の軸に残った
+# 古い値は素通りする——2026-09-02 の探索が選んだ `max_features=5` は #615 で `use_macro`
+# が base へ落ちた後も画面のプリフィルに出続け、9/20 の実測では rank-IC +0.0052・
+# fold 間 std 0（予測値が月内で全銘柄同じ）という最悪の条件だった。**パネルの世代は
+# 空間とは別の目で見る。**
+#
+# 指紋の規則は `hyperparameter_search._data_fingerprint()` が唯一の源で、ここへ書き写さない
+# （`weekly_price_cache.fingerprint()` の「規則が2つ同居すると次に触る人が古い方をコピー
+# する」と同じ理由）。
+#
+# **パネルは毎晩伸びるので指紋は探索当日しか一致しない＝自動プリフィルは事実上ほぼ常に
+# 止まる。** これは意図した交換で、消えるのは「黙って推す」ことだけ——バッジと
+# 「調整済みの値に戻す」ボタンは残るので手動適用の導線は生きている。ADR-0047 は同じ判定を
+# **品質ゲートでは棄却した**が、あちらは比較そのものが消えて劣化防止が丸ごと無くなるため
+# で、理由が逆になっている。
+PANEL_FP_TTL_SEC = 60.0
+
+# 画面は1回の読込で3モデルぶん叩く。指紋は `stock_price_weekly`（実測 1,284,465行・195MB）へ
+# `count(*)` を打つので、TTL で3回を1回へまとめる。このエンドポイントは「読取専用・軽量
+# （重い計算は起こさない）」を約束しているので、約束の側を守る。
+_panel_fp_cache: dict = {}
+
+
+def current_panel_fingerprint(db) -> Optional[str]:
+    """いま動いているパネルの指紋（読めなければ None）。
+
+    **例外を外へ出さない。** 指紋が取れないのは表示を殺す理由にならず、呼び出し側が
+    「同じだと言えない」として扱えば安全側へ倒れる（`project_tuned_params` が探索空間の
+    取得に失敗しても生値を返すのと同じ方針）。
+    """
+    now = time.monotonic()
+    hit = _panel_fp_cache.get("v")
+    if hit is not None and hit[0] > now:
+        return hit[1]
+    try:
+        from hyperparameter_search import _data_fingerprint
+        fp = _data_fingerprint(db)
+    except Exception:                                  # noqa: BLE001 — 表示は殺さない
+        log.warning("パネル指紋の取得に失敗（自動適用しない側へ倒す）", exc_info=True)
+        fp = None
+    _panel_fp_cache["v"] = (now + PANEL_FP_TTL_SEC, fp)
+    return fp
+
+
+def panel_changed(tuned_fp: Optional[str], current_fp: Optional[str]) -> Optional[bool]:
+    """保存時のパネルと現在のパネルが違うか。True=違う / False=同じ / None=判定不能。
+
+    **`stale_params` へ混ぜない。** 「探索空間から軸が消えた」と「パネルが動いた」は別の
+    事実で、同じ顔にすると読む人が原因を選べない（`batch_freshness.status_of` が missing と
+    stale を分けているのと同じ）。
+
+    どちらかが欠けていれば None ＝**「同じ」と積極的に言えたときだけ False** を返す。
+    指紋を持たない古い行と、指紋を読めなかった回を、「一致した」と同じ扱いにしない
+    （`check_batch_freshness.recovered()` が ok を積極的に言えた対象だけ返すのと同じ向き）。
+    """
+    if not tuned_fp or not current_fp:
+        return None
+    return tuned_fp != current_fp
+
+
 @router.get("/api/plugins/{plugin_name}/tuned")
 async def get_plugin_tuned(plugin_name: str, db: Session = Depends(api.get_db)):
     """自動調整済みハイパーパラメータ（Issue #264・hyperparameter_search.py --persist が
@@ -249,6 +312,10 @@ async def get_plugin_tuned(plugin_name: str, db: Session = Depends(api.get_db)):
     `params` は**現在の探索空間へ射影した値**を返す（#604・`project_tuned_params`）。
     生の保存値は `params_as_tuned`、射影で扱いが変わったキーは `stale_params` に載せる
     ——画面はこの2つで「保存された値」と「いま推奨できる値」を区別して見せられる。
+
+    加えて**測ったパネルが現在と同じか**を `panel_changed` で返す（#711・ADR-0047）。
+    射影は空間の形しか見ないので、いま探索中の軸に残った古い値はこちらでしか捉えられない。
+    画面は `panel_changed === false`（同じだと言えた）ときだけ自動プリフィルする。
     """
     from database import get_tuned_params
 
@@ -261,7 +328,9 @@ async def get_plugin_tuned(plugin_name: str, db: Session = Depends(api.get_db)):
         projected, changed = project_tuned_params(plugin, raw)
         tuned = {**tuned, "params": projected,
                  "params_as_tuned": raw, "stale_params": changed}
-    return tuned
+    current_fp = current_panel_fingerprint(db)
+    return {**tuned, "panel_fingerprint": current_fp,
+            "panel_changed": panel_changed(tuned.get("data_fingerprint"), current_fp)}
 
 
 @router.get("/api/gap-analysis")

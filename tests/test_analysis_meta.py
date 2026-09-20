@@ -7,6 +7,7 @@ PR1（目的別IA再設計の土台）:
 """
 import os
 import sys
+import types
 
 import pytest
 
@@ -237,8 +238,13 @@ class TestTunedParamsEndpoint:
 
     @pytest.fixture(autouse=True)
     def _override_db(self, db):
+        from routers.analysis import _panel_fp_cache
+        # パネル指紋は TTL キャッシュに載る（#711）。テストごとに DB が違うので、落として
+        # おかないと前のテストの指紋が次のテストへ漏れる。
+        _panel_fp_cache.clear()
         api.app.dependency_overrides[api.get_db] = lambda: db
         yield
+        _panel_fp_cache.clear()
         api.app.dependency_overrides.clear()
 
     def test_404_when_not_tuned(self):
@@ -299,6 +305,9 @@ class TestTunedParamsEndpoint:
             "use_momentum", "momentum_window", "use_macro", "min_coverage"}
         assert d["params_as_tuned"]["use_momentum"] is True  # 生値は監査用に残す
         assert d["params_as_tuned"]["use_macro"] is True
+        # `max_features=5` は探索軸なので射影を素通りする（#711）。射影だけでは止まらない
+        # ことを明示し、止めるのはパネル判定の側だと分かるようにしておく。
+        assert d["panel_changed"] is not False               # 自動適用させない
 
     def test_searched_axis_survives_projection(self, db):
         """いま探索している軸は射影で触らない（射影＝常に既定へ倒す、ではない）。"""
@@ -307,6 +316,109 @@ class TestTunedParamsEndpoint:
         d = client.get("/api/plugins/macro_gbdt/tuned").json()
         assert d["params"]["max_depth"] == 4
         assert d["stale_params"] == []
+
+
+class TestTunedParamsPanelFreshness:
+    """保存値を測ったパネルが現在と同じか（#711・ADR-0047）。
+
+    保存値は「そのとき存在したパネルで測った結果」であり、パネルが動けば根拠は消える。
+    射影（`project_tuned_params`）が見るのは**探索空間の形だけ**なので、いま探索中の軸に
+    残った古い値は素通りする——M-1 の `max_features=5`（2026-09-02・分割補正前のパネル）が
+    実際にそうで、9/20 の実測では rank-IC +0.0052・fold 間 std 0（予測値が月内で全銘柄
+    同じ）という最悪の条件だった。画面はこの応答の `panel_changed` だけを見て自動適用の
+    可否を決めるので、3分岐（同じ／違う／判定不能）をここで縛る。
+    """
+
+    @pytest.fixture(autouse=True)
+    def _override_db(self, db):
+        from routers.analysis import _panel_fp_cache
+        _panel_fp_cache.clear()
+        api.app.dependency_overrides[api.get_db] = lambda: db
+        yield
+        _panel_fp_cache.clear()
+        api.app.dependency_overrides.clear()
+
+    def test_matching_fingerprint_allows_auto_apply(self, db):
+        """探索当日と同じパネルなら `panel_changed=False`＝画面は自動適用してよい。"""
+        from database import upsert_tuned_params
+        from hyperparameter_search import _data_fingerprint
+        upsert_tuned_params(db, "macro_gbdt", {"max_depth": 4}, "rank_ic", 0.083, [], 1,
+                            _data_fingerprint(db))
+        d = client.get("/api/plugins/macro_gbdt/tuned").json()
+        assert d["panel_changed"] is False
+        assert d["panel_fingerprint"] == d["data_fingerprint"]
+
+    def test_different_fingerprint_blocks_auto_apply(self, db):
+        """別のパネルで測った行は `panel_changed=True`。
+
+        検体の指紋は**本番 DB に実在する M-1 の行**のもの（2026-09-02 の探索）。
+        """
+        from database import upsert_tuned_params
+        upsert_tuned_params(db, "macro_gbdt", {"max_depth": 4}, "rank_ic", 0.083, [], 1,
+                            "e3e3b334da49e8f4")
+        d = client.get("/api/plugins/macro_gbdt/tuned").json()
+        assert d["panel_changed"] is True
+        assert d["data_fingerprint"] == "e3e3b334da49e8f4"
+        assert d["panel_fingerprint"] != "e3e3b334da49e8f4"
+
+    def test_missing_fingerprint_is_undecidable(self, db):
+        """指紋を持たない世代の行は `None`＝「同じ」とは言えないので自動適用しない。"""
+        from database import upsert_tuned_params
+        upsert_tuned_params(db, "macro_gbdt", {"max_depth": 4}, "rank_ic", 0.083, [], 1, None)
+        d = client.get("/api/plugins/macro_gbdt/tuned").json()
+        assert d["panel_changed"] is None
+
+    def test_fingerprint_failure_does_not_kill_the_response(self, db, monkeypatch):
+        """指紋の取得が失敗しても 200 で返す（表示は殺さない・自動適用はしない）。
+
+        `project_tuned_params` が探索空間の取得に失敗しても生値を返すのと同じ方針。
+        ここで 500 にすると、指紋を読めないだけでバッジも手動適用の導線も消える。
+        """
+        from database import upsert_tuned_params
+        import routers.analysis as ra
+
+        upsert_tuned_params(db, "macro_gbdt", {"max_depth": 4}, "rank_ic", 0.083, [], 1, "fp")
+
+        def _boom(_db):
+            raise RuntimeError("週次株価を読めない")
+
+        # `current_panel_fingerprint` は関数内で import するので、モジュールを差し替えれば届く。
+        monkeypatch.setitem(sys.modules, "hyperparameter_search",
+                            types.SimpleNamespace(_data_fingerprint=_boom))
+        ra._panel_fp_cache.clear()
+        r = client.get("/api/plugins/macro_gbdt/tuned")
+        assert r.status_code == 200
+        d = r.json()
+        assert d["panel_fingerprint"] is None
+        assert d["panel_changed"] is None
+
+    def test_fingerprint_is_cached_across_calls(self, db, monkeypatch):
+        """1回のページ読込で3モデルぶん叩かれるので、TTL の内側では1回しか測らない。
+
+        指紋は `stock_price_weekly`（実測 1,284,465行）への `count(*)` を含む。この
+        エンドポイントは「読取専用・軽量」を約束しているので、約束の側を守る。
+        """
+        import routers.analysis as ra
+        from database import upsert_tuned_params
+
+        for name in ("macro_gbdt", "macro_dlm", "macro_risk_return"):
+            upsert_tuned_params(db, name, {}, "rank_ic", 0.1, [], 1, "fp")
+
+        calls = []
+        real = sys.modules.get("hyperparameter_search")
+
+        def _counting(_db):
+            calls.append(1)
+            return "fp-now"
+
+        monkeypatch.setitem(sys.modules, "hyperparameter_search",
+                            types.SimpleNamespace(_data_fingerprint=_counting))
+        ra._panel_fp_cache.clear()
+        for name in ("macro_gbdt", "macro_dlm", "macro_risk_return"):
+            assert client.get(f"/api/plugins/{name}/tuned").json()["panel_fingerprint"] == "fp-now"
+        assert len(calls) == 1
+        if real is not None:
+            sys.modules["hyperparameter_search"] = real
 
 
 class TestTunedBadgeHtml:
