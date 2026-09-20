@@ -83,18 +83,22 @@ stride 刻みで**並び順**に選ぶため、母集団が条件ごとに1社�
 
 ## マクロ軸モード（`--macro`・#604）
 
-窓モードと同じ問題が `use_macro` にもある。M-1 は `build_snapshots` を
-`macro_nan_ok=False`（strict）で呼ぶので、**マクロ特徴量を持つ条件のほうが母集団が縮む**
-——`macro_risk_return.execute` の `macro_names = list(macro_features) if use_macro else []`
-により、OFF ではマクロ特徴量が0個になり「1つでも欠損したら断面を破棄」の条件が成立しない。
-つまり ON は「当てにくい銘柄が落ちた集合」で測られており、`momentum_window` と同型の交絡がある。
+窓モードと同じ懸念が `use_macro` にもあった。M-1 は `build_snapshots` を
+`macro_nan_ok=False`（strict）で呼ぶので、構造上は**マクロ特徴量を持つ条件のほうが母集団が
+縮みうる**——`macro_risk_return.execute` の `macro_names = list(macro_features) if use_macro
+else []` により、OFF ではマクロ特徴量が0個になり「1つでも欠損したら断面を破棄」の条件が
+成立しない。**ただし実測では2回とも1行も動かなかった**（実データのマクロ系列は全期間
+揃っていて破棄が一度も発火しない・ADR-0050）。構造から母集団効果を推論せず測る、の実例。
 
     python -m scripts.momentum_gate --macro                       # M-1 のマクロ ON/OFF
     python -m scripts.momentum_gate --macro --models risk_return  # 同上（明示）
 
 **測る対象は M-1 だけ**（`MACRO_MODELS`）。M-2/M-6 は `macro_nan_ok=True` で欠損を nan として
 保持するため母集団がほとんど動かず、そもそも `tuning_search_space()` で `use_macro` を
-探索していない（既定固定）。strict × 探索軸の組み合わせを持つのは M-1 だけである。
+探索していない（既定固定）。M-1 の `use_macro` も **#615 で探索軸から外れ、`base_params` で
+False に固定された**（効果を測り終えたため）。**つまりこの軸の ON/OFF を決めるのは、もはや
+探索ではなくこのゲートである。** `macro_names_for` が本番の `use_macro` の既定を読まないのは
+そのため——読むと既定 OFF の日に ON 側まで空になり、両側が同じものになる。
 
 **基準は「マクロ無し」側**（`MACRO_BASE_COND`）。窓モードで基準をモメンタム無しに置いたのと
 同じ理由で、母集団が広い側を分母にする。縮む側を分母にすると母集団効果が「改善」として
@@ -651,10 +655,20 @@ def _fmt_sig(sig: dict | None, alpha: float = ALPHA) -> str:
 
 
 def macro_names_for(kind: str) -> list:
-    """パネル種別が使うマクロ系列名（各プラグインの既定 config が唯一の源）。"""
+    """パネル種別が `use_macro=True` のときに使うマクロ系列名。
+
+    **本番の `use_macro` の既定は見ない**（#615）。見ると、既定が OFF になった瞬間に
+    `--macro` ゲートの `macro` 側まで空になり、**両側が同一条件になって「差なし」だけが
+    残る**（ADR-0050 が繰り返し警告している「黙って同じものを比べる形」）。しかも数値は
+    もっともらしく出るので、失敗として現れない。
+
+    ON / OFF の切り分けを持つのは呼び出し側の `use_macro` 引数**だけ**である。この関数が
+    本番から取るのは**系列の顔ぶれ**（`macro_features`）で、そこは既定が唯一の源のまま
+    ——書き写すと本番が系列を増減したときに黙って別物を測る。
+    """
     plugin_name = "macro_risk_return" if kind == "m1" else "macro_gbdt"
     params = coerce_params(get_plugin(plugin_name).params_schema(), {})
-    return list(params["macro_features"]) if params["use_macro"] else []
+    return list(params["macro_features"])
 
 
 def _build(kind: str, args, prices_by_co, fin_by_co, companies, macro_cache,
@@ -663,11 +677,14 @@ def _build(kind: str, args, prices_by_co, fin_by_co, companies, macro_cache,
            demean_target: bool = False) -> tuple:
     """種別の本番 config のまま、条件の軸だけ差し替えて構築する。
 
-    `use_macro=False` は本番の M-1 が `use_macro=False` で走るときと同じ状態にする——
-    `macro_risk_return.execute` の `macro_names = list(macro_features) if use_macro else []`
-    と同じ形で、マクロ系列名を空にする（#604）。**strict（`macro_nan_ok=False`）では、
-    これが母集団を変える**: マクロ特徴量が0個なら「1つでも欠損したら断面を破棄」の条件が
-    成立せず、欠損由来の脱落が消えて母集団が広がる。だからこの軸は共通域で測る必要がある。
+    `use_macro=False` はマクロ系列名を空にする（#604）——`macro_risk_return.execute` の
+    `macro_names = list(macro_features) if use_macro else []` と同じ形。#615 で**本番の
+    既定も OFF になった**ので、条件 `nomacro` のほうが本番構成と一致する。
+
+    構造上は strict（`macro_nan_ok=False`）でこの軸が母集団を動かしうる（マクロ特徴量が
+    0個なら「1つでも欠損したら断面を破棄」の条件が成立しない）。**だが実測では2回とも
+    1行も動かなかった**——実データのマクロ系列は全期間揃っていて破棄が一度も発火しない
+    （ADR-0050）。構造から推論せず測るための軸として、共通域で扱い続ける。
 
     `build_interactions=False` / `max_features` は #615 の切り分け用の軸。**どちらも M-1
     にしか効かない**——M-2/M-6 は交互作用を持たないのが本番構成で、BIC 選択も無い。

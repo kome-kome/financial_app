@@ -417,6 +417,47 @@ class TestBuildUsesTheConditionAxes:
         want = coerce_params(get_plugin("macro_risk_return").params_schema(), {})["max_features"]
         assert seen["mf"] == want
 
+    def test_macro_axis_does_not_follow_the_production_default(self, monkeypatch):
+        """`use_macro` の ON/OFF を持つのは条件側だけで、本番の既定は見ない（#615）。
+
+        `macro_names_for` が `params_schema()` の `use_macro` を読んでいた間は、本番の既定が
+        OFF になった瞬間に `--macro` ゲートの **`macro` 側まで空**になり、両側が同一条件に
+        なって「差なし」だけが残る形だった（ADR-0050 の「黙って同じものを比べる」）。
+        数値はもっともらしく出るので**失敗として現れない**。構造ごと縛る。
+
+        `max_features` には既定追従を縛るテストが上にあるが、`use_macro` には無かった。
+        """
+        from plugins import get_plugin
+        from plugins.utils import coerce_params
+
+        seen = {}
+
+        def fake_build_snapshots(prices, fin, cos, cache, fin_features, macro_names,
+                                 *a, **k):
+            seen.setdefault("calls", []).append(list(macro_names))
+            return ({}, {}, None, [], {})
+
+        monkeypatch.setattr(momentum_gate, "build_snapshots", fake_build_snapshots)
+        monkeypatch.setattr(momentum_gate, "_thin", lambda s, m, i, stride: (s, m, i))
+        monkeypatch.setattr(momentum_gate, "_select_bic", lambda s, f, max_features: (s, []))
+
+        for on in (True, False):
+            momentum_gate._build("m1", _Args(), {}, {}, [], {},
+                                 use_momentum=False, mom_window=12, use_macro=on,
+                                 build_interactions=True, max_features=None)
+
+        on_names, off_names = seen["calls"]
+        assert on_names, (
+            "use_macro=True の条件でマクロ系列が空になった。`macro_names_for` が本番の"
+            "既定に追従していないか確認すること（#615）"
+        )
+        assert off_names == [], "use_macro=False の条件にマクロ系列が漏れている"
+        assert on_names != off_names, "両側が同じ条件になっている（測っても差は出ない）"
+
+        # この縛りが要る理由そのもの: 本番の既定はいま OFF である。
+        prod = coerce_params(get_plugin("macro_risk_return").params_schema(), {})
+        assert prod["use_macro"] is False
+
     @pytest.mark.parametrize("demean, want_mean_zero", [(True, True), (False, False)])
     def test_demean_reaches_the_bic_selection(self, monkeypatch, demean, want_mean_zero):
         """**変換は BIC 選択の前に掛かる**（#615）。選択に届かないと「選ばれる列が変わるか」を

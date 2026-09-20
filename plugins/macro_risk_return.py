@@ -1,12 +1,17 @@
 """
 M-1 マクロ・リスク-リターン推奨プラグイン（Phase B）
 
-財務比率 × マクロ要因の交差項を LassoLarsIC(BIC) で選択し、
-リスク-リターン平面に各銘柄をプロットして推奨集合を選ぶ。
+財務比率を LassoLarsIC(BIC) で選択し、リスク-リターン平面に各銘柄をプロットして
+推奨集合を選ぶ。マクロ要因とその交差項は `use_macro` で足せる（**既定 OFF**）。
+
+μ 側のマクロを既定から外したのは #615（ADR-0050 の 2026-09-20 追記）の実測による。
+**モデルからマクロが消えるわけではない**——マクロ起因リスク R_macro（`risk_axis`）は
+`macro_beta` の producer 経路で別に入り、この設定と独立に選べる。
 
 次元整合性（CLAUDE.md）:
   目的変数 = 52週先対数リターン（無次元）
-  説明変数 = 財務比率・Zスコア・マクロ変化率/Zスコア・それらの交差項（全て無次元）
+  説明変数 = 財務比率・Zスコア（既定）＋ use_macro=ON ならマクロ変化率/Zスコアと
+             それらの交差項（全て無次元）
 
 共有ロジックは macro_snapshots.py に集約（ADR-0003 §3）。
 本モジュールは: BIC 特徴量選択・最終 OLS フィット・R3・スコアリング・プラグイン本体を保有。
@@ -82,9 +87,11 @@ class MacroRiskReturnPlugin(AnalysisPlugin):
     name = "macro_risk_return"
     label = "マクロ×リスク-リターン推奨"
     description = (
-        "財務比率×マクロ要因の交差項を LassoLarsIC(BIC) で選択し、"
+        "財務比率を LassoLarsIC(BIC) で選択し、"
         "各銘柄を期待リターン（縦軸）×リスク（横軸）の散布図に配置して推奨集合を選びます。"
-        "【注意】株価週次履歴とマクロデータ5年分の蓄積が必要です。"
+        "マクロ要因とその交差項は「マクロ特徴量・交差項を使用」で足せます（既定 OFF）。"
+        "【注意】株価週次履歴が必要です。マクロ特徴量を ON にするならマクロデータ5年分、"
+        "横軸に R_macro を選ぶなら macro_beta の蓄積も必要です。"
     )
     depends_on: list[str] = []
     heavy: bool = True
@@ -135,7 +142,17 @@ class MacroRiskReturnPlugin(AnalysisPlugin):
             "use_macro": {
                 "type": "checkbox",
                 "label": "マクロ特徴量・交差項を使用",
-                "default": True,
+                "description": (
+                    "ON にすると μ（期待リターン）の説明変数へマクロ系列とその交差項を足します。"
+                    "既定は OFF です——共通 (ym,ec) 域の実測で、ON は rank-IC を有意に下げました"
+                    "（2026-09-20: nomacro +0.1994 対 macro +0.1287・差 −0.0706・p=0.015。"
+                    "2026-09-06 の測定も同じ符号・同じ有意性・#615/ADR-0050）。交互作用を切る・"
+                    "列の枠を増やす・目的変数から月平均を引く、のどれでも改善しませんでした。"
+                    "マクロ系列は月末の週の値で同じ月の全銘柄がほぼ同一なので、月内の順位を"
+                    "直接は動かせないためです。"
+                    "なおマクロ起因リスク R_macro（横軸リスク）はこの設定と独立に選べます。"
+                ),
+                "default": False,
             },
             "macro_features": {
                 "type": "multiselect",
@@ -198,17 +215,22 @@ class MacroRiskReturnPlugin(AnalysisPlugin):
 
     def tuning_search_space(self) -> tuple:
         """ハイパーパラメータ自動探索の探索空間（Issue #265・#596 で min_coverage を除外・
-        #604 でモメンタム2軸を除外）。
+        #604 でモメンタム2軸を除外・#615 で use_macro を除外）。
 
-        構造トグル（use_macro）と BIC 最大採用数（max_features）の少数軸グリッド。
+        BIC 最大採用数（max_features）の単一軸グリッド。
         `fin_features`/`macro_features` の部分集合探索は 2^N で不可能なため対象外
         （既定の候補プールを固定・#264 設計方針）。表示専用の lambda_risk/risk_axis/r3_gate/top_n
         も対象外。空間が小さいため strategy="grid"（全探索）を推奨。
 
-        **`min_coverage` は軸にしない（#596）。** M-1 は `build_snapshots` を
-        `macro_nan_ok=False` で呼ぶ＝マクロ特徴量が1つでも欠損した断面を**充足率チェックの
-        手前で破棄する**ため、フィルタへ到達する行の充足率は常に厳密に 1.0 になる。
-        実測（2026-09-02・本番データ）:
+        **`min_coverage` は軸にしない（#596）。** フィルタへ到達する行の充足率は常に厳密に
+        1.0 になる。**根拠は #615 で既定が変わった前後で入れ替わったが、結論は変わらない**:
+
+            use_macro=ON（#615 以前の既定） … `build_snapshots` を `macro_nan_ok=False` で
+              呼ぶ＝マクロ特徴量が1つでも欠損した断面を**充足率チェックの手前で破棄する**
+            use_macro=OFF（現在の既定）      … マクロ列も交差項も作らないので**そもそも
+              NaN 源が無い**。財務値が None の行はフィルタの手前で落ち、モメンタムも同様
+
+        実測（2026-09-02・本番データ・当時の既定 use_macro=ON）:
 
             min_coverage | 0.0 / 0.3 / 0.5 / 0.7 / 0.9 / 0.95 / 1.0
             サンプル総数 | 181,862（**全て同一**。1.0＝全特徴量が非欠損を要求しても1行も落ちない）
@@ -243,14 +265,28 @@ class MacroRiskReturnPlugin(AnalysisPlugin):
         M-2 は木モデルで特徴量選択が無く、この論拠（BIC が選ばない）が使えないため
         2軸を残している。M-2 側は共通域の実測（符号反転・窓24 は有意に悪化）で別途判断する。
 
-        グリッドは 72 → **12通り**（`use_macro` 2 × `max_features` 6）。
+        **`use_macro` も軸にしない（#615・ADR-0050 の 2026-09-20 追記）。** モメンタム2軸と
+        違い、この軸は**母集団を動かさない**（2回の実測で months / samples / companies / 共通域が
+        すべて一致。実データのマクロ系列は全期間揃っていて strict の破棄が一度も発火しない）。
+        外すのは**効果を測り終わったから**である——共通 (ym,ec) 域で ON は rank-IC を有意に
+        下げ（−0.0706・95%CI[−0.1334,−0.0133]・p=0.015）、交互作用を切る・列の枠を増やす・
+        目的変数から月平均を引く、のどれでも改善しなかった。
+
+        **軸に残したままだと既定 OFF が本番へ届かない。** `hyperparameter_search` は保存値を
+        champion として投入し（`tuning._project_champion` は dims にある軸の保存値をそのまま
+        使う）、軸が両方の値を毎回評価するので ON が勝てば `plugin_tuned_params` へ再び書かれる。
+        その行は `/api/plugins/{name}/tuned` 経由で画面のフォームへ**ページ読込時に自動適用**され、
+        実行時は全フィールドが明示値として POST される＝**既定はフォームの初期 HTML にしか
+        効かない**。`base_params` で False を明示固定すると保存値が `stale_params` に落ち、
+        この還流が止まる。
+
+        グリッドは 12 → **6通り**（`max_features` 6）。
         """
         from .tuning import SearchDim
 
-        # モメンタムは探索せず OFF で固定する（上記 docstring・#604）
-        base_params: dict = {"use_momentum": False}
+        # モメンタムとマクロは探索せず OFF で固定する（上記 docstring・#604・#615）
+        base_params: dict = {"use_momentum": False, "use_macro": False}
         dims = [
-            SearchDim("use_macro",        [True, False]),
             SearchDim("max_features",     [5, 10, 15, 20, 30, 40]),
         ]
         return base_params, dims
