@@ -6,7 +6,7 @@
 XLA が使うコア数は実行時の混み具合で変わる。つまり**「重い計算の裏で作業をしない」という
 運用条件が結果の再現性に直結している**。人が PC を触らない平日日中を専用の枠にした。
 
-守るのは11点:
+守るのは12点:
 
 1. **キューは先頭を取り除いてから返す**（失敗しても戻さない＝同じ計算を繰り返さない）
 2. **窓に入らない仕事は積ませない**（走ってから打ち切られると何も残らない）
@@ -19,6 +19,7 @@ XLA が使うコア数は実行時の混み具合で変わる。つまり**「�
 9. **日付で決まる仕事は暦が積む**（積むのが人だと、積み忘れが失敗として現れない・#681）
 10. **月次系のバッチと時間が重なる日は、並走に敏感な仕事を取り出さない**（#681）
 11. **祝日・年末年始も取り出さない。`-Now -Force` だけが今日の祝日の見送りを外す**（#684）
+12. **1回の実走で窓に収まるだけ取り出し、未完了の仕事をキューから失わない**（#707・ADR-0060）
 """
 import json
 import os
@@ -1245,8 +1246,10 @@ class TestCalendarInMain:
 
         rd.main([])
 
-        assert self.ran == [["collect_interim"]]
-        assert rd.read_queue(db=db) == ["oof:split-bias"]
+        # 暦が積んだ `interim`(64.6分) の後ろに `oof:split-bias`(8.6分) が入る余地があるので、
+        # 同じ窓で続けて回る（#707）。暦は「先頭へ積む」だけで、件数には関与しない。
+        assert self.ran == [["collect_interim", "oof_split_bias"]]
+        assert rd.read_queue(db=db) == []
         assert rd.read_schedule_marks(db=db) == {"disclosures": "2026-10", "interim": "2026-10"}
         assert "[schedule] interim" in self.log.read_text(encoding="utf-8")
 
@@ -1270,8 +1273,9 @@ class TestCalendarInMain:
 
         rd.main([])
 
-        assert self.ran == [["oof_split_bias"]]
-        assert rd.read_queue(db=db) == ["gate:max-features"]
+        # どちらも短い（8.6分 / 20.1分）ので同じ窓に収まる（#707）。
+        assert self.ran == [["oof_split_bias", "gate_max_features"]]
+        assert rd.read_queue(db=db) == []
         assert rd.read_schedule_marks(db=db) == {"disclosures": "2026-09", "interim": "2026-09"}
 
     def test_dry_run_writes_neither_queue_marks_nor_footprint(self, db, monkeypatch, capsys):
@@ -1280,7 +1284,9 @@ class TestCalendarInMain:
 
         rd.main(["--dry-run"])
 
-        assert self.ran == [["collect_disclosures"]], "ドライランが実走と違う1件を見せている"
+        # 暦が `disclosures` と `interim` を積み、`beta`(419分) は窓に入らず残る。
+        assert self.ran == [["collect_disclosures", "collect_interim"]], (
+            "ドライランが実走と違う並びを見せている")
         assert rd.read_queue(db=db) == ["beta"]
         assert rd.KEY_SCHEDULE not in db.store
         assert self.footprints == []
@@ -1492,3 +1498,326 @@ class TestArgumentsAreParsedBeforeTheQueue:
         assert passed, "run_daytime.ps1 から引数を読めない（書式が変わった）"
         known = {s for a in rd.build_parser()._actions for s in a.option_strings}
         assert passed <= known, f"パーサが知らない引数: {sorted(passed - known)}"
+
+
+class TestHowManyJobsFitTheWindow:
+    """1回の実走で**窓に収まるだけ**取り出す（#707・ADR-0060）。
+
+    守っているのは「重い計算の裏で別の作業を並走させない」ことであって件数ではない——
+    同じ窓の中で順番に回すのは並走ではない。1日1件だった頃、合計44分の3件
+    （`gate:macro` 7分 / `gate:ttm` 30分 / `gate:demean` 7分）が 445分の窓を3日ぶん
+    食い潰していた。しかもこの3つは同じデータ世代で並べてから判断する設計（#615・#424）
+    なので、別々の日に出ても揃うまで判断できない。
+    """
+
+    DAY = QUIET_DAY
+
+    def _pick(self, queue):
+        keys, _ = rd.select_jobs(queue, self.DAY)
+        return keys
+
+    def test_the_head_is_always_taken_even_if_it_fills_the_window(self):
+        """先頭は無条件。余裕の規則を当てると、窓いっぱいの仕事が自分で自分を弾く。"""
+        assert rd.JOBS["bench:rhat-scale"].measured_min * rd.JOB_HEADROOM > rd.JOB_BUDGET_MIN
+        assert self._pick(["bench:rhat-scale", "gate:macro"]) == ["bench:rhat-scale"]
+
+    def test_a_window_filling_head_gets_the_whole_budget(self):
+        """1件だけの日は現行と完全に同じ＝退行していない。"""
+        steps, _ = rd.steps_for_many("py", ["bench:rhat-scale"])
+        job = next(s for s in steps if s.name == "bench_rhat_scale")
+        assert job.budget_min == rd.JOB_BUDGET_MIN
+
+    def test_todays_short_queue_runs_three_in_one_window(self):
+        """2026-09-20 のキューの形。4件目（440分）で打ち切る。"""
+        queue = ["gate:macro", "gate:ttm", "gate:demean", "bench:rhat-scale"]
+        assert self._pick(queue) == ["gate:macro", "gate:ttm", "gate:demean"]
+
+    def test_budgets_are_the_window_split_evenly_not_the_measurement(self):
+        keys = ["gate:macro", "gate:ttm", "gate:demean"]
+        steps, owner = rd.steps_for_many("py", keys)
+        budgets = {owner[s.name]: s.budget_min for s in steps if s.name in owner}
+        assert set(budgets) == set(keys)
+        assert all(b == pytest.approx(rd.JOB_BUDGET_MIN / 3) for b in budgets.values()), (
+            "予算が所要の按分になっている（パネルは毎晩伸びるので実測から逆算しない）")
+
+    @pytest.mark.parametrize("queue", [
+        ["gate:macro"],
+        ["bench:rhat-scale"],
+        ["gate:macro", "gate:ttm", "gate:demean", "bench:rhat-scale"],
+        ["wf:preset-weights"] * 6,
+        ["disclosures", "interim", "beta"],
+        list(rd.JOBS),
+    ])
+    def test_sigma_budget_always_fits_the_window(self, queue):
+        """件数が何件でも Σ予算 + マージン <= 窓（`window_problem` の不変条件）。"""
+        keys, _ = rd.select_jobs(queue, self.DAY)
+        steps, _ = rd.steps_for_many(sys.executable, keys)
+        assert bc.window_problem(steps, rd.WINDOW_MIN) is None
+
+    def test_the_same_job_is_not_taken_twice_in_one_day(self):
+        """ステップ名は results 辞書のキー。重複すると結果が片方に潰れる。"""
+        assert self._pick(["gate:macro", "gate:macro", "gate:ttm"]) == ["gate:macro"]
+
+    def test_a_job_that_lost_its_definition_is_taken_alone_and_fails_loudly(self):
+        assert self._pick(["gone", "gate:macro"]) == ["gone"]
+        steps, _ = rd.steps_for_many("py", ["gone"])
+        assert [s.name for s in steps] == ["unknown:gone"]
+
+    def test_the_dependency_smoke_is_added_once_for_the_whole_run(self):
+        steps, _ = rd.steps_for_many("py", ["beta", "gate:macro"])
+        assert [s.name for s in steps].count("deps_smoke") == 1
+
+    def test_the_smoke_is_absent_when_nothing_needs_it(self):
+        steps, _ = rd.steps_for_many("py", ["gate:macro", "gate:ttm"])
+        assert "deps_smoke" not in [s.name for s in steps]
+
+    def test_an_empty_queue_picks_nothing(self):
+        assert self._pick([]) == []
+
+    def test_the_headroom_is_a_promise_not_a_derived_measurement(self):
+        """余裕は「所要が倍に伸びても切られない」という約束。実測からの逆算ではない。"""
+        assert rd.JOB_HEADROOM == 2.0
+        assert rd.budget_share(1) == rd.JOB_BUDGET_MIN
+        assert rd.budget_share(4) == rd.JOB_BUDGET_MIN / 4
+
+    def test_a_blocked_day_collects_several_insensitive_jobs(self):
+        """祝日は敏感な仕事だけを読み飛ばし、残りは同じ規則で集める（#684 の複数件版）。"""
+        holiday = date(2026, 9, 21)
+        keys, why = rd.select_jobs(
+            ["beta", "interim", "gate:macro", "disclosures"], holiday)
+        assert keys == ["interim", "disclosures"]
+        assert why and "飛ばして" in why
+
+    def test_a_blocked_day_with_only_sensitive_jobs_takes_nothing(self):
+        holiday = date(2026, 9, 21)
+        keys, why = rd.select_jobs(["beta", "gate:macro"], holiday)
+        assert keys == []
+        assert why and "取り出さない" in why
+
+    def test_select_job_still_answers_with_the_head(self):
+        """既存の読み手のための包み。先頭が一致することを縛る。"""
+        queue = ["gate:macro", "gate:ttm"]
+        assert rd.select_job(queue, self.DAY)[0] == rd.select_jobs(queue, self.DAY)[0][0]
+
+
+class TestInflightHoldsEveryUnfinishedJob:
+    """複数件を取り出す日は、**まだ走っていない仕事をキューから失わない**（#707・#639）。
+
+    件数を増やすと、3件目の途中で OS ごと消えたときに 1〜3件目すべてがキューから消える
+    経路ができる。#639 が塞いだ穴と同じ形で、失敗としては現れない。
+    """
+
+    @pytest.fixture
+    def db(self, fake_db, monkeypatch):
+        monkeypatch.setattr(rd, "_session", lambda: fake_db)
+        return fake_db
+
+    def test_a_legacy_single_job_marker_is_still_readable(self, db):
+        """複数件へ広げた回のデプロイで、前夜の中断を取り落とさない。"""
+        db.store[rd.KEY_INFLIGHT] = json.dumps({"job": "beta", "state": rd._STATE_RUNNING})
+        assert rd.inflight_jobs(rd.read_inflight(db=db)) == ["beta"]
+
+    def test_every_unfinished_job_goes_back_in_order(self, db):
+        rd.write_queue(["disclosures"], db=db)
+        rd.write_inflight(["gate:ttm", "gate:demean"], rd._STATE_RUNNING, 0, db=db)
+
+        rd.reclaim_inflight(db=db)
+
+        assert rd.read_queue(db=db) == ["gate:ttm", "gate:demean", "disclosures"]
+        assert rd.inflight_jobs(rd.read_inflight(db=db)) == ["gate:ttm", "gate:demean"]
+
+    def test_a_finished_job_is_not_reclaimed(self, db):
+        """マーカーは1件終わるごとに縮む。完了済みまで巻き戻すと計算を捨てる。"""
+        rd.write_inflight(["gate:demean"], rd._STATE_RUNNING, 0, db=db)   # 1件目は済み
+
+        rd.reclaim_inflight(db=db)
+
+        assert rd.read_queue(db=db) == ["gate:demean"]
+
+    def test_a_missing_definition_is_dropped_but_the_rest_comes_back(self, db):
+        rd.write_inflight(["gone", "gate:macro"], rd._STATE_RUNNING, 0, db=db)
+
+        lines = rd.reclaim_inflight(db=db)
+
+        assert rd.read_queue(db=db) == ["gate:macro"]
+        assert any("JOBS に無い" in ln for ln in lines)
+
+    def test_a_duplicate_in_the_queue_is_offset_only_once(self, db):
+        """同じ名前をわざと複数積む運用（bench:rhat-scale ×3）で、残りの回まで消さない。"""
+        rd.write_queue(["bench:rhat-scale", "bench:rhat-scale"], db=db)
+        rd.write_inflight(["bench:rhat-scale"], rd._STATE_RUNNING, 0, db=db)
+
+        lines = rd.reclaim_inflight(db=db)
+
+        assert rd.read_queue(db=db) == ["bench:rhat-scale"] * 2
+        assert any("相殺" in ln for ln in lines), "黙って1つ減らしている"
+
+    def test_the_requeue_cap_is_counted_from_the_head(self, db):
+        rd.write_inflight(["gate:ttm", "gate:demean"], rd._STATE_RUNNING, 0, db=db)
+        rd.reclaim_inflight(db=db)
+
+        assert rd.carried_requeue("gate:ttm", db=db) == 1
+        assert rd.carried_requeue("gate:demean", db=db) == 0
+
+    def test_every_message_survives_cp932(self, db):
+        rd.write_queue(["bench:rhat-scale"], db=db)
+        rd.write_inflight(["bench:rhat-scale", "gone"], rd._STATE_RUNNING, 0, db=db)
+        for line in rd.reclaim_inflight(db=db):
+            line.encode("cp932")
+
+
+class TestMultiJobLifecycleInMain:
+    """実走経路で、取り出した件数ぶんが take され、終わるごとにマーカーが縮む。"""
+
+    @pytest.fixture
+    def db(self, fake_db, monkeypatch, tmp_path):
+        monkeypatch.setattr(rd, "_session", lambda: fake_db)
+        monkeypatch.setattr(rd, "log_path", lambda *a, **k: tmp_path / "daytime.log")
+        monkeypatch.setattr(rd, "record_footprint", lambda results: None)
+        return fake_db
+
+    def test_the_marker_shrinks_as_steps_finish(self, db, monkeypatch):
+        seen = []
+
+        def _run_batch(spec, steps, hooks, argv):
+            for step in steps:
+                seen.append(rd.inflight_jobs(rd.read_inflight(db=db)))
+                hooks.on_step_done(step, 0)
+            seen.append(rd.inflight_jobs(rd.read_inflight(db=db)))
+            return 0
+
+        monkeypatch.setattr(rd.bc, "run_batch", _run_batch)
+        rd.write_queue(["gate:macro", "gate:ttm", "gate:demean"], db=db)
+        rd.main([])
+
+        assert seen == [
+            ["gate:macro", "gate:ttm", "gate:demean"],
+            ["gate:ttm", "gate:demean"],
+            ["gate:demean"],
+            [],
+        ]
+        assert rd.read_inflight(db=db) is None
+
+    def test_an_interruption_midway_returns_only_what_did_not_run(self, db, monkeypatch):
+        """2件目で OS ごと消えた形。1件目は完了しているので戻さない。
+
+        本物の中断は Python ごと消えるので `finally` が走らない。ここでは死んだ瞬間の
+        マーカーを控えておき、`finally` が消したあとに書き戻して回収を測る。
+        """
+        died = {}
+
+        def _run_batch(spec, steps, hooks, argv):
+            hooks.on_step_done(steps[0], 0)          # 1件目は終わった
+            died["mark"] = db.store[rd.KEY_INFLIGHT]  # 2件目の途中で OS ごと消える
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr(rd.bc, "run_batch", _run_batch)
+        rd.write_queue(["gate:macro", "gate:ttm", "gate:demean"], db=db)
+        with pytest.raises(KeyboardInterrupt):
+            rd.main([])
+        assert rd.read_queue(db=db) == [], "3件とも take されている"
+
+        db.store[rd.KEY_INFLIGHT] = died["mark"]      # 消える直前の状態を復元する
+        assert rd.reclaim_inflight(db=db)
+        assert rd.read_queue(db=db) == ["gate:ttm", "gate:demean"]
+
+    def test_steps_filter_only_takes_the_jobs_that_survive(self, db, monkeypatch):
+        """`--steps` で絞った日に、走らせていない仕事をキューから消さない。"""
+        monkeypatch.setattr(rd.bc, "run_batch", lambda *a, **k: 0)
+        rd.write_queue(["gate:macro", "gate:ttm", "gate:demean"], db=db)
+
+        assert rd.main(["--steps", "gate_macro", "--no-issue"]) == 0
+
+        assert rd.read_queue(db=db) == ["gate:ttm", "gate:demean"]
+
+
+class TestPeekReportsEveryJobItWillTake:
+    """`run_daytime.ps1 -Now` が読む口。**既存フィールドは壊さない**（#707）。"""
+
+    @pytest.fixture
+    def db(self, fake_db, monkeypatch):
+        monkeypatch.setattr(rd, "_session", lambda: fake_db)
+        return fake_db
+
+    def _peek(self, capsys):
+        assert rd.main(["--peek"]) == 0
+        line = next(ln for ln in capsys.readouterr().out.splitlines()
+                    if ln.lstrip().startswith("{"))
+        return json.loads(line)
+
+    def test_the_head_fields_are_unchanged(self, db, capsys):
+        rd.write_queue(["gate:macro", "gate:ttm", "gate:demean"], db=db)
+        got = self._peek(capsys)
+        assert got["key"] == "gate:macro"
+        assert got["name"] == "gate_macro"
+        assert got["known"] is True
+        assert got["measured_min"] == rd.JOBS["gate:macro"].measured_min
+        assert got["remaining"] == 3
+
+    def test_every_job_and_the_total_are_reported(self, db, capsys):
+        rd.write_queue(["gate:macro", "gate:ttm", "gate:demean"], db=db)
+        got = self._peek(capsys)
+        assert got["keys"] == ["gate:macro", "gate:ttm", "gate:demean"]
+        assert got["total_measured_min"] == pytest.approx(44.0)
+
+    def test_one_sensitive_job_makes_the_whole_run_sensitive(self, db, capsys):
+        """`-Force` の門はここで開く。混ざっていたら安全側へ倒す。"""
+        rd.write_queue(["disclosures", "gate:macro"], db=db)
+        got = self._peek(capsys)
+        assert got["keys"] == ["disclosures", "gate:macro"]
+        assert got["sensitive"] is True
+
+    def test_an_all_insensitive_run_stays_insensitive(self, db, capsys):
+        rd.write_queue(["disclosures", "wf:preset-weights"], db=db)
+        got = self._peek(capsys)
+        assert got["sensitive"] is False
+
+    def test_the_output_is_ascii(self, db, capsys):
+        rd.write_queue(["gate:macro", "gate:ttm"], db=db)
+        rd.main(["--peek"])
+        capsys.readouterr().out.encode("ascii")
+
+
+class TestRunBatchCallsTheStepHook:
+    """`batch_common.run_batch` が **1ステップ終わるごとに** `on_step_done` を呼ぶ（#707）。
+
+    この呼び出しが消えると、日中枠の in-flight マーカーが縮まなくなる。中断したときに
+    完了済みの仕事まで巻き戻すが、**それは失敗としては現れない**（キューが1件多いだけに
+    見える）ので、ここで縛る。日中枠以外の4バッチは `on_step_done` を渡さない＝既定 None の
+    経路も一緒に確かめる。
+    """
+
+    @staticmethod
+    def _step(name):
+        return bc.Step(name, (sys.executable, "-c", "pass"), why="テスト用", budget_min=1)
+
+    @pytest.fixture
+    def hooks(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("FINAPP_DB_TARGET", "local")
+        monkeypatch.setenv("FINAPP_JOB", "test")
+        self.log = tmp_path / "batch.log"
+        return dict(log_path=lambda: self.log,
+                    record_footprint=lambda results: None,
+                    notify=lambda results, log: None)
+
+    def test_the_hook_sees_every_step_with_its_exit_code(self, hooks):
+        seen = []
+        h = bc.Hooks(on_step_done=lambda step, code: seen.append((step.name, code)), **hooks)
+
+        assert bc.run_batch(rd.SPEC, [self._step("a"), self._step("b")], h, ["--no-issue"]) == 0
+        assert seen == [("a", 0), ("b", 0)]
+
+    def test_a_filtered_step_does_not_reach_the_hook(self, hooks):
+        """`--steps` で外したステップまで「終わった」と言うと、マーカーが先に空になる。"""
+        seen = []
+        h = bc.Hooks(on_step_done=lambda step, code: seen.append(step.name), **hooks)
+
+        bc.run_batch(rd.SPEC, [self._step("a"), self._step("b")], h,
+                     ["--steps", "a", "--no-issue"])
+        assert seen == ["a"]
+
+    def test_omitting_the_hook_still_runs(self, hooks):
+        """既定 None＝夜間・月次・バックアップの4バッチは何も変わらない。"""
+        h = bc.Hooks(**hooks)
+        assert bc.run_batch(rd.SPEC, [self._step("a")], h, ["--no-issue"]) == 0
+        assert "END   a" in self.log.read_text(encoding="utf-8")

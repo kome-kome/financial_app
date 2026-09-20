@@ -175,10 +175,15 @@ if ($Now) {
         exit 0
     }
 
-    $label = "$($peek.key)（実測 $($peek.measured_min)分・残り $($peek.remaining)件）"
+    # 窓に収まるだけまとめて取り出すので、件数と合計を見せる（#707）。`key` / `measured_min`
+    # は先頭1件のままなので、古い形の読み方をしても壊れない。
+    $taking = if ($peek.keys) { $peek.keys -join ", " } else { $peek.key }
+    $count = if ($peek.keys) { @($peek.keys).Count } else { 1 }
+    $sum = if ($null -ne $peek.total_measured_min) { $peek.total_measured_min } else { $peek.measured_min }
+    $label = "$taking（$count 件・実測の合計 $sum 分・残り $($peek.remaining)件）"
     if ($peek.sensitive -and -not $Force) {
         Write-Host ""
-        Write-Host "次の1件は並走で結果が変わりうる仕事です: $label" -ForegroundColor Yellow
+        Write-Host "次に取り出すのは並走で結果が変わりうる仕事です: $label" -ForegroundColor Yellow
         if (-not $peek.known) {
             Write-Host "  （JOBS に定義が無い名前なので、判断材料が無い側として扱いました）" -ForegroundColor Yellow
         }
@@ -192,9 +197,9 @@ if ($Now) {
         exit 1
     }
 
-    Write-Host "今すぐ1件を消化します: $label" -ForegroundColor Green
+    Write-Host "今すぐ $count 件を消化します: $label" -ForegroundColor Green
     if ($peek.sensitive) {
-        Write-Host "  並走に敏感な仕事です。終わるまで PC を触らないでください。" -ForegroundColor Yellow
+        Write-Host "  並走に敏感な仕事が含まれます。終わるまで PC を触らないでください。" -ForegroundColor Yellow
     }
     Start-ScheduledTask -TaskName $TaskName
 
