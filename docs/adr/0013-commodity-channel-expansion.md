@@ -57,7 +57,7 @@ Phase 0 疎通検証（2026-07-20・DB書込なし・`fetch_yahoo_history` 経�
 - **新規モデルサーフェス**: `_MACRO_MAP`/`MACRO_FEATURE_OPTIONS`（`plugins/macro_snapshots.py`）へ8エントリ、`_DLM_MACRO_MAP`（`plugins/macro_dlm.py`）へ8エントリ。M-1（`macro_risk_return.py`）・M-2（`macro_gbdt.py`）本体は import 派生で**変更不要**。ハイパラ探索空間（macro_features は探索対象外・#264）・oof_backtest・スコア保存テーブルも変更不要。
 - **新規 env var なし**: Yahoo は認証不要。
 - **容量影響は軽微**: 8系列 × 6年 × ~251営業日 ≈ 12,000行（実績 1,255件/5年/系列）。Supabase 500MB に対し軽微。
-- **疎データ耐性**: yoy 採用で5年 zscore 蓄積を待たず公開可。全 None 系列は `macro_beta_inference._drop_unusable_macro`（#352）が除外、M-2 は `macro_nan_ok=True` が吸収。`DEFAULT_MACRO_FEATURES`（M-1 既定3本）は不変のため既存ユーザーの結果は変わらない。
+- **疎データ耐性**: yoy 採用で5年 zscore 蓄積を待たず公開可。全 None 系列は `macro_beta_inference._drop_unusable_macro`（#352）が除外、M-2 は `macro_nan_ok=True` が吸収。`DEFAULT_MACRO_FEATURES`（M-1 既定3本）は不変のため既存ユーザーの結果は変わらない。 ※**この一文は採択時（2026-07-20）の想定であり、現在は当たらない**——同じ #358 の審議中にユーザー方針が変わり、M-1 の既定も米国寄り3本から全選択肢へ広がった（`plugins/macro_snapshots.py` の `DEFAULT_MACRO_FEATURES` 直上のコメント）。さらに #615（2026-09-20）で `use_macro` 自体の既定が OFF になり、既定の M-1 はマクロ列を1本も作らない。**既定値の正本はコード**で、本 ADR は当時の判断の記録として原文を残す。
 - **USD建て→円建て影響**: 商品価格はUSD建てで、円建て影響は既存 `USDJPY` 特徴量との組合せで M-2 XGBoost が捕捉する。マクロ×マクロの明示交差項は現行設計に無く、将来課題として記録。
 - **ドキュメント更新**: MODELS.md（§9.2 の変換誤記 DXY/WTI/金→YoY 修正 + 新系列追記・チャネル数更新・M-3 ファクター一覧）・ARCHITECTURE.md（マクロ系列一覧）・DEPLOYMENT.md（バックフィル years=6 運用）・GOTCHAS.md（Phase 0 検証結果・^BCOM 配信状況）。
 - **検証**: 第2PR 後にローカル /analysis で M-2 の SHAP 寄与・M-3 の β 出力に新系列が現れることを確認。`pytest` に `test_commodity_series_defined`・`_MACRO_MAP`↔`MACRO_FEATURE_OPTIONS` 整合テスト・dlm メンバーシップテストを追加。

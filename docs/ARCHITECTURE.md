@@ -1099,7 +1099,7 @@ classDiagram
         +depends_on = []
         +heavy = True
         +ui_order = 330
-        +params_schema() lambda_risk/risk_axis/fin_features(価格フリー含む)/use_macro/macro_features(USDJPY/SP500/US10Y/NIKKEI225 multiselect)/top_n 等
+        +params_schema() lambda_risk/risk_axis/fin_features(価格フリー含む)/use_macro(既定OFF・#615)/macro_features(multiselect・選択肢と既定の正本は macro_snapshots の MACRO_FEATURE_OPTIONS / DEFAULT_MACRO_FEATURES)/top_n 等
         +execute() 交差項OLS(財務×マクロ)+LassoLarsIC(BIC)選択+OLS再フィット+Walk-forward CV+James-Stein縮小。全社raw+selected_features+feature_coefs(標準化係数)を返却(効用U/Pareto/top_nはJS後処理)
     }
 

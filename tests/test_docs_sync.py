@@ -1,10 +1,11 @@
 """ドキュメントが実体から静かに乖離するのを守る（Issue #472・#575）。
 
-本ファイルは2つの照合を持つ。どちらも**乖離しても失敗が出ない**型の穴で、
+本ファイルは3つの照合を持つ。いずれも**乖離しても失敗が出ない**型の穴で、
 気づく手段が人間の定期点検（`/tidy`）しか無かったものを機械化している。
 
 1. `docs/MODELS.md` §9 ⇔ 副読本 `docs/M1_MACRO_MODEL_GUIDE.md` の章立て（#472・下記）
 2. `docs/SKILLS_AND_AGENTS.md` ⇔ ディスク上のスキル／エージェント実体（#575・後半のクラス）
+3. `docs/MODELS.md` の章 ⇔ `templates/models.html` の節（#712・末尾のクラス）
 
 ## 1. 副読本の章立て同期（#472）
 
@@ -383,3 +384,133 @@ class TestUserLevelGuard:
         assert skills_on_disk(tmp_path) == set()
         assert commands_on_disk(tmp_path) == set()
         assert agents_on_disk(tmp_path) == set()
+
+
+# ---------------------------------------------------------------------------
+# 3. MODELS.md の章 ⇔ models.html の節（Issue #712）
+# ---------------------------------------------------------------------------
+#
+# `docs/MODELS.md`（理論の正本）と `templates/models.html`（画面の解説）は、人が手で
+# 同期させる約束しか持たなかった。実装が変わってドキュメントだけ取り残されても
+# **失敗として現れない**ため、#712 では乖離4件（最長3ヶ月）が同時に見つかっている。
+#
+# ここで縛るのは**構造**だけ——「章があるのに節が無い／節があるのに章が無い」と
+# 「`#mN` リンクが実在しない節を指している」の2つ。本文の主張が古いこと（#712 の
+# 乖離1＝廃止済みの交差項が現役仕様として3ヶ月残った）は**この検査では拾えない**。
+# 本文まで機械化するには説明文をプラグインから生成するしかないが、MODELS.md は
+# 数式と参考文献を含む理論文書でその性質を持たない。拾えない範囲は `/tidy` に残す。
+#
+# アンカー `mN` の `N` は MODELS.md の章番号に由来する（ARCHITECTURE.md の画面一覧）。
+# #712 で M-6 だけが §16 に対し `id="m15"` とずれていた——§15 が後から差し込まれた
+# ときにページ側が追随しなかった跡で、まさにこの検査が拾うべき型だった。
+
+MODELS_HTML = Path(__file__).resolve().parents[1] / "templates" / "models.html"
+TEMPLATES_DIR = Path(__file__).resolve().parents[1] / "templates"
+
+CHAPTER_RE = re.compile(r"^##\s+(?P<num>[0-9]+)\.\s+(?P<title>.+)$")
+SECTION_RE = re.compile(r'<div\s+class="model-section"\s+id="m(?P<num>[0-9]+)"\s*>')
+ANCHOR_RE = re.compile(r'href="(?:/models)?#m(?P<num>[0-9]+)"')
+
+# MODELS.md の章のうち、models.html に節を持たないもの。**空の理由は不可**
+# （理由を書かせないと、次の書き手が「載せ忘れ」をここへ足して検査を殺せる）。
+CHAPTERS_WITHOUT_A_SECTION = {
+    "1": "exempt: バリュエーション分析（§3）へ統合した墓標節。旧アンカー #m1 は削除済み（ADR-0001）",
+    "4": "exempt: M-1（§9）へ集約した墓標節",
+    "15": "exempt: 兄弟モデル候補メニューは探索枠でプラグイン実体を持たない（ARCHITECTURE.md の画面一覧）",
+}
+
+
+def models_chapters() -> dict[str, str]:
+    """`docs/MODELS.md` の `## N. <題名>` から {章番号: 題名}。"""
+    out: dict[str, str] = {}
+    for line in MODELS_MD.read_text(encoding="utf-8").splitlines():
+        m = CHAPTER_RE.match(line)
+        if m:
+            out[m.group("num")] = m.group("title").strip()
+    return out
+
+
+def page_sections() -> dict[str, int]:
+    """`templates/models.html` の `<div class="model-section" id="mN">` から {章番号: 行番号}。"""
+    out: dict[str, int] = {}
+    for i, line in enumerate(MODELS_HTML.read_text(encoding="utf-8").splitlines(), start=1):
+        m = SECTION_RE.search(line)
+        if m:
+            out[m.group("num")] = i
+    return out
+
+
+def anchor_refs() -> dict[str, list[str]]:
+    """`templates/*.html` の `#mN` リンク → 参照元ファイル名の一覧。"""
+    out: dict[str, list[str]] = {}
+    for path in sorted(TEMPLATES_DIR.glob("*.html")):
+        for m in ANCHOR_RE.finditer(path.read_text(encoding="utf-8")):
+            out.setdefault(m.group("num"), []).append(path.name)
+    return out
+
+
+class TestModelsPageTracksModelsDoc:
+    """MODELS.md の章と models.html の節が対応しているか（#712）。"""
+
+    def test_extraction_is_not_vacuous(self):
+        """抽出が壊れて空集合同士を比べていないか（空の照合は常に緑になる）。"""
+        chapters, sections, anchors = models_chapters(), page_sections(), anchor_refs()
+        assert len(chapters) >= 10, f"MODELS.md から章を拾えていない: {sorted(chapters)}"
+        assert len(sections) >= 10, f"models.html から節を拾えていない: {sorted(sections)}"
+        assert len(anchors) >= 10, f"templates から #mN リンクを拾えていない: {sorted(anchors)}"
+
+    def test_every_chapter_has_a_section_or_a_reason(self):
+        """MODELS.md にモデル章を足してページへ載せ忘れると落ちる。"""
+        sections = page_sections()
+        missing = [
+            f"§{num} {title}"
+            for num, title in sorted(models_chapters().items(), key=lambda kv: int(kv[0]))
+            if num not in sections and not CHAPTERS_WITHOUT_A_SECTION.get(num, "").strip()
+        ]
+        assert not missing, (
+            f"MODELS.md の {missing} に対応する節が {MODELS_HTML.name} に無い。"
+            '`<div class="model-section" id="m<章番号>">` を足すか、'
+            "本ファイルの CHAPTERS_WITHOUT_A_SECTION へ理由付き（`exempt: …`）で登録すること"
+        )
+
+    def test_every_section_has_a_chapter(self):
+        """ページにだけ残った節・章番号とアンカー番号のずれで落ちる。"""
+        chapters = models_chapters()
+        orphans = [
+            f"id=m{num}（{MODELS_HTML.name}:{line}）"
+            for num, line in sorted(page_sections().items(), key=lambda kv: int(kv[0]))
+            if num not in chapters
+        ]
+        assert not orphans, (
+            f"{orphans} に対応する `## N.` が {MODELS_MD.name} に無い。"
+            "アンカー番号は MODELS.md の章番号に由来する（章を差し込んだら節の id も動かす）"
+        )
+
+    def test_exemptions_are_not_stale(self):
+        """除外表が実在しない章を指したり、節を持つ章を覆い隠したりしていないか。"""
+        chapters, sections = models_chapters(), page_sections()
+        unknown = sorted(set(CHAPTERS_WITHOUT_A_SECTION) - set(chapters), key=int)
+        assert not unknown, (
+            f"CHAPTERS_WITHOUT_A_SECTION の §{unknown} は {MODELS_MD.name} に無い章。"
+            "章番号を振り直したなら除外表も直すこと"
+        )
+        covered = sorted(set(CHAPTERS_WITHOUT_A_SECTION) & set(sections), key=int)
+        assert not covered, (
+            f"§{covered} は節を持つのに CHAPTERS_WITHOUT_A_SECTION に載っている。"
+            "除外したままだとその章の照合が死ぬので、行を外すこと"
+        )
+        blank = sorted([n for n, why in CHAPTERS_WITHOUT_A_SECTION.items() if not why.strip()], key=int)
+        assert not blank, f"§{blank} の除外理由が空。なぜ載せないのかを書くこと"
+
+    def test_anchor_links_resolve(self):
+        """`templates/*.html` の `#mN` が実在する節を指しているか（節を改名すると落ちる）。"""
+        sections = page_sections()
+        broken = [
+            f"#m{num}（参照元: {', '.join(sorted(set(srcs)))}）"
+            for num, srcs in sorted(anchor_refs().items(), key=lambda kv: int(kv[0]))
+            if num not in sections
+        ]
+        assert not broken, (
+            f"{broken} が指す節が {MODELS_HTML.name} に無い。"
+            "アンカーを改名したらリンク側も直すこと（切れても失敗として現れない）"
+        )

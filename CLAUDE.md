@@ -142,7 +142,7 @@ web版・ローカル版の双方が同じ Issue を見ることで、**コー�
 
 - **どこに書くかの判定**: 「これを読まないと Claude は**別の行動をとるか**？」——とるなら CLAUDE.md（**行動を変える命令**だけ・1項目 120字目安）、とらないなら [ARCHITECTURE.md](docs/ARCHITECTURE.md)（仕組み・経緯・実測値）か [GOTCHAS.md](docs/GOTCHAS.md)（再現条件と回避手順）へ。**教訓は捨てず、命令形の1行だけ残して「なぜ」を移す**。CLAUDE.md は冒頭で宣言したとおり**索引＋必須ルール**に限る（#576）。
 - **ARCHITECTURE.md**: DBテーブル / 処理フロー / APIエンドポイント / 画面 / プラグインを追加・変更したら対応セクションを更新。
-- **MODELS.md** と `templates/models.html`: 分析モデル追加・変更時に更新。参考文献は原著論文の DOI / 公式 URL（Wikipedia不可）。
+- **MODELS.md** と `templates/models.html`: 分析モデル追加・変更時に更新。参考文献は原著論文の DOI / 公式 URL（Wikipedia不可）。**章と節の対応・`#mN` リンクの解決は CI が照合する**（`アンカー番号 = MODELS.md の章番号`・#712）が、**本文の主張が古いことは拾えない**ので、仕様を変えたら両方の本文を読み直すこと。**系列の本数・既定値をドキュメントへ書き写さず正本（コード）へのリンクに留める**（書き写すと黙って陳腐化する）。
 - **MODELS.md §9（M-1）の章立てを変えたら初心者向け副読本 `docs/M1_MACRO_MODEL_GUIDE.md` も見直す**（Issue #472）: 副読本は**設計思想・章立てのみ追随**し、マクロ系列の全リスト・既定値・実測値は正本へのリンクに留める（書き写すと黙って陳腐化する）。見直し後、副読本冒頭の `models-sync` マーカーを更新すること。`tests/test_docs_sync.py` が CI で照合し、**乖離は失敗として現れないので通知では拾えない**（ADR-0031 と同型）。
 - **「増やしたら登録表へ1行足す」ルール（共通形）**: いずれも**忘れても失敗として現れない**ので、CI が実体と表を照合する。理由を書いた `exempt:` は可・空理由は不可。
 
@@ -155,6 +155,7 @@ web版・ローカル版の双方が同じ Issue を見ることで、**コー�
   | 日中枠の暦（`run_daytime.SCHEDULE`） | `batch_freshness.PRODUCERS`（読み手は `Scheduled.produced` を共有） | `test_check_batch_freshness.py::TestScheduledCollectionIsWatched` |
   | 月次系のバッチ（`run_monthly*.py`） | `run_daytime.MONTHLY_BATCHES`（＋ `TRIGGER_DAY` / `TRIGGER_TIME`） | `test_run_daytime.py::TestMonthlyOverlap` |
   | スキル／エージェント | `docs/SKILLS_AND_AGENTS.md` へ1行（#575） | `test_docs_sync.py`（**`~/.claude/` は CI の checkout に無くローカル pytest でのみ照合**） |
+  | `docs/MODELS.md` のモデル章 | `templates/models.html` の `#mN` 節（載せないなら `test_docs_sync.CHAPTERS_WITHOUT_A_SECTION` へ `exempt:` 理由） | `test_docs_sync.py::TestModelsPageTracksModelsDoc` |
 
   進捗は必ず**ステップ名**を持たせる（経過時間だけでは固まっていても健全に見える）。経緯は各 ADR と [ARCHITECTURE.md](docs/ARCHITECTURE.md)。
 - **断面の前処理を変えたら `plugins/utils.py::PREPROCESS_VERSION` を上げる**（ADR-0039・#517）: `recommend_factor_premia` の `mean_b` は「その前処理での1単位あたり」であり、前処理を変えると**永続化済みの重みの意味が変わる**。世代を上げれば `get_dynamic_preset` が旧世代の行を採らずバランス型へ倒し、`factor_premia` を回すまで安全側に留まる。**上げ忘れは CI で拾えない**（前処理の変更を機械的に検出する手段が無い）＝ #509 で実際に旧単位の重み × 新単位の特徴量が本番へ出た（実測 rank-IC −0.0881）。
