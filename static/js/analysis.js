@@ -1942,13 +1942,9 @@ function _mrrCoefType(name) {
   return 'fin';
 }
 // 特徴量コードを表示ラベル化。交差項は '_x_' で分割し各要素をラベル化して ' × ' で連結。
-// セクターダミー（sec_<safe>_x_<macro>）は 'セクター[safe]' と表示。
 function _mrrCoefLabel(name) {
   if (name.includes('_x_')) {
-    return name.split('_x_').map(part => {
-      if (part.startsWith('sec_')) return `業種[${part.slice(4)}]`;
-      return MRR_FEAT_LABELS[part] || part;
-    }).join(' × ');
+    return name.split('_x_').map(part => MRR_FEAT_LABELS[part] || part).join(' × ');
   }
   return MRR_FEAT_LABELS[name] || name;
 }
