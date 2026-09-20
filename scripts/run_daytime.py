@@ -1,4 +1,4 @@
-"""平日日中の枠で、重い計算を**キューから1日1件ずつ**進める（Issue #618）。
+"""平日日中の枠で、重い計算を**キューから窓に収まるだけ**進める（Issue #618・#707）。
 
 ## なぜ日中の枠が要るのか
 
@@ -40,9 +40,30 @@ PC を触っている時間帯に叩かれるのが前提で、それはこの�
 
 ## 窓に入らない仕事は積ませない
 
-窓は 8時間（480分・1件あたりの予算 445分）。実測は macro_beta 380〜419分・M-3 探索
+窓は 8時間（480分・1日ぶんの予算 445分）。実測は macro_beta 380〜419分・M-3 探索
 306〜369分・M-2 探索 176〜179分でいずれも収まるが、**M-1 探索は 752分で入らない**（ADR-0046 で専用タスクへ出したまま）。
 `JOBS` に無い名前と、予算が窓を超える仕事は `enqueue` の時点で弾く。
+
+## 1回の実走で何件取り出すか（#707・ADR-0060）
+
+**1日1件ではなく、窓に収まるだけ取り出して順に回す。** 守りたいのは「重い計算の裏で別の
+作業を並走させない」ことであって、件数ではない——同じ窓の中で**順番に**回すのは並走ではない。
+
+1日1件だった頃、先頭が `gate:macro`(7分) / `gate:ttm`(30分) / `gate:demean`(7分) と並んだ
+2026-09-20 のキューは、合計44分の仕事のために 445分の窓を3日ぶん食い潰していた。しかも
+この3つは**同じデータ世代で並べてから判断する**設計（#615・#424）なので、別々の日に出ても
+揃うまで判断できない。
+
+件数の決め方は `select_jobs` を参照。要点は2つ:
+
+- **予算は窓から導く**（`JOB_BUDGET_MIN / 件数` の等分）。`measured_min` は**どれだけ取り出すかの
+  計画にだけ**使い、打ち切りの閾値にはしない——パネルは毎晩伸びるので、所要から逆算した予算は
+  必ず陳腐化する
+- **先頭の1件は無条件**。これが無いと `bench:rhat-scale`（実測440分）が自分で自分を弾く。
+  先頭が窓に入ることは `enqueue` の検査（`measured_min <= JOB_BUDGET_MIN`）が保証している
+
+件数の上限定数は置かない。窓からも約束からも導けない恣意的な数になるため（上限の役は
+`JOB_HEADROOM` と等分が果たす）。
 
 ## 暦（#681・ADR-0056）
 
@@ -65,7 +86,7 @@ PC を触っている時間帯に叩かれるのが前提で、それはこの�
   月次の重なりは人の有無と関係が無いので外せない
 
 実行:
-    python -m scripts.run_daytime                       # キュー先頭を1件
+    python -m scripts.run_daytime                       # キュー先頭から窓に収まるだけ
     python -m scripts.run_daytime --dry-run             # 実行計画だけ
     python -m scripts.run_daytime --queue               # キューの中身を見る
     python -m scripts.run_daytime --peek                # 次の1件を JSON で（キューは減らさない）
@@ -125,11 +146,20 @@ CADENCE_H = 72.0
 # 暦と「今日」は JST で数える（トリガが JST の 8:00 なので）。tzdata に依存しない固定オフセット。
 JST = timezone(timedelta(hours=9))
 
-# 窓からマージンと deps_smoke を引いた、1件あたりの上限（ADR-0040）。
+# 窓からマージンと deps_smoke を引いた、**1回の実走ぶん**の上限（ADR-0040）。
 # **実測から逆算した値ではない**——パネルは毎晩伸びるので所要は据え置かず伸びる。
+# 複数件を取り出す日は、この値を件数で等分して各件の予算にする（#707・`budget_share`）。
 DEPS_SMOKE_MIN = 5
 MARGIN_MIN = 30
 JOB_BUDGET_MIN = WINDOW_MIN - DEPS_SMOKE_MIN - MARGIN_MIN   # = 445
+
+# 2件目以降を足すかを判断するときの余裕（#707・ADR-0060）。「**所要が倍に伸びても
+# 打ち切られない**」という約束であって、実測から逆算した値ではない。
+#
+# ここだけが `measured_min` を読む——読むのは「何件取り出すか」の計画のためで、
+# 予算（打ち切りの閾値）は常に窓の等分から導く。所要比で按分すると、伸びた仕事ほど
+# 予算も勝手に増える＝「実測から逆算しない」という ADR-0040 の方針が崩れる。
+JOB_HEADROOM = 2.0
 
 
 @dataclass(frozen=True)
@@ -537,11 +567,29 @@ def read_inflight(db=None) -> Optional[dict]:
     return mark if isinstance(mark, dict) else None
 
 
-def write_inflight(job: str, state: str, requeued: int, db=None) -> None:
+def inflight_jobs(mark: Optional[dict]) -> list[str]:
+    """マーカーが持つ**まだ結論を出していない**仕事の並び（#707）。
+
+    `jobs` が無い古い形式（`{"job": "..."}`）は1件として読む——マーカーは DB に残りうるので、
+    複数件へ広げた回のデプロイで前夜の中断を取り落とさない。壊れた値は無いものとして扱う。
+    """
+    if not mark:
+        return []
+    jobs = mark.get("jobs")
+    if isinstance(jobs, list):
+        return [j for j in jobs if isinstance(j, str)]
+    job = mark.get("job")
+    return [job] if isinstance(job, str) and job else []
+
+
+def write_inflight(jobs: Sequence[str], state: str, requeued: int, db=None) -> None:
     from database import upsert_setting
 
+    jobs = list(jobs)
     payload = {
-        "job": job,
+        "jobs": jobs,
+        # 古い読み手（`--queue` の表示・起票の文面）のために先頭も残す。
+        "job": jobs[0] if jobs else "",
         "state": state,
         "requeued": int(requeued),
         "at": bc.utc_now_iso(),
@@ -567,14 +615,17 @@ def clear_inflight(db=None) -> None:
             db.close()
 
 
-def notify_interrupted(job: str, mark: dict, run=subprocess.run) -> Optional[str]:
+def notify_interrupted(jobs: Sequence[str], mark: dict, run=subprocess.run) -> Optional[str]:
     """戻す上限に達した仕事を起票する。**gh が無くても落とさない**（`bc.notify` と同じ）。"""
+    jobs = list(jobs)
+    job = jobs[0] if jobs else "不明"
+    shown = ", ".join(f"`{j}`" for j in jobs) or "`不明`"
     body = "\n".join([
-        f"日中バッチが `{job}` を **{MAX_REQUEUE + 1} 回続けて、結論を出す前に**失っている。",
+        f"日中バッチが {shown} を **{MAX_REQUEUE + 1} 回続けて、結論を出す前に**失っている。",
         "",
         "| 項目 | 値 |",
         "|---|---|",
-        f"| 仕事 | `{job}` |",
+        f"| 仕事 | {shown} |",
         f"| 最後に取り出した時刻 | {mark.get('at', '不明')} |",
         f"| キューへ戻した回数 | {mark.get('requeued', 0)} |",
         "",
@@ -588,7 +639,7 @@ def notify_interrupted(job: str, mark: dict, run=subprocess.run) -> Optional[str
         "2. System イベントログの Kernel-Power 109 / Windows Update の再起動",
         "3. Windows Update のアクティブ時間"
         "（`HKLM\\SOFTWARE\\Microsoft\\WindowsUpdate\\UX\\Settings`）が窓を覆っているか",
-        "4. 原因が解消したら `run_daytime.ps1 -Enqueue " + job + "` で積み直す",
+        "4. 原因が解消したら `run_daytime.ps1 -Enqueue " + ",".join(jobs) + "` で積み直す",
         "",
         "---",
         "この Issue は `scripts/run_daytime.py` による自動起票（#639）。",
@@ -618,43 +669,65 @@ def reclaim_inflight(db=None, run=subprocess.run) -> list[str]:
     if not mark or mark.get("state") != _STATE_RUNNING:
         return []
 
-    job = mark.get("job")
+    jobs = inflight_jobs(mark)
     requeued = mark.get("requeued", 0)
     requeued = requeued if isinstance(requeued, int) else 0
     at = mark.get("at", "不明")
 
-    if not isinstance(job, str) or job not in JOBS:
+    # 出力に cp932 で表現できない記号を混ぜない（em dash など）。`Runner.write` は
+    # print を先に呼ぶので、ここで落ちると回収そのものが走らなくなる。
+    lines: list[str] = []
+    gone = [j for j in jobs if j not in JOBS]
+    known = [j for j in jobs if j in JOBS]
+    if gone:
+        lines.append(f"[inflight] 前回取り出した {', '.join(repr(g) for g in gone)} が"
+                     f" JOBS に無い（定義が消えたか typo）。戻さず捨てる")
+    if not known:
         clear_inflight(db)
-        return [f"[inflight] 前回取り出した {job!r} が JOBS に無い（定義が消えたか typo）。"
-                f"戻さず捨てる"]
+        return lines
 
+    label = ", ".join(known)
     if requeued >= MAX_REQUEUE:
         clear_inflight(db)
-        # 出力に cp932 で表現できない記号を混ぜない（em dash など）。`Runner.write` は
-        # print を先に呼ぶので、ここで落ちると回収そのものが走らなくなる。
-        lines = [f"[inflight] {job} は {MAX_REQUEUE + 1} 回続けて結論を出す前に消えた"
-                 f"（最後の取り出し {at}）。戻さず捨てる。"
-                 f"戻し続けると毎日同じ計算を繰り返して先へ進まないため"]
-        note = notify_interrupted(job, mark, run=run)
+        lines.append(f"[inflight] {label} は {MAX_REQUEUE + 1} 回続けて結論を出す前に消えた"
+                     f"（最後の取り出し {at}）。戻さず捨てる。"
+                     f"戻し続けると毎日同じ計算を繰り返して先へ進まないため")
+        note = notify_interrupted(known, mark, run=run)
         lines.append(f"[warn] 通知できなかった: {note}" if note
                      else "[inflight] 起票した")
         return lines
 
-    items = [x for x in read_queue(db) if x != job]     # 重複を作らない
-    write_queue([job] + items, db)
-    write_inflight(job, _STATE_QUEUED, requeued + 1, db)
-    return [f"[inflight] 前回 {job} が結論を出す前に消えた（最後の取り出し {at}）。"
-            f"キュー先頭へ戻した（{requeued + 1}/{MAX_REQUEUE} 回目）"]
+    # **重複を作らない**（マーカーとキューが食い違っていたときに同じ仕事を2回走らせない）。
+    # ただし取り除くのは**戻す1件につき1つまで**——`bench:rhat-scale` のように同じ名前を
+    # わざと複数積む運用があり、全部消すと残りの回まで黙って消える。
+    rest = list(read_queue(db))
+    dropped: list[str] = []
+    for j in known:
+        if j in rest:
+            rest.remove(j)
+            dropped.append(j)
+    write_queue(known + rest, db)
+    write_inflight(known, _STATE_QUEUED, requeued + 1, db)
+    lines.append(f"[inflight] 前回 {label} が結論を出す前に消えた（最後の取り出し {at}）。"
+                 f"キュー先頭へ戻した（{requeued + 1}/{MAX_REQUEUE} 回目）")
+    if dropped:
+        # 黙って減らさない。同じ名前を複数積んでいた回は、ここで1つ相殺されている。
+        lines.append(f"[inflight] {', '.join(dropped)} はキューにも残っていたので"
+                     f"1つ相殺した（二重に走らせないため。足すなら -Enqueue）")
+    return lines
 
 
 def carried_requeue(job: str, db=None) -> int:
     """`job` がキューへ戻された仕事なら、その回数。無関係なら 0。
 
     回数を引き継がないと `MAX_REQUEUE` が数えられず、戻すたびに 0 から数え直して
-    無限に戻り続ける。
+    無限に戻り続ける。複数件を戻した回は**先頭が一致するか**で見る——戻した並びは
+    そのままキュー先頭へ入るので、次の実走でも先頭に来る。
     """
     mark = read_inflight(db)
-    if not mark or mark.get("state") != _STATE_QUEUED or mark.get("job") != job:
+    if not mark or mark.get("state") != _STATE_QUEUED:
+        return 0
+    if inflight_jobs(mark)[:1] != [job]:
         return 0
     n = mark.get("requeued", 0)
     return n if isinstance(n, int) else 0
@@ -964,28 +1037,84 @@ def _block_reason(kind: str, today: date) -> tuple[str, str]:
     return f"{today:%m/%d} は祝日・年末年始で人が PC を触りうる", "次の平日"
 
 
-def select_job(queue: Sequence[str], today: date, holiday_override: bool = False,
-               ) -> tuple[Optional[str], Optional[str]]:
-    """今日取り出す1件と、先頭以外を選んだ／何も選ばなかった理由（ログ行）。
+def budget_share(n: int) -> float:
+    """`n` 件を1回の実走で回すときの、1件あたりの予算（分）。
 
-    月次と重なる日と祝日は、**並走に敏感でない仕事を先頭から探す**（残りの順番は崩さない）。
+    **窓の等分であって所要の按分ではない**（#707）。`Σ 予算 + deps_smoke + マージン = 窓` が
+    件数によらず成り立つので、`batch_common.window_problem` の検査は今までどおり通る。
+
+    予算は「割り当て」ではなく**打ち切りの閾値**なので、7分で終わる仕事に 148分 を渡しても
+    残りが無駄になるわけではない（次の仕事はすぐ始まる）。
+    """
+    return JOB_BUDGET_MIN / max(n, 1)
+
+
+def _eligible(key: str, blocked: bool) -> bool:
+    """月次と重なる日・祝日に取り出してよい仕事か。
+
     未知の名前は判断材料が無いので敏感側に倒す（`--peek` と同じ方針）。
     """
+    job = JOBS.get(key)
+    return job is not None and not job.parallel_sensitive if blocked else True
+
+
+def select_jobs(queue: Sequence[str], today: date, holiday_override: bool = False,
+                ) -> tuple[list[str], Optional[str]]:
+    """今日取り出す仕事の並びと、先頭以外を選んだ／何も選ばなかった理由（ログ行）。
+
+    **先頭の1件は無条件**（`enqueue` が `measured_min <= JOB_BUDGET_MIN` を検査済み）。
+    2件目以降は、足したときの等分予算に**全員が余裕込みで収まる**なら足し、収まらなければ
+    そこで打ち切る（順番を飛ばして先を漁らない）。
+
+        share(N) = JOB_BUDGET_MIN / N
+        足せる条件: すべての j について  measured_min(j) * JOB_HEADROOM <= share(N)
+
+    月次と重なる日・祝日は、**並走に敏感な仕事だけを読み飛ばして**敏感でない仕事を同じ規則で
+    集める（#681・#684 の挙動を複数件へ広げたもの。残りの順番は崩さない）。
+
+    同じ名前は1日に2回選ばない——ステップ名は `results` 辞書のキーなので、重複すると結果が
+    片方に潰れる。未知の名前は**単独で**選び、`steps_for` が声を上げて失敗する形へ渡す。
+    """
     if not queue:
-        return None, None
+        return [], None
     kind = blocked_by(today, holiday_override)
-    if kind is None:
-        return queue[0], None
-    reason, later = _block_reason(kind, today)
-    for key in queue:
+    blocked = kind is not None
+
+    head: Optional[str] = next((k for k in queue if _eligible(k, blocked)), None)
+    if head is None:
+        reason, later = _block_reason(kind, today)      # type: ignore[arg-type]
+        return [], (f"[calendar] {reason}ので、"
+                    f"並走に敏感な仕事は取り出さない（キューの {len(queue)}件は{later}に回す）")
+
+    why: Optional[str] = None
+    if head != queue[0]:
+        reason, _ = _block_reason(kind, today)          # type: ignore[arg-type]
+        why = (f"[calendar] {reason}ので、"
+               f"並走に敏感な仕事を飛ばして {head} を取り出す")
+
+    selected = [head]
+    if JOBS.get(head) is None:
+        return selected, why        # 定義を失った仕事は単独で走らせて失敗させる
+    for key in queue[queue.index(head) + 1:]:
+        if not _eligible(key, blocked):
+            continue                # 敏感な仕事だけを読み飛ばす（先頭を選んだときと同じ規則）
         job = JOBS.get(key)
-        if job is not None and not job.parallel_sensitive:
-            if key == queue[0]:
-                return key, None
-            return key, (f"[calendar] {reason}ので、"
-                         f"並走に敏感な仕事を飛ばして {key} を取り出す")
-    return None, (f"[calendar] {reason}ので、"
-                  f"並走に敏感な仕事は取り出さない（キューの {len(queue)}件は{later}に回す）")
+        if job is None or key in selected:
+            break
+        trial = selected + [key]
+        share = budget_share(len(trial))
+        if all(JOBS[j].measured_min * JOB_HEADROOM <= share for j in trial):
+            selected = trial
+        else:
+            break
+    return selected, why
+
+
+def select_job(queue: Sequence[str], today: date, holiday_override: bool = False,
+               ) -> tuple[Optional[str], Optional[str]]:
+    """`select_jobs` の先頭1件（既存の読み手のための薄い包み）。"""
+    keys, why = select_jobs(queue, today, holiday_override)
+    return (keys[0] if keys else None), why
 
 
 def take(key: str, db=None) -> None:
@@ -1006,28 +1135,48 @@ def _today() -> date:
 
 # ── ステップ組み立て ─────────────────────────────────────────────────────────
 
-def steps_for(python: str, job_key: Optional[str]) -> tuple[Step, ...]:
-    """キューから取った1件ぶんのステップ列。`job_key` が None（キューが空）なら空タプル。"""
-    if job_key is None:
-        return ()
-    job = JOBS.get(job_key)
-    if job is None:
-        # キューに積んだ後で JOBS から消えた場合。**黙って何もしないのではなく失敗にする**。
-        return (Step(f"unknown:{job_key}", (python, "-c", "raise SystemExit(2)"),
-                     why=f"キューにある {job_key!r} が JOBS に無い（定義が消えたか typo）",
-                     budget_min=1),)
+def steps_for_many(python: str, job_keys: Sequence[str],
+                   ) -> tuple[tuple[Step, ...], dict[str, str]]:
+    """今日取り出した仕事ぶんのステップ列と、`{ステップ名: 仕事のキー}` の対応（#707）。
 
+    対応表が要るのは in-flight マーカーを縮めるため——終わったステップがどの仕事だったかを
+    名前から引けないと、中断の回収が完了済みの仕事まで巻き戻す。
+
+    `deps_smoke` は**必要な仕事が1つでもあれば先頭に1本だけ**置く（件数ぶん並べない）。
+    予算は `JOB_BUDGET_MIN` の等分で、`DEPS_SMOKE_MIN` は走るかによらず窓から引いてある。
+    """
+    if not job_keys:
+        return (), {}
+
+    share = budget_share(len(job_keys))
     steps: list[Step] = []
-    if job.needs_deps_smoke:
+    owner: dict[str, str] = {}
+    if any(getattr(JOBS.get(k), "needs_deps_smoke", False) for k in job_keys):
         steps.append(Step(
             "deps_smoke", (python, "-m", "scripts.check_heavy_imports"),
             why="重い依存（pymc / jax / numpyro 等）が実際に import できるかを確かめる。"
                 "未評価 DLL の初回ロードをここが引き受ける（2026-09-01 に Smart App Control が"
                 "jaxlib の DLL を弾いて macro_beta が exit=1 で落ちた）",
             budget_min=DEPS_SMOKE_MIN))
-    argv = tuple(python if a == "{python}" else a for a in job.argv)
-    steps.append(Step(job.name, argv, why=job.why, budget_min=JOB_BUDGET_MIN))
-    return tuple(steps)
+    for key in job_keys:
+        job = JOBS.get(key)
+        if job is None:
+            # キューに積んだ後で JOBS から消えた場合。**黙って何もしないのではなく失敗にする**。
+            step = Step(f"unknown:{key}", (python, "-c", "raise SystemExit(2)"),
+                        why=f"キューにある {key!r} が JOBS に無い（定義が消えたか typo）",
+                        budget_min=1)
+        else:
+            argv = tuple(python if a == "{python}" else a for a in job.argv)
+            step = Step(job.name, argv, why=job.why, budget_min=share)
+        steps.append(step)
+        owner[step.name] = key
+    return tuple(steps), owner
+
+
+def steps_for(python: str, job_key: Optional[str]) -> tuple[Step, ...]:
+    """キューから取った1件ぶんのステップ列。`job_key` が None（キューが空）なら空タプル。"""
+    steps, _ = steps_for_many(python, [] if job_key is None else [job_key])
+    return steps
 
 
 def heavy_models() -> tuple[str, ...]:
@@ -1067,7 +1216,7 @@ def build_parser():
     `--help` や打ち間違いの引数が `take` の後で `SystemExit` になり、キュー先頭の仕事が
     黙って消えた（exit 0 でヘルプが出るだけで、in-flight マーカーも `finally` で消える）。
 
-    `--steps` のヘルプに並べる名前は JOBS 全体から作る。検証は取り出す1件が決まってから、
+    `--steps` のヘルプに並べる名前は JOBS 全体から作る。検証は今日取り出す件数が決まってから、
     `take` の前に実際のステップ列に対して行う（`main` 参照）。
     """
     names = ["deps_smoke"] + [j.name for j in JOBS.values()]
@@ -1077,7 +1226,8 @@ def build_parser():
     ops.add_argument("--queue", action="store_true",
                      help="キューの中身・暦の予定・今日の見送りを表示する（書き込まない）")
     ops.add_argument("--peek", action="store_true",
-                     help="次の1件を JSON で出す（キューは減らさない。run_daytime.ps1 -Now が使う）")
+                     help="今日取り出す仕事を JSON で出す（キューは減らさない。"
+                          "run_daytime.ps1 -Now が使う）")
     ops.add_argument("--allow-holiday", action="store_true",
                      help="今日だけ祝日の見送りを外す（run_daytime.ps1 -Now -Force が使う）")
     ops.add_argument("--clear-queue", action="store_true",
@@ -1107,11 +1257,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         mark = read_inflight()
         if mark:
             state = mark.get("state")
+            held = ", ".join(inflight_jobs(mark)) or "不明"
             if state == _STATE_RUNNING:
-                print(f"  [inflight] 前回 {mark.get('job')!r} が結論を出す前に消えている"
+                print(f"  [inflight] 前回 {held} が結論を出す前に消えている"
                       f"（最後の取り出し {mark.get('at', '不明')}）。次の実走で回収する")
             elif state == _STATE_QUEUED:
-                print(f"  [inflight] {mark.get('job')!r} は中断から戻した仕事"
+                print(f"  [inflight] {held} は中断から戻した仕事"
                       f"（{mark.get('requeued', 0)}/{MAX_REQUEUE} 回目）")
         # **暦と月次の重なりもここに出す**（#681）。次の実走で何が積まれ、何が見送られるかを
         # セッション開始時に読めるようにする。読むだけで書かない。
@@ -1121,8 +1272,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         for line in notes:
             print("  " + line)
         override = read_holiday_override(today)
-        _, why = select_job(planned, today, override)
+        picked, why = select_jobs(planned, today, override)
         kind = blocked_by(today, override)
+        if picked:
+            # **今日どこまで進むかをここで読めるようにする**（#707）。セッション開始時に
+            # 必ず見る画面なので、件数と予算が分からないと消化の見込みが立たない。
+            total = sum(JOBS[k].measured_min for k in picked if k in JOBS)
+            print(f"  [today] 今日取り出す: {', '.join(picked)}"
+                  f"（{len(picked)}件・Σ実測 {total:.0f}分・予算 各{budget_share(len(picked)):.0f}分）")
         if why:
             print("  " + why)
         elif kind == "monthly":
@@ -1138,13 +1295,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             print("  " + note)
         return 0
     if ns.peek:
-        # `run_daytime.ps1 -Now` が「次の1件を今すぐ叩いてよいか」を判断するための機械可読口。
+        # `run_daytime.ps1 -Now` が「今すぐ叩いてよいか」を判断するための機械可読口。
         # **キューは減らさない**（判断だけして走らせないことがある）。暦と月次の重なりは
-        # 実走と同じ関数で当てる＝見せた1件と実際に走る1件がずれない（#681）。
+        # 実走と同じ関数で当てる＝見せた並びと実際に走る並びがずれない（#681・#707）。
         today = _today()
         items, _ = apply_schedule(today, write=False)
         override = read_holiday_override(today)
-        key, _ = select_job(items, today, override)
+        keys, _ = select_jobs(items, today, override)
+        key = keys[0] if keys else None
         kind = blocked_by(today, override)
         job = JOBS.get(key) if key is not None else None
         print(json.dumps({
@@ -1152,8 +1310,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "name": job.name if job else None,
             "known": job is not None,
             # **未知の仕事は敏感側に倒す。** 判断材料が無いときに黙って走らせない。
-            "sensitive": job.parallel_sensitive if job else (key is not None),
+            # 複数件を取り出す日（#707）は**1件でも敏感なら敏感**（安全側）。
+            "sensitive": any(
+                JOBS[k].parallel_sensitive if k in JOBS else True for k in keys),
             "measured_min": job.measured_min if job else None,
+            # 今日取り出す全件と、その合計（#707）。既存の `key` / `measured_min` は
+            # 先頭1件のまま＝古い読み手を壊さない。
+            "keys": keys,
+            "total_measured_min": round(
+                sum(JOBS[k].measured_min for k in keys if k in JOBS), 1),
             "remaining": len(items),
             # キューに仕事があるのに今日は何も取り出さない（月次系のバッチと重なる日・祝日）。
             "blocked": key is None and bool(items),
@@ -1193,7 +1358,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     # 暦は回収の後に当てる（#681）。期限を迎えた収集は回収した仕事よりも前に並ぶ——
     # 収集は短く、先頭で待たせないことが watchdog の閾値の前提になっている。
     items, sched_notes = apply_schedule(today, write=not dry)
-    job_key, why = select_job(items, today, read_holiday_override(today))
+    job_keys, why = select_jobs(items, today, read_holiday_override(today))
     table_note = holiday_table_note(today)
     notes += sched_notes + ([why] if why else []) + ([table_note] if table_note else [])
     if notes:
@@ -1206,7 +1371,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 for line in notes:
                     runner.write(line)
 
-    if job_key is None:
+    if not job_keys:
         # **空を失敗にしない**（平日毎日走るので、積んでいない日に毎回起票すると煩い）。
         # 空だったこと・見送ったことは watchdog のレポートと足跡に出る。
         if items:
@@ -1218,20 +1383,39 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 0
     # `--steps` の打ち間違いも **取り除く前に** 弾く（#692）。後だと `select_steps` の
     # SystemExit で仕事が戻らない。
-    steps = steps_for(sys.executable, job_key)
-    bc.select_steps(steps, ns.steps)
+    steps, owner = steps_for_many(sys.executable, job_keys)
+    selected = bc.select_steps(steps, ns.steps)
+    # `--steps` で絞られたら、**生き残ったステップの仕事だけ**を取り除く（#707）。
+    # 全部取り除くと、走らせていない仕事がキューから黙って消える。
+    taken = [k for k in job_keys if k in {owner.get(s.name) for s in selected}]
     if not dry:
-        take(job_key)
+        for key in taken:
+            take(key)
 
     # 実走経路に届く引数は `--steps` / `--dry-run` / `--no-issue` だけ（キュー操作は上で
     # return 済み）で、`run_batch` 側の共通パーサが受け付ける集合と同じ＝二度目の解析は必ず通る。
-    hooks = bc.Hooks(log_path=log_path, record_footprint=record_footprint, notify=notify)
     if dry:
+        hooks = bc.Hooks(log_path=log_path, record_footprint=record_footprint, notify=notify)
         return bc.run_batch(SPEC, steps, hooks, args)
 
-    # マーカーは pop の直後に立て、**戻り値によらず finally で消す**。Python が生きていれば
+    # マーカーは take の直後に立て、**戻り値によらず finally で消す**。Python が生きていれば
     # 必ず消えるので、残っていること自体が「OS ごと消された」証拠になる（#639）。
-    write_inflight(job_key, _STATE_RUNNING, carried_requeue(job_key))
+    # **1件終わるごとに縮める**（#707）＝3件目で消えた回に、完了済みの1・2件目まで
+    # 巻き戻さない。縮めるのは終わった仕事だけで、成否は問わない（結論を出した失敗は
+    # 戻さないという `pop_queue` の判断をそのまま保つ）。
+    remaining = list(taken)
+    carried = carried_requeue(remaining[0]) if remaining else 0
+    write_inflight(remaining, _STATE_RUNNING, carried)
+
+    def _done(step: Step, code: int) -> None:
+        key = owner.get(step.name)
+        if key in remaining:
+            remaining.remove(key)
+            # 回数は引き継ぐ。落とすと `MAX_REQUEUE` が数えられず無限に戻り続ける。
+            write_inflight(remaining, _STATE_RUNNING, carried)
+
+    hooks = bc.Hooks(log_path=log_path, record_footprint=record_footprint, notify=notify,
+                     on_step_done=_done)
     try:
         return bc.run_batch(SPEC, steps, hooks, args)
     finally:

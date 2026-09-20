@@ -58,7 +58,8 @@ python -m scripts.macro_beta_gate_history --threshold 1.01  # strict 基準で�
 ./run_monthly_m1.ps1 -DryRun             # 実行計画だけ
 ./scripts/install_monthly_m1_task.ps1    # 登録（毎月3日 JST 01:00・上限16h）。**登録後に1回手動実行して足跡を入れる**
 
-# 平日日中バッチ（重い計算をキューから1日1件）。#618・平日 JST 08:00・窓8h
+# 平日日中バッチ（重い計算をキューから**窓に収まるだけ**）。#618・平日 JST 08:00・窓8h
+# **1回の実走で何件進むかは -Queue の [today] 行に出る**（#707・ADR-0060）。短い仕事が並ぶ日は複数件まとめて走る
 # **人が PC を触らない時間帯で回すこと自体が再現性の条件**（並走すると NUTS の発散が 0→344 に増えた実測）
 # **暦（#681・ADR-0056）**: disclosures は毎月1日以降・interim は毎月16日以降に自動でキュー先頭へ積まれる＝手で積まない。
 # 月次系の起動日（1〜3日）は並走に敏感な仕事を取り出さない（-Now -Force でも同じ）。どちらも -Queue に出る
@@ -67,7 +68,7 @@ python -m scripts.macro_beta_gate_history --threshold 1.01  # strict 基準で�
 ./run_daytime.ps1 -Queue                 # キューの中身＋暦の予定＋今日の見送り
 ./run_daytime.ps1 -Enqueue beta          # 積む（beta / tune:macro_gbdt / tune:macro_dlm / gate:interactions / gate:max-features / gate:macro / gate:ttm / gate:demean / oof:split-bias / bench:rhat-scale / interim / disclosures）
 ./run_daytime.ps1 -DryRun                # 実行計画だけ（キューは減らさない）
-./run_daytime.ps1 -Now                   # 枠を待たず次の1件（休暇等）。**タスク経由＝セッション0で走る**
+./run_daytime.ps1 -Now                   # 枠を待たず次の回ぶん（休暇等）。**タスク経由＝セッション0で走る**
 ./run_daytime.ps1 -Now -Force            # 並走に敏感な仕事（beta / tune:* / gate:* / oof:*）も叩く。**叩いたら PC を触らない**。祝日は今日だけ見送りを外す
 ./scripts/install_daytime_task.ps1       # 登録（平日 JST 08:00・上限8h）。**登録後に1回手動実行して足跡を入れる**
 

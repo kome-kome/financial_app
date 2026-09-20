@@ -434,10 +434,19 @@ def notify(results: dict[str, int], log: Path, title: str, body: str,
 @dataclass(frozen=True)
 class Hooks:
     """バッチ側のモジュール関数。**main の中で解決して渡す**——そうすればテストが
-    モジュール属性を差し替えたとき（monkeypatch）にそのまま効く。"""
+    モジュール属性を差し替えたとき（monkeypatch）にそのまま効く。
+
+    `on_step_done` は**1ステップ終わるごと**に `(step, exit_code)` で呼ばれる（省略可）。
+    要るのは日中枠だけ（#707）——1回の実走で複数の仕事を回すようになったので、どこまで
+    終わったかを in-flight マーカー（#639）へ反映しないと、3件目で OS ごと消えたときに
+    完了済みの1・2件目まで巻き戻る。**足跡や通知の代わりではない**（それらは全ステップが
+    終わってから `run_batch` が呼ぶ）。例外は握らない＝マーカーを更新できないまま走り続けると
+    回収が黙って壊れるので、失敗はその場で現す。
+    """
     log_path: Callable[[], Path]
     record_footprint: Callable[[dict[str, int]], Optional[str]]
     notify: Callable[[dict[str, int], Path], Optional[str]]
+    on_step_done: Optional[Callable[[Step, int], None]] = None
 
 
 def build_parser(spec: BatchSpec, step_names: Sequence[str]) -> argparse.ArgumentParser:
@@ -495,6 +504,8 @@ def run_batch(spec: BatchSpec, steps: Sequence[Step], hooks: Hooks,
             runner.write(line)
         for step in selected:
             results[step.name] = runner.run(step)      # 失敗しても次へ進む
+            if hooks.on_step_done is not None:
+                hooks.on_step_done(step, results[step.name])
         runner.write("-" * 70)
         for name, code in results.items():
             runner.write(f"  {'OK    ' if code == 0 else 'FAILED'} {name} (exit={code})")
