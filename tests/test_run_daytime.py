@@ -1758,7 +1758,11 @@ class TestPeekReportsEveryJobItWillTake:
         rd.write_queue(["gate:macro", "gate:ttm", "gate:demean"], db=db)
         got = self._peek(capsys)
         assert got["keys"] == ["gate:macro", "gate:ttm", "gate:demean"]
-        assert got["total_measured_min"] == pytest.approx(44.0)
+        # 合計は JOBS から導く。数値を書き写すと、実走のたびに `measured_min` を実測へ
+        # 差し替える運用（CLAUDE.md）でこのテストだけが落ちる。
+        assert got["total_measured_min"] == pytest.approx(
+            sum(rd.JOBS[k].measured_min for k in ("gate:macro", "gate:ttm", "gate:demean"))
+        )
 
     def test_one_sensitive_job_makes_the_whole_run_sensitive(self, db, capsys):
         """`-Force` の門はここで開く。混ざっていたら安全側へ倒す。"""
