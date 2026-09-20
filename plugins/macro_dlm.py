@@ -23,7 +23,8 @@ M-1（macro_risk_return, OLS 線形）・M-2（macro_gbdt, XGBoost 非線形）�
 
 設計決定:
   - 銘柄別 TVP 時系列（per-stock）。週次リターン × マクロ週次変化（同時点ファクタ応答 / APT 型）。
-  - マクロ + 市場ファクター（既定 USDJPY/US10Y/NIKKEI225/WTI）。指数/FX/商品は対数リターン、
+  - マクロ + 市場ファクター（既定は `MACRO_FEATURE_OPTIONS` 全系列に連動＝下の
+    `DEFAULT_MACRO_FEATURES` が唯一の源。顔ぶれをここへ書き写さない）。指数/FX/商品は対数リターン、
     金利は週次差分（bp スケール）。
   - 自前 割引 DLM（West & Harrison 型・numpy）。全適格銘柄・heavy=True。
   - 初版は API/UI のみ（producer 化・sell_ranking 統合はフォロー Issue）。
