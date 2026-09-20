@@ -209,6 +209,16 @@ graph TD
 > `params_schema` の既定へ倒す。生値は `params_as_tuned`、扱いが変わったキーは
 > `stale_params` に載せ、画面が注記として出す。**射影が無いと、探索から外した軸の古い値が
 > 「🔧 自動調整済み」として推奨され続ける**＝M-1 のモメンタムが実際にそうなっていた。
+> **射影が見るのは探索空間の形だけで、パネルの世代は別の目で見る**（#711・ADR-0047）——
+> `current_panel_fingerprint()` が `hyperparameter_search._data_fingerprint()`（規則の唯一の源・
+> TTL 60秒のキャッシュで1ページ読込3回を1回へまとめる）を呼び、保存時の `data_fingerprint`
+> と比べた結果を `panel_changed`（True=違う / False=同じ / None=判定不能）として返す。
+> 画面は **False と積極的に言えたときだけ**自動プリフィルする＝指紋を持たない古い行も、
+> 指紋を読めなかった回も、自動適用しない。**パネルは毎晩伸びるので自動適用は事実上ほぼ
+> 止まる**が、バッジと「調整済みの値に戻す」ボタンは残るので手動適用の導線は生きている。
+> これが無いと、いま探索中の軸に残った古い値が素通りする——M-1 の `max_features=5`
+> （2026-09-02・分割補正前のパネル）は rank-IC +0.0052・fold 間 std 0（予測値が月内で
+> 全銘柄同じ）だったのにプリフィルされ続けた。
 > ADR-0050・#604）は、いずれも「重い推論/探索バッチが結果だけを
 > 永続化し、軽量なAPI/プラグインが読む」producer/consumer 分離パターン（`regression_results`
 > と同型）。`statement_disclosure`（Issue #322・`collector_disclosures.py` が J-Quants
@@ -1251,7 +1261,7 @@ graph LR
         AN1["GET /api/plugins\nプラグイン + 特例エントリ(screen/backtest/model_comparison)のメタ一覧\n（category/ui_order/heavy/hidden 含む・ui_order 昇順）\n退役（hidden=True・ADR-0044）は除外"]
         AN2["POST /api/plugins/{name}/run\nプラグインを実行\n（heavy かつ RENDER_LIGHT_MODE は 403）\nheavy は実行中の進捗を JobState へ流す（#545）"]
         AN12["GET /api/plugins/{name}/progress\nheavy プラグイン実行の進捗 SSE（#545）\n{running, progress, total, new_logs}\n画面は POST の応答を待たずに開く\n（POST が完了まで返らないため）"]
-        AN11["GET /api/plugins/{name}/tuned\n自動調整済みハイパーパラメータ\n（hyperparameter_search.py --persist が書込・未調整は404）\n読取専用・軽量。探索自体はローカル月次バッチ経由\nparams は現在の探索空間へ射影して返す(#604)\n生値=params_as_tuned・変えたキー=stale_params"]
+        AN11["GET /api/plugins/{name}/tuned\n自動調整済みハイパーパラメータ\n（hyperparameter_search.py --persist が書込・未調整は404）\n読取専用・軽量。探索自体はローカル月次バッチ経由\nparams は現在の探索空間へ射影して返す(#604)\n生値=params_as_tuned・変えたキー=stale_params\n測ったパネルの照合=panel_changed(#711)\nFalse と言えたときだけ画面が自動プリフィル"]
         AN10["GET /api/model/status\n業種別OLSモデルの鮮度情報\n（computed_at/staleness_days/n_results/is_stale）\n鮮度バーUI用の軽量GET"]
         AN4["GET /api/gap-analysis\nバリュエーション分析（旧互換エンドポイント）"]
         AN5["POST /api/screen\nスクリーニング（条件絞り込み）"]
