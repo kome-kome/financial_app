@@ -173,6 +173,43 @@ demean 側の月平均が0になっていなければ停止する。どちらも
 **このモードも既定を動かさない。** 本番の M-1 は素の目的変数のままで、採るなら ADR-0050 の
 2026-09-19 追記に並べた変更（パラメータ契約・CV キャッシュのキー・画面の μ の意味）が要る。
 
+## リスク軸モード（`--risk-axis`・#709）
+
+ここまでの6モードは**すべて μ̂ の順位だけを測ってきた**。ところが M-1 が画面へ出すのは
+`U = μ − λR` の並びで、R は測定の外にあった。#615 でマクロ特徴量は「どの入れ方をしても月内の
+順位を改善しない」と確定したが、その機構（マクロ系列は月末の週の値なので同じ月の全銘柄でほぼ
+同一＝月内の順位を直接は動かせない）は**リスク軸には当たらない**——`r_macro = √(βᵀΣ_macroβ)`
+の β は per-stock で、同じ月でも銘柄ごとに値が変わる。マクロが効く余地は μ 側ではなく R 側に
+残っている、というのがこのモードの問い。
+
+    python -m scripts.momentum_gate --risk-axis          # mu_only / r2 / r_macro の3条件
+    python -m scripts.momentum_gate --risk-axis --smoke  # 経路確認（数値は読まない）
+
+    mu_only … リスクを引かない（ここまでの6モードが測ってきたもの）
+    r2      … U = μ − λ·z(実現ボラ)。**本番の既定＝比較の分母**
+    r_macro … U = μ − λ·z(√(βᵀΣ_macroβ))
+
+**R はパネルの構築に入らない。** 学習には一切関わらず、CV が出した μ̂ の順位を作り直すときに
+だけ使う。よって3条件は `Cond` が同一で、パネルと CV を1回に畳む（`built` / `ran` / `cran`）
+——**μ̂ をビット単位で一致させるため**で、速さは副産物。別々に回すと一致する保証が無い。
+
+**R は月内で z-score 標準化してから λ を掛ける。** `r2`（年率ボラ）と `r_macro`（√(βᵀΣβ)）は
+スケールが違うので、生値のまま同じ λ で比べると軸の差ではなくスケールの差を測る。
+
+**`r_macro` は時点再現できない（既知の限界）。** `macro_beta_loadings` に時点列が無く、run は
+2026-07 以降の数本しかないので、評価する全ての月に「その月より後のデータで推定した β」を
+当てることになる。#709 はこれを**未来情報を与えた場合の上限**として測ると決めた——ここで
+負ければ「採用しない」と結論でき、勝っても既定を変える根拠にはならない。副作用として
+`r_macro` は銘柄ごとの定数になるため、この軸は「マクロか実現ボラか」と「静的か動的か」を
+同時に動かす。分離には4つ目の条件（`r2` を銘柄ごとの定数に固定したもの）が要る。
+
+**R が全軸で取れる行へ揃えるのは共通域を取る段**（`risk_common_keys`）。変換の後で落とすと
+`r_macro` を持たない銘柄がその条件からだけ消え、母集団が条件間でずれる（ADR-0045）。
+
+素のリターンとの順位相関だけでは**リスクを下げた効果が罰として出る**ので、U の分位ごとの
+月次リターンの平均・ボラ・シャープを併記する（`quantile_risk_profile`）。**判定の主指標は
+他モードと同じ `rank_ic`** で、リスク調整後は参考値。
+
 ## M-1 を測るときの注意
 
 M-1 は `macro_nan_ok=False`（strict）で**母集団自体が M-2/M-6 と別物**なので、パネルを共有
@@ -186,6 +223,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import statistics
 import sys
 from pathlib import Path
 from typing import NamedTuple
@@ -198,7 +236,9 @@ from plugins import get_plugin  # noqa: E402
 from plugins.macro_ensemble import _align  # noqa: E402
 from plugins.macro_snapshots import (  # noqa: E402
     FIN_ROW_SOURCES,
+    _realized_vol,
     build_snapshots,
+    get_producer_scores,
     oof_backtest,
     preload_macro,
     use_fin_rows,
@@ -304,6 +344,27 @@ DEMEAN_MODELS = ["risk_return"]
 DEMEAN_RAW_MIN = 1e-12
 DEMEAN_TOL = 1e-9
 
+# リスク軸モード（`--risk-axis`・#709）。**基準は本番の既定（`r2`）**——この軸は母集団も
+# μ̂ も動かさない（R は学習に一切入らず、最後に `U = μ − λR` の順位を作るときだけ使う）ので、
+# 「本番から動かすとどうなるか」を見る形にする（`--max-features` / `--demean-target` と同じ）。
+#
+# なぜこの軸を測るのか: #615 でマクロ特徴量は**どの入れ方をしても月内の順位を改善しない**と
+# 確定した。機構は「マクロ系列は月末の週の値なので同じ月の全銘柄でほぼ同一＝月内の順位を
+# 直接は動かせない」であり、**これはリスク軸には当たらない**（`r_macro` の β は per-stock で
+# 同じ月でも銘柄ごとに値が変わる）。マクロが効く余地は μ 側ではなく R 側に残っている。
+#
+# `mu_only`（リスクを引かない）を分母ではなく条件として置くのは、**「そもそもリスクを引く
+# ことが効いているのか」が一度も測られていない**から——既存6モードの rank-IC はすべて μ̂
+# だけの順位で、本番が出している `U` の並びは測定の外にあった。同じパネル・同じ CV で測れる
+# ので追加費用はほぼゼロ。
+RISK_CONDS: dict[str, str | None] = {"mu_only": None, "r2": "r2", "r_macro": "r_macro"}
+RISK_BASE_COND = "r2"
+# U を持つのは M-1 だけ。M-2/M-6 は μ̂ の順位そのものが出力で、リスク軸を持たない。
+RISK_MODELS = ["risk_return"]
+# リスク調整後の指標を出す分位数。`oof_backtest` の既定と揃える（別の数にすると
+# 素のリターン側の分位と読み比べられない）。
+RISK_QUANTILES = 5
+
 MODELS =["xgb_m2", "elasticnet"]
 MODEL_LABELS = {"xgb_m2": "M-2(XGBoost)", "elasticnet": "M-6(ElasticNet)",
                 "risk_return": "M-1(RiskReturn)"}
@@ -339,10 +400,11 @@ def build_conditions(windows: list[int] | None = None,
                     interactions: bool = False,
                     max_features: list[int] | None = None,
                     fin_rows: bool = False,
-                    demean_target: bool = False) -> dict[str, Cond]:
+                    demean_target: bool = False,
+                    risk_axis: bool = False) -> dict[str, Cond]:
     """条件集合 {名前: Cond} を作る。
 
-    7つのモードがある。**同時に使えるのは1つだけ**（下記）:
+    8つのモードがある。**同時に使えるのは1つだけ**（下記）:
 
       既定           … ADR-0045 の昇格ゲートと完全に同じ2条件（`off` / `on`・マクロは ON のまま）
       `windows`      … モメンタム無し ＋ 各窓（#592・ADR-0050）
@@ -351,6 +413,12 @@ def build_conditions(windows: list[int] | None = None,
       `max_features` … BIC の列数上限を振る（#615）。他の軸は本番構成に固定
       `fin_rows`     … 通期のみ ＋ 通期＋TTM（#424 子3）。他の軸は本番構成に固定
       `demean_target` … 素の目的変数 ＋ 月平均を引いた目的変数（#615）。他の軸は本番構成に固定
+      `risk_axis`    … U = μ − λR の R を振る（#709）。**パネルは3条件とも本番構成で同一**
+
+    **`risk_axis` だけは `Cond` を動かさない。** R はモデルの学習に一切入らず、CV が出した
+    μ̂ の順位を作り直すときだけ使うので、パネル構築のパラメータではない。3条件とも同じ
+    `Cond` を返すのは意図どおりで、呼び出し側はこれを見て**パネルと CV を1回に畳む**
+    ——別々に回すと μ̂ が完全一致する保証が無く、軸の差と混ざる（#697 と同型）。
 
     **2つ以上を同時に指定できない。** 母集団を動かしうる軸を2つ同時に振ると、どちらの
     効果かが分離できない——それは共通域制限をかけても解けない（共通域は「全条件で測れる
@@ -366,12 +434,17 @@ def build_conditions(windows: list[int] | None = None,
     """
     modes = [("--windows", bool(windows)), ("--macro", macro),
              ("--interactions", interactions), ("--max-features", bool(max_features)),
-             ("--fin-rows", fin_rows), ("--demean-target", demean_target)]
+             ("--fin-rows", fin_rows), ("--demean-target", demean_target),
+             ("--risk-axis", risk_axis)]
     picked = [name for name, on in modes if on]
     if len(picked) > 1:
         raise ValueError(
             f"{' と '.join(picked)} は同時に指定できません（母集団を動かしうる軸を2つ同時に"
             "振ると、共通域へ制限してもどちらの効果か分離できない）")
+    if risk_axis:
+        # **3条件とも本番構成の同一 `Cond`**（上の docstring を参照）。軸そのものは
+        # `RISK_CONDS` が持ち、パネルには現れない。
+        return {name: Cond(False, MOM_WINDOW) for name in RISK_CONDS}
     if macro:
         return {name: Cond(False, MOM_WINDOW, use_macro)
                 for name, use_macro in MACRO_CONDS.items()}
@@ -415,9 +488,10 @@ def base_of(conds: dict[str, Cond], default_max_features: int | None = None) -> 
 
     行の基準モードの分母も**本番の構成**（`annual`）。TTM を足したときに本番から何が変わるかを見る。
     目的変数モードの分母も**本番の構成**（`raw`）。この軸も母集団を動かさない。
+    リスク軸モードの分母も**本番の構成**（`r2`・`params_schema()` の `risk_axis` 既定）。
     """
     for cand in (BASE_COND, MACRO_BASE_COND, INTERACTION_BASE_COND, FIN_ROWS_BASE_COND,
-                 DEMEAN_BASE_COND):
+                 DEMEAN_BASE_COND, RISK_BASE_COND):
         if cand in conds:
             return cand
     prod = maxfeat_cond_name(default_max_features) if default_max_features else None
@@ -444,12 +518,14 @@ ALPHA = 0.05 / N_TESTS
 # （#592 以来の挙動で、ここで変えると過去の結果の置き場所が変わる）。
 MODE_SUFFIX: dict[str, str] = {"default": "", "windows": "", "macro": "_macro",
                                "interactions": "_interactions", "max_features": "_maxfeat",
-                               "fin_rows": "_fin_rows", "demean_target": "_demean"}
+                               "fin_rows": "_fin_rows", "demean_target": "_demean",
+                               "risk_axis": "_risk_axis"}
 
 
 def mode_of(windows: list[int] | None = None, macro: bool = False,
             interactions: bool = False, max_features: list[int] | None = None,
-            fin_rows: bool = False, demean_target: bool = False) -> str:
+            fin_rows: bool = False, demean_target: bool = False,
+            risk_axis: bool = False) -> str:
     """測定モードの名前を返す（`build_conditions` と同じ引数から1箇所で導出する）。
 
     **#615 で足した2モードは、ここを持たないまま別モードの名前で出力されていた**——
@@ -468,6 +544,8 @@ def mode_of(windows: list[int] | None = None, macro: bool = False,
         return "fin_rows"
     if demean_target:
         return "demean_target"
+    if risk_axis:
+        return "risk_axis"
     return "windows" if windows else "default"
 
 
@@ -489,6 +567,8 @@ _AXIS_VERDICTS: dict[str, tuple[str, str]] = {
                  "with_ttm did not beat the annual-only baseline"),
     "demean_target": ("DEMEAN TARGET AXIS",
                       "the month-demeaned target did not beat the raw target"),
+    "risk_axis": ("RISK AXIS",
+                  "no risk axis beat the production axis (r2)"),
 }
 
 
@@ -498,7 +578,8 @@ def verdict_text(mode: str, n_conds: int, passed: list[str], regressed: list[str
     窓モードは**窓が2本以上のときだけ** WINDOW SCAN になる（`--windows 12` は2条件で、
     既定ゲートと同じ PROMOTE/REJECT の文言になる）。これは切り出す前からの挙動で変えない。
     """
-    if (mode in ("macro", "interactions", "max_features", "fin_rows", "demean_target")
+    if (mode in ("macro", "interactions", "max_features", "fin_rows", "demean_target",
+                 "risk_axis")
             or (mode == "windows" and n_conds > 2)):
         head, none = _AXIS_VERDICTS[mode]
         verdict = (f"{head}: effects that survive the common-domain restriction: "
@@ -799,6 +880,145 @@ def demean_reach_problems(panel_means: dict[str, float], conds: dict[str, Cond])
     return problems
 
 
+# ── リスク軸（`--risk-axis`・#709）─────────────────────────────────────────────
+
+def _month_end_bound(ym: str) -> str:
+    """`"2019-08"` → `"2019-08-31"`。**日付ではなく ISO 文字列の上限**として使う。
+
+    `_realized_vol` の絞り込みは `trade_date <= ref_date` の文字列比較なので、月の実日数を
+    知らなくても「その月までの全行」を取れる（`"2019-02-28" <= "2019-02-31"` は真）。
+    `calendar` を持ち込んで月末を計算すると、閏年の分岐が1つ増えるだけで結果は同じ。
+    """
+    return f"{ym}-31"
+
+
+def risk_by_ym(axis: str | None, prices_by_co: dict, ids_by_ym: dict,
+               producer: dict) -> dict[tuple, float]:
+    """`{(ym, edinet_code): R}` を返す。`axis` は `RISK_CONDS` の値（`None` は軸なし）。
+
+    **`r2` は時点再現できる。** `_realized_vol` を月末を `ref_date` として呼ぶので、見るのは
+    その月までの52週だけ＝未来を見ない。本番の M-1 と同じ関数を呼び、ボラの計算を書き写さない。
+
+    **`r_macro` は時点再現できない。** `get_producer_scores` が返すのは
+    `r_macro = √(βᵀΣ_macroβ)` で、β も Σ_macro も**単一 run のスナップショット**である
+    （`macro_beta_loadings` に時点列が無く、run は 2026-07 以降の数本しかない）。したがって
+    過去のどの月に当てても「その月より後のデータで推定した β」になる。#709 はこれを
+    **未来情報を与えた場合の上限**として測ると決めた——ここで負ければ採用しないと結論できる。
+
+    副作用として `r_macro` は**銘柄ごとの定数**（月で変わらない）になる。つまりこの軸は
+    「マクロか実現ボラか」と「静的か動的か」を同時に動かす。分離には3つ目の条件が要り、
+    #709 のスコープ外（判定文と JSON に注意書きを出す）。
+    """
+    if axis is None:
+        return {}
+    out: dict[tuple, float] = {}
+    if axis == "r_macro":
+        for ym, ids in ids_by_ym.items():
+            for ec in ids:
+                v = (producer.get(ec) or {}).get("r_macro")
+                if v is not None:
+                    out[(ym, ec)] = float(v)
+        return out
+    if axis != "r2":
+        raise ValueError(f"未知のリスク軸: {axis}（{', '.join(str(a) for a in RISK_CONDS.values())}）")
+    for ym, ids in ids_by_ym.items():
+        bound = _month_end_bound(ym)
+        for ec in ids:
+            v = _realized_vol(prices_by_co.get(ec) or [], bound)
+            if v is not None:
+                out[(ym, ec)] = float(v)
+    return out
+
+
+def risk_common_keys(risk_maps: dict[str, dict], keys: set) -> set:
+    """全ての軸で R が取れる `(ym, ec)` だけへ絞る（軸なしの条件は制約を課さない）。
+
+    **落とすのは共通域を取る段**——変換の後で落とすと、`r_macro` を持たない銘柄が
+    その条件だけから消えて条件間の母集団がずれる（ADR-0045 の「縮む側が有利に見える」
+    そのもの）。`macro_beta` は全社に付くとは限らないので、これは実際に起きる。
+    """
+    out = set(keys)
+    for rmap in risk_maps.values():
+        if not rmap:
+            continue        # 軸なし（`mu_only`）は誰も落とさない
+        out &= set(rmap)
+    return out
+
+
+def apply_risk_axis(resid_by_ym: dict, meta_by_ym: dict, rmap: dict,
+                    lam: float) -> tuple[dict, dict, int]:
+    """`yhat` を `U = yhat − λ·z(R)` へ置き換える。戻り値は `(resid, meta, 落とした行数)`。
+
+    **R は月内で z-score 標準化する。** `r2`（年率ボラ）と `r_macro`（√(βᵀΣβ)）はスケールが
+    違うので、同じ λ で比べると軸の差ではなく**スケールの差**を測ることになる。月内で揃える
+    のは M-1 が月内の順位で評価されるからで、月をまたいだ水準は順位に影響しない。
+
+    月内の R が全て同じ値なら標準偏差が 0 になる。そのときは傾けない（`z=0`）——`r_macro` は
+    銘柄ごとの定数なので、1銘柄しか残らない月でこれが起きる。
+
+    `rmap` が空なら恒等変換（`mu_only`）。
+    """
+    if not rmap:
+        return resid_by_ym, meta_by_ym, 0
+    out_r: dict[str, list] = {}
+    out_m: dict[str, list] = {}
+    dropped = 0
+    for ym, pairs in resid_by_ym.items():
+        metas = meta_by_ym.get(ym, [])
+        rows = []
+        for j, (yh, y) in enumerate(pairs):
+            meta = metas[j] if j < len(metas) else (None, None)
+            r = rmap.get((ym, meta[0]))
+            if r is None:
+                dropped += 1
+                continue
+            rows.append((yh, y, meta, r))
+        if not rows:
+            continue
+        rs = [r for _yh, _y, _m, r in rows]
+        mu = sum(rs) / len(rs)
+        sd = statistics.stdev(rs) if len(rs) > 1 else 0.0
+        out_r[ym] = [(yh - lam * ((r - mu) / sd if sd else 0.0), y)
+                     for yh, y, _m, r in rows]
+        out_m[ym] = [m for _yh, _y, m, _r in rows]
+    return out_r, out_m, dropped
+
+
+def quantile_risk_profile(resid_by_ym: dict, n_quantiles: int = RISK_QUANTILES) -> list[dict]:
+    """U の分位ごとの「月次リターンの平均・ボラ・シャープ」を返す（index 0 = 最低 U）。
+
+    **素のリターンとの順位相関（rank_ic）だけでは、リスクを下げた効果が罰として出る。**
+    高リスク銘柄を避ければ平均リターンは下がりうるが、ばらつきも下がる。U の並びが
+    「リスク調整後に」良いかは、分位ごとに月次の系列を作って初めて読める（#709）。
+
+    `oof_backtest` の内部には触らない（あちらは素のリターン側の正本のまま）。期内サンプルが
+    `n_quantiles * 2` 未満の月は分位を作らない——`oof_backtest` と同じ除外規則。
+    """
+    series: list[list[float]] = [[] for _ in range(n_quantiles)]
+    for pairs in resid_by_ym.values():
+        if len(pairs) < n_quantiles * 2:
+            continue
+        ordered = sorted(pairs, key=lambda p: p[0])
+        size = len(ordered) / n_quantiles
+        for q in range(n_quantiles):
+            lo, hi = int(round(q * size)), int(round((q + 1) * size))
+            bucket = ordered[lo:hi]
+            if bucket:
+                series[q].append(sum(y for _yh, y in bucket) / len(bucket))
+    out = []
+    for q, vals in enumerate(series):
+        mean = sum(vals) / len(vals) if vals else None
+        vol = statistics.stdev(vals) if len(vals) > 1 else None
+        out.append({
+            "quantile": q,
+            "mean_return": mean,
+            "vol": vol,
+            "sharpe": (mean / vol) if (mean is not None and vol) else None,
+            "n_periods": len(vals),
+        })
+    return out
+
+
 def main() -> None:
     # Windows cp932 では非ASCII記号でクラッシュするため UTF-8 に固定
     # （[[feedback_windows_cp932_stdout_symbols]]）。
@@ -830,6 +1050,9 @@ def main() -> None:
                     help="行の基準モード（通期のみ と 通期＋TTM を共通域で比べる・#424 子3・"
                          f"ADR-0051 決定9）。モデル既定は {','.join(FIN_ROWS_MODELS)}。"
                          "財務はキャッシュせずに読む。他モードと併用不可")
+    ap.add_argument("--risk-axis", dest="risk_axis", action="store_true",
+                    help="U = μ − λR の R を振る（#709）。mu_only / r2 / r_macro の3条件を"
+                         "同一パネル・同一 CV で比べる。分母は本番の既定 r2")
     ap.add_argument("--demean-target", dest="demean_target", action="store_true",
                     help="目的変数モード（素の目的変数 と 月ごとの全銘柄平均を引いた目的変数を"
                          "共通域で比べる・#615）。変換は BIC 選択の前に掛かる。"
@@ -858,6 +1081,8 @@ def main() -> None:
         default_models = FIN_ROWS_MODELS
     elif args.demean_target:
         default_models = DEMEAN_MODELS
+    elif args.risk_axis:
+        default_models = RISK_MODELS
     else:
         default_models = MODELS
     models = ([m.strip() for m in args.models.split(",") if m.strip()]
@@ -873,7 +1098,8 @@ def main() -> None:
     try:
         conds = build_conditions(windows, macro=args.macro, interactions=args.interactions,
                                  max_features=max_features, fin_rows=args.fin_rows,
-                                 demean_target=args.demean_target)
+                                 demean_target=args.demean_target,
+                                 risk_axis=args.risk_axis)
     except ValueError as e:
         raise SystemExit(str(e))
     # 列数モードの分母は本番値（プラグイン既定）。**ここで数値を書き写さない**。
@@ -892,7 +1118,11 @@ def main() -> None:
     # ファイル名で取り違えたまま比較するほうが起きやすい。
     mode = mode_of(windows, macro=args.macro, interactions=args.interactions,
                    max_features=max_features, fin_rows=args.fin_rows,
-                   demean_target=args.demean_target)
+                   demean_target=args.demean_target, risk_axis=args.risk_axis)
+    # リスク軸の λ は**プラグインの既定から取る**（書き写すと本番が変えたときに黙って別物を
+    # 測る）。R を月内で標準化するので、この λ は3条件で同じ意味を持つ。
+    lam = float(coerce_params(
+        get_plugin(MODEL_SPECS[models[0]][0]).params_schema(), {}).get("lambda_risk") or 0.0)
     default_out = f"momentum_gate{MODE_SUFFIX[mode]}.json"
     out_path = Path(args.json_path) if args.json_path else _OUT_DIR / default_out
 
@@ -945,12 +1175,20 @@ def main() -> None:
         # M-1 は strict のため別の1枚になる。ここを共有すると M-1 を M-2 の母集団で測る。
         panels: dict[tuple, tuple] = {}
         stats: dict[str, dict] = {}
+        # **同じ `Cond` なら同じパネルを使い回す**（#709）。リスク軸モードは3条件とも本番構成の
+        # 同一 `Cond` なので、畳まないと同じ構築を3回払ううえ、**μ̂ が3条件で完全一致する保証が
+        # 無くなる**——わずかでもずれると軸の差と混ざる（#697 と同型）。他モードは条件ごとに
+        # `Cond` が違うので、この畳み込みは1件も当たらず挙動が変わらない。
+        built: dict[tuple, tuple] = {}
         for cond, c in conds.items():
             for kind in kinds:
-                s, m, i, feats = _build(kind, args, prices_by_co, fins[c.fin_rows], companies,
-                                        macro_cache, c.use_momentum, c.momentum_window,
-                                        c.use_macro, c.build_interactions, c.max_features,
-                                        c.demean_target)
+                if (c, kind) not in built:
+                    built[(c, kind)] = _build(
+                        kind, args, prices_by_co, fins[c.fin_rows], companies,
+                        macro_cache, c.use_momentum, c.momentum_window,
+                        c.use_macro, c.build_interactions, c.max_features,
+                        c.demean_target)
+                s, m, i, feats = built[(c, kind)]
                 panels[(cond, kind)] = (s, m, i, feats)
                 st = _panel_stats(s, i, feats)
                 # **選ばれた列名を残す**（#615）。M-1 は BIC が列を選ぶので、数だけでは
@@ -1003,15 +1241,49 @@ def main() -> None:
                   "mean on the demean side; rank_ic / long_short / short_side are "
                   "within-month and unaffected by the shift", flush=True)
 
+        # リスク軸モードの R は CV の前に作る（軸ごとに `(ym, ec) → R`）。パネルは3条件とも
+        # 同一なので `base` のものを使う——ここを条件ごとに取ると、同じ中身を3回計算するだけ。
+        risk_maps: dict[str, dict] = {}
+        if mode == "risk_axis":
+            producer = get_producer_scores(db)
+            ids0 = panels[(base, MODEL_SPECS[models[0]][2])][2]
+            risk_maps = {cond: risk_by_ym(RISK_CONDS[cond], prices_by_co, ids0, producer)
+                         for cond in conds}
+            print(f"[risk] lambda={lam} axes=" + ", ".join(
+                f"{c}:{RISK_CONDS[c] or '-'}({len(risk_maps[c])} rows)" for c in conds),
+                flush=True)
+            print(f"[risk] r_macro producer companies={len(producer)} "
+                  "（**時点不変**: beta と Sigma_macro は単一 run のスナップショット＝"
+                  "過去の月にも 2026年推定の値を当てている。未来情報を含む上限として読む）",
+                  flush=True)
+            if not producer:
+                raise SystemExit(
+                    "中止: macro_beta の producer が空です（r_macro が全社で作れない）。"
+                    "macro_beta_loadings / macro_beta_meta に live の run があるか確認してください")
+
         # ── 2. 各条件 × 各モデルを走らせる（残差も受け取る）────────────────────
         results: dict[str, dict] = {}
-        parts: dict[str, tuple] = {}
+        # パネルと同じ理由で CV も `Cond` 単位に畳む（#709）。**μ̂ をビット単位で同一にする**
+        # のが目的で、速さは副産物。`_parts` は pop で消えるので memo 側に取り分けておく。
+        # （この段の残差は raw 水準の表示にしか使わない。主判定が読むのは共通月で走らせ
+        #  直した `cparts` のほう。）
+        ran: dict[tuple, tuple] = {}
         for cond in conds:
             for model in models:
                 estimator, kind = MODEL_SPECS[model][1], MODEL_SPECS[model][2]
-                s, m, i, feats = panels[(cond, kind)]
-                out = run_one(estimator, s, m, i, feats, pca=0, return_parts=True)
-                parts[f"{cond}|{model}"] = out.pop("_parts")
+                memo = (conds[cond], kind, model)
+                if memo not in ran:
+                    s, m, i, feats = panels[(cond, kind)]
+                    fresh = run_one(estimator, s, m, i, feats, pca=0, return_parts=True)
+                    ran[memo] = (fresh, fresh.pop("_parts"))
+                out, part = ran[memo]
+                if mode == "risk_axis":
+                    # 同じ CV の残差へ条件ごとの U 変換を当て、oof を作り直す。**`out` を
+                    # 複製する**——memo は3条件で共有しているので、その場で書き換えると
+                    # 他の条件の水準まで書き換わる。
+                    rr, mm, _drop = apply_risk_axis(part[0], part[1], risk_maps[cond], lam)
+                    out = {**out, "oof": oof_backtest(rr, n_quantiles=RISK_QUANTILES,
+                                                      meta_by_ym=mm, rebalance_per_year=4)}
                 if out.get("error"):
                     print(f"  {model}: ERROR {out['error']}", flush=True)
                 results[f"{cond}|{model}"] = out
@@ -1046,6 +1318,7 @@ def main() -> None:
                for cond in conds for kind in kinds}
     cparts: dict[str, tuple] = {}
     cruns: dict[str, dict] = {}
+    cran: dict[tuple, tuple] = {}       # 共通月パネルでも `Cond` 単位に畳む（上と同じ理由）
     for cond in conds:
         for kind in kinds:
             cs, _cm, ci, cfeats = cpanels[(cond, kind)]
@@ -1055,9 +1328,13 @@ def main() -> None:
                   f"features={st['n_features']}", flush=True)
         for model in models:
             estimator, kind = MODEL_SPECS[model][1], MODEL_SPECS[model][2]
-            s, m, i, feats = cpanels[(cond, kind)]
-            out = run_one(estimator, s, m, i, feats, pca=0, return_parts=True)
-            cparts[f"{cond}|{model}"] = out.pop("_parts")
+            memo = (conds[cond], kind, model)
+            if memo not in cran:
+                s, m, i, feats = cpanels[(cond, kind)]
+                fresh = run_one(estimator, s, m, i, feats, pca=0, return_parts=True)
+                cran[memo] = (fresh, fresh.pop("_parts"))
+            out, part = cran[memo]
+            cparts[f"{cond}|{model}"] = part
             cruns[f"{cond}|{model}"] = out
             if out.get("error"):
                 print(f"  {model}: ERROR {out['error']}", flush=True)
@@ -1065,12 +1342,28 @@ def main() -> None:
     print("\n=== common (ym,ec) restriction ===", flush=True)
     common_results: dict[str, dict] = {}
     common_info: dict[str, dict] = {}
+    # リスク軸モードの健全性（#709）。R が全軸で揃わず落とした行数と、U の分位ごとの
+    # リスク調整後の姿。他モードでは空のまま。
+    risk_dropped: dict[str, int] = {}
+    risk_profiles: dict[str, list] = {}
     for model in models:
         kind = MODEL_SPECS[model][2]
         aligned = {cond: _align(cparts[f"{cond}|{model}"][0], cpanels[(cond, kind)][2])
                    for cond in conds}
         # **全条件の交差**を取る。2条件のときは従来と同じ off ∩ on。
         keys = set.intersection(*[set(aligned[c]) for c in conds])
+        # **R が全軸で取れる行だけへ揃えるのは、変換の前（＝この段）**。変換の後で落とすと
+        # `r_macro` を持たない銘柄がその条件からだけ消え、母集団が条件間でずれる（ADR-0045）。
+        if mode == "risk_axis":
+            before = len(keys)
+            keys = risk_common_keys(risk_maps, keys)
+            risk_dropped[model] = before - len(keys)
+            print(f"  [risk] R が全軸で揃わない行を除外: {before - len(keys)} "
+                  f"（{before} -> {len(keys)}）", flush=True)
+            if not keys:
+                raise SystemExit(
+                    "中止: R が全軸で揃う (ym,ec) が 0 件です。r_macro の producer が"
+                    "評価パネルの銘柄を1社も覆っていない可能性があります")
         folds = {c: cruns[f"{c}|{model}"]["n_folds"] for c in conds}
         common_info[model] = {
             "n_common": len(keys),
@@ -1085,6 +1378,9 @@ def main() -> None:
         for cond in conds:
             resid, meta = cparts[f"{cond}|{model}"]
             r2, m2 = _restrict(resid, meta, cpanels[(cond, kind)][2], keys)
+            if mode == "risk_axis":
+                r2, m2, _d = apply_risk_axis(r2, m2, risk_maps[cond], lam)
+                risk_profiles[f"{cond}|{model}"] = quantile_risk_profile(r2)
             bt = oof_backtest(r2, n_quantiles=5, meta_by_ym=m2, rebalance_per_year=4)
             common_results[f"{cond}|{model}"] = bt
             print(f"    [{cond}] rank-IC={_num(bt['rank_ic']['mean'])} "
@@ -1135,6 +1431,25 @@ def main() -> None:
                   f"{_num(o.get('long_short_spread')):>10} {r['n_folds']:>6} "
                   f"{st['samples']:>9}", flush=True)
 
+    if mode == "risk_axis":
+        # **素のリターンだけでは、リスクを下げた効果が罰として出る**（#709）。判定の主指標は
+        # 上の rank_ic のままで、ここは読み手が符号を解釈するための参考値。
+        print("\n=== risk-adjusted profile of the U ordering "
+              "(quantile 0 = lowest U, monthly series) ===", flush=True)
+        print(f"  {'cond':<8} {'q':<3} {'mean ret':>10} {'vol':>10} {'sharpe':>10} "
+              f"{'periods':>8}", flush=True)
+        for cond in conds:
+            for model in models:
+                for row in risk_profiles.get(f"{cond}|{model}", []):
+                    print(f"  {cond:<8} {row['quantile']:<3} "
+                          f"{_num(row['mean_return']):>10} {_num(row['vol']):>10} "
+                          f"{_num(row['sharpe']):>10} {row['n_periods']:>8}", flush=True)
+        print("[note] r_macro is TIME-INVARIANT per company (beta and Sigma_macro come from a "
+              "single 2026 snapshot), so this axis moves 'macro vs realized vol' and "
+              "'static vs dynamic' at the same time. A win here is an UPPER BOUND that "
+              "includes look-ahead and is NOT grounds for changing the default (#709).",
+              flush=True)
+
     verdict = verdict_text(mode, len(conds), passed, regressed)
     print(f"\n=== verdict === {verdict}", flush=True)
     print("判定は common スコープで読む（同一 fold・同一 (ym,ec) 域）。raw は水準のみ。",
@@ -1160,6 +1475,18 @@ def main() -> None:
         "changed_rows": changed_rows,
         # 目的変数モードの健全性（#615）。{"条件|種別": 月平均の絶対値の最大}。他モードでは空。
         "target_month_mean": target_month_mean,
+        # リスク軸モード（#709）。他モードでは None / 空。
+        "risk_axes": {name: RISK_CONDS.get(name) for name in conds} if mode == "risk_axis" else {},
+        "lambda_risk": lam if mode == "risk_axis" else None,
+        "risk_dropped_rows": risk_dropped,
+        "risk_profiles": risk_profiles,
+        # **勝っても既定を変える根拠にならない**ことを JSON 側にも残す（標準出力は流れる）。
+        "risk_axis_caveat": (
+            "r_macro is time-invariant per company (beta and Sigma_macro come from a single "
+            "2026 snapshot; macro_beta_loadings has no as-of column). Every evaluated month "
+            "uses beta estimated from later data, so this is an upper bound that includes "
+            "look-ahead, and the axis moves 'macro vs realized vol' and 'static vs dynamic' "
+            "together." if mode == "risk_axis" else None),
         "alpha": alpha,
         "n_tests": n_tests,
         "models": models,
