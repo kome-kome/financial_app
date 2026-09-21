@@ -62,6 +62,14 @@ class TestModesAreMutuallyExclusive:
         (dict(interactions=True, demean_target=True)),
         (dict(max_features=[5], demean_target=True)),
         (dict(fin_rows=True, demean_target=True)),
+        # リスク軸モード（#709）も同じ扱い。R は学習に入らないので行は落とさないが、
+        # 軸を2つ振ると分離できない点は同じ。
+        (dict(windows=[3], risk_axis=True)),
+        (dict(macro=True, risk_axis=True)),
+        (dict(interactions=True, risk_axis=True)),
+        (dict(max_features=[5], risk_axis=True)),
+        (dict(fin_rows=True, risk_axis=True)),
+        (dict(demean_target=True, risk_axis=True)),
     ]
 
     @pytest.mark.parametrize("kwargs", PAIRS)
@@ -506,13 +514,14 @@ class TestOutputNamesTheModeThatWasMeasured:
         (dict(max_features=[5, 20]), "max_features"),
         (dict(fin_rows=True), "fin_rows"),
         (dict(demean_target=True), "demean_target"),
+        (dict(risk_axis=True), "risk_axis"),
     ])
     def test_mode_follows_the_flag(self, kwargs, want):
         assert mode_of(**kwargs) == want
 
     def test_every_mode_has_a_file_suffix(self):
         assert set(MODE_SUFFIX) == {"default", "windows", "macro", "interactions", "max_features",
-                                    "fin_rows", "demean_target"}
+                                    "fin_rows", "demean_target", "risk_axis"}
 
     def test_demean_mode_writes_its_own_file(self):
         """既定の `momentum_gate.json` を上書きしない（どの軸の結果かがファイル名で分かる）。"""
@@ -531,6 +540,7 @@ class TestOutputNamesTheModeThatWasMeasured:
         ("max_features", 2, "MAX_FEATURES SCAN"),
         ("fin_rows", 2, "FIN ROWS AXIS"),
         ("demean_target", 2, "DEMEAN TARGET AXIS"),
+        ("risk_axis", 3, "RISK AXIS"),
     ])
     def test_new_modes_do_not_borrow_the_momentum_wording(self, mode, n_conds, head):
         for passed, regressed in (([], []), (["x"], []), ([], ["y"])):
