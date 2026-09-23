@@ -158,6 +158,22 @@ _EN_CV_SPLITS = 3
 _EN_MAX_ITER = 50000
 
 
+def alpha_path_bounds(model, l1_ratios) -> tuple[float, float]:
+    """`ElasticNetCV` が選んだ l1_ratio の α パスの (最小, 最大) を返す（#726）。
+
+    α パスは l1_ratio ごとに別に自動生成される（`alphas_` は l1_ratio が複数なら
+    (n_l1_ratio, n_alphas)、1つなら (n_alphas,)）。選ばれた α がこの端に一致したら
+    「パスの外にもっと良い α がある」可能性がある——上端は全係数ゼロ（定数予測）、
+    下端は `eps` で切った正則化の最弱側。
+    """
+    path = np.asarray(model.alphas_, dtype=float)
+    if path.ndim == 2:
+        ratios = [float(r) for r in l1_ratios]
+        idx = int(np.argmin([abs(r - float(model.l1_ratio_)) for r in ratios]))
+        path = path[idx]
+    return float(path.min()), float(path.max())
+
+
 def make_elasticnet_fit_predict(l1_ratios: tuple = _EN_L1_RATIOS,
                                 n_alphas: int = _EN_N_ALPHAS,
                                 cv_splits: int = _EN_CV_SPLITS,
@@ -197,6 +213,10 @@ def make_elasticnet_fit_predict(l1_ratios: tuple = _EN_L1_RATIOS,
             diag["l1_ratio"].append(float(model.l1_ratio_))
             diag["n_nonzero"].append(int(np.count_nonzero(model.coef_)))
             diag["coef"].append([float(c) for c in model.coef_])
+            # 0/1 で積む＝`summarize_diag` の平均が「α パスの端に張り付いた fold の割合」になる（#726）
+            lo, hi = alpha_path_bounds(model, l1_ratios)
+            diag["alpha_at_path_min"].append(int(math.isclose(model.alpha_, lo, rel_tol=1e-9)))
+            diag["alpha_at_path_max"].append(int(math.isclose(model.alpha_, hi, rel_tol=1e-9)))
         return yhat, y_te
 
     return fit_predict

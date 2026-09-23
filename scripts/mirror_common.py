@@ -145,6 +145,9 @@ SYNC_PLAN: dict[str, TableSync] = {
     "recommend_factor_premia": TableSync(
         MODE_WATERMARK, "computed_at", 1,
         note="run_id 単位の追記。computed_at は onupdate 無しだが既存行を更新しない"),
+    "nightly_model_diagnostics": TableSync(
+        MODE_WATERMARK, "created_at", 1,
+        note="夜間ごと・モデルごとの追記のみ（#726）。既存行の更新も削除も無い"),
     "collection_logs": TableSync(
         MODE_WATERMARK, "started_at", 1, extra_where="finished_at IS NULL",
         note="running -> done の後追い UPDATE があるため、未完了行は高水位に関わらず毎回取り直す"),

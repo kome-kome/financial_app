@@ -2257,6 +2257,54 @@ def replace_ttm_financial_records(db, rows) -> int:
     return len(prepared)
 
 
+# ── 8.9 夜間モデルの診断値（#726・ADR-0061）──────────────────────────────────
+# 夜間の producer（sector_ols / macro_enet）が**毎晩計算して捨てていた**診断値を、夜ごと・モデルごとに
+# 1行ずつ積む。選ばれた正則化の強さ（ridge α・ElasticNet α / l1_ratio）、OOF 成績、業種別の統計。
+# 「α が候補の端に張り付いた」「データが変わらないのに値が動いた（#697 型）」を後から確かめるための表で、
+# 本番のスコアはこれを読まない。
+#
+# **追記のみ**（更新も削除もしない）。何を入れるかは `nightly_scores.DIAG_EXTRACTORS` が許可したキー
+# だけで決まり、結果の dict を丸ごと入れない（社別の行・社名を入れない＝リポジトリは public）。
+
+class NightlyModelDiagnostic(Base):
+    """夜間 producer の診断値（run_id × model で1行・追記のみ）。"""
+    __tablename__ = "nightly_model_diagnostics"
+    __table_args__ = (
+        UniqueConstraint("run_id", "model", name="uq_nightly_model_diagnostics_run_model"),
+    )
+
+    id                 = Column(Integer, primary_key=True, autoincrement=True)
+    run_id             = Column(String(40), nullable=False)   # 1回の nightly_scores 実行で共通
+    model              = Column(String(40), nullable=False)   # プラグイン名
+    snapshot_date      = Column(String(10))                    # "YYYY-MM-DD"（断面の代表値・無ければ NULL）
+    # 値が動いたとき「コードが変わったから」を切り分けるための印。夜間バッチは作業ツリーを
+    # そのまま import するので、未コミットの変更で回った夜は "+dirty" が付く。取れなければ "unknown"。
+    code_version       = Column(String(48))
+    # 断面の前処理の世代（plugins.utils.PREPROCESS_VERSION）。世代が違う行同士の α や係数は比べられない。
+    preprocess_version = Column(String(20))
+    diagnostics        = Column(JSON, nullable=False)
+    created_at         = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+
+def insert_nightly_model_diagnostic(db, *, run_id: str, model: str,
+                                    snapshot_date: str | None, code_version: str | None,
+                                    preprocess_version: str | None, diagnostics: dict) -> int:
+    """診断値を1行追記して commit する。戻り値は書いた行数（0 か 1）。
+
+    `tuning_dry_run()` の内側では no-op（`replace_macro_enet_scores` と同じ作法・Issue #264）。
+    書けたことの証明にはしない——呼び出し側（`nightly_scores`）が直接クエリで確かめる。
+    """
+    if _tuning_dry_run.get():
+        return 0
+    db.add(NightlyModelDiagnostic(
+        run_id=run_id, model=model, snapshot_date=snapshot_date,
+        code_version=code_version, preprocess_version=preprocess_version,
+        diagnostics=diagnostics,
+    ))
+    db.commit()
+    return 1
+
+
 # ── 9. 読み取りモデル: financial_metrics VIEW ──────────────────────────────
 # financial_records（ソース列）から軽い派生（比率・Zスコア・成長率）を「都度SQL算出」し、
 # regression_results を LEFT JOIN して予測値も合成する読み取り専用 VIEW。

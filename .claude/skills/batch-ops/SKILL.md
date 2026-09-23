@@ -31,6 +31,13 @@ python -m scripts.check_batch_freshness             # 判定（停止なら起�
 ./run_watchdog.ps1 -DryRun -Now 2026-08-28T00:00:00+00:00   # 欠落を再現（DB を汚さない）
 ./scripts/install_watchdog_task.ps1                 # タスクスケジューラへ登録（毎日 JST 20:00）
 
+# 夜間 producer の診断値（選ばれた α・OOF 成績・業種別統計）を夜をまたいで読む（#726・ADR-0061）。読み取り専用
+# **DB を手で引かない**。no-context-change の夜は並び依存の「調べる候補」であって断定ではない
+python -m scripts.nightly_diag_report                     # 値が動いた夜だけ（原因の候補つき）
+python -m scripts.nightly_diag_report --view edges        # α が候補の端に張り付いた夜
+python -m scripts.nightly_diag_report --view sectors      # 業種ごとの ridge α の推移
+python -m scripts.nightly_diag_report --model macro_enet --since 2026-10-01
+
 # 夜間バッチの収集ログを晩ごとに並べて読む（#556 の並行フェッチ・#620 のスケール選別）。DB に触らない
 python -m scripts.check_nightly_collect             # 直近3晩・警告があれば exit 2
 python -m scripts.check_nightly_collect --nights 5

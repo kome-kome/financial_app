@@ -32,13 +32,14 @@ M-2（macro_gbdt・XGBoost）の**線形兄弟**。Issue #372 の候補メニュ
     切り出していた残タスク。既定 `mu_source` は M-2 のまま（切替は要バックテスト事後検証）。
     順位スコアで水準を持たない M-5 とは異なり、M-6 は水準を持つため統合できる。
 """
+import math
 import statistics
 from typing import Any
 
 import numpy as np
 
 from .base import AnalysisPlugin
-from .model_candidates import make_diag, make_elasticnet_fit_predict, summarize_diag
+from .model_candidates import alpha_path_bounds, make_diag, make_elasticnet_fit_predict, summarize_diag
 from .macro_snapshots import (
     FIN_BASE_OPTIONS,
     LABEL_HORIZON_MONTHS,
@@ -415,11 +416,19 @@ class MacroEnetPlugin(AnalysisPlugin):
         )
         model.fit(np.asarray(X_tr, dtype=float)[:, 1:], np.asarray(y_z, dtype=float))
         mu = model.predict(np.asarray(X_te, dtype=float)[:, 1:]) * y_sd + y_mu
+        path_min, path_max = alpha_path_bounds(model, l1_ratios)
         meta = {
             "alpha":     round(float(model.alpha_), 6),
             "l1_ratio":  round(float(model.l1_ratio_), 4),
             "n_nonzero": int(np.count_nonzero(model.coef_)),
             "n_features": n_feat,
+            # 選ばれた α / l1_ratio が候補の端かを後から読むための値（夜間の診断・#726）。
+            # 端の判定は丸める前の値で行う（丸めた α と比べると一致を取り逃す）。
+            "alpha_path_min": path_min,
+            "alpha_path_max": path_max,
+            "alpha_at_path_min": math.isclose(model.alpha_, path_min, rel_tol=1e-9),
+            "alpha_at_path_max": math.isclose(model.alpha_, path_max, rel_tol=1e-9),
+            "l1_ratio_grid": [float(r) for r in l1_ratios],
         }
         return model.coef_.tolist(), mu.tolist(), meta
 
