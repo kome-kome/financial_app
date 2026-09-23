@@ -150,6 +150,7 @@ web版・ローカル版の双方が同じ Issue を見ることで、**コー�
   |---|---|---|
   | `heavy=True` のプラグイン | `nightly_scores.HEAVY_AUTOMATION`（回す経路 or `exempt:`） | `test_nightly_scores.py::TestHeavyAutomationRegistry` |
   | heavy な分析（プラグイン **および `SPECIAL_ANALYSES` の特例エントリ**・#593） | `plugins/progress.py::PROGRESS_COVERAGE`（`common` / `own` / `exempt:`） | `test_plugin_progress.py::TestProgressCoverageRegistry` |
+  | 夜間で回す producer（`NIGHTLY_MODELS`） | `nightly_scores.DIAG_EXTRACTORS`（診断値の allowlist・丸ごと保存しない・ADR-0061） | `test_nightly_scores.py::TestDiagnosticsRegistry` |
   | ローカル駆動バッチ（`BatchSpec`） | `batch_freshness.py::WATCHED`（閾値は書かず `cadence` と `WINDOW_MIN` を渡す） | `test_check_batch_freshness.py::TestEveryLocalBatchIsWatched` |
   | 月次が更新する producer（heavy プラグイン・`macro_beta` / `factor_premia`） | `batch_freshness.py::PRODUCER_COVERAGE`（`watched` / `exempt:`）＋ `PRODUCERS` | `test_check_batch_freshness.py::TestEveryHeavyProducerIsCovered` |
   | 日中枠の暦（`run_daytime.SCHEDULE`） | `batch_freshness.PRODUCERS`（読み手は `Scheduled.produced` を共有） | `test_check_batch_freshness.py::TestScheduledCollectionIsWatched` |

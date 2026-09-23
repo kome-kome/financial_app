@@ -181,6 +181,16 @@ class TestExecuteSmoke:
         assert meta["l1_ratio"] in (0.1, 0.5, 0.9)
         assert 0 <= meta["n_nonzero"] <= meta["n_features"]
 
+    def test_final_model_reports_alpha_path_edges(self):
+        """夜間の診断（#726）が「α がパスの端か」を読めるよう、パスの両端と判定を返す。"""
+        meta = _run(_params(use_macro=False))["final_model"]
+        assert meta["l1_ratio_grid"] == [0.1, 0.5, 0.9]
+        assert meta["alpha_path_min"] <= meta["alpha_path_max"]
+        # 丸める前の α で判定する（表示用の alpha は 6桁に丸めてある）
+        assert meta["alpha_path_min"] - 1e-6 <= meta["alpha"] <= meta["alpha_path_max"] + 1e-6
+        assert isinstance(meta["alpha_at_path_min"], bool)
+        assert isinstance(meta["alpha_at_path_max"], bool)
+
     def test_results_capped_at_top_n_and_sorted(self):
         res = _run(_params(use_macro=False, top_n=5))
         assert len(res["results"]) <= 5

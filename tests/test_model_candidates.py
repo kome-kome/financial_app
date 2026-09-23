@@ -19,10 +19,12 @@ import pytest
 
 from plugins.model_candidates import (
     CANDIDATES,
+    alpha_path_bounds,
     build_candidate,
     candidate_available,
     macro_column_indices,
     make_diag,
+    make_elasticnet_fit_predict,
     pca_feature_names,
     summarize_diag,
     wrap_macro_pca,
@@ -178,6 +180,39 @@ def test_walk_forward_integration(name):
     for ym, pairs in residuals.items():
         assert len(pairs) == len(panel[ym])
     assert summarize_diag(diag)     # 診断が空でない
+
+
+def test_elasticnet_diag_records_alpha_path_edges():
+    """fold ごとに「α がパスの端か」を 0/1 で積み、要約では端に張り付いた fold の割合になる（#726）。"""
+    diag = make_diag()
+    fp = make_elasticnet_fit_predict(diag=diag)
+    panel = _panel()
+    for n_train in (18, 20, 22):
+        train, test, _ = _split(panel, n_train)
+        fp(train, test)
+
+    assert len(diag["alpha_at_path_min"]) == 3
+    assert set(diag["alpha_at_path_min"]) <= {0, 1}
+    assert set(diag["alpha_at_path_max"]) <= {0, 1}
+    s = summarize_diag(diag)
+    assert 0.0 <= s["alpha_at_path_min"] <= 1.0
+    assert 0.0 <= s["alpha_at_path_max"] <= 1.0
+
+
+@pytest.mark.parametrize("l1_ratio", [[0.1, 0.5, 0.9], 0.5])
+def test_alpha_path_bounds_bracket_the_chosen_alpha(l1_ratio):
+    """l1_ratio が複数でも1つでも、選ばれた α は返した (最小, 最大) の内側にある。"""
+    from sklearn.linear_model import ElasticNetCV
+    from sklearn.model_selection import TimeSeriesSplit
+
+    rng = np.random.default_rng(0)
+    X = rng.normal(size=(200, 5))
+    y = X[:, 0] + rng.normal(size=200)
+    model = ElasticNetCV(l1_ratio=l1_ratio, alphas=20, cv=TimeSeriesSplit(3),
+                         random_state=42).fit(X, y)
+    lo, hi = alpha_path_bounds(model, l1_ratio if isinstance(l1_ratio, list) else [l1_ratio])
+    assert lo < hi
+    assert lo <= model.alpha_ <= hi
 
 
 def test_embargo_shortens_folds_equally():

@@ -21,7 +21,9 @@ heavy の自動実行契約（ADR-0031・Issue #423 子6）
      notify-failure でも検知できない（#432/#443/#423 子5 で3回起きた）。
 """
 import asyncio
+import json
 import os
+import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -32,6 +34,7 @@ import yaml
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from nightly_scores import (  # noqa: E402
+    DIAG_EXTRACTORS,
     EXEMPT_PREFIX,
     HEAVY_AUTOMATION,
     LOCAL_PREFIX,
@@ -39,9 +42,16 @@ from nightly_scores import (  # noqa: E402
     NIGHTLY_PARAMS,
     VERIFIERS,
     VerificationError,
+    _code_version,
+    _edge_warnings,
+    _extract_macro_enet,
+    _extract_sector_ols,
+    _json_safe,
     _summarize,
     _verify_macro_enet,
     _verify_sector_ols,
+    failed_labels,
+    ridge_alpha_edge,
     run_models,
 )
 from tests.test_sector_ols import _seed_sector  # noqa: E402
@@ -418,6 +428,207 @@ class TestVerifier:
 
     def test_summarize_handles_empty_result(self):
         assert _summarize({}) == "(要約できる項目なし)"
+
+
+# ── 診断値の記録（#726・ADR-0061）─────────────────────────────────────────────
+
+class TestDiagnosticsRegistry:
+    """`NIGHTLY_MODELS` を増やしたら `DIAG_EXTRACTORS` へ1行足す（忘れても失敗として現れない）。"""
+
+    def test_every_nightly_model_has_an_extractor(self):
+        missing = [m for m in NIGHTLY_MODELS if m not in DIAG_EXTRACTORS]
+        assert not missing, (
+            f"{missing} は夜間で回るのに診断値の抽出器が無い＝毎晩の α / OOF がまた捨てられる。"
+            "nightly_scores.DIAG_EXTRACTORS へ1行足すこと（ADR-0061）"
+        )
+
+
+class TestDiagnosticsRecording:
+    def test_writes_one_row_per_model_after_persistence(self, db, make_fin):
+        from database import NightlyModelDiagnostic
+        from plugins.utils import PREPROCESS_VERSION
+
+        _seed_sector(db, make_fin, n=12)
+        started = datetime.now(timezone.utc)
+        entries = asyncio.run(run_models(["sector_ols"], db, code_version="a" * 40))
+
+        e = entries[0]
+        assert e["ok"] is True, e["error"]
+        assert e["diagnostics_error"] is None
+        assert e["diagnostics"] and "code_version=" + "a" * 40 in e["diagnostics"]
+        assert failed_labels(entries) == []
+
+        rows = db.query(NightlyModelDiagnostic).all()
+        assert len(rows) == 1
+        r = rows[0]
+        assert r.model == "sector_ols"
+        assert r.code_version == "a" * 40
+        assert r.preprocess_version == PREPROCESS_VERSION
+        created = r.created_at if r.created_at.tzinfo else r.created_at.replace(tzinfo=timezone.utc)
+        assert created >= started - timedelta(seconds=1)
+        assert r.diagnostics["sectors"], "業種別の統計が入っていない"
+        assert r.diagnostics["sectors"][0]["method"] == "ridge"
+        assert r.diagnostics["ridge_alphas"][0] == 1e-3
+
+    def test_write_that_lands_nowhere_fails_the_batch(self, db, make_fin, monkeypatch):
+        """書いたつもりで入っていない夜を成功扱いにしない（その場の検証・決定5）。
+
+        μ̂（gap_ratio）の永続化は巻き戻さない——失敗するのは診断値だけ。
+        """
+        import database
+        from database import RegressionResult
+
+        monkeypatch.setattr(database, "insert_nightly_model_diagnostic", lambda db, **kw: 1)
+        _seed_sector(db, make_fin, n=12)
+        entries = asyncio.run(run_models(["sector_ols"], db, code_version="unknown"))
+
+        e = entries[0]
+        assert e["ok"] is True, "μ̂ の永続化は成功しているので model 自体は失敗にしない"
+        assert "行が無い" in e["diagnostics_error"]
+        assert failed_labels(entries) == ["sector_ols:diagnostics"]
+        assert db.query(RegressionResult).count() == 12
+
+    def test_nothing_is_recorded_when_the_model_failed(self, db):
+        from database import NightlyModelDiagnostic
+
+        entries = asyncio.run(run_models(["sector_ols"], db, code_version="unknown"))
+        assert entries[0]["ok"] is False
+        assert entries[0]["diagnostics"] is None
+        assert db.query(NightlyModelDiagnostic).count() == 0
+        assert failed_labels(entries) == ["sector_ols"]
+
+    def test_model_without_extractor_is_skipped_not_failed(self, db, monkeypatch):
+        """`--models` で明示した非夜間モデルは記録しないだけで、失敗にはしない。"""
+        import plugins
+        from plugins.base import AnalysisPlugin
+
+        class _Fake(AnalysisPlugin):
+            name = "fake_light"
+            label = "fake"
+            description = "test"
+
+            def params_schema(self) -> dict:
+                return {}
+
+            def execute(self, params, db) -> dict:
+                return {"n": 1}
+
+        monkeypatch.setattr(plugins, "get_plugin", lambda name: _Fake())
+        entries = asyncio.run(run_models(["fake_light"], db, code_version="unknown"))
+        assert entries[0]["ok"] is True
+        assert entries[0]["diagnostics"] is None
+        assert entries[0]["diagnostics_error"] is None
+        assert failed_labels(entries) == []
+
+
+class TestDiagnosticsExtraction:
+    def test_sector_ols_keeps_no_company_rows(self):
+        """社別の行・社名は入れない（allowlist・リポジトリは public）。"""
+        result = {
+            "n_sectors": 1, "n_total": 3, "features_used": ["pl_eps"],
+            "results": [{"edinet_code": "E99999", "company_name": "テスト社"}],
+            "sector_stats": [{"industry": "機械", "n": 3, "r2": 0.5, "adj_r2": 0.4,
+                              "method": "ridge", "alpha": 0.001,
+                              "collinearity_warnings": {"high_vif": [(0, 12.0)],
+                                                        "high_corr_pairs": []}}],
+        }
+        diag = _json_safe(_extract_sector_ols(result))
+        text = json.dumps(diag, ensure_ascii=False, allow_nan=False)
+        assert "E99999" not in text and "テスト社" not in text
+        s = diag["sectors"][0]
+        assert s["alpha_edge"] == "low"
+        assert s["n_high_vif"] == 1
+        assert diag["n_alpha_at_low_edge"] == 1
+        assert diag["n_alpha_at_high_edge"] == 0
+
+    def test_ols_sector_has_no_alpha_edge(self):
+        diag = _extract_sector_ols({"sector_stats": [
+            {"industry": "x", "n": 5, "method": "ols", "alpha": None}]})
+        assert diag["sectors"][0]["alpha"] is None
+        assert diag["sectors"][0]["alpha_edge"] is None
+
+    def test_macro_enet_keeps_no_company_rows_on_a_real_result(self):
+        """実プラグインの出力（スモーク DB）から抜き出しても社別の行が入らず、JSON として通る。"""
+        from tests.test_macro_enet import _params as enet_params
+        from tests.test_macro_enet import _run as enet_run
+
+        result = enet_run(enet_params(use_macro=False))
+        diag = _json_safe(_extract_macro_enet(result))
+        text = json.dumps(diag, ensure_ascii=False, allow_nan=False)
+        for row in result["results"]:
+            assert row["edinet_code"] not in text
+            assert row["company_name"] not in text
+        assert "coef" not in diag["cv_diagnostics"], "最終 fold の係数ベクトルは feature_coefs と重複する"
+        assert "rank_ic" in diag["oof"]
+        assert diag["final_model"]["l1_ratio_grid"] == [0.1, 0.5, 0.9]
+        assert isinstance(diag["final_model"]["l1_ratio_at_grid_edge"], bool)
+
+    def test_macro_enet_drops_unlisted_oof_keys(self):
+        diag = _extract_macro_enet({"oof_backtest": {"rank_ic": {"mean": 0.1}, "unlisted": 1}})
+        assert diag["oof"] == {"rank_ic": {"mean": 0.1}}
+
+    def test_json_safe_makes_postgres_json_acceptable(self):
+        """PostgreSQL の JSON は NaN を受け付けない。numpy の数・tuple・非文字列キーも揃える。"""
+        import numpy as np
+
+        got = _json_safe({1: float("nan"), "a": np.int64(3), "b": np.float64(0.5),
+                          "c": np.bool_(True), "d": (1, float("inf")), "e": None})
+        assert got == {"1": None, "a": 3, "b": 0.5, "c": True, "d": [1, None], "e": None}
+        assert type(got["a"]) is int and type(got["c"]) is bool
+        json.dumps(got, allow_nan=False)
+
+    @pytest.mark.parametrize("alpha,edge", [
+        (0.001, "low"), (1e-3, "low"), (1000.0, "high"), (10.0, None), (None, None)])
+    def test_ridge_alpha_edge(self, alpha, edge):
+        assert ridge_alpha_edge(alpha) == edge
+
+    def test_edge_warnings(self):
+        """ridge は上端だけを WARN にする。下端は罰なしと同等で対処できない（#728 の実測）。"""
+        sector = {"sectors": [{"industry": "機械", "alpha": 0.001, "alpha_edge": "low", "n": 208},
+                              {"industry": "卸売業", "alpha": 100.0, "alpha_edge": None, "n": 281},
+                              {"industry": "鉄鋼", "alpha": 1000.0, "alpha_edge": "high", "n": 37}]}
+        assert _edge_warnings("sector_ols", sector) == ["鉄鋼: alpha=1000.0 (high edge, n=37)"]
+        enet = {"final_model": {"alpha": 0.5, "alpha_at_path_min": False, "alpha_at_path_max": True}}
+        assert len(_edge_warnings("macro_enet", enet)) == 1
+        assert _edge_warnings("macro_enet", {"final_model": {}}) == []
+
+
+class TestCodeVersion:
+    @staticmethod
+    def _fake_run(sha: str, dirty: str):
+        def run(args, **kw):
+            out = sha if args[1] == "rev-parse" else dirty
+            return subprocess.CompletedProcess(args, 0, stdout=out + "\n", stderr="")
+        return run
+
+    def test_clean_tree(self):
+        assert _code_version(self._fake_run("b" * 40, "")) == "b" * 40
+
+    def test_dirty_tree_is_marked(self):
+        assert _code_version(self._fake_run("b" * 40, " M nightly_scores.py")) == "b" * 40 + "+dirty"
+
+    def test_git_missing_is_unknown_not_an_error(self):
+        def run(args, **kw):
+            raise FileNotFoundError("git")
+        assert _code_version(run) == "unknown"
+
+    def test_git_failure_is_unknown(self):
+        def run(args, **kw):
+            raise subprocess.CalledProcessError(128, args)
+        assert _code_version(run) == "unknown"
+
+    def test_non_sha_output_is_unknown(self):
+        assert _code_version(self._fake_run("not-a-sha", "")) == "unknown"
+
+    def test_args_are_fixed_and_shell_is_not_used(self):
+        seen = []
+
+        def run(args, **kw):
+            seen.append((tuple(args), kw.get("shell", False), kw.get("timeout")))
+            return subprocess.CompletedProcess(args, 0, stdout="c" * 40, stderr="")
+        _code_version(run)
+        assert seen == [(("git", "rev-parse", "HEAD"), False, 10),
+                        (("git", "status", "--porcelain", "--untracked-files=no"), False, 10)]
 
 
 # ── ワークフロー: 起動条件の不変条件 ────────────────────────────────────────

@@ -21,6 +21,11 @@ from . import progress
 # 予測値の log-space 上限（exp(LOG_PRED_CAP) ≈ 3.3 百万円/株）
 LOG_PRED_CAP = 15.0
 
+# `ridge_regression` が LOO で選ぶ α の候補（ADR-0058 決定1「候補は変えない」）。
+# 夜間の診断（`nightly_scores`・#726）が「選ばれた α が候補の端か」を判定するのにも使う＝
+# 書き写さずここを参照する（写すと候補を広げたときに端の判定だけが古いまま残る）。
+RIDGE_ALPHAS: tuple[float, ...] = (1e-3, 1e-2, 0.1, 1.0, 10.0, 100.0, 1000.0)
+
 
 # ── パラメータ契約（param contract）の coerce seam ──────────────────────────
 # CONTEXT.md「パラメータ契約」を参照。プラグインの params_schema() を型契約として読み、
@@ -560,7 +565,7 @@ def ridge_regression(X: list, y: list,
     Args:
         X: 設計行列（切片列を含む）
         y: 目的変数
-        alphas: 探索する α 候補（None なら `[1e-3, 1e-2, 0.1, 1, 10, 100, 1000]`）
+        alphas: 探索する α 候補（None なら `RIDGE_ALPHAS`）
     """
     from sklearn.linear_model import RidgeCV
 
@@ -571,7 +576,7 @@ def ridge_regression(X: list, y: list,
     n, p = X_np.shape
 
     if alphas is None:
-        alphas = [1e-3, 1e-2, 0.1, 1.0, 10.0, 100.0, 1000.0]
+        alphas = list(RIDGE_ALPHAS)
 
     # 切片は X に含めて RidgeCV(fit_intercept=False) とする（既存呼び出しと一貫）
     try:
