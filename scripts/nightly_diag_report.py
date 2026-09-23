@@ -212,6 +212,15 @@ def render_edges(items: list[dict]) -> str:
         lines.append("")
         lines.append("{0}  {1}".format(i["run_id"], i["model"]))
         lines += ["  - " + h for h in i["hits"]]
+    lines += [
+        "",
+        "読み方（#728 の実測・2026-09-23）:",
+        "  ridge の low（0.001）は罰なしと同等＝対処不要。候補を下へ広げても誤差は変わらない",
+        "  （機械 208社: alpha=0 でも 0.001 でも一個抜き誤差 0.5947）。社数が係数の数より少ない業種の",
+        "  low は LOO 自体が当てにならず、15社未満は全社プールへ縮約される。",
+        "  ridge の high（1000）は罰を最大にしても足りない＝特徴量が効いていない合図。夜間は WARN を出す。",
+        "  macro_enet の端は未実測（low を罰なし同等と読めるかは #728 で確かめる）。",
+    ]
     return "\n".join(lines)
 
 

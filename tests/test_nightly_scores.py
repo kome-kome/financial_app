@@ -583,9 +583,11 @@ class TestDiagnosticsExtraction:
         assert ridge_alpha_edge(alpha) == edge
 
     def test_edge_warnings(self):
+        """ridge は上端だけを WARN にする。下端は罰なしと同等で対処できない（#728 の実測）。"""
         sector = {"sectors": [{"industry": "機械", "alpha": 0.001, "alpha_edge": "low", "n": 208},
-                              {"industry": "卸売業", "alpha": 100.0, "alpha_edge": None, "n": 281}]}
-        assert _edge_warnings("sector_ols", sector) == ["機械: alpha=0.001 (low edge, n=208)"]
+                              {"industry": "卸売業", "alpha": 100.0, "alpha_edge": None, "n": 281},
+                              {"industry": "鉄鋼", "alpha": 1000.0, "alpha_edge": "high", "n": 37}]}
+        assert _edge_warnings("sector_ols", sector) == ["鉄鋼: alpha=1000.0 (high edge, n=37)"]
         enet = {"final_model": {"alpha": 0.5, "alpha_at_path_min": False, "alpha_at_path_max": True}}
         assert len(_edge_warnings("macro_enet", enet)) == 1
         assert _edge_warnings("macro_enet", {"final_model": {}}) == []

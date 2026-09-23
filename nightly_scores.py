@@ -335,12 +335,21 @@ DIAG_EXTRACTORS: dict[str, Callable[[dict], dict]] = {
 
 
 def _edge_warnings(model: str, diag: dict) -> list[str]:
-    """選ばれた α が候補の端に張り付いた箇所（WARN ログ用・起票はしない）。"""
+    """選ばれた α が候補の端に張り付いた箇所のうち、人が見るべきもの（WARN ログ用・起票はしない）。
+
+    **ridge の下端（0.001）は数えない**（#728 の実測・2026-09-23）。特徴量は z-score 済みで
+    X'X の対角は社数ほど（機械 208社）あるので、0.001 の罰は普通の回帰（α=0）と区別が付かない
+    ——機械は α=0 でも 0.001 でも一個抜き誤差が 0.5947 で同じ、予測値の差も最大 7e-4（標準化単位）。
+    下端は「候補が狭い」ではなく「この業種は罰が要らない」という結論なので、毎晩 WARN を出すと
+    対処できない警告になる。社数が係数の数（切片込みで 8〜11）より少ない業種も下端を選ぶが、そこでは LOO 自体が
+    当てにならず、15社未満は全社プールへの縮約が掛かる。**上端（1000）は罰を最大にしても足りない
+    ＝特徴量が効いていない合図**なので残す（初回の実測では上端の業種は0・1000 以上はどの業種でも悪化）。
+    """
     out: list[str] = []
     if model == "sector_ols":
         for s in diag.get("sectors") or []:
-            if s.get("alpha_edge"):
-                out.append(f"{s['industry']}: alpha={s['alpha']} ({s['alpha_edge']} edge, n={s['n']})")
+            if s.get("alpha_edge") == "high":
+                out.append(f"{s['industry']}: alpha={s['alpha']} (high edge, n={s['n']})")
     elif model == "macro_enet":
         fm = diag.get("final_model") or {}
         for key, side in (("alpha_at_path_min", "low"), ("alpha_at_path_max", "high")):
@@ -417,6 +426,9 @@ def _record_diagnostics(db, name: str, result: dict, run_ctx: dict,
             f" 実行開始 {started_at.isoformat()} より古い")
     for w in _edge_warnings(name, diag):
         logger.warning("[%s] alpha が候補の端: %s", name, w)
+    low = [s["industry"] for s in diag.get("sectors") or [] if s.get("alpha_edge") == "low"]
+    if low:
+        logger.info("[%s] alpha が下端（罰なしと同等・対処不要・#728）: %s", name, ", ".join(low))
     return f"run_id={run_ctx['run_id']} / code_version={run_ctx['code_version']}"
 
 
