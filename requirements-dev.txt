@@ -1,3 +1,6 @@
 # 開発・テスト専用の依存（Render 本番には入れない＝メモリ節約のため requirements.txt と分離）
 # インストール: pip install -r requirements.txt -r requirements-dev.txt
 pytest==9.0.3
+# pin した依存に後から公表された脆弱性の照合（Issue #723・.github/workflows/dependency-audit.yml）。
+# 評価（2026-09-24）: PyPA 管理・Apache-2.0 / PyPI 月間 24.3M DL / 2.10.1 自身の既知脆弱性なし
+pip-audit==2.10.1
