@@ -1341,7 +1341,7 @@ function _fallbackPlugins() {
 }
 
 function _createDynamicTab(plugin, tabId) {
-  // 重い回帰は Render 軽量モードでは実行不可（ローカルで実行→共有DBに保存→本番反映）
+  // 重い回帰は Render 軽量モードでは実行不可（ローカルで実行→正本のローカル DB に保存。Render の断面には届かない・#503）
   const blocked = plugin.heavy && _renderLightMode;
   const div = document.createElement('div');
   div.id = 'tab-' + tabId;
@@ -1351,7 +1351,7 @@ function _createDynamicTab(plugin, tabId) {
       <div class="section-title">${esc(plugin.label)}<a class="co-link" href="/guide#${esc(plugin.name)}" target="_blank" rel="noopener" style="float:right;font-size:12px;font-weight:400">❓ やさしい解説</a></div>
       ${plugin.description ? `<div class="info-box" style="margin-bottom:14px">${esc(plugin.description)}</div>` : ''}
       ${plugin.depends_on.length ? `<div class="info-box" style="border-color:${cssVar('--status-warn')};margin-bottom:14px">⚠ 事前実行が必要: ${esc(plugin.depends_on.join('、'))}</div>` : ''}
-      ${blocked ? `<div class="info-box" style="border-color:${cssVar('--status-bad')};margin-bottom:14px">⚠ この分析は計算が重いため、Render 環境では実行できません。ローカルPCで実行すると結果が共有DBに保存され、本番にも反映されます。</div>` : ''}
+      ${blocked ? `<div class="info-box" style="border-color:${cssVar('--status-bad')};margin-bottom:14px">⚠ この分析は計算が重いため、Render 環境では実行できません。ローカルPCで実行してください（結果はローカルの正本 DB に保存されます。Render は閲覧専用で、ここには反映されません）。</div>` : ''}
       <div id="form-${esc(tabId)}">${_renderParamsForm(plugin.params_schema, tabId)}</div>
       <button class="btn btn-primary" style="margin-top:16px${blocked ? ';opacity:0.4' : ''}" data-click="runDynamicPlugin" data-arg="${esc(plugin.name)}" data-arg2="${esc(tabId)}"${blocked ? ' disabled title="Render環境ではローカルPCから実行してください"' : ''}>
         ${esc(plugin.label)}を実行

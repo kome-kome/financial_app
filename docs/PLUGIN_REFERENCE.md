@@ -165,7 +165,7 @@ M-1/M-2/M-3 共有ハイパーパラメータ自動探索エンジン（ADR-0007
 
 **`champion_params`（#590・ADR-0047）**: 本番稼働中の params を候補プールの**先頭へ投入**し、今回のパネル上で測り直した値を `champion_score` として返す。これが要るのは、永続化済みの `objective_value` が「そのとき存在したパネルでの値」であり、パネルは毎晩伸びるので月をまたいだ単純比較が成立しないため（実測: `macro_gbdt` の 0.5068 は 10 fold・`macro_dlm` の 0.0221 は 55 fold＝**fold が少ない候補ほど高く出る**）。`_project_champion()` は**まず `coerce_params` を通してから** `dims` の軸名へ投影する＝後から足された軸は schema の default で補う（実測: `macro_gbdt` の 2026-07-19 の行には `use_monotone_constraints` / `use_sector_features` が無い。本番の `execute_plugin` も同じく default を補うので、補完後の姿が「いま本番で動いている設定」）。一方**値が `d.values` から外れていれば投入しない**（`dims` を狭めるのは退役の手段でもあり、投入すると退役させた設定が毎月復活する）。`only_if` の縮退規則は `_grid_combos` と揃える。既に combos にあれば重複投入しない＝grid ではコストゼロ。戻り値の追加キーは `best_oof` / `champion_injected` / `champion_score`。
 
-呼び出し元は CLI（`hyperparameter_search.py`）・GitHub Actions 月次実行（#292）のみ（Issue #293 で GUI からの手動トリガーを廃止）。M-3 の `load_prices`/`load_macro_levels` キャッシュと M-1 の BIC 選択結果紐づき CV キャッシュ（いずれも Issue #304）も同じ `shared_snapshot_cache()` の名前空間拡張で自動的に有効化される（`search()` 自体の `with` 文は #298 のまま変更なし）。
+呼び出し元は CLI（`hyperparameter_search.py`）のみ（Issue #293 で GUI からの手動トリガーを廃止）。定期実行はこの CLI をローカルの月次バッチ（`scripts/run_monthly.py` / `run_monthly_m1.py`）と日中枠（`scripts/run_daytime.py` の `tune:*`）が叩く（GitHub Actions の月次実行（#292）は #503 で止まり、#504 でワークフロー自体を削除）。M-3 の `load_prices`/`load_macro_levels` キャッシュと M-1 の BIC 選択結果紐づき CV キャッシュ（いずれも Issue #304）も同じ `shared_snapshot_cache()` の名前空間拡張で自動的に有効化される（`search()` 自体の `with` 文は #298 のまま変更なし）。
 
 依存先: `plugins/utils.py`, `plugins/__init__.py`, `database.py`
 

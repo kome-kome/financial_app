@@ -29,7 +29,9 @@
 ## 1. 全体構成図（コンポーネント図）
 
 > ブラウザ・サーバー・DB・外部APIの全体像と接続関係を示します。
-> ローカルと Render は同一 Supabase DB を共有し、役割で使い分けます。
+> **正本はローカル PostgreSQL**（#503・[ADR-0038](adr/0038-local-postgres-is-the-primary.md)）。収集・重い計算・バックアップはローカルのバッチが回します。
+> Render は Supabase に残した断面（2026-08-07 時点）を読む閲覧専用の窓で、正本の更新は届きません。Supabase はその断面と Storage のバックアップ置き場を兼ね、ローカルから Supabase の Postgres へ書き戻す経路は持ちません。
+> バッチの暦（起動日・時刻・窓・所要）は [DEPLOYMENT.md](DEPLOYMENT.md) が正本です。
 
 ```mermaid
 graph LR
@@ -37,25 +39,34 @@ graph LR
         direction TB
         LOGIN["🔐 ログイン画面\nlogin.html"]
         D["🏠 ダッシュボード\ndashboard.html\n企業数・収録状況サマリー"]
+        MO["☀️ 朝の推奨\nmorning.html\n発注判定・鮮度・推奨ランキング（読むだけ）"]
         C["📦 収集管理\ncollection.html\n財務収集/株価収集/市場データ更新/DB閲覧\n（4タブ構成・ウィザードUX）"]
         A["📊 分析画面\nanalysis.html\n目的別5カテゴリの左サイドバー\n（銘柄を探す/割安度/リターン予測/検証/保有を見直す・ステータスバー）"]
+        CP["🏢 企業詳細\ncompany.html\n企業検索・個別企業の業績/財務/CF"]
         M["📖 モデル解説\nmodels.html\n数式・参考文献・DOIリンク"]
+        G["🔰 やさしい解説\nguide.html\n数式なし・たとえ話での説明"]
         DB["🗃️ DB ビューア\ndb.html\nスキーマ/プレビュー/統計/リレーション/ドリルダウン"]
     end
 
-    subgraph LOCAL["💻 ローカル PC（制限なし・重い計算担当）"]
+    subgraph LOCAL["💻 ローカル PC（正本を持つ・収集と重い計算を担当）"]
         direction TB
-        API_L["⚡ api.py\n全操作可能\n・全件収集\n・株価履歴再構築\n・J-Quants大量収集\n・重いOLS回帰（結果を共有DBへ保存）\n・分析・スクリーニング"]
+        API_L["⚡ api.py\n全操作可能\n・全件収集\n・株価履歴再構築\n・J-Quants大量収集\n・重いOLS回帰（結果を正本へ保存）\n・分析・スクリーニング"]
+        BATCH["⏰ ローカルバッチ\n夜間（収集＋スコア更新）\n平日日中キュー・月次\n週次バックアップ"]
         COL_L["🔄 collector.py\n・EDINET全社XBRL収集\n・stooq株価取得\n・JPX業種補完"]
     end
 
-    subgraph RENDER["☁️ Render（軽量モード RENDER_LIGHT_MODE=true・読み取り担当）"]
+    subgraph RENDER["☁️ Render（閲覧専用の窓・RENDER_LIGHT_MODE=true）"]
         direction TB
-        API_R["⚡ api.py\n・差分収集のみ許可\n・全件収集はブロック（403）\n・株価履歴・J-Quantsはブロック（403）\n・重いプラグイン(heavy)はブロック（403）\n・VIEW読取・乖離/推薦/スクリーニングは通常通り\n・自動収集なし（手動のみ）"]
-        COL_R["🔄 collector.py\n差分収集・市場データ更新"]
+        API_R["⚡ api.py\n・Supabase の断面を読むだけ（正本の更新は届かない）\n・全件収集はブロック（403）\n・株価履歴・J-Quantsはブロック（403）\n・重いプラグイン(heavy)はブロック（403）\n・VIEW読取・乖離/推薦/スクリーニングは通常通り\n・差分収集 API はコード上まだ通るが運用しない"]
     end
 
-    subgraph SUPABASE["🗄️ Supabase PostgreSQL（共有DB）"]
+    subgraph SUPA["☁️ Supabase（閲覧用の断面＋バックアップ置き場）"]
+        direction TB
+        SNAP[("PostgreSQL の断面\n2026-08-07 時点のデータ\nRender が読むだけ")]
+        STG[("Storage\n正本の週次バックアップ\nscripts/run_backup.py")]
+    end
+
+    subgraph PG["🗄️ ローカル PostgreSQL（正本）"]
         direction TB
         CO[("companies\n企業マスタ\n約4,000社")]
         FR[("financial_records\nソースのみ\nBS / PL / CF + 市場スナップ")]
@@ -87,11 +98,11 @@ graph LR
     end
 
     USER -->|"HTTP / REST / SSE"| LOCAL
-    USER -->|"HTTP / REST / SSE"| RENDER
-    LOCAL <-->|"SQL (Supabase)"| SUPABASE
-    RENDER <-->|"SQL (Supabase)"| SUPABASE
+    USER -->|"HTTPS"| RENDER
+    LOCAL <-->|"SQL"| PG
+    RENDER -->|"SQL（読取）"| SNAP
+    BATCH -->|"週次バックアップ"| STG
     COL_L -->|"HTTPリクエスト"| EXT
-    COL_R -->|"HTTPリクエスト"| EXT
 ```
 
 ---
@@ -833,7 +844,7 @@ sequenceDiagram
     PLG -->> API : { sector_stats, results, dropped_features }
     API -->> UI  : 業種別 R²・予測値一覧
 
-    Note over User,DB: ※ 重い回帰は Render 軽量モードでは 403（ローカルで実行→結果が共有DBに保存され本番に反映）
+    Note over User,DB: ※ 重い回帰は Render 軽量モードでは 403（ローカルで実行→結果は正本のローカル DB に保存。Render が読む断面には反映されない）
 
     Note over User,DB: ② バリュエーション分析の実行（業種別OLS完了後に利用可能）
     User ->> UI  : 「バリュエーション分析」タブを選択
@@ -1301,7 +1312,7 @@ graph LR
 
 ## 9. デプロイ構成図
 
-> **稼働中の本番環境**: Render（Web Service）+ Supabase（PostgreSQL）。
+> **Render 側の構成**: Render（Web Service）+ Supabase（PostgreSQL の断面）。Render は `FINAPP_DB_TARGET=prod` で Supabase の断面（2026-08-07 時点）を読む**閲覧専用の窓**で、正本（ローカル PostgreSQL）とそれを更新するバッチは §1 の図にある（#503・[ADR-0038](adr/0038-local-postgres-is-the-primary.md)）。
 > 詳細な運用ガイドは [docs/DEPLOYMENT.md](DEPLOYMENT.md) を参照。
 
 ```mermaid
@@ -1318,13 +1329,13 @@ graph TB
             UV["uvicorn api:app\n--host 0.0.0.0 --port $PORT\n（512MB / 0.1 vCPU）\n15分アイドルでスピンダウン"]
         end
         subgraph CONFIG["設定"]
-            ENV["Render 環境変数\n・DATABASE_URL\n・EDINET_API_KEY / JQUANTS_API_KEY\n・APP_PASSWORD / SECRET / RECOVERY\n・ALLOWED_ORIGIN"]
+            ENV["Render 環境変数\n・FINAPP_DB_TARGET=prod / DATABASE_URL\n・EDINET_API_KEY / JQUANTS_API_KEY\n・APP_PASSWORD / SECRET / RECOVERY\n・ALLOWED_ORIGIN"]
             YAML["render.yaml\n（IaC 定義）"]
         end
     end
 
     subgraph SUPABASE["☁️ Supabase"]
-        PG[("PostgreSQL\nfinancial_db\nSSL 必須\n自動バックアップ")]
+        PG[("PostgreSQL の断面\n2026-08-07 時点・閲覧専用\nSSL 必須")]
     end
 
     subgraph EXT["🌍 外部サービス"]
@@ -1349,7 +1360,7 @@ graph TB
     style ENV fill:#1c1400,color:#fcd34d
     style YAML fill:#1c1400,color:#fcd34d
 
-    note1["📌 Render Free 制約\n・15分アイドルでスピンダウン\n（自動収集は GitHub Actions が担うため問題なし）\n・SSH 不可 → ログは Render ダッシュボードのみ\n・永続ディスクなし → 永続化は Supabase のみ"]
+    note1["📌 Render Free 制約\n・15分アイドルでスピンダウン\n（収集はローカルのバッチが担い Render は閲覧専用なので問題なし）\n・SSH 不可 → ログは Render ダッシュボードのみ\n・永続ディスクなし → Render が読むのは Supabase の断面のみ"]
     style note1 fill:#0c1a3a,color:#93c5fd
 ```
 
@@ -1361,7 +1372,7 @@ graph TB
 
 | ファイル | 種別 | 役割 | 主な依存先 |
 |---|---|---|---|
-| `api.py` | バックエンド | FastAPI アプリ本体。REST ルートは `routers/` 5本へ分割し `include_router` で集約。自身は HTML ページ配信・`/health`・`/api/system/info`・ミドルウェア（認証/CORS）・`StaticFiles` マウントを担う。収集ジョブの実行時状態は `collection_jobs.jobs` registry、バックテスト計算は `backtest`、財務レコード整形は `serializers` へ委譲 | routers/*, database.py, collector.py, collection_jobs.py, backtest.py, serializers.py, plugins/ |
+| `api.py` | バックエンド | FastAPI アプリ本体。REST ルートは `routers/` 5本へ分割し `include_router` で集約。自身は HTML ページ配信・`/api/system/info`・`/heartbeat`・ミドルウェア（認証/CORS）・`StaticFiles` マウントを担う（`/health` は `routers/auth.py`）。収集ジョブの実行時状態は `collection_jobs.jobs` registry、バックテスト計算は `backtest`、財務レコード整形は `serializers` へ委譲 | routers/*, database.py, collector.py, collection_jobs.py, backtest.py, serializers.py, plugins/ |
 | `routers/*.py` | バックエンド | `api.py` が `include_router` で束ねる REST ルーター5本（いずれも `APIRouter()`・フルパス保持）。`auth`（認証・Cookie/CSRF 発行）/ `collect`（収集管理・進捗SSE）/ `market`（統計・企業一覧・株価/履歴・マクロ・CSV）/ `analysis`（プラグイン実行・推薦・乖離・スクリーニング・バックテスト・DBビューア）/ `morning`（朝の推奨＝永続化済みスコア＋鮮度ブロックの読み出し専用・#423 子3）。REST ルート定義の実体はここにある | database.py, collection_jobs.py, plugins/, data_quality.py |
 | `collection_jobs.py` | バックエンド | 収集ジョブの実行時状態を集約する registry。job 名キーの `JobState`（running/progress/log/cancel）＋ start/cancel/snapshot/stream を提供。旧6本の並列 status dict を1箇所に畳む。SSE 配信ジェネレータ（`_sse_stream`）を内包。収集ジョブ専用ではなく job 名キーが衝突しなければ任意のバックグラウンドジョブに使える汎用 registry。heavy プラグインの進捗（#545）は `plugin:{name}` スロットへ相乗りし、`stream_awaiting_start` で配信する（**完了まで返らない POST と併走する**ため、開始前に開かれたストリームを猶予つきで待ち合わせる。素の `_sse_stream` は running=False で即切れる） | fastapi |
 | `backtest.py` | バックエンド | バックテスト分析（スコアリング上位N社の実績リターン）。`run(db, …, source, cost_bps=0.0)->dict` / `score_record` / `percentile` / `SCORING_SOURCES`(`recommend`/`valuation`/`net_cash`/`sell`) / `MULTI_PERIODS`。**断面標準化は `run` が `fit_view_metric_stats` で作り `score_record` へ渡す**（1レコードでは断面統計を持てないため・#509。渡さないと as-of 再現が是正前のスコアを測ることになる）。`source` で検証対象の一次分析を切替（メタ層の一般化）。`sell`＝買い系スコアの符号反転（双対）で超過収益が負なら有効。`cost_bps`（Issue #316・片道bp）は往復2倍控除したネット値を `return_pct_net`/`avg_return_net_pct` 等 `*_net` キーへ併記し、無印キー（コスト控除前）は常に不変＝後方互換固定。FastAPI 非依存で直接テスト可能。スコア指標は `FinancialMetric`（VIEW 派生）を引く | database.py, plugins.recommend, plugins.net_cash_analysis |
@@ -1391,7 +1402,7 @@ graph TB
 | `plugins/sector_ols.py` | バックエンド | 業種別OLS回帰分析（次元整合・winsorize+z-score 前処理）。予測値を `regression_results` へ保存・`heavy=True`・`ui_order=210`。`_load_records` は `sector_load_fields(features)` の列だけを引き、`issued_shares` は `companies` と `COALESCE`（#482・#462 経路の温存）。詳細は [PLUGIN_REFERENCE.md](PLUGIN_REFERENCE.md#pluginssector_olspy) | plugins/utils.py |
 | `plugins/net_cash_analysis.py` | バックエンド | ネットキャッシュ分析（清原式）＋グレアム NCAV。`ui_order=120`。詳細は [PLUGIN_REFERENCE.md](PLUGIN_REFERENCE.md#pluginsnet_cash_analysispy) | database.py |
 | `plugins/macro_snapshots.py` | バックエンド | M-1/M-2 共有スナップショット構築基盤（ADR-0003 §3）。`_MACRO_MAP`／`FIN_BASE_OPTIONS`／`FIN_LOAD_FIELDS`（`load_data` が financial_metrics VIEW から引く36列＝消費列だけ・#459）／`build_snapshots`／`oof_backtest`／`shared_snapshot_cache()` を集約（プラグインではない）。`load_weekly_prices_chunked` は **`weekly_price_cache` 経由の差分ロード**（#480・ADR-0036）で、SQL の所有権はここに残す（差分条件 `week_start >= :since` は既存の500社チャンクの**中**に足す）。詳細は [PLUGIN_REFERENCE.md](PLUGIN_REFERENCE.md#pluginsmacro_snapshotspy) | plugins/utils.py, weekly_price_cache.py |
-| `plugins/tuning.py` | バックエンド | M-1/M-2/M-3 共有ハイパーパラメータ自動探索エンジン（ADR-0007）。呼び出し元は CLI と GHA 月次のみ（プラグインではない）。詳細は [PLUGIN_REFERENCE.md](PLUGIN_REFERENCE.md#pluginstuningpy) | plugins/utils.py, plugins/__init__.py, database.py |
+| `plugins/tuning.py` | バックエンド | M-1/M-2/M-3 共有ハイパーパラメータ自動探索エンジン（ADR-0007）。呼び出し元は CLI（`hyperparameter_search.py`）のみ（プラグインではない）。定期実行ではローカルの月次バッチ（`scripts/run_monthly.py` / `run_monthly_m1.py`）と日中枠（`scripts/run_daytime.py` の `tune:*`）がこの CLI を叩く。詳細は [PLUGIN_REFERENCE.md](PLUGIN_REFERENCE.md#pluginstuningpy) | plugins/utils.py, plugins/__init__.py, database.py |
 | `plugins/macro_risk_return.py` | バックエンド | **M-1** マクロ×リスク-リターン推奨（財務OLS+BIC選択+Walk-forward CV。μ 側のマクロ・交差項は**既定 OFF**・#615）。producer＝共有 `macro_beta`・`heavy=True`・`ui_order=330`。詳細は [PLUGIN_REFERENCE.md](PLUGIN_REFERENCE.md#pluginsmacro_risk_returnpy) | plugins/utils.py, macro_snapshots.py |
 | `plugins/macro_gbdt.py` | バックエンド | **M-2** マクロ×財務 勾配ブースティング（ADR-0003/0004/0020）。producer＝`macro_gbdt_scores`（μ̂＋`r1_prime`）・`heavy=True`・`ui_order=340`。詳細は [PLUGIN_REFERENCE.md](PLUGIN_REFERENCE.md#pluginsmacro_gbdtpy) | plugins/utils.py, macro_snapshots.py, xgboost, shap |
 | `plugins/macro_dlm.py` | バックエンド | **M-3** ベイズ状態空間モデル（時変マクロβ DLM・週次・財務不使用）。producer＝`macro_dlm_scores`（`r1_prime` なし＝R3 ゲート無効）・`heavy=True`・`ui_order=360`。詳細は [PLUGIN_REFERENCE.md](PLUGIN_REFERENCE.md#pluginsmacro_dlmpy) | numpy, scipy, plugins/utils.py |
@@ -1451,7 +1462,7 @@ graph TB
 | `scripts/grid_macro_beta.py` | 検証（計測） | NUTS 軌道長（`max_tree_depth`）× `target_accept` の格子ドライバ（Issue #540）。**1セル1プロセス**で `bench_macro_beta` を subprocess 起動し、**安い順**に回して JSONL へ追記する（途中で kill されてもそこまでが残る／JAX 状態がセル間で混ざらない／窓が切れたとき失うのは高いセルだけ）。全セルへ**同一の `--panel-stamp`** を配り、`--probe-draws 0`（1点測定に probe は不要で warmup 1本ぶんの純損）。`--dry-run` でセル一覧と所要見積り、`--report-only` で生値の表。**測定をアドホックなスクリプトで終わらせない**ための実体（ADR-0041 と同じ作法）。**#664 で銘柄数 × seed の軸を足した**: `--n-stock` / `--seed` は複数値を取り（ラベルには振った軸だけを付ける＝1値なら従来ラベルのまま）、`--panel-seed` で全セルのパネルを固定する。**締切の手前で畳む**＝日中枠が渡す `FINAPP_STEP_DEADLINE_UTC`（`hyperparameter_search.resolve_deadline` を再利用）に、見積り ×1.25 ＋2分が入らないセルは始めない（bench は完走して初めて JSONL を書くので、殺されたセルは何も残らない）。1セルも回せずに残りがある回は exit 3（毎日何も進まないのに成功、にしない）。**`--resume` は JSONL の record の条件で照合する**（ラベルではない・ESS の無い record は済みにしない）ので、積み直せば続きから回り、全セル済みなら即 exit 0。所要見積りは同じ銘柄数の実測があればその最大値、無ければ `(n/250)^1.6` の見積りに実測で較正した倍率を掛ける。`--view scale` で規模の表。日中枠の `bench:rhat-scale` がこの形で回す | scripts/bench_macro_beta.py, scripts/bench_macro_beta_report.py, hyperparameter_search.py |
 | `scripts/macro_beta_gate_history.py` | 検証（計測） | 収束ゲートの余裕を **run 横断**で読む読み取り専用 CLI（Issue #612）。`macro_beta_meta.hyperparams.diagnostics.by_param` を古い順に並べ、変数別の `r_hat` p99・閾値までの余裕・`gate_verdict` の合否・`n_stock`・`n_divergences` を表へ出す。**判定は `macro_beta_inference` の `gate_values` / `gate_verdict` / `MONTHLY_RHAT_THRESHOLD` / `PERSIST_MARGIN_WARN` を import して共有**し、p99 の比較を書き写さない（本番と別基準の表を見ても設定を選べない＝#613 と同じ作法）。**`n_divergences > 0` の run と `by_param` を持たない旧 run には印を付ける**——前者を余裕の推移へ混ぜると「規模とともに縮んでいる」と誤読し（2026-09-07 の並走回は発散344回で `alpha` の p99 が 1.1843 まで悪化したが、並走を止めたら 0 に戻った）、後者は `r_hat_max` が#356 の丸め値なので生値と並べられない。集計は純関数 `summarize_runs` に切り出してテスト可能にし、出力は **ASCII の区切りだけ**（cp932 の標準出力でリダイレクト時に落ちないため）。**余裕の推移を溜める手段が無かったため、#612 では健全な2点を比べるだけで毎回 DB を手で引き直していた** | macro_beta_inference.py, database.py (macro_beta_meta), scripts/_textwidth.py |
 | `scripts/nightly_diag_report.py` | 検証（計測） | 夜間 producer の診断値を**夜をまたいで**読む読み取り専用 CLI（#726・[ADR-0061](adr/0061-nightly-keeps-the-diagnostics-it-already-computes.md)）。`--view timeline`（既定）は追っている値（sector_ols: 業種別 α・端の業種数／macro_enet: α・l1_ratio・非ゼロ係数数・OOF rank-IC など）が**前の夜から動いた夜だけ**を出し、同時に何が変わっていたか（`code` / `code?`＝unknown か dirty / `preprocess` / `data`＝断面日か件数）を添える。**どれも変わらずに動いた夜は `no-context-change`**＝#697 型の並び依存の候補（入力ハッシュは持たないので断定ではない）。`--view edges` は α が候補の端に張り付いた夜（下端＝罰なし同等・上端＝特徴量が効いていない、の読み方つき）、`--view sectors` は業種ごとの ridge α の推移。集計は純関数に切り出し、出力は ASCII の区切りだけ（cp932）。接続文字列は出さない | database.py (nightly_model_diagnostics), scripts/_textwidth.py |
-| `launch.py` | ユーティリティ | Windows ローカル開発用 tkinter ランチャー（uvicorn 起動 GUI）。ポート8000占有者を `/health` の `{"db": ...}` 応答で本アプリか識別し、別アプリ占有時は 8001〜 の空きポートへ退避起動。子プロセスへ `FINAPP_AUTO_SHUTDOWN=1` を設定しブラウザ切断（`/heartbeat` 途絶30秒・収集ジョブ実行中は保留）でサーバー自動停止＋ランチャーも自動クローズ。**接続先ラジオ（本番 / ローカル・#481 B-1）**を持ち、切り替えると `FINAPP_DB_TARGET` を変えてサーバーを入れ替える（世代番号 `state["gen"]` で旧監視スレッドが再起動を「停止検知」と誤表示しないようにする）。選択は永続化せず毎回 `prod` 始まり。本番・CI からは未参照の独立ツール | uvicorn |
+| `launch.py` | ユーティリティ | Windows ローカル開発用 tkinter ランチャー（uvicorn 起動 GUI）。ポート8000占有者を `/health` の `{"db": ...}` 応答で本アプリか識別し、別アプリ占有時は 8001〜 の空きポートへ退避起動。子プロセスへ `FINAPP_AUTO_SHUTDOWN=1` を設定しブラウザ切断（`/heartbeat` 途絶30秒・収集ジョブ実行中は保留）でサーバー自動停止＋ランチャーも自動クローズ。**接続先ラジオ（本番 / ローカル・#481 B-1）**を持ち、切り替えると `FINAPP_DB_TARGET` を変えてサーバーを入れ替える（世代番号 `state["gen"]` で旧監視スレッドが再起動を「停止検知」と誤表示しないようにする）。選択は永続化せず、毎回 `FINAPP_DB_TARGET`（未設定なら `local`＝正本）から始まる（#503 で既定を反転）。本番・CI からは未参照の独立ツール | uvicorn |
 | `run_local.ps1` | ユーティリティ | `launch.py` を**正本（ローカル PostgreSQL）**で起動する PowerShell ショートカット。#503 で既定そのものが local になったため `FINAPP_DB_TARGET=local` の明示は冗長だが、親シェルが prod を持っていても引きずらないことを保証する。起動前にローカルDBへ疎通＋`companies` 件数と週次株価の最新週を表示し、繋がらなければランチャーを起こす前に落とす。`FINAPP_EGRESS_ENFORCE=0` / `FINAPP_EGRESS_LEDGER=0` も併せて立てる（ローカル読取は Egress を消費しないため）。`-Console` でランチャー無しの uvicorn 直起動。本番・CI からは未参照 | launch.py, uvicorn |
 | `scripts/run_nightly.py` | ユーティリティ | **ローカル夜間バッチの実体**（#503 Phase 2・ADR-0038。骨格は `scripts/batch_common.py` と共有）。`_pipeline_incremental.py`（XBRL 差分＋マクロ＋市場データ）→ `nightly_scores.py` の順に回す。**ステップ間で止めない**（収集が落ちてもスコア更新は走り、両方の結果がログに残る）。実行のたび `app_settings` の `nightly_last_run` / `nightly_last_success` へ足跡を書き、失敗は `gh issue create` で起票する（**通知・記録の失敗はバッチを落とさない**）。収集の入口が `collector.py --incremental` ではないのが要点＝あちらは株価を1バイトも更新しない。`WINDOW_MIN`(360分) と `BUDGET_MIN`（pipeline 240 / scores 60）を持つ（#530・ADR-0040） | _pipeline_incremental.py, nightly_scores.py, database |
 | `run_nightly.ps1` | ユーティリティ | 上記の薄い起動口（Windows タスクスケジューラから呼ばれる）。実体を Python に置いているのは、PowerShell の「BOM 無しは cp932 扱い」「`python -c` のダブルクォートが native exe 引数で剥がれる」という実行するまで出ない罠を避けるため。`-DryRun` / `-Steps` / `-NoIssue` | scripts/run_nightly.py |

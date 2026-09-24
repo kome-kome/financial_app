@@ -25,7 +25,7 @@ description: >
 - `templates/*.html` / `static/js/*.js` の実在ファイル vs ARCHITECTURE.md の記載
 - `tests/test_*.py` の実在ファイル vs ARCHITECTURE.md の記載
 - `.claude/` 配下の agents / skills 定義ファイル vs ARCHITECTURE.md の記載
-- `docs/FUTURE_TASKS.md` に「✅ 完了済み」マークや「実装済み」言及がある項目 → 削除候補
+- `docs/FUTURE_TASKS.md` にタスク実体（個別の課題・完了済み項目）が書かれていないか → 残タスクの正本は GitHub Issues。見つけたら Issue 化 or 削除候補（本ファイルは Issue 運用ガイド＋設計制約に限る）
 
 ### 1-2. 壊れた内部リンク
 - `*.md` ファイル内の `[...](...)` が指すファイルが実在するか
@@ -65,7 +65,7 @@ description: >
 
 **確信度・高のみ自動実施**（ユーザー確認なし）:
 - 壊れた内部リンクの修正
-- `docs/FUTURE_TASKS.md` の完了済み項目削除
+- `docs/FUTURE_TASKS.md` に紛れ込んだ完了済みタスクの削除（未完のタスク実体は削除せず Issue 化を提案する）
 - ARCHITECTURE.md のファイル役割表への追記（実在するが未記載のファイル）
 
 **確信度・中/低はユーザー確認後に実施**:
@@ -116,7 +116,7 @@ description: >
 | `docs/DEPLOYMENT.md` | 運用＋外部サービス制約 | ✅（追記のみ） |
 | `docs/MODELS.md` | 分析モデル理論 | ✅（重複削除のみ） |
 | `docs/GOTCHAS.md` | 実装ハマりどころ | ✅（整理のみ） |
-| `docs/FUTURE_TASKS.md` | 未実装の課題 | ✅（完了済み項目削除） |
+| `docs/FUTURE_TASKS.md` | Issue 運用ガイド＋設計制約（残タスクの正本は GitHub Issues） | ✅（紛れ込んだタスク実体の除去のみ） |
 | `docs/VISION.md` | プロジェクト方針 | ✅（古いステータス更新のみ） |
 | `docs/archive/*` | 完了済み記録 | ⚠️ 統合のみ・削除禁止 |
 | `plugins/*` / `api.py` 等 | 中核ロジック | ❌ 触れない |

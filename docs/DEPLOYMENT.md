@@ -30,7 +30,7 @@ Render の制約と運用形態に合わせて設計すること。
 | **手動のみ** | 会社予想開示収集（J-Quants /fins/summary） | workflow_dispatch で起動 | GitHub Actions `collect-disclosures.yml` |
 | **手動のみ** | 半期(H1)財務収集（EDINET 半期/旧四半期Q2） | workflow_dispatch で起動 | GitHub Actions `collect-interim.yml` |
 | **手動のみ（アーカイブ）** | bs_inventory 補完 | workflow_dispatch で起動 | GitHub Actions `old/` 配下（一回性・完了済み） |
-| **UIから手動** | 差分収集・株価更新 | ユーザーがボタン押下 | Render Web UI |
+| **UIから手動** | 差分収集・株価更新 | ユーザーがボタン押下 | ローカルの Web UI（`/collection`）。Render は閲覧専用のため使わない（API は通るが Supabase の断面だけが動く。下の「ローカル / Render 役割分担」） |
 | **自動（CI）** | `pytest` 回帰テスト（Secrets・本番DB非依存） | PR / main への push | GitHub Actions `ci.yml` |
 | **自動（イベント）** | 他ワークフローの failure / cancelled を Issue 化 | 対象ワークフロー完了時（`workflow_run`） | GitHub Actions `notify-failure.yml` |
 | **自動（毎週）** | pin した依存の脆弱性照合（pip-audit・#723）。検出は failure → `notify-failure` が起票 | 毎週月曜 JST 07:23 ＋ `requirements*.txt` を変える PR / main への push | GitHub Actions `dependency-audit.yml` |
@@ -289,7 +289,7 @@ PYTHONUTF8=1 "$TEMP/audit-venv/Scripts/pip-audit" --strict -r requirements.txt -
 
 ### daily-incremental の動作詳細
 
-毎日 **UTC 08:17（JST 17:17）** に自動起動する `_pipeline_incremental.py` は:
+`_pipeline_incremental.py`（**現在はローカルの夜間バッチ `scripts/run_nightly.py` が毎日 JST 17:20 に呼ぶ**。GHA の `schedule` は #503 で停止しており、下の JST 17:17 は停止時点の設定値＝起動時刻の根拠としてだけ残す）は:
 
 > **⏰ 起動時刻の根拠（#476・2026-08-09 に JST 03:00 から移動）**
 >
@@ -403,16 +403,16 @@ M-1（`macro_risk_return`）・M-2（`macro_gbdt`）・M-3（`macro_dlm`）の�
 
 ## ローカル / Render 役割分担
 
-両環境が同一の **Supabase DB** を共有し、重さに応じて作業を分担する。
+**両環境は別の DB を見ている**（#503・[ADR-0038](adr/0038-local-postgres-is-the-primary.md)）。ローカルは**正本**のローカル PostgreSQL（下節）を読み書きし、Render は Supabase に残した断面（2026-08-07 時点）を読む**閲覧専用の窓**である。下表の Render 列は「API レベルで何が通るか」であって、運用で使うかどうかではない——Render で収集を走らせても動くのは Supabase の断面だけで、正本とは分岐する。
 
 | 操作 | ローカル PC | Render（Web） |
 |---|---|---|
 | 全件収集（初回・全社XBRL） | ✅ 推奨 | ❌ ブロック（OOM リスク） |
 | 株価履歴再構築 | ✅ 推奨 | ❌ ブロック |
 | J-Quants 大量収集 | ✅ 推奨 | ❌ ブロック |
-| 差分収集（`skip_existing=True`） | ✅ 可（手動） | ✅ 可（手動・UIボタン） |
-| 市場データ更新 | ✅ 可 | ✅ 可 |
-| スクリーニング・分析・UI 閲覧 | ✅ 可 | ✅ 可 |
+| 差分収集（`skip_existing=True`） | ✅ 可（定常は夜間バッチが回す） | ⚠️ API は通るが運用しない（断面だけが動く） |
+| 市場データ更新 | ✅ 可 | ⚠️ 同上 |
+| スクリーニング・分析・UI 閲覧 | ✅ 可 | ✅ 可（断面の時点のデータ） |
 
 **`RENDER_LIGHT_MODE=true`**（`render.yaml` に設定済み）を Render に設定することで、
 重い操作を API レベルでブロックし、UI 上でもボタンを無効化する。
@@ -431,7 +431,7 @@ Supabase が restricted になると**アプリも分析も一切動かせない
 | サーバ | **PostgreSQL 18.6**（Windows サービス `postgresql-x64-18`・port 5432） |
 | クライアント | `C:\Program Files\PostgreSQL\18\bin`。**PATH に無い**ので `pg_dump` 等はフルパスで呼ぶ |
 | 認証 | `pg_hba.conf` は local/host とも `scram-sha-256` |
-| 接続文字列 | `postgresql://edinet:edinet@localhost:5432/financial_db` ＝ [database.py](../database.py) の**既定フォールバックと同一**（`DATABASE_URL` 未設定ならここへ繋がる） |
+| 接続文字列 | `postgresql://edinet:edinet@localhost:5432/financial_db` ＝ [database.py](../database.py) の**既定フォールバックと同一**（`FINAPP_DB_TARGET` が `local`（既定）で `DATABASE_URL_LOCAL` 未設定ならここへ繋がる） |
 | encoding | **UTF8**（collate は `Japanese_Japan.932`＝並び順のみ OS 依存。Supabase と並び順が違う点は text の `ORDER BY` にのみ影響） |
 | `edinet` の権限 | **superuser でも createdb でもない**。所有する `financial_db` 内の CREATE は可 |
 
@@ -440,10 +440,11 @@ Supabase が restricted になると**アプリも分析も一切動かせない
 #### セットアップ（`scripts/setup_local_db.py`）
 
 ```powershell
-$env:DATABASE_URL = "postgresql://edinet:edinet@localhost:5432/financial_db"
 python -m scripts.setup_local_db            # ドライラン（何も変更しない）
 python -m scripts.setup_local_db --apply    # 実行
 ```
+
+- **接続先は `FINAPP_DB_TARGET`（既定 `local`）で決まる**。local では `DATABASE_URL_LOCAL`（未設定なら上表の既定）を読み、`DATABASE_URL` は読まない。既定と違う URL を使うときだけ `$env:DATABASE_URL_LOCAL` を立てる（ローカル以外を指すと import 時に `RuntimeError`）。
 
 - **接続先ガードが最初に走る**。`database._is_local` がローカルを指していなければ即 `SystemExit`。`init_db()` はスキーマ指紋が一致しないとき DDL（`DROP COLUMN` 移行を含む）を打つため、本番へ誤射すると不可逆（#597 / ADR-0048 以降、**指紋と実体が揃っていれば DDL は1本も出ない**が、接続先が違えば指紋も違うので誤射時はまさに全部打たれる＝このガードは引き続き必要）。
 - **既定はドライラン**（`--persist` と同じ作法）。
@@ -493,7 +494,7 @@ GUI（`launch.py`）は窓に**接続先ラジオ**を持ち、切り替える�
 
 **`run_local.ps1`**: ランチャー既定が local になった今でも、接続先を明示して起動する導線として残してある。`FINAPP_DB_TARGET=local` を先に立て、起動前に `companies` の件数と週次株価の最新週を出して**どの世代のデータを見ているか**を明示し、ローカルへ繋がらなければランチャーを起こす前に落とす。
 
-併せて `FINAPP_EGRESS_ENFORCE=0` / `FINAPP_EGRESS_LEDGER=0` を立てる——ローカル読取は Egress を1バイトも使わないので、400MB のプロセス予算で GUI が `EgressBudgetExceeded` に落ちる意味が無く、`.egress/ledger.jsonl` に混ぜると `scripts.egress_report` の集計が Supabase の実測でなくなる（請求サイクル累計のほうは `_is_local` で自動的に無効）。**`.env` は書き換えない**ので、復旧後は素の `python launch.py` に戻すだけで prod へ復帰する（戻し忘れが起きない）。
+併せて `FINAPP_EGRESS_ENFORCE=0` / `FINAPP_EGRESS_LEDGER=0` を立てる——ローカル読取は Egress を1バイトも使わないので、400MB のプロセス予算で GUI が `EgressBudgetExceeded` に落ちる意味が無く、`.egress/ledger.jsonl` に混ぜると `scripts.egress_report` の集計が Supabase の実測でなくなる（請求サイクル累計のほうは `_is_local` で自動的に無効）。**`.env` は書き換えない**ので戻し忘れは起きない（#503 以前は「復旧後は素の `python launch.py` に戻すだけで prod へ復帰する」ための作りだった。反転後は素の `launch.py` も local から始まる）。
 
 **ガードは強さを2種に分けてある**（[database.py](../database.py) の `resolve_database_url()`）:
 
@@ -616,7 +617,7 @@ Render ダッシュボードで管理。
 ### 3. シェルアクセスなし
 - SSH 接続は不可。デバッグは **Render ダッシュボードのログ閲覧** のみ
 - ローカルで再現してから push するワークフロー前提
-- DB へのアドホッククエリは Supabase のダッシュボード or psql 経由
+- Render が読む断面へのアドホッククエリは Supabase のダッシュボード or psql 経由（正本はローカル PostgreSQL なので、分析の確認はローカルの psql で行う）
 
 ### 4. デプロイの仕組み
 - `main` ブランチに push すると Render が自動的にビルド＆デプロイ
@@ -1077,14 +1078,14 @@ ADR-0006 §Decision-1 が定める CPI チャネル。
 
 ### 🔄 残課題タスクの Render 適合性
 
-`docs/FUTURE_TASKS.md` 記載の残課題を Render 前提で再評価:
+かつて `docs/FUTURE_TASKS.md` に載っていた残課題（Tier 別の課題リスト。現在の FUTURE_TASKS.md は Issue 運用ガイドで、残タスクの正本は GitHub Issues）を Render 前提で再評価した記録:
 
 | 項目 | Render での実装方針 |
 |---|---|
 | **G**: J-Quants IssuedShares 取得 | ✅ **実装済み（Tier2-G・PR #181・2026-06-16）**。`Company.issued_shares` 追加 + `_ensure_tables()` の冪等 ALTER + J-Quants `/v2/markets/listed/info` から取得。→ **このエンドポイントは v2 に存在しない**（#462・上の J-Quants 節の 403 分類を参照）。現在の issued_shares は `/fins/summary` の `ShOutFY` から取る（`collector_disclosures`） |
 | **H**: `period_end` を DATE 型に | ✅ **実装済み（Tier2-H・PR #182・2026-06-16）**。`init_db()` 内の冪等 DDL（`USING ...::DATE`・`SKIP_PERIOD_END_MIGRATION=1` フェールセーフ）で起動時 1 度だけ移行 |
 | **F**: HttpOnly Cookie 認証 | ✅ **実装済み（Tier3-3）**。`auth_token`（HttpOnly）＋`csrf_token` の2 Cookie + CSRF Double-Submit。本番は `COOKIE_SECURE=true` |
-| **E**: 本番デプロイ対応 | **大部分が完了済み**。残るのは Supabase の DB バックアップ運用ポリシー策定（Supabase の自動バックアップ機能を利用）と監視（Render ダッシュボード + UptimeRobot 等） |
+| **E**: 本番デプロイ対応 | **大部分が完了済み**。バックアップは #503 で正本がローカルへ移ったあと、`scripts/run_backup.py`（週次・正本を Supabase Storage へ置く・#606）で解決した。残るのは Render の監視（Render ダッシュボード + UptimeRobot 等） |
 
 ---
 
@@ -1094,8 +1095,8 @@ ADR-0006 §Decision-1 が定める CPI チャネル。
 
 **現状: 対策なし（許容）**
 
-収集を `.github/workflows/daily-incremental.yml`（差分・自動）と `full-pipeline.yml`（全件・手動）
-に統一したため、Render を常時起動させる必要がなくなった。ユーザーが Web UI を開いた
+収集はローカルの夜間バッチ（`scripts/run_nightly.py`）が担い、Render は Supabase の断面を読む
+閲覧専用の窓なので（#503）、Render を常時起動させる必要がない。ユーザーが Web UI を開いた
 ときだけスピンアップする運用で、コールドスタート（数秒〜数十秒）は許容する。
 
 **過去の対策（廃止済み、参考）:**
@@ -1146,7 +1147,6 @@ CLAUDE.md からも参照される。新セッションで Claude がデプロ�
 
 ## DB 構成の履歴
 
-開発初期に存在した「開発者 PC のローカル PostgreSQL」は廃止し、Render と同じ
-**Supabase PostgreSQL** に一本化済み（2026年完了）。現在はローカル開発・Render 本番
-ともに `DATABASE_URL`（Supabase）を共有する。移行・切り戻し手順の詳細は
-[`docs/archive/REFACTORING.md`](archive/REFACTORING.md) と git 履歴を参照。
+1. **開発初期**: 開発者 PC のローカル PostgreSQL を使っていた
+2. **Supabase への一本化（2026年完了）**: ローカル開発・Render 本番がともに `DATABASE_URL`（Supabase）を共有する構成へ移った。移行・切り戻し手順の詳細は [`docs/archive/REFACTORING.md`](archive/REFACTORING.md) と git 履歴を参照
+3. **ローカル PostgreSQL を正本へ反転（2026-08-20・#503・[ADR-0038](adr/0038-local-postgres-is-the-primary.md)）**: Supabase NANO の実効メモリに DB が乗らず停止が周期的に再発するため（#500）、正本をローカルへ移した。**現在の構成はこれ**——ローカルは `FINAPP_DB_TARGET=local`（既定）で `DATABASE_URL_LOCAL` を読み、Render だけが `FINAPP_DB_TARGET=prod` で Supabase の断面（2026-08-07 時点）を読む。Supabase は閲覧用の断面と Storage のバックアップ置き場として残る。詳細は上の「ローカル / Render 役割分担」と「ローカル PostgreSQL」節
