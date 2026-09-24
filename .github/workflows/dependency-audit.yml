@@ -1,0 +1,126 @@
+name: "[定常] 依存パッケージの脆弱性検査"
+
+# 目的（Issue #723）:
+#   requirements*.txt は完全 pin（==）なので、導入した後で同じ版に脆弱性が公表されても版は
+#   自動では上がらない。CLAUDE.md のパッケージ評価は「導入する前」だけで、導入後に検知する
+#   経路が無かった＝**忘れても失敗として現れない**型の穴。pip-audit で pin を照合し、
+#   既知の脆弱性があればこのジョブを failure にする。
+#   起票時点で既に anyio 4.13.0 が2件（GHSA-82r6-8w77-94w6 / GHSA-5p39-cfhj-2xmp）を抱えていた。
+#
+# 設計上の注意（触る前に必ず読むこと）:
+#   - **Issue 起票は notify-failure.yml の担当**（macro-health / egress-health と同じ）。この
+#     ジョブは失敗するだけにする。`issues: write` は notify-failure.yml だけに閉じる
+#     （tests/test_workflow_failure_notification.py が強制）。未修正のまま毎週失敗すれば、
+#     同じ Issue へ毎週コメントが追記される＝それが催促になる。
+#   - **照合対象は requirements*.txt の glob で拾い、ファイル名を列挙しない**。列挙すると
+#     ファイルを増やしたときの登録漏れが「失敗として現れない」形で起きる
+#     （notify-failure の `workflows: ["**"]` と同じ考え方）。Render に載らない
+#     -optional / -inference も、DB に繋ぐローカルのバッチが実際に使うので対象に含める。
+#   - `-r` モードは隔離した一時環境で依存を解決してから照合する＝requirements.txt に
+#     書かれていない推移依存も Render のビルドと同じ解決結果で見る（2026-09-24 実測 107件・
+#     スキップ 0）。pip-audit 自身も requirements-dev.txt の pin として照合される。
+#   - `--strict`: 依存の収集に失敗したパッケージを黙って飛ばさず失敗にする
+#     （「照合できなかった」を「脆弱性なし」に化けさせない）。
+#   - **concurrency の cancel-in-progress を付けない**。定時実行と push が同じ ref で重なって
+#     取り消されると cancelled で終わり、notify-failure は理由を判別できない cancelled を
+#     安全側で起票する＝誤報になる。所要は数分なので重複しても害は無い。
+#   - artifact は使わない（全ワークフローの artifact に Egress 台帳の同梱を強制する
+#     tests/test_db_egress.py の制約が、DB を触らないこのジョブには意味を持たないため）。
+#     結果はログ（＝notify-failure の Issue 本文のログ末尾）と Step Summary に出す。
+#
+# 検出したとき:
+#   - 修正版へ上げる。アップグレードは CLAUDE.md のとおり「単独 PR ＋ pytest ＋ 主要画面確認」。
+#   - 修正版が無い・本アプリの使い方では到達しない、を理由に外すなら、run の `ignores` 配列へ
+#     `--ignore-vuln <ID>` を足し、**同じ行に理由と Issue 番号を書く**（tests/test_dependency_audit.py が強制）。
+#     黙って外すと、外したことを誰も覚えていない穴を自分で作る（macro_health の除外系列と同型）。
+
+on:
+  schedule:
+    - cron: '23 22 * * 0'   # UTC 22:23 (日) = JST 07:23 (月)。毎正時の混雑を避けて分をずらす
+  workflow_dispatch:
+  # pin を変える PR と main への直接 push でも回す（CLAUDE.md の運用では小改善は main 直 push）。
+  pull_request:
+    paths:
+      - 'requirements*.txt'
+      - '.github/workflows/dependency-audit.yml'
+  push:
+    branches:
+      - main
+    paths:
+      - 'requirements*.txt'
+      - '.github/workflows/dependency-audit.yml'
+
+# 最小権限（照合は PyPI を読むだけ。Issue 起票は notify-failure.yml の担当）
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.13.7'  # render.yaml の PYTHON_VERSION と一致させる（依存の解決結果を揃える）
+          cache: 'pip'
+
+      # pip-audit の版は requirements-dev.txt の pin に従う（ここで素の `pip install pip-audit` をしない）。
+      - name: Install pip-audit
+        run: pip install -r requirements-dev.txt
+
+      - name: Audit pinned dependencies
+        env:
+          # requirements*.txt は日本語コメントを含む。pip-audit の requirements パーサは
+          # ロケールの既定エンコーディングで読むので、UTF-8 以外のロケール（Windows の cp932 で
+          # 実測）では UnicodeDecodeError で照合前に落ちる。ランナーのロケールに頼らず固定する。
+          PYTHONUTF8: '1'
+        run: |
+          set -uo pipefail
+          shopt -s nullglob
+
+          args=()
+          files=()
+          for f in requirements*.txt; do
+            args+=(-r "$f")
+            files+=("$f")
+          done
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "requirements*.txt が1本も見つからない（checkout か glob が壊れている）" >&2
+            exit 1
+          fi
+
+          # 除外は1行1件で、同じ行に理由と Issue 番号を書く（tests/test_dependency_audit.py が強制）。
+          # 行継続の `\` の後ろにはコメントを置けないので、除外はこの配列にだけ書く。
+          #   書式:  --ignore-vuln <ID>   # <外す理由> #<Issue 番号>
+          ignores=(
+          )
+
+          # 脆弱性が無いと pip-audit は --output のファイルを書かない。前回の結果が残っていると
+          # 「exit=0 なのに古い表」を出すので先に消す（ローカル再現で実測）。
+          report="${RUNNER_TEMP}/pip-audit.md"
+          rm -f "${report}"
+          status=0
+          pip-audit --strict --progress-spinner off --aliases on \
+            --format markdown --output "${report}" \
+            "${ignores[@]}" "${args[@]}" || status=$?
+
+          {
+            echo "## pip-audit（exit=${status}）"
+            echo
+            echo "照合したファイル: ${files[*]}"
+            echo
+            if [ -s "${report}" ]; then
+              cat "${report}"
+            elif [ "${status}" -eq 0 ]; then
+              echo "既知の脆弱性なし"
+            else
+              echo "照合そのものが失敗した（脆弱性の有無は不明）。上のログを見ること"
+            fi
+          } | tee -a "${GITHUB_STEP_SUMMARY}"
+
+          exit "${status}"

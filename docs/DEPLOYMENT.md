@@ -33,6 +33,7 @@ Render の制約と運用形態に合わせて設計すること。
 | **UIから手動** | 差分収集・株価更新 | ユーザーがボタン押下 | Render Web UI |
 | **自動（CI）** | `pytest` 回帰テスト（Secrets・本番DB非依存） | PR / main への push | GitHub Actions `ci.yml` |
 | **自動（イベント）** | 他ワークフローの failure / cancelled を Issue 化 | 対象ワークフロー完了時（`workflow_run`） | GitHub Actions `notify-failure.yml` |
+| **自動（毎週）** | pin した依存の脆弱性照合（pip-audit・#723）。検出は failure → `notify-failure` が起票 | 毎週月曜 JST 07:23 ＋ `requirements*.txt` を変える PR / main への push | GitHub Actions `dependency-audit.yml` |
 
 ### GitHub Actions workflow 早見表（いつ・何を・どれを使うか）
 
@@ -92,6 +93,7 @@ Render の制約と運用形態に合わせて設計すること。
 | UTC | ワークフロー | 頻度 | 占有（上限まで） | JST | 1回あたり Egress |
 |---|---|---|---|---|---|
 | **21:00** | **`egress-health`** | **毎日** | → 21:10（10分） | **翌06:00** | ほぼ0（`app_settings` 2行＋`pg_database_size` 1行） |
+| 日 22:23 | `dependency-audit` | 毎週（＋ `requirements*.txt` を変える push/PR） | → 22:38（15分） | 月 07:23 | 0（DB へ接続しない） |
 | （push/PR） | `ci.yml` | 随時 | 〜15分 | — | 0（DB へ接続しない） |
 | （失敗時） | `notify-failure` | 随時 | 〜10分 | — | 0 |
 
@@ -184,6 +186,7 @@ python -m scripts.backup_restore --source storage --apply --create-schema `
 | `[補完]` | 半期(H1)財務収集 | `collect-interim.yml` | EDINET 半期報告書（043A00/docType160）と旧四半期報告書（043000/docType140）の Q2(中間=H1累計)を収集し `financial_records` に `period_type='H1'` で保存（Issue #219② フェーズB）。通期収集とは独立・常に差分（収集済み doc_id をスキップ）。`workflow_dispatch`（years_back 既定6＝既存通期窓に整合）。240分に収まらない場合は years_back を分割 | 数時間（過去6年・事前選別でQ1/Q3を除外し概ね1社1半期1DL） |
 | `[定常]` | マクロ鮮度ゲート | `macro-health.yml` | `python -m scripts.check_macro_health`（Issue #420）が `macro_data` の系列別 `max(trade_date)` を期待更新頻度（`macro_health.FREQ_STALE_DAYS`）と突き合わせ、**既定モデルが使う系列**（`DEFAULT_MACRO_FEATURES` から逆引き）が古ければ exit 2 → `notify-failure` が Issue 起票。`collect_macro_data` は 1 系列失敗しても `continue` するため部分失敗が exit 0 で通り、#414 の失敗通知では拾えないのを塞ぐ。**収集本体（`daily-incremental` / `full-pipeline`）を落とさず独立ジョブに分離しているのが要点**——あちらを failure にすると `nightly-scores` の `workflow_run` チェーン（`success` 条件）が発火せず、マクロと無関係な `sector_ols` の夜間更新まで巻き添えで止まる（#425 の構造をワークフロー間へ適用）。収集側は同じレポートを run ログに出すだけ。誤検知が続く系列は `macro_health.EXCLUDED_SERIES` へ**理由付きで**登録する（現在: `JP_IP`＝FRED 凍結 #253／`JP_IIP`・`JP_IIP_INVENTORY`＝e-Stat が年単位更新 #451。`JP10Y` は #442 で `MACRO_SERIES` ごと削除したため除外指定も不要になった。`BCOM` は #438 の Yahoo 配信停止で一時除外していたが、収集元を連動 ETN `DJP` へ差し替えて 2026-08-06 に除外解除＝**直った系列は必ず除外から外す**（残すと代替ソース側の停止を検知できなくなる）） | 〜2分（GROUP BY 集約1本・`timeout-minutes: 10`） |
 | `[定常]` | Supabase 枠消費ゲート | `egress-health.yml` | `python -m scripts.check_egress_health`（Issue #478 / #483・[ADR-0037](adr/0037-egress-cycle-budget-is-a-second-axis.md)）が **Egress のサイクル累計**（`app_settings.egress_cycle_bytes`）と **Database Size**（`pg_database_size`）を閾値と突き合わせ、超過なら exit 2 → `notify-failure` が Issue 起票。**毎日 UTC 21:00（JST 06:00）自動**。閾値は Egress 80%（`db_egress.CYCLE_WARN_RATIO`）／DB 85%（`check_egress_health.DB_WARN_RATIO`）で、**DB 側を厳しくしてある**——Egress は超えても翌サイクルで戻るが、Database Size 超過は read-only で収集そのものが止まるため。**DB の判定値は `pg_database_size` で、Usage ページの課金判定値より約 35MB 低く出る**（2026-08-19 実測: Usage 430MB / Infrastructure 409.8MB / `pg_database_size` 395MB）＝閾値 0.90 のままだと Usage 基準で 97% 相当になり手遅れなので 0.85 に置いた。**この3つの数字を混ぜないこと。****`workflow_run` チェーンにせず cron で回すのが要点**：Egress はワークフローの成否と無関係に積み上がり、開発者のローカル CLI からも積まれる（過去2回の超過はどちらもローカル検証の反復が主因）ので「収集が成功した後に見る」では見落とす経路が残る。Management API の PAT は不要（判定材料は DB の中にある＝#483 のブロッカーを迂回）。手動即時実行は `workflow_dispatch`（`warn_only` で常に exit 0） | 〜2分（`timeout-minutes: 10`） |
+| `[定常]` | 依存パッケージの脆弱性検査 | `dependency-audit.yml` | `requirements*.txt`（glob で全本・推移依存込み）を pip-audit で照合し、既知の脆弱性があれば failure → `notify-failure` が起票（Issue #723）。**毎週 UTC 22:23・日（JST 07:23・月）自動**＋ `requirements*.txt` を変える PR / main への push。手動は `workflow_dispatch`。仕組みと検出時の対応は下記「依存パッケージの脆弱性検査」節 | 〜数分（ローカル実測 48秒・107件） |
 | `[定常]` | ワークフロー失敗の自動 Issue 起票 | `notify-failure.yml` | 上記ワークフロー（`ci.yml` を除く全本数・列挙しない設計）＋セルフテストが `failure` または `cancelled` で終わると自動起票（`workflow_run`）。手動起動しない。詳細は下記「ワークフロー失敗の通知」節 | 〜1分 |
 | `[検証]` | notify-failure セルフテスト | `notify-failure-selftest.yml` | `notify-failure.yml` の変更後に発火を実証するための、意図的に失敗するだけのワークフロー（本番データ不使用）。`workflow_dispatch`（`mode=fail`／`mode=cancel`） | 〜1分（cancel は約1分） |
 | `[手動]` | DBメンテナンス（VACUUM FULL・Supabase 断面用） | `vacuum-maintenance.yml` | **⛔ 定時実行は 2026-08-25 に停止（#290 / #505・[ADR-0038](adr/0038-local-postgres-is-the-primary.md) の追補）。正本側の担い手はローカル月次バッチの `vacuum` ステップ**（#504）で、この yml は断面を手で保守するときの口としてだけ残る。**起動するときは step env へ `FINAPP_DB_TARGET: prod` を一時的に足すこと**（常設すると「誤起動が localhost で落ちる」安全弁を外すことになり `tests/test_db_target.py` が落ちる）。以下は Supabase が正本だった時代の設計記録＝**復旧するときに読む**。`stock_price_daily` の DELETE ベース trim による index bloat 対策（Issue #290）。`_pipeline_vacuum.py` が AUTOCOMMIT 接続で **`TARGET_TABLES`（`stock_price_daily` / `stock_price_weekly`）を1表ずつ** `VACUUM FULL` し、前後の容量をログ出力。**2026-08-19 に対象を2表へ拡大し、前段で per-table の autovacuum チューニング（冪等な `ALTER TABLE ... SET (autovacuum_vacuum_scale_factor = 0.02)`）を行うようにした**——`stock_price_weekly`（195MB）に dead tuple が 200,498 行溜まり autovacuum の最終実行が 2026-07-31 で止まっていたが、これは故障ではなく **per-table 設定が無く（`reloptions = null`）クラスタ既定 0.2 が効いて発火閾値 `50 + 0.2 × 1,284,465 = 256,943` 行に一度も届いていなかった**だけ（当時 200,498 行＝その 78%）。**128万行の表に既定のスケール係数 20% が粗すぎる。** 0.02 で閾値は 25,739 行。チューニングだけでは既存の dead は物理サイズを返さず（通常 VACUUM は死領域をテーブル内で再利用するだけ）、VACUUM FULL だけでは翌週また溜まるので**両方要る**。per-table 設定を `init_db()` / `_ensure_tables()` へ入れてはいけない（lifespan が無条件実行するためローカル API 起動だけで本番へ不可逆反映される）。毎週 UTC 23:30・土（JST 08:30・日）自動（#446 で 22:00 から後ろ倒し。**cron の名目時刻ではなくキュー遅延込みの実起動時刻で設計する**——`daily-incremental` は cron UTC 18:00 に対し実起動 19:45Z 前後で、旧設定では夜間チェーン終端と日曜だけ約24分重なっていた）。**#476 で `daily-incremental` が 08:17Z へ前倒しされ、この 22:37Z 前提は解消した**（間隔が大きく開いたので時刻は据え置き＝動かす必然が無いものを動かさない）。手動即時実行は `workflow_dispatch`（ローカル・GitHub Actions 双方で Supabase pooler 経由の正常動作を確認済み・2026-07-12）。**時間帯は #427 で JST 04:00 → 07:00 へ移動**——差分収集（JST 03:00 開始・実測 2h05m〜2h38m）の最中に `VACUUM FULL`（ACCESS EXCLUSIVE ロック）が走っており、ずらす設計意図が成立していなかった。現行チェーンは 03:00 収集 → 最長 05:40 → nightly-scores（`sector_ols` 16分 + M-6・総所要は #443 の初回実走で実測）。**M-6 追加でチェーン後端が伸びるため、日曜だけは VACUUM FULL（07:00）と重なりうる**——ただし `VACUUM FULL` が排他ロックを取るのは `stock_price_daily` のみで、夜間バッチが読むのは `stock_price_weekly`／`financial_metrics` ゆえロック競合はしない（I/O は共有）。実測で 07:00 に食い込むようなら時間帯を再調整する | 数秒〜数分（対象テーブルは実測 ~50MB・42万行） |
@@ -254,6 +257,35 @@ gh run cancel <run-id>   # → annotation は "The run was canceled by @…" →
 ```
 
 `notify-failure.yml` を変更したら main 反映後にこれを1回流し、Issue が起票される（2回目以降はコメント追記になる）ことを確認する。確認後は起票された Issue をクローズすること。**cancelled の振り分けを触ったときは両側を流す**（手動キャンセル＝起票されない／timeout 打ち切り＝起票される）。片側だけでは「除外しすぎて timeout まで落としていないか」が実証できない。
+
+### 依存パッケージの脆弱性検査（`dependency-audit.yml`・Issue #723）
+
+`requirements*.txt` は完全 pin（`==`）なので、導入した後で同じ版に脆弱性が公表されても版は自動では上がらない。CLAUDE.md のパッケージ評価は**導入する前**だけで、導入後に検知する経路が無かった（忘れても失敗として現れない型）。このワークフローがその穴を塞ぐ。
+
+| 項目 | 内容 |
+|---|---|
+| 照合 | `pip-audit -r <requirements*.txt の全本>`。`-r` モードは隔離した一時環境で依存を解決してから照合する＝推移依存も Render のビルドと同じ解決結果で見る。`--strict` で「照合できなかった」を失敗にする。pip-audit の版は `requirements-dev.txt` の pin |
+| 対象 | `requirements*.txt` を **glob で拾う**（列挙しない＝ファイルを増やしても登録漏れが起きない）。Render に載らない `-optional` / `-inference` も、DB に繋ぐローカルのバッチが使うので対象 |
+| 起票 | このジョブは failure で終わるだけで、起票は `notify-failure.yml`（タイトル `[ops] ワークフロー失敗: [定常] 依存パッケージの脆弱性検査`）。未修正のまま毎週失敗すると同じ Issue へ毎週コメントが追記される＝催促になる |
+| 結果の読み方 | 失敗ステップのログ末尾（＝Issue 本文）と run の Step Summary に markdown の表（パッケージ・版・ID・修正版・別名）が出る |
+| 不変条件 | `tests/test_dependency_audit.py`（定時実行・paths・glob・pin・`--strict`・終了コードの伝播・`cancel-in-progress` 無し・`contents: read` のみ・除外の書式） |
+
+**検出したとき**: 修正版へ上げる。アップグレードは CLAUDE.md のとおり「単独 PR ＋ `pytest` ＋ 主要画面確認」。修正版が無い、または本アプリの使い方では到達しない経路だと判断して外すときは、run の `ignores` 配列へ `--ignore-vuln <ID>` を1行1件で足し、**同じ行に理由と Issue 番号を書く**（行継続の `\` の後ろにはコメントを置けないので配列にしてある）。黙って外すと、外したことを誰も覚えていない穴を自分で作る（`macro_health.EXCLUDED_SERIES` と同型）。
+
+**`cancel-in-progress` を付けない理由**: 定時実行と push が同じ ref で重なって取り消されると `cancelled` で終わり、`notify-failure` は理由を判別できない cancelled を安全側で起票する＝誤報になる。所要は数分なので重複しても害は無い。
+
+**Dependabot alerts との関係**: GitHub の Dependabot alerts は通知がメールと Security タブに出るだけで、#414 で「GitHub 標準のメール通知では誰も気づかなかった」実績がある。有効にしていても、Issue として表に出るこの経路は別に要る（有効かどうかは Settings → Code security で確かめる）。
+
+**初回の検査結果（2026-09-24・ローカル実測）**: 107件を照合・スキップ 0。検出は **anyio 4.13.0 の2件**（CVE-2026-63374 / GHSA-82r6-8w77-94w6、CVE-2026-64847 / GHSA-5p39-cfhj-2xmp・修正版 4.14.2）。anyio は starlette / httpx の推移依存。前者は非 ASCII ドメインへの TLS 接続、後者は `anyio.to_process` のプロセスプールが条件で、本アプリはどちらも踏まない見込みだが、修正版があるので上げる（検査の初回実走が起票する Issue で扱う）。
+
+**ローカルで回すとき**（プロジェクトの `venv` には入れず、リポジトリの外の使い捨て venv で。夜間バッチは `venv` をそのまま使うので、共有の依存の版を動かさない）:
+
+```bash
+python -m venv "$TEMP/audit-venv" && "$TEMP/audit-venv/Scripts/pip" install -r requirements-dev.txt
+PYTHONUTF8=1 "$TEMP/audit-venv/Scripts/pip-audit" --strict -r requirements.txt -r requirements-dev.txt -r requirements-inference.txt -r requirements-optional.txt
+```
+
+`PYTHONUTF8=1` が要るのは、requirements に日本語コメントがあり、pip-audit の requirements パーサがロケールの既定エンコーディングで読むため（Windows の cp932 では照合前に `UnicodeDecodeError` で落ちる・実測）。
 
 ### daily-incremental の動作詳細
 
