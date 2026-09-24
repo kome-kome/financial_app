@@ -129,7 +129,7 @@ async def run_plugin(
         raise HTTPException(404, f"プラグイン '{plugin_name}' が見つかりません")
     if api.RENDER_LIGHT_MODE and getattr(p, "heavy", False):
         raise HTTPException(403, f"「{p.label}」は計算が重いためローカル環境で実行してください"
-                                 "（Render Free プラン制限。結果は共有DBに保存され本番に反映されます）")
+                                 "（Render Free プラン制限。Render は閲覧専用で、ローカルで実行した結果はここには反映されません）")
     try:
         if getattr(p, "heavy", False):
             return await _execute_with_progress(p, plugin_name, params, db)

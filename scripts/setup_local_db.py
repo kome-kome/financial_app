@@ -90,11 +90,12 @@ def guard_local() -> str:
     print(f"接続先: {mask(url)}")
     if not database._is_local:
         raise SystemExit(
-            "中止: DATABASE_URL がローカルを指していません。\n"
-            "  init_db() は無条件に DDL（DROP COLUMN 移行を含む）を打つため、本番へ向けたまま\n"
-            "  実行すると不可逆です。先に環境変数を立ててから実行してください:\n"
-            '    $env:DATABASE_URL = "postgresql://edinet:edinet@localhost:5432/financial_db"\n'
-            "  （load_dotenv() は override=False なので、先に立てた環境変数が .env に勝ちます）"
+            "中止: 接続先がローカルを指していません（FINAPP_DB_TARGET=prod か RENDER 環境変数で\n"
+            "  prod として解決された）。init_db() は無条件に DDL（DROP COLUMN 移行を含む）を打つため、\n"
+            "  本番へ向けたまま実行すると不可逆です。local を明示してから実行してください:\n"
+            "    $env:FINAPP_DB_TARGET = \"local\"   # 明示指定は RENDER より優先される\n"
+            "  local ではローカルの接続先を DATABASE_URL_LOCAL から読み（未設定なら既定のローカル URL）、\n"
+            "  DATABASE_URL は読みません（load_dotenv() は override=False なので、先に立てた環境変数が .env に勝ちます）"
         )
     return url
 

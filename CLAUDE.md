@@ -68,11 +68,11 @@
 | `collector_prices.py` | 株価（stooq/J-Quants/Yahoo）・市場データ更新・マクロ収集 |
 | `collector_interim.py` | 半期(H1)財務収集（EDINET 半期報告書043A00/旧四半期Q2・period_type='H1'・Issue #219②）。**H1 判定は DEI `Q2`/`HY` の両方**（新式は `HY` を名乗る。`Q2` だけ見ると全件捨てて exit=0・#647） |
 | `collector_disclosures.py` | 会社予想（ガイダンス）開示収集（J-Quants `/fins/summary`）。`statement_disclosure` へ蓄積する。**本番の API / プラグイン経路からは使われていない**（利用は `scripts/event_study_*.py` の2本のみ・親 #323 は wontfix）。詳細は [ARCHITECTURE.md](docs/ARCHITECTURE.md) |
-| `api.py` | FastAPI アプリ本体（HTMLページ配信・認証/CORSミドルウェア・`/health`）。REST ルート実体は `routers/` へ委譲 |
+| `api.py` | FastAPI アプリ本体（HTMLページ配信・認証/CORSミドルウェア・`/api/system/info`・`/heartbeat`）。REST ルート実体は `routers/` へ委譲（`/health` も `routers/auth.py`） |
 | `routers/` | REST ルーター5本（`auth` / `collect` / `market` / `analysis` / `morning`）。エンドポイント定義の実体 |
 | `plugins/` | 分析モデル（自動検出方式）。理論は [MODELS.md](docs/MODELS.md)、実装詳細は [PLUGIN_REFERENCE.md](docs/PLUGIN_REFERENCE.md) |
 | `templates/*.html` | 画面テンプレート。JS は CSP 対応で `static/js/<page>.js` へ外部化。**ダッシュボードとログイン以外の全画面はグローバルナビ `.gnav` を持つ**——貼り忘れは失敗として現れないので `tests/test_templates_nav.py` が照合する。画面一覧は [ARCHITECTURE.md](docs/ARCHITECTURE.md) |
-| `_pipeline_gh.py` / `_pipeline_incremental.py` | GitHub Actions 用・全件 / 差分収集 |
+| `_pipeline_gh.py` / `_pipeline_incremental.py` | 全件収集（GitHub Actions `full-pipeline.yml`・手動のみ）/ 差分収集（**ローカル夜間バッチの収集入口**・GHA の cron は #503 で停止） |
 
 完全なファイル役割一覧・処理フロー・ER図は [ARCHITECTURE.md](docs/ARCHITECTURE.md) を参照。
 
