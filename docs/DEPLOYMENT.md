@@ -276,7 +276,7 @@ gh run cancel <run-id>   # → annotation は "The run was canceled by @…" →
 
 **Dependabot alerts との関係**: GitHub の Dependabot alerts は通知がメールと Security タブに出るだけで、#414 で「GitHub 標準のメール通知では誰も気づかなかった」実績がある。有効にしていても、Issue として表に出るこの経路は別に要る（有効かどうかは Settings → Code security で確かめる）。
 
-**初回の検査結果（2026-09-24・ローカル実測）**: 107件を照合・スキップ 0。検出は **anyio 4.13.0 の2件**（CVE-2026-63374 / GHSA-82r6-8w77-94w6、CVE-2026-64847 / GHSA-5p39-cfhj-2xmp・修正版 4.14.2）。anyio は starlette / httpx の推移依存。前者は非 ASCII ドメインへの TLS 接続、後者は `anyio.to_process` のプロセスプールが条件で、本アプリはどちらも踏まない見込みだが、修正版があるので上げる（検査の初回実走が起票する Issue で扱う）。
+**初回の検査結果（2026-09-24・ローカル実測）**: 107件を照合・スキップ 0。検出は **anyio 4.13.0 の2件**（CVE-2026-63374 / GHSA-82r6-8w77-94w6、CVE-2026-64847 / GHSA-5p39-cfhj-2xmp・修正版 4.14.2）。anyio は starlette / httpx の推移依存。前者は非 ASCII ドメインへの TLS 接続、後者は `anyio.to_process` のプロセスプールが条件で、本アプリはどちらも踏まない見込みだったが、修正版があるので #730（検査の初回実走が起票した Issue）で 4.14.2 へ上げて解消した。最新の 4.15.x は Python 3.13 で `typing_extensions>=4.16.0` を要求し pin（4.15.0）と衝突するので、単独 PR の範囲に収まる 4.14.2 を選んだ。
 
 **ローカルで回すとき**（プロジェクトの `venv` には入れず、リポジトリの外の使い捨て venv で。夜間バッチは `venv` をそのまま使うので、共有の依存の版を動かさない）:
 
