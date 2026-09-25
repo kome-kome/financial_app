@@ -127,7 +127,9 @@ async def run_plugin(
     p = plugin_registry.get_plugin(plugin_name)
     if p is None:
         raise HTTPException(404, f"プラグイン '{plugin_name}' が見つかりません")
-    if api.RENDER_LIGHT_MODE and getattr(p, "heavy", False):
+    # 旗（RENDER_LIGHT_MODE）だけでなく接続先 prod でも止める＝旗が反映されない Render で
+    # sector_ols が断面の regression_results へ書くのを防ぐ（#733）
+    if api.writes_blocked() and getattr(p, "heavy", False):
         raise HTTPException(403, f"「{p.label}」は計算が重いためローカル環境で実行してください"
                                  "（Render Free プラン制限。Render は閲覧専用で、ローカルで実行した結果はここには反映されません）")
     try:
@@ -452,7 +454,7 @@ async def backtest_model_comparison(request: Request, db: Session = Depends(api.
         return await _run_with_progress(
             "model_comparison", label,
             lambda: model_comparison.run_comparison(
-                db, render_light_mode=api.RENDER_LIGHT_MODE))
+                db, render_light_mode=api.writes_blocked()))
     except Exception as e:
         log.error("Model comparison error: %s", e, exc_info=True)
         raise HTTPException(500, "モデル比較の実行エラーが発生しました。")

@@ -3,6 +3,7 @@ let dbPage = 0, dbLimit = 50;
 let screenResults = [];
 let normData = {};
 let searchTimer = null;
+let _writesBlocked = false;  // 閲覧専用の環境か（initLightMode が立てる・#733）
 
 // ── API ────────────────────────────────────────────────────────────
 function apiBase(){ return document.getElementById('api-base').value.trim().replace(/\/$/,'') }
@@ -1123,8 +1124,9 @@ async function initWizardState() {
     ['btn-market', 'btn-history-start', 'btn-jq-start'].forEach(id => {
       const el = document.getElementById(id);
       if (!el) return;
-      el.disabled = noFin;
-      el.title = noFin ? '先に財務データを収集してください' : '';
+      // initLightMode と非同期で競うので、閲覧専用なら有効へ戻さない（#733）
+      el.disabled = noFin || _writesBlocked;
+      if (!_writesBlocked) el.title = noFin ? '先に財務データを収集してください' : '';
     });
     document.getElementById('stockmarket-prereq-banner').classList.toggle('hidden', !noFin);
   } catch(e) {}
@@ -1137,26 +1139,21 @@ function log(msg,type='info'){
 }
 function clearLog(){ document.getElementById('log-box').innerHTML=''; }
 
-// ── 軽量モード初期化 ────────────────────────────────────────────────────
+// ── 閲覧専用モード初期化（#733）──────────────────────────────────────────
+// 収集ルーターの書き込み系はサーバ側で一律 403。ここは押せないことを見せる補助で、
+// 書き込み API を叩くボタンに data-writes を付けておけば一括で無効化される。
 async function initLightMode(){
   try{
     const r = await fetch('/api/system/info');
     const d = await r.json();
-    if(!d.render_light_mode) return;
+    if(!d.writes_blocked) return;
+    _writesBlocked = true;
     document.getElementById('light-mode-banner').style.display = '';
-    // 全件収集ボタン
-    const btnCollect = document.getElementById('btn-collect');
-    if(btnCollect){ btnCollect.disabled = true; btnCollect.title = 'Render環境ではローカルPCから実行してください'; btnCollect.style.opacity = '0.4'; }
-    // 株価履歴収集ボタン
-    const btnHist = document.getElementById('btn-history-start');
-    if(btnHist){ btnHist.disabled = true; btnHist.title = 'Render環境ではローカルPCから実行してください'; btnHist.style.opacity = '0.4'; }
-    const btnHistF = document.getElementById('btn-history-force');
-    if(btnHistF){ btnHistF.disabled = true; btnHistF.style.opacity = '0.4'; }
-    // J-Quants 収集ボタン
-    const btnJq = document.getElementById('btn-jq-start');
-    if(btnJq){ btnJq.disabled = true; btnJq.title = 'Render環境ではローカルPCから実行してください'; btnJq.style.opacity = '0.4'; }
-    const btnJqF = document.getElementById('btn-jq-force');
-    if(btnJqF){ btnJqF.disabled = true; btnJqF.style.opacity = '0.4'; }
+    document.querySelectorAll('[data-writes]').forEach(btn => {
+      btn.disabled = true;
+      btn.title = '閲覧専用の環境です。ローカルPCから実行してください';
+      btn.style.opacity = '0.4';
+    });
   }catch(e){ /* 取得失敗は無視 */ }
 }
 

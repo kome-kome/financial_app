@@ -30,7 +30,7 @@ Render の制約と運用形態に合わせて設計すること。
 | **手動のみ** | 会社予想開示収集（J-Quants /fins/summary） | workflow_dispatch で起動 | GitHub Actions `collect-disclosures.yml` |
 | **手動のみ** | 半期(H1)財務収集（EDINET 半期/旧四半期Q2） | workflow_dispatch で起動 | GitHub Actions `collect-interim.yml` |
 | **手動のみ（アーカイブ）** | bs_inventory 補完 | workflow_dispatch で起動 | GitHub Actions `old/` 配下（一回性・完了済み） |
-| **UIから手動** | 差分収集・株価更新 | ユーザーがボタン押下 | ローカルの Web UI（`/collection`）。Render は閲覧専用のため使わない（API は通るが Supabase の断面だけが動く。下の「ローカル / Render 役割分担」） |
+| **UIから手動** | 差分収集・株価更新 | ユーザーがボタン押下 | ローカルの Web UI（`/collection`）。Render では収集・書き込み系 API が一律 403（#733・下の「ローカル / Render 役割分担」） |
 | **自動（CI）** | `pytest` 回帰テスト（Secrets・本番DB非依存） | PR / main への push | GitHub Actions `ci.yml` |
 | **自動（イベント）** | 他ワークフローの failure / cancelled を Issue 化 | 対象ワークフロー完了時（`workflow_run`） | GitHub Actions `notify-failure.yml` |
 | **自動（毎週）** | pin した依存の脆弱性照合（pip-audit・#723）。検出は failure → `notify-failure` が起票 | 毎週月曜 JST 07:23 ＋ `requirements*.txt` を変える PR / main への push | GitHub Actions `dependency-audit.yml` |
@@ -403,19 +403,19 @@ M-1（`macro_risk_return`）・M-2（`macro_gbdt`）・M-3（`macro_dlm`）の�
 
 ## ローカル / Render 役割分担
 
-**両環境は別の DB を見ている**（#503・[ADR-0038](adr/0038-local-postgres-is-the-primary.md)）。ローカルは**正本**のローカル PostgreSQL（下節）を読み書きし、Render は Supabase に残した断面（2026-08-07 時点）を読む**閲覧専用の窓**である。下表の Render 列は「API レベルで何が通るか」であって、運用で使うかどうかではない——Render で収集を走らせても動くのは Supabase の断面だけで、正本とは分岐する。
+**両環境は別の DB を見ている**（#503・[ADR-0038](adr/0038-local-postgres-is-the-primary.md)）。ローカルは**正本**のローカル PostgreSQL（下節）を読み書きし、Render は Supabase に残した断面（2026-08-07 時点）を読む**閲覧専用の窓**である。下表の Render 列は「API レベルで何が通るか」。断面へ書くと断面だけが前進して正本とも凍結断面とも分岐し、しかも**どちらの DB でも書き込みは成功するのでエラーにならない**ため、収集・書き込み系はコードで止めている（#733）。
 
 | 操作 | ローカル PC | Render（Web） |
 |---|---|---|
-| 全件収集（初回・全社XBRL） | ✅ 推奨 | ❌ ブロック（OOM リスク） |
+| 全件収集（初回・全社XBRL） | ✅ 推奨 | ❌ ブロック |
 | 株価履歴再構築 | ✅ 推奨 | ❌ ブロック |
 | J-Quants 大量収集 | ✅ 推奨 | ❌ ブロック |
-| 差分収集（`skip_existing=True`） | ✅ 可（定常は夜間バッチが回す） | ⚠️ API は通るが運用しない（断面だけが動く） |
-| 市場データ更新 | ✅ 可 | ⚠️ 同上 |
-| スクリーニング・分析・UI 閲覧 | ✅ 可 | ✅ 可（断面の時点のデータ） |
+| 差分収集（`skip_existing=True`） | ✅ 可（定常は夜間バッチが回す） | ❌ ブロック（書き込み系は一律 403・#733） |
+| 市場データ更新 | ✅ 可 | ❌ ブロック（同上） |
+| スクリーニング・分析・UI 閲覧 | ✅ 可 | ✅ 可（断面の時点のデータ。heavy プラグインは 403） |
 
-**`RENDER_LIGHT_MODE=true`**（`render.yaml` に設定済み）を Render に設定することで、
-重い操作を API レベルでブロックし、UI 上でもボタンを無効化する。
+**収集ルーター（`/api/collect/*`・`/api/scheduler/*`）の GET 以外は、`RENDER_LIGHT_MODE` が立っているか接続先が prod（`FINAPP_DB_TARGET=prod`、未設定でも `RENDER` 検知で prod）のとき一律 403** になる（`api.writes_blocked()`・ルーター単位の依存なので足したエンドポイントにも掛かる）。条件を2つ持つのは、render.yaml の env が Blueprint 管理外のサービスでは反映されないことがあり、旗だけでは無防備になりうるから。heavy プラグイン（`sector_ols` は `regression_results` へ書く）の 403 も同じ条件で判定する。画面（`/collection`・`/analysis`）も `/api/system/info` の `writes_blocked` を見て該当ボタンを無効化する。
+**`RENDER_LIGHT_MODE=true`**（`render.yaml` に設定済み）はこの2条件の片方。
 ローカル `.env` にはこの変数を設定しない（制限なし）。
 
 ### ローカル PostgreSQL（**正本**・Issue #481 → #503）
@@ -1049,7 +1049,7 @@ ADR-0006 §Decision-1 が定める CPI チャネル。
 | `APP_SECRET_KEY` | トークン署名キー（HMAC） | Render 自動生成 |
 | `APP_RECOVERY_KEY` | パスワードリセット用 | 手動設定 |
 | `ALLOWED_ORIGIN` | CORS 許可オリジン | 手動設定（例: `https://<your-service>.onrender.com`） |
-| `RENDER_LIGHT_MODE` | 重い操作をブロック（`"true"` 固定） | `render.yaml` に設定済み |
+| `RENDER_LIGHT_MODE` | heavy プラグインと収集・書き込み系 API をブロック（`"true"` 固定・#733） | `render.yaml` に設定済み |
 
 新規環境変数を追加するときは:
 1. `render.yaml` の `envVars` に追記

@@ -214,9 +214,10 @@ class TestModelStatusEndpoint:
         assert isinstance(d["is_stale"], bool)
 
     def test_no_render_light_mode_field(self):
-        """render_light_mode は /api/system/info が担当し model/status には含まない。"""
+        """環境の旗は /api/system/info（writes_blocked・#733）が担当し model/status には含まない。"""
         d = client.get("/api/model/status").json()
         assert "render_light_mode" not in d
+        assert "writes_blocked" not in d
 
 
 class TestFreshnessBarHtml:

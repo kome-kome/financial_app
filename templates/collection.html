@@ -156,9 +156,9 @@ tr:hover td{background:var(--border-subtle)}
 
 <div class="container">
 
-<!-- 軽量モードバナー（Render環境時のみ表示） -->
+<!-- 閲覧専用バナー（/api/system/info の writes_blocked 時のみ表示・#733） -->
 <div id="light-mode-banner" style="display:none;background:var(--status-warn-bg);border:1px solid var(--status-warn);border-radius:8px;padding:10px 16px;margin-bottom:16px;font-size:13px;color:var(--status-warn-text)">
-  ⚠️ <strong>Render 環境（軽量モード）</strong>: 全件収集・株価履歴再構築・J-Quants 収集はローカル PC から実行してください。差分収集・市場データ更新・分析は通常どおり利用できます。
+  ⚠️ <strong>閲覧専用</strong>: この環境は Supabase の断面を見ているため、収集・更新は止めています。ローカル PC（正本）から実行してください。スクリーニング・分析・閲覧は通常どおり利用できます。
 </div>
 
 <!-- 収集管理 -->
@@ -175,7 +175,7 @@ tr:hover td{background:var(--border-subtle)}
   <div class="card" style="border-color:var(--status-info-bg)">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
       <div class="section-title" style="margin-bottom:0">差分収集（手動実行）</div>
-      <button class="btn btn-primary btn-sm" data-click="runNow">今すぐ実行</button>
+      <button class="btn btn-primary btn-sm" data-writes data-click="runNow">今すぐ実行</button>
     </div>
     <div style="font-size:12px;color:var(--text-muted);line-height:1.6">
       過去1年・収集済みスキップ＋成長率/Zスコア＋市場・マクロデータを一括更新します。<br>
@@ -191,7 +191,7 @@ tr:hover td{background:var(--border-subtle)}
     </div>
     <div style="background:var(--accent-deep-bg);border-radius:8px;padding:10px 12px;font-size:12px;color:var(--accent-soft-text);border-left:3px solid var(--accent);margin-bottom:14px">
       DB状態を自動判定し、初回は200社ずつ分割収集（チャンク収集）、全社収集完了後は差分収集に切り替えます。<br>
-      <span style="color:var(--text-muted)">Render無料プラン（512MB）でも安全に動作します。ボタンを繰り返しクリックするだけで全社収集が完了します。</span><br>
+      <span style="color:var(--text-muted)">ボタンを繰り返しクリックするだけで全社収集が完了します。</span><br>
       <span style="color:var(--text-muted)">EDINETに保管されている過去5年分が取得可能な最大範囲です。最新の有価証券報告書（直近の決算）も含まれます。</span>
     </div>
     <div class="form-group" style="max-width:240px;margin-bottom:12px">
@@ -204,11 +204,11 @@ tr:hover td{background:var(--border-subtle)}
     </div>
     <div id="smart-mode-badge" style="display:none;font-size:12px;margin-bottom:10px;padding:4px 10px;border-radius:6px;background:var(--bg-hover)"></div>
     <div class="flex" style="margin-bottom:12px">
-      <button class="btn btn-primary" id="btn-smart" data-click="startSmartCollection" style="background:var(--accent-hover);border:1px solid var(--accent)">
+      <button class="btn btn-primary" id="btn-smart" data-writes data-click="startSmartCollection" style="background:var(--accent-hover);border:1px solid var(--accent)">
         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M4.22 4.22l2.12 2.12M17.66 17.66l2.12 2.12M2 12h3M19 12h3M4.22 19.78l2.12-2.12M17.66 6.34l2.12-2.12"/></svg>
         スマート収集を実行
       </button>
-      <button class="btn btn-secondary btn-sm" id="btn-smart-stop" data-click="stopCollection" style="display:none;border-color:var(--status-bad);color:var(--status-bad)">
+      <button class="btn btn-secondary btn-sm" id="btn-smart-stop" data-writes data-click="stopCollection" style="display:none;border-color:var(--status-bad);color:var(--status-bad)">
         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/></svg>
         停止
       </button>
@@ -238,11 +238,11 @@ tr:hover td{background:var(--border-subtle)}
         過去1年分のEDINET書類のうち、まだ取り込んでいないものだけを取得します。定期実行に最適です。
       </div>
       <div class="flex" style="margin-bottom:12px">
-        <button class="btn btn-primary" id="btn-incremental" data-click="startIncremental">
+        <button class="btn btn-primary" id="btn-incremental" data-writes data-click="startIncremental">
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 11-2.12-9.36L23 10"/></svg>
           差分収集を実行
         </button>
-        <button class="btn btn-secondary btn-sm" id="btn-stop" data-click="stopCollection" style="display:none;border-color:var(--status-bad);color:var(--status-bad)">
+        <button class="btn btn-secondary btn-sm" id="btn-stop" data-writes data-click="stopCollection" style="display:none;border-color:var(--status-bad);color:var(--status-bad)">
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/></svg>
           停止
         </button>
@@ -274,7 +274,7 @@ tr:hover td{background:var(--border-subtle)}
       <div style="background:var(--status-warn-bg);border:1px solid var(--status-warn);border-radius:6px;padding:10px 12px;font-size:12px;color:var(--status-warn-text);margin-bottom:12px">
         ⚠️ 全社収集は<strong>数時間</strong>かかります。サーバーを停止しないでください。
       </div>
-      <button class="btn btn-primary" id="btn-collect" data-click="startFullCollection">
+      <button class="btn btn-primary" id="btn-collect" data-writes data-click="startFullCollection">
         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg>
         全社収集開始
       </button>
@@ -290,7 +290,7 @@ tr:hover td{background:var(--border-subtle)}
       <div class="flex">
         <button class="btn btn-secondary btn-sm" data-click="clearLog">クリア</button>
         <button class="btn btn-secondary btn-sm" data-click="checkJobStatus">最新ジョブ確認</button>
-        <button class="btn btn-secondary btn-sm" data-click="resetStuckJobs" style="color:var(--status-warn)">強制リセット</button>
+        <button class="btn btn-secondary btn-sm" data-writes data-click="resetStuckJobs" style="color:var(--status-warn)">強制リセット</button>
       </div>
     </div>
     <div class="log-box" id="log-box" style="margin-top:10px" role="log" aria-live="polite" aria-label="ジョブ実行ログ"></div>
@@ -307,7 +307,7 @@ tr:hover td{background:var(--border-subtle)}
         <label>EDINETコードを指定して単体企業の財務データを再取得します</label>
         <div class="flex">
           <input type="text" id="refresh-code" placeholder="例: E02167" style="flex:1">
-          <button class="btn btn-secondary btn-sm" data-click="refreshSingle">再取得</button>
+          <button class="btn btn-secondary btn-sm" data-writes data-click="refreshSingle">再取得</button>
         </div>
       </div>
     </div>
@@ -402,14 +402,14 @@ tr:hover td{background:var(--border-subtle)}
           </select>
         </div>
         <div class="flex" style="margin-bottom:8px">
-          <button class="btn btn-primary" id="btn-jq-start" data-click="startJQuantsCollection">
+          <button class="btn btn-primary" id="btn-jq-start" data-writes data-click="startJQuantsCollection">
             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg>
             収集開始
           </button>
-          <button class="btn btn-secondary btn-sm" id="btn-jq-force" data-click="startJQuantsCollection" data-arg="true" style="display:none;border-color:var(--status-warn);color:var(--status-warn)">
+          <button class="btn btn-secondary btn-sm" id="btn-jq-force" data-writes data-click="startJQuantsCollection" data-arg="true" style="display:none;border-color:var(--status-warn);color:var(--status-warn)">
             強制再開
           </button>
-          <button class="btn btn-secondary btn-sm" id="btn-jq-stop" data-click="stopJQuantsCollection" style="display:none;border-color:var(--status-bad);color:var(--status-bad)">
+          <button class="btn btn-secondary btn-sm" id="btn-jq-stop" data-writes data-click="stopJQuantsCollection" style="display:none;border-color:var(--status-bad);color:var(--status-bad)">
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/></svg>
             停止
           </button>
@@ -458,14 +458,14 @@ tr:hover td{background:var(--border-subtle)}
             株価テーブルの最新終値で PER・PBR・時価総額・配当利回りを計算します（全社一括・数秒）。
           </div>
           <div class="flex">
-            <button class="btn btn-secondary" id="btn-market" data-click="startMarketUpdate">
+            <button class="btn btn-secondary" id="btn-market" data-writes data-click="startMarketUpdate">
               <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 102.13-9.36L1 10"/></svg>
               市場データ更新開始
             </button>
-            <button class="btn btn-secondary btn-sm" id="btn-market-force" data-click="startMarketUpdate" data-arg="true" style="display:none;border-color:var(--status-warn);color:var(--status-warn)" title="既に実行中のジョブを停止して再起動します">
+            <button class="btn btn-secondary btn-sm" id="btn-market-force" data-writes data-click="startMarketUpdate" data-arg="true" style="display:none;border-color:var(--status-warn);color:var(--status-warn)" title="既に実行中のジョブを停止して再起動します">
               強制再開
             </button>
-            <button class="btn btn-secondary btn-sm" id="btn-market-stop" data-click="stopMarketUpdate" style="display:none;border-color:var(--status-bad);color:var(--status-bad)">
+            <button class="btn btn-secondary btn-sm" id="btn-market-stop" data-writes data-click="stopMarketUpdate" style="display:none;border-color:var(--status-bad);color:var(--status-bad)">
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/></svg>
               停止
             </button>
@@ -530,14 +530,14 @@ tr:hover td{background:var(--border-subtle)}
             </label>
           </div>
           <div class="flex" style="margin-bottom:8px">
-            <button class="btn btn-secondary" id="btn-history-start" data-click="startHistoryCollection">
+            <button class="btn btn-secondary" id="btn-history-start" data-writes data-click="startHistoryCollection">
               <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg>
               収集開始
             </button>
-            <button class="btn btn-secondary btn-sm" id="btn-history-force" data-click="startHistoryCollection" data-arg="true" style="display:none;border-color:var(--status-warn);color:var(--status-warn)" title="既に実行中のジョブを停止して再起動します">
+            <button class="btn btn-secondary btn-sm" id="btn-history-force" data-writes data-click="startHistoryCollection" data-arg="true" style="display:none;border-color:var(--status-warn);color:var(--status-warn)" title="既に実行中のジョブを停止して再起動します">
               強制再開
             </button>
-            <button class="btn btn-secondary btn-sm" id="btn-history-stop" data-click="stopHistoryCollection" style="display:none;border-color:var(--status-bad);color:var(--status-bad)">
+            <button class="btn btn-secondary btn-sm" id="btn-history-stop" data-writes data-click="stopHistoryCollection" style="display:none;border-color:var(--status-bad);color:var(--status-bad)">
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/></svg>
               停止
             </button>
@@ -580,11 +580,11 @@ tr:hover td{background:var(--border-subtle)}
       </select>
     </div>
     <div class="flex" style="margin-bottom:8px">
-      <button class="btn btn-secondary" id="btn-macro-start" data-click="startMacroCollection">
+      <button class="btn btn-secondary" id="btn-macro-start" data-writes data-click="startMacroCollection">
         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg>
         マクロ収集開始
       </button>
-      <button class="btn btn-secondary btn-sm" id="btn-macro-stop" data-click="stopMacroCollection" style="display:none;border-color:var(--status-bad);color:var(--status-bad)">
+      <button class="btn btn-secondary btn-sm" id="btn-macro-stop" data-writes data-click="stopMacroCollection" style="display:none;border-color:var(--status-bad);color:var(--status-bad)">
         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/></svg>
         停止
       </button>
@@ -639,8 +639,8 @@ tr:hover td{background:var(--border-subtle)}
       </div>
     </div>
     <div style="display:flex;gap:8px;margin-bottom:12px;align-items:center">
-      <button class="btn btn-primary" id="btn-reparse-start" data-click="startReparse">再解析を実行</button>
-      <button class="btn btn-secondary btn-sm" id="btn-reparse-stop" data-click="stopReparse" style="display:none;border-color:var(--status-bad);color:var(--status-bad)">停止</button>
+      <button class="btn btn-primary" id="btn-reparse-start" data-writes data-click="startReparse">再解析を実行</button>
+      <button class="btn btn-secondary btn-sm" id="btn-reparse-stop" data-writes data-click="stopReparse" style="display:none;border-color:var(--status-bad);color:var(--status-bad)">停止</button>
       <button class="btn btn-secondary btn-sm" data-click="clearById" data-target="reparse-log">ログクリア</button>
     </div>
     <div class="log-box" id="reparse-log" role="log" aria-live="polite"></div>
@@ -658,7 +658,7 @@ tr:hover td{background:var(--border-subtle)}
         <select id="db-industry" style="width:140px" data-change="loadDB">
           <option value="">全業種</option>
         </select>
-        <button class="btn btn-secondary btn-sm" id="btn-update-industry" data-click="updateIndustryData">業種を更新</button>
+        <button class="btn btn-secondary btn-sm" id="btn-update-industry" data-writes data-click="updateIndustryData">業種を更新</button>
         <button class="btn btn-secondary btn-sm" data-click="exportCSV">CSV出力</button>
       </div>
     </div>

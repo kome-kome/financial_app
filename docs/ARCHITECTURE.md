@@ -57,7 +57,7 @@ graph LR
 
     subgraph RENDER["☁️ Render（閲覧専用の窓・RENDER_LIGHT_MODE=true）"]
         direction TB
-        API_R["⚡ api.py\n・Supabase の断面を読むだけ（正本の更新は届かない）\n・全件収集はブロック（403）\n・株価履歴・J-Quantsはブロック（403）\n・重いプラグイン(heavy)はブロック（403）\n・VIEW読取・乖離/推薦/スクリーニングは通常通り\n・差分収集 API はコード上まだ通るが運用しない"]
+        API_R["⚡ api.py\n・Supabase の断面を読むだけ（正本の更新は届かない）\n・収集・書き込み系（/api/collect/*・/api/scheduler/* の GET 以外）は一律ブロック（403・#733）\n・重いプラグイン(heavy)はブロック（403）\n・VIEW読取・乖離/推薦/スクリーニングは通常通り"]
     end
 
     subgraph SUPA["☁️ Supabase（閲覧用の断面＋バックアップ置き場）"]
@@ -1218,7 +1218,7 @@ graph LR
 
     subgraph OPS["🩺 運用"]
         H1["GET /health\n死活監視（DB疎通確認、認証不要）\n200=ok / 503=degraded"]
-        H2["GET /api/system/info\nRENDER_LIGHT_MODE フラグ＋接続先(db_target/db_is_local/db_label)を返す\n（フロントが heavy プラグイン可否を判定／common.js がローカル接続バッジを出す・#481）"]
+        H2["GET /api/system/info\nwrites_blocked（RENDER_LIGHT_MODE または接続先 prod）＋接続先(db_target/db_is_local/db_label)を返す\n（analysis.js が heavy プラグイン可否を判定／collection.js が書き込み系ボタンを無効化・#733／common.js がローカル接続バッジを出す・#481）"]
         H3["POST /heartbeat\nブラウザ生存通知（認証不要・common.js が5秒毎送信）\nFINAPP_AUTO_SHUTDOWN=1（launch.py 経由）時のみ\n途絶30秒で自動停止。収集ジョブ実行中は保留"]
     end
 
@@ -1238,7 +1238,7 @@ graph LR
         S5["GET /api/export/csv\n財務データをCSVでダウンロード"]
     end
 
-    subgraph COLLECT["📦 収集管理 /api/collect/"]
+    subgraph COLLECT["📦 収集管理 /api/collect/（GET 以外は閲覧専用の環境で一律 403・ルーター依存・#733）"]
         C1["POST /api/collect/start\n財務データ収集を開始"]
         C2["POST /api/collect/stop\n財務データ収集を停止"]
         C3["GET /api/collect/stream\nSSE: 収集進捗をリアルタイム配信"]
@@ -1283,7 +1283,7 @@ graph LR
 
     subgraph ANALYSIS["📊 分析 /api/"]
         AN1["GET /api/plugins\nプラグイン + 特例エントリ(screen/backtest/model_comparison)のメタ一覧\n（category/ui_order/heavy/hidden 含む・ui_order 昇順）\n退役（hidden=True・ADR-0044）は除外"]
-        AN2["POST /api/plugins/{name}/run\nプラグインを実行\n（heavy かつ RENDER_LIGHT_MODE は 403）\nheavy は実行中の進捗を JobState へ流す（#545）"]
+        AN2["POST /api/plugins/{name}/run\nプラグインを実行\n（heavy かつ writes_blocked＝RENDER_LIGHT_MODE または接続先 prod は 403・#733）\nheavy は実行中の進捗を JobState へ流す（#545）"]
         AN12["GET /api/plugins/{name}/progress\nheavy プラグイン実行の進捗 SSE（#545）\n{running, progress, total, new_logs}\n画面は POST の応答を待たずに開く\n（POST が完了まで返らないため）"]
         AN11["GET /api/plugins/{name}/tuned\n自動調整済みハイパーパラメータ\n（hyperparameter_search.py --persist が書込・未調整は404）\n読取専用・軽量。探索自体はローカル月次バッチ経由\nparams は現在の探索空間へ射影して返す(#604)\n生値=params_as_tuned・変えたキー=stale_params\n測ったパネルの照合=panel_changed(#711)\nFalse と言えたときだけ画面が自動プリフィル"]
         AN10["GET /api/model/status\n業種別OLSモデルの鮮度情報\n（computed_at/staleness_days/n_results/is_stale）\n鮮度バーUI用の軽量GET"]

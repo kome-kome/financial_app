@@ -157,6 +157,7 @@ web版・ローカル版の双方が同じ Issue を見ることで、**コー�
   | 月次が更新する producer（heavy プラグイン・`macro_beta` / `factor_premia`） | `batch_freshness.py::PRODUCER_COVERAGE`（`watched` / `exempt:`）＋ `PRODUCERS` | `test_check_batch_freshness.py::TestEveryHeavyProducerIsCovered` |
   | 日中枠の暦（`run_daytime.SCHEDULE`） | `batch_freshness.PRODUCERS`（読み手は `Scheduled.produced` を共有） | `test_check_batch_freshness.py::TestScheduledCollectionIsWatched` |
   | 月次系のバッチ（`run_monthly*.py`） | `run_daytime.MONTHLY_BATCHES`（＋ `TRIGGER_DAY` / `TRIGGER_TIME`） | `test_run_daytime.py::TestMonthlyOverlap` |
+  | 収集ルーター外の GET 以外のルート（書くなら `routers/collect.py` へ置く） | `api.WRITE_ROUTE_EXEMPTIONS`（`exempt:` 理由＝断面へ書かない根拠・#733） | `test_api_collect.py::TestWriteRouteRegistry` |
   | スキル／エージェント | `docs/SKILLS_AND_AGENTS.md` へ1行（#575） | `test_docs_sync.py`（**`~/.claude/` は CI の checkout に無くローカル pytest でのみ照合**） |
   | `docs/MODELS.md` のモデル章 | `templates/models.html` の `#mN` 節（載せないなら `test_docs_sync.CHAPTERS_WITHOUT_A_SECTION` へ `exempt:` 理由） | `test_docs_sync.py::TestModelsPageTracksModelsDoc` |
 

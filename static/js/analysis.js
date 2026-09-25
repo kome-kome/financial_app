@@ -137,14 +137,14 @@ const PLUGIN_TAB_MAP = {
 const PLUGIN_ICON = { 'recommend': '★ ', 'gap_analysis': '◆ ', 'net_cash_analysis': '¥ ' };
 let _allTabs   = [];        // タブを持つ分析の tabId 一覧（initPlugins が構築）
 let _pluginMeta = {};
-// Render 軽量モード（true なら重い回帰はローカル実行に限定。UIで無効化＋案内）
+// 閲覧専用の環境（writes_blocked・#733）。true なら heavy はローカル実行に限定（UIで無効化＋案内）
 let _renderLightMode = false;
 
 async function initLightMode(){
   try {
     const r = await fetch('/api/system/info');
     const d = await r.json();
-    _renderLightMode = !!d.render_light_mode;
+    _renderLightMode = !!d.writes_blocked;  // サーバの heavy ガードと同じ判定（#733）
   } catch(e){ /* 取得失敗は通常モード扱い */ }
 }
 
