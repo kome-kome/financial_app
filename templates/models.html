@@ -490,7 +490,7 @@ predicted_market_cap = ŷ_pred / stock_price × market_cap   <span class="sym">[
       <li><strong>説明変数の自動ドロップ（2段階）:</strong> ① 母集団全体での欠損率が 50% を超える列を全業種から除外。② <strong>業種内</strong>での欠損率が <code>sector_missing_rate</code>（既定 30%）を超える列を、その業種の回帰からのみ除外（さらに最小サンプル数に届かない業種は欠損最多列から貪欲に除外）。除外内容は業種別 R² サマリーに表示する</li>
       <li><strong>無配の 0 埋め（既定 ON・<code>zero_fill_no_dividend</code>）:</strong> XBRL は配当が無いとタグ自体を出さないため、<strong>無配（真の 0）と未収集が同じ NULL に潰れる</strong>。<code>dps</code> の NULL は 0 円/株として回帰へ入れる</li>
       <li>per-share 10項目以上選択時は PL同士・BS同士の比例関係から VIF&gt;10 が頻発する。<code>check_collinearity</code> の警告が出た業種では <strong>Ridge への切替を強く推奨</strong></li>
-      <li>株数推計は IFRS/JGAAP 定義差・期中増資・優先株・転換社債存在時に誤差あり（FUTURE_TASKS の J-Quants <code>IssuedShares</code> 取得で根本解決予定）</li>
+      <li>株数は <code>issued_shares</code>（XBRL 直接値）を優先し、推計（純資産 ÷ BPS）は欠損時のフォールバックだけ。推計は IFRS/JGAAP 定義差・期中増資・優先株・転換社債存在時に誤差あり</li>
       <li>バリュエーション分析（gap_analysis）は本プラグインの実行後でなければ利用不可。gap_ratio の収束予測には統計的根拠がない（→「バリュエーション分析」参照）</li>
     </ul>
   </div>

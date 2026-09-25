@@ -554,7 +554,7 @@ class MacroDlmPlugin(AnalysisPlugin):
         return y, X, used_dates
 
     def produced_output(self, db: Any) -> bool:
-        """M-3 producer μ̂（macro_dlm_scores）を共有DBに持つか（sell_ranking の graceful 判定用）。"""
+        """M-3 producer μ̂（macro_dlm_scores）を DB に永続化済みか（sell_ranking の graceful 判定用）。"""
         try:
             from database import get_macro_dlm_scores
             return bool(get_macro_dlm_scores(db))

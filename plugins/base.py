@@ -52,7 +52,7 @@ class AnalysisPlugin(ABC):
         ...
 
     def produced_output(self, db: Any) -> bool:
-        """この plugin が共有DBへ出力を書き終えているか（depends_on の充足判定に使う）。
+        """この plugin が出力を DB へ永続化し終えているか（depends_on の充足判定に使う）。
 
         他 plugin から depends_on で指される producer が override する。デフォルトは
         True（前提条件を持たない＝常に充足扱い）。例: sector_ols は regression_results に

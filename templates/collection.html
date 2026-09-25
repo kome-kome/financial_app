@@ -386,7 +386,7 @@ tr:hover td{background:var(--border-subtle)}
       <div class="card" style="border-color:var(--accent-soft-bg)">
         <div class="section-title">J-Quants 株価履歴収集</div>
         <div style="background:var(--accent-deep-bg);border-radius:8px;padding:10px 12px;font-size:12px;color:var(--accent-text);border-left:3px solid var(--accent);margin-bottom:14px">
-          JPX 公式 API から1日単位で全銘柄を一括取得します。stooq より高速・正確です。<br>
+          JPX 公式 API から1日単位で全銘柄を一括取得します。<br>
           <span style="color:var(--text-muted)">※ 要設定: <code>JQUANTS_API_KEY</code> を .env に設定（J-Quants ダッシュボード → API Keys）</span>
         </div>
         <div class="form-group">
@@ -430,10 +430,9 @@ tr:hover td{background:var(--border-subtle)}
       <div class="card" style="border-color:var(--accent-soft-bg)">
         <div class="section-title" style="color:var(--accent-text)">J-Quants の特徴</div>
         <div style="font-size:12px;color:var(--text-secondary);line-height:2">
-          <div>✓ &nbsp;1リクエストで全銘柄を一括取得（stooq より高速）</div>
+          <div>✓ &nbsp;1リクエストで全銘柄を一括取得</div>
           <div>✓ &nbsp;修正株価・分割調整済みデータ</div>
           <div>✓ &nbsp;取得済みデータも上書き更新（修正値に追従）</div>
-          <div>✓ &nbsp;stooq との重複は J-Quants が上書き優先</div>
           <div style="color:var(--text-muted);margin-top:8px">• 無料プランは過去2年分まで対応</div>
           <div style="color:var(--text-muted)">• レート制限: 約20秒/日付ごと（自動調整）</div>
         </div>
@@ -441,7 +440,7 @@ tr:hover td{background:var(--border-subtle)}
     </div>
   </div>
 
-  <!-- 市場データ更新（stooq専用・スクリーニングに必須） -->
+  <!-- 市場データ更新（株価テーブルから反映・外部接続なし・スクリーニングに必須） -->
   <div style="margin-bottom:16px">
     <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px">
       <div style="width:6px;height:6px;border-radius:50%;background:var(--text-muted)"></div>
@@ -487,86 +486,15 @@ tr:hover td{background:var(--border-subtle)}
     </div>
   </div>
 
-  <!-- 株価履歴収集（stooq フォールバック） -->
-  <details style="margin-bottom:0">
-    <summary style="cursor:pointer;padding:10px 16px;background:var(--bg-sunken);border:1px solid var(--bg-hover);border-radius:8px;font-size:13px;color:var(--text-secondary);list-style:none;display:flex;align-items:center;gap:8px">
-      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
-      株価履歴収集（stooq）
-      <span style="font-size:11px;background:var(--bg-hover);color:var(--text-secondary);padding:2px 8px;border-radius:10px;margin-left:4px">フォールバック / APIキー不要 / 最大5年</span>
-    </summary>
-    <div style="padding-top:12px">
-      <div style="font-size:12px;color:var(--text-muted);background:var(--bg-sunken);border:1px solid var(--bg-hover);border-radius:6px;padding:8px 12px;margin-bottom:12px">
-        J-Quants API キーが未設定の場合、または2年超の履歴（最大5年）が必要な場合のフォールバックです。<br>
-        stooq で収集した OHLCV は J-Quants が収集済みの日付については J-Quants データに上書きされます（J-Quants が正データ）。
-      </div>
-      <div class="card" style="border-color:var(--bg-hover)">
-          <div class="section-title" style="color:var(--text-muted)">株価履歴収集（OHLCV）</div>
-          <div style="font-size:12px;color:var(--text-muted);margin-bottom:14px">
-            stooq から日次 OHLCV を取得します。最大5年対応（J-Quants 無料プランは2年まで）。
-          </div>
-          <div class="form-group">
-            <label>取得年数（最大5年）</label>
-            <select id="history-years">
-              <option value="1">1年</option>
-              <option value="2">2年</option>
-              <option value="3" selected>3年</option>
-              <option value="5">5年</option>
-            </select>
-          </div>
-          <div class="form-group">
-            <label>最大社数（空欄=全社）</label>
-            <input type="number" id="history-max-co" placeholder="例: 100（テスト用）">
-          </div>
-          <div class="form-group">
-            <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
-              <input type="checkbox" id="history-skip-existing" checked style="width:14px;height:14px;cursor:pointer" data-change="toggleDisplay" data-target="history-backfill-row">
-              <span>差分収集（収集済みをスキップ）</span>
-            </label>
-          </div>
-          <div class="form-group" id="history-backfill-row">
-            <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
-              <input type="checkbox" id="history-backfill" checked style="width:14px;height:14px;cursor:pointer">
-              <span>過去分を補完（backfill）</span>
-            </label>
-          </div>
-          <div class="flex" style="margin-bottom:8px">
-            <button class="btn btn-secondary" id="btn-history-start" data-writes data-click="startHistoryCollection">
-              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg>
-              収集開始
-            </button>
-            <button class="btn btn-secondary btn-sm" id="btn-history-force" data-writes data-click="startHistoryCollection" data-arg="true" style="display:none;border-color:var(--status-warn);color:var(--status-warn)" title="既に実行中のジョブを停止して再起動します">
-              強制再開
-            </button>
-            <button class="btn btn-secondary btn-sm" id="btn-history-stop" data-writes data-click="stopHistoryCollection" style="display:none;border-color:var(--status-bad);color:var(--status-bad)">
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/></svg>
-              停止
-            </button>
-          </div>
-          <div id="history-progress" class="hidden progress-wrap">
-            <div class="flex" style="margin-bottom:6px">
-              <span class="spinner"></span>
-              <span class="text-sm" id="history-progress-label">収集中...</span>
-            </div>
-            <div class="progress-bar" role="progressbar" aria-valuemin="0" aria-valuemax="100"><div class="progress-fill" id="history-progress-fill" style="width:0%"></div></div>
-          </div>
-          <div class="flex-between" style="margin-top:12px;margin-bottom:6px">
-            <div style="font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px">収集ログ</div>
-            <button class="btn btn-secondary btn-sm" data-click="clearById" data-target="history-log">クリア</button>
-          </div>
-          <div class="log-box" id="history-log" role="log" aria-live="polite" aria-label="株価履歴収集ログ"></div>
-        </div>
-    </div>
-  </details>
-
   <!-- マクロデータ（為替・金利・指数・コモディティ） -->
 
   <div class="card" style="margin-top:16px">
     <div class="flex-between" style="margin-bottom:6px">
       <div style="font-size:14px;font-weight:600;color:var(--status-good-text)">マクロデータ（為替・金利・指数・コモディティ）</div>
-      <div style="font-size:11px;color:var(--text-muted)">stooq 経由 / 9系列・日次OHLCV</div>
+      <div style="font-size:11px;color:var(--text-muted)">市場系は Yahoo ＋ FRED・日銀・OECD ほか</div>
     </div>
     <div style="font-size:12px;color:var(--text-muted);margin-bottom:14px">
-      USD/JPY・米日10年金利・日経/TOPIX/S&P500・WTI/金 の日次データを取得します。<br>
+      為替・米国債利回り・株価指数・コモディティの日次データ（Yahoo）に加え、FRED・日銀・OECD・財務省などの系列をまとめて取得します（FRED・e-Stat は API キー設定時のみ）。<br>
       <span style="color:var(--text-muted)">※ 既存日付は上書き更新。自動取得はローカルの夜間バッチが毎日実行します（最終実行はダッシュボードの「自動収集」）。</span>
     </div>
 

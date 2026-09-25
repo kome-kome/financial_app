@@ -298,7 +298,7 @@ class MacroEnsemblePlugin(AnalysisPlugin):
 
     # ── producer/consumer（sell_ranking 共用契約・M-2 と同型）───────────────
     def produced_output(self, db: Any) -> bool:
-        """M-4 統合 μ̂（macro_ensemble_scores）を共有DBに持つか（graceful 判定用）。"""
+        """M-4 統合 μ̂（macro_ensemble_scores）を DB に永続化済みか（graceful 判定用）。"""
         try:
             from database import get_macro_ensemble_scores
             return bool(get_macro_ensemble_scores(db))
