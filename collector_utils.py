@@ -188,105 +188,6 @@ def rounding_tolerance(a: float, b: float) -> float:
     return max(REL_TOL_FLOOR, ROUND_UNIT / base)
 
 
-# --- 公式 AdjFactor が持たない企業イベント（#568）--------------------------------
-# **J-Quants の `AdjC` は株式分配型スピンオフ（子会社株の現物配当）を遡及調整しない。**
-# Yahoo（= DB）は権利落ち日より前の全期間へ
-#     (権利付最終日の終値 − 分配株式の初値) / 権利付最終日の終値
-# を掛ける。両者はどちらも「調整済み」だが中身が違い、権利落ち日を境に
-# 公式 / DB が 1.0 から離れる（**公式 > DB の向き**＝分割の取り残しとは逆）。
-#
-# 週次リターンを入力に持つ M-1 / M-2 / M-6 には DB 側が正しい——受け取った子会社株の価値が
-# 連続性として残る。**DB を公式へ寄せてはいけない**（権利落ち日に偽の暴落を作る）。
-# 突合では逆に、公式値へこの係数を掛けて DB のスケールへ換算してから比べる。
-#
-# 登録は「社を除外する」ではなく「換算して比べる」。DB の値が変われば（Yahoo が調整を
-# やめる・未調整値で取り直す等）再び段差として検出される（ADR-0053 の「名簿」にしない）。
-# 係数は丸めた小数を書き写さず、根拠の2つの値から式で持つ。
-#
-# 収集経路（J-Quants）はこの表を**書き込みを止める向きにだけ**使う（#651・`before_spinoff_ex_date`）。
-# 係数を掛けて書かないのは、登録の誤りを本番の株価へ入れないため——止める向きなら、誤登録で
-# 起きるのは「公式値で上書きされない行が残る」ことだけで、値そのものは壊れない。
-#
-# {edinet_code: ((権利落ち日, 係数, 根拠), ...)}
-SPINOFF_ADJUSTMENTS: dict = {
-    # メルコHD（現バッファロー・6676）→ シマダヤ（250A）を 1:1 で分配。権利付最終日 2024-09-26
-    # 終値 3820円・権利落ち 2024-09-27・効力／上場 2024-10-01・シマダヤ初値 1760円。
-    # 係数の逆数 1.854369 は #466 で実測した公式 / DB 比と一致する。
-    "E02086": (("2024-09-27", (3820.0 - 1760.0) / 3820.0,
-                "シマダヤ(250A) 株式分配型スピンオフ・効力 2024-10-01・#568"),),
-}
-
-
-def spinoff_factor(edinet_code: str, trade_date: str) -> float:
-    """公式 `AdjC` に掛けると DB（Yahoo）のスケールになる係数。登録が無ければ 1.0。
-
-    `trade_date` は "YYYY-MM-DD"。権利落ち日**より前**の日にだけ掛かる（当日以降は 1.0）。
-    同じ社に複数あれば積をとる。
-    """
-    f = 1.0
-    for ex_date, factor, _ in SPINOFF_ADJUSTMENTS.get(edinet_code, ()):
-        if str(trade_date)[:10] < ex_date:
-            f *= factor
-    return f
-
-
-def before_spinoff_ex_date(edinet_code: str, trade_date: str) -> bool:
-    """登録済みスピンオフの権利落ち日**より前**の日付か（#651）。登録が無ければ False。
-
-    この日付の公式 `AdjC` はスピンオフを調整しておらず `AdjC == C` のままなので、#620 の
-    「`AdjC != C` を書かない」選別を素通りする。一方 DB（Yahoo）は係数を掛けたスケールで
-    持つ＝書けば同じ列に2つのスケールが入る。J-Quants の取得経路はこの行を書かない。
-    """
-    d = str(trade_date)[:10]
-    return any(d < ex_date for ex_date, _, _ in SPINOFF_ADJUSTMENTS.get(edinet_code, ()))
-
-
-# --- 公式 AdjFactor だけが当て、DB へ当ててはいけない調整（#652）-------------------
-# スピンオフ（上の表）の**逆向き**: 公式は調整するが、DB（= Yahoo = 実際の約定値）は調整しない
-# のが正しい企業イベント。実例は新株予約権の無償割当（買収防衛策）で、公式 `AdjC` は権利落ち日
-# より前の全期間へ「全員が行使した場合」の理論係数を機械的に掛けるが、差別的行使条件と取得条項が
-# 付いた予約権は市場がほとんど織り込まない（#652 の観測: E34165 は理論上の権利落ちで約 −33% の
-# はずが、公式の段差が現れた前後の実際の終値は −3.5%。Yahoo も split として持たず DB と全期間一致）。
-# 公式へ寄せると、実際の取引に無い跳ねが週次リターン（M-1 / M-2 / M-6 の入力）に入る。
-#
-# **登録は換算ではなく書き込みの停止**（`repair_splits_from_jquants.judge_company`）。スピンオフの
-# ように公式値を DB のスケールへ換算するには正確な権利落ち日が要るが、この種のイベントは日程が
-# 変わりやすく（延期・差止め）、日付を誤って換算すると残った段差を公式イベントが「説明」して
-# **誤った係数が書き込まれる**。止める向きなら、誤登録で起きるのは「書かない」ことだけ。
-#
-# **鍵は社ではなく「社＋日付の窓」**（ADR-0053 の採らなかった案C「社の名簿」にしない）。窓の外で
-# 起きた公式イベントは今までどおり判定される。窓は日程の不確かさを吸収するために広く取る——
-# 広いほど書かない側に倒れ、窓の中の本物の分割も止まるが、レポートに理由付きで出るので黙らない。
-# 理論係数は照合に使わない（窓の中の公式イベントはすべて止める）。人が見比べるための根拠。
-#
-# {edinet_code: ((窓の始まり, 窓の終わり, 理論係数, 根拠), ...)}。窓は両端を含む "YYYY-MM-DD"。
-WITHHELD_OFFICIAL_ADJUSTMENTS: dict = {
-    # SAAFHD（1447）第1回A新株予約権: 1株につき1個を無償割当・1個あたり目的株式 0.5株・
-    # 行使価額 1円・行使期間 2026-11-01〜2027-01-31・対抗措置の行使条件と取得条項付き
-    # （適時開示 2026-08-03）。基準日は 9/14 説と 9/24 説があり一次資料で未確認、株主による
-    # 差止めの仮処分申立てもある（2026-09-14 に結果の開示）。理論係数は全員行使時の 1 / (1 + 0.5)。
-    # 見直すのは #652 の (a) 防衛策の撤回 か (b) 行使による株式交付 のどちらかが来たとき。
-    "E34165": (("2026-09-01", "2026-12-31", 1.0 / (1.0 + 0.5),
-                "SAAFHD(1447) 新株予約権無償割当（買収防衛策）・DB（実約定値）が正・日程未確認・#652"),),
-}
-
-
-def withheld_official_events(edinet_code: str, events: list) -> list:
-    """公式イベント `[(日付, AdjFactor)]` のうち、登録済みの窓に入るものを返す（#652）。
-
-    戻り値は `[(日付, AdjFactor, 理論係数, 根拠)]`（日付順）。登録が無い社・窓の外なら `[]`。
-    1件でも返れば、その社の補正は**書かない**（`repair_splits_from_jquants.judge_company`）。
-    """
-    out = []
-    for d, factor in events:
-        day = str(d)[:10]
-        for start, end, expected, reason in WITHHELD_OFFICIAL_ADJUSTMENTS.get(edinet_code, ()):
-            if start <= day <= end:
-                out.append((day, factor, expected, reason))
-                break
-    return sorted(out)
-
-
 def force_utf8_stdout() -> None:
     """cp932 の Windows コンソールへリダイレクトすると非 ASCII は UnicodeEncodeError で
     **出力済みの内容ごとクラッシュ**する。日本語を出す CLI はここを通して UTF-8 へ倒す。
@@ -486,27 +387,6 @@ def is_common_stock_code(code: str) -> bool:
     """
     s = str(code)
     return len(s) == 5 and s.endswith("0")
-
-
-#: `AdjFactor` をイベントとみなす下限（浮動小数の 1.0 ゆらぎを拾わない）。
-#: 収集（#661・catchup が残す）と修復（`repair_splits_from_jquants.extract_events`）が共有する。
-ADJ_FACTOR_EVENT_EPS = 1.0e-6
-
-
-def adj_factor_event(q: dict) -> Optional[float]:
-    """J-Quants の日次バー1行が公式の企業イベントなら、その `AdjFactor` を返す。無ければ None。
-
-    `AdjFactor` は**過去の株価に掛ける係数**（1:2 分割なら 0.5）で、分割補正係数 F とは向きが
-    逆（CONTEXT.md）。スピンオフは載らない（#568）。数値に読めない値はイベントとみなさない。
-    """
-    f = q.get("AdjFactor")
-    if f is None:
-        return None
-    try:
-        f = float(f)
-    except (TypeError, ValueError):
-        return None
-    return f if abs(f - 1.0) > ADJ_FACTOR_EVENT_EPS else None
 
 
 class EdinetAccessError(Exception):

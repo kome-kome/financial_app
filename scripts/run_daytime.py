@@ -395,7 +395,7 @@ JOBS: dict[str, Job] = {
     #
     # **#659 で既定が True へ倒れたのでキューへ積んだ**（2026-09-12）。倍率を `bs_bps` の
     # 年次比ではなく翌年の `issued_shares` 比から取るようにして、公式 `AdjFactor` との
-    # 一致率が 0.367 -> 0.962 になった（`measure_split_valuation_bias.DEFAULT_BPS_PATH`）。
+    # 一致率が 0.367 -> 0.962 になった（`corporate_actions.DEFAULT_BPS_PATH`）。
     # それまで積まなかったのは、**本番に入っていない設定の rank-IC** を 3 時間かけて
     # 測ることになるからである。
     "oof:split-bias": Job(

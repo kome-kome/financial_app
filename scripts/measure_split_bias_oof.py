@@ -44,7 +44,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from collector_prices import rebuild_split_adjustment_factors  # noqa: E402
+from corporate_actions import rebuild_split_adjustment_factors  # noqa: E402
 from database import SessionLocal  # noqa: E402
 from model_comparison import run_comparison  # noqa: E402
 

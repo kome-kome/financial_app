@@ -34,7 +34,7 @@ M-1 / M-2 / M-6 へ誤った企業イベントを伝播させる。#466 の調�
 **公式イベントが無い段差のすべてが「説明できない」わけではない。** 株式分配型スピンオフは
 公式 `AdjFactor` が持たず、Yahoo（= DB）だけが調整する（E02086・#568）。この場合は DB が
 正しいので、公式値の側へ係数を掛けて換算してから測る（`measured_ratios` の `ec`・
-`collector_utils.SPINOFF_ADJUSTMENTS`）。
+`corporate_actions.SPINOFF_ADJUSTMENTS`）。
 
 **逆向き（公式イベントがあるのに段差が無い）は正常。** Yahoo が既に知っている分割は
 DB 側で調整済みなので比が動かない（E02978 の 2024-07-30 が該当）。したがって
@@ -66,7 +66,7 @@ E34165（1447）の新株予約権無償割当（買収防衛策）で、公式 
 イベントが契約窓に入ると `validate` は「段差が公式イベント日で説明できる」ので**綺麗に通り**、
 `--apply` は実際の取引に無い +45% の跳ねを週次リターンへ入れる。
 
-そこで `collector_utils.WITHHELD_OFFICIAL_ADJUSTMENTS` に**社＋日付の窓**で登録し、窓の中に公式
+そこで `corporate_actions.WITHHELD_OFFICIAL_ADJUSTMENTS` に**社＋日付の窓**で登録し、窓の中に公式
 イベントがある社は `validate` より前に `withheld` へ分けて**書かない**（`judge_company`）。
 スピンオフのような換算にしないのは、この種のイベントは日程が変わりやすく、日付を誤って換算すると
 残った段差を公式イベントが説明して誤った係数を書くため。止める向きなら誤登録でも値は壊れない。
@@ -118,6 +118,9 @@ from collector_utils import (
     # 片方が「同じ値」と見た行をもう片方が「段差」と読む（#466 の実測: 株価 21円の
     # E01300 は観測幅 3.5e-3 で、`ROUND_UNIT / 株価` だと 4.8e-2）。
     REL_TOL_FLOOR, ROUND_UNIT, force_utf8_stdout, rounding_tolerance,
+)
+# 企業イベントの知識は台帳が唯一の源（#746・ADR-0062）。
+from corporate_actions import (
     # 公式が持たないスピンオフ調整（#568）。検出器（compare_official_vs_weekly）と共有する。
     spinoff_factor,
     # `AdjFactor` のイベント判定は夜間 catchup が残す側（#661）と共有する。
@@ -126,7 +129,7 @@ from collector_utils import (
     WITHHELD_OFFICIAL_ADJUSTMENTS, withheld_official_events,
 )
 
-# `AdjFactor` がイベントとみなされる下限。唯一の源は collector_utils（ここは互換の別名）。
+# `AdjFactor` がイベントとみなされる下限。唯一の源は corporate_actions（ここは互換の別名）。
 EVENT_EPS = ADJ_FACTOR_EVENT_EPS
 
 STAMP_KEY = "splits_repaired_from_jquants"
@@ -151,7 +154,7 @@ def measured_ratios(rows: list, weekly: dict, ec: Optional[str] = None) -> list:
     `weekly`: {trade_date: close_last}。戻り値は日付昇順の [(date, ratio, db, official)]。
     **比は推測ではなく実測**である（この関数が #466 の「株価比は検算に使う」の実体）。
 
-    `ec` を渡すと、公式が持たないスピンオフ調整（`collector_utils.SPINOFF_ADJUSTMENTS`・#568）を
+    `ec` を渡すと、公式が持たないスピンオフ調整（`corporate_actions.SPINOFF_ADJUSTMENTS`・#568）を
     `AdjC` へ掛けて DB のスケールへ換算してから比べる。換算しないと、DB が正しく調整済みの
     社でも段差に見え、補正計画が DB からスピンオフ調整を剥がす向きの係数を出す。
     """
@@ -282,7 +285,7 @@ def judge_company(ec: str, sec: str, rows: list, jq: list) -> tuple:
     **書いてよいのは `"fixed"` だけ**（`_run` はそれ以外で `apply_corrections` を呼ばない）。
     `factors` は `"fixed"` / `"clean"` のときだけ `{trade_date: 係数}`、それ以外は `{}`。
 
-    **登録済みの公式調整（`collector_utils.WITHHELD_OFFICIAL_ADJUSTMENTS`・#652）は validate より
+    **登録済みの公式調整（`corporate_actions.WITHHELD_OFFICIAL_ADJUSTMENTS`・#652）は validate より
     前に見る。** validate は「段差が公式イベント日で説明できるか」しか問わないので、公式だけが
     調整して DB が正しい企業イベント（新株予約権の無償割当）ほど綺麗に通ってしまう。
     """
@@ -458,7 +461,7 @@ def print_report(rep: dict, applied: bool) -> None:
 
     if rep.get("withheld"):
         print(f"\n=== 当てないと決めた公式調整 {len(rep['withheld'])}社（書かない・#652）===")
-        print("  公式イベントが collector_utils.WITHHELD_OFFICIAL_ADJUSTMENTS の窓に入る。")
+        print("  公式イベントが corporate_actions.WITHHELD_OFFICIAL_ADJUSTMENTS の窓に入る。")
         print("  公式だけが調整し DB（実約定値）が正しい企業イベントなので、段差が公式イベントで")
         print("  説明できても補正しない（--apply でも書かない）。登録の見直しは根拠の Issue で行う。")
         for e in rep["withheld"]:

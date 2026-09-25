@@ -14,6 +14,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+import corporate_actions as C  # noqa: E402
 import ttm_composite as T  # noqa: E402
 
 COLUMNS = ("pl_revenue", "pl_operating_profit", "pl_net_income_attr", "pl_eps",
@@ -184,49 +185,49 @@ class TestRejectSplit:
         assert reason(h1_cur={"values": {"pl_eps": 0.5, "pl_net_income_attr": 0.05}}) is None
 
     def test_detected_event_window_overlapping_the_danger_window(self):
-        w = T.SplitWindow(date(2025, 3, 31), date(2026, 3, 31), 2.0, "detected")
+        w = C.SplitWindow(date(2025, 3, 31), date(2026, 3, 31), 2.0, "detected")
         assert reason(windows=[w]) == "split_detected"
 
     def test_awaiting_magnitude_event(self):
-        w = T.SplitWindow(date(2025, 3, 31), date(2026, 3, 31), None, "awaiting")
+        w = C.SplitWindow(date(2025, 3, 31), date(2026, 3, 31), None, "awaiting")
         assert reason(windows=[w]) == "split_awaiting"
 
     def test_official_event_inside_the_danger_window(self):
-        w = T.SplitWindow(date(2025, 6, 30), date(2025, 7, 1), 2.0, "official")
+        w = C.SplitWindow(date(2025, 6, 30), date(2025, 7, 1), 2.0, "official")
         assert reason(windows=[w]) == "split_official"
 
     def test_event_before_the_previous_half_filing_is_fine(self):
         """前期 H1 の提出より前のイベントは、3 つの材料すべてに反映済み。"""
-        w = T.SplitWindow(date(2023, 3, 31), date(2024, 3, 31), 2.0, "detected")
+        w = C.SplitWindow(date(2023, 3, 31), date(2024, 3, 31), 2.0, "detected")
         assert reason(windows=[w]) is None
 
     def test_event_after_the_current_filing_is_fine(self):
-        w = T.SplitWindow(date(2026, 3, 31), date(2027, 3, 31), 2.0, "detected")
+        w = C.SplitWindow(date(2026, 3, 31), date(2027, 3, 31), 2.0, "detected")
         assert reason(windows=[w]) is None
 
     def test_window_with_unknown_edges_is_treated_as_overlapping(self):
-        w = T.SplitWindow(None, None, 2.0, "detected")
+        w = C.SplitWindow(None, None, 2.0, "detected")
         assert reason(windows=[w]) == "split_detected"
 
 
 class TestSplitFactor:
     def test_only_events_after_the_filing_are_multiplied(self):
-        after = T.SplitWindow(date(2026, 3, 31), date(2027, 3, 31), 2.0, "detected")
-        before = T.SplitWindow(date(2023, 3, 31), date(2024, 3, 31), 5.0, "detected")
-        assert T.ttm_split_factor([after, before], date(2025, 11, 14)) == 2.0
+        after = C.SplitWindow(date(2026, 3, 31), date(2027, 3, 31), 2.0, "detected")
+        before = C.SplitWindow(date(2023, 3, 31), date(2024, 3, 31), 5.0, "detected")
+        assert C.factor_after([after, before], date(2025, 11, 14)) == 2.0
 
     def test_events_without_a_magnitude_are_not_multiplied(self):
-        w = T.SplitWindow(date(2026, 3, 31), date(2027, 3, 31), None, "awaiting")
-        assert T.ttm_split_factor([w], date(2025, 11, 14)) == 1.0
+        w = C.SplitWindow(date(2026, 3, 31), date(2027, 3, 31), None, "awaiting")
+        assert C.factor_after([w], date(2025, 11, 14)) == 1.0
 
     def test_multiple_events_multiply(self):
-        w1 = T.SplitWindow(date(2026, 3, 31), date(2027, 3, 31), 2.0, "detected")
-        w2 = T.SplitWindow(date(2027, 3, 31), date(2028, 3, 31), 3.0, "detected")
-        assert T.ttm_split_factor([w1, w2], date(2025, 11, 14)) == pytest.approx(6.0)
+        w1 = C.SplitWindow(date(2026, 3, 31), date(2027, 3, 31), 2.0, "detected")
+        w2 = C.SplitWindow(date(2027, 3, 31), date(2028, 3, 31), 3.0, "detected")
+        assert C.factor_after([w1, w2], date(2025, 11, 14)) == pytest.approx(6.0)
 
     def test_official_factor_is_inverted_into_a_share_ratio(self):
         """公式 `AdjFactor` は過去株価に掛ける係数（1:2 分割で 0.5）。株数比は逆数。"""
-        (w,) = T.split_windows((), (), (("2026-05-01", 0.5),))
+        (w,) = C.split_windows((), (), (("2026-05-01", 0.5),))
         assert w.canonical == pytest.approx(2.0)
         assert w.source == "official" and w.end == date(2026, 5, 1)
 
@@ -303,7 +304,7 @@ class TestBuildRows:
 
     def test_split_factor_lands_on_the_row(self):
         a, p, c = materials()
-        w = T.SplitWindow(date(2026, 3, 31), date(2027, 3, 31), 2.0, "detected")
+        w = C.SplitWindow(date(2026, 3, 31), date(2027, 3, 31), 2.0, "detected")
         out, _ = self._build([a, p, c], windows_by_ec={"E00001": [w]})
         assert out[0]["split_factor"] == 2.0
 

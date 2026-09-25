@@ -15,7 +15,7 @@
 
 ## 測り方
 
-1. 係数表と**同じ入力・同じ関数**でイベントと F を作る（`collector_prices.compute_split_adjustments`）。
+1. 係数表と**同じ入力・同じ関数**でイベントと F を作る（`corporate_actions.build_ledger`）。
    作った F を `split_adjustment_factors` 表と突き合わせ、ずれていれば結果を信用しない
 2. 学習パネルと**同じ定義**でサンプルを作る。形成月は各社の月末の週、財務行は
    `macro_snapshots._find_applicable_fin`（期末＋45日）、ラベルは `log(close[i+52] / close[i])`
@@ -31,7 +31,7 @@
 
 **この判定は #687 で退役した。原理的に通らない層を含んでいたためである。**
 `_find_applicable_fin` が年 Y の行を返す形成日の範囲は `[期末_Y + 45日, 期末_{Y+1} + 45日)` で、
-年 Y+1 のイベントの窓（`measure_split_valuation_bias.event_window`）は
+年 Y+1 のイベントの窓（`corporate_actions.event_window`）は
 `(期末_Y - 45日, 期末_{Y+1} + 45日]`。**前者は必ず後者に含まれる**ので、「分割まで1年」の層は
 **全サンプルが**「分割が形成月より前か後か」を `period_end` から判定できない。
 2年以上離れた層は形成日が必ず窓より前なので、この曖昧さを持たない（`is_separable`）。
@@ -291,7 +291,7 @@ def count_datable_future_companies(prices_by_co: Mapping[str, Sequence],
     どれが層を決めたイベントか分けられないので採らない。併合（`reverse_1`）は事前登録した
     判定式の対象外なので数えない。
 
-    `window_of` には `measure_split_valuation_bias.event_window` を渡す（窓の定義を写さない）。
+    `window_of` には `corporate_actions.event_window` を渡す（窓の定義を写さない）。
     戻り値は `{"companies": 社数, "samples": 件数, "threshold": RETRY_MIN_COMPANIES,
     "ready": bool}`。述語の実体は `datable_future_points` にあり、再測定（#690）の層も
     同じ関数から作る。
@@ -607,26 +607,24 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--n-boot", type=int, default=N_BOOT)
     args = ap.parse_args(argv)
 
-    from collector_prices import compute_split_adjustments
-    from database import SessionLocal, SplitAdjustmentFactor, load_jquants_adj_factor_events
+    from corporate_actions import build_ledger, event_window
+    from database import SessionLocal, SplitAdjustmentFactor
     from plugins.macro_snapshots import _find_applicable_fin
     from scripts._cache import set_refresh
     from scripts.candidate_bakeoff import _load_prices
-    from scripts.measure_split_valuation_bias import event_window
 
     db = SessionLocal()
     try:
-        computed = compute_split_adjustments(db)
-        if computed is None:
+        ledger = build_ledger(db)
+        if ledger is None:
             print("annual 行が0件。測れない")
             return 1
-        rows, events, _stats, factors = computed
+        rows, events, factors = ledger.rows, ledger.events, ledger.factors
         table = {(ec, int(y)): float(f) for ec, y, f in db.query(
             SplitAdjustmentFactor.edinet_code, SplitAdjustmentFactor.year,
             SplitAdjustmentFactor.factor).all()}
-        # 着手条件（#687）を数えるための公式の分割日。`compute_split_adjustments` も内部で
-        # 読んでいるが返さないので、同じセッションで読み直す（表は小さい）。
-        official = load_jquants_adj_factor_events(db)
+        # 着手条件（#687）を数えるための公式の分割日。検出器へ渡したものと同じ（台帳が持つ）。
+        official = ledger.official
         db.commit()
     finally:
         db.close()

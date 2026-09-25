@@ -3,8 +3,8 @@
 ここで守るのは4つ。
 
 1. **検出アルゴリズムを写していない**——`rebuild_split_adjustment_factors` が書く factor は
-   `scripts/measure_split_valuation_bias` の純関数が出す値と厳密に一致する。
-2. **寄与イベントの集合と factor が整合する**——`kinds` / `n_events` は `collector_prices` 側で
+   台帳（`corporate_actions`）の検出器の純関数が出す値と厳密に一致する。
+2. **寄与イベントの集合と factor が整合する**——`kinds` / `n_events` は `Ledger.factor_rows` で
    引き直しているので、`e.year > row.year` の述語が正本から乖離したらここで落ちる。
 3. **F=1.0 の行は書かない**（VIEW が `COALESCE(...,1.0)` で埋める前提）。
 4. **検出0件では既存の表に触らず失敗する**——全置換の順序で「消してから失敗」にすると、
@@ -28,16 +28,16 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from collector_prices import (  # noqa: E402
-    compute_split_adjustments, rebuild_split_adjustment_factors,
+import corporate_actions as C  # noqa: E402
+from corporate_actions import (  # noqa: E402
+    build_ledger, load_jquants_adj_factor_coverage, load_jquants_adj_factor_events,
+    load_price_series, rebuild_split_adjustment_factors,
 )
 from database import (  # noqa: E402
     FinancialRecord, JQuantsAdjFactorCoverage, JQuantsAdjFactorEvent, SplitAdjustmentFactor,
-    StockPriceWeekly, load_jquants_adj_factor_coverage, load_jquants_adj_factor_events,
-    load_price_series, replace_split_adjustment_factors, upsert_jquants_adj_factor_coverage,
+    StockPriceWeekly, replace_split_adjustment_factors, upsert_jquants_adj_factor_coverage,
     upsert_jquants_adj_factor_events,
 )
-from scripts import measure_split_valuation_bias as M  # noqa: E402
 
 VIEW_SQL = (ROOT / "sql" / "financial_metrics_view.sql").read_text(encoding="utf-8")
 
@@ -80,12 +80,12 @@ class TestRebuild:
 
         n = rebuild_split_adjustment_factors(db)
 
-        rows = [M.AnnualRow(
+        rows = [C.AnnualRow(
             r.edinet_code, r.year, r.period_end, r.issued_shares, r.bs_bps, r.pl_eps,
             r.dps, r.stock_price, r.per, r.pbr, r.div_yield, r.market_cap, r.bs_total_equity,
         ) for r in db.query(FinancialRecord).filter_by(period_type="annual").all()]
-        events, _ = M.detect_events(rows)
-        expected = {k: v for k, v in M.cumulative_factors(rows, events).items() if v != 1.0}
+        events, _ = C.detect_events(rows)
+        expected = {k: v for k, v in C.cumulative_factors(rows, events).items() if v != 1.0}
 
         stored = {(r.edinet_code, r.year): r.factor
                   for r in db.query(SplitAdjustmentFactor).all()}
@@ -111,18 +111,18 @@ class TestRebuild:
     def test_kinds_and_n_events_multiply_back_to_the_factor(self, db, make_fin):
         """寄与イベントの積が factor に一致する。
 
-        `kinds` / `n_events` は `collector_prices` 側で寄与集合を引き直して作るため、
+        `kinds` / `n_events` は `Ledger.factor_rows` で寄与集合を引き直して作るため、
         `e.year > row.year` の述語が正本（`cumulative_factors`）から乖離しうる。
         積で突き合わせることでその乖離をここで捕まえる。
         """
         _seed_split_company(db, make_fin)
         rebuild_split_adjustment_factors(db)
 
-        rows = [M.AnnualRow(
+        rows = [C.AnnualRow(
             r.edinet_code, r.year, r.period_end, r.issued_shares, r.bs_bps, r.pl_eps,
             r.dps, r.stock_price, r.per, r.pbr, r.div_yield, r.market_cap, r.bs_total_equity,
         ) for r in db.query(FinancialRecord).filter_by(period_type="annual").all()]
-        events, _ = M.detect_events(rows)
+        events, _ = C.detect_events(rows)
 
         for saf in db.query(SplitAdjustmentFactor).all():
             contrib = [e for e in events
@@ -190,40 +190,61 @@ class TestRebuild:
                             div_yield=2.0, market_cap=5000.0))
         db.commit()
 
-        _, _, kind = M.snap_to_canonical(7.0, tol=M.DEFAULT_SNAP_TOL)
+        _, _, kind = C.snap_to_canonical(7.0, tol=C.DEFAULT_SNAP_TOL)
         assert kind == "unsnapped", "前提が崩れている（7.0 が定番比へ寄るようになった）"
 
         with pytest.raises(RuntimeError, match="1件も作れなかった"):
             rebuild_split_adjustment_factors(db)
 
 
-class TestComputeIsWhatRebuildWrites:
-    """`compute_split_adjustments` は書き込まずに、係数表と同じ F を返す（#685）。
+class TestLedgerIsWhatRebuildWrites:
+    """`build_ledger` は書き込まずに、係数表と同じ F を返す（#685・#746）。
 
-    リークの測定（`scripts/measure_split_leak.py`）はこの関数で F とイベントを作る。係数表の
-    入力を読み手ごとに揃え直すと、読み忘れがあっても値はもっともらしいまま出る。
+    リークの測定（`scripts/measure_split_leak.py`）と TTM 合成はこの台帳で F とイベントを作る。
+    係数表の入力を読み手ごとに揃え直すと、読み忘れがあっても値はもっともらしいまま出る。
     """
 
     def test_empty_db_is_none(self, db):
-        assert compute_split_adjustments(db) is None
+        assert build_ledger(db) is None
 
     def test_does_not_write(self, db, make_fin):
         _seed_split_company(db, make_fin)
-        compute_split_adjustments(db)
+        build_ledger(db)
         assert db.query(SplitAdjustmentFactor).count() == 0
 
     def test_nontrivial_factors_equal_the_table(self, db, make_fin):
         _seed_split_company(db, make_fin)
         _seed_quiet_company(db, make_fin)
-        rows, events, stats, factors = compute_split_adjustments(db)
-        assert events and "n_official_companies" in stats
-        assert {r.edinet_code for r in rows} == {"E00001", "E00002"}
+        ledger = build_ledger(db)
+        assert ledger.events and "n_official_companies" in ledger.stats
+        assert {r.edinet_code for r in ledger.rows} == {"E00001", "E00002"}
 
         rebuild_split_adjustment_factors(db)
 
         table = {(r.edinet_code, r.year): r.factor
                  for r in db.query(SplitAdjustmentFactor).all()}
-        assert table == {k: v for k, v in factors.items() if v != 1.0}
+        assert table == {k: v for k, v in ledger.factors.items() if v != 1.0}
+
+    def test_a_given_ledger_is_written_without_detecting_again(self, db, make_fin, monkeypatch):
+        """パイプラインが作った台帳を渡すと、ここでは検出し直さない＝係数表と TTM が同じ検出を使う。"""
+        _seed_split_company(db, make_fin)
+        ledger = build_ledger(db)
+        calls: list = []
+        real = C.detect_events
+
+        def spy(rows, **kw):
+            calls.append(1)
+            return real(rows, **kw)
+
+        monkeypatch.setattr(C, "detect_events", spy)
+        assert rebuild_split_adjustment_factors(db, ledger=ledger) == 2
+        assert calls == []
+
+    def test_ledger_and_bps_path_are_not_given_together(self, db, make_fin):
+        """台帳は作った時点の bps_path で固まっている。両方渡すと片方が黙って無視される。"""
+        _seed_split_company(db, make_fin)
+        with pytest.raises(ValueError, match="同時に渡さない"):
+            rebuild_split_adjustment_factors(db, ledger=build_ledger(db), bps_path=True)
 
 
 def _seed_bps_path_company(db, make_fin, ec="E00004"):
@@ -261,7 +282,7 @@ class TestBpsPathReachesTheTable:
         rebuild_split_adjustment_factors(db)
 
         got = db.query(SplitAdjustmentFactor).filter_by(edinet_code="E00004").count()
-        assert (got > 0) is M.DEFAULT_BPS_PATH
+        assert (got > 0) is C.DEFAULT_BPS_PATH
 
     def test_enabled_writes_the_factor_and_kinds(self, db, make_fin):
         _seed_bps_path_company(db, make_fin)
@@ -348,14 +369,14 @@ class TestOfficialEventsReachTheTable:
 
         rebuild_split_adjustment_factors(db, bps_path=True)
 
-        rows = [M.AnnualRow(
+        rows = [C.AnnualRow(
             r.edinet_code, r.year, r.period_end, r.issued_shares, r.bs_bps, r.pl_eps,
             r.dps, r.stock_price, r.per, r.pbr, r.div_yield, r.market_cap, r.bs_total_equity,
         ) for r in db.query(FinancialRecord).filter_by(period_type="annual")
             .order_by(FinancialRecord.edinet_code, FinancialRecord.year).all()]
-        events, _ = M.detect_events(rows, bps_path=True,
+        events, _ = C.detect_events(rows, bps_path=True,
                                     official_events=load_jquants_adj_factor_events(db))
-        expected = {k: v for k, v in M.cumulative_factors(rows, events).items() if v != 1.0}
+        expected = {k: v for k, v in C.cumulative_factors(rows, events).items() if v != 1.0}
         stored = {(r.edinet_code, r.year): r.factor
                   for r in db.query(SplitAdjustmentFactor).all()}
         assert stored == expected
@@ -368,13 +389,13 @@ class TestOfficialEventsReachTheTable:
         self._official(db, [{"edinet_code": "E00001", "event_date": "2020-10-01",
                              "adj_factor": 0.5, "jq_code": "12340"}])
         seen: dict = {}
-        real = M.detect_events
+        real = C.detect_events
 
         def spy(rows, **kw):
             seen.update(kw)
             return real(rows, **kw)
 
-        monkeypatch.setattr(M, "detect_events", spy)
+        monkeypatch.setattr(C, "detect_events", spy)
         rebuild_split_adjustment_factors(db)
         assert seen["official_events"] == {"E00001": [("2020-10-01", 0.5)]}
 
@@ -422,13 +443,13 @@ class TestListingGapReachesTheTable:
         _seed_split_company(db, make_fin)
         _seed_relisted_company(db, make_fin)
         seen: dict = {}
-        real = M.detect_events
+        real = C.detect_events
 
         def spy(rows, **kw):
             seen.update(kw)
             return real(rows, **kw)
 
-        monkeypatch.setattr(M, "detect_events", spy)
+        monkeypatch.setattr(C, "detect_events", spy)
         rebuild_split_adjustment_factors(db)
         assert seen["price_series"] == {"E00007": ("2025-09-29", ()), "E00001": ("2019-07-29", ())}
 
@@ -464,7 +485,6 @@ class TestAdjFactorEventTable:
     def test_empty_upsert_writes_nothing(self, db):
         assert upsert_jquants_adj_factor_events(db, []) == 0
         assert load_jquants_adj_factor_events(db) == {}
-
 
 
 def _seed_false_positive_company(db, make_fin, ec="E00008"):
@@ -536,13 +556,13 @@ class TestOfficialAbsenceReachesTheTable:
         ])
         db.commit()
         seen: dict = {}
-        real = M.detect_events
+        real = C.detect_events
 
         def spy(rows, **kw):
             seen.update(kw)
             return real(rows, **kw)
 
-        monkeypatch.setattr(M, "detect_events", spy)
+        monkeypatch.setattr(C, "detect_events", spy)
         rebuild_split_adjustment_factors(db)
         assert seen["official_coverage"] == {"E00008": [("2024-06-24", "2026-06-22")]}
 
@@ -598,13 +618,13 @@ class TestEquityCheckReachesTheTable:
         _seed_issuance_company(db, make_fin)
         _seed_split_company(db, make_fin)      # 既定で増資型が落ちても検出0件で失敗しないように
         seen: list = []
-        real = M.detect_events
+        real = C.detect_events
 
         def spy(rows, **kw):
             seen.extend(rows)
             return real(rows, **kw)
 
-        monkeypatch.setattr(M, "detect_events", spy)
+        monkeypatch.setattr(C, "detect_events", spy)
         rebuild_split_adjustment_factors(db)
         assert sorted((r.year, r.bs_total_equity) for r in seen
                       if r.edinet_code == "E00005") == [(2020, 2.0e6), (2021, 4.32e6)]
@@ -617,7 +637,7 @@ class TestEquityCheckReachesTheTable:
         rebuild_split_adjustment_factors(db)
 
         got = db.query(SplitAdjustmentFactor).filter_by(edinet_code="E00005").count()
-        assert (got > 0) is (M.DEFAULT_EQUITY_TOL is None)
+        assert (got > 0) is (C.DEFAULT_EQUITY_TOL is None)
         assert db.query(SplitAdjustmentFactor).filter_by(edinet_code="E00001").count() == 2
 
 
@@ -626,11 +646,11 @@ class TestViewAppliesTheDirections:
 
     実値の突合は Postgres でしか出来ないが、**向きの取り違えは符号が逆の歪みを新しく作る**
     ので、せめて演算子だけはソースで縛る。唯一の源は
-    `measure_split_valuation_bias.COLUMN_DIRECTION`。
+    `corporate_actions.COLUMN_DIRECTION`。
     """
 
     def test_every_distorted_column_is_corrected_in_the_right_direction(self):
-        for col, sign in M.COLUMN_DIRECTION.items():
+        for col, sign in C.COLUMN_DIRECTION.items():
             if col == "nc_ratio":
                 # VIEW 内で補正後 market_cap から計算されるので、この列を直接は触らない。
                 continue
@@ -652,6 +672,6 @@ class TestViewAppliesTheDirections:
 
     def test_stock_price_is_left_alone(self):
         """`stock_price` は補正しない（COLUMN_DIRECTION に無い・意図した非対称）。"""
-        assert "stock_price" not in M.COLUMN_DIRECTION
+        assert "stock_price" not in C.COLUMN_DIRECTION
         line = next(l for l in VIEW_SQL.splitlines() if "fr.stock_price" in l)
         assert "saf.factor" not in line

@@ -33,7 +33,6 @@ load_dotenv()
 from collector import (
     run_full_collection, collect_macro_data, reparse_from_raw,
     collect_stock_price_history_jquants, update_market_data_from_history,
-    rebuild_split_adjustment_factors,
     backfill_historical_stock_prices_yahoo, fill_recent_stock_price_gap_yahoo,
     backfill_weekly_history_yahoo,
     refill_cf_from_xbrl, refill_pl_bs_from_xbrl, refill_c2_from_xbrl,
@@ -41,6 +40,7 @@ from collector import (
     SKIP_XBRL_RAW, JQUANTS_BACKFILL_DAYS,
 )
 from database import SessionLocal, init_db
+from corporate_actions import build_ledger, rebuild_split_adjustment_factors
 from ttm_composite import rebuild_ttm_financial_records
 import _pipeline_utils
 from macro_health import check_macro_freshness, format_report
@@ -391,12 +391,14 @@ async def main(years_back: int, collect_only: bool = False,
             # 分割補正係数（#655・ADR-0055）。**入口を揃えるために差分側と同じ位置へ置く**——
             # ここを欠かすと、手動の全件実行のあとだけ係数が古いまま VIEW に残る。
             # point_in_time=True は過去行の株価も焼き直すので、歪みが入り直す経路そのもの。
-            n_factors = rebuild_split_adjustment_factors(db5)
+            # 台帳は一晩に1回だけ作り、TTM へも同じものを渡す（#746・ADR-0062）。
+            ledger = build_ledger(db5)
+            n_factors = rebuild_split_adjustment_factors(db5, ledger=ledger)
             log(f"  split_adjustment_factors: {n_factors}行 全置換")
 
             # TTM 行（#424 子2・ADR-0051）。差分側と同じ位置に置く＝**入口を揃える**。
             # こちらは失敗を握らない（後ろに工程が無く、巻き添えにするものが無い）。
-            n_ttm = rebuild_ttm_financial_records(db5)
+            n_ttm = rebuild_ttm_financial_records(db5, ledger=ledger)
             log(f"  ttm_financial_records: {n_ttm}行 全置換")
         finally:
             db5.close()

@@ -7,6 +7,9 @@ accepted（2026-09-08）。Issue [#620](https://github.com/kome-kome/financial_a
 前提の現象は [#466](https://github.com/kome-kome/financial_app/issues/466)。
 [Issue #314](https://github.com/kome-kome/financial_app/issues/314) の決定
 （J-Quants からは調整後 `AdjC` を保存する）を**採否の条件付きで狭める**。
+**2026-09-26: 登録表（`SPINOFF_ADJUSTMENTS` 等）の置き場所は
+[ADR-0062](0062-corporate-action-knowledge-lives-in-one-ledger.md) で `collector_utils` から企業イベント台帳
+`corporate_actions.py` へ移した**（中身と使い方は不変・本文中のパスは当時の記録）。
 
 ## Context
 
