@@ -41,12 +41,12 @@
 - **分析モデルの精度改善** — 次元整合性・外れ値処理・業種別モデルの検討
 
 ### 実装済み（中期完了）
-- **おすすめ銘柄の提示機能** ✅ — `total_return` プラグイン（EPS/BPS/DPS[円/株]→株価OLS、期待リターンランキング）
+- **おすすめ銘柄の提示機能** ✅ — `recommend` プラグイン（旧 `total_return` は [ADR-0001](adr/0001-valuation-consolidation-and-backtest-generalization.md) で `gap_analysis` へ吸収）
 - **毎日の自動データ更新** ✅ — ローカルのタスクスケジューラ（`run_nightly.ps1`・JST 17:20）で毎日自動収集。GitHub Actions の cron は #503 で全停止
 - **認証機能の追加** ✅ — HttpOnly Cookie + CSRF Double-Submit（Tier3-3）
 - **分析手法のプラグイン化** ✅ — `plugins/` ディレクトリ、自動検出方式
-- **外部サーバーへのデプロイ** ✅ — **Render にデプロイ済み**（[docs/DEPLOYMENT.md](DEPLOYMENT.md) 参照）。DB は Supabase PostgreSQL
-- **業種別回帰モデル** ✅ — `sector_ols` プラグイン + `total_return` の業種固定効果
+- **外部サーバーへのデプロイ** ✅ — **Render にデプロイ済み**（[docs/DEPLOYMENT.md](DEPLOYMENT.md) 参照）。Render が読む DB は Supabase PostgreSQL の閲覧用断面（正本はローカル PostgreSQL・#503）
+- **業種別回帰モデル** ✅ — `sector_ols` プラグイン（業種ごとの個別 OLS。業種ダミーのプール OLS は ADR-0001 で廃止）
 
 ### その次（長期）
 - **外部市場環境データの取り込み** — 金利・為替・マクロ指標等を投資モデルに組み込む

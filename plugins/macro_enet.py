@@ -170,7 +170,7 @@ class MacroEnetPlugin(AnalysisPlugin):
 
     # ── producer（M-2 と同一契約・Issue #396）────────────────────────────────
     def produced_output(self, db: Any) -> bool:
-        """M-6 producer μ̂（macro_enet_scores）を共有DBに持つか（sell_ranking の graceful 判定用）。
+        """M-6 producer μ̂（macro_enet_scores）を DB に永続化済みか（sell_ranking の graceful 判定用）。
 
         M-6 を一度ローカル実行すると execute() が μ̂ を永続化する。未実行なら False を返し、
         consumer（sell_ranking, mu_source=macro_enet）は graceful-degrade する（ADR-0004）。"""

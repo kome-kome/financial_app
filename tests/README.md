@@ -52,7 +52,7 @@ python -m pytest tests/ -v
 ## ネットワーク・DB のモック方針
 
 - **HTTP**: `httpx` 組み込みの `MockTransport` でレスポンスを擬似（新規依存なし）。`client: httpx.AsyncClient`
-  を引数に取る関数（`fetch_doc_list`/`fetch_xbrl_csv`/`fetch_stock_price_stooq`/`fetch_stock_history_stooq`/
+  を引数に取る関数（`fetch_doc_list`/`fetch_xbrl_csv`/`fetch_stock_history_stooq`/
   `_jquants_fetch_date`）にモック client を渡す。レート制限の `asyncio.sleep` は `monkeypatch` で無効化。
 - **DB エンドポイント**: FastAPI `app.dependency_overrides[get_db]` を `conftest.py` の SQLite `db` に差し替え。
   TestClient は別スレッドで実行するため `db` fixture は `StaticPool`＋`check_same_thread=False`。

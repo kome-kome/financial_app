@@ -564,82 +564,6 @@ async function loadHistoryCoverage(){
   }catch(e){ el.innerHTML = `<p class="text-sm" style="color:${cssVar('--status-bad')};text-align:center;padding:10px">取得失敗: ${esc(e.message)}</p>`; }
 }
 
-let _historySSE = null;
-async function startHistoryCollection(force = false){
-  const years = parseInt(document.getElementById('history-years').value);
-  const maxCo = numOrNull('history-max-co');
-  const skipExisting = document.getElementById('history-skip-existing').checked;
-  const backfill = skipExisting && document.getElementById('history-backfill').checked;
-  try{
-    await apiFetch('/api/collect/history/start',{
-      method:'POST',
-      body: JSON.stringify({years_back:years, max_companies:maxCo, skip_existing:skipExisting, backfill, force})
-    });
-    const mode = skipExisting ? (backfill ? '差分＋backfill' : '差分収集') : '全件収集';
-    _histLog(`株価履歴収集を開始しました（${years}年分・${mode}）`,'success');
-    document.getElementById('history-progress').classList.remove('hidden');
-    document.getElementById('btn-history-start').disabled = true;
-    document.getElementById('btn-history-force').style.display = 'none';
-    document.getElementById('btn-history-stop').style.display = '';
-    _startHistorySSE();
-  }catch(e){
-    const msg = e.message;
-    if(msg.includes('既に実行中')){
-      _histLog('既に実行中です。「強制再開」ボタンで上書き起動できます','error');
-      document.getElementById('btn-history-force').style.display = '';
-    } else {
-      _histLog('収集開始失敗: '+msg,'error');
-    }
-  }
-}
-
-function _startHistorySSE(){
-  if(_historySSE){ _historySSE.close(); }
-  _historySSE = new EventSource(apiBase()+'/api/collect/history/stream');
-  _historySSE.onmessage = function(e){
-    const d = JSON.parse(e.data);
-    if(d.total > 0){
-      const pct = Math.round(d.progress / d.total * 100);
-      document.getElementById('history-progress-fill').style.width = pct+'%';
-    }
-    if(d.new_logs && d.new_logs.length > 0){
-      const last = d.new_logs[d.new_logs.length - 1];
-      document.getElementById('history-progress-label').textContent = last;
-      d.new_logs.forEach(msg => _histLog(msg,'info'));
-    }
-    if(!d.running && d.progress > 0){
-      _historySSE.close();
-      _onHistoryComplete();
-    }
-  };
-  _historySSE.onerror = function(){ _historySSE.close(); _onHistoryComplete(); };
-}
-
-function _onHistoryComplete(){
-  document.getElementById('history-progress').classList.add('hidden');
-  document.getElementById('btn-history-start').disabled = false;
-  document.getElementById('btn-history-stop').style.display = 'none';
-  document.getElementById('btn-history-stop').disabled = false;
-  _histLog('株価履歴収集完了','success');
-  loadHistoryCoverage();
-}
-
-async function stopHistoryCollection(){
-  try{
-    await apiFetch('/api/collect/history/stop',{method:'POST'});
-    _histLog('停止リクエストを送信しました','info');
-    document.getElementById('btn-history-stop').disabled = true;
-    document.getElementById('btn-history-stop').textContent = '停止中...';
-  }catch(e){ _histLog('停止失敗: '+e.message,'error') }
-}
-
-function _histLog(msg,type='info'){
-  const box = document.getElementById('history-log');
-  const ts = new Date().toTimeString().slice(0,8);
-  const el = document.createElement('div'); el.className='log-entry '+type;
-  el.textContent = `[${ts}] ${msg}`; box.appendChild(el); box.scrollTop=box.scrollHeight;
-}
-
 // ── J-Quants 収集 ───────────────────────────────────────────────────
 let _jqSSE = null;
 async function startJQuantsCollection(force = false){
@@ -1121,7 +1045,7 @@ async function initWizardState() {
   try {
     const d = await apiFetch('/api/stats');
     const noFin = d.records === 0;
-    ['btn-market', 'btn-history-start', 'btn-jq-start'].forEach(id => {
+    ['btn-market', 'btn-jq-start'].forEach(id => {
       const el = document.getElementById(id);
       if (!el) return;
       // initLightMode と非同期で競うので、閲覧専用なら有効へ戻さない（#733）
@@ -1167,7 +1091,7 @@ checkApi();
 // （SPA 的なタブ切替はしていないので beforeunload のみで十分）
 window.addEventListener('beforeunload', () => {
   if (searchTimer) clearTimeout(searchTimer);
-  for (const sse of [_smartSSE, _collectSSE, _historySSE, _jqSSE, marketSSE]) {
+  for (const sse of [_smartSSE, _collectSSE, _jqSSE, marketSSE]) {
     if (sse) { try { sse.close(); } catch(_) {} }
   }
 });

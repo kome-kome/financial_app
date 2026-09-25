@@ -615,7 +615,7 @@ class MacroGbdtPlugin(AnalysisPlugin):
         return base_params, dims
 
     def produced_output(self, db: Any) -> bool:
-        """M-2 producer μ̂（macro_gbdt_scores）を共有DBに持つか（sell_ranking の graceful 判定用）。
+        """M-2 producer μ̂（macro_gbdt_scores）を DB に永続化済みか（sell_ranking の graceful 判定用）。
 
         M-2 を一度ローカル実行すると execute() が μ̂ を永続化する。未実行なら False を返し、
         consumer（sell_ranking, mu_source=macro_gbdt）は graceful-degrade する（ADR-0004）。"""

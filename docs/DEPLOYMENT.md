@@ -327,7 +327,7 @@ PYTHONUTF8=1 "$TEMP/audit-venv/Scripts/pip-audit" --strict -r requirements.txt -
 > FROM (SELECT edinet_code, max(trade_date) d FROM stock_price_daily GROUP BY 1) t;
 > ```
 
-**重要**: GitHub Actions の Runner は Azure IP のため **stooq は完全ブロック**（403）。株価取得は J-Quants のみ使用。Claude Code リモート環境からも Yahoo Finance はブロックされる。外部サービスの制約値は本ファイル「外部サービス制約（無料プラン）」節を参照。
+**重要**: GitHub Actions の Runner は Azure IP のため **stooq は完全ブロック**（403）。**ローカル（家庭回線）からも stooq は JavaScript のボット検証ページを HTTP 200 で返し、CSV は取れない**（2026-09-25 実測・[GOTCHAS.md](GOTCHAS.md)）。株価は夜間バッチ（`_pipeline_incremental.py`）が Yahoo で直近の欠損を補完し、J-Quants catchup で公式値へ置き換える。Claude Code リモート環境からも Yahoo Finance はブロックされる。外部サービスの制約値は本ファイル「外部サービス制約（無料プラン）」節を参照。
 
 ### CF補完の完了状態（2026-05-31 完了）
 
@@ -586,7 +586,7 @@ python -m scripts.mirror_rehearse --apply         # コード変更は不要
 | **Python バージョン** | 3.13.7（`render.yaml` で固定） |
 | **起動コマンド** | `uvicorn api:app --host 0.0.0.0 --port $PORT` |
 | **ビルドコマンド** | `pip install -r requirements.txt` |
-| **DB** | Supabase PostgreSQL（外部、`DATABASE_URL` で接続） |
+| **DB** | Supabase PostgreSQL（外部、`DATABASE_URL` で接続）。2026-08-07 の閲覧用断面で、正本はローカル PostgreSQL（「ローカル / Render 役割分担」節） |
 | **HTTPS** | Render が自動提供（証明書管理不要） |
 | **CI/CD** | GitHub `main` ブランチへの push で自動デプロイ |
 
@@ -1040,7 +1040,7 @@ ADR-0006 §Decision-1 が定める CPI チャネル。
 
 | キー | 用途 | デフォルト |
 |---|---|---|
-| `DATABASE_URL` | Supabase PostgreSQL 接続 URL | 手動設定（`postgresql://...?sslmode=require`） |
+| `DATABASE_URL` | Supabase PostgreSQL（2026-08-07 の閲覧用断面）の接続 URL | 手動設定（`postgresql://...?sslmode=require`） |
 | `EDINET_API_KEY` | 金融庁 EDINET API キー | 手動設定 |
 | `JQUANTS_API_KEY` | J-Quants API キー（任意） | 手動設定 |
 | `FRED_API_KEY` | FRED（米セントルイス連銀）API キー（任意） | 手動設定。未設定時はマクロ収集の FRED チャネルをスキップ |

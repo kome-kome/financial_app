@@ -292,7 +292,7 @@ class MacroRiskReturnPlugin(AnalysisPlugin):
         return base_params, dims
 
     def produced_output(self, db: Any) -> bool:
-        """macro_beta（per-stock 階層ベイズ推論結果）を共有DBに持つか（#217 の depends_on 充足判定）。
+        """macro_beta（per-stock 階層ベイズ推論結果）を DB に永続化済みか（#217 の depends_on 充足判定）。
 
         推論バッチ（macro_beta_inference.py / Actions）が未実行なら False を返し、consumer は
         graceful-degrade する。"""
