@@ -580,7 +580,7 @@ def trim_daily(db, window_days: int = DAILY_WINDOW_DAYS) -> int:
 
 
 def record_prices_batch(db, rows: list, *, trim: bool = True) -> int:
-    """価格収集の単一チョークポイント（J-Quants/stooq/yahoo 全経路が通る）。
+    """価格収集の単一チョークポイント（J-Quants/Yahoo 全経路が通る）。
 
     rows: [{edinet_code, trade_date, close, volume?}, ...]（同一キーは呼び出し側で重複排除済み前提）
     手順: ① daily upsert → ② 触れた週のみ daily から weekly を再集約 upsert → ③ daily の trim。

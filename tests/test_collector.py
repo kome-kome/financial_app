@@ -32,7 +32,6 @@ from collector import (
     collect_doc_ids_for_period,
     df_to_raw_rows,
     fetch_doc_list,
-    fetch_stock_history_stooq,
     fetch_xbrl_csv,
     parse_raw_rows,
     parse_xbrl_csv,
@@ -731,28 +730,6 @@ class TestXbrlFetchStats:
         assert "badzip=2" in line
         for k in ("no_csv", "oversize", "http", "other"):
             assert f"{k}=0" in line
-
-
-class TestFetchStockHistoryStooq:
-    def test_parses_rows(self):
-        csv = ("Date,Open,High,Low,Close,Volume\n"
-               "2023-01-04,100,110,90,105,1000\n"
-               "2023-01-05,106,108,104,107,2000\n")
-        client = _client(_const(httpx.Response(200, text=csv)))
-        rows = asyncio.run(fetch_stock_history_stooq(client, "7203", "20230101", "20230110"))
-        assert len(rows) == 2
-        assert rows[0]["trade_date"] == "2023-01-04"
-        assert rows[0]["close"] == 105.0
-        assert rows[1]["volume"] == 2000.0
-
-    def test_skips_malformed_lines(self):
-        csv = ("Date,Open,High,Low,Close,Volume\n"
-               "2023-01-04,100,110,90,105,1000\n"
-               "BADLINE\n"                                  # 列不足 → スキップ
-               "2023-01-05,n/a,108,104,107,2000\n")         # float 変換失敗 → スキップ
-        client = _client(_const(httpx.Response(200, text=csv)))
-        rows = asyncio.run(fetch_stock_history_stooq(client, "7203", "20230101", "20230110"))
-        assert len(rows) == 1
 
 
 class TestJquantsFetchDate:

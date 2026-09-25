@@ -1,6 +1,6 @@
 """collect_macro_data のモックテスト (#152)。
 
-MACRO_SERIES 全系列について、Yahoo Finance 取得→stooq フォールバックと、
+MACRO_SERIES 全系列について、Yahoo Finance 取得（stooq フォールバックは #736 で撤去）と、
 既存レコードの更新／新規挿入の分岐を検証する（件数アサートは len(MACRO_SERIES)
 でパラメタライズ済みのため系列追加に自動追従する）。外部 HTTP は httpx 組み込みの
 MockTransport で擬似（新規依存なし）。DB は conftest.py の in-memory SQLite fixture。
@@ -45,14 +45,6 @@ def _yahoo_json(timestamps: list, closes: list) -> dict:
     }
 
 
-def _stooq_csv(rows: list) -> str:
-    """fetch_stooq_history が解析する CSV（[(date, close), ...]）。"""
-    lines = ["Date,Open,High,Low,Close,Volume"]
-    for d, c in rows:
-        lines.append(f"{d},{c},{c},{c},{c},10")
-    return "\n".join(lines)
-
-
 _REAL_ASYNC_CLIENT = httpx.AsyncClient
 
 
@@ -70,7 +62,7 @@ async def _no_sleep(*_args, **_kwargs):
 def _run(db, handler, **kwargs):
     """全ソース込みで collect_macro_data を回す。
 
-    待機は即時に返す（#703）: handler が Yahoo/stooq 以外へ 500/404 を返すため、GDELT の
+    待機は即時に返す（#703）: handler が Yahoo 以外へ 500/404 を返すため、GDELT の
     リトライ待ち・系列間の *_RATE_SLEEP が本物の秒数で走り、1本 208秒（CI の pytest の
     86〜90%）を消費していた。検証しているのは取得経路と件数であって待機ではない。
     定数ではなく sleep そのものを潰すのは、ソースを足したときに同じ穴が再発しないため
@@ -86,7 +78,7 @@ def test_yahoo_success_saves_all_series(db):
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.host == "query1.finance.yahoo.com":
             return httpx.Response(200, json=_yahoo_json([TS1, TS2], [1.0, 2.0]))
-        # stooq は呼ばれないはず（呼ばれたら 500 でフォールバック失敗→検知しやすく）
+        # Yahoo 以外（FRED・BOJ 等）は失敗させ、市場系の件数だけを数える
         return httpx.Response(500)
 
     saved = _run(db, handler)
@@ -119,8 +111,11 @@ def test_commodity_series_defined():
     assert by_code["PLATINUM"]["yf_ticker"] == "PL=F"
 
 
-# ── 2. Yahoo 失敗時：stooq へフォールバックする ─────────────────────────────
-def test_falls_back_to_stooq_when_yahoo_fails(db):
+# ── 2. Yahoo 失敗時：stooq へはフォールバックしない（#736）─────────────────────
+def test_yahoo_failure_does_not_fall_back_to_stooq(db):
+    """stooq はどの実行環境からも CSV が取れない（クラウド IP は 403、ローカルは HTTP 200 の
+    ボット検証ページ）ため撤去した。仮に stooq が CSV を返しても1回も問い合わせず、
+    Yahoo が失敗した系列は保存されない（停止は macro_health の鮮度判定が拾う）。"""
     stooq_hits = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -129,16 +124,14 @@ def test_falls_back_to_stooq_when_yahoo_fails(db):
             return httpx.Response(500)  # Yahoo 失敗 → fetch_yahoo_history は [] を返す
         if host == "stooq.com":
             stooq_hits.append(str(request.url))
-            return httpx.Response(200, text=_stooq_csv([(DATE1, 1.5), (DATE2, 2.5)]))
+            return httpx.Response(200, text=f"Date,Open,High,Low,Close,Volume\n{DATE1},1.5,1.5,1.5,1.5,10")
         return httpx.Response(404)
 
     saved = _run(db, handler)
 
-    assert saved == len(MACRO_SERIES) * 2
-    assert stooq_hits, "stooq フォールバックが発火していない"
-    # stooq の close 値（1.5）が保存されている＝フォールバック経路で書き込まれた
-    row = db.query(MacroData).filter_by(series_code="USDJPY", trade_date=DATE1).one()
-    assert row.close == 1.5
+    assert stooq_hits == []
+    assert saved == 0
+    assert db.query(MacroData).count() == 0
 
 
 # ── 3. 既存系列は更新・無い系列は新規挿入 ───────────────────────────────────

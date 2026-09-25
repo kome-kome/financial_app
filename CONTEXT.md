@@ -86,7 +86,7 @@ _Avoid_: 遅延補正, 時系列ズレ（収集層での明示的補正という
 _Avoid_: 公表ラグ（補正量 `lag_days` と混同するため）, データ遅延
 
 **マクロ収集チャネル (macro collection channel)**:
-`macro_data` テーブルへの収集経路。系列定義リスト単位で分かれ、Yahoo 優先・stooq フォールバック（市場系: 為替・金利・指数・コモディティ）/ FRED API（信用スプレッド・損益分岐点・日本実質GDP・政策不確実性 EPU 等）/ 日銀 REST API（M2・短観DI等）/ OECD SDMX（景気先行指数 CLI）/ 内閣府ESRI 直接CSV（GDP需要項目）/ IMF WEO（見通し）/ e-Stat API（CPI 系と鉱工業指数系の2チャネル）/ 財務省 国債金利 CSV（日次の日本10年金利）/ GDELT / Wikimedia。認証 key が必要なチャネル（FRED・e-Stat）は key 未設定時にスキップし、他は常時収集。チャネルごとに期待更新頻度（`freq`）と観測基準日の取り方が異なるため、鮮度判定はチャネル単位で既定値を持つ。
+`macro_data` テーブルへの収集経路。系列定義リスト単位で分かれ、Yahoo（市場系: 為替・金利・指数・コモディティ）/ FRED API（信用スプレッド・損益分岐点・日本実質GDP・政策不確実性 EPU 等）/ 日銀 REST API（M2・短観DI等）/ OECD SDMX（景気先行指数 CLI）/ 内閣府ESRI 直接CSV（GDP需要項目）/ IMF WEO（見通し）/ e-Stat API（CPI 系と鉱工業指数系の2チャネル）/ 財務省 国債金利 CSV（日次の日本10年金利）/ GDELT / Wikimedia。認証 key が必要なチャネル（FRED・e-Stat）は key 未設定時にスキップし、他は常時収集。チャネルごとに期待更新頻度（`freq`）と観測基準日の取り方が異なるため、鮮度判定はチャネル単位で既定値を持つ。
 _Avoid_: データソース（実装の fetch 関数名と混同するため）
 
 **マクロ系列バリアント / デフォルト公開 (macro series variant / default exposure)**:

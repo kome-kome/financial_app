@@ -879,7 +879,7 @@ Supabase 無料プランは **1週間アクセスなしで自動停止**する�
 
 **設計制約（実装時の必須ルール）**:
 - **認証情報**: `.env` に `JQUANTS_API_KEY` を設定。未設定時は `ValueError` で明示エラー。
-- **データ優先度**: J-Quants = JPX公式 → stooq より正確。`ON CONFLICT DO UPDATE` で上書き（stooq は `ON CONFLICT DO NOTHING`）。
+- **データ優先度**: J-Quants = JPX公式。`ON CONFLICT DO UPDATE` で上書き。
 - **コード変換**: J-Quants は5桁コード（例 `"13010"`）。先頭4桁が証券コード（`code[:4]`）。
 - **取得単位**: 日付単位で全銘柄を一括取得。1営業日 = 1〜数リクエスト（ページネーション対応済み）。
 - **`close` は nullable=False**: `Close` が `None` の行はスキップ（停止銘柄等）。

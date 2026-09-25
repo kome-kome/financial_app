@@ -1,4 +1,4 @@
-"""株価収集（stooq / J-Quants / Yahoo Finance）とマクロ指標収集。"""
+"""株価収集（J-Quants / Yahoo Finance）とマクロ指標収集。"""
 import bisect
 import calendar
 import csv
@@ -33,92 +33,6 @@ from database import (
 )
 
 from collector_utils import *
-
-
-def _stooq_float(s: str) -> float | None:
-    """stooq CSV セルを float 化。パース不能なら None（欠損許容経路用）。"""
-    try:
-        return float(s)
-    except ValueError:
-        return None
-
-
-def _parse_stooq_csv(text: str, *, strict: bool) -> list:
-    """stooq 日次 OHLCV CSV（"Date,Open,High,Low,Close,Volume"）をパースする。
-    close は両経路とも必須（パース不能行はスキップ）。
-    strict=True : open/high/low/volume も float 必須で、不能なら行ごとスキップ（個別銘柄経路）。
-    strict=False: open/high/low/volume は None 許容（マクロ経路）。
-    """
-    rows = []
-    lines = text.strip().splitlines()
-    if len(lines) < 2:
-        return []
-    for line in lines[1:]:   # ヘッダー行をスキップ
-        parts = line.split(",")
-        if len(parts) < 5:
-            continue
-        try:
-            close = float(parts[4])
-        except ValueError:
-            continue
-        if strict:
-            try:
-                row = {
-                    "trade_date": parts[0],          # "YYYY-MM-DD"
-                    "open":       float(parts[1]),
-                    "high":       float(parts[2]),
-                    "low":        float(parts[3]),
-                    "close":      close,
-                    "volume":     float(parts[5]) if len(parts) > 5 else None,
-                }
-            except ValueError:
-                continue
-        else:
-            row = {
-                "trade_date": parts[0],
-                "open":       _stooq_float(parts[1]),
-                "high":       _stooq_float(parts[2]),
-                "low":        _stooq_float(parts[3]),
-                "close":      close,
-                "volume":     _stooq_float(parts[5]) if len(parts) > 5 else None,
-            }
-        rows.append(row)
-    return rows
-
-
-async def _fetch_stooq_ohlcv(
-    session: httpx.AsyncClient,
-    ticker: str,
-    date_from: str,   # "YYYYMMDD"
-    date_to: str,     # "YYYYMMDD"
-    *,
-    strict: bool,
-    log_label: str,
-) -> list:
-    """stooq 日次 OHLCV CSV を取得・パースする単一実装。
-    ticker 組み立ては呼び出し側が行う（個別銘柄は `.jp` 付与・マクロはそのまま）。"""
-    url = f"https://stooq.com/q/d/l/?s={ticker}&d1={date_from}&d2={date_to}&i=d"
-    try:
-        r = await session.get(url, timeout=30)
-        r.raise_for_status()
-        text = r.text
-    except Exception as e:
-        log.debug(f"{log_label}: {e}")
-        return []
-    return _parse_stooq_csv(text, strict=strict)
-
-
-async def fetch_stock_history_stooq(
-    session: httpx.AsyncClient,
-    sec_code: str,
-    date_from: str,   # "YYYYMMDD"
-    date_to: str,     # "YYYYMMDD"
-) -> list:
-    """stooq 日次 OHLCV を取得して [{trade_date, open, high, low, close, volume}] で返す（個別銘柄・`.jp` 付与）。"""
-    return await _fetch_stooq_ohlcv(
-        session, f"{sec_code}.jp", date_from, date_to,
-        strict=True, log_label=f"stooq履歴取得失敗 {sec_code}",
-    )
 
 
 async def _save_price_batch_with_retry(db, batch: list) -> int:
@@ -166,144 +80,6 @@ async def _price_collection_driver(db, batch_gen) -> tuple[bool, int]:
     with db_timeouts(db, statement=HEAVY_STATEMENT_TIMEOUT):
         trim_daily(db)      # 全社横断 DELETE。件数次第で 2min を超えうる
     return False, total
-
-
-async def collect_stock_price_history(
-    db,
-    years_back: int = 3,
-    max_companies: Optional[int] = None,
-    on_progress: Optional[Callable] = None,
-    cancel_check: Optional[Callable] = None,
-    skip_existing: bool = True,
-    backfill: bool = False,
-) -> dict:
-    """全企業（sec_code 保有）の日次 OHLCV を stooq から取得して DB に保存する。
-    skip_existing=True: DB の最新 trade_date から翌日以降のみ取得（差分収集）。
-    backfill=True かつ skip_existing=True: 前方差分に加えて後方欠損（years_back 起点→最古レコード前日）も補完。
-    プロバイダー固有ロジック（stooq 並行フェッチ）を _stooq_batch_gen に分離し、
-    _price_collection_driver の共通フレームで DB 保存・trim を一元管理する。
-    """
-
-    today     = date.today()
-    date_from = date(today.year - years_back, today.month, today.day)
-    d1 = date_from.strftime("%Y%m%d")
-    d2 = today.strftime("%Y%m%d")
-    date_from_str = date_from.strftime("%Y-%m-%d")
-    yesterday = (today - timedelta(days=1)).strftime("%Y-%m-%d")
-
-    companies = (
-        db.query(Company.edinet_code, Company.sec_code, Company.name)
-        .filter(Company.sec_code.isnot(None), Company.sec_code != "")
-        .all()
-    )
-    if max_companies:
-        companies = companies[:max_companies]
-
-    # 差分収集: 企業ごとの min/max の trade_date を一括取得（ループ外で1回のみ）
-    minmax_dates: dict = {}
-    latest_dates: dict = {}
-    if skip_existing:
-        # 差分判定は全履歴を持つ weekly の min/max を基準にする（daily は直近窓のみのため）
-        if backfill:
-            minmax_dates = {
-                row.edinet_code: (row.min_date, row.max_date)
-                for row in db.query(
-                    StockPriceWeekly.edinet_code,
-                    sqla_func.min(StockPriceWeekly.trade_date).label("min_date"),
-                    sqla_func.max(StockPriceWeekly.trade_date).label("max_date"),
-                ).group_by(StockPriceWeekly.edinet_code).all()
-            }
-        else:
-            latest_dates = dict(
-                db.query(StockPriceWeekly.edinet_code, sqla_func.max(StockPriceWeekly.trade_date))
-                .group_by(StockPriceWeekly.edinet_code)
-                .all()
-            )
-
-    total = len(companies)
-    skipped_total  = 0
-
-    # 差分収集: スキップ判定を事前に行い、取得対象だけリストアップ
-    # to_fetch: (edinet_code, sec_code, name, d1_co, d2_co) のリスト
-    to_fetch = []
-    for edinet_code, sec_code, name in companies:
-        if skip_existing and backfill:
-            entry = minmax_dates.get(edinet_code)
-            if entry is None:
-                to_fetch.append((edinet_code, sec_code, name, d1, d2))
-            else:
-                min_date, max_date = entry
-                added = False
-                if max_date < yesterday:
-                    d1_fwd = (date.fromisoformat(max_date) + timedelta(days=1)).strftime("%Y%m%d")
-                    to_fetch.append((edinet_code, sec_code, name, d1_fwd, d2))
-                    added = True
-                if min_date > date_from_str:
-                    min_dt = date.fromisoformat(min_date)
-                    if min_dt > date_from:
-                        d2_bwd = (min_dt - timedelta(days=1)).strftime("%Y%m%d")
-                        to_fetch.append((edinet_code, sec_code, name, d1, d2_bwd))
-                        added = True
-                if not added:
-                    skipped_total += 1
-        elif skip_existing:
-            latest = latest_dates.get(edinet_code)
-            if latest and latest >= yesterday:
-                skipped_total += 1
-                continue
-            d1_company = (date.fromisoformat(latest) + timedelta(days=1)).strftime("%Y%m%d") if latest else d1
-            to_fetch.append((edinet_code, sec_code, name, d1_company, d2))
-        else:
-            to_fetch.append((edinet_code, sec_code, name, d1, d2))
-
-    fetch_total = len(to_fetch)
-    progress_total = fetch_total if backfill else total
-    if on_progress and skipped_total:
-        on_progress(0 if backfill else skipped_total, progress_total,
-                    f"[スキップ] {skipped_total}社は補完不要 → {fetch_total}件を取得します" if backfill
-                    else f"[スキップ] {skipped_total}社は最新済み → {fetch_total}社を並列取得します")
-
-    async def _stooq_batch_gen(session):
-        sem = asyncio.Semaphore(STOOQ_HIST_CONCURRENCY)
-
-        async def _fetch_hist(ec, sc, nm, d1c, d2c):
-            async with sem:
-                rows = await fetch_stock_history_stooq(session, sc, d1c, d2c)
-            return ec, sc, nm, rows
-
-        tasks = [asyncio.ensure_future(_fetch_hist(*item)) for item in to_fetch]
-        completed = 0
-        for coro in asyncio.as_completed(tasks):
-            if cancel_check and cancel_check():
-                for t in tasks:
-                    t.cancel()
-                if on_progress:
-                    on_progress(completed, progress_total,
-                                f"[停止] ユーザーによる停止（{completed}/{fetch_total}件処理済み）")
-                db.commit()
-                yield None   # cancellation sentinel → driver returns early
-                return
-            edinet_code, sec_code, name, rows = await coro
-            completed += 1
-            if on_progress:
-                prog = completed if backfill else skipped_total + completed
-                on_progress(prog, progress_total,
-                            f"[{prog}/{progress_total}] {name}({sec_code}) {len(rows) if rows else 0}件")
-            yield [
-                {"edinet_code": edinet_code, "trade_date": r["trade_date"],
-                 "close": r.get("close"), "volume": r.get("volume")}
-                for r in rows
-            ] if rows else []
-
-    async with httpx.AsyncClient(timeout=60) as session:
-        cancelled, inserted_total = await _price_collection_driver(db, _stooq_batch_gen(session))
-
-    if cancelled:
-        return {"cancelled": True, "inserted": inserted_total, "skipped": skipped_total}
-    if on_progress:
-        on_progress(progress_total, progress_total,
-                    f"[完了] {total}社処理（スキップ:{skipped_total}社）、{inserted_total}件追加")
-    return {"cancelled": False, "inserted": inserted_total, "skipped": skipped_total, "companies": total}
 
 
 async def _jquants_fetch_date(session: httpx.AsyncClient, api_key: str, date_str: str) -> list:
@@ -514,13 +290,13 @@ async def collect_stock_price_history_jquants(
     cancel_check: Optional[Callable] = None,
 ) -> dict:
     """J-Quants API から日次 OHLCV を日付単位で取得し ON CONFLICT UPDATE で保存する。
-    J-Quants は JPX 公式データのため、stooq 由来レコードより優先して上書きする。
-    1回のリクエストで全銘柄のデータが取得できるため stooq より大幅に高速。
+    J-Quants は JPX 公式データのため、Yahoo 由来レコードより優先して上書きする。
+    1回のリクエストで全銘柄のデータが取得できる。
     date_from/date_to を指定した場合はその範囲を使用し、省略時は days_back から計算する。
     プロバイダー固有ロジック（J-Quants 日付単位フェッチ）を _jquants_batch_gen に分離し、
     _price_collection_driver の共通フレームで DB 保存・trim を一元管理する。
     株式分割・併合を遡及反映した調整後値（Adj* フィールド）を使用する（Issue #314）。
-    stooq/Yahoo（バックフィル経路）も調整済み系列のため、ソース間の整合性が取れる。
+    Yahoo（バックフィル経路）も調整済み系列のため、ソース間の整合性が取れる。
     """
     api_key = os.environ.get("JQUANTS_API_KEY", "")
     if not api_key:
@@ -1111,8 +887,8 @@ def _update_market_data_point_in_time(db) -> int:
 
 def update_market_data_from_history(db, point_in_time: bool = False) -> int:
     """stock_price_history の終値を financial_records.stock_price に反映する。
-    stooq が GitHub Actions IP でブロックされる問題を回避するため、
-    J-Quants 由来の stock_price_history を使ってバリュエーション指標を計算する。
+    外部 API へは接続せず、夜間バッチが J-Quants/Yahoo で蓄積した株価テーブルを使って
+    バリュエーション指標を計算する（旧 stooq 経路は #428 で廃止）。
 
     point_in_time=False（デフォルト・日次差分向け）:
         各社の最新レコードのみ、最新株価で更新する。高速。
@@ -1618,9 +1394,9 @@ async def fill_recent_stock_price_gap_yahoo(
     async def _yahoo_batch_gen(http):
         """並行フェッチ（#556）。**取得だけをタスク化し、判定と集計は消費側に残す。**
 
-        既存の `_stooq_batch_gen` と同じ `Semaphore` + `as_completed` の形を踏襲する
-        （新しい流儀を持ち込まない）。`records` の組み立てと `n_new` / `n_exchange_rejected` の
-        加算をタスク側へ動かさないのは、**カウンタの意味を並行度に依存させないため**。
+        `Semaphore` + `as_completed` の素直な形にする（新しい流儀を持ち込まない。
+        #736 で撤去した旧 `_stooq_batch_gen` と同じ形）。`records` の組み立てと
+        `n_new` / `n_exchange_rejected` の加算をタスク側へ動かさないのは、**カウンタの意味を並行度に依存させないため**。
 
         スリープは各タスクが取得後に払う＝実効レートは「並行度 ÷ 1リクエストの所要」。
         `YAHOO_STOCK_CONCURRENCY=1` なら従来の逐次と同じ順序・同じレートになる。
@@ -2433,7 +2209,7 @@ def _fetch_latest_fin_by_ec(db, edinet_codes: list) -> dict:
 # 新しい収集チャネルを足すときはここへ 1 行加える（`tests/test_collect_macro.py::
 # test_every_series_group_declares_anchor` が未宣言を落とす）。
 SERIES_ANCHOR: dict[str, str] = {
-    "MACRO_SERIES":       "collection",    # Yahoo/stooq の市場系（その日の終値）
+    "MACRO_SERIES":       "collection",    # Yahoo の市場系（その日の終値）
     "FRED_SERIES":        "period_start",
     "BOJ_SERIES":         "period_start",
     "OECD_SERIES":        "period_start",
@@ -2446,36 +2222,35 @@ SERIES_ANCHOR: dict[str, str] = {
     "MOF_SERIES":         "period_start",  # CSV の「基準日」＝観測日。lag_days で公表時点へ寄せる
 }
 
-# stooq ティッカー定義。category は 'fx' / 'rate' / 'equity' / 'commodity' / 'volatility'。
-# 本番収集は GitHub Actions（Azure IP）上で Yahoo Finance を優先する（stooq は 403 ブロック）。
-# VIX/DXY/US5Y/US30Y は #218 フェーズ1 で追加。Yahoo のみで取得するため stooq ticker は
-# best-effort（空文字は stooq フォールバック時に「データ無し」で skip され安全）。これらが
+# 市場系ティッカー定義（取得元は Yahoo Finance のみ）。category は 'fx' / 'rate' / 'equity' /
+# 'commodity' / 'volatility'。stooq のフォールバックは #736 で撤去した（クラウド IP では 403、
+# ローカルでも HTTP 200 のボット検証ページが返り、どの実行環境からも CSV が取れない）。
+# VIX/DXY/US5Y/US30Y は #218 フェーズ1 で追加。これらが
 # macro_data に実際に蓄積されたことを Actions で実証してから M-1 の特徴量（_MACRO_MAP）へ公開する。
 MACRO_SERIES: list[dict] = [
-    {"code": "USDJPY",    "name": "USD/JPY",      "category": "fx",         "ticker": "usdjpy",   "yf_ticker": "USDJPY=X"},
-    {"code": "EURJPY",    "name": "EUR/JPY",      "category": "fx",         "ticker": "eurjpy",   "yf_ticker": "EURJPY=X"},
-    {"code": "DXY",       "name": "ドル指数",     "category": "fx",         "ticker": "",         "yf_ticker": "DX-Y.NYB"},
-    {"code": "US5Y",      "name": "米5年金利",    "category": "rate",       "ticker": "",         "yf_ticker": "^FVX"},
-    {"code": "US10Y",     "name": "米10年金利",   "category": "rate",       "ticker": "10usy.b",  "yf_ticker": "^TNX"},
-    {"code": "US30Y",     "name": "米30年金利",   "category": "rate",       "ticker": "",         "yf_ticker": "^TYX"},
+    {"code": "USDJPY",    "name": "USD/JPY",      "category": "fx",         "yf_ticker": "USDJPY=X"},
+    {"code": "EURJPY",    "name": "EUR/JPY",      "category": "fx",         "yf_ticker": "EURJPY=X"},
+    {"code": "DXY",       "name": "ドル指数",     "category": "fx",         "yf_ticker": "DX-Y.NYB"},
+    {"code": "US5Y",      "name": "米5年金利",    "category": "rate",       "yf_ticker": "^FVX"},
+    {"code": "US10Y",     "name": "米10年金利",   "category": "rate",       "yf_ticker": "^TNX"},
+    {"code": "US30Y",     "name": "米30年金利",   "category": "rate",       "yf_ticker": "^TYX"},
     # 日10年金利（JP10Y）は Yahoo `^JGB` 廃止（404）・stooq `10jpy.b` も0件で、**定義だけが残って
     # 1行も蓄積されない**系列だった（毎回2リクエスト空振りしてから「データ無し」で continue）。
     # #442 で削除。既定モデルは月次 FRED の `JP10Y_FRED`（下記）を使うため影響は無い。日次ソースは
     # 財務省「国債金利情報」CSV で取れることを #456 で確認済みだが、CSV パース経路のため
-    # Yahoo/stooq 前提の本リストには乗らない。収集の実装は #458。
-    {"code": "NIKKEI225", "name": "日経225",      "category": "equity",     "ticker": "^nkx",     "yf_ticker": "^N225"},
+    # Yahoo 前提の本リストには乗らない。収集の実装は #458。
+    {"code": "NIKKEI225", "name": "日経225",      "category": "equity",     "yf_ticker": "^N225"},
     # TOPIX 指数 ^TPX は Yahoo で配信停止（200 OK だが 0 件）。TOPIX 連動 ETF 1306.T
     # （NEXT FUNDS TOPIX・最長履歴・高流動）を代理に使う＝yoy/logret/zscore は指数と同等に追従。
-    {"code": "TOPIX",     "name": "TOPIX",        "category": "equity",     "ticker": "^tpx",     "yf_ticker": "1306.T"},
-    {"code": "SP500",     "name": "S&P500",       "category": "equity",     "ticker": "^spx",     "yf_ticker": "^GSPC"},
-    {"code": "VIX",       "name": "VIX恐怖指数",  "category": "volatility", "ticker": "",         "yf_ticker": "^VIX"},
-    {"code": "WTI",       "name": "WTI原油",      "category": "commodity",  "ticker": "cl.f",     "yf_ticker": "CL=F"},
-    {"code": "GOLD",      "name": "金",           "category": "commodity",  "ticker": "gc.f",     "yf_ticker": "GC=F"},
+    {"code": "TOPIX",     "name": "TOPIX",        "category": "equity",     "yf_ticker": "1306.T"},
+    {"code": "SP500",     "name": "S&P500",       "category": "equity",     "yf_ticker": "^GSPC"},
+    {"code": "VIX",       "name": "VIX恐怖指数",  "category": "volatility", "yf_ticker": "^VIX"},
+    {"code": "WTI",       "name": "WTI原油",      "category": "commodity",  "yf_ticker": "CL=F"},
+    {"code": "GOLD",      "name": "金",           "category": "commodity",  "yf_ticker": "GC=F"},
     # ── コモディティ・チャネル拡張（#358・ADR-0013）───────────────────────────
     # 日本株の業種別コモディティ感応度をカバー（銅=非鉄/電線/機械・天然ガス=電力ガス/化学・
     # 貴金属=商社/触媒/電子材料・穀物=食品/飼料）。Phase 0 疎通検証で全8系列が Yahoo v8 から
-    # 6年 1506-1510 行取得可。stooq はコモディティ先物が全滅（ローカル IP でも 0 件）のため
-    # ticker は空文字（Yahoo フォールバック時に安全に skip）。VIX/DXY 同様、macro_data への
+    # 6年 1506-1510 行取得可。VIX/DXY 同様、macro_data への
     # 蓄積を Actions で実証してから M-1/M-2/M-3 の特徴量（_MACRO_MAP・_DLM_MACRO_MAP）へ
     # 公開する（2PR 構成・#218 の公開フロー準拠）。
     #
@@ -2490,14 +2265,14 @@ MACRO_SERIES: list[dict] = [
     # **series_code は BCOM のまま**（特徴量名・既定セットは不変）。DJP はトータルリターン型
     # ＝旧 ER 指数と水準体系が違うため、切替時は全期間（--years 11）で再収集して旧行を
     # 上書きすること。期間を絞ると新旧 level が混在し yoy が1年間壊れる。
-    {"code": "BCOM",      "name": "ブルームバーグ商品指数", "category": "commodity", "ticker": "", "yf_ticker": "DJP"},
-    {"code": "COPPER",    "name": "銅先物",        "category": "commodity",  "ticker": "",         "yf_ticker": "HG=F"},
-    {"code": "NATGAS",    "name": "天然ガス先物",  "category": "commodity",  "ticker": "",         "yf_ticker": "NG=F"},
-    {"code": "SILVER",    "name": "銀先物",        "category": "commodity",  "ticker": "",         "yf_ticker": "SI=F"},
-    {"code": "WHEAT",     "name": "小麦先物",      "category": "commodity",  "ticker": "",         "yf_ticker": "ZW=F"},
-    {"code": "CORN",      "name": "トウモロコシ先物", "category": "commodity", "ticker": "",       "yf_ticker": "ZC=F"},
-    {"code": "SOYBEAN",   "name": "大豆先物",      "category": "commodity",  "ticker": "",         "yf_ticker": "ZS=F"},
-    {"code": "PLATINUM",  "name": "プラチナ先物",  "category": "commodity",  "ticker": "",         "yf_ticker": "PL=F"},
+    {"code": "BCOM",      "name": "ブルームバーグ商品指数", "category": "commodity", "yf_ticker": "DJP"},
+    {"code": "COPPER",    "name": "銅先物",        "category": "commodity",  "yf_ticker": "HG=F"},
+    {"code": "NATGAS",    "name": "天然ガス先物",  "category": "commodity",  "yf_ticker": "NG=F"},
+    {"code": "SILVER",    "name": "銀先物",        "category": "commodity",  "yf_ticker": "SI=F"},
+    {"code": "WHEAT",     "name": "小麦先物",      "category": "commodity",  "yf_ticker": "ZW=F"},
+    {"code": "CORN",      "name": "トウモロコシ先物", "category": "commodity", "yf_ticker": "ZC=F"},
+    {"code": "SOYBEAN",   "name": "大豆先物",      "category": "commodity",  "yf_ticker": "ZS=F"},
+    {"code": "PLATINUM",  "name": "プラチナ先物",  "category": "commodity",  "yf_ticker": "PL=F"},
 ]
 
 # ── FRED マクロ系列（クレジット・インフレ・JP金利・期間構造）──────────────────────────
@@ -3894,7 +3669,7 @@ async def fetch_yahoo_history(
     expect_currency:  Optional[str] = None,
 ) -> list:
     """Yahoo Finance v8 API から日次 OHLCV を取得する。
-    GitHub Actions（Azure IP）からも動作する。stooq の代替として使用。
+    GitHub Actions（Azure IP）からも動作する。
 
     `expect_exchanges` / `expect_currency` は**キーワード専用・既定 None＝検証しない**
     ＝東証（`.T`）経路の意味論は1ビットも変わらない（#555）。地方取引所として
@@ -3909,19 +3684,6 @@ async def fetch_yahoo_history(
     return rows
 
 
-async def fetch_stooq_history(
-    session: httpx.AsyncClient,
-    ticker:  str,
-    date_from: str,   # "YYYYMMDD"
-    date_to:   str,   # "YYYYMMDD"
-) -> list:
-    """stooq 日次 OHLCV（汎用ティッカー・マクロ用）。open/high/low/volume は None 許容。"""
-    return await _fetch_stooq_ohlcv(
-        session, ticker, date_from, date_to,
-        strict=False, log_label=f"stooq マクロ取得失敗 {ticker}",
-    )
-
-
 async def collect_macro_data(
     db,
     years_back: int = 5,
@@ -3929,10 +3691,10 @@ async def collect_macro_data(
     cancel_check: Optional[Callable[[], bool]] = None,
     only: Optional[list[str]] = None,
 ):
-    """MACRO_SERIES（Yahoo/stooq）+ FRED_SERIES + BOJ_SERIES + OECD_SERIES + ESRI_SERIES +
+    """MACRO_SERIES（Yahoo）+ FRED_SERIES + BOJ_SERIES + OECD_SERIES + ESRI_SERIES +
     IMF_SERIES + ESTAT_SERIES + GDELT_SERIES + WIKIMEDIA_SERIES + MOF_SERIES を macro_data
     に upsert。
-    Yahoo Finance 優先（GitHub Actions Azure IP 対応）→ stooq フォールバック。FRED:
+    MACRO_SERIES は Yahoo Finance のみ（stooq フォールバックは #736 で撤去）。FRED:
     FRED_API_KEY 設定時のみ。BOJ・OECD・ESRI・IMF・GDELT・Wikimedia・MOF: 常時収集（認証不要）。
     e-Stat: ESTAT_API_KEY 設定時のみ。既存レコードは close 等を上書き（最新値で更新）。
 
@@ -4016,14 +3778,11 @@ async def collect_macro_data(
                     on_progress(i-1, total, "[マクロ収集] ユーザー停止")
                 return saved
 
-            # Yahoo Finance 優先（GitHub Actions Azure IP 対応）→ stooq フォールバック
+            # Yahoo Finance のみ。stooq フォールバックは #736 で撤去した（どの実行環境からも
+            # 取れず、ボット検証の HTML を 0 行として返して「データ無し」に化けていた）。
             rows = await fetch_yahoo_history(session, series["yf_ticker"], d1, d2)
-            src = "Yahoo Finance"
-            if not rows:
-                rows = await fetch_stooq_history(session, series["ticker"], d1, d2)
-                src = "stooq"
             if on_progress:
-                on_progress(i-1, total, f"[マクロ {i}/{total}] {series['name']} ({src}) 取得中")
+                on_progress(i-1, total, f"[マクロ {i}/{total}] {series['name']} (Yahoo Finance) 取得中")
             if not rows:
                 if on_progress:
                     on_progress(i, total, f"[マクロ {i}/{total}] {series['name']} データ無し")

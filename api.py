@@ -240,7 +240,7 @@ from database import (
     CollectionLog, StockPriceDaily, StockPriceWeekly, MacroData,
     prices_on_or_after, latest_prices, latest_year_subq,
 )
-from collector import run_full_collection, refresh_company, collect_stock_price_history, collect_stock_price_history_jquants, update_industry_from_jpx, collect_macro_data, MACRO_SERIES, reparse_from_raw
+from collector import run_full_collection, refresh_company, collect_stock_price_history_jquants, update_industry_from_jpx, collect_macro_data, MACRO_SERIES, reparse_from_raw
 from collection_jobs import jobs
 import backtest
 import serializers

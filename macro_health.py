@@ -69,7 +69,7 @@ FREQ_PERIOD_DAYS: dict[str, int] = {
 
 # 系列定義に `freq` が無いグループの既定頻度。
 _GROUP_DEFAULT_FREQ: dict[str, str] = {
-    "MACRO_SERIES":       "daily",       # Yahoo/stooq の市場系
+    "MACRO_SERIES":       "daily",       # Yahoo の市場系
     "FRED_SERIES":        "daily",       # freq 明示のある実体経済系は各定義が優先
     "BOJ_SERIES":         "monthly",     # 全系列が freq を明示
     "OECD_SERIES":        "monthly",     # JP_CLI

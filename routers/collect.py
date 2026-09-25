@@ -25,7 +25,7 @@ from database import (
 )
 from collector import (
     run_full_collection, refresh_company, update_market_data_from_history,
-    collect_stock_price_history, collect_stock_price_history_jquants,
+    collect_stock_price_history_jquants,
     update_industry_from_jpx, collect_macro_data, reparse_from_raw,
 )
 from collector_utils import JpxIndustryError
@@ -64,13 +64,6 @@ class CollectRequest(BaseModel):
     years_back: int = Field(default=1, ge=1, le=5)
     max_companies: Optional[int] = None
     skip_existing: bool = False
-
-class HistoryCollectRequest(BaseModel):
-    years_back:    int           = Field(default=3, ge=1, le=5)
-    max_companies: Optional[int] = None
-    skip_existing: bool          = True
-    backfill:      bool          = False
-    force:         bool          = False
 
 class SmartCollectRequest(BaseModel):
     years_back: int = Field(default=3, ge=1, le=5)
@@ -312,43 +305,10 @@ async def market_data_status():
     return api.jobs.snapshot("market")
 
 
-# ── 株価履歴収集 ──────────────────────────────────────────────────────────
-
-@router.post("/api/collect/history/start")
-@api.limiter.limit(api.RATELIMIT_COLLECT)
-async def start_history_collection(
-    request: Request, req: HistoryCollectRequest,
-    background_tasks: BackgroundTasks,
-):
-    async def body(on_progress, cancel_check):
-        db = SessionLocal()
-        try:
-            await collect_stock_price_history(
-                db, req.years_back, req.max_companies,
-                on_progress=on_progress, cancel_check=cancel_check,
-                skip_existing=req.skip_existing, backfill=req.backfill,
-            )
-        finally:
-            db.close()
-
-    api.jobs.start("history", background_tasks, body,
-                   busy_message="株価履歴収集ジョブが既に実行中です", force=req.force,
-                   error_message="[エラー] 株価履歴収集中に問題が発生しました（詳細はサーバーログを確認）")
-    return {"message": "株価履歴収集を開始しました"}
-
-
-@router.post("/api/collect/history/stop")
-async def stop_history_collection():
-    if not api.jobs.is_running("history"):
-        raise HTTPException(400, "実行中の株価履歴収集ジョブがありません")
-    api.jobs.request_cancel("history")
-    return {"message": "株価履歴収集の停止リクエストを送信しました"}
-
-
-@router.get("/api/collect/history/status")
-async def history_collection_status():
-    return api.jobs.snapshot("history")
-
+# ── 株価の収録状況 ────────────────────────────────────────────────────────
+# 株価履歴収集（stooq・`/api/collect/history/{start,stop,status,stream}`）は #736 で撤去した。
+# stooq はどの実行環境からも CSV が取れず、ボット検証の HTML を 0 行として「完了」に見せていた。
+# 株価は夜間バッチ（Yahoo の欠損補完 → J-Quants catchup）が入れる。ここは DB を読むだけ。
 
 @router.get("/api/collect/history/coverage")
 async def history_coverage(db: Session = Depends(api.get_db)):
@@ -370,7 +330,6 @@ async def history_coverage(db: Session = Depends(api.get_db)):
 for _sse_path, _sse_key in {
     "/api/collect/stream":         "collection",
     "/api/collect/market-stream":  "market",
-    "/api/collect/history/stream": "history",
     "/api/collect/reparse/stream": "reparse",
     "/api/collect/jquants/stream": "jquants",
     "/api/collect/macro/stream":   "macro",

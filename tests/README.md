@@ -33,7 +33,7 @@ python -m pytest tests/ -v
 | `test_gap_analysis.py` | `plugins/gap_analysis.py`（AR(1) 半減期推定・バリュエーション分析。期待総リターン列は旧 total_return 吸収） | statsmodels / SQLite fixture |
 | `test_sector_ols.py` | `plugins/sector_ols.py`（業種別OLS回帰・予測値書き込み） | numpy / SQLite fixture |
 | `test_database.py` | `database.py`（pack/unpack・upsert_company・upsert_financial・年度別Zスコア） | SQLite fixture |
-| `test_collector.py` | `collector.py`（XBRL パース・連結優先・派生指標 calc_derived・列検出・定数＋ネットワーク系：書類一覧/XBRL ZIP/stooq/J-Quants） | pandas / httpx MockTransport |
+| `test_collector.py` | `collector.py`（XBRL パース・連結優先・派生指標 calc_derived・列検出・定数＋ネットワーク系：書類一覧/XBRL ZIP/J-Quants） | pandas / httpx MockTransport |
 | `test_api.py` | `api.py`（JST変換・edinet_code 検証・トークン署名/検証・`/health`・DB-backed 読取エンドポイント） | fastapi TestClient |
 
 ## 設計方針
@@ -52,7 +52,7 @@ python -m pytest tests/ -v
 ## ネットワーク・DB のモック方針
 
 - **HTTP**: `httpx` 組み込みの `MockTransport` でレスポンスを擬似（新規依存なし）。`client: httpx.AsyncClient`
-  を引数に取る関数（`fetch_doc_list`/`fetch_xbrl_csv`/`fetch_stock_history_stooq`/
+  を引数に取る関数（`fetch_doc_list`/`fetch_xbrl_csv`/
   `_jquants_fetch_date`）にモック client を渡す。レート制限の `asyncio.sleep` は `monkeypatch` で無効化。
 - **DB エンドポイント**: FastAPI `app.dependency_overrides[get_db]` を `conftest.py` の SQLite `db` に差し替え。
   TestClient は別スレッドで実行するため `db` fixture は `StaticPool`＋`check_same_thread=False`。
