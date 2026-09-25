@@ -7,7 +7,7 @@ name: "[補完] マクロのみ収集"
 # 用途:
 #   - 新規系列追加時（例 #218 の VIX/DXY/US5Y/US30Y）の Actions（Azure IP）到達性・蓄積実証
 #   - macro_data の鮮度補完
-# Yahoo は GitHub Actions の Azure IP から到達できる（stooq は 403 ブロックのためフォールバック不可）。
+# Yahoo は GitHub Actions の Azure IP から到達できる（stooq のフォールバックは #736 で撤去済み）。
 
 on:
   workflow_dispatch:

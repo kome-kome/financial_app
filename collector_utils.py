@@ -81,8 +81,6 @@ RATE_SLEEP             = 0.6   # EDINET API のリクエスト間隔（秒）
 # 効果: 2026-08-29 は 892日ぶんを 0.6秒間隔で叩き切って約9分を捨てたうえ exit=0 で通った。
 EDINET_MAX_CONSECUTIVE_FAILURES = 10
 BATCH_PAUSE            = 3.0   # 100件ごとの追加ポーズ（秒）
-STOOQ_CONCURRENCY      = 30    # stooq 現在株価の同時接続数
-STOOQ_HIST_CONCURRENCY = 20    # stooq 履歴の同時接続数（1リクエストが重いため控えめ）
 JQUANTS_ENDPOINT             = "https://api.jquants.com/v2/equities/bars/daily"
 # 上場銘柄一覧。v1 の `/markets/listed/info` は **v2 に存在しない**（403
 # `The requested endpoint does not exist`）。後継は `/equities/master`（#462・2026-08-08 実測で

@@ -6,7 +6,7 @@
   - collector_utils.py      : 共通設定定数・ロガー
   - collector_master.py     : 企業/業種マスタ収集（EDINET コードリスト / JPX 業種）
   - collector_financials.py : XBRL 財務収集・パース・CF / PL-BS 補完・再解析
-  - collector_prices.py     : 株価（stooq / J-Quants / Yahoo）・マクロ指標収集
+  - collector_prices.py     : 株価（J-Quants / Yahoo）・マクロ指標収集
   - collector_disclosures.py: 会社予想開示（J-Quants /fins/summary・Issue #322）
   - collector_interim.py    : 半期(H1)財務収集（EDINET 半期/旧四半期Q2・Issue #219②）
 

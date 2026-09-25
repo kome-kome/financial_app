@@ -161,6 +161,33 @@ class TestMarketDataUpdate:
         assert not hasattr(collector_prices, "fetch_stock_price_stooq")
         assert not hasattr(collector, "update_market_data")
 
+    @pytest.mark.parametrize("name", [
+        "collect_stock_price_history", "fetch_stock_history_stooq", "fetch_stooq_history",
+        "_fetch_stooq_ohlcv", "_parse_stooq_csv",
+    ])
+    def test_stooq_fetchers_are_gone(self, name):
+        """stooq の個別銘柄経路とマクロのフォールバックが復活していないこと（#736）。
+
+        stooq はどの実行環境からも CSV が取れず、ボット検証の HTML を 0 行として返して
+        「取れなかった」を「データが無かった」に化けさせていた。"""
+        import collector
+        import collector_prices
+        assert not hasattr(collector_prices, name)
+        assert not hasattr(collector, name)
+
+    @pytest.mark.parametrize("method,path", [
+        ("POST", "/api/collect/history/start"),
+        ("POST", "/api/collect/history/stop"),
+        ("GET", "/api/collect/history/status"),
+        ("GET", "/api/collect/history/stream"),
+    ])
+    def test_stooq_history_routes_are_gone(self, method, path):
+        """株価履歴収集（stooq）の API は撤去済み。`/history/coverage`（DB 読み取り）だけ残す。"""
+        routes = {(m, r.path) for r in api.app.routes if isinstance(r, APIRoute)
+                  for m in r.methods}
+        assert (method, path) not in routes
+        assert ("GET", "/api/collect/history/coverage") in routes
+
     def test_legacy_max_companies_is_accepted_and_ignored(self, monkeypatch):
         """旧クライアントが max_companies を送っても 422 にしない（受理して無視）。"""
         self._run_job_body(monkeypatch)
@@ -258,7 +285,7 @@ class TestReadOnlyGuard:
         "/api/collect/status",
         "/api/collect/edinet-coverage",
         "/api/collect/market-data/status",
-        "/api/collect/history/status",
+        "/api/collect/history/coverage",
     ])
     def test_reads_still_pass(self, no_side_effects, monkeypatch, path):
         monkeypatch.setattr(api, "RENDER_LIGHT_MODE", True)
