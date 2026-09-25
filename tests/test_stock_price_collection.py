@@ -32,7 +32,8 @@ from collector import (
     backfill_weekly_history_yahoo,
     collect_stock_price_history_jquants,
 )
-from database import FinancialRecord, JQuantsAdjFactorEvent, load_jquants_adj_factor_events
+from corporate_actions import load_jquants_adj_factor_events
+from database import FinancialRecord, JQuantsAdjFactorEvent
 
 
 # ── Yahoo backfill：backfill_historical_stock_prices_yahoo ───────────────────

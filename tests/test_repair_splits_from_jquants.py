@@ -234,8 +234,8 @@ class TestWithheldOfficialAdjustments:
 
     @pytest.fixture
     def registered(self, monkeypatch):
-        import collector_utils
-        monkeypatch.setitem(collector_utils.WITHHELD_OFFICIAL_ADJUSTMENTS, self.EC,
+        import corporate_actions
+        monkeypatch.setitem(corporate_actions.WITHHELD_OFFICIAL_ADJUSTMENTS, self.EC,
                             (("2026-09-01", "2026-12-31", RIGHTS, "テスト用の登録・#652"),))
 
     def test_validate_alone_would_accept_the_official_adjustment(self):

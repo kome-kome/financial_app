@@ -16,11 +16,11 @@ load_dotenv()
 from collector import (
     run_full_collection, collect_macro_data,
     collect_stock_price_history_jquants, update_market_data_from_history,
-    rebuild_split_adjustment_factors,
     fill_recent_stock_price_gap_yahoo, detect_roundtrip_scale_bands,
     load_judged_scale_bands, exclude_judged_bands, roundtrip_log_line,
 )
 from collector_prices import format_yahoo_http_stats
+from corporate_actions import build_ledger, rebuild_split_adjustment_factors
 from ttm_composite import rebuild_ttm_financial_records
 from collector_utils import EdinetAccessError
 from database import SessionLocal, init_db, price_freshness
@@ -200,7 +200,10 @@ async def main():
         # 作れてしまう。例外は握らない（上の株価反映と同じ扱い）＝この工程の自己検証だけが
         # 係数表の固着を検知する仕組みなので、黙って続けると #504 と同型の穴になる。
         # 検出0件のときは既存の表に触らず raise するため、失敗しても VIEW は前夜の係数で動く。
-        n_factors = rebuild_split_adjustment_factors(db4)
+        # **台帳は一晩に1回だけ作り、係数表と TTM の両方へ同じものを渡す**（#746・ADR-0062）
+        # ＝係数表の F と TTM の F が同じ検出・同じ公式イベントから決まる。
+        ledger = build_ledger(db4)
+        n_factors = rebuild_split_adjustment_factors(db4, ledger=ledger)
         log(f"  split_adjustment_factors: {n_factors}行 全置換")
 
         # TTM 行の作り直し（#424 子2・ADR-0051）。**係数表の直後**に置くのは、TTM 行の F が
@@ -212,7 +215,7 @@ async def main():
         # ここで抜けると後ろの株価鮮度・往復段差の検知——**本番の画面が依存する側の自己検証**
         # ——まで巻き添えで止まる。失敗は最後に非0の終了コードとして必ず現れる（#580）。
         try:
-            n_ttm = rebuild_ttm_financial_records(db4)
+            n_ttm = rebuild_ttm_financial_records(db4, ledger=ledger)
             log(f"  ttm_financial_records: {n_ttm}行 全置換")
         except Exception as e:
             db4.rollback()      # 後続の price_freshness が同じセッションを使う

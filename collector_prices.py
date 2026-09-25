@@ -27,12 +27,12 @@ from database import (
     record_prices_batch, trim_daily, latest_prices,
     upsert_macro_batch, sync_active_status, db_timeouts,
     get_setting, upsert_setting, KEY_SCALE_BAND_VERDICTS,
-    replace_split_adjustment_factors,
-    upsert_jquants_adj_factor_events, load_jquants_adj_factor_events, load_price_series,
-    load_jquants_adj_factor_coverage,
+    upsert_jquants_adj_factor_events,
 )
 
 from collector_utils import *
+# 企業イベントの知識（公式 AdjFactor の判定・登録済みスピンオフ）は台帳が唯一の源（#746・ADR-0062）。
+from corporate_actions import adj_factor_event, before_spinoff_ex_date, spinoff_factor
 
 
 async def _save_price_batch_with_retry(db, batch: list) -> int:
@@ -144,7 +144,7 @@ async def _jquants_fetch_code(session: httpx.AsyncClient, api_key: str, code: st
     企業イベント日で、値が比率そのもの。**株価比から分割比を推測してはいけない**——
     #466 の調査で、公式イベントが無いのに株価が 5/6 ずれている銘柄（E32779）が実在すると
     分かっている。**逆に `AdjFactor` が持たない企業イベントもある**: 株式分配型スピンオフは
-    公式が調整せず Yahoo が調整する（E02086・#568・`collector_utils.SPINOFF_ADJUSTMENTS`）。
+    公式が調整せず Yahoo が調整する（E02086・#568・`corporate_actions.SPINOFF_ADJUSTMENTS`）。
 
     エラー処理は `_jquants_fetch_date` と同じ規約に揃える（429 は90秒待って1回だけ再試行・
     403 は `classify_jquants_forbidden` で分類して送出・400 は窓外なら
@@ -907,168 +907,6 @@ def update_market_data_from_history(db, point_in_time: bool = False) -> int:
         if not point_in_time:
             return _update_market_data_latest(db)
         return _update_market_data_point_in_time(db)
-
-
-def rebuild_split_adjustment_factors(db, *, bps_path: Optional[bool] = None) -> int:
-    """`split_adjustment_factors` を作り直す。戻り値は書いた行数（F≠1.0 の行数）。
-
-    バリュエーション基準の不一致（#655・ADR-0055）を `financial_metrics` VIEW が補正する
-    ための係数表を全置換する。**毎晩作り直すのは F が行の固有値ではないから**——F は
-    「その行の年より後に起きたイベントの累積積」なので、新しい分割が1件起きればその会社の
-    過去全行の値が変わる。焼き付けた値は必ず陳腐化する。
-
-    入力は `financial_records.issued_shares` と `bs_bps` と `pl_eps`（いずれも XBRL 由来）
-    だけで、J-Quants の契約窓（2年）に依存しない＝2018年まで遡って復元できる。この復元は
-    #654 が公式 `AdjFactor` と突合して**一致率 0.967（29/30・陰性対照の見逃し 0 社）**を
-    確認した。上場廃止をまたいで別の実体の行が隣り合うペアを比べないために、週次株価の系列の開始日と
-    途中の空白（`stock_price_weekly`）も読む（#672）。
-
-    `bps_path` は株数が追随しない社を拾う第2経路（#656）の ON/OFF。**None なら検出器側の
-    既定（`measure_split_valuation_bias.DEFAULT_BPS_PATH`）に従う**——呼び出し側が既定を
-    書き写すと2箇所が乖離する。明示するのは前後を測り比べるときだけである
-    （`scripts/measure_split_bias_oof.py`）。**2026-09-12 時点の既定は True**で、根拠は
-    公式 `AdjFactor` との一致率 0.962（25/26・陰性対照の見逃し 0 社）。倍率を `bs_bps` の
-    年次比ではなく**翌年の `issued_shares` 比**から取るようにして 0.367 から上がった（#659）。
-    数字と経緯は検出器側の定数へ。第1経路の純資産総額チェック（#657）も同じく検出器側の
-    `DEFAULT_EQUITY_TOL` に従い、ここでは `bs_total_equity` を読んで渡すだけである。
-
-    **「入力が無い」と「入力はあるのに作れない」を分ける**。annual 行が0件ならスキップして
-    0 を返す（初回ブートストラップ前・テストのスタブ DB）。行はあるのに係数が1件も作れない
-    のは検出が壊れた側なので `RuntimeError` を上げる。**どちらの場合も既存の表には触らない**
-    ——全置換の順序で「消してから失敗」にすると、補正が静かに全部外れた VIEW が残る
-    （どの値も妥当な株価指標なのでエラーは出ない）。
-    """
-    computed = compute_split_adjustments(db, bps_path=bps_path)
-    if computed is None:
-        # 入力そのものが無い＝初回ブートストラップ前、またはテストのスタブ DB。ここで失敗に
-        # すると空の DB からの立ち上げが通らない。**「走らなかった」の検知はここではなく
-        # 収集本体が担う**（annual 行が消えていれば前段がとうに失敗している）。
-        log.warning("分割補正係数: annual 行が0件のためスキップした（係数表は温存）")
-        return 0
-    rows, events, stats, factors = computed
-
-    # 寄与イベントの種別を行ごとに引く。**F の値は上の正本をそのまま使い、ここで積を取り直さない**
-    # （`tests/test_split_adjustment_factors.py` が「寄与集合の積 == factor」を照合して乖離を捕まえる）。
-    ev_by_ec: dict = defaultdict(list)
-    for e in events:
-        if e.canonical is not None:
-            ev_by_ec[e.edinet_code].append(e)
-
-    out = []
-    for (ec, year), f in sorted(factors.items()):
-        if f == 1.0:
-            continue                      # 無補正の行は持たない（VIEW 側が COALESCE で 1.0 を埋める）
-        contrib = [e for e in ev_by_ec.get(ec, ()) if e.year > year]
-        out.append({
-            "edinet_code": ec, "year": year, "factor": f,
-            "n_events": len(contrib),
-            "kinds": ",".join(sorted({e.kind for e in contrib})) or None,
-        })
-
-    if not out:
-        # 入力はあるのに1件も作れなかった＝検出が壊れた側。**既存の表に触らず失敗する**。
-        raise RuntimeError(
-            "分割補正係数が1件も作れなかった（annual 行 %d / 候補ペア %s / 検出イベント %s）。"
-            "既存の係数表は温存する" % (len(rows), stats.get("n_candidate_pairs"),
-                                        stats.get("n_events")))
-
-    n = replace_split_adjustment_factors(db, out)
-    db.commit()
-    log.info("分割補正係数: %d 行 / %d 社 を全置換（イベント %d 件・種別 %s・経路 %s）",
-             n, len({r["edinet_code"] for r in out}), stats.get("n_events"),
-             stats.get("by_kind"), stats.get("n_events_by_source"))
-    return _log_split_adjustment_stats(n, stats)
-
-
-def compute_split_adjustments(db, *, bps_path: Optional[bool] = None):
-    """係数表の入力を読んで分割イベントと累積 F を作る。**書き込まない。**
-
-    戻り値は `(rows, events, stats, factors)`。annual 行が0件なら None。
-
-    `rebuild_split_adjustment_factors` と、その補正がリークを除いたかを測る
-    `scripts/measure_split_leak.py`（#685・ADR-0055 決定7）が共有する。**読み手ごとに入力を
-    揃え直さない**——下の4つ（通期行・公式 AdjFactor・株価系列・受信区間）のどれかを読み忘れても
-    検出はもっともらしい結果を返し、測ったものが本番の係数表と別物になる。
-    """
-    # 検出アルゴリズムは scripts/measure_split_valuation_bias.py の純関数が唯一の源で、
-    # ここへ写さない。遅延 import なのは収集モジュールが scripts/ へ静的に依存しないため
-    # （あちらの純関数ブロックは database / httpx を引かないことをテストが固定している）。
-    from scripts.measure_split_valuation_bias import (
-        AnnualRow, detect_events, cumulative_factors, merge_spans, LISTING_GAP_MIN_DAYS,
-    )
-
-    # **ORDER BY を省かない。** `detect_events` は `sorted(rs, key=lambda r: r.year)` で並べるが
-    # Python のソートは安定なので、**同じ year に annual 行が2本ある社**（会計期間変更。実測
-    # 30,379 行に対し (ec, year) は 30,321＝58 組）ではペアの向きが入力順で決まる。
-    # 無指定だと run ごとに検出結果が 1〜数件ぶれる。`period_end` まで入れて完全に決める
-    # （測定器の `_SQL_ANNUAL` は `edinet_code, year` までなので、この 58 組ぶんだけ
-    #  結果が食い違いうる＝再現性を取る側を選ぶ）。
-    rows = [AnnualRow(*r) for r in db.query(
-        FinancialRecord.edinet_code, FinancialRecord.year, FinancialRecord.period_end,
-        FinancialRecord.issued_shares, FinancialRecord.bs_bps, FinancialRecord.pl_eps,
-        FinancialRecord.dps, FinancialRecord.stock_price, FinancialRecord.per,
-        FinancialRecord.pbr, FinancialRecord.div_yield, FinancialRecord.market_cap,
-        # 純資産総額は第1経路の増資チェック（#657）が読む。`AnnualRow` の末尾の列なので末尾に置く。
-        FinancialRecord.bs_total_equity,
-    ).filter(FinancialRecord.period_type == "annual").order_by(
-        FinancialRecord.edinet_code, FinancialRecord.year, FinancialRecord.period_end,
-    ).all()]
-
-    if not rows:
-        return None
-
-    kw = {} if bps_path is None else {"bps_path": bps_path}
-    # 翌年の行が無い第2経路の倍率は、catchup が残した公式 AdjFactor から取る（#661・決定4-5）。
-    # **ここでは J-Quants を叩かない**——外部サービスが落ちた晩に補正が静かに外れる経路を作らない
-    # ための分業で、表が空なら検出器は今日までどおり採らない側へ倒れる。DB エラーは握らない（決定5）。
-    official = load_jquants_adj_factor_events(db)
-    # 上場廃止をまたいで別の実体の行が隣り合うペアを比べないための週次株価の系列（開始日と途中の
-    # 空白・#672・決定4-7）。**読み忘れると判定は黙って無効になり**、定番比の 15 が E05714 型の
-    # 偽陽性を入れる。
-    series = load_price_series(db, min_hole_days=LISTING_GAP_MIN_DAYS)
-    # 公式のバーを社単位で受け取った区間（#668・決定4-8）。第1経路の偽陽性を「公式に分割が無い」と
-    # **確かめられた**ときだけ外す。区間は取り込み CLI が追記するので、併合してから渡す（併合の唯一の源は
-    # 検出器の `merge_spans`）。表が空なら何も外さない＝今日までどおり採る側へ倒れる。
-    coverage = {ec: merge_spans(sp) for ec, sp in load_jquants_adj_factor_coverage(db).items()}
-    events, stats = detect_events(rows, official_events=official, price_series=series,
-                                  official_coverage=coverage, **kw)
-    # use_canonical=True（既定）＝定番比へ寄せられなかった `unsnapped` を積から外す。
-    factors = cumulative_factors(rows, events)
-
-    # 夜間ログの「公式イベントを持つ社」の数。検出器の stats には無いのでここで足す。
-    stats["n_official_companies"] = len(official)
-    return rows, events, stats, factors
-
-
-def _log_split_adjustment_stats(n: int, stats: dict) -> int:
-    """係数表を書いたあとの内訳を夜間ログへ出す。戻り値は書いた行数をそのまま返す。"""
-    bp = stats.get("bps_path") or {}
-    if bp.get("enabled"):
-        # 倍率待ちの残りと公式との食い違いは**毎晩出す**（#661）。倍率待ちが減らないまま
-        # 公式イベント 0 社が続くなら、catchup が残せていない（あるいは表が消えた）合図。
-        cc = (bp.get("official") or {}).get("crosscheck") or {}
-        log.info("分割補正係数（第2経路）: 倍率の出どころ %s・倍率待ち %d 件・"
-                 "公式イベントを持つ社 %d・翌年株数と公式の突合 一致 %d / 食い違い %d",
-                 bp.get("magnitude_source"), len(bp.get("awaiting_magnitude") or ()),
-                 stats.get("n_official_companies", 0), cc.get("agree", 0), cc.get("disagree", 0))
-        for d in cc.get("disagreements") or ():
-            log.info("分割補正係数（第2経路）: 公式と食い違い %s", d)
-    # 比べなかったペアは**毎晩出す**（#672）。週次の系列が収集の都合で遅く始まる社（2024-05-27 に
-    # 225 社）や、取得の失敗で途中が抜けた社が欠損年をまたぐと本物の分割まで外しうるので、
-    # 一覧が増えたら中身を確かめる。
-    lg = stats.get("listing_gap") or {}
-    log.info("分割補正係数: 上場廃止をまたぐペアとして比べなかった %d 件（翌年先読み %d 件）",
-             lg.get("n_rejected", 0), lg.get("n_lagged", 0))
-    for r in lg.get("rejected") or ():
-        log.info("分割補正係数: 上場廃止をまたぐペア %s", r)
-    # 公式の不在で外した第1経路も**毎晩出す**（#668）。外れる社は取り込み CLI を回したときにしか増えない
-    # ので、取り込み後の最初の晩に一覧が変わっていなければ区間の書き込みか読み込みが壊れている。
-    oa = stats.get("official_absence") or {}
-    log.info("分割補正係数: 公式に分割が無いと確かめて外した第1経路 %d 件（取得記録のある社 %d）",
-             oa.get("n_rejected", 0), oa.get("n_companies_with_record", 0))
-    for r in oa.get("rejected") or ():
-        log.info("分割補正係数: 公式に分割が無い第1経路 %s", r)
-    return n
 
 
 async def backfill_historical_stock_prices_yahoo(

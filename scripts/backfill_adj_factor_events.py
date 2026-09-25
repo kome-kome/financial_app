@@ -51,6 +51,7 @@ from typing import Mapping, Optional, Sequence
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from collector_utils import JQUANTS_RATE_SLEEP, force_utf8_stdout  # noqa: E402
+import corporate_actions as C  # noqa: E402
 from scripts import measure_split_valuation_bias as M  # noqa: E402
 
 
@@ -60,7 +61,7 @@ from scripts import measure_split_valuation_bias as M  # noqa: E402
 REASONS = ("awaiting", "crosscheck", "absence")
 
 
-def choose_targets(events: Sequence[M.ShareEvent], stats: Mapping,
+def choose_targets(events: Sequence[C.ShareEvent], stats: Mapping,
                    coverage: tuple[str, str], *,
                    reasons: Sequence[str] = REASONS) -> dict[str, list[str]]:
     """取り込む社と、その理由（`awaiting` / `crosscheck` / `absence`）。社は edinet_code 昇順。
@@ -83,10 +84,10 @@ def choose_targets(events: Sequence[M.ShareEvent], stats: Mapping,
             picked.setdefault(a["edinet_code"], set()).add("awaiting")
     for e in events:
         if ("crosscheck" in reasons and e.source == "bps" and e.lagged_sh_ratio is not None
-                and M.in_coverage(e, coverage, mode="partial")):
+                and C.in_coverage(e, coverage, mode="partial")):
             picked.setdefault(e.edinet_code, set()).add("crosscheck")
         if ("absence" in reasons and e.source == "shares"
-                and M.in_coverage(e, coverage, mode="full")):
+                and C.in_coverage(e, coverage, mode="full")):
             picked.setdefault(e.edinet_code, set()).add("absence")
     return {ec: sorted(r) for ec, r in sorted(picked.items())}
 
@@ -123,7 +124,7 @@ async def _run(args) -> dict:
         else:
             rows = M.load_annual_rows(db)
             # 公式も取得記録も渡さない＝不在で外す前の検出結果（`choose_targets` の約束）。
-            events, stats = M.detect_events(rows)
+            events, stats = C.detect_events(rows)
             targets = choose_targets(events, stats, cover, reasons=args.reasons)
             n_awaiting = len(stats["bps_path"]["awaiting_magnitude"])
         meta = M.load_company_meta(db, list(targets))

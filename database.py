@@ -1951,7 +1951,7 @@ def upsert_regression_results_batch(db, rows) -> int:
 # 補正は `financial_metrics` VIEW が LEFT JOIN でその場で当てる＝生値は壊さない。
 #
 # **この表の1行は (edinet_code, year) ごとの累積倍率で、その行の年より後に起きた
-# イベントの積**（`scripts/measure_split_valuation_bias.cumulative_factors` が唯一の源）。
+# イベントの積**（`corporate_actions.cumulative_factors` が唯一の源）。
 # 新しい分割が1件起きればその会社の過去全行の値が変わるので、`financial_records` に列として
 # 焼き付ける形は採らず毎晩全置換する。**F=1.0 の行は書かない**（VIEW が COALESCE(...,1.0) で
 # 埋めるので、歪んでいる 1,947 行だけを持てば足りる）。
@@ -1967,7 +1967,7 @@ class SplitAdjustmentFactor(Base):
     edinet_code = Column(String(10), nullable=False)
     year        = Column(Integer, nullable=False)
     # 累積 F。per / pbr / market_cap は ×F、div_yield / nc_ratio は ÷F
-    # （向きの唯一の源は measure_split_valuation_bias.COLUMN_DIRECTION）。
+    # （向きの唯一の源は corporate_actions.COLUMN_DIRECTION）。
     factor      = Column(Float, nullable=False)
     n_events    = Column(Integer, nullable=False)   # 寄与したイベント数（gap_years>=2 の積も1行に畳む）
     kinds       = Column(String(64))                # 寄与イベントの種別（"split" / "composite,split"・昇順）
@@ -2003,7 +2003,7 @@ def replace_split_adjustment_factors(db, rows) -> int:
 #   - 毎晩の J-Quants catchup（`collect_stock_price_history_jquants`）が、受け取った行から残す
 #     ＝API 呼び出しを1回も増やさない
 #   - 一回きりの取り込み `scripts/backfill_adj_factor_events.py`（契約窓の過去2年ぶん）
-# 読み手の `rebuild_split_adjustment_factors` は**この表だけを読み J-Quants を叩かない**。
+# 読み手の台帳（`corporate_actions.build_ledger`）は**この表だけを読み J-Quants を叩かない**。
 # 外部サービスが落ちた晩は行が増えないだけで、既に残した値と補正は消えない。
 #
 # **行が無いことを「分割は無かった」と読まない**（夜の取りこぼし・取り込み前・エンバーゴ中と
@@ -2054,17 +2054,6 @@ def upsert_jquants_adj_factor_events(db, rows) -> int:
     return len(vals)
 
 
-def load_jquants_adj_factor_events(db) -> dict:
-    """`{edinet_code: [(event_date, adj_factor), ...]}`（日付順）。検出器の `official_events` の形。"""
-    out: dict = {}
-    for ec, d, f in db.query(
-        JQuantsAdjFactorEvent.edinet_code, JQuantsAdjFactorEvent.event_date,
-        JQuantsAdjFactorEvent.adj_factor,
-    ).order_by(JQuantsAdjFactorEvent.edinet_code, JQuantsAdjFactorEvent.event_date).all():
-        out.setdefault(ec, []).append((str(d)[:10], float(f)))
-    return out
-
-
 # ── 8.7 公式 AdjFactor の取得記録（#668・ADR-0055 決定4-8）──────────────────────
 # 「この社はこの期間の日次バーを**実際に**受け取った」の記録。`jquants_adj_factor_events` は
 # 行が無いことを「分割は無かった」と読めない（上の注記）ので、読めるのはこの記録がイベント窓を
@@ -2073,7 +2062,7 @@ def load_jquants_adj_factor_events(db) -> dict:
 # **区間は要求した期間ではなく、返ってきたバーの最初と最後の日付で持つ。** J-Quants が扱わない
 # 市場の社はバーが0本で返り（実測 E03474・契約窓内 0 本）、429 が続いた社も `[]` になる
 # ——どちらも「イベントが無い」と同じ形なので、要求した期間で書くと「確かめた」に化ける。
-# バーの空白が長い箇所で区間を切るのは検出器の純関数（`bars_spans`）の役目。
+# バーの空白が長い箇所で区間を切るのは台帳の純関数（`corporate_actions.bars_spans`）の役目。
 #
 # 書き手は社単位で取る取り込み CLI（`scripts/backfill_adj_factor_events.py`）だけ。夜間 catchup は
 # 1晩に 11 日ぶんしか見ず、止まっていた晩を検出できないので書かない。
@@ -2120,51 +2109,6 @@ def upsert_jquants_adj_factor_coverage(db, rows) -> int:
     )
     db.execute(stmt)
     return len(vals)
-
-
-def load_jquants_adj_factor_coverage(db) -> dict:
-    """`{edinet_code: [(first_bar_date, last_bar_date), ...]}`（日付順・**併合しない生の区間**）。
-
-    重なる区間の併合は検出器の純関数 `measure_split_valuation_bias.merge_spans` が唯一の源で、
-    呼び出し側が通す（database は scripts/ へ依存しない）。
-    """
-    out: dict = {}
-    for ec, d0, d1 in db.query(
-        JQuantsAdjFactorCoverage.edinet_code, JQuantsAdjFactorCoverage.first_bar_date,
-        JQuantsAdjFactorCoverage.last_bar_date,
-    ).order_by(JQuantsAdjFactorCoverage.edinet_code, JQuantsAdjFactorCoverage.first_bar_date,
-               JQuantsAdjFactorCoverage.last_bar_date).all():
-        out.setdefault(ec, []).append((str(d0)[:10], str(d1)[:10]))
-    return out
-
-
-def load_price_series(db, *, min_hole_days: int) -> dict:
-    """`{edinet_code: (最初の week_start, ((空白直前の週, 空白直後の週), ...))}`。検出器の `price_series` の形（#672）。
-
-    分割補正の検出器が「上場廃止をまたいで別の実体の行が隣り合うペア」を比べないために読む。
-    上場廃止→再上場は週次株価に2つの形で現れる——系列の開始が遅い（旧社の価格が表に無い・実測
-    E05714）か、系列の途中に空白がある（旧社の価格が残っている・実測 E03530）。
-    空白は隣り合う週の間隔が `min_hole_days` 以上のものだけを返す（閾値は検出器の定数を呼び出し側が渡す）。
-    週次株価を1行も持たない社は含まない＝検出器は判定できないとして今日どおり採る。
-
-    **全行を Python へ持ってこない**（週次は約 140万行）。間隔は SQL の LAG で測り、該当する数行だけを返す。
-    """
-    starts = {ec: str(ws)[:10] for ec, ws in db.query(
-        StockPriceWeekly.edinet_code, func.min(StockPriceWeekly.week_start),
-    ).group_by(StockPriceWeekly.edinet_code).all()}
-    dialect = db.bind.dialect.name if db.bind is not None else "postgresql"
-    days = ("julianday(week_start) - julianday(prev_ws)" if dialect == "sqlite"
-            else "week_start::date - prev_ws::date")
-    holes: dict = {}
-    for ec, a, b in db.execute(text(
-        "SELECT edinet_code, prev_ws, week_start FROM ("
-        " SELECT edinet_code, week_start,"
-        "        LAG(week_start) OVER (PARTITION BY edinet_code ORDER BY week_start) AS prev_ws"
-        "   FROM stock_price_weekly) t"
-        " WHERE prev_ws IS NOT NULL AND " + days + " >= :d"
-        " ORDER BY edinet_code, week_start"), {"d": min_hole_days}).fetchall():
-        holes.setdefault(ec, []).append((str(a)[:10], str(b)[:10]))
-    return {ec: (s, tuple(holes.get(ec, ()))) for ec, s in starts.items()}
 
 
 # ── 8.8 TTM 合成の行（最新業績を分析へ入れる・#424 子2・ADR-0051）─────────────

@@ -23,11 +23,13 @@ from collector_prices import (            # noqa: E402
     repair_price_scale_breaks,
 )
 from collector_utils import (             # noqa: E402
+    JQuantsOutOfCoverage,
+    is_common_stock_code,
+)
+from corporate_actions import (           # noqa: E402
     SPINOFF_ADJUSTMENTS,
     WITHHELD_OFFICIAL_ADJUSTMENTS,
-    JQuantsOutOfCoverage,
     before_spinoff_ex_date,
-    is_common_stock_code,
     spinoff_factor,
 )
 

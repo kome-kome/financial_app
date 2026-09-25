@@ -17,6 +17,9 @@ accepted（2026-09-12）。Issue [#655](https://github.com/kome-kome/financial_a
 **2026-09-19 の再測定で「リークの読みを維持する」になった**（決定 7 の追記）。
 [ADR-0053](0053-one-scale-per-price-column.md) の「スケール」の語義をそのまま保ち、
 この問題には別の語（[[バリュエーション基準の不一致]]）を立てる。
+**2026-09-26: 決定2（向きの唯一の源）と決定3（検出器の再利用）の置き場所は
+[ADR-0062](0062-corporate-action-knowledge-lives-in-one-ledger.md) で企業イベント台帳 `corporate_actions.py` へ移した**
+（本文中の `scripts/measure_split_valuation_bias.py` / `collector_prices` のパスは当時の記録）。
 
 ## Context
 

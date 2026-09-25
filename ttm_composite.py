@@ -31,7 +31,7 @@
 1. 株数の比（`issued_shares` と「純利益 ÷ EPS」の逆算）が `SPLIT_GATE_RATIO`（検出器の
    `DEFAULT_MIN_RATIO`）以上動いた。**逆算を併せて見るのは、期末の後・提出の前に分割が
    あると EPS だけが遡って直り、`issued_shares` は期末の株数のまま残るためである。**
-2. 係数表の検出器（`scripts/measure_split_valuation_bias.detect_events`）のイベント窓が
+2. 係数表の検出器（`corporate_actions.detect_events`）のイベント窓が
    危ない窓と重なる。第2経路の「倍率待ち」も同じ扱いにする（倍率が決まっていないだけで、
    分割そのものは起きている）。
 3. 公式 `AdjFactor`（`jquants_adj_factor_events`）の日付が危ない窓の中にある。
@@ -57,6 +57,10 @@ import re
 from collections import Counter, defaultdict
 from datetime import date, timedelta
 from typing import Callable, NamedTuple, Optional, Sequence
+
+# 分割窓と F の掛け方は企業イベント台帳が唯一の源（#746・ADR-0062）。TTM 固有なのは
+# 「どの窓なら材料を弾くか」（`windows_overlap` / `reject_reason`）だけである。
+from corporate_actions import DEFAULT_MIN_RATIO, SplitWindow, factor_after
 
 log = logging.getLogger("collector")
 
@@ -144,18 +148,6 @@ class SourceRow(NamedTuple):
     values: dict            # 財務列（列名 → 値）
 
 
-class SplitWindow(NamedTuple):
-    """分割イベントの窓。検出器の `ShareEvent` と公式 `AdjFactor` の両方をこの形へ寄せる。
-
-    `start` は「この日より後」、`end` は「この日まで」を表す半開区間 (start, end]。
-    公式イベントは日付が 1 点なので `start == end` になる。
-    """
-    start: Optional[date]
-    end: Optional[date]
-    canonical: Optional[float]
-    source: str             # detected | awaiting | official
-
-
 class Basis(NamedTuple):
     """開示（`statement_disclosure.doc_type`）から読んだ会計基準と連結・単体の別。"""
     consolidation: str
@@ -205,20 +197,6 @@ def windows_overlap(win: SplitWindow, start: date, end: date) -> bool:
     if win.start is None or win.end is None:
         return True
     return win.start < end and win.end > start
-
-
-def ttm_split_factor(windows: Sequence[SplitWindow], filing_date: date) -> float:
-    """TTM 行の分割補正係数 F ＝ 提出日より後にある窓の定番比の積。
-
-    窓が提出日をまたぐイベントは呼び出し側（`reject_reason`）が弾いているので、ここでは
-    「丸ごと後」だけを掛ければ足りる。倍率の決まっていない窓（`canonical` が None）は
-    掛けない＝通期側の `cumulative_factors(use_canonical=True)` と同じ扱いである。
-    """
-    f = 1.0
-    for w in windows:
-        if w.canonical and w.start is not None and w.start >= filing_date:
-            f *= w.canonical
-    return f
 
 
 def _days_between(a: Optional[date], b: Optional[date]) -> Optional[int]:
@@ -444,7 +422,7 @@ def build_ttm_rows(rows: Sequence[SourceRow], *,
             if reason:
                 reasons[reason] += 1
                 continue
-            values["split_factor"] = ttm_split_factor(windows, h1_cur.filing_date)
+            values["split_factor"] = factor_after(windows, h1_cur.filing_date)
             made.append((year, h1_cur, annual_prev, h1_prev, values))
 
         for year, h1_cur, annual_prev, h1_prev, values in made:
@@ -481,30 +459,6 @@ def build_ttm_rows(rows: Sequence[SourceRow], *,
     return out, stats
 
 
-def split_windows(events: Sequence, awaiting: Sequence[dict],
-                  official: Sequence[tuple]) -> list:
-    """検出イベント・倍率待ち・公式 AdjFactor を 1 社ぶんの `SplitWindow` 列へ寄せる。
-
-    3 つは形が違うだけで、言っているのは同じ「この窓の中で株数の基準が変わった」である。
-    寄せておかないと、判定側が 3 通りの形を知ることになる（そのうち 1 つを足し忘れても
-    もっともらしい結果が返る）。
-    """
-    out: list = []
-    for e in events:
-        out.append(SplitWindow(_as_date(e.prev_period_end), _as_date(e.period_end),
-                               e.canonical, "detected"))
-    for a in awaiting:
-        out.append(SplitWindow(_as_date(a.get("prev_period_end")), _as_date(a.get("period_end")),
-                               None, "awaiting"))
-    for d, factor in official:
-        day = _as_date(d)
-        if day is None or not factor or factor == 1.0:
-            continue
-        # 公式は「過去株価に掛ける係数」なので 1:2 分割は 0.5。株数比へ直すため逆数を取る。
-        out.append(SplitWindow(day - timedelta(days=1), day, 1.0 / factor, "official"))
-    return out
-
-
 def _as_date(v) -> Optional[date]:
     if v is None or isinstance(v, date):
         return v
@@ -515,48 +469,29 @@ def _as_date(v) -> Optional[date]:
 
 
 # ── I/O ─────────────────────────────────────────────────────────────────────
-def rebuild_ttm_financial_records(db) -> int:
-    """`ttm_financial_records` を全置換する。戻り値は書いた行数。
+def compute_ttm_rows(db, *, ledger=None):
+    """TTM 行を作る。**書き込まない。** H1 行が0件なら None、それ以外は `(行, 内訳, 材料の行数)`。
 
-    **毎晩作り直すのは、TTM 行が材料と F の両方に依存するからである。** 新しい半期が入れば
-    行が増え、新しい分割が 1 件起きれば F が変わる。焼き付けた値は必ず陳腐化する
-    （分割補正係数と同じ理由・ADR-0055）。
-
-    **「入力が無い」と「入力はあるのに作れない」を分ける。** H1 の行が 0 件ならスキップして
-    0 を返す（初回ブートストラップ前・テストのスタブ DB）。行はあるのに 1 件も作れないのは
-    合成か判定が壊れた側なので `RuntimeError` を上げる。**どちらの場合も既存の表に触らない**
-    ——消してから失敗すると、TTM が静かに全部消えた VIEW が残る（通期の行は出るのでエラーは
-    出ず、画面もモデルも「元どおり」に見える）。
+    分割窓は企業イベント台帳（`corporate_actions.Ledger.windows_by_company`）から取る。
+    `ledger` はパイプラインが係数表の洗い替えと共有するもの（一晩に1回だけ検出する）で、
+    渡さなければここで作る。**台帳を作り直さずに渡すのは、係数表と TTM の F を同じ検出から
+    決めるため**——間で入力が変わると「係数は今夜・TTM は別の検出」の組み合わせができる。
     """
-    from collector_prices import (_compute_market_values, _nearest_price, MAX_GAP_DAYS,
-                                 compute_split_adjustments)
+    from collector_prices import _compute_market_values, _nearest_price, MAX_GAP_DAYS
     from collector_utils import JQUANTS_DISCLOSURE_DELAY_DAYS
+    from corporate_actions import build_ledger
     from database import (FinancialRecord, StatementDisclosure, StockPriceWeekly,
-                          latest_prices, load_jquants_adj_factor_events,
-                          replace_ttm_financial_records, ttm_financial_columns)
-    from scripts.measure_split_valuation_bias import DEFAULT_MIN_RATIO
+                          latest_prices, ttm_financial_columns)
 
     columns = ttm_financial_columns()
     rows = _load_source_rows(db, FinancialRecord, columns)
     if not [r for r in rows if r.period_type == "H1"]:
-        log.warning("TTM 合成: H1 行が0件のためスキップした（TTM 表は温存）")
-        return 0
+        return None
 
-    computed = compute_split_adjustments(db)
-    events_by_ec: dict = defaultdict(list)
-    awaiting_by_ec: dict = defaultdict(list)
-    if computed is not None:
-        _, events, stats, _ = computed
-        for e in events:
-            events_by_ec[e.edinet_code].append(e)
-        for a in ((stats.get("bps_path") or {}).get("awaiting_magnitude") or ()):
-            awaiting_by_ec[a["edinet_code"]].append(a)
-    official = load_jquants_adj_factor_events(db)
-    windows_by_ec = {
-        ec: split_windows(events_by_ec.get(ec, ()), awaiting_by_ec.get(ec, ()),
-                          official.get(ec, ()))
-        for ec in set(events_by_ec) | set(awaiting_by_ec) | set(official)
-    }
+    if ledger is None:
+        ledger = build_ledger(db)
+    # 台帳が無い＝通期行が0件。TTM は前期の通期を材料に持つので、このときは1行も作れない。
+    windows_by_ec = ledger.windows_by_company() if ledger is not None else {}
     basis_by_key = _load_basis(db, StatementDisclosure)
     price_for = _price_lookup(db, rows, StockPriceWeekly, latest_prices,
                               _nearest_price, MAX_GAP_DAYS)
@@ -565,11 +500,34 @@ def rebuild_ttm_financial_records(db) -> int:
         rows, windows_by_ec=windows_by_ec, basis_by_key=basis_by_key, columns=columns,
         split_gate_ratio=DEFAULT_MIN_RATIO, embargo_days=JQUANTS_DISCLOSURE_DELAY_DAYS,
         today=date.today(), price_for=price_for, market_values=_compute_market_values)
+    return out, stats, len(rows)
+
+
+def rebuild_ttm_financial_records(db, *, ledger=None) -> int:
+    """`ttm_financial_records` を全置換する。戻り値は書いた行数。
+
+    **毎晩作り直すのは、TTM 行が材料と F の両方に依存するからである。** 新しい半期が入れば
+    行が増え、新しい分割が 1 件起きれば F が変わる。焼き付けた値は必ず陳腐化する
+    （分割補正係数と同じ理由・ADR-0055）。`ledger` は `compute_ttm_rows` を参照。
+
+    **「入力が無い」と「入力はあるのに作れない」を分ける。** H1 の行が 0 件ならスキップして
+    0 を返す（初回ブートストラップ前・テストのスタブ DB）。行はあるのに 1 件も作れないのは
+    合成か判定が壊れた側なので `RuntimeError` を上げる。**どちらの場合も既存の表に触らない**
+    ——消してから失敗すると、TTM が静かに全部消えた VIEW が残る（通期の行は出るのでエラーは
+    出ず、画面もモデルも「元どおり」に見える）。
+    """
+    from database import replace_ttm_financial_records
+
+    built = compute_ttm_rows(db, ledger=ledger)
+    if built is None:
+        log.warning("TTM 合成: H1 行が0件のためスキップした（TTM 表は温存）")
+        return 0
+    out, stats, n_source = built
 
     if not out:
         raise RuntimeError(
             "TTM 行が1件も作れなかった（材料 %d 行 / 弾いた理由 %s）。既存の TTM 表は温存する"
-            % (len(rows), stats.get("rejected")))
+            % (n_source, stats.get("rejected")))
 
     n = replace_ttm_financial_records(db, out)
     db.commit()
