@@ -82,6 +82,49 @@ def _is_production_like() -> bool:
     return RENDER_LIGHT_MODE
 
 
+def writes_blocked() -> bool:
+    """収集・書き込み系 API を止める環境か（#733・ADR-0038 追補）。
+
+    Render は Supabase の断面を読むだけの窓で、そこへ書くと断面だけが前進して正本とも
+    凍結断面とも違う状態になる。**どちらの DB でも書き込みは成功するので黙って進む**。
+    条件を2つ持つのは、どちらか1つでは穴が残るから:
+
+    - ``RENDER_LIGHT_MODE``: render.yaml が設定する旗。Blueprint 管理外のサービスでは
+      反映されないことがある（database.resolve_database_url の `RENDER` 検知と同じ事情）。
+    - 接続先が prod: 「断面へ書かない」という決まりそのもの。`RENDER` 検知で prod へ倒れた
+      Render も、ローカルから ``FINAPP_DB_TARGET=prod`` で起動した場合も含む。
+
+    呼び出し時に評価する（テストの monkeypatch と接続先の差し替えを効かせるため）。
+    """
+    return RENDER_LIGHT_MODE or db_target_info()["db_target"] == "prod"
+
+
+# 収集ルーター（routers/collect.py）の外に置く GET 以外のルートの登録表（#733）。
+# 収集ルーター配下はルーター依存が閲覧専用の環境で一律 403 にするが、ここに並ぶルートには
+# 掛からない。**足したら「断面へ書くか」を判断して理由付きで1行足す**——書くなら収集
+# ルーターへ置く。tests/test_api_collect.py::TestWriteRouteRegistry が実体と照合する。
+WRITE_ROUTE_EXEMPTIONS: dict[tuple[str, str], str] = {
+    ("POST", "/heartbeat"):
+        "exempt: ブラウザ生存通知。プロセス内の時刻を更新するだけで DB へ書かない",
+    ("POST", "/api/auth/login"):
+        "exempt: Cookie を発行するだけで DB へ書かない",
+    ("POST", "/api/auth/logout"):
+        "exempt: Cookie を消すだけで DB へ書かない",
+    ("POST", "/api/auth/reset-password"):
+        "exempt: app_settings のパスワードを書く。閲覧専用でもログインを復旧できる必要がある"
+        "（断面の分析データではない）",
+    ("POST", "/api/plugins/{plugin_name}/run"):
+        "exempt: 書くのは heavy の sector_ols（regression_results）だけで、heavy は "
+        "writes_blocked() で 403。heavy でないプラグインは DB へ書かない",
+    ("POST", "/api/recommend"):
+        "exempt: 推薦の計算。DB を読むだけ",
+    ("POST", "/api/backtest/model-comparison"):
+        "exempt: OOF 比較。DB を読むだけで、heavy は writes_blocked() のとき飛ばす",
+    ("POST", "/api/screen"):
+        "exempt: スクリーニングの条件を body で受けるだけで DB を読むだけ",
+}
+
+
 APP_PASSWORD     = os.getenv("APP_PASSWORD", "")
 APP_RECOVERY_KEY = os.getenv("APP_RECOVERY_KEY", "")
 APP_SECRET_KEY   = os.getenv("APP_SECRET_KEY", "")
@@ -491,7 +534,9 @@ async def system_info():
     Supabase は 2026-08-07 の断面で更新を止めてあり、そちらを見ているときが警告対象。
     `db_label` はサーバ側で組み立てた表示用文字列で、接続文字列そのものは返さない。
     """
-    return {"render_light_mode": RENDER_LIGHT_MODE, **db_target_info()}
+    # 旗は writes_blocked の1本だけ出す。RENDER_LIGHT_MODE を並べると、画面が旗の抜けた
+    # Render で古い方を見て押せるボタンを出しうる（#733）。
+    return {"writes_blocked": writes_blocked(), **db_target_info()}
 
 
 @app.post("/heartbeat")

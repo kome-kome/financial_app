@@ -3,6 +3,9 @@
 /api/collect/* および /api/scheduler/* エンドポイントを担当。
 共有状態（jobs, limiter, RATELIMIT_* 等）は import api 経由で参照し、
 テストの monkeypatch.setattr(api, ...) と互換性を保つ。
+
+書き込み系（GET 以外）は閲覧専用の環境でルーターの依存が一律 403 にする（#733）。
+エンドポイントごとに if を書かないので、足した POST にも自動で掛かる。
 """
 import asyncio
 import logging
@@ -27,7 +30,28 @@ from collector import (
 )
 from collector_utils import JpxIndustryError
 
-router = APIRouter()
+_READ_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+
+
+def _reject_writes_when_read_only(request: Request) -> None:
+    """閲覧専用の環境（`api.writes_blocked()`）では GET 以外を 403 にする（#733）。
+
+    Render は Supabase の断面を読むだけの窓で、ここを通すと断面だけが前進する。
+    停止系も止める——起動系がすべて 403 ならプロセス内に止める対象のジョブは無く、
+    reset-stuck は CollectionLog を書き換える。ルーター依存は body の検証より先に
+    解かれるので、壊れた body でも 422 ではなく 403 が返る。
+    """
+    if request.method in _READ_METHODS:
+        return
+    if api.writes_blocked():
+        raise HTTPException(
+            403,
+            "この環境は閲覧専用です（Supabase の断面を読むだけ）。"
+            "収集・更新はローカル PC（正本）から実行してください",
+        )
+
+
+router = APIRouter(dependencies=[Depends(_reject_writes_when_read_only)])
 log = logging.getLogger(__name__)
 
 SMART_CHUNK_SIZE     = 200   # スマート収集: 1チャンクあたりの企業数増分
@@ -110,8 +134,6 @@ async def start_collection(
     background_tasks: BackgroundTasks,
     db: Session = Depends(api.get_db),
 ):
-    if api.RENDER_LIGHT_MODE and not req.skip_existing:
-        raise HTTPException(403, "全件収集はローカル環境から実行してください（Render Free プラン制限）")
     if api.jobs.is_running(api._COLLECTION):
         raise HTTPException(400, "収集ジョブが既に実行中です")
     job_type = "incremental" if req.skip_existing else "full"
@@ -298,9 +320,6 @@ async def start_history_collection(
     request: Request, req: HistoryCollectRequest,
     background_tasks: BackgroundTasks,
 ):
-    if api.RENDER_LIGHT_MODE:
-        raise HTTPException(403, "株価履歴収集はローカル環境から実行してください（Render Free プラン制限）")
-
     async def body(on_progress, cancel_check):
         db = SessionLocal()
         try:
@@ -410,9 +429,6 @@ async def start_jquants_collection(
     request: Request, req: JQuantsCollectRequest,
     background_tasks: BackgroundTasks,
 ):
-    if api.RENDER_LIGHT_MODE:
-        raise HTTPException(403, "J-Quants収集はローカル環境から実行してください（Render Free プラン制限）")
-
     async def body(on_progress, cancel_check):
         db = SessionLocal()
         try:

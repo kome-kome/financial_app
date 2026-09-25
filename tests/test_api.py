@@ -84,7 +84,10 @@ class TestEndpoints:
     def test_system_info(self):
         r = client.get("/api/system/info")
         assert r.status_code == 200
-        assert "render_light_mode" in r.json()
+        d = r.json()
+        assert "writes_blocked" in d
+        # 判定の源を1本にする（#733）。旗が抜けた Render で古い方を見る画面を作らせない。
+        assert "render_light_mode" not in d
 
     def test_system_info_exposes_db_target(self):
         """接続先（#481 B-1）。common.js がこれを見てローカル接続時のバッジを出す。"""
@@ -92,6 +95,19 @@ class TestEndpoints:
         assert d["db_target"] in ("prod", "local")
         assert isinstance(d["db_is_local"], bool)
         assert d["db_label"]
+
+    @pytest.mark.parametrize("light, target, expected", [
+        (False, "local", False),
+        (True,  "local", True),    # render.yaml の旗
+        (False, "prod",  True),    # 旗が反映されない Render・ローカルから prod へ繋いだ場合
+    ])
+    def test_system_info_exposes_writes_blocked(self, monkeypatch, light, target, expected):
+        """collection.js が書き込み系ボタンを無効化する判定に使う（#733）。"""
+        import database
+        monkeypatch.setattr(api, "RENDER_LIGHT_MODE", light)
+        monkeypatch.setattr(database, "DB_TARGET", target)
+        d = client.get("/api/system/info").json()
+        assert d["writes_blocked"] is expected
 
     def test_system_info_does_not_leak_the_connection_string(self):
         """ブラウザへ渡る値なので資格情報・ホストを含めない（表示用ラベルだけ返す）。"""
@@ -274,9 +290,21 @@ class TestHeavyPluginRenderBlock:
         r = client.post("/api/plugins/sector_ols/run", json={})
         assert r.status_code == 403
 
+    def test_sector_ols_blocked_when_target_is_prod(self, db, monkeypatch):
+        # 旗が反映されない Render（`RENDER` 検知で prod）でも止める＝sector_ols は
+        # regression_results へ書くので、通すと断面へ書き込む（#733）
+        import database
+        monkeypatch.setattr(api, "RENDER_LIGHT_MODE", False)
+        monkeypatch.setattr(database, "DB_TARGET", "prod")
+        api.app.dependency_overrides[api.get_db] = lambda: db
+        r = client.post("/api/plugins/sector_ols/run", json={})
+        assert r.status_code == 403
+
     def test_sector_ols_not_blocked_when_not_light(self, db, monkeypatch):
         # 通常モードでは heavy ブロックは発火しない（データ無しで実行→400 になる）
+        import database
         monkeypatch.setattr(api, "RENDER_LIGHT_MODE", False)
+        monkeypatch.setattr(database, "DB_TARGET", "local")
         api.app.dependency_overrides[api.get_db] = lambda: db
         r = client.post("/api/plugins/sector_ols/run", json={})
         assert r.status_code != 403

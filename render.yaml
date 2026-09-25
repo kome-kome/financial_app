@@ -31,6 +31,6 @@ services:
       - key: JQUANTS_API_KEY
         sync: false          # J-Quants API キー（任意）  取得: https://jpx-jquants.com/ の「API Keys」
       - key: RENDER_LIGHT_MODE
-        value: "true"        # 重い処理をブロック（OOM・502対策）
+        value: "true"        # 重い処理をブロック（OOM・502対策）＋収集・書き込み系 API も 403（断面へ書かない・#733）
       - key: COOKIE_SECURE
         value: "true"        # 本番(HTTPS)で認証Cookieに Secure 属性を付与。ローカルHTTPでは未設定(false)のまま
