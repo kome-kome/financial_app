@@ -326,8 +326,8 @@ erDiagram
         string  edinet_code   PK "企業（複合PK）"
         int     year          PK "決算年度（複合PK）"
         float   factor           "累積 F。per/pbr/market_cap は ×F、div_yield/nc_ratio は ÷F"
-        float   shares_lag       "期末後分割の年の行の株数の遅れ（既定 1.0）。market_cap/nc_ratio/predicted_market_cap に掛ける・#753"
-        float   dps_lag          "期末後分割の年の行の配当の遅れ（既定 1.0）。div_yield を割る・#753"
+        float   shares_lag       "期末後分割の年の行の株数の遅れ（既定 1.0）。market_cap/nc_ratio/predicted_market_cap に掛ける・#753。sector_ols は issued_shares に掛ける・#758"
+        float   dps_lag          "期末後分割の年の行の配当の遅れ（既定 1.0）。div_yield を割る・#753。sector_ols は dps を割る・#758"
         int     n_events         "F に寄与した企業イベント数（この年より後のものだけ）"
         string  kinds            "寄与イベントの種別（split / composite / reverse / spinoff・昇順カンマ区切り。spinoff は登録表から・#740）"
         datetime computed_at     "全置換した日時"
@@ -598,7 +598,10 @@ erDiagram
 > `market_cap` に掛け、`dps_lag` で `div_yield` を割る（per / pbr には当てない・どの列がどの遅れを使うかの
 > 唯一の源は `corporate_actions.BASIS_LAG_COLUMN`）。`regression_results` の `predicted_market_cap` にも
 > `shares_lag` だけを掛ける（`sector_ols` が生の `market_cap` から作るので、掛けないと補正後の実績と大小が
-> 逆転する）。`nc_ratio` / `z_nc_ratio` は VIEW 内で**補正後の** `market_cap` から計算される
+> 逆転する）。**VIEW を通らない `sector_ols` は読込（`_load_records`）で同じ遅れを当てる**（#758・決定4-12）:
+> 係数表を LEFT JOIN し、XBRL の期末株数に `shares_lag` を掛け（マスタ値・純資産÷BPS の経路には掛けない）、
+> `dps` を `dps_lag` で割る。`market_cap` は生のまま読む（上の `predicted_market_cap` の補正と二重にしない）。
+> `nc_ratio` / `z_nc_ratio` は VIEW 内で**補正後の** `market_cap` から計算される
 > ので別途何もしない。適用した F と遅れは `split_factor` / `split_shares_lag` / `split_dps_lag` 列として
 > 露出する（消費側が重ねて掛けてはいけない）。**`stock_price` は補正しない**ので、補正された行では
 > `per <> stock_price / pl_eps` になる（意図した非対称・[GOTCHAS.md](GOTCHAS.md) 参照）。

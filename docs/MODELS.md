@@ -240,6 +240,7 @@ predicted_market_cap = ŷ_pred / stock_price × market_cap     [百万円]
 
 - 業種内のサンプル数 ≥ `min_samples`（デフォルト: 5社）でなければスキップ
 - 各銘柄に発行株数が必要。`issued_shares`（XBRL 直接値・fill率100%）を優先し、欠損時のみ `bs_total_equity ÷ bs_bps` で推計する（`plugins/utils.shares_outstanding`）。どちらでも株数を求められない銘柄のみ対象外（`bs_bps` 欠損だけでは除外されない）
+- **期末後分割の年の行は基準の遅れを当ててから使う**（#758・ADR-0055 決定4-12）: その行は株価と `pl_eps` / `bs_bps` が分割後の基準なのに、期末の `issued_shares` と（多くの社で）`dps` が分割前のまま残る。`ps_*` の分母（XBRL の期末株数）に株数の遅れ（`split_adjustment_factors.shares_lag`）を掛け、`dps` を配当の遅れ（`dps_lag`）で割って、1行の中の基準を揃える
 - **説明変数の自動ドロップ**: 説明変数は「選択列が1つでも NULL の銘柄を AND 除外」する仕様のため、欠損列を重ねると全銘柄が除外され 0 業種に潰れる。これを2段階で防ぐ:
   1. **全業種一括**（`_select_features`）: 母集団での欠損率が `MAX_FEATURE_MISSING_RATE`（50%）超の列を全業種から除外。結果の `dropped_features` で返し、画面に警告表示する
   2. **業種単位**（`_sector_feature_sets`・パラメータ `sector_missing_rate`・既定 30%）: 業種内欠損率が閾値超の列を**その業種の回帰からのみ**除外する。なお `min_samples` に届かない業種は、欠損の多い列から1つずつ貪欲に除外して届くか試す。結果は業種ごとの `sector_stats[].features` / `sector_stats[].dropped_features` と要約 `sector_dropped_features` で返す

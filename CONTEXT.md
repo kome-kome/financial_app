@@ -110,7 +110,7 @@ _Avoid_: 調整係数（J-Quants の `AdjFactor`＝過去株価に掛ける係�
 _Avoid_: しまむら型（実例の社名で、原因を表さないため）, 株数が追随しない社（株数の側が誤っているように読めるため）, 後発事象の分割（会計の専門語で、意味が伝わりにくいため）
 
 **基準の遅れ (basis lag)**:
-[[期末後分割]]の年の行で、分母の基準が 1 株指標より 1 年遅れて分割後へ移る分を補う倍率（#753・ADR-0055 決定4-11）。その行は 1 株利益・1 株純資産が分割後の基準なのに、期末の発行済株式数（と多くの社で 1 株配当）は分割前のまま残る。[[分割補正係数]] F は「その行より後のイベントの積」なのでこの行を直せず、F を当てると同じ行の正しい per / pbr を壊す。そこで F とは別に、株数の遅れ（`shares_lag`・market_cap / nc_ratio / predicted_market_cap に掛ける）と配当の遅れ（`dps_lag`・div_yield を割る）をその行にだけ持つ。どちらも「比が 1 と倍率のどちらに近いか」で入れるかを決め、株数が既に動いた行（期中の分割）・保存された market_cap が既に分割後の株数で計算された行・分割後の基準へ書き直した配当・同じ年に通期行が 2 本ある社には入れない。実体は `split_adjustment_factors.shares_lag` / `dps_lag` と `financial_metrics.split_shares_lag` / `split_dps_lag`、どの列がどの遅れを使うかの唯一の源は `corporate_actions.BASIS_LAG_COLUMN`。
+[[期末後分割]]の年の行で、分母の基準が 1 株指標より 1 年遅れて分割後へ移る分を補う倍率（#753・ADR-0055 決定4-11）。その行は 1 株利益・1 株純資産が分割後の基準なのに、期末の発行済株式数（と多くの社で 1 株配当）は分割前のまま残る。[[分割補正係数]] F は「その行より後のイベントの積」なのでこの行を直せず、F を当てると同じ行の正しい per / pbr を壊す。そこで F とは別に、株数の遅れ（`shares_lag`・market_cap / nc_ratio / predicted_market_cap に掛ける）と配当の遅れ（`dps_lag`・div_yield を割る）をその行にだけ持つ。どちらも「比が 1 と倍率のどちらに近いか」で入れるかを決め、株数が既に動いた行（期中の分割）・保存された market_cap が既に分割後の株数で計算された行・分割後の基準へ書き直した配当・同じ年に通期行が 2 本ある社には入れない。実体は `split_adjustment_factors.shares_lag` / `dps_lag` と `financial_metrics.split_shares_lag` / `split_dps_lag`、どの列がどの遅れを使うかの唯一の源は `corporate_actions.BASIS_LAG_COLUMN`。VIEW を通らない `sector_ols` は、読込で ps_* の分母（XBRL の期末株数）に株数の遅れを掛け、`dps` を配当の遅れで割る（#758）。
 _Avoid_: 第2の係数（何の基準かが落ちるため）, 当年補正（per / pbr にも当てるものと誤読されやすいため）
 
 **企業イベント台帳 (corporate action ledger)**:

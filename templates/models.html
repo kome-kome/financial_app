@@ -470,7 +470,7 @@ predicted_market_cap = ŷ_pred / stock_price × market_cap   <span class="sym">[
 
   <p>派生 per-share の全選択肢は PL/BS/CF の絶対額カラムを網羅（約37項目、<code>ps_*</code> プレフィックス）。うち <strong>C2 収集列</strong>（研究開発費 <code>ps_rd_expenses</code>・減価償却費 <code>ps_depreciation</code>・有形固定資産合計 <code>ps_ppe_total</code>・投資その他の資産合計 <code>ps_investments_other_assets</code>・特別損益 <code>ps_extraordinary_income</code>/<code>ps_extraordinary_loss</code>）も per-share 派生として選択可能。ただし欠損が広い（特別損益は JGAAP 専用・研究開発費は非研究開発企業で null）ため<strong>デフォルト10項目には含めず</strong>、研究開発集約度・資本集約度を見たい業種で明示選択する運用。</p>
 
-  <p><strong>実行条件:</strong> 業種最小サンプル数（デフォルト: 5社）を満たさない業種はスキップ。各銘柄に発行株数が必要で、<code>issued_shares</code>（XBRL 直接値・fill率100%）を優先し、欠損時のみ <code>bs_total_equity ÷ bs_bps</code> で推計する。どちらでも求められない銘柄のみ対象外（<code>bs_bps</code> 欠損だけでは除外されない）。</p>
+  <p><strong>実行条件:</strong> 業種最小サンプル数（デフォルト: 5社）を満たさない業種はスキップ。各銘柄に発行株数が必要で、<code>issued_shares</code>（XBRL 直接値・fill率100%）を優先し、欠損時のみ <code>bs_total_equity ÷ bs_bps</code> で推計する。どちらでも求められない銘柄のみ対象外（<code>bs_bps</code> 欠損だけでは除外されない）。期末後分割の年の行は、株価と 1 株指標が分割後の基準なのに期末の <code>issued_shares</code> と（多くの社で）<code>dps</code> が分割前のまま残るので、株数に基準の遅れ（<code>shares_lag</code>）を掛け、<code>dps</code> を配当の遅れ（<code>dps_lag</code>）で割ってから使う（#758）。</p>
 
   <div class="info-box">
     <strong>構造的な NULL は「欠測」ではなく「該当なし」として扱う（ADR-0027・#434）:</strong>

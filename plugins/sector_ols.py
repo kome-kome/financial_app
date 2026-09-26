@@ -10,8 +10,9 @@
   説明変数 = per-share [円/株] のみ。Ohlsonモデル拡張型。
     - DB永続 per-share: pl_eps / bs_bps / dps
     - 派生 per-share (ps_*): PL/BS/CFの絶対額を発行株数で割って実行時計算
-    - 発行株数 = bs_total_equity / bs_bps（utils.shares_outstanding）
-    - bs_bps が NULL/0 の銘柄は株数推計不能のため自動的に対象外
+    - 発行株数 = utils.shares_outstanding（XBRL期末値 → J-Quantsマスタ → 純資産÷BPS）
+    - 株数をどの経路でも求められない銘柄は自動的に対象外
+    - 期末後分割の年の行は、株数と dps に係数表の基準の遅れを当ててから使う（#758・_load_records）
 
 前処理: winsorize(p1-p99) → z-score正規化（業種内） → OLS / Ridge
 """
@@ -416,28 +417,47 @@ class SectorOLSPlugin(AnalysisPlugin):
         """
         from sqlalchemy import func as _sqla_func
 
-        from database import Company, FinancialRecord, latest_year_subq
+        from database import Company, FinancialRecord, SplitAdjustmentFactor, latest_year_subq
 
         # 転送は sector_load_fields(features) の列だけ（#482）。戻りは ORM インスタンス
         # ではなく _SectorRec なので、絞っていない列を後から読むと AttributeError で露見する。
         fields = sector_load_fields(features)
         rec_cls = namedtuple("_SectorRec", fields)
+        # 期末後分割の年の行は、株価と1株指標が分割後の基準なのに、期末の発行済株式数と（多くの社で）
+        # 1株配当が分割前のまま残る（#753）。そのままだと ps_* と dps が分割比ぶん大きく、gap_ratio が
+        # 割安側へ寄る（#758）。VIEW を通らないので、VIEW と同じ係数表の遅れをここで当てる
+        # （ADR-0055 決定4-12）。向きは VIEW が market_cap（株価 × 株数）と div_yield（配当 ÷ 株価）へ
+        # 当てるものと同じで、唯一の源 corporate_actions.BASIS_LAG_COLUMN / COLUMN_DIRECTION との
+        # 一致は tests/test_sector_ols.py::TestBasisLagAtLoad が照合する。**F は当てない**——最新行は
+        # F=1 で、時点再現（sector_gap_asof）は目的変数の月末株価へ F を掛けて基準を揃えている。
+        shares_lag = _sqla_func.coalesce(SplitAdjustmentFactor.shares_lag, 1.0)
+        dps_lag = _sqla_func.coalesce(SplitAdjustmentFactor.dps_lag, 1.0)
         cols = []
         for f in fields:
             if f == "issued_shares":
                 # shares_outstanding の第2経路（record.company.issued_shares・#462）は
                 # リレーション経由なので Row では消える。SQL 側で COALESCE して優先順位を
                 # 保つ。副産物として NULL 社ごとに companies を引く N+1 が JOIN 1本になる。
-                cols.append(_sqla_func.coalesce(FinancialRecord.issued_shares,
+                # 遅れは XBRL の期末値にだけ掛ける——マスタ値は最新の株数、純資産 ÷ BPS（第3経路）は
+                # BPS と同じ基準なので、どちらも遅れていない。
+                cols.append(_sqla_func.coalesce(FinancialRecord.issued_shares * shares_lag,
                                                 Company.issued_shares).label("issued_shares"))
+            elif f == "dps":
+                cols.append((FinancialRecord.dps / dps_lag).label("dps"))
             else:
+                # market_cap は生のまま読む。VIEW が predicted_market_cap（予測株価 ÷ 株価 × この値）へ
+                # shares_lag を掛ける（決定4-11）ので、ここで直すと二重になる。
                 cols.append(getattr(FinancialRecord, f))
 
         def _base_query():
             return (db.query(*cols)
                       .select_from(FinancialRecord)
                       .outerjoin(Company,
-                                 FinancialRecord.edinet_code == Company.edinet_code))
+                                 FinancialRecord.edinet_code == Company.edinet_code)
+                      # 係数表は F か遅れが 1.0 でない行だけを持つ（VIEW と同じ LEFT JOIN＋COALESCE）。
+                      .outerjoin(SplitAdjustmentFactor,
+                                 (SplitAdjustmentFactor.edinet_code == FinancialRecord.edinet_code) &
+                                 (SplitAdjustmentFactor.year == FinancialRecord.year)))
 
         # 母集団は **通期（annual）のみ**（#436）。同一 (edinet_code, year) に H1 が
         # 併存すると同じ企業が2行で回帰に入り、しかも H1 のフロー項目（売上・利益・CF）は
