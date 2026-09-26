@@ -161,3 +161,41 @@ class TestRunComparison:
         res = _run()
         assert all(m["available"] is False and m["reason"] == "not_registered"
                    for m in res["models"])
+
+
+class TestSignificanceCorrection:
+    """画面の有意性マトリクスは全ペアで Bonferroni を掛ける（#741・ADR-0063）。
+
+    以前は `significance_matrix` の alpha が判定に届かず、15 組を補正なしの 95% で ▲/▼ 判定していた。
+    """
+
+    @staticmethod
+    def _exec_with_ic(levels):
+        yms = [f"2020-{m:02d}" for m in range(1, 9)]
+
+        async def _exec(p, params, db):
+            return {"oof_backtest": {
+                "rank_ic": {"mean": levels[p.name], "std": 0.0, "n": len(yms)},
+                "rank_ic_by_period": {ym: levels[p.name] for ym in yms},
+            }}
+        return _exec
+
+    def test_all_pairs_are_bonferroni_corrected(self, monkeypatch):
+        levels = {n: 0.02 * (i + 1) for i, n in enumerate(_MODELS)}
+        _patch(monkeypatch, {n: _fake_plugin(n) for n in _MODELS}, self._exec_with_ic(levels))
+        sm = _run()["significance_matrix"]
+        n_pairs = len(_MODELS) * (len(_MODELS) - 1) // 2
+        assert sm["correction"] == "bonferroni"
+        assert sm["n_tests"] == n_pairs
+        assert sm["family_alpha"] == 0.05
+        assert sm["alpha"] == pytest.approx(0.05 / n_pairs)
+        assert len(sm["pairs"]) == n_pairs
+
+    def test_subset_of_two_models_keeps_alpha(self, monkeypatch):
+        # CLI の `--models a,b`（退役判断の実測・#570）は1組＝補正しても α 0.05 のまま。
+        two = _MODELS[:2]
+        levels = {n: 0.02 * (i + 1) for i, n in enumerate(_MODELS)}
+        _patch(monkeypatch, {n: _fake_plugin(n) for n in _MODELS}, self._exec_with_ic(levels))
+        sm = _run(only_models=list(two))["significance_matrix"]
+        assert sm["n_tests"] == 1
+        assert sm["alpha"] == pytest.approx(0.05)
