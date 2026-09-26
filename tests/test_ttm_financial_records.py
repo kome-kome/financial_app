@@ -13,9 +13,11 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+import corporate_actions as C  # noqa: E402
 import ttm_composite as T  # noqa: E402
 from database import (FinancialRecord, StockPriceWeekly, TtmFinancialRecord,  # noqa: E402
-                      replace_ttm_financial_records, ttm_financial_columns)
+                      replace_ttm_financial_records, ttm_financial_columns,
+                      upsert_jquants_adj_factor_events)
 
 
 def seed(db, *, ec="E00001", split=False):
@@ -98,6 +100,38 @@ class TestRebuild:
             T.rebuild_ttm_financial_records(db)
         db.rollback()
         assert db.query(TtmFinancialRecord).count() == 1
+
+
+class TestWithheldOfficialEvent:
+    """保留の窓（#652）に入る公式イベントは TTM の分割窓にならない（#739）。
+
+    E34165 型: 公式だけが権利落ち日より前へ理論係数 2/3 を掛け、DB（実約定値）は調整しない。
+    窓にすると、提出日がイベントより前の TTM 行すべてに F=1.5 が付く（どの値も妥当な株価指標
+    なのでエラーは出ない）。登録は架空の社で行う（実登録は根拠の Issue で外されうる）。
+    """
+    EC = "E99999"
+    RIGHTS = 1.0 / 1.5
+
+    @pytest.fixture
+    def registered(self, monkeypatch):
+        monkeypatch.setitem(C.WITHHELD_OFFICIAL_ADJUSTMENTS, self.EC,
+                            (("2026-09-01", "2026-12-31", self.RIGHTS, "テスト用の登録・#739"),))
+
+    def _rebuild_with_official(self, db, event_date):
+        seed(db, ec=self.EC)
+        upsert_jquants_adj_factor_events(db, [{"edinet_code": self.EC, "event_date": event_date,
+                                               "adj_factor": self.RIGHTS, "jq_code": None}])
+        db.commit()
+        T.rebuild_ttm_financial_records(db)
+        (r,) = db.query(TtmFinancialRecord).all()
+        return r
+
+    def test_withheld_event_leaves_the_factor_at_one(self, db, registered):
+        assert self._rebuild_with_official(db, "2026-09-11").split_factor == 1.0
+
+    def test_event_outside_the_window_still_applies(self, db, registered):
+        """窓の外の公式イベントは今までどおり F になる（外し方が広すぎない）。"""
+        assert self._rebuild_with_official(db, "2027-01-05").split_factor == pytest.approx(1.5)
 
 
 class TestTable:

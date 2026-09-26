@@ -1197,6 +1197,78 @@ class TestLedger:
         assert [(w.canonical, w.source) for w in ledger.windows_by_company()["E00006"]] == [
             (None, "awaiting")]
 
+    # 保留の窓（#652）の仕組みは架空の社を登録して確かめる。実登録（E34165）は根拠の Issue で
+    # 外されうるので、実登録の確認は `tests/test_repair_splits_from_jquants.py` の1本に閉じ込めてある。
+    WITHHELD_EC = "E99999"
+    RIGHTS = 1.0 / 1.5      # 目的株式 0.5株の予約権を全員が行使したときの理論係数（E34165 の形）
+
+    def _register_withheld(self, monkeypatch):
+        monkeypatch.setitem(C.WITHHELD_OFFICIAL_ADJUSTMENTS, self.WITHHELD_EC,
+                            (("2026-09-01", "2026-12-31", self.RIGHTS, "テスト用の登録・#739"),))
+
+    def test_withheld_event_reaches_neither_the_detector_nor_the_ttm_windows(self, monkeypatch):
+        """保留の窓に入る公式イベントは、F の検出にも TTM の窓にも届かない（#739）。
+
+        以前は修復スクリプトだけが登録を読み、TTM は公式イベントを素通しで窓にしていた。取り込みが
+        イベントに届いた晩から、その社の過去の TTM 行すべてに F=1.5 が付く（どの値も妥当な株価指標
+        なのでエラーは出ない）。同じ社でも窓の外のイベントは今までどおり両方へ届く。
+        """
+        self._register_withheld(monkeypatch)
+        seen = self._spy(monkeypatch)
+        official = {self.WITHHELD_EC: [("2026-09-11", self.RIGHTS), ("2027-01-05", 0.5)],
+                    "E00001": [("2020-10-01", 0.5)]}
+        ledger = C.compute_ledger(self._split_rows(), official=official, coverage={}, series={})
+
+        kept = {self.WITHHELD_EC: [("2027-01-05", 0.5)], "E00001": [("2020-10-01", 0.5)]}
+        assert seen["official_events"] == ledger.official == kept
+        assert [(w.end.isoformat(), w.source)
+                for w in ledger.windows_by_company()[self.WITHHELD_EC]] == [("2027-01-05", "official")]
+        wh = ledger.stats["withheld_official"]
+        assert wh["n_withheld"] == 1
+        (r,) = wh["withheld"]
+        assert (r["edinet_code"], r["date"]) == (self.WITHHELD_EC, "2026-09-11")
+        assert r["factor"] == pytest.approx(self.RIGHTS) and "#739" in r["reason"]
+        assert len(official[self.WITHHELD_EC]) == 2          # 渡した辞書は書き換えない
+
+    def test_company_left_without_official_events_is_as_if_it_had_none(self, monkeypatch):
+        """窓の中のイベントしか持たない社は、公式イベントを持たない社と同じ扱いになる。"""
+        self._register_withheld(monkeypatch)
+        ledger = C.compute_ledger(self._split_rows(), coverage={}, series={},
+                                  official={self.WITHHELD_EC: [("2026-09-11", self.RIGHTS)]})
+        assert ledger.official == {}
+        assert self.WITHHELD_EC not in ledger.windows_by_company()
+        assert ledger.stats["n_official_companies"] == 0
+        assert ledger.stats["withheld_official"]["n_withheld"] == 1
+
+    def test_nothing_withheld_is_still_counted(self):
+        """外すものが無い晩も件数を持つ（夜間ログは 0 件の行を出す）。"""
+        ledger = C.compute_ledger(self._split_rows(), **self.NO_INPUT)
+        assert ledger.stats["withheld_official"] == {
+            "n_registered_companies": len(C.WITHHELD_OFFICIAL_ADJUSTMENTS),
+            "n_withheld": 0, "withheld": []}
+
+    def test_withheld_event_reads_as_absent_to_the_first_path(self, monkeypatch):
+        """外した公式イベントは検出器から見て「無かった」ことになる（#668 との関係・#739）。
+
+        予約権が行使されて株数が 1.5 倍・1株純資産が 2/3 になった年は、第1経路には分割と同じ形に
+        見える。公式のバーの受信区間がイベント窓を覆っていれば、公式の不在として**補正しない側へ**
+        外れる。DB の株価は遡及調整されていない＝F を掛けないという登録の意味と同じ向き。
+        登録が無ければ、窓の中の公式イベントが第1経路を裏付けて F=1.5 が入る（今までどおり）。
+        """
+        rows = [row(2026, 1000.0, 300.0, ec=self.WITHHELD_EC),
+                row(2027, 1500.0, 200.0, ec=self.WITHHELD_EC)]
+        inputs = dict(official={self.WITHHELD_EC: [("2026-09-11", self.RIGHTS)]},
+                      coverage={self.WITHHELD_EC: [("2026-01-05", "2027-06-30")]}, series={})
+
+        unregistered = C.compute_ledger(rows, **inputs)
+        assert unregistered.factors[(self.WITHHELD_EC, 2026)] == pytest.approx(1.5)
+
+        self._register_withheld(monkeypatch)
+        ledger = C.compute_ledger(rows, **inputs)
+        assert ledger.factor_rows() == []
+        assert [r["edinet_code"] for r in ledger.stats["official_absence"]["rejected"]] == [
+            self.WITHHELD_EC]
+
 
 
 def test_pure_blocks_do_not_import_heavy_modules_at_top_level():

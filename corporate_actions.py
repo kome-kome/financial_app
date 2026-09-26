@@ -25,7 +25,8 @@ F や分割窓を得る道は2つだけにする。
   入力は**すべてキーワードで必須**にしてある（1つ渡し忘れても検出はもっともらしい結果を返す）。
 
 **公式イベントは台帳が1回だけ読み、F の検出と TTM の窓の両方に同じ値を使う。** 公式イベントの
-見え方を変えるとき（例: 保留の窓・#739）は `compute_ledger` の1か所を変えれば両方に効く。
+見え方を変えるときは `compute_ledger` の1か所を変えれば両方に効く——保留の窓（#652）に入る
+公式イベントは、そこで外してから両方へ渡す（#739）。
 
 ## 歪みの向きは列によって逆になる
 
@@ -157,6 +158,11 @@ def before_spinoff_ex_date(edinet_code: str, trade_date: str) -> bool:
 # 変わりやすく（延期・差止め）、日付を誤って換算すると残った段差を公式イベントが「説明」して
 # **誤った係数が書き込まれる**。止める向きなら、誤登録で起きるのは「書かない」ことだけ。
 #
+# **台帳も同じ登録を読む**（#739）。`compute_ledger` は窓に入る公式イベントを F の検出と TTM の
+# 分割窓の両方から外す——DB の株価が遡及調整されていなければ、1株指標との基準の不一致も起きて
+# おらず、F を掛ける理由が無い。以前は修復スクリプトだけがこの表を読み、TTM は公式イベントを素通しで
+# 窓にしていたので、イベントが catchup の取得範囲に届いた晩から同社の過去の TTM 行に F が付くはずだった。
+#
 # **鍵は社ではなく「社＋日付の窓」**（ADR-0053 の採らなかった案C「社の名簿」にしない）。窓の外で
 # 起きた公式イベントは今までどおり判定される。窓は日程の不確かさを吸収するために広く取る——
 # 広いほど書かない側に倒れ、窓の中の本物の分割も止まるが、レポートに理由付きで出るので黙らない。
@@ -178,7 +184,9 @@ def withheld_official_events(edinet_code: str, events: list) -> list:
     """公式イベント `[(日付, AdjFactor)]` のうち、登録済みの窓に入るものを返す（#652）。
 
     戻り値は `[(日付, AdjFactor, 理論係数, 根拠)]`（日付順）。登録が無い社・窓の外なら `[]`。
-    1件でも返れば、その社の補正は**書かない**（`repair_splits_from_jquants.judge_company`）。
+    読み手は2つある。修復スクリプトは1件でも返ればその社の補正を**書かない**
+    （`repair_splits_from_jquants.judge_company`）。台帳は返ったイベントを F の検出と TTM の窓から
+    外す（`compute_ledger`・#739）。
     """
     out = []
     for d, factor in events:
@@ -548,7 +556,12 @@ def detect_events(rows: Sequence[AnnualRow], *,
     無ければ採らず `stats["official_absence"]["rejected"]` に残す。**区間が無い社・窓がはみ出す社・
     窓の中に公式イベントがある社は今日までどおり採る**——`jquants_adj_factor_events` に行が無いだけでは
     「分割は無かった」と読めない（決定4-5）ので、読めるのは社単位で取得した記録が窓を覆うときだけ。
-    公式にある事象が分割でなくても（#652 の新株予約権無償割当）、この規則は補正を残す向きにしか効かない。
+    公式にある事象が分割でなくても、登録が無ければこの規則は補正を残す向きにしか効かない。
+    **保留の窓（`WITHHELD_OFFICIAL_ADJUSTMENTS`・#652 の新株予約権無償割当）に登録した公式イベントは、
+    台帳がここへ渡す前に外す**（#739）。その社では「窓の中に公式イベントが無い」と読まれ、区間が窓を
+    覆えば第1経路を外す向きに効く——登録の意味（DB の株価は遡及調整されていない＝F を掛けない）と
+    同じ向きである。夜間ログでは「公式に分割が無い」の行として出るので、同じ晩の「保留の窓で外した
+    公式イベント」の行と合わせて読む。
     **第2経路には掛けない**——期末後・提出前の分割を1株指標だけが先取りする社を拾う経路で、効力日が
     イベント窓の外に出うる。第1経路が不在で落としたペアを第2経路が独立に拾うことは妨げない（純資産比
     チェックと同じ規則）。測定器の CLI には渡さない（渡すと偽陽性が突合から消え、偽陽性率を測れない）。
@@ -1104,9 +1117,9 @@ def factor_after(windows: Sequence[SplitWindow], filing_date: date) -> float:
 class Ledger:
     """一晩ぶんの企業イベントの知識。`build_ledger` / `compute_ledger` だけが作る。
 
-    `official` は検出器へ渡したものと**同じ**公式イベントで、TTM の分割窓もここから作る。
-    読み手ごとに読み直さないのは、片方の読み手だけが登録表（保留の窓など）を通る状態を
-    作らないため（#739）。
+    `official` は検出器へ渡したものと**同じ**公式イベント（保留の窓に入るものを外したあと・#739）で、
+    TTM の分割窓もここから作る。読み手ごとに読み直さないのは、片方の読み手だけが登録表
+    （保留の窓など）を通る状態を作らないため。
     """
     rows: list          # AnnualRow（検出器の入力＝通期行）
     events: list        # ShareEvent（検出したイベント）
@@ -1157,6 +1170,26 @@ class Ledger:
         }
 
 
+def _without_withheld(official: Mapping[str, Sequence[tuple[str, float]]]) -> tuple[dict, list]:
+    """公式イベントから、保留の窓（`WITHHELD_OFFICIAL_ADJUSTMENTS`・#652）に入るものを外す（#739）。
+
+    戻り値は `(残した公式イベント, 外した一覧)`。外した結果イベントが0件になった社は辞書から消す
+    （公式イベントを持たない社と同じ扱い）。一覧の形は修復スクリプトの `judge_company` が出す
+    `withheld` に揃え、社コードを足したもの。
+    """
+    kept: dict = {}
+    withheld: list = []
+    for ec, evs in official.items():
+        held = withheld_official_events(ec, list(evs))
+        days = {d for d, _, _, _ in held}
+        rest = [e for e in evs if str(e[0])[:10] not in days]
+        if rest:
+            kept[ec] = rest
+        withheld += [{"edinet_code": ec, "date": d, "factor": f, "expected_factor": x, "reason": r}
+                     for d, f, x, r in held]
+    return kept, withheld
+
+
 def compute_ledger(rows: Sequence[AnnualRow], *,
                    official: Mapping[str, Sequence[tuple[str, float]]],
                    coverage: Mapping[str, Sequence[Sequence[str]]],
@@ -1169,7 +1202,8 @@ def compute_ledger(rows: Sequence[AnnualRow], *,
     空で渡すのは、その入力が本当に無いときだけにする。
 
     - `official`: 公式イベント `{edinet_code: [(日付, AdjFactor), ...]}`。翌年の行が無い第2経路の
-      倍率（#661）と、第1経路を公式の不在で外す判定（#668）に使い、TTM の分割窓にもなる
+      倍率（#661）と、第1経路を公式の不在で外す判定（#668）に使い、TTM の分割窓にもなる。
+      **保留の窓（#652）に入るものはここで外し**（#739）、外した一覧を `stats["withheld_official"]` に残す
     - `coverage`: 公式のバーを受け取った区間 `{edinet_code: [(最初のバー, 最後のバー), ...]}`。
       **併合前の生の区間でよい**（ここで `merge_spans` を通す＝併合の唯一の源）
     - `series`: 週次株価の系列（`load_price_series`）。上場廃止をまたぐペアを比べないため（#672）
@@ -1177,15 +1211,26 @@ def compute_ledger(rows: Sequence[AnnualRow], *,
       比べるときだけ（`scripts/measure_split_bias_oof.py`）——呼び出し側が既定を書き写すと乖離する
     """
     rows = list(rows)
-    official = dict(official)
+    # **保留の窓（#652）に入る公式イベントは、検出器にも TTM の窓にも渡さない**（#739）。公式だけが
+    # 当てる調整（新株予約権の無償割当など）で、DB の株価（実約定値）は遡及調整されていない＝F を
+    # 掛ける理由が無い。外すのはここ1か所——この `official` を検出器と `Ledger` の両方へ渡すので、
+    # 片方の読み手だけが登録を通る形にならない。
+    official, withheld = _without_withheld(official)
     merged = {ec: merge_spans(sp) for ec, sp in coverage.items()}
     kw = {} if bps_path is None else {"bps_path": bps_path}
     events, stats = detect_events(rows, official_events=official, price_series=series,
                                   official_coverage=merged, **kw)
     # use_canonical=True（既定）＝定番比へ寄せられなかった `unsnapped` を積から外す。
     factors = cumulative_factors(rows, events)
-    # 夜間ログの「公式イベントを持つ社」の数。検出器の stats には無いのでここで足す。
+    # 夜間ログの「公式イベントを持つ社」の数（保留の窓を外したあと＝検出器が見た社数）。
+    # 検出器の stats には無いのでここで足す。
     stats["n_official_companies"] = len(official)
+    # 保留の窓で外した公式イベント。外したものがどこにも届かないので、ここにしか残らない。
+    stats["withheld_official"] = {
+        "n_registered_companies": len(WITHHELD_OFFICIAL_ADJUSTMENTS),
+        "n_withheld": len(withheld),
+        "withheld": withheld,
+    }
     return Ledger(rows=rows, events=events, stats=stats, factors=factors, official=official)
 
 
@@ -1399,4 +1444,14 @@ def _log_split_adjustment_stats(n: int, stats: dict) -> int:
              oa.get("n_rejected", 0), oa.get("n_companies_with_record", 0))
     for r in oa.get("rejected") or ():
         log.info("分割補正係数: 公式に分割が無い第1経路 %s", r)
+    # 保留の窓（#652）で外した公式イベントも**毎晩出す**（#739）。外したものは F の検出にも TTM の
+    # 分割窓にも届かない。登録した社のイベントが catchup の取得範囲に届くまでは 0 件が正常で、届いた
+    # あとに 0 件へ戻ったら、登録の窓か台帳の読み込みが壊れている。同じ社の第1経路が上の「公式に分割が
+    # 無い」で外れ、その窓にこの行の日付が入っていれば、外したのはこの登録である（`detect_events` の
+    # #668 の段落）。
+    wh = stats.get("withheld_official") or {}
+    log.info("分割補正係数: 保留の窓で外した公式イベント %d 件（登録 %d 社）",
+             wh.get("n_withheld", 0), wh.get("n_registered_companies", 0))
+    for r in wh.get("withheld") or ():
+        log.info("分割補正係数: 保留の窓で外した公式イベント %s", r)
     return n
