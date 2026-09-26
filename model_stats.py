@@ -19,6 +19,13 @@
 
 決定性: すべての乱数は `random.Random(seed)`（既定 seed=0）で再現可能。
 テスト・本番・比較ビューで同じ入力 → 同じ p 値／CI（フレーク無し）。
+
+有意判定の規則（ADR-0063・#741）:
+  「p 値 < α」かつ「同じ α の CI が 0 を跨がない」。p の規則は CI の規則より厳しい側にあるので
+  実用上は「p < α」と同じで、CI 側は p の丸めの端で「有意なのに表示の CI が 0 を含む」を防ぐ安全装置。
+  昇格・退役の手続き（ADR-0021/0028/0044）とゲート系スクリプトが p と補正後 α で判定しているのに
+  揃える。複数の組を同時に検定するときは `paired_family_significance` が組数から補正後 α を出す——
+  `paired_ic_significance` を並べて既定の alpha のまま `significant` を読むと補正なしになる。
 """
 from __future__ import annotations
 
@@ -31,6 +38,10 @@ import statistics
 DEFAULT_N_BOOT = 2000
 DEFAULT_AVG_BLOCK = 3
 DEFAULT_SEED = 0
+
+# 多重比較の補正（ADR-0063）。bonferroni = 家族の α を実際に検定した組数で割る。
+# none = 渡された alpha をそのまま1検定あたりの α として使う（呼び出し元が補正済みの α を持つ場合）。
+CORRECTIONS = ("bonferroni", "none")
 
 
 def _percentile(sorted_vals: list[float], q: float) -> float:
@@ -78,7 +89,8 @@ def bootstrap_mean_ci(series: list[float], *, n_boot: int = DEFAULT_N_BOOT,
       {mean, ci_lo, ci_hi, p_value, n, n_boot} または n<2 で None。
     p_value: 両側。各裾を (count+1)/(n_boot+1) で推定（Davison-Hinkley フロア）した
              小さい方×2・[0,1] クランプ。全リサンプル同符号でも 0 にならず p≥2/(n_boot+1)。
-             系列相関を保存するため素朴 t より保守的。有意判定は CI 基準（下記）で別途行う。
+             系列相関を保存するため素朴 t より保守的。p は alpha に依存しない（CI だけが alpha で決まる）。
+             有意判定は `_is_significant`（p と同じ alpha の CI の両方）で別途行う。
     """
     n = len(series)
     if n < 2:
@@ -95,7 +107,7 @@ def bootstrap_mean_ci(series: list[float], *, n_boot: int = DEFAULT_N_BOOT,
     # Davison-Hinkley フロア (count+1)/(n_boot+1)（Monte-Carlo p 値の標準推定）で
     # p を厳密 0 にしない（全リサンプル同符号でも p≥2/(n_boot+1)）。有限回数の
     # リサンプルで「H0 下の確率ゼロ」を主張するのは反保守的で、本モジュールの
-    # 「paired-t より保守的」という趣旨に反するため。有意判定は CI 基準で別途行う。
+    # 「paired-t より保守的」という趣旨に反するため。有意判定は `_is_significant` で別途行う。
     b_le0 = sum(1 for x in boot_means if x <= 0.0)
     p_lower = (b_le0 + 1) / (n_boot + 1)               # H0: mean<=0 片側
     p_upper = (n_boot - b_le0 + 1) / (n_boot + 1)       # H0: mean>=0 片側
@@ -110,7 +122,39 @@ def bootstrap_mean_ci(series: list[float], *, n_boot: int = DEFAULT_N_BOOT,
     }
 
 
+def p_floor(n_boot: int = DEFAULT_N_BOOT) -> float:
+    """`bootstrap_mean_ci` が返しうる p の下限（Davison-Hinkley フロア・返り値と同じ4桁丸め）。
+
+    有意は「p < α」なので、1検定あたりの α がこれ以下だとどの組も有意になりえない。
+    """
+    return round(2.0 / (n_boot + 1), 4)
+
+
+def ci_level_label(alpha: float) -> str:
+    """CI の水準を表示用の文字列にする（0.05 → '95%'、0.05/15 → '99.67%'）。
+
+    CI は判定と同じ alpha で作るので、補正後は 95% ではない。表示側に「95%」を焼き付けない。
+    """
+    return f"{100 * (1 - alpha):.2f}".rstrip("0").rstrip(".") + "%"
+
+
+def _common_periods(ic_by_period_a: dict, ic_by_period_b: dict) -> list:
+    """ペアリングに使う共通 test 期（昇順）。2期未満の組は検定しない（検定数にも数えない）。"""
+    return sorted(set(ic_by_period_a) & set(ic_by_period_b))
+
+
+def _is_significant(stats: dict, alpha: float) -> bool:
+    """有意判定の唯一の規則（ADR-0063）: p < alpha かつ 同じ alpha の CI が 0 を跨がない。
+
+    p は返り値と同じ丸め後の値で比べる（画面・スクリプトが並べる数字と同じもので判定する）。
+    p の規則は CI の規則より厳しい側にあり、実用上は p < alpha と同値。CI 側の条件は、p の
+    4桁丸めの端で「有意なのに表示の CI が 0 を含む」が起きないための安全装置。
+    """
+    return bool(stats["p_value"] < alpha and (stats["ci_lo"] > 0 or stats["ci_hi"] < 0))
+
+
 def paired_ic_significance(ic_by_period_a: dict, ic_by_period_b: dict, *,
+                           alpha: float = 0.05,
                            n_boot: int = DEFAULT_N_BOOT,
                            avg_block: float = DEFAULT_AVG_BLOCK,
                            seed: int = DEFAULT_SEED) -> dict | None:
@@ -118,53 +162,104 @@ def paired_ic_significance(ic_by_period_a: dict, ic_by_period_b: dict, *,
 
     ic_by_period_* = {test_ym: ic}（oof_backtest の rank_ic_by_period）。
     共通する test_ym のみで差系列を作る（学習窓が揃わないモデル同士でも fair）。
-    返り値は bootstrap_mean_ci に n_common を足したもの、または共通期<2 で None。
+    alpha: **この1検定**の有意水準。CI は (1−alpha) の区間になり、`significant` も同じ alpha で
+           判定する。複数の組を同時に検定するなら補正後の値が要る——`paired_family_significance`
+           が組数から出す（既定の 0.05 のまま並べると補正なし・#741）。
+    返り値は bootstrap_mean_ci に n_common・alpha・significant を足したもの、または共通期<2 で None。
     """
-    common = sorted(set(ic_by_period_a) & set(ic_by_period_b))
+    common = _common_periods(ic_by_period_a, ic_by_period_b)
     if len(common) < 2:
         return None
     diffs = [ic_by_period_a[ym] - ic_by_period_b[ym] for ym in common]
-    stats = bootstrap_mean_ci(diffs, n_boot=n_boot, avg_block=avg_block, seed=seed)
+    stats = bootstrap_mean_ci(diffs, n_boot=n_boot, avg_block=avg_block, seed=seed, alpha=alpha)
     if stats is None:
         return None
     stats["n_common"] = len(common)
-    stats["significant"] = bool(stats["ci_lo"] > 0 or stats["ci_hi"] < 0)
+    stats["alpha"] = alpha
+    stats["significant"] = _is_significant(stats, alpha)
     return stats
 
 
+def paired_family_significance(pairs: dict, *, alpha: float = 0.05,
+                               correction: str = "bonferroni",
+                               n_boot: int = DEFAULT_N_BOOT,
+                               avg_block: float = DEFAULT_AVG_BLOCK,
+                               seed: int = DEFAULT_SEED) -> dict:
+    """同時に検定する組の家族へ多重比較の補正を掛け、各組を `paired_ic_significance` で判定する。
+
+    pairs = {key: (ic_by_period_a, ic_by_period_b)}（差は a − b）。
+    correction="bonferroni": 1検定あたりの α = alpha / m。m は**実際に検定した組の数**で、共通期が
+      2 未満で検定できない組は数えない（ADR-0041 §5「検定数は実際に走らせた数から機械が出す」）。
+    correction="none": alpha をそのまま1検定あたりの α として使う（呼び出し元が補正済みの α を持つ場合）。
+
+    返り値: {"alpha": 1検定あたりの α（判定と CI に使った値）, "family_alpha": alpha,
+             "correction", "n_tests": m, "p_floor",
+             "alpha_below_p_floor": 1検定あたりの α が p の下限以下＝どの組も有意になりえない,
+             "results": {key: paired_ic_significance の返り値 or None}}
+    """
+    if correction not in CORRECTIONS:
+        raise ValueError(f"correction は {CORRECTIONS} のいずれか: {correction!r}")
+    testable = {key for key, (a, b) in pairs.items() if len(_common_periods(a, b)) >= 2}
+    n_tests = len(testable)
+    per_test = alpha / n_tests if (correction == "bonferroni" and n_tests) else alpha
+    results = {
+        key: (paired_ic_significance(a, b, alpha=per_test, n_boot=n_boot,
+                                     avg_block=avg_block, seed=seed)
+              if key in testable else None)
+        for key, (a, b) in pairs.items()
+    }
+    floor = p_floor(n_boot)
+    return {
+        "alpha": per_test,
+        "family_alpha": alpha,
+        "correction": correction,
+        "n_tests": n_tests,
+        "p_floor": floor,
+        "alpha_below_p_floor": per_test <= floor,
+        "results": results,
+    }
+
+
 def significance_matrix(ic_by_period_by_model: dict, *, alpha: float = 0.05,
+                        correction: str = "bonferroni",
                         n_boot: int = DEFAULT_N_BOOT,
                         avg_block: float = DEFAULT_AVG_BLOCK,
                         seed: int = DEFAULT_SEED) -> dict:
-    """全モデルペアの IC 差有意性マトリクス。
+    """全モデルペアの IC 差有意性マトリクス（多重比較の補正込み・ADR-0063）。
 
     ic_by_period_by_model = {model_key: {test_ym: ic}}（IC 系列を持つモデルのみ）。
+    alpha と correction の意味は `paired_family_significance` と同じ（既定は全ペアで Bonferroni）。
     返り値: {"models": [key,...], "pairs": {"A|B": {mean_diff, ci_lo, ci_hi, p_value,
-             significant, n_common, better}}}。better = 差が有意なとき優位なモデルキー、
-             有意でなければ None。順序対の重複を避け a<b の上三角のみ格納。
+             significant, n_common, better}}, "alpha": 1検定あたりの α, "family_alpha",
+             "correction", "n_tests", "p_floor", "alpha_below_p_floor"}。
+             better = 差が有意なとき優位なモデルキー、有意でなければ None。
+             順序対の重複を避け a<b の上三角のみ格納。
     """
     keys = list(ic_by_period_by_model.keys())
+    order = [(a, b) for i, a in enumerate(keys) for b in keys[i + 1:]]
+    family = paired_family_significance(
+        {f"{a}|{b}": (ic_by_period_by_model[a], ic_by_period_by_model[b]) for a, b in order},
+        alpha=alpha, correction=correction, n_boot=n_boot, avg_block=avg_block, seed=seed,
+    )
     pairs: dict[str, dict] = {}
-    for i, a in enumerate(keys):
-        for b in keys[i + 1:]:
-            res = paired_ic_significance(
-                ic_by_period_by_model[a], ic_by_period_by_model[b],
-                n_boot=n_boot, avg_block=avg_block, seed=seed,
-            )
-            if res is None:
-                pairs[f"{a}|{b}"] = {"n_common": 0, "significant": False,
-                                     "better": None, "mean_diff": None,
-                                     "ci_lo": None, "ci_hi": None, "p_value": None}
-                continue
-            better = None
-            if res["significant"]:
-                better = a if res["mean"] > 0 else b
-            pairs[f"{a}|{b}"] = {
-                "mean_diff": res["mean"], "ci_lo": res["ci_lo"], "ci_hi": res["ci_hi"],
-                "p_value": res["p_value"], "significant": res["significant"],
-                "n_common": res["n_common"], "better": better,
-            }
-    return {"models": keys, "pairs": pairs, "alpha": alpha}
+    for a, b in order:
+        res = family["results"][f"{a}|{b}"]
+        if res is None:
+            pairs[f"{a}|{b}"] = {"n_common": 0, "significant": False,
+                                 "better": None, "mean_diff": None,
+                                 "ci_lo": None, "ci_hi": None, "p_value": None}
+            continue
+        better = None
+        if res["significant"]:
+            better = a if res["mean"] > 0 else b
+        pairs[f"{a}|{b}"] = {
+            "mean_diff": res["mean"], "ci_lo": res["ci_lo"], "ci_hi": res["ci_hi"],
+            "p_value": res["p_value"], "significant": res["significant"],
+            "n_common": res["n_common"], "better": better,
+        }
+    meta = {k: family[k] for k in ("alpha", "family_alpha", "correction", "n_tests",
+                                   "p_floor", "alpha_below_p_floor")}
+    return {"models": keys, "pairs": pairs, **meta}
 
 
 def monotonicity_summary(quantile_spearmans: list[float], adj_increasing: int,

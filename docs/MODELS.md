@@ -975,8 +975,12 @@ paired-t は系列相関を無視して分散を過小評価し、有意差を�
 - **rank-IC 差の有意性マトリクス**: 各モデルの per-fold IC 系列（`oof_backtest.rank_ic_by_period`
   ＝`{test_ym: ic}`）を**共通 test 期でペアリング**し、差 IC_A−IC_B の平均を **定常ブートストラップ**
   （Politis & Romano 1994・リサンプル単位を幾何長ブロックにして fold 間相関を標本内に保存）で検定する。
-  95% CI が 0 を跨がなければ有意。`run_comparison` は全モデルペアの上三角を `significance_matrix`
-  として返し、`/analysis` の比較ビューが ▲（行モデル優位）/▼（劣位）/n.s.（有意差なし）で表示する。
+  **全ペアを同時に検定するので多重比較を補正する**（Bonferroni：α = 0.05 ÷ 実際に検定した組数。
+  6モデル＝15組なら 0.0033）。差の p 値が補正後 α を下回れば有意で、CI も同じ α の区間で出す
+  （p の規則のほうが厳しいので、有意なら CI は 0 を跨がない・[ADR-0063](adr/0063-significance-is-p-below-corrected-alpha.md)）。
+  `run_comparison` は全モデルペアの上三角を `significance_matrix` として返し、`/analysis` の比較ビューが
+  ▲（行モデル優位）/▼（劣位）/n.s.（有意差なし）で表示する。補正前（#741 まで）は alpha が判定に届かず、
+  15組を「95% CI が 0 を跨がない」で判定していた。
 - **分位単調性**: top−bottom spread へ畳むと中間分位の U 字/非単調（過学習・不安定シグナル）が隠れる。
   `oof_backtest.monotonicity` は期毎の Spearman(分位idx, 分位平均リターン) の mean/std、隣接分位の
   正順率（`adjacent_increasing_rate`）、および「単調増が偶然でない」片側ブートストラップ p 値を返す。
@@ -1512,6 +1516,9 @@ Issue #372・ADR-0021。
 （ADR-0018・定常ブートストラップ）で **差が有意**（95% CI が 0 を跨がない）であり、かつ**同時に検定した
 候補数で多重比較補正**（Bonferroni・α/候補数）を通ることを条件とする。walk-forward の per-fold IC は
 学習窓が重なり系列相関を持ち、fold 数も 10 前後しかないため、点推定の大小はノイズで容易に入れ替わる。
+2つの条件は現在 `model_stats` の1つの規則（p < 補正後 α かつ同じ α の CI が 0 を跨がない）にまとまり、
+`candidate_bakeoff` も候補数で補正した判定を出す（#741・[ADR-0063](adr/0063-significance-is-p-below-corrected-alpha.md)。
+ADR-0021 のときは補正なしの「有意」を出し、α/8 は人が手で当てていた）。
 
 **既定を減らす向きにも同じ基準を課す（#454・ADR-0028）**。昇格ゲートは「候補を足すか否か」の
 検定で帰無仮説は「base のまま」に置かれる。既定入りの特徴量へ同じ検定を当てると帰無が反転し

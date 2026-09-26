@@ -278,26 +278,31 @@ def _fmt(v, nd: int = 4) -> str:
 def significance_vs_baseline(rows: list[dict], baseline: str = "xgb_m2") -> dict:
     """各候補と基準線（M-2 相当）の rank-IC 差を定常ブートストラップで検定する。
 
-    `model_stats.paired_ic_significance`（Issue #369・ADR-0018）をそのまま再利用する。
-    walk-forward の per-fold IC は学習窓が重なり系列相関を持つため、素朴な paired-t では
-    有意差を過大に主張する。共通 test 期でペアリングし、ブロック・ブートストラップで
-    差の平均の CI を出す（CI が 0 を跨がなければ有意）。昇格判断はこの検定で行う。
+    `model_stats.paired_family_significance`（検定は Issue #369・ADR-0018、補正は ADR-0063）を
+    そのまま再利用する。walk-forward の per-fold IC は学習窓が重なり系列相関を持つため、素朴な
+    paired-t では有意差を過大に主張する。共通 test 期でペアリングし、ブロック・ブートストラップで
+    差の平均を検定する。**同時に検定した候補数で Bonferroni を掛ける**——ADR-0021 のときは
+    補正なしの `significant` が出て、α/8 は人が手で当てていた（#741）。昇格判断はこの検定で行う。
+
+    返り値: {候補名: 検定結果（`alpha`＝補正後 α・`n_tests`・`family_alpha`・`better` 付き）}。
     """
-    from model_stats import paired_ic_significance
+    from model_stats import paired_family_significance
 
     base = next((r for r in rows if r["name"] == baseline and not r.get("error")), None)
     if base is None:
         return {}
     base_ic = (base.get("oof") or {}).get("rank_ic_by_period") or {}
+    family = paired_family_significance({
+        r["name"]: ((r.get("oof") or {}).get("rank_ic_by_period") or {}, base_ic)
+        for r in rows if r["name"] != baseline and not r.get("error")
+    })
     out: dict = {}
-    for r in rows:
-        if r["name"] == baseline or r.get("error"):
-            continue
-        ic = (r.get("oof") or {}).get("rank_ic_by_period") or {}
-        res = paired_ic_significance(ic, base_ic)
+    for name, res in family["results"].items():
         if res:
-            res["better"] = (r["name"] if res["mean"] > 0 else baseline) if res["significant"] else None
-            out[r["name"]] = res
+            res["better"] = (name if res["mean"] > 0 else baseline) if res["significant"] else None
+            res["n_tests"] = family["n_tests"]
+            res["family_alpha"] = family["family_alpha"]
+            out[name] = res
     return out
 
 
@@ -324,7 +329,16 @@ def report(rows: list[dict], sig: dict | None = None) -> None:
               f"{str(bt.get('n_oof_samples')):>7} {r['elapsed_sec']:>7}")
 
     if sig:
+        from model_stats import ci_level_label, p_floor
+
+        first = next(iter(sig.values()))
+        alpha = first["alpha"]
         print("\n---- rank-IC diff vs xgb_m2 (stationary bootstrap, ADR-0018) ----")
+        print(f"Bonferroni alpha={alpha:.4f} (= {first['family_alpha']} / {first['n_tests']} tests, "
+              f"ADR-0063) | CI = {ci_level_label(alpha)} | signif = p < alpha")
+        if alpha <= p_floor(first["n_boot"]):
+            print(f"  ** alpha <= p floor {p_floor(first['n_boot'])}: no candidate can be significant "
+                  "(raise n_boot or test fewer candidates)")
         h2 = (f"{'candidate':20} {'diff':>9} {'ci_lo':>9} {'ci_hi':>9} {'p':>7} "
               f"{'signif':>7} {'n_common':>9}")
         print(h2)

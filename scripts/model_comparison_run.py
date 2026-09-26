@@ -3,8 +3,8 @@
 `model_comparison.run_comparison()` をそのまま呼ぶだけの薄い入口で、**測る手続きを持たない**。
 rank-IC・分位リターン・ロングショート spread・売り側 spread・ターンオーバー・区間被覆は
 各モデルの `oof_backtest`（`plugins/macro_snapshots.py`・ADR-0004/0014/0018/0020）が、
-モデル間の差の有意性は `model_stats.significance_matrix`（ADR-0018 の定常ブートストラップ）が
-既に持っている。ここでそれらを再実装すると、**測ったものが本番と別物になる**（ADR-0041 で
+モデル間の差の有意性は `model_stats.significance_matrix`（ADR-0018 の定常ブートストラップ・
+ADR-0063 の Bonferroni 補正。2モデルなら1組＝alpha 0.05 のまま）が既に持っている。ここでそれらを再実装すると、**測ったものが本番と別物になる**（ADR-0041 で
 preset の rank-IC ゲートが3回書き直されかけたのと同型）。
 
 `--models` で部分集合を指定できる。2モデルだけ測るときも fold（`min_train_months=6` /
@@ -34,6 +34,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from database import SessionLocal  # noqa: E402
 from model_comparison import COMPARISON_MODELS, run_comparison  # noqa: E402
+from model_stats import ci_level_label  # noqa: E402
 
 
 def _num(v, digits: int = 4) -> str:
@@ -80,7 +81,17 @@ def _print_significance(sig: dict | None) -> None:
     if not sig:
         print("（IC 系列を持つモデルが2本未満のため未算出）")
         return
-    print("pair       mean_diff   95%CI                p_value  significant  better  n_common")
+    alpha = sig["alpha"]
+    if sig.get("correction") == "bonferroni":
+        print(f"多重比較の補正: Bonferroni  alpha = {sig['family_alpha']} / {sig['n_tests']} 組 "
+              f"= {alpha:.4f}（ADR-0063）")
+    else:
+        print(f"多重比較の補正: なし  alpha = {alpha:.4f}")
+    if sig.get("alpha_below_p_floor"):
+        print(f"** 注意: alpha が p の下限 {sig['p_floor']} 以下のため、どの組も有意になりえない"
+              "（組を減らすか n_boot を増やす）")
+    level = ci_level_label(alpha)
+    print(f"pair       mean_diff   {level + 'CI':<20} p_value  significant  better  n_common")
     for key, r in sorted((sig.get("pairs") or {}).items()):
         ci = f"[{_num(r.get('ci_lo'))}, {_num(r.get('ci_hi'))}]"
         print(
@@ -89,7 +100,8 @@ def _print_significance(sig: dict | None) -> None:
             f"{str(r.get('better')):<6}  {r.get('n_common')}"
         )
     print("")
-    print("注: p は差の検定であって強さではない。点推定の大小ではなく CI が 0 を跨ぐかで読む")
+    print("注: significant は p が補正後 alpha を下回ること（CI は同じ alpha の区間で、このとき 0 を")
+    print("    跨がない）。p は差の検定であって強さではなく、点推定の大小では読まない")
     print("    （walk-forward の per-fold IC は学習窓が重なり系列相関を持つ・fold 数も10前後）。")
 
 

@@ -10,7 +10,8 @@ walk-forward・ADR-0014）で以下を比較する:
 基底が増えると intersection は狭まりうるため、2基底構成と3基底構成では母集団が異なる。
 そのため「3基底 M-4 vs 3基底共通域での各基底」を主判定に、「2基底 M-4 vs 3基底 M-4」は
 参考値（母集団差を含む）として併記する。有意差は ADR-0018 の定常ブートストラップ
-（`model_stats.paired_ic_significance`・共通 test 期でペアリング）で見る。
+（`model_stats.paired_ic_significance`・共通 test 期でペアリング）で見る。主判定は基底の数だけ
+同時に検定するので Bonferroni を掛ける（`paired_family_significance`・ADR-0063・#741）。
 
 データは `scripts/_cache.py` 経由でローカル pickle を読む（Issue #355・本番 Egress ゼロ）。
 producer 永続化は `tuning_dry_run()` で no-op、現在μ̂スコアリングは `tuning_objective_only()`
@@ -34,7 +35,9 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from database import SessionLocal, tuning_dry_run, tuning_objective_only  # noqa: E402
-from model_stats import paired_ic_significance  # noqa: E402
+from model_stats import (  # noqa: E402
+    ci_level_label, paired_family_significance, paired_ic_significance,
+)
 from plugins import get_plugin, macro_ensemble  # noqa: E402
 from plugins.utils import coerce_params  # noqa: E402
 from scripts._cache import cached, set_refresh  # noqa: E402
@@ -121,12 +124,25 @@ def _ic_by_period(oof: dict) -> dict:
     return oof.get("rank_ic_by_period") or {}
 
 
+def significance_vs_bases(three_oof: dict, base_oofs: dict) -> dict:
+    """主判定: 3基底 M-4 − 同一共通域の各基底の rank-IC 差（ADR-0015 base-on-common）。
+
+    基底の数だけ同時に検定するので、その数で Bonferroni を掛ける（#741・ADR-0063。以前は
+    補正なしの `significant` をそのまま「有意」と出していた）。返り値は {基底名: 検定結果 or None}。
+    """
+    family = paired_family_significance(
+        {name: (_ic_by_period(three_oof), _ic_by_period(bo)) for name, bo in base_oofs.items()})
+    return family["results"]
+
+
 def _fmt_sig(sig: dict | None) -> str:
     if not sig:
         return "n/a（共通 test 期 < 2）"
-    return (f"diff={sig['mean']:+.4f} 95%CI[{sig['ci_lo']:+.4f},{sig['ci_hi']:+.4f}] "
+    # CI は判定と同じ alpha の区間（補正後は 95% ではない）。
+    return (f"diff={sig['mean']:+.4f} {ci_level_label(sig['alpha'])}CI"
+            f"[{sig['ci_lo']:+.4f},{sig['ci_hi']:+.4f}] "
             f"p={sig.get('p_value', float('nan')):.3f} n={sig['n_common']} "
-            f"{'有意' if sig['significant'] else '非有意'}")
+            f"{'有意' if sig['significant'] else '非有意'}(alpha={sig['alpha']:.4f})")
 
 
 def main() -> None:
@@ -177,8 +193,7 @@ def main() -> None:
               f"IC std={o['rank_ic'].get('std', float('nan')):.4f} "
               f"LS={o.get('long_short_spread', float('nan')):+.4f} "
               f"periods={o['n_periods']}", flush=True)
-    sigs = {name: paired_ic_significance(_ic_by_period(three["oof"]), _ic_by_period(bo))
-            for name, bo in three["base_oof"].items()}
+    sigs = significance_vs_bases(three["oof"], three["base_oof"])
     for name, sig in sigs.items():
         print(f"  M-4(3基底) − {name:20} {_fmt_sig(sig)}", flush=True)
 

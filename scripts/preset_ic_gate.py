@@ -474,7 +474,10 @@ def main() -> None:
     elif args.all_pairs:
         print(f"\n=== all pairs (Bonferroni alpha={alpha:.4f}, {n_tests} tests) ===",
               flush=True)
-        matrix = significance_matrix(ic_by_label, alpha=alpha, n_boot=args.n_boot)
+        # 判定は下の自前の p < alpha（補正後）で行い、行の CI は他のモードと同じ 95% で出す
+        # （`fmt_sig` の表記）。matrix へ alpha を渡すと CI が補正後の幅になり表記とずれるので、
+        # 補正なし・既定 alpha で呼ぶ（#741・ADR-0063。matrix の `significant` はここでは読まない）。
+        matrix = significance_matrix(ic_by_label, correction="none", n_boot=args.n_boot)
         for key, res in matrix["pairs"].items():
             sig = None if res.get("mean_diff") is None else {
                 "mean": res["mean_diff"], "ci_lo": res["ci_lo"], "ci_hi": res["ci_hi"],

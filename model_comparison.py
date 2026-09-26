@@ -122,6 +122,8 @@ async def run_comparison(db: Session, render_light_mode: bool = False,
     # モデル間 rank-IC 差の有意性マトリクス（Issue #369）。各モデルの per-fold IC 系列
     # （oof_backtest.rank_ic_by_period）を共通 test 期でペアリングし、系列相関を保存する
     # 定常ブートストラップで差の平均を検定する（純後処理・追加学習/Egress ゼロ）。
+    # 画面に並ぶ全ペア（退役モデルを含む）がどれも ▲/▼ を出しうるので、実際に検定した組数で
+    # Bonferroni を掛ける（#741・ADR-0063。以前は alpha が判定に届かず補正なしだった）。
     from model_stats import significance_matrix
     ic_by_model: dict[str, dict] = {}
     for m in models:
@@ -130,7 +132,8 @@ async def run_comparison(db: Session, render_light_mode: bool = False,
         ic_series = (m.get("oof_backtest") or {}).get("rank_ic_by_period")
         if ic_series:   # 非空 dict のモデルのみペアリング対象
             ic_by_model[m["short"]] = ic_series
-    sig_matrix = significance_matrix(ic_by_model) if len(ic_by_model) >= 2 else None
+    sig_matrix = (significance_matrix(ic_by_model, correction="bonferroni")
+                  if len(ic_by_model) >= 2 else None)
 
     return {
         "models": models,
