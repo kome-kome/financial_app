@@ -400,6 +400,58 @@ class TestOfficialEventsReachTheTable:
         assert seen["official_events"] == {"E00001": [("2020-10-01", 0.5)]}
 
 
+class TestWithheldOfficialEventsAreNotUsed:
+    """保留の窓（#652）に入る公式イベントは、係数表の倍率にも使われない（#739）。
+
+    台帳（`compute_ledger`）が検出器へ渡す前に外す。登録はテスト用の社に架空の窓を置いて行う
+    （実登録 E34165 は根拠の Issue で外されうるので、実登録の確認は
+    `tests/test_repair_splits_from_jquants.py` の1本に閉じ込めてある）。
+    """
+    EC = "E00006"
+
+    @pytest.fixture
+    def registered(self, monkeypatch):
+        monkeypatch.setitem(C.WITHHELD_OFFICIAL_ADJUSTMENTS, self.EC,
+                            (("2021-09-01", "2021-12-31", 0.5, "テスト用の登録・#739"),))
+
+    def _seed(self, db, make_fin, event_date):
+        _seed_latest_year_bps_company(db, make_fin, ec=self.EC)
+        _seed_split_company(db, make_fin)      # 検出0件で失敗しないよう第1経路の社も置く
+        upsert_jquants_adj_factor_events(db, [{"edinet_code": self.EC, "event_date": event_date,
+                                               "adj_factor": 0.5, "jq_code": None}])
+        db.commit()
+
+    def test_withheld_event_does_not_fill_the_latest_year(self, db, make_fin, registered):
+        """窓の中の公式イベントは第2経路の倍率（#661）に使われない＝倍率待ちのまま F の行を書かない。"""
+        self._seed(db, make_fin, "2021-10-01")
+        rebuild_split_adjustment_factors(db, bps_path=True)
+        assert db.query(SplitAdjustmentFactor).filter_by(edinet_code=self.EC).count() == 0
+
+    def test_event_outside_the_window_still_fills_it(self, db, make_fin, registered):
+        """同じ社でも窓の外の公式イベントは今までどおり倍率になる（外し方が広すぎない）。"""
+        self._seed(db, make_fin, "2022-01-05")
+        rebuild_split_adjustment_factors(db, bps_path=True)
+        got = {(r.year, r.factor)
+               for r in db.query(SplitAdjustmentFactor).filter_by(edinet_code=self.EC).all()}
+        assert got == {(2020, 2.0), (2021, 2.0)}
+
+    def test_withheld_events_are_logged(self, db, make_fin, registered, caplog):
+        """外したものはどこにも届かないので、件数と中身を毎晩のログへ出す。"""
+        self._seed(db, make_fin, "2021-10-01")
+        with caplog.at_level("INFO", logger="collector"):
+            rebuild_split_adjustment_factors(db, bps_path=True)
+        assert "保留の窓で外した公式イベント 1 件" in caplog.text
+        assert "2021-10-01" in caplog.text
+
+    def test_zero_is_logged_too(self, db, make_fin, caplog):
+        """外すものが無い晩も 0 件の行を出す（届いたあとに 0 件へ戻ったら壊れた合図）。"""
+        _seed_split_company(db, make_fin)
+        with caplog.at_level("INFO", logger="collector"):
+            rebuild_split_adjustment_factors(db)
+        assert "保留の窓で外した公式イベント 0 件（登録 %d 社）" % len(
+            C.WITHHELD_OFFICIAL_ADJUSTMENTS) in caplog.text
+
+
 def _seed_relisted_company(db, make_fin, ec="E00007"):
     """E05714 型: 上場廃止した旧社の行と、再上場した新社の行が欠損年をまたいで隣り合う社（#672）。
 
