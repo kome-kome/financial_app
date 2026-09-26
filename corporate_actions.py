@@ -297,8 +297,13 @@ DEFAULT_EQUITY_TOL: Optional[float] = 1.0
 # 決め、整合度照合で認めたものだけ、整合度と倍率が `DEFAULT_BPS_TOL` 以内で一致することを採る条件にする
 # （2 つの書き手が倍率で食い違う組は、どちらが正しいか決められないので採らない＝決定4-3 と同じ取引）。
 #
-# 既定は事前登録した基準（`scripts/measure_split_valuation_bias.py verify-sources`・決定4-10）で決める。
-DEFAULT_CONSISTENCY_CROSSCHECK = False
+# **True にしたのは、測る前に書いた基準を3つとも満たしたからである**（2026-09-26・`scripts/
+# measure_split_valuation_bias.py verify-sources`・決定4-10）。公式との倍率一致 31/31、公式で分割なしと
+# 確かめられたもの 0 件、Yahoo の分割履歴との一致 102/113＝0.903（取得できず 10）。Yahoo の不一致 11 件は
+# すべて本物の分割で、9 件は照合窓（期末+45日）の少し後に同じ比がある、2 件は窓の中の 2 回の分割のうち
+# 期末後の 1 回だけを拾ったもの。照合で増えるイベントは 201・F が変わる行 813（うち新たに補正 758）・192 社で、
+# 既存のイベントは 1 件も動かない。
+DEFAULT_CONSISTENCY_CROSSCHECK = True
 # 合成（分割＋増資）とみなす残差の範囲。これを外れたら丸めずに unsnapped で別枠へ出す。
 COMPOSITE_LO, COMPOSITE_HI = 0.8, 1.25
 

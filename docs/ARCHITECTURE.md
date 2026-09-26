@@ -604,7 +604,7 @@ erDiagram
 > そのイベントは採らない（ADR-0055 決定4-5）。
 > 第2経路の存在の確認（交差検証）は2通りある。`pl_eps` 比が `bs_bps` 比と揃うこと（EPS 照合）と、
 > 「純資産総額 ÷ bps」で逆算した株数と発行済株式数の比の年次変化（整合度・`consistency_ratio`）が
-> bps と同じ向きに動くこと（整合度照合・`DEFAULT_CONSISTENCY_CROSSCHECK`・#751・ADR-0055 決定4-10）。
+> bps と同じ向きに動くこと（整合度照合・`DEFAULT_CONSISTENCY_CROSSCHECK`・既定 ON・#751・ADR-0055 決定4-10）。
 > 後者は利益が大きく動いた年の期末後分割を拾うためのもので、倍率には使わず、倍率（翌年の株数・公式）と
 > 15% 以内で一致するときだけ採る。どちらで認めたかは `ShareEvent.cross_check` に残る。
 > 作り直しは `stock_price_weekly` から社ごとの系列の開始日と 365 日以上の空白も読み、ペアの期間の中に
