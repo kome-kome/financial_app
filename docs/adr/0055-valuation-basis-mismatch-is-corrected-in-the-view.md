@@ -6,14 +6,15 @@ accepted（2026-09-12）。Issue [#655](https://github.com/kome-kome/financial_a
 被害の測定は [#653](https://github.com/kome-kome/financial_app/issues/653) と
 [#654](https://github.com/kome-kome/financial_app/issues/654)、隣接する事象は
 [#568](https://github.com/kome-kome/financial_app/issues/568) と
-[#464](https://github.com/kome-kome/financial_app/issues/464)。決定 4-2〜4-11 は
+[#464](https://github.com/kome-kome/financial_app/issues/464)。決定 4-2〜4-12 は
 #656 / #659 / #657 / [#661](https://github.com/kome-kome/financial_app/issues/661) /
 [#669](https://github.com/kome-kome/financial_app/issues/669) /
 [#672](https://github.com/kome-kome/financial_app/issues/672) /
 [#668](https://github.com/kome-kome/financial_app/issues/668) /
 [#740](https://github.com/kome-kome/financial_app/issues/740) /
 [#751](https://github.com/kome-kome/financial_app/issues/751) /
-[#753](https://github.com/kome-kome/financial_app/issues/753) で追記した。
+[#753](https://github.com/kome-kome/financial_app/issues/753) /
+[#758](https://github.com/kome-kome/financial_app/issues/758) で追記した。
 **決定 7 は [#687](https://github.com/kome-kome/financial_app/issues/687) で根拠を定義へ
 置き直し、#685 の事前判定を退役させた（2026-09-18）。**測り直す条件と判定式は
 [#690](https://github.com/kome-kome/financial_app/issues/690) に測る前から書いてあり、
@@ -922,6 +923,86 @@ F 倍に壊す。実例の E02086（1:2・効力 2026-04-01）の最新行は ma
 - 同じ年に期中と期末後の分割が重なる社（#756）は F 自体が半分なので、遅れも期末後の分しか入らない
 - `sector_ols` の ps_* 特徴量は `financial_records` を直接読み issued_shares で割るので、分割した年の行では回帰の
   入力の基準が混ざったまま（VIEW の補正は届かない）
+  → **決定 4-12 で直した**（2026-09-27・#758）。読込で同じ係数表の遅れを当てる。
+
+### 4-12. VIEW を通らない `sector_ols` は、読込で同じ基準の遅れを当てる（#758）
+
+`sector_ols` は `financial_records` を直接読み、ps_* を「PL / BS / CF の絶対額 ÷ 発行済株式数」で作る。期末後分割の
+年の行は、目的変数の `stock_price` と `pl_eps` / `bs_bps` が分割後の基準なのに、`issued_shares` と（多くの社で）`dps` が
+分割前のまま残る（決定 4-11）ので、ps_* と dps が分割比ぶん大きく、1 行の中で特徴量の基準が混ざる。決定 4-11 は VIEW
+を直したが、`sector_ols` は VIEW を読まないので届かなかった。**gap_ratio が系統的に割安側へ寄っていた**: 分割した年の
+行が最新行の社（株数の遅れあり）87 社の中央値 55.0%（それ以外 3,544 社は 16.5%）で、乖離分析の画面と gap_ratio を
+使う買い推奨の上位に入りやすかった（E02086 は 39.39%）。
+
+#### 決めたこと
+
+1. **`SectorOLSPlugin._load_records` が `split_adjustment_factors` を `(edinet_code, year)` で LEFT JOIN し、
+   `issued_shares` に `shares_lag` を掛け、`dps` を `dps_lag` で割る。** 遅れの判定は係数表（台帳 `basis_lags` の出力）
+   を読むだけで写さない。列の数と名前は変えない（転送列の契約 #482・`EGRESS_COST_TABLE` の較正をそのまま保つ）。
+   読込の3経路（最新年度・`year` 指定・時点再現 `sector_gap_asof` が使う `all_years`）が同じ関数を通るので、全部に効く。
+2. **株数の遅れは XBRL の期末値（`shares_outstanding` の第1経路）にだけ掛ける。** マスタ値（第2経路・#462）は最新の
+   株数、純資産 ÷ BPS（第3経路）は BPS と同じ基準なので、どちらも遅れていない。SQL では
+   `COALESCE(financial_records.issued_shares × shares_lag, companies.issued_shares)` の第1引数の中に置く。
+3. **向きは VIEW が market_cap（株価 × 株数）と div_yield（配当 ÷ 株価）へ当てるものをそのまま継ぐ。** 唯一の源は
+   `corporate_actions.BASIS_LAG_COLUMN` / `COLUMN_DIRECTION` で、`BASIS_LAG_COLUMN` のキーは VIEW の列と一致させる
+   契約（`TestViewAppliesTheDirections`）なので入力列はそこへ足さない。VIEW と同じく消費側に演算子を書き、
+   `tests/test_sector_ols.py::TestBasisLagAtLoad` が係数表の列名と向きをこの2表から引いて照合する。
+4. **`market_cap` は生のまま読む。** VIEW が `predicted_market_cap`（予測株価 ÷ 株価 × 生の market_cap）へ株数の遅れを
+   掛ける（決定 4-11 の 5）ので、ここで直すと二重になる。保存値の式は変えない。
+5. **F は当てない。** 最新行は F=1 で、時点再現は目的変数（月末の週次終値）へ F を掛けて基準を揃えている
+   （[ADR-0057](0057-past-gap-ratio-is-reconstructed-as-of-each-month.md)）。
+6. Issue の案2（分割した年の行を学習と予測から外す）は、該当社の gap が翌期の決算まで（最長 1 年）出なくなり、割安系の
+   推奨から消えるので採らない。案3（対象外と明記する）は歪みが既定の画面に残るので採らない。
+7. **`PREPROCESS_VERSION` は上げない**（決定 6・4-11 の 9 と同じ理由）。本番の重み（`recommend_factor_premia`）の
+   パネルは gap_ratio を含まず、`build_period_panel(with_gap_ratio=True)` を使うのは検証スクリプト
+   （`preset_ic_gate --with-gap-ratio`・`preset_weight_walkforward`）だけ。それらの記録値は測り直していない。
+
+#### 実測（2026-09-27・接続先 local・書き込みなし）
+
+本表 `split_adjustment_factors` にはまだ遅れの列が無い（移行は次の夜間の `init_db`）ので、同じセッションに同名の
+一時表（遅れの列付き）を作り、夜間の洗い替えと同じ `build_ledger(db).factor_rows()` を入れて新しい読込を通した
+（PostgreSQL は一時表を先に引く）。本表は ROLLBACK 後も 6 列・2,754 行のまま。回帰は `NIGHTLY_PARAMS`（ridge）と同じ
+設定で、DB へ書かない `predict_gaps` を使った。
+
+| 項目 | 補正前 | 補正後 |
+|---|---|---|
+| 最新年度の断面で遅れが入る行 | — | **91 行**（株数 91・配当 88。うち gap が出る 87 社） |
+| 該当社の gap_ratio 中央値（p25 / p75） | 55.0%（16.5 / 134.1） | **5.6%**（-18.0 / 34.5） |
+| それ以外 3,544 社の中央値 | 16.5% | 17.6% |
+| E02086（株価 3,535 円） | 予測 4,927 円・39.39% | **予測 4,171 円・17.99%** |
+| 全年度（`all_years`・30,479 行）で値が変わる行 | — | 株数 **341**・配当 **320**（係数表の遅れの行数と一致） |
+
+- 補正前の値は本番の `regression_results` と 3,631 件すべて一致し（差の最大 0.0000）、補正後の入力は「台帳の遅れを
+  メモリ上で当てた入力」とビット単位で一致した
+- E02086 の理論時価総額（VIEW と同じ式）100,102 百万円 ÷ 補正後の market_cap 84,840 百万円 = 1.1799 は、予測株価 ÷
+  実株価 = 1.1799 と一致する（大小が逆転しない）
+- **該当社以外の gap も動く。** 同じ業種の回帰と全社プールを共有するうえ、ridge の α は一個抜き交差検証で
+  `RIDGE_ALPHAS` の 7 段から選ぶので、入力が変わると選ばれる α が変わる業種がある。6 業種で切り替わった:
+
+  | 業種 | 社数（うち該当） | α（前 → 後） | 該当社以外で 20pt 超動いた社 |
+  |---|---|---|---|
+  | 機械 | 208（4） | 0.001 → 100 | 156 |
+  | その他製品 | 105（3） | 100 → 10 | 62 |
+  | 小売業 | 327（5） | 1 → 10 | 33 |
+  | 建設業 | 123（6） | 10 → 100 | 32 |
+  | ガラス・土石製品 | 49（3） | 10 → 100 | 27 |
+  | 非鉄金属 | 32（2） | 100 → 10 | 23 |
+
+  補正前の α は歪んだ特徴量で選ばれていたので、補正後が正しい側である。該当社を含まない 10 業種のうち 6 業種は
+  1 件も動かず、**社数 15 以上の 4 業種（その他金融業・パルプ・紙・倉庫・運輸関連業・医薬品）はすべて一致**した。
+  動いた残り 4 業種（水産・農林業・海運業・石油・石炭製品・鉱業）は社数 15 未満で、全社プールの予測へ縮約される。
+  Issue の検証項目「該当社以外の係数・業種ごとの α が動かないこと」は、この理由で成り立たない
+
+#### 限界
+
+- **E01150 2024 の 1 行は直らない。** 株数の遅れには時価総額用の `shares_lag` をそのまま使うので、保存された
+  market_cap が別の株数（純資産 ÷ BPS）で計算されていた行（決定 4-11 の 3「時価総額が既に分割後」）は、
+  `issued_shares` が分割前のままでも遅れが 1.0 になる。最新行ではなく、時点再現と `year=2024` の実行にだけ入る。
+  直すなら「株数そのものの遅れ」を係数表に別の列で持つ。株数の遅れが立たない残りの 11 行（時価総額なし）は、株価も
+  週次株価も無いので回帰にも時点再現にも入らない
+- 倍率待ち・同じ年に通期行が2本ある社・#756 の形は、決定 4-11 の限界がそのまま残る（係数表に遅れが無い）
+- α の切り替わりの大きさ（機械は罰なし同等の 0.001 から 100 へ）は、一個抜き誤差の谷が平坦なことによる
+  （#728 の実測では機械の α=0 と 0.001 の誤差が同値）。補正とは別の、モデル側の感度として扱う
 
 ### 5. 係数の洗い替えは収集パイプラインの内側（Phase 4 の直後）に置く
 

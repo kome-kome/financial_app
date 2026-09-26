@@ -882,3 +882,176 @@ class TestPredictGaps:
             assert got.keys() == base.keys()
             for k, v in base.items():
                 assert got[k] == pytest.approx(v, abs=0.01), (seed, k)
+
+
+# ── 期末後分割の年の行の基準の遅れ（#758・ADR-0055 決定4-12）───────────────────────
+
+class TestBasisLagAtLoad:
+    """`_load_records` が係数表の基準の遅れ（#753）を ps_* の分母と dps に当てる。
+
+    期末後分割の年の行は、株価と1株指標が分割後の基準なのに、期末の発行済株式数と（多くの社で）
+    1株配当が分割前のまま残る。sector_ols は VIEW を通らず `financial_records` を読むので VIEW の
+    補正（決定4-11）が届かず、ps_* と dps が分割比ぶん大きく出て gap_ratio が割安側へ寄っていた
+    （実測 87 社の中央値 55.0%・他社 16.5%）。当て損ねても失敗としては現れない。
+    """
+
+    @staticmethod
+    def _lag(db, edinet_code="E00001", year=2023, *, factor=1.0, shares_lag=1.0, dps_lag=1.0):
+        from database import SplitAdjustmentFactor
+        db.add(SplitAdjustmentFactor(edinet_code=edinet_code, year=year, factor=factor,
+                                     shares_lag=shares_lag, dps_lag=dps_lag, n_events=0))
+        db.commit()
+
+    @staticmethod
+    def _one(records, edinet_code="E00001"):
+        return {r.edinet_code: r for r in records}[edinet_code]
+
+    def test_record_issued_shares_carries_the_shares_lag(self, db, make_fin):
+        db.add(make_fin(issued_shares=1.0e6, bs_bps=1000.0, bs_total_equity=1.0e9,
+                        stock_price=1500.0))
+        db.commit()
+        self._lag(db, shares_lag=2.0)
+        r = self._one(plugin._load_records(db, None, DEFAULT_FEATURES_PRICE))
+        assert r.issued_shares == pytest.approx(2.0e6)
+
+    def test_master_issued_shares_is_not_lagged(self, db, make_fin, make_company):
+        """XBRL の期末値が無くマスタへ落ちる行には掛けない（マスタは最新の株数＝既に分割後）。"""
+        db.add(make_company(issued_shares=1.5e6))
+        db.add(make_fin(issued_shares=None, bs_bps=None, bs_total_equity=None,
+                        stock_price=1500.0))
+        db.commit()
+        self._lag(db, shares_lag=2.0)
+        r = self._one(plugin._load_records(db, None, DEFAULT_FEATURES_PRICE))
+        assert r.issued_shares == pytest.approx(1.5e6)
+
+    def test_dps_is_divided_by_the_dps_lag(self, db, make_fin):
+        db.add(make_fin(issued_shares=1.0e6, dps=120.0, stock_price=1500.0))
+        db.add(make_fin(edinet_code="E00002", issued_shares=1.0e6, dps=None, stock_price=1500.0))
+        db.commit()
+        self._lag(db, dps_lag=2.0)
+        self._lag(db, "E00002", dps_lag=2.0)
+        recs = plugin._load_records(db, None, DEFAULT_FEATURES_PRICE)
+        assert self._one(recs).dps == pytest.approx(60.0)
+        # NULL は NULL のまま（無配の 0 埋めは後段の _resolve_per_share_value が持つ・#434）
+        assert self._one(recs, "E00002").dps is None
+
+    def test_market_cap_and_stock_price_stay_raw(self, db, make_fin):
+        """VIEW が predicted_market_cap（予測株価 ÷ 株価 × この market_cap）へ shares_lag を掛ける
+        （決定4-11-5）ので、ここで market_cap を直すと二重になる。株価は既に分割後の基準。"""
+        db.add(make_fin(issued_shares=1.0e6, stock_price=1500.0, market_cap=1500.0))
+        db.commit()
+        self._lag(db, shares_lag=2.0, dps_lag=2.0)
+        r = self._one(plugin._load_records(db, None, DEFAULT_FEATURES_PRICE))
+        assert r.market_cap == pytest.approx(1500.0)
+        assert r.stock_price == pytest.approx(1500.0)
+
+    def test_factor_alone_leaves_the_inputs_raw(self, db, make_fin):
+        """F は当てない（最新行は F=1・時点再現は目的変数の月末株価へ F を掛けて揃える）。"""
+        db.add(make_fin(issued_shares=1.0e6, dps=120.0, stock_price=1500.0))
+        db.commit()
+        self._lag(db, factor=2.0)
+        r = self._one(plugin._load_records(db, None, DEFAULT_FEATURES_PRICE))
+        assert r.issued_shares == pytest.approx(1.0e6)
+        assert r.dps == pytest.approx(120.0)
+
+    @pytest.mark.parametrize("mode", ["latest", "year", "all_years"])
+    def test_every_load_path_applies_the_lag(self, db, make_fin, mode):
+        """最新・年度指定・全年度（時点再現 `sector_gap_asof`）の3経路とも同じ補正を通る。"""
+        db.add(make_fin(year=2022, period_end="2022-03-31", issued_shares=1.0e6, dps=100.0,
+                        stock_price=1400.0))
+        db.add(make_fin(year=2023, period_end="2023-03-31", issued_shares=1.0e6, dps=120.0,
+                        stock_price=1500.0))
+        db.commit()
+        self._lag(db, year=2023, shares_lag=2.0, dps_lag=2.0)
+        year, all_years = {"latest": (None, False), "year": (2023, False),
+                           "all_years": (None, True)}[mode]
+        recs = plugin._load_records(db, year, DEFAULT_FEATURES_PRICE, all_years=all_years)
+        by_year = {r.year: r for r in recs}
+        assert by_year[2023].issued_shares == pytest.approx(2.0e6)
+        assert by_year[2023].dps == pytest.approx(60.0)
+        if mode == "all_years":                  # 遅れの無い年は生値のまま
+            assert by_year[2022].issued_shares == pytest.approx(1.0e6)
+            assert by_year[2022].dps == pytest.approx(100.0)
+
+    def test_lag_columns_and_directions_follow_the_ledger(self, db, make_fin):
+        """遅れの列と向きは、VIEW と同じ唯一の源（`corporate_actions`）に従う。
+
+        market_cap = 株価 × 株数、div_yield = 配当 ÷ 株価。VIEW がこの2列へ当てる遅れの列と向きが、
+        そのまま分母の生の列（issued_shares / dps）の補正になる。VIEW 側は
+        `tests/test_split_adjustment_factors.py::TestViewAppliesTheDirections` が同じ表と照合する。
+        """
+        import corporate_actions as C
+        from database import SplitAdjustmentFactor
+
+        db.add(make_fin(issued_shares=1.0e6, dps=120.0, stock_price=1500.0))
+        db.commit()
+        lags = {C.BASIS_LAG_COLUMN["market_cap"]: 2.0, C.BASIS_LAG_COLUMN["div_yield"]: 4.0}
+        db.add(SplitAdjustmentFactor(edinet_code="E00001", year=2023, factor=1.0, n_events=0,
+                                     **lags))
+        db.commit()
+        r = self._one(plugin._load_records(db, None, DEFAULT_FEATURES_PRICE))
+        assert r.issued_shares / 1.0e6 == pytest.approx(2.0 ** C.COLUMN_DIRECTION["market_cap"])
+        assert r.dps / 120.0 == pytest.approx(4.0 ** C.COLUMN_DIRECTION["div_yield"])
+
+    @staticmethod
+    def _seed_noisy(db, make_fin, n=30):
+        """回帰が補間にならない（残差が残る）ようノイズを入れた n 社。株数は XBRL の期末値で持つ。
+
+        `_seed_sector`（12 社・10 特徴量）は係数 11 個に対して社数がほぼ同じで、当てはめが補間に
+        なり全社の gap が 0.0 に丸まる——入力を変えても gap が動かず、この照合が空振りする。
+        """
+        import random
+        rng = random.Random(758)
+        recs = []
+        for i in range(1, n + 1):
+            shares = 1.0e6 + 5.0e4 * i
+            bps = 800.0 + 40.0 * i + rng.gauss(0, 60.0)
+            recs.append(make_fin(
+                edinet_code=f"E{i:05d}", issued_shares=shares,
+                bs_bps=bps, bs_total_equity=bps * shares,
+                pl_eps=80.0 + 4.0 * i + rng.gauss(0, 15.0),
+                dps=20.0 + rng.gauss(0, 5.0),
+                pl_revenue=1.0e9 + 1.0e8 * i + rng.gauss(0, 2.0e8),
+                pl_gross_profit=4.0e8 + 4.0e7 * i + rng.gauss(0, 8.0e7),
+                pl_operating_profit=1.0e8 + 1.5e7 * i + rng.gauss(0, 3.0e7),
+                bs_total_assets=2.0e9 + 1.0e8 * i + rng.gauss(0, 3.0e8),
+                bs_total_liabilities=1.0e9 + 5.0e7 * i + rng.gauss(0, 2.0e8),
+                cf_operating_cf=1.2e8 + 1.2e7 * i + rng.gauss(0, 4.0e7),
+                cf_free_cf=8.0e7 + 8.0e6 * i + rng.gauss(0, 3.0e7),
+                stock_price=max(100.0, 1500.0 + 60.0 * i + rng.gauss(0, 400.0)),
+                market_cap=1000.0 + 50.0 * i,
+            ))
+        db.add_all(recs)
+        db.commit()
+
+    def test_execute_regresses_on_the_restated_values(self, db, make_fin):
+        """遅れ付きの社の gap は、生値を分割後の基準へ書き直して遅れを外した場合と一致する。
+
+        つまり回帰と予測は補正後の値だけを見ている。遅れを当てない場合と gap が違うことも
+        確かめる（補正が効かない種の値で空振りしていないこと）。
+        """
+        from database import FinancialRecord, RegressionResult, SplitAdjustmentFactor
+
+        def _gaps():
+            asyncio.run(execute_plugin(plugin, {}, db))
+            return {r.edinet_code: r.gap_ratio for r in db.query(RegressionResult).all()}
+
+        self._seed_noisy(db, make_fin)
+        # E00001 を「期末後分割（1:2）の年の行」にする: 株数と配当が分割前のまま残る
+        fr = db.query(FinancialRecord).filter_by(edinet_code="E00001").one()
+        shares, dps = fr.issued_shares, fr.dps
+        fr.issued_shares, fr.dps = shares / 2, dps * 2
+        db.commit()
+        unlagged = _gaps()
+
+        self._lag(db, shares_lag=2.0, dps_lag=2.0)
+        lagged = _gaps()
+
+        # 同じ行を分割後の基準へ書き直し、遅れを外して回し直す
+        fr.issued_shares, fr.dps = shares, dps
+        db.query(SplitAdjustmentFactor).delete()
+        db.commit()
+        restated = _gaps()
+
+        assert lagged == restated
+        assert unlagged["E00001"] != restated["E00001"]
