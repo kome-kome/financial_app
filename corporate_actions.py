@@ -43,6 +43,12 @@ F の寄与イベントに足し、TTM の窓にも同じイベントを渡す�
 （分割当年の行は既に新基準なので歪まない）。逆分割は F < 1 となり向きが反転するが同じ式で扱う。
 向きの唯一の源は `COLUMN_DIRECTION`。
 
+**例外は期末後分割の年の行**（#753・ADR-0055 決定4-11）。第2経路のイベントの年 Y の行は、1株指標
+（`pl_eps` / `bs_bps`）が分割後の基準に書き直されているのに、期末の発行済株式数（と多くの社で1株配当）は
+分割前のまま残る＝per / pbr は揃うが market_cap は 1/F、div_yield と nc_ratio は F 倍に出る。この遅れは
+F に混ぜず（`>=` にすると per / pbr まで壊す）、別の係数 `shares_lag` / `dps_lag` としてその行にだけ持つ
+（`basis_lags`）。どの列がどの遅れを使うかの唯一の源は `BASIS_LAG_COLUMN`。
+
 ## 分割比をどこから取るか
 
 **全件は DB 内在の2列だけで復元する**: `issued_shares`（期末発行済株式総数）の年次比と、
@@ -95,7 +101,7 @@ from __future__ import annotations
 import logging
 import math
 from collections import Counter, defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, timedelta
 from typing import Iterable, Mapping, NamedTuple, Optional, Sequence
 
@@ -348,6 +354,15 @@ CANONICAL_RATIOS: tuple[float, ...] = (
 # 歪みの向き。+1 は「真値へ × F」、-1 は「真値へ / F」。取り違えると全部逆になる。
 COLUMN_DIRECTION: dict[str, int] = {
     "per": +1, "pbr": +1, "market_cap": +1, "div_yield": -1, "nc_ratio": -1,
+}
+
+# 期末後分割の年の行で、分母の基準が1株指標より遅れる列と、その遅れを持つ係数表の列（#753・
+# ADR-0055 決定4-11・`basis_lags`）。向きは `COLUMN_DIRECTION` と同じ（遅れも F と同じ向きに当てる）。
+# per / pbr の分母（`pl_eps` / `bs_bps`）はその期から分割後の基準なので遅れない＝None。
+# nc_ratio は VIEW の中で補正後の market_cap から計算されるので、market_cap の遅れがそのまま効く。
+BASIS_LAG_COLUMN: dict[str, Optional[str]] = {
+    "per": None, "pbr": None,
+    "market_cap": "shares_lag", "nc_ratio": "shares_lag", "div_yield": "dps_lag",
 }
 
 
@@ -1037,6 +1052,108 @@ def cumulative_factors(rows: Sequence[AnnualRow], events: Sequence[ShareEvent], 
     return out
 
 
+def _nearer_one(ratio: float, alt: float) -> bool:
+    """比 `ratio` が 1 と `alt` のどちらに近いか（対数距離）。1 側なら True。しきい値を持たない（#753）。"""
+    lr = _log(ratio)
+    return abs(lr) < abs(lr - _log(alt))
+
+
+def basis_lags(rows: Sequence[AnnualRow], events: Sequence[ShareEvent]
+               ) -> tuple[dict[tuple[str, int], float], dict[tuple[str, int], float], dict]:
+    """期末後分割の年の行で、株数と1株配当の基準が1株指標より遅れる倍率（#753・ADR-0055 決定4-11）。
+
+    戻り値は `(shares_lags, dps_lags, stats)`。辞書のキーは `(edinet_code, year)` で、**遅れのある行だけ**
+    を持つ（無い行は 1.0 と読む）。
+
+    期末後分割（第2経路・`source="bps"`）の年 Y の行は、1株指標がその期から分割後の基準に書き直されるのに、
+    期末の発行済株式数は分割前のまま残る。F（`cumulative_factors`）はその行より**後**のイベントの積なので、
+    この行は F=1 のまま market_cap が 1/F に出る。**遅れを F に混ぜない**のは、同じ行の per / pbr が正しい
+    から（`e.year >= y` にすると per / pbr が F 倍に壊れる）。
+
+    判定はどちらも「比が 1 と倍率のどちらに近いか」を対数で比べるだけで、しきい値を持たない:
+
+    - 期末後分割か: 当年の発行済株式数 ÷ 前の行（`e.sh_ratio`）が 1 側なら株数は分割前のまま。F 側は期中に
+      効力が生じて株数も動いた分割で、第1経路と同じく遅れは無い（実測 27 件・E05521 など）。前の行の株数も
+      遅れている連続分割（E00066 2024: 前の行の遅れが追いついて株数比 2・倍率 5）も 1 側に入る。
+    - 株数の遅れ: **保存された market_cap がこの行の発行済株式数で計算されている**（market_cap ÷ 株価 ÷
+      株数が 1 側）ときだけ `shares_lag = F`。issued_shares が当時欠けていて純資産 ÷ BPS（分割後の基準）で
+      計算した行は、もともと歪んでいない（実測 E01150 2024: market_cap ÷ 株価 = 3,582 万株・株数 911 万株）。
+    - 1株配当の遅れ: 当年 ÷ 前の行が 1 側なら分割前の実額＝`dps_lag = F`、1/F 側は分割後の基準へ書き直し済み
+      （実測 4 件・E04357 など）で遅れは無い。当年か前の行の配当が無ければ判定しない。div_yield は dps ÷ 株価の
+      1経路でしか計算されないので、market_cap のような保存値の確かめは要らない（実測 321 行すべて整合）。
+      **翌年の配当とは比べない**——分割直後の増配が多く（E00183: 144 円 → 翌年 110 円＝分割前換算 220 円）、
+      分割をまたぐ比較は増配に紛れて誤る。前の行は分割前の基準なので、比べても分割をまたがない。
+
+    **同じ year に通期行が2本ある社（決算期の変更）には入れない。** 係数表のキーは `(edinet_code, year)` で、
+    遅れがどちらの行に当たるかを VIEW が区別できない（実測 E22560 2020: 3 月期は分割前の株数、12 月期は
+    分割後の株数）。行は `(edinet_code, year, period_end)` で引く。
+
+    第1経路（株数と1株指標が同じ年に動く）と登録表のスピンオフ（株数も配当の基準も動かさない）には遅れが無い。
+    倍率が決まっていないイベント（`canonical` が None）は `cumulative_factors` と同じく数えない。
+    """
+    by_row = {(r.edinet_code, r.year, _iso(r.period_end)): r for r in rows}
+    n_rows_in_year = Counter((r.edinet_code, r.year) for r in rows)
+    shares: dict[tuple[str, int], float] = {}
+    dps: dict[tuple[str, int], float] = {}
+    counts: Counter = Counter()
+    listed: dict[str, list] = defaultdict(list)
+    for e in events:
+        if e.source != "bps" or e.canonical is None:
+            continue
+        key = (e.edinet_code, e.year)
+        item = {"edinet_code": e.edinet_code, "year": e.year, "factor": e.canonical}
+        if not e.sh_ratio or e.sh_ratio <= 0:
+            # 検出器の行は株数が必ずある（`_usable`）ので、ここへ来るのは手で作ったイベントだけ。
+            counts["shares_unknown"] += 1
+            continue
+        if not _nearer_one(e.sh_ratio, e.canonical):
+            counts["shares_moved"] += 1
+            continue
+        if n_rows_in_year[key] > 1:
+            counts["duplicate_year"] += 1
+            listed["duplicate_year"].append(item)
+            continue
+        cur = by_row.get((e.edinet_code, e.year, _iso(e.period_end)))
+        prev = by_row.get((e.edinet_code, e.prev_year, _iso(e.prev_period_end)))
+        mc = cur.market_cap if cur is not None else None
+        px = cur.stock_price if cur is not None else None
+        sh = cur.issued_shares if cur is not None else None
+        if not mc or not px or not sh or mc <= 0 or px <= 0 or sh <= 0:
+            counts["mcap_missing"] += 1
+        elif _nearer_one(mc * 1_000_000 / (px * sh), e.canonical):
+            shares[key] = shares.get(key, 1.0) * e.canonical
+            counts["shares_lag"] += 1
+        else:
+            counts["mcap_post_split"] += 1
+            listed["mcap_post_split"].append(dict(item, market_cap=mc, stock_price=px, issued_shares=sh))
+        a = prev.dps if prev is not None else None
+        b = cur.dps if cur is not None else None
+        if not a or not b or a <= 0 or b <= 0:
+            counts["dps_missing"] += 1
+            continue
+        if _nearer_one(b / a, 1.0 / e.canonical):
+            dps[key] = dps.get(key, 1.0) * e.canonical
+            counts["dps_lag"] += 1
+        else:
+            counts["dps_restated"] += 1
+            listed["dps_restated"].append(dict(item, prev_dps=a, dps=b))
+    stats = {
+        "n_shares_lag": counts["shares_lag"],
+        "n_shares_moved": counts["shares_moved"],
+        "n_shares_unknown": counts["shares_unknown"],
+        "n_duplicate_year": counts["duplicate_year"],
+        "n_mcap_post_split": counts["mcap_post_split"],
+        "n_mcap_missing": counts["mcap_missing"],
+        "n_dps_lag": counts["dps_lag"],
+        "n_dps_restated": counts["dps_restated"],
+        "n_dps_missing": counts["dps_missing"],
+        "duplicate_year": listed["duplicate_year"],
+        "mcap_post_split": listed["mcap_post_split"],
+        "dps_restated": listed["dps_restated"],
+    }
+    return shares, dps, stats
+
+
 def _iso(d) -> Optional[str]:
     if d is None:
         return None
@@ -1302,6 +1419,9 @@ class Ledger:
     stats: dict         # 検出器の内訳（夜間ログへ出す）
     factors: dict       # {(edinet_code, year): 累積 F}（F=1.0 の行も含む）
     official: dict      # {edinet_code: [(日付, AdjFactor), ...]}（検出器へ渡した公式イベント）
+    # 期末後分割の年の行の基準の遅れ（#753・`basis_lags`）。{(edinet_code, year): 倍率} で、遅れのある行だけ。
+    shares_lags: dict = field(default_factory=dict)
+    dps_lags: dict = field(default_factory=dict)
 
     def detected_events(self) -> list:
         """検出器が見つけたイベントだけ（登録表のスピンオフ `source="registry"` を除く・#740）。
@@ -1313,7 +1433,11 @@ class Ledger:
         return [e for e in self.events if e.source != "registry"]
 
     def factor_rows(self) -> list[dict]:
-        """`split_adjustment_factors` へ書く行。F=1.0 の行は持たない（VIEW が COALESCE で 1.0 を埋める）。
+        """`split_adjustment_factors` へ書く行。F と2つの遅れが全部 1.0 の行は持たない（VIEW が COALESCE で 1.0 を埋める）。
+
+        **F だけを見て飛ばさない**——期末後分割の年の行は F=1.0 で遅れだけが 1 でない（#753）ので、F=1.0 で
+        飛ばすとこの行が捨てられる。`n_events` / `kinds` は今までどおり F の寄与だけを表す（遅れは同じ年の
+        第2経路のイベント1件から来る）。
 
         寄与イベントの種別を行ごとに引く。**F の値は `factors` をそのまま使い、ここで積を取り直さない**
         （`tests/test_split_adjustment_factors.py` が「寄与集合の積 == factor」を照合して乖離を捕まえる）。
@@ -1324,12 +1448,16 @@ class Ledger:
                 ev_by_ec[e.edinet_code].append(e)
 
         out = []
-        for (ec, year), f in sorted(self.factors.items()):
-            if f == 1.0:
+        for ec, year in sorted(set(self.factors) | set(self.shares_lags) | set(self.dps_lags)):
+            f = self.factors.get((ec, year), 1.0)
+            shares_lag = self.shares_lags.get((ec, year), 1.0)
+            dps_lag = self.dps_lags.get((ec, year), 1.0)
+            if f == 1.0 and shares_lag == 1.0 and dps_lag == 1.0:
                 continue                      # 無補正の行は持たない（VIEW 側が COALESCE で 1.0 を埋める）
             contrib = [e for e in ev_by_ec.get(ec, ()) if e.year > year]
             out.append({
                 "edinet_code": ec, "year": year, "factor": f,
+                "shares_lag": shares_lag, "dps_lag": dps_lag,
                 "n_events": len(contrib),
                 "kinds": ",".join(sorted({e.kind for e in contrib})) or None,
             })
@@ -1466,6 +1594,8 @@ def compute_ledger(rows: Sequence[AnnualRow], *,
     events = events + registered
     # use_canonical=True（既定）＝定番比へ寄せられなかった `unsnapped` を積から外す。
     factors = cumulative_factors(rows, events)
+    # 期末後分割の年の行の基準の遅れ（#753）。F と別に持つ——同じ行の per / pbr は正しい。
+    shares_lags, dps_lags, lag_stats = basis_lags(rows, events)
     # 夜間ログの「公式イベントを持つ社」の数（保留の窓を外したあと＝検出器が見た社数）。
     # 検出器の stats には無いのでここで足す。
     stats["n_official_companies"] = len(official)
@@ -1481,7 +1611,10 @@ def compute_ledger(rows: Sequence[AnnualRow], *,
         "n_applied": len(applied),
         "applied": applied,
     }
-    return Ledger(rows=rows, events=events, stats=stats, factors=factors, official=official)
+    # 遅れの内訳。検出器の stats には無いのでここで足す（夜間ログが読む）。
+    stats["basis_lag"] = lag_stats
+    return Ledger(rows=rows, events=events, stats=stats, factors=factors, official=official,
+                  shares_lags=shares_lags, dps_lags=dps_lags)
 
 
 # ── I/O ─────────────────────────────────────────────────────────────────────
@@ -1624,7 +1757,7 @@ def build_ledger(db, *, bps_path: Optional[bool] = None,
 
 def rebuild_split_adjustment_factors(db, *, bps_path: Optional[bool] = None,
                                      ledger: Optional[Ledger] = None) -> int:
-    """`split_adjustment_factors` を作り直す。戻り値は書いた行数（F≠1.0 の行数）。
+    """`split_adjustment_factors` を作り直す。戻り値は書いた行数（F か遅れが 1.0 でない行数・#753）。
 
     バリュエーション基準の不一致（#655・ADR-0055）を `financial_metrics` VIEW が補正する
     ための係数表を全置換する。**毎晩作り直すのは F が行の固有値ではないから**——F は
@@ -1710,6 +1843,20 @@ def _log_split_adjustment_stats(n: int, stats: dict) -> int:
                      cs.get("not_rescued"), len(cs.get("magnitude_mismatch") or ()))
             for d in cs.get("magnitude_mismatch") or ():
                 log.info("分割補正係数（第2経路・整合度照合）: 倍率の食い違い %s", d)
+    # 期末後分割の年の行の基準の遅れ（#753）も**毎晩出す**。第2経路のイベントがあるのに株数の遅れが 0 件へ
+    # 落ちたら判定が壊れている（2026-09-27 は第2経路 381 件のうち 341 件）。入れなかった行は根拠ごと出す。
+    bl = stats.get("basis_lag") or {}
+    log.info("分割補正係数（期末後分割の年の行の遅れ）: 株数 %d 行（株数が既に動いた %d・時価総額が既に"
+             "分割後 %d・時価総額なし %d・同じ年に通期行が2本 %d・株数なし %d）／配当 %d 行（分割後の基準へ"
+             "書き直し済み %d・配当なし %d）",
+             bl.get("n_shares_lag", 0), bl.get("n_shares_moved", 0), bl.get("n_mcap_post_split", 0),
+             bl.get("n_mcap_missing", 0), bl.get("n_duplicate_year", 0), bl.get("n_shares_unknown", 0),
+             bl.get("n_dps_lag", 0), bl.get("n_dps_restated", 0), bl.get("n_dps_missing", 0))
+    for label, k in (("時価総額が既に分割後", "mcap_post_split"),
+                     ("同じ年に通期行が2本", "duplicate_year"),
+                     ("配当は書き直し済み", "dps_restated")):
+        for r in bl.get(k) or ():
+            log.info("分割補正係数（期末後分割の年の行の遅れ）: %s %s", label, r)
     # 比べなかったペアは**毎晩出す**（#672）。週次の系列が収集の都合で遅く始まる社（2024-05-27 に
     # 225 社）や、取得の失敗で途中が抜けた社が欠損年をまたぐと本物の分割まで外しうるので、
     # 一覧が増えたら中身を確かめる。

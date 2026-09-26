@@ -326,7 +326,9 @@ erDiagram
         string  edinet_code   PK "企業（複合PK）"
         int     year          PK "決算年度（複合PK）"
         float   factor           "累積 F。per/pbr/market_cap は ×F、div_yield/nc_ratio は ÷F"
-        int     n_events         "寄与した企業イベント数（この年より後のものだけ）"
+        float   shares_lag       "期末後分割の年の行の株数の遅れ（既定 1.0）。market_cap/nc_ratio/predicted_market_cap に掛ける・#753"
+        float   dps_lag          "期末後分割の年の行の配当の遅れ（既定 1.0）。div_yield を割る・#753"
+        int     n_events         "F に寄与した企業イベント数（この年より後のものだけ）"
         string  kinds            "寄与イベントの種別（split / composite / reverse / spinoff・昇順カンマ区切り。spinoff は登録表から・#740）"
         datetime computed_at     "全置換した日時"
     }
@@ -590,9 +592,15 @@ erDiagram
 > 食い違っており（[[バリュエーション基準の不一致]]・実測 1,948行/451社＝全 annual 行の 6.41%。
 > 分割に加え、株数の動かない登録済みの株式分配型スピンオフも F に入る・#740）、
 > **この壊れ方はエラーを出さない**——どの値も妥当な株価指標で、最新行は基準が揃うので既定の
-> 画面には出ない（例外は期末後分割の年の行で、最新行でも market_cap / div_yield / nc_ratio が歪む・#753）。`nc_ratio` / `z_nc_ratio` は VIEW 内で**補正後の** `market_cap` から計算される
-> ので別途何もしない。適用した F は `split_factor` 列として露出する（消費側が重ねて掛けては
-> いけない）。**`stock_price` は補正しない**ので、補正された行では
+> 画面には出ない（例外は期末後分割の年の行で、生値では最新行でも market_cap / div_yield / nc_ratio が歪む・#753）。
+> **期末後分割の年の行は F ではなく基準の遅れで直す**（#753・ADR-0055 決定4-11）: その行は1株指標が分割後の
+> 基準なのに期末の発行済株式数（と多くの社で1株配当）が分割前のままなので、係数表の `shares_lag` を
+> `market_cap` に掛け、`dps_lag` で `div_yield` を割る（per / pbr には当てない・どの列がどの遅れを使うかの
+> 唯一の源は `corporate_actions.BASIS_LAG_COLUMN`）。`regression_results` の `predicted_market_cap` にも
+> `shares_lag` だけを掛ける（`sector_ols` が生の `market_cap` から作るので、掛けないと補正後の実績と大小が
+> 逆転する）。`nc_ratio` / `z_nc_ratio` は VIEW 内で**補正後の** `market_cap` から計算される
+> ので別途何もしない。適用した F と遅れは `split_factor` / `split_shares_lag` / `split_dps_lag` 列として
+> 露出する（消費側が重ねて掛けてはいけない）。**`stock_price` は補正しない**ので、補正された行では
 > `per <> stock_price / pl_eps` になる（意図した非対称・[GOTCHAS.md](GOTCHAS.md) 参照）。
 > 係数表は毎晩の `_pipeline_incremental.py` の Phase 4 直後、および手動の全件実行
 > `_pipeline_gh.py` の `point_in_time=True` 版の直後で全置換される（ADR-0055 決定5。入口を2本とも
@@ -626,7 +634,7 @@ erDiagram
 > 全部の結果が変わる。読むのは学習パネルが `plugins.macro_snapshots.use_fin_rows("with_ttm")` の内側で
 > 読むときだけで、**既定は通期のみ**（昇格ゲート＝子3 は未実施）。比率・Zスコア・成長率の式は
 > `financial_metrics_view.sql` と同じ文面で、違いは 4 つ: ①入口が UNION ALL（通期＋`ttm_financial_records`）
-> で F が行ごとに来る ②窓が `(year, basis)` / `(year, industry, basis)` / `(edinet_code, basis ...)`
+> で F と基準の遅れ（#753）が行ごとに来る（TTM 行の遅れは 1.0＝期末後分割の年は TTM の材料にならない）②窓が `(year, basis)` / `(year, industry, basis)` / `(edinet_code, basis ...)`
 > ③TTM 行の成長率・前年差は直前の行が前年度のときだけ出す ④`regression_results` は通期の行にだけ結合。
 > TTM 行の id は負（`financial_records.id` と衝突させない）。読み取り ORM は `FinancialMetricWithTTM`
 > （`FinancialMetric` の列＋`basis`＋`filing_date`）。通期の行が `financial_metrics` と一致することは

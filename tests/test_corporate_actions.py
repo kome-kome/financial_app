@@ -907,6 +907,222 @@ class TestCumulativeFactors:
         assert raw[("E00001", 2019)] == pytest.approx(7.0)
 
 
+class TestBasisLags:
+    """期末後分割の年の行の基準の遅れ（`basis_lags`）— Issue #753・ADR-0055 決定4-11。
+
+    その行は1株指標が分割後の基準に書き直されているのに、期末の発行済株式数（と多くの社で1株配当）は
+    分割前のまま＝per / pbr は揃うが market_cap は 1/F、div_yield は F 倍に出る。**F に混ぜない**
+    （`TestCumulativeFactors.test_only_later_events_count` の「当年は歪まない」は per / pbr について正しい）。
+    判定はどちらも「比が 1 と倍率のどちらに近いか」を対数で比べるだけ。
+    """
+
+    @staticmethod
+    def _r(year, shares, bps, *, price=1000.0, **kw):
+        """market_cap を「株価 × 株数 ÷ 1e6」（百万円）に揃えた行（収集が計算するのと同じ形）。"""
+        return row(year, shares, bps, price=price, market_cap=price * shares / 1e6, **kw)
+
+    @classmethod
+    def _post_period_rows(cls, dps_prev=20.0, dps_cur=20.0):
+        """2021 期の 1 株指標だけが 1:2 分割後の基準に書き直され、株数は 2022 に追随する社。"""
+        return [cls._r(2020, 1000.0, 200.0, eps=100.0, dps=dps_prev),
+                cls._r(2021, 1000.0, 100.0, eps=50.0, dps=dps_cur),
+                cls._r(2022, 2000.0, 105.0, eps=52.0, dps=11.0)]
+
+    @staticmethod
+    def _bps_ev(year, *, canonical, sh_ratio, ec="E00001", **kw):
+        return ev(year, canonical=canonical, sh_ratio=sh_ratio, ec=ec, **kw)._replace(source="bps")
+
+    def test_post_period_split_with_the_pre_split_dividend_lags_both(self):
+        rows = self._post_period_rows()
+        events, _ = C.detect_events(rows, bps_path=True)
+        assert [(e.year, e.source, e.canonical) for e in events] == [(2021, "bps", 2.0)]
+        shares, dps, stats = C.basis_lags(rows, events)
+        assert shares == {("E00001", 2021): pytest.approx(2.0)}
+        assert dps == {("E00001", 2021): pytest.approx(2.0)}
+        assert (stats["n_shares_lag"], stats["n_dps_lag"], stats["n_dps_restated"]) == (1, 1, 0)
+        # F は今までどおり分割した年の行を含まない（per / pbr はこの行で正しい）
+        f = C.cumulative_factors(rows, events)
+        assert (f[("E00001", 2020)], f[("E00001", 2021)]) == (pytest.approx(2.0), pytest.approx(1.0))
+
+    def test_restated_dividend_lags_only_the_shares(self):
+        """当年の配当が前年の 1/2＝分割後の基準へ書き直し済み。÷F すると逆に 1/F へ壊れる。"""
+        rows = self._post_period_rows(dps_cur=10.0)
+        shares, dps, stats = C.basis_lags(rows, C.detect_events(rows, bps_path=True)[0])
+        assert shares == {("E00001", 2021): pytest.approx(2.0)} and dps == {}
+        assert stats["n_dps_restated"] == 1
+        assert stats["dps_restated"] == [{"edinet_code": "E00001", "year": 2021, "factor": 2.0,
+                                          "prev_dps": 20.0, "dps": 10.0}]
+
+    @pytest.mark.parametrize("dps_prev, dps_cur", [(None, 20.0), (20.0, None), (0.0, 20.0)])
+    def test_missing_dividend_lags_only_the_shares(self, dps_prev, dps_cur):
+        """配当が無い行は判定しない（今のまま）。株数の遅れは配当と関係なく入る。"""
+        rows = self._post_period_rows(dps_prev=dps_prev, dps_cur=dps_cur)
+        shares, dps, stats = C.basis_lags(rows, C.detect_events(rows, bps_path=True)[0])
+        assert shares == {("E00001", 2021): pytest.approx(2.0)} and dps == {}
+        assert stats["n_dps_missing"] == 1
+
+    def test_dividend_is_not_compared_with_the_next_year(self):
+        """翌年の配当は分割後の基準で、増配が混ざる。前の行とだけ比べる（分割をまたがない）。"""
+        rows = self._post_period_rows()
+        rows[2] = rows[2]._replace(dps=40.0)     # 分割後に倍へ増配しても判定は変わらない
+        _, dps, _ = C.basis_lags(rows, C.detect_events(rows, bps_path=True)[0])
+        assert dps == {("E00001", 2021): pytest.approx(2.0)}
+
+    def test_market_cap_on_the_post_split_count_gets_no_shares_lag(self):
+        """保存された market_cap が分割後の株数で計算済み（issued_shares が当時欠けて純資産 ÷ BPS で
+        計算した等）なら、もともと歪んでいない。配当の遅れは market_cap と関係なく判定する。"""
+        rows = self._post_period_rows()
+        rows[1] = rows[1]._replace(market_cap=1000.0 * 2000.0 / 1e6)
+        shares, dps, stats = C.basis_lags(rows, C.detect_events(rows, bps_path=True)[0])
+        assert shares == {} and dps == {("E00001", 2021): pytest.approx(2.0)}
+        assert stats["n_mcap_post_split"] == 1
+        assert stats["mcap_post_split"][0]["edinet_code"] == "E00001"
+
+    @pytest.mark.parametrize("field", ["market_cap", "stock_price"])
+    def test_missing_market_cap_gets_no_shares_lag(self, field):
+        """market_cap が出ない行は VIEW でも NULL のまま＝遅れを入れても効かない。判定しない。"""
+        rows = self._post_period_rows()
+        rows[1] = rows[1]._replace(**{field: None})
+        shares, dps, stats = C.basis_lags(rows, C.detect_events(rows, bps_path=True)[0])
+        assert shares == {} and dps == {("E00001", 2021): pytest.approx(2.0)}
+        assert stats["n_mcap_missing"] == 1
+
+    def test_shares_that_already_moved_have_no_lag(self):
+        """株数も F 倍に動いた年＝期中に効力が生じた分割。第1経路と同じく遅れは無い（実測 E05521 など）。"""
+        rows = [self._r(2020, 1000.0, 200.0), self._r(2021, 2000.0, 100.0)]
+        shares, dps, stats = C.basis_lags(rows, [self._bps_ev(2021, canonical=2.0, sh_ratio=2.0)])
+        assert (shares, dps) == ({}, {})
+        assert (stats["n_shares_lag"], stats["n_shares_moved"]) == (0, 1)
+
+    def test_successive_split_counts_the_catch_up_as_flat(self):
+        """前の行の遅れが追いついて株数が 2 倍になった年に 1:5 の期末後分割（実測 E00066 2024 の形）。
+
+        株数比 2 は 1 と 5 のうち 1 に近い＝この分割については分割前の株数のまま。
+        """
+        rows = [self._r(2023, 1000.0, 200.0), self._r(2024, 2000.0, 40.0)]
+        shares, _, _ = C.basis_lags(rows, [self._bps_ev(2024, canonical=5.0, sh_ratio=2.0)])
+        assert shares == {("E00001", 2024): pytest.approx(5.0)}
+
+    def test_reverse_split_lags_in_the_same_direction(self):
+        """併合（F < 1）も同じ式。期末後の 2:1 併合は株数が 2 倍多く残る＝market_cap × 0.5 で直る。"""
+        rows = [self._r(2020, 2000.0, 100.0, dps=10.0), self._r(2021, 2000.0, 200.0, dps=10.0)]
+        shares, dps, _ = C.basis_lags(rows, [self._bps_ev(2021, canonical=0.5, sh_ratio=1.0)])
+        assert shares == {("E00001", 2021): pytest.approx(0.5)}
+        assert dps == {("E00001", 2021): pytest.approx(0.5)}
+
+    def test_other_sources_and_unsnapped_events_have_no_lag(self):
+        """第1経路（株数と1株指標が同じ年に動く）・登録表のスピンオフ（株数も配当の基準も動かさない）・
+        倍率の決まっていないイベントには遅れを入れない。"""
+        rows = [self._r(2020, 1000.0, 200.0), self._r(2021, 1000.0, 100.0)]
+        events = [ev(2021, canonical=2.0, sh_ratio=1.0),                        # source="shares"
+                  ev(2021, canonical=1.5, sh_ratio=1.0)._replace(source="registry", kind="spinoff"),
+                  self._bps_ev(2021, canonical=None, sh_ratio=1.0)]
+        shares, dps, stats = C.basis_lags(rows, events)
+        assert (shares, dps) == ({}, {})
+        assert stats["n_shares_lag"] == stats["n_shares_moved"] == 0
+
+    # 実値（2026-09-26・接続先 local）: (year, period_end, issued_shares, bs_bps, pl_eps, dps, stock_price, market_cap)。
+    # E22560。2020 年に通期行が2本ある（決算期の変更）。遅れが要るのは 3 月期の行（株数 1,457 万＝分割前）だけで、
+    # 12 月期の行は株数 4,400 万（分割後）。係数表のキー (edinet_code, year) では2本を区別できない。
+    DUPLICATE_YEAR = (
+        (2019, "2019-03-31", 14344100.0, 1216.22, 98.99, 35.0, 624.6666870117188, 8960.28),
+        (2020, "2020-03-31", 14567300.0, 450.94, 57.57, 50.0, 1619.0, 23584.46),
+        (2020, "2020-12-31", 44001900.0, 525.83, 89.18, 25.0, 1612.0, 70931.06),
+    )
+    # E01150。2024 期の 1 株指標が 1:4 分割後の基準に書き直され、株数は翌期に x4。2024 行の market_cap
+    # 121,055 百万円は 株価 3,380 円 × 3,582 万株＝分割後の株数で計算済み（issued_shares は 911 万）。
+    MCAP_POST_SPLIT = (
+        (2023, "2023-03-31", 9114528.0, 8731.68, 983.46, 290.0, 1660.0, 14801.77),
+        (2024, "2024-03-31", 9114528.0, 2588.21, 368.64, 400.0, 3380.0, 121055.04),
+        (2025, "2025-03-31", 36458112.0, 2820.55, 372.23, 105.0, 4180.0, 152394.91),
+    )
+    # E04357。2025 期の 1 株指標が分割後の基準に書き直され（bps 1789.27 → 954.39）、株数は翌期に x2。
+    # 配当も 55 円 → 31.5 円と分割後の基準で書かれている＝配当の遅れは入れない（株数の遅れは入る）。
+    RESTATED = (
+        (2024, "2024-03-31", 23543800.0, 1789.27, 144.18, 55.0, 851.0, 20035.77),
+        (2025, "2025-03-31", 23543800.0, 954.39, 77.49, 31.5, 817.0, 19235.28),
+        (2026, "2026-03-31", 47087600.0, 1076.71, 77.92, 34.0, 963.0, 45345.36),
+    )
+    # E02086 の実値の (dps, stock_price, market_cap)（`TestConsistencyCrossCheck.BUFFALO` の行に足す）。
+    # 2026 期も配当 120 円・market_cap は 株価 3,535 円 × 1,200 万株（分割前の株数）。
+    BUFFALO_MARKET = {
+        2019: (60.0, 1046.177978515625, 23264.77), 2020: (60.0, 576.7460327148438, 12825.61),
+        2021: (70.0, 1035.392578125, 23024.93), 2022: (110.0, 1051.5706787109375, 18862.94),
+        2023: (120.0, 881.7015380859375, 14934.15), 2024: (120.0, 984.1622924804688, 16669.62),
+        2025: (120.0, 1147.0, 17549.1), 2026: (120.0, 3535.0, 42420.0),
+    }
+
+    @staticmethod
+    def _real(ec, table):
+        return [row(y, sh, bps, eps=eps, dps=d, price=px, market_cap=mc, ec=ec, period_end=pe)
+                for y, pe, sh, bps, eps, d, px, mc in table]
+
+    def test_real_duplicate_year_e22560_gets_no_lag(self):
+        rows = self._real("E22560", self.DUPLICATE_YEAR)
+        e = self._bps_ev(2020, canonical=3.0, sh_ratio=14567300.0 / 14344100.0, ec="E22560")
+        shares, dps, stats = C.basis_lags(rows, [e])
+        assert (shares, dps) == ({}, {})
+        assert stats["n_duplicate_year"] == 1
+        assert stats["duplicate_year"] == [{"edinet_code": "E22560", "year": 2020, "factor": 3.0}]
+
+    def test_real_market_cap_already_post_split_e01150(self):
+        rows = self._real("E01150", self.MCAP_POST_SPLIT)
+        e = self._bps_ev(2024, canonical=4.0, sh_ratio=1.0, ec="E01150")
+        shares, dps, stats = C.basis_lags(rows, [e])
+        assert shares == {}
+        assert dps == {("E01150", 2024): pytest.approx(4.0)}     # 290 円 → 400 円＝分割前の実額
+        assert stats["n_mcap_post_split"] == 1
+
+    def test_real_restated_dividend_e04357(self):
+        rows = self._real("E04357", self.RESTATED)
+        events, _ = C.detect_events(rows, bps_path=True)
+        assert [(e.year, e.source, e.canonical) for e in events] == [(2025, "bps", 2.0)]
+        shares, dps, _ = C.basis_lags(rows, events)
+        assert shares == {("E04357", 2025): pytest.approx(2.0)} and dps == {}
+
+    def test_real_latest_row_e02086_in_the_ledger(self):
+        """issue #753 の実例。最新行（2026）は株数 1,200 万・配当 120 円とも分割前の基準。
+
+        market_cap 42,420 → 84,840 百万円、div_yield 3.39% → 1.695%（VIEW が ×2 / ÷2 する）。
+        """
+        cc = TestConsistencyCrossCheck
+        rows = []
+        for r in real_rows("E02086", cc.BUFFALO):
+            d, px, mc = self.BUFFALO_MARKET[r.year]
+            rows.append(r._replace(dps=d, stock_price=px, market_cap=mc))
+        led = C.compute_ledger(rows, official=cc.BUFFALO_OFFICIAL, coverage={}, series={},
+                               consistency_crosscheck=True)
+        assert led.shares_lags == {("E02086", 2026): pytest.approx(2.0)}
+        assert led.dps_lags == {("E02086", 2026): pytest.approx(2.0)}
+        assert led.stats["basis_lag"]["n_shares_lag"] == 1
+        by_year = {r["year"]: r for r in led.factor_rows()}
+        latest = by_year[2026]
+        assert (latest["factor"], latest["shares_lag"], latest["dps_lag"],
+                latest["n_events"], latest["kinds"]) == (1.0, 2.0, 2.0, 0, None)
+        assert 42420.0 * latest["shares_lag"] == pytest.approx(84840.0)
+        assert 3.39 / latest["dps_lag"] == pytest.approx(1.695)
+        # それより前の行は遅れを持たない（F だけ）
+        assert {(r["shares_lag"], r["dps_lag"]) for y, r in by_year.items() if y < 2026} == {(1.0, 1.0)}
+
+    def test_real_shimamura_2024_is_the_split_year_row(self):
+        """E03137 しまむら。2024 の 1 株指標は分割後・株数は 2025 に追随＝2024 行に株数の遅れ 2.0。
+
+        検体に株価と時価総額は無いので、収集が計算するのと同じ形（株価 × 株数）に揃える。
+        """
+        rows = [r._replace(market_cap=r.stock_price * r.issued_shares / 1e6)
+                for r in TestBpsPath()._rows()]
+        led = C.compute_ledger(rows, official={}, coverage={}, series={})
+        assert led.shares_lags == {("E03137", 2024): pytest.approx(2.0)}
+
+    def test_factor_rows_skip_only_rows_where_everything_is_one(self):
+        led = C.compute_ledger(self._post_period_rows(), official={}, coverage={}, series={})
+        assert [(r["year"], r["factor"], r["shares_lag"], r["dps_lag"], r["n_events"], r["kinds"])
+                for r in led.factor_rows()] == [
+            (2020, 2.0, 1.0, 1.0, 1, "split"),
+            (2021, 1.0, 2.0, 2.0, 0, None),      # 分割した年の行: F は 1.0 のまま遅れだけ
+        ]                                        # 2022 は3つとも 1.0 なので持たない
+
+
 class TestMatchEvent:
     E = dict(prev_period_end="2023-03-31", period_end="2024-03-31")
 

@@ -12,7 +12,9 @@
 --
 -- 比率・Zスコア・成長率の式は `financial_metrics_view.sql` と**同じ文面**にしてある
 -- （`tests/test_financial_metrics_with_ttm.py` が照合する）。違いは 4 つだけ:
---   1. 入口が UNION ALL（通期 ＋ TTM）で、補正係数 F は行ごとに `fr.factor` として渡る
+--   1. 入口が UNION ALL（通期 ＋ TTM）で、補正係数 F と基準の遅れ（#753）は行ごとに `fr.factor` /
+--      `fr.shares_lag` / `fr.dps_lag` として渡る。TTM 行の遅れは 1.0（材料の間に分割があると合成しない
+--      ので、期末後分割の年は TTM の材料にならない）
 --   2. 窓に `basis` が入る
 --   3. TTM 行の成長率・前年差は、直前の行が前年度のときだけ出す（間が空いた年は NULL）
 --   4. `regression_results` は通期の行にだけ結合する（`sector_ols` は通期のまま・決定8）
@@ -23,6 +25,8 @@ WITH src AS (
         fr.year, fr.period_end, fr.doc_id, fr.source, fr.accounting_standard,
         'annual'::varchar AS basis, NULL::date AS filing_date,
         COALESCE(saf.factor, 1.0::double precision) AS factor,
+        COALESCE(saf.shares_lag, 1.0::double precision) AS shares_lag,
+        COALESCE(saf.dps_lag, 1.0::double precision) AS dps_lag,
         fr.bs_total_assets, fr.bs_current_assets, fr.bs_receivables, fr.bs_inventory,
         fr.bs_noncurrent_assets, fr.bs_buildings, fr.bs_machinery, fr.bs_ppe_total,
         fr.bs_intangible_assets, fr.bs_investments_other_assets,
@@ -50,6 +54,7 @@ WITH src AS (
         t.year, t.period_end, t.doc_id, t.source, NULL::varchar,
         'ttm'::varchar, t.filing_date,
         COALESCE(t.split_factor, 1.0::double precision),
+        1.0::double precision, 1.0::double precision,
         t.bs_total_assets, t.bs_current_assets, t.bs_receivables, t.bs_inventory,
         t.bs_noncurrent_assets, t.bs_buildings, t.bs_machinery, t.bs_ppe_total,
         t.bs_intangible_assets, t.bs_investments_other_assets,
@@ -86,16 +91,18 @@ d AS (
         fr.cf_operating_cf, fr.cf_investing_cf, fr.cf_financing_cf, fr.cf_free_cf,
         fr.cf_net_change_cash, fr.cf_capex,
         fr.stock_price,
-        -- 補正の向きは `financial_metrics` と同じ（唯一の源は COLUMN_DIRECTION）。F は行ごとに
-        -- 違う出どころから来る: 通期は `split_adjustment_factors`、TTM は合成時に決めた
+        -- 補正の向きは `financial_metrics` と同じ（唯一の源は COLUMN_DIRECTION・遅れは BASIS_LAG_COLUMN）。
+        -- F は行ごとに違う出どころから来る: 通期は `split_adjustment_factors`、TTM は合成時に決めた
         -- `ttm_financial_records.split_factor`（今期 H1 の提出日より後のイベントの積）。
-        ROUND((fr.market_cap * fr.factor)::numeric, 2)::double precision AS market_cap,
+        ROUND((fr.market_cap * fr.factor * fr.shares_lag)::numeric, 2)::double precision AS market_cap,
         ROUND((fr.per        * fr.factor)::numeric, 2)::double precision AS per,
         ROUND((fr.pbr        * fr.factor)::numeric, 2)::double precision AS pbr,
-        ROUND((fr.div_yield  / NULLIF(fr.factor, 0))::numeric, 2)::double precision AS div_yield,
+        ROUND((fr.div_yield  / NULLIF(fr.factor * fr.dps_lag, 0))::numeric, 2)::double precision AS div_yield,
         fr.dps,
         fr.employees, fr.issued_shares,
         fr.factor AS split_factor,
+        fr.shares_lag AS split_shares_lag,
+        fr.dps_lag AS split_dps_lag,
         c.is_active, c.delisted_date,
         CASE WHEN COALESCE(fr.pl_revenue,0) <> 0
              THEN ROUND((COALESCE(fr.pl_operating_profit,0) / fr.pl_revenue * 100)::numeric, 2) END AS op_margin,
@@ -174,7 +181,8 @@ SELECT
          THEN ROUND(((n.roe - AVG(n.roe) OVER yws) / COALESCE(NULLIF(STDDEV_SAMP(n.roe) OVER yws, 0), 1.0))::numeric, 4) END AS z_roe_sec,
     CASE WHEN COUNT(n.op_margin) OVER yws >= 2
          THEN ROUND(((n.op_margin - AVG(n.op_margin) OVER yws) / COALESCE(NULLIF(STDDEV_SAMP(n.op_margin) OVER yws, 0), 1.0))::numeric, 4) END AS z_op_margin_sec,
-    rr.predicted_market_cap,
+    -- 株数の遅れだけを掛ける理由は `financial_metrics_view.sql` と同じ（#753）。TTM 行は rr が結合されない。
+    rr.predicted_market_cap * n.split_shares_lag AS predicted_market_cap,
     rr.gap_ratio
 FROM n
 LEFT JOIN regression_results rr

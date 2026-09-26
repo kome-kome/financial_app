@@ -20,9 +20,13 @@ WITH d AS (
         -- バリュエーション基準の不一致の補正（#655・ADR-0055）。株価は遡及調整済みだが分母の
         -- 1株指標（pl_eps / bs_bps / dps / issued_shares）は提出当時の基準なので、分割より前の
         -- 年の行だけ分子と分母で基準が食い違う。向きは列ごとに逆で、唯一の源は
-        -- scripts/measure_split_valuation_bias.py::COLUMN_DIRECTION:
+        -- corporate_actions.COLUMN_DIRECTION:
         --   調整済み株価が分子または係数の列（per / pbr / market_cap）→ ×F
         --   調整済み株価が分母の列（div_yield / nc_ratio）            → ÷F
+        -- **期末後分割の年の行は、F とは別に基準の遅れを当てる**（#753・ADR-0055 決定4-11）。1株指標は
+        -- 分割後の基準に書き直されているのに期末の発行済株式数（と多くの社で1株配当）が分割前のまま
+        -- なので、market_cap に shares_lag を掛け、div_yield を dps_lag で割る（per / pbr は揃っているので
+        -- 遅れを当てない）。どの列がどの遅れを使うかの唯一の源は corporate_actions.BASIS_LAG_COLUMN。
         -- **fr.stock_price は補正しない**——COLUMN_DIRECTION に入っておらず、調整済み株価
         -- そのものとして sector_ols の目的変数や画面が読む値である。その結果、補正された行では
         -- `per <> stock_price / pl_eps` になる（意図した非対称・docs/GOTCHAS.md に記載）。
@@ -30,15 +34,17 @@ WITH d AS (
         -- 付けないと補正前まで double precision だった4列の型が変わる。ORM（`Column(Float)`）経由の
         -- 読み取りは Decimal を float へ直すので気づかないが、生 SQL で読む経路だけが Decimal を
         -- 受け取り、float との演算で静かに落ちる。型を変えずに値だけ直す。
-        ROUND((fr.market_cap * COALESCE(saf.factor, 1.0))::numeric, 2)::double precision AS market_cap,
+        ROUND((fr.market_cap * COALESCE(saf.factor, 1.0) * COALESCE(saf.shares_lag, 1.0))::numeric, 2)::double precision AS market_cap,
         ROUND((fr.per        * COALESCE(saf.factor, 1.0))::numeric, 2)::double precision AS per,
         ROUND((fr.pbr        * COALESCE(saf.factor, 1.0))::numeric, 2)::double precision AS pbr,
-        ROUND((fr.div_yield  / NULLIF(COALESCE(saf.factor, 1.0), 0))::numeric, 2)::double precision AS div_yield,
+        ROUND((fr.div_yield  / NULLIF(COALESCE(saf.factor, 1.0) * COALESCE(saf.dps_lag, 1.0), 0))::numeric, 2)::double precision AS div_yield,
         fr.dps,
         fr.employees, fr.issued_shares,
-        -- 適用した F を露出する（補正が効いた行を SQL と API から見えるようにする）。
-        -- 消費側が重ねて掛けてはいけない＝上の4列には既に反映済み。
+        -- 適用した F と遅れを露出する（補正が効いた行を SQL と API から見えるようにする）。
+        -- 消費側が重ねて掛けてはいけない＝上の4列と下の predicted_market_cap には既に反映済み。
         COALESCE(saf.factor, 1.0::double precision) AS split_factor,
+        COALESCE(saf.shares_lag, 1.0::double precision) AS split_shares_lag,
+        COALESCE(saf.dps_lag, 1.0::double precision) AS split_dps_lag,
         c.is_active, c.delisted_date,
         CASE WHEN COALESCE(fr.pl_revenue,0) <> 0
              THEN ROUND((COALESCE(fr.pl_operating_profit,0) / fr.pl_revenue * 100)::numeric, 2) END AS op_margin,
@@ -73,8 +79,8 @@ WITH d AS (
                          / fr.bs_total_assets)::numeric, 4) END AS accruals
     FROM financial_records fr
     LEFT JOIN companies c ON c.edinet_code = fr.edinet_code
-    -- 分割補正係数（#655・ADR-0055）。**LEFT JOIN なのは F=1.0 の行を持たないから**＝
-    -- 歪んでいる行（実測 1,947 / 30,379）だけを持ち、残りは COALESCE が 1.0 で埋める。
+    -- 分割補正係数（#655・ADR-0055）。**LEFT JOIN なのは F と遅れが全部 1.0 の行を持たないから**＝
+    -- 歪んでいる行だけを持ち、残りは COALESCE が 1.0 で埋める。
     -- 表は毎晩 _pipeline_incremental.py の Phase 4 直後に全置換される（F はその行の年より
     -- 後に起きたイベントの積なので、新しい分割が1件起きると過去全行の値が変わる）。
     LEFT JOIN split_adjustment_factors saf
@@ -131,7 +137,11 @@ SELECT
          THEN ROUND(((n.roe - AVG(n.roe) OVER yws) / COALESCE(NULLIF(STDDEV_SAMP(n.roe) OVER yws, 0), 1.0))::numeric, 4) END AS z_roe_sec,
     CASE WHEN COUNT(n.op_margin) OVER yws >= 2
          THEN ROUND(((n.op_margin - AVG(n.op_margin) OVER yws) / COALESCE(NULLIF(STDDEV_SAMP(n.op_margin) OVER yws, 0), 1.0))::numeric, 4) END AS z_op_margin_sec,
-    rr.predicted_market_cap,
+    -- sector_ols は「予測株価 ÷ 株価 × 生の market_cap」で保存するので、期末後分割の年の行では生の
+    -- market_cap と同じだけ小さい。補正後の market_cap と比べられるよう、株数の遅れだけを掛ける（#753）。
+    -- **F は掛けない**——sector_ols は最新年度の行をそれが最新の間（F=1）に保存し、時価総額は1株の
+    -- 基準によらない量なので、あとで分割が起きても保存値は正しいまま変わらない。
+    rr.predicted_market_cap * n.split_shares_lag AS predicted_market_cap,
     rr.gap_ratio
 FROM n
 LEFT JOIN regression_results rr
