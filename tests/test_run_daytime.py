@@ -1782,6 +1782,98 @@ class TestPeekReportsEveryJobItWillTake:
         capsys.readouterr().out.encode("ascii")
 
 
+class TestPreviewSeesTheInflightReclaim:
+    """`--peek`・`--queue`・ドライランは**中断の回収を見込んで**今日の計画を出す（#742）。
+
+    回収するのが実走だけだった間、前回消えた敏感な仕事（`beta`）がマーカーに残っていても
+    `--peek` はキューの残り（敏感でない仕事）だけを見て `sensitive=false` と答え、
+    `run_daytime.ps1 -Now` は人の作業中に実走を起動した——実走は回収した `beta` を先頭へ
+    戻してそのまま走らせる。#618・ADR-0056 が防ごうとしている状況そのもの。
+    """
+
+    @pytest.fixture
+    def db(self, fake_db, monkeypatch, tmp_path):
+        monkeypatch.setattr(rd, "_session", lambda: fake_db)
+        monkeypatch.setattr(rd, "log_path", lambda *a, **k: tmp_path / "daytime.log")
+        monkeypatch.setattr(rd, "record_footprint", lambda results: None)
+        return fake_db
+
+    @staticmethod
+    def _mark(db, jobs, state=rd._STATE_RUNNING, requeued=0):
+        db.store[rd.KEY_INFLIGHT] = json.dumps(
+            {"jobs": jobs, "job": jobs[0], "state": state, "requeued": requeued,
+             "at": "2026-09-25T00:00:04+00:00"})
+
+    def _peek(self, capsys):
+        assert rd.main(["--peek"]) == 0
+        line = next(ln for ln in capsys.readouterr().out.splitlines()
+                    if ln.lstrip().startswith("{"))
+        return json.loads(line)
+
+    def test_peek_reports_the_interrupted_sensitive_job(self, db, capsys):
+        rd.write_queue(["interim"], db=db)
+        self._mark(db, ["beta"])
+        before = dict(db.store)
+
+        got = self._peek(capsys)
+
+        assert got["sensitive"] is True, "-Now が回収される beta を知らずに起動する"
+        assert got["keys"][0] == "beta" and got["key"] == "beta"
+        assert db.store == before, "peek がキューかマーカーを書き換えた"
+
+    def test_queue_view_dry_run_and_real_run_agree(self, db, capsys, monkeypatch):
+        """見せる並び（`--queue`・`--peek`・ドライラン）と実走で取り出す並びが同じ。"""
+        rd.write_queue(["gate:ttm", "gate:macro"], db=db)
+        self._mark(db, ["gate:demean"])
+
+        peek = self._peek(capsys)["keys"]
+
+        assert rd.main(["--queue"]) == 0
+        today = next(ln for ln in capsys.readouterr().out.splitlines() if "[today]" in ln)
+        assert ", ".join(peek) in today
+
+        ran = []
+
+        def _run_batch(spec, steps, hooks, argv):
+            ran.append([s.name for s in steps])
+            return 0
+
+        monkeypatch.setattr(rd.bc, "run_batch", _run_batch)
+        want = [s.name for s in rd.steps_for_many(sys.executable, peek)[0]]
+        assert rd.main(["--dry-run"]) == 0
+        assert rd.main([]) == 0
+        assert ran == [want, want]
+        assert peek[0] == "gate:demean"
+
+    def test_a_marker_at_the_limit_is_not_previewed(self, db, capsys):
+        """上限に達した仕事は実走も戻さず捨てる＝見込みにも入れない。"""
+        rd.write_queue(["interim"], db=db)
+        self._mark(db, ["beta"], requeued=rd.MAX_REQUEUE)
+        got = self._peek(capsys)
+        assert got["keys"] == ["interim"] and got["sensitive"] is False
+
+    def test_an_already_requeued_marker_adds_nothing(self, db, capsys):
+        """`queued` は既にキュー先頭へ戻してある。見込みで足すと二重に数える。"""
+        rd.write_queue(["beta", "interim"], db=db)
+        self._mark(db, ["beta"], state=rd._STATE_QUEUED, requeued=1)
+        assert self._peek(capsys)["remaining"] == 2
+
+    def test_a_vanished_job_is_not_previewed(self, db, capsys):
+        rd.write_queue(["interim"], db=db)
+        self._mark(db, ["vanished"])
+        assert self._peek(capsys)["keys"] == ["interim"]
+
+    def test_the_queue_view_says_what_the_next_run_will_do(self, db, capsys):
+        rd.write_queue([], db=db)
+        self._mark(db, ["beta"], requeued=rd.MAX_REQUEUE)
+        assert rd.main(["--queue"]) == 0
+        assert "戻さず捨てる" in capsys.readouterr().out
+
+    def test_preview_is_refused_on_the_writing_path(self, db):
+        with pytest.raises(ValueError):
+            rd.apply_schedule(QUIET_DAY, db=db, write=True, preview_reclaim=True)
+
+
 class TestRunBatchCallsTheStepHook:
     """`batch_common.run_batch` が **1ステップ終わるごとに** `on_step_done` を呼ぶ（#707）。
 

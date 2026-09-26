@@ -687,15 +687,30 @@ def notify_interrupted(jobs: Sequence[str], mark: dict, run=subprocess.run) -> O
     return None
 
 
-def reclaim_inflight(db=None, run=subprocess.run) -> list[str]:
-    """前回の中断を回収する。戻り値はログへ書く行（何も起きなければ空）。
+@dataclass(frozen=True)
+class ReclaimPlan:
+    """中断の回収で**これから起きること**（#742）。`plan_reclaim` が作り、書き込まない。
+
+    実走は `reclaim_inflight` がこれを DB へ書き、`--peek`・`--queue`・ドライランは `queue` を
+    見込みとして暦へ渡すだけ——回収を見ない読み手がいると、`-Now` は敏感な仕事の回収を
+    知らずに実走を起動し、人の作業中にそれを走らせる。
+    """
+    queue: list[str]                 # 回収を当てたあとのキュー
+    changed: bool                    # キューを書き直すか
+    inflight: Optional[tuple]        # None=触らない / ("clear",) / ("queued", jobs, requeued)
+    notify: Optional[list[str]]      # 起票する仕事（上限到達のときだけ）
+    lines: list[str]                 # ログへ書く行
+
+
+def plan_reclaim(mark: Optional[dict], queue: Sequence[str]) -> ReclaimPlan:
+    """前回の中断を回収したらどうなるか。**書き込まない**（#742）。
 
     `state` が `running` のまま残っているマーカーだけが「中断された」を意味する。
     `queued`（＝すでに戻してある）はまだ pop されていないだけなので触らない。
     """
-    mark = read_inflight(db)
+    queue = list(queue)
     if not mark or mark.get("state") != _STATE_RUNNING:
-        return []
+        return ReclaimPlan(queue, False, None, None, [])
 
     jobs = inflight_jobs(mark)
     requeued = mark.get("requeued", 0)
@@ -711,38 +726,64 @@ def reclaim_inflight(db=None, run=subprocess.run) -> list[str]:
         lines.append(f"[inflight] 前回取り出した {', '.join(repr(g) for g in gone)} が"
                      f" JOBS に無い（定義が消えたか typo）。戻さず捨てる")
     if not known:
-        clear_inflight(db)
-        return lines
+        return ReclaimPlan(queue, False, ("clear",), None, lines)
 
     label = ", ".join(known)
     if requeued >= MAX_REQUEUE:
-        clear_inflight(db)
         lines.append(f"[inflight] {label} は {MAX_REQUEUE + 1} 回続けて結論を出す前に消えた"
                      f"（最後の取り出し {at}）。戻さず捨てる。"
                      f"戻し続けると毎日同じ計算を繰り返して先へ進まないため")
-        note = notify_interrupted(known, mark, run=run)
-        lines.append(f"[warn] 通知できなかった: {note}" if note
-                     else "[inflight] 起票した")
-        return lines
+        return ReclaimPlan(queue, False, ("clear",), known, lines)
 
     # **重複を作らない**（マーカーとキューが食い違っていたときに同じ仕事を2回走らせない）。
     # ただし取り除くのは**戻す1件につき1つまで**——`bench:rhat-scale` のように同じ名前を
     # わざと複数積む運用があり、全部消すと残りの回まで黙って消える。
-    rest = list(read_queue(db))
+    rest = list(queue)
     dropped: list[str] = []
     for j in known:
         if j in rest:
             rest.remove(j)
             dropped.append(j)
-    write_queue(known + rest, db)
-    write_inflight(known, _STATE_QUEUED, requeued + 1, db)
     lines.append(f"[inflight] 前回 {label} が結論を出す前に消えた（最後の取り出し {at}）。"
                  f"キュー先頭へ戻した（{requeued + 1}/{MAX_REQUEUE} 回目）")
     if dropped:
         # 黙って減らさない。同じ名前を複数積んでいた回は、ここで1つ相殺されている。
         lines.append(f"[inflight] {', '.join(dropped)} はキューにも残っていたので"
                      f"1つ相殺した（二重に走らせないため。足すなら -Enqueue）")
+    return ReclaimPlan(known + rest, True, (_STATE_QUEUED, known, requeued + 1), None, lines)
+
+
+def reclaim_inflight(db=None, run=subprocess.run) -> list[str]:
+    """前回の中断を回収する。戻り値はログへ書く行（何も起きなければ空）。
+
+    判断は `plan_reclaim`（`--peek`・`--queue` と共有）で、ここは書き込むだけ。
+    """
+    mark = read_inflight(db)
+    if not mark or mark.get("state") != _STATE_RUNNING:
+        return []
+    plan = plan_reclaim(mark, read_queue(db))
+    if plan.changed:
+        write_queue(plan.queue, db)
+    if plan.inflight is not None:
+        if plan.inflight[0] == "clear":
+            clear_inflight(db)
+        else:
+            _, jobs, n = plan.inflight
+            write_inflight(jobs, _STATE_QUEUED, n, db)
+    lines = list(plan.lines)
+    if plan.notify:
+        note = notify_interrupted(plan.notify, mark, run=run)
+        lines.append(f"[warn] 通知できなかった: {note}" if note
+                     else "[inflight] 起票した")
     return lines
+
+
+def preview_queue(db=None) -> list[str]:
+    """次の実走が回収を当てたあとのキュー（**書き込まない**・#742）。
+
+    `--peek`・`--queue`・ドライランはこれを暦へ渡す＝見せる並びと実走の並びがずれない。
+    """
+    return plan_reclaim(read_inflight(db), read_queue(db)).queue
 
 
 def carried_requeue(job: str, db=None) -> int:
@@ -916,8 +957,15 @@ def plan_schedule(queue: Sequence[str], marks: dict[str, str], today: date,
     return items, marks, notes
 
 
-def apply_schedule(today: date, db=None, write: bool = True) -> tuple[list[str], list[str]]:
-    """暦を当てる。戻り値は (当てたあとのキュー, ログ行)。`write=False` は読むだけ。"""
+def apply_schedule(today: date, db=None, write: bool = True,
+                   preview_reclaim: bool = False) -> tuple[list[str], list[str]]:
+    """暦を当てる。戻り値は (当てたあとのキュー, ログ行)。`write=False` は読むだけ。
+
+    `preview_reclaim=True` は、次の実走が中断を回収したあとのキューへ暦を当てる（#742）。
+    書かない読み手（`--peek`・`--queue`・ドライラン）専用——実走は回収を先に書いてから呼ぶ。
+    """
+    if preview_reclaim and write:
+        raise ValueError("preview_reclaim は write=False と組み合わせる（見込みを書き込まない）")
     own = db is None
     db = db or _session()
 
@@ -932,7 +980,8 @@ def apply_schedule(today: date, db=None, write: bool = True) -> tuple[list[str],
             raise
 
     try:
-        items, marks, notes = plan_schedule(read_queue(db), read_schedule_marks(db),
+        queue = preview_queue(db) if preview_reclaim else read_queue(db)
+        items, marks, notes = plan_schedule(queue, read_schedule_marks(db),
                                             today, produced_at)
         if write and notes:
             write_queue(items, db)
@@ -1287,8 +1336,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             state = mark.get("state")
             held = ", ".join(inflight_jobs(mark)) or "不明"
             if state == _STATE_RUNNING:
+                back = plan_reclaim(mark, items).changed
                 print(f"  [inflight] 前回 {held} が結論を出す前に消えている"
-                      f"（最後の取り出し {mark.get('at', '不明')}）。次の実走で回収する")
+                      f"（最後の取り出し {mark.get('at', '不明')}）。"
+                      + ("次の実走でキュー先頭へ戻す" if back
+                         else "次の実走は戻さず捨てる（上限到達か JOBS に無い）"))
             elif state == _STATE_QUEUED:
                 print(f"  [inflight] {held} は中断から戻した仕事"
                       f"（{mark.get('requeued', 0)}/{MAX_REQUEUE} 回目）")
@@ -1296,7 +1348,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         # セッション開始時に読めるようにする。読むだけで書かない。
         today = _today()
         print("  [schedule] 暦: " + " / ".join(f"{s.job}=毎月{s.day}日以降" for s in SCHEDULE))
-        planned, notes = apply_schedule(today, write=False)
+        # 回収の見込みも当てる（#742）＝ここで見せる「今日取り出す」が実走と同じ並びになる。
+        planned, notes = apply_schedule(today, write=False, preview_reclaim=True)
         for line in notes:
             print("  " + line)
         override = read_holiday_override(today)
@@ -1327,7 +1380,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         # **キューは減らさない**（判断だけして走らせないことがある）。暦と月次の重なりは
         # 実走と同じ関数で当てる＝見せた並びと実際に走る並びがずれない（#681・#707）。
         today = _today()
-        items, _ = apply_schedule(today, write=False)
+        # **中断の回収も見込む**（#742）。見ないと、前回消えた敏感な仕事を実走が先頭へ戻して
+        # 走らせるのに、ここでは `sensitive=false` と答えて `-Now` が人の作業中に起動する。
+        items, _ = apply_schedule(today, write=False, preview_reclaim=True)
         override = read_holiday_override(today)
         keys, _ = select_jobs(items, today, override)
         key = keys[0] if keys else None
@@ -1381,11 +1436,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     today = _today()
 
     # **キューを読む前に回収する**（#639）。戻した仕事がそのまま今日の1件になる。
-    # ドライランは「何も実行していない」を守るので読み書きしない。
+    # ドライランは「何も実行していない」を守るので書かず、回収の見込みだけ当てる（#742）。
     notes = [] if dry else reclaim_inflight()
     # 暦は回収の後に当てる（#681）。期限を迎えた収集は回収した仕事よりも前に並ぶ——
     # 収集は短く、先頭で待たせないことが watchdog の閾値の前提になっている。
-    items, sched_notes = apply_schedule(today, write=not dry)
+    items, sched_notes = apply_schedule(today, write=not dry, preview_reclaim=dry)
     job_keys, why = select_jobs(items, today, read_holiday_override(today))
     table_note = holiday_table_note(today)
     notes += sched_notes + ([why] if why else []) + ([table_note] if table_note else [])
