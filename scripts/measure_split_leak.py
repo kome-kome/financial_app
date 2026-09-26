@@ -525,8 +525,14 @@ def measure_retry(samples: Sequence[Sample], keys, ready: bool, *,
 
 def compare_factors(computed: Mapping[tuple[str, int], float],
                     table: Mapping[tuple[str, int], float], tol: float = 1e-9) -> dict:
-    """作り直した F と係数表の突合。表は F≠1 の行だけを持つ。"""
+    """作り直した F と係数表の突合。
+
+    表は F か基準の遅れが 1 でない行を持つ（#753）。**突き合わせるのは F なので、表の側も F≠1 の行だけを
+    数える**——期末後分割の年の行は F=1.0 で遅れだけを持つので、絞らないと「表にだけある」に数えて
+    MISMATCH になる。
+    """
     nontrivial = {k: v for k, v in computed.items() if v != 1.0}
+    table = {k: v for k, v in table.items() if v != 1.0}
     only_computed = sorted(set(nontrivial) - set(table))
     only_table = sorted(set(table) - set(nontrivial))
     differ = sorted(k for k in set(nontrivial) & set(table)

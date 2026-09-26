@@ -49,6 +49,16 @@ def conn():
         trans = c.begin()
         try:
             database.TtmFinancialRecord.__table__.create(bind=c, checkfirst=True)
+            # 基準の遅れの列（#753）。移行前の DB でも2本の VIEW を作れるよう、ここで足す（本番の移行は
+            # `database._ensure_tables`）。取り消すトランザクションの中なので DB には残らない。
+            for col in ("shares_lag", "dps_lag"):
+                c.execute(text(
+                    f"ALTER TABLE split_adjustment_factors ADD COLUMN IF NOT EXISTS {col} "
+                    "DOUBLE PRECISION NOT NULL DEFAULT 1.0"))
+            # 比べる相手の `financial_metrics` も今の SQL から作り直す（DB に残っている古い定義と
+            # 比べると、列の足し引きがそのまま「差」に出る）。
+            c.execute(text("DROP VIEW IF EXISTS financial_metrics"))
+            c.execute(text(database.FINANCIAL_METRICS_VIEW_SQL))
             c.execute(text(f"DROP VIEW IF EXISTS {VIEW}"))
             c.execute(text(database.FINANCIAL_METRICS_WITH_TTM_VIEW_SQL))
             yield c

@@ -80,6 +80,12 @@ F や分割窓を得る道は2つだけにする。
 > 「検出0件なら表に触らず失敗」は検出だけで数える（`Ledger.detected_events`）。これで Context の2つの穴はどちらも
 > 台帳の上で塞がった。
 
+> **追記（2026-09-27・[#753](https://github.com/kome-kome/financial_app/issues/753)）**: 同じ1か所で、期末後分割の年の行の
+> **基準の遅れ**（`basis_lags`）を F と別に作り、`Ledger.shares_lags` / `Ledger.dps_lags` として公開した
+> （ADR-0055 決定4-11）。係数表へは `factor_rows` が F と一緒に書く。どの列がどの遅れを使うかの唯一の源は
+> `corporate_actions.BASIS_LAG_COLUMN`（`COLUMN_DIRECTION` の隣）。**TTM へは渡さない**——材料の間に分割があると
+> TTM を合成しないので、期末後分割の年は TTM の材料にならない（with_ttm VIEW の TTM 行の遅れは 1.0）。
+
 ### 3. パイプラインは台帳を一晩に1回だけ作り、係数表と TTM へ同じものを渡す
 
 `_pipeline_incremental.py` / `_pipeline_gh.py` は `ledger = build_ledger(db)` を作り、

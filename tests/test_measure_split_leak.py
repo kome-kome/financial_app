@@ -250,6 +250,13 @@ class TestCompareFactors:
         assert (got["differ"], got["only_computed"], got["only_table"]) == (1, 1, 1)
         assert got["match"] is False
 
+    def test_lag_only_rows_of_the_table_are_not_counted(self):
+        """期末後分割の年の行は F=1.0 で遅れだけを表に持つ（#753）。F の突合では数えない。"""
+        got = L.compare_factors({("A", 1): 2.0, ("A", 2): 1.0},
+                                {("A", 1): 2.0, ("A", 2): 1.0})
+        assert got["match"] is True
+        assert (got["n_table"], got["only_table"]) == (1, 0)
+
 
 class TestRetryTrigger:
     """#687 で測る前に登録した着手条件を数える（層別の平均は出さない）。"""

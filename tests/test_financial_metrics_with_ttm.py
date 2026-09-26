@@ -29,6 +29,8 @@ SHARED_ALIASES = (
     "z_de_ratio", "z_nc_ratio", "z_roe_sec", "z_op_margin_sec",
     "rev_growth", "op_growth", "eps_growth", "delta_roe", "delta_op_margin",
     "market_cap", "per", "pbr", "div_yield",
+    # 期末後分割の年の行の株数の遅れを掛ける（#753）。通期の行で2つの VIEW が食い違わないように。
+    "predicted_market_cap",
 )
 # TTM 側だけが持つ追加条件（間の空いた年度の成長率を出さない）。
 BASIS_GUARD = "AND (n.basis = 'annual' OR LAG(n.year) OVER cw = n.year - 1)"
@@ -75,11 +77,10 @@ class TestSharedExpressions:
     def test_expression_matches(self, alias):
         annual = expressions(ANNUAL_SQL)[alias]
         ttm = expressions(TTM_SQL)[alias]
-        # 違ってよいのは 2 つだけ: F の出どころ（通期は係数表・TTM は行の列）と、
+        # 違ってよいのは 2 つだけ: F と基準の遅れ（#753）の出どころ（通期は係数表・TTM は行の列）と、
         # TTM 行にだけ掛ける前年度の条件。
-        annual = (annual
-                  .replace("NULLIF(COALESCE(saf.factor, 1.0), 0)", "NULLIF(fr.factor, 0)")
-                  .replace("COALESCE(saf.factor, 1.0)", "fr.factor"))
+        for col in ("factor", "shares_lag", "dps_lag"):
+            annual = annual.replace(f"COALESCE(saf.{col}, 1.0)", f"fr.{col}")
         ttm = ttm.replace(" " + BASIS_GUARD, "")
         assert annual == ttm
 
@@ -118,6 +119,15 @@ class TestTtmSpecifics:
     def test_stock_price_is_not_corrected(self):
         """`stock_price` を補正しないのは通期と同じ規約（ADR-0055・GOTCHAS）。"""
         assert "fr.stock_price * fr.factor" not in " ".join(TTM_SQL.split())
+
+    def test_ttm_rows_carry_no_basis_lag(self):
+        """TTM 行の遅れは 1.0（#753）。材料の間に分割があると合成しないので、期末後分割の年は
+        TTM の材料にならない。通期側は係数表から読む。"""
+        body = " ".join(_strip_comments(TTM_SQL).split())
+        assert ("COALESCE(t.split_factor, 1.0::double precision), "
+                "1.0::double precision, 1.0::double precision,") in body
+        assert "COALESCE(saf.shares_lag, 1.0::double precision) AS shares_lag" in body
+        assert "COALESCE(saf.dps_lag, 1.0::double precision) AS dps_lag" in body
 
 
 class TestOrmAndRegistry:

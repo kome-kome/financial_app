@@ -1953,8 +1953,14 @@ def upsert_regression_results_batch(db, rows) -> int:
 # **この表の1行は (edinet_code, year) ごとの累積倍率で、その行の年より後に起きた
 # イベントの積**（`corporate_actions.cumulative_factors` が唯一の源）。
 # 新しい分割が1件起きればその会社の過去全行の値が変わるので、`financial_records` に列として
-# 焼き付ける形は採らず毎晩全置換する。**F=1.0 の行は書かない**（VIEW が COALESCE(...,1.0) で
-# 埋めるので、歪んでいる 1,947 行だけを持てば足りる）。
+# 焼き付ける形は採らず毎晩全置換する。**F と2つの遅れが全部 1.0 の行は書かない**（VIEW が
+# COALESCE(...,1.0) で埋めるので、歪んでいる行だけを持てば足りる）。
+#
+# **期末後分割の年の行は F とは別に「基準の遅れ」を持つ**（#753・ADR-0055 決定4-11・
+# `corporate_actions.basis_lags`）。その行は1株指標が分割後の基準なのに、期末の発行済株式数（と
+# 多くの社で1株配当）が分割前のまま＝F=1.0 でも market_cap が 1/F、div_yield が F 倍に出る。
+# 遅れは F に混ぜない（同じ行の per / pbr は正しい）。どの列がどの遅れを使うかの唯一の源は
+# `corporate_actions.BASIS_LAG_COLUMN`。
 SPLIT_FACTOR_INSERT_CHUNK = 2000
 
 
@@ -1969,7 +1975,12 @@ class SplitAdjustmentFactor(Base):
     # 累積 F。per / pbr / market_cap は ×F、div_yield / nc_ratio は ÷F
     # （向きの唯一の源は corporate_actions.COLUMN_DIRECTION）。
     factor      = Column(Float, nullable=False)
-    n_events    = Column(Integer, nullable=False)   # 寄与したイベント数（gap_years>=2 の積も1行に畳む）
+    # 期末後分割の年の行の基準の遅れ（#753）。1.0 なら遅れなし。VIEW は market_cap（→ nc_ratio）と
+    # predicted_market_cap へ shares_lag を掛け、div_yield を dps_lag で割る。既定 1.0 は「遅れを
+    # 持たなかった時代の行」（列を足す前に書いた行）も今までどおり読めるようにするため。
+    shares_lag  = Column(Float, nullable=False, default=1.0)
+    dps_lag     = Column(Float, nullable=False, default=1.0)
+    n_events    = Column(Integer, nullable=False)   # F に寄与したイベント数（gap_years>=2 の積も1行に畳む）
     kinds       = Column(String(64))                # 寄与イベントの種別（"split" / "composite,split"・昇順。登録表のスピンオフは "spinoff"・#740）
     computed_at = Column(DateTime, default=lambda: datetime.now(timezone.utc),
                          onupdate=lambda: datetime.now(timezone.utc))
@@ -1983,8 +1994,8 @@ def replace_split_adjustment_factors(db, rows) -> int:
     **静かに二重補正になる**。補正前後どちらの値も妥当な株価指標なのでエラーは出ない
     （#508 と同型の沈黙する壊れ方）。
 
-    `rows` は `{edinet_code, year, factor, n_events, kinds}` の dict 列。F=1.0 の行は
-    呼び出し側で落としてから渡す（この関数は受け取った行をそのまま書く）。
+    `rows` は `{edinet_code, year, factor, shares_lag, dps_lag, n_events, kinds}` の dict 列。
+    F と2つの遅れが全部 1.0 の行は呼び出し側で落としてから渡す（この関数は受け取った行をそのまま書く）。
     """
     vals = list(rows)
     now = datetime.now(timezone.utc)
@@ -2308,6 +2319,11 @@ class FinancialMetric(ViewBase):
     # 既に ×F、div_yield/nc_ratio は ÷F された値が上の列に入っている＝**この列は
     # 「補正が効いたか」を見るためのもので、消費側が重ねて掛けてはいけない**。
     split_factor = Column(Float)
+    # 期末後分割の年の行の基準の遅れ（#753・ADR-0055 決定4-11）。1.0 なら遅れなし。market_cap /
+    # nc_ratio / predicted_market_cap には split_shares_lag が、div_yield には split_dps_lag が
+    # **既に反映済み**（split_factor と同じく、消費側が重ねて掛けてはいけない）。
+    split_shares_lag = Column(Float)
+    split_dps_lag = Column(Float)
     # 軽い派生（VIEW が都度算出）
     op_margin = Column(Float); net_margin = Column(Float)
     roe = Column(Float); roa = Column(Float)
@@ -2605,6 +2621,15 @@ def _ensure_tables() -> None:
                             ("n_combos_planned", "INTEGER")):
             conn.execute(text(
                 f"ALTER TABLE plugin_tuned_params ADD COLUMN IF NOT EXISTS {_col} {_type}"
+            ))
+        # 期末後分割の年の行の基準の遅れ（#753・ADR-0055 決定4-11・非破壊・冪等）。既存行は 1.0
+        # ＝遅れを持たなかった時代の補正そのもので、次の夜間の係数表の洗い替えで遅れが入る。
+        # **financial_metrics の2本の VIEW がこの列を読むので、VIEW の作り直し（_ensure_view）より先に
+        # 足す**（init_db は _ensure_tables → _ensure_view の順）。
+        for _col in ("shares_lag", "dps_lag"):
+            conn.execute(text(
+                f"ALTER TABLE split_adjustment_factors ADD COLUMN IF NOT EXISTS {_col} "
+                "DOUBLE PRECISION NOT NULL DEFAULT 1.0"
             ))
         # period_end を VARCHAR(20) → DATE 型に変換するマイグレーション（冪等）
         # SKIP_PERIOD_END_MIGRATION=1 で skip できるフェールセーフ付き

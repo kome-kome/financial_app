@@ -6,7 +6,8 @@
    台帳（`corporate_actions`）の検出器の純関数が出す値と厳密に一致する。
 2. **寄与イベントの集合と factor が整合する**——`kinds` / `n_events` は `Ledger.factor_rows` で
    引き直しているので、`e.year > row.year` の述語が正本から乖離したらここで落ちる。
-3. **F=1.0 の行は書かない**（VIEW が `COALESCE(...,1.0)` で埋める前提）。
+3. **F と2つの遅れが全部 1.0 の行は書かない**（VIEW が `COALESCE(...,1.0)` で埋める前提）。
+   期末後分割の年の行は F=1.0 で遅れ（`shares_lag` / `dps_lag`・#753）だけを持つ。
 4. **検出0件では既存の表に触らず失敗する**——全置換の順序で「消してから失敗」にすると、
    補正が静かに全部外れた VIEW が残る（どの値も妥当な株価指標なのでエラーは出ない）。
 
@@ -264,10 +265,12 @@ def _seed_bps_path_company(db, make_fin, ec="E00004"):
         (2023, 2000.0, 1100.0, 110.0),   # 株数が1年遅れて追随＝倍率の出どころ
     ]
     for year, shares, bps, eps in spec:
+        # market_cap は「株価 × 発行済株式数」（百万円）に揃える。分割した年の行の株数の遅れ（#753）は、
+        # 保存された market_cap がこの行の株数で計算されていることを確かめてから入れる。
         db.add(make_fin(edinet_code=ec, year=year, period_end=date(year, 3, 31),
                         issued_shares=shares, bs_bps=bps, pl_eps=eps, dps=20.0,
                         stock_price=1000.0, per=10.0, pbr=0.5,
-                        div_yield=2.0, market_cap=5000.0))
+                        div_yield=2.0, market_cap=1000.0 * shares / 1e6))
     db.commit()
 
 
@@ -288,9 +291,12 @@ class TestBpsPathReachesTheTable:
         _seed_bps_path_company(db, make_fin)
         rebuild_split_adjustment_factors(db, bps_path=True)
 
-        got = {(r.year, r.factor, r.n_events, r.kinds)
+        got = {(r.year, r.factor, r.shares_lag, r.dps_lag, r.n_events, r.kinds)
                for r in db.query(SplitAdjustmentFactor).filter_by(edinet_code="E00004").all()}
-        assert got == {(2020, 2.0, 1, "split"), (2021, 2.0, 1, "split")}
+        assert got == {(2020, 2.0, 1.0, 1.0, 1, "split"), (2021, 2.0, 1.0, 1.0, 1, "split"),
+                       # 分割した年の行は F=1.0 のまま、株数と配当の遅れだけを持つ（#753）。
+                       # n_events / kinds は F の寄与だけを表すので 0 / None
+                       (2022, 1.0, 2.0, 2.0, 0, None)}
 
     def test_disabled_leaves_the_company_alone(self, db, make_fin):
         _seed_bps_path_company(db, make_fin)
@@ -325,7 +331,7 @@ def _seed_latest_year_bps_company(db, make_fin, ec="E00006"):
         db.add(make_fin(edinet_code=ec, year=year, period_end=date(year, 3, 31),
                         issued_shares=shares, bs_bps=bps, pl_eps=eps, dps=20.0,
                         stock_price=1000.0, per=10.0, pbr=0.5,
-                        div_yield=2.0, market_cap=5000.0))
+                        div_yield=2.0, market_cap=1000.0 * shares / 1e6))
     db.commit()
 
 
@@ -352,9 +358,11 @@ class TestOfficialEventsReachTheTable:
 
         rebuild_split_adjustment_factors(db, bps_path=True)
 
-        got = {(r.year, r.factor, r.n_events, r.kinds)
+        got = {(r.year, r.factor, r.shares_lag, r.n_events, r.kinds)
                for r in db.query(SplitAdjustmentFactor).filter_by(edinet_code="E00006").all()}
-        assert got == {(2020, 2.0, 1, "split"), (2021, 2.0, 1, "split")}
+        # 最新年（分割した年）の行は遅れだけを持つ（#753）。既定の画面に出るのはこの行
+        assert got == {(2020, 2.0, 1.0, 1, "split"), (2021, 2.0, 1.0, 1, "split"),
+                       (2022, 1.0, 2.0, 0, None)}
 
     def test_factor_matches_the_pure_functions_given_the_same_official_events(self, db, make_fin):
         """表の値は、同じ公式イベントを純関数に渡した結果と厳密に一致する（写していない証拠）。"""
@@ -376,12 +384,16 @@ class TestOfficialEventsReachTheTable:
             .order_by(FinancialRecord.edinet_code, FinancialRecord.year).all()]
         events, _ = C.detect_events(rows, bps_path=True,
                                     official_events=load_jquants_adj_factor_events(db))
-        expected = {k: v for k, v in C.cumulative_factors(rows, events).items() if v != 1.0}
-        stored = {(r.edinet_code, r.year): r.factor
+        factors = C.cumulative_factors(rows, events)
+        shares_lags, dps_lags, _ = C.basis_lags(rows, events)
+        expected = {k: (f, shares_lags.get(k, 1.0), dps_lags.get(k, 1.0))
+                    for k, f in factors.items()}
+        expected = {k: v for k, v in expected.items() if v != (1.0, 1.0, 1.0)}
+        stored = {(r.edinet_code, r.year): (r.factor, r.shares_lag, r.dps_lag)
                   for r in db.query(SplitAdjustmentFactor).all()}
         assert stored == expected
         # 食い違った公式値は E00004 の係数を動かさない（翌年の株数 x2 のまま）
-        assert stored[("E00004", 2020)] == pytest.approx(2.0)
+        assert stored[("E00004", 2020)][0] == pytest.approx(2.0)
 
     def test_rebuild_passes_what_the_table_holds(self, db, make_fin, monkeypatch):
         """読み込みを書き忘れると、公式の値は表にあるのに黙って使われない。"""
@@ -431,9 +443,10 @@ class TestWithheldOfficialEventsAreNotUsed:
         """同じ社でも窓の外の公式イベントは今までどおり倍率になる（外し方が広すぎない）。"""
         self._seed(db, make_fin, "2022-01-05")
         rebuild_split_adjustment_factors(db, bps_path=True)
-        got = {(r.year, r.factor)
+        got = {(r.year, r.factor, r.shares_lag)
                for r in db.query(SplitAdjustmentFactor).filter_by(edinet_code=self.EC).all()}
-        assert got == {(2020, 2.0), (2021, 2.0)}
+        # 分割した年（2022）の行は遅れだけを持つ（#753）
+        assert got == {(2020, 2.0, 1.0), (2021, 2.0, 1.0), (2022, 1.0, 2.0)}
 
     def test_withheld_events_are_logged(self, db, make_fin, registered, caplog):
         """外したものはどこにも届かないので、件数と中身を毎晩のログへ出す。"""
@@ -758,6 +771,77 @@ class TestEquityCheckReachesTheTable:
         assert db.query(SplitAdjustmentFactor).filter_by(edinet_code="E00001").count() == 2
 
 
+class TestBasisLagsReachTheTable:
+    """期末後分割の年の行の基準の遅れ（#753・ADR-0055 決定4-11）が係数表まで届くこと。
+
+    判定の中身（株数・配当の比べ方）は `tests/test_corporate_actions.py::TestBasisLags` が純関数で縛る。
+    ここで守るのは、台帳の遅れがそのまま表へ書かれることと、遅れが入るのは第2経路のイベントの年の
+    行だけであること。
+    """
+
+    @staticmethod
+    def _rows(db):
+        return [C.AnnualRow(
+            r.edinet_code, r.year, r.period_end, r.issued_shares, r.bs_bps, r.pl_eps,
+            r.dps, r.stock_price, r.per, r.pbr, r.div_yield, r.market_cap, r.bs_total_equity,
+        ) for r in db.query(FinancialRecord).filter_by(period_type="annual")
+            .order_by(FinancialRecord.edinet_code, FinancialRecord.year).all()]
+
+    def test_lags_land_only_on_the_split_year_rows_of_the_bps_path(self, db, make_fin):
+        _seed_bps_path_company(db, make_fin)
+        _seed_split_company(db, make_fin)
+        rebuild_split_adjustment_factors(db, bps_path=True)
+
+        events, _ = C.detect_events(self._rows(db), bps_path=True)
+        bps_years = {(e.edinet_code, e.year) for e in events
+                     if e.source == "bps" and e.canonical is not None}
+        lagged = {(r.edinet_code, r.year) for r in db.query(SplitAdjustmentFactor).all()
+                  if r.shares_lag != 1.0 or r.dps_lag != 1.0}
+        assert lagged == bps_years == {("E00004", 2022)}
+        # 第1経路の社（株数と1株指標が同じ年に動く）は遅れを持たない
+        assert {(r.shares_lag, r.dps_lag) for r in db.query(SplitAdjustmentFactor)
+                .filter_by(edinet_code="E00001").all()} == {(1.0, 1.0)}
+
+    def test_restated_dividend_keeps_only_the_shares_lag(self, db, make_fin, caplog):
+        """分割した年の配当が分割後の基準へ書き直されていれば、配当の遅れは入れない（今のまま正しい）。"""
+        _seed_bps_path_company(db, make_fin)
+        db.query(FinancialRecord).filter_by(edinet_code="E00004", year=2022).one().dps = 10.0
+        db.commit()                       # 前年 20 円の 1/2＝分割後の基準で書かれた配当
+
+        with caplog.at_level("INFO", logger="collector"):
+            rebuild_split_adjustment_factors(db, bps_path=True)
+
+        r = db.query(SplitAdjustmentFactor).filter_by(edinet_code="E00004", year=2022).one()
+        assert (r.factor, r.shares_lag, r.dps_lag) == (1.0, 2.0, 1.0)
+        assert "配当は書き直し済み" in caplog.text and "E00004" in caplog.text
+
+    def test_market_cap_already_on_the_post_split_count_gets_no_shares_lag(self, db, make_fin, caplog):
+        """保存された market_cap が分割後の株数で計算済みなら、株数の遅れは入れない（実測 E01150 2024 の形）。
+
+        issued_shares が当時欠けていて純資産 ÷ BPS（分割後の基準）で計算した行は、もともと歪んでいない。
+        配当の遅れは market_cap と関係なく判定する。
+        """
+        _seed_bps_path_company(db, make_fin)
+        db.query(FinancialRecord).filter_by(edinet_code="E00004", year=2022).one().market_cap = 2.0
+        db.commit()                       # 株価 1000 円 × 2000 株＝分割後の株数で計算した値
+
+        with caplog.at_level("INFO", logger="collector"):
+            rebuild_split_adjustment_factors(db, bps_path=True)
+
+        r = db.query(SplitAdjustmentFactor).filter_by(edinet_code="E00004", year=2022).one()
+        assert (r.factor, r.shares_lag, r.dps_lag) == (1.0, 1.0, 2.0)
+        assert "時価総額が既に分割後" in caplog.text
+
+    def test_lags_are_logged(self, db, make_fin, caplog):
+        """遅れの内訳は毎晩出す（第2経路のイベントがあるのに 0 件へ落ちたら判定が壊れた合図）。"""
+        _seed_bps_path_company(db, make_fin)
+        with caplog.at_level("INFO", logger="collector"):
+            rebuild_split_adjustment_factors(db, bps_path=True)
+        assert ("分割補正係数（期末後分割の年の行の遅れ）: 株数 1 行（株数が既に動いた 0・時価総額が既に"
+                "分割後 0・時価総額なし 0・同じ年に通期行が2本 0・株数なし 0）／配当 1 行（分割後の基準へ"
+                "書き直し済み 0・配当なし 0）") in caplog.text
+
+
 class TestViewAppliesTheDirections:
     """VIEW 定義 SQL の補正の向きを照合する。
 
@@ -786,6 +870,45 @@ class TestViewAppliesTheDirections:
     def test_split_factor_is_exposed(self):
         """適用した F が列として見える（補正が効いた行を SQL / API から追える）。"""
         assert "AS split_factor" in VIEW_SQL
+
+    def test_every_lag_is_applied_in_the_direction_of_its_column(self):
+        """期末後分割の年の遅れ（#753）は、`BASIS_LAG_COLUMN` の列にだけ F と同じ向きで当たる。
+
+        per / pbr（分母は分割後の基準の1株指標）に遅れを当てると、正しい値を F 倍に壊す。
+        """
+        assert set(C.BASIS_LAG_COLUMN) == set(C.COLUMN_DIRECTION)
+        lags = {v for v in C.BASIS_LAG_COLUMN.values() if v}
+        for col, lag in C.BASIS_LAG_COLUMN.items():
+            if col == "nc_ratio":
+                # 補正後の market_cap から計算される（別の遅れを当てない）。
+                continue
+            line = next(l for l in VIEW_SQL.splitlines()
+                        if f"fr.{col}" in l and "saf.factor" in l)
+            if lag is None:
+                assert not any(f"saf.{x}" in line for x in lags), (
+                    f"{col} には遅れを当てない（分母は分割後の基準）: {line.strip()}")
+                continue
+            op = "*" if C.COLUMN_DIRECTION[col] > 0 else "/"
+            assert f"saf.{lag}" in line, f"{col} が {lag} を使っていない: {line.strip()}"
+            assert op in line.split(f"fr.{col}", 1)[1].split(f"saf.{lag}", 1)[0], (
+                f"{col} の遅れの向きが COLUMN_DIRECTION（{C.COLUMN_DIRECTION[col]:+d}）と違う: "
+                f"{line.strip()}")
+        # nc_ratio の遅れは market_cap と同じ列（VIEW の中で補正後の market_cap から計算するため）
+        assert C.BASIS_LAG_COLUMN["nc_ratio"] == C.BASIS_LAG_COLUMN["market_cap"]
+
+    def test_lags_are_exposed(self):
+        assert "AS split_shares_lag" in VIEW_SQL
+        assert "AS split_dps_lag" in VIEW_SQL
+
+    def test_predicted_market_cap_carries_only_the_shares_lag(self):
+        """sector_ols の保存値は生の market_cap から作るので、株数の遅れだけを掛ける（#753）。
+
+        F は掛けない（保存した時点でその行は最新＝F=1。時価総額は1株の基準によらない）。
+        """
+        body = " ".join(VIEW_SQL.split())
+        assert "rr.predicted_market_cap * n.split_shares_lag AS predicted_market_cap" in body
+        line = next(l for l in VIEW_SQL.splitlines() if "rr.predicted_market_cap" in l)
+        assert "factor" not in line
 
     def test_stock_price_is_left_alone(self):
         """`stock_price` は補正しない（COLUMN_DIRECTION に無い・意図した非対称）。"""
