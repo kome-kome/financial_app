@@ -16,7 +16,8 @@
 ## 測り方
 
 1. 係数表と**同じ入力・同じ関数**でイベントと F を作る（`corporate_actions.build_ledger`）。
-   作った F を `split_adjustment_factors` 表と突き合わせ、ずれていれば結果を信用しない
+   作った F を `split_adjustment_factors` 表と突き合わせ、ずれていれば結果を信用しない。
+   層と標本の F は、そこから登録表のスピンオフ（#740）を除いて作る（`split_events_and_factors`）
 2. 学習パネルと**同じ定義**でサンプルを作る。形成月は各社の月末の週、財務行は
    `macro_snapshots._find_applicable_fin`（期末＋45日）、ラベルは `log(close[i+52] / close[i])`
 3. その財務行より後で最も近いイベントまでの年数と向き（分割 F>1 / 併合 F<1）で層に分ける
@@ -132,6 +133,21 @@ def _iso(v) -> Optional[str]:
     if v is None:
         return None
     return v.isoformat()[:10] if hasattr(v, "isoformat") else str(v)[:10]
+
+
+def split_events_and_factors(ledger) -> tuple[list, dict]:
+    """層と標本の F に使うイベントと F。**登録表のスピンオフ（#740）は入れない**。
+
+    この測定は「分割が起きるまでの年数」で層を切り、`datable_future_points` は公式 `AdjFactor` の
+    日付をイベントの会計年度の窓で探す。スピンオフは株数の変わらない別種のイベントで、「上がった社が
+    分割する」という読みの対象ではなく、入れると同じ社の別の分割の公式日付を取り違えうる。層だけから
+    外して F を残すと `none` 層に F≠1 の標本が混ざるので、F も検出したイベントだけから作り直す。
+    係数表との突合（`compare_factors`）は台帳の F 全体で比べる（表には登録分も入る）。
+    """
+    from corporate_actions import cumulative_factors
+
+    events = ledger.detected_events()
+    return events, cumulative_factors(ledger.rows, events)
 
 
 def events_by_company(events: Sequence) -> dict[str, list]:
@@ -619,7 +635,7 @@ def main(argv: list[str] | None = None) -> int:
         if ledger is None:
             print("annual 行が0件。測れない")
             return 1
-        rows, events, factors = ledger.rows, ledger.events, ledger.factors
+        rows, factors = ledger.rows, ledger.factors
         table = {(ec, int(y)): float(f) for ec, y, f in db.query(
             SplitAdjustmentFactor.edinet_code, SplitAdjustmentFactor.year,
             SplitAdjustmentFactor.factor).all()}
@@ -639,9 +655,11 @@ def main(argv: list[str] | None = None) -> int:
 
     set_refresh(args.refresh_cache)
     prices = _load_prices(args.allow_full_pull)
+    # 層と標本の F は分割だけで作る（登録表のスピンオフを除く・#740）。表との突合は上の全体の F で済んでいる
+    events, split_factors = split_events_and_factors(ledger)
     evs_by_ec = events_by_company(events)
     samples = demean_by_month(build_samples(
-        prices, rows_by_ec, evs_by_ec, factors, _find_applicable_fin))
+        prices, rows_by_ec, evs_by_ec, split_factors, _find_applicable_fin))
     summary = summarize(samples, n_boot=args.n_boot)
     result = verdict(summary)
     trigger = count_datable_future_companies(

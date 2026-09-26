@@ -26,7 +26,8 @@ F や分割窓を得る道は2つだけにする。
 
 **公式イベントは台帳が1回だけ読み、F の検出と TTM の窓の両方に同じ値を使う。** 公式イベントの
 見え方を変えるときは `compute_ledger` の1か所を変えれば両方に効く——保留の窓（#652）に入る
-公式イベントは、そこで外してから両方へ渡す（#739）。
+公式イベントは、そこで外してから両方へ渡す（#739）。登録表のスピンオフ（#568）も同じ1か所で
+F の寄与イベントに足し、TTM の窓にも同じイベントを渡す（#740）。
 
 ## 歪みの向きは列によって逆になる
 
@@ -72,6 +73,10 @@ F や分割窓を得る道は2つだけにする。
 ペアになり、株数と `bs_bps` がたまたま逆向きに動くと交差検証を通る。判定は週次株価に1年以上の
 空白（系列の開始が遅い、または途中で途切れる）がペアの期間の中にあるかで行う（`listing_gap_in_pair`）。
 
+**例外は登録表のスピンオフだけ**（#740）。株式分配型スピンオフは発行済株式数を変えないので、2列からは
+原理的に復元できない。登録表（`SPINOFF_ADJUSTMENTS`）の権利落ち日と係数から、期末が権利落ち日より前の
+年へ 1/係数 を掛ける（`_registered_spinoff_events`）。
+
 ## 構成
 
 登録表 → 検出器（純関数）→ 台帳（純関数）→ I/O の順に並べる。**I/O より上は database /
@@ -110,6 +115,13 @@ log = logging.getLogger("collector")
 # 収集経路（J-Quants）はこの表を**書き込みを止める向きにだけ**使う（#651・`before_spinoff_ex_date`）。
 # 係数を掛けて書かないのは、登録の誤りを本番の株価へ入れないため——止める向きなら、誤登録で
 # 起きるのは「公式値で上書きされない行が残る」ことだけで、値そのものは壊れない。
+#
+# **台帳はこの表を分割補正係数 F の寄与イベントにも使う**（#740・ADR-0055 決定4-9）。DB の株価は
+# 権利落ち日より前へ係数を掛けてあるのに、当時の `pl_eps` / `bs_bps` は子会社込みのまま＝分割と同型の
+# バリュエーション基準の不一致で、株数が動かないので検出器には原理的に見えない。**こちらは止める向き
+# ではない**——誤登録（日付・係数の誤り）は、その社の過去行の per / pbr を VIEW でそのまま動かす。
+# 歯止めは、係数を丸めた小数ではなく根拠の2値から式で持つことと、F に入れた一覧を毎晩ログへ出すこと
+# （「分割補正係数: 登録表のスピンオフ N 件を F に入れた」）。
 #
 # {edinet_code: ((権利落ち日, 係数, 根拠), ...)}
 SPINOFF_ADJUSTMENTS: dict = {
@@ -340,9 +352,10 @@ class ShareEvent(NamedTuple):
     bps_ratio: float
     canonical: Optional[float]
     residual: float
-    kind: str            # split | reverse | composite | unsnapped
+    kind: str            # split | reverse | composite | unsnapped | spinoff（登録表・#740）
     # どちらの経路が拾ったか（#656）。"shares" は株数比を候補ゲートにした第1経路、
     # "bps" は `bs_bps` の年次比を候補ゲートにし `pl_eps` の比で交差検証した第2経路。
+    # "registry" は検出器ではなく台帳が登録表から足したイベント（スピンオフ・#740）。
     # 既定値を持つのは、既存の呼び出し（テストの `ev()` ヘルパー含む）を壊さないため。
     source: str = "shares"
     # 第2経路の倍率を決めた第3の信号＝**翌年**の `issued_shares` 比（#659）。
@@ -354,6 +367,9 @@ class ShareEvent(NamedTuple):
     # 第2経路で**翌年の行が無い**ときに倍率を決めた公式 `AdjFactor` の株数比（#661）。
     # イベント窓の中の公式イベントの積の逆数。`lagged_sh_ratio` とは排他（翌年があれば翌年を使う）。
     official_ratio: Optional[float] = None
+    # 登録表のイベント（`source="registry"`・#740）の権利落ち日 "YYYY-MM-DD"。検出したイベントは None。
+    # 日付が1点で分かるので、TTM の分割窓は会計年度ではなくこの日の1点にする（`split_windows`）。
+    ex_date: Optional[str] = None
 
 
 class MatchResult(NamedTuple):
@@ -1062,12 +1078,12 @@ class SplitWindow(NamedTuple):
     """分割イベントの窓。検出器の `ShareEvent` と公式 `AdjFactor` の両方をこの形へ寄せる。
 
     `start` は「この日より後」、`end` は「この日まで」を表す半開区間 (start, end]。
-    公式イベントは日付が 1 点なので `start == end` になる。
+    公式イベントと登録表のスピンオフは日付が 1 点なので `start` は `end` の前日になる。
     """
     start: Optional[date]
     end: Optional[date]
     canonical: Optional[float]
-    source: str             # detected | awaiting | official
+    source: str             # detected | awaiting | official | spinoff（登録表・#740）
 
 def split_windows(events: Sequence, awaiting: Sequence[dict],
                   official: Sequence[tuple]) -> list:
@@ -1075,10 +1091,18 @@ def split_windows(events: Sequence, awaiting: Sequence[dict],
 
     3 つは形が違うだけで、言っているのは同じ「この窓の中で株数の基準が変わった」である。
     寄せておかないと、判定側が 3 通りの形を知ることになる（そのうち 1 つを足し忘れても
-    もっともらしい結果が返る）。
+    もっともらしい結果が返る）。登録表のスピンオフ（#740）は検出イベントと一緒に `events` で渡り、
+    権利落ち日の 1 点の窓になる。
     """
     out: list = []
     for e in events:
+        ex = _as_date(e.ex_date)
+        if ex is not None:
+            # 権利落ち日が 1 点で分かるので、公式イベントと同じ形の窓にする。会計年度全体の窓にすると、
+            # その 1 年に提出日がある TTM 行まで作らない側へ倒れる。期末が無いイベント（全行が権利落ち前）
+            # を下の会計年度の窓へ流すと、端の欠けた窓を `windows_overlap` が全期間と重なると読む。
+            out.append(SplitWindow(ex - timedelta(days=1), ex, e.canonical, "spinoff"))
+            continue
         out.append(SplitWindow(_as_date(e.prev_period_end), _as_date(e.period_end),
                                e.canonical, "detected"))
     for a in awaiting:
@@ -1122,10 +1146,19 @@ class Ledger:
     （保留の窓など）を通る状態を作らないため。
     """
     rows: list          # AnnualRow（検出器の入力＝通期行）
-    events: list        # ShareEvent（検出したイベント）
+    events: list        # ShareEvent（検出したイベント＋登録表のスピンオフ・#740）
     stats: dict         # 検出器の内訳（夜間ログへ出す）
     factors: dict       # {(edinet_code, year): 累積 F}（F=1.0 の行も含む）
     official: dict      # {edinet_code: [(日付, AdjFactor), ...]}（検出器へ渡した公式イベント）
+
+    def detected_events(self) -> list:
+        """検出器が見つけたイベントだけ（登録表のスピンオフ `source="registry"` を除く・#740）。
+
+        読み手は2つ。係数表の安全網（`rebuild_split_adjustment_factors`）は、検出が壊れた晩を登録表の
+        数行に紛れさせないためにこれで数える。リークの測定（`scripts/measure_split_leak.py`）は、
+        分割の層だけを作るためにこれを使う。
+        """
+        return [e for e in self.events if e.source != "registry"]
 
     def factor_rows(self) -> list[dict]:
         """`split_adjustment_factors` へ書く行。F=1.0 の行は持たない（VIEW が COALESCE で 1.0 を埋める）。
@@ -1153,9 +1186,9 @@ class Ledger:
     def windows_by_company(self) -> dict:
         """TTM が使う分割窓 `{edinet_code: [SplitWindow, ...]}`。
 
-        検出イベント・第2経路の倍率待ち・公式イベントの3種を社ごとに `split_windows` で寄せる。
-        倍率待ちは分割そのものは起きている（倍率が決まっていないだけ）ので、材料の間にあれば
-        TTM を作らない側へ効く。
+        検出イベント・第2経路の倍率待ち・公式イベント・登録表のスピンオフ（#740）を社ごとに
+        `split_windows` で寄せる。倍率待ちは分割そのものは起きている（倍率が決まっていないだけ）ので、
+        材料の間にあれば TTM を作らない側へ効く。
         """
         events_by_ec: dict = defaultdict(list)
         awaiting_by_ec: dict = defaultdict(list)
@@ -1190,6 +1223,50 @@ def _without_withheld(official: Mapping[str, Sequence[tuple[str, float]]]) -> tu
     return kept, withheld
 
 
+def _registered_spinoff_events(rows: Sequence[AnnualRow]) -> tuple[list, list]:
+    """登録表のスピンオフ（`SPINOFF_ADJUSTMENTS`・#568）を F の寄与イベントへ直す（#740）。
+
+    株式分配型スピンオフは発行済株式数を変えないので、検出器（株数比・bps 比）には原理的に見えない。
+    一方 DB（Yahoo）は権利落ち日より前の株価に係数を掛けてあり、当時の `pl_eps` / `bs_bps` は子会社込みの
+    まま＝分割と同型のバリュエーション基準の不一致が起きている。倍率は 1/係数。
+
+    イベントの年 Y は**期末が権利落ち日以降である最初の通期行の year**。`cumulative_factors` は
+    `e.year > row.year` の行にだけ掛けるので、期末が権利落ち日より前の行（Y より前の年）だけに入る。
+    そのような行が無ければ Y = 最終 year + 1（既存の全行が権利落ち前）。**F が掛かる行が1行も無い登録
+    （全行が権利落ち後・通期行の無い社）はイベントにしない**——TTM の材料も全部権利落ち後になり、窓が
+    効く行が無い。株数も1株指標の基準も動かないので `sh_ratio` / `bps_ratio` / `residual` は 1.0。
+
+    `SPINOFF_ADJUSTMENTS` は呼び出しのたびに読む（テストが差し替える）。戻り値は `(イベント, 夜間ログ用の一覧)`。
+    """
+    by_ec: dict = defaultdict(list)
+    for r in rows:
+        by_ec[r.edinet_code].append(r)
+    events: list = []
+    applied: list = []
+    for ec, registered in SPINOFF_ADJUSTMENTS.items():
+        rs = sorted(by_ec.get(ec, ()), key=lambda r: (r.year, _iso(r.period_end) or ""))
+        if not rs:
+            continue                    # 通期行の無い社（F を掛ける行が無い）
+        for ex_date, factor, reason in registered:
+            after = [r for r in rs if _iso(r.period_end) and _iso(r.period_end) >= ex_date]
+            year = after[0].year if after else rs[-1].year + 1
+            before = [r for r in rs if r.year < year]
+            if not before:
+                continue                # 全行が権利落ち後
+            prev = before[-1]
+            e = ShareEvent(
+                edinet_code=ec, year=year, prev_year=prev.year, gap_years=year - prev.year,
+                period_end=after[0].period_end if after else None,
+                prev_period_end=prev.period_end,
+                sh_ratio=1.0, bps_ratio=1.0, canonical=1.0 / factor, residual=1.0,
+                kind="spinoff", source="registry", ex_date=ex_date)
+            events.append(e)
+            applied.append({"edinet_code": ec, "ex_date": ex_date, "factor": e.canonical,
+                            "year": year, "n_rows": len({r.year for r in before}),
+                            "reason": reason})
+    return events, applied
+
+
 def compute_ledger(rows: Sequence[AnnualRow], *,
                    official: Mapping[str, Sequence[tuple[str, float]]],
                    coverage: Mapping[str, Sequence[Sequence[str]]],
@@ -1209,6 +1286,10 @@ def compute_ledger(rows: Sequence[AnnualRow], *,
     - `series`: 週次株価の系列（`load_price_series`）。上場廃止をまたぐペアを比べないため（#672）
     - `bps_path`: None なら検出器の既定（`DEFAULT_BPS_PATH`）に従う。明示するのは前後を測り
       比べるときだけ（`scripts/measure_split_bias_oof.py`）——呼び出し側が既定を書き写すと乖離する
+
+    登録表のスピンオフ（`SPINOFF_ADJUSTMENTS`）は入力ではなく登録表から、検出の後に足す（#740）。
+    F の積にも `Ledger.events`（→ 係数表の寄与種別・TTM の窓）にも入り、検出器の stats（`n_events`・
+    `by_kind`）は検出だけの数のまま残る。足した一覧は `stats["registered_spinoff"]` に残す。
     """
     rows = list(rows)
     # **保留の窓（#652）に入る公式イベントは、検出器にも TTM の窓にも渡さない**（#739）。公式だけが
@@ -1220,6 +1301,11 @@ def compute_ledger(rows: Sequence[AnnualRow], *,
     kw = {} if bps_path is None else {"bps_path": bps_path}
     events, stats = detect_events(rows, official_events=official, price_series=series,
                                   official_coverage=merged, **kw)
+    # **登録表のスピンオフは検出の後に足す**（#740）。株数が動かないので検出器には見えないが、DB の
+    # 株価は権利落ち日より前へ係数を掛けてある。足すのはここ1か所——F の積と `Ledger.events` の両方に
+    # 入るので、係数表の寄与種別と TTM の窓が同じイベントから決まる。
+    registered, applied = _registered_spinoff_events(rows)
+    events = events + registered
     # use_canonical=True（既定）＝定番比へ寄せられなかった `unsnapped` を積から外す。
     factors = cumulative_factors(rows, events)
     # 夜間ログの「公式イベントを持つ社」の数（保留の窓を外したあと＝検出器が見た社数）。
@@ -1230,6 +1316,12 @@ def compute_ledger(rows: Sequence[AnnualRow], *,
         "n_registered_companies": len(WITHHELD_OFFICIAL_ADJUSTMENTS),
         "n_withheld": len(withheld),
         "withheld": withheld,
+    }
+    # F に入れた登録表のスピンオフ。検出ではなく登録で決まる寄与なので、中身を毎晩のログへ出す。
+    stats["registered_spinoff"] = {
+        "n_registered_companies": len(SPINOFF_ADJUSTMENTS),
+        "n_applied": len(applied),
+        "applied": applied,
     }
     return Ledger(rows=rows, events=events, stats=stats, factors=factors, official=official)
 
@@ -1370,7 +1462,8 @@ def rebuild_split_adjustment_factors(db, *, bps_path: Optional[bool] = None,
     だけで、J-Quants の契約窓（2年）に依存しない＝2018年まで遡って復元できる。この復元は
     #654 が公式 `AdjFactor` と突合して**一致率 0.967（29/30・陰性対照の見逃し 0 社）**を
     確認した。上場廃止をまたいで別の実体の行が隣り合うペアを比べないために、週次株価の系列の開始日と
-    途中の空白（`stock_price_weekly`）も読む（#672）。
+    途中の空白（`stock_price_weekly`）も読む（#672）。株数の動かない株式分配型スピンオフだけは
+    登録表（`SPINOFF_ADJUSTMENTS`）から足す（#740・`kinds` は `spinoff`）。
 
     `ledger` はパイプラインが一晩に1回作った台帳（TTM 合成と同じもの）。渡さなければここで作る。
     `bps_path` は株数が追随しない社を拾う第2経路（#656）の ON/OFF で、**None なら検出器の既定
@@ -1384,7 +1477,9 @@ def rebuild_split_adjustment_factors(db, *, bps_path: Optional[bool] = None,
     0 を返す（初回ブートストラップ前・テストのスタブ DB）。行はあるのに係数が1件も作れない
     のは検出が壊れた側なので `RuntimeError` を上げる。**どちらの場合も既存の表には触らない**
     ——全置換の順序で「消してから失敗」にすると、補正が静かに全部外れた VIEW が残る
-    （どの値も妥当な株価指標なのでエラーは出ない）。
+    （どの値も妥当な株価指標なのでエラーは出ない）。**「作れない」は検出だけで数える**（#740）——
+    登録表のスピンオフの行は検出が壊れた晩にも必ず出るので、それを数えるとその数行だけで表が
+    全置換され、他社の補正が静かに全部外れる。
     """
     if ledger is not None and bps_path is not None:
         raise ValueError("ledger と bps_path は同時に渡さない（台帳は作った時点の bps_path で固まっている）")
@@ -1399,12 +1494,15 @@ def rebuild_split_adjustment_factors(db, *, bps_path: Optional[bool] = None,
 
     out = ledger.factor_rows()
     stats = ledger.stats
-    if not out:
-        # 入力はあるのに1件も作れなかった＝検出が壊れた側。**既存の表に触らず失敗する**。
+    detected = cumulative_factors(ledger.rows, ledger.detected_events())
+    if not any(f != 1.0 for f in detected.values()):
+        # 入力はあるのに検出から1件も作れなかった＝検出が壊れた側。**既存の表に触らず失敗する**。
+        # 登録表のスピンオフの行（`out` には入る）は数えない（#740）。
         raise RuntimeError(
-            "分割補正係数が1件も作れなかった（annual 行 %d / 候補ペア %s / 検出イベント %s）。"
-            "既存の係数表は温存する" % (len(ledger.rows), stats.get("n_candidate_pairs"),
-                                        stats.get("n_events")))
+            "分割補正係数が1件も作れなかった（annual 行 %d / 候補ペア %s / 検出イベント %s・"
+            "登録表のスピンオフ %d 件は数えない）。既存の係数表は温存する"
+            % (len(ledger.rows), stats.get("n_candidate_pairs"), stats.get("n_events"),
+               (stats.get("registered_spinoff") or {}).get("n_applied", 0)))
 
     from database import replace_split_adjustment_factors
 
@@ -1454,4 +1552,12 @@ def _log_split_adjustment_stats(n: int, stats: dict) -> int:
              wh.get("n_withheld", 0), wh.get("n_registered_companies", 0))
     for r in wh.get("withheld") or ():
         log.info("分割補正係数: 保留の窓で外した公式イベント %s", r)
+    # 登録表のスピンオフ（#568）を F に入れた件数と中身も**毎晩出す**（#740）。この寄与は検出ではなく
+    # 登録で決まる＝誤登録は VIEW の値をそのまま動かすので、権利落ち日・F・年・行数を見える所に置く。
+    # 登録した社の通期行があるのに 0 件へ戻ったら、登録の日付か台帳の読み込みが壊れている。
+    rs = stats.get("registered_spinoff") or {}
+    log.info("分割補正係数: 登録表のスピンオフ %d 件を F に入れた（登録 %d 社）",
+             rs.get("n_applied", 0), rs.get("n_registered_companies", 0))
+    for r in rs.get("applied") or ():
+        log.info("分割補正係数: 登録表のスピンオフ %s", r)
     return n

@@ -10,6 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
+import corporate_actions as C
 from plugins import macro_snapshots as ms
 from scripts import measure_split_leak as L
 
@@ -51,6 +52,29 @@ class TestEvents:
         assert L.nearest_future_event(evs, 2020).year == 2021
         assert L.nearest_future_event(evs, 2021).year == 2024
         assert L.nearest_future_event(evs, 2024) is None
+
+    def test_registered_spinoff_is_neither_a_stratum_nor_in_the_sample_f(self, monkeypatch):
+        """登録表のスピンオフ（#740）は層にも標本の F にも入れない（分割の読みの対象ではない）。
+
+        係数表との突合は台帳の F 全体で行う（表には登録分も入る）ので、台帳の F はそのまま残る。
+        """
+        monkeypatch.setitem(C.SPINOFF_ADJUSTMENTS, "E99998",
+                            (("2021-09-27", 0.5, "テスト用の登録・#740"),))
+
+        def annual(ec, year, shares, bps):
+            return C.AnnualRow(ec, year, "%d-03-31" % year, shares, bps, 100.0, 10.0,
+                               1000.0, 10.0, 1.0, 1.0, 500.0)
+
+        rows = [annual("E99998", y, 1000.0, 500.0) for y in (2020, 2021, 2022)]
+        rows += [annual("E00001", 2020, 1000.0, 210.0), annual("E00001", 2021, 2000.0, 105.0)]
+        ledger = C.compute_ledger(rows, official={}, coverage={}, series={})
+
+        events, factors = L.split_events_and_factors(ledger)
+        assert [(e.edinet_code, e.kind) for e in events] == [("E00001", "split")]
+        assert "E99998" not in L.events_by_company(events)
+        assert factors[("E99998", 2020)] == 1.0
+        assert factors[("E00001", 2020)] == pytest.approx(2.0)
+        assert ledger.factors[("E99998", 2020)] == pytest.approx(2.0)
 
 
 class TestStratum:

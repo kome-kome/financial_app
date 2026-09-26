@@ -36,6 +36,9 @@
    分割そのものは起きている）。
 3. 公式 `AdjFactor`（`jquants_adj_factor_events`）の日付が危ない窓の中にある。
 
+登録表のスピンオフ（`corporate_actions.SPINOFF_ADJUSTMENTS`・#740）も、権利落ち日の1点の窓として
+2 と同じく効く（株数は動かないが、権利落ち日の前後で DB の株価の基準が変わる）。
+
 **1.4 倍未満の小さな分割（1:1.1 の無償割当など）は、公式の契約窓（2024-06 以降）の外では
 拾えない。** 既存の通期の補正（F）と同じ制約で、ADR-0051 に明記した。
 
@@ -241,12 +244,12 @@ def reject_reason(annual_prev: SourceRow, h1_prev: SourceRow, h1_cur: SourceRow,
         if basis_prev.consolidation != basis_cur.consolidation:
             return "consolidation_change"
 
-    # ── 基準（分割・併合）。危ない窓は「前期 H1 の提出日 〜 今期 H1 の提出日」──
+    # ── 基準（分割・併合・スピンオフ）。危ない窓は「前期 H1 の提出日 〜 今期 H1 の提出日」──
     danger_start, danger_end = h1_prev.filing_date, h1_cur.filing_date
     for w in windows:
         if windows_overlap(w, danger_start, danger_end):
-            return {"official": "split_official", "awaiting": "split_awaiting"}.get(
-                w.source, "split_detected")
+            return {"official": "split_official", "awaiting": "split_awaiting",
+                    "spinoff": "split_spinoff"}.get(w.source, "split_detected")
     pairs = ((annual_prev, h1_cur), (h1_prev, annual_prev), (h1_prev, h1_cur))
     for lhs, rhs in pairs:
         if ratio_moved(lhs.values.get(SHARES_COLUMN), rhs.values.get(SHARES_COLUMN),
