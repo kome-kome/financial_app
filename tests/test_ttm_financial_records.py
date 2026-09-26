@@ -134,6 +134,35 @@ class TestWithheldOfficialEvent:
         assert self._rebuild_with_official(db, "2027-01-05").split_factor == pytest.approx(1.5)
 
 
+class TestRegisteredSpinoff:
+    """登録表のスピンオフ（#568）は権利落ち日の 1 点の窓として TTM に効く（#740）。
+
+    DB の株価は権利落ち日より前へ係数を掛けてあり、それより前に提出した材料の1株指標は子会社込み。
+    提出日より後の権利落ちは F（= 1/係数）になり、危ない窓（前期 H1 の提出日, 今期 H1 の提出日]の
+    中の権利落ちはその行を作らない。登録は架空の社で行う（実登録は根拠の Issue で変わりうる）。
+    """
+    EC = "E99998"
+    KEEP = (3820.0 - 1760.0) / 3820.0
+
+    def _register(self, monkeypatch, ex_date):
+        monkeypatch.setitem(C.SPINOFF_ADJUSTMENTS, self.EC,
+                            ((ex_date, self.KEEP, "テスト用の登録・#740"),))
+
+    def test_ex_date_after_the_filing_is_the_factor(self, db, monkeypatch):
+        self._register(monkeypatch, "2026-06-01")          # 今期 H1 の提出（2025-11-14）より後
+        seed(db, ec=self.EC)
+        T.rebuild_ttm_financial_records(db)
+        (r,) = db.query(TtmFinancialRecord).all()
+        assert r.split_factor == pytest.approx(1.0 / self.KEEP)
+
+    def test_ex_date_between_the_materials_is_not_composed(self, db, monkeypatch):
+        self._register(monkeypatch, "2025-06-02")          # (2024-11-14, 2025-11-14] の中
+        seed(db, ec=self.EC)
+        with pytest.raises(RuntimeError, match="split_spinoff"):
+            T.rebuild_ttm_financial_records(db)
+        assert db.query(TtmFinancialRecord).count() == 0
+
+
 class TestTable:
     def test_financial_columns_mirror_financial_records(self):
         """財務列は `FinancialRecord` の複製＝再分類項目を増やす場所は1箇所のまま。"""

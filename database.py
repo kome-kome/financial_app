@@ -1970,7 +1970,7 @@ class SplitAdjustmentFactor(Base):
     # （向きの唯一の源は corporate_actions.COLUMN_DIRECTION）。
     factor      = Column(Float, nullable=False)
     n_events    = Column(Integer, nullable=False)   # 寄与したイベント数（gap_years>=2 の積も1行に畳む）
-    kinds       = Column(String(64))                # 寄与イベントの種別（"split" / "composite,split"・昇順）
+    kinds       = Column(String(64))                # 寄与イベントの種別（"split" / "composite,split"・昇順。登録表のスピンオフは "spinoff"・#740）
     computed_at = Column(DateTime, default=lambda: datetime.now(timezone.utc),
                          onupdate=lambda: datetime.now(timezone.utc))
 

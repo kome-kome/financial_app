@@ -452,6 +452,71 @@ class TestWithheldOfficialEventsAreNotUsed:
             C.WITHHELD_OFFICIAL_ADJUSTMENTS) in caplog.text
 
 
+class TestRegisteredSpinoffEntersTheTable:
+    """登録表のスピンオフ（#568）は係数表へ `kinds="spinoff"` の行として入る（#740）。
+
+    株数が動かないので検出器には見えない。登録はテスト用の社に架空の権利落ち日を置いて行う
+    （実登録 E02086 の確認は `tests/test_corporate_actions.py` の1本に閉じ込めてある）。
+    """
+    EC = "E99998"
+    KEEP = (3820.0 - 1760.0) / 3820.0
+
+    @pytest.fixture
+    def registered(self, monkeypatch):
+        # 株数の動かない社（2019〜2022・3月期）の 2021年3月期と 2022年3月期の間に権利落ちを置く
+        monkeypatch.setitem(C.SPINOFF_ADJUSTMENTS, self.EC,
+                            (("2021-09-27", self.KEEP, "テスト用の登録・#740"),))
+
+    def test_rows_before_the_ex_date_are_written(self, db, make_fin, registered):
+        """期末が権利落ち日より前の年だけが書かれ、同じ晩の他社の行は変わらない。"""
+        _seed_quiet_company(db, make_fin, ec=self.EC)
+        _seed_split_company(db, make_fin)
+        rebuild_split_adjustment_factors(db)
+
+        got = {(r.year, r.n_events, r.kinds): r.factor
+               for r in db.query(SplitAdjustmentFactor).filter_by(edinet_code=self.EC).all()}
+        assert got == pytest.approx({(y, 1, "spinoff"): 1.0 / self.KEEP for y in (2019, 2020, 2021)})
+        assert {(r.year, r.factor, r.kinds)
+                for r in db.query(SplitAdjustmentFactor).filter_by(edinet_code="E00001").all()} == {
+            (2019, 2.0, "split"), (2020, 2.0, "split")}
+
+    def test_registry_alone_is_not_a_working_detector(self, db, make_fin, registered):
+        """F を持つのが登録表の社だけの晩は、検出が壊れた晩と同じく既存の表に触らず失敗する。
+
+        登録表の行は検出が壊れても必ず出る。それを数えると、その数行だけで表が全置換されて
+        他社の補正が静かに全部外れる（ADR-0055 決定5）。
+        """
+        _seed_quiet_company(db, make_fin, ec=self.EC)
+        replace_split_adjustment_factors(
+            db, [{"edinet_code": "E09999", "year": 2020, "factor": 3.0,
+                  "n_events": 1, "kinds": "split"}])
+        db.commit()
+
+        with pytest.raises(RuntimeError, match="1件も作れなかった.*スピンオフ 1 件は数えない"):
+            rebuild_split_adjustment_factors(db)
+
+        db.rollback()
+        survived = db.query(SplitAdjustmentFactor).all()
+        assert [(r.edinet_code, r.year, r.factor) for r in survived] == [("E09999", 2020, 3.0)]
+
+    def test_applied_spinoffs_are_logged(self, db, make_fin, registered, caplog):
+        """F に入れた登録は検出ではなく登録で決まるので、件数と中身を毎晩のログへ出す。"""
+        _seed_quiet_company(db, make_fin, ec=self.EC)
+        _seed_split_company(db, make_fin)
+        with caplog.at_level("INFO", logger="collector"):
+            rebuild_split_adjustment_factors(db)
+        assert "登録表のスピンオフ 1 件を F に入れた" in caplog.text
+        assert "2021-09-27" in caplog.text
+
+    def test_zero_is_logged_too(self, db, make_fin, caplog):
+        """F に入れた登録が無い晩も 0 件の行を出す（登録した社の行があるのに 0 件なら壊れた合図）。"""
+        _seed_split_company(db, make_fin)
+        with caplog.at_level("INFO", logger="collector"):
+            rebuild_split_adjustment_factors(db)
+        assert "登録表のスピンオフ 0 件を F に入れた（登録 %d 社）" % len(
+            C.SPINOFF_ADJUSTMENTS) in caplog.text
+
+
 def _seed_relisted_company(db, make_fin, ec="E00007"):
     """E05714 型: 上場廃止した旧社の行と、再上場した新社の行が欠損年をまたいで隣り合う社（#672）。
 

@@ -1269,6 +1269,108 @@ class TestLedger:
         assert [r["edinet_code"] for r in ledger.stats["official_absence"]["rejected"]] == [
             self.WITHHELD_EC]
 
+    # 登録表のスピンオフ（#568）も架空の社を登録して確かめる。実登録（E02086）の確認は
+    # `test_real_registration_is_e02086` の1本に閉じ込める（根拠の Issue で登録が変われば、そこだけ直す）。
+    SPINOFF_EC = "E99998"
+    KEEP = (3820.0 - 1760.0) / 3820.0      # E02086 と同じ形（権利付最終日の終値と分配株式の初値から）
+
+    def _register_spinoff(self, monkeypatch, ex_date="2024-09-27"):
+        monkeypatch.setitem(C.SPINOFF_ADJUSTMENTS, self.SPINOFF_EC,
+                            ((ex_date, self.KEEP, "テスト用の登録・#740"),))
+
+    def _quiet_rows(self, years=range(2019, 2027), ec=None):
+        """株数も1株純資産も動かない3月期の社。検出器には何も見えない。"""
+        return [row(y, 1000.0, 500.0, ec=ec or self.SPINOFF_EC) for y in years]
+
+    def test_spinoff_enters_f_only_before_the_ex_date(self, monkeypatch):
+        """期末が権利落ち日より前の年（2019〜2024）だけに 1/係数 が入る（#740）。
+
+        株数が動かないので検出器には見えない。2025年3月期は期末が権利落ち（2024-09-27）より後で、
+        株価も1株指標も子会社を除いた基準で揃っている。
+        """
+        self._register_spinoff(monkeypatch)
+        ledger = C.compute_ledger(self._quiet_rows(), **self.NO_INPUT)
+
+        f = 1.0 / self.KEEP
+        got = {y: ledger.factors[(self.SPINOFF_EC, y)] for y in range(2019, 2027)}
+        assert got == pytest.approx({**{y: f for y in range(2019, 2025)}, 2025: 1.0, 2026: 1.0})
+        assert [(r["year"], r["n_events"], r["kinds"]) for r in ledger.factor_rows()] == [
+            (y, 1, "spinoff") for y in range(2019, 2025)]
+        (e,) = ledger.events
+        assert (e.year, e.kind, e.source, e.ex_date) == (2025, "spinoff", "registry", "2024-09-27")
+        # 検出器の数は検出だけのまま（夜間ログの「イベント N 件・種別」に登録を混ぜない）
+        assert ledger.stats["n_events"] == 0 and ledger.stats["by_kind"] == {}
+        (a,) = ledger.stats["registered_spinoff"]["applied"]
+        assert (a["edinet_code"], a["ex_date"], a["year"], a["n_rows"]) == (
+            self.SPINOFF_EC, "2024-09-27", 2025, 6)
+        assert a["factor"] == pytest.approx(f) and "#740" in a["reason"]
+
+    def test_spinoff_and_a_detected_split_multiply(self, monkeypatch):
+        """同じ社に検出した分割があれば F は積になり、寄与の種別も両方を持つ。"""
+        self._register_spinoff(monkeypatch)
+        ec = self.SPINOFF_EC
+        rows = [row(2019, 1000.0, 200.0, ec=ec), row(2020, 1000.0, 210.0, ec=ec)] + [
+            row(y, 2000.0, 105.0, ec=ec) for y in range(2021, 2026)]     # 2021 年に 1:2 分割
+        ledger = C.compute_ledger(rows, **self.NO_INPUT)
+
+        f = 1.0 / self.KEEP
+        assert [(r["year"], r["factor"], r["n_events"], r["kinds"]) for r in ledger.factor_rows()] == [
+            (2019, pytest.approx(2.0 * f), 2, "spinoff,split"),
+            (2020, pytest.approx(2.0 * f), 2, "spinoff,split"),
+            *[(y, pytest.approx(f), 1, "spinoff") for y in range(2021, 2025)]]
+
+    def test_detected_events_leave_out_the_registry(self, monkeypatch):
+        """`detected_events()` は検出器のイベントだけ＝安全網とリークの測定が数える集合（#740）。"""
+        self._register_spinoff(monkeypatch)
+        ledger = C.compute_ledger(self._split_rows() + self._quiet_rows(), **self.NO_INPUT)
+        assert [e.source for e in ledger.events] == ["shares", "registry"]
+        assert [(e.edinet_code, e.kind) for e in ledger.detected_events()] == [("E00001", "split")]
+
+    def test_ex_date_after_the_last_row_covers_every_row(self, monkeypatch):
+        """権利落ち日が最終行の期末より後なら、既存の全行が権利落ち前＝全行に入る。"""
+        self._register_spinoff(monkeypatch, ex_date="2027-06-01")
+        ledger = C.compute_ledger(self._quiet_rows(), **self.NO_INPUT)
+        assert [r["year"] for r in ledger.factor_rows()] == list(range(2019, 2027))
+        (e,) = ledger.events
+        assert (e.year, e.period_end, e.prev_period_end) == (2027, None, "2026-03-31")
+
+    def test_registration_before_every_row_is_not_an_event(self, monkeypatch):
+        """全行が権利落ち後なら F を掛ける行が無い＝イベントにしない（TTM の窓にもならない）。"""
+        self._register_spinoff(monkeypatch, ex_date="2018-09-27")
+        ledger = C.compute_ledger(self._quiet_rows(), **self.NO_INPUT)
+        assert ledger.events == [] and ledger.factor_rows() == []
+        assert self.SPINOFF_EC not in ledger.windows_by_company()
+        assert ledger.stats["registered_spinoff"]["n_applied"] == 0
+
+    @pytest.mark.parametrize("ex_date", ["2024-09-27", "2027-06-01"])
+    def test_ttm_window_is_the_ex_date_alone(self, monkeypatch, ex_date):
+        """TTM の窓は権利落ち日の 1 点（公式イベントと同じ形）で、会計年度の窓にしない。
+
+        会計年度全体の窓にすると、その 1 年に提出日がある TTM 行まで作らない側へ倒れる。期末の無い
+        イベント（全行が権利落ち前・2027-06-01）でも端は欠けない＝全期間と重なる窓にならない。
+        """
+        self._register_spinoff(monkeypatch, ex_date=ex_date)
+        ledger = C.compute_ledger(self._quiet_rows(), **self.NO_INPUT)
+        (w,) = ledger.windows_by_company()[self.SPINOFF_EC]
+        ex = date.fromisoformat(ex_date)
+        assert (w.start, w.end, w.source) == (ex - timedelta(days=1), ex, "spinoff")
+        assert w.canonical == pytest.approx(1.0 / self.KEEP)
+
+    def test_nothing_applied_is_still_counted(self):
+        """F に入れた登録が無い晩も件数を持つ（夜間ログは 0 件の行を出す）。"""
+        ledger = C.compute_ledger(self._split_rows(), **self.NO_INPUT)
+        assert ledger.stats["registered_spinoff"] == {
+            "n_registered_companies": len(C.SPINOFF_ADJUSTMENTS), "n_applied": 0, "applied": []}
+
+    def test_real_registration_is_e02086(self):
+        """実登録: E02086（メルコHD → シマダヤ・権利落ち 2024-09-27）の 2019〜2024年度に F=1.854369。
+
+        #466 で実測した公式 / DB 比と同じ値。実登録の確認はこの1本に閉じ込める。
+        """
+        ledger = C.compute_ledger(self._quiet_rows(ec="E02086"), **self.NO_INPUT)
+        got = {y: round(ledger.factors[("E02086", y)], 6) for y in range(2019, 2027)}
+        assert got == {**{y: 1.854369 for y in range(2019, 2025)}, 2025: 1.0, 2026: 1.0}
+
 
 
 def test_pure_blocks_do_not_import_heavy_modules_at_top_level():

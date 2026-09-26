@@ -74,6 +74,12 @@ F や分割窓を得る道は2つだけにする。
 > 公式の受信区間がイベント窓を覆えば、#668 の不在判定がその社の第1経路を**補正しない側へ**外す。
 > DB の株価は遡及調整されていない＝F を掛けないという登録の意味と同じ向きなので、そのまま受け入れた。
 
+> **追記（2026-09-26・[#740](https://github.com/kome-kome/financial_app/issues/740)）**: 同じ1か所で、登録表のスピンオフ
+> （`SPINOFF_ADJUSTMENTS`）を F の寄与イベントに足した（`kind="spinoff"`・`source="registry"`・ADR-0055 決定4-9）。
+> `Ledger.events` に入るので、係数表の寄与種別と TTM の窓（権利落ち日の 1 点）が同じイベントから決まる。検出器の数と
+> 「検出0件なら表に触らず失敗」は検出だけで数える（`Ledger.detected_events`）。これで Context の2つの穴はどちらも
+> 台帳の上で塞がった。
+
 ### 3. パイプラインは台帳を一晩に1回だけ作り、係数表と TTM へ同じものを渡す
 
 `_pipeline_incremental.py` / `_pipeline_gh.py` は `ledger = build_ledger(db)` を作り、
