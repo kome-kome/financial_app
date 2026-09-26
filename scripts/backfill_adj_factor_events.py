@@ -34,6 +34,11 @@
     python -m scripts.backfill_adj_factor_events               # 取り込む（約100社で約35分）
     python -m scripts.backfill_adj_factor_events --only E03137,E01234
     python -m scripts.backfill_adj_factor_events --reasons absence   # 第1経路の不在確認だけ（約93社・約31分）
+    python -m scripts.backfill_adj_factor_events --reasons awaiting,crosscheck --consistency-crosscheck
+
+`--consistency-crosscheck` は、第2経路の整合度照合（#751・ADR-0055 決定4-10）を有効にした検出結果から
+対象を選ぶ。照合を既定で入れる前に、それで倍率待ちになる期末後分割の社と、翌年の株数で倍率を決めた社の
+公式を先に取り込んで測るためのもの（取り込み自体は係数表を変えない＝照合が既定で切りなら補正は動かない）。
 
 **夜間バッチ（JST 17:20〜・約70分）と重ねない**。catchup と J-Quants のレート制限（約5回/分）を
 取り合い、429 で両方の取得が欠ける。書き込み先はローカル正本だけ（ADR-0038）。
@@ -124,7 +129,9 @@ async def _run(args) -> dict:
         else:
             rows = M.load_annual_rows(db)
             # 公式も取得記録も渡さない＝不在で外す前の検出結果（`choose_targets` の約束）。
-            events, stats = C.detect_events(rows)
+            # 整合度照合（#751）は明示したときだけ有効にする。無指定なら検出器の既定に従う（書き写さない）。
+            kw = {"consistency_crosscheck": True} if args.consistency_crosscheck else {}
+            events, stats = C.detect_events(rows, **kw)
             targets = choose_targets(events, stats, cover, reasons=args.reasons)
             n_awaiting = len(stats["bps_path"]["awaiting_magnitude"])
         meta = M.load_company_meta(db, list(targets))
@@ -202,6 +209,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     ap.add_argument("--only", help="edinet_code をカンマ区切りで指定（対象選びを省く）")
     ap.add_argument("--reasons", type=_parse_reasons, default=REASONS,
                     help=f"対象社を選ぶ理由をカンマ区切りで（既定: {','.join(REASONS)}）")
+    ap.add_argument("--consistency-crosscheck", action="store_true",
+                    help="第2経路の整合度照合（#751）を有効にした検出結果から対象を選ぶ（無指定は検出器の既定）")
     ap.add_argument("--dry-run", action="store_true", help="対象社を出すだけで取得しない")
     ap.add_argument("--json", action="store_true", help="機械可読出力")
     args = ap.parse_args(argv)

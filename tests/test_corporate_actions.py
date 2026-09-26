@@ -553,9 +553,11 @@ class TestOfficialMagnitude:
         events, stats = C.detect_events(self._rows(), bps_path=True, official_events=official)
         assert events == []
         assert stats["bps_path"]["rejected"]["no_lagged_row"] == 1
+        # どちらの交差検証で認めたか・整合度（純資産が無いので None）も残る（#751）
         assert stats["bps_path"]["awaiting_magnitude"] == [{
             "edinet_code": "E00001", "year": 2021, "prev_period_end": "2020-03-31",
-            "period_end": "2021-03-31", "bps_ratio": pytest.approx(2.0)}]
+            "period_end": "2021-03-31", "bps_ratio": pytest.approx(2.0),
+            "cross_check": "eps", "consistency": None}]
 
     def test_none_and_empty_mapping_reproduce_the_previous_behaviour(self):
         """`official_events=None`（測定器の CLI）と `{}`（表が空の夜）は #659 と完全に一致する。"""
@@ -662,6 +664,209 @@ class TestOfficialMagnitude:
         base, _ = C.detect_events(rows)
         events, _ = C.detect_events(rows, official_events={"E00001": [("2020-10-01", 0.2)]})
         assert events == base
+
+
+def real_rows(ec, table):
+    """`(year, period_end, issued_shares, bs_bps, pl_eps, bs_total_equity)` の実値の表を行へ直す。"""
+    return [row(y, sh, bps, eps=eps, ec=ec, period_end=pe, equity=eq)
+            for y, pe, sh, bps, eps, eq in table]
+
+
+class TestConsistencyCrossCheck:
+    """第2経路の整合度照合 — Issue #751・ADR-0055 決定4-10。
+
+    期末後分割（期末日の後・決算書の提出前に効力が生じた分割）では、その期の EPS / BPS は分割後の
+    株数で書き直されるが、発行済株式数は分割前のまま残る。EPS 照合は利益の伸びと打ち消し合うと
+    分割比に届かないので、純資産総額から逆算した株数と発行済株式数の比の年次変化（整合度）でも
+    存在を認める。**倍率は今までどおり翌年の株数か公式から取り、整合度と一致するときだけ採る。**
+
+    検体はすべて `financial_records` の実値（2026-09-26・接続先 local）。
+    """
+
+    # E02086（6676 バッファロー）。2026-04-01 効力の 1:2 分割で、2026 行の bps / eps は分割後の基準、
+    # 株数は自己株消却で 15.3M → 12.0M に減っただけ。bps 比 1.6312 に対し eps 比 1.2003
+    # （分割前の基準の EPS は +67%）で EPS 照合に落ちる。整合度は 1.9857。
+    BUFFALO = (
+        (2019, "2019-03-31", 22237873.0, 2779.07, 187.98, 54767000000.0),
+        (2020, "2020-03-31", 22237873.0, 2887.36, 173.61, 48260000000.0),
+        (2021, "2021-03-31", 22237873.0, 3277.94, 402.08, 52193000000.0),
+        (2022, "2022-03-31", 17937873.0, 3739.64, 584.32, 63123000000.0),
+        (2023, "2023-03-31", 16937873.0, 3705.7, 181.23, 62463000000.0),
+        (2024, "2024-03-31", 16937873.0, 3826.71, 179.66, 63922000000.0),
+        (2025, "2025-03-31", 15300000.0, 2961.91, 383.99, 45037000000.0),
+        (2026, "2026-03-31", 12000000.0, 1815.81, 319.92, 43000000000.0),
+    )
+    # E02086 の公式 AdjFactor（1:2・権利落ち 2026-03-30）。Yahoo の split 2026-03-30 と同じ日。
+    BUFFALO_OFFICIAL = {"E02086": [("2026-03-30", 0.5)]}
+
+    # E03186。2022 と 2023 の 1 株指標が続けて分割後の基準に書き直され、株数はそれぞれ翌年に x2・x4。
+    # 2022 は整合度 2.001・翌年の株数 2.0 で一致する。2023 は整合度 1.997 に対し翌年の株数 4.0 で
+    # 食い違う——前年から残っている基準のずれ（2 倍）の上に 4 倍が重なり、整合度はずれの**変化**（2 倍）
+    # しか測らないため。どちらが正しいか決められないので採らない。
+    SUCCESSIVE = (
+        (2021, "2021-03-31", 1136854.0, 2457.9, 189.7, 2712046000.0),
+        (2022, "2022-03-31", 1136854.0, 1172.12, 121.23, 2588085000.0),
+        (2023, "2023-03-31", 2273708.0, 327.37, 40.66, 2886876000.0),
+        (2024, "2024-03-31", 9094832.0, 368.23, 52.56, 3238712000.0),
+        (2025, "2025-03-31", 9094832.0, 390.6, 39.44, 3425948000.0),
+    )
+
+    # E02794。2023 は赤字（eps -266.53）で EPS 照合は符号で落ちる。整合度 9.998・翌年の株数 10.0。
+    LOSS_YEAR = (
+        (2022, "2022-12-20", 512070.0, 8842.7, -12.07, 4501562000.0),
+        (2023, "2023-12-20", 512070.0, 8732.07, -266.53, 4443821000.0),
+        (2024, "2024-12-20", 512070.0, 917.71, 24.44, 4669512000.0),
+        (2025, "2025-12-20", 5120700.0, 888.66, 3.44, 4521695000.0),
+    )
+
+    def test_off_reproduces_the_miss(self):
+        """#751 が報告した取りこぼしそのもの。整合度照合が無ければ EPS 照合で落ちる。"""
+        events, stats = C.detect_events(real_rows("E02086", self.BUFFALO), bps_path=True,
+                                        official_events=self.BUFFALO_OFFICIAL,
+                                        consistency_crosscheck=False)
+        assert events == []
+        assert stats["bps_path"]["rejected"] == {"eps_mismatch": 1}
+        assert stats["bps_path"]["consistency"]["enabled"] is False
+        assert stats["bps_path"]["consistency"]["n_rescued"] == 0
+
+    def test_consistency_ratio_of_the_post_period_split(self):
+        rs = real_rows("E02086", self.BUFFALO)
+        assert C.consistency_ratio(rs[-2], rs[-1]) == pytest.approx(1.98569, abs=1e-5)
+        # 前の年（分割の無い年）は 1 前後
+        assert C.consistency_ratio(rs[-3], rs[-2]) == pytest.approx(1.0, abs=0.1)
+
+    def test_without_official_the_rescued_pair_awaits_its_magnitude(self):
+        """存在は整合度で認めるが、倍率は整合度から取らない。翌年の行も公式も無ければ倍率待ち。"""
+        events, stats = C.detect_events(real_rows("E02086", self.BUFFALO), bps_path=True,
+                                        consistency_crosscheck=True)
+        assert events == []
+        cs = stats["bps_path"]["consistency"]
+        assert (cs["enabled"], cs["n_rescued"], cs["n_events"], cs["n_awaiting"]) == (True, 1, 0, 1)
+        assert stats["bps_path"]["rejected"] == {"no_lagged_row": 1}
+        [a] = stats["bps_path"]["awaiting_magnitude"]
+        assert (a["edinet_code"], a["year"], a["cross_check"]) == ("E02086", 2026, "consistency")
+        assert a["consistency"] == pytest.approx(1.98569, abs=1e-5)
+
+    def test_official_magnitude_that_agrees_is_taken(self):
+        events, stats = C.detect_events(real_rows("E02086", self.BUFFALO), bps_path=True,
+                                        official_events=self.BUFFALO_OFFICIAL,
+                                        consistency_crosscheck=True)
+        [e] = events
+        assert (e.year, e.source, e.cross_check, e.kind) == (2026, "bps", "consistency", "split")
+        assert e.canonical == pytest.approx(2.0) and e.official_ratio == pytest.approx(2.0)
+        assert e.consistency == pytest.approx(1.98569, abs=1e-5)
+        assert stats["bps_path"]["consistency"]["n_events"] == 1
+        f = C.cumulative_factors(real_rows("E02086", self.BUFFALO), events)
+        assert [f[("E02086", y)] for y in range(2019, 2027)] == [
+            pytest.approx(2.0)] * 7 + [pytest.approx(1.0)]
+
+    def test_ledger_multiplies_the_split_with_the_registered_spinoff(self):
+        """Issue #751 の完了条件。2019〜2024 はスピンオフ（#740）と分割の積、2025 は分割だけ。"""
+        led = C.compute_ledger(real_rows("E02086", self.BUFFALO), official=self.BUFFALO_OFFICIAL,
+                               coverage={}, series={}, consistency_crosscheck=True)
+        spinoff = 3820.0 / (3820.0 - 1760.0)
+        assert [led.factors[("E02086", y)] for y in range(2019, 2025)] == [
+            pytest.approx(2.0 * spinoff)] * 6
+        assert led.factors[("E02086", 2019)] == pytest.approx(3.708738, abs=1e-6)
+        assert led.factors[("E02086", 2025)] == pytest.approx(2.0)
+        assert led.factors[("E02086", 2026)] == pytest.approx(1.0)
+
+    def test_official_magnitude_that_disagrees_is_not_taken(self):
+        """公式が 1:3 を示すのに整合度は 2 倍。どちらが正しいか決められないので採らずに一覧へ出す。"""
+        events, stats = C.detect_events(real_rows("E02086", self.BUFFALO), bps_path=True,
+                                        official_events={"E02086": [("2026-03-30", 1.0 / 3.0)]},
+                                        consistency_crosscheck=True)
+        assert events == []
+        assert stats["bps_path"]["rejected"] == {"consistency_magnitude_mismatch": 1}
+        [m] = stats["bps_path"]["consistency"]["magnitude_mismatch"]
+        assert (m["edinet_code"], m["year"], m["magnitude_source"]) == ("E02086", 2026, "official")
+        assert m["magnitude"] == pytest.approx(3.0)
+
+    def test_lagged_shares_that_agree_are_taken_and_that_disagree_are_listed(self):
+        events, stats = C.detect_events(real_rows("E03186", self.SUCCESSIVE), bps_path=True,
+                                        consistency_crosscheck=True)
+        assert [(e.year, e.canonical, e.cross_check) for e in events] == [
+            (2022, pytest.approx(2.0), "consistency")]
+        assert events[0].lagged_sh_ratio == pytest.approx(2.0)
+        [m] = stats["bps_path"]["consistency"]["magnitude_mismatch"]
+        assert (m["year"], m["magnitude_source"]) == (2023, "lagged_shares")
+        assert m["consistency"] == pytest.approx(1.997, abs=1e-3)
+        assert m["magnitude"] == pytest.approx(4.0)
+        assert stats["bps_path"]["rejected"]["consistency_magnitude_mismatch"] == 1
+
+    def test_loss_year_is_rescued_too(self):
+        """赤字の年は EPS の比が意味を持たないが、整合度は EPS を使わない（決定4-10 の決定3）。"""
+        rs = real_rows("E02794", self.LOSS_YEAR)
+        off, off_stats = C.detect_events(rs, bps_path=True, consistency_crosscheck=False)
+        assert off == [] and off_stats["bps_path"]["rejected"]["eps_sign"] == 1
+        events, _ = C.detect_events(rs, bps_path=True, consistency_crosscheck=True)
+        assert [(e.year, e.canonical, e.cross_check) for e in events] == [
+            (2024, pytest.approx(10.0), "consistency")]
+        assert events[0].consistency == pytest.approx(9.998, abs=1e-3)
+
+    def test_equity_collapse_is_not_rescued(self):
+        """E37115 の実値。bps が 1/4 になったのは純資産そのものが 1/4 になったから（分割ではない）。
+        整合度は 1.000 のまま動かず、EPS 照合の不一致として落ちる。"""
+        rs = real_rows("E37115", (
+            (2021, "2021-12-31", 2899000.0, 732.21, 143.98, 2122681000.0),
+            (2022, "2022-12-31", 2920300.0, 176.27, 26.74, 514745000.0)))
+        events, stats = C.detect_events(rs, bps_path=True, consistency_crosscheck=True)
+        assert events == []
+        assert stats["bps_path"]["rejected"] == {"eps_mismatch": 1}
+        assert stats["bps_path"]["consistency"]["not_rescued"] == {"flat": 1}
+
+    def test_consistency_moving_against_the_bps_is_not_rescued(self):
+        """E05091 の実値。bps は分割の向き（1/1.475）だが、純資産が 1/2.9 に減って整合度は併合の向き。"""
+        rs = real_rows("E05091", (
+            (2024, "2024-03-31", 8261600.0, 1030.99, 89.74, 8517538000.0),
+            (2025, "2025-03-31", 8261600.0, 699.0, 128.74, 2921800000.0)))
+        events, stats = C.detect_events(rs, bps_path=True, consistency_crosscheck=True)
+        assert events == []
+        assert stats["bps_path"]["consistency"]["not_rescued"] == {"direction": 1}
+
+    def test_unknown_equity_is_not_rescued(self):
+        """純資産が無ければ整合度を計算できない。今日までどおり EPS 照合の理由で落ちる。"""
+        rows = [row(2020, 1000.0, 200.0, eps=100.0), row(2021, 1000.0, 100.0, eps=100.0)]
+        events, stats = C.detect_events(rows, bps_path=True, consistency_crosscheck=True)
+        assert events == []
+        assert stats["bps_path"]["rejected"] == {"eps_mismatch": 1}
+        assert stats["bps_path"]["consistency"]["not_rescued"] == {"unknown_equity": 1}
+
+    def test_eps_path_is_unchanged(self):
+        """EPS 照合を通るペア（E03137 しまむらの実値・純資産つき）は、照合を足しても同じイベントのまま。
+        整合度は診断のために残る（2024: 2.0001）。"""
+        rs = real_rows("E03137", (
+            (2023, "2023-02-20", 36913299.0, 11973.98, 1034.57, 440048000000.0),
+            (2024, "2024-02-20", 36913299.0, 6413.61, 545.35, 471408000000.0),
+            (2025, "2025-02-20", 73826598.0, 6815.66, 569.83, 500976000000.0),
+            (2026, "2026-02-20", 73826598.0, 2353.09, 202.36, 488545000000.0)))
+        off, off_stats = C.detect_events(rs, bps_path=True, consistency_crosscheck=False)
+        on, on_stats = C.detect_events(rs, bps_path=True, consistency_crosscheck=True)
+        assert on == off
+        assert on_stats["bps_path"]["rejected"] == off_stats["bps_path"]["rejected"]
+        [e] = on
+        assert (e.year, e.cross_check) == (2024, "eps")
+        assert e.consistency == pytest.approx(2.0001, abs=1e-4)
+        assert on_stats["bps_path"]["consistency"]["n_rescued"] == 0
+
+    def test_shares_path_events_have_no_cross_check(self):
+        events, _ = C.detect_events([row(2020, 1000.0, 200.0), row(2021, 2000.0, 100.0)],
+                                    consistency_crosscheck=True)
+        [e] = events
+        assert (e.source, e.cross_check, e.consistency) == ("shares", None, None)
+
+    def test_default_is_declared_in_one_place(self):
+        """既定は定数1か所。`detect_events` と台帳は None のとき検出器の既定へ従う（書き写さない）。"""
+        import inspect
+        sig = inspect.signature(C.detect_events)
+        assert sig.parameters["consistency_crosscheck"].default is C.DEFAULT_CONSISTENCY_CROSSCHECK
+        assert inspect.signature(C.compute_ledger).parameters["consistency_crosscheck"].default is None
+        assert inspect.signature(C.build_ledger).parameters["consistency_crosscheck"].default is None
+
+    @pytest.mark.parametrize("cons,mag,ok", [(1.9857, 2.0, True), (1.997, 4.0, False),
+                                             (2.0, 2.25, True), (2.0, 2.5, False)])
+    def test_magnitude_agreement_uses_the_bps_tolerance(self, cons, mag, ok):
+        assert C.magnitudes_agree(cons, mag) is ok
 
 
 class TestOfficialRatioInWindow:

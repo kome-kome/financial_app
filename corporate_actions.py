@@ -54,9 +54,16 @@ F の寄与イベントに足し、TTM の窓にも同じイベントを渡す�
 `scripts/measure_split_valuation_bias.py verify-sample` で公式 `AdjFactor` とサンプル突合して
 一致率を出す（陰性対照つき）。
 
-**株数が分割に追随しない社のために第2経路がある**（#656）。`bs_bps` の年次比を候補ゲートに、
-`pl_eps` の比を交差検証にする。株数と1株指標が同じ年に動く前提を外した経路で、
-既定は `DEFAULT_BPS_PATH`。
+**期末後分割のために第2経路がある**（#656・#751）。期末日の後・決算書の提出前に効力が生じた分割は、
+会計基準によりその期の EPS / BPS が分割後の株数で書き直されるが、期末の発行済株式数と 1 株配当は
+分割前のまま残る——株数は 1 年遅れて動く。`bs_bps` の年次比を候補ゲートに、`pl_eps` の比を
+交差検証にする。株数と1株指標が同じ年に動く前提を外した経路で、既定は `DEFAULT_BPS_PATH`。
+
+**第2経路の交差検証には整合度照合もある**（#751）。`pl_eps` の比は利益の伸びと打ち消し合うと分割比に
+届かない（実測 E02086: bps 比 1.631 に対し eps 比 1.200）。そこで分割では動かない純資産総額から
+「決算書が前提にしている株数」を逆算し、発行済株式数との比の年次変化（`consistency_ratio`）でも
+存在を認める。倍率の出どころにはせず、倍率と一致することを採る条件にする。既定は
+`DEFAULT_CONSISTENCY_CROSSCHECK`。
 
 **第2経路の倍率は候補ゲートから取らず、翌年の `issued_shares` 比から取る**（#659）。
 `bs_bps` は分割以外（内部留保・評価差額）でも増えるので年次比は `F / (1 + g)` になり、
@@ -276,6 +283,22 @@ DEFAULT_BPS_PATH = True
 # **E01121 は偽陽性と確定したが落とせない**（x1.3027 で落とすと E36173 も落ちる）。
 # 余裕は両側とも薄い（E36173 まで 0.015・E05716 まで 0.16）ので、動かすなら測り直すこと。
 DEFAULT_EQUITY_TOL: Optional[float] = 1.0
+# 第2経路の交差検証に整合度照合（`consistency_ratio`）を足すか（#751・ADR-0055 決定4-10）。
+# **`rebuild_split_adjustment_factors` が既定のまま呼ぶ＝ここが毎晩の係数表の中身を決める。**
+#
+# 期末後分割は第2経路の候補に上がるが、交差検証の `pl_eps` 比は利益の伸びと打ち消し合うと分割比に
+# 届かず落ちる（実測 E02086: bps 比 1.631 に対し eps 比 1.200・分割前の基準の EPS は +67%）。同じ形の
+# 取りこぼしは翌年の株数がちょうど 2.000 倍・3.000 倍に動く組だけで 153 件あった（2026-09-26）。
+# 純資産総額は分割で動かないので、「純資産総額 ÷ bps」で逆算した株数と発行済株式数の比の年次変化
+# （整合度）が期末後分割の年だけ分割比になる。**EPS 照合または整合度照合のどちらかが通れば存在を認める。**
+#
+# **整合度は倍率の出どころにしない。** 既存の第2経路 179 件で採用済みの倍率と 5% 以内で一致したのは
+# 144 件（0.80）で、倍率の基準（0.90）に届かない。倍率は今までどおり翌年の株数 → 公式 → 倍率待ちの順で
+# 決め、整合度照合で認めたものだけ、整合度と倍率が `DEFAULT_BPS_TOL` 以内で一致することを採る条件にする
+# （2 つの書き手が倍率で食い違う組は、どちらが正しいか決められないので採らない＝決定4-3 と同じ取引）。
+#
+# 既定は事前登録した基準（`scripts/measure_split_valuation_bias.py verify-sources`・決定4-10）で決める。
+DEFAULT_CONSISTENCY_CROSSCHECK = False
 # 合成（分割＋増資）とみなす残差の範囲。これを外れたら丸めずに unsnapped で別枠へ出す。
 COMPOSITE_LO, COMPOSITE_HI = 0.8, 1.25
 
@@ -370,6 +393,11 @@ class ShareEvent(NamedTuple):
     # 登録表のイベント（`source="registry"`・#740）の権利落ち日 "YYYY-MM-DD"。検出したイベントは None。
     # 日付が1点で分かるので、TTM の分割窓は会計年度ではなくこの日の1点にする（`split_windows`）。
     ex_date: Optional[str] = None
+    # 第2経路で存在を認めた交差検証（#751）。"eps" は `pl_eps` 比、"consistency" は EPS 照合に落ちた
+    # ペアを整合度照合（`consistency_ratio`）で認めたもの。第1経路と登録表のイベントは None。
+    cross_check: Optional[str] = None
+    # 第2経路のペアの整合度（#751）。計算できれば交差検証の種類によらず残す＝あとから照合できる。
+    consistency: Optional[float] = None
 
 
 class MatchResult(NamedTuple):
@@ -444,6 +472,65 @@ def equity_contradicts_split(sh_ratio: float, eq_ratio: float, tol: float) -> bo
     return le * _log(sh_ratio) > 0 and abs(le) > _log(1 + tol)
 
 
+def consistency_ratio(prev: AnnualRow, cur: AnnualRow) -> Optional[float]:
+    """整合度＝「純資産総額 ÷ bps」で逆算した株数と発行済株式数の比の、前年比（#751）。
+
+    式は `(bps逆比 / 株数比) × 純資産比`（ADR-0055 決定4-4 の整合度と同じ量）。分割が株数と 1 株指標の
+    両方に同じ年に反映されていれば 1 前後になり（第1経路 489 件で p5 0.958・p95 1.067）、**期末後分割で
+    1 株指標だけが分割後の基準に書き直された年は分割比前後になる**（実測 E02086 2026: 1.986）。
+    純資産総額は分割で動かないので、eps 比と違って利益の伸びに左右されない。
+    純資産・株数・bps のどれかが欠損・0 以下なら判定できないので None。
+    """
+    eq = equity_ratio(prev, cur)
+    if eq is None:
+        return None
+    vals = (prev.issued_shares, cur.issued_shares, prev.bs_bps, cur.bs_bps)
+    if any(v is None or v <= 0 for v in vals):
+        return None
+    return (prev.bs_bps / cur.bs_bps) / (cur.issued_shares / prev.issued_shares) * eq
+
+
+def _eps_cross_check(prev: AnnualRow, cur: AnnualRow, bps_ratio: float, tol: float
+                     ) -> Optional[str]:
+    """第2経路の EPS 照合。通れば None、落ちたら理由（`eps_sign` / `eps_mismatch`）。
+
+    **符号が跨ぐ年・赤字の年は比の意味が壊れる**（`eps_sign`）。赤字継続（両年とも負）でも比は数学的には
+    出るが、赤字幅の増減が分割比に化けるので落とす側を採る。`eps_mismatch` は減損・大幅赤字・タグ基準の
+    変更（bps だけが動いて eps が追随しない）と、利益が大きく動いた年の期末後分割がここへ来る（#751）。
+    """
+    if (prev.pl_eps is None or cur.pl_eps is None
+            or prev.pl_eps <= 0 or cur.pl_eps <= 0):
+        return "eps_sign"
+    if abs((prev.pl_eps / cur.pl_eps) / bps_ratio - 1.0) > tol:
+        return "eps_mismatch"
+    return None
+
+
+def _consistency_cross_check(consistency: Optional[float], bps_ratio: float, gate: float
+                             ) -> Optional[str]:
+    """整合度照合（#751）。通れば None、落ちたら理由（`unknown_equity` / `flat` / `direction`）。
+
+    ゲートは候補ゲートと同じ対数対称の `gate`。減損・大幅赤字は純資産も bps と一緒に減るので整合度は
+    1 前後に留まり（`flat`）、ここでは救わない。
+    """
+    if consistency is None or consistency <= 0:
+        return "unknown_equity"
+    if abs(_log(consistency)) < gate:
+        return "flat"
+    if _log(consistency) * _log(bps_ratio) < 0:
+        return "direction"
+    return None
+
+
+def magnitudes_agree(consistency: float, magnitude: float, tol: float = DEFAULT_BPS_TOL) -> bool:
+    """整合度と倍率（翌年の株数・公式）が対数距離 `log(1 + tol)` 以内で一致するか（#751・決定4-10）。
+
+    整合度照合で存在を認めたイベントだけに掛ける。2 つの書き手が倍率で食い違う組は、どちらが正しいか
+    決められないので採らない（実測: 翌年にもう 1 回分割して翌年の株数が 2 回分を含む E03186 型など）。
+    """
+    return abs(_log(consistency / magnitude)) <= _log(1 + tol)
+
+
 def listing_gap_in_pair(prev: AnnualRow, cur: AnnualRow,
                         series: Optional[tuple[str, Sequence[tuple[str, str]]]],
                         coverage_start: Optional[str], *,
@@ -502,6 +589,7 @@ def detect_events(rows: Sequence[AnnualRow], *,
                   official_events: Optional[Mapping[str, Sequence[tuple[str, float]]]] = None,
                   price_series: Optional[Mapping[str, tuple[str, Sequence[tuple[str, str]]]]] = None,
                   official_coverage: Optional[Mapping[str, Sequence[Sequence[str]]]] = None,
+                  consistency_crosscheck: bool = DEFAULT_CONSISTENCY_CROSSCHECK,
                   ) -> tuple[list[ShareEvent], dict]:
     """株数基準が変わった年を検出する。戻り値 (events, stats)。
 
@@ -581,6 +669,15 @@ def detect_events(rows: Sequence[AnnualRow], *,
     **第2経路には掛けない**——期末後・提出前の分割を1株指標だけが先取りする社を拾う経路で、効力日が
     イベント窓の外に出うる。第1経路が不在で落としたペアを第2経路が独立に拾うことは妨げない（純資産比
     チェックと同じ規則）。測定器の CLI には渡さない（渡すと偽陽性が突合から消え、偽陽性率を測れない）。
+
+    **`consistency_crosscheck` が真なら、第2経路の EPS 照合に落ちたペアを整合度照合で救う**（#751・
+    ADR-0055 決定4-10）。期末後分割は利益の伸びと打ち消し合うと eps 比が分割比に届かない（実測 E02086:
+    bps 比 1.631・eps 比 1.200）。整合度（`consistency_ratio`）がゲートを越えて bps 比と同じ向きに
+    動いていれば存在を認め、倍率の鎖（翌年の株数 → 公式 → 倍率待ち）へ進める。**整合度は倍率に使わず**、
+    倍率が決まったら整合度と `bps_tol` 以内で一致するときだけ採る（食い違いは
+    `consistency_magnitude_mismatch` に数え、一覧を `stats["bps_path"]["consistency"]` に残す）。
+    救えなかったペアは従来どおり `eps_sign` / `eps_mismatch` に数え、救えなかった理由は同じ所に内訳で残す。
+    EPS 照合を通ったペアの扱いは変えない。どちらの交差検証で認めたかは `ShareEvent.cross_check` に残る。
     """
     if official_coverage is not None and official_events is None:
         raise ValueError("official_coverage は official_events と一緒に渡す"
@@ -611,6 +708,11 @@ def detect_events(rows: Sequence[AnnualRow], *,
     awaiting: list[dict] = []
     # 公式の不在で外した第1経路のイベント（#668）。
     absence_rejected: list[dict] = []
+    # 整合度照合（#751）。EPS 照合に落ちて整合度で存在を認めたペアの数・救えなかった理由・
+    # 倍率が整合度と食い違って採らなかったペアの一覧。
+    n_consistency_rescued = 0
+    consistency_not_rescued: Counter = Counter()
+    magnitude_mismatch: list[dict] = []
 
     for ec, rs in by_ec.items():
         # **使える行だけを先に並べる。** 翌年の株数を見るには次の行を先読みする必要があり、
@@ -696,16 +798,26 @@ def detect_events(rows: Sequence[AnnualRow], *,
                     # 第1経路が同じペアを既に採った。両方が同じ実体を指しているので
                     # 2件に数えない（数えると `cumulative_factors` が比を二乗する）。
                     bps_rejected["dup_with_shares"] += 1
-                elif (prev.pl_eps is None or cur.pl_eps is None
-                        or prev.pl_eps <= 0 or cur.pl_eps <= 0):
-                    # **符号が跨ぐ年・赤字の年は比の意味が壊れる。** 赤字継続（両年とも負）でも
-                    # 比は数学的には出るが、赤字幅の増減が分割比に化けるので落とす側を採る。
-                    bps_rejected["eps_sign"] += 1
-                elif abs((prev.pl_eps / cur.pl_eps) / bps_ratio - 1.0) > bps_tol:
-                    # 交差検証で落ちた本体。減損・大幅赤字・タグ基準の変更はここへ来る
-                    # （bps だけが動いて eps が追随しない）。
-                    bps_rejected["eps_mismatch"] += 1
-                elif nxt is None:
+                    continue
+                cons = consistency_ratio(prev, cur)
+                via: Optional[str] = "eps"
+                eps_why = _eps_cross_check(prev, cur, bps_ratio, bps_tol)
+                if eps_why is not None:
+                    # 交差検証で落ちた本体。減損・大幅赤字・タグ基準の変更と、利益が大きく動いた年の
+                    # 期末後分割がここへ来る。後者だけを整合度照合で救う（#751）——純資産総額は分割で
+                    # 動かないので、減損・大幅赤字では bps と一緒に減り、整合度は 1 前後に留まる。
+                    via = None
+                    if consistency_crosscheck:
+                        why = _consistency_cross_check(cons, bps_ratio, gate)
+                        if why is None:
+                            via = "consistency"
+                            n_consistency_rescued += 1
+                        else:
+                            consistency_not_rescued[why] += 1
+                    if via is None:
+                        bps_rejected[eps_why] += 1
+                        continue
+                if nxt is None:
                     if next_crosses:
                         n_lagged_listing_gap += 1
                     # **翌年の株数が無い。** 最新年のイベントはここへ来る（翌年の決算がまだ
@@ -717,7 +829,8 @@ def detect_events(rows: Sequence[AnnualRow], *,
                         gap_years=cur.year - prev.year,
                         period_end=cur.period_end, prev_period_end=prev.period_end,
                         sh_ratio=sh_ratio, bps_ratio=bps_ratio,
-                        canonical=None, residual=bps_ratio, kind="unsnapped", source="bps")
+                        canonical=None, residual=bps_ratio, kind="unsnapped", source="bps",
+                        cross_check=via, consistency=cons)
                     off, _ = (official_ratio_in_window(official_events.get(ec, ()),
                                                        event_window(cand))
                               if official_events is not None else (None, 0))
@@ -727,6 +840,7 @@ def detect_events(rows: Sequence[AnnualRow], *,
                             "edinet_code": ec, "year": cur.year,
                             "prev_period_end": _iso(prev.period_end),
                             "period_end": _iso(cur.period_end), "bps_ratio": bps_ratio,
+                            "cross_check": via, "consistency": cons,
                         })
                     elif abs(_log(off)) < gate:
                         # 公式は窓の中で動いているが、1株指標の動きを説明するほどではない
@@ -734,6 +848,13 @@ def detect_events(rows: Sequence[AnnualRow], *,
                         bps_rejected["official_flat"] += 1
                     elif _log(off) * _log(bps_ratio) < 0:
                         bps_rejected["official_direction"] += 1
+                    elif via == "consistency" and not magnitudes_agree(cons, off, bps_tol):
+                        # 整合度で存在を認めた組は、倍率が整合度と合うときだけ採る（#751・決定4-10）。
+                        bps_rejected["consistency_magnitude_mismatch"] += 1
+                        magnitude_mismatch.append({
+                            "edinet_code": ec, "year": cur.year, "prev_year": prev.year,
+                            "magnitude_source": "official", "consistency": cons,
+                            "magnitude": off})
                     else:
                         # **公式の比は定番比へ丸めない。** 丸めは「株数比に増資の分が混ざる」のを
                         # 切り離すための仕組みで、`AdjFactor` は株価の遡及調整に使われた係数
@@ -756,6 +877,15 @@ def detect_events(rows: Sequence[AnnualRow], *,
                         canonical, residual, kind = snap_to_canonical(lag, tol=snap_tol)
                         if canonical is None:
                             bps_rejected["lagged_unsnapped"] += 1
+                        elif via == "consistency" and not magnitudes_agree(cons, canonical,
+                                                                           bps_tol):
+                            # 整合度と翌年の株数が倍率で食い違う（翌年にもう1回分割した・翌年の株数に
+                            # 増資が混ざった等）。どちらが正しいか決められないので採らない（#751）。
+                            bps_rejected["consistency_magnitude_mismatch"] += 1
+                            magnitude_mismatch.append({
+                                "edinet_code": ec, "year": cur.year, "prev_year": prev.year,
+                                "magnitude_source": "lagged_shares", "consistency": cons,
+                                "magnitude": canonical, "lagged_sh_ratio": lag})
                         else:
                             # **倍率は `lag` から決め、`bps_ratio` / `sh_ratio` は観測値の
                             # まま残す**（あとから「当年は株数が動いていない」が読める）。
@@ -766,7 +896,8 @@ def detect_events(rows: Sequence[AnnualRow], *,
                                 period_end=cur.period_end, prev_period_end=prev.period_end,
                                 sh_ratio=sh_ratio, bps_ratio=bps_ratio,
                                 canonical=canonical, residual=residual, kind=kind,
-                                source="bps", lagged_sh_ratio=lag))
+                                source="bps", lagged_sh_ratio=lag,
+                                cross_check=via, consistency=cons))
 
     # **同じ株数の動きを2回数えない。** bps 経路が翌年の動きを倍率に使い、かつ第1経路が
     # その翌年を独立したイベントとして採っていたら、`cumulative_factors` が比を二乗する
@@ -786,7 +917,9 @@ def detect_events(rows: Sequence[AnnualRow], *,
     # 翌年の株数から倍率を決めたイベントを公式と突き合わせる（#661）。**イベントは変えず数えるだけ**
     # ——両方が取れる年で2つの書き手が合っているかを、毎晩追加の取得なしに測り続けるため。
     # 公式イベントが窓に無いものは数えない（取り込み前・エンバーゴ中と区別できない）。
-    crosscheck = {"agree": 0, "disagree": 0, "disagreements": []}
+    # 交差検証の種類ごとの内訳（#751）も持つ——整合度照合で認めたイベントの倍率が公式と合っているかを、
+    # EPS 照合の分と混ぜずに読むため。
+    crosscheck = {"agree": 0, "disagree": 0, "disagreements": [], "by_cross_check": {}}
     if official_events is not None:
         for e in events:
             if e.source != "bps" or e.lagged_sh_ratio is None:
@@ -794,13 +927,16 @@ def detect_events(rows: Sequence[AnnualRow], *,
             m = match_event(e, official_events.get(e.edinet_code, ()))
             if m.official is None:
                 continue
+            by = crosscheck["by_cross_check"].setdefault(e.cross_check, {"agree": 0, "disagree": 0})
             if m.status == "agree":
                 crosscheck["agree"] += 1
+                by["agree"] += 1
             else:
                 crosscheck["disagree"] += 1
+                by["disagree"] += 1
                 crosscheck["disagreements"].append({
                     "edinet_code": e.edinet_code, "year": e.year, "status": m.status,
-                    "lagged": e.canonical, "official": m.official,
+                    "lagged": e.canonical, "official": m.official, "cross_check": e.cross_check,
                 })
 
     bps_events = [e for e in events if e.source == "bps"]
@@ -830,6 +966,17 @@ def detect_events(rows: Sequence[AnnualRow], *,
             "official": {
                 "enabled": official_events is not None,
                 "crosscheck": crosscheck,
+            },
+            # 整合度照合（#751・決定4-10）。rescued は EPS 照合に落ちて整合度で存在を認めたペア、
+            # not_rescued は救えなかった理由（そのペアは `rejected` の eps_sign / eps_mismatch にも入る）。
+            # 採用・倍率待ちは同じ `events` / `awaiting_magnitude` の中の内訳で、別に数え直さない。
+            "consistency": {
+                "enabled": bool(consistency_crosscheck),
+                "n_rescued": n_consistency_rescued,
+                "not_rescued": dict(consistency_not_rescued),
+                "n_events": sum(1 for e in bps_events if e.cross_check == "consistency"),
+                "n_awaiting": sum(1 for a in awaiting if a.get("cross_check") == "consistency"),
+                "magnitude_mismatch": magnitude_mismatch,
             },
         },
         "equity": {
@@ -1271,7 +1418,8 @@ def compute_ledger(rows: Sequence[AnnualRow], *,
                    official: Mapping[str, Sequence[tuple[str, float]]],
                    coverage: Mapping[str, Sequence[Sequence[str]]],
                    series: Mapping[str, tuple[str, Sequence[tuple[str, str]]]],
-                   bps_path: Optional[bool] = None) -> Ledger:
+                   bps_path: Optional[bool] = None,
+                   consistency_crosscheck: Optional[bool] = None) -> Ledger:
     """検出器を回して台帳を作る。**DB に触らない**（テストはここを通す）。
 
     入力は `build_ledger` が DB から読むものと同じで、**どれもキーワードで必須**にしてある——
@@ -1286,6 +1434,9 @@ def compute_ledger(rows: Sequence[AnnualRow], *,
     - `series`: 週次株価の系列（`load_price_series`）。上場廃止をまたぐペアを比べないため（#672）
     - `bps_path`: None なら検出器の既定（`DEFAULT_BPS_PATH`）に従う。明示するのは前後を測り
       比べるときだけ（`scripts/measure_split_bias_oof.py`）——呼び出し側が既定を書き写すと乖離する
+    - `consistency_crosscheck`: 第2経路の整合度照合（#751）。`bps_path` と同じく None なら検出器の既定
+      （`DEFAULT_CONSISTENCY_CROSSCHECK`）に従い、明示するのは前後を測り比べるときだけ
+      （`scripts/measure_split_valuation_bias.py verify-sources`）
 
     登録表のスピンオフ（`SPINOFF_ADJUSTMENTS`）は入力ではなく登録表から、検出の後に足す（#740）。
     F の積にも `Ledger.events`（→ 係数表の寄与種別・TTM の窓）にも入り、検出器の stats（`n_events`・
@@ -1299,6 +1450,8 @@ def compute_ledger(rows: Sequence[AnnualRow], *,
     official, withheld = _without_withheld(official)
     merged = {ec: merge_spans(sp) for ec, sp in coverage.items()}
     kw = {} if bps_path is None else {"bps_path": bps_path}
+    if consistency_crosscheck is not None:
+        kw["consistency_crosscheck"] = consistency_crosscheck
     events, stats = detect_events(rows, official_events=official, price_series=series,
                                   official_coverage=merged, **kw)
     # **登録表のスピンオフは検出の後に足す**（#740）。株数が動かないので検出器には見えないが、DB の
@@ -1420,33 +1573,48 @@ def load_price_series(db, *, min_hole_days: int) -> dict:
     return {ec: (s, tuple(holes.get(ec, ()))) for ec, s in starts.items()}
 
 
-def build_ledger(db, *, bps_path: Optional[bool] = None) -> Optional[Ledger]:
-    """入力を読んで台帳を作る。**書き込まない。** annual 行が0件なら None。
+def load_ledger_inputs(db) -> Optional[dict]:
+    """台帳の入力（`compute_ledger` のキーワード `rows` / `official` / `coverage` / `series`）を読む。
+    annual 行が0件なら None。**書き込まない。**
 
-    係数表の洗い替え（`rebuild_split_adjustment_factors`）・TTM 合成
-    （`ttm_composite.rebuild_ttm_financial_records`）・補正がリークを除いたかの測定
-    （`scripts/measure_split_leak.py`・#685・ADR-0055 決定7）が共有する。**読み手ごとに入力を
-    揃え直さない**——下の4つ（通期行・公式 AdjFactor・株価系列・受信区間）のどれかを読み忘れても
+    `build_ledger` と、同じ入力で設定だけ変えた台帳を並べて測る読み手（`scripts/measure_split_valuation_bias.py
+    verify-sources`・#751）が共有する。**読み手ごとに入力を揃え直さない**——4つのどれかを読み忘れても
     検出はもっともらしい結果を返し、測ったものが本番の係数表と別物になる。
     """
     rows = _load_annual_rows(db)
     if not rows:
         return None
-    return compute_ledger(
-        rows,
+    return {
+        "rows": rows,
         # 翌年の行が無い第2経路の倍率は、catchup が残した公式 AdjFactor から取る（#661・決定4-5）。
         # **ここでは J-Quants を叩かない**。表が空なら検出器は今日までどおり採らない側へ倒れる。
         # DB エラーは握らない（決定5）。
-        official=load_jquants_adj_factor_events(db),
+        "official": load_jquants_adj_factor_events(db),
         # 公式のバーを社単位で受け取った区間（#668・決定4-8）。第1経路の偽陽性を「公式に分割が無い」と
         # **確かめられた**ときだけ外す。表が空なら何も外さない＝今日までどおり採る側へ倒れる。
-        coverage=load_jquants_adj_factor_coverage(db),
+        "coverage": load_jquants_adj_factor_coverage(db),
         # 上場廃止をまたいで別の実体の行が隣り合うペアを比べないための週次株価の系列（開始日と途中の
         # 空白・#672・決定4-7）。**読み忘れると判定は黙って無効になり**、定番比の 15 が E05714 型の
         # 偽陽性を入れる。
-        series=load_price_series(db, min_hole_days=LISTING_GAP_MIN_DAYS),
-        bps_path=bps_path,
-    )
+        "series": load_price_series(db, min_hole_days=LISTING_GAP_MIN_DAYS),
+    }
+
+
+def build_ledger(db, *, bps_path: Optional[bool] = None,
+                 consistency_crosscheck: Optional[bool] = None) -> Optional[Ledger]:
+    """入力を読んで台帳を作る。**書き込まない。** annual 行が0件なら None。
+
+    係数表の洗い替え（`rebuild_split_adjustment_factors`）・TTM 合成
+    （`ttm_composite.rebuild_ttm_financial_records`）・補正がリークを除いたかの測定
+    （`scripts/measure_split_leak.py`・#685・ADR-0055 決定7）が共有する。入力は `load_ledger_inputs` が
+    読む（通期行・公式 AdjFactor・受信区間・株価系列）。
+    """
+    inputs = load_ledger_inputs(db)
+    if inputs is None:
+        return None
+    return compute_ledger(inputs["rows"], official=inputs["official"],
+                          coverage=inputs["coverage"], series=inputs["series"],
+                          bps_path=bps_path, consistency_crosscheck=consistency_crosscheck)
 
 
 def rebuild_split_adjustment_factors(db, *, bps_path: Optional[bool] = None,
@@ -1527,6 +1695,16 @@ def _log_split_adjustment_stats(n: int, stats: dict) -> int:
                  stats.get("n_official_companies", 0), cc.get("agree", 0), cc.get("disagree", 0))
         for d in cc.get("disagreements") or ():
             log.info("分割補正係数（第2経路）: 公式と食い違い %s", d)
+        # 整合度照合（#751）も**毎晩出す**。倍率が整合度と食い違って採らなかった組は検出ではなく
+        # 保留なので、一覧が増えたら中身（翌年にもう1回分割・翌年の株数に増資が混ざる等）を確かめる。
+        cs = bp.get("consistency") or {}
+        if cs.get("enabled"):
+            log.info("分割補正係数（第2経路・整合度照合）: EPS 照合に落ちて整合度で認めた %d 組・採用 %d 件・"
+                     "倍率待ち %d 件・救えなかった内訳 %s・倍率の食い違いで採らなかった %d 件",
+                     cs.get("n_rescued", 0), cs.get("n_events", 0), cs.get("n_awaiting", 0),
+                     cs.get("not_rescued"), len(cs.get("magnitude_mismatch") or ()))
+            for d in cs.get("magnitude_mismatch") or ():
+                log.info("分割補正係数（第2経路・整合度照合）: 倍率の食い違い %s", d)
     # 比べなかったペアは**毎晩出す**（#672）。週次の系列が収集の都合で遅く始まる社（2024-05-27 に
     # 225 社）や、取得の失敗で途中が抜けた社が欠損年をまたぐと本物の分割まで外しうるので、
     # 一覧が増えたら中身を確かめる。

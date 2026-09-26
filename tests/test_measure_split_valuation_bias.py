@@ -342,3 +342,113 @@ def test_equity_tol_grid_contains_the_ledger_default():
     既定を動かしたのに格子へ入れ忘れると、`detect --sweep` の表に本番の値の行が無くなる。
     """
     assert C.DEFAULT_EQUITY_TOL is None or C.DEFAULT_EQUITY_TOL in M.EQUITY_TOL_GRID
+
+
+class TestVerifySources:
+    """`verify-sources`（#751・ADR-0055 決定4-10）の純関数。
+
+    Yahoo の検体は `v8/finance/chart?interval=1mo&events=split` の実応答から写した（2026-09-26）。
+    """
+
+    # 6676.T（E02086）の 2025-02-14〜2026-05-15。キーは月足の開始（2026-03-01 00:00 JST）で、
+    # 権利落ち日は `date`（2026-03-30 00:00 UTC）。
+    BUFFALO_CHART = {"chart": {"result": [{
+        "meta": {"currency": "JPY", "symbol": "6676.T", "exchangeName": "JPX",
+                 "instrumentType": "EQUITY"},
+        "events": {"splits": {"1772290800": {"date": 1774828800, "numerator": 2.0,
+                                             "denominator": 1.0, "splitRatio": "2:1"}}}}],
+        "error": None}}
+    # 同じ銘柄の 2024-02-15〜2025-05-15（分割なし＝`events` が無い）。
+    NO_SPLIT_CHART = {"chart": {"result": [{
+        "meta": {"currency": "JPY", "symbol": "6676.T", "exchangeName": "JPX"}}], "error": None}}
+    # 存在しない銘柄（HTTP 404）。
+    NOT_FOUND_CHART = {"chart": {"result": None, "error": {
+        "code": "Not Found", "description": "No data found, symbol may be delisted"}}}
+
+    def _ev(self, canonical=2.0, official_ratio=None):
+        return ev(2026, canonical=canonical, ec="E02086")._replace(
+            source="bps", cross_check="consistency", official_ratio=official_ratio,
+            lagged_sh_ratio=None if official_ratio else canonical)
+
+    def test_split_date_is_the_ex_date_in_jst(self):
+        splits, meta = M.parse_yahoo_splits(self.BUFFALO_CHART)
+        assert splits == [("2026-03-30", 2.0)]
+        assert meta["exchangeName"] == "JPX"
+
+    def test_no_events_is_no_split_and_errors_are_unavailable(self):
+        """「分割が無い」（`[]`）と「取れなかった」（None）を同じ形にしない。"""
+        assert M.parse_yahoo_splits(self.NO_SPLIT_CHART)[0] == []
+        assert M.parse_yahoo_splits(self.NOT_FOUND_CHART)[0] is None
+        assert M.parse_yahoo_splits({})[0] is None
+        broken = {"chart": {"result": [{"meta": {}, "events": {"splits": {"1": {"date": 1}}}}]}}
+        assert M.parse_yahoo_splits(broken)[0] is None
+
+    def test_reverse_split_ratio_follows_the_share_count(self):
+        chart = {"chart": {"result": [{"meta": {}, "events": {"splits": {"0": {
+            "date": 1774828800, "numerator": 1.0, "denominator": 10.0}}}}]}}
+        assert M.parse_yahoo_splits(chart)[0] == [("2026-03-30", pytest.approx(0.1))]
+
+    def test_yahoo_ratio_uses_the_same_half_open_window_as_official(self):
+        splits = [("2026-03-30", 2.0), ("2026-06-30", 3.0)]
+        assert M.yahoo_ratio_in_window(splits, ("2025-02-14", "2026-05-15")) == (
+            pytest.approx(2.0), 1)
+        assert M.yahoo_ratio_in_window(splits, ("2026-03-30", "2026-05-15")) == (None, 0)
+        assert M.yahoo_ratio_in_window(splits, ("2025-02-14", "2026-12-31"))[0] == (
+            pytest.approx(6.0))
+
+    def test_official_judgement(self):
+        e = self._ev()
+        assert M.judge_against_official(e, [("2026-03-30", 0.5)], []) == (
+            "agree", pytest.approx(2.0))
+        assert M.judge_against_official(e, [("2026-03-30", 1 / 3)], [])[0] == "disagree"
+        # 受信区間が窓 (2025-02-14, 2026-05-15] を覆うのに公式イベントが無い＝分割は無かった
+        assert M.judge_against_official(e, [], [("2024-07-01", "2026-06-30")]) == ("absent", None)
+        # 区間が窓を覆わない・取り込んでいない＝公式では確かめられない
+        assert M.judge_against_official(e, [], [("2025-06-01", "2026-06-30")]) == (
+            "unconfirmed", None)
+        assert M.judge_against_official(e, [], []) == ("unconfirmed", None)
+
+    def test_official_magnitude_is_not_judged_against_the_official(self):
+        """公式から倍率を決めたイベントは公式と比べれば必ず一致する。基準1の分母に入れない。"""
+        e = self._ev(official_ratio=2.0)
+        assert M.judge_against_official(e, [("2026-03-30", 0.5)], [])[0] == "official_magnitude"
+
+    def test_yahoo_judgement(self):
+        e = self._ev()
+        splits, _ = M.parse_yahoo_splits(self.BUFFALO_CHART)
+        assert M.judge_against_yahoo(e, splits) == ("agree", pytest.approx(2.0))
+        assert M.judge_against_yahoo(self._ev(canonical=3.0), splits)[0] == "disagree"
+        assert M.judge_against_yahoo(e, [])[0] == "no_split"
+        assert M.judge_against_yahoo(e, None)[0] == "unavailable"
+
+    def test_criteria(self):
+        ok = M.judge_sources({"agree": 19, "disagree": 1}, {"agree": 27, "no_split": 3})
+        assert ok["pass"] is True
+        assert ok["criterion1"]["agree_rate"] == pytest.approx(0.95)
+        assert ok["criterion3"]["denominator"] == 30
+        # 分母が 20 に届かない基準は満たさない
+        assert M.judge_sources({"agree": 19}, {"agree": 27})["criterion1"]["pass"] is False
+        # 公式で分割なしと確かめられた新規イベントが 1 件でもあれば基準2 は満たさない
+        assert M.judge_sources({"agree": 20, "absent": 1}, {"agree": 20})["pass"] is False
+        # Yahoo の窓に分割が無いものは不一致として分母に入る。取得できないものは入らない
+        c3 = M.judge_sources({"agree": 20}, {"agree": 18, "no_split": 2, "unavailable": 9})[
+            "criterion3"]
+        assert (c3["denominator"], c3["agree_rate"], c3["pass"]) == (20, pytest.approx(0.9), True)
+
+    def test_criteria_constants_are_the_preregistered_ones(self):
+        """決定4-10 で測る前に固定した値。結果を見て動かしたらここで落ちる。"""
+        assert (M.SOURCES_MIN_AGREE_RATE, M.SOURCES_MIN_DENOMINATOR, M.SOURCES_MATCH_TOL) == (
+            0.90, 20, 0.05)
+
+    def test_ledger_diff_only_adds_consistency_events(self):
+        """E02086 の実値。照合を入れると整合度で認めた 1 件が足され、既存は動かない。"""
+        from tests.test_corporate_actions import TestConsistencyCrossCheck as T, real_rows
+        rows = real_rows("E02086", T.BUFFALO)
+        kw = dict(official=T.BUFFALO_OFFICIAL, coverage={}, series={})
+        off = C.compute_ledger(rows, consistency_crosscheck=False, **kw)
+        on = C.compute_ledger(rows, consistency_crosscheck=True, **kw)
+        d = M.ledger_diff(off, on)
+        assert d["n_added"] == 1
+        assert (d["added_not_by_consistency"], d["removed"], d["changed_existing"]) == ([], [], [])
+        # 2019〜2025 の 7 行（2019〜2024 はスピンオフの F の上に掛かる・2025 は新たに補正）
+        assert (d["n_rows_changed"], d["n_rows_newly_corrected"], d["n_companies"]) == (7, 1, 1)

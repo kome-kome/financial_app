@@ -94,6 +94,22 @@ def test_unknown_reason_is_rejected():
     assert B._parse_reasons(" absence , awaiting ") == ("absence", "awaiting")
 
 
+def test_post_period_split_rescued_by_consistency_awaits_the_official():
+    """整合度照合（#751）で存在を認めた期末後分割も倍率待ちとして選ばれる。E02086 の実値（2025・2026 行）。
+
+    照合を切った検出結果からは選ばれない（EPS 照合で落ちて倍率待ちにならない）。
+    """
+    rows = [M.AnnualRow(edinet_code="E02086", year=y, period_end="%d-03-31" % y,
+                        issued_shares=sh, bs_bps=bps, pl_eps=eps, dps=120.0, stock_price=1000.0,
+                        per=10.0, pbr=1.0, div_yield=1.0, market_cap=500.0, bs_total_equity=eq)
+            for y, sh, bps, eps, eq in ((2025, 15300000.0, 2961.91, 383.99, 45037000000.0),
+                                        (2026, 12000000.0, 1815.81, 319.92, 43000000000.0))]
+    events, stats = M.detect_events(rows, bps_path=True, consistency_crosscheck=True)
+    assert B.choose_targets(events, stats, COVER, reasons=("awaiting",)) == {"E02086": ["awaiting"]}
+    events, stats = M.detect_events(rows, bps_path=True, consistency_crosscheck=False)
+    assert B.choose_targets(events, stats, COVER, reasons=("awaiting",)) == {}
+
+
 def test_zero_bars_writes_no_coverage_row():
     """**0 本の社は区間を書かない**（#668）。書くと「イベントが無い」と読まれ、本物の分割まで外れる。"""
     assert B.coverage_rows("E03474", "30320", M.bars_spans([])) == []
