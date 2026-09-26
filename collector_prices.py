@@ -2604,6 +2604,14 @@ WIKIMEDIA_SERIES: list[dict] = [
 ]
 
 
+def all_macro_series() -> list[dict]:
+    """収集対象の全系列定義を群の宣言順に返す（`SERIES_ANCHOR` が群の一覧の唯一の源・#744）。
+
+    群を足したら `SERIES_ANCHOR` へ1行足すだけで API（routers/market.py）にも出る。
+    """
+    return [s for group in SERIES_ANCHOR for s in globals()[group]]
+
+
 def _esri_candidate_urls(today: date) -> list[str]:
     """直近 ESRI_QUARTERS_BACK 四半期 × ESRI_REPORTS（2次優先）のURL候補を、
     新しい四半期・新しい速報回の順（最新四半期の2次速報が最優先）に生成する。"""
