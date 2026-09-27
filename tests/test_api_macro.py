@@ -14,11 +14,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import api  # noqa: E402
 from database import MacroData  # noqa: E402
-from collector import MACRO_SERIES, FRED_SERIES, BOJ_SERIES, ESTAT_SERIES  # noqa: E402
+from collector_prices import MACRO_SERIES, all_macro_series  # noqa: E402
 
 client = TestClient(api.app)
 
-_ALL_SERIES = MACRO_SERIES + FRED_SERIES + BOJ_SERIES + ESTAT_SERIES
+_ALL_SERIES = all_macro_series()
 _VALID_CODE = MACRO_SERIES[0]["code"]  # 例: "USDJPY"
 
 
@@ -69,3 +69,26 @@ class TestMacroData:
 
     def test_invalid_days_returns_400(self):
         assert client.get(f"/api/macro/data/{_VALID_CODE}?days=0").status_code == 400
+
+
+# ── 全チャネルの掲載（#744）─────────────────────────────────────────────────
+
+class TestEveryChannelIsServed:
+    """収集している全系列群が API に出る（#744）。
+
+    以前はルーターが4群（MACRO/FRED/BOJ/ESTAT）だけを列挙しており、収集済みの OECD・MOF 等が
+    一覧に出ず `/api/macro/data` は 404 を返した。群の一覧は `SERIES_ANCHOR` が唯一の源で、
+    ここでは `all_macro_series` を経由せずに組み立てて照合する（同じ関数で自己照合しない）。
+    """
+
+    def test_lists_every_collected_series(self):
+        import collector_prices as cp
+        expected = {s["code"] for g in cp.SERIES_ANCHOR for s in getattr(cp, g)}
+        r = client.get("/api/macro/series")
+        assert r.status_code == 200
+        assert {i["code"] for i in r.json()["series"]} == expected
+
+    def test_non_legacy_group_code_is_served(self):
+        import collector_prices as cp
+        for code in (cp.OECD_SERIES[0]["code"], cp.MOF_SERIES[0]["code"]):
+            assert client.get(f"/api/macro/data/{code}").status_code == 200, code
