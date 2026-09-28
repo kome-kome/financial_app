@@ -71,16 +71,31 @@ class TestScoreMatchesProduction:
         for i, s in enumerate(scores):
             assert by_code[f"E{i:05d}"] == pytest.approx(s, abs=1e-4)
 
-    def test_denominator_is_weight_present_not_total(self):
-        """分母は存在指標の |w| 和。パネルに無い列は分母にも入らない。"""
-        records = _records3()
-        weights = {"z_roe": 1.0, "gap_ratio": 3.0}   # gap_ratio はパネルに無い
-        stats = build_view_stats(records, weights, FACTORS3)
-        scores = score_period(records, weights, stats)
-        only_roe = score_period(records, {"z_roe": 1.0},
-                                build_view_stats(records, {"z_roe": 1.0}, FACTORS3))
-        # total_weight(4.0) で割っていたら 1/4 に縮む。weight_present(1.0) なら一致する。
-        assert scores == pytest.approx(only_roe)
+    def test_unmeasured_columns_do_not_count_against_coverage(self):
+        """パネルに無い列（既定の gap_ratio）は分母にも被覆率にも入れない（#745）。
+
+        どの社にも無い列は行ごとの欠けではない。被覆率へ数えると、重みの半分超を持つ列が
+        1本無いだけで全社が落ちる（ここでは 1.0/4.0 < 0.5）。測れない重みは
+        `missing_weight_ratio` が別に出して判定から外す。
+        """
+        X = np.asarray(VALUES3, dtype=float)
+        y = np.asarray([0.3, -0.1, 0.2, 0.1, -0.2, -0.3])
+        panel = {"2024-01": (X, y), "2024-02": (X, y[::-1].copy())}
+        with_gap = ic_series(panel, FACTORS3, {"z_roe": 1.0, "gap_ratio": 3.0})
+        only_roe = ic_series(panel, FACTORS3, {"z_roe": 1.0})
+        assert len(only_roe) == 2                    # 空同士の一致で通らないように
+        assert with_gap == pytest.approx(only_roe)
+
+    def test_rows_below_the_production_coverage_are_not_scored(self):
+        """行ごとの欠けには本番と同じ被覆率の除外（既定 0.5）が掛かる（#745）。
+
+        今のパネルは欠けた行を `build_snapshots` が捨てるので発動しないが、規則は本番と共有する。
+        """
+        records = [SimpleNamespace(z_roe=1.0, z_op_margin=1.0),
+                   SimpleNamespace(z_roe=2.0, z_op_margin=None)]
+        scores = score_period(records, {"z_roe": 1.0, "z_op_margin": 3.0}, {})
+        assert scores[0] == pytest.approx(1.0)
+        assert scores[1] is None                     # 被覆率 1.0/4.0 < 0.5
 
     def test_row_without_any_weighted_value_is_none(self):
         records = _panel_rows(np.asarray(VALUES3, dtype=float), FACTORS3)

@@ -349,9 +349,11 @@ class TestBacktestEndpoint:
         assert r.json()["total_candidates"] == 0
 
     def test_scores_via_financial_metric(self, db, make_metric):
-        # 旧バグ（FinancialRecord 引きで常に空）の HTTP レイヤ回帰
+        # 旧バグ（FinancialRecord 引きで常に空）の HTTP レイヤ回帰。backtest は本番と同じく
+        # 被覆率 0.5 未満の社を採点しない（#745）ので、バランス型の重み 5.1 のうち 3.6 に値を入れる
         db.add(make_metric(edinet_code="E00001", year=2020, period_end="2020-03-31",
-                           market_cap=10000.0, z_roe=2.0))
+                           market_cap=10000.0, z_roe=2.0, z_op_margin=1.0,
+                           z_revenue=0.5, z_cf_ratio=0.5))
         db.commit()
         api.app.dependency_overrides[api.get_db] = lambda: db
         r = client.get("/api/backtest")

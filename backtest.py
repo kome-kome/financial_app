@@ -11,9 +11,8 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from database import FinancialMetric, prices_on_or_after, latest_prices
-from plugins.recommend import (SELECT_COLS, compute_momentum_z,
-                               fit_view_metric_stats, resolve_weights,
-                               standardize_metric)
+from plugins.recommend import (DEFAULT_MIN_COVERAGE, SELECT_COLS, compute_momentum_z,
+                               fit_view_metric_stats, resolve_weights, weighted_score)
 from plugins.net_cash_analysis import compute_net_cash, compute_nc_ratio
 
 # 複数保有期間バックテスト（/api/backtest/multi）の保有月数。
@@ -23,10 +22,10 @@ MULTI_PERIODS = [3, 6, 12, 18, 24]
 # 買い系（recommend/valuation/net_cash）は「スコアが高いほど買い候補」で、上位 N 社の
 # その後リターンがベンチマークを上回れば有効。sell は双対（買い系の逆観点）で、上位 N 社＝
 # 最も売り向きの銘柄。**sell は超過収益が負（＝下回る）ほど売りシグナルが有効**と解釈する。
-#   recommend : recommend のプリセット加重和（z_roe 等）
+#   recommend : 本番の買い推奨と同じ合成スコア（plugins.recommend.weighted_score・#745）
 #   valuation : バリュエーション分析の期待総リターン（gap_ratio + 配当利回り）
 #   net_cash  : 清原式ネットキャッシュ比率
-#   sell      : 売り候補（recommend 加重和の符号反転＝買い系スコアの逆観点・メタ×双対）
+#   sell      : 売り候補（recommend の合成スコアの符号反転＝買い系スコアの逆観点・メタ×双対）
 SCORING_SOURCES = ("recommend", "valuation", "net_cash", "sell")
 
 # 配当利回りの異常値ガード（％）。gap_analysis（バリュエーション分析）と整合。
@@ -40,8 +39,8 @@ _DIV_YIELD_CAP = 30.0
 # RUNTIME_METRICS のうち `z_momentum` は `momentum_z` から取り、`mu` は backtest では
 # reject される（as-of 再現ができない・#423 子4）＝どちらも VIEW 列として引く必要が無い。
 #
-# `score_record` は `getattr(r, metric, None)` で読むため、**列が欠けると例外ではなく
-# 「その指標だけ黙って 0 扱い」になる**（#482 で踏んだ罠と同型）。漏れは
+# `score_record`（→ `weighted_score`）は `getattr(r, metric, None)` で読むため、**列が欠けると
+# 例外ではなく「その指標だけ黙って欠け扱い」になる**（#482 で踏んだ罠と同型）。漏れは
 # `tests/test_backtest.py` のメタテストが CI で落とす。
 _BACKTEST_FIELDS: tuple[str, ...] = tuple(dict.fromkeys(
     SELECT_COLS + (
@@ -58,7 +57,11 @@ def score_record(r, source: str, weights: dict, momentum_z: dict | None = None,
     """1レコードのスコア（高いほど買い候補）。算出不能なら None（候補から除外）。
 
     各 source は financial_metrics VIEW の as-of スナップショット（FinancialMetric）から
-    一次分析のランキングキーを再現する。recommend のみ preset 加重を使う。
+    一次分析のランキングキーを再現する。recommend / sell は preset の重みを、本番の買い推奨と
+    同じ `plugins.recommend.weighted_score` で合成する（値がある指標の |w| 和で割る・被覆率が
+    画面の既定 `DEFAULT_MIN_COVERAGE` 未満なら None・#745）。以前は Σw·ẑ のまま（欠けた指標が
+    実質 0）で被覆率でも除外せず、欠けの多い銘柄を系統的に中央へ寄せる＝本番とは別の
+    ランキングを測っていた。
 
     momentum_z: {edinet_code: z} 形式の事前計算済み z_momentum（compute_momentum_z）。
     weights に z_momentum が含まれる場合のみ呼び出し側が渡す（他 source では未使用）。
@@ -82,20 +85,11 @@ def score_record(r, source: str, weights: dict, momentum_z: dict | None = None,
         nc = compute_net_cash(r.bs_current_assets, r.bs_investment_securities,
                               r.bs_total_liabilities)
         return compute_nc_ratio(nc, r.market_cap)
-    # recommend（既定）: プリセット加重和。sell は同一加重の符号反転（買い系の逆観点）。
-    score, has_any = 0.0, False
-    for metric, weight in weights.items():
-        if metric == "z_momentum":
-            # 算出側（compute_momentum_z）で期内標準化済み＝二重に標準化しない。
-            val = (momentum_z or {}).get(r.edinet_code)
-        else:
-            val = getattr(r, metric, None)
-            if val is not None and view_stats is not None:
-                val = standardize_metric(val, metric, view_stats)
-        if val is not None:
-            score += weight * val
-            has_any = True
-    if not has_any:
+    # recommend（既定）: 本番の買い推奨と同じ合成スコア。sell は同じスコアの符号反転（買い系の
+    # 逆観点）。z_momentum は算出側（compute_momentum_z）で期内標準化済み＝二重に標準化しない。
+    score = weighted_score(r, weights, view_stats or {}, min_coverage=DEFAULT_MIN_COVERAGE,
+                           runtime={"z_momentum": momentum_z or {}}).score
+    if score is None:
         return None
     return -score if source == "sell" else score
 

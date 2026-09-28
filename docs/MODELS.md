@@ -628,8 +628,9 @@ ridge は `--persist` と併用できず（DB 接続前に終了する）、既�
   両列で同じ極端値を取り（実測 `op=-61.6109` / `cf=-61.6108`）`STDDEV_SAMP` を支配する。
   61期・中央値 3,253社のパネルで `z_op_margin` は **99.4%** の会社が \|z\|<0.2
   （正規分布なら 15.9%）・尖度 1562。
-  **#509 で消費側を是正済み**——`recommend.execute` / `backtest.score_record` は
-  `fit_view_metric_stats` が断面ごとに作り直した (mean, sd) で標準化してから加重する。
+  **#509 で消費側を是正済み**——`recommend.execute` / `backtest.score_record` / 昇格ゲート
+  （`scripts/preset_ic_gate.py`）は `fit_view_metric_stats` が断面ごとに作り直した (mean, sd) で
+  標準化してから加重する（合成の式は3経路とも `weighted_score`・#745）。
   **画面に出る指標値（`results[].detail`）は生値のまま**で、変わったのはスコアの合成単位だけ。
   `z_momentum` / `mu` は算出側で期内標準化済みなので対象外。
 - **断面統計を共有させた副作用として、非有限値は入口で落とす**（#516・2026-08-23）。
@@ -685,10 +686,12 @@ ridge は `--persist` と併用できず（DB 接続前に終了する）、既�
 
 | source | スコア（高いほど上位 N 社へ） | 有効性の判定 | 前提 |
 |---|---|---|---|
-| `recommend`（既定） | recommend プリセットの加重和（z_roe 等） | 超過収益 > 0 | — |
+| `recommend`（既定） | 本番の買い推奨と同じ合成スコア（値がある指標の重み付き平均・被覆率 0.5 未満は除外） | 超過収益 > 0 | — |
 | `valuation` | 期待総リターン ＝ `gap_ratio` ＋ 配当利回り [%] | 超過収益 > 0 | sector_ols 実行済み年度のみ（gap_ratio 必須） |
 | `net_cash` | 清原式ネットキャッシュ比率 ＝ (流動資産＋投資有価証券×0.7−総負債) / 時価総額 | 超過収益 > 0 | — |
-| `sell` | 売り候補 ＝ recommend 加重和の符号反転（買い系の逆観点） | **超過収益 < 0**（上位＝売り候補が下回るほど有効） | — |
+| `sell` | 売り候補 ＝ recommend の合成スコアの符号反転（買い系の逆観点） | **超過収益 < 0**（上位＝売り候補が下回るほど有効） | — |
+
+**recommend / sell の採点は本番の買い推奨と同じ関数**（`plugins.recommend.weighted_score`・#745）で、被覆率の下限は画面の既定（`DEFAULT_MIN_COVERAGE`＝0.5）。以前は Σw·ẑ のまま（欠けた指標が実質 0）で被覆率でも除外せず、欠けの多い銘柄を系統的に中央へ寄せる＝本番とは別のランキングを測っていた。
 
 ML 系（macro）は WF-CV を内蔵するため対象外（→ §9）。`preset` は `recommend` / `sell` のときのみ意味を持つ。**`mu`（μ̂）を含む重みは 400 で reject する**（producer スコアは最新スナップショット1断面のみで as-of 再現できず、黙って欠測にすると「μ̂ 込みで検証した」と誤読されるため・ADR-0030）。`sell` はメタ層×双対層（売り判断の有効性検証）にあたり、上位 N 社＝最も売り向きの銘柄なので、その後リターンがベンチマークを**下回る**ほど売りシグナルが有効と読む。
 
@@ -701,7 +704,7 @@ start_date = today − months_ago × 30日
    各社の最新年度のデータを取得
 
 2. source のスコア関数（score_record）で全社をランキング
-   （recommend=加重和 / valuation=gap+配当 / net_cash=NC比率）
+   （recommend=本番と同じ合成スコア・被覆率 0.5 未満は除外 / valuation=gap+配当 / net_cash=NC比率）
 
 3. 上位 top_n 社について:
    始値 = start_date 以降の最初の終値

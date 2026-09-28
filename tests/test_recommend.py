@@ -6,6 +6,7 @@ execute(): 重み付きスコアのランキング・カバレッジフィルタ
 import asyncio
 import os
 import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -14,10 +15,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from plugins import execute_plugin
 from plugins.utils import PREPROCESS_VERSION
 from plugins.recommend import (
-    METRICS, MU_SOURCE_OPTIONS, PRESETS, RUNTIME_METRICS, SELECT_COLS,
+    DEFAULT_MIN_COVERAGE, METRICS, MU_SOURCE_OPTIONS, PRESETS, RUNTIME_METRICS, SELECT_COLS,
     STATISTICAL_PRESET_NAME, VIEW_METRICS, compute_momentum_z, compute_mu_z,
     fit_view_metric_stats, get_dynamic_preset, plugin, resolve_weights,
-    standardize_metric,
+    standardize_metric, weighted_score,
 )
 
 
@@ -688,3 +689,77 @@ class TestCrossSectionStandardization:
         top = res["results"][0]
         assert top["detail"]["z_roe"] == 8.0         # 標準化後の値ではない
         assert top["score"] != pytest.approx(8.0)    # スコアは標準化後
+
+
+# ── 合成スコアの唯一の実体（Issue #745）──────────────────────────────────────
+#
+# 本番の買い推奨・/api/backtest・昇格ゲート（preset_ic_gate）は同じ `weighted_score` を呼ぶ。
+# 以前は3か所に書き写されていて、backtest は分母（値がある指標の |w| 和）を、昇格ゲートは
+# 被覆率の除外を欠いていた＝指標が欠けた銘柄の順位が経路ごとに違った。
+
+class TestWeightedScore:
+    @staticmethod
+    def _rec(**vals):
+        return SimpleNamespace(edinet_code="E00001", **vals)
+
+    def test_denominator_is_the_weight_of_present_metrics(self):
+        r = self._rec(z_roe=2.0, z_op_margin=None, z_revenue=1.0)
+        ws = weighted_score(r, {"z_roe": 1.0, "z_op_margin": 1.0, "z_revenue": 2.0}, {},
+                            min_coverage=0.0)
+        # (1.0×2.0 + 2.0×1.0) / (1.0 + 2.0)。欠けた z_op_margin は分子にも分母にも入らない
+        assert ws.score == pytest.approx(4.0 / 3.0)
+        assert ws.coverage == pytest.approx(3.0 / 4.0)
+
+    def test_negative_weights_count_by_absolute_value(self):
+        r = self._rec(z_roe=1.0, z_de_ratio=2.0)
+        ws = weighted_score(r, {"z_roe": 1.0, "z_de_ratio": -1.0}, {}, min_coverage=0.0)
+        assert ws.score == pytest.approx((1.0 - 2.0) / 2.0)
+        assert ws.coverage == 1.0
+
+    def test_below_min_coverage_is_not_scored(self):
+        r = self._rec(z_roe=3.0, z_op_margin=None, z_revenue=None)
+        ws = weighted_score(r, {"z_roe": 1.0, "z_op_margin": 1.0, "z_revenue": 1.0}, {},
+                            min_coverage=0.5)
+        assert ws.score is None
+        assert ws.coverage == pytest.approx(1.0 / 3.0)   # 画面の除外件数を数えるために返す
+
+    def test_exactly_min_coverage_is_kept(self):
+        r = self._rec(z_roe=2.0, z_op_margin=None)
+        ws = weighted_score(r, {"z_roe": 1.0, "z_op_margin": 1.0}, {}, min_coverage=0.5)
+        assert ws.score == pytest.approx(2.0)
+
+    def test_no_weighted_value_is_not_scored_even_without_threshold(self):
+        ws = weighted_score(self._rec(z_roe=None), {"z_roe": 1.0}, {}, min_coverage=0.0)
+        assert ws.score is None
+        assert ws.coverage == 0.0
+
+    def test_min_coverage_has_no_default(self):
+        """既定値を持たせない。書き忘れた呼び出し側が黙って別の規則で採点しないように。"""
+        with pytest.raises(TypeError):
+            weighted_score(self._rec(z_roe=1.0), {"z_roe": 1.0}, {})
+
+    def test_runtime_values_are_read_by_edinet_code(self):
+        """RUNTIME_METRICS は VIEW 列に無い。渡された辞書から edinet_code で引く。"""
+        r = self._rec(z_roe=1.0)
+        w = {"z_roe": 1.0, "z_momentum": 1.0}
+        ws = weighted_score(r, w, {}, min_coverage=0.0, runtime={"z_momentum": {"E00001": 3.0}})
+        assert ws.score == pytest.approx(2.0)
+        missing = weighted_score(r, w, {}, min_coverage=0.0, runtime={"z_momentum": {}})
+        assert missing.score == pytest.approx(1.0)
+        assert missing.coverage == pytest.approx(0.5)
+
+    def test_metrics_without_runtime_are_read_from_the_record(self):
+        """昇格ゲートのパネルは z_momentum を列として持つ（runtime を渡さない）。"""
+        r = SimpleNamespace(z_momentum=0.4)          # edinet_code を持たない行でも読める
+        ws = weighted_score(r, {"z_momentum": 1.0}, {}, min_coverage=0.0)
+        assert ws.score == pytest.approx(0.4)
+
+    def test_view_stats_standardize_and_detail_stays_raw(self):
+        ws = weighted_score(self._rec(z_roe=3.0), {"z_roe": 1.0}, {"z_roe": (1.0, 2.0)},
+                            min_coverage=0.0)
+        assert ws.score == pytest.approx(1.0)        # (3 − 1) / 2
+        assert ws.detail == {"z_roe": 3.0}           # 画面へは生値
+
+    def test_default_min_coverage_is_the_screen_default(self):
+        """backtest と昇格ゲートはこの値で採点する＝画面の既定の並びを測る。"""
+        assert plugin.params_schema()["min_coverage"]["default"] == DEFAULT_MIN_COVERAGE == 0.5

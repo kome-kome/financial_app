@@ -46,6 +46,11 @@ PRESETS = {
     "高収益重視":  {"z_roe": 2.0, "z_op_margin": 2.0, "z_cf_ratio": 1.0, "z_equity_ratio": 0.5},
 }
 
+# 被覆率（値がある指標の |w| 和 ÷ 全指標の |w| 和）の下限の既定値＝画面の min_coverage
+# スライダーの初期値。/api/backtest と昇格ゲート（scripts/preset_ic_gate.py）はこの値で採点する
+# ＝画面の既定の並びを測る（Issue #745）。
+DEFAULT_MIN_COVERAGE = 0.5
+
 # 表示・フィルタで使う financial_metrics 列（Issue #441）。VIEW は97列あるが recommend が
 # 読むのはここと METRICS だけで、全列×全社（実測 4,430 行）を転送すると本番 Supabase 実測
 # 3.00s、必要列だけなら 1.16s。Render の 30秒リクエスト上限は有料プランでも変わらないため、
@@ -210,6 +215,57 @@ def standardize_metric(val: float, metric: str, stats: dict) -> float:
     if s is None:
         return float(val)
     return normalize_transform(float(val), s[0], s[1], "zscore")
+
+
+# 1社の採点結果（`weighted_score` の戻り値）。
+WeightedScore = namedtuple("WeightedScore", "score coverage detail")
+
+
+def weighted_score(r: Any, weights: dict, view_stats: dict, *, min_coverage: float,
+                   runtime: dict | None = None) -> WeightedScore:
+    """1社の重み付き合成スコア（Issue #745）。
+
+      score    = Σ(w_i × ẑ_i) / Σ|w_i|   （i は値が存在する指標のみ）
+      coverage = Σ|w_i|（値が存在する指標） / Σ|w|（全指標）
+
+    本番の買い推奨（`RecommendPlugin.execute`）・`/api/backtest`（`backtest.score_record`）・
+    昇格ゲート（`scripts/preset_ic_gate.score_period`）が共有する**唯一の実体**。以前は3か所に
+    書き写されていて、backtest は分母を（Σw·ẑ のまま＝欠けた指標が実質 0）、昇格ゲートは被覆率の
+    除外を欠いていた＝指標が欠けた銘柄の順位が経路ごとに違った。書き写さずここを呼ぶこと。
+
+    score は、重みの乗る値が1つも無いとき、または coverage < min_coverage のとき None。
+    coverage と detail は採点できない行でも返す（画面の除外件数・表示用）。
+    `min_coverage` に既定値を持たせないのは、書き忘れた呼び出し側が黙って別の規則で採点
+    しないため（画面の既定は `DEFAULT_MIN_COVERAGE`）。
+
+    ẑ_i は `standardize_metric(val, metric, view_stats)`。断面統計は1社では作れないので、呼び出し
+    側が `fit_view_metric_stats` で作って渡す。`view_stats` に無い指標（算出側で標準化済みの
+    RUNTIME_METRICS・有効4件未満の列）は生値のまま。
+
+    runtime: `{metric: {edinet_code: 値}}`。RUNTIME_METRICS（`z_momentum` / `mu`）は VIEW 列に
+    無く、算出側（`compute_momentum_z` / `compute_mu_z`）が期内標準化して渡す。渡されない指標は
+    `getattr(r, metric)` で読む（昇格ゲートのパネルは z_momentum を列として持つ）。
+
+    detail は**生値**のまま返す。画面は指標の実額を見せる場所で、スコアの合成単位とは役割が違う
+    （sell_ranking も raw を返している）。
+    """
+    total_weight = sum(abs(w) for w in weights.values())
+    weighted_sum = 0.0
+    weight_present = 0.0
+    detail = {}
+    for metric, weight in weights.items():
+        values = (runtime or {}).get(metric)
+        val = values.get(r.edinet_code) if values is not None else getattr(r, metric, None)
+        if val is not None:
+            # 算出側で標準化済みの RUNTIME_METRICS は view_stats に入っておらず素通りする
+            # （昇格ゲートはパネルの生の momentum を揃えるため、その統計を足して渡す）。
+            weighted_sum += weight * standardize_metric(val, metric, view_stats)
+            weight_present += abs(weight)
+        detail[metric] = round(val, 4) if val is not None else None
+    coverage = weight_present / total_weight if total_weight > 0 else 0.0
+    if coverage < min_coverage or weight_present == 0:
+        return WeightedScore(None, coverage, detail)
+    return WeightedScore(weighted_sum / weight_present, coverage, detail)
 
 
 def compute_momentum_z(db: Any, edinet_codes: list, as_of_date: str) -> dict:
@@ -404,7 +460,7 @@ class RecommendPlugin(AnalysisPlugin):
                 "dtype": "float",
                 "label": "必須指標カバレッジ（0-1）",
                 "min": 0.0, "max": 1.0, "step": 0.1,
-                "default": 0.5,
+                "default": DEFAULT_MIN_COVERAGE,
                 "description": "重み付き指標のうち、値が揃っている比率の下限。1.0=全指標必須。",
             },
             "year": {
@@ -432,7 +488,7 @@ class RecommendPlugin(AnalysisPlugin):
     def execute(self, params: dict, db: Any) -> dict:
         """重み付き指標スコアでランキング。
 
-        スコア計算: weighted mean を用いる。
+        スコア計算: weighted mean を用いる（式の実体は `weighted_score`・#745）。
           score = Σ(w_i × ẑ_i) / Σ|w_i|   (i は値が存在する指標のみ)
         これにより指標カバレッジが異なる銘柄を公平に比較できる。
         min_coverage は重み付き指標のうち値が存在する比率（重み総和ベース）の下限。
@@ -472,7 +528,7 @@ class RecommendPlugin(AnalysisPlugin):
         # （フロントエンドのプリセット切替は presets[name] を直接参照するため無改修で動く）。
         all_presets = get_all_presets(db)
 
-        # 重み総和（絶対値ベース）。カバレッジ計算と正規化に使う
+        # 重み総和（絶対値ベース）。0 なら採点できる指標が無いので DB を引かずに空で返す
         total_weight = sum(abs(w) for w in weights.values())
         if total_weight == 0:
             return {"count": 0, "total_candidates": 0, "presets": all_presets,
@@ -522,35 +578,18 @@ class RecommendPlugin(AnalysisPlugin):
         # 「重み 1.0」の実効的な影響力が列間で最大 73倍違う（詳細は fit_view_metric_stats）。
         view_stats = fit_view_metric_stats(records, weights)
 
+        # 採点は `weighted_score`（/api/backtest・昇格ゲートと共有する唯一の実体・#745）。
+        runtime = {"z_momentum": momentum_z, "mu": mu_z}
         scored = []
         skipped_low_coverage = 0
         for r in records:
-            weighted_sum = 0.0
-            weight_present = 0.0
-            detail = {}
-            for metric, weight in weights.items():
-                if metric == "z_momentum":
-                    val = momentum_z.get(r.edinet_code)
-                elif metric == "mu":
-                    val = mu_z.get(r.edinet_code)
-                else:
-                    val = getattr(r, metric, None)
-                if val is not None:
-                    # RUNTIME_METRICS は compute_momentum_z / compute_mu_z が標準化済み
-                    # ＝ここを通さない（standardize_metric 側でも stats に入っていない）。
-                    weighted_sum += weight * standardize_metric(val, metric, view_stats)
-                    weight_present += abs(weight)
-                # detail は **生値**（VIEW 値）のまま返す。画面は指標の実額を見せる場所で、
-                # スコアの合成単位とは役割が違う（sell_ranking も raw を返している）。
-                detail[metric] = round(val, 4) if val is not None else None
-            coverage = weight_present / total_weight if total_weight > 0 else 0.0
-            if coverage < min_coverage:
-                skipped_low_coverage += 1
+            ws = weighted_score(r, weights, view_stats, runtime=runtime,
+                                min_coverage=min_coverage)
+            if ws.score is None:
+                if ws.coverage < min_coverage:
+                    skipped_low_coverage += 1
                 continue
-            if weight_present == 0:
-                continue
-            score = weighted_sum / weight_present
-            scored.append((score, coverage, r, detail))
+            scored.append((ws.score, ws.coverage, r, ws.detail))
 
         # 株価 as-of（Issue #416）。z_momentum も PER/PBR も株価由来なので、株価が
         # 止まっていればスコア全体が静かに古くなる。行ごとの齢を返して UI で見せる。
