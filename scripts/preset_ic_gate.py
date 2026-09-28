@@ -10,12 +10,13 @@ ADR-0028 の昇格ゲート（期別 rank-IC 系列 ＋ `paired_ic_significance`
 
 設計の要点
 ----------
-1. **標準化は消費側の関数をそのまま呼ぶ**。`plugins.recommend.fit_view_metric_stats` →
-   `standardize_metric`（`fit_zscore_stats` で頑健な mean/sd を作り、**生値**を
+1. **標準化も合成も消費側の関数をそのまま呼ぶ**。標準化は `plugins.recommend.fit_view_metric_stats`
+   → `standardize_metric`（`fit_zscore_stats` で頑健な mean/sd を作り、**生値**を
    `normalize_transform` で変換して ±5 クリップ）であって、学習系の `fit_feature_columns`
-   （値を p1-p99 でクリップしてから zscore）ではない。ここを取り違えると測っているものが
-   本番と別物になる（#529 の指摘そのもの）。パネルは numpy 配列なので `_panel_rows` で
-   属性アクセスできる形へ写す薄いアダプタだけを挟む。
+   （値を p1-p99 でクリップしてから zscore）ではない。合成は `plugins.recommend.weighted_score`
+   （本番と同じ分母・同じ被覆率の除外・#745）。ここを取り違えると測っているものが本番と別物に
+   なる（#529・#745 の指摘そのもの）。パネルは numpy 配列なので `_panel_rows` で属性アクセス
+   できる形へ写す薄いアダプタだけを挟む。
 2. **パネルは `recommend_factor_premia.build_period_panel`**。#509/#517 の実測がこの61期
    パネル上で行われたため、再現には同じものが要る。既定は gap_ratio を持たない（ADR-0008
    Decision 1）ので、**測れなかった重みの比率を必ず出力**し、閾値超の行は判定を n/a へ落とす。
@@ -64,8 +65,8 @@ from database import SessionLocal, get_latest_factor_premia   # noqa: E402
 from model_stats import paired_ic_significance, significance_matrix   # noqa: E402
 from plugins.macro_snapshots import _spearman   # noqa: E402
 from plugins.recommend import (   # noqa: E402
-    METRICS, PRESETS, STATISTICAL_PRESET_NAME,
-    fit_view_metric_stats, standardize_metric,
+    DEFAULT_MIN_COVERAGE, METRICS, PRESETS, STATISTICAL_PRESET_NAME,
+    fit_view_metric_stats, weighted_score,
 )
 from plugins.utils import PREPROCESS_VERSION, fit_zscore_stats   # noqa: E402
 from recommend_factor_premia import build_period_panel   # noqa: E402
@@ -203,35 +204,34 @@ def build_view_stats(records: list, weights: dict, factor_names: list, *,
 
 
 def score_period(records: list, weights: dict, view_stats: dict) -> list:
-    """1期分のスコア列を返す（重みの乗る値が1つも無い行は None）。
+    """1期分のスコア列を返す（採点できない行は None）。
 
-    分母は `weight_present`（存在指標の |w| 和）＝ `RecommendPlugin.execute` と同一。
-    `total_weight` で割ると欠損の多い銘柄が不当に 0 へ寄る。
+    合成は `plugins.recommend.weighted_score`＝`RecommendPlugin.execute` と同じ式・同じ分母
+    （値がある指標の |w| 和）・同じ被覆率の除外（画面の既定 `DEFAULT_MIN_COVERAGE`）。書き写すと
+    中身が黙ってずれる（#745 以前はここが被覆率の除外を欠いていた）。今のパネルは欠けた行を
+    `build_snapshots` が捨てるので除外は発動しないが、規則は本番と共有する。
     """
-    scores = []
-    for r in records:
-        weighted_sum = 0.0
-        weight_present = 0.0
-        for metric, weight in weights.items():
-            val = getattr(r, metric, None)
-            if val is None:
-                continue
-            weighted_sum += weight * standardize_metric(val, metric, view_stats)
-            weight_present += abs(weight)
-        scores.append(weighted_sum / weight_present if weight_present > 0 else None)
-    return scores
+    return [weighted_score(r, weights, view_stats, min_coverage=DEFAULT_MIN_COVERAGE).score
+            for r in records]
 
 
 def ic_series(panel: dict, factor_names: list, weights: dict, *,
               standardize: bool = True, raw_momentum: bool = False) -> dict:
-    """{ym: rank_IC} を返す。IC は spearman(score, 52週先 log return)。"""
+    """{ym: rank_IC} を返す。IC は spearman(score, 52週先 log return)。
+
+    パネルに無い列（既定のパネルの gap_ratio 等）の重みは外してから採点する（#745）。その列は
+    どの社にも無い＝行ごとの欠けではないので、被覆率の分母へ入れると重みの半分超を持つ列が
+    1本無いだけで全社が落ちる。外せば分子にも分母にも被覆率にも入らない（#745 以前と同じ採点）。
+    測れない重みは `missing_weight_ratio` が別に出して判定から外す。
+    """
+    measurable = {m: w for m, w in weights.items() if m in factor_names}
     out: dict = {}
     for ym in sorted(panel):
         X, y = panel[ym]
         records = _panel_rows(X, factor_names)
-        view_stats = build_view_stats(records, weights, factor_names,
+        view_stats = build_view_stats(records, measurable, factor_names,
                                       standardize=standardize, raw_momentum=raw_momentum)
-        scores = score_period(records, weights, view_stats)
+        scores = score_period(records, measurable, view_stats)
         xs, ys = [], []
         for s, target in zip(scores, y):
             if s is not None:

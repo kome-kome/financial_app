@@ -9,7 +9,28 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import pytest
+
 import backtest
+from plugins.recommend import PRESETS, RUNTIME_METRICS
+
+# バランス型の VIEW 指標（z_momentum は株価から実行時に計算するので含まない）。
+_BALANCED_VIEW_METRICS = tuple(m for m in PRESETS["バランス型"] if m not in RUNTIME_METRICS)
+
+
+@pytest.fixture
+def make_metric(make_metric):
+    """conftest の make_metric に、バランス型の VIEW 指標の既定値 0.0 を足したもの（#745）。
+
+    backtest は本番の買い推奨と同じく**被覆率 0.5 未満の社を採点しない**。z_roe だけの検体は
+    被覆率 1.0/5.1 で候補から消えるので、テストが指定しない列を全社共通の 0.0 で埋める。
+    全社共通の定数は断面標準化で 0 になり（散らばり 0 は 1.0 で割る）、順位にも分子にも効かない。
+    スコアの分母（値がある指標の |w| 和）は 4.6＝z_momentum（株価が無ければ欠ける）以外の重み。
+    明示的に None を渡した列は欠けのまま。
+    """
+    def _make(**overrides):
+        return make_metric(**{**{m: 0.0 for m in _BALANCED_VIEW_METRICS}, **overrides})
+    return _make
 
 
 class TestPercentile:
@@ -89,13 +110,13 @@ class TestRun:
         assert res["results"][0]["edinet_code"] == "E00001"
 
     def test_ranking_by_score(self, db, make_metric):
-        # バランス型: z_roe(×1.0) + z_op_margin(×1.0) でスコア算出
+        # バランス型: 他の列は全社共通の 0.0 なので z_roe(×1.0) + z_op_margin(×1.0) の和で並ぶ
         db.add(make_metric(edinet_code="E00001", year=2020, period_end="2020-03-31",
-                           z_roe=1.0, z_op_margin=0.5))   # score=1.5
+                           z_roe=1.0, z_op_margin=0.5))   # 和=1.5
         db.add(make_metric(edinet_code="E00002", year=2020, period_end="2020-03-31",
-                           z_roe=3.0, z_op_margin=2.0))   # score=5.0
+                           z_roe=3.0, z_op_margin=2.0))   # 和=5.0
         db.add(make_metric(edinet_code="E00003", year=2020, period_end="2020-03-31",
-                           z_roe=2.0, z_op_margin=1.0))   # score=3.0
+                           z_roe=2.0, z_op_margin=1.0))   # 和=3.0
         db.commit()
         res = backtest.run(db, "バランス型", 6, 20, None, None)
         codes = [r["edinet_code"] for r in res["results"]]
@@ -167,14 +188,15 @@ class TestScoringSource:
         assert res["results"][0]["score"] == 1.5
 
     def test_source_sell_inverts_recommend_ranking(self, db, make_metric):
-        # sell は recommend 加重和の符号反転（買い系の逆観点）。
-        # recommend なら E00002(score=5) が首位だが、sell では最下位の買い＝最上位の売り。
+        # sell は recommend の合成スコアの符号反転（買い系の逆観点）。スコアは値がある指標の
+        # |w| 和 4.6 で割った重み付き平均（3社では断面標準化が掛からず生値のまま）。
+        # recommend なら E00002 が首位だが、sell では最下位の買い＝最上位の売り。
         db.add(make_metric(edinet_code="E00001", year=2020, period_end="2020-03-31",
-                           z_roe=1.0, z_op_margin=0.5))   # buy=1.5 → sell=-1.5
+                           z_roe=1.0, z_op_margin=0.5))   # buy=1.5/4.6 → sell=-1.5/4.6
         db.add(make_metric(edinet_code="E00002", year=2020, period_end="2020-03-31",
-                           z_roe=3.0, z_op_margin=2.0))   # buy=5.0 → sell=-5.0
+                           z_roe=3.0, z_op_margin=2.0))   # buy=5.0/4.6 → sell=-5.0/4.6
         db.add(make_metric(edinet_code="E00003", year=2020, period_end="2020-03-31",
-                           z_roe=2.0, z_op_margin=1.0))   # buy=3.0 → sell=-3.0
+                           z_roe=2.0, z_op_margin=1.0))   # buy=3.0/4.6 → sell=-3.0/4.6
         db.commit()
         buy  = backtest.run(db, "バランス型", 6, 20, None, None, source="recommend")
         sell = backtest.run(db, "バランス型", 6, 20, None, None, source="sell")
@@ -183,9 +205,9 @@ class TestScoringSource:
         buy_codes  = [r["edinet_code"] for r in buy["results"]]
         sell_codes = [r["edinet_code"] for r in sell["results"]]
         assert sell_codes == list(reversed(buy_codes))
-        # 売り候補首位＝最も買い向きでない E00001（sell score=-1.5 が最大）
+        # 売り候補首位＝最も買い向きでない E00001（sell score=-1.5/4.6 が最大・結果は3桁丸め）
         assert sell_codes[0] == "E00001"
-        assert sell["results"][0]["score"] == -1.5
+        assert sell["results"][0]["score"] == pytest.approx(-1.5 / 4.6, abs=1e-3)
 
 
 # ── z_momentum（Issue #270）: as-of リークセーフなランキング ─────────────────
@@ -241,7 +263,6 @@ class TestScoringSourceStatisticalPreset:
         assert res["results"][0]["edinet_code"] == "E00001"   # z_roe が高い方が上位
 
     def test_falls_back_to_balanced_when_unset(self, db, make_metric):
-        import pytest
         # データ未蓄積時はバランス型（z_roe+z_op_margin等）へフォールバック
         db.add(make_metric(edinet_code="E00001", year=2020, period_end="2020-03-31",
                            z_roe=2.0, z_op_margin=1.0))
@@ -249,7 +270,8 @@ class TestScoringSourceStatisticalPreset:
 
         res = backtest.run(db, "統計的最適化", 6, 20, None, None)
         assert res["total_candidates"] == 1
-        assert res["results"][0]["score"] == pytest.approx(3.0)   # バランス型: z_roe+z_op_margin
+        # バランス型: (z_roe + z_op_margin) / 値がある指標の |w| 和 4.6（結果は3桁丸め）
+        assert res["results"][0]["score"] == pytest.approx(3.0 / 4.6, abs=1e-3)
 
 
 # ── 摩擦コスト（Issue #316）: cost_bps ────────────────────────────────────────
@@ -467,3 +489,79 @@ class TestCrossSectionStandardization:
         order_both = [r["edinet_code"] for r in both["results"]]
         order_eq = [f"E{i:05d}" for i in range(1, n + 1)]   # z_equity_ratio 降順
         assert order_both != order_eq
+
+
+# ── 本番の買い推奨と同じ採点（Issue #745）─────────────────────────────────────
+#
+# 以前の score_record は Σw·ẑ をそのまま返し（欠けた指標は実質 0）、被覆率でも除外しなかった。
+# 欠けの多い銘柄を系統的に中央へ寄せる＝本番とは別のランキングを測っていた。
+
+class TestSameRuleAsRecommend:
+    def test_low_coverage_record_is_not_a_candidate(self, db, make_metric):
+        # バランス型（|w| 和 5.1）で z_roe と z_op_margin 以外を欠けにする＝被覆率 2.0/5.1 < 0.5
+        low = {m: None for m in _BALANCED_VIEW_METRICS if m not in ("z_roe", "z_op_margin")}
+        db.add(make_metric(edinet_code="E00001", year=2020, period_end="2020-03-31",
+                           z_roe=5.0, z_op_margin=5.0, **low))
+        db.add(make_metric(edinet_code="E00002", year=2020, period_end="2020-03-31", z_roe=1.0))
+        db.commit()
+        res = backtest.run(db, "バランス型", 6, 20, None, None)
+        assert [r["edinet_code"] for r in res["results"]] == ["E00002"]
+        assert res["total_candidates"] == 1
+
+    def test_three_paths_rank_alike(self, db, make_metric, monkeypatch):
+        """指標が欠けた社を含む断面で、本番・backtest・昇格ゲートの順位が一致する（#745 検証1）。
+
+        旧 backtest の式（欠けは 0・割らない・除外しない）とは順位が違うことも同じ検体で
+        確かめる。違わない検体だと、一致のテストは中身に関係なく通ってしまう。
+        """
+        import asyncio
+        from types import SimpleNamespace
+
+        import plugins.recommend as recommend_mod
+        from plugins import execute_plugin
+        from scripts.preset_ic_gate import build_view_stats, score_period
+
+        weights = {"z_roe": 1.0, "z_op_margin": 1.0, "z_revenue": 0.5}
+        monkeypatch.setattr(recommend_mod, "PRESETS",
+                            {**recommend_mod.PRESETS, "検証用": weights})
+        rows = {   # (z_roe, z_op_margin, z_revenue)。None＝欠け
+            "E00001": (2.0, None, 0.0),      # 1つ欠け（被覆率 0.6）
+            "E00002": (0.5, 0.5, 0.5),
+            "E00003": (1.0, 0.8, None),      # 1つ欠け（被覆率 0.8）
+            "E00004": (-1.0, -0.5, 1.0),
+            "E00005": (0.0, 1.5, -1.0),
+            "E00006": (3.0, None, None),     # 2つ欠け（被覆率 0.4）＝本番に出ない
+            "E00007": (-2.0, 0.2, 0.3),
+            "E00008": (0.3, -1.0, 2.0),
+        }
+        for ec, (roe, op, rev) in rows.items():
+            db.add(make_metric(edinet_code=ec, year=2020, period_end="2020-03-31",
+                               z_roe=roe, z_op_margin=op, z_revenue=rev))
+        db.commit()
+
+        # 本番: min_coverage は画面の既定（0.5）
+        prod = asyncio.run(execute_plugin(
+            recommend_mod.plugin, {"weights": weights, "top_n": 10}, db))
+        prod_order = [r["edinet_code"] for r in prod["results"]]
+
+        bt = backtest.run(db, "検証用", 6, 20, None, None)
+        bt_order = [r["edinet_code"] for r in bt["results"]]
+
+        records = [SimpleNamespace(edinet_code=ec, z_roe=v[0], z_op_margin=v[1], z_revenue=v[2])
+                   for ec, v in rows.items()]
+        stats = build_view_stats(records, weights, list(weights))
+        scores = score_period(records, weights, stats)
+        gate_order = [ec for _, ec in sorted(
+            ((s, r.edinet_code) for s, r in zip(scores, records) if s is not None),
+            reverse=True)]
+
+        assert prod_order == bt_order == gate_order
+        assert len(prod_order) == 7 and "E00006" not in prod_order
+
+        # 旧 backtest の式なら E00006 が首位に来て、E00001 と E00003 の順も入れ替わる
+        naive = [ec for _, ec in sorted(
+            ((sum(w * recommend_mod.standardize_metric(getattr(r, m), m, stats)
+                  for m, w in weights.items() if getattr(r, m) is not None), r.edinet_code)
+             for r in records), reverse=True)]
+        assert naive[0] == "E00006"
+        assert [ec for ec in naive if ec != "E00006"] != prod_order
