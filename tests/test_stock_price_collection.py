@@ -158,6 +158,32 @@ class TestBackfillWeeklyHistoryYahoo:
         assert ticker == "1001.T"
         assert d_to == date.today().strftime("%Y%m%d")
 
+    def test_scaled_history_against_oldest_week_is_not_written(
+            self, db, make_company, make_weekly):
+        """過去側が比率倍で返ったら、DB の最古の週との境目の段差で社ごと書かない（#765）。
+
+        検体は E03530（8303 SBI新生銀行）: Yahoo は split 1:20,000,000 で 2,766 を
+        55,319,998,464 として返す。再上場後の DB の最古週は 1,731。
+        """
+        oldest = (date.today() - timedelta(days=365 * 2)).strftime("%Y-%m-%d")
+        db.add(make_company(edinet_code="E03530", sec_code="8303"))
+        db.add(make_weekly(edinet_code="E03530", trade_date=oldest, close_last=1731.0))
+        db.commit()
+        before = (date.today() - timedelta(days=365 * 3)).isoformat()
+
+        async def mock_fetch(session, ticker, d_from, d_to, **kw):
+            return [{"trade_date": before, "close": 55319998464.0, "volume": 0.0}]
+
+        with (
+            patch("collector_prices.fetch_yahoo_history", new=mock_fetch),
+            patch("collector_prices.record_prices_batch", return_value=0) as rec,
+            patch("collector_prices.YAHOO_STOCK_RATE_SLEEP", 0),
+        ):
+            result = asyncio.run(backfill_weekly_history_yahoo(db, years_back=5))
+
+        rec.assert_not_called()
+        assert result["scale_rejected"] == 1
+
 
 # ── JQuants版：collect_stock_price_history_jquants ───────────────────────────
 

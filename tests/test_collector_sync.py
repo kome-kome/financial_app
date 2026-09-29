@@ -167,6 +167,25 @@ class TestUpdateMarketDataPointInTime:
         db.refresh(rec)
         assert rec.stock_price is None
 
+    def test_only_limits_the_companies_touched(self, db, make_fin, make_weekly):
+        """株価表を社を限って修復したあと、無関係な社の行まで書き換えない（#765）。"""
+        mine = make_fin(edinet_code="E00001", period_end="2023-03-31", bs_bps=1000.0)
+        other = make_fin(edinet_code="E00002", sec_code="1002", period_end="2023-03-31",
+                         bs_bps=1000.0, stock_price=1.0)
+        db.add_all([mine, other])
+        db.add(make_weekly(edinet_code="E00001", trade_date="2023-03-31", close_last=3000.0))
+        db.add(make_weekly(edinet_code="E00002", trade_date="2023-03-31", close_last=5000.0))
+        db.commit()
+        update_market_data_from_history(db, point_in_time=True, only=["E00001"])
+        db.refresh(mine)
+        db.refresh(other)
+        assert mine.stock_price == 3000.0
+        assert other.stock_price == 1.0
+
+    def test_only_requires_point_in_time(self, db):
+        with pytest.raises(ValueError):
+            update_market_data_from_history(db, only=["E00001"])
+
 
 class TestUpdateMarketDataPointInTimeNearest:
     """point_in_time=True の最近傍探索・日付範囲フィルタ・latest_by_ec 整合の深掘り。

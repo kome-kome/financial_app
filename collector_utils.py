@@ -212,6 +212,84 @@ def same_price_scale(a: float, b: float) -> bool:
         return False
     return abs(a - b) <= rounding_tolerance(a, b) * max(a, b)
 
+# --- 取引では起こりえない段差（#765）------------------------------------------
+# Yahoo は TOB 後のスクイーズアウトの株式併合（例: 4,400,000株→1株）を split として登録し、
+# 比率で調整した終値を返す（3,700 → 16,278,046,720・出来高0）。毎晩の gap-fill がそれを
+# 検査なしで書き、上場廃止で系列が止まるので異常値が「最新株価」として固定された。
+#
+# **閾値は取引所の約束から導く**（観測値から逆算しない・ADR-0042 と同じ考え方）。東証の
+# 制限値幅は最も低い帯（基準値段100円未満）でも30円、拡大時も通常の4倍までなので、
+# **連続するセッション間の100倍は1円前後の超低位株を除いて取引では起こらない**。
+# 下げ側は1日で1/100に届かない。上下対称にしてあるのは、100:1 以上の分割を Yahoo が遡及
+# 調整した場合（DB の旧スケールとの段差）も「書かずに知らせる」側へ倒すため。
+SCALE_BREAK_RATIO = 100.0
+
+
+def is_scale_break(prev, cur, ratio: float = SCALE_BREAK_RATIO) -> bool:
+    """2つの終値の比が `ratio` 倍以上（または 1/`ratio` 以下）か。片方でも欠損・非正なら False。
+
+    割り算ではなく掛け算で比べる（`nightly` の SQL 走査と同じ形＝0 除算の分岐を持たない）。
+    """
+    if prev is None or cur is None:
+        return False
+    prev, cur = float(prev), float(cur)
+    if prev <= 0 or cur <= 0:
+        return False
+    return cur >= ratio * prev or cur * ratio <= prev
+
+
+def first_scale_break(points, ratio: float = SCALE_BREAK_RATIO) -> Optional[tuple]:
+    """`[(日付, 終値)]`（日付昇順）を隣どうし比べ、最初の段差 `(d0, c0, d1, c1)` を返す。
+
+    同じ日付が2つ並んでもよい（DB の基準点と Yahoo のバーを並べて比べる）。欠損・非正の
+    終値は飛ばす＝その前後が隣どうしとして比べられる。
+    """
+    prev = None
+    for d, c in points:
+        if c is None or c <= 0:
+            continue
+        if prev is not None and is_scale_break(prev[1], c, ratio):
+            return (prev[0], prev[1], d, c)
+        prev = (d, c)
+    return None
+
+
+def merge_with_anchor(anchor: Optional[tuple], bars) -> list:
+    """DB の基準点 `(日付, 終値)` と Yahoo のバー `[(日付, 終値)]` を日付順に並べる。
+
+    同じ日付なら基準点を先に置く＝「DB の値 → 同じ日の Yahoo の値」が隣どうしになる。
+    """
+    points = [(d, 1, c) for d, c in bars]
+    if anchor is not None:
+        points.append((anchor[0], 0, anchor[1]))
+    points.sort(key=lambda p: (p[0], p[1]))
+    return [(d, c) for d, _, c in points]
+
+
+def scale_keep_mask(anchor_close, closes, ratio: float = SCALE_BREAK_RATIO) -> list:
+    """Yahoo の1社ぶんの終値（日付昇順）のうち、書いてよいバーを True で返す（#765）。
+
+    - 基準（DB の直前値）があるとき: 基準から `ratio` 倍以上離れていないバーだけ残す。
+      残したバーどうしに段差があれば全部捨てる（どちらの単位が正しいか決められない）。
+    - 基準が無いとき（株価を1件も持たない社）: 応答の中に段差があれば全部捨てる。
+
+    **社ごと全部捨てない**のは、捨てた社は最終日付が進まず、毎晩同じ直近数日を取り直して
+    同じ理由で捨て続けるから。Yahoo が数日だけ比率倍を返した社（E02305 は 5/18〜5/21 だけ
+    比率倍で 5/22 から正常）でも、J-Quants が追いつく約80日後まで株価が止まる。基準から
+    離れたバーだけ捨てれば、併合の社は全バーが落ち、一時的な乱れの社は正常なバーで回復する。
+    """
+    n = len(closes)
+    if anchor_close is not None and anchor_close > 0:
+        keep = [c is not None and c > 0 and not is_scale_break(anchor_close, c, ratio)
+                for c in closes]
+        kept = [(i, c) for i, (c, k) in enumerate(zip(closes, keep)) if k]
+        if first_scale_break(kept, ratio) is not None:
+            return [False] * n
+        return keep
+    if first_scale_break(list(enumerate(closes)), ratio) is not None:
+        return [False] * n
+    return [c is not None and c > 0 for c in closes]
+
 # --- 日本時間の基準（#474 / #476）----------------------------------------------
 # GitHub Actions のランナーは UTC。日本市場・EDINET の「日付」は JST なので、
 # 収集の日付境界は必ずこの tz で判定する（`date.today()` を直接使わない）。

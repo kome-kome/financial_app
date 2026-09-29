@@ -225,3 +225,53 @@ class TestFullPipelineKeepsFailFast:
             os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
             "_pipeline_gh.py"), encoding="utf-8").read()
         assert "except EdinetAccessError" not in body
+
+
+class TestScaleGuardLines:
+    """#765 の2行（Yahoo の不採用・株価表の段差の走査）が毎晩ログに出る。
+
+    書式は `collector_prices` の書式関数が唯一の源で、`scripts/check_nightly_collect.py` が
+    それを読む。走査の失敗は収集を止めない（往復段差の検知と同じ扱い）。
+    """
+
+    def _run(self, gap_result, scan):
+        mocks = {
+            "log": MagicMock(),
+            "init_db": MagicMock(),
+            "SessionLocal": MagicMock(return_value=MagicMock()),
+            "run_full_collection": AsyncMock(return_value=False),
+            "collect_macro_data": AsyncMock(return_value=0),
+            "collect_stock_price_history_jquants": AsyncMock(return_value={"upserted": 0}),
+            "fill_recent_stock_price_gap_yahoo": AsyncMock(return_value=gap_result),
+            "update_market_data_from_history": MagicMock(return_value=0),
+            "scan_price_scale_steps": scan,
+        }
+        with patch.multiple(pinc, **mocks):
+            asyncio.run(pinc.main())
+        return [str(c.args[0]) for c in mocks["log"].call_args_list if c.args]
+
+    def test_both_lines_are_logged(self):
+        gap = {"skipped": False, "upserted": 1, "from": "a", "to": "b",
+               "scale_rejected": 1, "scale_rejected_new": 1, "scale_dropped_bars": 2,
+               "scale_rejected_examples": [{"edinet_code": "E25282", "from_date": "2026-09-11",
+                                            "from_close": 3700.0, "to_date": "2026-09-14",
+                                            "to_close": 16280000512.0}]}
+        scan = MagicMock(return_value={"companies": [], "daily_steps": 0,
+                                       "weekly_steps": 0, "hits": []})
+        lines = self._run(gap, scan)
+        assert any("Yahoo スケール段差で不採用: 1社・2本（うち新規 1社）" in l for l in lines)
+        assert any("株価スケール段差（≥100倍）: 0社（日次 0件・週次 0件）" in l for l in lines)
+
+    def test_old_gap_result_without_keys_logs_no_rejection_line(self):
+        """新しいキーを持たない結果（旧書式）では不採用の行を出さない＝「不明」のまま。"""
+        scan = MagicMock(return_value={"companies": [], "daily_steps": 0,
+                                       "weekly_steps": 0, "hits": []})
+        lines = self._run({"skipped": False, "upserted": 0, "from": "a", "to": "b"}, scan)
+        assert not any("スケール段差で不採用" in l for l in lines)
+
+    def test_scan_failure_does_not_stop_the_pipeline(self):
+        scan = MagicMock(side_effect=RuntimeError("boom"))
+        lines = self._run({"skipped": False, "upserted": 0, "from": "a", "to": "b"}, scan)
+        assert any("株価スケール段差の走査に失敗（継続します）: RuntimeError: boom" in l
+                   for l in lines)
+        assert any("差分収集パイプライン完了" in l for l in lines)

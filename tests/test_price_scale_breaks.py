@@ -495,3 +495,22 @@ class TestRepairPriceScaleBreaks:
 
         assert yahoo.call_args.args[1] == "1000.T"
         assert yahoo.call_args.args[2] == "20190308"
+
+    def test_scaled_yahoo_against_db_latest_is_not_written(self, db, make_price):
+        """DB の最新値と100倍以上食い違う社は書かない（#765）。
+
+        Yahoo が株式併合を split として持つと全履歴を比率倍で揃えて返すので、応答の中には
+        段差が無い。この道具が直すのは2〜10倍の分割の遡及調整もれで、100倍は仕事に含まれない。
+        """
+        db.add(make_price(edinet_code="E00000", trade_date="2025-01-10", close=3700.0))
+        db.commit()
+        p_detect, p_yahoo, p_sleep = self._patched(
+            [self._found(1), self._found(1)],
+            yahoo_rows=[{"trade_date": "2025-01-10", "close": 16278046720.0, "volume": 0.0}])
+        with p_detect, p_yahoo, p_sleep:
+            with patch("collector_prices.record_prices_batch") as rec:
+                r = asyncio.run(repair_price_scale_breaks(db, "key", persist=True))
+
+        rec.assert_not_called()
+        assert r["repaired"] == 0
+        assert "スケール段差" in r["failed"][0]["reason"]

@@ -19,7 +19,10 @@ from collector import (
     fill_recent_stock_price_gap_yahoo, detect_roundtrip_scale_bands,
     load_judged_scale_bands, exclude_judged_bands, roundtrip_log_line,
 )
-from collector_prices import format_yahoo_http_stats
+from collector_prices import (
+    format_yahoo_http_stats, scale_rejection_log_line, scale_step_log_line,
+    scan_price_scale_steps,
+)
 from corporate_actions import build_ledger, rebuild_split_adjustment_factors
 from ttm_composite import rebuild_ttm_financial_records
 from collector_utils import EdinetAccessError
@@ -149,6 +152,10 @@ async def main():
         if not gap_result.get("skipped"):
             log(f"  Yahoo 並行度 {gap_result.get('concurrency')}・"
                 f"{format_yahoo_http_stats(_he)}")
+        # DB の直前値と100倍以上離れて**書かなかった** Yahoo のバー（#765）。0 の晩も出す
+        # （行の無い晩＝この記録が入る前）。書式は `scale_rejection_log_line` が唯一の源。
+        if not gap_result.get("skipped") and "scale_rejected" in gap_result:
+            log(f"  {scale_rejection_log_line(gap_result)}")
 
         # J-Quants catchup: 12週境界を過ぎた直後（today-90〜today-80日）を再取得し、
         # Yahoo 暫定値を J-Quants 公式値で自動上書きする（毎日走ることで徐々に置換）。
@@ -228,6 +235,15 @@ async def main():
         log(f"  株価鮮度: p50={fr.get('price_asof_p50')} / p05={fr.get('price_asof_p05')}"
             f" / max={fr.get('price_asof_max')} / level={fr.get('level')}"
             f"（{fr.get('n_codes')}銘柄・5営業日超の遅れ {fr.get('n_stale_over_5d')}銘柄）")
+
+        # 取引では起こりえない段差が株価表に残っていないか（#765）。上のガードは Yahoo の
+        # 書き手にしか掛からないので、**表そのもの**を毎晩見る（J-Quants・手動の修復・将来の
+        # 書き手の保険）。状態を持たない＝残っている間は毎晩出る（直すまで消えるべきでない）。
+        try:
+            log(f"  {scale_step_log_line(scan_price_scale_steps(db4))}")
+        except Exception as e:
+            db4.rollback()      # 後続の往復段差の検知が同じセッションを使う
+            log(f"  株価スケール段差の走査に失敗（継続します）: {type(e).__name__}: {e}")
 
         # 「飛んで数日で戻る」帯の検知（#620）。**この壊れ方は例外を出さない**——
         # どちらの値も妥当な株価で、upsert は成功し、行数も鮮度も上の指標も正常に見える。

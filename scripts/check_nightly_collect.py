@@ -74,6 +74,12 @@ RE_RT_NOTGT   = re.compile(r"往復段差: 検査対象なし")
 RE_RT_FAIL    = re.compile(r"往復段差の検知に失敗")
 RE_FRESH      = re.compile(r"株価鮮度: p50=(\S+) / p05=(\S+) / max=(\S+) / level=(\S+)"
                            r"（(\d+)銘柄・5営業日超の遅れ (\d+)銘柄）")
+# DB の直前値と100倍以上離れて書かなかった Yahoo のバー（#765）。書式の源は
+# `collector_prices.scale_rejection_log_line`。**`RE_REJECTED`（解決済みなのに空）とは別物**。
+RE_SCALE_REJ  = re.compile(r"Yahoo スケール段差で不採用: (\d+)社・(\d+)本（うち新規 (\d+)社）")
+# 株価表に残っている100倍以上の段差（#765・源は `collector_prices.scale_step_log_line`）
+RE_SCALE_STEPS = re.compile(r"株価スケール段差（≥\d+倍）: (\d+)社（日次 (\d+)件・週次 (\d+)件）")
+RE_SCALE_STEPS_FAIL = re.compile(r"株価スケール段差の走査に失敗")
 
 
 # ── 純関数（ファイルにもネットワークにも触らない・ここがテスト対象）────────────
@@ -96,6 +102,9 @@ def parse_nightly_log(text: str) -> dict:
         "roundtrip": None, "roundtrip_companies": None, "roundtrip_excluded": None,
         "fresh_p50": None, "fresh_p05": None, "fresh_max": None,
         "fresh_level": None, "fresh_codes": None, "fresh_stale5d": None,
+        "scale_rejected": None, "scale_dropped_bars": None, "scale_rejected_new": None,
+        "scale_steps": None, "scale_steps_daily": None, "scale_steps_weekly": None,
+        "scale_steps_failed": None,
     }
     t_start = t_end = None
     catchup_without_mismatch = False
@@ -143,6 +152,15 @@ def parse_nightly_log(text: str) -> dict:
             r["fresh_p50"], r["fresh_p05"] = m.group(1), m.group(2)
             r["fresh_max"], r["fresh_level"] = m.group(3), m.group(4)
             r["fresh_codes"], r["fresh_stale5d"] = int(m.group(5)), int(m.group(6))
+        if (m := RE_SCALE_REJ.search(line)):
+            r["scale_rejected"], r["scale_dropped_bars"] = int(m.group(1)), int(m.group(2))
+            r["scale_rejected_new"] = int(m.group(3))
+        if (m := RE_SCALE_STEPS.search(line)):
+            r["scale_steps"] = int(m.group(1))
+            r["scale_steps_daily"], r["scale_steps_weekly"] = int(m.group(2)), int(m.group(3))
+            r["scale_steps_failed"] = False
+        elif RE_SCALE_STEPS_FAIL.search(line):
+            r["scale_steps_failed"] = True
 
     # `スケール不一致で不採用 N行` は **0 件のとき行ごと出ない**（catchup 行への条件付き連結）。
     # 行の不在を 0 と読むと、#620 以前のログ——**選別そのものが存在しない晩**——まで
@@ -190,6 +208,17 @@ def warnings_for(row: dict) -> list:
         w.append("往復段差の検知が例外で落ちた（収集自体は継続している）")
     if row.get("fresh_level") and row["fresh_level"] != "fresh":
         w.append(f"株価鮮度 level={row['fresh_level']}")
+    # 既知の社（同じ基準日のまま弾き続けている上場廃止社）だけの晩は警告しない（#765）。
+    # 株式併合を split として持った Yahoo は比率倍の値を返し続けるので、毎晩鳴らすと
+    # 本物の新規が埋もれる。
+    if row.get("scale_rejected_new"):
+        w.append(f"Yahoo の値を DB の直前値と100倍以上離れているため新たに書かなかった社 "
+                 f"{row['scale_rejected_new']}＝株式併合を Yahoo が split として持った疑い（#765）")
+    if row.get("scale_steps"):
+        w.append(f"株価表に100倍以上の段差が残っている {row['scale_steps']}社"
+                 "＝Yahoo で取り直す修復コマンドは使わない。docs/GOTCHAS.md の #765 を参照")
+    if row.get("scale_steps_failed"):
+        w.append("株価スケール段差の走査が例外で落ちた（収集自体は継続している）")
     return w
 
 
@@ -235,6 +264,10 @@ ROWS = [
                                        + (f" {r['roundtrip_companies']}社"
                                           if r.get("roundtrip_companies") else "")),
     ("往復段差 除外帯",      lambda r: _fmt(r["roundtrip_excluded"])),
+    ("Yahoo 段差で不採用 社(新規)", lambda r: f"{_fmt(r['scale_rejected'])}"
+                                             f"（{_fmt(r['scale_rejected_new'])}）"),
+    ("株価スケール段差 社",  lambda r: "失敗" if r.get("scale_steps_failed")
+                                       else _fmt(r["scale_steps"])),
     ("鮮度 p50",             lambda r: _fmt(r["fresh_p50"])),
     ("鮮度 p05",             lambda r: _fmt(r["fresh_p05"])),
     ("鮮度 level",           lambda r: _fmt(r["fresh_level"])),
