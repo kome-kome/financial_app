@@ -6,7 +6,10 @@
 """
 import pytest
 
-from collector_prices import format_yahoo_http_stats, roundtrip_log_line
+from collector_prices import (
+    format_yahoo_http_stats, roundtrip_log_line, scale_rejection_log_line,
+    scale_step_log_line,
+)
 from scripts._textwidth import display_width, pad
 from scripts.check_nightly_collect import (
     parse_nightly_log, seconds_per_company, warnings_for,
@@ -261,3 +264,61 @@ class TestTextWidth:
     def test_pad_never_truncates(self):
         assert pad("日本語", 4) == "日本語"
         assert pad("ab", 5) == "ab   "
+
+
+class TestScaleGuardRules:
+    """#765 の2行を読む。検体は `_pipeline_incremental.py` と同じく**書式関数の実出力**。
+
+    Yahoo が株式併合を split として持った上場廃止社は比率倍の値を返し続けるので、同じ
+    基準日のまま弾き続けている社（既知）だけの晩は警告しない。株価表に残った段差は
+    直すまで毎晩警告する。
+    """
+
+    EX = {"edinet_code": "E35289", "from_date": "2026-09-25", "from_close": 1406.0,
+          "to_date": "2026-09-28", "to_close": 1688467584.0}
+
+    def _night(self, *, rejected=0, new=0, steps=None, scan_failed=False):
+        res = {"scale_rejected": rejected, "scale_rejected_new": new,
+               "scale_dropped_bars": rejected, "scale_rejected_examples": [self.EX] if rejected else []}
+        lines = [f"[17:47:20]   {scale_rejection_log_line(res)}"]
+        if scan_failed:
+            lines.append("[17:49:05]   株価スケール段差の走査に失敗（継続します）: RuntimeError: boom")
+        elif steps is not None:
+            lines.append("[17:49:05]   " + scale_step_log_line(steps))
+        # collector 自身の WARNING 行（文言が違う＝点検の正規表現には掛からない）
+        lines.append("2026-09-30 18:18:08,899 WARNING fill_recent_stock_price_gap_yahoo: DB の直前値と"
+                     "100倍以上離れた Yahoo の値を書かなかった 9社・9本（新規 9社）（例: …）")
+        return LOG_AFTER + "\n".join(lines) + "\n"
+
+    @staticmethod
+    def _steps(n):
+        hits = [{"table": "daily", "edinet_code": f"E{i:05d}", "from_date": "2026-09-08",
+                 "from_close": 3700.0, "to_date": "2026-09-09", "to_close": 16278046720.0}
+                for i in range(n)]
+        return {"companies": sorted({h["edinet_code"] for h in hits}),
+                "daily_steps": n, "weekly_steps": 0, "hits": hits}
+
+    def test_lines_are_read(self):
+        r = parse_nightly_log(self._night(rejected=4, new=1, steps=self._steps(2)))
+        assert (r["scale_rejected"], r["scale_rejected_new"], r["scale_dropped_bars"]) == (4, 1, 4)
+        assert (r["scale_steps"], r["scale_steps_daily"], r["scale_steps_weekly"]) == (2, 2, 0)
+        assert r["scale_steps_failed"] is False
+
+    def test_new_rejection_and_remaining_steps_are_flagged(self):
+        w = warnings_for(parse_nightly_log(self._night(rejected=4, new=1, steps=self._steps(2))))
+        assert any("新たに書かなかった社 1" in x for x in w)
+        assert any("100倍以上の段差が残っている 2社" in x for x in w)
+
+    def test_known_only_night_is_quiet(self):
+        w = warnings_for(parse_nightly_log(self._night(rejected=4, new=0, steps=self._steps(0))))
+        assert w == []
+
+    def test_scan_failure_is_flagged(self):
+        r = parse_nightly_log(self._night(scan_failed=True))
+        assert r["scale_steps_failed"] is True and r["scale_steps"] is None
+        assert any("走査が例外で落ちた" in x for x in warnings_for(r))
+
+    def test_old_format_is_unknown_not_zero(self):
+        r = parse_nightly_log(LOG_AFTER)
+        assert r["scale_rejected"] is None and r["scale_rejected_new"] is None
+        assert r["scale_steps"] is None and r["scale_steps_failed"] is None

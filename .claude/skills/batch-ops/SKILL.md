@@ -4,7 +4,8 @@ description: >-
   financial_app のローカル起動・収集・バッチ実行コマンド集。uvicorn / launch.py の起動、
   夜間バッチ（run_nightly）、月次・macro_beta・M-1 の各バッチ、平日日中キュー（run_daytime）、
   バッチ鮮度 watchdog、バックアップ（run_backup）、collector の各種オプション、
-  株価修復スクリプト（repair_splits_from_jquants / repair_scale_mixture / resolve_price_suffix）を
+  株価修復スクリプト（repair_splits_from_jquants / repair_scale_mixture / repair_consolidation_prices /
+  resolve_price_suffix）を
   叩くときに参照する。CLAUDE.md から移設した正本。
 ---
 
@@ -115,6 +116,12 @@ python -m scripts.backfill_adj_factor_events --reasons absence  # 第1経路の�
 python -m scripts.repair_scale_mixture                          # 候補（多いときは突合せず止まる）
 python -m scripts.repair_scale_mixture --only E01332,E01717     # 夜間ログが警告した社を突合→判定を記録
 python -m scripts.repair_scale_mixture --only E32779 --apply    # 公式突合で確定してから取り直す
+
+# Yahoo が株式併合を split として返した比率倍の株価を戻す（#765・一回性・台帳方式）。既定はドライラン
+# （1トランザクションで直して株価表を走査し直し、必ず巻き戻す）。**Yahoo で取り直す上の2本は使わない**
+python -m scripts.repair_consolidation_prices                  # 台帳の状態と、直した後の段差の見込み
+python -m scripts.repair_consolidation_prices --apply          # 確定→世代印→6社の point-in-time
+python -m scripts.check_nightly_collect                        # 夜間ログの「不採用（新規）」「段差」を読む
 
 # 地方取引所の単独上場を拾う（#555）。既定はドライラン＝棄却理由まで出す
 python -m scripts.resolve_price_suffix                            # 何も書かない

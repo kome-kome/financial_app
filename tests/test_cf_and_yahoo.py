@@ -741,3 +741,118 @@ class TestYahooHttpErrorStats:
         rows, meta = self._run(fetch_yahoo_chart(
             self._session_raising(OSError("boom")), "1001.T", "20260101", "20260131"))
         assert (rows, meta) == ([], {})
+
+
+# ── 取引では起こりえない段差のガード (#765) ─────────────────────────────────
+
+class TestYahooScaleGuard:
+    """Yahoo が株式併合を split として返した比率倍のバーを書かない（#765）。
+
+    検体は Issue #765 の実出力から写す（1909.T の 3,700 → 16,278,046,720・出来高0）。
+    保存は捕まえて見る（何が書かれようとしたかを縛る）。
+    """
+
+    SQUEEZE = 16278046720.0
+
+    def _run(self, coro):
+        return asyncio.run(coro)
+
+    def _seed(self, db, make_company, make_price, companies):
+        """`companies`: {edinet_code: (sec_code, 最終日の終値 or None)}。"""
+        now_jst, session = _monday_anchor()
+        last = (session - timedelta(days=1)).isoformat()
+        for ec, (sec, close) in companies.items():
+            db.add(make_company(edinet_code=ec, sec_code=sec))
+            if close is not None:
+                db.add(make_price(edinet_code=ec, trade_date=last, close=close))
+        db.commit()
+        return now_jst, session, last
+
+    def _gap_fill(self, db, now_jst, fake):
+        saved = []
+        with (
+            patch("collector_prices.fetch_yahoo_history", new=fake),
+            patch("collector_prices.record_prices_batch",
+                  side_effect=lambda _db, batch, **kw: saved.extend(batch) or len(batch)),
+            patch("collector_prices.trim_daily", return_value=0),
+            patch("collector_prices.YAHOO_STOCK_RATE_SLEEP", 0),
+        ):
+            res = self._run(fill_recent_stock_price_gap_yahoo(db, gap_days=0, now_jst=now_jst))
+        return res, saved
+
+    def test_scaled_bar_is_not_written_and_warned_once(
+            self, db, make_company, make_price, caplog):
+        now_jst, session, last = self._seed(
+            db, make_company, make_price, {"E25282": ("1909", 3700.0), "E00002": ("1002", 500.0)})
+
+        async def _fake(http, ticker, d_from, d_to, **kw):
+            if ticker == "1909.T":
+                return [{"trade_date": last, "close": 3700.0, "volume": 1000},
+                        {"trade_date": session.isoformat(), "close": self.SQUEEZE, "volume": 0}]
+            return [{"trade_date": session.isoformat(), "close": 505.0, "volume": 10}]
+
+        with caplog.at_level("INFO", logger="collector"):
+            res, saved = self._gap_fill(db, now_jst, _fake)
+
+        written = {(r["edinet_code"], r["trade_date"]): r["close"] for r in saved}
+        assert written == {("E25282", last): 3700.0, ("E00002", session.isoformat()): 505.0}
+        assert res["scale_rejected"] == 1 and res["scale_rejected_new"] == 1
+        assert res["scale_dropped_bars"] == 1
+        assert res["new_rows"] == 1                      # 捨てたバーは新規日付に数えない
+        ex = res["scale_rejected_examples"][0]
+        assert (ex["from_date"], ex["from_close"]) == (last, 3700.0)
+        assert (ex["to_date"], ex["to_close"]) == (session.isoformat(), self.SQUEEZE)
+        warned = [r for r in caplog.records if r.levelname == "WARNING"]
+        assert len(warned) == 1 and "書かなかった 1社・1本（新規 1社）" in warned[0].getMessage()
+
+        # 2晩目: 同じ基準日のまま弾く＝既知。WARNING は出さない
+        caplog.clear()
+        with caplog.at_level("INFO", logger="collector"):
+            res2, _ = self._gap_fill(db, now_jst, _fake)
+        assert res2["scale_rejected"] == 1 and res2["scale_rejected_new"] == 0
+        assert not [r for r in caplog.records if r.levelname == "WARNING"]
+        assert "（新規 0社）" in caplog.text
+
+    def test_priceless_company_with_internal_step_writes_nothing(
+            self, db, make_company, make_price):
+        now_jst, session, _ = self._seed(
+            db, make_company, make_price,
+            {"E35289": ("7082", None), "E00002": ("1002", 500.0)})     # E00002 は起動用
+
+        async def _fake(http, ticker, d_from, d_to, **kw):
+            if ticker == "7082.T":
+                return [{"trade_date": (session - timedelta(days=1)).isoformat(),
+                         "close": 1406.0, "volume": 100},
+                        {"trade_date": session.isoformat(), "close": 1688467584.0, "volume": 0}]
+            return []
+
+        res, saved = self._gap_fill(db, now_jst, _fake)
+        assert not [r for r in saved if r["edinet_code"] == "E35289"]
+        assert res["scale_rejected"] == 1 and res["scale_dropped_bars"] == 2
+
+    def test_ordinary_night_does_not_touch_the_record(self, db, make_company, make_price):
+        from database import KEY_YAHOO_SCALE_REJECTIONS, get_setting
+        now_jst, session, _ = self._seed(db, make_company, make_price,
+                                         {"E00002": ("1002", 500.0)})
+
+        async def _fake(http, ticker, d_from, d_to, **kw):
+            return [{"trade_date": session.isoformat(), "close": 250.0, "volume": 10}]  # 1:2 分割
+
+        res, saved = self._gap_fill(db, now_jst, _fake)
+        assert [r["close"] for r in saved] == [250.0]
+        assert res["scale_rejected"] == 0 and res["scale_rejected_new"] == 0
+        assert get_setting(db, KEY_YAHOO_SCALE_REJECTIONS) is None
+
+    def test_broken_record_does_not_stop_collection(self, db, make_company, make_price):
+        from database import KEY_YAHOO_SCALE_REJECTIONS, upsert_setting
+        now_jst, session, _ = self._seed(
+            db, make_company, make_price, {"E25282": ("1909", 3700.0), "E00002": ("1002", 500.0)})
+        upsert_setting(db, KEY_YAHOO_SCALE_REJECTIONS, "[broken")
+
+        async def _fake(http, ticker, d_from, d_to, **kw):
+            close = self.SQUEEZE if ticker == "1909.T" else 505.0
+            return [{"trade_date": session.isoformat(), "close": close, "volume": 1}]
+
+        res, saved = self._gap_fill(db, now_jst, _fake)
+        assert [r["edinet_code"] for r in saved] == ["E00002"]
+        assert res["scale_rejected_new"] == 1                 # 読めないときは新規側へ倒す

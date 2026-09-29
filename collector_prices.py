@@ -24,9 +24,9 @@ from database import (
     upsert_xbrl_raw, pack_elements, unpack_elements,
     build_xbrl_map,
     StockPriceDaily, StockPriceWeekly, DAILY_WINDOW_DAYS,
-    record_prices_batch, trim_daily, latest_prices,
+    record_prices_batch, trim_daily, latest_prices, prices_on_or_after,
     upsert_macro_batch, sync_active_status, db_timeouts,
-    get_setting, upsert_setting, KEY_SCALE_BAND_VERDICTS,
+    get_setting, upsert_setting, KEY_SCALE_BAND_VERDICTS, KEY_YAHOO_SCALE_REJECTIONS,
     upsert_jquants_adj_factor_events,
 )
 
@@ -759,19 +759,22 @@ def _bulk_apply_market_values(db, mappings_by_id: dict) -> None:
         db.commit()
 
 
-def _update_market_data_point_in_time(db) -> int:
+def _update_market_data_point_in_time(db, only: Optional[list] = None) -> int:
     """point_in_time=True: 全財務レコードを period_end 近傍の週次株価で更新し、
-    最新レコードは現在株価で上書きする。"""
+    最新レコードは現在株価で上書きする。`only` を渡すとその社のレコードだけに絞る。"""
 
     # 必要な列だけを読む（#464）。以前は `db.query(FinancialRecord).all()` で 50,478行を
     # 全列 ORM ロード（27.3MB）していたが、実際に使うのは読み9列・書き5列だけ。
     # 併せて更新も一括化したため、ORM オブジェクトは一切作らない。
-    rec_rows = db.query(
+    rec_q = db.query(
         FinancialRecord.id, FinancialRecord.edinet_code, FinancialRecord.year,
         FinancialRecord.period_type, FinancialRecord.period_end,
         FinancialRecord.pl_eps, FinancialRecord.bs_bps, FinancialRecord.issued_shares,
         FinancialRecord.bs_total_equity, FinancialRecord.dps,
-    ).all()
+    )
+    if only is not None:
+        rec_q = rec_q.filter(FinancialRecord.edinet_code.in_(list(only)))
+    rec_rows = rec_q.all()
 
     # 最新レコード（year最大）を社別にインデックス（最後の上書きステップで使用）。
     # 対象は **annual のみ**（#421）。H1 を混ぜると同一 year で先着順に決まってしまい、
@@ -824,6 +827,8 @@ def _update_market_data_point_in_time(db) -> int:
         .filter(FinancialRecord.period_end.isnot(None))
         .distinct()
     )
+    if only is not None:
+        ec_q = ec_q.filter(FinancialRecord.edinet_code.in_(list(only)))
     weekly_rows = (
         db.query(
             StockPriceWeekly.edinet_code,
@@ -885,7 +890,8 @@ def _update_market_data_point_in_time(db) -> int:
     return updated
 
 
-def update_market_data_from_history(db, point_in_time: bool = False) -> int:
+def update_market_data_from_history(db, point_in_time: bool = False,
+                                    only: Optional[list] = None) -> int:
     """stock_price_history の終値を financial_records.stock_price に反映する。
     外部 API へは接続せず、夜間バッチが J-Quants/Yahoo で蓄積した株価テーブルを使って
     バリュエーション指標を計算する（旧 stooq 経路は #428 で廃止）。
@@ -897,16 +903,22 @@ def update_market_data_from_history(db, point_in_time: bool = False) -> int:
         J-Quants カバレッジ外（データなし）のレコードはスキップし既存値を保持する。
         最新レコードは常に最新株価で上書きする。
 
+    `only`（edinet_code のリスト）は point_in_time=True でだけ受け付け、その社の
+    レコードだけを書き直す（#765）。株価表を社を限って修復したあと、無関係な社の行まで
+    その時点の週次で書き換えないため。
+
     戻り値: 更新した財務レコード数
 
     読み（数万行のスキャン）も書き（`UPDATE ... FROM (VALUES ...)` のチャンク）も
     Supabase 既定の statement_timeout=2min を超えうるので、この関数の実行中だけ
     引き上げる（#470: 2026-08-08 の夜間差分収集はここで 2分16秒後に落ちた）。
     """
+    if only is not None and not point_in_time:
+        raise ValueError("only は point_in_time=True のときだけ指定できる")
     with db_timeouts(db, statement=HEAVY_STATEMENT_TIMEOUT):
         if not point_in_time:
             return _update_market_data_latest(db)
-        return _update_market_data_point_in_time(db)
+        return _update_market_data_point_in_time(db, only=only)
 
 
 async def backfill_historical_stock_prices_yahoo(
@@ -1229,6 +1241,15 @@ async def fill_recent_stock_price_gap_yahoo(
     # 黙らせないための番人。通常は 0 で、0 以外が続いたら --reprobe を回す。
     n_exchange_rejected = 0
 
+    # DB の直前値（#765）。Yahoo のバーはこれと比べて100倍以上離れたものを書かない——
+    # 株式併合を split として持った Yahoo は比率倍の値を返し、書くと上場廃止で系列が止まって
+    # 「最新株価」として固定される。`latest_prices` は日次の最終行・無ければ週次＝上の `last` と
+    # 同じ決め方なので、基準日は取り直す窓（`last_d - 2` 〜）の中に入り、同じ日の Yahoo の値と
+    # 直接比べられる。**DB の値は「書かない判断」にだけ使い、何を書くかは決めない**（ADR-0053）。
+    anchors = latest_prices(db, [x[1] for x in to_fetch if x[3] is not None])
+    scale_rejected: list = []     # 1本でも捨てた社（ec 順に並べてから出す）
+    n_scale_dropped = 0
+
     async def _yahoo_batch_gen(http):
         """並行フェッチ（#556）。**取得だけをタスク化し、判定と集計は消費側に残す。**
 
@@ -1239,7 +1260,7 @@ async def fill_recent_stock_price_gap_yahoo(
         スリープは各タスクが取得後に払う＝実効レートは「並行度 ÷ 1リクエストの所要」。
         `YAHOO_STOCK_CONCURRENCY=1` なら従来の逐次と同じ順序・同じレートになる。
         """
-        nonlocal n_new, n_exchange_rejected
+        nonlocal n_new, n_exchange_rejected, n_scale_dropped
         sem = asyncio.Semaphore(YAHOO_STOCK_CONCURRENCY)
 
         async def _fetch(item):
@@ -1256,14 +1277,25 @@ async def fill_recent_stock_price_gap_yahoo(
             edinet_code, last_iso, suffix, rows = await coro
             if suffix and not rows:
                 n_exchange_rejected += 1
+            bars = [r for r in rows if r["close"]] if rows else []
+            # 取引では起こりえない段差のバーを捨てる（#765）。**bar_cap で切る前に**見るのは、
+            # 進行中セッションのバーも Yahoo が同じ単位で返した値＝判定の材料になるから。
+            anchor = anchors.get(edinet_code)
+            keep = scale_keep_mask(anchor["price"] if anchor else None,
+                                   [r["close"] for r in bars])
+            if not all(keep):
+                dropped = [r for r, k in zip(bars, keep) if not k]
+                n_scale_dropped += len(dropped)
+                scale_rejected.append(_scale_rejection(edinet_code, anchor, bars, dropped))
+                bars = [r for r, k in zip(bars, keep) if k]
             # bar_cap で進行中セッションのバーを捨てる（#474）。Yahoo の interval=1d は
             # 場中でもその日の**途中経過**を1本返す。J-Quants 無料は直近12週を配信しないので
             # 暫定値のまま確定せず、対象社を絞った状態では上書きの機会も来ない。
             records = [
                 {"edinet_code": edinet_code, "trade_date": r["trade_date"],
                  "close": r["close"], "volume": r.get("volume")}
-                for r in rows if r["close"] and r["trade_date"][:10] <= bar_cap
-            ] if rows else []
+                for r in bars if r["trade_date"][:10] <= bar_cap
+            ]
             if last_iso is None:
                 n_new += len(records)
             else:
@@ -1275,6 +1307,21 @@ async def fill_recent_stock_price_gap_yahoo(
     async with httpx.AsyncClient(timeout=60) as http:
         with yahoo_http_stats() as http_stats:
             _, upserted = await _price_collection_driver(db, _yahoo_batch_gen(http))
+
+    # 捨てた社の報告（#765）。**新しく起きたときだけ WARNING**＝上場廃止した社は Yahoo が
+    # 比率倍の値を返し続けるので、毎晩警告すると本物の新規が埋もれる。弾いた社が無い晩は
+    # 設定表を読みも書きもしない。
+    scale_rejected.sort(key=lambda r: r["edinet_code"])
+    new_ecs = classify_scale_rejections(db, scale_rejected, today=today)
+    scale_examples = sorted(scale_rejected,
+                            key=lambda r: (r["edinet_code"] not in new_ecs, r["edinet_code"]))[:5]
+    if scale_rejected:
+        msg = (f"fill_recent_stock_price_gap_yahoo: DB の直前値と{SCALE_BREAK_RATIO:.0f}倍以上離れた"
+               f" Yahoo の値を書かなかった {len(scale_rejected)}社・{n_scale_dropped}本"
+               f"（新規 {len(new_ecs)}社）（例: "
+               + " / ".join(scale_rejection_example(r) for r in scale_examples[:3])
+               + "）＝株式併合を Yahoo が split として持つと比率倍の値が返る（#765）")
+        (log.warning if new_ecs else log.info)(msg)
 
     # upserted は record_prices_batch の戻り値＝**投入行数**であって新規行数ではない
     # （ON CONFLICT DO UPDATE）。2026-08-08 の「3,677件 追加」は実は全社ぶんの取り直しだった。
@@ -1288,6 +1335,8 @@ async def fill_recent_stock_price_gap_yahoo(
     return {"skipped": False, "upserted": upserted, "new_rows": n_new, "companies": total,
             "priceless": n_priceless, "priceless_resolved": n_priceless_resolved,
             "exchange_rejected": n_exchange_rejected,
+            "scale_rejected": len(scale_rejected), "scale_rejected_new": len(new_ecs),
+            "scale_dropped_bars": n_scale_dropped, "scale_rejected_examples": scale_examples,
             "concurrency": YAHOO_STOCK_CONCURRENCY, "http_errors": dict(http_stats),
             "from": d_from_min, "to": d_to, "session": session.isoformat()}
 
@@ -1359,6 +1408,13 @@ async def backfill_weekly_history_yahoo(
         log.info(f"backfill_weekly_history_yahoo: 全社 {years_back}年以上カバー済み（対象なし）")
         return {"skipped": True, "reason": "already_covered", "companies": 0}
 
+    # 取ってくる範囲のすぐ後ろにある DB の最古の週次終値（#765）。Yahoo が株式併合を split と
+    # して持つと過去側が比率倍で返り、DB の既存の週との境目に取引では起こりえない段差ができる。
+    # この経路は範囲をまとめて書くので、段差があれば**その社は丸ごと書かない**（一部だけ書くと
+    # 単位が混ざる）。
+    oldest_close = prices_on_or_after(db, [x[1] for x in to_fetch], "0000-01-01")
+    scale_rejected: list = []
+
     upserted = 0
     async with httpx.AsyncClient(timeout=60) as session:
         for i, (sec_code, edinet_code, d_to, suffix) in enumerate(sorted(to_fetch), 1):
@@ -1374,6 +1430,10 @@ async def backfill_weekly_history_yahoo(
                  "close": r["close"], "volume": r.get("volume")}
                 for r in rows if r.get("close")
             ] if rows else []
+            brk = find_scale_break_against(oldest_close.get(edinet_code), records)
+            if brk is not None:
+                scale_rejected.append({"edinet_code": edinet_code, **brk})
+                records = []
             if records:
                 try:
                     # 1社ごとに trim=True：daily を都度 trim して保持窓外の過去を残さない
@@ -1391,7 +1451,13 @@ async def backfill_weekly_history_yahoo(
                 await asyncio.sleep(YAHOO_STOCK_RATE_SLEEP)
 
     log.info(f"backfill_weekly_history_yahoo: {upserted}件の daily を保存し weekly を再集約（{total}社）")
-    return {"skipped": False, "upserted": upserted, "companies": total, "floor": floor_str}
+    if scale_rejected:
+        log.warning(f"backfill_weekly_history_yahoo: {SCALE_BREAK_RATIO:.0f}倍以上の段差があるため"
+                    f"書かなかった {len(scale_rejected)}社（例: "
+                    + " / ".join(scale_rejection_example(r) for r in scale_rejected[:3])
+                    + "）＝株式併合を Yahoo が split として持つと比率倍の値が返る（#765）")
+    return {"skipped": False, "upserted": upserted, "companies": total, "floor": floor_str,
+            "scale_rejected": len(scale_rejected)}
 
 
 # ---------------------------------------------------------------------------
@@ -1777,6 +1843,183 @@ def roundtrip_log_line(n_checked: int, found: dict, n_excluded: int) -> str:
             f"`python -m scripts.repair_scale_mixture` で確認する（#620）・{excluded}")
 
 
+# ── 取引では起こりえない段差（#765）─────────────────────────────────────────────
+#
+# Yahoo は TOB 後のスクイーズアウトの株式併合を split として登録し、比率倍の終値を返す。
+# 判定そのもの（`is_scale_break` / `scale_keep_mask`）は collector_utils の純関数で、ここには
+# Yahoo の書き手が共有する組み立てと、夜間の記録・走査・ログの書式を置く。ログの書式は
+# `scripts/check_nightly_collect.py` が読むので、**ここが唯一の源**（書き写さない・#622）。
+
+def _fmt_close(v) -> str:
+    """終値の表示（桁区切り・整数なら小数を出さない）。"""
+    if v is None:
+        return "-"
+    v = float(v)
+    return f"{v:,.0f}" if v.is_integer() else f"{v:,.2f}".rstrip("0").rstrip(".")
+
+
+def scale_rejection_example(r: dict) -> str:
+    """捨てた社の例の1件（`E35289 2026-09-25 1,406 → 2026-09-28 1,688,467,584`）。"""
+    head = f"{r['edinet_code']} "
+    if r.get("from_date"):
+        head += f"{r['from_date']} {_fmt_close(r.get('from_close'))} → "
+    return head + f"{r.get('to_date')} {_fmt_close(r.get('to_close'))}"
+
+
+def find_scale_break_against(anchor: Optional[dict], records: list) -> Optional[dict]:
+    """Yahoo の1社ぶんのレコードを DB の基準値と並べ、最初の段差を返す（無ければ None）。
+
+    範囲をまとめて書く経路（週次の遡及・手動の修復）用で、段差があれば社ごと書かない。
+    `anchor` は `latest_prices` / `prices_on_or_after` の1件（`{"price", "date"}`）か None。
+    """
+    a_pt = (str(anchor["date"])[:10], anchor["price"]) if anchor else None
+    brk = first_scale_break(merge_with_anchor(
+        a_pt, [(str(r["trade_date"])[:10], r["close"]) for r in records]))
+    if brk is None:
+        return None
+    return {"anchor_date": a_pt[0] if a_pt else None,
+            "from_date": brk[0], "from_close": brk[1], "to_date": brk[2], "to_close": brk[3]}
+
+
+def _scale_rejection(ec: str, anchor: Optional[dict], bars: list, dropped: list) -> dict:
+    """gap-fill で捨てた社の記録（例として出す段差を1つ選ぶ）。"""
+    a_date = str(anchor["date"])[:10] if anchor else None
+    a_close = anchor["price"] if anchor else None
+    far = [r for r in dropped if is_scale_break(a_close, r["close"])]
+    if far:
+        frm, to = (a_date, a_close), (far[0]["trade_date"][:10], far[0]["close"])
+    else:
+        # 基準が無い（株価ゼロ社）か、基準の近くに残したバーどうしに段差があった
+        step = first_scale_break([(r["trade_date"][:10], r["close"]) for r in bars])
+        if step is not None:
+            frm, to = (step[0], step[1]), (step[2], step[3])
+        else:
+            frm, to = (a_date, a_close), (dropped[0]["trade_date"][:10], dropped[0]["close"])
+    return {"edinet_code": ec, "anchor_date": a_date,
+            "from_date": frm[0], "from_close": frm[1], "to_date": to[0], "to_close": to[1],
+            "dropped": len(dropped)}
+
+
+def classify_scale_rejections(db, rejected: list, *, today: Optional[date] = None) -> set:
+    """捨てた社のうち**新しく起きた**社の edinet_code を返し、記録を更新してコミットする。
+
+    同一性は「社＋基準にした DB の日付」。弾いている間は基準日が動かないので同じ事象は
+    一度しか新規にならず、修復や回復で基準日が変わったあとの再発は新規として数える
+    （社だけで覚えると一度記録した社の再発を永久に黙らせる＝ADR-0053 が退けた「社の名簿」）。
+
+    **株価の収集を止めない**: 記録が読めない・書けないときは rollback して全社を新規として
+    扱う（警告が増える側へ倒す）。弾いた社が無いときは設定表に触らない。
+    """
+    if not rejected:
+        return set()
+    today = today or date.today()
+    today_s = today.isoformat()
+    try:
+        raw = get_setting(db, KEY_YAHOO_SCALE_REJECTIONS)
+        doc = json.loads(raw) if raw else {"version": 1, "companies": {}}
+        known = doc.get("companies") if isinstance(doc, dict) else None
+        if not isinstance(known, dict):
+            raise ValueError("companies が無い")
+    except Exception as e:
+        db.rollback()
+        log.warning(f"app_settings.{KEY_YAHOO_SCALE_REJECTIONS} を読めないため"
+                    f"全社を新規として扱う: {type(e).__name__}: {e}")
+        known = {}
+
+    new = set()
+    for r in rejected:
+        ec, anchor = r["edinet_code"], r.get("anchor_date") or ""
+        prev = known.get(ec)
+        if isinstance(prev, dict) and prev.get("anchor_date", "") == anchor:
+            prev["last_seen"] = today_s
+            continue
+        new.add(ec)
+        known[ec] = {"anchor_date": anchor, "first_seen": today_s, "last_seen": today_s,
+                     "example": scale_rejection_example(r)}
+    # 保持窓より長く観測されない社は捨てる（その間に Yahoo が落としたか、回復した）
+    horizon = (today - timedelta(days=DAILY_WINDOW_DAYS)).isoformat()
+    known = {ec: e for ec, e in sorted(known.items())
+             if isinstance(e, dict) and str(e.get("last_seen", "")) >= horizon}
+    try:
+        upsert_setting(db, KEY_YAHOO_SCALE_REJECTIONS,
+                       json.dumps({"version": 1, "companies": known}, ensure_ascii=False))
+    except Exception as e:
+        db.rollback()
+        log.warning(f"app_settings.{KEY_YAHOO_SCALE_REJECTIONS} を書けなかった"
+                    f"（株価の収集は継続）: {type(e).__name__}: {e}")
+    return new
+
+
+def scale_rejection_log_line(res: dict) -> str:
+    """夜間ログの1行（`scripts/check_nightly_collect.py::RE_SCALE_REJ` が読む）。
+
+    **0 社の晩も出す**＝行の無い晩（この記録が入る前の書式）を「不明」と読めるようにする。
+    """
+    n, new = res.get("scale_rejected", 0), res.get("scale_rejected_new", 0)
+    line = (f"Yahoo スケール段差で不採用: {n}社・{res.get('scale_dropped_bars', 0)}本"
+            f"（うち新規 {new}社）")
+    ex = res.get("scale_rejected_examples") or []
+    if not ex:
+        return line
+    return (line + "（例: " + " / ".join(scale_rejection_example(r) for r in ex[:3])
+            + f"）＝DB の直前値と{SCALE_BREAK_RATIO:.0f}倍以上離れた値は書かない。"
+            "株式併合を Yahoo が split として持った疑い（#765）")
+
+
+def scan_price_scale_steps(db, ratio: float = SCALE_BREAK_RATIO) -> dict:
+    """株価表（日次＝全行・週次＝全履歴）の隣り合う行に `ratio` 倍以上の段差が無いか走査する。
+
+    読み取りのみ。書き手によらず表そのものを見る＝ガードの取りこぼしや、将来足される
+    書き手・手動の修復が作った段差の保険（#765）。比較は掛け算の形にして 0 除算を持たない
+    （Postgres は AND の短絡評価を保証しない）。SQLite と Postgres で同じ文が動く。
+    """
+    hits: list = []
+    counts: dict = {}
+    for table, key, col, label in (("stock_price_daily", "trade_date", "close", "daily"),
+                                   ("stock_price_weekly", "week_start", "close_last", "weekly")):
+        with db_timeouts(db, statement=HEAVY_STATEMENT_TIMEOUT):
+            rows = db.execute(sqla_text(f"""
+                WITH s AS (
+                    SELECT edinet_code, {key} AS cur_date, {col} AS cur_close,
+                           LAG({key}) OVER w AS prev_date,
+                           LAG({col}) OVER w AS prev_close
+                    FROM {table}
+                    WINDOW w AS (PARTITION BY edinet_code ORDER BY {key})
+                )
+                SELECT edinet_code, prev_date, cur_date, prev_close, cur_close
+                FROM s
+                WHERE prev_close > 0 AND cur_close > 0
+                  AND (cur_close >= :r * prev_close OR cur_close * :r <= prev_close)
+                ORDER BY edinet_code, cur_date
+            """), {"r": ratio}).all()
+        counts[label] = len(rows)
+        hits += [{"table": label, "edinet_code": r[0], "from_date": str(r[1]),
+                  "to_date": str(r[2]), "from_close": float(r[3]), "to_close": float(r[4])}
+                 for r in rows]
+    return {"companies": sorted({h["edinet_code"] for h in hits}),
+            "daily_steps": counts["daily"], "weekly_steps": counts["weekly"], "hits": hits}
+
+
+def scale_step_log_line(res: dict) -> str:
+    """夜間ログの1行（`scripts/check_nightly_collect.py::RE_SCALE_STEPS` が読む）。
+
+    数えるのは**段差**であって行ではない（比率倍の帯は両端の2か所が段差になる）。
+    """
+    comps = res["companies"]
+    line = (f"株価スケール段差（≥{SCALE_BREAK_RATIO:.0f}倍）: {len(comps)}社"
+            f"（日次 {res['daily_steps']}件・週次 {res['weekly_steps']}件）")
+    if not comps:
+        return line
+    seen, ex = set(), []
+    for h in res["hits"]:
+        if h["edinet_code"] not in seen:
+            seen.add(h["edinet_code"])
+            ex.append(f"{h['table']} " + scale_rejection_example(h))
+    return (line + "（例: " + " / ".join(ex[:3]) + "）＝取引では起こりえない段差が株価表に"
+            "残っている。Yahoo で取り直す修復コマンドは使わない（汚染を広げる）。"
+            "docs/GOTCHAS.md の #765 を参照")
+
+
 async def detect_price_scale_breaks(
     db,
     api_key: Optional[str] = None,
@@ -1864,6 +2107,10 @@ async def repair_price_scale_breaks(
     )
     d_to = date.today().strftime("%Y%m%d")
     total = len(breaks)
+    # DB の最新値（#765）。この道具が直すのは2〜10倍の分割の遡及調整もれで、100倍以上の
+    # 食い違いを書くことは仕事に含まれない。Yahoo が全履歴を比率倍で揃えて返すと応答の中には
+    # 段差が無いので、DB の値を基準に入れて比べる。
+    anchors = latest_prices(db, target_ecs)
     async with httpx.AsyncClient(timeout=60) as session:
         for i, b in enumerate(breaks, 1):
             ec, sec = b["edinet_code"], b.get("sec_code")
@@ -1879,8 +2126,14 @@ async def repair_price_scale_breaks(
             recs = [{"edinet_code": ec, "trade_date": r["trade_date"],
                      "close": r["close"], "volume": r.get("volume")}
                     for r in (rows or []) if r.get("close")]
+            brk = find_scale_break_against(anchors.get(ec), recs)
             if not recs:
                 out["failed"].append({"edinet_code": ec, "reason": "Yahoo が空を返した"})
+            elif brk is not None:
+                out["failed"].append({
+                    "edinet_code": ec,
+                    "reason": f"スケール段差（≥{SCALE_BREAK_RATIO:.0f}倍）: "
+                              + scale_rejection_example({"edinet_code": ec, **brk})})
             else:
                 try:
                     # 1社ごとに trim=True：daily を保持窓外に溜めない（容量安全）

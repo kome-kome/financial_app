@@ -402,3 +402,35 @@ class TestVerifyTargetsPerBand:
         assert ok is False
         assert [st for _, st, _ in per_band] == [REJECTED, REJECTED]
         assert "契約窓" in per_band[1][2]
+
+
+class TestRefetchRefusesScaleBreaks:
+    """取り直しは DB の最新値と100倍以上食い違う社を書かない（#765）。
+
+    この道具が均すのは1.2倍前後のスケール混在で、Yahoo が株式併合を split として持つと
+    保持窓ぶんが比率倍で返り、取り直すと汚染を広げる（1909.T の実出力）。
+    """
+
+    def test_scaled_company_is_skipped(self, db, make_price, monkeypatch, capsys):
+        db.add(make_price(edinet_code="E25282", trade_date="2026-09-08", close=3700.0))
+        db.add(make_price(edinet_code="E00001", trade_date="2026-09-08", close=1000.0))
+        db.commit()
+        rows = {"1909.T": [{"trade_date": "2026-09-08", "close": 16278046720.0, "volume": 0.0}],
+                "1001.T": [{"trade_date": "2026-09-08", "close": 1001.0, "volume": 5.0}]}
+
+        async def _fake(session, ticker, d_from, d_to, **kw):
+            return rows[ticker]
+
+        saved = []
+        monkeypatch.setattr(rsm, "YAHOO_STOCK_RATE_SLEEP", 0)
+        monkeypatch.setattr(rsm, "fetch_yahoo_history", _fake)
+        monkeypatch.setattr(rsm, "load_tickers", lambda db, ecs: {
+            "E25282": ("1909", None), "E00001": ("1001", None)})
+        monkeypatch.setattr(rsm.D, "record_prices_batch",
+                            lambda db, recs, **kw: saved.extend(recs) or len(recs))
+
+        out = asyncio.run(rsm.refetch_from_yahoo(db, ["E25282", "E00001"], days=30))
+
+        assert out == {"E25282": 0, "E00001": 1}
+        assert [r["edinet_code"] for r in saved] == ["E00001"]
+        assert "[不採用] E25282" in capsys.readouterr().out

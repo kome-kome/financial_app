@@ -73,10 +73,11 @@ from sqlalchemy import text as sqla_text
 import database as D
 from collector_prices import (
     _jquants_fetch_code, _learn_jquants_coverage,
-    detect_roundtrip_scale_bands, fetch_yahoo_history, record_scale_band_verdicts,
+    detect_roundtrip_scale_bands, fetch_yahoo_history, find_scale_break_against,
+    record_scale_band_verdicts, scale_rejection_example,
 )
 from collector_utils import (
-    JQUANTS_RATE_SLEEP, YAHOO_STOCK_RATE_SLEEP,
+    JQUANTS_RATE_SLEEP, SCALE_BREAK_RATIO, YAHOO_STOCK_RATE_SLEEP,
     force_utf8_stdout, same_price_scale, yahoo_guard_kwargs, yahoo_ticker,
 )
 
@@ -296,8 +297,13 @@ async def refetch_from_yahoo(db, ecs: list, *, days: int) -> dict:
     帯の右端は契約窓（無料プランは直近12週エンバーゴ）に貼り付いて**毎晩伸びる**ので、
     日付を手で固定せず保持窓ぶんをまとめて取り直す。`record_prices_batch` が daily の
     upsert → 触れた週の再集約 → trim までを担う。
+
+    DB の最新値と100倍以上食い違う社は書かない（#765）。この道具が均すのは1.2倍前後の
+    スケール混在で、Yahoo が株式併合を split として持つと保持窓ぶんが比率倍で返り、
+    取り直すと汚染を広げる。
     """
     tickers = load_tickers(db, ecs)
+    anchors = D.latest_prices(db, list(ecs))
     d_to = date.today().strftime("%Y%m%d")
     d_from = (date.today() - timedelta(days=days)).strftime("%Y%m%d")
     out: dict = {}
@@ -316,6 +322,12 @@ async def refetch_from_yahoo(db, ecs: list, *, days: int) -> dict:
                     for r in (rows or []) if r.get("close")]
             if not recs:
                 out[ec] = 0
+                continue
+            brk = find_scale_break_against(anchors.get(ec), recs)
+            if brk is not None:
+                out[ec] = 0
+                print(f"  [不採用] {ec}: スケール段差（≥{SCALE_BREAK_RATIO:.0f}倍）"
+                      f" {scale_rejection_example({'edinet_code': ec, **brk})}（#765）")
                 continue
             try:
                 D.record_prices_batch(db, recs, trim=True)

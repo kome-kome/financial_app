@@ -1541,6 +1541,11 @@ KEY_JPX_INDUSTRY_LAST_SUCCESS = "jpx_industry_last_success"
 # 書式は `collector_prices.record_scale_band_verdicts` / `load_judged_scale_bands` が一手に持つ。
 KEY_SCALE_BAND_VERDICTS = "scale_band_verdicts"
 
+# Yahoo の gap-fill が DB の直前値と100倍以上離れたバーを**書かなかった**社（JSON・#765）。
+# 「新しく起きたか」を判定するためだけの記録で、書く・書かないの判断には使わない。書き手も
+# 読み手も `collector_prices.classify_scale_rejections`（夜間の gap-fill の後）。
+KEY_YAHOO_SCALE_REJECTIONS = "yahoo_scale_rejections"
+
 
 # ── 5. マクロデータ（為替・金利・指数・コモディティ） ──────────────────────
 
