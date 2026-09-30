@@ -77,6 +77,11 @@ def settings(monkeypatch, tmp_path):
     monkeypatch.setattr(cbf, "_open_session", lambda: _FakeDB())
     monkeypatch.setattr(bf, "db_label", lambda: "ローカル（financial_app）")
     monkeypatch.setattr(cbf, "_log_path", lambda: tmp_path / "watchdog.log")
+    # 夜間ログも隔離する（#767）。本物の `.logs` を読むと、その日の実ログ次第で結論が変わる。
+    # 既定は「ログが無い＝判定しない」。夜間ログを試すテストはここへ書く。
+    nightly_dir = tmp_path / "nightly_logs"
+    nightly_dir.mkdir()
+    monkeypatch.setattr(cbf, "_nightly_log_dir", lambda: nightly_dir)
     monkeypatch.setattr(cbf, "check_gh", lambda **_k: None)
     # `--now` の回は自動クローズしない（#635）ので、クローズの配線は `--now` 無しで試す。
     # そのとき判定時刻が実時計へ流れないよう、既定値の継ぎ目も固定する。
@@ -1022,3 +1027,195 @@ class TestMarkers:
             body = cbf.recovery_body(target, snap, human_touched)
             body.encode("cp932")
             assert cbf.WATCHDOG_MARKER in body and cbf.RECOVERY_MARKER in body
+
+
+# ── 夜間ログの警告（#767）────────────────────────────────────────────────────
+# 検体は 2026-09-29 の実ログ（往復段差 4社・解決済みなのに空 1社）。`exit=0` で終わり、
+# 何も起票されなかった晩そのもの。
+
+from scripts.check_nightly_collect import parse_nightly_log  # noqa: E402
+from tests.test_check_nightly_collect import LOG_0929  # noqa: E402
+
+LOG_0929_NAME = "nightly_20260929.log"
+RT_TITLE = cbf.nightly_title("roundtrip")
+EX_TITLE = cbf.nightly_title("exchange_rejected")
+RT_0929 = "往復段差 4社＝`python -m scripts.repair_scale_mixture` で確認する（#620）"
+
+
+def _night(text=LOG_0929, name=LOG_0929_NAME):
+    row = parse_nightly_log(text)
+    row["log"] = name
+    return row
+
+
+def _nightly_snap(settings, text=LOG_0929):
+    snap = _snap(settings)
+    snap["producers"] = _producers(FRESH_PRODUCERS)
+    snap["nightly_log"] = _night(text)
+    return snap
+
+
+def _signed_body(messages):
+    """watchdog が以前に書いた本文（署名入り）。"""
+    return (f"起票\n{cbf.NIGHTLY_SIGNATURE.format(cbf.nightly_signature(messages))}\n"
+            f"{cbf.WATCHDOG_MARKER}")
+
+
+class TestNightlyLogWarningsAreFiled:
+    """走ったが中身がおかしい、を種類ごとの Issue にする。"""
+
+    def test_each_kind_gets_its_own_problem(self, settings):
+        found = [p for p in cbf.problems(_nightly_snap(settings)) if p.get("nightly")]
+        assert [p["title"] for p in found] == [EX_TITLE, RT_TITLE]
+        rt = next(p for p in found if p["title"] == RT_TITLE)
+        assert rt["nightly"]["messages"] == [RT_0929]
+        assert rt["nightly"]["log"] == LOG_0929_NAME
+
+    @pytest.mark.parametrize("kind", list(cbf.WARNING_KINDS))
+    def test_titles_have_no_date_or_count(self, kind):
+        title = cbf.nightly_title(kind)
+        assert not re.search(r"\d", title), title
+
+    def test_titles_do_not_collide_with_the_batch_titles(self):
+        titles = [cbf.nightly_title(k) for k in cbf.WARNING_KINDS] \
+            + [w.issue_title for w in cbf.WATCHED] + [cbf.DB_ERROR_TITLE]
+        assert len(set(titles)) == len(titles)
+
+    def test_a_night_in_flight_is_not_judged(self, settings):
+        """20:00 に夜間がまだ走っている＝書きかけのログ。起票も閉じもしない。"""
+        head = LOG_0929.split("[2026-09-29T09:25:28+00:00]")[0]
+        snap = _nightly_snap(settings, head)
+        assert not [p for p in cbf.problems(snap) if p.get("nightly")]
+        assert not [t for t in cbf.recoveries(snap) if t.get("nightly")]
+        assert "判定を保留する" in "\n".join(cbf.format_report(snap))
+
+    def test_no_log_is_not_judged(self, settings):
+        snap = _snap(settings)
+        snap["nightly_log"] = None
+        assert not [p for p in cbf.problems(snap) if p.get("nightly")]
+        assert not [t for t in cbf.recoveries(snap) if t.get("nightly")]
+
+    def test_a_clean_night_files_nothing(self, settings):
+        clean = LOG_0929.replace("・**解決済みなのに空 1社**", "").replace(
+            "**往復段差 4社**（例: E00024, E04980, E35948, E40060）",
+            "往復段差: なし（調整差のある 68社を検査")
+        assert not [p for p in cbf.problems(_nightly_snap(settings, clean)) if p.get("nightly")]
+
+    def test_the_body_names_the_log_and_carries_the_signature(self, settings):
+        snap = _nightly_snap(settings)
+        rt = next(p for p in cbf.problems(snap) if p["title"] == RT_TITLE)
+        body = cbf.issue_body(rt, snap)
+        assert f".logs/{LOG_0929_NAME}" in body
+        assert RT_0929 in body
+        assert cbf.last_nightly_signature({"body": body, "comments": []}) \
+            == cbf.nightly_signature([RT_0929])
+        body.encode("cp932")
+
+    def test_a_db_outage_still_files_the_log_warnings(self):
+        """夜間ログはファイルなので DB と独立に読める。"""
+        snap = {"now": NOW, "rows": [], "producers": [], "db_error": "boom",
+                "db_label": "x", "gh_error": None, "nightly_log": _night()}
+        titles = [p["title"] for p in cbf.problems(snap)]
+        assert cbf.DB_ERROR_TITLE in titles and RT_TITLE in titles
+
+
+class TestNightlyLogWarningsAreNotRepeated:
+    """長く続く警告（実測: 解決済みなのに空が15晩連続）でコメント欄を埋めない。"""
+
+    @staticmethod
+    def _notify(gh, snap):
+        found = [p for p in cbf.problems(snap) if p["title"] == RT_TITLE]
+        return cbf.notify(found, snap, say=lambda _: None, run=gh)
+
+    def test_a_new_kind_is_created(self, settings):
+        gh = _GhIssues({})
+        assert self._notify(gh, _nightly_snap(settings)) == []
+        (call,) = gh.writes()
+        assert call[:3] == ["gh", "issue", "create"] and _arg(call, "--title") == RT_TITLE
+
+    def test_the_same_warning_is_not_commented_again(self, settings):
+        gh = _GhIssues({42: (RT_TITLE, _signed_body([RT_0929]), [])})
+        assert self._notify(gh, _nightly_snap(settings)) == []
+        assert gh.writes() == []
+
+    def test_a_changed_warning_is_commented(self, settings):
+        gh = _GhIssues({42: (RT_TITLE, _signed_body([RT_0929.replace("4社", "2社")]), [])})
+        assert self._notify(gh, _nightly_snap(settings)) == []
+        (call,) = gh.writes()
+        assert call[:4] == ["gh", "issue", "comment", "42"]
+
+    def test_the_latest_watchdog_text_is_what_counts(self, settings):
+        """本文は古い内容、最後の追記が今と同じ → 追記しない。人のコメントは飛ばす。"""
+        gh = _GhIssues({42: (RT_TITLE, _signed_body(["古い"]),
+                             [_signed_body([RT_0929]), "人が調べている"])})
+        assert self._notify(gh, _nightly_snap(settings)) == []
+        assert gh.writes() == []
+
+    def test_after_a_recovery_note_the_warning_is_commented(self, settings):
+        """復旧コメント（署名なし）の後に再発したら伝える。"""
+        gh = _GhIssues({42: (RT_TITLE, _signed_body([RT_0929]), ["人", RECOVERY_NOTE])})
+        assert self._notify(gh, _nightly_snap(settings)) == []
+        assert [c[2] for c in gh.writes()] == ["comment"]
+
+    def test_an_unreadable_issue_falls_back_to_comment(self, settings):
+        """読めなければ追記へ倒す（重複より沈黙の方が悪い）。"""
+        gh = _GhIssues({42: (RT_TITLE, _signed_body([RT_0929]), [])}, fail=["view"])
+        errors = self._notify(gh, _nightly_snap(settings))
+        assert errors and "view boom" in errors[0]
+        assert [c[2] for c in gh.writes()] == ["comment"]
+
+    def test_batch_problems_still_comment_every_time(self, settings):
+        """足跡の問題の挙動は変えない（既存 Issue へ毎回追記・view を叩かない）。"""
+        settings[run_nightly.KEY_LAST_RUN] = _iso(48.0)
+        snap = _snap(settings)
+        gh = _GhIssues({42: (NIGHTLY.issue_title, _by_watchdog(), [])})
+        cbf.notify([p for p in cbf.problems(snap) if p["title"] == NIGHTLY.issue_title],
+                   snap, say=lambda _: None, run=gh)
+        assert [c[2] for c in gh.calls] == ["list", "comment"]
+
+
+class TestNightlyLogWarningsAreClosed:
+    def test_a_quiet_kind_is_closed(self, settings):
+        """9/29 のログは株価鮮度 fresh を読めている → 鮮度の Issue は閉じてよい。"""
+        snap = _nightly_snap(settings)
+        title = cbf.nightly_title("price_freshness")
+        gh = _GhIssues({5: (title, _signed_body(["株価鮮度 level=stale"]), [])})
+        assert cbf.close_recovered(cbf.recoveries(snap), snap, say=lambda _: None, run=gh) == []
+        (call,) = gh.writes()
+        assert call[:4] == ["gh", "issue", "close", "5"]
+        assert LOG_0929_NAME in _arg(call, "--comment")
+
+    def test_a_still_warning_kind_stays_open(self, settings):
+        titles = [t["title"] for t in cbf.recoveries(_nightly_snap(settings))]
+        assert RT_TITLE not in titles and EX_TITLE not in titles
+
+    def test_an_unknown_kind_is_not_closed(self, settings):
+        """9/29 は #765 の行が入る前＝Yahoo スケール不採用は不明。不明を ok と読まない。"""
+        titles = [t["title"] for t in cbf.recoveries(_nightly_snap(settings))]
+        assert cbf.nightly_title("scale_rejected") not in titles
+        assert cbf.nightly_title("scale_steps") not in titles
+        assert cbf.nightly_title("price_freshness") in titles
+
+    def test_recovery_bodies_encode_as_cp932(self, settings):
+        snap = _nightly_snap(settings)
+        for target in [t for t in cbf.recoveries(snap) if t.get("nightly")]:
+            cbf.recovery_body(target, snap, False).encode("cp932")
+
+
+class TestNightlyLogWiring:
+    def test_main_reads_the_seam_and_files(self, settings, monkeypatch):
+        (cbf._nightly_log_dir() / LOG_0929_NAME).write_text(LOG_0929, encoding="utf-8")
+        seen = []
+        monkeypatch.setattr(cbf, "notify", lambda found, snap, **k: seen.append(found) or [])
+        monkeypatch.setattr(cbf, "close_recovered", lambda *a, **k: [])
+        assert cbf.main([]) == cbf.EXIT_UNHEALTHY
+        assert [p["title"] for p in seen[0]] == [EX_TITLE, RT_TITLE]
+
+    def test_the_default_fixture_reads_no_real_log(self, settings, monkeypatch):
+        """既定では夜間ログが無い＝既存の判定に影響しない。"""
+        monkeypatch.setattr(cbf, "close_recovered", lambda *a, **k: [])
+        assert cbf.main([]) == 0
+
+    def test_the_seam_points_at_the_real_log_dir_by_default(self):
+        from scripts.check_nightly_collect import LOG_DIR
+        assert cbf._nightly_log_dir() == LOG_DIR

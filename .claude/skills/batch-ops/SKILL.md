@@ -27,7 +27,8 @@ python launch.py                         # GUI ランチャー（既定=ロー�
 ./scripts/install_nightly_task.ps1       # タスクスケジューラへ登録（毎日 JST 17:20）
 
 # バッチ鮮度 watchdog（走らなかったことを検知して起票）。#515・ADR-0042
-python -m scripts.check_batch_freshness             # 判定（停止なら起票 + exit 2）
+# 最新の夜間ログの警告も種類ごとに起票する（#767・書きかけのログは判定しない）
+python -m scripts.check_batch_freshness             # 判定（停止・夜間ログの警告なら起票 + exit 2）
 ./run_watchdog.ps1 -DryRun                          # 起票せず本文だけ見る
 ./run_watchdog.ps1 -DryRun -Now 2026-08-28T00:00:00+00:00   # 欠落を再現（DB を汚さない）
 ./scripts/install_watchdog_task.ps1                 # タスクスケジューラへ登録（毎日 JST 20:00）
@@ -40,6 +41,7 @@ python -m scripts.nightly_diag_report --view sectors      # 業種ごとの ridg
 python -m scripts.nightly_diag_report --model macro_enet --since 2026-10-01
 
 # 夜間バッチの収集ログを晩ごとに並べて読む（#556 の並行フェッチ・#620 のスケール選別）。DB に触らない
+# 最新の1晩は watchdog（毎日 20:00）が自動で読んで起票する（#767）。手で叩くのは晩ごとの推移を見るとき
 python -m scripts.check_nightly_collect             # 直近3晩・警告があれば exit 2
 python -m scripts.check_nightly_collect --nights 5
 

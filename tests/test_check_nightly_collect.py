@@ -11,8 +11,10 @@ from collector_prices import (
     scale_step_log_line,
 )
 from scripts._textwidth import display_width, pad
+from scripts import run_nightly
 from scripts.check_nightly_collect import (
-    parse_nightly_log, seconds_per_company, warnings_for,
+    WARNING_KINDS, latest_night, parse_nightly_log, seconds_per_company, warning_items,
+    warnings_for,
 )
 
 # #622／#620 の適用前（2026-09-07 の実ログ）。並行度・HTTP失敗・往復段差の行がまだ無い。
@@ -322,3 +324,87 @@ class TestScaleGuardRules:
         r = parse_nightly_log(LOG_AFTER)
         assert r["scale_rejected"] is None and r["scale_rejected_new"] is None
         assert r["scale_steps"] is None and r["scale_steps_failed"] is None
+
+
+# 2026-09-29 の実ログ（`.logs/nightly_20260929.log`）から写した。往復段差 4社・解決済みなのに空
+# 1社が出ていたが `END pipeline: exit=0` で何も起票されなかった晩（#767 の発端）。
+LOG_0929 = """\
+[2026-09-29T08:48:43+00:00] 夜間バッチ開始（正本=ローカル・#503）
+2026-09-29 18:07:30,954 INFO fill_recent_stock_price_gap_yahoo: 3878/4446社を補完（基準セッション 2026-09-29 / JST 2026-09-29 18:07 ・最古起点 20260330 〜 20260929 ・価格ゼロ 418社（うち解決済み 0社））
+2026-09-29 18:18:08,899 INFO fill_recent_stock_price_gap_yahoo: 7530件を株価テーブルへ集約保存（うち新規日付 3714件・並行度 4・HTTP失敗 429=0 5xx=0 4xx=128（うち404=128） その他=0）
+[18:18:08]   価格ゼロ 418社（うち解決済み 0社）・**解決済みなのに空 1社**
+[18:18:08]   Yahoo 並行度 4・HTTP失敗 429=0 5xx=0 4xx=128（うち404=128） その他=0
+[18:19:51]   J-Quants catchup (2026-07-01〜2026-07-11): 18106件 upsert・契約窓外 3日・スケール不一致で不採用 339行（68社）
+[18:20:38]   株価鮮度: p50=2026-09-29 / p05=2026-09-29 / max=2026-09-29 / level=fresh（3804銘柄・5営業日超の遅れ 68銘柄）
+[18:20:38]   **往復段差 4社**（例: E00024, E04980, E35948, E40060）＝調整差のある社の日次に「飛んで戻る」帯がある。1つの列に2つのスケールが混ざった疑い。`python -m scripts.repair_scale_mixture` で確認する（#620）・判定済みの非該当 3帯を除外
+[2026-09-29T09:25:28+00:00] 夜間バッチ終了
+"""
+
+
+class TestWarningKinds:
+    """#767: watchdog は警告を種類ごとの Issue にする。種類の表がここの唯一の源。"""
+
+    def test_every_warning_has_a_registered_kind(self):
+        """検体を全部並べて、出た種類キーが全部 `WARNING_KINDS` にあること。"""
+        guard = TestScaleGuardRules()
+        logs = (
+            "", LOG_0929,
+            LOG_AFTER.replace("429=0", "429=3").replace("level=fresh", "level=stale"),
+            _night_with("[17:49:05]   往復段差の検知に失敗（継続します）: RuntimeError: x"),
+            guard._night(rejected=4, new=1, steps=guard._steps(2)),
+        )
+        kinds = {k for t in logs for k, _ in warning_items(parse_nightly_log(t))}
+        assert kinds <= set(WARNING_KINDS)
+        assert {"collect_incomplete", "yahoo_http", "exchange_rejected", "roundtrip",
+                "price_freshness", "scale_rejected", "scale_steps"} == kinds
+
+    def test_warnings_for_is_the_text_of_warning_items(self):
+        r = parse_nightly_log(LOG_0929)
+        assert warnings_for(r) == [m for _, m in warning_items(r)]
+
+    def test_the_0929_night_warns_on_two_kinds(self):
+        assert [k for k, _ in warning_items(parse_nightly_log(LOG_0929))] \
+            == ["exchange_rejected", "roundtrip"]
+
+    def test_labels_have_no_digits(self):
+        """ラベルは Issue タイトルになる。数字が入ると一致で既存の起票を探せない。"""
+        for kind in WARNING_KINDS.values():
+            assert not any(ch.isdigit() for ch in kind.label), kind.label
+
+    def test_unknown_is_not_known(self):
+        """行が無い晩は ok と言えない（閉じる根拠にしない）。"""
+        r = parse_nightly_log(LOG_BEFORE)
+        assert not WARNING_KINDS["roundtrip"].known(r)
+        assert WARNING_KINDS["roundtrip"].known(parse_nightly_log(LOG_0929))
+
+
+class TestCompleted:
+    """書きかけのログを判定しない（20:00 に夜間がまだ走っていることがある・#767）。"""
+
+    def test_a_finished_night_is_completed(self):
+        assert parse_nightly_log(LOG_0929)["completed"] is True
+
+    def test_a_night_in_flight_is_not_completed(self):
+        head = LOG_0929.split("[2026-09-29T09:25:28+00:00]")[0]
+        assert parse_nightly_log(head)["completed"] is False
+
+    def test_a_second_run_in_the_same_file_resets_it(self):
+        """手動の追いつき実行で同じ日のログに2回目が追記され、まだ走っている。"""
+        log = LOG_0929 + "[2026-09-29T12:00:00+00:00] 夜間バッチ開始（正本=ローカル・#503）\n"
+        assert parse_nightly_log(log)["completed"] is False
+
+    def test_the_lines_match_what_the_runner_writes(self):
+        """文言の源は `batch_common.run_batch` の `{spec.name}開始` / `{spec.name}終了`。"""
+        name = run_nightly.SPEC.name
+        log = f"[x] {name}開始（正本=ローカル・#503）\n[y] {name}終了\n"
+        assert parse_nightly_log(log)["completed"] is True
+
+    def test_latest_night_reads_only_the_newest_file(self, tmp_path):
+        (tmp_path / "nightly_20260928.log").write_text("", encoding="utf-8")
+        (tmp_path / "nightly_20260929.log").write_text(LOG_0929, encoding="utf-8")
+        night = latest_night(tmp_path)
+        assert night["log"] == "nightly_20260929.log" and night["completed"] is True
+
+    def test_no_log_is_none(self, tmp_path):
+        assert latest_night(tmp_path) is None
+        assert latest_night(tmp_path / "absent") is None

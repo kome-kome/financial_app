@@ -86,6 +86,22 @@ stale の後に ok へ戻るのは「検出後にバッチが実際に走って�
 open Issue を閉じてしまう。起票は安全側の方向なので従来どおり `--now` でも行う。
 閉じ損ねは起票の失敗と同じ扱い（exit 3）＝沈黙させない。
 
+## 3つ目の事実: 「走ったが中身がおかしい」（#767）
+
+夜間の pipeline は往復段差・#765 のスケール段差などをログへ書いても **exit 0** で終わる＝
+`batch_common.notify` にも足跡にも現れない。#765 の比率倍の株価は4か月、毎晩ログに出ながら
+誰にも届かなかった。そこで**最新の夜間ログ1本**を `check_nightly_collect` の判定（唯一の源・
+書き写さない）で読み、警告の**種類ごと**に起票する（新しい種類は新規起票として届き、種類ごとに
+閉じる）。
+
+- **終了行の無いログは判定しない**（起票も閉じもしない）。20:00 に夜間がまだ走っていると
+  「収集が終わっていない」という偽の警告になる。途中で死んだ回は失敗の起票と足跡が拾う。
+- **閉じるのは ok を言えた種類だけ**。行が無い＝不明を ok と読むと、ログ書式が変わった日に
+  本物の Issue まで閉じる（`recoveries()` を補集合にしないのと同じ理由）。
+- **警告文が前回と同じ晩は追記しない**。長く続く警告（実測: 「解決済みなのに空」は15晩連続）で
+  コメント欄が埋まり、変化が読めなくなる。比べる相手は Issue 上で watchdog が最後に書いた署名
+  （`NIGHTLY_SIGNATURE`）で、ローカルに状態は持たない。
+
 読取のみ（自分の足跡1行の upsert を除く）。出力は ASCII 記号のみ（Windows cp932 対策）。
 
 実行: `python -m scripts.check_batch_freshness`（`-m` 必須）
@@ -95,6 +111,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -128,6 +145,10 @@ from batch_freshness import (                                # noqa: E402,F401
     KEY_LAST_RUN, PRODUCERS, SELF_WINDOW_MIN, WATCHED, Produced, Watched, _parse,
     collect, collect_producers, db_label, producer_status_of, status_of,
 )
+# 夜間ログの判定（#767）。ファイルを読むだけで DB にもネットワークにも触らない。
+from scripts.check_nightly_collect import (                   # noqa: E402
+    LOG_DIR as NIGHTLY_LOG_DIR, WARNING_KINDS, latest_night, warning_items,
+)
 
 EXIT_UNHEALTHY = 2
 # 「問題を見つけているのに誰にも伝えられていない」は最も静かな故障で、他のどこにも現れない。
@@ -150,6 +171,11 @@ GH_ERROR_TITLE = "[ops] watchdog が gh を使えない（通知経路が死ん�
 WATCHDOG_MARKER = "<!-- finapp-watchdog -->"
 # 復旧コメントの目印。最新コメントがこれなら「もう伝えた」＝毎日積み上げない。
 RECOVERY_MARKER = "<!-- finapp-watchdog:recovered -->"
+# 夜間ログの警告の Issue（#767）。タイトルは種類ごとで、数字・日付を入れない。
+NIGHTLY_TITLE_PREFIX = "[ops] 夜間収集の警告: "
+# その回の警告文。同じなら追記しない（比べる相手は Issue 上の最後の watchdog の署名）。
+NIGHTLY_SIGNATURE = "<!-- finapp-watchdog:nightly-signature={} -->"
+RE_NIGHTLY_SIGNATURE = re.compile(r"<!-- finapp-watchdog:nightly-signature=(.*?) -->")
 
 
 class _Echo:
@@ -201,11 +227,48 @@ def check_gh(run=subprocess.run, which=None) -> Optional[str]:
     return None
 
 
+def nightly_title(kind: str) -> str:
+    return NIGHTLY_TITLE_PREFIX + WARNING_KINDS[kind].label
+
+
+def _completed_night(snap: dict) -> Optional[dict]:
+    """判定してよい夜間ログ。無い・書きかけなら None（起票も閉じもしない）。"""
+    night = snap.get("nightly_log")
+    return night if night and night.get("completed") else None
+
+
+def nightly_problems(snap: dict) -> list[dict]:
+    """最新の夜間ログの警告を、種類ごとに1件へまとめて返す（#767）。"""
+    night = _completed_night(snap)
+    if night is None:
+        return []
+    by_kind: dict[str, list[str]] = {}
+    for kind, msg in warning_items(night):
+        by_kind.setdefault(kind, []).append(msg)
+    return [{"title": nightly_title(kind), "row": None, "status": "warning",
+             "nightly": {"kind": kind, "log": night["log"], "messages": msgs},
+             "message": f"{WARNING_KINDS[kind].label}: " + " / ".join(msgs)}
+            for kind, msgs in by_kind.items()]
+
+
+def nightly_recoveries(snap: dict) -> list[dict]:
+    """警告が出ていないと**言えた**種類だけ（元の値が不明の種類は閉じない・#767）。"""
+    night = _completed_night(snap)
+    if night is None:
+        return []
+    warned = {kind for kind, _ in warning_items(night)}
+    return [{"title": nightly_title(kind), "row": None,
+             "nightly": {"kind": kind, "log": night["log"], "messages": []}}
+            for kind, spec in WARNING_KINDS.items()
+            if kind not in warned and spec.known(night)]
+
+
 def problems(snap: dict) -> list[dict]:
     """起票に値する事象だけを返す（空なら健全）。対象ごとに1件＝Issue も対象ごとに1本。"""
     if snap["db_error"]:
         return [{"title": DB_ERROR_TITLE, "row": None, "status": "db_error",
-                 "message": f"ローカル DB を読めない: {snap['db_error']}"}]
+                 "message": f"ローカル DB を読めない: {snap['db_error']}"}] \
+            + nightly_problems(snap)
     found = []
     if snap.get("gh_error"):
         # **これ自体は起票できない**（起票の手段が死んでいる）。notify が失敗して exit 3 になり、
@@ -250,7 +313,7 @@ def problems(snap: dict) -> list[dict]:
                        f"{prod.batch_label}が走っていても成果物は前進していない")
         found.append({"title": prod.issue_title, "row": None, "producer": row,
                       "status": status, "message": message})
-    return found
+    return found + nightly_problems(snap)
 
 
 def recoveries(snap: dict) -> list[dict]:
@@ -262,7 +325,7 @@ def recoveries(snap: dict) -> list[dict]:
     原理的に自動起票されない）。
     """
     if snap["db_error"]:
-        return []
+        return nightly_recoveries(snap)     # 夜間ログはファイルなので DB と独立に言える
     found = [{"title": DB_ERROR_TITLE, "row": None}]
     for row in snap["rows"]:
         w, status = row["watched"], row["status"]
@@ -272,7 +335,7 @@ def recoveries(snap: dict) -> list[dict]:
     for row in snap.get("producers") or []:
         if row["status"] == "ok":
             found.append({"title": row["produced"].issue_title, "row": None, "producer": row})
-    return found
+    return found + nightly_recoveries(snap)
 
 
 def _pad(text: str, width: int) -> str:
@@ -302,7 +365,7 @@ def format_report(snap: dict) -> list[str]:
     ]
     if snap["db_error"]:
         lines.append(f"DB を読めない: {snap['db_error']}")
-        return lines
+        return lines + _nightly_report(snap)
     for row in snap["rows"]:
         w = row["watched"]
         success = "-" if w.key_success is None else _fmt_age(row["success_age_h"])
@@ -317,7 +380,23 @@ def format_report(snap: dict) -> list[str]:
             lines.append(
                 f"{_pad(prod.label, 30)}: 更新 {_pad(_fmt_age(row['age_h']), 12)}"
                 f"[閾値 {prod.stale_h / 24.0:.1f}日]")
-    return lines
+    return lines + _nightly_report(snap)
+
+
+def _nightly_report(snap: dict) -> list[str]:
+    """夜間ログの警告の節（#767）。**判定を保留した回も理由を出す**（黙って飛ばさない）。"""
+    if "nightly_log" not in snap:
+        return []
+    night = snap["nightly_log"]
+    if night is None:
+        return ["-- 夜間ログの警告 --", "夜間ログが1本も無い（判定しない）"]
+    lines = [f"-- 夜間ログの警告（{night['log']}） --"]
+    if not night.get("completed"):
+        return lines + ["終了行が無い＝まだ走っているか途中で止まった（判定を保留する）"]
+    items = warning_items(night)
+    if not items:
+        return lines + ["警告なし"]
+    return lines + [f"! {msg}" for _, msg in items]
 
 
 def issue_body(problem: dict, snap: dict) -> str:
@@ -365,6 +444,28 @@ def issue_body(problem: dict, snap: dict) -> str:
             "（`status=quarantined` の run は残るが producer は読まない・#609）",
             "3. **バッチ自体は走っていることがある**ので、「走っていない」と"
             "「走ったが値が書けていない」を混同しない（上の実行鮮度の表を参照）",
+        ]
+    elif problem.get("nightly") is not None:
+        n = problem["nightly"]
+        body = head + [
+            "| 項目 | 値 |",
+            "|---|---|",
+            f"| 読んだログ | `.logs/{n['log']}` |",
+            f"| 種類 | {WARNING_KINDS[n['kind']].label} |",
+            "| 夜間バッチの exit | 0（警告は失敗の起票に掛からない＝ここでしか届かない） |",
+            "",
+            "### 警告",
+            "",
+            *[f"- {msg}" for msg in n["messages"]],
+            "",
+            "### 確認すること",
+            "",
+            "1. `python -m scripts.check_nightly_collect --nights 5` で晩ごとの表を見る"
+            "（いつから出ているか・増えているか）",
+            "2. 警告文の指示に従う（修復コマンドの選び方は警告文と docs/GOTCHAS.md が正本）",
+            "3. **警告の内容が前回と同じ晩は追記しない**（内容が変わった晩だけ追記される・#767）",
+            "",
+            NIGHTLY_SIGNATURE.format(nightly_signature(n["messages"])),
         ]
     elif row is None:
         body = head + [
@@ -425,6 +526,17 @@ def recovery_body(target: dict, snap: dict, human_touched: bool) -> str:
             f"| 閾値 | {prod.stale_h / 24.0:.1f}日（cadence"
             f" {prod.cadence_h / 24.0:.0f}日 + 窓 {prod.window_min / 60.0:.1f}時間） |",
             "| 判定 | ok |",
+        ]
+    elif target.get("nightly") is not None:
+        n = target["nightly"]
+        label = WARNING_KINDS[n["kind"]].label
+        body = head + [
+            f"**復旧: 最新の夜間ログで「{label}」の警告が出なくなった**",
+            "",
+            "| 項目 | 値 |",
+            "|---|---|",
+            f"| 読んだログ | `.logs/{n['log']}`（終了行あり） |",
+            "| 判定 | ok（該当の行を読めて、警告に当たらなかった） |",
         ]
     elif row is None:
         body = head + ["**復旧: ローカル PostgreSQL へ接続でき、足跡を読めた**"]
@@ -500,6 +612,26 @@ def _view_issue(run, number: int) -> tuple[Optional[dict], Optional[str]]:
         return None, f"gh issue view #{number} の出力を JSON として読めない: {e}"
 
 
+def nightly_signature(messages: Sequence[str]) -> str:
+    """警告文の署名。HTML コメントを閉じる `--` が混ざらないよう潰す。"""
+    return " / ".join(messages).replace("--", "- -")
+
+
+def last_nightly_signature(detail: dict) -> Optional[str]:
+    """Issue 上で watchdog が**最後に書いた**テキストの署名（無ければ None）。
+
+    人のコメントは飛ばす（目印が無い）。watchdog の最後の書き込みが復旧コメント等で署名を
+    持たなければ None＝次の警告は必ず追記される。
+    """
+    texts = [detail.get("body") or ""] + [c.get("body") or "" for c in detail.get("comments") or []]
+    for text in reversed(texts):
+        if WATCHDOG_MARKER not in text:
+            continue
+        m = RE_NIGHTLY_SIGNATURE.search(text)
+        return m.group(1) if m else None
+    return None
+
+
 def close_recovered(targets: list[dict], snap: dict, say=print, run=subprocess.run,
                     dry_run: bool = False) -> list[str]:
     """ok へ戻った対象の open な起票を、復旧コメント付きで閉じる（#635）。
@@ -569,6 +701,16 @@ def notify(found: list[dict], snap: dict, say=print, run=subprocess.run,
             existing, warn = _find_open_issue(run, title)
             if warn:
                 errors.append(warn)
+            if existing is not None and problem.get("nightly") is not None:
+                # 夜間ログの警告は長く続く。内容が前回と同じなら追記しない（#767）。
+                # 読めなければ追記へ倒す（重複より沈黙の方が悪い）。
+                detail, warn = _view_issue(run, existing)
+                if detail is None:
+                    errors.append(warn)
+                elif (last_nightly_signature(detail)
+                      == nightly_signature(problem["nightly"]["messages"])):
+                    say(f"[夜間ログ] 前回と同じ警告のため追記しない #{existing}: {title}")
+                    continue
             if existing is not None:
                 proc = _gh(run, ["gh", "issue", "comment", str(existing), "--body", body])
                 action = f"既存 Issue #{existing} へ追記"
@@ -619,6 +761,21 @@ def _log_path() -> Path:
     return bc.log_path("watchdog")
 
 
+def _nightly_log_dir() -> Path:
+    """夜間ログの置き場。継ぎ目にしてあるのは、テストが本物の `.logs` を読まないため
+    （読むと、その日の実ログ次第でテストの結論が変わる）。"""
+    return NIGHTLY_LOG_DIR
+
+
+def _read_nightly(say) -> Optional[dict]:
+    """最新の夜間ログ。読めなくても watchdog を落とさない（足跡の判定は続ける）。"""
+    try:
+        return latest_night(_nightly_log_dir())
+    except OSError as e:
+        say(f"[warn] 夜間ログを読めない（判定しない）: {e}")
+        return None
+
+
 def _utcnow() -> datetime:
     """判定時刻の既定値。継ぎ目にしてあるのは、`--now` を使わずに `main()` を通すテストのため
     （`--now` の回は自動クローズしないので、`--now` 付きではクローズの配線を試せない）。"""
@@ -663,6 +820,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         finally:
             if db is not None:
                 db.close()
+        snap["nightly_log"] = _read_nightly(say)
 
         # 通知経路は**健全な回にも**確かめる（--dry-run は gh を叩かないので見送る）。
         # ここを異常検出時だけにすると、通知が死んでいることは一番届いてほしい回に判明する。
@@ -677,7 +835,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
         found = problems(snap)
         for problem in found:
-            say(f"[鮮度] 停止: {problem['message']}")
+            kind = "[夜間ログ] 警告" if problem.get("nightly") is not None else "[鮮度] 停止"
+            say(f"{kind}: {problem['message']}")
 
         errors: list[str] = []
         gh_dead = bool(snap.get("gh_error")) and not args.dry_run
