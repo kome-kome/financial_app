@@ -23,9 +23,16 @@ from scripts.resolve_price_suffix import (
 )
 
 
-def _bars(n: int) -> list:
-    return [{"trade_date": f"2026-01-{i % 28 + 1:02d}", "close": 100.0 + i}
+def _bars(n: int, volume=1000.0) -> list:
+    """`fetch_yahoo_chart` の行の形。既定は約定あり（採用ガードの3条件目・#769）。"""
+    return [{"trade_date": f"2026-01-{i % 28 + 1:02d}", "close": 100.0 + i, "volume": volume}
             for i in range(n)]
+
+
+# E00306（1734.S 北弘電社）の実測形（#769）: 2024-04-11 に上場廃止済みなのに、Yahoo は
+# SAP/JPY/実名とともに 2026-07-17 付け・終値657・出来高0 のバーを1本返した。
+PHANTOM_1734 = [{"trade_date": "2026-07-17", "open": 657.0, "high": 657.0, "low": 657.0,
+                 "close": 657.0, "volume": 0.0}]
 
 
 FKA_JPY = {"exchangeName": "FKA", "currency": "JPY"}
@@ -51,14 +58,38 @@ class TestDecideSuffix:
         assert (got, reason) == (".F", "adopted")
 
     def test_single_bar_is_adopted(self):
-        """バー数の下限は設けない。
+        """バー数の下限は設けない——**約定のある**1本なら採る。
 
-        #555 は 1734（北弘電社・札証）を「61営業日中1日しか約定しない」例として挙げていた。
-        2026-08-27 の実測ではこの銘柄は `.S` で `exchangeName=SAP` を返しつつ**1年窓でも
-        0バー**（＝別扱いの `empty`）だったが、低流動銘柄が存在するという前提自体は変わらない。
-        **バー数で足切りすると、この Issue が救おうとしている層をまさに落とす。**
+        **バー数で足切りすると、この Issue が救おうとしている低流動銘柄をまさに落とす。**
+        （#555 が例に挙げた 1734 北弘電社は、実際には 2024 年に廃止済みで、その1本は
+        出来高0の幽霊だった＝下の `test_phantom_bar_without_trades_is_rejected`・#769）
         """
         got, reason = decide_suffix([(".S", _bars(1), SAP_JPY)])
+        assert (got, reason) == (".S", "adopted")
+
+    def test_phantom_bar_without_trades_is_rejected(self):
+        """#769 の実測形。取引所名・通貨・実名が揃っていても出来高0の1本は採らない。
+
+        採用した結果、2026-07-17 付けの 657円が 2023-03 期の財務行へ押し込まれ、
+        Yahoo が記号を消したあとは毎晩「解決済みなのに空」が鳴り続けた。
+        """
+        got, reason = decide_suffix([(".S", PHANTOM_1734, SAP_JPY)])
+        assert got is None
+        assert reason == ".S:empty:SAP:no_trades"
+        # 期待した取引所の meta は返っている＝`empty` の棚（月次の再プローブで拾えるまま）
+        assert reject_bucket(reason) == "empty"
+
+    def test_bars_with_unknown_volume_are_not_evidence(self):
+        """出来高が None のバーは約定の証拠として数えない（誤った株価を書かない側へ倒す）。"""
+        got, reason = decide_suffix([(".F", _bars(5, volume=None), FKA_JPY)])
+        assert got is None
+        assert "no_trades" in reason
+
+    def test_one_trade_among_idle_days_is_enough(self):
+        """薄商いの現役銘柄は約定の無い日（出来高0）のバーを持つ。1本でも約定があれば採る。"""
+        bars = _bars(10, volume=0.0)
+        bars[3]["volume"] = 100.0
+        got, reason = decide_suffix([(".S", bars, SAP_JPY)])
         assert (got, reason) == (".S", "adopted")
 
     def test_currency_mismatch_is_rejected(self):
@@ -81,10 +112,11 @@ class TestDecideSuffix:
         assert reason == ".S:not_found,.F:not_found"
 
     def test_empty_on_expected_exchange_is_marked_empty(self):
-        """`1734.S` の実測形: SAP/JPY/実名を返しながらバーが0本。
+        """`231A.F` 等の実測形（2026-08-27）: 期待した取引所・実名を返しながらバーが0本。
 
-        **札証に実在する**ので再プローブの価値がある側。`fetch_yahoo_chart` が meta を
-        timestamp より先に読むことの意味がここに出る。
+        再プローブの価値がある側。`fetch_yahoo_chart` が meta を timestamp より先に読む
+        ことの意味がここに出る。（同日の `1734.S` も同じ形だったが、こちらは 2024 年に
+        廃止済みの記号だった＝meta だけでは上場の証拠にならない・#769）
         """
         got, reason = decide_suffix([(".S", [], SAP_JPY)])
         assert got is None
@@ -180,6 +212,41 @@ class TestTargetSelection:
         self._seed(db, make_company, make_price)
         rows = _targets(db, reprobe=True, only=None, limit=None)
         assert [r[1] for r in rows] == sorted(r[1] for r in rows)
+
+    def test_reprobe_reaches_resolved_with_prices(self, db, make_company, make_price,
+                                                  make_weekly):
+        """#769: 解決できた社には翌晩から株価が入る。株価ゼロに限ると永久に測り直せない。
+
+        夜間の「解決済みなのに空」が案内する `--reprobe` が、警告の対象に届かなかった。
+        日次だけ・週次だけの社も含む（daily は保持窓で trim され weekly だけが残る）。
+        """
+        self._seed(db, make_company, make_price)
+        db.add(make_company(edinet_code="E00005", sec_code="1734",
+                            is_active=False, yahoo_suffix=".S"))
+        db.add(make_price(edinet_code="E00005", trade_date="2026-07-17"))
+        db.add(make_company(edinet_code="E00006", sec_code="1006",
+                            is_active=False, yahoo_suffix=".F"))
+        db.add(make_weekly(edinet_code="E00006", trade_date="2026-01-09"))
+        db.commit()
+
+        assert sorted(r[1] for r in _targets(db, True, None, None)) == \
+            ["1001", "1002", "1006", "1734"]
+        # 既定（再開可能性）は従来どおり株価ゼロ・未解決だけ
+        assert [r[1] for r in _targets(db, False, None, None)] == ["1001"]
+
+    def test_reprobe_skips_unresolved_with_prices(self, db, make_company, make_price):
+        """株価を持つ未解決の社（東証の銘柄）は `--reprobe` でも入れない。
+
+        入れると東証と福証の重複上場が `.F` に切り替わる。E00003 が `_seed` のその形。
+        """
+        self._seed(db, make_company, make_price)
+        assert "1003" not in [r[1] for r in _targets(db, True, None, None)]
+
+    def test_targets_carry_the_current_suffix(self, db, make_company, make_price):
+        """5列目は現在の接尾辞＝`_resolve` が「解決済みだった社」を見分ける材料。"""
+        self._seed(db, make_company, make_price)
+        by_sec = {r[1]: r[4] for r in _targets(db, True, None, None)}
+        assert by_sec == {"1001": None, "1002": ".F"}
 
 
 class TestDryRunWritesNothing:
@@ -352,6 +419,146 @@ class TestProbeBucketIsPersisted:
         assert len(_targets(db, False, None, None)) == 3
 
 
+class _HttpError(Exception):
+    """`collector_prices._count_yahoo_http_error` が読む形（`.response.status_code`）。"""
+
+    def __init__(self, status: int):
+        super().__init__(f"HTTP {status}")
+        self.response = type("Resp", (), {"status_code": status})()
+
+
+def _chart_failing_with(status: int):
+    """`fetch_yahoo_chart` の失敗経路の形: 失敗を数えてから ([], {}) を返す。"""
+    import collector_prices
+
+    async def chart(http, ticker, d_from, d_to):
+        collector_prices._count_yahoo_http_error(_HttpError(status))
+        return [], {}
+    return chart
+
+
+class TestReprobeUnresolves:
+    """`--reprobe` で棄却された解決済みの社は接尾辞を外す（#769）。
+
+    外さないと、Yahoo が記号を消した社を毎晩「解決済みなのに空」として叩き続ける
+    （解決済みは廃止社の見送りを素通りする）。ただし**答えの出ていない失敗では外さない**
+    ——外した社は株価を持つ未解決の社になり、`--reprobe` の対象にも戻らない。
+    """
+
+    def _seed(self, db, make_company, make_price):
+        # E00306 の形: 解決済み `.S`・幽霊の株価1行
+        db.add(make_company(edinet_code="E00306", sec_code="1734",
+                            is_active=False, yahoo_suffix=".S"))
+        db.add(make_price(edinet_code="E00306", trade_date="2026-07-17", close=657.0))
+        db.commit()
+
+    def _run(self, db, monkeypatch, chart, apply=True):
+        import asyncio
+        import scripts.resolve_price_suffix as rps
+
+        monkeypatch.setattr(rps, "fetch_yahoo_chart", chart)
+        targets = _targets(db, True, None, None)
+        return asyncio.run(rps._resolve(db, targets, "20250101", "20260101",
+                                        sleep=0, apply=apply))
+
+    def _row(self, db):
+        from database import Company
+        db.expire_all()
+        return db.query(Company).filter(Company.edinet_code == "E00306").one()
+
+    def test_symbol_gone_clears_the_suffix(self, db, make_company, make_price, monkeypatch):
+        """Yahoo が記号を消した（404）＝答えが出ている。接尾辞を外し棄却理由を残す。"""
+        self._seed(db, make_company, make_price)
+        res = self._run(db, monkeypatch, _chart_failing_with(404))
+
+        row = self._row(db)
+        assert row.yahoo_suffix is None
+        assert row.yahoo_probe_bucket == "not_found"
+        assert [r["sec_code"] for r in res["unresolved"]] == ["1734"]
+        assert res["unresolved"][0]["previous_suffix"] == ".S"
+        assert res["undecided"] == []
+
+    def test_phantom_bar_clears_the_suffix(self, db, make_company, make_price, monkeypatch):
+        """#769 の採用時の形がそのまま返ってきても、出来高0の1本では解決済みを保たない。"""
+        self._seed(db, make_company, make_price)
+
+        async def chart(http, ticker, d_from, d_to):
+            return (PHANTOM_1734, SAP_JPY) if ticker.endswith(".S") else ([], {})
+
+        res = self._run(db, monkeypatch, chart)
+        row = self._row(db)
+        assert row.yahoo_suffix is None
+        assert row.yahoo_probe_bucket == "empty"
+        assert res["adopted"] == []
+
+    @pytest.mark.parametrize("status", [429, 503, 403])
+    def test_transient_failure_keeps_the_suffix(self, db, make_company, make_price,
+                                                monkeypatch, status):
+        """429・5xx・404 以外の 4xx は答えではない。何も書かず判定不能として出す。"""
+        self._seed(db, make_company, make_price)
+        res = self._run(db, monkeypatch, _chart_failing_with(status))
+
+        row = self._row(db)
+        assert row.yahoo_suffix == ".S"
+        assert row.yahoo_probe_bucket is None
+        assert res["unresolved"] == []
+        assert [r["sec_code"] for r in res["undecided"]] == ["1734"]
+
+    def test_still_adoptable_keeps_the_suffix(self, db, make_company, make_price,
+                                              monkeypatch):
+        self._seed(db, make_company, make_price)
+
+        async def chart(http, ticker, d_from, d_to):
+            return (_bars(120), SAP_JPY) if ticker.endswith(".S") else ([], {})
+
+        res = self._run(db, monkeypatch, chart)
+        assert self._row(db).yahoo_suffix == ".S"
+        assert res["unresolved"] == [] and res["undecided"] == []
+
+    def test_dry_run_clears_nothing(self, db, make_company, make_price, monkeypatch):
+        self._seed(db, make_company, make_price)
+        res = self._run(db, monkeypatch, _chart_failing_with(404), apply=False)
+
+        row = self._row(db)
+        assert row.yahoo_suffix == ".S"
+        assert row.yahoo_probe_bucket is None
+        assert [r["sec_code"] for r in res["unresolved"]] == ["1734"], \
+            "ドライランでも何が外れるかは報告する"
+
+    def test_unresolved_rejection_is_unchanged(self, db, make_company, make_price,
+                                               monkeypatch):
+        """未解決の社の棄却は従来どおり（バケットだけ）。一時失敗でも書く挙動を変えない。"""
+        from database import Company
+
+        db.add(make_company(edinet_code="E00001", sec_code="1001", is_active=False))
+        db.commit()
+        res = self._run(db, monkeypatch, _chart_failing_with(429))
+
+        row = db.query(Company).filter(Company.edinet_code == "E00001").one()
+        assert row.yahoo_suffix is None
+        assert row.yahoo_probe_bucket == "not_found"
+        assert res["unresolved"] == [] and res["undecided"] == []
+
+
+class TestTransientHttpFailures:
+    """解除してよいかの判定＝「答えの出ていない失敗」の数。"""
+
+    def test_not_found_is_an_answer(self):
+        from scripts.resolve_price_suffix import transient_http_failures
+        assert transient_http_failures(
+            {"429": 0, "5xx": 0, "4xx": 2, "404": 2, "other": 0}) == 0
+
+    @pytest.mark.parametrize("stats", [
+        {"429": 1, "5xx": 0, "4xx": 0, "404": 0, "other": 0},
+        {"429": 0, "5xx": 1, "4xx": 0, "404": 0, "other": 0},
+        {"429": 0, "5xx": 0, "4xx": 1, "404": 0, "other": 0},   # 403 等の拒否
+        {"429": 0, "5xx": 0, "4xx": 0, "404": 0, "other": 1},   # タイムアウト等
+    ])
+    def test_everything_else_is_not(self, stats):
+        from scripts.resolve_price_suffix import transient_http_failures
+        assert transient_http_failures(stats) == 1
+
+
 class TestRejectBucket:
     """棄却の3分類。**強い信号を優先する**（mismatch > empty > not_found）。"""
 
@@ -359,10 +566,10 @@ class TestRejectBucket:
         assert reject_bucket(".S:not_found,.F:exchange_mismatch:FRA") == "mismatch"
 
     def test_empty_wins_over_not_found(self):
-        """1734 の実測形。`.S` は exchangeName=SAP を返すが**バーが0本**。
+        """`.S` は exchangeName=SAP を返すが**バーが0本**、`.F` は知らない記号。
 
         素朴に "not_found" を含むかで分けると「Yahoo が知らない」群に紛れ、
-        再プローブの候補から消える。銘柄が実在することは meta が証明している。
+        再プローブの候補から消える。
         """
         assert reject_bucket(".S:empty:SAP,.F:not_found") == "empty"
 
