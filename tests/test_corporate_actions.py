@@ -869,6 +869,267 @@ class TestConsistencyCrossCheck:
         assert C.magnitudes_agree(cons, mag) is ok
 
 
+class TestInPeriodDecomposition:
+    """同じ年の期中の分割と期末後分割を 2 件に分ける — Issue #756・ADR-0055 決定4-13。
+
+    期中の分割は株数と 1 株指標の両方に、期末後分割は 1 株指標だけに入るので、その年のペアは 1 株指標が
+    2 回分・株数が 1 回分だけ動く。第2経路は期末後の分（翌年の株数）しか倍率にしないので F が半分になる。
+    **整合度（発行済株式数では説明できない 1 株指標の基準の動き）が倍率と一致する組だけ**を分ける。
+
+    検体は `financial_records` の実値（2026-09-30・接続先 local）。Yahoo の分割は Issue #756 の本文より。
+    """
+
+    # E35140。Yahoo の分割は 2021-12-29（1:2・期中）と 2022-09-29（1:2・期末 2022-09-30 の後に効力）。
+    # 2022 は株数比 2.015・bps 比 3.218・純資産 +25%（Issue の案1「bps逆比 ÷ 整合度 ≈ 株数比」＝純資産比 ≈ 1
+    # は通らない）・整合度 2.000・翌年の株数 2.004。
+    E35140 = (
+        (2019, "2019-09-30", 10000000.0, 107.03, 60.26, 1070252000.0),
+        (2020, "2020-09-30", 22522000.0, 231.6, 53.78, 5216105000.0),
+        (2021, "2021-09-30", 24280000.0, 673.04, 112.31, 16341000000.0),
+        (2022, "2022-09-30", 48917600.0, 209.12, 44.03, 20458000000.0),
+        (2023, "2023-09-30", 98033400.0, 270.56, 64.44, 26523000000.0),
+        (2024, "2024-09-30", 98112000.0, 339.39, 75.86, 33212000000.0),
+        (2025, "2025-09-30", 98112000.0, 370.46, 37.52, 36132000000.0),
+    )
+    # E35140 の (dps, stock_price, market_cap)。2022 の market_cap は 2440 円 × 期中分割後・期末後分割前の株数。
+    E35140_MARKET = {2021: (9.0, 1967.5, 47770.9), 2022: (6.0, 2440.0, 119358.94),
+                     2023: (3.0, 2603.0, 255180.94)}
+
+    # E35767。Yahoo の分割は 2021-12-06（1:2）と 2022-08-30（1:2・期末 2022-08-31 の後に効力）。
+    E35767 = (
+        (2020, "2020-08-31", 5173400.0, 96.72, 16.34, 503416000.0),
+        (2021, "2021-08-31", 5192040.0, 111.46, 14.63, 581724000.0),
+        (2022, "2022-08-31", 10469440.0, 34.99, 6.46, 736916000.0),
+        (2023, "2023-08-31", 20986080.0, 42.52, 8.11, 897074000.0),
+        (2024, "2024-08-31", 43294960.0, 66.46, 4.45, 2885810000.0),
+        (2025, "2025-08-31", 43493360.0, 77.05, 11.38, 3467931000.0),
+    )
+
+    # E38979。EPS 照合を通った同じ形（2025: 株数比 2.031・整合度 3.000・翌年の株数 3.067）。公式は窓の中に
+    # 1:2（2024-12-27）と 1:3（2025-06-27）の 2 件＝積 6 を持つ。
+    E38979 = (
+        (2023, "2023-06-30", 224507.0, 1480.02, 354.82, 9968000000.0),
+        (2024, "2024-06-30", 8076944.0, 1752.09, 252.16, 14151000000.0),
+        (2025, "2025-06-30", 16404628.0, 325.99, 41.35, 16043000000.0),
+        (2026, "2026-06-30", 50311340.0, 391.78, 55.65, 19719000000.0),
+    )
+    E38979_OFFICIAL = {"E38979": [("2024-12-27", 0.5), ("2025-06-27", 1.0 / 3.0)]}
+
+    # E00066。2023 の 1 株指標が期末後分割（1:2）で書き直され、2024 に株数が追いつく（株数比 2.000）。2024 は
+    # さらに期末後分割（倍率 5）。2024 の株数の動きは 2023 のイベントが倍率に使った＝期中の分割ではない。
+    E00066 = (
+        (2021, "2021-03-31", 5220023.0, 9585.74, 948.69, 48026000000.0),
+        (2022, "2022-03-31", 5220023.0, 10303.13, 765.54, 50466000000.0),
+        (2023, "2023-03-31", 5220023.0, 5402.32, 333.64, 52711000000.0),
+        (2024, "2024-03-31", 10440046.0, 1162.69, 79.94, 56075000000.0),
+        (2025, "2025-03-31", 50394730.0, 1197.37, 89.22, 56931000000.0),
+        (2026, "2026-03-31", 50394730.0, 1160.86, 74.24, 55059000000.0),
+    )
+
+    # E35824。2021 は株数比 2.129・整合度 1.000＝株数と 1 株指標が同じ 1 回の分割で動いた（純資産 +23% で
+    # 第1経路の bps 照合に落ち、第2経路が翌年の株数 2.0 を倍率にして採っている）。分けてはいけない。
+    E35824 = (
+        (2020, "2020-11-30", 1792800.0, 338.12, 71.91, 1212351000.0),
+        (2021, "2021-11-30", 3816600.0, 195.87, 39.42, 1495082000.0),
+        (2022, "2022-11-30", 7633200.0, 229.69, 58.14, 1733503000.0),
+        (2023, "2023-11-30", 7633200.0, 285.45, 62.61, 2163249000.0),
+    )
+
+    # E38695。最新年（2026）で倍率を公式（2026-06-29 の 1:2）から決めている。株数比 3.224・整合度 1.999。
+    E38695 = (
+        (2023, "2023-06-30", 3334230.0, 485.2, 201.86, 1622077000.0),
+        (2024, "2024-06-30", 3827130.0, 807.33, 183.38, 3094081000.0),
+        (2025, "2025-06-30", 3843379.0, 1011.08, 191.42, 3890227000.0),
+        (2026, "2026-06-30", 12390486.0, 193.37, 32.77, 4793994000.0),
+    )
+
+    @classmethod
+    def _e35140_rows(cls):
+        """E35140 に dps / 株価 / market_cap を載せた行（`basis_lags` が読む）。"""
+        out = []
+        for y, pe, sh, bps, eps, eq in cls.E35140:
+            dps, px, mc = cls.E35140_MARKET.get(y, (10.0, 1000.0, 500.0))
+            out.append(row(y, sh, bps, eps=eps, ec="E35140", period_end=pe, equity=eq,
+                           dps=dps, price=px, market_cap=mc))
+        return out
+
+    def test_off_reproduces_the_half(self):
+        """#756 が報告した形そのもの。分けなければ期末後の 1 回だけが F に入る。"""
+        rs = real_rows("E35140", self.E35140)
+        events, stats = C.detect_events(rs, bps_path=True, in_period_decompose=False)
+        assert [(e.year, e.source, e.cross_check, e.canonical) for e in events] == [
+            (2022, "bps", "consistency", pytest.approx(2.0))]
+        assert stats["bps_path"]["in_period"] == {
+            "enabled": False, "n_events": 0, "not_decomposed": {}, "decomposed": []}
+        f = C.cumulative_factors(rs, events)
+        assert f[("E35140", 2021)] == pytest.approx(2.0)
+
+    @pytest.mark.parametrize("ec", ["E35140", "E35767"])
+    def test_on_gives_the_product_of_both_splits(self, ec):
+        """Issue #756 の完了条件。分割より前の行の F が 4、2022年度以降は 1。"""
+        rs = real_rows(ec, getattr(self, ec))
+        events, stats = C.detect_events(rs, bps_path=True, in_period_decompose=True)
+        assert sorted((e.year, e.source, e.canonical) for e in events) == [
+            (2022, "bps", pytest.approx(2.0)), (2022, "in_period", pytest.approx(2.0))]
+        ip = next(e for e in events if e.source == "in_period")
+        assert (ip.kind, ip.prev_year, ip.cross_check) == ("split", 2021, None)
+        assert ip.consistency == pytest.approx(2.0, abs=0.01)
+        f = C.cumulative_factors(rs, events)
+        assert {y: f[(ec, y)] for y in (2020, 2021, 2022, 2023)} == {
+            2020: pytest.approx(4.0), 2021: pytest.approx(4.0),
+            2022: pytest.approx(1.0), 2023: pytest.approx(1.0)}
+        s = stats["bps_path"]["in_period"]
+        assert (s["enabled"], s["n_events"], s["not_decomposed"]) == (True, 1, {})
+        [d] = s["decomposed"]
+        assert (d["edinet_code"], d["year"], d["in_period"], d["post_period"], d["cross_check"]) == (
+            ec, 2022, pytest.approx(2.0), pytest.approx(2.0), "consistency")
+        assert stats["n_events_by_source"] == {"bps": 1, "in_period": 1}
+        # 第2経路の数え（bps_path の n_events・by_kind）は期中のイベントを混ぜない
+        assert stats["bps_path"]["n_events"] == 1
+
+    def test_eps_verified_pair_is_decomposed_too(self):
+        """EPS 照合で認めた組も同じ規則で分ける。公式の窓の積 6（1:2 と 1:3）と一致する。"""
+        rs = real_rows("E38979", self.E38979)
+        events, _ = C.detect_events(rs, bps_path=True, official_events=self.E38979_OFFICIAL,
+                                    in_period_decompose=True)
+        assert sorted((e.year, e.source, e.canonical) for e in events) == [
+            (2025, "bps", pytest.approx(3.0)), (2025, "in_period", pytest.approx(2.0))]
+        assert next(e for e in events if e.source == "bps").cross_check == "eps"
+        f = C.cumulative_factors(rs, events)
+        assert f[("E38979", 2024)] == pytest.approx(6.0)
+        assert f[("E38979", 2025)] == pytest.approx(1.0)
+
+    def test_official_crosscheck_compares_the_product(self):
+        """公式の窓の積は期中と期末後の両方を含む。分けたら積で比べ、分けなければ食い違いのまま。"""
+        rs = real_rows("E38979", self.E38979)
+        _, off = C.detect_events(rs, bps_path=True, official_events=self.E38979_OFFICIAL,
+                                 in_period_decompose=False)
+        _, on = C.detect_events(rs, bps_path=True, official_events=self.E38979_OFFICIAL,
+                                in_period_decompose=True)
+        cc_off = off["bps_path"]["official"]["crosscheck"]
+        cc_on = on["bps_path"]["official"]["crosscheck"]
+        assert (cc_off["agree"], cc_off["disagree"]) == (0, 1)
+        assert cc_off["disagreements"][0]["official"] == pytest.approx(6.0)
+        assert (cc_on["agree"], cc_on["disagree"]) == (1, 0)
+
+    def test_catch_up_of_the_prior_lag_is_not_decomposed(self):
+        """前年の期末後分割に株数が追いついた年（E00066 2024）。前年のイベントが倍率に使った株数の動きなので
+        期中の分割として 2 回数えない。"""
+        rs = real_rows("E00066", self.E00066)
+        off, _ = C.detect_events(rs, bps_path=True, in_period_decompose=False)
+        on, stats = C.detect_events(rs, bps_path=True, in_period_decompose=True)
+        assert on == off
+        assert [(e.year, e.source) for e in on] == [(2023, "bps"), (2024, "bps")]
+        assert stats["bps_path"]["in_period"]["not_decomposed"] == {"prior_lag": 1}
+
+    def test_single_in_period_split_is_not_decomposed(self):
+        """整合度 ≈ 1＝株数の動きと 1 株指標の動きは同じ 1 回の分割。分けると F が二乗になる。"""
+        rs = real_rows("E35824", self.E35824)
+        off, _ = C.detect_events(rs, bps_path=True, in_period_decompose=False)
+        on, stats = C.detect_events(rs, bps_path=True, in_period_decompose=True)
+        assert on == off and [(e.year, e.source) for e in on] == [(2021, "bps")]
+        assert stats["bps_path"]["in_period"]["not_decomposed"] == {"single_split": 1}
+
+    def test_official_magnitude_is_not_decomposed(self):
+        """倍率を公式から決めた組は分けない。公式の積が窓の中の調整の正本である。"""
+        rs = real_rows("E38695", self.E38695)
+        off, _ = C.detect_events(rs, bps_path=True, official_events={"E38695": [("2026-06-29", 0.5)]},
+                                 in_period_decompose=False)
+        on, stats = C.detect_events(rs, bps_path=True,
+                                    official_events={"E38695": [("2026-06-29", 0.5)]},
+                                    in_period_decompose=True)
+        assert on == off
+        assert [(e.year, e.source, e.official_ratio) for e in on] == [
+            (2026, "bps", pytest.approx(2.0))]
+        assert stats["bps_path"]["in_period"]["not_decomposed"] == {"official_magnitude": 1}
+
+    def test_consistency_off_the_magnitude_is_not_decomposed(self):
+        """整合度が 1 でも倍率でもない組（前年のずれの残りなど）は分けない。"""
+        rs = [row(2020, 1000.0, 300.0, eps=30.0, equity=300000.0),
+              row(2021, 2000.0, 50.0, eps=5.0, equity=300000.0),     # 株数 x2・1 株指標 x6＝整合度 3
+              row(2022, 4000.0, 52.0, eps=5.2, equity=312000.0)]     # 翌年の株数 x2＝倍率 2
+        events, stats = C.detect_events(rs, bps_path=True, in_period_decompose=True)
+        assert [(e.year, e.source, e.canonical) for e in events] == [(2021, "bps", 2.0)]
+        assert stats["bps_path"]["in_period"]["not_decomposed"] == {"magnitude_mismatch": 1}
+
+    def test_equity_moving_with_the_shares_is_not_decomposed(self):
+        """株数 x2 と同じ向きに純資産が 2.2 倍＝増資と読む（第1経路と同じ純資産比チェック）。整合度は増資と
+        期末後分割の組でも倍率に一致するので、ここでしか止まらない。"""
+        rs = [row(2020, 1000.0, 200.0, eps=100.0, equity=200000.0),
+              row(2021, 2015.0, 109.18, eps=54.6, equity=440000.0),
+              row(2022, 4030.0, 115.0, eps=57.0, equity=463450.0)]
+        events, stats = C.detect_events(rs, bps_path=True, in_period_decompose=True)
+        assert [(e.year, e.source) for e in events] == [(2021, "bps")]
+        assert stats["bps_path"]["in_period"]["not_decomposed"] == {"equity": 1}
+        assert stats["equity"]["n_rejected"] == 1        # 第1経路も同じ理由で落としている
+
+    def test_official_absence_rejects_the_in_period_part(self):
+        """公式のバーを窓の全期間ぶん受け取ったのに企業イベントが無ければ、期中の分割は分けない（#668 と同じ）。"""
+        rs = real_rows("E35140", self.E35140)
+        events, stats = C.detect_events(
+            rs, bps_path=True, official_events={"E35140": []},
+            official_coverage={"E35140": [("2021-01-01", "2023-12-31")]}, in_period_decompose=True)
+        assert [(e.year, e.source) for e in events] == [(2022, "bps")]
+        assert stats["bps_path"]["in_period"]["not_decomposed"] == {"official_absence": 1}
+
+    def test_partner_removed_by_the_dedup_takes_the_in_period_event_with_it(self):
+        """翌年の株数の動きを第1経路が独立に採ったら、第2経路の組は消える。期中の分割も根拠を失うので一緒に消す。"""
+        rs = [row(2020, 1000.0, 400.0, eps=100.0, equity=400000.0),
+              row(2021, 2000.0, 100.0, eps=25.0, equity=400000.0),   # 株数 x2・1 株指標 x4
+              row(2022, 4000.0, 50.0, eps=12.5, equity=400000.0)]    # 株数 x2・1 株指標 x2（第1経路が採る）
+        events, stats = C.detect_events(rs, bps_path=True, in_period_decompose=True)
+        assert [(e.year, e.source) for e in events] == [(2022, "shares")]
+        s = stats["bps_path"]["in_period"]
+        assert (s["n_events"], s["not_decomposed"], s["decomposed"]) == (
+            0, {"dup_lagged_with_shares": 1}, [])
+        assert stats["bps_path"]["rejected"]["dup_lagged_with_shares"] == 1
+
+    def test_ledger_passes_the_flag_and_the_factor_rows_carry_both_events(self):
+        rows = real_rows("E35140", self.E35140)
+        led = C.compute_ledger(rows, official={}, coverage={}, series={}, in_period_decompose=True)
+        assert led.factors[("E35140", 2021)] == pytest.approx(4.0)
+        r = next(x for x in led.factor_rows() if x["year"] == 2021)
+        assert (r["n_events"], r["kinds"]) == (2, "split")
+        # 検出として数える（係数表の安全網は登録表のスピンオフだけを除く）
+        assert sorted(e.source for e in led.detected_events()) == ["bps", "in_period"]
+        off = C.compute_ledger(rows, official={}, coverage={}, series={}, in_period_decompose=False)
+        assert off.factors[("E35140", 2021)] == pytest.approx(2.0)
+
+    def test_split_year_row_gets_the_post_period_lags(self):
+        """分割した年の行は、期中の分を除いてから期末後の分の遅れを判定する（決定4-11 の限界だった形）。
+        2022 の株数は期中分割後・期末後分割前、配当 6 円は期中分割後の基準（翌年 3 円＝期末後分割後）。"""
+        rows = self._e35140_rows()
+        off, _ = C.detect_events(rows, bps_path=True, in_period_decompose=False)
+        on, _ = C.detect_events(rows, bps_path=True, in_period_decompose=True)
+        sh_off, dps_off, st_off = C.basis_lags(rows, off)
+        assert (sh_off, dps_off, st_off["n_shares_moved"]) == ({}, {}, 1)
+        sh_on, dps_on, st_on = C.basis_lags(rows, on)
+        assert sh_on == {("E35140", 2022): pytest.approx(2.0)}
+        assert dps_on == {("E35140", 2022): pytest.approx(2.0)}
+        assert (st_on["n_shares_moved"], st_on["n_shares_lag"], st_on["n_dps_lag"]) == (0, 1, 1)
+
+    def test_in_period_factors_are_keyed_by_the_row(self):
+        events = [ev(2022, canonical=2.0)._replace(source="in_period"),
+                  ev(2022, canonical=2.0)._replace(source="bps"),
+                  ev(2023, canonical=None)._replace(source="in_period")]
+        assert C.in_period_factors(events) == {("E00001", 2022, "2022-03-31"): pytest.approx(2.0)}
+
+    def test_nightly_log_lists_the_decomposed_pairs(self, caplog):
+        _, stats = C.detect_events(real_rows("E35140", self.E35140), bps_path=True,
+                                   in_period_decompose=True)
+        with caplog.at_level("INFO", logger=C.log.name):
+            C._log_split_adjustment_stats(0, stats)
+        assert "期中分割の分解）: 分けた 1 組・分けなかった内訳 {}" in caplog.text
+        assert "'edinet_code': 'E35140'" in caplog.text
+
+    def test_default_is_declared_in_one_place(self):
+        import inspect
+        assert (inspect.signature(C.detect_events).parameters["in_period_decompose"].default
+                is C.DEFAULT_IN_PERIOD_DECOMPOSE)
+        assert inspect.signature(C.compute_ledger).parameters["in_period_decompose"].default is None
+        assert inspect.signature(C.build_ledger).parameters["in_period_decompose"].default is None
+
+
 class TestOfficialRatioInWindow:
     def test_reciprocal_of_the_product_inside_the_half_open_window(self):
         official = [("2020-01-01", 0.5), ("2020-06-01", 0.5), ("2021-01-01", 0.1)]

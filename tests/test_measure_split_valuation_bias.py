@@ -449,6 +449,85 @@ class TestVerifySources:
         on = C.compute_ledger(rows, consistency_crosscheck=True, **kw)
         d = M.ledger_diff(off, on)
         assert d["n_added"] == 1
-        assert (d["added_not_by_consistency"], d["removed"], d["changed_existing"]) == ([], [], [])
+        assert (d["added_unexpected"], d["removed"], d["changed_existing"]) == ([], [], [])
         # 2019〜2025 の 7 行（2019〜2024 はスピンオフの F の上に掛かる・2025 は新たに補正）
         assert (d["n_rows_changed"], d["n_rows_newly_corrected"], d["n_companies"]) == (7, 1, 1)
+
+
+class TestVerifyInPeriod:
+    """`verify-sources --axis in-period`（#756・ADR-0055 決定4-13）の純関数。
+
+    検体の行は `tests/test_corporate_actions.py::TestInPeriodDecomposition` の実値。Yahoo の分割の日付と比は
+    Issue #756 の本文（`verify-sources` が 2026-09-26 に Yahoo から読んだもの）。
+    """
+
+    @staticmethod
+    def _ledgers(ec="E35140"):
+        from tests.test_corporate_actions import TestInPeriodDecomposition as T, real_rows
+        rows = real_rows(ec, getattr(T, ec))
+        kw = dict(official={}, coverage={}, series={})
+        return (C.compute_ledger(rows, in_period_decompose=False, **kw),
+                C.compute_ledger(rows, in_period_decompose=True, **kw))
+
+    def test_ledger_diff_only_adds_in_period_events(self):
+        off, on = self._ledgers()
+        d = M.ledger_diff(off, on, expected=lambda e: e.source == "in_period")
+        assert d["n_added"] == 1
+        assert (d["added_unexpected"], d["removed"], d["changed_existing"]) == ([], [], [])
+        # 2019〜2021 の 3 行の F が 2 -> 4（新たに補正された行は無い）
+        assert (d["n_rows_changed"], d["n_rows_newly_corrected"], d["n_companies"]) == (3, 0, 1)
+        # 整合度照合の述語のままなら「照合以外で増えた」に数える＝述語が効いている
+        assert M.ledger_diff(off, on)["added_unexpected"] == [["E35140", 2022, "2022-09-30", "in_period"]]
+
+    def test_pairs_carry_the_product(self):
+        _, on = self._ledgers()
+        [(ip, partner, combined)] = M.in_period_pairs(on.events)
+        assert (ip.source, partner.source, ip.year, partner.year) == ("in_period", "bps", 2022, 2022)
+        assert combined == pytest.approx(4.0)
+
+    def test_window_reaches_past_the_filing_deadline(self):
+        """期末後分割の権利落ち日は、提出期限（期末から 3 か月）より前に来る。+45日では狭い（決定4-10）。"""
+        _, on = self._ledgers()
+        [(ip, _, _)] = M.in_period_pairs(on.events)
+        assert M.in_period_window(ip) == ("2021-08-16", "2022-12-31")
+        assert C.event_window(ip) == ("2021-08-16", "2022-11-14")
+
+    def test_product_is_judged_against_yahoo_and_official(self):
+        _, on = self._ledgers()
+        [(ip, partner, combined)] = M.in_period_pairs(on.events)
+        judge, win = partner._replace(canonical=combined), M.in_period_window(ip)
+        both = [("2021-12-29", 2.0), ("2022-09-29", 2.0)]
+        assert M.judge_against_yahoo(judge, both, window=win) == ("agree", pytest.approx(4.0))
+        # 期末後の 1 回だけ（分解しない今の F と同じ値）は不一致
+        assert M.judge_against_yahoo(judge, both[1:], window=win)[0] == "disagree"
+        assert M.judge_against_yahoo(judge, [], window=win)[0] == "no_split"
+        official = [("2021-12-29", 0.5), ("2022-09-29", 0.5)]
+        assert M.judge_against_official(judge, official, [], window=win) == (
+            "agree", pytest.approx(4.0))
+        # 受信区間が広い窓を覆うのに公式イベントが無い＝分割は無かった。覆わなければ確かめられない
+        assert M.judge_against_official(judge, [], [("2021-01-01", "2023-06-30")], window=win) == (
+            "absent", None)
+        assert M.judge_against_official(judge, [], [("2021-01-01", "2022-11-30")], window=win) == (
+            "unconfirmed", None)
+
+    def test_criteria(self):
+        clean = {"changed_existing": [], "removed": [], "added_unexpected": []}
+        ok = M.judge_in_period(clean, {"unconfirmed": 5, "agree": 1}, {"agree": 3, "unavailable": 2}, 6)
+        assert ok["pass"] is True
+        assert (ok["criterion3"]["confirmed"], ok["criterion3"]["required"]) == (4, 3)
+        # 判定できた組が 1 件でも食い違えば基準2 を満たさない（窓に分割が無いものも不一致）
+        assert M.judge_in_period(clean, {}, {"agree": 5, "no_split": 1}, 6)["criterion2"]["pass"] is False
+        assert M.judge_in_period(clean, {"absent": 1}, {"agree": 5}, 6)["criterion2"]["pass"] is False
+        # 判定できた組が半数に届かなければ基準3 を満たさない
+        c3 = M.judge_in_period(clean, {}, {"agree": 2, "unavailable": 4}, 6)["criterion3"]
+        assert (c3["pass"], c3["required"], c3["unavailable"]) == (False, 3, 4)
+        # 既存のイベントが動いたら基準1 を満たさない
+        moved = dict(clean, changed_existing=[["E1", 2022, "2022-03-31", "bps"]])
+        assert M.judge_in_period(moved, {}, {"agree": 6}, 6)["criterion1"]["pass"] is False
+        # 分けた組が無ければ採用しない
+        assert M.judge_in_period(clean, {}, {}, 0)["pass"] is False
+
+    def test_criteria_constants_are_the_preregistered_ones(self):
+        """決定4-13 で測る前に固定した値。結果を見て動かしたらここで落ちる。"""
+        assert (M.IN_PERIOD_WINDOW_END_DAYS, M.IN_PERIOD_MIN_CONFIRMED_SHARE, M.SOURCES_MATCH_TOL) == (
+            92, 0.5, 0.05)

@@ -45,6 +45,8 @@ F だけを当てて測る（遅れは当てない）。
     python -m scripts.measure_split_valuation_bias verify-sample --census    # 窓内を全数（約30分）
     python -m scripts.measure_split_valuation_bias verify-sources   # 整合度照合（#751）で増えるイベントを
                                      # DB の公式と Yahoo の分割履歴に照らし、事前登録した基準1〜3を判定する
+    python -m scripts.measure_split_valuation_bias verify-sources --axis in-period
+                                     # 期中の分割の分解（#756）で増える組を同じく照らす（決定4-13 の基準）
 
 出力は ASCII 記号のみ（Windows cp932 リダイレクト対策）。
 """
@@ -71,8 +73,8 @@ from corporate_actions import (  # noqa: E402
     COLUMN_DIRECTION, DEFAULT_BPS_PATH, DEFAULT_BPS_TOL, DEFAULT_CONSISTENCY_CROSSCHECK,
     DEFAULT_EQUITY_TOL, DEFAULT_MIN_RATIO, DEFAULT_SNAP_TOL, LISTING_GAP_MIN_DAYS, AnnualRow,
     ShareEvent, MatchResult, _iso, _log, _usable, bars_spans, compute_ledger, cumulative_factors,
-    detect_events, event_window, in_coverage, load_ledger_inputs, match_event, merge_spans,
-    official_ratio_in_window, window_confirmed,
+    detect_events, event_window, in_coverage, in_period_factors, load_ledger_inputs, match_event,
+    merge_spans, official_ratio_in_window, window_confirmed,
 )
 
 # 感度表と既定判定に使う格子。0.15 は本物の分割の伸び（第1経路 split の p95 1.168）に掛かる。
@@ -86,6 +88,16 @@ EQUITY_TOL_GRID: tuple[float, ...] = (0.15, 0.25, 0.40, 0.60, 1.00)
 SOURCES_MIN_AGREE_RATE = 0.90
 SOURCES_MIN_DENOMINATOR = 20
 SOURCES_MATCH_TOL = 0.05
+# verify-sources --axis in-period の基準（#756・ADR-0055 決定4-13）。**測る前に固定した値で、結果を見て動かさない。**
+# 分解で増える組は数件なので決定4-10 の分母 20 件には届かない＝全数を照らす。
+# 基準1: 既存のイベントは1件も動かない（倍率が変わった 0・消えた 0・分解以外で増えた 0）
+# 基準2: 判定できた組（公式か Yahoo で一致・不一致が言えた組）の全件で「期中 × 期末後」の積が窓の中の分割の積と
+#        SOURCES_MATCH_TOL 以内で一致する。窓に分割が無い・公式で分割なしと確かめられた組は不一致に数える
+# 基準3: 判定できた組が、分解で増えた組の IN_PERIOD_MIN_CONFIRMED_SHARE 以上（かつ 1 件以上）
+# 窓は (前期末 - 45日, 当期末 + IN_PERIOD_WINDOW_END_DAYS 日]。期末後分割は決算書の提出前に効力が生じ、有価証券
+# 報告書の提出期限は期末から 3 か月なので、権利落ち日はそれより前に来る（+45日では期末後分割に狭い・決定4-10）。
+IN_PERIOD_WINDOW_END_DAYS = 92
+IN_PERIOD_MIN_CONFIRMED_SHARE = 0.5
 YAHOO_CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
 # 権利落ち日の UNIX 秒を日付へ直すときの時差（Yahoo の東証銘柄は 00:00 UTC＝09:00 JST で返る）。
 JST = timezone(timedelta(hours=9))
@@ -115,6 +127,7 @@ JSON_KEYS = (
 DEFAULT_JSON = ROOT / "scripts" / ".cache" / "measure_split_valuation_bias.json"
 DEFAULT_VERIFY_JSON = ROOT / "scripts" / ".cache" / "measure_split_valuation_bias_verify.json"
 DEFAULT_SOURCES_JSON = ROOT / "scripts" / ".cache" / "measure_split_valuation_bias_sources.json"
+DEFAULT_IN_PERIOD_JSON = ROOT / "scripts" / ".cache" / "measure_split_valuation_bias_in_period.json"
 
 
 def corrected_values(row: AnnualRow, factor: float) -> dict[str, float]:
@@ -587,7 +600,8 @@ def _agree(observed: float, magnitude: float, tol: float) -> bool:
 
 
 def judge_against_official(ev: ShareEvent, official: Sequence[tuple[str, float]],
-                           spans: Sequence[Sequence[str]], *, tol: float = SOURCES_MATCH_TOL
+                           spans: Sequence[Sequence[str]], *, tol: float = SOURCES_MATCH_TOL,
+                           window: Optional[tuple[str, str]] = None
                            ) -> tuple[str, Optional[float]]:
     """公式との照合。`(status, 公式の株数比)`。
 
@@ -596,27 +610,41 @@ def judge_against_official(ev: ShareEvent, official: Sequence[tuple[str, float]]
     - `agree` / `disagree`: 窓の中に公式イベントがある（基準1の分母）
     - `absent`: 公式のバーを受け取った区間が窓を覆うのに公式イベントが無い＝分割は無かったと確かめられた（基準2）
     - `unconfirmed`: 公式では確かめられない（区間が窓を覆わない・取り込んでいない）。Yahoo で確かめる（基準3）
+
+    `window` は既定でイベント窓（`event_window`）。期中の分割の分解（#756）は期末後分割まで入る広い窓を渡す。
     """
     if ev.official_ratio is not None:
         return "official_magnitude", ev.official_ratio
-    ratio, _ = official_ratio_in_window(official, event_window(ev))
+    win = window if window is not None else event_window(ev)
+    ratio, _ = official_ratio_in_window(official, win)
     if ratio is not None:
         return ("agree" if _agree(ratio, ev.canonical, tol) else "disagree"), ratio
-    if window_confirmed(ev, merge_spans(spans)):
+    covered = (_spans_cover(merge_spans(spans), win) if window is not None
+               else window_confirmed(ev, merge_spans(spans)))
+    if covered:
         return "absent", None
     return "unconfirmed", None
 
 
+def _spans_cover(spans: Sequence[Sequence[str]], window: Optional[tuple[str, str]]) -> bool:
+    """窓 `(w0, w1]` が受信区間のどれか1本に完全に収まるか（`window_confirmed` と同じ包含の規則）。"""
+    if window is None or not spans:
+        return False
+    return any(str(s[0])[:10] <= window[0] and window[1] <= str(s[1])[:10] for s in spans)
+
+
 def judge_against_yahoo(ev: ShareEvent, splits: Optional[Sequence[tuple[str, float]]], *,
-                        tol: float = SOURCES_MATCH_TOL) -> tuple[str, Optional[float]]:
+                        tol: float = SOURCES_MATCH_TOL,
+                        window: Optional[tuple[str, str]] = None) -> tuple[str, Optional[float]]:
     """Yahoo との照合。`(status, Yahoo の株数比)`。
 
     `unavailable`（取得できない・ティッカーが無い・取引所が違う）は基準3の分母に入れない。
     `no_split`（窓の中に Yahoo の分割が無い）は**不一致として分母に入れる**（決定4-10 で測る前に決めた規則）。
+    `window` は `judge_against_official` と同じ。
     """
     if splits is None:
         return "unavailable", None
-    ratio, _ = yahoo_ratio_in_window(splits, event_window(ev))
+    ratio, _ = yahoo_ratio_in_window(splits, window if window is not None else event_window(ev))
     if ratio is None:
         return "no_split", None
     return ("agree" if _agree(ratio, ev.canonical, tol) else "disagree"), ratio
@@ -644,11 +672,66 @@ def judge_sources(official_status: Mapping[str, int], yahoo_status: Mapping[str,
     }
 
 
-def ledger_diff(off, on) -> dict:
-    """同じ入力で整合度照合を切った台帳 `off` と入れた台帳 `on` の差（#751）。
+def in_period_window(ev: ShareEvent, *, slack_days: int = 45,
+                     end_days: int = IN_PERIOD_WINDOW_END_DAYS) -> Optional[tuple[str, str]]:
+    """期中の分割の分解（#756）を照らす窓 `(前期末 - slack_days, 当期末 + end_days]`。"""
+    p0, p1 = _iso(ev.prev_period_end), _iso(ev.period_end)
+    if not p0 or not p1:
+        return None
+    return ((date.fromisoformat(p0) - timedelta(days=slack_days)).isoformat(),
+            (date.fromisoformat(p1) + timedelta(days=end_days)).isoformat())
 
-    **照合で認めたイベントが足されるだけで、既存のイベントは1件も動かない**ことを確かめるための数を返す
-    （`changed_existing` と `added_not_by_consistency` と `removed` が空であるべき）。
+
+def in_period_pairs(events: Sequence[ShareEvent]) -> list[tuple[ShareEvent, ShareEvent, float]]:
+    """分解した組 `(期中のイベント, 対の第2経路のイベント, 期中 × 期末後)` の一覧（#756）。
+
+    対は同じ `(edinet_code, year, period_end)` の `source="bps"`。積は台帳の `in_period_factors` から引く
+    （検出器の値を写さない）。
+    """
+    inner = in_period_factors(events)
+    bps = {(e.edinet_code, e.year, _iso(e.period_end)): e for e in events if e.source == "bps"}
+    out = []
+    for e in events:
+        if e.source != "in_period":
+            continue
+        k = (e.edinet_code, e.year, _iso(e.period_end))
+        partner = bps.get(k)
+        if partner is None or partner.canonical is None:
+            continue
+        out.append((e, partner, inner[k] * partner.canonical))
+    return sorted(out, key=lambda t: (t[0].edinet_code, t[0].year))
+
+
+def judge_in_period(diff: Mapping, official_status: Mapping[str, int],
+                    yahoo_status: Mapping[str, int], n_pairs: int, *,
+                    min_share: float = IN_PERIOD_MIN_CONFIRMED_SHARE) -> dict:
+    """事前登録した基準1〜3（ADR-0055 決定4-13）の判定。`yahoo_status` は公式で確かめられなかった組だけの数。"""
+    o, y = Counter(official_status), Counter(yahoo_status)
+    c1 = not (diff.get("changed_existing") or diff.get("removed") or diff.get("added_unexpected"))
+    bad = o["disagree"] + o["absent"] + y["disagree"] + y["no_split"]
+    confirmed = o["agree"] + o["disagree"] + o["absent"] + y["agree"] + y["disagree"] + y["no_split"]
+    c2 = confirmed > 0 and bad == 0
+    need = max(1, math.ceil(min_share * n_pairs))
+    c3 = confirmed >= need
+    return {
+        "criterion1": {"pass": c1},
+        "criterion2": {"pass": c2, "disagree": bad, "confirmed": confirmed},
+        "criterion3": {"pass": c3, "confirmed": confirmed, "required": need, "n_pairs": n_pairs,
+                       "unavailable": y["unavailable"]},
+        "pass": c1 and c2 and c3,
+    }
+
+
+def _by_consistency(e: ShareEvent) -> bool:
+    return e.cross_check == "consistency"
+
+
+def ledger_diff(off, on, *, expected=_by_consistency) -> dict:
+    """同じ入力で規則を1つだけ切った台帳 `off` と入れた台帳 `on` の差（#751・#756）。
+
+    **その規則で認めたイベントが足されるだけで、既存のイベントは1件も動かない**ことを確かめるための数を返す
+    （`changed_existing` と `added_unexpected` と `removed` が空であるべき）。`expected` は「その規則が足す
+    イベントか」の述語で、既定は整合度照合（#751）。
     """
     def key(e):
         return (e.edinet_code, e.year, _iso(e.period_end), e.source)
@@ -663,8 +746,7 @@ def ledger_diff(off, on) -> dict:
     aw = lambda led: len((led.stats.get("bps_path") or {}).get("awaiting_magnitude") or ())  # noqa: E731
     return {
         "n_added": len(added),
-        "added_not_by_consistency": [list(k) for k in added
-                                     if on_ev[k].cross_check != "consistency"],
+        "added_unexpected": [list(k) for k in added if not expected(on_ev[k])],
         "removed": [list(k) for k in removed],
         "changed_existing": [list(k) for k in changed_existing],
         "n_rows_changed": len(rows),
@@ -1154,6 +1236,8 @@ def _cmd_verify_sources(args) -> int:
         if inputs is None:
             raise SystemExit("annual 行がありません")
         kw = dict(official=inputs["official"], coverage=inputs["coverage"], series=inputs["series"])
+        if args.axis == "in-period":
+            return _verify_in_period(args, db, inputs, kw)
         off = compute_ledger(inputs["rows"], consistency_crosscheck=False, **kw)
         on = compute_ledger(inputs["rows"], consistency_crosscheck=True, **kw)
         diff = ledger_diff(off, on)
@@ -1165,7 +1249,7 @@ def _cmd_verify_sources(args) -> int:
                  diff["ttm_windows"]["off"], diff["ttm_windows"]["on"]))
         print("既存イベントの変化: 倍率が変わった %d / 消えた %d / 照合以外で増えた %d（すべて 0 であるべき）"
               % (len(diff["changed_existing"]), len(diff["removed"]),
-                 len(diff["added_not_by_consistency"])))
+                 len(diff["added_unexpected"])))
 
         targets = [e for e in on.events if e.source == "bps" and e.cross_check == args.cross_check]
         if args.only:
@@ -1245,6 +1329,111 @@ def _cmd_verify_sources(args) -> int:
         db.close()
 
 
+def _fetch_yahoo_for(db, pending: Sequence[dict], *, sleep: float) -> dict:
+    """照らす組の社ごとに、窓を全部覆う期間の Yahoo の分割履歴を取る。戻り値は `{edinet_code: splits|None}`。"""
+    tickers = load_yahoo_tickers(db, sorted({r["edinet_code"] for r in pending}))
+    spans: dict[str, tuple[str, str]] = {}
+    for r in pending:
+        if r["window"] is None:
+            continue
+        w0, w1 = r["window"]
+        s = spans.get(r["edinet_code"])
+        spans[r["edinet_code"]] = (min(w0, s[0]), max(w1, s[1])) if s else (w0, w1)
+    fetch = {ec: (tickers[ec][0], tickers[ec][1], w0, w1)
+             for ec, (w0, w1) in spans.items() if ec in tickers}
+    print("Yahoo から %d社の分割履歴を取ります（ティッカー無し %d社）..."
+          % (len(fetch), len(spans) - len(fetch)), flush=True)
+    return fetch_yahoo_splits(fetch, sleep=sleep)
+
+
+def _verify_in_period(args, db, inputs: Mapping, kw: Mapping) -> int:
+    """期中の分割の分解（#756）で増える組を、DB の公式 AdjFactor と Yahoo の分割履歴に照らす（決定4-13）。
+
+    分解を切った台帳と入れた台帳を同じ入力で並べ、分けた組ごとに「期中 × 期末後」の積を、窓
+    `in_period_window` の中の公式の積（無ければ Yahoo の分割の積）と比べる。
+    """
+    import database as D
+
+    off = compute_ledger(inputs["rows"], in_period_decompose=False, **kw)
+    on = compute_ledger(inputs["rows"], in_period_decompose=True, **kw)
+    diff = ledger_diff(off, on, expected=lambda e: e.source == "in_period")
+    pairs = in_period_pairs(on.events)
+    print("annual %d行・接続先=%s" % (len(inputs["rows"]), D.DB_TARGET))
+    print("分解で増えるイベント %d件（組 %d）/ F が変わる行 %d（新たに補正 %d）/ %d社 / TTM の分割窓 %d -> %d"
+          % (diff["n_added"], len(pairs), diff["n_rows_changed"], diff["n_rows_newly_corrected"],
+             diff["n_companies"], diff["ttm_windows"]["off"], diff["ttm_windows"]["on"]))
+    print("既存イベントの変化: 倍率が変わった %d / 消えた %d / 分解以外で増えた %d（すべて 0 であるべき）"
+          % (len(diff["changed_existing"]), len(diff["removed"]), len(diff["added_unexpected"])))
+    lags = {name: sum(1 for k in set(getattr(on, name)) | set(getattr(off, name))
+                      if getattr(on, name).get(k, 1.0) != getattr(off, name).get(k, 1.0))
+            for name in ("shares_lags", "dps_lags")}
+    print("分割した年の行の遅れが変わる行: 株数 %d / 配当 %d" % (lags["shares_lags"], lags["dps_lags"]))
+    print("分けなかった内訳: %s" % (on.stats["bps_path"]["in_period"]["not_decomposed"],))
+
+    only = {x.strip() for x in args.only.split(",") if x.strip()}
+    results = []
+    for ip, partner, combined in pairs:
+        if only and ip.edinet_code not in only:
+            continue
+        judge = partner._replace(canonical=combined)
+        win = in_period_window(ip)
+        st, ratio = judge_against_official(judge, on.official.get(ip.edinet_code, ()),
+                                           inputs["coverage"].get(ip.edinet_code, ()),
+                                           tol=args.match_tol, window=win)
+        results.append({"edinet_code": ip.edinet_code, "year": ip.year,
+                        "in_period": ip.canonical, "post_period": partner.canonical,
+                        "combined": combined, "sh_ratio": ip.sh_ratio,
+                        "consistency": ip.consistency, "cross_check": partner.cross_check,
+                        "window": win, "official_status": st, "official_ratio": ratio,
+                        "yahoo_status": None, "yahoo_ratio": None, "_judge": judge})
+    o_tally = Counter(r["official_status"] for r in results)
+    print()
+    print("照らす組 %d・公式との照合: %s" % (len(results), dict(sorted(o_tally.items()))))
+
+    y_tally: Counter = Counter()
+    pending = [r for r in results if r["official_status"] == "unconfirmed"]
+    if pending and not args.no_yahoo:
+        got = _fetch_yahoo_for(db, pending, sleep=args.sleep)
+        for r in pending:
+            st, ratio = judge_against_yahoo(r["_judge"], got.get(r["edinet_code"]),
+                                            tol=args.match_tol, window=r["window"])
+            r["yahoo_status"], r["yahoo_ratio"] = st, ratio
+        y_tally = Counter(r["yahoo_status"] for r in pending)
+        print("Yahoo との照合: %s" % dict(sorted(y_tally.items())))
+
+    verdict = judge_in_period(diff, o_tally, y_tally, len(results))
+    c2, c3 = verdict["criterion2"], verdict["criterion3"]
+    print()
+    print("基準1（既存のイベントは1件も動かない）: %s" % ("OK" if verdict["criterion1"]["pass"] else "NG"))
+    print("基準2（判定できた組の全件で 期中x期末後 が窓の中の分割の積と一致）: %s（判定できた %d・不一致 %d）"
+          % ("OK" if c2["pass"] else "NG", c2["confirmed"], c2["disagree"]))
+    print("基準3（判定できた組が %d 組以上＝分けた組 %d の %.0f%% 以上）: %s（判定できた %d・取得できず %d）"
+          % (c3["required"], c3["n_pairs"], IN_PERIOD_MIN_CONFIRMED_SHARE * 100,
+             "OK" if c3["pass"] else "NG", c3["confirmed"], c3["unavailable"]))
+    print("判定: %s" % ("採用（基準をすべて満たした）" if verdict["pass"] else "見送り"))
+    for r in results:
+        print("  %-9s %s 期中 %s x 期末後 %s = %s 整合度 %s（%s）公式 %s(%s) Yahoo %s(%s) 窓 %s"
+              % (r["edinet_code"], r["year"], _fmt(r["in_period"]), _fmt(r["post_period"]),
+                 _fmt(r["combined"]), _fmt(r["consistency"]), r["cross_check"],
+                 r["official_status"], _fmt(r["official_ratio"]), r["yahoo_status"],
+                 _fmt(r["yahoo_ratio"]), r["window"]))
+
+    if args.json:
+        # 既定のままなら整合度照合の結果（同じ既定のパス）を上書きしない
+        path = Path(DEFAULT_IN_PERIOD_JSON if args.json == str(DEFAULT_SOURCES_JSON) else args.json)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({
+            "db_target": D.DB_TARGET, "axis": "in-period", "match_tol": args.match_tol,
+            "window_end_days": IN_PERIOD_WINDOW_END_DAYS, "diff": diff,
+            "basis_lag_rows_changed": lags,
+            "not_decomposed": on.stats["bps_path"]["in_period"]["not_decomposed"],
+            "official_tally": dict(o_tally), "yahoo_tally": dict(y_tally), "verdict": verdict,
+            "rows": [{k: v for k, v in r.items() if k != "_judge"} for r in results],
+        }, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+        print("JSON: %s" % path)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(
         prog="python -m scripts.measure_split_valuation_bias",
@@ -1309,8 +1498,10 @@ def build_parser() -> argparse.ArgumentParser:
     # 検出器の設定は本番の既定（台帳）で固定する＝`common` を持たない。測る相手は本番がこれから採るもの。
     s = sub.add_parser("verify-sources",
                        help="整合度照合（#751）で増えるイベントを DB の公式と Yahoo の分割履歴に照らす")
+    s.add_argument("--axis", choices=("consistency", "in-period"), default="consistency",
+                   help="照らす規則。consistency=整合度照合（#751）/ in-period=期中の分割の分解（#756）")
     s.add_argument("--cross-check", choices=("consistency", "eps"), default="consistency",
-                   help="照らすイベントの交差検証（既定: 整合度照合で認めたもの）")
+                   help="照らすイベントの交差検証（既定: 整合度照合で認めたもの・--axis consistency のときだけ）")
     s.add_argument("--match-tol", type=float, default=SOURCES_MATCH_TOL)
     s.add_argument("--sleep", type=float, default=1.0, help="Yahoo へのリクエスト間隔（秒）")
     s.add_argument("--no-yahoo", action="store_true", help="Yahoo を叩かない（基準3は判定しない）")

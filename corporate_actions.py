@@ -310,6 +310,17 @@ DEFAULT_EQUITY_TOL: Optional[float] = 1.0
 # 期末後の 1 回だけを拾ったもの。照合で増えるイベントは 201・F が変わる行 813（うち新たに補正 758）・192 社で、
 # 既存のイベントは 1 件も動かない。
 DEFAULT_CONSISTENCY_CROSSCHECK = True
+# 第2経路が採った組のうち、同じ年に期中の分割と期末後分割が重なったものを 2 件に分けるか（#756・ADR-0055
+# 決定4-13）。**`rebuild_split_adjustment_factors` が既定のまま呼ぶ＝ここが毎晩の係数表の中身を決める。**
+#
+# 期中の分割は株数と 1 株指標の両方に、期末後分割は 1 株指標だけに入るので、その年のペアは 1 株指標が
+# 2 回分・株数が 1 回分だけ動く。第1経路は bps の不一致で落とし、第2経路は翌年の株数（期末後の 1 回）だけを
+# 倍率にして採るので、F が真値の半分になる（実測 E35140 2022・E35767 2022: 真値 4 に対し 2）。
+# 整合度（`consistency_ratio`）は「発行済株式数では説明できない 1 株指標の基準の動き」なので、この形の年だけ
+# 倍率（期末後の分）と一致し、1 回だけの期中分割では 1 前後、前年の期末後分割に株数が追いついた連続分割では
+# どちらでもない値になる（2026-09-30・株数も動いた第2経路 28 件: ≈倍率 7・≈1 20・どちらでもない 1）。
+# 分解の判定に新しいしきい値は無い（候補ゲート・`DEFAULT_BPS_TOL`・`DEFAULT_EQUITY_TOL` を使う）。
+DEFAULT_IN_PERIOD_DECOMPOSE = False
 # 合成（分割＋増資）とみなす残差の範囲。これを外れたら丸めずに unsnapped で別枠へ出す。
 COMPOSITE_LO, COMPOSITE_HI = 0.8, 1.25
 
@@ -399,6 +410,8 @@ class ShareEvent(NamedTuple):
     # どちらの経路が拾ったか（#656）。"shares" は株数比を候補ゲートにした第1経路、
     # "bps" は `bs_bps` の年次比を候補ゲートにし `pl_eps` の比で交差検証した第2経路。
     # "registry" は検出器ではなく台帳が登録表から足したイベント（スピンオフ・#740）。
+    # "in_period" は第2経路が採った組のうち、同じ年に株数も動いた期中の分割（#756）。倍率は当年の株数比を
+    # 定番比へ寄せたもので、同じ (edinet_code, year) の "bps" のイベント（期末後の分）と対になる。
     # 既定値を持つのは、既存の呼び出し（テストの `ev()` ヘルパー含む）を壊さないため。
     source: str = "shares"
     # 第2経路の倍率を決めた第3の信号＝**翌年**の `issued_shares` 比（#659）。
@@ -551,6 +564,64 @@ def magnitudes_agree(consistency: float, magnitude: float, tol: float = DEFAULT_
     return abs(_log(consistency / magnitude)) <= _log(1 + tol)
 
 
+def _in_period_split(prev: AnnualRow, cur: AnnualRow, *, sh_ratio: float, bps_ratio: float,
+                     consistency: Optional[float], magnitude: float, gate: float, bps_tol: float,
+                     snap_tol: float, equity_tol: Optional[float],
+                     official: Sequence[tuple[str, float]],
+                     coverage: Optional[Sequence[Sequence[str]]]
+                     ) -> tuple[Optional[ShareEvent], Optional[str]]:
+    """第2経路が採った組の、同じ年の株数の動きを期中の分割として分けるか（#756・ADR-0055 決定4-13）。
+
+    戻り値は `(期中の分割のイベント, None)` か `(None, 分けなかった理由)`。呼び出すのは、第2経路が翌年の株数から
+    倍率 `magnitude`（期末後の分）を決めて採り、当年の株数比も候補ゲートを越えた組だけ。前年の第2経路がこの
+    株数の動きを倍率に使った組（`prior_lag`）は、ループの状態が要るので呼び出し側が先に外す。
+
+    整合度は「発行済株式数では説明できない 1 株指標の基準の動き」なので、同じ年に期中の分割と期末後分割が
+    重なった組では期末後の分（＝倍率）と一致する（実測 E35140 2022: 株数比 2.015・整合度 2.000・倍率 2）。
+    1 回だけの期中分割では 1 側に留まり（`single_split`・株数の動きと 1 株指標の動きが同じ 1 回の分割）、前年の
+    期末後分割に株数が追いついた年はどちらでもない（E00066 2024: 整合度 2.47・倍率 5・`magnitude_mismatch`）。
+    **株数の動きが分割であって増資でないことの確かめは、第1経路と同じ2つ**（純資産比チェック・公式の不在）で、
+    それより強くはない——bps の交差検証は期末後の分が混ざるので使えず、純資産の伸びを除いた式は整合度の一致と
+    同じ量になる。倍率は株数比を定番比へ寄せたもの（第1経路と同じ）。
+    """
+    if consistency is None or consistency <= 0:
+        return None, "unknown_equity"
+    if abs(_log(consistency)) < gate:
+        return None, "single_split"
+    if not magnitudes_agree(consistency, magnitude, bps_tol):
+        return None, "magnitude_mismatch"
+    canonical, residual, kind = snap_to_canonical(sh_ratio, tol=snap_tol)
+    if canonical is None:
+        return None, "unsnapped"
+    eq = equity_ratio(prev, cur)
+    if equity_tol is not None and eq is not None and equity_contradicts_split(sh_ratio, eq, equity_tol):
+        return None, "equity"
+    ev = ShareEvent(
+        edinet_code=cur.edinet_code, year=cur.year, prev_year=prev.year,
+        gap_years=cur.year - prev.year, period_end=cur.period_end, prev_period_end=prev.period_end,
+        sh_ratio=sh_ratio, bps_ratio=bps_ratio, canonical=canonical, residual=residual, kind=kind,
+        source="in_period", equity_ratio=eq, consistency=consistency)
+    if (coverage is not None and window_confirmed(ev, coverage)
+            and official_ratio_in_window(official, event_window(ev))[0] is None):
+        # 公式のバーを窓の全期間ぶん受け取ったのに企業イベントが無い（#668 と同じ規則）。
+        return None, "official_absence"
+    return ev, None
+
+
+def in_period_factors(events: Sequence[ShareEvent]) -> dict[tuple[str, int, Optional[str]], float]:
+    """期中の分割（`source="in_period"`・#756）の倍率を、行 `(edinet_code, year, period_end)` ごとの積にする。
+
+    対の第2経路のイベント（期末後の分）と合わせて読む側（公式との突合・`basis_lags`・測定器）が引く。
+    値は検出器が作ったイベントから毎回引き、ShareEvent に写さない（書き写した値は片方だけ更新されうる）。
+    """
+    out: dict[tuple[str, int, Optional[str]], float] = {}
+    for e in events:
+        if e.source == "in_period" and e.canonical is not None:
+            k = (e.edinet_code, e.year, _iso(e.period_end))
+            out[k] = out.get(k, 1.0) * e.canonical
+    return out
+
+
 def listing_gap_in_pair(prev: AnnualRow, cur: AnnualRow,
                         series: Optional[tuple[str, Sequence[tuple[str, str]]]],
                         coverage_start: Optional[str], *,
@@ -610,6 +681,7 @@ def detect_events(rows: Sequence[AnnualRow], *,
                   price_series: Optional[Mapping[str, tuple[str, Sequence[tuple[str, str]]]]] = None,
                   official_coverage: Optional[Mapping[str, Sequence[Sequence[str]]]] = None,
                   consistency_crosscheck: bool = DEFAULT_CONSISTENCY_CROSSCHECK,
+                  in_period_decompose: bool = DEFAULT_IN_PERIOD_DECOMPOSE,
                   ) -> tuple[list[ShareEvent], dict]:
     """株数基準が変わった年を検出する。戻り値 (events, stats)。
 
@@ -698,6 +770,20 @@ def detect_events(rows: Sequence[AnnualRow], *,
     `consistency_magnitude_mismatch` に数え、一覧を `stats["bps_path"]["consistency"]` に残す）。
     救えなかったペアは従来どおり `eps_sign` / `eps_mismatch` に数え、救えなかった理由は同じ所に内訳で残す。
     EPS 照合を通ったペアの扱いは変えない。どちらの交差検証で認めたかは `ShareEvent.cross_check` に残る。
+
+    **`in_period_decompose` が真なら、同じ年に期中の分割と期末後分割が重なった第2経路の組を 2 件に分ける**
+    （#756・ADR-0055 決定4-13）。期中の分割は株数と 1 株指標の両方に、期末後分割は 1 株指標だけに入るので、
+    その年のペアは 1 株指標が 2 回分・株数が 1 回分だけ動き、第2経路は期末後の分（翌年の株数）しか倍率に
+    しない。第2経路が**翌年の株数から倍率 M を決めて採る**組で、当年の株数比も候補ゲートを越えていたら、
+    次の順に確かめ、全部通れば当年の株数比を定番比へ寄せた期中の分割（`source="in_period"`）を足す:
+    前年の第2経路がこの年の株数の動きを倍率に使っていない（`prior_lag`・株数の動きを 2 回数えない）／
+    整合度が計算できる（`unknown_equity`）／整合度が 1 側でない（`single_split`・1 回の期中分割）／
+    整合度が M と `bps_tol` 以内で一致する（`magnitude_mismatch`）／株数比が定番比へ寄る（`unsnapped`）／
+    第1経路と同じ純資産比チェック（`equity`）と公式の不在判定（`official_absence`）に当たらない。
+    **倍率を公式から決めた組は分けない**（`official_magnitude`）——公式の比は窓の中の調整の積＝F の正本で、
+    期中の分割が本物なら公式の積に既に入っている。ループの後の重複除去で第2経路のイベントが消えたら、
+    対の期中のイベントも消す（倍率の根拠が消えるため）。分けなかった理由と分けた組の一覧は
+    `stats["bps_path"]["in_period"]` に残る。
     """
     if official_coverage is not None and official_events is None:
         raise ValueError("official_coverage は official_events と一緒に渡す"
@@ -733,6 +819,13 @@ def detect_events(rows: Sequence[AnnualRow], *,
     n_consistency_rescued = 0
     consistency_not_rescued: Counter = Counter()
     magnitude_mismatch: list[dict] = []
+    # 期中の分割の分解（#756）。lag_consumed は第2経路が倍率に使った「翌年の株数の動き」の行
+    # (ec, year, period_end)（決算期の変更で同じ year が 2 行ある社を取り違えない）。
+    # in_period_partner は期中のイベントの添字 -> 対の第2経路のイベントの添字（重複除去で一緒に消すため）。
+    lag_consumed: set[tuple[str, int, Optional[str]]] = set()
+    in_period_partner: dict[int, int] = {}
+    in_period_not: Counter = Counter()
+    in_period_list: list[dict] = []
 
     for ec, rs in by_ec.items():
         # **使える行だけを先に並べる。** 翌年の株数を見るには次の行を先読みする必要があり、
@@ -884,6 +977,9 @@ def detect_events(rows: Sequence[AnnualRow], *,
                         events.append(cand._replace(
                             canonical=off, residual=1.0,
                             kind="split" if off > 1 else "reverse", official_ratio=off))
+                        if in_period_decompose and abs(_log(sh_ratio)) >= gate:
+                            # 公式の積は窓の中の調整を全部含む＝期中の分割が本物なら既に入っている（#756）。
+                            in_period_not["official_magnitude"] += 1
                 else:
                     lag = nxt.issued_shares / cur.issued_shares
                     if abs(_log(lag)) < gate:
@@ -907,9 +1003,35 @@ def detect_events(rows: Sequence[AnnualRow], *,
                                 "magnitude_source": "lagged_shares", "consistency": cons,
                                 "magnitude": canonical, "lagged_sh_ratio": lag})
                         else:
+                            # 同じ年に株数も動いていたら、期中の分割が重なっていないかを確かめる（#756）。
+                            if in_period_decompose and abs(_log(sh_ratio)) >= gate:
+                                if (ec, cur.year, _iso(cur.period_end)) in lag_consumed:
+                                    # 前年の第2経路がこの株数の動きを倍率に使った（前年の期末後分割に
+                                    # 株数が追いついた・E00066 2024）。2 回数えない。
+                                    ip, why = None, "prior_lag"
+                                else:
+                                    ip, why = _in_period_split(
+                                        prev, cur, sh_ratio=sh_ratio, bps_ratio=bps_ratio,
+                                        consistency=cons, magnitude=canonical, gate=gate,
+                                        bps_tol=bps_tol, snap_tol=snap_tol, equity_tol=equity_tol,
+                                        official=(official_events.get(ec, ())
+                                                  if official_events is not None else ()),
+                                        coverage=(official_coverage.get(ec)
+                                                  if official_coverage is not None else None))
+                                if ip is None:
+                                    in_period_not[why] += 1
+                                else:
+                                    in_period_partner[len(events)] = len(events) + 1
+                                    events.append(ip)
+                                    in_period_list.append({
+                                        "edinet_code": ec, "year": cur.year, "prev_year": prev.year,
+                                        "in_period": ip.canonical, "post_period": canonical,
+                                        "sh_ratio": sh_ratio, "consistency": cons,
+                                        "equity_ratio": ip.equity_ratio, "cross_check": via})
                             # **倍率は `lag` から決め、`bps_ratio` / `sh_ratio` は観測値の
                             # まま残す**（あとから「当年は株数が動いていない」が読める）。
                             lagged_year_of[len(events)] = nxt.year
+                            lag_consumed.add((ec, nxt.year, _iso(nxt.period_end)))
                             events.append(ShareEvent(
                                 edinet_code=ec, year=cur.year, prev_year=prev.year,
                                 gap_years=cur.year - prev.year,
@@ -925,11 +1047,18 @@ def detect_events(rows: Sequence[AnnualRow], *,
     # 基準として素直だからである。判定はループを抜けてから——第1経路が採るかどうかは
     # 翌年のペアを処理するまで決まらない。
     if lagged_year_of:
+        dropped = {i for i, ly in lagged_year_of.items()
+                   if (events[i].edinet_code, ly) in shares_pairs}
         kept: list[ShareEvent] = []
         for i, e in enumerate(events):
-            ly = lagged_year_of.get(i)
-            if ly is not None and (e.edinet_code, ly) in shares_pairs:
+            if i in dropped:
                 bps_rejected["dup_lagged_with_shares"] += 1
+                continue
+            if in_period_partner.get(i) in dropped:
+                # 対の第2経路が消えた＝期中の分割を分けた根拠（倍率 M と整合度の一致）も消える（#756）。
+                in_period_not["dup_lagged_with_shares"] += 1
+                in_period_list[:] = [d for d in in_period_list
+                                     if (d["edinet_code"], d["year"]) != (e.edinet_code, e.year)]
                 continue
             kept.append(e)
         events = kept
@@ -939,11 +1068,17 @@ def detect_events(rows: Sequence[AnnualRow], *,
     # 公式イベントが窓に無いものは数えない（取り込み前・エンバーゴ中と区別できない）。
     # 交差検証の種類ごとの内訳（#751）も持つ——整合度照合で認めたイベントの倍率が公式と合っているかを、
     # EPS 照合の分と混ぜずに読むため。
+    # 期中の分割を分けた組（#756）は「期中 × 期末後」の積で比べる——公式の窓の積は両方を含むので、期末後の分
+    # だけで比べると毎晩「食い違い」に数える。
     crosscheck = {"agree": 0, "disagree": 0, "disagreements": [], "by_cross_check": {}}
     if official_events is not None:
+        inner = in_period_factors(events)
         for e in events:
             if e.source != "bps" or e.lagged_sh_ratio is None:
                 continue
+            f_in = inner.get((e.edinet_code, e.year, _iso(e.period_end)), 1.0)
+            if f_in != 1.0:
+                e = e._replace(canonical=e.canonical * f_in, lagged_sh_ratio=e.lagged_sh_ratio * f_in)
             m = match_event(e, official_events.get(e.edinet_code, ()))
             if m.official is None:
                 continue
@@ -997,6 +1132,14 @@ def detect_events(rows: Sequence[AnnualRow], *,
                 "n_events": sum(1 for e in bps_events if e.cross_check == "consistency"),
                 "n_awaiting": sum(1 for a in awaiting if a.get("cross_check") == "consistency"),
                 "magnitude_mismatch": magnitude_mismatch,
+            },
+            # 期中の分割の分解（#756・決定4-13）。数えるのは「第2経路が採った組のうち、同じ年に株数も
+            # 候補ゲートを越えて動いたもの」だけで、decomposed は分けた組、not_decomposed は分けなかった理由。
+            "in_period": {
+                "enabled": bool(in_period_decompose),
+                "n_events": sum(1 for e in events if e.source == "in_period"),
+                "not_decomposed": dict(in_period_not),
+                "decomposed": in_period_list,
             },
         },
         "equity": {
@@ -1090,9 +1233,16 @@ def basis_lags(rows: Sequence[AnnualRow], events: Sequence[ShareEvent]
 
     第1経路（株数と1株指標が同じ年に動く）と登録表のスピンオフ（株数も配当の基準も動かさない）には遅れが無い。
     倍率が決まっていないイベント（`canonical` が None）は `cumulative_factors` と同じく数えない。
+
+    **同じ年に期中の分割が重なった組（`source="in_period"`・#756・決定4-13）は、その倍率 `f_in` を除いてから
+    判定する**——期中の分割は株数にも配当の基準にも既に入っているので、除かないと「株数が既に動いた」と読んで
+    期末後の分の遅れが入らない（実測 E35140 2022: 株数比 2.015・期中 2・期末後 2）。株数は `sh_ratio / f_in`、
+    配当は `(当年 ÷ 前の行) × f_in` を比べ、遅れの値は今までどおり期末後の分（第2経路の倍率）だけにする。
+    期中の分割そのものには遅れが無い（第1経路と同じ）。
     """
     by_row = {(r.edinet_code, r.year, _iso(r.period_end)): r for r in rows}
     n_rows_in_year = Counter((r.edinet_code, r.year) for r in rows)
+    inner = in_period_factors(events)
     shares: dict[tuple[str, int], float] = {}
     dps: dict[tuple[str, int], float] = {}
     counts: Counter = Counter()
@@ -1102,11 +1252,13 @@ def basis_lags(rows: Sequence[AnnualRow], events: Sequence[ShareEvent]
             continue
         key = (e.edinet_code, e.year)
         item = {"edinet_code": e.edinet_code, "year": e.year, "factor": e.canonical}
+        # 同じ年の期中の分割（#756）の分は、株数にも配当にも既に入っている。除いてから期末後の分を見る。
+        f_in = inner.get((e.edinet_code, e.year, _iso(e.period_end)), 1.0)
         if not e.sh_ratio or e.sh_ratio <= 0:
             # 検出器の行は株数が必ずある（`_usable`）ので、ここへ来るのは手で作ったイベントだけ。
             counts["shares_unknown"] += 1
             continue
-        if not _nearer_one(e.sh_ratio, e.canonical):
+        if not _nearer_one(e.sh_ratio / f_in, e.canonical):
             counts["shares_moved"] += 1
             continue
         if n_rows_in_year[key] > 1:
@@ -1131,7 +1283,7 @@ def basis_lags(rows: Sequence[AnnualRow], events: Sequence[ShareEvent]
         if not a or not b or a <= 0 or b <= 0:
             counts["dps_missing"] += 1
             continue
-        if _nearer_one(b / a, 1.0 / e.canonical):
+        if _nearer_one(b / a * f_in, 1.0 / e.canonical):
             dps[key] = dps.get(key, 1.0) * e.canonical
             counts["dps_lag"] += 1
         else:
@@ -1552,7 +1704,8 @@ def compute_ledger(rows: Sequence[AnnualRow], *,
                    coverage: Mapping[str, Sequence[Sequence[str]]],
                    series: Mapping[str, tuple[str, Sequence[tuple[str, str]]]],
                    bps_path: Optional[bool] = None,
-                   consistency_crosscheck: Optional[bool] = None) -> Ledger:
+                   consistency_crosscheck: Optional[bool] = None,
+                   in_period_decompose: Optional[bool] = None) -> Ledger:
     """検出器を回して台帳を作る。**DB に触らない**（テストはここを通す）。
 
     入力は `build_ledger` が DB から読むものと同じで、**どれもキーワードで必須**にしてある——
@@ -1570,6 +1723,9 @@ def compute_ledger(rows: Sequence[AnnualRow], *,
     - `consistency_crosscheck`: 第2経路の整合度照合（#751）。`bps_path` と同じく None なら検出器の既定
       （`DEFAULT_CONSISTENCY_CROSSCHECK`）に従い、明示するのは前後を測り比べるときだけ
       （`scripts/measure_split_valuation_bias.py verify-sources`）
+    - `in_period_decompose`: 同じ年の期中の分割と期末後分割を 2 件に分ける（#756）。None なら検出器の既定
+      （`DEFAULT_IN_PERIOD_DECOMPOSE`）に従い、明示するのは前後を測り比べるときだけ
+      （`verify-sources --axis in-period`）
 
     登録表のスピンオフ（`SPINOFF_ADJUSTMENTS`）は入力ではなく登録表から、検出の後に足す（#740）。
     F の積にも `Ledger.events`（→ 係数表の寄与種別・TTM の窓）にも入り、検出器の stats（`n_events`・
@@ -1585,6 +1741,8 @@ def compute_ledger(rows: Sequence[AnnualRow], *,
     kw = {} if bps_path is None else {"bps_path": bps_path}
     if consistency_crosscheck is not None:
         kw["consistency_crosscheck"] = consistency_crosscheck
+    if in_period_decompose is not None:
+        kw["in_period_decompose"] = in_period_decompose
     events, stats = detect_events(rows, official_events=official, price_series=series,
                                   official_coverage=merged, **kw)
     # **登録表のスピンオフは検出の後に足す**（#740）。株数が動かないので検出器には見えないが、DB の
@@ -1739,7 +1897,8 @@ def load_ledger_inputs(db) -> Optional[dict]:
 
 
 def build_ledger(db, *, bps_path: Optional[bool] = None,
-                 consistency_crosscheck: Optional[bool] = None) -> Optional[Ledger]:
+                 consistency_crosscheck: Optional[bool] = None,
+                 in_period_decompose: Optional[bool] = None) -> Optional[Ledger]:
     """入力を読んで台帳を作る。**書き込まない。** annual 行が0件なら None。
 
     係数表の洗い替え（`rebuild_split_adjustment_factors`）・TTM 合成
@@ -1752,7 +1911,8 @@ def build_ledger(db, *, bps_path: Optional[bool] = None,
         return None
     return compute_ledger(inputs["rows"], official=inputs["official"],
                           coverage=inputs["coverage"], series=inputs["series"],
-                          bps_path=bps_path, consistency_crosscheck=consistency_crosscheck)
+                          bps_path=bps_path, consistency_crosscheck=consistency_crosscheck,
+                          in_period_decompose=in_period_decompose)
 
 
 def rebuild_split_adjustment_factors(db, *, bps_path: Optional[bool] = None,
@@ -1843,6 +2003,14 @@ def _log_split_adjustment_stats(n: int, stats: dict) -> int:
                      cs.get("not_rescued"), len(cs.get("magnitude_mismatch") or ()))
             for d in cs.get("magnitude_mismatch") or ():
                 log.info("分割補正係数（第2経路・整合度照合）: 倍率の食い違い %s", d)
+        # 期中の分割の分解（#756）も**毎晩出す**。分けた組は F を「期中 × 期末後」にするので中身を見える所に
+        # 置く。株数も動いた第2経路の組が毎晩あるのに、分けた組と分けなかった理由が両方 0 なら判定が壊れている。
+        ip = bp.get("in_period") or {}
+        if ip.get("enabled"):
+            log.info("分割補正係数（第2経路・期中分割の分解）: 分けた %d 組・分けなかった内訳 %s",
+                     ip.get("n_events", 0), ip.get("not_decomposed"))
+            for d in ip.get("decomposed") or ():
+                log.info("分割補正係数（第2経路・期中分割の分解）: %s", d)
     # 期末後分割の年の行の基準の遅れ（#753）も**毎晩出す**。第2経路のイベントがあるのに株数の遅れが 0 件へ
     # 落ちたら判定が壊れている（2026-09-27 は第2経路 381 件のうち 341 件）。入れなかった行は根拠ごと出す。
     bl = stats.get("basis_lag") or {}
