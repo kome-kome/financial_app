@@ -28,6 +28,14 @@ gap-fill は前営業日バーの唯一の取得者で全社が対象になる�
     python -m scripts.check_nightly_collect              # 直近3晩
     python -m scripts.check_nightly_collect --nights 5
     python -m scripts.check_nightly_collect --json
+
+## watchdog が毎晩これを読む（#767）
+
+警告を出しても exit 0 のまま終わる夜間の pipeline は、失敗の起票（`batch_common.notify`）に
+掛からない。そこで watchdog（`scripts/check_batch_freshness.py`・毎日 20:00）が**最新の1晩**を
+この判定で読み、警告の**種類ごと**（`WARNING_KINDS`）に Issue を起票・自動クローズする。
+判定はここが唯一の源で、watchdog は書き写さない。**終了行の無い（書きかけの）ログは判定しない**
+——20:00 の時点で夜間がまだ走っていると、「収集が終わっていない」という偽の警告になる。
 """
 from __future__ import annotations
 
@@ -35,8 +43,10 @@ import argparse
 import json
 import re
 import sys
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from typing import Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -80,6 +90,38 @@ RE_SCALE_REJ  = re.compile(r"Yahoo スケール段差で不採用: (\d+)社・(\
 # 株価表に残っている100倍以上の段差（#765・源は `collector_prices.scale_step_log_line`）
 RE_SCALE_STEPS = re.compile(r"株価スケール段差（≥\d+倍）: (\d+)社（日次 (\d+)件・週次 (\d+)件）")
 RE_SCALE_STEPS_FAIL = re.compile(r"株価スケール段差の走査に失敗")
+# 夜間バッチの開始・終了行（源は `batch_common.run_batch` の `{spec.name}開始` / `{spec.name}終了`）。
+# 同じ日のログに2回ぶん追記されることがある（手動の追いつき実行）ので、**最後の開始の後に
+# 終了がある**ときだけ完了とみなす。
+RE_BATCH_START = re.compile(r"^\[[^\]]+\] 夜間バッチ開始")
+RE_BATCH_END   = re.compile(r"^\[[^\]]+\] 夜間バッチ終了\s*$")
+
+
+@dataclass(frozen=True)
+class WarningKind:
+    """警告の種類。watchdog は種類ごとに1本の Issue を持つ（#767）。
+
+    `sources` は「ok と言うために `None` であってはならない値」。**行が無い＝不明を ok と
+    読まない**——書式が変わった日に本物の Issue まで閉じてしまう。
+    """
+    label: str
+    sources: tuple[str, ...]
+
+    def known(self, row: dict) -> bool:
+        return any(row.get(s) is not None for s in self.sources)
+
+
+# **ラベルに数字や日付を入れない**（Issue のタイトルになり、一致で既存の起票を探すため）。
+WARNING_KINDS: dict[str, WarningKind] = {
+    "collect_incomplete": WarningKind("株価の収集が終わっていない",
+                                      ("upserted", "gap_skip_reason")),
+    "yahoo_http":         WarningKind("Yahoo の HTTP 失敗", ("http_429",)),
+    "exchange_rejected":  WarningKind("解決済みなのに株価が空", ("exchange_rejected",)),
+    "roundtrip":          WarningKind("往復段差", ("roundtrip",)),
+    "price_freshness":    WarningKind("株価鮮度の低下", ("fresh_level",)),
+    "scale_rejected":     WarningKind("Yahoo のスケール段差で不採用", ("scale_rejected_new",)),
+    "scale_steps":        WarningKind("株価表のスケール段差", ("scale_steps_failed",)),
+}
 
 
 # ── 純関数（ファイルにもネットワークにも触らない・ここがテスト対象）────────────
@@ -105,11 +147,16 @@ def parse_nightly_log(text: str) -> dict:
         "scale_rejected": None, "scale_dropped_bars": None, "scale_rejected_new": None,
         "scale_steps": None, "scale_steps_daily": None, "scale_steps_weekly": None,
         "scale_steps_failed": None,
+        "completed": False,
     }
     t_start = t_end = None
     catchup_without_mismatch = False
 
     for line in text.splitlines():
+        if RE_BATCH_START.search(line):
+            r["completed"] = False
+        elif RE_BATCH_END.search(line):
+            r["completed"] = True
         if (m := RE_GAP_START.search(line)):
             r["gap_target"], r["gap_universe"] = int(m.group(1)), int(m.group(2))
             t_start = t_start or _stamp(line)
@@ -182,44 +229,56 @@ def seconds_per_company(row: dict):
     return round(row["gap_minutes"] * 60 / row["gap_target"], 3)
 
 
-def warnings_for(row: dict) -> list:
-    """その晩の警告。**増減は入れない**——夜ごとの分散に埋もれるので人が見る（#556）。"""
+def warning_items(row: dict) -> list:
+    """その晩の警告を `(種類キー, 文)` で返す。種類キーは `WARNING_KINDS` のどれか（#767）。
+
+    **増減は入れない**——夜ごとの分散に埋もれるので人が見る（#556）。
+    """
     w = []
     if row.get("upserted") is None and row.get("gap_skip_reason") is None:
-        w.append("gap-fill の完了行もスキップ行も無い＝収集が終わっていない可能性")
+        w.append(("collect_incomplete",
+                  "gap-fill の完了行もスキップ行も無い＝収集が終わっていない可能性"))
     for key, label in (("http_429", "429（レート制限）"), ("http_5xx", "5xx")):
         if row.get(key):
-            w.append(f"Yahoo {label} が {row[key]}件"
-                     "＝並行度を下げる（FINAPP_YAHOO_CONCURRENCY=1 で逐次）")
+            w.append(("yahoo_http", f"Yahoo {label} が {row[key]}件"
+                      "＝並行度を下げる（FINAPP_YAHOO_CONCURRENCY=1 で逐次）"))
     # 404 は上場廃止社が毎晩一定数返す値（#556・実測 約320件）。それ以外の 4xx は拒否
     # （401/403 等）の疑いで、429 と同じく絞られた合図になりうる。内訳が無い晩（旧書式）は
     # 判定しない——「不明」を 0 と読んで健全へ倒さない。
     if row.get("http_4xx") is not None and row.get("http_404") is not None:
         n_other_4xx = row["http_4xx"] - row["http_404"]
         if n_other_4xx > 0:
-            w.append(f"Yahoo 404以外の 4xx が {n_other_4xx}件＝アクセス拒否（401/403 等）の疑い"
-                     "＝並行度を下げる（FINAPP_YAHOO_CONCURRENCY=1 で逐次）")
+            w.append(("yahoo_http",
+                      f"Yahoo 404以外の 4xx が {n_other_4xx}件＝アクセス拒否（401/403 等）の疑い"
+                      "＝並行度を下げる（FINAPP_YAHOO_CONCURRENCY=1 で逐次）"))
     if row.get("exchange_rejected"):
-        w.append(f"解決済みなのに空 {row['exchange_rejected']}社＝取引所が張り替わった合図")
+        w.append(("exchange_rejected",
+                  f"解決済みなのに空 {row['exchange_rejected']}社＝取引所が張り替わった合図"))
     if row.get("roundtrip_companies"):
-        w.append(f"往復段差 {row['roundtrip_companies']}社"
-                 "＝`python -m scripts.repair_scale_mixture` で確認する（#620）")
+        w.append(("roundtrip", f"往復段差 {row['roundtrip_companies']}社"
+                  "＝`python -m scripts.repair_scale_mixture` で確認する（#620）"))
     if row.get("roundtrip") == "検知失敗":
-        w.append("往復段差の検知が例外で落ちた（収集自体は継続している）")
+        w.append(("roundtrip", "往復段差の検知が例外で落ちた（収集自体は継続している）"))
     if row.get("fresh_level") and row["fresh_level"] != "fresh":
-        w.append(f"株価鮮度 level={row['fresh_level']}")
+        w.append(("price_freshness", f"株価鮮度 level={row['fresh_level']}"))
     # 既知の社（同じ基準日のまま弾き続けている上場廃止社）だけの晩は警告しない（#765）。
     # 株式併合を split として持った Yahoo は比率倍の値を返し続けるので、毎晩鳴らすと
     # 本物の新規が埋もれる。
     if row.get("scale_rejected_new"):
-        w.append(f"Yahoo の値を DB の直前値と100倍以上離れているため新たに書かなかった社 "
-                 f"{row['scale_rejected_new']}＝株式併合を Yahoo が split として持った疑い（#765）")
+        w.append(("scale_rejected",
+                  f"Yahoo の値を DB の直前値と100倍以上離れているため新たに書かなかった社 "
+                  f"{row['scale_rejected_new']}＝株式併合を Yahoo が split として持った疑い（#765）"))
     if row.get("scale_steps"):
-        w.append(f"株価表に100倍以上の段差が残っている {row['scale_steps']}社"
-                 "＝Yahoo で取り直す修復コマンドは使わない。docs/GOTCHAS.md の #765 を参照")
+        w.append(("scale_steps", f"株価表に100倍以上の段差が残っている {row['scale_steps']}社"
+                  "＝Yahoo で取り直す修復コマンドは使わない。docs/GOTCHAS.md の #765 を参照"))
     if row.get("scale_steps_failed"):
-        w.append("株価スケール段差の走査が例外で落ちた（収集自体は継続している）")
+        w.append(("scale_steps", "株価スケール段差の走査が例外で落ちた（収集自体は継続している）"))
     return w
+
+
+def warnings_for(row: dict) -> list:
+    """その晩の警告文だけ（CLI の表示・`--json`・exit code 用）。"""
+    return [msg for _, msg in warning_items(row)]
 
 
 # ── ファイル走査と表示 ──────────────────────────────────────────────────────
@@ -239,6 +298,16 @@ def collect_nights(log_dir: Path, nights: int) -> list:
             row["weekday"] = "?"
         out.append(row)
     return out
+
+
+def latest_night(log_dir: Path) -> Optional[dict]:
+    """最新の1晩（watchdog が読む・#767）。ログが1本も無ければ None。
+
+    **1晩だけ**にするのは、直した後も古い晩の警告で鳴り続けないため。完了したかは
+    `row["completed"]` を読む側が見る（書きかけのログは判定しない）。
+    """
+    rows = collect_nights(log_dir, 1)
+    return rows[0] if rows else None
 
 
 def _fmt(v) -> str:
