@@ -1084,6 +1084,17 @@ class TestInPeriodDecomposition:
             0, {"dup_lagged_with_shares": 1}, [])
         assert stats["bps_path"]["rejected"]["dup_lagged_with_shares"] == 1
 
+    def test_reasons_are_counted_only_for_the_surviving_pairs(self):
+        """重複除去で消えた第2経路の組の「分けなかった理由」は数えない。内訳の合計を、残った「株数も動いた
+        第2経路のイベント」の数と合わせるため。"""
+        rs = [row(2020, 1000.0, 200.0, eps=100.0, equity=200000.0),
+              row(2021, 2000.0, 130.0, eps=65.0, equity=260000.0),   # 1 回の期中分割（整合度 1.0）
+              row(2022, 4000.0, 67.5, eps=33.75, equity=270000.0)]   # 第1経路が採る
+        events, stats = C.detect_events(rs, bps_path=True, in_period_decompose=True)
+        assert [(e.year, e.source) for e in events] == [(2022, "shares")]
+        assert stats["bps_path"]["rejected"]["dup_lagged_with_shares"] == 1
+        assert stats["bps_path"]["in_period"]["not_decomposed"] == {}
+
     def test_ledger_passes_the_flag_and_the_factor_rows_carry_both_events(self):
         rows = real_rows("E35140", self.E35140)
         led = C.compute_ledger(rows, official={}, coverage={}, series={}, in_period_decompose=True)

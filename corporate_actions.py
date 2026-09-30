@@ -320,7 +320,12 @@ DEFAULT_CONSISTENCY_CROSSCHECK = True
 # 倍率（期末後の分）と一致し、1 回だけの期中分割では 1 前後、前年の期末後分割に株数が追いついた連続分割では
 # どちらでもない値になる（2026-09-30・株数も動いた第2経路 28 件: ≈倍率 7・≈1 20・どちらでもない 1）。
 # 分解の判定に新しいしきい値は無い（候補ゲート・`DEFAULT_BPS_TOL`・`DEFAULT_EQUITY_TOL` を使う）。
-DEFAULT_IN_PERIOD_DECOMPOSE = False
+#
+# **True にしたのは、測る前に書いた基準を3つとも満たしたからである**（2026-09-30・`scripts/
+# measure_split_valuation_bias.py verify-sources --axis in-period`・決定4-13）。分けた 6 組すべてで
+# 「期中 × 期末後」が窓（前期末−45日, 当期末+92日]の中の分割の積と一致（公式 2・Yahoo 4・不一致 0）、
+# 既存のイベントは 1 件も動かない。F が変わる行 14（6 社・2→4 など）、分割した年の行の遅れ 株数 +5・配当 +2。
+DEFAULT_IN_PERIOD_DECOMPOSE = True
 # 合成（分割＋増資）とみなす残差の範囲。これを外れたら丸めずに unsnapped で別枠へ出す。
 COMPOSITE_LO, COMPOSITE_HI = 0.8, 1.25
 
@@ -822,8 +827,11 @@ def detect_events(rows: Sequence[AnnualRow], *,
     # 期中の分割の分解（#756）。lag_consumed は第2経路が倍率に使った「翌年の株数の動き」の行
     # (ec, year, period_end)（決算期の変更で同じ year が 2 行ある社を取り違えない）。
     # in_period_partner は期中のイベントの添字 -> 対の第2経路のイベントの添字（重複除去で一緒に消すため）。
+    # in_period_reason は分けなかった第2経路のイベントの添字 -> 理由。数えるのは重複除去の後に残った組だけ
+    # （消えた組まで数えると、内訳の合計が「株数も動いた第2経路のイベント」の数と合わなくなる）。
     lag_consumed: set[tuple[str, int, Optional[str]]] = set()
     in_period_partner: dict[int, int] = {}
+    in_period_reason: dict[int, str] = {}
     in_period_not: Counter = Counter()
     in_period_list: list[dict] = []
 
@@ -979,7 +987,7 @@ def detect_events(rows: Sequence[AnnualRow], *,
                             kind="split" if off > 1 else "reverse", official_ratio=off))
                         if in_period_decompose and abs(_log(sh_ratio)) >= gate:
                             # 公式の積は窓の中の調整を全部含む＝期中の分割が本物なら既に入っている（#756）。
-                            in_period_not["official_magnitude"] += 1
+                            in_period_reason[len(events) - 1] = "official_magnitude"
                 else:
                     lag = nxt.issued_shares / cur.issued_shares
                     if abs(_log(lag)) < gate:
@@ -1019,7 +1027,7 @@ def detect_events(rows: Sequence[AnnualRow], *,
                                         coverage=(official_coverage.get(ec)
                                                   if official_coverage is not None else None))
                                 if ip is None:
-                                    in_period_not[why] += 1
+                                    in_period_reason[len(events)] = why     # 次に足す第2経路の添字
                                 else:
                                     in_period_partner[len(events)] = len(events) + 1
                                     events.append(ip)
@@ -1062,6 +1070,10 @@ def detect_events(rows: Sequence[AnnualRow], *,
                 continue
             kept.append(e)
         events = kept
+    else:
+        dropped = set()
+    # 分けなかった理由は、重複除去の後に残った第2経路のイベントだけを数える（#756）。
+    in_period_not.update(r for i, r in in_period_reason.items() if i not in dropped)
 
     # 翌年の株数から倍率を決めたイベントを公式と突き合わせる（#661）。**イベントは変えず数えるだけ**
     # ——両方が取れる年で2つの書き手が合っているかを、毎晩追加の取得なしに測り続けるため。
