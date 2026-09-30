@@ -19,10 +19,23 @@ Yahoo のティッカーは長らく `f"{sec_code}.T"` 固定で、**東証以�
 `.F` は Frankfurt と名前空間が衝突する。`377A.F` と `6461.F` は **HTTP200 で61バー返すが
 `exchangeName=FRA`**＝同記号の欧州銘柄で、454社中2社（0.44%）が誤爆した。
 **「取れた」ように見えるので、件数だけ見ていると別会社の株価を書き込む。**
-採用は `exchangeName ∈ {SAP, FKA}` かつ `currency == JPY` の AND のみ。
+採用は `exchangeName ∈ {SAP, FKA}` かつ `currency == JPY` かつ**出来高>0 のバーが1本以上**の
+AND のみ。
 
-バー数の下限は設けない。1734（北弘電社・札証）は61営業日中**1日しか約定していない**——
-本数で足切りすると、この Issue が救おうとしている低流動銘柄をまさに落とす。
+バー数の下限は設けない（本数で足切りすると、この Issue が救おうとしている低流動銘柄を
+まさに落とす）。**ただし約定の証拠は要る**（#769）。1734（北弘電社）は 2024-04-11 に
+上場廃止済みなのに、Yahoo は `SAP`/`JPY`/実名とともに**出来高0のバーを1本**返し、これを
+採用した結果、2026-07-17 付けの幽霊株価が FY2023 の財務行へ押し込まれた。取引所名・通貨・
+実名は廃止済みの記号にも残るので、生きている上場の証拠にならない。
+
+## `--reprobe`（解決済みの測り直し）
+
+対象は「株価ゼロの社」に加えて**株価を持つ解決済みの社**（#769）。解決できた社には翌晩から
+株価が入るので、株価ゼロに限ると解決済みの社は永久に測り直せない＝夜間の「解決済みなのに空」
+が案内する手順が、警告の対象に届かなかった。**株価を持つ未解決の社（東証の銘柄）は入れない**
+——東証と福証の重複上場が `.F` に切り替わる。棄却された解決済みの社は接尾辞を外すが、
+そのプローブで 429・5xx・404 以外の 4xx・分類不能の失敗を踏んだ社は**判定不能**として触らない
+（一時失敗で健全な社の株価収集を止めない）。
 
 ## 解決しただけでは px_* は復活しない
 
@@ -39,7 +52,7 @@ GHA がローカル正本を見られなくなった今、**運用経路から�
     python -m scripts.resolve_price_suffix --apply --backfill-weekly  # ＋5年 weekly
     python -m scripts.resolve_price_suffix --limit 20                 # スモーク
     python -m scripts.resolve_price_suffix --only 8398,1734
-    python -m scripts.resolve_price_suffix --reprobe                  # 解決済みも測り直す
+    python -m scripts.resolve_price_suffix --reprobe                  # 解決済みも測り直す（棄却なら外す）
     python -m scripts.resolve_price_suffix --json
 """
 from __future__ import annotations
@@ -58,7 +71,7 @@ import httpx
 from sqlalchemy import text
 
 import database as D
-from collector_prices import fetch_yahoo_chart
+from collector_prices import fetch_yahoo_chart, yahoo_http_stats
 from collector_utils import (
     YAHOO_LOCAL_EXCHANGES, YAHOO_EXPECT_CURRENCY, YAHOO_STOCK_RATE_SLEEP,
     PRICE_COMMIT_BATCH, YAHOO_BACKFILL_PROGRESS_BATCH,
@@ -72,17 +85,24 @@ DEFAULT_PROBE_DAYS = 365   # 1リクエストのコストは窓幅に依らな�
 
 # 「株価を1件も持たない社」。collector_prices.py のインライン判定（latest_daily /
 # latest_weekly を dict 化して last is None を見る）と等価なものを SQL 側で1文にした。
-PRICELESS_SQL = """
+PRICELESS_COND = (
+    "NOT EXISTS (SELECT 1 FROM stock_price_daily  d WHERE d.edinet_code = c.edinet_code)"
+    " AND NOT EXISTS (SELECT 1 FROM stock_price_weekly w WHERE w.edinet_code = c.edinet_code)"
+)
+
+# 既定は「株価ゼロ・未解決」。`--reprobe` は株価ゼロに加えて**株価を持つ解決済み**も含む
+# （#769・モジュール冒頭の `--reprobe` 節）。株価を持つ未解決の社は含めない。
+TARGETS_SQL = """
 SELECT c.edinet_code, c.sec_code, c.name, c.is_active, c.yahoo_suffix
 FROM companies c
 WHERE c.sec_code IS NOT NULL
   AND c.sec_code <> ''
-  AND NOT EXISTS (SELECT 1 FROM stock_price_daily  d WHERE d.edinet_code = c.edinet_code)
-  AND NOT EXISTS (SELECT 1 FROM stock_price_weekly w WHERE w.edinet_code = c.edinet_code)
-  {resolved_filter}
+  AND ({scope})
   {bucket_filter}
 ORDER BY c.sec_code
 """
+SCOPE_DEFAULT = f"{PRICELESS_COND} AND c.yahoo_suffix IS NULL"
+SCOPE_REPROBE = f"({PRICELESS_COND}) OR c.yahoo_suffix IS NOT NULL"
 
 
 # Yahoo が「知らない記号」に対して 200 とともに返すプレースホルダの取引所名（2026-08-27 実測）。
@@ -92,7 +112,7 @@ YAHOO_PLACEHOLDER_EXCHANGE = "YHD"
 
 REJECT_BUCKET_NOTE = {
     "mismatch": "別の取引所/通貨を掴んだ（採用すると別会社の株価が入る）",
-    "empty":    "期待した取引所に実在するが Yahoo にバーが1本も無い（再プローブする価値がある）",
+    "empty":    "期待した取引所の meta は返るが、約定のあるバーが1本も無い（再プローブする価値がある）",
     "placeholder": f"Yahoo が {YAHOO_PLACEHOLDER_EXCHANGE} の空箱を返しただけ（実在する上場ではない）",
     "not_found": "Yahoo がその記号を知らない（現時点で取得手段が無い）",
 }
@@ -109,7 +129,7 @@ def reject_bucket(reason: str) -> str:
 
     | 例 | meta | 意味 |
     |---|---|---|
-    | `1734.S` 北弘電社 | `SAP` / `JPY` / `KITA KOUDENSHA Corporation` | 札証に実在するが Yahoo が価格を持たない＝**再プローブの価値がある** |
+    | `231A.F` Cross E Holdings | `FKA` / `JPY` / 実名 | 福証に実在するが Yahoo が価格を持たない＝**再プローブの価値がある** |
     | `9062.F` 日本通運ほか27社 | `YHD` / currency なし / 名前なし | Yahoo の空箱。実在する上場ではない |
 
     これを1つの `empty` に畳むと、東証を廃止された大型株（日本通運・NTTドコモ・ベネッセ等）が
@@ -152,6 +172,11 @@ def decide_suffix(probes: list) -> tuple:
         if got_cur != YAHOO_EXPECT_CURRENCY:
             reasons.append(f"{suffix}:currency_mismatch:{got_cur or '?'}")
             continue
+        if not any((r.get("volume") or 0) > 0 for r in rows):
+            # 取引所名・通貨・実名は廃止済みの記号にも残る（#769: 1734.S は 2024 年廃止なのに
+            # SAP/JPY/実名＋出来高0の1本）。約定の無い応答は `empty` と同じ棚へ畳む。
+            reasons.append(f"{suffix}:empty:{got_ex}:no_trades")
+            continue
         return suffix, "adopted"
     return None, ",".join(reasons) if reasons else "not_found"
 
@@ -182,9 +207,11 @@ def _targets(db, reprobe: bool, only: Optional[list], limit: Optional[int],
     `bucket` を渡すと `yahoo_probe_bucket` で絞る（#560）。**月次バッチが使うのはこれ**——
     全数 454社は約8分かかり月次の窓に入らない（Σ予算 925 + マージン 30 に対し窓 960＝
     余裕5分）。`empty`（取引所は判明・バー0本）の5社だけなら約5秒で収まる。
+
+    `reprobe` は株価を持つ解決済みの社も含む（#769・`SCOPE_REPROBE`）。
     """
-    sql = PRICELESS_SQL.format(
-        resolved_filter="" if reprobe else "AND c.yahoo_suffix IS NULL",
+    sql = TARGETS_SQL.format(
+        scope=SCOPE_REPROBE if reprobe else SCOPE_DEFAULT,
         bucket_filter="AND c.yahoo_probe_bucket = :bucket" if bucket else "")
     rows = db.execute(text(sql), {"bucket": bucket} if bucket else {}).fetchall()
     if only:
@@ -195,15 +222,33 @@ def _targets(db, reprobe: bool, only: Optional[list], limit: Optional[int],
     return rows
 
 
+def transient_http_failures(stats: dict) -> int:
+    """`yahoo_http_stats` の集計のうち「答えが出ていない」失敗の数（#769）。
+
+    404 は「その記号は無い」という**答え**なので数えない。429・5xx・404 以外の 4xx（拒否）・
+    分類不能（タイムアウト等）は答えではない＝解決済みの社の接尾辞を外す根拠にしない。
+    """
+    return (stats.get("429", 0) + stats.get("5xx", 0) + stats.get("other", 0)
+            + stats.get("4xx", 0) - stats.get("404", 0))
+
+
 async def _resolve(db, targets: list, d_from: str, d_to: str, sleep: float,
                    apply: bool) -> dict:
     adopted, rejected = [], []
+    unresolved, undecided = [], []   # `--reprobe` で棄却された解決済みの社（#769）
     async with httpx.AsyncClient(timeout=60) as http:
-        for i, (ec, sec, name, is_active, _cur) in enumerate(targets, 1):
-            suffix, reason, bars = await probe_company(http, sec, d_from, d_to, sleep)
+        for i, (ec, sec, name, is_active, cur) in enumerate(targets, 1):
+            with yahoo_http_stats() as http_errors:
+                suffix, reason, bars = await probe_company(http, sec, d_from, d_to, sleep)
             rec = {"edinet_code": ec, "sec_code": sec, "name": name,
                    "is_active": is_active, "reason": reason, "bars": bars}
-            if suffix:
+            if not suffix and cur and transient_http_failures(http_errors):
+                # 一時失敗は答えではない。外すと健全な社の株価収集が止まり、株価を持つ
+                # 未解決の社は `--reprobe` の対象にも戻らない＝元に戻す経路が無い。
+                rec["suffix"] = cur
+                rec["http_errors"] = dict(http_errors)
+                undecided.append(rec)
+            elif suffix:
                 rec["suffix"] = suffix
                 adopted.append(rec)
                 if apply:
@@ -223,13 +268,20 @@ async def _resolve(db, targets: list, d_from: str, d_to: str, sleep: float,
             else:
                 rec["bucket"] = reject_bucket(reason)
                 rejected.append(rec)
+                if cur:
+                    # 解決済みだった社の棄却（#769）。接尾辞を残すと毎晩「解決済みなのに空」を
+                    # 叩き続ける（廃止社の見送りを素通りする＝警告が永久に続く）。
+                    rec["previous_suffix"] = cur
+                    unresolved.append(rec)
                 if apply:
                     # **棄却理由を永続化する（#560）。** 分類する `reject_bucket` は #555 から
                     # あったが printf されて消えており、「取引所は分かっているのに絞り込めない」
                     # 状態だった。ここで残すことで、月次が `empty` の5社だけを叩ける。
+                    # 解決済みだった社は同じ文で接尾辞も外す（NULL＝`.T` で試す・#555）。
                     db.execute(
                         text("UPDATE companies SET yahoo_probe_bucket = :b, "
-                             "updated_at = :ts WHERE edinet_code = :ec"),
+                             + ("yahoo_suffix = NULL, " if cur else "")
+                             + "updated_at = :ts WHERE edinet_code = :ec"),
                         {"b": rec["bucket"], "ec": ec,
                          "ts": datetime.now(timezone.utc)})
             if apply and i % PRICE_COMMIT_BATCH == 0:
@@ -239,7 +291,8 @@ async def _resolve(db, targets: list, d_from: str, d_to: str, sleep: float,
                       flush=True)
     if apply:
         db.commit()
-    return {"adopted": adopted, "rejected": rejected}
+    return {"adopted": adopted, "rejected": rejected,
+            "unresolved": unresolved, "undecided": undecided}
 
 
 def _print_report(res: dict, targets: list, applied: bool) -> None:
@@ -269,6 +322,21 @@ def _print_report(res: dict, targets: list, applied: bool) -> None:
             print(f"  例: {', '.join(r['sec_code'] for r in rs[:10])}"
                   + (f" ... 他 {len(rs) - 10}社" if len(rs) > 10 else ""))
 
+    # `--reprobe` で動いた解決済みの社は全件名指しで出す（#769）。接尾辞を外すと翌晩から
+    # その社の取り方が変わるので、何が外れたかを数だけで済ませない。
+    unresolved, undecided = res.get("unresolved") or [], res.get("undecided") or []
+    if unresolved:
+        print(f"\n[解除] 解決済みだったが棄却 {len(unresolved)}社 — 接尾辞を外す"
+              "（NULL＝.T で試す。夜間の「解決済みなのに空」はこれで止まる）")
+        for r in unresolved:
+            print(f"  {r['sec_code']:>5}  {r['previous_suffix']} → なし  {r['bars']:>4}バー"
+                  f"  {r['reason']}  {r['name']}")
+    if undecided:
+        print(f"\n[判定不能] 解決済みで HTTP の一時失敗 {len(undecided)}社 — 接尾辞は残した"
+              "（時間を置いて --reprobe し直す）")
+        for r in undecided:
+            print(f"  {r['sec_code']:>5}  {r['suffix']}  {r['http_errors']}  {r['name']}")
+
     if not applied:
         print("\nドライラン（何も変更していない）。実行するには --apply を付けてください。")
 
@@ -288,7 +356,8 @@ def main() -> int:
     ap.add_argument("--limit", type=int, help="先頭N社だけ（スモーク用）")
     ap.add_argument("--only", help="証券コードをカンマ区切りで指定")
     ap.add_argument("--reprobe", action="store_true",
-                    help="解決済みの社も測り直す（Yahoo が記号を張り替えた疑いがあるとき）")
+                    help="株価を持つ解決済みの社も測り直す。棄却されたら接尾辞を外す"
+                         "（夜間の「解決済みなのに空」のとき・#769）")
     ap.add_argument("--bucket", choices=REJECT_BUCKET_ORDER,
                     help="前回の棄却理由で対象を絞る（月次は empty＝取引所判明・バー0本の5社）")
     ap.add_argument("--sleep", type=float, default=YAHOO_STOCK_RATE_SLEEP,

@@ -213,7 +213,7 @@ class TestFetchYahooChartMeta:
         assert len(rows) == 61
 
     def test_single_bar_is_kept(self):
-        """低流動を落とさない。1734（北弘電社・札証）は61営業日中1日しか約定しない。"""
+        """低流動を落とさない（夜間経路は本数も出来高も見ない。採用の判定は解決スクリプト側・#769）。"""
         payload = _chart_json(1, {"exchangeName": "SAP", "currency": "JPY"})
         rows = _fetch_history(payload, expect_exchanges=self.LOCAL, expect_currency="JPY")
         assert len(rows) == 1
