@@ -29,6 +29,14 @@ jaxlib 更新で入った未評価の `_ifrt_proxy.pyd` を**初回ロードで�
 pip でパッケージを更新した後は、**対話セッションで一度 import して評価を通しておく**こと
 （`docs/GOTCHAS.md`）。バッチはセッション0（S4U）で走り、そこで初めて触るのが一番まずい。
 
+## 既に読めていたファイルも遮断されうる（#782）
+
+2026-10-02 01:00 は、10/1 まで読めていた `_mosaic_gpu_ext.pyd`（中身不変）が遮断され、対話で
+import しても通らなかった（同日 03:15 までに自然に解けた）。SAC の判定は時間とともにどちらへも
+動くので、上の「一度 import して評価を通す」は初回ロードにしか効かない。遮断されたのが GPU/TPU
+専用の jaxlib 拡張なら `jax_import_guard` が空モジュールで代替し、ここでは `[warn ]` 行として
+残す（CPU の推論では使わないので失敗にしない）。それ以外の遮断は従来どおり失敗にする。
+
 ## 未導入と import 失敗を区別する
 
 未導入（`ModuleNotFoundError`）は **skip** として報告するだけで失敗にしない——`jax` 系は
@@ -43,6 +51,8 @@ from __future__ import annotations
 
 import importlib
 import sys
+
+import jax_import_guard
 
 # (import 名, 何のために要るか)。**pip のパッケージ名ではなく import 名**を書く。
 # 並びは「本番も使う native 拡張」→「推論バッチ専用」の順。
@@ -94,6 +104,9 @@ def warm_jax() -> tuple[str, str] | None:
 
 
 def main() -> int:
+    # 本番の推論（`macro_beta_inference`）と同じ条件で確かめる。ガード無しで測ると、本番では
+    # 通る遮断をここだけが失敗として報告する。
+    jax_import_guard.install()
     failures: list[str] = []
     for name, why in HEAVY_IMPORTS:
         state, detail = probe(name)
@@ -108,6 +121,12 @@ def main() -> int:
         if state == "error":
             failures.append(f"jax.devices: {detail}")
 
+    # 代替は失敗に数えないが、黙らせもしない。**判定の反転は CodeIntegrity ログ（約4時間で
+    # 上書き）に残らず、このログが唯一の時系列になる**（#782）。
+    for name in jax_import_guard.substituted():
+        print(f"[warn ] {name}  Smart App Control が遮断 → 空モジュールで代替"
+              "（GPU/TPU 専用・CPU 推論では使わない）")
+
     if failures:
         print("")
         print("重い依存を import できない。**この先のステップは同じ理由で落ちる**:")
@@ -115,8 +134,10 @@ def main() -> int:
             print(f"  - {line}")
         print("")
         print("Windows で 'アプリケーション制御ポリシーによってこのファイルがブロックされました' "
-              "と出ている場合は Smart App Control が未評価の DLL を弾いている。"
-              "対話セッションで一度 import して評価を通す（docs/GOTCHAS.md）。"
+              "と出ている場合は Smart App Control が DLL を弾いている。"
+              "未評価の DLL なら対話セッションで一度 import して評価を通す。"
+              "既に読めていた DLL の判定が反転した場合は対話でも通らず、時間を置くと戻る"
+              "ことがある（#782・docs/GOTCHAS.md）。"
               "Smart App Control は OFF にしない（不可逆）。")
         return 1
 
