@@ -17,7 +17,7 @@ from collector import (
     run_full_collection, collect_macro_data,
     collect_stock_price_history_jquants, update_market_data_from_history,
     fill_recent_stock_price_gap_yahoo, detect_roundtrip_scale_bands,
-    load_judged_scale_bands, exclude_judged_bands, roundtrip_log_line,
+    load_judged_scale_bands, exclude_judged_bands, exclude_unmixable_bands, roundtrip_log_line,
 )
 from collector_prices import (
     format_yahoo_http_stats, scale_rejection_log_line, scale_step_log_line,
@@ -255,12 +255,15 @@ async def main():
         # ただし交差は**社単位**で、ADR-0053 の確定条件1・3（帯の中に AdjC≠C の日があるか・
         # Yahoo が AdjC と食い違うか）は見ていない。分割のある社で実際の値動きが往復すると
         # 毎晩鳴り続けるので、`repair_scale_mixture` が非該当と判定済みの**帯**は除く（#644）。
+        # その前に、#620 以降に公式スケールで書かれえない日付から始まる帯を除く（#773）——
+        # 分割の波で `AdjC≠C` の社が急増した晩に、突合しなくても非該当と分かる帯で鳴らさない。
         _susp = (catchup_result or {}).get("scale_mismatch_companies") or []
         try:
             if _susp:
                 rt = detect_roundtrip_scale_bands(db4, only_ecs=_susp)
+                rt, n_unmixable = exclude_unmixable_bands(rt)
                 rt, n_judged = exclude_judged_bands(rt, load_judged_scale_bands(db4))
-                log(f"  {roundtrip_log_line(len(_susp), rt, n_judged)}")
+                log(f"  {roundtrip_log_line(len(_susp), rt, n_judged, n_unmixable=n_unmixable)}")
             else:
                 log("  往復段差: 検査対象なし（今夜は AdjC≠C の社が無かった）")
         except Exception as e:

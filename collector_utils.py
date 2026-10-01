@@ -8,7 +8,7 @@ import os
 import logging
 import re
 import sys
-from datetime import time as dtime, timedelta, timezone
+from datetime import date, time as dtime, timedelta, timezone
 from typing import Optional
 
 from dotenv import load_dotenv
@@ -397,6 +397,17 @@ ROUNDTRIP_MAX_GAP_DAYS   = 21
 # 往復して「元へ戻った」とみなす正味変化の許容幅。帯の前後には**実際の値動き**が
 # 挟まるため、2つの段差の積は 1.0 ちょうどにならない（#620 の E32779 は 0.967）。
 ROUNDTRIP_NET_TOL        = 0.15
+# 公式スケールの値が日次へ書かれえた最終日（#773）。#620 以降の書き手は `AdjC≠C` の行を
+# 書かない（`_jquants_batch_gen`）ので、**開始日がこれより後の帯は混ざりようがない**。
+# 反映日は de5ed9a（2026-09-08 03:18 JST）で、夜間ログでも 9/7 の晩が最後の選別なし
+# （catchup 右端 2026-06-19）・9/8 の晩から「スケール不一致で不採用」が出る。
+# 80日は**当時の** catchup の右端の遅れ（`_pipeline_incremental` の `today - 80日`）＝過去の
+# 事実なので、今の catchup 窓を変えてもここは変えない。9/8 未明に旧コードで回した場合の
+# 右端も 6/20 で、J-Quants の契約窓（12週エンバーゴ）が実際にはさらに数日手前で切る
+# （実測 契約窓外 3〜4日）＝この境界は除きすぎる側へ倒れない。
+SCALE_FILTER_SINCE           = date(2026, 9, 8)
+PRE_FILTER_CATCHUP_LAG_DAYS  = 80
+OFFICIAL_SCALE_WRITABLE_UNTIL = SCALE_FILTER_SINCE - timedelta(days=PRE_FILTER_CATCHUP_LAG_DAYS)
 
 # Supabase Free プランの DB 容量制約(500MB)で xbrl_raw_documents (TOAST 880MB)
 # を持てないため、デフォルトで保存をスキップ。再解析が必要な場合のみ

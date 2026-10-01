@@ -6,7 +6,7 @@
 """
 import asyncio
 import os
-from datetime import date
+from datetime import date, timedelta
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -15,10 +15,12 @@ import database as D
 import scripts.repair_scale_mixture as rsm
 from collector_prices import (
     _pair_roundtrip_steps, _steps_from_closes, collect_stock_price_history_jquants,
-    exclude_judged_bands, load_judged_scale_bands, record_scale_band_verdicts,
-    scale_band_key,
+    exclude_judged_bands, exclude_unmixable_bands, load_judged_scale_bands,
+    record_scale_band_verdicts, scale_band_key,
 )
-from collector_utils import rounding_tolerance, same_price_scale
+from collector_utils import (
+    OFFICIAL_SCALE_WRITABLE_UNTIL, SCALE_FILTER_SINCE, rounding_tolerance, same_price_scale,
+)
 from scripts.repair_scale_mixture import (
     CONFIRMED, REJECTED, UNDETERMINED, confirm_official_scale, judge_official_scale,
 )
@@ -368,6 +370,75 @@ class TestJudgedBandRecord:
         D.upsert_setting(db, D.KEY_SCALE_BAND_VERDICTS, '{"version": 1}')
         with pytest.raises(ValueError):
             load_judged_scale_bands(db)
+
+
+# ── #773: #620 以降に公式スケールで書かれえない帯を、突合の前に除く ────────────────
+
+# 2026-09-29 の分割の波で夜間が警告した4社・13帯（#770）。`repair_scale_mixture --only` が
+# 2026-09-30 に `app_settings.scale_band_verdicts` へ記録した実値から写した（13帯すべて [棄却]）。
+_REAL_0930 = {
+    "E00024": [
+        {"start": "2026-06-12", "end": "2026-06-22", "ratio_out": 1.1760, "ratio_back": 0.8738},
+        {"start": "2026-07-31", "end": "2026-08-07", "ratio_out": 1.1423, "ratio_back": 0.8645},
+    ],
+    "E04980": [
+        {"start": "2026-08-28", "end": "2026-08-31", "ratio_out": 1.2095, "ratio_back": 0.8351},
+        {"start": "2026-08-31", "end": "2026-09-03", "ratio_out": 1.1894, "ratio_back": 0.8093},
+    ],
+    "E35948": [
+        {"start": "2026-06-19", "end": "2026-07-01", "ratio_out": 1.1207, "ratio_back": 0.8653},
+        {"start": "2026-06-25", "end": "2026-07-10", "ratio_out": 1.1227, "ratio_back": 0.8714},
+        {"start": "2026-07-16", "end": "2026-07-30", "ratio_out": 0.8497, "ratio_back": 1.1772},
+        {"start": "2026-07-17", "end": "2026-07-17", "ratio_out": 0.8390, "ratio_back": 1.1718},
+        {"start": "2026-07-28", "end": "2026-08-14", "ratio_out": 0.8167, "ratio_back": 1.1507},
+    ],
+    "E40060": [
+        {"start": "2026-04-22", "end": "2026-05-11", "ratio_out": 1.1608, "ratio_back": 0.7561},
+        {"start": "2026-06-16", "end": "2026-06-22", "ratio_out": 1.2069, "ratio_back": 0.8482},
+        {"start": "2026-07-10", "end": "2026-07-27", "ratio_out": 1.1432, "ratio_back": 0.8034},
+        {"start": "2026-08-17", "end": "2026-08-28", "ratio_out": 1.1388, "ratio_back": 0.8219},
+    ],
+}
+
+
+class TestUnmixableBands:
+    """開始日が境界日より後の帯は、突合しなくても混在ではありえない（#773）。"""
+
+    def test_boundary_is_derived_from_the_filter_date_and_the_old_catchup_lag(self):
+        """9/8（#620）− 80日（当時の catchup の右端）。9/7 の晩の実際の右端 6/19 を含む。"""
+        assert OFFICIAL_SCALE_WRITABLE_UNTIL == SCALE_FILTER_SINCE - timedelta(days=80)
+        assert OFFICIAL_SCALE_WRITABLE_UNTIL == date(2026, 6, 20)
+        assert OFFICIAL_SCALE_WRITABLE_UNTIL >= date(2026, 6, 19)
+
+    def test_band_starting_on_the_boundary_is_kept_and_the_day_after_is_dropped(self):
+        on = {"start": "2026-06-20", "end": "2026-06-26", "ratio_out": 0.85, "ratio_back": 1.17}
+        after = {"start": "2026-06-21", "end": "2026-06-26", "ratio_out": 0.85, "ratio_back": 1.17}
+        found, n = exclude_unmixable_bands(_found({"E1": [on], "E2": [after]}))
+        assert n == 1
+        assert [c["edinet_code"] for c in found["companies"]] == ["E1"]
+
+    def test_the_0930_wave_drops_nine_bands_without_any_record(self):
+        """完了条件3: #770 の13帯は記録なしで9帯が落ち、境界以前に始まる4帯だけ残る。"""
+        found, n = exclude_unmixable_bands(_found(_REAL_0930))
+        assert n == 9
+        left = {(c["edinet_code"], b["start"]) for c in found["companies"] for b in c["bands"]}
+        assert left == {("E00024", "2026-06-12"), ("E35948", "2026-06-19"),
+                        ("E40060", "2026-04-22"), ("E40060", "2026-06-16")}
+        assert "E04980" not in {c["edinet_code"] for c in found["companies"]}
+
+    def test_the_real_mixture_is_kept(self):
+        """本物の混在（#620 の E32779・2026-06-01〜06-15）は境界より前に始まる＝落とさない。"""
+        bands = _pair_roundtrip_steps(_steps_from_closes(TestRoundtripBands._MIXED))
+        found, n = exclude_unmixable_bands(_found({"E32779": bands}))
+        assert n == 0 and found["companies"][0]["bands"] == bands
+
+    def test_bands_dropped_here_are_not_counted_again_as_judged(self, db):
+        """夜間の順（構造 → 判定済み）で数えたとき、同じ帯を二重に数えない。"""
+        record_scale_band_verdicts(db, _rejected(_REAL_0930), today=date(2026, 9, 30))
+        found, n_unmixable = exclude_unmixable_bands(_found(_REAL_0930))
+        found, n_judged = exclude_judged_bands(found, load_judged_scale_bands(db))
+        assert (n_unmixable, n_judged) == (9, 4)
+        assert found["companies"] == []
 
 
 class TestVerifyTargetsPerBand:
