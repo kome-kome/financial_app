@@ -105,6 +105,65 @@ class TestFreshnessBlock:
         assert f["gap_ratio"]["driver"] == "local:scripts/run_nightly.py"
 
 
+def _mu_sources() -> set[str]:
+    """`mu_source` に渡りうる producer 名の全部（正本から読む＝足したら追随する）。"""
+    from database import _PRODUCER_SCORE_MODELS
+    from plugins import get_plugin
+    from plugins.recommend import MU_SOURCE_OPTIONS
+
+    sell = get_plugin("sell_ranking").params_schema()["mu_source"]["options"]
+    names = {o["value"] for o in MU_SOURCE_OPTIONS + sell} | set(_PRODUCER_SCORE_MODELS)
+    return names - {""}
+
+
+class TestMuDriver:
+    """μ̂ を前進させるバッチは `HEAVY_AUTOMATION` から引く（#743）。
+
+    以前は「既定の macro_enet なら夜間、それ以外は全部月次」と推測しており、M-1 の μ̂ を
+    永続化するのは `run_monthly_m1.py`（ADR-0046）なのに `./run_monthly.ps1` を案内していた。
+    """
+
+    @pytest.mark.parametrize("source", sorted(_mu_sources()))
+    def test_driver_matches_the_registry(self, source):
+        from nightly_scores import HEAVY_AUTOMATION, LOCAL_PREFIX
+
+        entry = HEAVY_AUTOMATION.get(source, "")
+        expected = entry if entry.startswith(LOCAL_PREFIX) else None
+        mu = client.get(f"/api/morning?mu_source={source}").json()["freshness"]["mu"]
+        assert mu["driver"] == expected, source
+
+    def test_m1_points_at_its_own_batch(self):
+        """照合テストが「両辺とも同じ間違い」で通らないよう、M-1 は値で縛る。"""
+        mu = client.get("/api/morning?mu_source=macro_risk_return").json()["freshness"]["mu"]
+        assert mu["driver"] == "local:scripts/run_monthly_m1.py"
+        assert mu["command"] == "./run_monthly_m1.ps1"
+
+    def test_default_points_at_the_nightly_batch(self):
+        mu = client.get("/api/morning").json()["freshness"]["mu"]
+        assert mu["driver"] == "local:scripts/run_nightly.py"
+        assert mu["command"] == "./run_nightly.ps1"
+
+    def test_exempt_producer_points_at_nothing(self):
+        """自動実行しないと決めた producer に、回さないバッチを案内しない。"""
+        mu = client.get("/api/morning?mu_source=macro_ensemble").json()["freshness"]["mu"]
+        assert mu["driver"] is None
+        assert mu["command"] is None
+
+    def test_every_local_driver_has_its_command(self):
+        """案内したコマンドを打つとファイルが無い、という壊れ方を防ぐ。"""
+        from pathlib import Path
+
+        from nightly_scores import HEAVY_AUTOMATION, LOCAL_PREFIX
+
+        root = Path(__file__).resolve().parent.parent
+        for name, entry in HEAVY_AUTOMATION.items():
+            if not entry.startswith(LOCAL_PREFIX):
+                continue
+            _driver, command = _mor._mu_driver(name)
+            assert command is not None, name
+            assert (root / command).is_file(), f"{name}: {command} が無い"
+
+
 # `_batch_block` の**本物**を import 時に1度だけ捕まえる。テスト内で monkeypatch した後に
 # `mor._batch_block` を読むと差し替え済みのラムダが返り、二重に包んだ側の `get` が捨てられる
 # （実際それで unreadable が missing に化けた）。

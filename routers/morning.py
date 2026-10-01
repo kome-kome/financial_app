@@ -40,12 +40,11 @@ _RUNBOOK_URL = "https://github.com/kome-kome/financial_app/blob/main/docs/DEPLOY
 
 # 各ブロックを前進させる駆動主体。表記は `nightly_scores.HEAVY_AUTOMATION` の
 # `local:<スクリプト>` 語彙と揃える（画面と登録簿で別の名前を使わない）。
+# μ̂ だけは producer ごとに主体が違うので、ここに書かず登録簿から引く（`_mu_driver`）。
 _DRIVER_NIGHTLY = "local:scripts/run_nightly.py"
-_DRIVER_MONTHLY = "local:scripts/run_monthly.py"
 
 # 手で回すときのコマンド。画面から読める場所に置く（DEPLOYMENT.md を開かずとも打てる）。
 _CMD_NIGHTLY = "./run_nightly.ps1"
-_CMD_MONTHLY = "./run_monthly.ps1"
 _CMD_MACRO = "python collector.py --macro"
 
 # gap_ratio（sector_ols・nightly-scores が毎晩更新）の許容鮮度。夜間バッチが毎日
@@ -115,15 +114,30 @@ def _gap_ratio_block(db: Session) -> dict:
     }
 
 
+def _mu_driver(mu_source: str) -> tuple[Optional[str], Optional[str]]:
+    """μ̂ を前進させるバッチと、手で回すコマンドを `HEAVY_AUTOMATION` から引く（#743）。
+
+    **推測しない。** 以前は「既定の macro_enet なら夜間、それ以外は月次」と決め打ちしており、
+    M-1 の μ̂ を永続化するのは `run_monthly_m1.py`（ADR-0046）なのに `./run_monthly.ps1` を
+    案内していた。コマンドはスクリプト名から導く（対応表を書くと登録簿と二重管理になる）。
+    `exempt:` や未登録の producer は自動で前進させる経路が無いので `(None, None)`。
+    """
+    from nightly_scores import HEAVY_AUTOMATION, LOCAL_PREFIX
+
+    entry = HEAVY_AUTOMATION.get(mu_source, "")
+    if not entry.startswith(LOCAL_PREFIX):
+        return None, None
+    stem = entry[len(LOCAL_PREFIX):].rsplit("/", 1)[-1].removesuffix(".py")
+    return entry, f"./{stem}.ps1"
+
+
 def _mu_block(db: Session, mu_source: str) -> dict:
     """producer スコア（μ̂）の as-of。未蓄積なら level=empty で返す（例外にしない）。"""
     asof = get_producer_asof(db, mu_source)
-    # μ̂ の更新主体は producer で違う（macro_enet は夜間、M-1 系は月次探索の
-    # --persist-scores 副作用）。毎晩前進するのは既定の macro_enet だけ。
-    is_nightly = mu_source == DEFAULT_MU_SOURCE
-    base = {"source": mu_source,
-            "driver": _DRIVER_NIGHTLY if is_nightly else _DRIVER_MONTHLY,
-            "command": _CMD_NIGHTLY if is_nightly else _CMD_MONTHLY,
+    # μ̂ の更新主体は producer で違う（macro_enet は夜間、M-2/M-3 は月次本体、M-1 は
+    # 月次から切り出した別タスク）。
+    driver, command = _mu_driver(mu_source)
+    base = {"source": mu_source, "driver": driver, "command": command,
             "url": _RUNBOOK_URL}
     if not asof:
         return {**base, "snapshot_date": None, "snapshot_date_min": None,
