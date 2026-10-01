@@ -174,7 +174,7 @@ class TestJudgedBandsExcluded:
     """#644: 夜間は判定済みの非該当の帯を除いて数え、除いた数を行に残す。"""
 
     def test_none_line_with_exclusions_is_read(self):
-        line = roundtrip_log_line(45, {"companies": [], "steps": 9}, 5)
+        line = roundtrip_log_line(45, {"companies": [], "steps": 9}, 5, n_unmixable=0)
         r = parse_nightly_log(_night_with(line))
         assert r["roundtrip"] == "なし" and r["roundtrip_companies"] == 0
         assert r["roundtrip_excluded"] == 5
@@ -182,7 +182,7 @@ class TestJudgedBandsExcluded:
 
     def test_hit_line_with_exclusions_is_read_and_flagged(self):
         found = {"companies": [{"edinet_code": "E01717", "bands": [_BAND]}], "steps": 9}
-        r = parse_nightly_log(_night_with(roundtrip_log_line(45, found, 5)))
+        r = parse_nightly_log(_night_with(roundtrip_log_line(45, found, 5, n_unmixable=0)))
         assert r["roundtrip"] == "検出" and r["roundtrip_companies"] == 1
         assert r["roundtrip_excluded"] == 5
         assert any("repair_scale_mixture" in w for w in warnings_for(r))   # 完了条件2
@@ -190,7 +190,7 @@ class TestJudgedBandsExcluded:
     def test_zero_exclusions_is_zero_not_unknown(self):
         """0 のときも行に出す＝記載の無い晩（旧書式）だけが `None` になる。"""
         r = parse_nightly_log(_night_with(
-            roundtrip_log_line(45, {"companies": [], "steps": 9}, 0)))
+            roundtrip_log_line(45, {"companies": [], "steps": 9}, 0, n_unmixable=0)))
         assert r["roundtrip_excluded"] == 0
 
     def test_old_format_is_unknown(self):
@@ -199,9 +199,50 @@ class TestJudgedBandsExcluded:
 
     def test_scale_mismatch_zero_inference_still_works_on_the_new_format(self):
         """スケール不一致の「0 と不明」の区別は往復段差の行を手掛かりにしている。"""
-        log = _night_with(roundtrip_log_line(45, {"companies": [], "steps": 9}, 5)) \
+        log = _night_with(roundtrip_log_line(45, {"companies": [], "steps": 9}, 5, n_unmixable=0)) \
             .replace("・スケール不一致で不採用 218行（44社）", "")
         assert parse_nightly_log(log)["scale_mismatch_rows"] == 0
+
+
+# #644 の書式（#773 の区切りが入る前）の実ログ。9/30 は警告が出た晩、10/01 は判定の記録で黙った晩。
+LINE_RT_HIT_0930 = "**往復段差 4社**（例: E00024, E04980, E35948, E40060）＝調整差のある社の日次に「飛んで戻る」帯がある。1つの列に2つのスケールが混ざった疑い。`python -m scripts.repair_scale_mixture` で確認する（#620）・判定済みの非該当 3帯を除外"
+LINE_RT_NONE_1001 = "往復段差: なし（調整差のある 68社を検査・判定済みの非該当 16帯を除外）"
+
+
+class TestUnmixableBandsLogged:
+    """#773: 構造上混ざりようのない帯の数を、判定済みの除外とは別に読む。"""
+
+    def test_both_counts_are_read(self):
+        line = roundtrip_log_line(68, {"companies": [], "steps": 9}, 7, n_unmixable=9)
+        r = parse_nightly_log(_night_with(line))
+        assert r["roundtrip_unmixable"] == 9 and r["roundtrip_excluded"] == 7
+        assert r["roundtrip"] == "なし" and warnings_for(r) == []
+
+    def test_hit_line_is_still_flagged(self):
+        found = {"companies": [{"edinet_code": "E00024", "bands": [_BAND]}], "steps": 9}
+        r = parse_nightly_log(_night_with(roundtrip_log_line(68, found, 0, n_unmixable=9)))
+        assert r["roundtrip"] == "検出" and r["roundtrip_companies"] == 1
+        assert r["roundtrip_unmixable"] == 9
+        assert any("repair_scale_mixture" in w for w in warnings_for(r))
+
+    def test_zero_is_zero_not_unknown(self):
+        r = parse_nightly_log(_night_with(
+            roundtrip_log_line(45, {"companies": [], "steps": 9}, 0, n_unmixable=0)))
+        assert r["roundtrip_unmixable"] == 0
+
+    @pytest.mark.parametrize("line, judged", [(LINE_RT_HIT_0930, 3), (LINE_RT_NONE_1001, 16)])
+    def test_the_judged_only_format_is_unknown(self, line, judged):
+        """#773 より前の晩は「構造除外 0」ではなく不明。判定済みの数はそのまま読める。"""
+        r = parse_nightly_log(_night_with(line))
+        assert r["roundtrip_unmixable"] is None and r["roundtrip_excluded"] == judged
+
+    def test_table_column(self):
+        from scripts.check_nightly_collect import ROWS
+
+        get = dict(ROWS)["往復段差 構造除外"]
+        line = roundtrip_log_line(68, {"companies": [], "steps": 9}, 7, n_unmixable=9)
+        assert get(parse_nightly_log(_night_with(line))) == "9"
+        assert get(parse_nightly_log(_night_with(LINE_RT_NONE_1001))) == "-"
 
 
 class TestHttp404Breakdown:

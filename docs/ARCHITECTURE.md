@@ -762,6 +762,17 @@ Yahoo gap-fill が直近セッションを、J-Quants catchup が `today-90 〜 
 `(edinet_code, start, end, 往き比, 戻り比)` で、帯の値が書き換われば再び警告される。判定不能の帯は
 記録しない。保持窓（`DAILY_WINDOW_DAYS`）の外へ出た帯は書き込み時に掃除する。
 
+判定済みの除外の**前に**、開始日が `collector_utils.OFFICIAL_SCALE_WRITABLE_UNTIL` より後の帯を
+`exclude_unmixable_bands` で落とす（#773）。境界は「#620 の反映日 `SCALE_FILTER_SINCE`（2026-09-08）−
+当時の catchup の右端の遅れ `PRE_FILTER_CATCHUP_LAG_DAYS`（80日）」= 2026-06-20 で、#620 以降は
+`AdjC != C` の行を誰も書かないので、それより後に始まる帯は公式スケールで書かれようがない（J-Quants の値を
+日次へ渡すのは `collect_stock_price_history_jquants` の1本だけで、3つの入口がすべて選別を通る）。80日は
+過去の事実なので、今の catchup 窓を変えても動かさない。状態を持たないので、分割の波で `AdjC != C` の社が
+急増した晩も突合なしで黙る（実測: #770 の13帯のうち9帯）。ログの往復段差の行は「2026-06-20 より後に
+始まる帯 N帯を除外・判定済みの非該当 M帯を除外」をどちらも 0 でも出し、`check_nightly_collect` は前者を
+「往復段差 構造除外」の列で読む。**2026-12-21 に境界以前の行が保持窓から消え、以後この検知は構造上
+鳴らない**ので、退役を #775 で扱う。
+
 ### 取引では起こりえない段差を書かない（#765・ADR-0053 追記）
 
 Yahoo は TOB 後のスクイーズアウトの株式併合を split として登録し、比率倍の終値を返す

@@ -1827,13 +1827,41 @@ def exclude_judged_bands(found: dict, judged: set) -> tuple:
     return {**found, "companies": companies}, n_excluded
 
 
-def roundtrip_log_line(n_checked: int, found: dict, n_excluded: int) -> str:
+# ── #620 以降は混ざりようがない帯（#773）──────────────────────────────────────────
+#
+# 分割の波が来ると `AdjC≠C` の社が急増し、社単位の交差が実際の往復まで拾う（実測 9/29 に
+# 15→68社、4社・13帯が警告され、公式突合で13帯すべて非該当）。そのうち開始日が
+# `OFFICIAL_SCALE_WRITABLE_UNTIL` より後の帯は、突合しなくても混在ではありえない——その日付を
+# 公式スケールで書いた者がいない。状態を持たない日付の線引きなので、保持窓（183日）が
+# 境界を過ぎる 2026-12-21 以降はすべての帯がここで落ち、検知は鳴らなくなる。
+
+def exclude_unmixable_bands(found: dict,
+                            until: date = OFFICIAL_SCALE_WRITABLE_UNTIL) -> tuple:
+    """開始日が `until` より後の帯を落とす。`(結果, 除いた帯の数)`（`exclude_judged_bands` と同じ形）。
+
+    境界を跨ぐ帯（開始が `until` 以前）は残す——中に公式スケールで書かれえた日を含む。
+    """
+    limit = until.isoformat()
+    companies, n_excluded = [], 0
+    for c in found["companies"]:
+        keep = [b for b in c["bands"] if str(b["start"])[:10] <= limit]
+        n_excluded += len(c["bands"]) - len(keep)
+        if keep:
+            companies.append({**c, "bands": keep})
+    return {**found, "companies": companies}, n_excluded
+
+
+def roundtrip_log_line(n_checked: int, found: dict, n_excluded: int, *,
+                       n_unmixable: int) -> str:
     """夜間ログの往復段差の1行（`scripts/check_nightly_collect.py` が読む）。
 
     **除いた帯の数は 0 でも必ず出す。** 出ていない晩＝この記録が入る前の書式＝「不明」と
     読めるようにするため（0 のとき行を省くと、旧書式の晩まで「除外 0」に見える）。
+    `n_unmixable` は `exclude_unmixable_bands`（#773）、`n_excluded` は判定済みの記録（#644）が
+    除いた帯の数。
     """
-    excluded = f"判定済みの非該当 {n_excluded}帯を除外"
+    excluded = (f"{OFFICIAL_SCALE_WRITABLE_UNTIL.isoformat()} より後に始まる帯 {n_unmixable}帯を除外"
+                f"・判定済みの非該当 {n_excluded}帯を除外")
     comps = found["companies"]
     if not comps:
         return f"往復段差: なし（調整差のある {n_checked}社を検査・{excluded}）"
