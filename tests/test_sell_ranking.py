@@ -507,6 +507,31 @@ class TestMuSource:
         by = {r["sec_code"]: r for r in res["results"]}
         assert by["1001"]["score"] > by["1005"]["score"]   # 低μ → 売り上位
 
+    def test_mu_standardized_over_tradable_universe_only(self, db, make_metric):
+        """μ̂ の標準化基準は universe（tradable）にいる社だけ（#780）。
+
+        producer は廃止社にも「現在の」μ̂ を付けて保存する。全行を基準にすると、#605 が
+        表示から外した社が平均・標準偏差へ戻り、保有銘柄の z 値が動く。
+        """
+        from plugins.utils import fit_zscore_stats, normalize_transform
+        self._seed_universe(db, make_metric)
+        # 廃止社（universe から tradable_filters で落ちる）に極端な μ̂ を持たせる
+        db.add(make_metric(edinet_code="E0099", sec_code="1099", company_name="廃止社",
+                           year=2023, roe=1.0, is_active=False))
+        db.commit()
+        mus = {"E0001": -0.10, "E0002": -0.05, "E0003": 0.0, "E0004": 0.05, "E0005": 0.10}
+        self._seed_m6(db, {**mus, "E0099": 3.0})
+
+        res = _run({"holdings": "1001", "weights": {"mu": 1.0}, "min_coverage": 0.0,
+                    "mu_source": "macro_enet", "timing_adjust": False}, db)
+
+        mean_, sd = fit_zscore_stats(list(mus.values()))
+        expected = round(-normalize_transform(-0.10, mean_, sd, "zscore"), 4)
+        assert res["results"][0]["score"] == expected
+        # 廃止社を基準に入れた値とは違う（このテストが区別できていることの確認）
+        mean_all, sd_all = fit_zscore_stats([*mus.values(), 3.0])
+        assert expected != round(-normalize_transform(-0.10, mean_all, sd_all, "zscore"), 4)
+
     def test_macro_enet_graceful_when_not_run(self, db, make_metric):
         """M-6 未実行（macro_enet_scores 空）でも μ を除外して判定継続（ADR-0004）。"""
         self._seed_universe(db, make_metric)

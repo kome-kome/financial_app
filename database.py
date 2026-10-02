@@ -1352,19 +1352,42 @@ def stale_price_codes(db, bdays: int = PRICE_STALE_ALERT_BDAYS) -> set:
     return {ec for (ec,) in db.query(sub.c.ec).filter(sub.c.d < cutoff).all() if ec}
 
 
-def tradable_filters(db) -> list:
+def tradable_filters(db, *, is_active=None, edinet_code=None) -> list:
     """「買える銘柄」の WHERE 条件（#315 の上場廃止除外 ＋ #605 の価格停止除外）。
 
     **推奨・ギャップ・ネットキャッシュ・売却ランキングの4経路が必ずこれを共有する。**
     1箇所だけ直すと「推奨には出ないが売却候補には出る」状態になる。
 
-    `is_active` 未設定（旧データ）は対象に含める（`isnot(False)` で NULL を許容）。
+    表示だけでなく**計算の母集団**も同じ判定を共有する（#780）: sector_ols の当日回帰は
+    `financial_records`＋`companies` の JOIN を読むので、`is_active` / `edinet_code` に
+    その列を渡して同じ条件を掛ける。既定は `FinancialMetric`（VIEW）の列。判定の中身を
+    呼び出し側で書き写さないこと。
+
+    `is_active` 未設定（旧データ・外部結合で companies に行が無い社）は対象に含める
+    （`isnot(False)` で NULL を許容）。
     """
-    conds = [FinancialMetric.is_active.isnot(False)]
+    is_active = FinancialMetric.is_active if is_active is None else is_active
+    edinet_code = FinancialMetric.edinet_code if edinet_code is None else edinet_code
+    conds = [is_active.isnot(False)]
     codes = stale_price_codes(db)
     if codes:
-        conds.append(FinancialMetric.edinet_code.notin_(codes))
+        conds.append(edinet_code.notin_(codes))
     return conds
+
+
+def non_tradable_codes(db) -> set:
+    """`tradable_filters` を満たさない社の edinet_code 集合（companies 基準・#780）。
+
+    producer が保存する代表 as-of（`macro_snapshots.tradable_snapshot_asof`）から、もう買えない社を
+    除くために使う。条件は Python で書き直さず、`tradable_filters` を `companies` の列で評価した
+    否定で引く（判定の源を1つに保つ）。companies に行が無い社はここに入らない＝「買えない」と
+    数えない（`stale_price_codes` が価格行の無い社を落とさないのと同じ保守側）。
+
+    例外は握らない（`stale_price_codes` と同じ理由: 空集合へ倒すと除外が黙って無効になる）。
+    """
+    from sqlalchemy import and_, not_
+    conds = tradable_filters(db, is_active=Company.is_active, edinet_code=Company.edinet_code)
+    return {ec for (ec,) in db.query(Company.edinet_code).filter(not_(and_(*conds))).all() if ec}
 
 
 # ── 5g. ハイパーパラメータ自動探索の結果永続化（Issue #264）─────────────────────

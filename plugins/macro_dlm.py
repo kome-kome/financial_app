@@ -187,7 +187,7 @@ from .macro_snapshots import (  # noqa: E402
     PRICE_FEATURE_OPTIONS,
     DEFAULT_PRICE_FEATURES,
     build_price_features as _build_price_features,
-    representative_snapshot_date,
+    tradable_snapshot_asof,
     _PX_RVOL_WINDOW,
     _PX_VOLZ_WINDOW,
     _PX_HIGH52_WINDOW,
@@ -812,7 +812,8 @@ class MacroDlmPlugin(AnalysisPlugin):
 
         # snapshot_date は銘柄別 snap_date の代表値＝中央値（max だと最新の 1〜2 銘柄が
         # 全体の as-of を名乗る・Issue #417）。objective_only 時は snap_date を持たない。
-        _asof = representative_snapshot_date(r.get("snap_date") for r in rows)
+        # 母集団は今買える社だけ（廃止・価格停止の社の μ̂ は保存するが as-of には数えない・#780）。
+        _asof = tradable_snapshot_asof(db, ((r["edinet_code"], r.get("snap_date")) for r in rows))
 
         # top_n のみ α/β 経路（信用区間バンド）を構築して付与
         for r in rows[:top_n]:

@@ -13,6 +13,7 @@ M-1（macro_risk_return）と M-2（macro_gbdt）の共通面を集約し、M-2�
   - producer スコア（producer_scores / get_producer_scores）
 """
 import contextvars
+import logging
 import math
 import statistics
 import sys
@@ -26,6 +27,8 @@ import pandas as pd
 
 from . import progress
 from .utils import macro_risk_exposure, normalize, winsorize
+
+logger = logging.getLogger(__name__)
 
 # ── 定数 ──────────────────────────────────────────────────────────────────
 
@@ -478,6 +481,35 @@ def representative_snapshot_date(snap_dates) -> dict:
         "snapshot_date_max": ds[-1],
         "n_stale":           sum(1 for s in ds if s < p50),
     }
+
+
+def tradable_snapshot_asof(db, pairs) -> dict:
+    """producer の代表 as-of を「今買える社」だけで作る（#780）。
+
+    producer は廃止・価格停止の社にも各社の最終週次バー時点の「現在の」μ̂ を付けて保存する
+    （読み手の推奨・売却はそれぞれ tradable な母集団へ絞るので、μ̂ の行そのものは無害）。
+    しかし as-of は保存時に全行から作るため、M-6 で `n_stale=113` の大半がもう売買されて
+    いない社だった＝朝の鮮度カードと売却画面の as-of 行が鮮度の問題を表していなかった。
+    社ごとのスナップ日は保存していないので、絞れるのはここ（保存時）だけ。
+
+    `pairs` は `(edinet_code, snap_date)` の列。除く社は `database.non_tradable_codes`
+    （`tradable_filters` の否定）で、判定を書き写さない。
+
+    **全社が除かれたとき**（価格収集そのものが `PRICE_STALE_ALERT_BDAYS` 超止まった）は全社で
+    代表させる。空のまま返すと as-of が None になり、画面は「未蓄積」と出すが、本当の状態は
+    「古い」——古さが見える方を採る。
+    """
+    from database import non_tradable_codes
+
+    pairs = list(pairs)
+    excluded = non_tradable_codes(db)
+    kept = [d for ec, d in pairs if ec not in excluded]
+    if (not any(to_date_str(d) for d in kept)
+            and any(to_date_str(d) for _, d in pairs)):
+        logger.warning("代表 as-of: 買える社が1社も残らない（%d社すべて廃止・価格停止）。"
+                       "全社で代表させる（価格収集の停止を疑う）", len(pairs))
+        kept = [d for _, d in pairs]
+    return representative_snapshot_date(kept)
 
 
 def month_end_indices(dates: list) -> list[int]:

@@ -53,8 +53,8 @@ from .macro_snapshots import (
     get_producer_scores,
     load_data,
     oof_backtest,
-    representative_snapshot_date,
     to_date_str,
+    tradable_snapshot_asof,
     preload_macro,
 )
 from .macro_risk_return import MacroRiskReturnPlugin as _M1
@@ -345,8 +345,9 @@ class MacroEnetPlugin(AnalysisPlugin):
 
         # ── producer μ̂ を永続化（sell_ranking が mu_source=macro_enet で読む・Issue #396）─
         # as-of は max ではなく中央値を代表値にする（Issue #417）。
-        _asof = representative_snapshot_date(
-            current_snaps[c][1].get("snap_date") for c in codes_ordered)
+        # 母集団は今買える社だけ（廃止・価格停止の社の μ̂ は保存するが as-of には数えない・#780）。
+        _asof = tradable_snapshot_asof(
+            db, ((c, current_snaps[c][1].get("snap_date")) for c in codes_ordered))
         self._persist_producer(db, raw_items, _asof)
 
         return {
@@ -371,7 +372,7 @@ class MacroEnetPlugin(AnalysisPlugin):
     def _persist_producer(db: Any, raw_items: list, asof: dict) -> None:
         """producer μ̂ を macro_enet_scores へ永続化（M-2 の _persist_producer と同型）。
 
-        asof は `representative_snapshot_date` の戻り値（代表値=中央値・最古・古い銘柄数）。
+        asof は `tradable_snapshot_asof` の戻り値（代表値=中央値・最古・古い銘柄数）。
         永続化失敗（読取専用DB等）は分析表示を妨げない＝握りつぶす（producer は次回実行で
         再生成される）。探索中は replace 側が `tuning_dry_run()` で no-op（Issue #264）。"""
         from database import replace_macro_enet_scores

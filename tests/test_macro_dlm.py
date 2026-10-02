@@ -32,6 +32,18 @@ plugin = MacroDlmPlugin()
 
 # ── 1. meta ──────────────────────────────────────────────────────────────────
 
+@pytest.fixture(autouse=True)
+def _no_tradable_lookup(monkeypatch):
+    """producer の as-of の母集団判定（#780）を素通しにする。
+
+    このファイルの execute は MagicMock の db で回すことが多く、`stale_price_codes` の
+    比較式（`sub.c.d < cutoff`）が組めず TypeError になる。母集団の判定そのものはここの
+    主題ではなく、tests/test_tradable_universe.py が実 DB（SQLite）で縛る。空集合なら
+    as-of は全行の代表値＝変更前と同じ値になるので、既存の assert はそのまま読める。
+    """
+    monkeypatch.setattr("database.non_tradable_codes", lambda db: set())
+
+
 class TestPluginMeta:
     def test_name(self):
         assert plugin.name == "macro_dlm"

@@ -211,6 +211,25 @@ graph TD
 >   価格行を1本も持たない銘柄は落とさない（判定できるのは「止まった」であって「無い」ではない）。
 >   4経路が同じ `tradable_filters` を共有することは `tests/test_tradable_universe.py` が AST で
 >   縛る——1箇所だけ直すと「推奨には出ないが売却候補には出る」形で静かに食い違う。
+> - **計算の母集団も同じ判定を共有する（Issue #780）**: #605 が直したのは表示母集団だけで、計算には
+>   廃止・停止の社が残っていた。次の3つも `tradable_filters` を共有する（同じく AST で縛る）。
+>   - **sector_ols の当日回帰**（既定・`year` 指定）: `financial_records`＋`companies` の JOIN を読むので、
+>     `tradable_filters(db, is_active=Company.is_active, edinet_code=FinancialRecord.edinet_code)` と列を
+>     渡して掛ける。実測（2026-10-02）で廃止25社・停止17社が最終株価のまま回帰に入り、整理銘柄の暴落価格
+>     （`stock_price=1.0` → gap +47,963%）が業種の係数と α を通じて現役社の gap を動かしていた。外すと
+>     現役社の gap は全体で順位相関 0.991・中央値 0.79pt 動き、ridge の α が切り替わった4業種
+>     （輸送用機器 100→1000 ほか）で最大 1,092pt 動いた（α が平坦な谷で跳ぶ問題は #761）。
+>     **時点再現（`all_years=True`・`sector_gap_asof`）には掛けない**——「その月末に週次の足を持つ社」で
+>     もともと廃止社を含まず、今日の上場状態で絞ると生存者バイアスになる。今回の変更で本番の当日回帰が
+>     学習パネルの母集団に揃った（だから `PREPROCESS_VERSION` は上げていない）。外した社の
+>     `regression_results` の既存行は消さない（表示は `tradable_filters` が隠す）。
+>   - **sell_ranking の `mu` / `neg_r_macro` の標準化基準**: producer の全行ではなく universe にいる社の μ̂。
+>     M-6 では 1,719行のうち77行が外れ、標準偏差が 0.0642 → 0.0559 になった。
+>   - **producer の代表 as-of**（M-2・M-3・M-6・M-4）: μ̂ の行は全社ぶん保存したまま（読み手が各自の
+>     母集団で絞る）、as-of だけを `macro_snapshots.tradable_snapshot_asof` で今買える社から作る。社ごとの
+>     スナップ日は保存しないので絞れるのは保存時だけ。除く社は `database.non_tradable_codes`
+>     （`tradable_filters` の否定）。全社が落ちたら全社で代表させる（「未蓄積」ではなく古さを見せる）。
+>   - `macro_beta_loadings`（M-1 の学習データ）には掛けない（階層ベイズのプーリングは過去の社を要する・#315）。
 >
 > **`nightly_model_diagnostics`（#726・[ADR-0061](adr/0061-nightly-keeps-the-diagnostics-it-already-computes.md)）**: 夜間の producer が毎晩計算して捨てていた診断値（`sector_ols` の業種別 ridge α・R²・VIF 警告、`macro_enet` の CV が選んだ α / l1_ratio と α パスの端・OOF 成績・係数）を run_id × model で1行ずつ**追記**する。書き手は `nightly_scores.py` だけで、μ̂ / gap_ratio の検証が済んだ後に書き、直接クエリで確かめる（書けなければ `<model>:diagnostics` で非ゼロ終了）。入れるのは `DIAG_EXTRACTORS` の allowlist だけ（社別の行・社名は入れない）。**本番のスコアも起票もこれを読まない**——読み手は `python -m scripts.nightly_diag_report` だけ。
 >
