@@ -115,6 +115,21 @@ class TestAnnualRowsAreUnchanged:
 
 
 class TestTtmRows:
+    @pytest.fixture(autouse=True)
+    def _empty_ttm_table(self, conn):
+        """**取り消されるトランザクションの中で** TTM の表を空にしてから始める（#759）。
+
+        夜間の TTM 合成（#424 子2）が実データを書くようになり、このクラスが書かれた #689 の
+        「表は空」という前提が崩れた。崩れ方は2つある:
+
+        - 同じ社の同じ年度の行が既にあり、`_insert` が一意制約 `uq_ttm_edinet_year` で落ちる
+        - Zスコアの窓は `(year, basis)` で**社をまたぐ**ので、他社の実データの TTM 行
+          （実測 2026 年度だけで 3,125 行）を数えてしまう＝社の選び方では避けられない
+
+        TRUNCATE ではなく DELETE にするのは、表全体の ACCESS EXCLUSIVE を取らないため。
+        """
+        conn.execute(text("DELETE FROM ttm_financial_records"))
+
     def _insert(self, conn, ec: str, **over):
         vals = dict(edinet_code=ec, year=2026, period_end=date(2025, 9, 30),
                     filing_date=date(2025, 11, 14), industry="小売業",
@@ -171,7 +186,8 @@ class TestTtmRows:
         z = conn.execute(text(
             f"SELECT z_revenue FROM {VIEW} WHERE edinet_code = :ec AND basis = 'ttm'"),
             {"ec": ec}).scalar()
-        assert z is None      # 同じ年度・同じ基準の行が1本だけ＝COUNT >= 2 を満たさない
+        # 同じ年度・同じ基準の行が1本だけ＝COUNT >= 2 を満たさない（表を空にしてあるから言える）
+        assert z is None
 
     def test_gap_ratio_is_null_for_ttm_rows(self, conn):
         ec = _sample_company(conn)
