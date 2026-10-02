@@ -1,4 +1,4 @@
-"""Smart App Control が jaxlib の GPU/TPU 専用拡張を遮断しても、CPU の jax を立ち上げる。
+"""Smart App Control が CPU の推論で使わない jaxlib 拡張を遮断しても、CPU の jax を立ち上げる。
 
 なぜ要るか
 ----------
@@ -19,8 +19,9 @@ import して評価を通す」では直らない。SAC は OFF にしない（�
 
 何をするか
 ----------
-`GPU_ONLY_EXTENSIONS` に挙げたモジュールの読み込みが**SAC の遮断で**失敗したときだけ、その
-モジュールを空のモジュールで代替する。遮断された DLL は一度も実行されない——SAC をすり抜けるの
+`GPU_ONLY_EXTENSIONS`・`STUBBED_EXTENSIONS` に挙げたモジュールの読み込みが**SAC の遮断で**
+失敗したときだけ、そのモジュールを空のモジュール（後者は import 時に読まれる属性だけを持つ
+スタブ）で代替する。遮断された DLL は一度も実行されない——SAC をすり抜けるの
 ではなく、使わない部品を読まないだけである。
 
 - 遮断以外の理由（DLL が無い・依存 DLL が読めない等）の失敗はそのまま送出する
@@ -28,6 +29,16 @@ import して評価を通す」では直らない。SAC は OFF にしない（�
 - 空モジュールの属性を誰かが読めば `AttributeError` になる＝静かに誤った値は出ない
 - 代替した事実は `substituted()` で取れる。呼ぶ側がログへ残す（`deps_smoke` の `[warn ]` 行）
 - Windows 以外（CI の Linux・Render）では何も挿さない
+
+空モジュールでは足りない部品（#789）
+------------------------------------
+2026-10-03 01:00 の月次 M-1 では `jaxlib/cpu/_sparse.pyd`（CPU の疎行列カーネル）が遮断された。
+これは空モジュールでは救えない——numpyro が import 時に `jax.experimental.sparse` を読み、
+その冒頭（`_lowerings.py`）が `cpu_sparse.registrations()` を無条件に呼ぶので、属性が無いと
+import の段で落ちる。そこで `STUBBED_EXTENSIONS` には**import 時に読まれる属性だけ**を持つ
+スタブを置く。`registrations()` が `{}` を返すと CPU の疎行列カーネルが XLA へ登録されないだけで、
+NUTS の結果は代替なしとビット一致した。カーネルを本当に使う経路（BCSR 積）は
+`NOT_FOUND: No FFI handler registered ...` で止まる＝こちらも静かに誤った値は出ない。
 
 遮断かどうかは、例外の文面に Windows のエラー 4551 の文言が含まれるかで判定する。`ImportError`
 は winerror を持たないので番号では見られない。文言は `ctypes.FormatError` で OS の表示言語の
@@ -42,6 +53,7 @@ import importlib.abc
 import importlib.machinery
 import sys
 import types
+from typing import Any, Callable
 
 # jax が CPU でも起動時に import しうる、GPU / TPU 専用の拡張モジュール。**名前から GPU/TPU
 # 専用と分かるものだけ**を置く。5つ全部を空にしても CPU の jax 起動と NUTS が動くことを
@@ -53,6 +65,22 @@ GPU_ONLY_EXTENSIONS: frozenset[str] = frozenset({
     "jaxlib.mlir._mlir_libs._mlirGPUPasses",
     "jaxlib.mlir._mlir_libs._tpu_ext",
 })
+
+
+def _no_registrations() -> dict[str, Any]:
+    """登録する FFI ターゲットが無い（カーネルを使えば XLA が NOT_FOUND で止める）。"""
+    return {}
+
+
+# CPU の NUTS では使わないが、**import 時に属性を読まれる**ので空モジュールでは足りない拡張
+# （名前 → スタブに載せる属性）。載せるのは import の段で読まれる属性だけ——それ以外を読めば
+# 従来どおり AttributeError になる。代替なしと NUTS がビット一致することを 2026-10-03 に
+# 確かめた（jax 0.10.2・#789）。jaxlib を上げたら同じ確認をやり直すこと
+# （`tests/test_jax_import_guard.py` の結合テストが import の段までを縛る）。
+STUBBED_EXTENSIONS: dict[str, dict[str, Callable[..., Any]]] = {
+    # `jax.experimental.sparse._lowerings` が冒頭で `cpu_sparse.registrations()` を呼ぶ。
+    "jaxlib.cpu._sparse": {"registrations": _no_registrations},
+}
 
 # ERROR_APP_CONTROL_BLOCKED（「アプリケーション制御ポリシーによってこのファイルがブロックされました」）。
 ERROR_APP_CONTROL_BLOCKED = 4551
@@ -88,6 +116,8 @@ class _Loader(importlib.abc.Loader):
                 raise
         module = types.ModuleType(spec.name)
         module.__substituted_by__ = __name__
+        for attr, value in STUBBED_EXTENSIONS.get(spec.name, {}).items():
+            setattr(module, attr, value)
         _substituted.append(spec.name)
         return module
 
@@ -98,13 +128,13 @@ class _Loader(importlib.abc.Loader):
 
 
 class _Finder(importlib.abc.MetaPathFinder):
-    """`GPU_ONLY_EXTENSIONS` のときだけ本物の spec を取り、loader を包む。"""
+    """`GPU_ONLY_EXTENSIONS`・`STUBBED_EXTENSIONS` のときだけ本物の spec を取り、loader を包む。"""
 
     def __init__(self, message: str) -> None:
         self._message = message
 
     def find_spec(self, fullname, path, target=None):
-        if fullname not in GPU_ONLY_EXTENSIONS:
+        if fullname not in GPU_ONLY_EXTENSIONS and fullname not in STUBBED_EXTENSIONS:
             return None
         spec = importlib.machinery.PathFinder.find_spec(fullname, path)
         if spec is None or spec.loader is None:

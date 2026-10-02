@@ -76,6 +76,14 @@ class TestStepOrder:
         names = _names()
         assert names.index("deps_smoke") < names.index("tune:macro_risk_return")
 
+    def test_deps_smoke_checks_only_the_base(self):
+        """M-1 は jax / numpyro / pymc を import しない（`macro_beta_loadings` を読むだけ）。
+
+        2026-10-03 は M-1 が使わない `jaxlib/cpu/_sparse.pyd` の遮断で exit=1 になった（#789）。
+        """
+        argv = next(s.argv for s in rm1.steps_for("py") if s.name == "deps_smoke")
+        assert argv[argv.index("--profile") + 1] == "base"
+
     def test_every_step_states_why(self):
         for s in rm1.steps_for(sys.executable):
             assert s.why.strip(), f"{s.name} に理由が書かれていない"

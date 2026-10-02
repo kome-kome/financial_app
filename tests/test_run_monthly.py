@@ -204,6 +204,15 @@ class TestStepOrder:
         beta_names = [s.name for s in rmb.steps_for("py")]
         assert beta_names.index("deps_smoke") < beta_names.index("macro_beta")
 
+    def test_deps_smoke_checks_only_the_base(self):
+        """月次本体は jax / numpyro / pymc を使わない（macro_beta は #579 で出た）。
+
+        使わない jaxlib の部品が Smart App Control に遮断されただけで失敗扱いにしない（#789）。
+        """
+        argv = _argv("deps_smoke")
+        assert argv[argv.index("--profile") + 1] == "base"
+        assert not any(name.startswith("macro_beta") for name in _names())
+
     def test_remaining_tunes_are_ordered_lightest_first(self):
         """M-1 が別タスクへ出た後、本体に残る tune は M-3 → M-2（#584）。
 

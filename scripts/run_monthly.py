@@ -29,8 +29,9 @@ notify-failure でも macro-health でも拾えない。ADR-0031 が防ごうと
 `deps_smoke` は**重い依存を import できるかだけを確かめる軽いステップ**。2026-09-01 の初実走で
 Smart App Control が未評価の jaxlib DLL を初回ロードで弾き、`macro_beta` が exit=1 で落ちた
 （`scripts/check_heavy_imports.py`）。ここで消化すれば本番ステップは通り、消化できなければ
-180分の予算を待たずに失敗として現れる。**`macro_beta` より前**でありさえすれば役目は果たすので、
-位置は下の「軽い順」に従う。
+180分の予算を待たずに失敗として現れる。**tune 系より前**でありさえすれば役目は果たすので、
+位置は下の「軽い順」に従う。`macro_beta` が #579 で出ていったあとは jax / numpyro / pymc を使う
+ステップが無いので、確かめるのは基盤だけ（`--profile base`・#789）。
 
 残りは2つの制約の積:
 
@@ -201,8 +202,8 @@ def steps_for(python: str) -> tuple[Step, ...]:
                  "**`--backfill-weekly` は採用できた社にだけ走る**——解決しただけでは "
                  "daily 保持窓183日＝約26週しか付かず z_momentum の52週に届かない（#555）。"
                  "対象は最大でもバケットの社数なので窓を脅かさない"),
-        Step("deps_smoke", (python, "-m", "scripts.check_heavy_imports"),
-             why="重い依存（pymc / jax / numpyro 等）が実際に import できるかを確かめる。"
+        Step("deps_smoke", (python, "-m", "scripts.check_heavy_imports", "--profile", "base"),
+             why="重い依存（numpy / scipy / sklearn / statsmodels 等）が実際に import できるかを確かめる。"
                  "2026-09-01 の初実走では Smart App Control が 8/21 の jaxlib 更新で入った"
                  "未評価の `_ifrt_proxy.pyd` を**初回ロードでブロック**し、`macro_beta` が "
                  "exit=1 で落ちて 1か月ぶんの `macro_beta_loadings` が固着した"
@@ -211,8 +212,10 @@ def steps_for(python: str) -> tuple[Step, ...]:
                  "それでも落ちるなら数百分の予算を待たず起票される。"
                  "位置は「軽い順」の原則に従う（vacuum を除く先頭は最軽量の price_suffix）——"
                  "重い依存を実際に使う最初のステップより前でありさえすれば役目は果たす。"
-                 "**`macro_beta` は #579 で `run_monthly_beta.py` へ出た**が、tune 系も同じ"
-                 "依存群を使うのでここは残す"),
+                 "**`macro_beta` は #579 で `run_monthly_beta.py` へ出た**ので、jax / numpyro / "
+                 "pymc を使うステップはもう無い（factor_premia・tune 系は基盤だけ）。"
+                 "基盤（`--profile base`）だけを確かめる——使わない jaxlib の部品の遮断で "
+                 "失敗扱いにしない（#789）"),
         Step("factor_premia",
              (python, "recommend_factor_premia.py",
               "--min-companies-per-period", "30", "--maxlags", "11", "--persist"),
