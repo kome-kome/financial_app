@@ -39,6 +39,13 @@ from datetime import datetime, timezone
 
 import numpy as np
 
+import jax_import_guard
+
+# jax より先に挿す。Smart App Control が jaxlib の GPU 専用拡張を遮断しても CPU の jax を
+# 立ち上げる（#782）。ここで挿すので、このモジュールを先に import する bench / experiment /
+# grid も覆われる。Windows 以外では何もしない。
+jax_import_guard.install()
+
 logger = logging.getLogger("macro_beta_inference")
 
 # heartbeat の間隔[秒]。5分は「生死の判定に十分な粒度」と「数時間ぶんでもログが読める量
@@ -426,6 +433,10 @@ def run_inference(draws: int = 1000, tune: int = 1000, target_accept: float = 0.
     if nuts_sampler == "numpyro":
         import os
         import numpyro
+        if jax_import_guard.substituted():
+            logger.warning("Smart App Control が遮断した GPU/TPU 専用の jaxlib 拡張を空モジュールで"
+                           "代替した（CPU 推論では使わない・#782）: %s",
+                           ", ".join(jax_import_guard.substituted()))
         os.environ.setdefault("XLA_FLAGS", f"--xla_force_host_platform_device_count={chains}")
         numpyro.set_host_device_count(chains)
         sample_kwargs["nuts_sampler"] = "numpyro"
