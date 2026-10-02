@@ -849,3 +849,131 @@ class TestMasterAsOfProtectsNewListings:
         assert result["delisted"] == 1
         assert result["protected"] == 0
         assert db.query(Company).filter_by(sec_code="589A").one().is_active is False
+
+
+class TestPriceAliveLocalListings:
+    """マスタに載らない地方単独上場を、株価が生きていれば delisted にしない（#779）。
+
+    `/equities/master` は東証銘柄しか載せないので、札証・福証の単独上場（`yahoo_suffix`
+    解決済み・#555）は「載っていない＝廃止」と読まれ、2026-08-08 の初回同期で37社が
+    一括 delisted になった。復帰の条件（マスタに再び載る）を永久に満たさず、推奨・売却・
+    ギャップ・ネットキャッシュの母集団から静かに落ちていた。
+
+    判定は「最終足が #605 と同じ10営業日以内」かつ「as-of より後に出来高>0 の足がある」。
+    日付は今日基準の相対値（固定日付だと時間が経つと最終足が古くなって意味が変わる）。
+    """
+
+    _AS_OF_DAYS = 84   # 実測のマスタ as-of は「今日−84日」（#463）
+
+    def _setup(self, db, make_company, make_price, *, suffix=".S", is_active=True,
+               after_as_of_volume=500.0, recent_volume=100.0, recent_days_ago=1):
+        """1001（マスタ収載）と 2137（マスタ未収載）を作り、2137 に3本の足を置く。
+
+        as-of より前の足を必ず持たせる＝ #463 の `protected`（履歴が as-of 後に始まる）で
+        救われないようにして、#779 の判定だけを測る。
+        """
+        today = date.today()
+        as_of = today - timedelta(days=self._AS_OF_DAYS)
+        db.add(make_company(edinet_code="E00001", sec_code="1001", name="東証上場"))
+        db.add(make_company(edinet_code="E00010", sec_code="2137", name="札証単独上場",
+                            yahoo_suffix=suffix, is_active=is_active,
+                            delisted_date=None if is_active else date(2026, 8, 8)))
+        db.commit()
+        for d, vol in ((as_of - timedelta(days=30), 300.0),
+                       (as_of + timedelta(days=10), after_as_of_volume),
+                       (today - timedelta(days=recent_days_ago), recent_volume)):
+            db.add(make_price(edinet_code="E00010", trade_date=d.isoformat(), volume=vol))
+        db.commit()
+        return as_of.isoformat()
+
+    def _company(self, db):
+        from database import Company
+        return db.query(Company).filter_by(sec_code="2137").one()
+
+    def test_live_local_listing_is_not_delisted(self, db, make_company, make_price):
+        from database import sync_active_status
+
+        as_of = self._setup(db, make_company, make_price)
+        result = sync_active_status(db, {"1001"}, master_as_of=as_of)
+
+        assert result == {"delisted": 0, "reactivated": 0, "protected": 0, "price_alive": 1}
+        assert self._company(db).is_active is True
+
+    def test_already_delisted_local_listing_is_reactivated(self, db, make_company, make_price):
+        """本番の37社の状態（2026-08-08 に一括 delisted）から戻ること。"""
+        from database import sync_active_status
+
+        as_of = self._setup(db, make_company, make_price, is_active=False)
+        result = sync_active_status(db, {"1001"}, master_as_of=as_of)
+
+        assert result["reactivated"] == 1
+        assert result["price_alive"] == 1
+        co = self._company(db)
+        assert co.is_active is True
+        assert co.delisted_date is None
+
+    def test_thinly_traded_listing_survives_zero_volume_days(self, db, make_company, make_price):
+        """直近の足が出来高0でも、as-of より後に約定があれば生きている（実測: 約定が29営業日空く社）。"""
+        from database import sync_active_status
+
+        as_of = self._setup(db, make_company, make_price, recent_volume=0.0)
+        result = sync_active_status(db, {"1001"}, master_as_of=as_of)
+
+        assert result["price_alive"] == 1
+        assert self._company(db).is_active is True
+
+    def test_ghost_bars_do_not_keep_it_listed(self, db, make_company, make_price):
+        """as-of より後の足が全部出来高0＝幽霊足（#769 の 1734）なら救わない。"""
+        from database import sync_active_status
+
+        as_of = self._setup(db, make_company, make_price,
+                            after_as_of_volume=0.0, recent_volume=0.0)
+        result = sync_active_status(db, {"1001"}, master_as_of=as_of)
+
+        assert result["delisted"] == 1
+        assert result["price_alive"] == 0
+        assert self._company(db).is_active is False
+
+    def test_ghost_bars_do_not_reactivate(self, db, make_company, make_price):
+        from database import sync_active_status
+
+        as_of = self._setup(db, make_company, make_price, is_active=False,
+                            after_as_of_volume=0.0, recent_volume=0.0)
+        result = sync_active_status(db, {"1001"}, master_as_of=as_of)
+
+        assert result["reactivated"] == 0
+        assert self._company(db).is_active is False
+
+    def test_stopped_prices_do_not_keep_it_listed(self, db, make_company, make_price):
+        """最終足が10営業日より古い＝ #605 の価格停止と同じ線を越えたら救わない。"""
+        from database import sync_active_status
+
+        as_of = self._setup(db, make_company, make_price, recent_days_ago=30)
+        result = sync_active_status(db, {"1001"}, master_as_of=as_of)
+
+        assert result["delisted"] == 1
+        assert result["price_alive"] == 0
+
+    def test_tse_company_is_still_judged_by_master(self, db, make_company, make_price):
+        """接尾辞が無い（東証）社はマスタが証言できるので、株価が生きていても救わない。
+
+        株価で救うと、as-of の直後に廃止した 3593 型（#463）まで上場扱いに戻りうる。
+        """
+        from database import sync_active_status
+
+        as_of = self._setup(db, make_company, make_price, suffix=None)
+        result = sync_active_status(db, {"1001"}, master_as_of=as_of)
+
+        assert result["delisted"] == 1
+        assert result["price_alive"] == 0
+        assert self._company(db).is_active is False
+
+    def test_without_as_of_no_price_protection(self, db, make_company, make_price):
+        """as-of が無い晩は窓を決められないので掛けない（`protected` と同じ扱い）。"""
+        from database import sync_active_status
+
+        self._setup(db, make_company, make_price)
+        result = sync_active_status(db, {"1001"})
+
+        assert result["delisted"] == 1
+        assert result["price_alive"] == 0
