@@ -76,6 +76,8 @@ class TestRunFullCollection:
             patch("collector_financials.parse_xbrl_csv", return_value=_parsed_financial()),
             patch("collector_financials.update_industry_from_jpx",
                   new=AsyncMock(return_value=(0, 0))),
+            patch("collector_financials.fill_industry_from_edinet_codelist",
+                  new=AsyncMock(return_value=(0, 0))),
             patch("collector.asyncio.sleep", new=AsyncMock()),
         ):
             cancelled = self._run(run_full_collection(db, years_back=1))
@@ -98,6 +100,8 @@ class TestRunFullCollection:
             patch("collector_financials.fetch_xbrl_csv",
                   new=AsyncMock(side_effect=RuntimeError("EDINET 障害テスト"))),
             patch("collector_financials.update_industry_from_jpx",
+                  new=AsyncMock(return_value=(0, 0))),
+            patch("collector_financials.fill_industry_from_edinet_codelist",
                   new=AsyncMock(return_value=(0, 0))),
             patch("collector.asyncio.sleep", new=AsyncMock()),
         ):
@@ -126,6 +130,8 @@ class TestRunFullCollection:
             patch("collector_financials.parse_xbrl_csv", return_value=_parsed_financial()),
             patch("collector_financials.update_industry_from_jpx",
                   new=AsyncMock(return_value=(0, 0))),
+            patch("collector_financials.fill_industry_from_edinet_codelist",
+                  new=AsyncMock(return_value=(0, 0))),
             patch("collector.asyncio.sleep", new=AsyncMock()),
         ):
             self._run(run_full_collection(db, years_back=1, skip_existing=True))
@@ -135,6 +141,31 @@ class TestRunFullCollection:
         # 既存レコードは変更されない
         db.refresh(rec)
         assert rec.bs_total_assets == 999.0
+
+    def test_edinet_codelist_failure_does_not_stop_collection(self, db):
+        """業種補完の失敗は WARNING どまり（#784）。最後の1歩で送出すると XBRL 差分収集を丸ごと
+        retry させる（#632 と同じ理由）。失敗は足跡が進まないことで watchdog に現れる。"""
+        from collector_utils import EdinetCodelistError
+        edinet = AsyncMock(side_effect=EdinetCodelistError("配布ホスト停止テスト"))
+        with (
+            patch("collector_financials.fetch_edinet_code_list",
+                  new=AsyncMock(return_value=_company_df())),
+            patch("collector_financials.collect_doc_ids_for_period",
+                  new=AsyncMock(return_value=_doc_list())),
+            patch("collector_financials.fetch_xbrl_csv",
+                  new=AsyncMock(return_value=_xbrl_df())),
+            patch("collector_financials.parse_xbrl_csv", return_value=_parsed_financial()),
+            patch("collector_financials.update_industry_from_jpx",
+                  new=AsyncMock(return_value=(0, 0))) as jpx,
+            patch("collector_financials.fill_industry_from_edinet_codelist", new=edinet),
+            patch("collector.asyncio.sleep", new=AsyncMock()),
+        ):
+            cancelled = self._run(run_full_collection(db, years_back=1))
+
+        assert cancelled is False
+        jpx.assert_awaited_once()
+        edinet.assert_awaited_once()
+        assert db.query(FinancialRecord).filter_by(doc_id="S100TEST").count() == 1
 
 
 # ── reparse_from_raw (#75) ────────────────────────────────────────────────

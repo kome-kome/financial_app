@@ -797,6 +797,36 @@ class TestJpxIndustryProducer:
         assert all(r["status"] == "ok" for r in rows)
 
 
+class TestEdinetCodelistProducer:
+    """EDINET コードリストでの業種の空欄補完も夜間バッチの producer（#784）。
+
+    埋めた業種は取得が止まっても残るので、止まっている間に上場した地方単独上場の社だけが
+    業種別回帰から静かに漏れる＝JPX と同じ形の穴。
+    """
+
+    LABEL = "EDINET コードリスト（業種の空欄補完）"
+
+    def test_it_reads_its_own_footprint(self, monkeypatch):
+        """JPX の足跡と取り違えない（片方だけ止まる形を見分けるため）。"""
+        from database import KEY_EDINET_CODELIST_LAST_SUCCESS, KEY_JPX_INDUSTRY_LAST_SUCCESS
+        seen = {}
+
+        def fake_get(db, key):
+            seen["key"] = key
+            return NOW.isoformat()
+
+        monkeypatch.setattr(bf, "_get_setting", fake_get)
+        assert bf._edinet_codelist_at(_FakeDB()) == NOW
+        assert seen["key"] == KEY_EDINET_CODELIST_LAST_SUCCESS
+        assert KEY_EDINET_CODELIST_LAST_SUCCESS != KEY_JPX_INDUSTRY_LAST_SUCCESS
+
+    def test_a_stale_footprint_fires(self, settings):
+        snap = _snap(settings)
+        snap["producers"] = _producers({**FRESH_PRODUCERS, self.LABEL: 3.0})
+        found = cbf.problems(snap)
+        assert [f["title"] for f in found] == [_by_label(self.LABEL).issue_title]
+
+
 # ── 復旧したら閉じる（#635）────────────────────────────────────────────────
 # #634 は起票の16分後に解消したが、閉じるのが人の手だったので翌日まで open のまま残った。
 # 閉じ忘れた Issue へ次の欠落が追記されると、直った話と今の話が同じスレッドに混ざって埋もれる。

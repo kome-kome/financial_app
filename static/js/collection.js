@@ -460,7 +460,8 @@ async function updateIndustryData(){
   btn.disabled = true; btn.textContent = '更新中...';
   try{
     const d = await apiFetch('/api/collect/industry', {method:'POST'});
-    log(`業種更新完了: 企業 ${d.updated_companies}件, 財務レコード ${d.updated_records}件`, 'success');
+    log(`業種更新完了: 企業 ${d.updated_companies}件, 財務レコード ${d.updated_records}件`
+        + ` / EDINET で空欄補完: 企業 ${d.edinet_filled_companies}件, 財務レコード ${d.edinet_filled_records}件`, 'success');
     await loadIndustries();
     await loadDB();
   }catch(e){

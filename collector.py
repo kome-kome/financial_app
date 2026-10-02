@@ -23,7 +23,7 @@ from collector_interim import run_interim_collection  # 半期(H1)財務収集
 
 # テスト等が `from collector import _name` で参照する非公開名は明示的に再エクスポートする
 # （`from module import *` は先頭 _ の名前を取り込まないため）。
-from collector_master import _read_jpx_excel
+from collector_master import _read_jpx_excel, _read_edinet_codelist
 from collector_financials import _match_capex_by_label, _phase_process_docs, _detect_xbrl_columns
 from collector_prices import _nearest_price, _jquants_fetch_date, _jquants_fetch_code
 from collector_prices import _esri_candidate_urls, _parse_esri_gdp_csv, _esri_apply_lag

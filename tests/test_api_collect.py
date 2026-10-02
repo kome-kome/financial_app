@@ -238,7 +238,47 @@ def no_side_effects(db_session, monkeypatch):
     async def _no_jpx(*args, **kwargs):
         return 0, 0
     monkeypatch.setattr(collect_router, "update_industry_from_jpx", _no_jpx)
+    monkeypatch.setattr(collect_router, "fill_industry_from_edinet_codelist", _no_jpx)
     return db_session
+
+
+class TestCollectIndustry:
+    """手動の業種更新は夜間の Phase 5 と同じ順序（JPX → EDINET コードリスト・#784）。"""
+
+    def _wire(self, db_session, monkeypatch, edinet):
+        api.app.dependency_overrides[api.get_db] = lambda: db_session
+        calls = []
+
+        async def _jpx(*args, **kwargs):
+            calls.append("jpx")
+            return 3, 30
+
+        async def _edinet(*args, **kwargs):
+            calls.append("edinet")
+            return await edinet()
+        monkeypatch.setattr(collect_router, "update_industry_from_jpx", _jpx)
+        monkeypatch.setattr(collect_router, "fill_industry_from_edinet_codelist", _edinet)
+        return calls
+
+    def test_runs_jpx_then_edinet_and_reports_both(self, db_session, monkeypatch):
+        async def ok():
+            return 2, 20
+        calls = self._wire(db_session, monkeypatch, ok)
+        r = client.post("/api/collect/industry")
+        assert r.status_code == 200, r.text
+        assert calls == ["jpx", "edinet"]
+        assert r.json() == {"updated_companies": 3, "updated_records": 30,
+                            "edinet_filled_companies": 2, "edinet_filled_records": 20}
+
+    def test_edinet_failure_is_502_not_a_silent_zero(self, db_session, monkeypatch):
+        from collector_utils import EdinetCodelistError
+
+        async def fail():
+            raise EdinetCodelistError("配布ホスト停止テスト")
+        self._wire(db_session, monkeypatch, fail)
+        r = client.post("/api/collect/industry")
+        assert r.status_code == 502
+        assert "EDINET" in r.json()["detail"]
 
 
 class TestReadOnlyGuard:

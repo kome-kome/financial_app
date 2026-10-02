@@ -363,6 +363,13 @@ def _jpx_industry_at(db):
     return _parse(_get_setting(db, KEY_JPX_INDUSTRY_LAST_SUCCESS))
 
 
+def _edinet_codelist_at(db):
+    """EDINET コードリストで業種の空欄を補完できた時刻（#784）。理由は `_jpx_industry_at` と同じ
+    ——埋めた業種は取得が止まっても残るので、`companies.industry` の中身は証拠にならない。"""
+    from database import KEY_EDINET_CODELIST_LAST_SUCCESS
+    return _parse(_get_setting(db, KEY_EDINET_CODELIST_LAST_SUCCESS))
+
+
 def _scheduled(job: str):
     """日中バッチの暦の1行。読み手と読む場所は暦側が持つ（書き写さない・#681）。"""
     return next(s for s in run_daytime.SCHEDULE if s.job == job)
@@ -436,6 +443,18 @@ PRODUCERS: tuple[Produced, ...] = (
         task_name="financial_app-nightly",
         source="app_settings.jpx_industry_last_success",
         read=_jpx_industry_at,
+    ),
+    Produced(
+        # JPX に載らない上場社（札証・福証の単独上場等）の業種の空欄を埋める側（#784）。止まると
+        # その間に上場した社が業種別回帰から静かに漏れる＝JPX と同じ形の穴なので同じ表で見る。
+        label="EDINET コードリスト（業種の空欄補完）",
+        issue_title="[ops] EDINET コードリストで業種を補完できていない",
+        cadence_h=24.0,
+        window_min=run_nightly.WINDOW_MIN,
+        batch_label="夜間バッチ",
+        task_name="financial_app-nightly",
+        source="app_settings.edinet_codelist_last_success",
+        read=_edinet_codelist_at,
     ),
     # ── 日中バッチの暦が積む収集（#681・ADR-0056）─────────────────────────────
     # 積み忘れ・暦の故障・収集の失敗のどれでも「新しい行が入らない」として現れる。読み手は

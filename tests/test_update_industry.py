@@ -1,12 +1,14 @@
-"""update_industry_from_jpx のユニットテスト (#78)。
+"""update_industry_from_jpx / fill_industry_from_edinet_codelist のユニットテスト (#78・#784)。
 
 HTTP 呼び出しをモックし、Company/FinancialRecord の業種が
 バルク UPDATE で正しく更新されることを検証する。
 """
 import asyncio
 import io
+import logging
 import os
 import sys
+import zipfile
 
 import httpx
 import openpyxl
@@ -14,9 +16,12 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from collector import _read_jpx_excel, resolve_jpx_excel_url, update_industry_from_jpx
-from collector_utils import JPX_EXCEL_URL, JPX_LISTING_URL, JpxIndustryError
-from database import KEY_JPX_INDUSTRY_LAST_SUCCESS, get_setting
+from collector import (_read_edinet_codelist, _read_jpx_excel, fill_industry_from_edinet_codelist,
+                       resolve_jpx_excel_url, update_industry_from_jpx)
+from collector_utils import (EDINET_CODELIST_URL, JPX_EXCEL_URL, JPX_LISTING_URL,
+                             EdinetCodelistError, JpxIndustryError)
+from database import (KEY_EDINET_CODELIST_LAST_SUCCESS, KEY_JPX_INDUSTRY_LAST_SUCCESS, Company,
+                      FinancialRecord, get_setting)
 
 # 一覧ページの検体。**実物から写す**（`href` の形が違えば解決は静かに既定値へ倒れる）。
 # 2026-09-08 実測: リンクは相対パスで、拡張子は `.xlsx`。
@@ -279,3 +284,216 @@ class TestSuccessLeavesAFootprint:
         with pytest.raises(JpxIndustryError):
             self._run(update_industry_from_jpx(client, db))
         assert get_setting(db, KEY_JPX_INDUSTRY_LAST_SUCCESS) is None
+
+
+class TestJpxUpdatesNullIndustry:
+    """`industry != ind` は NULL の行を更新しない（SQL の三値論理・#784）。"""
+
+    def test_null_company_and_record_are_updated(self, db, make_company, make_fin):
+        db.add(make_company(edinet_code="E00001", sec_code="1001", industry=None))
+        db.add(make_fin(edinet_code="E00001", sec_code="1001", industry=None))
+        db.commit()
+        client = _mock_client(_make_jpx_xlsx([("1001", "情報・通信業")]))
+        co_updated, fr_updated = asyncio.run(update_industry_from_jpx(client, db))
+        assert (co_updated, fr_updated) == (1, 1)
+        assert db.query(Company).one().industry == "情報・通信業"
+        assert db.query(FinancialRecord).one().industry == "情報・通信業"
+
+
+# ── EDINET コードリスト（#784）────────────────────────────────────────────────
+# 検体は **2026-10-02 版の実ファイルから写した行**（`EdinetcodeDlInfo.csv`・cp932・CRLF）。
+# 1行目はメタ行、2行目が見出し、データ行は全項目を引用符で囲む。推測で書いた検体は、
+# 本物を読めないことを検出できない。
+_CODELIST_META = "ダウンロード実行日,2026年10月02日現在,件数,11402件"
+_CODELIST_HEADER = ("ＥＤＩＮＥＴコード,提出者種別,上場区分,連結の有無,資本金,決算日,提出者名,"
+                    "提出者名（英字）,提出者名（ヨミ）,所在地,提出者業種,証券コード,提出者法人番号")
+_CODELIST_ROWS = [
+    # 福証の単独上場（JPX に載らない＝#784 の本題）
+    ["E02813", "内国法人・組合", "上場", "有", "1690", "3月31日", "株式会社Ｍｉｓｕｍｉ",
+     "MISUMI CO., LTD.", "カブシキガイシャミスミ", "鹿児島市卸本町７番地２０", "卸売業", "74410",
+     "4340001004160"],
+    # 東証上場だが JPX の一覧で業種が付かない（優先出資証券）
+    ["E03729", "内国法人・組合", "上場", "有", "890998", "3月31日", "信金中央金庫",
+     "Shinkin Central Bank", "シンキンチュウオウキンコ", "中央区八重洲一丁目３番７号", "その他金融業",
+     "84210", "3010005002392"],
+    # 表記差: EDINET は「倉庫・運輸関連」、JPX は「倉庫・運輸関連業」
+    ["E04369", "内国法人・組合", "上場", "有", "500", "2月末日", "株式会社エーアイテイー",
+     "AIT CORPORATION", "カブシキガイシャエーアイティー", "大阪市中央区本町二丁目１番６号",
+     "倉庫・運輸関連", "93810", "3120001075217"],
+    # 非上場（業種は33業種名でも埋めない）
+    ["E00033", "内国法人・組合", "非上場", "有", "2141", "3月31日", "常磐興産株式会社",
+     "Joban Kosan Co.,Ltd.", "ジョウバンコウサンカブシキガイシャ", "いわき市常磐藤原町蕨平５０番地",
+     "サービス業", "", "9380001014473"],
+    # 上場区分が空欄（提出義務者以外）
+    ["E00050", "内国法人・組合（有価証券報告書等の提出義務者以外）", "", "", "10000", "",
+     "日本コムシス株式会社", "", "ニッポンコムシスカブシキガイシャ", "品川区東五反田２丁目１７番１号",
+     "内国法人・組合（有価証券報告書等の提出義務者以外）", "", "4010701022825"],
+]
+
+
+def _make_codelist_zip(rows=_CODELIST_ROWS, header=_CODELIST_HEADER, meta=_CODELIST_META) -> bytes:
+    lines = [meta, header] + [",".join(f'"{v}"' for v in r) for r in rows]
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("EdinetcodeDlInfo.csv", ("\r\n".join(lines) + "\r\n").encode("cp932"))
+    return buf.getvalue()
+
+
+def _codelist_client(content: bytes = None, status: int = 200) -> httpx.AsyncClient:
+    """コードリストの URL だけに応答する。別の URL を叩いたら 599 で落ちる（素通りを検出する）。"""
+    content = _make_codelist_zip() if content is None else content
+    def handler(request):
+        if str(request.url) == EDINET_CODELIST_URL:
+            return httpx.Response(status, content=content)
+        return httpx.Response(599)
+    return httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+
+class TestReadEdinetCodelist:
+    def test_returns_listed_rows_only(self):
+        """非上場・上場区分が空欄の社は返さない。業種名は生のまま（正規化は呼び出し側）。"""
+        assert _read_edinet_codelist(_make_codelist_zip()) == {
+            "E02813": "卸売業", "E03729": "その他金融業", "E04369": "倉庫・運輸関連"}
+
+    def test_columns_are_found_by_name(self):
+        """列の位置ではなく見出しの名前で引く（列が足されてもずれない）。"""
+        header = "追加列," + _CODELIST_HEADER
+        rows = [["x"] + r for r in _CODELIST_ROWS[:1]]
+        assert _read_edinet_codelist(_make_codelist_zip(rows, header)) == {"E02813": "卸売業"}
+
+    def test_missing_header_column_raises(self):
+        header = _CODELIST_HEADER.replace("提出者業種", "業種")
+        with pytest.raises(EdinetCodelistError, match="提出者業種"):
+            _read_edinet_codelist(_make_codelist_zip(header=header))
+
+    def test_no_listed_rows_raises(self):
+        """件数が減ったまま通さない（#632 と同じ考え方）。"""
+        with pytest.raises(EdinetCodelistError, match="上場"):
+            _read_edinet_codelist(_make_codelist_zip(rows=_CODELIST_ROWS[3:]))
+
+    def test_not_a_zip_raises(self):
+        with pytest.raises(EdinetCodelistError):
+            _read_edinet_codelist(b"<html>maintenance</html>")
+
+
+class TestFillIndustryFromEdinetCodelist:
+    """空欄だけを埋め、JPX を上書きせず、許す名前は JPX が書いた名前だけ（#784）。"""
+
+    def _seed_jpx_names(self, db, make_company):
+        # 照合先＝JPX が書いた業種名（DB に既にある名前）
+        for i, ind in enumerate(["卸売業", "その他金融業", "倉庫・運輸関連業", "サービス業"]):
+            db.add(make_company(edinet_code=f"E9000{i}", sec_code=f"900{i}", industry=ind))
+
+    def _industry(self, db, code):
+        return db.query(Company).filter_by(edinet_code=code).one().industry
+
+    def test_fills_empty_and_null_listed_companies(self, db, make_company):
+        self._seed_jpx_names(db, make_company)
+        db.add(make_company(edinet_code="E02813", sec_code="7441", industry=""))
+        db.add(make_company(edinet_code="E03729", sec_code="8421", industry=None))
+        db.commit()
+        filled_co, _ = asyncio.run(fill_industry_from_edinet_codelist(_codelist_client(), db))
+        assert filled_co == 2
+        assert self._industry(db, "E02813") == "卸売業"
+        assert self._industry(db, "E03729") == "その他金融業"
+
+    def test_alias_maps_to_the_jpx_name(self, db, make_company):
+        self._seed_jpx_names(db, make_company)
+        db.add(make_company(edinet_code="E04369", sec_code="9381", industry=""))
+        db.commit()
+        asyncio.run(fill_industry_from_edinet_codelist(_codelist_client(), db))
+        assert self._industry(db, "E04369") == "倉庫・運輸関連業"
+
+    def test_does_not_overwrite_jpx(self, db, make_company):
+        """JPX の分類は EDINET と 4.6% 食い違う（実測）。正本は JPX のまま。"""
+        self._seed_jpx_names(db, make_company)
+        db.add(make_company(edinet_code="E02813", sec_code="7441", industry="サービス業"))
+        db.commit()
+        filled_co, _ = asyncio.run(fill_industry_from_edinet_codelist(_codelist_client(), db))
+        assert filled_co == 0
+        assert self._industry(db, "E02813") == "サービス業"
+
+    def test_non_listed_companies_stay_empty(self, db, make_company):
+        """非上場・空欄の社（大半は廃止社）は埋めない（過去年度の分析を動かさない）。"""
+        self._seed_jpx_names(db, make_company)
+        db.add(make_company(edinet_code="E00033", sec_code="9675", industry=""))
+        db.add(make_company(edinet_code="E00050", sec_code=None, industry=""))
+        db.commit()
+        filled_co, _ = asyncio.run(fill_industry_from_edinet_codelist(_codelist_client(), db))
+        assert filled_co == 0
+        assert self._industry(db, "E00033") == ""
+        assert self._industry(db, "E00050") == ""
+
+    def test_name_unknown_to_jpx_is_not_written(self, db, make_company, caplog):
+        """JPX の名前に無い提出者業種を書くと、業種別回帰に1社だけの業種ができる。"""
+        db.add(make_company(edinet_code="E90000", sec_code="9000", industry="卸売業"))
+        db.add(make_company(edinet_code="E03729", sec_code="8421", industry=""))
+        db.commit()
+        with caplog.at_level(logging.WARNING):
+            filled_co, _ = asyncio.run(fill_industry_from_edinet_codelist(_codelist_client(), db))
+        assert filled_co == 0
+        assert self._industry(db, "E03729") == ""
+        assert "その他金融業" in caplog.text
+
+    def test_no_jpx_names_raises(self, db, make_company):
+        """照合先が空＝JPX が一度も成功していない。黙って0件にしない。"""
+        db.add(make_company(edinet_code="E02813", sec_code="7441", industry=""))
+        db.commit()
+        with pytest.raises(EdinetCodelistError, match="照合先"):
+            asyncio.run(fill_industry_from_edinet_codelist(_codelist_client(), db))
+        assert get_setting(db, KEY_EDINET_CODELIST_LAST_SUCCESS) is None
+
+
+class TestPropagateToFinancialRecords:
+    """収集は財務行の業種を空で書き直すので、会社の業種を毎晩写す（#784）。"""
+
+    def test_empty_and_null_rows_are_filled_and_filled_rows_kept(self, db, make_company, make_fin):
+        db.add(make_company(edinet_code="E90000", sec_code="9000", industry="卸売業"))
+        db.add(make_company(edinet_code="E02813", sec_code="7441", industry=""))
+        db.add(make_fin(edinet_code="E02813", sec_code="7441", year=2024, industry=""))
+        db.add(make_fin(edinet_code="E02813", sec_code="7441", year=2025, industry=None))
+        db.add(make_fin(edinet_code="E02813", sec_code="7441", year=2026, period_type="H1",
+                        industry="小売業"))
+        db.commit()
+        _, filled_fr = asyncio.run(fill_industry_from_edinet_codelist(_codelist_client(), db))
+        assert filled_fr == 2
+        got = {(r.year, r.period_type): r.industry
+               for r in db.query(FinancialRecord).filter_by(edinet_code="E02813")}
+        assert got == {(2024, "annual"): "卸売業", (2025, "annual"): "卸売業",
+                       (2026, "H1"): "小売業"}
+
+    def test_company_filled_earlier_is_propagated(self, db, make_company, make_fin):
+        """JPX から外れた社（TOB 等）の、後から空で作られた H1 行も直る。"""
+        db.add(make_company(edinet_code="E99999", sec_code="8283", industry="卸売業"))
+        db.add(make_fin(edinet_code="E99999", sec_code="8283", period_type="H1", industry=""))
+        db.commit()
+        _, filled_fr = asyncio.run(fill_industry_from_edinet_codelist(_codelist_client(), db))
+        assert filled_fr == 1
+        assert db.query(FinancialRecord).one().industry == "卸売業"
+
+    def test_rows_of_companies_without_industry_stay_empty(self, db, make_company, make_fin):
+        db.add(make_company(edinet_code="E90000", sec_code="9000", industry="卸売業"))
+        db.add(make_company(edinet_code="E00033", sec_code="9675", industry=""))
+        db.add(make_fin(edinet_code="E00033", sec_code="9675", industry=""))
+        db.commit()
+        _, filled_fr = asyncio.run(fill_industry_from_edinet_codelist(_codelist_client(), db))
+        assert filled_fr == 0
+        assert db.query(FinancialRecord).one().industry == ""
+
+
+class TestEdinetCodelistFootprint:
+    """足跡が `batch_freshness.PRODUCERS` の見る唯一の証拠（#784・#632 と同じ作法）。"""
+
+    def test_footprint_is_written_even_when_nothing_was_filled(self, db, make_company):
+        db.add(make_company(edinet_code="E90000", sec_code="9000", industry="卸売業"))
+        db.commit()
+        assert asyncio.run(fill_industry_from_edinet_codelist(_codelist_client(), db)) == (0, 0)
+        assert get_setting(db, KEY_EDINET_CODELIST_LAST_SUCCESS)
+
+    def test_no_footprint_when_the_fetch_fails(self, db, make_company):
+        """**握って (0,0) を返さない**。「埋める社が無かった」と区別できなくなる。"""
+        db.add(make_company(edinet_code="E90000", sec_code="9000", industry="卸売業"))
+        db.commit()
+        with pytest.raises(EdinetCodelistError):
+            asyncio.run(fill_industry_from_edinet_codelist(_codelist_client(status=404), db))
+        assert get_setting(db, KEY_EDINET_CODELIST_LAST_SUCCESS) is None

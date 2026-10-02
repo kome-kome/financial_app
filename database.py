@@ -275,7 +275,7 @@ class Company(Base):
     sec_code     = Column(String(6),  index=True)          # 証券コード4桁
     name         = Column(String(200), nullable=False)
     name_en      = Column(String(200))
-    industry     = Column(String(100))                     # 業種（EDINET分類）
+    industry     = Column(String(100))                     # 業種（東証33業種。JPX が正本・JPX に無い上場社の空欄だけ EDINET 提出者業種で補完・#784）
     market       = Column(String(50))                      # プライム/スタンダード/グロース
     fiscal_month = Column(Integer)                         # 決算月
     accounting_standard = Column(String(20))               # JGAAP/IFRS/US-GAAP
@@ -1580,6 +1580,9 @@ class AppSetting(Base):
 # 読み手は `batch_freshness.PRODUCERS`（#632）。**キーをここに置く**のは、batch_freshness が
 # 「import 時に副作用を持つモジュールを呼ばない」制約を持ち、collector 系を参照できないため。
 KEY_JPX_INDUSTRY_LAST_SUCCESS = "jpx_industry_last_success"
+# EDINET コードリストで業種の空欄を補完できた時刻（#784）。書き手は
+# `fill_industry_from_edinet_codelist`、読み手は同じく `batch_freshness.PRODUCERS`。
+KEY_EDINET_CODELIST_LAST_SUCCESS = "edinet_codelist_last_success"
 
 # 公式突合で**非該当**と判定済みの往復段差の帯（JSON・#644）。書き手は
 # `scripts/repair_scale_mixture.py`、読み手は夜間の往復段差の検知（`_pipeline_incremental.py`）。
