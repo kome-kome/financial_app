@@ -1115,3 +1115,30 @@ class TestBasisLagAtLoad:
 
         assert lagged == restated
         assert unlagged["E00001"] != restated["E00001"]
+
+
+class TestMeasureSectorCoverageScript:
+    """`scripts/measure_sector_coverage.py`（MODELS.md が案内する実測手順）が現行の私的 API で動く（#762）。
+
+    このスクリプトは `_load_records` と `_persist_and_rank` を差し替えて使う。#482 で `_load_records` に
+    `features` が足されたとき追随しておらず `TypeError` で止まっていたが、`scripts/` は CI で実行されない
+    ので失敗として現れなかった。シグネチャを変えた人がこのファイルで落ちを見るよう、ここで通し実行する。
+    """
+
+    def test_runs_to_end_without_writing(self, db, make_fin, monkeypatch, capsys):
+        from database import RegressionResult
+        from scripts import measure_sector_coverage as m
+
+        _seed_sector(db, make_fin, n=12)
+        monkeypatch.setattr(m, "SessionLocal", lambda: db)
+        m.main([])
+
+        out = capsys.readouterr().out
+        assert "読み込み: 12 レコード" in out
+        assert "★新既定" in out
+        # 書き込みは差し替えで止まっている（実測のたびに本番の gap を上書きしない）
+        assert db.query(RegressionResult).count() == 0
+        # 差し替えは専用のインスタンスに当てる。登録済みのシングルトンに当てると、後続の sector_ols が
+        # 書かず・読み直さないまま動き、外す実装にすると中断時に取り残したワーカーが正本へ書く
+        assert "_load_records" not in vars(plugin)
+        assert "_persist_and_rank" not in vars(plugin)

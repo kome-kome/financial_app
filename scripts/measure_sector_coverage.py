@@ -16,9 +16,18 @@
   python -m scripts.measure_sector_coverage --ridge    # Ridge で比較
 
 注意:
-  DATABASE_URL は本番 Supabase を指す。**書き込みは行わない**（`_persist_and_rank` を
-  no-op へ差し替えて regression_results への upsert を止める）。財務レコードの読み込みは
-  1回だけ行い、全設定で使い回す（Egress 節約・[[feedback_verification_fullloads_exhaust_egress]]）。
+  接続先は `FINAPP_DB_TARGET`（既定 local＝正本のローカル PG・#503）。**書き込みは行わない**
+  （`_persist_and_rank` を差し替えて regression_results への upsert を止める）。財務レコードの
+  読み込みは1回だけ行い、全設定で使い回す。
+
+  差し替えは登録済みのシングルトン（`plugins.sector_ols.plugin`）ではなく、このスクリプト専用の
+  インスタンスに当て、**外さない**。execute は `asyncio.to_thread` のワーカーで走るので、Ctrl+C を
+  2回押すとワーカーを取り残したまま main が抜ける。そこで差し替えを外すと、ワーカーが残りの業種を
+  本物の `_persist_and_rank` で正本へ書く。
+
+  プラグインの私的メソッドを差し替えるので、シグネチャが変わると動かなくなる（#482 で
+  `_load_records` に `features` が足されて止まっていた・#762）。`scripts/` は CI で実行されないため、
+  `tests/test_sector_ols.py::TestMeasureSectorCoverageScript` がこのスクリプトを通しで走らせる。
 """
 import argparse
 import io
@@ -27,11 +36,10 @@ import statistics
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
 
 from database import SessionLocal                       # noqa: E402
 from plugins import execute_plugin                      # noqa: E402
-from plugins.sector_ols import DEFAULT_FEATURES_PRICE, plugin  # noqa: E402
+from plugins.sector_ols import DEFAULT_FEATURES_PRICE, SectorOLSPlugin  # noqa: E402
 
 # (ラベル, sector_missing_rate, zero_fill_no_dividend)
 CONFIGS = [
@@ -44,7 +52,8 @@ CONFIGS = [
 ]
 
 
-def _run(db, rate: float, zero_fill: bool, regularization: str) -> tuple[dict, dict]:
+def _run(plugin: SectorOLSPlugin, db, rate: float, zero_fill: bool,
+         regularization: str) -> tuple[dict, dict]:
     """execute を1回走らせ、(結果, {edinet_code: (sector, 実績株価, 予測株価)}) を返す。"""
     import asyncio
     preds: dict = {}
@@ -86,23 +95,27 @@ def _r2_on(preds: dict, codes: set) -> float:
     return num / den if den else float("nan")
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--ridge", action="store_true", help="Ridge で比較（既定は OLS）")
     ap.add_argument("--year", type=int, default=None, help="対象年度（既定=最新年度）")
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
     regularization = "ridge" if args.ridge else "none"
 
+    # 差し替える相手はこのスクリプト専用のインスタンス（理由はモジュール docstring）
+    plugin = SectorOLSPlugin()
     db = SessionLocal()
     try:
         # 財務レコードは1回だけ読む（全設定で使い回す）
-        records = plugin._load_records(db, args.year)
+        records = plugin._load_records(db, args.year, DEFAULT_FEATURES_PRICE)
         print(f"読み込み: {len(records)} レコード / regularization={regularization}")
-        plugin._load_records = lambda _db, _year: records          # 以降の再読込を抑止
+        # 以降の再読込を抑止。execute は (db, year, features) で呼ぶが、全設定が
+        # DEFAULT_FEATURES_PRICE を使うので引数は見ない
+        plugin._load_records = lambda *_a, **_k: records
 
         rows = []
         for label, rate, zero_fill in CONFIGS:
-            res, preds = _run(db, rate, zero_fill, regularization)
+            res, preds = _run(plugin, db, rate, zero_fill, regularization)
             stats = res["sector_stats"]
             rows.append({
                 "label":     label,
@@ -160,4 +173,5 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
     main()
