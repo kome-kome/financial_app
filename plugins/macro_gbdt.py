@@ -40,8 +40,8 @@ from .macro_snapshots import (
     preload_macro,
     build_snapshots,
     get_producer_scores,
-    representative_snapshot_date,
     to_date_str,
+    tradable_snapshot_asof,
     oof_backtest,
     build_oof_meta,
     conformal_bucket_halfwidths,
@@ -675,7 +675,7 @@ class MacroGbdtPlugin(AnalysisPlugin):
     def _persist_producer(self, db: Any, raw_items: list, asof: dict) -> None:
         """producer μ̂ を macro_gbdt_scores へ永続化（sell_ranking が mu_source で読む）。
 
-        asof は `representative_snapshot_date` の戻り値（代表値=中央値・最古・古い銘柄数）。
+        asof は `tradable_snapshot_asof` の戻り値（代表値=中央値・最古・古い銘柄数）。
         M-2 のみ。M-5 のスコアは順位（リターン単位でない）ため producer を持たず no-op
         で override する（Issue #362・下流統合は「順位→分位期待リターン写像」を別途定義
         するまで見送り）。"""
@@ -987,8 +987,9 @@ class MacroGbdtPlugin(AnalysisPlugin):
         # ── producer μ̂ を永続化（sell_ranking が mu_source=macro_gbdt で読む・ADR-0004）─
         # M-2 は macro_gbdt_scores へ書く。M-5 は producer を持たず no-op（_persist_producer override）。
         # as-of は max ではなく中央値を代表値にする（Issue #417）。
-        _asof = representative_snapshot_date(
-            current_snaps[c][1].get("snap_date") for c in codes_ordered)
+        # 母集団は今買える社だけ（廃止・価格停止の社の μ̂ は保存するが as-of には数えない・#780）。
+        _asof = tradable_snapshot_asof(
+            db, ((c, current_snaps[c][1].get("snap_date")) for c in codes_ordered))
         self._persist_producer(db, raw_items, _asof)
 
         return {

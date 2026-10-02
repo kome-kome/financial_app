@@ -45,8 +45,8 @@ from .macro_snapshots import (
     build_snapshots,
     oof_backtest,
     get_producer_scores,
-    representative_snapshot_date,
     to_date_str,
+    tradable_snapshot_asof,
     _macro_from_cache,
     _spearman,
 )
@@ -617,8 +617,9 @@ class MacroEnsemblePlugin(AnalysisPlugin):
 
         # ── 6) producer 永続化（sell_ranking が mu_source=macro_ensemble で読む）─
         # as-of は max ではなく中央値を代表値にする。母集団も「基底レグの全社」ではなく
-        # 実際に μ̂ を出した交差銘柄（results）に合わせる（Issue #417）。
-        asof = representative_snapshot_date(it.get("snap_date") for it in results)
+        # 実際に μ̂ を出した交差銘柄（results）に合わせる（Issue #417）。そのうち今買える社だけで
+        # 代表させる（廃止・価格停止の社の μ̂ は保存するが as-of には数えない・#780）。
+        asof = tradable_snapshot_asof(db, ((it["edinet_code"], it.get("snap_date")) for it in results))
         try:
             from database import replace_macro_ensemble_scores
             replace_macro_ensemble_scores(

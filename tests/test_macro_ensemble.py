@@ -45,6 +45,18 @@ except Exception:  # pragma: no cover
 # ── 合成データ（財務が会社間で変動＝BIC 選択が成立し、価格ドリフトも会社別＝
 #    52週先リターンが横断変動する。210週 ≥ min_train(6)+embargo(12) 分の有効月を確保）──
 
+@pytest.fixture(autouse=True)
+def _no_tradable_lookup(monkeypatch):
+    """producer の as-of の母集団判定（#780）を素通しにする。
+
+    このファイルの execute は MagicMock の db で回すことが多く、`stale_price_codes` の
+    比較式（`sub.c.d < cutoff`）が組めず TypeError になる。母集団の判定そのものはここの
+    主題ではなく、tests/test_tradable_universe.py が実 DB（SQLite）で縛る。空集合なら
+    as-of は全行の代表値＝変更前と同じ値になるので、既存の assert はそのまま読める。
+    """
+    monkeypatch.setattr("database.non_tradable_codes", lambda db: set())
+
+
 def _make_db(n_companies=6, n_weeks=210):
     import datetime
 

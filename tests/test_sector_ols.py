@@ -781,6 +781,66 @@ class TestPeriodTypeIsolation:
         assert all(r.period_end != date(2023, 9, 30) for r in records)
 
 
+# ── 当日回帰の母集団: 今買える社だけ（#780）─────────────────────────────────────
+
+class TestTradablePopulation:
+    """当日回帰（既定・year 指定）は廃止・価格停止の社を読まない。時点再現は絞らない（#780）。
+
+    廃止社は最終株価のまま残り、整理銘柄の暴落価格（実測 `stock_price=1.0` → gap +47,963%）が
+    業種の係数と α を通じて現役社の gap_ratio を動かしていた。判定は推奨系の表示母集団と
+    同じ `tradable_filters`（唯一の源）。
+    """
+
+    DELISTED, STALE, LIVE, NO_ROW = "E00001", "E00002", "E00003", "E00004"
+
+    def _seed(self, db, make_fin, make_company, make_price):
+        from datetime import timedelta
+
+        from database import PRICE_STALE_ALERT_BDAYS, stale_cutoff_date
+        _seed_sector(db, make_fin, n=15)
+        cutoff = date.fromisoformat(stale_cutoff_date(date.today(), PRICE_STALE_ALERT_BDAYS))
+        db.add(make_company(edinet_code=self.DELISTED, sec_code="1001", is_active=False))
+        # マスタの追随待ち（is_active は True のまま・最終足が cutoff の前日）＝#605 の停止
+        db.add(make_company(edinet_code=self.STALE, sec_code="1002", is_active=True))
+        db.add(make_price(edinet_code=self.STALE,
+                          trade_date=(cutoff - timedelta(days=1)).isoformat()))
+        db.add(make_company(edinet_code=self.LIVE, sec_code="1003", is_active=True))
+        db.add(make_price(edinet_code=self.LIVE, trade_date=date.today().isoformat()))
+        # NO_ROW は companies にも株価にも行が無い＝判定できないので落とさない（#555 と同型の欠測を作らない）
+        db.commit()
+
+    def _codes(self, db, year=None, **kw):
+        return {r.edinet_code for r in plugin._load_records(db, year, DEFAULT_FEATURES_PRICE, **kw)}
+
+    def test_default_path_drops_delisted_and_stale(self, db, make_fin, make_company, make_price):
+        self._seed(db, make_fin, make_company, make_price)
+        codes = self._codes(db)
+        assert self.DELISTED not in codes
+        assert self.STALE not in codes
+        assert {self.LIVE, self.NO_ROW} <= codes
+        assert len(codes) == 13
+
+    def test_year_path_drops_delisted_and_stale(self, db, make_fin, make_company, make_price):
+        self._seed(db, make_fin, make_company, make_price)
+        codes = self._codes(db, 2023)
+        assert self.DELISTED not in codes and self.STALE not in codes
+        assert {self.LIVE, self.NO_ROW} <= codes
+
+    def test_all_years_keeps_delisted(self, db, make_fin, make_company, make_price):
+        """時点再現は今日の上場状態で絞らない。過去の月末に生きていた社を落とすと生存者バイアス。"""
+        self._seed(db, make_fin, make_company, make_price)
+        codes = self._codes(db, all_years=True)
+        assert {self.DELISTED, self.STALE, self.LIVE, self.NO_ROW} <= codes
+
+    def test_execute_does_not_write_excluded(self, db, make_fin, make_company, make_price):
+        from database import RegressionResult
+        self._seed(db, make_fin, make_company, make_price)
+        asyncio.run(execute_plugin(plugin, {}, db))
+        written = {ec for (ec,) in db.query(RegressionResult.edinet_code).all()}
+        assert self.DELISTED not in written and self.STALE not in written
+        assert self.LIVE in written
+
+
 # ── predict_gaps(): 保存しない計算経路（#626）──────────────────────────────────
 
 class TestPredictGaps:

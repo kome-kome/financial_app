@@ -14,6 +14,9 @@
     - 株数をどの経路でも求められない銘柄は自動的に対象外
     - 期末後分割の年の行は、株数と dps に係数表の基準の遅れを当ててから使う（#758・_load_records）
 
+母集団: 当日回帰（既定・year 指定）は今買える社だけ（tradable_filters・#780）。時点再現
+（all_years）は今日の上場状態で絞らない（生存者バイアス・#315）。
+
 前処理: winsorize(p1-p99) → z-score正規化（業種内） → OLS / Ridge
 """
 import logging
@@ -412,12 +415,20 @@ class SectorOLSPlugin(AnalysisPlugin):
                       all_years: bool = False) -> list:
         """回帰の母集団を読む。既定は各社の最新の通期行、`year` 指定でその年度の通期行。
 
+        既定と `year` 指定（＝当日回帰）は、**今買える社だけ**を読む（`tradable_filters`・#780）。
+        廃止・価格停止の社は最終株価のまま残り、整理銘柄の暴落価格（実測 `stock_price=1.0`）が
+        業種の係数と ridge の α を通じて現役社の gap_ratio を動かしていた。時点再現の gap は
+        「その月末に週次の足を持つ社」だけで回帰するので、もともと廃止社を含まない
+        ＝ここで絞ると学習パネルと本番の母集団が揃う。
+
         `all_years=True` は**全年度の通期行**を返す（時点再現 `sector_gap_asof` 用・#626）。
-        どの行を使うかは呼び出し側が月末ごとに選ぶので、ここでは絞らない。
+        どの行を使うかは呼び出し側が月末ごとに選ぶので、ここでは絞らない。**今日の上場状態でも
+        絞らない**——過去の月末に生きていた社を落とすと生存者バイアスになる（#315）。
         """
         from sqlalchemy import func as _sqla_func
 
-        from database import Company, FinancialRecord, SplitAdjustmentFactor, latest_year_subq
+        from database import (Company, FinancialRecord, SplitAdjustmentFactor, latest_year_subq,
+                              tradable_filters)
 
         # 転送は sector_load_fields(features) の列だけ（#482）。戻りは ORM インスタンス
         # ではなく _SectorRec なので、絞っていない列を後から読むと AttributeError で露見する。
@@ -477,6 +488,11 @@ class SectorOLSPlugin(AnalysisPlugin):
                              FinancialRecord.period_type == "annual"))
         elif all_years:
             query = _base_query().filter(FinancialRecord.period_type == "annual")
+        if not all_years:
+            # 推奨系の表示母集団と同じ判定（唯一の源）を、この JOIN の列で掛ける。companies は
+            # 外部結合なので、行の無い社は is_active が NULL になり残る（VIEW 側と同じ扱い）。
+            query = query.filter(*tradable_filters(db, is_active=Company.is_active,
+                                                   edinet_code=FinancialRecord.edinet_code))
         records = [rec_cls(*row) for row in query.all()]
         if not records:
             raise ValueError("データがありません。先にデータ収集を実行してください。")

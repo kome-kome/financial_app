@@ -376,12 +376,17 @@ class SellRankingPlugin(AnalysisPlugin):
             except Exception:
                 mu_asof = None
 
+        # μ̂ の標準化基準も他の指標と同じ universe（tradable）に揃える（#780）。producer は廃止・
+        # 価格停止の社にも「現在の」μ̂ を付けて保存しており、全行を基準にすると #605 が外した社が
+        # 平均・標準偏差へ戻ってくる。保有銘柄自体の μ̂ は従来どおり mu_scores から引く。
+        uni_codes = {r.edinet_code for r in universe if r.edinet_code}
+        mu_pop = [ps for ec, ps in mu_scores.items() if ec in uni_codes]
         stats: dict[str, tuple[float, float]] = {}
         for m in weights:
             if m == "mu":
-                vals = [float(ps["mu"]) for ps in mu_scores.values() if ps.get("mu") is not None]
+                vals = [float(ps["mu"]) for ps in mu_pop if ps.get("mu") is not None]
             elif m == "neg_r_macro":
-                vals = [-float(ps["r_macro"]) for ps in mu_scores.values() if ps.get("r_macro") is not None]
+                vals = [-float(ps["r_macro"]) for ps in mu_pop if ps.get("r_macro") is not None]
             else:
                 vals = [v for v in (_resolve_metric(r, m) for r in universe) if v is not None]
             s = fit_zscore_stats(vals)

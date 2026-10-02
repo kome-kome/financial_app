@@ -30,6 +30,18 @@ from tests.test_macro_gbdt import TestExecuteSmoke as _M2Smoke
 plugin = MacroEnetPlugin()
 
 
+@pytest.fixture(autouse=True)
+def _no_tradable_lookup(monkeypatch):
+    """producer の as-of の母集団判定（#780）を素通しにする。
+
+    このファイルの execute は MagicMock の db で回すことが多く、`stale_price_codes` の
+    比較式（`sub.c.d < cutoff`）が組めず TypeError になる。母集団の判定そのものはここの
+    主題ではなく、tests/test_tradable_universe.py が実 DB（SQLite）で縛る。空集合なら
+    as-of は全行の代表値＝変更前と同じ値になるので、既存の assert はそのまま読める。
+    """
+    monkeypatch.setattr("database.non_tradable_codes", lambda db: set())
+
+
 def _params(**overrides):
     base = {k: v["default"] for k, v in plugin.params_schema().items() if "default" in v}
     base.update(overrides)
@@ -38,9 +50,12 @@ def _params(**overrides):
 
 def _run(params, **patches):
     db, prices_by_co, fin_by_co, companies = _M2Smoke()._make_db()
+    # as-of の母集団判定（#780）もここで素通しにする。autouse fixture はこのモジュールの
+    # テストにしか効かないが、`_run` は tests/test_nightly_scores.py からも借りられる。
     with patch("plugins.macro_enet.load_data", return_value=(prices_by_co, fin_by_co, companies)), \
          patch("plugins.macro_enet.preload_macro", return_value={}), \
-         patch("plugins.macro_enet.get_producer_scores", return_value={}):
+         patch("plugins.macro_enet.get_producer_scores", return_value={}), \
+         patch("database.non_tradable_codes", return_value=set()):
         return plugin.execute(params, db)
 
 
