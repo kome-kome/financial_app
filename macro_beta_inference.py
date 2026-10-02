@@ -191,6 +191,9 @@ class InferenceResult:
     factor_cov: list[list[float]]                   # Sigma_macro（選択因子の共分散・R_macro 用）
     diagnostics: dict | None = None                 # r_hat_max/ess_bulk_min 等（収束診断・ADR-0002 検証）
     hyperparams: dict | None = None                 # draws/tune/target_accept/seed（persist で meta へ）
+    # μ̂ の as-of（パネルの最終週次バーの代表値・最古・古い銘柄数・#781）。persist で
+    # hyperparams.data_asof へ。None は「作れなかった」＝読み手には「as-of 不明」。
+    data_asof: dict | None = None
 
 
 def _drop_unusable_macro(macro_cache: dict, macro_names: list[str],
@@ -225,7 +228,8 @@ def _drop_unusable_macro(macro_cache: dict, macro_names: list[str],
     return usable, dropped
 
 
-def build_panel(db, macro_names: list[str] | None = None) -> tuple:
+def build_panel(db, macro_names: list[str] | None = None, *,
+                return_last_bars: bool = False) -> tuple:
     """DB から週次リターン・マクロ因子・セクターを読み、パネル（銘柄×時点×因子）を構築する。
 
     plugins.macro_snapshots の load_data / preload_macro / build_snapshots を再利用する
@@ -239,6 +243,9 @@ def build_panel(db, macro_names: list[str] | None = None) -> tuple:
 
     Returns:
         (returns, macro, stock_idx, sector_idx, factor_names, edinet_codes, sector_names)
+        return_last_bars=True のときは末尾に `{edinet_code: 最終週次バーの trade_date}`
+        （パネルに入った銘柄だけ）を足した 8 要素を返す（#781）。M-1 の μ̂ の as-of は
+        これから作る——`macro_beta_meta.snapshot_date` は推論の実行日でデータの日付ではない。
     """
     from plugins.macro_snapshots import (
         MACRO_FEATURE_NAMES,
@@ -307,7 +314,34 @@ def build_panel(db, macro_names: list[str] | None = None) -> tuple:
     returns_arr = np.asarray(returns, dtype=float)
     macro_arr = np.asarray(macro_rows, dtype=float)
 
-    return returns_arr, macro_arr, stock_idx, sector_idx, factor_names, edinet_codes, sector_names
+    panel = (returns_arr, macro_arr, stock_idx, sector_idx, factor_names, edinet_codes, sector_names)
+    if not return_last_bars:
+        return panel
+    last_bars = {c: max(r.trade_date for r in prices_by_co[c])
+                 for c in edinet_codes if prices_by_co.get(c)}
+    return (*panel, last_bars)
+
+
+def _panel_data_asof(db, last_bars: dict, edinet_codes: list[str]) -> dict | None:
+    """パネルの最終週次バーから M-1 の μ̂ の as-of を作る（#781）。
+
+    定義は他の producer と同じ「各銘柄で見えていた最終週次バー」で、代表値・最古・古い銘柄数の
+    3点を今買える社だけで集計する（`tradable_snapshot_asof`・#417/#780）。
+
+    **失敗しても推論は止めない**（None を返して警告だけ出す）。as-of は表示のための付帯情報で、
+    ここで落とすと 6〜7時間の推論が1回分消える。None は読み手に「as-of 不明」と出る。
+    """
+    from plugins.macro_snapshots import tradable_snapshot_asof
+
+    try:
+        asof = tradable_snapshot_asof(db, ((c, last_bars.get(c)) for c in edinet_codes))
+    except Exception as e:
+        logger.warning("μ̂ の as-of を作れなかった（推論は続行・画面は「as-of 不明」になる）: %s", e)
+        return None
+    if not asof.get("snapshot_date"):
+        logger.warning("μ̂ の as-of を作れなかった（最終週次バーが1社も取れない・推論は続行）")
+        return None
+    return {k: asof[k] for k in ("snapshot_date", "snapshot_date_min", "n_stale")}
 
 
 def select_shared_factors(macro: np.ndarray, returns: np.ndarray,
@@ -400,9 +434,11 @@ def run_inference(draws: int = 1000, tune: int = 1000, target_accept: float = 0.
     """
     import pymc as pm  # 遅延 import
 
-    returns, macro, stock_idx, sector_idx, factor_names, edinet_codes, sector_names = build_panel(
-        db, macro_names=macro_names
-    )
+    (returns, macro, stock_idx, sector_idx, factor_names, edinet_codes, sector_names,
+     last_bars) = build_panel(db, macro_names=macro_names, return_last_bars=True)
+    # as-of は今買える社の判定に DB を読むので、下の commit の前に作る（#781）。
+    data_asof = _panel_data_asof(db, last_bars, edinet_codes)
+    logger.info("μ̂ の as-of（最終週次バー）: %s", data_asof)
     # Issue #269: ここでcommitしないと load_data/preload_macro のSELECTで開いたトランザクションが
     # 後続の数時間に及ぶMCMC計算中も残留し、companies等へのAccessShareロックが他セッション（例:
     # ローカルAPI起動時の冪等ALTER TABLE）のACCESS EXCLUSIVE取得をブロックし続ける。MCMC自体は
@@ -473,6 +509,7 @@ def run_inference(draws: int = 1000, tune: int = 1000, target_accept: float = 0.
     if not result.snapshot_date:
         result.snapshot_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     result.diagnostics = diagnostics
+    result.data_asof = data_asof
     result.hyperparams = {"draws": draws, "tune": tune, "target_accept": target_accept, "seed": seed,
                           "chains": chains, "nuts_sampler": nuts_sampler or "pymc", "init": init,
                           "max_tree_depth": max_tree_depth}
@@ -900,7 +937,10 @@ def persist(db, result: InferenceResult, status: str | None = None) -> None:
         "snapshot_date":    result.snapshot_date,
         "selected_factors": result.selected_factors,
         "factor_cov":       result.factor_cov,
-        "hyperparams":      {**(result.hyperparams or {}), "diagnostics": result.diagnostics},
+        # data_asof は列ではなく hyperparams に置く（#781）。列を足すと DDL 未適用の DB で
+        # バッチが開始時に止まり（`assert_persist_schema`）、Egress の列数較正も動く。
+        "hyperparams":      {**(result.hyperparams or {}), "diagnostics": result.diagnostics,
+                             "data_asof": result.data_asof},
         "status":           status or MACRO_BETA_STATUS_LIVE,
     }
     rows: list[dict] = []

@@ -42,6 +42,10 @@ accepted（2026-08-03）。Issue #417（producer の as-of）・#416（買い推
 見せると株価が止まっていても「今日」と表示され同型の嘘になる。`get_producer_asof` は M-1 に対して
 意図的に None を返す。
 
+> 追記（#781）: M-1 にもデータ側の日付を持たせた。推論バッチがパネルの最終週次バーから同じ3点を作り
+> `macro_beta_meta.hyperparams.data_asof` に残し、`get_producer_asof` はそれを返す。日付を持たない run は
+> None（未蓄積）ではなく日付が None の dict（as-of 不明）を返す。
+
 ## Considered Options
 
 - **最古（min）を代表値にする**: 最も保守的だが、上場廃止銘柄など極端に古い 1 社に引っ張られて

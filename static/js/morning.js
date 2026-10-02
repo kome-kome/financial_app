@@ -94,6 +94,7 @@ function renderFreshness(f) {
     freshCard(`μ̂（${esc(m.source || '—')}）`, m.level,
       m.snapshot_date || '—',
       m.level === 'empty' ? '未蓄積' :
+      m.level === 'unknown' ? '蓄積済み・as-of 不明（日付の記録が無い）' :
         `${LEVEL_LABEL[m.level] || '—'}・${m.age_bdays ?? '—'}営業日前<br>最古 ${m.snapshot_date_min || '—'}／古い銘柄 ${m.n_stale ?? 0}`,
       m.url),
     freshCard('マクロ系列', mac.level,

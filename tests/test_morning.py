@@ -88,6 +88,49 @@ class TestFreshnessBlock:
         mu = client.get("/api/morning?mu_source=macro_gbdt").json()["freshness"]["mu"]
         assert mu["source"] == "macro_gbdt"
 
+    @staticmethod
+    def _put_m1_run(db, hyperparams):
+        from database import upsert_macro_beta
+        upsert_macro_beta(db, {"run_id": "mb_test", "snapshot_date": date.today().isoformat(),
+                               "selected_factors": ["f1"], "factor_cov": [[1.0]],
+                               "hyperparams": hyperparams},
+                          [{"run_id": "mb_test", "edinet_code": "E00001", "factor_name": "f1",
+                            "loading_mean": 1.0, "loading_se": 0.1}])
+        db.commit()
+
+    def test_m1_run_without_data_asof_is_unknown_not_empty(self, db):
+        """#781 より前の M-1 run は μ̂ が読めるのに「未蓄積」と出ていた。理由文を分ける。"""
+        self._put_m1_run(db, {"draws": 800})
+        f = client.get("/api/morning?mu_source=macro_risk_return").json()["freshness"]
+        assert f["mu"]["level"] == "unknown"
+        assert f["mu"]["snapshot_date"] is None
+        mu_reasons = [s for s in f["reasons"] if "macro_risk_return" in s]
+        assert any("as-of が不明" in s for s in mu_reasons)
+        assert not any("未蓄積" in s for s in mu_reasons)
+        assert f["tradable"] is False        # 判定不能は発注不可に寄せる（_LEVEL_ORDER）
+
+    def test_m1_run_with_data_asof_reports_its_age(self, db):
+        """実行日ではなく、推論が見た最終週次バーの日付で鮮度を判定する（#781）。"""
+        today = date.today().isoformat()
+        self._put_m1_run(db, {"data_asof": {"snapshot_date": today,
+                                            "snapshot_date_min": "2026-09-18", "n_stale": 3}})
+        mu = _mor._mu_block(db, "macro_risk_return")
+        assert mu["level"] == "fresh"
+        assert mu["snapshot_date"] == today
+        assert mu["snapshot_date_min"] == "2026-09-18"
+        assert mu["n_stale"] == 3
+        assert mu["age_bdays"] == 0
+
+    def test_m1_stale_data_asof_degrades(self, db):
+        """実行日が今日でも、データが古ければ古いと出す（実行日を as-of にしていた嘘の再発防止）。"""
+        old = (date.today() - timedelta(days=60)).isoformat()
+        self._put_m1_run(db, {"data_asof": {"snapshot_date": old,
+                                            "snapshot_date_min": old, "n_stale": 0}})
+        mu = _mor._mu_block(db, "macro_risk_return")
+        assert mu["level"] == "alert"
+        assert any(old in s for s in _mor._reasons(
+            {"level": "fresh"}, {"level": "fresh"}, mu, {"level": "fresh"}, {}))
+
     def test_each_block_points_at_the_local_runbook(self, db):
         """#503 で駆動がローカルへ移った。**停止済みの GHA へ誘導しない**（#561）。
 

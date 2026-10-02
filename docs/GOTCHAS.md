@@ -352,7 +352,7 @@ TTM 合成（`ttm_composite.py`）の実装で実測して分かったこと。*
   - **draw ごとに再構成する**。`sigma_stock` が確率変数なので `mean(beta_raw * sigma_stock) != mean(beta_raw) * mean(sigma_stock)`＝事後平均から組み直すと平均がずれ、SD は全く別物になる。
   - **銘柄チャンク（`BETA_CHUNK_STOCKS`）で刻む**。全銘柄まとめて `(chain, draw, stock, factor)` を作ると削減した約584MB がそのまま戻る。
   - **収束診断は `beta` に対して計算し続ける**。`persist_allowed` は `beta` / `alpha` / `mu_universe` それぞれの r_hat を見るので、`beta` を `beta_raw` で代用すると non-centered の raw パラメータは混合が良いぶん r_hat が小さく出て**ゲートが黙って緩くなる**（失敗として現れない）。チャンクへ分割して r_hat=max・ESS=min を累積するのは、これらがスカラーパラメータごとに独立に計算されるため全体と厳密に一致するから。
-- **M-1 の `macro_beta_meta.snapshot_date` は推論バッチの実行日であってデータ as-of ではない**（`macro_beta_inference.py` が UTC today を入れる）。株価が止まっていても「今日」と読めてしまうため、`database.get_producer_asof("macro_risk_return")` は意図的に None を返す。M-1 の as-of を表示したくなったら、まず実行日でなくデータ側の日付を持たせるところから直すこと。
+- **M-1 の `macro_beta_meta.snapshot_date` は推論バッチの実行日であってデータ as-of ではない**（`macro_beta_inference.py` が UTC today を入れる）。株価が止まっていても「今日」と読めてしまうので as-of には使わない。データ側の日付は推論バッチが `build_panel(return_last_bars=True)` の最終週次バーから作り、`hyperparams.data_asof` に残す（#781・列にしないのは DDL 未適用の DB でバッチが開始時に止まるため）。`get_producer_asof` は live run のそれを返し、持たない run には**日付が None の dict（as-of 不明）**を返す——None（未蓄積）と同じ顔にすると、#781 以前のように「μ̂ が揃っているのに未蓄積・発注不可」と出る。
 - 分析モデルの理論・次元整合性・外れ値処理（winsorize）・株数推計・Zスコア年度別計算の詳細は [MODELS.md](MODELS.md) を参照。
 
 ---

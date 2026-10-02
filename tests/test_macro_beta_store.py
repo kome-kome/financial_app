@@ -108,6 +108,39 @@ class TestMacroBetaStore:
         assert loadings["E001"]["macro_usdjpy_yoy"] == (0.4, 0.05)
         assert loadings["E001"]["_intercept"] == (0.01, 0.002)     # 切片が格納される
 
+    def test_persist_writes_data_asof_that_the_reader_returns(self, db):
+        """as-of は列ではなく hyperparams.data_asof へ（#781）。`get_producer_asof` が読み戻す。"""
+        from database import get_producer_asof
+        from macro_beta_inference import InferenceResult, persist
+        asof = {"snapshot_date": "2026-10-02", "snapshot_date_min": "2026-09-18", "n_stale": 4}
+        res = InferenceResult(
+            run_id="mb_asof", snapshot_date="2026-10-03",      # 実行日（as-of ではない）
+            selected_factors=["macro_usdjpy_yoy"],
+            loadings={"E001": {"macro_usdjpy_yoy": (0.4, 0.05)}},
+            alpha={"E001": (0.01, 0.002)}, mu_pred={"E001": 0.03},
+            factor_cov=[[1.0]], hyperparams={"draws": 800}, data_asof=asof,
+        )
+        persist(db, res)
+        meta, _ = get_macro_beta(db, "mb_asof", with_loadings=False)
+        assert meta["hyperparams"]["data_asof"] == asof
+        assert meta["hyperparams"]["draws"] == 800              # 既存のキーを潰さない
+        assert get_producer_asof(db, "macro_risk_return") == asof
+
+    def test_persist_without_data_asof_reads_as_unknown(self, db):
+        """as-of を作れなかった run は「未蓄積」ではなく「不明」。実行日で埋めない（#781）。"""
+        from database import get_producer_asof
+        from macro_beta_inference import InferenceResult, persist
+        res = InferenceResult(
+            run_id="mb_noasof", snapshot_date="2026-10-03",
+            selected_factors=["macro_usdjpy_yoy"],
+            loadings={"E001": {"macro_usdjpy_yoy": (0.4, 0.05)}},
+            alpha={"E001": (0.01, 0.002)}, mu_pred={"E001": 0.03},
+            factor_cov=[[1.0]],
+        )
+        persist(db, res)
+        assert get_producer_asof(db, "macro_risk_return") == {
+            "snapshot_date": None, "snapshot_date_min": None, "n_stale": 0}
+
 
 class TestQuarantine:
     """収束ゲートに落ちた run を**捨てずに隔離する**（#609）。

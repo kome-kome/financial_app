@@ -132,7 +132,11 @@ def _mu_driver(mu_source: str) -> tuple[Optional[str], Optional[str]]:
 
 
 def _mu_block(db: Session, mu_source: str) -> dict:
-    """producer スコア（μ̂）の as-of。未蓄積なら level=empty で返す（例外にしない）。"""
+    """producer スコア（μ̂）の as-of。未蓄積なら level=empty で返す（例外にしない）。
+
+    スコアはあるが日付の記録が無い（`get_producer_asof` が日付 None の dict を返す）ときは
+    age が取れず level=unknown になる。どちらも verdict では alert だが、理由文は分ける（#781）。
+    """
     asof = get_producer_asof(db, mu_source)
     # μ̂ の更新主体は producer で違う（macro_enet は夜間、M-2/M-3 は月次本体、M-1 は
     # 月次から切り出した別タスク）。
@@ -240,6 +244,10 @@ def _reasons(price: dict, gap: dict, mu: dict, macro: dict, batch: dict) -> list
                    f"（{mu['age_bdays']}営業日前）")
     elif mu["level"] == "empty":
         out.append(f"μ̂（{mu['source']}）が未蓄積")
+    elif mu["level"] == "unknown":
+        # 「未蓄積」と同じ文にしない（#781）。直す場所が違う——こちらは producer が日付を
+        # 記録していない（M-1 なら #781 より前の run）か、記録が日付として読めない。
+        out.append(f"μ̂（{mu['source']}）の as-of が不明（スコアはあるが日付の記録が無いか読めない）")
     if macro["level"] == "alert":
         codes = "・".join(e["code"] for e in macro["worst"]) or "不明"
         out.append(f"既定モデルが使うマクロ系列が古い/欠測: {codes}")

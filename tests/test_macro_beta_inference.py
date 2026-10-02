@@ -161,6 +161,53 @@ class TestBuildPanel:
         observed_codes = {edinet_codes[i] for i in stock_idx}
         assert observed_codes <= set(codes)
 
+    def test_default_return_keeps_seven_elements(self):
+        """既存の呼び出し元（scripts・テスト）は 7 要素で展開している。既定を変えない（#781）。"""
+        db, _codes, _sectors = _build_mock_db()
+        assert len(build_panel(db, macro_names=MACRO_TEST_NAMES)) == 7
+
+    def test_return_last_bars_gives_last_weekly_bar_per_panel_code(self):
+        """M-1 の as-of の素（#781）。パネルに入った銘柄だけ・各銘柄の最終週次バー。"""
+        ref = date(2025, 6, 1)
+        db, _codes, _sectors = _build_mock_db(ref=ref)
+        out = build_panel(db, macro_names=MACRO_TEST_NAMES, return_last_bars=True)
+        assert len(out) == 8
+        edinet_codes, last_bars = out[5], out[7]
+        assert set(last_bars) == set(edinet_codes)
+        # 合成データの最終週は ref の 7日前（_build_mock_db の i = n_weeks-1）
+        assert set(last_bars.values()) == {(ref - timedelta(days=7)).isoformat()}
+
+
+# ── μ̂ の as-of（#781）───────────────────────────────────────────────────────────
+
+class TestPanelDataAsof:
+    """`macro_beta_meta.snapshot_date` は実行日なので、as-of はパネルの最終週次バーから作る。"""
+
+    def test_representative_triplet(self, db):
+        last_bars = {"E1": "2026-10-02", "E2": "2026-10-02", "E3": "2026-09-18"}
+        assert mbi._panel_data_asof(db, last_bars, ["E1", "E2", "E3"]) == {
+            "snapshot_date": "2026-10-02", "snapshot_date_min": "2026-09-18", "n_stale": 1}
+
+    def test_failure_does_not_stop_inference(self, db, monkeypatch, caplog):
+        """as-of は付帯情報。ここで落とすと 6〜7時間の推論が1回分消える＝None で続行する。"""
+        import logging
+
+        import plugins.macro_snapshots as ms
+
+        def _boom(*_a, **_k):
+            raise RuntimeError("companies を読めない")
+        monkeypatch.setattr(ms, "tradable_snapshot_asof", _boom)
+        with caplog.at_level(logging.WARNING, logger="macro_beta_inference"):
+            assert mbi._panel_data_asof(db, {"E1": "2026-10-02"}, ["E1"]) is None
+        assert "as-of" in caplog.text
+
+    def test_no_bars_is_none_with_warning(self, db, caplog):
+        import logging
+
+        with caplog.at_level(logging.WARNING, logger="macro_beta_inference"):
+            assert mbi._panel_data_asof(db, {}, ["E1"]) is None
+        assert "as-of" in caplog.text
+
 
 # ── select_shared_factors ──────────────────────────────────────────────────────
 
@@ -252,10 +299,23 @@ class TestRunInferenceEndToEnd:
             lambda macro, returns, factor_names, max_features: list(range(min(len(factor_names), max_features))),
         )
 
+        # as-of の結線（#781）: パネルの銘柄の最終週次バーが渡り、結果が result へ載る。
+        # 実体は TestPanelDataAsof が検証する（MagicMock の db では companies を読めない）。
+        seen_asof_args = {}
+
+        def _fake_asof(_db, last_bars, edinet_codes):
+            seen_asof_args.update(last_bars=last_bars, edinet_codes=list(edinet_codes))
+            return {"snapshot_date": "2025-05-25", "snapshot_date_min": "2025-05-25", "n_stale": 0}
+        monkeypatch.setattr(mbi, "_panel_data_asof", _fake_asof)
+
         db, codes, _sectors = _build_mock_db(n_weeks=100, n_companies=3)
         result = mbi.run_inference(draws=50, tune=50, target_accept=0.9, seed=0, db=db,
                                    macro_names=MACRO_TEST_NAMES, chains=2)
 
+        assert result.data_asof == {"snapshot_date": "2025-05-25",
+                                    "snapshot_date_min": "2025-05-25", "n_stale": 0}
+        assert set(seen_asof_args["last_bars"]) == set(seen_asof_args["edinet_codes"])
+        assert set(seen_asof_args["edinet_codes"]) == set(result.loadings)
         assert result.run_id
         assert result.snapshot_date
         assert set(result.selected_factors) <= set(MACRO_TEST_NAMES)
