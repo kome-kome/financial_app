@@ -280,7 +280,7 @@ class Company(Base):
     fiscal_month = Column(Integer)                         # 決算月
     accounting_standard = Column(String(20))               # JGAAP/IFRS/US-GAAP
     issued_shares = Column(Float, nullable=True)           # 発行済株式数（J-Quants 取得・最新値）
-    is_active     = Column(Boolean, nullable=False, default=True)  # 上場中フラグ（J-Quants /equities/master 突合で自動更新。#315・#462）
+    is_active     = Column(Boolean, nullable=False, default=True)  # 上場中フラグ（J-Quants /equities/master 突合で自動更新。#315・#462。地方単独上場は株価で判定・#779）
     delisted_date = Column(Date, nullable=True)             # is_active=False へ遷移した日（再上場等で復帰した場合はNoneへ戻す）
     # 解決済みの Yahoo ティッカーサフィックス（".S"=札証 / ".F"=福証・#555）。
     # **NULL は「未解決＝.T（東証）で試す」の1つの意味しか持たない**（3状態目を作らない
@@ -2928,10 +2928,15 @@ def sync_active_status(db, active_sec_codes: set, master_as_of: Optional[str] = 
     net_cash_analysis の母集団から落ちた）。**マスタは自分の as-of より後のことを証言できない**
     ので、価格履歴が as-of より後に始まる銘柄は delisted 判定から除外する。
 
+    **マスタは東証しか載せない**（#779）。札証・福証の単独上場（`yahoo_suffix` 解決済み・#555）は
+    構造的に載らず、2026-08-08 の初回同期で37社が一括 delisted になり、復帰の条件（マスタに
+    再び載る）を永久に満たさなかった。マスタが証言できない社は**株価で判定する**——
+    `yahoo_suffix` 解決済みで株価が生きている社は delisted にせず、既に delisted なら復帰させる。
+
     戻り値: {"delisted": 新規delisted件数, "reactivated": 復帰件数, "protected": as-of 以降の
-    取引で保護した件数}
+    取引で保護した件数, "price_alive": 株価が生きている地方単独上場として上場扱いに保った件数}
     """
-    from sqlalchemy import update as sa_update
+    from sqlalchemy import update as sa_update, case, and_
 
     currently_active = {
         sec for (sec,) in db.query(Company.sec_code)
@@ -2968,6 +2973,38 @@ def sync_active_status(db, active_sec_codes: set, master_as_of: Optional[str] = 
         }
         newly_delisted -= protected
 
+    price_alive: set = set()
+    candidates = newly_delisted | currently_inactive
+    if master_as_of and candidates:
+        # 地方単独上場の生存判定（#779）。「既に delisted なら復帰」だけでは翌晩
+        # `currently_active - active_sec_codes` で再び delisted に戻るので、両側に効かせる。
+        #
+        # - 対象は `yahoo_suffix` 解決済みの社だけ。東証の社はマスタが証言できるので、
+        #   上の `protected` だけで判定する（as-of 直後に廃止した 3593 を救わないため）。
+        # - 最終足が `PRICE_STALE_ALERT_BDAYS` 以内＝ #605 の価格停止判定と同じ線。
+        #   別の線を持つと、片方だけ動かしたときに黙ってずれる。
+        # - 加えて as-of より後に**出来高>0** の足を要る。Yahoo は廃止後も出来高0の幽霊足を
+        #   返しうる（#769）。窓をマスタの as-of から取るのは、そこがマスタの証言できない
+        #   区間だから（実測から逆算しない）。地方株は約定の無い日が多く（実測: 最大29営業日
+        #   空く社がある）、出来高>0 を10営業日へ縮めると生きている社が delisted と復帰を
+        #   繰り返す。
+        cutoff = stale_cutoff_date(date.today(), PRICE_STALE_ALERT_BDAYS)
+        traded_after_as_of = case(
+            (and_(StockPriceDaily.volume > 0, StockPriceDaily.trade_date > master_as_of), 1),
+            else_=0,
+        )
+        price_alive = {
+            sec for (sec,) in db.query(Company.sec_code)
+            .join(StockPriceDaily, StockPriceDaily.edinet_code == Company.edinet_code)
+            .filter(Company.sec_code.in_(candidates), Company.yahoo_suffix.isnot(None))
+            .group_by(Company.sec_code)
+            .having(func.max(StockPriceDaily.trade_date) >= cutoff)
+            .having(func.sum(traded_after_as_of) > 0)
+            .all()
+        }
+        newly_delisted -= price_alive
+        reactivated = reactivated | (currently_inactive & price_alive)
+
     if newly_delisted:
         db.execute(
             sa_update(Company).where(Company.sec_code.in_(newly_delisted))
@@ -2987,8 +3024,13 @@ def sync_active_status(db, active_sec_codes: set, master_as_of: Optional[str] = 
             f"上場状態同期: マスタ as-of {master_as_of} 以降の取引がある {len(protected)}社を"
             f"delisted 判定から除外（新規上場でマスタ未収載）: {sorted(protected)}"
         )
+    if price_alive:
+        log.info(
+            f"上場状態同期: マスタに載らないが株価が生きている地方単独上場 {len(price_alive)}社を"
+            f"上場扱いに保った（うち今回の復帰 {len(currently_inactive & price_alive)}社・#779）"
+        )
     return {"delisted": len(newly_delisted), "reactivated": len(reactivated),
-            "protected": len(protected)}
+            "protected": len(protected), "price_alive": len(price_alive)}
 
 
 def upsert_financial(db, data: dict) -> FinancialRecord:

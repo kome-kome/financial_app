@@ -189,6 +189,9 @@ graph TD
 >   `collect_stock_price_history_jquants`（夜間の J-Quants catchup・`_pipeline_incremental.py`）が J-Quants `/equities/master`
 >   （現在の上場銘柄集合・実測4,446銘柄）と突合し `sync_active_status()`（database.py）で自動更新する。
 >   v1 の `/markets/listed/info` は **v2 に存在せず**、#425 の v2 移行以降この同期は停止していた（#462）。
+>   マスタは東証銘柄だけを載せるので、**札証・福証の単独上場（`yahoo_suffix` 解決済み・#555）は株価で判定する**（#779）:
+>   最終足が `PRICE_STALE_ALERT_BDAYS` 以内で、マスタの as-of より後に出来高>0 の足がある社は delisted にせず、
+>   delisted なら復帰させる（戻り値 `price_alive`）。東証の社はマスタ突合と #463 の `protected` だけで判定する。
 >   「今買える銘柄」を選ぶプラグイン（recommend / gap_analysis / net_cash_analysis）と
 >   sell_ranking の**標準化の基準となる母集団**は `database.tradable_filters(db)` で対象を絞るが、
 >   **backtest はフィルタしない**（as-of の start_date 時点の候補を「現在」の上場状態で絞ると
@@ -253,7 +256,7 @@ erDiagram
         string    market            "市場区分（プライム/スタンダード/グロース）"
         int       fiscal_month      "決算月（3=3月決算など）"
         string    accounting_standard "会計基準（JGAAP/IFRS/US-GAAP）"
-        bool      is_active         "上場中フラグ（既定true。J-Quants listed/info突合で自動更新）"
+        bool      is_active         "上場中フラグ（既定true。J-Quants /equities/master突合で自動更新。地方単独上場は株価で判定・#779）"
         date      delisted_date     "is_active=false へ遷移した日（再上場等で復帰時はnullへ戻す）"
         string    yahoo_suffix      "解決済みYahooティッカーのサフィックス（.S=札証/.F=福証）。nullは未解決＝.T（#555）"
         string    yahoo_probe_bucket "プローブの棄却理由 mismatch/empty/placeholder/not_found。採用済みと未プローブはnull（#560）"

@@ -73,7 +73,7 @@ class TestUpsertCompany:
 
 
 class TestSyncActiveStatus:
-    """sync_active_status() — J-Quants listed/info 突合による is_active 自動更新（Issue #315）。"""
+    """sync_active_status() — J-Quants /equities/master 突合による is_active 自動更新（Issue #315）。"""
 
     def test_marks_missing_company_as_delisted(self, db):
         from database import sync_active_status
@@ -85,7 +85,7 @@ class TestSyncActiveStatus:
         obj = db.query(Company).filter_by(edinet_code="E00001").one()
         assert obj.is_active is False
         assert obj.delisted_date is not None
-        assert result == {"delisted": 1, "reactivated": 0, "protected": 0}
+        assert result == {"delisted": 1, "reactivated": 0, "protected": 0, "price_alive": 0}
 
     def test_active_company_still_in_set_is_untouched(self, db):
         from database import sync_active_status
@@ -97,7 +97,7 @@ class TestSyncActiveStatus:
         obj = db.query(Company).filter_by(edinet_code="E00001").one()
         assert obj.is_active is True
         assert obj.delisted_date is None
-        assert result == {"delisted": 0, "reactivated": 0, "protected": 0}
+        assert result == {"delisted": 0, "reactivated": 0, "protected": 0, "price_alive": 0}
 
     def test_reactivates_when_code_reappears(self, db):
         from database import sync_active_status
@@ -112,7 +112,7 @@ class TestSyncActiveStatus:
         obj = db.query(Company).filter_by(edinet_code="E00001").one()
         assert obj.is_active is True
         assert obj.delisted_date is None
-        assert result == {"delisted": 0, "reactivated": 1, "protected": 0}
+        assert result == {"delisted": 0, "reactivated": 1, "protected": 0, "price_alive": 0}
 
     def test_company_without_sec_code_is_untouched(self, db):
         from database import sync_active_status
@@ -123,7 +123,7 @@ class TestSyncActiveStatus:
 
         obj = db.query(Company).filter_by(edinet_code="E00001").one()
         assert obj.is_active is True   # sec_code 無しは突合不能なので不変
-        assert result == {"delisted": 0, "reactivated": 0, "protected": 0}
+        assert result == {"delisted": 0, "reactivated": 0, "protected": 0, "price_alive": 0}
 
 
 class TestUpsertFinancial:
