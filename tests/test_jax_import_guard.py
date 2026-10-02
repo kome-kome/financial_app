@@ -10,7 +10,10 @@
 import importlib
 import importlib.abc
 import importlib.machinery
+import subprocess
 import sys
+import textwrap
+from pathlib import Path
 
 import pytest
 
@@ -19,6 +22,8 @@ from scripts import check_heavy_imports
 
 MESSAGE = "アプリケーション制御ポリシーによってこのファイルがブロックされました。"
 FAKE = "fake_gpu_ext_782"
+FAKE_STUB = "fake_cpu_ext_789"
+REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
 @pytest.fixture(autouse=True)
@@ -34,10 +39,13 @@ def _isolate(monkeypatch):
     guard._substituted.clear()
     monkeypatch.setattr(guard, "block_message", lambda: MESSAGE)
     monkeypatch.setattr(guard, "GPU_ONLY_EXTENSIONS", frozenset({FAKE}))
+    monkeypatch.setattr(guard, "STUBBED_EXTENSIONS",
+                        {FAKE_STUB: {"registrations": guard._no_registrations}})
     yield
     sys.meta_path[:] = meta_path
     guard._substituted[:] = substituted
     sys.modules.pop(FAKE, None)
+    sys.modules.pop(FAKE_STUB, None)
 
 
 class _RealLoader(importlib.abc.Loader):
@@ -59,13 +67,13 @@ class _RealLoader(importlib.abc.Loader):
 
 @pytest.fixture
 def real_loader(monkeypatch):
-    """PathFinder が FAKE にだけ偽の spec を返すようにする（他の import は素通し）。"""
+    """PathFinder が FAKE / FAKE_STUB にだけ偽の spec を返すようにする（他の import は素通し）。"""
     loader = _RealLoader()
     original = importlib.machinery.PathFinder.find_spec
 
     def find_spec(fullname, path=None, target=None):
-        if fullname == FAKE:
-            return importlib.machinery.ModuleSpec(FAKE, loader)
+        if fullname in (FAKE, FAKE_STUB):
+            return importlib.machinery.ModuleSpec(fullname, loader)
         return original(fullname, path, target)
 
     monkeypatch.setattr(importlib.machinery.PathFinder, "find_spec", find_spec)
@@ -137,6 +145,99 @@ class TestImportThroughTheGuard:
         real_loader.error = ImportError(MESSAGE)
         with pytest.raises(ImportError):
             importlib.import_module(FAKE)
+
+
+class TestStubbedExtension:
+    """空モジュールでは足りない部品（#789）。import 時に読まれる属性だけを持たせる。
+
+    `jaxlib.cpu._sparse` は numpyro の import が `jax.experimental.sparse` 経由で
+    `registrations()` を呼ぶので、空モジュールでは import の段で落ちる。
+    """
+
+    def test_blocked_load_gets_only_the_stub_attributes(self, real_loader):
+        real_loader.error = ImportError(f"DLL load failed while importing {FAKE_STUB}: {MESSAGE}")
+        guard.install()
+        module = importlib.import_module(FAKE_STUB)
+        assert module.__substituted_by__ == guard.__name__
+        assert module.registrations() == {}    # 登録するカーネルが無い＝使えば XLA が止める
+        assert guard.substituted() == (FAKE_STUB,)
+        assert real_loader.executed is False
+        with pytest.raises(AttributeError):    # スタブに無い属性は従来どおり例外
+            module.batch_partitionable_targets  # noqa: B018
+
+    def test_other_import_errors_still_raise(self, real_loader):
+        real_loader.error = ImportError("DLL load failed: 指定されたモジュールが見つかりません。")
+        guard.install()
+        with pytest.raises(ImportError, match="見つかりません"):
+            importlib.import_module(FAKE_STUB)
+        assert guard.substituted() == ()
+
+    def test_successful_load_is_delegated(self, real_loader):
+        guard.install()
+        module = importlib.import_module(FAKE_STUB)
+        assert module.loaded_for_real is True
+        assert not hasattr(module, "__substituted_by__")
+
+    def test_default_stubs_are_listed_with_their_reason(self, monkeypatch):
+        monkeypatch.undo()
+        assert "jaxlib.cpu._sparse" in guard.STUBBED_EXTENSIONS
+        # GPU 一覧と重ねない（どちらの扱いか曖昧にしない）。
+        assert not set(guard.STUBBED_EXTENSIONS) & guard.GPU_ONLY_EXTENSIONS
+        for name, attrs in guard.STUBBED_EXTENSIONS.items():
+            assert attrs, f"{name}: 属性が無いなら GPU_ONLY_EXTENSIONS 側（空モジュール）でよい"
+
+
+_SPARSE_BLOCKED_IMPORT = textwrap.dedent("""
+    import importlib.abc
+    import importlib.machinery
+    import jax_import_guard as guard
+
+    NAME = "jaxlib.cpu._sparse"
+    message = guard.block_message()
+
+    class Blocked(importlib.abc.Loader):
+        def create_module(self, spec):
+            raise ImportError(f"DLL load failed while importing _sparse: {message}")
+
+        def exec_module(self, module):
+            raise AssertionError("遮断された本物を実行した")
+
+    original = importlib.machinery.PathFinder.find_spec
+
+    def find_spec(fullname, path=None, target=None):
+        spec = original(fullname, path, target)
+        if fullname == NAME and spec is not None:
+            spec.loader = Blocked()
+        return spec
+
+    importlib.machinery.PathFinder.find_spec = find_spec
+    guard.install()
+
+    import jax
+    import numpyro  # noqa: F401  (jax.experimental.sparse の冒頭が registrations() を呼ぶ)
+    import jaxlib.cpu_sparse
+
+    assert guard.substituted() == (NAME,), guard.substituted()
+    assert jaxlib.cpu_sparse.registrations() == {"cpu": []}
+    print("devices", jax.devices(), float(jax.jit(lambda x: x * 2.0)(1.5)))
+""")
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="ガードは Windows でしか挿さない")
+def test_real_jax_starts_with_cpu_sparse_blocked():
+    """本物の jax / numpyro が `_sparse` の遮断をスタブで越えて立ち上がる（#789）。
+
+    jax を既に読んだ pytest のプロセスでは import の段を再現できないのでサブプロセスで測る。
+    jaxlib を上げて import 時に読まれる属性が増えたら、ここが AttributeError で落ちる。
+    """
+    pytest.importorskip("numpyro")
+    result = subprocess.run(
+        [sys.executable, "-c", _SPARSE_BLOCKED_IMPORT],
+        cwd=REPO_ROOT, capture_output=True, text=True, encoding="utf-8", errors="replace",
+        timeout=120,
+    )
+    assert result.returncode == 0, result.stderr[-2000:]
+    assert result.stdout.strip().endswith(" 3.0"), result.stdout[-500:]
 
 
 class TestDepsSmokeReportsSubstitution:

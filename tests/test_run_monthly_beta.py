@@ -82,6 +82,11 @@ class TestStepOrder:
         names = _names()
         assert names.index("deps_smoke") < names.index("macro_beta")
 
+    def test_deps_smoke_checks_the_inference_stack(self):
+        """macro_beta は jax / numpyro を使う。base に絞ると直前の確認が消える（#789 の逆側）。"""
+        argv = next(s.argv for s in rmb.steps_for("py") if s.name == "deps_smoke")
+        assert "base" not in argv
+
     def test_every_step_states_why(self):
         for s in rmb.steps_for(sys.executable):
             assert s.why, f"{s.name} に why が無い（ログだけ見て意図が分からなくなる）"

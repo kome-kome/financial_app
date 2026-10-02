@@ -134,6 +134,11 @@ class TestSteps:
         names = [s.name for s in rd.steps_for("py", "beta")]
         assert names == ["deps_smoke", "macro_beta"]
 
+    def test_the_smoke_checks_the_inference_stack(self):
+        """deps_smoke を積むのは jax / numpyro を使う仕事だけ＝base に絞らない（#789）。"""
+        smoke = rd.steps_for("py", "beta")[0]
+        assert smoke.name == "deps_smoke" and "base" not in smoke.argv
+
     def test_search_jobs_skip_the_smoke_step(self):
         """探索は pymc を使わないので、20秒の import 確認を毎回払わない。"""
         assert [s.name for s in rd.steps_for("py", "tune:macro_gbdt")] == ["tune:macro_gbdt"]

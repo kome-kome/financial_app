@@ -33,9 +33,23 @@ pip でパッケージを更新した後は、**対話セッションで一度 i
 
 2026-10-02 01:00 は、10/1 まで読めていた `_mosaic_gpu_ext.pyd`（中身不変）が遮断され、対話で
 import しても通らなかった（同日 03:15 までに自然に解けた）。SAC の判定は時間とともにどちらへも
-動くので、上の「一度 import して評価を通す」は初回ロードにしか効かない。遮断されたのが GPU/TPU
-専用の jaxlib 拡張なら `jax_import_guard` が空モジュールで代替し、ここでは `[warn ]` 行として
-残す（CPU の推論では使わないので失敗にしない）。それ以外の遮断は従来どおり失敗にする。
+動くので、上の「一度 import して評価を通す」は初回ロードにしか効かない。遮断されたのが CPU の
+NUTS で使わない jaxlib 拡張（GPU/TPU 専用・#789 の `cpu/_sparse`）なら `jax_import_guard` が
+代替し、ここでは `[warn ]` 行として残す（失敗にしない）。それ以外の遮断は従来どおり失敗にする。
+
+## バッチが使う依存だけを確かめる（#789）
+
+2026-10-03 01:00 の月次 M-1 は、SAC が `jaxlib/cpu/_sparse.pyd` を遮断して exit=1 になった。
+だが M-1（`macro_risk_return`）も月次本体（factor_premia / macro_dlm / macro_gbdt）も jax・
+numpyro・pymc を一切 import しない——使わない部品の遮断で失敗扱いになった誤報である。
+そこで `--profile` で確かめる範囲を選ぶ:
+
+- `base`: 基盤（numpy / scipy / pandas / sklearn / statsmodels）だけ。M-1 と月次本体
+- `inference`（既定）: base ＋ pymc / pytensor / arviz / jax / numpyro ＋ `jax.devices()`。
+  `macro_beta_inference` を回すバッチ（月次 beta・日中枠の beta / bench）
+
+既定を厳しい側に置くのは、指定を忘れたバッチが確認を失わないため。`_sparse` 自体は
+`jax_import_guard` がスタブで代替する（`[warn ]` 行で残す）。
 
 ## 未導入と import 失敗を区別する
 
@@ -45,29 +59,44 @@ import できない**のは環境の異常なので失敗にする。この2つ�
 「入っていないだけ」に見えて黙って通る。
 
 実行（必ず -m 形式）:
-    python -m scripts.check_heavy_imports
+    python -m scripts.check_heavy_imports                  # inference（全部）
+    python -m scripts.check_heavy_imports --profile base   # 基盤だけ
 """
 from __future__ import annotations
 
+import argparse
 import importlib
 import sys
+from typing import Optional, Sequence
 
 import jax_import_guard
 
 # (import 名, 何のために要るか)。**pip のパッケージ名ではなく import 名**を書く。
-# 並びは「本番も使う native 拡張」→「推論バッチ専用」の順。
-HEAVY_IMPORTS: tuple[tuple[str, str], ...] = (
+# 本番も使う native 拡張。どのバッチも使う。
+BASE_IMPORTS: tuple[tuple[str, str], ...] = (
     ("numpy", "全モデルの土台"),
     ("scipy", "統計・最適化"),
     ("pandas", "パネル整形"),
     ("sklearn", "M-2 / 前処理"),
     ("statsmodels", "OLS / Fama-MacBeth"),
+)
+
+# `macro_beta_inference` だけが使う推論系。M-1（macro_risk_return）はこれが作った
+# `macro_beta_loadings` を DB から読むだけで、ここは import しない（#789）。
+INFERENCE_IMPORTS: tuple[tuple[str, str], ...] = (
     ("pymc", "M-1 macro_beta の階層ベイズ（pytensor / arviz もここで解決される）"),
     ("pytensor", "pymc の計算グラフ"),
     ("arviz", "事後診断（r_hat / ESS）"),
     ("jax", "numpyro NUTS の実行基盤。**SAC がブロックしたのはここが読む jaxlib の DLL**"),
     ("numpyro", "NUTS サンプラ本体"),
 )
+
+# プロファイル → 確かめる import。`inference` は `jax.devices()` まで踏み込む。
+PROFILES: dict[str, tuple[tuple[str, str], ...]] = {
+    "base": BASE_IMPORTS,
+    "inference": BASE_IMPORTS + INFERENCE_IMPORTS,
+}
+DEFAULT_PROFILE = "inference"
 
 
 def probe(name: str) -> tuple[str, str]:
@@ -103,18 +132,26 @@ def warm_jax() -> tuple[str, str] | None:
         return "error", f"{type(exc).__name__}: {str(exc)[:200]}"
 
 
-def main() -> int:
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    """`argv=None` は引数なし扱い（pytest から呼んだとき pytest の sys.argv を読まない）。"""
+    parser = argparse.ArgumentParser(description="重い依存が import できるかを確かめる")
+    parser.add_argument("--profile", choices=sorted(PROFILES), default=DEFAULT_PROFILE,
+                        help="base＝基盤だけ（M-1・月次本体）／inference＝推論系と jax.devices() まで"
+                             f"（既定 {DEFAULT_PROFILE}）")
+    args = parser.parse_args([] if argv is None else list(argv))
+
     # 本番の推論（`macro_beta_inference`）と同じ条件で確かめる。ガード無しで測ると、本番では
     # 通る遮断をここだけが失敗として報告する。
     jax_import_guard.install()
+    print(f"[profile] {args.profile}")
     failures: list[str] = []
-    for name, why in HEAVY_IMPORTS:
+    for name, why in PROFILES[args.profile]:
         state, detail = probe(name)
         print(f"[{state:5s}] {name:12s} {detail}  <- {why}")
         if state == "error":
             failures.append(f"{name}: {detail}")
 
-    warmed = warm_jax()
+    warmed = warm_jax() if args.profile == "inference" else None
     if warmed is not None:
         state, detail = warmed
         print(f"[{state:5s}] {'jax.devices':12s} {detail}")
@@ -124,8 +161,8 @@ def main() -> int:
     # 代替は失敗に数えないが、黙らせもしない。**判定の反転は CodeIntegrity ログ（約4時間で
     # 上書き）に残らず、このログが唯一の時系列になる**（#782）。
     for name in jax_import_guard.substituted():
-        print(f"[warn ] {name}  Smart App Control が遮断 → 空モジュールで代替"
-              "（GPU/TPU 専用・CPU 推論では使わない）")
+        print(f"[warn ] {name}  Smart App Control が遮断 → 代替"
+              "（CPU の NUTS では使わない部品・#782・#789）")
 
     if failures:
         print("")
@@ -147,4 +184,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(main(sys.argv[1:]))

@@ -115,11 +115,14 @@ def steps_for(python: str) -> tuple[Step, ...]:
     全部同じ理由で落ちるので、900分の予算を待たずに失敗として現れる方がよい（#584）。
     """
     steps: list[Step] = [
-        Step("deps_smoke", (python, "-m", "scripts.check_heavy_imports"),
+        Step("deps_smoke", (python, "-m", "scripts.check_heavy_imports", "--profile", "base"),
              why="重い依存（numpy / scipy / sklearn 等）が実際に import できるかを確かめる。"
                  "2026-09-01 の実走では Smart App Control が未評価の DLL を初回ロードで"
                  "ブロックし、本番ステップが exit=1 で落ちた。ここで消化しておけば "
-                 "900分の予算を待たずに失敗が現れる"),
+                 "900分の予算を待たずに失敗が現れる。"
+                 "**M-1 は jax / numpyro / pymc を import しない**（`macro_beta_loadings` を "
+                 "DB から読むだけ）ので基盤だけを確かめる——使わない jaxlib の部品の遮断で "
+                 "失敗扱いになった（2026-10-03・#789）"),
         Step(f"tune:{MODEL}",
              (python, "hyperparameter_search.py", "--model", MODEL,
               "--strategy", STRATEGY,
