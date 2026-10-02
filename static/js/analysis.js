@@ -586,6 +586,10 @@ function renderSellRanking(d) {
     const nStale = a.n_stale ? `／代表より古い銘柄 ${Number(a.n_stale).toLocaleString()}社` : '';
     notes.push(`<span style="color:var(--text-muted)">※ μ̂ の as-of: ${esc(a.snapshot_date)}（中央値）`
       + `／最古 ${esc(a.snapshot_date_min || '不明')}${nStale}</span>`);
+  } else if (d.mu_asof) {
+    // スコアはあるが日付の記録が無い（M-1 の #781 より前の run 等）。行ごと消すと
+    // 「いつのデータか」を確かめられないまま使うことになるので、不明と明示する。
+    notes.push('<span style="color:var(--text-muted)">※ μ̂ の as-of: 不明（スコアはあるが日付の記録が無い）</span>');
   }
   document.getElementById('sell-notes').innerHTML = notes.join('<br>');
 

@@ -84,18 +84,52 @@ class TestProducerAsofPersistence:
         assert get_producer_asof(db, "macro_gbdt") is None
         assert get_producer_asof(db, "unknown_plugin") is None
 
-    def test_m1_returns_none_because_meta_date_is_run_date(self, db):
-        """M-1 の macro_beta_meta.snapshot_date は推論バッチの実行日でデータ as-of ではない。
+    def test_row_without_date_is_unknown_not_empty(self, db):
+        """スコアがあるのに日付が無いことを「未蓄積」（None）と同じ顔にしない（#781）。"""
+        replace_macro_enet_scores(
+            db, [{"edinet_code": "E001", "mu": 0.1, "r1_prime": None}], None)
+        assert get_producer_asof(db, "macro_enet") == {
+            "snapshot_date": None, "snapshot_date_min": None, "n_stale": 0}
 
-        そのまま返すと株価が止まっていても「今日」と表示され #417 と同型の嘘になるため、
-        意図的に None を返す。
-        """
-        from database import upsert_macro_beta
-        upsert_macro_beta(db, {"run_id": "r1", "snapshot_date": date.today().isoformat(),
-                               "selected_factors": ["f1"], "factor_cov": [[1.0]],
-                               "hyperparams": {}},
-                          [{"run_id": "r1", "edinet_code": "E001", "factor_name": "f1",
-                            "loading_mean": 1.0, "loading_se": 0.1}])
+
+def _put_m1_run(db, run_id, hyperparams, status=None):
+    from database import upsert_macro_beta
+    meta = {"run_id": run_id, "snapshot_date": date.today().isoformat(),
+            "selected_factors": ["f1"], "factor_cov": [[1.0]], "hyperparams": hyperparams}
+    if status:
+        meta["status"] = status
+    upsert_macro_beta(db, meta, [{"run_id": run_id, "edinet_code": "E001", "factor_name": "f1",
+                                  "loading_mean": 1.0, "loading_se": 0.1}])
+
+
+class TestM1ProducerAsof:
+    """M-1 の as-of は `hyperparams.data_asof`（推論時の最終週次バー）から読む（#781）。
+
+    `macro_beta_meta.snapshot_date` は推論バッチの実行日でデータ as-of ではない。そのまま
+    返すと株価が止まっていても「今日」と表示され #417 と同型の嘘になるので、読まない。
+    """
+
+    def test_no_run_is_empty(self, db):
+        assert get_producer_asof(db, "macro_risk_return") is None
+
+    def test_run_without_data_asof_is_unknown_not_run_date(self, db):
+        """#781 より前の run。実行日（今日）を as-of として返さず、「不明」にする。"""
+        _put_m1_run(db, "r_old", {"draws": 800})
+        assert get_producer_asof(db, "macro_risk_return") == {
+            "snapshot_date": None, "snapshot_date_min": None, "n_stale": 0}
+
+    def test_run_with_data_asof_returns_it(self, db):
+        _put_m1_run(db, "r_new", {"draws": 800, "data_asof": {
+            "snapshot_date": "2026-10-02", "snapshot_date_min": "2026-09-18", "n_stale": 12}})
+        assert get_producer_asof(db, "macro_risk_return") == {
+            "snapshot_date": "2026-10-02", "snapshot_date_min": "2026-09-18", "n_stale": 12}
+
+    def test_quarantined_run_is_not_read(self, db):
+        """producer から見えない run の日付を出さない（`get_macro_beta` の live 絞りに従う）。"""
+        from database import MACRO_BETA_STATUS_QUARANTINED
+        _put_m1_run(db, "r_q", {"data_asof": {"snapshot_date": "2026-10-02",
+                                              "snapshot_date_min": "2026-10-02", "n_stale": 0}},
+                    status=MACRO_BETA_STATUS_QUARANTINED)
         assert get_producer_asof(db, "macro_risk_return") is None
 
 

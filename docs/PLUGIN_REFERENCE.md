@@ -132,7 +132,7 @@ sink は **ContextVar**。`execute` のシグネチャは `(params, db)` に固�
   - `macro_snapshots.load_weekly_prices_chunked` も**流用できない**：①対象が `Company` 全社固定で保有20銘柄には過剰 ②戻り値は常に全履歴（#480 で DB からは差分だけ引くようになったが、キャッシュとマージして**返す形は全履歴のまま**＝学習用ローダーの契約は不変） ③`week_start` を返さない（#480 後も意図的にそのまま。差分の切り出しは ISO 週の不変条件を使って `trade_date` で行う） ④`_VOLUME_NOT_LOADED` 番兵は volume 用で不要。
 - **μ／−R_macro 観点の出所は `mu_source` トグル**（M-1 `macro_risk_return`／M-3 `macro_dlm`／M-6 `macro_enet`＝**既定**・#396/#402。M-4 は退役・ADR-0044／M-2 は供給者から降ろした・ADR-0052）で切替——選択 producer の `read_producer_scores` を読み、未実行なら graceful-degrade（`mu_available=false`）。
 - **R3 足切りゲートは `r1_prime`（M-1=予測SE／M-2・M-6=コンフォーマル区間半幅・ADR-0020/#365）で M-1・M-2・M-6 とも機能**（M-3/M-4 は r1_prime 不在で無効・`r1_prime=None` はゲート素通り）。
-- **`mu_asof`（producer スコアの代表 as-of・最古・古い銘柄数）を返却**（`database.get_producer_asof`・#417。M-1 は meta の日付が推論実行日でデータ as-of ではないため None）。
+- **`mu_asof`（producer スコアの代表 as-of・最古・古い銘柄数）を返却**（`database.get_producer_asof`・#417。M-1 は `macro_beta_meta.hyperparams.data_asof`＝推論時の最終週次バーから・#781。スコアはあるが日付の記録が無いときは日付が None の dict を返し、画面は「as-of 不明」と出す）。
 
 依存先: `plugins/utils.py`, `database.py`, `plugins.net_cash_analysis`
 

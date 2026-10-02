@@ -49,6 +49,7 @@ ASOF_PRODUCERS = (
     "plugins/macro_gbdt.py",
     "plugins/macro_dlm.py",
     "plugins/macro_ensemble.py",
+    "macro_beta_inference.py",      # M-1（#781）。as-of は推論バッチがパネルから作る
 )
 
 

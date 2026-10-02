@@ -432,7 +432,7 @@ erDiagram
         string   snapshot_date        "推論実行日 YYYY-MM-DD"
         json     selected_factors     "選択された共有マクロ因子（pooled BIC・ADR-0002）"
         json     factor_cov           "因子共分散Σ_macro（R_macro算出用）"
-        json     hyperparams          "推論ハイパラ（draws/tune/target_accept等・収束診断含む。極値を出した母数と変数別の分位も #600/#609）"
+        json     hyperparams          "推論ハイパラ（draws/tune/target_accept等・収束診断含む。極値を出した母数と変数別の分位も #600/#609）。data_asof＝μ̂ の as-of（パネルの最終週次バーの代表値・最古・古い銘柄数・#781）"
         string   status               "収束ゲートの結果（live=producerが読む / quarantined=保全のみ・NULLは列導入前でlive扱い・#609）"
         datetime created_at           "登録日時"
     }

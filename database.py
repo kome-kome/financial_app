@@ -1145,18 +1145,38 @@ _PRODUCER_SCORE_MODELS = {
 }
 
 
+_ASOF_UNKNOWN = {"snapshot_date": None, "snapshot_date_min": None, "n_stale": 0}
+
+
 def get_producer_asof(db, plugin_name: str) -> dict | None:
     """producer スコアの as-of を `{snapshot_date, snapshot_date_min, n_stale}` で返す。
 
-    未蓄積・未 migration・不明な plugin_name なら None（graceful degrade）。
+    戻り値は3通りで、**「未蓄積」と「as-of 不明」を分ける**（#781）:
 
-    M-1（macro_risk_return）は意図的に None を返す。`macro_beta_meta.snapshot_date` は
-    推論バッチの**実行日**（`macro_beta_inference.py` が UTC today を入れる）であって
-    データの as-of ではないため、そのまま as-of として見せると株価が止まっていても
-    「今日」と表示され、#417 と同型の嘘になる。M-1 の as-of 是正は別途。
+    - None: スコアが未蓄積・未 migration・不明な plugin_name（graceful degrade）
+    - 日付が None の dict: スコアはあるが日付の記録が無い（読み手は「as-of 不明」と出す）
+    - 日付の入った dict: 通常
+
+    M-1（macro_risk_return）は live run の `hyperparams.data_asof`（推論時の最終週次バー）を
+    返す。`macro_beta_meta.snapshot_date` は推論バッチの**実行日**であってデータの as-of では
+    ないので読まない——株価が止まっていても「今日」と表示され、#417 と同型の嘘になる。
+    `data_asof` を持たない run（#781 より前）は「不明」になる。
     """
     if plugin_name == "macro_risk_return":
-        return None
+        try:
+            meta, _ = get_macro_beta(db, with_loadings=False)
+        except Exception:
+            return None
+        if meta is None:
+            return None
+        a = (meta.get("hyperparams") or {}).get("data_asof") or {}
+        if not a.get("snapshot_date"):
+            return dict(_ASOF_UNKNOWN)
+        return {
+            "snapshot_date":     a["snapshot_date"],
+            "snapshot_date_min": a.get("snapshot_date_min"),
+            "n_stale":           a.get("n_stale") or 0,
+        }
     model = _PRODUCER_SCORE_MODELS.get(plugin_name)
     if model is None:
         return None
@@ -1164,8 +1184,10 @@ def get_producer_asof(db, plugin_name: str) -> dict | None:
         row = db.query(model).first()
     except Exception:
         return None
-    if row is None or not row.snapshot_date:
+    if row is None:
         return None
+    if not row.snapshot_date:
+        return dict(_ASOF_UNKNOWN)
     return {
         "snapshot_date":     row.snapshot_date,
         "snapshot_date_min": row.snapshot_date_min,
