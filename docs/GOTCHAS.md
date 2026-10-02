@@ -22,8 +22,8 @@ SSEエンドポイント（進捗のリアルタイム配信・全5本）: 収�
 ## 業種データの取得方法
 
 - **業種はXBRLから取得できない**。EDINETのXBRLに TSE 33業種コードは含まれていない。
-- **正規ソース**: JPX上場会社一覧Excel（`data_j.xlsx`、33業種コード列=col4/col5）
-- `update_industry_from_jpx(client, db)` が `run_full_collection` の末尾で自動実行される。
+- **正規ソース**: JPX上場会社一覧Excel（`data_j.xlsx`、33業種コード列=col4/col5）。JPX に載らない上場社の空欄だけ EDINET コードリストの「提出者業種」で補う（#784・下記）。
+- `update_industry_from_jpx(client, db)` → `fill_industry_from_edinet_codelist(client, db)` の順に `run_full_collection` の末尾（Phase 5）で自動実行される。
 - 証券コードは4桁数字（`1301`）とアルファベット混在（`350A`）の両形式に対応済み。
 - **URL は一覧ページから解決する。定数で持つと変わった晩から静かに 404 になる（#632・2026-09-03）**: JPX は `data_j.xls` を `data_j.xlsx` へ切り替えた。ディレクトリ（`tvdivq0000001vg2-att`）は変わっておらず、変わったのは拡張子だけ。6晩連続で 404 になったが、`update_industry_from_jpx` が `except Exception: return 0, 0` で握っていたため **WARNING 止まりで `exit=0`**、足跡（`nightly_last_run`）も入るので watchdog（#515）にも引っかからなかった。既存の業種は DB に残るので画面も壊れず（実測で業種が空なのは 3,725社中2社）、現れるのは「新規上場社の業種が入らない」という静かな陳腐化だけ。解決は `resolve_jpx_excel_url()` が `JPX_LISTING_URL`（一覧ページ）から `href="...data_j.xls|xlsx"` を拾う。ページを読めない／リンクが無いときは `JPX_EXCEL_URL` へ倒す（解決の失敗を致命傷にしない）。
 - **xlrd は .xls 専用**（`xlrd==2.0.2` は `.xlsx` を読めず `XLRDError` を送出）。`openpyxl` へのフォールバックが `_read_jpx_excel` にある。
@@ -31,6 +31,14 @@ SSEエンドポイント（進捗のリアルタイム配信・全5本）: 収�
   - `_read_jpx_excel` は **業種は埋まっているのにコード列を解釈できなかった行を数え**、`JPX_CODE_DROP_LIMIT`（5%）を超えたら `JpxIndustryError` を送出する。**正常なファイルではこの数は 0** なので閾値をどこに置いても誤検知しない（今回の壊れ方は 3,606/3,899＝一桁違い）。`bool` は `int` の派生なので判定から除く（`True` が `"0001"` に化ける）。
   - 取得・解釈の失敗は `JpxIndustryError` として型にする（`EdinetAccessError` と同じ役どころ＝「変化が無かった」と「取れなかった」を分ける）。
 - **失敗の現れ方は watchdog の producer 側（#632）**: 成功時だけ `app_settings.jpx_industry_last_success` を書き、`batch_freshness.PRODUCERS` がその鮮度を見る（閾値は `cadence 24h + run_nightly.WINDOW_MIN`）。**`companies.industry` の中身は見ない**——既存値は取得が止まっても残るので「更新できているか」の証拠にならない。**Phase 5 で例外を送出してはいけない**——`run_full_collection` は `_pipeline_incremental._run_with_retry` の内側にあり、最後の1歩で raise すると XBRL 差分収集を丸ごと retry させる。捕捉して収集は継続し、失敗は足跡が進まないことで翌日以降に現れる。手動経路（`POST /api/collect/industry`）だけは 502 で即返す（「0件更新」と区別する）。
+- **JPX に載らない上場社の空欄は EDINET コードリストで埋める（#784・2026-10-03）**: JPX の一覧は東証銘柄だけなので、札証・福証の単独上場37社・JPX の一覧で業種が付かない社（信金中央金庫 8421 の優先出資証券）・JPX 未収載の新規上場は業種が空のまま `sector_ols._eligible_base`（`if not r.industry`）で回帰から外れ、`gap_ratio` が付かなかった（例外も警告も出ない）。`fill_industry_from_edinet_codelist` が JPX の直後（Phase 5）に `EDINET_CODELIST_URL`（`Edinetcode.zip`・日次更新・API キー不要・cp932 の CSV。1行目はメタ行）の「提出者業種」で埋める。守っている約束は4つ:
+  - **JPX を上書きしない（空欄だけ埋める）**: JPX で業種が付いている 3,753社を突き合わせると **174社（4.6%）で EDINET の分類が食い違う**（2026-10-02 実測・例: JPX サービス業／EDINET 情報・通信業）。正本は JPX。
+  - **上場区分が「上場」の社だけ**: 業種が空の 695社のうち、上場は 108社（地方37・現役3・DB 上は廃止の68）。残る 587社（非上場・空欄＝大半は廃止社）を埋めると、時点再現の回帰（`sector_gap_asof` は生存者バイアスを避けて廃止社を含む）・業種内Z（年度×業種で区切る VIEW の `z_*_sec`）・M-1 系の業種カテゴリの**過去年度が広く動く**ので範囲から外した。今はこの 587社が空文字という1つの「疑似業種」にまとまっている。
+  - **許す業種名は DB に既にある名前（＝JPX が書いた名前）だけ。33業種名をコードへ写さない**: 削除した旧 `TSE_INDUSTRY`（XBRL の到達不能な分岐でだけ使われていた）は「証券、商品先物取引業」を「証券・」と書いており、写しは黙って陳腐化していた。表記差は実測で1つだけ（EDINET `倉庫・運輸関連` → JPX `倉庫・運輸関連業`）で `EDINET_INDUSTRY_ALIASES` が吸収する。一致しない上場社の名前は書かずに WARNING で数える（書くと業種別回帰に1社だけの業種ができる）。33業種以外の値（`外国法人・組合`・`内国法人・組合（有価証券報告書等の提出義務者以外）`）も同じく書かれない。
+  - **会社の業種を空の財務行へ毎晩写す（`_propagate_company_industry`）**: 収集が財務行の業種を空文字で書き直すため、一度埋めるだけでは直らない——差分収集（Phase 4）は新しい行を `xbrl_industry or master_industry`（どちらも常に空）で作り、`refresh_company`・半期（H1）収集は既存行を空で上書きする。JPX は証券コードで財務行も直すが、JPX に載らない社の行は誰も直さない。実測で TOB 等で JPX から外れた現役13社の 2026 年 H1 行（9/15 の日中収集で作成）が、会社側に業種があるのに空のままだった。写しは埋まっている行を変えない。
+  - 失敗の扱いは JPX と同じ: `EdinetCodelistError`・足跡 `app_settings.edinet_codelist_last_success`・`batch_freshness.PRODUCERS`（Phase 5 では送出しない／手動の `POST /api/collect/industry` は 502）。照合先（JPX の名前）が DB に1つも無いときも失敗にする。
+  - 効き方（2026-10-03・ローカル正本で書き込みなしの模擬実行）: 補完は会社 108社・財務行 1,612行。地方37社のうち 36社に `gap_ratio` が付く（残る E01855 は業種以外＝特徴量の欠損で `_prepare_fit` が外す）。既存社の gap は順位相関 0.9995・ridge α は全業種で不変。20pt 超動いたのは 23社で、|gap| の中央値 475% の外れ値側（相対変化の中央値 10%）。1社足された金属製品は業種内の順位相関 0.9865（winsorize の境界と z-score が動く）。
+- **`update_industry_from_jpx` の UPDATE 条件は `IS DISTINCT FROM`（#784）**: `industry != ind` は SQL の三値論理で NULL の行を更新しない（発見時点で NULL の行は0件＝潜在バグ）。
 
 ---
 
@@ -239,7 +247,7 @@ SSEエンドポイント（進捗のリアルタイム配信・全5本）: 収�
     - **地方単独上場は株価で判定する（#779・2026-10-02）**：マスタは東証しか載せないので、`yahoo_suffix` 解決済みの37社（札証15・福証22）は初回同期で一括 delisted になり、復帰の条件（マスタに再び載る）を永久に満たさなかった——株価は毎晩入っているので #605 の価格停止にも掛からず、**`is_active` だけが推奨・売却・ギャップ・ネットキャッシュから静かに落としていた**。`sync_active_status` は「`yahoo_suffix` 解決済み・最終足が `PRICE_STALE_ALERT_BDAYS` 以内・as-of より後に出来高>0 の足が1本以上」の社を delisted にせず、delisted なら復帰させる（戻り値 `price_alive`）。**復帰だけ足すと翌晩また delisted に戻る**ので両側に効かせてある。
     - **出来高>0 の窓を10営業日へ縮めない**：地方株は Yahoo が毎営業日バーを返すが約定の無い日は出来高0で、実測では約定が最大29営業日空く社があり、10営業日を超える空白を持つ社が37社中5社。縮めると生きている社が delisted と復帰を繰り返し、そのたび `delisted_date` が書き換わる。窓はマスタが証言できない区間（as-of より後）から取っている。出来高>0 を外すと幽霊足（#769）で廃止社が戻る。
     - **東証の社（接尾辞 NULL）は株価で救わない**：as-of 直後に廃止した 3593 型（#463）まで上場扱いに戻りうる。東証はマスタが証言できるので従来の `protected` だけで判定する。**`master_as_of` が無い晩はこの保護も掛からない**（37社がその晩だけ delisted に落ち、次に as-of が取れた晩に戻る）。
-    - #779 後も `is_active=False` には**真の廃止と #463 の誤検出**が残り、`delisted_date` は検出日のまま（廃止日ではない・#785）。地方単独上場は業種が空なので sector_ols から外れ、`gap_ratio` が付かない（ギャップ分析には出ない・#784）。
+    - #779 後も `is_active=False` には**真の廃止と #463 の誤検出**が残り、`delisted_date` は検出日のまま（廃止日ではない・#785）。地方単独上場の業種は EDINET コードリストの提出者業種で埋める（#784・「業種データの取得方法」節）。
 - **naive な `timestamp` 列へ aware UTC を書くと、入る値は「接続先のセッション TZ」で決まる（#565・2026-08-29・[ADR-0043](adr/0043-session-settings-travel-with-the-connection.md)）**: DateTime 列は `timestamp without time zone` なのに Python 側は `datetime.now(timezone.utc)`（aware）を渡している。psycopg2 は aware のまま送るので、**PG は naive 列へキャストする際にセッション TZ でローカル時刻へ変換して tz を落とす**。セッション TZ が UTC なら UTC naive、`Asia/Tokyo` なら **JST naive** が入る。表示側 `api._utc_to_jst_str` は前者を仮定して +9h するので、後者だと画面に **9 時間先の時刻**が出る（ダッシュボードが「バッチが走っていない 03:02」を最終更新として表示していた）。
   - **#503 の正本反転で顕在化した**。Supabase は既定 `TimeZone=UTC`、ローカル PG は実測 `Asia/Tokyo`（`pg_settings` のサーバ設定なので**全クライアントが継承する**——psql も SQLAlchemy も同じ）。**どちらの世界でも接続でき書き込みも成功するので例外は出ない**（#508 と同型で、接続先の食い違いは沈黙する）。結果として同じ列に UTC と JST が混在した（境界は 2026-08-20）。
   - **表示だけでなく判定に効く**。`routers/market.py::days_since_update` と `routers/morning.py::_gap_ratio_block` の `age_days` が 9 時間新しく見える＝鮮度が甘くなる。さらに `nightly_scores._make_score_table_verifier` の `max(created_at) < started_at` は、9 時間進んだ値のせいで**常に通過する空検査**に化けていた（書けていなくても気づけない）。

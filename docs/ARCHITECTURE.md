@@ -52,7 +52,7 @@ graph LR
         direction TB
         API_L["⚡ api.py\n全操作可能\n・全件収集\n・株価履歴再構築\n・J-Quants大量収集\n・重いOLS回帰（結果を正本へ保存）\n・分析・スクリーニング"]
         BATCH["⏰ ローカルバッチ\n夜間（収集＋スコア更新）\n平日日中キュー・月次\n週次バックアップ"]
-        COL_L["🔄 collector.py\n・EDINET全社XBRL収集\n・株価（Yahoo 欠損補完→J-Quants 公式値）\n・JPX業種補完"]
+        COL_L["🔄 collector.py\n・EDINET全社XBRL収集\n・株価（Yahoo 欠損補完→J-Quants 公式値）\n・JPX業種補完（JPX に無い上場社は EDINET コードリスト）"]
     end
 
     subgraph RENDER["☁️ Render（閲覧専用の窓・RENDER_LIGHT_MODE=true）"]
@@ -271,7 +271,7 @@ erDiagram
         string    edinet_code   UK  "EDINETコード（E00001など）"
         string    sec_code          "証券コード（4桁 例:7203）"
         string    name              "会社名"
-        string    industry          "業種（TSE33業種）"
+        string    industry          "業種（TSE33業種。JPX が正本・空欄だけ EDINET 提出者業種で補完）"
         string    market            "市場区分（プライム/スタンダード/グロース）"
         int       fiscal_month      "決算月（3=3月決算など）"
         string    accounting_standard "会計基準（JGAAP/IFRS/US-GAAP）"
@@ -694,6 +694,7 @@ sequenceDiagram
     participant BGT   as 🔄 バックグラウンドタスク
     participant EDI   as 📋 EDINET API
     participant JPX   as 🏢 JPX Excel
+    participant ED    as 📇 EDINET コードリスト
     participant DB    as 🗄️ PostgreSQL
 
     User ->> UI  : 「収集開始」をクリック
@@ -723,6 +724,9 @@ sequenceDiagram
     BGT  ->> JPX : TSE33業種一覧Excelをダウンロード
     JPX -->> BGT : 証券コード→業種名の対応表
     BGT  ->> DB  : companies・financial_records の industry を更新
+    BGT  ->> ED  : EDINET コードリスト（Edinetcode.zip）をダウンロード（#784）
+    ED  -->> BGT : EDINET コード→提出者業種（上場区分＝上場の社だけ使う）
+    BGT  ->> DB  : 業種が空の会社だけ埋め（JPX を上書きしない）、会社の業種を空の財務行へ写す
 
     Note over BGT,DB: フェーズ④: 後処理は不要<br/>成長率・Zスコアは financial_metrics VIEW が読み取り時に都度算出（事前計算を廃止）
 
@@ -1336,7 +1340,7 @@ graph LR
         C15["GET /api/collect/edinet-coverage\nEDINET収録状況"]
         C16["GET /api/collect/market-coverage\n株価データ収録状況"]
         C17["GET /api/collect/data-quality\nNULL率・外れ値チェック\n会計基準別サマリ（JGAAP/IFRS/US-GAAP）"]
-        C18["POST /api/collect/industry\nJPX Excelから業種データを更新"]
+        C18["POST /api/collect/industry\nJPX Excelから業種データを更新\n→ 空欄を EDINET コードリストで補完"]
         C19["POST /api/collect/macro/start\nマクロデータ収集（為替・金利・指数・コモディティ）"]
         C20["POST /api/collect/macro/stop\nマクロ収集を停止"]
         C21["GET /api/collect/macro/status\nマクロ収集の状態"]
@@ -1464,7 +1468,7 @@ graph TB
 | `jax_import_guard.py` | バックエンド | **Smart App Control が CPU の NUTS で使わない jaxlib 拡張を遮断しても CPU の jax を立ち上げる**（#782・#789）。jax は CPU でも `_mosaic_gpu_ext` を起動時に無条件 import するので、GPU 専用の1ファイルの遮断で jax・numpyro 全体が落ちる。`install()` が meta path finder を先頭へ挿し、`GPU_ONLY_EXTENSIONS` の読み込みが**遮断（Windows エラー 4551 の文言）で**失敗したときだけ空モジュールで代替する。**import 時に属性を読まれる部品は `STUBBED_EXTENSIONS` に読まれる属性だけを持つスタブで代替する**（`jaxlib.cpu._sparse` は numpyro の import が `registrations()` を呼ぶ。`{}` を返すとカーネルが未登録になるだけで NUTS はビット一致・#789）——遮断された DLL は実行しない／別の失敗と一覧外は従来どおり送出／Windows 以外は何も挿さない。`macro_beta_inference` がモジュール冒頭で、`scripts/check_heavy_imports` が `main()` 冒頭で呼ぶ。代替は `substituted()` で取り、両者がログへ残す。経緯は [GOTCHAS.md](GOTCHAS.md) | （標準ライブラリのみ） |
 | `collector.py` | バックエンド | **オーケストレータ＋後方互換の再エクスポート層**。CLI エントリ（`python collector.py ...`）を保持し、責務別5モジュールの全シンボルを再エクスポートする（`from collector import X` / `collector.X` は従来どおり）。実体は下記5ファイル | collector_utils/master/financials/prices/disclosures |
 | `collector_utils.py` | バックエンド | 収集系モジュール共通の設定定数（EDINET/J-Quants/Yahoo のレート・並列数・バッチ閾値。stooq の定数は #736 で経路ごと撤去）とロガー `log`。価格スケール突合の共有定義（丸め許容 `rounding_tolerance`・公式 `AdjFactor` が持たないスピンオフ調整の登録表 `SPINOFF_ADJUSTMENTS` / `spinoff_factor`・#568）もここに置き、検出器と修復スクリプトが書き写さずに共有する | dotenv |
-| `collector_master.py` | バックエンド | 企業/業種マスタ収集（EDINET コードリスト `fetch_edinet_code_list`・JPX 業種マスタ `resolve_jpx_excel_url` / `update_industry_from_jpx` / `_read_jpx_excel`） | EDINET API, JPX, collector_utils |
+| `collector_master.py` | バックエンド | 企業/業種マスタ収集（企業一覧 `fetch_edinet_code_list`＝名前に反して書類一覧 API の走査・JPX 業種マスタ `resolve_jpx_excel_url` / `update_industry_from_jpx` / `_read_jpx_excel`・JPX に載らない上場社の業種の空欄補完 `fill_industry_from_edinet_codelist` / `_read_edinet_codelist`＝EDINET コードリストの提出者業種・#784） | EDINET API, EDINET コードリスト, JPX, collector_utils |
 | `collector_financials.py` | バックエンド | XBRL 財務収集・パース・正規化（`parse_xbrl_csv` / `calc_derived` ほか）＋ CF/PL-BS 補完・再解析＋全件収集オーケストレーション（`run_full_collection` / `_phase_*`）。**派生指標・Zスコア・成長率・nc_ratio は永続化しない**（financial_metrics VIEW が担う）。`calc_derived` は free_cf/nonoperating_income の算出のみ残す | EDINET API, collector_utils, collector_master |
 | `collector_prices.py` | バックエンド | 株価収集（Yahoo / J-Quants。stooq は個別銘柄の株価履歴収集 `/api/collect/history/{start,stop,status,stream}` とマクロのフォールバックごと撤去済み＝どの実行環境からもボット検証で CSV が取れない・#736）＋市場データ更新＋マクロ指標収集。株価は夜間バッチ（`_pipeline_incremental.py`）の Yahoo 欠損補完 → J-Quants catchup（公式値への置き換え）で入る。**`financial_records` への株価・PER/PBR/時価総額の反映は `update_market_data_from_history` に一本化**（#428。旧 `update_market_data`＝stooq へ全社逐次リクエストする経路は削除。GUI `/api/collect/market-data`・CLI `--market` も同関数を呼ぶ）。`MACRO_SERIES` で為替・金利・指数・コモディティ・ボラ、`FRED_SERIES` で FRED 11系列（米クレジット/インフレ＋#381 非ICE信用代替 `BAA_SPREAD`＝`BAA10Y` Baa−10Y＋#250 日本実体経済3種＋#404 政策不確実性2種（`US_EPU`＝`USEPUINDXD`・`US_EQUITY_EPU`＝`WLEMUINDXD`・Baker-Bloom-Davis EPU・日次1985〜・日本版 `JPNEPUINDXM` は 2016-04 凍結のため不採用）。`HY_OAS`/`IG_OAS` は FRED の ICE BofA 3年窓制限で 2023-06 以降のみ＝strict の既定からは除外・選択肢としては残置・ADR-0016）、`BOJ_SERIES` で日銀 API（M2 月次＋短観DI の各バリアント・四半期・認証不要）、`OECD_SERIES` で OECD SDMX API 1系列（`JP_CLI`＝日本 Composite Leading Indicator・振幅調整済・認証不要・ADR-0009・#283）、`ESRI_SERIES` で内閣府ESRI直接CSV配布4系列（`JP_GDP_PRIVATE_CONSUMPTION`個人消費・`JP_GDP_RESIDENTIAL_INV`住宅投資・`JP_GDP_CAPEX`設備投資・`JP_GDP_PUBLIC_INV`公共投資・認証不要・1994Q1〜最新を含む単一CSVを直近4四半期×速報2種のURLプロービングで取得・#286）、`IMF_SERIES` で IMF WEO 見通し2系列（`JP_WEO_GDP_FCAST`実質GDP成長率見通し・`JP_WEO_CPI_FCAST`インフレ率見通し・いずれも翌年予測・認証不要・唯一のforward-lookingチャネル・バックフィルは `WEOhistorical.xlsx`（point-in-timeパネル・vintage先読みバイアス回避）、継続収集は現行dataflowをtrade_date=収集日で固定・ADR-0011・#284）、`ESTAT_SERIES` で e-Stat API 3系列（全国CPI総合/コア・東京CPI）、`ESTAT_INDEX_SERIES` で e-Stat 鉱工業指数2系列（`JP_IIP`生産・`JP_IIP_INVENTORY`在庫・#253のFRED凍結代替・#281）、`GDELT_SERIES` で GDELT DOC 2.0 API 3系列（`JP_NEWS_TONE`／`JP_NEWS_ECON_TONE`＝ニュース平均トーン・`JP_NEWS_ECON_VOL`＝報道量%・認証不要・2017-01-01〜・全期間を1リクエストで日次取得・レート制限1req/5sで**超過時も HTTP 200＋プレーンテキスト**のため本文JSON判定でリトライ・ADR-0024・#406）、`WIKIMEDIA_SERIES` で Wikimedia Pageviews API 2系列（`JP_WIKI_MARKET_ATTN`／`JP_WIKI_MACRO_ATTN`＝ja.wikipedia 記事バスケットの日次閲覧数合算・認証不要だが User-Agent に連絡先必須・2015-07-01〜・欠測日は0埋めせず除外）を定義。**`MOF_SERIES`** で財務省「国債金利情報」CSV 1系列（`JP10Y_MOF`＝日次の日本10年金利・認証不要・PDL1.0・1986-07〜・cp932/和暦・`parse_mof_jgb_csv`。**初回は全期間版 `jgbcm_all.csv`＋当月版 `jgbcm.csv`、以降は当月版のみ**＝全期間版は月次更新で当月分を持たない・#458/ADR-0029）（e-Stat 系はいずれも `ESTAT_API_KEY` 要。GDELT/Wikimedia は**マクロ集約のみ＝銘柄別日次は370MB/年で無料枠に入らないため採らない**）。公表ラグは各系列の `lag_days` で `trade_date` をシフトして先読みバイアスを防ぐ。TOPIX は指数 ^TPX 配信停止のため ETF 1306.T で収集（#250）。**週次株価の段差（分割の遡及調整もれ）検出・修復**（#465）: `detect_price_scale_breaks`（契約窓を1リクエストで学習 → weekly に実在する `trade_date` から月次で突合日を選定 → `AdjC` と `weekly.close_last` を突合）と `repair_price_scale_breaks`（該当銘柄だけ Yahoo で全履歴を取り直し `record_prices_batch` へ通し、同じ突合日で検算）。CLI は `--repair-price-breaks`（既定 dry-run・`--persist` で書込・`PRICE_BREAK_MAX_REPAIR` 超過で中止）。5桁コード→4桁の縮約は `is_common_stock_code` で**普通株を優先**（日次収集の dedup と突合の両方が同じ規則を使う）。**毎晩の鮮度確保 `fill_recent_stock_price_gap_yahoo(gap_days=0)` の対象判定は `last_closed_session`（閉場済みの最新 JST 営業日）**＝ランナーの UTC 日付と比べると JST 日曜/月曜の早朝に全社が空振り対象になる（#474・本番実測 4,437社→735社）。**そのうち 454社は価格を1件も持たない `is_active=False` の社**で、`should_retry_priceless_delisted` により `DELISTED_RETRY_INTERVAL_DAYS=7` 日に1回だけ試す（恒久除外にすると #463 の誤 delisted 判定を拾い直せない・#475）。**株価履歴を持つ廃止社**（`is_active=False`・サフィックス未解決・最終株価が `DELISTED_STALE_DAYS=30` 日より前）も同じ間隔で試す（#556・実測 263社が毎晩 404 を返していた。最終株価の古さを条件に入れるので、一度履歴を得た新規上場は巻き込まない）。Yahoo の HTTP 失敗は `yahoo_http_stats()` で数え、4xx は 404 を内訳として分けて出す（`4xx=N（うち404=M）`）。基準セッションより後の `trade_date`（Yahoo が場中に返す進行中バー）は取り込まない。J-Quants catchup は受け取った日次バーのうち `AdjFactor != 1`（普通株のみ）を**価格行の選別より前に** `jquants_adj_factor_events` へ upsert する（#661・API 呼び出しは増えない・保存失敗は戻り値 `adj_factor_events=None` で価格収集の結果は返す）。分割補正係数 F の洗い替え（`rebuild_split_adjustment_factors`）と公式イベント・スピンオフの判定は企業イベント台帳（`corporate_actions.py`）が持つ（#746・ADR-0062）。Yahoo の株価の書き手は DB の直前値と100倍以上離れた値を書かず（gap-fill は離れたバーだけ捨てる・弾いた社は `app_settings.yahoo_scale_rejections` に「社＋基準日」で記録して新規だけ WARNING）、夜間の末尾で株価表全体の100倍段差を走査する（`scan_price_scale_steps`・#765・4-2 節） | J-Quants, Yahoo, FRED, 日銀API, OECD API, ESRI, IMF API, e-Stat, collector_utils, corporate_actions |
 | `sector_gap_asof.py` | バックエンド | **学習パネル用の時点再現の gap_ratio**（#626・[ADR-0057](adr/0057-past-gap-ratio-is-reconstructed-as-of-each-month.md)）。`recommend_factor_premia.build_period_panel(with_gap_ratio=True)` だけが使う。月末ごとに「その月末に見えていた各社の最新の通期行（期末＋45日・`_find_applicable_fin`）」と「その月末の週次終値（`month_end_indices` の足＝`build_snapshots` と共有）× 分割補正係数 F」で`SectorOLSPlugin.predict_gaps`（保存しない経路）を回し、`{(edinet_code, ym): gap_ratio}` を返す。**`regression_results` へは書かない**（画面・バックテスト・鮮度表示に混ざらない）。**株価は `financial_records.stock_price` を読まない**——過去行には「その年度が最新だった頃に毎晩上書きされた現在株価」＝最大1年先の値が残っており（期末±3% に入るのは 2023年度 70%・2024年度 65%）、年度ごとに回すと先読みになる。回帰の母集団はその月末に株価がある全社（パネルの標本＝52週先リターンがある社ではない＝生存バイアスを入れない）。回帰の設定は `nightly_scores.NIGHTLY_PARAMS` を唯一の源にする。**行は edinet_code 順に固定**（回帰は並びに依存しない＝ridge の α は LOO・#697・[ADR-0058](adr/0058-ridge-alpha-is-chosen-by-loo.md)。固定は浮動小数の加算順まで揃えてパネルをビット単位で再現するため）。上半分は DB を引かない純関数 | plugins/sector_ols.py, plugins/macro_snapshots.py, nightly_scores.py, database.py |

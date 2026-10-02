@@ -1,6 +1,6 @@
 """collector.py のユニットテスト（純粋関数・DB/ネットワーク不要）。
 
-対象: XBRL_MAP/TSE_INDUSTRY/CONSOLIDATED_KEYS 定数、XBRL パース（連結優先・前期スキップ・
+対象: XBRL_MAP/CONSOLIDATED_KEYS 定数、XBRL パース（連結優先・前期スキップ・
 値整形）、派生指標計算 calc_derived、列検出、raw 変換。
 """
 import asyncio
@@ -23,7 +23,6 @@ import collector_financials
 import collector_utils
 from collector import (
     CONSOLIDATED_KEYS,
-    TSE_INDUSTRY,
     XBRL_MAP,
     _detect_xbrl_columns,
     _jquants_fetch_code,
@@ -93,10 +92,6 @@ class TestConstants:
         assert XBRL_MAP["NumberOfEmployees"] == ("nonfin", "employees")
         assert XBRL_MAP["NumberOfIssuedSharesAsOfFiscalYearEndIssuedSharesTotalNumberOfSharesEtc"] \
             == ("nonfin", "issued_shares")
-
-    def test_tse_industry(self):
-        assert TSE_INDUSTRY["5250"] == "情報・通信業"
-        assert TSE_INDUSTRY["3650"] == "電気機器"
 
     def test_consolidated_keys(self):
         assert CONSOLIDATED_KEYS == ["Consolidated"]
@@ -662,9 +657,11 @@ class TestEdinetBase:
             body = open(os.path.join(root, name), encoding="utf-8").read()
             for line in body.splitlines():
                 if "edinet-fsa.go.jp" in line and "EDINET_BASE   =" not in line \
+                        and "EDINET_CODELIST_URL =" not in line \
                         and not line.lstrip().startswith("#"):
                     offenders.append(f"{name}: {line.strip()}")
-        assert not offenders, "EDINET の URL は collector_utils.EDINET_BASE 経由にする: " + str(offenders)
+        assert not offenders, ("EDINET の URL は collector_utils.EDINET_BASE（書類 API）か "
+                               "EDINET_CODELIST_URL（コードリスト・#784）経由にする: " + str(offenders))
 
 
 class TestFetchXbrlCsv:

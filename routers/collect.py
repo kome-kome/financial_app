@@ -26,9 +26,10 @@ from database import (
 from collector import (
     run_full_collection, refresh_company, update_market_data_from_history,
     collect_stock_price_history_jquants,
-    update_industry_from_jpx, collect_macro_data, reparse_from_raw,
+    update_industry_from_jpx, fill_industry_from_edinet_codelist,
+    collect_macro_data, reparse_from_raw,
 )
-from collector_utils import JpxIndustryError
+from collector_utils import EdinetCodelistError, JpxIndustryError
 
 _READ_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 
@@ -377,7 +378,13 @@ async def collect_industry(request: Request, db: Session = Depends(api.get_db)):
         except JpxIndustryError as e:
             # 「0件更新」と「取れなかった」を同じ 200 に潰さない（#632）。
             raise HTTPException(502, f"JPX 業種マスタを取得できませんでした: {e}")
-    return {"updated_companies": updated_co, "updated_records": updated_fr}
+        # 夜間の Phase 5 と同じ順序（JPX → EDINET・#784）。手動と夜間で業種の埋まり方をずらさない。
+        try:
+            filled_co, filled_fr = await fill_industry_from_edinet_codelist(client, db)
+        except EdinetCodelistError as e:
+            raise HTTPException(502, f"EDINET コードリストで業種を補完できませんでした: {e}")
+    return {"updated_companies": updated_co, "updated_records": updated_fr,
+            "edinet_filled_companies": filled_co, "edinet_filled_records": filled_fr}
 
 
 # ── J-Quants 収集 ────────────────────────────────────────────────────────

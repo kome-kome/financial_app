@@ -26,25 +26,11 @@ from database import (
 )
 
 from collector_utils import *
-from collector_master import fetch_edinet_code_list, update_industry_from_jpx
+from collector_master import (fetch_edinet_code_list, update_industry_from_jpx,
+                              fill_industry_from_edinet_codelist)
 
 
 # ── XBRL パース用ドメイン定数 ────────────────────────────────────────────
-# TSE 33業種コード → 業種名
-TSE_INDUSTRY = {
-    "0050": "水産・農林業", "1050": "鉱業",       "2050": "建設業",
-    "3050": "食料品",       "3100": "繊維製品",    "3150": "パルプ・紙",
-    "3200": "化学",         "3250": "医薬品",       "3300": "石油・石炭製品",
-    "3350": "ゴム製品",     "3400": "ガラス・土石製品", "3450": "鉄鋼",
-    "3500": "非鉄金属",     "3550": "金属製品",    "3600": "機械",
-    "3650": "電気機器",     "3700": "輸送用機器",  "3750": "精密機器",
-    "3800": "その他製品",   "4050": "電気・ガス業","5050": "陸運業",
-    "5100": "海運業",       "5150": "空運業",       "5200": "倉庫・運輸関連業",
-    "5250": "情報・通信業", "6050": "卸売業",       "6100": "小売業",
-    "7050": "銀行業",       "7100": "証券・商品先物取引業", "7150": "保険業",
-    "7200": "その他金融業", "8050": "不動産業",    "9050": "サービス業",
-}
-
 # XBRL 生タグ → (section, field) のマップ。手書きせず FinancialRecord の各列 info["xbrl"]
 # から逆引き生成する（再分類項目の唯一の源は列定義。database.build_xbrl_map 参照）。
 XBRL_MAP = build_xbrl_map()
@@ -314,7 +300,7 @@ def _apply_row(
     """共通フィルタ・優先度計算・結果反映。parse_raw_rows / parse_xbrl_csv の中核共通ロジック。
 
     Prior コンテキストスキップ・OperatingRevenue1 非連結フィルタ・
-    is_consol/has_member/priority 計算・float 変換・meta/priority 更新を担う。
+    is_consol/has_member/priority 計算・float 変換・priority 更新を担う。
     apply_capex_sign=True のとき capex を負値（支出＝アウトフロー）に統一する。
     """
     # 前期比較データ（Prior1Year等）はスキップ。当期データのみ処理する
@@ -339,16 +325,12 @@ def _apply_row(
     if apply_capex_sign and field == "capex":
         # capex は支出＝負（アウトフロー）で統一する（UI の符号ロバスト実装と整合）
         val = -abs(val)
-    if cat == "meta":
-        # 業種コード: 数値 → 4桁ゼロ埋め文字列 → 業種名に変換
-        code_str = str(int(val)).zfill(4)
-        result["meta"]["tse_industry_code"] = code_str
-        result["meta"]["industry_name"] = TSE_INDUSTRY.get(code_str, "")
-    else:
-        key = f"{cat}_{field}"
-        if priority > _priority.get(key, -1):
-            result[cat][field] = val
-            _priority[key] = priority
+    # 業種は XBRL から取れない（`section="meta"` の列は無い）。業種の源は `collector_master`
+    # （JPX 上場会社一覧と EDINET コードリスト・#784）。
+    key = f"{cat}_{field}"
+    if priority > _priority.get(key, -1):
+        result[cat][field] = val
+        _priority[key] = priority
 
 
 def _inventory_fallback(inv_parts: dict, result: dict) -> None:
@@ -1179,6 +1161,13 @@ async def run_full_collection(db,
             await update_industry_from_jpx(client, db, on_progress=on_progress)
         except JpxIndustryError as e:
             log.warning(f"業種補完をスキップ（収集は継続する）: {e}")
+        # JPX に載らない上場社（地方単独上場等）の空欄を EDINET コードリストで埋め、会社の業種を
+        # 空の財務行へ写す（#784）。**JPX の後に回す**——許す業種名は JPX が書いた名前だけ。
+        # 失敗の扱いは JPX と同じ（足跡 `edinet_codelist_last_success` が進まないことで現れる）。
+        try:
+            await fill_industry_from_edinet_codelist(client, db, on_progress=on_progress)
+        except EdinetCodelistError as e:
+            log.warning(f"EDINET コードリストでの業種補完をスキップ（収集は継続する）: {e}")
     return False
 
 

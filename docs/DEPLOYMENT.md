@@ -395,7 +395,9 @@ M-1（`macro_risk_return`）・M-2（`macro_gbdt`）・M-3（`macro_dlm`）の�
      **`PRODUCERS` は月次の成果物だけではない**——夜間バッチが更新する `JPX 業種マスタ`
      （`app_settings.jpx_industry_last_success`）も同じ表で見る。取得が止まっても既存の業種は
      DB に残り、`nightly_last_run` も画面も健全なままなので、ここ以外に現れる場所が無い
-     （#632・2026-09-03 の拡張子変更は6晩連続の 404 を `exit=0` で通した）。
+     （#632・2026-09-03 の拡張子変更は6晩連続の 404 を `exit=0` で通した）。JPX に載らない上場社の
+     空欄を埋める `EDINET コードリスト（業種の空欄補完）`（`app_settings.edinet_codelist_last_success`・
+     #784）も同じ理由で同じ表に並ぶ。
   3. 予算切れが続くなら `BUDGET_MIN` を実測から見直すか、そのステップを日中枠
      （`run_daytime.ps1 -Enqueue tune:macro_gbdt`・#618）へ逃がす。
 
@@ -930,6 +932,17 @@ ADR-0006 §Decision-2 が定める M2・短観 DI チャネル。
 | レート制限 | 非公開。`BOJ_RATE_SLEEP = 0.5` 秒。5系列で総所要 < 5秒 |
 
 注: ADR-0006 は `api.boj.or.jp` と記したが実エンドポイントは `stat-search.boj.or.jp/api/v1`（GOTCHAS.md 参照）。
+
+### EDINET コードリスト（認証不要・#784）
+
+JPX の上場会社一覧（東証のみ）に載らない上場社の業種の空欄を埋める源。書類 API（`EDINET_BASE`・要 `EDINET_API_KEY`）とは別ホストの配布物。
+
+| 項目 | 値 |
+|---|---|
+| エンドポイント | `https://disclosure2dl.edinet-fsa.go.jp/searchdocument/codelist/Edinetcode.zip`（`collector_utils.EDINET_CODELIST_URL`） |
+| 認証 | 不要 |
+| 更新頻度・サイズ | 日次（2026-10-02 実測 `Last-Modified` は前日 23:59 JST 頃）・ZIP 約570KB（cp932 の CSV 1本・約11,400行） |
+| 呼び出し | 夜間の Phase 5 で1回（JPX の直後）と手動の `POST /api/collect/industry` |
 
 ### OECD SDMX API（認証不要）
 
