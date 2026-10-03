@@ -713,7 +713,8 @@ async function loadPeers(){
   }
   let d;
   try{
-    d = await apiFetch('/api/companies?include_latest=true&limit=300&industry=' + encodeURIComponent(curCompany.industry));
+    // 上場中の社だけを並べる（#797）。廃止社は業種が付いていても古い財務のまま順位に混ざる
+    d = await apiFetch('/api/companies?include_latest=true&active_only=true&limit=300&industry=' + encodeURIComponent(curCompany.industry));
   }catch(e){
     peersLoaded = false;
     note.textContent = '同業データの取得に失敗しました: ' + e.message;

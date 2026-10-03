@@ -248,15 +248,17 @@ async def update_industry_from_jpx(client: httpx.AsyncClient, db,
 
 
 def _read_edinet_codelist(content: bytes) -> dict:
-    """EDINET コードリスト（ZIP のバイト列）を `{edinet_code: 提出者業種}` に変換する純粋関数（#784）。
+    """EDINET コードリスト（ZIP のバイト列）を `{edinet_code: (提出者業種, 上場か)}` に変換する純粋関数。
 
-    **上場区分が「上場」の行だけ**を返す。非上場・空欄の社（大半は廃止社）を埋めると、時点再現の
-    回帰・業種内Z・M-1 系の業種カテゴリの過去年度が広く動くので、#784 の範囲から外した。
-    業種名は生のまま返す——別名表での正規化と許可名との照合は呼び出し側が担う。
+    **上場区分によらず全行を返す**（#797・ADR-0065）。#784 は上場の行だけを返していたが、残った
+    非上場・空欄の社（大半は廃止社）の業種が空のままだと、過去年度の分析で「後に廃止した社」という
+    未来情報の疑似業種になる。業種名は生のまま返す——別名表での正規化・許可名との照合・上場区分に
+    よる警告の出し分けは `_plan_industry_fill` が担う。
 
     見出しは列の位置ではなく名前で引く（1行目は「ダウンロード実行日,…」のメタ行）。見出しが
     見つからない・上場の行が1件も無いときは `EdinetCodelistError` を送出する＝配布形式が変わった
-    疑いがあるので、件数が減ったまま通さない（`_read_jpx_excel` の #632 と同じ考え方）。
+    疑いがあるので、件数が減ったまま通さない（`_read_jpx_excel` の #632 と同じ考え方）。上場の行は
+    約3,800あるのが正常で、0件は上場区分の書き方が変わったときにしか起きない。
     """
     try:
         with zipfile.ZipFile(io.BytesIO(content)) as zf:
@@ -278,16 +280,20 @@ def _read_edinet_codelist(content: bytes) -> dict:
     i_code, i_listed, i_industry = (hdr.index(c) for c in EDINET_CODELIST_COLUMNS)
     width = max(i_code, i_listed, i_industry)
 
-    listed: dict = {}
+    out: dict = {}
+    n_listed = 0
     for r in rows[hdr_idx + 1:]:
-        if len(r) <= width or r[i_listed].strip() != EDINET_CODELIST_LISTED:
+        if len(r) <= width:
             continue
         code, industry = r[i_code].strip(), r[i_industry].strip()
-        if code and industry:
-            listed[code] = industry
-    if not listed:
+        if not (code and industry):
+            continue
+        listed = r[i_listed].strip() == EDINET_CODELIST_LISTED
+        n_listed += listed
+        out[code] = (industry, listed)
+    if not n_listed:
         raise EdinetCodelistError("上場区分が「上場」の行が1件も無い（配布形式が変わった疑い）")
-    return listed
+    return out
 
 
 def _propagate_company_industry(db) -> int:
@@ -321,68 +327,107 @@ def _propagate_company_industry(db) -> int:
     return res.rowcount
 
 
+def _plan_industry_fill(db, codelist: dict) -> tuple[dict, Counter, Counter]:
+    """業種が空の社を、どの業種で埋めるかを決める（書かない・#797）。
+
+    戻り値は `(by_industry, rejected_listed, out_of_scope)`:
+
+    - `by_industry`: `{業種名: [edinet_code, ...]}`。**上場区分によらず**、提出者業種（別名表で
+      正規化）が DB に既にある業種名（＝JPX が書いた名前）に一致する社
+    - `rejected_listed`: 上場社なのに名前が一致しなかった提出者業種の件数。表記差か分類体系の変更の
+      疑いなので呼び出し側が WARNING で出す（書くと業種別回帰に1社だけの業種ができる）
+    - `out_of_scope`: 非上場・区分空欄の社の、33業種外の名前の件数（`内国法人・組合（有価証券報告書等
+      の提出義務者以外）`・`外国法人・組合`）。業種ではなく提出者の種別なので想定内＝INFO で数える
+
+    計測（`scripts.measure_industry_fill_impact`）が本番と同じ選び方を使えるよう、書く処理から
+    切り出してある。照合先の業種名が DB に1つも無いときは `EdinetCodelistError`。
+    """
+    allowed = {ind for (ind,) in db.query(Company.industry)
+               .filter(Company.industry.isnot(None), Company.industry != "")
+               .distinct()}
+    if not allowed:
+        raise EdinetCodelistError("照合先の業種名（JPX が書いた名前）が DB に1つも無い。"
+                                  "JPX の業種更新が先に成功している必要がある")
+
+    empty_codes = [c for (c,) in db.query(Company.edinet_code)
+                   .filter(or_(Company.industry.is_(None), Company.industry == ""))]
+    by_industry: dict = defaultdict(list)
+    rejected_listed: Counter = Counter()
+    out_of_scope: Counter = Counter()
+    for code in empty_codes:
+        entry = codelist.get(code)
+        if entry is None:
+            continue        # コードリストに無い社・提出者業種が空の社は埋めない
+        raw, listed = entry
+        industry = EDINET_INDUSTRY_ALIASES.get(raw, raw)
+        if industry not in allowed:
+            (rejected_listed if listed else out_of_scope)[raw] += 1
+            continue
+        by_industry[industry].append(code)
+    return dict(by_industry), rejected_listed, out_of_scope
+
+
+def _apply_industry_fill(db, by_industry: dict) -> int:
+    """`_plan_industry_fill` の結果を会社へ書く。**commit しない**（呼び出し側が持つ）。
+
+    業種が空の社だけを書く条件を UPDATE にも持たせる（計画と書き込みの間に JPX が埋めた社を
+    上書きしない）。戻り値は書いた会社数。
+    """
+    from sqlalchemy import update as sa_update
+
+    filled = 0
+    for industry, codes in by_industry.items():
+        res = db.execute(
+            sa_update(Company)
+            .where(Company.edinet_code.in_(codes))
+            .where(or_(Company.industry.is_(None), Company.industry == ""))
+            .values(industry=industry)
+            .execution_options(synchronize_session=False)
+        )
+        filled += res.rowcount
+    return filled
+
+
 async def fill_industry_from_edinet_codelist(client: httpx.AsyncClient, db,
                                              on_progress: Optional[Callable] = None):
-    """JPX に載らない上場社の業種の空欄を、EDINET コードリストの提出者業種で埋める（#784）。
+    """業種が空の社を、EDINET コードリストの提出者業種で埋める（#784・#797）。
 
     札証・福証の単独上場は JPX の一覧（東証のみ）に構造的に載らず、業種が空のまま業種別回帰
     （`sector_ols._eligible_base`）から外れて `gap_ratio` が付かなかった。例外も警告も出ない。
 
+    - **上場区分によらない**（#797・ADR-0065）: 業種が空の社は「今日の JPX 一覧に載っていない＝
+      その後に廃止した社」とほぼ同じ集合で、空文字のまま残すと過去の断面で未来情報の疑似業種になる
+      （業種内Z・M-1 系の「不明」カテゴリ・時点再現の gap パネル）。#784 は上場の社だけを埋めていた
     - **JPX を上書きしない**: 会社の業種が空のときだけ埋める。JPX で業種が付いている社の 4.6% で
       EDINET の分類が食い違う（2026-10-02 実測）ので、正本は JPX のまま
     - **許す業種名は DB に既にある名前（＝JPX が書いた名前）だけ**。33業種名をコードへ写さない
       （写しは陳腐化する。旧 `TSE_INDUSTRY` は「証券、」を「証券・」と書いていた）。表記差は
-      `EDINET_INDUSTRY_ALIASES` で吸収し、それでも一致しない上場社の名前は書かずに数えて出す
+      `EDINET_INDUSTRY_ALIASES` で吸収し、それでも一致しない上場社の名前は書かずに WARNING で数える。
+      非上場社の33業種外の名前（提出者の種別）は想定内なので INFO で数える
     - 最後に会社の業種を空の財務行へ写す（`_propagate_company_industry`）
 
     取れなかった／解釈できなかったときは `EdinetCodelistError` を送出し、足跡を書かない（#632 と
     同じ作法。握って `(0, 0)` を返すと「埋める社が無かった」と区別できない）。戻り値は
     `(埋めた会社数, 写した財務行数)`。
     """
-    from sqlalchemy import update as sa_update
     try:
         log.info("EDINET コードリストをダウンロード中...")
         if on_progress:
             on_progress(0, 1, "[業種補完] EDINET コードリストをダウンロード中...")
         r = await client.get(EDINET_CODELIST_URL, timeout=60)
         r.raise_for_status()
-        listed = _read_edinet_codelist(r.content)
+        codelist = _read_edinet_codelist(r.content)
 
-        allowed = {ind for (ind,) in db.query(Company.industry)
-                   .filter(Company.industry.isnot(None), Company.industry != "")
-                   .distinct()}
-        if not allowed:
-            raise EdinetCodelistError("照合先の業種名（JPX が書いた名前）が DB に1つも無い。"
-                                      "JPX の業種更新が先に成功している必要がある")
-
-        empty_codes = [c for (c,) in db.query(Company.edinet_code)
-                       .filter(or_(Company.industry.is_(None), Company.industry == ""))]
-        by_industry: dict = defaultdict(list)
-        rejected: Counter = Counter()
-        for code in empty_codes:
-            raw = listed.get(code)
-            if raw is None:
-                continue        # 非上場・空欄・リストに無い社は埋めない
-            industry = EDINET_INDUSTRY_ALIASES.get(raw, raw)
-            if industry not in allowed:
-                rejected[raw] += 1
-                continue
-            by_industry[industry].append(code)
-        if rejected:
+        by_industry, rejected_listed, out_of_scope = _plan_industry_fill(db, codelist)
+        if rejected_listed:
             # 上場社の提出者業種が JPX の名前と食い違う＝表記差か分類体系の変更。書くと業種別回帰に
             # 1社だけの業種ができるので書かない。別名表に足すかは名前を見て決める。
-            log.warning(f"EDINET 提出者業種が JPX の業種名に無いので書かなかった（上場社）: {dict(rejected)}")
+            log.warning(f"EDINET 提出者業種が JPX の業種名に無いので書かなかった（上場社）: "
+                        f"{dict(rejected_listed)}")
+        if out_of_scope:
+            log.info(f"33業種外の提出者業種（非上場・提出者の種別）は書かなかった: {dict(out_of_scope)}")
 
-        filled_co = 0
-        for industry, codes in by_industry.items():
-            res = db.execute(
-                sa_update(Company)
-                .where(Company.edinet_code.in_(codes))
-                .where(or_(Company.industry.is_(None), Company.industry == ""))
-                .values(industry=industry)
-                .execution_options(synchronize_session=False)
-            )
-            filled_co += res.rowcount
+        filled_co = _apply_industry_fill(db, by_industry)
         db.commit()
 
         filled_fr = _propagate_company_industry(db)
@@ -391,7 +436,8 @@ async def fill_industry_from_edinet_codelist(client: httpx.AsyncClient, db,
         upsert_setting(db, KEY_EDINET_CODELIST_LAST_SUCCESS,
                        datetime.now(timezone.utc).isoformat(timespec="seconds"))
 
-        log.info(f"業種補完完了（EDINET コードリスト・上場 {len(listed)}社）: "
+        n_listed = sum(1 for _ind, listed in codelist.values() if listed)
+        log.info(f"業種補完完了（EDINET コードリスト {len(codelist)}社・うち上場 {n_listed}社）: "
                  f"Company {filled_co}件, FinancialRecord {filled_fr}件")
         if on_progress:
             on_progress(1, 1, f"[業種補完完了] Company {filled_co}件, FR {filled_fr}件")

@@ -294,6 +294,7 @@ async def list_companies(
     limit: int = 100,
     offset: int = 0,
     include_latest: bool = False,
+    active_only: bool = False,
     db: Session = Depends(api.get_db),
 ):
     if not (1 <= limit <= 500):
@@ -307,6 +308,10 @@ async def list_companies(
         query = query.filter(Company.industry == industry)
     if market:
         query = query.filter(Company.market == market)
+    if active_only:
+        # 上場中の社だけ（同業比較・#797）。廃止社は業種が付いていても古い財務のまま順位に混ざる。
+        # limit の枠も現役だけで埋まるよう、絞り込みはクエリ側で掛ける。
+        query = query.filter(Company.is_active.isnot(False))
     total = query.count()
     rows = query.offset(offset).limit(limit).all()
     items = [{"edinet_code": c.edinet_code, "sec_code": c.sec_code,
