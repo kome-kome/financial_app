@@ -102,3 +102,52 @@ OFF 側の根拠は「NaN 源が無い」だが、画面から手動で ON に�
   NaN が混入すると OLS が壊れる（`build_snapshots` の docstring が明示）。別の話として扱う
 - **`params_schema()` からも消す。** 消費側（UI・`coerce_params`・保存済み params）が壊れる。
   パラメータ契約（CONTEXT.md）から要素を消すのは退役の手続きが要る
+
+## 追記（2026-10-03）: `max_features` も同じ規則で落とした（#791）
+
+### 事実
+
+2026-10-03 の月次 M-1（`.logs/monthly_m1_20261003.log`・19 fold）で、残っていた唯一の軸
+`max_features`（5/10/15/20/30/40）の **6候補すべてが rank-IC 0.1926** だった。
+
+### 機構
+
+#604（モメンタム）と #615（マクロ）で両方を `base_params` の OFF に固定した結果、`build_snapshots`
+の候補列は財務の既定6列（`DEFAULT_FIN_FEATURES`）だけになった。交差項は `build_interactions and
+use_macro` のときしか作られない。BIC の選択は上限で切るだけなので、**上限が6以上なら構造上かならず
+同値**で、上限5 も今回のデータでは同値だった（BIC の選択が5列以下）。`min_coverage` と同じく
+「効いていない」であって「壊れている」ではない——画面で `use_macro` を ON にすれば候補列が増えて
+上限は効く。
+
+### 同点が害になる経路
+
+同点は安定ソートで候補の先頭、すなわち champion（前回の保存値・ADR-0047）が勝つ。9月に
+`use_macro=ON` の条件で選ばれた `max_features=5` が、**測って選んだ値ではないのに**毎月書き戻され、
+`max_features` が探索軸に居る限り射影（`project_tuned_params`）を素通りして探索当日の画面へ
+自動適用されていた。画面で `use_macro` を ON にすると、#711 の実測で最悪だった組み合わせ
+（上限5・rank-IC +0.0052）になる。
+
+### 決定
+
+`tuning_search_space()` から `max_features` を外し、`base_params` に**本番既定 20 を固定**する
+（6 → **1候補**・軸なし）。固定しないと保存値の 5 が残り続ける。base に置けば射影が 20 へ倒し、
+`stale_params` で申告する（DB の保存値は書き換えない）。探索そのものは μ̂ の永続化
+（`--persist-scores`）のために残す。軸が無いとき `_grid_combos([])` は `[{}]` を返し、champion は
+空の combo へ投影されて重複排除されるので、`search()` は1回だけ評価して完走する
+（`tests/test_hyperparameter_search.py::TestNoAxisSpace`）。
+
+同点の扱い（同点なら既定を選ぶ）は採らなかった。全モデルの「同点なら champion を保つ」性質を
+変える話で、軸を外せば M-1 では同点が起きない。
+
+### 前提を縛る
+
+外せる根拠は「固定条件の候補列の数 ≤ 固定した上限」。マクロかモメンタムの固定が外れるか、財務の
+既定列が上限を超えると上限が再び効くのに、**軸はもう無いので探索されない**。
+`tests/test_macro_risk_return.py::test_pinned_space_cannot_reach_the_max_features_cap` が縛り、
+固定値が schema の既定と一致することも同じファイルで縛る。
+
+### 動かさないもの
+
+`BUDGET_MIN["tune:macro_risk_return"]=900` は ADR-0040（予算は実測から逆算しない）に従い動かさない。
+1候補なら数分で終わるので ADR-0046 の切り出し理由は弱まるが、月次本体へ折り戻すかはタスク構成と
+依存順（`macro_beta_loadings`）の話として別に扱う。

@@ -746,10 +746,14 @@ class TestTuningSearchSpace:
         self.plugin = MacroRiskReturnPlugin()
 
     def test_returns_base_params_and_dims(self):
+        """軸は1本も残らない（#791 で最後の `max_features` も外した）。
+
+        探索そのものは μ̂ の永続化（`--persist-scores`）のために残る＝1候補で完走する。
+        """
         base_params, dims = self.plugin.tuning_search_space()
         assert isinstance(base_params, dict)
         names = {d.name for d in dims}
-        assert names == {"max_features"}
+        assert names == set()
 
     def test_min_coverage_is_not_a_search_axis(self):
         """M-1 で `min_coverage` を振っても結果が1ミリも動かない（#596）。
@@ -870,17 +874,65 @@ class TestTuningSearchSpace:
         assert "use_macro" in schema
         assert "macro_features" in schema
 
-    def test_grid_is_6_combos(self):
-        """モメンタム2軸（#604）と `use_macro`（#615）を落として 72 → **6**。
+    def test_grid_is_a_single_candidate(self):
+        """72 → 12（#604）→ 6（#615）→ **1**（#791）。
 
         72 の内訳は use_macro 2 × (use_momentum False 1 + True × 窓5) × max_features 6。
-        窓の展開が消えて 12（#604）、マクロの2値が消えて 6 になる。残る軸は
-        `max_features` だけで、これは母集団を動かさず BIC の列数上限を選ぶだけである。
+        最後に残った `max_features` も、固定条件では候補列が上限に届かず6値すべてが同値
+        だった（2026-10-03 の月次で全候補 0.1926）ので外した。軸が無いとき `_grid_combos`
+        は空の combo を1つ返し、`search()` は `base_params` だけで1回評価する。
         """
         from plugins.tuning import _grid_combos
 
         _base_params, dims = self.plugin.tuning_search_space()
-        assert len(_grid_combos(dims)) == 6
+        assert _grid_combos(dims) == [{}]
+
+    def test_max_features_is_not_a_search_axis(self):
+        """`max_features` は探索しない（#791・ADR-0049 の 2026-10-03 追記）。
+
+        モメンタムとマクロを OFF に固定した空間では、候補列は財務の既定6列だけになる
+        （交差項はマクロがあるときしか作られない）。BIC の上限が6以上なら上限に届かない
+        ので 10/15/20/30/40 は**構造上かならず同値**で、5 も今回のデータでは同値だった。
+        軸に残すと同点の先頭（champion＝前回の保存値）が毎月「測って選んだ値」として
+        保存され続ける。
+        """
+        _base_params, dims = self.plugin.tuning_search_space()
+        assert "max_features" not in {d.name for d in dims}
+
+    def test_max_features_is_pinned_to_the_production_default(self):
+        """外すだけでなく **本番既定（20）で固定**する（#791）。
+
+        固定しないと、9月に `use_macro=ON` の条件で選ばれた保存値 `max_features=5` が
+        射影（`project_tuned_params`）を素通りして画面へ出続ける。base に置けば保存値は
+        `stale_params` に落ちる。値は schema の既定と揃える——ずれると「探索が固定した値」と
+        「製品の既定」が別物になり、画面の2つのボタンが同じ意味でなくなる。
+        """
+        base_params, _dims = self.plugin.tuning_search_space()
+        schema = self.plugin.params_schema()
+        assert base_params.get("max_features") == schema["max_features"]["default"] == 20
+
+    def test_max_features_stays_in_the_params_contract(self):
+        """探索から外すのと契約から消すのは別。画面で `use_macro` を ON にすると候補列が
+        増えて上限が効くので、スライダーは残す。"""
+        assert "max_features" in self.plugin.params_schema()
+
+    def test_pinned_space_cannot_reach_the_max_features_cap(self):
+        """`max_features` を外した前提を縛る（#791・ADR-0049 の「前提を縛る」と同じ扱い）。
+
+        外せる根拠は「固定条件での候補列の数 ≤ 固定した上限」であること。候補列は
+        `fin_features + マクロ + モメンタム + 交差項（マクロがあるときだけ）` なので、
+        マクロとモメンタムが OFF なら財務の既定列数だけになる。どれかが崩れると上限が
+        再び効くのに、**軸はもう無いので探索されず、誰も気づかない**（ADR-0031 と同型）。
+        """
+        base_params, _dims = self.plugin.tuning_search_space()
+        schema = self.plugin.params_schema()
+        n_candidates = len(schema["fin_features"]["default"])
+        assert base_params.get("use_macro") is False and base_params.get("use_momentum") is False, (
+            "マクロかモメンタムが固定 OFF でなくなった。候補列が増えて max_features が再び効く"
+            "ので、軸へ戻すか測り直すこと（#791・ADR-0049）")
+        assert n_candidates <= base_params["max_features"], (
+            f"財務の既定列（{n_candidates}）が固定した上限（{base_params['max_features']}）を"
+            "超えた。max_features が再び効くので、軸へ戻すか測り直すこと（#791・ADR-0049）")
 
     def test_display_only_params_excluded(self):
         _base_params, dims = self.plugin.tuning_search_space()

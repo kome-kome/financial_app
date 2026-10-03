@@ -46,9 +46,37 @@ class _NoSpacePlugin:
         return {}
 
 
+class _NoAxisPlugin:
+    """軸を1本も持たない探索空間（M-1 が #791 でこの形になった）。
+
+    `base_params` が x=5 を固定するので、保存値が何であっても評価は x=5 で行われる。
+    """
+    name = "no_axis"
+    depends_on: list = []
+    execute_calls = 0
+    seen_params: list = []
+
+    def params_schema(self) -> dict:
+        return {"x": {"type": "slider", "dtype": "int", "default": 5, "min": 0, "max": 10}}
+
+    def tuning_search_space(self):
+        return {"x": 5}, []
+
+    def execute(self, params: dict, db) -> dict:
+        type(self).execute_calls += 1
+        type(self).seen_params.append(dict(params))
+        score = -((params["x"] - 5) ** 2) + 0.25
+        return {"oof_backtest": {
+            "rank_ic": {"mean": float(score), "std": 1.0, "n": 3},
+            "n_periods": 3, "n_oof_samples": 300,
+        }}
+
+
 @pytest.fixture(autouse=True)
 def _reset_execute_calls():
     _FakePlugin.execute_calls = 0
+    _NoAxisPlugin.execute_calls = 0
+    _NoAxisPlugin.seen_params = []
     yield
 
 
@@ -335,6 +363,59 @@ class TestChampionInjection:
         tuned = get_tuned_params(db, "fake_model")
         assert tuned["n_periods"] == 3
         assert tuned["n_oof_samples"] == 300
+
+
+class TestNoAxisSpace:
+    """軸が1本も無い探索空間でも、1候補で完走して永続化まで行う（#791）。
+
+    M-1 は最後の軸 `max_features` を外したが、`tune:macro_risk_return` は μ̂ の永続化
+    （`--persist-scores`）のために残す。`_grid_combos([])` は `[{}]`・`_random_combos` も
+    `[{}]` を返すので `search()` は `base_params` だけで1回評価する——ここが崩れると
+    「探索空間が空です」の `ValueError` で月次が落ち、**止まって最も困る M-1 の μ̂** が止まる。
+    """
+
+    @pytest.mark.parametrize("strategy", ["grid", "random"])
+    def test_first_run_evaluates_once_and_persists_scores(self, db, monkeypatch, strategy):
+        import plugins
+        from database import get_tuned_params
+        monkeypatch.setattr(plugins, "get_plugin", lambda name: _NoAxisPlugin())
+
+        result = asyncio.run(hs.run_search(
+            "no_axis", strategy, 50, "rank_ic", 0, db, persist=True, persist_scores=True,
+        ))
+
+        assert result["persisted"] is True
+        assert result["best_params"] == {"x": 5}
+        assert result["config"]["n_combos"] == 1
+        assert result["config"]["n_combos_planned"] == 1
+        # 候補1件 + best params での最終 execute（μ̂ の永続化）1回
+        assert _NoAxisPlugin.execute_calls == 2
+        assert get_tuned_params(db, "no_axis")["params"] == {"x": 5}
+
+    @pytest.mark.parametrize("strategy", ["grid", "random"])
+    def test_stale_champion_is_remeasured_under_the_pinned_value(self, db, monkeypatch, strategy):
+        """軸を外す前の保存値（x=3）は champion として投入されるが、評価は固定値 x=5 で行う。
+
+        M-1 の実物では 2026-10-03 の保存値 `max_features=5` がこの形になる。軸が無いので
+        `_project_champion` は空の combo を返し、候補 `{}` と重複排除されて1件のまま。
+        **古い値で測り直すのではない**——`{**base_params, **{}}` なので base が勝つ。
+        """
+        import plugins
+        from database import get_tuned_params, upsert_tuned_params
+        monkeypatch.setattr(plugins, "get_plugin", lambda name: _NoAxisPlugin())
+        upsert_tuned_params(db, "no_axis", {"x": 3}, "rank_ic", 999.0, [], 6, "fp")
+
+        result = asyncio.run(hs.run_search(
+            "no_axis", strategy, 50, "rank_ic", 0, db, persist=True,
+        ))
+
+        assert result["champion_injected"] is True
+        assert result["config"]["n_combos"] == 1
+        assert _NoAxisPlugin.seen_params == [{"x": 5}]
+        assert result["champion_score"] == result["best_score"] == 0.25
+        tuned = get_tuned_params(db, "no_axis")
+        assert tuned["params"] == {"x": 5}
+        assert tuned["prev_objective_value"] == 999.0
 
 
 class TestDataFingerprint:
