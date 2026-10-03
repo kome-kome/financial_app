@@ -320,7 +320,7 @@ _CODELIST_ROWS = [
     ["E04369", "内国法人・組合", "上場", "有", "500", "2月末日", "株式会社エーアイテイー",
      "AIT CORPORATION", "カブシキガイシャエーアイティー", "大阪市中央区本町二丁目１番６号",
      "倉庫・運輸関連", "93810", "3120001075217"],
-    # 非上場（業種は33業種名でも埋めない）
+    # 非上場（33業種名なので埋める・#797）
     ["E00033", "内国法人・組合", "非上場", "有", "2141", "3月31日", "常磐興産株式会社",
      "Joban Kosan Co.,Ltd.", "ジョウバンコウサンカブシキガイシャ", "いわき市常磐藤原町蕨平５０番地",
      "サービス業", "", "9380001014473"],
@@ -350,16 +350,18 @@ def _codelist_client(content: bytes = None, status: int = 200) -> httpx.AsyncCli
 
 
 class TestReadEdinetCodelist:
-    def test_returns_listed_rows_only(self):
-        """非上場・上場区分が空欄の社は返さない。業種名は生のまま（正規化は呼び出し側）。"""
+    def test_returns_all_rows_with_the_listed_flag(self):
+        """上場区分によらず全行を返す（#797）。業種名は生のまま（正規化・照合は呼び出し側）。"""
         assert _read_edinet_codelist(_make_codelist_zip()) == {
-            "E02813": "卸売業", "E03729": "その他金融業", "E04369": "倉庫・運輸関連"}
+            "E02813": ("卸売業", True), "E03729": ("その他金融業", True),
+            "E04369": ("倉庫・運輸関連", True), "E00033": ("サービス業", False),
+            "E00050": ("内国法人・組合（有価証券報告書等の提出義務者以外）", False)}
 
     def test_columns_are_found_by_name(self):
         """列の位置ではなく見出しの名前で引く（列が足されてもずれない）。"""
         header = "追加列," + _CODELIST_HEADER
         rows = [["x"] + r for r in _CODELIST_ROWS[:1]]
-        assert _read_edinet_codelist(_make_codelist_zip(rows, header)) == {"E02813": "卸売業"}
+        assert _read_edinet_codelist(_make_codelist_zip(rows, header)) == {"E02813": ("卸売業", True)}
 
     def test_missing_header_column_raises(self):
         header = _CODELIST_HEADER.replace("提出者業種", "業種")
@@ -413,16 +415,30 @@ class TestFillIndustryFromEdinetCodelist:
         assert filled_co == 0
         assert self._industry(db, "E02813") == "サービス業"
 
-    def test_non_listed_companies_stay_empty(self, db, make_company):
-        """非上場・空欄の社（大半は廃止社）は埋めない（過去年度の分析を動かさない）。"""
+    def test_non_listed_companies_are_filled(self, db, make_company):
+        """非上場の社（大半は廃止社）も33業種名なら埋める（#797・ADR-0065）。空のままだと過去の
+        断面で「後に廃止した社」という未来情報の疑似業種になる。"""
         self._seed_jpx_names(db, make_company)
-        db.add(make_company(edinet_code="E00033", sec_code="9675", industry=""))
-        db.add(make_company(edinet_code="E00050", sec_code=None, industry=""))
+        db.add(make_company(edinet_code="E00033", sec_code="9675", industry="", is_active=False))
         db.commit()
         filled_co, _ = asyncio.run(fill_industry_from_edinet_codelist(_codelist_client(), db))
+        assert filled_co == 1
+        assert self._industry(db, "E00033") == "サービス業"
+
+    def test_out_of_scope_names_of_non_listed_are_not_written_nor_warned(self, db, make_company,
+                                                                         caplog):
+        """33業種外（提出者の種別）は書かない。想定内なので WARNING にしない（毎晩70件が鳴る）。"""
+        self._seed_jpx_names(db, make_company)
+        db.add(make_company(edinet_code="E00050", sec_code=None, industry=""))
+        db.commit()
+        with caplog.at_level(logging.INFO):
+            filled_co, _ = asyncio.run(fill_industry_from_edinet_codelist(_codelist_client(), db))
         assert filled_co == 0
-        assert self._industry(db, "E00033") == ""
         assert self._industry(db, "E00050") == ""
+        assert not [r for r in caplog.records
+                    if r.levelno >= logging.WARNING and "提出義務者以外" in r.getMessage()]
+        assert any("提出義務者以外" in r.getMessage() for r in caplog.records
+                   if r.levelno == logging.INFO)
 
     def test_name_unknown_to_jpx_is_not_written(self, db, make_company, caplog):
         """JPX の名前に無い提出者業種を書くと、業種別回帰に1社だけの業種ができる。"""

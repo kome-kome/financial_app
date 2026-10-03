@@ -73,8 +73,9 @@ JPX_EXCEL_LINK_RE = re.compile(r'href="([^"]*data_j\.xlsx?)"')
 JPX_CODE_DROP_LIMIT = 0.05
 
 # EDINET コードリスト（金融庁の配布物・日次更新・API キー不要・約570KB の ZIP＝cp932 の CSV 1本）。
-# **JPX に載らない社の業種の空欄だけを「提出者業種」で埋める**（#784）。札証・福証の単独上場は
-# JPX の一覧（東証のみ）に構造的に載らず、業種が空のまま業種別回帰から静かに外れていた。
+# **JPX に載らない社の業種の空欄だけを「提出者業種」で埋める**（#784・上場区分によらない・#797）。
+# 札証・福証の単独上場は JPX の一覧（東証のみ）に構造的に載らず、業種が空のまま業種別回帰から静かに
+# 外れていた。廃止社の空欄は過去の断面で「後に廃止した社」という未来情報の疑似業種になる（ADR-0065）。
 # JPX を上書きしないのは、JPX で業種が付いている 3,753社のうち 174社（4.6%）で EDINET の分類が
 # 食い違うから（2026-10-02 実測）。ホストは書類 API（`EDINET_BASE`）と別の配布用ホスト。
 EDINET_CODELIST_URL = "https://disclosure2dl.edinet-fsa.go.jp/searchdocument/codelist/Edinetcode.zip"
@@ -83,7 +84,9 @@ EDINET_CODELIST_URL = "https://disclosure2dl.edinet-fsa.go.jp/searchdocument/cod
 EDINET_INDUSTRY_ALIASES = {"倉庫・運輸関連": "倉庫・運輸関連業"}
 # コードリストの見出し（全角）。列は位置ではなく名前で引く（列の追加・並べ替えで黙ってずれない）。
 EDINET_CODELIST_COLUMNS = ("ＥＤＩＮＥＴコード", "上場区分", "提出者業種")
-EDINET_CODELIST_LISTED  = "上場"   # 上場区分の値。これ以外（非上場・空欄）の社は埋めない（#784 の範囲）
+# 上場区分の値。範囲の線引きには使わない（#797）。使うのは2つ: 配布形式の検査（上場の行が0件なら
+# 失敗）と、33業種外の名前を WARNING（上場社＝表記差の疑い）と INFO（非上場＝提出者の種別）に分けること。
+EDINET_CODELIST_LISTED  = "上場"
 API_KEY       = os.environ.get("EDINET_API_KEY", "")
 RATE_SLEEP             = 0.6   # EDINET API のリクエスト間隔（秒）
 # 連続でこの回数だけ書類一覧の取得に失敗したら以降の日付を叩かない（#577）。

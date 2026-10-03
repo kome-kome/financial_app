@@ -389,6 +389,20 @@ class TestCompaniesEndpoint:
         ind = client.get("/api/companies", params={"industry": "電気機器"}).json()
         assert [i["edinet_code"] for i in ind["items"]] == ["E00002"]
 
+    def test_active_only_excludes_delisted(self, db, make_company):
+        """同業比較は上場中の社だけを並べる（#797）。既定（active_only なし）は従来どおり全社。"""
+        db.add(make_company(edinet_code="E00001", sec_code="1001", industry="電気機器"))
+        db.add(make_company(edinet_code="E00002", sec_code="1002", industry="電気機器",
+                            is_active=False))
+        db.commit()
+        api.app.dependency_overrides[api.get_db] = lambda: db
+        everyone = client.get("/api/companies", params={"industry": "電気機器"}).json()
+        assert everyone["total"] == 2
+        active = client.get("/api/companies",
+                            params={"industry": "電気機器", "active_only": "true"}).json()
+        assert active["total"] == 1
+        assert [i["edinet_code"] for i in active["items"]] == ["E00001"]
+
     def test_limit_out_of_range_returns_400(self, db):
         api.app.dependency_overrides[api.get_db] = lambda: db
         assert client.get("/api/companies", params={"limit": 0}).status_code == 400
