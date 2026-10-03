@@ -713,47 +713,34 @@ async function loadPeers(){
   }
   let d;
   try{
-    // 上場中の社だけを並べる（#797）。廃止社は業種が付いていても古い財務のまま順位に混ざる
-    d = await apiFetch('/api/companies?include_latest=true&active_only=true&limit=300&industry=' + encodeURIComponent(curCompany.industry));
+    // 並べ替え・順位・母数はサーバーが業種の全件で決める（#801）。上場中の社だけ（#797）、
+    // 返るのは時価総額の上位15社と、その外に居る場合の表示中の企業
+    d = await apiFetch('/api/peers?industry=' + encodeURIComponent(curCompany.industry) + '&code=' + encodeURIComponent(curCompany.code));
   }catch(e){
     peersLoaded = false;
     note.textContent = '同業データの取得に失敗しました: ' + e.message;
     return;
   }
   if (!d) return;
-  let peers = (d.items || []).filter(it => it.latest);   // 財務データのある企業のみ
-  if (peers.length === 0){
-    note.textContent = `業種「${curCompany.industry}」に財務データを持つ企業が見つかりません。`;
+  if (!d.total){
+    note.textContent = `業種「${curCompany.industry}」に財務データを持つ上場中の企業が見つかりません。`;
     wrap.innerHTML = '';
     return;
   }
-  // 時価総額の降順でソート
-  peers.sort((a, b) => (b.latest.val.market_cap || 0) - (a.latest.val.market_cap || 0));
-
-  // 業種内順位を記録
-  const rankMap = {};
-  peers.forEach((p, i) => { rankMap[p.edinet_code] = i + 1; });
-
-  // 上位15社。表示中の企業は必ず含める
-  let top = peers.slice(0, 15);
-  if (!top.some(p => p.edinet_code === curCompany.code)){
-    const me = peers.find(p => p.edinet_code === curCompany.code);
-    if (me){
-      top.push(me);
-    } else if (curCompany.latest){
-      // APIの件数上限外の場合、保持データでフォールバック
-      top.push({ edinet_code: curCompany.code, sec_code: curCompany.sec_code, name: curCompany.name, latest: curCompany.latest });
-      rankMap[curCompany.code] = peers.length + 1; // 正確な順位不明
-    }
+  const top = (d.items || []).filter(it => it.latest);
+  // 表示中の企業が母集団に居ない（廃止社など）ときは、順位を付けずに保持データで並べる
+  if (!top.some(p => p.edinet_code === curCompany.code) && curCompany.latest){
+    top.push({ edinet_code: curCompany.code, sec_code: curCompany.sec_code, name: curCompany.name, latest: curCompany.latest, rank: null });
   }
 
-  const myRank = rankMap[curCompany.code];
-  const rankText = myRank ? `（業種内 第${myRank}位 / ${peers.length}社）` : '';
-  note.textContent = `業種「${curCompany.industry}」の上位${Math.min(15, peers.length)}社を比較${rankText}（時価総額順・最新年度）。色付きが表示中の企業。`;
+  const delisted = curCompany.latest && curCompany.latest.is_active === false;
+  const rankText = d.rank ? `（業種内 第${d.rank}位 / ${d.total}社）`
+                 : delisted ? '（上場廃止のため順位は出しません）' : '';
+  note.textContent = `業種「${curCompany.industry}」の上場中の上位${Math.min(15, d.total)}社を比較${rankText}（時価総額順・最新年度）。色付きが表示中の企業。`;
 
-  const rows = top.map((p, idx) => {
+  const rows = top.map(p => {
     const L = p.latest, isMe = p.edinet_code === curCompany.code;
-    const rank = rankMap[p.edinet_code] || (idx + 1);
+    const rank = p.rank || '-';
     return `<tr class="${isMe ? 'me' : ''}">
       <td class="num" style="color:var(--text-muted)">${rank}</td>
       <td>${esc(p.sec_code || '-')}</td>

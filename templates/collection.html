@@ -653,6 +653,10 @@ tr:hover td{background:var(--border-subtle)}
       <div class="form-group"><label>業種</label><select id="sc-industry"><option value="">全業種</option></select></div>
       <div class="form-group"><label>市場</label><select id="sc-market"><option value="">全市場</option><option>プライム</option><option>スタンダード</option><option>グロース</option></select></div>
     </div>
+    <label style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--text-secondary)">
+      <input type="checkbox" id="sc-include-delisted" style="width:auto;accent-color:var(--accent)">
+      廃止社も含める（既定は上場中の社だけ。廃止社は廃止前の古い年度の財務で並ぶ）
+    </label>
   </div>
 
   <div class="card">

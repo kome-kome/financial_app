@@ -172,6 +172,8 @@ FULL_ROW_LOADS: dict[str, str] = {
         "exempt: serializers.record_to_dict が VIEW 全列を返す API 契約。1社分の年度数（数十行）で行数が小さい",
     "routers/market.py::list_companies::FinancialMetric":
         "exempt: 同じく record_to_dict 経由。1ページ分の edinet_code へ IN 絞り済みで行数はページサイズ（最大500）",
+    "routers/market.py::list_peers::FinancialMetric":
+        "exempt: 同じく record_to_dict 経由。並べ替えは4列で済ませ、全列を引くのは上位 top 社＋表示中の社（最大51社）だけ",
     "routers/market.py::get_macro_data::MacroData":
         "exempt: /api/macro/data は OHLCV を返す契約で 11列中6列を実際に返す。行数は limit days で上限あり",
     "routers/market.py::db_company_drilldown::FinancialRecord":
