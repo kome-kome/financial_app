@@ -138,18 +138,17 @@ class TestRealM1Space:
         assert "momentum_window" not in out
         assert "use_momentum" in changed and "momentum_window" in changed
 
-    def test_searched_axes_survive(self):
-        """いま探索している軸（`use_macro` / `max_features`）は保存値のまま残る。
+    def test_stored_max_features_is_projected_to_the_default(self):
+        """2026-10-03 の月次が保存した行の `max_features=5` が本番既定 20 へ射影される（#791）。
 
-        **射影は「常に既定へ倒す」ではない。** 探索中の軸まで既定へ倒すと、自動調整の
-        意味そのものが消える。実物のプラグインでこの側を縛るのはここ
-        （かつては M-2 で縛っていたが、#604 で M-2 の2軸も外したため M-1 の探索軸へ移した）。
+        6候補が全部同点（0.1926）で、同点の先頭（champion＝9月の保存値）が保存された値。
+        軸に居た間は射影を素通りして探索当日に自動適用されていた。base へ固定したので、
+        次の月次を待たずに画面は 20 を出し、変えたことを `stale_params` で申告する。
         """
-        stored = {"use_macro": False, "max_features": 30}
+        stored = {"use_momentum": False, "use_macro": False, "max_features": 5}
         out, changed = project_tuned_params(self._m1(), stored)
-        assert out["use_macro"] is False
-        assert out["max_features"] == 30
-        assert changed == []
+        assert out == {"use_momentum": False, "use_macro": False, "max_features": 20}
+        assert changed == ["max_features"]
 
     def test_min_coverage_also_drops(self):
         """#596 で外した軸も同じ規則で落ちる（この射影は特定の軸を知らない）。"""
@@ -285,6 +284,20 @@ class TestRealM2Space:
         assert "momentum_window" not in out
         assert out["max_depth"] == 8          # 探索中の軸は保存値のまま
         assert set(changed) == {"use_momentum", "momentum_window"}
+
+    def test_searched_axes_survive(self):
+        """いま探索している軸は保存値のまま残る。
+
+        **射影は「常に既定へ倒す」ではない。** 探索中の軸まで既定へ倒すと、自動調整の
+        意味そのものが消える。実物のプラグインでこの側を縛るのはここ（M-2 → #604 で M-1
+        → #791 で M-1 の軸が無くなったので M-2 へ戻した）。
+        """
+        from plugins import get_plugin
+        stored = {"use_momentum": False, "max_depth": 4, "learning_rate": 0.05}
+        out, changed = project_tuned_params(get_plugin("macro_gbdt"), stored)
+        assert out["max_depth"] == 4
+        assert out["learning_rate"] == 0.05
+        assert changed == []
 
     def test_m5_inherits_the_same_space(self):
         """M-5（`macro_gbdt_rank`）は M-2 を継承するので同じ射影が効く。

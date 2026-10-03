@@ -215,12 +215,14 @@ class MacroRiskReturnPlugin(AnalysisPlugin):
 
     def tuning_search_space(self) -> tuple:
         """ハイパーパラメータ自動探索の探索空間（Issue #265・#596 で min_coverage を除外・
-        #604 でモメンタム2軸を除外・#615 で use_macro を除外）。
+        #604 でモメンタム2軸を除外・#615 で use_macro を除外・#791 で max_features を除外）。
 
-        BIC 最大採用数（max_features）の単一軸グリッド。
+        **軸は1本も無い**（`dims=[]`）。`search()` は `base_params` だけの1候補を評価して
+        完走し、月次の `tune:macro_risk_return` は best params での最終 execute で μ̂ を
+        永続化する（`--persist-scores`）——探索を残しているのはこのため。
         `fin_features`/`macro_features` の部分集合探索は 2^N で不可能なため対象外
         （既定の候補プールを固定・#264 設計方針）。表示専用の lambda_risk/risk_axis/r3_gate/top_n
-        も対象外。空間が小さいため strategy="grid"（全探索）を推奨。
+        も対象外。
 
         **`min_coverage` は軸にしない（#596）。** フィルタへ到達する行の充足率は常に厳密に
         1.0 になる。**根拠は #615 で既定が変わった前後で入れ替わったが、結論は変わらない**:
@@ -280,15 +282,26 @@ class MacroRiskReturnPlugin(AnalysisPlugin):
         効かない**。`base_params` で False を明示固定すると保存値が `stale_params` に落ち、
         この還流が止まる。
 
-        グリッドは 12 → **6通り**（`max_features` 6）。
-        """
-        from .tuning import SearchDim
+        **最後に残った `max_features` も軸にしない（#791・ADR-0049 の 2026-10-03 追記）。**
+        モメンタムとマクロを OFF に固定すると、候補列は財務の既定6列（`DEFAULT_FIN_FEATURES`）
+        だけになる（交差項はマクロがあるときしか作られない）。BIC の上限が6以上なら上限に
+        届かないので、10/15/20/30/40 は**データに関係なく構造的に同値**になる。実測
+        （2026-10-03 の月次・19 fold）では上限5 も含めて6候補すべてが rank-IC 0.1926 だった。
 
-        # モメンタムとマクロは探索せず OFF で固定する（上記 docstring・#604・#615）
-        base_params: dict = {"use_momentum": False, "use_macro": False}
-        dims = [
-            SearchDim("max_features",     [5, 10, 15, 20, 30, 40]),
-        ]
+        **軸に残すと同点の先頭が保存され続ける。** 同点は安定ソートで先頭の champion
+        （前回の保存値）が勝つので、9月に `use_macro=ON` の条件で選ばれた `max_features=5` が
+        「測って選んだ値」として毎月書き戻され、射影を素通りして探索当日の画面へ自動適用
+        されていた（画面で `use_macro` を ON にすると #711 の実測で最悪だった上限5 になる）。
+        `base_params` で本番既定の 20 に固定すると、保存値は `stale_params` に落ちる。
+
+        外せる前提は「固定条件の候補列の数 ≤ 固定した上限」で、
+        `tests/test_macro_risk_return.py` が縛る（崩れたら軸へ戻すか測り直す）。
+
+        グリッドは 6 → **1通り**（軸なし）。
+        """
+        # モメンタム・マクロは OFF、BIC の上限は本番既定で固定する（上記 docstring・#604・#615・#791）
+        base_params: dict = {"use_momentum": False, "use_macro": False, "max_features": 20}
+        dims: list = []
         return base_params, dims
 
     def produced_output(self, db: Any) -> bool:

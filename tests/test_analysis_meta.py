@@ -300,14 +300,16 @@ class TestTunedParamsEndpoint:
         assert d["params"]["use_momentum"] is False          # 探索が固定した値へ
         assert d["params"]["use_macro"] is False             # 同上（#615 で base へ固定）
         assert "momentum_window" not in d["params"]          # 空間から消えた軸は落とす
-        assert d["params"]["max_features"] == 5              # 探索中の軸は保存値のまま
+        # `max_features=5` は #711 の当時は探索軸で射影を素通りしたが、#791 で軸から外して
+        # base へ本番既定 20 を固定したので、射影が倒す。
+        assert d["params"]["max_features"] == 20
         # 実在の行には `min_coverage` も入っており、これも探索軸から外れている（#596）。
         assert set(d["stale_params"]) == {
-            "use_momentum", "momentum_window", "use_macro", "min_coverage"}
+            "use_momentum", "momentum_window", "use_macro", "min_coverage", "max_features"}
         assert d["params_as_tuned"]["use_momentum"] is True  # 生値は監査用に残す
         assert d["params_as_tuned"]["use_macro"] is True
-        # `max_features=5` は探索軸なので射影を素通りする（#711）。射影だけでは止まらない
-        # ことを明示し、止めるのはパネル判定の側だと分かるようにしておく。
+        assert d["params_as_tuned"]["max_features"] == 5
+        # 探索中の軸に残った古い値を止めるのはパネル判定の側（#711）。射影とは別の目で見る。
         assert d["panel_changed"] is not False               # 自動適用させない
 
     def test_searched_axis_survives_projection(self, db):
