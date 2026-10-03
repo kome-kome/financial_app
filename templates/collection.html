@@ -608,12 +608,13 @@ tr:hover td{background:var(--border-subtle)}
       <div class="flex-between">
         <div class="section-title" style="margin-bottom:0">BS / PL / CF 再分類ビュー</div>
         <div class="flex">
-          <select id="norm-company" style="width:220px" data-change="loadNormYears"><option value="">企業を選択</option></select>
+          <input type="text" id="norm-search" placeholder="企業名・証券コード" style="width:160px" data-input="debounceNormSearch">
+          <select id="norm-company" style="width:220px" data-change="loadNormYears"><option value="">企業を検索してください</option></select>
           <select id="norm-year" style="width:110px" data-change="renderNorm"><option value="">年度</option></select>
         </div>
       </div>
       <div id="norm-content" style="margin-top:16px">
-        <p class="text-sm" style="text-align:center;padding:40px 0">企業を選択してください</p>
+        <p class="text-sm" style="text-align:center;padding:40px 0">企業名か証券コードで検索して選択してください</p>
       </div>
     </div>
   </div>

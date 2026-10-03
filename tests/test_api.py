@@ -8,6 +8,7 @@ import base64
 import hashlib
 import hmac
 import os
+import re
 import sys
 import time as _time
 from datetime import datetime, date
@@ -436,6 +437,55 @@ class TestCompaniesEndpoint:
         items = client.get("/api/companies", params={"include_latest": "true"}).json()["items"]
         assert items[0]["latest"] is not None
         assert items[0]["latest"]["year"] == 2025
+
+    def test_static_js_literal_limits_within_api_bound(self):
+        """画面 JS が `/api/companies` へ直書きする limit は API の上限以下（#803）。
+
+        `collection.js` は `limit=9999` のまま #254 の上限検証に掛かり、毎回 400 を
+        `catch(e){}` が捨てて業種プルダウンが黙って空になっていた。呼ぶ側と検証する側が
+        ずれても失敗として現れないので、ここで照合する。`${dbLimit}` のような変数経由は
+        拾えない（対象はリテラルだけ）。"""
+        from routers.market import COMPANIES_LIMIT_MAX
+        js_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                              "static", "js")
+        pat = re.compile(r"/api/companies\?[^'\"`]*?\blimit=(\d+)")
+        found = []
+        for fname in sorted(os.listdir(js_dir)):
+            if not fname.endswith(".js"):
+                continue
+            with open(os.path.join(js_dir, fname), encoding="utf-8") as f:
+                found += [(fname, int(m)) for m in pat.findall(f.read())]
+        # 何も拾えないまま通る照合にしない（正規表現が壊れても緑になる）。
+        assert found, "static/js から /api/companies の limit を1件も拾えなかった"
+        over = [(f, n) for f, n in found if not 1 <= n <= COMPANIES_LIMIT_MAX]
+        assert not over, f"API の上限 {COMPANIES_LIMIT_MAX} を超える limit: {over}"
+
+
+class TestIndustriesEndpoint:
+    def test_distinct_sorted_and_skips_blank(self, db, make_company):
+        """重複なし・空欄（None / ""）除外・昇順（#803）。"""
+        db.add(make_company(edinet_code="E00001", sec_code="1001", industry="電気機器"))
+        db.add(make_company(edinet_code="E00002", sec_code="1002", industry="輸送用機器"))
+        db.add(make_company(edinet_code="E00003", sec_code="1003", industry="電気機器"))
+        db.add(make_company(edinet_code="E00004", sec_code="1004", industry=None))
+        db.add(make_company(edinet_code="E00005", sec_code="1005", industry=""))
+        db.commit()
+        api.app.dependency_overrides[api.get_db] = lambda: db
+        r = client.get("/api/industries")
+        assert r.status_code == 200
+        assert r.json()["items"] == sorted(["電気機器", "輸送用機器"])
+
+    def test_includes_delisted(self, db, make_company):
+        """廃止社の業種も並べる（DB ブラウザは廃止社も出し、スクリーニングは含められる）。"""
+        db.add(make_company(edinet_code="E00001", sec_code="1001", industry="銀行業",
+                            is_active=False))
+        db.commit()
+        api.app.dependency_overrides[api.get_db] = lambda: db
+        assert client.get("/api/industries").json()["items"] == ["銀行業"]
+
+    def test_empty(self, db):
+        api.app.dependency_overrides[api.get_db] = lambda: db
+        assert client.get("/api/industries").json() == {"items": []}
 
 
 class TestEdinetCoverageEndpoint:
