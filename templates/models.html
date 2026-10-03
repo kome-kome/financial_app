@@ -205,7 +205,7 @@ HC3 SE:          不均一分散に対応したロバスト標準誤差</div>
   <h3>Ridge 回帰（L2 正則化）</h3>
   <div class="formula-block"><span class="var">β</span><span class="sym">ridge</span> = arg min ‖<span class="var">X</span><span class="var">β</span> - <span class="var">y</span>‖² + <span class="var">α</span>‖<span class="var">β</span>‖²
   <span class="comment"># 最適 α は一個抜き交差検証（LOO）で自動選択</span></div>
-  <p>業種別 OLS の <code>regularization="ridge"</code> パラメータで切替可能。多重共線性が顕著な業種では予測安定性が向上するが、SE / t / p 値は定義されない（NaN）。実装は <code>sklearn.linear_model.RidgeCV</code>（<code>cv=None</code>＝効率的な LOO）。α の選択は行の並び順に依存しない（以前のシャッフルなし KFold は並びで fold が決まり、同じデータでも gap が変わった・#697）。</p>
+  <p>業種別 OLS の <code>regularization="ridge"</code> パラメータで切替可能。多重共線性が顕著な業種では予測安定性が向上するが、SE / t / p 値は定義されない（NaN）。実装は <code>sklearn.linear_model.RidgeCV</code>（<code>cv=None</code>＝効率的な LOO）。α の選択は行の並び順に依存しない（以前のシャッフルなし KFold は並びで fold が決まり、同じデータでも gap が変わった・#697）。α の候補は 0.001〜1000 を1桁10点に刻んだ対数格子61点。1桁刻みの7点だと、誤差がほぼ同じ桁違いの候補の間で α が跳び、業種全体の gap が一晩で動いた（#761）。</p>
 </div>
 
 <div class="common-section" id="layers">

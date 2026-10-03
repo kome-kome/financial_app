@@ -116,7 +116,9 @@ VIF_i = 1 / (1 - R²_i)
 β_ridge = arg min ‖Xβ - y‖² + α‖β‖²
 ```
 
-最適 α は一個抜き交差検証（LOO・`RidgeCV(cv=None)`）で `[1e-3, 1e-2, 0.1, 1, 10, 100, 1000]` から選択。
+最適 α は一個抜き交差検証（LOO・`RidgeCV(cv=None)`）で、`1e-3`〜`1e3` を1桁10点に刻んだ対数格子61点（`plugins.utils.RIDGE_ALPHAS`）から選択。
+1桁刻みの7点だった間は、多くの業種で LOO 誤差の谷が平坦なため桁違いの候補がほぼ同点になり、数社の入力変化で α が10倍・100倍へ跳んで
+業種全体の gap_ratio が一晩で動いた（#761・[ADR-0064](adr/0064-ridge-alpha-candidates-are-a-fine-log-grid.md)）。細分は旧7点を含むので LOO 誤差は悪化しない。
 LOO は行の並び順に依存しない（以前のシャッフルなし KFold は fold が並びで決まり、同じデータでも業種ごと
 α と gap_ratio が夜ごとに変わった・#697・[ADR-0058](adr/0058-ridge-alpha-is-chosen-by-loo.md)）。
 業種別 OLS の `regularization="ridge"` パラメータで切替可能。多重共線性が顕著な業種

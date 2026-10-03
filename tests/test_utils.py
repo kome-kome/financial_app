@@ -776,6 +776,45 @@ class TestRidgeRegression:
             assert [res["yhat"][idx.index(i)] for i in range(n)] == \
                 pytest.approx(base["yhat"], abs=1e-9)
 
+    def test_ridge_alphas_is_a_fine_log_grid(self):
+        # #761・ADR-0064: 1桁刻み7点へ戻すと、平坦な谷で α が桁違いの候補へ跳ぶ。範囲は広げない（#728）。
+        # 端は夜間の診断（`ridge_alpha_edge`）が isclose で照合するので、厳密に 1e-3 / 1e3 であること
+        from plugins.utils import RIDGE_ALPHAS
+        assert len(RIDGE_ALPHAS) == 61
+        assert RIDGE_ALPHAS[0] == 1e-3 and RIDGE_ALPHAS[-1] == 1e3
+        assert all(a < b for a, b in zip(RIDGE_ALPHAS, RIDGE_ALPHAS[1:]))
+        for k in range(-3, 4):
+            assert 10.0 ** k in RIDGE_ALPHAS
+        steps = {round(math.log10(b) - math.log10(a), 9) for a, b in zip(RIDGE_ALPHAS, RIDGE_ALPHAS[1:])}
+        assert steps == {0.1}
+
+    def test_ridge_alpha_is_the_brute_force_loo_argmin(self):
+        # 選ばれる α が「全候補について1行ずつ抜いて当てはめ直した二乗誤差」の最小と一致する。
+        # RidgeCV の効率的な LOO とは独立の計算で、候補が実際に全部使われていることも確かめる
+        # （候補を細分しても選び方が LOO のままであること・ADR-0058 / ADR-0064）
+        import random
+
+        import numpy as np
+        from plugins.utils import RIDGE_ALPHAS
+        rng = random.Random(7)
+        n, p = 40, 5
+        X = np.array([[1.0] + [rng.gauss(0, 1) for _ in range(p - 1)] for _ in range(n)])
+        y = np.array([0.4 * r[1] - 0.3 * r[2] + rng.gauss(0, 1.0) for r in X])
+        errs = []
+        for a in RIDGE_ALPHAS:
+            se = 0.0
+            for i in range(n):
+                keep = np.arange(n) != i
+                Xi, yi = X[keep], y[keep]
+                beta = np.linalg.solve(Xi.T @ Xi + a * np.eye(p), Xi.T @ yi)
+                se += float(y[i] - X[i] @ beta) ** 2
+            errs.append(se / n)
+        best = RIDGE_ALPHAS[int(np.argmin(errs))]
+        # 旧7点（各桁の 10^k）には無い値が最小になる構成＝細分した候補まで実際に探していること
+        assert not any(math.isclose(best, 10.0 ** k) for k in range(-3, 4))
+        result = ridge_regression(X.tolist(), y.tolist())
+        assert result["alpha"] == pytest.approx(best, rel=1e-12)
+
 
 # ── shares_outstanding ───────────────────────────────────────────────────
 

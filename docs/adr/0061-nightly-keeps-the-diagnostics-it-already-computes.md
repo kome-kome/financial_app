@@ -58,7 +58,7 @@ accepted（2026-09-23）。Issue [#726](https://github.com/kome-kome/financial_a
 `make_elasticnet_fit_predict` が fold ごとに `alpha_at_path_min` / `alpha_at_path_max` を 0/1 で積み
 （`summarize_diag` の平均が「端に張り付いた fold の割合」になる）、`macro_enet` の `final_model` が
 α パスの両端と判定・`l1_ratio_grid` を返す。ridge の候補は `plugins.utils.RIDGE_ALPHAS` へ切り出し、
-端の判定もそこを参照する（候補の値は変えない・ADR-0058 決定1）。
+端の判定もそこを参照する（候補の値は変えない・ADR-0058 決定1。のちに [ADR-0064](0064-ridge-alpha-candidates-are-a-fine-log-grid.md) で同じ範囲を61点へ細分した＝端は 0.001 / 1000 のまま）。
 
 ## Consequences
 
