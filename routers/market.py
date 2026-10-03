@@ -1,6 +1,6 @@
 """市場データ・財務データ・スクリーニング・DBビューア API ルーター。
 
-/api/stock/*, /api/macro/*, /api/stats, /api/companies,
+/api/stock/*, /api/macro/*, /api/stats, /api/companies, /api/industries,
 /api/financials/*, /api/screen, /api/db/*, /api/export/csv を担当。
 """
 import csv
@@ -27,6 +27,10 @@ from collector_prices import all_macro_series
 
 router = APIRouter()
 log = logging.getLogger(__name__)
+
+# `/api/companies` の limit 上限（#254）。画面 JS が直書きする limit は
+# `tests/test_api.py` がこの値と照合する（超えると毎回 400 で、画面は黙って空になる・#803）。
+COMPANIES_LIMIT_MAX = 500
 
 
 # ── DB ビューア設定 ─────────────────────────────────────────────────────────
@@ -297,8 +301,8 @@ async def list_companies(
     active_only: bool = False,
     db: Session = Depends(api.get_db),
 ):
-    if not (1 <= limit <= 500):
-        raise HTTPException(400, "limit は 1〜500 の範囲で指定してください")
+    if not (1 <= limit <= COMPANIES_LIMIT_MAX):
+        raise HTTPException(400, f"limit は 1〜{COMPANIES_LIMIT_MAX} の範囲で指定してください")
     if offset < 0:
         raise HTTPException(400, "offset は 0 以上で指定してください")
     query = db.query(Company)
@@ -339,6 +343,21 @@ async def list_companies(
         for item in items:
             item["latest"] = latest_map.get(item["edinet_code"])
     return {"total": total, "items": items}
+
+
+@router.get("/api/industries")
+async def list_industries(db: Session = Depends(api.get_db)):
+    """業種プルダウン用の業種一覧（#803）。
+
+    以前は画面が `/api/companies?limit=9999` で全社を取って業種を集めていたが、上限
+    `COMPANIES_LIMIT_MAX` に掛かって毎回 400 になり、プルダウンが黙って空になっていた。
+    上場区分では絞らない（DB ブラウザは廃止社も並べ、スクリーニングは廃止社を含められる）。
+    並びは Python の符号点順＝旧 JS の `.sort()` と同じ（DB の照合順序に依存させない）。
+    """
+    rows = (db.query(Company.industry)
+            .filter(Company.industry.isnot(None), Company.industry != "")
+            .distinct().all())
+    return {"items": sorted(r[0] for r in rows)}
 
 
 @router.get("/api/peers")

@@ -1319,7 +1319,8 @@ graph LR
     subgraph STATS["📊 統計 /api/stats"]
         S1["GET /api/stats\n企業数・レコード数・最新年度\n+ データ鮮度（最終更新日時・経過日数・期待最新年度・freshness判定）\n+ 株価 as-of 分位（p50/p05/max・stale_bdays・n_stale_over_5d・price_freshness）#416
 + batch（夜間/月次/watchdog の足跡・batch_freshness.summarize と共有）#563"]
-        S2["GET /api/companies\n企業一覧（検索・業種・市場フィルタ・active_only）"]
+        S2["GET /api/companies\n企業一覧（検索・業種・市場フィルタ・active_only）。limit は 1〜500（#254）"]
+        S7["GET /api/industries\n業種一覧（companies.industry の重複なし・空欄除外・廃止社も含む）。\n業種プルダウン用（#803。全社を取って集めると limit 上限で 400 になっていた）"]
         S6["GET /api/peers?industry&code&top\n同業比較（#801）。業種内の上場中で通期の財務を持つ社を\n時価総額順に全件で並べ、上位 top 社＋code の社と total・rank を返す\n（廃止社の code は rank=null）"]
         S3["GET /api/financials/{edinet_code}\n指定企業の全年度財務データ"]
         S4["GET /api/stock/history/{edinet_code}?resolution=daily|weekly\n終値時系列（close-only・daily=直近6か月/weekly=全履歴）"]
@@ -1504,7 +1505,7 @@ graph TB
 | `requirements-optional.txt` | 設定 | ローカル探索専用の任意依存（`lightgbm`/`catboost`・#372）。**本番 `requirements.txt` には入れない**（Render 無料プランのビルド footprint を増やさない）。未導入でも `plugins/model_candidates.py` の該当候補が自動スキップされるだけでアプリは無影響。正式採用（本番コードパスで必須化）へ昇格した時点で `requirements.txt` へ移す | — |
 | `dashboard.html` | フロントエンド | トップページ・全体サマリー（`/`）。「よく使う」の先頭に朝の推奨（`/morning`）への導線。**「自動収集」カードは静的な予定表を持たず**、`/api/stats` の `batch`（足跡）から `dashboard.js::renderSchedule` が描く（#563）——以前は「GitHub Actions で毎日 03:00 JST」を緑ドット付きで固定表示しており、#503 で cron が止まった後もトップページが嘘をつき続けていた（しかも 03:00 は GHA 時代ですら誤りで、実際の cron は 17:17 JST）。**名目の起動時刻も書かない**——実起動は最大 +1h41m ずれる（#551） | api.py |
 | `morning.html` / `static/js/morning.js` | フロントエンド | 朝の推奨（`/morning`・Issue #423 子3）。`GET /api/morning` を1本叩くだけで、**学習も再計算もしない**。総合判定バナー（fresh 緑／warn 黄／alert 赤＋理由リスト＋該当ワークフローへのリンク）＋鮮度5カード（**夜間バッチの足跡** / 株価 as-of p50 / 乖離率 computed_at / μ̂ snapshot_date / マクロ critical 系列）。**バッチのカードは先頭**——下流（株価・スコア）の古さはバッチが走らなかった結果でしかないため（#561）。正常時も「いつ走ったか」を必ず出す（異常時だけ出す設計では沈黙が読めず、**健全なのに「止まっているのでは」と疑われる**）。リンク先は停止済みの GitHub Actions ではなく `docs/DEPLOYMENT.md`＋買い推奨ランキング表。**赤でもランキングは隠さない**（隠すと別経路で古い値を見に行くだけなので、出した上で「この結果で発注しないでください」を明示する） | api.py, routers/morning.py |
-| `collection.html` | フロントエンド | 収集管理・スクリーニング・DBブラウザ（`/collection`） | api.py |
+| `collection.html` | フロントエンド | 収集管理・スクリーニング・DBブラウザ（`/collection`）。業種プルダウンは `/api/industries`、BS/PL/CF 再分類ビューの企業は検索欄で絞って選ぶ（全社のプルダウンは `/api/companies` の上限 500 を超えるため作らない・#803） | api.py |
 | `analysis.html` | フロントエンド | 分析ハブ（`/analysis`）。左サイドバーを `/api/plugins` のメタ（category/ui_order）から目的別5カテゴリ（①銘柄を探す/②割安度/③リターン予測/④検証/⑤保有を見直す）で動的生成（`buildSidebar`）。売り候補ランキング（`#tab-sell_ranking`・保有銘柄の売り時）は静的タブ＋保有入力 textarea（localStorage 記憶）。バリュエーション分析に横断分布（理論vs実績の散布図・乖離率ヒストグラム）を Chart.js で表示。スクリーニングは特例エントリとして `/collection` へリンク。動的タブの結果描画は `RESULT_RENDERERS`（plugin名→描画関数の登録制・未登録は汎用フォールバック）、CSV出力は単一の `exportCSV(name)` ディスパッチャ（`CSV_EXPORTERS` 登録制）に統一。バリュエーション分析タブに**モデル鮮度バー**（`#model-freshness-bar`）を常設 — `/api/model/status` から computed_at/staleness_days を取得して表示し、OLSロック演出を廃止。買い推奨タブには**株価 as-of バー**（`#price-freshness-bar`・#416）を常設 — `/api/stats` の p50/p05 と齢（営業日）を表示し、5営業日超で黄・10営業日超で赤＋「この結果で発注しないでください」。赤のときは実行前に `confirm()` で確認（**実行はブロックしない**＝z_momentum を外した分析など正当な用途を殺さない）。結果テーブルとCSVに銘柄別「株価日」列 | api.py, Chart.js (CDN) |
 | `login.html` | フロントエンド | 認証ログイン画面（`/login`） | api.py |
 | `models.html` | フロントエンド | モデル解説・参考文献ページ（`/models`）。全モデルの数式・パラメータ・DOIリンクをインラインHTMLで表示（節の顔ぶれは `MODELS.md` の章と1対1で対応する・#712。節の数をここへ書き写さない＝増減しても失敗として現れない）。冒頭に**分析の3層モデル**（一次分析／双対／メタ検証・`#layers`）の枠組みを置き、本文は `guide.html` と揃えた**目的別5カテゴリ**（①銘柄を探す/②割安度/③リターン予測/④検証/⑤保有を見直す）で `cat-header` グルーピング。各モデルは `#mN` でディープリンク可能（番号表示は廃止しアンカーIDのみ維持）。旧「総合リターン予測」(`#m1`) はバリュエーション分析へ統合し削除（ADR-0001）。 | — |

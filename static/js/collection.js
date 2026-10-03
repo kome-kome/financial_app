@@ -3,6 +3,7 @@ let dbPage = 0, dbLimit = 50;
 let screenResults = [];
 let normData = {};
 let searchTimer = null;
+let normSearchTimer = null;
 let _writesBlocked = false;  // 閲覧専用の環境か（initLightMode が立てる・#733）
 
 // ── API ────────────────────────────────────────────────────────────
@@ -471,23 +472,37 @@ async function updateIndustryData(){
   }
 }
 
+// 業種は専用 API から取る（#803）。全社を取って集めると /api/companies の上限 500 に掛かり、
+// 毎回 400 になっていた。失敗は黙って捨てずログ欄へ出す。
 async function loadIndustries(){
   try{
-    const d = await apiFetch('/api/companies?limit=9999');
-    const inds = [...new Set(d.items.map(c=>c.industry).filter(Boolean))].sort();
+    const d = await apiFetch('/api/industries');
+    if(!d) return;
     ['db-industry','sc-industry'].forEach(id=>{
       const sel = document.getElementById(id);
       sel.innerHTML='<option value="">全業種</option>';
-      inds.forEach(i=>{ const o=document.createElement('option'); o.value=i; o.textContent=i; sel.appendChild(o); });
+      d.items.forEach(i=>{ const o=document.createElement('option'); o.value=i; o.textContent=i; sel.appendChild(o); });
     });
-    // 正規化ビュー企業リスト
-    const sel2 = document.getElementById('norm-company');
-    sel2.innerHTML='<option value="">企業を選択</option>';
+  }catch(e){ log('業種一覧の取得失敗: '+e.message,'error') }
+}
+
+// 正規化ビューの企業は検索で絞る（#803）。全社のプルダウンは上限 500 を超えるため作らない。
+function debounceNormSearch(){ clearTimeout(normSearchTimer); normSearchTimer=setTimeout(searchNormCompanies,250) }
+
+async function searchNormCompanies(){
+  const q = document.getElementById('norm-search').value.trim();
+  const sel = document.getElementById('norm-company');
+  if(!q){ sel.innerHTML='<option value="">企業を検索してください</option>'; return; }
+  try{
+    const d = await apiFetch(`/api/companies?limit=50&q=${encodeURIComponent(q)}`);
+    if(!d) return;
+    const head = d.total > d.items.length ? `${d.total}社該当（先頭${d.items.length}社）` : `${d.total}社該当`;
+    sel.innerHTML = `<option value="">${head}</option>`;
     d.items.forEach(c=>{
       const o=document.createElement('option'); o.value=c.edinet_code;
-      o.textContent=`${c.sec_code||''} ${c.name}`; sel2.appendChild(o);
+      o.textContent=`${c.sec_code||''} ${c.name}`; sel.appendChild(o);
     });
-  }catch(e){}
+  }catch(e){ log('企業検索失敗: '+e.message,'error') }
 }
 
 async function showDetail(code, name){
