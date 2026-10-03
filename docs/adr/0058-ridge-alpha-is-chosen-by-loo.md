@@ -4,6 +4,7 @@
 
 accepted（2026-09-19）。Issue [#697](https://github.com/kome-kome/financial_app/issues/697)
 （[#626](https://github.com/kome-kome/financial_app/issues/626) の実装中に発見）。
+**決定1 のうち「α の候補（7点）は変えない」は [ADR-0064](0064-ridge-alpha-candidates-are-a-fine-log-grid.md) で置き換え**（範囲 `1e-3`〜`1e3` はそのまま1桁10点の61点へ細分・#761）。LOO で選ぶこと・採点は変わらない。
 
 - [ADR-0057](0057-past-gap-ratio-is-reconstructed-as-of-each-month.md) 決定4（行を edinet_code 順に
   固定する）の**理由を置き換える**。順序の固定は残すが、目的は「fold を揃える」から「浮動小数の

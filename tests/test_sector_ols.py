@@ -1142,3 +1142,54 @@ class TestMeasureSectorCoverageScript:
         # 書かず・読み直さないまま動き、外す実装にすると中断時に取り残したワーカーが正本へ書く
         assert "_load_records" not in vars(plugin)
         assert "_persist_and_rank" not in vars(plugin)
+
+
+class TestMeasureRidgeAlphaStabilityScript:
+    """`scripts/measure_ridge_alpha_stability.py`（ADR-0064 の実測値の正本）が現行の私的 API で動く（#761）。
+
+    `_prepare_fit` / `_fit_sector` を直に呼び、旧格子は `plugins.utils.RIDGE_ALPHAS` の差し替えで当てる。
+    `scripts/` は CI で実行されないので、ここで通し実行する（#762 と同じ理由）。
+    """
+
+    def test_runs_to_end_without_writing(self, db, make_fin, monkeypatch, capsys):
+        import plugins.utils as putils
+        from database import RegressionResult
+        from scripts import measure_ridge_alpha_stability as m
+
+        _seed_sector(db, make_fin, n=20)
+        _seed_sector2(db, make_fin, n=20, industry="電気機器", n_missing_gp=0)
+        monkeypatch.setattr(m, "SessionLocal", lambda: db)
+        before = putils.RIDGE_ALPHAS
+        assert m.main(["--reps", "2"]) == 0
+
+        out = capsys.readouterr().out
+        for head in ("[1] 谷の平坦さ", "[3] 切替の一度きりの移動", "[4] 安定性", "1社抜き", "2%抜き", "所要:"):
+            assert head in out
+        assert "情報・通信業" in out and "電気機器" in out
+        # 書き込みは経路として持たない（実測のたびに本番の gap を上書きしない）
+        assert db.query(RegressionResult).count() == 0
+        # 旧格子の差し替えは必ず戻る（戻らないと同じプロセスの後続が7点で回る）
+        assert putils.RIDGE_ALPHAS is before
+
+    def test_alpha_swap_is_restored_on_error(self):
+        import plugins.utils as putils
+        from scripts import measure_ridge_alpha_stability as m
+
+        before = putils.RIDGE_ALPHAS
+        with pytest.raises(RuntimeError):
+            with m.ridge_alphas(m.LEGACY_ALPHAS):
+                assert putils.RIDGE_ALPHAS == m.LEGACY_ALPHAS
+                raise RuntimeError("boom")
+        assert putils.RIDGE_ALPHAS is before
+
+    def test_drop_keys_is_reproducible_and_per_sector(self):
+        import numpy as np
+        from scripts import measure_ridge_alpha_stability as m
+
+        keys = {"A": [("E1", 2025, None), ("E2", 2025, None), ("E3", 2025, None)],
+                "B": [(f"E{i}", 2025, None) for i in range(10, 110)]}
+        d1 = m.drop_keys(keys, 0.02, 1, np.random.default_rng(5))
+        d2 = m.drop_keys(keys, 0.02, 1, np.random.default_rng(5))
+        assert d1 == d2
+        assert len(d1 & set(keys["A"])) == 1      # 最低1社
+        assert len(d1 & set(keys["B"])) == 2      # 100社の 2%
