@@ -957,10 +957,11 @@ sequenceDiagram
     participant DB    as 🗄️ PostgreSQL
 
     User ->> UI  : 条件を入力（PER≤20, ROE≥10%, 自己資本比率≥40% など）
-    UI   ->> API : POST /api/screen { max_per:20, min_roe:10, min_equity_ratio:40, ... }
+    UI   ->> API : POST /api/screen { max_per:20, min_roe:10, min_equity_ratio:40, ..., include_delisted:false }
 
     Note over API,DB: 各企業の「最新年度」レコードのみを対象にサブクエリで絞り込む<br/>派生指標フィルタ（ROE・営業利益率等）は financial_metrics VIEW を対象にする
-    API  ->> DB  : SELECT m.* FROM financial_metrics m<br/>JOIN (SELECT edinet_code, MAX(year) FROM financial_records) subq<br/>WHERE [各条件フィルタ]<br/>LIMIT 200
+    Note over API,DB: 既定は廃止社を外す（is_active IS NOT FALSE・#801）。tradable_filters は使わない<br/>＝価格停止の判定は今日基準なので、Render の凍結断面では株価を持つ全社が「停止」になり結果が空になる<br/>画面の「廃止社も含める」で include_delisted:true、結果の廃止社には「廃止」タグ
+    API  ->> DB  : SELECT m.* FROM financial_metrics m<br/>JOIN (SELECT edinet_code, MAX(year) FROM financial_records WHERE period_type='annual') subq<br/>WHERE m.is_active IS NOT FALSE AND [各条件フィルタ]<br/>ORDER BY m.market_cap DESC NULLS LAST, m.edinet_code<br/>LIMIT 200（並べてから切る＝残る社が返却順で決まらない・#801）
     DB  -->> API : 条件に合致したレコード一覧
 
     API -->> UI  : { count: N, results: [...] }
@@ -1319,6 +1320,7 @@ graph LR
         S1["GET /api/stats\n企業数・レコード数・最新年度\n+ データ鮮度（最終更新日時・経過日数・期待最新年度・freshness判定）\n+ 株価 as-of 分位（p50/p05/max・stale_bdays・n_stale_over_5d・price_freshness）#416
 + batch（夜間/月次/watchdog の足跡・batch_freshness.summarize と共有）#563"]
         S2["GET /api/companies\n企業一覧（検索・業種・市場フィルタ・active_only）"]
+        S6["GET /api/peers?industry&code&top\n同業比較（#801）。業種内の上場中で通期の財務を持つ社を\n時価総額順に全件で並べ、上位 top 社＋code の社と total・rank を返す\n（廃止社の code は rank=null）"]
         S3["GET /api/financials/{edinet_code}\n指定企業の全年度財務データ"]
         S4["GET /api/stock/history/{edinet_code}?resolution=daily|weekly\n終値時系列（close-only・daily=直近6か月/weekly=全履歴）"]
         S5["GET /api/export/csv\n財務データをCSVでダウンロード"]
@@ -1508,7 +1510,7 @@ graph TB
 | `models.html` | フロントエンド | モデル解説・参考文献ページ（`/models`）。全モデルの数式・パラメータ・DOIリンクをインラインHTMLで表示（節の顔ぶれは `MODELS.md` の章と1対1で対応する・#712。節の数をここへ書き写さない＝増減しても失敗として現れない）。冒頭に**分析の3層モデル**（一次分析／双対／メタ検証・`#layers`）の枠組みを置き、本文は `guide.html` と揃えた**目的別5カテゴリ**（①銘柄を探す/②割安度/③リターン予測/④検証/⑤保有を見直す）で `cat-header` グルーピング。各モデルは `#mN` でディープリンク可能（番号表示は廃止しアンカーIDのみ維持）。旧「総合リターン予測」(`#m1`) はバリュエーション分析へ統合し削除（ADR-0001）。 | — |
 | `guide.html` | フロントエンド | 初心者向け「やさしい解説」ページ（`/guide`）。各分析を数式なし・たとえ話で説明（ひとことで言うと／何が分かる／どう使う／注意点）。セクションidはプラグイン名（`recommend`/`net_cash_analysis`/`gap_analysis`/`sector_ols`/`macro_risk_return`/`macro_dlm`/`backtest`/`sell_ranking`/`zscore`）でディープリンク可能（`gap_analysis`=バリュエーション分析、旧 total_return は統合）。分析画面の各タブの「❓ やさしい解説」リンクから該当セクションへ飛ぶ。各セクション末尾から技術版 `/models#mN` へ相互リンク。TOC追従は `models.js` を再利用（専用JSなし）。 | — |
 | `db.html` | フロントエンド | DBビューア（`/db`）。4テーブルのスキーマ・プレビュー・統計サマリー・ER 風リレーション・企業ドリルダウン・CSV エクスポート。 | api.py |
-| `company.html` | フロントエンド | 企業詳細（`/company`・`/company/{edinet_code}`）。個別企業の業績・財務(BS)・CF・per-share/配当・バリュエーション（理論時価総額乖離）・日次株価・業種内Zスコアレーダー・清原式ネットキャッシュ・同業比較を Chart.js の時系列グラフで可視化。企業名・証券コード検索付き。財務(BS)タブはバフェットコード型で各年「左＝資産（借方）／右＝負債・純資産（貸方）」を並列表示し、粒度（粗/中/細）切替で内訳の細かさを変更できる（どの粒度でも資産バー＝負債純資産バー＝総資産になるよう補正）。業績(PL)タブは売上高を費用・利益に分解した積み上げ棒（最上部＝純利益）を粒度（粗/中/細）切替で表示（合計＝売上高、信頼性の低い stored gross_profit は不使用）。CFタブも粒度（粗＝フリー+財務／中＝営業/投資/財務／細＝営業/設備投資/その他投資/財務）切替に対応し、CFデータ未収集の企業には明示メッセージを表示。同業比較タブは選択企業を必ず表示し業種内時価総額順位を併記（並べるのは上場中の社だけ＝`/api/companies?active_only=true`。廃止社は業種が付いていても古い財務のまま順位に混ざるため・#797）。**相互リンク**：理論時価総額/乖離率チャート→`/analysis?tab=gap`・Zスコアチャート→`/analysis?tab=recommend`・ネットキャッシュチャート→`/analysis?tab=net_cash`（逆方向のバリュエーション分析表→`/company/{code}` は既存） | api.py, Chart.js (CDN) |
+| `company.html` | フロントエンド | 企業詳細（`/company`・`/company/{edinet_code}`）。個別企業の業績・財務(BS)・CF・per-share/配当・バリュエーション（理論時価総額乖離）・日次株価・業種内Zスコアレーダー・清原式ネットキャッシュ・同業比較を Chart.js の時系列グラフで可視化。企業名・証券コード検索付き。財務(BS)タブはバフェットコード型で各年「左＝資産（借方）／右＝負債・純資産（貸方）」を並列表示し、粒度（粗/中/細）切替で内訳の細かさを変更できる（どの粒度でも資産バー＝負債純資産バー＝総資産になるよう補正）。業績(PL)タブは売上高を費用・利益に分解した積み上げ棒（最上部＝純利益）を粒度（粗/中/細）切替で表示（合計＝売上高、信頼性の低い stored gross_profit は不使用）。CFタブも粒度（粗＝フリー+財務／中＝営業/投資/財務／細＝営業/設備投資/その他投資/財務）切替に対応し、CFデータ未収集の企業には明示メッセージを表示。同業比較タブは選択企業を必ず表示し業種内時価総額順位を併記（並べるのは上場中の社だけ。廃止社は業種が付いていても古い財務のまま順位に混ざるため・#797。並べ替え・順位・母数は `/api/peers` がサーバー側で業種の全件に対して決める＝件数で切ってから画面で並べると、300社を超える業種で上位の社が漏れ母数も小さく出た・#801。廃止社のページでは順位を出さない）。**相互リンク**：理論時価総額/乖離率チャート→`/analysis?tab=gap`・Zスコアチャート→`/analysis?tab=recommend`・ネットキャッシュチャート→`/analysis?tab=net_cash`（逆方向のバリュエーション分析表→`/company/{code}` は既存） | api.py, Chart.js (CDN) |
 | `static/js/*.js` | フロントエンド | 各HTMLテンプレから外部化したページ別JS（CSP対応）。common（`esc`/`apiFetch`/`initAuth`/`logout` 等の共通ユーティリティ・全ページ読込）+ theme-init（`localStorage`/`prefers-color-scheme` から `data-theme` を描画前に適用する FOUC 防止・全ページ `<head>` 読込）+ dashboard / collection / analysis / company / db / models / login / morning の10ファイル。`/static` で配信（api.py の `StaticFiles` マウント）。`<style>` とインラインイベントハンドラ（`onclick=` 等）はHTML側に残置（後者は将来 addEventListener 化予定）。 | api.py |
 | `_pipeline_gh.py` | GitHub Actions | 全件収集パイプライン（full-pipeline.yml から workflow_dispatch 手動起動）。`--refill-cf`（CF NULL 補完: 投資CF/現金増減/capex）・`--refill-capex-only`（capex のみワンショット）・`--refill-cf-missing`（CF全NULL社=IFRS決算大企業の営業/投資/財務CFを補完）・`--refill-pl-bs`（bs_inventory NULL 補完: 旧コホート〜2022の PL/BS 列を XBRL 再取得で是正・古い順／`refill-pl-bs.yml`）・`--diagnose-cf`（CF ラベル診断）モードを持つ。`normal` CF補完は 2026-05-31 に完了（capex 88.8%充足）、IFRS/US-GAAP決算企業の CF全NULL は 2026-06-03 に `--refill-cf-missing` で補完し CF未収集 268社→0社（詳細は GOTCHAS.md「IFRS/US-GAAP決算のCF・売上要素名」「CF NULL補完の運用」「bs_inventory バックフィルの運用」）。 | collector.py, database.py |
 | `_pipeline_incremental.py` | GitHub Actions | 差分収集パイプライン（`daily-incremental.yml` から起動。停止前の cron は **JST 17:17**＝UTC 08:17・#476 で JST 03:00 から前倒し＝**起動時刻の根拠としてだけ残す値**）。**schedule はコメントアウトで恒久停止**（#503・ADR-0038 で正本がローカル PostgreSQL へ移ったため。動かすと Supabase だけが前進して正本と分岐する。停止の発端は #477 の Egress 超過だったが、#503 の反転で復帰の前提そのものが消えた＝**復帰条件は「正本を Supabase へ戻す決定をしたとき」だけ**で、その場合は #503 を再オープンしローカル→Supabase の引き渡し経路を先に用意する。`workflow_dispatch` は残っているが**手動起動すると Supabase へ書く**） | collector.py, database.py |

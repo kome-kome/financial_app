@@ -797,6 +797,7 @@ async function runScreen(){
     min_cf_ratio:    numOrNull('sc-cf'),
     industry: document.getElementById('sc-industry').value||null,
     market:   document.getElementById('sc-market').value||null,
+    include_delisted: document.getElementById('sc-include-delisted').checked,
     limit: 500
   };
   try{
@@ -813,7 +814,7 @@ function renderScreenResults(){
     const score = calcScore(r);
     return `<tr>
       <td><span class="tag tag-blue">${esc(r.sec_code||r.edinet_code)}</span></td>
-      <td>${r.edinet_code ? `<a href="/company/${esc(r.edinet_code)}" class="co-link" style="font-weight:500">${esc(r.company_name)}</a>` : esc(r.company_name)}</td>
+      <td>${r.edinet_code ? `<a href="/company/${esc(r.edinet_code)}" class="co-link" style="font-weight:500">${esc(r.company_name)}</a>` : esc(r.company_name)}${r.is_active === false ? ' <span class="tag tag-red" style="font-size:10px">廃止</span>' : ''}</td>
       <td><span class="tag tag-amber" style="font-size:10px">${esc(r.industry)||'-'}</span></td>
       <td>${r.val?.per!=null?Number(r.val.per):'-'}</td>
       <td>${r.val?.pbr!=null?Number(r.val.pbr):'-'}</td>

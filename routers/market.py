@@ -7,7 +7,7 @@ import csv
 import io
 import json
 import logging
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -341,6 +341,63 @@ async def list_companies(
     return {"total": total, "items": items}
 
 
+@router.get("/api/peers")
+async def list_peers(
+    industry: str,
+    code: Optional[str] = None,
+    top: int = 15,
+    db: Session = Depends(api.get_db),
+):
+    """同業比較: 業種内の上場中の社を時価総額順に並べた上位 `top` 社と、`code` の順位（#801）。
+
+    母集団は「業種が一致・上場中・通期の財務を持つ社」（`/api/companies?active_only=true` と同じ
+    `companies` の列で判定）。並べ替えと順位はここで全件に対して決める——件数で切ってから画面で
+    並べると、大きな業種（情報・通信業 613社）で上位の社が切られた側に入り、母数も小さく出る。
+    レコード全体を返すのは上位と `code` の社だけ。`code` が母集団に居なければ（廃止社など）
+    `rank` は None で items にも入れない。
+    """
+    if not industry:
+        raise HTTPException(400, "industry を指定してください")
+    if code is not None and not api._EDINET_CODE_RE.match(code):
+        raise HTTPException(400, "code の形式が不正です（例: E02167）")
+    if not (1 <= top <= 50):
+        raise HTTPException(400, "top は 1〜50 の範囲で指定してください")
+    # annual で絞る（#680）。同じ年度に通期行が2本ある社（決算期変更）は period_end の新しい方を採る。
+    subq = latest_year_subq(db, FinancialRecord, period_type="annual")
+    on_latest = ((FinancialMetric.edinet_code == subq.c.edinet_code) &
+                 (FinancialMetric.year == subq.c.max_year))
+    rows = (db.query(Company.edinet_code, Company.sec_code, Company.name,
+                     FinancialMetric.market_cap, FinancialMetric.period_end)
+              .join(FinancialMetric, FinancialMetric.edinet_code == Company.edinet_code)
+              .join(subq, on_latest)
+              .filter(Company.industry == industry, Company.is_active.isnot(False))
+              .all())
+    newest = {}
+    for r in rows:
+        cur = newest.get(r.edinet_code)
+        if cur is None or (r.period_end or date.min) > (cur.period_end or date.min):
+            newest[r.edinet_code] = r
+    # 時価総額の降順・NULL は最後・同値は edinet_code の昇順（スクリーニングと同じ並び）
+    ranked = sorted(newest.values(),
+                    key=lambda r: (r.market_cap is None, -(r.market_cap or 0), r.edinet_code))
+    rank_of = {r.edinet_code: i + 1 for i, r in enumerate(ranked)}
+    picked = ranked[:top]
+    if rank_of.get(code, 0) > top:
+        picked.append(ranked[rank_of[code] - 1])
+    latest_map = {}
+    if picked:
+        recs = (db.query(FinancialMetric).join(subq, on_latest)
+                  .filter(FinancialMetric.edinet_code.in_([r.edinet_code for r in picked]))
+                  .all())
+        for rec in recs:
+            if rec.period_end == newest[rec.edinet_code].period_end:
+                latest_map[rec.edinet_code] = serializers.record_to_dict(rec)
+    items = [{"edinet_code": r.edinet_code, "sec_code": r.sec_code, "name": r.name,
+              "rank": rank_of[r.edinet_code], "latest": latest_map.get(r.edinet_code)}
+             for r in picked]
+    return {"industry": industry, "total": len(ranked), "rank": rank_of.get(code), "items": items}
+
+
 # ── 財務データ取得 ─────────────────────────────────────────────────────────
 
 @router.get("/api/financials/{edinet_code}")
@@ -373,6 +430,7 @@ class ScreenRequest(BaseModel):
     max_pbr: Optional[float] = None
     min_div_yield: Optional[float] = None
     min_cf_ratio: Optional[float] = None
+    include_delisted: bool = False
     limit: int = Field(default=200, ge=1, le=500)
 
 
@@ -387,6 +445,11 @@ async def screening(request: Request, req: ScreenRequest, db: Session = Depends(
                .join(subq, (FinancialMetric.edinet_code == subq.c.edinet_code) &
                            (FinancialMetric.year == subq.c.max_year)))
 
+    if not req.include_delisted:
+        # 廃止社は廃止前の古い年度の財務のまま並ぶ（#801）。`tradable_filters` は使わない:
+        # 価格停止の判定は今日を基準にするので、Render が読む凍結断面（2026-08-07）では
+        # 株価を持つ全社が「停止」になり、結果がほぼ空になる。NULL（旧データ）は残す。
+        query = query.filter(FinancialMetric.is_active.isnot(False))
     if req.year:
         query = query.filter(FinancialMetric.year == req.year)
     if req.industry:
@@ -416,7 +479,10 @@ async def screening(request: Request, req: ScreenRequest, db: Session = Depends(
     if req.min_cf_ratio is not None:
         query = query.filter(FinancialMetric.cf_ratio >= req.min_cf_ratio)
 
-    rows = query.limit(req.limit).all()
+    # 並べてから切る（#801）。並びが無いと limit で残る社が DB の返却順で決まる。
+    rows = (query.order_by(FinancialMetric.market_cap.desc().nullslast(),
+                           FinancialMetric.edinet_code)
+                 .limit(req.limit).all())
     return {"count": len(rows), "results": [serializers.record_to_dict(r) for r in rows]}
 
 

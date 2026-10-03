@@ -566,3 +566,129 @@ class TestScreenEndpoint:
         api.app.dependency_overrides[api.get_db] = lambda: db
         assert client.post("/api/screen", json={"limit": 1}).status_code == 200
         assert client.post("/api/screen", json={"limit": 500}).status_code == 200
+
+    def test_excludes_delisted_by_default(self, db, make_fin, make_metric):
+        """廃止社は廃止前の古い財務のまま並ぶので既定で外す（#801）。NULL（旧データ）は残す。"""
+        self._setup(db, make_fin, make_metric, [
+            {"edinet_code": "E00001", "is_active": True},
+            {"edinet_code": "E00002", "is_active": False},
+            {"edinet_code": "E00003", "is_active": None},
+        ])
+        api.app.dependency_overrides[api.get_db] = lambda: db
+        body = client.post("/api/screen", json={}).json()
+        assert {r["edinet_code"] for r in body["results"]} == {"E00001", "E00003"}
+
+    def test_include_delisted_returns_them_flagged(self, db, make_fin, make_metric):
+        """含めたときは画面が見分けられるよう is_active=false が付いて返る。"""
+        self._setup(db, make_fin, make_metric, [
+            {"edinet_code": "E00001", "is_active": True},
+            {"edinet_code": "E00002", "is_active": False},
+        ])
+        api.app.dependency_overrides[api.get_db] = lambda: db
+        body = client.post("/api/screen", json={"include_delisted": True}).json()
+        flags = {r["edinet_code"]: r["is_active"] for r in body["results"]}
+        assert flags == {"E00001": True, "E00002": False}
+
+    def test_orders_by_market_cap_before_limit(self, db, make_fin, make_metric):
+        """時価総額の降順（NULL は最後・同値は edinet_code）に並べてから limit で切る（#801）。"""
+        self._setup(db, make_fin, make_metric, [
+            {"edinet_code": "E00001", "market_cap": 10.0},
+            {"edinet_code": "E00002", "market_cap": None},
+            {"edinet_code": "E00003", "market_cap": 300.0},
+            {"edinet_code": "E00004", "market_cap": 200.0},
+            {"edinet_code": "E00005", "market_cap": 200.0},
+        ])
+        api.app.dependency_overrides[api.get_db] = lambda: db
+        codes = [r["edinet_code"] for r in client.post("/api/screen", json={}).json()["results"]]
+        assert codes == ["E00003", "E00004", "E00005", "E00001", "E00002"]
+        top2 = client.post("/api/screen", json={"limit": 2}).json()["results"]
+        assert [r["edinet_code"] for r in top2] == ["E00003", "E00004"]
+
+
+class TestPeersEndpoint:
+    """#801: 同業比較は業種の全件で並べ、上位と表示中の社の順位・母数をサーバーが返す。"""
+
+    IND = "情報・通信業"
+
+    def _add(self, db, make_company, make_fin, make_metric, ec, market_cap, *,
+             industry=IND, is_active=True, with_fin=True):
+        db.add(make_company(edinet_code=ec, sec_code=ec[-4:], name=f"社{ec}",
+                            industry=industry, is_active=is_active))
+        if with_fin:
+            db.add(make_fin(edinet_code=ec, year=2025, period_end="2025-03-31"))
+            db.add(make_metric(edinet_code=ec, year=2025, period_end="2025-03-31",
+                               industry=industry, market_cap=market_cap))
+
+    def _seed(self, db, make_company, make_fin, make_metric):
+        # 業種内の上場中で財務を持つ社は4社。母数に入らない社を3種類混ぜる
+        for ec, mc in (("E00001", 100.0), ("E00002", 400.0), ("E00003", None), ("E00004", 250.0)):
+            self._add(db, make_company, make_fin, make_metric, ec, mc)
+        self._add(db, make_company, make_fin, make_metric, "E00009", 9999.0, is_active=False)
+        self._add(db, make_company, make_fin, make_metric, "E00008", 5000.0, industry="銀行業")
+        self._add(db, make_company, make_fin, make_metric, "E00007", None, with_fin=False)
+        db.commit()
+        api.app.dependency_overrides[api.get_db] = lambda: db
+
+    def test_ranks_whole_industry_and_counts_listed_with_financials(
+            self, db, make_company, make_fin, make_metric):
+        self._seed(db, make_company, make_fin, make_metric)
+        body = client.get("/api/peers", params={"industry": self.IND, "code": "E00004"}).json()
+        assert body["total"] == 4
+        assert body["rank"] == 2
+        assert [(i["edinet_code"], i["rank"]) for i in body["items"]] == [
+            ("E00002", 1), ("E00004", 2), ("E00001", 3), ("E00003", 4)]
+        assert body["items"][0]["latest"]["val"]["market_cap"] == 400.0
+        assert body["items"][0]["name"] == "社E00002"
+
+    def test_code_outside_top_is_appended_with_its_rank(
+            self, db, make_company, make_fin, make_metric):
+        self._seed(db, make_company, make_fin, make_metric)
+        body = client.get("/api/peers", params={"industry": self.IND, "code": "E00003",
+                                                "top": 2}).json()
+        assert body["total"] == 4
+        assert body["rank"] == 4
+        assert [(i["edinet_code"], i["rank"]) for i in body["items"]] == [
+            ("E00002", 1), ("E00004", 2), ("E00003", 4)]
+
+    def test_delisted_code_has_no_rank(self, db, make_company, make_fin, make_metric):
+        """廃止社のページは母集団に居ない＝順位を出さない（旧「第(M+1)位」をやめる）。"""
+        self._seed(db, make_company, make_fin, make_metric)
+        body = client.get("/api/peers", params={"industry": self.IND, "code": "E00009"}).json()
+        assert body["rank"] is None
+        assert "E00009" not in {i["edinet_code"] for i in body["items"]}
+        assert body["total"] == 4
+
+    def test_uses_latest_annual_even_with_newer_h1(self, db, make_company, make_fin, make_metric):
+        """H1 だけの新しい年度があっても通期の最新行で並べる（#680 と同じ罠）。"""
+        self._add(db, make_company, make_fin, make_metric, "E00001", 100.0)
+        db.add(make_fin(edinet_code="E00001", year=2026, period_end="2025-09-30",
+                        period_type="H1"))
+        db.commit()
+        api.app.dependency_overrides[api.get_db] = lambda: db
+        body = client.get("/api/peers", params={"industry": self.IND, "code": "E00001"}).json()
+        assert body["total"] == 1
+        assert body["items"][0]["latest"]["year"] == 2025
+
+    def test_two_annual_rows_in_one_year_count_once(self, db, make_company, make_fin, make_metric):
+        """決算期変更で同じ年度に通期行が2本ある社は1社に数え、period_end の新しい方を採る。"""
+        self._add(db, make_company, make_fin, make_metric, "E00001", 100.0)
+        db.add(make_fin(edinet_code="E00001", year=2025, period_end="2025-12-31"))
+        db.add(make_metric(edinet_code="E00001", year=2025, period_end="2025-12-31",
+                           market_cap=300.0))
+        self._add(db, make_company, make_fin, make_metric, "E00002", 200.0)
+        db.commit()
+        api.app.dependency_overrides[api.get_db] = lambda: db
+        body = client.get("/api/peers", params={"industry": self.IND}).json()
+        assert body["total"] == 2
+        assert [i["edinet_code"] for i in body["items"]] == ["E00001", "E00002"]
+        assert body["items"][0]["latest"]["period_end"] == "2025-12-31"
+        assert body["rank"] is None
+
+    def test_invalid_params_return_400(self, db):
+        api.app.dependency_overrides[api.get_db] = lambda: db
+        assert client.get("/api/peers", params={"industry": ""}).status_code == 400
+        assert client.get("/api/peers", params={"industry": self.IND,
+                                                "code": "INVALID"}).status_code == 400
+        assert client.get("/api/peers", params={"industry": self.IND, "top": 0}).status_code == 400
+        assert client.get("/api/peers", params={"industry": self.IND, "top": 51}).status_code == 400
+        assert client.get("/api/peers").status_code == 422
