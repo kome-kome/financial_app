@@ -2558,7 +2558,24 @@ function _mgShapHTML(item) {
 // ── M-6 マクロ×財務 正則化線形（ElasticNet）レンダラ（#807）──────────────────
 // 縦軸は相対 μ̂（今買える社の μ̂ 中央値との差・CONTEXT.md）。M-6 は順位だけが OOF で検証済みで、
 // μ̂ の水準は検証の外にある（今買える社の平均 −0.225・M-2 は +0.040）。λ の既定は 0
-// （表は μ̂ の順）で、λ>0 の並びの成績は測っていない（#808）。
+// （表は μ̂ の順）。λ>0 の並びは #808 で λ=0.1/0.3/1.0 を測った（ADR-0050 の 2026-10-05 追記）:
+// R2 は μ̂ の順と有意差なし、R_macro は λ を上げるほど悪化し λ=1.0 で売り側が有意に劣後。
+
+// 測った λ の上限（#808）。これを超える λ は測っていない。
+const _ENET_RISK_MEASURED_MAX = 1.0;
+
+function _enetLambdaNoteHTML(v) {
+  if (!(v.lambda > 0)) return '';
+  const warn = 'margin-bottom:8px;padding:8px 12px;border-radius:6px;font-size:11px;background:var(--status-warn-bg);color:var(--status-warn-text)';
+  const back = 'λ=0 なら μ̂ の順（OOF で検証済み）です。';
+  if (v.lambda > _ENET_RISK_MEASURED_MAX) {
+    return `<div style="${warn}">λ=${v.lambda} の並び（U = μ̂ − λR の順）は成績を測っていません（#808 で測ったのは λ≤${_ENET_RISK_MEASURED_MAX.toFixed(1)}）。${back}</div>`;
+  }
+  if (v.axis === 'r_macro') {
+    return `<div style="${warn}">R_macro で λ>0 の並びは、測った範囲（λ=0.1 / 0.3 / 1.0）では λ を上げるほど μ̂ だけの並びより成績が悪く、λ=1.0 では売り側の成績が有意に劣後しました（#808）。${back}</div>`;
+  }
+  return `<div style="font-size:11px;color:var(--text-muted);margin-bottom:8px">R2 で λ>0 の並びは、測った範囲（λ≤${_ENET_RISK_MEASURED_MAX.toFixed(1)}）で μ̂ だけの並びと有意な差がありませんでした（劣後も優位も検出されず・#808）。</div>`;
+}
 
 const _enetView = _riskReturnView({
   tabId: 'macro_enet', prefix: 'enet', yKey: 'mu_rel', defaultLambda: 0.0,
@@ -2566,7 +2583,7 @@ const _enetView = _riskReturnView({
   headerHTML: _enetHeaderHTML,
   afterHeader: data => _mrrPaintCoefBars(data.feature_coefs || {}, 'enet-coef-bars', 'enet-coef-legend'),
   tableNote: (v, data) => `
-    ${v.lambda > 0 ? `<div style="margin-bottom:8px;padding:8px 12px;border-radius:6px;font-size:11px;background:var(--status-warn-bg);color:var(--status-warn-text)">λ=${v.lambda} の並び（U = μ̂ − λR の順）は成績を測っていません（#808）。λ=0 なら μ̂ の順（OOF で検証済み）です。</div>` : ''}
+    ${_enetLambdaNoteHTML(v)}
     <div style="font-size:11px;color:var(--text-muted);margin-bottom:4px">※ μ̂ は52週（1年）先の年率対数リターン予測。相対 μ̂ = μ̂ − 今買える社の μ̂ 中央値（${_rrPct(data.mu_rel_center)}）。水準は未検証・順位は OOF で検証済み。</div>
     <div style="font-size:11px;color:var(--text-muted);margin-bottom:8px">行をクリックすると予測の内訳を表示します</div>`,
   headCells: v => `${_rrLeadHead()}<th><span class="gloss" data-tip="今買える社の μ̂ 中央値との差。全社を同じ量だけずらした値なので、順位は μ̂ と同じ。">相対μ̂</span></th><th><span class="gloss" data-tip="52週=1年先の年率対数リターンの予測値（ElasticNet）。順位は OOF で検証済みだが、水準は検証していない。">μ̂</span></th>${_rrTailHead(v.axis)}`,
