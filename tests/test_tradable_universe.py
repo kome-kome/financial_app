@@ -14,6 +14,8 @@
 4. **計算の母集団も同じ判定を共有していること**（#780）。sector_ols の当日回帰と、producer が
    保存する代表 as-of。表示から消えても計算に残ると、現役社の gap_ratio や鮮度の数字が
    静かに動く
+5. **M 系の分析タブが返す結果表も同じ判定を通ること**（#806）。M-6 では上位30のうち23社が
+   廃止社だった（株価が止まった日のマクロ値で μ̂ が押し上がる）。保存する μ̂ は全社のまま
 """
 import ast
 import logging
@@ -27,9 +29,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from database import (  # noqa: E402
     Company, FinancialMetric, FinancialRecord, PRICE_STALE_ALERT_BDAYS, PRICE_STALE_WARN_BDAYS,
-    non_tradable_codes, stale_cutoff_date, stale_price_codes, tradable_filters,
+    non_tradable_breakdown, non_tradable_codes, stale_cutoff_date, stale_price_codes,
+    tradable_filters,
 )
-from plugins.macro_snapshots import tradable_snapshot_asof  # noqa: E402
+from plugins.macro_snapshots import tradable_results, tradable_snapshot_asof  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -50,6 +53,16 @@ ASOF_PRODUCERS = (
     "plugins/macro_dlm.py",
     "plugins/macro_ensemble.py",
     "macro_beta_inference.py",      # M-1（#781）。as-of は推論バッチがパネルから作る
+)
+
+# 分析タブへ `results` を返す M 系（#806）。M-5 は M-2 の execute を継承するので M-2 で足りる。
+# M-4 は退役中（hidden）だが、復帰したときに同じ穴が開かないよう対象に入れる。
+RESULT_PRODUCERS = (
+    "plugins/macro_risk_return.py",   # M-1
+    "plugins/macro_gbdt.py",          # M-2（M-5 も）
+    "plugins/macro_dlm.py",           # M-3
+    "plugins/macro_ensemble.py",      # M-4
+    "plugins/macro_enet.py",          # M-6
 )
 
 
@@ -259,3 +272,93 @@ class TestProducersUseTradableAsof:
     def test_does_not_call_representative_snapshot_date_directly(self, relpath):
         assert "representative_snapshot_date" not in self._called(relpath), (
             f"{relpath} が全行の as-of を作っている。tradable_snapshot_asof を使うこと")
+
+
+# ── 分析タブの結果表（#806）────────────────────────────────────────────────────
+
+class TestNonTradableBreakdown:
+    """除外の内訳は `non_tradable_codes` に理由の札を付けるだけ（判定の源は1つ）。"""
+
+    def test_splits_delisted_and_stale(self, db, make_company, make_price):
+        _seed_companies(db, make_company, make_price)
+        assert non_tradable_breakdown(db) == {"delisted": {"E_DELIST"}, "stale": {"E_ZOMBIE"}}
+
+    def test_delisted_with_stopped_price_counts_once_as_delisted(self, db, make_company,
+                                                                  make_price):
+        """廃止社のほとんどは価格も止まっている。両方に数えると内訳の和が除外数と合わない。"""
+        _seed_companies(db, make_company, make_price)
+        db.add(make_company(edinet_code="E_DEAD", sec_code="1005", is_active=False))
+        db.add(make_price(edinet_code="E_DEAD", trade_date=(_cutoff() - timedelta(days=30)).isoformat()))
+        db.commit()
+        why = non_tradable_breakdown(db)
+        assert why == {"delisted": {"E_DELIST", "E_DEAD"}, "stale": {"E_ZOMBIE"}}
+        assert why["delisted"] | why["stale"] == non_tradable_codes(db)
+        assert not (why["delisted"] & why["stale"])
+
+    def test_empty_when_everyone_is_tradable(self, db, make_company, make_price):
+        db.add(make_company(edinet_code="E_OK", sec_code="1001", is_active=True))
+        db.add(make_price(edinet_code="E_OK", trade_date=date.today().isoformat()))
+        db.commit()
+        assert non_tradable_breakdown(db) == {"delisted": set(), "stale": set()}
+
+
+class TestTradableResults:
+    """M 系の `results` を今買える社だけへ絞る共有関数（#806）。"""
+
+    def test_keeps_order_and_counts_by_reason(self, db, make_company, make_price):
+        _seed_companies(db, make_company, make_price)
+        items = [{"edinet_code": ec, "mu_raw": mu} for ec, mu in (
+            ("E_DELIST", 0.19),      # 株価が止まった日のマクロ値で押し上がった廃止社（M-6 の実例）
+            ("E_OK", 0.05),
+            ("E_ZOMBIE", 0.04),
+            ("E_NOPRICE", 0.03),     # 価格行が無い社は落とさない（#555 と同型の欠測を作らない）
+            ("E_NOCOMPANY", 0.02),   # companies に行が無い社も「買えない」と数えない
+        )]
+        kept, excluded = tradable_results(db, items)
+        assert [it["edinet_code"] for it in kept] == ["E_OK", "E_NOPRICE", "E_NOCOMPANY"]
+        assert excluded == {"delisted": 1, "stale": 1, "fallback": False}
+
+    def test_does_not_mutate_the_input(self, db, make_company, make_price):
+        """保存する μ̂ は全社のまま（呼び手は同じリストを永続化にも使う）。"""
+        _seed_companies(db, make_company, make_price)
+        items = [{"edinet_code": "E_DELIST"}, {"edinet_code": "E_OK"}]
+        tradable_results(db, items)
+        assert [it["edinet_code"] for it in items] == ["E_DELIST", "E_OK"]
+
+    def test_falls_back_to_everyone_when_nothing_is_tradable(self, db, make_company,
+                                                              make_price, caplog):
+        """全社が落ちる＝価格収集そのものの停止。空の表ではなく全社と警告を返す。"""
+        _seed_companies(db, make_company, make_price)
+        items = [{"edinet_code": "E_DELIST"}, {"edinet_code": "E_ZOMBIE"}]
+        with caplog.at_level(logging.WARNING, logger="plugins.macro_snapshots"):
+            kept, excluded = tradable_results(db, items)
+        assert kept == items
+        assert excluded == {"delisted": 1, "stale": 1, "fallback": True}
+        assert "全社を返す" in caplog.text
+
+    def test_empty_input_stays_empty_without_warning(self, db, make_company, make_price, caplog):
+        _seed_companies(db, make_company, make_price)
+        with caplog.at_level(logging.WARNING, logger="plugins.macro_snapshots"):
+            kept, excluded = tradable_results(db, [])
+        assert kept == []
+        assert excluded == {"delisted": 0, "stale": 0, "fallback": False}
+        assert caplog.text == ""
+
+
+class TestResultsUseTradableResults:
+    """M 系の execute が返す `results` は `tradable_results` を通る（#806）。
+
+    #605・#780 で表示と計算の母集団は揃えたが、**分析タブの結果表そのもの**が読み手である
+    ことは扱われず、M-6 の上位を廃止社が占めた。1本だけ漏れても失敗としては現れない
+    （そのモデルを実行したときだけ買えない社が並ぶ）。だから構文で縛る。
+    """
+
+    @pytest.mark.parametrize("relpath", RESULT_PRODUCERS)
+    def test_calls_tradable_results(self, relpath):
+        assert "tradable_results" in TestProducersUseTradableAsof._called(relpath)
+
+    def test_screen_reads_the_exclusion_key(self):
+        """応答キーの名前が画面とずれても失敗として現れない（注記が黙って出なくなる）。"""
+        js = open(os.path.join(ROOT, "static", "js", "analysis.js"), encoding="utf-8").read()
+        assert "untradable_excluded" in js
+        assert "_showUntradableNote(tabId, d)" in js

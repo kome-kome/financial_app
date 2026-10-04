@@ -46,6 +46,7 @@ from .macro_snapshots import (
     oof_backtest,
     get_producer_scores,
     to_date_str,
+    tradable_results,
     tradable_snapshot_asof,
     _macro_from_cache,
     _spearman,
@@ -630,7 +631,10 @@ class MacroEnsemblePlugin(AnalysisPlugin):
         except Exception:
             pass   # 読取専用DB等でも表示を妨げない（次回実行で再生成）
 
-        base_result.update(n_companies=len(results), results=results,
+        # 表示は今買える社だけ（#806）。永続化の後に掛ける＝保存する μ̂ は全社のまま。
+        shown, untradable = tradable_results(db, results)
+        base_result.update(n_companies=len(results), results=shown,
+                           untradable_excluded=untradable,
                            r_macro_available=r_macro_available, asof=asof)
         return base_result
 

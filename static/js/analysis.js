@@ -1475,6 +1475,7 @@ async function runDynamicPlugin(pluginName, tabId) {
     const card = document.getElementById(`dynresult-${tabId}`);
     const content = document.getElementById(`dynresult-content-${tabId}`);
     content.innerHTML = (RESULT_RENDERERS[pluginName] || _renderGenericResult)(d);
+    _showUntradableNote(tabId, d);
     card.classList.remove('hidden');
     // 業種別OLS が完了したらバリュエーション分析を解放し、結果に導線を出す
     if (pluginName === 'sector_ols') {
@@ -1493,6 +1494,35 @@ async function runDynamicPlugin(pluginName, tabId) {
     if (stopProgress) stopProgress();
     if (btn) { btn.disabled = false; btn.innerHTML = origHTML; }
   }
+}
+
+// M 系が結果から外した「今買えない社」（上場廃止・価格停止）を1行で出す（#806）。
+// 黙って消すと「予測できる社が減った」と区別がつかない。置き場は結果本体（dynresult-content-*）の
+// 外＝直前: M-1/M-2/M-3 は λ・リスク軸の変更で本体の innerHTML を描き直すので、中に置くと消える。
+function _showUntradableNote(tabId, d) {
+  const content = document.getElementById(`dynresult-content-${tabId}`);
+  if (!content) return;
+  let note = document.getElementById(`dynresult-note-${tabId}`);
+  if (!note) {
+    note = document.createElement('div');
+    note.id = `dynresult-note-${tabId}`;
+    note.className = 'info-box hidden';
+    note.style.marginBottom = '12px';
+    content.before(note);
+  }
+  const ex = d && d.untradable_excluded;
+  const n = ex ? (ex.delisted || 0) + (ex.stale || 0) : 0;
+  if (!ex || (!n && !ex.fallback)) { note.classList.add('hidden'); note.textContent = ''; return; }
+  if (ex.fallback) {
+    note.style.borderLeftColor = cssVar('--status-warn');
+    note.textContent = `今買える社が1社も残らないため、上場廃止・価格停止の社（${n} 社）も含めて全社を表示しています。`
+      + '価格収集が止まっていないか確認してください。';
+  } else {
+    note.style.borderLeftColor = '';
+    note.textContent = `今買えない ${n} 社（上場廃止 ${ex.delisted || 0} 社・価格停止 ${ex.stale || 0} 社）を結果から外しました。`
+      + '株価が止まった日の予測は、今の社と順位を比べられないためです（予測値の保存と他の画面には影響しません）。';
+  }
+  note.classList.remove('hidden');
 }
 
 // heavy プラグインの進捗 SSE を開き、閉じるための関数を返す（Issue #545）。

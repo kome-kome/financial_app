@@ -1412,6 +1412,25 @@ def non_tradable_codes(db) -> set:
     return {ec for (ec,) in db.query(Company.edinet_code).filter(not_(and_(*conds))).all() if ec}
 
 
+def non_tradable_breakdown(db) -> dict:
+    """`non_tradable_codes` を理由別に分ける（#806）。`{"delisted": set, "stale": set}`。
+
+    分析タブが「何社をなぜ外したか」を1行で出すために使う。**どちらに入るかを決めるのは
+    `non_tradable_codes` だけ**で、ここは理由の札を付けるだけ（判定を書き写さない）。
+    和は常に `non_tradable_codes` と一致する。
+
+    廃止社のほとんどは価格も止まっているので、上場廃止（`is_active=False`）を優先し、残り
+    （`is_active` が立ったまま価格が止まった＝廃止の追随待ち・#605）を価格停止とする。
+    両方に数えると内訳の和が除外数と合わない。除外対象が無ければ追加の問い合わせをしない。
+    """
+    codes = non_tradable_codes(db)
+    if not codes:
+        return {"delisted": set(), "stale": set()}
+    delisted = {ec for (ec,) in db.query(Company.edinet_code)
+                                  .filter(Company.is_active.is_(False)).all() if ec} & codes
+    return {"delisted": delisted, "stale": codes - delisted}
+
+
 # ── 5g. ハイパーパラメータ自動探索の結果永続化（Issue #264）─────────────────────
 # hyperparameter_search.py（ローカル専用CLI）が walk-forward OOF rank-IC 等を目的関数として
 # 探索した best params を保存する。plugin_name 単位で最新1件のみ保持（履歴不要）。

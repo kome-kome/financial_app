@@ -487,7 +487,8 @@ def tradable_snapshot_asof(db, pairs) -> dict:
     """producer の代表 as-of を「今買える社」だけで作る（#780）。
 
     producer は廃止・価格停止の社にも各社の最終週次バー時点の「現在の」μ̂ を付けて保存する
-    （読み手の推奨・売却はそれぞれ tradable な母集団へ絞るので、μ̂ の行そのものは無害）。
+    （読み手の推奨・売却はそれぞれ tradable な母集団へ絞り、分析タブの結果表は
+    `tradable_results` で絞るので、μ̂ の行そのものは無害・#806）。
     しかし as-of は保存時に全行から作るため、M-6 で `n_stale=113` の大半がもう売買されて
     いない社だった＝朝の鮮度カードと売却画面の as-of 行が鮮度の問題を表していなかった。
     社ごとのスナップ日は保存していないので、絞れるのはここ（保存時）だけ。
@@ -510,6 +511,43 @@ def tradable_snapshot_asof(db, pairs) -> dict:
                        "全社で代表させる（価格収集の停止を疑う）", len(pairs))
         kept = [d for _, d in pairs]
     return representative_snapshot_date(kept)
+
+
+def tradable_results(db, items) -> tuple[list, dict]:
+    """分析タブが返す `results` を「今買える社」だけへ絞る（#806）。`(kept, excluded)` を返す。
+
+    M 系の「現在」の μ̂ は社ごとに**その社の最終週次バー**で作るので、株価が止まった社は止まった
+    日付のまま並ぶ（`build_snapshots` の `is_current`）。線形の M-6 ではその日付のマクロ値が全社共通の
+    定数として μ̂ を押し上げ、上位30のうち23社が廃止社だった。OOF rank-IC が検証したのは同じ月の中の
+    順位なので、日付の違う社を混ぜた表は検証の外にある＝除外は表示を検証された使い方へ戻す修正。
+
+    **永続化の後に掛ける**: 保存する μ̂（`*_scores`）は全社のまま（読み手が各自の母集団で絞る・#780）。
+
+    `excluded = {"delisted": 件数, "stale": 件数, "fallback": bool}`（応答の `untradable_excluded`）。
+    画面はこれを1行で出す（黙って消さない）。判定は `database.non_tradable_breakdown`
+    （＝ `non_tradable_codes` の内訳）で、書き写さない。並び順は保つ。
+
+    **全社が除かれたとき**は `tradable_snapshot_asof` と同じく全社を返して警告する
+    （空の表は「予測できる社が無い」に見えるが、本当の状態は価格収集の停止）。
+    """
+    from database import non_tradable_breakdown
+
+    items = list(items)
+    why = non_tradable_breakdown(db)
+    delisted, stale = why["delisted"], why["stale"]
+    kept = [it for it in items
+            if it.get("edinet_code") not in delisted and it.get("edinet_code") not in stale]
+    excluded = {
+        "delisted": sum(1 for it in items if it.get("edinet_code") in delisted),
+        "stale":    sum(1 for it in items if it.get("edinet_code") in stale),
+        "fallback": False,
+    }
+    if items and not kept:
+        logger.warning("分析結果: 買える社が1社も残らない（%d社すべて廃止・価格停止）。"
+                       "全社を返す（価格収集の停止を疑う）", len(items))
+        kept = items
+        excluded["fallback"] = True
+    return kept, excluded
 
 
 def month_end_indices(dates: list) -> list[int]:

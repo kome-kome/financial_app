@@ -303,3 +303,27 @@ class TestProducer:
             with tuning_objective_only():
                 _run(_params(use_macro=False))
         assert m.call_count == 0
+
+
+class TestUntradableHidden:
+    """廃止・価格停止の社は results から外れ、保存する μ̂ には残る（#806）。
+
+    M-6 では株価が止まった日のマクロ値で μ̂ が押し上がり、上位30のうち23社が廃止社だった。
+    """
+
+    def test_hidden_from_results_but_persisted(self):
+        db, prices_by_co, fin_by_co, companies = _M2Smoke()._make_db()
+        persisted: list[dict] = []
+        with patch("plugins.macro_enet.load_data", return_value=(prices_by_co, fin_by_co, companies)), \
+             patch("plugins.macro_enet.preload_macro", return_value={}), \
+             patch("plugins.macro_enet.get_producer_scores", return_value={}), \
+             patch("database.non_tradable_breakdown",
+                   return_value={"delisted": {"E00001"}, "stale": {"E00002"}}), \
+             patch("database.replace_macro_enet_scores",
+                   side_effect=lambda db, rows, *a, **k: persisted.extend(rows)):
+            result = plugin.execute(_params(use_macro=False), db)
+
+        assert {it["edinet_code"] for it in result["results"]} == {"E00000", "E00003"}
+        assert {r["edinet_code"] for r in persisted} == set(companies)
+        assert result["untradable_excluded"] == {"delisted": 1, "stale": 1, "fallback": False}
+        assert result["n_companies"] == len(companies)

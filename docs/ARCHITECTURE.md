@@ -230,6 +230,18 @@ graph TD
 >     スナップ日は保存しないので絞れるのは保存時だけ。除く社は `database.non_tradable_codes`
 >     （`tradable_filters` の否定）。全社が落ちたら全社で代表させる（「未蓄積」ではなく古さを見せる）。
 >   - `macro_beta_loadings`（M-1 の学習データ）には掛けない（階層ベイズのプーリングは過去の社を要する・#315）。
+> - **分析タブの結果表も同じ判定を通す（Issue #806）**: #605・#780 は推奨系と計算の母集団を揃えたが、
+>   **M 系の `execute` が返す `results` そのもの**が読み手であることは扱われていなかった。M 系の「現在」の
+>   μ̂ は社ごとに最終週次バーで作るので、株価が止まった社は止まった日付のまま並ぶ。線形の M-6 では
+>   その日付のマクロ値が全社共通の定数として μ̂ を押し上げ、実測（2026-10-04）で上位10が全部・上位30の
+>   23社が廃止社だった（最終バーの月ごとの M-6 μ̂ 平均は 2025-06 の +0.187 から 2026-10 の −0.225 へ
+>   ほぼ単調に下がる。木の M-2 は外挿しないので段差が出ない）。OOF rank-IC が検証したのは同じ月の中の
+>   順位なので、日付の違う社を混ぜた表は検証の外にある。M-1/M-2/M-3/M-4/M-6 は**永続化の後に**
+>   `macro_snapshots.tradable_results` で表だけを絞り（保存する μ̂ は全社のまま）、内訳
+>   `untradable_excluded`（上場廃止 / 価格停止。`database.non_tradable_breakdown` が `non_tradable_codes`
+>   に理由の札を付ける）を画面へ1行出す（`analysis.js::_showUntradableNote`。結果本体は λ 変更で
+>   描き直されるので注記は本体の外に置く）。M-3 は絞ってから `top_n` を取り、α/β 経路も表示する社に付ける。
+>   呼び出しは `tests/test_tradable_universe.py::TestResultsUseTradableResults` が AST で縛る。
 >
 > **`nightly_model_diagnostics`（#726・[ADR-0061](adr/0061-nightly-keeps-the-diagnostics-it-already-computes.md)）**: 夜間の producer が毎晩計算して捨てていた診断値（`sector_ols` の業種別 ridge α・R²・VIF 警告、`macro_enet` の CV が選んだ α / l1_ratio と α パスの端・OOF 成績・係数）を run_id × model で1行ずつ**追記**する。書き手は `nightly_scores.py` だけで、μ̂ / gap_ratio の検証が済んだ後に書き、直接クエリで確かめる（書けなければ `<model>:diagnostics` で非ゼロ終了）。入れるのは `DIAG_EXTRACTORS` の allowlist だけ（社別の行・社名は入れない）。**本番のスコアも起票もこれを読まない**——読み手は `python -m scripts.nightly_diag_report` だけ。
 >

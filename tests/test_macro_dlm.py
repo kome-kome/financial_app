@@ -796,6 +796,43 @@ class TestProducer:
 
         assert len(persisted) == n_co, f"全 {n_co} 銘柄を保存すべきが {len(persisted)} 件（top_n=2 でも全件）"
 
+    def test_untradable_rows_are_hidden_but_persisted(self):
+        """廃止・価格停止の社は results から外れ、保存する μ̂ には残る（#806）。
+
+        経路（信用区間バンド）は絞った後の top_n に付く＝表示する社が経路を持たないまま
+        top_n の枠を買えない社に取られることがない。
+        """
+        dates = _weekly_dates(90)
+        n_co = 6
+        prices_by_co, companies = _make_prices_companies(n_co, dates)
+        macro_levels = _make_macro_levels(dates)
+        params = {k: v["default"] for k, v in plugin.params_schema().items() if "default" in v}
+        from plugins.utils import coerce_params
+        params = coerce_params(plugin.params_schema(), params)
+        params.update({"min_weeks": 40, "burn_in_weeks": 5, "top_n": 3, "price_features": []})
+        codes = sorted(companies)
+        gone = {"delisted": {codes[0]}, "stale": {codes[1]}}
+
+        persisted: list[dict] = []
+
+        def fake_replace(db, rows, snapshot_date=None, snapshot_date_min=None, n_stale=None):
+            persisted.extend(rows)
+
+        db = MagicMock()
+        with patch("plugins.macro_dlm.load_prices", return_value=(prices_by_co, companies)), \
+             patch("plugins.macro_dlm.load_macro_levels", return_value=macro_levels), \
+             patch("database.replace_macro_dlm_scores", side_effect=fake_replace), \
+             patch("database.non_tradable_breakdown", return_value=gone):
+            result = plugin.execute(params, db)
+
+        shown = [r["edinet_code"] for r in result["results"]]
+        assert len(shown) == 3
+        assert not set(shown) & {codes[0], codes[1]}
+        assert all("path" in r and "_path_src" not in r for r in result["results"])
+        assert {r["edinet_code"] for r in persisted} == set(codes)
+        assert result["untradable_excluded"] == {"delisted": 1, "stale": 1, "fallback": False}
+        assert result["n_companies"] == n_co
+
     def test_sell_ranking_mu_source_schema_has_macro_dlm(self):
         """sell_ranking の mu_source に macro_dlm が含まれる。"""
         from plugins.sell_ranking import SellRankingPlugin

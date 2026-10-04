@@ -187,6 +187,7 @@ from .macro_snapshots import (  # noqa: E402
     PRICE_FEATURE_OPTIONS,
     DEFAULT_PRICE_FEATURES,
     build_price_features as _build_price_features,
+    tradable_results,
     tradable_snapshot_asof,
     _PX_RVOL_WINDOW,
     _PX_VOLZ_WINDOW,
@@ -815,8 +816,12 @@ class MacroDlmPlugin(AnalysisPlugin):
         # 母集団は今買える社だけ（廃止・価格停止の社の μ̂ は保存するが as-of には数えない・#780）。
         _asof = tradable_snapshot_asof(db, ((r["edinet_code"], r.get("snap_date")) for r in rows))
 
+        # 表示は今買える社だけ（#806）。経路は表示する社にだけ要るので、絞ってから top_n を取る。
+        # 永続化は下で全 `rows` から書く＝保存する μ̂ は全社のまま。
+        shown, untradable = tradable_results(db, rows)
+
         # top_n のみ α/β 経路（信用区間バンド）を構築して付与
-        for r in rows[:top_n]:
+        for r in shown[:top_n]:
             m_path, sd_path, used_dates, b0 = r.pop("_path_src")
             idx = _downsample_idx(len(used_dates) - b0, _MAX_PATH_POINTS)
             sel = [b0 + i for i in idx]
@@ -843,8 +848,8 @@ class MacroDlmPlugin(AnalysisPlugin):
                 },
             }
             r["path"] = path
-        # 経路を付けなかった残りは _path_src を破棄
-        for r in rows[top_n:]:
+        # 経路を付けなかった残り（表示しない社を含む）は _path_src を破棄
+        for r in rows:
             r.pop("_path_src", None)
 
         diagnostics = {
@@ -894,10 +899,11 @@ class MacroDlmPlugin(AnalysisPlugin):
             "n_companies": n_companies,
             "diagnostics": diagnostics,
             "oof_backtest": oof_bt,
-            "results": rows[:top_n],
+            "results": shown[:top_n],
+            "untradable_excluded": untradable,
             # #273: r_macro は自前計算だが分散不足等で全社 None になり得る（β推論と別要因）。
             # クライアントはこのフラグでリスク-リターン散布図の空表示に理由メッセージを出す。
-            "r_macro_available": any(r.get("r_macro") is not None for r in rows[:top_n]),
+            "r_macro_available": any(r.get("r_macro") is not None for r in shown[:top_n]),
         }
 
 
