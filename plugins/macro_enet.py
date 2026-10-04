@@ -159,6 +159,43 @@ class MacroEnetPlugin(AnalysisPlugin):
                 ],
                 "default": "auto",
             },
+            # ── ここから下は表示だけのパラメータ（サーバーは受け取って返すだけ・M-2 と同じ）──
+            # 画面は全社の μ̂ とリスク軸を持ち、λ・横軸・R3 ゲート・件数の変更を再実行なしで
+            # 描き直す（#807）。
+            "lambda_risk": {
+                "type": "slider",
+                "dtype": "float",
+                "label": "リスク回避度 λ",
+                "description": (
+                    "U = μ − λ × R で表を並べ替えます。既定 0＝μ̂ の順（OOF で検証済みの並び）。"
+                    "λ>0 の並びは成績を測っていません（#808）。M-6 の μ̂ は銘柄間のばらつきが"
+                    "リスク軸より小さいため、λ を上げると表はほぼ「低リスク銘柄の並び」になります。"
+                ),
+                "default": 0.0,
+                "min": 0.0,
+                "max": 5.0,
+                "step": 0.1,
+            },
+            "risk_axis": {
+                "type": "select",
+                "label": "横軸リスク",
+                "description": "R2=実現ボラ（既定）/ R_macro=マクロ起因リスク（macro_beta の蓄積が必要）。",
+                "options": [
+                    {"value": "r2",      "label": "R2 実現ボラティリティ（既定）"},
+                    {"value": "r_macro", "label": "R_macro マクロ起因リスク（β推論要）"},
+                ],
+                "default": "r2",
+            },
+            "r3_gate": {
+                "type": "slider",
+                "dtype": "float",
+                "label": "R3 信頼度ゲート（足切り）",
+                "description": "CV-RMSE がこの値を超える銘柄を表と図から除外（0=ゲートなし）。",
+                "default": 0.0,
+                "min": 0.0,
+                "max": 0.5,
+                "step": 0.01,
+            },
             "top_n": {
                 "type": "number",
                 "dtype": "int",
@@ -296,6 +333,9 @@ class MacroEnetPlugin(AnalysisPlugin):
                 "cv_diagnostics":    cv_diag,
                 "n_train_samples":   total_samples,
                 "n_companies":       0,
+                "lambda_risk":       params["lambda_risk"],
+                "risk_axis":         params["risk_axis"],
+                "r3_gate":           params["r3_gate"],
                 "top_n":             top_n,
                 "results":           [],
                 "model_type":        "elasticnet",
@@ -307,10 +347,17 @@ class MacroEnetPlugin(AnalysisPlugin):
         all_samples = [s for ym_s in samples_by_ym.values() for s in ym_s]
         codes_ordered = list(current_snaps.keys())
         current_rows = [current_snaps[c][0] for c in codes_ordered]
-        coefs, mu_preds, final_meta = self._fit_final_and_score(
-            all_samples, current_rows, l1_ratios)
+        coefs, mu_preds, final_meta, breakdown = self._fit_final_and_score(
+            all_samples, current_rows, l1_ratios, return_breakdown=True)
         feature_coefs = {name: round(float(c), 6)
                          for name, c in zip(model_feat_names, coefs)}
+        # 内訳の列（#807）: マクロ列は同じ日付なら全社同一＝順位を動かさないので1行に合算する。
+        # 係数 0 の列は省く（L1 で落ちた列を 0 の棒として並べない・応答を軽くする）。
+        macro_set = set(macro_names)
+        macro_idx = [i for i, n in enumerate(model_feat_names) if n in macro_set]
+        own_idx = [i for i, n in enumerate(model_feat_names)
+                   if n not in macro_set and coefs[i] != 0.0]
+        contrib_mat = breakdown["contrib"]
 
         # ── リスク軸（M-2 と同一ヘルパーを共有）────────────────────────────
         m1_inst = _M1()
@@ -340,6 +387,10 @@ class MacroEnetPlugin(AnalysisPlugin):
                 "r3":           round(r3, 6) if r3 is not None else None,
                 "r_macro":      (round(float(prod["r_macro"]), 6)
                                  if (prod and prod.get("r_macro") is not None) else None),
+                # 予測の内訳（基準は応答の `breakdown_base`）。合計 = mu_raw（丸め誤差の範囲）
+                "contrib":       {model_feat_names[i]: round(float(contrib_mat[j, i]), 6)
+                                  for i in own_idx},
+                "contrib_macro": round(float(contrib_mat[j, macro_idx].sum()), 6) if macro_idx else 0.0,
             })
         raw_items.sort(key=lambda x: x.get("mu_raw") or -1e18, reverse=True)
         r_macro_available = any(it["r_macro"] is not None for it in raw_items)
@@ -354,6 +405,14 @@ class MacroEnetPlugin(AnalysisPlugin):
         # ── 表示は今買える社だけ（#806）。永続化の後に掛ける＝保存する μ̂ は全社のまま ──
         shown, untradable = tradable_results(db, raw_items)
 
+        # ── 相対 μ̂（#807）: 今買える社の μ̂ 中央値との差。M-6 は順位だけが OOF で検証済みで
+        # 水準は検証の外（今買える社の平均 −0.225・M-2 は +0.040）。全社を同じ量だけ平行移動
+        # するので、順位・フロンティア・U=μ−λR の並びは μ̂ と同じで、変わるのは図の目盛りだけ。
+        mu_rel_center = (round(float(statistics.median(it["mu_raw"] for it in shown)), 6)
+                         if shown else None)
+        for it in shown:
+            it["mu_rel"] = round(it["mu_raw"] - mu_rel_center, 6)
+
         return {
             "asof":              _asof,
             "cv_metrics":        {"enet": _cv_summary(cv_folds)},
@@ -364,10 +423,16 @@ class MacroEnetPlugin(AnalysisPlugin):
             "final_model":       final_meta,
             "n_train_samples":   total_samples,
             "n_companies":       len(raw_items),
+            # 表示だけのパラメータ（計算には使わない・画面が全社から描き直す・M-2 と同じ）
+            "lambda_risk":       params["lambda_risk"],
+            "risk_axis":         params["risk_axis"],
+            "r3_gate":           params["r3_gate"],
             "top_n":             top_n,
-            # 全社ではなく上位 top_n のみ返す（汎用レンダラが数千行の DOM を吐かないように）。
-            "results":           shown[:top_n],
+            # 今買える社を全件返す（表の件数・λ・横軸はクライアントが切る＝M-2 と同じ・#807）。
+            "results":           shown,
             "untradable_excluded": untradable,
+            "mu_rel_center":     mu_rel_center,
+            "breakdown_base":    round(float(breakdown["base"]), 6),
             "model_type":        "elasticnet",
             "oof_backtest":      oof_bt,
             "r_macro_available": r_macro_available,
@@ -394,13 +459,19 @@ class MacroEnetPlugin(AnalysisPlugin):
             pass
 
     @staticmethod
-    def _fit_final_and_score(all_samples: list, current_rows: list, l1_ratios: tuple) -> tuple:
+    def _fit_final_and_score(all_samples: list, current_rows: list, l1_ratios: tuple,
+                             return_breakdown: bool = False) -> tuple:
         """全学習データで ElasticNet を再学習し、現在断面 μ̂ と係数・メタを返す。
 
         CV の fit_predict（`make_elasticnet_fit_predict`）と同じ前処理・同じ探索設定を使う。
         現在断面にはラベルが無いため `fit_predict` をそのまま使い回せない（2 番目の返り値が
         テストラベルである契約のため）ので、同じ手順を「学習＝全サンプル／テスト＝現在断面」
         として明示的に組み立てる。
+
+        `return_breakdown=True` のときだけ4つ目に予測の内訳 `{"base", "contrib"}` を返す（#807）。
+        μ̂ = (Σ coef_i·x_i + intercept)·y_sd + y_mu なので、寄与_i = coef_i·x_i·y_sd・
+        基準 = intercept·y_sd + y_mu と置けば `base + contrib[j].sum() == mu[j]`（近似なし）。
+        `contrib` は (現在断面の社数 × 特徴量数) の配列。M-4（`macro_ensemble`）は3つ組で呼ぶ。
         """
         from sklearn.linear_model import ElasticNetCV
         from sklearn.model_selection import TimeSeriesSplit
@@ -421,7 +492,8 @@ class MacroEnetPlugin(AnalysisPlugin):
             random_state=42, selection="cyclic",
         )
         model.fit(np.asarray(X_tr, dtype=float)[:, 1:], np.asarray(y_z, dtype=float))
-        mu = model.predict(np.asarray(X_te, dtype=float)[:, 1:]) * y_sd + y_mu
+        X_cur = np.asarray(X_te, dtype=float)[:, 1:]
+        mu = model.predict(X_cur) * y_sd + y_mu
         path_min, path_max = alpha_path_bounds(model, l1_ratios)
         meta = {
             "alpha":     round(float(model.alpha_), 6),
@@ -436,6 +508,12 @@ class MacroEnetPlugin(AnalysisPlugin):
             "alpha_at_path_max": math.isclose(model.alpha_, path_max, rel_tol=1e-9),
             "l1_ratio_grid": [float(r) for r in l1_ratios],
         }
+        if return_breakdown:
+            breakdown = {
+                "base":    float(model.intercept_) * y_sd + y_mu,
+                "contrib": X_cur * (np.asarray(model.coef_, dtype=float) * y_sd),
+            }
+            return model.coef_.tolist(), mu.tolist(), meta, breakdown
         return model.coef_.tolist(), mu.tolist(), meta
 
 

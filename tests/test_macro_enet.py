@@ -8,7 +8,8 @@ ElasticNet 線形モデル。
   2. coerce : l1_ratio の membership 検証・macro_pca_components の bounds 検証
   3. fold   : M-2 と同一の walk-forward 設定（min_train_months=6 / step=3 / embargo=12）で回す
   3.5 config: 探索設定（l1_ratios / n_alphas / cv_splits / max_iter）が候補実装の単一ソース（#452）
-  4. smoke  : execute の出力契約（model_type=elasticnet・係数と特徴量名の対応・results は top_n 以内）
+  4. smoke  : execute の出力契約（model_type=elasticnet・係数と特徴量名の対応・results は今買える社の全件）
+  4.5 view  : 散布図の入力（#807）＝表示だけのパラメータ・相対 μ̂・予測の内訳（合計＝μ̂）
   5. tuning : tuning_objective_only で OOF 算出後に早期 return する（model_comparison の高速化）
   6. compare: model_comparison.COMPARISON_MODELS に M-6 として登録されている
 
@@ -16,8 +17,10 @@ ElasticNet 線形モデル。
 **本プラグインには載せない**（探索枠 `model_candidates.wrap_macro_pca` に残す）。その契約も
 `test_no_pca_knob_promoted` で固定する。
 """
+import statistics
 from unittest.mock import MagicMock, patch
 
+import numpy as np
 import pytest
 
 from plugins.macro_enet import MacroEnetPlugin
@@ -48,8 +51,8 @@ def _params(**overrides):
     return coerce_params(plugin.params_schema(), base)
 
 
-def _run(params, **patches):
-    db, prices_by_co, fin_by_co, companies = _M2Smoke()._make_db()
+def _run(params, n_companies=4, **patches):
+    db, prices_by_co, fin_by_co, companies = _M2Smoke()._make_db(n_companies=n_companies)
     # as-of の母集団判定（#780）もここで素通しにする。autouse fixture はこのモジュールの
     # テストにしか効かないが、`_run` は tests/test_nightly_scores.py からも借りられる。
     with patch("plugins.macro_enet.load_data", return_value=(prices_by_co, fin_by_co, companies)), \
@@ -206,9 +209,10 @@ class TestExecuteSmoke:
         assert isinstance(meta["alpha_at_path_min"], bool)
         assert isinstance(meta["alpha_at_path_max"], bool)
 
-    def test_results_capped_at_top_n_and_sorted(self):
-        res = _run(_params(use_macro=False, top_n=5))
-        assert len(res["results"]) <= 5
+    def test_results_are_all_tradable_and_sorted(self):
+        """今買える社を全件返す（top_n で切らない＝表の件数・λ・横軸は画面が切る・#807）。"""
+        res = _run(_params(use_macro=False, top_n=5), n_companies=8)
+        assert len(res["results"]) == res["n_companies"] == 8
         mus = [r["mu_raw"] for r in res["results"]]
         assert mus == sorted(mus, reverse=True)
 
@@ -221,6 +225,133 @@ class TestExecuteSmoke:
     def test_oof_backtest_present(self):
         oof = _run(_params(use_macro=False))["oof_backtest"]
         assert "rank_ic" in oof and "n_periods" in oof
+
+
+# ── 4.5 散布図の入力（#807）────────────────────────────────────────────────────
+
+class TestViewParams:
+    """λ・横軸・R3 ゲートは表示だけのパラメータ（サーバーは受け取って返すだけ・M-2 と同じ）。"""
+
+    def test_defaults_keep_mu_order_and_r2_axis(self):
+        """既定は λ=0（表は μ̂ の順＝OOF で検証済みの並び）・横軸 R2（macro_beta に依存しない）。"""
+        p = coerce_params(plugin.params_schema(), {})
+        assert p["lambda_risk"] == 0.0
+        assert p["risk_axis"] == "r2"
+        assert p["r3_gate"] == 0.0
+
+    def test_risk_axis_membership_enforced(self):
+        opts = {o["value"] for o in plugin.params_schema()["risk_axis"]["options"]}
+        assert opts == {"r2", "r_macro"}
+        with pytest.raises(ValueError):
+            coerce_params(plugin.params_schema(), {"risk_axis": "r1"})
+
+    def test_view_params_echoed_and_unused_by_model(self):
+        """値は返るだけで μ̂ を変えない（変えると画面の再計算と食い違う）。"""
+        a = _run(_params(use_macro=False))
+        b = _run(_params(use_macro=False, lambda_risk=2.5, risk_axis="r_macro", r3_gate=0.2))
+        assert (b["lambda_risk"], b["risk_axis"], b["r3_gate"]) == (2.5, "r_macro", 0.2)
+        assert [r["mu_raw"] for r in a["results"]] == [r["mu_raw"] for r in b["results"]]
+
+
+class TestRelativeMu:
+    """相対 μ̂ = μ̂ − 今買える社の μ̂ 中央値（CONTEXT.md「相対 μ̂」）。"""
+
+    def test_is_a_uniform_shift_centered_at_median(self):
+        res = _run(_params(use_macro=False), n_companies=8)
+        rows = res["results"]
+        shifts = {round(r["mu_raw"] - r["mu_rel"], 6) for r in rows}
+        # 全社に同じ量＝順位・パレート集合・U=μ−λR の並びは μ̂ と同じ（変わるのは目盛りだけ）
+        assert len(shifts) == 1
+        assert shifts.pop() == pytest.approx(res["mu_rel_center"], abs=1e-6)
+        assert res["mu_rel_center"] == pytest.approx(
+            statistics.median(r["mu_raw"] for r in rows), abs=1e-6)
+        assert statistics.median(r["mu_rel"] for r in rows) == pytest.approx(0.0, abs=1e-6)
+
+    def test_center_uses_tradable_companies_only(self):
+        """中央値は表示する（今買える）社だけで取る＝廃止社の μ̂ に引っ張られない（#806）。"""
+        db, prices_by_co, fin_by_co, companies = _M2Smoke()._make_db(n_companies=6)
+        with patch("plugins.macro_enet.load_data", return_value=(prices_by_co, fin_by_co, companies)), \
+             patch("plugins.macro_enet.preload_macro", return_value={}), \
+             patch("plugins.macro_enet.get_producer_scores", return_value={}), \
+             patch("database.non_tradable_breakdown",
+                   return_value={"delisted": {"E00000", "E00001"}, "stale": set()}):
+            res = plugin.execute(_params(use_macro=False), db)
+        shown = res["results"]
+        assert {r["edinet_code"] for r in shown} == {"E00002", "E00003", "E00004", "E00005"}
+        assert res["mu_rel_center"] == pytest.approx(
+            statistics.median(r["mu_raw"] for r in shown), abs=1e-6)
+
+
+def _noisy_panel(seed=807, n_train=300, n_cur=40, n_feat=6):
+    """ノイズ入りの線形パネル。完全線形の検体だと全社の μ̂ が揃い、合計の一致が空振りする。"""
+    rng = np.random.default_rng(seed)
+    beta = np.array([0.8, -0.5, 0.3, 0.0, 0.0, 0.2])[:n_feat]
+    X = rng.normal(size=(n_train, n_feat))
+    y = X @ beta + rng.normal(scale=0.5, size=n_train)
+    samples = [(X[i].tolist(), float(y[i])) for i in range(n_train)]
+    current = rng.normal(size=(n_cur, n_feat)).tolist()
+    return samples, current
+
+
+class TestBreakdown:
+    """予測の内訳（#807）: 基準 + Σ寄与 = μ̂ を近似なしで満たす（線形モデルなので）。"""
+
+    def test_sums_to_mu_on_noisy_panel(self):
+        samples, current = _noisy_panel()
+        coefs, mu, _meta, bd = MacroEnetPlugin._fit_final_and_score(
+            samples, current, (0.5,), return_breakdown=True)
+        mu = np.asarray(mu)
+        assert bd["contrib"].shape == (len(current), len(current[0]))
+        np.testing.assert_allclose(bd["base"] + bd["contrib"].sum(axis=1), mu, atol=1e-9)
+        # 空振り防止: 内訳が「全社同じ」「基準だけ」だと一致は自明に通る
+        assert np.std(mu) > 0.1
+        assert sum(1 for c in coefs if c != 0.0) >= 2
+        assert np.abs(bd["contrib"].sum(axis=1)).max() > 0.1
+        assert np.ptp(bd["contrib"], axis=0).max() > 0.1
+
+    def test_default_keeps_three_tuple_for_m4(self):
+        """M-4（macro_ensemble）は3つ組で呼ぶ＝既定の戻り値の形を変えない。"""
+        samples, current = _noisy_panel(n_cur=5)
+        out = MacroEnetPlugin._fit_final_and_score(samples, current, (0.5,))
+        assert len(out) == 3
+
+    def test_rows_sum_to_mu_raw(self):
+        res = _run(_params(use_macro=False), n_companies=8)
+        base = res["breakdown_base"]
+        for r in res["results"]:
+            total = base + r["contrib_macro"] + sum(r["contrib"].values())
+            assert total == pytest.approx(r["mu_raw"], abs=1e-4)
+
+    def test_macro_columns_fold_into_one_row_and_zero_coefs_dropped(self):
+        """マクロ列は「マクロ環境（全社共通）」1行へ合算し、係数 0 の列は内訳に並べない。"""
+        def _fake_fit(all_samples, current_rows, l1_ratios, return_breakdown=False):
+            n, k = len(current_rows), len(current_rows[0])
+            contrib = np.random.default_rng(1).normal(size=(n, k))
+            coefs = [1.0] * k
+            coefs[0] = 0.0                    # L1 で落ちた列
+            contrib[:, 0] = 0.0
+            base = 0.05
+            mu = (base + contrib.sum(axis=1)).tolist()
+            return coefs, mu, {}, {"base": base, "contrib": contrib}
+
+        # 検体はマクロ値を持たない（全欠測）。系列を絞らないと充足率下限で全サンプルが落ちる。
+        two = [o["value"] for o in plugin.params_schema()["macro_features"]["options"]][:2]
+        params = _params(use_macro=True, macro_features=two)
+        with patch.object(MacroEnetPlugin, "_fit_final_and_score", staticmethod(_fake_fit)):
+            res = _run(params)
+        macro = set(params["macro_features"])
+        feats = res["selected_features"]
+        assert macro & set(feats), "マクロ列が特徴量に入っていない（検体が主題を踏んでいない）"
+        for r in res["results"]:
+            assert not (macro & set(r["contrib"]))
+            assert feats[0] not in r["contrib"]
+            assert r["contrib_macro"] != 0.0
+            total = res["breakdown_base"] + r["contrib_macro"] + sum(r["contrib"].values())
+            assert total == pytest.approx(r["mu_raw"], abs=1e-4)
+
+    def test_no_macro_means_zero_macro_row(self):
+        for r in _run(_params(use_macro=False))["results"]:
+            assert r["contrib_macro"] == 0.0
 
 
 # ── 5. tuning 早期 return（model_comparison 高速化）───────────────────────────
@@ -327,3 +458,31 @@ class TestUntradableHidden:
         assert {r["edinet_code"] for r in persisted} == set(companies)
         assert result["untradable_excluded"] == {"delisted": 1, "stale": 1, "fallback": False}
         assert result["n_companies"] == len(companies)
+
+
+class TestScreenWiring:
+    """画面側（static/js/analysis.js）が応答のキーを読んでいること（#807）。
+
+    JS の実行環境は CI に無いので文字列で縛る。キー名がずれても失敗としては現れず、
+    散布図が空になる・内訳が開かないだけになる。
+    """
+
+    @staticmethod
+    def _js() -> str:
+        import os
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        return open(os.path.join(root, "static", "js", "analysis.js"), encoding="utf-8").read()
+
+    def test_renderer_registered(self):
+        assert "'macro_enet':        renderMacroEnet," in self._js()
+
+    def test_reads_view_keys(self):
+        js = self._js()
+        for key in ("mu_rel", "mu_rel_center", "breakdown_base", "contrib_macro", "item.contrib"):
+            assert key in js, key
+
+    def test_rows_use_delegation_not_inline_onclick(self):
+        """インラインの onclick は CSP（script-src-attr）で遮断され、行クリックが黙って効かない。"""
+        js = self._js()
+        assert 'data-click="_rrSelectRow"' in js
+        assert "CustomEvent('mg-shap'" not in js

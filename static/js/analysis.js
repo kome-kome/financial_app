@@ -1572,6 +1572,7 @@ const RESULT_RENDERERS = {
   'sector_ols':        renderSectorOls,
   'macro_risk_return': renderMacroRiskReturn,
   'macro_gbdt':        renderMacroGbdt,
+  'macro_enet':        renderMacroEnet,
   'macro_dlm':         renderMacroDlm,
   // M-4 は退役（hidden=True・ADR-0044）でサイドバーにタブが生えないため、現状このレンダラは
   // 使われない。復帰時に書き直さずに済むよう残す（退役は削除ではない）。
@@ -1829,11 +1830,12 @@ function _mrrLogAxisRange(pts, key) {
 // 散布点の描画座標＋クランプ方向を算出する。線形時は x,y とも軸範囲へクランプ
 //（外れ値は端に境界表示）、対数X時は x は下限フロアのみ（上側は全域が範囲内）。
 // クランプ点は三角マーカーにし、はみ出た方向へ回転させて軸外れ値だと視覚区別する。
-function _mrrGeom(pts, xKey, xRange, yRange, logX) {
+// yKey は縦軸の値（既定 mu_raw。M-6 は相対 μ̂ の mu_rel・#807）。
+function _mrrGeom(pts, xKey, xRange, yRange, logX, yKey = 'mu_raw') {
   const clamp = (val, R) => (R.min == null || val == null) ? val : Math.min(R.max, Math.max(R.min, val));
   let outCount = 0;
   const geo = pts.map(p => {
-    const rx = p[xKey], ry = p.mu_raw;
+    const rx = p[xKey], ry = p[yKey];
     let x, cx = 0;
     if (logX) {
       x = (xRange.min != null && rx < xRange.min) ? ((cx = -1), xRange.min) : rx;
@@ -1859,9 +1861,9 @@ function _mrrGeom(pts, xKey, xRange, yRange, logX) {
 // フロンティア線用の座標: クランプしない実値（クランプすると端で線が垂直に立つ偽形状に
 // なるため）。軸範囲外へ出る区間はデータセットの clip:0 で chartArea 端において切断され、
 // 実際の方向へ「抜けて消える」表現になる。対数X時のみ log(0) 回避の下限フロアを掛ける。
-function _mrrLineXY(p, xKey, xRange, logX) {
+function _mrrLineXY(p, xKey, xRange, logX, yKey = 'mu_raw') {
   const x = (logX && xRange.min != null) ? Math.max(p[xKey], xRange.min) : p[xKey];
-  return { x, y: p.mu_raw };
+  return { x, y: p[yKey] };
 }
 
 // チャート右上に「軸外れ N点」の注記をオーバーレイ表示（0点なら消す）。
@@ -1879,9 +1881,9 @@ function _mrrClipNote(canvas, outCount) {
 }
 
 // 対数X軸トグルの状態と切替 UI。表示のみの切替（効用計算・モデル実行に不関与）で、
-// id は param-* 形式でないためサーバーへ送られない。M-2/M-3 は結果 HTML ごとチェック
-// ボックスを再注入するため、状態をモジュール変数に保持して checked を復元する。
-let _mrrLogX = false, _mgLogX = false, _dlmLogX = false;
+// id は param-* 形式でないためサーバーへ送られない。M-2/M-6/M-3 は結果 HTML ごとチェック
+// ボックスを再注入するため、状態を保持して checked を復元する（M-2/M-6 は共通ビューが持つ）。
+let _mrrLogX = false, _dlmLogX = false;
 function _logToggleHTML(id, checked) {
   return `<div style="display:flex;justify-content:flex-end;margin-bottom:2px">
     <label style="font-size:11px;color:var(--text-secondary);display:inline-flex;align-items:center;gap:5px;cursor:pointer">
@@ -1891,8 +1893,11 @@ function _logToggleHTML(id, checked) {
 document.addEventListener('change', (e) => {
   const id = e.target && e.target.id;
   if (id === 'mrr-log-x')      { _mrrLogX = e.target.checked; if (_mrrData) _mrrPaintChart(_mrrRecompute()); }
-  else if (id === 'mg-log-x')  { _mgLogX  = e.target.checked; if (_mgData)  _mgPaintChart(_mgRecompute()); }
   else if (id === 'dlm-log-x') { _dlmLogX = e.target.checked; if (_dlmData) _dlmPaintBubbleChart(_dlmRecompute()); }
+  else {
+    const view = Object.values(_RR_VIEWS).find(w => id === `${w.cfg.prefix}-log-x`);
+    if (view) { view.logX = e.target.checked; if (view.data) _rrPaintChart(view, _rrRecompute(view)); }
+  }
 });
 
 // 効用 U → 色（スレート→紫の濃淡）。高 U ほど紫が濃い。
@@ -1914,7 +1919,7 @@ function _mrrDColor(d, dMin, dMax, alpha) {
 }
 
 // アウトオブサンプル検証（OOF）: μ̂ が将来リターンを順序付けるか（無リーク・再学習なし・#272）。
-// M-2 の _mgPaintCv 内 oofHtml / M-3 の _dlmOofHTML と同じ描画（同一指標で3モデル横並び比較可能）。
+// M-1・M-2・M-6 が共有し、M-3 の _dlmOofHTML と同じ描画（同一指標でモデル横並び比較可能）。
 function _mrrOofHTML(data) {
   const oof = data.oof_backtest || {};
   const qr  = oof.quantile_returns || [];
@@ -2210,78 +2215,267 @@ function _mrrIsClientParam(id) {
 document.addEventListener('input',  (e) => { if (e.target && e.target.id && _mrrIsClientParam(e.target.id)) _mrrScheduleRepaint(); });
 document.addEventListener('change', (e) => { if (e.target && e.target.id && _mrrIsClientParam(e.target.id)) _mrrScheduleRepaint(); });
 
-// ── M-2 マクロ×財務 勾配ブースティング レンダラ ─────────────────────────────
+// ── リスク-リターン散布図の共通ビュー（M-2・M-6・#807）────────────────────────
+// サーバーは今買える社の全件の μ̂ とリスク軸を返し、λ・横軸・R3 ゲート・件数はここで
+// 再実行なしに描き直す。M-2 の `_mg*` をタブごとの設定（cfg）で動くようにしたもの。
+// M-1（_mrr*）と M-3（_dlm*）は未移行（同じ形のコピーが残っている）。
+//   cfg.tabId          プラグイン名＝タブ id（param-<tabId>-* と dynresult-<tabId> を引く）
+//   cfg.prefix         この画面だけの DOM id の接頭辞（<prefix>-cv-wrap / chart-<prefix>-bubble 等）
+//   cfg.yKey / yLabel  縦軸の値と見出し（M-2 は mu_raw。M-6 は相対 μ̂ の mu_rel）
+//   cfg.defaultLambda  フォームにも応答にも λ が無いときの λ
+//   cfg.headerHTML(data) / afterHeader(data)   散布図の上のパネル（CV・OOF・係数）とその後の描画
+//   cfg.tableNote(v, data) / headCells(v) / rowCells(r, i, v)   表
+//   cfg.tooltipLines(p, axisKey)   散布点のツールチップ（銘柄名の次の行から）
+//   cfg.detailHTML(item, data)     行クリックで開くパネルの中身（null なら開かない）
+// U とパレート集合は実際の μ̂（mu_raw）で取る。相対 μ̂ は全社を同じ量だけ平行移動した値
+// なので、縦軸を mu_rel にしても並びと集合は変わらない。
+const _RR_CLIENT_PARAMS = ['lambda_risk', 'risk_axis', 'top_n', 'r3_gate'];
+const _RR_VALID_AXES = ['r2', 'r_macro'];
+const _RR_AXIS_LABELS = { r2: '実現ボラ（R2）', r_macro: 'マクロ起因リスク（R_macro）' };
+const _RR_VIEWS = {};
 
-let _mgData  = null;
-let _mgChart = null;
-let _mgPaintTimer = null;
-
-function renderMacroGbdt(data) {
-  _mgData = data;
-  _updateRiskAxisOption('macro_gbdt', data.r_macro_available !== false);
-  _mgPaintCv(data);
-  const v = _mgRecompute();
-  setTimeout(() => _mgPaintChart(v), 0);
-  return _mgTableHTML(v);
+function _riskReturnView(cfg) {
+  const view = { cfg, data: null, chart: null, timer: null, logX: false };
+  _RR_VIEWS[cfg.tabId] = view;
+  return view;
 }
 
-// CV 比較（XGB vs OLS ベースライン）
-function _mgPaintCv(data) {
+const _rrPct = (x, signed) => x == null ? '-' : `${signed && x > 0 ? '+' : ''}${(x * 100).toFixed(2)}%`;
+
+function _rrRender(view, data) {
+  view.data = data;
+  _updateRiskAxisOption(view.cfg.tabId, data.r_macro_available !== false);
+  _rrInjectHeader(view, data);
+  const v = _rrRecompute(view);
+  setTimeout(() => _rrPaintChart(view, v), 0);
+  return _rrTableHTML(view, v);
+}
+
+// ヘッダーと散布図は結果カードの直前に置く。結果カードの中身は λ 等を動かすたびに描き直す
+// ので、その外に置く（動的タブでも dynresult-<tabId> は静的タブと同じ形で存在する）。
+function _rrInjectHeader(view, data) {
+  const c = view.cfg;
+  const dynResult = document.getElementById(`dynresult-${c.tabId}`);
+  if (!dynResult) return;
+  let wrap = document.getElementById(`${c.prefix}-cv-wrap`);
+  if (!wrap) {
+    wrap = document.createElement('div');
+    wrap.id = `${c.prefix}-cv-wrap`;
+    dynResult.insertAdjacentElement('beforebegin', wrap);
+  }
+  wrap.innerHTML = `${c.headerHTML(data)}
+  ${_logToggleHTML(`${c.prefix}-log-x`, view.logX)}
+  ${makeChartContainer(`chart-${c.prefix}-bubble`, 360)}`;
+  if (c.afterHeader) setTimeout(() => c.afterHeader(data), 0);
+}
+
+function _rrReadParams(view) {
+  const g = id => document.getElementById(`param-${view.cfg.tabId}-${id}`);
+  const d = view.data || {};
+  const lamEl = g('lambda_risk'), axEl = g('risk_axis'), tnEl = g('top_n'), gEl = g('r3_gate');
+  const lambda = (lamEl && lamEl.value !== '') ? parseFloat(lamEl.value) : (d.lambda_risk ?? view.cfg.defaultLambda);
+  const axis = _RR_VALID_AXES.includes(axEl && axEl.value)
+    ? axEl.value
+    : (_RR_VALID_AXES.includes(d.risk_axis) ? d.risk_axis : 'r2');
+  const topN = (tnEl && tnEl.value !== '') ? Math.max(1, Math.round(parseFloat(tnEl.value))) : (d.top_n ?? 30);
+  const r3Gate = (gEl && gEl.value !== '') ? parseFloat(gEl.value) : (d.r3_gate ?? 0.0);
+  return { lambda, axis, topN, r3Gate };
+}
+
+function _rrRecompute(view) {
+  const { lambda, axis, topN, r3Gate } = _rrReadParams(view);
+  const items = (view.data && view.data.results ? view.data.results : [])
+    .filter(r => r[axis] != null && r.mu_raw != null)
+    .filter(r => r3Gate <= 0 || r.r3 == null || r.r3 <= r3Gate)
+    .map(r => ({ ...r, _u: r.mu_raw - lambda * r[axis], _d: lambda * r[axis] - r.mu_raw }));
+  const paretoSet = _mrrParetoSet(items, axis);
+  const antiParetoSet = _mrrAntiParetoSet(items, axis);
+  items.forEach(it => {
+    it._pareto = paretoSet.has(it.edinet_code);
+    it._anti_pareto = antiParetoSet.has(it.edinet_code);
+  });
+  items.sort((a, b) => b._u - a._u);
+  return { axis, lambda, topN, r3Gate, all: items, top: items.slice(0, topN) };
+}
+
+function _rrPaintChart(view, v) {
+  const c = view.cfg;
+  const canvas = document.getElementById(`chart-${c.prefix}-bubble`);
+  if (!canvas || !window.Chart) return;
+  if (view.chart) { view.chart.destroy(); view.chart = null; }
+  const pts = v.all;
+  if (!pts.length) { _toggleChartEmpty(canvas, v.axis); return; }
+  _hideChartEmpty(canvas);
+  const axisKey = v.axis, yKey = c.yKey;
+  const topSet = new Set(v.top.map(p => p.edinet_code));
+  const us = pts.map(p => p._u);
+  const uMin = Math.min(...us), uMax = Math.max(...us);
+  const dMax = Math.max(...pts.filter(q => q._anti_pareto).map(q => q._d));
+  const logRange = view.logX ? _mrrLogAxisRange(pts, axisKey) : {};
+  const useLogX = logRange.min != null;
+  const xRange = useLogX ? logRange : _mrrAxisRange(pts, axisKey);
+  const yRange = _mrrAxisRange(pts, yKey);
+  const G = _mrrGeom(pts, axisKey, xRange, yRange, useLogX, yKey);
+  const bubble = pts.map((p, i) => ({
+    x: G.geo[i].x, y: G.geo[i].y,
+    r: (p._pareto || p._anti_pareto) ? 6 : (topSet.has(p.edinet_code) ? 5 : 3),
+    _p: p, _clip: G.geo[i].clip,
+  }));
+  const bg = pts.map(p =>
+    p._anti_pareto
+      ? _mrrDColor(p._d, 0, dMax, 0.75)
+      : _mrrUColor(p._u, uMin, uMax, topSet.has(p.edinet_code) ? 0.9 : 0.55)
+  );
+  const front = pts.filter(p => p._pareto).map(p => _mrrLineXY(p, axisKey, xRange, useLogX, yKey));
+  const antiFront = pts.filter(p => p._anti_pareto).map(p => _mrrLineXY(p, axisKey, xRange, useLogX, yKey));
+  view.chart = new Chart(canvas, {
+    type: 'bubble',
+    data: {
+      datasets: [
+        { label: '全銘柄', data: bubble, backgroundColor: bg, pointStyle: G.styles, rotation: G.rots, borderColor: pts.map(p => p._pareto?cssVar('--val-up-text'):p._anti_pareto?cssVar('--val-down-text'):topSet.has(p.edinet_code)?'rgba(226,232,240,0.9)':'rgba(148,163,184,0.3)'), borderWidth: pts.map(p=>(p._pareto||p._anti_pareto)?2.5:topSet.has(p.edinet_code)?1.2:0.4) },
+        { label: '効率的フロンティア', data: front.sort((a,b)=>a.x-b.x), type:'line', clip: 0, borderColor:cssVar('--val-up-text'), borderWidth:1.5, pointRadius:0, fill:false, tension:0.3, order:0 },
+        { label: '非効率的フロンティア', data: antiFront.sort((a,b)=>a.x-b.x), type:'line', clip: 0, borderColor:cssVar('--val-down-text'), borderWidth:1.5, pointRadius:0, fill:false, tension:0.3, order:0 },
+      ]
+    },
+    options: {
+      responsive:true, maintainAspectRatio:false,
+      animation:{duration:0},
+      plugins:{
+        legend:{display:false},
+        tooltip:{callbacks:{label:ctx=>{const p=ctx.raw._p;if(!p)return'';return[`${esc(p.company_name||p.edinet_code)} (${esc(p.sec_code||'')})`,...c.tooltipLines(p,axisKey),ctx.raw._clip?'▲ 軸範囲外（チャート端に境界表示）':'',p._pareto?'★ 効率的フロンティア':p._anti_pareto?'▼ 非効率的フロンティア':''].filter(Boolean)}}}
+      },
+      scales:{
+        x:{type:useLogX?'logarithmic':'linear',title:{display:true,text:_RR_AXIS_LABELS[axisKey]||axisKey,color:cssVar('--text-secondary'),font:{size:11}},grid:{color:'rgba(255,255,255,0.05)'},ticks:{color:cssVar('--text-muted')},...(xRange.min!=null?{min:xRange.min,max:xRange.max}:{})},
+        y:{title:{display:true,text:c.yLabel,color:cssVar('--text-secondary'),font:{size:11}},grid:{color:'rgba(255,255,255,0.05)'},ticks:{color:cssVar('--text-muted')},...(yRange.min!=null?{min:yRange.min,max:yRange.max}:{})},
+      }
+    }
+  });
+  _mrrClipNote(canvas, G.outCount);
+}
+
+// 表の共通の列（先頭4列と末尾4列）。間の μ 列だけモデルごとに違う。
+function _rrLeadHead() { return '<th>#</th><th>コード</th><th>銘柄名</th><th>業種</th>'; }
+function _rrTailHead(axis) { return `<th>${axis==='r2'?'R2 ボラ':'R_macro'}</th><th>U=μ−λR</th><th>R3</th><th>F</th>`; }
+function _rrLeadCells(r, i) {
+  return `<td>${i+1}</td>
+      <td>${esc(r.sec_code||'-')}</td>
+      <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(r.company_name||r.edinet_code)}</td>
+      <td>${esc(r.industry||'-')}</td>`;
+}
+function _rrTailCells(r, axis) {
+  const frontier = r._pareto ? '★' : r._anti_pareto ? '▼' : '';
+  return `<td>${r[axis]!=null?r[axis].toFixed(3):'-'}</td>
+      <td>${r._u!=null?r._u.toFixed(3):'-'}</td>
+      <td>${r.r3!=null?r.r3.toFixed(3):'-'}</td>
+      <td style="color:${r._pareto?cssVar('--val-up-text'):r._anti_pareto?cssVar('--val-down-text'):cssVar('--text-muted')}">${frontier}</td>`;
+}
+
+function _rrTableHTML(view, v) {
+  const c = view.cfg;
+  if (!v.top.length) {
+    return `<div class="text-sm" style="padding:20px;text-align:center;color:var(--text-secondary)">${esc(_riskAxisEmptyMessage(v.axis))}</div>`;
+  }
+  // 行クリックは data-click＋委譲（インラインの onclick は CSP の script-src-attr で遮断される・#807）
+  const rows = v.top.map((r, i) =>
+    `<tr style="cursor:pointer" data-click="_rrSelectRow" data-arg="${esc(c.tabId)}" data-arg2="${esc(r.edinet_code)}">${c.rowCells(r, i, v)}</tr>`
+  ).join('');
+  return `${c.tableNote(v, view.data || {})}
+    <div id="${c.prefix}-detail-panel" class="hidden" style="margin-bottom:16px;padding:12px 16px;background:var(--bg-sunken);border-radius:8px;border:1px solid var(--border-muted)"></div>
+    <div style="overflow-x:auto">
+      <table>
+        <thead><tr>${c.headCells(v)}</tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>`;
+}
+
+// 行クリック（_wireDelegate から呼ばれる）。パネルの中身は各モデルの cfg.detailHTML。
+function _rrSelectRow(tabId, edinetCode) {
+  const view = _RR_VIEWS[tabId];
+  if (!view || !view.data) return;
+  const item = (view.data.results || []).find(r => r.edinet_code === edinetCode);
+  const panel = document.getElementById(`${view.cfg.prefix}-detail-panel`);
+  const html = item ? view.cfg.detailHTML(item, view.data) : null;
+  if (!panel || !html) return;
+  panel.innerHTML = html;
+  panel.classList.remove('hidden');
+  panel.scrollIntoView({ block: 'nearest' });
+}
+
+// 符号付きの横棒（ゼロ中心・正右/負左）。entries = [[表示名, 値]]・fmt = 値の表示形式。
+function _rrSignedBarsHTML(entries, fmt) {
+  const maxAbs = Math.max(...entries.map(([, v]) => Math.abs(v))) || 1;
+  return entries.map(([label, v]) => {
+    const w = (Math.abs(v) / maxAbs) * 50;
+    const pos = v >= 0;
+    const bar = pos
+      ? `<div style="position:absolute;left:50%;width:${w}%;height:14px;background:#c084fc;border-radius:0 3px 3px 0"></div>`
+      : `<div style="position:absolute;right:50%;width:${w}%;height:14px;background:var(--status-info);border-radius:3px 0 0 3px"></div>`;
+    return `<div style="display:flex;align-items:center;gap:8px;margin-bottom:3px">
+      <div style="width:160px;flex:none;font-size:11px;color:var(--text-body);text-align:right;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(label)}">${esc(label)}</div>
+      <div style="position:relative;flex:1;height:14px;background:var(--border-subtle);border-radius:3px">
+        <div style="position:absolute;left:50%;top:-2px;bottom:-2px;width:1px;background:var(--text-muted)"></div>${bar}
+      </div>
+      <div style="width:64px;flex:none;font-size:11px;color:${pos?cssVar('--val-up-text'):cssVar('--val-down-text')};text-align:left">${fmt(v)}</div>
+    </div>`;
+  }).join('');
+}
+
+function _rrRepaint(view) {
+  if (!view.data) return;
+  const v = _rrRecompute(view);
+  _rrPaintChart(view, v);
+  const content = document.getElementById(`dynresult-content-${view.cfg.tabId}`);
+  if (content) content.innerHTML = _rrTableHTML(view, v);
+}
+function _rrScheduleRepaint(view) {
+  if (!view.data) return;
+  clearTimeout(view.timer);
+  view.timer = setTimeout(() => _rrRepaint(view), 80);
+}
+// フォームの param-<tabId>-{lambda_risk,risk_axis,top_n,r3_gate} が動いたら、再実行せず描き直す。
+function _rrViewForParam(id) {
+  for (const view of Object.values(_RR_VIEWS)) {
+    const prefix = `param-${view.cfg.tabId}-`;
+    if (id.startsWith(prefix) && _RR_CLIENT_PARAMS.includes(id.slice(prefix.length))) return view;
+  }
+  return null;
+}
+document.addEventListener('input',  (e) => { const w = e.target && e.target.id && _rrViewForParam(e.target.id); if (w) _rrScheduleRepaint(w); });
+document.addEventListener('change', (e) => { const w = e.target && e.target.id && _rrViewForParam(e.target.id); if (w) _rrScheduleRepaint(w); });
+
+// ── M-2 マクロ×財務 勾配ブースティング レンダラ ─────────────────────────────
+
+const _mgView = _riskReturnView({
+  tabId: 'macro_gbdt', prefix: 'mg', yKey: 'mu_raw', defaultLambda: 1.0,
+  yLabel: '期待リターン μ（52週先対数リターン・年率）',
+  headerHTML: _mgHeaderHTML,
+  // SHAP バー（署名付き重要度＝棒長は重要度・左右は学習方向・#371）
+  afterHeader: data => {
+    _mrrPaintCoefBars(data.feature_coefs_signed || data.feature_coefs || {}, 'mg-coef-bars', 'mg-coef-legend');
+    _mgPaintInteractions(data.feature_interactions || []);
+  },
+  tableNote: () => `
+    <div style="font-size:11px;color:var(--text-muted);margin-bottom:4px">※ μ は52週（1年）先の年率対数リターン予測（例: 表示10.00% = 年率+10%）。M-1と同一ターゲットをXGBoostで学習。</div>
+    <div style="font-size:11px;color:var(--text-muted);margin-bottom:8px">行をクリックすると SHAP 寄与を表示します</div>`,
+  headCells: v => `${_rrLeadHead()}<th><span class="gloss" data-tip="期待リターン（M-1と同じ52週=1年先の年率対数リターン、無次元）。0.10は年率+10%を意味する（XGBoostモデルの予測値）。">μ</span></th>${_rrTailHead(v.axis)}`,
+  rowCells: (r, i, v) => `${_rrLeadCells(r, i)}
+      <td class="${r.mu_raw>0?'text-green':''}">${r.mu_raw!=null?(r.mu_raw*100).toFixed(2)+'%':'-'}</td>
+      ${_rrTailCells(r, v.axis)}`,
+  tooltipLines: (p, axisKey) => [`μ=${p.mu_raw!=null?(p.mu_raw*100).toFixed(2)+'%':'-'}  R=${p[axisKey]!=null?p[axisKey].toFixed(3):'-'}  U=${p._u!=null?p._u.toFixed(3):'-'}`],
+  detailHTML: _mgShapHTML,
+});
+
+function renderMacroGbdt(data) {
+  return _rrRender(_mgView, data);
+}
+
+// CV 比較（XGB vs OLS ベースライン）＋ SHAP ＋ OOF
+function _mgHeaderHTML(data) {
   const cv = data.cv_metrics || {};
   const xgb = cv.xgb || {};
   const ols = cv.ols_baseline || {};
-  const el = document.getElementById('dynresult-content-macro_gbdt');
-  if (!el) return;
-
-  // アウトオブサンプル検証（OOF）: μ̂ が将来リターンを順序付けるか（無リーク・再学習なし）
-  const oof = data.oof_backtest || {};
-  const qr  = oof.quantile_returns || [];
-  const ic  = oof.rank_ic || {};
-  const hasOof = qr.length > 0;
-  const oofHtml = `
-  <div style="margin-bottom:16px;padding:12px 16px;background:var(--bg-sunken);border-radius:8px;border:1px solid var(--border-muted)">
-    <div style="font-size:12px;color:var(--accent-text);font-weight:600;margin-bottom:4px">
-      アウトオブサンプル検証（OOF）— μ̂ が将来リターンを順序付けるか（無リーク walk-forward 予測）
-    </div>
-    <div style="font-size:11px;color:var(--text-muted);margin-bottom:10px">
-      既存「バックテスト」(/api/backtest) とは別物。再学習なし・各期で μ̂ を横断${oof.n_quantiles||5}分位し実現52週リターンを集計。
-    </div>
-    ${hasOof ? `
-    <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:12px">
-      <div style="padding:8px;background:var(--bg-sunken);border-radius:6px">
-        <div style="font-size:10px;color:var(--text-muted)">rank-IC（Spearman 平均±std）</div>
-        <div style="font-size:15px;font-weight:700;color:${(ic.mean||0)>0?cssVar('--val-up-text'):cssVar('--val-down-text')}">${ic.mean!=null?ic.mean.toFixed(3):'-'}<span style="font-size:11px;color:var(--text-muted)"> ±${ic.std!=null?ic.std.toFixed(3):'-'}</span></div>
-        <div style="font-size:10px;color:var(--text-muted)">${ic.n||0} fold</div>
-      </div>
-      <div style="padding:8px;background:var(--bg-sunken);border-radius:6px">
-        <div style="font-size:10px;color:var(--text-muted)">ロングショート spread（top−bottom）</div>
-        <div style="font-size:15px;font-weight:700;color:${(oof.long_short_spread||0)>0?cssVar('--val-up-text'):cssVar('--val-down-text')}">${oof.long_short_spread!=null?(oof.long_short_spread*100).toFixed(2)+'%':'-'}</div>
-      </div>
-      <div style="padding:8px;background:var(--bg-sunken);border-radius:6px">
-        <div style="font-size:10px;color:var(--text-muted)">hit-rate（top&gt;bottom の期）</div>
-        <div style="font-size:15px;font-weight:700;color:#c084fc">${oof.hit_rate!=null?(oof.hit_rate*100).toFixed(0)+'%':'-'}</div>
-        <div style="font-size:10px;color:var(--text-muted)">${oof.n_periods_quantile||0} 期</div>
-      </div>
-    </div>
-    <div style="font-size:11px;color:var(--text-secondary);margin-bottom:6px">分位別 平均実現リターン（左=最低 μ̂ → 右=最高 μ̂・52週先・期間平均）</div>
-    <div style="display:flex;align-items:flex-end;gap:6px;height:92px">
-      ${(() => {
-        const mx = Math.max(...qr.map(Math.abs), 1e-9);
-        return qr.map((v, i) => {
-          const h = Math.round(Math.abs(v) / mx * 70) + 2;
-          const col = v >= 0 ? cssVar('--val-up-text') : cssVar('--val-down-text');
-          return `<div style="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:flex-end;height:100%">
-            <div style="font-size:10px;color:${col}">${(v*100).toFixed(1)}%</div>
-            <div style="width:100%;height:${h}px;background:${col};border-radius:3px 3px 0 0"></div>
-            <div style="font-size:10px;color:var(--text-muted);margin-top:2px">Q${i+1}</div>
-          </div>`;
-        }).join('');
-      })()}
-    </div>` : `<div style="font-size:11px;color:var(--text-muted)">OOF サンプルが期内 ${(oof.n_quantiles||5)*2} 銘柄未満のため分位を表示できません（データ蓄積後に再実行）。rank-IC は ${ic.n||0} fold で算出。</div>`}
-  </div>`;
-
-  // CV パネルを先頭に inject（テーブル返却前）
-  const cvHtml = `
+  return `
   <div style="margin-bottom:16px;padding:12px 16px;background:var(--bg-sunken);border-radius:8px;border:1px solid var(--border-muted)">
     <div style="font-size:12px;color:var(--accent-text);font-weight:600;margin-bottom:10px">
       Walk-Forward CV（M-2 XGBoost vs 同一特徴量 OLS ベースライン）
@@ -2321,29 +2515,7 @@ function _mgPaintCv(data) {
       <div id="mg-interact-bars" style="margin-top:4px"></div>
     </div>
   </div>
-  ${oofHtml}
-  ${_logToggleHTML('mg-log-x', _mgLogX)}
-  ${makeChartContainer('chart-mg-bubble', 360)}`;
-  const resultCard = document.getElementById('dynresult-macro_gbdt') || el.closest('.card');
-  // CV パネルをテーブルより上に置くため、result area の直前に挿入
-  const cvWrap = document.getElementById('mg-cv-wrap');
-  if (!cvWrap) {
-    const wrap = document.createElement('div');
-    wrap.id = 'mg-cv-wrap';
-    wrap.innerHTML = cvHtml;
-    const tabContent = document.getElementById('tab-macro_gbdt');
-    if (tabContent) {
-      const dynResult = document.getElementById('dynresult-macro_gbdt');
-      if (dynResult) dynResult.insertAdjacentElement('beforebegin', wrap);
-    }
-  } else {
-    cvWrap.innerHTML = cvHtml;
-  }
-  // SHAP バー（署名付き重要度＝棒長は重要度・左右は学習方向・#371）
-  setTimeout(() => {
-    _mrrPaintCoefBars(data.feature_coefs_signed || data.feature_coefs || {}, 'mg-coef-bars', 'mg-coef-legend');
-    _mgPaintInteractions(data.feature_interactions || []);
-  }, 0);
+  <div style="margin-bottom:16px">${_mrrOofHTML(data)}</div>`;
 }
 
 // SHAP 交互作用の上位ペア（#371）。棒長=交互作用強度・種別色は左特徴量で分類。
@@ -2369,179 +2541,117 @@ function _mgPaintInteractions(pairs) {
   }).join('');
 }
 
-const _MG_VALID_AXES = ['r2', 'r_macro'];
-function _mgReadParams() {
-  const g = id => document.getElementById('param-macro_gbdt-' + id);
-  const d = _mgData || {};
-  const lamEl = g('lambda_risk'), axEl = g('risk_axis'), tnEl = g('top_n'), gEl = g('r3_gate');
-  const lambda = (lamEl && lamEl.value !== '') ? parseFloat(lamEl.value) : (d.lambda_risk ?? 1.0);
-  const axis = _MG_VALID_AXES.includes(axEl && axEl.value)
-    ? axEl.value
-    : (_MG_VALID_AXES.includes(d.risk_axis) ? d.risk_axis : 'r2');
-  const topN = (tnEl && tnEl.value !== '') ? Math.max(1, Math.round(parseFloat(tnEl.value))) : (d.top_n ?? 30);
-  const r3Gate = (gEl && gEl.value !== '') ? parseFloat(gEl.value) : (d.r3_gate ?? 0.0);
-  return { lambda, axis, topN, r3Gate };
-}
-
-function _mgRecompute() {
-  const { lambda, axis, topN, r3Gate } = _mgReadParams();
-  const items = (_mgData && _mgData.results ? _mgData.results : [])
-    .filter(r => r[axis] != null && r.mu_raw != null)
-    .filter(r => r3Gate <= 0 || r.r3 == null || r.r3 <= r3Gate)
-    .map(r => ({ ...r, _u: r.mu_raw - lambda * r[axis], _d: lambda * r[axis] - r.mu_raw }));
-  const paretoSet = _mrrParetoSet(items, axis);
-  const antiParetoSet = _mrrAntiParetoSet(items, axis);
-  items.forEach(it => {
-    it._pareto = paretoSet.has(it.edinet_code);
-    it._anti_pareto = antiParetoSet.has(it.edinet_code);
-  });
-  items.sort((a, b) => b._u - a._u);
-  return { axis, lambda, topN, r3Gate, all: items, top: items.slice(0, topN) };
-}
-
-function _mgPaintChart(v) {
-  const canvas = document.getElementById('chart-mg-bubble');
-  if (!canvas || !window.Chart) return;
-  if (_mgChart) { _mgChart.destroy(); _mgChart = null; }
-  const pts = v.all;
-  if (!pts.length) { _toggleChartEmpty(canvas, v.axis); return; }
-  _hideChartEmpty(canvas);
-  const axisKey = v.axis;
-  const topSet = new Set(v.top.map(p => p.edinet_code));
-  const us = pts.map(p => p._u);
-  const uMin = Math.min(...us), uMax = Math.max(...us);
-  const logRange = _mgLogX ? _mrrLogAxisRange(pts, axisKey) : {};
-  const useLogX = logRange.min != null;
-  const xRange = useLogX ? logRange : _mrrAxisRange(pts, axisKey);
-  const yRange = _mrrAxisRange(pts, 'mu_raw');
-  const G = _mrrGeom(pts, axisKey, xRange, yRange, useLogX);
-  const bubble = pts.map((p, i) => ({
-    x: G.geo[i].x, y: G.geo[i].y,
-    r: (p._pareto || p._anti_pareto) ? 6 : (topSet.has(p.edinet_code) ? 5 : 3),
-    _p: p, _clip: G.geo[i].clip,
-  }));
-  const bg = pts.map(p =>
-    p._anti_pareto
-      ? _mrrDColor(p._d, 0, Math.max(...pts.filter(q=>q._anti_pareto).map(q=>q._d)||[1]), 0.75)
-      : _mrrUColor(p._u, uMin, uMax, topSet.has(p.edinet_code) ? 0.9 : 0.55)
-  );
-  const front = pts.filter(p => p._pareto).map(p => _mrrLineXY(p, axisKey, xRange, useLogX));
-  const antiFront = pts.filter(p => p._anti_pareto).map(p => _mrrLineXY(p, axisKey, xRange, useLogX));
-  const AXIS_LABELS = { r2: '実現ボラ（R2）', r_macro: 'マクロ起因リスク（R_macro）' };
-  _mgChart = new Chart(canvas, {
-    type: 'bubble',
-    data: {
-      datasets: [
-        { label: '全銘柄', data: bubble, backgroundColor: bg, pointStyle: G.styles, rotation: G.rots, borderColor: pts.map(p => p._pareto?cssVar('--val-up-text'):p._anti_pareto?cssVar('--val-down-text'):topSet.has(p.edinet_code)?'rgba(226,232,240,0.9)':'rgba(148,163,184,0.3)'), borderWidth: pts.map(p=>(p._pareto||p._anti_pareto)?2.5:topSet.has(p.edinet_code)?1.2:0.4) },
-        { label: '効率的フロンティア', data: front.sort((a,b)=>a.x-b.x), type:'line', clip: 0, borderColor:cssVar('--val-up-text'), borderWidth:1.5, pointRadius:0, fill:false, tension:0.3, order:0 },
-        { label: '非効率的フロンティア', data: antiFront.sort((a,b)=>a.x-b.x), type:'line', clip: 0, borderColor:cssVar('--val-down-text'), borderWidth:1.5, pointRadius:0, fill:false, tension:0.3, order:0 },
-      ]
-    },
-    options: {
-      responsive:true, maintainAspectRatio:false,
-      animation:{duration:0},
-      plugins:{
-        legend:{display:false},
-        tooltip:{callbacks:{label:ctx=>{const p=ctx.raw._p;if(!p)return'';return[`${esc(p.company_name||p.edinet_code)} (${esc(p.sec_code||'')})`,`μ=${p.mu_raw!=null?(p.mu_raw*100).toFixed(2)+'%':'-'}  R=${p[axisKey]!=null?p[axisKey].toFixed(3):'-'}  U=${p._u!=null?p._u.toFixed(3):'-'}`,ctx.raw._clip?'▲ 軸範囲外（チャート端に境界表示）':'',p._pareto?'★ 効率的フロンティア':p._anti_pareto?'▼ 非効率的フロンティア':''].filter(Boolean)}}}
-      },
-      scales:{
-        x:{type:useLogX?'logarithmic':'linear',title:{display:true,text:AXIS_LABELS[axisKey]||axisKey,color:cssVar('--text-secondary'),font:{size:11}},grid:{color:'rgba(255,255,255,0.05)'},ticks:{color:cssVar('--text-muted')},...(xRange.min!=null?{min:xRange.min,max:xRange.max}:{})},
-        y:{title:{display:true,text:'期待リターン μ（52週先対数リターン・年率）',color:cssVar('--text-secondary'),font:{size:11}},grid:{color:'rgba(255,255,255,0.05)'},ticks:{color:cssVar('--text-muted')},...(yRange.min!=null?{min:yRange.min,max:yRange.max}:{})},
-      }
-    }
-  });
-  _mrrClipNote(canvas, G.outCount);
-}
-
-// per-stock SHAP パネル（クリックで展開）
-function _mgShowShap(editnetCode) {
-  if (!_mgData) return;
-  const item = (_mgData.results||[]).find(r => r.edinet_code === editnetCode);
-  if (!item || !item.shap) return;
-  const shap = item.shap;
-  const entries = Object.entries(shap).sort((a,b) => Math.abs(b[1])-Math.abs(a[1]));
-  const maxAbs = Math.max(...entries.map(([,v]) => Math.abs(v))) || 1;
-  const bars = entries.map(([name, v]) => {
-    const w = (Math.abs(v) / maxAbs) * 50;
-    const pos = v >= 0;
-    const bar = pos
-      ? `<div style="position:absolute;left:50%;width:${w}%;height:14px;background:#c084fc;border-radius:0 3px 3px 0"></div>`
-      : `<div style="position:absolute;right:50%;width:${w}%;height:14px;background:var(--status-info);border-radius:3px 0 0 3px"></div>`;
-    return `<div style="display:flex;align-items:center;gap:8px;margin-bottom:3px">
-      <div style="width:160px;flex:none;font-size:11px;color:var(--text-body);text-align:right;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(MRR_FEAT_LABELS[name]||name)}</div>
-      <div style="position:relative;flex:1;height:14px;background:var(--border-subtle);border-radius:3px">
-        <div style="position:absolute;left:50%;top:-2px;bottom:-2px;width:1px;background:var(--text-muted)"></div>${bar}
-      </div>
-      <div style="width:54px;flex:none;font-size:11px;color:${pos?cssVar('--val-up-text'):cssVar('--val-down-text')};text-align:left">${pos?'+':''}${v.toFixed(3)}</div>
-    </div>`;
-  }).join('');
-  const panel = document.getElementById('mg-shap-panel');
-  if (!panel) return;
-  panel.innerHTML = `
+// per-stock SHAP パネル（行クリックで展開）
+function _mgShapHTML(item) {
+  if (!item.shap) return null;
+  const entries = Object.entries(item.shap)
+    .sort((a, b) => Math.abs(b[1]) - Math.abs(a[1]))
+    .map(([name, v]) => [MRR_FEAT_LABELS[name] || name, v]);
+  return `
     <div style="font-size:12px;color:#c084fc;font-weight:600;margin-bottom:8px">
-      SHAP 寄与内訳: ${esc(item.company_name||editnetCode)}（${esc(item.sec_code||'')}）
+      SHAP 寄与内訳: ${esc(item.company_name||item.edinet_code)}（${esc(item.sec_code||'')}）
     </div>
     <div style="font-size:11px;color:var(--text-muted);margin-bottom:6px">正（紫）= 予測リターン↑方向　負（青）= 予測リターン↓方向</div>
-    ${bars}`;
-  panel.classList.remove('hidden');
+    ${_rrSignedBarsHTML(entries, v => `${v >= 0 ? '+' : ''}${v.toFixed(3)}`)}`;
 }
 
-function _mgTableHTML(v) {
-  const { top, axis } = v;
-  if (!top.length) {
-    return `<div class="text-sm" style="padding:20px;text-align:center;color:var(--text-secondary)">${esc(_riskAxisEmptyMessage(axis))}</div>`;
-  }
-  const frontierLabel = r => r._pareto ? '★' : r._anti_pareto ? '▼' : '';
-  const rows = top.map((r,i) => {
-    const frontier = frontierLabel(r);
-    return `<tr style="cursor:pointer" onclick="document.dispatchEvent(new CustomEvent('mg-shap',{detail:'${esc(r.edinet_code)}'}))">
-      <td>${i+1}</td>
-      <td>${esc(r.sec_code||'-')}</td>
-      <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(r.company_name||r.edinet_code)}</td>
-      <td>${esc(r.industry||'-')}</td>
-      <td class="${r.mu_raw>0?'text-green':''}">${r.mu_raw!=null?(r.mu_raw*100).toFixed(2)+'%':'-'}</td>
-      <td>${r[axis]!=null?r[axis].toFixed(3):'-'}</td>
-      <td>${r._u!=null?r._u.toFixed(3):'-'}</td>
-      <td>${r.r3!=null?r.r3.toFixed(3):'-'}</td>
-      <td style="color:${r._pareto?cssVar('--val-up-text'):r._anti_pareto?cssVar('--val-down-text'):cssVar('--text-muted')}">${frontier}</td>
-    </tr>`;
-  }).join('');
+// ── M-6 マクロ×財務 正則化線形（ElasticNet）レンダラ（#807）──────────────────
+// 縦軸は相対 μ̂（今買える社の μ̂ 中央値との差・CONTEXT.md）。M-6 は順位だけが OOF で検証済みで、
+// μ̂ の水準は検証の外にある（今買える社の平均 −0.225・M-2 は +0.040）。λ の既定は 0
+// （表は μ̂ の順）で、λ>0 の並びの成績は測っていない（#808）。
+
+const _enetView = _riskReturnView({
+  tabId: 'macro_enet', prefix: 'enet', yKey: 'mu_rel', defaultLambda: 0.0,
+  yLabel: '相対 μ̂（今買える社の μ̂ 中央値との差・52週先対数リターン）',
+  headerHTML: _enetHeaderHTML,
+  afterHeader: data => _mrrPaintCoefBars(data.feature_coefs || {}, 'enet-coef-bars', 'enet-coef-legend'),
+  tableNote: (v, data) => `
+    ${v.lambda > 0 ? `<div style="margin-bottom:8px;padding:8px 12px;border-radius:6px;font-size:11px;background:var(--status-warn-bg);color:var(--status-warn-text)">λ=${v.lambda} の並び（U = μ̂ − λR の順）は成績を測っていません（#808）。λ=0 なら μ̂ の順（OOF で検証済み）です。</div>` : ''}
+    <div style="font-size:11px;color:var(--text-muted);margin-bottom:4px">※ μ̂ は52週（1年）先の年率対数リターン予測。相対 μ̂ = μ̂ − 今買える社の μ̂ 中央値（${_rrPct(data.mu_rel_center)}）。水準は未検証・順位は OOF で検証済み。</div>
+    <div style="font-size:11px;color:var(--text-muted);margin-bottom:8px">行をクリックすると予測の内訳を表示します</div>`,
+  headCells: v => `${_rrLeadHead()}<th><span class="gloss" data-tip="今買える社の μ̂ 中央値との差。全社を同じ量だけずらした値なので、順位は μ̂ と同じ。">相対μ̂</span></th><th><span class="gloss" data-tip="52週=1年先の年率対数リターンの予測値（ElasticNet）。順位は OOF で検証済みだが、水準は検証していない。">μ̂</span></th>${_rrTailHead(v.axis)}`,
+  rowCells: (r, i, v) => `${_rrLeadCells(r, i)}
+      <td class="${r.mu_rel>0?'text-green':''}">${_rrPct(r.mu_rel, true)}</td>
+      <td>${_rrPct(r.mu_raw)}</td>
+      ${_rrTailCells(r, v.axis)}`,
+  tooltipLines: (p, axisKey) => [
+    `相対μ̂=${_rrPct(p.mu_rel, true)}  μ̂=${_rrPct(p.mu_raw)}`,
+    `R=${p[axisKey]!=null?p[axisKey].toFixed(3):'-'}  U=${p._u!=null?p._u.toFixed(3):'-'}`,
+  ],
+  detailHTML: _enetBreakdownHTML,
+});
+
+function renderMacroEnet(data) {
+  return _rrRender(_enetView, data);
+}
+
+// CV・最終モデル・符号付き係数・OOF・相対 μ̂ の注記
+function _enetHeaderHTML(data) {
+  const cv = (data.cv_metrics || {}).enet || {};
+  const fm = data.final_model || {};
   return `
-    <div style="font-size:11px;color:var(--text-muted);margin-bottom:4px">※ μ は52週（1年）先の年率対数リターン予測（例: 表示10.00% = 年率+10%）。M-1と同一ターゲットをXGBoostで学習。</div>
-    <div style="font-size:11px;color:var(--text-muted);margin-bottom:8px">行をクリックすると SHAP 寄与を表示します</div>
-    <div id="mg-shap-panel" class="hidden" style="margin-bottom:16px;padding:12px 16px;background:var(--bg-sunken);border-radius:8px;border:1px solid var(--border-muted)"></div>
-    <div style="overflow-x:auto">
-      <table>
-        <thead><tr>
-          <th>#</th><th>コード</th><th>銘柄名</th><th>業種</th>
-          <th><span class="gloss" data-tip="期待リターン（M-1と同じ52週=1年先の年率対数リターン、無次元）。0.10は年率+10%を意味する（XGBoostモデルの予測値）。">μ</span></th><th>${axis==='r2'?'R2 ボラ':'R_macro'}</th><th>U=μ−λR</th><th>R3</th><th>F</th>
-        </tr></thead>
-        <tbody>${rows}</tbody>
-      </table>
-    </div>`;
+  <div style="margin-bottom:16px;padding:12px 16px;background:var(--bg-sunken);border-radius:8px;border:1px solid var(--border-muted)">
+    <div style="font-size:12px;color:var(--accent-text);font-weight:600;margin-bottom:10px">Walk-Forward CV（M-6 ElasticNet）</div>
+    <table style="width:100%;font-size:12px;border-collapse:collapse">
+      <thead><tr>
+        <th style="text-align:left;padding:4px 8px;color:var(--text-muted)">モデル</th>
+        <th style="text-align:right;padding:4px 8px;color:var(--text-muted)">Mean R²</th>
+        <th style="text-align:right;padding:4px 8px;color:var(--text-muted)">Mean RMSE</th>
+        <th style="text-align:right;padding:4px 8px;color:var(--text-muted)">フォールド数</th>
+      </tr></thead>
+      <tbody><tr>
+        <td style="padding:4px 8px;color:#c084fc;font-weight:600">ElasticNet（M-6）</td>
+        <td style="padding:4px 8px;text-align:right;color:${(cv.mean_r2||0)>0?cssVar('--val-up-text'):cssVar('--val-down-text')}">${cv.mean_r2!=null?cv.mean_r2.toFixed(3):'-'}</td>
+        <td style="padding:4px 8px;text-align:right;color:var(--text-secondary)">${cv.mean_rmse!=null?cv.mean_rmse.toFixed(4):'-'}</td>
+        <td style="padding:4px 8px;text-align:right;color:var(--text-secondary)">${cv.n_folds||0}</td>
+      </tr></tbody>
+    </table>
+    <div style="margin-top:10px;font-size:11px;color:var(--text-muted)">
+      最終モデル: α=${fm.alpha!=null?fm.alpha:'-'} ／ l1_ratio=${fm.l1_ratio!=null?fm.l1_ratio:'-'} ／ 非ゼロ係数 ${fm.n_nonzero!=null?fm.n_nonzero:'-'}/${fm.n_features!=null?fm.n_features:'-'} ／ 学習サンプル: ${(data.n_train_samples||0).toLocaleString()}件
+    </div>
+    <div style="margin-top:8px">
+      <div style="font-size:11px;color:var(--text-secondary);margin-bottom:4px">符号付き係数（標準化した特徴量1単位あたり・右＝予測リターン↑）</div>
+      <div id="enet-coef-bars" style="margin-top:4px"></div>
+      <div id="enet-coef-legend"></div>
+      <div style="font-size:10px;color:var(--text-muted);margin-top:4px">係数 0 は L1 で使われなかった列。マクロ列は同じ日付の全社で同じ値なので、同じ月の銘柄の順位は動かさない。</div>
+    </div>
+  </div>
+  <div style="margin-bottom:16px">${_mrrOofHTML(data)}</div>
+  <div style="margin-bottom:8px;padding:8px 12px;border-radius:6px;font-size:11px;background:var(--bg-sunken);border:1px solid var(--border-muted);color:var(--text-secondary)">
+    縦軸は<b>相対 μ̂</b>＝今買える社の μ̂ 中央値（${_rrPct(data.mu_rel_center)}）を 0 とした差です。全社を同じ量だけずらしただけなので、順位・フロンティア・U の並びは μ̂ と同じです。
+    M-6 の μ̂ は<b>順位だけが OOF で検証済み</b>で、水準（何%上がるか）は検証していません。実際の μ̂ は表とツールチップに出します。
+  </div>`;
 }
 
-document.addEventListener('mg-shap', e => _mgShowShap(e.detail));
-
-function _mgRepaint() {
-  if (!_mgData) return;
-  const v = _mgRecompute();
-  _mgPaintChart(v);
-  const content = document.getElementById('dynresult-content-macro_gbdt');
-  if (content) content.innerHTML = _mgTableHTML(v);
+// 予測の内訳（行クリックで展開）。線形なので 基準 + マクロ環境 + Σ銘柄ごとの寄与 = μ̂（近似なし）。
+function _enetBreakdownHTML(item, data) {
+  if (!item.contrib) return null;
+  const base = data.breakdown_base ?? 0;
+  const macro = item.contrib_macro ?? 0;
+  const entries = Object.entries(item.contrib)
+    .sort((a, b) => Math.abs(b[1]) - Math.abs(a[1]))
+    .map(([name, v]) => [MRR_FEAT_LABELS[name] || name, v]);
+  const own = entries.reduce((s, [, v]) => s + v, 0);
+  const row = (label, val, bold) =>
+    `<div style="color:var(--text-secondary)${bold ? ';font-weight:600' : ''}">${label}</div><div style="text-align:right${bold ? ';font-weight:600' : ''}">${val}</div>`;
+  return `
+    <div style="font-size:12px;color:#c084fc;font-weight:600;margin-bottom:8px">
+      予測の内訳: ${esc(item.company_name||item.edinet_code)}（${esc(item.sec_code||'')}）
+    </div>
+    <div style="font-size:11px;color:var(--text-muted);margin-bottom:8px">
+      μ̂ = 基準 ＋ マクロ環境 ＋ 銘柄ごとの寄与（線形モデルなので近似なしで足し上がる）。基準とマクロ環境は同じ日付の社では全社同じ値で、順位を決めているのは銘柄ごとの寄与です。
+    </div>
+    <div style="display:grid;grid-template-columns:auto auto;gap:2px 16px;font-size:12px;margin-bottom:10px;width:max-content">
+      ${row('基準（全社共通）', _rrPct(base, true))}
+      ${row('マクロ環境（全社共通）', _rrPct(macro, true))}
+      ${row('銘柄ごとの寄与の合計', _rrPct(own, true))}
+      ${row('合計 = μ̂', `${_rrPct(base + macro + own)}（相対 μ̂ ${_rrPct(item.mu_rel, true)}）`, true)}
+    </div>
+    <div style="font-size:11px;color:var(--text-muted);margin-bottom:6px">銘柄ごとの寄与（正＝予測リターン↑・負＝↓・係数 0 の列は省略）</div>
+    ${entries.length
+      ? _rrSignedBarsHTML(entries, v => _rrPct(v, true))
+      : '<span style="color:var(--text-muted);font-size:11px">（寄与する列なし）</span>'}`;
 }
-function _mgScheduleRepaint() {
-  if (!_mgData) return;
-  clearTimeout(_mgPaintTimer);
-  _mgPaintTimer = setTimeout(_mgRepaint, 80);
-}
-const _MG_CLIENT_PARAMS = ['lambda_risk', 'risk_axis', 'top_n', 'r3_gate'];
-function _mgIsClientParam(id) {
-  const prefix = 'param-macro_gbdt-';
-  return id.startsWith(prefix) && _MG_CLIENT_PARAMS.includes(id.slice(prefix.length));
-}
-document.addEventListener('input',  (e) => { if (e.target && e.target.id && _mgIsClientParam(e.target.id)) _mgScheduleRepaint(); });
-document.addEventListener('change', (e) => { if (e.target && e.target.id && _mgIsClientParam(e.target.id)) _mgScheduleRepaint(); });
 
 // ── M-3 ベイズ状態空間（時変マクロβ DLM）専用レンダラ ───────────────────────
 // サーバーは µ̂ 上位 N 銘柄の最新 α/β・信用区間・α/β 経路・1期先診断を返す。
