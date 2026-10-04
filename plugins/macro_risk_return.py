@@ -54,6 +54,7 @@ from .macro_snapshots import (
     oof_backtest,
     build_oof_meta,
     shared_cache_get_or_compute,
+    tradable_results,
 )
 # R3（セクター×サイズ別 CV-RMSE）でバケットを採用する最小残差数。
 R3_MIN_BUCKET_N = 5
@@ -492,19 +493,25 @@ class MacroRiskReturnPlugin(AnalysisPlugin):
         # UI は risk_axis の r_macro 選択肢を無効化し理由を表示する（サイレント空表示の防止）。
         r_macro_available = any(item["r_macro"] is not None for item in results)
 
+        # 表示は今買える社だけ（#806）。M-1 は execute で永続化しない（μ̂ の producer は
+        # macro_beta 推論バッチ）ので、絞るのは返す表だけ。n_companies はスコアを付けた全社数。
+        n_scored = len(results)
+        results, untradable = tradable_results(db, results)
+
         return {
             "cv_metrics":       cv_metrics,
             "oof_backtest":     oof_bt,
             "selected_features": selected_names,
             "feature_coefs":    feature_coefs,
             "n_train_samples":  total_samples,
-            "n_companies":      len(results),
+            "n_companies":      n_scored,
             # クライアントの初期表示シード（λ・リスク軸・表示件数・ゲートは再計算なしで切替可能）
             "risk_axis":        risk_axis,
             "lambda_risk":      lambda_risk,
             "r3_gate":          r3_gate,
             "top_n":            top_n,
             "results":          results,
+            "untradable_excluded": untradable,
             "r_macro_available": r_macro_available,
         }
 

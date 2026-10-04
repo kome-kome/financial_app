@@ -41,6 +41,7 @@ from .macro_snapshots import (
     build_snapshots,
     get_producer_scores,
     to_date_str,
+    tradable_results,
     tradable_snapshot_asof,
     oof_backtest,
     build_oof_meta,
@@ -992,6 +993,9 @@ class MacroGbdtPlugin(AnalysisPlugin):
             db, ((c, current_snaps[c][1].get("snap_date")) for c in codes_ordered))
         self._persist_producer(db, raw_items, _asof)
 
+        # ── 表示は今買える社だけ（#806）。永続化の後に掛ける＝保存する μ̂ は全社のまま ──
+        shown, untradable = tradable_results(db, raw_items)
+
         return {
             "asof":              _asof,
             "cv_metrics":        cv_metrics,
@@ -1007,7 +1011,8 @@ class MacroGbdtPlugin(AnalysisPlugin):
             "lambda_risk":       lambda_risk,
             "r3_gate":           r3_gate,
             "top_n":             top_n,
-            "results":           raw_items,
+            "results":           shown,
+            "untradable_excluded": untradable,
             "model_type":        self._model_type(),
             "best_iteration":    n_est_final,
             "oof_backtest":      oof_bt,

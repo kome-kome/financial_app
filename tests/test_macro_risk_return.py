@@ -19,6 +19,18 @@ from plugins.utils import coerce_params
 
 # ── フィクスチャ ──────────────────────────────────────────────────────────────
 
+@pytest.fixture(autouse=True)
+def _no_tradable_lookup(monkeypatch):
+    """結果表の母集団判定（#806）を素通しにする（M-2/M-3/M-6 のテストと同じ）。
+
+    このファイルの execute は MagicMock の db で回すことが多く、`stale_price_codes` の
+    比較式（`sub.c.d < cutoff`）が組めず TypeError になる。母集団の判定そのものはここの
+    主題ではなく、tests/test_tradable_universe.py が実 DB（SQLite）で縛る。空集合なら
+    results は全社のまま＝変更前と同じなので、既存の assert はそのまま読める。
+    """
+    monkeypatch.setattr("database.non_tradable_codes", lambda db: set())
+
+
 def _make_price(trade_date: str, close_last: float):
     return SimpleNamespace(trade_date=trade_date, close_last=close_last)
 
@@ -575,6 +587,22 @@ class TestExecuteIntegration:
         assert "cv_metrics" in result
         assert "selected_features" in result
         assert isinstance(result["results"], list)
+
+    def test_untradable_rows_are_hidden(self):
+        """廃止・価格停止の社は results から外れ、内訳が応答に出る（#806）。
+
+        M-1 は execute で永続化しない（μ̂ の producer は macro_beta 推論バッチ）ので、
+        確かめるのは返す表と件数だけ。`n_companies` はスコアを付けた全社数のまま。
+        """
+        plugin = MacroRiskReturnPlugin()
+        params = coerce_params(plugin.params_schema(), {"use_macro": False})
+        with patch("database.non_tradable_breakdown",
+                   return_value={"delisted": {"E01234"}, "stale": set()}):
+            result = plugin.execute(params, self._build_mock_db())
+
+        assert {it["edinet_code"] for it in result["results"]} == {"E02345", "E03456"}
+        assert result["untradable_excluded"] == {"delisted": 1, "stale": 0, "fallback": False}
+        assert result["n_companies"] == 3
 
     def test_execute_has_oof_backtest(self):
         """execute が oof_backtest（アウトオブサンプル検証）を返す（#272・ADR-0004・M-2/M-3 と同型）。"""

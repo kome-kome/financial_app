@@ -1473,3 +1473,26 @@ class TestSectorSizeFeatures:
 
         assert _SIZE_FEAT not in result["selected_features"]
         assert _SECTOR_TE_FEAT not in result["selected_features"]
+
+
+class TestUntradableHidden:
+    """廃止・価格停止の社は results から外れ、保存する μ̂ には残る（#806）。"""
+
+    def test_hidden_from_results_but_persisted(self):
+        smoke = TestExecuteSmoke()
+        db, prices_by_co, fin_by_co, companies = smoke._make_db()
+        params = smoke._make_params(use_macro=False)
+        persisted: list[dict] = []
+        with patch("plugins.macro_gbdt.load_data", return_value=(prices_by_co, fin_by_co, companies)), \
+             patch("plugins.macro_gbdt.preload_macro", return_value={}), \
+             patch("plugins.macro_gbdt.get_producer_scores", return_value={}), \
+             patch("database.non_tradable_breakdown",
+                   return_value={"delisted": {"E00001"}, "stale": {"E00002"}}), \
+             patch("database.replace_macro_gbdt_scores",
+                   side_effect=lambda db, rows, *a, **k: persisted.extend(rows)):
+            result = plugin.execute(params, db)
+
+        assert {it["edinet_code"] for it in result["results"]} == {"E00000", "E00003"}
+        assert {r["edinet_code"] for r in persisted} == set(companies)
+        assert result["untradable_excluded"] == {"delisted": 1, "stale": 1, "fallback": False}
+        assert result["n_companies"] == len(companies)

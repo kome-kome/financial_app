@@ -54,6 +54,7 @@ from .macro_snapshots import (
     load_data,
     oof_backtest,
     to_date_str,
+    tradable_results,
     tradable_snapshot_asof,
     preload_macro,
 )
@@ -350,6 +351,9 @@ class MacroEnetPlugin(AnalysisPlugin):
             db, ((c, current_snaps[c][1].get("snap_date")) for c in codes_ordered))
         self._persist_producer(db, raw_items, _asof)
 
+        # ── 表示は今買える社だけ（#806）。永続化の後に掛ける＝保存する μ̂ は全社のまま ──
+        shown, untradable = tradable_results(db, raw_items)
+
         return {
             "asof":              _asof,
             "cv_metrics":        {"enet": _cv_summary(cv_folds)},
@@ -362,7 +366,8 @@ class MacroEnetPlugin(AnalysisPlugin):
             "n_companies":       len(raw_items),
             "top_n":             top_n,
             # 全社ではなく上位 top_n のみ返す（汎用レンダラが数千行の DOM を吐かないように）。
-            "results":           raw_items[:top_n],
+            "results":           shown[:top_n],
+            "untradable_excluded": untradable,
             "model_type":        "elasticnet",
             "oof_backtest":      oof_bt,
             "r_macro_available": r_macro_available,
