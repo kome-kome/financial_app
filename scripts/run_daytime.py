@@ -328,6 +328,22 @@ JOBS: dict[str, Job] = {
         measured_min=15.0,
         parallel_sensitive=True,   # 他の gate と同じ理由（採否が CI の符号で決まる）
     ),
+    # M-6 の U の並び（#808）。M-6 の本番 λ は 0（#807）なので分母は `mu_only` で、M-1（r2）と
+    # 分母が違う＝同じ run に入れられない。λ は画面のスライダーと同じ値を明示し、R は画面と同じ
+    # 生の値に掛ける（`--risk-scale raw`）。7条件・12検定でも `Cond` は1つなので CV は1回。
+    "gate:risk-axis-m6": Job(
+        name="gate_risk_axis_m6",
+        argv=("{python}", "-m", "scripts.momentum_gate", "--risk-axis",
+              "--models", "elasticnet", "--lambdas", "0.1,0.3,1.0", "--risk-scale", "raw",
+              "--stride", "1", "--allow-full-pull", "--refresh-cache"),
+        why="M-6 の U = μ̂ − λR の並び（画面の λ>0）が μ̂ だけの並び（mu_only・本番＝分母）に"
+            "劣後しないかを測る（#808）。λ=0.1/0.3/1.0 × r2/r_macro の6条件・12検定。"
+            "**r_macro は時点不変の 2026年スナップショット＝未来情報を含む上限**。",
+        # 2026-10-05 の実測（日曜深夜に -Now -Force で消化・並走なし）。見積り 15.0 から差し替えた。
+        # CV は `Cond` が1つなので1回（158.8秒）で、7条件ぶんの R と変換はほぼ時間を食わない。
+        measured_min=6.6,
+        parallel_sensitive=True,   # 他の gate と同じ理由（採否が CI の符号で決まる）
+    ),
 
     # ── 最新業績の供給（#424 の子タスク1・ADR-0051）────────────────────────
     # #503 で GHA cron を止めて以降、H1 と会社予想は**どこからも収集されていない**
