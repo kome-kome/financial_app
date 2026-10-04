@@ -210,6 +210,24 @@ demean 側の月平均が0になっていなければ停止する。どちらも
 月次リターンの平均・ボラ・シャープを併記する（`quantile_risk_profile`）。**判定の主指標は
 他モードと同じ `rank_ic`** で、リスク調整後は参考値。
 
+### M-6 を測るとき（#808）
+
+    python -m scripts.momentum_gate --risk-axis --models elasticnet --lambdas 0.1,0.3,1.0 --risk-scale raw
+
+    mu_only     … μ̂ だけの並び。**M-6 の本番（λ=0）＝分母**
+    r2@0.1 …    … U = μ̂ − λ·R2（生の実現ボラ）。λ は画面のスライダーと同じ値
+    r_macro@0.1 … U = μ̂ − λ·R_macro
+
+**λ と分母は画面プラグインの既定から取る**（`RISK_LAMBDA_PLUGIN`）。`MODEL_SPECS` の設定元から
+取っていた間は、M-6 を M-2 の既定 λ=1.0 で黙って測る形だった。M-6 の既定 λ は 0 なので
+`--lambdas` 無しでは止まる（λ=0 の並びは `mu_only` と同一で、差が構造的にゼロになる）。
+分母は M-1 が `r2`・M-6 が `mu_only` と違うので、**両方を同時に指定すると止まる**。
+
+**`--risk-scale raw` は画面と同じ生の R に λ を掛ける。** z-score の λ=1.0 は画面の λ≈1/sd(R)
+（M-6 の R2 で約 4.7）に当たり、結果をスライダーの既定に結び付けられない。代わりに r2 と
+r_macro を同じ λ で比べる意味は無くなる（どちらも分母と比べるだけ）。M-1 の事前登録
+（z-score・λ=1.0）は変えていない。
+
 ## M-1 を測るときの注意
 
 M-1 は `macro_nan_ok=False`（strict）で**母集団自体が M-2/M-6 と別物**なので、パネルを共有
@@ -223,6 +241,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import statistics
 import sys
 from pathlib import Path
@@ -358,9 +377,30 @@ DEMEAN_TOL = 1e-9
 # だけの順位で、本番が出している `U` の並びは測定の外にあった。同じパネル・同じ CV で測れる
 # ので追加費用はほぼゼロ。
 RISK_CONDS: dict[str, str | None] = {"mu_only": None, "r2": "r2", "r_macro": "r_macro"}
+RISK_NO_AXIS = "mu_only"
+# M-1 の本番の並び（λ=1.0・r2）。**分母そのものは `risk_base_cond` が画面プラグインの既定から
+# 導出する**——この定数は M-1 の事前登録（ADR-0050 の 2026-09-21 追記）を読み手に示すためのもので、
+# 導出結果と一致することをテストが縛る。
 RISK_BASE_COND = "r2"
-# U を持つのは M-1 だけ。M-2/M-6 は μ̂ の順位そのものが出力で、リスク軸を持たない。
+# 既定のモデルは M-1 だけ。#807 で M-6 も画面に U = μ̂ − λR の並びを持ったが、**本番の λ が 0**
+# なので本番の並びは `mu_only` であり、M-1（λ=1.0・r2）と分母が違う。分母が違うモデルは
+# 同時に測れない（`risk_base_cond` が止める）ので、M-6 を既定へ足すと `--models` を渡さない
+# `gate:risk-axis` が止まる。M-6 は `--models elasticnet --lambdas … --risk-scale raw` で別に回す（#808）。
 RISK_MODELS = ["risk_return"]
+# U を画面へ出すプラグイン（λ と横軸の既定の唯一の源）。**`MODEL_SPECS` の設定元とは別物**——
+# M-6 のパネル設定は M-2（`macro_gbdt`）から借りているので、そちらから λ を取ると M-6 を
+# M-2 の既定 λ=1.0 で黙って測る（#808 で見つけた。数値はもっともらしく出るので失敗として現れない）。
+RISK_LAMBDA_PLUGIN: dict[str, str] = {
+    "risk_return": "macro_risk_return",
+    "xgb_m2":      "macro_gbdt",
+    "elasticnet":  "macro_enet",
+}
+# λ を明示したとき（`--lambdas`）の条件名の区切り。`r2@0.3` のように軸と λ を並べる。
+RISK_LAMBDA_SEP = "@"
+# R の尺度（`--risk-scale`）。`z` は月内 z-score（ADR-0050 決定3・M-1 の事前登録）、`raw` は
+# 画面と同じ生の R（`static/js/analysis.js` の `_u: r.mu_raw - lambda * r[axis]`）。
+RISK_SCALES = ("z", "raw")
+RISK_SCALE_DEFAULT = "z"
 # リスク調整後の指標を出す分位数。`oof_backtest` の既定と揃える（別の数にすると
 # 素のリターン側の分位と読み比べられない）。
 RISK_QUANTILES = 5
@@ -401,7 +441,8 @@ def build_conditions(windows: list[int] | None = None,
                     max_features: list[int] | None = None,
                     fin_rows: bool = False,
                     demean_target: bool = False,
-                    risk_axis: bool = False) -> dict[str, Cond]:
+                    risk_axis: bool = False,
+                    lambdas: list[float] | None = None) -> dict[str, Cond]:
     """条件集合 {名前: Cond} を作る。
 
     8つのモードがある。**同時に使えるのは1つだけ**（下記）:
@@ -419,6 +460,7 @@ def build_conditions(windows: list[int] | None = None,
     μ̂ の順位を作り直すときだけ使うので、パネル構築のパラメータではない。3条件とも同じ
     `Cond` を返すのは意図どおりで、呼び出し側はこれを見て**パネルと CV を1回に畳む**
     ——別々に回すと μ̂ が完全一致する保証が無く、軸の差と混ざる（#697 と同型）。
+    `lambdas` を渡すと条件は `mu_only` ＋ 軸 × λ になる（`risk_specs`・#808）。これも全て同一の `Cond`。
 
     **2つ以上を同時に指定できない。** 母集団を動かしうる軸を2つ同時に振ると、どちらの
     効果かが分離できない——それは共通域制限をかけても解けない（共通域は「全条件で測れる
@@ -441,10 +483,12 @@ def build_conditions(windows: list[int] | None = None,
         raise ValueError(
             f"{' と '.join(picked)} は同時に指定できません（母集団を動かしうる軸を2つ同時に"
             "振ると、共通域へ制限してもどちらの効果か分離できない）")
+    if lambdas and not risk_axis:
+        raise ValueError("--lambdas は --risk-axis と一緒にしか使えません（λ はリスク軸の係数）")
     if risk_axis:
-        # **3条件とも本番構成の同一 `Cond`**（上の docstring を参照）。軸そのものは
-        # `RISK_CONDS` が持ち、パネルには現れない。
-        return {name: Cond(False, MOM_WINDOW) for name in RISK_CONDS}
+        # **全条件が本番構成の同一 `Cond`**（上の docstring を参照）。軸と λ は
+        # `risk_specs` が持ち、パネルには現れない。
+        return {name: Cond(False, MOM_WINDOW) for name in risk_specs(lambdas)}
     if macro:
         return {name: Cond(False, MOM_WINDOW, use_macro)
                 for name, use_macro in MACRO_CONDS.items()}
@@ -488,7 +532,8 @@ def base_of(conds: dict[str, Cond], default_max_features: int | None = None) -> 
 
     行の基準モードの分母も**本番の構成**（`annual`）。TTM を足したときに本番から何が変わるかを見る。
     目的変数モードの分母も**本番の構成**（`raw`）。この軸も母集団を動かさない。
-    リスク軸モードの分母も**本番の構成**（`r2`・`params_schema()` の `risk_axis` 既定）。
+    リスク軸モードの分母も**本番の構成**だが、モデルごとに違う（M-1 は `r2`・M-6 は `mu_only`）ので
+    ここでは決めない。`main` はリスク軸モードでは `risk_base_cond` を使う（#808）。
     """
     for cand in (BASE_COND, MACRO_BASE_COND, INTERACTION_BASE_COND, FIN_ROWS_BASE_COND,
                  DEMEAN_BASE_COND, RISK_BASE_COND):
@@ -567,21 +612,26 @@ _AXIS_VERDICTS: dict[str, tuple[str, str]] = {
                  "with_ttm did not beat the annual-only baseline"),
     "demean_target": ("DEMEAN TARGET AXIS",
                       "the month-demeaned target did not beat the raw target"),
+    # 分母はモデルで違う（M-1 は r2・M-6 は mu_only・#808）ので名前を差し込む。
     "risk_axis": ("RISK AXIS",
-                  "no risk axis beat the production axis (r2)"),
+                  "no risk condition beat the production ordering ({base})"),
 }
 
 
-def verdict_text(mode: str, n_conds: int, passed: list[str], regressed: list[str]) -> str:
+def verdict_text(mode: str, n_conds: int, passed: list[str], regressed: list[str],
+                 base: str | None = None) -> str:
     """判定行の文言を組み立てる（出力の読み違いをテストで縛るために純関数にしてある）。
 
     窓モードは**窓が2本以上のときだけ** WINDOW SCAN になる（`--windows 12` は2条件で、
     既定ゲートと同じ PROMOTE/REJECT の文言になる）。これは切り出す前からの挙動で変えない。
+    `base` はリスク軸モードの分母名（省略時は M-1 の `RISK_BASE_COND`）。他モードでは使わない。
     """
     if (mode in ("macro", "interactions", "max_features", "fin_rows", "demean_target",
                  "risk_axis")
             or (mode == "windows" and n_conds > 2)):
         head, none = _AXIS_VERDICTS[mode]
+        if mode == "risk_axis":
+            none = none.format(base=base or RISK_BASE_COND)
         verdict = (f"{head}: effects that survive the common-domain restriction: "
                    + ", ".join(passed)) if passed else (
                    f"{head}: {none} on the common (ym,ec) domain at the corrected alpha")
@@ -892,6 +942,101 @@ def _month_end_bound(ym: str) -> str:
     return f"{ym}-31"
 
 
+def normalize_lambdas(lambdas: list[float]) -> list[float]:
+    """測る λ を昇順・重複なしにする。**0 以下と非有限は止める**（#808）。
+
+    λ=0 の条件は U = μ̂ − 0·R ＝ `mu_only` と同一で、比べても差が**構造的にゼロ**になる。
+    数値はもっともらしく出るので失敗として現れない（ADR-0050 の「黙って同じものを比べる形」）。
+    重複を落とすのは、同じ λ を2回測っても検定数だけが増えて α が不当に締まるから（窓と同じ）。
+    """
+    vals = sorted({float(v) for v in lambdas})
+    bad = [v for v in vals if not math.isfinite(v) or v <= 0]
+    if bad:
+        raise ValueError(
+            f"λ は正の有限値で指定してください: {bad}（λ=0 は {RISK_NO_AXIS} と同一で、"
+            "比べても差が構造的にゼロになる）")
+    if not vals:
+        raise ValueError("--lambdas に λ が1つもありません")
+    return vals
+
+
+def risk_cond_name(axis: str, lam: float) -> str:
+    """λ を明示したときの条件名（`r2@0.3`）。`repr` で書くので異なる λ が同じ名前に潰れない。"""
+    return f"{axis}{RISK_LAMBDA_SEP}{lam!r}"
+
+
+def risk_specs(lambdas: list[float] | None = None,
+               default_lam: float = 0.0) -> dict[str, tuple[str | None, float]]:
+    """条件名 → `(R の軸, λ)`。**リスク軸の条件名を作るのはここだけ**（#808）。
+
+    - `lambdas` 無し: M-1 の事前登録の形（`mu_only` / `r2` / `r_macro`）。λ は `default_lam`
+      （呼び出し側が画面プラグインの既定から解決した値）で、全軸に共通。
+    - `lambdas` あり: `mu_only` ＋ 軸 × λ（`r2@0.1` …）。λ は画面と同じ値を明示して測る。
+
+    `mu_only` の λ は 0（軸が無いので変換しない）。R の算出・変換・JSON はこの表だけを読む
+    ——条件名から軸を引き直すと、λ 付きの名前で `RISK_CONDS` の直読みが壊れる。
+    """
+    if not lambdas:
+        return {name: (axis, 0.0 if axis is None else float(default_lam))
+                for name, axis in RISK_CONDS.items()}
+    out: dict[str, tuple[str | None, float]] = {RISK_NO_AXIS: (None, 0.0)}
+    for axis in [a for a in RISK_CONDS.values() if a]:
+        for lam in normalize_lambdas(lambdas):
+            out[risk_cond_name(axis, lam)] = (axis, lam)
+    return out
+
+
+def production_risk(model: str) -> tuple[float, str]:
+    """モデルの画面が既定で出す並びの `(λ, 横軸)`。**`RISK_LAMBDA_PLUGIN` からだけ取る**。"""
+    if model not in RISK_LAMBDA_PLUGIN:
+        raise ValueError(f"{model} は U を画面に出すプラグインが登録されていません（RISK_LAMBDA_PLUGIN）")
+    params = coerce_params(get_plugin(RISK_LAMBDA_PLUGIN[model]).params_schema(), {})
+    return float(params.get("lambda_risk") or 0.0), str(params.get("risk_axis") or "r2")
+
+
+def resolve_risk_lambda(models: list[str]) -> float:
+    """`--lambdas` 無しのときの λ（全モデルの画面の既定）。0 に解決されたら止める（#808）。
+
+    以前は `models[0]` の設定元（`MODEL_SPECS`）から取っていたので、M-6 は M-2 の λ で、
+    M-1 と並べた M-6 は M-1 の λ で黙って測られていた。
+    """
+    lams = {m: production_risk(m)[0] for m in models}
+    vals = set(lams.values())
+    if len(vals) > 1:
+        raise ValueError(f"λ の既定がモデルで違います {lams}。--lambdas で測る λ を明示してください")
+    lam = vals.pop()
+    if not lam > 0:
+        raise ValueError(
+            f"λ が {lam} に解決されました {lams}。λ=0 の並びは {RISK_NO_AXIS} と同一で、比べても"
+            "差が構造的にゼロになる。--lambdas で測る λ を明示してください（例: --lambdas 0.1,0.3,1.0）")
+    return lam
+
+
+def risk_base_cond(models: list[str], specs: dict[str, tuple[str | None, float]]) -> str:
+    """リスク軸モードの分母＝**各モデルの画面が既定で出している並び**の条件名（#808）。
+
+    M-1 は λ=1.0・r2 なので `r2`（`--lambdas` ありなら `r2@1.0`）、M-6 は λ=0 なので `mu_only`。
+    **分母が違うモデルは同時に測れない**（判定の向きが1本の表で混ざる）ので止める。本番の並びが
+    条件集合に無い（M-1 に `--lambdas 0.3` だけを渡した等）ときも止める——分母の無い比較になる。
+    """
+    wanted: dict[str, str] = {}
+    for model in models:
+        lam, axis = production_risk(model)
+        if lam <= 0:
+            wanted[model] = RISK_NO_AXIS
+            continue
+        hit = [name for name, (a, l) in specs.items() if a == axis and l == lam]
+        if not hit:
+            raise ValueError(
+                f"{model} の本番の並び（{axis}・λ={lam}）が条件に無い。--lambdas に {lam} を含めてください")
+        wanted[model] = hit[0]
+    names = set(wanted.values())
+    if len(names) > 1:
+        raise ValueError(
+            f"分母（本番の並び）がモデルで違います {wanted}。--models で1つずつ別々に回してください")
+    return names.pop()
+
+
 def risk_by_ym(axis: str | None, prices_by_co: dict, ids_by_ym: dict,
                producer: dict) -> dict[tuple, float]:
     """`{(ym, edinet_code): R}` を返す。`axis` は `RISK_CONDS` の値（`None` は軸なし）。
@@ -946,7 +1091,7 @@ def risk_common_keys(risk_maps: dict[str, dict], keys: set) -> set:
 
 
 def apply_risk_axis(resid_by_ym: dict, meta_by_ym: dict, rmap: dict,
-                    lam: float) -> tuple[dict, dict, int]:
+                    lam: float, standardize: bool = True) -> tuple[dict, dict, int]:
     """`yhat` を `U = yhat − λ·z(R)` へ置き換える。戻り値は `(resid, meta, 落とした行数)`。
 
     **R は月内で z-score 標準化する。** `r2`（年率ボラ）と `r_macro`（√(βᵀΣβ)）はスケールが
@@ -955,6 +1100,10 @@ def apply_risk_axis(resid_by_ym: dict, meta_by_ym: dict, rmap: dict,
 
     月内の R が全て同じ値なら標準偏差が 0 になる。そのときは傾けない（`z=0`）——`r_macro` は
     銘柄ごとの定数なので、1銘柄しか残らない月でこれが起きる。
+
+    `standardize=False` は**画面と同じ生の R**で `U = yhat − λR` を作る（`--risk-scale raw`・#808）。
+    λ がスライダーの値と同じ意味になる代わりに、軸の間で同じ λ を比べる意味は無くなる
+    （各軸を分母と比べるだけ）。z の λ=1.0 は画面の λ≈1/sd(R) に当たり、M-6 では約 4.7。
 
     `rmap` が空なら恒等変換（`mu_only`）。
     """
@@ -975,11 +1124,14 @@ def apply_risk_axis(resid_by_ym: dict, meta_by_ym: dict, rmap: dict,
             rows.append((yh, y, meta, r))
         if not rows:
             continue
-        rs = [r for _yh, _y, _m, r in rows]
-        mu = sum(rs) / len(rs)
-        sd = statistics.stdev(rs) if len(rs) > 1 else 0.0
-        out_r[ym] = [(yh - lam * ((r - mu) / sd if sd else 0.0), y)
-                     for yh, y, _m, r in rows]
+        if standardize:
+            rs = [r for _yh, _y, _m, r in rows]
+            mu = sum(rs) / len(rs)
+            sd = statistics.stdev(rs) if len(rs) > 1 else 0.0
+            out_r[ym] = [(yh - lam * ((r - mu) / sd if sd else 0.0), y)
+                         for yh, y, _m, r in rows]
+        else:
+            out_r[ym] = [(yh - lam * r, y) for yh, y, _m, r in rows]
         out_m[ym] = [m for _yh, _y, m, _r in rows]
     return out_r, out_m, dropped
 
@@ -1052,7 +1204,15 @@ def main() -> None:
                          "財務はキャッシュせずに読む。他モードと併用不可")
     ap.add_argument("--risk-axis", dest="risk_axis", action="store_true",
                     help="U = μ − λR の R を振る（#709）。mu_only / r2 / r_macro の3条件を"
-                         "同一パネル・同一 CV で比べる。分母は本番の既定 r2")
+                         "同一パネル・同一 CV で比べる。分母は各モデルの画面の既定の並び"
+                         "（M-1 は r2・M-6 は mu_only）")
+    ap.add_argument("--lambdas",
+                    help="--risk-axis で測る λ をカンマ区切りで明示する（例: 0.1,0.3,1.0・#808）。"
+                         "条件は mu_only ＋ 軸 × λ。0 以下は止まる。省略時は画面プラグインの既定 λ"
+                         "（0 に解決されたら止まる）")
+    ap.add_argument("--risk-scale", dest="risk_scale", choices=RISK_SCALES,
+                    help=f"--risk-axis の R の尺度（既定 {RISK_SCALE_DEFAULT}）。z=月内 z-score"
+                         "（ADR-0050 決定3）／raw=画面と同じ生の R（λ がスライダーと同じ意味・#808）")
     ap.add_argument("--demean-target", dest="demean_target", action="store_true",
                     help="目的変数モード（素の目的変数 と 月ごとの全銘柄平均を引いた目的変数を"
                          "共通域で比べる・#615）。変換は BIC 選択の前に掛かる。"
@@ -1095,17 +1255,43 @@ def main() -> None:
                if args.windows else None)
     max_features = ([int(n) for n in args.max_features.replace(" ", "").split(",") if n]
                     if args.max_features else None)
+    if args.lambdas is not None:
+        lambdas = [float(x) for x in args.lambdas.replace(" ", "").split(",") if x]
+        if not lambdas:
+            raise SystemExit("--lambdas に λ が1つもありません")
+    else:
+        lambdas = None
+    if args.risk_scale is not None and not args.risk_axis:
+        raise SystemExit("--risk-scale は --risk-axis と一緒にしか使えません")
+    risk_scale = args.risk_scale or RISK_SCALE_DEFAULT
     try:
         conds = build_conditions(windows, macro=args.macro, interactions=args.interactions,
                                  max_features=max_features, fin_rows=args.fin_rows,
                                  demean_target=args.demean_target,
-                                 risk_axis=args.risk_axis)
+                                 risk_axis=args.risk_axis, lambdas=lambdas)
     except ValueError as e:
         raise SystemExit(str(e))
     # 列数モードの分母は本番値（プラグイン既定）。**ここで数値を書き写さない**。
     prod_max_features = coerce_params(
         get_plugin(MODEL_SPECS[models[0]][0]).params_schema(), {}).get("max_features")
-    base = base_of(conds, prod_max_features)
+    # リスク軸の λ と分母は**画面プラグインの既定から取る**（`RISK_LAMBDA_PLUGIN`・#808）。
+    # 書き写すと本番が変えたときに黙って別物を測り、`MODEL_SPECS` の設定元から取ると M-6 を
+    # M-2 の λ で測る。`--lambdas` 無しで λ が 0 に解決されたら止める（差が構造的にゼロ）。
+    default_lam: float | None = None
+    specs: dict[str, tuple[str | None, float]] = {}
+    try:
+        if args.risk_axis:
+            if lambdas is None:
+                default_lam = resolve_risk_lambda(models)
+            specs = risk_specs(lambdas, default_lam or 0.0)
+            base = risk_base_cond(models, specs)
+        else:
+            base = base_of(conds, prod_max_features)
+    except ValueError as e:
+        raise SystemExit(f"中止: {e}")
+    if args.risk_axis and len(set(conds.values())) != 1:
+        # μ̂ をビット単位で一致させる前提（パネルと CV を1回に畳む）が崩れている。
+        raise SystemExit("中止: リスク軸の条件が同一の Cond を共有していません（μ̂ が条件間でずれる）")
     # **alpha は検定数から導出する**（定数 ALPHA を窓モードへ流用すると、条件を増やした
     # ぶんの多重比較が補正されないまま「有意」が出る）。
     alpha = bonferroni_alpha(len(models), len(conds))
@@ -1119,11 +1305,10 @@ def main() -> None:
     mode = mode_of(windows, macro=args.macro, interactions=args.interactions,
                    max_features=max_features, fin_rows=args.fin_rows,
                    demean_target=args.demean_target, risk_axis=args.risk_axis)
-    # リスク軸の λ は**プラグインの既定から取る**（書き写すと本番が変えたときに黙って別物を
-    # 測る）。R を月内で標準化するので、この λ は3条件で同じ意味を持つ。
-    lam = float(coerce_params(
-        get_plugin(MODEL_SPECS[models[0]][0]).params_schema(), {}).get("lambda_risk") or 0.0)
     default_out = f"momentum_gate{MODE_SUFFIX[mode]}.json"
+    if mode == "risk_axis" and models != RISK_MODELS:
+        # M-1 と M-6 は分母が違い別々に回す（#808）。同じファイルへ書くと後の run が前の結果を消す。
+        default_out = f"momentum_gate{MODE_SUFFIX[mode]}_{'_'.join(models)}.json"
     out_path = Path(args.json_path) if args.json_path else _OUT_DIR / default_out
 
     db = SessionLocal()
@@ -1241,17 +1426,19 @@ def main() -> None:
                   "mean on the demean side; rank_ic / long_short / short_side are "
                   "within-month and unaffected by the shift", flush=True)
 
-        # リスク軸モードの R は CV の前に作る（軸ごとに `(ym, ec) → R`）。パネルは3条件とも
-        # 同一なので `base` のものを使う——ここを条件ごとに取ると、同じ中身を3回計算するだけ。
+        # リスク軸モードの R は CV の前に作る（軸ごとに `(ym, ec) → R`）。パネルは全条件で
+        # 同一なので `base` のものを使う。**R は軸ごとに1回だけ作り**、λ 違いの条件で同じ表を
+        # 共有する（条件ごとに取ると、同じ中身を λ の数だけ計算するだけ）。
         risk_maps: dict[str, dict] = {}
         if mode == "risk_axis":
             producer = get_producer_scores(db)
             ids0 = panels[(base, MODEL_SPECS[models[0]][2])][2]
-            risk_maps = {cond: risk_by_ym(RISK_CONDS[cond], prices_by_co, ids0, producer)
-                         for cond in conds}
-            print(f"[risk] lambda={lam} axes=" + ", ".join(
-                f"{c}:{RISK_CONDS[c] or '-'}({len(risk_maps[c])} rows)" for c in conds),
-                flush=True)
+            axis_maps = {axis: risk_by_ym(axis, prices_by_co, ids0, producer)
+                         for axis in {a for a, _l in specs.values()}}
+            risk_maps = {cond: axis_maps[specs[cond][0]] for cond in conds}
+            print(f"[risk] scale={risk_scale} base={base} conds=" + ", ".join(
+                f"{c}:{specs[c][0] or '-'}@{specs[c][1]:g}({len(risk_maps[c])} rows)"
+                for c in conds), flush=True)
             print(f"[risk] r_macro producer companies={len(producer)} "
                   "（**時点不変**: beta と Sigma_macro は単一 run のスナップショット＝"
                   "過去の月にも 2026年推定の値を当てている。未来情報を含む上限として読む）",
@@ -1281,7 +1468,9 @@ def main() -> None:
                     # 同じ CV の残差へ条件ごとの U 変換を当て、oof を作り直す。**`out` を
                     # 複製する**——memo は3条件で共有しているので、その場で書き換えると
                     # 他の条件の水準まで書き換わる。
-                    rr, mm, _drop = apply_risk_axis(part[0], part[1], risk_maps[cond], lam)
+                    rr, mm, _drop = apply_risk_axis(part[0], part[1], risk_maps[cond],
+                                                    specs[cond][1],
+                                                    standardize=(risk_scale == "z"))
                     out = {**out, "oof": oof_backtest(rr, n_quantiles=RISK_QUANTILES,
                                                       meta_by_ym=mm, rebalance_per_year=4)}
                 if out.get("error"):
@@ -1379,7 +1568,8 @@ def main() -> None:
             resid, meta = cparts[f"{cond}|{model}"]
             r2, m2 = _restrict(resid, meta, cpanels[(cond, kind)][2], keys)
             if mode == "risk_axis":
-                r2, m2, _d = apply_risk_axis(r2, m2, risk_maps[cond], lam)
+                r2, m2, _d = apply_risk_axis(r2, m2, risk_maps[cond], specs[cond][1],
+                                             standardize=(risk_scale == "z"))
                 risk_profiles[f"{cond}|{model}"] = quantile_risk_profile(r2)
             bt = oof_backtest(r2, n_quantiles=5, meta_by_ym=m2, rebalance_per_year=4)
             common_results[f"{cond}|{model}"] = bt
@@ -1397,6 +1587,7 @@ def main() -> None:
     passed: list[str] = []
     regressed: list[str] = []
     test_conds = [c for c in conds if c != base]
+    cw = max(6, *(len(c) for c in conds))    # 条件名の列幅（`r_macro@0.3` は6字に収まらない）
     print(f"\n=== cond - {base} / common [PRIMARY] "
           f"(Bonferroni alpha={alpha:.5f}, {n_tests} tests) ===", flush=True)
     for model in models:
@@ -1413,19 +1604,19 @@ def main() -> None:
                     passed.append(label)
                 elif hit:
                     regressed.append(label)
-                print(f"  {MODEL_LABELS[model]:<18} {cond:<6} {metric:<18} "
+                print(f"  {MODEL_LABELS[model]:<18} {cond:<{cw}} {metric:<18} "
                       f"{_fmt_sig(sig, alpha)}", flush=True)
 
     print("\n=== raw levels (each condition's own population; NOT testable across "
           "conditions: fold phases differ) ===", flush=True)
-    print(f"  {'cond':<6} {'model':<18} {'rank-IC':>9} {'IC std':>9} {'short':>9} "
+    print(f"  {'cond':<{cw}} {'model':<18} {'rank-IC':>9} {'IC std':>9} {'short':>9} "
           f"{'LS spread':>10} {'folds':>6} {'samples':>9}", flush=True)
     for cond in conds:
         for model in models:
             r = results[f"{cond}|{model}"]
             o = r["oof"]
             st = stats[f"{cond}|{MODEL_SPECS[model][2]}"]
-            print(f"  {cond:<6} {MODEL_LABELS[model]:<18} {_num(o['rank_ic']['mean']):>9} "
+            print(f"  {cond:<{cw}} {MODEL_LABELS[model]:<18} {_num(o['rank_ic']['mean']):>9} "
                   f"{_num(o['rank_ic'].get('std')):>9} "
                   f"{_num(o.get('short_side_spread')):>9} "
                   f"{_num(o.get('long_short_spread')):>10} {r['n_folds']:>6} "
@@ -1436,12 +1627,12 @@ def main() -> None:
         # 上の rank_ic のままで、ここは読み手が符号を解釈するための参考値。
         print("\n=== risk-adjusted profile of the U ordering "
               "(quantile 0 = lowest U, monthly series) ===", flush=True)
-        print(f"  {'cond':<8} {'q':<3} {'mean ret':>10} {'vol':>10} {'sharpe':>10} "
+        print(f"  {'cond':<{max(cw, 8)}} {'q':<3} {'mean ret':>10} {'vol':>10} {'sharpe':>10} "
               f"{'periods':>8}", flush=True)
         for cond in conds:
             for model in models:
                 for row in risk_profiles.get(f"{cond}|{model}", []):
-                    print(f"  {cond:<8} {row['quantile']:<3} "
+                    print(f"  {cond:<{max(cw, 8)}} {row['quantile']:<3} "
                           f"{_num(row['mean_return']):>10} {_num(row['vol']):>10} "
                           f"{_num(row['sharpe']):>10} {row['n_periods']:>8}", flush=True)
         print("[note] r_macro is TIME-INVARIANT per company (beta and Sigma_macro come from a "
@@ -1450,7 +1641,7 @@ def main() -> None:
               "includes look-ahead and is NOT grounds for changing the default (#709).",
               flush=True)
 
-    verdict = verdict_text(mode, len(conds), passed, regressed)
+    verdict = verdict_text(mode, len(conds), passed, regressed, base=base)
     print(f"\n=== verdict === {verdict}", flush=True)
     print("判定は common スコープで読む（同一 fold・同一 (ym,ec) 域）。raw は水準のみ。",
           flush=True)
@@ -1476,8 +1667,13 @@ def main() -> None:
         # 目的変数モードの健全性（#615）。{"条件|種別": 月平均の絶対値の最大}。他モードでは空。
         "target_month_mean": target_month_mean,
         # リスク軸モード（#709）。他モードでは None / 空。
-        "risk_axes": {name: RISK_CONDS.get(name) for name in conds} if mode == "risk_axis" else {},
-        "lambda_risk": lam if mode == "risk_axis" else None,
+        "risk_axes": {name: specs[name][0] for name in conds} if mode == "risk_axis" else {},
+        # `--lambdas` 無しのときの共通 λ（画面プラグインの既定）。明示したときは None で、
+        # 条件ごとの λ は `risk_specs` が持つ（#808）。
+        "lambda_risk": default_lam,
+        "risk_specs": ({name: {"axis": a, "lambda": lam} for name, (a, lam) in specs.items()}
+                       if mode == "risk_axis" else {}),
+        "risk_scale": risk_scale if mode == "risk_axis" else None,
         "risk_dropped_rows": risk_dropped,
         "risk_profiles": risk_profiles,
         # **勝っても既定を変える根拠にならない**ことを JSON 側にも残す（標準出力は流れる）。

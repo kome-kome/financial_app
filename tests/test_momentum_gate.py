@@ -22,11 +22,12 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from plugins.macro_ensemble import _align
 from plugins.utils import walk_forward_cv_monthly
 from scripts.momentum_gate import (
-    ALPHA, CONDS, METRICS, MODELS, MOM_WINDOW, N_TESTS,
-    RISK_BASE_COND, RISK_CONDS, RISK_MODELS,
+    ALPHA, CONDS, METRICS, MODEL_SPECS, MODELS, MOM_WINDOW, N_TESTS,
+    RISK_BASE_COND, RISK_CONDS, RISK_LAMBDA_PLUGIN, RISK_MODELS, RISK_NO_AXIS,
     _month_end_bound, _num, _panel_stats, _restrict, _restrict_months,
-    apply_risk_axis, base_of, build_conditions, mode_of,
-    quantile_risk_profile, risk_by_ym, risk_common_keys,
+    apply_risk_axis, base_of, bonferroni_alpha, build_conditions, mode_of,
+    normalize_lambdas, production_risk, quantile_risk_profile, resolve_risk_lambda,
+    risk_base_cond, risk_by_ym, risk_common_keys, risk_specs, verdict_text,
 )
 
 
@@ -245,7 +246,8 @@ class TestRiskAxisContract:
 
     def test_mode_name_and_models(self):
         assert mode_of(risk_axis=True) == "risk_axis"
-        assert RISK_MODELS == ["risk_return"]   # U を持つのは M-1 だけ
+        # 既定は M-1 だけ。M-6 も U を持つが分母（mu_only）が違うので別に回す（#808）。
+        assert RISK_MODELS == ["risk_return"]
 
     def test_bonferroni_matches_the_default_gate(self):
         """1モデル x 2指標 x 2条件 = 4 検定＝既定ゲートと同じ検定数。"""
@@ -260,6 +262,118 @@ class TestRiskAxisContract:
         """他の軸と同時に振ると、どちらの効果か分離できない（既存6モードと同じ規則）。"""
         with pytest.raises(ValueError, match="--risk-axis"):
             build_conditions(risk_axis=True, **kwargs)
+
+
+class TestRiskAxisExplicitLambdas:
+    """`--lambdas`（#808）: λ を画面と同じ値で明示し、`mu_only` ＋ 軸 × λ を測る。"""
+
+    LAMS = [0.1, 0.3, 1.0]
+
+    def test_conditions_are_mu_only_plus_axis_times_lambda(self):
+        conds = build_conditions(risk_axis=True, lambdas=self.LAMS)
+        assert list(conds) == ["mu_only", "r2@0.1", "r2@0.3", "r2@1.0",
+                               "r_macro@0.1", "r_macro@0.3", "r_macro@1.0"]
+
+    def test_all_conditions_still_share_one_cond(self):
+        """λ を増やしてもパネルと CV は1回＝μ̂ はビット単位で一致する。"""
+        conds = build_conditions(risk_axis=True, lambdas=self.LAMS)
+        assert len(set(conds.values())) == 1
+
+    def test_specs_carry_axis_and_lambda(self):
+        specs = risk_specs(self.LAMS)
+        assert specs["mu_only"] == (None, 0.0)
+        assert specs["r2@0.3"] == ("r2", 0.3)
+        assert specs["r_macro@1.0"] == ("r_macro", 1.0)
+
+    def test_default_specs_keep_the_m1_registration(self):
+        """`--lambdas` 無しは M-1 の事前登録の3条件のまま（ADR-0050 の 2026-09-21 追記）。"""
+        assert risk_specs(None, 1.0) == {"mu_only": (None, 0.0), "r2": ("r2", 1.0),
+                                         "r_macro": ("r_macro", 1.0)}
+        assert set(build_conditions(risk_axis=True)) == set(RISK_CONDS)
+
+    @pytest.mark.parametrize("bad", [[0.0], [0.1, 0.0], [-0.1],
+                                     [float("nan")], [float("inf")]])
+    def test_zero_negative_or_non_finite_lambda_stops(self, bad):
+        """λ=0 は `mu_only` と同一＝比べても差が構造的にゼロ（黙って「差なし」が出る形）。"""
+        with pytest.raises(ValueError, match="λ"):
+            build_conditions(risk_axis=True, lambdas=bad)
+
+    def test_duplicates_are_dropped_and_sorted(self):
+        """同じ λ を2回測ると検定数だけが増えて α が不当に締まる。"""
+        assert normalize_lambdas([1.0, 0.1, 0.1]) == [0.1, 1.0]
+
+    def test_close_lambdas_do_not_collapse_into_one_name(self):
+        specs = risk_specs([0.1234561, 0.1234562])
+        assert len(specs) == 1 + 2 * 2
+
+    def test_lambdas_without_risk_axis_stop(self):
+        with pytest.raises(ValueError, match="--lambdas"):
+            build_conditions(lambdas=[0.1])
+
+    def test_m6_gate_has_twelve_tests_above_the_p_floor(self):
+        """1モデル x 2指標 x 6条件 = 12 検定。α は p の下限 2/(n_boot+1) より上（ADR-0063 §5）。"""
+        conds = build_conditions(risk_axis=True, lambdas=self.LAMS)
+        assert 1 * len(METRICS) * (len(conds) - 1) == 12
+        alpha = bonferroni_alpha(1, len(conds))
+        assert alpha == pytest.approx(0.05 / 12)
+        assert alpha > 2 / (2000 + 1)
+
+
+class TestRiskLambdaSource:
+    """λ は**画面に U を出すプラグイン**から取る（#808）。
+
+    `MODEL_SPECS` の設定元から取っていた間は、M-6 を M-2（`macro_gbdt`）の λ=1.0 で、
+    M-1 と並べた M-6 を M-1 の λ で黙って測る形だった。
+    """
+
+    def test_every_model_has_a_screen_plugin(self):
+        assert set(RISK_LAMBDA_PLUGIN) == set(MODEL_SPECS)
+
+    def test_m6_lambda_does_not_come_from_the_panel_source(self):
+        assert MODEL_SPECS["elasticnet"][0] == "macro_gbdt"     # パネル設定は M-2 から借りる
+        assert RISK_LAMBDA_PLUGIN["elasticnet"] == "macro_enet"  # λ は M-6 の画面から
+        assert production_risk("elasticnet")[0] == 0.0           # #807 の既定
+        assert production_risk("xgb_m2")[0] > 0                  # 取り違えると M-2 の λ で測る
+
+    def test_m6_without_lambdas_stops(self):
+        with pytest.raises(ValueError, match="--lambdas"):
+            resolve_risk_lambda(["elasticnet"])
+
+    def test_m1_resolves_to_its_screen_default(self):
+        lam = resolve_risk_lambda(["risk_return"])
+        assert lam > 0 and lam == production_risk("risk_return")[0]
+
+    def test_models_with_different_defaults_stop(self):
+        with pytest.raises(ValueError, match="--lambdas"):
+            resolve_risk_lambda(["risk_return", "elasticnet"])
+
+
+class TestRiskBaseCond:
+    """分母は各モデルの画面が既定で出す並び（#808）。M-1 は r2、M-6 は mu_only。"""
+
+    def test_m1_base_is_the_preregistered_r2(self):
+        specs = risk_specs(None, resolve_risk_lambda(["risk_return"]))
+        assert risk_base_cond(["risk_return"], specs) == RISK_BASE_COND == "r2"
+
+    def test_m1_with_explicit_lambdas_uses_its_default_lambda(self):
+        assert risk_base_cond(["risk_return"], risk_specs([0.3, 1.0])) == "r2@1.0"
+
+    def test_m1_without_its_default_lambda_stops(self):
+        """分母の無い比較になる。"""
+        with pytest.raises(ValueError, match="条件に無い"):
+            risk_base_cond(["risk_return"], risk_specs([0.3]))
+
+    def test_m6_base_is_mu_only(self):
+        assert risk_base_cond(["elasticnet"], risk_specs([0.1, 0.3, 1.0])) == RISK_NO_AXIS
+
+    def test_models_with_different_bases_stop(self):
+        """判定の向きが1本の表で混ざる。別々に回す。"""
+        with pytest.raises(ValueError, match="別々に"):
+            risk_base_cond(["risk_return", "elasticnet"], risk_specs([0.1, 1.0]))
+
+    def test_verdict_names_the_actual_base(self):
+        assert "(mu_only)" in verdict_text("risk_axis", 7, [], [], base="mu_only")
+        assert "(r2)" in verdict_text("risk_axis", 3, [], [])
 
 
 class TestMonthEndBound:
@@ -343,6 +457,22 @@ class TestApplyRiskAxis:
         got, _m, _d = apply_risk_axis(resid, meta, rmap, 2.0)
         # R = 1,2,3 → 標本標準偏差 1.0 → z = -1, 0, +1
         assert [yh for yh, _y in got["2020-01"]] == pytest.approx([3.0, 2.0, 1.0])
+
+    def test_raw_scale_subtracts_lambda_times_the_raw_risk(self):
+        """`standardize=False` は画面と同じ U = μ̂ − λR（`--risk-scale raw`・#808）。"""
+        resid, meta = self._panel()
+        rmap = {("2020-01", f"E{i}"): 0.1 * i for i in (1, 2, 3)}
+        got, _m, _d = apply_risk_axis(resid, meta, rmap, 2.0, standardize=False)
+        assert [yh for yh, _y in got["2020-01"]] == pytest.approx([0.8, 1.6, 2.4])
+
+    def test_raw_scale_depends_on_the_scale_of_r(self):
+        """生の R ではスケールが効く（λ がスライダーと同じ意味を持つ代わりに）。"""
+        resid, meta = self._panel()
+        small = {("2020-01", f"E{i}"): 0.1 * i for i in (1, 2, 3)}
+        large = {k: v * 10.0 for k, v in small.items()}
+        a, _m, _d = apply_risk_axis(resid, meta, small, 1.0, standardize=False)
+        b, _m2, _d2 = apply_risk_axis(resid, meta, large, 1.0, standardize=False)
+        assert [yh for yh, _y in a["2020-01"]] != pytest.approx([yh for yh, _y in b["2020-01"]])
 
     def test_targets_are_untouched(self):
         """y_true は変換しない（変えたら測っている対象そのものが変わる）。"""

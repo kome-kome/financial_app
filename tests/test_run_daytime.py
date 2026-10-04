@@ -308,6 +308,40 @@ class TestDemeanGateMeasuresTheTargetAxis:
         assert argv[argv.index("--stride") + 1] == "1"
 
 
+class TestRiskAxisM6GateMeasuresTheScreenOrdering:
+    """M-6 のリスク軸ジョブ（#808）は λ を明示し、画面と同じ生の R で、間引かずに測る。
+
+    `--lambdas` を落とすと λ が M-6 の既定 0 に解決されて止まり（平日1日ぶんの枠が消える）、
+    `--risk-scale raw` を落とすと z-score の λ（画面の約 4.7 倍）で測って exit 0 のまま残る。
+    """
+
+    KEY = "gate:risk-axis-m6"
+
+    def test_the_job_runs_the_risk_axis_on_m6(self):
+        argv = rd.JOBS[self.KEY].argv
+        assert "--risk-axis" in argv
+        assert argv[argv.index("--models") + 1] == "elasticnet"
+        assert argv[argv.index("--risk-scale") + 1] == "raw"
+
+    def test_lambdas_are_explicit_and_positive(self):
+        from scripts.momentum_gate import normalize_lambdas
+
+        argv = rd.JOBS[self.KEY].argv
+        vals = [float(v) for v in argv[argv.index("--lambdas") + 1].split(",")]
+        assert normalize_lambdas(vals) == vals   # 昇順・重複なし・正（0 を含むと止まる）
+
+    def test_the_job_measures_at_full_resolution(self):
+        """`--smoke` の共通域は間引きで壊れるので読まない（ADR-0050 Decision 3）。"""
+        argv = rd.JOBS[self.KEY].argv
+        assert "--smoke" not in argv
+        assert argv[argv.index("--stride") + 1] == "1"
+
+    def test_the_m1_job_keeps_its_registration(self):
+        """M-1 は分母 r2・z-score・λ は既定（ADR-0050 の 2026-09-21 追記）のまま。"""
+        argv = rd.JOBS["gate:risk-axis"].argv
+        assert not {"--models", "--lambdas", "--risk-scale"} & set(argv)
+
+
 class TestBudgetFitsTheWindow:
     INSTALLER = ROOT / "scripts" / "install_daytime_task.ps1"
 
@@ -413,7 +447,7 @@ class TestParallelSensitivity:
 
     @pytest.mark.parametrize("key", ["beta", "tune:macro_gbdt", "tune:macro_dlm",
                                      "gate:interactions", "gate:max-features", "gate:ttm",
-                                     "gate:demean", "bench:rhat-scale"])
+                                     "gate:demean", "gate:risk-axis-m6", "bench:rhat-scale"])
     def test_computations_are_sensitive(self, key):
         """MCMC も探索も昇格ゲートも、数値の揺れが**採否や重みそのもの**を変える。"""
         assert rd.JOBS[key].parallel_sensitive is True
