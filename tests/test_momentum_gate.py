@@ -27,7 +27,7 @@ from scripts.momentum_gate import (
     _month_end_bound, _num, _panel_stats, _restrict, _restrict_months,
     apply_risk_axis, base_of, bonferroni_alpha, build_conditions, mode_of,
     normalize_lambdas, production_risk, quantile_risk_profile, resolve_risk_lambda,
-    risk_base_cond, risk_by_ym, risk_common_keys, risk_specs, verdict_text,
+    risk_base_cond, risk_by_ym, risk_common_keys, risk_cond_name, risk_specs, verdict_text,
 )
 
 
@@ -365,6 +365,16 @@ class TestRiskBaseCond:
 
     def test_m6_base_is_mu_only(self):
         assert risk_base_cond(["elasticnet"], risk_specs([0.1, 0.3, 1.0])) == RISK_NO_AXIS
+
+    def test_m2_base_is_its_screen_default_ordering(self):
+        """M-2 の分母は画面の既定の並び（#814・2026-10-05 時点は `r_macro@1.0`）。
+
+        期待値を書き写さず既定から作る——既定を変えたら分母も追随するのが正しい挙動で、
+        書き写すと「既定を変えたのに旧既定を分母に測る」形をテストが固定してしまう。
+        """
+        lam, axis = production_risk("xgb_m2")
+        want = RISK_NO_AXIS if lam <= 0 else risk_cond_name(axis, lam)
+        assert risk_base_cond(["xgb_m2"], risk_specs([0.1, 0.3, 1.0])) == want
 
     def test_models_with_different_bases_stop(self):
         """判定の向きが1本の表で混ざる。別々に回す。"""

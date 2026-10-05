@@ -342,6 +342,42 @@ class TestRiskAxisM6GateMeasuresTheScreenOrdering:
         assert not {"--models", "--lambdas", "--risk-scale"} & set(argv)
 
 
+class TestRiskAxisM2GateMeasuresTheScreenOrdering:
+    """M-2 のリスク軸ジョブ（#814）。形は M-6 と同じで、分母だけが画面の既定（λ=1.0 × R_macro）。
+
+    `--lambdas` に画面の既定 λ が入っていないと、分母（本番の並び）が条件に無いとして
+    `risk_base_cond` が止まる＝平日1日ぶんの枠が exit≠0 で消える。ここで先に捕まえる。
+    """
+
+    KEY = "gate:risk-axis-m2"
+
+    def test_the_job_runs_the_risk_axis_on_m2(self):
+        argv = rd.JOBS[self.KEY].argv
+        assert "--risk-axis" in argv
+        assert argv[argv.index("--models") + 1] == "xgb_m2"
+        assert argv[argv.index("--risk-scale") + 1] == "raw"
+
+    def test_lambdas_are_explicit_and_positive(self):
+        from scripts.momentum_gate import normalize_lambdas
+
+        argv = rd.JOBS[self.KEY].argv
+        vals = [float(v) for v in argv[argv.index("--lambdas") + 1].split(",")]
+        assert normalize_lambdas(vals) == vals   # 昇順・重複なし・正（0 を含むと止まる）
+
+    def test_the_lambdas_contain_the_screen_default(self):
+        from scripts.momentum_gate import risk_base_cond, risk_specs
+
+        argv = rd.JOBS[self.KEY].argv
+        vals = [float(v) for v in argv[argv.index("--lambdas") + 1].split(",")]
+        risk_base_cond(["xgb_m2"], risk_specs(vals))   # 分母が無ければ ValueError
+
+    def test_the_job_measures_at_full_resolution(self):
+        """`--smoke` の共通域は間引きで壊れるので読まない（ADR-0050 Decision 3）。"""
+        argv = rd.JOBS[self.KEY].argv
+        assert "--smoke" not in argv
+        assert argv[argv.index("--stride") + 1] == "1"
+
+
 class TestBudgetFitsTheWindow:
     INSTALLER = ROOT / "scripts" / "install_daytime_task.ps1"
 
@@ -447,7 +483,8 @@ class TestParallelSensitivity:
 
     @pytest.mark.parametrize("key", ["beta", "tune:macro_gbdt", "tune:macro_dlm",
                                      "gate:interactions", "gate:max-features", "gate:ttm",
-                                     "gate:demean", "gate:risk-axis-m6", "bench:rhat-scale"])
+                                     "gate:demean", "gate:risk-axis-m6", "gate:risk-axis-m2",
+                                     "bench:rhat-scale"])
     def test_computations_are_sensitive(self, key):
         """MCMC も探索も昇格ゲートも、数値の揺れが**採否や重みそのもの**を変える。"""
         assert rd.JOBS[key].parallel_sensitive is True

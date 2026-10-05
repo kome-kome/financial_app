@@ -344,6 +344,22 @@ JOBS: dict[str, Job] = {
         measured_min=6.6,
         parallel_sensitive=True,   # 他の gate と同じ理由（採否が CI の符号で決まる）
     ),
+    # M-2 の画面の既定の並び（#814）。M-2 の本番は λ=1.0 × R_macro で、M-6 が上で有意に劣後した
+    # 形そのもの。分母は `risk_base_cond` が M-2 の既定から `r_macro@1.0` と導出する＝M-1（r2）とも
+    # M-6（mu_only）とも違うので単独で回す（ADR-0050 の 2026-10-05・その2 追記）。
+    "gate:risk-axis-m2": Job(
+        name="gate_risk_axis_m2",
+        argv=("{python}", "-m", "scripts.momentum_gate", "--risk-axis",
+              "--models", "xgb_m2", "--lambdas", "0.1,0.3,1.0", "--risk-scale", "raw",
+              "--stride", "1", "--allow-full-pull", "--refresh-cache"),
+        why="M-2 の画面の既定の並び（U = μ̂ − 1.0 × R_macro・分母）を、μ̂ だけの並び（mu_only）と"
+            "他の λ・横軸と比べる（#814）。λ=0.1/0.3/1.0 × r2/r_macro の7条件・12検定。"
+            "**r_macro は時点不変の 2026年スナップショット＝未来情報を含む上限**。",
+        # **未実測**。M-6（6.6分・ElasticNet の CV 158.8秒）を土台に、M-2 の XGBoost の CV が
+        # 1回 約41秒（2026-09-20 `gate_ttm` の実測）であることから置いた。初回の実走で差し替える。
+        measured_min=7.0,
+        parallel_sensitive=True,   # 他の gate と同じ理由（採否が CI の符号で決まる）
+    ),
 
     # ── 最新業績の供給（#424 の子タスク1・ADR-0051）────────────────────────
     # #503 で GHA cron を止めて以降、H1 と会社予想は**どこからも収集されていない**

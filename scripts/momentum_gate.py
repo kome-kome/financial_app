@@ -228,6 +228,15 @@ demean 側の月平均が0になっていなければ停止する。どちらも
 r_macro を同じ λ で比べる意味は無くなる（どちらも分母と比べるだけ）。M-1 の事前登録
 （z-score・λ=1.0）は変えていない。
 
+### M-2 を測るとき（#814）
+
+    python -m scripts.momentum_gate --risk-axis --models xgb_m2 --lambdas 0.1,0.3,1.0 --risk-scale raw
+
+M-2 の画面の既定は λ=1.0 × R_macro なので、`risk_base_cond` が分母を **`r_macro@1.0`** と導出する
+（M-1 の `r2`・M-6 の `mu_only` のどちらとも違う＝単独で回す）。μ̂ は M-6 と同じく fold ごとの
+OOF 予測で、画面の `mu_raw`（全データで学び直した最終モデル）とは単位が同じで散らばりの保証は無い
+（ADR-0050 の 2026-10-05・その2 追記）。
+
 ## M-1 を測るときの注意
 
 M-1 は `macro_nan_ok=False`（strict）で**母集団自体が M-2/M-6 と別物**なので、パネルを共有
@@ -386,6 +395,7 @@ RISK_BASE_COND = "r2"
 # なので本番の並びは `mu_only` であり、M-1（λ=1.0・r2）と分母が違う。分母が違うモデルは
 # 同時に測れない（`risk_base_cond` が止める）ので、M-6 を既定へ足すと `--models` を渡さない
 # `gate:risk-axis` が止まる。M-6 は `--models elasticnet --lambdas … --risk-scale raw` で別に回す（#808）。
+# M-2 も分母が `r_macro@1.0`（画面の既定 λ=1.0 × R_macro）で、`--models xgb_m2` で別に回す（#814）。
 RISK_MODELS = ["risk_return"]
 # U を画面へ出すプラグイン（λ と横軸の既定の唯一の源）。**`MODEL_SPECS` の設定元とは別物**——
 # M-6 のパネル設定は M-2（`macro_gbdt`）から借りているので、そちらから λ を取ると M-6 を
