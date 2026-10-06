@@ -4,3 +4,6 @@ pytest==9.0.3
 # pin した依存に後から公表された脆弱性の照合（Issue #723・.github/workflows/dependency-audit.yml）。
 # 評価（2026-09-24）: PyPA 管理・Apache-2.0 / PyPI 月間 24.3M DL / 2.10.1 自身の既知脆弱性なし
 pip-audit==2.10.1
+# 未定義名・import 漏れの静的検出（Issue #724・ruff.toml で F 系に限定・ci.yml で実行）。
+# 評価（2026-10-07）: Astral 管理・MIT / PyPI 月間 3.0億 DL / 0.16.10 自身の既知脆弱性なし（OSV 記録なし。CVE-2025-62518 は 0.14.2 で修正済み）
+ruff==0.16.10

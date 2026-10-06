@@ -43,6 +43,12 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt -r requirements-dev.txt
 
+      # 未定義名・import 漏れ（ruff の F 系・#724）。テストが通らない経路（except 節や
+      # まれな分岐）の誤りは pytest では実行されるまで出ないので、静的に読んで拾う。
+      # ルールは ruff.toml が持つ（ローカルと同じ判定）。数秒で終わるので pytest の前に置く。
+      - name: Run ruff (F rules)
+        run: ruff check --output-format=github .
+
       # --durations: 遅い順の上位を毎回ログへ出す（伸びた箇所を行タイムスタンプから
       # 再構成しなくて済むように・#703）。
       - name: Run pytest

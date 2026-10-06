@@ -366,7 +366,7 @@ def main() -> int:
     dst_url = _swap_db(base_url(), DST_DB)
     print(f"予行用 source: {mc.mask_url(src_url)}")
     print(f"予行用 dest  : {mc.mask_url(dst_url)}")
-    print(f"実 financial_db には一切触れません\n")
+    print("実 financial_db には一切触れません\n")
 
     adm = admin_engine()
     try:

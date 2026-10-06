@@ -1,0 +1,24 @@
+# ruff の設定（#724）。CI（.github/workflows/ci.yml）とローカルで同じ判定にするため、
+# 引数ではなくここに置く。範囲は F 系（pyflakes 相当＝未定義名 F821・再定義 F811・
+# 辞書キーの重複 F601 など）だけ。format・型・その他のルールは差分量に見合わないので入れない。
+# 縛りは tests/test_ci_lint.py が持つ（select を狭める・CI のステップを消すと落ちる）。
+
+target-version = "py313"   # render.yaml の PYTHON_VERSION と揃える
+
+[lint]
+select = ["F"]
+
+# 未使用 import。導入時点（2026-10-07）で 143件あり、機械的に消すとほかのモジュールや
+# テストがそこ経由で import している名前（再エクスポート）まで消える。実害は無い
+# （import 漏れ＝未定義名は F821 が別に拾う）ので外し、後片付けは #825 で行う。
+ignore = ["F401"]
+
+[lint.per-file-ignores]
+# collector_utils 等をスター import している4本（導入時点 F405 337件・F403 8件）。
+# スター import のあるファイルでは未定義名も F405 になるため、この4本では F821 が効かない。
+# 導入時点で F405 の名前はすべてスター import 元の公開名に解決できた（隠れた未定義名 0）。
+# 明示 import へ置き換えて死角を消すのは #824。
+"collector.py" = ["F403", "F405"]
+"collector_prices.py" = ["F403", "F405"]
+"collector_financials.py" = ["F403", "F405"]
+"collector_master.py" = ["F403", "F405"]

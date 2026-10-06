@@ -1157,7 +1157,6 @@ class TestTuningSnapshotCacheForDlm:
     def test_search_calls_load_prices_once_across_candidates(self, monkeypatch):
         """δ/β_v のみ違う候補間（macro_features・母集団は不変）は load_prices/
         load_macro_levels を1回だけ実行する（Issue #304）。"""
-        import asyncio
         import plugins.macro_dlm as dlm
         from plugins.tuning import SearchDim, search
 

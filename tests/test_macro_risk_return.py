@@ -436,7 +436,6 @@ class TestSelectMacroFeatures:
 
     def test_bic_respects_max_features(self):
         plugin = MacroRiskReturnPlugin()
-        samples = self._make_samples(300)
         feat_names = [f"f{i}" for i in range(10)]
         # 全列をランダムノイズにして max_features=2 で上限が守られることを確認
         import random

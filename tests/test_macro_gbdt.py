@@ -158,7 +158,6 @@ class TestParity:
     def test_m1_has_interaction_columns_when_macro_enabled(self):
         prices_by_co, fin_by_co, companies = self._make_minimal_inputs()
         fin_feats = ["per"]
-        macro_cache_dummy = {}
         # マクロを付けても macro_cache が空だと全スキップになるので、
         # マクロなしで交差項は生成されないことを確認
         _, _, _, feats_m1 = build_snapshots(
@@ -253,7 +252,6 @@ class TestLeak:
         import xgboost as xgb
 
         eval_sets_received = []
-        original_fit = xgb.XGBRegressor.fit
 
         def mock_fit(self, X, y, eval_set=None, verbose=False, **kwargs):
             if eval_set:
@@ -263,14 +261,10 @@ class TestLeak:
             self.n_estimators = 100
             return self
 
-        n_features = 3
         n_train = 50
-        n_test = 10
-        train_samples = [([float(i % 7), float(i % 5), float(i % 3)], float(i) * 0.01) for i in range(n_train)]
-        test_samples  = [([1.0, 2.0, 3.0], 0.05) for _ in range(n_test)]
 
         best_iters = []
-        callback = _make_xgb_fit_predict(
+        _make_xgb_fit_predict(
             {"max_depth": 3, "learning_rate": 0.1, "subsample": 0.8, "colsample_bytree": 0.8,
              "min_child_weight": 1, "reg_lambda": 1.0, "reg_alpha": 0.0,
              "n_estimators": 100, "early_stopping_rounds": 10,
@@ -400,7 +394,6 @@ class TestExecuteSmoke:
         base = datetime.date(2018, 1, 5)
 
         PX = type("PX", (), {})
-        FIN = type("FIN", (), {})
         CO = type("CO", (), {})
 
         prices_by_co = defaultdict(list)
