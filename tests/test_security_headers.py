@@ -96,3 +96,32 @@ def test_no_inline_handlers_or_scripts_in_templates():
         if inline_script_re.search(text):
             offenders.append(f"{name}: インライン<script>")
     assert not offenders, "CSP違反となるインラインJSが残存: " + "; ".join(offenders)
+
+
+def test_no_inline_handlers_in_js_generated_html():
+    """static/js/*.js が文字列で組み立てる HTML にインラインイベントハンドラが無いこと（#811）。
+
+    テンプレートの検査は JS が innerHTML へ流す HTML を見ないので、M-3 の行の onclick が
+    取り残されていた（クリックしても CSP の script-src-attr で黙って止まる）。
+    行クリック等は data-click＋委譲（analysis.js の _wireDelegate）で書く。
+    `el.onclick = fn` のようなプロパティ代入は CSP に抵触しないので、直前が `.`・英数字の
+    ものは除外し、属性値の書き出し（引用符か `${`）が続くものだけを拾う。
+    """
+    import glob
+    import re
+
+    base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    attr_handler_re = re.compile(
+        r'(?<![\w.$])on(click|dblclick|change|input|submit|reset|key[a-z]+|mouse[a-z]+|pointer[a-z]+'
+        r'|focus[a-z]*|blur|load|error|scroll|wheel|drag[a-z]*|drop|contextmenu|select|toggle)'
+        r'\s*=\s*(["\']|\$\{)', re.I)
+    offenders = []
+    for path in sorted(glob.glob(os.path.join(base, "static", "js", "*.js"))):
+        name = os.path.basename(path)
+        with open(path, encoding="utf-8") as f:
+            for lineno, line in enumerate(f, 1):
+                if attr_handler_re.search(line):
+                    offenders.append(f"{name}:{lineno}")
+    assert not offenders, (
+        "JS が生成する HTML にインラインイベントハンドラが残存（data-click＋委譲へ移すこと）: "
+        + ", ".join(offenders))
