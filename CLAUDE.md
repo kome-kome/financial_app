@@ -79,27 +79,24 @@
 
 ---
 
-## GitHub 協調ワークフロー
+## GitHub ワークフロー（Issue の自動解決）
 
-デスクトップ版 Claude Code（ここ）と Web版（claude.ai/code）が `kome-kome/financial_app` 経由で協調。PR は Web版でレビュー → main マージ。
+Issue は `/next-issue` が優先度順に回す（人は計画承認だけ。PR→CI→squash 自動マージ→次の Issue。手動マージ廃止）。main マージ＝Render 自動デプロイ。
 
-| 規模 | ブランチ | 手順 |
-|---|---|---|
-| バグ修正・小改善 | `main` 直接 | commit → push |
-| 機能追加・大きな変更 | `feature/xxx` | branch → push → PR |
+- **main へ直接 push しない**。Issue 外の依頼も PR→CI 通過後に `gh pr merge --squash --match-head-commit`。
+- **元のフォルダは main から動かさない**（バッチがここのコードを読む）。ブランチは `.claude/worktrees/` に切る。
+- **バッチ実行中はローカル pytest と元フォルダの pull を見送り、検証を CI に委ねる**（判定と理由は [FUTURE_TASKS.md](docs/FUTURE_TASKS.md)）。
 
 ### タスク管理（残タスクの正本＝GitHub Issues）
 
-web版・ローカル版の双方が同じ Issue を見ることで、**コードと残タスクの乖離を防ぐ**。タスク実体をメモリや docs に二重記載しない（過去はこの二重記載が乖離源になった）。
+タスク実体をメモリや docs に二重記載しない（過去はこの二重記載が乖離源になった）。
 
-- **起票**: `gh issue create`（優先度 `priority:high|medium|low`、本番運用は `ops`）。粒度は「該当／問題／改善案／検証」。
-- **着手**: `gh issue list --state open` で確認 → 対応 Issue を見て作業。
-- **完了の同期**: PR 本文に `Closes #N` を書く。**main マージで Issue が自動クローズ**＝コード状態と残タスクが構造的に一致する。
-- 運用詳細は [FUTURE_TASKS.md](docs/FUTURE_TASKS.md)。
+- **起票**: `gh issue create`（`priority:high|medium|low`、コード変更なしは `ops`）。粒度は「該当／問題／改善案／検証」。`ops`・`triage` は自動選定の対象外。
+- **完了の同期**: PR 本文に `Closes #N`。**main マージで自動クローズ**。
 
 **セッション開始時**: `./run_daytime.ps1 -Queue` と `.logs/daytime_*.log` の最新を見る。実測待ちの Issue は日中枠（#618）が平日に窓へ収まるだけ進めており（#707）、**前回セッション以降に結果が出ている**ことがある。見ないまま同じ実測を手で回すと、並走で結果を汚したうえに丸1日ぶんの計算を捨てる。見積りで置いた `measured_min` は実走ログの `END <step>: exit=0 (N.N分)` から**実測へ差し替える**。
 
-**セッション終了時**: `git status` →（`.env`・機密を除外して）`git add` → `git commit` → `git push`。**残タスクが生じたら Issue 化**してから終了する。
+**セッション終了時**: 変更は（`.env`・機密を除外して）PR にしてマージまで運ぶ（止まったら PR・worktree を残して理由を報告）。**残タスクが生じたら Issue 化**してから終了する。
 
 ---
 
@@ -175,4 +172,4 @@ web版・ローカル版の双方が同じ Issue を見ることで、**コー�
 
 ## テスト方針
 
-実装後は必ず Claude 自身が Python でテストを実行し、動作確認してから報告する。`tests/` は `pytest.ini` で `testpaths=tests` 固定。プラグイン追加時は `tests/test_<plugin>.py` を作成。
+実装後は必ず Claude 自身が Python でテストを実行し、動作確認してから報告する（バッチ実行中は CI に委ねる）。`tests/` は `pytest.ini` で `testpaths=tests` 固定。プラグイン追加時は `tests/test_<plugin>.py` を作成。

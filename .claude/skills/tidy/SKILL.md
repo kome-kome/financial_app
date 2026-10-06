@@ -103,7 +103,7 @@ description: >
 - `git grep <ファイル名>` で能動的な参照が 0 件であることを確認
 
 **セッション終了時**:
-- CLAUDE.md の規約どおり `.env`・機密を除外して `git add` → `git commit` → `git push`
+- CLAUDE.md の規約どおり `.env`・機密を除外してブランチへ commit → PR → CI 通過後に自動マージ（main へ直接 push しない）
 
 ---
 
