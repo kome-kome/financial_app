@@ -217,7 +217,7 @@ async def main(years_back: int, collect_only: bool = False,
 
     # ─── Phase 6: Yahoo Finance 過去株価バックフィル（単独モード）────────────────
     if backfill_yahoo:
-        log(f"[6/6] Yahoo Finance バックフィル 開始")
+        log("[6/6] Yahoo Finance バックフィル 開始")
         log(f"  対象: stock_price が NULL かつ period_end が {JQUANTS_BACKFILL_DAYS}日以前のレコード")
         db6 = SessionLocal()
         try:

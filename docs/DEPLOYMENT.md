@@ -31,7 +31,7 @@ Render の制約と運用形態に合わせて設計すること。
 | **手動のみ** | 半期(H1)財務収集（EDINET 半期/旧四半期Q2） | workflow_dispatch で起動 | GitHub Actions `collect-interim.yml` |
 | **手動のみ（アーカイブ）** | bs_inventory 補完 | workflow_dispatch で起動 | GitHub Actions `old/` 配下（一回性・完了済み） |
 | **UIから手動** | 差分収集・株価更新 | ユーザーがボタン押下 | ローカルの Web UI（`/collection`）。Render では収集・書き込み系 API が一律 403（#733・下の「ローカル / Render 役割分担」） |
-| **自動（CI）** | `pytest` 回帰テスト（Secrets・本番DB非依存） | PR / main への push | GitHub Actions `ci.yml` |
+| **自動（CI）** | `ruff check`（F 系）＋ `pytest` 回帰テスト（Secrets・本番DB非依存） | PR / main への push | GitHub Actions `ci.yml` |
 | **自動（イベント）** | 他ワークフローの failure / cancelled を Issue 化 | 対象ワークフロー完了時（`workflow_run`） | GitHub Actions `notify-failure.yml` |
 | **自動（毎週）** | pin した依存の脆弱性照合（pip-audit・#723）。検出は failure → `notify-failure` が起票 | 毎週月曜 JST 07:23 ＋ `requirements*.txt` を変える PR / main への push | GitHub Actions `dependency-audit.yml` |
 
@@ -178,7 +178,7 @@ python -m scripts.backup_restore --source storage --apply --create-schema `
 
 | カテゴリ | workflow 名 | ファイル | 使うタイミング | 所要時間の目安 |
 |---|---|---|---|---|
-| `[CI]` | pytest 自動テスト | `ci.yml` | PR・main push で自動実行（手動起動不要） | 〜1分 |
+| `[CI]` | ruff（F 系）＋ pytest 自動テスト | `ci.yml` | PR・main push で自動実行（手動起動不要） | 〜1分 |
 | `[定常]` | 差分収集・毎日自動実行 | `daily-incremental.yml` | **毎日 UTC 08:17（JST 17:17）** に自動（#476 で JST 03:00 から前倒し＝大引け 15:30 と EDINET 受付終了 17:15 の直後。根拠は下記「daily-incremental の動作詳細」）。手動で即時更新したい場合は `workflow_dispatch` | **2h05m〜2h38m**（2026-08-02 実測）。#474 以降、週末・祝日明けは gap-fill をほぼ飛ばすため大幅に短い |
 | `[全件]` | XBRL収集・財務データ全件更新 | `full-pipeline.yml` | DB初期構築時・全社バックフィル必要時（`daily-incremental` を `.disabled` に退避して同時実行回避） | 200〜240分 |
 | `[補完]` | マクロのみ収集 | `collect-macro.yml` | `MACRO_SERIES`（為替・金利・指数・コモディティ・ボラ）を Yahoo から収集。新規系列追加や macro_data の鮮度補完。`workflow_dispatch`（years 既定5）。**新系列のバックフィルは years=6 で起動**（yoy は1年+30日で足りるが、将来 zscore 版追加時に再バックフィル不要な余裕幅。#358 コモディティ8系列追加時の運用）。入力 `series` に series_code（カンマ区切り）を渡すと**その系列だけ**を収集する（#444・定義是正後の再収集で GDELT 累積クエリ制限を消費しないため） | 〜数分 |
@@ -201,7 +201,7 @@ python -m scripts.backup_restore --source storage --apply --create-schema `
 |---|---|---|---|---|
 | `[補完]` | PL/BS NULL バックフィル | `.github/workflows/old/refill-pl-bs.yml` | `bs_inventory` 等 旧コホート（〜2022年）が NULL の場合に再取得 | 4〜5時間 |
 
-> **CI（`ci.yml`）**: データ収集系ワークフローとは独立した回帰検知用。`pull_request` と main への `push` で Python 3.13.7 上に `requirements.txt` + `requirements-dev.txt` を入れて `pytest` を実行する。Secrets・外部ネットワーク・本番 DB には一切触れず、`conftest.py` の in-memory SQLite / モックで完結する範囲のみを検証する。
+> **CI（`ci.yml`）**: データ収集系ワークフローとは独立した回帰検知用。`pull_request` と main への `push` で Python 3.13.7 上に `requirements.txt` + `requirements-dev.txt` を入れて `ruff check`（F 系＝未定義名・import 漏れの静的検出・ルールは `ruff.toml`・#724）→ `pytest` の順に実行する。Secrets・外部ネットワーク・本番 DB には一切触れず、`conftest.py` の in-memory SQLite / モックで完結する範囲のみを検証する。
 
 ### ワークフロー失敗の通知（`notify-failure.yml`・Issue #414）
 
