@@ -19,16 +19,17 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from plugins import get_plugin
 from plugins.macro_ensemble import _align
-from plugins.utils import walk_forward_cv_monthly
+from plugins.utils import coerce_params, walk_forward_cv_monthly
 from scripts.momentum_gate import (
     ALPHA, CONDS, METRICS, MODEL_SPECS, MODELS, MOM_WINDOW, N_TESTS,
     RISK_BASE_COND, RISK_CONDS, RISK_LAMBDA_PLUGIN, RISK_MODELS, RISK_NO_AXIS,
     _month_end_bound, _num, _panel_stats, _restrict, _restrict_months,
     apply_risk_axis, base_of, bonferroni_alpha, build_conditions, mode_of,
-    normalize_lambdas, production_risk, quantile_risk_profile, resolve_risk_lambda,
-    resolve_risk_base, risk_base_cond, risk_by_ym, risk_common_keys, risk_cond_name, risk_specs,
-    verdict_text,
+    normalize_lambdas, production_risk, production_use_macro, quantile_risk_profile,
+    resolve_risk_lambda, resolve_risk_base, risk_base_cond, risk_by_ym, risk_common_keys,
+    risk_cond_name, risk_specs, verdict_text,
 )
 
 
@@ -233,17 +234,40 @@ class TestRiskAxisContract:
         """
         assert RISK_CONDS == {"mu_only": None, "r2": "r2", "r_macro": "r_macro"}
         assert RISK_BASE_COND == "r2"
-        conds = build_conditions(risk_axis=True)
+        conds = build_conditions(risk_axis=True, models=RISK_MODELS)
         assert set(conds) == set(RISK_CONDS)
         assert base_of(conds) == "r2"
 
     def test_all_conditions_share_one_production_cond(self):
         """**3条件のパネルは同一**。ここが崩れると μ̂ が条件ごとにずれ、軸の差と混ざる。"""
-        conds = build_conditions(risk_axis=True)
+        conds = build_conditions(risk_axis=True, models=RISK_MODELS)
         assert len(set(conds.values())) == 1
         c = conds["r2"]
-        assert c.use_momentum is False and c.use_macro is True
+        assert c.use_momentum is False
+        assert c.use_macro is production_use_macro(RISK_MODELS)
         assert c.demean_target is False and c.fin_rows == "annual"
+
+    @pytest.mark.parametrize("model", sorted(RISK_LAMBDA_PLUGIN))
+    def test_panel_macro_follows_the_screen_default(self, model):
+        """パネルの `use_macro` は**そのモデルの画面の既定**（#815）。
+
+        `Cond` の既定（True）のままだった間は、M-1（#615 で本番は OFF）をマクロ込みのパネル
+        （BIC が選ぶ列は画面の3列に対し20列）で測り、数値はもっともらしく出た。期待値は書き写さず
+        画面プラグインの既定から作る——既定を変えたらパネルも追随するのが正しい挙動。
+        """
+        screen = coerce_params(get_plugin(RISK_LAMBDA_PLUGIN[model]).params_schema(), {})
+        for c in build_conditions(risk_axis=True, models=[model]).values():
+            assert c.use_macro is bool(screen["use_macro"])
+
+    def test_missing_models_stop(self):
+        """M-1 の既定へ黙って倒すと、M-2/M-6（本番はマクロ ON）をマクロ無しで測る形になる。"""
+        with pytest.raises(ValueError, match="models"):
+            build_conditions(risk_axis=True)
+
+    def test_models_with_different_macro_defaults_stop(self):
+        """M-1（OFF）と M-2（ON）は1枚の `Cond` に畳めない。"""
+        with pytest.raises(ValueError, match="use_macro"):
+            build_conditions(risk_axis=True, models=["risk_return", "xgb_m2"])
 
     def test_mode_name_and_models(self):
         assert mode_of(risk_axis=True) == "risk_axis"
@@ -252,7 +276,7 @@ class TestRiskAxisContract:
 
     def test_bonferroni_matches_the_default_gate(self):
         """1モデル x 2指標 x 2条件 = 4 検定＝既定ゲートと同じ検定数。"""
-        conds = build_conditions(risk_axis=True)
+        conds = build_conditions(risk_axis=True, models=RISK_MODELS)
         assert len(RISK_MODELS) * len(METRICS) * (len(conds) - 1) == N_TESTS
 
     @pytest.mark.parametrize("kwargs", [
@@ -271,13 +295,13 @@ class TestRiskAxisExplicitLambdas:
     LAMS = [0.1, 0.3, 1.0]
 
     def test_conditions_are_mu_only_plus_axis_times_lambda(self):
-        conds = build_conditions(risk_axis=True, lambdas=self.LAMS)
+        conds = build_conditions(risk_axis=True, lambdas=self.LAMS, models=["elasticnet"])
         assert list(conds) == ["mu_only", "r2@0.1", "r2@0.3", "r2@1.0",
                                "r_macro@0.1", "r_macro@0.3", "r_macro@1.0"]
 
     def test_all_conditions_still_share_one_cond(self):
         """λ を増やしてもパネルと CV は1回＝μ̂ はビット単位で一致する。"""
-        conds = build_conditions(risk_axis=True, lambdas=self.LAMS)
+        conds = build_conditions(risk_axis=True, lambdas=self.LAMS, models=["elasticnet"])
         assert len(set(conds.values())) == 1
 
     def test_specs_carry_axis_and_lambda(self):
@@ -290,14 +314,14 @@ class TestRiskAxisExplicitLambdas:
         """`--lambdas` 無しは M-1 の事前登録の3条件のまま（ADR-0050 の 2026-09-21 追記）。"""
         assert risk_specs(None, 1.0) == {"mu_only": (None, 0.0), "r2": ("r2", 1.0),
                                          "r_macro": ("r_macro", 1.0)}
-        assert set(build_conditions(risk_axis=True)) == set(RISK_CONDS)
+        assert set(build_conditions(risk_axis=True, models=RISK_MODELS)) == set(RISK_CONDS)
 
     @pytest.mark.parametrize("bad", [[0.0], [0.1, 0.0], [-0.1],
                                      [float("nan")], [float("inf")]])
     def test_zero_negative_or_non_finite_lambda_stops(self, bad):
         """λ=0 は `mu_only` と同一＝比べても差が構造的にゼロ（黙って「差なし」が出る形）。"""
         with pytest.raises(ValueError, match="λ"):
-            build_conditions(risk_axis=True, lambdas=bad)
+            build_conditions(risk_axis=True, lambdas=bad, models=["elasticnet"])
 
     def test_duplicates_are_dropped_and_sorted(self):
         """同じ λ を2回測ると検定数だけが増えて α が不当に締まる。"""
@@ -313,7 +337,7 @@ class TestRiskAxisExplicitLambdas:
 
     def test_m6_gate_has_twelve_tests_above_the_p_floor(self):
         """1モデル x 2指標 x 6条件 = 12 検定。α は p の下限 2/(n_boot+1) より上（ADR-0063 §5）。"""
-        conds = build_conditions(risk_axis=True, lambdas=self.LAMS)
+        conds = build_conditions(risk_axis=True, lambdas=self.LAMS, models=["elasticnet"])
         assert 1 * len(METRICS) * (len(conds) - 1) == 12
         alpha = bonferroni_alpha(1, len(conds))
         assert alpha == pytest.approx(0.05 / 12)

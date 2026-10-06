@@ -212,6 +212,10 @@ demean 側の月平均が0になっていなければ停止する。どちらも
 だけ使う。よって3条件は `Cond` が同一で、パネルと CV を1回に畳む（`built` / `ran` / `cran`）
 ——**μ̂ をビット単位で一致させるため**で、速さは副産物。別々に回すと一致する保証が無い。
 
+**パネルの `use_macro` は画面の既定から取る**（`production_use_macro`・#815）。M-1 は #615 で
+OFF になったが、9/21〜10/07 は `Cond` の既定（ON）のままで、画面とは別のマクロ込みの M-1
+（BIC が選ぶ列は画面の3列に対し20列）を測っていた（ADR-0050 の 2026-10-07 追記）。
+
 **R の尺度は `--risk-scale` で選ぶ。** 既定の `z` は R を月内で z-score 標準化してから λ を掛ける
 （9/21 の決定3）。`r2`（年率ボラ）と `r_macro`（√(βᵀΣβ)）はスケールが違うので、同じ強さで引いたときの
 軸の質を比べるにはこちらが要る。ただし z の λ=1.0 は画面の λ≈1/sd(R)（M-1 の今買える社で R2 4.6・
@@ -330,6 +334,9 @@ class Cond(NamedTuple):
     どちらが何の軸かを読み手が数えることになる。既定 `use_macro=True` は本番構成
     （M-1・M-2 とも `params_schema()` の既定が True）で、モメンタムの判定は
     従来どおりマクロ ON の下で行われる＝ADR-0045 の実測条件が動かない。
+    **ただし M-1 の本番は #615（2026-09-20）で OFF になった**——この既定値を「今の本番」と
+    読まない。今の本番の構成で測るモード（リスク軸）は、画面プラグインの既定から導出する
+    （`production_use_macro`・#815。9/21〜10/07 はこの既定のまま M-1 をマクロ込みで測っていた）。
 
     #615 で軸が5つになった。`build_interactions` / `max_features` の既定も本番構成
     （M-1 は交互作用あり・列数はプラグインの `params_schema()` 既定）で、
@@ -494,7 +501,8 @@ def build_conditions(windows: list[int] | None = None,
                     fin_rows: bool = False,
                     demean_target: bool = False,
                     risk_axis: bool = False,
-                    lambdas: list[float] | None = None) -> dict[str, Cond]:
+                    lambdas: list[float] | None = None,
+                    models: list[str] | None = None) -> dict[str, Cond]:
     """条件集合 {名前: Cond} を作る。
 
     8つのモードがある。**同時に使えるのは1つだけ**（下記）:
@@ -506,13 +514,15 @@ def build_conditions(windows: list[int] | None = None,
       `max_features` … BIC の列数上限を振る（#615）。他の軸は本番構成に固定
       `fin_rows`     … 通期のみ ＋ 通期＋TTM（#424 子3）。他の軸は本番構成に固定
       `demean_target` … 素の目的変数 ＋ 月平均を引いた目的変数（#615）。他の軸は本番構成に固定
-      `risk_axis`    … U = μ − λR の R を振る（#709）。**パネルは3条件とも本番構成で同一**
+      `risk_axis`    … U = μ − λR の R を振る（#709）。**パネルは全条件とも本番構成で同一**
 
     **`risk_axis` だけは `Cond` を動かさない。** R はモデルの学習に一切入らず、CV が出した
     μ̂ の順位を作り直すときだけ使うので、パネル構築のパラメータではない。3条件とも同じ
     `Cond` を返すのは意図どおりで、呼び出し側はこれを見て**パネルと CV を1回に畳む**
     ——別々に回すと μ̂ が完全一致する保証が無く、軸の差と混ざる（#697 と同型）。
     `lambdas` を渡すと条件は `mu_only` ＋ 軸 × λ になる（`risk_specs`・#808）。これも全て同一の `Cond`。
+    リスク軸では **`models` が必須**で、パネルの `use_macro` は各モデルの画面の既定から取る
+    （`production_use_macro`・#815）。画面の並びを測るモードなので、μ̂ を作るパネルも画面と同じ構成にする。
 
     **2つ以上を同時に指定できない。** 母集団を動かしうる軸を2つ同時に振ると、どちらの
     効果かが分離できない——それは共通域制限をかけても解けない（共通域は「全条件で測れる
@@ -539,8 +549,15 @@ def build_conditions(windows: list[int] | None = None,
         raise ValueError("--lambdas は --risk-axis と一緒にしか使えません（λ はリスク軸の係数）")
     if risk_axis:
         # **全条件が本番構成の同一 `Cond`**（上の docstring を参照）。軸と λ は
-        # `risk_specs` が持ち、パネルには現れない。
-        return {name: Cond(False, MOM_WINDOW) for name in risk_specs(lambdas)}
+        # `risk_specs` が持ち、パネルには現れない。`use_macro` は画面の既定から取る（#815）——
+        # `Cond` の既定 True のままだった間は、M-1（本番は OFF）をマクロ込みのパネルで黙って測った。
+        # モデルを渡さない呼び出しは止める。M-1 の既定へ倒すと、今度は M-2/M-6（本番は ON）を
+        # マクロ無しで黙って測る形になる。
+        if not models:
+            raise ValueError("--risk-axis のパネルはモデルの画面の use_macro 既定で作る。"
+                             "build_conditions に models を渡してください（#815）")
+        use_macro = production_use_macro(models)
+        return {name: Cond(False, MOM_WINDOW, use_macro) for name in risk_specs(lambdas)}
     if macro:
         return {name: Cond(False, MOM_WINDOW, use_macro)
                 for name, use_macro in MACRO_CONDS.items()}
@@ -890,6 +907,16 @@ def macro_base_cond(models: list[str]) -> str:
         raise ValueError(
             f"分母（本番の use_macro）がモデルで違います {wanted}。--models で1つずつ別々に回してください")
     return names.pop()
+
+
+def production_use_macro(models: list[str]) -> bool:
+    """リスク軸モードのパネルの `use_macro`＝各モデルの画面プラグインの既定（#815）。
+
+    リスク軸は画面が出す並びを測るので、μ̂ を作るパネルも画面と同じ構成でなければならない。
+    M-1 は #615 で OFF、M-2・M-6 は ON。導出は `macro_base_cond` と同じ（`RISK_LAMBDA_PLUGIN` の
+    既定）で、書き写さない。既定がモデルで違えば1枚の `Cond` に畳めないので止まる。
+    """
+    return MACRO_CONDS[macro_base_cond(models)]
 
 
 def panel_config_mismatches(models: list[str]) -> list[str]:
@@ -1407,7 +1434,7 @@ def main() -> None:
         conds = build_conditions(windows, macro=args.macro, interactions=args.interactions,
                                  max_features=max_features, fin_rows=args.fin_rows,
                                  demean_target=args.demean_target,
-                                 risk_axis=args.risk_axis, lambdas=lambdas)
+                                 risk_axis=args.risk_axis, lambdas=lambdas, models=models)
     except ValueError as e:
         raise SystemExit(str(e))
     # 列数モードの分母は本番値（プラグイン既定）。**ここで数値を書き写さない**。
