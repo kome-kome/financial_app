@@ -679,7 +679,7 @@ conv_score₁₂ₘ = max(<span class="val">5</span>, min(<span class="val">95</
     <li><strong>rank-IC 差の有意性マトリクス</strong>：各モデルの per-fold rank-IC を<strong>共通 test 期でペアリング</strong>し、差の平均を系列相関を保存する<strong>定常ブートストラップ</strong>（Politis-Romano 1994）で検定。全ペアを同時に比べるので<strong>多重比較を補正</strong>する（Bonferroni：α = 0.05 ÷ 検定した組数。6モデル＝15組なら 0.0033）。比較ビューが <strong>▲</strong>（行モデルが有意に優位＝差の p 値が補正後 α を下回る。このとき同じ α の CI は 0 を跨がない）/ <strong>▼</strong>（劣位）/ <strong>n.s.</strong>（有意差なし）で表示する（ADR-0063）。</li>
     <li><strong>分位単調性</strong>：top−bottom spread へ畳むと隠れる中間分位の U 字/非単調（過学習の兆候）を、期毎 Spearman(分位idx, 分位平均)・隣接分位の正順率・「単調増が偶然でない」片側ブートストラップ p 値で可視化する。</li>
   </ul>
-  <p>ブートストラップ p 値は Davison-Hinkley フロア <code>(count+1)/(n_boot+1)</code> で厳密 0 を避ける。詳細は MODELS.md §9.12。ADR-0004 の OOF-first 哲学を「差の有意性」まで押し進める補強（非矛盾）。</p>
+  <p>ブートストラップ p 値は Davison-Hinkley フロア <code>(count+1)/(n_boot+1)</code> で厳密 0 を避ける。平均がちょうど 0 のリサンプルは両裾に数える（差が全期 0 なら p=1）。詳細は MODELS.md §9.12。ADR-0004 の OOF-first 哲学を「差の有意性」まで押し進める補強（非矛盾）。</p>
 
   <h3>参考文献</h3>
   <div class="ref-list">

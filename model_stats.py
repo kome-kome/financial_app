@@ -89,6 +89,7 @@ def bootstrap_mean_ci(series: list[float], *, n_boot: int = DEFAULT_N_BOOT,
       {mean, ci_lo, ci_hi, p_value, n, n_boot} または n<2 で None。
     p_value: 両側。各裾を (count+1)/(n_boot+1) で推定（Davison-Hinkley フロア）した
              小さい方×2・[0,1] クランプ。全リサンプル同符号でも 0 にならず p≥2/(n_boot+1)。
+             平均がちょうど 0 のリサンプルは両裾に数える（差が全期 0 なら p=1・符号反転で p 不変・#802）。
              系列相関を保存するため素朴 t より保守的。p は alpha に依存しない（CI だけが alpha で決まる）。
              有意判定は `_is_significant`（p と同じ alpha の CI の両方）で別途行う。
     """
@@ -108,9 +109,12 @@ def bootstrap_mean_ci(series: list[float], *, n_boot: int = DEFAULT_N_BOOT,
     # p を厳密 0 にしない（全リサンプル同符号でも p≥2/(n_boot+1)）。有限回数の
     # リサンプルで「H0 下の確率ゼロ」を主張するのは反保守的で、本モジュールの
     # 「paired-t より保守的」という趣旨に反するため。有意判定は `_is_significant` で別途行う。
+    # ちょうど 0 のリサンプルは H0 と区別できないので、どちらの片側でも H0 側（両裾）に数える（#802）。
+    # 片側にだけ数えると全期 0 の系列が p の下限を返し、差の向き（A−B / B−A）で p が割れる。
     b_le0 = sum(1 for x in boot_means if x <= 0.0)
+    b_ge0 = sum(1 for x in boot_means if x >= 0.0)
     p_lower = (b_le0 + 1) / (n_boot + 1)               # H0: mean<=0 片側
-    p_upper = (n_boot - b_le0 + 1) / (n_boot + 1)       # H0: mean>=0 片側
+    p_upper = (b_ge0 + 1) / (n_boot + 1)               # H0: mean>=0 片側
     p_value = min(1.0, 2.0 * min(p_lower, p_upper))
     return {
         "mean": round(obs, 6),
