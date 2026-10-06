@@ -248,43 +248,52 @@ class TestLeak:
     """early_stopping の eval_set が train 月に厳密包含（test 月を含まない）。"""
 
     def test_eval_set_is_subset_of_train(self):
-        """fit_predict コールバックで eval_set に使う行数が n_fit 以降（train の末尾）。"""
+        """fit_predict コールバックが eval_set に train の時系列末尾だけを渡す（#826）。
+
+        行は特徴量の1列目で識別する（train は 0..n_train-1、test は 1000 以上）。y は関数内で
+        winsorize されて値が変わるので識別に使わない。fit は差し替えて受け取った行を記録する
+        だけで、本物の学習は走らせない（未学習の best_iteration は NotFittedError＝
+        AttributeError になり、関数側の getattr の既定値へ落ちる）。
+        """
         import xgboost as xgb
+        from plugins.macro_gbdt import _MIN_FIT_N, _VALID_FRAC
 
-        eval_sets_received = []
+        n_train, n_test = 50, 10
+        train = [([float(i), i + 0.5, 2.0 * i], i * 0.01) for i in range(n_train)]
+        test = [([1000.0 + j, 0.0, 0.0], 0.05) for j in range(n_test)]
+        n_valid = max(1, int(n_train * _VALID_FRAC))
+        n_fit = n_train - n_valid
+        assert n_fit >= _MIN_FIT_N, "eval_set を使わない分岐に入る行数になっている"
 
-        def mock_fit(self, X, y, eval_set=None, verbose=False, **kwargs):
-            if eval_set:
-                eval_sets_received.append(eval_set)
-            # 実際には学習しない
-            self.best_iteration = 10
-            self.n_estimators = 100
+        fit_calls = []
+
+        def spy_fit(self, X, y, eval_set=None, verbose=False, **kwargs):
+            fit_calls.append({"X": np.asarray(X), "eval_set": eval_set})
             return self
 
-        n_train = 50
-
-        best_iters = []
-        _make_xgb_fit_predict(
+        fit_predict = _make_xgb_fit_predict(
             {"max_depth": 3, "learning_rate": 0.1, "subsample": 0.8, "colsample_bytree": 0.8,
              "min_child_weight": 1, "reg_lambda": 1.0, "reg_alpha": 0.0,
              "n_estimators": 100, "early_stopping_rounds": 10,
              "tree_method": "hist", "objective": "reg:squarederror", "random_state": 42},
-            best_iters,
+            [],
         )
+        with patch.object(xgb.XGBRegressor, "fit", spy_fit), \
+             patch.object(xgb.XGBRegressor, "predict", lambda self, X: np.zeros(len(X))):
+            yhat, _ = fit_predict(train, test)
 
-        with patch.object(xgb.XGBRegressor, 'fit', mock_fit):
-            with patch.object(xgb.XGBRegressor, 'predict', lambda self, X: np.zeros(len(X))):
-                with patch.object(xgb.XGBRegressor, '__init__', lambda self, **kwargs: None):
-                    # mock_fit を直接動かす代わりに _VALID_FRAC ロジックのみ確認
-                    pass
+        assert len(yhat) == n_test
+        assert len(fit_calls) == 1, "fit が1回呼ばれていない"
+        eval_set = fit_calls[0]["eval_set"]
+        assert eval_set is not None and len(eval_set) == 1, "early_stopping の eval_set が渡っていない"
 
-        # eval_set に使う行は train の末尾 _VALID_FRAC（= n_train * 0.2 = 10 行）
-        # つまり n_fit = 40、valid_rows = 10 行（インデックス 40-49）
-        from plugins.macro_gbdt import _VALID_FRAC
-        n_valid = max(1, int(n_train * _VALID_FRAC))
-        n_fit = n_train - n_valid
-        assert n_fit > 0 and n_valid > 0
-        assert n_fit + n_valid == n_train
+        fit_ids = fit_calls[0]["X"][:, 0]
+        eval_ids = np.asarray(eval_set[0][0])[:, 0]
+        assert (fit_ids < 1000).all() and (eval_ids < 1000).all(), "test の行が学習側へ漏れている"
+        np.testing.assert_array_equal(
+            fit_ids, np.arange(n_fit), err_msg="学習行が train の先頭 n_fit 行でない")
+        np.testing.assert_array_equal(
+            eval_ids, np.arange(n_fit, n_train), err_msg="eval_set が train の末尾 n_valid 行でない")
 
     def test_future_price_not_in_features(self):
         """スナップショット構築で snap_idx+HORIZON_WEEKS の株価をターゲットに使い、
