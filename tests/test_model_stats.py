@@ -68,6 +68,15 @@ class TestBootstrapMeanCI:
         s = [0.01, 0.03, -0.01, 0.02, 0.04]
         assert ms.bootstrap_mean_ci(s, seed=7) == ms.bootstrap_mean_ci(s, seed=7)
 
+    def test_sign_flip_gives_same_p_with_exact_zeros(self):
+        # ちょうど 0 のリサンプルは両裾に数える（#802）。片側にだけ数えると「A−B」と「B−A」で
+        # p が割れる（変更前は負の側が下限 0.001、正の側が 0.5247）。
+        s = [0.0] * 7 + [0.01]
+        pos = ms.bootstrap_mean_ci(s, seed=0)
+        neg = ms.bootstrap_mean_ci([-x for x in s], seed=0)
+        assert pos["p_value"] == neg["p_value"]
+        assert pos["p_value"] > 0.05 and neg["p_value"] > 0.05
+
 
 class TestPairedICSignificance:
     def test_no_common_periods_returns_none(self):
@@ -94,6 +103,15 @@ class TestPairedICSignificance:
         a = {ym: 0.10 + (0.01 if i % 2 else -0.01) for i, ym in enumerate(yms)}
         b = {ym: 0.10 for ym in yms}
         r = ms.paired_ic_significance(a, b, seed=0)
+        assert r["significant"] is False
+
+    def test_identical_series_p_is_one(self):
+        # 全期で差がちょうど 0 の組は「差がまったく無い」＝p=1（#802。変更前は下限 0.001 を返した）。
+        yms = [f"{2020 + i // 12}-{i % 12 + 1:02d}" for i in range(19)]
+        a = {ym: 0.1 + 0.01 * (i % 5) for i, ym in enumerate(yms)}
+        r = ms.paired_ic_significance(a, dict(a), seed=0)
+        assert r["p_value"] == 1.0
+        assert r["ci_lo"] == 0.0 and r["ci_hi"] == 0.0
         assert r["significant"] is False
 
 

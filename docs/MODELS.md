@@ -986,7 +986,8 @@ paired-t は系列相関を無視して分散を過小評価し、有意差を�
   （p の規則のほうが厳しいので、有意なら CI は 0 を跨がない・[ADR-0063](adr/0063-significance-is-p-below-corrected-alpha.md)）。
   `run_comparison` は全モデルペアの上三角を `significance_matrix` として返し、`/analysis` の比較ビューが
   ▲（行モデル優位）/▼（劣位）/n.s.（有意差なし）で表示する。補正前（#741 まで）は alpha が判定に届かず、
-  15組を「95% CI が 0 を跨がない」で判定していた。
+  15組を「95% CI が 0 を跨がない」で判定していた。p は各裾を `(count+1)/(n_boot+1)` で数え、平均がちょうど 0 の
+  リサンプルは両裾に数える（差が全期 0 なら p=1・差の向きを入れ替えても p は同じ・#802）。
 - **分位単調性**: top−bottom spread へ畳むと中間分位の U 字/非単調（過学習・不安定シグナル）が隠れる。
   `oof_backtest.monotonicity` は期毎の Spearman(分位idx, 分位平均リターン) の mean/std、隣接分位の
   正順率（`adjacent_increasing_rate`）、および「単調増が偶然でない」片側ブートストラップ p 値を返す。
