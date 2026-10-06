@@ -335,7 +335,12 @@ class MacroGbdtPlugin(AnalysisPlugin):
                 "type": "slider",
                 "dtype": "float",
                 "label": "リスク回避度 λ",
-                "description": "U = μ − λ × R。λ=0 でリターン最大化、λ大でリスク重視。",
+                "description": (
+                    "U = μ − λ × R。λ=0 でリターン最大化、λ大でリスク重視。"
+                    "λ=0.1/0.3/1.0 で測った結果（#814）、既定（R_macro・λ=1.0）の並びは測った7つの"
+                    "並びで rank-IC が最も低く、R2 の λ=0.3/1.0 は既定より有意に良い成績でした"
+                    "（λ>1.0 は未測定）。"
+                ),
                 "default": 1.0,
                 "min": 0.0,
                 "max": 5.0,

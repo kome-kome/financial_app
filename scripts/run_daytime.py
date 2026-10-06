@@ -355,9 +355,9 @@ JOBS: dict[str, Job] = {
         why="M-2 の画面の既定の並び（U = μ̂ − 1.0 × R_macro・分母）を、μ̂ だけの並び（mu_only）と"
             "他の λ・横軸と比べる（#814）。λ=0.1/0.3/1.0 × r2/r_macro の7条件・12検定。"
             "**r_macro は時点不変の 2026年スナップショット＝未来情報を含む上限**。",
-        # **未実測**。M-6（6.6分・ElasticNet の CV 158.8秒）を土台に、M-2 の XGBoost の CV が
-        # 1回 約41秒（2026-09-20 `gate_ttm` の実測）であることから置いた。初回の実走で差し替える。
-        measured_min=7.0,
+        # 2026-10-06 の実測（平日の日中枠 8:00・並走なし）。見積り 7.0 から差し替えた。
+        # XGBoost の CV は ElasticNet より速く、`--refresh-cache` 込みでも M-6 の半分以下で済んだ。
+        measured_min=2.7,
         parallel_sensitive=True,   # 他の gate と同じ理由（採否が CI の符号で決まる）
     ),
 
