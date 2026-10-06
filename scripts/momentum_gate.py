@@ -237,6 +237,15 @@ M-2 の画面の既定は λ=1.0 × R_macro なので、`risk_base_cond` が分�
 OOF 予測で、画面の `mu_raw`（全データで学び直した最終モデル）とは単位が同じで散らばりの保証は無い
 （ADR-0050 の 2026-10-05・その2 追記）。
 
+### 分母を上書きするとき（#816）
+
+    python -m scripts.momentum_gate --risk-axis --models xgb_m2 --lambdas 1.0 --risk-scale raw --risk-base mu_only
+
+分母は既定では画面の既定の並びだが、「既定に勝った候補が μ̂ だけの並びに負けないか」のように
+**既定ではない並びを基準に測りたい**ときは `--risk-base <条件名>` で上書きする（`resolve_risk_base`）。
+条件に無い名前は止まる。判定行は「production」ではなく「base ordering」と書き、画面の既定の並びを
+併記する。出力先には `_base-<分母>` が付き、既定を分母にした run の JSON を上書きしない。
+
 ## M-1 を測るときの注意
 
 M-1 は `macro_nan_ok=False`（strict）で**母集団自体が M-2/M-6 と別物**なので、パネルを共有
@@ -626,22 +635,31 @@ _AXIS_VERDICTS: dict[str, tuple[str, str]] = {
     "risk_axis": ("RISK AXIS",
                   "no risk condition beat the production ordering ({base})"),
 }
+# `--risk-base` で分母を上書きした run の文（#816）。「production」と書くと画面の既定と取り違える。
+_RISK_OVERRIDE_NONE = "no risk condition beat the base ordering ({base})"
 
 
 def verdict_text(mode: str, n_conds: int, passed: list[str], regressed: list[str],
-                 base: str | None = None) -> str:
+                 base: str | None = None, production: str | None = None,
+                 overridden: bool = False) -> str:
     """判定行の文言を組み立てる（出力の読み違いをテストで縛るために純関数にしてある）。
 
     窓モードは**窓が2本以上のときだけ** WINDOW SCAN になる（`--windows 12` は2条件で、
     既定ゲートと同じ PROMOTE/REJECT の文言になる）。これは切り出す前からの挙動で変えない。
     `base` はリスク軸モードの分母名（省略時は M-1 の `RISK_BASE_COND`）。他モードでは使わない。
+    `overridden` は分母を `--risk-base` で上書きした run で、判定行に分母と画面の既定の並び
+    （`production`・条件に無ければ None）の両方を出す（#816）。
     """
     if (mode in ("macro", "interactions", "max_features", "fin_rows", "demean_target",
                  "risk_axis")
             or (mode == "windows" and n_conds > 2)):
         head, none = _AXIS_VERDICTS[mode]
         if mode == "risk_axis":
-            none = none.format(base=base or RISK_BASE_COND)
+            b = base or RISK_BASE_COND
+            if overridden:
+                head = f"{head} [base {b} overridden; screen default {production or '-'}]"
+                none = _RISK_OVERRIDE_NONE
+            none = none.format(base=b)
         verdict = (f"{head}: effects that survive the common-domain restriction: "
                    + ", ".join(passed)) if passed else (
                    f"{head}: {none} on the common (ym,ec) domain at the corrected alpha")
@@ -1047,6 +1065,27 @@ def risk_base_cond(models: list[str], specs: dict[str, tuple[str | None, float]]
     return names.pop()
 
 
+def resolve_risk_base(models: list[str], specs: dict[str, tuple[str | None, float]],
+                      override: str | None = None) -> tuple[str, str | None]:
+    """リスク軸モードの `(分母, 画面の既定の並び)`。`override` は `--risk-base`（#816）。
+
+    上書きが無ければ分母は画面の既定の並び（`risk_base_cond`・#808）。上書きは「既に既定に勝った
+    候補が μ̂ だけの並びに負けないか」のように、**既定ではない並びを基準に測りたい**ときに使う。
+    上書き名が条件に無いと分母の無い比較になるので止める。画面の既定の並びが条件に無いのは
+    上書き時に限って許す（その run は既定を測らない）——判定行に出すために None で返す。
+    """
+    if override is None:
+        base = risk_base_cond(models, specs)
+        return base, base
+    if override not in specs:
+        raise ValueError(f"--risk-base {override} は条件に無い（{', '.join(specs)}）")
+    try:
+        production = risk_base_cond(models, specs)
+    except ValueError:
+        production = None
+    return override, production
+
+
 def risk_by_ym(axis: str | None, prices_by_co: dict, ids_by_ym: dict,
                producer: dict) -> dict[tuple, float]:
     """`{(ym, edinet_code): R}` を返す。`axis` は `RISK_CONDS` の値（`None` は軸なし）。
@@ -1223,6 +1262,9 @@ def main() -> None:
     ap.add_argument("--risk-scale", dest="risk_scale", choices=RISK_SCALES,
                     help=f"--risk-axis の R の尺度（既定 {RISK_SCALE_DEFAULT}）。z=月内 z-score"
                          "（ADR-0050 決定3）／raw=画面と同じ生の R（λ がスライダーと同じ意味・#808）")
+    ap.add_argument("--risk-base", dest="risk_base",
+                    help="--risk-axis の分母を条件名で上書きする（例: mu_only・#816）。省略時は"
+                         "画面の既定の並び。条件に無い名前は止まる。出力先に _base-<分母> が付く")
     ap.add_argument("--demean-target", dest="demean_target", action="store_true",
                     help="目的変数モード（素の目的変数 と 月ごとの全銘柄平均を引いた目的変数を"
                          "共通域で比べる・#615）。変換は BIC 選択の前に掛かる。"
@@ -1273,6 +1315,8 @@ def main() -> None:
         lambdas = None
     if args.risk_scale is not None and not args.risk_axis:
         raise SystemExit("--risk-scale は --risk-axis と一緒にしか使えません")
+    if args.risk_base is not None and not args.risk_axis:
+        raise SystemExit("--risk-base は --risk-axis と一緒にしか使えません")
     risk_scale = args.risk_scale or RISK_SCALE_DEFAULT
     try:
         conds = build_conditions(windows, macro=args.macro, interactions=args.interactions,
@@ -1289,16 +1333,20 @@ def main() -> None:
     # M-2 の λ で測る。`--lambdas` 無しで λ が 0 に解決されたら止める（差が構造的にゼロ）。
     default_lam: float | None = None
     specs: dict[str, tuple[str | None, float]] = {}
+    production_base: str | None = None
     try:
         if args.risk_axis:
             if lambdas is None:
                 default_lam = resolve_risk_lambda(models)
             specs = risk_specs(lambdas, default_lam or 0.0)
-            base = risk_base_cond(models, specs)
+            base, production_base = resolve_risk_base(models, specs, args.risk_base)
         else:
             base = base_of(conds, prod_max_features)
     except ValueError as e:
         raise SystemExit(f"中止: {e}")
+    if args.risk_base is not None:
+        print(f"[risk] base={base}（--risk-base で上書き）/ 画面の既定の並び="
+              f"{production_base or '条件に無い'}", flush=True)
     if args.risk_axis and len(set(conds.values())) != 1:
         # μ̂ をビット単位で一致させる前提（パネルと CV を1回に畳む）が崩れている。
         raise SystemExit("中止: リスク軸の条件が同一の Cond を共有していません（μ̂ が条件間でずれる）")
@@ -1319,6 +1367,10 @@ def main() -> None:
     if mode == "risk_axis" and models != RISK_MODELS:
         # M-1 と M-6 は分母が違い別々に回す（#808）。同じファイルへ書くと後の run が前の結果を消す。
         default_out = f"momentum_gate{MODE_SUFFIX[mode]}_{'_'.join(models)}.json"
+    if args.risk_base is not None:
+        # 分母を上書きした run は、画面の既定を分母にした run（#814 等）と別物。同じ名前へ
+        # 書くと前の結果を消す（#816）。
+        default_out = default_out[:-len(".json")] + f"_base-{base}.json"
     out_path = Path(args.json_path) if args.json_path else _OUT_DIR / default_out
 
     db = SessionLocal()
@@ -1651,7 +1703,8 @@ def main() -> None:
               "includes look-ahead and is NOT grounds for changing the default (#709).",
               flush=True)
 
-    verdict = verdict_text(mode, len(conds), passed, regressed, base=base)
+    verdict = verdict_text(mode, len(conds), passed, regressed, base=base,
+                           production=production_base, overridden=args.risk_base is not None)
     print(f"\n=== verdict === {verdict}", flush=True)
     print("判定は common スコープで読む（同一 fold・同一 (ym,ec) 域）。raw は水準のみ。",
           flush=True)
@@ -1669,6 +1722,9 @@ def main() -> None:
                        for name, c in conds.items()},
         "mode": mode,
         "base_cond": base,
+        # 分母を `--risk-base` で上書きしたか（#816）と、そのときの画面の既定の並び（条件に無ければ None）。
+        "risk_base_override": args.risk_base is not None,
+        "production_base": production_base,
         "windows": windows,
         "max_features": max_features,
         # 行の基準モードの健全性（#424 子3）。他モードでは None / 空。

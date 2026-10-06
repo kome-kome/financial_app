@@ -360,6 +360,22 @@ JOBS: dict[str, Job] = {
         measured_min=2.7,
         parallel_sensitive=True,   # 他の gate と同じ理由（採否が CI の符号で決まる）
     ),
+    # M-2 の既定の横軸を決める（#816）。上の run で R2@1.0 は既定（R_macro@1.0）に有意に勝ったが、
+    # μ̂ だけの並びとは比べていない。分母を `--risk-base mu_only` で上書きして、候補 r2@1.0 が
+    # μ̂ だけに有意に負けないかを測る（ADR-0050 の 2026-10-06 追記）。λ=1.0 だけ＝3条件・4検定。
+    "gate:risk-axis-m2-mu": Job(
+        name="gate_risk_axis_m2_mu",
+        argv=("{python}", "-m", "scripts.momentum_gate", "--risk-axis",
+              "--models", "xgb_m2", "--lambdas", "1.0", "--risk-scale", "raw",
+              "--risk-base", "mu_only",
+              "--stride", "1", "--allow-full-pull", "--refresh-cache"),
+        why="M-2 の既定の横軸の候補 r2@1.0 が、μ̂ だけの並び（mu_only・分母に上書き）に有意に"
+            "劣後しないかを測る（#816）。mu_only / r2@1.0 / r_macro@1.0 の3条件・4検定・α 0.0125。",
+        # **未実測**。条件が3つに減るだけで CV は `gate:risk-axis-m2` と同じ1回なので、その実測
+        # 2.7分をそのまま置いた。初回の実走で差し替える。
+        measured_min=2.7,
+        parallel_sensitive=True,   # 他の gate と同じ理由（採否が CI の符号で決まる）
+    ),
 
     # ── 最新業績の供給（#424 の子タスク1・ADR-0051）────────────────────────
     # #503 で GHA cron を止めて以降、H1 と会社予想は**どこからも収集されていない**

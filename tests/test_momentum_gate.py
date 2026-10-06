@@ -27,7 +27,8 @@ from scripts.momentum_gate import (
     _month_end_bound, _num, _panel_stats, _restrict, _restrict_months,
     apply_risk_axis, base_of, bonferroni_alpha, build_conditions, mode_of,
     normalize_lambdas, production_risk, quantile_risk_profile, resolve_risk_lambda,
-    risk_base_cond, risk_by_ym, risk_common_keys, risk_cond_name, risk_specs, verdict_text,
+    resolve_risk_base, risk_base_cond, risk_by_ym, risk_common_keys, risk_cond_name, risk_specs,
+    verdict_text,
 )
 
 
@@ -384,6 +385,49 @@ class TestRiskBaseCond:
     def test_verdict_names_the_actual_base(self):
         assert "(mu_only)" in verdict_text("risk_axis", 7, [], [], base="mu_only")
         assert "(r2)" in verdict_text("risk_axis", 3, [], [])
+
+
+class TestRiskBaseOverride:
+    """`--risk-base` で分母を上書きする（#816）。既定ではない並びを基準に測るための口。"""
+
+    SPECS = risk_specs([1.0])     # mu_only / r2@1.0 / r_macro@1.0
+
+    def test_without_override_the_base_is_the_screen_default(self):
+        base, production = resolve_risk_base(["xgb_m2"], self.SPECS)
+        assert base == production == risk_base_cond(["xgb_m2"], self.SPECS)
+
+    def test_override_returns_both_names(self):
+        base, production = resolve_risk_base(["xgb_m2"], self.SPECS, RISK_NO_AXIS)
+        assert base == RISK_NO_AXIS
+        assert production == risk_base_cond(["xgb_m2"], self.SPECS)
+
+    def test_override_not_in_conditions_stops(self):
+        """分母の無い比較になる。"""
+        with pytest.raises(ValueError, match="条件に無い"):
+            resolve_risk_base(["xgb_m2"], self.SPECS, "r2@0.3")
+
+    def test_override_tolerates_a_missing_screen_default(self):
+        """上書きした run は既定を測らなくてよい（M-1 の既定 r2@1.0 が条件に無い）。"""
+        base, production = resolve_risk_base(["risk_return"], risk_specs([0.3]), RISK_NO_AXIS)
+        assert (base, production) == (RISK_NO_AXIS, None)
+        with pytest.raises(ValueError, match="条件に無い"):
+            resolve_risk_base(["risk_return"], risk_specs([0.3]))   # 上書きが無ければ止まる
+
+    def test_verdict_says_base_not_production_when_overridden(self):
+        """「production」と書くと画面の既定と取り違える。分母と画面の既定の両方を出す。"""
+        v = verdict_text("risk_axis", 3, [], [], base="mu_only",
+                         production="r_macro@1.0", overridden=True)
+        assert "base ordering (mu_only)" in v
+        assert "production" not in v
+        assert "screen default r_macro@1.0" in v
+        hit = verdict_text("risk_axis", 3, ["M-2(XGBoost)/r2@1.0/rank_ic"], [],
+                           base="mu_only", production=None, overridden=True)
+        assert "overridden" in hit and "screen default -" in hit
+
+    def test_verdict_without_override_is_unchanged(self):
+        v = verdict_text("risk_axis", 7, [], [], base="r_macro@1.0", production="r_macro@1.0")
+        assert "production ordering (r_macro@1.0)" in v
+        assert "overridden" not in v
 
 
 class TestMonthEndBound:
