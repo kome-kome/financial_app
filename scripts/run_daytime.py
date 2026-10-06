@@ -388,9 +388,9 @@ JOBS: dict[str, Job] = {
         why="M-6 のマクロ特徴量を外した条件（nomacro）を本番（macro＝分母）と共通 (ym,ec) 域で"
             "比べる（#809）。1モデル × 2指標 ＝ 2検定・α 0.025。ns なら既定は据え置き、nomacro が"
             "有意に上回れば外す候補（既定の変更は別 Issue で ADR-0021 の昇格ゲートへ）。",
-        # **未実測**。M-6 の CV 1回は約159秒（`gate:risk-axis-m6` のログ）で、この run は2条件 × 2段
-        # （各条件の母集団・共通月）＝4回。パネル構築と `--refresh-cache` の取り直しを足して置いた。
-        measured_min=15.0,
+        # 2026-10-06 の実測（夜に -Now -Force で消化・並走なし）。見積り 15.0 から差し替えた。
+        # CV は nomacro（25列）35.0秒・macro（78列）157.4秒で、見積りは全部を macro の速さで数えていた。
+        measured_min=7.8,
         parallel_sensitive=True,   # 他の gate と同じ理由（採否が CI の符号で決まる）
     ),
 
