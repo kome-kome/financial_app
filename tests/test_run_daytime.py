@@ -336,10 +336,49 @@ class TestRiskAxisM6GateMeasuresTheScreenOrdering:
         assert "--smoke" not in argv
         assert argv[argv.index("--stride") + 1] == "1"
 
-    def test_the_m1_job_keeps_its_registration(self):
-        """M-1 は分母 r2・z-score・λ は既定（ADR-0050 の 2026-09-21 追記）のまま。"""
-        argv = rd.JOBS["gate:risk-axis"].argv
-        assert not {"--models", "--lambdas", "--risk-scale"} & set(argv)
+
+class TestRiskAxisM1GateMeasuresTheScreenOrdering:
+    """M-1 のリスク軸ジョブ（#709・#815）は、画面と同じ生の R に画面の既定の λ を掛けて測る。
+
+    9/21 の事前登録は z-score の λ=1.0 で、画面の λ≈4.6（R2）〜7.9（R_macro）に当たる並びを測る形
+    だった（ADR-0050 の 2026-10-07 追記）。`--risk-scale raw` を落とすとその形へ戻り、exit 0 のまま
+    画面とは別物の結果が残る。λ は書き写さず、画面の既定から導出する（`--lambdas` を持たない）。
+    """
+
+    KEY = "gate:risk-axis"
+
+    def test_the_job_measures_on_the_screen_scale(self):
+        argv = rd.JOBS[self.KEY].argv
+        assert "--risk-axis" in argv
+        assert argv[argv.index("--risk-scale") + 1] == "raw"
+
+    def test_lambda_is_derived_from_the_screen_default(self):
+        """`--lambdas` を書くと、画面の既定を変えたときに黙って古い λ を測る。"""
+        from scripts.momentum_gate import RISK_MODELS, resolve_risk_lambda
+
+        argv = rd.JOBS[self.KEY].argv
+        assert "--lambdas" not in argv
+        assert "--models" not in argv          # 既定のモデル（M-1）＝出力先も 9/21 と同じ
+        assert RISK_MODELS == ["risk_return"]
+        assert resolve_risk_lambda(RISK_MODELS) > 0   # 0 に解決されると止まる（平日1日ぶんの枠が消える）
+
+    def test_the_preregistered_conditions_and_tests(self):
+        from scripts.momentum_gate import (RISK_BASE_COND, RISK_MODELS, bonferroni_alpha,
+                                           resolve_risk_base, resolve_risk_lambda, risk_specs)
+
+        argv = rd.JOBS[self.KEY].argv
+        assert "--risk-base" not in argv       # 分母は画面の既定の並び（上書きしない）
+        specs = risk_specs(None, resolve_risk_lambda(RISK_MODELS))
+        assert set(specs) == {"mu_only", "r2", "r_macro"}
+        base, production = resolve_risk_base(RISK_MODELS, specs)
+        assert base == production == RISK_BASE_COND == "r2"
+        assert bonferroni_alpha(1, len(specs)) == pytest.approx(0.0125)   # 4検定
+
+    def test_the_job_measures_at_full_resolution(self):
+        """`--smoke` の共通域は間引きで壊れるので読まない（ADR-0050 Decision 3）。"""
+        argv = rd.JOBS[self.KEY].argv
+        assert "--smoke" not in argv
+        assert argv[argv.index("--stride") + 1] == "1"
 
 
 class TestRiskAxisM2GateMeasuresTheScreenOrdering:

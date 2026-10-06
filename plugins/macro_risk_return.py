@@ -105,7 +105,11 @@ class MacroRiskReturnPlugin(AnalysisPlugin):
                 "type": "slider",
                 "dtype": "float",
                 "label": "リスク回避度 λ",
-                "description": "U = μ − λ × R。λ=0 でリターン最大化、λ大でリスク重視。",
+                "description": (
+                    "U = μ − λ × R。λ=0 でリターン最大化、λ大でリスク重視。"
+                    "既定（R2・λ=1.0）の並びは μ だけの並び（λ=0）と順位の成績に有意な差がなく、"
+                    "横軸を R_macro に替えると有意に下がりました（#815・測ったのは λ=1.0 だけ）。"
+                ),
                 "default": 1.0,
                 "min": 0.0,
                 "max": 5.0,
@@ -117,6 +121,7 @@ class MacroRiskReturnPlugin(AnalysisPlugin):
                 "description": (
                     "R2=実現ボラ（既定）/ R_macro=マクロ起因リスク √(βᵀΣ_macroβ)（per-stock β推論＝macro_beta 蓄積が必要）。"
                     "両者リターン単位で λ の次元整合 U=μ−λR が保たれる。"
+                    "λ=1.0 で測ると、R_macro の並びは R2 の並びより順位の成績が有意に低い（#815）。"
                 ),
                 "options": [
                     {"value": "r2",      "label": "R2 実現ボラティリティ（既定）"},

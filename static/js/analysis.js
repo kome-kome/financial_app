@@ -2142,6 +2142,23 @@ function _mrrPaintChart(v) {
 }
 
 // ランキング表（クライアント算出の U・パレートで描画）。
+// 画面の並び（U = μ − λR）を測った結果（#815・ADR-0050 の 2026-10-07 追記）。測ったのは既定の
+// λ=1.0 だけ（R は画面と同じ生の値・分母は既定の並び R2・λ=1.0）。R2 の並びは μ だけの並び（λ=0）と
+// 有意差なし、R_macro の並びは R2 より rank-IC・売り側スプレッドとも有意に劣後した。
+const _MRR_RISK_MEASURED_LAMBDA = 1.0;
+
+function _mrrLambdaNoteHTML(v) {
+  if (!(v.lambda > 0)) return '';
+  const warn = 'margin-bottom:8px;padding:8px 12px;border-radius:6px;font-size:11px;background:var(--status-warn-bg);color:var(--status-warn-text)';
+  if (v.axis === 'r_macro') {
+    return `<div style="${warn}">R_macro で並べると、λ=1.0 では順位とその後のリターンの相関（rank-IC）がほぼ 0（+0.015）まで落ち、R2 の並び（既定）より rank-IC・売り側の成績とも有意に劣りました（#815）。過去の月にも 2026年に推定した β を当てた、未来情報を含む上限での結果です。</div>`;
+  }
+  if (v.lambda !== _MRR_RISK_MEASURED_LAMBDA) {
+    return `<div style="${warn}">λ=${v.lambda} の並び（U = μ − λR の順）は成績を測っていません（測ったのは既定の λ=${_MRR_RISK_MEASURED_LAMBDA.toFixed(1)} だけ・#815）。</div>`;
+  }
+  return `<div style="font-size:11px;color:var(--text-muted);margin-bottom:8px">既定の並び（R2・λ=1.0）は、μ だけの並び（λ=0）と順位の成績に有意な差がありませんでした（#815）。リスクを引くぶん上位は低ボラ寄りになり、上位の分位は平均リターンがやや低い代わりにボラが低くシャープが高めでした。</div>`;
+}
+
 function _mrrTableHTML(v) {
   if (!v.top.length) {
     return `<div class="text-sm" style="padding:20px;text-align:center;color:var(--text-secondary)">${esc(_riskAxisEmptyMessage(v.axis))}</div>`;
@@ -2184,6 +2201,7 @@ function _mrrTableHTML(v) {
       </div>
       <div class="text-sm" style="color:var(--text-muted)">λ・リスク軸・表示件数は即時反映（再計算不要）</div>
     </div>
+    ${_mrrLambdaNoteHTML(v)}
     <div class="text-sm" style="color:var(--text-muted);margin-bottom:6px;font-size:11px">
       ※ μ_raw は52週（1年）先の年率対数リターン予測（例: 表示10.00% = 年率+10%）。モデルの素の銘柄別推定（収縮なし）。検証 R² は低く推定にはノイズを含むため、
       順位は目安。μ_shrunk はセクター平均への収縮後の保守的推定（参考）。
