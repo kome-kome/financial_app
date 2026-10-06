@@ -93,16 +93,35 @@ else []` により、OFF ではマクロ特徴量が0個になり「1つでも�
     python -m scripts.momentum_gate --macro                       # M-1 のマクロ ON/OFF
     python -m scripts.momentum_gate --macro --models risk_return  # 同上（明示）
 
-**測る対象は M-1 だけ**（`MACRO_MODELS`）。M-2/M-6 は `macro_nan_ok=True` で欠損を nan として
-保持するため母集団がほとんど動かず、そもそも `tuning_search_space()` で `use_macro` を
-探索していない（既定固定）。M-1 の `use_macro` も **#615 で探索軸から外れ、`base_params` で
+**既定で測るのは M-1 だけ**（`MACRO_MODELS`）。M-2/M-6 は `macro_nan_ok=True` で欠損を nan として
+保持するため母集団はほとんど動かない見込みで、`tuning_search_space()` でも `use_macro` を
+探索していない（既定固定）。**だが母集団が動かないことは成績を測らない理由にならない**（#809）。
+M-6 は下の「M-6 を測るとき」の形で別に回す。M-1 の `use_macro` も **#615 で探索軸から外れ、`base_params` で
 False に固定された**（効果を測り終えたため）。**つまりこの軸の ON/OFF を決めるのは、もはや
 探索ではなくこのゲートである。** `macro_names_for` が本番の `use_macro` の既定を読まないのは
 そのため——読むと既定 OFF の日に ON 側まで空になり、両側が同じものになる。
 
-**基準は「マクロ無し」側**（`MACRO_BASE_COND`）。窓モードで基準をモメンタム無しに置いたのと
+**M-1 の基準は「マクロ無し」側**（`MACRO_BASE_COND`）。窓モードで基準をモメンタム無しに置いたのと
 同じ理由で、母集団が広い側を分母にする。縮む側を分母にすると母集団効果が「改善」として
-符号ごと出る。
+符号ごと出る。#615 で M-1 の本番も「マクロ無し」になったので、分母は本番の構成とも一致する。
+
+### M-6 を測るとき（#809）
+
+    python -m scripts.momentum_gate --macro --models elasticnet
+
+M-6 は交互作用を持たないので、マクロ値（同じ月なら全社で同じ値）は予測に「全社に同じ値を足す
+定数」として入るだけで、月内の順位を直接は動かせない——M-1 で #615 が確かめた機構と同じ。
+ところが ADR-0021 の昇格も CONTEXT.md の勝因の記述も、マクロ込みの構成でしか測っていない。
+
+**分母は各モデルの本番の構成**（`macro_base_cond`・画面プラグインの `use_macro` 既定から導出）。
+M-1 は `nomacro`（上と同じ）、M-6 は **`macro`**。分母が違うモデルは同時に指定すると止まるので、
+M-6 は `--models elasticnet` で単独で回す。対比較のブートストラップは向きについて対称なので、
+p は分母の選び方に依存しない（変わるのは差の符号と判定文だけ）。出力先は
+`momentum_gate_macro_elasticnet.json`（M-1 の結果を上書きしない）。
+
+**M-6 のパネルは M-2 の設定（`macro_gbdt`）で作る**（`MODEL_SPECS`）。系列の顔ぶれ・財務列・
+充足率下限・px_* が M-6 自身の既定とずれたら黙って別物を測るので、`panel_config_mismatches` が
+読み込みの前に止める。母集団が動かないとは構造から推論せず、共通域の段で条件ごとに落ちた行数を出す。
 
 **`--windows` と `--macro` は同時に指定できない。** 母集団を動かす軸を2つ同時に振ると、
 共通域へ制限してもどちらの効果かが分離できない——それは #592/#604 が指摘している当のもので、
@@ -334,10 +353,17 @@ CONDS: dict[str, bool] = {"off": False, "on": True}
 # モメンタムの窓モードで基準を「モメンタム無し」に置いたのと同じ理由で、広い側を分母にする。
 MACRO_CONDS: dict[str, bool] = {"nomacro": False, "macro": True}
 MACRO_BASE_COND = "nomacro"
-# マクロ軸を測る意味があるのは M-1 だけ。M-2/M-6 は `macro_nan_ok=True` で欠損を nan として
-# 保持するため `use_macro` が母集団をほとんど動かさず、そもそも `tuning_search_space()` で
-# 探索していない（既定固定）。M-1 だけが strict × 探索軸の組み合わせを持つ。
+# 既定で測るのは M-1 だけ。M-2/M-6 は `macro_nan_ok=True` で欠損を nan として保持するため
+# `use_macro` は母集団をほとんど動かさない見込みだが、**母集団の話であって成績を測らない理由
+# ではない**（#809）。M-6 の本番は `macro` で、分母（`macro_base_cond`）が M-1（`nomacro`）と
+# 違う＝同じ run に入れられないので、既定へ足すと `--models` を渡さない `gate:macro` が止まる。
+# M-6 は `--models elasticnet` で別に回す（日中枠 `gate:macro-m6`）。
 MACRO_MODELS = ["risk_return"]
+# 判定文で使う、マクロ軸の各条件名（`MACRO_CONDS` のキーと一致することをテストが縛る）。
+MACRO_ON_COND = "macro"
+# パネルを借りるモデルが、自分の既定とずれていないか照合するパネル設定の項目（#809）。
+# `_build` が設定元（`MODEL_SPECS`）から読む項目のうち、`Cond` が上書きしないものだけ。
+PANEL_CONFIG_KEYS = ("fin_features", "macro_features", "min_coverage", "price_features")
 
 # 交互作用モード（`--interactions`・#615）。**基準は「交互作用なし」側**——M-1 は strict
 # なので、列が増えるほど「1つでも欠損したら断面を破棄」に当たりやすく母集団が縮みうる。
@@ -637,6 +663,9 @@ _AXIS_VERDICTS: dict[str, tuple[str, str]] = {
 }
 # `--risk-base` で分母を上書きした run の文（#816）。「production」と書くと画面の既定と取り違える。
 _RISK_OVERRIDE_NONE = "no risk condition beat the base ordering ({base})"
+# マクロ軸で分母が「マクロ有り」（M-6 の本番）の run の文（#809）。M-1 の文（no-macro baseline）の
+# ままだと、外した側（nomacro）を基準にしたように読める。
+_MACRO_ON_BASE_NONE = "removing macro (nomacro) did not beat the production configuration (macro)"
 
 
 def verdict_text(mode: str, n_conds: int, passed: list[str], regressed: list[str],
@@ -646,7 +675,8 @@ def verdict_text(mode: str, n_conds: int, passed: list[str], regressed: list[str
 
     窓モードは**窓が2本以上のときだけ** WINDOW SCAN になる（`--windows 12` は2条件で、
     既定ゲートと同じ PROMOTE/REJECT の文言になる）。これは切り出す前からの挙動で変えない。
-    `base` はリスク軸モードの分母名（省略時は M-1 の `RISK_BASE_COND`）。他モードでは使わない。
+    `base` はリスク軸モードの分母名（省略時は M-1 の `RISK_BASE_COND`）と、マクロ軸モードの分母名
+    （`macro` のときだけ文が変わる・#809）。他モードでは使わない。
     `overridden` は分母を `--risk-base` で上書きした run で、判定行に分母と画面の既定の並び
     （`production`・条件に無ければ None）の両方を出す（#816）。
     """
@@ -654,6 +684,8 @@ def verdict_text(mode: str, n_conds: int, passed: list[str], regressed: list[str
                  "risk_axis")
             or (mode == "windows" and n_conds > 2)):
         head, none = _AXIS_VERDICTS[mode]
+        if mode == "macro" and base == MACRO_ON_COND:
+            none = _MACRO_ON_BASE_NONE
         if mode == "risk_axis":
             b = base or RISK_BASE_COND
             if overridden:
@@ -828,6 +860,51 @@ def macro_names_for(kind: str) -> list:
     plugin_name = "macro_risk_return" if kind == "m1" else "macro_gbdt"
     params = coerce_params(get_plugin(plugin_name).params_schema(), {})
     return list(params["macro_features"])
+
+
+def macro_base_cond(models: list[str]) -> str:
+    """マクロ軸モードの分母＝**各モデルの本番の構成**の側の条件名（#809）。
+
+    M-1 は #615 で `use_macro=False` になったので `nomacro`（母集団が広い側＝`MACRO_BASE_COND` とも
+    一致し、9/6・9/20 の形は変わらない）。M-6 の本番は `macro`。**本番の構成はモデル自身の画面
+    プラグイン（`RISK_LAMBDA_PLUGIN`）から取る**——`MODEL_SPECS` の設定元は M-6 で M-2 を指すので、
+    そちらから取ると M-6 の既定を M-2 の既定で黙って代用する（#808 の λ と同じ罠）。
+
+    **分母が違うモデルは同時に測れない**（判定の向きが1本の表で混ざる）ので止める。
+    """
+    wanted: dict[str, str] = {}
+    for model in models:
+        if model not in RISK_LAMBDA_PLUGIN:
+            raise ValueError(f"{model} の画面プラグインが登録されていません（RISK_LAMBDA_PLUGIN）")
+        params = coerce_params(get_plugin(RISK_LAMBDA_PLUGIN[model]).params_schema(), {})
+        wanted[model] = MACRO_ON_COND if params["use_macro"] else MACRO_BASE_COND
+    names = set(wanted.values())
+    if len(names) > 1:
+        raise ValueError(
+            f"分母（本番の use_macro）がモデルで違います {wanted}。--models で1つずつ別々に回してください")
+    return names.pop()
+
+
+def panel_config_mismatches(models: list[str]) -> list[str]:
+    """パネルを借りるモデルの設定が、自分の画面プラグインの既定とずれている項目を列挙する（#809）。
+
+    `_build` は種別ごとに1枚のパネルを作り、設定は `MODEL_SPECS` の設定元から読む——M-6 は
+    M-2（`macro_gbdt`）の設定で作られる。ここがずれると **M-6 を M-6 ではない構成で測り、数値は
+    もっともらしく出る**。空リストなら健全（今は一致している）。比べるのは `Cond` が上書きしない
+    項目だけ（`PANEL_CONFIG_KEYS`）。
+    """
+    problems = []
+    for model in models:
+        source = MODEL_SPECS[model][0]
+        own = RISK_LAMBDA_PLUGIN.get(model, source)
+        if own == source:
+            continue
+        a = coerce_params(get_plugin(source).params_schema(), {})
+        b = coerce_params(get_plugin(own).params_schema(), {})
+        for key in PANEL_CONFIG_KEYS:
+            if a.get(key) != b.get(key):
+                problems.append(f"{model}: {key} が {own} の既定と {source}（パネルの設定元）で違う")
+    return problems
 
 
 def _build(kind: str, args, prices_by_co, fin_by_co, companies, macro_cache,
@@ -1239,7 +1316,8 @@ def main() -> None:
                          "（例: 3,6,12,18,24）。既定は ON/OFF の2条件のまま")
     ap.add_argument("--macro", action="store_true",
                     help="マクロ軸モード（use_macro の ON/OFF を共通域で測る・#604）。"
-                         f"モデル既定は {','.join(MACRO_MODELS)}。--windows とは併用不可")
+                         f"モデル既定は {','.join(MACRO_MODELS)}。分母は各モデルの本番の構成で、"
+                         "M-6 は --models elasticnet で別に回す（#809）。--windows とは併用不可")
     ap.add_argument("--interactions", action="store_true",
                     help="交互作用モード（build_interactions の ON/OFF を共通域で測る・#615）。"
                          "マクロの悪化が「主効果」なのか「交差項が列数上限を食い尽くしたこと」"
@@ -1280,9 +1358,9 @@ def main() -> None:
         args.stride = 5
     set_refresh(args.refresh_cache)
 
-    # M-1 専用モードの既定モデルは M-1 だけ。M-2/M-6 は `macro_nan_ok=True` で欠損を nan
-    # として保持するため `use_macro` が母集団をほとんど動かさず、交互作用も BIC の列数上限も
-    # 持たない（本番構成が `build_interactions=False`）＝いずれも測る動機が無い。
+    # M-1 専用モードの既定モデルは M-1 だけ。M-2/M-6 は交互作用も BIC の列数上限も持たない
+    # （本番構成が `build_interactions=False`）＝測る動機が無い。マクロ軸は M-6 も測るが、
+    # 分母が M-1 と違うので `--models elasticnet` で別に回す（#809・`macro_base_cond`）。
     if args.macro:
         default_models = MACRO_MODELS
     elif args.interactions:
@@ -1340,10 +1418,18 @@ def main() -> None:
                 default_lam = resolve_risk_lambda(models)
             specs = risk_specs(lambdas, default_lam or 0.0)
             base, production_base = resolve_risk_base(models, specs, args.risk_base)
+        elif args.macro:
+            # マクロ軸の分母は各モデルの本番の構成（#809）。M-1 は `nomacro`・M-6 は `macro`。
+            base = macro_base_cond(models)
         else:
             base = base_of(conds, prod_max_features)
     except ValueError as e:
         raise SystemExit(f"中止: {e}")
+    # パネルを借りるモデル（M-6 は M-2 の設定で作る）が自分の既定とずれていたら、読み込む前に止める
+    # （#809）。ずれたまま走ると別物を測り、数値はもっともらしく出る。
+    mismatches = panel_config_mismatches(models)
+    if mismatches:
+        raise SystemExit("中止: パネルの設定がモデル自身の既定と違います: " + " / ".join(mismatches))
     if args.risk_base is not None:
         print(f"[risk] base={base}（--risk-base で上書き）/ 画面の既定の並び="
               f"{production_base or '条件に無い'}", flush=True)
@@ -1366,6 +1452,9 @@ def main() -> None:
     default_out = f"momentum_gate{MODE_SUFFIX[mode]}.json"
     if mode == "risk_axis" and models != RISK_MODELS:
         # M-1 と M-6 は分母が違い別々に回す（#808）。同じファイルへ書くと後の run が前の結果を消す。
+        default_out = f"momentum_gate{MODE_SUFFIX[mode]}_{'_'.join(models)}.json"
+    if mode == "macro" and models != MACRO_MODELS:
+        # M-6 は分母が M-1 と違い別に回す（#809）。同じファイルへ書くと M-1 の結果を消す。
         default_out = f"momentum_gate{MODE_SUFFIX[mode]}_{'_'.join(models)}.json"
     if args.risk_base is not None:
         # 分母を上書きした run は、画面の既定を分母にした run（#814 等）と別物。同じ名前へ
@@ -1616,14 +1705,20 @@ def main() -> None:
                     "中止: R が全軸で揃う (ym,ec) が 0 件です。r_macro の producer が"
                     "評価パネルの銘柄を1社も覆っていない可能性があります")
         folds = {c: cruns[f"{c}|{model}"]["n_folds"] for c in conds}
+        # 共通域へ揃えるために条件ごとに落とした行数（#809）。母集団が動かないとは構造から
+        # 推論せず、ここで数えて出す（`use_macro` が strict でも1行も落とさなかった #604 の逆向き）。
+        dropped = {c: len(aligned[c]) - len(keys) for c in conds}
         common_info[model] = {
             "n_common": len(keys),
             "n_by_cond": {c: len(aligned[c]) for c in conds},
+            "dropped_by_cond": dropped,
             "n_folds": folds,
         }
         per_cond = " ".join(f"{c}={len(aligned[c])}" for c in conds)
         print(f"  {MODEL_LABELS[model]:<18} common={len(keys)} "
               f"({per_cond}) folds={folds}", flush=True)
+        print("    dropped to reach the common domain: "
+              + " ".join(f"{c}={n}" for c, n in dropped.items()), flush=True)
         if len(set(folds.values())) > 1:
             print("    [warn] fold 数が一致していません（位相が揃っていない可能性）", flush=True)
         for cond in conds:

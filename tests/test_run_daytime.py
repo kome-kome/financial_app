@@ -418,6 +418,41 @@ class TestRiskAxisM2AgainstMuOnly:
         assert argv[argv.index("--stride") + 1] == "1"
 
 
+class TestMacroM6GateMeasuresM6Alone:
+    """M-6 のマクロ軸ジョブ（#809）は M-6 だけを、間引かずに、本番（macro）を分母に測る。
+
+    事前登録（ADR-0050 の 2026-10-06・その2 追記）は「M-6 だけ・nomacro / macro・2検定・α 0.025」。
+    M-2 を混ぜると α が 0.0125 に締まり、M-1 を混ぜると分母が食い違って止まる（平日1日ぶんの枠が消える）。
+    """
+
+    KEY = "gate:macro-m6"
+
+    def test_the_job_runs_the_macro_axis_on_m6(self):
+        argv = rd.JOBS[self.KEY].argv
+        assert "--macro" in argv
+        assert argv[argv.index("--models") + 1] == "elasticnet"
+
+    def test_the_preregistered_base_and_tests(self):
+        from scripts.momentum_gate import bonferroni_alpha, build_conditions, macro_base_cond
+
+        argv = rd.JOBS[self.KEY].argv
+        models = argv[argv.index("--models") + 1].split(",")
+        conds = build_conditions(macro=True)
+        assert macro_base_cond(models) == "macro"           # M-6 の本番の構成
+        assert bonferroni_alpha(len(models), len(conds)) == pytest.approx(0.025)   # 2検定
+
+    def test_the_job_measures_at_full_resolution(self):
+        """`--smoke` の共通域は間引きで壊れるので読まない（ADR-0050 Decision 3）。"""
+        argv = rd.JOBS[self.KEY].argv
+        assert "--smoke" not in argv
+        assert argv[argv.index("--stride") + 1] == "1"
+
+    def test_the_m1_job_keeps_its_registration(self):
+        """M-1 は既定のモデル・分母 nomacro（ADR-0050 の 9/6・9/20 の形）のまま。"""
+        argv = rd.JOBS["gate:macro"].argv
+        assert "--models" not in argv
+
+
 class TestBudgetFitsTheWindow:
     INSTALLER = ROOT / "scripts" / "install_daytime_task.ps1"
 
@@ -524,7 +559,8 @@ class TestParallelSensitivity:
     @pytest.mark.parametrize("key", ["beta", "tune:macro_gbdt", "tune:macro_dlm",
                                      "gate:interactions", "gate:max-features", "gate:ttm",
                                      "gate:demean", "gate:risk-axis-m6", "gate:risk-axis-m2",
-                                     "gate:risk-axis-m2-mu", "bench:rhat-scale"])
+                                     "gate:risk-axis-m2-mu", "gate:macro-m6",
+                                     "bench:rhat-scale"])
     def test_computations_are_sensitive(self, key):
         """MCMC も探索も昇格ゲートも、数値の揺れが**採否や重みそのもの**を変える。"""
         assert rd.JOBS[key].parallel_sensitive is True

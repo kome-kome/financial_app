@@ -18,6 +18,7 @@ M-1 は `build_interactions=True` で財務 × マクロの交差項を作り、
 
 パネル構築の本体は DB フルロードが要るのでここでは触らない（既存の窓モードテストと同じ）。
 """
+import copy
 import inspect
 import os
 import sys
@@ -29,10 +30,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from scripts import momentum_gate  # noqa: E402
 from scripts.momentum_gate import (  # noqa: E402
     BASE_COND, CONDS, DEMEAN_BASE_COND, DEMEAN_CONDS, DEMEAN_MODELS, INTERACTION_BASE_COND,
-    INTERACTION_CONDS, INTERACTION_MODELS, MACRO_BASE_COND, MAXFEAT_MODELS, METRICS,
-    MODE_SUFFIX, MOM_WINDOW, Cond, base_of, bonferroni_alpha, build_conditions,
-    demean_reach_problems, demean_target_by_month, max_abs_month_mean, maxfeat_cond_name,
-    mode_of, verdict_text,
+    INTERACTION_CONDS, INTERACTION_MODELS, MACRO_BASE_COND, MACRO_ON_COND, MAXFEAT_MODELS,
+    METRICS, MODE_SUFFIX, MOM_WINDOW, PANEL_CONFIG_KEYS, Cond, base_of, bonferroni_alpha,
+    build_conditions, demean_reach_problems, demean_target_by_month, max_abs_month_mean,
+    maxfeat_cond_name, mode_of, panel_config_mismatches, verdict_text,
 )
 
 
@@ -580,6 +581,85 @@ class TestOutputNamesTheModeThatWasMeasured:
     def test_verdicts_survive_cp932(self, mode):
         """日中枠のログはリダイレクト先へ書かれる（cp932 で落ちる記号を使わない）。"""
         verdict_text(mode, 5, ["a"], ["b"]).encode("cp932")
+
+    def test_m1_macro_wording_is_unchanged_with_its_base(self):
+        """M-1 の分母（`nomacro`）を明示しても文言は 9/6・9/20 のログと同じ（#809）。"""
+        want = verdict_text("macro", 2, [], [])
+        assert verdict_text("macro", 2, [], [], base=MACRO_BASE_COND) == want
+
+    def test_macro_wording_when_production_is_macro(self):
+        """分母が `macro`（M-6 の本番）の run は、外した側を基準にしたように読ませない（#809）。"""
+        v = verdict_text("macro", 2, [], [], base=MACRO_ON_COND)
+        assert v.startswith("MACRO AXIS: removing macro (nomacro) did not beat the production "
+                            "configuration (macro)"), v
+        assert "no-macro baseline" not in v
+        v.encode("cp932")
+        hit = verdict_text("macro", 2, ["M-6(ElasticNet)/nomacro/rank_ic"], [], base=MACRO_ON_COND)
+        assert hit.endswith("effects that survive the common-domain restriction: "
+                            "M-6(ElasticNet)/nomacro/rank_ic")
+
+
+class TestPanelConfigMatchesTheModel:
+    """パネルを借りるモデルの設定は、自分の画面プラグインの既定と一致する（#809）。
+
+    M-6 のパネルは M-2（`macro_gbdt`）の設定で作られる（`MODEL_SPECS`）。系列の顔ぶれ・財務列・
+    充足率下限・px_* がずれると、**M-6 を M-6 ではない構成で測り、数値はもっともらしく出る**。
+    """
+
+    def test_every_model_matches_today(self):
+        assert panel_config_mismatches(list(momentum_gate.MODEL_SPECS)) == []
+
+    @pytest.mark.parametrize("key, shift", [
+        ("min_coverage", lambda d: 0.9 if d != 0.9 else 0.8),
+        ("macro_features", lambda d: list(d)[:-1]),
+    ])
+    def test_a_divergence_is_detected(self, monkeypatch, key, shift):
+        from plugins import get_plugin as real
+
+        class _Shifted:
+            def __init__(self, p):
+                self._p = p
+
+            def params_schema(self):
+                s = copy.deepcopy(self._p.params_schema())
+                s[key]["default"] = shift(s[key]["default"])
+                return s
+
+        monkeypatch.setattr(momentum_gate, "get_plugin",
+                            lambda n: _Shifted(real(n)) if n == "macro_enet" else real(n))
+        problems = panel_config_mismatches(["elasticnet"])
+        assert len(problems) == 1 and key in problems[0], problems
+        # 自分の設定でパネルを作るモデル（M-1・M-2）は照合の対象外＝影響を受けない
+        assert panel_config_mismatches(["risk_return", "xgb_m2"]) == []
+
+    def test_compared_keys_are_what_build_reads(self):
+        """照合する項目は `_build` が設定元から読むもの。読む項目を増やしたらここへ足す。"""
+        src = inspect.getsource(momentum_gate._build) + inspect.getsource(
+            momentum_gate.macro_names_for)
+        for key in PANEL_CONFIG_KEYS:
+            assert f'"{key}"' in src, key
+
+    def test_main_checks_before_loading(self):
+        """**ずれたまま走ると例外は出ない。** 読み込みの前に止める。"""
+        src = inspect.getsource(momentum_gate.main)
+        assert "panel_config_mismatches(models)" in src
+        assert src.index("panel_config_mismatches(models)") < src.index("_load_prices(")
+
+
+class TestMacroMainWiring:
+    def test_macro_mode_uses_the_production_base(self):
+        """マクロ軸の分母は `base_of` の固定値ではなく各モデルの本番の構成（#809）。"""
+        src = inspect.getsource(momentum_gate.main)
+        assert "base = macro_base_cond(models)" in src
+
+    def test_non_default_models_write_their_own_file(self):
+        """M-6 の run が M-1 の `momentum_gate_macro.json` を上書きしない。"""
+        src = inspect.getsource(momentum_gate.main)
+        assert 'mode == "macro" and models != MACRO_MODELS' in src
+
+    def test_dropped_rows_are_reported(self):
+        src = inspect.getsource(momentum_gate.main)
+        assert '"dropped_by_cond": dropped' in src
 
 
 class _Args:
