@@ -2905,7 +2905,8 @@ function _dlmTableHTML(data, v) {
     const u = ui ? ui._u : null;
     const frontier = ui && ui._pareto ? '★' : ui && ui._anti_pareto ? '▼' : '';
     const frontColor = ui && ui._pareto ? cssVar('--val-up-text') : ui && ui._anti_pareto ? cssVar('--val-down-text') : cssVar('--text-muted');
-    return `<tr style="cursor:pointer;${seld ? 'background:rgba(124,58,237,0.14)' : ''}" onclick="document.dispatchEvent(new CustomEvent('dlm-select',{detail:'${esc(r.edinet_code)}'}))">
+    // 行クリックは data-click＋委譲（インラインの onclick は CSP の script-src-attr で遮断される・#811）
+    return `<tr style="cursor:pointer;${seld ? 'background:rgba(124,58,237,0.14)' : ''}" data-click="_dlmSelectRow" data-arg="${esc(r.edinet_code)}">
       <td>${i + 1}</td>
       <td>${esc(r.sec_code || '-')}</td>
       <td style="max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(r.company_name || r.edinet_code)}</td>
@@ -2982,6 +2983,11 @@ function _dlmRepaint() {
   if (sel) sel.value = _dlmSeries;          // 行クリック再描画で系列選択を保持
   setTimeout(() => _dlmPaintChart(), 0);
 }
+// 行クリック（_wireDelegate から呼ばれる）。選択銘柄の α/β 経路を描き直す。
+function _dlmSelectRow(edinetCode) {
+  _dlmSel = edinetCode;
+  _dlmRepaint();
+}
 function _dlmScheduleRepaint() {
   if (!_dlmData) return;
   clearTimeout(_dlmPaintTimer);
@@ -2992,7 +2998,6 @@ function _dlmIsClientParam(id) {
   const prefix = 'param-macro_dlm-';
   return id.startsWith(prefix) && _DLM_CLIENT_PARAMS.includes(id.slice(prefix.length));
 }
-document.addEventListener('dlm-select', e => { _dlmSel = e.detail; _dlmRepaint(); });
 document.addEventListener('change', e => {
   if (e.target && e.target.id === 'dlm-series') { _dlmSeries = e.target.value; _dlmPaintChart(); }
   if (e.target && e.target.id && _dlmIsClientParam(e.target.id)) _dlmScheduleRepaint();
