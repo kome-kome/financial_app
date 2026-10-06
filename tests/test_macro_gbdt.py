@@ -343,6 +343,17 @@ class TestCoerce:
         with pytest.raises(ValueError, match="risk_axis"):
             self._coerce(raw)
 
+    def test_screen_default_ordering_is_r2_at_lambda_one(self):
+        """画面の既定の並びは λ=1.0 × R2（#816・ADR-0050 の 2026-10-06 追記）。
+
+        旧既定の R_macro × 1.0 は測った7つの並びで rank-IC が最も低く（#814）、R2 × 1.0 は旧既定より
+        有意に良く μ̂ だけの並びとは有意差が無かった。戻すなら測り直してからにする。
+        """
+        p = self._coerce({})
+        assert (p["lambda_risk"], p["risk_axis"]) == (1.0, "r2")
+        labels = {o["value"]: o["label"] for o in self.schema["risk_axis"]["options"]}
+        assert "既定" in labels["r2"] and "既定" not in labels["r_macro"]
+
     def test_invalid_fin_feature_rejected(self):
         raw = {k: v["default"] for k, v in self.schema.items() if "default" in v}
         raw["fin_features"] = ["per", "nonexistent_feature"]

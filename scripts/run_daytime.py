@@ -344,20 +344,37 @@ JOBS: dict[str, Job] = {
         measured_min=6.6,
         parallel_sensitive=True,   # 他の gate と同じ理由（採否が CI の符号で決まる）
     ),
-    # M-2 の画面の既定の並び（#814）。M-2 の本番は λ=1.0 × R_macro で、M-6 が上で有意に劣後した
-    # 形そのもの。分母は `risk_base_cond` が M-2 の既定から `r_macro@1.0` と導出する＝M-1（r2）とも
+    # M-2 の画面の既定の並び（#814）。当時の M-2 の本番は λ=1.0 × R_macro で、M-6 が上で有意に
+    # 劣後した形そのもの。分母は `risk_base_cond` が M-2 の既定から導出する＝M-1（r2）とも
     # M-6（mu_only）とも違うので単独で回す（ADR-0050 の 2026-10-05・その2 追記）。
+    # **分母は既定に追随する**: #814 の run は `r_macro@1.0` だったが、#816 で横軸の既定を R2 へ
+    # 変えたので、いま回すと分母は `r2@1.0` になる。
     "gate:risk-axis-m2": Job(
         name="gate_risk_axis_m2",
         argv=("{python}", "-m", "scripts.momentum_gate", "--risk-axis",
               "--models", "xgb_m2", "--lambdas", "0.1,0.3,1.0", "--risk-scale", "raw",
               "--stride", "1", "--allow-full-pull", "--refresh-cache"),
-        why="M-2 の画面の既定の並び（U = μ̂ − 1.0 × R_macro・分母）を、μ̂ だけの並び（mu_only）と"
+        why="M-2 の画面の既定の並び（分母・U = μ̂ − λR）を、μ̂ だけの並び（mu_only）と"
             "他の λ・横軸と比べる（#814）。λ=0.1/0.3/1.0 × r2/r_macro の7条件・12検定。"
             "**r_macro は時点不変の 2026年スナップショット＝未来情報を含む上限**。",
         # 2026-10-06 の実測（平日の日中枠 8:00・並走なし）。見積り 7.0 から差し替えた。
         # XGBoost の CV は ElasticNet より速く、`--refresh-cache` 込みでも M-6 の半分以下で済んだ。
         measured_min=2.7,
+        parallel_sensitive=True,   # 他の gate と同じ理由（採否が CI の符号で決まる）
+    ),
+    # M-2 の既定の横軸を決める（#816）。上の run で R2@1.0 は既定（R_macro@1.0）に有意に勝ったが、
+    # μ̂ だけの並びとは比べていない。分母を `--risk-base mu_only` で上書きして、候補 r2@1.0 が
+    # μ̂ だけに有意に負けないかを測る（ADR-0050 の 2026-10-06 追記）。λ=1.0 だけ＝3条件・4検定。
+    "gate:risk-axis-m2-mu": Job(
+        name="gate_risk_axis_m2_mu",
+        argv=("{python}", "-m", "scripts.momentum_gate", "--risk-axis",
+              "--models", "xgb_m2", "--lambdas", "1.0", "--risk-scale", "raw",
+              "--risk-base", "mu_only",
+              "--stride", "1", "--allow-full-pull", "--refresh-cache"),
+        why="M-2 の既定の横軸の候補 r2@1.0 が、μ̂ だけの並び（mu_only・分母に上書き）に有意に"
+            "劣後しないかを測る（#816）。mu_only / r2@1.0 / r_macro@1.0 の3条件・4検定・α 0.0125。",
+        # 2026-10-06 の実測（夜に -Now -Force で消化・並走なし）。見積り 2.7 から差し替えた。
+        measured_min=2.6,
         parallel_sensitive=True,   # 他の gate と同じ理由（採否が CI の符号で決まる）
     ),
 
