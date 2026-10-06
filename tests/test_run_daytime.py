@@ -343,7 +343,8 @@ class TestRiskAxisM6GateMeasuresTheScreenOrdering:
 
 
 class TestRiskAxisM2GateMeasuresTheScreenOrdering:
-    """M-2 のリスク軸ジョブ（#814）。形は M-6 と同じで、分母だけが画面の既定（λ=1.0 × R_macro）。
+    """M-2 のリスク軸ジョブ（#814）。形は M-6 と同じで、分母だけが画面の既定（#814 当時は λ=1.0 ×
+    R_macro・#816 で R2 へ変えたので、いま回すと λ=1.0 × R2）。
 
     `--lambdas` に画面の既定 λ が入っていないと、分母（本番の並び）が条件に無いとして
     `risk_base_cond` が止まる＝平日1日ぶんの枠が exit≠0 で消える。ここで先に捕まえる。

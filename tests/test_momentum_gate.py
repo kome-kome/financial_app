@@ -368,7 +368,7 @@ class TestRiskBaseCond:
         assert risk_base_cond(["elasticnet"], risk_specs([0.1, 0.3, 1.0])) == RISK_NO_AXIS
 
     def test_m2_base_is_its_screen_default_ordering(self):
-        """M-2 の分母は画面の既定の並び（#814・2026-10-05 時点は `r_macro@1.0`）。
+        """M-2 の分母は画面の既定の並び（#814 の run は `r_macro@1.0`・#816 で既定を R2 へ変えて `r2@1.0`）。
 
         期待値を書き写さず既定から作る——既定を変えたら分母も追随するのが正しい挙動で、
         書き写すと「既定を変えたのに旧既定を分母に測る」形をテストが固定してしまう。

@@ -2445,24 +2445,24 @@ document.addEventListener('input',  (e) => { const w = e.target && e.target.id &
 document.addEventListener('change', (e) => { const w = e.target && e.target.id && _rrViewForParam(e.target.id); if (w) _rrScheduleRepaint(w); });
 
 // ── M-2 マクロ×財務 勾配ブースティング レンダラ ─────────────────────────────
-// λ の既定は 1.0・横軸の既定は R_macro。#814 で λ=0.1/0.3/1.0 × R2/R_macro と μ̂ だけの並びを、
-// 既定の並びを分母に測った（ADR-0050 の 2026-10-05・その2 追記）: 既定の並びは7条件で rank-IC が
-// 最も低く（−0.048）、R2 の λ=0.3/1.0 は既定より両指標で有意に良かった。μ̂ だけの並びも点推定では
-// 上だが補正後の水準に届かず、事前に決めた読み方どおり既定は据え置いた（横軸の変更は別 Issue）。
+// λ の既定は 1.0・横軸の既定は R2（#816 で R_macro から変更・ADR-0050 の 2026-10-06 追記）。
+// #814 で λ=0.1/0.3/1.0 × R2/R_macro と μ̂ だけの並びを旧既定（R_macro・λ=1.0）を分母に測り、
+// 旧既定は7条件で rank-IC が最も低く（−0.048）、R2 の λ=0.3/1.0 は旧既定より両指標で有意に良かった。
+// #816 で R2@1.0 を μ̂ だけの並びと比べ、有意差なし（rank-IC 差 −0.010・p=0.83）だったので既定を R2 へ。
 
-// 測った λ の上限（#814）。これを超える λ は測っていない。
+// 測った λ の上限（#814・#816）。これを超える λ は測っていない。
 const _MG_RISK_MEASURED_MAX = 1.0;
 
 function _mgLambdaNoteHTML(v) {
   if (!(v.lambda > 0)) return '';
   const warn = 'margin-bottom:8px;padding:8px 12px;border-radius:6px;font-size:11px;background:var(--status-warn-bg);color:var(--status-warn-text)';
   if (v.lambda > _MG_RISK_MEASURED_MAX) {
-    return `<div style="${warn}">λ=${v.lambda} の並び（U = μ − λR の順）は成績を測っていません（#814 で測ったのは λ≤${_MG_RISK_MEASURED_MAX.toFixed(1)}）。</div>`;
+    return `<div style="${warn}">λ=${v.lambda} の並び（U = μ − λR の順）は成績を測っていません（測ったのは λ≤${_MG_RISK_MEASURED_MAX.toFixed(1)}・#814）。</div>`;
   }
   if (v.axis === 'r_macro') {
-    return `<div style="${warn}">R_macro で並べると、測った範囲（λ=0.1 / 0.3 / 1.0）では λ を上げるほど成績が下がり、既定の λ=1.0 では順位とその後のリターンの相関（rank-IC）が負でした（測った7つの並びで最低）。横軸を R2 にした λ=0.3 / 1.0 の並びは既定より有意に良い成績でした。μ だけの並び（λ=0）も上回りましたが、有意とまでは言えません（#814）。</div>`;
+    return `<div style="${warn}">R_macro で並べると、測った範囲（λ=0.1 / 0.3 / 1.0）では λ を上げるほど成績が下がり、λ=1.0 では順位とその後のリターンの相関（rank-IC）が負で、μ だけの並びより売り側の成績が有意に劣りました。このため既定の横軸は R2 にしています（#814・#816）。</div>`;
   }
-  return `<div style="font-size:11px;color:var(--text-muted);margin-bottom:8px">R2 で並べると、測った λ のうち 0.3 と 1.0 で既定（R_macro・λ=1.0）より有意に良い成績でした（λ=0.1 は有意差なし。μ だけの並びとの差は測っていません・#814）。</div>`;
+  return `<div style="font-size:11px;color:var(--text-muted);margin-bottom:8px">R2 で並べると、測った λ のうち 0.3 と 1.0 で R_macro（λ=1.0）より有意に良く、既定の λ=1.0 は μ だけの並び（λ=0）と有意な差がありませんでした（#814・#816）。</div>`;
 }
 
 const _mgView = _riskReturnView({
