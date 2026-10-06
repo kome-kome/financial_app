@@ -17,6 +17,7 @@
 """
 import ast
 import inspect
+import copy
 import os
 import sys
 
@@ -27,6 +28,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from scripts import candidate_bakeoff, momentum_gate
 from scripts.momentum_gate import (
     ALPHA, BASE_COND, CONDS, MACRO_BASE_COND, MACRO_CONDS, MACRO_MODELS, METRICS,
+    MACRO_ON_COND,
     MODEL_LABELS, MODEL_SPECS, MODELS, MOM_WINDOW, N_TESTS, Cond, _select_bic,
     base_of, bonferroni_alpha, build_conditions,
 )
@@ -96,11 +98,13 @@ class TestMacroAxisMode:
         with pytest.raises(ValueError):
             build_conditions([6, 12], macro=True)
 
-    def test_macro_mode_measures_m1_only(self):
-        """M-2/M-6 は `macro_nan_ok=True` で母集団が動かず、探索軸にも持っていない。"""
+    def test_macro_mode_defaults_to_m1_only(self):
+        """既定で測るのは M-1 だけ。M-6 も測るが、分母が M-1 と違うので `--models elasticnet` で
+        別に回す（#809）——既定へ足すと `--models` を渡さない `gate:macro` が止まる。"""
         assert MACRO_MODELS == ["risk_return"]
         assert set(MACRO_MODELS) <= set(MODEL_SPECS)
         assert MODEL_SPECS["risk_return"][2] == "m1"
+        momentum_gate.macro_base_cond(MACRO_MODELS)   # 既定のモデル集合で止まらないこと
 
     def test_alpha_follows_the_test_count(self):
         """1モデル × 2指標 × 1条件 = 2検定 → alpha = 0.025。定数を流用しない。"""
@@ -126,6 +130,62 @@ class TestBaseCondition:
         for conds in (build_conditions(), build_conditions([6]),
                       build_conditions(macro=True)):
             assert base_of(conds) in conds
+
+
+class TestMacroBaseCond:
+    """マクロ軸の分母は各モデルの本番の構成（#809）。M-1 は `nomacro`・M-6 は `macro`。
+
+    期待値は本番の既定から作る——既定を変えたら分母も追随するのが正しい挙動で、書き写すと
+    「既定を変えたのに旧既定を分母に測る」形をテストが固定してしまう（#816 と同じ作法）。
+    """
+
+    @staticmethod
+    def _production(plugin: str) -> str:
+        from plugins import get_plugin
+        from plugins.utils import coerce_params
+        on = coerce_params(get_plugin(plugin).params_schema(), {})["use_macro"]
+        return MACRO_ON_COND if on else MACRO_BASE_COND
+
+    def test_m1_preregistration_is_unchanged(self):
+        """M-1 の分母は 9/6・9/20 の形（`nomacro`＝母集団が広い側）のまま。#615 で本番も OFF。"""
+        assert momentum_gate.macro_base_cond(["risk_return"]) == MACRO_BASE_COND == "nomacro"
+        assert self._production("macro_risk_return") == MACRO_BASE_COND
+
+    def test_m6_base_is_its_own_production_configuration(self):
+        """M-6 の分母は M-6 自身の画面プラグイン（`macro_enet`）の既定から取る。"""
+        assert momentum_gate.macro_base_cond(["elasticnet"]) == self._production("macro_enet")
+
+    def test_m6_does_not_borrow_m2_default(self, monkeypatch):
+        """**`MODEL_SPECS` の設定元（M-2）から取らない**（#808 の λ と同じ罠）。M-2 の既定だけを
+        反転しても M-6 の分母は動かない。"""
+        from plugins import get_plugin as real
+        want = momentum_gate.macro_base_cond(["elasticnet"])
+
+        class _Flipped:
+            def __init__(self, p):
+                self._p = p
+
+            def params_schema(self):
+                s = copy.deepcopy(self._p.params_schema())
+                s["use_macro"]["default"] = not s["use_macro"]["default"]
+                return s
+
+        monkeypatch.setattr(momentum_gate, "get_plugin",
+                            lambda n: _Flipped(real(n)) if n == "macro_gbdt" else real(n))
+        assert momentum_gate.macro_base_cond(["elasticnet"]) == want
+
+    def test_models_with_different_bases_stop(self):
+        """判定の向きが1本の表で混ざる。別々に回す。"""
+        if (self._production("macro_risk_return")
+                == self._production("macro_enet")):
+            pytest.skip("M-1 と M-6 の本番の use_macro が同じ（分母が食い違わない）")
+        with pytest.raises(ValueError, match="別々に"):
+            momentum_gate.macro_base_cond(["risk_return", "elasticnet"])
+
+    def test_the_on_condition_name_matches_the_conditions(self):
+        """判定文と分母が使う条件名は `MACRO_CONDS` のキーそのもの（ずれると分母が条件に無い）。"""
+        assert {MACRO_BASE_COND, MACRO_ON_COND} == set(MACRO_CONDS)
+        assert MACRO_CONDS[MACRO_ON_COND] is True
 
 
 class TestBonferroniAlpha:

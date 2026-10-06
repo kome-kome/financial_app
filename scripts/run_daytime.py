@@ -377,6 +377,22 @@ JOBS: dict[str, Job] = {
         measured_min=2.6,
         parallel_sensitive=True,   # 他の gate と同じ理由（採否が CI の符号で決まる）
     ),
+    # M-6 のマクロ特徴量の有無（#809・ADR-0050 の 2026-10-06・その2 追記）。M-6 は交互作用を持たず、
+    # マクロ値（同じ月なら全社で同じ値）は月内の順位を直接は動かせない——M-1 で #615 が確かめた機構。
+    # ADR-0021 の昇格はマクロ込みの構成でしか測っていない。分母は M-6 の本番の構成（`macro`）で、
+    # M-1（`nomacro`）と違う＝`gate:macro` と同じ run に入れられないので単独で回す。
+    "gate:macro-m6": Job(
+        name="gate_macro_m6",
+        argv=("{python}", "-m", "scripts.momentum_gate", "--macro", "--models", "elasticnet",
+              "--stride", "1", "--allow-full-pull", "--refresh-cache"),
+        why="M-6 のマクロ特徴量を外した条件（nomacro）を本番（macro＝分母）と共通 (ym,ec) 域で"
+            "比べる（#809）。1モデル × 2指標 ＝ 2検定・α 0.025。ns なら既定は据え置き、nomacro が"
+            "有意に上回れば外す候補（既定の変更は別 Issue で ADR-0021 の昇格ゲートへ）。",
+        # **未実測**。M-6 の CV 1回は約159秒（`gate:risk-axis-m6` のログ）で、この run は2条件 × 2段
+        # （各条件の母集団・共通月）＝4回。パネル構築と `--refresh-cache` の取り直しを足して置いた。
+        measured_min=15.0,
+        parallel_sensitive=True,   # 他の gate と同じ理由（採否が CI の符号で決まる）
+    ),
 
     # ── 最新業績の供給（#424 の子タスク1・ADR-0051）────────────────────────
     # #503 で GHA cron を止めて以降、H1 と会社予想は**どこからも収集されていない**
