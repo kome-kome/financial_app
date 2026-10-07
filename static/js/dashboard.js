@@ -44,7 +44,7 @@ function renderSchedule(b) {
         <div class="sched-item-label">${esc(r.task_name)}</div>
       </div>`).join('') + `
       <div class="sched-item">
-        <div class="sched-item-label">手動差分収集</div>
+        <div class="sched-item-label">財務の手動差分収集（株価は夜間バッチ）</div>
         <div class="sched-item-value"><a href="/collection" style="color:var(--status-info);text-decoration:none">収集画面から実行</a></div>
       </div>`;
 }
@@ -118,10 +118,12 @@ async function loadStats() {
     const yearBehind = (d.latest_year != null && d.expected_latest_year != null)
       ? (d.expected_latest_year - d.latest_year) : 0;
     if (d.freshness === 'outdated' || yearBehind >= 2) {
-      bmsg.textContent = `最新年度が${yearBehind}年遅れています（DB: ${d.latest_year ?? '—'} / 期待: ${d.expected_latest_year ?? '—'}）。差分収集を実行して最新化してください。`;
+      // このバナーは財務レコードの鮮度だけを見る（株価の鮮度は朝の推奨と収集画面が出す）。
+      // 財務の差分収集で直る話だけを、そう分かる言葉で書く。
+      bmsg.textContent = `財務データの最新年度が${yearBehind}年遅れています（DB: ${d.latest_year ?? '—'} / 期待: ${d.expected_latest_year ?? '—'}）。財務データの差分収集を実行して最新化してください。`;
       banner.classList.add('show');
     } else if (d.freshness === 'stale' || yearBehind === 1) {
-      bmsg.textContent = `最新の財務レコードから${d.days_since_update ?? '?'}日経過しています。差分収集の実行を検討してください。`;
+      bmsg.textContent = `最新の財務レコードから${d.days_since_update ?? '?'}日経過しています。財務データの差分収集の実行を検討してください。`;
       banner.classList.add('show');
     } else {
       banner.classList.remove('show');

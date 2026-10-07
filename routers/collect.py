@@ -164,12 +164,18 @@ async def scheduler_run_now(
     background_tasks: BackgroundTasks,
     db: Session = Depends(api.get_db),
 ):
-    """手動差分収集: 過去1年・収集済みスキップ＋成長率/Zスコア＋市場・マクロ更新"""
+    """手動の財務差分収集: 過去1年・収集済みスキップ（`/api/collect/start` と同じ処理）。
+
+    実体は `run_full_collection` で、企業マスタ・XBRL 財務・業種補完だけを行う。**株価・マクロ・
+    市場データは更新しない**（それは夜間バッチの `_pipeline_incremental` の仕事）。成長率/Zスコアは
+    `financial_metrics` VIEW が都度算出するので、ここで再計算するものは無い。
+    """
     if api.jobs.is_running(api._COLLECTION):
         raise HTTPException(400, "収集ジョブが既に実行中です")
     log_obj = _start_collection_job(db, "incremental")
     background_tasks.add_task(api._run_collection_bg, 1, None, log_obj.id, True)
-    return {"message": "差分収集を開始しました（過去1年・収集済みスキップ）", "log_id": log_obj.id}
+    return {"message": "財務データの差分収集を開始しました（過去1年・収集済みスキップ・株価は更新しない）",
+            "log_id": log_obj.id}
 
 
 @router.get("/api/collect/status")
