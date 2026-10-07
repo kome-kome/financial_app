@@ -986,6 +986,7 @@ function _renderBtMulti(data) {
 // 各モデルの oof_backtest（無リーク walk-forward）を1列カードで並べる。指標・分位バーの
 // 視覚言語は _mrrOofHTML（M-1/M-2/M-3 の各パネル）と揃える。
 async function runModelComparison() {
+  if (!(await _confirmHeavyRun('model_comparison'))) return;
   const btn = document.getElementById('btn-model-comparison');
   btn.disabled = true;
   btn.innerHTML = '<span class="spinner"></span> 3モデル実行中（計算が重いため時間がかかります）...';
@@ -998,7 +999,7 @@ async function runModelComparison() {
     _renderModelComparison(d);
     document.getElementById('mc-results-card').classList.remove('hidden');
   } catch(e) {
-    showNotif('モデル比較に失敗: ' + e.message);
+    showNotif('モデル比較に失敗: ' + _errDetail(e));
   } finally {
     if (stopProgress) stopProgress();
     btn.disabled = false;
@@ -1466,6 +1467,59 @@ function _collectParamValues(tabId, schema) {
   return params;
 }
 
+// ── 重い分析の安全柵（バッチとの並走を防ぎ、押す前に何が置き換わるかを見せる）──────────────
+// heavy を画面から回すと、夜間・日中・月次のバッチと同じ正本 DB を同時に読み書きし（並走は所要
+// ではなく計算結果そのものを変える）、保存済みの結果を黙って置き換える。守りはサーバ側の 409
+// （routers/analysis.py::_refuse_heavy_while_unsafe）で、ここは押す前に理由を見せる側。
+let _batchBlockReason = null;
+
+function _heavyRunButtons() {
+  const out = [...document.querySelectorAll('[data-click="runDynamicPlugin"]')]
+    .filter(b => (_pluginMeta[b.dataset.arg] || {}).heavy);
+  const mc = document.getElementById('btn-model-comparison');
+  if (mc) out.push(mc);
+  return out;
+}
+
+async function refreshBatchActivity() {
+  let d;
+  try { d = await apiFetch('/api/batch/activity'); } catch (e) { return; }   // 読めなくても画面は殺さない
+  if (!d) return;
+  _batchBlockReason = d.message || null;
+  const banner = document.getElementById('batch-activity-banner');
+  banner.textContent = _batchBlockReason ? `⏳ ${_batchBlockReason}` : '';
+  banner.classList.toggle('hidden', !_batchBlockReason);
+  if (_renderLightMode) return;            // 閲覧専用の環境は initLightMode / 動的タブ側が止めている
+  _heavyRunButtons().forEach(btn => {
+    btn.disabled = !!_batchBlockReason;
+    btn.title = _batchBlockReason ? '重い分析はローカルバッチの実行中は動かせません' : '';
+  });
+}
+
+// サーバの 409 などは本文が JSON（{"detail": "..."}）で来る。生の JSON を通知に出さない。
+function _errDetail(e) {
+  try { return JSON.parse(e.message).detail || e.message; } catch (_) { return e.message; }
+}
+
+// 押す直前の確認。始められない理由があれば知らせて false、なければ「何が置き換わるか」と
+// 「前回の所要」を見せて confirm の結果を返す。
+async function _confirmHeavyRun(name) {
+  let d;
+  try { d = await apiFetch(`/api/plugins/${encodeURIComponent(name)}/preflight`); }
+  catch (e) { showNotif(`実行前の確認に失敗しました: ${_errDetail(e)}`); return false; }
+  if (!d) return false;
+  if (d.blocked_reason) { showNotif(d.blocked_reason); refreshBatchActivity(); return false; }
+  const writes = (d.writes || []).length
+    ? `・保存先: ${d.writes.join('、')}（保存済みの結果を置き換えます）`
+    : '・保存先: なし（画面に表示するだけで、保存済みの結果は変わりません）';
+  const last = d.last_run_min == null ? '・前回の所要: 記録なし'
+    : d.last_run_min < 1 ? '・前回の所要: 1分未満'
+    : `・前回の所要: 約 ${Math.round(d.last_run_min)} 分`;
+  return confirm(`「${d.label}」を実行します。\n\n${writes}\n${last}\n`
+    + '・実行中は夜間・日中のバッチを手で起動しないでください（並行すると計算結果が変わります）\n\n'
+    + '実行しますか？');
+}
+
 async function runDynamicPlugin(pluginName, tabId) {
   const plugin = _pluginMeta[pluginName];
   if (!plugin) return;
@@ -1474,6 +1528,7 @@ async function runDynamicPlugin(pluginName, tabId) {
     return;
   }
   const btn = this instanceof HTMLElement ? this : null;
+  if (plugin.heavy && !(await _confirmHeavyRun(pluginName))) return;
   const origHTML = btn ? btn.innerHTML : null;
   if (btn) { btn.disabled = true; btn.textContent = '実行中...'; }
   const params = _collectParamValues(tabId, plugin.params_schema);
@@ -1498,7 +1553,7 @@ async function runDynamicPlugin(pluginName, tabId) {
         </div>`);
       showNotif('バリュエーション分析が利用可能になりました', 'success');
     }
-  } catch(e) { showNotif(`実行失敗: ${e.message}`); }
+  } catch(e) { showNotif(`実行失敗: ${_errDetail(e)}`); }
   finally {
     if (stopProgress) stopProgress();
     if (btn) { btn.disabled = false; btn.innerHTML = origHTML; }
@@ -3069,7 +3124,7 @@ initAuth();
 initRecommend();  // おすすめ銘柄タブのプリセット取得（既存タブ用）
 initSellRanking();  // 売り候補タブ: ウェイトグリッド描画＋保有入力の localStorage 復元
 // 軽量モード判定を先に解決してから動的タブを生成（重い回帰の無効化に必要）
-initLightMode().then(() => initPlugins());
+initLightMode().then(() => initPlugins()).then(refreshBatchActivity);
 preflight();
 
 // data 属性ハンドラ用ヘルパ（this=対象要素）

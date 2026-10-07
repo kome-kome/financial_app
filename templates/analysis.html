@@ -188,6 +188,9 @@ tr:hover td{background:var(--border-subtle)}
   <a href="/models" class="gnav-link gnav-ref" style="color:var(--accent-text)">モデル解説</a>
 </nav>
 
+<!-- ローカルバッチの実行中（GET /api/batch/activity）。出ている間は重い分析のボタンを止める -->
+<div id="batch-activity-banner" class="hidden" role="status" style="background:var(--status-warn-bg);border-bottom:1px solid var(--status-warn);color:var(--status-warn-text);padding:8px 24px;font-size:12px;line-height:1.6"></div>
+
 <div id="data-status-bar" style="background:var(--bg-sunken);border-bottom:1px solid var(--bg-hover);padding:8px 24px;display:flex;align-items:center;gap:20px;font-size:12px">
   <div style="display:flex;align-items:center;gap:6px">
     <span id="status-fin-dot" class="dot" style="background:var(--status-warn)"></span>
@@ -851,6 +854,6 @@ tr:hover td{background:var(--border-subtle)}
 
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 <script src="/static/js/common.js?v=20260620e"></script>
-<script src="/static/js/analysis.js?v=20261008a"></script>
+<script src="/static/js/analysis.js?v=20261008b"></script>
 </body>
 </html>
