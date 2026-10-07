@@ -39,7 +39,7 @@
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:'Segoe UI',sans-serif;background:var(--bg);color:var(--text);min-height:100vh}
 a{color:inherit}
-.header{background:var(--bg-elevated);border-bottom:1px solid var(--border);padding:14px 24px;display:flex;align-items:center;gap:14px;position:sticky;top:0;z-index:20}
+.header{background:var(--bg-elevated);border-bottom:1px solid var(--border);padding:14px 24px;display:flex;align-items:center;gap:10px 14px;flex-wrap:wrap;position:sticky;top:0;z-index:20}
 .header h1{font-size:17px;font-weight:600;color:var(--accent-text);white-space:nowrap}
 .logo{width:32px;height:32px;background:var(--accent-soft-bg);border-radius:8px;display:flex;align-items:center;justify-content:center;flex-shrink:0;text-decoration:none}
 .badge{background:var(--accent-soft-bg);color:var(--accent-soft-text);font-size:11px;padding:3px 8px;border-radius:12px;white-space:nowrap}
@@ -121,7 +121,12 @@ table.cmp tbody tr:hover td{background:var(--border-subtle)}
 
 @media (max-width:768px){
   .stats-grid{grid-template-columns:1fr 1fr}
-  .search-wrap{max-width:none}
+  /* `.stats-grid.s10`（詳細度 0,2,0）は上の `.stats-grid` に勝つので、同じ詳細度で上書きする。
+     無いと10枚のサマリーカードが5列のまま右へはみ出す */
+  .stats-grid.s10{grid-template-columns:1fr 1fr}
+  /* 検索欄は見出しの行に押し込まず、次の行を全幅で使う（375px では1文字分の幅に潰れていた。
+     候補一覧も同じ幅なので、欄が潰れると候補も読めない） */
+  .search-wrap{max-width:none;order:10;flex:1 1 100%}
 }
 .gnav{display:flex;align-items:center;gap:2px;background:var(--bg-elevated);border-bottom:1px solid var(--border);padding:0 24px;flex-wrap:wrap}
 .gnav-link{padding:10px 14px;font-size:13px;color:var(--text-secondary);text-decoration:none;border-bottom:2px solid transparent;transition:color .15s,border-color .15s}

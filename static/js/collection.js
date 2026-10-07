@@ -19,6 +19,7 @@ async function checkApi(){
     document.getElementById('s-companies').textContent=d.companies.toLocaleString();
     document.getElementById('s-records').textContent=d.records.toLocaleString();
     document.getElementById('s-year').textContent=d.latest_year||'-';
+    renderPriceStaleGuide(d);
     log('API接続成功: '+d.companies+'社 / '+d.records+'レコード','success');
     loadIndustries();
     initWizardState();
@@ -32,6 +33,19 @@ async function checkApi(){
 
 async function runNow(){
   await startIncremental();
+}
+
+// 株価が古いときだけ、本当の回復手順（夜間バッチ）を出す。「データが古い」と感じてこの画面へ
+// 来た人が財務の差分収集を押しても、株価もスコアも変わらず朝の推奨は赤のまま——という
+// 行き止まりを作らないため。判定は /api/stats の price_freshness（朝の推奨と同じ p50 基準）。
+function renderPriceStaleGuide(d){
+  const box = document.getElementById('price-stale-guide');
+  const stale = d.price_freshness === 'warn' || d.price_freshness === 'alert' || d.price_freshness === 'empty';
+  box.classList.toggle('hidden', !stale);
+  if(!stale) return;
+  document.getElementById('price-stale-head').textContent = d.price_freshness === 'empty'
+    ? '株価データがありません'
+    : `株価が ${d.price_stale_bdays ?? '?'} 営業日前（中央値 ${d.price_asof_p50 || '—'}）で止まっています`;
 }
 
 // ── EDINETカバレッジ ────────────────────────────────────────────────
@@ -287,9 +301,10 @@ async function startIncremental(){
       method:'POST',
       body: JSON.stringify({years_back:1, skip_existing:true})
     });
-    log('差分収集ジョブを開始しました','success');
+    log('財務データの差分収集を開始しました（株価・マクロは更新しません）','success');
     document.getElementById('collect-progress').classList.remove('hidden');
     document.getElementById('btn-incremental').disabled = true;
+    document.getElementById('btn-run-now').disabled = true;
     document.getElementById('btn-stop').style.display = '';
     startSSEProgress();
   }catch(e){ log('収集開始失敗: '+e.message,'error') }
@@ -306,6 +321,7 @@ async function startFullCollection(){
     log('全件収集ジョブを開始しました','success');
     document.getElementById('collect-progress').classList.remove('hidden');
     document.getElementById('btn-collect').disabled = true;
+    document.getElementById('btn-run-now').disabled = true;
     document.getElementById('btn-stop').style.display = '';
     startSSEProgress();
   }catch(e){ log('収集開始失敗: '+e.message,'error') }
@@ -324,6 +340,7 @@ function _onCollectionComplete(){
   document.getElementById('collect-progress').classList.add('hidden');
   document.getElementById('btn-incremental').disabled = false;
   document.getElementById('btn-collect').disabled = false;
+  document.getElementById('btn-run-now').disabled = false;
   document.getElementById('btn-stop').style.display = 'none';
   document.getElementById('btn-stop').disabled = false;
   document.getElementById('btn-stop').innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/></svg> 停止';

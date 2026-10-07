@@ -30,7 +30,7 @@ Render の制約と運用形態に合わせて設計すること。
 | **手動のみ** | 会社予想開示収集（J-Quants /fins/summary） | workflow_dispatch で起動 | GitHub Actions `collect-disclosures.yml` |
 | **手動のみ** | 半期(H1)財務収集（EDINET 半期/旧四半期Q2） | workflow_dispatch で起動 | GitHub Actions `collect-interim.yml` |
 | **手動のみ（アーカイブ）** | bs_inventory 補完 | workflow_dispatch で起動 | GitHub Actions `old/` 配下（一回性・完了済み） |
-| **UIから手動** | 差分収集・株価更新 | ユーザーがボタン押下 | ローカルの Web UI（`/collection`）。Render では収集・書き込み系 API が一律 403（#733・下の「ローカル / Render 役割分担」） |
+| **UIから手動** | 財務の差分収集（XBRL のみ・**直近の株価は更新しない**）・J-Quants 株価（直近84日は無料プランの配信外）・マクロ収集・市場データ反映 | ユーザーがボタン押下 | ローカルの Web UI（`/collection`）。Render では収集・書き込み系 API が一律 403（#733・下の「ローカル / Render 役割分担」） |
 | **自動（CI）** | `ruff check`（F 系）＋ `pytest` 回帰テスト（Secrets・本番DB非依存） | PR / main への push | GitHub Actions `ci.yml` |
 | **自動（イベント）** | 他ワークフローの failure / cancelled を Issue 化 | 対象ワークフロー完了時（`workflow_run`） | GitHub Actions `notify-failure.yml` |
 | **自動（毎週）** | pin した依存の脆弱性照合（pip-audit・#723）。検出は failure → `notify-failure` が起票 | 毎週月曜 JST 07:23 ＋ `requirements*.txt` を変える PR / main への push | GitHub Actions `dependency-audit.yml` |

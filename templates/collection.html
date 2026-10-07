@@ -38,7 +38,7 @@
 }
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:'Segoe UI',sans-serif;background:var(--bg);color:var(--text);min-height:100vh}
-.header{background:var(--bg-elevated);border-bottom:1px solid var(--border);padding:14px 24px;display:flex;align-items:center;gap:14px}
+.header{background:var(--bg-elevated);border-bottom:1px solid var(--border);padding:14px 24px;display:flex;align-items:center;gap:10px 14px;flex-wrap:wrap}
 .header h1{font-size:17px;font-weight:600;color:var(--accent-text)}
 .badge{background:var(--accent-soft-bg);color:var(--accent-soft-text);font-size:11px;padding:3px 8px;border-radius:12px}
 .theme-toggle-btn{background:transparent;border:1px solid var(--border-muted);color:var(--text);border-radius:6px;width:30px;height:30px;font-size:14px;cursor:pointer;display:flex;align-items:center;justify-content:center;flex-shrink:0}
@@ -59,6 +59,12 @@ body{font-family:'Segoe UI',sans-serif;background:var(--bg);color:var(--text);mi
 @media (max-width: 768px){
   .container{padding:12px}
   .grid4{grid-template-columns:repeat(2,1fr)}
+  /* API URL 欄は開発用で、CSP の connect-src 'self' により別ホストは指定しても届かない。
+     狭い幅ではテーマ切替を画面外へ押し出すだけなので隠す */
+  .api-url-bar{display:none}
+  /* タブ4つは 375px に収まらないので、ページごと広げず帯の中だけ横に流す */
+  .nav{overflow-x:auto;padding:0 12px}
+  .nav-btn{white-space:nowrap;flex-shrink:0}
 }
 @media (max-width: 480px){
   .grid4{grid-template-columns:1fr}
@@ -171,15 +177,40 @@ tr:hover td{background:var(--border-subtle)}
     <div class="card"><div class="card-title">API接続</div><div class="card-value" id="s-api" style="font-size:14px;color:var(--status-warn)">未確認</div></div>
   </div>
 
-  <!-- 差分収集（手動実行） -->
+  <!-- 株価が古いときの案内（/api/stats の price_freshness が warn/alert のときだけ出す）。
+       「データが古い」と感じてこの画面へ来ても、下の財務の差分収集では株価は直らない。
+       株価とスコアを更新するのは夜間バッチ（_pipeline_incremental → nightly_scores）だけ -->
+  <div id="price-stale-guide" class="hidden" role="status" style="background:var(--status-warn-bg);border:1px solid var(--status-warn);border-radius:8px;padding:12px 16px;margin-bottom:16px;font-size:13px;color:var(--status-warn-text);line-height:1.7">
+    <strong id="price-stale-head">株価が古くなっています</strong><br>
+    株価とスコア（乖離率・μ̂）は<strong>夜間バッチ</strong>が毎日 17:20 に更新します。この画面の「財務データの差分収集」では直りません。<br>
+    PC で <code>./run_nightly.ps1</code> を実行するか、次の夜間バッチを待ってください。夜間バッチの最終実行は<a href="/" style="color:inherit">ダッシュボード</a>の「自動収集」で確認できます。
+  </div>
+
+  <!-- 財務データの差分収集（手動実行）。実体は run_full_collection（years_back=1・skip_existing）で、
+       企業マスタ・XBRL 財務・業種補完だけを行う。株価・マクロ・市場データは更新しない -->
   <div class="card" style="border-color:var(--status-info-bg)">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
-      <div class="section-title" style="margin-bottom:0">差分収集（手動実行）</div>
-      <button class="btn btn-primary btn-sm" data-writes data-click="runNow">今すぐ実行</button>
+      <div class="section-title" style="margin-bottom:0">財務データの差分収集（手動）</div>
+      <button class="btn btn-primary btn-sm" id="btn-run-now" data-writes data-click="runNow">今すぐ実行</button>
     </div>
     <div style="font-size:12px;color:var(--text-muted);line-height:1.6">
-      過去1年・収集済みスキップ＋成長率/Zスコア＋市場・マクロデータを一括更新します。<br>
-      <span style="color:var(--status-info)">🔄 自動収集はローカルの夜間バッチ（タスクスケジューラ）が毎日実行します。最終実行は<a href="/" style="color:inherit">ダッシュボード</a>の「自動収集」で確認できます。</span>
+      EDINET の新しい書類（過去1年・取得済みは飛ばす）から財務データを取り込みます。<strong>株価・マクロ・スコアは更新しません</strong>。<br>
+      <span style="color:var(--status-info)">🔄 財務・株価・スコアの自動更新はローカルの夜間バッチ（タスクスケジューラ）が毎日実行します。最終実行は<a href="/" style="color:inherit">ダッシュボード</a>の「自動収集」で確認できます。</span>
+    </div>
+    <!-- 進捗と停止はここに置く（下の「詳細設定」は既定で閉じているので、中に置くと押した後に何も見えない）。
+         詳細設定の差分収集・全件収集も同じ進捗を使う -->
+    <div class="flex" style="margin-top:10px">
+      <button class="btn btn-secondary btn-sm" id="btn-stop" data-writes data-click="stopCollection" style="display:none;border-color:var(--status-bad);color:var(--status-bad)">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/></svg>
+        停止
+      </button>
+    </div>
+    <div id="collect-progress" class="hidden progress-wrap" style="margin-top:10px">
+      <div class="flex" style="margin-bottom:6px">
+        <span class="spinner"></span>
+        <span class="text-sm" id="progress-label">収集中...</span>
+      </div>
+      <div class="progress-bar" role="progressbar" aria-valuemin="0" aria-valuemax="100"><div class="progress-fill" id="progress-fill" style="width:0%"></div></div>
     </div>
   </div>
 
@@ -235,25 +266,15 @@ tr:hover td{background:var(--border-subtle)}
     <div class="card" style="border-color:var(--status-info-bg)">
       <div class="section-title">差分収集</div>
       <div style="background:var(--status-info-bg);border-radius:8px;padding:10px 12px;font-size:12px;color:var(--status-info-text);border-left:3px solid var(--status-info);margin-bottom:14px">
-        過去1年分のEDINET書類のうち、まだ取り込んでいないものだけを取得します。定期実行に最適です。
+        過去1年分のEDINET書類のうち、まだ取り込んでいないものだけを取得します（上の「今すぐ実行」と同じ処理）。株価・マクロは更新しません。
       </div>
       <div class="flex" style="margin-bottom:12px">
         <button class="btn btn-primary" id="btn-incremental" data-writes data-click="startIncremental">
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 11-2.12-9.36L23 10"/></svg>
           差分収集を実行
         </button>
-        <button class="btn btn-secondary btn-sm" id="btn-stop" data-writes data-click="stopCollection" style="display:none;border-color:var(--status-bad);color:var(--status-bad)">
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/></svg>
-          停止
-        </button>
       </div>
-      <div id="collect-progress" class="hidden progress-wrap">
-        <div class="flex" style="margin-bottom:6px">
-          <span class="spinner"></span>
-          <span class="text-sm" id="progress-label">収集中...</span>
-        </div>
-        <div class="progress-bar" role="progressbar" aria-valuemin="0" aria-valuemax="100"><div class="progress-fill" id="progress-fill" style="width:0%"></div></div>
-      </div>
+      <div class="text-sm" style="color:var(--text-muted)">進捗と停止ボタンは上の「財務データの差分収集（手動）」に出ます。</div>
     </div>
 
     <!-- 全件収集 -->

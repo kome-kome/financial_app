@@ -52,6 +52,9 @@ body{font-family:'Segoe UI',sans-serif;background:var(--bg);color:var(--text);mi
 @media (max-width: 768px){
   .stats-grid{grid-template-columns:1fr 1fr}
   .nav-grid{grid-template-columns:1fr}
+  /* `.nav-grid-main{1fr 1fr}` はこのメディアクエリより後ろに書かれていて勝つので、
+     詳細度を上げて1列に戻す（無いと入口カードが 375px で2列に詰まる） */
+  .nav-grid.nav-grid-main{grid-template-columns:1fr}
   .sched-grid{grid-template-columns:1fr 1fr}
 }
 @media (max-width: 480px){
@@ -135,7 +138,7 @@ body{font-family:'Segoe UI',sans-serif;background:var(--bg);color:var(--text);mi
     <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--accent-text)" stroke-width="2" style="flex-shrink:0">
       <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>
     </svg>
-    <span id="update-banner-msg">データが古い可能性があります。差分収集を実行して最新化してください。</span>
+    <span id="update-banner-msg">財務データが古い可能性があります。財務データの差分収集を実行して最新化してください。</span>
     <a href="/collection">収集ページへ</a>
   </div>
 
