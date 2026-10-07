@@ -88,6 +88,19 @@ def weekly_cache_sandbox(tmp_path, monkeypatch):
     monkeypatch.setenv("FINAPP_WEEKLY_CACHE", "0")
 
 
+@pytest.fixture(autouse=True)
+def batch_activity_sandbox(tmp_path, monkeypatch):
+    """実行中マーカー（`batch_activity`）の置き場所を tmp へ向ける。
+
+    書き手（`run_batch` を呼ぶテスト）と読み手（重い分析の 409 判定）の両方がここを通る。
+    差し替えないと、①`run_batch` を呼ぶテストが本物の `.logs` にマーカーを書いて消し、
+    **走っている本物のバッチのマーカーまで消しうる**、②開発 PC で夜間バッチが走っている間だけ
+    API テストが 409 を踏んで落ちる。monkeypatch を各テストに任せると1本の書き忘れで本物へ届く。
+    """
+    import batch_activity
+    monkeypatch.setattr(batch_activity, "LOG_DIR", tmp_path / "batch_activity")
+
+
 @pytest.fixture
 def db():
     """各テスト独立の in-memory SQLite Session。

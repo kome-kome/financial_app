@@ -45,7 +45,7 @@
 
 ## `plugins/base.py`
 
-分析プラグインの抽象基底クラス。`heavy`（既定 False・True なら Render 軽量モードでブロックしローカル実行を促す）・`hidden`（既定 False・True なら `/api/plugins` から除外＝サイドバーに出ない**退役**・ADR-0044）・`ui_order`（既定 999）・`produced_output(db)` 等の共通契約を定義する。`heavy` は実行環境の制約、`hidden` は評価の結論で**別軸**（hidden にしてもレジストリ・`execute_plugin`・`model_comparison` には残る）。
+分析プラグインの抽象基底クラス。`heavy`（既定 False・True なら Render 軽量モードでブロックしローカル実行を促す）・`hidden`（既定 False・True なら `/api/plugins` から除外＝サイドバーに出ない**退役**・ADR-0044）・`ui_order`（既定 999）・`produced_output(db)`・`writes`（既定 None・画面から実行したときに置き換わる保存済みの表。**heavy は宣言必須**で、書かないなら `()`。実行前の確認ダイアログに出す）等の共通契約を定義する。`heavy` は実行環境の制約、`hidden` は評価の結論で**別軸**（hidden にしてもレジストリ・`execute_plugin`・`model_comparison` には残る）。
 
 依存先: —
 

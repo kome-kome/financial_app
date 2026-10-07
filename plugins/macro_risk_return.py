@@ -92,6 +92,7 @@ class MacroRiskReturnPlugin(AnalysisPlugin):
     )
     depends_on: list[str] = []
     heavy: bool = True
+    writes = ()   # 推論結果は画面に返すだけで保存しない
     category = "③ 将来リターンを予測"
     ui_order = 330
 

@@ -109,12 +109,14 @@ WRITE_ROUTE_EXEMPTIONS: dict[tuple[str, str], str] = {
         "exempt: app_settings のパスワードを書く。閲覧専用でもログインを復旧できる必要がある"
         "（断面の分析データではない）",
     ("POST", "/api/plugins/{plugin_name}/run"):
-        "exempt: 書くのは heavy の sector_ols（regression_results）だけで、heavy は "
-        "writes_blocked() で 403。heavy でないプラグインは DB へ書かない",
+        "exempt: 書くのは heavy だけ（各プラグインの writes＝regression_results・"
+        "macro_*_scores と、所要の記録 app_settings）で、heavy は writes_blocked() で 403。"
+        "heavy でないプラグインは DB へ書かない",
     ("POST", "/api/recommend"):
         "exempt: 推薦の計算。DB を読むだけ",
     ("POST", "/api/backtest/model-comparison"):
-        "exempt: OOF 比較。DB を読むだけで、heavy は writes_blocked() のとき飛ばす",
+        "exempt: OOF 比較。各モデルは tuning_dry_run で保存しない。heavy は writes_blocked() の"
+        "とき飛ばし、所要の記録（app_settings）も writes_blocked() のときは書かない",
     ("POST", "/api/screen"):
         "exempt: スクリーニングの条件を body で受けるだけで DB を読むだけ",
 }
