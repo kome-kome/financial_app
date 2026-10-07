@@ -1,11 +1,9 @@
 """plugins/utils.py の純関数に対するユニットテスト。
 
-このモジュールは numpy/scipy 等の外部依存を持たないため、本テストは
-プロジェクトの venv なしで実行できる:
+    python -m pytest tests/test_utils.py -v
 
-    python3 -m pytest tests/test_utils.py -v
-
-CLAUDE.md「ols() は Pure Python 単体実装」を担保する回帰テストでもある。
+ols() の回帰テストでもある。旧方針「ols() は Pure Python 単体実装」は撤回済みで、
+plugins/utils.py は numpy/scipy を使う（採用基準は docs/VISION.md）。
 """
 import math
 import os
@@ -149,7 +147,7 @@ class TestNormalizeTransform:
 
 # ── winsorize/normalize/fit_feature_columns の新旧完全一致（Issue #304）────
 # plugins/utils.py の numpy ベクトル化版は、旧 Pure Python 実装（sorted()/list内包表記）と
-# 完全に同一の数値を返す必要がある（CLAUDE.md「統計的妥当性に影響しない」要件）。
+# 完全に同一の数値を返す必要がある（ADR-0007 の Update「統計的妥当性に影響しない」要件）。
 # 以下は変更前の実装をそのまま複製した参照実装で、ランダム入力・境界ケースで
 # 新実装と厳密一致（==）することを検証する。
 

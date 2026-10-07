@@ -51,7 +51,7 @@ python -m scripts.check_nightly_collect --nights 5
 ./run_monthly.ps1 -Steps factor_premia   # 一部だけ
 ./scripts/install_monthly_task.ps1       # タスクスケジューラへ登録（毎月1日 JST 01:00・上限16h）
 
-# macro_beta は別タスク（毎月2日 JST 01:00）。実測 360分で月次本体の窓に入らない（#579）
+# macro_beta は別タスク（毎月2日 JST 01:00）。実測 360〜419分で月次本体の窓に入らない（#579）
 ./run_monthly_beta.ps1                   # 手動で1回
 ./run_monthly_beta.ps1 -DryRun           # 実行計画だけ
 ./run_monthly_beta.ps1 -Force            # 収束ゲートを無視して live で persist（人手で精査した1回だけ）

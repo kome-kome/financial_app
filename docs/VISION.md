@@ -109,7 +109,7 @@
 | `scikit-learn` | Ridge/Lasso/ElasticNet・適切な交差検証 | ML のデファクト、TimeSeriesSplit 含む |
 | `pandas` | データフレーム操作 | 既に利用中（collector.py） |
 
-### 採用前の手順（CLAUDE.md「パッケージ管理方針」と併用）
+### 採用前の手順（CLAUDE.md「パッケージ管理（pip install 前に必須）」と併用）
 
 1. WebSearch で `<ライブラリ名> CVE` / `security vulnerability` を検索
 2. PyPI・GitHub でメンテナ状況・直近リリース・スター数を確認

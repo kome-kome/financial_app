@@ -14,8 +14,8 @@ heavy を GitHub Actions 上で実行し、本番 Supabase へ直接永続化す
   - `sector_ols`  → `regression_results`（`gap_ratio` の生成元・買い推奨のバランス型プリセット）
   - `macro_enet`  → `macro_enet_scores`（M-6 の μ̂・`sell_ranking` の**既定** mu_source・#402/#443）
 
-M-2（`macro_gbdt`）は載せていない。既定 mu_source ではなく、`tune-hyperparameters.yml` の
-`--persist-scores` による月次更新経路が現に生きているため（載せるなら同時に tune 側から外し、
+M-2（`macro_gbdt`）は載せていない。既定 mu_source ではなく、月次バッチ（`scripts/run_monthly.py`
+の `TUNE_MATRIX`・旧 `tune-hyperparameters.yml`）の `--persist-scores` による更新経路が現に生きているため（載せるなら同時に tune 側から外し、
 探索 cadence と #291 の品質ゲートの関係を詰める必要がある）。M-4（`macro_ensemble`）は基底を
 全部回してコストが合算になるのに M-6 単体を上回らないため当面除外（+0.0006・p=0.810・ADR-0022）。
 

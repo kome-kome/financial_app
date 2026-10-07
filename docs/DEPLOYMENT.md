@@ -12,7 +12,7 @@ Render の制約と運用形態に合わせて設計すること。
 ### 自動実行 vs 手動実行の整理
 
 > **⚠ GitHub Actions の定時実行は #503 で全て止まった。** 生きている cron は
-> `egress-health` の1本だけで、月次3本（`tune-hyperparameters` / `macro-beta-inference` /
+> `egress-health` と、DB へ接続しない週次の `dependency-audit`（#723）の2本だけで、月次3本（`tune-hyperparameters` / `macro-beta-inference` /
 > `recommend-factor-premia`）は **#504 でファイル自体を削除した**。下表の「実行場所」は
 > **現在の駆動元**を示す。
 
@@ -37,7 +37,7 @@ Render の制約と運用形態に合わせて設計すること。
 
 ### GitHub Actions workflow 早見表（いつ・何を・どれを使うか）
 
-#### 定期実行の占有表（時刻を動かす前に必ずここを見る）
+#### バッチ暦（定期実行の占有表・時刻を動かす前に必ずここを見る）
 
 > **2026-08-20（#503・[ADR-0038](adr/0038-local-postgres-is-the-primary.md)）に駆動主体が変わった。**
 > 正本がローカル PostgreSQL へ移り、**GHA はクラウドで走るのでローカル DB へ書けない**ため、
@@ -49,7 +49,10 @@ Render の制約と運用形態に合わせて設計すること。
 | JST | タスク | 頻度 | 中身 | 備考 |
 |---|---|---|---|---|
 | **17:20** | `financial_app-nightly`（`run_nightly.ps1` → `scripts/run_nightly.py`） | 毎日 | `_pipeline_incremental.py`（XBRL 差分＋マクロ＋市場データ）→ `nightly_scores.py` | 大引 15:30・J-Quants 四本値 16:30・EDINET 受付終了 17:15 の後（#476 の確定時刻表）。`StartWhenAvailable` で停止していた日は次回起動時に追いつく。上限6時間（最悪 23:20 終了）。**窓はステップ予算へ分割**（pipeline 240分 / scores 60分・#530・ADR-0040）＝超過は `exit=124` で起票され、後続ステップは走る |
-| **1日 01:00** | `financial_app-monthly`（`run_monthly.ps1` → `scripts/run_monthly.py`） | 毎月 | `_pipeline_vacuum.py` → `scripts/resolve_price_suffix.py` → `recommend_factor_premia.py` → `macro_beta_inference.py` → `hyperparameter_search.py` ×3（M-1/M-3/M-2） | 日次の最悪ケース（23:20）の後で、翌日の日次 17:20 までの**16時間の窓**。上限もその幅（`PT16H`）。GHA 時代の4本（vacuum / tune / macro-beta / factor-premia）の移設先（#504・#290）。**窓はステップ予算へ分割**（vacuum 45 / price_suffix 3 / factor_premia 20 / macro_beta 180 / tune 250・250・180 分・Σ928＜960・#530・ADR-0040）。**余裕は 2分しかない**ので、ステップを足すときは必ず `window_problem()` を通ること（#560 で `--reprobe` 全数 8分が入らなかった）。予算が無いと `macro_beta` が窓を食い尽くし `tune×3` が**一度も起動しない**（打ち切りは failure として現れないので気づけない） |
+| **1日 01:00** | `financial_app-monthly`（`run_monthly.ps1` → `scripts/run_monthly.py`） | 毎月 | `_pipeline_vacuum.py` → `scripts/resolve_price_suffix` → `scripts/check_heavy_imports` → `recommend_factor_premia.py` → `hyperparameter_search.py` ×2（M-3/M-2）。**macro_beta は 2日・M-1 探索は 3日の別タスク**（#579・#584） | 日次の最悪ケース（23:20）の後で、翌日の日次 17:20 までの**16時間の窓**。上限もその幅（`PT16H`）。GHA 時代の4本（vacuum / tune / macro-beta / factor-premia）の移設先（#504・#290）。**窓はステップ予算へ分割**（値の正本は `scripts/run_monthly.py` の `BUDGET_MIN`・Σ＋マージン ≤ 窓・#530・ADR-0040）。ステップを足すときは必ず `window_problem()` を通すこと。予算が無いと1ステップが窓を食い尽くし後続が**一度も起動しない**（打ち切りは failure として現れないので気づけない。#579 以前は `macro_beta` がこれを起こした） |
+| **2日 01:00** | `financial_app-monthly-beta`（`run_monthly_beta.ps1` → `scripts/run_monthly_beta.py`） | 毎月 | `scripts/check_heavy_imports` → `macro_beta_inference.py`（M-1 の入力 `macro_beta_loadings` を作る） | 窓16時間。所要が本体の予算に収まらず切り出した（#579）。**M-1 探索（3日）より前**でなければならない＝日付の順序がそのまま依存順 |
+| **3日 01:00** | `financial_app-monthly-m1`（`run_monthly_m1.ps1` → `scripts/run_monthly_m1.py`） | 毎月 | `scripts/check_heavy_imports` → `hyperparameter_search.py --model macro_risk_return` | 窓16時間。所要が本体の窓に入らず切り出した（#584・[ADR-0046](adr/0046-steps-that-cannot-finish-get-their-own-task.md)）。2日に作られた `macro_beta_loadings` を入力に使う |
+| **平日 08:00** | `financial_app-daytime`（`run_daytime.ps1` → `scripts/run_daytime.py`） | 月〜金 | 重い計算のキュー（`beta` / `tune:*` / `interim` / `disclosures` / `gate:*`）を窓に収まるだけ消化（#618・#707・ADR-0060） | 窓8時間。**走っている間は何も並走させない**（並走は MCMC の結論そのものを変える）。月次系の起動日（1〜3日は 01:00 から16時間の窓と重なる）と祝日・年末年始は、並走に敏感な仕事を取り出さない（#681・#684・`run_daytime.MONTHLY_BATCHES` / `HOLIDAYS`） |
 | **20:00** | `financial_app-watchdog`（`run_watchdog.ps1` → `scripts/check_batch_freshness.py`） | 毎日 | `app_settings` の `*_last_run` を読み、閾値超過なら Issue へ起票（既存 open があればコメント追記） | **走らなかったことを検知する唯一の役**（#515 手順3・ADR-0042）。バッチが起動前に死ぬと failure が出ないので `batch_common.notify` は発火しない。上限15分。時刻は判定に影響しない（閾値が観測時刻に依存しない導出）ので、選ぶ基準は**その時刻に PC が点いている確率**だけ |
 | **日曜 21:00** | `financial_app-backup`（`run_backup.ps1` → `scripts/run_backup.py`） | 毎週 | `scripts/backup_push.py --apply --dest storage`（17表を `--compress=9` でダンプ → Storage へ） | 夜間バッチと**別タスク**にする（遅延が道連れにならない）。実測 38.1MB/世代・所要は数分規模だが、窓2時間・ステップ予算90分は**窓から導出**する（ADR-0040・実測へ寄せると伸びた週に打ち切られて世代が残らない）。自動化前は手動 CLI で、実効 RPO が「最後に人が思い出した日」だった（#606）。夜間バッチ（17:20 開始・実測約70分）とは時間帯が重ならない |
 
@@ -83,7 +86,7 @@ Render の制約と運用形態に合わせて設計すること。
 - **ログの先頭に実行環境が出る**（`batch_common.env_lines()`・#550）＝python パス（venv か否か）・cwd・**DB 接続先の表示名**・セッション ID・`FINAPP_*`。S4U はセッション0で走るので、`session: 0（S4U/サービス側）` と出るのが自動実行、`1（対話）` が手動実行。**接続先が想定と違っても書き込みは成功して静かに正常終了する**ので、切り分けの最初にここを見る。`./run_nightly.ps1 -DryRun` なら実走せずに同じ行が出る。
 - **実行中のログはエクスプローラ上のサイズが 0 のまま**（Windows がオープン中ファイルのサイズをメタデータへ反映しない）。`Get-ChildItem` の `Length` を見て「空＝即死」と読まないこと。中身は `[System.IO.File]::Open($f,'Open','Read','ReadWrite')` で読める。
 - 「走らなかった」ことは **毎日 20:00 の `financial_app-watchdog`（`scripts/check_batch_freshness.py`）が `app_settings` の `*_last_run` を見て起票する**（#515 手順3）。`/api/morning` の as-of ブロック（#416/#417）は人が開いたときの最後の環として残る。**閾値は `cadence + 窓` の導出**（夜間 24h+6h=30h／月次 31日+16h=760h）で、窓を広げれば閾値も自動で広がる＝乖離が原理的に起きない。副産物として「実行中は鳴らない」が構造的に成立する（窓の項がそのまま「まだ走っていてよい時間」の許容）。**見るのは `*_last_run` であって `*_last_success` ではない**——後者は #512 が解けるまで `monthly_last_success` が設計上ずっと古く、そこで鳴らすと恒久的に open な Issue ができて通知そのものが信用されなくなる（成功側は報告と Issue 本文には必ず載る）。
-- **月次の並びは「依存順 ∧ 軽い順」**＝`macro_beta_loadings` は M-1 の入力なので推論が tune より先、かつ打ち切られても前方が揃うよう軽い順（factor_premia 実測 2.6分 → macro_beta → tune）。
+- **月次の並びは「依存順 ∧ 軽い順」**＝打ち切られても前方が揃うよう軽い順（factor_premia 実測 2.6分 → tune）。`macro_beta_loadings` は M-1 の入力なので、その推論（2日）は M-1 探索（3日）より前の日に置く（#579・#584＝依存順を日付の順序で表す）。
 - **`vacuum` だけは別枠で先頭**（#290）。`VACUUM FULL` は ACCESS EXCLUSIVE ロックを取るので、後ろに置くと tune が長引いたぶん実行機会が減り、上限で打ち切られると一度も走らない。**週次ではなく月次で足りる**のは、`_pipeline_vacuum.py` が前段で per-table の `autovacuum_vacuum_scale_factor` を 0.02 へ較正するため dead tuple は 2% で回収され続け、月次で要るのは物理サイズの頭打ちだけだから。Supabase 時代に週次だったのは**枠を超えた瞬間 read-only になる崖**があったからで、ローカルにその崖は無い。
 - **上限で打ち切られても「失敗」としては現れない**（タスクスケジューラがプロセスを止めるだけで Issue も起票されない）。ただし**打ち切られると `record_footprint` に到達しない＝足跡が1つも進まない**ので、`*_last_run` の鮮度としては現れる——ADR-0040 が「検知できない」と書き残した穴は watchdog（#515・ADR-0042）が塞いだ。
 - **月次タスクの登録は XML 直渡し**（`scripts/install_monthly_task.ps1`）。PowerShell の `New-ScheduledTaskTrigger` に `-Monthly` は無く、CIM の `MSFT_TaskMonthlyTrigger` を組んでも `schtasks` の産物を渡し直しても `Register`/`Set-ScheduledTask` が "The parameter is incorrect" で弾く（2026-08-21 に実測）。**しかも非終了エラーなので `$ErrorActionPreference=Stop` でも止まらず「登録しました」と嘘が出る**ため、登録後に `Export-ScheduledTask` で日・上限・`StartWhenAvailable` を読み直して検証している。
@@ -133,7 +136,7 @@ Render の制約と運用形態に合わせて設計すること。
 | 制約 | 値 | 実測との関係 |
 |---|---|---|
 | ファイルサイズ | **50MB**（Free） | 最大表 `stock_price_weekly` が 17.4MB。表ごとに分けているので余裕がある |
-| Storage 容量 | **1GB**（Free） | 1世代 37.5MB。保持ポリシー（直近4＋月次6＝10世代）で約 375MB |
+| Storage 容量 | **1GB**（Free） | 1世代 38.1MB。保持ポリシー（直近4＋月次6＝10世代）で約 381MB |
 | Egress | 5GB/月（DB と共用） | **upload は Egress に載らない**。download は復元時だけ |
 
 
@@ -173,8 +176,9 @@ python -m scripts.backup_restore --source storage --apply --create-schema `
 > （月次 毎月1日 JST 01:00）・`run_monthly_beta.ps1`（2日）・`run_monthly_m1.ps1`（3日）・
 > `run_daytime.ps1`（平日 08:00）**で、停止と代替の対応は上の「GitHub Actions（#503 で停止したもの）」が
 > 正本。残っているファイルは `workflow_dispatch` の口が生きているが、**GHA からはローカル正本の DB へは
-> 書けない**（書けるのは Supabase 断面だけ＝走らせると正本と分岐する）。定時で生きているのは
-> `egress-health` / `ci` / `notify-failure` の**3本**（`vacuum-maintenance` は 2026-08-25 に停止・#290 / #505）。
+> 書けない**（書けるのは Supabase 断面だけ＝走らせると正本と分岐する）。定時（cron）で生きているのは
+> `egress-health`（毎日）と `dependency-audit`（毎週・#723）の**2本**で、`ci` / `notify-failure` はイベント駆動
+> （`vacuum-maintenance` は 2026-08-25 に停止・#290 / #505）。
 
 | カテゴリ | workflow 名 | ファイル | 使うタイミング | 所要時間の目安 |
 |---|---|---|---|---|
@@ -193,7 +197,7 @@ python -m scripts.backup_restore --source storage --apply --create-schema `
 
 #### アーカイブ済み（`.github/workflows/old/` 配下・一回性・Actions 対象外）
 
-一回性バックフィル完了後に `old/` へ退避済み。再実行が必要な場合のみ `workflow_dispatch` で起動する。定期スケジュールは持たない。
+一回性バックフィル完了後に `old/` へ退避済み。サブディレクトリの yml は Actions が認識しないので、再実行が必要な場合のみ `.github/workflows/` へ戻してから `workflow_dispatch` で起動する。定期スケジュールは持たない。
 
 > 株価履歴バックフィル / 週次株価バックフィル / C2 NULL バックフィル / CF NULL バックフィル / bs_machinery バックフィルの5本は完了済みにつき削除済み（Issue #259）。
 
@@ -354,7 +358,7 @@ PYTHONUTF8=1 "$TEMP/audit-venv/Scripts/pip-audit" --strict -r requirements.txt -
 
 ### bs_inventory バックフィル（`.github/workflows/old/refill-pl-bs.yml`）
 
-`bs_inventory` の NULL はタグ漏れではなく**時系列コホート**が原因（パーサ修正前に収集した〜2022年度が backfill 未実施。2026-06-15 実測で旧年度 57〜94% null・新年度は ~3%）。`.github/workflows/old/refill-pl-bs.yml` を **workflow_dispatch（limit 省略＝全件・約4〜5時間）** で起動し、古い順に XBRL を再取得して是正する。詳細・残件の見方は GOTCHAS.md「bs_inventory バックフィルの運用」。
+`bs_inventory` の NULL はタグ漏れではなく**時系列コホート**が原因（パーサ修正前に収集した〜2022年度が backfill 未実施。2026-06-15 実測で旧年度 57〜94% null・新年度は ~3%）。`.github/workflows/old/refill-pl-bs.yml` を（`.github/workflows/` へ戻してから）**workflow_dispatch（limit 省略＝全件・約4〜5時間）** で起動し、古い順に XBRL を再取得して是正する。詳細・残件の見方は GOTCHAS.md「bs_inventory バックフィルの運用」。
 
 | 項目 | 状態 |
 |---|---|
@@ -468,7 +472,7 @@ python -m scripts.setup_local_db --apply    # 実行
 
 このマシンには Supabase 移行前（2026-02〜05 で凍結）の開発 DB が残っていた。うち旧 `stock_price_history` は **2024-05-17〜2026-02-20・3,960社・1,636,505行の日次 OHLCV** で、**現行 Supabase にはもう存在しない**——`stock_price_daily` は `DAILY_WINDOW_DAYS=183` でローリング削除され、`stock_price_weekly` は `close_last` と集約しか持たず O/H/L を残さない。Yahoo から取り直すと 3,960社ぶんで数十時間かかるため、**DROP せず改名して温存**した（478MB）。
 
-`stock_price_daily` の窓は今日時点で 2026-02-13 以降なので **7日重なって連続する**が、**この旧データに分割の遡及調整が入っているかは未確認**（#465 で週次に段差が見つかっている）。調整済みの現行値と混ぜる前に接合検証が要る。ミラー範囲には含めない。
+`stock_price_daily` の窓は今日時点で 2026-02-13 以降なので **7日重なって連続する**が、**この旧データに分割の遡及調整は入っていない**（#490・2026-08-21 に検証。詳細は [GOTCHAS.md](GOTCHAS.md) の `legacy_stock_price_history_2026_02` の項）。調整済みの現行値と混ぜる前に接合検証が要る。ミラー範囲には含めない。
 
 同時に DROP した旧4テーブル（`companies` / `financial_records` / `macro_data` / `collection_logs`）は `migration_dumps/legacy_pre_mirror_20260815.dump` へ退避していたが、**2026-08-29 にユーザー判断で削除した**（7.8MB）。**この4テーブルの 2026-08-15 断面はもう復元できない**——`.backups` と Supabase Storage が持つのは現行スキーマのバックアップで、DROP 済みのテーブルは入っていない。`migration_dumps/` 自体は `mirror_pull.py` が`mkdir(exist_ok=True)` で作り直すので、ミラーの動作には影響しない。
 
@@ -648,8 +652,8 @@ Render ダッシュボードで管理。
 - `full-pipeline.yml` finalize（Phase 3〜5）: **run 31229841870（2026-08-08・`jquants_days=180`）で 255.8分 実測**（`timeout-minutes: 355`）。内訳 = 成長率/Zスコアは VIEW 算出でスキップ ／ **マクロ 6.0分** ／ **Yahoo ギャップ補完 83.3分**（3,708件・4,437社 × `YAHOO_STOCK_RATE_SLEEP=0.5秒`＝差分が1日でも全社ループの固定費がかかる） ／ **J-Quants 23.4分**（130営業日中70日を取得＝235,359件 upsert・60日は契約窓外でリクエストせずスキップ） ／ **`update_market_data_from_history` 143.1分**（42,289レコード）。
   - **J-Quants は窓長にほぼ比例**（1営業日 = `JQUANTS_RATE_SLEEP` 20秒）。`jquants_days=730` なら窓内約462営業日＝約154分。`full-pipeline.yml` の `jquants_days` 入力で切り替える。
   - **`update_market_data_from_history` の143.1分は #464 で解消済み**（1件1 UPDATE → `UPDATE ... FROM` の一括更新でローカル約56秒）。GHA では往復回数が 42,394 → 22 に減るため、この項は数分以下になる見込み。**次回の実走で再計測すること。** 解消後は 730日でも合計約250分で 355分に収まり、公式値置換のために専用ワークフローを分ける必要はない。
-- `backfill-stock-history.yml`: 対象＝stock_price NULL かつ period_end 730日超前（初回 約3,800社）。`YAHOO_STOCK_RATE_SLEEP=0.5秒`・1社1リクエストで **約60〜90分**（`timeout-minutes: 150`）。
-- `backfill-weekly-history.yml`（#198）: 対象＝`stock_price_weekly` の最古日が `today-years` より新しい社。`backfill_weekly_history_yahoo` が Yahoo から過去方向に取得し、**1社ごとに `record_prices_batch(trim=True)`** で daily→weekly 再集約しつつ daily を都度 trim する（5年×全社の daily 同時展開を避け Supabase 500MB を超えない）。`YAHOO_STOCK_RATE_SLEEP=0.5秒`で **約60〜150分**（`timeout-minutes: 150`）。
+- `backfill-stock-history.yml`（完了につき削除済み・上の「アーカイブ済み」節）: 対象＝stock_price NULL かつ period_end 730日超前（初回 約3,800社）。`YAHOO_STOCK_RATE_SLEEP=0.5秒`・1社1リクエストで **約60〜90分**（`timeout-minutes: 150`）。
+- `backfill-weekly-history.yml`（#198・完了につき削除済み）: 対象＝`stock_price_weekly` の最古日が `today-years` より新しい社。`backfill_weekly_history_yahoo` が Yahoo から過去方向に取得し、**1社ごとに `record_prices_batch(trim=True)`** で daily→weekly 再集約しつつ daily を都度 trim する（5年×全社の daily 同時展開を避け Supabase 500MB を超えない）。`YAHOO_STOCK_RATE_SLEEP=0.5秒`で **約60〜150分**（`timeout-minutes: 150`）。
 
 ### Supabase（無料プラン）
 
@@ -805,7 +809,7 @@ python -m scripts.mirror_verify --level counts --bytes --warn-only   # 表ごと
 **後続PR（本対策に連なる別タスク）**：
 - *予測モデルの平滑化ターゲット化*：`turnover_sum`/`volume_sum` 由来の VWAP・相対流動性を説明/被説明変数に。年次株価変動ノイズ対策。MODELS.md 更新を伴う。
 - *`financial_records.raw_xbrl_json` の drop*：**実装済み（Issue #219 ①）**。financial_records 73MBの主因＝第2の容量レバーだった列を冪等DROPマイグレーション（`database.py::_DEBUG_ONLY_COLS`）で削除し、ヘッドルームを確保。
-- *過去2〜5年の Yahoo 週次バックフィル*：J-Quants 無料は2年上限のため、5年時系列（財務5年と整合）を Yahoo から `stock_price_weekly` へ補填。**実装済み（#198・`backfill-weekly-history.yml` / `backfill_weekly_history_yahoo`）。本番実行は use_momentum 常用時に手動で1回**。
+- *過去2〜5年の Yahoo 週次バックフィル*：J-Quants 無料は2年上限のため、5年時系列（財務5年と整合）を Yahoo から `stock_price_weekly` へ補填。**実装済み（#198・`backfill_weekly_history_yahoo`）。本番実行は完了済みで、専用の `backfill-weekly-history.yml` は削除した**。現在の呼び出し元は `_pipeline_gh.py`（全件収集）と `python -m scripts.resolve_price_suffix --backfill-weekly`（解決できた社だけ）。
 
 #### バックアップ運用ポリシー
 

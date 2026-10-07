@@ -32,7 +32,7 @@ name: "[手動] DBメンテナンス（VACUUM FULL・Supabase 断面用）"
 # もう成り立たず、23:30Z との間隔は大きく開いている**＝この時刻を狭める理由は無いので
 # 据え置く（動かす必然が無いものを動かさない）。同じ日に走りうる相手は #503・#504 で
 # 全て消えた（月次3本は削除し、VACUUM の受け皿も `_pipeline_vacuum.py` が月次で担う）。
-# 全ワークフローの占有表は docs/DEPLOYMENT.md「cron 占有表」を参照。
+# 全ワークフローの占有表は docs/DEPLOYMENT.md「バッチ暦（定期実行の占有表）」を参照。
 #
 # ✅ 段階導入完了（2026-07-12）: workflow_dispatch でローカル・GitHub Actions
 # （Azure IP）双方から Supabase pooler 経由の VACUUM FULL 正常完了を確認済み
