@@ -23,7 +23,7 @@ from plugins.macro_gbdt import (
     _build_sector_final_samples, _sector_current_row,
 )
 from plugins.macro_snapshots import (
-    build_snapshots, oof_backtest, build_oof_meta,
+    build_snapshots, oof_backtest, build_oof_meta, build_price_features, month_end_indices,
 )
 from plugins.utils import coerce_params
 
@@ -1155,9 +1155,62 @@ class TestTuningSearchSpace:
 class TestPriceFeatures:
     """build_snapshots(price_features=...) が px_* を正しく配線し、既定は無変更に保つ。"""
 
+    # 値を照合する px 特徴量。px_volz は検体に出来高が無く全 nan になるので外す。
+    _PX_MATCH = ["px_rvol", "px_high52dev", "px_rev4w"]
+
     def _inputs(self):
         _, prices_by_co, fin_by_co, companies = _make_db_mock(n_companies=3, n_weeks=180)
         return prices_by_co, fin_by_co, companies
+
+    def _irregular_inputs(self, seed=831):
+        """終値が週ごとに不規則に動く検体（#831）。
+
+        `_make_db_mock` の終値は毎週 +0.5 円の一直線で、単調増加なので px_high52dev は warmup 後
+        ずっと 0、px_rvol / px_rev4w も隣の週との差がごく小さい＝1週ずれても値の照合が通る。
+        日付・財務・会社は `_make_db_mock` のものを使い、終値だけ seed 固定の幾何ランダム
+        ウォークへ差し替える（他のテストが共有する検体は変えない）。3社とも別の値動きにして、
+        別の社の px 値が入る誤りも拾えるようにする。
+        """
+        prices_by_co, fin_by_co, companies = self._inputs()
+        rng = np.random.default_rng(seed)
+        for ec, rows in prices_by_co.items():
+            closes = 1000.0 * np.exp(np.cumsum(rng.normal(0.0, 0.03, size=len(rows))))
+            prices_by_co[ec] = [_make_price(r.trade_date, float(c)) for r, c in zip(rows, closes)]
+        return prices_by_co, fin_by_co, companies
+
+    def _build_px(self, prices_by_co, fin_by_co, companies):
+        """px 特徴量つきでスナップショットを組む（各サンプルの社も受け取る）。"""
+        return build_snapshots(
+            prices_by_co, fin_by_co, companies, {}, ["per", "pbr"], [], False, 12, 0.1,
+            build_interactions=False, macro_nan_ok=True, return_stock_ids=True,
+            price_features=self._PX_MATCH,
+        )
+
+    def _px_mismatches(self, prices_by_co, samples, stock_ids, feats):
+        """全サンプルの px 値を、その社の build_price_features(...)[name][snap_idx] と照合する。
+
+        snap_idx は社の日付列に対する month_end_indices のうち、サンプルの月に当たる位置
+        （日付は3社共通なので月→snap_idx は一意）。期待値はこのモジュールが import 時に掴んだ
+        本物の build_price_features で計算する＝本体側を差し替えても期待値は動かない。
+        nan は nan 同士で一致とみなす。
+        戻り値: (食い違い [(社, 月, 特徴量, 入った値, 期待値)], 期待値 {社: {特徴量: 列}},
+        照合した [(社, snap_idx)])
+        """
+        expected, snap_of = {}, {}
+        for ec, rows in prices_by_co.items():
+            dates = [r.trade_date for r in rows]
+            expected[ec] = build_price_features(rows, self._PX_MATCH)
+            snap_of[ec] = {dates[i][:7]: i for i in month_end_indices(dates)}
+        mismatches, checked = [], []
+        for ym, rows in samples.items():
+            for (feat_row, _y), ec in zip(rows, stock_ids[ym], strict=True):
+                s = snap_of[ec][ym]
+                checked.append((ec, s))
+                for name in self._PX_MATCH:
+                    got, want = feat_row[feats.index(name)], expected[ec][name][s]
+                    if not (got == want or (math.isnan(got) and math.isnan(want))):
+                        mismatches.append((ec, ym, name, got, want))
+        return mismatches, expected, checked
 
     def test_schema_default_off(self):
         """M-2 の price_features 既定は空（use_momentum と同じ保守ゲート）。"""
@@ -1199,21 +1252,63 @@ class TestPriceFeatures:
         assert feats == ["per", "pbr", "momentum_12m1", "px_rvol", "px_high52dev"]
 
     def test_feat_row_length_and_values_match_direct(self):
-        """feat_row 長が feature 数に一致し、px 値が build_price_features(snap_idx) と一致する。"""
-        prices_by_co, fin_by_co, companies = self._inputs()
-        pf = ["px_rvol", "px_high52dev", "px_rev4w"]
-        samples, _, _, feats = build_snapshots(
-            prices_by_co, fin_by_co, companies, {}, ["per", "pbr"], [], False, 12, 0.1,
-            build_interactions=False, macro_nan_ok=True, price_features=pf,
-        )
+        """feat_row の px 値が、その社の build_price_features(...)[name][snap_idx] と一致する（#831）。
+
+        feature の並びと feat_row の長さに加え、全サンプルの px 値を形成週（snap_idx）の値と
+        照合する（nan は nan 同士で一致）。照合が1週のずれを見分けられることも同じテストで
+        確かめる: 照合する各 px 特徴量について、snap_idx の値が snap_idx+1・snap_idx-1 の値と
+        異なる（どちらも有限）サンプルが少なくとも1つある。無いと、ずれても値が同じで照合が
+        空振りする（一直線の `_make_db_mock` では px_high52dev がそうなる）。
+        """
+        prices_by_co, fin_by_co, companies = self._irregular_inputs()
+        samples, _, _, feats, stock_ids = self._build_px(prices_by_co, fin_by_co, companies)
         # feature 順: fin(2) + px(3)
-        assert feats == ["per", "pbr"] + pf
+        assert feats == ["per", "pbr"] + self._PX_MATCH
         # サンプルが存在し、各 feat_row 長が feature 数と一致
         total = sum(len(v) for v in samples.values())
         assert total > 0
-        for ym, rows in samples.items():
+        for rows in samples.values():
             for feat_row, _y in rows:
                 assert len(feat_row) == len(feats)
+
+        mismatches, expected, checked = self._px_mismatches(prices_by_co, samples, stock_ids, feats)
+        assert mismatches == [], f"px 値が snap_idx の週の値と食い違う（先頭5件）: {mismatches[:5]}"
+        assert len(checked) == total
+
+        # 検体が1週のずれを見分けられること（照合が空振りしないこと）
+        for name in self._PX_MATCH:
+            for d in (1, -1):
+                n_distinct = sum(
+                    1 for ec, s in checked
+                    if math.isfinite(expected[ec][name][s])
+                    and math.isfinite(expected[ec][name][s + d])
+                    and expected[ec][name][s] != expected[ec][name][s + d]
+                )
+                assert n_distinct > 0, (
+                    f"{name}: snap_idx と snap_idx{d:+d} の値が全サンプルで区別できない"
+                    "（1週ずれても照合が通る検体）")
+
+    @pytest.mark.parametrize("shift", [1, -1], ids=["look_ahead", "lag"])
+    def test_one_week_shift_is_detected(self, monkeypatch, shift):
+        """px 値が1週ずれると、上のテストの照合が3つの px 特徴量すべてで食い違いを出す（#831）。
+
+        本体のソースは書き換えず、build_snapshots が呼ぶ build_price_features を、index i に
+        i+shift 週目の値を返すものへ差し替える（shift=+1 は1週先＝未来を覗く値、-1 は1週前）。
+        期待値の側は本物の関数で計算するので、照合は差し替えの影響を受けない。
+        """
+        def shifted(px_rows, selected):
+            pad = [float("nan")] * abs(shift)
+            return {
+                name: (vals[shift:] + pad) if shift > 0 else (pad + vals[:shift])
+                for name, vals in build_price_features(px_rows, selected).items()
+            }
+
+        monkeypatch.setattr("plugins.macro_snapshots.build_price_features", shifted)
+        prices_by_co, fin_by_co, companies = self._irregular_inputs()
+        samples, _, _, feats, stock_ids = self._build_px(prices_by_co, fin_by_co, companies)
+        mismatches, _, _ = self._px_mismatches(prices_by_co, samples, stock_ids, feats)
+        assert {name for _ec, _ym, name, _got, _want in mismatches} == set(self._PX_MATCH), (
+            "1週ずらした px 値を照合が拾えていない特徴量がある")
 
     def test_px_high52dev_warmup_reduces_population(self):
         """px_high52dev の52週 warmup 分は nan → min_coverage=1.0 で先頭 snapshot が脱落しうる。"""
