@@ -38,7 +38,7 @@
 }
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:'Segoe UI',sans-serif;background:var(--bg);color:var(--text);min-height:100vh}
-.header{background:var(--bg-elevated);border-bottom:1px solid var(--border);padding:14px 24px;display:flex;align-items:center;gap:14px}
+.header{background:var(--bg-elevated);border-bottom:1px solid var(--border);padding:14px 24px;display:flex;align-items:center;gap:10px 14px;flex-wrap:wrap}
 .header h1{font-size:17px;font-weight:600;color:var(--accent-text)}
 .badge{background:var(--accent-soft-bg);color:var(--accent-soft-text);font-size:11px;padding:3px 8px;border-radius:12px}
 .theme-toggle-btn{background:transparent;border:1px solid var(--border-muted);color:var(--text);border-radius:6px;width:30px;height:30px;font-size:14px;cursor:pointer;display:flex;align-items:center;justify-content:center;flex-shrink:0}
@@ -78,6 +78,10 @@ body{font-family:'Segoe UI',sans-serif;background:var(--bg);color:var(--text);mi
   .sidebar{flex:none;width:100%;min-height:0;border-right:none;border-bottom:1px solid var(--border);display:flex;flex-wrap:wrap;align-items:center;gap:4px;padding:8px 12px}
   .sidebar-cat{width:100%;margin:8px 4px 2px}
   .sidebar-item{width:auto}
+  /* API URL 欄は開発用で、CSP の connect-src 'self' により別ホストは指定しても届かない。
+     狭い幅ではテーマ切替を画面外へ押し出すだけなので隠す */
+  .api-url-bar{display:none}
+  #data-status-bar{flex-wrap:wrap;gap:6px 16px !important;padding:8px 12px !important}
 }
 @media (max-width: 480px){
   .grid4{grid-template-columns:1fr}
@@ -847,6 +851,6 @@ tr:hover td{background:var(--border-subtle)}
 
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 <script src="/static/js/common.js?v=20260620e"></script>
-<script src="/static/js/analysis.js?v=20260712a"></script>
+<script src="/static/js/analysis.js?v=20261008a"></script>
 </body>
 </html>
