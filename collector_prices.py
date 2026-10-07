@@ -6,6 +6,7 @@ import io
 import zipfile
 import asyncio
 import json
+import os
 from collections import defaultdict
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta, timezone
@@ -30,7 +31,22 @@ from database import (
     upsert_jquants_adj_factor_events,
 )
 
-from collector_utils import *
+# 設定定数・log。スター import だと ruff が未定義名（F821）を検出できないので名前を明示する（#824）。
+from collector_utils import (
+    BULK_UPDATE_CHUNK, DELISTED_RETRY_INTERVAL_DAYS, DELISTED_STALE_DAYS,
+    HEAVY_STATEMENT_TIMEOUT, JQUANTS_BACKFILL_DAYS, JQUANTS_ENDPOINT,
+    JQUANTS_MASTER_ENDPOINT, JQUANTS_MAX_CONSECUTIVE_FORBIDDEN, JQUANTS_RATE_SLEEP,
+    JQuantsAccessError, JQuantsOutOfCoverage, JST, MARKET_CLOSE_JST, MAX_GAP_DAYS,
+    OFFICIAL_SCALE_WRITABLE_UNTIL, PRICE_BATCH_MAX_ATTEMPTS, PRICE_BATCH_RETRY_SLEEP,
+    PRICE_BREAK_MAX_REPAIR, PRICE_BREAK_PROBE_MONTHS, PRICE_BREAK_THRESHOLD,
+    PRICE_COMMIT_BATCH, PRICE_REFRESH_TAIL_DAYS, PROGRESS_REPORT_BATCH,
+    ROUNDTRIP_MAX_GAP_DAYS, ROUNDTRIP_MIN_GAP_DAYS, ROUNDTRIP_NET_TOL, ROUNDTRIP_THRESHOLD,
+    SCALE_BREAK_RATIO, SESSION_SANITY_DAYS, YAHOO_BACKFILL_PROGRESS_BATCH,
+    YAHOO_STOCK_CONCURRENCY, YAHOO_STOCK_RATE_SLEEP, classify_jquants_forbidden,
+    first_scale_break, is_common_stock_code, is_scale_break, log, merge_with_anchor,
+    parse_jquants_coverage, same_price_scale, scale_keep_mask, yahoo_guard_kwargs,
+    yahoo_ticker,
+)
 # 企業イベントの知識（公式 AdjFactor の判定・登録済みスピンオフ）は台帳が唯一の源（#746・ADR-0062）。
 from corporate_actions import adj_factor_event, before_spinoff_ex_date, spinoff_factor
 

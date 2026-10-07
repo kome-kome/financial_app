@@ -25,7 +25,14 @@ from database import (
     db_timeouts,
 )
 
-from collector_utils import *
+# 設定定数・log。スター import だと ruff が未定義名（F821）を検出できないので名前を明示する（#824）。
+from collector_utils import (
+    API_KEY, BATCH_PAUSE, COLLECT_COMMIT_BATCH, COLLECT_SLEEP_BATCH, EDINET_BASE,
+    EDINET_CUTOFF_JST, EDINET_MAX_CONSECUTIVE_FAILURES, EdinetAccessError,
+    EdinetCodelistError, HEAVY_STATEMENT_TIMEOUT, JST, JpxIndustryError,
+    MASTER_COMMIT_BATCH, PROGRESS_LOG_BATCH, PROGRESS_REPORT_BATCH, RATE_SLEEP,
+    REPARSE_COMMIT_BATCH, REPARSE_FETCH_BATCH, SKIP_XBRL_RAW, log, redact_secrets,
+)
 from collector_master import (fetch_edinet_code_list, update_industry_from_jpx,
                               fill_industry_from_edinet_codelist)
 
