@@ -78,6 +78,25 @@ def _worst(*levels: str) -> str:
     return {0: "fresh", 1: "warn", 2: "alert"}[worst]
 
 
+def _cap_at_warn(level: str) -> str:
+    """ランキングに使っていない入力の古さを、総合判定では黄（warn）までに抑える。
+
+    総合判定は「今日この並びで発注してよいか」を表す。μ̂ とマクロは朝のランキングの
+    スコアに入っていない（`DEFAULT_MU_SOURCE` のコメント・ADR-0030）ので、それらが
+    古くても並びそのものは変わらない。赤にすると「発注しないでください」が並びと無関係な
+    理由で出続け、**本当にランキングの元データが止まった朝に効かなくなる**（`morning` 本体の
+    月次バッチを verdict へ混ぜない理由と同じ）。黄に留めるので `tradable` は False のまま。
+    """
+    return "fresh" if level == "fresh" else "warn"
+
+
+def _overall_verdict(price: dict, gap: dict, mu: dict, macro: dict, batch: dict) -> str:
+    """総合判定。赤まで効くのはランキングの元データ（株価・gap_ratio・それを書く夜間バッチ）
+    だけで、μ̂ とマクロはスコアに入っていないので黄までに抑える（`_cap_at_warn`）。"""
+    return _worst(price.get("level", "empty"), gap["level"], batch["level"],
+                  _cap_at_warn(mu["level"]), _cap_at_warn(macro["level"]))
+
+
 def _age_bdays(d: Optional[str]) -> Optional[int]:
     if not d:
         return None
@@ -239,18 +258,22 @@ def _reasons(price: dict, gap: dict, mu: dict, macro: dict, batch: dict) -> list
         out.append(f"gap_ratio の更新が {gap['age_days']}日前（夜間スコア更新が止まっている可能性）")
     elif gap["level"] == "empty":
         out.append("gap_ratio が未生成（sector_ols が一度も走っていない）")
+    # μ̂ とマクロはランキングのスコアに入っていない（`_cap_at_warn`）。総合判定を黄までに
+    # 抑えたので、文にもそう書く——書かないと「黄なのに理由が赤と同じ文」になり読み分けられない。
+    not_ranked = "（ランキングには使っていないので注意のみ）"
     if mu["level"] in ("warn", "alert"):
         out.append(f"μ̂（{mu['source']}）のスナップショットが {mu['snapshot_date']}"
-                   f"（{mu['age_bdays']}営業日前）")
+                   f"（{mu['age_bdays']}営業日前）{not_ranked}")
     elif mu["level"] == "empty":
-        out.append(f"μ̂（{mu['source']}）が未蓄積")
+        out.append(f"μ̂（{mu['source']}）が未蓄積{not_ranked}")
     elif mu["level"] == "unknown":
         # 「未蓄積」と同じ文にしない（#781）。直す場所が違う——こちらは producer が日付を
         # 記録していない（M-1 なら #781 より前の run）か、記録が日付として読めない。
-        out.append(f"μ̂（{mu['source']}）の as-of が不明（スコアはあるが日付の記録が無いか読めない）")
+        out.append(f"μ̂（{mu['source']}）の as-of が不明"
+                   f"（スコアはあるが日付の記録が無いか読めない）{not_ranked}")
     if macro["level"] == "alert":
         codes = "・".join(e["code"] for e in macro["worst"]) or "不明"
-        out.append(f"既定モデルが使うマクロ系列が古い/欠測: {codes}")
+        out.append(f"既定モデルが使うマクロ系列が古い/欠測: {codes}{not_ranked}")
     return out
 
 
@@ -287,8 +310,7 @@ async def morning(
     # 依存せず、月次で更新される M-1 系 μ̂ の鮮度は `_mu_block` が別に見ている。ここで月次を
     # 混ぜると次の月次まで毎日 warn が出続けて狼少年になり、**本当に止まった回に効かなくなる**
     # （`common.js` が接続先バッジの向きで避けたのと同じ失敗）。
-    verdict = _worst(price.get("level", "empty"), gap["level"], mu["level"],
-                     macro["level"], batch["level"])
+    verdict = _overall_verdict(price, gap, mu, macro, batch)
     return {
         "generated_at": api._utc_to_jst_str(datetime.now(timezone.utc)),
         "preset": preset,

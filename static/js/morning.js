@@ -9,8 +9,10 @@
 function apiBase() { return ''; }
 
 const LEVEL_LABEL = { fresh: '最新', warn: '注意', alert: '古い', empty: 'データなし', unknown: '判定不能' };
+// 総合判定は「この並びで発注してよいか」。赤はランキングの元データ（株価・乖離率・夜間バッチ）が
+// 古いときだけで、ランキングに使っていない μ̂・マクロの遅れは黄どまり（routers/morning.py `_cap_at_warn`）。
 const VERDICT_TEXT = {
-  fresh: { cls: 'verdict-fresh', icon: '✓', head: 'この結果で発注して問題ありません' },
+  fresh: { cls: 'verdict-fresh', icon: '✓', head: 'ランキングの元データは最新です（この結果で発注して問題ありません）' },
   warn:  { cls: 'verdict-warn',  icon: '!', head: '一部のデータが古めです（内容を確認してから発注してください）' },
   alert: { cls: 'verdict-alert', icon: '×', head: 'この結果で発注しないでください（データが古い/欠けています）' },
 };
@@ -21,6 +23,15 @@ function levelClass(level) {
 
 function fmt(v, digits = 2) {
   return (v === null || v === undefined) ? '—' : Number(v).toFixed(digits);
+}
+
+// 乖離率。`gap_ratio` は保存時点で既に %（plugins/sector_ols.py `gap_ratio_pct`）なので
+// **×100 しない**——掛けていた間は分析画面で 37.1% の銘柄がここで 3713.0% になっていた。
+// 符号と色は分析画面（analysis.js の fmtPct）に揃える。正＝理論値より安い。
+function fmtGap(v) {
+  if (v === null || v === undefined) return '—';
+  const n = Number(v);
+  return `<span class="${n >= 0 ? 'gap-positive' : 'gap-negative'}">${n >= 0 ? '+' : ''}${n.toFixed(1)}%</span>`;
 }
 
 function renderVerdict(f) {
@@ -34,6 +45,8 @@ function renderVerdict(f) {
   const link = document.getElementById('verdict-link');
   // #503 以降、次に見るのはワークフローの実行履歴ではなくローカル運用の手順書（#561）
   link.href = f.runbook_url || '#';
+  // 復旧手順は直すものがあるときだけ出す（緑の朝に並ぶと、読むべき導線が埋もれる）
+  link.hidden = f.overall_verdict === 'fresh';
 }
 
 function freshCard(label, level, value, sub, url) {
@@ -41,8 +54,15 @@ function freshCard(label, level, value, sub, url) {
     <div class="fresh-card-label">${esc(label)}</div>
     <div class="fresh-card-value">${esc(value)}</div>
     <div class="fresh-card-sub">${sub}</div>
-    ${url ? `<a href="${esc(url)}" target="_blank" rel="noopener">復旧手順を見る →</a>` : ''}
+    ${url && level !== 'fresh' ? `<a href="${esc(url)}" target="_blank" rel="noopener">復旧手順を見る →</a>` : ''}
   </div>`;
+}
+
+// 畳んだときに見える1行。記号は色だけに頼らない（✓ / ! / ×）。
+const LEVEL_MARK = { fresh: ['✓', 'lv-fresh'], warn: ['!', 'lv-warn'] };
+function freshChip(label, level) {
+  const [mark, cls] = LEVEL_MARK[level] || ['×', 'lv-alert'];
+  return `<span class="${cls}">${esc(label)} ${mark}</span>`;
 }
 
 /* 「昨夜そもそもバッチが走ったのか」（#561）。
@@ -80,6 +100,13 @@ function renderFreshness(f) {
   const g = f.gap_ratio || {};
   const m = f.mu || {};
   const mac = f.macro || {};
+  document.getElementById('fresh-summary').innerHTML = 'データ鮮度<span class="fresh-chips">' + [
+    freshChip('夜間バッチ', (f.batch || {}).level),
+    freshChip('株価', p.level),
+    freshChip('乖離率', g.level),
+    freshChip('μ̂', m.level),
+    freshChip('マクロ', mac.level),
+  ].join('') + '</span>';
   document.getElementById('fresh-grid').innerHTML = [
     // **バッチを先頭に置く。** 下流（株価・スコア）の古さはバッチが走らなかった結果でしかない
     batchCard(f.batch || {}),
@@ -111,21 +138,23 @@ function renderRanking(rec, priceLevel) {
   const rows = (rec && rec.results) || [];
   const body = document.getElementById('rank-body');
   if (!rows.length) {
-    body.innerHTML = '<tr><td colspan="10" class="muted" style="padding:18px">'
+    body.innerHTML = '<tr><td colspan="10" class="muted rank-empty" style="padding:18px">'
       + '該当銘柄がありません（データ未収集か、指標カバレッジ不足）</td></tr>';
     return;
   }
+  // data-label は狭い幅のカード表示で見出しになる（morning.html の 480px メディアクエリ）。
+  // col-opt はカードでは隠す列。
   body.innerHTML = rows.map(r => `<tr>
     <td class="rank-num">${r.rank}</td>
-    <td>${esc(r.sec_code || '—')}</td>
-    <td class="rank-name"><a href="/company/${esc(r.edinet_code)}" style="color:inherit;text-decoration:none">${esc(r.company_name || '—')}</a></td>
-    <td>${esc(r.industry || '—')}</td>
-    <td class="num rank-score">${fmt(r.score, 3)}</td>
-    <td class="num">${fmt(r.per, 1)}</td>
-    <td class="num">${fmt(r.pbr, 2)}</td>
-    <td class="num">${fmt(r.roe, 1)}</td>
-    <td class="num">${r.gap_ratio === null || r.gap_ratio === undefined ? '—' : fmt(r.gap_ratio * 100, 1) + '%'}</td>
-    <td class="${priceLevel === 'fresh' ? '' : 'stale-asof'}">${esc(r.price_asof || '—')}</td>
+    <td class="rank-code">${esc(r.sec_code || '—')}</td>
+    <td class="rank-name"><a href="/company/${esc(r.edinet_code)}">${esc(r.company_name || '—')}</a></td>
+    <td class="col-opt">${esc(r.industry || '—')}</td>
+    <td class="num rank-score rank-metric" data-label="スコア">${fmt(r.score, 3)}</td>
+    <td class="num col-opt">${fmt(r.per, 1)}</td>
+    <td class="num col-opt">${fmt(r.pbr, 2)}</td>
+    <td class="num col-opt">${fmt(r.roe, 1)}</td>
+    <td class="num rank-metric" data-label="乖離率">${fmtGap(r.gap_ratio)}</td>
+    <td class="rank-metric ${priceLevel === 'fresh' ? '' : 'stale-asof'}" data-label="株価 as-of">${esc(r.price_asof || '—')}</td>
   </tr>`).join('');
 }
 
@@ -147,6 +176,8 @@ async function loadMorning() {
   } catch (e) {
     dot.className = 'dot dot-red';
     label.textContent = '取得失敗';
+    // 判定を出せなかった＝発注の根拠が無いので赤にする（読み込み中の黄のまま残さない）
+    document.getElementById('verdict').className = 'verdict verdict-alert';
     document.getElementById('verdict-head').textContent = '× 朝の集計を取得できませんでした';
     document.getElementById('verdict-reasons').innerHTML = `<li>${esc(e.message)}</li>`;
   }
@@ -156,5 +187,10 @@ async function loadMorning() {
 document.addEventListener('change', (ev) => {
   if (ev.target instanceof HTMLElement && ev.target.dataset.change === 'reload') loadMorning();
 });
+
+// 狭い幅では鮮度を畳んで始める（1行の要約が見えるので、開かなくても状態は分かる）。
+if (window.matchMedia('(max-width: 768px)').matches) {
+  document.getElementById('fresh-details').open = false;
+}
 
 loadMorning();

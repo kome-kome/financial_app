@@ -38,8 +38,8 @@
 }
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:'Segoe UI',sans-serif;background:var(--bg);color:var(--text);min-height:100vh}
-.header{background:var(--bg-elevated);border-bottom:1px solid var(--border);padding:14px 24px;display:flex;align-items:center;gap:14px}
-.header h1{font-size:17px;font-weight:600;color:var(--accent-text)}
+.header{background:var(--bg-elevated);border-bottom:1px solid var(--border);padding:14px 24px;display:flex;align-items:center;gap:10px 14px;flex-wrap:wrap}
+.header h1{font-size:17px;font-weight:600;color:var(--accent-text);white-space:nowrap}
 .badge{background:var(--accent-soft-bg);color:var(--accent-soft-text);font-size:11px;padding:3px 8px;border-radius:12px}
 .theme-toggle-btn{background:transparent;border:1px solid var(--border-muted);color:var(--text);border-radius:6px;width:30px;height:30px;font-size:14px;cursor:pointer;display:flex;align-items:center;justify-content:center;flex-shrink:0}
 .theme-toggle-btn:hover{background:var(--bg-hover)}
@@ -47,7 +47,7 @@ body{font-family:'Segoe UI',sans-serif;background:var(--bg);color:var(--text);mi
 .dot-green{background:var(--status-good)}.dot-amber{background:var(--status-warn)}.dot-red{background:var(--status-bad)}
 .api-status{margin-left:auto;display:flex;align-items:center;gap:8px;font-size:12px;color:var(--text-muted)}
 .container{padding:28px 24px;max-width:1100px;margin:0 auto}
-.section-title{font-size:13px;font-weight:600;color:var(--text-muted);text-transform:uppercase;letter-spacing:.8px;margin-bottom:14px}
+.section-title{font-size:13px;font-weight:600;color:var(--text-muted);letter-spacing:.8px;margin-bottom:14px}
 .spinner{width:14px;height:14px;border:2px solid var(--border-muted);border-top-color:var(--accent-text);border-radius:50%;animation:spin .7s linear infinite;display:inline-block}
 @keyframes spin{to{transform:rotate(360deg)}}
 
@@ -65,25 +65,54 @@ body{font-family:'Segoe UI',sans-serif;background:var(--bg);color:var(--text);mi
 .verdict-reasons li::before{content:'•';color:var(--text-muted);flex-shrink:0}
 .verdict a{color:var(--accent-text);font-size:12px;text-decoration:none;width:fit-content}
 .verdict a:hover{text-decoration:underline}
-.fresh-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:14px;margin-bottom:28px}
+/* 鮮度は <details> で畳める。狭い幅では閉じて始め、1行の要約だけ見せる——開いたままだと
+   カード5枚でランキングが4画面下へ押し出される（スマホで朝に見るのはランキングが主） */
+.fresh-details{margin-bottom:28px}
+.fresh-details>summary{cursor:pointer;display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 12px}
+.fresh-details>summary::-webkit-details-marker{display:none}
+.fresh-details>summary::before{content:'▸';color:var(--text-muted)}
+.fresh-details[open]>summary::before{content:'▾'}
+.fresh-chips{font-weight:400;letter-spacing:0;display:flex;flex-wrap:wrap;gap:4px 10px}
+.lv-fresh{color:var(--status-good-text)}.lv-warn{color:var(--status-warn-text)}.lv-alert{color:var(--status-bad-text)}
+.fresh-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:14px}
 @media(max-width:768px){.fresh-grid{grid-template-columns:1fr 1fr}}
 @media(max-width:480px){.fresh-grid{grid-template-columns:1fr}}
 .fresh-card{background:var(--bg-elevated);border:1px solid var(--border);border-radius:10px;padding:16px;display:flex;flex-direction:column;gap:5px}
 .fresh-card.warn{border-color:var(--status-warn)}
 .fresh-card.alert{border-color:var(--status-bad)}
-.fresh-card-label{font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px}
+.fresh-card-label{font-size:11px;color:var(--text-muted);letter-spacing:.5px}
 .fresh-card-value{font-size:19px;font-weight:700}
 .fresh-card-sub{font-size:11px;color:var(--text-muted);line-height:1.6}
 .fresh-card a{font-size:11px;color:var(--accent-text);text-decoration:none;margin-top:auto}
+.rank-wrap{overflow-x:auto}
 .rank-table{width:100%;border-collapse:collapse;background:var(--bg-elevated);border:1px solid var(--border);border-radius:10px;overflow:hidden;font-size:12px}
-.rank-table th{background:var(--bg-sunken);color:var(--text-muted);font-size:11px;text-transform:uppercase;letter-spacing:.4px;padding:10px 12px;text-align:left;white-space:nowrap}
+.rank-table th{background:var(--bg-sunken);color:var(--text-muted);font-size:11px;letter-spacing:.4px;padding:10px 12px;text-align:left;white-space:nowrap}
 .rank-table td{padding:9px 12px;border-top:1px solid var(--border-subtle);color:var(--text-body);white-space:nowrap}
 .rank-table tbody tr:hover{background:var(--bg-hover)}
 .rank-num{color:var(--text-muted);font-variant-numeric:tabular-nums}
 .rank-name{color:var(--text);font-weight:500}
+.rank-name a{color:var(--accent-text);text-decoration:none}
+.rank-name a:hover{text-decoration:underline}
 .rank-score{font-weight:700;color:var(--accent-text);font-variant-numeric:tabular-nums}
 .num{text-align:right;font-variant-numeric:tabular-nums}
 .stale-asof{color:var(--status-warn-text)}
+.gap-positive{color:var(--val-up);font-weight:600}
+.gap-negative{color:var(--val-down);font-weight:600}
+/* 狭い幅ではランキングを1社1枚のカードにする。横スクロールの先にスコアが隠れると、
+   肝心の列を見ないまま発注を判断することになる。残すのは名前・スコア・乖離率・株価 as-of */
+@media(max-width:480px){
+  .rank-table{border:none;background:none;border-radius:0}
+  .rank-table thead{display:none}
+  .rank-table tbody{display:flex;flex-direction:column;gap:10px}
+  .rank-table tr{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:8px 10px;background:var(--bg-elevated);border:1px solid var(--border);border-radius:10px;padding:12px 14px}
+  .rank-table td{border:none;padding:0;white-space:normal;text-align:left}
+  .rank-table td.col-opt{display:none}
+  .rank-table td.rank-num,.rank-table td.rank-code{grid-column:span 1}
+  .rank-table td.rank-name{grid-column:span 4;font-size:14px}
+  .rank-table td.rank-metric{grid-column:span 2}
+  .rank-table td.rank-empty{grid-column:1/-1}
+  .rank-table td[data-label]::before{content:attr(data-label);display:block;font-size:11px;font-weight:400;color:var(--text-muted)}
+}
 .controls{display:flex;gap:10px;align-items:center;margin-bottom:16px;flex-wrap:wrap}
 .controls select{background:var(--bg-elevated);color:var(--text);border:1px solid var(--border-muted);border-radius:6px;padding:7px 10px;font-size:12px}
 .muted{font-size:11px;color:var(--text-muted)}
@@ -130,8 +159,10 @@ body{font-family:'Segoe UI',sans-serif;background:var(--bg);color:var(--text);mi
     <a id="verdict-link" href="#" target="_blank" rel="noopener">復旧手順（DEPLOYMENT.md）を見る →</a>
   </div>
 
-  <div class="section-title">データ鮮度</div>
-  <div class="fresh-grid" id="fresh-grid"></div>
+  <details class="fresh-details" id="fresh-details" open>
+    <summary class="section-title" id="fresh-summary">データ鮮度</summary>
+    <div class="fresh-grid" id="fresh-grid"></div>
+  </details>
 
   <div class="section-title">買い推奨ランキング</div>
   <div class="controls">
@@ -151,7 +182,7 @@ body{font-family:'Segoe UI',sans-serif;background:var(--bg);color:var(--text);mi
     </select>
     <span class="muted" id="mor-generated"></span>
   </div>
-  <div style="overflow-x:auto">
+  <div class="rank-wrap">
     <table class="rank-table">
       <thead>
         <tr>
@@ -161,7 +192,7 @@ body{font-family:'Segoe UI',sans-serif;background:var(--bg);color:var(--text);mi
         </tr>
       </thead>
       <tbody id="rank-body">
-        <tr><td colspan="10" class="muted" style="padding:18px">読み込み中…</td></tr>
+        <tr><td colspan="10" class="muted rank-empty" style="padding:18px">読み込み中…</td></tr>
       </tbody>
     </table>
   </div>
