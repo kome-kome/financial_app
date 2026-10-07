@@ -38,7 +38,7 @@
 }
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:'Segoe UI',sans-serif;background:var(--bg);color:var(--text);min-height:100vh}
-.header{background:var(--bg-elevated);border-bottom:1px solid var(--border);padding:14px 24px;display:flex;align-items:center;gap:14px}
+.header{background:var(--bg-elevated);border-bottom:1px solid var(--border);padding:14px 24px;display:flex;align-items:center;gap:10px 14px;flex-wrap:wrap}
 .header h1{font-size:17px;font-weight:600;color:var(--accent-text)}
 .badge{background:var(--accent-soft-bg);color:var(--accent-soft-text);font-size:11px;padding:3px 8px;border-radius:12px}
 .theme-toggle-btn{background:transparent;border:1px solid var(--border-muted);color:var(--text);border-radius:6px;width:30px;height:30px;font-size:14px;cursor:pointer;display:flex;align-items:center;justify-content:center;flex-shrink:0}
@@ -59,6 +59,12 @@ body{font-family:'Segoe UI',sans-serif;background:var(--bg);color:var(--text);mi
 @media (max-width: 768px){
   .container{padding:12px}
   .grid4{grid-template-columns:repeat(2,1fr)}
+  /* API URL 欄は開発用で、CSP の connect-src 'self' により別ホストは指定しても届かない。
+     狭い幅ではテーマ切替を画面外へ押し出すだけなので隠す */
+  .api-url-bar{display:none}
+  /* タブ4つは 375px に収まらないので、ページごと広げず帯の中だけ横に流す */
+  .nav{overflow-x:auto;padding:0 12px}
+  .nav-btn{white-space:nowrap;flex-shrink:0}
 }
 @media (max-width: 480px){
   .grid4{grid-template-columns:1fr}

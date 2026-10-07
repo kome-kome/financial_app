@@ -221,7 +221,7 @@ function renderGap(rows) {
     const trColor = tr > 0 ? cssVar('--val-up') : cssVar('--val-down');
     return `<tr>
       <td><span class="tag tag-blue">${esc(r.sec_code||r.edinet_code)}</span></td>
-      <td>${r.edinet_code ? `<a href="/company/${esc(r.edinet_code)}" class="co-link" style="font-weight:500">${esc(r.company_name)}</a>` : esc(r.company_name)}</td>
+      <td>${r.edinet_code ? `<a href="/company/${esc(r.edinet_code)}" class="co-link" target="_blank" rel="noopener" style="font-weight:500">${esc(r.company_name)}</a>` : esc(r.company_name)}</td>
       <td><span class="tag tag-amber" style="font-size:10px">${esc(r.industry||'-')}</span></td>
       <td style="text-align:right;font-family:monospace">${fmt0((r.actual_market_cap||0)/100)}</td>
       <td style="text-align:right;font-family:monospace">${fmt0((r.predicted_market_cap||0)/100)}</td>
@@ -419,7 +419,7 @@ async function runRecommend() {
         <tr>
           <td style="font-weight:700;color:${rankColor};font-size:15px">${Number(r.rank)}</td>
           <td style="color:${cssVar('--status-info')};font-weight:600">${esc(r.sec_code || '-')}</td>
-          <td>${r.edinet_code ? `<a href="/company/${esc(r.edinet_code)}" class="co-link" style="font-weight:600">${esc(r.company_name)}</a>` : esc(r.company_name)}</td>
+          <td>${r.edinet_code ? `<a href="/company/${esc(r.edinet_code)}" class="co-link" target="_blank" rel="noopener" style="font-weight:600">${esc(r.company_name)}</a>` : esc(r.company_name)}</td>
           <td style="color:var(--text-secondary);font-size:11px">${esc(r.industry || '-')}</td>
           <td style="font-weight:700;color:${scoreColor}">${r.score.toFixed(2)}</td>
           <td>${r.roe != null ? r.roe.toFixed(1) + '%' : '-'}</td>
@@ -611,7 +611,7 @@ function renderSellRanking(d) {
       <td style="font-weight:700;color:var(--text)">${Number(r.rank)}</td>
       <td><span class="tag" style="background:${aColor}22;color:${aColor};font-weight:700">${esc(aLabel)}</span></td>
       <td style="color:${cssVar('--status-info')};font-weight:600">${esc(r.sec_code || '-')}</td>
-      <td>${r.edinet_code ? `<a href="/company/${esc(r.edinet_code)}" class="co-link" style="font-weight:600">${esc(r.company_name)}</a>` : esc(r.company_name)}</td>
+      <td>${r.edinet_code ? `<a href="/company/${esc(r.edinet_code)}" class="co-link" target="_blank" rel="noopener" style="font-weight:600">${esc(r.company_name)}</a>` : esc(r.company_name)}</td>
       <td style="color:var(--text-secondary);font-size:11px">${esc(r.industry || '-')}</td>
       <td style="font-weight:700;color:${scoreColor}">${r.score == null ? '-' : Number(r.score).toFixed(2)}</td>
       <td style="color:${tColor};font-weight:600">${esc(r.trend)}</td>
@@ -700,7 +700,7 @@ function renderNetCash() {
     return `<tr>
       <td>${r.rank}</td>
       <td><code style="color:${cssVar('--status-info-text')}">${esc(r.sec_code || '')}</code></td>
-      <td>${r.edinet_code ? `<a href="/company/${esc(r.edinet_code)}" class="co-link">${esc(r.company_name || '')}</a>` : esc(r.company_name || '')}</td>
+      <td>${r.edinet_code ? `<a href="/company/${esc(r.edinet_code)}" class="co-link" target="_blank" rel="noopener">${esc(r.company_name || '')}</a>` : esc(r.company_name || '')}</td>
       <td style="color:var(--text-secondary)">${esc(r.industry || '')}</td>
       <td>${r.year ?? '-'}</td>
       <td style="text-align:right;color:${ncColor};font-weight:600">${fmt(r.net_cash_oku)}</td>
@@ -857,7 +857,7 @@ function _renderBtTable(rows) {
     return `<tr>
       <td>${r.rank}</td>
       <td><span class="tag tag-blue">${esc(r.sec_code||r.edinet_code)}</span></td>
-      <td>${r.edinet_code ? `<a href="/company/${esc(r.edinet_code)}" class="co-link" style="font-weight:500">${esc(r.company_name)}</a>` : esc(r.company_name)}</td>
+      <td>${r.edinet_code ? `<a href="/company/${esc(r.edinet_code)}" class="co-link" target="_blank" rel="noopener" style="font-weight:500">${esc(r.company_name)}</a>` : esc(r.company_name)}</td>
       <td><span class="tag tag-amber" style="font-size:10px">${esc(r.industry||'-')}</span></td>
       <td style="font-family:monospace;color:var(--accent-text)">${r.score}</td>
       <td style="text-align:right;font-family:monospace">${r.start_price != null ? '&yen;' + Math.round(r.start_price).toLocaleString() : '-'}</td>
@@ -1178,6 +1178,15 @@ function showTab(t) {
   document.querySelectorAll('.sidebar-item').forEach(b => {
     b.classList.toggle('active', b.dataset.tab === t);
   });
+  // 開いているタブを URL に残す（再読込・戻る・共有で同じタブへ戻れるように）。入口の読み取りは
+  // `_urlTab`。pushState にしない＝タブ切替で履歴を積むと「戻る」が画面を出られなくなる。
+  if (_allTabs.includes(t)) {
+    const q = new URLSearchParams(window.location.search);
+    if (q.get('tab') !== t) {
+      q.set('tab', t);
+      history.replaceState(null, '', `${window.location.pathname}?${q}${window.location.hash}`);
+    }
+  }
 }
 
 // ── 自動調整済みハイパーパラメータ（Issue #264・読取専用・重い再計算はしない）───
@@ -2179,7 +2188,7 @@ function _mrrTableHTML(v) {
     return `<tr>
       <td>${i+1}</td>
       <td>${esc(r.sec_code||'-')}</td>
-      <td><a href="/company/${esc(r.edinet_code||'')}" style="color:var(--status-info)">${esc(r.company_name||'-')}</a></td>
+      <td><a href="/company/${esc(r.edinet_code||'')}" class="co-link" target="_blank" rel="noopener">${esc(r.company_name||'-')}</a></td>
       <td style="font-size:11px">${esc(r.industry||'-')}</td>
       <td class="${muClass}">${(mu*100).toFixed(2)}%</td>
       <td>${r.r2!=null?(r.r2*100).toFixed(2)+'%':'-'}</td>

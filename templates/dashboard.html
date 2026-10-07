@@ -52,6 +52,9 @@ body{font-family:'Segoe UI',sans-serif;background:var(--bg);color:var(--text);mi
 @media (max-width: 768px){
   .stats-grid{grid-template-columns:1fr 1fr}
   .nav-grid{grid-template-columns:1fr}
+  /* `.nav-grid-main{1fr 1fr}` はこのメディアクエリより後ろに書かれていて勝つので、
+     詳細度を上げて1列に戻す（無いと入口カードが 375px で2列に詰まる） */
+  .nav-grid.nav-grid-main{grid-template-columns:1fr}
   .sched-grid{grid-template-columns:1fr 1fr}
 }
 @media (max-width: 480px){

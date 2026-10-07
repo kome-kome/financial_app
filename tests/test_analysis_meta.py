@@ -447,3 +447,31 @@ class TestCrossLinks:
     def test_company_page_has_recommend_crosslink(self):
         """company ページのZスコアチャートに /analysis?tab=recommend リンクがある。"""
         assert '/analysis?tab=recommend' in client.get("/company/E02167").text
+
+
+class TestAnalysisStateSurvivesCompanyDetour:
+    """分析の結果は URL に載らず、再計算は分単位（M 系）かかる。結果表から企業詳細へ
+    **同じタブで**飛ぶと、戻ったときには結果が消えていて回し直すしかなかった。
+    結果表の企業リンクは新しいタブで開き、開いているタブは `?tab=` に残す。"""
+
+    JS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                      "static", "js", "analysis.js")
+
+    def _src(self):
+        with open(self.JS, encoding="utf-8") as fh:
+            return fh.read()
+
+    def test_every_company_link_opens_a_new_tab(self):
+        import re
+        links = re.findall(r'<a href="/company/[^>]*>', self._src())
+        assert links, "analysis.js に /company/ へのリンクが見つからない（照合が空振りしている）"
+        missing = [a for a in links if 'target="_blank"' not in a or 'rel="noopener"' not in a]
+        assert not missing, f"同じタブで企業詳細へ飛ぶリンクが残っている: {missing}"
+
+    def test_show_tab_writes_the_tab_into_the_url(self):
+        """入口（`_urlTab`）だけ読んで書かないと、再読込や戻るで初期タブへ戻ってしまう。"""
+        import re
+        body = re.search(r"function showTab\(t\) \{(.*?)\n\}", self._src(), re.S)
+        assert body, "showTab が見つからない"
+        assert "history.replaceState" in body.group(1)
+        assert "'tab'" in body.group(1)
