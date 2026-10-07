@@ -57,13 +57,25 @@ gh issue create --label "priority:low,ops" # 新タスク起票
 
 連鎖そのものは止めない（実装・PR・CI 待ち・マージはローカルの計算資源をほぼ使わない）。ただし CI で skip されるテスト（`FINAPP_TEST_PG_URL` 必須の実測など）に関わる変更は、バッチが終わってからローカルで回し、通ってからマージする。
 
-判定（PowerShell。行が出たら実行中）:
+判定（PowerShell。**2本のどちらかに行が出たら実行中**）:
 
 ```powershell
+# 1. スケジュールタスク経由（定時起動と run_daytime.ps1 -Now）
+Get-ScheduledTask -TaskName 'financial_app-*' | Where-Object { $_.State -eq 'Running' -and $_.TaskName -notmatch 'backup|watchdog' }
+# 2. 対話セッションからの手動起動（run_*.ps1 や python -m scripts.run_* を端末で直に叩いたもの）
 Get-CimInstance Win32_Process | Where-Object { $_.Name -eq 'python.exe' -and $_.CommandLine -match 'scripts[\\./]run_(daytime|nightly|monthly)' }
 ```
 
-`run_*.ps1` は `-m scripts.run_<名>` で起動するので、スケジュールタスク経由でも手動起動でも拾える（タスクの `State` だけを見ると手動起動を見落とす）。バックアップ（`run_backup`）と watchdog は軽いので対象にしない。各バッチの起動時刻と窓は [DEPLOYMENT.md](DEPLOYMENT.md) の冒頭の表が正本。
+**両方が要る。** タスク（`financial_app-*`）は `LogonType S4U` で登録されセッション0で走るので、対話セッションの非昇格プロセスからは python の `CommandLine` が空で返り、2 はタスク経由の実行を拾えない（2026-10-07 17:40 JST、`financial_app-nightly` が `Running` の最中に 2 は0件だった・#829）。逆に 1 は、タスクを通さずに端末から起動したバッチを見ない。バックアップ（`run_backup`）と watchdog は軽いので対象にしない。1 を除外の形で書くのは、タスクが増えたときに「実行中」の側へ倒すため。各バッチの起動時刻と窓は [DEPLOYMENT.md](DEPLOYMENT.md) の冒頭の表が正本。
+
+判定を書き換えたら、0件だけでなく**陽性も確かめる**（#823 の検証はバッチが止まっている時間帯だけで、陽性を一度も見ていなかった）。
+
+- 1 の名前の絞り込み: `State` の条件だけ外して実行し、`daytime` / `monthly` / `monthly-beta` / `monthly-m1` / `nightly` の5本が出て、`backup` / `watchdog` が出ないこと
+- 2: 引数に `scripts.run_daytime` という文字列を含むだけで何もしない python を下のように立て、行が出ること、60秒後に自然に終わったら消えることを見る。**本物の `scripts.run_daytime` は起動しない**（日中キューを実際に消費する）
+
+```powershell
+Start-Process python -ArgumentList '-c "import time; time.sleep(60)" scripts.run_daytime' -WindowStyle Hidden
+```
 
 ---
 
