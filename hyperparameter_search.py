@@ -59,7 +59,8 @@ ENV_DEADLINE = "FINAPP_STEP_DEADLINE_UTC"
 FINAL_RESERVE_MIN = 15.0
 
 # CLI で探索できるモデル（`tuning_search_space()` を実装しているもの）。
-# GitHub Actions（tune-hyperparameters.yml）の matrix は M-1/M-2/M-3 の3本のままで、
+# 月次で回すのは M-1/M-2/M-3 の3本（M-2/M-3 は `scripts/run_monthly.py` の `TUNE_MATRIX`、
+# M-1 は `scripts/run_monthly_m1.py`・旧 tune-hyperparameters.yml は #504 で削除）で、
 # macro_enet（M-6・#372）は手動 CLI 専用。M-6 の探索軸は use_momentum / momentum_window だけ
 # （α・l1_ratio は学習 fold 内 CV が自動決定するため探索対象にしない）。
 MODELS = ("macro_risk_return", "macro_gbdt", "macro_dlm", "macro_enet")

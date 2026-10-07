@@ -20,9 +20,10 @@ name: "[定常] Supabase 枠消費ゲート"
 #     発火せず、無関係な sector_ols の夜間更新まで巻き添えで止まる（#425 / macro-health
 #     と同じ理由でこのジョブを独立させている）。
 #
-# ⏰ 時刻（UTC 21:00 = JST 06:00・docs/DEPLOYMENT.md「cron 占有表」も更新すること）:
-#   #503 の正本反転で他の cron はすべて止まり、**このリポジトリで生きている cron はここだけ**
-#   になった。当時の非重複の相手だった `daily-incremental` は停止中、
+# ⏰ 時刻（UTC 21:00 = JST 06:00・docs/DEPLOYMENT.md「バッチ暦（定期実行の占有表）」も更新すること）:
+#   #503 の正本反転で他の cron はすべて止まり、**DB に触る cron はここだけ**になった
+#   （ほかに生きているのは DB へ接続しない週次の `dependency-audit`・#723）。
+#   当時の非重複の相手だった `daily-incremental` は停止中、
 #   `recommend-factor-premia` / `tune-hyperparameters` / `macro-beta-inference` は
 #   #504 で削除済み（ローカルの月次バッチが回す）。重なる相手が居ないので動かす理由も無い。
 #   このジョブは3行を読むだけ（数秒・1接続）なので、いずれにせよ接続上限には寄与しない
@@ -69,7 +70,8 @@ jobs:
           FINAPP_DB_TARGET: prod
           FINAPP_JOB: egress-health          # Egress 台帳の帰属ラベル（#478）
         # schedule 起動では github.event.inputs.* が空になるため || '' を外さないこと
-        # （tests/test_recommend_factor_premia_workflow.py が同型の罠を強制している）
+        # （同型の罠を強制していた tests/test_recommend_factor_premia_workflow.py は、
+        #   対象の workflow ごと #504 で削除済み）
         run: |
           set -o pipefail
           FLAG=""
