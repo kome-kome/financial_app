@@ -452,6 +452,100 @@ class TestVerifySources:
         assert (d["n_rows_changed"], d["n_rows_newly_corrected"], d["n_companies"]) == (7, 1, 1)
 
 
+class TestPostPeriodSourcesWindow:
+    """verify-sources の照合窓を期末後分割に合わせて広げる（#755）。
+
+    日付は #755 の実測の E00167 2024（期末 2024-03-31・Yahoo の 1:2 が 2024-05-30＝期末+60日）と
+    E02242 2025（期末 2025-03-31・1:2 が 2025-09-29＝期末+182日）の形。
+    """
+
+    SPLIT = [("2024-05-30", 2.0)]
+
+    @staticmethod
+    def _ev(year, cross_check="consistency", ec="E00167", canonical=2.0):
+        return ev(year, canonical=canonical, ec=ec)._replace(
+            source="bps", cross_check=cross_check, lagged_sh_ratio=canonical)
+
+    @staticmethod
+    def _by_key(*events):
+        return {(e.edinet_code, e.year): e for e in events}
+
+    def test_post_period_split_after_45_days_agrees_for_consistency_events(self):
+        e = self._ev(2024)
+        assert M.sources_window(e) == ("2023-02-14", "2024-06-29")
+        assert M.judge_against_yahoo(e, self.SPLIT, window=M.sources_window(e)) == (
+            "agree", pytest.approx(2.0))
+        # 本番の窓（当期末+45日）では本物の分割を読み違えていた
+        assert C.event_window(e) == ("2023-02-14", "2024-05-15")
+        assert M.judge_against_yahoo(e, self.SPLIT)[0] == "no_split"
+
+    def test_eps_events_keep_the_production_window(self):
+        e = self._ev(2024, cross_check="eps")
+        assert M.sources_window(e) == C.event_window(e)
+        assert M.judge_against_yahoo(e, self.SPLIT, window=M.sources_window(e))[0] == "no_split"
+        [r] = M.judge_rows_against_official([e], {}, {}, claimed={})
+        assert r["window"] == C.event_window(e)
+
+    def test_split_beyond_the_widened_window_stays_no_split(self):
+        """E02242 2025 の形（期末+182日＝翌年度の期中）は広げた窓にも入らない＝既知の例外。"""
+        e = self._ev(2025)
+        assert M.judge_against_yahoo(e, [("2025-09-29", 2.0)],
+                                     window=M.sources_window(e))[0] == "no_split"
+
+    def test_end_days_is_adjustable(self):
+        e = self._ev(2024)
+        assert M.sources_window(e, end_days=45) == C.event_window(e)
+        assert M.build_parser().parse_args(["verify-sources"]).post_period_end_days == 90
+        assert M.POST_PERIOD_WINDOW_END_DAYS == 90
+
+    def test_one_split_is_counted_as_agree_by_one_event_only(self):
+        """広げた窓は翌年度の窓（前期末-45日から）と重なる。古い年が先に一致に数え、新しい年は使えない。"""
+        y1, y2 = self._ev(2024), self._ev(2025)
+        # 手当てが無ければ両方が同じ分割を一致に数える
+        assert all(M.judge_against_yahoo(e, self.SPLIT, window=M.sources_window(e))[0] == "agree"
+                   for e in (y1, y2))
+        claimed: dict = {}
+        rows = M.judge_rows_against_official([y2, y1], {}, {}, claimed=claimed)
+        assert [(r["year"], r["official_status"]) for r in rows] == [
+            (2024, "unconfirmed"), (2025, "unconfirmed")]
+        M.judge_rows_against_yahoo(rows, self._by_key(y1, y2), {"E00167": self.SPLIT},
+                                   claimed=claimed)
+        assert [(r["year"], r["yahoo_status"], r["withheld"]) for r in rows] == [
+            (2024, "agree", []), (2025, "no_split", ["2024-05-30"])]
+
+    def test_disagreeing_event_does_not_take_the_split(self):
+        y1, y2 = self._ev(2024, canonical=3.0), self._ev(2025)
+        claimed: dict = {}
+        rows = M.judge_rows_against_official([y1, y2], {}, {}, claimed=claimed)
+        M.judge_rows_against_yahoo(rows, self._by_key(y1, y2), {"E00167": self.SPLIT},
+                                   claimed=claimed)
+        assert [r["yahoo_status"] for r in rows] == ["disagree", "agree"]
+
+    def test_split_counted_by_the_official_is_not_counted_again_by_yahoo(self):
+        y1, y2 = self._ev(2024), self._ev(2025)
+        official = {"E00167": [("2024-05-30", 0.5)]}
+        claimed: dict = {}
+        rows = M.judge_rows_against_official([y1, y2], official, {}, claimed=claimed)
+        assert [(r["year"], r["official_status"], r["withheld"]) for r in rows] == [
+            (2024, "agree", []), (2025, "unconfirmed", ["2024-05-30"])]
+        pending = [r for r in rows if r["official_status"] == "unconfirmed"]
+        M.judge_rows_against_yahoo(pending, self._by_key(y1, y2), {"E00167": self.SPLIT},
+                                   claimed=claimed)
+        assert pending[0]["yahoo_status"] == "no_split"
+        # 公式の受信区間が窓を覆えば、残ったイベントは「公式で分割なしと確かめられた」（基準2）に数えられる
+        rows = M.judge_rows_against_official(
+            [y1, y2], official, {"E00167": [("2023-01-01", "2025-12-31")]}, claimed={})
+        assert [r["official_status"] for r in rows] == ["agree", "absent"]
+
+    def test_claims_do_not_cross_companies(self):
+        a, b = self._ev(2024, ec="E00001"), self._ev(2024, ec="E00002")
+        claimed: dict = {}
+        rows = M.judge_rows_against_official([a, b], {}, {}, claimed=claimed)
+        M.judge_rows_against_yahoo(rows, self._by_key(a, b),
+                                   {"E00001": self.SPLIT, "E00002": self.SPLIT}, claimed=claimed)
+        assert [r["yahoo_status"] for r in rows] == ["agree", "agree"]
+
+
 class TestVerifyInPeriod:
     """`verify-sources --axis in-period`（#756・ADR-0055 決定4-13）の純関数。
 
