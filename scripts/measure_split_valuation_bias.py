@@ -88,6 +88,11 @@ EQUITY_TOL_GRID: tuple[float, ...] = (0.15, 0.25, 0.40, 0.60, 1.00)
 SOURCES_MIN_AGREE_RATE = 0.90
 SOURCES_MIN_DENOMINATOR = 20
 SOURCES_MATCH_TOL = 0.05
+# verify-sources の照合窓の右端（#755）。整合度照合で認めたイベント（期末後分割）だけ当期末 + この日数まで広げる。
+# 期末後分割は有価証券報告書の提出前に効力が生じ、提出期限は期末から 3 か月。#751 の基準3 の `no_split` 9 件のうち
+# 8 件は期末から 56〜77 日でこの内側に入る。E02242 2025（182 日）は翌年度の期中なので広げない（既知の例外）。
+# 本番の窓（`event_window`）は変えない。決定4-13 の IN_PERIOD_WINDOW_END_DAYS は測る前に固定した別の値なので共有しない。
+POST_PERIOD_WINDOW_END_DAYS = 90
 # verify-sources --axis in-period の基準（#756・ADR-0055 決定4-13）。**測る前に固定した値で、結果を見て動かさない。**
 # 分解で増える組は数件なので決定4-10 の分母 20 件には届かない＝全数を照らす。
 # 基準1: 既存のイベントは1件も動かない（倍率が変わった 0・消えた 0・分解以外で増えた 0）
@@ -674,12 +679,93 @@ def judge_sources(official_status: Mapping[str, int], yahoo_status: Mapping[str,
 
 def in_period_window(ev: ShareEvent, *, slack_days: int = 45,
                      end_days: int = IN_PERIOD_WINDOW_END_DAYS) -> Optional[tuple[str, str]]:
-    """期中の分割の分解（#756）を照らす窓 `(前期末 - slack_days, 当期末 + end_days]`。"""
+    """期中の分割の分解（#756）を照らす窓 `(前期末 - slack_days, 当期末 + end_days]`。
+
+    右端を期末後まで広げた窓の唯一の作り方で、整合度照合のイベントの照合窓（`sources_window`・#755）も共有する。
+    """
     p0, p1 = _iso(ev.prev_period_end), _iso(ev.period_end)
     if not p0 or not p1:
         return None
     return ((date.fromisoformat(p0) - timedelta(days=slack_days)).isoformat(),
             (date.fromisoformat(p1) + timedelta(days=end_days)).isoformat())
+
+
+def sources_window(ev: ShareEvent, *, end_days: int = POST_PERIOD_WINDOW_END_DAYS
+                   ) -> Optional[tuple[str, str]]:
+    """verify-sources（整合度照合の軸）の照合窓（#755）。
+
+    整合度照合で認めたイベント（`cross_check == "consistency"`＝期末後分割）だけ、右端を当期末 + `end_days` へ
+    広げる。期末後分割は効力日が期末 + 45日を越えうるので、本番の窓では本物の分割を `no_split` と読む（#751 の
+    基準3 の不一致 11 件のうち 9 件）。それ以外のイベントは本番と同じ `event_window`。広げた窓は翌年度のイベントの
+    窓と重なるので、同じ分割を2つのイベントで一致に数えない手当てを `judge_rows_against_official` /
+    `judge_rows_against_yahoo` が持つ。
+    """
+    if ev.cross_check == "consistency":
+        return in_period_window(ev, end_days=end_days)
+    return event_window(ev)
+
+
+def _dates_in_window(dated: Sequence[tuple[str, float]], window: Optional[tuple[str, str]]
+                     ) -> set[str]:
+    """`[(日付, 値), ...]` のうち窓 (w0, w1] に入る日付（`official_ratio_in_window` と同じ半開区間）。"""
+    if window is None:
+        return set()
+    w0, w1 = window
+    return {d for d, _ in dated if w0 < d <= w1}
+
+
+def judge_rows_against_official(events: Sequence[ShareEvent],
+                                official_of: Mapping[str, Sequence[tuple[str, float]]],
+                                spans_of: Mapping[str, Sequence[Sequence[str]]], *,
+                                tol: float = SOURCES_MATCH_TOL,
+                                end_days: int = POST_PERIOD_WINDOW_END_DAYS,
+                                claimed: dict[str, set[str]]) -> list[dict]:
+    """イベントを社ごとに年の古い順に、`sources_window` の窓で公式と照らす（#755）。戻り値は照合の行。
+
+    **1つの分割を同じ社の2つのイベントが一致に数えない。** `agree` に使った公式イベントの日付を
+    `claimed[edinet_code]` へ積み、後のイベントはその日付を除いた公式で判定する（除いた日付は行の
+    `withheld`）。取り残されたイベントは窓に分割が無いものとして扱われ、事前に決めた規則どおり不一致の側に
+    数えられる。`claimed` は `judge_rows_against_yahoo` と共有する——公式で一致に数えた分割を、別のイベントが
+    Yahoo で数え直さないため（同じ分割の日付は公式も Yahoo も権利落ち日で一致する前提）。
+    """
+    rows = []
+    for e in sorted(events, key=lambda e: (e.edinet_code, e.year)):
+        win = sources_window(e, end_days=end_days)
+        used = claimed.setdefault(e.edinet_code, set())
+        official = official_of.get(e.edinet_code, ())
+        withheld = sorted(_dates_in_window(official, win) & used)
+        st, ratio = judge_against_official(e, [o for o in official if o[0] not in used],
+                                           spans_of.get(e.edinet_code, ()), tol=tol, window=win)
+        if st == "agree":
+            used.update(_dates_in_window(official, win))
+        rows.append({"edinet_code": e.edinet_code, "year": e.year, "kind": e.kind,
+                     "magnitude": e.canonical, "consistency": e.consistency,
+                     "lagged_sh_ratio": e.lagged_sh_ratio, "window": win,
+                     "official_status": st, "official_ratio": ratio,
+                     "yahoo_status": None, "yahoo_ratio": None, "withheld": withheld})
+    return rows
+
+
+def judge_rows_against_yahoo(rows: Sequence[dict], events_of: Mapping[tuple[str, int], ShareEvent],
+                             splits_of: Mapping[str, Optional[Sequence[tuple[str, float]]]], *,
+                             tol: float = SOURCES_MATCH_TOL,
+                             claimed: dict[str, set[str]]) -> None:
+    """公式で確かめられなかった行を、社ごとに年の古い順に Yahoo の分割履歴と照らし、行へ書き込む（#755）。
+
+    窓は行の `window`（`judge_rows_against_official` が決めたもの）。一致に使った日付の扱いは
+    `judge_rows_against_official` と同じで、`claimed` も共有する。
+    """
+    for r in sorted(rows, key=lambda r: (r["edinet_code"], r["year"])):
+        used = claimed.setdefault(r["edinet_code"], set())
+        splits = splits_of.get(r["edinet_code"])
+        if splits is not None:
+            r["withheld"] = sorted(set(r["withheld"]) | (_dates_in_window(splits, r["window"]) & used))
+            splits = [s for s in splits if s[0] not in used]
+        st, ratio = judge_against_yahoo(events_of[(r["edinet_code"], r["year"])], splits,
+                                        tol=tol, window=r["window"])
+        if st == "agree":
+            used.update(_dates_in_window(splits, r["window"]))
+        r["yahoo_status"], r["yahoo_ratio"] = st, ratio
 
 
 def in_period_pairs(events: Sequence[ShareEvent]) -> list[tuple[ShareEvent, ShareEvent, float]]:
@@ -1255,16 +1341,13 @@ def _cmd_verify_sources(args) -> int:
         if args.only:
             only = {x.strip() for x in args.only.split(",") if x.strip()}
             targets = [e for e in targets if e.edinet_code in only]
-        results = []
-        for e in sorted(targets, key=lambda e: (e.edinet_code, e.year)):
-            st, ratio = judge_against_official(e, on.official.get(e.edinet_code, ()),
-                                               inputs["coverage"].get(e.edinet_code, ()),
-                                               tol=args.match_tol)
-            results.append({"edinet_code": e.edinet_code, "year": e.year, "kind": e.kind,
-                            "magnitude": e.canonical, "consistency": e.consistency,
-                            "lagged_sh_ratio": e.lagged_sh_ratio, "window": event_window(e),
-                            "official_status": st, "official_ratio": ratio,
-                            "yahoo_status": None, "yahoo_ratio": None})
+        print("照合窓: 整合度照合のイベントは (前期末-45日, 当期末+%d日]・それ以外は本番と同じ +45日"
+              "（#755）。1つの分割を一致に数えるのは同じ社の1イベントだけ" % args.post_period_end_days)
+        # 社ごとの「一致に数えた分割の日付」。公式と Yahoo で共有する（#755）。
+        claimed: dict[str, set[str]] = {}
+        results = judge_rows_against_official(targets, on.official, inputs["coverage"],
+                                              tol=args.match_tol,
+                                              end_days=args.post_period_end_days, claimed=claimed)
         o_tally = Counter(r["official_status"] for r in results)
         print()
         print("照合する %s 経路のイベント %d件・公式との照合: %s"
@@ -1273,24 +1356,9 @@ def _cmd_verify_sources(args) -> int:
         y_tally: Counter = Counter()
         pending = [r for r in results if r["official_status"] == "unconfirmed"]
         if pending and not args.no_yahoo:
-            tickers = load_yahoo_tickers(db, sorted({r["edinet_code"] for r in pending}))
-            spans: dict[str, tuple[str, str]] = {}
-            for r in pending:
-                if r["window"] is None:
-                    continue
-                w0, w1 = r["window"]
-                s = spans.get(r["edinet_code"])
-                spans[r["edinet_code"]] = (min(w0, s[0]), max(w1, s[1])) if s else (w0, w1)
-            fetch = {ec: (tickers[ec][0], tickers[ec][1], w0, w1)
-                     for ec, (w0, w1) in spans.items() if ec in tickers}
-            print("Yahoo から %d社の分割履歴を取ります（ティッカー無し %d社）..."
-                  % (len(fetch), len(spans) - len(fetch)), flush=True)
-            got = fetch_yahoo_splits(fetch, sleep=args.sleep)
+            got = _fetch_yahoo_for(db, pending, sleep=args.sleep)
             ev_of = {(e.edinet_code, e.year): e for e in targets}
-            for r in pending:
-                st, ratio = judge_against_yahoo(ev_of[(r["edinet_code"], r["year"])],
-                                                got.get(r["edinet_code"]), tol=args.match_tol)
-                r["yahoo_status"], r["yahoo_ratio"] = st, ratio
+            judge_rows_against_yahoo(pending, ev_of, got, tol=args.match_tol, claimed=claimed)
             y_tally = Counter(r["yahoo_status"] for r in pending)
             print("Yahoo との照合: %s" % dict(sorted(y_tally.items())))
 
@@ -1310,16 +1378,18 @@ def _cmd_verify_sources(args) -> int:
         for r in results:
             if r["official_status"] in ("disagree", "absent") or r["yahoo_status"] in (
                     "disagree", "no_split"):
-                print("  %-9s %s 倍率 %s 整合度 %s 公式 %s(%s) Yahoo %s(%s) 窓 %s"
+                print("  %-9s %s 倍率 %s 整合度 %s 公式 %s(%s) Yahoo %s(%s) 窓 %s%s"
                       % (r["edinet_code"], r["year"], _fmt(r["magnitude"]),
                          _fmt(r["consistency"]), r["official_status"], _fmt(r["official_ratio"]),
-                         r["yahoo_status"], _fmt(r["yahoo_ratio"]), r["window"]))
+                         r["yahoo_status"], _fmt(r["yahoo_ratio"]), r["window"],
+                         " 他のイベントが一致に数えた分割 %s" % r["withheld"] if r["withheld"] else ""))
 
         if args.json:
             p = Path(args.json)
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_text(json.dumps({
                 "db_target": D.DB_TARGET, "cross_check": args.cross_check,
+                "post_period_end_days": args.post_period_end_days,
                 "match_tol": args.match_tol, "diff": diff, "official_tally": dict(o_tally),
                 "yahoo_tally": dict(y_tally), "verdict": verdict, "rows": results,
             }, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
@@ -1503,6 +1573,9 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--cross-check", choices=("consistency", "eps"), default="consistency",
                    help="照らすイベントの交差検証（既定: 整合度照合で認めたもの・--axis consistency のときだけ）")
     s.add_argument("--match-tol", type=float, default=SOURCES_MATCH_TOL)
+    s.add_argument("--post-period-end-days", type=int, default=POST_PERIOD_WINDOW_END_DAYS,
+                   help="整合度照合で認めたイベント（期末後分割）の照合窓の右端＝当期末からの日数"
+                        "（#755・--axis consistency のときだけ）")
     s.add_argument("--sleep", type=float, default=1.0, help="Yahoo へのリクエスト間隔（秒）")
     s.add_argument("--no-yahoo", action="store_true", help="Yahoo を叩かない（基準3は判定しない）")
     s.add_argument("--only", default="", help="edinet_code をカンマ区切りで絞る")
