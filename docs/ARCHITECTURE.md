@@ -1376,7 +1376,7 @@ graph LR
     end
 
     subgraph SCHED["🖱️ 手動差分収集 /api/scheduler/"]
-        SC3["POST /api/scheduler/run-now\n差分収集を手動実行\n（過去1年・skip_existing）"]
+        SC3["POST /api/scheduler/run-now\n財務の差分収集を手動実行\n（過去1年・skip_existing・株価/マクロは更新しない）"]
     end
 
     subgraph ANALYSIS["📊 分析 /api/"]
