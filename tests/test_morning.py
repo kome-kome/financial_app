@@ -159,6 +159,60 @@ def _mu_sources() -> set[str]:
     return names - {""}
 
 
+class TestVerdictGatesOnRankingInputs:
+    """総合判定は「この並びで発注してよいか」。赤まで効くのはランキングの元データだけ。
+
+    μ̂ とマクロは朝のランキングのスコアに入っていない（`DEFAULT_MU_SOURCE` のコメント・
+    ADR-0030）。それらで赤にすると、並びと無関係な理由で「発注しないでください」が出続け、
+    本当に元データが止まった朝に効かなくなる。黄までに抑え、発注可（tradable）とは言わない。
+    """
+    FRESH = {"level": "fresh"}
+
+    def _verdict(self, **levels):
+        blocks = {k: {"level": levels.get(k, "fresh")}
+                  for k in ("price", "gap", "mu", "macro", "batch")}
+        return _mor._overall_verdict(**blocks)
+
+    @pytest.mark.parametrize("level", ["warn", "alert", "empty", "unknown"])
+    def test_stale_mu_alone_is_yellow_not_red(self, level):
+        assert self._verdict(mu=level) == "warn"
+
+    def test_bad_macro_alone_is_yellow_not_red(self):
+        assert self._verdict(macro="alert") == "warn"
+
+    def test_mu_and_macro_both_bad_stay_yellow(self):
+        assert self._verdict(mu="alert", macro="alert") == "warn"
+
+    @pytest.mark.parametrize("source", ["price", "gap", "batch"])
+    @pytest.mark.parametrize("level", ["alert", "empty", "unknown"])
+    def test_ranking_inputs_still_go_red(self, source, level):
+        assert self._verdict(**{source: level}) == "alert"
+
+    def test_all_fresh_is_green(self):
+        assert self._verdict() == "fresh"
+
+    def test_mu_only_stale_is_not_tradable(self, db):
+        """黄は発注可ではない。μ̂ だけが判定不能の朝も tradable は False のまま。"""
+        TestFreshnessBlock._put_m1_run(db, {"draws": 800})
+        f = client.get("/api/morning?mu_source=macro_risk_return").json()["freshness"]
+        assert f["mu"]["level"] == "unknown"
+        assert f["tradable"] is False
+
+    def test_mu_and_macro_reasons_say_they_do_not_rank(self):
+        mu = {"level": "alert", "source": "macro_enet",
+              "snapshot_date": "2026-09-01", "age_bdays": 20}
+        macro = {"level": "alert", "worst": [{"code": "VIX"}]}
+        reasons = _mor._reasons(self.FRESH, self.FRESH, mu, macro, {})
+        assert len(reasons) == 2
+        assert all("ランキングには使っていない" in s for s in reasons)
+
+    def test_ranking_input_reasons_do_not_claim_that(self):
+        """株価・gap_ratio の理由に「注意のみ」を付けると、赤の理由を読み流させてしまう。"""
+        gap = {"level": "alert", "age_days": 30}
+        reasons = _mor._reasons(self.FRESH, gap, self.FRESH, self.FRESH, {})
+        assert reasons and not any("ランキングには使っていない" in s for s in reasons)
+
+
 class TestMuDriver:
     """μ̂ を前進させるバッチは `HEAVY_AUTOMATION` から引く（#743）。
 
