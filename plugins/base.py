@@ -33,6 +33,11 @@ class AnalysisPlugin(ABC):
     # 一員としての役割（ADR-0021「並置して実データで決める」）が退役後も残るため。
     # フィルタは消費側（`routers/analysis.py` の `/api/plugins`）が行う。
     hidden: bool = False
+    # 画面から実行したときに**置き換わる保存済みの表**（実行前の確認ダイアログに出す）。
+    # heavy は宣言必須で、書かない分析は `()` を明示する（`None` は「宣言し忘れ」と区別するため。
+    # `tests/test_plugin_progress.py::TestHeavyDeclaresWrites` が照合する）。heavy を画面から
+    # 回すと夜間・月次バッチが書いた結果を黙って上書きするので、押す前に何が変わるかを見せる。
+    writes: tuple[str, ...] | None = None
 
     @abstractmethod
     def params_schema(self) -> dict:
@@ -70,5 +75,6 @@ class AnalysisPlugin(ABC):
             "category": self.category,
             "ui_order": self.ui_order,
             "hidden": self.hidden,
+            "writes": None if self.writes is None else list(self.writes),
             "params_schema": self.params_schema(),
         }

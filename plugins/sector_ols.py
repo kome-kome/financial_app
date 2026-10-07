@@ -306,6 +306,7 @@ class SectorOLSPlugin(AnalysisPlugin):
     )
     depends_on = []
     heavy = True   # 業種ごとの行列回帰。Render Free では OOM するためローカル実行に限定
+    writes = ("regression_results",)   # 朝の推奨・バリュエーション分析の乖離率
     category = "② 割安度を測る"
     ui_order = 210
 

@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 
 import api
 import backtest
+import batch_activity
 import model_comparison
 import plugins as plugin_registry
 from collection_jobs import jobs
@@ -18,6 +19,47 @@ from plugins import progress
 
 router = APIRouter()
 log = logging.getLogger(__name__)
+
+# 画面から回した heavy の所要（分）を残す `app_settings` のキー接頭辞。実行前の確認ダイアログに
+# 「前回 約 N 分」と出すためだけの値で、バッチの所要（`run_daytime.JOBS[*].measured_min`）とは別物。
+LAST_RUN_KEY_PREFIX = "plugin_last_run_min:"
+
+
+def _jst(iso: Optional[str]) -> Optional[str]:
+    """`batch_activity` の UTC ISO を画面用の JST 文字列へ（読めなければそのまま）。"""
+    from datetime import datetime
+    try:
+        return api._utc_to_jst_str(datetime.fromisoformat(iso)) if iso else None
+    except ValueError:
+        return iso
+
+
+def _batch_running_message(running: list[dict]) -> str:
+    parts = [f"{r['label']}（開始 {_jst(r['started_at']) or '不明'}"
+             + (f"・ステップ {r['step']}" if r.get("step") else "") + "）"
+             for r in running]
+    return ("ローカルバッチが実行中です: " + "、".join(parts)
+            + "。同じ正本 DB を並行して読み書きすると計算結果そのものが変わるため、"
+              "終わってから実行してください")
+
+
+def _refuse_heavy_while_unsafe(job_name: str, label: str) -> None:
+    """heavy を始めてよいかの関所（409）。**`_run_with_progress` を呼ぶ直前に、await を挟まずに**呼ぶ。
+
+    1. ローカルバッチ（夜間・日中・月次…）の実行中マーカーがあれば断る。並走は所要ではなく
+       結果を変える（seed 固定でも MCMC の発散が 0→344）。マーカーは `batch_activity` が唯一の源。
+    2. 同じ heavy がこのアプリ内で既に走っていれば断る。2タブで押すと JobState も保存先の表も
+       取り合いになる。チェックと `reset_for_run` の間に await が無いので、イベントループ上で
+       2つの要求がすり抜けることはない。
+
+    逆向き（画面の heavy 実行中にバッチが起動する）は防げない——バッチ側はアプリを見ていない。
+    """
+    running = batch_activity.read_activity()["running"]
+    if running:
+        raise HTTPException(409, _batch_running_message(running))
+    if jobs.is_running(_progress_job(job_name)):
+        raise HTTPException(409, f"「{label}」は既に実行中です（別のタブで開始されています）。"
+                                 "終わるまで待ってください")
 
 
 def _heavy_special_names() -> set:
@@ -70,6 +112,7 @@ SPECIAL_ANALYSES = [
         "description": "将来リターン予測モデル M-1〜M-6 の予測力（rank-IC・ロングショート spread・hit-rate）を無リーク OOF で横並び比較します（/api/backtest の as-of 上位N とは別手法）。退役した M-4/M-5 もここには並びます",
         "depends_on": [],
         "heavy": True,   # 全モデル（heavy）を実行するため。Render では各モデルがスキップされる
+        "writes": [],    # 各モデルを tuning_dry_run で回す＝保存済みの表は変えない（model_comparison.py）
         "category": "④ 戦略を検証",
         "ui_order": 420,
         "params_schema": {},  # 専用UI（静的タブ）を使用するため空
@@ -132,6 +175,9 @@ async def run_plugin(
     if api.writes_blocked() and getattr(p, "heavy", False):
         raise HTTPException(403, f"「{p.label}」は計算が重いためローカル環境で実行してください"
                                  "（Render Free プラン制限。Render は閲覧専用で、ローカルで実行した結果はここには反映されません）")
+    if getattr(p, "heavy", False):
+        # try の外で断る（中の `except Exception` に 409 を 500 へ化けさせない）
+        _refuse_heavy_while_unsafe(plugin_name, p.label)
     try:
         if getattr(p, "heavy", False):
             return await _execute_with_progress(p, plugin_name, params, db)
@@ -146,7 +192,7 @@ async def run_plugin(
         raise HTTPException(500, "分析エラーが発生しました。")
 
 
-async def _run_with_progress(job_name: str, label: str, run):
+async def _run_with_progress(job_name: str, label: str, run, db=None):
     """重い分析を進捗 sink で包んで実行する（Issue #545・#593 で特例エントリへも拡張）。
 
     包むのは **heavy だけ**。軽い分析まで JobState を回すと、画面が開いていない
@@ -160,10 +206,13 @@ async def _run_with_progress(job_name: str, label: str, run):
     例外は握らず送出する（呼び出し側の except が HTTP ステータスへマップする契約を保つ）
     が、**閉じる前に最後の1行として画面へ残す**——ここで黙って落ちると、画面は
     ストリームが切れただけになり「終わった」と区別できない。
+
+    `db` を渡すと、成功したときの所要を `app_settings` に残す（`_record_last_run`）。
     """
     st = jobs.state(_progress_job(job_name))
     st.reset_for_run()
     st.append_log(f"「{label}」を開始しました")
+    started = time.monotonic()
 
     def sink(step: str, current: int, total: int) -> None:
         st.progress, st.total = current, total
@@ -171,7 +220,10 @@ async def _run_with_progress(job_name: str, label: str, run):
 
     try:
         with progress.progress_sink(sink):
-            return await run()
+            result = await run()
+        if db is not None:
+            _record_last_run(db, job_name, (time.monotonic() - started) / 60.0)
+        return result
     except Exception as e:
         st.append_log(f"[エラー] {e}")
         raise
@@ -180,10 +232,84 @@ async def _run_with_progress(job_name: str, label: str, run):
         st.running = False
 
 
+def _record_last_run(db, job_name: str, minutes: float) -> None:
+    """画面から回した heavy の所要を残す（次の確認ダイアログの「前回 約 N 分」）。
+
+    **失敗しても実行結果は返す**——所要の記録は表示用の補助で、計算の成否と関係ない。
+    閲覧専用の環境（Render の断面）には書かない。
+    """
+    if api.writes_blocked():
+        return
+    try:
+        from database import upsert_setting
+        upsert_setting(db, LAST_RUN_KEY_PREFIX + job_name, f"{minutes:.1f}")
+    except Exception:                                  # noqa: BLE001 — 補助の記録で実行を落とさない
+        log.warning("「%s」の所要を記録できなかった", job_name, exc_info=True)
+        try:
+            db.rollback()
+        except Exception:                              # noqa: BLE001
+            pass
+
+
 async def _execute_with_progress(p, plugin_name: str, params: dict, db):
     """heavy プラグインを進捗つきで実行する（`_run_with_progress` の薄い入口）。"""
     return await _run_with_progress(
-        plugin_name, p.label, lambda: plugin_registry.execute_plugin(p, params, db))
+        plugin_name, p.label, lambda: plugin_registry.execute_plugin(p, params, db), db=db)
+
+
+def _heavy_entry(name: str) -> Optional[dict]:
+    """heavy な分析のメタ（プラグインと `SPECIAL_ANALYSES` の特例の両方）。heavy でなければ None。"""
+    p = plugin_registry.get_plugin(name)
+    if p is not None:
+        return p.to_meta() if getattr(p, "heavy", False) else None
+    return next((e for e in SPECIAL_ANALYSES if e["name"] == name and e.get("heavy")), None)
+
+
+@router.get("/api/batch/activity")
+async def batch_activity_status():
+    """いま走っているローカルバッチ（`running`）と、期限切れで残ったマーカー（`stale`）。
+
+    分析画面が読み込み時に読み、走っていれば heavy のボタンを止めて帯で理由を出す。
+    時刻は画面用に JST へ整形して返す。
+    """
+    act = batch_activity.read_activity()
+    for key in ("running", "stale"):
+        for r in act[key]:
+            r["started_at_jst"] = _jst(r.get("started_at"))
+            r["heartbeat_at_jst"] = _jst(r.get("heartbeat_at"))
+    if act["running"]:
+        act["message"] = _batch_running_message(act["running"])
+    return act
+
+
+@router.get("/api/plugins/{plugin_name}/preflight")
+async def plugin_preflight(plugin_name: str, db: Session = Depends(api.get_db)):
+    """heavy を押す直前の確認材料（読取専用）。画面はこれで確認ダイアログを組み立てる。
+
+    - `blocked_reason`: 今は始められない理由（バッチ実行中・同じ分析が実行中）。None なら始められる
+    - `writes`: 置き換わる保存済みの表（`AnalysisPlugin.writes`）
+    - `last_run_min`: このアプリから前回回したときの所要（記録が無ければ None）
+
+    サーバ側の 409（`_refuse_heavy_while_unsafe`）と同じ判定を使う。こちらは押す前に見せる
+    ための写しで、守りは 409 の側にある。
+    """
+    entry = _heavy_entry(plugin_name)
+    if entry is None:
+        raise HTTPException(404, f"heavy な分析 '{plugin_name}' が見つかりません")
+    try:
+        _refuse_heavy_while_unsafe(plugin_name, entry["label"])
+        blocked = None
+    except HTTPException as e:
+        blocked = e.detail
+    last = None
+    try:
+        from database import get_setting
+        raw = get_setting(db, LAST_RUN_KEY_PREFIX + plugin_name)
+        last = float(raw) if raw not in (None, "") else None
+    except Exception:                                  # noqa: BLE001 — 表示の補助で画面を殺さない
+        log.warning("「%s」の前回所要を読めなかった", plugin_name, exc_info=True)
+    return {"name": plugin_name, "label": entry["label"], "writes": entry.get("writes"),
+            "last_run_min": last, "blocked_reason": blocked}
 
 
 @router.get("/api/plugins/{plugin_name}/progress")
@@ -450,11 +576,13 @@ async def backtest_model_comparison(request: Request, db: Session = Depends(api.
     # なのに、#545 の配線は `/api/plugins/{name}/run` 経路にしか通っていなかった。
     label = next((e["label"] for e in SPECIAL_ANALYSES if e["name"] == "model_comparison"),
                  "モデル比較（OOF）")
+    # try の外で断る（下の `except Exception` に 409 を 500 へ化けさせない）
+    _refuse_heavy_while_unsafe("model_comparison", label)
     try:
         return await _run_with_progress(
             "model_comparison", label,
             lambda: model_comparison.run_comparison(
-                db, render_light_mode=api.writes_blocked()))
+                db, render_light_mode=api.writes_blocked()), db=db)
     except Exception as e:
         log.error("Model comparison error: %s", e, exc_info=True)
         raise HTTPException(500, "モデル比較の実行エラーが発生しました。")

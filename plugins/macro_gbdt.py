@@ -324,6 +324,7 @@ class MacroGbdtPlugin(AnalysisPlugin):
     )
     depends_on: list[str] = []
     heavy: bool = True
+    writes = ("macro_gbdt_scores",)
     category = "③ 将来リターンを予測"
     ui_order = 340
 

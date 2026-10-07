@@ -112,6 +112,7 @@ class MacroGbdtRankPlugin(MacroGbdtPlugin):
     )
     depends_on: list[str] = []
     heavy: bool = True
+    writes = ()   # _persist_producer が no-op（順位はリターン単位でない・#362）
     category = "③ 将来リターンを予測"
     ui_order = 380                       # M-4=370 の後（M-1→M-2→M-3→M-4→M-5 順）
     # 退役（#570・ADR-0044）: ADR-0017 が約束していた実測をようやく取ったところ、

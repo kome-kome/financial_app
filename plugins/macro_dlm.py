@@ -361,6 +361,7 @@ class MacroDlmPlugin(AnalysisPlugin):
     )
     depends_on: list[str] = []
     heavy: bool = True
+    writes = ("macro_dlm_scores",)
     category = "③ 将来リターンを予測"
     ui_order = 360                       # macro_gbdt(340) の次
 

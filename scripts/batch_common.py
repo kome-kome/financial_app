@@ -36,6 +36,12 @@ from typing import Callable, Optional, Sequence
 ROOT = Path(__file__).resolve().parents[1]
 LOG_DIR = ROOT / ".logs"
 
+# 実行中マーカー（repo 直下・副作用なし）。`python -m scripts.run_*` は repo 直下を cwd に
+# 走るので import できるが、直接パス実行（`python scripts/run_*.py`）でも落ちないよう通す。
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+import batch_activity  # noqa: E402
+
 # 失敗を起票するときのラベル（GHA の notify-failure と同じ運用に載せる）。
 ISSUE_LABELS = ("ops", "priority:high")
 
@@ -171,11 +177,23 @@ def kill_tree(proc, echo=None) -> None:
 class Runner:
     """ステップ実行とログ出力。テストから差し替えられるよう subprocess を1箇所に閉じる。"""
 
-    def __init__(self, log: Path, echo=print, heartbeat_sec: float = HEARTBEAT_SEC):
+    def __init__(self, log: Path, echo=print, heartbeat_sec: float = HEARTBEAT_SEC,
+                 on_beat: Optional[Callable[[str], None]] = None):
         self.log = log
         self.echo = echo
         self.heartbeat_sec = heartbeat_sec
+        # ステップ開始と heartbeat のたびにステップ名で呼ぶ（実行中マーカー `batch_activity` の更新）。
+        # 例外は握る——マーカーは画面の安全柵で、ステップの成否を左右させない。
+        self.on_beat = on_beat
         self._fh = None
+
+    def _beat(self, step_name: str) -> None:
+        if self.on_beat is None:
+            return
+        try:
+            self.on_beat(step_name)
+        except Exception:      # noqa: BLE001 — 安全柵の失敗でステップを落とさない
+            pass
 
     def __enter__(self):
         self.log.parent.mkdir(parents=True, exist_ok=True)
@@ -243,6 +261,7 @@ class Runner:
         黙ってプロセスを止め、後続ステップは走った形跡すら残さずに消える。
         """
         self.write(f"[{utc_now_iso()}] START {step.name}: {step.why}")
+        self._beat(step.name)
         started = datetime.now(timezone.utc)
         if self._fh is None:
             # コンテキストマネージャの外で呼ばれた（＝呼び出し側のバグ）。DEVNULL へ流すと
@@ -306,6 +325,7 @@ class Runner:
                     break
                 self.write(f"{HEARTBEAT_MARK} {step.name} 継続中: 経過 {waited / 60.0:.0f}分"
                            f" | {_mem_line(proc.pid)}")
+                self._beat(step.name)
         tail = self._tail_since(pos) or _proc_tail(proc)
         if killed:
             # 打ち切った子の returncode（Windows なら taskkill の 1、POSIX なら -SIGTERM）は
@@ -495,29 +515,41 @@ def run_batch(spec: BatchSpec, steps: Sequence[Step], hooks: Hooks,
         return 0
 
     results: dict[str, int] = {}
-    with Runner(log) as runner:
-        runner.write("=" * 70)
-        runner.write(f"[{utc_now_iso()}] {spec.name}開始（正本=ローカル・#503）")
-        # **どこで走ったかを最初に残す**（#550）。S4U はセッション0で走り、`.env` も PATH も
-        # 対話セッションと変わりうるのに、これまでログから一切読めなかった。
-        for line in env_lines():
-            runner.write(line)
-        for step in selected:
-            results[step.name] = runner.run(step)      # 失敗しても次へ進む
-            if hooks.on_step_done is not None:
-                hooks.on_step_done(step, results[step.name])
-        runner.write("-" * 70)
-        for name, code in results.items():
-            runner.write(f"  {'OK    ' if code == 0 else 'FAILED'} {name} (exit={code})")
+    # 実行中マーカー（`batch_activity`）。画面から重い分析を回す前に「いまバッチが走っているか」
+    # を知るための唯一の手掛かり——足跡は終わったときにしか書かれないので、これが無いと
+    # 並走（＝計算結果そのものが変わる）を画面側で止められない。書けなくてもバッチは続ける。
+    # 置き場所は `batch_activity.LOG_DIR` だけで決める（読み手と同じ場所・テストはそこを差し替える）。
+    marker = batch_activity.RunningMarker(
+        batch_activity.marker_path(spec.log_prefix), HEARTBEAT_SEC)
+    with Runner(log, on_beat=marker.beat) as runner:
+        marker.warn = lambda msg: runner.write(f"[warn] {msg}")
+        marker.start()
+        try:
+            runner.write("=" * 70)
+            runner.write(f"[{utc_now_iso()}] {spec.name}開始（正本=ローカル・#503）")
+            # **どこで走ったかを最初に残す**（#550）。S4U はセッション0で走り、`.env` も PATH も
+            # 対話セッションと変わりうるのに、これまでログから一切読めなかった。
+            for line in env_lines():
+                runner.write(line)
+            for step in selected:
+                results[step.name] = runner.run(step)      # 失敗しても次へ進む
+                if hooks.on_step_done is not None:
+                    hooks.on_step_done(step, results[step.name])
+            runner.write("-" * 70)
+            for name, code in results.items():
+                runner.write(f"  {'OK    ' if code == 0 else 'FAILED'} {name} (exit={code})")
 
-        note = hooks.record_footprint(results)
-        if note:
-            runner.write(f"[warn] 足跡を残せなかった: {note}")
-        if not args.no_issue:
-            note = hooks.notify(results, log)
+            note = hooks.record_footprint(results)
             if note:
-                runner.write(f"[warn] 通知できなかった: {note}")
-        runner.write(f"[{utc_now_iso()}] {spec.name}終了")
+                runner.write(f"[warn] 足跡を残せなかった: {note}")
+            if not args.no_issue:
+                note = hooks.notify(results, log)
+                if note:
+                    runner.write(f"[warn] 通知できなかった: {note}")
+            runner.write(f"[{utc_now_iso()}] {spec.name}終了")
+        finally:
+            # 例外で抜けても消す（残ると期限切れまで画面の重い分析を止め続ける）
+            marker.clear()
 
     return sum(1 for c in results.values() if c != 0)
 

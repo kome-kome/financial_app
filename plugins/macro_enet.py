@@ -88,6 +88,7 @@ class MacroEnetPlugin(AnalysisPlugin):
     )
     depends_on: list[str] = []
     heavy: bool = True
+    writes = ("macro_enet_scores",)    # 売りランキング既定の μ̂（mu_source）
     category = "③ 将来リターンを予測"
     ui_order = 390                       # M-5=380 の後（M-1→M-2→M-3→M-4→M-5→M-6 順）
 
