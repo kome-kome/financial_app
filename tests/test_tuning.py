@@ -7,7 +7,6 @@ import pytest
 
 from plugins.tuning import (SearchDim, _grid_combos, _project_champion, _random_combos,
                             _score, search)
-from plugins.utils import coerce_params
 
 
 # ── フェイクプラグイン ─────────────────────────────────────────────────────────

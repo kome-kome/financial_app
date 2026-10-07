@@ -9,7 +9,6 @@
 4. **接続先を local に固定**。親シェルが prod を持っていても引きずらない
 """
 import os
-import subprocess
 import sys
 from pathlib import Path
 

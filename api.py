@@ -10,9 +10,8 @@ FastAPI バックエンド（エントリポイント）
 このファイルは: 共有状態・認証ヘルパー・ミドルウェア・HTML配信・バックグラウンドジョブ関数を担う。
 """
 
-import json, logging, re, threading
+import logging, re, threading
 import hmac, hashlib, base64, secrets, time as _time, os
-import httpx
 
 # .env を「APP_PASSWORD 等の認証設定を読む前」に読み込む。
 # 注意: これらの os.getenv(...) は database の import より前に実行されるため、
@@ -26,7 +25,7 @@ log = logging.getLogger(__name__)
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
-from datetime import date, datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 
 _JST = timezone(timedelta(hours=9))
 
@@ -48,18 +47,14 @@ def _utc_to_jst_str(dt: Optional[datetime]) -> Optional[str]:
         return dt.astimezone(_JST).strftime("%Y-%m-%d %H:%M:%S") + " JST"
     return (dt + timedelta(hours=9)).strftime("%Y-%m-%d %H:%M:%S") + " JST"
 
-from fastapi import FastAPI, BackgroundTasks, Depends, HTTPException, Request, Response
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse, FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
-from pydantic import BaseModel, Field
-from sqlalchemy import func, text
-from sqlalchemy.orm import Session
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
-import io, csv
 
 BASE_DIR = Path(__file__).parent
 
@@ -236,14 +231,10 @@ def _clear_auth_cookies(response) -> None:
 # ── DB / コレクター インポート ──────────────────────────────────────────────
 from database import (
     SessionLocal, init_db, db_target_info,
-    Company, FinancialRecord, FinancialMetric, RegressionResult,
-    CollectionLog, StockPriceDaily, StockPriceWeekly, MacroData,
-    prices_on_or_after, latest_prices, latest_year_subq,
+    Company, FinancialRecord, CollectionLog,
 )
-from collector import run_full_collection, refresh_company, collect_stock_price_history_jquants, update_industry_from_jpx, collect_macro_data, MACRO_SERIES, reparse_from_raw
+from collector import run_full_collection
 from collection_jobs import jobs
-import backtest
-import serializers
 import plugins as plugin_registry
 
 # ── edinet_code 検証正規表現 ────────────────────────────────────────────

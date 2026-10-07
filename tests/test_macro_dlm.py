@@ -18,8 +18,7 @@ import numpy as np
 import pytest
 
 from plugins.macro_dlm import (
-    MacroDlmPlugin, dlm_filter, load_prices, load_macro_levels,
-    DEFAULT_MACRO_FEATURES, MACRO_FEATURE_OPTIONS, _DLM_MACRO_MAP,
+    MacroDlmPlugin, dlm_filter, DEFAULT_MACRO_FEATURES, MACRO_FEATURE_OPTIONS, _DLM_MACRO_MAP,
     _downsample_idx,
     _AUTO_DELTA_GRID, _AUTO_BV_GRID,
     _build_price_features, PRICE_FEATURE_OPTIONS, DEFAULT_PRICE_FEATURES,

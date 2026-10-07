@@ -33,23 +33,19 @@ from .utils import (
     winsorize,
 )
 from .macro_snapshots import (
-    FINANCIAL_LAG_DAYS,
-    HORIZON_WEEKS,
     LABEL_HORIZON_MONTHS,
     FIN_BASE_OPTIONS,
     DEFAULT_FIN_FEATURES,
-    _MACRO_MAP,
-    MACRO_FEATURE_NAMES,
+    _MACRO_MAP as _MACRO_MAP,  # テスト後方互換の再エクスポート（`X as X`＝ruff F401 の対象外・#825）
     MACRO_FEATURE_OPTIONS,
     DEFAULT_MACRO_FEATURES,
     _realized_vol,
-    _find_applicable_fin,  # テスト後方互換の再エクスポート
-    _macro_from_cache,     # テスト後方互換の再エクスポート
+    _macro_from_cache as _macro_from_cache,        # テスト後方互換の再エクスポート
     load_data,
     preload_macro,
     build_snapshots,
     select_features_bic,
-    producer_scores,
+    producer_scores as producer_scores,            # テスト後方互換の再エクスポート
     get_producer_scores,
     oof_backtest,
     build_oof_meta,

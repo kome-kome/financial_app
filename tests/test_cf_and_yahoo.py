@@ -9,7 +9,6 @@ from datetime import date, datetime, time as dtime, timedelta
 from unittest.mock import AsyncMock, patch
 
 import pandas as pd
-import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 

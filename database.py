@@ -2571,7 +2571,6 @@ def _drop_stale_derived_tables() -> None:
 
 def _ensure_tables() -> None:
     """Phase 1: テーブル作成・インデックス・カラムマイグレーション（すべて冪等）"""
-    import re as _re
     _drop_stale_derived_tables()     # create_all より前（落とした表をここで作り直させる）
     Base.metadata.create_all(bind=engine)
     # `db_timeouts` を同じ with 文へ並べる＝**本体を再インデントせずに**ロック上限を掛ける

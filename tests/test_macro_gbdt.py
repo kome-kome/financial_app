@@ -23,7 +23,7 @@ from plugins.macro_gbdt import (
     _build_sector_final_samples, _sector_current_row,
 )
 from plugins.macro_snapshots import (
-    build_snapshots, FINANCIAL_LAG_DAYS, HORIZON_WEEKS, oof_backtest, build_oof_meta,
+    build_snapshots, oof_backtest, build_oof_meta,
 )
 from plugins.utils import coerce_params
 
@@ -1200,7 +1200,6 @@ class TestPriceFeatures:
 
     def test_feat_row_length_and_values_match_direct(self):
         """feat_row 長が feature 数に一致し、px 値が build_price_features(snap_idx) と一致する。"""
-        from plugins.macro_snapshots import build_price_features
         prices_by_co, fin_by_co, companies = self._inputs()
         pf = ["px_rvol", "px_high52dev", "px_rev4w"]
         samples, _, _, feats = build_snapshots(

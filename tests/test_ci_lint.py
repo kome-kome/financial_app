@@ -30,9 +30,7 @@ RUFF_TOML = ROOT / "ruff.toml"
 
 # 外している系統の登録表（理由＝解消する Issue、または残すと決めた Issue）。解消したら
 # 行を消し、ruff.toml からも外す。理由の無い除外を増やさないための照合。
-EXPECTED_IGNORES = {
-    "F401": "#825 未使用 import の後片付け（再エクスポートを壊さずに消す）",
-}
+EXPECTED_IGNORES: dict[str, str] = {}   # F401 は #825 で片付けて外した
 EXPECTED_PER_FILE_IGNORES = {
     "collector.py": ({"F403", "F405"}, "#824 後方互換の再エクスポート層としてスター import を残す（決定）"),
 }

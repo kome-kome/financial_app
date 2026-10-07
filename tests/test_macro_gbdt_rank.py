@@ -12,8 +12,6 @@ M-2（macro_gbdt）の rank-IC 整合版。学習目的を MSE→learning-to-ran
   5. compat : pass_train_groups=False（既定）は従来の 2 引数呼び出しで不変（M-2 回帰保護）
   6. smoke  : execute が model_type=xgboost_ranker を返し producer を永続化しない
 """
-import datetime
-from collections import defaultdict
 from unittest.mock import MagicMock, patch
 
 import numpy as np

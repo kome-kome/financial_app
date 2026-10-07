@@ -22,7 +22,7 @@ from plugins.utils import coerce_params
 from plugins.sell_ranking import (
     SELL_METRICS, PRESETS, SELL_SELECT_COLS, plugin,
     _NC_RATIO_COLS, _SELL_RUNTIME_METRICS, _SELL_VIEW_METRICS, _WeeklyBar,
-    _TREND_CODE_BATCH, _TREND_LOOKBACK_DAYS,
+    _TREND_LOOKBACK_DAYS,
     parse_holdings, _compute_trend, _apply_timing, _base_action,
 )
 

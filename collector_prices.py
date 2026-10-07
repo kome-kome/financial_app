@@ -3,7 +3,6 @@ import bisect
 import calendar
 import csv
 import io
-import zipfile
 import asyncio
 import json
 import os
@@ -20,10 +19,7 @@ from sqlalchemy import func as sqla_func, text as sqla_text
 from sqlalchemy.exc import SQLAlchemyError
 
 from database import (
-    SessionLocal, Company, FinancialRecord, MacroData,
-    XbrlRawDocument, upsert_company, upsert_financial,
-    upsert_xbrl_raw, pack_elements, unpack_elements,
-    build_xbrl_map,
+    Company, FinancialRecord, MacroData,
     StockPriceDaily, StockPriceWeekly, DAILY_WINDOW_DAYS,
     record_prices_batch, trim_daily, latest_prices, prices_on_or_after,
     upsert_macro_batch, sync_active_status, db_timeouts,

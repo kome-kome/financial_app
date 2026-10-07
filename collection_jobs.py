@@ -17,7 +17,7 @@ import asyncio
 import json
 import logging
 from dataclasses import dataclass, field
-from typing import Awaitable, Callable, Optional
+from typing import Awaitable, Callable
 
 from fastapi import BackgroundTasks, HTTPException
 from fastapi.responses import StreamingResponse

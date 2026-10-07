@@ -11,7 +11,6 @@ from plugins.macro_risk_return import (
     MacroRiskReturnPlugin,
     _pareto_frontier,
     _realized_vol,
-    _find_applicable_fin,
     _macro_from_cache,
 )
 from plugins.utils import coerce_params

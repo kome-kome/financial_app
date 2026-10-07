@@ -9,7 +9,6 @@ numpy / scipy / statsmodels を利用する（旧 Pure Python 実装からの移
 import logging
 import math
 import statistics
-from typing import Any
 
 log = logging.getLogger(__name__)
 

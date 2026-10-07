@@ -23,7 +23,7 @@ import api
 import plugins as plugin_registry
 from database import (
     RegressionResult, business_days_between, get_producer_asof,
-    PRICE_STALE_WARN_BDAYS, PRICE_STALE_ALERT_BDAYS,
+    PRICE_STALE_WARN_BDAYS,
 )
 
 router = APIRouter()

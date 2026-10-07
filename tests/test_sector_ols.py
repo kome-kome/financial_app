@@ -12,7 +12,7 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from database import Company, FinancialRecord
+from database import FinancialRecord
 from plugins import execute_plugin
 from plugins.sector_ols import (
     DB_PER_SHARE_KEYS,
@@ -466,7 +466,6 @@ class TestExecute:
 
 
 # ── サブメソッド単体テスト（#169：回帰検出粒度の向上）──────────────────────────
-import math
 import statistics
 
 from plugins.utils import normalize, winsorize

@@ -16,7 +16,6 @@ from unittest.mock import patch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import collector
 from collector import collect_macro_data, MACRO_SERIES
 from database import MacroData
 

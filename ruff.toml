@@ -7,11 +7,9 @@ target-version = "py313"   # render.yaml の PYTHON_VERSION と揃える
 
 [lint]
 select = ["F"]
-
-# 未使用 import。導入時点（2026-10-07）で 143件あり、機械的に消すとほかのモジュールや
-# テストがそこ経由で import している名前（再エクスポート）まで消える。実害は無い
-# （import 漏れ＝未定義名は F821 が別に拾う）ので外し、後片付けは #825 で行う。
-ignore = ["F401"]
+# 未使用 import（F401）は #825 で片付けて除外を外した。ほかのモジュールやテストがそこ経由で
+# import する名前（再エクスポート）は `from m import X as X` の形で残す（ruff はこの形を
+# 意図した再エクスポートとみなし F401 にしない）。`--fix` で消す前に外部の参照を確かめること。
 
 [lint.per-file-ignores]
 # collector.py は後方互換の再エクスポート層なので、分割モジュールのスター import を意図して
