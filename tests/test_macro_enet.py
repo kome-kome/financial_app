@@ -18,7 +18,7 @@ ElasticNet 線形モデル。
 `test_no_pca_knob_promoted` で固定する。
 """
 import statistics
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import numpy as np
 import pytest

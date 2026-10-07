@@ -1,7 +1,6 @@
 import logging
 from typing import Any
 from collections import defaultdict, namedtuple
-from sqlalchemy import func
 from .base import AnalysisPlugin
 from .utils import PREPROCESS_VERSION, fit_zscore_stats, normalize_transform
 

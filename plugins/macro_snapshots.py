@@ -611,7 +611,7 @@ def _macro_from_cache(
         current_avg = statistics.mean(current_vals)
 
         if ttype == "yoy":
-            from datetime import date as _d2, timedelta as _td2
+            from datetime import timedelta as _td2
             ref_1y = ref - _td2(days=365)
             p_s = (ref_1y - _td2(days=window_days)).isoformat()
             p_e = (ref_1y + _td2(days=window_days)).isoformat()
@@ -630,7 +630,7 @@ def _macro_from_cache(
             result[fname] = (current_avg - prev_avg) / prev_avg if prev_avg else None
 
         elif ttype == "zscore":
-            from datetime import date as _d3, timedelta as _td3
+            from datetime import timedelta as _td3
             hist_start = (ref - _td3(days=zscore_years * 366)).isoformat()
             all_vals = [v for d, v in date_close.items() if hist_start <= d <= ref_date]
             if len(all_vals) < _ZSCORE_MIN_PTS:

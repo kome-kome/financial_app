@@ -10,7 +10,6 @@ import sys
 from datetime import date, datetime, timedelta, timezone
 from unittest.mock import AsyncMock, patch
 
-import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 

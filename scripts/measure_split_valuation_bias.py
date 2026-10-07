@@ -62,7 +62,7 @@ import sys
 from collections import Counter, defaultdict
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Iterable, Mapping, NamedTuple, Optional, Sequence
+from typing import Iterable, Mapping, Optional, Sequence
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:

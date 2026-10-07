@@ -23,7 +23,7 @@ SKIP_XBRL_RAW=true（デフォルト）の運用前提:
   --refill-machinery  bs_machinery NULL（かつ bs_ppe_total あり）を XBRL 再取得で補完
   --refill-machinery-limit N  機械装置補完の上限件数（デフォルト None＝全件）
 """
-import argparse, asyncio, sys, time
+import argparse, asyncio, time
 from datetime import datetime
 from functools import partial
 from typing import Optional

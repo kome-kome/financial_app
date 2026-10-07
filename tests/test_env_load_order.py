@@ -8,7 +8,6 @@ api.py は APP_PASSWORD / APP_SECRET_KEY / APP_RECOVERY_KEY 等の認証設定�
   - APP_SECRET_KEY が dev 既定値（既知のハードコード鍵）
 という事故になる。本テストはその順序不変条件を固定する。
 """
-import os
 from pathlib import Path
 
 API_SRC = (Path(__file__).resolve().parent.parent / "api.py").read_text(encoding="utf-8")

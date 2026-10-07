@@ -15,7 +15,7 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from database import (  # noqa: E402
-    MacroGbdtScore, MacroEnetScore, StockPriceDaily,
+    MacroGbdtScore, StockPriceDaily,
     business_days_between, get_producer_asof, price_asof_by_code, price_freshness,
     replace_macro_gbdt_scores, replace_macro_enet_scores,
     PRICE_STALE_WARN_BDAYS, PRICE_STALE_ALERT_BDAYS,

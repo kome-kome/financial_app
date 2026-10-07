@@ -34,7 +34,6 @@ from .macro_snapshots import (
     LABEL_HORIZON_MONTHS,
     MACRO_FEATURE_OPTIONS,
     PRICE_FEATURE_OPTIONS,
-    DEFAULT_PRICE_FEATURES,
     _realized_vol,
     load_data,
     preload_macro,
@@ -701,7 +700,6 @@ class MacroGbdtPlugin(AnalysisPlugin):
             pass   # 永続化失敗（読取専用DB等）は分析表示を妨げない・producer は次回実行で再生成
 
     def execute(self, params: dict, db: Any) -> dict:
-        import xgboost as xgb
         import shap
 
         lambda_risk  = params["lambda_risk"]

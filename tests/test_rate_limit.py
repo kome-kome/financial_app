@@ -7,7 +7,6 @@ DB 不要の /api/auth/login（パスワード照合のみ）を対象にする�
 import os
 import sys
 
-import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 

@@ -6,7 +6,7 @@ SQLite（conftest.py の db fixture）に対して実際に行う（upsert_state
 """
 import asyncio
 import os
-from datetime import date, timedelta
+from datetime import date
 from unittest.mock import AsyncMock, patch
 
 import pytest

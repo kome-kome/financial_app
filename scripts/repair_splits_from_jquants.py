@@ -117,7 +117,7 @@ from collector_utils import (
     # 丸め許容は収集側（J-Quants catchup の選別・#620）と共有する。ここで書き写すと、
     # 片方が「同じ値」と見た行をもう片方が「段差」と読む（#466 の実測: 株価 21円の
     # E01300 は観測幅 3.5e-3 で、`ROUND_UNIT / 株価` だと 4.8e-2）。
-    REL_TOL_FLOOR, ROUND_UNIT, force_utf8_stdout, rounding_tolerance,
+    REL_TOL_FLOOR, force_utf8_stdout, rounding_tolerance,
 )
 # 企業イベントの知識は台帳が唯一の源（#746・ADR-0062）。
 from corporate_actions import (

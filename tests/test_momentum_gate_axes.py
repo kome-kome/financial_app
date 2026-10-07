@@ -31,7 +31,7 @@ from scripts import momentum_gate  # noqa: E402
 from scripts.momentum_gate import (  # noqa: E402
     BASE_COND, CONDS, DEMEAN_BASE_COND, DEMEAN_CONDS, DEMEAN_MODELS, INTERACTION_BASE_COND,
     INTERACTION_CONDS, INTERACTION_MODELS, MACRO_BASE_COND, MACRO_ON_COND, MAXFEAT_MODELS,
-    METRICS, MODE_SUFFIX, MOM_WINDOW, PANEL_CONFIG_KEYS, Cond, base_of, bonferroni_alpha,
+    METRICS, MODE_SUFFIX, MOM_WINDOW, PANEL_CONFIG_KEYS, base_of, bonferroni_alpha,
     build_conditions, demean_reach_problems, demean_target_by_month, max_abs_month_mean,
     maxfeat_cond_name, mode_of, panel_config_mismatches, verdict_text,
 )

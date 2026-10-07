@@ -22,12 +22,20 @@ from collector_disclosures import *      # 会社予想開示
 from collector_interim import run_interim_collection  # 半期(H1)財務収集
 
 # テスト等が `from collector import _name` で参照する非公開名は明示的に再エクスポートする
-# （`from module import *` は先頭 _ の名前を取り込まないため）。
-from collector_master import _read_jpx_excel, _read_edinet_codelist
-from collector_financials import _match_capex_by_label, _phase_process_docs, _detect_xbrl_columns
-from collector_prices import _nearest_price, _jquants_fetch_date, _jquants_fetch_code
-from collector_prices import _esri_candidate_urls, _parse_esri_gdp_csv, _esri_apply_lag
-from collector_prices import _parse_imf_weo_sheet
+# （`from module import *` は先頭 _ の名前を取り込まないため）。`X as X` は ruff に
+# 「意図した再エクスポート」と伝える形で、未使用 import（F401）として消されない（#825）。
+from collector_master import _read_jpx_excel as _read_jpx_excel
+from collector_master import _read_edinet_codelist as _read_edinet_codelist
+from collector_financials import _match_capex_by_label as _match_capex_by_label
+from collector_financials import _phase_process_docs as _phase_process_docs
+from collector_financials import _detect_xbrl_columns as _detect_xbrl_columns
+from collector_prices import _nearest_price as _nearest_price
+from collector_prices import _jquants_fetch_date as _jquants_fetch_date
+from collector_prices import _jquants_fetch_code as _jquants_fetch_code
+from collector_prices import _esri_candidate_urls as _esri_candidate_urls
+from collector_prices import _parse_esri_gdp_csv as _parse_esri_gdp_csv
+from collector_prices import _esri_apply_lag as _esri_apply_lag
+from collector_prices import _parse_imf_weo_sheet as _parse_imf_weo_sheet
 from database import SessionLocal
 
 

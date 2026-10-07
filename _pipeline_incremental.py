@@ -6,7 +6,7 @@ GitHub Actions 用・差分収集パイプライン（毎日自動実行向け�
 
 全件収集は _pipeline_gh.py で workflow_dispatch 手動実行。
 """
-import asyncio, sys, time
+import asyncio, time
 from typing import Optional
 from datetime import datetime, date, timedelta
 from functools import partial

@@ -4,7 +4,6 @@ from datetime import date, timedelta
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
-import pytest
 
 from plugins.utils import get_macro_features, get_momentum_return
 # 正本マップは macro_snapshots._MACRO_MAP（ADR-0003・#218 で utils の重複定義を統合）。

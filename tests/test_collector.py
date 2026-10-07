@@ -4,7 +4,6 @@
 値整形）、派生指標計算 calc_derived、列検出、raw 変換。
 """
 import asyncio
-import bisect
 import io
 import os
 import sys

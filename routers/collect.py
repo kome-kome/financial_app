@@ -21,10 +21,10 @@ from sqlalchemy.orm import Session
 import api
 from database import (
     SessionLocal, Company, FinancialRecord, CollectionLog,
-    StockPriceWeekly, StockPriceDaily,
+    StockPriceWeekly,
 )
 from collector import (
-    run_full_collection, refresh_company, update_market_data_from_history,
+    refresh_company, update_market_data_from_history,
     collect_stock_price_history_jquants,
     update_industry_from_jpx, fill_industry_from_edinet_codelist,
     collect_macro_data, reparse_from_raw,

@@ -13,7 +13,6 @@ import asyncio
 from datetime import date
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import pytest
 
 from collector_prices import (
     MOF_ERA_BASE,

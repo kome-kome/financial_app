@@ -189,10 +189,11 @@ from .macro_snapshots import (  # noqa: E402
     build_price_features as _build_price_features,
     tradable_results,
     tradable_snapshot_asof,
-    _PX_RVOL_WINDOW,
-    _PX_VOLZ_WINDOW,
-    _PX_HIGH52_WINDOW,
-    _PX_REV_WINDOW,
+    # テストが plugins.macro_dlm から参照する再エクスポート（`X as X`＝ruff F401 の対象外・#825）
+    _PX_RVOL_WINDOW as _PX_RVOL_WINDOW,
+    _PX_VOLZ_WINDOW as _PX_VOLZ_WINDOW,
+    _PX_HIGH52_WINDOW as _PX_HIGH52_WINDOW,
+    _PX_REV_WINDOW as _PX_REV_WINDOW,
 )
 
 WEEKS_PER_YEAR = 52

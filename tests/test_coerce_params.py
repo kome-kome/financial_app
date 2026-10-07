@@ -3,7 +3,6 @@
 interface = (schema, raw) → typed dict。db / HTTP に依存しないため直接テストできる。
 型付け・default 補完・bounds/membership reject・dtype 推論・schema バグ検出を網羅する。
 """
-import math
 import os
 import sys
 
