@@ -24,7 +24,13 @@ from database import (
     KEY_JPX_INDUSTRY_LAST_SUCCESS, KEY_EDINET_CODELIST_LAST_SUCCESS, upsert_setting,
 )
 
-from collector_utils import *
+# 設定定数・log。スター import だと ruff が未定義名（F821）を検出できないので名前を明示する（#824）。
+from collector_utils import (
+    API_KEY, EDINET_BASE, EDINET_CODELIST_COLUMNS, EDINET_CODELIST_LISTED,
+    EDINET_CODELIST_URL, EDINET_INDUSTRY_ALIASES, EDINET_MAX_CONSECUTIVE_FAILURES,
+    EdinetAccessError, EdinetCodelistError, JPX_CODE_DROP_LIMIT, JPX_EXCEL_LINK_RE,
+    JPX_EXCEL_URL, JPX_LISTING_URL, JpxIndustryError, RATE_SLEEP, log, redact_secrets,
+)
 
 
 async def fetch_edinet_code_list(client: httpx.AsyncClient) -> pd.DataFrame:

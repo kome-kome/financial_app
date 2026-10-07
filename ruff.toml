@@ -14,11 +14,9 @@ select = ["F"]
 ignore = ["F401"]
 
 [lint.per-file-ignores]
-# collector_utils 等をスター import している4本（導入時点 F405 337件・F403 8件）。
-# スター import のあるファイルでは未定義名も F405 になるため、この4本では F821 が効かない。
-# 導入時点で F405 の名前はすべてスター import 元の公開名に解決できた（隠れた未定義名 0）。
-# 明示 import へ置き換えて死角を消すのは #824。
+# collector.py は後方互換の再エクスポート層なので、分割モジュールのスター import を意図して
+# 残す（#824 で決定。外から `collector.<名前>` で参照する呼び出し側を壊さないため）。
+# スター import のあるファイルでは未定義名も F405 になり F821 が効かない＝この1本だけは
+# 死角が残る。新しい処理は collector.py ではなく分割モジュール（collector_*.py）へ置くこと。
+# 分割モジュール3本は #824 で明示 import へ置き換え、除外を外した。
 "collector.py" = ["F403", "F405"]
-"collector_prices.py" = ["F403", "F405"]
-"collector_financials.py" = ["F403", "F405"]
-"collector_master.py" = ["F403", "F405"]

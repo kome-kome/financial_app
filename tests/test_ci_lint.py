@@ -28,16 +28,13 @@ ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github" / "workflows" / "ci.yml"
 RUFF_TOML = ROOT / "ruff.toml"
 
-# 外している系統の登録表（`exempt` の理由＝解消する Issue）。解消したら行を消し、
-# ruff.toml からも外す。理由の無い除外を増やさないための照合。
+# 外している系統の登録表（理由＝解消する Issue、または残すと決めた Issue）。解消したら
+# 行を消し、ruff.toml からも外す。理由の無い除外を増やさないための照合。
 EXPECTED_IGNORES = {
     "F401": "#825 未使用 import の後片付け（再エクスポートを壊さずに消す）",
 }
 EXPECTED_PER_FILE_IGNORES = {
-    "collector.py": ({"F403", "F405"}, "#824 スター import を明示 import へ"),
-    "collector_prices.py": ({"F403", "F405"}, "#824"),
-    "collector_financials.py": ({"F403", "F405"}, "#824"),
-    "collector_master.py": ({"F403", "F405"}, "#824"),
+    "collector.py": ({"F403", "F405"}, "#824 後方互換の再エクスポート層としてスター import を残す（決定）"),
 }
 
 
