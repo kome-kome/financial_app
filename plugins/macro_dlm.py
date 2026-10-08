@@ -873,17 +873,18 @@ class MacroDlmPlugin(AnalysisPlugin):
 
         # ── producer μ̂ を永続化（sell_ranking が mu_source=macro_dlm で読む・ADR-0004）─
         from database import replace_macro_dlm_scores
-        try:
-            replace_macro_dlm_scores(
-                db,
-                [{"edinet_code": r["edinet_code"], "mu": r["mu"]}
-                 for r in rows if r.get("mu") is not None],
-                _asof.get("snapshot_date"),
-                snapshot_date_min=_asof.get("snapshot_date_min"),
-                n_stale=_asof.get("n_stale"),
-            )
-        except Exception:
-            pass   # 永続化失敗（読取専用DB等）は分析表示を妨げない
+        with progress.persisting():     # 画面の取消はここまで（#849）
+            try:
+                replace_macro_dlm_scores(
+                    db,
+                    [{"edinet_code": r["edinet_code"], "mu": r["mu"]}
+                     for r in rows if r.get("mu") is not None],
+                    _asof.get("snapshot_date"),
+                    snapshot_date_min=_asof.get("snapshot_date_min"),
+                    n_stale=_asof.get("n_stale"),
+                )
+            except Exception:
+                pass   # 永続化失敗（読取専用DB等）は分析表示を妨げない
 
         return {
             "asof": _asof,

@@ -999,7 +999,7 @@ async function runModelComparison() {
     _renderModelComparison(d);
     document.getElementById('mc-results-card').classList.remove('hidden');
   } catch(e) {
-    showNotif('モデル比較に失敗: ' + _errDetail(e));
+    _notifyRunFailure('モデル比較に失敗: ', e);
   } finally {
     if (stopProgress) stopProgress();
     btn.disabled = false;
@@ -1553,7 +1553,7 @@ async function runDynamicPlugin(pluginName, tabId) {
         </div>`);
       showNotif('バリュエーション分析が利用可能になりました', 'success');
     }
-  } catch(e) { showNotif(`実行失敗: ${_errDetail(e)}`); }
+  } catch(e) { _notifyRunFailure('実行失敗: ', e); }
   finally {
     if (stopProgress) stopProgress();
     if (btn) { btn.disabled = false; btn.innerHTML = origHTML; }
@@ -1605,6 +1605,8 @@ function _startPluginProgress(pluginName, tabId) {
   label.textContent = '実行中...';
   count.textContent = '';
   fill.style.width = '0%';
+  const cancelBtn = _cancelButtonFor(wrap, pluginName, tabId);
+  const hideCancel = () => cancelBtn.classList.add('hidden');
 
   const es = new EventSource(apiBase() + `/api/plugins/${encodeURIComponent(pluginName)}/progress`);
   es.onmessage = (ev) => {
@@ -1624,10 +1626,61 @@ function _startPluginProgress(pluginName, tabId) {
     logBox.scrollTop = logBox.scrollHeight;
     // サーバは running=false を終端として1件配ってから閉じる。閉じられたままにすると
     // EventSource が自動再接続を繰り返すので、こちらから明示的に切る。
-    if (!d.running) es.close();
+    if (!d.running) { es.close(); hideCancel(); }
   };
   es.onerror = () => es.close();
-  return () => es.close();
+  // POST が返った瞬間に閉じると、サーバが最後に積んだ1行（「取消しました」「[エラー] …」）が
+  // 次の配信（1秒間隔）に乗る前に切れる。終端（running=false）を受けたら上で閉じるので、
+  // ここは受け損ねたときの上限だけ置く。
+  return () => { hideCancel(); setTimeout(() => es.close(), 2000); };
+}
+
+// 進捗の見出し行に取消ボタンを置く（#849）。静的タブの進捗ボックスは analysis.html に
+// 手書きで複数あるので、ボタンは各所へ書かずここで1回だけ作る。
+function _cancelButtonFor(wrap, pluginName, tabId) {
+  let btn = document.getElementById(`dynprogress-cancel-${tabId}`);
+  if (!btn) {
+    btn = document.createElement('button');
+    btn.type = 'button';
+    btn.id = `dynprogress-cancel-${tabId}`;
+    btn.className = 'btn btn-secondary btn-sm';
+    btn.dataset.click = 'cancelHeavyRun';
+    btn.title = '保存を始める前なら止められます。保存済みの結果は前回のまま残ります';
+    wrap.firstElementChild.appendChild(btn);
+  }
+  btn.dataset.arg = pluginName;
+  btn.textContent = '取消';
+  btn.disabled = false;
+  btn.classList.remove('hidden');
+  return btn;
+}
+
+// 取消を求める（協調型・#849）。止まるのは計算が次に進捗を送ったときで、すぐではない。
+// 保存を始めた後は受け付けられない（業種ごとに保存する sector_ols は途中で止めると新旧が混ざる）。
+async function cancelHeavyRun(pluginName) {
+  const btn = this instanceof HTMLElement ? this : null;
+  if (btn) { btn.disabled = true; btn.textContent = '取消を送信中...'; }
+  let d;
+  try {
+    d = await apiFetch(`/api/plugins/${encodeURIComponent(pluginName)}/cancel`, {method:'POST', body:'{}'});
+  } catch (e) {
+    showNotif(`取消を送れませんでした: ${_errDetail(e)}`);
+    if (btn) { btn.disabled = false; btn.textContent = '取消'; }
+    return;
+  }
+  if (!d) return;
+  if (d.accepted) { if (btn) btn.textContent = '取消待ち（次の区切りで止まります）'; return; }
+  showNotif(d.message, 'info');
+  if (btn) btn.textContent = d.saving ? '保存中（取消できません）' : '取消';
+}
+
+// 実行の 409 が「取消した」なのか（routers/analysis.py::CANCELLED_MESSAGE）。取消は失敗では
+// ないので、赤いエラーではなく情報として出す。
+function _isCancelled(msg) { return typeof msg === 'string' && msg.startsWith('取消しました'); }
+function _notifyRunFailure(prefix, e) {
+  const msg = _errDetail(e);
+  if (_isCancelled(msg)) showNotif(msg, 'info');
+  else showNotif(prefix + msg);
 }
 
 // 結果レンダラ登録制: 動的タブ（プラグイン runner）の結果描画を plugin名 → 描画関数で対応付ける。
