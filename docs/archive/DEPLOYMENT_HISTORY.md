@@ -235,3 +235,43 @@ pg_restore --clean --no-acl --no-owner \
 
 - *`financial_records.raw_xbrl_json` の drop*：**実装済み（Issue #219 ①）**。financial_records 73MBの主因＝第2の容量レバーだった列を冪等DROPマイグレーション（`database.py::_DEBUG_ONLY_COLS`）で削除し、ヘッドルームを確保。
 - *過去2〜5年の Yahoo 週次バックフィル*：J-Quants 無料は2年上限のため、5年時系列（財務5年と整合）を Yahoo から `stock_price_weekly` へ補填。**実装済み（#198・`backfill_weekly_history_yahoo`）。本番実行は完了済みで、専用の `backfill-weekly-history.yml` は削除した**。現在の呼び出し元は `_pipeline_gh.py`（全件収集）と `python -m scripts.resolve_price_suffix --backfill-weekly`（解決できた社だけ）。
+
+## バッチ暦: 電源オン窓の実測（#551）
+
+2026-10-09（#844 の3回目）に DEPLOYMENT.md「バッチ暦」の箇条から移した。規則（名目時刻は下限・この環境では 17:20 が最速）は DEPLOYMENT.md に残し、根拠の表と `WakeToRun` が効かない理由をここへ移した（同じ事実は [ADR-0042](../adr/0042-batch-footprints-need-a-reader.md) の #551 追補にもある）。
+
+- **名目時刻は「これより前には走らせない」下限であって、実起動時刻の予測ではない（#551）。** 実起動を決めるのは **PC の電源オン窓**で、実測（2026-08-26〜28 の System ログ 6005/6006）は **~17:40 → 翌 ~08:00**。この1つの変数で3タスクすべての挙動が説明できる:
+
+  | タスク | 名目 | 窓との関係 | 実起動 |
+  |---|---|---|---|
+  | nightly | 17:20 | **外** | 毎日 `StartWhenAvailable` で追いつき、電源投入の 4〜10分後（実測 17:49〜17:53） |
+  | monthly | 1日 01:00 | 内 | 名目どおりの見込み（9/1 が初回・#532 が観測） |
+  | watchdog | 20:00 | 内 | **20:00:02**＝ずれない |
+
+  **watchdog がずれず nightly だけずれることが、「スケジューラの設定ではなく電源時刻が原因」の決定的な証拠**（設定が原因なら 20:00 も同じようにずれる）。`WakeToRun` を足しても直らない——ウェイクタイマはスリープ／休止からの復帰にしか働かず、**ユーザーが行ったシャットダウンからは起動できない**（電源オフから起こすには BIOS の RTC アラームか Wake-on-LAN が要る）。名目を電源投入後へ寄せるのも現状より遅くなるだけ。**この環境では 17:20 のままが最速**。
+
+## バッチ暦: 正本へのリンクにした箇条（移す前の文）
+
+2026-10-09（#844 の3回目）に DEPLOYMENT.md「バッチ暦」から外した文。どちらも同じ事実が正本にあるので、DEPLOYMENT.md では要点とリンクだけにした（watchdog の閾値と `*_last_run` を見る理由は [ADR-0042](../adr/0042-batch-footprints-need-a-reader.md) の決定1・2、月次タスクの XML 登録は [SCRIPTS_REFERENCE.md](../SCRIPTS_REFERENCE.md#scriptsinstall_monthly_taskps1)）。
+
+- 「走らなかった」ことは **毎日 20:00 の `financial_app-watchdog`（`scripts/check_batch_freshness.py`）が `app_settings` の `*_last_run` を見て起票する**（#515 手順3）。`/api/morning` の as-of ブロック（#416/#417）は人が開いたときの最後の環として残る。**閾値は `cadence + 窓` の導出**（夜間 24h+6h=30h／月次 31日+16h=760h）で、窓を広げれば閾値も自動で広がる＝乖離が原理的に起きない。副産物として「実行中は鳴らない」が構造的に成立する（窓の項がそのまま「まだ走っていてよい時間」の許容）。**見るのは `*_last_run` であって `*_last_success` ではない**——後者は #512 が解けるまで `monthly_last_success` が設計上ずっと古く、そこで鳴らすと恒久的に open な Issue ができて通知そのものが信用されなくなる（成功側は報告と Issue 本文には必ず載る）。
+- **月次タスクの登録は XML 直渡し**（`scripts/install_monthly_task.ps1`）。PowerShell の `New-ScheduledTaskTrigger` に `-Monthly` は無く、CIM の `MSFT_TaskMonthlyTrigger` を組んでも `schtasks` の産物を渡し直しても `Register`/`Set-ScheduledTask` が "The parameter is incorrect" で弾く（2026-08-21 に実測）。**しかも非終了エラーなので `$ErrorActionPreference=Stop` でも止まらず「登録しました」と嘘が出る**ため、登録後に `Export-ScheduledTask` で日・上限・`StartWhenAvailable` を読み直して検証している。
+
+## ワークフロー: 月次3本を削除した理由（#504）
+
+2026-10-09（#844 の3回目）に DEPLOYMENT.md「バッチ暦」の箇条から移した。`HEAVY_AUTOMATION` の箇条は、今の規則（`local:` を指す・yml を指す登録は CI が schedule まで確かめる）を DEPLOYMENT.md に残し、#504 で語彙を足した経緯ごと元の文をここへ移した（正本は [ADR-0031](../adr/0031-heavy-plugins-require-registered-automation.md) の 2026-08-21 改訂）。
+
+- **月次3本は #504 で削除した**（「停止中」のまま残さなかった）。理由は3つ。①`workflow_dispatch` が生きている限り誰でも手動起動でき、その1回で Supabase 側だけが前進して正本と分岐する（ADR-0038 が禁じた向き）。②yml に書いた「代替経路」が #579・#584 の分離で実体とずれており（`macro_beta` は `run_monthly.ps1` ではなく `run_monthly_beta.ps1`、M-1 は `run_monthly_m1.ps1`）、`tests/test_workflow_schedule_pauses.py` は⛔・復旧条件・代替経路という**語の有無しか見ない**ので乖離が失敗として現れなかった。③停止中として残す条件は「復旧条件が書けること」だが、この3本の復旧条件は「正本を Supabase へ戻すとき」＝ADR-0038 がしないと決めた事象だった。
+- `nightly_scores.HEAVY_AUTOMATION` は #504 で語彙に `local:<スクリプト>` を足し、全エントリがローカルバッチを指すようになった。**yml を指すエントリは schedule が生きていることまで CI が確かめる**（`tests/test_nightly_scores.py`）＝「登録はあるが cron は止まっている」という嘘を構造的に作れなくした。ただし `local:` には**タスクスケジューラ登録**という CI から見えない一段が残る（ADR-0031 の「登録があること ≠ 動いていること」は健在）。
+
+## ワークフロー早見表: cron 停止前の3行（#503 まで）
+
+2026-10-09（#844 の3回目）に DEPLOYMENT.md「GitHub Actions workflow 早見表」→「アクティブ」の表から移した。#503（2026-08-20）で `daily-incremental` の `schedule:` が止まり、`nightly-scores` / `macro-health` はその `workflow_run` チェーンなので連動して発火しない。DEPLOYMENT.md の3行は今の状態に書き直し、GHA で定時に動いていた頃の行（実測・設計の説明）をここへ移した。表の上にあった注記の1文も合わせて移した。
+
+> **⚠ 下表の「使うタイミング」には cron 停止前の記述が残っている。**
+
+| カテゴリ | workflow 名 | ファイル | 使うタイミング | 所要時間の目安 |
+|---|---|---|---|---|
+| `[定常]` | 差分収集・毎日自動実行 | `daily-incremental.yml` | **毎日 UTC 08:17（JST 17:17）** に自動（#476 で JST 03:00 から前倒し＝大引け 15:30 と EDINET 受付終了 17:15 の直後。根拠は下記「daily-incremental の動作詳細」）。手動で即時更新したい場合は `workflow_dispatch` | **2h05m〜2h38m**（2026-08-02 実測）。#474 以降、週末・祝日明けは gap-fill をほぼ飛ばすため大幅に短い |
+| `[定常]` | 夜間スコア更新（`sector_ols` + M-6） | `nightly-scores.yml` | `nightly_scores.py`（Issue #432/#443・親 #423）を実行し、①`sector_ols` → `regression_results`（`predicted_market_cap` / `gap_ratio`）②`macro_enet`（M-6）→ `macro_enet_scores`（μ̂・`sell_ranking` の**既定** mu_source）を更新する。**起動は `daily-incremental` の `workflow_run` チェーンで `conclusion == 'success'` のときだけ**（株価が前進していない日にスコアだけ更新すると、古い株価由来の値が「今日のランキング」として出るため）。`sector_ols` は `regularization=ridge` 固定（既定 features 10項目は VIF>10 が頻発）、M-6 は params_schema の既定のまま（ADR-0021/0022 の実測と同一構成）。1モデルの失敗は他を巻き込まず、実行後に `max(computed_at)` / `max(created_at)` を直接クエリして永続化を確認する（例外なし＝コミット済みとしない）。モデル間の `load_data`（週次127万行）は `shared_snapshot_cache()` で共有し、Egress がモデル数に比例しないようにしている。手動即時実行は `workflow_dispatch` | **総所要 33.5分**（2026-08-04 本番実走・[run 30954182465](https://github.com/kome-kome/financial_app/actions/runs/30954182465)＝`sector_ols` 30.3分 + M-6 3.2分・job wall 34.5分）／**32.6分**（08-05・[run 31050406971](https://github.com/kome-kome/financial_app/actions/runs/31050406971)＝29.4分 + 3.2分）。`timeout-minutes` は実測 job wall の 2.0倍で **70分**（#446 で 150 から）。重いのは `sector_ols` 側で M-6 は 3.2分。起票時の 16.1分（2026-08-03・run 30808053564・30業種/2,837社）は #434 の構造的NULL対応前の値＝**銘柄数・業種数とともに伸びるので実走ログで追う** |
+| `[定常]` | マクロ鮮度ゲート | `macro-health.yml` | `python -m scripts.check_macro_health`（Issue #420）が `macro_data` の系列別 `max(trade_date)` を期待更新頻度（`macro_health.FREQ_STALE_DAYS`）と突き合わせ、**既定モデルが使う系列**（`DEFAULT_MACRO_FEATURES` から逆引き）が古ければ exit 2 → `notify-failure` が Issue 起票。`collect_macro_data` は 1 系列失敗しても `continue` するため部分失敗が exit 0 で通り、#414 の失敗通知では拾えないのを塞ぐ。**収集本体（`daily-incremental` / `full-pipeline`）を落とさず独立ジョブに分離しているのが要点**——あちらを failure にすると `nightly-scores` の `workflow_run` チェーン（`success` 条件）が発火せず、マクロと無関係な `sector_ols` の夜間更新まで巻き添えで止まる（#425 の構造をワークフロー間へ適用）。収集側は同じレポートを run ログに出すだけ。誤検知が続く系列は `macro_health.EXCLUDED_SERIES` へ**理由付きで**登録する（現在: `JP_IP`＝FRED 凍結 #253／`JP_IIP`・`JP_IIP_INVENTORY`＝e-Stat が年単位更新 #451。`JP10Y` は #442 で `MACRO_SERIES` ごと削除したため除外指定も不要になった。`BCOM` は #438 の Yahoo 配信停止で一時除外していたが、収集元を連動 ETN `DJP` へ差し替えて 2026-08-06 に除外解除＝**直った系列は必ず除外から外す**（残すと代替ソース側の停止を検知できなくなる）） | 〜2分（GROUP BY 集約1本・`timeout-minutes: 10`） |
