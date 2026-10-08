@@ -7,13 +7,13 @@ let normSearchTimer = null;
 let _writesBlocked = false;  // 閲覧専用の環境か（initLightMode が立てる・#733）
 
 // ── API ────────────────────────────────────────────────────────────
-function apiBase(){ return document.getElementById('api-base').value.trim().replace(/\/$/,'') }
+// 接続先は常に同じオリジン（CSP の connect-src 'self' で別ホストへは届かない・#851 で入力欄を撤去）
+function apiBase(){ return '' }
 
 
 async function checkApi(){
   try{
     const d = await apiFetch('/api/stats');
-    document.getElementById('api-dot').style.background=cssVar('--status-good');
     document.getElementById('s-api').textContent='接続OK';
     document.getElementById('s-api').style.color=cssVar('--status-good');
     document.getElementById('s-companies').textContent=d.companies.toLocaleString();
@@ -24,7 +24,6 @@ async function checkApi(){
     loadIndustries();
     initWizardState();
   }catch(e){
-    document.getElementById('api-dot').style.background=cssVar('--status-bad');
     document.getElementById('s-api').textContent='接続失敗';
     document.getElementById('s-api').style.color=cssVar('--status-bad');
     log('API接続失敗: '+e.message,'error');

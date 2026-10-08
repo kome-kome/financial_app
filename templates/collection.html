@@ -44,8 +44,6 @@ body{font-family:'Segoe UI',sans-serif;background:var(--bg);color:var(--text);mi
 .badge{background:var(--accent-soft-bg);color:var(--accent-soft-text);font-size:11px;padding:3px 8px;border-radius:12px}
 .theme-toggle-btn{background:transparent;border:1px solid var(--border-muted);color:var(--text);border-radius:6px;width:30px;height:30px;font-size:14px;cursor:pointer;display:flex;align-items:center;justify-content:center;flex-shrink:0}
 .theme-toggle-btn:hover{background:var(--bg-hover)}
-.api-url-bar{background:var(--bg-sunken);border:1px solid var(--border-muted);border-radius:6px;padding:5px 10px;font-size:12px;color:var(--text-secondary);margin-left:auto;display:flex;align-items:center;gap:8px}
-.api-url-bar input{background:none;border:none;color:var(--status-info-text);font-size:12px;width:220px}
 .dot{width:8px;height:8px;border-radius:50%;display:inline-block}
 .dot-green{background:var(--status-good)}.dot-red{background:var(--status-bad)}.dot-yellow{background:var(--status-warn)}
 .nav{display:flex;border-bottom:1px solid var(--border);background:var(--bg-elevated);padding:0 24px}
@@ -60,9 +58,6 @@ body{font-family:'Segoe UI',sans-serif;background:var(--bg);color:var(--text);mi
 @media (max-width: 768px){
   .container{padding:12px}
   .grid4{grid-template-columns:repeat(2,1fr)}
-  /* API URL 欄は開発用で、CSP の connect-src 'self' により別ホストは指定しても届かない。
-     狭い幅ではテーマ切替を画面外へ押し出すだけなので隠す */
-  .api-url-bar{display:none}
   /* タブ4つは 375px に収まらないので、ページごと広げず帯の中だけ横に流す */
   .nav{overflow-x:auto;padding:0 12px}
   .nav-btn{white-space:nowrap;flex-shrink:0}
@@ -133,12 +128,6 @@ tr:hover td{background:var(--border-subtle)}
   </div>
   <h1>収集 &amp; スクリーニング</h1>
   <span class="badge">収集</span>
-  <div class="api-url-bar">
-    <span class="dot" id="api-dot" style="background:var(--status-warn)"></span>
-    <span style="font-size:11px">API:</span>
-    <input type="text" id="api-base" value="" placeholder="http://localhost:8000">
-    <button class="btn btn-sm" style="padding:3px 8px;background:var(--bg-hover);border:1px solid var(--border-muted);color:var(--text-secondary);border-radius:4px" data-click="checkApi">接続確認</button>
-  </div>
   <button id="theme-toggle" class="theme-toggle-btn" title="ライト/ダーク切替" aria-label="テーマ切替">🌙</button>
   <button id="logout-btn" data-click="logout" style="display:none;margin-left:8px;padding:5px 12px;background:transparent;border:1px solid var(--border-muted);border-radius:4px;color:var(--text-secondary);font-size:12px;cursor:pointer">ログアウト</button>
 </div>
@@ -152,6 +141,7 @@ tr:hover td{background:var(--border-subtle)}
   <span class="gnav-spacer"></span>
   <a href="/guide" class="gnav-link gnav-ref" style="color:var(--status-good-text)">やさしい解説</a>
   <a href="/models" class="gnav-link gnav-ref" style="color:var(--accent-text)">モデル解説</a>
+  <a href="/db" class="gnav-link gnav-ref">DB</a>
 </nav>
 
 <div class="nav">
@@ -564,17 +554,24 @@ tr:hover td{background:var(--border-subtle)}
     <div class="log-box" id="macro-log"></div>
   </div>
 
-  <!-- XBRL 再解析 -->
-  <div class="card" style="margin-top:16px">
+  <!-- XBRL 再解析（既定では生データを保存しないので対象が 0 件＝空振りする。主列から外して折りたたむ・#851） -->
+  <details style="margin-top:16px">
+    <summary style="cursor:pointer;padding:10px 16px;background:var(--bg-sunken);border:1px solid var(--bg-hover);border-radius:8px;font-size:13px;color:var(--text-secondary);list-style:none;display:flex;align-items:center;gap:8px">
+      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+      XBRL 再解析（保存した生データから再構築）
+      <span style="font-size:11px;background:var(--bg-hover);color:var(--text-secondary);padding:2px 8px;border-radius:10px;margin-left:4px">上級者向け</span>
+    </summary>
+  <div class="card" style="margin-top:12px">
     <div class="flex-between" style="margin-bottom:6px">
       <div style="font-size:14px;font-weight:600;color:var(--status-info-text)">XBRL 再解析（Re-parse from Raw）</div>
-      <div style="font-size:11px;color:var(--text-muted)">EDINET 通信なし / Render でも利用可</div>
+      <div style="font-size:11px;color:var(--text-muted)">EDINET 通信なし</div>
     </div>
     <div style="font-size:12px;color:var(--text-muted);margin-bottom:14px">
       収集時に保存した XBRL 生データ（<code style="color:var(--status-info-text)">xbrl_raw_documents</code>）から
       <code style="color:var(--status-info-text)">financial_records</code> を再構築します。<br>
-      新しい財務指標を <code>XBRL_MAP</code> に追加した後、EDINET への再ダウンロードなしで全件更新できます。<br>
-      <span style="color:var(--text-muted)">※ raw データが蓄積されている書類のみ対象（新規収集分から順次蓄積）。</span>
+      新しい財務指標を <code>XBRL_MAP</code> に追加した後、EDINET への再ダウンロードなしで更新できます。<br>
+      <span style="color:var(--status-warn-text)">※ 既定では容量の都合で生データを保存していません（環境変数 <code>SKIP_XBRL_RAW=true</code>）。
+      保存していない間は対象が 0 件で、押しても何も更新されません。保存を有効にした後に収集した書類だけが対象です。</span>
     </div>
     <div style="display:flex;gap:12px;margin-bottom:14px;align-items:flex-end">
       <div class="form-group" style="margin:0;max-width:140px">
@@ -595,6 +592,7 @@ tr:hover td{background:var(--border-subtle)}
     </div>
     <div class="log-box" id="reparse-log" role="log" aria-live="polite"></div>
   </div>
+  </details>
 </div>
 
 <!-- データ確認 -->

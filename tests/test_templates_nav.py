@@ -37,14 +37,14 @@ GNAV_PAGES = {
     "collection.html": "/collection",
     "guide.html": "/guide",
     "models.html": "/models",
-    "db.html": None,  # /db は gnav の項目に無い＝どのリンクも active にならない
+    "db.html": "/db",  # #851 で gnav の参照項目に足した（以前は現在地が光らなかった）
 }
 
 # 意図的に gnav を持たないページ（ホーム＝ナビカードを持つ / 認証前）
 NO_GNAV = {"dashboard.html", "login.html"}
 
 # gnav が指す全 href（左の主要導線 → 右のリファレンス）
-GNAV_HREFS = ["/", "/morning", "/analysis", "/company", "/collection", "/guide", "/models"]
+GNAV_HREFS = ["/", "/morning", "/analysis", "/company", "/collection", "/guide", "/models", "/db"]
 
 # gnav の描画に必要な CSS セレクタ（HTML だけ貼って CSS を貼り忘れると無スタイルになる）
 GNAV_CSS_SELECTORS = [
