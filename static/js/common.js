@@ -175,3 +175,41 @@ async function apiFetch(path, opts = {}) {
     load();
   }
 })();
+
+// ── バッチ実行中の表示（#851） ───────────────────────────────────────────
+// ローカルバッチが走っている間は、裏で重い作業をすると同じ入力から違う答えが出る。分析画面は
+// heavy の安全柵として専用の帯（#batch-activity-banner）を持つが、他の画面では見えなかった。
+// ここ1箇所で全画面に出す（分析画面は専用の帯に任せて重ねない）。読むのはローカルの
+// マーカーのファイルだけなので、Render では常に空＝何も出さない。接続先バッジ（右下）と
+// 重ならないよう左下に置く。開いた時点の状態だけを出す（ポーリングはしない）。
+(() => {
+  const load = async () => {
+    if (document.getElementById('batch-activity-banner')) return;
+    try {
+      const r = await fetch('/api/batch/activity', { credentials: 'same-origin' });
+      if (!r.ok) return;      // ログイン前は 401
+      const d = await r.json();
+      if (!d || !d.message) return;
+      const el = document.createElement('div');
+      el.id = 'batch-activity-badge';
+      el.setAttribute('role', 'status');
+      el.textContent = `⏳ ${d.message}`;
+      Object.assign(el.style, {
+        position: 'fixed', left: '12px', bottom: '12px', zIndex: '9999',
+        maxWidth: 'calc(100vw - 24px)', boxSizing: 'border-box',
+        padding: '6px 12px', borderRadius: '12px',
+        background: 'var(--status-warn-bg, #78350f)',
+        color: 'var(--status-warn-text, #fef3c7)',
+        border: '1px solid var(--status-warn, #f59e0b)',
+        font: '600 12px/1.4 system-ui, sans-serif',
+        boxShadow: '0 2px 8px rgba(0,0,0,.25)', cursor: 'default',
+      });
+      document.body.appendChild(el);
+    } catch (_) { /* サーバー再起動中などは無視 */ }
+  };
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', load);
+  } else {
+    load();
+  }
+})();

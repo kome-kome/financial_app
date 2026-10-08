@@ -119,8 +119,11 @@ async function loadStats() {
       ? (d.expected_latest_year - d.latest_year) : 0;
     if (d.freshness === 'outdated' || yearBehind >= 2) {
       // このバナーは財務レコードの鮮度だけを見る（株価の鮮度は朝の推奨と収集画面が出す）。
-      // 財務の差分収集で直る話だけを、そう分かる言葉で書く。
-      bmsg.textContent = `財務データの最新年度が${yearBehind}年遅れています（DB: ${d.latest_year ?? '—'} / 期待: ${d.expected_latest_year ?? '—'}）。財務データの差分収集を実行して最新化してください。`;
+      // 財務の差分収集で直る話だけを、そう分かる言葉で書く。年度が遅れていないのに outdated
+      // （経過日数だけが閾値を超えた）なら、「0年遅れ」ではなく経過日数で知らせる（#851）。
+      bmsg.textContent = yearBehind >= 1
+        ? `財務データの最新年度が${yearBehind}年遅れています（DB: ${d.latest_year ?? '—'} / 期待: ${d.expected_latest_year ?? '—'}）。財務データの差分収集を実行して最新化してください。`
+        : `最新の財務レコードから${d.days_since_update ?? '?'}日経過しています。財務データの差分収集を実行して最新化してください。`;
       banner.classList.add('show');
     } else if (d.freshness === 'stale' || yearBehind === 1) {
       bmsg.textContent = `最新の財務レコードから${d.days_since_update ?? '?'}日経過しています。財務データの差分収集の実行を検討してください。`;

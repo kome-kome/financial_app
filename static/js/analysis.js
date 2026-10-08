@@ -149,7 +149,8 @@ async function initLightMode(){
 }
 
 
-function apiBase() { return document.getElementById('api-base').value.trim().replace(/\/$/,''); }
+// 接続先は常に同じオリジン（CSP の connect-src 'self' で別ホストへは届かない・#851 で入力欄を撤去）
+function apiBase() { return ''; }
 
 
 let _preflight = { records: 0, stock_price_records: 0 };
@@ -171,7 +172,6 @@ async function preflight() {
     document.getElementById('status-price-dot').style.background = prOk  ? cssVar('--status-good') : cssVar('--status-bad');
     document.getElementById('status-price-text').textContent     = `${(d.stock_price_records ?? 0).toLocaleString()}件`;
     document.getElementById('status-price-text').style.color     = prOk  ? cssVar('--status-good') : cssVar('--status-bad');
-    document.getElementById('api-dot').style.background = cssVar('--status-good');
     [['btn-gap-analysis', !finOk], ['btn-recommend', !finOk],
      ['btn-backtest', !prOk],
      ['btn-bt-multi', !prOk], ['btn-mrr', !finOk || !prOk]].forEach(([id, disabled]) => {
@@ -184,7 +184,9 @@ async function preflight() {
         : '';
     });
   } catch(e) {
-    document.getElementById('api-dot').style.background = cssVar('--status-bad');
+    document.getElementById('status-fin-dot').style.background = cssVar('--status-bad');
+    document.getElementById('status-fin-text').textContent     = 'API に接続できません';
+    document.getElementById('status-fin-text').style.color     = cssVar('--status-bad');
   }
 }
 
@@ -989,8 +991,8 @@ async function runModelComparison() {
   if (!(await _confirmHeavyRun('model_comparison'))) return;
   const btn = document.getElementById('btn-model-comparison');
   btn.disabled = true;
-  btn.innerHTML = '<span class="spinner"></span> 3モデル実行中（計算が重いため時間がかかります）...';
-  // 進捗 SSE（#593）。内部で heavy 3本を順に回すので実行が最も長く、進捗が最も要るのがここ。
+  btn.innerHTML = '<span class="spinner"></span> 全モデル実行中（計算が重いため時間がかかります）...';
+  // 進捗 SSE（#593）。内部で heavy を順に回すので実行が最も長く、進捗が最も要るのがここ。
   // タブ id は静的タブ名 'model_comparison' で、SSE の名前も同じ（特例エントリは
   // routers/analysis.py::SPECIAL_ANALYSES 側が heavy として持つ）。
   const stopProgress = _startPluginProgress('model_comparison', 'model_comparison');
@@ -1003,7 +1005,7 @@ async function runModelComparison() {
   } finally {
     if (stopProgress) stopProgress();
     btn.disabled = false;
-    btn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg> 3モデルを実行して比較';
+    btn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg> 全モデルを実行して比較';
   }
 }
 
