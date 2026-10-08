@@ -63,6 +63,7 @@
 | [`scripts/repair_splits_from_jquants.py`](#scriptsrepair_splits_from_jquantspy) | ユーティリティ |
 | [`scripts/repair_consolidation_prices.py`](#scriptsrepair_consolidation_pricespy) | ユーティリティ |
 | [`scripts/repair_scale_mixture.py`](#scriptsrepair_scale_mixturepy) | ユーティリティ |
+| [`scripts/refetch_financials.py`](#scriptsrefetch_financialspy) | ユーティリティ |
 | [`scripts/check_nightly_collect.py`](#scriptscheck_nightly_collectpy) | ユーティリティ |
 | [`scripts/_textwidth.py`](#scripts_textwidthpy) | ユーティリティ |
 | [`run_watchdog.ps1`](#run_watchdogps1) | ユーティリティ |
@@ -367,6 +368,12 @@ NUTS 軌道長（`max_tree_depth`）× `target_accept` の格子ドライバ（I
 
 種別: ユーティリティ ／ 依存先: collector_prices, collector_utils
 
+## `scripts/refetch_financials.py`
+
+**誤った値の入った過去の財務行を、`doc_id` から書類を取り直して上書きする**（`python -m scripts.refetch_financials [--apply]`・#870・全件の実行と確認は #858）。#852 の parse 修正は既存の行を直さず、既存の補完経路（`--refill-pl-bs` 等・`_refill_records_from_xbrl`）は **NULL の列だけ**を埋めるので「値は入っているが違う」誤りは1行も直らない。生タグは DB に無い（`xbrl_raw_documents` は0行）。**共通骨格には乗せない**——骨格は NULL の目印で対象を選び全件をメモリへ読む作りで、試運転・進捗・締切・列ごとの差分を持たず、足すと既存の4経路すべてに触る。読み方は通常の収集と同じ `parse_xbrl_csv` → `calc_derived`（期末は行が持つもの）。**書き込みは `upsert_financial` を通さない**（None でない値を会社名・業種まで全部書き、同じ値でも `updated_at` を進める）——列の写像だけ `database.financial_columns()` を共有し、**書類から読めた列のうち値が違う列だけ**を書く。行のキー・会社の属性・市場データ（株価・時価総額・PER・PBR・配当利回り）は触らない。**`cf_free_cf` は営業CFと投資CFが両方読めたときだけ**（`calc_derived` は欠けた入力を0とみなして必ず作る）。**書類の DEI `CurrentPeriodEndDateDEI` が行の `period_end` と違えば書かない**（期末不一致として数える）。**既定は試運転**（何も書かず進捗も保存しない）で、列ごとの件数と代表例（旧値 -> 新値・`--examples N`）を出し、変化0件も明示する。`--edinet-code` / `--doc-id` / `--year-from` / `--year-to` / `--period-type` で絞れる。**再開**: `--apply` かつ絞り込み無し（`--limit` は可）のときだけ `app_settings.refetch_financials_cursor` に「最後に失敗しなかった行の id」をデータと同じ commit で保存し、続きから始める（`--restart` で最初から。#859 の後に会計基準を埋め直す想定）。**締切**は `resolve_deadline()` で読み、1件目は必ず処理し、以後は最も遅かった1件×1.25＋2分が入らなければ確定して exit 0（ADR-0054）。取得失敗と読み取り失敗は別に数えて doc_id を出し、**全件失敗は exit 1**、`EDINET_MAX_CONSECUTIVE_FAILURES` 件続けて失敗したら止めて exit 1（進捗は最後に成功した行まで）。**PER・PBR・時価総額は再計算しない**——評価額の入力（`pl_eps`・`bs_bps`・`issued_shares`・`bs_total_equity`・`dps`）が変わった社を一覧に出すだけ（夜間が直すのは各社の最新行だけなので、過去の行は `update_market_data_from_history(point_in_time=True, only=...)` が要る）。日中キュー `run_daytime.JOBS["refetch:financials"]`（`--apply`・窓を使い切る `measured_min=440`・**積むのは人**）。ローカル正本専用。実測 2026-10-09: 確認済みの5社 67行の試運転で変化 54行（`pl_revenue` 45・営業利益/EBITDA/営業外損益 各25・総資産/従業員 各14・負債 6）、期末不一致・失敗 0。トヨタ H1 の売上高 NULL は、半期報告書に単体の売上高が無く、連結の営業収益が #852 まで未対応だった IFRS タグ（`OperatingRevenuesIFRSKeyFinancialData`）でしか書かれていないため（6行とも取り直しで埋まる）
+
+種別: ユーティリティ ／ 依存先: collector_financials, collector_interim, database
+
 ## `scripts/check_nightly_collect.py`
 
 **夜間バッチの収集ログを晩ごとに並べて読む**（`python -m scripts.check_nightly_collect`・#556 / #620）。`.logs/nightly_*.log` だけを読み、**DB にもネットワークにも触らない**——見たい値（対象社数・`new_rows`・gap-fill 所要・Yahoo 並行度と HTTP 429/5xx・catchup の `スケール不一致で不採用`・往復段差・株価鮮度 p50/p05）は全部そこに出ており、DB を引くと「今の値」しか分からず**その晩に何が起きたか**が残らない。設計上の要点は3つ。①**既定で3晩ぶん並べ、社数や所要の増減は警告にしない**——同じ逐次実装のまま夜ごとに 0.646 → 0.936 s/社と +45% 振れた前例があり（#556）、1回の実測を基準線にすると分散をロールアウトの効果と読み違える。曜日も併記する（平日 4078社に対し土曜 442社＝母数が桁で違う）。②**「0」と「不明」を混ぜない**。`スケール不一致で不採用 N行` は 0 件のとき**行ごと出ない**ので、行の不在を 0 と読むと #620 以前のログまで「0件で健全」に見える。往復段差の行——#620 で同じ PR に入った1組——が出ている晩だけ本物の 0 と判定し、それ以外は `None` を返して表では `-` と出す。③警告は「収集が終わっていない」「429/5xx が非ゼロ」「404 以外の 4xx が非ゼロ」「解決済みなのに空」「往復段差」「往復段差の検知の失敗」「鮮度 level≠fresh」「Yahoo の値を新たに不採用にした社（#765・同じ基準日のまま弾き続けている既知の社だけの晩は鳴らさない）」「株価表に100倍以上の段差が残っている」「その走査の失敗」の10個だけ。404 は上場廃止社が毎晩一定数（実測 約320件）返すので、内訳 `（うち404=N）` を引いた残りだけを拒否（401/403 等）の疑いとして警告する。内訳の無い旧書式の晩は判定しない（#556）。④**watchdog が毎晩これを呼ぶ**（#767）——以前は手で叩いたときにしか動かず、警告は誰にも届かなかった。警告は `warning_items()` が `(種類, 文)` で返し、種類の表 `WARNING_KINDS`（Issue タイトルのラベルと「ok と言うのに必要な元の値」）もここが持つ。`parse_nightly_log()` は `completed`（最後の `夜間バッチ開始` の後に `夜間バッチ終了` がある）を返し、書きかけのログを watchdog が判定しないための根拠になる。exit 0/2
@@ -501,7 +508,7 @@ M-1 探索専用タスクの登録（既定 毎月3日 JST 01:00・16時間）�
 - **`--peek`・`--queue`・ドライランは中断の回収を見込んだ計画を出す**（#742）。回収の判断は純関数 `plan_reclaim` に置き、実走の `reclaim_inflight` はその結果を書くだけ。読み手は `apply_schedule(write=False, preview_reclaim=True)` で同じ並びを見る（以前は `--peek` が回収予定の敏感な仕事を見落とし、`-Now` が人の作業中に実走を起動した）。
 - **キューが空の日は exit 0**（平日毎日走るので、起票すると鳴りっぱなしになる）。
 - **引数はキューに触る前に全部解析する**（#692・`build_parser` は共通パーサにキュー操作を足した上位集合）。以前は `"--x" in args` の手書き判定のあと `bc.run_batch` の中で初めて解析していたため、`--help` や打ち間違いが `take` の後で `SystemExit` になり、先頭の仕事が exit 0 のまま黙って消えた（in-flight マーカーも `finally` で消えるので回収にも掛からない）。`--steps` の検証も `take` の前。**キュー操作は互いに排他**（2つ渡すと exit 2）。`--steps` で絞った日は生き残ったステップの仕事だけを `take` する。
-- **`Job.parallel_sensitive` は「裏で作業されると同じ入力から違う答えが出るか」**を表す（所要が延びるかではない）。`beta` / `tune:*` / `gate:*` / `bench:rhat-scale` は True、`interim` / `disclosures` / `wf:preset-weights` は False。**既定値を持たせない必須フィールド**（足し忘れを `TypeError` で落とす）。分岐するのは `-Now` の手動キックだけ。
+- **`Job.parallel_sensitive` は「裏で作業されると同じ入力から違う答えが出るか」**を表す（所要が延びるかではない）。`beta` / `tune:*` / `gate:*` / `bench:rhat-scale` は True、`interim` / `disclosures` / `wf:preset-weights` / `refetch:financials` は False。**既定値を持たせない必須フィールド**（足し忘れを `TypeError` で落とす）。分岐するのは `-Now` の手動キックだけ。
 - **`JOBS` に無い名前と予算超過の仕事は `enqueue` の時点で弾く**（M-1 探索 752分は積めない＝[ADR-0046](adr/0046-steps-that-cannot-finish-get-their-own-task.md) の専用タスク）。引数は `run_monthly*.py` と同一であることをテストが照合する。
 - **仕事は手で作ったキャッシュに依存させない**（#674）。`--refresh-cache` を渡し、入力を毎回ローカル DB から作り直す。書き忘れは `tests/test_run_daytime.py::TestJobsBuildTheirOwnInputs` が落とす（経緯は [GOTCHAS.md](GOTCHAS.md)）。
 - **暦**（#681・[ADR-0056](adr/0056-the-daytime-queue-follows-a-calendar.md)）: 日付で決まる仕事は `SCHEDULE` が積む（`disclosures` は毎月1日以降、`interim` は毎月16日以降の最初の実走で**キュー先頭へ1回だけ**。判定した月は `app_settings.daytime_schedule`）。今月ぶんが入っているかは成果物の `created_at`（`h1_created_at` / `disclosure_created_at`＝`batch_freshness.PRODUCERS` と同じ読み手）で判定し、`updated_at` は使わない。測れなければ積む側へ倒す。

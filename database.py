@@ -3105,23 +3105,13 @@ def sync_active_status(db, active_sec_codes: set, master_as_of: Optional[str] = 
             "protected": len(protected), "price_alive": len(price_alive)}
 
 
-def upsert_financial(db, data: dict) -> FinancialRecord:
-    """BS/PL/CF辞書をフラット化してUpsert"""
-    flat = {
-        "edinet_code":        data.get("edinet_code"),
-        "sec_code":           data.get("sec_code"),
-        "company_name":       data.get("company_name"),
-        "industry":           data.get("industry"),
-        "market":             data.get("market"),
-        "accounting_standard":data.get("accounting_standard"),
-        "year":               data.get("year"),
-        "period_end":         _parse_period_end(data.get("period_end")),
-        "doc_id":             data.get("doc_id"),
-        "source":             data.get("source", "EDINET_XBRL"),
-        # 開示粒度（Issue #219②）。通期収集は未指定→既定 'annual'。半期収集は 'H1' 等を渡す。
-        "period_type":        data.get("period_type", "annual"),
-        "filing_date":        _parse_period_end(data.get("filing_date")),
-    }
+def financial_columns(data: dict) -> dict:
+    """収集の辞書 `{bs, pl, cf, val, nonfin}` を FinancialRecord の列名へ写す（唯一の写像）。
+
+    `upsert_financial` と、書類の取り直しで既存行を上書きする `scripts/refetch_financials.py`
+    （#870）が共有する。写像を2か所に書くと、片方だけ区分を足したときに黙って列が落ちる。
+    """
+    flat: dict = {}
     # BS
     for k, v in data.get("bs", {}).items():
         flat[f"bs_{k}"] = v
@@ -3148,6 +3138,28 @@ def upsert_financial(db, data: dict) -> FinancialRecord:
             f"upsert_financial: FinancialRecord に無い未知キー {unknown}"
             f"（val/nonfin の typo か列追加忘れ）"
         )
+    return flat
+
+
+def upsert_financial(db, data: dict) -> FinancialRecord:
+    """BS/PL/CF辞書をフラット化してUpsert"""
+    flat = {
+        "edinet_code":        data.get("edinet_code"),
+        "sec_code":           data.get("sec_code"),
+        "company_name":       data.get("company_name"),
+        "industry":           data.get("industry"),
+        "market":             data.get("market"),
+        "accounting_standard":data.get("accounting_standard"),
+        "year":               data.get("year"),
+        "period_end":         _parse_period_end(data.get("period_end")),
+        "doc_id":             data.get("doc_id"),
+        "source":             data.get("source", "EDINET_XBRL"),
+        # 開示粒度（Issue #219②）。通期収集は未指定→既定 'annual'。半期収集は 'H1' 等を渡す。
+        "period_type":        data.get("period_type", "annual"),
+        "filing_date":        _parse_period_end(data.get("filing_date")),
+    }
+    # 区分→列の写像と未知キーの検査（fail fast）は financial_columns が持つ。
+    flat.update(financial_columns(data))
 
     obj = db.query(FinancialRecord).filter_by(
         edinet_code=flat["edinet_code"],

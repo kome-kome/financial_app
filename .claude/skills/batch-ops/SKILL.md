@@ -76,7 +76,7 @@ python -m scripts.macro_beta_gate_history --threshold 1.01  # strict 基準で�
 # **祝日・年末年始（#684）も取り出さない**（トリガは月〜金固定で祝日を知らない）。-Now -Force だけが今日の祝日の見送りを外す。
 # 祝日表 `run_daytime.HOLIDAYS` は内閣府の一覧から毎年足す（10月以降に翌年が無いと CI が落ちる）
 ./run_daytime.ps1 -Queue                 # キューの中身＋暦の予定＋今日の見送り
-./run_daytime.ps1 -Enqueue beta          # 積む（beta / tune:macro_gbdt / tune:macro_dlm / gate:interactions / gate:max-features / gate:macro / gate:ttm / gate:demean / gate:risk-axis / gate:risk-axis-m6 / gate:risk-axis-m2 / gate:risk-axis-m2-mu / gate:macro-m6 / oof:split-bias / bench:rhat-scale / interim / disclosures）
+./run_daytime.ps1 -Enqueue beta          # 積む（beta / tune:macro_gbdt / tune:macro_dlm / gate:interactions / gate:max-features / gate:macro / gate:ttm / gate:demean / gate:risk-axis / gate:risk-axis-m6 / gate:risk-axis-m2 / gate:risk-axis-m2-mu / gate:macro-m6 / oof:split-bias / bench:rhat-scale / interim / disclosures / refetch:financials）
 ./run_daytime.ps1 -DryRun                # 実行計画だけ（キューは減らさない）
 ./run_daytime.ps1 -Now                   # 枠を待たず次の回ぶん（休暇等）。**タスク経由＝セッション0で走る**
 ./run_daytime.ps1 -Now -Force            # 並走に敏感な仕事（beta / tune:* / gate:* / oof:*）も叩く。**叩いたら PC を触らない**。祝日は今日だけ見送りを外す
@@ -124,6 +124,13 @@ python -m scripts.repair_scale_mixture --only E32779 --apply    # 公式突合�
 python -m scripts.repair_consolidation_prices                  # 台帳の状態と、直した後の段差の見込み
 python -m scripts.repair_consolidation_prices --apply          # 確定→世代印→6社の point-in-time
 python -m scripts.check_nightly_collect                        # 夜間ログの「不採用（新規）」「段差」を読む
+
+# 誤った値の入った過去の財務行を、doc_id から書類を取り直して上書きする（#870・#858）。既定は試運転（DB へ書かない）
+# 全件の --apply は数日かかる＝日中キューへ `refetch:financials` を終わるまで日数ぶん積む（締切で畳み、翌日は続きから）
+python -m scripts.refetch_financials --edinet-code E02144 E00317 --examples 20  # 試運転（列ごとの件数と旧値 -> 新値）
+python -m scripts.refetch_financials --period-type H1 --year-from 2025          # 期種・年度で絞った試運転
+python -m scripts.refetch_financials --apply --limit 100                        # 全件を続きから100行だけ書く（進捗を保存）
+python -m scripts.refetch_financials --apply --restart                          # 保存した進捗を無視して最初から
 
 # 地方取引所の単独上場を拾う（#555）。既定はドライラン＝棄却理由まで出す
 python -m scripts.resolve_price_suffix                            # 何も書かない
