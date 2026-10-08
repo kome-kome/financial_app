@@ -101,6 +101,9 @@ async def run_comparison(db: Session, render_light_mode: bool = False,
                     oof_backtest=res.get("oof_backtest") or {},
                     macro_features=res.get("macro_features"),
                 )
+            except progress.AnalysisCancelled:
+                # 画面の取消（#849）は失敗ではない。下で握ると次のモデルへ進んでしまう
+                raise
             except Exception as e:  # noqa: BLE001 — per-model で握って比較全体は継続
                 # 1モデルが DB エラー（接続切断・トランザクション失敗）で落ちると session が
                 # 失敗状態のまま残り、後続モデルが "invalid transaction" で連鎖失敗する。

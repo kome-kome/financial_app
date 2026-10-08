@@ -112,6 +112,8 @@ WRITE_ROUTE_EXEMPTIONS: dict[tuple[str, str], str] = {
         "exempt: 書くのは heavy だけ（各プラグインの writes＝regression_results・"
         "macro_*_scores と、所要の記録 app_settings）で、heavy は writes_blocked() で 403。"
         "heavy でないプラグインは DB へ書かない",
+    ("POST", "/api/plugins/{plugin_name}/cancel"):
+        "exempt: 画面から回した heavy の取消（#849）。プロセス内の取消の旗を立てるだけで DB へ書かない",
     ("POST", "/api/recommend"):
         "exempt: 推薦の計算。DB を読むだけ",
     ("POST", "/api/backtest/model-comparison"):

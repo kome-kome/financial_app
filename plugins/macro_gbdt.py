@@ -27,6 +27,7 @@ from typing import Any
 
 import numpy as np
 
+from . import progress
 from .base import AnalysisPlugin
 from .utils import walk_forward_cv_monthly, winsorize
 from .macro_snapshots import (
@@ -997,7 +998,8 @@ class MacroGbdtPlugin(AnalysisPlugin):
         # 母集団は今買える社だけ（廃止・価格停止の社の μ̂ は保存するが as-of には数えない・#780）。
         _asof = tradable_snapshot_asof(
             db, ((c, current_snaps[c][1].get("snap_date")) for c in codes_ordered))
-        self._persist_producer(db, raw_items, _asof)
+        with progress.persisting():     # 画面の取消はここまで（#849）
+            self._persist_producer(db, raw_items, _asof)
 
         # ── 表示は今買える社だけ（#806）。永続化の後に掛ける＝保存する μ̂ は全社のまま ──
         shown, untradable = tradable_results(db, raw_items)

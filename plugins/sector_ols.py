@@ -904,26 +904,29 @@ class SectorOLSPlugin(AnalysisPlugin):
         # 「いまどこを回帰しているか」になる）。
         sectors = sorted(prep.by_sector.items())
         n_sectors = len(sectors)
-        for done, (sector, samples) in enumerate(sectors):
-            progress.emit(f"業種別に回帰: {sector}", done, n_sectors,
-                          every=progress.EVERY_SECTORS)
-            fit = self._fit_sector(prep, sector, samples, params)
-            if fit is None:
-                n_skipped += 1
-                continue
+        # 業種ごとに commit する（`_persist_and_rank`）ので、最初の業種から先は止めない（#849）。
+        # 途中で止めると regression_results に新旧の業種が混ざる。取消はロードと前処理の間だけ。
+        with progress.persisting("業種ごとに回帰して保存（ここからは取消できません）"):
+            for done, (sector, samples) in enumerate(sectors):
+                progress.emit(f"業種別に回帰: {sector}", done, n_sectors,
+                              every=progress.EVERY_SECTORS)
+                fit = self._fit_sector(prep, sector, samples, params)
+                if fit is None:
+                    n_skipped += 1
+                    continue
 
-            sector_preds = self._persist_and_rank(db, sector, fit.samples, fit.all_yhat,
-                                                  regularization)
-            stat_entry   = self._build_stat_entry(
-                sector, fit.samples, fit.result, fit.y_sd, fit.X_norm, fit.y_normed,
-                fit.features, regularization, fit.X_win_cols
-            )
-            stat_entry["features"] = list(fit.features)
-            stat_entry["dropped_features"] = dropped_by_sector.get(sector, [])
-            all_predictions.extend(sector_preds)
-            sector_stats.append(stat_entry)
+                sector_preds = self._persist_and_rank(db, sector, fit.samples, fit.all_yhat,
+                                                      regularization)
+                stat_entry   = self._build_stat_entry(
+                    sector, fit.samples, fit.result, fit.y_sd, fit.X_norm, fit.y_normed,
+                    fit.features, regularization, fit.X_win_cols
+                )
+                stat_entry["features"] = list(fit.features)
+                stat_entry["dropped_features"] = dropped_by_sector.get(sector, [])
+                all_predictions.extend(sector_preds)
+                sector_stats.append(stat_entry)
 
-        progress.emit("業種別に回帰", n_sectors, n_sectors)
+            progress.emit("業種別に回帰", n_sectors, n_sectors)
         if not sector_stats:
             msg = (
                 f"分析可能な業種がありません（各業種 {min_samples}社以上が必要）。"

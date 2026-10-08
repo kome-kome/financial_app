@@ -67,13 +67,15 @@
 
 ## `plugins/progress.py`
 
-heavy プラグイン実行の進捗を画面へ流す唯一の経路（#545）。`emit(step, current, total, every=)` / `progress_sink(fn)` / `active()` ＋ カバレッジ表 `PROGRESS_COVERAGE`。
+heavy プラグイン実行の進捗を画面へ流す唯一の経路（#545）。`emit(step, current, total, every=)` / `progress_sink(fn, cancel=)` / `active()` / `persisting()` / `Cancellation` / `AnalysisCancelled` ＋ カバレッジ表 `PROGRESS_COVERAGE`。
 
 sink は **ContextVar**。`execute` のシグネチャは `(params, db)` に固定されていて引数を増やせず、`execute_plugin` は execute を `asyncio.to_thread` へ逃がす（#357）が、**to_thread はコンテキストを複製するので ContextVar は素通しで伝播する**（`tuning_dry_run` / `shared_snapshot_cache` と同じ手）＝ `execute_plugin` は無改造。包むのは `routers/analysis.py::_execute_with_progress`（heavy のときだけ）で、**sink 未設定なら emit は完全な no-op**——月次バッチ（`scripts/run_monthly*.py`）や `/api/recommend`・`/api/gap-analysis` 経路は進捗機構に一切触られない。
 
 発生源は共通骨格に置く（M-1/M-2/M-3/M-6 系は全部 `load_data → preload_macro → build_snapshots` を通るため、ここに入れれば一括で進捗を持つ）: `load_weekly_prices_chunked`（500社チャンク）・`_preload_macro_impl`・`_build_snapshots_impl`（全社ループ・`EVERY_COMPANIES=100` で間引き）。`sector_ols`（業種ループ）と `macro_dlm`（銘柄ループ）は自前で足す。**キャッシュヒット時は `_cached_or_computed` が「キャッシュから復元」を出す**——黙って飛ばすと件数ゼロのまま完了し「0件で終わった」と区別できない。
 
 間引きは **最初（current=0）と最後（current=total）を必ず通す**。終端を落とすと「4300/4400 のまま完了」に見え、止まったのか終わったのか分からなくなる。
+
+**取消（#849）は協調型**。スレッドは外から止められないので、`_run_with_progress` が実行ごとに `Cancellation` を作って `progress_sink(fn, cancel=)` で渡し、`emit` が**送った後に**取消の有無を見て `AnalysisCancelled` を投げる（止まれるのは間引き後に sink まで届いた点だけ・止まった場所がログの最後に残る）。画面の取消ボタンは `POST /api/plugins/{name}/cancel`、実行の応答は 409（`CANCELLED_MESSAGE`）。**保存は `persisting()` で包み、入る直前を最後の取消点にする**——中では取消を受け付けない（sector_ols は業種ごとに commit するので、途中で止めると `regression_results` に新旧が混ざる）。受付（`request`）と保存の開始は同じロックで判定する＝「受け付けた直後に保存が始まり、保存の後で止まる」すり抜けが無い。`AnalysisCancelled` は `Exception` なので、**emit を含む処理を `except Exception` で握る箇所は取消だけ先に送出し直す**（`model_comparison` のモデル単位の except）。`writes` を持つ heavy が `progress.persisting(` を通ることは `tests/test_analysis_cancel.py` が照合する。取消状態の無い経路（バッチ・`/api/recommend`）では emit も persisting も素通り。
 
 `PROGRESS_COVERAGE` は heavy 名 → `common`（共通骨格を通る）/ `own`（自前 emit）/ `exempt: <理由>`。**「heavy を足したが進捗が無い」は画面が沈黙するだけで例外もログも出ない**ため、`tests/test_plugin_progress.py::TestProgressCoverageRegistry` が表と実体（MRO を辿ったモジュールソース）を CI で照合する（ADR-0031 の `HEAVY_AUTOMATION` と同型）。
 

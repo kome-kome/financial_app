@@ -36,6 +36,7 @@ from typing import Any
 import numpy as np
 from scipy.optimize import nnls
 
+from . import progress
 from .base import AnalysisPlugin
 from .utils import coerce_params, winsorize, walk_forward_cv_monthly
 from .macro_snapshots import (
@@ -622,15 +623,16 @@ class MacroEnsemblePlugin(AnalysisPlugin):
         # 実際に μ̂ を出した交差銘柄（results）に合わせる（Issue #417）。そのうち今買える社だけで
         # 代表させる（廃止・価格停止の社の μ̂ は保存するが as-of には数えない・#780）。
         asof = tradable_snapshot_asof(db, ((it["edinet_code"], it.get("snap_date")) for it in results))
-        try:
-            from database import replace_macro_ensemble_scores
-            replace_macro_ensemble_scores(
-                db, [{"edinet_code": it["edinet_code"], "mu": it["mu_raw"]} for it in results],
-                asof.get("snapshot_date"),
-                snapshot_date_min=asof.get("snapshot_date_min"),
-                n_stale=asof.get("n_stale"))
-        except Exception:
-            pass   # 読取専用DB等でも表示を妨げない（次回実行で再生成）
+        with progress.persisting():     # 画面の取消はここまで（#849）
+            try:
+                from database import replace_macro_ensemble_scores
+                replace_macro_ensemble_scores(
+                    db, [{"edinet_code": it["edinet_code"], "mu": it["mu_raw"]} for it in results],
+                    asof.get("snapshot_date"),
+                    snapshot_date_min=asof.get("snapshot_date_min"),
+                    n_stale=asof.get("n_stale"))
+            except Exception:
+                pass   # 読取専用DB等でも表示を妨げない（次回実行で再生成）
 
         # 表示は今買える社だけ（#806）。永続化の後に掛ける＝保存する μ̂ は全社のまま。
         shown, untradable = tradable_results(db, results)

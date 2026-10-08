@@ -24,6 +24,14 @@ log = logging.getLogger(__name__)
 # 「前回 約 N 分」と出すためだけの値で、バッチの所要（`run_daytime.JOBS[*].measured_min`）とは別物。
 LAST_RUN_KEY_PREFIX = "plugin_last_run_min:"
 
+# 取消した実行の HTTP 応答（409）と画面のログの最後の1行（#849）。画面は 409 の detail が
+# この文で始まるかで「失敗」と「取消」を見分ける（`analysis.js::_isCancelled`）。
+CANCELLED_MESSAGE = "取消しました。保存は始めていないので、保存済みの結果は前回のままです"
+
+# いま画面から走っている heavy の取消状態（`_progress_job` 名 → Cancellation）。
+# `_run_with_progress` が実行の間だけ置き、`cancel_plugin` が読む。
+_cancellations: dict[str, progress.Cancellation] = {}
+
 
 def _jst(iso: Optional[str]) -> Optional[str]:
     """`batch_activity` の UTC ISO を画面用の JST 文字列へ（読めなければそのまま）。"""
@@ -182,6 +190,9 @@ async def run_plugin(
         if getattr(p, "heavy", False):
             return await _execute_with_progress(p, plugin_name, params, db)
         return await plugin_registry.execute_plugin(p, params, db)
+    except progress.AnalysisCancelled:
+        # 下の `except Exception` に 500 へ化けさせない（取消は失敗ではない・#849）
+        raise HTTPException(409, CANCELLED_MESSAGE)
     except (plugin_registry.DependencyError, ValueError) as e:
         # パラメータ契約違反・依存不足のドメイン検証メッセージ（内部実装は露出しない）。
         # 可観測性のためログにも残す（#346）。
@@ -208,26 +219,37 @@ async def _run_with_progress(job_name: str, label: str, run, db=None):
     ストリームが切れただけになり「終わった」と区別できない。
 
     `db` を渡すと、成功したときの所要を `app_settings` に残す（`_record_last_run`）。
+
+    画面からの取消（#849）は `Cancellation` を実行の間だけ `_cancellations` に置いて受ける。
+    取消で止まったときは `AnalysisCancelled` をそのまま送出する（呼び出し側が 409 へ写す）。
     """
-    st = jobs.state(_progress_job(job_name))
+    job = _progress_job(job_name)
+    st = jobs.state(job)
     st.reset_for_run()
     st.append_log(f"「{label}」を開始しました")
     started = time.monotonic()
+    cancel = progress.Cancellation()
+    _cancellations[job] = cancel
 
     def sink(step: str, current: int, total: int) -> None:
         st.progress, st.total = current, total
         st.append_log(f"{step} {current}/{total}" if total else step)
 
     try:
-        with progress.progress_sink(sink):
+        with progress.progress_sink(sink, cancel=cancel):
             result = await run()
         if db is not None:
             _record_last_run(db, job_name, (time.monotonic() - started) / 60.0)
         return result
+    except progress.AnalysisCancelled:
+        st.append_log(CANCELLED_MESSAGE)
+        raise
     except Exception as e:
         st.append_log(f"[エラー] {e}")
         raise
     finally:
+        if _cancellations.get(job) is cancel:
+            del _cancellations[job]
         # running=False が SSE の終端。append_log より後（最後の1件に載せるため）。
         st.running = False
 
@@ -322,6 +344,34 @@ async def stream_plugin_progress(plugin_name: str):
     if plugin_registry.get_plugin(plugin_name) is None and plugin_name not in _heavy_special_names():
         raise HTTPException(404, f"プラグイン '{plugin_name}' が見つかりません")
     return jobs.stream_awaiting_start(_progress_job(plugin_name))
+
+
+@router.post("/api/plugins/{plugin_name}/cancel")
+async def cancel_plugin(plugin_name: str):
+    """画面から回した heavy の取消を求める（協調型・#849）。
+
+    止まるのは計算が次に進捗を送ったときで、すぐではない。**保存を始めた後は受け付けない**
+    （`progress.persisting`）——sector_ols は業種ごとに commit するので、途中で止めると
+    `regression_results` に新旧が混ざる。入口の判定は進捗 SSE と同じ規則にする。
+
+    返すのは `{accepted, running, saving, message}`。受付の可否はプロセス内の旗を見るだけで、
+    DB へは書かない。
+    """
+    if plugin_registry.get_plugin(plugin_name) is None and plugin_name not in _heavy_special_names():
+        raise HTTPException(404, f"プラグイン '{plugin_name}' が見つかりません")
+    job = _progress_job(plugin_name)
+    cancel = _cancellations.get(job)
+    st = jobs.state(job)
+    if cancel is None or not st.running:
+        return {"accepted": False, "running": False, "saving": False,
+                "message": "実行中ではありません（もう終わっています）"}
+    if not cancel.request():
+        msg = "保存を始めた後は取消できません。このまま最後まで実行します"
+        st.append_log(msg)
+        return {"accepted": False, "running": True, "saving": True, "message": msg}
+    msg = "取消を受け付けました。次の区切りで止まります"
+    st.append_log(msg)
+    return {"accepted": True, "running": True, "saving": False, "message": msg}
 
 
 def project_tuned_params(plugin, params: dict) -> tuple[dict, list[str]]:
@@ -583,6 +633,8 @@ async def backtest_model_comparison(request: Request, db: Session = Depends(api.
             "model_comparison", label,
             lambda: model_comparison.run_comparison(
                 db, render_light_mode=api.writes_blocked()), db=db)
+    except progress.AnalysisCancelled:
+        raise HTTPException(409, CANCELLED_MESSAGE)
     except Exception as e:
         log.error("Model comparison error: %s", e, exc_info=True)
         raise HTTPException(500, "モデル比較の実行エラーが発生しました。")
