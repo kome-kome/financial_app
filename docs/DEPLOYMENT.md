@@ -486,7 +486,7 @@ python -m scripts.setup_local_db --apply    # 実行
 | `FINAPP_DB_TARGET` | 未設定 / `local` | `DATABASE_URL_LOCAL`（無ければ `postgresql://edinet:edinet@localhost:5432/financial_db`） |
 | `FINAPP_DB_TARGET` | `prod` | `DATABASE_URL`（無ければローカル既定へフォールバック＋警告） |
 
-**`.env` に `DATABASE_URL` があるだけでは Supabase へ行かない。** 向きを決めるのはこの変数だけで、`prod` を明示するのは実質 `render.yaml` の1箇所である（保険として `RENDER` 環境変数があれば prod へ倒す）。
+**`.env` に `DATABASE_URL` があるだけでは Supabase へ行かない。** 向きを決めるのはこの変数だけで、`prod` を明示するのは実質 `render.yaml` の1箇所である（保険として `RENDER` 環境変数があれば prod へ倒す）。保険の根拠は、Render が `RENDER=true` を必ず設定すること——Blueprint 管理外で `render.yaml` の env が反映されない構成でも、localhost を見にいって「接続失敗」ではなく**空の DB に繋がって0件**に化けるのを防ぐ。明示指定は常に最優先。`prod` で `DATABASE_URL` 未設定が警告どまりで raise しないのは、反転前に `ci.yml` がこの経路を踏んでいた名残（緩さ自体は Render 側で生きている）。
 
 **この反転は「明示しない側が壊れる」向きに効く。** #503 で `render.yaml` には prod を書いたが GHA に残した2本へ書き忘れ、`egress-health` が反転後の初回定時実行で `connection to server at "localhost" ... Connection refused` に落ちた（#508）。**`DATABASE_URL` を渡す定時ワークフローは `FINAPP_DB_TARGET: prod` も渡すこと**——`tests/test_db_target.py::TestWorkflowsPinTheTarget` が CI で縛っている。逆に schedule を止めた手動専用の 14本には**書かない**（既定 local が誤起動の安全弁になる）。
 
