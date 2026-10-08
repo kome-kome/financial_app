@@ -8,6 +8,7 @@
 | `IMPROVEMENTS.md` | コードベース改善トラッキング（全項目完了） | ✅ 完了 |
 | `VISUALIZATION_IMPROVEMENTS.md` | 企業データ可視化強化（Phase1-4 実装済み） | ✅ 完了 |
 | `REFACTORING.md` | DB 一本化・XBRL 生データ保存の設計書 ＋ 付録: コード品質改善 (Phase 2) | ✅ 完了 |
+| `DEPLOYMENT_HISTORY.md` | DEPLOYMENT.md から移した完了済みの経緯（ローカル PG の初回セットアップ結果・ミラーの旧定常手順と予行演習・Supabase 正本時代のバックアップ運用・`vacuum-maintenance.yml` の設計記録）。#844 | 📦 記録 |
 
 各ファイルの変更履歴は git で追える（`git log --follow docs/archive/<file>`）。
 
