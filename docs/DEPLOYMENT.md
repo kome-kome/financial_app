@@ -630,8 +630,7 @@ Render ダッシュボードで管理。
 
 **常時計測（`db_egress.py`）**: `engine` の `after_cursor_execute` フックが「どのクエリが何行・何列を返したか」を全プロセス（GHA バッチ・ローカル CLI・Render）で記録する。psycopg2 の既定カーソルはクライアント側バッファなので、このフックの時点で行は既に転送済み＝`cursor.rowcount` がそのまま転送行数になる（結果は消費しないので既存挙動に干渉しない）。プロセス終了時に `[egress] summary job=... total=...MB rows=... top=<テーブル>:<MB>,...` を標準エラーへ1行出す。ワークフローの帰属は各 yml の `FINAPP_JOB` で付く。
 
-- **なぜ要ったか**: 2026-07（61.2GB）・2026-08（7.312GB）の2回とも、超過後に「誰が食ったか」を答えられなかった。当時の計測は `scripts/_cache.py` の HIT/MISS だけで、**夜間バッチ本体・`routers/`・`collector*.py` は完全に無計測**だった。
-- **推定は正本ではない**。較正値（B/行）は下表の実測から導出しており、未較正の組み合わせは 17.5 B/列/行 の保守的な既定を使う（#446 時点は 12.0。#493 の全表実測で `macro_beta_loadings` が 17.3 とそれを上回っていたため引き上げた＝**既定は実測レンジの上側に置く**）。**台帳の役目は帰属とブレーカであって、実測の置き換えではない。**
+- **推定は正本ではない**。較正値（B/行）はサーバ側の実測から導出しており（出所は `db_egress.EGRESS_COST_TABLE` の各エントリ）、未較正の組み合わせは 17.5 B/列/行 の保守的な既定を使う（#446 時点は 12.0。#493 の全表実測で `macro_beta_loadings` が 17.3 とそれを上回っていたため引き上げた＝**既定は実測レンジの上側に置く**）。**台帳の役目は帰属とブレーカであって、実測の置き換えではない。**
 - **較正には2世代ある**。#446（2026-08-06）は消費側が実際に投げる**部分列**、#493（2026-08-19）は mirror 16 表の**全列**。**部分列エントリを全列エントリで上書きしてはいけない**——列ごとに B/値 が違うため過小評価になる（`stock_price_weekly` は 3列で 10.7 B/列/行、全列平均では 7.8 B/列/行）。
 - **ロールアップ**: `python -m scripts.egress_report`（JSONL 台帳）／`--log <gh run view --log の保存先>`（run ログの `[egress] summary` 行）。DB に繋がないので実行しても Egress は増えない。**JSONL は既定で `.egress/ledger.jsonl` へ書かれる**（2026-08-19・#478 の穴3）——以前は `FINAPP_EGRESS_LEDGER` を人が手で立てる運用で、**過去2回の超過の主因だったローカル検証の反復が1バイトも記録されていなかった**。無効化は `FINAPP_EGRESS_LEDGER=0`。GHA では全ワークフローが `upload-artifact` の `path` に `.egress/*.jsonl` を含める（`tests/test_db_egress.py::TestWorkflowLedgerCollection` が回収漏れを CI で落とす＝**漏れは failure を出さないので通知では拾えない**）。
 
@@ -655,57 +654,20 @@ Render ダッシュボードで管理。
 - 緊急停止は `FINAPP_EGRESS_CYCLE=0`（プロセス予算と JSONL 台帳は生きたまま）。
 - 閾値超過の通知は `egress-health.yml`（毎日 UTC 21:00）が exit 2 → `notify-failure` が Issue 起票。
 
-夜間スコア更新（`sector_ols` + M-6）の実測。**2026-08-20 の回は正本＝ローカル PostgreSQL に対する実走**で、
-台帳（`.egress/ledger.jsonl`・job=`nightly-local`）のテーブル別内訳がそのまま取れる:
-
-| 引くもの | 行数 | 削減前（2026-08-06） | 実測（2026-08-20・#482） |
-|---|---|---|---|
-| `financial_metrics` VIEW（97列 → 消費36列・#459） | 30,298 | 22.5 MB | **8.76 MB**（`octet_length` 実測は 6.69MB） |
-| `macro_data`（`{series: {date: close}}` にしか使わない） | 87,355 | 8.7 MB | **3.50 MB** |
-| `macro_beta_loadings`（7列 → 消費4列・#482） | 49,283 | 4.86 MB | **3.41 MB**（実測 3.18MB） |
-| `stock_price_weekly`（3列・差分ロード後の定常・#480） | 103,976 | 51.4 MB | **3.34 MB** |
-| `financial_records` 最新 annual（69列 → 消費20列・#482） | 4,430 | 2.8 MB | **0.82 MB** |
-| `companies` | 8,876 | 0.5 MB | **0.63 MB**（`calls=2`） |
-| `regression_results`（sector_ols の**書き込み**） | 3,611 | — | 0.30 MB（`calls=3,623`＝1社1文） |
-| **1回あたり合計** | 287,831 | **86.0 MB** | **20.8 MB** |
-
-> **見積り 52.0MB に対し実測 20.8MB**。差の主因は #480（週次差分ロード）で、`stock_price_weekly` が
-> 39.3MB → 3.34MB に落ちた（初回だけフルロード）。#459/#482 の列絞りも効いており、
-> `financial_metrics` は 22.5 → 8.76MB、`financial_records` は 2.8 → 0.82MB。
->
-> **`companies` の `calls=2` が #482 の副産物の確認になっている**——列指定 Row から `relationship` が
-> 消えて `record.company.issued_shares` が黙って None になる罠を SQL 側 COALESCE で潰した結果、
-> N+1 が JOIN 1本になった（N+1 が残っていれば 4,430 回級の calls が出る）。
->
-> 一方 **`regression_results` は `calls=3,623`＝1社1文の書き込み**が残っている。読み取り列の話ではないので
-> #482/#489 の対象外だが、所要には効く（→ 別 Issue）。
->
-> なお **この測定はもう Supabase の枠を1バイトも使わない**（#503 で正本がローカルへ移った）。
-> 「restricted 中は測定自体が枠を食う」という #478 当時の制約は解けている。
+夜間スコア更新（`sector_ols` + M-6）の Egress 実測表（2026-08-20）と解説は、夜間バッチがローカルで走り Supabase を使わなくなったので [DEPLOYMENT_HISTORY.md](archive/DEPLOYMENT_HISTORY.md) へ移した（#844）。
 
 - **削減した2列は「消費側が一度も読まない列」だけ**。`volume_sum` は `px_volz`（出来高z-score）専用で、M-1 は price_features を持たず M-2/M-6 は既定 OFF＝`load_data(db, with_volume=...)` で選択時のみ引く。M-3 は既定 ON なので従来どおり引く。
 - **未ロードは `None` ではなく番兵**（`macro_snapshots._VOLUME_NOT_LOADED`）にして、読もうとしたら即 `ValueError`。欠測として扱うと `px_volz` が全 nan になり「データが薄い」と見分けがつかない＝#438 と同型の静かな故障になる。
-- **残る最大項だった `financial_metrics` VIEW の全列 22.5MB は #459 で列指定へ切り替えた**（2026-08-10）。`plugins/macro_snapshots.py::FIN_LOAD_FIELDS`（36列＝`FIN_BASE_OPTIONS` の選択肢＋`recommend.METRICS` の非 RUNTIME 列＋突合/メタ6列）だけを引き、軽量 namedtuple `_FinRow` で返す。**削減後の実測は 2026-08-21 に取得済み**＝36列 220.8 B/行（6.69MB / 30,298行）に対し全列 97 は 685.4 B/行（20.77MB）＝**1/3 へ落ちた**（上表）。
+- **`financial_metrics` VIEW は列指定で引く（#459）**。`plugins/macro_snapshots.py::FIN_LOAD_FIELDS`（36列＝`FIN_BASE_OPTIONS` の選択肢＋`recommend.METRICS` の非 RUNTIME 列＋突合/メタ6列）だけを引き、軽量 namedtuple `_FinRow` で返す。
   - 列を落とした結果が黙って欠測に化けないよう、`FIN_LOAD_FIELDS` 外の列を `fin_features` に渡したら `build_snapshots` が `ValueError` を投げる。`getattr(..., None)` 任せだと全社が捨てられて学習0件になり「データが薄い」と誤読する（`volume_sum` の番兵と同じ考え方）。
   - 消費側との対応（`recommend.METRICS` / `FIN_BASE_OPTIONS` / `scripts/candidate_bakeoff._FIN_FIELDS`）は `tests/test_macro_snapshots_loaders.py` のメタテストが CI で照合する。列の追加漏れは failure ではなく「静かに全社が消える」形で出るため、通知では拾えない（ADR-0031 と同型）。
-- **残る5経路も列指定へ広げた（#482・2026-08-15）**。#459 と #441 以外は全列 ORM ロードのままで、「静かに枠を食う」形でしか現れないため誰も気づかない状態だった。
-  - `plugins/sector_ols.py::_load_records` — `sector_load_fields(features)` が選択 features から列を導出（既定10項目なら **69列 → 20列**）。`shares_outstanding` の第2優先（`record.company.issued_shares`・#462）は列指定 Row にリレーションが無く消えるため、SQL 側の `COALESCE(FinancialRecord.issued_shares, Company.issued_shares)` で優先順位を保つ。副産物として `issued_shares` が NULL の社ごとに `companies` を引いていた N+1 が JOIN 1本になる。
-  - `plugins/sell_ranking.py` — `SELL_SELECT_COLS`（**97列 → 18列**＝表示9＋VIEW指標6＋`nc_ratio` の入力3）。週次は `week_start >= today − 400日` の下限＋500社チャンク＋3列で、保有20銘柄あたり 0.43 → 0.037 MB。**ユーザーが押すたびに払う経路**なので効き方が日次ジョブと違う（下記）。
-  - `plugins/utils.py::get_macro_features` — `macro_data` 11列 → 3列（`_preload_macro_impl` と同じ。非対称の解消）。
-  - `database.py::get_macro_beta` — `macro_beta_loadings` 7列 → 4列。加えて `with_loadings=False` を新設した。**4呼び出しのうち3つは `meta` の `selected_factors` だけを見て loadings を捨てていた**ので、そこは転送自体を止める。
+- #482（2026-08-15）で残る5経路を列指定へ広げた経緯は [DEPLOYMENT_HISTORY.md](archive/DEPLOYMENT_HISTORY.md) へ移した（#844）。
 - **新規の全列ロードは CI で落とす**: `tests/test_column_scoping.py` が `plugins/` ＋ `routers/` ＋ ルート直下を **AST で走査**し、`db.query(Model)`（＝全列）を検出して許可リスト `FULL_ROW_LOADS` と**双方向差分**を取る（未登録＝fail／実体の消えた登録＝fail／理由文20文字未満＝fail）。`.first()` 等の単一行終端と `with_entities` は対象外。正規表現ではなく AST なのは、`db.query(M.col)` との判別と docstring 内コード例の除外のため。`scripts/` は `scripts/_cache.py`（#355）の別制御下なので対象外。
   - **静的解析で完結させる理由**: `db_egress._Bucket` は `n_cols` を保持せず、SQLite では `cursor.rowcount = -1` で `unknown_calls` にしか積まれない。「このクエリが何列引いたか」を実行時に測る手段が無い。
-- **他の消費**: `daily-incremental`（収集は主に ingress だが `update_market_data_from_history` の読みがある）・ローカルの `scripts/` 検証（`scripts/.cache/` の pickle キャッシュで反復 pull を抑える・Issue #355）。1.98GB は**このワークフロー単独の値**なので、他を足した余裕で判断すること。
 
 ##### 週次株価の差分ロード（#480・[ADR-0036](adr/0036-weekly-prices-incremental-load.md)）
 
-上表の最大項（`stock_price_weekly` 39.3MB）は**毎晩ほぼ同じ行を送り直していた**。1日の増分は約4,400行＝転送の 99.7% が不変データの再送。列を削る（#446/#459/#482）とは別の軸で、**行を送らない**手当てが要った。
-
-| | 転送 | 月30回 |
-|---|---|---|
-| 従来（毎晩フルロード） | 39.3 MB | 1.98 GB（枠の40%） |
-| 差分ロード（定常） | 約 3.7 MB（27週 ≒ 9.3%） | 約 1.06 GB |
-| ＋週1回の強制コールド | 39.3 MB × 4 = 157 MB | **実効 約1.11 GB（枠の22%）** |
+導入の理由と Egress の見積りは [ADR-0036](adr/0036-weekly-prices-incremental-load.md) が正本で、導入時の表は [DEPLOYMENT_HISTORY.md](archive/DEPLOYMENT_HISTORY.md) へ移した（#844）。
 
 - **仕組み**: 指紋（`max(week_start)` + `count(*)`＝サーバ側集約なので Egress は2行ぶん）でキャッシュ世代を判定し、**直近27週は常に再取得**して訂正を吸収する。27週は `database.WEEKLY_OVERLAP_DAYS`（`DAILY_WINDOW_DAYS` からの導出）で、ミラー同期（#481）と**同一オブジェクト**を共有する。
 - **キャッシュの置き場**: ローカルは `.weekly_cache/`、GHA は `actions/cache`（`nightly-scores.yml` のみ）。`scripts/.cache/`（#355）とは別物で、ログ接頭辞も `[wpcache]` と `[cache]` で分けてある。あちらは検証用で TTL 無し・明示リフレッシュのみ＝要求が逆を向いている。
@@ -713,21 +675,11 @@ Render ダッシュボードで管理。
 - **印を進めるのは構造的な条件**: `_recompute_weeks_from_daily` が「保持窓より古い週を実際に書き換えた」とき。定常経路は取得開始日を `today − DAILY_WINDOW_DAYS` でクリップするのでここへは来ない。明示フック（repair / backfill-weekly）は保険であって主ではない——列挙は必ず漏れる（ADR-0031「登録≠実行」と同型）。
 - **ログの読み方**: `[wpcache] HIT ... fresh=<行数>` と `[egress] summary` の `top=stock_price_weekly:<MB>` を突き合わせる。乖離したら**キャッシュを通らない別経路が残っている**（#478 で `scripts/_cache.py` について学んだ読み方と同じ）。全ワークフローが `.egress/*.jsonl` を artifact に含めるので、`python -m scripts.egress_report` で構造化データから読める。
 - **静かな劣化への歯止め4層**: ①行数照合はハードゲート（不一致は必ずフルロード）②鮮度アサートは raise（GHA では failure ＝自動起票）③週1回の強制コールド（`FINAPP_WEEKLY_CACHE_MAX_AGE_DAYS`・既定7）④コールド時のドリフト監査（差分が触らない過去区間を旧キャッシュと突合・追加 Egress ゼロ）。stale なパネルで μ̂ を出しても failure は出ないので、設計側で塞ぐしかない。
-- **初回は必ずフルロード**。GHA キャッシュが載る翌晩から効く。復帰判断は従来値で行うこと。
 - **緊急停止**: `FINAPP_WEEKLY_CACHE=0`。このとき**指紋クエリすら発行しない**＝従来と1文も変わらない。
 
-**リクエスト経路の Egress（#482）**: 上表は日次ジョブの話だが、`/api/plugins/sell_ranking/run` と `/api/morning` は**ユーザーが押すたび**に払う。回数が cron ではなく操作頻度で決まるので、1回の重さがそのまま効く。
+**リクエスト経路の Egress（#482）**: `/api/plugins/sell_ranking/run` と `/api/morning` は**ユーザーが押すたび**に払う。回数が cron ではなく操作頻度で決まるので、1回の重さがそのまま効く。
 
-| 引くもの | 削減前 | 削減後（見積り） |
-|---|---|---|
-| `financial_metrics` ユニバース（97 → 18列・4,430行） | 3.45 MB | 0.64 MB |
-| `financial_metrics` 保有分（同上・20行） | 0.02 MB | 0.003 MB |
-| `stock_price_weekly`（7列全期間 → 3列400日窓） | 0.43 MB | 0.04 MB |
-| `macro_data`（11 → 3列） | 1.34 MB | 0.40 MB |
-| `macro_beta_loadings`（`with_loadings=False` で転送ゼロ） | 4.86 MB | 0 MB |
-| **1リクエスト合計** | **10.10 MB** | **1.08 MB（−89%）** |
-
-`macro_beta_loadings` の B/行は #493（2026-08-19）で実測へ差し替えた：**121.4 B/行（7列・10.5MB / 90,841 行）**。それまでは較正値が無く 12 B/列/行 = 84.0 B/行 の既定を当てており、**実測はその 1.44 倍＝保守側に置いたつもりの既定が過小だった**（上表の 3.36 MB → 4.86 MB はこの比で引き直した値）。`DEFAULT_BYTES_PER_COLUMN` を 17.5 へ引き上げたのはこの実例が根拠。
+削減前後の実測表と `macro_beta_loadings` の較正の経緯は [DEPLOYMENT_HISTORY.md](archive/DEPLOYMENT_HISTORY.md) へ移した（#844）。
 
 **全表較正（#493・2026-08-19）**: Egress リセット直後に mirror 16 表を全列で測り直した。**明細（B/行・列数・行数）の正本は `db_egress.EGRESS_COST_TABLE` のエントリと note**（ここに書き写すと黙って陳腐化する）。設計判断に効く要点だけ:
 
@@ -736,10 +688,8 @@ $env:FINAPP_JOB = "egress-calibration"
 python -m scripts.mirror_verify --level counts --bytes --warn-only   # 表ごとに1行＝Egress ほぼゼロ
 ```
 
-- **16 表・全列の合計は 131.1 MB**（1,569,144 行）。これが **ミラー初回 pull（#481 手順3）の見積りの母数**であり、枠 5GB の 2.6%。1,284,465 行の `stock_price_weekly` だけで 66.6MB＝**半分がここ**
 - **通常の表の B/列/行 は 7.9〜17.3 に収まる**。ただし JSON 列を持つ2表（`macro_beta_meta` 492、`plugin_tuned_params` 1238）は桁が違う＝**平均から外して読む**
 - **`statement_timeout=2min`（ADR-0032）には当たらなかった**。128万行の `octet_length` 全走査も含めて全16表が通ったので、`table_stats()` に timeout の局所引き上げは足していない（当たるようになったら `database.db_timeouts` で包む）
-- `financial_metrics` は VIEW でミラー対象外＝この回では未測。#446 の 779 B/行（97列）が引き続き唯一の実測
 
 **キャッシュが効いているかを見る（#478）**: `scripts/` 系の検証 CLI は実行のたびに `[cache] HIT/MISS/REFRESH <key>` を標準エラーへ出し、終了時に `[cache] summary hits=N misses=M produced=X.XMB` を出す。**MISS と REFRESH は本番 DB を引いた＝Egress を使った**という意味なので、2回目以降の実行で misses が減らないならキーが実質毎回ミスしている。2026-07 と 2026-08 の2回とも、超過後にこの内訳が分からず原因の切り分けに時間を要した（黙ってミスしても気づけない＝#438 と同型）。`produced` は pickle のバイト数であって Egress そのものではない（正本は上記の `octet_length` 実測）。
 
@@ -749,9 +699,9 @@ python -m scripts.mirror_verify --level counts --bytes --warn-only   # 表ごと
 
 - **`stock_price_daily`**：直近 `DAILY_WINDOW_DAYS`（≒6か月）の日次終値のみ。収集のたびにローリング削除（trim）でサイズが頭打ち……のはずだが、DELETE ベースの trim は btree インデックス（`pk_stock_price_daily`/`ix_spd_trade_date`）を bloat させ続け、autovacuum は死領域をテーブル内で再利用するのみでファイルサイズは縮まない（**Issue #290**・実測: 2026-07-09 VACUUM FULL 直後 48MB→3日後 72MB）。**月次バッチの `vacuum` ステップ**（`_pipeline_vacuum.py`・毎月1日 JST 01:00・#504）で物理サイズを頭打ちにする（GHA の `vacuum-maintenance.yml` は 2026-08-25 に停止＝正本がローカルへ移り、断面は凍結して bloat が増えないため・#290 / #505）。チャートの日次ズーム・短期バックテスト用。**VACUUM 本体の所要は伸びている**（43〜92MB で 7.6〜10.4秒／2026-07-18〜08-01 → **79MB で 37.4秒**／2026-08-09 手動実行・79MB→49MB・DB 426MB→395MB）。`statement_timeout` は `'0'` にして時間で殺さず、歯止めはワークフローの `timeout-minutes: 30` 側に置く（#471）。
 - **`stock_price_weekly`**：全履歴の週次集約（追記専用・trim しない）。`close_last`＋生集約 `volume_sum`/`turnover_sum`/`n_days` のみ保持し、**VWAP・相対流動性は派生**（保存しない）。チャート全期間・長期バックテスト・将来の予測モデル用。
-- 見通し：5年分 weekly ≈ 145MB、総計 ≈ 285MB / 500MB、+約37MB/年（runway 約6年）。書き込みは単一チョークポイント `record_prices_batch`（daily upsert→触れた週を weekly 再集約→trim）。
+- 書き込みは単一チョークポイント `record_prices_batch`（daily upsert→触れた週を weekly 再集約→trim）。
 
-**移行（一回限り・ローカル実行 `migrate_stock_price_dual.py`・2026-06 完了済みでスクリプトは撤去／以下は手順記録）**：満杯DB（≈448MB）で新旧テーブルを併存させると 500MB 超で read-only に墜落するため、**ローカルで集約計算 → 旧テーブル DROP（即解放）→ コンパクトな新テーブルをアップロード** の順で Supabase 側ピークを上げない（[GOTCHAS.md](GOTCHAS.md) 参照）。
+500MB に対する見通しと、一回限りの移行（2026-06 完了）の手順記録は [DEPLOYMENT_HISTORY.md](archive/DEPLOYMENT_HISTORY.md) へ移した（#844）。
 
 **将来オプション（いずれも未実装・発動条件つき）**：
 - *別ストア退避*（S3互換 / 別Postgres 等）：真の日次OHLCV・出来高分析・intraday が要件化したとき、または Supabase 使用量が 400MB を再突破したとき検討。
@@ -759,8 +709,7 @@ python -m scripts.mirror_verify --level counts --bytes --warn-only   # 表ごと
 
 **後続PR（本対策に連なる別タスク）**：
 - *予測モデルの平滑化ターゲット化*：`turnover_sum`/`volume_sum` 由来の VWAP・相対流動性を説明/被説明変数に。年次株価変動ノイズ対策。MODELS.md 更新を伴う。
-- *`financial_records.raw_xbrl_json` の drop*：**実装済み（Issue #219 ①）**。financial_records 73MBの主因＝第2の容量レバーだった列を冪等DROPマイグレーション（`database.py::_DEBUG_ONLY_COLS`）で削除し、ヘッドルームを確保。
-- *過去2〜5年の Yahoo 週次バックフィル*：J-Quants 無料は2年上限のため、5年時系列（財務5年と整合）を Yahoo から `stock_price_weekly` へ補填。**実装済み（#198・`backfill_weekly_history_yahoo`）。本番実行は完了済みで、専用の `backfill-weekly-history.yml` は削除した**。現在の呼び出し元は `_pipeline_gh.py`（全件収集）と `python -m scripts.resolve_price_suffix --backfill-weekly`（解決できた社だけ）。
+- 実装済みの2件（`financial_records.raw_xbrl_json` の drop・過去2〜5年の Yahoo 週次バックフィル）は [DEPLOYMENT_HISTORY.md](archive/DEPLOYMENT_HISTORY.md) へ移した（#844）。
 
 #### バックアップ運用ポリシー
 

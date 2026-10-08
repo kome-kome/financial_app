@@ -22,7 +22,9 @@ hyperparameter_search.py / recommend_factor_premia.py / macro_beta_inference.py�
 
 **本モジュールの数字は正本ではない。** 役目は2つに限る——(1) 全経路の帰属を常時残して
 「誰が食ったか」に答えられるようにすること、(2) 暴走をプロセス単位で止めること。
-係数の正本は docs/DEPLOYMENT.md「Egress 設計」の実測表で、較正は #446 と同じ手順で行う。
+係数の出所は `EGRESS_COST_TABLE` の各エントリ（measured_on / source_issue / note）、測り方は
+docs/DEPLOYMENT.md「Egress 設計」、導入時の実測表は docs/archive/DEPLOYMENT_HISTORY.md にある。
+較正は #446 と同じ手順で行う。
 
 ## どう測るか
 
@@ -108,7 +110,8 @@ class EgressCost:
     note: str
 
 
-# (テーブル名, 転送列数) の実測値。docs/DEPLOYMENT.md「Egress 設計」の実測表が正本。
+# (テーブル名, 転送列数) の実測値。各エントリの measured_on / source_issue / note が出所の正本
+# （導入時の実測表は docs/archive/DEPLOYMENT_HISTORY.md、測り方は docs/DEPLOYMENT.md「Egress 設計」）。
 #
 # 出所は2世代ある。**どちらもサーバ側 `sum(octet_length(列::text))` が正本**（#446 の測り方）:
 #   #446（2026-08-06）… 消費側が実際に転送する**部分列**を測ったもの。部分列の推定はこちらが効く
