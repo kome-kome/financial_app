@@ -129,7 +129,7 @@ python -m scripts.check_nightly_collect                        # 夜間ログの
 python -m scripts.resolve_price_suffix                            # 何も書かない
 python -m scripts.resolve_price_suffix --apply --backfill-weekly  # 採用＋5年weekly
 python -m scripts.resolve_price_suffix --reprobe                  # 株価を持つ解決済みも測り直す・棄却なら接尾辞を外す（夜間の「解決済みなのに空」・#769）
-python -m scripts.resolve_price_suffix --apply --bucket empty     # 取引所判明・バー0本の5社だけ（月次が回す・#560）
+python -m scripts.resolve_price_suffix --apply --bucket empty     # 取引所判明・バー0本の数社だけ（#560。月次は #841 から絞らず全バケットを回す）
 python edinet_ping.py                    # EDINET API接続テスト
 ```
 

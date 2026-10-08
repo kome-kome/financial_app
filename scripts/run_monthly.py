@@ -17,7 +17,7 @@ notify-failure でも macro-health でも拾えない。ADR-0031 が防ごうと
 
 ## ステップの並び
 
-    vacuum → price_suffix → deps_smoke → factor_premia → tune（M-2 / M-3）
+    vacuum → deps_smoke → price_suffix → factor_premia → tune（M-2 / M-3）
            → tune:macro_dlm → tune:macro_gbdt
 
 **M-1（macro_risk_return）の探索はここに無い**。実測 約752分で窓（960分）に入らない。
@@ -148,11 +148,14 @@ BUDGET_MIN: dict[str, float] = {
     # ロードを消化するのが役目**なので、ここが遅いこと自体は起きない。5分は起動と
     # jax.devices() の初期化を含めた余裕。
     "deps_smoke": 5,
-    # 5社 × 2サフィックス × YAHOO_STOCK_RATE_SLEEP(0.5s) ≒ 5秒（#560）。3分は十分な余裕。
-    # 対象を `--bucket empty` へ絞ったのは #560 当時、全数 454社の `--reprobe`（約8分）が
-    # Σ925 + マージン30 = 955 に対し窓 960 で余裕5分に収まらなかったため。macro_beta（#579）と
-    # M-1（#584）が出ていった後の Σ はこの dict の合計で、この根拠は崩れている（戻すかは #841）。
-    "price_suffix": 3,
+    # 株価ゼロ・未解決の全社（2026-10-08 実測 419社）を `.S`/`.F` で測る。#560 当時の全数 454社が
+    # 約8分（≒1.06秒/社）だったので約7.4分、HTTP の待ちを重く見ても約10.5分。20分はその約2倍の
+    # **見積り**（実走ログ `END price_suffix: exit=0 (N.N分)` で実測へ差し替える）。
+    # #560 で `--bucket empty`（数社・約5秒）へ絞ったのは、当時 Σ925 + マージン30 = 955 に対し
+    # 窓 960 で余裕5分しか無かったため。macro_beta（#579）と M-1（#584）が出ていって Σ が下がり、
+    # 全数でも窓に収まるので戻した（#841）。夜間の7日に1回の再取得は `.T` しか叩かないので、
+    # Yahoo が後から札証/福証で載せ始めた社を拾えるのはこのステップだけ。
+    "price_suffix": 20,
     "factor_premia": 20,
     # 実測 1.04分/件（クリーンな状態・12候補）〜1.26分/件（9/1 実走・M-1 と同居でメモリ枯渇下）。
     # 294件で 306〜369分。**9/1 の打ち切り（exit=124・199/294 まで）は当時の予算 250分での
@@ -193,16 +196,6 @@ def steps_for(python: str) -> tuple[Step, ...]:
              why="stock_price_daily / stock_price_weekly の index bloat 回収と "
                  "per-table autovacuum の較正（#290）。正本がローカルへ移ってから"
                  "メンテ経路が無かった"),
-        Step("price_suffix",
-             (python, "-m", "scripts.resolve_price_suffix", "--apply", "--bucket", "empty",
-              "--backfill-weekly"),
-             why="地方取引所に実在すると分かっている社（Yahoo が SAP/FKA と実名を返すのに"
-                 "バーが0本）を、正しい取引所で再プローブする（#560）。バーが供給され始めた"
-                 "瞬間に自動で拾う。**全数 454社は約8分で月次の窓に入らない**ので "
-                 "`--bucket empty` の数社だけに絞ってある（約5秒）。"
-                 "**`--backfill-weekly` は採用できた社にだけ走る**——解決しただけでは "
-                 "daily 保持窓183日＝約26週しか付かず z_momentum の52週に届かない（#555）。"
-                 "対象は最大でもバケットの社数なので窓を脅かさない"),
         Step("deps_smoke", (python, "-m", "scripts.check_heavy_imports", "--profile", "base"),
              why="重い依存（numpy / scipy / sklearn / statsmodels 等）が実際に import できるかを確かめる。"
                  "2026-09-01 の初実走では Smart App Control が 8/21 の jaxlib 更新で入った"
@@ -211,12 +204,24 @@ def steps_for(python: str) -> tuple[Step, ...]:
                  "（CodeIntegrity 3118/3077/3033・以後は同じ DLL が通る一過性の挙動）。"
                  "**未評価 DLL の初回ロードをここが引き受ける**ので本番ステップの手前で消化でき、"
                  "それでも落ちるなら数百分の予算を待たず起票される。"
-                 "位置は「軽い順」の原則に従う（vacuum を除く先頭は最軽量の price_suffix）——"
+                 "位置は「軽い順」の原則に従う（vacuum を除く先頭は最軽量のこのステップ。"
+                 "#841 で price_suffix の予算を広げてからこの並び）——"
                  "重い依存を実際に使う最初のステップより前でありさえすれば役目は果たす。"
                  "**`macro_beta` は #579 で `run_monthly_beta.py` へ出た**ので、jax / numpyro / "
                  "pymc を使うステップはもう無い（factor_premia・tune 系は基盤だけ）。"
                  "基盤（`--profile base`）だけを確かめる——使わない jaxlib の部品の遮断で "
                  "失敗扱いにしない（#789）"),
+        Step("price_suffix",
+             (python, "-m", "scripts.resolve_price_suffix", "--apply", "--backfill-weekly"),
+             why="株価ゼロ・未解決の社を、札証/福証（`.S`/`.F`）で再プローブする（#560・#841）。"
+                 "夜間の7日に1回の再取得は `.T` しか叩かないので、Yahoo が後から地方取引所で"
+                 "載せ始めた社を拾えるのはここだけ。#560 では `--bucket empty`（数社・約5秒）へ"
+                 "絞っていたが、窓に余裕ができたので全バケット（2026-10-08 時点 419社・見積り"
+                 "約7〜11分）へ戻した。`--reprobe`（解決済みも測り直して棄却なら外す）は使わない——"
+                 "夜間の警告を見た人が手で回す手順（#769）。"
+                 "**`--backfill-weekly` は採用できた社にだけ走る**——解決しただけでは "
+                 "daily 保持窓183日＝約26週しか付かず z_momentum の52週に届かない（#555）。"
+                 "週次株価を足すので factor_premia より前に置く"),
         Step("factor_premia",
              (python, "recommend_factor_premia.py",
               "--min-companies-per-period", "30", "--maxlags", "11", "--persist"),

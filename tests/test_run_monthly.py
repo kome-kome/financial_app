@@ -174,8 +174,8 @@ class TestStepOrder:
     def test_lightest_runs_first(self):
         """打ち切られても前方は当月分が揃う（nightly_scores の NIGHTLY_MODELS と同じ思想）。
 
-        実測 price_suffix は約5秒・factor_premia は約2分。tune は GHA で 300〜355分の
-        timeout を積んでいた。
+        実測 deps_smoke は約20秒・factor_premia は約2分、price_suffix は #841 で全バケットへ
+        戻して見積り約7〜11分。tune は GHA で 300〜355分の timeout を積んでいた。
 
         **名前で固定しない**——ステップを足すたびにここを書き換える形にすると、
         「軽い順」という不変条件ではなく「そのときの並び」を検査することになる

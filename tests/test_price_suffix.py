@@ -461,7 +461,7 @@ class TestLocalExchangeCompaniesAreNotProbedOnTokyo:
 
     `empty` は「Yahoo が期待した取引所（SAP/FKA）と実名を返すのにバーが0本」＝
     札証/福証に**実在する**社。東証には居ないのでバックオフで間隔を空けても当たらない。
-    正しい取引所での再プローブは月次（`--bucket empty`）が担う。
+    正しい取引所での再プローブは月次（`resolve_price_suffix --apply`・#841 から全バケット）が担う。
 
     **`placeholder` / `not_found` は従来どおり7日に1回**＝#475 の挙動を保存する。
     ここを一緒くたにすると、取得手段が無いだけの群まで永久に諦めることになる。

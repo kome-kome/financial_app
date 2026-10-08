@@ -328,8 +328,8 @@ class TestProbeBucketIsPersisted:
     """棄却理由を DB へ残す（#560）。
 
     分類する `reject_bucket` は #555 からあったが **printf されて消えていた**ため、
-    「取引所は分かっているのに絞り込めない」状態だった。永続化して初めて月次が
-    `--bucket empty` の5社だけを叩ける（全数 454社の約8分は月次の窓に入らない）。
+    「取引所は分かっているのに絞り込めない」状態だった。永続化して初めて `--bucket` で
+    バケットへ絞れる（#560 の月次は `empty` の数社だけを叩いていた。#841 からは全バケット）。
     """
 
     def _seed(self, db, make_company, make_price):
@@ -375,7 +375,7 @@ class TestProbeBucketIsPersisted:
 
     def test_adoption_clears_the_bucket(self, db, make_company, make_price, monkeypatch):
         """採用できたら棄却理由は消す。**残すと解決済みなのに not_found という
-        読めない状態になり、月次の `--bucket empty` が解決済みを拾い続ける。**"""
+        読めない状態になり、`--bucket` で絞ったときに解決済みを拾い続ける。**"""
         from database import Company
 
         self._seed(db, make_company, make_price)

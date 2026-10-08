@@ -1172,8 +1172,8 @@ async def fill_recent_stock_price_gap_yahoo(
             # **`.T` が永久に当たらないと分かっている社は、7日に1回すら叩かない**（#560）。
             # `empty` は「Yahoo が期待した取引所（SAP/FKA）と実名を返すのにバーが0本」＝
             # 札証/福証に実在する社で、東証には居ない。バックオフで間隔を空けても当たらない
-            # 相手に投げ続ける意味は無い。正しい取引所での再プローブは月次が担う
-            # （`resolve_price_suffix --apply --bucket empty`）。
+            # 相手に投げ続ける意味は無い。正しい取引所（`.S`/`.F`）での再プローブは月次が担う
+            # （`resolve_price_suffix --apply`・未解決の全バケット・#841）。
             #
             # `placeholder`（Yahoo の空箱）と `not_found` は**従来どおり7日に1回**＝
             # #475 の挙動を保存する（取得手段が無いだけで、将来 Yahoo が載せる可能性は残る）。
