@@ -12,6 +12,7 @@
 | [DEPLOYMENT.md](docs/DEPLOYMENT.md) | Render デプロイ運用＋データ収集の自動/手動の仕組み＋外部サービス制約（GitHub Actions / Supabase / J-Quants） | デプロイ・収集・インフラ設計時 |
 | [MODELS.md](docs/MODELS.md) | 分析モデル解説＋モデル固有の制約 | 分析モデル変更時 |
 | [PLUGIN_REFERENCE.md](docs/PLUGIN_REFERENCE.md) | `plugins/` 各ファイルの実装リファレンス（内部契約・producer・heavy・実測値）。理論は MODELS.md が正本 | プラグイン実装を触るとき |
+| [SCRIPTS_REFERENCE.md](docs/SCRIPTS_REFERENCE.md) | `scripts/` と起動用 `*.ps1` の実装リファレンス（役割・守ること・実測値） | バッチ・スクリプトを触るとき |
 | [M1_MACRO_MODEL_GUIDE.md](docs/M1_MACRO_MODEL_GUIDE.md) | M-1（マクロ×リスク-リターン推奨）の初心者向け副読本。予備知識ゼロから設計思想を解説。正式版は MODELS.md §9 | M-1 の考え方を噛み砕いて把握したいとき |
 | [SKILLS_AND_AGENTS.md](docs/SKILLS_AND_AGENTS.md) | スキル／エージェントの索引マニュアル | スラッシュコマンドや調査エージェントを使うとき |
 | [FUTURE_TASKS.md](docs/FUTURE_TASKS.md) | **Issue 運用ガイド＋設計制約**（残タスクの正本は GitHub Issues。本書はタスク実体を持たない）。完了項目は `docs/archive/IMPROVEMENTS.md` へ集約 | リファクタ着手・改善項目の参照時 |
@@ -53,10 +54,10 @@
 |---|---|
 | `database.py` | テーブル定義・upsert・成長率/Zスコア計算 |
 | `db_egress.py` | Egress 台帳＋サーキットブレーカ（ADR-0034/0037）。**歯止めはプロセス予算と請求サイクル累計の2軸**（片方へ戻さない）。集計は `python -m scripts.egress_report`。詳細は [ARCHITECTURE.md](docs/ARCHITECTURE.md) |
-| `scripts/batch_common.py` | ローカル駆動バッチの共通骨格＝**「走らなかったことを検知する」仕組みの唯一の源**。**子の出力はログへ直結する／生の接続文字列は出さない／Σ予算＋マージン ≤ 窓／予算は締切（`FINAPP_STEP_DEADLINE_UTC`）として子へ渡し、予算の無いステップでは消す**（ADR-0054）。詳細は [ARCHITECTURE.md](docs/ARCHITECTURE.md) |
+| `scripts/batch_common.py` | ローカル駆動バッチの共通骨格＝**「走らなかったことを検知する」仕組みの唯一の源**。**子の出力はログへ直結する／生の接続文字列は出さない／Σ予算＋マージン ≤ 窓／予算は締切（`FINAPP_STEP_DEADLINE_UTC`）として子へ渡し、予算の無いステップでは消す**（ADR-0054）。詳細は [SCRIPTS_REFERENCE.md](docs/SCRIPTS_REFERENCE.md#scriptsbatch_commonpy) |
 | `batch_freshness.py` | 足跡（`*_last_run`）と成果物の前進（`PRODUCERS`）を**測る**層。watchdog と `/api/morning` が共有する。**producer は watchdog の起票にだけ出す**（`collect()` / `summarize()` を触らない）。`macro_beta` は **live の行だけ**数える。**API から `scripts/check_batch_freshness.py` を import しない**（import 時に接続先を書き換える）。詳細は [ARCHITECTURE.md](docs/ARCHITECTURE.md) |
-| `scripts/check_batch_freshness.py` | **バッチ鮮度 watchdog**（ADR-0042）。**閾値は `cadence` と `run_*.WINDOW_MIN` から導出し、実測から逆算しない・書き写さない／バッチの判定は `*_last_run` のみ／成果物の固着は `PRODUCERS` で別に起票する／通知経路（`gh`）は健全な回にも確かめる／ok へ戻った起票は自動で閉じる（コメントを付けると止まる）**。exit 0/2/3。詳細は [ARCHITECTURE.md](docs/ARCHITECTURE.md) |
-| `scripts/mirror_*.py` | ミラーの pull / sync / verify（共有基盤 `mirror_common.py`）。**pull / sync は定常運転では使わない**（`verify` はバックアップ復元先の突合用）。規則は設計制約、詳細は [ARCHITECTURE.md](docs/ARCHITECTURE.md) |
+| `scripts/check_batch_freshness.py` | **バッチ鮮度 watchdog**（ADR-0042）。**閾値は `cadence` と `run_*.WINDOW_MIN` から導出し、実測から逆算しない・書き写さない／バッチの判定は `*_last_run` のみ／成果物の固着は `PRODUCERS` で別に起票する／通知経路（`gh`）は健全な回にも確かめる／ok へ戻った起票は自動で閉じる（コメントを付けると止まる）**。exit 0/2/3。詳細は [SCRIPTS_REFERENCE.md](docs/SCRIPTS_REFERENCE.md#scriptscheck_batch_freshnesspy) |
+| `scripts/mirror_*.py` | ミラーの pull / sync / verify（共有基盤 `mirror_common.py`）。**pull / sync は定常運転では使わない**（`verify` はバックアップ復元先の突合用）。規則は設計制約、詳細は [SCRIPTS_REFERENCE.md](docs/SCRIPTS_REFERENCE.md#scriptsmirror_commonpy) |
 | `weekly_price_cache.py` | 週次株価の run 間差分ロードキャッシュ（規則は設計制約）。緊急停止は `FINAPP_WEEKLY_CACHE=0`。詳細は [ARCHITECTURE.md](docs/ARCHITECTURE.md) |
 | `corporate_actions.py` | 企業イベント台帳（F の検出器・登録表・TTM の分割窓・ADR-0062）。**一晩1回作り F の表と TTM へ同じものを渡す／本番から `scripts/` を import しない** |
 | `ttm_composite.py` | TTM 行（直近12か月）の合成（ADR-0051）。夜間に `ttm_financial_records` を全置換し、`financial_metrics_with_ttm` VIEW が通期と並べる（規則は設計制約）。**純関数ブロックは database・scripts を import しない**。詳細は [ARCHITECTURE.md](docs/ARCHITECTURE.md) |
