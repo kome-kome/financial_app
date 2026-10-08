@@ -20,8 +20,9 @@
   `pl_nonoperating_income`）も同じ経路で直る。
 - 書類から読めた列（None でない値）だけを置き換える。取れなかった列は消さない（NULL で上書きしない）。
 - 値が同じ列は触らず、変化に数えない。
-- 触るのは `database.financial_columns()` が返す列だけ＝行のキー（edinet_code・year・period_end・
-  period_type）・会社名・業種・doc_id・source・市場データ（株価・時価総額・PER・PBR・配当利回り）は触らない。
+- 触るのは `database.financial_columns()` が返す列と、DEI から読んだ `accounting_standard`（#859）だけ
+  ＝行のキー（edinet_code・year・period_end・period_type）・会社名・業種・doc_id・source・市場データ
+  （株価・時価総額・PER・PBR・配当利回り）は触らない。
 - `cf_free_cf` は営業CFと投資CFが両方読めたときだけ。`calc_derived` は欠けた入力を 0 とみなして必ず
   `free_cf` を作るので、そのまま使うと CF の読めない書類で既存値を 0 や営業CFだけの値で潰す。
 - 書類の DEI（書類が名乗る当期末日）が行の `period_end` と違う・読めないときは書かない（期末不一致）。
@@ -58,8 +59,10 @@ from typing import Awaitable, Callable, Optional
 import httpx
 
 import database as D
-from collector_financials import calc_derived, fetch_xbrl_csv, parse_xbrl_csv
-from collector_interim import _DEI_PEND, _extract_dei
+from collector_financials import (
+    _DEI_PEND, _extract_dei, accounting_standard_from_dei, calc_derived, fetch_xbrl_csv,
+    parse_xbrl_csv,
+)
 from collector_utils import EDINET_MAX_CONSECUTIVE_FAILURES, RATE_SLEEP
 from database import FinancialRecord, financial_columns, get_setting, upsert_setting
 
@@ -227,10 +230,15 @@ async def _process_row(row, fetch: Fetch, apply: bool, report: Report, log) -> s
         report.parse_failed.append(row.doc_id)
         return "parse_failed"
 
-    doc_pe = (_extract_dei(df).get(_DEI_PEND) or "")[:10]
+    dei = _extract_dei(df)
+    doc_pe = (dei.get(_DEI_PEND) or "")[:10]
     if doc_pe != pe:
         report.period_mismatch.append((row.edinet_code, row.doc_id, pe, doc_pe or None))
         return "period_mismatch"
+    # 会計基準も書類（DEI）由来。読めたときだけ候補にする（#859・既存行は #858 の取り直しで埋まる）
+    std = accounting_standard_from_dei(dei, row.doc_id)
+    if std is not None:
+        values["accounting_standard"] = std
 
     changes = diff_columns(row, values)
     if not changes:

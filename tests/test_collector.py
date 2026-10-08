@@ -538,6 +538,68 @@ class TestConsolidatedRevenue:
         assert collector_financials._context_priority(ctx) == priority
 
 
+# ── 会計基準（DEI `AccountingStandardsDEI`・#859）──────────────────────────────
+# 検体は 2026-10-09 に EDINET から取得した実際の書類の DEI 行。表記は年度・半期・旧四半期で同じだった。
+
+_DEI_JGAAP_S100YHJP = [  # E00317 有価証券報告書
+    ("jpdei_cor:AccountingStandardsDEI", "FilingDateInstant", "Japan GAAP"),
+    ("jpdei_cor:CurrentPeriodEndDateDEI", "FilingDateInstant", "2026-03-31"),
+    ("jpdei_cor:TypeOfCurrentPeriodDEI", "FilingDateInstant", "FY"),
+]
+_DEI_IFRS_S100Y8NY = [   # トヨタ 有価証券報告書
+    ("jpdei_cor:AccountingStandardsDEI", "FilingDateInstant", "IFRS"),
+    ("jpdei_cor:CurrentPeriodEndDateDEI", "FilingDateInstant", "2026-03-31"),
+    ("jpdei_cor:TypeOfCurrentPeriodDEI", "FilingDateInstant", "FY"),
+]
+_DEI_USGAAP_S100XTLJ = [  # キヤノン 有価証券報告書
+    ("jpdei_cor:AccountingStandardsDEI", "FilingDateInstant", "US GAAP"),
+    ("jpdei_cor:CurrentPeriodEndDateDEI", "FilingDateInstant", "2025-12-31"),
+    ("jpdei_cor:TypeOfCurrentPeriodDEI", "FilingDateInstant", "FY"),
+]
+
+
+class TestAccountingStandard:
+    @pytest.mark.parametrize("rows, expected", [
+        (_DEI_JGAAP_S100YHJP, "JGAAP"),
+        (_DEI_IFRS_S100Y8NY, "IFRS"),
+        (_DEI_USGAAP_S100XTLJ, "US-GAAP"),
+    ], ids=["E00317-JGAAP", "E02144-IFRS", "E02274-USGAAP"])
+    def test_real_dei_maps_to_column_values(self, rows, expected):
+        assert collector_financials.accounting_standard_of(_xbrl_df(rows), "S100") == expected
+
+    def test_dei_also_keeps_the_period_meta(self):
+        """会計基準を足しても、半期収集と取り直しが読む期間の要素は同じ1パスで取れる。"""
+        dei = collector_financials._extract_dei(_xbrl_df(_DEI_USGAAP_S100XTLJ))
+        assert dei["CurrentPeriodEndDateDEI"] == "2025-12-31"
+        assert dei["TypeOfCurrentPeriodDEI"] == "FY"
+        assert dei["AccountingStandardsDEI"] == "US GAAP"
+
+    @pytest.mark.parametrize("rows", [
+        [("jpdei_cor:CurrentPeriodEndDateDEI", "FilingDateInstant", "2026-03-31")],   # 要素が無い
+        [("jpdei_cor:AccountingStandardsDEI", "FilingDateInstant", "－")],            # EDINET の空欄
+    ], ids=["missing", "blank"])
+    def test_missing_or_blank_is_none_without_warning(self, rows, caplog):
+        with caplog.at_level("WARNING", logger="collector"):
+            assert collector_financials.accounting_standard_of(_xbrl_df(rows), "S100") is None
+        assert not caplog.records
+
+    def test_unknown_notation_is_none_with_warning(self, caplog):
+        """推測で丸めない。現れたら実物で表記を確かめて写し表へ足す。"""
+        rows = [("jpdei_cor:AccountingStandardsDEI", "FilingDateInstant", "Unknown GAAP")]
+        with caplog.at_level("WARNING", logger="collector"):
+            assert collector_financials.accounting_standard_of(_xbrl_df(rows), "S100X") is None
+        assert "Unknown GAAP" in caplog.text and "S100X" in caplog.text
+
+    @pytest.mark.parametrize("df", [None, pd.DataFrame()], ids=["none", "empty"])
+    def test_no_document_is_none(self, df):
+        assert collector_financials.accounting_standard_of(df) is None
+
+    def test_interim_collection_shares_the_extractor(self):
+        """DEI の抽出を写して二重に持たない（年度・半期・取り直しが同じ関数を使う）。"""
+        import collector_interim
+        assert collector_interim._extract_dei is collector_financials._extract_dei
+
+
 # ── calc_derived ─────────────────────────────────────────────────────────────
 
 class TestCalcDerived:

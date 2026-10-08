@@ -57,6 +57,22 @@ CAPEX_LABEL_INCLUDE = ["取得による支出", "購入による支出"]   # 取
 CAPEX_LABEL_REQUIRE = ["有形固定資産"]                         # 有形固定資産を必ず含む（無形のみ除外、有形及び無形は可）
 CAPEX_LABEL_EXCLUDE = ["売却", "収入", "減少"]                 # 売却収入・回収は capex ではない
 
+# ── DEI（書類が名乗る期間・会計基準）────────────────────────────────────────
+# 抽出する DEI 要素（接頭辞除去後の要素名）。年度・半期の収集と取り直し（scripts/refetch_financials）
+# が `_extract_dei` を共有する（半期収集から移した・#859）。
+_DEI_TYPE     = "TypeOfCurrentPeriodDEI"
+_DEI_PEND     = "CurrentPeriodEndDateDEI"
+_DEI_FYEND    = "CurrentFiscalYearEndDateDEI"
+_DEI_STANDARD = "AccountingStandardsDEI"
+
+# DEI `AccountingStandardsDEI` の表記 -> financial_records.accounting_standard（#859）。
+# 表記は実物で確かめたものだけを置く（2026-10-09: E00317 S100YHJP=Japan GAAP、トヨタ S100Y8NY・
+# S100WYZE・S100K3J3=IFRS、キヤノン S100XTLJ・S100YUDN=US GAAP。年度・半期・旧四半期で同じ）。
+# 修正国際基準（JMIS）は DB に実例が見つからず表記を確かめられないので置かない＝未知として警告し NULL。
+ACCOUNTING_STANDARDS = {"Japan GAAP": "JGAAP", "IFRS": "IFRS", "US GAAP": "US-GAAP"}
+# EDINET が空欄に入れる印。値が無いのと同じに扱う（警告しない）。
+_DEI_BLANK = "－"
+
 
 def _match_capex_by_label(label) -> bool:
     """項目名（日本語ラベル）が設備投資（有形固定資産の取得による支出）に該当するか判定。
@@ -272,6 +288,46 @@ def _col_as_str_list(df, col) -> list:
     落とす（C2 補完で全件失敗の原因）。fillna("") で NaN を先に潰してから変換する。
     """
     return df[col].fillna("").astype(str).tolist()
+
+
+def _extract_dei(df) -> dict:
+    """XBRL df から DEI のメタ（当期種別・当期末日・会計年度末日・会計基準）を1パスで抽出する。"""
+    col_map = _detect_xbrl_columns(df)
+    if not {"element", "value"}.issubset(col_map):
+        return {}
+    elements = _col_as_str_list(df, col_map["element"])
+    values   = _col_as_str_list(df, col_map["value"])
+    want = {_DEI_TYPE, _DEI_PEND, _DEI_FYEND, _DEI_STANDARD}
+    out: dict = {}
+    for raw_elem, val in zip(elements, values):
+        elem = raw_elem.split(":")[-1] if ":" in raw_elem else raw_elem
+        if elem in want and elem not in out:
+            out[elem] = val.strip()
+            if len(out) == len(want):
+                break
+    return out
+
+
+def accounting_standard_from_dei(dei: dict, doc_id: str = "") -> Optional[str]:
+    """DEI の会計基準を `JGAAP` / `IFRS` / `US-GAAP` へ写す（#859）。
+
+    要素が無い・空欄（`－`）は None。写し表に無い表記は推測で丸めず、警告して None
+    （収集は止めない。現れたら表記を実物で確かめて `ACCOUNTING_STANDARDS` へ足す）。
+    """
+    raw = (dei.get(_DEI_STANDARD) or "").strip()
+    if not raw or raw == _DEI_BLANK:
+        return None
+    std = ACCOUNTING_STANDARDS.get(raw)
+    if std is None:
+        log.warning(f"会計基準の表記が未知のため NULL にする: {raw!r} {doc_id}")
+    return std
+
+
+def accounting_standard_of(xbrl_df, doc_id: str = "") -> Optional[str]:
+    """取得した書類から会計基準を読む。書類が無い（取得失敗）なら None。"""
+    if xbrl_df is None or getattr(xbrl_df, "empty", True):
+        return None
+    return accounting_standard_from_dei(_extract_dei(xbrl_df), doc_id)
 
 
 def df_to_raw_rows(df) -> list:
@@ -1075,6 +1131,7 @@ async def _phase_process_docs(db, client, all_docs: list,
                 "period_end":   period_end,
                 "doc_id":       doc_id,
                 "source":       "EDINET_XBRL",
+                "accounting_standard": accounting_standard_of(xbrl_df, doc_id),
             })
             phase = "db"
             upsert_financial(db, rec)
@@ -1210,6 +1267,7 @@ async def refresh_company(edinet_code: str, years_back: int = 5,
                     "period_end":   doc.get("periodEnd", ""),
                     "doc_id":       doc["docID"],
                     "source":       "EDINET_XBRL",
+                    "accounting_standard": accounting_standard_of(xbrl_df, doc["docID"]),
                 })
                 upsert_financial(db, rec)
             db.commit()

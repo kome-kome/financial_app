@@ -220,6 +220,23 @@ class TestOverwriteRules:
         assert _snapshot(db, rid) == before
         assert r.period_mismatch == [("E90001", "D1", "2026-03-31", None)]
 
+    def test_accounting_standard_is_filled_from_dei(self, db, make_fin):
+        """会計基準も書類（DEI）由来で、取り直しで埋まる（#859・既存行は #858 で埋める）。"""
+        rows = _E00317_S100YHJP + [
+            ("jpdei_cor:AccountingStandardsDEI", "FilingDateInstant", "Japan GAAP"),  # S100YHJP の実物
+        ]
+        (rid,) = _add_rows(db, make_fin, 1)
+        r = _run(db, FakeEdinet({"D1": rows}), apply=True, filters=rf.Filters(doc_ids=("D1",)))
+        assert _snapshot(db, rid)["accounting_standard"] == "JGAAP"
+        assert r.examples["accounting_standard"][0][-2:] == (None, "JGAAP")
+
+    def test_unreadable_standard_keeps_the_existing_value(self, db, make_fin):
+        (rid,) = _add_rows(db, make_fin, 1, accounting_standard="JGAAP")
+        r = _run(db, FakeEdinet({"D1": _E00317_S100YHJP}), apply=True,
+                 filters=rf.Filters(doc_ids=("D1",)))
+        assert _snapshot(db, rid)["accounting_standard"] == "JGAAP"
+        assert "accounting_standard" not in r.column_counts
+
     def test_valuation_inputs_are_reported(self, db, make_fin):
         """PER・PBR 等の入力（EPS）が変わった社を一覧にする（市場データは再計算しない）。"""
         (rid,) = _add_rows(db, make_fin, 1, pl_eps=184.78)

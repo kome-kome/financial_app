@@ -28,9 +28,10 @@ from collector_utils import (
     EDINET_BASE, EDINET_MAX_CONSECUTIVE_FAILURES, EdinetAccessError,
     RATE_SLEEP, log, redact_secrets,
 )
+# DEI の抽出と要素名は年度の収集・取り直しと共有する（collector_financials が唯一の源・#859）。
 from collector_financials import (
-    _col_as_str_list, _detect_xbrl_columns, calc_derived, fetch_xbrl_csv,
-    format_xbrl_fetch_stats, parse_xbrl_csv, xbrl_fetch_stats,
+    _DEI_FYEND, _DEI_PEND, _DEI_TYPE, _extract_dei, accounting_standard_from_dei,
+    calc_derived, fetch_xbrl_csv, format_xbrl_fetch_stats, parse_xbrl_csv, xbrl_fetch_stats,
 )
 from database import Company, FinancialRecord, upsert_company, upsert_financial
 
@@ -42,11 +43,6 @@ H1_PERIOD_TYPES_DEI = frozenset({"Q2", "HY"})
 HALF_YEAR_REPORT_DOC_TYPE = "160"
 # financial_records.period_type に格納する半期ラベル。
 INTERIM_PERIOD_TYPE = "H1"
-
-# 抽出する DEI 要素(接頭辞除去後の要素名)。
-_DEI_TYPE  = "TypeOfCurrentPeriodDEI"
-_DEI_PEND  = "CurrentPeriodEndDateDEI"
-_DEI_FYEND = "CurrentFiscalYearEndDateDEI"
 
 
 async def fetch_interim_doc_list(client: httpx.AsyncClient, target_date: date) -> list:
@@ -73,24 +69,6 @@ async def fetch_interim_doc_list(client: httpx.AsyncClient, target_date: date) -
             if d.get("ordinanceCode") == "010"
             and d.get("docTypeCode") in INTERIM_DOC_TYPES
             and d.get("secCode")]
-
-
-def _extract_dei(df) -> dict:
-    """XBRL df から DEI 期間メタ(種別・当期末日・会計年度末日)を1パスで抽出する。"""
-    col_map = _detect_xbrl_columns(df)
-    if not {"element", "value"}.issubset(col_map):
-        return {}
-    elements = _col_as_str_list(df, col_map["element"])
-    values   = _col_as_str_list(df, col_map["value"])
-    want = {_DEI_TYPE, _DEI_PEND, _DEI_FYEND}
-    out: dict = {}
-    for raw_elem, val in zip(elements, values):
-        elem = raw_elem.split(":")[-1] if ":" in raw_elem else raw_elem
-        if elem in want and elem not in out:
-            out[elem] = val.strip()
-            if len(out) == len(want):
-                break
-    return out
 
 
 def build_fy_end_month_map(db) -> dict:
@@ -346,6 +324,7 @@ async def process_interim_docs(db, client, docs: list,
                 "filing_date":  filing_date,
                 "doc_id":       doc_id,
                 "source":       "EDINET_XBRL_H1",
+                "accounting_standard": accounting_standard_from_dei(dei, doc_id),
             })
             upsert_financial(db, rec)
             stat["saved"] += 1
