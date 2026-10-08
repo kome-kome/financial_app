@@ -1,7 +1,7 @@
 """tests/test_macro_snapshots_loaders.py — 週次株価/マクロのローダーと Egress 列絞り（Issue #446）
 
 夜間バッチ（`nightly-scores.yml`）は Supabase 無料枠 5GB/月に対し 1回 86MB を引いていた
-（2026-08-06 実測・内訳は docs/DEPLOYMENT.md）。うち `stock_price_weekly.volume_sum` の
+（2026-08-06 実測・内訳は docs/archive/DEPLOYMENT_HISTORY.md）。うち `stock_price_weekly.volume_sum` の
 12.1MB と `macro_data` の ORM 全列ぶん 6.1MB は、消費側が読まない列だった。
 
 ここで固定するのは「引かない」ことそのものではなく、**引かなかったときに壊れ方が黙らない**
