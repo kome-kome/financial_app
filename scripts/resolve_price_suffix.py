@@ -204,9 +204,9 @@ def _targets(db, reprobe: bool, only: Optional[list], limit: Optional[int],
     """プローブ対象。`yahoo_suffix IS NULL` 条件だけで再開可能性が成立する
     （途中で落ちても、書けたぶんは次回の対象から自動的に外れる＝状態ファイル不要）。
 
-    `bucket` を渡すと `yahoo_probe_bucket` で絞る（#560）。**月次バッチが使うのはこれ**——
-    全数 454社は約8分かかり月次の窓に入らない（Σ予算 925 + マージン 30 に対し窓 960＝
-    余裕5分）。`empty`（取引所は判明・バー0本）の5社だけなら約5秒で収まる。
+    `bucket` を渡すと `yahoo_probe_bucket` で絞る（#560）。#560 当時の月次バッチは `empty`
+    （取引所は判明・バー0本）の数社だけを回していた（全数 454社の約8分が窓の余裕5分に
+    入らなかった）。#841 で窓に余裕ができ、月次は絞らずに全バケットを回す。
 
     `reprobe` は株価を持つ解決済みの社も含む（#769・`SCOPE_REPROBE`）。
     """
@@ -257,7 +257,7 @@ async def _resolve(db, targets: list, d_from: str, d_to: str, sleep: float,
                     # in-memory SQLite が `no such function: now` で落ちる。
                     #
                     # 採用できたら棄却理由は消す（#560）。**残すと「解決済みなのに
-                    # not_found」という読めない状態になる**し、月次の `--bucket empty` が
+                    # not_found」という読めない状態になる**し、`--bucket` で絞ったときに
                     # 解決済みの社を拾い続ける。
                     db.execute(
                         text("UPDATE companies SET yahoo_suffix = :s, "
