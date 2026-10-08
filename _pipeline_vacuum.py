@@ -47,13 +47,15 @@ Database Size が 430MB / 500MB (86%) に達した時点で内訳を測ると、
 > （`raw_xbrl_json` 削除の前例）。定期バッチで走りログに残るこのファイルが正しい置き場所。
 """
 import time
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
 load_dotenv()
 
 from sqlalchemy import text
 
 from database import engine, db_timeouts
+# 親バッチの締切を読む唯一の口（環境変数名と解釈を写さない）。標準ライブラリしか import しない。
+from hyperparameter_search import resolve_deadline
 import _pipeline_utils
 
 LOG_FILE = "logs/pipeline_vacuum.log"
@@ -70,19 +72,39 @@ TARGET_TABLES = ("stock_price_daily", "stock_price_weekly")
 AUTOVACUUM_SCALE_FACTOR = 0.02
 AUTOVACUUM_ANALYZE_SCALE_FACTOR = 0.02
 
-# ⏱ タイムアウト設計（Issue #471）
+# ⏱ タイムアウト設計（Issue #471 → #868）
 # Supabase の postgres ロール既定は statement_timeout=2min / lock_timeout=0（実測）。
 # VACUUM FULL 本体は実測 7.6〜10.4秒（43〜92MB）で 2min に遠く及ばないが、
 # 2026-08-08 の失敗は **きっかり 2分01秒**で打ち切られた＝待っていたのはロックである。
 # lock_timeout=0 のままだと「取れるまで待つ→statement_timeout で殺される」ので、
 #   - lock_timeout を有限にしてロック待ちだけを先に諦めさせ（原因がログで確定する）
-#   - statement_timeout は外して VACUUM 本体を時間で殺さない
-#     （暴走時の歯止めはワークフローの timeout-minutes）
+#   - statement_timeout は固定の上限を置かず、VACUUM 本体を固定値では殺さない
 # ロック保持者は一過性（夜間チェーンの残り・autovacuum）なので、間を空けて数回粘る。
+#
+# **時間の歯止めは起動元ごとに違う（#868）。**
+#   - ローカル月次バッチ（定常・`scripts/run_monthly.py` の `vacuum`・予算15分）: 親が渡す締切
+#     （`FINAPP_STEP_DEADLINE_UTC`）から「残り − DEADLINE_RESERVE_SEC」を statement_timeout に入れる
+#     ＝**サーバー側の VACUUM FULL も締切で打ち切られ、ACCESS EXCLUSIVE ロックが外れる**。予算超過時の
+#     `kill_tree`（`taskkill /F /T`）が止めるのはクライアントだけで、PostgreSQL は文の実行中に
+#     クライアントが消えても次に返事を送ろうとするまで気付かない（それを早める
+#     `client_connection_check_interval` は Windows では使えない）。締切を文へ渡すのはそのため。
+#   - 締切の無い起動（手動の `vacuum-maintenance.yml`・手での直接実行）: 無制限（STATEMENT_TIMEOUT）。
+#     手動の GHA では `timeout-minutes: 30` がジョブを止めるが、止まるのはクライアントだけ。
+# VACUUM FULL は新しい表を作って入れ替える命令なので、途中で打ち切られても作りかけを捨てて
+# 元に戻るだけ＝データは失われない。
 LOCK_TIMEOUT      = "90s"
-STATEMENT_TIMEOUT = "0"     # 無制限。上限はワークフローの timeout-minutes が持つ
+STATEMENT_TIMEOUT = "0"     # 締切が無い起動での値（無制限）。締切があれば _statement_timeout が導く
 MAX_ATTEMPTS      = 3
 RETRY_SLEEP_SEC   = 120
+
+# 締切から statement_timeout を導くときの取り置き（秒）。文が打ち切られた後に、打ち切りを
+# ログへ残して自分から失敗として抜けるまでを、親の kill_tree より先に終えるための時間。
+# 予算15分に対して VACUUM の実測は 0.3分（月次バッチ）なので、本体の時間は圧迫しない。
+DEADLINE_RESERVE_SEC = 60
+
+
+class DeadlineExceeded(RuntimeError):
+    """締切までに VACUUM を始める（または再試行する）時間が残っていない。"""
 
 
 def _table_size(conn, table: str) -> str:
@@ -100,6 +122,29 @@ def _db_size(conn) -> str:
 def _is_lock_timeout(exc) -> bool:
     """lock_timeout での打ち切り（Postgres 55P03 lock_not_available）か。"""
     return getattr(getattr(exc, "orig", None), "pgcode", None) == "55P03"
+
+
+def _is_statement_timeout(exc) -> bool:
+    """statement_timeout での打ち切り（Postgres 57014 query_canceled）か。"""
+    return getattr(getattr(exc, "orig", None), "pgcode", None) == "57014"
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _statement_timeout(deadline, now) -> str | None:
+    """VACUUM の文に渡す statement_timeout（#868）。
+
+    締切が無ければ STATEMENT_TIMEOUT（無制限）。あれば「残り − DEADLINE_RESERVE_SEC」をミリ秒で
+    返す（`db_timeouts` が受け付ける書式）。残りが取り置き以下なら None＝始めない。
+    """
+    if deadline is None:
+        return STATEMENT_TIMEOUT
+    remain_ms = int((deadline - now).total_seconds() * 1000) - DEADLINE_RESERVE_SEC * 1000
+    if remain_ms <= 0:
+        return None
+    return f"{remain_ms}ms"
 
 
 def _log_lock_holders(conn, table: str) -> None:
@@ -170,23 +215,40 @@ def _tune_autovacuum(conn) -> None:
 
 # ── VACUUM FULL ───────────────────────────────────────────────────────────────
 
-def _vacuum_full(conn, table: str) -> None:
-    """1表を VACUUM FULL する。ロック待ちだけ再試行し、それ以外は即送出する。"""
+def _vacuum_full(conn, table: str, deadline=None, now=_utcnow) -> None:
+    """1表を VACUUM FULL する。ロック待ちだけ再試行し、それ以外は即送出する。
+
+    `deadline`（親バッチの締切・#868）があれば、各試行の statement_timeout を締切から導き、
+    締切までに始められない・再試行の待ちが締切を越えるなら DeadlineExceeded で失敗する。
+    """
     for attempt in range(1, MAX_ATTEMPTS + 1):
+        statement = _statement_timeout(deadline, now())
+        if statement is None:
+            raise DeadlineExceeded(
+                f"締切 {deadline.isoformat()} まで {DEADLINE_RESERVE_SEC}秒を切ったので "
+                f"VACUUM FULL {table} を始めない（試行 {attempt}/{MAX_ATTEMPTS}）")
         log(f"VACUUM FULL {table} 実行中...（試行 {attempt}/{MAX_ATTEMPTS}・"
-            f"lock_timeout={LOCK_TIMEOUT} / statement_timeout={STATEMENT_TIMEOUT}）")
+            f"lock_timeout={LOCK_TIMEOUT} / statement_timeout={statement}）")
         t_begin = time.time()
         try:
-            with db_timeouts(conn, statement=STATEMENT_TIMEOUT, lock=LOCK_TIMEOUT):
+            with db_timeouts(conn, statement=statement, lock=LOCK_TIMEOUT):
                 conn.execute(text(f"VACUUM FULL {table}"))
             log(f"  VACUUM 完了（{time.time() - t_begin:.1f}秒）")
             return
         except Exception as e:
+            if _is_statement_timeout(e):
+                log(f"  statement_timeout（{statement}）で打ち切られた＝締切に達した"
+                    f"（{time.time() - t_begin:.1f}秒）。VACUUM FULL は巻き戻るだけでデータは失われない")
+                raise
             if not _is_lock_timeout(e):
                 raise
             log(f"  ロック取得に失敗（{LOCK_TIMEOUT} 待ちで打ち切り）")
             _log_lock_holders(conn, table)
             if attempt == MAX_ATTEMPTS:
+                raise
+            if deadline is not None and (
+                    now() + timedelta(seconds=RETRY_SLEEP_SEC + DEADLINE_RESERVE_SEC) >= deadline):
+                log(f"  {RETRY_SLEEP_SEC}秒待つと締切 {deadline.isoformat()} を越えるので再試行しない")
                 raise
             log(f"  {RETRY_SLEEP_SEC}秒待って再試行する")
             time.sleep(RETRY_SLEEP_SEC)
@@ -197,6 +259,12 @@ def main():
     log("DBメンテナンス（VACUUM FULL）パイプライン 開始")
     log("=" * 60)
 
+    deadline = resolve_deadline()
+    if deadline is None:
+        log(f"締切なし（statement_timeout={STATEMENT_TIMEOUT}＝無制限）")
+    else:
+        log(f"締切 {deadline.isoformat()}（statement_timeout は残り − {DEADLINE_RESERVE_SEC}秒）")
+
     with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
         _tune_autovacuum(conn)
 
@@ -205,7 +273,7 @@ def main():
         log(f"[before] DB全体: {_db_size(conn)}")
 
         for table in TARGET_TABLES:
-            _vacuum_full(conn, table)
+            _vacuum_full(conn, table, deadline)
 
         for table in TARGET_TABLES:
             log(f"[after]  {table}: {_table_size(conn, table)}")
