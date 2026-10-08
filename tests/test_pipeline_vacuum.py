@@ -8,16 +8,19 @@
 2026-08-19（#290 再オープン）に対象を 2 表へ広げ、per-table の autovacuum
 チューニングを前段に足した。ここで担保するのは
 
-  - VACUUM を lock_timeout 有限 / statement_timeout 無制限で実行すること
+  - VACUUM を lock_timeout 有限で実行し、締切が無ければ statement_timeout 無制限であること
   - ロック待ちで落ちたら保持者を記録して再試行し、使い切ったら送出すること
   - ロック待ち以外（本当のエラー）はリトライせず即送出すること
   - **TARGET_TABLES の全表**が VACUUM されること（1表増やしたのに回っていない、を防ぐ）
   - autovacuum チューニングが **VACUUM より先**に走り、かつ**冪等**であること
+  - 親バッチの締切があれば statement_timeout を締切から導き、締切を越えて始めない・待たないこと（#868）
 
-の5点。DB へは一切繋がず、接続をフェイクに差し替えて検証する。
+DB へは一切繋がず、接続をフェイクに差し替えて検証する。
 """
 import os
+import re
 import sys
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -46,10 +49,11 @@ class _FakeConn:
     （pg_class.reloptions が NULL）を返す＝本番の初回と同じ状態。
     """
 
-    def __init__(self, lock_failures=0, fatal=False, reloptions=None):
+    def __init__(self, lock_failures=0, fatal=False, reloptions=None, stmt_timeout=False):
         self.executed: list[str] = []
         self._lock_failures = lock_failures
         self._fatal = fatal
+        self._stmt_timeout = stmt_timeout
         self._reloptions = dict(reloptions or {})
         self.dialect = type("D", (), {"name": "postgresql"})()
 
@@ -59,6 +63,8 @@ class _FakeConn:
         if "VACUUM FULL" in sql:
             if self._fatal:
                 raise _DBError("53100")           # disk full — リトライしてはいけない
+            if self._stmt_timeout:
+                raise _DBError("57014")           # statement_timeout（締切で打ち切り）
             if self._lock_failures > 0:
                 self._lock_failures -= 1
                 raise _DBError("55P03")           # lock_not_available
@@ -105,6 +111,13 @@ class _FakeResult:
                  "00:03:00", "UPDATE stock_price_daily ...")]
 
 
+@pytest.fixture(autouse=True)
+def no_parent_deadline(monkeypatch):
+    """既定は締切なし（手での直接実行・手動の GHA と同じ）。バッチの中から pytest を
+    叩いたときに、親の締切が漏れて既定の検証がぶれないようにする。"""
+    monkeypatch.delenv("FINAPP_STEP_DEADLINE_UTC", raising=False)
+
+
 @pytest.fixture
 def no_sleep(monkeypatch):
     slept = []
@@ -142,8 +155,13 @@ class TestTimeoutKnobs:
         assert "RESET statement_timeout" in conn.executed
 
     def test_statement_timeout_is_unlimited(self):
-        """VACUUM を時間で殺さない（歯止めはワークフローの timeout-minutes）。"""
+        """締切の無い起動（手動の GHA・手での直接実行）では VACUUM を時間で殺さない。
+
+        月次バッチからの起動は締切から導く（TestParentDeadline）。手動の GHA の
+        `timeout-minutes: 30` が止めるのはクライアントだけ（#868）。
+        """
         assert pv.STATEMENT_TIMEOUT == "0"
+        assert pv._statement_timeout(None, datetime.now(timezone.utc)) == "0"
 
     def test_lock_timeout_is_finite(self):
         assert pv.LOCK_TIMEOUT != "0"
@@ -279,3 +297,103 @@ class TestIsLockTimeout:
 
     def test_rejects_plain_exception(self):
         assert pv._is_lock_timeout(RuntimeError("boom")) is False
+
+
+# ── 親バッチの締切（#868）──────────────────────────────────────────────────────
+# 月次バッチは予算超過のステップを kill_tree で落とすが、止まるのはクライアントだけで、
+# サーバー側の VACUUM FULL は ACCESS EXCLUSIVE を握ったまま走りうる。締切を文の
+# statement_timeout へ渡してサーバー側も止める。
+
+def _set_deadline(monkeypatch, delta: timedelta) -> datetime:
+    deadline = datetime.now(timezone.utc) + delta
+    monkeypatch.setenv("FINAPP_STEP_DEADLINE_UTC", deadline.isoformat())
+    return deadline
+
+
+def _statement_timeouts(conn) -> list[str]:
+    return [m.group(1) for sql in conn.executed
+            if (m := re.fullmatch(r"SET statement_timeout = '(.+)'", sql))]
+
+
+class TestParentDeadline:
+    def test_statement_timeout_is_shorter_than_the_remaining_time(
+            self, monkeypatch, no_sleep, logged):
+        _set_deadline(monkeypatch, timedelta(minutes=10))
+        conn = _FakeConn()
+        _run(monkeypatch, conn)
+        pv.main()
+
+        values = _statement_timeouts(conn)
+        assert len(values) == len(pv.TARGET_TABLES)              # 表ごとに1回
+        for v in values:
+            ms = int(re.fullmatch(r"(\d+)ms", v).group(1))
+            assert 0 < ms <= (10 * 60 - pv.DEADLINE_RESERVE_SEC) * 1000
+
+    def test_past_deadline_does_not_start_vacuum(self, monkeypatch, no_sleep, logged):
+        _set_deadline(monkeypatch, timedelta(minutes=-1))
+        conn = _FakeConn()
+        _run(monkeypatch, conn)
+        with pytest.raises(pv.DeadlineExceeded):
+            pv.main()
+
+        assert not any("VACUUM FULL" in sql for sql in conn.executed)
+
+    def test_deadline_inside_the_reserve_does_not_start_vacuum(
+            self, monkeypatch, no_sleep, logged):
+        """取り置きを切っていれば始めない（打ち切りを記録する時間が残らない）。"""
+        _set_deadline(monkeypatch, timedelta(seconds=pv.DEADLINE_RESERVE_SEC // 2))
+        conn = _FakeConn()
+        _run(monkeypatch, conn)
+        with pytest.raises(pv.DeadlineExceeded):
+            pv.main()
+
+        assert not any("VACUUM FULL" in sql for sql in conn.executed)
+
+    def test_retry_wait_does_not_cross_the_deadline(self, monkeypatch, no_sleep, logged):
+        """1回目は始められるが、120秒待つと締切を越える。待たずに失敗する。"""
+        _set_deadline(monkeypatch, timedelta(seconds=pv.DEADLINE_RESERVE_SEC + 30))
+        conn = _FakeConn(lock_failures=1)
+        _run(monkeypatch, conn)
+        with pytest.raises(_DBError):
+            pv.main()
+
+        assert conn.executed.count(f"VACUUM FULL {_first_table()}") == 1
+        assert no_sleep == []
+        assert any("締切" in line and "再試行しない" in line for line in logged)
+
+    def test_retry_happens_when_the_wait_fits(self, monkeypatch, no_sleep, logged):
+        _set_deadline(monkeypatch, timedelta(minutes=10))
+        conn = _FakeConn(lock_failures=1)
+        _run(monkeypatch, conn)
+        pv.main()
+
+        assert conn.executed.count(f"VACUUM FULL {_first_table()}") == 2
+        assert no_sleep == [pv.RETRY_SLEEP_SEC]
+
+    def test_statement_timeout_is_reported_and_not_retried(self, monkeypatch, no_sleep, logged):
+        """締切で打ち切られたら、それと分かるログを出して失敗する（再試行しない）。"""
+        _set_deadline(monkeypatch, timedelta(minutes=10))
+        conn = _FakeConn(stmt_timeout=True)
+        _run(monkeypatch, conn)
+        with pytest.raises(_DBError):
+            pv.main()
+
+        assert conn.executed.count(f"VACUUM FULL {_first_table()}") == 1
+        assert no_sleep == []
+        assert any("statement_timeout" in line and "打ち切られた" in line for line in logged)
+        assert "RESET statement_timeout" in conn.executed            # 接続へ持ち越さない
+
+    def test_derived_value_is_accepted_by_db_timeouts(self):
+        """db_timeouts は書式を正規表現で検証する。導いた値がそれに通ること。"""
+        import database
+        now = datetime.now(timezone.utc)
+        v = pv._statement_timeout(now + timedelta(minutes=15), now)
+        assert database._TIMEOUT_VALUE_RE.match(v)
+        assert pv._statement_timeout(now + timedelta(seconds=pv.DEADLINE_RESERVE_SEC), now) is None
+
+    def test_no_deadline_keeps_unlimited(self, monkeypatch, no_sleep, logged):
+        conn = _FakeConn()
+        _run(monkeypatch, conn)
+        pv.main()
+
+        assert set(_statement_timeouts(conn)) == {pv.STATEMENT_TIMEOUT}
