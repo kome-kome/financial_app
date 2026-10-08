@@ -94,6 +94,7 @@ a{color:inherit}
 .chart-card{background:var(--bg-elevated);border:1px solid var(--border);border-radius:12px;padding:18px;margin-bottom:18px}
 .chart-title{font-size:13px;font-weight:600;color:var(--text-body);margin-bottom:4px}
 .chart-note{font-size:11px;color:var(--text-muted);margin-bottom:12px}
+.chart-note.warn{color:var(--status-warn-text);margin:10px 0 0}
 .chart-box{position:relative;height:340px}
 .chart-box.tall{height:380px}
 .chart-box.xtall{height:440px}
@@ -217,6 +218,7 @@ table.cmp tbody tr:hover td{background:var(--border-subtle)}
           </div>
         </div>
         <div class="chart-box xtall"><canvas id="chart-perf"></canvas></div>
+        <div class="chart-note warn" id="pl-mismatch" role="status" hidden></div>
       </div>
       <div class="chart-card">
         <div class="chart-title">利益率の推移</div>

@@ -293,6 +293,27 @@ def df_to_raw_rows(df) -> list:
     return rows
 
 
+def _context_priority(ctx: str) -> int:
+    """コンテキスト名から、同じ項目の値どうしの優先度を返す（大きいほど優先）。
+
+    _apply_row / _collect_inventory_row 共通（式を書き写さない。#852 では2箇所に同じ穴があった）。
+
+    - 2: 名前で連結を名乗り、単体でもメンバーでもない（旧形式の `CurrentYearConsolidatedDuration` 等）
+    - 1: メンバー無し（現行の EDINET では連結総額がここ。`CurrentYearDuration` は Consolidated を含まない）
+    - 0: メンバー付き（セグメント別・株式種類別等）・単体（NonConsolidatedMember）
+
+    次元メンバーは全て "...Member" で終わる breakdown。"_Member" 限定だと "ReportableSegmentMember"
+    （直前にアンダースコア無し）を取りこぼし、連結総額と同優先度で並んで CSV 順次第で上書きされる
+    （従業員数で顕在化）。メンバーは名前に Consolidated を含んでも 2 にしない——
+    `...ConsolidatedSubsidiariesReportableSegmentsMember` 等のセグメントが連結総額に勝ち、
+    売上高がセグメント1つ分の値になっていた（#852・実測 E00317 / E05663）。
+    """
+    has_member = "Member" in ctx or "NonConsolidated" in ctx
+    if has_member:
+        return 0
+    return 2 if any(k in ctx for k in CONSOLIDATED_KEYS) else 1
+
+
 def _apply_row(
     elem: str, ctx: str, val_raw, cat: str, field: str,
     result: dict, _priority: dict, apply_capex_sign: bool = False,
@@ -300,7 +321,7 @@ def _apply_row(
     """共通フィルタ・優先度計算・結果反映。parse_raw_rows / parse_xbrl_csv の中核共通ロジック。
 
     Prior コンテキストスキップ・OperatingRevenue1 非連結フィルタ・
-    is_consol/has_member/priority 計算・float 変換・priority 更新を担う。
+    優先度計算（_context_priority）・float 変換・priority 更新を担う。
     apply_capex_sign=True のとき capex を負値（支出＝アウトフロー）に統一する。
     """
     # 前期比較データ（Prior1Year等）はスキップ。当期データのみ処理する
@@ -311,13 +332,7 @@ def _apply_row(
     if field == "revenue" and elem.startswith("OperatingRevenue1") and \
             ("NonConsolidated" in ctx or "_Member" in ctx):
         return
-    is_consol  = any(k in ctx for k in CONSOLIDATED_KEYS) and "NonConsolidated" not in ctx
-    # 次元メンバー（セグメント別・株式種類別等）は全て "...Member" で終わる breakdown。
-    # "_Member" 限定だと "ReportableSegmentMember"（直前にアンダースコア無し）を取りこぼし、
-    # 連結総額（メンバー無し context）と同優先度で並んで CSV 順次第で上書きされる（従業員数で顕在化）。
-    # 広く "Member" を breakdown とみなすことで連結総額を確実に優先する。
-    has_member = "Member" in ctx or "NonConsolidated" in ctx
-    priority   = 2 if is_consol else (1 if not has_member else 0)
+    priority = _context_priority(ctx)
     try:
         val = float(str(val_raw).replace(",", ""))
     except (ValueError, TypeError):
@@ -358,9 +373,7 @@ def _collect_inventory_row(elem: str, ctx: str, raw_value, inv_parts: dict, inv_
     """
     if "Prior" in ctx and "CurrentYear" not in ctx:
         return
-    is_consol = any(k in ctx for k in CONSOLIDATED_KEYS) and "NonConsolidated" not in ctx
-    has_member = "Member" in ctx or "NonConsolidated" in ctx
-    prio = 2 if is_consol else (1 if not has_member else 0)
+    prio = _context_priority(ctx)
     try:
         val = float(str(raw_value).replace(",", ""))
     except (ValueError, TypeError):

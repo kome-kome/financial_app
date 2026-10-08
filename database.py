@@ -380,10 +380,16 @@ class FinancialRecord(Base):
     # ── PL（損益計算書）再分類項目 ──────────────────────────────────────
     # 売上高。生 OperatingRevenue1（PL本体）は登録しない: 金融持株会社が単体営業収益を誤採用するため
     # Summary 変種のみ採用。NetSalesIFRS はソニー等が Revenue でなく NetSales を使う IFRS 企業対策。
+    # Revenue2IFRS は売上を「収益」と呼ぶ IFRS 企業の標準タグ、OperatingRevenuesIFRS(KeyFinancialData) は
+    # 「営業収益」を独自拡張でタグ付けする IFRS 企業（トヨタ等）。どれも無いと連結の売上が1つも一致せず、
+    # 単体の NetSales（NonConsolidatedMember）が採られていた（#852）。独自拡張の名前は合計を指すものだけ足す
+    # （トヨタ自身の SalesOfProductsIFRS が商品・製品売上だけの内訳であるように、似た名前が内訳を指しうる）。
     pl_revenue              = Column(Float, info={"xbrl": [
         "NetSales", "Revenues", "NetRevenues", "OperatingRevenues", "Revenue",
         "OperatingRevenue1SummaryOfBusinessResults",
         "RevenueIFRS", "RevenueIFRSSummaryOfBusinessResults",
+        "Revenue2IFRS", "Revenue2IFRSSummaryOfBusinessResults",
+        "OperatingRevenuesIFRS", "OperatingRevenuesIFRSKeyFinancialData",
         "NetSalesIFRS", "NetSalesIFRSSummaryOfBusinessResults",
         "RevenuesUSGAAPSummaryOfBusinessResults",
     ]})  # 売上高

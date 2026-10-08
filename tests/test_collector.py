@@ -432,6 +432,112 @@ class TestMatchCapexByLabel:
         assert _match_capex_by_label(label) is expected
 
 
+# ── 連結の売上高の選択（#852）────────────────────────────────────────────────
+# 検体は 2026-10-08 に EDINET から取得した実際の書類の行（要素ID・コンテキストID・値）を写した。
+# 推測で書くと、実際の書類のタグ名・コンテキスト名を読めないことを検出できない。
+
+def _xbrl_df(rows):
+    return pd.DataFrame(rows, columns=["要素ID", "コンテキストID", "値"])
+
+
+# E02144 トヨタ 2026年度（S100Y8NY）: 連結の営業収益は独自拡張タグ。単体の NetSales が採られていた
+_TOYOTA_S100Y8NY = [
+    ("jpcrp030000-asr_E02144-000:OperatingRevenuesIFRSKeyFinancialData", "CurrentYearDuration", "50684952000000"),
+    ("jpcrp_cor:NetSalesSummaryOfBusinessResults", "CurrentYearDuration_NonConsolidatedMember", "18259979000000"),
+    ("jpcrp030000-asr_E02144-000:SalesOfProductsIFRS", "CurrentYearDuration", "45865949000000"),
+    ("jpigp_cor:CostOfSalesIFRS", "CurrentYearDuration", "39141418000000"),
+    ("jppfs_cor:NetSales", "CurrentYearDuration_NonConsolidatedMember", "18259979000000"),
+]
+# E05156 2026年度（S100YIB5）: 売上を「収益」と呼ぶ IFRS の標準タグ Revenue2IFRS
+_E05156_S100YIB5 = [
+    ("jpcrp030000-asr_E05156-000:Revenue2IFRSSummaryOfBusinessResults", "CurrentYearDuration", "40971000000"),
+    ("jpcrp_cor:NetSalesSummaryOfBusinessResults", "CurrentYearDuration_NonConsolidatedMember", "10171000000"),
+    ("jpigp_cor:Revenue2IFRS", "CurrentYearDuration", "40971000000"),
+    ("jpigp_cor:CostOfSalesIFRS", "CurrentYearDuration", "13285000000"),
+    ("jppfs_cor:NetSales", "CurrentYearDuration_NonConsolidatedMember", "10171000000"),
+]
+# E03345 2023年度（S100QTB3）: 営業収益の独自拡張タグ（トヨタと同名）
+_E03345_S100QTB3 = [
+    ("jpcrp030000-asr_E03345-000:OperatingRevenuesIFRSKeyFinancialData", "CurrentYearDuration", "1000385000000"),
+    ("jpcrp030000-asr_E03345-000:OperatingRevenuesIFRS", "CurrentYearDuration", "1000385000000"),
+    ("jpigp_cor:CostOfSalesIFRS", "CurrentYearDuration", "473074000000"),
+    ("jppfs_cor:NetSales", "CurrentYearDuration_NonConsolidatedMember", "26419000000"),
+]
+# E00317 2026年度（S100YHJP）: 名前に Consolidated を含むセグメントが連結総額に勝っていた
+_E00317_S100YHJP = [
+    ("jppfs_cor:NetSales",
+     "CurrentYearDuration_jpcrp030000-asr_E00317-000ConsolidatedSubsidiariesReportableSegmentsMember",
+     "93814000000"),
+    ("jppfs_cor:NetSales", "CurrentYearDuration", "439615000000"),
+    ("jppfs_cor:NetSales", "CurrentYearDuration_NonConsolidatedMember", "413353000000"),
+]
+# E05663 2026年度（S100Z38F）: 同上
+_E05663_S100Z38F = [
+    ("jppfs_cor:NetSales",
+     "CurrentYearDuration_jpcrp030000-asr_E05663-000ConsolidatedFinancialDisclosureBusinessReportableSegmentMember",
+     "9648249000"),
+    ("jppfs_cor:NetSales", "CurrentYearDuration", "30481393000"),
+    ("jppfs_cor:OperatingRevenue1", "CurrentYearDuration_NonConsolidatedMember", "5524677000"),
+]
+# E01254 2026年度（S100YDBT）: 日本基準の連結。売上総利益が本当に赤字（売上原価 > 売上高）で、選択は変わらない
+_E01254_S100YDBT = [
+    ("jppfs_cor:NetSales", "CurrentYearDuration", "9414000000"),
+    ("jppfs_cor:CostOfSales", "CurrentYearDuration", "12555000000"),
+    ("jppfs_cor:NetSales", "CurrentYearDuration_NonConsolidatedMember", "8679000000"),
+    ("jppfs_cor:CostOfSales", "CurrentYearDuration_NonConsolidatedMember", "11861000000"),
+]
+
+
+class TestConsolidatedRevenue:
+    """連結の売上高が単体・セグメントの値に負けないこと（#852）。行の並びに依存しないことも縛る。"""
+
+    @pytest.mark.parametrize("rows, revenue", [
+        (_TOYOTA_S100Y8NY, 50684952000000.0),
+        (_E05156_S100YIB5, 40971000000.0),
+        (_E03345_S100QTB3, 1000385000000.0),
+        (_E00317_S100YHJP, 439615000000.0),
+        (_E05663_S100Z38F, 30481393000.0),
+        (_E01254_S100YDBT, 9414000000.0),
+    ], ids=["E02144", "E05156", "E03345", "E00317", "E05663", "E01254-unchanged"])
+    @pytest.mark.parametrize("order", ["as_filed", "reversed"])
+    def test_consolidated_revenue_is_chosen(self, rows, revenue, order):
+        rows = rows if order == "as_filed" else rows[::-1]
+        assert parse_xbrl_csv(_xbrl_df(rows), "E00000", "2026-03-31")["pl"]["revenue"] == revenue
+
+    @pytest.mark.parametrize("order", ["as_filed", "reversed"])
+    def test_parse_raw_rows_agrees(self, order):
+        rows = _E00317_S100YHJP if order == "as_filed" else _E00317_S100YHJP[::-1]
+        raw = [{"element": e.split(":")[-1], "context": c, "value": v} for e, c, v in rows]
+        assert parse_raw_rows(raw)["pl"]["revenue"] == 439615000000.0
+
+    def test_revenue_and_cost_share_the_consolidated_basis(self):
+        """トヨタ: 売上高と売上原価が同じ連結の基準になる（食い違いの本体）。"""
+        pl = parse_xbrl_csv(_xbrl_df(_TOYOTA_S100Y8NY), "E02144", "2026-03-31")["pl"]
+        assert pl["revenue"] == 50684952000000.0
+        assert pl["cost_of_sales"] == 39141418000000.0
+        assert pl["cost_of_sales"] < pl["revenue"]
+
+    def test_new_revenue_tags_are_mapped(self):
+        for tag in ("Revenue2IFRS", "Revenue2IFRSSummaryOfBusinessResults",
+                    "OperatingRevenuesIFRS", "OperatingRevenuesIFRSKeyFinancialData"):
+            assert XBRL_MAP[tag] == ("pl", "revenue")
+
+    def test_component_extension_tags_are_not_mapped(self):
+        """トヨタの SalesOfProductsIFRS は商品・製品売上だけの内訳。合計に似た名前を足していない。"""
+        assert "SalesOfProductsIFRS" not in XBRL_MAP
+
+    @pytest.mark.parametrize("ctx, priority", [
+        ("CurrentYearConsolidatedDuration", 2),  # 旧形式: 名前で連結を名乗る
+        ("CurrentYearDuration", 1),               # 現行の連結総額
+        ("CurrentYearDuration_NonConsolidatedMember", 0),
+        ("CurrentYearDuration_jpcrp030000-asr_E00317-000ConsolidatedSubsidiariesReportableSegmentsMember", 0),
+        ("CurrentYearDuration_ConsolidatedAccountingGroupMember", 0),
+        ("CurrentYearInstant_jpcrp030000-asr_E03144-000NITORIReportableSegmentMember", 0),
+    ])
+    def test_context_priority(self, ctx, priority):
+        assert collector_financials._context_priority(ctx) == priority
+
+
 # ── calc_derived ─────────────────────────────────────────────────────────────
 
 class TestCalcDerived:
