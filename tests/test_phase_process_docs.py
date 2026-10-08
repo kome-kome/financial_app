@@ -9,6 +9,7 @@ import os
 import sys
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pandas as pd
 from sqlalchemy.exc import OperationalError
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -105,3 +106,38 @@ class TestPhaseProcessDocsFailSoft:
 
         assert result == (0, False)
         assert db.rollback.call_count == 2      # 各社で rollback 試行
+
+
+class TestAccountingStandardIsSaved:
+    """年度の収集が書類の DEI から会計基準を読み、upsert_financial へ渡す（#859）。"""
+
+    def test_dei_standard_reaches_upsert(self):
+        # 実物 S100XTLJ（キヤノン・有価証券報告書）の DEI 行＋売上高の行の形
+        df = pd.DataFrame([
+            ("jpdei_cor:AccountingStandardsDEI", "FilingDateInstant", "US GAAP"),
+            ("jpdei_cor:CurrentPeriodEndDateDEI", "FilingDateInstant", "2025-12-31"),
+            ("jpcrp_cor:RevenuesUSGAAPSummaryOfBusinessResults", "CurrentYearDuration", "4624727000000"),
+        ], columns=["要素ID", "コンテキストID", "値"])
+        docs = [_doc("S100XTLJ", "E00001", period="2025-12-31")]
+        with (
+            patch("collector_financials.fetch_xbrl_csv", new=AsyncMock(return_value=df)),
+            patch("collector_financials.upsert_financial") as upsert,
+        ):
+            _run(docs)
+
+        rec = upsert.call_args.args[1]
+        assert rec["accounting_standard"] == "US-GAAP"
+        assert rec["pl"]["revenue"] == 4624727000000.0
+
+    def test_unreadable_standard_is_none_and_still_saved(self):
+        df = pd.DataFrame([
+            ("jppfs_cor:NetSales", "CurrentYearDuration", "100"),
+        ], columns=["要素ID", "コンテキストID", "値"])
+        with (
+            patch("collector_financials.fetch_xbrl_csv", new=AsyncMock(return_value=df)),
+            patch("collector_financials.upsert_financial") as upsert,
+        ):
+            _run([_doc("S1", "E00001")])
+
+        assert upsert.call_count == 1
+        assert upsert.call_args.args[1]["accounting_standard"] is None

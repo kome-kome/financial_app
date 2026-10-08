@@ -252,6 +252,20 @@ class TestHalfYearPeriodKind:
         assert rec.year == 2026           # 同一会計年度の通期行（2026-03-31）と同じ year
         assert rec.pl_revenue == 3758000000
 
+    def test_accounting_standard_is_saved(self, monkeypatch, db):
+        """H1 の保存でも DEI の会計基準を入れる（#859）。行は実物 S100YUDN（キヤノン・半期報告書）。"""
+        df = _dei_df("HY", [
+            ["jpdei_cor:AccountingStandardsDEI", "FilingDateInstant", "US GAAP"],
+            ["jppfs_cor:NetSales", "InterimDuration", "100"],
+        ])
+        assert self._run(monkeypatch, db, df)["saved"] == 1
+        assert db.query(FinancialRecord).one().accounting_standard == "US-GAAP"
+
+    def test_missing_accounting_standard_is_null_and_still_saved(self, monkeypatch, db):
+        df = _dei_df("HY", [["jppfs_cor:NetSales", "InterimDuration", "100"]])
+        assert self._run(monkeypatch, db, df)["saved"] == 1
+        assert db.query(FinancialRecord).one().accounting_standard is None
+
     def test_q2_is_still_saved(self, monkeypatch, db):
         df = _dei_df("Q2", [["jppfs_cor:NetSales", "CurrentYTDDuration", "100"]])
         assert self._run(monkeypatch, db, df)["saved"] == 1
