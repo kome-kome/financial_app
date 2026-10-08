@@ -9,7 +9,7 @@
 :root{
   --bg:#0f1117;--bg-elevated:#1a1d2e;--bg-sunken:#0f1117;--bg-hover:#1e293b;
   --border:#2d3154;--border-muted:#334155;--border-subtle:#1e2235;
-  --text:#e2e8f0;--text-secondary:#94a3b8;--text-muted:#64748b;--text-body:#cbd5e1;
+  --text:#e2e8f0;--text-secondary:#94a3b8;--text-muted:#8291a7;--text-body:#cbd5e1;
   --accent:#7c3aed;--accent-hover:#6d28d9;--accent-text:#a78bfa;
   --accent-soft-bg:#312e81;--accent-soft-text:#c4b5fd;--accent-deep-bg:#2e1065;
   --status-good:#10b981;--status-good-bg:#052e16;--status-good-text:#86efac;
@@ -24,7 +24,7 @@
 :root[data-theme="light"]{
   --bg:#f8fafc;--bg-elevated:#ffffff;--bg-sunken:#f1f5f9;--bg-hover:#e2e8f0;
   --border:#e2e8f0;--border-muted:#cbd5e1;--border-subtle:#e5e7eb;
-  --text:#0f172a;--text-secondary:#475569;--text-muted:#94a3b8;--text-body:#334155;
+  --text:#0f172a;--text-secondary:#475569;--text-muted:#56657a;--text-body:#334155;
   --accent:#7c3aed;--accent-hover:#6d28d9;--accent-text:#6d28d9;
   --accent-soft-bg:#ede9fe;--accent-soft-text:#6d28d9;--accent-deep-bg:#ddd6fe;
   --status-good:#059669;--status-good-bg:#d1fae5;--status-good-text:#065f46;
@@ -37,6 +37,7 @@
   --shadow-color:rgba(0,0,0,.12);
 }
 *{box-sizing:border-box;margin:0;padding:0}
+:focus-visible{outline:2px solid var(--accent-text);outline-offset:2px}
 body{font-family:'Segoe UI',sans-serif;background:var(--bg);color:var(--text);min-height:100vh}
 a{color:inherit}
 .header{background:var(--bg-elevated);border-bottom:1px solid var(--border);padding:14px 24px;display:flex;align-items:center;gap:10px 14px;flex-wrap:wrap;position:sticky;top:0;z-index:20}
@@ -52,12 +53,13 @@ a{color:inherit}
 /* search */
 .search-wrap{position:relative;flex:1;max-width:420px}
 .search-input{width:100%;background:var(--bg-sunken);border:1px solid var(--border);border-radius:8px;padding:8px 12px;color:var(--text);font-size:13px}
-.search-input:focus{outline:none;border-color:var(--accent)}
+.search-input:focus{border-color:var(--accent)}
 .search-results{position:absolute;top:calc(100% + 4px);left:0;right:0;background:var(--bg-elevated);border:1px solid var(--border);border-radius:8px;max-height:340px;overflow-y:auto;z-index:30;display:none;box-shadow:0 8px 24px var(--shadow-color)}
 .search-results.show{display:block}
 .search-item{padding:9px 12px;cursor:pointer;border-bottom:1px solid var(--border-subtle);font-size:13px;display:flex;align-items:center;gap:10px}
 .search-item:last-child{border-bottom:none}
 .search-item:hover{background:var(--border-subtle)}
+.search-item[aria-selected="true"]{background:var(--bg-hover);box-shadow:inset 3px 0 0 var(--accent-text)}
 .search-item .code{color:var(--status-info);font-weight:600;font-family:'Consolas','Menlo',monospace;font-size:12px}
 .search-item .ind{color:var(--text-muted);font-size:11px;margin-left:auto}
 
@@ -78,9 +80,9 @@ a{color:inherit}
 /* summary cards */
 .stats-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:24px}
 .stat-card{background:var(--bg-elevated);border:1px solid var(--border);border-radius:10px;padding:14px;text-align:center}
-.stat-label{font-size:10px;color:var(--text-muted);margin-bottom:6px;text-transform:uppercase;letter-spacing:.5px}
+.stat-label{font-size:11px;color:var(--text-muted);margin-bottom:6px;text-transform:uppercase;letter-spacing:.5px}
 .stat-value{font-size:20px;font-weight:700;line-height:1.1;color:var(--text)}
-.stat-sub{font-size:10px;color:var(--text-muted);margin-top:3px}
+.stat-sub{font-size:11px;color:var(--text-muted);margin-top:3px}
 
 /* tabs */
 .tabs{display:flex;gap:4px;border-bottom:1px solid var(--border);margin-bottom:18px;flex-wrap:wrap}
@@ -118,6 +120,13 @@ table.cmp tr.me td{color:var(--text);font-weight:600}
 table.cmp a{color:var(--status-info);text-decoration:none}
 table.cmp a:hover{text-decoration:underline}
 table.cmp tbody tr:hover td{background:var(--border-subtle)}
+/* 通知トースト（showNotif・common.js）。エラーは閉じるまで残る */
+.notif-stack{position:fixed;right:16px;bottom:16px;z-index:100;display:flex;flex-direction:column;gap:8px;max-width:min(440px,calc(100vw - 32px))}
+.notif{display:flex;align-items:flex-start;gap:10px;padding:10px 12px;border-radius:8px;border:1px solid var(--border);background:var(--bg-elevated);color:var(--text);font-size:13px;line-height:1.5;box-shadow:0 8px 24px var(--shadow-color);overflow-wrap:anywhere}
+.notif-error{background:var(--status-bad-bg);color:var(--status-bad-text);border-color:var(--status-bad)}
+.notif-success{background:var(--status-good-bg);color:var(--status-good-text);border-color:var(--status-good)}
+.notif-msg{flex:1;min-width:0}
+.notif-close{background:none;border:none;color:inherit;font-size:18px;line-height:1;cursor:pointer;padding:0 2px}
 
 @media (max-width:768px){
   .stats-grid{grid-template-columns:1fr 1fr}
@@ -144,8 +153,8 @@ table.cmp tbody tr:hover td{background:var(--border-subtle)}
   </a>
   <h1>企業詳細</h1>
   <div class="search-wrap">
-    <input type="text" class="search-input" id="search-input" placeholder="企業名・証券コードで検索…" autocomplete="off" aria-label="企業検索">
-    <div class="search-results" id="search-results" role="listbox"></div>
+    <input type="text" class="search-input" id="search-input" placeholder="企業名・証券コードで検索…" autocomplete="off" aria-label="企業検索" role="combobox" aria-expanded="false" aria-controls="search-results" aria-autocomplete="list">
+    <div class="search-results" id="search-results" role="listbox" aria-label="検索候補"></div>
   </div>
   <button id="theme-toggle" class="theme-toggle-btn" title="ライト/ダーク切替" aria-label="テーマ切替">🌙</button>
   <a href="/" class="home-link">
@@ -183,18 +192,18 @@ table.cmp tbody tr:hover td{background:var(--border-subtle)}
     <div class="stats-grid s10" id="summary-cards"></div>
 
     <div class="tabs" role="tablist">
-      <button class="tab active" data-tab="perf" role="tab">業績</button>
-      <button class="tab" data-tab="bs" role="tab">財務(BS)</button>
-      <button class="tab" data-tab="cf" role="tab">キャッシュフロー</button>
-      <button class="tab" data-tab="psh" role="tab">per-share・配当</button>
-      <button class="tab" data-tab="val" role="tab">バリュエーション</button>
-      <button class="tab" data-tab="price" role="tab">株価</button>
-      <button class="tab" data-tab="zscore" role="tab">業種内</button>
-      <button class="tab" data-tab="nc" role="tab">ネットキャッシュ</button>
-      <button class="tab" data-tab="peer" role="tab">同業比較</button>
+      <button class="tab active" data-tab="perf" role="tab" id="tab-perf" aria-controls="panel-perf" aria-selected="true" tabindex="0">業績</button>
+      <button class="tab" data-tab="bs" role="tab" id="tab-bs" aria-controls="panel-bs" aria-selected="false" tabindex="-1">財務(BS)</button>
+      <button class="tab" data-tab="cf" role="tab" id="tab-cf" aria-controls="panel-cf" aria-selected="false" tabindex="-1">キャッシュフロー</button>
+      <button class="tab" data-tab="psh" role="tab" id="tab-psh" aria-controls="panel-psh" aria-selected="false" tabindex="-1">per-share・配当</button>
+      <button class="tab" data-tab="val" role="tab" id="tab-val" aria-controls="panel-val" aria-selected="false" tabindex="-1">バリュエーション</button>
+      <button class="tab" data-tab="price" role="tab" id="tab-price" aria-controls="panel-price" aria-selected="false" tabindex="-1">株価</button>
+      <button class="tab" data-tab="zscore" role="tab" id="tab-zscore" aria-controls="panel-zscore" aria-selected="false" tabindex="-1">業種内</button>
+      <button class="tab" data-tab="nc" role="tab" id="tab-nc" aria-controls="panel-nc" aria-selected="false" tabindex="-1">ネットキャッシュ</button>
+      <button class="tab" data-tab="peer" role="tab" id="tab-peer" aria-controls="panel-peer" aria-selected="false" tabindex="-1">同業比較</button>
     </div>
 
-    <div class="panel active" id="panel-perf">
+    <div class="panel active" id="panel-perf" role="tabpanel" aria-labelledby="tab-perf">
       <div class="chart-card">
         <div class="bs-head">
           <div>
@@ -226,7 +235,7 @@ table.cmp tbody tr:hover td{background:var(--border-subtle)}
       </div>
     </div>
 
-    <div class="panel" id="panel-bs">
+    <div class="panel" id="panel-bs" role="tabpanel" aria-labelledby="tab-bs">
       <div class="chart-card">
         <div class="bs-head">
           <div>
@@ -248,7 +257,7 @@ table.cmp tbody tr:hover td{background:var(--border-subtle)}
       </div>
     </div>
 
-    <div class="panel" id="panel-cf">
+    <div class="panel" id="panel-cf" role="tabpanel" aria-labelledby="tab-cf">
       <div class="chart-card">
         <div class="bs-head">
           <div>
@@ -265,7 +274,7 @@ table.cmp tbody tr:hover td{background:var(--border-subtle)}
       </div>
     </div>
 
-    <div class="panel" id="panel-psh">
+    <div class="panel" id="panel-psh" role="tabpanel" aria-labelledby="tab-psh">
       <div class="chart-card">
         <div class="chart-title">1株当たり指標（EPS・DPS・BPS）</div>
         <div class="chart-note">棒＝EPS・DPS（円）／折れ線＝BPS（右軸・円）</div>
@@ -278,7 +287,7 @@ table.cmp tbody tr:hover td{background:var(--border-subtle)}
       </div>
     </div>
 
-    <div class="panel" id="panel-val">
+    <div class="panel" id="panel-val" role="tabpanel" aria-labelledby="tab-val">
       <div class="chart-card">
         <div class="chart-title">バリュエーション（PER・PBR）の推移</div>
         <div class="chart-note">PER・PBR（倍）。収集時点の株価ベース</div>
@@ -291,7 +300,7 @@ table.cmp tbody tr:hover td{background:var(--border-subtle)}
       </div>
     </div>
 
-    <div class="panel" id="panel-price">
+    <div class="panel" id="panel-price" role="tabpanel" aria-labelledby="tab-price">
       <div class="chart-card">
         <div class="bs-head">
           <div>
@@ -310,7 +319,7 @@ table.cmp tbody tr:hover td{background:var(--border-subtle)}
       </div>
     </div>
 
-    <div class="panel" id="panel-zscore">
+    <div class="panel" id="panel-zscore" role="tabpanel" aria-labelledby="tab-zscore">
       <div class="chart-card">
         <div class="chart-title">業種内ポジション（Zスコア・最新年度） <span style="color:var(--accent-text)">（本ツール独自）</span></div>
         <div class="chart-note">同一業種・同一年度内での標準化偏差。0＝業種平均、外側ほど高い（D/Eレシオは高いほど負債が多い点に注意）。｜<a href="/analysis?tab=recommend" style="color:var(--accent-text)">横断ランキング（おすすめ銘柄）→</a></div>
@@ -318,7 +327,7 @@ table.cmp tbody tr:hover td{background:var(--border-subtle)}
       </div>
     </div>
 
-    <div class="panel" id="panel-nc">
+    <div class="panel" id="panel-nc" role="tabpanel" aria-labelledby="tab-nc">
       <div class="chart-card">
         <div class="chart-title">清原式ネットキャッシュ <span style="color:var(--accent-text)">（本ツール独自）</span></div>
         <div class="chart-note">NC＝流動資産＋投資有価証券×0.7−総負債（億円）／NC比率＝NC÷時価総額（倍。1.0超で時価総額を上回るネットキャッシュ）｜<a href="/analysis?tab=net_cash" style="color:var(--accent-text)">横断ランキング（ネットキャッシュ分析）→</a></div>
@@ -326,7 +335,7 @@ table.cmp tbody tr:hover td{background:var(--border-subtle)}
       </div>
     </div>
 
-    <div class="panel" id="panel-peer">
+    <div class="panel" id="panel-peer" role="tabpanel" aria-labelledby="tab-peer">
       <div class="chart-card">
         <div class="chart-title">同業比較（同一業種）</div>
         <div class="chart-note" id="peer-note">同一業種の企業を横断比較します。指標は最新年度ベース。</div>

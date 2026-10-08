@@ -434,7 +434,7 @@ async function loadDB(){
       tr.innerHTML = `
         <td><span class="tag tag-blue">${esc(c.sec_code)||'-'}</span></td>
         <td>${c.edinet_code ? `<a href="/company/${esc(c.edinet_code)}" class="co-link" style="font-weight:500">${esc(c.name)}</a>` : esc(c.name)}</td>
-        <td><span class="tag tag-amber" style="font-size:10px">${esc(c.industry)||'-'}</span></td>
+        <td><span class="tag tag-amber" style="font-size:11px">${esc(c.industry)||'-'}</span></td>
         <td>${latest?.year!=null?Number(latest.year):'-'}</td>
         <td>${latest ? fmt0(latest.pl.revenue/1e6) : '-'}</td>
         <td class="${latest?.pl.op_margin>0?'text-green':''}">${latest?.pl.op_margin!=null?Number(latest.pl.op_margin)+'%':'-'}</td>
@@ -566,7 +566,7 @@ async function showDetail(code, name){
     document.getElementById('modal-detail').classList.remove('hidden');
   }catch(e){ log('詳細取得失敗: '+e.message,'error') }
 }
-function statCard(t,v){ return `<div style="background:${cssVar('--bg-sunken')};border-radius:6px;padding:10px"><div style="font-size:10px;color:${cssVar('--text-muted')}">${t}</div><div style="font-size:16px;font-weight:600">${v}</div></div>` }
+function statCard(t,v){ return `<div style="background:${cssVar('--bg-sunken')};border-radius:6px;padding:10px"><div style="font-size:11px;color:${cssVar('--text-muted')}">${t}</div><div style="font-size:16px;font-weight:600">${v}</div></div>` }
 function closeModal(){ document.getElementById('modal-detail').classList.add('hidden') }
 
 // ── 株価履歴収集 ────────────────────────────────────────────────────
@@ -684,8 +684,8 @@ async function loadMacroCoverage(){
     const catColor = {fx:'tag-blue', rate:'tag-amber', equity:'tag-purple', commodity:'tag-amber'};
     tbody.innerHTML = d.series.map(s => `
       <tr>
-        <td><strong>${esc(s.name)}</strong><br><span style="font-size:10px;color:${cssVar('--text-muted')}">${esc(s.code)} / ${esc(s.ticker)}</span></td>
-        <td><span class="tag ${catColor[s.category]||'tag-gray'}" style="font-size:10px">${catLabel[s.category]||s.category}</span></td>
+        <td><strong>${esc(s.name)}</strong><br><span style="font-size:11px;color:${cssVar('--text-muted')}">${esc(s.code)} / ${esc(s.ticker)}</span></td>
+        <td><span class="tag ${catColor[s.category]||'tag-gray'}" style="font-size:11px">${catLabel[s.category]||s.category}</span></td>
         <td>${s.rows.toLocaleString()}</td>
         <td>${s.oldest||`<span style="color:${cssVar('--text-muted')}">—</span>`}</td>
         <td>${s.newest||`<span style="color:${cssVar('--text-muted')}">—</span>`}</td>
@@ -846,8 +846,8 @@ function renderScreenResults(){
     const score = calcScore(r);
     return `<tr>
       <td><span class="tag tag-blue">${esc(r.sec_code||r.edinet_code)}</span></td>
-      <td>${r.edinet_code ? `<a href="/company/${esc(r.edinet_code)}" class="co-link" style="font-weight:500">${esc(r.company_name)}</a>` : esc(r.company_name)}${r.is_active === false ? ' <span class="tag tag-red" style="font-size:10px">廃止</span>' : ''}</td>
-      <td><span class="tag tag-amber" style="font-size:10px">${esc(r.industry)||'-'}</span></td>
+      <td>${r.edinet_code ? `<a href="/company/${esc(r.edinet_code)}" class="co-link" style="font-weight:500">${esc(r.company_name)}</a>` : esc(r.company_name)}${r.is_active === false ? ' <span class="tag tag-red" style="font-size:11px">廃止</span>' : ''}</td>
+      <td><span class="tag tag-amber" style="font-size:11px">${esc(r.industry)||'-'}</span></td>
       <td>${r.val?.per!=null?Number(r.val.per):'-'}</td>
       <td>${r.val?.pbr!=null?Number(r.val.pbr):'-'}</td>
       <td class="${(r.val?.roe||0)>10?'text-green':'text-amber'}">${r.val?.roe!=null?Number(r.val.roe):'-'}</td>

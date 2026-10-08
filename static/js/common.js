@@ -40,14 +40,32 @@ initTheme();
 
 // ── 通知トースト ────────────────────────────────────────────────────
 
+// エラーは閉じるまで残す（読み終える前に消えると、何が失敗したのか分からない）。成功は 4 秒で消す。
+// 見た目（.notif-stack / .notif）は showNotif を呼ぶ画面のテンプレートが持つ（tests/test_templates_a11y.py が照合）。
 function showNotif(msg, type = 'error') {
+  let stack = document.getElementById('notif-stack');
+  if (!stack) {
+    stack = document.createElement('div');
+    stack.id = 'notif-stack';
+    stack.className = 'notif-stack';
+    document.body.appendChild(stack);
+  }
   const el = document.createElement('div');
-  el.textContent = msg;
   el.setAttribute('role', type === 'error' ? 'alert' : 'status');
   el.setAttribute('aria-live', type === 'error' ? 'assertive' : 'polite');
   el.className = `notif notif-${type}`;
-  document.body.appendChild(el);
-  setTimeout(() => el.remove(), 4000);
+  const text = document.createElement('span');
+  text.className = 'notif-msg';
+  text.textContent = msg;
+  const close = document.createElement('button');
+  close.type = 'button';
+  close.className = 'notif-close';
+  close.setAttribute('aria-label', '閉じる');
+  close.textContent = '×';
+  close.addEventListener('click', () => el.remove());
+  el.append(text, close);
+  stack.appendChild(el);
+  if (type !== 'error') setTimeout(() => el.remove(), 4000);
 }
 
 // ── 認証 ────────────────────────────────────────────────────────────

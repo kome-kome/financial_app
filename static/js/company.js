@@ -39,54 +39,117 @@ function currentCode(){
   return m ? decodeURIComponent(m[1]) : null;
 }
 
-// ── 検索 ──────────────────────────────────────────────────────
+// ── 検索（combobox: フォーカスは入力欄に置いたまま、↑↓で候補を選び Enter で開く） ──
 let searchTimer = null;
+let shownQuery = null;   // 一覧に出ている結果がどの語に対するものか（Enter が古い語の結果を開かないため）
+let activeIdx = -1;
 const searchInput = document.getElementById('search-input');
 const searchResults = document.getElementById('search-results');
+
+function searchOptions(){ return [...searchResults.querySelectorAll('.search-item[data-code]')]; }
+function openCompany(el){ location.href = '/company/' + el.dataset.code; }
+function setActiveOption(i){
+  const opts = searchOptions();
+  activeIdx = i;
+  opts.forEach((el, k) => el.setAttribute('aria-selected', k === i ? 'true' : 'false'));
+  if (i >= 0 && opts[i]){
+    searchInput.setAttribute('aria-activedescendant', opts[i].id);
+    opts[i].scrollIntoView({block:'nearest'});
+  } else {
+    searchInput.removeAttribute('aria-activedescendant');
+  }
+}
+function openResults(){ searchResults.classList.add('show'); searchInput.setAttribute('aria-expanded', 'true'); }
+function closeResults(){
+  searchResults.classList.remove('show');
+  searchInput.setAttribute('aria-expanded', 'false');
+  setActiveOption(-1);
+}
 
 searchInput.addEventListener('input', () => {
   clearTimeout(searchTimer);
   const q = searchInput.value.trim();
-  if (q.length < 1){ searchResults.classList.remove('show'); searchResults.innerHTML=''; return; }
+  if (q.length < 1){ closeResults(); searchResults.innerHTML=''; shownQuery = null; return; }
   searchTimer = setTimeout(() => runSearch(q), 250);
 });
 searchInput.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape'){ searchResults.classList.remove('show'); }
+  const opts = searchOptions();
+  if (e.key === 'ArrowDown' || e.key === 'ArrowUp'){
+    if (!opts.length) return;
+    e.preventDefault();
+    const step = e.key === 'ArrowDown' ? 1 : -1;
+    if (!searchResults.classList.contains('show')) openResults();
+    setActiveOption(activeIdx < 0 ? (step > 0 ? 0 : opts.length - 1)
+                                  : (activeIdx + step + opts.length) % opts.length);
+  } else if (e.key === 'Enter'){
+    const q = searchInput.value.trim();
+    if (!q) return;
+    e.preventDefault();
+    if (activeIdx >= 0 && opts[activeIdx]){ openCompany(opts[activeIdx]); return; }
+    if (shownQuery === q && opts.length){ openCompany(opts[0]); return; }
+    // 今の語の結果がまだ出ていない。待たずに引くが、開くかは結果を見た人が決める
+    clearTimeout(searchTimer);
+    runSearch(q);
+  } else if (e.key === 'Escape' || e.key === 'Tab'){
+    closeResults();
+  }
 });
 document.addEventListener('click', (e) => {
-  if (!e.target.closest('.search-wrap')) searchResults.classList.remove('show');
+  if (!e.target.closest('.search-wrap')) closeResults();
 });
 
 async function runSearch(q){
   try{
     const d = await apiFetch('/api/companies?limit=20&q=' + encodeURIComponent(q));
     if (!d) return;
+    if (q !== searchInput.value.trim()) return;   // 遅れて届いた古い語の結果は捨てる
+    shownQuery = q;
     if (!d.items || d.items.length === 0){
       searchResults.innerHTML = '<div class="search-item" style="color:var(--text-muted);cursor:default">該当する企業がありません</div>';
-      searchResults.classList.add('show');
+      setActiveOption(-1);
+      openResults();
       return;
     }
-    searchResults.innerHTML = d.items.map(c => `
-      <div class="search-item" role="option" data-code="${esc(c.edinet_code)}">
+    searchResults.innerHTML = d.items.map((c, i) => `
+      <div class="search-item" role="option" id="search-opt-${i}" aria-selected="false" data-code="${esc(c.edinet_code)}">
         <span class="code">${esc(c.sec_code || '----')}</span>
         <span>${esc(c.name)}</span>
         <span class="ind">${esc(c.industry || '')}</span>
       </div>`).join('');
     searchResults.querySelectorAll('.search-item[data-code]').forEach(el => {
-      el.addEventListener('click', () => { location.href = '/company/' + el.dataset.code; });
+      el.addEventListener('click', () => openCompany(el));
     });
-    searchResults.classList.add('show');
+    setActiveOption(-1);
+    openResults();
   }catch(e){ showNotif('検索に失敗しました: ' + e.message); }
 }
 
-// ── タブ ──────────────────────────────────────────────────────
-document.querySelectorAll('.tab').forEach(t => {
-  t.addEventListener('click', () => {
-    document.querySelectorAll('.tab').forEach(x => x.classList.remove('active'));
-    document.querySelectorAll('.panel').forEach(x => x.classList.remove('active'));
-    t.classList.add('active');
-    document.getElementById('panel-' + t.dataset.tab).classList.add('active');
-    if (t.dataset.tab === 'peer' && !peersLoaded) loadPeers();
+// ── タブ（role=tab。Tab キーは選択中のタブにだけ止まり、列の中は ←→/Home/End で動く） ──
+const tabs = [...document.querySelectorAll('.tab')];
+function selectTab(t, focus){
+  tabs.forEach(x => {
+    const on = x === t;
+    x.classList.toggle('active', on);
+    x.setAttribute('aria-selected', on ? 'true' : 'false');
+    x.tabIndex = on ? 0 : -1;
+  });
+  document.querySelectorAll('.panel').forEach(x => x.classList.remove('active'));
+  document.getElementById('panel-' + t.dataset.tab).classList.add('active');
+  if (focus) t.focus();
+  if (t.dataset.tab === 'peer' && !peersLoaded) loadPeers();
+}
+tabs.forEach((t, i) => {
+  t.addEventListener('click', () => selectTab(t, false));
+  t.addEventListener('keydown', (e) => {
+    const n = tabs.length;
+    const j = e.key === 'ArrowRight' ? (i + 1) % n
+            : e.key === 'ArrowLeft'  ? (i - 1 + n) % n
+            : e.key === 'Home'       ? 0
+            : e.key === 'End'        ? n - 1
+            : -1;
+    if (j < 0) return;
+    e.preventDefault();
+    selectTab(tabs[j], true);
   });
 });
 

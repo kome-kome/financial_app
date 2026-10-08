@@ -9,7 +9,7 @@
 :root{
   --bg:#0f1117;--bg-elevated:#1a1d2e;--bg-sunken:#0f1117;--bg-hover:#1e293b;
   --border:#2d3154;--border-muted:#334155;--border-subtle:#1e2235;
-  --text:#e2e8f0;--text-secondary:#94a3b8;--text-muted:#64748b;--text-body:#cbd5e1;
+  --text:#e2e8f0;--text-secondary:#94a3b8;--text-muted:#8291a7;--text-body:#cbd5e1;
   --accent:#7c3aed;--accent-hover:#6d28d9;--accent-text:#a78bfa;
   --accent-soft-bg:#312e81;--accent-soft-text:#c4b5fd;--accent-deep-bg:#2e1065;
   --status-good:#10b981;--status-good-bg:#052e16;--status-good-text:#86efac;
@@ -24,7 +24,7 @@
 :root[data-theme="light"]{
   --bg:#f8fafc;--bg-elevated:#ffffff;--bg-sunken:#f1f5f9;--bg-hover:#e2e8f0;
   --border:#e2e8f0;--border-muted:#cbd5e1;--border-subtle:#e5e7eb;
-  --text:#0f172a;--text-secondary:#475569;--text-muted:#94a3b8;--text-body:#334155;
+  --text:#0f172a;--text-secondary:#475569;--text-muted:#56657a;--text-body:#334155;
   --accent:#7c3aed;--accent-hover:#6d28d9;--accent-text:#6d28d9;
   --accent-soft-bg:#ede9fe;--accent-soft-text:#6d28d9;--accent-deep-bg:#ddd6fe;
   --status-good:#059669;--status-good-bg:#d1fae5;--status-good-text:#065f46;
@@ -37,6 +37,7 @@
   --shadow-color:rgba(0,0,0,.12);
 }
 *{box-sizing:border-box;margin:0;padding:0}
+:focus-visible{outline:2px solid var(--accent-text);outline-offset:2px}
 body{font-family:'Segoe UI',sans-serif;background:var(--bg);color:var(--text);min-height:100vh}
 .header{background:var(--bg-elevated);border-bottom:1px solid var(--border);padding:14px 24px;display:flex;align-items:center;gap:10px 14px;flex-wrap:wrap}
 .header h1{font-size:17px;font-weight:600;color:var(--accent-text)}
@@ -44,7 +45,7 @@ body{font-family:'Segoe UI',sans-serif;background:var(--bg);color:var(--text);mi
 .theme-toggle-btn{background:transparent;border:1px solid var(--border-muted);color:var(--text);border-radius:6px;width:30px;height:30px;font-size:14px;cursor:pointer;display:flex;align-items:center;justify-content:center;flex-shrink:0}
 .theme-toggle-btn:hover{background:var(--bg-hover)}
 .api-url-bar{background:var(--bg-sunken);border:1px solid var(--border-muted);border-radius:6px;padding:5px 10px;font-size:12px;color:var(--text-secondary);margin-left:auto;display:flex;align-items:center;gap:8px}
-.api-url-bar input{background:none;border:none;color:var(--status-info-text);font-size:12px;width:220px;outline:none}
+.api-url-bar input{background:none;border:none;color:var(--status-info-text);font-size:12px;width:220px}
 .dot{width:8px;height:8px;border-radius:50%;display:inline-block}
 .dot-green{background:var(--status-good)}.dot-red{background:var(--status-bad)}
 .nav{display:flex;border-bottom:1px solid var(--border);background:var(--bg-elevated);padding:0 24px;gap:4px}
@@ -62,13 +63,20 @@ body{font-family:'Segoe UI',sans-serif;background:var(--bg);color:var(--text);mi
 .sidebar-item:hover{background:var(--border-subtle);color:var(--text)}
 .sidebar-item.active{background:var(--accent-deep-bg);color:var(--accent-soft-text);font-weight:600}
 .sidebar-item.locked{color:var(--text-muted);opacity:.7}
-.sidebar-ext{font-size:10px;color:var(--text-muted);margin-left:4px}
+.sidebar-ext{font-size:11px;color:var(--text-muted);margin-left:4px}
 .layout .container{flex:1;min-width:0;max-width:none;margin:0}
 .container{padding:20px;max-width:1400px;margin:0 auto}
 .card{background:var(--bg-elevated);border:1px solid var(--border);border-radius:10px;padding:16px;margin-bottom:16px}
 .grid4{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:16px}
 .grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:16px}
 .grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px}
+/* 通知トースト（showNotif・common.js）。エラーは閉じるまで残る */
+.notif-stack{position:fixed;right:16px;bottom:16px;z-index:100;display:flex;flex-direction:column;gap:8px;max-width:min(440px,calc(100vw - 32px))}
+.notif{display:flex;align-items:flex-start;gap:10px;padding:10px 12px;border-radius:8px;border:1px solid var(--border);background:var(--bg-elevated);color:var(--text);font-size:13px;line-height:1.5;box-shadow:0 8px 24px var(--shadow-color);overflow-wrap:anywhere}
+.notif-error{background:var(--status-bad-bg);color:var(--status-bad-text);border-color:var(--status-bad)}
+.notif-success{background:var(--status-good-bg);color:var(--status-good-text);border-color:var(--status-good)}
+.notif-msg{flex:1;min-width:0}
+.notif-close{background:none;border:none;color:inherit;font-size:18px;line-height:1;cursor:pointer;padding:0 2px}
 @media (max-width: 768px){
   .container{padding:12px}
   .grid4{grid-template-columns:repeat(2,1fr)}
@@ -99,7 +107,7 @@ body{font-family:'Segoe UI',sans-serif;background:var(--bg);color:var(--text);mi
 .btn-green{background:var(--val-up-bg);color:var(--val-up-text);border:1px solid var(--val-up)}.btn-green:hover{background:var(--val-up)}
 .btn-sm{padding:5px 10px;font-size:12px}
 input,select{background:var(--bg-sunken);border:1px solid var(--border-muted);border-radius:6px;color:var(--text);padding:8px 12px;font-size:13px;width:100%}
-input:focus,select:focus{outline:none;border-color:var(--accent)}
+input:focus,select:focus{border-color:var(--accent)}
 label{font-size:12px;color:var(--text-secondary);display:block;margin-bottom:4px}
 .form-group{margin-bottom:12px}
 table{width:100%;border-collapse:collapse;font-size:12px}
@@ -108,7 +116,7 @@ th.sortable{cursor:pointer;user-select:none}
 th.sortable:hover{color:var(--accent-text)}
 td{padding:9px 10px;border-bottom:1px solid var(--border-subtle)}
 tr:hover td{background:var(--border-subtle)}
-.tag{display:inline-block;padding:2px 7px;border-radius:10px;font-size:10px;font-weight:500}
+.tag{display:inline-block;padding:2px 7px;border-radius:10px;font-size:11px;font-weight:500}
 .tag-blue{background:var(--status-info-bg);color:var(--status-info-text)}
 .tag-green{background:var(--status-good-bg);color:var(--status-good-text)}
 .tag-red{background:var(--status-bad-bg);color:var(--status-bad-text)}
@@ -134,13 +142,13 @@ tr:hover td{background:var(--border-subtle)}
 .gap-positive{color:var(--val-up);font-weight:600}
 .gap-negative{color:var(--val-down);font-weight:600}
 .stat-card{background:var(--bg-sunken);border-radius:8px;padding:12px;text-align:center}
-.stat-label{font-size:10px;color:var(--text-muted);margin-bottom:4px;text-transform:uppercase;letter-spacing:.5px}
+.stat-label{font-size:11px;color:var(--text-muted);margin-bottom:4px;text-transform:uppercase;letter-spacing:.5px}
 .stat-value{font-size:20px;font-weight:700}
 .info-box{background:var(--border-subtle);border-radius:8px;padding:12px;font-size:12px;color:var(--text-secondary);border-left:3px solid var(--accent);line-height:1.6}
 /* 用語ツールチップ（マウスオーバーで解説を表示） */
 .gloss{border-bottom:1px dotted var(--text-secondary);cursor:help;position:relative}
 .gloss::after{content:attr(data-tip);position:absolute;left:0;top:calc(100% + 7px);z-index:60;width:max-content;max-width:280px;white-space:normal;text-align:left;text-transform:none;letter-spacing:normal;background:var(--bg-sunken);color:var(--text-body);border:1px solid var(--border-muted);border-radius:7px;padding:9px 11px;font-size:11px;font-weight:400;line-height:1.6;box-shadow:0 10px 30px var(--shadow-color);opacity:0;visibility:hidden;transform:translateY(-4px);transition:opacity .13s ease,transform .13s ease;pointer-events:none}
-.gloss:hover::after{opacity:1;visibility:visible;transform:translateY(0)}
+.gloss:hover::after,.gloss:focus::after{opacity:1;visibility:visible;transform:translateY(0)}
 .btn:disabled{opacity:.4;cursor:not-allowed}
 .co-link{color:var(--accent-text);text-decoration:none}
 .co-link:hover{text-decoration:underline}
@@ -447,14 +455,14 @@ tr:hover td{background:var(--border-subtle)}
   <div class="card">
     <div class="section-title">ネットキャッシュ分析 — 清原達郎『わが投資術』<a class="co-link" href="/guide#net_cash_analysis" target="_blank" rel="noopener" style="float:right;font-size:12px;font-weight:400">❓ やさしい解説</a></div>
     <div class="info-box" style="margin-bottom:14px">
-      <strong style="color:var(--val-up)" class="gloss" data-tip="すぐ換金できる資産から全負債を引いた、実質的な手元現金。流動資産＋投資有価証券×0.7−総負債で計算する清原達郎式の指標。">ネットキャッシュ</strong> = 流動資産 + 投資有価証券 × 0.7 − 総負債&nbsp;<span style="color:var(--text-muted)">[円]（清原式）</span><br>
-      <strong style="color:var(--val-up)" class="gloss" data-tip="ネットキャッシュ÷時価総額。1.0で会社をまるごと買える現金を保有、0.5で時価総額の半分が現金。大きいほど割安。">ネットキャッシュ比率</strong> = ネットキャッシュ ÷ 時価総額&nbsp;<span style="color:var(--text-muted)">[無次元]</span><br>
-      <strong style="color:var(--status-info-text)" class="gloss" data-tip="Net Current Asset Value＝純流動資産価値。流動資産−総負債。投資有価証券の0.7補正をしない、ベンジャミン・グレアム(1934)の古典的で保守的な割安指標。">NCAV</strong> = 流動資産 − 総負債&nbsp;<span style="color:var(--text-muted)">[円]（グレアム1934・より保守的）</span> &nbsp;/&nbsp; <strong style="color:var(--status-info-text)" class="gloss" data-tip="NCAV÷時価総額。大きいほど割安で、1.5以上が『ネットネット』水準。">NCAV比率</strong> = NCAV ÷ 時価総額<br>
+      <strong style="color:var(--val-up)" class="gloss" tabindex="0" data-tip="すぐ換金できる資産から全負債を引いた、実質的な手元現金。流動資産＋投資有価証券×0.7−総負債で計算する清原達郎式の指標。">ネットキャッシュ</strong> = 流動資産 + 投資有価証券 × 0.7 − 総負債&nbsp;<span style="color:var(--text-muted)">[円]（清原式）</span><br>
+      <strong style="color:var(--val-up)" class="gloss" tabindex="0" data-tip="ネットキャッシュ÷時価総額。1.0で会社をまるごと買える現金を保有、0.5で時価総額の半分が現金。大きいほど割安。">ネットキャッシュ比率</strong> = ネットキャッシュ ÷ 時価総額&nbsp;<span style="color:var(--text-muted)">[無次元]</span><br>
+      <strong style="color:var(--status-info-text)" class="gloss" tabindex="0" data-tip="Net Current Asset Value＝純流動資産価値。流動資産−総負債。投資有価証券の0.7補正をしない、ベンジャミン・グレアム(1934)の古典的で保守的な割安指標。">NCAV</strong> = 流動資産 − 総負債&nbsp;<span style="color:var(--text-muted)">[円]（グレアム1934・より保守的）</span> &nbsp;/&nbsp; <strong style="color:var(--status-info-text)" class="gloss" tabindex="0" data-tip="NCAV÷時価総額。大きいほど割安で、1.5以上が『ネットネット』水準。">NCAV比率</strong> = NCAV ÷ 時価総額<br>
       <span style="color:var(--status-warn-text)">NC比率 ≥ 1.0</span>: 現金で買える&nbsp;|&nbsp;
       <span style="color:var(--val-up-text)">NC比率 ≥ 0.5</span>: 半額バーゲン&nbsp;|&nbsp;
-      <span style="color:var(--status-info-text)">NCAV比率 ≥ 1.5</span>: <span class="gloss" data-tip="時価総額がNCAV(純流動資産価値)の3分の2未満＝NCAV比率1.5以上の超割安株。グレアムが好んだ、解散価値を大きく下回る銘柄群。これがグレアムの『2/3ルール』。">グレアムのネットネット</span>（時価総額 &lt; NCAV×2/3）<br>
-      <span style="color:var(--status-warn);font-size:11px">⚠ 投資有価証券の 0.7 倍は<span class="gloss" data-tip="保有株を売って利益が出ると約30%課税される。これを見込み、投資有価証券は簿価の0.7倍で保守的に評価する。">含み益課税</span>（約30%）を考慮した清原式の経験則。実態の換金価値は市況・銘柄構成で変動するため参考値です。</span><br>
-      <span style="color:var(--text-secondary);font-size:11px">ℹ 時価総額は<span class="gloss" data-tip="発行株式数を 純資産÷1株純資産(BPS) で概算した値。実測ではないため誤差が出ることがある。">推計株数</span>（純資産÷BPS）ベースの概算です。推計が壊れると比率が異常値になるため、<strong>NC比率の上限</strong>（<span class="gloss" data-tip="時価総額は推計値のため、計算が壊れると比率が異常な大きさ(数千倍など)になることがある。その異常値を自動で除外する安全装置(サニティ＝妥当性チェック)。既定はNC比率5.0超を除外。">データ品質ガード</span>）で自動除外します。一律の時価総額下限は設けず、小型バーゲンを取りこぼしません。</span>
+      <span style="color:var(--status-info-text)">NCAV比率 ≥ 1.5</span>: <span class="gloss" tabindex="0" data-tip="時価総額がNCAV(純流動資産価値)の3分の2未満＝NCAV比率1.5以上の超割安株。グレアムが好んだ、解散価値を大きく下回る銘柄群。これがグレアムの『2/3ルール』。">グレアムのネットネット</span>（時価総額 &lt; NCAV×2/3）<br>
+      <span style="color:var(--status-warn);font-size:11px">⚠ 投資有価証券の 0.7 倍は<span class="gloss" tabindex="0" data-tip="保有株を売って利益が出ると約30%課税される。これを見込み、投資有価証券は簿価の0.7倍で保守的に評価する。">含み益課税</span>（約30%）を考慮した清原式の経験則。実態の換金価値は市況・銘柄構成で変動するため参考値です。</span><br>
+      <span style="color:var(--text-secondary);font-size:11px">ℹ 時価総額は<span class="gloss" tabindex="0" data-tip="発行株式数を 純資産÷1株純資産(BPS) で概算した値。実測ではないため誤差が出ることがある。">推計株数</span>（純資産÷BPS）ベースの概算です。推計が壊れると比率が異常値になるため、<strong>NC比率の上限</strong>（<span class="gloss" tabindex="0" data-tip="時価総額は推計値のため、計算が壊れると比率が異常な大きさ(数千倍など)になることがある。その異常値を自動で除外する安全装置(サニティ＝妥当性チェック)。既定はNC比率5.0超を除外。">データ品質ガード</span>）で自動除外します。一律の時価総額下限は設けず、小型バーゲンを取りこぼしません。</span>
     </div>
     <div id="params-form-net-cash"></div>
     <button class="btn btn-primary" id="btn-net-cash" data-click="runNetCash" style="margin-top:8px">
@@ -475,7 +483,7 @@ tr:hover td{background:var(--border-subtle)}
         <div class="stat-value" id="nc-stat-cheap" style="color:var(--val-up-text)">-</div>
       </div>
       <div class="stat-card">
-        <div class="stat-label"><span class="gloss" data-tip="時価総額がNCAV(純流動資産価値)の3分の2未満＝NCAV比率1.5以上の超割安株。グレアムが好んだ、解散価値を大きく下回る銘柄群（グレアムの2/3ルール）。">グレアム ネットネット</span>（NCAV比率 ≥ 1.5）</div>
+        <div class="stat-label"><span class="gloss" tabindex="0" data-tip="時価総額がNCAV(純流動資産価値)の3分の2未満＝NCAV比率1.5以上の超割安株。グレアムが好んだ、解散価値を大きく下回る銘柄群（グレアムの2/3ルール）。">グレアム ネットネット</span>（NCAV比率 ≥ 1.5）</div>
         <div class="stat-value" id="nc-stat-netnet" style="color:var(--status-info-text)">-</div>
       </div>
       <div class="stat-card">
@@ -853,7 +861,7 @@ tr:hover td{background:var(--border-subtle)}
 </div><!-- layout -->
 
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
-<script src="/static/js/common.js?v=20260620e"></script>
-<script src="/static/js/analysis.js?v=20261008b"></script>
+<script src="/static/js/common.js?v=20261008a"></script>
+<script src="/static/js/analysis.js?v=20261008c"></script>
 </body>
 </html>

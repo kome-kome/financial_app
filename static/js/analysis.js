@@ -222,7 +222,7 @@ function renderGap(rows) {
     return `<tr>
       <td><span class="tag tag-blue">${esc(r.sec_code||r.edinet_code)}</span></td>
       <td>${r.edinet_code ? `<a href="/company/${esc(r.edinet_code)}" class="co-link" target="_blank" rel="noopener" style="font-weight:500">${esc(r.company_name)}</a>` : esc(r.company_name)}</td>
-      <td><span class="tag tag-amber" style="font-size:10px">${esc(r.industry||'-')}</span></td>
+      <td><span class="tag tag-amber" style="font-size:11px">${esc(r.industry||'-')}</span></td>
       <td style="text-align:right;font-family:monospace">${fmt0((r.actual_market_cap||0)/100)}</td>
       <td style="text-align:right;font-family:monospace">${fmt0((r.predicted_market_cap||0)/100)}</td>
       <td class="${gapCls}" style="text-align:right;font-family:monospace">${gap>0?'+':''}${gap}%</td>
@@ -822,7 +822,7 @@ function _renderBtSummary(s) {
       <div style="position:absolute;left:1%;top:6px;width:2px;height:16px;background:var(--text-muted)"></div>
       <div style="position:absolute;right:1%;top:6px;width:2px;height:16px;background:var(--text-muted)"></div>
     </div>
-    <div style="font-size:10px;color:var(--text-muted);margin-top:4px">
+    <div style="font-size:11px;color:var(--text-muted);margin-top:4px">
       <span style="color:var(--text-muted)">| p5〜p95の全範囲</span> &nbsp;
       <span style="color:var(--accent-hover)">■ IQR（p25〜p75）</span> &nbsp;
       <span style="color:var(--accent-text)">| 中央値</span> &nbsp;
@@ -858,7 +858,7 @@ function _renderBtTable(rows) {
       <td>${r.rank}</td>
       <td><span class="tag tag-blue">${esc(r.sec_code||r.edinet_code)}</span></td>
       <td>${r.edinet_code ? `<a href="/company/${esc(r.edinet_code)}" class="co-link" target="_blank" rel="noopener" style="font-weight:500">${esc(r.company_name)}</a>` : esc(r.company_name)}</td>
-      <td><span class="tag tag-amber" style="font-size:10px">${esc(r.industry||'-')}</span></td>
+      <td><span class="tag tag-amber" style="font-size:11px">${esc(r.industry||'-')}</span></td>
       <td style="font-family:monospace;color:var(--accent-text)">${r.score}</td>
       <td style="text-align:right;font-family:monospace">${r.start_price != null ? '&yen;' + Math.round(r.start_price).toLocaleString() : '-'}</td>
       <td style="text-align:right;font-family:monospace">${r.end_price != null ? '&yen;' + Math.round(r.end_price).toLocaleString() : '-'}</td>
@@ -1021,7 +1021,7 @@ function _mcModelCard(m) {
     <div style="font-size:11px;color:var(--text-muted);margin-bottom:8px">${esc(m.label || m.name)}</div>`;
   if (!m.available) {
     const msg = MC_REASON_LABEL[m.reason] || '実行できませんでした';
-    const detail = m.error ? `<div style="font-size:10px;color:var(--text-muted);margin-top:6px">${esc(m.error)}</div>` : '';
+    const detail = m.error ? `<div style="font-size:11px;color:var(--text-muted);margin-top:6px">${esc(m.error)}</div>` : '';
     return `<div style="padding:12px 14px;background:var(--bg-sunken);border-radius:8px;border:1px solid var(--border-muted)">
       ${head}
       <div style="font-size:11px;color:var(--status-warn-text)">${esc(msg)}</div>${detail}
@@ -1046,39 +1046,39 @@ function _mcModelCard(m) {
   const metrics = `
     <div style="display:grid;grid-template-columns:1fr;gap:6px;margin-bottom:10px">
       <div style="padding:6px 8px;background:var(--bg-panel,var(--bg-sunken));border-radius:6px" title="生rank-IC＝業種ベット（例:素材>ハイテクをWTIで一括に並べる）を含む。業種中立rank-ICは各期・業種内で順位デミーンしてからSpearman＝業種内の真の銘柄選択力（Issue #368）。">
-        <div style="font-size:10px;color:var(--text-muted)">rank-IC（生 ／ 業種中立）</div>
+        <div style="font-size:11px;color:var(--text-muted)">rank-IC（生 ／ 業種中立）</div>
         <div style="font-size:15px;font-weight:700;color:${(ic.mean||0)>0?cssVar('--val-up-text'):cssVar('--val-down-text')}">${ic.mean!=null?ic.mean.toFixed(3):'-'}<span style="font-size:11px;color:var(--text-muted)"> ±${ic.std!=null?ic.std.toFixed(3):'-'}</span> <span style="font-size:12px;color:${(inIc.mean||0)>0?cssVar('--val-up-text'):cssVar('--val-down-text')}">／ ${inIc.mean!=null?inIc.mean.toFixed(3):'-'}</span></div>
-        <div style="font-size:10px;color:var(--text-muted)">${ic.n||0} fold${inIc.mean!=null?` ／ 中立 ${inIc.n||0}期`:''}</div>
+        <div style="font-size:11px;color:var(--text-muted)">${ic.n||0} fold${inIc.mean!=null?` ／ 中立 ${inIc.n||0}期`:''}</div>
       </div>
       <div style="padding:6px 8px;background:var(--bg-panel,var(--bg-sunken));border-radius:6px">
-        <div style="font-size:10px;color:var(--text-muted)">ロングショート spread（top−bottom）</div>
+        <div style="font-size:11px;color:var(--text-muted)">ロングショート spread（top−bottom）</div>
         <div style="font-size:15px;font-weight:700;color:${(oof.long_short_spread||0)>0?cssVar('--val-up-text'):cssVar('--val-down-text')}">${oof.long_short_spread!=null?(oof.long_short_spread*100).toFixed(2)+'%':'-'}</div>
       </div>
       <div style="padding:6px 8px;background:var(--bg-panel,var(--bg-sunken));border-radius:6px" title="売り側spread＝期内全体平均−最低μ̂分位平均。売り候補ランキング(sell_ranking)はμ̂の下位を売るため、top側の強さに引っ張られるロングショートspreadでは売り判定の質を測れない(Issue #402)。大きいほど売り候補が市場平均を下回った＝売りシグナルとして有効。勝率はそれが成立した期の割合。">
-        <div style="font-size:10px;color:var(--text-muted)">売り側 spread（全体平均−最低分位）</div>
+        <div style="font-size:11px;color:var(--text-muted)">売り側 spread（全体平均−最低分位）</div>
         <div style="font-size:15px;font-weight:700;color:${(ss||0)>0?cssVar('--val-up-text'):cssVar('--val-down-text')}">${ss!=null?(ss*100).toFixed(2)+'%':'-'}<span style="font-size:11px;color:var(--text-muted)"> ／ 勝率 ${ssHit!=null?(ssHit*100).toFixed(0)+'%':'-'}</span></div>
       </div>
       <div style="padding:6px 8px;background:var(--bg-panel,var(--bg-sunken));border-radius:6px" title="実効ターンオーバー＝隣接期の上位/下位分位メンバー(銘柄)の入替割合(0=据置,1=総入替)。ブレークイーブンbps＝片道コスト何bpでロングショートspreadが消えるか(gross·50/turnover)。頻度依存が比で相殺され、低回転な安定モデルほど高い＝コスト耐性が強い(Issue #368・Grinold & Kahn)。">
-        <div style="font-size:10px;color:var(--text-muted)">ブレークイーブンbps ／ 実効ターンオーバー</div>
+        <div style="font-size:11px;color:var(--text-muted)">ブレークイーブンbps ／ 実効ターンオーバー</div>
         <div style="font-size:15px;font-weight:700;color:${be!=null?cssVar('--val-up-text'):'var(--text-muted)'}">${be!=null?be.toFixed(0)+'bp':'-'}<span style="font-size:11px;color:var(--text-muted)"> ／ 回転 ${to!=null?(to*100).toFixed(0)+'%':'-'}</span></div>
       </div>
       <div style="padding:6px 8px;background:var(--bg-panel,var(--bg-sunken));border-radius:6px">
-        <div style="font-size:10px;color:var(--text-muted)">hit-rate（top&gt;bottom の期）</div>
-        <div style="font-size:15px;font-weight:700;color:#c084fc">${oof.hit_rate!=null?(oof.hit_rate*100).toFixed(0)+'%':'-'}<span style="font-size:10px;color:var(--text-muted)"> / ${oof.n_periods_quantile||0}期</span></div>
+        <div style="font-size:11px;color:var(--text-muted)">hit-rate（top&gt;bottom の期）</div>
+        <div style="font-size:15px;font-weight:700;color:#c084fc">${oof.hit_rate!=null?(oof.hit_rate*100).toFixed(0)+'%':'-'}<span style="font-size:11px;color:var(--text-muted)"> / ${oof.n_periods_quantile||0}期</span></div>
       </div>
       <div style="padding:6px 8px;background:var(--bg-panel,var(--bg-sunken));border-radius:6px" title="分位idxと分位平均リターンの期毎Spearman。+1=完全単調増。p値は「単調増が偶然でない」片側ブートストラップ検定（<0.05で有意）。">
-        <div style="font-size:10px;color:var(--text-muted)">分位単調性（Spearman・隣接正順率）</div>
+        <div style="font-size:11px;color:var(--text-muted)">分位単調性（Spearman・隣接正順率）</div>
         <div style="font-size:15px;font-weight:700;color:${(monoSp||0)>0?cssVar('--val-up-text'):cssVar('--val-down-text')}">${monoSp!=null?monoSp.toFixed(2):'-'}<span style="font-size:11px;color:var(--text-muted)"> ／ 隣接 ${monoRate!=null?(monoRate*100).toFixed(0)+'%':'-'}</span></div>
-        <div style="font-size:10px;color:${monoSig?cssVar('--val-up-text'):'var(--text-muted)'}">p=${monoP!=null?monoP.toFixed(3):'-'}${monoSig?' ✓有意':''}</div>
+        <div style="font-size:11px;color:${monoSig?cssVar('--val-up-text'):'var(--text-muted)'}">p=${monoP!=null?monoP.toFixed(3):'-'}${monoSig?' ✓有意':''}</div>
       </div>
       <div style="padding:6px 8px;background:var(--bg-panel,var(--bg-sunken));border-radius:6px" title="コンフォーマル予測区間の被覆率（Issue #365）。無リークwalk-forward: 各期をそれより過去の残差で較正した区間の実測被覆率。名目τ(既定90%)に近いほど区間較正が良い。追加学習ゼロ。">
-        <div style="font-size:10px;color:var(--text-muted)">区間被覆率（実測 ／ 名目τ）</div>
+        <div style="font-size:11px;color:var(--text-muted)">区間被覆率（実測 ／ 名目τ）</div>
         <div style="font-size:15px;font-weight:700;color:${(() => { const c=oof.interval_coverage, t=oof.interval_tau; if(c==null||t==null) return 'var(--text-muted)'; return Math.abs(c-t)<=0.05?cssVar('--val-up-text'):cssVar('--val-down-text'); })()}">${oof.interval_coverage!=null?(oof.interval_coverage*100).toFixed(0)+'%':'-'}<span style="font-size:11px;color:var(--text-muted)"> ／ ${oof.interval_tau!=null?(oof.interval_tau*100).toFixed(0)+'%':'-'}</span></div>
-        <div style="font-size:10px;color:var(--text-muted)">${oof.n_interval_calib||0} 標本較正</div>
+        <div style="font-size:11px;color:var(--text-muted)">${oof.n_interval_calib||0} 標本較正</div>
       </div>
     </div>`;
   const bars = hasOof ? `
-    <div style="font-size:10px;color:var(--text-secondary);margin-bottom:4px">分位別 平均実現リターン（左=最低 μ̂ → 右=最高）</div>
+    <div style="font-size:11px;color:var(--text-secondary);margin-bottom:4px">分位別 平均実現リターン（左=最低 μ̂ → 右=最高）</div>
     <div style="display:flex;align-items:flex-end;gap:4px;height:72px">
       ${(() => {
         const mx = Math.max(...qr.map(Math.abs), 1e-9);
@@ -1086,14 +1086,14 @@ function _mcModelCard(m) {
           const h = Math.round(Math.abs(v) / mx * 54) + 2;
           const col = v >= 0 ? cssVar('--val-up-text') : cssVar('--val-down-text');
           return `<div style="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:flex-end;height:100%">
-            <div style="font-size:9px;color:${col}">${(v*100).toFixed(1)}</div>
+            <div style="font-size:11px;color:${col}">${(v*100).toFixed(1)}</div>
             <div style="width:100%;height:${h}px;background:${col};border-radius:3px 3px 0 0"></div>
-            <div style="font-size:9px;color:var(--text-muted);margin-top:2px">Q${i+1}</div>
+            <div style="font-size:11px;color:var(--text-muted);margin-top:2px">Q${i+1}</div>
           </div>`;
         }).join('');
       })()}
     </div>`
-    : `<div style="font-size:10px;color:var(--text-muted)">OOF サンプルが期内 ${(oof.n_quantiles||5)*2} 銘柄未満のため分位を表示できません。rank-IC は ${ic.n||0} fold で算出。</div>`;
+    : `<div style="font-size:11px;color:var(--text-muted)">OOF サンプルが期内 ${(oof.n_quantiles||5)*2} 銘柄未満のため分位を表示できません。rank-IC は ${ic.n||0} fold で算出。</div>`;
   return `<div style="padding:12px 14px;background:var(--bg-sunken);border-radius:8px;border:1px solid var(--border-muted)">
     ${head}${metrics}${bars}
   </div>`;
@@ -1938,7 +1938,7 @@ function _mrrClipNote(canvas, outCount) {
   if (!el) {
     el = document.createElement('div');
     el.className = 'chart-clip-note';
-    el.style.cssText = 'position:absolute;top:2px;right:8px;font-size:10px;color:var(--text-muted);pointer-events:none;text-align:right';
+    el.style.cssText = 'position:absolute;top:2px;right:8px;font-size:11px;color:var(--text-muted);pointer-events:none;text-align:right';
     host.appendChild(el);
   }
   el.textContent = outCount > 0 ? `▲ ${outCount}点 = 軸範囲外（端に境界表示・実値はツールチップ参照）` : '';
@@ -2000,18 +2000,18 @@ function _mrrOofHTML(data) {
     ${hasOof ? `
     <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:12px">
       <div style="padding:8px;background:var(--bg-sunken);border-radius:6px">
-        <div style="font-size:10px;color:var(--text-muted)">rank-IC（Spearman 平均±std）</div>
+        <div style="font-size:11px;color:var(--text-muted)">rank-IC（Spearman 平均±std）</div>
         <div style="font-size:15px;font-weight:700;color:${(ic.mean||0)>0?cssVar('--val-up-text'):cssVar('--val-down-text')}">${ic.mean!=null?ic.mean.toFixed(3):'-'}<span style="font-size:11px;color:var(--text-muted)"> ±${ic.std!=null?ic.std.toFixed(3):'-'}</span></div>
-        <div style="font-size:10px;color:var(--text-muted)">${ic.n||0} fold</div>
+        <div style="font-size:11px;color:var(--text-muted)">${ic.n||0} fold</div>
       </div>
       <div style="padding:8px;background:var(--bg-sunken);border-radius:6px">
-        <div style="font-size:10px;color:var(--text-muted)">ロングショート spread（top−bottom）</div>
+        <div style="font-size:11px;color:var(--text-muted)">ロングショート spread（top−bottom）</div>
         <div style="font-size:15px;font-weight:700;color:${(oof.long_short_spread||0)>0?cssVar('--val-up-text'):cssVar('--val-down-text')}">${oof.long_short_spread!=null?(oof.long_short_spread*100).toFixed(2)+'%':'-'}</div>
       </div>
       <div style="padding:8px;background:var(--bg-sunken);border-radius:6px">
-        <div style="font-size:10px;color:var(--text-muted)">hit-rate（top&gt;bottom の期）</div>
+        <div style="font-size:11px;color:var(--text-muted)">hit-rate（top&gt;bottom の期）</div>
         <div style="font-size:15px;font-weight:700;color:#c084fc">${oof.hit_rate!=null?(oof.hit_rate*100).toFixed(0)+'%':'-'}</div>
-        <div style="font-size:10px;color:var(--text-muted)">${oof.n_periods_quantile||0} 期</div>
+        <div style="font-size:11px;color:var(--text-muted)">${oof.n_periods_quantile||0} 期</div>
       </div>
     </div>
     <div style="font-size:11px;color:var(--text-secondary);margin-bottom:6px">分位別 平均実現リターン（左=最低 μ̂ → 右=最高 μ̂・52週先・期間平均）</div>
@@ -2022,9 +2022,9 @@ function _mrrOofHTML(data) {
           const h = Math.round(Math.abs(v) / mx * 70) + 2;
           const col = v >= 0 ? cssVar('--val-up-text') : cssVar('--val-down-text');
           return `<div style="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:flex-end;height:100%">
-            <div style="font-size:10px;color:${col}">${(v*100).toFixed(1)}%</div>
+            <div style="font-size:11px;color:${col}">${(v*100).toFixed(1)}%</div>
             <div style="width:100%;height:${h}px;background:${col};border-radius:3px 3px 0 0"></div>
-            <div style="font-size:10px;color:var(--text-muted);margin-top:2px">Q${i+1}</div>
+            <div style="font-size:11px;color:var(--text-muted);margin-top:2px">Q${i+1}</div>
           </div>`;
         }).join('');
       })()}
@@ -2229,7 +2229,7 @@ function _mrrTableHTML(v) {
   }
   const total = (_mrrData && _mrrData.results ? _mrrData.results.length : v.top.length);
   const header = `<tr><th>順位</th><th>証券コード</th><th>企業名</th><th>業種</th>
-    <th><span class="gloss" data-tip="期待リターン（52週=1年先の年率対数リターン、無次元）。小数を%表示しているだけで、10.00%は年率+10%を意味する（OLSモデルの生予測値）。">μ_raw</span></th><th>R2 ボラ</th><th>R_macro</th><th>R3 信頼性</th><th>効用 U</th><th>D（負効用）</th><th>F</th></tr>`;
+    <th><span class="gloss" tabindex="0" data-tip="期待リターン（52週=1年先の年率対数リターン、無次元）。小数を%表示しているだけで、10.00%は年率+10%を意味する（OLSモデルの生予測値）。">μ_raw</span></th><th>R2 ボラ</th><th>R_macro</th><th>R3 信頼性</th><th>効用 U</th><th>D（負効用）</th><th>F</th></tr>`;
   const rows = v.top.map((r, i) => {
     const mu = r.mu_raw ?? 0;
     const muClass = mu > 0 ? 'text-green' : 'text-red';
@@ -2560,7 +2560,7 @@ const _mgView = _riskReturnView({
     ${_mgLambdaNoteHTML(v)}
     <div style="font-size:11px;color:var(--text-muted);margin-bottom:4px">※ μ は52週（1年）先の年率対数リターン予測（例: 表示10.00% = 年率+10%）。M-1と同一ターゲットをXGBoostで学習。</div>
     <div style="font-size:11px;color:var(--text-muted);margin-bottom:8px">行をクリックすると SHAP 寄与を表示します</div>`,
-  headCells: v => `${_rrLeadHead()}<th><span class="gloss" data-tip="期待リターン（M-1と同じ52週=1年先の年率対数リターン、無次元）。0.10は年率+10%を意味する（XGBoostモデルの予測値）。">μ</span></th>${_rrTailHead(v.axis)}`,
+  headCells: v => `${_rrLeadHead()}<th><span class="gloss" tabindex="0" data-tip="期待リターン（M-1と同じ52週=1年先の年率対数リターン、無次元）。0.10は年率+10%を意味する（XGBoostモデルの予測値）。">μ</span></th>${_rrTailHead(v.axis)}`,
   rowCells: (r, i, v) => `${_rrLeadCells(r, i)}
       <td class="${r.mu_raw>0?'text-green':''}">${r.mu_raw!=null?(r.mu_raw*100).toFixed(2)+'%':'-'}</td>
       ${_rrTailCells(r, v.axis)}`,
@@ -2610,7 +2610,7 @@ function _mgHeaderHTML(data) {
     <div style="margin-top:8px">
       <div style="font-size:11px;color:var(--text-secondary);margin-bottom:4px">グローバル特徴量寄与 signed SHAP（棒長=mean|SHAP| 重要度 ／ 左右=学習された方向）</div>
       <div id="mg-coef-bars" style="margin-top:4px"></div>
-      <div style="font-size:10px;color:var(--text-muted);margin-top:4px">右（＋）=特徴量↑で予測リターン↑方向に効く ／ 左（−）=↓方向。方向は木が学習した corr(特徴量, SHAP) の符号。</div>
+      <div style="font-size:11px;color:var(--text-muted);margin-top:4px">右（＋）=特徴量↑で予測リターン↑方向に効く ／ 左（−）=↓方向。方向は木が学習した corr(特徴量, SHAP) の符号。</div>
     </div>
     <div id="mg-interact-wrap" style="margin-top:12px">
       <div style="font-size:11px;color:var(--text-secondary);margin-bottom:4px">特徴量ペアの交互作用強度（SHAP interaction・M-2 が自動学習する非線形構造）</div>
@@ -2688,7 +2688,7 @@ const _enetView = _riskReturnView({
     ${_enetLambdaNoteHTML(v)}
     <div style="font-size:11px;color:var(--text-muted);margin-bottom:4px">※ μ̂ は52週（1年）先の年率対数リターン予測。相対 μ̂ = μ̂ − 今買える社の μ̂ 中央値（${_rrPct(data.mu_rel_center)}）。水準は未検証・順位は OOF で検証済み。</div>
     <div style="font-size:11px;color:var(--text-muted);margin-bottom:8px">行をクリックすると予測の内訳を表示します</div>`,
-  headCells: v => `${_rrLeadHead()}<th><span class="gloss" data-tip="今買える社の μ̂ 中央値との差。全社を同じ量だけずらした値なので、順位は μ̂ と同じ。">相対μ̂</span></th><th><span class="gloss" data-tip="52週=1年先の年率対数リターンの予測値（ElasticNet）。順位は OOF で検証済みだが、水準は検証していない。">μ̂</span></th>${_rrTailHead(v.axis)}`,
+  headCells: v => `${_rrLeadHead()}<th><span class="gloss" tabindex="0" data-tip="今買える社の μ̂ 中央値との差。全社を同じ量だけずらした値なので、順位は μ̂ と同じ。">相対μ̂</span></th><th><span class="gloss" tabindex="0" data-tip="52週=1年先の年率対数リターンの予測値（ElasticNet）。順位は OOF で検証済みだが、水準は検証していない。">μ̂</span></th>${_rrTailHead(v.axis)}`,
   rowCells: (r, i, v) => `${_rrLeadCells(r, i)}
       <td class="${r.mu_rel>0?'text-green':''}">${_rrPct(r.mu_rel, true)}</td>
       <td>${_rrPct(r.mu_raw)}</td>
@@ -2732,7 +2732,7 @@ function _enetHeaderHTML(data) {
       <div style="font-size:11px;color:var(--text-secondary);margin-bottom:4px">符号付き係数（標準化した特徴量1単位あたり・右＝予測リターン↑）</div>
       <div id="enet-coef-bars" style="margin-top:4px"></div>
       <div id="enet-coef-legend"></div>
-      <div style="font-size:10px;color:var(--text-muted);margin-top:4px">係数 0 は L1 で使われなかった列。マクロ列は同じ日付の全社で同じ値なので、同じ月の銘柄の順位は動かさない。</div>
+      <div style="font-size:11px;color:var(--text-muted);margin-top:4px">係数 0 は L1 で使われなかった列。マクロ列は同じ日付の全社で同じ値なので、同じ月の銘柄の順位は動かさない。</div>
     </div>
   </div>
   <div style="margin-bottom:16px">${_mrrOofHTML(data)}</div>
@@ -2902,9 +2902,9 @@ function _dlmDiagHTML(data) {
       1期先予測診断（バーンイン除外・全 ${data.n_companies || 0} 銘柄平均）
     </div>
     <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px">
-      <div style="padding:8px;background:var(--bg-sunken);border-radius:6px"><div style="font-size:10px;color:var(--text-muted)">校正（標準化誤差² 平均・1 が理想）</div><div style="font-size:15px;font-weight:700;color:#c084fc">${d.calibration != null ? d.calibration.toFixed(3) : '-'}</div></div>
-      <div style="padding:8px;background:var(--bg-sunken);border-radius:6px"><div style="font-size:10px;color:var(--text-muted)">予測 RMSE（週次リターン）</div><div style="font-size:15px;font-weight:700;color:var(--text-secondary)">${d.pred_rmse != null ? d.pred_rmse.toFixed(4) : '-'}</div></div>
-      <div style="padding:8px;background:var(--bg-sunken);border-radius:6px"><div style="font-size:10px;color:var(--text-muted)">95% 信用区間カバレッジ</div><div style="font-size:15px;font-weight:700;color:${(d.coverage95 || 0) >= 0.9 ? cssVar('--val-up-text') : cssVar('--status-warn-text')}">${d.coverage95 != null ? (d.coverage95 * 100).toFixed(1) + '%' : '-'}</div></div>
+      <div style="padding:8px;background:var(--bg-sunken);border-radius:6px"><div style="font-size:11px;color:var(--text-muted)">校正（標準化誤差² 平均・1 が理想）</div><div style="font-size:15px;font-weight:700;color:#c084fc">${d.calibration != null ? d.calibration.toFixed(3) : '-'}</div></div>
+      <div style="padding:8px;background:var(--bg-sunken);border-radius:6px"><div style="font-size:11px;color:var(--text-muted)">予測 RMSE（週次リターン）</div><div style="font-size:15px;font-weight:700;color:var(--text-secondary)">${d.pred_rmse != null ? d.pred_rmse.toFixed(4) : '-'}</div></div>
+      <div style="padding:8px;background:var(--bg-sunken);border-radius:6px"><div style="font-size:11px;color:var(--text-muted)">95% 信用区間カバレッジ</div><div style="font-size:15px;font-weight:700;color:${(d.coverage95 || 0) >= 0.9 ? cssVar('--val-up-text') : cssVar('--status-warn-text')}">${d.coverage95 != null ? (d.coverage95 * 100).toFixed(1) + '%' : '-'}</div></div>
     </div>
     <div style="margin-top:8px;font-size:11px;color:var(--text-muted)">δ=${p.state_discount ?? '-'} ／ β_v=${p.var_discount ?? '-'} ／ 最低 ${p.min_weeks ?? '-'} 週 ／ バーンイン ${p.burn_in_weeks ?? '-'} 週</div>
     ${(() => {
@@ -2932,18 +2932,18 @@ function _dlmOofHTML(data) {
     ${hasOof ? `
     <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:12px">
       <div style="padding:8px;background:var(--bg-sunken);border-radius:6px">
-        <div style="font-size:10px;color:var(--text-muted)">rank-IC（Spearman 平均±std）</div>
+        <div style="font-size:11px;color:var(--text-muted)">rank-IC（Spearman 平均±std）</div>
         <div style="font-size:15px;font-weight:700;color:${(ic.mean||0)>0?cssVar('--val-up-text'):cssVar('--val-down-text')}">${ic.mean!=null?ic.mean.toFixed(3):'-'}<span style="font-size:11px;color:var(--text-muted)"> ±${ic.std!=null?ic.std.toFixed(3):'-'}</span></div>
-        <div style="font-size:10px;color:var(--text-muted)">${ic.n||0} fold</div>
+        <div style="font-size:11px;color:var(--text-muted)">${ic.n||0} fold</div>
       </div>
       <div style="padding:8px;background:var(--bg-sunken);border-radius:6px">
-        <div style="font-size:10px;color:var(--text-muted)">ロングショート spread（top−bottom）</div>
+        <div style="font-size:11px;color:var(--text-muted)">ロングショート spread（top−bottom）</div>
         <div style="font-size:15px;font-weight:700;color:${(oof.long_short_spread||0)>0?cssVar('--val-up-text'):cssVar('--val-down-text')}">${oof.long_short_spread!=null?(oof.long_short_spread*100).toFixed(2)+'%':'-'}</div>
       </div>
       <div style="padding:8px;background:var(--bg-sunken);border-radius:6px">
-        <div style="font-size:10px;color:var(--text-muted)">hit-rate（top&gt;bottom の期）</div>
+        <div style="font-size:11px;color:var(--text-muted)">hit-rate（top&gt;bottom の期）</div>
         <div style="font-size:15px;font-weight:700;color:#c084fc">${oof.hit_rate!=null?(oof.hit_rate*100).toFixed(0)+'%':'-'}</div>
-        <div style="font-size:10px;color:var(--text-muted)">${oof.n_periods_quantile||0} 期</div>
+        <div style="font-size:11px;color:var(--text-muted)">${oof.n_periods_quantile||0} 期</div>
       </div>
     </div>
     <div style="font-size:11px;color:var(--text-secondary);margin-bottom:6px">分位別 平均実現リターン（左=最低 α → 右=最高 α・週次・期間平均）</div>
@@ -2954,9 +2954,9 @@ function _dlmOofHTML(data) {
           const h = Math.round(Math.abs(v) / mx * 70) + 2;
           const col = v >= 0 ? cssVar('--val-up-text') : cssVar('--val-down-text');
           return `<div style="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:flex-end;height:100%">
-            <div style="font-size:10px;color:${col}">${(v*100).toFixed(2)}%</div>
+            <div style="font-size:11px;color:${col}">${(v*100).toFixed(2)}%</div>
             <div style="width:100%;height:${h}px;background:${col};border-radius:3px 3px 0 0"></div>
-            <div style="font-size:10px;color:var(--text-muted);margin-top:2px">Q${i+1}</div>
+            <div style="font-size:11px;color:var(--text-muted);margin-top:2px">Q${i+1}</div>
           </div>`;
         }).join('');
       })()}
@@ -3013,7 +3013,7 @@ function _dlmTableHTML(data, v) {
     </div>
     ${makeChartContainer('chart-dlm', 320)}
     <div style="overflow-x:auto"><table>
-      <thead><tr><th>#</th><th>コード</th><th>銘柄名</th><th>業種</th><th><span class="gloss" data-tip="期待リターン（週次の潜在アルファ状態推定値をα×52で年率換算、無次元）。0.10は年率+10%を意味する。カルマンフィルタによる最新推定値のため、M-1/M-2（回帰・機械学習の予測値）とは算出方式が異なる。">µ̂(年率)</span></th><th>R_macro</th><th>U=µ̂−λR</th><th>F</th>${betaHead}<th>RMSE</th><th>被覆</th></tr></thead>
+      <thead><tr><th>#</th><th>コード</th><th>銘柄名</th><th>業種</th><th><span class="gloss" tabindex="0" data-tip="期待リターン（週次の潜在アルファ状態推定値をα×52で年率換算、無次元）。0.10は年率+10%を意味する。カルマンフィルタによる最新推定値のため、M-1/M-2（回帰・機械学習の予測値）とは算出方式が異なる。">µ̂(年率)</span></th><th>R_macro</th><th>U=µ̂−λR</th><th>F</th>${betaHead}<th>RMSE</th><th>被覆</th></tr></thead>
       <tbody>${trs}</tbody>
     </table></div>`;
 }
