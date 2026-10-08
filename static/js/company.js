@@ -340,6 +340,21 @@ function drawPL(){
   if (!recs) return;
   if (charts.perf){ charts.perf.destroy(); }
   const datasets = plDatasets(recs, plGran);
+  // 棒の合計が売上高を上回る年を注記する。残差は非負に丸めるので、売上総利益の赤字や
+  // データの基準の食い違い（単体の売上と連結の費用・#852）があると、黙って「棒＝売上高」が崩れる。
+  const over = labels.filter((_, i) => {
+    const rev = toOku(recs[i].pl.revenue);
+    if (rev == null || isNaN(rev) || rev <= 0) return false;
+    const total = datasets.reduce((s, ds) => s + (ds.data[i] || 0), 0);
+    return total > rev * 1.001;
+  });
+  const warn = document.getElementById('pl-mismatch');
+  if (warn){
+    warn.hidden = over.length === 0;
+    warn.textContent = over.length
+      ? `※ ${over.join('・')}年は費用と利益の合計が売上高を上回るため、棒の高さが売上高と一致しません（売上総利益の赤字、またはデータの基準の食い違い）。`
+      : '';
+  }
   datasets.push({ label:'営業利益率(%)', type:'line', data:recs.map(r=>r.pl.op_margin), yAxisID:'y1',
     borderColor:'#f59e0b', backgroundColor:'#f59e0b', tension:.3, pointRadius:3, order:0 });
 

@@ -77,6 +77,19 @@ def test_consolidated_preferred_over_nonconsolidated():
     assert result["bs"]["inventory"] == pytest.approx(9500)
 
 
+def test_segment_named_consolidated_does_not_beat_total():
+    """名前に Consolidated を含むセグメント（メンバー）が、メンバー無しの連結総額に勝たない（#852）。
+    コンテキスト名は E00317 の実際の書類（S100YHJP）のもの。"""
+    segment = "CurrentYearInstant_jpcrp030000-asr_E00317-000ConsolidatedSubsidiariesReportableSegmentsMember"
+    for order in (1, -1):
+        df = _make_df([
+            {"element": "jppfs_cor:MerchandiseAndFinishedGoods", "context": segment, "value": "1000"},
+            {"element": "jppfs_cor:MerchandiseAndFinishedGoods", "context": "CurrentYearInstant", "value": "9000"},
+        ][::order])
+        result = parse_xbrl_csv(df, "E00317", "2026-03-31")
+        assert result["bs"]["inventory"] == pytest.approx(9000)
+
+
 def test_prior_year_context_ignored():
     """Prior コンテキストはスキップ → 当期サブ項目がなければ inventory は None。"""
     df = _make_df([
