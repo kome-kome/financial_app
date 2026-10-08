@@ -539,6 +539,26 @@ JOBS: dict[str, Job] = {
         # 裏で何が動いていても所要が延びるだけで、結論は変わらない。
         parallel_sensitive=False,
     ),
+
+    # ── 誤った値の入った過去の財務行を書類の取り直しで上書きする（#870・#858）──────
+    # #852 の parse 修正は既存の行を直さない（NULL 補完の経路は既存値を上書きしない）。対象は
+    # doc_id を持つ全行（年度行＋H1 行・数万件）で、1件1〜2秒なら十数〜20時間＝1回の窓に入らない。
+    # 締切の手前で畳み、app_settings の進捗から翌日に続きを回す＝**終わるまで日数ぶん積む**。
+    # **積むのは人**（#858 で試運転の差分を読み、#859 の会計基準のマージを待ってから）。
+    "refetch:financials": Job(
+        name="refetch_financials",
+        argv=("{python}", "-m", "scripts.refetch_financials", "--apply"),
+        why="誤った値の入った過去の financial_records を、doc_id から書類を取り直して上書きする"
+            "（#870・#858）。既定の試運転ではなく --apply で書く。進捗は app_settings に残り、"
+            "次の実行は続きから始まる。",
+        # 見積り（未実測）。**窓を使い切る仕事なので END の分数で差し替えない**——締切で畳む回の
+        # END は「締切がどこに来たか」を測るだけで、仕事の所要を名乗っていない（bench:rhat-scale と
+        # 同じ扱い・ADR-0002 の #664 節）。全件に要る日数は、実走ログの「処理 N 行・残り M 行」から
+        # 見積り直す。440 は 2件目を付けない値（`JOB_BUDGET_MIN / 2` を超える）でもある。
+        measured_min=440.0,
+        # 書く値は EDINET の書類だけで決まる＝裏で何が動いていても同じ。所要の大半は応答待ち。
+        parallel_sensitive=False,
+    ),
 }
 
 SPEC = bc.BatchSpec(

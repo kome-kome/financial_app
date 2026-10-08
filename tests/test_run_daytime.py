@@ -604,7 +604,7 @@ class TestParallelSensitivity:
         """MCMC も探索も昇格ゲートも、数値の揺れが**採否や重みそのもの**を変える。"""
         assert rd.JOBS[key].parallel_sensitive is True
 
-    @pytest.mark.parametrize("key", ["interim", "disclosures"])
+    @pytest.mark.parametrize("key", ["interim", "disclosures", "refetch:financials"])
     def test_collection_is_not_sensitive(self, key):
         """収集は外部 API の応答待ちが所要の大半で、取れる中身は裏で何が動いても同じ。"""
         assert rd.JOBS[key].parallel_sensitive is False
