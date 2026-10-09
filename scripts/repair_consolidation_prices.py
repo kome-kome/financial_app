@@ -57,6 +57,7 @@ from sqlalchemy import bindparam, text as sqla_text   # noqa: E402
 
 import database as D   # noqa: E402
 import weekly_price_cache   # noqa: E402
+from database import guard_local_target   # noqa: E402  唯一の定義は database（#872）
 from collector_prices import (   # noqa: E402
     scale_rejection_example, scan_price_scale_steps, update_market_data_from_history,
 )
@@ -161,15 +162,6 @@ def status_of(fix: Fix, row: Optional[tuple]) -> str:
 
 _COLS = {"daily": ("stock_price_daily", "trade_date", "close", "volume"),
          "weekly": ("stock_price_weekly", "week_start", "close_last", "volume_sum")}
-
-
-def guard_local_target() -> None:
-    """ローカル正本以外へは書かない（ADR-0038: Supabase の Postgres へ書き戻す経路は作らない）。"""
-    if D.DB_TARGET != "local" or not D._is_local:
-        raise SystemExit(
-            f"接続先が local ではありません（FINAPP_DB_TARGET={D.DB_TARGET!r} / "
-            f"is_local={D._is_local}）。このスクリプトはローカル正本専用です。"
-        )
 
 
 def read_row(db, fix: Fix) -> Optional[tuple]:

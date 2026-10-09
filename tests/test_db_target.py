@@ -201,6 +201,48 @@ class TestModuleState:
         assert "@" not in label
 
 
+class TestGuardLocalTarget:
+    """ローカル専用の修復スクリプトの歯止め（#872）。**唯一の定義は database**。
+
+    スクリプトごとに写すと、接続先の判定を変えたときに1本だけ古い式が残り、
+    その1本がエラーなく本番へ繋がる（失敗として現れない）。
+    """
+
+    @pytest.mark.parametrize("target, is_local", [
+        ("prod", False),
+        ("prod", True),     # target が prod なら解決先が手元でも止める
+        ("local", False),   # target が local でも解決先がリモートなら止める（二重の網）
+    ])
+    def test_rejects_anything_but_local(self, monkeypatch, target, is_local):
+        monkeypatch.setattr(database, "DB_TARGET", target)
+        monkeypatch.setattr(database, "_is_local", is_local)
+        with pytest.raises(SystemExit, match="ローカル正本専用"):
+            database.guard_local_target()
+
+    def test_accepts_local(self, monkeypatch):
+        monkeypatch.setattr(database, "DB_TARGET", "local")
+        monkeypatch.setattr(database, "_is_local", True)
+        assert database.guard_local_target() is None
+
+    @pytest.mark.parametrize("module", [
+        "scripts.refetch_financials",
+        "scripts.fix_naive_jst_timestamps",
+        "scripts.repair_consolidation_prices",
+    ])
+    def test_scripts_use_the_shared_guard(self, module):
+        import importlib
+
+        mod = importlib.import_module(module)
+        assert mod.guard_local_target is database.guard_local_target, (
+            f"{module} が自前の guard_local_target を持っている（写すと1本だけ古い式が残る）"
+        )
+
+    def test_no_script_defines_its_own_guard(self):
+        offenders = [p.name for p in (ROOT / "scripts").glob("*.py")
+                     if "def guard_local_target" in p.read_text(encoding="utf-8")]
+        assert not offenders, f"自前の guard_local_target を定義している: {offenders}"
+
+
 def _env_blocks(doc: dict):
     """workflow / job / step のどの階層に置かれた env も拾う。"""
     if isinstance(doc.get("env"), dict):
