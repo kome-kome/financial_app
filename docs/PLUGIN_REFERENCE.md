@@ -216,7 +216,7 @@ producer は共有 `macro_beta`（`read_producer_scores` は `macro_snapshots.ge
 
 **M-4 兄弟μ̂スタッキング・アンサンブル**（#367・ADR-0015、#397 で M-6 を基底追加）。`heavy=True`・`hidden=True`（**退役**・#570/ADR-0044）・`ui_order=370`（M-3 の後・#378）。
 
-- **退役の根拠**: 統合は M-6 単体を上回らない（rank-IC +0.0006・p=0.810／売り側 spread p=0.655）のに、実行コストは基底 M-1+M-2+M-6 の合算。ADR-0015 本文の「上回らなければ単体で十分」判定に該当する。サイドバーと `mu_source`（`sell_ranking` / `recommend` / `templates/analysis.html` の静的 select）から外したが、**プラグイン・テスト・`COMPARISON_MODELS` の M-4 行は残す**。基底構成を変えたら `scripts/ensemble_base_bakeoff.py` か `python -m scripts.model_comparison_run` で測り直す。
+- **退役の根拠**: 統合は M-6 単体を rank-IC でも売り側 spread でも上回らない（数値は [ADR-0044](adr/0044-retire-underperforming-models-by-hiding.md)・元の測定は ADR-0015）のに、実行コストは基底 M-1+M-2+M-6 の合算。ADR-0015 本文の「上回らなければ単体で十分」判定に該当する。サイドバーと `mu_source`（`sell_ranking` / `recommend` / `templates/analysis.html` の静的 select）から外したが、**プラグイン・テスト・`COMPARISON_MODELS` の M-4 行は残す**。基底構成を変えたら `scripts/ensemble_base_bakeoff.py` か `python -m scripts.model_comparison_run` で測り直す。
 
 - **基底は `BASE_MODELS` 定数駆動（M-1+M-2+M-6）**——レグの build/CV/現在μ̂ を名前でディスパッチするため、基底の増減は定数変更だけで済む（`scripts/ensemble_base_bakeoff.py` が構成間 OOF を同一 honest 前提で横並び実測）。重みは非負・和1（NNLS／`rank_ic_grid` は n 次元シンプレックス格子 `_simplex_grid`）ゆえ効かない基底は重み ~0 へ落ちる。M-2/M-6 は build 契約が同じで config 同値ならスナップショットを共有（`_same_build_config`）。
 - M-1（BIC+OLS）と M-2（`_make_xgb_fit_predict`）と M-6（`make_elasticnet_fit_predict`）の per-(ym,銘柄) OOF を `build_snapshots(return_stock_ids=True)`＋`walk_forward_cv_monthly(return_residuals=True, embargo_months=12)` で自前再現し、(ym, edinet_code) の intersection を母集団に**二段ウォークフォワード**（月 t の統合重みは t 未満の共通 OOF だけで NNLS 学習＝無リーク・`_stack_walk_forward`）で統合。統合残差を共有 `oof_backtest` に通し model_comparison に M-4 として並ぶ。
@@ -229,7 +229,7 @@ producer は共有 `macro_beta`（`read_producer_scores` は `macro_snapshots.ge
 
 **M-5 マクロ×財務 ランク学習**（learning-to-rank・#362・ADR-0017）。M-2 の rank-IC 整合版。`heavy=True`・`hidden=True`（**退役**・#570/ADR-0044）・`ui_order=380`。
 
-- **退役の根拠（2026-08-30 実測・ADR-0017 の実測節）**: rank-IC **0.0808 vs M-2 0.1578**（差 −0.0771・95%CI [−0.0995, −0.0558]・p=0.001・17期／OOF 25,738ペア）＝ADR-0017 の「上回らなければ MSE で十分」に該当。弱いのは下位分位（最下位分位リターン 0.0145→0.0520・売り側 spread 0.0676→0.0302）。**ただし early_stopping 不使用の固定木数で正則化が M-2 と非対称**なので「learning-to-rank が無効」ではなく「この実装では下回った」と読む（再挑戦は group 付き eval_set を組んでから）。producer が無いため下流の切断は不要で、サイドバーから外しただけ。
+- **退役の根拠（2026-08-30 実測・ADR-0017 の実測節）**: rank-IC で M-2(MSE) に有意に劣後し（数値は [ADR-0017](adr/0017-m5-learning-to-rank.md) の実測節）、ADR-0017 の「上回らなければ MSE で十分」に該当。弱いのは下位分位（最下位分位リターンと売り側 spread）。**ただし early_stopping 不使用の固定木数で正則化が M-2 と非対称**なので「learning-to-rank が無効」ではなく「この実装では下回った」と読む（再挑戦は group 付き eval_set を組んでから）。producer が無いため下流の切断は不要で、サイドバーから外しただけ。
 
 学習目的を MSE→XGBoost の learning-to-rank（`rank:pairwise` 既定・`rank:ndcg` 選択可）へ差し替え、各 test 月を1クエリグループとして期内順位を直接最適化。M-2 を無改変ベースラインとして残すため `MacroGbdtPlugin` を継承し `execute()` 本体を共有、4フック（`_objective`/`_make_cv_callback`/`_fit_final_model`/`_persist_producer`）＋`_model_type`/`params_schema` のみ override。`walk_forward_cv_monthly(pass_train_groups=True)` で月クエリグループ境界を `XGBRanker.fit(group=…)` へ受け渡す。ラベルは pairwise＝生リターン素通し／ndcg＝期内分位グレード（`_prep_rank_labels`・2^rel 発散回避）。
 
@@ -241,9 +241,9 @@ producer は共有 `macro_beta`（`read_producer_scores` は `macro_snapshots.ge
 
 **M-6 マクロ×財務 正則化線形（ElasticNet・#372・ADR-0021）**。`heavy=True`・`ui_order=390`。
 
-候補メニューの bake-off で M-2(XGBoost) を **honest OOF rank-IC で有意に上回った**（0.1713 vs 0.1419・差 +0.0294・95%CI [+0.0116,+0.0469]・p=0.002・8候補中で唯一 Bonferroni α/8 を通過）ため正式兄弟へ昇格。
+候補メニューの bake-off で M-2(XGBoost) を **honest OOF rank-IC で有意に上回った**（8候補中で唯一 Bonferroni α/8 を通過・数値は [ADR-0021](adr/0021-sibling-model-candidate-menu.md)）ため正式兄弟へ昇格。
 
-- CV の fit_predict は候補実装 `model_candidates.make_elasticnet_fit_predict` を**そのまま注入**し、ADR-0021 の実測と同一コードパスであることを保証する（本番データで rank-IC 0.1713 の再現を確認済み）。スナップショット・fold（`min_train_months=6`/`step=3`/`embargo=12`）は M-2 と同値。α・l1_ratio は**学習 fold 内 `TimeSeriesSplit`** で選択（ランダム K-fold の楽観バイアス回避）。`feature_coefs` に符号付き係数（L1 でゼロ＝未使用がそのまま読める）。
+- CV の fit_predict は候補実装 `model_candidates.make_elasticnet_fit_predict` を**そのまま注入**し、ADR-0021 の実測と同一コードパスであることを保証する（本番データで ADR-0021 の rank-IC の再現を確認済み）。スナップショット・fold（`min_train_months=6`/`step=3`/`embargo=12`）は M-2 と同値。α・l1_ratio は**学習 fold 内 `TimeSeriesSplit`** で選択（ランダム K-fold の楽観バイアス回避）。`feature_coefs` に符号付き係数（L1 でゼロ＝未使用がそのまま読める）。
 - **per-stock μ̂ と確実性軸 `r1_prime`（コンフォーマル区間半幅）を `macro_enet_scores` へ全置換で永続化**（producer・#396・`tuning_dry_run` no-op）。`produced_output`/`read_producer_scores` は M-2 と同一形＝売り推奨が `mu_source=macro_enet` で読み、**R3 足切りゲートも機能する**（**既定 `mu_source`＝M-6**・#402/ADR-0022 で M-2 から切替＝売り側 OOF 指標 `short_side_spread` で有意優位）。
 - `results` は**今買える社を全件**返す（`tradable_results`・#806 で絞った後。`top_n` では切らない＝表の件数・λ・横軸は画面が切る・#807）——株価が止まった社は止まった日のマクロ値で μ̂ が押し上がり、絞る前は上位30のうち23社が廃止社だった。マクロ fold 内 PCA は実測で無効果のため**非搭載**。
 - **散布図の入力（#807）**: 各行に `mu_rel`（今買える社の `mu_raw` 中央値との差＝相対 μ̂・引いた値は応答の `mu_rel_center`）と予測の内訳 `contrib`（係数 0 でない財務・モメンタム・px_* 列の寄与）・`contrib_macro`（マクロ列の合算）を付け、応答に基準 `breakdown_base` を置く。`breakdown_base + contrib_macro + Σcontrib = mu_raw`（丸め誤差の範囲）。内訳は `_fit_final_and_score(..., return_breakdown=True)` の4つ目の戻り値（寄与ᵢ = coefᵢ·xᵢ·σ_y・基準 = 切片·σ_y + μ_y）で、**M-4 は3つ組で呼ぶので既定は3つ組のまま**。`lambda_risk`（既定 **0**＝表は μ̂ の順。λ>0 の並びは #808 で λ=0.1/0.3/1.0 を測った＝R2 は μ̂ の順と有意差なし・R_macro は λ を上げるほど悪化し λ=1.0 で売り側が有意に劣後・λ>1.0 は未測定。入口は `momentum_gate --risk-axis --models elasticnet --lambdas … --risk-scale raw`・日中枠 `gate:risk-axis-m6`）・`risk_axis`（既定 `r2`）・`r3_gate` は表示だけのパラメータで、受け取って返すだけ（M-2 と同じ）。画面は `analysis.js` の共通ビュー `_riskReturnView`（M-2 と共有）で縦軸を `mu_rel` にする。
