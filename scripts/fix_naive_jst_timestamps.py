@@ -53,6 +53,7 @@ from sqlalchemy import DateTime, text
 
 import database as D
 from collector_utils import force_utf8_stdout
+from database import guard_local_target  # 唯一の定義は database（#872）
 
 # 正本反転（#503）の直後・ローカル初回書き込み（2026-08-20 19:43:32）の直前。
 # 左側の最も近い行は 2026-08-18 21:10:23 なので 24時間の guard band は空になる。
@@ -134,16 +135,7 @@ def shift_column(db, table: str, col: str, cutoff: datetime) -> int:
     return int(res.rowcount or 0)
 
 
-# ── ガード ──────────────────────────────────────────────────────────────────
-
-def guard_local_target() -> None:
-    """ローカル正本以外へは書かない（ADR-0038: Supabase の Postgres へ書き戻す経路は作らない）。"""
-    if D.DB_TARGET != "local" or not D._is_local:
-        raise SystemExit(
-            f"接続先が local ではありません（FINAPP_DB_TARGET={D.DB_TARGET!r} / "
-            f"is_local={D._is_local}）。このスクリプトはローカル正本専用です。"
-        )
-
+# ── ガード（接続先は database.guard_local_target）──────────────────────────────
 
 def guard_not_applied(db, force: bool) -> Optional[str]:
     """冪等スタンプ。2度掛けると 18 時間ずれる＝取り返しがつかない。"""

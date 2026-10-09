@@ -143,7 +143,22 @@ def db_target_info() -> dict:
     where = DATABASE_URL.rsplit("/", 1)[-1].split("?")[0] if _is_local else "Supabase"
     return {"db_target": DB_TARGET, "db_is_local": _is_local, "db_label": f"{label}（{where}）"}
 
-_connect_args = {} if _is_local else {"sslmode": "require"}
+
+def guard_local_target() -> None:
+    """ローカル正本以外へは繋がない・書かない（ADR-0038: Supabase の Postgres へ書き戻す経路は作らない）。
+
+    ローカル専用の修復スクリプト（`scripts/refetch_financials.py` 等）が実行の最初に呼ぶ。
+    **唯一の定義はここ**（#872）——スクリプトごとに写すと、接続先の判定を変えたときに1本だけ
+    古い式が残り、その1本がエラーなく本番へ繋がる。モジュール変数は呼ばれた時点で読む
+    （テストが `DB_TARGET` / `_is_local` を差し替えたとき、その差し替えが効くように）。
+    """
+    if DB_TARGET != "local" or not _is_local:
+        raise SystemExit(
+            f"接続先が local ではありません（FINAPP_DB_TARGET={DB_TARGET!r} / "
+            f"is_local={_is_local}）。このスクリプトはローカル正本専用です。"
+        )
+
+_connect_args ={} if _is_local else {"sslmode": "require"}
 _pool_size    = 10 if _is_local else 3
 _max_overflow = 20 if _is_local else 5
 

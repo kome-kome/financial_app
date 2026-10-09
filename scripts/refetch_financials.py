@@ -64,7 +64,9 @@ from collector_financials import (
     parse_xbrl_csv,
 )
 from collector_utils import EDINET_MAX_CONSECUTIVE_FAILURES, RATE_SLEEP
-from database import FinancialRecord, financial_columns, get_setting, upsert_setting
+from database import (
+    FinancialRecord, financial_columns, get_setting, guard_local_target, upsert_setting,
+)
 
 # 進捗（再開位置）の置き場。既存の app_settings を使う＝起動時に必ず走る init_db() へ DDL を足さない。
 CURSOR_KEY = "refetch_financials_cursor"
@@ -90,15 +92,6 @@ EXIT_FAILED = 1
 FAILURES = ("fetch_failed", "parse_failed")
 
 Fetch = Callable[[str], Awaitable[object]]
-
-
-def guard_local_target() -> None:
-    """ローカル正本以外へは繋がない（ADR-0038: Supabase の Postgres へ書き戻す経路は作らない）。"""
-    if D.DB_TARGET != "local" or not D._is_local:
-        raise SystemExit(
-            f"接続先が local ではありません（FINAPP_DB_TARGET={D.DB_TARGET!r} / "
-            f"is_local={D._is_local}）。このスクリプトはローカル正本専用です。"
-        )
 
 
 # ── 差分（DB に触らない）────────────────────────────────────────────────────
