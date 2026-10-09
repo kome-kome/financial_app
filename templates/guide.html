@@ -58,8 +58,8 @@ body{font-family:'Segoe UI',sans-serif;background:var(--bg);color:var(--text);mi
 .content{flex:1;min-width:0}
 /* 狭い幅では目次を本文の上へ積む。横並びのままだと目次 240px が残り、本文が幅 59px に潰れて
    ページ全体が 655px に広がっていた（#863・375px で実測）。
-   .content の clip は用語の吹き出し（.term::after・幅最大 280px）のため——隠れている間も配置は
-   残るので、右端近くの用語の吹き出しが本文の外へ伸びてページ幅を 608px に広げていた */
+   .content の clip は表示中の用語の吹き出し（.term::after・幅最大 280px）のため——狭い本文では
+   左右どちらへ開いても本文の外へ出うるので、本文の端で切る（隠れている間は #888 で場所ごと消した） */
 @media (max-width: 768px){
   .layout{flex-direction:column;padding:12px;gap:16px}
   .sidebar{width:auto}
@@ -94,8 +94,13 @@ td code,p code,li code{background:var(--bg-sunken);border:1px solid var(--border
 .more a{color:var(--accent-text);text-decoration:none;font-weight:600}
 .more a:hover{text-decoration:underline}
 .term{border-bottom:1px dotted var(--status-good);cursor:help;position:relative;color:var(--status-good-text)}
-.term::after{content:attr(data-tip);position:absolute;left:0;top:calc(100% + 7px);z-index:60;width:max-content;max-width:280px;white-space:normal;background:var(--bg-sunken);color:var(--text-body);border:1px solid var(--border-muted);border-radius:7px;padding:9px 11px;font-size:11px;font-weight:400;line-height:1.6;box-shadow:0 10px 30px var(--shadow-color);opacity:0;visibility:hidden;transform:translateY(-4px);transition:opacity .13s,transform .13s;pointer-events:none}
-.term:hover::after{opacity:1;visibility:visible;transform:translateY(0)}
+/* 用語の吹き出し。隠れている間は display:none で場所ごと消す——visibility:hidden だと配置が残り、
+   右端近くの用語の吹き出しがページ幅を 1280px で 1412px に広げていた（#888）。現れるときのフェードは
+   @starting-style で保つ。本文の右端を越える用語は models.js が .tip-flip を付けて左へ開く */
+.term::after{content:attr(data-tip);position:absolute;left:0;top:calc(100% + 7px);z-index:60;width:max-content;max-width:280px;white-space:normal;background:var(--bg-sunken);color:var(--text-body);border:1px solid var(--border-muted);border-radius:7px;padding:9px 11px;font-size:11px;font-weight:400;line-height:1.6;box-shadow:0 10px 30px var(--shadow-color);opacity:0;display:none;transform:translateY(-4px);transition:opacity .13s,transform .13s;pointer-events:none}
+.term:hover::after{display:block;opacity:1;transform:translateY(0)}
+.term.tip-flip::after{left:auto;right:0}
+@starting-style{.term:hover::after{opacity:0;transform:translateY(-4px)}}
 .tag{display:inline-block;padding:2px 7px;border-radius:10px;font-size:11px;font-weight:500}
 .tag-green{background:var(--status-good-bg);color:var(--status-good-text)}
 .tag-amber{background:var(--status-warn-bg);color:var(--status-warn-text)}
