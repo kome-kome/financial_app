@@ -56,6 +56,16 @@ body{font-family:'Segoe UI',sans-serif;background:var(--bg);color:var(--text);mi
 .toc a.active{background:var(--bg-hover);color:var(--status-good-text);border-left-color:var(--status-good)}
 .toc-section-title{font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px;margin:12px 0 4px 8px}
 .content{flex:1;min-width:0}
+/* 狭い幅では目次を本文の上へ積む。横並びのままだと目次 240px が残り、本文が幅 59px に潰れて
+   ページ全体が 655px に広がっていた（#863・375px で実測）。
+   .content の clip は用語の吹き出し（.term::after・幅最大 280px）のため——隠れている間も配置は
+   残るので、右端近くの用語の吹き出しが本文の外へ伸びてページ幅を 608px に広げていた */
+@media (max-width: 768px){
+  .layout{flex-direction:column;padding:12px;gap:16px}
+  .sidebar{width:auto}
+  .toc{position:static;max-height:40vh;overflow-y:auto}
+  .content{overflow-x:clip}
+}
 .intro{background:var(--bg-elevated);border:1px solid var(--border);border-radius:10px;padding:20px 24px;margin-bottom:20px}
 .intro p{font-size:13px;color:var(--text-body);margin-bottom:8px}
 .model-section{background:var(--bg-elevated);border:1px solid var(--border);border-radius:10px;padding:24px;margin-bottom:20px}
