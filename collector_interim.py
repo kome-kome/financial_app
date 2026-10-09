@@ -10,6 +10,9 @@ de-risk 実証で確認した前提(検証スクリプトは Issue #219② 完�
     既存 `parse_xbrl_csv` が無改修で H1 累計を抽出できる(前期比較 `Prior1*` は既存フィルタが skip)。
     2025年提出の新式には context が `InterimDuration` / `Prior1InterimDuration` のものもあるが、
     フィルタは `Prior*` を除外する方式なので同じく当期だけが残る(#647・S100WXIT で実測)。
+    旧四半期は同じ要素を直近3か月(`CurrentQuarterDuration`)でも並べる。優先度が累計と同じで
+    CSV の並び順で勝つ方が決まっていたので、3か月の期間は採らない
+    (`collector_financials._outside_current_period`・#871・S100K3J3 で実測)。
   - 真の H1 期末は DEI 要素 `CurrentPeriodEndDateDEI`。metadata の periodEnd は新式では
     会計年度末を返し不正確なため使わない。
   - H1 判定は DEI `TypeOfCurrentPeriodDEI` が `Q2` または `HY`。#219② 当時(2024年提出分)の新式は

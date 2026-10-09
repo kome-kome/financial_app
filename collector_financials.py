@@ -370,18 +370,34 @@ def _context_priority(ctx: str) -> int:
     return 2 if any(k in ctx for k in CONSOLIDATED_KEYS) else 1
 
 
+def _outside_current_period(ctx: str) -> bool:
+    """当期の値として採らないコンテキストか。_apply_row / _collect_inventory_row 共通（式を書き写さない）。
+
+    - 前期比較（`Prior1YearDuration` / `Prior1YTDDuration` / `Prior1InterimDuration` 等）。
+      当期を列挙せず `Prior*` を除外する方式なので、新式半期の `InterimDuration` も無改修で残る（#647）
+    - 直近3か月の期間（`CurrentQuarterDuration`・旧形式の `CurrentQuarterConsolidatedDuration`）。
+      旧様式の四半期報告書は同じ要素を半期累計（`CurrentYTDDuration`）と3か月の2つで並べ、
+      優先度（`_context_priority`）が同じなので CSV の並び順で勝つ方が決まっていた（#871・実測 S100K3J3）。
+      3か月しか無い項目は採らない（H1 行へ3か月分が入ると黙って誤る）。
+      **時点（`CurrentQuarterInstant`＝半期末の残高）は Duration ではないので採る。**
+    """
+    if "Prior" in ctx and "CurrentYear" not in ctx:
+        return True
+    return "Quarter" in ctx and "Duration" in ctx
+
+
 def _apply_row(
     elem: str, ctx: str, val_raw, cat: str, field: str,
     result: dict, _priority: dict, apply_capex_sign: bool = False,
 ) -> None:
     """共通フィルタ・優先度計算・結果反映。parse_raw_rows / parse_xbrl_csv の中核共通ロジック。
 
-    Prior コンテキストスキップ・OperatingRevenue1 非連結フィルタ・
+    当期外コンテキストのスキップ（_outside_current_period）・OperatingRevenue1 非連結フィルタ・
     優先度計算（_context_priority）・float 変換・priority 更新を担う。
     apply_capex_sign=True のとき capex を負値（支出＝アウトフロー）に統一する。
     """
-    # 前期比較データ（Prior1Year等）はスキップ。当期データのみ処理する
-    if "Prior" in ctx and "CurrentYear" not in ctx:
+    # 前期比較・直近3か月の値はスキップ。当期（通期・半期累計）のデータのみ処理する
+    if _outside_current_period(ctx):
         return
     # OperatingRevenue1 系（営業収益）は連結のみ採用。金融持株会社は連結営業収益を持たず
     # 提出会社単体（NonConsolidatedMember）の営業収益しか無いため、非連結値を売上に誤採用しない。
@@ -423,11 +439,11 @@ def _inventory_fallback(inv_parts: dict, result: dict) -> None:
 def _collect_inventory_row(elem: str, ctx: str, raw_value, inv_parts: dict, inv_prio: dict) -> None:
     """棚卸資産サブ項目を連結優先度付きで inv_parts へ集約する（in-place）。
 
-    parse_raw_rows / parse_xbrl_csv 共通。Prior 期（CurrentYear を含まない）は除外し、
+    parse_raw_rows / parse_xbrl_csv 共通。当期外（_outside_current_period）は除外し、
     連結 > 単体(メンバー無し) > メンバー有り の優先度が高い値で上書きする。
     パース不能な値は無視する。
     """
-    if "Prior" in ctx and "CurrentYear" not in ctx:
+    if _outside_current_period(ctx):
         return
     prio = _context_priority(ctx)
     try:
