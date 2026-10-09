@@ -9,6 +9,7 @@
 | `VISUALIZATION_IMPROVEMENTS.md` | 企業データ可視化強化（Phase1-4 実装済み） | ✅ 完了 |
 | `REFACTORING.md` | DB 一本化・XBRL 生データ保存の設計書 ＋ 付録: コード品質改善 (Phase 2) | ✅ 完了 |
 | `DEPLOYMENT_HISTORY.md` | DEPLOYMENT.md から移した完了済みの経緯（ローカル PG の初回セットアップ結果・ミラーの旧定常手順と予行演習・Supabase 正本時代のバックアップ運用・`vacuum-maintenance.yml` の設計記録・Supabase の Egress と容量設計の実測・バッチ暦とワークフロー早見表の旧記述・CF 補完と bs_inventory バックフィルの完了状態）。#844 | 📦 記録 |
+| `MODELS_HISTORY.md` | MODELS.md 末尾の改訂履歴の表（2026-05-14〜2026-10-07）。以後の変更の記録は git log と ADR。#844 | 📦 記録 |
 
 各ファイルの変更履歴は git で追える（`git log --follow docs/archive/<file>`）。
 
