@@ -1523,7 +1523,7 @@ Issue #372・ADR-0021。
 
 `walk_forward_cv_monthly(fit_predict=…)` の注入点は**同一 fold・同一特徴量・同一指標**で任意の学習器を
 評価できる共有ハーネスである。ここへ差し込むだけの「候補」を `plugins/model_candidates.py` に集約し、
-正式兄弟（M-1〜M-5）へ昇格させる前に OOF rank-IC で実証比較する。候補はプラグインではないため
+正式兄弟（`plugins/` に登録される M 系のプラグイン）へ昇格させる前に OOF rank-IC で実証比較する。候補はプラグインではないため
 （`plugin` 属性なし＝レジストリ非登録）、API・UI・`model_comparison`・本番 requirements に一切現れない。
 
 実行は `python -m scripts.candidate_bakeoff`。M-2 既定 config（`params_schema` を `coerce_params({})`）で

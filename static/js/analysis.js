@@ -984,7 +984,7 @@ function _renderBtMulti(data) {
   }).join('');
 }
 
-// ── モデル比較（OOF・M-1/M-2/M-3 横並び）────────────────────────────────
+// ── モデル比較（OOF・model_comparison.COMPARISON_MODELS の横並び）─────────────
 // 各モデルの oof_backtest（無リーク walk-forward）を1列カードで並べる。指標・分位バーの
 // 視覚言語は _mrrOofHTML（M-1/M-2/M-3 の各パネル）と揃える。
 async function runModelComparison() {
