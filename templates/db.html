@@ -58,6 +58,15 @@ body{font-family:'Segoe UI',sans-serif;background:var(--bg);color:var(--text);mi
 .tbl-card-name{font-size:13px;font-weight:600;color:var(--text);margin-bottom:8px;font-family:'Consolas','Menlo',monospace}
 .tbl-card-meta{display:flex;justify-content:space-between;font-size:11px;color:var(--text-muted)}
 .tbl-card-rows{font-size:20px;font-weight:700;color:var(--accent-text);margin:4px 0}
+/* 狭い幅ではカードの列を減らし、テーブル名を途中で折り返す。4列のままだと等幅のテーブル名が
+   縮まず、ページ全体が 639px に広がっていた（#863・375px で実測） */
+@media (max-width: 768px){
+  .tables-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .tbl-card-name{overflow-wrap:anywhere}
+}
+@media (max-width: 480px){
+  .tables-grid{grid-template-columns:minmax(0,1fr)}
+}
 
 /* リレーション図 */
 .relations-box{background:var(--bg-elevated);border:1px solid var(--border);border-radius:10px;padding:24px;overflow-x:auto}
