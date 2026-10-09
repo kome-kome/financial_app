@@ -8,7 +8,7 @@ name: "[定常] 依存パッケージの脆弱性検査"
 #   起票時点で既に anyio 4.13.0 が2件（GHSA-82r6-8w77-94w6 / GHSA-5p39-cfhj-2xmp）を抱えていた。
 #
 # 設計上の注意（触る前に必ず読むこと）:
-#   - **Issue 起票は notify-failure.yml の担当**（macro-health / egress-health と同じ）。この
+#   - **Issue 起票は notify-failure.yml の担当**（egress-health と同じ）。この
 #     ジョブは失敗するだけにする。`issues: write` は notify-failure.yml だけに閉じる
 #     （tests/test_workflow_failure_notification.py が強制）。未修正のまま毎週失敗すれば、
 #     同じ Issue へ毎週コメントが追記される＝それが催促になる。

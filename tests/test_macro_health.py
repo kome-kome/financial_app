@@ -1,4 +1,4 @@
-"""macro_health.py と macro-health.yml の不変条件ガード（Issue #420）。
+"""macro_health.py と鮮度ゲート CLI の不変条件ガード（Issue #420）。
 
 守るのは2系統:
 
@@ -9,11 +9,12 @@
   3. 除外系列は判定から外すが**レポートには必ず出す**（黙って消さない）
   4. 系列一覧は collector_prices の定義から生成する（テストに列挙を二重管理しない）
 
-ワークフロー（macro-health.yml）
-  5. `workflows:` は `["**"]` 固定（列挙は "[定常] …" の角括弧で startup_failure・#414）
-  6. 収集ワークフローの name と `success` で絞ること（実在の name と一致するか）
-  7. `tee` するステップに `set -o pipefail` があること（exit code が化ける・#352）
-  8. 収集側と同じ API キーを渡すこと（キー有無で判定対象が変わるため）
+ゲート（scripts/check_macro_health.py・起動元は夜間バッチの `macro_health` ステップ・#876）
+  5. critical 系列が古ければ exit 2、健全なら 0（`--warn-only` は常に 0）
+  6. 収集本体は鮮度で非ゼロ終了しない（収集の失敗と鮮度切れを混ぜない）
+
+夜間バッチがこのゲートを回し、鮮度切れを起票することは `tests/test_run_nightly.py`
+（`TestStaleMacroIsReported`）が縛る。
 """
 import os
 import sys
@@ -21,27 +22,13 @@ from datetime import date, timedelta
 from pathlib import Path
 
 import pytest
-import yaml
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import macro_health as mh  # noqa: E402
 from database import MacroData  # noqa: E402
 
-WORKFLOW = Path(__file__).resolve().parents[1] / ".github" / "workflows" / "macro-health.yml"
-DAILY = Path(__file__).resolve().parents[1] / ".github" / "workflows" / "daily-incremental.yml"
-FULL = Path(__file__).resolve().parents[1] / ".github" / "workflows" / "full-pipeline.yml"
-
 AS_OF = date(2026, 8, 4)
-
-
-def _load(path: Path) -> dict:
-    return yaml.safe_load(path.read_text(encoding="utf-8"))
-
-
-def _triggers(doc: dict) -> dict:
-    """`on:` は YAML 1.1 で bool True にパースされるため両方を見る。"""
-    return doc.get("on", doc.get(True)) or {}
 
 
 @pytest.fixture(autouse=True)
@@ -74,11 +61,6 @@ def _seed_all_fresh(db, as_of: date = AS_OF):
     for s in mh.expected_series():
         if s["code"] not in mh.EXCLUDED_SERIES:
             _seed(db, s["code"], as_of)
-
-
-@pytest.fixture(scope="module")
-def workflow() -> dict:
-    return _load(WORKFLOW)
 
 
 # ── 判定ロジック ──────────────────────────────────────────────────────────
@@ -363,33 +345,38 @@ class TestFreshnessCheck:
         report.encode("cp932")   # 例外が出ないこと自体が検証対象
 
 
-# ── ワークフロー ──────────────────────────────────────────────────────────
+# ── ゲート（CLI） ─────────────────────────────────────────────────────────
 
-class TestWorkflow:
-    def test_workflows_filter_is_wildcard(self, workflow):
-        """`workflows:` の列挙は "[定常] …" の角括弧で startup_failure になる（#414）。"""
-        assert _triggers(workflow)["workflow_run"]["workflows"] == ["**"]
+class TestGateCli:
+    """終了コードが夜間バッチの起票の根拠になる（0 = 健全 / 2 = 鮮度切れ・#876）。"""
 
-    def test_chained_on_collection_workflow_success(self, workflow):
-        cond = workflow["jobs"]["check"]["if"]
-        daily_name = _load(DAILY)["name"]
-        full_name = _load(FULL)["name"]
-        assert daily_name in cond, "daily-incremental の name とズレている"
-        assert full_name in cond, "full-pipeline の name とズレている"
-        assert "conclusion == 'success'" in cond
+    @pytest.fixture
+    def gate(self, db, monkeypatch):
+        from scripts import check_macro_health as cmh
+        monkeypatch.setattr(cmh, "SessionLocal", lambda: db)
+        return cmh
 
-    def test_tee_step_sets_pipefail(self, workflow):
-        for step in workflow["jobs"]["check"]["steps"]:
-            run = step.get("run", "")
-            if "tee" in run:
-                assert "set -o pipefail" in run, step.get("name")
+    def _stale_usdjpy(self, db):
+        today = date.today()
+        _seed_all_fresh(db, today)
+        db.query(MacroData).filter(MacroData.series_code == "USDJPY").delete()
+        _seed(db, "USDJPY", today - timedelta(days=30))
 
-    def test_passes_same_api_keys_as_collection(self, workflow):
-        """キーの有無で判定対象が変わるため、収集ジョブと同じキーを渡す。"""
-        env = next(s for s in workflow["jobs"]["check"]["steps"]
-                   if "check_macro_health" in s.get("run", ""))["env"]
-        assert {"DATABASE_URL", "FRED_API_KEY", "ESTAT_API_KEY"} <= set(env)
+    def test_stale_critical_series_exits_2(self, db, gate):
+        self._stale_usdjpy(db)
+        assert gate.main([]) == gate.EXIT_UNHEALTHY == 2
 
+    def test_healthy_exits_0(self, db, gate):
+        _seed_all_fresh(db, date.today())
+        assert gate.main([]) == 0
+
+    def test_warn_only_never_fails(self, db, gate):
+        """誤検知の調査用。夜間バッチの argv には付けない（付けると起票されなくなる）。"""
+        self._stale_usdjpy(db)
+        assert gate.main(["--warn-only"]) == 0
+
+
+class TestGateIsSeparateFromCollection:
     def test_collection_pipelines_do_not_exit_on_macro_health(self):
         """収集本体は健全性で非ゼロ終了しない（sector_ols 夜間更新の巻き添え防止・#425/#432）。"""
         root = Path(__file__).resolve().parents[1]

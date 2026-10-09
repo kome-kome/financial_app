@@ -94,7 +94,7 @@ NIGHTLY_PARAMS: dict[str, dict] = {
 # （新しい heavy を足して登録を忘れると赤くなる）。**登録があること ≠ 実際に動いている
 # こと**である点に注意——`local:` の場合はさらに**タスクスケジューラへの登録**という
 # CI からは見えない一段が挟まる（`scripts/install_*_task.ps1`）。鮮度そのものの監視は
-# `/api/morning` の as-of ブロック（#416/#417）と macro-health（#420）が担当し、
+# `/api/morning` の as-of ブロック（#416/#417）と夜間バッチの `macro_health` ステップ（#420/#876）が担当し、
 # ここが見るのは「経路の有無」だけ。
 HEAVY_AUTOMATION: dict[str, str] = {
     # 日次（タスクスケジューラ JST 17:20 → run_nightly.ps1 → nightly_scores.py）

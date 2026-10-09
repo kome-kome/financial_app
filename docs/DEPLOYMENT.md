@@ -48,7 +48,7 @@ Render の制約と運用形態に合わせて設計すること。
 
 | JST | タスク | 頻度 | 中身 | 備考 |
 |---|---|---|---|---|
-| **17:20** | `financial_app-nightly`（`run_nightly.ps1` → `scripts/run_nightly.py`） | 毎日 | `_pipeline_incremental.py`（XBRL 差分＋マクロ＋市場データ）→ `nightly_scores.py` | 大引 15:30・J-Quants 四本値 16:30・EDINET 受付終了 17:15 の後（#476 の確定時刻表）。`StartWhenAvailable` で停止していた日は次回起動時に追いつく。上限6時間（最悪 23:20 終了）。**窓はステップ予算へ分割**（pipeline 240分 / scores 60分・#530・ADR-0040）＝超過は `exit=124` で起票され、後続ステップは走る |
+| **17:20** | `financial_app-nightly`（`run_nightly.ps1` → `scripts/run_nightly.py`） | 毎日 | `_pipeline_incremental.py`（XBRL 差分＋マクロ＋市場データ）→ `scripts/check_macro_health.py`（マクロ鮮度ゲート・#876）→ `nightly_scores.py` | 大引 15:30・J-Quants 四本値 16:30・EDINET 受付終了 17:15 の後（#476 の確定時刻表）。`StartWhenAvailable` で停止していた日は次回起動時に追いつく。上限6時間（最悪 23:20 終了）。**窓はステップ予算へ分割**（pipeline 240分 / macro_health 10分 / scores 60分・#530・ADR-0040）＝超過は `exit=124` で起票され、後続ステップは走る。既定モデルが使うマクロ系列が古ければ `macro_health` が exit 2 で起票される（`scores` は走る） |
 | **1日 01:00** | `financial_app-monthly`（`run_monthly.ps1` → `scripts/run_monthly.py`） | 毎月 | `_pipeline_vacuum.py` → `scripts/check_heavy_imports` → `scripts/resolve_price_suffix` → `recommend_factor_premia.py` → `hyperparameter_search.py` ×2（M-3/M-2）。**macro_beta は 2日・M-1 探索は 3日の別タスク**（#579・#584） | 日次の最悪ケース（23:20）の後で、翌日の日次 17:20 までの**16時間の窓**。上限もその幅（`PT16H`）。GHA 時代の4本（vacuum / tune / macro-beta / factor-premia）の移設先（#504・#290）。**窓はステップ予算へ分割**（値の正本は `scripts/run_monthly.py` の `BUDGET_MIN`・Σ＋マージン ≤ 窓・#530・ADR-0040）。ステップを足すときは必ず `window_problem()` を通すこと。予算が無いと1ステップが窓を食い尽くし後続が**一度も起動しない**（打ち切りは failure として現れないので気づけない。#579 以前は `macro_beta` がこれを起こした） |
 | **2日 01:00** | `financial_app-monthly-beta`（`run_monthly_beta.ps1` → `scripts/run_monthly_beta.py`） | 毎月 | `scripts/check_heavy_imports` → `macro_beta_inference.py`（M-1 の入力 `macro_beta_loadings` を作る） | 窓16時間。所要が本体の予算に収まらず切り出した（#579）。**M-1 探索（3日）より前**でなければならない＝日付の順序がそのまま依存順 |
 | **3日 01:00** | `financial_app-monthly-m1`（`run_monthly_m1.ps1` → `scripts/run_monthly_m1.py`） | 毎月 | `scripts/check_heavy_imports` → `hyperparameter_search.py --model macro_risk_return` | 窓16時間。所要が本体の窓に入らず切り出した（#584・[ADR-0046](adr/0046-steps-that-cannot-finish-get-their-own-task.md)）。2日に作られた `macro_beta_loadings` を入力に使う |
@@ -96,13 +96,13 @@ Render の制約と運用形態に合わせて設計すること。
 
 | 旧 UTC | ワークフロー | 停止理由 | 代替 |
 |---|---|---|---|
-| 08:17 | `daily-incremental` → `nightly-scores` / `macro-health` | 正本がローカルへ移り、動かすと Supabase だけが前進して分岐する | ローカル `run_nightly.ps1`（JST 17:20） |
+| 08:17 | `daily-incremental` → `nightly-scores` ／ マクロ鮮度ゲート（**#876 で削除**） | 正本がローカルへ移り、動かすと Supabase だけが前進して分岐する | ローカル `run_nightly.ps1`（JST 17:20）。鮮度ゲートはその `macro_health` ステップ |
 | 00:00 | `macro-beta-inference`（**#504 で削除**） | 同上（`macro_beta_loadings` が分岐する） | `run_monthly_beta.ps1`（#579・毎月2日 JST 01:00） |
 | 16:30 | `tune-hyperparameters`（**#504 で削除**） | 同上。M-1/M-2/M-3 の**唯一の自動更新経路**だったので、止めた時点で μ̂ の鮮度も止まる | 月次本体の `tune:macro_gbdt` / `tune:macro_dlm` と `run_monthly_m1.ps1`（M-1・#584） |
 | 22:00 | `recommend-factor-premia`（**#504 で削除**） | 同上。#423 子5 で「実行履歴ゼロのまま 37 期の重みで固着」を直した cron なので、**止めれば同じ固着へ戻る** | 月次本体の `factor_premia` ステップ（先頭に置いて打ち切りに強くしてある） |
 | 土 23:30 | `vacuum-maintenance` | **2026-08-25 に停止**（#290 / #505）。断面は 2026-08-07 で凍結＝書き込みが無いので bloat も増えず、毎週 `VACUUM FULL` を打っても初回以降は何も回収しない | ローカル月次の `vacuum` ステップ（#504・先頭。実測 daily 59→49MB / weekly 188→165MB / 計13.4秒） |
 
-- `nightly-scores` と `macro-health` は `daily-incremental` の `workflow_run` チェーンなので、親を止めれば連動して止まる（yml 側の schedule は元から無い）。
+- `nightly-scores` は `daily-incremental` の `workflow_run` チェーンなので、親を止めれば連動して止まる（yml 側の schedule は元から無い）。同じチェーンにいたマクロ鮮度ゲートは、#503 から起動元が無いまま #876 で見つかり、ワークフローを削除して夜間バッチの `macro_health` ステップへ移した。
 - `full-pipeline` / `backfill-*` / `collect-interim` / `collect-disclosures` / `collect-macro` は `workflow_dispatch` 専用。放置で害はないが、**手動起動すると Supabase へ書く**＝正本と分岐するので注意。
 - **月次3本は #504 でファイルごと削除した**（「停止中」のまま残さなかった）。削除を選んだ理由は [DEPLOYMENT_HISTORY.md](archive/DEPLOYMENT_HISTORY.md#ワークフロー-月次3本を削除した理由504)。
 - `nightly_scores.HEAVY_AUTOMATION` は全エントリがローカルバッチ（`local:<スクリプト>`）を指す。**yml を指すエントリは schedule が生きていることまで CI が確かめる**（`tests/test_nightly_scores.py`）が、`local:` には**タスクスケジューラ登録**という CI から見えない一段が残る（[ADR-0031](adr/0031-heavy-plugins-require-registered-automation.md) の 2026-08-21 改訂）。
@@ -160,9 +160,11 @@ python -m scripts.backup_restore --source storage --apply --create-schema `
 
 #### アクティブ（`.github/workflows/` 直下・Actions 対象）
 
-> #503 で `daily-incremental` の `schedule:` はコメントアウトされ、連動して `nightly-scores` /
-> `macro-health` の `workflow_run` チェーンも発火しない（下表の3行は今の状態に書き直した。
+> #503 で `daily-incremental` の `schedule:` はコメントアウトされ、連動して `nightly-scores`
+> の `workflow_run` チェーンも発火しない（下表の2行は今の状態に書き直した。
 > GHA で定時に動いていた頃の行は [DEPLOYMENT_HISTORY.md](archive/DEPLOYMENT_HISTORY.md#ワークフロー早見表-cron-停止前の3行503-まで) へ移した・#844）。
+> 同じチェーンにいたマクロ鮮度ゲートは **#876 でファイルごと削除し**、夜間バッチの `macro_health`
+> ステップへ移したので下表にも無い。
 > 月次3本（`macro-beta-inference` / `tune-hyperparameters` /
 > `recommend-factor-premia`）は **#504 でファイルごと削除した**ので下表にも無い。
 > **現在の駆動は `scripts/run_nightly.py`（日次 JST 17:20）・`scripts/run_monthly.py`
@@ -181,7 +183,6 @@ python -m scripts.backup_restore --source storage --apply --create-schema `
 | `[補完]` | マクロのみ収集 | `collect-macro.yml` | `MACRO_SERIES`（為替・金利・指数・コモディティ・ボラ）を Yahoo から収集。新規系列追加や macro_data の鮮度補完。`workflow_dispatch`（years 既定5）。**新系列のバックフィルは years=6 で起動**（yoy は1年+30日で足りるが、将来 zscore 版追加時に再バックフィル不要な余裕幅。#358 コモディティ8系列追加時の運用）。入力 `series` に series_code（カンマ区切り）を渡すと**その系列だけ**を収集する（#444・定義是正後の再収集で GDELT 累積クエリ制限を消費しないため） | 〜数分 |
 | `[停止]` | 夜間スコア更新（`sector_ols` + M-6） | `nightly-scores.yml` | **⛔ `daily-incremental` の `workflow_run` チェーンなので、#503 で親ごと発火しなくなった**（手動起動の口だけ残る）。`nightly_scores.py` 自体はローカル夜間バッチの `scores` ステップで毎晩回る。回すモデル・1モデルの失敗が他を巻き込まないこと・書き込みの直接確認・`shared_snapshot_cache()` の共有は [ARCHITECTURE.md](ARCHITECTURE.md) の `nightly_scores.py` の行が正本 | —（GHA 時代の実測は [DEPLOYMENT_HISTORY.md](archive/DEPLOYMENT_HISTORY.md#ワークフロー早見表-cron-停止前の3行503-まで)） |
 | `[補完]` | 半期(H1)財務収集 | `collect-interim.yml` | EDINET 半期報告書（043A00/docType160）と旧四半期報告書（043000/docType140）の Q2(中間=H1累計)を収集し `financial_records` に `period_type='H1'` で保存（Issue #219② フェーズB）。通期収集とは独立・常に差分（収集済み doc_id をスキップ）。`workflow_dispatch`（years_back 既定6＝既存通期窓に整合）。240分に収まらない場合は years_back を分割 | 数時間（過去6年・事前選別でQ1/Q3を除外し概ね1社1半期1DL） |
-| `[停止]` | マクロ鮮度ゲート | `macro-health.yml` | **⛔ 同じチェーンで #503 以降は発火しない。マクロの鮮度ゲート（`scripts/check_macro_health.py`）はいまどこからも起動されていない**——夜間バッチの `_pipeline_incremental.py` は鮮度レポートをログへ出すだけで、終了コードには反映しない（#876 で起票）。判定（系列個別の許容遅延・critical 系列の逆引き）と除外（`macro_health.EXCLUDED_SERIES` は理由必須。直った系列は必ず除外から外す・ADR-0013）は [ARCHITECTURE.md](ARCHITECTURE.md) の `macro_health.py` の行と [SCRIPTS_REFERENCE.md](SCRIPTS_REFERENCE.md#scriptscheck_macro_healthpy) | 〜2分（GROUP BY 集約1本・`timeout-minutes: 10`） |
 | `[定常]` | Supabase 枠消費ゲート | `egress-health.yml` | `python -m scripts.check_egress_health`（Issue #478 / #483・[ADR-0037](adr/0037-egress-cycle-budget-is-a-second-axis.md)）が **Egress のサイクル累計**（`app_settings.egress_cycle_bytes`）と **Database Size**（`pg_database_size`）を閾値と突き合わせ、超過なら exit 2 → `notify-failure` が Issue 起票。**毎日 UTC 21:00（JST 06:00）自動**。閾値は Egress 80%（`db_egress.CYCLE_WARN_RATIO`）／DB 85%（`check_egress_health.DB_WARN_RATIO`）で、**DB 側を厳しくしてある**——Egress は超えても翌サイクルで戻るが、Database Size 超過は read-only で収集そのものが止まるため。**DB の判定値は `pg_database_size` で、Usage ページの課金判定値より約 35MB 低く出る**（2026-08-19 実測: Usage 430MB / Infrastructure 409.8MB / `pg_database_size` 395MB）＝閾値 0.90 のままだと Usage 基準で 97% 相当になり手遅れなので 0.85 に置いた。**この3つの数字を混ぜないこと。****`workflow_run` チェーンにせず cron で回すのが要点**：Egress はワークフローの成否と無関係に積み上がり、開発者のローカル CLI からも積まれる（過去2回の超過はどちらもローカル検証の反復が主因）ので「収集が成功した後に見る」では見落とす経路が残る。Management API の PAT は不要（判定材料は DB の中にある＝#483 のブロッカーを迂回）。手動即時実行は `workflow_dispatch`（`warn_only` で常に exit 0） | 〜2分（`timeout-minutes: 10`） |
 | `[定常]` | 依存パッケージの脆弱性検査 | `dependency-audit.yml` | `requirements*.txt`（glob で全本・推移依存込み）を pip-audit で照合し、既知の脆弱性があれば failure → `notify-failure` が起票（Issue #723）。**毎週 UTC 22:23・日（JST 07:23・月）自動**＋ `requirements*.txt` を変える PR / main への push。手動は `workflow_dispatch`。仕組みと検出時の対応は下記「依存パッケージの脆弱性検査」節 | 〜数分（ローカル実測 48秒・107件） |
 | `[定常]` | ワークフロー失敗の自動 Issue 起票 | `notify-failure.yml` | 上記ワークフロー（`ci.yml` を除く全本数・列挙しない設計）＋セルフテストが `failure` または `cancelled` で終わると自動起票（`workflow_run`）。手動起動しない。詳細は下記「ワークフロー失敗の通知」節 | 〜1分 |
