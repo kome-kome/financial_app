@@ -26,8 +26,8 @@ on:
   # （fill_recent_stock_price_gap_yahoo）である＝ここが失敗すると鮮度が止まる。
   # 実測所要 2h05m〜2h38m（2026-08-02 の success run 2本・#422）。#474 以降、
   # 週末・祝日明けは gap-fill をほぼ丸ごと飛ばすため大きく短くなる。
-  # このワークフローの success が nightly-scores / macro-health の workflow_run
-  # チェーンを起動する（#432 / #420）ので、name を変えるときは両 yml の if も直す。
+  # このワークフローの success が nightly-scores の workflow_run チェーンを
+  # 起動する（#432）ので、name を変えるときは nightly-scores.yml の if も直す。
   # nightly-scores は実測33〜35分なので、チェーン終端は JST 21〜22時台の見込み。
   # ⛔ 2026-08-10: Egress 超過（#477）で一時停止 → **2026-08-20 に恒久停止へ切り替え**（#503）。
   #    停止の理由が「枠が戻るまでの待避」から「役割の終了」へ変わった:

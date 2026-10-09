@@ -67,13 +67,15 @@ WINDOW_MIN = 6 * 60
 #
 # 実測: 通常は総所要 60〜70分（2026-08-23 は 69分）。1日飛ぶと翌日の Yahoo gap-fill が
 # 4,000社超へ膨らみ 2h11m 級まで伸びる（#475）。pipeline 240分はその最悪ケースの外側で、
-# **通常運転を打ち切らない**ことを優先した値。scores は実測 6.5分。
+# **通常運転を打ち切らない**ことを優先した値。scores は実測 6.5分。macro_health は
+# `macro_data` の GROUP BY 1本（同じ判定を pipeline の Phase 3 が毎晩ログへ出している）。
 #
 # ここで切れる方が良い理由: 窓（6時間）に達するとタスクスケジューラが黙ってプロセスを
 # 止め、`scores` は走った形跡すら残さない。予算で切れば exit=124 の失敗として起票され、
 # `scores` はそのまま走る。
 BUDGET_MIN: dict[str, float] = {
     "pipeline": 240,
+    "macro_health": 10,
     "scores": 60,
 }
 
@@ -101,10 +103,17 @@ def steps_for(python: str) -> tuple[Step, ...]:
     （`fill_recent_stock_price_gap_yahoo` → J-Quants で公式値へ置換）にある。
     2026-08-20 に `collector.py --incremental` で12日ぶんの欠測を埋めようとして、
     財務だけ通り株価が動かないのを実測した。GHA が回していたのと同じ入口を使う。
+
+    **マクロの鮮度ゲート（`macro_health`）は収集の直後に別ステップで回す**（#876）。
+    収集は1系列が取れなくても exit 0 で通るので、鮮度切れはここでしか失敗にならない。
+    収集の終了コードへ混ぜないのは、起票で「収集が落ちた」と見分けるため。
+    ステップ間で止めないので、鮮度切れの夜も `scores` は走る。
     """
     steps = (
         Step("pipeline", (python, "_pipeline_incremental.py"),
              why="XBRL 差分 ＋ マクロ ＋ 市場データ（株価鮮度の担い手・GHA と同じ入口）"),
+        Step("macro_health", (python, "-m", "scripts.check_macro_health"),
+             why="マクロ系列の鮮度ゲート（既定モデルが使う系列が古ければ exit 2・#420/#876）"),
         Step("scores", (python, "nightly_scores.py"),
              why="sector_ols / macro_enet のスコア更新（producer の永続化）"),
     )

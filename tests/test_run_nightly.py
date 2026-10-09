@@ -31,11 +31,30 @@ class _FakeProc:
         return self.returncode
 
 
+def _target(argv) -> str:
+    """子の argv から「何を起動したか」を取る（`-m` ならモジュール名、そうでなければファイル名）。"""
+    if len(argv) > 2 and argv[1] == "-m":
+        return argv[2]
+    return Path(argv[1]).name if len(argv) > 1 else argv[0]
+
+
 class TestStepOrder:
     def test_freshness_runs_before_scores(self):
         """収集がスコアより先。逆順だと前日データでスコアが確定する（#423 の依存順）。"""
         names = [s.name for s in rn.steps_for(sys.executable)]
         assert names.index("pipeline") < names.index("scores")
+
+    def test_macro_health_runs_right_after_collection(self):
+        """鮮度ゲートは収集の直後（#876）。収集より前だと前夜のマクロを判定してしまう。"""
+        names = [s.name for s in rn.steps_for(sys.executable)]
+        assert names.index("pipeline") < names.index("macro_health") < names.index("scores")
+
+    def test_macro_health_step_runs_the_gate_cli(self):
+        """起動元が無いと鮮度切れは誰にも知らされない（#503 以降そうなっていた・#876）。"""
+        argv = next(s.argv for s in rn.steps_for("py") if s.name == "macro_health")
+        assert argv[1:] == ("-m", "scripts.check_macro_health"), (
+            "鮮度ゲートの CLI を呼んでいない＝鮮度切れが失敗にならない"
+        )
 
     def test_collection_uses_the_pipeline_not_collector_cli(self):
         """**株価を更新する入口を選ぶ。**
@@ -122,7 +141,7 @@ class TestKeepsGoing:
         seen = []
 
         def fake_run(argv, **kw):
-            seen.append(Path(argv[1]).name if len(argv) > 1 else argv[0])
+            seen.append(_target(argv))
             return _FakeProc(returncode=1 if "_pipeline_incremental.py" in argv[1] else 0)
 
         monkeypatch.setattr(rn.subprocess, "Popen", fake_run)
@@ -131,7 +150,8 @@ class TestKeepsGoing:
         monkeypatch.setattr(rn, "notify", lambda results, log, run=None: None)
 
         code = rn.main([])
-        assert seen == ["_pipeline_incremental.py", "nightly_scores.py"], (
+        assert seen == ["_pipeline_incremental.py", "scripts.check_macro_health",
+                        "nightly_scores.py"], (
             "失敗したステップの後ろが実行されていない＝途中で止まっている"
         )
         assert code == 1, "失敗数が exit code に出ていない"
@@ -156,6 +176,85 @@ class TestKeepsGoing:
             finally:
                 rn.subprocess.Popen = original
         assert code == 127
+
+
+class TestStaleMacroIsReported:
+    """鮮度切れのマクロが夜間バッチの失敗として起票され、`scores` は止まらない（#876）。
+
+    鮮度ゲートは #503 で GHA の起動元を失い、2026-08-20 から一度も回っていなかった。
+    `collect_macro_data` は1系列が取れなくても exit 0 で通るので、ここで失敗にならないと
+    #438（`^BCOM` の静かな固定）と同じ事故が誰にも知らされない。
+
+    子プロセスは in-memory SQLite を見られないので、`macro_health` のステップだけは
+    同じプロセスで `check_macro_health.main` を呼び、その戻り値をステップの exit にする。
+    起票は本物の `notify` に `gh` の差し替えを渡して、引数まで確かめる。
+    """
+
+    @staticmethod
+    def _seed(db, stale_code=None):
+        from datetime import date, timedelta
+
+        import macro_health as mh
+        from database import MacroData
+
+        today = date.today()
+        for s in mh.expected_series():
+            if s["code"] in mh.EXCLUDED_SERIES:
+                continue
+            last = today - timedelta(days=30) if s["code"] == stale_code else today
+            db.add(MacroData(series_code=s["code"], series_name=s["code"], category="test",
+                             trade_date=last.isoformat(), close=1.0))
+        db.commit()
+
+    def _run_nightly(self, db, tmp_path, monkeypatch):
+        from scripts import check_macro_health as cmh
+
+        monkeypatch.setattr(cmh, "SessionLocal", lambda: db)
+        seen, gh_calls = [], []
+
+        def fake_popen(argv, **kw):
+            target = _target(argv)
+            seen.append(target)
+            if target == "scripts.check_macro_health":
+                return _FakeProc(returncode=cmh.main([]))
+            return _FakeProc(0)
+
+        def fake_gh(argv, **kw):
+            gh_calls.append(argv)
+            return _FakeProc(0)
+
+        real_notify = rn.notify
+        monkeypatch.setattr(rn.subprocess, "Popen", fake_popen)
+        monkeypatch.setattr(rn, "log_path", lambda now=None: tmp_path / "n.log")
+        monkeypatch.setattr(rn, "record_footprint", lambda results: None)
+        monkeypatch.setattr(rn, "notify",
+                            lambda results, log, run=None: real_notify(results, log, run=fake_gh))
+        return rn.main([]), seen, gh_calls
+
+    def test_stale_critical_series_fails_the_step_and_files_an_issue(
+            self, db, tmp_path, monkeypatch):
+        # USDJPY は日次（許容 14日）かつ既定モデルが使う critical 系列
+        self._seed(db, stale_code="USDJPY")
+        code, seen, gh_calls = self._run_nightly(db, tmp_path, monkeypatch)
+
+        assert code == 1, "鮮度切れが夜間バッチの失敗に数えられていない"
+        assert len(gh_calls) == 1, "鮮度切れなのに起票されていない"
+        argv = gh_calls[0]
+        assert argv[:3] == ["gh", "issue", "create"]
+        assert "macro_health" in argv[argv.index("--title") + 1]
+        assert "| macro_health | 2 |" in argv[argv.index("--body") + 1]
+
+    def test_scores_still_runs_when_macro_is_stale(self, db, tmp_path, monkeypatch):
+        """マクロを使わない sector_ols まで巻き添えにしない（ステップ間で止めない・#425）。"""
+        self._seed(db, stale_code="USDJPY")
+        _, seen, _ = self._run_nightly(db, tmp_path, monkeypatch)
+        assert seen == ["_pipeline_incremental.py", "scripts.check_macro_health",
+                        "nightly_scores.py"]
+
+    def test_fresh_series_file_nothing(self, db, tmp_path, monkeypatch):
+        self._seed(db)
+        code, _, gh_calls = self._run_nightly(db, tmp_path, monkeypatch)
+        assert code == 0 and gh_calls == [], "健全なのに失敗・起票している"
 
 
 class TestSideEffectsNeverKillTheBatch:

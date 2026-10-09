@@ -85,7 +85,7 @@
 | [`run_daytime.ps1` / `scripts/install_daytime_task.ps1`](#run_daytimeps1--scriptsinstall_daytime_taskps1) | ユーティリティ |
 | [`scripts/backup_push.py`](#scriptsbackup_pushpy) | ユーティリティ |
 | [`scripts/backup_restore.py`](#scriptsbackup_restorepy) | ユーティリティ |
-| [`scripts/check_macro_health.py`](#scriptscheck_macro_healthpy) | GitHub Actions / ユーティリティ |
+| [`scripts/check_macro_health.py`](#scriptscheck_macro_healthpy) | ユーティリティ |
 | [`scripts/check_egress_health.py`](#scriptscheck_egress_healthpy) | GitHub Actions / ユーティリティ |
 
 ---
@@ -296,9 +296,9 @@ NUTS 軌道長（`max_tree_depth`）× `target_accept` の格子ドライバ（I
 
 ## `scripts/run_nightly.py`
 
-**ローカル夜間バッチの実体**（#503 Phase 2・ADR-0038。骨格は `scripts/batch_common.py` と共有）。`_pipeline_incremental.py`（XBRL 差分＋マクロ＋市場データ）→ `nightly_scores.py` の順に回す。**ステップ間で止めない**（収集が落ちてもスコア更新は走り、両方の結果がログに残る）。実行のたび `app_settings` の `nightly_last_run` / `nightly_last_success` へ足跡を書き、失敗は `gh issue create` で起票する（**通知・記録の失敗はバッチを落とさない**）。収集の入口が `collector.py --incremental` ではないのが要点＝あちらは株価を1バイトも更新しない。`WINDOW_MIN`(360分) と `BUDGET_MIN`（pipeline 240 / scores 60）を持つ（#530・ADR-0040）
+**ローカル夜間バッチの実体**（#503 Phase 2・ADR-0038。骨格は `scripts/batch_common.py` と共有）。`_pipeline_incremental.py`（XBRL 差分＋マクロ＋市場データ）→ `scripts/check_macro_health.py`（マクロ鮮度ゲート・#876）→ `nightly_scores.py` の順に回す。**ステップ間で止めない**（収集が落ちてもスコア更新は走り、両方の結果がログに残る。鮮度切れの夜も同じ）。実行のたび `app_settings` の `nightly_last_run` / `nightly_last_success` へ足跡を書き、失敗は `gh issue create` で起票する（**通知・記録の失敗はバッチを落とさない**）。鮮度切れの夜は `nightly_last_success` が進まないが、watchdog と `/api/morning` の判定は `nightly_last_run` だけを見るので「走っていない」とは出ない（ADR-0042 の決定2）。収集の入口が `collector.py --incremental` ではないのが要点＝あちらは株価を1バイトも更新しない。`WINDOW_MIN`(360分) と `BUDGET_MIN`（pipeline 240 / macro_health 10 / scores 60）を持つ（#530・ADR-0040）
 
-種別: ユーティリティ ／ 依存先: _pipeline_incremental.py, nightly_scores.py, database
+種別: ユーティリティ ／ 依存先: _pipeline_incremental.py, scripts/check_macro_health.py, nightly_scores.py, database
 
 ## `run_nightly.ps1`
 
@@ -548,9 +548,9 @@ M-1 探索専用タスクの登録（既定 毎月3日 JST 01:00・16時間）�
 
 ## `scripts/check_macro_health.py`
 
-`macro_health.py` の判定 CLI（`python -m scripts.check_macro_health`）。critical 系列が不健全なら exit 2 → `notify-failure.yml` が Issue 起票。`macro-health.yml` から起動。**収集パイプライン本体からは意図的に分離**（収集ジョブを failure にすると `nightly-scores` の `workflow_run` チェーンが発火せず `sector_ols` 夜間更新まで止まるため・#425/#432）
+`macro_health.py` の判定 CLI（`python -m scripts.check_macro_health`）。critical 系列が不健全なら exit 2 → 夜間バッチの失敗通知が Issue 起票。**起動元はローカル夜間バッチの `macro_health` ステップ**（`scripts/run_nightly.py`・`pipeline` の直後・#876）。GHA の起動元は #503 で親ごと発火しなくなり、#876 で削除した。**収集パイプライン本体からは意図的に分離**（収集は1系列が取れなくても exit 0 で通る。鮮度切れを収集の終了コードへ混ぜると、起票で「収集が落ちた」と見分けられない）。`--warn-only` は常に exit 0（誤検知の調査用・夜間の argv には付けない）。除外は `macro_health.EXCLUDED_SERIES`（理由必須。直った系列は必ず除外から外す・ADR-0013）
 
-種別: GitHub Actions / ユーティリティ ／ 依存先: macro_health.py, database.py
+種別: ユーティリティ ／ 依存先: macro_health.py, database.py
 
 ## `scripts/check_egress_health.py`
 

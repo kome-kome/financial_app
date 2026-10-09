@@ -314,8 +314,8 @@ async def main(years_back: int, collect_only: bool = False,
             log(f"  マクロデータ {n} 件更新")
             # 健全性レポート（#420）。collect_macro_data は 1 系列が取れなくても continue する
             # ため、部分失敗は exit 0 で通り #414 の失敗通知に載らない。その時点の鮮度を
-            # run ログへ残す。非ゼロ終了は独立した macro-health.yml が担う（ここで落とすと
-            # マクロと無関係な Phase 5＝株価鮮度を巻き添えにする・#425）。
+            # run ログへ残す。非ゼロ終了は夜間バッチの `macro_health` ステップが担う
+            # （ここで落とすとマクロと無関係な Phase 5＝株価鮮度を巻き添えにする・#425/#876）。
             for line in format_report(check_macro_freshness(db)):
                 log(line)
         finally:
