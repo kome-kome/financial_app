@@ -275,3 +275,40 @@ pg_restore --clean --no-acl --no-owner \
 | `[定常]` | 差分収集・毎日自動実行 | `daily-incremental.yml` | **毎日 UTC 08:17（JST 17:17）** に自動（#476 で JST 03:00 から前倒し＝大引け 15:30 と EDINET 受付終了 17:15 の直後。根拠は下記「daily-incremental の動作詳細」）。手動で即時更新したい場合は `workflow_dispatch` | **2h05m〜2h38m**（2026-08-02 実測）。#474 以降、週末・祝日明けは gap-fill をほぼ飛ばすため大幅に短い |
 | `[定常]` | 夜間スコア更新（`sector_ols` + M-6） | `nightly-scores.yml` | `nightly_scores.py`（Issue #432/#443・親 #423）を実行し、①`sector_ols` → `regression_results`（`predicted_market_cap` / `gap_ratio`）②`macro_enet`（M-6）→ `macro_enet_scores`（μ̂・`sell_ranking` の**既定** mu_source）を更新する。**起動は `daily-incremental` の `workflow_run` チェーンで `conclusion == 'success'` のときだけ**（株価が前進していない日にスコアだけ更新すると、古い株価由来の値が「今日のランキング」として出るため）。`sector_ols` は `regularization=ridge` 固定（既定 features 10項目は VIF>10 が頻発）、M-6 は params_schema の既定のまま（ADR-0021/0022 の実測と同一構成）。1モデルの失敗は他を巻き込まず、実行後に `max(computed_at)` / `max(created_at)` を直接クエリして永続化を確認する（例外なし＝コミット済みとしない）。モデル間の `load_data`（週次127万行）は `shared_snapshot_cache()` で共有し、Egress がモデル数に比例しないようにしている。手動即時実行は `workflow_dispatch` | **総所要 33.5分**（2026-08-04 本番実走・[run 30954182465](https://github.com/kome-kome/financial_app/actions/runs/30954182465)＝`sector_ols` 30.3分 + M-6 3.2分・job wall 34.5分）／**32.6分**（08-05・[run 31050406971](https://github.com/kome-kome/financial_app/actions/runs/31050406971)＝29.4分 + 3.2分）。`timeout-minutes` は実測 job wall の 2.0倍で **70分**（#446 で 150 から）。重いのは `sector_ols` 側で M-6 は 3.2分。起票時の 16.1分（2026-08-03・run 30808053564・30業種/2,837社）は #434 の構造的NULL対応前の値＝**銘柄数・業種数とともに伸びるので実走ログで追う** |
 | `[定常]` | マクロ鮮度ゲート | `macro-health.yml` | `python -m scripts.check_macro_health`（Issue #420）が `macro_data` の系列別 `max(trade_date)` を期待更新頻度（`macro_health.FREQ_STALE_DAYS`）と突き合わせ、**既定モデルが使う系列**（`DEFAULT_MACRO_FEATURES` から逆引き）が古ければ exit 2 → `notify-failure` が Issue 起票。`collect_macro_data` は 1 系列失敗しても `continue` するため部分失敗が exit 0 で通り、#414 の失敗通知では拾えないのを塞ぐ。**収集本体（`daily-incremental` / `full-pipeline`）を落とさず独立ジョブに分離しているのが要点**——あちらを failure にすると `nightly-scores` の `workflow_run` チェーン（`success` 条件）が発火せず、マクロと無関係な `sector_ols` の夜間更新まで巻き添えで止まる（#425 の構造をワークフロー間へ適用）。収集側は同じレポートを run ログに出すだけ。誤検知が続く系列は `macro_health.EXCLUDED_SERIES` へ**理由付きで**登録する（現在: `JP_IP`＝FRED 凍結 #253／`JP_IIP`・`JP_IIP_INVENTORY`＝e-Stat が年単位更新 #451。`JP10Y` は #442 で `MACRO_SERIES` ごと削除したため除外指定も不要になった。`BCOM` は #438 の Yahoo 配信停止で一時除外していたが、収集元を連動 ETN `DJP` へ差し替えて 2026-08-06 に除外解除＝**直った系列は必ず除外から外す**（残すと代替ソース側の停止を検知できなくなる）） | 〜2分（GROUP BY 集約1本・`timeout-minutes: 10`） |
+
+## CF 補完と bs_inventory バックフィルの完了状態（2026-05〜06）
+
+2026-10-09（#844 の4回目）に DEPLOYMENT.md「データ収集の仕組み（自動 vs 手動）」の「CF補完の完了状態」「bs_inventory バックフィル」の2節から移した。どちらも完了済みの一回性の作業で、今の運用の手順は [GOTCHAS.md](../GOTCHAS.md)「CF NULL補完の運用」「bs_inventory バックフィルの運用」にある。`refill-cf.yml` は移した時点で `.github/workflows/` に無い。
+
+### CF補完の完了状態（2026-05-31 完了）
+
+| 指標 | 状態 |
+|---|---|
+| 通常補完（`cf_net_change_cash IS NULL`）| ✅ **全件完了**（remaining=0） |
+| capex 充足率 | **88.8%**（CF文を持つ 19,073件中 16,929件取得済み） |
+| 残り 2,144件 | アセットライト企業（持株会社・IT等）で capex 行が元々無いため永続的に NULL。再実行しても変わらない |
+| `refill-cf.yml` スケジュール | **cron を撤去し手動（workflow_dispatch）のみ**に確定（Issue #117・案B）。下記の実態計測により定期実行は便益が無いと判断 |
+
+#### cron を持たない理由（Issue #117 / 本番DB 20,548行の実態計測）
+
+| CF 区分 | 充足率 |
+|---|---|
+| 営業CF `cf_operating_cf` | 100.0% |
+| 投資CF `cf_investing_cf` | 99.9% |
+| 財務CF `cf_financing_cf` | 99.7% |
+| 現金増減 `cf_net_change_cash` | 98.3% |
+| 設備投資 `cf_capex` | 88.9% |
+
+- 主要3区分（営業/投資/財務CF）は初回 XBRL 収集で ≧99.7% 充足し、「CF NULL が蓄積し続ける」懸念は実態として発生していない。
+- 唯一の有意な欠損は capex（~11%）だが全年度で安定した**構造的欠損**（提出企業ごとのタグ揺れ）であり、同じ XBRL を再パースする日次 cron では改善しない。本質的改善は parse 側のラベル照合拡充（別 Issue）で扱う。
+- よって定期 cron の便益はほぼ無く、J-Quants レート制限・Render スリープのコストのみ残るため cron は撤去。欠損補完が必要な場合は `workflow_dispatch`（mode=refill/capex-only/diagnose・件数指定）で随時実行する。
+
+### bs_inventory バックフィル（`.github/workflows/old/refill-pl-bs.yml`）
+
+`bs_inventory` の NULL はタグ漏れではなく**時系列コホート**が原因（パーサ修正前に収集した〜2022年度が backfill 未実施。2026-06-15 実測で旧年度 57〜94% null・新年度は ~3%）。`.github/workflows/old/refill-pl-bs.yml` を（`.github/workflows/` へ戻してから）**workflow_dispatch（limit 省略＝全件・約4〜5時間）** で起動し、古い順に XBRL を再取得して是正する。詳細・残件の見方は GOTCHAS.md「bs_inventory バックフィルの運用」。
+
+| 項目 | 状態 |
+|---|---|
+| 自動化整備 | ✅ `_pipeline_gh.py --refill-pl-bs` + `.github/workflows/old/refill-pl-bs.yml` を結線 |
+| 本番バックフィル実行 | ✅ **完了**（2026-06-24 実測: 全年度 82〜87% カバレッジ。残 NULL はサービス業・金融等の構造的欠損） |
+| 完了判定 | 全年度で一様な欠損率（≒13〜18%）になっており旧コホート偏りは解消済み |
