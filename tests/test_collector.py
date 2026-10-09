@@ -538,6 +538,78 @@ class TestConsolidatedRevenue:
         assert collector_financials._context_priority(ctx) == priority
 
 
+# ── 旧様式の四半期報告書の H1: 半期累計と直近3か月（#871）──────────────────────
+# 検体は E02144 トヨタ 2021年 H1（S100K3J3）の実際の行。同じ要素が半期の累計
+# （CurrentYTDDuration）と直近3か月（CurrentQuarterDuration）の2つで並び、どちらも
+# メンバーを持たないので優先度が同じ＝先に来た方が採られていた。
+_TOYOTA_S100K3J3 = [
+    ("jpcrp040300-q2r_E02144-000:OperatingRevenuesIFRSKeyFinancialData", "CurrentYTDDuration", "11375223000000"),
+    ("jpcrp040300-q2r_E02144-000:OperatingRevenuesIFRSKeyFinancialData", "CurrentQuarterDuration", "6774427000000"),
+]
+
+
+class TestInterimYtdOverQuarter:
+    """H1 行の P/L・CF は並び順に関わらず半期累計から採る（#871）。"""
+
+    @pytest.mark.parametrize("order", ["as_filed", "reversed"])
+    def test_ytd_is_chosen_regardless_of_order(self, order):
+        rows = _TOYOTA_S100K3J3 if order == "as_filed" else _TOYOTA_S100K3J3[::-1]
+        pl = parse_xbrl_csv(_xbrl_df(rows), "E02144", "2021-09-30")["pl"]
+        assert pl["revenue"] == 11375223000000.0, "3か月分（7〜9月）の値が採られている"
+
+    @pytest.mark.parametrize("order", ["as_filed", "reversed"])
+    def test_parse_raw_rows_agrees(self, order):
+        rows = _TOYOTA_S100K3J3 if order == "as_filed" else _TOYOTA_S100K3J3[::-1]
+        raw = [{"element": e.split(":")[-1], "context": c, "value": v} for e, c, v in rows]
+        assert parse_raw_rows(raw)["pl"]["revenue"] == 11375223000000.0
+
+    def test_quarter_only_value_is_not_taken(self):
+        """3か月しか無い項目は NULL のまま（H1 行へ3か月分が入ると黙って誤る）。"""
+        rows = [r for r in _TOYOTA_S100K3J3 if r[1] == "CurrentQuarterDuration"]
+        assert "revenue" not in parse_xbrl_csv(_xbrl_df(rows), "E02144", "2021-09-30")["pl"]
+
+    def test_quarter_end_balance_is_still_taken(self):
+        """B/S は時点（CurrentQuarterInstant＝第2四半期末＝半期末の残高）から採る。Duration ではない。"""
+        rows = [("jppfs_cor:Assets", "CurrentQuarterInstant", "999")]
+        assert parse_xbrl_csv(_xbrl_df(rows), "E00000", "2021-09-30")["bs"]["total_assets"] == 999.0
+
+    def test_quarter_inventory_parts_are_not_collected(self):
+        """棚卸資産の集約も同じ判定を通る（#852 では2箇所に同じ穴があった）。"""
+        elem = next(iter(collector_financials._INVENTORY_SUB_ELEMS))
+        parts, prio = {}, {}
+        collector_financials._collect_inventory_row(elem, "CurrentQuarterDuration", "5", parts, prio)
+        collector_financials._collect_inventory_row(elem, "CurrentQuarterInstant", "7", parts, prio)
+        assert parts == {elem: 7.0}
+
+    @pytest.mark.parametrize("ctx, outside", [
+        ("CurrentYTDDuration", False),                          # 旧様式 H1 の累計
+        ("CurrentYTDDuration_NonConsolidatedMember", False),
+        ("CurrentQuarterDuration", True),                       # 旧様式の直近3か月
+        ("CurrentQuarterDuration_NonConsolidatedMember", True),
+        ("CurrentQuarterConsolidatedDuration", True),           # 旧形式の3か月
+        ("CurrentQuarterInstant", False),                       # 半期末の残高
+        ("CurrentYearDuration", False),                         # 年度
+        ("CurrentYearInstant", False),
+        ("InterimDuration", False),                             # 新式半期（#647）
+        ("Prior1InterimDuration", True),
+        ("Prior1YTDDuration", True),
+        ("Prior1YearDuration", True),
+        ("Prior1YearInstant", True),
+    ])
+    def test_outside_current_period(self, ctx, outside):
+        assert collector_financials._outside_current_period(ctx) is outside
+
+    def test_period_rule_lives_in_one_place(self):
+        """期間の判定の式は `_outside_current_period` だけに置く（呼び出し側へ書き写さない）。"""
+        import inspect
+        for fn in (collector_financials._apply_row, collector_financials._collect_inventory_row):
+            src = inspect.getsource(fn)
+            assert "_outside_current_period(ctx)" in src, fn.__name__
+            assert '"Prior" in ctx' not in src and '"Quarter" in ctx' not in src, (
+                f"{fn.__name__} が期間の判定を書き写している"
+            )
+
+
 # ── 会計基準（DEI `AccountingStandardsDEI`・#859）──────────────────────────────
 # 検体は 2026-10-09 に EDINET から取得した実際の書類の DEI 行。表記は年度・半期・旧四半期で同じだった。
 
