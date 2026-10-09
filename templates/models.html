@@ -689,7 +689,7 @@ conv_score₁₂ₘ = max(<span class="val">5</span>, min(<span class="val">95</
   <div class="warn-box"><strong>旧既定の並び（R_macro・λ=1.0）は、測った7つの並びで rank-IC が最も低かった（−0.048）。</strong>横軸を <strong>R2 にした λ=0.3 / 1.0 の並びは、rank-IC・売り側スプレッドとも旧既定より有意に良く</strong>、R2・λ=1.0 は μ̂ だけの並びとも有意な差がなかった（rank-IC 差 −0.010・p=0.83）。旧既定に勝った候補が μ̂ だけの並びにも負けなかったので、<strong>横軸の既定を R2 へ変えた</strong>（λ=1.0 は据え置き）。R_macro は λ を上げるほど悪化し、λ=1.0 では μ̂ だけの並びより売り側で有意に劣り、分位の並びも逆転した（M-6 と同じ現象）。λ&gt;1.0 は未測定。</div>
 
   <h3 id="model-comparison">モデル比較の統計的厳密化（#369）</h3>
-  <p>「モデル比較」タブは M-1〜M-5 の <code>oof_backtest</code> を横並びにするが、mean 値の目視だけでは「あるモデルが他より<strong>本当に</strong>有効か」は言えない。walk-forward の各 fold は学習窓が重複し per-fold の rank-IC 系列は iid でないため、素朴な paired-t は分散を過小評価する。そこで #369 では<strong>純後処理</strong>（追加学習・Egress ゼロ・stdlib のみ・実装は <code>model_stats.py</code>）で2点を補強する：</p>
+  <p>「モデル比較」タブは <code>model_comparison.COMPARISON_MODELS</code> に並ぶモデル（退役したモデルも比較の基準線として残す）の <code>oof_backtest</code> を横並びにするが、mean 値の目視だけでは「あるモデルが他より<strong>本当に</strong>有効か」は言えない。walk-forward の各 fold は学習窓が重複し per-fold の rank-IC 系列は iid でないため、素朴な paired-t は分散を過小評価する。そこで #369 では<strong>純後処理</strong>（追加学習・Egress ゼロ・stdlib のみ・実装は <code>model_stats.py</code>）で2点を補強する：</p>
   <ul>
     <li><strong>rank-IC 差の有意性マトリクス</strong>：各モデルの per-fold rank-IC を<strong>共通 test 期でペアリング</strong>し、差の平均を系列相関を保存する<strong>定常ブートストラップ</strong>（Politis-Romano 1994）で検定。全ペアを同時に比べるので<strong>多重比較を補正</strong>する（Bonferroni：α = 0.05 ÷ 検定した組数。6モデル＝15組なら 0.0033）。比較ビューが <strong>▲</strong>（行モデルが有意に優位＝差の p 値が補正後 α を下回る。このとき同じ α の CI は 0 を跨がない）/ <strong>▼</strong>（劣位）/ <strong>n.s.</strong>（有意差なし）で表示する（ADR-0063）。</li>
     <li><strong>分位単調性</strong>：top−bottom spread へ畳むと隠れる中間分位の U 字/非単調（過学習の兆候）を、期毎 Spearman(分位idx, 分位平均)・隣接分位の正順率・「単調増が偶然でない」片側ブートストラップ p 値で可視化する。</li>

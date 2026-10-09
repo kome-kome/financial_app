@@ -1234,8 +1234,8 @@ classDiagram
         +depends_on = []
         +heavy = True
         +ui_order = 390
-        +params_schema() 正則化強度・l1_ratio/fin_features/use_macro/macro_features 等
-        +execute() 交差項+ElasticNet で μ̂ 推定 → macro_enet_scores へ保存（売り推奨の既定 mu_source）
+        +params_schema() fin_features/use_macro/macro_features/use_momentum/price_features 等（α・l1_ratio は fold 内で選ぶ）
+        +execute() ElasticNet（build_interactions=False）で μ̂ 推定 → macro_enet_scores へ保存（売り推奨の既定 mu_source）
     }
 
     class MacroGbdtRankPlugin {
