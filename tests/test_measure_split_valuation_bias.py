@@ -623,3 +623,77 @@ class TestVerifyInPeriod:
         """決定4-13 で測る前に固定した値。結果を見て動かしたらここで落ちる。"""
         assert (M.IN_PERIOD_WINDOW_END_DAYS, M.IN_PERIOD_MIN_CONFIRMED_SHARE, M.SOURCES_MATCH_TOL) == (
             92, 0.5, 0.05)
+
+
+class TestConsistencyAxisReadsInPeriodPairs:
+    """verify-sources（整合度照合の軸）が、期中の分割を分けた組（決定4-13）を想定外・不一致に数えない（#898）。
+
+    検体は `TestVerifyInPeriod` と同じ実値（E35140・E35767）。組の期末後イベントは整合度照合で認めたもので、
+    分解はそれを相方にして期中のイベントを足す。Yahoo の分割の日付は `TestInPeriodDecomposition` の注記より。
+    """
+
+    YAHOO = {"E35140": [("2021-12-29", 2.0), ("2022-09-29", 2.0)],
+             "E35767": [("2021-12-06", 2.0), ("2022-08-30", 2.0)]}
+
+    @staticmethod
+    def _ledgers(ec):
+        from tests.test_corporate_actions import TestInPeriodDecomposition as T, real_rows
+        rows = real_rows(ec, getattr(T, ec))
+        kw = dict(official={}, coverage={}, series={})
+        return (C.compute_ledger(rows, consistency_crosscheck=False, **kw),
+                C.compute_ledger(rows, consistency_crosscheck=True, **kw))
+
+    @staticmethod
+    def _targets(on):
+        return [e for e in on.events if e.source == "bps" and e.cross_check == "consistency"]
+
+    @pytest.mark.parametrize("ec", ["E35140", "E35767"])
+    def test_in_period_partnered_by_consistency_is_expected(self, ec):
+        off, on = self._ledgers(ec)
+        d = M.ledger_diff(off, on, expected=M.consistency_rule_events(on.events))
+        assert d["n_added"] == 2
+        assert (d["added_unexpected"], d["removed"], d["changed_existing"]) == ([], [], [])
+        # 整合度照合だけの述語（#898 以前の verify-sources）は、組の期中のイベントを想定外に数えていた
+        assert [k[3] for k in M.ledger_diff(off, on)["added_unexpected"]] == ["in_period"]
+
+    def test_in_period_without_a_consistency_partner_stays_unexpected(self):
+        import dataclasses
+        off, on = self._ledgers("E35140")
+        [ip] = [e for e in on.events if e.source == "in_period"]
+        [partner] = self._targets(on)
+        key = ["E35140", 2022, "2022-09-30"]
+        # 相方が無い／相方が整合度照合でない（そのときは相方自身も想定外）
+        for events, unexpected in (([ip], ["in_period"]),
+                                   ([ip, partner._replace(cross_check="eps")], ["bps", "in_period"])):
+            lone = dataclasses.replace(on, events=events)
+            d = M.ledger_diff(off, lone, expected=M.consistency_rule_events(lone.events))
+            assert d["added_unexpected"] == [key + [s] for s in unexpected]
+
+    @pytest.mark.parametrize("ec", ["E35140", "E35767"])
+    def test_pair_partner_is_judged_by_the_product(self, ec):
+        _, on = self._ledgers(ec)
+        targets = self._targets(on)
+        judged = M.judged_as_pairs(targets, on.events)
+        assert [(e.year, e.canonical) for e in targets] == [(2022, pytest.approx(2.0))]
+        assert [(e.year, e.canonical) for e in judged] == [(2022, pytest.approx(4.0))]
+
+        def yahoo(events):
+            claimed: dict = {}
+            rows = M.judge_rows_against_official(events, {}, {}, claimed=claimed)
+            M.judge_rows_against_yahoo(rows, {(e.edinet_code, e.year): e for e in events},
+                                       self.YAHOO, claimed=claimed)
+            return [(r["yahoo_status"], r["yahoo_ratio"]) for r in rows]
+
+        # 窓に期中と期末後の 1:2 が 2 本。期末後の 1 回分（2.0）と比べると不一致、組の積（4.0）なら一致
+        assert yahoo(judged) == [("agree", pytest.approx(4.0))]
+        assert yahoo(targets) == [("disagree", pytest.approx(4.0))]
+        # 公式も同じ窓・同じ倍率で比べる
+        official = {ec: [(d, 0.5) for d, _ in self.YAHOO[ec]]}
+        [r] = M.judge_rows_against_official(judged, official, {}, claimed={})
+        assert (r["official_status"], r["official_ratio"]) == ("agree", pytest.approx(4.0))
+
+    def test_events_outside_a_pair_are_judged_as_before(self):
+        e = TestPostPeriodSourcesWindow._ev(2024)
+        assert M.judged_as_pairs([e], [e]) == [e]
+        _, on = self._ledgers("E35140")
+        assert M.judged_as_pairs([e], on.events) == [e]

@@ -70,7 +70,7 @@ import sys
 from collections import Counter, defaultdict
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Iterable, Mapping, Optional, Sequence
+from typing import Callable, Iterable, Mapping, Optional, Sequence
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -783,12 +783,12 @@ def in_period_pairs(events: Sequence[ShareEvent]) -> list[tuple[ShareEvent, Shar
     （検出器の値を写さない）。
     """
     inner = in_period_factors(events)
-    bps = {(e.edinet_code, e.year, _iso(e.period_end)): e for e in events if e.source == "bps"}
+    bps = {_row_of(e): e for e in events if e.source == "bps"}
     out = []
     for e in events:
         if e.source != "in_period":
             continue
-        k = (e.edinet_code, e.year, _iso(e.period_end))
+        k = _row_of(e)
         partner = bps.get(k)
         if partner is None or partner.canonical is None:
             continue
@@ -818,6 +818,32 @@ def judge_in_period(diff: Mapping, official_status: Mapping[str, int],
 
 def _by_consistency(e: ShareEvent) -> bool:
     return e.cross_check == "consistency"
+
+
+def _row_of(e: ShareEvent) -> tuple:
+    return (e.edinet_code, e.year, _iso(e.period_end))
+
+
+def consistency_rule_events(events: Sequence[ShareEvent]) -> Callable[[ShareEvent], bool]:
+    """verify-sources（整合度照合の軸）で「その規則が足すイベント」の述語（#898）。
+
+    整合度照合のイベントと、それを相方に分けた期中のイベント（決定4-13・`in_period_pairs`）。分解は整合度照合の
+    期末後イベントを相方にして期中を足すので、整合度照合を切った台帳には期中も無い。相方が整合度照合でない・
+    相方を持たない期中のイベントは想定外のまま数える。
+    """
+    paired = {_row_of(ip) for ip, partner, _ in in_period_pairs(events) if _by_consistency(partner)}
+    return lambda e: _by_consistency(e) or (e.source == "in_period" and _row_of(e) in paired)
+
+
+def judged_as_pairs(targets: Sequence[ShareEvent], events: Sequence[ShareEvent]) -> list[ShareEvent]:
+    """照らすイベント。分解した組（決定4-13）の期末後イベントは、倍率を組の積（期中 × 期末後）に置き換える（#898）。
+
+    整合度照合の照合窓（`sources_window`）は期中の分割も含むので、期末後の 1 回分だけと比べると組を `disagree` に
+    数える（E35140 2022・E35767 2022 で 4.0 対 2.0）。積は `--axis in-period` が組を照らすのと同じ
+    `in_period_pairs` から引く。組でないイベントはそのまま返す。
+    """
+    product = {_row_of(partner): combined for _, partner, combined in in_period_pairs(events)}
+    return [e._replace(canonical=product[_row_of(e)]) if _row_of(e) in product else e for e in targets]
 
 
 def ledger_diff(off, on, *, expected=_by_consistency) -> dict:
@@ -1334,7 +1360,7 @@ def _cmd_verify_sources(args) -> int:
             return _verify_in_period(args, db, inputs, kw)
         off = compute_ledger(inputs["rows"], consistency_crosscheck=False, **kw)
         on = compute_ledger(inputs["rows"], consistency_crosscheck=True, **kw)
-        diff = ledger_diff(off, on)
+        diff = ledger_diff(off, on, expected=consistency_rule_events(on.events))
         print("annual %d行・接続先=%s" % (len(inputs["rows"]), D.DB_TARGET))
         print("整合度照合で増えるイベント %d件 / F が変わる行 %d（新たに補正 %d）/ %d社 / "
               "倍率待ち %d -> %d / TTM の分割窓 %d -> %d"
@@ -1351,11 +1377,19 @@ def _cmd_verify_sources(args) -> int:
             targets = [e for e in targets if e.edinet_code in only]
         print("照合窓: 整合度照合のイベントは (前期末-45日, 当期末+%d日]・それ以外は本番と同じ +45日"
               "（#755）。1つの分割を一致に数えるのは同じ社の1イベントだけ" % args.post_period_end_days)
+        # 期中の分割を分けた組（決定4-13）の期末後イベントは、組の積で照らす（#898）
+        paired = ({(p.edinet_code, p.year) for _, p, _ in in_period_pairs(on.events)}
+                  & {(e.edinet_code, e.year) for e in targets})
+        targets = judged_as_pairs(targets, on.events)
+        if paired:
+            print("期中の分割を分けた組 %d件は、期末後のイベントを組の積（期中 × 期末後）で照らす" % len(paired))
         # 社ごとの「一致に数えた分割の日付」。公式と Yahoo で共有する（#755）。
         claimed: dict[str, set[str]] = {}
         results = judge_rows_against_official(targets, on.official, inputs["coverage"],
                                               tol=args.match_tol,
                                               end_days=args.post_period_end_days, claimed=claimed)
+        for r in results:  # 倍率（magnitude）は組なら組の積
+            r["in_period_pair"] = (r["edinet_code"], r["year"]) in paired
         o_tally = Counter(r["official_status"] for r in results)
         print()
         print("照合する %s 経路のイベント %d件・公式との照合: %s"
@@ -1386,8 +1420,9 @@ def _cmd_verify_sources(args) -> int:
         for r in results:
             if r["official_status"] in ("disagree", "absent") or r["yahoo_status"] in (
                     "disagree", "no_split"):
-                print("  %-9s %s 倍率 %s 整合度 %s 公式 %s(%s) Yahoo %s(%s) 窓 %s%s"
+                print("  %-9s %s 倍率 %s%s 整合度 %s 公式 %s(%s) Yahoo %s(%s) 窓 %s%s"
                       % (r["edinet_code"], r["year"], _fmt(r["magnitude"]),
+                         "（組の積）" if r["in_period_pair"] else "",
                          _fmt(r["consistency"]), r["official_status"], _fmt(r["official_ratio"]),
                          r["yahoo_status"], _fmt(r["yahoo_ratio"]), r["window"],
                          " 他のイベントが一致に数えた分割 %s" % r["withheld"] if r["withheld"] else ""))
