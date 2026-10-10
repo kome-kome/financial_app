@@ -17,7 +17,9 @@
 
 注意:
   接続先は `FINAPP_DB_TARGET`（既定 local＝正本のローカル PG・#503）。**書き込みは行わない**
-  （`_persist_and_rank` を差し替えて regression_results への upsert を止める）。財務レコードの
+  （`_persist_and_rank` を差し替えて regression_results への upsert を止め、`_prune_unwritten` を
+  差し替えて回帰に入らなかった行の削除も止める・#905）。削除の対象は「回帰に入ったか」で決まる
+  ので、upsert だけ止めると設定ごとに外れた社の行が正本から消える。財務レコードの
   読み込みは1回だけ行い、全設定で使い回す。
 
   差し替えは登録済みのシングルトン（`plugins.sector_ols.plugin`）ではなく、このスクリプト専用の
@@ -64,6 +66,7 @@ def _run(plugin: SectorOLSPlugin, db, rate: float, zero_fill: bool,
         return []
 
     plugin._persist_and_rank = _capture      # 本番 regression_results への書き込みを止める
+    plugin._prune_unwritten = lambda *_a: 0  # 回帰に入らなかった行の削除も止める（#905）
     res = asyncio.run(execute_plugin(plugin, {
         "features": DEFAULT_FEATURES_PRICE,
         "min_samples": 5,

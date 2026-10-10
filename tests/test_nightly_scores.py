@@ -541,6 +541,27 @@ class TestDiagnosticsExtraction:
         assert diag["n_alpha_at_low_edge"] == 1
         assert diag["n_alpha_at_high_edge"] == 0
 
+    def test_sector_ols_records_missing_exclusions_as_counts(self):
+        """空欄で外した社は列ごとの社数だけを残す（#905）。社の識別子は入れない。"""
+        result = {
+            "sector_stats": [],
+            "n_excluded_missing": 2,
+            "excluded_by_feature": [
+                {"feature": "ps_gross_profit", "label": "[PL/株] 売上総利益（円/株）",
+                 "missing": 2},
+                {"feature": "ps_operating_profit", "label": "[PL/株] 営業利益（円/株）",
+                 "missing": 1},
+            ],
+            "n_removed_stale": 2,
+            "results": [{"edinet_code": "E99999", "company_name": "テスト社"}],
+        }
+        diag = _json_safe(_extract_sector_ols(result))
+        text = json.dumps(diag, ensure_ascii=False, allow_nan=False)
+        assert "E99999" not in text and "テスト社" not in text
+        assert diag["n_excluded_missing"] == 2
+        assert diag["excluded_by_feature"] == {"ps_gross_profit": 2, "ps_operating_profit": 1}
+        assert diag["n_removed_stale"] == 2
+
     def test_ols_sector_has_no_alpha_edge(self):
         diag = _extract_sector_ols({"sector_stats": [
             {"industry": "x", "n": 5, "method": "ols", "alpha": None}]})

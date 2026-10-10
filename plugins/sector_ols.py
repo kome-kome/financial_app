@@ -22,7 +22,7 @@
 import logging
 import math
 from collections import defaultdict, namedtuple
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from . import progress
@@ -282,6 +282,10 @@ class _FitInputs:
     dropped_by_sector: dict
     by_sector: dict             # 業種名 → [(row, y, record), ...]
     global_pred_map: dict       # (edinet_code, year, period_end) → プール予測 [円/株]
+    # 採用列のどれかが空欄で AND フィルタに落ちた社（#905）。1社が複数の列で数えられうるので、
+    # excluded_by_feature の合計は n_excluded_missing 以上になる。
+    n_excluded_missing: int = 0
+    excluded_by_feature: list = field(default_factory=list)   # [{feature,label,missing}, ...]
 
 
 @dataclass
@@ -716,6 +720,25 @@ class SectorOLSPlugin(AnalysisPlugin):
             sector_preds[idx]["sector_rank"] = rank
         return sector_preds
 
+    def _prune_unwritten(self, db, records: list, fitted_keys: set) -> int:
+        """今回読んだ行のうち回帰に入らなかった行を `regression_results` から消す（#905）。
+
+        保存は上書き（upsert）なので、列が空欄になった・業種が min_samples を割った等で回帰から
+        外れた社には、前回までの gap_ratio が残る。`financial_metrics` VIEW が同じキーで結合する
+        ため、乖離分析と買い推奨に古い値が出続け、次の晩以降も上書きされない（#900 で単体の値を
+        消すと、単体の値から計算した乖離率だけが残る）。
+        消すのは**今回読んだ行（各社の最新の通期行、`year` 指定ならその年度）だけ**。過去の年度の行と、
+        `tradable_filters` で読まなかった廃止・停止の社の行（#780 で残すと決めた）には触れない。
+
+        **`_persist_and_rank` を差し替えて書き込みを止める計測（`scripts/measure_sector_coverage.py`）は、
+        このメソッドも差し替える**——消す対象は「回帰に入ったか」で決めるので、保存を止めても削除は走る。
+        """
+        from database import delete_regression_results
+        stale = {_row_key(r) for r in records} - fitted_keys
+        removed = delete_regression_results(db, stale)
+        db.commit()
+        return removed
+
     def _build_stat_entry(self, sector: str, samples: list, result: dict,
                           y_sd: float, X_norm: list, y_normed: list,
                           features: list, regularization: str,
@@ -809,6 +832,8 @@ class SectorOLSPlugin(AnalysisPlugin):
         features_by_sector, dropped_by_sector = self._sector_feature_sets(
             present, features, min_samples, sector_missing_rate)
         by_sector = self._classify_by_sector(base, features_by_sector, zero_fill)
+        n_excluded_missing, excluded_by_feature = self._count_missing_exclusions(
+            present, features_by_sector)
 
         # 部分プーリング: 薄業種の係数安定化のため全社プール OLS を事前フィット。
         # 業種別に採用列が違うと行ベクトルの次元が揃わないため、プール側は段階1採用列
@@ -835,7 +860,34 @@ class SectorOLSPlugin(AnalysisPlugin):
             features=features, dropped_features=dropped_features,
             features_by_sector=features_by_sector, dropped_by_sector=dropped_by_sector,
             by_sector=by_sector, global_pred_map=global_pred_map,
+            n_excluded_missing=n_excluded_missing, excluded_by_feature=excluded_by_feature,
         )
+
+    @staticmethod
+    def _count_missing_exclusions(present: list, features_by_sector: dict) -> tuple[int, list]:
+        """採用列のどれかが空欄で `_classify_by_sector` の AND に落ちる社を数える（#905）。
+
+        `present` は `_classify_by_sector` と同じ判定（`_resolve_per_share_value`）で作った
+        各社の「値がある列」なので、ここで数えた社がそのまま回帰から外れた社になる。
+        業種の採用列が空（`_classify_by_sector` が業種ごと飛ばす）の社は欠損の除外ではないので数えない。
+        連結の値が無い列（US-GAAP の営業利益・IFRS の売上総利益など）は補完せずに外す
+        （ADR-0066）ので、黙って外さず列ごとの社数を返して画面と夜間の診断値に出す。
+        """
+        n_excluded = 0
+        by_feature: dict[str, int] = defaultdict(int)
+        for ind, s in present:
+            kept = features_by_sector.get(ind) or []
+            missing = [f for f in kept if f not in s]
+            if not missing:
+                continue
+            n_excluded += 1
+            for f in missing:
+                by_feature[f] += 1
+        excluded = [
+            {"feature": f, "label": FEATURE_LABELS.get(f, f), "missing": n}
+            for f, n in sorted(by_feature.items(), key=lambda kv: (-kv[1], kv[0]))
+        ]
+        return n_excluded, excluded
 
     def _fit_sector(self, prep: _FitInputs, sector: str, samples: list,
                     params: dict) -> _SectorFit | None:
@@ -899,6 +951,8 @@ class SectorOLSPlugin(AnalysisPlugin):
         dropped_by_sector = prep.dropped_by_sector
 
         sector_stats, all_predictions, n_skipped = [], [], 0
+        fitted_keys: set = set()   # 回帰に入った行（#905 の削除の基準。`_persist_and_rank` の戻りに頼らない）
+        n_removed_stale = 0
 
         # 進捗（#545）。業種数は数十なので間引かず1業種1件流す（業種名がそのまま
         # 「いまどこを回帰しているか」になる）。
@@ -925,8 +979,13 @@ class SectorOLSPlugin(AnalysisPlugin):
                 stat_entry["dropped_features"] = dropped_by_sector.get(sector, [])
                 all_predictions.extend(sector_preds)
                 sector_stats.append(stat_entry)
+                fitted_keys.update(_row_key(s[2]) for s in fit.samples)
 
             progress.emit("業種別に回帰", n_sectors, n_sectors)
+            # 1業種も当てはめられなかった回は消さない（設定の誤りで表を空にしない）。直後に raise する。
+            if sector_stats:
+                progress.emit("回帰に入らなかった社の古い乖離率を消す")
+                n_removed_stale = self._prune_unwritten(db, records, fitted_keys)
         if not sector_stats:
             msg = (
                 f"分析可能な業種がありません（各業種 {min_samples}社以上が必要）。"
@@ -966,6 +1025,11 @@ class SectorOLSPlugin(AnalysisPlugin):
                 sum(1 for s in sector_stats if s["n"] < shrink_threshold)
                 if shrink_threshold > 0 else 0
             ),
+            # 採用列の空欄で外した社と、その列ごとの社数（#905・補完しない＝ADR-0066）
+            "n_excluded_missing":  prep.n_excluded_missing,
+            "excluded_by_feature": prep.excluded_by_feature,
+            # 回帰に入らなかったので regression_results から消した前回までの行の数
+            "n_removed_stale":     n_removed_stale,
         }
 
 

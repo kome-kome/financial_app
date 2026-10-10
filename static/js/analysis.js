@@ -1738,6 +1738,16 @@ function renderSectorOls(data) {
       ${data.dropped_features.map(f => `${esc(f.label)}（NULL ${Number(f.missing_rate)}% / ${Number(f.missing)}社）`).join('、')}
     </div>`;
   }
+  // 採用列の空欄で回帰から外した会社（補完しない・#905）。連結の値が無い列（US-GAAP の営業利益・
+  // IFRS の売上総利益など）が典型。前回までの乖離率は消したので、画面にも推奨にも出ない
+  if (Number(data.n_excluded_missing) > 0) {
+    const byCol = (data.excluded_by_feature || [])
+      .map(f => `${esc(f.label)} ${Number(f.missing)}社`).join('・');
+    html += `<div style="margin-bottom:12px;padding:8px 12px;border-left:3px solid ${cssVar('--status-warn')};background:rgba(245,158,11,0.08);font-size:12px;color:${cssVar('--status-warn-text')}">
+      説明変数が空欄のため回帰から外した会社: ${Number(data.n_excluded_missing)}社（${byCol}）。
+      推測で埋めずに外しています。前回までの乖離率 ${Number(data.n_removed_stale || 0)}件を消しました。
+    </div>`;
+  }
   // 業種内欠損で外した説明変数の要約（業種ごとに採用列が違うことを明示・#434）
   if (Number(data.n_sectors_with_dropped_features) > 0) {
     html += `<div style="margin-bottom:12px;padding:8px 12px;border-left:3px solid ${cssVar('--accent')};background:rgba(124,58,237,0.08);font-size:12px;color:${cssVar('--text-muted')}">

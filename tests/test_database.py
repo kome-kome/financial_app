@@ -16,6 +16,7 @@ from database import (
     Company,
     FinancialRecord,
     RegressionResult,
+    delete_regression_results,
     pack_elements,
     unpack_elements,
     upsert_company,
@@ -367,6 +368,61 @@ class TestUpsertRegressionResultsBatch:
         two = db.query(RegressionResult).one()
         assert single == (two.edinet_code, two.year, two.period_end,
                           two.predicted_market_cap, two.gap_ratio, two.model, two.sector)
+
+
+class TestDeleteRegressionResults:
+    """回帰に入らなかった行を消す部品（Issue #905）。指定したキーの行だけを消す。"""
+
+    def _seed(self, db):
+        upsert_regression_results_batch(db, [
+            {"edinet_code": ec, "year": y, "period_end": pe,
+             "predicted_market_cap": 1.0, "gap_ratio": 0.0, "model": "ols", "sector": "機械"}
+            for ec, y, pe in [("E00001", 2024, "2025-03-31"), ("E00002", 2024, "2025-03-31"),
+                              ("E00002", 2023, "2024-03-31"), ("E00003", 2024, "2024-12-31")]
+        ])
+        db.commit()
+
+    def _keys(self, db):
+        return {(r.edinet_code, r.year, r.period_end.isoformat())
+                for r in db.query(RegressionResult).all()}
+
+    def test_deletes_only_the_given_keys(self, db):
+        """同じ社の過去の年度の行・期末違いの行は残る（キーは3つ組）。"""
+        self._seed(db)
+        assert delete_regression_results(db, [("E00002", 2024, "2025-03-31"),
+                                              ("E00003", 2024, "2025-03-31")]) == 1
+        db.commit()
+        assert self._keys(db) == {("E00001", 2024, "2025-03-31"),
+                                  ("E00002", 2023, "2024-03-31"),
+                                  ("E00003", 2024, "2024-12-31")}
+
+    def test_period_end_accepts_str_and_date(self, db):
+        self._seed(db)
+        removed = delete_regression_results(db, [("E00001", 2024, date(2025, 3, 31)),
+                                                 ("E00002", 2024, "2025-03-31")])
+        db.commit()
+        assert removed == 2
+        assert ("E00001", 2024, "2025-03-31") not in self._keys(db)
+
+    def test_empty_or_null_period_end_issues_no_statement(self, db):
+        self._seed(db)
+        stmts = TestUpsertRegressionResultsBatch._count_statements(
+            db, lambda: delete_regression_results(db, [("E00001", 2024, None)]))
+        assert stmts == []
+        assert delete_regression_results(db, []) == 0
+        assert len(self._keys(db)) == 4
+
+    def test_chunks_when_over_the_parameter_limit(self, db):
+        from database import REGRESSION_UPSERT_CHUNK
+
+        self._seed(db)
+        keys = [(f"X{i:05d}", 2024, "2025-03-31") for i in range(REGRESSION_UPSERT_CHUNK + 1)]
+        keys.append(("E00001", 2024, "2025-03-31"))
+        stmts = TestUpsertRegressionResultsBatch._count_statements(
+            db, lambda: delete_regression_results(db, keys))
+        assert len([s for s in stmts if s == "DELETE"]) == 2
+        db.commit()
+        assert len(self._keys(db)) == 3
 
 
 # Zスコア正規化は financial_metrics VIEW（PostgreSQL window function）へ移行した。

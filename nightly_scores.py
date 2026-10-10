@@ -303,6 +303,12 @@ def _extract_sector_ols(result: dict) -> dict:
         "shrink_threshold":  result.get("shrink_threshold"),
         "n_alpha_at_low_edge":  sum(1 for s in sectors if s["alpha_edge"] == "low"),
         "n_alpha_at_high_edge": sum(1 for s in sectors if s["alpha_edge"] == "high"),
+        # 採用列の空欄で外した社の数と列ごとの社数・消した前回までの行の数（#905）。
+        # #900（単体の値の掃除）の前後で採用社数を比べるときはこの3つを読む。会社の行は持たない。
+        "n_excluded_missing":  result.get("n_excluded_missing"),
+        "excluded_by_feature": {d["feature"]: d["missing"]
+                                for d in result.get("excluded_by_feature") or []},
+        "n_removed_stale":     result.get("n_removed_stale"),
         "sectors":           sectors,
     }
 
