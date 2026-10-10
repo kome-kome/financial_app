@@ -330,6 +330,46 @@ function plDatasets(recs, level){
   ];
 }
 
+// 棒の合計が売上高を上回る年の理由（#897）。描画から切り離した純関数。
+// 残差は 0 で切って積むので、純利益が営業利益を上回る年（営業外・特別の利益が大きい）や、内訳が
+// 空欄（0 として積む）の年も棒が売上高を超える。それを「データの基準の食い違い」と出さない。
+// 判定の順: 内訳が無い → 基準の食い違い（営業利益 > 売上高 − 売上原価。1つの基準の行ではありえない。
+// #852 型の「単体の売上と連結の費用」は純利益 > 営業利益や原価 > 売上にも当たるので先に見る）→
+// 純利益 > 営業利益 → 売上総利益の赤字 → どれでもなければ基準の食い違い。
+const PL_OVER_REASONS = [
+  ['missing',   '内訳が無い（売上原価・販管費・営業利益のどれかが未収集）'],
+  ['netOverOp', '純利益が営業利益を上回る（営業外・特別の利益が大きい）'],
+  ['grossLoss', '売上総利益の赤字（売上原価が売上高を上回る）'],
+  ['basis',     'データの基準の食い違い（単体の売上と連結の費用など）'],
+];
+// 粒度ごとに積み方が使う内訳（粗は総費用＝売上高−純利益だけで内訳を使わない）
+const PL_PARTS_BY_LEVEL = {
+  coarse: [],
+  medium: ['cost_of_sales', 'sga'],
+  fine:   ['cost_of_sales', 'sga', 'operating_profit'],
+};
+
+function plOverReason(rec, level){
+  const val = k => toOku(rec.pl[k]);   // 空欄は null（0 に丸める前の値で見る）
+  if ((PL_PARTS_BY_LEVEL[level] || []).some(k => val(k) == null)) return 'missing';
+  const rev = val('revenue'), cos = val('cost_of_sales');
+  const op = val('operating_profit'), ni = val('net_income');
+  if (rev != null && cos != null && op != null && op > rev - cos) return 'basis';
+  if (op != null && ni != null && ni > op) return 'netOverOp';
+  if (cos != null && rev != null && cos > rev) return 'grossLoss';
+  return 'basis';
+}
+
+// 注記の文。理由ごとに年をまとめ、理由は PL_OVER_REASONS の順に並べる。`over` は [年, 理由] の並び。
+function plOverNote(over){
+  if (!over.length) return '';
+  const parts = PL_OVER_REASONS
+    .map(([key, text]) => [over.filter(([, r]) => r === key).map(([y]) => y), text])
+    .filter(([years]) => years.length)
+    .map(([years, text]) => `${years.join('・')}年: ${text}`);
+  return `※ 棒の高さが売上高と一致しない年があります（費用と利益の合計が売上高を上回るため）。${parts.join('／')}`;
+}
+
 function renderPerf(labels, recs){
   plState = { labels, recs };
   drawPL();
@@ -340,20 +380,20 @@ function drawPL(){
   if (!recs) return;
   if (charts.perf){ charts.perf.destroy(); }
   const datasets = plDatasets(recs, plGran);
-  // 棒の合計が売上高を上回る年を注記する。残差は非負に丸めるので、売上総利益の赤字や
-  // データの基準の食い違い（単体の売上と連結の費用・#852）があると、黙って「棒＝売上高」が崩れる。
-  const over = labels.filter((_, i) => {
+  // 棒の合計が売上高を上回る年を、理由（plOverReason）付きで注記する。残差は非負に丸めるので、
+  // 内訳の空欄・純利益 > 営業利益・売上総利益の赤字・データの基準の食い違い（単体の売上と連結の
+  // 費用・#852）があると、黙って「棒＝売上高」が崩れる。
+  const over = [];
+  labels.forEach((y, i) => {
     const rev = toOku(recs[i].pl.revenue);
-    if (rev == null || isNaN(rev) || rev <= 0) return false;
+    if (rev == null || isNaN(rev) || rev <= 0) return;
     const total = datasets.reduce((s, ds) => s + (ds.data[i] || 0), 0);
-    return total > rev * 1.001;
+    if (total > rev * 1.001) over.push([y, plOverReason(recs[i], plGran)]);
   });
   const warn = document.getElementById('pl-mismatch');
   if (warn){
     warn.hidden = over.length === 0;
-    warn.textContent = over.length
-      ? `※ ${over.join('・')}年は費用と利益の合計が売上高を上回るため、棒の高さが売上高と一致しません（売上総利益の赤字、またはデータの基準の食い違い）。`
-      : '';
+    warn.textContent = plOverNote(over);
   }
   datasets.push({ label:'営業利益率(%)', type:'line', data:recs.map(r=>r.pl.op_margin), yAxisID:'y1',
     borderColor:'#f59e0b', backgroundColor:'#f59e0b', tension:.3, pointRadius:3, order:0 });
