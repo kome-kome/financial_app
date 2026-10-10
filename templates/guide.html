@@ -94,7 +94,9 @@ td code,p code,li code{background:var(--bg-sunken);border:1px solid var(--border
 .more{margin-top:16px;padding-top:14px;border-top:1px solid var(--border);font-size:12px}
 .more a{color:var(--accent-text);text-decoration:none;font-weight:600}
 .more a:hover{text-decoration:underline}
-.term{border-bottom:1px dotted var(--status-good);cursor:help;position:relative;color:var(--status-good-text)}
+/* 用語は行をまたがせない（nowrap）。2行に割れると吹き出しの基準が1行目の始まりになり、models.js が測る
+   2行を囲む箱と食い違う——幅 375px の「生存バイアス」は行末から右へ開いて本文の外で 220px 切れていた（#893） */
+.term{border-bottom:1px dotted var(--status-good);cursor:help;position:relative;color:var(--status-good-text);white-space:nowrap}
 /* 用語の吹き出し。隠れている間は display:none で場所ごと消す——visibility:hidden だと配置が残り、
    右端近くの用語の吹き出しがページ幅を 1280px で 1412px に広げていた（#888）。現れるときのフェードは
    @starting-style で保つ。本文の右端を越える用語は models.js が .tip-flip を付けて左へ開く。
