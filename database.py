@@ -2391,7 +2391,7 @@ def insert_nightly_model_diagnostic(db, *, run_id: str, model: str,
 # financial_records（ソース列）から軽い派生（比率・Zスコア・成長率）を「都度SQL算出」し、
 # regression_results を LEFT JOIN して予測値も合成する読み取り専用 VIEW。
 # 派生値はDBに保存しない（関数型）。計算は Supabase 側で走るため Render の CPU を使わない。
-# 式は collector.calc_derived / database._calc_zscore_for_year / calc_growth_rates と一致させてある
+# 式は collector_financials.calc_derived と、廃止した旧 _calc_zscore_for_year / calc_growth_rates に一致させてある
 # （truthy フォールバック・標本SD・sd=0→1.0・n>=2・丸め桁）。
 
 ViewBase = declarative_base()   # create_all に VIEW を CREATE TABLE させないため別メタデータ
