@@ -221,7 +221,8 @@ class TestStaleMacroIsReported:
 
         def fake_gh(argv, **kw):
             gh_calls.append(argv)
-            return _FakeProc(0)
+            # open な Issue の一覧は空（同じタイトルの起票が無い＝新規起票になる・#885）
+            return _FakeProc(0, stdout="[]" if argv[:3] == ["gh", "issue", "list"] else "")
 
         real_notify = rn.notify
         monkeypatch.setattr(rn.subprocess, "Popen", fake_popen)
@@ -238,9 +239,10 @@ class TestStaleMacroIsReported:
         code, seen, gh_calls = self._run_nightly(db, tmp_path, monkeypatch)
 
         assert code == 1, "鮮度切れが夜間バッチの失敗に数えられていない"
-        assert len(gh_calls) == 1, "鮮度切れなのに起票されていない"
-        argv = gh_calls[0]
-        assert argv[:3] == ["gh", "issue", "create"]
+        # 同じタイトルの open Issue を探してから起票する（#885）
+        assert [c[:3] for c in gh_calls] == [["gh", "issue", "list"], ["gh", "issue", "create"]], (
+            "鮮度切れなのに起票されていない")
+        argv = gh_calls[-1]
         assert "macro_health" in argv[argv.index("--title") + 1]
         assert "| macro_health | 2 |" in argv[argv.index("--body") + 1]
 

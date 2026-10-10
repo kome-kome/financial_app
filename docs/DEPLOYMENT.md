@@ -346,7 +346,9 @@ M-1（`macro_risk_return`）・M-2（`macro_gbdt`）・M-3（`macro_dlm`）の�
      `exit=124` はむしろ**畳む判断が間に合わなかった**（1候補が取り置き15分より長い等）ことを
      意味する。何件まで見た結果かは `plugin_tuned_params` の
      `n_combos` / `n_combos_planned` で読む（`n_combos < n_combos_planned` なら畳んだ回）。
-  2. 失敗は `scripts/batch_common.py` が `gh issue create` で起票する（#587 が実例）。
+  2. 失敗は `scripts/batch_common.py` が `gh issue create` で起票する（#587 が実例）。**同じタイトル
+     （＝同じバッチの同じステップの組み合わせ）の open Issue があれば、新しく立てずにコメントで追記する**
+     （#885・GHA の notify-failure と watchdog と同じ寄せ方）。一覧を読めなければ新規起票へ倒す。
      **ただしその Issue を閉じても穴は残る**——2026-09-01 の打ち切り後、`plugin_tuned_params` は
      M-2 が 50日・M-3 が 59日 古いまま誰も気づかなかった。成果物の固着は
      `batch_freshness.PRODUCERS` を watchdog が見て別に起票する（#504）。
