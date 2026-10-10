@@ -2,9 +2,7 @@ function apiBase(){return '';}
 
 
 // ── 数値フォーマット ──────────────────────────────────────────
-const OKU = 1e8;
-function toOku(v){ return (v==null || isNaN(v)) ? null : v/OKU; }       // 円 → 億円
-function mnToOku(v){ return (v==null || isNaN(v)) ? null : v/100; }     // 百万円 → 億円（market_cap 系）
+// 億への換算（toOku / mnToOku）は common.js にある。
 function fmtNum(v, digits=1){ return (v==null || isNaN(v)) ? '—' : Number(v).toLocaleString('ja-JP',{maximumFractionDigits:digits}); }
 function fmtPct(v){ return (v==null || isNaN(v)) ? '—' : Number(v).toFixed(1) + '%'; }
 function fmtX(v){ return (v==null || isNaN(v)) ? '—' : Number(v).toFixed(2) + '倍'; }

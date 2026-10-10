@@ -7,6 +7,15 @@ function esc(s) {
   return String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
+// ── 金額の単位換算（億） ──────────────────────────────────────────────
+// API は財務の金額を「円」、時価総額（market_cap 系）だけを「百万円」で返す（収集が
+// 株価×株数/1e6 で作る）。億への換算はここだけに置き、ページ側で書き写さない（#911:
+// 収集画面が両方を /1e6 していたため、円の列は 100 倍、時価総額は 1 万分の 1 で出ていた）。
+// 空欄（null・NaN）は null のまま返す（`null/1e8` は 0 になり、空欄が「0億」に化ける）。
+const OKU = 1e8;
+function toOku(v){ return (v==null || isNaN(v)) ? null : v/OKU; }       // 円 → 億円
+function mnToOku(v){ return (v==null || isNaN(v)) ? null : v/100; }     // 百万円 → 億円（market_cap 系）
+
 // ── テーマ（ライト/ダーク） ──────────────────────────────────────────
 // data-theme 属性の初期値は各テンプレート <head> 先頭のインラインスクリプトが
 // ペイント前に同期設定する（FOUC防止のため common.js より前に確定させる必要がある）。

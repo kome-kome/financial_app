@@ -435,12 +435,12 @@ async function loadDB(){
         <td>${c.edinet_code ? `<a href="/company/${esc(c.edinet_code)}" class="co-link" style="font-weight:500">${esc(c.name)}</a>` : esc(c.name)}</td>
         <td><span class="tag tag-amber" style="font-size:11px">${esc(c.industry)||'-'}</span></td>
         <td>${latest?.year!=null?Number(latest.year):'-'}</td>
-        <td>${latest ? fmt0(latest.pl.revenue/1e6) : '-'}</td>
+        <td>${fmt0(toOku(latest?.pl.revenue))}</td>
         <td class="${latest?.pl.op_margin>0?'text-green':''}">${latest?.pl.op_margin!=null?Number(latest.pl.op_margin)+'%':'-'}</td>
         <td>${latest?.val.roe!=null?Number(latest.val.roe)+'%':'-'}</td>
         <td>${latest?.val.pbr!=null?Number(latest.val.pbr):'-'}</td>
         <td>${latest?.bs.equity_ratio!=null?Number(latest.bs.equity_ratio)+'%':'-'}</td>
-        <td>${latest ? fmt0((latest.val.market_cap||0)/1e6) : '-'}</td>
+        <td>${fmt0(mnToOku(latest?.val.market_cap))}</td>
       `;
       tbody.appendChild(tr);
     }
@@ -869,32 +869,32 @@ function renderNorm(){
     <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:16px">
       <div>
         <div style="color:${cssVar('--accent-text')};font-weight:500;margin-bottom:8px;font-size:12px">▌ BS 再分類</div>
-        ${bsRow('流動資産', r.bs.current_assets)} ${bsRow('固定資産', r.bs.noncurrent_assets)}
-        ${bsRow('現金・預金', r.bs.cash)} ${bsRow('総資産', r.bs.total_assets, true)}
-        ${bsRow('流動負債', r.bs.current_liabilities)} ${bsRow('固定負債', r.bs.noncurrent_liabilities)}
-        ${bsRow('純資産', r.bs.total_equity)} ${bsRow('自己資本比率', null,false,fmtPct(r.bs.equity_ratio))}
-        ${bsRow('BPS', null,false,(r.bs.bps||'-')+'円')}
+        ${bsRow('流動資産', toOku(r.bs.current_assets))} ${bsRow('固定資産', toOku(r.bs.noncurrent_assets))}
+        ${bsRow('現金・預金', toOku(r.bs.cash))} ${bsRow('総資産', toOku(r.bs.total_assets), true)}
+        ${bsRow('流動負債', toOku(r.bs.current_liabilities))} ${bsRow('固定負債', toOku(r.bs.noncurrent_liabilities))}
+        ${bsRow('純資産', toOku(r.bs.total_equity))} ${bsRow('自己資本比率', null,false,fmtPct(r.bs.equity_ratio))}
+        ${bsRow('BPS', null,false,fmtYen(r.bs.bps))}
       </div>
       <div>
         <div style="color:${cssVar('--status-good')};font-weight:500;margin-bottom:8px;font-size:12px">▌ PL 再分類</div>
-        ${bsRow('売上高', r.pl.revenue)} ${bsRow('売上総利益', r.pl.gross_profit)}
-        ${bsRow('営業利益', r.pl.operating_profit)} ${bsRow('経常利益', r.pl.ordinary_profit)}
-        ${bsRow('当期純利益', r.pl.net_income)}
+        ${bsRow('売上高', toOku(r.pl.revenue))} ${bsRow('売上総利益', toOku(r.pl.gross_profit))}
+        ${bsRow('営業利益', toOku(r.pl.operating_profit))} ${bsRow('経常利益', toOku(r.pl.ordinary_profit))}
+        ${bsRow('当期純利益', toOku(r.pl.net_income))}
         ${bsRow('営業利益率', null,false,fmtPct(r.pl.op_margin))}
         ${bsRow('純利益率', null,false,fmtPct(r.pl.net_margin))}
         ${bsRow('売上成長率', null,false,fmtPct(r.pl.rev_growth))}
-        ${bsRow('EPS', null,false,(r.pl.eps||'-')+'円')}
+        ${bsRow('EPS', null,false,fmtYen(r.pl.eps))}
       </div>
       <div>
         <div style="color:${cssVar('--status-warn')};font-weight:500;margin-bottom:8px;font-size:12px">▌ CF 再分類</div>
-        ${bsRow('営業CF', r.cf.operating_cf)} ${bsRow('投資CF', r.cf.investing_cf)}
-        ${bsRow('財務CF', r.cf.financing_cf)} ${bsRow('フリーCF', r.cf.free_cf)}
-        ${bsRow('設備投資', r.cf.capex)} ${bsRow('CF/売上比', null,false,fmtPct(r.cf.cf_ratio))}
+        ${bsRow('営業CF', toOku(r.cf.operating_cf))} ${bsRow('投資CF', toOku(r.cf.investing_cf))}
+        ${bsRow('財務CF', toOku(r.cf.financing_cf))} ${bsRow('フリーCF', toOku(r.cf.free_cf))}
+        ${bsRow('設備投資', toOku(r.cf.capex))} ${bsRow('CF/売上比', null,false,fmtPct(r.cf.cf_ratio))}
         <div style="margin-top:12px"></div>
         <div style="color:${cssVar('--status-info')};font-weight:500;margin-bottom:8px;font-size:12px">▌ バリュエーション</div>
-        ${bsRow('時価総額', r.val.market_cap)}
-        ${bsRow('PER', null,false,(r.val.per||'-')+'倍')}
-        ${bsRow('PBR', null,false,(r.val.pbr||'-')+'倍')}
+        ${bsRow('時価総額', mnToOku(r.val.market_cap))}
+        ${bsRow('PER', null,false,fmtX(r.val.per))}
+        ${bsRow('PBR', null,false,fmtX(r.val.pbr))}
         ${bsRow('ROE', null,false,fmtPct(r.val.roe))}
         ${bsRow('配当利回', null,false,fmtPct(r.val.div_yield))}
       </div>
@@ -903,9 +903,11 @@ function renderNorm(){
   `;
 }
 
-function bsRow(label, val, bold=false, rawStr=null){
-  const v = rawStr !== null ? rawStr : (val==null?'-': ((val<0?'▲':'')+fmt0(Math.abs(val)/1e6)+'億'));
-  const col = rawStr===null && val!=null && val<0 ? `color:${cssVar('--status-bad')}` : '';
+// 金額の行は億の値（toOku / mnToOku を通したもの）を受け取る。どの単位から換算したかを
+// 呼び出し側で見えるようにする（#911）。
+function bsRow(label, oku, bold=false, rawStr=null){
+  const v = rawStr !== null ? rawStr : fmtOku(oku);
+  const col = rawStr===null && oku!=null && oku<0 ? `color:${cssVar('--status-bad')}` : '';
   return `<div style="display:flex;justify-content:space-between;padding:3px 0;border-bottom:1px solid ${cssVar('--border-subtle')};font-size:12px">
     <span style="color:${cssVar('--text-secondary')}">${label}</span>
     <span style="font-weight:${bold?600:400};${col}">${v}</span></div>`;
@@ -931,6 +933,13 @@ function fmt0(n){ return n==null?'-':Math.round(n).toLocaleString(); }
 // 比率の % 表示。空欄（null）を文字列連結すると「null%」、`||'-'` で逃がすと 0 まで「-%」になる（#906）。
 // 桁は VIEW の丸め（小数第 2 位）に合わせる。
 function fmtPct(v){ return (v==null || isNaN(v)) ? '—' : Number(v).toFixed(2) + '%'; }
+// 億・円・倍の表示も同じ形にする（#911）。空欄は「—」、値があるときだけ単位を付ける。
+// `||'-'` で逃がすと 0 も空欄扱い（「-円」「-倍」）になり、空欄でも単位だけが残る。
+// 億は toOku / mnToOku（common.js）で換算した値を受け取る。桁は企業詳細ページと同じ小数第 1 位
+// （整数に丸めると、億に満たない金額が「0億」になり空欄と 0 の区別とぶつかる）。
+function fmtOku(v){ return (v==null || isNaN(v)) ? '—' : (v<0?'▲':'') + Math.abs(v).toLocaleString('ja-JP',{maximumFractionDigits:1}) + '億'; }
+function fmtYen(v){ return (v==null || isNaN(v)) ? '—' : Number(v).toLocaleString('ja-JP',{maximumFractionDigits:2}) + '円'; }
+function fmtX(v){ return (v==null || isNaN(v)) ? '—' : Number(v).toFixed(2) + '倍'; }
 const _TABS = ['collect','stockmarket','dataview','screen'];
 function showTab(t){
   _TABS.forEach(x=>document.getElementById('tab-'+x).classList.toggle('hidden',x!==t));
