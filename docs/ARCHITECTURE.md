@@ -222,7 +222,9 @@ graph TD
 >     **時点再現（`all_years=True`・`sector_gap_asof`）には掛けない**——「その月末に週次の足を持つ社」で
 >     もともと廃止社を含まず、今日の上場状態で絞ると生存者バイアスになる。今回の変更で本番の当日回帰が
 >     学習パネルの母集団に揃った（だから `PREPROCESS_VERSION` は上げていない）。外した社の
->     `regression_results` の既存行は消さない（表示は `tradable_filters` が隠す）。
+>     `regression_results` の既存行は消さない（表示は `tradable_filters` が隠す）。これに対し、**読んだのに
+>     回帰に入らなかった上場中の社**（採用列の空欄・業種が `min_samples` 割れ等）の行は消す（#905・ADR-0066）
+>     ——隠す仕組みが無いので、前回までの乖離率が乖離分析と推奨に出続けるため。
 >   - **sell_ranking の `mu` / `neg_r_macro` の標準化基準**: producer の全行ではなく universe にいる社の μ̂。
 >     M-6 では 1,719行のうち77行が外れ、標準偏差が 0.0642 → 0.0559 になった。
 >   - **producer の代表 as-of**（M-2・M-3・M-6・M-4）: μ̂ の行は全社ぶん保存したまま（読み手が各自の
@@ -938,8 +940,9 @@ sequenceDiagram
         PLG  ->> PLG : ols() / ridge_regression() で β を推定
         PLG  ->> DB  : predicted_market_cap（円/株 → 百万円換算）/ gap_ratio を<br/>regression_results へ upsert（merge・財務本体と分離）
     end
+    PLG  ->> DB  : 今回読んだ行のうち回帰に入らなかった行を regression_results から削除（_prune_unwritten・ADR-0066）<br/>採用列の空欄で外した社は補完しない。過去の年度・読まなかった廃止社の行は残す
 
-    PLG -->> API : { sector_stats, results, dropped_features }
+    PLG -->> API : { sector_stats, results, dropped_features, n_excluded_missing, excluded_by_feature, n_removed_stale }
     API -->> UI  : 業種別 R²・予測値一覧
 
     Note over User,DB: ※ 重い回帰は Render 軽量モードでは 403（ローカルで実行→結果は正本のローカル DB に保存。Render が読む断面には反映されない）

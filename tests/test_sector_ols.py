@@ -223,6 +223,43 @@ def _seed_sector2(db, make_fin, n=8, industry="銀行業", n_missing_gp=None, of
     db.commit()
 
 
+_MISSING_GP = "E00013"
+
+
+def _add_missing_gross_profit(db, make_fin, edinet_code=_MISSING_GP, industry="情報・通信業"):
+    """`_seed_sector` と同じ業種へ、売上総利益だけが空欄の1社を足す（#905）。
+
+    IFRS で売上総利益を出さない社（ソニー・ホンダ・武田）の再現。業種内の欠損率は 1/13 で
+    `sector_missing_rate`（30%）を超えないので列は残り、この社だけが AND フィルタで外れる。
+    """
+    bps_val = 1500.0
+    db.add(make_fin(
+        edinet_code=edinet_code, industry=industry,
+        pl_revenue=2.3e9, pl_gross_profit=None, pl_operating_profit=3.6e8,
+        pl_net_income=1.8e8, bs_total_assets=3.3e9, bs_total_liabilities=1.65e9,
+        bs_total_equity=bps_val * 1.65e6, bs_bps=bps_val, pl_eps=145.0, dps=46.0,
+        cf_operating_cf=3.2e8, cf_free_cf=2.1e8, stock_price=2800.0, market_cap=3600.0,
+    ))
+    db.commit()
+
+
+def _seed_regression_rows(db, keys, gap=999.0):
+    """前回までの実行が残した `regression_results` の行を置く。"""
+    from database import upsert_regression_results_batch
+    upsert_regression_results_batch(db, [
+        {"edinet_code": ec, "year": y, "period_end": pe, "predicted_market_cap": 1.0,
+         "gap_ratio": gap, "model": "ridge", "sector": "情報・通信業"}
+        for ec, y, pe in keys
+    ])
+    db.commit()
+
+
+def _regression_keys(db):
+    from database import RegressionResult
+    return {(r.edinet_code, r.year, r.period_end.isoformat())
+            for r in db.query(RegressionResult).all()}
+
+
 class TestExecute:
     def test_empty_db_raises(self, db):
         with pytest.raises(ValueError):
@@ -840,6 +877,81 @@ class TestTradablePopulation:
         assert self.LIVE in written
 
 
+# ── 回帰に入らなかった社の古い行（#905）──────────────────────────────────────────
+
+class TestPruneRowsLeftOutOfTheFit:
+    """回帰に入らなかった社の前回までの gap_ratio を `regression_results` から消す（#905）。
+
+    保存は上書きなので、列が空欄になって外れた社には、前回の値（#900 の前なら単体の値から計算した
+    乖離率）が残り、`financial_metrics` VIEW が同じキーで結合して乖離分析と買い推奨に出続ける。
+    消すのは今回読んだ行だけ——過去の年度の行と、読まなかった廃止の社の行（#780）は残す。
+    """
+
+    LATEST = "2023-03-31"
+    DELISTED = "E00014"
+
+    def _seed(self, db, make_fin, make_company):
+        _seed_sector(db, make_fin, n=12)
+        _add_missing_gross_profit(db, make_fin)
+        # 廃止の社（全列そろう）。当日回帰は読まない＝前回の行は消さず、表示は tradable_filters が隠す
+        _add_missing_gross_profit(db, make_fin, edinet_code=self.DELISTED)
+        db.query(FinancialRecord).filter_by(edinet_code=self.DELISTED).update(
+            {"pl_gross_profit": 9.0e8})
+        db.add(make_company(edinet_code=self.DELISTED, sec_code="1014", is_active=False))
+        db.commit()
+        _seed_regression_rows(db, [
+            ("E00001", 2023, self.LATEST),        # 今回も回帰に入る → 上書き
+            (_MISSING_GP, 2023, self.LATEST),     # 今回は外れる → 消す
+            (_MISSING_GP, 2022, "2022-03-31"),    # 過去の年度 → 今回読んでいないので残す
+            (self.DELISTED, 2023, self.LATEST),   # 廃止 → 読んでいないので残す
+        ])
+
+    def test_removes_only_rows_read_this_time_and_left_out(self, db, make_fin, make_company):
+        from database import RegressionResult
+        self._seed(db, make_fin, make_company)
+
+        res = asyncio.run(execute_plugin(plugin, {}, db))
+
+        keys = _regression_keys(db)
+        assert (_MISSING_GP, 2023, self.LATEST) not in keys
+        assert (_MISSING_GP, 2022, "2022-03-31") in keys
+        assert (self.DELISTED, 2023, self.LATEST) in keys
+        assert len(keys) == 12 + 2
+        overwritten = db.query(RegressionResult).filter_by(edinet_code="E00001").one()
+        assert overwritten.gap_ratio != 999.0
+        assert res["n_removed_stale"] == 1
+
+    def test_counts_exclusions_by_column(self, db, make_fin, make_company):
+        self._seed(db, make_fin, make_company)
+
+        res = asyncio.run(execute_plugin(plugin, {}, db))
+
+        assert res["n_total"] == 12
+        assert res["n_excluded_missing"] == 1
+        assert [(d["feature"], d["missing"]) for d in res["excluded_by_feature"]] == [
+            ("ps_gross_profit", 1)]
+        assert res["excluded_by_feature"][0]["label"]
+
+    def test_nothing_is_removed_when_no_sector_fits(self, db, make_fin):
+        """1業種も当てはめられない回（設定の誤り・データ不足）は表を空にしない。"""
+        _seed_sector(db, make_fin, n=3)
+        _seed_regression_rows(db, [("E00001", 2023, self.LATEST)])
+
+        with pytest.raises(ValueError):
+            asyncio.run(execute_plugin(plugin, {}, db))
+
+        assert _regression_keys(db) == {("E00001", 2023, self.LATEST)}
+
+    def test_predict_gaps_does_not_touch_the_table(self, db, make_fin, make_company):
+        """時点再現の経路（#626）は DB に書かない＝消しもしない。"""
+        from plugins.utils import coerce_params
+        self._seed(db, make_fin, make_company)
+        before = _regression_keys(db)
+        plugin.predict_gaps(plugin._load_records(db, None, DEFAULT_FEATURES_PRICE),
+                            coerce_params(plugin.params_schema(), {}))
+        assert _regression_keys(db) == before
+
+
 # ── predict_gaps(): 保存しない計算経路（#626）──────────────────────────────────
 
 class TestPredictGaps:
@@ -1141,6 +1253,23 @@ class TestMeasureSectorCoverageScript:
         # 書かず・読み直さないまま動き、外す実装にすると中断時に取り残したワーカーが正本へ書く
         assert "_load_records" not in vars(plugin)
         assert "_persist_and_rank" not in vars(plugin)
+        assert "_prune_unwritten" not in vars(plugin)
+
+    def test_does_not_delete_rows_of_excluded_companies(self, db, make_fin, monkeypatch, capsys):
+        """回帰に入らなかった社の行も消さない（#905）。削除の対象は「回帰に入ったか」で決まるので、
+        upsert だけ止めると、設定ごとに外れた社の行が正本から消える。"""
+        from database import RegressionResult
+        from scripts import measure_sector_coverage as m
+
+        _seed_sector(db, make_fin, n=12)
+        _add_missing_gross_profit(db, make_fin)
+        _seed_regression_rows(db, [(_MISSING_GP, 2023, "2023-03-31")])
+        monkeypatch.setattr(m, "SessionLocal", lambda: db)
+        m.main([])
+        capsys.readouterr()
+
+        assert _regression_keys(db) == {(_MISSING_GP, 2023, "2023-03-31")}
+        assert db.query(RegressionResult).one().gap_ratio == 999.0
 
 
 class TestMeasureRidgeAlphaStabilityScript:

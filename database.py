@@ -24,7 +24,7 @@ from dotenv import load_dotenv
 from sqlalchemy import (
     create_engine, event, Column, String, Integer, Float, Boolean, DateTime, Date,
     Text, UniqueConstraint, PrimaryKeyConstraint, Index, JSON, LargeBinary, ForeignKey, text, func,
-    or_
+    or_, tuple_
 )
 from sqlalchemy.orm import declarative_base, sessionmaker, relationship
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -2041,6 +2041,31 @@ def upsert_regression_results_batch(db, rows) -> int:
         )
         db.execute(stmt)
     return len(vals)
+
+
+def delete_regression_results(db, keys) -> int:
+    """`regression_results` から指定キーの行を消す（Issue #905）。
+
+    keys = [(edinet_code, year, period_end), ...]。`period_end` は文字列でも date でもよい
+    （`_parse_period_end` を通す）。`period_end` が None のキーは飛ばす——Postgres では PK の
+    一部で NOT NULL なので、その行はもともと存在しない。commit は呼び出し側に任せる（upsert と同じ）。
+    戻り値は消した行数。
+    """
+    norm = sorted({
+        (ec, int(y), pe)
+        for ec, y, p in keys
+        if (pe := _parse_period_end(p)) is not None
+    })
+    if not norm:
+        return 0
+    key_cols = tuple_(RegressionResult.edinet_code, RegressionResult.year,
+                      RegressionResult.period_end)
+    removed = 0
+    for i in range(0, len(norm), REGRESSION_UPSERT_CHUNK):
+        chunk = norm[i:i + REGRESSION_UPSERT_CHUNK]
+        res = db.execute(RegressionResult.__table__.delete().where(key_cols.in_(chunk)))
+        removed += res.rowcount or 0
+    return removed
 
 
 # ── 8.5 分割補正係数（バリュエーション基準の不一致・#655・ADR-0055）────────────

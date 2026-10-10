@@ -263,10 +263,15 @@ class TestSectorOlsStopsOnlyBeforeSaving:
 
     def _plugin(self, persisted, on_persist=None):
         p = SectorOLSPlugin()
-        sectors = {"A業種": ["a"], "B業種": ["b"], "C業種": ["c"]}
+
+        def sample(ec):   # (行ベクトル, 目的変数, レコード)。削除の基準のキー（#905）を引ける形にする
+            return ([1.0], 1.0, SimpleNamespace(edinet_code=ec, year=2023, period_end=None))
+
+        sectors = {"A業種": [sample("a")], "B業種": [sample("b")], "C業種": [sample("c")]}
         p._load_records = lambda db, year, features, **kw: []
         p._prepare_fit = lambda records, params: SimpleNamespace(
-            features=["x"], dropped_features=[], dropped_by_sector={}, by_sector=sectors)
+            features=["x"], dropped_features=[], dropped_by_sector={}, by_sector=sectors,
+            n_excluded_missing=0, excluded_by_feature=[])
         p._fit_sector = lambda prep, sector, samples, params: SimpleNamespace(
             samples=samples, all_yhat=[1.0], result={}, y_sd=1.0, X_norm=[], y_normed=[],
             features=["x"], X_win_cols=[])
@@ -278,6 +283,12 @@ class TestSectorOlsStopsOnlyBeforeSaving:
             return []
 
         p._persist_and_rank = persist
+
+        def prune(db, records, fitted_keys):   # 保存を差し替えるなら削除も差し替える（#905）
+            persisted.append(("prune", frozenset(fitted_keys)))
+            return 0
+
+        p._prune_unwritten = prune
         p._build_stat_entry = lambda sector, *a: {"r2": 0.5, "n": 10, "industry": sector}
         return p
 
@@ -287,7 +298,10 @@ class TestSectorOlsStopsOnlyBeforeSaving:
         p = self._plugin(persisted, on_persist=lambda: answers.append(cancel.request()))
         with progress.progress_sink(lambda *a: None, cancel=cancel):
             result = p.execute(dict(self.PARAMS), db=None)
-        assert persisted == ["A業種", "B業種", "C業種"]
+        # 古い行の削除（#905）は全業種の保存の後に1回、保存の区間の中で走る＝取消で途中に残らない
+        assert persisted == ["A業種", "B業種", "C業種",
+                             ("prune", frozenset({("a", 2023, None), ("b", 2023, None),
+                                                  ("c", 2023, None)}))]
         assert answers == [False, False, False]
         assert result["n_sectors"] == 3
 
