@@ -25,6 +25,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import subprocess
 import sys
@@ -431,24 +432,72 @@ def issue_body(results: dict[str, int], log: Path, headline: str) -> str:
     return "\n".join(lines)
 
 
+def run_gh(run, argv: Sequence[str]) -> subprocess.CompletedProcess:
+    """gh を1回呼ぶ。リポジトリは `ROOT` で決める（起動元の cwd に頼らない）。OSError は呼び出し側が受ける。"""
+    return run(list(argv), cwd=str(ROOT), capture_output=True, text=True,
+               encoding="utf-8", errors="replace")
+
+
+def list_open_issues(run) -> tuple[Optional[list], Optional[str]]:
+    """open な Issue の `[{number, title}]`。失敗なら (None, 理由)。
+
+    **ラベルで絞らない**——誰かが `ops` を外した瞬間に重複起票が始まる
+    （`.github/workflows/notify-failure.yml:165` の理由をそのまま継ぐ）。突き合わせは
+    `--jq` に任せず Python 側で行う（シェル依存を持ち込まずテストできる）。
+    """
+    proc = run_gh(run, ["gh", "issue", "list", "--state", "open", "--limit", "200",
+                        "--json", "number,title"])
+    if proc.returncode != 0:
+        return None, f"gh issue list が失敗: {(proc.stderr or '')[:200]}"
+    try:
+        return json.loads(proc.stdout or "[]"), None
+    except json.JSONDecodeError as e:
+        return None, f"gh issue list の出力を JSON として読めない: {e}"
+
+
+def find_open_issue(run, title: str) -> tuple[Optional[int], Optional[str]]:
+    """同一タイトルの open Issue 番号を返す。見つからない・失敗なら None。
+
+    **listing が失敗したら新規起票へ倒す**（重複より沈黙の方が悪い）。
+    watchdog（`check_batch_freshness`）と `notify` が共有する（#885）。
+    """
+    issues, warn = list_open_issues(run)
+    if issues is None:
+        return None, f"{warn}（新規起票へ倒す）"
+    for issue in issues:
+        if issue.get("title") == title:
+            return issue.get("number"), None
+    return None, None
+
+
 def notify(results: dict[str, int], log: Path, title: str, body: str,
            run=subprocess.run) -> Optional[str]:
-    """失敗を Issue として起票する。gh が無い/失敗しても None 以外を返すだけで落とさない。"""
+    """失敗を Issue として起票する。gh が無い/失敗しても None 以外を返すだけで落とさない。
+
+    **同じタイトルの open Issue があればそこへ追記する**（#885）——鮮度ゲートのように直るまで毎晩同じ理由で
+    落ちる失敗で、晩ごとに Issue が増えないため（GHA の notify-failure・watchdog と同じ寄せ方）。
+    一覧を読めなければ新規起票へ倒し、その理由を返す。
+    """
     failed = [n for n, c in results.items() if c != 0]
     if not failed:
         return None
-    argv = ["gh", "issue", "create", "--title", title.format(failed=", ".join(failed)),
-            "--body", body]
-    for label in ISSUE_LABELS:
-        argv += ["--label", label]
+    title = title.format(failed=", ".join(failed))
     try:
-        proc = run(argv, cwd=str(ROOT), capture_output=True, text=True,
-                   encoding="utf-8", errors="replace")
+        existing, warn = find_open_issue(run, title)
+        if existing is not None:
+            action = f"gh issue comment #{existing}"
+            proc = run_gh(run, ["gh", "issue", "comment", str(existing), "--body", body])
+        else:
+            action = "gh issue create"
+            argv = ["gh", "issue", "create", "--title", title, "--body", body]
+            for label in ISSUE_LABELS:
+                argv += ["--label", label]
+            proc = run_gh(run, argv)
     except OSError as e:
         return f"gh を起動できない: {e}"
     if proc.returncode != 0:
-        return f"gh issue create が失敗: {(proc.stderr or '').strip()[:200]}"
-    return None
+        return f"{action} が失敗: {(proc.stderr or '').strip()[:200]}"
+    return warn
 
 
 @dataclass(frozen=True)
@@ -647,6 +696,7 @@ def models_from_steps(steps: Sequence[Step], flag: str = "--model") -> tuple[str
 __all__ = [
     "ROOT", "LOG_DIR", "ISSUE_LABELS", "Step", "BatchSpec", "Hooks", "Runner",
     "utc_now_iso", "log_path", "record_footprint", "issue_body", "notify",
+    "run_gh", "list_open_issues", "find_open_issue",
     "build_parser", "select_steps", "run_batch", "models_from_steps",
     "env_lines", "window_problem",
 ]

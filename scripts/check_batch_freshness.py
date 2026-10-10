@@ -566,44 +566,11 @@ def recovery_body(target: dict, snap: dict, human_touched: bool) -> str:
     return "\n".join(body + ["", "---"] + tail + [WATCHDOG_MARKER, RECOVERY_MARKER])
 
 
-def _gh(run, argv: Sequence[str]) -> subprocess.CompletedProcess:
-    return run(list(argv), capture_output=True, text=True, encoding="utf-8", errors="replace")
-
-
-def _list_open_issues(run) -> tuple[Optional[list], Optional[str]]:
-    """open な Issue の `[{number, title}]`。失敗なら (None, 理由)。
-
-    **ラベルで絞らない**——誰かが `ops` を外した瞬間に重複起票が始まる
-    （`.github/workflows/notify-failure.yml:165` の理由をそのまま継ぐ）。突き合わせは
-    `--jq` に任せず Python 側で行う（シェル依存を持ち込まずテストできる）。
-    """
-    proc = _gh(run, ["gh", "issue", "list", "--state", "open", "--limit", "200",
-                     "--json", "number,title"])
-    if proc.returncode != 0:
-        return None, f"gh issue list が失敗: {(proc.stderr or '')[:200]}"
-    try:
-        return json.loads(proc.stdout or "[]"), None
-    except json.JSONDecodeError as e:
-        return None, f"gh issue list の出力を JSON として読めない: {e}"
-
-
-def _find_open_issue(run, title: str) -> tuple[Optional[int], Optional[str]]:
-    """同一タイトルの open Issue 番号を返す。見つからない・失敗なら None。
-
-    **listing が失敗したら新規起票へ倒す**（重複より沈黙の方が悪い）。
-    """
-    issues, warn = _list_open_issues(run)
-    if issues is None:
-        return None, f"{warn}（新規起票へ倒す）"
-    for issue in issues:
-        if issue.get("title") == title:
-            return issue.get("number"), None
-    return None, None
-
-
+# gh の呼び出しと open Issue の突き合わせは `batch_common`（`run_gh` / `list_open_issues` /
+# `find_open_issue`）が唯一の源で、バッチの失敗通知と共有する（#885）。
 def _view_issue(run, number: int) -> tuple[Optional[dict], Optional[str]]:
     """Issue の本文とコメント。失敗なら (None, 理由)。"""
-    proc = _gh(run, ["gh", "issue", "view", str(number), "--json", "body,comments"])
+    proc = bc.run_gh(run, ["gh", "issue", "view", str(number), "--json", "body,comments"])
     if proc.returncode != 0:
         return None, f"gh issue view #{number} が失敗: {(proc.stderr or '')[:200]}"
     try:
@@ -649,7 +616,7 @@ def close_recovered(targets: list[dict], snap: dict, say=print, run=subprocess.r
     errors: list[str] = []
     by_title = {target["title"]: target for target in targets}
     try:
-        issues, warn = _list_open_issues(run)
+        issues, warn = bc.list_open_issues(run)
         if issues is None:
             return [f"{warn}（復旧した起票を閉じられない）"]
         for issue in issues:
@@ -668,11 +635,11 @@ def close_recovered(targets: list[dict], snap: dict, say=print, run=subprocess.r
                 continue        # もう伝えてある。毎日積み上げない
             body = recovery_body(target, snap, human_touched)
             if human_touched:
-                proc = _gh(run, ["gh", "issue", "comment", str(number), "--body", body])
+                proc = bc.run_gh(run, ["gh", "issue", "comment", str(number), "--body", body])
                 action = f"復旧コメント（人のコメントがあるため閉じない）#{number}"
             else:
-                proc = _gh(run, ["gh", "issue", "close", str(number),
-                                 "--comment", body, "--reason", "completed"])
+                proc = bc.run_gh(run, ["gh", "issue", "close", str(number),
+                                       "--comment", body, "--reason", "completed"])
                 action = f"復旧により自動クローズ #{number}"
             if proc.returncode != 0:
                 errors.append(f"{action}に失敗: {(proc.stderr or '')[:200]}")
@@ -698,7 +665,7 @@ def notify(found: list[dict], snap: dict, say=print, run=subprocess.run,
                 say(f"[dry-run] | {line}")
             continue
         try:
-            existing, warn = _find_open_issue(run, title)
+            existing, warn = bc.find_open_issue(run, title)
             if warn:
                 errors.append(warn)
             if existing is not None and problem.get("nightly") is not None:
@@ -712,13 +679,13 @@ def notify(found: list[dict], snap: dict, say=print, run=subprocess.run,
                     say(f"[夜間ログ] 前回と同じ警告のため追記しない #{existing}: {title}")
                     continue
             if existing is not None:
-                proc = _gh(run, ["gh", "issue", "comment", str(existing), "--body", body])
+                proc = bc.run_gh(run, ["gh", "issue", "comment", str(existing), "--body", body])
                 action = f"既存 Issue #{existing} へ追記"
             else:
                 argv = ["gh", "issue", "create", "--title", title, "--body", body]
                 for label in bc.ISSUE_LABELS:
                     argv += ["--label", label]
-                proc = _gh(run, argv)
+                proc = bc.run_gh(run, argv)
                 action = "新規起票"
         except OSError as e:
             errors.append(f"gh を起動できない: {e}")

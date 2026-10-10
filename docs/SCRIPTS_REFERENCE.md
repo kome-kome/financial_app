@@ -296,7 +296,7 @@ NUTS 軌道長（`max_tree_depth`）× `target_accept` の格子ドライバ（I
 
 ## `scripts/run_nightly.py`
 
-**ローカル夜間バッチの実体**（#503 Phase 2・ADR-0038。骨格は `scripts/batch_common.py` と共有）。`_pipeline_incremental.py`（XBRL 差分＋マクロ＋市場データ）→ `scripts/check_macro_health.py`（マクロ鮮度ゲート・#876）→ `nightly_scores.py` の順に回す。**ステップ間で止めない**（収集が落ちてもスコア更新は走り、両方の結果がログに残る。鮮度切れの夜も同じ）。実行のたび `app_settings` の `nightly_last_run` / `nightly_last_success` へ足跡を書き、失敗は `gh issue create` で起票する（**通知・記録の失敗はバッチを落とさない**）。鮮度切れの夜は `nightly_last_success` が進まないが、watchdog と `/api/morning` の判定は `nightly_last_run` だけを見るので「走っていない」とは出ない（ADR-0042 の決定2）。収集の入口が `collector.py --incremental` ではないのが要点＝あちらは株価を1バイトも更新しない。`WINDOW_MIN`(360分) と `BUDGET_MIN`（pipeline 240 / macro_health 10 / scores 60）を持つ（#530・ADR-0040）
+**ローカル夜間バッチの実体**（#503 Phase 2・ADR-0038。骨格は `scripts/batch_common.py` と共有）。`_pipeline_incremental.py`（XBRL 差分＋マクロ＋市場データ）→ `scripts/check_macro_health.py`（マクロ鮮度ゲート・#876）→ `nightly_scores.py` の順に回す。**ステップ間で止めない**（収集が落ちてもスコア更新は走り、両方の結果がログに残る。鮮度切れの夜も同じ）。実行のたび `app_settings` の `nightly_last_run` / `nightly_last_success` へ足跡を書き、失敗は `gh issue create` で起票する（同じタイトルの open Issue があれば追記・#885。**通知・記録の失敗はバッチを落とさない**）。鮮度切れの夜は `nightly_last_success` が進まないが、watchdog と `/api/morning` の判定は `nightly_last_run` だけを見るので「走っていない」とは出ない（ADR-0042 の決定2）。収集の入口が `collector.py --incremental` ではないのが要点＝あちらは株価を1バイトも更新しない。`WINDOW_MIN`(360分) と `BUDGET_MIN`（pipeline 240 / macro_health 10 / scores 60）を持つ（#530・ADR-0040）
 
 種別: ユーティリティ ／ 依存先: _pipeline_incremental.py, scripts/check_macro_health.py, nightly_scores.py, database
 
@@ -400,7 +400,7 @@ watchdog をタスクスケジューラへ登録する（毎日 JST 20:00・上�
 
 ## `scripts/batch_common.py`
 
-**ローカル駆動バッチの共通骨格**（#504）。`Step` / `Runner` / `BatchSpec` / `run_batch()` と、足跡（`app_settings`）・通知（`gh issue create`）・ログ綴じを持つ。各バッチは cadence も中身も違うが「走らなかったことを検知する」骨格は同じなので、ここが唯一の源（コピーすると片方だけ直す事故が起きる）。`models_from_steps()` は argv から `--model` を抜き、`HEAVY_AUTOMATION` の照合に使う（列挙を二重に持たない）。
+**ローカル駆動バッチの共通骨格**（#504）。`Step` / `Runner` / `BatchSpec` / `run_batch()` と、足跡（`app_settings`）・通知（`gh issue create`。同じタイトルの open Issue があれば `gh issue comment` で追記する・#885）・ログ綴じを持つ。open Issue の突き合わせ（`run_gh` / `list_open_issues` / `find_open_issue`）もここが唯一の源で、watchdog（`check_batch_freshness.py`）が import して使う（逆向きに import しない＝あちらは import 時に接続先を書き換える）。各バッチは cadence も中身も違うが「走らなかったことを検知する」骨格は同じなので、ここが唯一の源（コピーすると片方だけ直す事故が起きる）。`models_from_steps()` は argv から `--model` を抜き、`HEAVY_AUTOMATION` の照合に使う（列挙を二重に持たない）。
 
 - **子の出力はログファイルへ直結する**（`stdout=fh` / `stderr=STDOUT` ＋ 子へ `PYTHONUNBUFFERED` / `PYTHONIOENCODING`・#504）。途中で kill されてもそこまでの出力がディスクに残る。`capture_output=True` で溜めていた頃は、親ごと落ちると START 行だけが残り、「順調に長い」と「死んだ」がログ上で区別できなかった。
 - **待ち合わせは `Popen` ＋ `wait(timeout=HEARTBEAT_SEC)` の heartbeat 付きで、全ステップが自動で対象**（#522・スクリプト側の opt-in にしない）。刻むのは待っている親自身なので「親が生きていて子がまだ終わっていない」の証拠になるが、**heartbeat は生存を示すが進行を示さない**（進行の裏取りは CPU 時間）。
