@@ -602,6 +602,9 @@ def calc_derived(rec: dict) -> dict:
     asset = bs.get("total_assets", 0) or 0
     eq    = bs.get("total_equity", 0) or bs.get("equity_parent", 0) or 0
     debt  = (bs.get("short_term_debt", 0) or 0) + (bs.get("long_term_debt", 0) or 0)
+    # 借入金の行が無いのは無借金だからとして 0 で足すが、負債合計まで無ければ負債の側を観測していない
+    # ので D/E を作らない（VIEW の de_ratio と同じ・#915）
+    liab_seen = any(bs.get(k) is not None for k in ("short_term_debt", "long_term_debt", "total_liabilities"))
     ocf   = cf.get("operating_cf", 0) or 0
     # free_cf は cf セクションに置くことで upsert_financial が cf_free_cf 列に正しくマップする
     cf["free_cf"] = ocf + (cf.get("investing_cf", 0) or 0)
@@ -614,11 +617,12 @@ def calc_derived(rec: dict) -> dict:
         pl["ebitda"] = round(op + dep, 0)
     # 清原達郎式ネットキャッシュ = 流動資産 + 投資有価証券×0.7 − 総負債
     # 投資有価証券が未取得の古いレコードは 0 として扱う（簡易NCAV式相当）。
+    # 流動資産と総負債は片方でも無ければ作らない（片方を 0 とすると過大・過小に出る。VIEW と同じ・#915）。
     # nc_ratio は market_cap 確定後に update_market_data_only で計算する。
-    ca   = bs.get("current_assets", 0) or 0
+    ca   = bs.get("current_assets")
     inv  = bs.get("investment_securities", 0) or 0
-    tl   = bs.get("total_liabilities", 0) or 0
-    net_cash = ca + inv * 0.7 - tl if (ca or tl) else None
+    tl   = bs.get("total_liabilities")
+    net_cash = ca + inv * 0.7 - tl if (ca is not None and tl is not None and (ca or tl)) else None
     rec["derived"] = {
         # 営業利益が取れない行は 0% ではなく空欄（VIEW の op_margin と同じ・#896）
         "op_margin":    round(op / rev * 100, 2) if rev and pl.get("operating_profit") is not None else None,
@@ -626,7 +630,7 @@ def calc_derived(rec: dict) -> dict:
         "roe":          round(net / eq * 100, 2) if eq else None,
         "roa":          round(net / asset * 100, 2) if asset else None,
         "equity_ratio": round(eq / asset * 100, 2) if asset else None,
-        "de_ratio":     round(debt / eq, 4) if eq else None,
+        "de_ratio":     round(debt / eq, 4) if eq and liab_seen else None,
         "cf_ratio":     round(ocf / rev * 100, 2) if rev else None,
         "net_cash":     round(net_cash, 0) if net_cash is not None else None,
     }

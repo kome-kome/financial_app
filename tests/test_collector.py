@@ -1046,6 +1046,26 @@ class TestCalcDerived:
         rec["bs"]["total_liabilities"] = 0
         assert calc_derived(rec)["derived"]["net_cash"] is None
 
+    @pytest.mark.parametrize("missing", ["current_assets", "total_liabilities"])
+    def test_net_cash_none_when_one_side_is_missing(self, missing):
+        """片方を 0 とみなすと過大・過小に出る（銀行は流動資産の区分が無い・VIEW と同じ・#915）。"""
+        rec = self._rec()
+        del rec["bs"][missing]
+        assert calc_derived(rec)["derived"]["net_cash"] is None
+
+    def test_de_ratio_zero_without_debt_lines_when_liabilities_are_present(self):
+        """借入金の行が無く負債合計がある社は無借金として D/E 0（#915）。"""
+        rec = self._rec()
+        del rec["bs"]["short_term_debt"], rec["bs"]["long_term_debt"]
+        assert calc_derived(rec)["derived"]["de_ratio"] == 0.0
+
+    def test_de_ratio_none_when_no_liability_is_observed(self):
+        """負債合計まで無ければ負債の側を観測していないので D/E を作らない（#915）。"""
+        rec = self._rec()
+        for k in ("short_term_debt", "long_term_debt", "total_liabilities"):
+            del rec["bs"][k]
+        assert calc_derived(rec)["derived"]["de_ratio"] is None
+
 
 # ── 列検出・raw 変換・二分探索 ───────────────────────────────────────────────
 

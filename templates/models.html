@@ -343,6 +343,7 @@ z_metric_j_i: 企業 i の指標 j の候補集団標準化値（±5 クリッ�
 
 <span class="comment"># 実装上の単位調整（market_cap は百万円単位）</span>
 <span class="var">比率</span> = 金額 / (market_cap × <span class="val">1_000_000</span>)</div>
+  <p><strong>流動資産か総負債のどちらかが空欄の行は NC も NCAV も計算しない</strong>（片方を 0 とすると過大・過小に出る。流動資産の区分を持たない銀行・保険はここで外れる）。投資有価証券の空欄は 0 として扱う（持たない社が多い）。</p>
 
   <h3>銘柄選別基準</h3>
   <div class="table-scroll"><table>

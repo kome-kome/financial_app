@@ -199,6 +199,33 @@ class TestTtmRows:
         assert row.op_margin is None
         assert row.net_margin == pytest.approx(6.0)     # 売上高はあるので他の比率は出る
 
+    def _bs_ratios(self, conn, ec: str):
+        return conn.execute(text(
+            f"SELECT de_ratio, net_cash, nc_ratio FROM {VIEW} WHERE edinet_code = :ec AND basis = 'ttm'"),
+            {"ec": ec}).one()
+
+    def test_de_ratio_is_zero_without_debt_lines_when_liabilities_are_observed(self, conn):
+        """借入金の行が無く負債合計がある社は無借金として D/E 0（外さない・#915）。式は通期・半期と同じ形。"""
+        ec = _sample_company(conn)
+        self._insert(conn, ec)                           # 借入金は2列とも空欄・負債合計 1000
+        assert self._bs_ratios(conn, ec).de_ratio == 0.0
+
+    def test_de_ratio_and_net_cash_are_blank_when_no_liability_is_observed(self, conn):
+        """負債合計まで空欄なら D/E を 0（無借金）にせず空欄（#915・#900 の後の US-GAAP の社）。"""
+        ec = _sample_company(conn)
+        self._insert(conn, ec, bs_total_liabilities=None)
+        row = self._bs_ratios(conn, ec)
+        assert row.de_ratio is None
+        assert row.net_cash is None and row.nc_ratio is None
+
+    def test_net_cash_is_blank_without_current_assets(self, conn):
+        """流動資産の区分を持たない社（銀行・保険）は「−負債合計」にせず空欄（#915）。"""
+        ec = _sample_company(conn)
+        self._insert(conn, ec, bs_current_assets=None)
+        row = self._bs_ratios(conn, ec)
+        assert row.net_cash is None and row.nc_ratio is None
+        assert row.de_ratio == 0.0                       # 負債合計はあるので D/E は出る
+
     def test_gap_ratio_is_null_for_ttm_rows(self, conn):
         ec = _sample_company(conn)
         self._insert(conn, ec)
