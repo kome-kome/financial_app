@@ -774,6 +774,49 @@ _TOYOTA_H1_S100WYZE = [
     ("jpigp_cor:BasicAndDilutedEarningsLossPerShareIFRS", "InterimDuration", "136.07"),
 ]
 
+# ── 売上債権（#904）: 検体は 2026-10-11 に EDINET から取得した実際の書類の行を写した ─────────
+_DEI_JGAAP_CONSOLIDATED_2025_03 = [
+    ("jpdei_cor:AccountingStandardsDEI", "FilingDateInstant", "Japan GAAP"),
+    ("jpdei_cor:WhetherConsolidatedFinancialStatementsArePreparedDEI", "FilingDateInstant", "true"),
+    ("jpdei_cor:CurrentPeriodEndDateDEI", "FilingDateInstant", "2025-03-31"),
+]
+# 極東貿易 2025年3月期（S100W0AA）: 連結 BS は「受取手形、売掛金及び契約資産」。注記は文章だけで内訳のタグが無い。
+# 未登録だった間は単体の売掛金（10,738百万円）が入り、#896 の後は空欄になっていた
+_E8093_S100W0AA = _DEI_JGAAP_CONSOLIDATED_2025_03 + [
+    ("jppfs_cor:NotesAndAccountsReceivableTradeAndContractAssets", "Prior1YearInstant", "16025000000"),
+    ("jppfs_cor:NotesAndAccountsReceivableTradeAndContractAssets", "CurrentYearInstant", "20891000000"),
+    ("jppfs_cor:AccountsReceivableTrade", "Prior1YearInstant_NonConsolidatedMember", "9783000000"),
+    ("jppfs_cor:AccountsReceivableTrade", "CurrentYearInstant_NonConsolidatedMember", "10738000000"),
+]
+# E02769 2025年3月期（S100W4DK）: BS の合算の行（CSV 496行目）のあとに、注記の内訳（売掛金・契約資産。
+# 891・893行目）が同じタグ・同じ文脈で並ぶ。契約資産が売掛金より大きい
+_E02769_S100W4DK = _DEI_JGAAP_CONSOLIDATED_2025_03 + [
+    ("jppfs_cor:NotesAndAccountsReceivableTradeAndContractAssets", "CurrentYearInstant", "33414000000"),
+    ("jppfs_cor:AccountsReceivableTrade", "CurrentYearInstant", "14778000000"),
+    ("jppfs_cor:ContractAssets", "CurrentYearInstant", "17940000000"),
+    ("jppfs_cor:AccountsReceivableTrade", "CurrentYearInstant_NonConsolidatedMember", "4931000000"),
+]
+# E04191 2025年3月期（S100W5BJ）: BS の「受取手形及び売掛金」と注記の「売掛金」（登録済みのタグどうし）
+_E04191_S100W5BJ = _DEI_JGAAP_CONSOLIDATED_2025_03 + [
+    ("jppfs_cor:NotesAndAccountsReceivableTrade", "CurrentYearInstant", "37079000000"),
+    ("jppfs_cor:AccountsReceivableTrade", "CurrentYearInstant", "36726000000"),
+    ("jppfs_cor:AccountsReceivableTrade", "CurrentYearInstant_NonConsolidatedMember", "976000000"),
+]
+# E30466 2025年3月期（S100W9FR）: BS は「売掛金及び契約資産」。注記に売掛金・契約資産の内訳
+_E30466_S100W9FR = _DEI_JGAAP_CONSOLIDATED_2025_03 + [
+    ("jppfs_cor:AccountsReceivableTradeAndContractAssets", "CurrentYearInstant", "382131000"),
+    ("jppfs_cor:AccountsReceivableTrade", "CurrentYearInstant", "363851000"),
+    ("jppfs_cor:ContractAssets", "CurrentYearInstant", "18279000"),
+    ("jppfs_cor:AccountsReceivableTradeAndContractAssets", "CurrentYearInstant_NonConsolidatedMember", "286511000"),
+]
+# E05332 2025年3月期（S100W5KF）: BS が「売掛金」と「契約資産」を別の行で載せる（注記に内訳のタグは無い）
+_E05332_S100W5KF = _DEI_JGAAP_CONSOLIDATED_2025_03 + [
+    ("jppfs_cor:AccountsReceivableTrade", "CurrentYearInstant", "5829956000"),
+    ("jppfs_cor:ContractAssets", "CurrentYearInstant", "2030603000"),
+    ("jppfs_cor:AccountsReceivableTrade", "CurrentYearInstant_NonConsolidatedMember", "5080999000"),
+    ("jppfs_cor:ContractAssets", "CurrentYearInstant_NonConsolidatedMember", "1344147000"),
+]
+
 
 def _without_dei(rows):
     return [r for r in rows if not r[0].startswith("jpdei_cor:")]
@@ -864,7 +907,10 @@ class TestNonConsolidatedValuesAreDropped:
 
     @pytest.mark.parametrize("rows", [
         _TOYOTA_USGAAP_S100G1ZO, _TOYOTA_IFRS_S100Y8NY, _E01033_SINGLE_S100W071, _TOYOTA_H1_S100WYZE,
-    ], ids=["usgaap", "ifrs", "single-only", "h1"])
+        _E8093_S100W0AA, _E02769_S100W4DK, _E04191_S100W5BJ, _E30466_S100W9FR, _E05332_S100W5KF,
+    ], ids=["usgaap", "ifrs", "single-only", "h1",
+            "recv-combined", "recv-combined-and-note", "recv-notes-and-ar", "recv-ar-and-ca",
+            "recv-ar-only"])
     @_ORDERS
     def test_parse_raw_rows_agrees(self, rows, order):
         rows = rows if order == "as_filed" else rows[::-1]
@@ -904,6 +950,40 @@ class TestNonConsolidatedValuesAreDropped:
         import inspect
         for fn in (collector_financials._apply_row, collector_financials._collect_inventory_row):
             assert "_drops_nonconsolidated(" in inspect.getsource(fn), fn.__name__
+
+
+class TestReceivablesTakeTheBalanceSheetLine:
+    """売上債権は BS に載る行を採る。注記の内訳の「売掛金」が同じ文脈で並んでも、行の並びに依存しない（#904）。"""
+
+    @_ORDERS
+    @pytest.mark.parametrize("rows, expected", [
+        (_E8093_S100W0AA, 20891000000.0),    # 合算の行だけ。単体の 10,738百万円ではない
+        (_E02769_S100W4DK, 33414000000.0),   # 注記の売掛金 14,778百万円ではない
+        (_E04191_S100W5BJ, 37079000000.0),   # 注記の売掛金 36,726百万円ではない
+        (_E30466_S100W9FR, 382131000.0),     # 注記の売掛金 363,851千円ではない
+        (_E05332_S100W5KF, 5829956000.0),    # BS の行が売掛金（契約資産は別の行）
+    ], ids=["combined", "combined-and-note", "notes-and-ar", "ar-and-ca", "ar-only"])
+    def test_balance_sheet_line_wins(self, rows, expected, order):
+        assert _parse(rows, order)["bs"]["receivables"] == expected
+
+    def test_combined_tags_are_mapped(self):
+        assert XBRL_MAP["NotesAndAccountsReceivableTradeAndContractAssets"] == ("bs", "receivables")
+        assert XBRL_MAP["AccountsReceivableTradeAndContractAssets"] == ("bs", "receivables")
+        assert "ContractAssets" not in XBRL_MAP   # 契約資産だけの行は売上債権の列へ足さない
+
+    def test_tags_losing_ties_are_registered(self):
+        """順位を下げるタグは登録済みの列のタグであること（綴り違いだと黙って効かない）。"""
+        for tag in collector_financials._TAGS_LOSING_TIES:
+            assert tag in XBRL_MAP, tag
+
+    def test_context_priority_still_comes_first(self):
+        """タグの順位は文脈の優先度が同じときだけ効く。連結の売掛金は単体の合算の行に勝つ。"""
+        rows = [
+            ("jppfs_cor:AccountsReceivableTrade", "CurrentYearInstant", "100"),
+            ("jppfs_cor:NotesAndAccountsReceivableTrade", "CurrentYearInstant_NonConsolidatedMember", "200"),
+        ]
+        for order in ("as_filed", "reversed"):
+            assert _parse(rows, order)["bs"]["receivables"] == 100.0
 
 
 # ── calc_derived ─────────────────────────────────────────────────────────────

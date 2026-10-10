@@ -389,6 +389,19 @@ def _context_priority(ctx: str) -> int:
     return 2 if any(k in ctx for k in CONSOLIDATED_KEYS) else 1
 
 
+# 文脈の優先度（_context_priority）が同じとき、同じ列の他のタグに負ける生タグ（#904）。
+# 現行の有報は BS の行に加えて、注記（収益認識「顧客との契約から生じた債権」）の内訳にも同じタグ・
+# 同じ文脈で数値を付ける。BS の「受取手形及び売掛金」「受取手形、売掛金及び契約資産」と注記の
+# 「売掛金」が並び、CSV の並び順で値が決まっていた（標本 200件中 58件・実測 S100W4DK / S100W5BJ）。
+# BS に「売掛金」だけを載せる会社（受取手形・契約資産と別建て）は他のタグが無いので従来どおり採る。
+_TAGS_LOSING_TIES = frozenset({"AccountsReceivableTrade"})
+
+
+def _tag_rank(elem: str) -> int:
+    """文脈の優先度が同じ値どうしの順位（大きいほど優先・#904）。_apply_row が使う。"""
+    return 0 if elem in _TAGS_LOSING_TIES else 1
+
+
 def _outside_current_period(ctx: str) -> bool:
     """当期の値として採らないコンテキストか。_apply_row / _collect_inventory_row 共通（式を書き写さない）。
 
@@ -430,8 +443,8 @@ def _apply_row(
     """共通フィルタ・優先度計算・結果反映。parse_raw_rows / parse_xbrl_csv の中核共通ロジック。
 
     当期外コンテキストのスキップ（_outside_current_period）・連結を作る書類の単体の値のスキップ
-    （_drops_nonconsolidated）・OperatingRevenue1 非連結フィルタ・優先度計算（_context_priority）・
-    float 変換・priority 更新を担う。
+    （_drops_nonconsolidated）・OperatingRevenue1 非連結フィルタ・優先度計算（_context_priority、
+    同じ優先度ではタグの順位 _tag_rank）・float 変換・priority 更新を担う。
     apply_capex_sign=True のとき capex を負値（支出＝アウトフロー）に統一する。
     """
     # 前期比較・直近3か月の値はスキップ。当期（通期・半期累計）のデータのみ処理する
@@ -455,9 +468,10 @@ def _apply_row(
     # 業種は XBRL から取れない（`section="meta"` の列は無い）。業種の源は `collector_master`
     # （JPX 上場会社一覧と EDINET コードリスト・#784）。
     key = f"{cat}_{field}"
-    if priority > _priority.get(key, -1):
+    rank = (priority, _tag_rank(elem))
+    if rank > _priority.get(key, (-1, -1)):
         result[cat][field] = val
-        _priority[key] = priority
+        _priority[key] = rank
 
 
 def _inventory_fallback(inv_parts: dict, result: dict) -> None:
