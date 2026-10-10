@@ -131,6 +131,7 @@ python -m scripts.refetch_financials --edinet-code E02144 E00317 --examples 20  
 python -m scripts.refetch_financials --period-type H1 --year-from 2025          # 期種・年度で絞った試運転
 python -m scripts.refetch_financials --apply --limit 100                        # 全件を続きから100行だけ書く（進捗を保存）
 python -m scripts.refetch_financials --apply --restart                          # 保存した進捗を無視して最初から
+python -m scripts.refetch_financials --clear-nonconsolidated --edinet-code E02144  # 単体の値で入った列を NULL へ戻す試運転（#896。進捗は別キー）
 
 # 地方取引所の単独上場を拾う（#555）。既定はドライラン＝棄却理由まで出す
 python -m scripts.resolve_price_suffix                            # 何も書かない

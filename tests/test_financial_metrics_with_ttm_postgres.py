@@ -189,6 +189,16 @@ class TestTtmRows:
         # 同じ年度・同じ基準の行が1本だけ＝COUNT >= 2 を満たさない（表を空にしてあるから言える）
         assert z is None
 
+    def test_op_margin_is_blank_without_operating_profit(self, conn):
+        """営業利益が空欄の行は営業利益率も空欄（0% にしない・#896）。式は通期・半期の VIEW と同じ形。"""
+        ec = _sample_company(conn)
+        self._insert(conn, ec, pl_operating_profit=None)
+        row = conn.execute(text(
+            f"SELECT op_margin, net_margin FROM {VIEW} WHERE edinet_code = :ec AND basis = 'ttm'"),
+            {"ec": ec}).one()
+        assert row.op_margin is None
+        assert row.net_margin == pytest.approx(6.0)     # 売上高はあるので他の比率は出る
+
     def test_gap_ratio_is_null_for_ttm_rows(self, conn):
         ec = _sample_company(conn)
         self._insert(conn, ec)

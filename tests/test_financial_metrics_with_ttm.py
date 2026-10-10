@@ -89,6 +89,24 @@ class TestSharedExpressions:
         assert set(expressions(TTM_SQL)) == set(SHARED_ALIASES)
 
 
+class TestOpMarginIsBlankWithoutOperatingProfit:
+    """営業利益が空欄の行で営業利益率を 0% にしない（#896）。
+
+    連結を作る会社の書類では単体の営業利益を採らないので、営業利益が空欄の行が増える。
+    `COALESCE(営業利益, 0)` のままだと 0% として推奨・スクリーニングへ流れる。3 つの VIEW は
+    式を共有しない（通期と TTM は上の照合で同一・半期は別ファイル）ので 3 本とも縛る。
+    値での確認は実 PG のテスト（`test_financial_metrics_with_ttm_postgres.py`）。
+    """
+
+    @pytest.mark.parametrize("sql", [
+        ANNUAL_SQL, TTM_SQL, database.FINANCIAL_METRICS_INTERIM_VIEW_SQL,
+    ], ids=["annual", "ttm", "interim"])
+    def test_operating_profit_is_not_treated_as_zero(self, sql):
+        expr = expressions(sql)["op_margin"]
+        assert "fr.pl_operating_profit / fr.pl_revenue" in expr
+        assert "COALESCE(fr.pl_operating_profit" not in expr
+
+
 class TestTtmSpecifics:
     def test_windows_are_partitioned_by_basis(self):
         body = " ".join(_strip_comments(TTM_SQL).split())
