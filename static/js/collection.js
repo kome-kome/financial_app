@@ -531,17 +531,17 @@ async function showDetail(code, name){
     let html = `
       <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:12px">
         ${statCard('売上高', fmt0(r.pl.revenue/1e6)+'億')}
-        ${statCard('営業利益率', r.pl.op_margin+'%')}
-        ${statCard('ROE', r.val.roe+'%')}
+        ${statCard('営業利益率', fmtPct(r.pl.op_margin))}
+        ${statCard('ROE', fmtPct(r.val.roe))}
         ${statCard('総資産', fmt0(r.bs.total_assets/1e6)+'億')}
-        ${statCard('自己資本比率', r.bs.equity_ratio+'%')}
+        ${statCard('自己資本比率', fmtPct(r.bs.equity_ratio))}
         ${statCard('時価総額', fmt0((r.val.market_cap||0)/1e6)+'億')}
       </div>
       <div style="font-size:12px;color:${cssVar('--text-secondary')};line-height:2">
-        <b style="color:${cssVar('--status-good')}">PL:</b> 純利益 ${fmt0((r.pl.net_income||0)/1e6)}億 / EPS ${r.pl.eps||'-'}円 / 純利益率 ${r.pl.net_margin||'-'}%<br>
+        <b style="color:${cssVar('--status-good')}">PL:</b> 純利益 ${fmt0((r.pl.net_income||0)/1e6)}億 / EPS ${r.pl.eps||'-'}円 / 純利益率 ${fmtPct(r.pl.net_margin)}<br>
         <b style="color:${cssVar('--status-info')}">BS:</b> 純資産 ${fmt0((r.bs.total_equity||0)/1e6)}億 / D/E ${r.derived?.de_ratio||'-'}<br>
         <b style="color:${cssVar('--status-warn')}">CF:</b> 営業CF ${fmt0((r.cf.operating_cf||0)/1e6)}億 / フリーCF ${fmt0((r.cf.free_cf||0)/1e6)}億<br>
-        <b style="color:${cssVar('--accent-text')}">Val:</b> PER ${r.val.per||'-'}倍 / PBR ${r.val.pbr||'-'}倍 / 配当 ${r.val.div_yield||'-'}%
+        <b style="color:${cssVar('--accent-text')}">Val:</b> PER ${r.val.per||'-'}倍 / PBR ${r.val.pbr||'-'}倍 / 配当 ${fmtPct(r.val.div_yield)}
       </div>`;
     if(priceHistory && priceHistory.length > 0){
       html += `<div style="margin-top:14px">
@@ -920,7 +920,7 @@ function renderNorm(){
         ${bsRow('流動資産', r.bs.current_assets)} ${bsRow('固定資産', r.bs.noncurrent_assets)}
         ${bsRow('現金・預金', r.bs.cash)} ${bsRow('総資産', r.bs.total_assets, true)}
         ${bsRow('流動負債', r.bs.current_liabilities)} ${bsRow('固定負債', r.bs.noncurrent_liabilities)}
-        ${bsRow('純資産', r.bs.total_equity)} ${bsRow('自己資本比率', null,false,r.bs.equity_ratio+'%')}
+        ${bsRow('純資産', r.bs.total_equity)} ${bsRow('自己資本比率', null,false,fmtPct(r.bs.equity_ratio))}
         ${bsRow('BPS', null,false,(r.bs.bps||'-')+'円')}
       </div>
       <div>
@@ -928,23 +928,23 @@ function renderNorm(){
         ${bsRow('売上高', r.pl.revenue)} ${bsRow('売上総利益', r.pl.gross_profit)}
         ${bsRow('営業利益', r.pl.operating_profit)} ${bsRow('経常利益', r.pl.ordinary_profit)}
         ${bsRow('当期純利益', r.pl.net_income)}
-        ${bsRow('営業利益率', null,false,(r.pl.op_margin||'-')+'%')}
-        ${bsRow('純利益率', null,false,(r.pl.net_margin||'-')+'%')}
-        ${bsRow('売上成長率', null,false,(r.pl.rev_growth||'-')+'%')}
+        ${bsRow('営業利益率', null,false,fmtPct(r.pl.op_margin))}
+        ${bsRow('純利益率', null,false,fmtPct(r.pl.net_margin))}
+        ${bsRow('売上成長率', null,false,fmtPct(r.pl.rev_growth))}
         ${bsRow('EPS', null,false,(r.pl.eps||'-')+'円')}
       </div>
       <div>
         <div style="color:${cssVar('--status-warn')};font-weight:500;margin-bottom:8px;font-size:12px">▌ CF 再分類</div>
         ${bsRow('営業CF', r.cf.operating_cf)} ${bsRow('投資CF', r.cf.investing_cf)}
         ${bsRow('財務CF', r.cf.financing_cf)} ${bsRow('フリーCF', r.cf.free_cf)}
-        ${bsRow('設備投資', r.cf.capex)} ${bsRow('CF/売上比', null,false,(r.cf.cf_ratio||'-')+'%')}
+        ${bsRow('設備投資', r.cf.capex)} ${bsRow('CF/売上比', null,false,fmtPct(r.cf.cf_ratio))}
         <div style="margin-top:12px"></div>
         <div style="color:${cssVar('--status-info')};font-weight:500;margin-bottom:8px;font-size:12px">▌ バリュエーション</div>
         ${bsRow('時価総額', r.val.market_cap)}
         ${bsRow('PER', null,false,(r.val.per||'-')+'倍')}
         ${bsRow('PBR', null,false,(r.val.pbr||'-')+'倍')}
-        ${bsRow('ROE', null,false,(r.val.roe||'-')+'%')}
-        ${bsRow('配当利回', null,false,(r.val.div_yield||'-')+'%')}
+        ${bsRow('ROE', null,false,fmtPct(r.val.roe))}
+        ${bsRow('配当利回', null,false,fmtPct(r.val.div_yield))}
       </div>
     </div>
     <div style="margin-top:12px;font-size:11px;color:${cssVar('--text-muted')}">Zスコア: 売上 ${r.zscore?.z_revenue?.toFixed(2)||'-'} / 営業利益率 ${r.zscore?.z_op_margin?.toFixed(2)||'-'} / ROE ${r.zscore?.z_roe?.toFixed(2)||'-'}</div>
@@ -976,6 +976,9 @@ function dl(content, name){
 // ── ユーティリティ ────────────────────────────────────────────────
 function numOrNull(id){ const v=document.getElementById(id).value; return v===''?null:parseFloat(v); }
 function fmt0(n){ return n==null?'-':Math.round(n).toLocaleString(); }
+// 比率の % 表示。空欄（null）を文字列連結すると「null%」、`||'-'` で逃がすと 0 まで「-%」になる（#906）。
+// 桁は VIEW の丸め（小数第 2 位）に合わせる。
+function fmtPct(v){ return (v==null || isNaN(v)) ? '—' : Number(v).toFixed(2) + '%'; }
 const _TABS = ['collect','stockmarket','dataview','screen'];
 function showTab(t){
   _TABS.forEach(x=>document.getElementById('tab-'+x).classList.toggle('hidden',x!==t));
