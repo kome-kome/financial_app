@@ -45,15 +45,13 @@ class TestComputeNetCash:
         # 流動資産も総負債も無いケースは計算不能
         assert compute_net_cash(None, 500e8, None) is None
 
-    def test_only_current_assets_present(self):
-        # 流動資産だけあれば計算する（総負債=0扱い）
-        nc = compute_net_cash(500e8, None, None)
-        assert nc == pytest.approx(500e8)
+    def test_only_current_assets_present_returns_none(self):
+        # 総負債を 0 とみなすと過大に出る（#900 の後の US-GAAP の社は負債合計が空欄）。#915
+        assert compute_net_cash(500e8, None, None) is None
 
-    def test_only_liabilities_present(self):
-        # 負債だけある会社はネットキャッシュは大きくマイナス
-        nc = compute_net_cash(None, None, 800e8)
-        assert nc == pytest.approx(-800e8)
+    def test_only_liabilities_present_returns_none(self):
+        # 流動資産の区分を持たない銀行・保険を「−総負債」にしない（比率が平均 −34 倍になっていた）。#915
+        assert compute_net_cash(None, None, 800e8) is None
 
     def test_investment_discount_constant_is_70_percent(self):
         # 清原氏が指定する「投資有価証券は 0.7 倍評価」
@@ -108,9 +106,10 @@ class TestComputeNcav:
         # 同じ BS でも清原式は投資有価証券×0.7 を上乗せするため NCAV ≤ net_cash
         assert ncav < nc
 
-    def test_only_current_assets(self):
-        ncav = compute_ncav(500e8, None)
-        assert ncav == pytest.approx(500e8)
+    def test_one_side_missing_returns_none(self):
+        # compute_net_cash と同じく、片方を 0 とみなさない（#915）
+        assert compute_ncav(500e8, None) is None
+        assert compute_ncav(None, 800e8) is None
 
     def test_both_none_returns_none(self):
         assert compute_ncav(None, None) is None

@@ -114,7 +114,9 @@ d AS (
              THEN ROUND((COALESCE(NULLIF(fr.pl_net_income,0), NULLIF(fr.pl_net_income_attr,0), 0) / fr.bs_total_assets * 100)::numeric, 2) END AS roa,
         CASE WHEN COALESCE(fr.bs_total_assets,0) <> 0
              THEN ROUND((COALESCE(NULLIF(fr.bs_total_equity,0), NULLIF(fr.bs_equity_parent,0), 0) / fr.bs_total_assets * 100)::numeric, 2) END AS equity_ratio,
+        -- D/E とネットキャッシュの空欄の扱いは financial_metrics と同じ（#915）。
         CASE WHEN COALESCE(NULLIF(fr.bs_total_equity,0), NULLIF(fr.bs_equity_parent,0), 0) <> 0
+              AND (fr.bs_short_term_debt IS NOT NULL OR fr.bs_long_term_debt IS NOT NULL OR fr.bs_total_liabilities IS NOT NULL)
              THEN ROUND(((COALESCE(fr.bs_short_term_debt,0) + COALESCE(fr.bs_long_term_debt,0)) / COALESCE(NULLIF(fr.bs_total_equity,0), NULLIF(fr.bs_equity_parent,0), 0))::numeric, 4) END AS de_ratio,
         CASE WHEN COALESCE(fr.pl_revenue,0) <> 0
              THEN ROUND((COALESCE(fr.cf_operating_cf,0) / fr.pl_revenue * 100)::numeric, 2) END AS cf_ratio,
@@ -124,8 +126,9 @@ d AS (
              THEN ROUND((fr.pl_depreciation / fr.pl_revenue * 100)::numeric, 2) END AS da_intensity,
         CASE WHEN COALESCE(fr.bs_total_assets,0) <> 0
              THEN ROUND((COALESCE(fr.pl_revenue,0) / fr.bs_total_assets)::numeric, 4) END AS asset_turnover,
-        CASE WHEN COALESCE(fr.bs_current_assets,0) <> 0 OR COALESCE(fr.bs_total_liabilities,0) <> 0
-             THEN ROUND((COALESCE(fr.bs_current_assets,0) + COALESCE(fr.bs_investment_securities,0) * 0.7 - COALESCE(fr.bs_total_liabilities,0))::numeric, 0) END AS net_cash,
+        CASE WHEN fr.bs_current_assets IS NOT NULL AND fr.bs_total_liabilities IS NOT NULL
+              AND (fr.bs_current_assets <> 0 OR fr.bs_total_liabilities <> 0)
+             THEN ROUND((fr.bs_current_assets + COALESCE(fr.bs_investment_securities,0) * 0.7 - fr.bs_total_liabilities)::numeric, 0) END AS net_cash,
         CASE WHEN COALESCE(fr.bs_total_assets,0) <> 0
              THEN ROUND(((COALESCE(NULLIF(fr.pl_net_income,0), NULLIF(fr.pl_net_income_attr,0)) - fr.cf_operating_cf)
                          / fr.bs_total_assets)::numeric, 4) END AS accruals

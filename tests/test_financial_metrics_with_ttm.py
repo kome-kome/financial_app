@@ -107,6 +107,40 @@ class TestOpMarginIsBlankWithoutOperatingProfit:
         assert "COALESCE(fr.pl_operating_profit" not in expr
 
 
+class TestDebtAndNetCashNeedTheBalanceSheet:
+    """D/E とネットキャッシュで、観測していない BS を 0 として計算しない（#915）。
+
+    - D/E: 借入金の行が無いのは無借金だから（有報は無い科目を載せない・自己資本比率の中央値 74%）
+      なので 0 として足す。**負債合計まで空欄なら負債の側を観測していない**ので NULL。#900 の後の
+      US-GAAP の社がこれに当たり、0 のままだと無借金に見えて factor premia の AND を素通りする
+    - ネットキャッシュ: 流動資産と負債合計の**両方**が要る。流動資産の区分を持たない銀行・保険は
+      「−負債合計」だけが残り、比率が平均 −34 倍になっていた
+
+    3 つの VIEW は式を共有しないので 3 本とも縛る。値での確認は実 PG のテスト。
+    """
+
+    SQLS = pytest.mark.parametrize("sql", [
+        ANNUAL_SQL, TTM_SQL, database.FINANCIAL_METRICS_INTERIM_VIEW_SQL,
+    ], ids=["annual", "ttm", "interim"])
+
+    @SQLS
+    def test_de_ratio_is_blank_only_when_no_liability_is_observed(self, sql):
+        expr = expressions(sql)["de_ratio"]
+        assert ("(fr.bs_short_term_debt IS NOT NULL OR fr.bs_long_term_debt IS NOT NULL"
+                " OR fr.bs_total_liabilities IS NOT NULL)") in expr
+        # 負債合計が載っていれば、借入金の行が無い社は無借金として 0 を足す（外さない）
+        assert "COALESCE(fr.bs_short_term_debt,0) + COALESCE(fr.bs_long_term_debt,0)" in expr
+
+    @SQLS
+    def test_net_cash_needs_both_current_assets_and_liabilities(self, sql):
+        expr = expressions(sql)["net_cash"]
+        assert "fr.bs_current_assets IS NOT NULL AND fr.bs_total_liabilities IS NOT NULL" in expr
+        assert "COALESCE(fr.bs_current_assets" not in expr
+        assert "COALESCE(fr.bs_total_liabilities" not in expr
+        # 投資有価証券は持たない社が多いので空欄を 0 とする（今までどおり）
+        assert "COALESCE(fr.bs_investment_securities,0) * 0.7" in expr
+
+
 class TestTtmSpecifics:
     def test_windows_are_partitioned_by_basis(self):
         body = " ".join(_strip_comments(TTM_SQL).split())

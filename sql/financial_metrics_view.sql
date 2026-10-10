@@ -56,7 +56,11 @@ WITH d AS (
              THEN ROUND((COALESCE(NULLIF(fr.pl_net_income,0), NULLIF(fr.pl_net_income_attr,0), 0) / fr.bs_total_assets * 100)::numeric, 2) END AS roa,
         CASE WHEN COALESCE(fr.bs_total_assets,0) <> 0
              THEN ROUND((COALESCE(NULLIF(fr.bs_total_equity,0), NULLIF(fr.bs_equity_parent,0), 0) / fr.bs_total_assets * 100)::numeric, 2) END AS equity_ratio,
+        -- D/E: 借入金の行が無いのは無借金だから（有報は無い科目を載せない）なので 0 として足すが、
+        -- **負債合計まで空欄なら負債の側を観測していない**ので NULL にする。0 にすると無借金に見え、
+        -- 空欄の社を外す分析（factor premia・M-2/M-6）の AND を素通りする（#915）。
         CASE WHEN COALESCE(NULLIF(fr.bs_total_equity,0), NULLIF(fr.bs_equity_parent,0), 0) <> 0
+              AND (fr.bs_short_term_debt IS NOT NULL OR fr.bs_long_term_debt IS NOT NULL OR fr.bs_total_liabilities IS NOT NULL)
              THEN ROUND(((COALESCE(fr.bs_short_term_debt,0) + COALESCE(fr.bs_long_term_debt,0)) / COALESCE(NULLIF(fr.bs_total_equity,0), NULLIF(fr.bs_equity_parent,0), 0))::numeric, 4) END AS de_ratio,
         CASE WHEN COALESCE(fr.pl_revenue,0) <> 0
              THEN ROUND((COALESCE(fr.cf_operating_cf,0) / fr.pl_revenue * 100)::numeric, 2) END AS cf_ratio,
@@ -69,8 +73,11 @@ WITH d AS (
         -- 総資産回転率（無次元・回）。デュポン分解 ROA ≈ net_margin × asset_turnover の中核因子。
         CASE WHEN COALESCE(fr.bs_total_assets,0) <> 0
              THEN ROUND((COALESCE(fr.pl_revenue,0) / fr.bs_total_assets)::numeric, 4) END AS asset_turnover,
-        CASE WHEN COALESCE(fr.bs_current_assets,0) <> 0 OR COALESCE(fr.bs_total_liabilities,0) <> 0
-             THEN ROUND((COALESCE(fr.bs_current_assets,0) + COALESCE(fr.bs_investment_securities,0) * 0.7 - COALESCE(fr.bs_total_liabilities,0))::numeric, 0) END AS net_cash,
+        -- ネットキャッシュは流動資産と負債合計の両方が要る。片方を 0 とすると過大・過小に出る（流動資産の
+        -- 区分を持たない銀行・保険は NULL・#915）。投資有価証券は持たない社が多いので空欄を 0 とする。
+        CASE WHEN fr.bs_current_assets IS NOT NULL AND fr.bs_total_liabilities IS NOT NULL
+              AND (fr.bs_current_assets <> 0 OR fr.bs_total_liabilities <> 0)
+             THEN ROUND((fr.bs_current_assets + COALESCE(fr.bs_investment_securities,0) * 0.7 - fr.bs_total_liabilities)::numeric, 0) END AS net_cash,
         -- アクルーアル（Sloan 1996 の質因子・#373）: (純利益 − 営業CF)/総資産。無次元。
         -- 会計発生高が大きいほど将来リターンが低い傾向。純利益・営業CF のどちらか未開示なら
         -- null 伝搬（分子を COALESCE で 0 埋めしない＝営業CF欠損企業を「発生高ゼロ」と誤認しないため）。
