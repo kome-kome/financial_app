@@ -35,6 +35,7 @@ _FONT_RE = re.compile(r"font-size:\s*(\d+(?:\.\d+)?)px")
 _OUTLINE_OFF_RE = re.compile(r"outline\s*:\s*(?:none|0)\b")
 _FOCUS_VISIBLE_RE = re.compile(r":focus-visible\{outline:\s*2px solid var\(--accent-text\)")
 _SCRIPT_RE = re.compile(r'<script src="/static/js/([\w-]+\.js)')
+_SELECTOR_LIST_RE = re.compile(r"([^{}]+)\{")
 _NOTIF_CALL_RE = re.compile(r"(?<!function )\bshowNotif\(")
 
 
@@ -127,10 +128,16 @@ def test_glossary_tooltips_are_keyboard_reachable():
         assert tags, f"`.{cls}` を1つも拾えない（検出の正規表現が実体とずれた）"
         unreachable = [f"{name}: {tag[:80]}" for name, tag in tags if 'tabindex="0"' not in tag]
         assert not unreachable, "\n".join(unreachable)
+        # ホバーで開く規則ごとにフォーカスを並べる。ファイルのどこかに `:focus::after` があるかだけを見ると、
+        # @starting-style（フェードの開始）側に残った1つで、開く規則から外しても通ってしまう（#893 で実測）
         for path in TEMPLATES:
             text = _read(path)
-            if f".{cls}::after{{" in text:
-                assert f".{cls}:focus::after" in text, f"{_name(path)}: `.{cls}` はフォーカスでもツールチップを出す"
+            if f".{cls}::after{{" not in text:
+                continue
+            hover_rules = [s.strip() for s in _SELECTOR_LIST_RE.findall(text) if f".{cls}:hover::after" in s]
+            assert hover_rules, f"{_name(path)}: `.{cls}:hover::after` の規則を拾えない（検出の正規表現が実体とずれた）"
+            no_focus = [s for s in hover_rules if f".{cls}:focus::after" not in s]
+            assert not no_focus, f"{_name(path)}: `.{cls}` はフォーカスでもツールチップを出す: {no_focus}"
 
 
 def test_pages_that_raise_toasts_style_them():
