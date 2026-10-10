@@ -6,7 +6,8 @@
   （#850 以前はライト約 2.5:1・ダーク約 4.0:1 で、鮮度カードのラベルや表の見出しが読みにくかった）
 - `outline:none` でフォーカス枠を消す（重みのスライダーはフォーカスが全く見えなかった）
 - 11px 未満の文字（9〜10.5px が 62 箇所あった）
-- 用語ツールチップ（`.gloss`）がホバー専用で、キーボードでは説明に届かない
+- 用語ツールチップ（分析画面の `.gloss`・/guide の `.term`）がホバー専用で、キーボードでは説明に届かない
+  （#850 は `.gloss` だけを照合していて、同じ作りの `.term` が外れていた・#893）
 - `showNotif` を呼ぶのにトーストの CSS が無い（#850 まで一度も無く、エラーはページ最下部に
   装飾なしで足されて 4 秒で消えていた＝誰の目にも入っていなかった）
 
@@ -25,14 +26,16 @@ MIN_FONT_PX = 11.0     # 意味を持つ文字の下限
 # `--text-muted` が載りうる背景（カード・地・表の行ホバー・入力欄）
 MUTED_BACKGROUNDS = ("--bg", "--bg-elevated", "--bg-sunken", "--bg-hover")
 NOTIF_CSS_SELECTORS = (".notif-stack{", ".notif{", ".notif-error{", ".notif-close{")
+# ホバーで ::after の吹き出しを出す用語のクラス（分析画面・/guide）
+TOOLTIP_CLASSES = ("gloss", "term")
 
 _ROOT_RE = re.compile(r'(:root(?:\[data-theme="light"\])?)\{(.*?)\}', re.S)
 _TOKEN_RE = re.compile(r"(--[a-z0-9-]+):\s*(#[0-9a-fA-F]{6})\s*;")
 _FONT_RE = re.compile(r"font-size:\s*(\d+(?:\.\d+)?)px")
 _OUTLINE_OFF_RE = re.compile(r"outline\s*:\s*(?:none|0)\b")
 _FOCUS_VISIBLE_RE = re.compile(r":focus-visible\{outline:\s*2px solid var\(--accent-text\)")
-_GLOSS_TAG_RE = re.compile(r'<[a-z]+\b[^>]*\bclass="[^"]*\bgloss\b[^"]*"[^>]*>')
 _SCRIPT_RE = re.compile(r'<script src="/static/js/([\w-]+\.js)')
+_SELECTOR_LIST_RE = re.compile(r"([^{}]+)\{")
 _NOTIF_CALL_RE = re.compile(r"(?<!function )\bshowNotif\(")
 
 
@@ -110,19 +113,31 @@ def test_no_text_below_minimum_size():
     assert not small, "\n".join(small)
 
 
+def _tooltip_tag_re(cls):
+    # class 属性の中の単語として照合する（`term-xxx` のような別のクラスを拾わない）
+    return re.compile(rf'<[a-z]+\b[^>]*\bclass="(?:[^"]*\s)?{cls}(?:\s[^"]*)?"[^>]*>')
+
+
 def test_glossary_tooltips_are_keyboard_reachable():
-    tags = [
-        (_name(p), tag)
-        for p in TEMPLATES + STATIC_JS
-        for tag in _GLOSS_TAG_RE.findall(_read(p))
-    ]
-    assert tags, "`.gloss` を1つも拾えない（検出の正規表現が実体とずれた）"
-    unreachable = [f"{name}: {tag[:80]}" for name, tag in tags if 'tabindex="0"' not in tag]
-    assert not unreachable, "\n".join(unreachable)
-    for path in TEMPLATES:
-        text = _read(path)
-        if ".gloss::after{" in text:
-            assert ".gloss:focus::after" in text, f"{_name(path)}: フォーカスでもツールチップを出す"
+    for cls in TOOLTIP_CLASSES:
+        tags = [
+            (_name(p), tag)
+            for p in TEMPLATES + STATIC_JS
+            for tag in _tooltip_tag_re(cls).findall(_read(p))
+        ]
+        assert tags, f"`.{cls}` を1つも拾えない（検出の正規表現が実体とずれた）"
+        unreachable = [f"{name}: {tag[:80]}" for name, tag in tags if 'tabindex="0"' not in tag]
+        assert not unreachable, "\n".join(unreachable)
+        # ホバーで開く規則ごとにフォーカスを並べる。ファイルのどこかに `:focus::after` があるかだけを見ると、
+        # @starting-style（フェードの開始）側に残った1つで、開く規則から外しても通ってしまう（#893 で実測）
+        for path in TEMPLATES:
+            text = _read(path)
+            if f".{cls}::after{{" not in text:
+                continue
+            hover_rules = [s.strip() for s in _SELECTOR_LIST_RE.findall(text) if f".{cls}:hover::after" in s]
+            assert hover_rules, f"{_name(path)}: `.{cls}:hover::after` の規則を拾えない（検出の正規表現が実体とずれた）"
+            no_focus = [s for s in hover_rules if f".{cls}:focus::after" not in s]
+            assert not no_focus, f"{_name(path)}: `.{cls}` はフォーカスでもツールチップを出す: {no_focus}"
 
 
 def test_pages_that_raise_toasts_style_them():
