@@ -107,8 +107,6 @@ tr:hover td{background:var(--border-subtle)}
 .score-fill{height:100%;border-radius:3px}
 .spinner{width:16px;height:16px;border:2px solid var(--border-muted);border-top-color:var(--accent-text);border-radius:50%;animation:spin .7s linear infinite;display:inline-block}
 @keyframes spin{to{transform:rotate(360deg)}}
-.modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:100;display:flex;align-items:center;justify-content:center}
-.modal{background:var(--bg-elevated);border:1px solid var(--border);border-radius:12px;padding:24px;width:520px;max-width:95vw;max-height:90vh;overflow-y:auto}
 .btn:disabled{opacity:.4;cursor:not-allowed}
 .co-link{color:var(--accent-text);text-decoration:none}
 .co-link:hover{text-decoration:underline}
@@ -613,7 +611,7 @@ tr:hover td{background:var(--border-subtle)}
     <div style="overflow-x:auto;margin-top:12px">
       <table>
         <thead>
-          <tr><th>証券コード</th><th>企業名</th><th>業種</th><th>期</th><th>売上高(億)</th><th>営業利益率%</th><th>ROE%</th><th>PBR</th><th>自己資本比率%</th><th>時価総額(億)</th><th>操作</th></tr>
+          <tr><th>証券コード</th><th>企業名</th><th>業種</th><th>期</th><th>売上高(億)</th><th>営業利益率%</th><th>ROE%</th><th>PBR</th><th>自己資本比率%</th><th>時価総額(億)</th></tr>
         </thead>
         <tbody id="db-tbody"></tbody>
       </table>
@@ -704,15 +702,6 @@ tr:hover td{background:var(--border-subtle)}
 </div>
 
 
-</div>
-
-<!-- 詳細モーダル -->
-<div class="modal-overlay" id="modal-detail" style="display:none">
-  <div class="modal">
-    <div style="font-size:15px;font-weight:600;color:var(--accent-text);margin-bottom:14px" id="modal-title"></div>
-    <div id="modal-body"></div>
-    <button class="btn btn-secondary" style="margin-top:16px" data-click="closeModal">閉じる</button>
-  </div>
 </div>
 
 <script src="/static/js/common.js"></script>

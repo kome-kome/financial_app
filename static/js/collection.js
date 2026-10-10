@@ -441,7 +441,6 @@ async function loadDB(){
         <td>${latest?.val.pbr!=null?Number(latest.val.pbr):'-'}</td>
         <td>${latest?.bs.equity_ratio!=null?Number(latest.bs.equity_ratio)+'%':'-'}</td>
         <td>${latest ? fmt0((latest.val.market_cap||0)/1e6) : '-'}</td>
-        <td><button class="btn btn-secondary btn-sm" data-click="showDetail" data-arg="${esc(c.edinet_code)}" data-arg2="${esc(c.name)}">詳細</button></td>
       `;
       tbody.appendChild(tr);
     }
@@ -520,53 +519,6 @@ async function searchNormCompanies(){
     });
   }catch(e){ log('企業検索失敗: '+e.message,'error') }
 }
-
-async function showDetail(code, name){
-  try{
-    const [fin, priceHistory] = await Promise.all([
-      apiFetch(`/api/financials/${code}`),
-      apiFetch(`/api/stock/history/${code}?days=30`).catch(()=>null),
-    ]);
-    const r = fin.records[fin.records.length-1];
-    let html = `
-      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:12px">
-        ${statCard('売上高', fmt0(r.pl.revenue/1e6)+'億')}
-        ${statCard('営業利益率', fmtPct(r.pl.op_margin))}
-        ${statCard('ROE', fmtPct(r.val.roe))}
-        ${statCard('総資産', fmt0(r.bs.total_assets/1e6)+'億')}
-        ${statCard('自己資本比率', fmtPct(r.bs.equity_ratio))}
-        ${statCard('時価総額', fmt0((r.val.market_cap||0)/1e6)+'億')}
-      </div>
-      <div style="font-size:12px;color:${cssVar('--text-secondary')};line-height:2">
-        <b style="color:${cssVar('--status-good')}">PL:</b> 純利益 ${fmt0((r.pl.net_income||0)/1e6)}億 / EPS ${r.pl.eps||'-'}円 / 純利益率 ${fmtPct(r.pl.net_margin)}<br>
-        <b style="color:${cssVar('--status-info')}">BS:</b> 純資産 ${fmt0((r.bs.total_equity||0)/1e6)}億 / D/E ${r.derived?.de_ratio||'-'}<br>
-        <b style="color:${cssVar('--status-warn')}">CF:</b> 営業CF ${fmt0((r.cf.operating_cf||0)/1e6)}億 / フリーCF ${fmt0((r.cf.free_cf||0)/1e6)}億<br>
-        <b style="color:${cssVar('--accent-text')}">Val:</b> PER ${r.val.per||'-'}倍 / PBR ${r.val.pbr||'-'}倍 / 配当 ${fmtPct(r.val.div_yield)}
-      </div>`;
-    if(priceHistory && priceHistory.length > 0){
-      html += `<div style="margin-top:14px">
-        <div style="font-size:12px;font-weight:600;color:${cssVar('--status-info')};margin-bottom:6px">株価履歴（直近${priceHistory.length}日）</div>
-        <div style="overflow-x:auto;max-height:200px;overflow-y:auto">
-          <table style="font-size:11px"><thead><tr><th>日付</th><th>始値</th><th>高値</th><th>安値</th><th>終値</th><th>出来高</th></tr></thead><tbody>`;
-      [...priceHistory].reverse().forEach(p=>{
-        html += `<tr>
-          <td>${esc(p.trade_date)}</td>
-          <td>${p.open!=null?Number(p.open).toLocaleString():'-'}</td>
-          <td style="color:${cssVar('--status-good')}">${p.high!=null?Number(p.high).toLocaleString():'-'}</td>
-          <td style="color:${cssVar('--status-bad')}">${p.low!=null?Number(p.low).toLocaleString():'-'}</td>
-          <td style="font-weight:600">${p.close!=null?Number(p.close).toLocaleString():'-'}</td>
-          <td style="color:${cssVar('--text-muted')}">${p.volume!=null?Number(p.volume).toLocaleString():'-'}</td>
-        </tr>`;
-      });
-      html += '</tbody></table></div></div>';
-    }
-    document.getElementById('modal-title').textContent = name;
-    document.getElementById('modal-body').innerHTML = html;
-    document.getElementById('modal-detail').classList.remove('hidden');
-  }catch(e){ log('詳細取得失敗: '+e.message,'error') }
-}
-function statCard(t,v){ return `<div style="background:${cssVar('--bg-sunken')};border-radius:6px;padding:10px"><div style="font-size:11px;color:${cssVar('--text-muted')}">${t}</div><div style="font-size:16px;font-weight:600">${v}</div></div>` }
-function closeModal(){ document.getElementById('modal-detail').classList.add('hidden') }
 
 // ── 株価履歴収集 ────────────────────────────────────────────────────
 async function loadHistoryCoverage(){
