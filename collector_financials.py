@@ -618,7 +618,7 @@ def calc_derived(rec: dict) -> dict:
     # 清原達郎式ネットキャッシュ = 流動資産 + 投資有価証券×0.7 − 総負債
     # 投資有価証券が未取得の古いレコードは 0 として扱う（簡易NCAV式相当）。
     # 流動資産と総負債は片方でも無ければ作らない（片方を 0 とすると過大・過小に出る。VIEW と同じ・#915）。
-    # nc_ratio は market_cap 確定後に update_market_data_only で計算する。
+    # derived は upsert_financial が破棄する（保存しない）。net_cash / nc_ratio は financial_metrics VIEW が都度計算する。
     ca   = bs.get("current_assets")
     inv  = bs.get("investment_securities", 0) or 0
     tl   = bs.get("total_liabilities")

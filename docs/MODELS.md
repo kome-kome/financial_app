@@ -376,7 +376,7 @@ dX_t = κ(θ − X_t) dt + σ dW_t,   half_life = ln(2) / κ
 
 ## 5. 横断的Zスコア正規化
 
-**実装ファイル**: `database.py` の `calc_zscore_normalization()` / `_calc_zscore_for_year()`
+**実装ファイル**: [sql/financial_metrics_view.sql](../sql/financial_metrics_view.sql)（`financial_metrics` VIEW の窓関数 `PARTITION BY year`。列に保存せず読むたびに計算する）
 
 ### 概要
 
@@ -805,19 +805,10 @@ NCAV比率           = NCAV / 時価総額                              [無次�
 
 ### 計算フロー
 
-```
-1. collector.py の calc_derived() で
-     net_cash = current_assets + investment_securities × 0.7 − total_liabilities
-   を計算し、`FinancialRecord.net_cash` カラムに書き込む（BS データのみ依存）
+ネットキャッシュとその比率は **列に保存せず、読むたびに計算する**。計算する場所は次の 2 つで、空欄の扱い（流動資産か総負債が空欄なら計算しない）はどちらも同じ（#915）。分母の `market_cap` もどちらも VIEW の分割補正後の値を使う（[ADR-0055](adr/0055-valuation-basis-mismatch-is-corrected-in-the-view.md)）。
 
-2. update_market_data_only() で stock_price 取得後に
-     nc_ratio = net_cash / (market_cap × 1_000_000)
-   を計算し、`FinancialRecord.nc_ratio` カラムに書き込む
-
-3. database.py の _calc_zscore_for_year() で
-     z_nc_ratio = (nc_ratio − μ_year) / σ_year
-   を年度内 Zスコアとして算出（モデル 5 と統合）
-```
+1. **`financial_metrics` VIEW**（[sql/financial_metrics_view.sql](../sql/financial_metrics_view.sql)）が `financial_records` の BS 列から `net_cash` → `nc_ratio` → `z_nc_ratio`（年度内 Zスコア・モデル 5）を都度計算する。収集時の `calc_derived()`（`collector_financials.py`）も `net_cash` を作るが、`derived` に入るので `upsert_financial` が破棄する。
+2. **プラグイン**（画面のネットキャッシュ分析 [plugins/net_cash_analysis.py](../plugins/net_cash_analysis.py)・`plugins/sell_ranking.py`・`backtest.py`）は VIEW の `net_cash` / `nc_ratio` を読まない。VIEW から BS の 3 列（`bs_current_assets` / `bs_investment_securities` / `bs_total_liabilities`）と `market_cap` を読み、`compute_net_cash()` / `compute_nc_ratio()`（NCAV は `compute_ncav()` / `compute_ncav_ratio()`）で計算する。
 
 ### 投資有価証券の取得対応
 

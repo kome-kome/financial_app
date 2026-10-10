@@ -1,8 +1,8 @@
 """database.py のユニットテスト（in-memory SQLite）。
 
-対象: pack/unpack・upsert_company・upsert_financial（辞書フラット化）・
-calc_zscore_normalization（年度別Zスコア）。
-calc_growth_rates は PostgreSQL 専用 SQL（LAG OVER・::numeric）のため SQLite では検証不可（対象外）。
+対象: pack/unpack・upsert_company・upsert_financial（辞書フラット化）。
+Zスコア・成長率は financial_metrics VIEW が算出する（旧 calc_zscore_normalization / calc_growth_rates は廃止）。
+VIEW は PostgreSQL 専用 SQL（窓関数・::numeric）のため SQLite では検証不可（対象外）。
 """
 import os
 import sys

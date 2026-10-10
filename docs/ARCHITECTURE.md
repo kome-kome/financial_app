@@ -1005,7 +1005,7 @@ sequenceDiagram
 - 年度内の非NULL件数が 2 未満なら NULL（`COUNT(値) OVER (PARTITION BY year) >= 2` ガード）
 - 標本標準偏差・`sd=0→1.0` フォールバック・丸め桁（z は 4 桁）まで旧実装に一致させてある。
 
-> 旧 `calc_zscore_normalization` / `calc_growth_rates` 関数は残置（非推奨・収集後の呼び出しは廃止）。
+> 旧 `calc_zscore_normalization` / `calc_growth_rates` / `_calc_zscore_for_year` 関数は削除済み（`database.py` の廃止の注記）。
 > 派生比率・成長率も同様に VIEW が算出する（成長率は `LAG() OVER (PARTITION BY edinet_code ORDER BY year, period_end)`）。
 
 ---

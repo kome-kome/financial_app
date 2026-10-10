@@ -369,17 +369,14 @@ z_metric_j_i: 企業 i の指標 j の候補集団標準化値（±5 クリッ�
   </div>
 
   <h3>計算フロー</h3>
-  <div class="formula-block"><span class="comment"># 1. 財務収集時（calc_derived）</span>
-net_cash = current_assets + investment_securities × <span class="val">0.7</span> − total_liabilities
-  → FinancialRecord.net_cash カラムに保存
+  <p>ネットキャッシュとその比率は<strong>列に保存せず、読むたびに計算する</strong>。計算する場所は次の 2 つで、空欄の扱い（流動資産か総負債が空欄なら計算しない）はどちらも同じ。分母の <code>market_cap</code> もどちらも VIEW の分割補正後の値を使う。</p>
+  <div class="formula-block"><span class="comment"># 1. financial_metrics VIEW（sql/financial_metrics_view.sql）が都度計算</span>
+net_cash → nc_ratio → z_nc_ratio（年度内 Zスコア・横断的Zスコア正規化）
+  収集時の calc_derived も net_cash を作るが、upsert_financial が破棄する
 
-<span class="comment"># 2. 市場データ更新時（update_market_data_only）</span>
-nc_ratio = net_cash / (market_cap × <span class="val">1_000_000</span>)
-  → FinancialRecord.nc_ratio カラムに保存
-
-<span class="comment"># 3. Zスコア正規化（_calc_zscore_for_year）</span>
-z_nc_ratio = (nc_ratio − μ_year) / σ_year
-  → FinancialRecord.z_nc_ratio カラムに保存</div>
+<span class="comment"># 2. プラグイン（net_cash_analysis / sell_ranking / backtest）が計算</span>
+VIEW の BS 3 列と market_cap → compute_net_cash / compute_nc_ratio
+  VIEW の net_cash / nc_ratio は読まない</div>
 
   <h3>投資有価証券の XBRL マッピング</h3>
   <div class="table-scroll"><table>
@@ -974,7 +971,7 @@ z_metric_j_i : 企業 i の指標 j のユニバース標準化値（±5 クリ�
 
 <div class="model-section" id="m5">
   <h2>横断的Zスコア正規化</h2>
-  <span class="file-tag">database.py — calc_zscore_normalization()</span>
+  <span class="file-tag">sql/financial_metrics_view.sql — financial_metrics VIEW（PARTITION BY year）</span>
 
   <p>財務指標を年度別に横断的な Zスコアに変換し、異なる企業間で指標の相対的な優劣を比較可能にする。</p>
 
