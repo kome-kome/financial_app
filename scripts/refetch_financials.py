@@ -19,6 +19,7 @@
   持つものを使う。`calc_derived` が pl/cf に入れて永続化する派生額（`cf_free_cf`・`pl_ebitda`・
   `pl_nonoperating_income`）も同じ経路で直る。
 - 書類から読めた列（None でない値）だけを置き換える。取れなかった列は消さない（NULL で上書きしない）。
+  例外は `--clear-nonconsolidated`（下記）が明示した列だけ。
 - 値が同じ列は触らず、変化に数えない。
 - 触るのは `database.financial_columns()` が返す列と、DEI から読んだ `accounting_standard`（#859）だけ
   ＝行のキー（edinet_code・year・period_end・period_type）・会社名・業種・doc_id・source・市場データ
@@ -30,6 +31,16 @@
 - PER・PBR・時価総額は、評価額の入力（`VALUATION_INPUTS`）から計算して保存した値なので、入力が
   変わると過去の行では古くなる（夜間が直すのは各社の最新行だけ）。ここでは再計算せず、入力が
   変わった社を一覧に出すだけにする（再計算は株価の列まで書き換え、試運転の差分に出ない変化を生む）。
+
+単体の値の掃除（`--clear-nonconsolidated`・#896）:
+- 連結を作る会社の書類では、財務諸表の列に単体（NonConsolidatedMember）の値を採らなくなった
+  （`collector_financials._drops_nonconsolidated`）。上の「NULL で上書きしない」規則のままでは、
+  以前に入った単体の値が消えない。この指定のときだけ、同じ書類を旧来の読み方
+  （`parse_xbrl_csv(nonconsolidated_fallback=True)`）でも読み、**旧来の読み方でだけ値が出る列**
+  ＝この規則で空欄になる列を NULL へ戻す（`cleared_columns`）。派生額（`pl_ebitda`・
+  `pl_nonoperating_income`・`cf_free_cf`）も同じ比べ方で消える。読み取りに失敗した列は消さない。
+- 進捗は通常の取り直しと別のキー（`CLEAR_CURSOR_KEY`）に保存する（互いの続きを踏まない）。
+- 正本への適用は #900（人が試運転の差分を読んでから）。
 
 再開と締切:
 - `--apply` かつ絞り込み無し（`--limit` は可）のときだけ、`app_settings.refetch_financials_cursor` に
@@ -70,6 +81,7 @@ from database import (
 
 # 進捗（再開位置）の置き場。既存の app_settings を使う＝起動時に必ず走る init_db() へ DDL を足さない。
 CURSOR_KEY = "refetch_financials_cursor"
+CLEAR_CURSOR_KEY = "refetch_financials_clear_cursor"   # --clear-nonconsolidated の進捗（#896）
 
 # 1回に読む行数（数万行を一度にメモリへ載せない）と、--apply で commit する間隔（行数）。
 CHUNK_ROWS = 500
@@ -96,12 +108,15 @@ Fetch = Callable[[str], Awaitable[object]]
 
 # ── 差分（DB に触らない）────────────────────────────────────────────────────
 
-def document_columns(df, edinet_code: str, period_end: str) -> Optional[dict]:
+def document_columns(df, edinet_code: str, period_end: str, *,
+                     nonconsolidated_fallback: bool = False) -> Optional[dict]:
     """取り直した書類から、上書きの候補になる {列名: 値} を返す（None の値は含めない）。
 
-    読み取りに失敗した（bs/pl/cf が全部空）ときは None。
+    読み取りに失敗した（bs/pl/cf が全部空）ときは None。`nonconsolidated_fallback=True` は
+    単体の値で埋める旧来の読み方（`cleared_columns` の比較相手だけに使う）。
     """
-    parsed = parse_xbrl_csv(df, edinet_code, period_end)
+    parsed = parse_xbrl_csv(df, edinet_code, period_end,
+                            nonconsolidated_fallback=nonconsolidated_fallback)
     if not any(parsed.get(cat) for cat in ("bs", "pl", "cf")):
         return None
     cf = parsed.get("cf", {})
@@ -111,6 +126,16 @@ def document_columns(df, edinet_code: str, period_end: str) -> Optional[dict]:
     if not has_fcf_inputs:
         rec["cf"].pop("free_cf", None)
     return {col: v for col, v in financial_columns(rec).items() if v is not None}
+
+
+def cleared_columns(df, edinet_code: str, period_end: str, values: dict) -> set[str]:
+    """連結を作る書類で単体の値を採らない規則（#896）によって空欄になる列。
+
+    `values` は今の読み方の `document_columns`。旧来の読み方でだけ値が出る列を返す
+    （連結の値がある列・単体だけの会社の書類・DEI の読めない書類では空集合）。
+    """
+    old = document_columns(df, edinet_code, period_end, nonconsolidated_fallback=True) or {}
+    return set(old) - set(values)
 
 
 def diff_columns(row, values: dict) -> list[tuple[str, object, object]]:
@@ -153,6 +178,7 @@ class Report:
     apply: bool
     filters: Filters
     use_cursor: bool
+    clear_nonconsolidated: bool = False
     start_after: int = 0
     targets: int = 0
     processed: int = 0
@@ -228,6 +254,10 @@ async def _process_row(row, fetch: Fetch, apply: bool, report: Report, log) -> s
     if doc_pe != pe:
         report.period_mismatch.append((row.edinet_code, row.doc_id, pe, doc_pe or None))
         return "period_mismatch"
+    if report.clear_nonconsolidated:
+        # 規則で空欄になる列だけを NULL の候補にする（取れなかった列は従来どおり消さない）
+        for col in cleared_columns(df, row.edinet_code, pe, values):
+            values[col] = None
     # 会計基準も書類（DEI）由来。読めたときだけ候補にする（#859・既存行は #858 の取り直しで埋まる）
     std = accounting_standard_from_dei(dei, row.doc_id)
     if std is not None:
@@ -256,23 +286,29 @@ async def refetch(db, *, apply: bool = False, filters: Filters = Filters(),
                   fetch: Optional[Fetch] = None,
                   now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
                   commit_every: int = COMMIT_EVERY,
-                  examples_per_column: int = EXAMPLES_PER_COLUMN, log=print) -> Report:
+                  examples_per_column: int = EXAMPLES_PER_COLUMN,
+                  clear_nonconsolidated: bool = False, log=print) -> Report:
     """対象の行を id の昇順に取り直す。試運転（apply=False）は何も書かず最後に rollback する。
 
+    `clear_nonconsolidated=True` のときは、連結を作る書類で単体の値を採らない規則（#896）で
+    空欄になる列も NULL へ戻す（`cleared_columns`）。進捗は別のキーに保存する。
     `fetch(doc_id)` と `now()` はテストで差し替える（本物の EDINET と時計に触れない）。
     """
     use_cursor = apply and not filters.narrowed
+    cursor_key = CLEAR_CURSOR_KEY if clear_nonconsolidated else CURSOR_KEY
     start_after = 0
     if use_cursor and not restart:
-        start_after = int(get_setting(db, CURSOR_KEY) or 0)
+        start_after = int(get_setting(db, cursor_key) or 0)
     report = Report(apply=apply, filters=filters, use_cursor=use_cursor, start_after=start_after,
-                    examples_per_column=examples_per_column)
+                    examples_per_column=examples_per_column,
+                    clear_nonconsolidated=clear_nonconsolidated)
 
     base = _target_query(db, filters)
     report.targets = base.filter(FinancialRecord.id > start_after).count()
     if limit is not None:
         report.targets = min(report.targets, limit)
-    log(f"[refetch] mode={'apply' if apply else 'dry-run'} 対象 {report.targets}行"
+    log(f"[refetch] mode={'apply' if apply else 'dry-run'}"
+        f"{' clear-nonconsolidated' if clear_nonconsolidated else ''} 対象 {report.targets}行"
         f"（絞り込み: {filters.describe()}・開始 id>{start_after}"
         f"{'・進捗を保存' if use_cursor else '・進捗は読まず書かない'}）")
 
@@ -284,7 +320,7 @@ async def refetch(db, *, apply: bool = False, filters: Filters = Filters(),
 
     def _commit() -> None:
         if use_cursor:
-            upsert_setting(db, CURSOR_KEY, str(safe_cursor))  # 書き換えた行と同じ commit で確定する
+            upsert_setting(db, cursor_key, str(safe_cursor))  # 書き換えた行と同じ commit で確定する
             report.cursor = safe_cursor
         else:
             db.commit()
@@ -362,6 +398,8 @@ def format_report(r: Report) -> str:
     lines = [
         "=== refetch_financials 結果 ===",
         f"モード: {mode}",
+        "単体の値の掃除: " + ("あり（--clear-nonconsolidated・規則で空欄になる列を NULL へ戻す）"
+                              if r.clear_nonconsolidated else "なし"),
         f"絞り込み: {r.filters.describe()}",
         f"処理 {r.processed}/{r.targets}行: 変化 {r.changed_rows} / 変化なし {r.unchanged_rows} / "
         f"期末不一致 {len(r.period_mismatch)} / 取得失敗 {len(r.fetch_failed)} / "
@@ -425,6 +463,8 @@ def _parse_args(argv):
     p.add_argument("--period-type", choices=("annual", "H1"), default=None, help="期種で絞る")
     p.add_argument("--limit", type=int, default=None, help="処理する行数の上限（進捗は保存する）")
     p.add_argument("--restart", action="store_true", help="保存した進捗を無視して最初から（--apply 用）")
+    p.add_argument("--clear-nonconsolidated", action="store_true",
+                   help="連結を作る書類の単体の値で入っていた列を NULL へ戻す（#896。進捗は別に保存）")
     p.add_argument("--sleep", type=float, default=RATE_SLEEP, help="EDINET リクエストの間隔（秒）")
     p.add_argument("--examples", type=int, default=EXAMPLES_PER_COLUMN,
                    help=f"列ごとに出す代表例の件数（既定 {EXAMPLES_PER_COLUMN}）")
@@ -447,6 +487,7 @@ def main(argv=None) -> int:
         report = asyncio.run(refetch(
             db, apply=args.apply, filters=filters, limit=args.limit, restart=args.restart,
             sleep_sec=args.sleep, deadline=deadline, examples_per_column=args.examples,
+            clear_nonconsolidated=args.clear_nonconsolidated,
             log=lambda m: print(m, flush=True),
         ))
     finally:

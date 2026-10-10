@@ -15,7 +15,9 @@ import database as D
 from database import AppSetting, FinancialRecord, financial_columns, get_setting
 from scripts import refetch_financials as rf
 from scripts import run_daytime as rd
-from tests.test_collector import _TOYOTA_S100Y8NY
+from tests.test_collector import (
+    _E01033_SINGLE_S100W071, _TOYOTA_S100Y8NY, _TOYOTA_USGAAP_S100G1ZO,
+)
 
 _SEG = "jpcrp030000-asr_E00317-000ConsolidatedSubsidiariesReportableSegmentsMember"
 
@@ -277,6 +279,113 @@ class TestDryRun:
         r = _run(db, FakeEdinet({"D1": _E00317_S100YHJP}))
         assert r.changed_rows == 0 and r.unchanged_rows == 1
         assert "変化は0件" in rf.format_report(r)
+
+
+# ── 単体の値の掃除（--clear-nonconsolidated・#896）─────────────────────────────
+
+# トヨタ 2019年度（S100G1ZO）の行に、#896 の前の読み方で入っていた値（連結の要約＋単体の明細）。
+_TOYOTA_2019_OLD = dict(
+    edinet_code="E02144", year=2019, period_end=date(2019, 3, 31), doc_id="S100G1ZO",
+    accounting_standard="US-GAAP",
+    pl_revenue=30225681000000.0, pl_net_income=1882873000000.0, pl_eps=650.55,
+    bs_total_assets=51936949000000.0, bs_total_equity=20565210000000.0, bs_bps=6830.92,
+    cf_operating_cf=3766597000000.0, dps=220.0, employees=370870.0, issued_shares=3310097492.0,
+    # ここから下が単体の値（規則で空欄になる列）
+    pl_cost_of_sales=9991345000000.0, pl_gross_profit=2643093000000.0,
+    pl_sga=1316956000000.0, pl_operating_profit=1326137000000.0,
+    pl_ordinary_profit=2323121000000.0,
+    pl_nonoperating_income=2323121000000.0 - 1326137000000.0,   # 単体の経常 - 単体の営業
+    bs_total_liabilities=5266718000000.0, bs_current_assets=7078259000000.0,
+    bs_inventory=187526000000.0 + 86559000000.0 + 155428000000.0,
+)
+_TOYOTA_2019_CLEARED = {
+    "pl_cost_of_sales", "pl_gross_profit", "pl_sga", "pl_operating_profit", "pl_ordinary_profit",
+    "pl_nonoperating_income", "bs_total_liabilities", "bs_current_assets", "bs_inventory",
+}
+_TOYOTA_2019_KEPT = (
+    "pl_revenue", "pl_net_income", "pl_eps", "bs_total_assets", "bs_total_equity", "bs_bps",
+    "cf_operating_cf", "dps", "employees", "issued_shares",
+)
+
+
+def _add_toyota_2019(db, make_fin):
+    row = make_fin(**_TOYOTA_2019_OLD)
+    db.add(row)
+    db.commit()
+    return row.id
+
+
+class TestClearNonConsolidated:
+    """連結を作る書類の単体の値で入っていた列を NULL へ戻す（#896）。既定の取り直しは従来どおり消さない。"""
+
+    DOCS = {"S100G1ZO": _TOYOTA_USGAAP_S100G1ZO}
+
+    def test_cleared_columns_are_what_the_rule_empties(self):
+        df = _df(_TOYOTA_USGAAP_S100G1ZO)
+        values = rf.document_columns(df, "E02144", "2019-03-31")
+        assert rf.cleared_columns(df, "E02144", "2019-03-31", values) == _TOYOTA_2019_CLEARED
+
+    def test_single_only_company_has_nothing_to_clear(self):
+        df = _df(_E01033_SINGLE_S100W071)
+        values = rf.document_columns(df, "E01033", "2025-03-31")
+        assert rf.cleared_columns(df, "E01033", "2025-03-31", values) == set()
+
+    def test_apply_clears_only_the_rule_columns(self, db, make_fin):
+        rid = _add_toyota_2019(db, make_fin)
+        r = _run(db, FakeEdinet(self.DOCS), apply=True, clear_nonconsolidated=True,
+                 filters=rf.Filters(edinet_codes=("E02144",)))
+        after = _snapshot(db, rid)
+        for col in _TOYOTA_2019_CLEARED:
+            assert after[col] is None, col
+        for col in _TOYOTA_2019_KEPT:
+            assert after[col] == _TOYOTA_2019_OLD[col], col
+        assert set(r.column_counts) == _TOYOTA_2019_CLEARED
+        assert r.examples["pl_operating_profit"][0][-2:] == (1326137000000.0, None)
+        out = rf.format_report(r)
+        assert "--clear-nonconsolidated" in out and "1,326,137,000,000 -> NULL" in out
+
+    def test_dry_run_writes_nothing(self, db, make_fin):
+        rid = _add_toyota_2019(db, make_fin)
+        before = _snapshot(db, rid)
+        r = _run(db, FakeEdinet(self.DOCS), clear_nonconsolidated=True)
+        assert _snapshot(db, rid) == before
+        assert db.query(AppSetting).count() == 0          # 進捗も書かない
+        assert set(r.column_counts) == _TOYOTA_2019_CLEARED   # 消える見込みは数えて出す
+        assert "dry-run" in rf.format_report(r)
+
+    def test_without_the_flag_nothing_is_cleared(self, db, make_fin):
+        rid = _add_toyota_2019(db, make_fin)
+        before = _snapshot(db, rid)
+        r = _run(db, FakeEdinet(self.DOCS), apply=True,
+                 filters=rf.Filters(edinet_codes=("E02144",)))
+        assert _snapshot(db, rid) == before
+        assert r.changed_rows == 0
+        assert "単体の値の掃除: なし" in rf.format_report(r)
+
+    def test_single_only_company_is_not_cleared(self, db, make_fin):
+        row = make_fin(edinet_code="E01033", year=2025, period_end=date(2025, 3, 31),
+                       doc_id="S100W071", accounting_standard="JGAAP",
+                       pl_revenue=14661000000.0, pl_operating_profit=1820000000.0,
+                       pl_ordinary_profit=1882000000.0, bs_total_liabilities=6400000000.0)
+        db.add(row)
+        db.commit()
+        before = _snapshot(db, row.id)
+        r = _run(db, FakeEdinet({"S100W071": _E01033_SINGLE_S100W071}), apply=True,
+                 clear_nonconsolidated=True, filters=rf.Filters(doc_ids=("S100W071",)))
+        after = _snapshot(db, row.id)
+        for col in ("pl_revenue", "pl_operating_profit", "pl_ordinary_profit", "bs_total_liabilities"):
+            assert after[col] == before[col], col
+        assert not any(new is None for ex in r.examples.values() for *_, new in ex)
+
+    def test_progress_is_kept_under_its_own_key(self, db, make_fin):
+        _add_toyota_2019(db, make_fin)
+        _run(db, FakeEdinet(self.DOCS), apply=True, clear_nonconsolidated=True)
+        assert get_setting(db, rf.CLEAR_CURSOR_KEY) is not None
+        assert get_setting(db, rf.CURSOR_KEY) is None
+
+    def test_cli_flag(self):
+        assert rf._parse_args(["--clear-nonconsolidated"]).clear_nonconsolidated is True
+        assert rf._parse_args([]).clear_nonconsolidated is False
 
 
 # ── 再開 ──────────────────────────────────────────────────────────────────

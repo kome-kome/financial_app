@@ -47,7 +47,7 @@ WITH d AS (
         COALESCE(saf.dps_lag, 1.0::double precision) AS split_dps_lag,
         c.is_active, c.delisted_date,
         CASE WHEN COALESCE(fr.pl_revenue,0) <> 0
-             THEN ROUND((COALESCE(fr.pl_operating_profit,0) / fr.pl_revenue * 100)::numeric, 2) END AS op_margin,
+             THEN ROUND((fr.pl_operating_profit / fr.pl_revenue * 100)::numeric, 2) END AS op_margin,
         CASE WHEN COALESCE(fr.pl_revenue,0) <> 0
              THEN ROUND((COALESCE(NULLIF(fr.pl_net_income,0), NULLIF(fr.pl_net_income_attr,0), 0) / fr.pl_revenue * 100)::numeric, 2) END AS net_margin,
         CASE WHEN COALESCE(NULLIF(fr.bs_total_equity,0), NULLIF(fr.bs_equity_parent,0), 0) <> 0

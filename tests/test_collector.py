@@ -672,6 +672,240 @@ class TestAccountingStandard:
         assert collector_interim._extract_dei is collector_financials._extract_dei
 
 
+# ── 連結を作る会社の書類では単体の値を採らない（#896）─────────────────────────────
+# 検体は 2026-10-10 に EDINET から取得した実際の書類の行を写した（要素ID・コンテキストID・値）。
+# 推測で書くと、実際の書類のタグ名・コンテキスト名・DEI の表記を読めないことを検出できない。
+
+# E02144 トヨタ 2019年度（S100G1ZO・US-GAAP）: 連結は要約（…USGAAPSummaryOfBusinessResults）だけで、
+# 明細は単体（NonConsolidatedMember）しか無い。営業利益率が「単体の営業利益 ÷ 連結の売上高」になっていた
+_TOYOTA_USGAAP_S100G1ZO = [
+    ("jpdei_cor:AccountingStandardsDEI", "FilingDateInstant", "US GAAP"),
+    ("jpdei_cor:WhetherConsolidatedFinancialStatementsArePreparedDEI", "FilingDateInstant", "true"),
+    ("jpdei_cor:CurrentPeriodEndDateDEI", "FilingDateInstant", "2019-03-31"),
+    ("jpcrp_cor:RevenuesUSGAAPSummaryOfBusinessResults", "CurrentYearDuration", "30225681000000"),
+    ("jppfs_cor:NetSales", "CurrentYearDuration_NonConsolidatedMember", "12634439000000"),
+    ("jppfs_cor:CostOfSales", "CurrentYearDuration_NonConsolidatedMember", "9991345000000"),
+    ("jppfs_cor:GrossProfit", "CurrentYearDuration_NonConsolidatedMember", "2643093000000"),
+    ("jppfs_cor:SellingGeneralAndAdministrativeExpenses", "CurrentYearDuration_NonConsolidatedMember", "1316956000000"),
+    ("jppfs_cor:OperatingIncome", "CurrentYearDuration_NonConsolidatedMember", "1326137000000"),
+    ("jppfs_cor:OrdinaryIncome", "CurrentYearDuration_NonConsolidatedMember", "2323121000000"),
+    ("jpcrp_cor:NetIncomeLossAttributableToOwnersOfParentUSGAAPSummaryOfBusinessResults", "CurrentYearDuration", "1882873000000"),
+    ("jppfs_cor:ProfitLoss", "CurrentYearDuration_NonConsolidatedMember", "1896824000000"),
+    ("jpcrp_cor:BasicEarningsLossPerShareUSGAAPSummaryOfBusinessResults", "CurrentYearDuration", "650.55"),
+    ("jpcrp_cor:BasicEarningsLossPerShareSummaryOfBusinessResults", "CurrentYearDuration_NonConsolidatedMember", "657.10"),
+    ("jpcrp_cor:TotalAssetsUSGAAPSummaryOfBusinessResults", "CurrentYearInstant", "51936949000000"),
+    ("jppfs_cor:Assets", "CurrentYearInstant_NonConsolidatedMember", "17716993000000"),
+    ("jppfs_cor:Liabilities", "CurrentYearInstant_NonConsolidatedMember", "5266718000000"),
+    ("jppfs_cor:CurrentAssets", "CurrentYearInstant_NonConsolidatedMember", "7078259000000"),
+    ("jpcrp_cor:EquityIncludingPortionAttributableToNonControllingInterestUSGAAPSummaryOfBusinessResults", "CurrentYearInstant", "20565210000000"),
+    ("jppfs_cor:NetAssets", "CurrentYearInstant_NonConsolidatedMember", "12450274000000"),
+    ("jpcrp_cor:EquityAttributableToOwnersOfParentPerShareUSGAAPSummaryOfBusinessResults", "CurrentYearInstant", "6830.92"),
+    ("jpcrp_cor:NetAssetsPerShareSummaryOfBusinessResults", "CurrentYearInstant_NonConsolidatedMember", "4225.55"),
+    ("jpcrp_cor:CashFlowsFromUsedInOperatingActivitiesUSGAAPSummaryOfBusinessResults", "CurrentYearDuration", "3766597000000"),
+    ("jpcrp_cor:DividendPaidPerShareSummaryOfBusinessResults", "CurrentYearDuration_NonConsolidatedMember", "220"),
+    ("jpcrp_cor:NumberOfEmployees", "CurrentYearInstant", "370870"),
+    ("jpcrp_cor:NumberOfEmployees", "CurrentYearInstant_NonConsolidatedMember", "74515"),
+    ("jpcrp_cor:NumberOfIssuedSharesAsOfFiscalYearEndIssuedSharesTotalNumberOfSharesEtc", "FilingDateInstant", "3310097492"),
+    ("jppfs_cor:MerchandiseAndFinishedGoods", "CurrentYearInstant_NonConsolidatedMember", "187526000000"),
+    ("jppfs_cor:WorkInProcess", "CurrentYearInstant_NonConsolidatedMember", "86559000000"),
+    ("jppfs_cor:RawMaterialsAndSupplies", "CurrentYearInstant_NonConsolidatedMember", "155428000000"),
+]
+# E02144 トヨタ 2026年度（S100Y8NY・IFRS）: 販管費・EPS・BPS の連結は未登録のタグにだけあり、単体の値が
+# 採られていた。BPS の要素名は EquityToAssetRatio…だが EDINET のラベルは「１株当たり親会社所有者帰属持分」
+_TOYOTA_IFRS_S100Y8NY = [
+    ("jpdei_cor:AccountingStandardsDEI", "FilingDateInstant", "IFRS"),
+    ("jpdei_cor:WhetherConsolidatedFinancialStatementsArePreparedDEI", "FilingDateInstant", "true"),
+    ("jpdei_cor:CurrentPeriodEndDateDEI", "FilingDateInstant", "2026-03-31"),
+    ("jpcrp030000-asr_E02144-000:OperatingRevenuesIFRSKeyFinancialData", "CurrentYearDuration", "50684952000000"),
+    ("jppfs_cor:NetSales", "CurrentYearDuration_NonConsolidatedMember", "18259979000000"),
+    ("jpigp_cor:CostOfSalesIFRS", "CurrentYearDuration", "39141418000000"),
+    ("jppfs_cor:CostOfSales", "CurrentYearDuration_NonConsolidatedMember", "14279645000000"),
+    ("jppfs_cor:GrossProfit", "CurrentYearDuration_NonConsolidatedMember", "3980334000000"),
+    ("jpigp_cor:SellingGeneralAndAdministrativeExpensesIFRS", "CurrentYearDuration", "4697524000000"),
+    ("jppfs_cor:SellingGeneralAndAdministrativeExpenses", "CurrentYearDuration_NonConsolidatedMember", "2174945000000"),
+    ("jpigp_cor:OperatingProfitLossIFRS", "CurrentYearDuration", "3766216000000"),
+    ("jppfs_cor:OperatingIncome", "CurrentYearDuration_NonConsolidatedMember", "1805389000000"),
+    ("jppfs_cor:OrdinaryIncome", "CurrentYearDuration_NonConsolidatedMember", "4197319000000"),
+    ("jpcrp_cor:BasicEarningsLossPerShareIFRSSummaryOfBusinessResults", "CurrentYearDuration", "295.25"),
+    ("jpigp_cor:BasicAndDilutedEarningsLossPerShareIFRS", "CurrentYearDuration", "295.25"),
+    ("jpcrp_cor:BasicEarningsLossPerShareSummaryOfBusinessResults", "CurrentYearDuration_NonConsolidatedMember", "260.28"),
+    ("jpcrp_cor:EquityToAssetRatioIFRSSummaryOfBusinessResults", "CurrentYearInstant", "3062.82"),
+    ("jpcrp_cor:RatioOfOwnersEquityToGrossAssetsIFRSSummaryOfBusinessResults", "CurrentYearInstant", "0.378"),
+    ("jpcrp_cor:NetAssetsPerShareSummaryOfBusinessResults", "CurrentYearInstant_NonConsolidatedMember", "1815.72"),
+    ("jpigp_cor:LiabilitiesIFRS", "CurrentYearInstant", "64502263000000"),
+    ("jppfs_cor:Liabilities", "CurrentYearInstant_NonConsolidatedMember", "7991401000000"),
+    ("jppfs_cor:CurrentLiabilities", "CurrentYearInstant_NonConsolidatedMember", "6185881000000"),
+    ("jpcrp_cor:DividendPaidPerShareSummaryOfBusinessResults", "CurrentYearDuration_NonConsolidatedMember", "95"),
+]
+# E01033 ヤスハラケミカル 2025年度（S100W071・連結を作らない）: 全ての値を NonConsolidatedMember で載せる。
+# context だけでは連結を作る会社と区別できない＝判定は DEI の連結決算の有無（書類単位）
+_E01033_SINGLE_S100W071 = [
+    ("jpdei_cor:AccountingStandardsDEI", "FilingDateInstant", "Japan GAAP"),
+    ("jpdei_cor:WhetherConsolidatedFinancialStatementsArePreparedDEI", "FilingDateInstant", "false"),
+    ("jpdei_cor:CurrentPeriodEndDateDEI", "FilingDateInstant", "2025-03-31"),
+    ("jppfs_cor:NetSales", "CurrentYearDuration_NonConsolidatedMember", "14661000000"),
+    ("jppfs_cor:GrossProfit", "CurrentYearDuration_NonConsolidatedMember", "3837000000"),
+    ("jppfs_cor:SellingGeneralAndAdministrativeExpenses", "CurrentYearDuration_NonConsolidatedMember", "2017000000"),
+    ("jppfs_cor:OperatingIncome", "CurrentYearDuration_NonConsolidatedMember", "1820000000"),
+    ("jppfs_cor:OrdinaryIncome", "CurrentYearDuration_NonConsolidatedMember", "1882000000"),
+    ("jppfs_cor:ProfitLoss", "CurrentYearDuration_NonConsolidatedMember", "1376000000"),
+    ("jpcrp_cor:BasicEarningsLossPerShareSummaryOfBusinessResults", "CurrentYearDuration_NonConsolidatedMember", "150.79"),
+    ("jppfs_cor:Assets", "CurrentYearInstant_NonConsolidatedMember", "27468000000"),
+    ("jppfs_cor:Liabilities", "CurrentYearInstant_NonConsolidatedMember", "6400000000"),
+    ("jppfs_cor:NetAssets", "CurrentYearInstant_NonConsolidatedMember", "21067000000"),
+    ("jpcrp_cor:NetAssetsPerShareSummaryOfBusinessResults", "CurrentYearInstant_NonConsolidatedMember", "2321.33"),
+    ("jppfs_cor:NetCashProvidedByUsedInOperatingActivities", "CurrentYearDuration_NonConsolidatedMember", "3057000000"),
+    ("jpcrp_cor:DividendPaidPerShareSummaryOfBusinessResults", "CurrentYearDuration_NonConsolidatedMember", "12.00"),
+    ("jpcrp_cor:NumberOfEmployees", "CurrentYearInstant_NonConsolidatedMember", "231"),
+    ("jppfs_cor:WorkInProcess", "CurrentYearInstant_NonConsolidatedMember", "2159000000"),
+    ("jppfs_cor:RawMaterialsAndSupplies", "CurrentYearInstant_NonConsolidatedMember", "5883000000"),
+]
+# E02144 トヨタ 半期報告書（S100WYZE・2025-09-30）: 新しい様式の半期報告書は単体の値を持たない。
+# 販管費・EPS の連結は #896 で登録したタグにある
+_TOYOTA_H1_S100WYZE = [
+    ("jpdei_cor:AccountingStandardsDEI", "FilingDateInstant", "IFRS"),
+    ("jpdei_cor:WhetherConsolidatedFinancialStatementsArePreparedDEI", "FilingDateInstant", "true"),
+    ("jpdei_cor:TypeOfCurrentPeriodDEI", "FilingDateInstant", "HY"),
+    ("jpdei_cor:CurrentPeriodEndDateDEI", "FilingDateInstant", "2025-09-30"),
+    ("jpcrp040300-ssr_E02144-000:OperatingRevenuesIFRSKeyFinancialData", "InterimDuration", "24630753000000"),
+    ("jpigp_cor:SellingGeneralAndAdministrativeExpensesIFRS", "InterimDuration", "2158959000000"),
+    ("jpigp_cor:OperatingProfitLossIFRS", "InterimDuration", "2005692000000"),
+    ("jpcrp_cor:BasicEarningsLossPerShareIFRSSummaryOfBusinessResults", "InterimDuration", "136.07"),
+    ("jpigp_cor:BasicAndDilutedEarningsLossPerShareIFRS", "InterimDuration", "136.07"),
+]
+
+
+def _without_dei(rows):
+    return [r for r in rows if not r[0].startswith("jpdei_cor:")]
+
+
+def _raw(rows):
+    return [{"element": e.split(":")[-1], "context": c, "value": v} for e, c, v in rows]
+
+
+_ORDERS = pytest.mark.parametrize("order", ["as_filed", "reversed"])
+
+
+def _parse(rows, order="as_filed", **kw):
+    rows = rows if order == "as_filed" else rows[::-1]
+    return parse_xbrl_csv(_xbrl_df(rows), "E02144", "", **kw)
+
+
+class TestNonConsolidatedValuesAreDropped:
+    """連結を作る会社の書類では、財務諸表の列に単体の値を採らない（#896）。行の並びに依存しない。"""
+
+    @_ORDERS
+    def test_usgaap_keeps_only_the_consolidated_summary(self, order):
+        p = _parse(_TOYOTA_USGAAP_S100G1ZO, order)
+        assert p["pl"] == {"revenue": 30225681000000.0, "net_income": 1882873000000.0,
+                           "eps": 650.55}
+        assert p["bs"] == {"total_assets": 51936949000000.0, "total_equity": 20565210000000.0,
+                           "bps": 6830.92}
+        assert p["cf"] == {"operating_cf": 3766597000000.0}
+
+    @_ORDERS
+    def test_ifrs_takes_consolidated_sga_eps_bps_and_no_ordinary_profit(self, order):
+        p = _parse(_TOYOTA_IFRS_S100Y8NY, order)
+        assert p["pl"]["sga"] == 4697524000000.0           # 連結（登録したタグ）。単体は 2,174,945百万円
+        assert p["pl"]["operating_profit"] == 3766216000000.0
+        assert p["pl"]["cost_of_sales"] == 39141418000000.0
+        assert p["pl"]["eps"] == 295.25                    # 単体は 260.28
+        assert p["bs"]["bps"] == 3062.82                   # 単体は 1815.72・比率 0.378 ではない
+        assert p["bs"]["total_liabilities"] == 64502263000000.0
+        for col in ("ordinary_profit", "gross_profit"):    # IFRS に無い概念・連結の値が無い
+            assert col not in p["pl"], col
+        assert "current_liabilities" not in p["bs"]
+
+    @_ORDERS
+    def test_company_level_values_are_kept(self, order):
+        """1株配当（提出会社の欄にしか載らない）・従業員数・発行済株式数は規則の外。"""
+        p = _parse(_TOYOTA_USGAAP_S100G1ZO, order)
+        assert p["val"] == {"dps": 220.0}
+        assert p["nonfin"] == {"employees": 370870.0, "issued_shares": 3310097492.0}
+        assert _parse(_TOYOTA_IFRS_S100Y8NY, order)["val"] == {"dps": 95.0}
+
+    def test_inventory_is_not_summed_from_nonconsolidated_parts(self):
+        assert "inventory" not in _parse(_TOYOTA_USGAAP_S100G1ZO)["bs"]
+
+    @_ORDERS
+    def test_single_only_company_is_read_as_before(self, order):
+        """連結を作らない会社（DEI=false）は、NonConsolidatedMember の値を従来どおり全部採る。"""
+        p = parse_xbrl_csv(_xbrl_df(_E01033_SINGLE_S100W071 if order == "as_filed"
+                                    else _E01033_SINGLE_S100W071[::-1]), "E01033", "")
+        assert p["pl"] == {"revenue": 14661000000.0, "gross_profit": 3837000000.0,
+                           "sga": 2017000000.0, "operating_profit": 1820000000.0,
+                           "ordinary_profit": 1882000000.0, "net_income": 1376000000.0,
+                           "eps": 150.79}
+        assert p["bs"] == {"total_assets": 27468000000.0, "total_liabilities": 6400000000.0,
+                           "total_equity": 21067000000.0, "bps": 2321.33,
+                           "inventory": 2159000000.0 + 5883000000.0}
+        assert p["cf"] == {"operating_cf": 3057000000.0}
+        assert p["val"] == {"dps": 12.0} and p["nonfin"] == {"employees": 231.0}
+
+    def test_document_without_dei_is_read_as_before(self):
+        """DEI が読めない書類は従来どおり（単体の値で埋まる）。規則で値をまとめて消さない。"""
+        p = _parse(_without_dei(_TOYOTA_USGAAP_S100G1ZO))
+        assert p["pl"]["operating_profit"] == 1326137000000.0
+        assert p["pl"]["revenue"] == 30225681000000.0      # 連結の優先は従来どおり
+
+    def test_fallback_reads_the_old_way(self):
+        """掃除の差分（refetch_financials --clear-nonconsolidated）が比べる旧来の読み方。"""
+        p = _parse(_TOYOTA_USGAAP_S100G1ZO, nonconsolidated_fallback=True)
+        assert p["pl"]["operating_profit"] == 1326137000000.0
+        assert p["bs"]["total_liabilities"] == 5266718000000.0
+        assert p["bs"]["inventory"] == 187526000000.0 + 86559000000.0 + 155428000000.0
+
+    @_ORDERS
+    def test_interim_report_takes_the_new_consolidated_tags(self, order):
+        p = _parse(_TOYOTA_H1_S100WYZE, order)
+        assert p["pl"]["sga"] == 2158959000000.0
+        assert p["pl"]["eps"] == 136.07
+        assert p["pl"]["operating_profit"] == 2005692000000.0
+
+    @pytest.mark.parametrize("rows", [
+        _TOYOTA_USGAAP_S100G1ZO, _TOYOTA_IFRS_S100Y8NY, _E01033_SINGLE_S100W071, _TOYOTA_H1_S100WYZE,
+    ], ids=["usgaap", "ifrs", "single-only", "h1"])
+    @_ORDERS
+    def test_parse_raw_rows_agrees(self, rows, order):
+        rows = rows if order == "as_filed" else rows[::-1]
+        csv = parse_xbrl_csv(_xbrl_df(rows), "E02144", "")
+        raw = parse_raw_rows(_raw(rows))
+        for cat in ("bs", "pl", "cf", "val", "nonfin"):
+            assert raw[cat] == csv[cat], cat
+
+    def test_new_consolidated_tags_are_mapped(self):
+        assert XBRL_MAP["SellingGeneralAndAdministrativeExpensesIFRS"] == ("pl", "sga")
+        assert XBRL_MAP["BasicEarningsLossPerShareIFRSSummaryOfBusinessResults"] == ("pl", "eps")
+        assert XBRL_MAP["BasicAndDilutedEarningsLossPerShareIFRS"] == ("pl", "eps")
+        assert XBRL_MAP["EquityToAssetRatioIFRSSummaryOfBusinessResults"] == ("bs", "bps")
+        assert "RatioOfOwnersEquityToGrossAssetsIFRSSummaryOfBusinessResults" not in XBRL_MAP
+
+    @pytest.mark.parametrize("value, expected", [
+        ("true", True), ("false", False), ("TRUE", True), ("", None), ("－", None),
+    ])
+    def test_prepares_consolidated(self, value, expected):
+        dei = {"WhetherConsolidatedFinancialStatementsArePreparedDEI": value}
+        assert collector_financials.prepares_consolidated(dei) is expected
+
+    def test_members_other_than_nonconsolidated_are_not_dropped(self):
+        """セグメント・株式種類のメンバーは単体ではない（規則は NonConsolidated だけ）。"""
+        drops = collector_financials._drops_nonconsolidated
+        assert drops("CurrentYearDuration_NonConsolidatedMember", "pl", True)
+        assert not drops("CurrentYearDuration_NonConsolidatedMember", "pl", False)
+        assert not drops("CurrentYearDuration_NonConsolidatedMember", "val", True)
+        assert not drops("CurrentYearInstant_NonConsolidatedMember", "nonfin", True)
+        assert not drops(
+            "CurrentYearDuration_jpcrp030000-asr_E02144-000AutomotiveReportableSegmentMember",
+            "pl", True)
+        assert not drops("FilingDateInstant_OrdinaryShareMember", "bs", True)
+
+    def test_rule_lives_in_one_place(self):
+        """単体の判定の式は `_drops_nonconsolidated` だけに置く（呼び出し側へ書き写さない）。"""
+        import inspect
+        for fn in (collector_financials._apply_row, collector_financials._collect_inventory_row):
+            assert "_drops_nonconsolidated(" in inspect.getsource(fn), fn.__name__
+
+
 # ── calc_derived ─────────────────────────────────────────────────────────────
 
 class TestCalcDerived:
@@ -707,6 +941,16 @@ class TestCalcDerived:
     def test_net_cash(self):
         # 流動資産 1000 + 投資有価証券 500×0.7 − 総負債 800 = 550
         assert calc_derived(self._rec())["derived"]["net_cash"] == 550.0
+
+    def test_missing_operating_profit_yields_none_not_zero(self):
+        """営業利益が取れない行は営業利益率を 0% にせず、営業利益から作る派生額も作らない（#896）。"""
+        rec = self._rec()
+        del rec["pl"]["operating_profit"]
+        rec["pl"]["depreciation"] = 30.0
+        out = calc_derived(rec)
+        assert out["derived"]["op_margin"] is None
+        assert out["derived"]["net_margin"] == 10.0
+        assert "ebitda" not in out["pl"] and "nonoperating_income" not in out["pl"]
 
     def test_zero_revenue_yields_none(self):
         rec = self._rec()

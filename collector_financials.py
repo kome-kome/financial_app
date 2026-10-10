@@ -64,6 +64,15 @@ _DEI_TYPE     = "TypeOfCurrentPeriodDEI"
 _DEI_PEND     = "CurrentPeriodEndDateDEI"
 _DEI_FYEND    = "CurrentFiscalYearEndDateDEI"
 _DEI_STANDARD = "AccountingStandardsDEI"
+# 連結決算の有無（"true" / "false"）。実物で確かめた表記（2026-10-10: トヨタ S100G1ZO=US GAAP 有報・
+# S100Y8NY=IFRS 有報・S100WYZE=半期報告書がいずれも true、E01033 S100W071・E02753 S100VZR8 が false）。
+_DEI_CONSOLIDATED = "WhetherConsolidatedFinancialStatementsArePreparedDEI"
+_DEI_KEYS = frozenset({_DEI_TYPE, _DEI_PEND, _DEI_FYEND, _DEI_STANDARD, _DEI_CONSOLIDATED})
+
+# 連結を作る書類で単体（NonConsolidated）の値を採らない区分＝財務諸表の列（#896）。
+# val の1株配当は有報の「主要な経営指標等」の提出会社（＝単体）の欄にしか載らず、nonfin の従業員数・
+# 発行済株式数は会社単位の値なので外す（実物: トヨタ S100G1ZO の配当は NonConsolidatedMember だけ）。
+_STATEMENT_SECTIONS = frozenset({"bs", "pl", "cf"})
 
 # DEI `AccountingStandardsDEI` の表記 -> financial_records.accounting_standard（#859）。
 # 表記は実物で確かめたものだけを置く（2026-10-09: E00317 S100YHJP=Japan GAAP、トヨタ S100Y8NY・
@@ -290,22 +299,31 @@ def _col_as_str_list(df, col) -> list:
     return df[col].fillna("").astype(str).tolist()
 
 
+def _scan_dei(pairs) -> dict:
+    """(要素名, 値) の並びから DEI を1パスで抜く。CSV（_extract_dei）と raw 行（parse_raw_rows）共通。"""
+    out: dict = {}
+    for raw_elem, val in pairs:
+        elem = raw_elem.split(":")[-1] if ":" in raw_elem else raw_elem
+        if elem in _DEI_KEYS and elem not in out:
+            out[elem] = str(val).strip()
+            if len(out) == len(_DEI_KEYS):
+                break
+    return out
+
+
 def _extract_dei(df) -> dict:
-    """XBRL df から DEI のメタ（当期種別・当期末日・会計年度末日・会計基準）を1パスで抽出する。"""
+    """XBRL df から DEI のメタ（当期種別・当期末日・会計年度末日・会計基準・連結決算の有無）を1パスで抽出する。"""
     col_map = _detect_xbrl_columns(df)
     if not {"element", "value"}.issubset(col_map):
         return {}
-    elements = _col_as_str_list(df, col_map["element"])
-    values   = _col_as_str_list(df, col_map["value"])
-    want = {_DEI_TYPE, _DEI_PEND, _DEI_FYEND, _DEI_STANDARD}
-    out: dict = {}
-    for raw_elem, val in zip(elements, values):
-        elem = raw_elem.split(":")[-1] if ":" in raw_elem else raw_elem
-        if elem in want and elem not in out:
-            out[elem] = val.strip()
-            if len(out) == len(want):
-                break
-    return out
+    return _scan_dei(zip(_col_as_str_list(df, col_map["element"]),
+                         _col_as_str_list(df, col_map["value"])))
+
+
+def prepares_consolidated(dei: dict) -> Optional[bool]:
+    """DEI の連結決算の有無。"true" -> True・"false" -> False・無い/読めない -> None（#896）。"""
+    raw = (dei.get(_DEI_CONSOLIDATED) or "").strip().lower()
+    return {"true": True, "false": False}.get(raw)
 
 
 def accounting_standard_from_dei(dei: dict, doc_id: str = "") -> Optional[str]:
@@ -356,7 +374,8 @@ def _context_priority(ctx: str) -> int:
 
     - 2: 名前で連結を名乗り、単体でもメンバーでもない（旧形式の `CurrentYearConsolidatedDuration` 等）
     - 1: メンバー無し（現行の EDINET では連結総額がここ。`CurrentYearDuration` は Consolidated を含まない）
-    - 0: メンバー付き（セグメント別・株式種類別等）・単体（NonConsolidatedMember）
+    - 0: メンバー付き（セグメント別・株式種類別等）・単体（NonConsolidatedMember）。
+      ただし連結を作る書類の財務諸表の列では、単体の値は優先度以前に採らない（_drops_nonconsolidated・#896）
 
     次元メンバーは全て "...Member" で終わる breakdown。"_Member" 限定だと "ReportableSegmentMember"
     （直前にアンダースコア無し）を取りこぼし、連結総額と同優先度で並んで CSV 順次第で上書きされる
@@ -386,18 +405,39 @@ def _outside_current_period(ctx: str) -> bool:
     return "Quarter" in ctx and "Duration" in ctx
 
 
+def _drops_nonconsolidated(ctx: str, cat: str, consolidated_doc: bool) -> bool:
+    """連結を作る書類の、財務諸表の列の単体の値か（採らない）。_apply_row / _collect_inventory_row 共通（#896）。
+
+    連結の値が無い列へ単体の値を優先度0で入れると、同じ行に連結と単体が混ざる（エラーは出ない）。
+    US-GAAP の有報は連結の明細を標準タグで持たず、要約（売上高・純利益・総資産等）だけを載せるので、
+    売上原価・販管費・営業利益・負債が単体の値になっていた（トヨタ 2019年度の営業利益率 4.4%＝単体の
+    営業利益 ÷ 連結の売上高）。連結の値が無い列は「取れなかった」＝空欄にする。
+
+    - 判定は書類単位（DEI の連結決算の有無・`prepares_consolidated`）。**単体だけの会社も全ての値を
+      `NonConsolidatedMember` で載せる**（実物: E01033 S100W071）ので、context だけでは決められない。
+      DEI が読めない書類（`consolidated_doc=False`）は従来どおり読む
+    - `NonConsolidated` を含む context だけ。セグメント・株式種類のメンバーは単体ではない
+    - 財務諸表の列（`_STATEMENT_SECTIONS`）だけ。1株配当・従業員数・発行済株式数は対象外
+    """
+    return consolidated_doc and cat in _STATEMENT_SECTIONS and "NonConsolidated" in ctx
+
+
 def _apply_row(
     elem: str, ctx: str, val_raw, cat: str, field: str,
     result: dict, _priority: dict, apply_capex_sign: bool = False,
+    consolidated_doc: bool = False,
 ) -> None:
     """共通フィルタ・優先度計算・結果反映。parse_raw_rows / parse_xbrl_csv の中核共通ロジック。
 
-    当期外コンテキストのスキップ（_outside_current_period）・OperatingRevenue1 非連結フィルタ・
-    優先度計算（_context_priority）・float 変換・priority 更新を担う。
+    当期外コンテキストのスキップ（_outside_current_period）・連結を作る書類の単体の値のスキップ
+    （_drops_nonconsolidated）・OperatingRevenue1 非連結フィルタ・優先度計算（_context_priority）・
+    float 変換・priority 更新を担う。
     apply_capex_sign=True のとき capex を負値（支出＝アウトフロー）に統一する。
     """
     # 前期比較・直近3か月の値はスキップ。当期（通期・半期累計）のデータのみ処理する
     if _outside_current_period(ctx):
+        return
+    if _drops_nonconsolidated(ctx, cat, consolidated_doc):
         return
     # OperatingRevenue1 系（営業収益）は連結のみ採用。金融持株会社は連結営業収益を持たず
     # 提出会社単体（NonConsolidatedMember）の営業収益しか無いため、非連結値を売上に誤採用しない。
@@ -436,14 +476,16 @@ def _inventory_fallback(inv_parts: dict, result: dict) -> None:
         result["bs"]["inventory"] = total
 
 
-def _collect_inventory_row(elem: str, ctx: str, raw_value, inv_parts: dict, inv_prio: dict) -> None:
+def _collect_inventory_row(elem: str, ctx: str, raw_value, inv_parts: dict, inv_prio: dict,
+                           consolidated_doc: bool = False) -> None:
     """棚卸資産サブ項目を連結優先度付きで inv_parts へ集約する（in-place）。
 
-    parse_raw_rows / parse_xbrl_csv 共通。当期外（_outside_current_period）は除外し、
+    parse_raw_rows / parse_xbrl_csv 共通。当期外（_outside_current_period）と連結を作る書類の単体の値
+    （_drops_nonconsolidated。合算先は bs の棚卸資産）は除外し、
     連結 > 単体(メンバー無し) > メンバー有り の優先度が高い値で上書きする。
     パース不能な値は無視する。
     """
-    if _outside_current_period(ctx):
+    if _outside_current_period(ctx) or _drops_nonconsolidated(ctx, "bs", consolidated_doc):
         return
     prio = _context_priority(ctx)
     try:
@@ -461,6 +503,8 @@ def parse_raw_rows(rows: list) -> dict:
     _priority: dict = {}
     _inv_parts: dict = {}
     _inv_prio: dict = {}
+    consolidated_doc = prepares_consolidated(
+        _scan_dei((row.get("element", ""), row.get("value", "")) for row in rows)) is True
     for row in rows:
         elem = row.get("element", "")
         category_field = XBRL_MAP.get(elem)
@@ -468,17 +512,25 @@ def parse_raw_rows(rows: list) -> dict:
             if elem in _INVENTORY_SUB_ELEMS:
                 _collect_inventory_row(
                     elem, row.get("context", ""), row.get("value", ""),
-                    _inv_parts, _inv_prio,
+                    _inv_parts, _inv_prio, consolidated_doc,
                 )
             continue
         cat, field = category_field
         ctx = row.get("context", "")
-        _apply_row(elem, ctx, row.get("value", ""), cat, field, result, _priority)
+        _apply_row(elem, ctx, row.get("value", ""), cat, field, result, _priority,
+                   consolidated_doc=consolidated_doc)
     _inventory_fallback(_inv_parts, result)
     return result
 
 
-def parse_xbrl_csv(df, edinet_code: str, period_end: str) -> dict:
+def parse_xbrl_csv(df, edinet_code: str, period_end: str, *,
+                   nonconsolidated_fallback: bool = False) -> dict:
+    """XBRL CSV の df から {bs, pl, cf, val, nonfin, meta} を抽出する（年度・半期・補完・取り直しの共通入口）。
+
+    連結を作る書類（DEI）では財務諸表の列に単体の値を採らない（_drops_nonconsolidated・#896）。
+    `nonconsolidated_fallback=True` はその規則を外した旧来の読み方で、規則で空欄になる列を既存行から
+    消す差分を取るため（`scripts/refetch_financials --clear-nonconsolidated`）だけに使う。
+    """
     result = {"bs": {}, "pl": {}, "cf": {}, "val": {}, "nonfin": {}, "meta": {}}
     if df is None or df.empty:
         return result
@@ -487,6 +539,8 @@ def parse_xbrl_csv(df, edinet_code: str, period_end: str) -> dict:
     if not {"element", "value"}.issubset(col_map):
         return result
 
+    consolidated_doc = (not nonconsolidated_fallback
+                        and prepares_consolidated(_extract_dei(df)) is True)
     _priority: dict = {}
     _inv_parts: dict = {}
     _inv_prio: dict = {}
@@ -512,13 +566,14 @@ def parse_xbrl_csv(df, edinet_code: str, period_end: str) -> dict:
             if label_col is not None and _match_capex_by_label(label):
                 category_field = ("cf", "capex")
             elif elem in _INVENTORY_SUB_ELEMS:
-                _collect_inventory_row(elem, ctx, val, _inv_parts, _inv_prio)
+                _collect_inventory_row(elem, ctx, val, _inv_parts, _inv_prio, consolidated_doc)
                 continue
             else:
                 continue
 
         cat, field = category_field
-        _apply_row(elem, ctx, val, cat, field, result, _priority, apply_capex_sign=True)
+        _apply_row(elem, ctx, val, cat, field, result, _priority, apply_capex_sign=True,
+                   consolidated_doc=consolidated_doc)
 
     _inventory_fallback(_inv_parts, result)
     return result
@@ -551,7 +606,8 @@ def calc_derived(rec: dict) -> dict:
     tl   = bs.get("total_liabilities", 0) or 0
     net_cash = ca + inv * 0.7 - tl if (ca or tl) else None
     rec["derived"] = {
-        "op_margin":    round(op / rev * 100, 2) if rev else None,
+        # 営業利益が取れない行は 0% ではなく空欄（VIEW の op_margin と同じ・#896）
+        "op_margin":    round(op / rev * 100, 2) if rev and pl.get("operating_profit") is not None else None,
         "net_margin":   round(net / rev * 100, 2) if rev else None,
         "roe":          round(net / eq * 100, 2) if eq else None,
         "roa":          round(net / asset * 100, 2) if asset else None,

@@ -390,7 +390,10 @@ class FinancialRecord(Base):
     bs_equity_parent        = Column(Float, info={"xbrl": ["EquityAttributableToOwnersOfParent", "EquityAttributableToOwnersOfParentIFRS"]})  # 親会社株主帰属持分（IFRS）
     bs_paid_in_capital      = Column(Float, info={"xbrl": ["CapitalStock", "IssuedCapitalIFRS"]})  # 資本金
     bs_retained_earnings    = Column(Float, info={"xbrl": ["RetainedEarnings", "RetainedEarningsIFRS"]})  # 利益剰余金
-    bs_bps                  = Column(Float, info={"xbrl": ["BookValuePerShare", "NetAssetsPerShareSummaryOfBusinessResults", "EquityAttributableToOwnersOfParentPerShareUSGAAPSummaryOfBusinessResults"]})  # 1株純資産
+    # 1株純資産。IFRS の EquityToAssetRatioIFRSSummaryOfBusinessResults は名前に反して EDINET のラベルが
+    # 「１株当たり親会社所有者帰属持分（IFRS）、経営指標等」（比率は RatioOfOwnersEquityToGrossAssetsIFRS…）。
+    # 登録しないと IFRS の会社は単体の NetAssetsPerShare しか当たらず、#896 の規則で空欄になる（実物: トヨタ S100Y8NY）
+    bs_bps                  = Column(Float, info={"xbrl": ["BookValuePerShare", "NetAssetsPerShareSummaryOfBusinessResults", "EquityAttributableToOwnersOfParentPerShareUSGAAPSummaryOfBusinessResults", "EquityToAssetRatioIFRSSummaryOfBusinessResults"]})  # 1株純資産
 
     # ── PL（損益計算書）再分類項目 ──────────────────────────────────────
     # 売上高。生 OperatingRevenue1（PL本体）は登録しない: 金融持株会社が単体営業収益を誤採用するため
@@ -410,20 +413,22 @@ class FinancialRecord(Base):
     ]})  # 売上高
     pl_cost_of_sales        = Column(Float, info={"xbrl": ["CostOfSales", "CostOfSalesIFRS"]})  # 売上原価
     pl_gross_profit         = Column(Float, info={"xbrl": ["GrossProfit", "GrossProfitIFRS"]})  # 売上総利益
-    pl_sga                  = Column(Float, info={"xbrl": ["SellingGeneralAndAdministrativeExpenses"]})  # 販売費及び一般管理費
+    # 連結を作る会社の書類では、財務諸表の列に単体（NonConsolidatedMember）の値を採らない（#896）。
+    # 連結の値が書類にあるのに登録していないタグは足す（例: IFRS の販管費・EPS。実物 トヨタ S100Y8NY・S100WYZE）。
+    pl_sga                  = Column(Float, info={"xbrl": ["SellingGeneralAndAdministrativeExpenses", "SellingGeneralAndAdministrativeExpensesIFRS"]})  # 販売費及び一般管理費
     pl_operating_profit     = Column(Float, info={"xbrl": ["OperatingIncome", "OperatingProfit", "ProfitFromOperatingActivities", "OperatingProfitLossIFRS", "ProfitFromOperatingActivitiesIFRS"]})  # 営業利益
     pl_nonoperating_income  = Column(Float)   # 営業外損益（純額）= 経常利益 - 営業利益（派生列・tagなし）
-    pl_ordinary_profit      = Column(Float, info={"xbrl": ["OrdinaryIncome"]})  # 経常利益
+    pl_ordinary_profit      = Column(Float, info={"xbrl": ["OrdinaryIncome"]})  # 経常利益（JGAAP概念。IFRS/US-GAAP の連結では NULL・#896）
     pl_pretax_profit        = Column(Float, info={"xbrl": ["IncomeBeforeIncomeTaxes", "ProfitLossBeforeTaxIFRS", "ProfitLossBeforeTaxIFRSSummaryOfBusinessResults", "ProfitLossBeforeTaxUSGAAPSummaryOfBusinessResults", "ProfitLossBeforeIncomeTaxes"]})  # 税前利益（JGAAP=IncomeBeforeIncomeTaxes / IFRS=ProfitLossBeforeTaxIFRS。旧ProfitLossBeforeIncomeTaxesは誤りだが互換で末尾保持）
     pl_net_income           = Column(Float, info={"xbrl": ["NetIncomeLoss", "ProfitLoss", "ProfitLossIFRS", "NetIncomeLossAttributableToOwnersOfParentUSGAAPSummaryOfBusinessResults"]})  # 当期純利益
     pl_net_income_attr      = Column(Float, info={"xbrl": ["ProfitLossAttributableToOwnersOfParent", "ProfitLossAttributableToOwnersOfParentIFRS"]})  # 親会社帰属純利益（IFRS）
-    pl_eps                  = Column(Float, info={"xbrl": ["EarningsPerShare", "BasicEarningsLossPerShare", "BasicEarningsLossPerShareSummaryOfBusinessResults", "BasicEarningsLossPerShareIFRS", "EarningsPerShareIFRS", "BasicEarningsLossPerShareUSGAAPSummaryOfBusinessResults"]})  # EPS（円）
+    pl_eps                  = Column(Float, info={"xbrl": ["EarningsPerShare", "BasicEarningsLossPerShare", "BasicEarningsLossPerShareSummaryOfBusinessResults", "BasicEarningsLossPerShareIFRS", "EarningsPerShareIFRS", "BasicEarningsLossPerShareUSGAAPSummaryOfBusinessResults", "BasicEarningsLossPerShareIFRSSummaryOfBusinessResults", "BasicAndDilutedEarningsLossPerShareIFRS"]})  # EPS（円）
     pl_ebitda               = Column(Float)   # EBITDA（計算値=営業利益+減価償却費・派生列・tagなし）
     # ── PL 網羅性追加（C2）──
     pl_rd_expenses          = Column(Float, info={"xbrl": ["ResearchAndDevelopmentExpensesResearchAndDevelopmentActivities", "ResearchAndDevelopmentExpensesSGA"]})  # 研究開発費
     pl_depreciation         = Column(Float, info={"xbrl": ["DepreciationAndAmortizationOpeCF", "DepreciationAndAmortizationOpeCFIFRS"]})  # 減価償却費及び償却費（D&A・CF add-back。EBITDA入力）
-    pl_extraordinary_income = Column(Float, info={"xbrl": ["ExtraordinaryIncome"]})  # 特別利益（JGAAP概念。IFRS/US-GAAP連結は概ねnull）
-    pl_extraordinary_loss   = Column(Float, info={"xbrl": ["ExtraordinaryLoss"]})  # 特別損失（JGAAP概念。IFRS/US-GAAP連結は概ねnull）
+    pl_extraordinary_income = Column(Float, info={"xbrl": ["ExtraordinaryIncome"]})  # 特別利益（JGAAP概念。IFRS/US-GAAP の連結では NULL・#896）
+    pl_extraordinary_loss   = Column(Float, info={"xbrl": ["ExtraordinaryLoss"]})  # 特別損失（JGAAP概念。IFRS/US-GAAP の連結では NULL・#896）
 
     # ── CF（キャッシュフロー）再分類項目 ────────────────────────────────
     # CF 合計: JGAAP=CashFlowsFrom…系、IFRS/共通=NetCashProvidedByUsedIn…系、IFRS/US-GAAP 経営指標等=…SummaryOfBusinessResults。
