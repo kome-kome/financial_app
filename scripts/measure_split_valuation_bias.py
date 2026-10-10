@@ -48,6 +48,14 @@ F だけを当てて測る（遅れは当てない）。
     python -m scripts.measure_split_valuation_bias verify-sources --axis in-period
                                      # 期中の分割の分解（#756）で増える組を同じく照らす（決定4-13 の基準）
 
+## verify-sample の窓は本番と同じ（#837）
+
+`verify-sample` は本番の `match_event` の窓（期末+45日）で測る。整合度照合で認めた期末後分割は効力日が
+期末+45日を越えうる（#755・#836）が、ここでは広げない——広げると `in_coverage` の母集団が変わり、`--census`
+の結果を決定4-4 の根拠と比べられなくなるため。越えたイベントは `no_official_event` に出るので、全数突合の
+偽陽性を数える前に `verify-sources`（整合度照合のイベントだけ期末+90日）で読み直す。2026-10-10 時点で
+`--census` の母集団に該当は無い（ADR-0055 決定4-10 の限界）。
+
 出力は ASCII 記号のみ（Windows cp932 リダイレクト対策）。
 """
 from __future__ import annotations
