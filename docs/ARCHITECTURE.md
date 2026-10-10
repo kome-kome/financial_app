@@ -323,7 +323,7 @@ erDiagram
         float   pl_extraordinary_income "特別利益（円・C2・JGAAP概念）"
         float   pl_extraordinary_loss  "特別損失（円・C2・JGAAP概念）"
         float   bs_total_assets        "総資産（円）"
-        float   bs_receivables         "売掛金（円）"
+        float   bs_receivables         "売上債権（円・契約資産やその他の債権を含む書類あり・#904）"
         float   bs_inventory           "棚卸資産（円）"
         float   bs_buildings           "建物及び構築物（純額・円）"
         float   bs_machinery           "機械装置（純額・円）"

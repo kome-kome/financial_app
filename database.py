@@ -363,7 +363,11 @@ class FinancialRecord(Base):
     # ── BS（貸借対照表）再分類項目。info["xbrl"] = この列へ集約する生タグ群（多対一） ──
     bs_total_assets         = Column(Float, info={"xbrl": ["Assets", "AssetsIFRS", "TotalAssetsUSGAAPSummaryOfBusinessResults"]})  # 総資産
     bs_current_assets       = Column(Float, info={"xbrl": ["CurrentAssets", "CurrentAssetsIFRS"]})  # 流動資産
-    bs_receivables          = Column(Float, info={"xbrl": ["NotesAndAccountsReceivableTrade", "AccountsReceivableTrade", "TradeAndOtherReceivablesCurrentIFRS"]})  # 売掛金（売上債権）
+    # 売上債権＝BS に載る売上債権の行。IFRS の TradeAndOtherReceivables… は「その他の債権」を含み、日本基準の
+    # …AndContractAssets（収益認識基準後の「受取手形、売掛金及び契約資産」「売掛金及び契約資産」）は契約資産を
+    # 含む。未登録だと注記の「売掛金」か単体の値が入り、#896 の後は空欄になっていた（#904・実物: 8093 S100W0AA）。
+    # 注記の内訳の「売掛金」は BS の行に負ける（collector_financials._TAGS_LOSING_TIES）
+    bs_receivables          = Column(Float, info={"xbrl": ["NotesAndAccountsReceivableTrade", "AccountsReceivableTrade", "NotesAndAccountsReceivableTradeAndContractAssets", "AccountsReceivableTradeAndContractAssets", "TradeAndOtherReceivablesCurrentIFRS"]})  # 売上債権
     bs_inventory            = Column(Float, info={"xbrl": ["Inventories", "InventoriesIFRS"]})  # 棚卸資産
     bs_noncurrent_assets    = Column(Float, info={"xbrl": ["NoncurrentAssets", "NoncurrentAssetsIFRS"]})  # 固定資産
     # 建物及び構築物（純額のみ）。BuildingsAndStructures（Net無し）は取得原価=グロスで bs_ppe_total（純額）を超え
