@@ -332,6 +332,9 @@ erDiagram
         float   bs_investments_other_assets "投資その他の資産合計（円・C2）"
         float   bs_payables            "買掛金（円）"
         float   bs_bonds_payable       "社債（円）"
+        float   bs_current_portion_long_term_debt "1年内返済予定の長期借入金（円・#925）"
+        float   bs_commercial_paper    "コマーシャル・ペーパー（円・#925）"
+        float   bs_current_portion_bonds_payable "1年内償還予定の社債（円・#925）"
         float   bs_paid_in_capital     "資本金（円）"
         float   bs_retained_earnings   "利益剰余金（円）"
         float   bs_total_equity        "純資産（円）"
@@ -623,6 +626,9 @@ erDiagram
 > `z_roe_sec` / `z_op_margin_sec`（**業種内**Zスコア・`PARTITION BY year, industry`・#373）を
 > SQL で都度算出し、`regression_results` を LEFT JOIN して `predicted_market_cap` / `gap_ratio` も合成する。
 > 算出式は旧 `collector.calc_derived` / `_calc_zscore_for_year` / `calc_growth_rates` と一致（移植）。
+> `de_ratio` の分子は今は短期・長期借入金の2列で、**銀行業・保険業の行は NULL**（借入金の区分を持たず 0＝無借金に
+> 見えるため・`database.DE_RATIO_EXCLUDED_INDUSTRIES`・ADR-0067）。有利子負債の残りの構成要素（1年内返済予定の
+> 長期借入金・CP・1年内償還予定の社債）は `financial_records` の列にあり、VIEW へ出して分子へ足すのは #926。
 >
 > **株価由来の列はここで基準を揃える（#655・ADR-0055）**: `split_adjustment_factors` を
 > LEFT JOIN し、`per` / `pbr` / `market_cap` に `× F`、`div_yield` に `÷ F` を当てる。

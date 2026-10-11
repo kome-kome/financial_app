@@ -386,9 +386,20 @@ class FinancialRecord(Base):
     bs_current_liabilities  = Column(Float, info={"xbrl": ["CurrentLiabilities", "CurrentLiabilitiesIFRS"]})  # 流動負債
     bs_payables             = Column(Float, info={"xbrl": ["NotesAndAccountsPayableTrade", "AccountsPayableTrade", "TradeAndOtherPayablesCurrentIFRS"]})  # 買掛金（仕入債務）
     bs_noncurrent_liabilities = Column(Float, info={"xbrl": ["NoncurrentLiabilities", "NoncurrentLiabilitiesIFRS"]})  # 固定負債
-    bs_short_term_debt      = Column(Float, info={"xbrl": ["ShortTermLoansPayable"]})  # 短期借入金
-    bs_long_term_debt       = Column(Float, info={"xbrl": ["LongTermLoansPayable"]})  # 長期借入金
+    # 有利子負債の構成要素（#920・ADR-0067）。1つの列には1つのタグの値しか入らない（_apply_row は合算しない）
+    # ので、構成要素ごとに列を持ち、合計は VIEW で作る（#926）。D/E の分子は今は短期・長期借入金の2列だけ。
+    # IFRS の会社は連結の BS を「社債及び借入金」「有利子負債」「借入金」「長期債務」の流動・非流動で載せる
+    # （jpigp_cor の標準タグ。実物: 三菱商事 S100YB25・トヨタ S100Y8NY・日立 S100YGBO・リクルート S100YDHL）。
+    # これを下の2列へ別名として登録するので、**IFRS の行だけ2列の意味が広い**（社債と1年内返済分を含む）。
+    # IFRS の行は下の新しい3列と社債の列が空なので、構成要素を足しても二重計上にはならない。
+    # 独自拡張のタグ（日立・ソニーの1年内償還の長期債務、ホンダの資金調達に係る債務等）は登録しない（#852）
+    bs_short_term_debt      = Column(Float, info={"xbrl": ["ShortTermLoansPayable", "BondsAndBorrowingsCLIFRS", "InterestBearingLiabilitiesCLIFRS", "BorrowingsCLIFRS"]})  # 短期借入金（IFRS は流動の社債及び借入金）
+    bs_long_term_debt       = Column(Float, info={"xbrl": ["LongTermLoansPayable", "BondsAndBorrowingsNCLIFRS", "InterestBearingLiabilitiesNCLIFRS", "BorrowingsNCLIFRS", "LongTermDebtNCLIFRS"]})  # 長期借入金（IFRS は非流動の社債及び借入金）
     bs_bonds_payable        = Column(Float, info={"xbrl": ["BondsPayable"]})  # 社債
+    # 日本基準の連結 BS の行（実物: 住友不動産 S100YI5D・JR東日本 S100YC7N・三井不動産 S100YHUO・東京ガス S100YH8W）
+    bs_current_portion_long_term_debt = Column(Float, info={"xbrl": ["CurrentPortionOfLongTermLoansPayable"]})  # 1年内返済予定の長期借入金
+    bs_commercial_paper     = Column(Float, info={"xbrl": ["CommercialPapersLiabilities"]})  # コマーシャル・ペーパー
+    bs_current_portion_bonds_payable = Column(Float, info={"xbrl": ["CurrentPortionOfBonds"]})  # 1年内償還予定の社債
     # 純資産（連結）。US-GAAP は「株主資本」「純資産額(NCI含む)」のどちらか一方のみ載る企業があり両方登録（同優先度では先勝ち）
     bs_total_equity         = Column(Float, info={"xbrl": ["Equity", "NetAssets", "EquityIFRS", "EquityAttributableToOwnersOfParentUSGAAPSummaryOfBusinessResults", "EquityIncludingPortionAttributableToNonControllingInterestUSGAAPSummaryOfBusinessResults"]})  # 純資産（連結）
     bs_equity_parent        = Column(Float, info={"xbrl": ["EquityAttributableToOwnersOfParent", "EquityAttributableToOwnersOfParentIFRS"]})  # 親会社株主帰属持分（IFRS）
@@ -2555,6 +2566,12 @@ FINANCIAL_METRICS_INTERIM_VIEW_SQL = (Path(__file__).parent / "sql" / "financial
 # financial_metrics_with_ttm VIEW DDL（#424 子2・ADR-0051）
 FINANCIAL_METRICS_WITH_TTM_VIEW_SQL = (Path(__file__).parent / "sql" / "financial_metrics_with_ttm_view.sql").read_text(encoding="utf-8")
 
+# D/E を作らない業種（JPX 33業種名・#925・ADR-0067）。銀行は借入を「借用金」で載せ、保険も借入金の区分を
+# 持たないので、借入金の列が空欄になり「負債合計があれば借入金の空欄は 0」（#915）で D/E = 0（無借金）に見える。
+# **SQL は Python を読めないので、VIEW 3本の `de_ratio` にも同じ名前を書いてある**（一致は
+# `tests/test_financial_metrics_with_ttm.py` が照合）。JPX が業種名を変えると黙って効かなくなる。
+DE_RATIO_EXCLUDED_INDUSTRIES: tuple[str, ...] = ("銀行業", "保険業")
+
 
 # ── 10. DB初期化 ───────────────────────────────────────────────────────────
 
@@ -2567,6 +2584,7 @@ _NEW_COLS = [
     "bs_paid_in_capital", "bs_retained_earnings",
     "bs_investment_securities",
     "bs_ppe_total", "bs_investments_other_assets",
+    "bs_current_portion_long_term_debt", "bs_commercial_paper", "bs_current_portion_bonds_payable",
     "pl_rd_expenses", "pl_depreciation",
     "pl_extraordinary_income", "pl_extraordinary_loss",
     "employees", "issued_shares",
