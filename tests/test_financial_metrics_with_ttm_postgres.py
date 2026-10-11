@@ -114,6 +114,16 @@ class TestAnnualRowsAreUnchanged:
         assert a == b
 
 
+class TestDeRatioOnRealRows:
+    def test_no_bank_or_insurer_has_a_de_ratio(self, conn):
+        """実データの通期の行で、銀行業・保険業の D/E と `z_de_ratio` が全部空欄（#925）。"""
+        n = conn.execute(text(
+            "SELECT count(*) FROM financial_metrics WHERE industry = ANY(:names)"
+            " AND (de_ratio IS NOT NULL OR z_de_ratio IS NOT NULL)"),
+            {"names": list(database.DE_RATIO_EXCLUDED_INDUSTRIES)}).scalar()
+        assert n == 0
+
+
 class TestTtmRows:
     @pytest.fixture(autouse=True)
     def _empty_ttm_table(self, conn):
@@ -217,6 +227,13 @@ class TestTtmRows:
         row = self._bs_ratios(conn, ec)
         assert row.de_ratio is None
         assert row.net_cash is None and row.nc_ratio is None
+
+    @pytest.mark.parametrize("industry", database.DE_RATIO_EXCLUDED_INDUSTRIES)
+    def test_de_ratio_is_blank_for_banks_and_insurers(self, conn, industry):
+        """銀行・保険は負債合計があっても D/E を 0（無借金）にせず空欄（#925）。式は通期・半期と同じ形。"""
+        ec = _sample_company(conn)
+        self._insert(conn, ec, industry=industry)       # 借入金は2列とも空欄・負債合計 1000
+        assert self._bs_ratios(conn, ec).de_ratio is None
 
     def test_net_cash_is_blank_without_current_assets(self, conn):
         """流動資産の区分を持たない社（銀行・保険）は「−負債合計」にせず空欄（#915）。"""

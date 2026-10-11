@@ -15,7 +15,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from database import (
     SessionLocal, Company, FinancialRecord, XbrlRawDocument, upsert_company, upsert_financial,
     upsert_xbrl_raw, unpack_elements,
-    build_xbrl_map, db_timeouts,
+    build_xbrl_map, db_timeouts, DE_RATIO_EXCLUDED_INDUSTRIES,
 )
 
 # 設定定数・log。スター import だと ruff が未定義名（F821）を検出できないので名前を明示する（#824）。
@@ -605,6 +605,9 @@ def calc_derived(rec: dict) -> dict:
     # 借入金の行が無いのは無借金だからとして 0 で足すが、負債合計まで無ければ負債の側を観測していない
     # ので D/E を作らない（VIEW の de_ratio と同じ・#915）
     liab_seen = any(bs.get(k) is not None for k in ("short_term_debt", "long_term_debt", "total_liabilities"))
+    # 銀行業・保険業は D/E を作らない（VIEW と同じ・#925）。収集の経路は業種を付ける前にここを呼ぶが、
+    # derived は保存しない（読み手は VIEW）ので、効くのは業種を持った rec を渡したときだけ
+    de_applies = rec.get("industry") not in DE_RATIO_EXCLUDED_INDUSTRIES
     ocf   = cf.get("operating_cf", 0) or 0
     # free_cf は cf セクションに置くことで upsert_financial が cf_free_cf 列に正しくマップする
     cf["free_cf"] = ocf + (cf.get("investing_cf", 0) or 0)
@@ -630,7 +633,7 @@ def calc_derived(rec: dict) -> dict:
         "roe":          round(net / eq * 100, 2) if eq else None,
         "roa":          round(net / asset * 100, 2) if asset else None,
         "equity_ratio": round(eq / asset * 100, 2) if asset else None,
-        "de_ratio":     round(debt / eq, 4) if eq and liab_seen else None,
+        "de_ratio":     round(debt / eq, 4) if eq and liab_seen and de_applies else None,
         "cf_ratio":     round(ocf / rev * 100, 2) if rev else None,
         "net_cash":     round(net_cash, 0) if net_cash is not None else None,
     }

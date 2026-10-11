@@ -48,6 +48,7 @@ WITH d AS (
         -- D/E とネットキャッシュの空欄の扱いは financial_metrics と同じ（#915）。
         CASE WHEN COALESCE(NULLIF(fr.bs_total_equity,0), NULLIF(fr.bs_equity_parent,0), 0) <> 0
               AND (fr.bs_short_term_debt IS NOT NULL OR fr.bs_long_term_debt IS NOT NULL OR fr.bs_total_liabilities IS NOT NULL)
+              AND COALESCE(fr.industry, '') NOT IN ('銀行業', '保険業')
              THEN ROUND(((COALESCE(fr.bs_short_term_debt,0) + COALESCE(fr.bs_long_term_debt,0)) / COALESCE(NULLIF(fr.bs_total_equity,0), NULLIF(fr.bs_equity_parent,0), 0))::numeric, 4) END AS de_ratio,
         CASE WHEN COALESCE(fr.pl_revenue,0) <> 0
              THEN ROUND((COALESCE(fr.cf_operating_cf,0) / fr.pl_revenue * 100)::numeric, 2) END AS cf_ratio,

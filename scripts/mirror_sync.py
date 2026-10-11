@@ -51,7 +51,8 @@ from scripts import mirror_common as mc
 from scripts.mirror_verify import add_endpoint_args, compare, endpoints, report, selected_tables
 
 # 1 INSERT あたりの行数。大きすぎると psycopg2 のパラメータ上限（65535）に当たる。
-# 列数最大は financial_records の 69 列なので 900 行 * 69 = 62,100 で収まる。
+# 列数最大は financial_records の 72 列なので 900 行 * 72 = 64,800 で収まる（#925 で3列足した）。
+# **次に financial_records へ列を足すと上限を超える**ので、そのときはこの値を下げる。
 CHUNK_ROWS = 900
 
 # 取得予定がこれを超えたら中止する安全弁。増分同期が想定するのは1日ぶんの差分

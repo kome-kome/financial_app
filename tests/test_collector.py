@@ -20,6 +20,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import collector
 import collector_financials
 import collector_utils
+import database
 from collector import (
     CONSOLIDATED_KEYS,
     XBRL_MAP,
@@ -817,6 +818,88 @@ _E05332_S100W5KF = _DEI_JGAAP_CONSOLIDATED_2025_03 + [
     ("jppfs_cor:ContractAssets", "CurrentYearInstant_NonConsolidatedMember", "1344147000"),
 ]
 
+# ── 有利子負債の構成要素と IFRS の借入金（#925）: 検体は 2026-10-11 に EDINET から取得した実際の書類の行を写した ──
+_DEI_JGAAP_CONSOLIDATED_2026_03 = [
+    ("jpdei_cor:AccountingStandardsDEI", "FilingDateInstant", "Japan GAAP"),
+    ("jpdei_cor:WhetherConsolidatedFinancialStatementsArePreparedDEI", "FilingDateInstant", "true"),
+    ("jpdei_cor:CurrentPeriodEndDateDEI", "FilingDateInstant", "2026-03-31"),
+]
+_DEI_IFRS_2026_03 = [
+    ("jpdei_cor:AccountingStandardsDEI", "FilingDateInstant", "IFRS"),
+    ("jpdei_cor:WhetherConsolidatedFinancialStatementsArePreparedDEI", "FilingDateInstant", "true"),
+    ("jpdei_cor:CurrentPeriodEndDateDEI", "FilingDateInstant", "2026-03-31"),
+]
+# 住友不動産 2026年3月期（S100YI5D）: 連結 BS に新しい3タグ（1年内返済予定の長期借入金・CP・1年内償還予定の社債）が
+# 全部載る。ノンリコースの行は独自拡張（登録しない）。同じタグが単体の文脈にも並ぶ
+_E03907_S100YI5D = _DEI_JGAAP_CONSOLIDATED_2026_03 + [
+    ("jppfs_cor:ShortTermLoansPayable", "Prior1YearInstant", "27615000000"),
+    ("jppfs_cor:ShortTermLoansPayable", "CurrentYearInstant", "22767000000"),
+    ("jppfs_cor:CurrentPortionOfLongTermLoansPayable", "Prior1YearInstant", "253855000000"),
+    ("jppfs_cor:CurrentPortionOfLongTermLoansPayable", "CurrentYearInstant", "313062000000"),
+    ("jpcrp030000-asr_E03907-000:CurrentPortionOfLongTermNonRecourseLoansPayableCL", "CurrentYearInstant", "34819000000"),
+    ("jppfs_cor:CommercialPapersLiabilities", "CurrentYearInstant", "236000000000"),
+    ("jppfs_cor:CurrentPortionOfBonds", "CurrentYearInstant", "20000000000"),
+    ("jpcrp030000-asr_E03907-000:CurrentPortionOfNonRecourseBondsCL", "CurrentYearInstant", "6000000000"),
+    ("jppfs_cor:BondsPayable", "CurrentYearInstant", "210000000000"),
+    ("jppfs_cor:LongTermLoansPayable", "CurrentYearInstant", "2998320000000"),
+    ("jpcrp030000-asr_E03907-000:LongTermNonRecourseLoansPayableNCL", "CurrentYearInstant", "118852000000"),
+    ("jppfs_cor:ShortTermLoansPayable", "CurrentYearInstant_NonConsolidatedMember", "22500000000"),
+    ("jppfs_cor:CurrentPortionOfLongTermLoansPayable", "CurrentYearInstant_NonConsolidatedMember", "312872000000"),
+    ("jppfs_cor:CommercialPapersLiabilities", "CurrentYearInstant_NonConsolidatedMember", "236000000000"),
+    ("jppfs_cor:CurrentPortionOfBonds", "CurrentYearInstant_NonConsolidatedMember", "20000000000"),
+    ("jppfs_cor:BondsPayable", "CurrentYearInstant_NonConsolidatedMember", "210000000000"),
+    ("jppfs_cor:LongTermLoansPayable", "CurrentYearInstant_NonConsolidatedMember", "2959650000000"),
+]
+# JR東日本 2026年3月期（S100YC7N）: 1年内返済予定の長期借入金は単体の文脈にしか無い（連結 BS に行が無い）
+_E04147_S100YC7N = _DEI_JGAAP_CONSOLIDATED_2026_03 + [
+    ("jppfs_cor:ShortTermLoansPayable", "CurrentYearInstant", "184873000000"),
+    ("jppfs_cor:CurrentPortionOfBonds", "CurrentYearInstant", "89999000000"),
+    ("jppfs_cor:BondsPayable", "CurrentYearInstant", "3289601000000"),
+    ("jppfs_cor:LongTermLoansPayable", "CurrentYearInstant", "1295607000000"),
+    ("jppfs_cor:CurrentPortionOfBonds", "CurrentYearInstant_NonConsolidatedMember", "89999000000"),
+    ("jppfs_cor:CurrentPortionOfLongTermLoansPayable", "CurrentYearInstant_NonConsolidatedMember", "184250000000"),
+    ("jppfs_cor:BondsPayable", "CurrentYearInstant_NonConsolidatedMember", "3289601000000"),
+    ("jppfs_cor:LongTermLoansPayable", "CurrentYearInstant_NonConsolidatedMember", "1295600000000"),
+]
+# 三菱商事 2026年3月期（S100YB25・IFRS）: 連結 BS は「社債及び借入金」の流動・非流動。日本基準のタグは単体だけ
+# （未登録だった間は単体の長期借入金 2,751,255百万円が bs_long_term_debt に入っていた）
+_MITSUBISHI_CORP_S100YB25 = _DEI_IFRS_2026_03 + [
+    ("jpigp_cor:BondsAndBorrowingsCLIFRS", "Prior1YearInstant", "1338274000000"),
+    ("jpigp_cor:BondsAndBorrowingsCLIFRS", "CurrentYearInstant", "1610898000000"),
+    ("jpigp_cor:BondsAndBorrowingsNCLIFRS", "CurrentYearInstant", "4136045000000"),
+    ("jppfs_cor:ShortTermLoansPayable", "CurrentYearInstant_NonConsolidatedMember", "489122000000"),
+    ("jppfs_cor:CurrentPortionOfBonds", "Prior1YearInstant_NonConsolidatedMember", "－"),
+    ("jppfs_cor:CurrentPortionOfBonds", "CurrentYearInstant_NonConsolidatedMember", "79914000000"),
+    ("jppfs_cor:LongTermLoansPayable", "CurrentYearInstant_NonConsolidatedMember", "2751255000000"),
+    ("jppfs_cor:BondsPayable", "CurrentYearInstant_NonConsolidatedMember", "1066940000000"),
+]
+# トヨタ 2026年3月期（S100Y8NY・IFRS）: 連結 BS は「有利子負債」の流動・非流動
+_TOYOTA_DEBT_S100Y8NY = _DEI_IFRS_2026_03 + [
+    ("jpigp_cor:InterestBearingLiabilitiesCLIFRS", "CurrentYearInstant", "17581104000000"),
+    ("jpigp_cor:InterestBearingLiabilitiesNCLIFRS", "CurrentYearInstant", "25624365000000"),
+    ("jppfs_cor:CurrentPortionOfLongTermLoansPayable", "CurrentYearInstant_NonConsolidatedMember", "193500000000"),
+    ("jppfs_cor:CurrentPortionOfBonds", "CurrentYearInstant_NonConsolidatedMember", "119940000000"),
+    ("jppfs_cor:BondsPayable", "CurrentYearInstant_NonConsolidatedMember", "979520000000"),
+    ("jppfs_cor:LongTermLoansPayable", "CurrentYearInstant_NonConsolidatedMember", "153857000000"),
+]
+# 日立 2026年3月期（S100YGBO・IFRS）: 「借入金（流動）」「長期債務（非流動）」と、独自拡張の「1年内償還の長期債務」
+_E01737_S100YGBO = _DEI_IFRS_2026_03 + [
+    ("jpigp_cor:BorrowingsCLIFRS", "CurrentYearInstant", "43407000000"),
+    ("jpcrp030000-asr_E01737-000:CurrentPortionOfLongTermDebtCLIFRS", "CurrentYearInstant", "425877000000"),
+    ("jpigp_cor:LongTermDebtNCLIFRS", "CurrentYearInstant", "539753000000"),
+    ("jppfs_cor:ShortTermLoansPayable", "CurrentYearInstant_NonConsolidatedMember", "330007000000"),
+    ("jppfs_cor:CurrentPortionOfBonds", "CurrentYearInstant_NonConsolidatedMember", "20000000000"),
+    ("jppfs_cor:CurrentPortionOfLongTermLoansPayable", "CurrentYearInstant_NonConsolidatedMember", "319844000000"),
+    ("jppfs_cor:BondsPayable", "CurrentYearInstant_NonConsolidatedMember", "200000000000"),
+    ("jppfs_cor:LongTermLoansPayable", "CurrentYearInstant_NonConsolidatedMember", "84000000000"),
+]
+# リクルート 2026年3月期（S100YDHL・IFRS）: 連結は「借入金（非流動）」だけ。単体には短期借入金 543,092百万円がある
+_RECRUIT_S100YDHL = _DEI_IFRS_2026_03 + [
+    ("jpigp_cor:BorrowingsNCLIFRS", "CurrentYearInstant", "645000000"),
+    ("jppfs_cor:ShortTermLoansPayable", "CurrentYearInstant_NonConsolidatedMember", "543092000000"),
+    ("jppfs_cor:LongTermLoansPayable", "CurrentYearInstant_NonConsolidatedMember", "200000000000"),
+]
+
 
 def _without_dei(rows):
     return [r for r in rows if not r[0].startswith("jpdei_cor:")]
@@ -908,9 +991,13 @@ class TestNonConsolidatedValuesAreDropped:
     @pytest.mark.parametrize("rows", [
         _TOYOTA_USGAAP_S100G1ZO, _TOYOTA_IFRS_S100Y8NY, _E01033_SINGLE_S100W071, _TOYOTA_H1_S100WYZE,
         _E8093_S100W0AA, _E02769_S100W4DK, _E04191_S100W5BJ, _E30466_S100W9FR, _E05332_S100W5KF,
+        _E03907_S100YI5D, _E04147_S100YC7N, _MITSUBISHI_CORP_S100YB25, _TOYOTA_DEBT_S100Y8NY,
+        _E01737_S100YGBO, _RECRUIT_S100YDHL,
     ], ids=["usgaap", "ifrs", "single-only", "h1",
             "recv-combined", "recv-combined-and-note", "recv-notes-and-ar", "recv-ar-and-ca",
-            "recv-ar-only"])
+            "recv-ar-only",
+            "debt-jgaap-all", "debt-jgaap-cpltd-single-only", "debt-ifrs-bonds-and-borrowings",
+            "debt-ifrs-interest-bearing", "debt-ifrs-borrowings", "debt-ifrs-noncurrent-only"])
     @_ORDERS
     def test_parse_raw_rows_agrees(self, rows, order):
         rows = rows if order == "as_filed" else rows[::-1]
@@ -984,6 +1071,83 @@ class TestReceivablesTakeTheBalanceSheetLine:
         ]
         for order in ("as_filed", "reversed"):
             assert _parse(rows, order)["bs"]["receivables"] == 100.0
+
+
+_DEBT_FIELDS = ("short_term_debt", "current_portion_long_term_debt", "long_term_debt",
+                "commercial_paper", "bonds_payable", "current_portion_bonds_payable")
+
+
+class TestInterestBearingDebtComponents:
+    """有利子負債の構成要素を連結の値で読む（#925）。単体の値は採らず、行の並びに依存しない。
+
+    日本基準は構成要素ごとの列へ、IFRS は「社債及び借入金」等の流動・非流動を短期・長期借入金の列へ入れる
+    （IFRS の行は2列の意味が広い。構成要素の和で二重計上しないよう、社債の列には IFRS のタグを登録しない）。
+    """
+
+    @_ORDERS
+    @pytest.mark.parametrize("rows, expected", [
+        (_E03907_S100YI5D, {"short_term_debt": 22767000000.0,
+                            "current_portion_long_term_debt": 313062000000.0,
+                            "long_term_debt": 2998320000000.0,
+                            "commercial_paper": 236000000000.0,
+                            "bonds_payable": 210000000000.0,
+                            "current_portion_bonds_payable": 20000000000.0}),
+        # 1年内返済予定の長期借入金は単体（184,250百万円）にしか無いので空欄のまま
+        (_E04147_S100YC7N, {"short_term_debt": 184873000000.0,
+                            "long_term_debt": 1295607000000.0,
+                            "bonds_payable": 3289601000000.0,
+                            "current_portion_bonds_payable": 89999000000.0}),
+        # 単体の短期借入金 489,122百万円・長期借入金 2,751,255百万円・社債 1,066,940百万円ではない
+        (_MITSUBISHI_CORP_S100YB25, {"short_term_debt": 1610898000000.0,
+                                     "long_term_debt": 4136045000000.0}),
+        (_TOYOTA_DEBT_S100Y8NY, {"short_term_debt": 17581104000000.0,
+                                 "long_term_debt": 25624365000000.0}),
+        # 独自拡張の「1年内償還の長期債務」425,877百万円は登録しない（既知の取りこぼし・ADR-0067）
+        (_E01737_S100YGBO, {"short_term_debt": 43407000000.0,
+                            "long_term_debt": 539753000000.0}),
+        # 単体の短期借入金 543,092百万円を連結の空欄へ入れない
+        (_RECRUIT_S100YDHL, {"long_term_debt": 645000000.0}),
+    ], ids=["jgaap-all", "jgaap-cpltd-single-only", "ifrs-bonds-and-borrowings",
+            "ifrs-interest-bearing", "ifrs-borrowings", "ifrs-noncurrent-only"])
+    def test_consolidated_components_are_read(self, rows, expected, order):
+        bs = _parse(rows, order)["bs"]
+        assert {k: v for k, v in bs.items() if k in _DEBT_FIELDS} == expected
+
+    def test_jgaap_component_tags_are_mapped(self):
+        assert XBRL_MAP["CurrentPortionOfLongTermLoansPayable"] == ("bs", "current_portion_long_term_debt")
+        assert XBRL_MAP["CommercialPapersLiabilities"] == ("bs", "commercial_paper")
+        assert XBRL_MAP["CurrentPortionOfBonds"] == ("bs", "current_portion_bonds_payable")
+
+    @pytest.mark.parametrize("tag", [
+        "BondsAndBorrowingsCLIFRS", "InterestBearingLiabilitiesCLIFRS", "BorrowingsCLIFRS",
+    ])
+    def test_ifrs_current_tags_go_to_short_term_debt(self, tag):
+        assert XBRL_MAP[tag] == ("bs", "short_term_debt")
+
+    @pytest.mark.parametrize("tag", [
+        "BondsAndBorrowingsNCLIFRS", "InterestBearingLiabilitiesNCLIFRS", "BorrowingsNCLIFRS",
+        "LongTermDebtNCLIFRS",
+    ])
+    def test_ifrs_noncurrent_tags_go_to_long_term_debt(self, tag):
+        assert XBRL_MAP[tag] == ("bs", "long_term_debt")
+
+    @pytest.mark.parametrize("tag", [
+        "CurrentPortionOfLongTermDebtCLIFRS",            # 日立・ソニー
+        "LongTermDebt2NCLIFRS",                          # ソニー
+        "FinancingLiabilitiesCLIFRS",                    # ホンダ
+        "BondsBorrowingsAndLeaseObligationsCLIFRS",      # 日本製鉄（リース負債を含む）
+        "CurrentPortionOfLongTermNonRecourseLoansPayableCL",  # 住友不動産のノンリコース
+    ])
+    def test_company_specific_extensions_are_not_registered(self, tag):
+        """独自拡張のタグは登録しない（#852 と同じ。似た名前が内訳や別の範囲を指しうる）。"""
+        assert tag not in XBRL_MAP
+
+    def test_new_columns_are_added_to_existing_databases(self):
+        """`create_all` は既存の表に列を足さない。`_NEW_COLS` に無いと、既存の DB で `FinancialRecord` の
+        全列 SELECT が落ちる（CI は空の DB から作るので緑のまま）。"""
+        for col in ("bs_current_portion_long_term_debt", "bs_commercial_paper",
+                    "bs_current_portion_bonds_payable"):
+            assert col in database._NEW_COLS, col
 
 
 # ── calc_derived ─────────────────────────────────────────────────────────────
@@ -1065,6 +1229,23 @@ class TestCalcDerived:
         for k in ("short_term_debt", "long_term_debt", "total_liabilities"):
             del rec["bs"][k]
         assert calc_derived(rec)["derived"]["de_ratio"] is None
+
+    @pytest.mark.parametrize("industry", database.DE_RATIO_EXCLUDED_INDUSTRIES)
+    def test_de_ratio_none_for_banks_and_insurers(self, industry):
+        """銀行は借入を「借用金」で載せ借入金の列が空欄になる＝0（無借金）に見えるので作らない（VIEW と同じ・#925）。"""
+        rec = self._rec()
+        rec["industry"] = industry
+        assert calc_derived(rec)["derived"]["de_ratio"] is None
+
+    @pytest.mark.parametrize("industry", ["証券、商品先物取引業", "その他金融業", "小売業", "", None])
+    def test_de_ratio_kept_for_other_industries(self, industry):
+        """証券業・その他金融業は残す（外すかは #927 で測る）。業種が空・無い行も今までどおり。"""
+        rec = self._rec()
+        rec["industry"] = industry
+        assert calc_derived(rec)["derived"]["de_ratio"] == 0.12
+
+    def test_excluded_industries_are_banks_and_insurers(self):
+        assert database.DE_RATIO_EXCLUDED_INDUSTRIES == ("銀行業", "保険業")
 
 
 # ── 列検出・raw 変換・二分探索 ───────────────────────────────────────────────

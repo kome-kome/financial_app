@@ -132,6 +132,17 @@ class TestDebtAndNetCashNeedTheBalanceSheet:
         assert "COALESCE(fr.bs_short_term_debt,0) + COALESCE(fr.bs_long_term_debt,0)" in expr
 
     @SQLS
+    def test_de_ratio_is_blank_for_banks_and_insurers(self, sql):
+        """銀行・保険は借入金の列が空欄になり、上の規則で D/E = 0（無借金）に見えるので作らない（#925）。
+
+        業種名の唯一の源は `database.DE_RATIO_EXCLUDED_INDUSTRIES`。SQL は Python を読めないので、
+        定数から組み立てた条件が 3 本の式に入っていることを照合する（片方だけ直すと落ちる）。
+        `COALESCE` が無いと、業種が NULL の行で `NOT IN` が NULL を返し、関係のない社の D/E まで消える。
+        """
+        names = ", ".join(f"'{n}'" for n in database.DE_RATIO_EXCLUDED_INDUSTRIES)
+        assert f"AND COALESCE(fr.industry, '') NOT IN ({names})" in expressions(sql)["de_ratio"]
+
+    @SQLS
     def test_net_cash_needs_both_current_assets_and_liabilities(self, sql):
         expr = expressions(sql)["net_cash"]
         assert "fr.bs_current_assets IS NOT NULL AND fr.bs_total_liabilities IS NOT NULL" in expr
