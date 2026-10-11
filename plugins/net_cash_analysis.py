@@ -73,10 +73,14 @@ def compute_net_cash(current_assets: float | None,
 
     流動資産と総負債の**どちらか一方でも**欠損していたら None（欠損の扱いは `financial_metrics` VIEW と同じ・#915）。
     片方を 0 とすると過大・過小に出る——流動資産の区分を持たない銀行・保険は、預金を含む総負債だけが
-    引かれて比率が平均 −34 倍になっていた。
+    引かれて比率が平均 −34 倍になっていた。**両方 0 の行も None**（BS を読めていない行。VIEW と
+    `calc_derived` の `(流動資産 <> 0 OR 総負債 <> 0)` と同じ・#923）——計算すると投資有価証券×0.7 だけが
+    残り、画面のランキングには載るのに VIEW の `z_nc_ratio` からは外れる。
     投資有価証券は欠損時 0 として扱う（持たない社が多く、古いレコードは未収集のため）。
     """
     if current_assets is None or total_liabilities is None:
+        return None
+    if not current_assets and not total_liabilities:
         return None
     inv = float(investment_securities or 0)
     return float(current_assets) + inv * INVESTMENT_DISCOUNT - float(total_liabilities)
@@ -94,9 +98,12 @@ def compute_ncav(current_assets: float | None,
     """Graham 流ネットネット（NCAV）= 流動資産 − 総負債 [円]。
 
     投資有価証券の 0.7 補正を行わない、より保守的なグレアムの原型（Graham 1934）。
-    流動資産と総負債のどちらか一方でも欠損していたら None（`compute_net_cash` と同じ・#915）。
+    流動資産と総負債のどちらか一方でも欠損していたら None、両方 0 の行も None（`compute_net_cash` と同じ・
+    #915・#923）。
     """
     if current_assets is None or total_liabilities is None:
+        return None
+    if not current_assets and not total_liabilities:
         return None
     return float(current_assets) - float(total_liabilities)
 
