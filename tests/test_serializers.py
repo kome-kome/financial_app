@@ -3,11 +3,19 @@
 api.py の routing から引き上げた純粋関数を、FastAPI app を読み込まず直接検証する。
 """
 import os
+import re
 import sys
+from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import serializers
+
+_JS_DIR = Path(__file__).resolve().parent.parent / "static" / "js"
+# 画面が record_to_dict の入れ子をキー名で読む箇所（`r.bs.cash` / `latest?.pl.revenue` / `r.zscore?.z_roe`）。
+_JS_GROUP_KEY = re.compile(r"(\w+)\??\.(bs|pl|cf|val|nc|nonfin|zscore)\??\.(\w+)")
+# `charts.bs` / `charts.cf` は Chart.js のインスタンスで、API の応答ではない。
+_NOT_A_RECORD = {"charts"}
 
 
 def test_record_to_dict_groups_fields(make_metric):
@@ -68,3 +76,32 @@ def test_record_to_dict_nonfin_unset_is_none(make_metric):
     assert d["nonfin"]["employees"] is None
     assert d["nonfin"]["issued_shares"] is None
     assert d["bs"]["ppe_total"] is None
+
+
+def test_record_to_dict_includes_liabilities_split(make_metric):
+    # 収集画面の正規化ビューが読む流動負債・固定負債（#928）
+    r = make_metric(bs_current_liabilities=700.0, bs_noncurrent_liabilities=300.0)
+    d = serializers.record_to_dict(r)
+    assert d["bs"]["current_liabilities"] == 700.0
+    assert d["bs"]["noncurrent_liabilities"] == 300.0
+
+
+def test_every_key_the_screens_read_is_serialized(make_metric):
+    """static/js が読む入れ子のキーは、すべて record_to_dict が出している（#928）。
+
+    出していないキーを JS が読むと undefined になり、エラーを出さずに空欄で表示される。
+    `const z = latest.zscore || {}; z[k]` のように別名を経由する読み方は拾えない
+    （company.js の Zスコア 8 キーがこの形）。
+    """
+    d = serializers.record_to_dict(make_metric())
+    refs = {}
+    for js in sorted(_JS_DIR.glob("*.js")):
+        for m in _JS_GROUP_KEY.finditer(js.read_text(encoding="utf-8")):
+            base, group, key = m.groups()
+            if base in _NOT_A_RECORD:
+                continue
+            refs.setdefault((group, key), js.name)
+    # 正規表現が腐って何も拾わなくなったら、照合が空振りで通ってしまう
+    assert ("bs", "current_liabilities") in refs
+    missing = sorted(f"{g}.{k} ({f})" for (g, k), f in refs.items() if k not in d[g])
+    assert not missing, f"画面が読むのに record_to_dict が出していないキー: {missing}"
