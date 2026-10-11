@@ -29,6 +29,8 @@ def record_to_dict(r) -> dict:
             "investments_other_assets": r.bs_investments_other_assets,
             "cash": r.bs_cash,
             "total_liabilities": r.bs_total_liabilities,
+            "current_liabilities": r.bs_current_liabilities,
+            "noncurrent_liabilities": r.bs_noncurrent_liabilities,
             "total_equity": r.bs_total_equity,
             "equity_parent": r.bs_equity_parent,
             "short_term_debt": r.bs_short_term_debt,
