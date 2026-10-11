@@ -768,7 +768,7 @@ NCAV比率           = NCAV / 時価総額                              [無次�
 
 実装では `market_cap` が百万円単位のため、`比率 = 金額 / (market_cap × 1_000_000)` で単位を整える。投資有価証券は常に NC ≥ NCAV となる（NC − NCAV = 投資有価証券 × 0.7 ≥ 0）。
 
-**流動資産か総負債のどちらかが空欄の行は NC も NCAV も計算しない**（片方を 0 とすると過大・過小に出る。流動資産の区分を持たない銀行・保険はここで外れる・#915）。投資有価証券の空欄は 0 として扱う（持たない社が多い）。
+**流動資産か総負債のどちらかが空欄の行と、両方 0 の行は NC も NCAV も計算しない**（片方を 0 とすると過大・過小に出る。流動資産の区分を持たない銀行・保険はここで外れる・#915。両方 0 は BS を読めていない行で、計算すると投資有価証券×0.7 だけが残る・#923）。投資有価証券の空欄は 0 として扱う（持たない社が多い）。
 
 ### 投資有価証券に 0.7 を乗じる理由
 
@@ -805,7 +805,7 @@ NCAV比率           = NCAV / 時価総額                              [無次�
 
 ### 計算フロー
 
-ネットキャッシュとその比率は **列に保存せず、読むたびに計算する**。計算する場所は次の 2 つで、空欄の扱い（流動資産か総負債が空欄なら計算しない）はどちらも同じ（#915）。分母の `market_cap` もどちらも VIEW の分割補正後の値を使う（[ADR-0055](adr/0055-valuation-basis-mismatch-is-corrected-in-the-view.md)）。
+ネットキャッシュとその比率は **列に保存せず、読むたびに計算する**。計算する場所は次の 2 つで、空欄と 0 の扱い（流動資産か総負債が空欄、または両方 0 なら計算しない）はどちらも同じ（#915・#923）。分母の `market_cap` もどちらも VIEW の分割補正後の値を使う（[ADR-0055](adr/0055-valuation-basis-mismatch-is-corrected-in-the-view.md)）。
 
 1. **`financial_metrics` VIEW**（[sql/financial_metrics_view.sql](../sql/financial_metrics_view.sql)）が `financial_records` の BS 列から `net_cash` → `nc_ratio` → `z_nc_ratio`（年度内 Zスコア・モデル 5）を都度計算する。収集時の `calc_derived()`（`collector_financials.py`）も `net_cash` を作るが、`derived` に入るので `upsert_financial` が破棄する。
 2. **プラグイン**（画面のネットキャッシュ分析 [plugins/net_cash_analysis.py](../plugins/net_cash_analysis.py)・`plugins/sell_ranking.py`・`backtest.py`）は VIEW の `net_cash` / `nc_ratio` を読まない。VIEW から BS の 3 列（`bs_current_assets` / `bs_investment_securities` / `bs_total_liabilities`）と `market_cap` を読み、`compute_net_cash()` / `compute_nc_ratio()`（NCAV は `compute_ncav()` / `compute_ncav_ratio()`）で計算する。
