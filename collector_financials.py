@@ -15,7 +15,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from database import (
     SessionLocal, Company, FinancialRecord, XbrlRawDocument, upsert_company, upsert_financial,
     upsert_xbrl_raw, unpack_elements,
-    build_xbrl_map, db_timeouts, DE_RATIO_EXCLUDED_INDUSTRIES,
+    build_xbrl_map, db_timeouts, DE_RATIO_EXCLUDED_INDUSTRIES, INTEREST_BEARING_DEBT_COLUMNS,
 )
 
 # 設定定数・log。スター import だと ruff が未定義名（F821）を検出できないので名前を明示する（#824）。
@@ -601,10 +601,13 @@ def calc_derived(rec: dict) -> dict:
     net   = pl.get("net_income", 0) or pl.get("net_income_attr", 0) or 0
     asset = bs.get("total_assets", 0) or 0
     eq    = bs.get("total_equity", 0) or bs.get("equity_parent", 0) or 0
-    debt  = (bs.get("short_term_debt", 0) or 0) + (bs.get("long_term_debt", 0) or 0)
-    # 借入金の行が無いのは無借金だからとして 0 で足すが、負債合計まで無ければ負債の側を観測していない
+    # 有利子負債（D/E の分子）は VIEW の interest_bearing_debt と同じ列を足す（構成要素の唯一の源は
+    # database.INTEREST_BEARING_DEBT_COLUMNS・#926）。bs のキーは列名から接頭辞 bs_ を外した名前
+    debt_keys = tuple(c.removeprefix("bs_") for c in INTEREST_BEARING_DEBT_COLUMNS)
+    debt  = sum(bs.get(k, 0) or 0 for k in debt_keys)
+    # 借入の行が無いのは無借金だからとして 0 で足すが、負債合計まで無ければ負債の側を観測していない
     # ので D/E を作らない（VIEW の de_ratio と同じ・#915）
-    liab_seen = any(bs.get(k) is not None for k in ("short_term_debt", "long_term_debt", "total_liabilities"))
+    liab_seen = any(bs.get(k) is not None for k in debt_keys + ("total_liabilities",))
     # 銀行業・保険業は D/E を作らない（VIEW と同じ・#925）。収集の経路は業種を付ける前にここを呼ぶが、
     # derived は保存しない（読み手は VIEW）ので、効くのは業種を持った rec を渡したときだけ
     de_applies = rec.get("industry") not in DE_RATIO_EXCLUDED_INDUSTRIES

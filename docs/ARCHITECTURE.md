@@ -617,7 +617,7 @@ erDiagram
 ```
 
 > **`financial_metrics`（VIEW・物理テーブルではない）**: `financial_records` をソースに、
-> `op_margin` / `net_margin` / `roe` / `roa` / `equity_ratio` / `de_ratio` / `cf_ratio` /
+> `op_margin` / `net_margin` / `roe` / `roa` / `equity_ratio` / `interest_bearing_debt` / `de_ratio` / `cf_ratio` /
 > `asset_turnover`（総資産回転率＝売上/総資産・デュポン分解因子・M-1 特徴量） /
 > `rd_intensity` / `da_intensity`（研究開発・減価償却の対売上集約度 [%]・C2列の結線） /
 > `net_cash` / `nc_ratio` / `z_*`（8指標）/ `rev_growth` / `op_growth` / `eps_growth` /
@@ -626,9 +626,12 @@ erDiagram
 > `z_roe_sec` / `z_op_margin_sec`（**業種内**Zスコア・`PARTITION BY year, industry`・#373）を
 > SQL で都度算出し、`regression_results` を LEFT JOIN して `predicted_market_cap` / `gap_ratio` も合成する。
 > 算出式は旧 `collector.calc_derived` / `_calc_zscore_for_year` / `calc_growth_rates` と一致（移植）。
-> `de_ratio` の分子は今は短期・長期借入金の2列で、**銀行業・保険業の行は NULL**（借入金の区分を持たず 0＝無借金に
-> 見えるため・`database.DE_RATIO_EXCLUDED_INDUSTRIES`・ADR-0067）。有利子負債の残りの構成要素（1年内返済予定の
-> 長期借入金・CP・1年内償還予定の社債）は `financial_records` の列にあり、VIEW へ出して分子へ足すのは #926。
+> `de_ratio` の分子は `interest_bearing_debt`（有利子負債＝借入金と社債の構成要素の和・リース債務は除く・#926）。
+> 足す列の唯一の源は `database.INTEREST_BEARING_DEBT_COLUMNS` で、VIEW 3本の式は d の層で1か所だけ作り、
+> `de_ratio` は n の層でそれを読む（同じ SELECT では別名を読めないため）。企業詳細の BS グラフ
+> （`serializers.record_to_dict` の `interest_bearing_debt` / `interest_bearing_debt_current`）と `calc_derived` も
+> 同じ列を読む。**銀行業・保険業の行は `de_ratio` が NULL**（借入金の区分を持たず 0＝無借金に見えるため・
+> `database.DE_RATIO_EXCLUDED_INDUSTRIES`・ADR-0067）。
 >
 > **株価由来の列はここで基準を揃える（#655・ADR-0055）**: `split_adjustment_factors` を
 > LEFT JOIN し、`per` / `pbr` / `market_cap` に `× F`、`div_yield` に `÷ F` を当てる。

@@ -211,20 +211,41 @@ class TestTtmRows:
 
     def _bs_ratios(self, conn, ec: str):
         return conn.execute(text(
-            f"SELECT de_ratio, net_cash, nc_ratio FROM {VIEW} WHERE edinet_code = :ec AND basis = 'ttm'"),
+            f"SELECT interest_bearing_debt, de_ratio, net_cash, nc_ratio FROM {VIEW}"
+            f" WHERE edinet_code = :ec AND basis = 'ttm'"),
             {"ec": ec}).one()
+
+    def test_de_ratio_sums_all_interest_bearing_debt_components(self, conn):
+        """D/E の分子は借入金と社債の6列の和（#926・ADR-0067 決定1）。純資産 2000。"""
+        ec = _sample_company(conn)
+        self._insert(conn, ec, bs_short_term_debt=100.0, bs_current_portion_long_term_debt=50.0,
+                     bs_commercial_paper=30.0, bs_current_portion_bonds_payable=20.0,
+                     bs_long_term_debt=200.0, bs_bonds_payable=100.0)
+        row = self._bs_ratios(conn, ec)
+        assert row.interest_bearing_debt == 500.0
+        assert row.de_ratio == pytest.approx(0.25)
+
+    def test_new_components_alone_count_as_observed(self, conn):
+        """負債合計が空欄でも、新しい構成要素（CP）があれば負債の側を観測している（#926）。"""
+        ec = _sample_company(conn)
+        self._insert(conn, ec, bs_total_liabilities=None, bs_commercial_paper=80.0)
+        row = self._bs_ratios(conn, ec)
+        assert row.interest_bearing_debt == 80.0
+        assert row.de_ratio == pytest.approx(0.04)
 
     def test_de_ratio_is_zero_without_debt_lines_when_liabilities_are_observed(self, conn):
         """借入金の行が無く負債合計がある社は無借金として D/E 0（外さない・#915）。式は通期・半期と同じ形。"""
         ec = _sample_company(conn)
-        self._insert(conn, ec)                           # 借入金は2列とも空欄・負債合計 1000
-        assert self._bs_ratios(conn, ec).de_ratio == 0.0
+        self._insert(conn, ec)                           # 有利子負債は6列とも空欄・負債合計 1000
+        row = self._bs_ratios(conn, ec)
+        assert row.interest_bearing_debt == 0.0 and row.de_ratio == 0.0
 
     def test_de_ratio_and_net_cash_are_blank_when_no_liability_is_observed(self, conn):
         """負債合計まで空欄なら D/E を 0（無借金）にせず空欄（#915・#900 の後の US-GAAP の社）。"""
         ec = _sample_company(conn)
         self._insert(conn, ec, bs_total_liabilities=None)
         row = self._bs_ratios(conn, ec)
+        assert row.interest_bearing_debt is None
         assert row.de_ratio is None
         assert row.net_cash is None and row.nc_ratio is None
 
@@ -232,7 +253,7 @@ class TestTtmRows:
     def test_de_ratio_is_blank_for_banks_and_insurers(self, conn, industry):
         """銀行・保険は負債合計があっても D/E を 0（無借金）にせず空欄（#925）。式は通期・半期と同じ形。"""
         ec = _sample_company(conn)
-        self._insert(conn, ec, industry=industry)       # 借入金は2列とも空欄・負債合計 1000
+        self._insert(conn, ec, industry=industry)       # 有利子負債は6列とも空欄・負債合計 1000
         assert self._bs_ratios(conn, ec).de_ratio is None
 
     def test_net_cash_is_blank_without_current_assets(self, conn):

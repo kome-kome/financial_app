@@ -86,6 +86,24 @@ def test_record_to_dict_includes_liabilities_split(make_metric):
     assert d["bs"]["noncurrent_liabilities"] == 300.0
 
 
+def test_record_to_dict_includes_interest_bearing_debt(make_metric):
+    """BS グラフの有利子負債は VIEW の合計と短期側の小計を読む（JS で構成要素を足さない・#926）。"""
+    r = make_metric(interest_bearing_debt=600.0, bs_short_term_debt=100.0,
+                    bs_current_portion_long_term_debt=50.0, bs_commercial_paper=30.0,
+                    bs_current_portion_bonds_payable=20.0, bs_long_term_debt=200.0,
+                    bs_bonds_payable=200.0)
+    d = serializers.record_to_dict(r)
+    assert d["bs"]["interest_bearing_debt"] == 600.0
+    assert d["bs"]["interest_bearing_debt_current"] == 200.0      # 100 + 50 + 30 + 20
+
+
+def test_interest_bearing_debt_current_is_blank_when_the_total_is_blank(make_metric):
+    """合計が NULL（負債の側を観測していない・#915）なら短期側も 0 ではなく NULL。"""
+    d = serializers.record_to_dict(make_metric(interest_bearing_debt=None))
+    assert d["bs"]["interest_bearing_debt"] is None
+    assert d["bs"]["interest_bearing_debt_current"] is None
+
+
 def test_every_key_the_screens_read_is_serialized(make_metric):
     """static/js が読む入れ子のキーは、すべて record_to_dict が出している（#928）。
 

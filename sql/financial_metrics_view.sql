@@ -8,7 +8,8 @@ WITH d AS (
         fr.bs_intangible_assets, fr.bs_investments_other_assets,
         fr.bs_cash, fr.bs_investment_securities, fr.bs_total_liabilities, fr.bs_current_liabilities,
         fr.bs_payables, fr.bs_noncurrent_liabilities, fr.bs_short_term_debt, fr.bs_long_term_debt,
-        fr.bs_bonds_payable, fr.bs_total_equity, fr.bs_equity_parent, fr.bs_paid_in_capital,
+        fr.bs_bonds_payable, fr.bs_current_portion_long_term_debt, fr.bs_commercial_paper,
+        fr.bs_current_portion_bonds_payable, fr.bs_total_equity, fr.bs_equity_parent, fr.bs_paid_in_capital,
         fr.bs_retained_earnings, fr.bs_bps,
         fr.pl_revenue, fr.pl_cost_of_sales, fr.pl_gross_profit, fr.pl_sga, fr.pl_operating_profit,
         fr.pl_nonoperating_income, fr.pl_ordinary_profit, fr.pl_pretax_profit, fr.pl_net_income,
@@ -56,13 +57,20 @@ WITH d AS (
              THEN ROUND((COALESCE(NULLIF(fr.pl_net_income,0), NULLIF(fr.pl_net_income_attr,0), 0) / fr.bs_total_assets * 100)::numeric, 2) END AS roa,
         CASE WHEN COALESCE(fr.bs_total_assets,0) <> 0
              THEN ROUND((COALESCE(NULLIF(fr.bs_total_equity,0), NULLIF(fr.bs_equity_parent,0), 0) / fr.bs_total_assets * 100)::numeric, 2) END AS equity_ratio,
-        -- D/E: 借入金の行が無いのは無借金だから（有報は無い科目を載せない）なので 0 として足すが、
-        -- **負債合計まで空欄なら負債の側を観測していない**ので NULL にする。0 にすると無借金に見え、
-        -- 空欄の社を外す分析（factor premia・M-2/M-6）の AND を素通りする（#915）。
-        CASE WHEN COALESCE(NULLIF(fr.bs_total_equity,0), NULLIF(fr.bs_equity_parent,0), 0) <> 0
-              AND (fr.bs_short_term_debt IS NOT NULL OR fr.bs_long_term_debt IS NOT NULL OR fr.bs_total_liabilities IS NOT NULL)
-              AND COALESCE(fr.industry, '') NOT IN ('銀行業', '保険業')
-             THEN ROUND(((COALESCE(fr.bs_short_term_debt,0) + COALESCE(fr.bs_long_term_debt,0)) / COALESCE(NULLIF(fr.bs_total_equity,0), NULLIF(fr.bs_equity_parent,0), 0))::numeric, 4) END AS de_ratio,
+        -- 有利子負債（#926・ADR-0067 決定1・2）: 借入金と社債の6列の和。リース債務は入れない。
+        -- 構成要素の唯一の源は database.INTEREST_BEARING_DEBT_COLUMNS（SQL は Python を読めないので
+        -- 列を書き並べ、一致は tests/test_financial_metrics_with_ttm.py が照合する）。D/E の分子と
+        -- 企業詳細の BS グラフが**この1か所**を読む。借入の行が無いのは無借金だから（有報は無い科目を
+        -- 載せない）なので 0 として足すが、**構成要素と負債合計がすべて空欄なら負債の側を観測していない**
+        -- ので NULL にする。0 にすると無借金に見え、空欄の社を外す分析（factor premia・M-2/M-6）の
+        -- AND を素通りする（#915）。
+        CASE WHEN fr.bs_short_term_debt IS NOT NULL OR fr.bs_current_portion_long_term_debt IS NOT NULL
+               OR fr.bs_commercial_paper IS NOT NULL OR fr.bs_current_portion_bonds_payable IS NOT NULL
+               OR fr.bs_long_term_debt IS NOT NULL OR fr.bs_bonds_payable IS NOT NULL
+               OR fr.bs_total_liabilities IS NOT NULL
+             THEN COALESCE(fr.bs_short_term_debt,0) + COALESCE(fr.bs_current_portion_long_term_debt,0)
+                + COALESCE(fr.bs_commercial_paper,0) + COALESCE(fr.bs_current_portion_bonds_payable,0)
+                + COALESCE(fr.bs_long_term_debt,0) + COALESCE(fr.bs_bonds_payable,0) END AS interest_bearing_debt,
         CASE WHEN COALESCE(fr.pl_revenue,0) <> 0
              THEN ROUND((COALESCE(fr.cf_operating_cf,0) / fr.pl_revenue * 100)::numeric, 2) END AS cf_ratio,
         -- C2 結線: 研究開発集約度・減価償却集約度（無次元 [%]）。分子は非 COALESCE で
@@ -100,6 +108,13 @@ WITH d AS (
 ),
 n AS (
     SELECT d.*,
+        -- D/E = 有利子負債 ÷ 純資産。有利子負債が NULL（負債の側を観測していない・#915）なら NULL。
+        -- 同じ SELECT の中では別名を読めないので、d で作った interest_bearing_debt をここで読む（#926）。
+        -- 銀行業・保険業は作らない（借入を「借用金」で載せる・#925・ADR-0067 決定4）。
+        CASE WHEN COALESCE(NULLIF(d.bs_total_equity,0), NULLIF(d.bs_equity_parent,0), 0) <> 0
+              AND d.interest_bearing_debt IS NOT NULL
+              AND COALESCE(d.industry, '') NOT IN ('銀行業', '保険業')
+             THEN ROUND((d.interest_bearing_debt / COALESCE(NULLIF(d.bs_total_equity,0), NULLIF(d.bs_equity_parent,0), 0))::numeric, 4) END AS de_ratio,
         CASE WHEN d.net_cash IS NOT NULL AND COALESCE(d.market_cap,0) <> 0
              THEN ROUND((d.net_cash / (d.market_cap * 1000000))::numeric, 4) END AS nc_ratio
     FROM d

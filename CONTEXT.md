@@ -23,6 +23,10 @@ _Avoid_: （口語の「説明変数」は可。正式にはこちら）
 「未収集だから NULL」ではなく「その企業・業種には会計上そもそも存在しないから NULL」である欠損。銀行業の売上総利益・売上高、無配企業の `dps` が該当する。[[分析特徴量]] の AND フィルタ（選択列が1つでも NULL の銘柄を丸ごと除外）では欠測と区別できず、企業や業種を丸ごと分析対象外にする。sector_ols は業種単位の列ドロップ（`sector_missing_rate`）と無配の 0 埋め（`zero_fill_no_dividend`）で扱いを分ける（ADR-0027）。**欠損率で機械的に判断せず「なぜ NULL なのか」を先に決める**のが要点で、母集団全体の欠損率だけを見ると業種内 100% 欠損（銀行業の粗利＝全体では 7.7%）を取りこぼす。
 _Avoid_: 欠測, 未収集（区別が本質なので言い換えない）
 
+**有利子負債 (interest-bearing debt)**:
+利息と返済期限のある負債＝借入金と社債（CP・1年内返済／償還予定の分を含む）。D/E レシオの分子で、**リース債務は含まない**（新リース基準の適用前は日本基準と IFRS で扱いが違う・ADR-0067）。合計は VIEW の `interest_bearing_debt` が1か所で作り、足す列の唯一の源は `database.INTEREST_BEARING_DEBT_COLUMNS`（#926）。構成要素と負債合計がすべて空欄の行は 0 ではなく NULL（[[構造的NULL]] と同じく「無い」と「読めていない」を分ける・#915）。
+_Avoid_: 借入金（短期・長期借入金の2列だけを指すと誤解させるため。#926 より前の D/E の分子はこの2列だった）, 負債（負債合計と混同するため）
+
 **回帰結果 (regression result)**:
 業種別OLS（producer）が `regression_results` テーブルへ書き込む銘柄×年度の出力（predicted_market_cap / gap_ratio / model[ols|ridge] / sector / computed_at）。バリュエーション分析（consumer・`depends_on=["sector_ols"]`）が消費する seam の通貨。producer 未実行なら乖離分析は前提条件エラー（`plugins.ensure_dependencies` が `depends_on` を runner/専用エンドポイントで強制）。回帰が財務データ更新より古い＝stale。
 _Avoid_: 予測結果, OLS結果（モデル混在を曖昧にするため）
