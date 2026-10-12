@@ -317,6 +317,21 @@ JOBS: dict[str, Job] = {
         measured_min=15.0,
         parallel_sensitive=True,   # 他の gate と同じ理由（採否が CI の符号で決まる）
     ),
+    # 同じ問い（#927）を factor premia で測る道具（#941）。`z_de_ratio` は年度ごとに標準化されるので、
+    # トランザクションの中だけ VIEW を差し替えて本番の関数で測り、必ず取り消す。**積むのは人**（#926 の後）。
+    "measure:de-exclusion": Job(
+        name="measure_de_exclusion",
+        argv=("{python}", "-m", "scripts.measure_de_exclusion"),
+        why="証券業・その他金融業の D/E を空欄にした VIEW で factor premia の z_de_ratio の係数と、"
+            "推定した重みの合成スコアの rank-IC（共通域・in-sample の記録）を測る（#927・#941）。"
+            "VIEW の差し替えはトランザクションの中だけで、実行後に定義と行数が戻らなければ非0で止まる。",
+        # 見積り（未実測）。factor premia のパネル構築（月次バッチの所要の一部）を2条件ぶん。
+        # 実走ログの END の分数で差し替える。
+        measured_min=15.0,
+        # 結果は閉形式で決まるが、計測中は financial_metrics に ACCESS EXCLUSIVE が掛かり、並走する
+        # 読み手（夜間・API）を待たせる。手動キックで PC を触っている時間帯に走らせない。
+        parallel_sensitive=True,
+    ),
     # 9/18 の列数上限の本測定で「上限が財務の列を締め出している」は否定された（上限 40 でも財務は
     # 2列）。残った見立ては「M-1 の目的変数は素の52週先リターンなので、BIC（二乗誤差）は相場全体の
     # 変動を説明するマクロ列を選ぶ。評価は月内の順位」＝学習と評価のずれ（ADR-0050 の 9/18 追記）。
