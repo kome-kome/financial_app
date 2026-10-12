@@ -369,7 +369,11 @@ class FinancialRecord(Base):
     # 注記の内訳の「売掛金」は BS の行に負ける（collector_financials._TAGS_LOSING_TIES）
     bs_receivables          = Column(Float, info={"xbrl": ["NotesAndAccountsReceivableTrade", "AccountsReceivableTrade", "NotesAndAccountsReceivableTradeAndContractAssets", "AccountsReceivableTradeAndContractAssets", "TradeAndOtherReceivablesCurrentIFRS"]})  # 売上債権
     bs_inventory            = Column(Float, info={"xbrl": ["Inventories", "InventoriesIFRS"]})  # 棚卸資産
-    bs_noncurrent_assets    = Column(Float, info={"xbrl": ["NoncurrentAssets", "NoncurrentAssetsIFRS"]})  # 固定資産
+    # IFRS の連結 BS の小計は日本基準の名前に IFRS を付けた形ではない（#935・2019〜2025 年度の通期と H1 で同じ）:
+    # 非流動資産 NonCurrentAssetsIFRS（C が大文字）・流動負債 TotalCurrentLiabilitiesIFRS・非流動負債
+    # NonCurrentLabilitiesIFRS（**タクソノミ自体の綴り。Liabilities へ直すと拾えなくなる**）。…NoncurrentAssetsIFRS 等の
+    # 旧い登録名はどの書類にも無いが、消しても得るものが無いので残す
+    bs_noncurrent_assets    = Column(Float, info={"xbrl": ["NoncurrentAssets", "NonCurrentAssetsIFRS", "NoncurrentAssetsIFRS"]})  # 固定資産
     # 建物及び構築物（純額のみ）。BuildingsAndStructures（Net無し）は取得原価=グロスで bs_ppe_total（純額）を超え
     # balance invariant を壊すため除外。代替綴り BuildingsNet・IFRS 純額 BuildingsAndStructuresIFRS を採用。
     bs_buildings            = Column(Float, info={"xbrl": ["BuildingsAndStructuresNet", "BuildingsNet", "BuildingsAndStructuresIFRS"]})  # 建物及び構築物（純額）
@@ -383,9 +387,9 @@ class FinancialRecord(Base):
     # 投資有価証券（清原式ネットキャッシュ用）。IFRS は非流動その他金融資産で近似（流動性の高い金融資産は別科目のため除外）
     bs_investment_securities = Column(Float, info={"xbrl": ["InvestmentSecurities", "InvestmentsInSecurities", "ShortTermInvestmentSecurities", "OtherFinancialAssetsNonCurrentIFRS"]})  # 投資有価証券
     bs_total_liabilities    = Column(Float, info={"xbrl": ["Liabilities", "LiabilitiesIFRS"]})  # 総負債
-    bs_current_liabilities  = Column(Float, info={"xbrl": ["CurrentLiabilities", "CurrentLiabilitiesIFRS"]})  # 流動負債
+    bs_current_liabilities  = Column(Float, info={"xbrl": ["CurrentLiabilities", "TotalCurrentLiabilitiesIFRS", "CurrentLiabilitiesIFRS"]})  # 流動負債（IFRS の名前は bs_noncurrent_assets の注記）
     bs_payables             = Column(Float, info={"xbrl": ["NotesAndAccountsPayableTrade", "AccountsPayableTrade", "TradeAndOtherPayablesCurrentIFRS"]})  # 買掛金（仕入債務）
-    bs_noncurrent_liabilities = Column(Float, info={"xbrl": ["NoncurrentLiabilities", "NoncurrentLiabilitiesIFRS"]})  # 固定負債
+    bs_noncurrent_liabilities = Column(Float, info={"xbrl": ["NoncurrentLiabilities", "NonCurrentLabilitiesIFRS", "NoncurrentLiabilitiesIFRS"]})  # 固定負債（同上・綴りはタクソノミのまま）
     # 有利子負債の構成要素（#920・ADR-0067）。1つの列には1つのタグの値しか入らない（_apply_row は合算しない）
     # ので、構成要素ごとに列を持ち、合計は VIEW で作る（#926）。D/E の分子は今は短期・長期借入金の2列だけ。
     # IFRS の会社は連結の BS を「社債及び借入金」「有利子負債」「借入金」「長期債務」の流動・非流動で載せる
