@@ -899,6 +899,22 @@ _RECRUIT_S100YDHL = _DEI_IFRS_2026_03 + [
     ("jppfs_cor:ShortTermLoansPayable", "CurrentYearInstant_NonConsolidatedMember", "543092000000"),
     ("jppfs_cor:LongTermLoansPayable", "CurrentYearInstant_NonConsolidatedMember", "200000000000"),
 ]
+# トヨタ 2026年3月期（S100Y8NY・IFRS）の BS の小計と合計（#935）。連結は jpigp_cor の名前（非流動負債は
+# タクソノミ自体の綴り Labilities）、単体は jppfs_cor の名前。書類の値をそのまま写した
+_TOYOTA_SUBTOTALS_S100Y8NY = _DEI_IFRS_2026_03 + [
+    ("jpigp_cor:CurrentAssetsIFRS", "CurrentYearInstant", "42824081000000"),
+    ("jpigp_cor:NonCurrentAssetsIFRS", "CurrentYearInstant", "62698250000000"),
+    ("jpigp_cor:AssetsIFRS", "CurrentYearInstant", "105522331000000"),
+    ("jpigp_cor:TotalCurrentLiabilitiesIFRS", "CurrentYearInstant", "33605019000000"),
+    ("jpigp_cor:NonCurrentLabilitiesIFRS", "CurrentYearInstant", "30897244000000"),
+    ("jpigp_cor:LiabilitiesIFRS", "CurrentYearInstant", "64502263000000"),
+    ("jppfs_cor:CurrentAssets", "CurrentYearInstant_NonConsolidatedMember", "16512121000000"),
+    ("jppfs_cor:NoncurrentAssets", "CurrentYearInstant_NonConsolidatedMember", "15144204000000"),
+    ("jppfs_cor:Assets", "CurrentYearInstant_NonConsolidatedMember", "31656325000000"),
+    ("jppfs_cor:CurrentLiabilities", "CurrentYearInstant_NonConsolidatedMember", "6185881000000"),
+    ("jppfs_cor:NoncurrentLiabilities", "CurrentYearInstant_NonConsolidatedMember", "1805520000000"),
+    ("jppfs_cor:Liabilities", "CurrentYearInstant_NonConsolidatedMember", "7991401000000"),
+]
 
 
 def _without_dei(rows):
@@ -1148,6 +1164,95 @@ class TestInterestBearingDebtComponents:
         for col in ("bs_current_portion_long_term_debt", "bs_commercial_paper",
                     "bs_current_portion_bonds_payable"):
             assert col in database._NEW_COLS, col
+
+
+# ベイカレント 2024年2月期（S100TI4B・IFRS・連結財務諸表なし）。同じ書類に IFRS（jpigp_cor）と日本基準
+# （jppfs_cor）の財務諸表を単体の文脈で両方載せる（#944）。書類の値をそのまま写した
+_BAYCURRENT_S100TI4B = [
+    ("jpdei_cor:AccountingStandardsDEI", "FilingDateInstant", "IFRS"),
+    ("jpdei_cor:WhetherConsolidatedFinancialStatementsArePreparedDEI", "FilingDateInstant", "false"),
+    ("jpdei_cor:CurrentPeriodEndDateDEI", "FilingDateInstant", "2024-02-29"),
+    ("jppfs_cor:CurrentPortionOfLongTermLoansPayable", "CurrentYearInstant_NonConsolidatedMember", "1050000000"),
+    ("jppfs_cor:LongTermLoansPayable", "CurrentYearInstant_NonConsolidatedMember", "1313000000"),
+    ("jpigp_cor:BorrowingsCLIFRS", "CurrentYearInstant_NonConsolidatedMember", "1050000000"),
+    ("jpigp_cor:BorrowingsNCLIFRS", "CurrentYearInstant_NonConsolidatedMember", "1306000000"),
+]
+
+
+class TestIfrsDocumentsReadDebtFromIfrsTagsOnly:
+    """IFRS の書類では有利子負債の列に日本基準のタグを割り当てない（#944）。
+
+    連結を作らない IFRS の社は IFRS と日本基準の表を両方載せ、同じ借入が「借入金（流動）」と
+    「1年内返済予定の長期借入金」の2列に入って、#926 の6列の和で二重に数えていた。
+    """
+
+    @_ORDERS
+    def test_only_ifrs_borrowings_are_read(self, order):
+        bs = _parse(_BAYCURRENT_S100TI4B, order)["bs"]
+        assert {k: v for k, v in bs.items() if k in _DEBT_FIELDS} == {
+            "short_term_debt": 1050000000.0,    # 借入金（流動・IFRS）。1年内返済分を含む
+            "long_term_debt": 1306000000.0,     # 借入金（非流動・IFRS）。日本基準の 1,313 ではない
+        }
+
+    def test_the_legacy_reading_still_sees_the_jgaap_values(self):
+        """旧来の読み方（--clear-nonconsolidated の比べる相手）には効かせない。効かせると、二重に
+        入った値が「消す列」として検出されず、取り直しで残る。"""
+        bs = _parse(_BAYCURRENT_S100TI4B, nonconsolidated_fallback=True)["bs"]
+        assert bs["current_portion_long_term_debt"] == 1050000000.0
+
+    def test_the_refetch_clears_the_double_counted_column(self):
+        from scripts.refetch_financials import cleared_columns, document_columns
+
+        df = _xbrl_df(_BAYCURRENT_S100TI4B)
+        values = document_columns(df, "E32549", "2024-02-29")
+        assert "bs_current_portion_long_term_debt" not in values
+        assert "bs_current_portion_long_term_debt" in cleared_columns(df, "E32549", "2024-02-29", values)
+
+    def test_jgaap_documents_are_unaffected(self):
+        """日本基準の書類は jppfs_cor のタグを今までどおり読む（規則は IFRS の書類だけ）。"""
+        rows = [("jpdei_cor:AccountingStandardsDEI", "FilingDateInstant", "Japan GAAP")] + \
+            _BAYCURRENT_S100TI4B[1:]
+        bs = _parse(rows)["bs"]
+        assert bs["current_portion_long_term_debt"] == 1050000000.0
+
+
+_SUBTOTAL_FIELDS = ("current_assets", "noncurrent_assets", "total_assets",
+                    "current_liabilities", "noncurrent_liabilities", "total_liabilities")
+
+
+class TestIfrsBalanceSheetSubtotals:
+    """IFRS の連結 BS の小計を連結の値で読む（#935・#930）。
+
+    登録していた `CurrentLiabilitiesIFRS` / `NoncurrentAssetsIFRS` / `NoncurrentLiabilitiesIFRS` はどの書類にも無く、
+    連結の小計を1つも拾えていなかった（以前は単体の値が入り、トヨタの流動負債 6.19 兆円は単体だった）。
+    """
+
+    @_ORDERS
+    def test_consolidated_subtotals_are_read(self, order):
+        bs = _parse(_TOYOTA_SUBTOTALS_S100Y8NY, order)["bs"]
+        assert {k: v for k, v in bs.items() if k in _SUBTOTAL_FIELDS} == {
+            "current_assets": 42824081000000.0,
+            "noncurrent_assets": 62698250000000.0,       # 単体の 15,144,204百万円ではない
+            "total_assets": 105522331000000.0,
+            "current_liabilities": 33605019000000.0,     # 単体の 6,185,881百万円ではない
+            "noncurrent_liabilities": 30897244000000.0,  # 単体の 1,805,520百万円ではない
+            "total_liabilities": 64502263000000.0,
+        }
+
+    def test_subtotals_add_up_to_the_totals(self):
+        """小計の和が合計に一致する（#930 の「足しても合計にならない」が解消したことの確認）。"""
+        bs = _parse(_TOYOTA_SUBTOTALS_S100Y8NY)["bs"]
+        assert bs["current_assets"] + bs["noncurrent_assets"] == bs["total_assets"]
+        assert bs["current_liabilities"] + bs["noncurrent_liabilities"] == bs["total_liabilities"]
+
+    @pytest.mark.parametrize("tag, col", [
+        ("NonCurrentAssetsIFRS", "noncurrent_assets"),
+        ("TotalCurrentLiabilitiesIFRS", "current_liabilities"),
+        # タクソノミ自体の綴り（Labilities）。Liabilities へ直すと拾えなくなる
+        ("NonCurrentLabilitiesIFRS", "noncurrent_liabilities"),
+    ])
+    def test_ifrs_subtotal_tags_are_mapped(self, tag, col):
+        assert XBRL_MAP[tag] == ("bs", col)
 
 
 # ── calc_derived ─────────────────────────────────────────────────────────────

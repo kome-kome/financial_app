@@ -58,9 +58,20 @@ class TestComputeNetCash:
         assert INVESTMENT_DISCOUNT == 0.7
 
     def test_investment_discount_applied(self):
-        # 流動資産=0、投資有価証券 1000億、負債=0 → 700億になる
-        nc = compute_net_cash(0, 1000e8, 0)
+        # 流動資産と負債が相殺（各 100億）、投資有価証券 1000億 → 投資有価証券×0.7 の 700億だけが残る
+        nc = compute_net_cash(100e8, 1000e8, 100e8)
         assert nc == pytest.approx(700e8)
+
+    def test_both_zero_returns_none(self):
+        # 流動資産と総負債が両方 0 の行は BS を読めていない。VIEW・calc_derived と同じく計算しない
+        # （計算すると投資有価証券×0.7 だけが残り、画面のランキングにだけ載る・#923）
+        assert compute_net_cash(0, 1000e8, 0) is None
+        assert compute_net_cash(0.0, None, 0.0) is None
+
+    def test_one_side_zero_is_still_computed(self):
+        # 片方だけが 0 の行は観測済みの値として計算する（VIEW の `流動資産 <> 0 OR 総負債 <> 0` と同じ）
+        assert compute_net_cash(0, 0, 500e8) == pytest.approx(-500e8)
+        assert compute_net_cash(300e8, 0, 0) == pytest.approx(300e8)
 
 
 class TestComputeNcRatio:
@@ -113,6 +124,10 @@ class TestComputeNcav:
 
     def test_both_none_returns_none(self):
         assert compute_ncav(None, None) is None
+
+    def test_both_zero_returns_none(self):
+        # compute_net_cash と同じく、両方 0 の行は計算しない（#923）
+        assert compute_ncav(0, 0) is None
 
     def test_negative_when_liabilities_exceed_assets(self):
         ncav = compute_ncav(100e8, 800e8)

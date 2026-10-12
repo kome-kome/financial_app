@@ -369,7 +369,11 @@ class FinancialRecord(Base):
     # 注記の内訳の「売掛金」は BS の行に負ける（collector_financials._TAGS_LOSING_TIES）
     bs_receivables          = Column(Float, info={"xbrl": ["NotesAndAccountsReceivableTrade", "AccountsReceivableTrade", "NotesAndAccountsReceivableTradeAndContractAssets", "AccountsReceivableTradeAndContractAssets", "TradeAndOtherReceivablesCurrentIFRS"]})  # 売上債権
     bs_inventory            = Column(Float, info={"xbrl": ["Inventories", "InventoriesIFRS"]})  # 棚卸資産
-    bs_noncurrent_assets    = Column(Float, info={"xbrl": ["NoncurrentAssets", "NoncurrentAssetsIFRS"]})  # 固定資産
+    # IFRS の連結 BS の小計は日本基準の名前に IFRS を付けた形ではない（#935・2019〜2025 年度の通期と H1 で同じ）:
+    # 非流動資産 NonCurrentAssetsIFRS（C が大文字）・流動負債 TotalCurrentLiabilitiesIFRS・非流動負債
+    # NonCurrentLabilitiesIFRS（**タクソノミ自体の綴り。Liabilities へ直すと拾えなくなる**）。…NoncurrentAssetsIFRS 等の
+    # 旧い登録名はどの書類にも無いが、消しても得るものが無いので残す
+    bs_noncurrent_assets    = Column(Float, info={"xbrl": ["NoncurrentAssets", "NonCurrentAssetsIFRS", "NoncurrentAssetsIFRS"]})  # 固定資産
     # 建物及び構築物（純額のみ）。BuildingsAndStructures（Net無し）は取得原価=グロスで bs_ppe_total（純額）を超え
     # balance invariant を壊すため除外。代替綴り BuildingsNet・IFRS 純額 BuildingsAndStructuresIFRS を採用。
     bs_buildings            = Column(Float, info={"xbrl": ["BuildingsAndStructuresNet", "BuildingsNet", "BuildingsAndStructuresIFRS"]})  # 建物及び構築物（純額）
@@ -383,9 +387,9 @@ class FinancialRecord(Base):
     # 投資有価証券（清原式ネットキャッシュ用）。IFRS は非流動その他金融資産で近似（流動性の高い金融資産は別科目のため除外）
     bs_investment_securities = Column(Float, info={"xbrl": ["InvestmentSecurities", "InvestmentsInSecurities", "ShortTermInvestmentSecurities", "OtherFinancialAssetsNonCurrentIFRS"]})  # 投資有価証券
     bs_total_liabilities    = Column(Float, info={"xbrl": ["Liabilities", "LiabilitiesIFRS"]})  # 総負債
-    bs_current_liabilities  = Column(Float, info={"xbrl": ["CurrentLiabilities", "CurrentLiabilitiesIFRS"]})  # 流動負債
+    bs_current_liabilities  = Column(Float, info={"xbrl": ["CurrentLiabilities", "TotalCurrentLiabilitiesIFRS", "CurrentLiabilitiesIFRS"]})  # 流動負債（IFRS の名前は bs_noncurrent_assets の注記）
     bs_payables             = Column(Float, info={"xbrl": ["NotesAndAccountsPayableTrade", "AccountsPayableTrade", "TradeAndOtherPayablesCurrentIFRS"]})  # 買掛金（仕入債務）
-    bs_noncurrent_liabilities = Column(Float, info={"xbrl": ["NoncurrentLiabilities", "NoncurrentLiabilitiesIFRS"]})  # 固定負債
+    bs_noncurrent_liabilities = Column(Float, info={"xbrl": ["NoncurrentLiabilities", "NonCurrentLabilitiesIFRS", "NoncurrentLiabilitiesIFRS"]})  # 固定負債（同上・綴りはタクソノミのまま）
     # 有利子負債の構成要素（#920・ADR-0067）。1つの列には1つのタグの値しか入らない（_apply_row は合算しない）
     # ので、構成要素ごとに列を持ち、合計は VIEW の `interest_bearing_debt` で作る（D/E の分子・#926）。
     # どの列を足すかの唯一の源は下の `INTEREST_BEARING_DEBT_COLUMNS`。
@@ -2572,6 +2576,11 @@ FINANCIAL_METRICS_VIEW_SQL = (Path(__file__).parent / "sql" / "financial_metrics
 FINANCIAL_METRICS_INTERIM_VIEW_SQL = (Path(__file__).parent / "sql" / "financial_metrics_interim_view.sql").read_text(encoding="utf-8")
 # financial_metrics_with_ttm VIEW DDL（#424 子2・ADR-0051）
 FINANCIAL_METRICS_WITH_TTM_VIEW_SQL = (Path(__file__).parent / "sql" / "financial_metrics_with_ttm_view.sql").read_text(encoding="utf-8")
+
+# D/E の比較から外すかを**測る候補**の業種（#927・本番は外していない）。借入が事業の資金そのもの（証券の
+# 信用取引・リース・信販）で D/E が大きく出る。計測の道具（`scripts/momentum_gate --de-exclude`・#940、
+# factor premia の計測・#941）だけが読む。外すと決めたら下の DE_RATIO_EXCLUDED_INDUSTRIES へ移す。
+DE_RATIO_EXCLUSION_CANDIDATES: tuple[str, ...] = ("証券、商品先物取引業", "その他金融業")
 
 # D/E を作らない業種（JPX 33業種名・#925・ADR-0067）。銀行は借入を「借用金」で載せ、保険も借入金の区分を
 # 持たないので、借入金の列が空欄になり「負債合計があれば借入金の空欄は 0」（#915）で D/E = 0（無借金）に見える。

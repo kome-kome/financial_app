@@ -71,6 +71,23 @@ class TestModesAreMutuallyExclusive:
         (dict(max_features=[5], risk_axis=True)),
         (dict(fin_rows=True, risk_axis=True)),
         (dict(demean_target=True, risk_axis=True)),
+        # 財務の空欄モード（#938）は母集団そのものを広げる軸。他の軸と同時に振ると分離できない。
+        (dict(windows=[3], fin_nan=True)),
+        (dict(macro=True, fin_nan=True)),
+        (dict(interactions=True, fin_nan=True)),
+        (dict(max_features=[5], fin_nan=True)),
+        (dict(fin_rows=True, fin_nan=True)),
+        (dict(demean_target=True, fin_nan=True)),
+        (dict(risk_axis=True, fin_nan=True)),
+        # D/E の業種除外モード（#940）も母集団を縮める軸。他の軸と同時に振ると分離できない。
+        (dict(windows=[3], de_exclude=True)),
+        (dict(macro=True, de_exclude=True)),
+        (dict(interactions=True, de_exclude=True)),
+        (dict(max_features=[5], de_exclude=True)),
+        (dict(fin_rows=True, de_exclude=True)),
+        (dict(demean_target=True, de_exclude=True)),
+        (dict(risk_axis=True, de_exclude=True)),
+        (dict(fin_nan=True, de_exclude=True)),
     ]
 
     @pytest.mark.parametrize("kwargs", PAIRS)
@@ -272,7 +289,8 @@ class TestDemeanMainWiring:
         """**渡し忘れても例外は出ない**（両条件が素の目的変数で組まれ、差なしになる）。"""
         src = inspect.getsource(momentum_gate.main)
         assert src.count("demean_target=args.demean_target") == 2   # build_conditions / mode_of
-        assert "c.demean_target)" in src                              # _build へ渡す
+        # _build へ渡す（#938 で後ろに fin_nan_ok が続く形になった）
+        assert "c.demean_target, fin_nan_ok=c.fin_nan_ok)" in src
         assert "demean_reach_problems(" in src
         assert "DEMEAN_MODELS" in src
 
@@ -363,6 +381,26 @@ class TestExistingModesAreUnchanged:
         for c in build_conditions(**kwargs).values():
             assert c.demean_target is False
 
+    @pytest.mark.parametrize("kwargs", [
+        dict(), dict(windows=[3, 12]), dict(macro=True), dict(interactions=True),
+        dict(max_features=[5, 20]), dict(fin_rows=True), dict(demean_target=True),
+        dict(risk_axis=True, models=["xgb_m2"]),
+    ])
+    def test_existing_modes_drop_rows_with_blank_financials(self, kwargs):
+        """財務の空欄（#938）の既定は本番の構成＝空欄の行を捨てる。既存モードは NaN で通さない。"""
+        for c in build_conditions(**kwargs).values():
+            assert c.fin_nan_ok is False
+
+    @pytest.mark.parametrize("kwargs", [
+        dict(), dict(windows=[3, 12]), dict(macro=True), dict(interactions=True),
+        dict(max_features=[5, 20]), dict(fin_rows=True), dict(demean_target=True),
+        dict(risk_axis=True, models=["xgb_m2"]), dict(fin_nan=True),
+    ])
+    def test_existing_modes_keep_every_industrys_de_ratio(self, kwargs):
+        """D/E の業種除外（#940）の既定は本番の構成＝空欄にする業種なし。既存モードは差し替えない。"""
+        for c in build_conditions(**kwargs).values():
+            assert c.de_null_industries == ()
+
 
 class TestBuildUsesTheConditionAxes:
     """`_build` が Cond の値を実際に使うこと。
@@ -409,6 +447,32 @@ class TestBuildUsesTheConditionAxes:
             build_interactions=False, max_features=7)
         assert seen["build_interactions"] is False
         assert feats == ["sel7"], "max_features が _select_bic へ渡っていない"
+
+    @pytest.mark.parametrize("kind, want", [("gbdt", True), ("m1", False)])
+    def test_fin_nan_reaches_gbdt_but_never_m1(self, monkeypatch, kind, want):
+        """財務の空欄を NaN で通すのは M-2/M-6 だけ（#938）。M-1 は交差項の OLS が NaN で壊れる。"""
+        seen = {}
+
+        def fake_build_snapshots(*a, **k):
+            seen.update(k)
+            return {}, {}, None, [], {}
+
+        monkeypatch.setattr(momentum_gate, "build_snapshots", fake_build_snapshots)
+        monkeypatch.setattr(momentum_gate, "_thin", lambda s, m, i, stride: (s, m, i))
+        monkeypatch.setattr(momentum_gate, "_select_bic", lambda s, f, max_features: (s, f))
+        momentum_gate._build(kind, _Args(), {}, {}, [], {},
+                             use_momentum=False, mom_window=12, use_macro=True,
+                             fin_nan_ok=True)
+        assert seen["fin_nan_ok"] is want
+
+    def test_fin_nan_is_off_unless_the_condition_asks(self, monkeypatch):
+        seen = {}
+        monkeypatch.setattr(momentum_gate, "build_snapshots",
+                            lambda *a, **k: (seen.update(k), ({}, {}, None, [], {}))[1])
+        monkeypatch.setattr(momentum_gate, "_thin", lambda s, m, i, stride: (s, m, i))
+        momentum_gate._build("gbdt", _Args(), {}, {}, [], {},
+                             use_momentum=False, mom_window=12, use_macro=True)
+        assert seen["fin_nan_ok"] is False
 
     def test_m1_falls_back_to_the_plugin_default_limit(self, monkeypatch):
         """`max_features=None` は「プラグインの既定に従う」＝数値を書き写さない。"""
@@ -516,13 +580,16 @@ class TestOutputNamesTheModeThatWasMeasured:
         (dict(fin_rows=True), "fin_rows"),
         (dict(demean_target=True), "demean_target"),
         (dict(risk_axis=True), "risk_axis"),
+        (dict(fin_nan=True), "fin_nan"),
+        (dict(de_exclude=True), "de_exclude"),
     ])
     def test_mode_follows_the_flag(self, kwargs, want):
         assert mode_of(**kwargs) == want
 
     def test_every_mode_has_a_file_suffix(self):
         assert set(MODE_SUFFIX) == {"default", "windows", "macro", "interactions", "max_features",
-                                    "fin_rows", "demean_target", "risk_axis"}
+                                    "fin_rows", "demean_target", "risk_axis", "fin_nan",
+                                    "de_exclude"}
 
     def test_demean_mode_writes_its_own_file(self):
         """既定の `momentum_gate.json` を上書きしない（どの軸の結果かがファイル名で分かる）。"""
@@ -542,6 +609,9 @@ class TestOutputNamesTheModeThatWasMeasured:
         ("fin_rows", 2, "FIN ROWS AXIS"),
         ("demean_target", 2, "DEMEAN TARGET AXIS"),
         ("risk_axis", 3, "RISK AXIS"),
+        ("fin_nan", 2,
+         "FIN NAN AXIS [common domain = complete-financials rows only; read raw for blank rows]"),
+        ("de_exclude", 2, "DE EXCLUDE AXIS"),
     ])
     def test_new_modes_do_not_borrow_the_momentum_wording(self, mode, n_conds, head):
         for passed, regressed in (([], []), (["x"], []), ([], ["y"])):

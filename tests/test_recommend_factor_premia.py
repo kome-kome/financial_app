@@ -391,3 +391,40 @@ class TestBuildPeriodPanelWithGapRatio:
         db, _codes = _build_mock_recommend_db()
         with use_fin_rows("with_ttm"), pytest.raises(ValueError, match="annual"):
             build_period_panel(db, min_companies_per_period=2, with_gap_ratio=True)
+
+
+class TestStockIdsOut:
+    """`build_period_panel(stock_ids_out=)`（#941）: 共通 (ym, ec) 域で比べる計測専用の ID の出口。
+
+    並びが X の行と揃っていないと、共通域へ絞ったときに別の社の行を残す（エラーは出ない）。
+    """
+
+    @staticmethod
+    def _fake(monkeypatch, samples, ids):
+        import plugins.macro_snapshots as ms
+        monkeypatch.setattr(ms, "load_data", lambda db, with_volume=False: ({"E1": [1]}, {}, {}))
+        monkeypatch.setattr(ms, "build_snapshots",
+                            lambda *a, **k: (samples, {}, {}, ["z_roe", "momentum_12m1"], ids))
+
+    def test_ids_follow_the_rows_of_the_kept_periods(self, monkeypatch):
+        samples = {"2024-01": [([1.0, 0.1], 0.2), ([2.0, 0.2], 0.3), ([3.0, 0.3], 0.1)],
+                   "2024-02": [([1.0, 0.1], 0.2)]}                     # 1社だけ＝期間ごと捨てる
+        ids = {"2024-01": ["E1", "E2", "E3"], "2024-02": ["E1"]}
+        self._fake(monkeypatch, samples, ids)
+        out: dict = {}
+        panel, names = build_period_panel(MagicMock(), min_companies_per_period=2, stock_ids_out=out)
+        assert set(panel) == {"2024-01"} and out == {"2024-01": ["E1", "E2", "E3"]}
+        assert len(out["2024-01"]) == len(panel["2024-01"][0])
+        assert names == ["z_roe", "z_momentum"]
+
+    def test_default_leaves_the_return_value_unchanged(self, monkeypatch):
+        """本番（月次バッチ・画面）は渡さない＝戻り値の形は今までどおり。"""
+        samples = {"2024-01": [([1.0, 0.1], 0.2), ([2.0, 0.2], 0.3)]}
+        self._fake(monkeypatch, samples, {"2024-01": ["E1", "E2"]})
+        panel, names = build_period_panel(MagicMock(), min_companies_per_period=2)
+        assert set(panel) == {"2024-01"} and len(names) == 2
+
+    def test_refused_together_with_gap_ratio(self):
+        """gap を付ける経路は行を落とすので、ID の並びが X と揃う保証が無い。"""
+        with pytest.raises(ValueError, match="stock_ids_out"):
+            build_period_panel(MagicMock(), with_gap_ratio=True, stock_ids_out={})

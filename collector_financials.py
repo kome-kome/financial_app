@@ -435,6 +435,22 @@ def _drops_nonconsolidated(ctx: str, cat: str, consolidated_doc: bool) -> bool:
     return consolidated_doc and cat in _STATEMENT_SECTIONS and "NonConsolidated" in ctx
 
 
+# 有利子負債の列（bs のキー・#926 の D/E の分子）。IFRS の書類ではこれらに日本基準（jppfs_cor）のタグを
+# 割り当てない（#944）。連結を作らない IFRS の社は、同じ書類に IFRS と日本基準の財務諸表を単体の文脈で
+# 両方載せるので、`BorrowingsCLIFRS`（短期）と `CurrentPortionOfLongTermLoansPayable`（1年内返済の長期）に
+# 同じ借入が入り、6列の和で二重に数える（実物: ベイカレント S100TI4B）。IFRS の行は短期・長期の2列が社債と
+# 1年内返済分を含む前提で、残りの4列は空欄でなければならない（database.py の注記）。
+_IFRS_DEBT_FIELDS = frozenset({
+    "short_term_debt", "current_portion_long_term_debt", "commercial_paper",
+    "current_portion_bonds_payable", "long_term_debt", "bonds_payable",
+})
+
+
+def _skips_jgaap_debt_tag(raw_elem: str, cat: str, field: str, ifrs_doc: bool) -> bool:
+    """IFRS の書類の有利子負債の列へ、日本基準のタグを割り当てないか（#944）。"""
+    return ifrs_doc and cat == "bs" and field in _IFRS_DEBT_FIELDS and raw_elem.startswith("jppfs_cor:")
+
+
 def _apply_row(
     elem: str, ctx: str, val_raw, cat: str, field: str,
     result: dict, _priority: dict, apply_capex_sign: bool = False,
@@ -512,7 +528,11 @@ def _collect_inventory_row(elem: str, ctx: str, raw_value, inv_parts: dict, inv_
 
 
 def parse_raw_rows(rows: list) -> dict:
-    """[{element, context, value}, ...] から {bs, pl, cf, val, nonfin, meta} を抽出（再解析用）"""
+    """[{element, context, value}, ...] から {bs, pl, cf, val, nonfin, meta} を抽出（再解析用）
+
+    保存行の要素名は接頭辞を持たないので、IFRS の書類で日本基準の借入金タグを外す規則（#944）は
+    効かない（`xbrl_raw_documents` は 2026-10 時点で 0 行。読み直すなら `parse_xbrl_csv` の経路で）。
+    """
     result = {"bs": {}, "pl": {}, "cf": {}, "val": {}, "nonfin": {}, "meta": {}}
     _priority: dict = {}
     _inv_parts: dict = {}
@@ -542,7 +562,8 @@ def parse_xbrl_csv(df, edinet_code: str, period_end: str, *,
     """XBRL CSV の df から {bs, pl, cf, val, nonfin, meta} を抽出する（年度・半期・補完・取り直しの共通入口）。
 
     連結を作る書類（DEI）では財務諸表の列に単体の値を採らない（_drops_nonconsolidated・#896）。
-    `nonconsolidated_fallback=True` はその規則を外した旧来の読み方で、規則で空欄になる列を既存行から
+    IFRS の書類では有利子負債の列に日本基準のタグを割り当てない（_skips_jgaap_debt_tag・#944）。
+    `nonconsolidated_fallback=True` はこの2つの規則を外した旧来の読み方で、規則で空欄になる列を既存行から
     消す差分を取るため（`scripts/refetch_financials --clear-nonconsolidated`）だけに使う。
     """
     result = {"bs": {}, "pl": {}, "cf": {}, "val": {}, "nonfin": {}, "meta": {}}
@@ -553,8 +574,13 @@ def parse_xbrl_csv(df, edinet_code: str, period_end: str, *,
     if not {"element", "value"}.issubset(col_map):
         return result
 
+    dei = _extract_dei(df)
     consolidated_doc = (not nonconsolidated_fallback
-                        and prepares_consolidated(_extract_dei(df)) is True)
+                        and prepares_consolidated(dei) is True)
+    # 旧来の読み方には効かせない: 効かせると二重に入った値が「消す列」（cleared_columns）として
+    # 検出されず、`--clear-nonconsolidated` の取り直しで残る（#944）
+    ifrs_doc = (not nonconsolidated_fallback
+                and accounting_standard_from_dei(dei) == "IFRS")
     _priority: dict = {}
     _inv_parts: dict = {}
     _inv_prio: dict = {}
@@ -586,6 +612,8 @@ def parse_xbrl_csv(df, edinet_code: str, period_end: str, *,
                 continue
 
         cat, field = category_field
+        if _skips_jgaap_debt_tag(raw_elem, cat, field, ifrs_doc):
+            continue
         _apply_row(elem, ctx, val, cat, field, result, _priority, apply_capex_sign=True,
                    consolidated_doc=consolidated_doc)
 

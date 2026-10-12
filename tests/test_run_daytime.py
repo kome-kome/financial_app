@@ -492,6 +492,63 @@ class TestMacroM6GateMeasuresM6Alone:
         assert "--models" not in argv
 
 
+class TestFinNanGateMeasuresM2AndM6:
+    """財務の空欄のジョブ（#938・#916）は M-2 / M-6 を、間引かずに、本番（drop）を分母に測る。
+
+    M-2 と M-6 は同じ gbdt のパネルを共有するので、パネルに効く軸は両方を測る（4検定・α 0.0125）。
+    """
+
+    KEY = "gate:fin-nan"
+
+    def test_the_job_runs_the_fin_nan_axis_with_the_default_models(self):
+        from scripts.momentum_gate import FIN_NAN_MODELS
+
+        argv = rd.JOBS[self.KEY].argv
+        assert "--fin-nan" in argv
+        assert "--models" not in argv
+        assert FIN_NAN_MODELS == ["xgb_m2", "elasticnet"]
+
+    def test_the_preregistered_base_and_tests(self):
+        from scripts.momentum_gate import FIN_NAN_MODELS, base_of, bonferroni_alpha, build_conditions
+
+        conds = build_conditions(fin_nan=True)
+        assert base_of(conds) == "drop"                      # 本番の構成
+        assert bonferroni_alpha(len(FIN_NAN_MODELS), len(conds)) == pytest.approx(0.0125)
+
+    def test_the_job_measures_at_full_resolution(self):
+        """`--smoke` の共通域は間引きで壊れるので読まない（ADR-0050 Decision 3）。"""
+        argv = rd.JOBS[self.KEY].argv
+        assert "--smoke" not in argv
+        assert argv[argv.index("--stride") + 1] == "1"
+
+
+class TestDeExcludeGateMeasuresM2AndM6:
+    """D/E の業種除外のジョブ（#940・#927）は M-2 / M-6 を、間引かずに、本番（keep）を分母に測る。"""
+
+    KEY = "gate:de-exclude"
+
+    def test_the_job_runs_the_de_exclude_axis_with_the_default_models(self):
+        from scripts.momentum_gate import DE_EXCLUDE_MODELS
+
+        argv = rd.JOBS[self.KEY].argv
+        assert "--de-exclude" in argv
+        assert "--models" not in argv
+        assert DE_EXCLUDE_MODELS == ["xgb_m2", "elasticnet"]
+
+    def test_the_preregistered_base_and_tests(self):
+        from scripts.momentum_gate import (
+            DE_EXCLUDE_MODELS, base_of, bonferroni_alpha, build_conditions)
+
+        conds = build_conditions(de_exclude=True)
+        assert base_of(conds) == "keep"                      # 本番の構成
+        assert bonferroni_alpha(len(DE_EXCLUDE_MODELS), len(conds)) == pytest.approx(0.0125)
+
+    def test_the_job_measures_at_full_resolution(self):
+        argv = rd.JOBS[self.KEY].argv
+        assert "--smoke" not in argv
+        assert argv[argv.index("--stride") + 1] == "1"
+
+
 class TestBudgetFitsTheWindow:
     INSTALLER = ROOT / "scripts" / "install_daytime_task.ps1"
 
@@ -599,6 +656,7 @@ class TestParallelSensitivity:
                                      "gate:interactions", "gate:max-features", "gate:ttm",
                                      "gate:demean", "gate:risk-axis-m6", "gate:risk-axis-m2",
                                      "gate:risk-axis-m2-mu", "gate:macro-m6",
+                                     "gate:fin-nan", "gate:de-exclude", "measure:de-exclusion",
                                      "bench:rhat-scale"])
     def test_computations_are_sensitive(self, key):
         """MCMC も探索も昇格ゲートも、数値の揺れが**採否や重みそのもの**を変える。"""

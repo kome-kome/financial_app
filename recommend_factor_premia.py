@@ -63,7 +63,8 @@ class FactorPremiaResult:
 
 def build_period_panel(db, min_companies_per_period: int = DEFAULT_MIN_COMPANIES_PER_PERIOD,
                        *, with_gap_ratio: bool = False,
-                       gap_coverage: dict | None = None) -> tuple:
+                       gap_coverage: dict | None = None,
+                       stock_ids_out: dict | None = None) -> tuple:
     """月末スナップショットごとの横断面パネルを構築する（Fama-MacBeth 用）。
 
     `plugins.macro_snapshots.build_snapshots` を無改修で再利用する。fin_features に
@@ -86,6 +87,10 @@ def build_period_panel(db, min_companies_per_period: int = DEFAULT_MIN_COMPANIES
     sector_ols は通期の行でしか回らないので、TTM 行の基準（`use_fin_rows("with_ttm")`）の
     内側では拒否する（行の基準を混ぜない）。
 
+    `stock_ids_out` を渡すと `{ym: [edinet_code, ...]}` を書き込む（並びは X の行と同じ・残した期間だけ）。
+    共通 (ym, ec) 域で比べる計測（`scripts/measure_de_exclusion.py`・#941）専用で、本番（月次バッチ・画面）は
+    渡さない。gap を付ける経路は行を落とすので、`with_gap_ratio=True` とは併用できない。
+
     momentum 列は build_snapshots が生の log return を返す（macro_snapshots._momentum）。
     **ここでは標準化せず生値のまま渡す**（Issue #519）。#509 で ols 経路も
     `fit_feature_columns` を通すようになったため、ここで先に winsorize→Z スコア化すると
@@ -101,6 +106,9 @@ def build_period_panel(db, min_companies_per_period: int = DEFAULT_MIN_COMPANIES
     from plugins.macro_snapshots import build_snapshots, current_fin_rows, load_data
     from plugins.recommend import METRICS, RUNTIME_METRICS
 
+    if with_gap_ratio and stock_ids_out is not None:
+        raise ValueError("build_period_panel: stock_ids_out は with_gap_ratio と併用できません"
+                         "（gap を付ける経路が行を落とすので、ID の並びが X と揃う保証が無い）")
     if with_gap_ratio and current_fin_rows() != "annual":
         raise ValueError(
             "build_period_panel: with_gap_ratio は通期の行（annual）でしか使えません"
@@ -146,6 +154,8 @@ def build_period_panel(db, min_companies_per_period: int = DEFAULT_MIN_COMPANIES
         X = np.asarray([p[0] for p in pairs], dtype=float)
         y = np.asarray([p[1] for p in pairs], dtype=float)
         period_panel[ym] = (X, y)
+        if stock_ids_out is not None:
+            stock_ids_out[ym] = list(stock_ids[ym])
 
     if not period_panel:
         raise ValueError(
