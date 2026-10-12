@@ -656,7 +656,8 @@ class TestParallelSensitivity:
                                      "gate:interactions", "gate:max-features", "gate:ttm",
                                      "gate:demean", "gate:risk-axis-m6", "gate:risk-axis-m2",
                                      "gate:risk-axis-m2-mu", "gate:macro-m6",
-                                     "gate:fin-nan", "gate:de-exclude", "bench:rhat-scale"])
+                                     "gate:fin-nan", "gate:de-exclude", "measure:de-exclusion",
+                                     "bench:rhat-scale"])
     def test_computations_are_sensitive(self, key):
         """MCMC も探索も昇格ゲートも、数値の揺れが**採否や重みそのもの**を変える。"""
         assert rd.JOBS[key].parallel_sensitive is True

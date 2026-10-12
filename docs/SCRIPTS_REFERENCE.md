@@ -37,6 +37,7 @@
 | [`scripts/measure_split_bias_oof.py`](#scriptsmeasure_split_bias_oofpy) | 検証（実験） |
 | [`scripts/measure_split_leak.py`](#scriptsmeasure_split_leakpy) | 検証（実験） |
 | [`scripts/measure_industry_fill_impact.py`](#scriptsmeasure_industry_fill_impactpy) | 検証（実験） |
+| [`scripts/measure_de_exclusion.py`](#scriptsmeasure_de_exclusionpy) | 検証（実験） |
 | [`scripts/candidate_bakeoff.py`](#scriptscandidate_bakeoffpy) | 検証（実験） |
 | [`scripts/ensemble_base_bakeoff.py`](#scriptsensemble_base_bakeoffpy) | 検証（実験） |
 | [`scripts/macro_feature_bakeoff.py`](#scriptsmacro_feature_bakeoffpy) | 検証（実験） |
@@ -197,6 +198,12 @@ ADR-0055 決定7 の直接証拠（#685）。係数表と**同じ入力・同じ
 業種の空欄補完（#797）を入れる前と後で、過去年度の分析がどれだけ動くかを**書き込みなしで**測る（[ADR-0065](adr/0065-empty-industry-is-filled-regardless-of-listing.md)）。1つのセッション・1つのトランザクションの中で「補完前を測る → 本番と同じ `_plan_industry_fill` / `_apply_industry_fill` / `_propagate_company_industry` で補完を流す → 補完後を測る → ROLLBACK」とし、正本へは何も書かない。模擬の間（`simulated`）は `db.commit` を flush に、`db.rollback` を「数えて例外」に差し替え、差し替えを迂回する commit は `before_commit` で止める——`run_comparison` は失敗したモデルで rollback するので、**黙って補完が消えると「補完後」が補完前を測る**（例外は握られうるので回数で中断する）。測るのは当日 gap（夜間と同じ設定・完全一致を要求）・業種内Z（前から業種があった社／埋めた社／空のまま残る社の3群）・時点再現の gap パネル（`build_period_panel(with_gap_ratio=True)` の母集団減少率と、中の `build_asof_gaps` の戻りを写し取った行ごとの gap）・M-1/M-2/M-6 の OOF（`model_comparison.run_comparison` そのもの）で、測る手続きは持たない（ADR-0041）。**OOF の rank-IC の符号は採否に使わない**（空の業種は後の廃止の印＝未来情報）。止める条件（当日 gap の変化・母集団の縮小・業種名の種類の変化・模擬の破綻）に当たれば exit 1。`--skip-oof` / `--skip-panel` / `--summarize <json>`
 
 種別: 検証（実験） ／ 依存先: collector_master, model_comparison.run_comparison, recommend_factor_premia.build_period_panel, sector_gap_asof
+
+## `scripts/measure_de_exclusion.py`
+
+証券業・その他金融業の D/E を比較から外すか（#927）を **factor premia** について測る（#941）。`z_de_ratio` は VIEW が年度ごとに全社で標準化するので、Python 側で空欄にするだけでは他社の Z が標準化し直されない。そこで `measure_industry_fill_impact.simulated` の中で `financial_metrics` を **main の SQL から**作り直し（条件 `keep`＝そのまま／`exclude`＝`de_ratio` の除外業種に `database.DE_RATIO_EXCLUSION_CANDIDATES` を足す。差し替えは1か所だけで、該当が1か所でなければ止まる）、本番の `compute_factor_premia` と `build_period_panel(stock_ids_out=)` を同じセッションで回して必ず取り消す。出すのは `z_de_ratio` の係数（mean_b / t / p）・母集団と外れた社数・各条件で推定した重みの合成スコアの rank-IC（`preset_ic_gate.ic_series`・自分の母集団と共通 (ym, ec) 域・共通域は `paired_ic_significance` で対比較）。**rank-IC は in-sample の記録で採否の根拠にしない**。単一因子の rank-IC は共通域で差が出ない（Spearman は一次変換で不変）ので測らない。実行前後で `pg_get_viewdef` と行数が違えば exit 1。計測中は VIEW に ACCESS EXCLUSIVE が掛かるので日中枠（`measure:de-exclusion`）で回す。M-2 / M-6 の同じ問いは `momentum_gate --de-exclude`（#940）。`--json`
+
+種別: 検証（実験） ／ 依存先: recommend_factor_premia, scripts/measure_industry_fill_impact.py, scripts/preset_ic_gate.py, model_stats.py
 
 ## `scripts/candidate_bakeoff.py`
 
