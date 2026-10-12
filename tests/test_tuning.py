@@ -445,6 +445,22 @@ class TestTuningSnapshotCache:
 
         assert mock_impl.call_count == 2
 
+    def test_build_snapshots_distinguishes_fin_nan_ok(self, monkeypatch):
+        """fin_nan_ok が異なれば別キー（momentum_gate --fin-nan の drop/nan が同じ結果を共有しない・#938）。"""
+        import plugins.macro_snapshots as ms
+        mock_impl = MagicMock(return_value=({}, {}, {}, []))
+        monkeypatch.setattr(ms, "_build_snapshots_impl", mock_impl)
+        prices, fin, companies, macro = {}, {}, {}, {}
+
+        with ms.shared_snapshot_cache():
+            for flag in (False, True):
+                ms.build_snapshots(prices, fin, companies, macro,
+                                   ["per"], ["macro_usdjpy_yoy"], False, 11, 1.0,
+                                   build_interactions=False, macro_nan_ok=True, fin_nan_ok=flag)
+
+        assert mock_impl.call_count == 2
+        assert [c.kwargs["fin_nan_ok"] for c in mock_impl.call_args_list] == [False, True]
+
     def test_build_snapshots_recomputes_outside_context(self, monkeypatch):
         import plugins.macro_snapshots as ms
         mock_impl = MagicMock(return_value=({}, {}, {}, []))
