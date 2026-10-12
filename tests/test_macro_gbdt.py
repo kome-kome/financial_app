@@ -225,6 +225,37 @@ class TestMacroNanOk:
             assert math.isnan(feat_row[sp_idx]), "欠損系列が NaN になっていない"
             assert math.isfinite(feat_row[usd_idx]), "充足系列まで NaN 化している"
 
+    def test_fin_nan_ok_defaults_to_dropping_blank_financials(self):
+        """fin_nan_ok の既定（False＝本番の全モデル）: 財務が1つでも空欄の社は落ちる（#938）。"""
+        prices_by_co, fin_by_co, companies = self._inputs()
+        blank = sorted(fin_by_co)[0]
+        fin_by_co[blank][0].pbr = None
+        samples, _, snaps, _ = build_snapshots(
+            prices_by_co, fin_by_co, companies, {}, ["per", "pbr"], [], False, 12, 0.5,
+            build_interactions=False, macro_nan_ok=True,
+        )
+        assert blank not in snaps
+        assert len(snaps) == len(fin_by_co) - 1
+
+    def test_fin_nan_ok_keeps_blank_financials_as_nan(self):
+        """fin_nan_ok=True（計測専用・#938）: 空欄を NaN で残し、揃った社の行は1つも変えない。"""
+        prices_by_co, fin_by_co, companies = self._inputs()
+        blank = sorted(fin_by_co)[0]
+        fin_by_co[blank][0].pbr = None
+        kw = dict(build_interactions=False, macro_nan_ok=True)
+        s_drop, _, snaps_drop, _ = build_snapshots(
+            prices_by_co, fin_by_co, companies, {}, ["per", "pbr"], [], False, 12, 0.5, **kw)
+        s_nan, _, snaps_nan, feats = build_snapshots(
+            prices_by_co, fin_by_co, companies, {}, ["per", "pbr"], [], False, 12, 0.5,
+            fin_nan_ok=True, **kw)
+        row, _info = snaps_nan[blank]
+        assert math.isnan(row[feats.index("pbr")])
+        assert math.isfinite(row[feats.index("per")])
+        # drop 側は nan 側に含まれる（momentum_gate --fin-nan の共通域の前提）
+        assert sum(map(len, s_nan.values())) > sum(map(len, s_drop.values()))
+        for ec, (feat_row, _i) in snaps_drop.items():
+            assert snaps_nan[ec][0] == feat_row
+
     def test_company_count_stable_when_adding_thin_feature(self):
         """薄い系列を足しても企業数が維持される（USDJPY のみ → +SP500 で不変）。"""
         prices_by_co, fin_by_co, companies = self._inputs()

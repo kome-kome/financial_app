@@ -274,6 +274,27 @@ OOF 予測で、画面の `mu_raw`（全データで学び直した最終モデ�
 条件に無い名前は止まる。判定行は「production」ではなく「base ordering」と書き、画面の既定の並びを
 併記する。出力先には `_base-<分母>` が付き、既定を分母にした run の JSON を上書きしない。
 
+## 財務の空欄モード（`--fin-nan`・#938/#916）
+
+M-2 / M-6 で、財務特徴量が空欄の行を捨てずに NaN で学習へ通すか（`build_snapshots(fin_nan_ok=)`）を測る。
+#900 の後、IFRS の約3割と US-GAAP の全社で営業利益などが空欄になり、本番では丸ごと外れる:
+
+    drop … 財務が1つでも空欄の行を捨てる（本番の構成）＝基準
+    nan  … 空欄を NaN で通す（M-2 は XGBoost が分岐で扱い、M-6 は fold 内の列平均で補完する）
+
+    python -m scripts.momentum_gate --fin-nan                     # M-2 / M-6（4検定・alpha 0.0125）
+    python -m scripts.momentum_gate --fin-nan --models xgb_m2     # M-2 だけ（2検定・alpha 0.025）
+
+**共通域で測れるものが限られる。** `drop` 側で残る行は `nan` 側でも同じ値で残るので、`drop` 側の
+パネルは `nan` 側に含まれ、共通域はほぼ `drop` 側の域になる。ここで読めるのは「空欄のある行を学習に
+足すと、財務が揃った社の予測がどう変わるか」だけで、**空欄のある社にも予測が出る、という本来の狙いは
+共通域の外の水準（raw）と、会計基準ごとの rank-IC でしか読めない**。判定行の見出しにもこれを書く。
+
+**M-1 には効かせない**（交差項の OLS に NaN が入ると壊れる）。M-2 と M-6 は同じ gbdt のパネルを
+共有するので、本番で「M-2 だけ」に効かせると共有が壊れる（`macro_ensemble._BUILD_KEYS`）——採るなら
+共有の扱いも #916 で決める。CV の前に `nan` 側のサンプル数が `drop` 側より多いことを確かめ、
+増えていなければ止める（`fin_nan_reach_problems`）。日中キューの名前は `gate:fin-nan`。
+
 ## M-1 を測るときの注意
 
 M-1 は `macro_nan_ok=False`（strict）で**母集団自体が M-2/M-6 と別物**なので、パネルを共有
@@ -348,6 +369,10 @@ class Cond(NamedTuple):
 
     `demean_target`（#615）は目的変数から月ごとの全銘柄平均を引くか。既定 False は本番の
     構成（素の52週先リターン）で、既存モードの測定条件はやはり動かない。
+
+    `fin_nan_ok`（#938・#916）は財務特徴量の空欄で行を捨てずに NaN で通すか。既定 False は本番の
+    構成（全モデルが空欄の行を捨てる）で、既存モードの測定条件はやはり動かない。M-1 には効かない
+    （交差項の OLS に NaN が入ると壊れる・`_build`）。
     """
     use_momentum: bool
     momentum_window: int
@@ -356,6 +381,7 @@ class Cond(NamedTuple):
     max_features: int | None = None
     fin_rows: str = "annual"
     demean_target: bool = False
+    fin_nan_ok: bool = False
 
 
 CONDS: dict[str, bool] = {"off": False, "on": True}
@@ -414,6 +440,15 @@ FIN_ROWS_MODELS = ["xgb_m2", "elasticnet"]
 DEMEAN_CONDS: dict[str, bool] = {"raw": False, "demean": True}
 DEMEAN_BASE_COND = "raw"
 DEMEAN_MODELS = ["risk_return"]
+
+# 財務の空欄モード（`--fin-nan`・#938/#916）。**基準は本番の構成（空欄の行を捨てる `drop`）**。
+# 対象は M-2 / M-6——同じ gbdt のパネルを共有するので、パネルに効く軸は両方を測る（M-2 は XGBoost が
+# NaN を分岐で扱い、M-6 は fold 内の列平均で補完する）。**`drop` 側のパネルは `nan` 側に含まれる**ので、
+# 共通域で測れるのは「空欄のある行を学習に足すと、財務が揃った社の予測がどう変わるか」だけ。
+# 空欄のある社にも予測が出る、という本来の狙いは共通域の外の水準（raw）で読む。
+FIN_NAN_CONDS: dict[str, bool] = {"drop": False, "nan": True}
+FIN_NAN_BASE_COND = "drop"
+FIN_NAN_MODELS = ["xgb_m2", "elasticnet"]
 # 月平均除去が届いたかの許容（`demean_reach_problems`）。素の側は「全部0」だけを弾き、除去した
 # 側は浮動小数の丸めを十分に上回る幅で 0 とみなす（どちらの値も実行時に出力と JSON へ出る）。
 DEMEAN_RAW_MIN = 1e-12
@@ -502,10 +537,11 @@ def build_conditions(windows: list[int] | None = None,
                     demean_target: bool = False,
                     risk_axis: bool = False,
                     lambdas: list[float] | None = None,
-                    models: list[str] | None = None) -> dict[str, Cond]:
+                    models: list[str] | None = None,
+                    fin_nan: bool = False) -> dict[str, Cond]:
     """条件集合 {名前: Cond} を作る。
 
-    8つのモードがある。**同時に使えるのは1つだけ**（下記）:
+    9つのモードがある。**同時に使えるのは1つだけ**（下記）:
 
       既定           … ADR-0045 の昇格ゲートと完全に同じ2条件（`off` / `on`・マクロは ON のまま）
       `windows`      … モメンタム無し ＋ 各窓（#592・ADR-0050）
@@ -515,6 +551,7 @@ def build_conditions(windows: list[int] | None = None,
       `fin_rows`     … 通期のみ ＋ 通期＋TTM（#424 子3）。他の軸は本番構成に固定
       `demean_target` … 素の目的変数 ＋ 月平均を引いた目的変数（#615）。他の軸は本番構成に固定
       `risk_axis`    … U = μ − λR の R を振る（#709）。**パネルは全条件とも本番構成で同一**
+      `fin_nan`      … 財務の空欄の行を捨てる ＋ NaN で通す（#938・#916）。他の軸は本番構成に固定
 
     **`risk_axis` だけは `Cond` を動かさない。** R はモデルの学習に一切入らず、CV が出した
     μ̂ の順位を作り直すときだけ使うので、パネル構築のパラメータではない。3条件とも同じ
@@ -539,7 +576,7 @@ def build_conditions(windows: list[int] | None = None,
     modes = [("--windows", bool(windows)), ("--macro", macro),
              ("--interactions", interactions), ("--max-features", bool(max_features)),
              ("--fin-rows", fin_rows), ("--demean-target", demean_target),
-             ("--risk-axis", risk_axis)]
+             ("--risk-axis", risk_axis), ("--fin-nan", fin_nan)]
     picked = [name for name, on in modes if on]
     if len(picked) > 1:
         raise ValueError(
@@ -580,6 +617,11 @@ def build_conditions(windows: list[int] | None = None,
         # 交互作用と列数はプラグインの既定・通期のみ）＝「本番の M-1 の学習目標を変えたら」を問う。
         return {name: Cond(False, MOM_WINDOW, demean_target=flag)
                 for name, flag in DEMEAN_CONDS.items()}
+    if fin_nan:
+        # 財務の空欄の扱いだけを差し替える。他の軸はすべて本番構成（モメンタム OFF・マクロ ON・
+        # 通期のみ・素の目的変数）＝「本番の M-2/M-6 で空欄の社を外さずに通したら」を問う。
+        return {name: Cond(False, MOM_WINDOW, fin_nan_ok=flag)
+                for name, flag in FIN_NAN_CONDS.items()}
     if not windows:
         return {name: Cond(use_mom, MOM_WINDOW) for name, use_mom in CONDS.items()}
     ws = sorted({int(w) for w in windows})
@@ -601,11 +643,13 @@ def base_of(conds: dict[str, Cond], default_max_features: int | None = None) -> 
 
     行の基準モードの分母も**本番の構成**（`annual`）。TTM を足したときに本番から何が変わるかを見る。
     目的変数モードの分母も**本番の構成**（`raw`）。この軸も母集団を動かさない。
+    財務の空欄モードの分母も**本番の構成**（`drop`）。こちらは母集団を広げる側が本番ではないが、
+    `drop` 側は `nan` 側に含まれる＝分母に置いた側が「母集団の狭い側」になる点に注意（共通域で揃える）。
     リスク軸モードの分母も**本番の構成**だが、モデルごとに違う（M-1 は `r2`・M-6 は `mu_only`）ので
     ここでは決めない。`main` はリスク軸モードでは `risk_base_cond` を使う（#808）。
     """
     for cand in (BASE_COND, MACRO_BASE_COND, INTERACTION_BASE_COND, FIN_ROWS_BASE_COND,
-                 DEMEAN_BASE_COND, RISK_BASE_COND):
+                 DEMEAN_BASE_COND, RISK_BASE_COND, FIN_NAN_BASE_COND):
         if cand in conds:
             return cand
     prod = maxfeat_cond_name(default_max_features) if default_max_features else None
@@ -633,13 +677,13 @@ ALPHA = 0.05 / N_TESTS
 MODE_SUFFIX: dict[str, str] = {"default": "", "windows": "", "macro": "_macro",
                                "interactions": "_interactions", "max_features": "_maxfeat",
                                "fin_rows": "_fin_rows", "demean_target": "_demean",
-                               "risk_axis": "_risk_axis"}
+                               "risk_axis": "_risk_axis", "fin_nan": "_fin_nan"}
 
 
 def mode_of(windows: list[int] | None = None, macro: bool = False,
             interactions: bool = False, max_features: list[int] | None = None,
             fin_rows: bool = False, demean_target: bool = False,
-            risk_axis: bool = False) -> str:
+            risk_axis: bool = False, fin_nan: bool = False) -> str:
     """測定モードの名前を返す（`build_conditions` と同じ引数から1箇所で導出する）。
 
     **#615 で足した2モードは、ここを持たないまま別モードの名前で出力されていた**——
@@ -660,6 +704,8 @@ def mode_of(windows: list[int] | None = None, macro: bool = False,
         return "demean_target"
     if risk_axis:
         return "risk_axis"
+    if fin_nan:
+        return "fin_nan"
     return "windows" if windows else "default"
 
 
@@ -681,6 +727,9 @@ _AXIS_VERDICTS: dict[str, tuple[str, str]] = {
                  "with_ttm did not beat the annual-only baseline"),
     "demean_target": ("DEMEAN TARGET AXIS",
                       "the month-demeaned target did not beat the raw target"),
+    # 共通域は財務が揃った行だけ（drop 側 ⊂ nan 側）。空欄の社に予測が出る効果は raw の水準で読む（#938）。
+    "fin_nan": ("FIN NAN AXIS [common domain = complete-financials rows only; read raw for blank rows]",
+                "passing blank financials as NaN did not beat dropping them"),
     # 分母はモデルで違う（M-1 は r2・M-6 は mu_only・#808）ので名前を差し込む。
     "risk_axis": ("RISK AXIS",
                   "no risk condition beat the production ordering ({base})"),
@@ -705,7 +754,7 @@ def verdict_text(mode: str, n_conds: int, passed: list[str], regressed: list[str
     （`production`・条件に無ければ None）の両方を出す（#816）。
     """
     if (mode in ("macro", "interactions", "max_features", "fin_rows", "demean_target",
-                 "risk_axis")
+                 "risk_axis", "fin_nan")
             or (mode == "windows" and n_conds > 2)):
         head, none = _AXIS_VERDICTS[mode]
         if mode == "macro" and base == MACRO_ON_COND:
@@ -944,7 +993,7 @@ def panel_config_mismatches(models: list[str]) -> list[str]:
 def _build(kind: str, args, prices_by_co, fin_by_co, companies, macro_cache,
            use_momentum: bool, mom_window: int, use_macro: bool = True,
            build_interactions: bool = True, max_features: int | None = None,
-           demean_target: bool = False) -> tuple:
+           demean_target: bool = False, fin_nan_ok: bool = False) -> tuple:
     """種別の本番 config のまま、条件の軸だけ差し替えて構築する。
 
     `use_macro=False` はマクロ系列名を空にする（#604）——`macro_risk_return.execute` の
@@ -974,6 +1023,9 @@ def _build(kind: str, args, prices_by_co, fin_by_co, companies, macro_cache,
     効かせないと「目的変数を変えたら選ばれる列が変わるか」を測れない。月平均は学習が
     見る行（間引いた後）で取る。変換は種別を問わず掛かる（M-2/M-6 の目的変数も同じ素の
     リターン）が、既定で測るのは M-1 だけ（`DEMEAN_MODELS`）。
+
+    `fin_nan_ok`（#938）は財務の空欄を NaN で通すか。**M-1 には効かせない**——M-1 は交差項を作り
+    OLS で学習するので、NaN が入ると壊れる（`build_snapshots` の注意書き）。
     """
     plugin_name = "macro_risk_return" if kind == "m1" else "macro_gbdt"
     params = coerce_params(get_plugin(plugin_name).params_schema(), {})
@@ -987,6 +1039,7 @@ def _build(kind: str, args, prices_by_co, fin_by_co, companies, macro_cache,
         # M-2/M-6 は交互作用を持たないのが本番構成なので、条件が True でも入れない。
         build_interactions=(kind == "m1" and build_interactions),
         macro_nan_ok=(kind != "m1"),
+        fin_nan_ok=(kind != "m1" and fin_nan_ok),
         return_stock_ids=True,
         **extra,
     )
@@ -1066,6 +1119,27 @@ def demean_reach_problems(panel_means: dict[str, float], conds: dict[str, Cond])
                 problems.append(f"{key}: 月平均が0になっていない（max|mean|={v:.3e}）")
         elif v <= DEMEAN_RAW_MIN:
             problems.append(f"{key}: 素の目的変数の月平均が全部0（変換しても何も変わらない）")
+    return problems
+
+
+def fin_nan_reach_problems(samples: dict[str, int], kinds: list[str]) -> list[str]:
+    """`{"条件|種別": サンプル数}` から、財務の空欄の切り替えが届いていない種別を列挙する（#938）。
+
+    空リストなら健全。`nan` 側は `drop` 側の行をすべて含むので、**サンプル数が増えていなければ
+    切り替えが断面に届いていない**（空欄の財務を持つ行が1つも無い、または引数が渡っていない）。
+    そのまま走ると両条件が同じパネルになり、エラーを出さずに「差なし」だけが残る。減っていたら
+    包含関係そのものが崩れている（drop 側に無い行が nan 側にしか無い、の逆）。
+    """
+    problems = []
+    for kind in kinds:
+        n_drop = samples.get(f"{FIN_NAN_BASE_COND}|{kind}", 0)
+        for cond in FIN_NAN_CONDS:
+            if cond == FIN_NAN_BASE_COND:
+                continue
+            n_nan = samples.get(f"{cond}|{kind}", 0)
+            if n_nan <= n_drop:
+                problems.append(f"{cond}|{kind}: サンプル数 {n_nan} が {FIN_NAN_BASE_COND} 側の "
+                                f"{n_drop} より多くない（空欄を通しても行が増えていない）")
     return problems
 
 
@@ -1381,6 +1455,10 @@ def main() -> None:
                     help="目的変数モード（素の目的変数 と 月ごとの全銘柄平均を引いた目的変数を"
                          "共通域で比べる・#615）。変換は BIC 選択の前に掛かる。"
                          f"モデル既定は {','.join(DEMEAN_MODELS)}。他モードと併用不可")
+    ap.add_argument("--fin-nan", dest="fin_nan", action="store_true",
+                    help="財務の空欄モード（空欄の行を捨てる drop と NaN で通す nan を共通域で比べる・"
+                         f"#938/#916）。モデル既定は {','.join(FIN_NAN_MODELS)}。共通域は財務が揃った行"
+                         "だけになるので、空欄の社に予測が出る効果は raw で読む。他モードと併用不可")
     ap.add_argument("--smoke", action="store_true", help="サンプルを間引いた短時間確認")
     ap.add_argument("--stride", type=int, default=1, help="各月のサンプル間引き幅")
     ap.add_argument("--allow-full-pull", action="store_true",
@@ -1407,6 +1485,8 @@ def main() -> None:
         default_models = DEMEAN_MODELS
     elif args.risk_axis:
         default_models = RISK_MODELS
+    elif args.fin_nan:
+        default_models = FIN_NAN_MODELS
     else:
         default_models = MODELS
     models = ([m.strip() for m in args.models.split(",") if m.strip()]
@@ -1434,7 +1514,8 @@ def main() -> None:
         conds = build_conditions(windows, macro=args.macro, interactions=args.interactions,
                                  max_features=max_features, fin_rows=args.fin_rows,
                                  demean_target=args.demean_target,
-                                 risk_axis=args.risk_axis, lambdas=lambdas, models=models)
+                                 risk_axis=args.risk_axis, lambdas=lambdas, models=models,
+                                 fin_nan=args.fin_nan)
     except ValueError as e:
         raise SystemExit(str(e))
     # 列数モードの分母は本番値（プラグイン既定）。**ここで数値を書き写さない**。
@@ -1482,7 +1563,8 @@ def main() -> None:
     # ファイル名で取り違えたまま比較するほうが起きやすい。
     mode = mode_of(windows, macro=args.macro, interactions=args.interactions,
                    max_features=max_features, fin_rows=args.fin_rows,
-                   demean_target=args.demean_target, risk_axis=args.risk_axis)
+                   demean_target=args.demean_target, risk_axis=args.risk_axis,
+                   fin_nan=args.fin_nan)
     default_out = f"momentum_gate{MODE_SUFFIX[mode]}.json"
     if mode == "risk_axis" and models != RISK_MODELS:
         # M-1 と M-6 は分母が違い別々に回す（#808）。同じファイルへ書くと後の run が前の結果を消す。
@@ -1557,7 +1639,7 @@ def main() -> None:
                         kind, args, prices_by_co, fins[c.fin_rows], companies,
                         macro_cache, c.use_momentum, c.momentum_window,
                         c.use_macro, c.build_interactions, c.max_features,
-                        c.demean_target)
+                        c.demean_target, fin_nan_ok=c.fin_nan_ok)
                 s, m, i, feats = built[(c, kind)]
                 panels[(cond, kind)] = (s, m, i, feats)
                 st = _panel_stats(s, i, feats)
@@ -1574,6 +1656,7 @@ def main() -> None:
                       f"inter={'on' if c.build_interactions else 'off'} "
                       f"maxfeat={c.max_features or '-'} "
                       f"target={'demean' if c.demean_target else 'raw'} "
+                      f"fin_blank={'nan' if c.fin_nan_ok else 'drop'} "
                       f"months={st['months']} ({st['first_ym']}..{st['last_ym']}) "
                       f"samples={st['samples']} companies={st['companies']} "
                       f"features={st['n_features']} [{head}{more}]", flush=True)
@@ -1610,6 +1693,21 @@ def main() -> None:
             print("[note] bottom_q_return / quantile_returns are excess over the monthly "
                   "mean on the demean side; rank_ic / long_short / short_side are "
                   "within-month and unaffected by the shift", flush=True)
+
+        # 財務の空欄モードでも、切り替えが**断面まで届いたか**を CV の前に確かめる（#938）。
+        # nan 側は drop 側を含むので、サンプル数が増えていなければ同じパネルを比べることになる。
+        fin_nan_samples: dict[str, int] = {}
+        if mode == "fin_nan":
+            fin_nan_samples = {key: st["samples"] for key, st in stats.items()}
+            for key, n in fin_nan_samples.items():
+                print(f"[{key}] samples={n}", flush=True)
+            problems = fin_nan_reach_problems(fin_nan_samples, kinds)
+            if problems:
+                raise SystemExit("中止: 財務の空欄の切り替えが断面に届いていません: "
+                                 + " / ".join(problems))
+            print("[note] the common domain is the drop side (complete financials); the effect "
+                  "of predicting companies with blank financials shows only in raw levels",
+                  flush=True)
 
         # リスク軸モードの R は CV の前に作る（軸ごとに `(ym, ec) → R`）。パネルは全条件で
         # 同一なので `base` のものを使う。**R は軸ごとに1回だけ作り**、λ 違いの条件で同じ表を
@@ -1847,7 +1945,8 @@ def main() -> None:
                               "build_interactions": c.build_interactions,
                               "max_features": c.max_features,
                               "fin_rows": c.fin_rows,
-                              "demean_target": c.demean_target}
+                              "demean_target": c.demean_target,
+                              "fin_nan_ok": c.fin_nan_ok}
                        for name, c in conds.items()},
         "mode": mode,
         "base_cond": base,
@@ -1859,6 +1958,7 @@ def main() -> None:
         # 行の基準モードの健全性（#424 子3）。他モードでは None / 空。
         "ttm_rows": ttm_rows,
         "changed_rows": changed_rows,
+        "fin_nan_samples": fin_nan_samples,
         # 目的変数モードの健全性（#615）。{"条件|種別": 月平均の絶対値の最大}。他モードでは空。
         "target_month_mean": target_month_mean,
         # リスク軸モード（#709）。他モードでは None / 空。

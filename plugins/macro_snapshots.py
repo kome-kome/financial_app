@@ -1109,6 +1109,7 @@ def build_snapshots(
     macro_nan_ok: bool = False,
     return_stock_ids: bool = False,
     price_features: list[str] | None = None,
+    fin_nan_ok: bool = False,
 ) -> tuple:
     """M-1/M-2 共有スナップショット構築。
 
@@ -1132,6 +1133,12 @@ def build_snapshots(
       M-1（OLS）は既定の None のままにして OLS 特徴を汚さない。px_* は全て無次元→木で
       単調不変・次元整合 OK。px_high52dev の52週 warmup 分は nan となり coverage で制御される。
 
+    fin_nan_ok=False（既定・本番の全モデル）: 財務特徴量が1つでも空欄の行は捨てる。
+    fin_nan_ok=True（計測専用・#938/#916）: 財務の空欄も float('nan') として保持し企業を残す。
+      `scripts/momentum_gate --fin-nan` が「M-2/M-6 で空欄の社を外さずに学習へ通すか」を共通域で
+      測るために使う。**本番のプラグインはまだ渡さない**（採るかは #916 の実測で決める）。
+      macro_nan_ok と同じく **build_interactions=False と併用すること**（交差項の OLS が壊れる）。
+
     shared_snapshot_cache() コンテキスト内では、大きいオブジェクト引数（prices_by_co/
     fin_by_co/companies/macro_cache）は id()、それ以外の引数は値そのものからキーを
     構築してキャッシュする（Issue #298）。コンテキスト外では常にフル計算する。
@@ -1143,12 +1150,14 @@ def build_snapshots(
             prices_by_co, fin_by_co, companies, macro_cache,
             fin_features, macro_names, use_momentum, mom_window, min_coverage,
             build_interactions, macro_nan_ok, return_stock_ids, price_features,
+            fin_nan_ok=fin_nan_ok,
         )
+    # fin_nan_ok もキーに入れる。入れないと、空欄を通した条件と通さない条件が同じ結果を共有する（#938）
     key = (
         id(prices_by_co), id(fin_by_co), id(companies), id(macro_cache),
         tuple(fin_features), tuple(macro_names), use_momentum, mom_window,
         min_coverage, build_interactions, macro_nan_ok, return_stock_ids,
-        tuple(price_features),
+        tuple(price_features), fin_nan_ok,
     )
     return _cached_or_computed(
         cache["build_snapshots"], key,
@@ -1156,6 +1165,7 @@ def build_snapshots(
             prices_by_co, fin_by_co, companies, macro_cache,
             fin_features, macro_names, use_momentum, mom_window, min_coverage,
             build_interactions, macro_nan_ok, return_stock_ids, price_features,
+            fin_nan_ok=fin_nan_ok,
         ),
         "スナップショット",
     )
@@ -1175,6 +1185,7 @@ def _build_snapshots_impl(
     macro_nan_ok: bool,
     return_stock_ids: bool,
     price_features: list[str] | None = None,
+    fin_nan_ok: bool = False,
 ) -> tuple:
     """build_snapshots の実体（キャッシュなし・毎回フル計算）。"""
     use_macro = bool(macro_names)
@@ -1246,8 +1257,13 @@ def _build_snapshots_impl(
             for fn in fin_features:
                 v = getattr(fin_rec, fn, None)
                 if v is None:
-                    ok = False
-                    break
+                    if not fin_nan_ok:
+                        ok = False
+                        break
+                    # 計測専用（#938）: 空欄を NaN として保持（XGBoost は分岐で、ElasticNet は
+                    # fold 内の列平均補完で扱う）。表示可否は下の min_coverage が制御する
+                    fin_row.append(float("nan"))
+                    continue
                 fin_row.append(float(v))
             if not ok:
                 continue
