@@ -899,6 +899,22 @@ _RECRUIT_S100YDHL = _DEI_IFRS_2026_03 + [
     ("jppfs_cor:ShortTermLoansPayable", "CurrentYearInstant_NonConsolidatedMember", "543092000000"),
     ("jppfs_cor:LongTermLoansPayable", "CurrentYearInstant_NonConsolidatedMember", "200000000000"),
 ]
+# トヨタ 2026年3月期（S100Y8NY・IFRS）の BS の小計と合計（#935）。連結は jpigp_cor の名前（非流動負債は
+# タクソノミ自体の綴り Labilities）、単体は jppfs_cor の名前。書類の値をそのまま写した
+_TOYOTA_SUBTOTALS_S100Y8NY = _DEI_IFRS_2026_03 + [
+    ("jpigp_cor:CurrentAssetsIFRS", "CurrentYearInstant", "42824081000000"),
+    ("jpigp_cor:NonCurrentAssetsIFRS", "CurrentYearInstant", "62698250000000"),
+    ("jpigp_cor:AssetsIFRS", "CurrentYearInstant", "105522331000000"),
+    ("jpigp_cor:TotalCurrentLiabilitiesIFRS", "CurrentYearInstant", "33605019000000"),
+    ("jpigp_cor:NonCurrentLabilitiesIFRS", "CurrentYearInstant", "30897244000000"),
+    ("jpigp_cor:LiabilitiesIFRS", "CurrentYearInstant", "64502263000000"),
+    ("jppfs_cor:CurrentAssets", "CurrentYearInstant_NonConsolidatedMember", "16512121000000"),
+    ("jppfs_cor:NoncurrentAssets", "CurrentYearInstant_NonConsolidatedMember", "15144204000000"),
+    ("jppfs_cor:Assets", "CurrentYearInstant_NonConsolidatedMember", "31656325000000"),
+    ("jppfs_cor:CurrentLiabilities", "CurrentYearInstant_NonConsolidatedMember", "6185881000000"),
+    ("jppfs_cor:NoncurrentLiabilities", "CurrentYearInstant_NonConsolidatedMember", "1805520000000"),
+    ("jppfs_cor:Liabilities", "CurrentYearInstant_NonConsolidatedMember", "7991401000000"),
+]
 
 
 def _without_dei(rows):
@@ -1148,6 +1164,45 @@ class TestInterestBearingDebtComponents:
         for col in ("bs_current_portion_long_term_debt", "bs_commercial_paper",
                     "bs_current_portion_bonds_payable"):
             assert col in database._NEW_COLS, col
+
+
+_SUBTOTAL_FIELDS = ("current_assets", "noncurrent_assets", "total_assets",
+                    "current_liabilities", "noncurrent_liabilities", "total_liabilities")
+
+
+class TestIfrsBalanceSheetSubtotals:
+    """IFRS の連結 BS の小計を連結の値で読む（#935・#930）。
+
+    登録していた `CurrentLiabilitiesIFRS` / `NoncurrentAssetsIFRS` / `NoncurrentLiabilitiesIFRS` はどの書類にも無く、
+    連結の小計を1つも拾えていなかった（以前は単体の値が入り、トヨタの流動負債 6.19 兆円は単体だった）。
+    """
+
+    @_ORDERS
+    def test_consolidated_subtotals_are_read(self, order):
+        bs = _parse(_TOYOTA_SUBTOTALS_S100Y8NY, order)["bs"]
+        assert {k: v for k, v in bs.items() if k in _SUBTOTAL_FIELDS} == {
+            "current_assets": 42824081000000.0,
+            "noncurrent_assets": 62698250000000.0,       # 単体の 15,144,204百万円ではない
+            "total_assets": 105522331000000.0,
+            "current_liabilities": 33605019000000.0,     # 単体の 6,185,881百万円ではない
+            "noncurrent_liabilities": 30897244000000.0,  # 単体の 1,805,520百万円ではない
+            "total_liabilities": 64502263000000.0,
+        }
+
+    def test_subtotals_add_up_to_the_totals(self):
+        """小計の和が合計に一致する（#930 の「足しても合計にならない」が解消したことの確認）。"""
+        bs = _parse(_TOYOTA_SUBTOTALS_S100Y8NY)["bs"]
+        assert bs["current_assets"] + bs["noncurrent_assets"] == bs["total_assets"]
+        assert bs["current_liabilities"] + bs["noncurrent_liabilities"] == bs["total_liabilities"]
+
+    @pytest.mark.parametrize("tag, col", [
+        ("NonCurrentAssetsIFRS", "noncurrent_assets"),
+        ("TotalCurrentLiabilitiesIFRS", "current_liabilities"),
+        # タクソノミ自体の綴り（Labilities）。Liabilities へ直すと拾えなくなる
+        ("NonCurrentLabilitiesIFRS", "noncurrent_liabilities"),
+    ])
+    def test_ifrs_subtotal_tags_are_mapped(self, tag, col):
+        assert XBRL_MAP[tag] == ("bs", col)
 
 
 # ── calc_derived ─────────────────────────────────────────────────────────────
