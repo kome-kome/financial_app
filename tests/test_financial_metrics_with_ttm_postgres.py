@@ -223,7 +223,7 @@ class TestTtmRows:
                      bs_long_term_debt=200.0, bs_bonds_payable=100.0)
         row = self._bs_ratios(conn, ec)
         assert row.interest_bearing_debt == 500.0
-        assert row.de_ratio == pytest.approx(0.25)
+        assert float(row.de_ratio) == pytest.approx(0.25)    # ROUND(::numeric) は生の SQL では Decimal
 
     def test_new_components_alone_count_as_observed(self, conn):
         """負債合計が空欄でも、新しい構成要素（CP）があれば負債の側を観測している（#926）。"""
@@ -231,7 +231,7 @@ class TestTtmRows:
         self._insert(conn, ec, bs_total_liabilities=None, bs_commercial_paper=80.0)
         row = self._bs_ratios(conn, ec)
         assert row.interest_bearing_debt == 80.0
-        assert row.de_ratio == pytest.approx(0.04)
+        assert float(row.de_ratio) == pytest.approx(0.04)
 
     def test_de_ratio_is_zero_without_debt_lines_when_liabilities_are_observed(self, conn):
         """借入金の行が無く負債合計がある社は無借金として D/E 0（外さない・#915）。式は通期・半期と同じ形。"""

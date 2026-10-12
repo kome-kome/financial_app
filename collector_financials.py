@@ -440,10 +440,8 @@ def _drops_nonconsolidated(ctx: str, cat: str, consolidated_doc: bool) -> bool:
 # 両方載せるので、`BorrowingsCLIFRS`（短期）と `CurrentPortionOfLongTermLoansPayable`（1年内返済の長期）に
 # 同じ借入が入り、6列の和で二重に数える（実物: ベイカレント S100TI4B）。IFRS の行は短期・長期の2列が社債と
 # 1年内返済分を含む前提で、残りの4列は空欄でなければならない（database.py の注記）。
-_IFRS_DEBT_FIELDS = frozenset({
-    "short_term_debt", "current_portion_long_term_debt", "commercial_paper",
-    "current_portion_bonds_payable", "long_term_debt", "bonds_payable",
-})
+# 列の唯一の源は database.INTEREST_BEARING_DEBT_COLUMNS（書き写さない・#926）。
+_IFRS_DEBT_FIELDS = frozenset(c.removeprefix("bs_") for c in INTEREST_BEARING_DEBT_COLUMNS)
 
 
 def _skips_jgaap_debt_tag(raw_elem: str, cat: str, field: str, ifrs_doc: bool) -> bool:
