@@ -522,6 +522,33 @@ class TestFinNanGateMeasuresM2AndM6:
         assert argv[argv.index("--stride") + 1] == "1"
 
 
+class TestDeExcludeGateMeasuresM2AndM6:
+    """D/E の業種除外のジョブ（#940・#927）は M-2 / M-6 を、間引かずに、本番（keep）を分母に測る。"""
+
+    KEY = "gate:de-exclude"
+
+    def test_the_job_runs_the_de_exclude_axis_with_the_default_models(self):
+        from scripts.momentum_gate import DE_EXCLUDE_MODELS
+
+        argv = rd.JOBS[self.KEY].argv
+        assert "--de-exclude" in argv
+        assert "--models" not in argv
+        assert DE_EXCLUDE_MODELS == ["xgb_m2", "elasticnet"]
+
+    def test_the_preregistered_base_and_tests(self):
+        from scripts.momentum_gate import (
+            DE_EXCLUDE_MODELS, base_of, bonferroni_alpha, build_conditions)
+
+        conds = build_conditions(de_exclude=True)
+        assert base_of(conds) == "keep"                      # 本番の構成
+        assert bonferroni_alpha(len(DE_EXCLUDE_MODELS), len(conds)) == pytest.approx(0.0125)
+
+    def test_the_job_measures_at_full_resolution(self):
+        argv = rd.JOBS[self.KEY].argv
+        assert "--smoke" not in argv
+        assert argv[argv.index("--stride") + 1] == "1"
+
+
 class TestBudgetFitsTheWindow:
     INSTALLER = ROOT / "scripts" / "install_daytime_task.ps1"
 
@@ -629,7 +656,7 @@ class TestParallelSensitivity:
                                      "gate:interactions", "gate:max-features", "gate:ttm",
                                      "gate:demean", "gate:risk-axis-m6", "gate:risk-axis-m2",
                                      "gate:risk-axis-m2-mu", "gate:macro-m6",
-                                     "gate:fin-nan", "bench:rhat-scale"])
+                                     "gate:fin-nan", "gate:de-exclude", "bench:rhat-scale"])
     def test_computations_are_sensitive(self, key):
         """MCMC も探索も昇格ゲートも、数値の揺れが**採否や重みそのもの**を変える。"""
         assert rd.JOBS[key].parallel_sensitive is True
