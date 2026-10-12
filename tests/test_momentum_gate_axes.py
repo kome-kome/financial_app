@@ -280,7 +280,8 @@ class TestDemeanMainWiring:
         """**渡し忘れても例外は出ない**（両条件が素の目的変数で組まれ、差なしになる）。"""
         src = inspect.getsource(momentum_gate.main)
         assert src.count("demean_target=args.demean_target") == 2   # build_conditions / mode_of
-        assert "c.demean_target)" in src                              # _build へ渡す
+        # _build へ渡す（#938 で後ろに fin_nan_ok が続く形になった）
+        assert "c.demean_target, fin_nan_ok=c.fin_nan_ok)" in src
         assert "demean_reach_problems(" in src
         assert "DEMEAN_MODELS" in src
 
