@@ -295,6 +295,27 @@ M-2 / M-6 で、財務特徴量が空欄の行を捨てずに NaN で学習へ�
 共有の扱いも #916 で決める。CV の前に `nan` 側のサンプル数が `drop` 側より多いことを確かめ、
 増えていなければ止める（`fin_nan_reach_problems`）。日中キューの名前は `gate:fin-nan`。
 
+## D/E の業種除外モード（`--de-exclude`・#940/#927）
+
+証券業・その他金融業（リース・信販など）は借入が事業の資金そのもので、#926 で D/E の分子を有利子負債へ
+広げると D/E が大きく出る。この 2 業種を M-2 / M-6 の D/E の比較から外すかを測る:
+
+    keep    … 2業種の D/E を残す（本番の構成）＝基準
+    exclude … 2業種の D/E を空欄にする（業種名の正本は `database.DE_RATIO_EXCLUSION_CANDIDATES`）
+
+    python -m scripts.momentum_gate --de-exclude                  # M-2 / M-6（4検定・alpha 0.0125）
+
+**VIEW は変えず、読み込んだ財務の行だけを差し替える**（`null_de_ratio`）。M-2 / M-6 は生の `de_ratio` だけを
+使い、他の会社の値に波及しないので、本番の VIEW の業種の条件を広げたときと同じになる。factor premia は
+`z_de_ratio` を年度ごとに標準化し直す必要があるので、別の道具（#941）で測る。
+
+**母集団が縮む。** M-2 / M-6 の既定の財務特徴量は `de_ratio` を含むので、空欄にすると財務の空欄の行を落とす
+本番の規則でその社が丸ごと外れる。主判定は共通域で読み、raw は「縮む側は有利に見える」（ADR-0045）に当たる
+前提で読む。#916 で財務の空欄を NaN で通す（`fin_nan_ok`）と決めた後は、社は落ちず NaN として残る＝結果が
+変わるので、どちらの規則の下で測ったかを記録に残す。CV の前に、空欄にした行が0より多く、`exclude` 側の
+サンプル数が `keep` 側より少ないことを確かめる（`de_exclude_reach_problems`）。日中キューの名前は
+`gate:de-exclude`。**#926 のマージ後に測る**（新しい定義の D/E でないと測る意味がない）。
+
 ## M-1 を測るときの注意
 
 M-1 は `macro_nan_ok=False`（strict）で**母集団自体が M-2/M-6 と別物**なので、パネルを共有
@@ -316,7 +337,7 @@ from typing import NamedTuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from database import SessionLocal  # noqa: E402
+from database import DE_RATIO_EXCLUSION_CANDIDATES, SessionLocal  # noqa: E402
 from model_stats import paired_ic_significance  # noqa: E402
 from plugins import get_plugin  # noqa: E402
 from plugins.macro_ensemble import _align  # noqa: E402
@@ -373,6 +394,10 @@ class Cond(NamedTuple):
     `fin_nan_ok`（#938・#916）は財務特徴量の空欄で行を捨てずに NaN で通すか。既定 False は本番の
     構成（全モデルが空欄の行を捨てる）で、既存モードの測定条件はやはり動かない。M-1 には効かない
     （交差項の OLS に NaN が入ると壊れる・`_build`）。
+
+    `de_null_industries`（#940・#927）は D/E を空欄にする業種。既定 `()` は本番の構成（銀行業・保険業は
+    VIEW が既に空欄にしている）で、既存モードの測定条件はやはり動かない。差し替えは読み込んだ財務の行
+    だけで行い、VIEW は変えない（`null_de_ratio`）。
     """
     use_momentum: bool
     momentum_window: int
@@ -382,6 +407,7 @@ class Cond(NamedTuple):
     fin_rows: str = "annual"
     demean_target: bool = False
     fin_nan_ok: bool = False
+    de_null_industries: tuple[str, ...] = ()
 
 
 CONDS: dict[str, bool] = {"off": False, "on": True}
@@ -449,6 +475,13 @@ DEMEAN_MODELS = ["risk_return"]
 FIN_NAN_CONDS: dict[str, bool] = {"drop": False, "nan": True}
 FIN_NAN_BASE_COND = "drop"
 FIN_NAN_MODELS = ["xgb_m2", "elasticnet"]
+
+# D/E の業種除外モード（`--de-exclude`・#940/#927）。**基準は本番の構成（2業種の D/E を残す `keep`）**。
+# 対象は M-2 / M-6——既定の財務特徴量が `de_ratio` を含むので、空欄にすると財務の空欄の行を落とす本番の
+# 規則でその社が丸ごと外れる（母集団が縮む＝共通域で比べる）。業種名の正本は database 側に1か所。
+DE_EXCLUDE_CONDS: dict[str, tuple[str, ...]] = {"keep": (), "exclude": DE_RATIO_EXCLUSION_CANDIDATES}
+DE_EXCLUDE_BASE_COND = "keep"
+DE_EXCLUDE_MODELS = ["xgb_m2", "elasticnet"]
 # 月平均除去が届いたかの許容（`demean_reach_problems`）。素の側は「全部0」だけを弾き、除去した
 # 側は浮動小数の丸めを十分に上回る幅で 0 とみなす（どちらの値も実行時に出力と JSON へ出る）。
 DEMEAN_RAW_MIN = 1e-12
@@ -538,10 +571,11 @@ def build_conditions(windows: list[int] | None = None,
                     risk_axis: bool = False,
                     lambdas: list[float] | None = None,
                     models: list[str] | None = None,
-                    fin_nan: bool = False) -> dict[str, Cond]:
+                    fin_nan: bool = False,
+                    de_exclude: bool = False) -> dict[str, Cond]:
     """条件集合 {名前: Cond} を作る。
 
-    9つのモードがある。**同時に使えるのは1つだけ**（下記）:
+    10のモードがある。**同時に使えるのは1つだけ**（下記）:
 
       既定           … ADR-0045 の昇格ゲートと完全に同じ2条件（`off` / `on`・マクロは ON のまま）
       `windows`      … モメンタム無し ＋ 各窓（#592・ADR-0050）
@@ -552,6 +586,7 @@ def build_conditions(windows: list[int] | None = None,
       `demean_target` … 素の目的変数 ＋ 月平均を引いた目的変数（#615）。他の軸は本番構成に固定
       `risk_axis`    … U = μ − λR の R を振る（#709）。**パネルは全条件とも本番構成で同一**
       `fin_nan`      … 財務の空欄の行を捨てる ＋ NaN で通す（#938・#916）。他の軸は本番構成に固定
+      `de_exclude`   … 2業種の D/E を残す ＋ 空欄にする（#940・#927）。他の軸は本番構成に固定
 
     **`risk_axis` だけは `Cond` を動かさない。** R はモデルの学習に一切入らず、CV が出した
     μ̂ の順位を作り直すときだけ使うので、パネル構築のパラメータではない。3条件とも同じ
@@ -576,7 +611,7 @@ def build_conditions(windows: list[int] | None = None,
     modes = [("--windows", bool(windows)), ("--macro", macro),
              ("--interactions", interactions), ("--max-features", bool(max_features)),
              ("--fin-rows", fin_rows), ("--demean-target", demean_target),
-             ("--risk-axis", risk_axis), ("--fin-nan", fin_nan)]
+             ("--risk-axis", risk_axis), ("--fin-nan", fin_nan), ("--de-exclude", de_exclude)]
     picked = [name for name, on in modes if on]
     if len(picked) > 1:
         raise ValueError(
@@ -622,6 +657,11 @@ def build_conditions(windows: list[int] | None = None,
         # 通期のみ・素の目的変数）＝「本番の M-2/M-6 で空欄の社を外さずに通したら」を問う。
         return {name: Cond(False, MOM_WINDOW, fin_nan_ok=flag)
                 for name, flag in FIN_NAN_CONDS.items()}
+    if de_exclude:
+        # D/E を空欄にする業種だけを差し替える。他の軸はすべて本番構成＝「本番の M-2/M-6 で
+        # 証券業・その他金融業の D/E を比較から外したら」を問う。
+        return {name: Cond(False, MOM_WINDOW, de_null_industries=inds)
+                for name, inds in DE_EXCLUDE_CONDS.items()}
     if not windows:
         return {name: Cond(use_mom, MOM_WINDOW) for name, use_mom in CONDS.items()}
     ws = sorted({int(w) for w in windows})
@@ -645,11 +685,12 @@ def base_of(conds: dict[str, Cond], default_max_features: int | None = None) -> 
     目的変数モードの分母も**本番の構成**（`raw`）。この軸も母集団を動かさない。
     財務の空欄モードの分母も**本番の構成**（`drop`）。こちらは母集団を広げる側が本番ではないが、
     `drop` 側は `nan` 側に含まれる＝分母に置いた側が「母集団の狭い側」になる点に注意（共通域で揃える）。
+    D/E の業種除外モードの分母も**本番の構成**（`keep`）。こちらは本番が母集団の広い側。
     リスク軸モードの分母も**本番の構成**だが、モデルごとに違う（M-1 は `r2`・M-6 は `mu_only`）ので
     ここでは決めない。`main` はリスク軸モードでは `risk_base_cond` を使う（#808）。
     """
     for cand in (BASE_COND, MACRO_BASE_COND, INTERACTION_BASE_COND, FIN_ROWS_BASE_COND,
-                 DEMEAN_BASE_COND, RISK_BASE_COND, FIN_NAN_BASE_COND):
+                 DEMEAN_BASE_COND, RISK_BASE_COND, FIN_NAN_BASE_COND, DE_EXCLUDE_BASE_COND):
         if cand in conds:
             return cand
     prod = maxfeat_cond_name(default_max_features) if default_max_features else None
@@ -677,13 +718,14 @@ ALPHA = 0.05 / N_TESTS
 MODE_SUFFIX: dict[str, str] = {"default": "", "windows": "", "macro": "_macro",
                                "interactions": "_interactions", "max_features": "_maxfeat",
                                "fin_rows": "_fin_rows", "demean_target": "_demean",
-                               "risk_axis": "_risk_axis", "fin_nan": "_fin_nan"}
+                               "risk_axis": "_risk_axis", "fin_nan": "_fin_nan",
+                               "de_exclude": "_de_exclude"}
 
 
 def mode_of(windows: list[int] | None = None, macro: bool = False,
             interactions: bool = False, max_features: list[int] | None = None,
             fin_rows: bool = False, demean_target: bool = False,
-            risk_axis: bool = False, fin_nan: bool = False) -> str:
+            risk_axis: bool = False, fin_nan: bool = False, de_exclude: bool = False) -> str:
     """測定モードの名前を返す（`build_conditions` と同じ引数から1箇所で導出する）。
 
     **#615 で足した2モードは、ここを持たないまま別モードの名前で出力されていた**——
@@ -706,6 +748,8 @@ def mode_of(windows: list[int] | None = None, macro: bool = False,
         return "risk_axis"
     if fin_nan:
         return "fin_nan"
+    if de_exclude:
+        return "de_exclude"
     return "windows" if windows else "default"
 
 
@@ -730,6 +774,9 @@ _AXIS_VERDICTS: dict[str, tuple[str, str]] = {
     # 共通域は財務が揃った行だけ（drop 側 ⊂ nan 側）。空欄の社に予測が出る効果は raw の水準で読む（#938）。
     "fin_nan": ("FIN NAN AXIS [common domain = complete-financials rows only; read raw for blank rows]",
                 "passing blank financials as NaN did not beat dropping them"),
+    # 本番は D/E を残す側（母集団が広い側）。外した側の改善は母集団の縮みと混ざるので共通域で読む（#940）。
+    "de_exclude": ("DE EXCLUDE AXIS",
+                   "blanking D/E for the candidate industries did not beat keeping it"),
     # 分母はモデルで違う（M-1 は r2・M-6 は mu_only・#808）ので名前を差し込む。
     "risk_axis": ("RISK AXIS",
                   "no risk condition beat the production ordering ({base})"),
@@ -754,7 +801,7 @@ def verdict_text(mode: str, n_conds: int, passed: list[str], regressed: list[str
     （`production`・条件に無ければ None）の両方を出す（#816）。
     """
     if (mode in ("macro", "interactions", "max_features", "fin_rows", "demean_target",
-                 "risk_axis", "fin_nan")
+                 "risk_axis", "fin_nan", "de_exclude")
             or (mode == "windows" and n_conds > 2)):
         head, none = _AXIS_VERDICTS[mode]
         if mode == "macro" and base == MACRO_ON_COND:
@@ -1143,6 +1190,51 @@ def fin_nan_reach_problems(samples: dict[str, int], kinds: list[str]) -> list[st
     return problems
 
 
+def null_de_ratio(fin_by_co: dict, industries: tuple[str, ...]) -> tuple[dict, int]:
+    """指定業種の財務の行の `de_ratio` を空欄にした写しと、空欄にした行数を返す（#940）。
+
+    **元の dict と行は書き換えない**（他の条件が同じ財務を読むため）。M-2/M-6 は生の `de_ratio` だけを
+    使い、他の会社の値に波及しないので、本番の VIEW の業種の条件を広げたときと同じになる。
+    Zスコア（`z_de_ratio`）は年度ごとに標準化し直す必要があるのでここでは触らない（factor premia は #941）。
+    既に空欄の行は数えない（届いたかの検査に使うため、実際に値を消した行だけを数える）。
+    """
+    inds = set(industries)
+    out: dict = {}
+    n = 0
+    for ec, recs in fin_by_co.items():
+        new_recs = []
+        for rec in recs:
+            if rec.industry in inds and rec.de_ratio is not None:
+                rec = rec._replace(de_ratio=None)
+                n += 1
+            new_recs.append(rec)
+        out[ec] = new_recs
+    return out, n
+
+
+def de_exclude_reach_problems(nulled_rows: int, samples: dict[str, int],
+                              kinds: list[str]) -> list[str]:
+    """D/E の業種除外の切り替えが断面に届いていない理由を列挙する（#940）。空リストなら健全。
+
+    空欄にした行が0なら（業種名の表記ずれ・該当業種の D/E が元から空欄）、両条件は同じ財務で組まれる。
+    `exclude` 側のサンプル数が `keep` 側より少なくなければ、空欄が行の除外まで届いていない
+    （M-2/M-6 の既定の特徴量に `de_ratio` が無い、など）。どちらもエラーを出さずに「差なし」だけが残る。
+    """
+    problems = []
+    if nulled_rows <= 0:
+        problems.append("D/E を空欄にした財務の行が0（業種名の表記ずれ、または該当業種の D/E が元から空欄）")
+    for kind in kinds:
+        n_keep = samples.get(f"{DE_EXCLUDE_BASE_COND}|{kind}", 0)
+        for cond in DE_EXCLUDE_CONDS:
+            if cond == DE_EXCLUDE_BASE_COND:
+                continue
+            n_ex = samples.get(f"{cond}|{kind}", 0)
+            if n_ex >= n_keep:
+                problems.append(f"{cond}|{kind}: サンプル数 {n_ex} が {DE_EXCLUDE_BASE_COND} 側の "
+                                f"{n_keep} より少なくない（空欄が行の除外まで届いていない）")
+    return problems
+
+
 # ── リスク軸（`--risk-axis`・#709）─────────────────────────────────────────────
 
 def _month_end_bound(ym: str) -> str:
@@ -1459,6 +1551,10 @@ def main() -> None:
                     help="財務の空欄モード（空欄の行を捨てる drop と NaN で通す nan を共通域で比べる・"
                          f"#938/#916）。モデル既定は {','.join(FIN_NAN_MODELS)}。共通域は財務が揃った行"
                          "だけになるので、空欄の社に予測が出る効果は raw で読む。他モードと併用不可")
+    ap.add_argument("--de-exclude", dest="de_exclude", action="store_true",
+                    help="D/E の業種除外モード（証券業・その他金融業の D/E を残す keep と空欄にする "
+                         f"exclude を共通域で比べる・#940/#927）。モデル既定は {','.join(DE_EXCLUDE_MODELS)}。"
+                         "VIEW は変えず、読み込んだ財務の行だけを差し替える。他モードと併用不可")
     ap.add_argument("--smoke", action="store_true", help="サンプルを間引いた短時間確認")
     ap.add_argument("--stride", type=int, default=1, help="各月のサンプル間引き幅")
     ap.add_argument("--allow-full-pull", action="store_true",
@@ -1487,6 +1583,8 @@ def main() -> None:
         default_models = RISK_MODELS
     elif args.fin_nan:
         default_models = FIN_NAN_MODELS
+    elif args.de_exclude:
+        default_models = DE_EXCLUDE_MODELS
     else:
         default_models = MODELS
     models = ([m.strip() for m in args.models.split(",") if m.strip()]
@@ -1515,7 +1613,7 @@ def main() -> None:
                                  max_features=max_features, fin_rows=args.fin_rows,
                                  demean_target=args.demean_target,
                                  risk_axis=args.risk_axis, lambdas=lambdas, models=models,
-                                 fin_nan=args.fin_nan)
+                                 fin_nan=args.fin_nan, de_exclude=args.de_exclude)
     except ValueError as e:
         raise SystemExit(str(e))
     # 列数モードの分母は本番値（プラグイン既定）。**ここで数値を書き写さない**。
@@ -1564,7 +1662,7 @@ def main() -> None:
     mode = mode_of(windows, macro=args.macro, interactions=args.interactions,
                    max_features=max_features, fin_rows=args.fin_rows,
                    demean_target=args.demean_target, risk_axis=args.risk_axis,
-                   fin_nan=args.fin_nan)
+                   fin_nan=args.fin_nan, de_exclude=args.de_exclude)
     default_out = f"momentum_gate{MODE_SUFFIX[mode]}.json"
     if mode == "risk_axis" and models != RISK_MODELS:
         # M-1 と M-6 は分母が違い別々に回す（#808）。同じファイルへ書くと後の run が前の結果を消す。
@@ -1631,12 +1729,24 @@ def main() -> None:
         # 同一 `Cond` なので、畳まないと同じ構築を3回払ううえ、**μ̂ が3条件で完全一致する保証が
         # 無くなる**——わずかでもずれると軸の差と混ざる（#697 と同型）。他モードは条件ごとに
         # `Cond` が違うので、この畳み込みは1件も当たらず挙動が変わらない。
+        # D/E の業種除外モード（#940）: 条件が指定した業種の `de_ratio` だけを空欄にした財務の写しを、
+        # (行の基準, 業種) ごとに1回だけ作る。元の `fins` は書き換えない（他の条件が同じ財務を読む）。
+        de_nulled: dict[tuple, dict] = {}
+        de_nulled_rows = 0
+        for c in conds.values():
+            dkey = (c.fin_rows, c.de_null_industries)
+            if c.de_null_industries and dkey not in de_nulled:
+                de_nulled[dkey], n_null = null_de_ratio(fins[c.fin_rows], c.de_null_industries)
+                de_nulled_rows += n_null
+                print(f"[de_exclude] financial rows whose de_ratio was blanked: {n_null}", flush=True)
         built: dict[tuple, tuple] = {}
         for cond, c in conds.items():
             for kind in kinds:
                 if (c, kind) not in built:
+                    fin_src = (de_nulled[(c.fin_rows, c.de_null_industries)]
+                               if c.de_null_industries else fins[c.fin_rows])
                     built[(c, kind)] = _build(
-                        kind, args, prices_by_co, fins[c.fin_rows], companies,
+                        kind, args, prices_by_co, fin_src, companies,
                         macro_cache, c.use_momentum, c.momentum_window,
                         c.use_macro, c.build_interactions, c.max_features,
                         c.demean_target, fin_nan_ok=c.fin_nan_ok)
@@ -1657,6 +1767,7 @@ def main() -> None:
                       f"maxfeat={c.max_features or '-'} "
                       f"target={'demean' if c.demean_target else 'raw'} "
                       f"fin_blank={'nan' if c.fin_nan_ok else 'drop'} "
+                      f"de_null_inds={len(c.de_null_industries)} "
                       f"months={st['months']} ({st['first_ym']}..{st['last_ym']}) "
                       f"samples={st['samples']} companies={st['companies']} "
                       f"features={st['n_features']} [{head}{more}]", flush=True)
@@ -1708,6 +1819,16 @@ def main() -> None:
             print("[note] the common domain is the drop side (complete financials); the effect "
                   "of predicting companies with blank financials shows only in raw levels",
                   flush=True)
+
+        # D/E の業種除外モードでも、切り替えが**断面まで届いたか**を CV の前に確かめる（#940）。
+        de_exclude_samples: dict[str, int] = {}
+        if mode == "de_exclude":
+            de_exclude_samples = {key: st["samples"] for key, st in stats.items()}
+            for key, n in de_exclude_samples.items():
+                print(f"[{key}] samples={n}", flush=True)
+            problems = de_exclude_reach_problems(de_nulled_rows, de_exclude_samples, kinds)
+            if problems:
+                raise SystemExit("中止: D/E の業種除外が断面に届いていません: " + " / ".join(problems))
 
         # リスク軸モードの R は CV の前に作る（軸ごとに `(ym, ec) → R`）。パネルは全条件で
         # 同一なので `base` のものを使う。**R は軸ごとに1回だけ作り**、λ 違いの条件で同じ表を
@@ -1946,7 +2067,8 @@ def main() -> None:
                               "max_features": c.max_features,
                               "fin_rows": c.fin_rows,
                               "demean_target": c.demean_target,
-                              "fin_nan_ok": c.fin_nan_ok}
+                              "fin_nan_ok": c.fin_nan_ok,
+                              "de_null_industries": list(c.de_null_industries)}
                        for name, c in conds.items()},
         "mode": mode,
         "base_cond": base,
@@ -1959,6 +2081,7 @@ def main() -> None:
         "ttm_rows": ttm_rows,
         "changed_rows": changed_rows,
         "fin_nan_samples": fin_nan_samples,
+        "de_exclude": {"nulled_rows": de_nulled_rows, "samples": de_exclude_samples},
         # 目的変数モードの健全性（#615）。{"条件|種別": 月平均の絶対値の最大}。他モードでは空。
         "target_month_mean": target_month_mean,
         # リスク軸モード（#709）。他モードでは None / 空。

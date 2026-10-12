@@ -2570,6 +2570,11 @@ FINANCIAL_METRICS_INTERIM_VIEW_SQL = (Path(__file__).parent / "sql" / "financial
 # financial_metrics_with_ttm VIEW DDL（#424 子2・ADR-0051）
 FINANCIAL_METRICS_WITH_TTM_VIEW_SQL = (Path(__file__).parent / "sql" / "financial_metrics_with_ttm_view.sql").read_text(encoding="utf-8")
 
+# D/E の比較から外すかを**測る候補**の業種（#927・本番は外していない）。借入が事業の資金そのもの（証券の
+# 信用取引・リース・信販）で D/E が大きく出る。計測の道具（`scripts/momentum_gate --de-exclude`・#940、
+# factor premia の計測・#941）だけが読む。外すと決めたら下の DE_RATIO_EXCLUDED_INDUSTRIES へ移す。
+DE_RATIO_EXCLUSION_CANDIDATES: tuple[str, ...] = ("証券、商品先物取引業", "その他金融業")
+
 # D/E を作らない業種（JPX 33業種名・#925・ADR-0067）。銀行は借入を「借用金」で載せ、保険も借入金の区分を
 # 持たないので、借入金の列が空欄になり「負債合計があれば借入金の空欄は 0」（#915）で D/E = 0（無借金）に見える。
 # **SQL は Python を読めないので、VIEW 3本の `de_ratio` にも同じ名前を書いてある**（一致は

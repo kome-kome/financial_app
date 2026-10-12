@@ -79,6 +79,15 @@ class TestModesAreMutuallyExclusive:
         (dict(fin_rows=True, fin_nan=True)),
         (dict(demean_target=True, fin_nan=True)),
         (dict(risk_axis=True, fin_nan=True)),
+        # D/E の業種除外モード（#940）も母集団を縮める軸。他の軸と同時に振ると分離できない。
+        (dict(windows=[3], de_exclude=True)),
+        (dict(macro=True, de_exclude=True)),
+        (dict(interactions=True, de_exclude=True)),
+        (dict(max_features=[5], de_exclude=True)),
+        (dict(fin_rows=True, de_exclude=True)),
+        (dict(demean_target=True, de_exclude=True)),
+        (dict(risk_axis=True, de_exclude=True)),
+        (dict(fin_nan=True, de_exclude=True)),
     ]
 
     @pytest.mark.parametrize("kwargs", PAIRS)
@@ -382,6 +391,16 @@ class TestExistingModesAreUnchanged:
         for c in build_conditions(**kwargs).values():
             assert c.fin_nan_ok is False
 
+    @pytest.mark.parametrize("kwargs", [
+        dict(), dict(windows=[3, 12]), dict(macro=True), dict(interactions=True),
+        dict(max_features=[5, 20]), dict(fin_rows=True), dict(demean_target=True),
+        dict(risk_axis=True, models=["xgb_m2"]), dict(fin_nan=True),
+    ])
+    def test_existing_modes_keep_every_industrys_de_ratio(self, kwargs):
+        """D/E の業種除外（#940）の既定は本番の構成＝空欄にする業種なし。既存モードは差し替えない。"""
+        for c in build_conditions(**kwargs).values():
+            assert c.de_null_industries == ()
+
 
 class TestBuildUsesTheConditionAxes:
     """`_build` が Cond の値を実際に使うこと。
@@ -562,13 +581,15 @@ class TestOutputNamesTheModeThatWasMeasured:
         (dict(demean_target=True), "demean_target"),
         (dict(risk_axis=True), "risk_axis"),
         (dict(fin_nan=True), "fin_nan"),
+        (dict(de_exclude=True), "de_exclude"),
     ])
     def test_mode_follows_the_flag(self, kwargs, want):
         assert mode_of(**kwargs) == want
 
     def test_every_mode_has_a_file_suffix(self):
         assert set(MODE_SUFFIX) == {"default", "windows", "macro", "interactions", "max_features",
-                                    "fin_rows", "demean_target", "risk_axis", "fin_nan"}
+                                    "fin_rows", "demean_target", "risk_axis", "fin_nan",
+                                    "de_exclude"}
 
     def test_demean_mode_writes_its_own_file(self):
         """既定の `momentum_gate.json` を上書きしない（どの軸の結果かがファイル名で分かる）。"""
@@ -590,6 +611,7 @@ class TestOutputNamesTheModeThatWasMeasured:
         ("risk_axis", 3, "RISK AXIS"),
         ("fin_nan", 2,
          "FIN NAN AXIS [common domain = complete-financials rows only; read raw for blank rows]"),
+        ("de_exclude", 2, "DE EXCLUDE AXIS"),
     ])
     def test_new_modes_do_not_borrow_the_momentum_wording(self, mode, n_conds, head):
         for passed, regressed in (([], []), (["x"], []), ([], ["y"])):

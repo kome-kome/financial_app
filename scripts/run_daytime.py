@@ -304,6 +304,19 @@ JOBS: dict[str, Job] = {
         measured_min=20.0,
         parallel_sensitive=True,   # 他の gate と同じ理由（採否が CI の符号で決まる）
     ),
+    # 証券業・その他金融業の D/E を比較から外すか（#927）を M-2 / M-6 で測る道具（#940）。
+    # **積むのは人**（#926 のマージ後。新しい定義の D/E でないと測る意味がない）。
+    "gate:de-exclude": Job(
+        name="gate_de_exclude",
+        argv=("{python}", "-m", "scripts.momentum_gate", "--de-exclude",
+              "--stride", "1", "--allow-full-pull", "--refresh-cache"),
+        why="証券業・その他金融業の D/E を残す（本番）か空欄にするかを共通 (ym,ec) 域で比べる"
+            "（#927・#940）。対象は M-2 / M-6・4検定・alpha 0.0125。空欄にした行が0、または"
+            "行の除外まで届かないときは非0で止まる。",
+        # 見積り（未実測）。gate:ttm（12.8分・パネル構築2条件＋CV）と同じ形。実走ログの END で差し替える。
+        measured_min=15.0,
+        parallel_sensitive=True,   # 他の gate と同じ理由（採否が CI の符号で決まる）
+    ),
     # 9/18 の列数上限の本測定で「上限が財務の列を締め出している」は否定された（上限 40 でも財務は
     # 2列）。残った見立ては「M-1 の目的変数は素の52週先リターンなので、BIC（二乗誤差）は相場全体の
     # 変動を説明するマクロ列を選ぶ。評価は月内の順位」＝学習と評価のずれ（ADR-0050 の 9/18 追記）。
