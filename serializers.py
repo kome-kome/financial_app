@@ -4,6 +4,19 @@ api.py の routing から引き上げた純粋関数。company / 財務一覧画
 bs/pl/cf/val/nc/zscore のネスト dict へ整形する（残差表示・チャート用）。
 ORM 行の属性を読むだけで db/HTTP に依存しないため直接テストできる。
 """
+from database import INTEREST_BEARING_DEBT_CURRENT
+
+
+def _interest_bearing_debt_current(r):
+    """有利子負債の短期側の小計（BS グラフの「短期有利子負債」・#926）。
+
+    合計は VIEW の `interest_bearing_debt` を読み、ここでは短期側の構成要素だけを足す（どの列が
+    短期側かの唯一の源は `database.INTEREST_BEARING_DEBT_CURRENT`）。合計が NULL＝負債の側を
+    観測していない行では、短期側も 0 ではなく NULL にする（#915）。
+    """
+    if r.interest_bearing_debt is None:
+        return None
+    return sum(getattr(r, c) or 0 for c in INTEREST_BEARING_DEBT_CURRENT)
 
 
 def record_to_dict(r) -> dict:
@@ -35,6 +48,9 @@ def record_to_dict(r) -> dict:
             "equity_parent": r.bs_equity_parent,
             "short_term_debt": r.bs_short_term_debt,
             "long_term_debt": r.bs_long_term_debt,
+            # 有利子負債（D/E の分子・VIEW の値）と短期側の小計。画面は構成要素を足さずにこれを読む（#926）
+            "interest_bearing_debt": r.interest_bearing_debt,
+            "interest_bearing_debt_current": _interest_bearing_debt_current(r),
             "bps": r.bs_bps,
             "equity_ratio": r.equity_ratio,
         },

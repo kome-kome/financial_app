@@ -1329,11 +1329,27 @@ class TestCalcDerived:
         assert calc_derived(rec)["derived"]["de_ratio"] == 0.0
 
     def test_de_ratio_none_when_no_liability_is_observed(self):
-        """負債合計まで無ければ負債の側を観測していないので D/E を作らない（#915）。"""
+        """構成要素と負債合計がすべて無ければ負債の側を観測していないので D/E を作らない（#915）。"""
+        rec = self._rec()
+        for col in database.INTEREST_BEARING_DEBT_COLUMNS + ("bs_total_liabilities",):
+            rec["bs"].pop(col.removeprefix("bs_"), None)
+        assert calc_derived(rec)["derived"]["de_ratio"] is None
+
+    def test_de_ratio_sums_all_interest_bearing_debt_components(self):
+        """D/E の分子は VIEW の interest_bearing_debt と同じ6列の和（#926）。純資産 2500。"""
+        rec = self._rec()
+        rec["bs"].update(current_portion_long_term_debt=50.0, commercial_paper=30.0,
+                         current_portion_bonds_payable=20.0, bonds_payable=200.0)
+        # 100 + 50 + 30 + 20 + 200 + 200 = 600
+        assert calc_derived(rec)["derived"]["de_ratio"] == 0.24
+
+    def test_new_components_alone_count_as_observed(self):
+        """負債合計と2列が無くても、新しい構成要素（CP）があれば D/E を作る（VIEW と同じ・#926）。"""
         rec = self._rec()
         for k in ("short_term_debt", "long_term_debt", "total_liabilities"):
             del rec["bs"][k]
-        assert calc_derived(rec)["derived"]["de_ratio"] is None
+        rec["bs"]["commercial_paper"] = 250.0
+        assert calc_derived(rec)["derived"]["de_ratio"] == 0.1
 
     @pytest.mark.parametrize("industry", database.DE_RATIO_EXCLUDED_INDUSTRIES)
     def test_de_ratio_none_for_banks_and_insurers(self, industry):

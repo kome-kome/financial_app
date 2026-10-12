@@ -391,7 +391,8 @@ class FinancialRecord(Base):
     bs_payables             = Column(Float, info={"xbrl": ["NotesAndAccountsPayableTrade", "AccountsPayableTrade", "TradeAndOtherPayablesCurrentIFRS"]})  # 買掛金（仕入債務）
     bs_noncurrent_liabilities = Column(Float, info={"xbrl": ["NoncurrentLiabilities", "NonCurrentLabilitiesIFRS", "NoncurrentLiabilitiesIFRS"]})  # 固定負債（同上・綴りはタクソノミのまま）
     # 有利子負債の構成要素（#920・ADR-0067）。1つの列には1つのタグの値しか入らない（_apply_row は合算しない）
-    # ので、構成要素ごとに列を持ち、合計は VIEW で作る（#926）。D/E の分子は今は短期・長期借入金の2列だけ。
+    # ので、構成要素ごとに列を持ち、合計は VIEW の `interest_bearing_debt` で作る（D/E の分子・#926）。
+    # どの列を足すかの唯一の源は下の `INTEREST_BEARING_DEBT_COLUMNS`。
     # IFRS の会社は連結の BS を「社債及び借入金」「有利子負債」「借入金」「長期債務」の流動・非流動で載せる
     # （jpigp_cor の標準タグ。実物: 三菱商事 S100YB25・トヨタ S100Y8NY・日立 S100YGBO・リクルート S100YDHL）。
     # これを下の2列へ別名として登録するので、**IFRS の行だけ2列の意味が広い**（社債と1年内返済分を含む）。
@@ -2440,7 +2441,9 @@ class FinancialMetric(ViewBase):
     bs_total_liabilities = Column(Float); bs_current_liabilities = Column(Float)
     bs_payables = Column(Float); bs_noncurrent_liabilities = Column(Float)
     bs_short_term_debt = Column(Float); bs_long_term_debt = Column(Float)
-    bs_bonds_payable = Column(Float); bs_total_equity = Column(Float)
+    bs_bonds_payable = Column(Float); bs_current_portion_long_term_debt = Column(Float)
+    bs_commercial_paper = Column(Float); bs_current_portion_bonds_payable = Column(Float)
+    bs_total_equity = Column(Float)
     bs_equity_parent = Column(Float); bs_paid_in_capital = Column(Float)
     bs_retained_earnings = Column(Float); bs_bps = Column(Float)
     pl_revenue = Column(Float); pl_cost_of_sales = Column(Float)
@@ -2470,6 +2473,7 @@ class FinancialMetric(ViewBase):
     op_margin = Column(Float); net_margin = Column(Float)
     roe = Column(Float); roa = Column(Float)
     equity_ratio = Column(Float); de_ratio = Column(Float); cf_ratio = Column(Float)
+    interest_bearing_debt = Column(Float)   # D/E の分子（構成要素は INTEREST_BEARING_DEBT_COLUMNS・#926）
     rd_intensity = Column(Float); da_intensity = Column(Float)
     asset_turnover = Column(Float)
     net_cash = Column(Float); nc_ratio = Column(Float)
@@ -2517,7 +2521,9 @@ class FinancialMetricInterim(ViewBase):
     bs_total_liabilities = Column(Float); bs_current_liabilities = Column(Float)
     bs_payables = Column(Float); bs_noncurrent_liabilities = Column(Float)
     bs_short_term_debt = Column(Float); bs_long_term_debt = Column(Float)
-    bs_bonds_payable = Column(Float); bs_total_equity = Column(Float)
+    bs_bonds_payable = Column(Float); bs_current_portion_long_term_debt = Column(Float)
+    bs_commercial_paper = Column(Float); bs_current_portion_bonds_payable = Column(Float)
+    bs_total_equity = Column(Float)
     bs_equity_parent = Column(Float); bs_paid_in_capital = Column(Float)
     bs_retained_earnings = Column(Float); bs_bps = Column(Float)
     pl_revenue = Column(Float); pl_cost_of_sales = Column(Float)
@@ -2538,6 +2544,7 @@ class FinancialMetricInterim(ViewBase):
     op_margin = Column(Float); net_margin = Column(Float)
     roe = Column(Float); roa = Column(Float)
     equity_ratio = Column(Float); de_ratio = Column(Float); cf_ratio = Column(Float)
+    interest_bearing_debt = Column(Float)   # D/E の分子（構成要素は INTEREST_BEARING_DEBT_COLUMNS・#926）
     rd_intensity = Column(Float); da_intensity = Column(Float)
     asset_turnover = Column(Float)
     net_cash = Column(Float); nc_ratio = Column(Float)
@@ -2580,6 +2587,19 @@ DE_RATIO_EXCLUSION_CANDIDATES: tuple[str, ...] = ("証券、商品先物取引�
 # **SQL は Python を読めないので、VIEW 3本の `de_ratio` にも同じ名前を書いてある**（一致は
 # `tests/test_financial_metrics_with_ttm.py` が照合）。JPX が業種名を変えると黙って効かなくなる。
 DE_RATIO_EXCLUDED_INDUSTRIES: tuple[str, ...] = ("銀行業", "保険業")
+
+# 有利子負債（D/E の分子）の構成要素（#926・ADR-0067 決定1）。借入金と社債。**リース債務は入れない**
+# （新リース基準の適用前は日本基準と IFRS で扱いが違う）。流動と非流動に分けて持つのは、企業詳細の
+# BS グラフが短期・長期の2段で描くため（`serializers.record_to_dict`）。合計は VIEW 3本の
+# `interest_bearing_debt` が作り、`calc_derived` も同じ列を読む。**SQL は Python を読めないので VIEW にも
+# 同じ列を書き並べてある**（一致は `tests/test_financial_metrics_with_ttm.py` が照合）。
+INTEREST_BEARING_DEBT_CURRENT: tuple[str, ...] = (
+    "bs_short_term_debt", "bs_current_portion_long_term_debt", "bs_commercial_paper",
+    "bs_current_portion_bonds_payable",
+)
+INTEREST_BEARING_DEBT_NONCURRENT: tuple[str, ...] = ("bs_long_term_debt", "bs_bonds_payable")
+INTEREST_BEARING_DEBT_COLUMNS: tuple[str, ...] = (
+    INTEREST_BEARING_DEBT_CURRENT + INTEREST_BEARING_DEBT_NONCURRENT)
 
 
 # ── 10. DB初期化 ───────────────────────────────────────────────────────────

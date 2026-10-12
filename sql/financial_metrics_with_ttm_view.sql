@@ -32,7 +32,8 @@ WITH src AS (
         fr.bs_intangible_assets, fr.bs_investments_other_assets,
         fr.bs_cash, fr.bs_investment_securities, fr.bs_total_liabilities, fr.bs_current_liabilities,
         fr.bs_payables, fr.bs_noncurrent_liabilities, fr.bs_short_term_debt, fr.bs_long_term_debt,
-        fr.bs_bonds_payable, fr.bs_total_equity, fr.bs_equity_parent, fr.bs_paid_in_capital,
+        fr.bs_bonds_payable, fr.bs_current_portion_long_term_debt, fr.bs_commercial_paper,
+        fr.bs_current_portion_bonds_payable, fr.bs_total_equity, fr.bs_equity_parent, fr.bs_paid_in_capital,
         fr.bs_retained_earnings, fr.bs_bps,
         fr.pl_revenue, fr.pl_cost_of_sales, fr.pl_gross_profit, fr.pl_sga, fr.pl_operating_profit,
         fr.pl_nonoperating_income, fr.pl_ordinary_profit, fr.pl_pretax_profit, fr.pl_net_income,
@@ -60,7 +61,8 @@ WITH src AS (
         t.bs_intangible_assets, t.bs_investments_other_assets,
         t.bs_cash, t.bs_investment_securities, t.bs_total_liabilities, t.bs_current_liabilities,
         t.bs_payables, t.bs_noncurrent_liabilities, t.bs_short_term_debt, t.bs_long_term_debt,
-        t.bs_bonds_payable, t.bs_total_equity, t.bs_equity_parent, t.bs_paid_in_capital,
+        t.bs_bonds_payable, t.bs_current_portion_long_term_debt, t.bs_commercial_paper,
+        t.bs_current_portion_bonds_payable, t.bs_total_equity, t.bs_equity_parent, t.bs_paid_in_capital,
         t.bs_retained_earnings, t.bs_bps,
         t.pl_revenue, t.pl_cost_of_sales, t.pl_gross_profit, t.pl_sga, t.pl_operating_profit,
         t.pl_nonoperating_income, t.pl_ordinary_profit, t.pl_pretax_profit, t.pl_net_income,
@@ -82,7 +84,8 @@ d AS (
         fr.bs_intangible_assets, fr.bs_investments_other_assets,
         fr.bs_cash, fr.bs_investment_securities, fr.bs_total_liabilities, fr.bs_current_liabilities,
         fr.bs_payables, fr.bs_noncurrent_liabilities, fr.bs_short_term_debt, fr.bs_long_term_debt,
-        fr.bs_bonds_payable, fr.bs_total_equity, fr.bs_equity_parent, fr.bs_paid_in_capital,
+        fr.bs_bonds_payable, fr.bs_current_portion_long_term_debt, fr.bs_commercial_paper,
+        fr.bs_current_portion_bonds_payable, fr.bs_total_equity, fr.bs_equity_parent, fr.bs_paid_in_capital,
         fr.bs_retained_earnings, fr.bs_bps,
         fr.pl_revenue, fr.pl_cost_of_sales, fr.pl_gross_profit, fr.pl_sga, fr.pl_operating_profit,
         fr.pl_nonoperating_income, fr.pl_ordinary_profit, fr.pl_pretax_profit, fr.pl_net_income,
@@ -114,11 +117,14 @@ d AS (
              THEN ROUND((COALESCE(NULLIF(fr.pl_net_income,0), NULLIF(fr.pl_net_income_attr,0), 0) / fr.bs_total_assets * 100)::numeric, 2) END AS roa,
         CASE WHEN COALESCE(fr.bs_total_assets,0) <> 0
              THEN ROUND((COALESCE(NULLIF(fr.bs_total_equity,0), NULLIF(fr.bs_equity_parent,0), 0) / fr.bs_total_assets * 100)::numeric, 2) END AS equity_ratio,
-        -- D/E とネットキャッシュの空欄の扱いは financial_metrics と同じ（#915）。
-        CASE WHEN COALESCE(NULLIF(fr.bs_total_equity,0), NULLIF(fr.bs_equity_parent,0), 0) <> 0
-              AND (fr.bs_short_term_debt IS NOT NULL OR fr.bs_long_term_debt IS NOT NULL OR fr.bs_total_liabilities IS NOT NULL)
-              AND COALESCE(fr.industry, '') NOT IN ('銀行業', '保険業')
-             THEN ROUND(((COALESCE(fr.bs_short_term_debt,0) + COALESCE(fr.bs_long_term_debt,0)) / COALESCE(NULLIF(fr.bs_total_equity,0), NULLIF(fr.bs_equity_parent,0), 0))::numeric, 4) END AS de_ratio,
+        -- 有利子負債（D/E の分子）とネットキャッシュの空欄の扱いは financial_metrics と同じ（#915・#926）。
+        CASE WHEN fr.bs_short_term_debt IS NOT NULL OR fr.bs_current_portion_long_term_debt IS NOT NULL
+               OR fr.bs_commercial_paper IS NOT NULL OR fr.bs_current_portion_bonds_payable IS NOT NULL
+               OR fr.bs_long_term_debt IS NOT NULL OR fr.bs_bonds_payable IS NOT NULL
+               OR fr.bs_total_liabilities IS NOT NULL
+             THEN COALESCE(fr.bs_short_term_debt,0) + COALESCE(fr.bs_current_portion_long_term_debt,0)
+                + COALESCE(fr.bs_commercial_paper,0) + COALESCE(fr.bs_current_portion_bonds_payable,0)
+                + COALESCE(fr.bs_long_term_debt,0) + COALESCE(fr.bs_bonds_payable,0) END AS interest_bearing_debt,
         CASE WHEN COALESCE(fr.pl_revenue,0) <> 0
              THEN ROUND((COALESCE(fr.cf_operating_cf,0) / fr.pl_revenue * 100)::numeric, 2) END AS cf_ratio,
         CASE WHEN COALESCE(fr.pl_revenue,0) <> 0
@@ -138,6 +144,11 @@ d AS (
 ),
 n AS (
     SELECT d.*,
+        -- D/E の空欄・業種の扱いは financial_metrics と同じ（#915・#925・#926）。
+        CASE WHEN COALESCE(NULLIF(d.bs_total_equity,0), NULLIF(d.bs_equity_parent,0), 0) <> 0
+              AND d.interest_bearing_debt IS NOT NULL
+              AND COALESCE(d.industry, '') NOT IN ('銀行業', '保険業')
+             THEN ROUND((d.interest_bearing_debt / COALESCE(NULLIF(d.bs_total_equity,0), NULLIF(d.bs_equity_parent,0), 0))::numeric, 4) END AS de_ratio,
         CASE WHEN d.net_cash IS NOT NULL AND COALESCE(d.market_cap,0) <> 0
              THEN ROUND((d.net_cash / (d.market_cap * 1000000))::numeric, 4) END AS nc_ratio
     FROM d

@@ -445,8 +445,9 @@ function bsDatasets(recs, level){
   const ca   = r => num(r.bs.current_assets);
   const cash = r => Math.min(num(r.bs.cash), ca(r));     // 現金は流動資産に収める
   const te   = r => num(r.bs.total_equity);
-  const std  = r => num(r.bs.short_term_debt);
-  const ltd  = r => num(r.bs.long_term_debt);
+  // 有利子負債は API が返す合計と短期側の小計を読む（構成要素をここで足さない＝D/E の分子と同じ値・#926）
+  const ibd  = r => num(r.bs.interest_bearing_debt);
+  const ibdC = r => Math.min(num(r.bs.interest_bearing_debt_current), ibd(r));
   // 資産側（合計＝総資産になるよう各内訳をクランプ＋残差で帳尻）
   const fixed   = r => Math.max(0, ta(r) - ca(r));      // 固定資産
   const otherCa = r => Math.max(0, ca(r) - cash(r));    // その他流動資産（粗/中）
@@ -462,10 +463,10 @@ function bsDatasets(recs, level){
   const fxOtherM= r => Math.max(0, fixed(r) - ppeC(r));   // 中: 有形以外の固定資産
   // 負債側（合計＝総資産−純資産＝負債合計）
   const liab    = r => Math.max(0, ta(r) - te(r));      // 負債合計
-  const mInt    = r => Math.min(std(r) + ltd(r), liab(r));        // 有利子負債（中）
+  const mInt    = r => Math.min(ibd(r), liab(r));                 // 有利子負債（中）
   const mOth    = r => Math.max(0, liab(r) - mInt(r));            // その他負債（中）
-  const fStd    = r => Math.min(std(r), liab(r));                 // 短期有利子負債（細）
-  const fLtd    = r => Math.min(ltd(r), Math.max(0, liab(r) - fStd(r))); // 長期有利子負債（細）
+  const fStd    = r => Math.min(ibdC(r), liab(r));                // 短期有利子負債（細）
+  const fLtd    = r => Math.min(ibd(r) - ibdC(r), Math.max(0, liab(r) - fStd(r))); // 長期有利子負債（細）
   const fOth    = r => Math.max(0, liab(r) - fStd(r) - fLtd(r));  // その他負債（細）
 
   const C = {

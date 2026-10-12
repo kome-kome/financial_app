@@ -405,7 +405,7 @@ z_field_i = (field_i − μ_y) / σ_y
 | `equity_ratio` | `z_equity_ratio` | 自己資本比率 |
 | `cf_ratio` | `z_cf_ratio` | 営業CF/売上比 |
 | `pl_eps` | `z_eps` | EPS |
-| `de_ratio` | `z_de_ratio` | D/Eレシオ |
+| `de_ratio` | `z_de_ratio` | D/Eレシオ＝有利子負債 ÷ 純資産。有利子負債は借入金と社債の和でリース債務を含まない（構成要素は [`interest_bearing_debt`](../sql/financial_metrics_view.sql)・#926）。銀行業・保険業は空欄 |
 | `nc_ratio` | `z_nc_ratio` | ネットキャッシュ比率（清原式、モデル 8 参照）|
 
 ### 年度別計算の理由

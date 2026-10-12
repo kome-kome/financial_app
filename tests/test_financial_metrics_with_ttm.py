@@ -23,7 +23,8 @@ TTM_SQL = database.FINANCIAL_METRICS_WITH_TTM_VIEW_SQL
 
 # 2 つの VIEW が共有する派生列（比率・Zスコア・成長率）。
 SHARED_ALIASES = (
-    "op_margin", "net_margin", "roe", "roa", "equity_ratio", "de_ratio", "cf_ratio",
+    "op_margin", "net_margin", "roe", "roa", "equity_ratio", "interest_bearing_debt", "de_ratio",
+    "cf_ratio",
     "rd_intensity", "da_intensity", "asset_turnover", "net_cash", "accruals", "nc_ratio",
     "z_revenue", "z_op_margin", "z_roe", "z_equity_ratio", "z_cf_ratio", "z_eps",
     "z_de_ratio", "z_nc_ratio", "z_roe_sec", "z_op_margin_sec",
@@ -110,9 +111,10 @@ class TestOpMarginIsBlankWithoutOperatingProfit:
 class TestDebtAndNetCashNeedTheBalanceSheet:
     """D/E とネットキャッシュで、観測していない BS を 0 として計算しない（#915）。
 
-    - D/E: 借入金の行が無いのは無借金だから（有報は無い科目を載せない・自己資本比率の中央値 74%）
-      なので 0 として足す。**負債合計まで空欄なら負債の側を観測していない**ので NULL。#900 の後の
-      US-GAAP の社がこれに当たり、0 のままだと無借金に見えて factor premia の AND を素通りする
+    - D/E: 分子は有利子負債（借入金と社債の6列・#926）。借入の行が無いのは無借金だから（有報は無い
+      科目を載せない・自己資本比率の中央値 74%）なので 0 として足す。**構成要素と負債合計がすべて
+      空欄なら負債の側を観測していない**ので NULL。#900 の後の US-GAAP の社がこれに当たり、0 のままだと
+      無借金に見えて factor premia の AND を素通りする
     - ネットキャッシュ: 流動資産と負債合計の**両方**が要る。流動資産の区分を持たない銀行・保険は
       「−負債合計」だけが残り、比率が平均 −34 倍になっていた
 
@@ -124,12 +126,39 @@ class TestDebtAndNetCashNeedTheBalanceSheet:
     ], ids=["annual", "ttm", "interim"])
 
     @SQLS
-    def test_de_ratio_is_blank_only_when_no_liability_is_observed(self, sql):
+    def test_interest_bearing_debt_is_blank_only_when_no_liability_is_observed(self, sql):
+        """構成要素と負債合計が**すべて**空欄の行だけ NULL。どれかがあれば空欄は無借金として 0 を足す。"""
+        expr = expressions(sql)["interest_bearing_debt"]
+        observed = " OR ".join(f"fr.{c} IS NOT NULL" for c in database.INTEREST_BEARING_DEBT_COLUMNS)
+        assert f"CASE WHEN {observed} OR fr.bs_total_liabilities IS NOT NULL THEN" in expr
+        summed = " + ".join(f"COALESCE(fr.{c},0)" for c in database.INTEREST_BEARING_DEBT_COLUMNS)
+        assert f"THEN {summed} END" in expr
+
+    @SQLS
+    def test_interest_bearing_debt_sums_exactly_the_registered_columns(self, sql):
+        """足す列の唯一の源は `database.INTEREST_BEARING_DEBT_COLUMNS`（#926・ADR-0067 決定1）。
+
+        SQL は Python を読めないので、式に現れる列の集合を定数と突き合わせる。列を足すとき VIEW と
+        定数の片方だけを直すと、D/E の分子と画面（`serializers`・`calc_derived`）が黙って食い違う。
+        リース債務は入れない（新リース基準の適用前は日本基準と IFRS で扱いが違う）。
+        """
+        expr = expressions(sql)["interest_bearing_debt"]
+        summed = set(re.findall(r"COALESCE\(fr\.(bs_[a-z_]+),0\)", expr))
+        assert summed == set(database.INTEREST_BEARING_DEBT_COLUMNS)
+        assert "lease" not in expr.lower()
+        assert (set(database.INTEREST_BEARING_DEBT_CURRENT)
+                | set(database.INTEREST_BEARING_DEBT_NONCURRENT)) == summed
+        assert not set(database.INTEREST_BEARING_DEBT_CURRENT) & set(
+            database.INTEREST_BEARING_DEBT_NONCURRENT)
+
+    @SQLS
+    def test_de_ratio_reads_interest_bearing_debt(self, sql):
+        """D/E の分子は d で作った有利子負債（同じ SELECT では別名を読めないので n で割る）。"""
         expr = expressions(sql)["de_ratio"]
-        assert ("(fr.bs_short_term_debt IS NOT NULL OR fr.bs_long_term_debt IS NOT NULL"
-                " OR fr.bs_total_liabilities IS NOT NULL)") in expr
-        # 負債合計が載っていれば、借入金の行が無い社は無借金として 0 を足す（外さない）
-        assert "COALESCE(fr.bs_short_term_debt,0) + COALESCE(fr.bs_long_term_debt,0)" in expr
+        assert "AND d.interest_bearing_debt IS NOT NULL" in expr
+        assert ("ROUND((d.interest_bearing_debt / COALESCE(NULLIF(d.bs_total_equity,0), "
+                "NULLIF(d.bs_equity_parent,0), 0))::numeric, 4)") in expr
+        assert "short_term_debt" not in expr       # 構成要素を式に書き写さない
 
     @SQLS
     def test_de_ratio_is_blank_for_banks_and_insurers(self, sql):
@@ -140,7 +169,7 @@ class TestDebtAndNetCashNeedTheBalanceSheet:
         `COALESCE` が無いと、業種が NULL の行で `NOT IN` が NULL を返し、関係のない社の D/E まで消える。
         """
         names = ", ".join(f"'{n}'" for n in database.DE_RATIO_EXCLUDED_INDUSTRIES)
-        assert f"AND COALESCE(fr.industry, '') NOT IN ({names})" in expressions(sql)["de_ratio"]
+        assert f"AND COALESCE(d.industry, '') NOT IN ({names})" in expressions(sql)["de_ratio"]
 
     @SQLS
     def test_net_cash_needs_both_current_assets_and_liabilities(self, sql):
