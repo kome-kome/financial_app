@@ -1166,6 +1166,56 @@ class TestInterestBearingDebtComponents:
             assert col in database._NEW_COLS, col
 
 
+# ベイカレント 2024年2月期（S100TI4B・IFRS・連結財務諸表なし）。同じ書類に IFRS（jpigp_cor）と日本基準
+# （jppfs_cor）の財務諸表を単体の文脈で両方載せる（#944）。書類の値をそのまま写した
+_BAYCURRENT_S100TI4B = [
+    ("jpdei_cor:AccountingStandardsDEI", "FilingDateInstant", "IFRS"),
+    ("jpdei_cor:WhetherConsolidatedFinancialStatementsArePreparedDEI", "FilingDateInstant", "false"),
+    ("jpdei_cor:CurrentPeriodEndDateDEI", "FilingDateInstant", "2024-02-29"),
+    ("jppfs_cor:CurrentPortionOfLongTermLoansPayable", "CurrentYearInstant_NonConsolidatedMember", "1050000000"),
+    ("jppfs_cor:LongTermLoansPayable", "CurrentYearInstant_NonConsolidatedMember", "1313000000"),
+    ("jpigp_cor:BorrowingsCLIFRS", "CurrentYearInstant_NonConsolidatedMember", "1050000000"),
+    ("jpigp_cor:BorrowingsNCLIFRS", "CurrentYearInstant_NonConsolidatedMember", "1306000000"),
+]
+
+
+class TestIfrsDocumentsReadDebtFromIfrsTagsOnly:
+    """IFRS の書類では有利子負債の列に日本基準のタグを割り当てない（#944）。
+
+    連結を作らない IFRS の社は IFRS と日本基準の表を両方載せ、同じ借入が「借入金（流動）」と
+    「1年内返済予定の長期借入金」の2列に入って、#926 の6列の和で二重に数えていた。
+    """
+
+    @_ORDERS
+    def test_only_ifrs_borrowings_are_read(self, order):
+        bs = _parse(_BAYCURRENT_S100TI4B, order)["bs"]
+        assert {k: v for k, v in bs.items() if k in _DEBT_FIELDS} == {
+            "short_term_debt": 1050000000.0,    # 借入金（流動・IFRS）。1年内返済分を含む
+            "long_term_debt": 1306000000.0,     # 借入金（非流動・IFRS）。日本基準の 1,313 ではない
+        }
+
+    def test_the_legacy_reading_still_sees_the_jgaap_values(self):
+        """旧来の読み方（--clear-nonconsolidated の比べる相手）には効かせない。効かせると、二重に
+        入った値が「消す列」として検出されず、取り直しで残る。"""
+        bs = _parse(_BAYCURRENT_S100TI4B, nonconsolidated_fallback=True)["bs"]
+        assert bs["current_portion_long_term_debt"] == 1050000000.0
+
+    def test_the_refetch_clears_the_double_counted_column(self):
+        from scripts.refetch_financials import cleared_columns, document_columns
+
+        df = _xbrl_df(_BAYCURRENT_S100TI4B)
+        values = document_columns(df, "E32549", "2024-02-29")
+        assert "bs_current_portion_long_term_debt" not in values
+        assert "bs_current_portion_long_term_debt" in cleared_columns(df, "E32549", "2024-02-29", values)
+
+    def test_jgaap_documents_are_unaffected(self):
+        """日本基準の書類は jppfs_cor のタグを今までどおり読む（規則は IFRS の書類だけ）。"""
+        rows = [("jpdei_cor:AccountingStandardsDEI", "FilingDateInstant", "Japan GAAP")] + \
+            _BAYCURRENT_S100TI4B[1:]
+        bs = _parse(rows)["bs"]
+        assert bs["current_portion_long_term_debt"] == 1050000000.0
+
+
 _SUBTOTAL_FIELDS = ("current_assets", "noncurrent_assets", "total_assets",
                     "current_liabilities", "noncurrent_liabilities", "total_liabilities")
 
