@@ -10,19 +10,27 @@ M-2/M-6 で、財務特徴量が空欄の行を捨てずに NaN で学習へ通�
 このファイルは条件・分母・検定数・出力と、3つ目を止める純関数を縛る。1つ目は
 `tests/test_momentum_gate_axes.py::TestBuildUsesTheConditionAxes` が縛る。
 """
+import datetime
 import inspect
 import os
 import sys
+from collections import namedtuple
 
 import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from plugins.macro_snapshots import FIN_BASE_OPTIONS  # noqa: E402
 from scripts import momentum_gate  # noqa: E402
 from scripts.momentum_gate import (  # noqa: E402
-    FIN_NAN_BASE_COND, FIN_NAN_CONDS, FIN_NAN_MODELS, MODE_SUFFIX, MODEL_SPECS, MOM_WINDOW, N_TESTS,
-    base_of, bonferroni_alpha, build_conditions, fin_nan_reach_problems, mode_of, verdict_text,
+    FIN_BLANK_GROUPS, FIN_NAN_BASE_COND, FIN_NAN_CONDS, FIN_NAN_MODELS, MODE_SUFFIX, MODEL_SPECS,
+    MOM_WINDOW, N_TESTS, STANDARD_UNKNOWN, base_of, blank_group_breakdown, bonferroni_alpha,
+    build_conditions, fin_blank_labels, fin_nan_reach_problems, mode_of, standard_labels,
+    verdict_text,
 )
+
+NAN = float("nan")
+_Fin = namedtuple("_Fin", ["period_end"])
 
 
 class TestConditions:
@@ -89,6 +97,121 @@ class TestMainWiring:
         src = inspect.getsource(momentum_gate.main)
         assert '"fin_nan_ok": c.fin_nan_ok' in src
         assert '"fin_nan_samples": fin_nan_samples' in src
+
+    def test_breakdown_is_wired_into_the_fin_nan_mode(self):
+        """内訳（#916）は共通域の外を読む唯一の手段。出し忘れても判定は同じく出るので気づけない。"""
+        src = inspect.getsource(momentum_gate.main)
+        assert 'load_standards(db) if mode == "fin_nan"' in src
+        assert "blank_group_breakdown(_align(part[0], ids)" in src
+        assert '"fin_blank_breakdown": fin_blank_breakdown' in src
+
+
+class TestBlankGroups:
+    def test_every_group_column_is_a_production_feature(self):
+        """群の列が `FIN_BASE_OPTIONS` に無いと、その群は黙って1行も付かない（列名の打ち間違い等）。"""
+        production = {o["value"] for o in FIN_BASE_OPTIONS}
+        for g, cols in FIN_BLANK_GROUPS.items():
+            assert set(cols) <= production, g
+
+
+class TestFinBlankLabels:
+    FEATS = ["per", "rd_intensity", "div_yield", "macro_x"]
+    FIN = ["per", "rd_intensity", "div_yield"]
+
+    def _labels(self, rows):
+        samples = {"2024-03": [(x, 0.0) for x in rows]}
+        ids = {"2024-03": [f"E{i}" for i in range(len(rows))]}
+        return fin_blank_labels(samples, ids, self.FEATS, self.FIN)
+
+    def test_complete_row(self):
+        assert self._labels([[1.0, 2.0, 3.0, 4.0]])[("2024-03", "E0")] == ["complete"]
+
+    def test_only_one_group_blank(self):
+        got = self._labels([[1.0, NAN, 3.0, 4.0]])[("2024-03", "E0")]
+        assert got == ["any_blank", "blank:rd_intensity", "only:rd_intensity"]
+
+    def test_two_groups_blank_is_neither_only(self):
+        got = self._labels([[NAN, NAN, 3.0, 4.0]])[("2024-03", "E0")]
+        assert got == ["any_blank", "blank:rd_intensity", "blank:per"]
+
+    def test_blank_macro_is_not_a_blank_financial(self):
+        """マクロ・交差項の NaN は財務の空欄ではない（M-2 はマクロの欠損を元から NaN で通す）。"""
+        assert self._labels([[1.0, 2.0, 3.0, NAN]])[("2024-03", "E0")] == ["complete"]
+
+    def test_growth_group_covers_any_of_its_columns(self):
+        feats = ["eps_growth", "rev_growth"]
+        samples = {"2024-03": [([1.0, NAN], 0.0)]}
+        got = fin_blank_labels(samples, {"2024-03": ["E0"]}, feats, feats)
+        assert got[("2024-03", "E0")] == ["any_blank", "blank:growth", "only:growth"]
+
+
+class TestStandardLabels:
+    def test_uses_the_row_the_snapshot_would_use(self):
+        """決算日＋45日が断面日以前の最新の行（`build_snapshots` と同じ選び方）の基準を付ける。"""
+        fins = {"E1": [_Fin(datetime.date(2023, 3, 31)), _Fin(datetime.date(2024, 3, 31))]}
+        stds = {("E1", "2023-03-31"): "JGAAP", ("E1", "2024-03-31"): "IFRS"}
+        ids = {"2024-04": ["E1"], "2024-05": ["E1"]}
+        got = standard_labels(ids, fins, stds)
+        # 2024-03-31 + 45日 = 2024-05-15 なので、4月はまだ前期の行
+        assert got[("2024-04", "E1")] == "std:JGAAP"
+        assert got[("2024-05", "E1")] == "std:IFRS"
+
+    def test_cached_string_period_end_matches(self):
+        """キャッシュ由来の行は period_end が文字列のことがある。date と同じキーで引けること。"""
+        fins = {"E1": [_Fin("2023-03-31")]}
+        got = standard_labels({"2024-01": ["E1"]}, fins, {("E1", "2023-03-31"): "US-GAAP"})
+        assert got[("2024-01", "E1")] == "std:US-GAAP"
+
+    def test_missing_standard_or_row_is_unknown(self):
+        fins = {"E1": [_Fin(datetime.date(2023, 3, 31))]}
+        got = standard_labels({"2024-01": ["E1", "E2"]}, fins, {})
+        assert got[("2024-01", "E1")] == f"std:{STANDARD_UNKNOWN}"
+        assert got[("2024-01", "E2")] == f"std:{STANDARD_UNKNOWN}"
+
+
+class TestBlankGroupBreakdown:
+    @staticmethod
+    def _period(ym, preds, reals):
+        return {(ym, f"E{i}"): (p, r) for i, (p, r) in enumerate(zip(preds, reals))}
+
+    def test_placement_bias_is_the_mean_rank_gap(self):
+        """予測は上位・実現は下位に置かれた群は正（実際より買い側に置いている）。"""
+        aligned = self._period("2024-01", [4, 3, 2, 1], [1, 2, 3, 4])
+        labels = {("2024-01", "E0"): ["g"], ("2024-01", "E1"): ["g"]}
+        row = blank_group_breakdown(aligned, labels)["g"]
+        # 予測の順位 4,3・実現の順位 1,2 → ((4-1)+(3-2)) / (2 * 4) = 0.5
+        assert row["placement_bias"] == pytest.approx(0.5)
+        assert row["samples"] == 2 and row["bias_periods"] == 1
+        assert row["placement_bias_t"] is None    # 1期だけでは標準誤差が無い
+
+    def test_rank_ic_is_within_the_group_and_bias_catches_the_shift(self):
+        """群の中の順位が完全に合っていれば rank-IC は 1。群ごと上に置かれたずれは bias にだけ出る。"""
+        aligned = self._period("2024-01", [10, 11, 12, 1, 2, 3], [1, 2, 3, 6, 5, 4])
+        labels = {("2024-01", f"E{i}"): ["g"] for i in range(3)}
+        row = blank_group_breakdown(aligned, labels)["g"]
+        assert row["rank_ic"] == pytest.approx(1.0)
+        # 予測の順位 4,5,6・実現の順位 1,2,3 → (3+3+3) / (3 * 6) = 0.5
+        assert row["placement_bias"] == pytest.approx(0.5)
+
+    def test_group_smaller_than_three_has_no_rank_ic_but_has_bias(self):
+        aligned = self._period("2024-01", [4, 3, 2, 1], [1, 2, 3, 4])
+        labels = {("2024-01", "E0"): ["g"]}
+        row = blank_group_breakdown(aligned, labels)["g"]
+        assert row["rank_ic"] is None and row["ic_periods"] == 0
+        assert row["placement_bias"] == pytest.approx((4 - 1) / 4)
+
+    def test_periods_average_and_t(self):
+        aligned = {**self._period("2024-01", [4, 3, 2, 1], [1, 2, 3, 4]),
+                   **self._period("2024-02", [1, 2, 3, 4], [1, 2, 3, 4])}
+        labels = {(ym, "E0"): ["g"] for ym in ("2024-01", "2024-02")}
+        row = blank_group_breakdown(aligned, labels)["g"]
+        assert row["bias_periods"] == 2
+        assert row["placement_bias"] == pytest.approx((0.75 + 0.0) / 2)
+        assert row["placement_bias_t"] == pytest.approx(1.0)   # 平均 0.375 ÷ (標準偏差 0.53033 / √2)
+
+    def test_tiny_period_is_skipped(self):
+        aligned = self._period("2024-01", [1, 2], [2, 1])
+        assert blank_group_breakdown(aligned, {("2024-01", "E0"): ["g"]}) == {}
 
 
 class TestReachProblems:

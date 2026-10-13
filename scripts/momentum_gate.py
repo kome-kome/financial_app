@@ -277,7 +277,8 @@ OOF 予測で、画面の `mu_raw`（全データで学び直した最終モデ�
 ## 財務の空欄モード（`--fin-nan`・#938/#916）
 
 M-2 / M-6 で、財務特徴量が空欄の行を捨てずに NaN で学習へ通すか（`build_snapshots(fin_nan_ok=)`）を測る。
-#900 の後、IFRS の約3割と US-GAAP の全社で営業利益などが空欄になり、本番では丸ごと外れる:
+本番の既定の財務特徴量は `FIN_BASE_OPTIONS` の 25 列すべてで、どれかが空欄の行は丸ごと外れる。2026-10-13 の
+実測で通期の 65% がそうで、主因は #900 の IFRS・US-GAAP の営業利益ではなく JGAAP の `rd_intensity` の空欄だった:
 
     drop … 財務が1つでも空欄の行を捨てる（本番の構成）＝基準
     nan  … 空欄を NaN で通す（M-2 は XGBoost が分岐で扱い、M-6 は fold 内の列平均で補完する）
@@ -289,6 +290,11 @@ M-2 / M-6 で、財務特徴量が空欄の行を捨てずに NaN で学習へ�
 パネルは `nan` 側に含まれ、共通域はほぼ `drop` 側の域になる。ここで読めるのは「空欄のある行を学習に
 足すと、財務が揃った社の予測がどう変わるか」だけで、**空欄のある社にも予測が出る、という本来の狙いは
 共通域の外の水準（raw）と、会計基準ごとの rank-IC でしか読めない**。判定行の見出しにもこれを書く。
+
+そのため最後に**群ごとの内訳**を出す（#916・`blank_group_breakdown`）。各条件の OOF（自分の母集団）を
+「どの列が空欄か」（`FIN_BLANK_GROUPS`）と会計基準で群に分け、群の中の rank-IC と、全体の順位の中で群を
+実際より上に置いているか（placement bias）を並べる。**群は検定しない**（条件をまたいだ検定はできず、
+採否は人が水準を読んで決める）。会計基準は `financial_records` から (edinet_code, period_end) で引く。
 
 **M-1 には効かせない**（交差項の OLS に NaN が入ると壊れる）。M-2 と M-6 は同じ gbdt のパネルを
 共有するので、本番で「M-2 だけ」に効かせると共有が壊れる（`macro_ensemble._BUILD_KEYS`）——採るなら
@@ -332,18 +338,23 @@ import json
 import math
 import statistics
 import sys
+from collections import defaultdict
 from pathlib import Path
 from typing import NamedTuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from database import DE_RATIO_EXCLUSION_CANDIDATES, SessionLocal  # noqa: E402
+from database import DE_RATIO_EXCLUSION_CANDIDATES, FinancialRecord, SessionLocal  # noqa: E402
 from model_stats import paired_ic_significance  # noqa: E402
 from plugins import get_plugin  # noqa: E402
 from plugins.macro_ensemble import _align  # noqa: E402
 from plugins.macro_snapshots import (  # noqa: E402
+    FIN_BASE_OPTIONS,
     FIN_ROW_SOURCES,
+    _avg_ranks,
+    _find_applicable_fin,
     _realized_vol,
+    _spearman,
     build_snapshots,
     get_producer_scores,
     oof_backtest,
@@ -1190,6 +1201,144 @@ def fin_nan_reach_problems(samples: dict[str, int], kinds: list[str]) -> list[st
     return problems
 
 
+# ── 財務の空欄の内訳（`--fin-nan`・#916）────────────────────────────────────────
+#
+# 共通域は財務が揃った行だけになる（drop 側は nan 側に含まれる）ので、空欄の社の予測の質は共通域の検定では
+# 読めない。各条件の OOF を「どの列が空欄か」と会計基準で群に分けて読む。
+#
+# 列の群は 2026-10-13 の実測（`financial_metrics` 通期・2018 年度以降 30,553 行・読み取りのみ）で決めた。
+# 25 列のどれかが空欄の行は 19,958 で、最多は rd_intensity（14,055 行・うち 6,713 行はそれだけが空欄）、
+# 次いで div_yield 7,792・per 6,766・成長率系 4,459〜5,751（前期の行が無い）・op_margin 1,512。
+FIN_BLANK_GROUPS: dict[str, tuple[str, ...]] = {
+    "rd_intensity": ("rd_intensity",),
+    "div_yield": ("div_yield",),
+    "per": ("per",),
+    "growth": ("eps_growth", "op_growth", "rev_growth", "delta_roe", "delta_op_margin"),
+    "op_margin": ("op_margin",),
+}
+# 会計基準が引けなかった行のラベル（`accounting_standard` が空欄、または断面が使う行が無い）
+STANDARD_UNKNOWN = "unknown"
+
+
+def _iso(d) -> str | None:
+    """period_end を ISO 文字列へ（date でもキャッシュ由来の文字列でも同じ形にする）。"""
+    if not d:
+        return None
+    return d.isoformat() if hasattr(d, "isoformat") else str(d)[:10]
+
+
+def fin_blank_labels(samples_by_ym: dict, ids_by_ym: dict, feats: list,
+                     fin_names: list[str]) -> dict[tuple[str, str], list[str]]:
+    """パネルの各 (ym, ec) に、財務の空欄の群のラベルを付ける（#916）。
+
+    `complete` … 財務の列に空欄なし / `any_blank` … 1 つ以上空欄
+    `blank:<群>` … その群の列のどれかが空欄（他の列の空欄は問わない）
+    `only:<群>` … 空欄がその群の列だけ（本番で外れる理由がその群だけ）
+
+    空欄は NaN で判定する（`build_snapshots(fin_nan_ok=True)` が空欄を NaN で入れる）。drop 側のパネルは
+    全行が `complete` になる。`fin_names` に無い列（マクロ・交差項）は見ない。
+    """
+    idx = {n: feats.index(n) for n in fin_names if n in feats}
+    out: dict[tuple[str, str], list[str]] = {}
+    for ym, rows in samples_by_ym.items():
+        ids = ids_by_ym.get(ym, [])
+        for j, (x, _y) in enumerate(rows):
+            if j >= len(ids):
+                break
+            blank = {n for n, k in idx.items() if x[k] != x[k]}
+            labels = ["any_blank" if blank else "complete"]
+            for g, cols in FIN_BLANK_GROUPS.items():
+                if blank & set(cols):
+                    labels.append(f"blank:{g}")
+                    if blank <= set(cols):
+                        labels.append(f"only:{g}")
+            out[(ym, ids[j])] = labels
+    return out
+
+
+def load_standards(db) -> dict[tuple[str, str], str]:
+    """通期の行の会計基準を {(edinet_code, period_end の ISO): 基準} で返す（#916・読み取りのみ）。
+
+    `financial_metrics`（パネルの財務の出どころ）は `financial_records` の通期の行なので、同じ
+    (edinet_code, period_end) で突き合わせられる。`_FinRow` に列を足さないのは、本番の読み込み
+    （`FIN_LOAD_FIELDS`）とキャッシュの形を計測のために変えないため。
+    """
+    rows = (db.query(FinancialRecord.edinet_code, FinancialRecord.period_end,
+                     FinancialRecord.accounting_standard)
+            .filter(FinancialRecord.period_type == "annual").all())
+    return {(ec, _iso(pe)): std for ec, pe, std in rows if std and pe}
+
+
+def standard_labels(ids_by_ym: dict, fin_by_co: dict,
+                    std_by_pe: dict[tuple[str, str], str]) -> dict[tuple[str, str], str]:
+    """各 (ym, ec) に、その月の断面が使う財務の行の会計基準を `std:<基準>` で付ける（#916）。
+
+    行の選び方は `build_snapshots` と同じ `_find_applicable_fin`。断面日は月末の上限
+    （`_month_end_bound`）で近似する——実際の断面日はその月の最終取引日なので、決算日＋45日が
+    その間に落ちる行だけ 1 期ずれうる（群のラベルにしか使わない）。
+    """
+    out: dict[tuple[str, str], str] = {}
+    for ym, ids in ids_by_ym.items():
+        snap = _month_end_bound(ym)
+        for ec in ids:
+            rec = _find_applicable_fin(fin_by_co.get(ec, []), snap)
+            std = std_by_pe.get((ec, _iso(rec.period_end))) if rec is not None else None
+            out[(ym, ec)] = f"std:{std or STANDARD_UNKNOWN}"
+    return out
+
+
+def blank_group_breakdown(aligned: dict, labels: dict) -> dict[str, dict]:
+    """群ごとの rank-IC と placement bias を返す（#916）。**検定はしない**。
+
+    `aligned` は `_align` の {(ym, ec): (yhat, y)}、`labels` は {(ym, ec): [群, ...]}。
+
+    - `rank_ic`: 期ごとに群の中だけで Spearman(yhat, y) を取った期平均。群の中で順位を当てられているか
+    - `placement_bias`: 期ごとに、全体の中での予測の順位分位 − 実現の順位分位を群で平均し、その期平均。
+      **正なら群を実際より上（買い側）に置いている**。空欄そのものが効いて群ごと持ち上げる・沈める形は
+      群の中の rank-IC には出ず、ここに出る。`placement_bias_t` は期をまたいだ平均 ÷ 標準誤差（参考値）
+
+    全体が 3 社未満の期は読まない。群の中が 3 社未満の期は rank-IC から外す（`oof_backtest` と同じ下限）。
+    """
+    by_ym: dict[str, list] = defaultdict(list)
+    for (ym, ec), (yh, y) in aligned.items():
+        by_ym[ym].append((ec, yh, y))
+    ics: dict[str, list] = defaultdict(list)
+    bias: dict[str, list] = defaultdict(list)
+    n_samples: dict[str, int] = defaultdict(int)
+    for ym in sorted(by_ym):
+        rows = by_ym[ym]
+        n = len(rows)
+        if n < 3:
+            continue
+        r_pred = _avg_ranks([r[1] for r in rows])
+        r_real = _avg_ranks([r[2] for r in rows])
+        members: dict[str, list] = defaultdict(list)
+        for j, (ec, _yh, _y) in enumerate(rows):
+            for g in labels.get((ym, ec), ()):
+                members[g].append(j)
+        for g, js in members.items():
+            n_samples[g] += len(js)
+            bias[g].append(sum(r_pred[j] - r_real[j] for j in js) / (len(js) * n))
+            ic = _spearman([rows[j][1] for j in js], [rows[j][2] for j in js])
+            if ic is not None:
+                ics[g].append(ic)
+    out: dict[str, dict] = {}
+    for g in sorted(n_samples):
+        b, ic = bias[g], ics[g]
+        b_mean = statistics.mean(b) if b else None
+        se = statistics.stdev(b) / math.sqrt(len(b)) if len(b) > 1 else None
+        out[g] = {
+            "samples": n_samples[g],
+            "rank_ic": statistics.mean(ic) if ic else None,
+            "rank_ic_std": statistics.pstdev(ic) if len(ic) > 1 else None,
+            "ic_periods": len(ic),
+            "placement_bias": b_mean,
+            "placement_bias_t": (b_mean / se) if se else None,
+            "bias_periods": len(b),
+        }
+    return out
+
+
 def null_de_ratio(fin_by_co: dict, industries: tuple[str, ...]) -> tuple[dict, int]:
     """指定業種の財務の行の `de_ratio` を空欄にした写しと、空欄にした行数を返す（#940）。
 
@@ -1701,6 +1850,8 @@ def main() -> None:
             print(f"panel src[{src}]: fin_cos={len(fins[src])} fin_rows={n_rows} "
                   f"companies={len(companies)}", flush=True)
         ttm_rows = ttm_row_count(fins)
+        # 財務の空欄の内訳（#916）の会計基準。CPU 計算の前に読み、読取トランザクションを残さない
+        std_by_pe = load_standards(db) if mode == "fin_nan" else {}
         if mode == "fin_rows":
             if not ttm_rows or ttm_rows <= 0:
                 raise SystemExit(
@@ -2032,6 +2183,38 @@ def main() -> None:
                   f"{_num(o.get('long_short_spread')):>10} {r['n_folds']:>6} "
                   f"{st['samples']:>9}", flush=True)
 
+    # 財務の空欄の内訳（#916）。共通域の外＝空欄の社の予測の質は、各条件の OOF を群に分けて読む。
+    fin_blank_breakdown: dict[str, dict] = {}
+    if mode == "fin_nan":
+        fin_names = [o["value"] for o in FIN_BASE_OPTIONS]
+        print("\n=== blank-financials breakdown (each condition's own OOF; groups are NOT "
+              "tested) ===", flush=True)
+        print("[note] rank-IC is within the group. bias = mean(pred rank pct - realized rank pct) "
+              "of the group in the whole cross-section (+ = placed higher than realized).",
+              flush=True)
+        group_labels: dict[tuple, dict] = {}
+        for cond in conds:
+            for model in models:
+                kind = MODEL_SPECS[model][2]
+                s, _m, ids, feats = panels[(cond, kind)]
+                if (cond, kind) not in group_labels:
+                    labels = fin_blank_labels(s, ids, feats, fin_names)
+                    for key, std in standard_labels(ids, fins[conds[cond].fin_rows],
+                                                    std_by_pe).items():
+                        labels.setdefault(key, []).append(std)
+                    group_labels[(cond, kind)] = labels
+                part = ran[(conds[cond], kind, model)][1]
+                bd = blank_group_breakdown(_align(part[0], ids), group_labels[(cond, kind)])
+                fin_blank_breakdown[f"{cond}|{model}"] = bd
+                print(f"  [{cond}] {MODEL_LABELS[model]}", flush=True)
+                print(f"    {'group':<20} {'samples':>8} {'rank-IC':>9} {'IC std':>9} "
+                      f"{'periods':>8} {'bias':>9} {'bias t':>8}", flush=True)
+                for g, row in bd.items():
+                    print(f"    {g:<20} {row['samples']:>8} {_num(row['rank_ic']):>9} "
+                          f"{_num(row['rank_ic_std']):>9} {row['ic_periods']:>8} "
+                          f"{_num(row['placement_bias']):>9} "
+                          f"{_num(row['placement_bias_t'], 2):>8}", flush=True)
+
     if mode == "risk_axis":
         # **素のリターンだけでは、リスクを下げた効果が罰として出る**（#709）。判定の主指標は
         # 上の rank_ic のままで、ここは読み手が符号を解釈するための参考値。
@@ -2081,6 +2264,9 @@ def main() -> None:
         "ttm_rows": ttm_rows,
         "changed_rows": changed_rows,
         "fin_nan_samples": fin_nan_samples,
+        # 財務の空欄の内訳（#916）。{"条件|モデル": {群: 指標}}。他モードでは空。
+        "fin_blank_groups": FIN_BLANK_GROUPS if mode == "fin_nan" else {},
+        "fin_blank_breakdown": fin_blank_breakdown,
         "de_exclude": {"nulled_rows": de_nulled_rows, "samples": de_exclude_samples},
         # 目的変数モードの健全性（#615）。{"条件|種別": 月平均の絶対値の最大}。他モードでは空。
         "target_month_mean": target_month_mean,
