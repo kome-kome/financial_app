@@ -986,6 +986,13 @@ z_metric_j_i : 企業 i の指標 j のユニバース標準化値（±5 クリ�
 μ_y = mean({ field_j : field_j ≠ NULL, year(j) = y })
 σ_y = stdev({ field_j : field_j ≠ NULL, year(j) = y })</div>
 
+  <p>式の外に、VIEW が持つ条件が 2 つある（正本は <code>sql/financial_metrics_view.sql</code> の <code>z_*</code>）。</p>
+  <ul>
+    <li>年度 y で値のある社が 2 社未満なら、<code>z_field_i</code> は NULL（1 社だけの年度では Zスコアを出さない）</li>
+    <li>σ_y は標本標準偏差（<code>STDDEV_SAMP</code>）。σ_y = 0（年度内の値がすべて同じ）なら 1.0 で割る。このとき偏差もすべて 0 なので <code>z_field_i</code> は 0 になり、0 除算にはならない</li>
+  </ul>
+  <p>業種内Zスコア（<code>z_roe_sec</code> / <code>z_op_margin_sec</code>）は同じ式を年度×業種（<code>PARTITION BY year, industry</code>）の中で計算し、上の 2 つの条件も同じ。業種が NULL の行は 1 つの群にまとめて計算される。</p>
+
   <h3>正規化対象フィールド</h3>
   <div class="table-scroll"><table>
     <thead><tr><th>元フィールド</th><th>Zスコアフィールド</th><th>内容</th></tr></thead>
