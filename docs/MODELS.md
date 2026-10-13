@@ -395,6 +395,13 @@ z_field_i = (field_i − μ_y) / σ_y
 σ_y = stdev({ field_j : field_j ≠ NULL, year(j) = y })
 ```
 
+式の外に、VIEW が持つ条件が 2 つある（正本は [sql/financial_metrics_view.sql](../sql/financial_metrics_view.sql) の `z_*`）。
+
+- 年度 y で値のある社が 2 社未満なら、`z_field_i` は NULL（1 社だけの年度では Zスコアを出さない）
+- σ_y は標本標準偏差（`STDDEV_SAMP`）。σ_y = 0（年度内の値がすべて同じ）なら 1.0 で割る。このとき偏差もすべて 0 なので `z_field_i` は 0 になり、0 除算にはならない
+
+業種内Zスコア（`z_roe_sec` / `z_op_margin_sec`）は同じ式を年度×業種（`PARTITION BY year, industry`）の中で計算し、上の 2 つの条件も同じ。業種が NULL の行は 1 つの群にまとめて計算される。
+
 ### 正規化対象フィールド
 
 | 元フィールド | Zスコアフィールド | 内容 |
