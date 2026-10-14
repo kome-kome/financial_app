@@ -10,6 +10,7 @@ M-2/M-6 で、財務特徴量が空欄の行を捨てずに NaN で学習へ通�
 このファイルは条件・分母・検定数・出力と、3つ目を止める純関数を縛る。1つ目は
 `tests/test_momentum_gate_axes.py::TestBuildUsesTheConditionAxes` が縛る。
 """
+import csv
 import datetime
 import inspect
 import os
@@ -24,9 +25,9 @@ from plugins.macro_snapshots import FIN_BASE_OPTIONS  # noqa: E402
 from scripts import momentum_gate  # noqa: E402
 from scripts.momentum_gate import (  # noqa: E402
     FIN_BLANK_GROUPS, FIN_NAN_BASE_COND, FIN_NAN_CONDS, FIN_NAN_MODELS, MODE_SUFFIX, MODEL_SPECS,
-    MOM_WINDOW, N_TESTS, STANDARD_UNKNOWN, base_of, blank_group_breakdown, bonferroni_alpha,
-    build_conditions, fin_blank_labels, fin_nan_reach_problems, mode_of, standard_labels,
-    verdict_text,
+    MOM_WINDOW, N_TESTS, OOF_CSV_COLUMNS, STANDARD_UNKNOWN, base_of, blank_group_breakdown,
+    bonferroni_alpha, build_conditions, fin_blank_labels, fin_nan_reach_problems, mode_of,
+    oof_rows, standard_labels, verdict_text, write_oof_csv,
 )
 
 NAN = float("nan")
@@ -102,8 +103,18 @@ class TestMainWiring:
         """内訳（#916）は共通域の外を読む唯一の手段。出し忘れても判定は同じく出るので気づけない。"""
         src = inspect.getsource(momentum_gate.main)
         assert 'load_standards(db) if mode == "fin_nan"' in src
-        assert "blank_group_breakdown(_align(part[0], ids)" in src
+        assert "aligned_run = _align(part[0], ids)" in src
+        assert "blank_group_breakdown(aligned_run, group_labels[(cond, kind)])" in src
         assert '"fin_blank_breakdown": fin_blank_breakdown' in src
+
+    def test_row_level_oof_is_written_from_the_same_inputs(self):
+        """行ごとの OOF（#951）は内訳と同じ入力から書く。書き忘れても判定と内訳は同じく出るので気づけない。"""
+        src = inspect.getsource(momentum_gate.main)
+        assert "oof_rows(aligned_run, group_labels[(cond, kind)])" in src
+        assert "write_oof_csv(fin_oof_path, fin_oof)" in src
+        assert 'out_path.with_name(out_path.stem + "_oof.csv")' in src
+        assert '"fin_oof_path": str(fin_oof_path) if fin_oof_path else None' in src
+        assert '"fin_oof_rows": fin_oof_rows' in src
 
 
 class TestBlankGroups:
@@ -212,6 +223,68 @@ class TestBlankGroupBreakdown:
     def test_tiny_period_is_skipped(self):
         aligned = self._period("2024-01", [1, 2], [2, 1])
         assert blank_group_breakdown(aligned, {("2024-01", "E0"): ["g"]}) == {}
+
+
+class TestOofRows:
+    def test_standard_and_groups_are_split_and_rows_are_sorted(self):
+        aligned = {("2024-02", "E1"): (0.3, -0.1), ("2024-01", "E2"): (0.2, 0.4),
+                   ("2024-01", "E1"): (0.1, 0.5)}
+        labels = {("2024-01", "E1"): ["complete", "std:JGAAP"],
+                  ("2024-01", "E2"): ["any_blank", "blank:per", "only:per", "std:IFRS"],
+                  ("2024-02", "E1"): ["complete", "std:JGAAP"]}
+        assert oof_rows(aligned, labels) == [
+            ("2024-01", "E1", 0.1, 0.5, "JGAAP", "complete"),
+            ("2024-01", "E2", 0.2, 0.4, "IFRS", "any_blank;blank:per;only:per"),
+            ("2024-02", "E1", 0.3, -0.1, "JGAAP", "complete"),
+        ]
+
+    def test_row_without_a_standard_label_is_unknown(self):
+        """`standard_labels` は全行に付けるが、ラベルが欠けても行は落とさず unknown にする。"""
+        got = oof_rows({("2024-01", "E1"): (0.1, 0.2)}, {})
+        assert got == [("2024-01", "E1", 0.1, 0.2, STANDARD_UNKNOWN, "")]
+
+
+class TestOofCsv:
+    @staticmethod
+    def _read(path):
+        with path.open(encoding="utf-8", newline="") as f:
+            return list(csv.reader(f))
+
+    def test_header_and_run_columns(self, tmp_path):
+        path = tmp_path / "sub" / "x_oof.csv"
+        n = write_oof_csv(path, {"drop|xgb_m2": [("2024-01", "E1", 0.1, 0.5, "JGAAP", "complete")],
+                                 "nan|elasticnet": [("2024-01", "E2", 1, 2, "IFRS", "any_blank")]})
+        rows = self._read(path)
+        assert n == 2
+        assert tuple(rows[0]) == OOF_CSV_COLUMNS
+        assert rows[1][:4] == ["drop", "xgb_m2", "2024-01", "E1"]
+        assert rows[2][:2] == ["nan", "elasticnet"]
+        assert rows[2][4:6] == ["1.0", "2.0"]    # int も float として書く
+
+    def test_breakdown_is_reproducible_from_the_csv(self, tmp_path):
+        """CSV だけから内訳を計算し直して一致すること＝列が足り、浮動小数を丸めていないこと。
+
+        予測は 2 社ずつ 1e-12 だけ違う。丸めて書くと同点に化け、順位と bias が変わる。
+        """
+        aligned, labels = {}, {}
+        for ym in ("2024-01", "2024-02"):
+            for i in range(6):
+                base = 0.1 * (i // 2) + (0.37 if ym == "2024-02" else 0.0)
+                aligned[(ym, f"E{i}")] = (base + i * 1e-12, (-1) ** i * 0.01 * (i + 1))
+                labels[(ym, f"E{i}")] = (["any_blank", "blank:per"] if i % 2 else ["complete"]) \
+                    + [f"std:{'IFRS' if i < 3 else 'JGAAP'}"]
+        want = blank_group_breakdown(aligned, labels)
+
+        path = tmp_path / "oof.csv"
+        write_oof_csv(path, {"nan|elasticnet": oof_rows(aligned, labels)})
+        back_aligned, back_labels = {}, {}
+        for r in self._read(path)[1:]:
+            rec = dict(zip(OOF_CSV_COLUMNS, r))
+            key = (rec["ym"], rec["edinet_code"])
+            back_aligned[key] = (float(rec["yhat"]), float(rec["y"]))
+            back_labels[key] = rec["blank_groups"].split(";") + [f"std:{rec['standard']}"]
+        assert back_aligned == aligned
+        assert blank_group_breakdown(back_aligned, back_labels) == want
 
 
 class TestReachProblems:

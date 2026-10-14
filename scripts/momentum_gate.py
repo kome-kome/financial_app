@@ -296,6 +296,12 @@ M-2 / M-6 で、財務特徴量が空欄の行を捨てずに NaN で学習へ�
 実際より上に置いているか（placement bias）を並べる。**群は検定しない**（条件をまたいだ検定はできず、
 採否は人が水準を読んで決める）。会計基準は `financial_records` から (edinet_code, period_end) で引く。
 
+内訳は群ごとの平均しか残さないので、**行ごとの OOF を JSON の隣の `<出力名>_oof.csv` に残す**（#951・
+既定は `momentum_gate_fin_nan_oof.csv`）。列は `cond, model, ym, edinet_code, yhat, y, standard,
+blank_groups`（`OOF_CSV_COLUMNS`）で、`standard` は会計基準、`blank_groups` は内訳の群のラベルを `;` で
+つないだもの。内訳と同じ OOF（各条件の自分の母集団）で、共通月で走らせ直した判定用の OOF ではない。
+この CSV だけから内訳を計算し直せるので、規模や業種を揃えた読み直しは DB との突き合わせで済む。
+
 **M-1 には効かせない**（交差項の OLS に NaN が入ると壊れる）。M-2 と M-6 は同じ gbdt のパネルを
 共有するので、本番で「M-2 だけ」に効かせると共有が壊れる（`macro_ensemble._BUILD_KEYS`）——採るなら
 共有の扱いも #916 で決める。CV の前に `nan` 側のサンプル数が `drop` 側より多いことを確かめ、
@@ -333,6 +339,7 @@ M-1 は `macro_nan_ok=False`（strict）で**母集団自体が M-2/M-6 と別�
 from __future__ import annotations
 
 import argparse
+import csv
 import hashlib
 import json
 import math
@@ -1339,6 +1346,48 @@ def blank_group_breakdown(aligned: dict, labels: dict) -> dict[str, dict]:
     return out
 
 
+# 行ごとの OOF の CSV の列（#951）。`blank_group_breakdown` へ渡す `aligned` と `labels` を
+# そのまま行にしたもので、この CSV だけから群の集計を計算し直せる。
+OOF_CSV_COLUMNS = ("cond", "model", "ym", "edinet_code", "yhat", "y", "standard", "blank_groups")
+
+
+def oof_rows(aligned: dict, labels: dict) -> list[tuple]:
+    """群の内訳と同じ入力を、行ごとの OOF にして返す（#951）。
+
+    1 行は `(ym, ec, yhat, y, standard, blank_groups)` で、`(ym, ec)` の順に並べる。
+    `standard` は `std:<基準>` のラベルから接頭辞を外した値（無ければ `STANDARD_UNKNOWN`）、
+    `blank_groups` は残りのラベル（`complete` / `any_blank` / `blank:<群>` / `only:<群>`）を
+    `;` でつないだもの。群の集計（`fin_blank_breakdown`）は群ごとの平均しか残さないので、
+    規模や業種を揃えて読み直すにはこの行が要る。
+    """
+    rows: list[tuple] = []
+    for (ym, ec) in sorted(aligned):
+        yh, y = aligned[(ym, ec)]
+        tags = labels.get((ym, ec), ())
+        std = next((t[len("std:"):] for t in tags if t.startswith("std:")), STANDARD_UNKNOWN)
+        groups = ";".join(t for t in tags if not t.startswith("std:"))
+        rows.append((ym, ec, yh, y, std, groups))
+    return rows
+
+
+def write_oof_csv(path: Path, rows_by_run: dict[str, list[tuple]]) -> int:
+    """`{"条件|モデル": oof_rows の戻り値}` を CSV へ書き、書いた行数を返す（#951）。
+
+    浮動小数は `repr` で書く——丸めると順位が同点に化け、CSV から群の集計が再現しなくなる。
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    n = 0
+    with path.open("w", encoding="utf-8", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(OOF_CSV_COLUMNS)
+        for run, rows in rows_by_run.items():
+            cond, model = run.split("|", 1)
+            for ym, ec, yh, y, std, groups in rows:
+                w.writerow((cond, model, ym, ec, repr(float(yh)), repr(float(y)), std, groups))
+                n += 1
+    return n
+
+
 def null_de_ratio(fin_by_co: dict, industries: tuple[str, ...]) -> tuple[dict, int]:
     """指定業種の財務の行の `de_ratio` を空欄にした写しと、空欄にした行数を返す（#940）。
 
@@ -2185,6 +2234,10 @@ def main() -> None:
 
     # 財務の空欄の内訳（#916）。共通域の外＝空欄の社の予測の質は、各条件の OOF を群に分けて読む。
     fin_blank_breakdown: dict[str, dict] = {}
+    # 行ごとの OOF（#951）。内訳と同じ `aligned` と `labels` から作り、JSON の隣の CSV へ残す。
+    fin_oof: dict[str, list[tuple]] = {}
+    fin_oof_path: Path | None = None
+    fin_oof_rows = 0
     if mode == "fin_nan":
         fin_names = [o["value"] for o in FIN_BASE_OPTIONS]
         print("\n=== blank-financials breakdown (each condition's own OOF; groups are NOT "
@@ -2204,8 +2257,10 @@ def main() -> None:
                         labels.setdefault(key, []).append(std)
                     group_labels[(cond, kind)] = labels
                 part = ran[(conds[cond], kind, model)][1]
-                bd = blank_group_breakdown(_align(part[0], ids), group_labels[(cond, kind)])
+                aligned_run = _align(part[0], ids)
+                bd = blank_group_breakdown(aligned_run, group_labels[(cond, kind)])
                 fin_blank_breakdown[f"{cond}|{model}"] = bd
+                fin_oof[f"{cond}|{model}"] = oof_rows(aligned_run, group_labels[(cond, kind)])
                 print(f"  [{cond}] {MODEL_LABELS[model]}", flush=True)
                 print(f"    {'group':<20} {'samples':>8} {'rank-IC':>9} {'IC std':>9} "
                       f"{'periods':>8} {'bias':>9} {'bias t':>8}", flush=True)
@@ -2214,6 +2269,10 @@ def main() -> None:
                           f"{_num(row['rank_ic_std']):>9} {row['ic_periods']:>8} "
                           f"{_num(row['placement_bias']):>9} "
                           f"{_num(row['placement_bias_t'], 2):>8}", flush=True)
+        # JSON の隣に置く（`--json` で出力先を変えても対になる）。
+        fin_oof_path = out_path.with_name(out_path.stem + "_oof.csv")
+        fin_oof_rows = write_oof_csv(fin_oof_path, fin_oof)
+        print(f"wrote {fin_oof_path} ({fin_oof_rows} rows)", flush=True)
 
     if mode == "risk_axis":
         # **素のリターンだけでは、リスクを下げた効果が罰として出る**（#709）。判定の主指標は
@@ -2267,6 +2326,9 @@ def main() -> None:
         # 財務の空欄の内訳（#916）。{"条件|モデル": {群: 指標}}。他モードでは空。
         "fin_blank_groups": FIN_BLANK_GROUPS if mode == "fin_nan" else {},
         "fin_blank_breakdown": fin_blank_breakdown,
+        # 行ごとの OOF の CSV（#951・列は `OOF_CSV_COLUMNS`）。他モードでは None / 0。
+        "fin_oof_path": str(fin_oof_path) if fin_oof_path else None,
+        "fin_oof_rows": fin_oof_rows,
         "de_exclude": {"nulled_rows": de_nulled_rows, "samples": de_exclude_samples},
         # 目的変数モードの健全性（#615）。{"条件|種別": 月平均の絶対値の最大}。他モードでは空。
         "target_month_mean": target_month_mean,
