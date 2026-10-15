@@ -1139,6 +1139,10 @@ def build_snapshots(
       測るために使う。**本番のプラグインはまだ渡さない**（採るかは #916 の実測で決める）。
       macro_nan_ok と同じく **build_interactions=False と併用すること**（交差項の OLS が壊れる）。
 
+    行の並び: 各月の行（samples_by_ym / sample_meta_by_ym / stock_ids_by_ym）は edinet_code の
+      昇順で、`prices_by_co` の挿入順に依らない（Issue #954）。M-2 は行の並びで木が変わるので、
+      読み出し順のままだと同じパネルでも run ごとに結果が動いた。
+
     shared_snapshot_cache() コンテキスト内では、大きいオブジェクト引数（prices_by_co/
     fin_by_co/companies/macro_cache）は id()、それ以外の引数は値そのものからキーを
     構築してキャッシュする（Issue #298）。コンテキスト外では常にフル計算する。
@@ -1223,7 +1227,12 @@ def _build_snapshots_impl(
     macro_memo: dict[str, dict] = {}
 
     n_companies = len(prices_by_co)
-    for done, (edinet_code, price_rows) in enumerate(prices_by_co.items()):
+    # 社は edinet_code 順に回す（Issue #954）。各月の行はこのループの順に積まれ、辞書の
+    # 順番は DB の読み出し順（ORDER BY 無し＝夜間の書き込みで変わる）で決まる。XGBoost は
+    # subsample と early stopping の検証集合を「何行目か」で選ぶので、並びが変わると
+    # random_state を固定していても別の木になる（同じパネルで M-2 の rank-IC が 0.0982 / 0.1117）。
+    for done, (edinet_code, price_rows) in enumerate(
+            sorted(prices_by_co.items(), key=lambda kv: kv[0])):
         progress.emit("スナップショットを構築", done, n_companies,
                       every=progress.EVERY_COMPANIES)
         n = len(price_rows)

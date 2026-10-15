@@ -342,6 +342,99 @@ class TestLeak:
             assert snap_date <= max_date, "snap_date が price_rows の最終日を超えている（リーク）"
 
 
+# ── 2b. 行の並び（Issue #954）─────────────────────────────────────────────────
+
+def _make_varied_inputs(n_companies=8, n_weeks=200):
+    """社ごとに財務と株価の動きが違う入力。
+
+    `_make_db_mock` は全社の財務が同じ値で、木が分岐できず並びの影響が出ない。ここでは
+    per / pbr を社ごとに変え、株価を社ごとの乱歩にして、M-2 の木が行の並びで変わりうる
+    程度に散らす（乱数は固定）。
+    """
+    import datetime
+    rng = np.random.default_rng(954)
+    base = datetime.date(2019, 1, 4)
+    pe_date = (base - datetime.timedelta(days=120)).isoformat()
+    prices_by_co, fin_by_co, companies = {}, {}, {}
+    for ci in range(n_companies):
+        ec = f"E{ci:05d}"
+        close = 1000.0
+        prices = []
+        for w in range(n_weeks):
+            close *= math.exp(rng.normal(0.0, 0.03))
+            prices.append(_make_price((base + datetime.timedelta(weeks=w)).isoformat(), close))
+        prices_by_co[ec] = prices
+        fin_by_co[ec] = [_make_fin(pe_date, edinet_code=ec, company_name=f"会社{ci}",
+                                   per=5.0 + 3.0 * ci,
+                                   pbr=0.5 + 0.4 * ((ci * 3) % n_companies))]
+        companies[ec] = SimpleNamespace(
+            edinet_code=ec, name=f"会社{ci}", sec_code=str(1000 + ci), industry="テスト業",
+        )
+    return prices_by_co, fin_by_co, companies
+
+
+class TestSnapshotRowOrder:
+    """`build_snapshots` の行の並びは入力の辞書の順番に依らない（Issue #954）。
+
+    辞書の順番は DB の読み出し順で決まり、ORDER BY が無いので夜間の書き込みで変わる。
+    XGBoost は `random_state` を固定していても、subsample と early stopping の検証集合
+    （学習集合の末尾）を「何行目か」で選ぶので、並びが変わると別の木になる。同じパネルで
+    M-2 の rank-IC が 0.0982 / 0.1117 と動いていた。
+    """
+
+    _FIN = ["per", "pbr"]
+    _XGB_PARAMS = {
+        "max_depth": 3, "learning_rate": 0.1, "subsample": 0.8, "colsample_bytree": 0.8,
+        "min_child_weight": 1, "reg_lambda": 1.0, "reg_alpha": 0.0,
+        "n_estimators": 50, "early_stopping_rounds": 10,
+        "tree_method": "hist", "objective": "reg:squarederror", "random_state": 42,
+    }
+
+    def _build(self, prices_by_co, fin_by_co, companies):
+        return build_snapshots(
+            prices_by_co, fin_by_co, companies, {},
+            self._FIN, [], True, 12, 0.5,
+            build_interactions=False, return_stock_ids=True,
+        )
+
+    def test_rows_follow_edinet_code_not_insertion_order(self):
+        prices_by_co, fin_by_co, companies = _make_varied_inputs()
+        reversed_prices = dict(reversed(list(prices_by_co.items())))
+
+        s_a, meta_a, _, feats_a, ids_a = self._build(prices_by_co, fin_by_co, companies)
+        s_b, meta_b, _, feats_b, ids_b = self._build(reversed_prices, fin_by_co, companies)
+
+        assert s_a, "サンプルが1件も無い（入力の作り方を見直す）"
+        assert feats_a == feats_b
+        assert s_a == s_b, "挿入順だけが違う入力で、各月の行の並びが変わった"
+        assert meta_a == meta_b
+        assert ids_a == ids_b
+        for ym, ids in ids_a.items():
+            assert ids == sorted(ids), f"{ym} の行が edinet_code の昇順でない"
+
+    def test_m2_oof_does_not_depend_on_insertion_order(self):
+        """実害の出る経路そのもの（subsample 0.8 の walk-forward）で、予測が並びに依らない。"""
+        from plugins.utils import walk_forward_cv_monthly
+
+        prices_by_co, fin_by_co, companies = _make_varied_inputs()
+        preds = []
+        for prices in (prices_by_co, dict(reversed(list(prices_by_co.items())))):
+            samples, _, _, feats, ids = self._build(prices, fin_by_co, companies)
+            folds, resid = walk_forward_cv_monthly(
+                samples, feats, min_train_months=6, step_months=3,
+                return_residuals=True,
+                fit_predict=_make_xgb_fit_predict(self._XGB_PARAMS, []),
+            )
+            # walk_forward は fit の例外を握りつぶして fold を飛ばすので、空同士の一致を防ぐ
+            assert folds, "fold が1つも回っていない"
+            preds.append({
+                (ym, ec): yhat
+                for ym, pairs in resid.items()
+                for ec, (yhat, _y) in zip(ids[ym], pairs)
+            })
+        assert preds[0] == preds[1], "挿入順だけが違う入力で、M-2 の OOF 予測が変わった"
+
+
 # ── 3. coerce ─────────────────────────────────────────────────────────────────
 
 class TestCoerce:
