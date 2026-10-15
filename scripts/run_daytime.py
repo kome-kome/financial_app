@@ -309,6 +309,20 @@ JOBS: dict[str, Job] = {
         measured_min=47.0,
         parallel_sensitive=True,   # 他の gate と同じ理由（採否が CI の符号で決まる）
     ),
+    # 「無い」と確かめた空欄（無配・R&D の無い社）を 0 で埋めて M-2/M-6 の対象を広げるか（#950）を測る道具。
+    # **積むのは人**（#955 の読み直しの後。M-2 は 5 個の種で平均して測る）。
+    "gate:fin-fill": Job(
+        name="gate_fin_fill",
+        argv=("{python}", "-m", "scripts.momentum_gate", "--fin-fill",
+              "--stride", "1", "--allow-full-pull", "--refresh-cache"),
+        why="無配の配当利回りと R&D の無い社の R&D 集約度を 0 で埋める（fill）か、空欄の行を捨てる"
+            "（本番・drop）かを共通 (ym,ec) 域で比べる（#950）。対象は M-2 / M-6・4検定・alpha 0.0125。"
+            "株価が空欄の行は埋めない。埋めた行が0、または fill 側のサンプルが増えないときは非0で止まる。",
+        # 見積り。gate:fin-nan（drop と nan の2条件・M-2 は 5 個の種で 47.0 分の見積り）と同じ形で、
+        # fill 側のパネルは nan 側より小さい。実走ログの END 行で差し替える。
+        measured_min=40.0,
+        parallel_sensitive=True,   # 他の gate と同じ理由（採否が CI の符号で決まる）
+    ),
     # 証券業・その他金融業の D/E を比較から外すか（#927）を M-2 / M-6 で測る道具（#940）。
     # **積むのは人**（#926 のマージ後。新しい定義の D/E でないと測る意味がない）。
     "gate:de-exclude": Job(
