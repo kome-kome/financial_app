@@ -328,6 +328,19 @@ blank_groups`（`OOF_CSV_COLUMNS`）で、`standard` は会計基準、`blank_gr
 サンプル数が `keep` 側より少ないことを確かめる（`de_exclude_reach_problems`）。日中キューの名前は
 `gate:de-exclude`。**#926 のマージ後に測る**（新しい定義の D/E でないと測る意味がない）。
 
+## 空欄を 0 で埋めるモード（`--fin-fill`・#950）
+
+財務の空欄のうち、書類の実物で「無い」と確かめたものだけを 0 で埋める（`fill`）か、本番どおり空欄の行を
+捨てる（`drop`・分母）かを比べる。無配の社は 1 株配当を「−」で載せ、R&D の無い社は「研究開発活動 該当事項は
+ありません」と書く（2026-10-15 に 8 社ずつ確認・#950 のコメント）。埋めるのは `rd_intensity`（`pl_rd_expenses` が
+空欄で売上 > 0）と `div_yield`（`dps` が空欄か 0 で株価 > 0）だけで、**株価が空欄の行は埋めない**（赤字・無配と
+関係の無い欠けで、0 にすると別の意味になる）。差し替えは読み込んだ財務の行の写しだけで、VIEW は変えない
+（`fill_fin_blanks`・判定の生の値は `load_fill_sources` が通期の行から引く）。`drop` 側は `fill` 側に含まれるので、
+共通域で測れるのは「埋めた行を学習に足すと財務が揃った社の予測がどう変わるか」で、広がった社の効果は raw で
+読む（`--fin-nan` と同じ形）。埋めた行が0、または `fill` 側のサンプルが増えないときは CV の前に止める
+（`fin_fill_reach_problems`）。日中キューの名前は `gate:fin-fill`。PER → 益利回りの置き換えは入れていない
+（`per` は分割補正係数 F を掛けた値で `stock_price` は補正しない列なので、赤字の行の E/P を作ると基準が食い違う）。
+
 ## M-2 は種を変えて平均する（`--seeds`・#955）
 
 M-2（XGBoost）は `random_state` を固定していても、種が違えば subsample の抜き方が変わり、同じ
@@ -429,6 +442,10 @@ class Cond(NamedTuple):
     `de_null_industries`（#940・#927）は D/E を空欄にする業種。既定 `()` は本番の構成（銀行業・保険業は
     VIEW が既に空欄にしている）で、既存モードの測定条件はやはり動かない。差し替えは読み込んだ財務の行
     だけで行い、VIEW は変えない（`null_de_ratio`）。
+
+    `fin_fill`（#950）は「無い」と確かめた空欄（無配の配当利回り・R&D の無い社の R&D 集約度）を 0 で
+    埋めるか。既定 False は本番の構成（空欄の行を捨てる）で、既存モードの測定条件はやはり動かない。
+    差し替えは読み込んだ財務の行だけで行い、VIEW は変えない（`fill_fin_blanks`）。
     """
     use_momentum: bool
     momentum_window: int
@@ -439,6 +456,7 @@ class Cond(NamedTuple):
     demean_target: bool = False
     fin_nan_ok: bool = False
     de_null_industries: tuple[str, ...] = ()
+    fin_fill: bool = False
 
 
 CONDS: dict[str, bool] = {"off": False, "on": True}
@@ -513,6 +531,18 @@ FIN_NAN_MODELS = ["xgb_m2", "elasticnet"]
 DE_EXCLUDE_CONDS: dict[str, tuple[str, ...]] = {"keep": (), "exclude": DE_RATIO_EXCLUSION_CANDIDATES}
 DE_EXCLUDE_BASE_COND = "keep"
 DE_EXCLUDE_MODELS = ["xgb_m2", "elasticnet"]
+
+# 空欄を 0 で埋めるモード（`--fin-fill`・#950）。**基準は本番の構成（空欄の行を捨てる `drop`）**。
+# 埋めるのは書類の実物で「無い」と確かめた空欄だけ（#950 のコメント・2026-10-15）: 無配の社は 1 株配当を
+# 「−」で載せ、R&D の無い社は「研究開発活動 該当事項はありません」と書く。**株価が空欄の行は埋めない**
+# （赤字・無配とは関係のない欠けで、0 にすると別の意味になる）。`drop` 側のパネルは `fill` 側に含まれる
+# ので、共通域で測れるのは「埋めた行を学習に足すと、財務が揃った社の予測がどう変わるか」。広がった社の
+# 予測が当たるかは raw の水準で読む（`--fin-nan` と同じ形）。
+FIN_FILL_CONDS: dict[str, bool] = {"drop": False, "fill": True}
+FIN_FILL_BASE_COND = "drop"
+FIN_FILL_MODELS = ["xgb_m2", "elasticnet"]
+# 埋める判定に使う列（VIEW の生の値）。財務の行（`_FIN_FIELDS`）には入っていないので別に引く。
+FIN_FILL_SOURCE_FIELDS = ("dps", "stock_price", "pl_rd_expenses", "pl_revenue")
 # 月平均除去が届いたかの許容（`demean_reach_problems`）。素の側は「全部0」だけを弾き、除去した
 # 側は浮動小数の丸めを十分に上回る幅で 0 とみなす（どちらの値も実行時に出力と JSON へ出る）。
 DEMEAN_RAW_MIN = 1e-12
@@ -603,10 +633,11 @@ def build_conditions(windows: list[int] | None = None,
                     lambdas: list[float] | None = None,
                     models: list[str] | None = None,
                     fin_nan: bool = False,
-                    de_exclude: bool = False) -> dict[str, Cond]:
+                    de_exclude: bool = False,
+                    fin_fill: bool = False) -> dict[str, Cond]:
     """条件集合 {名前: Cond} を作る。
 
-    10のモードがある。**同時に使えるのは1つだけ**（下記）:
+    11のモードがある。**同時に使えるのは1つだけ**（下記）:
 
       既定           … ADR-0045 の昇格ゲートと完全に同じ2条件（`off` / `on`・マクロは ON のまま）
       `windows`      … モメンタム無し ＋ 各窓（#592・ADR-0050）
@@ -618,6 +649,7 @@ def build_conditions(windows: list[int] | None = None,
       `risk_axis`    … U = μ − λR の R を振る（#709）。**パネルは全条件とも本番構成で同一**
       `fin_nan`      … 財務の空欄の行を捨てる ＋ NaN で通す（#938・#916）。他の軸は本番構成に固定
       `de_exclude`   … 2業種の D/E を残す ＋ 空欄にする（#940・#927）。他の軸は本番構成に固定
+      `fin_fill`     … 財務の空欄の行を捨てる ＋ 「無い」空欄を 0 で埋める（#950）。他の軸は本番構成に固定
 
     **`risk_axis` だけは `Cond` を動かさない。** R はモデルの学習に一切入らず、CV が出した
     μ̂ の順位を作り直すときだけ使うので、パネル構築のパラメータではない。3条件とも同じ
@@ -642,7 +674,8 @@ def build_conditions(windows: list[int] | None = None,
     modes = [("--windows", bool(windows)), ("--macro", macro),
              ("--interactions", interactions), ("--max-features", bool(max_features)),
              ("--fin-rows", fin_rows), ("--demean-target", demean_target),
-             ("--risk-axis", risk_axis), ("--fin-nan", fin_nan), ("--de-exclude", de_exclude)]
+             ("--risk-axis", risk_axis), ("--fin-nan", fin_nan), ("--de-exclude", de_exclude),
+             ("--fin-fill", fin_fill)]
     picked = [name for name, on in modes if on]
     if len(picked) > 1:
         raise ValueError(
@@ -693,6 +726,11 @@ def build_conditions(windows: list[int] | None = None,
         # 証券業・その他金融業の D/E を比較から外したら」を問う。
         return {name: Cond(False, MOM_WINDOW, de_null_industries=inds)
                 for name, inds in DE_EXCLUDE_CONDS.items()}
+    if fin_fill:
+        # 「無い」空欄を 0 で埋めるかだけを差し替える。他の軸はすべて本番構成＝「本番の M-2/M-6 で
+        # 無配・R&D の無い社を外さずに 0 として通したら」を問う。
+        return {name: Cond(False, MOM_WINDOW, fin_fill=flag)
+                for name, flag in FIN_FILL_CONDS.items()}
     if not windows:
         return {name: Cond(use_mom, MOM_WINDOW) for name, use_mom in CONDS.items()}
     ws = sorted({int(w) for w in windows})
@@ -717,11 +755,13 @@ def base_of(conds: dict[str, Cond], default_max_features: int | None = None) -> 
     財務の空欄モードの分母も**本番の構成**（`drop`）。こちらは母集団を広げる側が本番ではないが、
     `drop` 側は `nan` 側に含まれる＝分母に置いた側が「母集団の狭い側」になる点に注意（共通域で揃える）。
     D/E の業種除外モードの分母も**本番の構成**（`keep`）。こちらは本番が母集団の広い側。
+    空欄を 0 で埋めるモードの分母も**本番の構成**（`drop`）。`--fin-nan` と同じく分母が母集団の狭い側。
     リスク軸モードの分母も**本番の構成**だが、モデルごとに違う（M-1 は `r2`・M-6 は `mu_only`）ので
     ここでは決めない。`main` はリスク軸モードでは `risk_base_cond` を使う（#808）。
     """
     for cand in (BASE_COND, MACRO_BASE_COND, INTERACTION_BASE_COND, FIN_ROWS_BASE_COND,
-                 DEMEAN_BASE_COND, RISK_BASE_COND, FIN_NAN_BASE_COND, DE_EXCLUDE_BASE_COND):
+                 DEMEAN_BASE_COND, RISK_BASE_COND, FIN_NAN_BASE_COND, DE_EXCLUDE_BASE_COND,
+                 FIN_FILL_BASE_COND):
         if cand in conds:
             return cand
     prod = maxfeat_cond_name(default_max_features) if default_max_features else None
@@ -750,13 +790,14 @@ MODE_SUFFIX: dict[str, str] = {"default": "", "windows": "", "macro": "_macro",
                                "interactions": "_interactions", "max_features": "_maxfeat",
                                "fin_rows": "_fin_rows", "demean_target": "_demean",
                                "risk_axis": "_risk_axis", "fin_nan": "_fin_nan",
-                               "de_exclude": "_de_exclude"}
+                               "de_exclude": "_de_exclude", "fin_fill": "_fin_fill"}
 
 
 def mode_of(windows: list[int] | None = None, macro: bool = False,
             interactions: bool = False, max_features: list[int] | None = None,
             fin_rows: bool = False, demean_target: bool = False,
-            risk_axis: bool = False, fin_nan: bool = False, de_exclude: bool = False) -> str:
+            risk_axis: bool = False, fin_nan: bool = False, de_exclude: bool = False,
+            fin_fill: bool = False) -> str:
     """測定モードの名前を返す（`build_conditions` と同じ引数から1箇所で導出する）。
 
     **#615 で足した2モードは、ここを持たないまま別モードの名前で出力されていた**——
@@ -781,6 +822,8 @@ def mode_of(windows: list[int] | None = None, macro: bool = False,
         return "fin_nan"
     if de_exclude:
         return "de_exclude"
+    if fin_fill:
+        return "fin_fill"
     return "windows" if windows else "default"
 
 
@@ -808,6 +851,9 @@ _AXIS_VERDICTS: dict[str, tuple[str, str]] = {
     # 本番は D/E を残す側（母集団が広い側）。外した側の改善は母集団の縮みと混ざるので共通域で読む（#940）。
     "de_exclude": ("DE EXCLUDE AXIS",
                    "blanking D/E for the candidate industries did not beat keeping it"),
+    # 共通域は埋める前から財務が揃っていた行だけ（drop 側 ⊂ fill 側）。広がった社の効果は raw で読む（#950）。
+    "fin_fill": ("FIN FILL AXIS [common domain = rows complete before filling; read raw for filled rows]",
+                 "filling no-dividend / no-R&D blanks with 0 did not beat dropping those rows"),
     # 分母はモデルで違う（M-1 は r2・M-6 は mu_only・#808）ので名前を差し込む。
     "risk_axis": ("RISK AXIS",
                   "no risk condition beat the production ordering ({base})"),
@@ -832,7 +878,7 @@ def verdict_text(mode: str, n_conds: int, passed: list[str], regressed: list[str
     （`production`・条件に無ければ None）の両方を出す（#816）。
     """
     if (mode in ("macro", "interactions", "max_features", "fin_rows", "demean_target",
-                 "risk_axis", "fin_nan", "de_exclude")
+                 "risk_axis", "fin_nan", "de_exclude", "fin_fill")
             or (mode == "windows" and n_conds > 2)):
         head, none = _AXIS_VERDICTS[mode]
         if mode == "macro" and base == MACRO_ON_COND:
@@ -1461,6 +1507,74 @@ def de_exclude_reach_problems(nulled_rows: int, samples: dict[str, int],
     return problems
 
 
+def load_fill_sources(db) -> dict[tuple[str, str], tuple]:
+    """埋める判定に使う生の値を {(edinet_code, period_end の ISO): FIN_FILL_SOURCE_FIELDS の順} で返す
+    （#950・読み取りのみ）。
+
+    `load_standards` と同じく通期の行で突き合わせる。`_FinRow` に列を足さないのは、本番の読み込みと
+    キャッシュの形を計測のために変えないため。
+    """
+    cols = [getattr(FinancialRecord, f) for f in FIN_FILL_SOURCE_FIELDS]
+    rows = (db.query(FinancialRecord.edinet_code, FinancialRecord.period_end, *cols)
+            .filter(FinancialRecord.period_type == "annual").all())
+    return {(r[0], _iso(r[1])): tuple(r[2:]) for r in rows if r[1]}
+
+
+def fill_fin_blanks(fin_by_co: dict, sources: dict) -> tuple[dict, dict[str, int]]:
+    """「無い」と確かめた空欄を 0 で埋めた財務の写しと、列ごとに埋めた行数を返す（#950）。
+
+    - `rd_intensity`: 空欄で、`pl_rd_expenses` が空欄かつ売上 > 0 の行（R&D の無い社）
+    - `div_yield`: 空欄で、`dps` が空欄か 0 かつ株価 > 0 の行（無配の社）
+
+    **株価が空欄の行・売上が空欄か 0 の行は埋めない**（別の理由の欠けで、0 にすると意味が変わる）。
+    **元の dict と行は書き換えない**（`drop` 側が同じ財務を読む）。突き合わせる生の値が無い行も埋めない。
+    """
+    out: dict = {}
+    n = {"rd_intensity": 0, "div_yield": 0}
+    for ec, recs in fin_by_co.items():
+        new_recs = []
+        for rec in recs:
+            src = sources.get((ec, _iso(rec.period_end)))
+            if src is not None:
+                dps, price, rd, revenue = src
+                upd = {}
+                if rec.rd_intensity is None and rd is None and revenue is not None and revenue > 0:
+                    upd["rd_intensity"] = 0.0
+                if (rec.div_yield is None and (dps is None or dps == 0)
+                        and price is not None and price > 0):
+                    upd["div_yield"] = 0.0
+                if upd:
+                    rec = rec._replace(**upd)
+                    for k in upd:
+                        n[k] += 1
+            new_recs.append(rec)
+        out[ec] = new_recs
+    return out, n
+
+
+def fin_fill_reach_problems(filled: dict[str, int], samples: dict[str, int],
+                            kinds: list[str]) -> list[str]:
+    """空欄を 0 で埋める切り替えが断面に届いていない理由を列挙する（#950）。空リストなら健全。
+
+    埋めた行が0なら両条件は同じ財務で組まれる。`fill` 側のサンプル数が `drop` 側より多くなければ、
+    埋めた行が断面に入っていない（他の列も空欄の行だけを埋めた、など）。どちらもエラーを出さずに
+    「差なし」だけが残る。
+    """
+    problems = []
+    if sum(filled.values()) <= 0:
+        problems.append("0 で埋めた財務の行が0（突き合わせる生の値が読めていない可能性）")
+    for kind in kinds:
+        n_drop = samples.get(f"{FIN_FILL_BASE_COND}|{kind}", 0)
+        for cond in FIN_FILL_CONDS:
+            if cond == FIN_FILL_BASE_COND:
+                continue
+            n_fill = samples.get(f"{cond}|{kind}", 0)
+            if n_fill <= n_drop:
+                problems.append(f"{cond}|{kind}: サンプル数 {n_fill} が {FIN_FILL_BASE_COND} 側の "
+                                f"{n_drop} より多くない（埋めた行が断面に入っていない）")
+    return problems
+
+
 # ── リスク軸（`--risk-axis`・#709）─────────────────────────────────────────────
 
 def _month_end_bound(ym: str) -> str:
@@ -1781,6 +1895,10 @@ def main() -> None:
                     help="D/E の業種除外モード（証券業・その他金融業の D/E を残す keep と空欄にする "
                          f"exclude を共通域で比べる・#940/#927）。モデル既定は {','.join(DE_EXCLUDE_MODELS)}。"
                          "VIEW は変えず、読み込んだ財務の行だけを差し替える。他モードと併用不可")
+    ap.add_argument("--fin-fill", dest="fin_fill", action="store_true",
+                    help="空欄を 0 で埋めるモード（無配の配当利回りと R&D の無い社の R&D 集約度を 0 にする "
+                         f"fill と、空欄の行を捨てる drop を共通域で比べる・#950）。モデル既定は {','.join(FIN_FILL_MODELS)}。"
+                         "株価が空欄の行は埋めない。VIEW は変えず、読み込んだ財務の行だけを差し替える。他モードと併用不可")
     ap.add_argument("--smoke", action="store_true", help="サンプルを間引いた短時間確認")
     ap.add_argument("--stride", type=int, default=1, help="各月のサンプル間引き幅")
     ap.add_argument("--seeds", type=int, default=SEEDS_DEFAULT,
@@ -1816,6 +1934,8 @@ def main() -> None:
         default_models = FIN_NAN_MODELS
     elif args.de_exclude:
         default_models = DE_EXCLUDE_MODELS
+    elif args.fin_fill:
+        default_models = FIN_FILL_MODELS
     else:
         default_models = MODELS
     models = ([m.strip() for m in args.models.split(",") if m.strip()]
@@ -1844,7 +1964,8 @@ def main() -> None:
                                  max_features=max_features, fin_rows=args.fin_rows,
                                  demean_target=args.demean_target,
                                  risk_axis=args.risk_axis, lambdas=lambdas, models=models,
-                                 fin_nan=args.fin_nan, de_exclude=args.de_exclude)
+                                 fin_nan=args.fin_nan, de_exclude=args.de_exclude,
+                                 fin_fill=args.fin_fill)
     except ValueError as e:
         raise SystemExit(str(e))
     # 列数モードの分母は本番値（プラグイン既定）。**ここで数値を書き写さない**。
@@ -1893,7 +2014,7 @@ def main() -> None:
     mode = mode_of(windows, macro=args.macro, interactions=args.interactions,
                    max_features=max_features, fin_rows=args.fin_rows,
                    demean_target=args.demean_target, risk_axis=args.risk_axis,
-                   fin_nan=args.fin_nan, de_exclude=args.de_exclude)
+                   fin_nan=args.fin_nan, de_exclude=args.de_exclude, fin_fill=args.fin_fill)
     default_out = f"momentum_gate{MODE_SUFFIX[mode]}.json"
     if mode == "risk_axis" and models != RISK_MODELS:
         # M-1 と M-6 は分母が違い別々に回す（#808）。同じファイルへ書くと後の run が前の結果を消す。
@@ -1966,6 +2087,12 @@ def main() -> None:
         # (行の基準, 業種) ごとに1回だけ作る。元の `fins` は書き換えない（他の条件が同じ財務を読む）。
         de_nulled: dict[tuple, dict] = {}
         de_nulled_rows = 0
+        # 空欄を 0 で埋めるモード（#950）: 埋めた財務の写しを1回だけ作る。元の `fins` は書き換えない。
+        filled_fins: dict | None = None
+        fin_filled: dict[str, int] = {}
+        if any(c.fin_fill for c in conds.values()):
+            filled_fins, fin_filled = fill_fin_blanks(fins[FIN_ROWS_BASE_COND], load_fill_sources(db))
+            print(f"[fin_fill] financial rows filled with 0: {fin_filled}", flush=True)
         for c in conds.values():
             dkey = (c.fin_rows, c.de_null_industries)
             if c.de_null_industries and dkey not in de_nulled:
@@ -1978,6 +2105,8 @@ def main() -> None:
                 if (c, kind) not in built:
                     fin_src = (de_nulled[(c.fin_rows, c.de_null_industries)]
                                if c.de_null_industries else fins[c.fin_rows])
+                    if c.fin_fill:
+                        fin_src = filled_fins
                     built[(c, kind)] = _build(
                         kind, args, prices_by_co, fin_src, companies,
                         macro_cache, c.use_momentum, c.momentum_window,
@@ -2001,6 +2130,7 @@ def main() -> None:
                       f"target={'demean' if c.demean_target else 'raw'} "
                       f"fin_blank={'nan' if c.fin_nan_ok else 'drop'} "
                       f"de_null_inds={len(c.de_null_industries)} "
+                      f"fin_fill={'on' if c.fin_fill else 'off'} "
                       f"months={st['months']} ({st['first_ym']}..{st['last_ym']}) "
                       f"samples={st['samples']} companies={st['companies']} "
                       f"features={st['n_features']} [{head}{more}]", flush=True)
@@ -2062,6 +2192,16 @@ def main() -> None:
             problems = de_exclude_reach_problems(de_nulled_rows, de_exclude_samples, kinds)
             if problems:
                 raise SystemExit("中止: D/E の業種除外が断面に届いていません: " + " / ".join(problems))
+
+        # 空欄を 0 で埋めるモードでも、切り替えが**断面まで届いたか**を CV の前に確かめる（#950）。
+        fin_fill_samples: dict[str, int] = {}
+        if mode == "fin_fill":
+            fin_fill_samples = {key: st["samples"] for key, st in stats.items()}
+            for key, n in fin_fill_samples.items():
+                print(f"[{key}] samples={n}", flush=True)
+            problems = fin_fill_reach_problems(fin_filled, fin_fill_samples, kinds)
+            if problems:
+                raise SystemExit("中止: 空欄の 0 埋めが断面に届いていません: " + " / ".join(problems))
 
         # リスク軸モードの R は CV の前に作る（軸ごとに `(ym, ec) → R`）。パネルは全条件で
         # 同一なので `base` のものを使う。**R は軸ごとに1回だけ作り**、λ 違いの条件で同じ表を
@@ -2347,7 +2487,8 @@ def main() -> None:
                               "fin_rows": c.fin_rows,
                               "demean_target": c.demean_target,
                               "fin_nan_ok": c.fin_nan_ok,
-                              "de_null_industries": list(c.de_null_industries)}
+                              "de_null_industries": list(c.de_null_industries),
+                              "fin_fill": c.fin_fill}
                        for name, c in conds.items()},
         "mode": mode,
         "base_cond": base,
@@ -2367,6 +2508,7 @@ def main() -> None:
         "fin_oof_path": str(fin_oof_path) if fin_oof_path else None,
         "fin_oof_rows": fin_oof_rows,
         "de_exclude": {"nulled_rows": de_nulled_rows, "samples": de_exclude_samples},
+        "fin_fill": {"filled_rows": fin_filled, "samples": fin_fill_samples},
         # 目的変数モードの健全性（#615）。{"条件|種別": 月平均の絶対値の最大}。他モードでは空。
         "target_month_mean": target_month_mean,
         # リスク軸モード（#709）。他モードでは None / 空。

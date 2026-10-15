@@ -582,6 +582,7 @@ class TestOutputNamesTheModeThatWasMeasured:
         (dict(risk_axis=True), "risk_axis"),
         (dict(fin_nan=True), "fin_nan"),
         (dict(de_exclude=True), "de_exclude"),
+        (dict(fin_fill=True), "fin_fill"),
     ])
     def test_mode_follows_the_flag(self, kwargs, want):
         assert mode_of(**kwargs) == want
@@ -589,7 +590,7 @@ class TestOutputNamesTheModeThatWasMeasured:
     def test_every_mode_has_a_file_suffix(self):
         assert set(MODE_SUFFIX) == {"default", "windows", "macro", "interactions", "max_features",
                                     "fin_rows", "demean_target", "risk_axis", "fin_nan",
-                                    "de_exclude"}
+                                    "de_exclude", "fin_fill"}
 
     def test_demean_mode_writes_its_own_file(self):
         """既定の `momentum_gate.json` を上書きしない（どの軸の結果かがファイル名で分かる）。"""
