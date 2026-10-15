@@ -105,13 +105,18 @@ EQUITY_COLUMNS = ("bs_total_equity", "bs_equity_parent")   # BPS を伸縮させ
 # 空のままだと VIEW が 0 として扱い、`net_cash`（→ `nc_ratio`）と `de_ratio` が黙って偏る。
 #
 # 「表示の省略」と言える根拠は、**同じ社の翌年の通期にはその列がある**ことである（半期の BS は
-# 科目をまとめて出す）。2026-09-18 の実測（候補 19,134 組）では、H1 で欠けた列の 85〜92% が
-# 翌年の通期に現れた: 受取手形 33.7%（翌年あり 89.3%）・建物 32.9%（90.2%）・機械装置 32.3%
-# （92.3%）・投資有価証券 27.6%（90.2%）・短期借入金 8.2%（69.1%）など。
+# 科目をまとめて出す）。2026-10-15 の実測（候補 19,549 組・#900/#918/#936 の取り直しの後・前期の
+# 通期に値あり・H1 で空欄・翌年の通期の行あり → 翌年の通期に値あり）: 建物 98.6%・機械装置 97.9%・
+# 投資有価証券 97.1%・売上債権 78.0%・棚卸資産 71.5%。
+#
+# **借入金（短期・長期・社債と、#925 の 1 年内返済・CP・1 年内償還）は入れない**（#946）——
+# 返済すれば本当にゼロになる科目で、H1 の空欄が翌年の通期にもあるのは短期借入金 32.8%（151/461）・
+# 長期借入金 25.9%（85/328）・社債 6.0%（10/168）、6 列の合計でも 29.0%（61/210）だった。
+# 引き継ぐと、返し終えた社の D/E に存在しない借金を載せる。2026-09-18 の測定（短期借入金 69.1%）は
+# H1 に単体の値が混ざっていた状態のもので、数え方も再現できなかった（ADR-0051 実装2 の追記）。
 # **フロー（PL・CF）はここへ入れない**——期間の違う値を混ぜることになる。
 CARRY_FORWARD_BS_COLUMNS: frozenset = frozenset({
-    "bs_investment_securities", "bs_short_term_debt", "bs_long_term_debt",
-    "bs_bonds_payable", "bs_payables", "bs_receivables", "bs_inventory",
+    "bs_investment_securities", "bs_payables", "bs_receivables", "bs_inventory",
     "bs_buildings", "bs_machinery", "bs_ppe_total", "bs_intangible_assets",
     "bs_investments_other_assets", "bs_paid_in_capital", "bs_retained_earnings",
     "bs_noncurrent_assets", "bs_current_liabilities", "bs_noncurrent_liabilities",

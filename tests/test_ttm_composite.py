@@ -115,6 +115,18 @@ class TestCompose:
         assert v["bs_investment_securities"] == 700.0
         assert carried["bs:bs_investment_securities"] == 1
 
+    def test_debt_columns_are_not_carried_from_annual(self):
+        """借入金は返済でゼロになる。H1 の空欄が翌年の通期にもあるのは有利子負債の合計で 29.0%
+        （#946・2026-10-15）で、引き継ぐと返し終えた社の D/E を過大にする。"""
+        debt = {"bs_short_term_debt": 100.0, "bs_current_portion_long_term_debt": 50.0,
+                "bs_commercial_paper": 30.0, "bs_current_portion_bonds_payable": 20.0,
+                "bs_long_term_debt": 200.0, "bs_bonds_payable": 100.0}
+        a, p, c = materials(annual_prev={"values": debt})
+        carried: T.Counter = T.Counter()
+        v = T.compose_values(a, p, c, columns=COLUMNS + tuple(debt), carried=carried)
+        assert all(v[col] is None for col in debt)
+        assert not any(key.startswith("bs:") for key in carried)
+
     def test_market_columns_are_not_composed(self):
         a, p, c = materials()
         v = T.compose_values(a, p, c, columns=COLUMNS)
