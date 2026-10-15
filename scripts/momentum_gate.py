@@ -328,6 +328,17 @@ blank_groups`（`OOF_CSV_COLUMNS`）で、`standard` は会計基準、`blank_gr
 サンプル数が `keep` 側より少ないことを確かめる（`de_exclude_reach_problems`）。日中キューの名前は
 `gate:de-exclude`。**#926 のマージ後に測る**（新しい定義の D/E でないと測る意味がない）。
 
+## M-2 は種を変えて平均する（`--seeds`・#955）
+
+M-2（XGBoost）は `random_state` を固定していても、種が違えば subsample の抜き方が変わり、同じ
+パネルで rank-IC が ±0.005〜0.01 動く。これは M-2 で比べてきた条件どうしの差（0.01〜0.03）と同じ
+大きさで、`gate:fin-nan` の M-2 の short_side_spread は 10/14 に有意（p=0.002）、10/15 に有意でなく
+（p=0.233）なった（行の並びの違い・#954）。そこで **M-2 は既定で 5 個の種（42〜46）で回し、行ごとに
+予測を平均してから**指標と検定を出す（`candidate_bakeoff.run_seeds`）。下流（共通月・共通 (ym,ec)
+域・ペアの検定）は無改修。測るのは「5 個の平均のモデル」で、本番の 1 個のモデルより少し安定した
+成績になる。種ごとの rank-IC と short_side_spread は `[seeds]` の行と JSON の `seeds` に残す。
+`--seeds 1` で従来（種 42 の 1 回）と同じになる。M-6・M-1 は種で結果が変わらないので 1 回のまま。
+
 ## M-1 を測るときの注意
 
 M-1 は `macro_nan_ok=False`（strict）で**母集団自体が M-2/M-6 と別物**なので、パネルを共有
@@ -374,10 +385,12 @@ from scripts.candidate_bakeoff import (  # noqa: E402
     _load_financials,
     _load_prices,
     _thin,
-    run_one,
+    run_seeds,
 )
 
 _OUT_DIR = Path(__file__).resolve().parent / ".cache"
+# M-2 を回す種の数の既定（#955）。予測を平均してから測る。1 で従来どおり種 42 の 1 回。
+SEEDS_DEFAULT = 5
 
 # 12-1 モメンタムの標準形（Jegadeesh-Titman 1993）。窓の最適化は**既定のゲートでは**対象外＝
 # まず「入れるか否か」を clean に判定する（窓も同時に振ると検定数が5倍になり、
@@ -849,6 +862,21 @@ def _num(v, nd: int = 4) -> str:
     if v is None:
         return "-"
     return f"{v:+.{nd}f}" if isinstance(v, float) else str(v)
+
+
+def seed_spread_line(seeds: dict) -> str:
+    """種ごとの rank-IC と short_side_spread の幅を 1 行にする（#955）。
+
+    平均する前の 1 回ごとの揺れの大きさで、条件の差（diff）と見比べるための目安。
+    """
+    def span(vals: list) -> str:
+        v = [x for x in vals if x is not None]
+        if not v:
+            return "-"
+        return f"min={_num(min(v))} max={_num(max(v))} range={_num(max(v) - min(v))}"
+
+    return (f"[seeds] n={seeds['n']} rank-IC by seed: {span(seeds['rank_ic_by_seed'])}"
+            f" | short_side: {span(seeds['short_side_spread_by_seed'])}")
 
 
 def _restrict_months(panel: tuple, yms: set) -> tuple:
@@ -1755,11 +1783,16 @@ def main() -> None:
                          "VIEW は変えず、読み込んだ財務の行だけを差し替える。他モードと併用不可")
     ap.add_argument("--smoke", action="store_true", help="サンプルを間引いた短時間確認")
     ap.add_argument("--stride", type=int, default=1, help="各月のサンプル間引き幅")
+    ap.add_argument("--seeds", type=int, default=SEEDS_DEFAULT,
+                    help=f"M-2 を回す種の数。予測を平均してから測る（既定 {SEEDS_DEFAULT}・"
+                         "1 で従来どおり 1 回・#955）")
     ap.add_argument("--allow-full-pull", action="store_true",
                     help="週次株価キャッシュが無い場合に DB からのフルロードを許可する")
     ap.add_argument("--refresh-cache", action="store_true", help="キャッシュを無視して再取得")
     ap.add_argument("--json", dest="json_path", help="結果 JSON の出力先")
     args = ap.parse_args()
+    if args.seeds < 1:
+        raise SystemExit(f"--seeds は 1 以上（指定: {args.seeds}）")
     if args.smoke and args.stride <= 1:
         args.stride = 5
     set_refresh(args.refresh_cache)
@@ -2065,7 +2098,8 @@ def main() -> None:
                 memo = (conds[cond], kind, model)
                 if memo not in ran:
                     s, m, i, feats = panels[(cond, kind)]
-                    fresh = run_one(estimator, s, m, i, feats, pca=0, return_parts=True)
+                    fresh = run_seeds(estimator, s, m, i, feats, pca=0, seeds=args.seeds,
+                                      return_parts=True)
                     ran[memo] = (fresh, fresh.pop("_parts"))
                 out, part = ran[memo]
                 if mode == "risk_axis":
@@ -2086,6 +2120,8 @@ def main() -> None:
                       f"(std={_num(o['rank_ic'].get('std'))}) "
                       f"short_side={_num(o.get('short_side_spread'))} "
                       f"folds={out['n_folds']} ({out['elapsed_sec']}s)", flush=True)
+                if out.get("seeds"):
+                    print("    " + seed_spread_line(out["seeds"]), flush=True)
     finally:
         db.close()
 
@@ -2124,7 +2160,8 @@ def main() -> None:
             memo = (conds[cond], kind, model)
             if memo not in cran:
                 s, m, i, feats = cpanels[(cond, kind)]
-                fresh = run_one(estimator, s, m, i, feats, pca=0, return_parts=True)
+                fresh = run_seeds(estimator, s, m, i, feats, pca=0, seeds=args.seeds,
+                                  return_parts=True)
                 cran[memo] = (fresh, fresh.pop("_parts"))
             out, part = cran[memo]
             cparts[f"{cond}|{model}"] = part
@@ -2353,6 +2390,8 @@ def main() -> None:
         "n_tests": n_tests,
         "models": models,
         "stride": args.stride,
+        "seeds": args.seeds,
+        "seeds_by_run": {k: v["seeds"] for k, v in results.items() if v.get("seeds")},
         "panel": stats,
         "common_months": {kind: {"n": len(ys),
                                  "first": min(ys, default=None),

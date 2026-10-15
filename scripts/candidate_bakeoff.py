@@ -60,6 +60,12 @@ from scripts._cache import cached, set_refresh
 MIN_TRAIN_MONTHS = 6
 STEP_MONTHS = 3
 
+# 種を変えて平均する候補と、1 個目の種（#955）。XGBoost は random_state を固定していても、
+# 種が違えば subsample の抜き方が変わり、同じパネルで rank-IC が ±0.005〜0.01 動く。1 個目は
+# 候補の既定（`_b_xgb_baseline` の 42）と同じにして、seeds=1 が従来の run_one と一致するようにする。
+SEEDED_CANDIDATES = frozenset({"xgb_m2"})
+SEED_BASE = 42
+
 # 既定で回す候補（+ 素 OLS 基準線は常に付く）
 DEFAULT_ORDER = ["xgb_m2", "elasticnet", "extratrees", "fama_macbeth",
                  "fama_macbeth_ridge", "regime_linear", "lightgbm", "catboost"]
@@ -210,22 +216,91 @@ def build_panel(db, args) -> tuple:
     return samples_by_ym, meta_by_ym, ids_by_ym, feat_names
 
 
+def _backtest(residuals: dict, meta: dict) -> dict:
+    """OOF 残差から指標を出す（run_one と run_seeds で設定を共有する）。"""
+    return oof_backtest(residuals, n_quantiles=5, meta_by_ym=meta, rebalance_per_year=4)
+
+
+def average_residuals(runs: list[dict]) -> dict:
+    """種だけが違う run の残差 `{ym: [(yhat, y), ...]}` を、行ごとに予測を平均して 1 つにする（#955）。
+
+    行の並びは `build_snapshots` が edinet_code 順に固定する（#954）ので、同じパネルなら月ごとの
+    行は種によらず同じ並びになる。月・行数・実現値のどれかが食い違えば、別のパネルを混ぜている
+    ので平均せずに止める（黙って平均すると別の社の予測を足し合わせる）。
+    """
+    first = runs[0]
+    for r in runs[1:]:
+        if r.keys() != first.keys():
+            raise ValueError("種ごとの残差で test 月が食い違う（同じパネルではない）")
+        for ym, pairs in r.items():
+            if [y for _yh, y in pairs] != [y for _yh, y in first[ym]]:
+                raise ValueError(f"種ごとの残差で {ym} の行が食い違う（同じパネルではない）")
+    return {ym: [(sum(r[ym][j][0] for r in runs) / len(runs), y)
+                 for j, (_yh, y) in enumerate(pairs)]
+            for ym, pairs in first.items()}
+
+
+def run_seeds(name: str, samples_by_ym: dict, meta_by_ym: dict, ids_by_ym: dict,
+              feat_names: list, pca: int, *, seeds: int, return_parts: bool = False) -> dict:
+    """種を変えて `seeds` 回回し、行ごとに予測を平均してから指標を出す（#955）。
+
+    1 回だけの M-2 は、種（subsample の抜き方）だけで rank-IC が ±0.005〜0.01 動き、条件の差と
+    同じ大きさになる。予測を平均してから測れば、下流（共通域への制限・ペアの検定）は無改修で
+    この揺れが薄まる。測るのは「`seeds` 個の平均のモデル」で、本番の 1 個のモデルより少し
+    安定した成績になる点に注意。種ごとの rank-IC / short_side_spread は `out["seeds"]` に残す。
+
+    `seeds <= 1` か、種の効かない候補（`SEEDED_CANDIDATES` の外）は `run_one` と同じ。
+    """
+    if seeds <= 1 or name not in SEEDED_CANDIDATES:
+        return run_one(name, samples_by_ym, meta_by_ym, ids_by_ym, feat_names, pca,
+                       return_parts=return_parts)
+    t0 = time.time()
+    runs = [run_one(name, samples_by_ym, meta_by_ym, ids_by_ym, feat_names, pca,
+                    opts={"random_state": SEED_BASE + k}, return_parts=True)
+            for k in range(seeds)]
+    failed = next((r for r in runs if r.get("error")), None)
+    if failed is not None:
+        out = dict(failed)
+        parts = out.pop("_parts")
+        if return_parts:
+            out["_parts"] = parts
+        return out
+    residuals = average_residuals([r["_parts"][0] for r in runs])
+    meta = runs[0]["_parts"][1]
+    out = {k: v for k, v in runs[0].items() if k != "_parts"}
+    out["oof"] = _backtest(residuals, meta)
+    out["elapsed_sec"] = round(time.time() - t0, 1)
+    out["seeds"] = {
+        "n": seeds,
+        "random_states": [SEED_BASE + k for k in range(seeds)],
+        "rank_ic_by_seed": [r["oof"]["rank_ic"]["mean"] for r in runs],
+        "short_side_spread_by_seed": [r["oof"].get("short_side_spread") for r in runs],
+    }
+    if return_parts:
+        out["_parts"] = (residuals, meta)
+    return out
+
+
 def run_one(name: str, samples_by_ym: dict, meta_by_ym: dict, ids_by_ym: dict,
-            feat_names: list, pca: int, *, return_parts: bool = False) -> dict:
+            feat_names: list, pca: int, *, opts: dict | None = None,
+            return_parts: bool = False) -> dict:
     """候補1件を walk-forward → oof_backtest まで回して指標 dict を返す。
 
     return_parts=True のとき `out["_parts"] = (residuals, oof_meta)` を添える
     （`scripts/momentum_gate.py` が2条件を**共通 (ym,ec) 域**へ制限して測り直すために使う。
     母集団が動く条件比較では、この制限をしないと「特徴量の効果」と「母集団が変わった効果」が
     分離できない）。**JSON へは載せない**（残差全件でファイルが肥大する）。既定 False＝
-    既存の呼び出し（本スクリプト・macro_feature_bakeoff）は一切変わらない。"""
+    既存の呼び出し（本スクリプト・macro_feature_bakeoff）は一切変わらない。
+
+    opts は候補の既定パラメータへの上書き（`build_candidate` へそのまま渡す）。`run_seeds` が
+    `random_state` を変えるために使う（#955）。既定 None＝候補の既定のまま。"""
     t0 = time.time()
     eff_names = pca_feature_names(feat_names, pca) if pca > 0 else feat_names
     errors: list[str] = []
     if name == "ols":
         fit_predict, wf_extra, diag = None, {}, {}
     else:
-        raw_fp, wf_extra, diag = build_candidate(name, feat_names, pca_components=pca)
+        raw_fp, wf_extra, diag = build_candidate(name, feat_names, opts, pca_components=pca)
 
         def fit_predict(*a, _inner=raw_fp, **k):
             """例外理由を握り潰さずに記録する薄いラッパー。
@@ -247,7 +322,7 @@ def run_one(name: str, samples_by_ym: dict, meta_by_ym: dict, ids_by_ym: dict,
         embargo_months=LABEL_HORIZON_MONTHS, **wf_extra,
     )
     meta = build_oof_meta(ids_by_ym, meta_by_ym, residuals.keys())
-    bt = oof_backtest(residuals, n_quantiles=5, meta_by_ym=meta, rebalance_per_year=4)
+    bt = _backtest(residuals, meta)
     out = {
         "name": name,
         "pca": pca,
