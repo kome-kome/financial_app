@@ -46,7 +46,13 @@ import numpy as np
 
 from . import progress
 from .base import AnalysisPlugin
-from .model_candidates import alpha_path_bounds, make_diag, make_elasticnet_fit_predict, summarize_diag
+from .model_candidates import (
+    alpha_path_bounds,
+    elasticnet_inner_cv,
+    make_diag,
+    make_elasticnet_fit_predict,
+    summarize_diag,
+)
 from .macro_snapshots import (
     FIN_BASE_OPTIONS,
     LABEL_HORIZON_MONTHS,
@@ -76,6 +82,32 @@ from .model_candidates import _EN_CV_SPLITS as _CV_SPLITS
 from .model_candidates import _EN_L1_RATIOS as _L1_RATIOS
 from .model_candidates import _EN_MAX_ITER as _MAX_ITER
 from .model_candidates import _EN_N_ALPHAS as _N_ALPHAS
+
+# α・l1_ratio を選ぶ内側 CV の区切り方（#971・`model_candidates.elasticnet_inner_cv`）。**CV と最終モデルの
+# 両方へこの1つを渡す**（片方だけ切り替えると、検証した区切り方と本番の μ̂ の区切り方が割れる）。
+# 既定は行で区切る `rows`。月で区切る `months` へ切り替えるかは #964 が `momentum_gate --inner-cv` の
+# 結果で決める。M-4（退役済み）と候補メニューは関数の既定（`rows`）のままで、ここに追随しない。
+_INNER_CV = "rows"
+
+
+def _final_training_rows(samples_by_ym: dict, inner_cv: str) -> tuple[list, list[int] | None]:
+    """最終モデルの学習行と各月の行数を返す（#971）。
+
+    `rows` は修正前と同じ辞書の順の連結で、行数は返さない（None）。`months` は月を昇順に並べて
+    連結し、各月の行数を返す——月で区切る内側 CV は行が月の昇順に並んでいる前提で、辞書の順は
+    それを保証しない（walk-forward 側は `sorted()` で並べ直している・M-5 の最終モデルも同じ）。
+    """
+    if inner_cv == "rows":
+        return [s for ym_s in samples_by_ym.values() for s in ym_s], None
+    rows: list = []
+    groups: list[int] = []
+    for ym in sorted(samples_by_ym):
+        seg = samples_by_ym[ym]
+        if not seg:
+            continue
+        rows.extend(seg)
+        groups.append(len(seg))
+    return rows, groups
 
 
 class MacroEnetPlugin(AnalysisPlugin):
@@ -306,7 +338,7 @@ class MacroEnetPlugin(AnalysisPlugin):
         diag = make_diag()
         fit_predict = make_elasticnet_fit_predict(
             l1_ratios=l1_ratios, n_alphas=_N_ALPHAS, cv_splits=_CV_SPLITS,
-            max_iter=_MAX_ITER, diag=diag,
+            max_iter=_MAX_ITER, diag=diag, inner_cv=_INNER_CV,
         )
 
         cv_folds, cv_residuals = walk_forward_cv_monthly(
@@ -315,6 +347,7 @@ class MacroEnetPlugin(AnalysisPlugin):
             return_residuals=True,
             fit_predict=fit_predict,
             embargo_months=LABEL_HORIZON_MONTHS,   # 52週先ラベルの窓重複を purge（ADR-0014）
+            pass_train_groups=(_INNER_CV == "months"),   # 月で区切る内側 CV だけ各月の行数が要る（#971）
         )
 
         oof_meta = build_oof_meta(stock_ids_by_ym, sample_meta_by_ym, cv_residuals.keys())
@@ -354,11 +387,12 @@ class MacroEnetPlugin(AnalysisPlugin):
             }
 
         # ── 最終モデル（全データ）: CV と同一前処理で fit し現在断面をスコアリング ──
-        all_samples = [s for ym_s in samples_by_ym.values() for s in ym_s]
+        all_samples, train_groups = _final_training_rows(samples_by_ym, _INNER_CV)
         codes_ordered = list(current_snaps.keys())
         current_rows = [current_snaps[c][0] for c in codes_ordered]
         coefs, mu_preds, final_meta, breakdown = self._fit_final_and_score(
-            all_samples, current_rows, l1_ratios, return_breakdown=True)
+            all_samples, current_rows, l1_ratios, return_breakdown=True,
+            inner_cv=_INNER_CV, train_groups=train_groups)
         feature_coefs = {name: round(float(c), 6)
                          for name, c in zip(model_feat_names, coefs)}
         # 内訳の列（#807）: マクロ列は同じ日付なら全社同一＝順位を動かさないので1行に合算する。
@@ -471,7 +505,8 @@ class MacroEnetPlugin(AnalysisPlugin):
 
     @staticmethod
     def _fit_final_and_score(all_samples: list, current_rows: list, l1_ratios: tuple,
-                             return_breakdown: bool = False) -> tuple:
+                             return_breakdown: bool = False, *, inner_cv: str = "rows",
+                             train_groups: list[int] | None = None) -> tuple:
         """全学習データで ElasticNet を再学習し、現在断面 μ̂ と係数・メタを返す。
 
         CV の fit_predict（`make_elasticnet_fit_predict`）と同じ前処理・同じ探索設定を使う。
@@ -483,9 +518,12 @@ class MacroEnetPlugin(AnalysisPlugin):
         μ̂ = (Σ coef_i·x_i + intercept)·y_sd + y_mu なので、寄与_i = coef_i·x_i·y_sd・
         基準 = intercept·y_sd + y_mu と置けば `base + contrib[j].sum() == mu[j]`（近似なし）。
         `contrib` は (現在断面の社数 × 特徴量数) の配列。M-4（`macro_ensemble`）は3つ組で呼ぶ。
+
+        `inner_cv` / `train_groups`（#971）は CV の fit_predict と同じ内側 CV の区切り方
+        （`elasticnet_inner_cv`）。`months` では `all_samples` が月の昇順に連結され、`train_groups` が
+        その各月の行数であること（`_final_training_rows` が作る）。既定 `rows` は修正前と同一。
         """
         from sklearn.linear_model import ElasticNetCV
-        from sklearn.model_selection import TimeSeriesSplit
 
         train = list(all_samples)
         test = [(row, 0.0) for row in current_rows]   # ラベルは未知（予測には一切使わない）
@@ -496,10 +534,10 @@ class MacroEnetPlugin(AnalysisPlugin):
         y_z, y_mu, y_sd = normalize(y_w, "zscore")
         X_te = [transform_feature_row(s[0], win_p, norm_p) for s in test]
 
-        splits = max(2, min(_CV_SPLITS, len(X_tr) // 2 - 1))
         model = ElasticNetCV(
             l1_ratio=list(l1_ratios), alphas=_N_ALPHAS,
-            cv=TimeSeriesSplit(n_splits=splits), max_iter=_MAX_ITER,
+            cv=elasticnet_inner_cv(len(X_tr), _CV_SPLITS, inner_cv, train_groups),
+            max_iter=_MAX_ITER,
             random_state=42, selection="cyclic",
         )
         model.fit(np.asarray(X_tr, dtype=float)[:, 1:], np.asarray(y_z, dtype=float))

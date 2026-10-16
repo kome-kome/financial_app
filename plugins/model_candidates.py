@@ -156,6 +156,55 @@ _EN_CV_SPLITS = 3
 # 飽和しているため（最大 fold の実測: α パスは [0.00035, 3.186] で選択 α=0.05）。`eps`
 # （α パス下限）を切り上げる案は選択 α・l1_ratio 自体が変わりモデルが別物になるので採らない。
 _EN_MAX_ITER = 50000
+# α・l1_ratio を選ぶ内側 CV の区切り方（#971）。`rows` は行の番号で区切る今の方式、`months` は
+# 月の境界でだけ区切る方式。`rows` は区切りが月の途中に落ち、月内の並び（社の順）だけで最終モデルの
+# α が 165 倍動く（#964）。**既定は `rows` のまま**で、M-6 本体は `macro_enet._INNER_CV` を明示して渡す。
+_EN_INNER_CV_CHOICES = ("rows", "months")
+
+
+def month_block_splits(train_groups, cv_splits: int) -> list[tuple[np.ndarray, np.ndarray]]:
+    """月の塊で区切る内側 CV の (学習行, 検証行) の列を返す（#971）。
+
+    `train_groups` は月の昇順に連結した学習行の、各月の行数（`walk_forward_cv_monthly` の
+    `pass_train_groups=True` と同じ契約）。月の番号の列に `TimeSeriesSplit` をそのまま当てて、
+    月の番号を行の番号の範囲へ写す——「過去の月で学習 → 直後の月の塊で検証」という行ベースと
+    同じ形のまま、**どの月も学習側と検証側に分かれない**。分割数は行ベースの式
+    `max(2, min(cv_splits, 行数 // 2 - 1))` の行数を月数へ置き換えたもの。
+    """
+    from sklearn.model_selection import TimeSeriesSplit
+
+    sizes = [int(g) for g in train_groups]
+    if not sizes or any(g <= 0 for g in sizes):
+        raise ValueError(f"各月の行数は 1 以上で、1 か月以上が要る（受け取った値: {sizes}）")
+    n_months = len(sizes)
+    bounds = np.concatenate([[0], np.cumsum(sizes)])
+    splits = max(2, min(cv_splits, n_months // 2 - 1))
+    out = []
+    for tr_m, te_m in TimeSeriesSplit(n_splits=splits).split(np.arange(n_months)):
+        out.append((np.arange(bounds[tr_m[0]], bounds[tr_m[-1] + 1]),
+                    np.arange(bounds[te_m[0]], bounds[te_m[-1] + 1])))
+    return out
+
+
+def elasticnet_inner_cv(n_rows: int, cv_splits: int, inner_cv: str = "rows",
+                        train_groups=None):
+    """`ElasticNetCV(cv=...)` へ渡す内側 CV を返す（#971）。CV の fit_predict と最終モデルが共有する。
+
+    `rows` は修正前と同じ `TimeSeriesSplit(n_splits=max(2, min(cv_splits, n_rows // 2 - 1)))`。
+    `months` は `month_block_splits` の分割で、各月の行数 `train_groups`（合計 = n_rows）が要る。
+    """
+    from sklearn.model_selection import TimeSeriesSplit
+
+    if inner_cv == "rows":
+        return TimeSeriesSplit(n_splits=max(2, min(cv_splits, n_rows // 2 - 1)))
+    if inner_cv == "months":
+        if train_groups is None:
+            raise ValueError("inner_cv='months' には各学習月の行数（train_groups）が要る")
+        if sum(int(g) for g in train_groups) != n_rows:
+            raise ValueError(f"train_groups の合計 {sum(int(g) for g in train_groups)} が"
+                             f"学習行数 {n_rows} と合わない")
+        return month_block_splits(train_groups, cv_splits)
+    raise ValueError(f"未知の inner_cv: {inner_cv}（{', '.join(_EN_INNER_CV_CHOICES)} のみ）")
 
 
 def alpha_path_bounds(model, l1_ratios) -> tuple[float, float]:
@@ -178,7 +227,8 @@ def make_elasticnet_fit_predict(l1_ratios: tuple = _EN_L1_RATIOS,
                                 n_alphas: int = _EN_N_ALPHAS,
                                 cv_splits: int = _EN_CV_SPLITS,
                                 max_iter: int = _EN_MAX_ITER,
-                                diag: dict | None = None) -> Callable:
+                                diag: dict | None = None,
+                                inner_cv: str = "rows") -> Callable:
     """ElasticNet（L1+L2）の fit_predict を返す（Zou & Hastie 2005）。
 
     M-1(OLS・BIC 特徴選択) と M-2(XGBoost 非線形) の中間に位置づく「頑健な正則化線形」。
@@ -190,17 +240,24 @@ def make_elasticnet_fit_predict(l1_ratios: tuple = _EN_L1_RATIOS,
     walk_forward_cv_monthly は train_samples を月昇順に連結して渡すため、TimeSeriesSplit は
     「過去で学習→直近で検証」の向きになり、ランダム K-fold のような期間シャッフルによる
     楽観バイアスを避けられる。
+
+    `inner_cv`（#971）は内側 CV の区切り方（`elasticnet_inner_cv`）。既定 `rows` は行の番号で
+    区切る（修正前と同一）。`months` は月の境界でだけ区切り、3 番目の引数 `train_groups`（各学習月の
+    行数）を使う——`walk_forward_cv_monthly(pass_train_groups=True)` で呼ぶこと（候補メニューの
+    `elasticnet` は opts に `inner_cv="months"` があれば `pass_train_groups=True` を返す）。`months` のときだけ診断値に
+    `inner_cv` を積む（`rows` では何も足さない＝夜間の診断値の形は変わらない）。
     """
     from sklearn.linear_model import ElasticNetCV
-    from sklearn.model_selection import TimeSeriesSplit
 
-    def fit_predict(train_samples, test_samples):
+    if inner_cv not in _EN_INNER_CV_CHOICES:
+        raise ValueError(f"未知の inner_cv: {inner_cv}（{', '.join(_EN_INNER_CV_CHOICES)} のみ）")
+
+    def fit_predict(train_samples, test_samples, train_groups=None):
         X_tr, y_tr, X_te, y_mu, y_sd, y_te = _prep_matrices(train_samples, test_samples)
-        splits = max(2, min(cv_splits, len(X_tr) // 2 - 1))
         model = ElasticNetCV(
             l1_ratio=list(l1_ratios),
             alphas=n_alphas,        # sklearn>=1.7: 整数を渡すと自動生成する α パス本数
-            cv=TimeSeriesSplit(n_splits=splits),
+            cv=elasticnet_inner_cv(len(X_tr), cv_splits, inner_cv, train_groups),
             max_iter=max_iter,
             random_state=42,
             selection="cyclic",     # 決定的（random は seed 依存の座標選択順）
@@ -217,6 +274,9 @@ def make_elasticnet_fit_predict(l1_ratios: tuple = _EN_L1_RATIOS,
             lo, hi = alpha_path_bounds(model, l1_ratios)
             diag["alpha_at_path_min"].append(int(math.isclose(model.alpha_, lo, rel_tol=1e-9)))
             diag["alpha_at_path_max"].append(int(math.isclose(model.alpha_, hi, rel_tol=1e-9)))
+            if inner_cv != "rows":
+                # 切り替えが CV まで届いたかを呼び出し側が確かめる印（`momentum_gate --inner-cv`）
+                diag["inner_cv"].append(inner_cv)
         return yhat, y_te
 
     return fit_predict
@@ -808,7 +868,9 @@ class Candidate:
 
 
 def _b_elasticnet(feature_names, opts, diag):
-    return make_elasticnet_fit_predict(diag=diag, **opts), {}
+    # 月で区切る内側 CV（#971）だけ各学習月の行数が要る。既定（rows）は従来どおり 2 引数で呼ぶ。
+    extra = {"pass_train_groups": True} if opts.get("inner_cv") == "months" else {}
+    return make_elasticnet_fit_predict(diag=diag, **opts), extra
 
 
 def _b_extratrees(feature_names, opts, diag):

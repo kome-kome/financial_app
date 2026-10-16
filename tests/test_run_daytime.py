@@ -549,6 +549,40 @@ class TestDeExcludeGateMeasuresM2AndM6:
         assert argv[argv.index("--stride") + 1] == "1"
 
 
+class TestInnerCvGateMeasuresM6:
+    """M-6 の内側 CV の区切り方のジョブ（#971・#964）は M-6 だけを、間引かずに、本番（rows）を分母に測る。
+
+    事前登録（ADR-0050 の 2026-10-17 追記）は「M-6 だけ・rows / months・2検定・α 0.025」。M-2 を混ぜると
+    この軸を持たないモデルの同じ CV を2回回すだけになり、`build_conditions` が止める（平日1日ぶんの枠が消える）。
+    """
+
+    KEY = "gate:inner-cv"
+
+    def test_the_job_runs_the_inner_cv_axis_with_the_default_models(self):
+        from scripts.momentum_gate import INNER_CV_MODELS
+
+        argv = rd.JOBS[self.KEY].argv
+        assert "--inner-cv" in argv
+        assert "--models" not in argv
+        assert INNER_CV_MODELS == ["elasticnet"]
+
+    def test_the_preregistered_base_and_tests(self):
+        from scripts.momentum_gate import INNER_CV_MODELS, base_of, bonferroni_alpha, build_conditions
+
+        conds = build_conditions(inner_cv=True, models=INNER_CV_MODELS)
+        assert base_of(conds) == "rows"                      # 本番の構成
+        assert bonferroni_alpha(len(INNER_CV_MODELS), len(conds)) == pytest.approx(0.025)
+
+    def test_the_job_measures_at_full_resolution(self):
+        argv = rd.JOBS[self.KEY].argv
+        assert "--smoke" not in argv
+        assert argv[argv.index("--stride") + 1] == "1"
+
+    def test_the_result_changes_with_background_work(self):
+        """採否が CI の符号で決まる＝並走で答えが変わる側（他の gate と同じ）。"""
+        assert rd.JOBS[self.KEY].parallel_sensitive is True
+
+
 class TestFinFillGateMeasuresM2AndM6:
     """空欄を 0 で埋めるジョブ（#950）は M-2 / M-6 を、間引かずに、本番（drop）を分母に測る。"""
 

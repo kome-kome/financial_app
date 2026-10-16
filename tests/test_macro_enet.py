@@ -150,6 +150,8 @@ class TestFoldConfigMatchesM2:
         assert captured["embargo_months"] == LABEL_HORIZON_MONTHS == 12
         assert captured["return_residuals"] is True
         assert callable(captured["fit_predict"])
+        # 本番の内側 CV は行で区切る（#971）＝従来どおり 2 引数で呼ぶ
+        assert captured["pass_train_groups"] is False
 
 
 # ── 3.5 探索設定の単一ソース（Issue #452）─────────────────────────────────────
@@ -171,6 +173,140 @@ class TestSearchConfigSingleSource:
         """max_iter は本番規模で収束する水準を保つ（#452 実測: 5000 は 17 fold 中 10 件が未収束）。"""
         import plugins.macro_enet as me
         assert me._MAX_ITER >= 50_000
+
+
+# ── 3.6 内側 CV の区切り方（#971）──────────────────────────────────────────────
+
+# 月ごとの社数をわざと不揃いにする（揃っていると行の区切りも月の境界に落ち、区切り方の差が出ない）。
+_MONTH_SIZES = [40, 17, 33, 25, 38, 21, 29, 15, 36, 23, 31, 19, 27, 40, 22, 34, 18, 30, 26, 39]
+
+
+def _noisy_months(seed=971, sizes=_MONTH_SIZES, n_cur=30, n_feat=6):
+    """月ごとの学習パネル {ym: [(row, y), ...]}（月の昇順）と現在断面の行。"""
+    rng = np.random.default_rng(seed)
+    beta = np.array([0.6, -0.3, 0.2, 0.0, 0.0, 0.1])[:n_feat]
+    by_ym: dict = {}
+    for m, g in enumerate(sizes):
+        X = rng.normal(size=(g, n_feat))
+        y = X @ beta + rng.normal(scale=0.5, size=g)
+        by_ym[f"20{20 + m // 12:02d}-{m % 12 + 1:02d}"] = [(X[i].tolist(), float(y[i]))
+                                                          for i in range(g)]
+    return by_ym, rng.normal(size=(n_cur, n_feat)).tolist()
+
+
+def _scrambled(by_ym: dict, seed=964) -> dict:
+    """同じ中身で、月の順を崩した辞書（辞書の順は月の昇順を保証しない）。"""
+    keys = list(by_ym)
+    order = np.random.default_rng(seed).permutation(len(keys))
+    return {keys[i]: by_ym[keys[i]] for i in order}
+
+
+def _final_reference(samples, current, l1_ratios):
+    """修正前（#971 より前）の `_fit_final_and_score` の手順を書き写した参照実装（係数と μ̂）。"""
+    from sklearn.linear_model import ElasticNetCV
+    from sklearn.model_selection import TimeSeriesSplit
+
+    from plugins.macro_enet import _CV_SPLITS, _MAX_ITER, _N_ALPHAS
+    from plugins.utils import fit_feature_columns, normalize, transform_feature_row, winsorize
+
+    n_feat = len(samples[0][0])
+    X_tr, win_p, norm_p = fit_feature_columns([s[0] for s in samples], n_feat)
+    y_w, _, _ = winsorize([s[1] for s in samples])
+    y_z, y_mu, y_sd = normalize(y_w, "zscore")
+    X_te = [transform_feature_row(r, win_p, norm_p) for r in current]
+    splits = max(2, min(_CV_SPLITS, len(X_tr) // 2 - 1))
+    model = ElasticNetCV(l1_ratio=list(l1_ratios), alphas=_N_ALPHAS,
+                         cv=TimeSeriesSplit(n_splits=splits), max_iter=_MAX_ITER,
+                         random_state=42, selection="cyclic")
+    model.fit(np.asarray(X_tr, dtype=float)[:, 1:], np.asarray(y_z, dtype=float))
+    mu = model.predict(np.asarray(X_te, dtype=float)[:, 1:]) * y_sd + y_mu
+    return model.coef_.tolist(), mu.tolist()
+
+
+class TestInnerCv:
+    """M-6 の α・l1_ratio を選ぶ内側 CV の区切り方（#971）。本番の既定 `rows` は1ビットも変えない。"""
+
+    def test_production_default_is_rows(self):
+        """`months` へ切り替えるかは #964 が `momentum_gate --inner-cv` の結果で決める（ここで変えない）。"""
+        import plugins.macro_enet as me
+        assert me._INNER_CV == "rows"
+
+    def test_final_rows_is_bit_identical_to_the_pre_971_procedure(self):
+        from plugins.macro_enet import _L1_RATIOS, _final_training_rows
+
+        by_ym, current = _noisy_months()
+        samples, groups = _final_training_rows(by_ym, "rows")
+        assert groups is None
+        want_coef, want_mu = _final_reference(samples, current, _L1_RATIOS)
+        for kw in ({}, {"inner_cv": "rows"}):
+            coefs, mu, _meta = MacroEnetPlugin._fit_final_and_score(samples, current, _L1_RATIOS, **kw)
+            assert coefs == want_coef and mu == want_mu
+        # 空振り防止: この検体では区切り方を変えると μ̂ が動く（一致が自明に通る検体ではない）
+        m_rows, m_groups = _final_training_rows(by_ym, "months")
+        _c, mu_m, _m = MacroEnetPlugin._fit_final_and_score(
+            m_rows, current, _L1_RATIOS, inner_cv="months", train_groups=m_groups)
+        assert mu_m != want_mu
+
+    def test_rows_training_rows_keep_the_dict_order(self):
+        """rows は修正前と同じ辞書の順の連結（本番の最終モデルの入力を動かさない）。"""
+        from plugins.macro_enet import _final_training_rows
+
+        by_ym = _scrambled(_noisy_months()[0])
+        rows, groups = _final_training_rows(by_ym, "rows")
+        assert rows == [s for v in by_ym.values() for s in v]
+        assert groups is None
+
+    def test_months_training_rows_are_sorted_by_month(self):
+        from plugins.macro_enet import _final_training_rows
+
+        by_ym, _cur = _noisy_months()
+        scrambled = _scrambled(by_ym)
+        assert list(scrambled) != sorted(scrambled)              # 月の順は実際に崩れている
+        rows, groups = _final_training_rows({**scrambled, "2019-12": []}, "months")
+        assert rows == [s for ym in sorted(by_ym) for s in by_ym[ym]]
+        assert groups == [len(by_ym[ym]) for ym in sorted(by_ym)]   # 空の月は数えない
+
+    def test_months_final_model_ignores_the_dict_order(self):
+        """months の最終モデルは、月の順が崩れた辞書を渡しても月の昇順に連結して学習する。"""
+        from plugins.macro_enet import _L1_RATIOS, _final_training_rows
+
+        by_ym, current = _noisy_months()
+
+        def fit(d, inner_cv):
+            rows, groups = _final_training_rows(d, inner_cv)
+            return MacroEnetPlugin._fit_final_and_score(
+                rows, current, _L1_RATIOS, inner_cv=inner_cv, train_groups=groups)
+
+        sorted_fit, scrambled_fit = fit(by_ym, "months"), fit(_scrambled(by_ym), "months")
+        assert sorted_fit[0] == scrambled_fit[0] and sorted_fit[1] == scrambled_fit[1]
+        # 空振り防止: rows は辞書の順に連結するので、同じ崩れ方で μ̂ が動く
+        assert fit(by_ym, "rows")[1] != fit(_scrambled(by_ym), "rows")[1]
+
+    def test_months_needs_the_month_sizes(self):
+        from plugins.macro_enet import _L1_RATIOS
+
+        samples, current = _noisy_panel(n_cur=5)
+        with pytest.raises(ValueError, match="train_groups"):
+            MacroEnetPlugin._fit_final_and_score(samples, current, _L1_RATIOS, inner_cv="months")
+
+    def test_execute_passes_one_scheme_to_cv_and_final(self, monkeypatch):
+        """CV と最終モデルは同じ `_INNER_CV` で回る（片方だけ切り替わると検証と本番の区切り方が割れる）。"""
+        import plugins.macro_enet as me
+
+        monkeypatch.setattr(me, "_INNER_CV", "months")
+        seen: dict = {}
+        real = MacroEnetPlugin._fit_final_and_score
+
+        def spy(*a, **kw):
+            seen.update(kw)
+            return real(*a, **kw)
+
+        monkeypatch.setattr(MacroEnetPlugin, "_fit_final_and_score", staticmethod(spy))
+        res = _run(_params(use_macro=False))
+        assert res["cv_metrics"]["enet"]["n_folds"] > 0, "months の CV で fold が1つも立たなかった"
+        assert res["cv_diagnostics"]["inner_cv"] == "months"
+        assert seen["inner_cv"] == "months"
+        assert seen["train_groups"] and all(g > 0 for g in seen["train_groups"])
 
 
 # ── 4. execute スモーク ───────────────────────────────────────────────────────
@@ -324,7 +460,7 @@ class TestBreakdown:
 
     def test_macro_columns_fold_into_one_row_and_zero_coefs_dropped(self):
         """マクロ列は「マクロ環境（全社共通）」1行へ合算し、係数 0 の列は内訳に並べない。"""
-        def _fake_fit(all_samples, current_rows, l1_ratios, return_breakdown=False):
+        def _fake_fit(all_samples, current_rows, l1_ratios, return_breakdown=False, **_inner_cv):
             n, k = len(current_rows), len(current_rows[0])
             contrib = np.random.default_rng(1).normal(size=(n, k))
             coefs = [1.0] * k

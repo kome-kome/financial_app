@@ -242,7 +242,7 @@ def average_residuals(runs: list[dict]) -> dict:
 
 def run_seeds(name: str, samples_by_ym: dict, meta_by_ym: dict, ids_by_ym: dict,
               feat_names: list, pca: int, *, seeds: int, return_parts: bool = False,
-              return_seed_parts: bool = False) -> dict:
+              return_seed_parts: bool = False, opts: dict | None = None) -> dict:
     """種を変えて `seeds` 回回し、行ごとに予測を平均してから指標を出す（#955）。
 
     1 回だけの M-2 は、種（subsample の抜き方）だけで rank-IC が ±0.005〜0.01 動き、条件の差と
@@ -255,13 +255,17 @@ def run_seeds(name: str, samples_by_ym: dict, meta_by_ym: dict, ids_by_ym: dict,
     `out["seeds"]` の幅が変換前の μ̂ のものなので、条件ごとの幅を作り直すのにこれが要る。
 
     `seeds <= 1` か、種の効かない候補（`SEEDED_CANDIDATES` の外）は `run_one` と同じ。
+
+    `opts` は候補の既定への上書きで、`run_one` へそのまま渡す（種の上書きはその上に重ねる）。
+    `momentum_gate --inner-cv` が M-6 の内側 CV の区切り方を差し替えるために使う（#971）。
+    既定 None＝既存の呼び出しと同一。
     """
     if seeds <= 1 or name not in SEEDED_CANDIDATES:
         return run_one(name, samples_by_ym, meta_by_ym, ids_by_ym, feat_names, pca,
-                       return_parts=return_parts)
+                       opts=opts, return_parts=return_parts)
     t0 = time.time()
     runs = [run_one(name, samples_by_ym, meta_by_ym, ids_by_ym, feat_names, pca,
-                    opts={"random_state": SEED_BASE + k}, return_parts=True)
+                    opts={**(opts or {}), "random_state": SEED_BASE + k}, return_parts=True)
             for k in range(seeds)]
     failed = next((r for r in runs if r.get("error")), None)
     if failed is not None:
