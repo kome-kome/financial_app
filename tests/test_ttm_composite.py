@@ -127,6 +127,25 @@ class TestCompose:
         assert all(v[col] is None for col in debt)
         assert not any(key.startswith("bs:") for key in carried)
 
+    def test_carried_columns_are_the_ones_the_rule_keeps(self):
+        """規則（翌年の通期に値がある割合 85% 以上・分母 30 組以上）を満たした 4 列だけ（#960）。
+        率は ADR-0051 実装2 の 2026-10-16 の追記。列を足すなら先に同じ数え方で測る。"""
+        assert T.CARRY_FORWARD_BS_COLUMNS == {
+            "bs_investment_securities", "bs_buildings", "bs_machinery", "bs_investments_other_assets"}
+
+    def test_columns_without_evidence_are_not_carried_from_annual(self):
+        """売上債権 82.2%・棚卸資産 78.6%・仕入債務 75.4% などは「書き省き」と言い切れない（#960）。"""
+        dropped = {"bs_receivables": 100.0, "bs_inventory": 80.0, "bs_payables": 60.0,
+                   "bs_intangible_assets": 40.0, "bs_ppe_total": 500.0,
+                   "bs_noncurrent_liabilities": 300.0, "bs_current_liabilities": 200.0,
+                   "bs_noncurrent_assets": 900.0, "bs_paid_in_capital": 50.0,
+                   "bs_retained_earnings": 400.0}
+        a, p, c = materials(annual_prev={"values": dropped})
+        carried: T.Counter = T.Counter()
+        v = T.compose_values(a, p, c, columns=COLUMNS + tuple(dropped), carried=carried)
+        assert all(v[col] is None for col in dropped)
+        assert not any(key.startswith("bs:") for key in carried)
+
     def test_market_columns_are_not_composed(self):
         a, p, c = materials()
         v = T.compose_values(a, p, c, columns=COLUMNS)
