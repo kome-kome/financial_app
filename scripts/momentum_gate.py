@@ -2422,6 +2422,10 @@ def main() -> None:
         print("[note] rank-IC is within the group. bias = mean(pred rank pct - realized rank pct) "
               "of the group in the whole cross-section (+ = placed higher than realized).",
               flush=True)
+        # 会計基準の群の bias は規模の交絡だった（#951・ADR-0050 の 2026-10-16 追記）。同じ数字が毎回出るので隣に書く。
+        print("[note] group bias is NOT adjusted for size or sector. On the drop side the std:IFRS "
+              "bias vanished within market-cap deciles: IFRS firms cluster in the largest decile, "
+              "which the models under-rank (#951, #957).", flush=True)
         group_labels: dict[tuple, dict] = {}
         for cond in conds:
             for model in models:
