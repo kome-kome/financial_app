@@ -180,8 +180,15 @@ class TestGateWiring:
     def test_risk_axis_rebuilds_the_seed_spread_per_condition(self):
         """リスク軸の `[seeds]` は条件の U で測る（#962）。変換前の μ̂ の幅を写すと全条件で同じ値になる。"""
         src = inspect.getsource(momentum_gate.main)
-        assert 'return_seed_parts=(mode == "risk_axis")' in src
+        assert "return_seed_parts=(mode in SEED_RESCORED_MODES)" in src
+        assert "risk_axis" in momentum_gate.SEED_RESCORED_MODES
         assert 'risk_axis_seeds(out["seeds"], seed_parts, risk_maps[cond]' in src
+
+    def test_size_neutral_rebuilds_the_seed_spread_too(self):
+        """規模の中立化（#970）も CV を1回だけ回す後処理のモードなので、種の幅を条件の変換で測り直す。"""
+        src = inspect.getsource(momentum_gate.main)
+        assert "size_neutral" in momentum_gate.SEED_RESCORED_MODES
+        assert 'lambda r, mt: size_neutralize(r, mt, logcap)[:2], "size_neutral")' in src
 
     def test_seed_spread_line(self):
         line = momentum_gate.seed_spread_line({
@@ -197,6 +204,12 @@ class TestGateWiring:
             "n": 2, "rank_ic_by_seed": [0.1, 0.2], "short_side_spread_by_seed": [0.0, 0.1],
             "scored_on": "U"})
         assert line.endswith("(scored on U per seed)")
+
+    def test_seed_spread_line_names_the_size_neutral_scoring(self):
+        line = momentum_gate.seed_spread_line({
+            "n": 2, "rank_ic_by_seed": [0.1, 0.2], "short_side_spread_by_seed": [0.0, 0.1],
+            "scored_on": "size_neutral"})
+        assert line.endswith("(scored on size_neutral per seed)")
 
 
 # ── リスク軸の条件ごとの種の幅（#962）──────────────────────────────────────────
@@ -231,3 +244,15 @@ class TestRiskAxisSeeds:
     def test_mu_only_is_the_untransformed_prediction(self):
         got = momentum_gate.risk_axis_seeds({"n": 2}, self._seed_parts(), {}, 1.0, standardize=False)
         assert got["rank_ic_by_seed"] == [3.0, 8.0]
+
+    def test_any_transform_rescores_each_seed(self):
+        """共通の測り直し（#970）: 渡した変換を種ごとに当て、変換の名前を残す。"""
+        def double(resid, meta):
+            return {ym: [(2 * yh, y) for yh, y in pairs] for ym, pairs in resid.items()}, meta
+
+        base = {"n": 2, "rank_ic_by_seed": [9.9, 9.9]}
+        got = momentum_gate.rescore_seeds(base, self._seed_parts(), double, "doubled")
+        assert got["rank_ic_by_seed"] == [6.0, 16.0]
+        assert got["short_side_spread_by_seed"] == [2.0, 6.0]
+        assert got["scored_on"] == "doubled"
+        assert base["rank_ic_by_seed"] == [9.9, 9.9]

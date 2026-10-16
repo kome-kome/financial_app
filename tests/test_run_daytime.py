@@ -583,6 +583,39 @@ class TestInnerCvGateMeasuresM6:
         assert rd.JOBS[self.KEY].parallel_sensitive is True
 
 
+class TestSizeNeutralGateMeasuresM2AndM6:
+    """規模の中立化のジョブ（#970・#957）は M-2 / M-6 を、間引かずに、予測そのまま（raw）を分母に測る。
+
+    事前登録（ADR-0050 の 2026-10-17・その2 追記）は「M-2 / M-6・raw / size_neutral・4検定・α 0.0125」。
+    """
+
+    KEY = "gate:size-neutral"
+
+    def test_the_job_runs_the_size_neutral_axis_with_the_default_models(self):
+        from scripts.momentum_gate import SIZE_NEUTRAL_MODELS
+
+        argv = rd.JOBS[self.KEY].argv
+        assert "--size-neutral" in argv
+        assert "--models" not in argv
+        assert SIZE_NEUTRAL_MODELS == ["xgb_m2", "elasticnet"]
+
+    def test_the_preregistered_base_and_tests(self):
+        from scripts.momentum_gate import (
+            SIZE_NEUTRAL_MODELS, base_of, bonferroni_alpha, build_conditions)
+
+        conds = build_conditions(size_neutral=True, models=SIZE_NEUTRAL_MODELS)
+        assert base_of(conds) == "raw"                       # 本番の構成（予測そのまま）
+        assert bonferroni_alpha(len(SIZE_NEUTRAL_MODELS), len(conds)) == pytest.approx(0.0125)
+
+    def test_the_job_measures_at_full_resolution(self):
+        argv = rd.JOBS[self.KEY].argv
+        assert "--smoke" not in argv
+        assert argv[argv.index("--stride") + 1] == "1"
+
+    def test_the_result_changes_with_background_work(self):
+        assert rd.JOBS[self.KEY].parallel_sensitive is True
+
+
 class TestFinFillGateMeasuresM2AndM6:
     """空欄を 0 で埋めるジョブ（#950）は M-2 / M-6 を、間引かずに、本番（drop）を分母に測る。"""
 

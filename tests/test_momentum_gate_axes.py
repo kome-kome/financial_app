@@ -100,6 +100,18 @@ class TestModesAreMutuallyExclusive:
         (dict(fin_nan=True, inner_cv=True)),
         (dict(de_exclude=True, inner_cv=True)),
         (dict(fin_fill=True, inner_cv=True)),
+        # 規模の中立化のモード（#970）も予測の後処理だけだが、軸を2つ振ると分離できない点は同じ。
+        (dict(windows=[3], size_neutral=True)),
+        (dict(macro=True, size_neutral=True)),
+        (dict(interactions=True, size_neutral=True)),
+        (dict(max_features=[5], size_neutral=True)),
+        (dict(fin_rows=True, size_neutral=True)),
+        (dict(demean_target=True, size_neutral=True)),
+        (dict(risk_axis=True, size_neutral=True)),
+        (dict(fin_nan=True, size_neutral=True)),
+        (dict(de_exclude=True, size_neutral=True)),
+        (dict(fin_fill=True, size_neutral=True)),
+        (dict(inner_cv=True, size_neutral=True)),
     ]
 
     @pytest.mark.parametrize("kwargs", PAIRS)
@@ -684,6 +696,7 @@ class TestOutputNamesTheModeThatWasMeasured:
         (dict(de_exclude=True), "de_exclude"),
         (dict(fin_fill=True), "fin_fill"),
         (dict(inner_cv=True), "inner_cv"),
+        (dict(size_neutral=True), "size_neutral"),
     ])
     def test_mode_follows_the_flag(self, kwargs, want):
         assert mode_of(**kwargs) == want
@@ -691,7 +704,7 @@ class TestOutputNamesTheModeThatWasMeasured:
     def test_every_mode_has_a_file_suffix(self):
         assert set(MODE_SUFFIX) == {"default", "windows", "macro", "interactions", "max_features",
                                     "fin_rows", "demean_target", "risk_axis", "fin_nan",
-                                    "de_exclude", "fin_fill", "inner_cv"}
+                                    "de_exclude", "fin_fill", "inner_cv", "size_neutral"}
 
     def test_demean_mode_writes_its_own_file(self):
         """既定の `momentum_gate.json` を上書きしない（どの軸の結果かがファイル名で分かる）。"""
@@ -715,6 +728,8 @@ class TestOutputNamesTheModeThatWasMeasured:
          "FIN NAN AXIS [common domain = complete-financials rows only; read raw for blank rows]"),
         ("de_exclude", 2, "DE EXCLUDE AXIS"),
         ("inner_cv", 2, "INNER CV AXIS [M-6 only; same panel on both sides]"),
+        ("size_neutral", 2,
+         "SIZE NEUTRAL AXIS [same CV; rows without market cap dropped from both sides]"),
     ])
     def test_new_modes_do_not_borrow_the_momentum_wording(self, mode, n_conds, head):
         for passed, regressed in (([], []), (["x"], []), ([], ["y"])):
