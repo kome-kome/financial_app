@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import sys
+from collections import Counter
 from datetime import date
 from pathlib import Path
 
@@ -190,6 +191,58 @@ class TestRejectBasis:
         assert reason(basis_prev=T.Basis("Consolidated", "JP"),
                       basis_cur=T.Basis("Consolidated", "JP")) is None
 
+
+def stds(annual_prev, h1_prev, h1_cur):
+    """材料 3 つの `accounting_standard` を上書きする `materials` の引数。"""
+    return dict(annual_prev={"accounting_standard": annual_prev},
+                h1_prev={"accounting_standard": h1_prev},
+                h1_cur={"accounting_standard": h1_cur})
+
+
+class TestRejectAccountingStandard:
+    """材料 3 つの `financial_records.accounting_standard` を比べる（#966）。
+
+    `Basis`（開示の基準）は前期の通期と今期 H1 が両方そろうときだけ比べ、前期 H1 を見ない。
+    食い違いの最多の形は「前期の通期で IFRS へ移ったが前期 H1 は日本基準」で、`Basis` では捕まらない。
+    """
+
+    def test_annual_only_differs_without_any_disclosure(self):
+        assert reason(**stds("JGAAP", "IFRS", "IFRS")) == "standard_change"
+
+    def test_prev_half_only_differs_even_when_the_disclosures_agree(self):
+        assert reason(basis_prev=T.Basis("Consolidated", "IFRS"),
+                      basis_cur=T.Basis("Consolidated", "IFRS"),
+                      **stds("IFRS", "JGAAP", "IFRS")) == "standard_change"
+
+    @pytest.mark.parametrize("shape", [("JGAAP", "JGAAP", "IFRS"), ("US-GAAP", "US-GAAP", "IFRS")])
+    def test_current_half_only_differs(self, shape):
+        assert reason(**stds(*shape)) == "standard_change"
+
+    def test_same_standard_is_fine(self):
+        assert reason(**stds("IFRS", "IFRS", "IFRS")) is None
+
+    def test_current_annual_is_not_a_material(self):
+        """今期の通期は合成の材料ではない＝基準が違っても弾かない（比べると材料がそろった行まで弾く）。"""
+        a, p, c = materials(**stds("JGAAP", "JGAAP", "JGAAP"))
+        annual_cur = row("annual", 2026, "2026-03-31")._replace(accounting_standard="IFRS")
+        assert T.reject_reason(a, p, c, annual_cur=annual_cur, windows=[],
+                               basis_prev=None, basis_cur=None, split_gate_ratio=1.4) is None
+
+    @pytest.mark.parametrize("shape", [(None, "JGAAP", "IFRS"), ("JGAAP", None, "IFRS"),
+                                       ("JGAAP", "IFRS", None)])
+    def test_a_blank_leaves_the_decision_to_the_disclosures(self, shape):
+        """空欄は「分からない」。列では弾かず、開示の判定に従う（そろえば比べ、無ければ作る）。"""
+        assert reason(**stds(*shape)) is None
+        assert reason(basis_prev=T.Basis("Consolidated", "JP"),
+                      basis_cur=T.Basis("Consolidated", "IFRS"),
+                      **stds(*shape)) == "standard_change"
+
+    def test_structure_is_still_checked_first(self):
+        """判定の順序（構造 → 基準 → 値）は変えない。提出が遅い行は基準が違っても late_filing。"""
+        assert reason(h1_cur={"filing_date": date(2025, 12, 1)},
+                      **{k: v for k, v in stds("IFRS", "JGAAP", "IFRS").items() if k != "h1_cur"}
+                      ) == "late_filing"
+
     def test_doc_type_parsing(self):
         assert T.parse_doc_type("FYFinancialStatements_Consolidated_JP") == \
             T.Basis("Consolidated", "JP")
@@ -343,6 +396,53 @@ class TestBuildRows:
         a, p, c = materials()
         out, stats = self._build([a, p, c], price_for=lambda *_: None)
         assert len(out) == 1 and stats["notes"]["no_price"] == 1
+
+    # 社ごとの 5 行の会計基準（A2024 / H2024 / A2025 / H2025 / H2026）。TTM の候補は 3 つ:
+    # 2024（前期の通期が無い）・2025（A2024, H2024, H2025）・2026（A2025, H2025, H2026）。
+    STANDARDS = {
+        "E00001": ("IFRS", "IFRS", "IFRS", "IFRS", "IFRS"),          # そろう → 2 行とも作る
+        "E00002": ("JGAAP", "JGAAP", "IFRS", "JGAAP", "IFRS"),       # 前期の通期で IFRS へ（前期 H1 だけ違う）
+        "E00003": ("JGAAP", "JGAAP", "JGAAP", "JGAAP", "IFRS"),      # 今期 H1 で IFRS へ（前期の通期も違う）
+        "E00004": ("JGAAP", "JGAAP", "JGAAP", None, "JGAAP"),        # 空欄を含む → 列では判定しない
+        "E00005": ("JGAAP", "JGAAP", "IFRS", "JGAAP", "IFRS"),       # E00002 と同じ形だが 2026 は提出が遅い
+    }
+
+    def _company(self, ec: str) -> list:
+        s = self.STANDARDS[ec]
+        late = "2025-12-01" if ec == "E00005" else "2025-11-14"
+        rows = [row("annual", 2024, "2024-03-31"), row("H1", 2024, "2023-09-30", filing="2023-11-14"),
+                row("annual", 2025, "2025-03-31"), row("H1", 2025, "2024-09-30", filing="2024-11-14"),
+                row("H1", 2026, "2025-09-30", filing=late)]
+        return [r._replace(edinet_code=ec, accounting_standard=std) for r, std in zip(rows, s)]
+
+    def test_only_the_mismatched_companies_lose_their_rows(self):
+        """食い違う社の行だけが作られずに standard_change へ数えられ、他の社の行と他の理由の件数は変わらない。"""
+        rows = [r for ec in self.STANDARDS for r in self._company(ec)]
+        out, stats = self._build(rows)
+        # 修正前の挙動＝列が空（開示も無いので基準では何も弾かない）
+        old_out, old_stats = self._build([r._replace(accounting_standard=None) for r in rows])
+
+        made = {(r["edinet_code"], r["year"]) for r in out}
+        old_made = {(r["edinet_code"], r["year"]) for r in old_out}
+        assert old_made - made == {("E00002", 2026), ("E00003", 2026)}
+        assert made <= old_made
+        assert ("E00004", 2025) in made and ("E00004", 2026) in made   # 空欄は弾かない
+
+        new_rej, old_rej = Counter(stats["rejected"]), Counter(old_stats["rejected"])
+        assert new_rej["standard_change"] - old_rej["standard_change"] == 2
+        del new_rej["standard_change"], old_rej["standard_change"]
+        assert new_rej == old_rej                    # 他の理由（E00005 の late_filing を含む）は不変
+        assert old_rej["late_filing"] == 1
+        # 候補の総数（作った行 + 弾いた理由）は前後で同じ＝弾く段が変わっただけ
+        assert len(out) + sum(stats["rejected"].values()) == \
+            len(old_out) + sum(old_stats["rejected"].values())
+        # 空欄で判定できなかった候補は注記に数える（E00004 の 2025・2026）
+        assert stats["notes"]["accounting_standard_blank"] == 2
+
+    def test_the_blank_note_is_absent_when_every_standard_is_known(self):
+        out, stats = self._build(self._company("E00001"))
+        assert len(out) == 2
+        assert "accounting_standard_blank" not in stats["notes"]
 
 
 class TestModuleBoundary:
