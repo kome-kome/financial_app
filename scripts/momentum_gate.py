@@ -341,6 +341,18 @@ blank_groups`（`OOF_CSV_COLUMNS`）で、`standard` は会計基準、`blank_gr
 （`fin_fill_reach_problems`）。日中キューの名前は `gate:fin-fill`。PER → 益利回りの置き換えは入れていない
 （`per` は分割補正係数 F を掛けた値で `stock_price` は補正しない列なので、赤字の行の E/P を作ると基準が食い違う）。
 
+## M-6 の内側 CV の区切り方を比べるモード（`--inner-cv`・#971）
+
+M-6 は α・l1_ratio を学習 fold の中の時系列分割 CV で選ぶ。本番（`rows`・分母）は行の番号で区切るので
+区切りが月の途中に落ち、月内の並び（社の順）だけで最終モデルの α が 165 倍動く（#964）。`months` は
+月の境界でだけ区切る（`model_candidates.month_block_splits`）。**パネルは2条件で同一**で、パネルの鍵から
+この軸を外して1枚を共有する（`panel_cond`）＝母集団は動かず、共通域は全行になる。差し替えるのは M-6 の
+CV へ渡す候補の opts だけ（`cv_opts`）。測るのは M-6 だけで（M-2・M-1 にこの軸は無い）、1モデル × 2指標
+＝2検定・α 0.025。CV の後、各条件の診断値の `inner_cv` が指定どおりかを確かめ、違えば止める
+（`inner_cv_reach_problems`。届かないまま走ると両条件が同じ CV になり「差なし」だけが残る）。日中キューの
+名前は `gate:inner-cv`（**積むのは人**）。分母は M-6 本体の `macro_enet._INNER_CV` と一致することを
+テストが縛る——#964 で本番を切り替えたら、ここの分母も見直す。
+
 ## M-2 は種を変えて平均する（`--seeds`・#955）
 
 M-2（XGBoost）は `random_state` を固定していても、種が違えば subsample の抜き方が変わり、同じ
@@ -392,6 +404,7 @@ from plugins.macro_snapshots import (  # noqa: E402
     preload_macro,
     use_fin_rows,
 )
+from plugins.model_candidates import _EN_INNER_CV_CHOICES  # noqa: E402
 from plugins.utils import coerce_params  # noqa: E402
 from scripts._cache import cached, set_refresh  # noqa: E402
 from scripts.candidate_bakeoff import (  # noqa: E402
@@ -446,6 +459,10 @@ class Cond(NamedTuple):
     `fin_fill`（#950）は「無い」と確かめた空欄（無配の配当利回り・R&D の無い社の R&D 集約度）を 0 で
     埋めるか。既定 False は本番の構成（空欄の行を捨てる）で、既存モードの測定条件はやはり動かない。
     差し替えは読み込んだ財務の行だけで行い、VIEW は変えない（`fill_fin_blanks`）。
+
+    `inner_cv`（#971）は M-6 の α・l1_ratio を選ぶ内側 CV の区切り方。既定 `rows` は本番の構成で、
+    既存モードの測定条件はやはり動かない。**この欄だけはパネルを動かさない**——パネルの鍵からは外し
+    （`panel_cond`）、M-6 の CV へ渡す opts にだけ効く（`cv_opts`）。
     """
     use_momentum: bool
     momentum_window: int
@@ -457,6 +474,7 @@ class Cond(NamedTuple):
     fin_nan_ok: bool = False
     de_null_industries: tuple[str, ...] = ()
     fin_fill: bool = False
+    inner_cv: str = "rows"
 
 
 CONDS: dict[str, bool] = {"off": False, "on": True}
@@ -543,6 +561,14 @@ FIN_FILL_BASE_COND = "drop"
 FIN_FILL_MODELS = ["xgb_m2", "elasticnet"]
 # 埋める判定に使う列（VIEW の生の値）。財務の行（`_FIN_FIELDS`）には入っていないので別に引く。
 FIN_FILL_SOURCE_FIELDS = ("dps", "stock_price", "pl_rd_expenses", "pl_revenue")
+
+# M-6 の内側 CV の区切り方を比べるモード（`--inner-cv`・#971）。**基準は本番の構成（行で区切る `rows`）**。
+# 条件名は候補実装の選択肢そのもの（書き写さない）。2条件のパネルは同一で、M-6 の CV へ渡す候補の opts
+# だけを差し替える。分母が M-6 本体の `macro_enet._INNER_CV` と一致することはテストが縛る（#964 で本番を
+# 切り替えたら見直す）。M-2・M-1 にこの軸は無いので測らない（同じ CV を2回回すだけになる）。
+INNER_CV_CONDS: tuple[str, ...] = _EN_INNER_CV_CHOICES
+INNER_CV_BASE_COND = "rows"
+INNER_CV_MODELS = ["elasticnet"]
 # 月平均除去が届いたかの許容（`demean_reach_problems`）。素の側は「全部0」だけを弾き、除去した
 # 側は浮動小数の丸めを十分に上回る幅で 0 とみなす（どちらの値も実行時に出力と JSON へ出る）。
 DEMEAN_RAW_MIN = 1e-12
@@ -634,10 +660,11 @@ def build_conditions(windows: list[int] | None = None,
                     models: list[str] | None = None,
                     fin_nan: bool = False,
                     de_exclude: bool = False,
-                    fin_fill: bool = False) -> dict[str, Cond]:
+                    fin_fill: bool = False,
+                    inner_cv: bool = False) -> dict[str, Cond]:
     """条件集合 {名前: Cond} を作る。
 
-    11のモードがある。**同時に使えるのは1つだけ**（下記）:
+    12のモードがある。**同時に使えるのは1つだけ**（下記）:
 
       既定           … ADR-0045 の昇格ゲートと完全に同じ2条件（`off` / `on`・マクロは ON のまま）
       `windows`      … モメンタム無し ＋ 各窓（#592・ADR-0050）
@@ -650,6 +677,10 @@ def build_conditions(windows: list[int] | None = None,
       `fin_nan`      … 財務の空欄の行を捨てる ＋ NaN で通す（#938・#916）。他の軸は本番構成に固定
       `de_exclude`   … 2業種の D/E を残す ＋ 空欄にする（#940・#927）。他の軸は本番構成に固定
       `fin_fill`     … 財務の空欄の行を捨てる ＋ 「無い」空欄を 0 で埋める（#950）。他の軸は本番構成に固定
+      `inner_cv`     … M-6 の内側 CV を行で区切る ＋ 月で区切る（#971）。**パネルは2条件で同一**・M-6 だけ
+
+    `inner_cv` の `Cond` は2条件で違うが、違うのは CV へ渡す opts だけで、パネルの鍵からは外す
+    （`panel_cond`）。`models` を渡したときは M-6 だけであることを確かめる（M-2・M-1 にこの軸は無い）。
 
     **`risk_axis` だけは `Cond` を動かさない。** R はモデルの学習に一切入らず、CV が出した
     μ̂ の順位を作り直すときだけ使うので、パネル構築のパラメータではない。3条件とも同じ
@@ -675,7 +706,7 @@ def build_conditions(windows: list[int] | None = None,
              ("--interactions", interactions), ("--max-features", bool(max_features)),
              ("--fin-rows", fin_rows), ("--demean-target", demean_target),
              ("--risk-axis", risk_axis), ("--fin-nan", fin_nan), ("--de-exclude", de_exclude),
-             ("--fin-fill", fin_fill)]
+             ("--fin-fill", fin_fill), ("--inner-cv", inner_cv)]
     picked = [name for name, on in modes if on]
     if len(picked) > 1:
         raise ValueError(
@@ -731,6 +762,15 @@ def build_conditions(windows: list[int] | None = None,
         # 無配・R&D の無い社を外さずに 0 として通したら」を問う。
         return {name: Cond(False, MOM_WINDOW, fin_fill=flag)
                 for name, flag in FIN_FILL_CONDS.items()}
+    if inner_cv:
+        # M-6 の内側 CV の区切り方だけを差し替える。他の軸はすべて本番構成＝「本番の M-6 で α・l1_ratio を
+        # 月の境界で区切った CV で選んだら」を問う。パネルは2条件で同一（`panel_cond`）。
+        others = [m for m in (models or []) if m not in INNER_CV_MODELS]
+        if others:
+            raise ValueError(
+                f"--inner-cv は M-6（{', '.join(INNER_CV_MODELS)}）だけを測る。{', '.join(others)} に"
+                "この軸は無く、同じ CV を2回回すだけになる（#971）")
+        return {name: Cond(False, MOM_WINDOW, inner_cv=name) for name in INNER_CV_CONDS}
     if not windows:
         return {name: Cond(use_mom, MOM_WINDOW) for name, use_mom in CONDS.items()}
     ws = sorted({int(w) for w in windows})
@@ -756,12 +796,13 @@ def base_of(conds: dict[str, Cond], default_max_features: int | None = None) -> 
     `drop` 側は `nan` 側に含まれる＝分母に置いた側が「母集団の狭い側」になる点に注意（共通域で揃える）。
     D/E の業種除外モードの分母も**本番の構成**（`keep`）。こちらは本番が母集団の広い側。
     空欄を 0 で埋めるモードの分母も**本番の構成**（`drop`）。`--fin-nan` と同じく分母が母集団の狭い側。
+    内側 CV のモードの分母も**本番の構成**（`rows`）。この軸はパネルを動かさない。
     リスク軸モードの分母も**本番の構成**だが、モデルごとに違う（M-1 は `r2`・M-6 は `mu_only`）ので
     ここでは決めない。`main` はリスク軸モードでは `risk_base_cond` を使う（#808）。
     """
     for cand in (BASE_COND, MACRO_BASE_COND, INTERACTION_BASE_COND, FIN_ROWS_BASE_COND,
                  DEMEAN_BASE_COND, RISK_BASE_COND, FIN_NAN_BASE_COND, DE_EXCLUDE_BASE_COND,
-                 FIN_FILL_BASE_COND):
+                 FIN_FILL_BASE_COND, INNER_CV_BASE_COND):
         if cand in conds:
             return cand
     prod = maxfeat_cond_name(default_max_features) if default_max_features else None
@@ -790,14 +831,15 @@ MODE_SUFFIX: dict[str, str] = {"default": "", "windows": "", "macro": "_macro",
                                "interactions": "_interactions", "max_features": "_maxfeat",
                                "fin_rows": "_fin_rows", "demean_target": "_demean",
                                "risk_axis": "_risk_axis", "fin_nan": "_fin_nan",
-                               "de_exclude": "_de_exclude", "fin_fill": "_fin_fill"}
+                               "de_exclude": "_de_exclude", "fin_fill": "_fin_fill",
+                               "inner_cv": "_inner_cv"}
 
 
 def mode_of(windows: list[int] | None = None, macro: bool = False,
             interactions: bool = False, max_features: list[int] | None = None,
             fin_rows: bool = False, demean_target: bool = False,
             risk_axis: bool = False, fin_nan: bool = False, de_exclude: bool = False,
-            fin_fill: bool = False) -> str:
+            fin_fill: bool = False, inner_cv: bool = False) -> str:
     """測定モードの名前を返す（`build_conditions` と同じ引数から1箇所で導出する）。
 
     **#615 で足した2モードは、ここを持たないまま別モードの名前で出力されていた**——
@@ -824,6 +866,8 @@ def mode_of(windows: list[int] | None = None, macro: bool = False,
         return "de_exclude"
     if fin_fill:
         return "fin_fill"
+    if inner_cv:
+        return "inner_cv"
     return "windows" if windows else "default"
 
 
@@ -854,6 +898,9 @@ _AXIS_VERDICTS: dict[str, tuple[str, str]] = {
     # 共通域は埋める前から財務が揃っていた行だけ（drop 側 ⊂ fill 側）。広がった社の効果は raw で読む（#950）。
     "fin_fill": ("FIN FILL AXIS [common domain = rows complete before filling; read raw for filled rows]",
                  "filling no-dividend / no-R&D blanks with 0 did not beat dropping those rows"),
+    # パネルは2条件で同一（母集団は動かない）。差は M-6 の α・l1_ratio の選び方だけ（#971）。
+    "inner_cv": ("INNER CV AXIS [M-6 only; same panel on both sides]",
+                 "splitting the inner CV at month boundaries did not beat splitting by row"),
     # 分母はモデルで違う（M-1 は r2・M-6 は mu_only・#808）ので名前を差し込む。
     "risk_axis": ("RISK AXIS",
                   "no risk condition beat the production ordering ({base})"),
@@ -878,7 +925,7 @@ def verdict_text(mode: str, n_conds: int, passed: list[str], regressed: list[str
     （`production`・条件に無ければ None）の両方を出す（#816）。
     """
     if (mode in ("macro", "interactions", "max_features", "fin_rows", "demean_target",
-                 "risk_axis", "fin_nan", "de_exclude", "fin_fill")
+                 "risk_axis", "fin_nan", "de_exclude", "fin_fill", "inner_cv")
             or (mode == "windows" and n_conds > 2)):
         head, none = _AXIS_VERDICTS[mode]
         if mode == "macro" and base == MACRO_ON_COND:
@@ -1595,6 +1642,42 @@ def fin_fill_reach_problems(filled: dict[str, int], samples: dict[str, int],
     return problems
 
 
+# ── M-6 の内側 CV の区切り方（`--inner-cv`・#971）─────────────────────────────
+
+def panel_cond(c: Cond) -> Cond:
+    """パネルを作る鍵（#971）。CV だけに効く欄（`inner_cv`）を本番の値へ戻す。
+
+    `inner_cv` の2条件は同じパネルを1枚だけ作って共有する——別々に作ると、構築の揺れが区切り方の差に
+    混ざる（`--risk-axis` が同じ `Cond` を共有して μ̂ を揃えるのと同じ理由）。他のモードでは
+    `inner_cv` は既定のままなので、鍵は `c` そのものと等しく、挙動は変わらない。
+    """
+    return c._replace(inner_cv=INNER_CV_BASE_COND)
+
+
+def cv_opts(c: Cond, model: str) -> dict | None:
+    """条件が M-6 の CV へ渡す候補の opts（#971）。本番の構成なら None＝既存の呼び出しと同一。"""
+    if c.inner_cv != INNER_CV_BASE_COND and MODEL_SPECS[model][1] == "elasticnet":
+        return {"inner_cv": c.inner_cv}
+    return None
+
+
+def inner_cv_reach_problems(diags: dict[str, dict], conds: dict[str, Cond]) -> list[str]:
+    """内側 CV の切り替えが CV まで届いていない理由を列挙する（#971）。空リストなら健全。
+
+    `diags` は {"条件|モデル": run の `diag`}。候補は `rows` 以外のときだけ診断値に `inner_cv` を積む
+    （`make_elasticnet_fit_predict`）ので、積まれていなければ `rows` で回ったことになる。opts が
+    候補まで届かないと両条件が同じ CV になり、エラーを出さずに「差なし」だけが残る。
+    """
+    problems = []
+    for key, diag in diags.items():
+        cond = key.split("|", 1)[0]
+        want = conds[cond].inner_cv
+        got = (diag or {}).get("inner_cv", INNER_CV_BASE_COND)
+        if got != want:
+            problems.append(f"{key}: 内側 CV が {got} で回った（指定は {want}）")
+    return problems
+
+
 # ── リスク軸（`--risk-axis`・#709）─────────────────────────────────────────────
 
 def _month_end_bound(ym: str) -> str:
@@ -1919,6 +2002,10 @@ def main() -> None:
                     help="空欄を 0 で埋めるモード（無配の配当利回りと R&D の無い社の R&D 集約度を 0 にする "
                          f"fill と、空欄の行を捨てる drop を共通域で比べる・#950）。モデル既定は {','.join(FIN_FILL_MODELS)}。"
                          "株価が空欄の行は埋めない。VIEW は変えず、読み込んだ財務の行だけを差し替える。他モードと併用不可")
+    ap.add_argument("--inner-cv", dest="inner_cv", action="store_true",
+                    help="M-6 の内側 CV の区切り方のモード（α・l1_ratio を選ぶ CV を行で区切る rows＝本番と、"
+                         "月の境界で区切る months を共通域で比べる・#971）。パネルは2条件で同一。"
+                         f"モデルは {','.join(INNER_CV_MODELS)} だけ。他モードと併用不可")
     ap.add_argument("--smoke", action="store_true", help="サンプルを間引いた短時間確認")
     ap.add_argument("--stride", type=int, default=1, help="各月のサンプル間引き幅")
     ap.add_argument("--seeds", type=int, default=SEEDS_DEFAULT,
@@ -1956,6 +2043,8 @@ def main() -> None:
         default_models = DE_EXCLUDE_MODELS
     elif args.fin_fill:
         default_models = FIN_FILL_MODELS
+    elif args.inner_cv:
+        default_models = INNER_CV_MODELS
     else:
         default_models = MODELS
     models = ([m.strip() for m in args.models.split(",") if m.strip()]
@@ -1985,7 +2074,7 @@ def main() -> None:
                                  demean_target=args.demean_target,
                                  risk_axis=args.risk_axis, lambdas=lambdas, models=models,
                                  fin_nan=args.fin_nan, de_exclude=args.de_exclude,
-                                 fin_fill=args.fin_fill)
+                                 fin_fill=args.fin_fill, inner_cv=args.inner_cv)
     except ValueError as e:
         raise SystemExit(str(e))
     # 列数モードの分母は本番値（プラグイン既定）。**ここで数値を書き写さない**。
@@ -2034,7 +2123,8 @@ def main() -> None:
     mode = mode_of(windows, macro=args.macro, interactions=args.interactions,
                    max_features=max_features, fin_rows=args.fin_rows,
                    demean_target=args.demean_target, risk_axis=args.risk_axis,
-                   fin_nan=args.fin_nan, de_exclude=args.de_exclude, fin_fill=args.fin_fill)
+                   fin_nan=args.fin_nan, de_exclude=args.de_exclude, fin_fill=args.fin_fill,
+                   inner_cv=args.inner_cv)
     default_out = f"momentum_gate{MODE_SUFFIX[mode]}.json"
     if mode == "risk_axis" and models != RISK_MODELS:
         # M-1 と M-6 は分母が違い別々に回す（#808）。同じファイルへ書くと後の run が前の結果を消す。
@@ -2121,18 +2211,20 @@ def main() -> None:
                 print(f"[de_exclude] financial rows whose de_ratio was blanked: {n_null}", flush=True)
         built: dict[tuple, tuple] = {}
         for cond, c in conds.items():
+            # 鍵は CV だけに効く欄を外した `Cond`（#971）。内側 CV のモードは2条件で1枚を共有する。
+            pc = panel_cond(c)
             for kind in kinds:
-                if (c, kind) not in built:
+                if (pc, kind) not in built:
                     fin_src = (de_nulled[(c.fin_rows, c.de_null_industries)]
                                if c.de_null_industries else fins[c.fin_rows])
                     if c.fin_fill:
                         fin_src = filled_fins
-                    built[(c, kind)] = _build(
+                    built[(pc, kind)] = _build(
                         kind, args, prices_by_co, fin_src, companies,
                         macro_cache, c.use_momentum, c.momentum_window,
                         c.use_macro, c.build_interactions, c.max_features,
                         c.demean_target, fin_nan_ok=c.fin_nan_ok)
-                s, m, i, feats = built[(c, kind)]
+                s, m, i, feats = built[(pc, kind)]
                 panels[(cond, kind)] = (s, m, i, feats)
                 st = _panel_stats(s, i, feats)
                 # **選ばれた列名を残す**（#615）。M-1 は BIC が列を選ぶので、数だけでは
@@ -2151,6 +2243,7 @@ def main() -> None:
                       f"fin_blank={'nan' if c.fin_nan_ok else 'drop'} "
                       f"de_null_inds={len(c.de_null_industries)} "
                       f"fin_fill={'on' if c.fin_fill else 'off'} "
+                      f"inner_cv={c.inner_cv} "
                       f"months={st['months']} ({st['first_ym']}..{st['last_ym']}) "
                       f"samples={st['samples']} companies={st['companies']} "
                       f"features={st['n_features']} [{head}{more}]", flush=True)
@@ -2261,7 +2354,8 @@ def main() -> None:
                     # 種ごとの残差はリスク軸でだけ持つ（条件ごとの種の幅を作り直すため・#962）。
                     fresh = run_seeds(estimator, s, m, i, feats, pca=0, seeds=args.seeds,
                                       return_parts=True,
-                                      return_seed_parts=(mode == "risk_axis"))
+                                      return_seed_parts=(mode == "risk_axis"),
+                                      opts=cv_opts(conds[cond], model))
                     ran[memo] = (fresh, fresh.pop("_parts"), fresh.pop("_seed_parts", None))
                 out, part, seed_parts = ran[memo]
                 if mode == "risk_axis":
@@ -2289,6 +2383,16 @@ def main() -> None:
                       f"folds={out['n_folds']} ({out['elapsed_sec']}s)", flush=True)
                 if out.get("seeds"):
                     print("    " + seed_spread_line(out["seeds"]), flush=True)
+
+        # 内側 CV のモードでは、区切り方の切り替えが**CV まで届いたか**を確かめる（#971）。
+        # パネルは同一なので、届かないと両条件が同じ CV になり「差なし」だけが残る。
+        if mode == "inner_cv":
+            problems = inner_cv_reach_problems(
+                {key: out.get("diag") for key, out in results.items()}, conds)
+            if problems:
+                raise SystemExit("中止: 内側 CV の切り替えが CV に届いていません: " + " / ".join(problems))
+            print("[note] both sides share one panel; the only difference is how M-6 picks "
+                  "alpha / l1_ratio inside each training fold", flush=True)
     finally:
         db.close()
 
@@ -2328,13 +2432,20 @@ def main() -> None:
             if memo not in cran:
                 s, m, i, feats = cpanels[(cond, kind)]
                 fresh = run_seeds(estimator, s, m, i, feats, pca=0, seeds=args.seeds,
-                                  return_parts=True)
+                                  return_parts=True, opts=cv_opts(conds[cond], model))
                 cran[memo] = (fresh, fresh.pop("_parts"))
             out, part = cran[memo]
             cparts[f"{cond}|{model}"] = part
             cruns[f"{cond}|{model}"] = out
             if out.get("error"):
                 print(f"  {model}: ERROR {out['error']}", flush=True)
+    # 主判定が読む共通月の run でも、内側 CV の切り替えが届いたかを確かめる（#971・上と同じ）。
+    if mode == "inner_cv":
+        problems = inner_cv_reach_problems(
+            {key: out.get("diag") for key, out in cruns.items()}, conds)
+        if problems:
+            raise SystemExit("中止: 内側 CV の切り替えが CV に届いていません（共通月）: "
+                             + " / ".join(problems))
 
     print("\n=== common (ym,ec) restriction ===", flush=True)
     common_results: dict[str, dict] = {}
@@ -2519,7 +2630,8 @@ def main() -> None:
                               "demean_target": c.demean_target,
                               "fin_nan_ok": c.fin_nan_ok,
                               "de_null_industries": list(c.de_null_industries),
-                              "fin_fill": c.fin_fill}
+                              "fin_fill": c.fin_fill,
+                              "inner_cv": c.inner_cv}
                        for name, c in conds.items()},
         "mode": mode,
         "base_cond": base,

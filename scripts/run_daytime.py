@@ -323,6 +323,20 @@ JOBS: dict[str, Job] = {
         measured_min=40.0,
         parallel_sensitive=True,   # 他の gate と同じ理由（採否が CI の符号で決まる）
     ),
+    # M-6 の α・l1_ratio を選ぶ内側 CV を月の境界で区切るか（#964）を測る道具（#971）。
+    # **積むのは人**（#964 で読んで、本番の `macro_enet._INNER_CV` を切り替えるかを決める）。
+    "gate:inner-cv": Job(
+        name="gate_inner_cv",
+        argv=("{python}", "-m", "scripts.momentum_gate", "--inner-cv",
+              "--stride", "1", "--allow-full-pull", "--refresh-cache"),
+        why="M-6 の内側 CV を月の境界で区切る（months）か、行の番号で区切る（本番・rows）かを共通 (ym,ec) 域で"
+            "比べる（#971・#964）。パネルは2条件で同一で、母集団は動かない。対象は M-6 だけ・2検定・alpha 0.025。"
+            "切り替えが CV に届いていなければ非0で止まる。",
+        # 見積り。gate:macro-m6 の実測（78列の M-6 の CV 1回 157.4秒・全体 7.8分）から、78列の CV が
+        # 2条件 × 2段（全月・共通月）＝約10.5分＋読み込み約1.4分。実走ログの END 行で差し替える。
+        measured_min=12.0,
+        parallel_sensitive=True,   # 他の gate と同じ理由（採否が CI の符号で決まる）
+    ),
     # 証券業・その他金融業の D/E を比較から外すか（#927）を M-2 / M-6 で測る道具（#940）。
     # **積むのは人**（#926 のマージ後。新しい定義の D/E でないと測る意味がない）。
     "gate:de-exclude": Job(

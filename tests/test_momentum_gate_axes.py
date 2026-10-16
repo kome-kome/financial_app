@@ -29,11 +29,12 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from scripts import momentum_gate  # noqa: E402
 from scripts.momentum_gate import (  # noqa: E402
-    BASE_COND, CONDS, DEMEAN_BASE_COND, DEMEAN_CONDS, DEMEAN_MODELS, INTERACTION_BASE_COND,
-    INTERACTION_CONDS, INTERACTION_MODELS, MACRO_BASE_COND, MACRO_ON_COND, MAXFEAT_MODELS,
-    METRICS, MODE_SUFFIX, MOM_WINDOW, PANEL_CONFIG_KEYS, base_of, bonferroni_alpha,
-    build_conditions, demean_reach_problems, demean_target_by_month, max_abs_month_mean,
-    maxfeat_cond_name, mode_of, panel_config_mismatches, verdict_text,
+    BASE_COND, CONDS, DEMEAN_BASE_COND, DEMEAN_CONDS, DEMEAN_MODELS, INNER_CV_BASE_COND,
+    INNER_CV_CONDS, INNER_CV_MODELS, INTERACTION_BASE_COND, INTERACTION_CONDS,
+    INTERACTION_MODELS, MACRO_BASE_COND, MACRO_ON_COND, MAXFEAT_MODELS, METRICS, MODE_SUFFIX,
+    MOM_WINDOW, PANEL_CONFIG_KEYS, base_of, bonferroni_alpha, build_conditions, cv_opts,
+    demean_reach_problems, demean_target_by_month, inner_cv_reach_problems, max_abs_month_mean,
+    maxfeat_cond_name, mode_of, panel_cond, panel_config_mismatches, verdict_text,
 )
 
 
@@ -88,6 +89,17 @@ class TestModesAreMutuallyExclusive:
         (dict(demean_target=True, de_exclude=True)),
         (dict(risk_axis=True, de_exclude=True)),
         (dict(fin_nan=True, de_exclude=True)),
+        # M-6 の内側 CV のモード（#971）はパネルを動かさないが、軸を2つ振ると分離できない点は同じ。
+        (dict(windows=[3], inner_cv=True)),
+        (dict(macro=True, inner_cv=True)),
+        (dict(interactions=True, inner_cv=True)),
+        (dict(max_features=[5], inner_cv=True)),
+        (dict(fin_rows=True, inner_cv=True)),
+        (dict(demean_target=True, inner_cv=True)),
+        (dict(risk_axis=True, inner_cv=True)),
+        (dict(fin_nan=True, inner_cv=True)),
+        (dict(de_exclude=True, inner_cv=True)),
+        (dict(fin_fill=True, inner_cv=True)),
     ]
 
     @pytest.mark.parametrize("kwargs", PAIRS)
@@ -295,6 +307,79 @@ class TestDemeanMainWiring:
         assert "DEMEAN_MODELS" in src
 
 
+class TestInnerCvMode:
+    """M-6 の内側 CV の区切り方のモード（`--inner-cv`・#971）。
+
+    M-6 は α・l1_ratio を学習 fold の中の時系列分割 CV で選ぶ。本番（`rows`）は行の番号で区切るので、
+    月内の並びだけで最終モデルの α が 165 倍動く（#964）。この軸はパネルを動かさず、M-6 の CV へ渡す
+    候補の opts だけを差し替える。
+    """
+
+    def test_builds_both_sides_from_the_candidate_choices(self):
+        from plugins.model_candidates import _EN_INNER_CV_CHOICES
+
+        conds = build_conditions(inner_cv=True)
+        assert list(conds) == list(INNER_CV_CONDS) == list(_EN_INNER_CV_CHOICES) == ["rows", "months"]
+        assert {name: c.inner_cv for name, c in conds.items()} == {"rows": "rows", "months": "months"}
+
+    def test_other_axes_stay_at_the_production_shape(self):
+        """差し替えるのは区切り方だけ。他の軸が動くと2軸ぶんの差が混ざる。"""
+        rows, months = build_conditions(inner_cv=True).values()
+        assert rows == momentum_gate.Cond(False, MOM_WINDOW)
+        assert months._replace(inner_cv="rows") == rows
+
+    def test_both_sides_share_one_panel(self):
+        """パネルの鍵は2条件で同じ＝1枚を共有する（別々に作ると構築の揺れが区切り方の差に混ざる）。"""
+        conds = build_conditions(inner_cv=True)
+        assert len({panel_cond(c) for c in conds.values()}) == 1
+        assert len(set(conds.values())) == 2          # CV は条件ごとに回る（memo の鍵は別）
+
+    def test_baseline_is_the_production_scheme_of_m6(self):
+        """分母は M-6 本体の `_INNER_CV`。#964 で本番を切り替えたらここが落ちて、分母の見直しを促す。"""
+        import plugins.macro_enet as me
+
+        conds = build_conditions(inner_cv=True)
+        assert base_of(conds) == INNER_CV_BASE_COND == me._INNER_CV
+
+    def test_measures_m6_only(self):
+        assert INNER_CV_MODELS == ["elasticnet"]
+        build_conditions(inner_cv=True, models=["elasticnet"])
+        for models in (["xgb_m2"], ["elasticnet", "xgb_m2"], ["risk_return"]):
+            with pytest.raises(ValueError, match="M-6"):
+                build_conditions(inner_cv=True, models=models)
+
+    def test_alpha_is_two_tests(self):
+        conds = build_conditions(inner_cv=True)
+        assert bonferroni_alpha(len(INNER_CV_MODELS), len(conds)) == pytest.approx(0.025)
+
+    def test_only_the_m6_months_side_gets_options(self):
+        conds = build_conditions(inner_cv=True)
+        assert cv_opts(conds["rows"], "elasticnet") is None
+        assert cv_opts(conds["months"], "elasticnet") == {"inner_cv": "months"}
+        assert cv_opts(conds["months"], "xgb_m2") is None
+        assert cv_opts(conds["months"], "risk_return") is None
+
+    def test_reach_check(self):
+        conds = build_conditions(inner_cv=True)
+        healthy = {"rows|elasticnet": {"alpha": 0.1}, "months|elasticnet": {"inner_cv": "months"}}
+        assert inner_cv_reach_problems(healthy, conds) == []
+        # opts が候補まで届かず、months 側も行で区切って回った
+        lost = {"rows|elasticnet": {"alpha": 0.1}, "months|elasticnet": {"alpha": 0.1}}
+        assert inner_cv_reach_problems(lost, conds) == [
+            "months|elasticnet: 内側 CV が rows で回った（指定は months）"]
+        # 全 fold が落ちて診断値が空でも、届いたとはみなさない
+        assert inner_cv_reach_problems({"months|elasticnet": None}, conds)
+
+    def test_main_wiring(self):
+        """**渡し忘れても例外は出ない**（両条件が同じ CV になり、差なしだけが残る）。"""
+        src = inspect.getsource(momentum_gate.main)
+        assert src.count("inner_cv=args.inner_cv") == 2            # build_conditions / mode_of
+        assert src.count("opts=cv_opts(conds[cond], model)") == 2  # 全月と共通月の CV
+        assert src.count("inner_cv_reach_problems(") == 2
+        assert "pc = panel_cond(c)" in src
+        assert "INNER_CV_MODELS" in src
+
+
 class TestEvaluationIsInvariantToMonthlyShift:
     """**評価側の y を素へ戻さなくてよい、という前提を縛る。**
 
@@ -400,6 +485,21 @@ class TestExistingModesAreUnchanged:
         """D/E の業種除外（#940）の既定は本番の構成＝空欄にする業種なし。既存モードは差し替えない。"""
         for c in build_conditions(**kwargs).values():
             assert c.de_null_industries == ()
+
+    @pytest.mark.parametrize("kwargs", [
+        dict(), dict(windows=[3, 12]), dict(macro=True), dict(interactions=True),
+        dict(max_features=[5, 20]), dict(fin_rows=True), dict(demean_target=True),
+        dict(risk_axis=True, models=["xgb_m2"]), dict(fin_nan=True), dict(de_exclude=True),
+        dict(fin_fill=True),
+    ])
+    def test_existing_modes_keep_the_production_inner_cv(self, kwargs):
+        """M-6 の内側 CV（#971）の既定は本番の構成＝行で区切る。既存モードは CV の opts を渡さず、
+        パネルの鍵も `Cond` そのもの（畳み込みの当たり方が変わらない）。"""
+        for c in build_conditions(**kwargs).values():
+            assert c.inner_cv == "rows"
+            assert panel_cond(c) == c
+            for model in momentum_gate.MODEL_SPECS:
+                assert cv_opts(c, model) is None
 
 
 class TestBuildUsesTheConditionAxes:
@@ -583,6 +683,7 @@ class TestOutputNamesTheModeThatWasMeasured:
         (dict(fin_nan=True), "fin_nan"),
         (dict(de_exclude=True), "de_exclude"),
         (dict(fin_fill=True), "fin_fill"),
+        (dict(inner_cv=True), "inner_cv"),
     ])
     def test_mode_follows_the_flag(self, kwargs, want):
         assert mode_of(**kwargs) == want
@@ -590,7 +691,7 @@ class TestOutputNamesTheModeThatWasMeasured:
     def test_every_mode_has_a_file_suffix(self):
         assert set(MODE_SUFFIX) == {"default", "windows", "macro", "interactions", "max_features",
                                     "fin_rows", "demean_target", "risk_axis", "fin_nan",
-                                    "de_exclude", "fin_fill"}
+                                    "de_exclude", "fin_fill", "inner_cv"}
 
     def test_demean_mode_writes_its_own_file(self):
         """既定の `momentum_gate.json` を上書きしない（どの軸の結果かがファイル名で分かる）。"""
@@ -613,6 +714,7 @@ class TestOutputNamesTheModeThatWasMeasured:
         ("fin_nan", 2,
          "FIN NAN AXIS [common domain = complete-financials rows only; read raw for blank rows]"),
         ("de_exclude", 2, "DE EXCLUDE AXIS"),
+        ("inner_cv", 2, "INNER CV AXIS [M-6 only; same panel on both sides]"),
     ])
     def test_new_modes_do_not_borrow_the_momentum_wording(self, mode, n_conds, head):
         for passed, regressed in (([], []), (["x"], []), ([], ["y"])):

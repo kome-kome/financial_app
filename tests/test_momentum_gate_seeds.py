@@ -75,6 +75,15 @@ class TestRunSeeds:
         cb.run_seeds("elasticnet", {}, {}, {}, [], 0, seeds=5)
         assert self.calls == [None]
 
+    def test_options_reach_the_run(self):
+        """候補の opts（#971 の内側 CV）は run_one へそのまま届き、種の上書きはその上に重ねる。"""
+        cb.run_seeds("elasticnet", {}, {}, {}, [], 0, seeds=5, opts={"inner_cv": "months"})
+        assert self.calls == [{"inner_cv": "months"}]
+        self.calls.clear()
+        cb.run_seeds("xgb_m2", {}, {}, {}, [], 0, seeds=2, opts={"max_depth": 3})
+        assert self.calls == [{"max_depth": 3, "random_state": cb.SEED_BASE},
+                              {"max_depth": 3, "random_state": cb.SEED_BASE + 1}]
+
     def test_seeds_are_consecutive_from_the_default(self):
         out = cb.run_seeds("xgb_m2", {}, {}, {}, [], 0, seeds=3, return_parts=True)
         assert [c["random_state"] for c in self.calls] == [42, 43, 44]

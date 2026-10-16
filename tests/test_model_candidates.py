@@ -18,13 +18,20 @@ import numpy as np
 import pytest
 
 from plugins.model_candidates import (
+    _EN_CV_SPLITS,
+    _EN_L1_RATIOS,
+    _EN_MAX_ITER,
+    _EN_N_ALPHAS,
     CANDIDATES,
+    _prep_matrices,
     alpha_path_bounds,
     build_candidate,
     candidate_available,
+    elasticnet_inner_cv,
     macro_column_indices,
     make_diag,
     make_elasticnet_fit_predict,
+    month_block_splits,
     pca_feature_names,
     summarize_diag,
     wrap_macro_pca,
@@ -225,6 +232,192 @@ def test_embargo_shortens_folds_equally():
     leaky = walk_forward_cv_monthly(panel, FEATURE_NAMES, min_train_months=6,
                                     step_months=3, fit_predict=fp2, embargo_months=0, **extra2)
     assert len(honest) < len(leaky)
+
+
+# ── 内側 CV の区切り方（#971）──────────────────────────────────────────────
+#
+# M-6 は α・l1_ratio を学習 fold の中の時系列分割 CV で選ぶ。`rows`（本番）は行の番号で区切るので、
+# 区切りが月の途中に落ち、月内の並びだけで α が動く（#964）。`months` は月の境界でだけ区切る。
+
+# 月ごとの行数をわざと不揃いにする。揃っていると行の区切りも偶然すべて月の境界に落ち、
+# rows と months が同じ分割になって比べる意味が無くなる（空振り）。
+_UNEVEN_GROUPS = [7, 3, 9, 5, 8, 4, 6, 10, 3, 7, 5, 9]
+
+
+def _month_of_row(groups) -> np.ndarray:
+    return np.repeat(np.arange(len(groups)), groups)
+
+
+def _months_cut(splits, groups) -> set:
+    """学習側と検証側の両方に行を持つ月（＝月の途中で区切られた月）の番号。"""
+    month = _month_of_row(groups)
+    cut: set = set()
+    for tr, te in splits:
+        cut |= set(month[tr].tolist()) & set(month[te].tolist())
+    return cut
+
+
+def _row_splits(groups, cv_splits: int = 3) -> list:
+    n = sum(groups)
+    return list(elasticnet_inner_cv(n, cv_splits, "rows").split(np.zeros((n, 1))))
+
+
+def _uneven_panel(sizes, seed: int = 971) -> dict:
+    """月ごとの社数が `sizes` の合成パネル（線形の信号＋ノイズ・マクロは月内で同値）。
+
+    `_panel` を切り詰めた検体では、どちらの区切り方でも同じ α が選ばれて差が出なかった
+    （区切り方を変えても予測が動かない検体では、rows のビット一致が自明に通ってしまう）。
+    """
+    rng = np.random.default_rng(seed)
+    out: dict = {}
+    for m, g in enumerate(sizes):
+        ym = f"20{20 + m // 12:02d}-{m % 12 + 1:02d}"
+        macro = rng.normal(size=len(MACRO_FEATURES))
+        rows = []
+        for _ in range(g):
+            fin = rng.normal(size=len(FIN_FEATURES))
+            y = float(0.6 * fin[0] - 0.3 * fin[1] + 0.3 * macro[1] + rng.normal(scale=0.5))
+            rows.append((list(fin) + list(macro), y))
+        out[ym] = rows
+    return out
+
+
+def _reference_enet(train_samples, test_samples):
+    """修正前（#971 より前）の `make_elasticnet_fit_predict` の手順をそのまま書き写した参照実装。"""
+    from sklearn.linear_model import ElasticNetCV
+    from sklearn.model_selection import TimeSeriesSplit
+
+    X_tr, y_tr, X_te, y_mu, y_sd, _y_te = _prep_matrices(train_samples, test_samples)
+    splits = max(2, min(_EN_CV_SPLITS, len(X_tr) // 2 - 1))
+    model = ElasticNetCV(l1_ratio=list(_EN_L1_RATIOS), alphas=_EN_N_ALPHAS,
+                         cv=TimeSeriesSplit(n_splits=splits), max_iter=_EN_MAX_ITER,
+                         random_state=42, selection="cyclic")
+    model.fit(X_tr, y_tr)
+    return (model.predict(X_te) * y_sd + y_mu).tolist(), model
+
+
+def test_month_splits_never_cut_a_month():
+    """months: どの分割でも、触れた月は丸ごと学習側か検証側に入る（月が両側に分かれない）。"""
+    month = _month_of_row(_UNEVEN_GROUPS)
+    splits = month_block_splits(_UNEVEN_GROUPS, cv_splits=3)
+    assert len(splits) == 3
+    for tr, te in splits:
+        for side in (tr, te):
+            for m in set(month[side].tolist()):
+                assert set(np.flatnonzero(month == m).tolist()) <= set(side.tolist())
+        assert tr.max() < te.min()     # 過去の月で学習 → 直後の月で検証（行ベースと同じ向き）
+    assert _months_cut(splits, _UNEVEN_GROUPS) == set()
+    # 空振り防止: 同じ行数を rows で区切ると月の途中に落ちる（#964 の原因そのもの）
+    assert _months_cut(_row_splits(_UNEVEN_GROUPS), _UNEVEN_GROUPS)
+
+
+def test_month_splits_hold_the_same_rows_when_rows_are_shuffled_within_months():
+    """months: 月内の行の並びを入れ替えても、各分割の学習側・検証側に入る行（社）の集合は変わらない。"""
+    rng = np.random.default_rng(971)
+    ids = [(m, k) for m, g in enumerate(_UNEVEN_GROUPS) for k in range(g)]
+    shuffled: list = []
+    start = 0
+    for g in _UNEVEN_GROUPS:
+        block = ids[start:start + g]
+        shuffled.extend(block[i] for i in rng.permutation(g))
+        start += g
+    assert shuffled != ids                                      # 並びは実際に変わっている
+
+    def sides(splits, order):
+        return [({order[i] for i in tr}, {order[i] for i in te}) for tr, te in splits]
+
+    months = month_block_splits(_UNEVEN_GROUPS, cv_splits=3)
+    assert sides(months, ids) == sides(months, shuffled)
+    # 空振り防止: rows では同じ入れ替えで検証側に入る社が変わる
+    rows = _row_splits(_UNEVEN_GROUPS)
+    assert sides(rows, ids) != sides(rows, shuffled)
+
+
+@pytest.mark.parametrize("n_months, want", [(6, 2), (7, 2), (8, 3), (40, 3)])
+def test_month_split_count_maps_the_row_rule_onto_months(n_months, want):
+    """分割数は行ベースの `max(2, min(cv_splits, n // 2 - 1))` の n を月数へ置き換えたもの。"""
+    assert len(month_block_splits([5] * n_months, cv_splits=_EN_CV_SPLITS)) == want
+
+
+def test_inner_cv_rejects_bad_inputs():
+    with pytest.raises(ValueError, match="train_groups"):
+        elasticnet_inner_cv(10, 3, "months")
+    with pytest.raises(ValueError, match="合わない"):
+        elasticnet_inner_cv(10, 3, "months", [4, 5])
+    with pytest.raises(ValueError, match="未知の inner_cv"):
+        elasticnet_inner_cv(10, 3, "weeks")
+    with pytest.raises(ValueError, match="未知の inner_cv"):
+        make_elasticnet_fit_predict(inner_cv="weeks")
+
+
+def test_rows_is_bit_identical_to_the_pre_971_procedure():
+    """既定（rows）の fit_predict は修正前と同じ予測・係数を返す（2 引数でも 3 引数でも）。"""
+    panel = _uneven_panel([40, 17, 33, 25, 38, 21, 29, 15, 36, 23, 31, 19, 27, 40, 22, 34,
+                           18, 30, 26, 39, 24])
+    train, test, groups = _split(panel, n_train_months=20)
+    want, ref = _reference_enet(train, test)
+
+    diag = make_diag()
+    got, _ = make_elasticnet_fit_predict(diag=diag)(train, test)
+    got3, _ = make_elasticnet_fit_predict(inner_cv="rows")(train, test, groups)
+    assert got == want and got3 == want
+    assert diag["alpha"] == [float(ref.alpha_)]
+    assert diag["coef"] == [[float(c) for c in ref.coef_]]
+    assert "inner_cv" not in diag          # rows は診断値に何も足さない（夜間の診断値の形は不変）
+
+    # 空振り防止: この検体では区切り方を変えると予測が動く（一致が自明に通る検体ではない）
+    got_m, _ = make_elasticnet_fit_predict(inner_cv="months")(train, test, groups)
+    assert got_m != want
+
+
+def test_months_fit_ignores_the_order_of_rows_within_a_month():
+    """months: 月内の行を入れ替えても、選ぶ α・l1_ratio と予測は変わらない。
+
+    α は行の並びで足し算の順が変わるぶん末尾の桁だけ動く（α パスは Xᵀy から作る）ので、
+    同じ候補を選んだかは相対 1e-12 で比べる。
+    """
+    sizes = [40, 17, 33, 25, 38, 21, 29, 15, 36, 23, 31, 19, 27, 40, 22, 34, 18, 30, 26, 39, 24]
+    panel = _uneven_panel(sizes)
+    rng = np.random.default_rng(964)
+    shuffled = {ym: [rows[i] for i in rng.permutation(len(rows))] for ym, rows in panel.items()}
+    tr_a, te, groups = _split(panel, n_train_months=20)
+    tr_b, _te, _g = _split(shuffled, n_train_months=20)
+    assert tr_a != tr_b                                         # 並びは実際に変わっている
+
+    def fit(train, inner_cv):
+        d = make_diag()
+        yhat, _ = make_elasticnet_fit_predict(diag=d, inner_cv=inner_cv)(train, te, groups)
+        return d, yhat
+
+    (a, yhat_a), (b, yhat_b) = fit(tr_a, "months"), fit(tr_b, "months")
+    assert math.isclose(a["alpha"][0], b["alpha"][0], rel_tol=1e-12)
+    assert a["l1_ratio"] == b["l1_ratio"]
+    assert np.allclose(yhat_a, yhat_b, rtol=0.0, atol=1e-9)
+    assert a["inner_cv"] == ["months"]
+    # 空振り防止: rows では同じ入れ替えで選ぶ α が動く（#964 の症状そのもの）
+    (ra, _), (rb, _) = fit(tr_a, "rows"), fit(tr_b, "rows")
+    assert not math.isclose(ra["alpha"][0], rb["alpha"][0], rel_tol=1e-6)
+
+
+def test_months_needs_the_month_sizes():
+    """months は各学習月の行数が要る（2 引数で呼ぶと分割を作れない）。"""
+    train, test, _groups = _split(_panel())
+    with pytest.raises(ValueError, match="train_groups"):
+        make_elasticnet_fit_predict(inner_cv="months")(train, test)
+
+
+def test_candidate_menu_asks_for_month_sizes_only_for_months():
+    """候補メニューの elasticnet: 既定は従来どおり 2 引数、months のときだけ train_groups を受け取る。"""
+    _fp, extra, _ = build_candidate("elasticnet", FEATURE_NAMES)
+    assert extra == {}
+    fp, extra_m, diag = build_candidate("elasticnet", FEATURE_NAMES, {"inner_cv": "months"})
+    assert extra_m == {"pass_train_groups": True}
+    panel = _uneven_panel([30, 12, 25, 18, 28, 14, 22, 11, 27, 16, 24, 13, 20, 30, 15, 26,
+                           12, 23, 19, 29, 17, 21, 25, 14])
+    folds = walk_forward_cv_monthly(panel, FEATURE_NAMES, min_train_months=6, step_months=3,
+                                    fit_predict=fp, embargo_months=12, **extra_m)
+    assert folds, "months の fold が1つも立たなかった（全 fold が例外で飛ばされた可能性）"
+    assert summarize_diag(diag)["inner_cv"] == "months"
 
 
 # ── マクロ fold 内 PCA 圧縮ラッパー ────────────────────────────────────────
