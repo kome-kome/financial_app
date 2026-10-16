@@ -116,6 +116,11 @@ class TestMainWiring:
         assert '"fin_oof_path": str(fin_oof_path) if fin_oof_path else None' in src
         assert '"fin_oof_rows": fin_oof_rows' in src
 
+    def test_breakdown_says_group_bias_is_not_size_adjusted(self):
+        """会計基準の群の bias は規模の交絡だった（#951）。注記が消えると、同じ数字を見て同じ疑いが立ち直る。"""
+        src = inspect.getsource(momentum_gate.main)
+        assert "group bias is NOT adjusted for size or sector" in src
+
 
 class TestBlankGroups:
     def test_every_group_column_is_a_production_feature(self):
