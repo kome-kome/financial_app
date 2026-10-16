@@ -921,8 +921,28 @@ def seed_spread_line(seeds: dict) -> str:
             return "-"
         return f"min={_num(min(v))} max={_num(max(v))} range={_num(max(v) - min(v))}"
 
+    scored_on = " (scored on U per seed)" if seeds.get("scored_on") == "U" else ""
     return (f"[seeds] n={seeds['n']} rank-IC by seed: {span(seeds['rank_ic_by_seed'])}"
-            f" | short_side: {span(seeds['short_side_spread_by_seed'])}")
+            f" | short_side: {span(seeds['short_side_spread_by_seed'])}{scored_on}")
+
+
+def risk_axis_seeds(seeds: dict, seed_parts: list, rmap: dict, lam: float,
+                    standardize: bool) -> dict:
+    """リスク軸の条件ごとに、種ごとの U の並びの rank-IC / short_side_spread を作り直す（#962）。
+
+    リスク軸は μ̂ の CV を `Cond` ごとに 1 回だけ回し、条件ごとに U = μ̂ − λR へ変換する。
+    `run_seeds` の `seeds` は**変換前の μ̂** の種ごとの成績なので、そのままだと全条件で同じ幅が
+    出る（10/16 の `gate:risk-axis-m2` で 7 条件すべて同じ値）。種ごとの残差（`_seed_parts`）に
+    同じ変換と `oof_backtest` を当て、条件の成績と同じ物差しで測り直す。`rmap` が空（`mu_only`）
+    なら変換は恒等で、μ̂ の種ごとの成績をこの物差しで測ったものになる。
+    """
+    ics, sss = [], []
+    for resid, meta in seed_parts:
+        rr, mm, _drop = apply_risk_axis(resid, meta, rmap, lam, standardize=standardize)
+        o = oof_backtest(rr, n_quantiles=RISK_QUANTILES, meta_by_ym=mm, rebalance_per_year=4)
+        ics.append(o["rank_ic"]["mean"])
+        sss.append(o.get("short_side_spread"))
+    return {**seeds, "rank_ic_by_seed": ics, "short_side_spread_by_seed": sss, "scored_on": "U"}
 
 
 def _restrict_months(panel: tuple, yms: set) -> tuple:
@@ -2238,10 +2258,12 @@ def main() -> None:
                 memo = (conds[cond], kind, model)
                 if memo not in ran:
                     s, m, i, feats = panels[(cond, kind)]
+                    # 種ごとの残差はリスク軸でだけ持つ（条件ごとの種の幅を作り直すため・#962）。
                     fresh = run_seeds(estimator, s, m, i, feats, pca=0, seeds=args.seeds,
-                                      return_parts=True)
-                    ran[memo] = (fresh, fresh.pop("_parts"))
-                out, part = ran[memo]
+                                      return_parts=True,
+                                      return_seed_parts=(mode == "risk_axis"))
+                    ran[memo] = (fresh, fresh.pop("_parts"), fresh.pop("_seed_parts", None))
+                out, part, seed_parts = ran[memo]
                 if mode == "risk_axis":
                     # 同じ CV の残差へ条件ごとの U 変換を当て、oof を作り直す。**`out` を
                     # 複製する**——memo は3条件で共有しているので、その場で書き換えると
@@ -2251,6 +2273,11 @@ def main() -> None:
                                                     standardize=(risk_scale == "z"))
                     out = {**out, "oof": oof_backtest(rr, n_quantiles=RISK_QUANTILES,
                                                       meta_by_ym=mm, rebalance_per_year=4)}
+                    # `seeds` は変換前の μ̂ の幅なので、条件の U で測り直す（#962）。
+                    if out.get("seeds") and seed_parts:
+                        out["seeds"] = risk_axis_seeds(out["seeds"], seed_parts, risk_maps[cond],
+                                                       specs[cond][1],
+                                                       standardize=(risk_scale == "z"))
                 if out.get("error"):
                     print(f"  {model}: ERROR {out['error']}", flush=True)
                 results[f"{cond}|{model}"] = out

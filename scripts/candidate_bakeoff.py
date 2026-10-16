@@ -241,13 +241,18 @@ def average_residuals(runs: list[dict]) -> dict:
 
 
 def run_seeds(name: str, samples_by_ym: dict, meta_by_ym: dict, ids_by_ym: dict,
-              feat_names: list, pca: int, *, seeds: int, return_parts: bool = False) -> dict:
+              feat_names: list, pca: int, *, seeds: int, return_parts: bool = False,
+              return_seed_parts: bool = False) -> dict:
     """種を変えて `seeds` 回回し、行ごとに予測を平均してから指標を出す（#955）。
 
     1 回だけの M-2 は、種（subsample の抜き方）だけで rank-IC が ±0.005〜0.01 動き、条件の差と
     同じ大きさになる。予測を平均してから測れば、下流（共通域への制限・ペアの検定）は無改修で
     この揺れが薄まる。測るのは「`seeds` 個の平均のモデル」で、本番の 1 個のモデルより少し
     安定した成績になる点に注意。種ごとの rank-IC / short_side_spread は `out["seeds"]` に残す。
+
+    `return_seed_parts=True` のとき、種ごとの `(residuals, oof_meta)` を種の順に
+    `out["_seed_parts"]` へ添える（#962）。予測を後から変換する軸（リスク軸の U）は、
+    `out["seeds"]` の幅が変換前の μ̂ のものなので、条件ごとの幅を作り直すのにこれが要る。
 
     `seeds <= 1` か、種の効かない候補（`SEEDED_CANDIDATES` の外）は `run_one` と同じ。
     """
@@ -278,6 +283,8 @@ def run_seeds(name: str, samples_by_ym: dict, meta_by_ym: dict, ids_by_ym: dict,
     }
     if return_parts:
         out["_parts"] = (residuals, meta)
+    if return_seed_parts:
+        out["_seed_parts"] = [r["_parts"] for r in runs]
     return out
 
 

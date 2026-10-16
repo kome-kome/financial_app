@@ -89,6 +89,15 @@ class TestRunSeeds:
     def test_parts_are_left_out_unless_asked(self):
         out = cb.run_seeds("xgb_m2", {}, {}, {}, [], 0, seeds=2)
         assert "_parts" not in out
+        assert "_seed_parts" not in out
+
+    def test_seed_parts_are_kept_in_seed_order_when_asked(self):
+        """リスク軸が条件ごとの種の幅を作り直す材料（#962）。平均する前の 1 回ごとの残差を種の順に。"""
+        out = cb.run_seeds("xgb_m2", {}, {}, {}, [], 0, seeds=3, return_parts=True,
+                           return_seed_parts=True)
+        got = out["_seed_parts"]
+        assert [meta for _resid, meta in got] == [{"meta": 42}, {"meta": 43}, {"meta": 44}]
+        assert got[1][0] == {"2021-01": [(43.0, 1.0), (44.0, 2.0)]}
 
     def test_failed_seed_is_reported_not_averaged(self, monkeypatch):
         def failing(name, s, m, i, feats, pca, *, opts=None, return_parts=False):
@@ -159,6 +168,12 @@ class TestGateWiring:
         assert src.count("seeds=args.seeds") == 2
         assert "run_one(" not in src
 
+    def test_risk_axis_rebuilds_the_seed_spread_per_condition(self):
+        """リスク軸の `[seeds]` は条件の U で測る（#962）。変換前の μ̂ の幅を写すと全条件で同じ値になる。"""
+        src = inspect.getsource(momentum_gate.main)
+        assert 'return_seed_parts=(mode == "risk_axis")' in src
+        assert 'risk_axis_seeds(out["seeds"], seed_parts, risk_maps[cond]' in src
+
     def test_seed_spread_line(self):
         line = momentum_gate.seed_spread_line({
             "n": 3, "rank_ic_by_seed": [0.10, 0.12, 0.11],
@@ -166,3 +181,44 @@ class TestGateWiring:
         assert line.startswith("[seeds] n=3 ")
         assert "min=+0.1000 max=+0.1200 range=+0.0200" in line
         assert "short_side: min=+0.0400 max=+0.0500" in line
+        assert "scored on U" not in line
+
+    def test_seed_spread_line_says_when_it_is_scored_on_u(self):
+        line = momentum_gate.seed_spread_line({
+            "n": 2, "rank_ic_by_seed": [0.1, 0.2], "short_side_spread_by_seed": [0.0, 0.1],
+            "scored_on": "U"})
+        assert line.endswith("(scored on U per seed)")
+
+
+# ── リスク軸の条件ごとの種の幅（#962）──────────────────────────────────────────
+
+class TestRiskAxisSeeds:
+    @pytest.fixture(autouse=True)
+    def _fake_backtest(self, monkeypatch):
+        """渡された U の予測をそのまま指標にする偽の oof_backtest（変換が種ごとに効いたかを見る）。"""
+        def fake(resid, *, n_quantiles, meta_by_ym, rebalance_per_year):
+            preds = [yh for pairs in resid.values() for yh, _y in pairs]
+            return {"rank_ic": {"mean": sum(preds)}, "short_side_spread": min(preds)}
+        monkeypatch.setattr(momentum_gate, "oof_backtest", fake)
+
+    @staticmethod
+    def _seed_parts():
+        meta = {"2021-01": [("E1",), ("E2",)]}
+        return [({"2021-01": [(1.0, 0.5), (2.0, 0.1)]}, meta),
+                ({"2021-01": [(3.0, 0.5), (5.0, 0.1)]}, meta)]
+
+    def test_each_seed_is_scored_after_the_same_transform(self):
+        rmap = {("2021-01", "E1"): 0.5, ("2021-01", "E2"): 1.0}
+        base = {"n": 2, "random_states": [42, 43], "rank_ic_by_seed": [9.9, 9.9],
+                "short_side_spread_by_seed": [9.9, 9.9]}
+        got = momentum_gate.risk_axis_seeds(base, self._seed_parts(), rmap, 2.0, standardize=False)
+        # U = yhat − 2R: 種 42 は (0.0, 0.0)、種 43 は (2.0, 3.0)
+        assert got["rank_ic_by_seed"] == [0.0, 5.0]
+        assert got["short_side_spread_by_seed"] == [0.0, 2.0]
+        assert got["scored_on"] == "U"
+        assert got["n"] == 2 and got["random_states"] == [42, 43]
+        assert base["rank_ic_by_seed"] == [9.9, 9.9]          # 渡した dict は書き換えない
+
+    def test_mu_only_is_the_untransformed_prediction(self):
+        got = momentum_gate.risk_axis_seeds({"n": 2}, self._seed_parts(), {}, 1.0, standardize=False)
+        assert got["rank_ic_by_seed"] == [3.0, 8.0]
