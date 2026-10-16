@@ -13,6 +13,10 @@
   （ADR-0051 の「株数の比で揃える」は実装時にこの方針へ倒した。生の株数比で揃えると、
   自己株式の消却や増資まで分割として扱ってしまう＝EPS は期中平均株数ベースなので、
   消却・増資では基準を直してはいけない）。
+- **会計基準**: 前期の通期で IFRS へ移ったが前期 H1 は日本基準、のように材料の間で基準が違うと、
+  違う基準の数字どうしを足し引きすることになる。**材料 3 つの `accounting_standard` が1つでも違えば
+  合成しない**（#966。列は #859 の後に全行埋まった）。開示（`statement_disclosure`）から読む基準は
+  連結・単体の切り替えと、列が空欄のときの予備として残す（ADR-0051 決定4）。
 - **表示の省略**: 半期の BS は科目をまとめて出すことがあり、通期にある列が空で入る。VIEW は
   `net_cash` / `de_ratio` の計算で欠けを 0 として扱うので、そのままでは値が黙って偏る。
   引き継ぐ列（`CARRY_FORWARD_BS_COLUMNS`）と通期値で埋める列（`ANNUAL_FALLBACK_FLOW_COLUMNS`）は
@@ -157,6 +161,9 @@ class SourceRow(NamedTuple):
     industry: Optional[str]
     market: Optional[str]
     values: dict            # 財務列（列名 → 値）
+    # 行の会計基準（`financial_records.accounting_standard`: JGAAP / IFRS / US-GAAP 等）。判定に使う
+    # メタ列で、TTM 表の列にはしない（`database._TTM_SKIP_COLUMNS`）。空欄は「分からない」（#966）
+    accounting_standard: Optional[str] = None
 
 
 class Basis(NamedTuple):
@@ -246,6 +253,15 @@ def reject_reason(annual_prev: SourceRow, h1_prev: SourceRow, h1_cur: SourceRow,
         return "late_filing"
 
     # ── 基準（会計基準・連結範囲）──
+    # 材料 3 つの会計基準（#966）。1 つでも違えば合成しない——TTM = 前期の通期 − 前期 H1 + 今期 H1 なので、
+    # 「IFRS の通期から日本基準の H1 を引く」形が例外を出さずにできる。今期の通期は材料ではないので
+    # 比べない（比べると材料がそろった行まで弾く）。どれかが空欄なら判定せず、下の開示の判定に任せる。
+    stds = (annual_prev.accounting_standard, h1_prev.accounting_standard,
+            h1_cur.accounting_standard)
+    if all(stds) and len(set(stds)) > 1:
+        return "standard_change"
+    # 開示（`statement_disclosure`）の基準は、連結・単体の切り替えと、空欄のときの予備として残す。
+    # 語彙が違う（JP / IFRS / US 対 JGAAP / IFRS / US-GAAP）ので、上の列と突き合わせない。
     if basis_prev and basis_cur:
         if basis_prev.standard != basis_cur.standard:
             return "standard_change"
@@ -416,6 +432,11 @@ def build_ttm_rows(rows: Sequence[SourceRow], *,
                 fd = h1_cur.filing_date
                 notes["standard_embargo" if fd and (today - fd).days <= embargo_days
                       else "standard_unknown"] += 1
+            if not (annual_prev.accounting_standard and h1_prev.accounting_standard
+                    and h1_cur.accounting_standard):
+                # 材料の会計基準が空欄で、表の列では判定できなかった（#966。今は 0 件の見込み）。
+                # 上の開示の注記とは別物＝こちらは「財務の表に基準が無い」。
+                notes["accounting_standard_blank"] += 1
             reason = reject_reason(
                 annual_prev, h1_prev, h1_cur, annual_cur=annuals.get(year),
                 windows=windows, basis_prev=basis_prev, basis_cur=basis_cur,
@@ -553,13 +574,15 @@ def _load_source_rows(db, FinancialRecord, columns: Sequence[str]) -> list:
     """材料になる行を必要な列だけ読む（#446 の「消費列だけ引く」方針）。"""
     meta = ("edinet_code", "year", "period_type", "period_end", "filing_date", "doc_id",
             "sec_code", "company_name", "industry", "market")
-    cols = [getattr(FinancialRecord, c) for c in meta + tuple(columns)]
+    # 会計基準は判定にだけ使うメタ列（#966）。財務列の後ろではなく meta の直後に置いて引く
+    cols = [getattr(FinancialRecord, c) for c in meta + ("accounting_standard",) + tuple(columns)]
     out = []
     for row in (db.query(*cols)
                 .filter(FinancialRecord.period_type.in_(("annual", "H1")))
                 .order_by(FinancialRecord.edinet_code, FinancialRecord.period_end).all()):
-        vals = dict(zip(columns, row[len(meta):]))
-        out.append(SourceRow(*row[:len(meta)], values=vals))
+        vals = dict(zip(columns, row[len(meta) + 1:]))
+        out.append(SourceRow(*row[:len(meta)], values=vals,
+                             accounting_standard=row[len(meta)]))
     return out
 
 
