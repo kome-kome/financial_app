@@ -353,6 +353,17 @@ CV へ渡す候補の opts だけ（`cv_opts`）。測るのは M-6 だけで（
 名前は `gate:inner-cv`（**積むのは人**）。分母は M-6 本体の `macro_enet._INNER_CV` と一致することを
 テストが縛る——#964 で本番を切り替えたら、ここの分母も見直す。
 
+## 規模で中立化した順位を比べるモード（`--size-neutral`・#970）
+
+M-2 / M-6 は毎期、小型株を実際より高く・大型株を低く置く（#957）。予測そのまま（`raw`・本番・分母）と、
+月ごとの断面で予測を log(時価総額) へ OLS で回帰した残差（`size_neutral`）を比べる。**予測の後処理で条件を
+作る**のでリスク軸と同じく `Cond` は2条件で同一で、パネルも CV も1回（M-2 の種ごとの幅は `rescore_seeds` で
+条件の変換を当てて測り直す）。時価総額は `financial_metrics` VIEW（分割補正済み）の通期の行から引き、その月の
+断面が使う行と同じ選び方（`_find_applicable_fin` を月末で）で当てる＝先を読まない（`log_market_cap_by_ym`）。
+**時価総額の無い行は変換の前に両条件から落とし**、落とした行数を出す（`size_common_keys`）。対象は M-2 / M-6・
+4検定・α 0.0125。規模の十分位ごとの placement bias（#947 と同じ定義）を両条件で並べて出す（検定はしない）。
+時価総額が1行も取れなければ CV の前に止める。日中キューの名前は `gate:size-neutral`（**積むのは人**・採否は #957）。
+
 ## M-2 は種を変えて平均する（`--seeds`・#955）
 
 M-2（XGBoost）は `random_state` を固定していても、種が違えば subsample の抜き方が変わり、同じ
@@ -387,7 +398,12 @@ from typing import NamedTuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from database import DE_RATIO_EXCLUSION_CANDIDATES, FinancialRecord, SessionLocal  # noqa: E402
+from database import (  # noqa: E402
+    DE_RATIO_EXCLUSION_CANDIDATES,
+    FinancialMetric,
+    FinancialRecord,
+    SessionLocal,
+)
 from model_stats import paired_ic_significance  # noqa: E402
 from plugins import get_plugin  # noqa: E402
 from plugins.macro_ensemble import _align  # noqa: E402
@@ -569,6 +585,19 @@ FIN_FILL_SOURCE_FIELDS = ("dps", "stock_price", "pl_rd_expenses", "pl_revenue")
 INNER_CV_CONDS: tuple[str, ...] = _EN_INNER_CV_CHOICES
 INNER_CV_BASE_COND = "rows"
 INNER_CV_MODELS = ["elasticnet"]
+
+# 規模で中立化した順位を比べるモード（`--size-neutral`・#970）。**基準は本番の構成（予測そのまま `raw`）**。
+# 予測の後処理で条件を作る（リスク軸と同じ形）＝2条件は同じ `Cond` を共有し、CV は1回。`size_neutral` は
+# 月ごとの断面で予測を log(時価総額) へ OLS で回帰した残差を予測として使う（#957 の 10/16 の試算の形）。
+# 対象は M-2 / M-6（#957 の偏りはこの2つ）。M-1 はパネルが別物（strict）なので測らない。
+SIZE_NEUTRAL_CONDS: tuple[str, ...] = ("raw", "size_neutral")
+SIZE_NEUTRAL_BASE_COND = "raw"
+SIZE_NEUTRAL_MODELS = ["xgb_m2", "elasticnet"]
+# 規模の偏りを並べる分位（#947・#951 の「時価総額の十分位」と同じ数）。
+SIZE_DECILES = 10
+# 予測の後処理で条件を作るモード。CV は `Cond` ごとに1回で、種ごとの成績（変換前の μ̂ のもの）を
+# 条件の変換で測り直す（#962）ので、種ごとの残差を受け取る。
+SEED_RESCORED_MODES = ("risk_axis", "size_neutral")
 # 月平均除去が届いたかの許容（`demean_reach_problems`）。素の側は「全部0」だけを弾き、除去した
 # 側は浮動小数の丸めを十分に上回る幅で 0 とみなす（どちらの値も実行時に出力と JSON へ出る）。
 DEMEAN_RAW_MIN = 1e-12
@@ -661,10 +690,11 @@ def build_conditions(windows: list[int] | None = None,
                     fin_nan: bool = False,
                     de_exclude: bool = False,
                     fin_fill: bool = False,
-                    inner_cv: bool = False) -> dict[str, Cond]:
+                    inner_cv: bool = False,
+                    size_neutral: bool = False) -> dict[str, Cond]:
     """条件集合 {名前: Cond} を作る。
 
-    12のモードがある。**同時に使えるのは1つだけ**（下記）:
+    13のモードがある。**同時に使えるのは1つだけ**（下記）:
 
       既定           … ADR-0045 の昇格ゲートと完全に同じ2条件（`off` / `on`・マクロは ON のまま）
       `windows`      … モメンタム無し ＋ 各窓（#592・ADR-0050）
@@ -678,9 +708,13 @@ def build_conditions(windows: list[int] | None = None,
       `de_exclude`   … 2業種の D/E を残す ＋ 空欄にする（#940・#927）。他の軸は本番構成に固定
       `fin_fill`     … 財務の空欄の行を捨てる ＋ 「無い」空欄を 0 で埋める（#950）。他の軸は本番構成に固定
       `inner_cv`     … M-6 の内側 CV を行で区切る ＋ 月で区切る（#971）。**パネルは2条件で同一**・M-6 だけ
+      `size_neutral` … 予測そのまま ＋ 月ごとに log 時価総額の効果を除いた予測（#970）。`Cond` は2条件で同一
 
     `inner_cv` の `Cond` は2条件で違うが、違うのは CV へ渡す opts だけで、パネルの鍵からは外す
     （`panel_cond`）。`models` を渡したときは M-6 だけであることを確かめる（M-2・M-1 にこの軸は無い）。
+
+    `size_neutral` も `risk_axis` と同じく `Cond` を動かさない（予測の後処理で条件を作る）。`models` を
+    渡したときは M-2 / M-6 だけであることを確かめる（M-1 はパネルが別物）。
 
     **`risk_axis` だけは `Cond` を動かさない。** R はモデルの学習に一切入らず、CV が出した
     μ̂ の順位を作り直すときだけ使うので、パネル構築のパラメータではない。3条件とも同じ
@@ -706,7 +740,8 @@ def build_conditions(windows: list[int] | None = None,
              ("--interactions", interactions), ("--max-features", bool(max_features)),
              ("--fin-rows", fin_rows), ("--demean-target", demean_target),
              ("--risk-axis", risk_axis), ("--fin-nan", fin_nan), ("--de-exclude", de_exclude),
-             ("--fin-fill", fin_fill), ("--inner-cv", inner_cv)]
+             ("--fin-fill", fin_fill), ("--inner-cv", inner_cv),
+             ("--size-neutral", size_neutral)]
     picked = [name for name, on in modes if on]
     if len(picked) > 1:
         raise ValueError(
@@ -771,6 +806,14 @@ def build_conditions(windows: list[int] | None = None,
                 f"--inner-cv は M-6（{', '.join(INNER_CV_MODELS)}）だけを測る。{', '.join(others)} に"
                 "この軸は無く、同じ CV を2回回すだけになる（#971）")
         return {name: Cond(False, MOM_WINDOW, inner_cv=name) for name in INNER_CV_CONDS}
+    if size_neutral:
+        # 2条件とも本番構成の同一 `Cond`（パネルも CV も1回）。差は CV の後の予測の変換だけ。
+        others = [m for m in (models or []) if m not in SIZE_NEUTRAL_MODELS]
+        if others:
+            raise ValueError(
+                f"--size-neutral は M-2 / M-6（{', '.join(SIZE_NEUTRAL_MODELS)}）だけを測る。"
+                f"{', '.join(others)} はパネルが別物（#970）")
+        return {name: Cond(False, MOM_WINDOW) for name in SIZE_NEUTRAL_CONDS}
     if not windows:
         return {name: Cond(use_mom, MOM_WINDOW) for name, use_mom in CONDS.items()}
     ws = sorted({int(w) for w in windows})
@@ -797,12 +840,13 @@ def base_of(conds: dict[str, Cond], default_max_features: int | None = None) -> 
     D/E の業種除外モードの分母も**本番の構成**（`keep`）。こちらは本番が母集団の広い側。
     空欄を 0 で埋めるモードの分母も**本番の構成**（`drop`）。`--fin-nan` と同じく分母が母集団の狭い側。
     内側 CV のモードの分母も**本番の構成**（`rows`）。この軸はパネルを動かさない。
+    規模の中立化のモードの分母も**本番の構成**（予測そのまま `raw`）。この軸もパネルを動かさない。
     リスク軸モードの分母も**本番の構成**だが、モデルごとに違う（M-1 は `r2`・M-6 は `mu_only`）ので
     ここでは決めない。`main` はリスク軸モードでは `risk_base_cond` を使う（#808）。
     """
     for cand in (BASE_COND, MACRO_BASE_COND, INTERACTION_BASE_COND, FIN_ROWS_BASE_COND,
                  DEMEAN_BASE_COND, RISK_BASE_COND, FIN_NAN_BASE_COND, DE_EXCLUDE_BASE_COND,
-                 FIN_FILL_BASE_COND, INNER_CV_BASE_COND):
+                 FIN_FILL_BASE_COND, INNER_CV_BASE_COND, SIZE_NEUTRAL_BASE_COND):
         if cand in conds:
             return cand
     prod = maxfeat_cond_name(default_max_features) if default_max_features else None
@@ -832,14 +876,14 @@ MODE_SUFFIX: dict[str, str] = {"default": "", "windows": "", "macro": "_macro",
                                "fin_rows": "_fin_rows", "demean_target": "_demean",
                                "risk_axis": "_risk_axis", "fin_nan": "_fin_nan",
                                "de_exclude": "_de_exclude", "fin_fill": "_fin_fill",
-                               "inner_cv": "_inner_cv"}
+                               "inner_cv": "_inner_cv", "size_neutral": "_size_neutral"}
 
 
 def mode_of(windows: list[int] | None = None, macro: bool = False,
             interactions: bool = False, max_features: list[int] | None = None,
             fin_rows: bool = False, demean_target: bool = False,
             risk_axis: bool = False, fin_nan: bool = False, de_exclude: bool = False,
-            fin_fill: bool = False, inner_cv: bool = False) -> str:
+            fin_fill: bool = False, inner_cv: bool = False, size_neutral: bool = False) -> str:
     """測定モードの名前を返す（`build_conditions` と同じ引数から1箇所で導出する）。
 
     **#615 で足した2モードは、ここを持たないまま別モードの名前で出力されていた**——
@@ -868,6 +912,8 @@ def mode_of(windows: list[int] | None = None, macro: bool = False,
         return "fin_fill"
     if inner_cv:
         return "inner_cv"
+    if size_neutral:
+        return "size_neutral"
     return "windows" if windows else "default"
 
 
@@ -901,6 +947,9 @@ _AXIS_VERDICTS: dict[str, tuple[str, str]] = {
     # パネルは2条件で同一（母集団は動かない）。差は M-6 の α・l1_ratio の選び方だけ（#971）。
     "inner_cv": ("INNER CV AXIS [M-6 only; same panel on both sides]",
                  "splitting the inner CV at month boundaries did not beat splitting by row"),
+    # CV は1回で、差は予測の変換だけ。共通域は時価総額のある行（無い行は両条件から落とす・#970）。
+    "size_neutral": ("SIZE NEUTRAL AXIS [same CV; rows without market cap dropped from both sides]",
+                     "removing the log market cap effect per month did not beat the raw prediction"),
     # 分母はモデルで違う（M-1 は r2・M-6 は mu_only・#808）ので名前を差し込む。
     "risk_axis": ("RISK AXIS",
                   "no risk condition beat the production ordering ({base})"),
@@ -925,7 +974,7 @@ def verdict_text(mode: str, n_conds: int, passed: list[str], regressed: list[str
     （`production`・条件に無ければ None）の両方を出す（#816）。
     """
     if (mode in ("macro", "interactions", "max_features", "fin_rows", "demean_target",
-                 "risk_axis", "fin_nan", "de_exclude", "fin_fill", "inner_cv")
+                 "risk_axis", "fin_nan", "de_exclude", "fin_fill", "inner_cv", "size_neutral")
             or (mode == "windows" and n_conds > 2)):
         head, none = _AXIS_VERDICTS[mode]
         if mode == "macro" and base == MACRO_ON_COND:
@@ -968,7 +1017,7 @@ def seed_spread_line(seeds: dict) -> str:
             return "-"
         return f"min={_num(min(v))} max={_num(max(v))} range={_num(max(v) - min(v))}"
 
-    scored_on = " (scored on U per seed)" if seeds.get("scored_on") == "U" else ""
+    scored_on = f" (scored on {seeds['scored_on']} per seed)" if seeds.get("scored_on") else ""
     return (f"[seeds] n={seeds['n']} rank-IC by seed: {span(seeds['rank_ic_by_seed'])}"
             f" | short_side: {span(seeds['short_side_spread_by_seed'])}{scored_on}")
 
@@ -983,13 +1032,27 @@ def risk_axis_seeds(seeds: dict, seed_parts: list, rmap: dict, lam: float,
     同じ変換と `oof_backtest` を当て、条件の成績と同じ物差しで測り直す。`rmap` が空（`mu_only`）
     なら変換は恒等で、μ̂ の種ごとの成績をこの物差しで測ったものになる。
     """
+    return rescore_seeds(
+        seeds, seed_parts,
+        lambda resid, meta: apply_risk_axis(resid, meta, rmap, lam, standardize=standardize)[:2],
+        "U")
+
+
+def rescore_seeds(seeds: dict, seed_parts: list, transform, scored_on: str) -> dict:
+    """種ごとの残差に条件の変換を当て、rank-IC / short_side_spread を測り直す（#962・#970）。
+
+    `transform(resid, meta) -> (resid, meta)` は条件の予測の後処理（リスク軸の U・規模の中立化）。
+    予測の後処理で条件を作るモードは CV を `Cond` ごとに1回しか回さないので、`run_seeds` の `seeds`
+    （変換前の μ̂ の種ごとの成績）のままだと全条件で同じ幅が出る。渡した dict は書き換えない。
+    """
     ics, sss = [], []
     for resid, meta in seed_parts:
-        rr, mm, _drop = apply_risk_axis(resid, meta, rmap, lam, standardize=standardize)
+        rr, mm = transform(resid, meta)
         o = oof_backtest(rr, n_quantiles=RISK_QUANTILES, meta_by_ym=mm, rebalance_per_year=4)
         ics.append(o["rank_ic"]["mean"])
         sss.append(o.get("short_side_spread"))
-    return {**seeds, "rank_ic_by_seed": ics, "short_side_spread_by_seed": sss, "scored_on": "U"}
+    return {**seeds, "rank_ic_by_seed": ics, "short_side_spread_by_seed": sss,
+            "scored_on": scored_on}
 
 
 def _restrict_months(panel: tuple, yms: set) -> tuple:
@@ -1678,6 +1741,115 @@ def inner_cv_reach_problems(diags: dict[str, dict], conds: dict[str, Cond]) -> l
     return problems
 
 
+# ── 規模で中立化した順位（`--size-neutral`・#970）──────────────────────────────
+
+def load_market_caps(db) -> dict[tuple[str, str], float]:
+    """通期の行の時価総額を {(edinet_code, period_end の ISO): 時価総額} で返す（#970・読み取りのみ）。
+
+    出どころは `financial_metrics` VIEW（パネルの財務の出どころと同じ通期の行）。**`financial_records` の
+    生の値は使わない**——分割のあった年は遡及調整済みの株価 × 提出当時の株数で 1/F ずれ、VIEW が ×F で
+    直している（ADR-0055）。`_FinRow` に列を足さないのは、本番の読み込みとキャッシュの形を計測の
+    ために変えないため（`load_standards` と同じ）。
+    """
+    rows = db.query(FinancialMetric.edinet_code, FinancialMetric.period_end,
+                    FinancialMetric.market_cap).all()
+    return {(ec, _iso(pe)): float(mc) for ec, pe, mc in rows if pe and mc is not None}
+
+
+def log_market_cap_by_ym(ids_by_ym: dict, fin_by_co: dict,
+                         caps: dict[tuple[str, str], float]) -> dict[tuple[str, str], float]:
+    """各 (ym, ec) に、その月の断面が使う通期の行の log(時価総額) を当てる（#970）。
+
+    行の選び方は `build_snapshots` と同じ `_find_applicable_fin` を月末の上限（`_month_end_bound`）で
+    呼ぶ＝**「決算日 + FINANCIAL_LAG_DAYS ≦ 月末」の最新の行だけ**を使い、先を読まない（会計基準の群の
+    `standard_labels` と同じ手順）。その行の時価総額が無い・0 以下なら当てない（両条件から落ちる）。
+    """
+    out: dict[tuple[str, str], float] = {}
+    for ym, ids in ids_by_ym.items():
+        snap = _month_end_bound(ym)
+        for ec in ids:
+            rec = _find_applicable_fin(fin_by_co.get(ec, []), snap)
+            if rec is None:
+                continue
+            mc = caps.get((ec, _iso(rec.period_end)))
+            if mc is not None and mc > 0:
+                out[(ym, ec)] = math.log(mc)
+    return out
+
+
+def size_common_keys(keys: set, logcap: dict) -> set:
+    """時価総額の取れる (ym, ec) だけへ絞る（#970）。**両条件に同じ集合を当てる**＝落ちる行は同じ。
+
+    落とすのは共通域を取る段で、変換の前（`risk_common_keys` と同じ理由）。変換の後で落とすと
+    `size_neutral` の条件からだけ社が消え、条件間の母集団がずれる（ADR-0045）。
+    """
+    return {k for k in keys if k in logcap}
+
+
+def size_neutralize(resid_by_ym: dict, meta_by_ym: dict, logcap: dict) -> tuple[dict, dict, int]:
+    """`yhat` を、月ごとの断面で `yhat` を [定数, log 時価総額] へ OLS で回帰した残差へ置き換える（#970）。
+
+    戻り値は `(resid, meta, 落とした行数)`。時価総額の無い行は落とす。OLS の残差は回帰した列と
+    直交するので、変換後の予測と log 時価総額の月内の相関は（数値誤差を除いて）0 になる。社が3社未満か
+    log 時価総額が月内で全社同じ月は傾きを推定できないので、平均を引くだけにする（順位は変わらない）。
+    残差の月平均は 0 になるが、判定の指標は月の中で完結する（月ごとの平行移動で変わらない）。
+    """
+    out_r: dict[str, list] = {}
+    out_m: dict[str, list] = {}
+    dropped = 0
+    for ym, pairs in resid_by_ym.items():
+        metas = meta_by_ym.get(ym, [])
+        rows = []
+        for j, (yh, y) in enumerate(pairs):
+            meta = metas[j] if j < len(metas) else (None, None)
+            x = logcap.get((ym, meta[0]))
+            if x is None:
+                dropped += 1
+                continue
+            rows.append((yh, y, meta, x))
+        if not rows:
+            continue
+        n = len(rows)
+        mx = sum(r[3] for r in rows) / n
+        my = sum(r[0] for r in rows) / n
+        sxx = sum((r[3] - mx) ** 2 for r in rows)
+        slope = (sum((r[3] - mx) * (r[0] - my) for r in rows) / sxx
+                 if n >= 3 and sxx > 0 else 0.0)
+        out_r[ym] = [(yh - my - slope * (x - mx), y) for yh, y, _m, x in rows]
+        out_m[ym] = [m for _yh, _y, m, _x in rows]
+    return out_r, out_m, dropped
+
+
+def size_decile_labels(logcap: dict, keys: set, n_bins: int = SIZE_DECILES) -> dict:
+    """共通域の各 (ym, ec) に、その月の断面での log 時価総額の分位 `size_d<k>`（d0 が最小）を付ける（#970）。
+
+    `blank_group_breakdown` へ渡して、規模の分位ごとの placement bias（#947 と同じ定義）を出すのに使う。
+    同じ値の並びは社のコードで決める（実行ごとに分位が入れ替わらない）。
+    """
+    by_ym: dict[str, list] = defaultdict(list)
+    for ym, ec in keys:
+        if (ym, ec) in logcap:
+            by_ym[ym].append((logcap[(ym, ec)], ec))
+    out: dict[tuple[str, str], list] = {}
+    for ym, rows in by_ym.items():
+        rows.sort()
+        m = len(rows)
+        for j, (_x, ec) in enumerate(rows):
+            out[(ym, ec)] = [f"size_d{j * n_bins // m}"]
+    return out
+
+
+def aligned_from(resid_by_ym: dict, meta_by_ym: dict) -> dict:
+    """残差とメタ（同順）を {(ym, ec): (yhat, y)} へ組み直す（#970・`blank_group_breakdown` の入力）。"""
+    out: dict = {}
+    for ym, pairs in resid_by_ym.items():
+        metas = meta_by_ym.get(ym, [])
+        for j, (yh, y) in enumerate(pairs):
+            if j < len(metas):
+                out[(ym, metas[j][0])] = (yh, y)
+    return out
+
+
 # ── リスク軸（`--risk-axis`・#709）─────────────────────────────────────────────
 
 def _month_end_bound(ym: str) -> str:
@@ -2006,6 +2178,10 @@ def main() -> None:
                     help="M-6 の内側 CV の区切り方のモード（α・l1_ratio を選ぶ CV を行で区切る rows＝本番と、"
                          "月の境界で区切る months を共通域で比べる・#971）。パネルは2条件で同一。"
                          f"モデルは {','.join(INNER_CV_MODELS)} だけ。他モードと併用不可")
+    ap.add_argument("--size-neutral", dest="size_neutral", action="store_true",
+                    help="規模の中立化のモード（予測そのまま raw＝本番と、月ごとに予測を log 時価総額へ OLS で回帰した"
+                         "残差 size_neutral を共通域で比べる・#970）。CV は1回。時価総額の無い行は両条件から落とす。"
+                         f"モデル既定は {','.join(SIZE_NEUTRAL_MODELS)}。他モードと併用不可")
     ap.add_argument("--smoke", action="store_true", help="サンプルを間引いた短時間確認")
     ap.add_argument("--stride", type=int, default=1, help="各月のサンプル間引き幅")
     ap.add_argument("--seeds", type=int, default=SEEDS_DEFAULT,
@@ -2045,6 +2221,8 @@ def main() -> None:
         default_models = FIN_FILL_MODELS
     elif args.inner_cv:
         default_models = INNER_CV_MODELS
+    elif args.size_neutral:
+        default_models = SIZE_NEUTRAL_MODELS
     else:
         default_models = MODELS
     models = ([m.strip() for m in args.models.split(",") if m.strip()]
@@ -2074,7 +2252,8 @@ def main() -> None:
                                  demean_target=args.demean_target,
                                  risk_axis=args.risk_axis, lambdas=lambdas, models=models,
                                  fin_nan=args.fin_nan, de_exclude=args.de_exclude,
-                                 fin_fill=args.fin_fill, inner_cv=args.inner_cv)
+                                 fin_fill=args.fin_fill, inner_cv=args.inner_cv,
+                                 size_neutral=args.size_neutral)
     except ValueError as e:
         raise SystemExit(str(e))
     # 列数モードの分母は本番値（プラグイン既定）。**ここで数値を書き写さない**。
@@ -2110,6 +2289,9 @@ def main() -> None:
     if args.risk_axis and len(set(conds.values())) != 1:
         # μ̂ をビット単位で一致させる前提（パネルと CV を1回に畳む）が崩れている。
         raise SystemExit("中止: リスク軸の条件が同一の Cond を共有していません（μ̂ が条件間でずれる）")
+    if args.size_neutral and len(set(conds.values())) != 1:
+        # 規模の中立化も同じ前提（#970）。CV が2回に割れると、変換の差に CV の揺れが混ざる。
+        raise SystemExit("中止: 規模の中立化の条件が同一の Cond を共有していません（μ̂ が条件間でずれる）")
     # **alpha は検定数から導出する**（定数 ALPHA を窓モードへ流用すると、条件を増やした
     # ぶんの多重比較が補正されないまま「有意」が出る）。
     alpha = bonferroni_alpha(len(models), len(conds))
@@ -2124,7 +2306,7 @@ def main() -> None:
                    max_features=max_features, fin_rows=args.fin_rows,
                    demean_target=args.demean_target, risk_axis=args.risk_axis,
                    fin_nan=args.fin_nan, de_exclude=args.de_exclude, fin_fill=args.fin_fill,
-                   inner_cv=args.inner_cv)
+                   inner_cv=args.inner_cv, size_neutral=args.size_neutral)
     default_out = f"momentum_gate{MODE_SUFFIX[mode]}.json"
     if mode == "risk_axis" and models != RISK_MODELS:
         # M-1 と M-6 は分母が違い別々に回す（#808）。同じファイルへ書くと後の run が前の結果を消す。
@@ -2165,6 +2347,8 @@ def main() -> None:
         ttm_rows = ttm_row_count(fins)
         # 財務の空欄の内訳（#916）の会計基準。CPU 計算の前に読み、読取トランザクションを残さない
         std_by_pe = load_standards(db) if mode == "fin_nan" else {}
+        # 規模の中立化（#970）の時価総額。同じく CPU 計算の前に読む
+        market_caps = load_market_caps(db) if mode == "size_neutral" else {}
         if mode == "fin_rows":
             if not ttm_rows or ttm_rows <= 0:
                 raise SystemExit(
@@ -2338,6 +2522,20 @@ def main() -> None:
                     "中止: macro_beta の producer が空です（r_macro が全社で作れない）。"
                     "macro_beta_loadings / macro_beta_meta に live の run があるか確認してください")
 
+        # 規模の中立化モードの log 時価総額も CV の前に作る（#970）。パネルは2条件で同一なので
+        # `base` のものを使い、行の選び方は断面と同じ（`log_market_cap_by_ym`）。
+        logcap: dict[tuple[str, str], float] = {}
+        if mode == "size_neutral":
+            ids0 = panels[(base, MODEL_SPECS[models[0]][2])][2]
+            logcap = log_market_cap_by_ym(ids0, fins[conds[base].fin_rows], market_caps)
+            n_ids = sum(len(v) for v in ids0.values())
+            print(f"[size] panel rows with market cap: {len(logcap)} / {n_ids} "
+                  f"(without: {n_ids - len(logcap)}; dropped from BOTH sides)", flush=True)
+            if not logcap:
+                raise SystemExit(
+                    "中止: 時価総額が1行も取れません（両条件が同じ予測になる）。"
+                    "financial_metrics の market_cap と、断面が使う通期の行を確認してください")
+
         # ── 2. 各条件 × 各モデルを走らせる（残差も受け取る）────────────────────
         results: dict[str, dict] = {}
         # パネルと同じ理由で CV も `Cond` 単位に畳む（#709）。**μ̂ をビット単位で同一にする**
@@ -2351,10 +2549,11 @@ def main() -> None:
                 memo = (conds[cond], kind, model)
                 if memo not in ran:
                     s, m, i, feats = panels[(cond, kind)]
-                    # 種ごとの残差はリスク軸でだけ持つ（条件ごとの種の幅を作り直すため・#962）。
+                    # 種ごとの残差は予測の後処理で条件を作るモードでだけ持つ（条件ごとの種の幅を
+                    # 作り直すため・#962・#970）。
                     fresh = run_seeds(estimator, s, m, i, feats, pca=0, seeds=args.seeds,
                                       return_parts=True,
-                                      return_seed_parts=(mode == "risk_axis"),
+                                      return_seed_parts=(mode in SEED_RESCORED_MODES),
                                       opts=cv_opts(conds[cond], model))
                     ran[memo] = (fresh, fresh.pop("_parts"), fresh.pop("_seed_parts", None))
                 out, part, seed_parts = ran[memo]
@@ -2372,6 +2571,16 @@ def main() -> None:
                         out["seeds"] = risk_axis_seeds(out["seeds"], seed_parts, risk_maps[cond],
                                                        specs[cond][1],
                                                        standardize=(risk_scale == "z"))
+                if mode == "size_neutral" and cond != base:
+                    # 同じ CV の残差へ規模の中立化を当て、oof を作り直す（#970）。`out` はリスク軸と
+                    # 同じ理由で複製する。この段は raw の水準の表示用で、時価総額の無い行はここで落ちる。
+                    rr, mm, _drop = size_neutralize(part[0], part[1], logcap)
+                    out = {**out, "oof": oof_backtest(rr, n_quantiles=RISK_QUANTILES,
+                                                      meta_by_ym=mm, rebalance_per_year=4)}
+                    if out.get("seeds") and seed_parts:
+                        out["seeds"] = rescore_seeds(
+                            out["seeds"], seed_parts,
+                            lambda r, mt: size_neutralize(r, mt, logcap)[:2], "size_neutral")
                 if out.get("error"):
                     print(f"  {model}: ERROR {out['error']}", flush=True)
                 results[f"{cond}|{model}"] = out
@@ -2454,6 +2663,10 @@ def main() -> None:
     # リスク調整後の姿。他モードでは空のまま。
     risk_dropped: dict[str, int] = {}
     risk_profiles: dict[str, list] = {}
+    # 規模の中立化モード（#970）。時価総額が無くて両条件から落とした行数と、規模の十分位ごとの
+    # placement bias（#947 と同じ定義）。他モードでは空のまま。
+    size_dropped: dict[str, int] = {}
+    size_deciles: dict[str, dict] = {}
     for model in models:
         kind = MODEL_SPECS[model][2]
         aligned = {cond: _align(cparts[f"{cond}|{model}"][0], cpanels[(cond, kind)][2])
@@ -2472,6 +2685,15 @@ def main() -> None:
                 raise SystemExit(
                     "中止: R が全軸で揃う (ym,ec) が 0 件です。r_macro の producer が"
                     "評価パネルの銘柄を1社も覆っていない可能性があります")
+        # 時価総額の無い行も同じく変換の前に、**両条件から同じ集合で**落とす（#970）。
+        if mode == "size_neutral":
+            before = len(keys)
+            keys = size_common_keys(keys, logcap)
+            size_dropped[model] = before - len(keys)
+            print(f"  [size] 時価総額の無い行を両条件から除外: {before - len(keys)} "
+                  f"（{before} -> {len(keys)}）", flush=True)
+            if not keys:
+                raise SystemExit("中止: 時価総額のある (ym,ec) が共通域に 0 件です")
         folds = {c: cruns[f"{c}|{model}"]["n_folds"] for c in conds}
         # 共通域へ揃えるために条件ごとに落とした行数（#809）。母集団が動かないとは構造から
         # 推論せず、ここで数えて出す（`use_macro` が strict でも1行も落とさなかった #604 の逆向き）。
@@ -2489,6 +2711,8 @@ def main() -> None:
               + " ".join(f"{c}={n}" for c, n in dropped.items()), flush=True)
         if len(set(folds.values())) > 1:
             print("    [warn] fold 数が一致していません（位相が揃っていない可能性）", flush=True)
+        # 規模の十分位は共通域で1回だけ作り、両条件に同じラベルを当てる（#970）
+        size_labels = size_decile_labels(logcap, keys) if mode == "size_neutral" else {}
         for cond in conds:
             resid, meta = cparts[f"{cond}|{model}"]
             r2, m2 = _restrict(resid, meta, cpanels[(cond, kind)][2], keys)
@@ -2496,12 +2720,27 @@ def main() -> None:
                 r2, m2, _d = apply_risk_axis(r2, m2, risk_maps[cond], specs[cond][1],
                                              standardize=(risk_scale == "z"))
                 risk_profiles[f"{cond}|{model}"] = quantile_risk_profile(r2)
+            if mode == "size_neutral":
+                if cond != base:
+                    r2, m2, _d = size_neutralize(r2, m2, logcap)
+                size_deciles.setdefault(model, {})[cond] = blank_group_breakdown(
+                    aligned_from(r2, m2), size_labels)
             bt = oof_backtest(r2, n_quantiles=5, meta_by_ym=m2, rebalance_per_year=4)
             common_results[f"{cond}|{model}"] = bt
             print(f"    [{cond}] rank-IC={_num(bt['rank_ic']['mean'])} "
                   f"(std={_num(bt['rank_ic'].get('std'))}) "
                   f"short_side={_num(bt.get('short_side_spread'))} "
                   f"periods={bt.get('n_periods')}", flush=True)
+        if mode == "size_neutral":
+            # 規模の十分位ごとに、断面全体での予測の順位百分位 − 実現の順位百分位（#947 と同じ定義）。
+            # 正なら実際より上（買い側）に置いている。検定はしない（並べて読む・#957）。
+            print(f"    size decile placement bias (d0 = smallest; {' / '.join(conds)}):",
+                  flush=True)
+            for g in sorted(size_deciles[model][base]):
+                cells = " ".join(
+                    f"{c}={_num((size_deciles[model][c].get(g) or {}).get('placement_bias'))}"
+                    for c in conds)
+                print(f"      {g:<8} {cells}", flush=True)
 
     # ── 4. 昇格ゲート判定 ──────────────────────────────────────────────────
     # 検定は common スコープだけで行う。**raw では差を検定できない**——条件ごとに
@@ -2651,6 +2890,10 @@ def main() -> None:
         "fin_oof_path": str(fin_oof_path) if fin_oof_path else None,
         "fin_oof_rows": fin_oof_rows,
         "de_exclude": {"nulled_rows": de_nulled_rows, "samples": de_exclude_samples},
+        # 規模の中立化モード（#970）。時価総額の取れたパネルの行数・共通域で両条件から落とした行数・
+        # 規模の十分位ごとの {モデル: {条件: {size_d<k>: 指標}}}。他モードでは 0 / 空。
+        "size_neutral": {"panel_rows_with_cap": len(logcap), "dropped_rows": size_dropped,
+                         "deciles": size_deciles},
         "fin_fill": {"filled_rows": fin_filled, "samples": fin_fill_samples},
         # 目的変数モードの健全性（#615）。{"条件|種別": 月平均の絶対値の最大}。他モードでは空。
         "target_month_mean": target_month_mean,

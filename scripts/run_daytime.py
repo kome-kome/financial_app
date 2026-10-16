@@ -337,6 +337,21 @@ JOBS: dict[str, Job] = {
         measured_min=12.0,
         parallel_sensitive=True,   # 他の gate と同じ理由（採否が CI の符号で決まる）
     ),
+    # M-2 / M-6 が小型株を高く置く偏り（#957）を、予測から log 時価総額の効果を月ごとに除いた順位で
+    # 測る道具（#970）。**積むのは人**（#957 で読んで採否を決める）。
+    "gate:size-neutral": Job(
+        name="gate_size_neutral",
+        argv=("{python}", "-m", "scripts.momentum_gate", "--size-neutral",
+              "--stride", "1", "--allow-full-pull", "--refresh-cache"),
+        why="予測そのまま（raw・本番）と、月ごとに予測を log 時価総額へ OLS で回帰した残差（size_neutral）を"
+            "共通 (ym,ec) 域で比べる（#970・#957）。対象は M-2 / M-6・4検定・alpha 0.0125。CV は1回。"
+            "時価総額の無い行は両条件から落とし、規模の十分位ごとの bias を並べて出す。",
+        # 見積り。CV を1回だけ回すリスク軸の実測・見積りの和: M-6 だけの gate:risk-axis-m6 が 6.6分、
+        # M-2 を 5 個の種で回す gate:risk-axis-m2-mu が 8.2分の見積り。読み込みの重複（約1分）を引いた。
+        # 実走ログの END 行で差し替える。
+        measured_min=14.0,
+        parallel_sensitive=True,   # 他の gate と同じ理由（採否が CI の符号で決まる）
+    ),
     # 証券業・その他金融業の D/E を比較から外すか（#927）を M-2 / M-6 で測る道具（#940）。
     # **積むのは人**（#926 のマージ後。新しい定義の D/E でないと測る意味がない）。
     "gate:de-exclude": Job(
