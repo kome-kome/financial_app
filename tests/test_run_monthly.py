@@ -453,3 +453,17 @@ class TestTuneBudgetsMatchTheMeasurement:
         assert not missing, (
             f"日中枠に対応する Job が無い tune ステップ: {missing}"
             "（`run_daytime.JOBS` が実測の唯一の源。無いと予算の妥当性を誰も検査しない・#633）")
+
+
+class TestConfirmStageBudget:
+    """M-2 の探索に確かめ直す段（#984）を足したぶん、予算を上乗せしてある（探索の本体の時間を削らない）。"""
+
+    def test_the_search_body_keeps_its_share(self):
+        import hyperparameter_search as hs
+        from plugins.tuning import CONFIRM_RESERVE_MIN
+
+        _model, _strategy, extra = next(t for t in rm.TUNE_MATRIX if t[0] == "macro_gbdt")
+        assert "--confirm-top" in extra and "--confirm-seeds" in extra
+        body = rm.BUDGET_MIN["tune:macro_gbdt"] - hs.FINAL_RESERVE_MIN - CONFIRM_RESERVE_MIN
+        # 2026-10-01 の探索の本体は 225分（＝当時の予算 240 − 取り置き 15）で畳んでいた。段を足しても削らない
+        assert body >= 225

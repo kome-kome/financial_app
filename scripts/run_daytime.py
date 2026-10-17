@@ -200,14 +200,16 @@ JOBS: dict[str, Job] = {
     "tune:macro_gbdt": Job(
         name="tune:macro_gbdt",
         argv=("{python}", "hyperparameter_search.py", "--model", "macro_gbdt",
-              "--strategy", "random", "--n-iter", "150",
+              "--strategy", "random", "--n-iter", "150", "--confirm-top", "5", "--confirm-seeds", "5",
               "--objective", "rank_ic", "--persist", "--persist-scores", "--seed", "0"),
         why="M-2 の探索。9/1 の月次では 176.3分で150件を完走したが品質ゲートで persist を"
             "スキップした（#590）。**2026-09-08 の日中枠で 179.4分・151件を完走し persist まで"
             "到達した**——ADR-0047 の同一パネル比較で champion 0.1442 に対し新 0.2268。"
             "`plugin_tuned_params` が50日固着していた穴（#504 の producer 監視が捉えた分）は"
             "これで埋まった。**引数は run_monthly.py と同一**。",
-        measured_min=179.4,      # 2026-09-08 ローカル実測（9/1 月次は 176.3分）
+        # **見積り**（#984）: 2026-09-08 の実測 179.4分（9/1 月次は 176.3分）に、確かめ直す段（上位 5 × 追加の種 4 個・
+        # 33〜50 分）を乗せた。実走ログの `END tune:macro_gbdt: exit=0 (N.N分)` で実測へ差し替える。
+        measured_min=230.0,
         # 探索は CV を回して rank-IC の大小で候補を選ぶ。数値のわずかな揺れが順位を
         # 入れ替えれば、**永続化される重みが変わる**（所要ではなく結論が変わる）。
         parallel_sensitive=True,

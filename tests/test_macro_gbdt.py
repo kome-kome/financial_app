@@ -569,6 +569,38 @@ class TestExecuteSmoke:
         for k in required:
             assert k in result, f"出力に '{k}' がない"
 
+    def test_random_state_is_fixed_unless_the_confirm_stage_overrides_it(self):
+        """XGBoost の種は常に `_RANDOM_STATE`。月次探索の確かめ直す段（`seed_override`・#984）の中だけ上書きされる。
+
+        上書きが届かないと、段は同じ種で 5 回回すだけになり「種の平均」が種 42 の値そのものになる——エラーは出ない。
+        """
+        import plugins.macro_gbdt as mg
+        from plugins.tuning import seed_override
+
+        class _Stop(Exception):
+            pass
+
+        seen: list = []
+
+        def spy(self, xgb_params, best_iterations):
+            seen.append(xgb_params["random_state"])
+            raise _Stop
+
+        db, prices_by_co, fin_by_co, companies = self._make_db()
+        params = self._make_params(use_macro=False)
+        with patch("plugins.macro_gbdt.load_data", return_value=(prices_by_co, fin_by_co, companies)), \
+             patch("plugins.macro_gbdt.preload_macro", return_value={}), \
+             patch("plugins.macro_gbdt.get_producer_scores", return_value={}), \
+             patch.object(mg.MacroGbdtPlugin, "_make_cv_callback", spy):
+            with pytest.raises(_Stop):
+                plugin.execute(params, db)
+            with seed_override(45), pytest.raises(_Stop):
+                plugin.execute(params, db)
+            with pytest.raises(_Stop):
+                plugin.execute(params, db)
+        assert seen == [mg._RANDOM_STATE, 45, mg._RANDOM_STATE] == [42, 45, 42]
+        assert mg.MacroGbdtPlugin.tuning_seed_base == mg._RANDOM_STATE
+
     def test_execute_cv_metrics_has_xgb_and_ols(self):
         db, prices_by_co, fin_by_co, companies = self._make_db()
         params = self._make_params(use_macro=False)
@@ -1358,6 +1390,9 @@ class TestTuningSearchSpace:
 
     def test_saved_subsample_is_projected_to_the_pinned_rate(self):
         """保存済みの調整値（探索で選ばれた 0.4）は、画面へ出す前に固定値へ上書きされ、変えたことが注記される。"""
+        # `routers.analysis` を単独で import すると `api` との循環 import で落ちる（このファイルだけ流したとき）。
+        # `tests/test_analysis_meta.py` と同じく `api` を先に読む
+        import api  # noqa: F401
         from routers.analysis import project_tuned_params
 
         saved = {"use_momentum": False, "max_depth": 6, "subsample": 0.4, "colsample_bytree": 0.8}

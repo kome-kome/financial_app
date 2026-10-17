@@ -9,6 +9,9 @@ plugins.execute_plugin() でフル実行して walk-forward OOF（oof_backtest�
 """
 import logging
 import random
+import statistics
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
@@ -16,6 +19,37 @@ from typing import Any, Callable
 log = logging.getLogger(__name__)
 
 OBJECTIVES = ("rank_ic", "ic_ir", "long_short")
+
+# 上位の候補を種を変えて確かめ直す段（`search(confirm_top=, confirm_seeds=)`・#984）に取り置く時間（分）。
+# 探索の本体はこのぶん早く畳み、残りの時間で確かめ直す。**見積り**（2026-10-18）: 上位 5 × 追加の種 4 個＝20 回は
+# 今朝の実測で 26 分、`subsample` 1.0（#991・1 回あたり約 1.25 倍）と月次の環境の遅さを乗せて 33〜50 分。本番の候補が
+# 上位 5 に居なければ 4 回足す。足りなければ段は巡の途中で止まり、そこまでの種で比べる（失敗にはしない）。
+# 月次の予算（`run_monthly.BUDGET_MIN["tune:macro_gbdt"]`）はこのぶん上げてある（240 → 300 分）。
+CONFIRM_RESERVE_MIN = 60.0
+
+# 確かめ直す段の間だけ有効な種の上書き（#984）。種で結果が動くプラグイン（`tuning_seed_base` を持つもの）は
+# execute の中で `seeded(既定の種)` を使う。画面の項目にはしない＝本番の実行と最終モデルは常に既定の種。
+_SEED_OVERRIDE: ContextVar[int | None] = ContextVar("tuning_seed_override", default=None)
+
+
+@contextmanager
+def seed_override(seed: int):
+    """このブロックの中だけ、`seeded()` が返す種を `seed` にする（#984）。
+
+    `plugins.execute_plugin` は `asyncio.to_thread` で execute を回すが、to_thread は呼び出し時の contextvars を
+    写すので、ブロックの中で await した execute には届く（`database.tuning_dry_run` と同じ仕組み）。
+    """
+    token = _SEED_OVERRIDE.set(int(seed))
+    try:
+        yield
+    finally:
+        _SEED_OVERRIDE.reset(token)
+
+
+def seeded(default: int) -> int:
+    """種で結果が動くプラグインが execute の中で使う種。`seed_override` の外では `default`（#984）。"""
+    v = _SEED_OVERRIDE.get()
+    return default if v is None else v
 
 
 @dataclass
@@ -204,6 +238,8 @@ async def search(
     champion_params: dict | None = None,
     deadline: datetime | None = None,
     on_progress: Callable[[dict], None] | None = None,
+    confirm_top: int = 0,
+    confirm_seeds: int = 0,
 ) -> dict:
     """探索空間を評価し {best_params, best_score, objective, leaderboard, config, ...} を返す。
 
@@ -257,9 +293,26 @@ async def search(
     `on_progress`（Issue #638）: 候補を1件評価するたびに、その時点の戻り値と同じ形の辞書を
     渡す。呼び出し元はこれを使って暫定ベストを逐次永続化できる（外から強制終了されても
     パラメータだけは残る）。有効なスコアが1件も無い間は呼ばれない。
+
+    `confirm_top` / `confirm_seeds`（#984）: 探索の後で、既定の種の score の上位 `confirm_top` 候補（＋本番の
+    候補が居なければ足す）を種 `confirm_seeds` 個（既定の種を含む）で回し直し、**種の平均**で選び直す
+    （`_confirm_by_seeds`）。M-2 は種だけで OOF rank-IC が 0.009〜0.019 動き、1 回の種で選ぶと上位どうしの差
+    （2026-10-01 は 1 位と 2 位で 0.0003）が種の揺れに埋もれる。種で結果が動くと宣言したプラグイン
+    （`tuning_seed_base`）だけが使える。有効にすると探索の本体は `deadline` より `CONFIRM_RESERVE_MIN` 早く畳む。
     """
     if objective not in OBJECTIVES:
         raise ValueError(f"objective は {OBJECTIVES} のいずれかを指定してください: {objective!r}")
+    confirm = bool(confirm_top or confirm_seeds)
+    if confirm:
+        if confirm_top < 1 or confirm_seeds < 2:
+            raise ValueError("確かめ直す段は confirm_top >= 1 と confirm_seeds >= 2 を両方指定する"
+                             f"（受け取った値: top={confirm_top} seeds={confirm_seeds}）")
+        if not isinstance(getattr(plugin, "tuning_seed_base", None), int):
+            raise ValueError(f"プラグイン '{getattr(plugin, 'name', plugin)}' は種で結果が動くと宣言していない"
+                             "（tuning_seed_base が無い）ので、種を変えて確かめ直す意味が無い（#984）")
+    # 探索の本体の締切。確かめ直す段のぶんを取り置く（段そのものは `deadline` まで使える）
+    loop_deadline = (deadline - timedelta(minutes=CONFIRM_RESERVE_MIN)
+                     if (confirm and deadline is not None) else deadline)
 
     from database import tuning_dry_run, tuning_objective_only
     from plugins import execute_plugin
@@ -293,14 +346,14 @@ async def search(
 
     with shared_snapshot_cache(), tuning_objective_only():
         for i, combo in enumerate(combos):
-            if deadline is not None and i > 0:
+            if loop_deadline is not None and i > 0:
                 est = timedelta(seconds=worst_sec)
-                if datetime.now(timezone.utc) + est > deadline:
+                if datetime.now(timezone.utc) + est > loop_deadline:
                     truncated = True
                     log.warning(
                         "予算の手前で探索を畳みます（#638）: %d/%d 件まで評価済み・"
                         "締切=%s・次の1件の見積り=%.1f分（観測した最大値）",
-                        i, n_planned, deadline.isoformat(), worst_sec / 60.0,
+                        i, n_planned, loop_deadline.isoformat(), worst_sec / 60.0,
                     )
                     break
             t0 = datetime.now(timezone.utc)
@@ -309,13 +362,18 @@ async def search(
                 with tuning_dry_run():
                     result = await execute_plugin(plugin, raw, db)
             except Exception as e:
-                leaderboard.append({"params": combo, "score": None, "error": str(e)})
+                elapsed = (datetime.now(timezone.utc) - t0).total_seconds()
+                leaderboard.append({"params": combo, "score": None, "error": str(e),
+                                    "elapsed_sec": round(elapsed, 1)})
                 log.info("[%d/%d] 失敗（契約違反 or 実行時例外）: %s params=%s",
                           i + 1, n_planned, e, combo)
             else:
+                elapsed = (datetime.now(timezone.utc) - t0).total_seconds()
                 oof = result.get("oof_backtest") or {}
                 score = _score(oof, objective)
-                leaderboard.append({"params": combo, "score": score, "oof": oof})
+                # 所要は確かめ直す段（#984）が候補ごとの見積りに使う
+                leaderboard.append({"params": combo, "score": score, "oof": oof,
+                                    "elapsed_sec": round(elapsed, 1)})
                 log.info("[%d/%d] score=%s params=%s", i + 1, n_planned, score, combo)
             # **失敗した候補の所要も数える**。契約違反で即返る候補ばかり見ていると見積りが
             # 0 に張り付き、重い候補が1件でも残っていれば締切を踏み越える。
@@ -325,7 +383,129 @@ async def search(
                 if partial is not None:
                     on_progress(partial)
 
-    final = _snapshot()
-    if final is None:
-        raise ValueError("有効なスコアが1件も得られませんでした（全候補が失敗/契約違反/スコア算出不能）")
+        final = _snapshot()
+        if final is None:
+            raise ValueError("有効なスコアが1件も得られませんでした（全候補が失敗/契約違反/スコア算出不能）")
+        if confirm:
+            # 探索と同じキャッシュ・objective_only の内側で回す（断面を作り直さない）
+            await _confirm_by_seeds(
+                final, leaderboard, champion_combo, plugin=plugin, base_params=base_params, db=db,
+                objective=objective, top=confirm_top, n_seeds=confirm_seeds, deadline=deadline,
+                execute_plugin=execute_plugin, tuning_dry_run=tuning_dry_run,
+            )
     return final
+
+
+async def _confirm_by_seeds(
+    final: dict,
+    leaderboard: list[dict],
+    champion_combo: dict | None,
+    *,
+    plugin: Any,
+    base_params: dict,
+    db: Any,
+    objective: str,
+    top: int,
+    n_seeds: int,
+    deadline: datetime | None,
+    execute_plugin: Callable,
+    tuning_dry_run: Callable,
+) -> None:
+    """上位の候補を種を変えて回し直し、種の平均で選び直す（#984）。`final` をその場で書き換える。
+
+    - 対象: 既定の種の score の上位 `top` 候補（同じ params は 1 つ）＋本番の候補（champion）が居なければ足す。
+      champion を必ず入れるのは、ADR-0047 の「本番より悪い候補は選ばない」（探索のプールに champion を置くと
+      best >= champion が成り立つ）を、種の平均で選び直した後も保つため
+    - 回し方: **種の順**（全候補を種 base+1、次に全候補を種 base+2 …）。各巡の前に、その巡が `deadline` に入るかを
+      候補ごとの所要（探索での所要と、それまでの巡の最大）の合計で見積もり、入らなければ止める——どの候補も同じ数の
+      種で比べるため。1 巡も回れなければ既定の種だけで比べる＝探索の選択と同じになる
+    - 選び方: 回った種の平均が最も高い候補。ある種で失敗した候補（score が None）は比べる対象から外す
+    - 書き換えるもの: `best_params` / `best_score`（**種の平均**）/ `best_oof`（既定の種の OOF）/ `champion_score`
+      （champion の種の平均）。候補の leaderboard の行に `seed_scores`（{種: score}）と `seed_mean` を足し、
+      `config["confirm"]` に段の要約を置く
+    """
+    base_seed = int(plugin.tuning_seed_base)
+    scored = sorted((e for e in leaderboard if e["score"] is not None),
+                    key=lambda e: e["score"], reverse=True)
+    picked: list[dict] = []
+    seen: set = set()
+    for e in scored:
+        k = _combo_key(e["params"])
+        if k in seen:
+            continue
+        picked.append(e)
+        seen.add(k)
+        if len(picked) == top:
+            break
+    champion_added = False
+    if champion_combo is not None:
+        ck = _combo_key(champion_combo)
+        if ck not in seen:
+            ce = next((e for e in scored if _combo_key(e["params"]) == ck), None)
+            if ce is not None:
+                picked.append(ce)
+                seen.add(ck)
+                champion_added = True
+
+    for e in picked:
+        e["seed_scores"] = {str(base_seed): e["score"]}
+    est = [max(float(e.get("elapsed_sec") or 0.0), 1.0) for e in picked]
+    rounds = 0
+    truncated = False
+    for k in range(1, n_seeds):
+        s = base_seed + k
+        need = sum(est)
+        if deadline is not None and datetime.now(timezone.utc) + timedelta(seconds=need) > deadline:
+            truncated = True
+            log.warning("確かめ直す段を種 %d の手前で止めます（#984）: %d/%d 個の種まで・締切=%s・"
+                        "次の巡の見積り=%.1f分", s, 1 + rounds, n_seeds, deadline.isoformat(), need / 60.0)
+            break
+        for j, e in enumerate(picked):
+            t0 = datetime.now(timezone.utc)
+            try:
+                with seed_override(s), tuning_dry_run():
+                    res = await execute_plugin(plugin, {**base_params, **e["params"]}, db)
+                sc = _score(res.get("oof_backtest") or {}, objective)
+            except Exception as ex:          # 1 回の失敗で段全体は止めない（その候補だけ比べる対象から外す）
+                sc = None
+                log.info("[confirm seed=%d] 失敗: %s params=%s", s, ex, e["params"])
+            est[j] = max(est[j], (datetime.now(timezone.utc) - t0).total_seconds())
+            e["seed_scores"][str(s)] = sc
+            log.info("[confirm seed=%d %d/%d] score=%s params=%s", s, j + 1, len(picked), sc, e["params"])
+        rounds += 1
+
+    for e in picked:
+        vals = list(e["seed_scores"].values())
+        e["seed_mean"] = (statistics.mean(vals) if vals and all(v is not None for v in vals) else None)
+    eligible = [e for e in picked if e["seed_mean"] is not None]
+    chosen = max(eligible, key=lambda e: e["seed_mean"]) if eligible else picked[0]
+    seed_base_best = scored[0]
+
+    final["best_params"] = {**base_params, **chosen["params"]}
+    final["best_score"] = chosen["seed_mean"] if chosen.get("seed_mean") is not None else chosen["score"]
+    final["best_oof"] = chosen.get("oof") or {}
+    if champion_combo is not None:
+        ck = _combo_key(champion_combo)
+        ce = next((e for e in picked if _combo_key(e["params"]) == ck), None)
+        if ce is not None and ce.get("seed_mean") is not None:
+            final["champion_score"] = ce["seed_mean"]
+    final["config"]["confirm"] = {
+        "top": top,
+        "seeds_planned": n_seeds,
+        "seeds_completed": 1 + rounds,
+        "seeds": [base_seed + k for k in range(1 + rounds)],
+        "truncated": truncated,
+        "n_candidates": len(picked),
+        "champion_added": champion_added,
+        "changed": _combo_key(chosen["params"]) != _combo_key(seed_base_best["params"]),
+        "seed_base_best_params": seed_base_best["params"],
+        "seed_base_best_score": seed_base_best["score"],
+        "selected_seed_base_score": chosen["score"],
+    }
+    log.info("確かめ直す段（#984）: %d 候補 × 種 %d 個で選び直しました。種の平均で 1 位: %s（平均 %s・"
+             "種 %d では %s）。種 %d だけで選んだときの 1 位: %s（%s）。入れ替わり=%s",
+             len(picked), 1 + rounds, chosen["params"], chosen.get("seed_mean"), base_seed, chosen["score"],
+             base_seed, seed_base_best["params"], seed_base_best["score"],
+             final["config"]["confirm"]["changed"])
+    for e in picked:
+        log.info("  [confirm] mean=%s seeds=%s params=%s", e.get("seed_mean"), e["seed_scores"], e["params"])

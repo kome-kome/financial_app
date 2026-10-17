@@ -826,3 +826,121 @@ class TestOnProgress:
                                    on_progress=lambda p: seen.append(p)))
         assert set(seen[-1]) == set(final)
         assert set(seen[-1]["config"]) == set(final["config"])
+
+
+# ── 上位の候補を種を変えて確かめ直す段（#984）──────────────────────────────────
+
+from plugins.tuning import CONFIRM_RESERVE_MIN, seed_override, seeded  # noqa: E402
+
+# 候補 x の種によらない水準と、種ごとの上乗せ。既定の種 42 だけ x=1 を押し上げる＝種 42 だけで選ぶと x=1、
+# 種 5 個の平均で選ぶと x=2（0.12）。x=3 は種 42 だけ押し下げてあり、平均では 0.124 で最も高い。
+_LEVEL = {1: 0.10, 2: 0.12, 3: 0.13, 4: 0.05}
+_BUMP = {(1, 42): 0.05, (3, 42): -0.03}
+
+
+class _SeededPlugin:
+    """種で結果が動くプラグインの代わり。execute の中で `seeded(42)` を読み、見た (x, 種) を記録する。"""
+    name = "fake_seeded"
+    depends_on: list = []
+    tuning_seed_base = 42
+
+    def __init__(self, fail_at=None):
+        self.seen: list = []
+        self.fail_at = fail_at or set()
+
+    def params_schema(self) -> dict:
+        return {"x": {"type": "slider", "dtype": "int", "default": 1, "min": 1, "max": 4}}
+
+    def execute(self, params: dict, db) -> dict:
+        s = seeded(42)
+        x = params["x"]
+        self.seen.append((x, s))
+        if (x, s) in self.fail_at:
+            raise RuntimeError("この種では落ちる")
+        score = _LEVEL[x] + _BUMP.get((x, s), 0.0)
+        return {"oof_backtest": {"rank_ic": {"mean": score, "std": 1.0, "n": 5}}}
+
+
+def _confirm(plugin, **kw):
+    dims = [SearchDim("x", [1, 2, 3, 4])]
+    return asyncio.run(search(plugin, {}, dims, db=None, strategy="grid", **kw))
+
+
+class TestSeedOverride:
+    def test_default_outside_and_override_inside(self):
+        assert seeded(42) == 42
+        with seed_override(44):
+            assert seeded(42) == 44
+            with seed_override(45):
+                assert seeded(42) == 45
+            assert seeded(42) == 44
+        assert seeded(42) == 42
+
+
+class TestConfirmBySeeds:
+    """探索の後で上位の候補を種を変えて回し直し、種の平均で選び直す（#984）。"""
+
+    def test_without_the_stage_the_lucky_seed_wins(self):
+        r = _confirm(_SeededPlugin())
+        assert r["best_params"] == {"x": 1}
+        assert "confirm" not in r["config"]
+
+    def test_the_stage_picks_the_best_mean_over_seeds(self):
+        p = _SeededPlugin()
+        r = _confirm(p, confirm_top=2, confirm_seeds=5)
+        c = r["config"]["confirm"]
+        assert r["best_params"] == {"x": 2}                    # 種 42 だけなら x=1
+        assert r["best_score"] == pytest.approx(0.12)          # 保存する値は種の平均
+        assert c["changed"] is True and c["seed_base_best_params"] == {"x": 1}
+        assert c["seeds"] == [42, 43, 44, 45, 46] and c["seeds_completed"] == 5 and c["truncated"] is False
+        assert c["n_candidates"] == 2 and c["champion_added"] is False
+        # 上書きした種が execute（to_thread の中）まで届いた＝同じ種を 5 回回しただけではない
+        assert {s for x, s in p.seen if x in (1, 2)} == {42, 43, 44, 45, 46}
+        assert not any(x in (3, 4) and s != 42 for x, s in p.seen)    # 上位 2 の外は回し直さない
+        row = next(e for e in r["leaderboard"] if e["params"] == {"x": 1})
+        assert row["seed_scores"]["42"] == pytest.approx(0.15) and row["seed_mean"] == pytest.approx(0.11)
+
+    def test_the_champion_is_always_rechecked(self):
+        """本番の候補は上位に居なくても必ず回し直す（ADR-0047 の「本番より悪い候補は選ばない」を保つ）。"""
+        r = _confirm(_SeededPlugin(), confirm_top=2, confirm_seeds=5, champion_params={"x": 3})
+        c = r["config"]["confirm"]
+        assert c["champion_added"] is True and c["n_candidates"] == 3
+        assert r["best_params"] == {"x": 3}                    # 種 42 では 3 位だが平均では最も高い
+        assert r["champion_score"] == pytest.approx(0.124) == r["best_score"]
+
+    def test_a_candidate_that_fails_on_a_seed_is_not_compared(self):
+        r = _confirm(_SeededPlugin(fail_at={(2, 44)}), confirm_top=2, confirm_seeds=5)
+        assert r["best_params"] == {"x": 1}
+        row = next(e for e in r["leaderboard"] if e["params"] == {"x": 2})
+        assert row["seed_scores"]["44"] is None and row["seed_mean"] is None
+
+    def test_the_search_body_folds_early_to_leave_time_for_the_stage(self):
+        """締切が段の取り置き（CONFIRM_RESERVE_MIN）より近いと、探索の本体は先頭の1件で畳み、段は回る。"""
+        soon = datetime.now(timezone.utc) + timedelta(minutes=CONFIRM_RESERVE_MIN / 2)
+        r = _confirm(_SeededPlugin(), confirm_top=2, confirm_seeds=3, deadline=soon)
+        assert r["config"]["n_combos"] == 1 and r["config"]["truncated"] is True
+        assert r["config"]["confirm"]["seeds_completed"] == 3
+        r0 = _confirm(_SeededPlugin(), deadline=soon)           # 段が無ければ同じ締切で全件回る
+        assert r0["config"]["n_combos"] == 4
+
+    def test_a_past_deadline_keeps_the_base_seed_choice(self):
+        """1 巡も回れなければ既定の種だけで比べる＝探索の選択と同じ（失敗にはしない）。"""
+        past = datetime.now(timezone.utc) - timedelta(hours=1)
+        p = _SeededPlugin()
+        r = _confirm(p, confirm_top=2, confirm_seeds=5, deadline=past)
+        c = r["config"]["confirm"]
+        assert c["truncated"] is True and c["seeds_completed"] == 1 and c["changed"] is False
+        assert all(s == 42 for _x, s in p.seen)
+
+    @pytest.mark.parametrize("kw", [dict(confirm_top=0, confirm_seeds=5),
+                                    dict(confirm_top=2, confirm_seeds=1),
+                                    dict(confirm_top=2, confirm_seeds=0)])
+    def test_both_settings_are_required(self, kw):
+        with pytest.raises(ValueError, match="confirm"):
+            _confirm(_SeededPlugin(), **kw)
+
+    def test_a_plugin_that_does_not_depend_on_seeds_is_rejected(self):
+        dims = [SearchDim("x", [0, 3, 5])]
+        with pytest.raises(ValueError, match="tuning_seed_base"):
+            asyncio.run(search(_QuadraticPlugin(), {"y": 2}, dims, db=None, strategy="grid",
+                               confirm_top=2, confirm_seeds=3))
