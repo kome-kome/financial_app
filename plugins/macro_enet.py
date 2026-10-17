@@ -86,12 +86,15 @@ from .model_candidates import _EN_N_ALPHAS as _N_ALPHAS
 
 # α・l1_ratio を選ぶ内側 CV の区切り方（#971・`model_candidates.elasticnet_inner_cv`）。**CV と最終モデルの
 # 両方へこの1つを渡す**（片方だけ切り替えると、検証した区切り方と本番の μ̂ の区切り方が割れる）。
-# 既定は月の境界でだけ区切る `months`（#964）。行で区切る `rows` は区切りが月の途中に落ち、月内の社の順
-# だけで最終モデルの α が 165 倍動いた。2026-10-17 の `momentum_gate --inner-cv`（共通域・18 期間）で、
-# 測る前に固定した規則（rank-IC か short_side_spread の差の 95%CI が丸ごと 0 より下なら採らない）に
-# 当たらなかったので切り替えた。M-4（退役済み）と候補メニューは関数の既定（`rows`）のままで、ここに追随しない。
+# 既定は月の塊で区切ったうえで、学習の最後の月と検証の最初の月の間を `LABEL_HORIZON_MONTHS` か月を上限に
+# 空ける `months_purged`（#968）。目的変数は 52 週先リターンで、隣り合う月のラベル期間がほぼ丸ごと重なる
+# ので、空けないと検証誤差が楽観的になる。その前の `months`（#964）は行で区切る `rows` の「区切りが月の途中に
+# 落ち、月内の社の順だけで最終モデルの α が 165 倍動く」を直したもので、`months_purged` もこの性質を保つ。
+# どちらも 2026-10-17 の `momentum_gate`（`--inner-cv` → `--inner-cv-purge`・共通域・18 期間）で、測る前に
+# 固定した規則（rank-IC か short_side_spread の差の 95%CI が丸ごと 0 より下なら採らない）に当たらなかった
+# ので切り替えた。M-4（退役済み）と候補メニューは関数の既定（`rows`）のままで、ここに追随しない。
 # `momentum_gate` の分母と M-6 の既定の条件はこの値から取る（ゲートの「本番の構成」を書き写さない）。
-_INNER_CV = "months"
+_INNER_CV = "months_purged"
 
 
 def _final_training_rows(samples_by_ym: dict, inner_cv: str) -> tuple[list, list[int] | None]:
@@ -525,7 +528,7 @@ class MacroEnetPlugin(AnalysisPlugin):
         `contrib` は (現在断面の社数 × 特徴量数) の配列。M-4（`macro_ensemble`）は3つ組で呼ぶ。
 
         `inner_cv` / `train_groups`（#971）は CV の fit_predict と同じ内側 CV の区切り方
-        （`elasticnet_inner_cv`）。`months` では `all_samples` が月の昇順に連結され、`train_groups` が
+        （`elasticnet_inner_cv`）。`months`・`months_purged` では `all_samples` が月の昇順に連結され、`train_groups` が
         その各月の行数であること（`_final_training_rows` が作る）。既定 `rows` は修正前と同一。
         """
         from sklearn.linear_model import ElasticNetCV
