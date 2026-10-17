@@ -358,9 +358,9 @@ CV へ渡す候補の opts だけ（`cv_opts`）。測るのは M-6 だけで（
 ## M-2 の early stopping の検証集合の取り方を比べるモード（`--valid-split`・#976）
 
 M-2 は学習行の末尾 2 割を early stopping の検証集合にし、各 fold の best_iteration の中央値を最終モデルの
-木の本数に使う。`valid_rows`（本番・分母）は行の番号で取るので区切りが月の途中に落ち、その月のどの社が
+木の本数に使う。`valid_rows` は行の番号で取るので区切りが月の途中に落ち、その月のどの社が
 fit 側・検証側に入るかが月内の並びで決まる（#969）。`valid_months` は末尾の月を丸ごと取る
-（`macro_gbdt._tail_month_valid_rows`）。`--inner-cv` と同じ形で、**パネルは2条件で同一**（`panel_cond`）、
+（`macro_gbdt._tail_month_valid_rows`）。#969 で本番（分母）を `valid_months` へ切り替えた（2026-10-17）。`--inner-cv` と同じ形で、**パネルは2条件で同一**（`panel_cond`）、
 差し替えるのは M-2 の CV へ渡す候補の opts だけ（`cv_opts`）。測るのは M-2 だけ（種 5 個の平均・#955）で、
 1モデル × 2指標 ＝2検定・α 0.025。CV の後、各条件の診断値の `valid_split` が指定どおりかを確かめ、違えば止める
 （`valid_split_reach_problems`）。日中キューの名前は `gate:valid-split`（**積むのは人**）。分母と `Cond.valid_split`
@@ -1049,10 +1049,10 @@ _AXIS_VERDICTS: dict[str, tuple[str, str]] = {
     # 書いていたが、分母が入れ替わったので、どちらの向きでも読める形にした。
     "inner_cv": ("INNER CV AXIS [M-6 only; same panel on both sides]",
                  "the other inner CV split did not beat the production split"),
-    # 分母は本番（`valid_rows`）。パネルは2条件で同一で、差は M-2 の early stopping の検証集合だけ（#976）。
+    # 分母は本番（#969 で `valid_months`）。パネルは2条件で同一で、差は M-2 の early stopping の検証集合だけ
+    # （#976）。分母が入れ替わったので、`inner_cv` と同じくどちらの向きでも読める形にした。
     "valid_split": ("VALID SPLIT AXIS [M-2 only; same panel on both sides]",
-                    "taking the early-stopping validation set as whole tail months did not beat taking "
-                    "the tail rows"),
+                    "the other early-stopping validation set did not beat the production one"),
     # 分母は本番（`nogap`＝`months`）。パネルは2条件で同一で、差は M-6 の内側 CV の空白だけ（#979）。
     "inner_cv_purge": ("INNER CV PURGE AXIS [M-6 only; same panel on both sides]",
                        "leaving a label-horizon gap between the inner training and validation months "
@@ -2316,8 +2316,8 @@ def main() -> None:
                          "（#964）と、行で区切る rows を共通域で比べる・#971）。パネルは2条件で同一。"
                          f"モデルは {','.join(INNER_CV_MODELS)} だけ。他モードと併用不可")
     ap.add_argument("--valid-split", dest="valid_split", action="store_true",
-                    help="M-2 の early stopping の検証集合のモード（末尾の行で取る valid_rows＝本番と、末尾の月を"
-                         "丸ごと取る valid_months を共通域で比べる・#976）。パネルは2条件で同一。"
+                    help="M-2 の early stopping の検証集合のモード（末尾の月を丸ごと取る valid_months＝本番（#969）と、"
+                         "末尾の行で取る valid_rows を共通域で比べる・#976）。パネルは2条件で同一。"
                          f"モデルは {','.join(VALID_SPLIT_MODELS)} だけ。他モードと併用不可")
     ap.add_argument("--inner-cv-purge", dest="inner_cv_purge", action="store_true",
                     help="M-6 の内側 CV の空白のモード（月の塊で区切る nogap＝本番の months と、学習の最後の月と検証の"

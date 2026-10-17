@@ -81,7 +81,8 @@ class TestOptions:
         conds = build_conditions(inner_cv_purge=True)
         assert cv_opts(conds["nogap"], "elasticnet") == {"inner_cv": "months"}
         assert cv_opts(conds["gap"], "elasticnet") == {"inner_cv": "months_purged"}
-        assert cv_opts(conds["gap"], "xgb_m2") is None
+        # M-2 には内側 CV の軸が漏れない（M-2 に渡るのは M-2 自身の本番の検証集合だけ・#969）
+        assert "inner_cv" not in (cv_opts(conds["gap"], "xgb_m2") or {})
 
     @pytest.mark.parametrize("kwargs", [
         dict(), dict(windows=[3, 12]), dict(macro=True), dict(interactions=True),

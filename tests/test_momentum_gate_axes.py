@@ -420,7 +420,8 @@ class TestInnerCvMode:
         conds = build_conditions(inner_cv=True)
         assert cv_opts(conds["rows"], "elasticnet") is None
         assert cv_opts(conds["months"], "elasticnet") == {"inner_cv": "months"}
-        assert cv_opts(conds["months"], "xgb_m2") is None
+        # M-2 には内側 CV の軸が漏れない（M-2 に渡るのは M-2 自身の本番の検証集合だけ・#969）
+        assert "inner_cv" not in (cv_opts(conds["months"], "xgb_m2") or {})
         assert cv_opts(conds["months"], "risk_return") is None
 
     def test_reach_check(self):
@@ -569,7 +570,8 @@ class TestExistingModesAreUnchanged:
                 if momentum_gate.MODEL_SPECS[model][1] == "elasticnet":
                     assert cv_opts(c, model) == {"inner_cv": me._INNER_CV}
                 else:
-                    assert cv_opts(c, model) is None
+                    # 内側 CV の軸は M-6 以外へ漏れない（M-2 には本番の検証集合だけが渡る・#969）
+                    assert "inner_cv" not in (cv_opts(c, model) or {})
 
 
 class TestBuildUsesTheConditionAxes:

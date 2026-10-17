@@ -335,13 +335,13 @@ JOBS: dict[str, Job] = {
         parallel_sensitive=True,   # 他の gate と同じ理由（採否が CI の符号で決まる）
     ),
     # M-2 の early stopping の検証集合を末尾の月の塊で取るか（#969）を測る道具（#976）。
-    # **積むのは人**（#969 で読んで、本番の `macro_gbdt._VALID_SPLIT` を切り替えるかを決める）。
+    # **積むのは人**。#969 は 2026-10-17 の結果で本番（`macro_gbdt._VALID_SPLIT`）を `months` へ切り替えた。
     "gate:valid-split": Job(
         name="gate_valid_split",
         argv=("{python}", "-m", "scripts.momentum_gate", "--valid-split",
               "--stride", "1", "--allow-full-pull", "--refresh-cache"),
-        why="M-2 の early stopping の検証集合を末尾の行で取る（本番・valid_rows）か、末尾の月を丸ごと取る"
-            "（valid_months）かを共通 (ym,ec) 域で比べる（#976・#969）。パネルは2条件で同一で、母集団は動かない。"
+        why="M-2 の early stopping の検証集合を末尾の月を丸ごと取る（本番・valid_months）か、末尾の行で取る"
+            "（valid_rows）かを共通 (ym,ec) 域で比べる（#976・#969）。パネルは2条件で同一で、母集団は動かない。"
             "対象は M-2 だけ（種 5 個の平均）・2検定・alpha 0.025。切り替えが CV に届いていなければ非0で止まる。",
         # 2026-10-17 の実測（土曜に -Now -Force で消化・並走なし）。見積り 16.0 から差し替えた。
         measured_min=15.0,

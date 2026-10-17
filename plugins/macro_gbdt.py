@@ -200,11 +200,13 @@ _MIN_FIT_N  = 5            # この未満なら early_stopping を諦め固定 n
 # early_stopping の検証集合の取り方（#976・#969）。`rows` は末尾 `_VALID_FRAC` の行を行の番号で取る今の方式で、
 # 区切りが月の途中に落ちる（その月のどの社が fit 側・検証側に入るかが月内の並びで決まる）。`months` は末尾の
 # 月を丸ごと取る（`_tail_month_valid_rows`）。`_VALID_SPLIT_DEFAULT` は関数の既定＝opts を省いたときに回る方式。
-# **M-2 本体の既定は `_VALID_SPLIT`（`rows` のまま）**。`months` へ切り替えるかは #969 が
-# `momentum_gate --valid-split` の結果で決める。
+# **M-2 本体の既定は `_VALID_SPLIT`（#969 で `months`）**。2026-10-17 の `momentum_gate --valid-split`（共通域・
+# 18 期間・種 5 個の平均）で、測る前に固定した規則（rank-IC か short_side_spread の差の 95%CI が丸ごと 0 より下なら
+# 採らない）に当たらなかったので切り替えた。M-4（退役済み）と候補メニューは関数の既定（`rows`）のまま。
+# `momentum_gate` の分母と `Cond.valid_split` の既定はこの値から取る（ゲートの「本番の構成」を書き写さない）。
 _VALID_SPLIT_CHOICES = ("rows", "months")
 _VALID_SPLIT_DEFAULT = "rows"
-_VALID_SPLIT = "rows"
+_VALID_SPLIT = "months"
 
 # ── SHAP 解釈性強化（signed SHAP＋交互作用・Issue #371）────────────────────────
 _INTERACT_TOP_K   = 15     # グローバル交互作用の上位ペア表示件数

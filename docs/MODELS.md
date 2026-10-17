@@ -1132,7 +1132,10 @@ M-1 から**交差項（`fin×macro`）を除いた**同一セット。BIC/LASSO
 各フォールド（train 月 < test 月・`min_train_months=6`・`step_months=3`）で:
 
 1. y を p1-p99 winsorize（X は winsorize しない。木は単調不変）
-2. train の時系列末尾 20% を `eval_set`（リーク安全・実運用設定を模す）
+2. train の時系列末尾の**月を丸ごと**、行数が 20% に最も近くなるだけ `eval_set` にする（リーク安全・実運用設定を模す）。
+   行の番号で末尾 20% を取ると区切りが月の途中に落ち、同じ月のどの社が fit 側・検証側に入るかが社の並びで
+   決まるので、月の塊で取る（`macro_gbdt._VALID_SPLIT`・#969。共通域の対比較で劣後しないことを確かめて
+   2026-10-17 に切り替えた・数値は #969）
 3. `early_stopping_rounds`（既定 40）で過学習を検知して学習停止
 4. `best_iteration` を記録
 

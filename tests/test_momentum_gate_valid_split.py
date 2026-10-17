@@ -1,6 +1,6 @@
 """`scripts/momentum_gate.py` の M-2 の検証集合のモード（`--valid-split`・#976・#969）。
 
-M-2 の early stopping の検証集合を、末尾の行で取る（本番・`valid_rows`）か末尾の月を丸ごと取る（`valid_months`）かを
+M-2 の early stopping の検証集合を、末尾の月を丸ごと取る（本番・`valid_months`・#969）か末尾の行で取る（`valid_rows`）かを
 共通域で比べる道具。`--inner-cv` と同じ形で、危ないのは**黙って同じものを比べる**形:
 
   - opts が候補まで届かず、両条件とも行で取る（`walk_forward_cv_monthly` は fit_predict の例外を握るので、
@@ -35,10 +35,10 @@ class TestConditions:
         assert tuple(VALID_SPLIT_CONDS.values()) == mg._VALID_SPLIT_CHOICES
 
     def test_other_axes_stay_at_the_production_shape(self):
-        """差し替えるのは検証集合の取り方だけ。本番（`rows`）の側が `Cond` の既定そのもの。"""
+        """差し替えるのは検証集合の取り方だけ。本番（#969 で `months`）の側が `Cond` の既定そのもの。"""
         conds = build_conditions(valid_split=True)
-        assert conds["valid_rows"] == momentum_gate.Cond(False, MOM_WINDOW)
-        assert conds["valid_months"]._replace(valid_split="rows") == conds["valid_rows"]
+        assert conds["valid_months"] == momentum_gate.Cond(False, MOM_WINDOW)
+        assert conds["valid_rows"]._replace(valid_split="months") == conds["valid_months"]
 
     def test_both_sides_share_one_panel(self):
         conds = build_conditions(valid_split=True)
@@ -91,10 +91,10 @@ class TestOptions:
         dict(fin_fill=True), dict(inner_cv=True), dict(size_neutral=True),
     ])
     def test_existing_modes_keep_the_production_valid_split(self, kwargs):
-        """既存モードの M-2 は本番の取り方のまま（opts を渡さない）。パネルの鍵も変わらない。"""
+        """既存モードの M-2 は本番の取り方（#969 で months）で回る。パネルの鍵も変わらない。"""
         for c in build_conditions(**kwargs).values():
             assert c.valid_split == mg._VALID_SPLIT
-            assert cv_opts(c, "xgb_m2") is None
+            assert cv_opts(c, "xgb_m2") == {"valid_split": mg._VALID_SPLIT}
             assert panel_cond(c)._replace(inner_cv=c.inner_cv) == c
 
 
