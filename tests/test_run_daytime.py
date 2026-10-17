@@ -550,7 +550,8 @@ class TestDeExcludeGateMeasuresM2AndM6:
 
 
 class TestInnerCvGateMeasuresM6:
-    """M-6 の内側 CV の区切り方のジョブ（#971・#964）は M-6 だけを、間引かずに、本番（rows）を分母に測る。
+    """M-6 の内側 CV の区切り方のジョブ（#971・#964）は M-6 だけを、間引かずに、本番を分母に測る
+    （#964 で本番は rows → months へ切り替わった。分母は `macro_enet._INNER_CV` から取る）。
 
     事前登録（ADR-0050 の 2026-10-17 追記）は「M-6 だけ・rows / months・2検定・α 0.025」。M-2 を混ぜると
     この軸を持たないモデルの同じ CV を2回回すだけになり、`build_conditions` が止める（平日1日ぶんの枠が消える）。
@@ -569,8 +570,10 @@ class TestInnerCvGateMeasuresM6:
     def test_the_preregistered_base_and_tests(self):
         from scripts.momentum_gate import INNER_CV_MODELS, base_of, bonferroni_alpha, build_conditions
 
+        import plugins.macro_enet as me
+
         conds = build_conditions(inner_cv=True, models=INNER_CV_MODELS)
-        assert base_of(conds) == "rows"                      # 本番の構成
+        assert base_of(conds) == me._INNER_CV == "months"     # 本番の構成（#964）
         assert bonferroni_alpha(len(INNER_CV_MODELS), len(conds)) == pytest.approx(0.025)
 
     def test_the_job_measures_at_full_resolution(self):

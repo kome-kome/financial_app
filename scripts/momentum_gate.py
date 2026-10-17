@@ -343,15 +343,17 @@ blank_groups`（`OOF_CSV_COLUMNS`）で、`standard` は会計基準、`blank_gr
 
 ## M-6 の内側 CV の区切り方を比べるモード（`--inner-cv`・#971）
 
-M-6 は α・l1_ratio を学習 fold の中の時系列分割 CV で選ぶ。本番（`rows`・分母）は行の番号で区切るので
+M-6 は α・l1_ratio を学習 fold の中の時系列分割 CV で選ぶ。`rows` は行の番号で区切るので
 区切りが月の途中に落ち、月内の並び（社の順）だけで最終モデルの α が 165 倍動く（#964）。`months` は
-月の境界でだけ区切る（`model_candidates.month_block_splits`）。**パネルは2条件で同一**で、パネルの鍵から
+月の境界でだけ区切る（`model_candidates.month_block_splits`）。#964 で本番（分母）を `months` へ切り替えた
+（2026-10-17）。**パネルは2条件で同一**で、パネルの鍵から
 この軸を外して1枚を共有する（`panel_cond`）＝母集団は動かず、共通域は全行になる。差し替えるのは M-6 の
 CV へ渡す候補の opts だけ（`cv_opts`）。測るのは M-6 だけで（M-2・M-1 にこの軸は無い）、1モデル × 2指標
 ＝2検定・α 0.025。CV の後、各条件の診断値の `inner_cv` が指定どおりかを確かめ、違えば止める
 （`inner_cv_reach_problems`。届かないまま走ると両条件が同じ CV になり「差なし」だけが残る）。日中キューの
-名前は `gate:inner-cv`（**積むのは人**）。分母は M-6 本体の `macro_enet._INNER_CV` と一致することを
-テストが縛る——#964 で本番を切り替えたら、ここの分母も見直す。
+名前は `gate:inner-cv`（**積むのは人**）。分母と、他のモードで M-6 を回すときの区切り方（`Cond.inner_cv`
+の既定）は M-6 本体の `macro_enet._INNER_CV` から取る（書き写すと、本番を切り替えたときに全ゲートの M-6 が
+黙って旧い区切り方を測る）。opts を省くかどうかは本番の値ではなく候補の既定（`_EN_INNER_CV_DEFAULT`）と比べる。
 
 ## 規模で中立化した順位を比べるモード（`--size-neutral`・#970）
 
@@ -420,7 +422,8 @@ from plugins.macro_snapshots import (  # noqa: E402
     preload_macro,
     use_fin_rows,
 )
-from plugins.model_candidates import _EN_INNER_CV_CHOICES  # noqa: E402
+from plugins.macro_enet import _INNER_CV as _M6_INNER_CV  # noqa: E402
+from plugins.model_candidates import _EN_INNER_CV_CHOICES, _EN_INNER_CV_DEFAULT  # noqa: E402
 from plugins.utils import coerce_params  # noqa: E402
 from scripts._cache import cached, set_refresh  # noqa: E402
 from scripts.candidate_bakeoff import (  # noqa: E402
@@ -476,9 +479,10 @@ class Cond(NamedTuple):
     埋めるか。既定 False は本番の構成（空欄の行を捨てる）で、既存モードの測定条件はやはり動かない。
     差し替えは読み込んだ財務の行だけで行い、VIEW は変えない（`fill_fin_blanks`）。
 
-    `inner_cv`（#971）は M-6 の α・l1_ratio を選ぶ内側 CV の区切り方。既定 `rows` は本番の構成で、
-    既存モードの測定条件はやはり動かない。**この欄だけはパネルを動かさない**——パネルの鍵からは外し
-    （`panel_cond`）、M-6 の CV へ渡す opts にだけ効く（`cv_opts`）。
+    `inner_cv`（#971）は M-6 の α・l1_ratio を選ぶ内側 CV の区切り方。既定は本番の構成
+    （`macro_enet._INNER_CV`・#964 で `months`）から取る＝どのモードでも M-6 は本番の区切り方で回る。
+    **この欄だけはパネルを動かさない**——パネルの鍵からは外し（`panel_cond`）、M-6 の CV へ渡す opts に
+    だけ効く（`cv_opts`）。
     """
     use_momentum: bool
     momentum_window: int
@@ -490,7 +494,7 @@ class Cond(NamedTuple):
     fin_nan_ok: bool = False
     de_null_industries: tuple[str, ...] = ()
     fin_fill: bool = False
-    inner_cv: str = "rows"
+    inner_cv: str = _M6_INNER_CV
 
 
 CONDS: dict[str, bool] = {"off": False, "on": True}
@@ -578,12 +582,12 @@ FIN_FILL_MODELS = ["xgb_m2", "elasticnet"]
 # 埋める判定に使う列（VIEW の生の値）。財務の行（`_FIN_FIELDS`）には入っていないので別に引く。
 FIN_FILL_SOURCE_FIELDS = ("dps", "stock_price", "pl_rd_expenses", "pl_revenue")
 
-# M-6 の内側 CV の区切り方を比べるモード（`--inner-cv`・#971）。**基準は本番の構成（行で区切る `rows`）**。
-# 条件名は候補実装の選択肢そのもの（書き写さない）。2条件のパネルは同一で、M-6 の CV へ渡す候補の opts
-# だけを差し替える。分母が M-6 本体の `macro_enet._INNER_CV` と一致することはテストが縛る（#964 で本番を
-# 切り替えたら見直す）。M-2・M-1 にこの軸は無いので測らない（同じ CV を2回回すだけになる）。
+# M-6 の内側 CV の区切り方を比べるモード（`--inner-cv`・#971）。**基準は本番の構成**（M-6 本体の
+# `macro_enet._INNER_CV`・#964 で `months`）で、書き写さずにそこから取る。条件名は候補実装の選択肢そのもの
+# （書き写さない）。2条件のパネルは同一で、M-6 の CV へ渡す候補の opts だけを差し替える。
+# M-2・M-1 にこの軸は無いので測らない（同じ CV を2回回すだけになる）。
 INNER_CV_CONDS: tuple[str, ...] = _EN_INNER_CV_CHOICES
-INNER_CV_BASE_COND = "rows"
+INNER_CV_BASE_COND = _M6_INNER_CV
 INNER_CV_MODELS = ["elasticnet"]
 
 # 規模で中立化した順位を比べるモード（`--size-neutral`・#970）。**基準は本番の構成（予測そのまま `raw`）**。
@@ -1718,8 +1722,13 @@ def panel_cond(c: Cond) -> Cond:
 
 
 def cv_opts(c: Cond, model: str) -> dict | None:
-    """条件が M-6 の CV へ渡す候補の opts（#971）。本番の構成なら None＝既存の呼び出しと同一。"""
-    if c.inner_cv != INNER_CV_BASE_COND and MODEL_SPECS[model][1] == "elasticnet":
+    """条件が M-6 の CV へ渡す候補の opts（#971）。候補の既定で回る条件なら None。
+
+    **省けるかは本番の値（`INNER_CV_BASE_COND`）ではなく候補の既定（`_EN_INNER_CV_DEFAULT`）で決める**
+    （#964）。本番が `months` のとき本番と比べて省くと、候補は `rows` で回り、本番の構成のつもりで
+    旧い区切り方を測る——エラーは出ない。
+    """
+    if c.inner_cv != _EN_INNER_CV_DEFAULT and MODEL_SPECS[model][1] == "elasticnet":
         return {"inner_cv": c.inner_cv}
     return None
 
@@ -1727,15 +1736,15 @@ def cv_opts(c: Cond, model: str) -> dict | None:
 def inner_cv_reach_problems(diags: dict[str, dict], conds: dict[str, Cond]) -> list[str]:
     """内側 CV の切り替えが CV まで届いていない理由を列挙する（#971）。空リストなら健全。
 
-    `diags` は {"条件|モデル": run の `diag`}。候補は `rows` 以外のときだけ診断値に `inner_cv` を積む
-    （`make_elasticnet_fit_predict`）ので、積まれていなければ `rows` で回ったことになる。opts が
-    候補まで届かないと両条件が同じ CV になり、エラーを出さずに「差なし」だけが残る。
+    `diags` は {"条件|モデル": run の `diag`}。候補は既定（`rows`）以外のときだけ診断値に `inner_cv` を積む
+    （`make_elasticnet_fit_predict`）ので、積まれていなければ候補の既定で回ったことになる（本番の値では
+    ない・#964）。opts が候補まで届かないと両条件が同じ CV になり、エラーを出さずに「差なし」だけが残る。
     """
     problems = []
     for key, diag in diags.items():
         cond = key.split("|", 1)[0]
         want = conds[cond].inner_cv
-        got = (diag or {}).get("inner_cv", INNER_CV_BASE_COND)
+        got = (diag or {}).get("inner_cv", _EN_INNER_CV_DEFAULT)
         if got != want:
             problems.append(f"{key}: 内側 CV が {got} で回った（指定は {want}）")
     return problems
