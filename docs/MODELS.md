@@ -977,6 +977,12 @@ walk-forward CV の無リーク残差（`cv_residuals_by_ym`）に適用し、`o
 該当しない。**この無リーク残差は §9.4 の purge/embargo（`embargo_months=12`・#363・ADR-0014）を
 経た honest な OOF であり、M-2 と対称**（M-3 は週次で構造的に非該当）。
 
+分位で測る指標（分位リターン・long_short_spread・hit_rate・単調性・short_side_spread・実効ターンオーバー）は、
+期内サンプルが `n_quantiles×2` 未満の期と、**予測 μ̂ が全社同じ期**を外して期間平均する（判定は
+`macro_snapshots.quantile_period_ok`）。後者は同点が入力の順（＝社の順）のまま分位へ切られ、値が社の順で
+決まるため（#977。M-6 の walk-forward の最初の fold で係数がすべて 0 になる期が実例）。rank-IC も無分散の期を
+外すので、両者の期の集合が揃う。
+
 > **purge の実測影響（#375・2026-07-23・本番データ・`scripts/measure_embargo_impact.py`）**: embargo=0→12 で **M-2 の OOF rank-IC は 0.348→0.141（−59%）**、M-1（財務のみ OLS）は 0.237→0.195（−18%）。embargo=0 が過去記録値（M-2≈0.33）を再現した上での低下＝**旧 M-2≈0.33 は大半が 52週先ラベルの前方リーク由来で honest 値は約0.14**。柔軟な XGBoost ほどリークを吸っていた。3兄弟比較や `mu_source` 選択は honest 値（embargo 済み）で判断する。
 
 ### 9.12 モデル比較の統計的厳密化（#369・全モデル横断）

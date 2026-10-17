@@ -1616,6 +1616,19 @@ def conformal_halfwidth_for(sector, size, data: dict) -> float | None:
     return data.get("global")
 
 
+def quantile_period_ok(pairs: list, n_quantiles: int) -> bool:
+    """この期を分位で測る指標に入れてよいか（`oof_backtest` と `momentum_gate.quantile_risk_profile` が共有）。
+
+    pairs = [(yhat, y_true), ...]。期内サンプルが n_quantiles*2 未満の期と、yhat が全行同じ期を外す。
+    後者は安定ソートで入力の順（＝社の順）のまま分位へ切られ、値が社の順で決まるため（#977）。
+    rank-IC（`_spearman`）が無分散で外す期と揃う。
+    """
+    if len(pairs) < n_quantiles * 2:
+        return False
+    yhats = [p[0] for p in pairs]
+    return min(yhats) != max(yhats)
+
+
 def oof_backtest(residuals_by_ym: dict, n_quantiles: int = 5, cost_bps: float = 0.0,
                  meta_by_ym: dict | None = None, rebalance_per_year: float | None = None,
                  tau: float = CONFORMAL_TAU) -> dict:
@@ -1634,6 +1647,8 @@ def oof_backtest(residuals_by_ym: dict, n_quantiles: int = 5, cost_bps: float = 
         （sell_ranking は μ̂ 下位を売る）専用の識別力。正なら売り候補が市場平均を下回った。
         short_side_hit_rate はそれが成立した期の割合、short_side_spread_by_period は per-fold 系列。
       - 期内サンプルが n_quantiles*2 未満の期は分位計算から自動除外（IC には使用）。
+      - yhat が全行同じ期も分位計算から除外（同点が社の順で分位へ切られるため・#977）。rank-IC も
+        無分散で外すので、分位系と IC 系の期が揃う。判定は `quantile_period_ok`。
     quantile_returns[0]=最低 μ̂ バケット, [-1]=最高 μ̂ バケットの実現リターン。
 
     cost_bps（Issue #316）: 片道売買コスト（bp、1bp=0.01%）。long_short_spread は毎期
@@ -1714,7 +1729,7 @@ def oof_backtest(residuals_by_ym: dict, n_quantiles: int = 5, cost_bps: float = 
     ss_hits = 0
     for ym in yms:
         pairs = residuals_by_ym[ym]
-        if len(pairs) < n_quantiles * 2:
+        if not quantile_period_ok(pairs, n_quantiles):
             continue
         metas = meta_by_ym.get(ym, []) if meta_by_ym is not None else []
         order = sorted(range(len(pairs)), key=lambda i: pairs[i][0])   # yhat 昇順（index）

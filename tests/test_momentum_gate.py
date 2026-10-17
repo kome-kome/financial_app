@@ -605,6 +605,12 @@ class TestQuantileRiskProfile:
         prof = quantile_risk_profile(resid, n_quantiles=5)
         assert all(row["n_periods"] == 0 for row in prof)
 
+    def test_flat_prediction_periods_are_skipped_like_oof_backtest(self):
+        """U が全社同じ月も分位を作らない（同点は社の順で分位が決まる・#977）。"""
+        resid = {"2020-01": [(0.0, 0.01 * i) for i in range(10)]}
+        prof = quantile_risk_profile(resid, n_quantiles=5)
+        assert all(row["n_periods"] == 0 for row in prof)
+
     def test_single_period_has_no_vol_and_no_sharpe(self):
         """1期しか無ければボラは測れない（0 で割らずに None を返す）。"""
         resid = {"2020-01": [(float(i), 0.1) for i in range(10)]}
