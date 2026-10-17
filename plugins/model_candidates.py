@@ -158,8 +158,11 @@ _EN_CV_SPLITS = 3
 _EN_MAX_ITER = 50000
 # α・l1_ratio を選ぶ内側 CV の区切り方（#971）。`rows` は行の番号で区切る今の方式、`months` は
 # 月の境界でだけ区切る方式。`rows` は区切りが月の途中に落ち、月内の並び（社の順）だけで最終モデルの
-# α が 165 倍動く（#964）。**既定は `rows` のまま**で、M-6 本体は `macro_enet._INNER_CV` を明示して渡す。
+# α が 165 倍動く（#964）。**候補の既定は `rows` のまま**で、M-6 本体は `macro_enet._INNER_CV`（`months`）を
+# 明示して渡す。`_EN_INNER_CV_DEFAULT` は「opts に `inner_cv` が無いときに回る区切り方」で、本番の M-6 の
+# 区切り方ではない（呼び出し側が opts を省くか・診断値が無いときに何で回ったかを判断するのに使う）。
 _EN_INNER_CV_CHOICES = ("rows", "months")
+_EN_INNER_CV_DEFAULT = "rows"
 
 
 def month_block_splits(train_groups, cv_splits: int) -> list[tuple[np.ndarray, np.ndarray]]:
@@ -186,7 +189,7 @@ def month_block_splits(train_groups, cv_splits: int) -> list[tuple[np.ndarray, n
     return out
 
 
-def elasticnet_inner_cv(n_rows: int, cv_splits: int, inner_cv: str = "rows",
+def elasticnet_inner_cv(n_rows: int, cv_splits: int, inner_cv: str = _EN_INNER_CV_DEFAULT,
                         train_groups=None):
     """`ElasticNetCV(cv=...)` へ渡す内側 CV を返す（#971）。CV の fit_predict と最終モデルが共有する。
 
@@ -228,7 +231,7 @@ def make_elasticnet_fit_predict(l1_ratios: tuple = _EN_L1_RATIOS,
                                 cv_splits: int = _EN_CV_SPLITS,
                                 max_iter: int = _EN_MAX_ITER,
                                 diag: dict | None = None,
-                                inner_cv: str = "rows") -> Callable:
+                                inner_cv: str = _EN_INNER_CV_DEFAULT) -> Callable:
     """ElasticNet（L1+L2）の fit_predict を返す（Zou & Hastie 2005）。
 
     M-1(OLS・BIC 特徴選択) と M-2(XGBoost 非線形) の中間に位置づく「頑健な正則化線形」。
@@ -274,7 +277,7 @@ def make_elasticnet_fit_predict(l1_ratios: tuple = _EN_L1_RATIOS,
             lo, hi = alpha_path_bounds(model, l1_ratios)
             diag["alpha_at_path_min"].append(int(math.isclose(model.alpha_, lo, rel_tol=1e-9)))
             diag["alpha_at_path_max"].append(int(math.isclose(model.alpha_, hi, rel_tol=1e-9)))
-            if inner_cv != "rows":
+            if inner_cv != _EN_INNER_CV_DEFAULT:
                 # 切り替えが CV まで届いたかを呼び出し側が確かめる印（`momentum_gate --inner-cv`）
                 diag["inner_cv"].append(inner_cv)
         return yhat, y_te

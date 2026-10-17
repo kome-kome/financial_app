@@ -85,9 +85,12 @@ from .model_candidates import _EN_N_ALPHAS as _N_ALPHAS
 
 # α・l1_ratio を選ぶ内側 CV の区切り方（#971・`model_candidates.elasticnet_inner_cv`）。**CV と最終モデルの
 # 両方へこの1つを渡す**（片方だけ切り替えると、検証した区切り方と本番の μ̂ の区切り方が割れる）。
-# 既定は行で区切る `rows`。月で区切る `months` へ切り替えるかは #964 が `momentum_gate --inner-cv` の
-# 結果で決める。M-4（退役済み）と候補メニューは関数の既定（`rows`）のままで、ここに追随しない。
-_INNER_CV = "rows"
+# 既定は月の境界でだけ区切る `months`（#964）。行で区切る `rows` は区切りが月の途中に落ち、月内の社の順
+# だけで最終モデルの α が 165 倍動いた。2026-10-17 の `momentum_gate --inner-cv`（共通域・18 期間）で、
+# 測る前に固定した規則（rank-IC か short_side_spread の差の 95%CI が丸ごと 0 より下なら採らない）に
+# 当たらなかったので切り替えた。M-4（退役済み）と候補メニューは関数の既定（`rows`）のままで、ここに追随しない。
+# `momentum_gate` の分母と M-6 の既定の条件はこの値から取る（ゲートの「本番の構成」を書き写さない）。
+_INNER_CV = "months"
 
 
 def _final_training_rows(samples_by_ym: dict, inner_cv: str) -> tuple[list, list[int] | None]:

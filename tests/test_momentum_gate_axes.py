@@ -335,10 +335,11 @@ class TestInnerCvMode:
         assert {name: c.inner_cv for name, c in conds.items()} == {"rows": "rows", "months": "months"}
 
     def test_other_axes_stay_at_the_production_shape(self):
-        """差し替えるのは区切り方だけ。他の軸が動くと2軸ぶんの差が混ざる。"""
+        """差し替えるのは区切り方だけ。他の軸が動くと2軸ぶんの差が混ざる。本番（#964 で `months`）の側が
+        `Cond` の既定そのもの。"""
         rows, months = build_conditions(inner_cv=True).values()
-        assert rows == momentum_gate.Cond(False, MOM_WINDOW)
-        assert months._replace(inner_cv="rows") == rows
+        assert months == momentum_gate.Cond(False, MOM_WINDOW)
+        assert rows._replace(inner_cv="months") == months
 
     def test_both_sides_share_one_panel(self):
         """パネルの鍵は2条件で同じ＝1枚を共有する（別々に作ると構築の揺れが区切り方の差に混ざる）。"""
@@ -347,11 +348,24 @@ class TestInnerCvMode:
         assert len(set(conds.values())) == 2          # CV は条件ごとに回る（memo の鍵は別）
 
     def test_baseline_is_the_production_scheme_of_m6(self):
-        """分母は M-6 本体の `_INNER_CV`。#964 で本番を切り替えたらここが落ちて、分母の見直しを促す。"""
+        """分母は M-6 本体の `_INNER_CV`（書き写さずに取る・#964 で `months`）。"""
         import plugins.macro_enet as me
 
         conds = build_conditions(inner_cv=True)
         assert base_of(conds) == INNER_CV_BASE_COND == me._INNER_CV
+
+    @pytest.mark.parametrize("kwargs", [dict(inner_cv=True), dict(), dict(fin_nan=True), dict(fin_fill=True)])
+    def test_every_condition_reaches_the_candidate_with_its_own_scheme(self, kwargs):
+        """各条件の opts を候補へ渡したとき、候補が回る区切り方＝条件の `inner_cv`（#964）。
+
+        **opts を省くかを本番の値と比べると落ちる**: 本番が `months` のとき本番側の opts が None になり、
+        候補は既定の `rows` で回る——本番の構成のつもりで旧い区切り方を測り、エラーは出ない。
+        """
+        from plugins.model_candidates import _EN_INNER_CV_DEFAULT
+
+        for c in build_conditions(**kwargs).values():
+            opts = cv_opts(c, "elasticnet") or {}
+            assert opts.get("inner_cv", _EN_INNER_CV_DEFAULT) == c.inner_cv
 
     def test_measures_m6_only(self):
         assert INNER_CV_MODELS == ["elasticnet"]
@@ -505,13 +519,19 @@ class TestExistingModesAreUnchanged:
         dict(fin_fill=True),
     ])
     def test_existing_modes_keep_the_production_inner_cv(self, kwargs):
-        """M-6 の内側 CV（#971）の既定は本番の構成＝行で区切る。既存モードは CV の opts を渡さず、
-        パネルの鍵も `Cond` そのもの（畳み込みの当たり方が変わらない）。"""
+        """M-6 の内側 CV（#971）の既定は本番の構成（`macro_enet._INNER_CV`・#964 で月の境界で区切る）。
+        既存モードの M-6 は本番の区切り方で回り、他のモデルには opts を渡さない。パネルの鍵は `Cond`
+        そのもの（畳み込みの当たり方が変わらない）。"""
+        import plugins.macro_enet as me
+
         for c in build_conditions(**kwargs).values():
-            assert c.inner_cv == "rows"
+            assert c.inner_cv == me._INNER_CV
             assert panel_cond(c) == c
             for model in momentum_gate.MODEL_SPECS:
-                assert cv_opts(c, model) is None
+                if momentum_gate.MODEL_SPECS[model][1] == "elasticnet":
+                    assert cv_opts(c, model) == {"inner_cv": me._INNER_CV}
+                else:
+                    assert cv_opts(c, model) is None
 
 
 class TestBuildUsesTheConditionAxes:
