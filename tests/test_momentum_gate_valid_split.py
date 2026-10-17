@@ -79,10 +79,12 @@ class TestOptions:
             opts = cv_opts(c, "xgb_m2") or {}
             assert opts.get("valid_split", mg._VALID_SPLIT_DEFAULT) == c.valid_split
 
-    def test_only_the_m2_months_side_gets_options(self):
+    def test_only_the_m2_months_side_gets_the_split(self):
+        """候補の既定（`rows`）の側は取り方を渡さず、`months` の側だけ渡す。どちらも M-2 本番の割合（#987 で
+        `subsample` 1.0）は渡る。"""
         conds = build_conditions(valid_split=True)
-        assert cv_opts(conds["valid_rows"], "xgb_m2") is None
-        assert cv_opts(conds["valid_months"], "xgb_m2") == {"valid_split": "months"}
+        assert cv_opts(conds["valid_rows"], "xgb_m2") == {"subsample": mg._SUBSAMPLE}
+        assert cv_opts(conds["valid_months"], "xgb_m2") == {"valid_split": "months", "subsample": mg._SUBSAMPLE}
         assert cv_opts(conds["valid_months"], "risk_return") is None
 
     @pytest.mark.parametrize("kwargs", [
@@ -95,7 +97,7 @@ class TestOptions:
         """既存モードの M-2 は本番の取り方（#969 で months）で回る。パネルの鍵も変わらない。"""
         for c in build_conditions(**kwargs).values():
             assert c.valid_split == mg._VALID_SPLIT
-            assert cv_opts(c, "xgb_m2") == {"valid_split": mg._VALID_SPLIT}
+            assert (cv_opts(c, "xgb_m2") or {}).get("valid_split", mg._VALID_SPLIT_DEFAULT) == mg._VALID_SPLIT
             assert panel_cond(c)._replace(inner_cv=c.inner_cv) == c
 
 

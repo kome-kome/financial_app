@@ -1296,13 +1296,13 @@ class TestTuningSearchSpace:
     def test_returns_base_params_and_dims(self):
         base_params, dims = plugin.tuning_search_space()
         assert isinstance(base_params, dict)
-        assert len(dims) == 9
+        assert len(dims) == 8
 
     def test_dims_cover_xgb_axes(self):
         _base_params, dims = plugin.tuning_search_space()
         names = {d.name for d in dims}
         assert names == {
-            "max_depth", "learning_rate", "subsample", "colsample_bytree",
+            "max_depth", "learning_rate", "colsample_bytree",
             "min_child_weight", "reg_lambda", "reg_alpha",
             "use_monotone_constraints",   # 符号事前知識 1軸（Issue #366）
             "use_sector_features",        # セクター/サイズ 1軸（Issue #370）
@@ -1342,6 +1342,29 @@ class TestTuningSearchSpace:
         schema = plugin.params_schema()
         assert "use_momentum" in schema
         assert "momentum_window" in schema
+
+    def test_subsample_is_pinned_to_the_production_rate(self):
+        """行の抽出の割合は探索せず、本番の既定（`_SUBSAMPLE`・#987 で 1.0）で固定する。
+
+        1.0 未満では木ごとに抽出する行が行の並び（社の順）で決まり、社が 1 つ増減するだけで種を変えたのと
+        同じだけ学習が変わる。探索に残すと 1.0 未満が選ばれうる（2026-10-01 の 1 位は 0.4）。
+        """
+        import plugins.macro_gbdt as mg
+
+        base_params, dims = plugin.tuning_search_space()
+        assert "subsample" not in {d.name for d in dims}
+        assert base_params["subsample"] == mg._SUBSAMPLE == 1.0
+        assert "subsample" in plugin.params_schema()          # 契約からは消さない（画面で手動で動かせる）
+
+    def test_saved_subsample_is_projected_to_the_pinned_rate(self):
+        """保存済みの調整値（探索で選ばれた 0.4）は、画面へ出す前に固定値へ上書きされ、変えたことが注記される。"""
+        from routers.analysis import project_tuned_params
+
+        saved = {"use_momentum": False, "max_depth": 6, "subsample": 0.4, "colsample_bytree": 0.8}
+        out, changed = project_tuned_params(plugin, saved)
+        assert out["subsample"] == 1.0
+        assert out["max_depth"] == 6 and out["colsample_bytree"] == 0.8
+        assert "subsample" in changed
 
     def test_snapshot_cache_now_needs_one_panel(self):
         """**副次効果**: スナップショットのキャッシュキーが1種類になる。

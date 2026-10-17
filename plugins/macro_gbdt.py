@@ -637,8 +637,8 @@ class MacroGbdtPlugin(AnalysisPlugin):
     def tuning_search_space(self) -> tuple:
         """ハイパーパラメータ自動探索の探索空間（Issue #266・#604 でモメンタム2軸を除外）。
 
-        XGBoost 7軸（木構造・正則化）＋符号事前知識1軸（use_monotone_constraints・#366）
-        ＋セクター/サイズ特徴1軸（use_sector_features・#370）の9軸。この2軸はいずれも
+        XGBoost 6軸（木構造・正則化）＋符号事前知識1軸（use_monotone_constraints・#366）
+        ＋セクター/サイズ特徴1軸（use_sector_features・#370）の8軸。後ろの2軸はいずれも
         build_snapshots のキャッシュキーに影響しない execute 内後処理（前者は純 xgb_param・
         後者は特徴量後付け連結）のため再構築を誘発せず LRU も圧迫しない。
         他の構造パラメータ（fin_features/macro_features/use_macro/min_coverage）は
@@ -669,15 +669,20 @@ class MacroGbdtPlugin(AnalysisPlugin):
 
         `params_schema()` からは**消さない**（UI から手動で ON にできる。#599 で
         `min_coverage` を探索から外しつつ契約に残したのと同じ判断）。
+
+        **行の抽出の割合（`subsample`）も外し、本番の既定 `_SUBSAMPLE`（1.0）で固定した（#987）。**
+        1.0 未満では、木ごとにどの行を抽出するかが行の並び（社の順）で決まり、社が 1 つ増減するだけで種を変えたのと
+        同じだけ学習が変わる。探索に残すと 1.0 未満が選ばれうる（2026-10-01 の 1 位は 0.4）。こちらも
+        `params_schema()` からは消さない（画面で手動で動かせる）。保存済みの調整値に残る `subsample` は、
+        `project_tuned_params()` が `base_params` の値で上書きして画面へ出す（#604 のモメンタムと同じ扱い）。
         """
         from .tuning import SearchDim
 
-        # モメンタムは探索せず OFF で固定する（上記 docstring・#604）
-        base_params: dict = {"use_momentum": False}
+        # モメンタムは探索せず OFF で固定する（上記 docstring・#604）。行の抽出は止めて固定する（#987）
+        base_params: dict = {"use_momentum": False, "subsample": _SUBSAMPLE}
         dims = [
             SearchDim("max_depth",          [2, 4, 6, 8, 10]),
             SearchDim("learning_rate",      [0.01, 0.03, 0.05, 0.1, 0.2, 0.3]),
-            SearchDim("subsample",          [0.4, 0.6, 0.8, 1.0]),
             SearchDim("colsample_bytree",   [0.4, 0.6, 0.8, 1.0]),
             SearchDim("min_child_weight",   [1, 5, 10, 20, 30]),
             SearchDim("reg_lambda",         [0.0, 0.5, 1.0, 2.0, 5.0, 10.0]),
