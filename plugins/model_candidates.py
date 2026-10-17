@@ -902,16 +902,27 @@ def _b_catboost(feature_names, opts, diag):
 
 
 def _b_xgb_baseline(feature_names, opts, diag):
-    """M-2 と同一の XGBoost コールバック（基準線・同一 fold で候補と直接比較する）。"""
-    from .macro_gbdt import _make_xgb_fit_predict
+    """M-2 と同一の XGBoost コールバック（基準線・同一 fold で候補と直接比較する）。
+
+    opts の `valid_split`（#976）は early stopping の検証集合の取り方で、XGBoost の設定へ混ぜずに取り出して
+    渡す（混ぜると `XGBRegressor` に未知の引数として届く）。`months` のときだけ各学習月の行数が要るので
+    `pass_train_groups=True` を返し、回った fold ごとに診断値 `valid_split` へ印を積む。
+    """
+    from .macro_gbdt import _VALID_SPLIT_DEFAULT, _make_xgb_fit_predict
+    rest = dict(opts or {})
+    valid_split = rest.pop("valid_split", _VALID_SPLIT_DEFAULT)
     xgb_params = {
         "max_depth": 4, "learning_rate": 0.05, "subsample": 0.8,
         "colsample_bytree": 0.8, "min_child_weight": 5, "reg_lambda": 1.0,
         "reg_alpha": 0.0, "n_estimators": 500, "early_stopping_rounds": 40,
         "tree_method": "hist", "objective": "reg:squarederror", "random_state": 42,
-        **(opts or {}),
+        **rest,
     }
-    return _make_xgb_fit_predict(xgb_params, diag["best_iteration"]), {}
+    if valid_split == _VALID_SPLIT_DEFAULT:
+        return _make_xgb_fit_predict(xgb_params, diag["best_iteration"]), {}
+    fp = _make_xgb_fit_predict(xgb_params, diag["best_iteration"],
+                               valid_split=valid_split, split_marks=diag["valid_split"])
+    return fp, {"pass_train_groups": True}
 
 
 CANDIDATES: dict[str, Candidate] = {

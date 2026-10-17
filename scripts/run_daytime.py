@@ -337,6 +337,20 @@ JOBS: dict[str, Job] = {
         measured_min=15.0,
         parallel_sensitive=True,   # 他の gate と同じ理由（採否が CI の符号で決まる）
     ),
+    # M-2 の early stopping の検証集合を末尾の月の塊で取るか（#969）を測る道具（#976）。
+    # **積むのは人**（#969 で読んで、本番の `macro_gbdt._VALID_SPLIT` を切り替えるかを決める）。
+    "gate:valid-split": Job(
+        name="gate_valid_split",
+        argv=("{python}", "-m", "scripts.momentum_gate", "--valid-split",
+              "--stride", "1", "--allow-full-pull", "--refresh-cache"),
+        why="M-2 の early stopping の検証集合を末尾の行で取る（本番・valid_rows）か、末尾の月を丸ごと取る"
+            "（valid_months）かを共通 (ym,ec) 域で比べる（#976・#969）。パネルは2条件で同一で、母集団は動かない。"
+            "対象は M-2 だけ（種 5 個の平均）・2検定・alpha 0.025。切り替えが CV に届いていなければ非0で止まる。",
+        # 見積り。2026-10-17 の gate:fin-fill の実測で、M-2 を 5 個の種で回す CV が drop 側（95,807 行）で
+        # 210.1秒。2条件 × 2段（全月・共通月）＝約14分＋読み込み約1.5分。実走ログの END 行で差し替える。
+        measured_min=16.0,
+        parallel_sensitive=True,   # 他の gate と同じ理由（採否が CI の符号で決まる）
+    ),
     # M-2 / M-6 が小型株を高く置く偏り（#957）を、予測から log 時価総額の効果を月ごとに除いた順位で
     # 測る道具（#970）。**積むのは人**（#957 で読んで採否を決める）。
     "gate:size-neutral": Job(

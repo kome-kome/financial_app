@@ -197,6 +197,14 @@ def _sector_current_row(feat_row: list, info: dict, enc: dict, gmean: float) -> 
 
 _VALID_FRAC = 0.2          # 学習データから時系列末尾の何割を early_stopping 検証用に使うか
 _MIN_FIT_N  = 5            # この未満なら early_stopping を諦め固定 n_estimators にフォールバック
+# early_stopping の検証集合の取り方（#976・#969）。`rows` は末尾 `_VALID_FRAC` の行を行の番号で取る今の方式で、
+# 区切りが月の途中に落ちる（その月のどの社が fit 側・検証側に入るかが月内の並びで決まる）。`months` は末尾の
+# 月を丸ごと取る（`_tail_month_valid_rows`）。`_VALID_SPLIT_DEFAULT` は関数の既定＝opts を省いたときに回る方式。
+# **M-2 本体の既定は `_VALID_SPLIT`（`rows` のまま）**。`months` へ切り替えるかは #969 が
+# `momentum_gate --valid-split` の結果で決める。
+_VALID_SPLIT_CHOICES = ("rows", "months")
+_VALID_SPLIT_DEFAULT = "rows"
+_VALID_SPLIT = "rows"
 
 # ── SHAP 解釈性強化（signed SHAP＋交互作用・Issue #371）────────────────────────
 _INTERACT_TOP_K   = 15     # グローバル交互作用の上位ペア表示件数
@@ -205,22 +213,58 @@ _INTERACT_MAX_ROWS = 800   # shap_interaction_values は O(n·F²) メモリ＋T
                            # （グローバル平均 |交互作用| の順位付けには十分。決定的スライス）。
 
 
-def _make_xgb_fit_predict(xgb_params: dict, best_iterations: list) -> callable:
+def _tail_month_valid_rows(train_groups, n_rows: int) -> int:
+    """末尾の月を丸ごと early_stopping の検証に回すときの検証行数（#976）。
+
+    `train_groups` は月の昇順に連結した学習行の各月の行数（`walk_forward_cv_monthly(pass_train_groups=True)`
+    の契約・合計 = `n_rows`）。末尾の月から丸ごと足していき、検証行数が `n_rows × _VALID_FRAC` に最も近く
+    なる月数を選ぶ（同点なら月数の少ない側）。少なくとも 1 か月を検証に、少なくとも 1 か月を fit に残す。
+    学習月が 1 か月しか無いときは `n_rows` を返す＝fit 側が 0 行になり、呼び出し側は今と同じく
+    early stopping を諦めて固定本数で学習する。
+    """
+    groups = [int(g) for g in train_groups]
+    if sum(groups) != n_rows:
+        raise ValueError(f"train_groups の合計 {sum(groups)} が学習行数 {n_rows} と合わない")
+    if len(groups) < 2:
+        return n_rows
+    target = n_rows * _VALID_FRAC
+    best_k, best_gap, cum = 1, None, 0
+    for k in range(1, len(groups)):          # k = 検証に回す末尾の月数（fit に 1 か月以上残す）
+        cum += groups[-k]
+        gap = abs(cum - target)
+        if best_gap is None or gap < best_gap:
+            best_k, best_gap = k, gap
+    return sum(groups[-best_k:])
+
+
+def _make_xgb_fit_predict(xgb_params: dict, best_iterations: list, *,
+                          valid_split: str = _VALID_SPLIT_DEFAULT,
+                          split_marks: list | None = None) -> callable:
     """walk_forward_cv_monthly 注入用 XGBoost fit_predict コールバックを返す。
 
     各フォールドで:
       1. y を p1-p99 winsorize（X は winsorize しない）
-      2. 学習データの時系列末尾 _VALID_FRAC を early_stopping の eval_set に
+      2. 学習データの時系列末尾を early_stopping の eval_set に（取り方は `valid_split`）
       3. best_iteration を best_iterations リストに記録（最終モデルの n_estimators 決定用）
       4. (yhat_orig, y_test_orig) を返す（y はオリジナルスケール・winsorize なし）
+
+    `valid_split`（#976）: `rows`（既定）は末尾 `_VALID_FRAC` の行で、#976 の前と1ビットも同じ。`months` は
+    末尾の月を丸ごと検証にし（`_tail_month_valid_rows`）、3 番目の引数 `train_groups`（各学習月の行数）を
+    使う——`walk_forward_cv_monthly(pass_train_groups=True)` で呼ぶこと。`months` で回った fold ごとに
+    `split_marks` へ印を積む（切り替えが CV まで届いたかを呼び出し側が確かめる・`momentum_gate --valid-split`）。
+    `walk_forward_cv_monthly` は fit_predict の例外を握って fold を捨てるので、`train_groups` の渡し忘れは
+    失敗として現れない——印で確かめる。
     """
     import xgboost as xgb
+
+    if valid_split not in _VALID_SPLIT_CHOICES:
+        raise ValueError(f"未知の valid_split: {valid_split}（{', '.join(_VALID_SPLIT_CHOICES)} のみ）")
 
     n_estimators_max = xgb_params.get("n_estimators", 500)
     early_stopping_rounds = xgb_params.get("early_stopping_rounds", 40)
     base_params = {k: v for k, v in xgb_params.items() if k not in ("n_estimators", "early_stopping_rounds")}
 
-    def fit_predict(train_samples, test_samples):
+    def fit_predict(train_samples, test_samples, train_groups=None):
         X_train_all = np.array([s[0] for s in train_samples], dtype=float)
         y_train_raw = [s[1] for s in train_samples]
         X_test = np.array([s[0] for s in test_samples], dtype=float)
@@ -230,7 +274,14 @@ def _make_xgb_fit_predict(xgb_params: dict, best_iterations: list) -> callable:
         y_train_all = np.array(y_w, dtype=float)
 
         n = len(train_samples)
-        n_valid = max(1, int(n * _VALID_FRAC))
+        if valid_split == "months":
+            if train_groups is None:
+                raise ValueError("valid_split='months' には各学習月の行数（train_groups）が要る")
+            n_valid = _tail_month_valid_rows(train_groups, n)
+            if split_marks is not None:
+                split_marks.append(valid_split)
+        else:
+            n_valid = max(1, int(n * _VALID_FRAC))
         n_fit = n - n_valid
 
         if n_fit < _MIN_FIT_N or early_stopping_rounds is None:
@@ -669,9 +720,12 @@ class MacroGbdtPlugin(AnalysisPlugin):
     def _make_cv_callback(self, xgb_params: dict, best_iterations: list) -> tuple:
         """walk-forward CV へ注入する (fit_predict, walk_forward追加kwargs) を返す。
 
-        M-2 は XGBRegressor の early-stopping コールバック＋追加kwargsなし。M-5 は
-        XGBRanker コールバック＋`pass_train_groups=True`（月クエリグループ境界の受渡）。"""
-        return _make_xgb_fit_predict(xgb_params, best_iterations), {}
+        M-2 は XGBRegressor の early-stopping コールバック。検証集合の取り方は `_VALID_SPLIT`（#976）で、
+        `months` のときだけ各学習月の行数が要るので `pass_train_groups=True` を返す（`rows` は追加 kwargs
+        なし＝#976 の前と同一）。M-5 は XGBRanker コールバック＋`pass_train_groups=True`（月クエリグループ
+        境界の受渡）。"""
+        extra = {"pass_train_groups": True} if _VALID_SPLIT == "months" else {}
+        return _make_xgb_fit_predict(xgb_params, best_iterations, valid_split=_VALID_SPLIT), extra
 
     def _fit_final_model(self, final_params: dict, n_est_final: int,
                          X_all, y_all, samples_by_ym: dict, feat_names: list):

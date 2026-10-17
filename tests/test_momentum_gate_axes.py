@@ -112,6 +112,19 @@ class TestModesAreMutuallyExclusive:
         (dict(de_exclude=True, size_neutral=True)),
         (dict(fin_fill=True, size_neutral=True)),
         (dict(inner_cv=True, size_neutral=True)),
+        # M-2 の検証集合のモード（#976）もパネルを動かさないが、軸を2つ振ると分離できない点は同じ。
+        (dict(windows=[3], valid_split=True)),
+        (dict(macro=True, valid_split=True)),
+        (dict(interactions=True, valid_split=True)),
+        (dict(max_features=[5], valid_split=True)),
+        (dict(fin_rows=True, valid_split=True)),
+        (dict(demean_target=True, valid_split=True)),
+        (dict(risk_axis=True, valid_split=True)),
+        (dict(fin_nan=True, valid_split=True)),
+        (dict(de_exclude=True, valid_split=True)),
+        (dict(fin_fill=True, valid_split=True)),
+        (dict(inner_cv=True, valid_split=True)),
+        (dict(size_neutral=True, valid_split=True)),
     ]
 
     @pytest.mark.parametrize("kwargs", PAIRS)
@@ -717,6 +730,7 @@ class TestOutputNamesTheModeThatWasMeasured:
         (dict(fin_fill=True), "fin_fill"),
         (dict(inner_cv=True), "inner_cv"),
         (dict(size_neutral=True), "size_neutral"),
+        (dict(valid_split=True), "valid_split"),
     ])
     def test_mode_follows_the_flag(self, kwargs, want):
         assert mode_of(**kwargs) == want
@@ -724,7 +738,8 @@ class TestOutputNamesTheModeThatWasMeasured:
     def test_every_mode_has_a_file_suffix(self):
         assert set(MODE_SUFFIX) == {"default", "windows", "macro", "interactions", "max_features",
                                     "fin_rows", "demean_target", "risk_axis", "fin_nan",
-                                    "de_exclude", "fin_fill", "inner_cv", "size_neutral"}
+                                    "de_exclude", "fin_fill", "inner_cv", "size_neutral",
+                                    "valid_split"}
 
     def test_demean_mode_writes_its_own_file(self):
         """既定の `momentum_gate.json` を上書きしない（どの軸の結果かがファイル名で分かる）。"""

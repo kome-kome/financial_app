@@ -1471,3 +1471,23 @@ rank-IC +0.0036（95%CI [-0.0025, +0.0107]・p 0.307）、short_side_spread −0
 - 候補メニューの `elasticnet` と M-4（退役済み）は候補の既定（`rows`）のまま
 - 規則の外で気づいたこと（判定には使っていない）: `months` 側で 1 期間だけ rank-IC が定義されず（n=17）、回転率は
   0.304 → 0.421 に上がった。切り替えた後の並び確認（社の順を 4 通り）で最終モデルの非ゼロ係数を見る
+
+## 追記（2026-10-17・その4）: M-2 の early stopping の検証集合を末尾の月の塊で取る軸を足す——道具だけ（#976・#969）
+
+M-2 は学習行の末尾 2 割を early stopping の検証集合にし、各 fold の best_iteration の中央値を最終モデルの木の本数に
+使う。行の番号で取るので区切りが月の途中に落ち、その月のどの社が fit 側・検証側に入るかが月内の並びで決まる
+（#969・#964 の M-6 と同じ型）。末尾の月を丸ごと取る方式（`valid_split="months"`・`macro_gbdt._tail_month_valid_rows`）
+を選べるようにし、行で取る本番（`rows`）と比べる軸（`--valid-split`・日中キューの `gate:valid-split`）を足した。
+**本番は変えていない**（`macro_gbdt._VALID_SPLIT = "rows"`）。
+
+- **母集団は動かない。** `--inner-cv` と同じく、パネルは2条件で1枚を共有し（`panel_cond`）、差し替えるのは M-2 の
+  CV へ渡す候補の opts だけ。共通域は全行になる
+- **対象は M-2 だけ**（`VALID_SPLIT_MODELS`・種 5 個の平均）。検定数 1モデル × 2指標 ＝ **2**、補正後 α ＝ **0.025**
+- **分母は本番から取る**（`macro_gbdt._VALID_SPLIT`・その3 と同じ理由）。opts を省けるかは関数の既定と比べる
+- **条件名は `valid_rows` / `valid_months`。** `--inner-cv` の `rows` / `months` と同じ名前にすると、分母を名前で引く
+  `base_of` が `--inner-cv` の本番（`months`）を返す
+- **黙って同じものを比べる形を止める**: 候補は `rows` 以外のときだけ診断値に `valid_split` を積み、各条件の値が指定どおり
+  でなければ止まる（`valid_split_reach_problems`）。`walk_forward_cv_monthly` は fit_predict の例外を握って fold を
+  捨てるので、`train_groups` の渡し忘れは失敗として現れない
+- **既定を `months` へ切り替えるかは #969 で、この run を読んでから決める。** 判定の規則（案）は #964 と同じ形で、
+  #969 に書いた
