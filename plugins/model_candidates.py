@@ -158,14 +158,13 @@ _EN_CV_SPLITS = 3
 _EN_MAX_ITER = 50000
 # α・l1_ratio を選ぶ内側 CV の区切り方（#971）。`rows` は行の番号で区切る今の方式、`months` は
 # 月の境界でだけ区切る方式。`rows` は区切りが月の途中に落ち、月内の並び（社の順）だけで最終モデルの
-# α が 165 倍動く（#964）。**候補の既定は `rows` のまま**で、M-6 本体は `macro_enet._INNER_CV`（`months`）を
+# α が 165 倍動く（#964）。**候補の既定は `rows` のまま**で、M-6 本体は `macro_enet._INNER_CV`（`months_purged`）を
 # 明示して渡す。`_EN_INNER_CV_DEFAULT` は「opts に `inner_cv` が無いときに回る区切り方」で、本番の M-6 の
 # 区切り方ではない（呼び出し側が opts を省くか・診断値が無いときに何で回ったかを判断するのに使う）。
 # `months_purged`（#979）は月の塊で区切ったうえで、学習の最後の月と検証の最初の月の間を空ける方式。目的変数は
 # 52 週先リターンなので、隣り合う月のラベル期間はほぼ丸ごと重なる。外側の walk-forward は
 # `embargo_months=LABEL_HORIZON_MONTHS`（ADR-0014）で重なりを外しているが、内側には無かった（#968）。
-# **どの既定もこれではない**（候補は `rows`・M-6 本体は `macro_enet._INNER_CV`）。比べるのは
-# `momentum_gate --inner-cv-purge`、切り替えるかは #968 で決める。
+# M-6 本体の既定はこれ（#968・2026-10-17 の `momentum_gate --inner-cv-purge` で採った）。候補の既定は `rows` のまま。
 _EN_INNER_CV_PURGED = "months_purged"
 _EN_INNER_CV_CHOICES = ("rows", "months", _EN_INNER_CV_PURGED)
 _EN_INNER_CV_DEFAULT = "rows"

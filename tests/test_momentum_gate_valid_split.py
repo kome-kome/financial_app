@@ -21,7 +21,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import plugins.macro_gbdt as mg  # noqa: E402
 from scripts import momentum_gate  # noqa: E402
 from scripts.momentum_gate import (  # noqa: E402
-    INNER_CV_BASE_COND, MODE_SUFFIX, MOM_WINDOW, VALID_SPLIT_BASE_COND, VALID_SPLIT_CONDS,
+    INNER_CV_PURGE_CONDS, MODE_SUFFIX, MOM_WINDOW, VALID_SPLIT_BASE_COND, VALID_SPLIT_CONDS,
     VALID_SPLIT_MODELS, base_of, bonferroni_alpha, build_conditions, cv_opts, mode_of, panel_cond,
     valid_split_reach_problems, verdict_text,
 )
@@ -50,10 +50,11 @@ class TestConditions:
         conds = build_conditions(valid_split=True)
         assert base_of(conds) == VALID_SPLIT_BASE_COND == f"valid_{mg._VALID_SPLIT}"
 
-    def test_names_do_not_collide_with_the_inner_cv_mode(self):
-        """`--inner-cv` の `rows` / `months` と同じ名前だと、`base_of` が先に並ぶ `INNER_CV_BASE_COND` を返す。"""
-        assert not set(VALID_SPLIT_CONDS) & set(build_conditions(inner_cv=True))
-        assert INNER_CV_BASE_COND not in VALID_SPLIT_CONDS
+    def test_names_do_not_collide_with_the_inner_cv_purge_mode(self):
+        """区切り方の名前（`rows` / `months`）をそのまま条件名にすると、分母を名前で引く `base_of` が他のモードの
+        条件名と取り違えうる（足した当時は `--inner-cv` と衝突した・#968 で退役）。"""
+        assert not set(VALID_SPLIT_CONDS) & set(INNER_CV_PURGE_CONDS)
+        assert not set(VALID_SPLIT_CONDS) & {"rows", "months"}
 
     def test_measures_m2_only(self):
         assert VALID_SPLIT_MODELS == ["xgb_m2"]
@@ -68,7 +69,7 @@ class TestConditions:
 
 
 class TestOptions:
-    @pytest.mark.parametrize("kwargs", [dict(valid_split=True), dict(), dict(inner_cv=True), dict(fin_fill=True)])
+    @pytest.mark.parametrize("kwargs", [dict(valid_split=True), dict(), dict(inner_cv_purge=True), dict(fin_fill=True)])
     def test_every_condition_reaches_the_candidate_with_its_own_scheme(self, kwargs):
         """各条件の opts を候補へ渡したとき、候補が取る検証集合＝条件の `valid_split`。
 
@@ -88,7 +89,7 @@ class TestOptions:
         dict(), dict(windows=[3, 12]), dict(macro=True), dict(interactions=True),
         dict(max_features=[5, 20]), dict(fin_rows=True), dict(demean_target=True),
         dict(risk_axis=True, models=["xgb_m2"]), dict(fin_nan=True), dict(de_exclude=True),
-        dict(fin_fill=True), dict(inner_cv=True), dict(size_neutral=True),
+        dict(fin_fill=True), dict(inner_cv_purge=True), dict(size_neutral=True),
     ])
     def test_existing_modes_keep_the_production_valid_split(self, kwargs):
         """既存モードの M-2 は本番の取り方（#969 で months）で回る。パネルの鍵も変わらない。"""

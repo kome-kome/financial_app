@@ -549,41 +549,14 @@ class TestDeExcludeGateMeasuresM2AndM6:
         assert argv[argv.index("--stride") + 1] == "1"
 
 
-class TestInnerCvGateMeasuresM6:
-    """M-6 の内側 CV の区切り方のジョブ（#971・#964）は M-6 だけを、間引かずに、本番を分母に測る
-    （#964 で本番は rows → months へ切り替わった。分母は `macro_enet._INNER_CV` から取る）。
+class TestRetiredInnerCvGate:
+    """M-6 の内側 CV を行で区切るか月で区切るかのジョブ `gate:inner-cv`（#971・#964）は、#968 で本番が
+    `months_purged` になり両側とも本番でなくなったので退役した（2026-10-18）。積めないこと＝名前が残って
+    誤って積まれ、`momentum_gate` が知らない引数で落ちる形を防ぐ。"""
 
-    事前登録（ADR-0050 の 2026-10-17 追記）は「M-6 だけ・rows / months・2検定・α 0.025」。M-2 を混ぜると
-    この軸を持たないモデルの同じ CV を2回回すだけになり、`build_conditions` が止める（平日1日ぶんの枠が消える）。
-    """
-
-    KEY = "gate:inner-cv"
-
-    def test_the_job_runs_the_inner_cv_axis_with_the_default_models(self):
-        from scripts.momentum_gate import INNER_CV_MODELS
-
-        argv = rd.JOBS[self.KEY].argv
-        assert "--inner-cv" in argv
-        assert "--models" not in argv
-        assert INNER_CV_MODELS == ["elasticnet"]
-
-    def test_the_preregistered_base_and_tests(self):
-        from scripts.momentum_gate import INNER_CV_MODELS, base_of, bonferroni_alpha, build_conditions
-
-        import plugins.macro_enet as me
-
-        conds = build_conditions(inner_cv=True, models=INNER_CV_MODELS)
-        assert base_of(conds) == me._INNER_CV == "months"     # 本番の構成（#964）
-        assert bonferroni_alpha(len(INNER_CV_MODELS), len(conds)) == pytest.approx(0.025)
-
-    def test_the_job_measures_at_full_resolution(self):
-        argv = rd.JOBS[self.KEY].argv
-        assert "--smoke" not in argv
-        assert argv[argv.index("--stride") + 1] == "1"
-
-    def test_the_result_changes_with_background_work(self):
-        """採否が CI の符号で決まる＝並走で答えが変わる側（他の gate と同じ）。"""
-        assert rd.JOBS[self.KEY].parallel_sensitive is True
+    def test_the_job_is_gone(self):
+        assert "gate:inner-cv" not in rd.JOBS
+        assert all("--inner-cv" not in job.argv for job in rd.JOBS.values())   # argv は要素の完全一致
 
 
 class TestValidSplitGateMeasuresM2:
@@ -621,7 +594,8 @@ class TestValidSplitGateMeasuresM2:
 
 
 class TestInnerCvPurgeGateMeasuresM6:
-    """M-6 の内側 CV の空白のジョブ（#979・#968）は M-6 だけを、間引かずに、本番（months）を分母に測る。
+    """M-6 の内側 CV の空白のジョブ（#979・#968）は M-6 だけを、間引かずに、本番を分母に測る（#968 で分母は
+    nogap(months) → gap(months_purged) へ付け替わった）。
 
     事前登録（ADR-0050 の 2026-10-17・その5 追記）は「M-6 だけ・nogap(months) / gap(months_purged)・2検定・α 0.025」。
     """
@@ -642,8 +616,8 @@ class TestInnerCvPurgeGateMeasuresM6:
             INNER_CV_PURGE_CONDS, INNER_CV_PURGE_MODELS, base_of, bonferroni_alpha, build_conditions)
 
         conds = build_conditions(inner_cv_purge=True, models=INNER_CV_PURGE_MODELS)
-        assert base_of(conds) == "nogap"
-        assert INNER_CV_PURGE_CONDS["nogap"] == me._INNER_CV == "months"     # 本番の構成
+        assert base_of(conds) == "gap"
+        assert INNER_CV_PURGE_CONDS["gap"] == me._INNER_CV == "months_purged"     # 本番の構成（#968）
         assert bonferroni_alpha(len(INNER_CV_PURGE_MODELS), len(conds)) == pytest.approx(0.025)
 
     def test_the_job_measures_at_full_resolution(self):
