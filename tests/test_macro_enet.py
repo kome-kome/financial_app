@@ -150,7 +150,7 @@ class TestFoldConfigMatchesM2:
         assert captured["embargo_months"] == LABEL_HORIZON_MONTHS == 12
         assert captured["return_residuals"] is True
         assert callable(captured["fit_predict"])
-        # 本番の内側 CV は月の境界で区切る（#964）＝各学習月の行数を 3 番目の引数で渡す
+        # 本番の内側 CV は月の塊で区切る（#964・#968 で空白付き）＝各学習月の行数を 3 番目の引数で渡す
         assert captured["pass_train_groups"] is True
 
 
@@ -226,10 +226,10 @@ def _final_reference(samples, current, l1_ratios):
 class TestInnerCv:
     """M-6 の α・l1_ratio を選ぶ内側 CV の区切り方（#971）。`rows` の手順は #971 の前と1ビットも変えない。"""
 
-    def test_production_default_is_months(self):
-        """#964 が `momentum_gate --inner-cv`（2026-10-17）の結果で `months` へ切り替えた。"""
+    def test_production_default_is_months_purged(self):
+        """#964 が `months` へ、#968 が `momentum_gate --inner-cv-purge`（2026-10-17）の結果で `months_purged` へ切り替えた。"""
         import plugins.macro_enet as me
-        assert me._INNER_CV == "months"
+        assert me._INNER_CV == "months_purged"
 
     def test_final_rows_is_bit_identical_to_the_pre_971_procedure(self):
         from plugins.macro_enet import _L1_RATIOS, _final_training_rows
@@ -291,7 +291,7 @@ class TestInnerCv:
 
     def test_execute_passes_one_scheme_to_cv_and_final(self, monkeypatch):
         """CV と最終モデルは同じ `_INNER_CV` で回る（片方だけ切り替わると検証と本番の区切り方が割れる）。
-        本番の既定（`months`）のまま回す。"""
+        本番の既定（`months_purged`・#968）のまま回す。"""
         seen: dict = {}
         real = MacroEnetPlugin._fit_final_and_score
 
@@ -301,10 +301,10 @@ class TestInnerCv:
 
         monkeypatch.setattr(MacroEnetPlugin, "_fit_final_and_score", staticmethod(spy))
         res = _run(_params(use_macro=False))
-        assert res["cv_metrics"]["enet"]["n_folds"] > 0, "months の CV で fold が1つも立たなかった"
-        assert res["cv_diagnostics"]["inner_cv"] == "months"
-        assert "inner_cv_gap" not in res["cv_diagnostics"]   # 空白の印は months_purged だけ（#979）
-        assert seen["inner_cv"] == "months"
+        assert res["cv_metrics"]["enet"]["n_folds"] > 0, "months_purged の CV で fold が1つも立たなかった"
+        assert res["cv_diagnostics"]["inner_cv"] == "months_purged"
+        assert 0 <= res["cv_diagnostics"]["inner_cv_gap"] <= LABEL_HORIZON_MONTHS
+        assert seen["inner_cv"] == "months_purged"
         assert seen["train_groups"] and all(g > 0 for g in seen["train_groups"])
 
     def test_execute_rows_reaches_both_cv_and_final(self, monkeypatch):
@@ -340,11 +340,11 @@ class TestInnerCv:
         with pytest.raises(ValueError, match="train_groups"):
             MacroEnetPlugin._fit_final_and_score(rows, current, _L1_RATIOS, inner_cv="months_purged")
 
-    def test_execute_purged_reaches_both_cv_and_final(self, monkeypatch):
-        """定数を `months_purged` にすれば CV と最終モデルの両方へ届く（#968 で切り替えるときの経路・#979）。"""
+    def test_execute_months_reaches_both_cv_and_final(self, monkeypatch):
+        """定数1つを `months`（#968 の前の本番）へ戻せば CV と最終モデルの両方が戻る（切り戻しの経路が生きている）。"""
         import plugins.macro_enet as me
 
-        monkeypatch.setattr(me, "_INNER_CV", "months_purged")
+        monkeypatch.setattr(me, "_INNER_CV", "months")
         seen: dict = {}
         real = MacroEnetPlugin._fit_final_and_score
 
@@ -354,10 +354,10 @@ class TestInnerCv:
 
         monkeypatch.setattr(MacroEnetPlugin, "_fit_final_and_score", staticmethod(spy))
         res = _run(_params(use_macro=False))
-        assert res["cv_metrics"]["enet"]["n_folds"] > 0, "months_purged の CV で fold が1つも立たなかった"
-        assert res["cv_diagnostics"]["inner_cv"] == "months_purged"
-        assert 0 <= res["cv_diagnostics"]["inner_cv_gap"] <= LABEL_HORIZON_MONTHS
-        assert seen["inner_cv"] == "months_purged"
+        assert res["cv_metrics"]["enet"]["n_folds"] > 0, "months の CV で fold が1つも立たなかった"
+        assert res["cv_diagnostics"]["inner_cv"] == "months"
+        assert "inner_cv_gap" not in res["cv_diagnostics"]   # 空白の印は months_purged だけ（#979）
+        assert seen["inner_cv"] == "months"
         assert seen["train_groups"] and all(g > 0 for g in seen["train_groups"])
 
 

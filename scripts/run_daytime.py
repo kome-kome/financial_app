@@ -321,20 +321,8 @@ JOBS: dict[str, Job] = {
         measured_min=36.5,
         parallel_sensitive=True,   # 他の gate と同じ理由（採否が CI の符号で決まる）
     ),
-    # M-6 の α・l1_ratio を選ぶ内側 CV を月の境界で区切るか（#964）を測る道具（#971）。
-    # **積むのは人**。#964 は 2026-10-17 の結果で本番（`macro_enet._INNER_CV`）を `months` へ切り替えた。
-    "gate:inner-cv": Job(
-        name="gate_inner_cv",
-        argv=("{python}", "-m", "scripts.momentum_gate", "--inner-cv",
-              "--stride", "1", "--allow-full-pull", "--refresh-cache"),
-        why="M-6 の内側 CV を月の境界で区切る（本番・months）か、行の番号で区切る（rows）かを共通 (ym,ec) 域で"
-            "比べる（#971・#964）。パネルは2条件で同一で、母集団は動かない。対象は M-6 だけ・2検定・alpha 0.025。"
-            "切り替えが CV に届いていなければ非0で止まる。",
-        # 2026-10-17 の実測（土曜に手動で起動・並走なし）。見積り 12.0 から差し替えた。CV は rows 194.4秒・
-        # months 228.3秒で、全月と共通月の2段にキャッシュの取り直しが乗る。
-        measured_min=15.0,
-        parallel_sensitive=True,   # 他の gate と同じ理由（採否が CI の符号で決まる）
-    ),
+    # M-6 の内側 CV を行で区切るか月の境界で区切るかを測った `gate:inner-cv`（#971・#964）は、#968 で本番が
+    # `months_purged` になり両側とも本番でなくなったので退役した（2026-10-18）。
     # M-2 の early stopping の検証集合を末尾の月の塊で取るか（#969）を測る道具（#976）。
     # **積むのは人**（#969 で読んで、本番の `macro_gbdt._VALID_SPLIT` を切り替えるかを決める）。
     "gate:valid-split": Job(
@@ -349,14 +337,15 @@ JOBS: dict[str, Job] = {
         parallel_sensitive=True,   # 他の gate と同じ理由（採否が CI の符号で決まる）
     ),
     # M-6 の内側 CV に 52 週先ラベルの重なりを外す空白を入れるか（#968）を測る道具（#979）。
-    # **積むのは人**（#968 で読んで、本番の `macro_enet._INNER_CV` を切り替えるかを決める）。
+    # **積むのは人**。#968 は 2026-10-17 の結果で本番（`macro_enet._INNER_CV`）を `months_purged` へ切り替え、
+    # 分母を `gap` へ付け替えた（今は「空白を外すと悪くなるか」を問う）。
     "gate:inner-cv-purge": Job(
         name="gate_inner_cv_purge",
         argv=("{python}", "-m", "scripts.momentum_gate", "--inner-cv-purge",
               "--stride", "1", "--allow-full-pull", "--refresh-cache"),
-        why="M-6 の内側 CV を月の塊で区切る（本番・nogap＝months）か、学習の最後の月と検証の最初の月の間に"
-            "LABEL_HORIZON_MONTHS か月を上限とする空白を空ける（gap＝months_purged）かを共通 (ym,ec) 域で比べる"
-            "（#979・#968）。パネルは2条件で同一で、母集団は動かない。対象は M-6 だけ・2検定・alpha 0.025。"
+        why="M-6 の内側 CV で学習の最後の月と検証の最初の月の間に LABEL_HORIZON_MONTHS か月を上限とする空白を"
+            "空ける（本番・gap＝months_purged）か、空けずに月の塊で区切る（nogap＝months）かを共通 (ym,ec) 域で"
+            "比べる（#979・#968）。パネルは2条件で同一で、母集団は動かない。対象は M-6 だけ・2検定・alpha 0.025。"
             "切り替えが CV に届いていなければ非0で止まる。",
         # 2026-10-17 の実測（土曜に -Now -Force で消化・並走なし）。見積り 15.0 から差し替えた。CV は全月の段で
         # nogap 234.0秒・gap 147.9秒（gap は内側の学習月が空白の分だけ短い）。
