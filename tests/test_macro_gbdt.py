@@ -24,6 +24,7 @@ from plugins.macro_gbdt import (
 )
 from plugins.macro_snapshots import (
     build_snapshots, oof_backtest, build_oof_meta, build_price_features, month_end_indices,
+    quantile_period_ok,
 )
 from plugins.utils import coerce_params
 
@@ -1136,6 +1137,117 @@ class TestOofBacktest:
         assert o["short_side_spread"] is None
         assert o["short_side_hit_rate"] is None
         assert o["short_side_spread_by_period"] == {}
+
+    # ── 予測が全社同じ期（Issue #977）──────────────────────────────────────
+    # 同点は安定ソートで入力の順（＝社の順）のまま分位へ切られるので、その期の分位系の値は
+    # 社の順で決まる。rank-IC は無分散で None にして外しているので、分位系も同じ期を外す。
+
+    _QUANTILE_KEYS = (
+        "n_periods_quantile", "quantile_returns", "monotonicity", "long_short_spread",
+        "hit_rate", "short_side_spread", "short_side_hit_rate", "short_side_spread_by_period",
+        "long_short_spread_net", "effective_turnover", "annual_turnover",
+        "long_short_spread_net_turnover", "breakeven_cost_bps",
+    )
+
+    @staticmethod
+    def _varied():
+        """全期に予測のばらつきがある 4 期×23 行（業種 3・社は期ごとに少しずれる）。"""
+        import random
+        rng = random.Random(977)
+        inds = ["A", "B", "C"]
+        r, meta = {}, {}
+        for k, ym in enumerate(["2020-01", "2020-04", "2020-07", "2020-10"]):
+            pairs, rows = [], []
+            for i in range(23):
+                yhat = round(rng.gauss(0.0, 1.0), 4)
+                pairs.append((yhat, round(0.3 * yhat + rng.gauss(0.0, 1.0), 4)))
+                rows.append((f"E{(i + 3 * k) % 30:02d}", inds[i % 3]))
+            r[ym], meta[ym] = pairs, rows
+        return r, meta
+
+    @staticmethod
+    def _with_flat(r, meta, ym="2020-05"):
+        """予測が全行 0.0 の期を1つ足す（実現リターンは行ごとに違う）。"""
+        r2, m2 = dict(r), dict(meta)
+        r2[ym] = [(0.0, 0.01 * ((7 * i) % 23 - 11)) for i in range(23)]
+        m2[ym] = [(f"E{i:02d}", "ABC"[i % 3]) for i in range(23)]
+        return r2, m2
+
+    def test_quantile_period_ok(self):
+        assert quantile_period_ok([(i * 0.1, 0.0) for i in range(10)], 5)
+        assert not quantile_period_ok([(i * 0.1, 0.0) for i in range(9)], 5)   # 行数不足
+        assert not quantile_period_ok([(0.3, i * 0.1) for i in range(10)], 5)  # 予測が全行同じ
+
+    def test_flat_prediction_period_is_left_out_of_quantile_metrics(self):
+        """予測が全行同じ期は分位系の指標から外れ、その期が無い入力と同じ値になる。"""
+        r, meta = self._varied()
+        r2, m2 = self._with_flat(r, meta)
+        a = oof_backtest(r, n_quantiles=5, cost_bps=10.0, meta_by_ym=meta, rebalance_per_year=4)
+        b = oof_backtest(r2, n_quantiles=5, cost_bps=10.0, meta_by_ym=m2, rebalance_per_year=4)
+        assert b["n_periods"] == 5
+        assert b["n_periods_quantile"] == 4
+        assert "2020-05" not in b["short_side_spread_by_period"]
+        # rank-IC が外す期と揃う（共通期のペアリングから自然に落ちる）
+        assert set(b["short_side_spread_by_period"]) == set(b["rank_ic_by_period"])
+        for key in self._QUANTILE_KEYS:
+            assert b[key] == a[key], key
+
+    def test_row_order_inside_flat_period_does_not_move_anything(self):
+        """予測が全行同じ期の行を並べ替えても、返り値は完全に一致する。"""
+        r, meta = self._with_flat(*self._varied())
+        base = oof_backtest(r, n_quantiles=5, cost_bps=10.0, meta_by_ym=meta,
+                            rebalance_per_year=4)
+        for perm in (lambda xs: xs[::-1], lambda xs: xs[5:] + xs[:5]):
+            r2, m2 = dict(r), dict(meta)
+            r2["2020-05"], m2["2020-05"] = perm(r["2020-05"]), perm(meta["2020-05"])
+            assert oof_backtest(r2, n_quantiles=5, cost_bps=10.0, meta_by_ym=m2,
+                                rebalance_per_year=4) == base
+
+    def test_rank_ic_family_is_unchanged_by_a_flat_period(self):
+        r, meta = self._varied()
+        r2, m2 = self._with_flat(r, meta)
+        a = oof_backtest(r, n_quantiles=5, meta_by_ym=meta)
+        b = oof_backtest(r2, n_quantiles=5, meta_by_ym=m2)
+        for key in ("rank_ic", "rank_ic_by_period", "rank_ic_industry_neutral"):
+            assert b[key] == a[key], key
+
+    def test_output_unchanged_when_every_period_has_spread(self):
+        """全期に予測のばらつきがある入力では #977 の前と1ビットも変わらない。
+
+        期待値は修正前の `oof_backtest` に同じ入力を通した実出力を写したもの。
+        """
+        r, meta = self._varied()
+        o = oof_backtest(r, n_quantiles=5, cost_bps=10.0, meta_by_ym=meta, rebalance_per_year=4)
+        assert o == {
+            "n_quantiles": 5,
+            "n_periods": 4,
+            "n_periods_quantile": 4,
+            "n_oof_samples": 92,
+            "quantile_returns": [-0.193781, -0.12279, -0.247469, 0.269535, 0.40607],
+            "rank_ic": {"mean": 0.2018, "std": 0.349, "n": 4},
+            "rank_ic_by_period": {"2020-01": 0.59585, "2020-04": 0.177866,
+                                  "2020-07": -0.34585, "2020-10": 0.379447},
+            "rank_ic_industry_neutral": {"mean": 0.1138, "n": 4},
+            "monotonicity": {"spearman_mean": 0.35, "spearman_std": 0.5025,
+                             "adjacent_increasing_rate": 0.625, "p_value": 0.0315,
+                             "n_periods": 4},
+            "long_short_spread": 0.599851,
+            "hit_rate": 0.75,
+            "short_side_spread": 0.237219,
+            "short_side_hit_rate": 0.75,
+            "short_side_spread_by_period": {"2020-01": 0.962299, "2020-04": 0.259846,
+                                            "2020-07": -0.353813, "2020-10": 0.080546},
+            "cost_bps": 10.0,
+            "long_short_spread_net": 0.399851,
+            "effective_turnover": 0.82672,
+            "annual_turnover": 3.3069,
+            "long_short_spread_net_turnover": 0.434507,
+            "breakeven_cost_bps": 36.28,
+            "interval_coverage": 0.8841,
+            "interval_tau": 0.9,
+            "interval_halfwidth": 2.17146,
+            "n_interval_calib": 69,
+        }
 
 
 # ── 7. producer μ̂ 永続化（sell_ranking 連携・ADR-0004）───────────────────────

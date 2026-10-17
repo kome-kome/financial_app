@@ -433,6 +433,7 @@ from plugins.macro_snapshots import (  # noqa: E402
     get_producer_scores,
     oof_backtest,
     preload_macro,
+    quantile_period_ok,
     use_fin_rows,
 )
 from plugins.macro_enet import _INNER_CV as _M6_INNER_CV  # noqa: E402
@@ -2167,11 +2168,12 @@ def quantile_risk_profile(resid_by_ym: dict, n_quantiles: int = RISK_QUANTILES) 
     「リスク調整後に」良いかは、分位ごとに月次の系列を作って初めて読める（#709）。
 
     `oof_backtest` の内部には触らない（あちらは素のリターン側の正本のまま）。期内サンプルが
-    `n_quantiles * 2` 未満の月は分位を作らない——`oof_backtest` と同じ除外規則。
+    `n_quantiles * 2` 未満の月と U が全社同じ月は分位を作らない——`oof_backtest` と同じ除外規則
+    （`quantile_period_ok` を共有する・#977）。
     """
     series: list[list[float]] = [[] for _ in range(n_quantiles)]
     for pairs in resid_by_ym.values():
-        if len(pairs) < n_quantiles * 2:
+        if not quantile_period_ok(pairs, n_quantiles):
             continue
         ordered = sorted(pairs, key=lambda p: p[0])
         size = len(ordered) / n_quantiles
