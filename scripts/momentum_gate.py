@@ -389,6 +389,17 @@ M-2 / M-6 は毎期、小型株を実際より高く・大型株を低く置く�
 4検定・α 0.0125。規模の十分位ごとの placement bias（#947 と同じ定義）を両条件で並べて出す（検定はしない）。
 時価総額が1行も取れなければ CV の前に止める。日中キューの名前は `gate:size-neutral`（**積むのは人**・採否は #957）。
 
+## M-2 の行の抽出の割合を比べるモード（`--subsample`・#989）
+
+M-2 の XGBoost は木ごとに学習行の `subsample` 割を抽出する。どの行が選ばれるかは行の並びで決まり、社の順を変えると
+種を変えたのと同じだけ学習が変わる（#987）。本番（`macro_gbdt._SUBSAMPLE`・0.8・分母）と、抽出を止める 1.0 を比べる。
+**条件は事前登録した `subsample_0.8` / `subsample_1.0` の2つに固定する**（ADR-0050）。`--valid-split` と同じ形で、
+**パネルは2条件で同一**（`panel_cond`）、差し替えるのは M-2 の CV へ渡す候補の opts だけ（`cv_opts`）。測るのは
+M-2 だけ（種 5 個の平均・#955）で、1モデル × 2指標 ＝2検定・α 0.025。CV の後、各条件の診断値の `subsample` が
+指定どおりかを確かめ、違えば止める（`subsample_reach_problems`）。分母と `Cond.subsample` の既定は M-2 本体の
+`macro_gbdt._SUBSAMPLE` から取り、本番が2条件のどちらでもなければ止める。opts を省くかどうかは候補の既定
+（`_SUBSAMPLE_DEFAULT`）と比べる（#964 の教訓）。日中キューの名前は `gate:subsample`（**積むのは人**・採否は #987）。
+
 ## M-2 は種を変えて平均する（`--seeds`・#955）
 
 M-2（XGBoost）は `random_state` を固定していても、種が違えば subsample の抜き方が変わり、同じ
@@ -449,6 +460,8 @@ from plugins.macro_snapshots import (  # noqa: E402
 from plugins.macro_enet import _INNER_CV as _M6_INNER_CV  # noqa: E402
 from plugins.macro_gbdt import _VALID_SPLIT as _M2_VALID_SPLIT  # noqa: E402
 from plugins.macro_gbdt import _VALID_SPLIT_CHOICES, _VALID_SPLIT_DEFAULT  # noqa: E402
+from plugins.macro_gbdt import _SUBSAMPLE as _M2_SUBSAMPLE  # noqa: E402
+from plugins.macro_gbdt import _SUBSAMPLE_DEFAULT  # noqa: E402
 from plugins.model_candidates import (  # noqa: E402
     _EN_INNER_CV_DEFAULT,
     _EN_INNER_CV_PURGED,
@@ -517,6 +530,10 @@ class Cond(NamedTuple):
     `valid_split`（#976）は M-2 の early stopping の検証集合の取り方。既定は本番の構成
     （`macro_gbdt._VALID_SPLIT`・`rows`）から取る。`inner_cv` と同じく**パネルを動かさず**、M-2 の CV へ渡す
     opts にだけ効く。
+
+    `subsample`（#989）は M-2 の XGBoost が木ごとに抽出する学習行の割合。既定は本番の構成
+    （`macro_gbdt._SUBSAMPLE`・0.8）から取る。`valid_split` と同じく**パネルを動かさず**、M-2 の CV へ渡す
+    opts にだけ効く。
     """
     use_momentum: bool
     momentum_window: int
@@ -530,6 +547,7 @@ class Cond(NamedTuple):
     fin_fill: bool = False
     inner_cv: str = _M6_INNER_CV
     valid_split: str = _M2_VALID_SPLIT
+    subsample: float = _M2_SUBSAMPLE
 
 
 CONDS: dict[str, bool] = {"off": False, "on": True}
@@ -637,6 +655,15 @@ VALID_SPLIT_CONDS: dict[str, str] = {f"valid_{s}": s for s in _VALID_SPLIT_CHOIC
 VALID_SPLIT_BASE_COND = f"valid_{_M2_VALID_SPLIT}"
 VALID_SPLIT_MODELS = ["xgb_m2"]
 
+# M-2 の行の抽出の割合を比べるモード（`--subsample`・#989）。**基準は本番の構成**（M-2 本体の
+# `macro_gbdt._SUBSAMPLE`）で、書き写さずにそこから取る。条件名は {名前: 割合}。**条件は事前登録した 0.8 / 1.0 の
+# 2つに固定する**（#987 の 10/18 のコメント・ADR-0050）。本番が2つのどちらでもなくなったら `build_conditions` が
+# 止める（分母が本番でなくなる）。名前に接頭辞 `subsample_` を付けるのは、分母を名前で引く `base_of` が他のモードの
+# 条件名と取り違えないため。M-6・M-1 にこの軸は無いので測らない。
+SUBSAMPLE_CONDS: dict[str, float] = {"subsample_0.8": 0.8, "subsample_1.0": 1.0}
+SUBSAMPLE_BASE_COND = f"subsample_{float(_M2_SUBSAMPLE)}"
+SUBSAMPLE_MODELS = ["xgb_m2"]
+
 # 規模で中立化した順位を比べるモード（`--size-neutral`・#970）。**基準は本番の構成（予測そのまま `raw`）**。
 # 予測の後処理で条件を作る（リスク軸と同じ形）＝2条件は同じ `Cond` を共有し、CV は1回。`size_neutral` は
 # 月ごとの断面で予測を log(時価総額) へ OLS で回帰した残差を予測として使う（#957 の 10/16 の試算の形）。
@@ -743,10 +770,11 @@ def build_conditions(windows: list[int] | None = None,
                     fin_fill: bool = False,
                     size_neutral: bool = False,
                     valid_split: bool = False,
-                    inner_cv_purge: bool = False) -> dict[str, Cond]:
+                    inner_cv_purge: bool = False,
+                    subsample: bool = False) -> dict[str, Cond]:
     """条件集合 {名前: Cond} を作る。
 
-    14のモードがある。**同時に使えるのは1つだけ**（下記）:
+    15のモードがある。**同時に使えるのは1つだけ**（下記）:
 
       既定           … ADR-0045 の昇格ゲートと完全に同じ2条件（`off` / `on`・マクロは ON のまま）
       `windows`      … モメンタム無し ＋ 各窓（#592・ADR-0050）
@@ -762,8 +790,9 @@ def build_conditions(windows: list[int] | None = None,
       `size_neutral` … 予測そのまま ＋ 月ごとに log 時価総額の効果を除いた予測（#970）。`Cond` は2条件で同一
       `valid_split`  … M-2 の early stopping の検証集合を行で取る ＋ 月の塊で取る（#976）。**パネルは2条件で同一**・M-2 だけ
       `inner_cv_purge` … M-6 の内側 CV を月の塊で区切る ＋ 学習と検証の間に空白を空ける（#979）。**パネルは2条件で同一**・M-6 だけ
+      `subsample`    … M-2 の行の抽出の割合 0.8 ＋ 1.0（#989）。**パネルは2条件で同一**・M-2 だけ
 
-    `inner_cv_purge` / `valid_split` の `Cond` は2条件で違うが、違うのは CV へ渡す opts だけで、パネルの鍵からは外す
+    `inner_cv_purge` / `valid_split` / `subsample` の `Cond` は2条件で違うが、違うのは CV へ渡す opts だけで、パネルの鍵からは外す
     （`panel_cond`）。`models` を渡したときはその軸を持つモデルだけであることを確かめる。
     `inner_cv_purge` は本番（`macro_enet._INNER_CV`）が分母の `months_purged` でなければ止める。
 
@@ -796,7 +825,7 @@ def build_conditions(windows: list[int] | None = None,
              ("--risk-axis", risk_axis), ("--fin-nan", fin_nan), ("--de-exclude", de_exclude),
              ("--fin-fill", fin_fill),
              ("--size-neutral", size_neutral), ("--valid-split", valid_split),
-             ("--inner-cv-purge", inner_cv_purge)]
+             ("--inner-cv-purge", inner_cv_purge), ("--subsample", subsample)]
     picked = [name for name, on in modes if on]
     if len(picked) > 1:
         raise ValueError(
@@ -862,6 +891,21 @@ def build_conditions(windows: list[int] | None = None,
                 "この軸は無く、同じ CV を2回回すだけになる（#976）")
         return {name: Cond(False, MOM_WINDOW, valid_split=split)
                 for name, split in VALID_SPLIT_CONDS.items()}
+    if subsample:
+        # M-2 の行の抽出の割合だけを差し替える。他の軸はすべて本番構成（検証集合も本番の取り方）。パネルは2条件で
+        # 同一（`panel_cond`）。M-6・M-1 にこの軸は無い（#989）。
+        others = [m for m in (models or []) if m not in SUBSAMPLE_MODELS]
+        if others:
+            raise ValueError(
+                f"--subsample は M-2（{', '.join(SUBSAMPLE_MODELS)}）だけを測る。{', '.join(others)} に"
+                "この軸は無く、同じ CV を2回回すだけになる（#989）")
+        if SUBSAMPLE_BASE_COND not in SUBSAMPLE_CONDS:
+            raise ValueError(
+                f"--subsample の分母は本番の M-2 の割合のはずだが、本番（macro_gbdt._SUBSAMPLE）は {_M2_SUBSAMPLE} で、"
+                f"事前登録した条件（{', '.join(f'{v}' for v in SUBSAMPLE_CONDS.values())}）に無い。本番と比べているつもりで"
+                "別物を比べるので止める（#989）")
+        return {name: Cond(False, MOM_WINDOW, subsample=rate)
+                for name, rate in SUBSAMPLE_CONDS.items()}
     if inner_cv_purge:
         # M-6 の内側 CV に空白を入れるかだけを差し替える。他の軸はすべて本番構成。パネルは2条件で同一
         # （`panel_cond`）。M-2・M-1 にこの軸は無い（#979）。
@@ -912,6 +956,7 @@ def base_of(conds: dict[str, Cond], default_max_features: int | None = None) -> 
     空欄を 0 で埋めるモードの分母も**本番の構成**（`drop`）。`--fin-nan` と同じく分母が母集団の狭い側。
     検証集合のモードの分母も**本番の構成**（`valid_` ＋ `macro_gbdt._VALID_SPLIT`）。この軸はパネルを動かさない。
     内側 CV の空白のモードの分母も**本番の構成**（`gap`＝`months_purged`・#968）。この軸もパネルを動かさない。
+    行の抽出の割合のモードの分母も**本番の構成**（`subsample_` ＋ `macro_gbdt._SUBSAMPLE`・#989）。この軸もパネルを動かさない。
     規模の中立化のモードの分母も**本番の構成**（予測そのまま `raw`）。この軸もパネルを動かさない。
     リスク軸モードの分母も**本番の構成**だが、モデルごとに違う（M-1 は `r2`・M-6 は `mu_only`）ので
     ここでは決めない。`main` はリスク軸モードでは `risk_base_cond` を使う（#808）。
@@ -919,7 +964,7 @@ def base_of(conds: dict[str, Cond], default_max_features: int | None = None) -> 
     for cand in (BASE_COND, MACRO_BASE_COND, INTERACTION_BASE_COND, FIN_ROWS_BASE_COND,
                  DEMEAN_BASE_COND, RISK_BASE_COND, FIN_NAN_BASE_COND, DE_EXCLUDE_BASE_COND,
                  FIN_FILL_BASE_COND, SIZE_NEUTRAL_BASE_COND,
-                 VALID_SPLIT_BASE_COND, INNER_CV_PURGE_BASE_COND):
+                 VALID_SPLIT_BASE_COND, INNER_CV_PURGE_BASE_COND, SUBSAMPLE_BASE_COND):
         if cand in conds:
             return cand
     prod = maxfeat_cond_name(default_max_features) if default_max_features else None
@@ -950,7 +995,8 @@ MODE_SUFFIX: dict[str, str] = {"default": "", "windows": "", "macro": "_macro",
                                "risk_axis": "_risk_axis", "fin_nan": "_fin_nan",
                                "de_exclude": "_de_exclude", "fin_fill": "_fin_fill",
                                "size_neutral": "_size_neutral",
-                               "valid_split": "_valid_split", "inner_cv_purge": "_inner_cv_purge"}
+                               "valid_split": "_valid_split", "inner_cv_purge": "_inner_cv_purge",
+                               "subsample": "_subsample"}
 
 
 def mode_of(windows: list[int] | None = None, macro: bool = False,
@@ -958,7 +1004,8 @@ def mode_of(windows: list[int] | None = None, macro: bool = False,
             fin_rows: bool = False, demean_target: bool = False,
             risk_axis: bool = False, fin_nan: bool = False, de_exclude: bool = False,
             fin_fill: bool = False, size_neutral: bool = False,
-            valid_split: bool = False, inner_cv_purge: bool = False) -> str:
+            valid_split: bool = False, inner_cv_purge: bool = False,
+            subsample: bool = False) -> str:
     """測定モードの名前を返す（`build_conditions` と同じ引数から1箇所で導出する）。
 
     **#615 で足した2モードは、ここを持たないまま別モードの名前で出力されていた**——
@@ -991,6 +1038,8 @@ def mode_of(windows: list[int] | None = None, macro: bool = False,
         return "valid_split"
     if inner_cv_purge:
         return "inner_cv_purge"
+    if subsample:
+        return "subsample"
     return "windows" if windows else "default"
 
 
@@ -1028,6 +1077,10 @@ _AXIS_VERDICTS: dict[str, tuple[str, str]] = {
     # 分母は本番（#968 で `gap`＝`months_purged`）。パネルは2条件で同一で、差は M-6 の内側 CV の空白だけ（#979）。
     # #968 の前は分母が `nogap` で「空白を空けても月の塊を上回らない」と書いていたが、分母が入れ替わったので
     # 「空白を外しても上回らない」の向きにした。
+    # 分母は本番（`macro_gbdt._SUBSAMPLE`）。パネルは2条件で同一で、差は M-2 の行の抽出の割合だけ（#989）。
+    # 本番を切り替えても読めるよう、向きを決めない言い方にした（#964 の `inner_cv` と同じ）。
+    "subsample": ("SUBSAMPLE AXIS [M-2 only; same panel on both sides]",
+                  "the other row-subsampling rate did not beat the production rate"),
     "inner_cv_purge": ("INNER CV PURGE AXIS [M-6 only; same panel on both sides]",
                        "removing the label-horizon gap between the inner training and validation months "
                        "did not beat the production purged month blocks"),
@@ -1793,27 +1846,34 @@ def fin_fill_reach_problems(filled: dict[str, int], samples: dict[str, int],
 # ── CV だけに効く欄（M-6 の内側 CV・#971／M-2 の検証集合・#976）───────────────────
 
 def panel_cond(c: Cond) -> Cond:
-    """パネルを作る鍵（#971・#976）。CV だけに効く欄（`inner_cv`・`valid_split`）を本番の値へ戻す。
+    """パネルを作る鍵（#971・#976・#989）。CV だけに効く欄（`inner_cv`・`valid_split`・`subsample`）を本番の値へ戻す。
 
-    `inner_cv_purge` / `valid_split` の2条件は同じパネルを1枚だけ作って共有する——別々に作ると、構築の揺れが
-    区切り方の差に混ざる（`--risk-axis` が同じ `Cond` を共有して μ̂ を揃えるのと同じ理由）。他のモードでは
-    どちらも既定のままなので、鍵は `c` そのものと等しく、挙動は変わらない。
+    `inner_cv_purge` / `valid_split` / `subsample` の2条件は同じパネルを1枚だけ作って共有する——別々に作ると、構築の
+    揺れが区切り方の差に混ざる（`--risk-axis` が同じ `Cond` を共有して μ̂ を揃えるのと同じ理由）。他のモードでは
+    どれも既定のままなので、鍵は `c` そのものと等しく、挙動は変わらない。
     """
-    return c._replace(inner_cv=_M6_INNER_CV, valid_split=_M2_VALID_SPLIT)
+    return c._replace(inner_cv=_M6_INNER_CV, valid_split=_M2_VALID_SPLIT, subsample=_M2_SUBSAMPLE)
 
 
 def cv_opts(c: Cond, model: str) -> dict | None:
-    """条件が CV へ渡す候補の opts（M-6 の内側 CV・#971／M-2 の検証集合・#976）。候補の既定で回る条件なら None。
+    """条件が CV へ渡す候補の opts（M-6 の内側 CV・#971／M-2 の検証集合・#976／M-2 の行の抽出・#989）。
+    候補の既定で回る条件なら None。
 
     **省けるかは本番の値（`macro_enet._INNER_CV`）ではなく候補の既定（`_EN_INNER_CV_DEFAULT`）で決める**
     （#964）。本番が `months_purged` のとき本番と比べて省くと、候補は `rows` で回り、本番の構成のつもりで
-    旧い区切り方を測る——エラーは出ない。M-2 の `valid_split` も同じ規則で関数の既定（`_VALID_SPLIT_DEFAULT`）と比べる。
+    旧い区切り方を測る——エラーは出ない。M-2 の `valid_split` / `subsample` も同じ規則で候補の既定
+    （`_VALID_SPLIT_DEFAULT` / `_SUBSAMPLE_DEFAULT`）と比べ、両方が既定から外れれば両方を渡す。
     """
     kind = MODEL_SPECS[model][1]
     if kind == "elasticnet" and c.inner_cv != _EN_INNER_CV_DEFAULT:
         return {"inner_cv": c.inner_cv}
-    if kind == "xgb_m2" and c.valid_split != _VALID_SPLIT_DEFAULT:
-        return {"valid_split": c.valid_split}
+    if kind == "xgb_m2":
+        opts = {}
+        if c.valid_split != _VALID_SPLIT_DEFAULT:
+            opts["valid_split"] = c.valid_split
+        if c.subsample != _SUBSAMPLE_DEFAULT:
+            opts["subsample"] = c.subsample
+        return opts or None
     return None
 
 
@@ -1848,6 +1908,23 @@ def valid_split_reach_problems(diags: dict[str, dict], conds: dict[str, Cond]) -
         got = (diag or {}).get("valid_split", _VALID_SPLIT_DEFAULT)
         if got != want:
             problems.append(f"{key}: 検証集合が {got} で取られた（指定は {want}）")
+    return problems
+
+
+def subsample_reach_problems(diags: dict[str, dict], conds: dict[str, Cond]) -> list[str]:
+    """M-2 の行の抽出の割合の切り替えが CV まで届いていない理由を列挙する（#989）。空リストなら健全。
+
+    候補 `xgb_m2` は候補の既定（`_SUBSAMPLE_DEFAULT`）以外のときだけ、回り切った fold ごとに診断値 `subsample` へ
+    値を積む（`_b_xgb_baseline`）ので、積まれていなければ候補の既定で回ったことになる。opts が候補まで届かないと
+    両条件が同じ CV になり、エラーを出さずに「差なし」だけが残る。
+    """
+    problems = []
+    for key, diag in diags.items():
+        cond = key.split("|", 1)[0]
+        want = float(conds[cond].subsample)
+        got = (diag or {}).get("subsample", _SUBSAMPLE_DEFAULT)
+        if got is None or not math.isclose(float(got), want, abs_tol=1e-9):
+            problems.append(f"{key}: 行の抽出が {got} で回った（指定は {want}）")
     return problems
 
 
@@ -2294,6 +2371,10 @@ def main() -> None:
                          "外す空白を空ける gap＝本番の months_purged（#968）と、空けずに月の塊で区切る nogap＝months を"
                          f"共通域で比べる・#979）。パネルは2条件で同一。モデルは {','.join(INNER_CV_PURGE_MODELS)} だけ。"
                          "他モードと併用不可")
+    ap.add_argument("--subsample", dest="subsample", action="store_true",
+                    help="M-2 の行の抽出の割合のモード（木ごとに学習行の一部を抽出する本番の割合と、抽出を止める割合を"
+                         f"共通域で比べる・#989・#987。条件は {' / '.join(SUBSAMPLE_CONDS)}・分母は {SUBSAMPLE_BASE_COND}）。パネルは2条件で同一。"
+                         f"モデルは {','.join(SUBSAMPLE_MODELS)} だけ。他モードと併用不可")
     ap.add_argument("--size-neutral", dest="size_neutral", action="store_true",
                     help="規模の中立化のモード（予測そのまま raw＝本番と、月ごとに予測を log 時価総額へ OLS で回帰した"
                          "残差 size_neutral を共通域で比べる・#970）。CV は1回。時価総額の無い行は両条件から落とす。"
@@ -2339,6 +2420,8 @@ def main() -> None:
         default_models = VALID_SPLIT_MODELS
     elif args.inner_cv_purge:
         default_models = INNER_CV_PURGE_MODELS
+    elif args.subsample:
+        default_models = SUBSAMPLE_MODELS
     elif args.size_neutral:
         default_models = SIZE_NEUTRAL_MODELS
     else:
@@ -2372,7 +2455,7 @@ def main() -> None:
                                  fin_nan=args.fin_nan, de_exclude=args.de_exclude,
                                  fin_fill=args.fin_fill,
                                  valid_split=args.valid_split,
-                                 inner_cv_purge=args.inner_cv_purge,
+                                 inner_cv_purge=args.inner_cv_purge, subsample=args.subsample,
                                  size_neutral=args.size_neutral)
     except ValueError as e:
         raise SystemExit(str(e))
@@ -2427,7 +2510,8 @@ def main() -> None:
                    demean_target=args.demean_target, risk_axis=args.risk_axis,
                    fin_nan=args.fin_nan, de_exclude=args.de_exclude, fin_fill=args.fin_fill,
                    size_neutral=args.size_neutral,
-                   valid_split=args.valid_split, inner_cv_purge=args.inner_cv_purge)
+                   valid_split=args.valid_split, inner_cv_purge=args.inner_cv_purge,
+                   subsample=args.subsample)
     default_out = f"momentum_gate{MODE_SUFFIX[mode]}.json"
     if mode == "risk_axis" and models != RISK_MODELS:
         # M-1 と M-6 は分母が違い別々に回す（#808）。同じファイルへ書くと後の run が前の結果を消す。
@@ -2550,6 +2634,7 @@ def main() -> None:
                       f"fin_fill={'on' if c.fin_fill else 'off'} "
                       f"inner_cv={c.inner_cv} "
                       f"valid_split={c.valid_split} "
+                      f"subsample={c.subsample} "
                       f"months={st['months']} ({st['first_ym']}..{st['last_ym']}) "
                       f"samples={st['samples']} companies={st['companies']} "
                       f"features={st['n_features']} [{head}{more}]", flush=True)
@@ -2741,6 +2826,14 @@ def main() -> None:
                 raise SystemExit("中止: 検証集合の切り替えが CV に届いていません: " + " / ".join(problems))
             print("[note] both sides share one panel; the only difference is how M-2 takes "
                   "the early-stopping validation set inside each training fold", flush=True)
+        # 行の抽出の割合のモード（#989）も同じ確かめ方（候補は既定以外の割合を診断値に積む）。
+        if mode == "subsample":
+            problems = subsample_reach_problems(
+                {key: out.get("diag") for key, out in results.items()}, conds)
+            if problems:
+                raise SystemExit("中止: 行の抽出の割合の切り替えが CV に届いていません: " + " / ".join(problems))
+            print("[note] both sides share one panel; the only difference is the share of training rows "
+                  "each M-2 tree samples (subsample)", flush=True)
     finally:
         db.close()
 
@@ -2799,6 +2892,12 @@ def main() -> None:
             {key: out.get("diag") for key, out in cruns.items()}, conds)
         if problems:
             raise SystemExit("中止: 検証集合の切り替えが CV に届いていません（共通月）: "
+                             + " / ".join(problems))
+    if mode == "subsample":
+        problems = subsample_reach_problems(
+            {key: out.get("diag") for key, out in cruns.items()}, conds)
+        if problems:
+            raise SystemExit("中止: 行の抽出の割合の切り替えが CV に届いていません（共通月）: "
                              + " / ".join(problems))
 
     print("\n=== common (ym,ec) restriction ===", flush=True)
@@ -3016,7 +3115,8 @@ def main() -> None:
                               "de_null_industries": list(c.de_null_industries),
                               "fin_fill": c.fin_fill,
                               "inner_cv": c.inner_cv,
-                              "valid_split": c.valid_split}
+                              "valid_split": c.valid_split,
+                              "subsample": c.subsample}
                        for name, c in conds.items()},
         "mode": mode,
         "base_cond": base,

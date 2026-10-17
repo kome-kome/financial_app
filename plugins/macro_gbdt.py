@@ -205,6 +205,13 @@ _MIN_FIT_N  = 5            # この未満なら early_stopping を諦め固定 n
 _VALID_SPLIT_CHOICES = ("rows", "months")
 _VALID_SPLIT_DEFAULT = "rows"
 _VALID_SPLIT = "rows"
+# 木ごとに学習行の何割を抽出するか（XGBoost の `subsample`・#987・#989）。どの行が選ばれるかは行の並びで決まり、
+# 社の順を変えると種を変えたのと同じだけ学習が変わる（`months` の検証集合でも、社の順だけで最終モデルの木の本数が
+# 幅 91 動き、1.0 にすると幅 1 に縮んだ・2026-10-18）。`_SUBSAMPLE` は **M-2 本体の既定**（`params_schema()` の既定はここから取る）、`_SUBSAMPLE_DEFAULT` は
+# 候補 `xgb_m2`（`model_candidates._b_xgb_baseline`）が opts を省いたときに回る値。1.0 へ切り替えるかは #987 が
+# `momentum_gate --subsample` の結果で決める。
+_SUBSAMPLE_DEFAULT = 0.8
+_SUBSAMPLE = 0.8
 
 # ── SHAP 解釈性強化（signed SHAP＋交互作用・Issue #371）────────────────────────
 _INTERACT_TOP_K   = 15     # グローバル交互作用の上位ペア表示件数
@@ -532,7 +539,7 @@ class MacroGbdtPlugin(AnalysisPlugin):
                 "dtype": "float",
                 "label": "サブサンプル率",
                 "description": "各ツリーで使うサンプルの割合。",
-                "default": 0.8,
+                "default": _SUBSAMPLE,
                 "min": 0.4,
                 "max": 1.0,
                 "step": 0.05,

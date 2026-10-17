@@ -336,6 +336,20 @@ JOBS: dict[str, Job] = {
         measured_min=15.0,
         parallel_sensitive=True,   # 他の gate と同じ理由（採否が CI の符号で決まる）
     ),
+    # M-2 の XGBoost の行の抽出（subsample）を止めるか（#987）を測る道具（#989）。
+    # **積むのは人**（#987 で読んで、本番の `macro_gbdt._SUBSAMPLE` を切り替えるかを決める）。
+    "gate:subsample": Job(
+        name="gate_subsample",
+        argv=("{python}", "-m", "scripts.momentum_gate", "--subsample",
+              "--stride", "1", "--allow-full-pull", "--refresh-cache"),
+        why="M-2 の XGBoost が木ごとに学習行の 0.8 を抽出する（本番・subsample_0.8）か、抽出を止める（subsample_1.0）"
+            "かを共通 (ym,ec) 域で比べる（#989・#987）。パネルは2条件で同一で、母集団は動かない。"
+            "対象は M-2 だけ（種 5 個の平均）・2検定・alpha 0.025。切り替えが CV に届いていなければ非0で止まる。",
+        # 見積り: gate:valid-split の実測 15.0 分に、抽出を止めた側の M-2 が 3 割ほど重い分（#987 の 10/18 の
+        # 並び確認で 1 回 214〜245 秒・#969 の 0.8 は約 180 秒）を乗せた。実走後に実測へ差し替える。
+        measured_min=18.0,
+        parallel_sensitive=True,   # 他の gate と同じ理由（採否が CI の符号で決まる）
+    ),
     # M-6 の内側 CV に 52 週先ラベルの重なりを外す空白を入れるか（#968）を測る道具（#979）。
     # **積むのは人**。#968 は 2026-10-17 の結果で本番（`macro_enet._INNER_CV`）を `months_purged` へ切り替え、
     # 分母を `gap` へ付け替えた（今は「空白を外すと悪くなるか」を問う）。

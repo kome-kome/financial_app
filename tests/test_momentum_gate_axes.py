@@ -125,6 +125,20 @@ class TestModesAreMutuallyExclusive:
         (dict(fin_fill=True, inner_cv_purge=True)),
         (dict(size_neutral=True, inner_cv_purge=True)),
         (dict(valid_split=True, inner_cv_purge=True)),
+        # M-2 の行の抽出の割合のモード（#989）もパネルを動かさないが、軸を2つ振ると分離できない点は同じ。
+        (dict(windows=[3], subsample=True)),
+        (dict(macro=True, subsample=True)),
+        (dict(interactions=True, subsample=True)),
+        (dict(max_features=[5], subsample=True)),
+        (dict(fin_rows=True, subsample=True)),
+        (dict(demean_target=True, subsample=True)),
+        (dict(risk_axis=True, subsample=True)),
+        (dict(fin_nan=True, subsample=True)),
+        (dict(de_exclude=True, subsample=True)),
+        (dict(fin_fill=True, subsample=True)),
+        (dict(size_neutral=True, subsample=True)),
+        (dict(valid_split=True, subsample=True)),
+        (dict(inner_cv_purge=True, subsample=True)),
     ]
 
     @pytest.mark.parametrize("kwargs", PAIRS)
@@ -644,6 +658,7 @@ class TestOutputNamesTheModeThatWasMeasured:
         (dict(size_neutral=True), "size_neutral"),
         (dict(valid_split=True), "valid_split"),
         (dict(inner_cv_purge=True), "inner_cv_purge"),
+        (dict(subsample=True), "subsample"),
     ])
     def test_mode_follows_the_flag(self, kwargs, want):
         assert mode_of(**kwargs) == want
@@ -652,7 +667,7 @@ class TestOutputNamesTheModeThatWasMeasured:
         assert set(MODE_SUFFIX) == {"default", "windows", "macro", "interactions", "max_features",
                                     "fin_rows", "demean_target", "risk_axis", "fin_nan",
                                     "de_exclude", "fin_fill", "size_neutral",
-                                    "valid_split", "inner_cv_purge"}
+                                    "valid_split", "inner_cv_purge", "subsample"}
 
     def test_demean_mode_writes_its_own_file(self):
         """既定の `momentum_gate.json` を上書きしない（どの軸の結果かがファイル名で分かる）。"""
@@ -676,6 +691,7 @@ class TestOutputNamesTheModeThatWasMeasured:
          "FIN NAN AXIS [common domain = complete-financials rows only; read raw for blank rows]"),
         ("de_exclude", 2, "DE EXCLUDE AXIS"),
         ("inner_cv_purge", 2, "INNER CV PURGE AXIS [M-6 only; same panel on both sides]"),
+        ("subsample", 2, "SUBSAMPLE AXIS [M-2 only; same panel on both sides]"),
         ("size_neutral", 2,
          "SIZE NEUTRAL AXIS [same CV; rows without market cap dropped from both sides]"),
     ])
