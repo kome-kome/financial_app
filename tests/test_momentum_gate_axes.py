@@ -125,6 +125,20 @@ class TestModesAreMutuallyExclusive:
         (dict(fin_fill=True, valid_split=True)),
         (dict(inner_cv=True, valid_split=True)),
         (dict(size_neutral=True, valid_split=True)),
+        # M-6 の内側 CV の空白のモード（#979）もパネルを動かさないが、軸を2つ振ると分離できない点は同じ。
+        (dict(windows=[3], inner_cv_purge=True)),
+        (dict(macro=True, inner_cv_purge=True)),
+        (dict(interactions=True, inner_cv_purge=True)),
+        (dict(max_features=[5], inner_cv_purge=True)),
+        (dict(fin_rows=True, inner_cv_purge=True)),
+        (dict(demean_target=True, inner_cv_purge=True)),
+        (dict(risk_axis=True, inner_cv_purge=True)),
+        (dict(fin_nan=True, inner_cv_purge=True)),
+        (dict(de_exclude=True, inner_cv_purge=True)),
+        (dict(fin_fill=True, inner_cv_purge=True)),
+        (dict(inner_cv=True, inner_cv_purge=True)),
+        (dict(size_neutral=True, inner_cv_purge=True)),
+        (dict(valid_split=True, inner_cv_purge=True)),
     ]
 
     @pytest.mark.parametrize("kwargs", PAIRS)
@@ -344,8 +358,19 @@ class TestInnerCvMode:
         from plugins.model_candidates import _EN_INNER_CV_CHOICES
 
         conds = build_conditions(inner_cv=True)
-        assert list(conds) == list(INNER_CV_CONDS) == list(_EN_INNER_CV_CHOICES) == ["rows", "months"]
+        assert list(conds) == list(INNER_CV_CONDS) == ["rows", "months"]
         assert {name: c.inner_cv for name, c in conds.items()} == {"rows": "rows", "months": "months"}
+        assert set(INNER_CV_CONDS) <= set(_EN_INNER_CV_CHOICES)
+
+    def test_stays_two_conditions_when_the_candidate_gains_a_choice(self):
+        """事前登録は `rows` / `months` の2条件・2検定（ADR-0050）。空白付き `months_purged`（#979）を
+        候補の選択肢に足しても、このモードは黙って3条件にならない（検定数と α が変わる）。"""
+        from plugins.model_candidates import _EN_INNER_CV_CHOICES
+
+        assert "months_purged" in _EN_INNER_CV_CHOICES
+        conds = build_conditions(inner_cv=True)
+        assert len(conds) == 2
+        assert bonferroni_alpha(len(INNER_CV_MODELS), len(conds)) == pytest.approx(0.025)
 
     def test_other_axes_stay_at_the_production_shape(self):
         """差し替えるのは区切り方だけ。他の軸が動くと2軸ぶんの差が混ざる。本番（#964 で `months`）の側が
@@ -731,6 +756,7 @@ class TestOutputNamesTheModeThatWasMeasured:
         (dict(inner_cv=True), "inner_cv"),
         (dict(size_neutral=True), "size_neutral"),
         (dict(valid_split=True), "valid_split"),
+        (dict(inner_cv_purge=True), "inner_cv_purge"),
     ])
     def test_mode_follows_the_flag(self, kwargs, want):
         assert mode_of(**kwargs) == want
@@ -739,7 +765,7 @@ class TestOutputNamesTheModeThatWasMeasured:
         assert set(MODE_SUFFIX) == {"default", "windows", "macro", "interactions", "max_features",
                                     "fin_rows", "demean_target", "risk_axis", "fin_nan",
                                     "de_exclude", "fin_fill", "inner_cv", "size_neutral",
-                                    "valid_split"}
+                                    "valid_split", "inner_cv_purge"}
 
     def test_demean_mode_writes_its_own_file(self):
         """既定の `momentum_gate.json` を上書きしない（どの軸の結果かがファイル名で分かる）。"""

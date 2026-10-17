@@ -619,6 +619,41 @@ class TestValidSplitGateMeasuresM2:
         assert rd.JOBS[self.KEY].parallel_sensitive is True
 
 
+class TestInnerCvPurgeGateMeasuresM6:
+    """M-6 の内側 CV の空白のジョブ（#979・#968）は M-6 だけを、間引かずに、本番（months）を分母に測る。
+
+    事前登録（ADR-0050 の 2026-10-17・その5 追記）は「M-6 だけ・nogap(months) / gap(months_purged)・2検定・α 0.025」。
+    """
+
+    KEY = "gate:inner-cv-purge"
+
+    def test_the_job_runs_the_purge_axis_with_the_default_models(self):
+        from scripts.momentum_gate import INNER_CV_PURGE_MODELS
+
+        argv = rd.JOBS[self.KEY].argv
+        assert "--inner-cv-purge" in argv
+        assert "--models" not in argv
+        assert INNER_CV_PURGE_MODELS == ["elasticnet"]
+
+    def test_the_preregistered_base_and_tests(self):
+        import plugins.macro_enet as me
+        from scripts.momentum_gate import (
+            INNER_CV_PURGE_CONDS, INNER_CV_PURGE_MODELS, base_of, bonferroni_alpha, build_conditions)
+
+        conds = build_conditions(inner_cv_purge=True, models=INNER_CV_PURGE_MODELS)
+        assert base_of(conds) == "nogap"
+        assert INNER_CV_PURGE_CONDS["nogap"] == me._INNER_CV == "months"     # 本番の構成
+        assert bonferroni_alpha(len(INNER_CV_PURGE_MODELS), len(conds)) == pytest.approx(0.025)
+
+    def test_the_job_measures_at_full_resolution(self):
+        argv = rd.JOBS[self.KEY].argv
+        assert "--smoke" not in argv
+        assert argv[argv.index("--stride") + 1] == "1"
+
+    def test_the_result_changes_with_background_work(self):
+        assert rd.JOBS[self.KEY].parallel_sensitive is True
+
+
 class TestSizeNeutralGateMeasuresM2AndM6:
     """規模の中立化のジョブ（#970・#957）は M-2 / M-6 を、間引かずに、予測そのまま（raw）を分母に測る。
 

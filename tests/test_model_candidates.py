@@ -33,9 +33,11 @@ from plugins.model_candidates import (
     make_elasticnet_fit_predict,
     month_block_splits,
     pca_feature_names,
+    purged_month_plan,
     summarize_diag,
     wrap_macro_pca,
 )
+from plugins.macro_snapshots import LABEL_HORIZON_MONTHS
 from plugins.utils import walk_forward_cv_monthly
 
 FIN_FEATURES = ["per", "pbr", "roe", "de_ratio"]
@@ -282,15 +284,19 @@ def _uneven_panel(sizes, seed: int = 971) -> dict:
     return out
 
 
-def _reference_enet(train_samples, test_samples):
-    """修正前（#971 より前）の `make_elasticnet_fit_predict` の手順をそのまま書き写した参照実装。"""
+def _reference_enet(train_samples, test_samples, cv=None):
+    """修正前（#971 より前）の `make_elasticnet_fit_predict` の手順をそのまま書き写した参照実装。
+
+    `cv` を渡すとその分割で選ぶ（月で区切る方式を、分割だけ差し替えて同じ手順で回す・#979）。
+    """
     from sklearn.linear_model import ElasticNetCV
     from sklearn.model_selection import TimeSeriesSplit
 
     X_tr, y_tr, X_te, y_mu, y_sd, _y_te = _prep_matrices(train_samples, test_samples)
-    splits = max(2, min(_EN_CV_SPLITS, len(X_tr) // 2 - 1))
+    if cv is None:
+        cv = TimeSeriesSplit(n_splits=max(2, min(_EN_CV_SPLITS, len(X_tr) // 2 - 1)))
     model = ElasticNetCV(l1_ratio=list(_EN_L1_RATIOS), alphas=_EN_N_ALPHAS,
-                         cv=TimeSeriesSplit(n_splits=splits), max_iter=_EN_MAX_ITER,
+                         cv=cv, max_iter=_EN_MAX_ITER,
                          random_state=42, selection="cyclic")
     model.fit(X_tr, y_tr)
     return (model.predict(X_te) * y_sd + y_mu).tolist(), model
@@ -418,6 +424,151 @@ def test_candidate_menu_asks_for_month_sizes_only_for_months():
                                     fit_predict=fp, embargo_months=12, **extra_m)
     assert folds, "months の fold が1つも立たなかった（全 fold が例外で飛ばされた可能性）"
     assert summarize_diag(diag)["inner_cv"] == "months"
+
+
+# ── 空白付きの月の塊（`months_purged`・#979）─────────────────────────────────
+# 目的変数は 52 週先リターンなので、学習の最後の月と検証の最初の月が隣り合うとラベル期間がほぼ丸ごと重なる
+# （#968）。`months_purged` は間に `LABEL_HORIZON_MONTHS` か月を上限とする空白を空ける。`months` は変えない。
+
+_UNEVEN_30 = (_UNEVEN_GROUPS * 3)[:30]
+_SIZES_21 = [40, 17, 33, 25, 38, 21, 29, 15, 36, 23, 31, 19, 27, 40, 22, 34, 18, 30, 26, 39, 24]
+
+
+def _reference_month_splits(groups, cv_splits: int) -> list:
+    """修正前（#979 より前）の `month_block_splits` をそのまま書き写した参照実装。"""
+    from sklearn.model_selection import TimeSeriesSplit
+
+    sizes = [int(g) for g in groups]
+    bounds = np.concatenate([[0], np.cumsum(sizes)])
+    splits = max(2, min(cv_splits, len(sizes) // 2 - 1))
+    return [(np.arange(bounds[tr[0]], bounds[tr[-1] + 1]), np.arange(bounds[te[0]], bounds[te[-1] + 1]))
+            for tr, te in TimeSeriesSplit(n_splits=splits).split(np.arange(len(sizes)))]
+
+
+def _same_splits(a, b) -> bool:
+    a, b = list(a), list(b)
+    return len(a) == len(b) and all(np.array_equal(x, y) and np.array_equal(u, v)
+                                    for (x, u), (y, v) in zip(a, b))
+
+
+def _gaps(splits, groups) -> list[int]:
+    """各分割で、学習の最後の月と検証の最初の月の間に挟まる月の数。"""
+    month = _month_of_row(groups)
+    return [int(month[te[0]] - month[tr[-1]] - 1) for tr, te in splits]
+
+
+def test_months_split_is_unchanged_by_979():
+    """months の分割は #979 の前と同じ。参照実装そのものも、手で求めた行の範囲で縛る。"""
+    ref = _reference_month_splits(_UNEVEN_GROUPS, 3)
+    assert [((int(tr[0]), int(tr[-1]) + 1), (int(te[0]), int(te[-1]) + 1)) for tr, te in ref] == [
+        ((0, 19), (19, 36)), ((0, 36), (36, 55)), ((0, 55), (55, 76))]
+    for groups in (_UNEVEN_GROUPS, _UNEVEN_30, [5] * 6, [5] * 3):
+        want = _reference_month_splits(groups, 3)
+        assert _same_splits(month_block_splits(groups, 3), want)
+        assert _same_splits(month_block_splits(groups, 3, gap_months=0), want)
+        assert _same_splits(elasticnet_inner_cv(sum(groups), 3, "months", groups), want)
+
+
+def test_months_fit_is_unchanged_by_979():
+    """months の fit_predict は修正前の分割を渡した手順と同じ予測・係数を返し、空白の印を積まない。"""
+    train, test, groups = _split(_uneven_panel(_SIZES_21), n_train_months=20)
+    want, ref = _reference_enet(train, test, cv=_reference_month_splits(groups, _EN_CV_SPLITS))
+    diag = make_diag()
+    got, _ = make_elasticnet_fit_predict(diag=diag, inner_cv="months")(train, test, groups)
+    assert got == want
+    assert diag["coef"] == [[float(c) for c in ref.coef_]]
+    assert diag["inner_cv"] == ["months"]
+    assert "inner_cv_gap" not in diag          # 夜間の M-6（months）の診断値の形は変わらない
+
+
+def test_purged_leaves_the_full_gap_with_30_training_months():
+    """学習 30 か月なら空白は縮まずに入り、どの分割でも学習と検証の間が LABEL_HORIZON_MONTHS か月空く。"""
+    splits = month_block_splits(_UNEVEN_30, 3, gap_months=LABEL_HORIZON_MONTHS)
+    assert len(splits) == 3
+    assert _gaps(splits, _UNEVEN_30) == [LABEL_HORIZON_MONTHS] * 3
+    assert _months_cut(splits, _UNEVEN_30) == set()
+    month = _month_of_row(_UNEVEN_30)
+    # 検証の塊の大きさは空白を引いた残りの月数から決まる: (30 − 12) // 4 = 4 か月ずつ
+    assert [len(set(month[te].tolist())) for _tr, te in splits] == [4, 4, 4]
+    assert all(len(set(month[tr].tolist())) >= 1 for tr, _te in splits)
+    # 内側 CV の入口からも同じ分割になる
+    assert _same_splits(elasticnet_inner_cv(sum(_UNEVEN_30), 3, "months_purged", _UNEVEN_30), splits)
+    # 空振り防止: months では学習と検証が隣り合う
+    assert _gaps(month_block_splits(_UNEVEN_30, 3), _UNEVEN_30) == [0, 0, 0]
+
+
+@pytest.mark.parametrize("n_months, want_gap", [
+    (4, 1), (6, 3), (14, 11), (15, 12), (16, 12), (20, 12), (48, 12), (60, 12)])
+def test_purged_gap_shrinks_only_as_far_as_needed(n_months, want_gap):
+    """短い学習期間では、空白は両立する最大の値まで縮む（学習 6 か月なら 3 か月）。"""
+    groups = (_UNEVEN_GROUPS * 6)[:n_months]
+    splits = month_block_splits(groups, 3, gap_months=LABEL_HORIZON_MONTHS)
+    assert purged_month_plan(n_months, 3, LABEL_HORIZON_MONTHS)[2] == want_gap
+    assert len(splits) >= 2
+    assert _gaps(splits, groups) == [want_gap] * len(splits)
+    month = _month_of_row(groups)
+    for tr, te in splits:
+        assert len(set(month[tr].tolist())) >= 1 and len(set(month[te].tolist())) >= 1
+    if want_gap < LABEL_HORIZON_MONTHS:
+        # 縮んだ値は両立する最大の値: 上限を1か月だけ広げても、それ以上は空けられない
+        assert purged_month_plan(n_months, 3, want_gap + 1)[2] == want_gap
+
+
+def test_purged_with_no_room_for_a_gap_is_exactly_months():
+    """空白が 0 まで縮んだとき（学習 3 か月）の分割は months と完全に同じ。"""
+    groups = [7, 3, 9]
+    assert purged_month_plan(len(groups), 3, LABEL_HORIZON_MONTHS)[2] == 0
+    assert _same_splits(month_block_splits(groups, 3, gap_months=LABEL_HORIZON_MONTHS),
+                        month_block_splits(groups, 3))
+
+
+def test_purged_splits_hold_the_same_rows_when_rows_are_shuffled_within_months():
+    """月内の行の並びを入れ替えても、各分割の学習側・検証側に入る行（社）の集合は変わらない。"""
+    rng = np.random.default_rng(979)
+    ids = [(m, k) for m, g in enumerate(_UNEVEN_30) for k in range(g)]
+    shuffled: list = []
+    start = 0
+    for g in _UNEVEN_30:
+        block = ids[start:start + g]
+        shuffled.extend(block[i] for i in rng.permutation(g))
+        start += g
+    assert shuffled != ids                                      # 並びは実際に変わっている
+
+    def sides(splits, order):
+        return [({order[i] for i in tr}, {order[i] for i in te}) for tr, te in splits]
+
+    splits = month_block_splits(_UNEVEN_30, 3, gap_months=LABEL_HORIZON_MONTHS)
+    assert sides(splits, ids) == sides(splits, shuffled)
+
+
+def test_purged_fit_records_the_gap_it_used():
+    """months_purged の fit_predict は空白付きの分割で選び、その fold で空けた月数を診断値に積む。"""
+    train, test, groups = _split(_uneven_panel(_SIZES_21), n_train_months=20)
+    want, _ref = _reference_enet(
+        train, test, cv=month_block_splits(groups, _EN_CV_SPLITS, gap_months=LABEL_HORIZON_MONTHS))
+    diag = make_diag()
+    got, _ = make_elasticnet_fit_predict(diag=diag, inner_cv="months_purged")(train, test, groups)
+    assert got == want
+    assert diag["inner_cv"] == ["months_purged"]
+    assert diag["inner_cv_gap"] == [LABEL_HORIZON_MONTHS]       # 学習 20 か月なら縮まない
+    with pytest.raises(ValueError, match="train_groups"):       # 2 引数では分割を作れない
+        make_elasticnet_fit_predict(inner_cv="months_purged")(train, test)
+
+
+def test_candidate_menu_asks_for_month_sizes_for_purged_too():
+    """候補メニューの elasticnet: months_purged も各学習月の行数を受け取り、walk-forward で fold が立つ。"""
+    fp, extra, diag = build_candidate("elasticnet", FEATURE_NAMES, {"inner_cv": "months_purged"})
+    assert extra == {"pass_train_groups": True}
+    panel = _uneven_panel([30, 12, 25, 18, 28, 14, 22, 11, 27, 16, 24, 13, 20, 30, 15, 26,
+                           12, 23, 19, 29, 17, 21, 25, 14])
+    folds = walk_forward_cv_monthly(panel, FEATURE_NAMES, min_train_months=6, step_months=3,
+                                    fit_predict=fp, embargo_months=12, **extra)
+    assert folds, "months_purged の fold が1つも立たなかった（全 fold が例外で飛ばされた可能性）"
+    summary = summarize_diag(diag)
+    assert summary["inner_cv"] == "months_purged"
+    # 学習 6・9 か月の fold では空白が縮む（3・6 か月）
+    assert diag["inner_cv_gap"] == [3, 6]
+    assert 0 < summary["inner_cv_gap"] <= LABEL_HORIZON_MONTHS
 
 
 # ── マクロ fold 内 PCA 圧縮ラッパー ────────────────────────────────────────

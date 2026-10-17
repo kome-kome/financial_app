@@ -368,6 +368,19 @@ fit 側・検証側に入るかが月内の並びで決まる（#969）。`valid
 （`_VALID_SPLIT_DEFAULT`）と比べる（#964 の教訓）。**条件名に接頭辞 `valid_` を付けるのは `--inner-cv` の
 `rows` / `months` と区別するため**——同じ名前だと、分母を名前で引く `base_of` が他方の本番を返す。
 
+## M-6 の内側 CV に空白を入れるかを比べるモード（`--inner-cv-purge`・#979）
+
+目的変数は 52 週先リターンなので、内側 CV で学習の最後の月と検証の最初の月が隣り合うと、両者のラベル期間が
+ほぼ丸ごと重なる（外側の walk-forward は `embargo_months` で外している・#968）。`nogap`（本番の `months`・分母）と、
+間に `LABEL_HORIZON_MONTHS` か月を上限とする空白を空ける `gap`（`months_purged`・`model_candidates.purged_month_plan`）を
+比べる。`--inner-cv` と同じ形で、**パネルは2条件で同一**（`panel_cond`）、差し替えるのは M-6 の CV へ渡す候補の
+opts だけ（`cv_opts`）。測るのは M-6 だけで、1モデル × 2指標 ＝2検定・α 0.025。CV の後、各条件の診断値の
+`inner_cv` が指定どおりかを `inner_cv_reach_problems` で確かめ、違えば止める。`gap` 側が実際に空けた月数（fold の
+平均）は `diag.inner_cv_gap` に出る。日中キューの名前は `gate:inner-cv-purge`（**積むのは人**・既定を切り替えるかは
+#968）。**分母は本番から取り、本番が `months` でなくなったら止める**（`build_conditions`）——黙って `months` を
+分母にすると、本番と比べているつもりで別物を比べる。条件名を `nogap` / `gap` にするのは `--inner-cv` の `months` と
+区別するため（`--valid-split` の接頭辞と同じ理由）。
+
 ## 規模で中立化した順位を比べるモード（`--size-neutral`・#970）
 
 M-2 / M-6 は毎期、小型株を実際より高く・大型株を低く置く（#957）。予測そのまま（`raw`・本番・分母）と、
@@ -439,7 +452,11 @@ from plugins.macro_snapshots import (  # noqa: E402
 from plugins.macro_enet import _INNER_CV as _M6_INNER_CV  # noqa: E402
 from plugins.macro_gbdt import _VALID_SPLIT as _M2_VALID_SPLIT  # noqa: E402
 from plugins.macro_gbdt import _VALID_SPLIT_CHOICES, _VALID_SPLIT_DEFAULT  # noqa: E402
-from plugins.model_candidates import _EN_INNER_CV_CHOICES, _EN_INNER_CV_DEFAULT  # noqa: E402
+from plugins.model_candidates import (  # noqa: E402
+    _EN_INNER_CV_DEFAULT,
+    _EN_INNER_CV_PURGED,
+    _purge_gap_months,
+)
 from plugins.utils import coerce_params  # noqa: E402
 from scripts._cache import cached, set_refresh  # noqa: E402
 from scripts.candidate_bakeoff import (  # noqa: E402
@@ -498,7 +515,7 @@ class Cond(NamedTuple):
     `inner_cv`（#971）は M-6 の α・l1_ratio を選ぶ内側 CV の区切り方。既定は本番の構成
     （`macro_enet._INNER_CV`・#964 で `months`）から取る＝どのモードでも M-6 は本番の区切り方で回る。
     **この欄はパネルを動かさない**——パネルの鍵からは外し（`panel_cond`）、M-6 の CV へ渡す opts に
-    だけ効く（`cv_opts`）。
+    だけ効く（`cv_opts`）。`--inner-cv-purge`（#979）の空白付き `months_purged` もこの欄で渡す。
 
     `valid_split`（#976）は M-2 の early stopping の検証集合の取り方。既定は本番の構成
     （`macro_gbdt._VALID_SPLIT`・`rows`）から取る。`inner_cv` と同じく**パネルを動かさず**、M-2 の CV へ渡す
@@ -604,12 +621,22 @@ FIN_FILL_MODELS = ["xgb_m2", "elasticnet"]
 FIN_FILL_SOURCE_FIELDS = ("dps", "stock_price", "pl_rd_expenses", "pl_revenue")
 
 # M-6 の内側 CV の区切り方を比べるモード（`--inner-cv`・#971）。**基準は本番の構成**（M-6 本体の
-# `macro_enet._INNER_CV`・#964 で `months`）で、書き写さずにそこから取る。条件名は候補実装の選択肢そのもの
-# （書き写さない）。2条件のパネルは同一で、M-6 の CV へ渡す候補の opts だけを差し替える。
+# `macro_enet._INNER_CV`・#964 で `months`）で、書き写さずにそこから取る。条件名は候補実装の選択肢の名前そのもの。
+# **条件は事前登録した `rows` / `months` の2つに固定する**（ADR-0050 の 2026-10-17 追記）——選択肢の一覧から
+# 作ると、空白付きの `months_purged`（#979）を足した時点で黙って3条件になり、検定数と α が変わる。
+# 2条件のパネルは同一で、M-6 の CV へ渡す候補の opts だけを差し替える。
 # M-2・M-1 にこの軸は無いので測らない（同じ CV を2回回すだけになる）。
-INNER_CV_CONDS: tuple[str, ...] = _EN_INNER_CV_CHOICES
+INNER_CV_CONDS: tuple[str, ...] = ("rows", "months")
 INNER_CV_BASE_COND = _M6_INNER_CV
 INNER_CV_MODELS = ["elasticnet"]
+
+# M-6 の内側 CV に空白を入れるかを比べるモード（`--inner-cv-purge`・#979）。条件名は {名前: 区切り方}。
+# `nogap` は本番の `months`（分母）、`gap` は `months_purged`。名前を区切り方そのものにしないのは、
+# `--inner-cv` の `months` と同じ名前だと分母を名前で引く `base_of` が取り違えるため。本番が `months` で
+# なくなったら `build_conditions` が止める（分母が本番でなくなる）。M-2・M-1 にこの軸は無いので測らない。
+INNER_CV_PURGE_CONDS: dict[str, str] = {"nogap": "months", "gap": _EN_INNER_CV_PURGED}
+INNER_CV_PURGE_BASE_COND = "nogap"
+INNER_CV_PURGE_MODELS = ["elasticnet"]
 
 # M-2 の early stopping の検証集合の取り方を比べるモード（`--valid-split`・#976）。**基準は本番の構成**（M-2 本体の
 # `macro_gbdt._VALID_SPLIT`・`rows`）で、書き写さずにそこから取る。条件名は {名前: 取り方}。取り方は関数の選択肢
@@ -725,10 +752,11 @@ def build_conditions(windows: list[int] | None = None,
                     fin_fill: bool = False,
                     inner_cv: bool = False,
                     size_neutral: bool = False,
-                    valid_split: bool = False) -> dict[str, Cond]:
+                    valid_split: bool = False,
+                    inner_cv_purge: bool = False) -> dict[str, Cond]:
     """条件集合 {名前: Cond} を作る。
 
-    14のモードがある。**同時に使えるのは1つだけ**（下記）:
+    15のモードがある。**同時に使えるのは1つだけ**（下記）:
 
       既定           … ADR-0045 の昇格ゲートと完全に同じ2条件（`off` / `on`・マクロは ON のまま）
       `windows`      … モメンタム無し ＋ 各窓（#592・ADR-0050）
@@ -744,9 +772,11 @@ def build_conditions(windows: list[int] | None = None,
       `inner_cv`     … M-6 の内側 CV を行で区切る ＋ 月で区切る（#971）。**パネルは2条件で同一**・M-6 だけ
       `size_neutral` … 予測そのまま ＋ 月ごとに log 時価総額の効果を除いた予測（#970）。`Cond` は2条件で同一
       `valid_split`  … M-2 の early stopping の検証集合を行で取る ＋ 月の塊で取る（#976）。**パネルは2条件で同一**・M-2 だけ
+      `inner_cv_purge` … M-6 の内側 CV を月の塊で区切る ＋ 学習と検証の間に空白を空ける（#979）。**パネルは2条件で同一**・M-6 だけ
 
-    `inner_cv` の `Cond` は2条件で違うが、違うのは CV へ渡す opts だけで、パネルの鍵からは外す
+    `inner_cv` / `inner_cv_purge` の `Cond` は2条件で違うが、違うのは CV へ渡す opts だけで、パネルの鍵からは外す
     （`panel_cond`）。`models` を渡したときは M-6 だけであることを確かめる（M-2・M-1 にこの軸は無い）。
+    `inner_cv_purge` は本番（`macro_enet._INNER_CV`）が分母の `months` でなければ止める。
 
     `size_neutral` も `risk_axis` と同じく `Cond` を動かさない（予測の後処理で条件を作る）。`models` を
     渡したときは M-2 / M-6 だけであることを確かめる（M-1 はパネルが別物）。
@@ -776,7 +806,8 @@ def build_conditions(windows: list[int] | None = None,
              ("--fin-rows", fin_rows), ("--demean-target", demean_target),
              ("--risk-axis", risk_axis), ("--fin-nan", fin_nan), ("--de-exclude", de_exclude),
              ("--fin-fill", fin_fill), ("--inner-cv", inner_cv),
-             ("--size-neutral", size_neutral), ("--valid-split", valid_split)]
+             ("--size-neutral", size_neutral), ("--valid-split", valid_split),
+             ("--inner-cv-purge", inner_cv_purge)]
     picked = [name for name, on in modes if on]
     if len(picked) > 1:
         raise ValueError(
@@ -851,6 +882,21 @@ def build_conditions(windows: list[int] | None = None,
                 f"--inner-cv は M-6（{', '.join(INNER_CV_MODELS)}）だけを測る。{', '.join(others)} に"
                 "この軸は無く、同じ CV を2回回すだけになる（#971）")
         return {name: Cond(False, MOM_WINDOW, inner_cv=name) for name in INNER_CV_CONDS}
+    if inner_cv_purge:
+        # M-6 の内側 CV に空白を入れるかだけを差し替える。他の軸はすべて本番構成。パネルは2条件で同一
+        # （`panel_cond`）。M-2・M-1 にこの軸は無い（#979）。
+        others = [m for m in (models or []) if m not in INNER_CV_PURGE_MODELS]
+        if others:
+            raise ValueError(
+                f"--inner-cv-purge は M-6（{', '.join(INNER_CV_PURGE_MODELS)}）だけを測る。{', '.join(others)} に"
+                "この軸は無く、同じ CV を2回回すだけになる（#979）")
+        base_split = INNER_CV_PURGE_CONDS[INNER_CV_PURGE_BASE_COND]
+        if _M6_INNER_CV != base_split:
+            raise ValueError(
+                f"--inner-cv-purge の分母は本番の M-6 の区切り方のはずだが、本番（macro_enet._INNER_CV）は "
+                f"{_M6_INNER_CV}、分母は {base_split}。本番と比べているつもりで別物を比べるので止める（#979）")
+        return {name: Cond(False, MOM_WINDOW, inner_cv=split)
+                for name, split in INNER_CV_PURGE_CONDS.items()}
     if size_neutral:
         # 2条件とも本番構成の同一 `Cond`（パネルも CV も1回）。差は CV の後の予測の変換だけ。
         others = [m for m in (models or []) if m not in SIZE_NEUTRAL_MODELS]
@@ -886,6 +932,7 @@ def base_of(conds: dict[str, Cond], default_max_features: int | None = None) -> 
     空欄を 0 で埋めるモードの分母も**本番の構成**（`drop`）。`--fin-nan` と同じく分母が母集団の狭い側。
     内側 CV のモードの分母も**本番の構成**（`macro_enet._INNER_CV`・#964 で `months`）。この軸はパネルを動かさない。
     検証集合のモードの分母も**本番の構成**（`valid_` ＋ `macro_gbdt._VALID_SPLIT`）。この軸もパネルを動かさない。
+    内側 CV の空白のモードの分母も**本番の構成**（`nogap`＝`months`・#979）。この軸もパネルを動かさない。
     規模の中立化のモードの分母も**本番の構成**（予測そのまま `raw`）。この軸もパネルを動かさない。
     リスク軸モードの分母も**本番の構成**だが、モデルごとに違う（M-1 は `r2`・M-6 は `mu_only`）ので
     ここでは決めない。`main` はリスク軸モードでは `risk_base_cond` を使う（#808）。
@@ -893,7 +940,7 @@ def base_of(conds: dict[str, Cond], default_max_features: int | None = None) -> 
     for cand in (BASE_COND, MACRO_BASE_COND, INTERACTION_BASE_COND, FIN_ROWS_BASE_COND,
                  DEMEAN_BASE_COND, RISK_BASE_COND, FIN_NAN_BASE_COND, DE_EXCLUDE_BASE_COND,
                  FIN_FILL_BASE_COND, INNER_CV_BASE_COND, SIZE_NEUTRAL_BASE_COND,
-                 VALID_SPLIT_BASE_COND):
+                 VALID_SPLIT_BASE_COND, INNER_CV_PURGE_BASE_COND):
         if cand in conds:
             return cand
     prod = maxfeat_cond_name(default_max_features) if default_max_features else None
@@ -924,7 +971,7 @@ MODE_SUFFIX: dict[str, str] = {"default": "", "windows": "", "macro": "_macro",
                                "risk_axis": "_risk_axis", "fin_nan": "_fin_nan",
                                "de_exclude": "_de_exclude", "fin_fill": "_fin_fill",
                                "inner_cv": "_inner_cv", "size_neutral": "_size_neutral",
-                               "valid_split": "_valid_split"}
+                               "valid_split": "_valid_split", "inner_cv_purge": "_inner_cv_purge"}
 
 
 def mode_of(windows: list[int] | None = None, macro: bool = False,
@@ -932,7 +979,7 @@ def mode_of(windows: list[int] | None = None, macro: bool = False,
             fin_rows: bool = False, demean_target: bool = False,
             risk_axis: bool = False, fin_nan: bool = False, de_exclude: bool = False,
             fin_fill: bool = False, inner_cv: bool = False, size_neutral: bool = False,
-            valid_split: bool = False) -> str:
+            valid_split: bool = False, inner_cv_purge: bool = False) -> str:
     """測定モードの名前を返す（`build_conditions` と同じ引数から1箇所で導出する）。
 
     **#615 で足した2モードは、ここを持たないまま別モードの名前で出力されていた**——
@@ -965,6 +1012,8 @@ def mode_of(windows: list[int] | None = None, macro: bool = False,
         return "size_neutral"
     if valid_split:
         return "valid_split"
+    if inner_cv_purge:
+        return "inner_cv_purge"
     return "windows" if windows else "default"
 
 
@@ -1004,6 +1053,10 @@ _AXIS_VERDICTS: dict[str, tuple[str, str]] = {
     "valid_split": ("VALID SPLIT AXIS [M-2 only; same panel on both sides]",
                     "taking the early-stopping validation set as whole tail months did not beat taking "
                     "the tail rows"),
+    # 分母は本番（`nogap`＝`months`）。パネルは2条件で同一で、差は M-6 の内側 CV の空白だけ（#979）。
+    "inner_cv_purge": ("INNER CV PURGE AXIS [M-6 only; same panel on both sides]",
+                       "leaving a label-horizon gap between the inner training and validation months "
+                       "did not beat the production month blocks"),
     # CV は1回で、差は予測の変換だけ。共通域は時価総額のある行（無い行は両条件から落とす・#970）。
     "size_neutral": ("SIZE NEUTRAL AXIS [same CV; rows without market cap dropped from both sides]",
                      "removing the log market cap effect per month did not beat the raw prediction"),
@@ -2266,6 +2319,10 @@ def main() -> None:
                     help="M-2 の early stopping の検証集合のモード（末尾の行で取る valid_rows＝本番と、末尾の月を"
                          "丸ごと取る valid_months を共通域で比べる・#976）。パネルは2条件で同一。"
                          f"モデルは {','.join(VALID_SPLIT_MODELS)} だけ。他モードと併用不可")
+    ap.add_argument("--inner-cv-purge", dest="inner_cv_purge", action="store_true",
+                    help="M-6 の内側 CV の空白のモード（月の塊で区切る nogap＝本番の months と、学習の最後の月と検証の"
+                         "最初の月の間に 52 週先ラベルの重なりを外す空白を空ける gap＝months_purged を共通域で比べる・"
+                         f"#979）。パネルは2条件で同一。モデルは {','.join(INNER_CV_PURGE_MODELS)} だけ。他モードと併用不可")
     ap.add_argument("--size-neutral", dest="size_neutral", action="store_true",
                     help="規模の中立化のモード（予測そのまま raw＝本番と、月ごとに予測を log 時価総額へ OLS で回帰した"
                          "残差 size_neutral を共通域で比べる・#970）。CV は1回。時価総額の無い行は両条件から落とす。"
@@ -2311,6 +2368,8 @@ def main() -> None:
         default_models = INNER_CV_MODELS
     elif args.valid_split:
         default_models = VALID_SPLIT_MODELS
+    elif args.inner_cv_purge:
+        default_models = INNER_CV_PURGE_MODELS
     elif args.size_neutral:
         default_models = SIZE_NEUTRAL_MODELS
     else:
@@ -2344,6 +2403,7 @@ def main() -> None:
                                  fin_nan=args.fin_nan, de_exclude=args.de_exclude,
                                  fin_fill=args.fin_fill, inner_cv=args.inner_cv,
                                  valid_split=args.valid_split,
+                                 inner_cv_purge=args.inner_cv_purge,
                                  size_neutral=args.size_neutral)
     except ValueError as e:
         raise SystemExit(str(e))
@@ -2398,7 +2458,7 @@ def main() -> None:
                    demean_target=args.demean_target, risk_axis=args.risk_axis,
                    fin_nan=args.fin_nan, de_exclude=args.de_exclude, fin_fill=args.fin_fill,
                    inner_cv=args.inner_cv, size_neutral=args.size_neutral,
-                   valid_split=args.valid_split)
+                   valid_split=args.valid_split, inner_cv_purge=args.inner_cv_purge)
     default_out = f"momentum_gate{MODE_SUFFIX[mode]}.json"
     if mode == "risk_axis" and models != RISK_MODELS:
         # M-1 と M-6 は分母が違い別々に回す（#808）。同じファイルへ書くと後の run が前の結果を消す。
@@ -2688,13 +2748,21 @@ def main() -> None:
 
         # 内側 CV のモードでは、区切り方の切り替えが**CV まで届いたか**を確かめる（#971）。
         # パネルは同一なので、届かないと両条件が同じ CV になり「差なし」だけが残る。
-        if mode == "inner_cv":
+        # 内側 CV の空白のモード（#979）も同じ確かめ方で足りる（候補は `rows` 以外の区切り方を診断値に積む）。
+        if mode in ("inner_cv", "inner_cv_purge"):
             problems = inner_cv_reach_problems(
                 {key: out.get("diag") for key, out in results.items()}, conds)
             if problems:
                 raise SystemExit("中止: 内側 CV の切り替えが CV に届いていません: " + " / ".join(problems))
             print("[note] both sides share one panel; the only difference is how M-6 picks "
                   "alpha / l1_ratio inside each training fold", flush=True)
+        if mode == "inner_cv_purge":
+            # 学習月の少ない fold では空白が縮む（`purged_month_plan`）。fold の平均を出して、どれだけ入ったかを読む。
+            for key, out in results.items():
+                gap = (out.get("diag") or {}).get("inner_cv_gap")
+                if gap is not None:
+                    print(f"[note] {key}: mean inner CV gap = {gap} months "
+                          f"(cap {_purge_gap_months()})", flush=True)
         # 検証集合のモードも同じ（#976）。fit_predict の例外は fold ごと捨てられるので、届かないと
         # 片方の条件の fold が黙って欠けるか、両条件が同じ取り方になる。
         if mode == "valid_split":
@@ -2751,7 +2819,7 @@ def main() -> None:
             if out.get("error"):
                 print(f"  {model}: ERROR {out['error']}", flush=True)
     # 主判定が読む共通月の run でも、内側 CV の切り替えが届いたかを確かめる（#971・上と同じ）。
-    if mode == "inner_cv":
+    if mode in ("inner_cv", "inner_cv_purge"):
         problems = inner_cv_reach_problems(
             {key: out.get("diag") for key, out in cruns.items()}, conds)
         if problems:
