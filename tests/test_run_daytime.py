@@ -593,6 +593,39 @@ class TestValidSplitGateMeasuresM2:
         assert rd.JOBS[self.KEY].parallel_sensitive is True
 
 
+class TestSubsampleGateMeasuresM2:
+    """M-2 の行の抽出の割合のジョブ（#989・#987）は M-2 だけを、間引かずに、本番（subsample_0.8）を分母に測る。
+
+    事前登録（#987 の 2026-10-18 のコメント・ADR-0050）は「M-2 だけ・subsample_0.8 / subsample_1.0・2検定・α 0.025」。
+    """
+
+    KEY = "gate:subsample"
+
+    def test_the_job_runs_the_subsample_axis_with_the_default_models(self):
+        from scripts.momentum_gate import SUBSAMPLE_MODELS
+
+        argv = rd.JOBS[self.KEY].argv
+        assert "--subsample" in argv
+        assert "--models" not in argv
+        assert SUBSAMPLE_MODELS == ["xgb_m2"]
+
+    def test_the_preregistered_base_and_tests(self):
+        import plugins.macro_gbdt as mg
+        from scripts.momentum_gate import SUBSAMPLE_MODELS, base_of, bonferroni_alpha, build_conditions
+
+        conds = build_conditions(subsample=True, models=SUBSAMPLE_MODELS)
+        assert base_of(conds) == f"subsample_{float(mg._SUBSAMPLE)}" == "subsample_0.8"   # 本番の構成
+        assert bonferroni_alpha(len(SUBSAMPLE_MODELS), len(conds)) == pytest.approx(0.025)
+
+    def test_the_job_measures_at_full_resolution(self):
+        argv = rd.JOBS[self.KEY].argv
+        assert "--smoke" not in argv
+        assert argv[argv.index("--stride") + 1] == "1"
+
+    def test_the_result_changes_with_background_work(self):
+        assert rd.JOBS[self.KEY].parallel_sensitive is True
+
+
 class TestInnerCvPurgeGateMeasuresM6:
     """M-6 の内側 CV の空白のジョブ（#979・#968）は M-6 だけを、間引かずに、本番を分母に測る（#968 で分母は
     nogap(months) → gap(months_purged) へ付け替わった）。

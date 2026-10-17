@@ -962,22 +962,35 @@ def _b_xgb_baseline(feature_names, opts, diag):
     opts の `valid_split`（#976）は early stopping の検証集合の取り方で、XGBoost の設定へ混ぜずに取り出して
     渡す（混ぜると `XGBRegressor` に未知の引数として届く）。`months` のときだけ各学習月の行数が要るので
     `pass_train_groups=True` を返し、回った fold ごとに診断値 `valid_split` へ印を積む。
+    `subsample`（#989）は XGBoost の設定のまま渡し、`_SUBSAMPLE_DEFAULT` 以外のときだけ回った fold ごとに
+    診断値 `subsample` へ値を積む（切り替えが CV まで届いたかを `momentum_gate --subsample` が確かめる）。
     """
-    from .macro_gbdt import _VALID_SPLIT_DEFAULT, _make_xgb_fit_predict
+    from .macro_gbdt import _SUBSAMPLE_DEFAULT, _VALID_SPLIT_DEFAULT, _make_xgb_fit_predict
     rest = dict(opts or {})
     valid_split = rest.pop("valid_split", _VALID_SPLIT_DEFAULT)
     xgb_params = {
-        "max_depth": 4, "learning_rate": 0.05, "subsample": 0.8,
+        "max_depth": 4, "learning_rate": 0.05, "subsample": _SUBSAMPLE_DEFAULT,
         "colsample_bytree": 0.8, "min_child_weight": 5, "reg_lambda": 1.0,
         "reg_alpha": 0.0, "n_estimators": 500, "early_stopping_rounds": 40,
         "tree_method": "hist", "objective": "reg:squarederror", "random_state": 42,
         **rest,
     }
     if valid_split == _VALID_SPLIT_DEFAULT:
-        return _make_xgb_fit_predict(xgb_params, diag["best_iteration"]), {}
-    fp = _make_xgb_fit_predict(xgb_params, diag["best_iteration"],
-                               valid_split=valid_split, split_marks=diag["valid_split"])
-    return fp, {"pass_train_groups": True}
+        fp, extra = _make_xgb_fit_predict(xgb_params, diag["best_iteration"]), {}
+    else:
+        fp = _make_xgb_fit_predict(xgb_params, diag["best_iteration"],
+                                   valid_split=valid_split, split_marks=diag["valid_split"])
+        extra = {"pass_train_groups": True}
+    subsample = xgb_params["subsample"]
+    if subsample == _SUBSAMPLE_DEFAULT:
+        return fp, extra
+
+    def marked(*args, **kwargs):
+        out = fp(*args, **kwargs)
+        diag["subsample"].append(float(subsample))   # fold が回り切ったときだけ積む（例外の fold は捨てられる）
+        return out
+
+    return marked, extra
 
 
 CANDIDATES: dict[str, Candidate] = {
