@@ -29,6 +29,7 @@ import numpy as np
 
 from . import progress
 from .base import AnalysisPlugin
+from .tuning import seeded
 from .utils import walk_forward_cv_monthly, winsorize
 from .macro_snapshots import (
     FIN_BASE_OPTIONS,
@@ -218,6 +219,10 @@ _VALID_SPLIT = "months"
 # （`tuning_search_space`）。
 _SUBSAMPLE_DEFAULT = 0.8
 _SUBSAMPLE = 1.0
+# XGBoost の種。本番の実行と最終モデルは常にこの値。月次探索の確かめ直す段（`plugins.tuning.seed_override`・#984）
+# の中だけ上書きされる（`seeded`）。行の抽出を止めても列の抽出（`colsample_bytree`）が種で動くので、種だけで
+# OOF rank-IC が動く（`gate:subsample` の種 5 個の幅 0.0112）。
+_RANDOM_STATE = 42
 
 # ── SHAP 解釈性強化（signed SHAP＋交互作用・Issue #371）────────────────────────
 _INTERACT_TOP_K   = 15     # グローバル交互作用の上位ペア表示件数
@@ -392,6 +397,8 @@ class MacroGbdtPlugin(AnalysisPlugin):
     writes = ("macro_gbdt_scores",)
     category = "③ 将来リターンを予測"
     ui_order = 340
+    # 種で結果が動く＝月次探索の確かめ直す段（`plugins.tuning.search(confirm_*)`・#984）の対象。値は既定の種
+    tuning_seed_base: int = _RANDOM_STATE
 
     def params_schema(self) -> dict:
         return {
@@ -850,7 +857,8 @@ class MacroGbdtPlugin(AnalysisPlugin):
             "early_stopping_rounds": params["early_stopping_rounds"],
             "tree_method":        "hist",
             "objective":          self._objective(params),
-            "random_state":       42,
+            # 確かめ直す段（#984）の中だけ種が上書きされる。それ以外は常に `_RANDOM_STATE`
+            "random_state":       seeded(_RANDOM_STATE),
         }
 
         # ── 経済符号の単調性制約（Issue #366）─────────────────────────────────

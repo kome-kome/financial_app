@@ -237,6 +237,7 @@ class TestQualityGate:
         args = argparse.Namespace(
             model="fake_model", strategy="grid", n_iter=50, objective="rank_ic",
             seed=0, persist=True, persist_scores=False, budget_min=None,
+            confirm_top=0, confirm_seeds=0,
         )
         asyncio.run(hs._run(args))  # SystemExit を送出しない
         assert get_tuned_params(db, "fake_model")["objective_value"] == 0.0
@@ -603,3 +604,54 @@ class TestIncrementalPersist:
         monkeypatch.setattr(plugins, "get_plugin", lambda name: _FakePlugin())
         asyncio.run(hs.run_search("fake_model", "grid", 50, "rank_ic", 0, db, persist=False))
         assert get_tuned_params(db, "fake_model") is None
+
+
+class TestConfirmStageWiring:
+    """月次の M-2 探索に足した「上位の候補を種で確かめ直す段」（#984）の配線。"""
+
+    def test_run_search_passes_the_settings_to_search(self, db, monkeypatch):
+        import plugins
+        import plugins.tuning as tuning
+
+        seen: dict = {}
+
+        async def fake_search(plugin, base_params, dims, db, **kw):
+            seen.update(kw)
+            return {"best_params": {"x": 5}, "best_score": 0.1, "best_oof": {}, "objective": "rank_ic",
+                    "leaderboard": [], "config": {}, "champion_injected": False, "champion_score": None}
+
+        monkeypatch.setattr(plugins, "get_plugin", lambda name: _FakePlugin())
+        monkeypatch.setattr(tuning, "search", fake_search)
+        asyncio.run(hs.run_search("fake_model", "grid", 50, "rank_ic", 0, db,
+                                  confirm_top=5, confirm_seeds=5))
+        assert seen["confirm_top"] == 5 and seen["confirm_seeds"] == 5
+
+    def test_cli_reads_the_monthly_arguments(self, monkeypatch):
+        """月次（`run_monthly.TUNE_MATRIX`）と同じ引数を CLI が受け取れる。"""
+        import sys
+        from scripts import run_monthly as rm
+
+        got: dict = {}
+
+        async def fake_run(args):
+            got["args"] = args
+
+        model, strategy, extra = next(t for t in rm.TUNE_MATRIX if t[0] == "macro_gbdt")
+        monkeypatch.setattr(hs, "_run", fake_run)
+        monkeypatch.setattr(sys, "argv", ["hyperparameter_search.py", "--model", model,
+                                          "--strategy", strategy, *extra])
+        hs.main()
+        assert got["args"].confirm_top == 5 and got["args"].confirm_seeds == 5
+
+    @pytest.mark.parametrize("extra", [("--confirm-top", "5"), ("--confirm-seeds", "5"),
+                                       ("--confirm-top", "5", "--confirm-seeds", "1")])
+    def test_cli_requires_both_settings(self, monkeypatch, extra):
+        import sys
+
+        async def fake_run(args):
+            raise AssertionError("ここまで来てはいけない")
+
+        monkeypatch.setattr(hs, "_run", fake_run)
+        monkeypatch.setattr(sys, "argv", ["hyperparameter_search.py", "--model", "macro_gbdt", *extra])
+        with pytest.raises(SystemExit):
+            hs.main()

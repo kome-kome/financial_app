@@ -124,6 +124,8 @@ async def run_search(
     persist: bool = False,
     persist_scores: bool = False,
     deadline: datetime | None = None,
+    confirm_top: int = 0,
+    confirm_seeds: int = 0,
 ) -> dict:
     """1モデル分の探索を実行する共有ロジック（CLI・GitHub Actionsから呼ぶ・Issue #264）。
 
@@ -139,6 +141,10 @@ async def run_search(
     引いた時刻を渡す＝**探索を畳んだあとに永続化と最終 execute を終える時間を残す**。
     加えて persist=True のときは候補ごとの暫定ベストを逐次永続化する（外から強制終了
     されてもパラメータだけは残る・#639 で 285分が消えた形への保険）。
+
+    `confirm_top` / `confirm_seeds`（#984）: 探索の後で上位の候補を種を変えて回し直し、種の平均で選び直す
+    （`plugins.tuning.search`）。探索の本体は `CONFIRM_RESERVE_MIN` 早く畳み、残りを確かめ直す段に充てる。
+    逐次永続化は探索の本体の暫定ベスト（既定の種の score）を書き、段の後で選び直した結果で上書きする。
     """
     from database import get_tuned_params, upsert_tuned_params
     from plugins import execute_plugin, get_plugin
@@ -199,6 +205,7 @@ async def run_search(
         champion_params=prev["params"] if prev else None,
         deadline=None if deadline is None else deadline - timedelta(minutes=FINAL_RESERVE_MIN),
         on_progress=_on_progress if persist else None,
+        confirm_top=confirm_top, confirm_seeds=confirm_seeds,
     )
     result["persisted"] = False
 
@@ -247,6 +254,7 @@ async def _run(args: argparse.Namespace) -> None:
                 args.model, args.strategy, args.n_iter, args.objective, args.seed, db,
                 persist=args.persist, persist_scores=args.persist_scores,
                 deadline=deadline,
+                confirm_top=args.confirm_top, confirm_seeds=args.confirm_seeds,
             )
         except ValueError as e:
             raise SystemExit(str(e))
@@ -263,6 +271,13 @@ async def _run(args: argparse.Namespace) -> None:
         logger.info("リーダーボード上位%d件:\n%s", len(top5),
                    json.dumps(top5, ensure_ascii=False, indent=2, default=str))
 
+        if cfg.get("confirm"):
+            c = cfg["confirm"]
+            log_fn = logger.warning if c.get("truncated") else logger.info
+            log_fn("確かめ直す段（#984）: %d 候補 × 種 %d/%d 個・入れ替わり=%s・種 %s だけで選んだ 1 位=%s（%s）",
+                   c["n_candidates"], c["seeds_completed"], c["seeds_planned"], c["changed"],
+                   c["seeds"][0], json.dumps(c["seed_base_best_params"], ensure_ascii=False),
+                   c["seed_base_best_score"])
         if result["champion_injected"]:
             logger.info("champion 再測定スコア=%s（同一パネル上の比較・ADR-0047）",
                         result["champion_score"])
@@ -293,10 +308,17 @@ def main() -> None:
                     help=f"このプロセスに許す分数（Issue #638）。残り候補が入らないと見たら"
                          f"探索を畳み、そこまでの best を永続化する。省略時は環境変数 "
                          f"{ENV_DEADLINE}（親バッチが渡す）を見る。どちらも無ければ無期限")
+    ap.add_argument("--confirm-top", type=int, default=0, dest="confirm_top",
+                    help="探索の後で、既定の種の score の上位 N 候補（＋本番の候補）を種を変えて回し直し、"
+                         "種の平均で選び直す（#984）。--confirm-seeds と併用。種で結果が動くモデル（M-2）だけ")
+    ap.add_argument("--confirm-seeds", type=int, default=0, dest="confirm_seeds",
+                    help="確かめ直す段で使う種の数（既定の種を含む・2 以上・#984）")
     args = ap.parse_args()
 
     if args.persist_scores and not args.persist:
         ap.error("--persist-scores は --persist と併用してください")
+    if (args.confirm_top or args.confirm_seeds) and (args.confirm_top < 1 or args.confirm_seeds < 2):
+        ap.error("--confirm-top（1 以上）と --confirm-seeds（2 以上）は両方指定してください（#984）")
 
     logging.basicConfig(level=logging.INFO)
     asyncio.run(_run(args))

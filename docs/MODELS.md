@@ -1304,6 +1304,8 @@ R2 は月末までの52週だけで計算する＝時点再現できている。
   <br>**#987（2026-10-18）で行の抽出の割合 `subsample` も探索から外し、本番の 1.0 に固定した**（`base_params`）。
   1.0 未満は社の順への依存を持ち込み、探索に残すと選ばれうる（2026-10-01 の 1 位は 0.4）。保存済みの調整値の
   `subsample` は `project_tuned_params()` が固定値で上書きして画面へ出す。M-5 も継承で同じ（退役済み）
+  <br>**#984（2026-10-18）で、探索の後に上位 5 候補（＋本番の候補）を種 5 個で回し直し、種の平均で選び直す段を足した**。
+  M-2 は種だけで OOF rank-IC が 0.009〜0.019 動き、1 回の種で選ぶと上位どうしの差が種の揺れに埋もれる（ADR-0047 の追記）
 - ~~quantile regression（`reg:quantileerror`）による予測区間（R1' 代替）~~ → #365 で**分割コンフォーマル区間**として対応済み（§11.7.1・ADR-0020）。quantile regression（再学習要）ではなく OOF 残差ベースのコンフォーマル（再学習不要・family-wide・被覆保証）を採用
 - ~~SHAP interaction values（特徴量ペアの交互作用可視化）~~ → #371 で対応済み（§11.5・`feature_interactions`）。あわせて signed SHAP（`feature_coefs_signed`）＋学習方向 corr（`feature_shap_dir`）も追加
 - M-2 初心者向けガイド（`M2_MACRO_GBDT_GUIDE.md`）
