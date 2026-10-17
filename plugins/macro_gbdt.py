@@ -200,18 +200,24 @@ _MIN_FIT_N  = 5            # この未満なら early_stopping を諦め固定 n
 # early_stopping の検証集合の取り方（#976・#969）。`rows` は末尾 `_VALID_FRAC` の行を行の番号で取る今の方式で、
 # 区切りが月の途中に落ちる（その月のどの社が fit 側・検証側に入るかが月内の並びで決まる）。`months` は末尾の
 # 月を丸ごと取る（`_tail_month_valid_rows`）。`_VALID_SPLIT_DEFAULT` は関数の既定＝opts を省いたときに回る方式。
-# **M-2 本体の既定は `_VALID_SPLIT`（`rows` のまま）**。`months` へ切り替えるかは #969 が
-# `momentum_gate --valid-split` の結果で決める。
+# **M-2 本体の既定は `_VALID_SPLIT`（#987 で `months`）**。2026-10-17 の `momentum_gate --valid-split`（共通域・
+# 18 期間・種 5 個の平均）で、測る前に固定した規則（rank-IC か short_side_spread の差の 95%CI が丸ごと 0 より下なら
+# 採らない）に当たらなかった（#969）。ただし行の抽出（下の `_SUBSAMPLE`）を止めないと並びへの依存は減らなかったので、
+# 2026-10-18 に `_SUBSAMPLE = 1.0` と合わせて切り替えた（#987）。M-4（退役済み）と候補メニューは関数の既定（`rows`）の
+# まま。`momentum_gate` の分母と `Cond.valid_split` の既定はこの値から取る（ゲートの「本番の構成」を書き写さない）。
 _VALID_SPLIT_CHOICES = ("rows", "months")
 _VALID_SPLIT_DEFAULT = "rows"
-_VALID_SPLIT = "rows"
+_VALID_SPLIT = "months"
 # 木ごとに学習行の何割を抽出するか（XGBoost の `subsample`・#987・#989）。どの行が選ばれるかは行の並びで決まり、
-# 社の順を変えると種を変えたのと同じだけ学習が変わる（`months` の検証集合でも、社の順だけで最終モデルの木の本数が
-# 幅 91 動き、1.0 にすると幅 1 に縮んだ・2026-10-18）。`_SUBSAMPLE` は **M-2 本体の既定**（`params_schema()` の既定はここから取る）、`_SUBSAMPLE_DEFAULT` は
-# 候補 `xgb_m2`（`model_candidates._b_xgb_baseline`）が opts を省いたときに回る値。1.0 へ切り替えるかは #987 が
-# `momentum_gate --subsample` の結果で決める。
+# 社の順を変えると種を変えたのと同じだけ学習が変わる。`months` の検証集合でも、社の順だけで最終モデルの木の本数が
+# 幅 91 動き、1.0 にすると幅 1 に縮んだ（2026-10-18）。`_SUBSAMPLE` は **M-2 本体の既定**（`params_schema()` の既定は
+# ここから取る・#987 で 1.0）、`_SUBSAMPLE_DEFAULT` は候補 `xgb_m2`（`model_candidates._b_xgb_baseline`）が opts を
+# 省いたときに回る値（0.8 のまま）。2026-10-18 の `momentum_gate --subsample` で、測る前に固定した規則に当たらなかった
+# （差の点推定は rank-IC −0.0028・short_side −0.0033 で ns）。狙いは成績ではなく並びへの依存を消すこと。種への依存は
+# 残る（列の抽出 `colsample_bytree` は種で動く・1.0 でも種ごとの幅は縮まなかった）。月次探索の軸からは外した
+# （`tuning_search_space`）。
 _SUBSAMPLE_DEFAULT = 0.8
-_SUBSAMPLE = 0.8
+_SUBSAMPLE = 1.0
 
 # ── SHAP 解釈性強化（signed SHAP＋交互作用・Issue #371）────────────────────────
 _INTERACT_TOP_K   = 15     # グローバル交互作用の上位ペア表示件数

@@ -471,7 +471,8 @@ class TestExistingModesAreUnchanged:
                 if momentum_gate.MODEL_SPECS[model][1] == "elasticnet":
                     assert cv_opts(c, model) == {"inner_cv": me._INNER_CV}
                 else:
-                    assert cv_opts(c, model) is None
+                    # 内側 CV の軸は M-6 以外へ漏れない（M-2 には本番の検証集合と行の抽出の割合だけが渡る・#987）
+                    assert "inner_cv" not in (cv_opts(c, model) or {})
 
 
 class TestBuildUsesTheConditionAxes:
