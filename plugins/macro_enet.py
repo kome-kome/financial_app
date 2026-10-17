@@ -47,6 +47,7 @@ import numpy as np
 from . import progress
 from .base import AnalysisPlugin
 from .model_candidates import (
+    _EN_INNER_CV_BY_MONTH,
     alpha_path_bounds,
     elasticnet_inner_cv,
     make_diag,
@@ -96,8 +97,8 @@ _INNER_CV = "months"
 def _final_training_rows(samples_by_ym: dict, inner_cv: str) -> tuple[list, list[int] | None]:
     """最終モデルの学習行と各月の行数を返す（#971）。
 
-    `rows` は修正前と同じ辞書の順の連結で、行数は返さない（None）。`months` は月を昇順に並べて
-    連結し、各月の行数を返す——月で区切る内側 CV は行が月の昇順に並んでいる前提で、辞書の順は
+    `rows` は修正前と同じ辞書の順の連結で、行数は返さない（None）。`months`・`months_purged`（#979）は月を
+    昇順に並べて連結し、各月の行数を返す——月で区切る内側 CV は行が月の昇順に並んでいる前提で、辞書の順は
     それを保証しない（walk-forward 側は `sorted()` で並べ直している・M-5 の最終モデルも同じ）。
     """
     if inner_cv == "rows":
@@ -350,7 +351,8 @@ class MacroEnetPlugin(AnalysisPlugin):
             return_residuals=True,
             fit_predict=fit_predict,
             embargo_months=LABEL_HORIZON_MONTHS,   # 52週先ラベルの窓重複を purge（ADR-0014）
-            pass_train_groups=(_INNER_CV == "months"),   # 月で区切る内側 CV だけ各月の行数が要る（#971）
+            # 月で区切る内側 CV（#971・空白付きは #979）だけ各月の行数が要る
+            pass_train_groups=(_INNER_CV in _EN_INNER_CV_BY_MONTH),
         )
 
         oof_meta = build_oof_meta(stock_ids_by_ym, sample_meta_by_ym, cv_residuals.keys())

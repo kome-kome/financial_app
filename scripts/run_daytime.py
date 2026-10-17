@@ -351,6 +351,22 @@ JOBS: dict[str, Job] = {
         measured_min=16.0,
         parallel_sensitive=True,   # 他の gate と同じ理由（採否が CI の符号で決まる）
     ),
+    # M-6 の内側 CV に 52 週先ラベルの重なりを外す空白を入れるか（#968）を測る道具（#979）。
+    # **積むのは人**（#968 で読んで、本番の `macro_enet._INNER_CV` を切り替えるかを決める）。
+    "gate:inner-cv-purge": Job(
+        name="gate_inner_cv_purge",
+        argv=("{python}", "-m", "scripts.momentum_gate", "--inner-cv-purge",
+              "--stride", "1", "--allow-full-pull", "--refresh-cache"),
+        why="M-6 の内側 CV を月の塊で区切る（本番・nogap＝months）か、学習の最後の月と検証の最初の月の間に"
+            "LABEL_HORIZON_MONTHS か月を上限とする空白を空ける（gap＝months_purged）かを共通 (ym,ec) 域で比べる"
+            "（#979・#968）。パネルは2条件で同一で、母集団は動かない。対象は M-6 だけ・2検定・alpha 0.025。"
+            "切り替えが CV に届いていなければ非0で止まる。",
+        # 見積り。2026-10-17 の gate:inner-cv の実測 15.0 分（CV は rows 194.4秒・months 228.3秒、全月と共通月の
+        # 2段）を目安にした。gap 側は内側の学習月が空白の分だけ短く、months より重くはならない見込み。
+        # 実走ログの END 行で差し替える。
+        measured_min=15.0,
+        parallel_sensitive=True,   # 他の gate と同じ理由（採否が CI の符号で決まる）
+    ),
     # M-2 / M-6 が小型株を高く置く偏り（#957）を、予測から log 時価総額の効果を月ごとに除いた順位で
     # 測る道具（#970）。**積むのは人**（#957 で読んで採否を決める）。
     "gate:size-neutral": Job(

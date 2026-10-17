@@ -303,6 +303,7 @@ class TestInnerCv:
         res = _run(_params(use_macro=False))
         assert res["cv_metrics"]["enet"]["n_folds"] > 0, "months の CV で fold が1つも立たなかった"
         assert res["cv_diagnostics"]["inner_cv"] == "months"
+        assert "inner_cv_gap" not in res["cv_diagnostics"]   # 空白の印は months_purged だけ（#979）
         assert seen["inner_cv"] == "months"
         assert seen["train_groups"] and all(g > 0 for g in seen["train_groups"])
 
@@ -324,6 +325,40 @@ class TestInnerCv:
         assert "inner_cv" not in res["cv_diagnostics"]      # rows は診断値に何も足さない
         assert seen["inner_cv"] == "rows"
         assert seen.get("train_groups") is None
+
+    def test_purged_final_model_uses_month_sorted_rows(self):
+        """months_purged（#979）も最終モデルは月の昇順に連結した行と各月の行数で学習する。"""
+        from plugins.macro_enet import _L1_RATIOS, _final_training_rows
+
+        by_ym, current = _noisy_months()
+        rows, groups = _final_training_rows(_scrambled(by_ym), "months_purged")
+        assert rows == [s for ym in sorted(by_ym) for s in by_ym[ym]]
+        assert groups == [len(by_ym[ym]) for ym in sorted(by_ym)]
+        _coefs, mu, _meta = MacroEnetPlugin._fit_final_and_score(
+            rows, current, _L1_RATIOS, inner_cv="months_purged", train_groups=groups)
+        assert len(mu) == len(current)
+        with pytest.raises(ValueError, match="train_groups"):
+            MacroEnetPlugin._fit_final_and_score(rows, current, _L1_RATIOS, inner_cv="months_purged")
+
+    def test_execute_purged_reaches_both_cv_and_final(self, monkeypatch):
+        """定数を `months_purged` にすれば CV と最終モデルの両方へ届く（#968 で切り替えるときの経路・#979）。"""
+        import plugins.macro_enet as me
+
+        monkeypatch.setattr(me, "_INNER_CV", "months_purged")
+        seen: dict = {}
+        real = MacroEnetPlugin._fit_final_and_score
+
+        def spy(*a, **kw):
+            seen.update(kw)
+            return real(*a, **kw)
+
+        monkeypatch.setattr(MacroEnetPlugin, "_fit_final_and_score", staticmethod(spy))
+        res = _run(_params(use_macro=False))
+        assert res["cv_metrics"]["enet"]["n_folds"] > 0, "months_purged の CV で fold が1つも立たなかった"
+        assert res["cv_diagnostics"]["inner_cv"] == "months_purged"
+        assert 0 <= res["cv_diagnostics"]["inner_cv_gap"] <= LABEL_HORIZON_MONTHS
+        assert seen["inner_cv"] == "months_purged"
+        assert seen["train_groups"] and all(g > 0 for g in seen["train_groups"])
 
 
 # ── 4. execute スモーク ───────────────────────────────────────────────────────

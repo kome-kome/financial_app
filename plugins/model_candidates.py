@@ -161,11 +161,50 @@ _EN_MAX_ITER = 50000
 # α が 165 倍動く（#964）。**候補の既定は `rows` のまま**で、M-6 本体は `macro_enet._INNER_CV`（`months`）を
 # 明示して渡す。`_EN_INNER_CV_DEFAULT` は「opts に `inner_cv` が無いときに回る区切り方」で、本番の M-6 の
 # 区切り方ではない（呼び出し側が opts を省くか・診断値が無いときに何で回ったかを判断するのに使う）。
-_EN_INNER_CV_CHOICES = ("rows", "months")
+# `months_purged`（#979）は月の塊で区切ったうえで、学習の最後の月と検証の最初の月の間を空ける方式。目的変数は
+# 52 週先リターンなので、隣り合う月のラベル期間はほぼ丸ごと重なる。外側の walk-forward は
+# `embargo_months=LABEL_HORIZON_MONTHS`（ADR-0014）で重なりを外しているが、内側には無かった（#968）。
+# **どの既定もこれではない**（候補は `rows`・M-6 本体は `macro_enet._INNER_CV`）。比べるのは
+# `momentum_gate --inner-cv-purge`、切り替えるかは #968 で決める。
+_EN_INNER_CV_PURGED = "months_purged"
+_EN_INNER_CV_CHOICES = ("rows", "months", _EN_INNER_CV_PURGED)
 _EN_INNER_CV_DEFAULT = "rows"
+# 月の境界で区切る方式＝各学習月の行数（`train_groups`）が要る方式。
+_EN_INNER_CV_BY_MONTH = ("months", _EN_INNER_CV_PURGED)
 
 
-def month_block_splits(train_groups, cv_splits: int) -> list[tuple[np.ndarray, np.ndarray]]:
+def _purge_gap_months() -> int:
+    """`months_purged` が空ける月数の上限。書き写さず、外側の embargo と同じ `LABEL_HORIZON_MONTHS` から取る。"""
+    from .macro_snapshots import LABEL_HORIZON_MONTHS
+    return LABEL_HORIZON_MONTHS
+
+
+def purged_month_plan(n_months: int, cv_splits: int, gap_months: int) -> tuple[int, int, int]:
+    """空白付きの月の塊の (分割数, 検証の塊の月数, 実際に空ける月数) を返す（#979）。
+
+    空白は `gap_months` から始める。数え方は外側の walk-forward の `embargo_months` と同じで、学習の最後の
+    月と検証の最初の月の**間に挟まる月の数**（学習に入った月の並びで数える）。分割数は `months` と同じ式
+    `max(2, min(cv_splits, 月数 // 2 - 1))`、検証の塊の大きさは**空白を引いた残りの月数**から
+    `(月数 − 空白) // (分割数 + 1)` で決める（sklearn の既定 `月数 // (分割数 + 1)` のまま空白を足すと、
+    学習 48 か月以下では 12 か月が入らない）。この大きさが 1 以上なら、どの split も学習月が 1 つ以上残る。
+
+    両立しないときは**空白を最優先で保ち**、検証の塊の大きさ（1 か月まで）→ 分割数（最小 2）→ 空白 の順に
+    縮める。空白は両立する最大の値まで縮め、最小は 0。0 まで縮んだら `months` と同じ (分割数, 大きさ) を返す。
+    """
+    splits0 = max(2, min(cv_splits, n_months // 2 - 1))
+    for gap in range(max(0, int(gap_months)), 0, -1):
+        test_size = (n_months - gap) // (splits0 + 1)
+        if test_size >= 1:
+            return splits0, test_size, gap
+        # 検証の塊を 1 か月に縮めたうえで、学習月が 1 つ以上残るところまで分割数を縮める
+        splits = min(splits0, n_months - gap - 1)
+        if splits >= 2:
+            return splits, 1, gap
+    return splits0, n_months // (splits0 + 1), 0
+
+
+def month_block_splits(train_groups, cv_splits: int,
+                       gap_months: int = 0) -> list[tuple[np.ndarray, np.ndarray]]:
     """月の塊で区切る内側 CV の (学習行, 検証行) の列を返す（#971）。
 
     `train_groups` は月の昇順に連結した学習行の、各月の行数（`walk_forward_cv_monthly` の
@@ -173,6 +212,9 @@ def month_block_splits(train_groups, cv_splits: int) -> list[tuple[np.ndarray, n
     月の番号を行の番号の範囲へ写す——「過去の月で学習 → 直後の月の塊で検証」という行ベースと
     同じ形のまま、**どの月も学習側と検証側に分かれない**。分割数は行ベースの式
     `max(2, min(cv_splits, 行数 // 2 - 1))` の行数を月数へ置き換えたもの。
+
+    `gap_months`（#979）は学習の最後の月と検証の最初の月の間に空ける月数の上限。既定 0 は今のまま。1 以上なら
+    `purged_month_plan` が決めた空白・分割数・検証の塊の大きさで切り、空白が 0 まで縮んだら既定と同じ分割になる。
     """
     from sklearn.model_selection import TimeSeriesSplit
 
@@ -181,9 +223,15 @@ def month_block_splits(train_groups, cv_splits: int) -> list[tuple[np.ndarray, n
         raise ValueError(f"各月の行数は 1 以上で、1 か月以上が要る（受け取った値: {sizes}）")
     n_months = len(sizes)
     bounds = np.concatenate([[0], np.cumsum(sizes)])
-    splits = max(2, min(cv_splits, n_months // 2 - 1))
+    gap = 0
+    if gap_months > 0:
+        splits, test_size, gap = purged_month_plan(n_months, cv_splits, gap_months)
+    if gap > 0:
+        tss = TimeSeriesSplit(n_splits=splits, test_size=test_size, gap=gap)
+    else:
+        tss = TimeSeriesSplit(n_splits=max(2, min(cv_splits, n_months // 2 - 1)))
     out = []
-    for tr_m, te_m in TimeSeriesSplit(n_splits=splits).split(np.arange(n_months)):
+    for tr_m, te_m in tss.split(np.arange(n_months)):
         out.append((np.arange(bounds[tr_m[0]], bounds[tr_m[-1] + 1]),
                     np.arange(bounds[te_m[0]], bounds[te_m[-1] + 1])))
     return out
@@ -195,17 +243,20 @@ def elasticnet_inner_cv(n_rows: int, cv_splits: int, inner_cv: str = _EN_INNER_C
 
     `rows` は修正前と同じ `TimeSeriesSplit(n_splits=max(2, min(cv_splits, n_rows // 2 - 1)))`。
     `months` は `month_block_splits` の分割で、各月の行数 `train_groups`（合計 = n_rows）が要る。
+    `months_purged`（#979）は `months` に `LABEL_HORIZON_MONTHS` か月を上限とする空白を足したもの。
     """
     from sklearn.model_selection import TimeSeriesSplit
 
     if inner_cv == "rows":
         return TimeSeriesSplit(n_splits=max(2, min(cv_splits, n_rows // 2 - 1)))
-    if inner_cv == "months":
+    if inner_cv in _EN_INNER_CV_BY_MONTH:
         if train_groups is None:
-            raise ValueError("inner_cv='months' には各学習月の行数（train_groups）が要る")
+            raise ValueError(f"inner_cv='{inner_cv}' には各学習月の行数（train_groups）が要る")
         if sum(int(g) for g in train_groups) != n_rows:
             raise ValueError(f"train_groups の合計 {sum(int(g) for g in train_groups)} が"
                              f"学習行数 {n_rows} と合わない")
+        if inner_cv == _EN_INNER_CV_PURGED:
+            return month_block_splits(train_groups, cv_splits, gap_months=_purge_gap_months())
         return month_block_splits(train_groups, cv_splits)
     raise ValueError(f"未知の inner_cv: {inner_cv}（{', '.join(_EN_INNER_CV_CHOICES)} のみ）")
 
@@ -249,6 +300,8 @@ def make_elasticnet_fit_predict(l1_ratios: tuple = _EN_L1_RATIOS,
     行数）を使う——`walk_forward_cv_monthly(pass_train_groups=True)` で呼ぶこと（候補メニューの
     `elasticnet` は opts に `inner_cv="months"` があれば `pass_train_groups=True` を返す）。`months` のときだけ診断値に
     `inner_cv` を積む（`rows` では何も足さない＝夜間の診断値の形は変わらない）。
+    `months_purged`（#979）も `train_groups` を使い、診断値には `inner_cv` に加えて、その fold で実際に空けた月数
+    `inner_cv_gap` を積む（学習月の少ない fold では縮む・`purged_month_plan`）。`months` では積まない。
     """
     from sklearn.linear_model import ElasticNetCV
 
@@ -280,6 +333,9 @@ def make_elasticnet_fit_predict(l1_ratios: tuple = _EN_L1_RATIOS,
             if inner_cv != _EN_INNER_CV_DEFAULT:
                 # 切り替えが CV まで届いたかを呼び出し側が確かめる印（`momentum_gate --inner-cv`）
                 diag["inner_cv"].append(inner_cv)
+            if inner_cv == _EN_INNER_CV_PURGED:
+                diag["inner_cv_gap"].append(
+                    purged_month_plan(len(train_groups), cv_splits, _purge_gap_months())[2])
         return yhat, y_te
 
     return fit_predict
@@ -871,8 +927,8 @@ class Candidate:
 
 
 def _b_elasticnet(feature_names, opts, diag):
-    # 月で区切る内側 CV（#971）だけ各学習月の行数が要る。既定（rows）は従来どおり 2 引数で呼ぶ。
-    extra = {"pass_train_groups": True} if opts.get("inner_cv") == "months" else {}
+    # 月で区切る内側 CV（#971・空白付きは #979）だけ各学習月の行数が要る。既定（rows）は従来どおり 2 引数で呼ぶ。
+    extra = {"pass_train_groups": True} if opts.get("inner_cv") in _EN_INNER_CV_BY_MONTH else {}
     return make_elasticnet_fit_predict(diag=diag, **opts), extra
 
 
