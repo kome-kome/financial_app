@@ -586,6 +586,39 @@ class TestInnerCvGateMeasuresM6:
         assert rd.JOBS[self.KEY].parallel_sensitive is True
 
 
+class TestValidSplitGateMeasuresM2:
+    """M-2 の検証集合のジョブ（#976・#969）は M-2 だけを、間引かずに、本番（valid_rows）を分母に測る。
+
+    事前登録（ADR-0050 の 2026-10-17・その4 追記）は「M-2 だけ・valid_rows / valid_months・2検定・α 0.025」。
+    """
+
+    KEY = "gate:valid-split"
+
+    def test_the_job_runs_the_valid_split_axis_with_the_default_models(self):
+        from scripts.momentum_gate import VALID_SPLIT_MODELS
+
+        argv = rd.JOBS[self.KEY].argv
+        assert "--valid-split" in argv
+        assert "--models" not in argv
+        assert VALID_SPLIT_MODELS == ["xgb_m2"]
+
+    def test_the_preregistered_base_and_tests(self):
+        import plugins.macro_gbdt as mg
+        from scripts.momentum_gate import VALID_SPLIT_MODELS, base_of, bonferroni_alpha, build_conditions
+
+        conds = build_conditions(valid_split=True, models=VALID_SPLIT_MODELS)
+        assert base_of(conds) == f"valid_{mg._VALID_SPLIT}" == "valid_rows"   # 本番の構成
+        assert bonferroni_alpha(len(VALID_SPLIT_MODELS), len(conds)) == pytest.approx(0.025)
+
+    def test_the_job_measures_at_full_resolution(self):
+        argv = rd.JOBS[self.KEY].argv
+        assert "--smoke" not in argv
+        assert argv[argv.index("--stride") + 1] == "1"
+
+    def test_the_result_changes_with_background_work(self):
+        assert rd.JOBS[self.KEY].parallel_sensitive is True
+
+
 class TestSizeNeutralGateMeasuresM2AndM6:
     """規模の中立化のジョブ（#970・#957）は M-2 / M-6 を、間引かずに、予測そのまま（raw）を分母に測る。
 
