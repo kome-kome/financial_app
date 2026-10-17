@@ -1,7 +1,7 @@
 """`scripts/momentum_gate.py` の M-2 の行の抽出の割合のモード（`--subsample`・#989・#987）。
 
-M-2 の XGBoost が木ごとに学習行の 0.8 を抽出する（本番・`subsample_0.8`）か、抽出を止める（`subsample_1.0`）かを
-共通域で比べる道具。`--valid-split` と同じ形で、危ないのは**黙って同じものを比べる**形:
+M-2 の XGBoost の行の抽出を止める（本番・`subsample_1.0`・#987 で切り替え）か、木ごとに学習行の 0.8 を抽出する
+（`subsample_0.8`・#987 の前の本番）かを共通域で比べる道具。`--valid-split` と同じ形で、危ないのは**黙って同じものを比べる**形:
 
   - opts が候補まで届かず、両条件とも 0.8 で回る（`walk_forward_cv_monthly` は fit_predict の例外を握る）
   - 分母を本番から取らず書き写す（本番を切り替えたときに旧い割合を本番として測る・#964）
@@ -65,9 +65,9 @@ def _run_candidate(opts):
 
 
 class TestProductionDefaults:
-    def test_both_defaults_are_point_eight(self):
-        """1.0 へ切り替えるかは #987 が `momentum_gate --subsample` の結果で決める（ここで変えない）。"""
-        assert mg._SUBSAMPLE == 0.8
+    def test_production_stops_sampling_and_the_candidate_keeps_point_eight(self):
+        """#987 が `momentum_gate --subsample`（2026-10-18）の結果で本番を 1.0 へ切り替えた。候補の既定は 0.8 のまま。"""
+        assert mg._SUBSAMPLE == 1.0
         assert mg._SUBSAMPLE_DEFAULT == 0.8
 
     def test_screen_default_comes_from_the_production_constant(self, monkeypatch):
@@ -141,7 +141,7 @@ class TestConditions:
 
     def test_baseline_is_the_production_rate_of_m2(self):
         conds = build_conditions(subsample=True)
-        assert base_of(conds) == SUBSAMPLE_BASE_COND == "subsample_0.8"
+        assert base_of(conds) == SUBSAMPLE_BASE_COND == "subsample_1.0"      # #987 で 0.8 から移った
         assert SUBSAMPLE_CONDS[SUBSAMPLE_BASE_COND] == mg._SUBSAMPLE
 
     def test_stops_when_production_is_not_a_registered_rate(self, monkeypatch):
@@ -168,10 +168,11 @@ class TestConditions:
 
 
 class TestOptions:
-    def test_only_the_m2_non_default_side_gets_options(self):
+    def test_only_the_m2_non_default_side_gets_the_rate(self):
+        """候補の既定（0.8）の側は割合を渡さず、1.0 の側だけ渡す。どちらも M-2 本番の検証集合（#987 で `months`）は渡る。"""
         conds = build_conditions(subsample=True)
-        assert cv_opts(conds["subsample_0.8"], "xgb_m2") is None
-        assert cv_opts(conds["subsample_1.0"], "xgb_m2") == {"subsample": 1.0}
+        assert cv_opts(conds["subsample_0.8"], "xgb_m2") == {"valid_split": mg._VALID_SPLIT}
+        assert cv_opts(conds["subsample_1.0"], "xgb_m2") == {"valid_split": mg._VALID_SPLIT, "subsample": 1.0}
         assert "subsample" not in (cv_opts(conds["subsample_1.0"], "elasticnet") or {})
         assert cv_opts(conds["subsample_1.0"], "risk_return") is None
 
@@ -196,11 +197,11 @@ class TestOptions:
         dict(risk_axis=True, models=["xgb_m2"]), dict(fin_nan=True), dict(de_exclude=True),
         dict(fin_fill=True), dict(inner_cv_purge=True), dict(size_neutral=True), dict(valid_split=True),
     ])
-    def test_existing_modes_keep_the_production_rate(self, kwargs):
-        """既存モードの M-2 は本番の割合のまま（`subsample` の opts を渡さない）。"""
+    def test_existing_modes_run_the_production_rate(self, kwargs):
+        """既存モードの M-2 は本番の割合（#987 で 1.0）で回る＝候補の既定（0.8）と違うので opts で渡る。"""
         for c in build_conditions(**kwargs).values():
-            assert c.subsample == mg._SUBSAMPLE
-            assert "subsample" not in (cv_opts(c, "xgb_m2") or {})
+            assert c.subsample == mg._SUBSAMPLE == 1.0
+            assert (cv_opts(c, "xgb_m2") or {}).get("subsample", mg._SUBSAMPLE_DEFAULT) == mg._SUBSAMPLE
 
 
 class TestReachCheck:

@@ -200,18 +200,24 @@ _MIN_FIT_N  = 5            # この未満なら early_stopping を諦め固定 n
 # early_stopping の検証集合の取り方（#976・#969）。`rows` は末尾 `_VALID_FRAC` の行を行の番号で取る今の方式で、
 # 区切りが月の途中に落ちる（その月のどの社が fit 側・検証側に入るかが月内の並びで決まる）。`months` は末尾の
 # 月を丸ごと取る（`_tail_month_valid_rows`）。`_VALID_SPLIT_DEFAULT` は関数の既定＝opts を省いたときに回る方式。
-# **M-2 本体の既定は `_VALID_SPLIT`（`rows` のまま）**。`months` へ切り替えるかは #969 が
-# `momentum_gate --valid-split` の結果で決める。
+# **M-2 本体の既定は `_VALID_SPLIT`（#987 で `months`）**。2026-10-17 の `momentum_gate --valid-split`（共通域・
+# 18 期間・種 5 個の平均）で、測る前に固定した規則（rank-IC か short_side_spread の差の 95%CI が丸ごと 0 より下なら
+# 採らない）に当たらなかった（#969）。ただし行の抽出（下の `_SUBSAMPLE`）を止めないと並びへの依存は減らなかったので、
+# 2026-10-18 に `_SUBSAMPLE = 1.0` と合わせて切り替えた（#987）。M-4（退役済み）と候補メニューは関数の既定（`rows`）の
+# まま。`momentum_gate` の分母と `Cond.valid_split` の既定はこの値から取る（ゲートの「本番の構成」を書き写さない）。
 _VALID_SPLIT_CHOICES = ("rows", "months")
 _VALID_SPLIT_DEFAULT = "rows"
-_VALID_SPLIT = "rows"
+_VALID_SPLIT = "months"
 # 木ごとに学習行の何割を抽出するか（XGBoost の `subsample`・#987・#989）。どの行が選ばれるかは行の並びで決まり、
-# 社の順を変えると種を変えたのと同じだけ学習が変わる（`months` の検証集合でも、社の順だけで最終モデルの木の本数が
-# 幅 91 動き、1.0 にすると幅 1 に縮んだ・2026-10-18）。`_SUBSAMPLE` は **M-2 本体の既定**（`params_schema()` の既定はここから取る）、`_SUBSAMPLE_DEFAULT` は
-# 候補 `xgb_m2`（`model_candidates._b_xgb_baseline`）が opts を省いたときに回る値。1.0 へ切り替えるかは #987 が
-# `momentum_gate --subsample` の結果で決める。
+# 社の順を変えると種を変えたのと同じだけ学習が変わる。`months` の検証集合でも、社の順だけで最終モデルの木の本数が
+# 幅 91 動き、1.0 にすると幅 1 に縮んだ（2026-10-18）。`_SUBSAMPLE` は **M-2 本体の既定**（`params_schema()` の既定は
+# ここから取る・#987 で 1.0）、`_SUBSAMPLE_DEFAULT` は候補 `xgb_m2`（`model_candidates._b_xgb_baseline`）が opts を
+# 省いたときに回る値（0.8 のまま）。2026-10-18 の `momentum_gate --subsample` で、測る前に固定した規則に当たらなかった
+# （差の点推定は rank-IC −0.0028・short_side −0.0033 で ns）。狙いは成績ではなく並びへの依存を消すこと。種への依存は
+# 残る（列の抽出 `colsample_bytree` は種で動く・1.0 でも種ごとの幅は縮まなかった）。月次探索の軸からは外した
+# （`tuning_search_space`）。
 _SUBSAMPLE_DEFAULT = 0.8
-_SUBSAMPLE = 0.8
+_SUBSAMPLE = 1.0
 
 # ── SHAP 解釈性強化（signed SHAP＋交互作用・Issue #371）────────────────────────
 _INTERACT_TOP_K   = 15     # グローバル交互作用の上位ペア表示件数
@@ -631,8 +637,8 @@ class MacroGbdtPlugin(AnalysisPlugin):
     def tuning_search_space(self) -> tuple:
         """ハイパーパラメータ自動探索の探索空間（Issue #266・#604 でモメンタム2軸を除外）。
 
-        XGBoost 7軸（木構造・正則化）＋符号事前知識1軸（use_monotone_constraints・#366）
-        ＋セクター/サイズ特徴1軸（use_sector_features・#370）の9軸。この2軸はいずれも
+        XGBoost 6軸（木構造・正則化）＋符号事前知識1軸（use_monotone_constraints・#366）
+        ＋セクター/サイズ特徴1軸（use_sector_features・#370）の8軸。後ろの2軸はいずれも
         build_snapshots のキャッシュキーに影響しない execute 内後処理（前者は純 xgb_param・
         後者は特徴量後付け連結）のため再構築を誘発せず LRU も圧迫しない。
         他の構造パラメータ（fin_features/macro_features/use_macro/min_coverage）は
@@ -663,15 +669,20 @@ class MacroGbdtPlugin(AnalysisPlugin):
 
         `params_schema()` からは**消さない**（UI から手動で ON にできる。#599 で
         `min_coverage` を探索から外しつつ契約に残したのと同じ判断）。
+
+        **行の抽出の割合（`subsample`）も外し、本番の既定 `_SUBSAMPLE`（1.0）で固定した（#987）。**
+        1.0 未満では、木ごとにどの行を抽出するかが行の並び（社の順）で決まり、社が 1 つ増減するだけで種を変えたのと
+        同じだけ学習が変わる。探索に残すと 1.0 未満が選ばれうる（2026-10-01 の 1 位は 0.4）。こちらも
+        `params_schema()` からは消さない（画面で手動で動かせる）。保存済みの調整値に残る `subsample` は、
+        `project_tuned_params()` が `base_params` の値で上書きして画面へ出す（#604 のモメンタムと同じ扱い）。
         """
         from .tuning import SearchDim
 
-        # モメンタムは探索せず OFF で固定する（上記 docstring・#604）
-        base_params: dict = {"use_momentum": False}
+        # モメンタムは探索せず OFF で固定する（上記 docstring・#604）。行の抽出は止めて固定する（#987）
+        base_params: dict = {"use_momentum": False, "subsample": _SUBSAMPLE}
         dims = [
             SearchDim("max_depth",          [2, 4, 6, 8, 10]),
             SearchDim("learning_rate",      [0.01, 0.03, 0.05, 0.1, 0.2, 0.3]),
-            SearchDim("subsample",          [0.4, 0.6, 0.8, 1.0]),
             SearchDim("colsample_bytree",   [0.4, 0.6, 0.8, 1.0]),
             SearchDim("min_child_weight",   [1, 5, 10, 20, 30]),
             SearchDim("reg_lambda",         [0.0, 0.5, 1.0, 2.0, 5.0, 10.0]),

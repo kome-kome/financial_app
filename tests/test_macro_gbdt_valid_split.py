@@ -72,20 +72,20 @@ def _fit_rows(valid_split, train, groups=GROUPS, **kw):
 
 
 class TestProductionDefault:
-    def test_production_default_is_rows(self):
-        """`months` へ切り替えるかは #969 が `momentum_gate --valid-split` の結果で決める（ここで変えない）。"""
-        assert mg._VALID_SPLIT == "rows"
+    def test_production_default_is_months(self):
+        """#969 が `momentum_gate --valid-split`（2026-10-17）の結果で `months` へ切り替えた。"""
+        assert mg._VALID_SPLIT == "months"
         assert mg._VALID_SPLIT_DEFAULT == "rows"
         assert mg._VALID_SPLIT_CHOICES == ("rows", "months")
 
     def test_cv_callback_follows_the_constant(self, monkeypatch):
         """本番の CV は `_VALID_SPLIT` の1行で切り替わり、`months` のときだけ各月の行数を受け取る。"""
         plugin = mg.MacroGbdtPlugin()
-        fp, extra = plugin._make_cv_callback(_XGB, [])
-        assert extra == {}                       # rows は #976 の前と同じ 2 引数呼び出し
-        monkeypatch.setattr(mg, "_VALID_SPLIT", "months")
         _fp, extra_m = plugin._make_cv_callback(_XGB, [])
-        assert extra_m == {"pass_train_groups": True}
+        assert extra_m == {"pass_train_groups": True}   # 本番（months）は各学習月の行数を受け取る
+        monkeypatch.setattr(mg, "_VALID_SPLIT", "rows")
+        fp, extra = plugin._make_cv_callback(_XGB, [])
+        assert extra == {}                       # 定数1つを戻せば #976 の前と同じ 2 引数呼び出し
 
 
 class TestRowsIsUnchanged:

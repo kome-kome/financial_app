@@ -1107,7 +1107,7 @@ M-1（§9）の**非線形兄弟**。同一の目的変数（52週先対数リ�
 | SHAP | グローバル mean\|SHAP\|（`feature_coefs`）＋**signed SHAP**（`feature_coefs_signed`＝重要度×学習方向）＋**学習方向 corr**（`feature_shap_dir`）＋**交互作用**（`feature_interactions`＝特徴量ペア強度）＋per-stock SHAP 全社添付（#371・§11.5） |
 | R1 | 出さない（OLS 固有の予測 SE。効用軸でないため欠落しても幾何は壊れない） |
 | R_macro | 既存 `macro_beta` producer から流用（M-1 と軸パリティを維持） |
-| 正則化 | 強正則化デフォルト（`max_depth=4`・`min_child_weight=5`・`subsample=colsample_bytree=0.8`・`reg_lambda=1.0`・`lr=0.05`）。日本株 52週リターンは低 S/N のため過学習を抑制 |
+| 正則化 | 強正則化デフォルト（`max_depth=4`・`min_child_weight=5`・`colsample_bytree=0.8`・`reg_lambda=1.0`・`lr=0.05`）。日本株 52週リターンは低 S/N のため過学習を抑制。行の抽出は止める（`subsample=1.0`・`macro_gbdt._SUBSAMPLE`・#987）——1.0 未満では木ごとに抽出する行が行の並び（社の順）で決まり、社が 1 つ増減するだけで種を変えたのと同じだけ学習が変わる |
 
 ### 11.3 特徴量
 
@@ -1132,7 +1132,11 @@ M-1 から**交差項（`fin×macro`）を除いた**同一セット。BIC/LASSO
 各フォールド（train 月 < test 月・`min_train_months=6`・`step_months=3`）で:
 
 1. y を p1-p99 winsorize（X は winsorize しない。木は単調不変）
-2. train の時系列末尾 20% を `eval_set`（リーク安全・実運用設定を模す）
+2. train の時系列末尾の**月を丸ごと**、行数が 20% に最も近くなるだけ `eval_set` にする（リーク安全・実運用設定を模す）。
+   行の番号で末尾 20% を取ると区切りが月の途中に落ち、同じ月のどの社が fit 側・検証側に入るかが社の並びで
+   決まるので、月の塊で取る（`macro_gbdt._VALID_SPLIT`・#969。共通域の対比較で劣後しないことを確かめ、
+   行の抽出を止める `subsample=1.0` と合わせて 2026-10-18 に切り替えた・数値は #969・#987。2 つを合わせると、
+   社の順を 4 通り変えても最終モデルの木の本数の揺れは幅 1 で、行で取るままだと幅 53 残る）
 3. `early_stopping_rounds`（既定 40）で過学習を検知して学習停止
 4. `best_iteration` を記録
 
@@ -1296,7 +1300,10 @@ R2 は月末までの52週だけで計算する＝時点再現できている。
   M-5 は M-2 を継承するので同じ変更が波及する（#570 で退役済み）。
   **M-6 は2軸を持ったまま**——今回の窓スキャンで測っておらず外す根拠が無い。実害も無い
   （`TUNE_MATRIX` に入っておらず探索が一度も走っていない）
-  （`use_monotone_constraints`・#366・§11.4.1）の10軸
+  （`use_monotone_constraints`・#366・§11.4.1）の10軸。
+  <br>**#987（2026-10-18）で行の抽出の割合 `subsample` も探索から外し、本番の 1.0 に固定した**（`base_params`）。
+  1.0 未満は社の順への依存を持ち込み、探索に残すと選ばれうる（2026-10-01 の 1 位は 0.4）。保存済みの調整値の
+  `subsample` は `project_tuned_params()` が固定値で上書きして画面へ出す。M-5 も継承で同じ（退役済み）
 - ~~quantile regression（`reg:quantileerror`）による予測区間（R1' 代替）~~ → #365 で**分割コンフォーマル区間**として対応済み（§11.7.1・ADR-0020）。quantile regression（再学習要）ではなく OOF 残差ベースのコンフォーマル（再学習不要・family-wide・被覆保証）を採用
 - ~~SHAP interaction values（特徴量ペアの交互作用可視化）~~ → #371 で対応済み（§11.5・`feature_interactions`）。あわせて signed SHAP（`feature_coefs_signed`）＋学習方向 corr（`feature_shap_dir`）も追加
 - M-2 初心者向けガイド（`M2_MACRO_GBDT_GUIDE.md`）

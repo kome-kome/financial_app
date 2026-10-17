@@ -352,9 +352,10 @@ M-6 は α・l1_ratio を学習 fold の中の時系列分割 CV で選ぶ。他
 ## M-2 の early stopping の検証集合の取り方を比べるモード（`--valid-split`・#976）
 
 M-2 は学習行の末尾 2 割を early stopping の検証集合にし、各 fold の best_iteration の中央値を最終モデルの
-木の本数に使う。`valid_rows`（本番・分母）は行の番号で取るので区切りが月の途中に落ち、その月のどの社が
+木の本数に使う。`valid_rows` は行の番号で取るので区切りが月の途中に落ち、その月のどの社が
 fit 側・検証側に入るかが月内の並びで決まる（#969）。`valid_months` は末尾の月を丸ごと取る
-（`macro_gbdt._tail_month_valid_rows`）。`--inner-cv-purge` と同じ形で、**パネルは2条件で同一**（`panel_cond`）、
+（`macro_gbdt._tail_month_valid_rows`）。#987 で本番（分母）を `valid_months` へ切り替えた（2026-10-18・`subsample`
+と合わせて）。`--inner-cv-purge` と同じ形で、**パネルは2条件で同一**（`panel_cond`）、
 差し替えるのは M-2 の CV へ渡す候補の opts だけ（`cv_opts`）。測るのは M-2 だけ（種 5 個の平均・#955）で、
 1モデル × 2指標 ＝2検定・α 0.025。CV の後、各条件の診断値の `valid_split` が指定どおりかを確かめ、違えば止める
 （`valid_split_reach_problems`）。日中キューの名前は `gate:valid-split`（**積むのは人**）。分母と `Cond.valid_split`
@@ -392,13 +393,14 @@ M-2 / M-6 は毎期、小型株を実際より高く・大型株を低く置く�
 ## M-2 の行の抽出の割合を比べるモード（`--subsample`・#989）
 
 M-2 の XGBoost は木ごとに学習行の `subsample` 割を抽出する。どの行が選ばれるかは行の並びで決まり、社の順を変えると
-種を変えたのと同じだけ学習が変わる（#987）。本番（`macro_gbdt._SUBSAMPLE`・0.8・分母）と、抽出を止める 1.0 を比べる。
+種を変えたのと同じだけ学習が変わる（#987）。抽出を止める 1.0（#987 で本番＝`macro_gbdt._SUBSAMPLE`・分母）と、#987 の前の本番 0.8 を比べる。
 **条件は事前登録した `subsample_0.8` / `subsample_1.0` の2つに固定する**（ADR-0050）。`--valid-split` と同じ形で、
 **パネルは2条件で同一**（`panel_cond`）、差し替えるのは M-2 の CV へ渡す候補の opts だけ（`cv_opts`）。測るのは
 M-2 だけ（種 5 個の平均・#955）で、1モデル × 2指標 ＝2検定・α 0.025。CV の後、各条件の診断値の `subsample` が
 指定どおりかを確かめ、違えば止める（`subsample_reach_problems`）。分母と `Cond.subsample` の既定は M-2 本体の
 `macro_gbdt._SUBSAMPLE` から取り、本番が2条件のどちらでもなければ止める。opts を省くかどうかは候補の既定
-（`_SUBSAMPLE_DEFAULT`）と比べる（#964 の教訓）。日中キューの名前は `gate:subsample`（**積むのは人**・採否は #987）。
+（`_SUBSAMPLE_DEFAULT`）と比べる（#964 の教訓）。日中キューの名前は `gate:subsample`（**積むのは人**）。#987 の判定
+（2026-10-18・分母は当時の本番 0.8）で 1.0 を採り、分母が `subsample_1.0` へ移った（今は「抽出を戻すと良くなるか」を問う）。
 
 ## M-2 は種を変えて平均する（`--seeds`・#955）
 
@@ -532,7 +534,7 @@ class Cond(NamedTuple):
     opts にだけ効く。
 
     `subsample`（#989）は M-2 の XGBoost が木ごとに抽出する学習行の割合。既定は本番の構成
-    （`macro_gbdt._SUBSAMPLE`・0.8）から取る。`valid_split` と同じく**パネルを動かさず**、M-2 の CV へ渡す
+    （`macro_gbdt._SUBSAMPLE`・#987 で 1.0）から取る。`valid_split` と同じく**パネルを動かさず**、M-2 の CV へ渡す
     opts にだけ効く。
     """
     use_momentum: bool
@@ -1070,17 +1072,17 @@ _AXIS_VERDICTS: dict[str, tuple[str, str]] = {
     # 共通域は埋める前から財務が揃っていた行だけ（drop 側 ⊂ fill 側）。広がった社の効果は raw で読む（#950）。
     "fin_fill": ("FIN FILL AXIS [common domain = rows complete before filling; read raw for filled rows]",
                  "filling no-dividend / no-R&D blanks with 0 did not beat dropping those rows"),
-    # 分母は本番（`valid_rows`）。パネルは2条件で同一で、差は M-2 の early stopping の検証集合だけ（#976）。
+    # 分母は本番（#987 で `valid_months`）。パネルは2条件で同一で、差は M-2 の early stopping の検証集合だけ
+    # （#976）。分母が入れ替わったので、`subsample` と同じくどちらの向きでも読める形にした。
     "valid_split": ("VALID SPLIT AXIS [M-2 only; same panel on both sides]",
-                    "taking the early-stopping validation set as whole tail months did not beat taking "
-                    "the tail rows"),
-    # 分母は本番（#968 で `gap`＝`months_purged`）。パネルは2条件で同一で、差は M-6 の内側 CV の空白だけ（#979）。
-    # #968 の前は分母が `nogap` で「空白を空けても月の塊を上回らない」と書いていたが、分母が入れ替わったので
-    # 「空白を外しても上回らない」の向きにした。
-    # 分母は本番（`macro_gbdt._SUBSAMPLE`）。パネルは2条件で同一で、差は M-2 の行の抽出の割合だけ（#989）。
+                    "the other early-stopping validation set did not beat the production one"),
+    # 分母は本番（`macro_gbdt._SUBSAMPLE`・#987 で 1.0）。パネルは2条件で同一で、差は M-2 の行の抽出の割合だけ（#989）。
     # 本番を切り替えても読めるよう、向きを決めない言い方にした（#964 の `inner_cv` と同じ）。
     "subsample": ("SUBSAMPLE AXIS [M-2 only; same panel on both sides]",
                   "the other row-subsampling rate did not beat the production rate"),
+    # 分母は本番（#968 で `gap`＝`months_purged`）。パネルは2条件で同一で、差は M-6 の内側 CV の空白だけ（#979）。
+    # #968 の前は分母が `nogap` で「空白を空けても月の塊を上回らない」と書いていたが、分母が入れ替わったので
+    # 「空白を外しても上回らない」の向きにした。
     "inner_cv_purge": ("INNER CV PURGE AXIS [M-6 only; same panel on both sides]",
                        "removing the label-horizon gap between the inner training and validation months "
                        "did not beat the production purged month blocks"),
@@ -2363,8 +2365,8 @@ def main() -> None:
                          f"fill と、空欄の行を捨てる drop を共通域で比べる・#950）。モデル既定は {','.join(FIN_FILL_MODELS)}。"
                          "株価が空欄の行は埋めない。VIEW は変えず、読み込んだ財務の行だけを差し替える。他モードと併用不可")
     ap.add_argument("--valid-split", dest="valid_split", action="store_true",
-                    help="M-2 の early stopping の検証集合のモード（末尾の行で取る valid_rows＝本番と、末尾の月を"
-                         "丸ごと取る valid_months を共通域で比べる・#976）。パネルは2条件で同一。"
+                    help="M-2 の early stopping の検証集合のモード（末尾の月を丸ごと取る valid_months＝本番（#987）と、"
+                         "末尾の行で取る valid_rows を共通域で比べる・#976）。パネルは2条件で同一。"
                          f"モデルは {','.join(VALID_SPLIT_MODELS)} だけ。他モードと併用不可")
     ap.add_argument("--inner-cv-purge", dest="inner_cv_purge", action="store_true",
                     help="M-6 の内側 CV の空白のモード（学習の最後の月と検証の最初の月の間に 52 週先ラベルの重なりを"
