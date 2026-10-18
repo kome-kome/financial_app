@@ -386,14 +386,25 @@ CV の後、各条件の診断値の `inner_cv` が指定どおりかを `inner_
 
 ## 規模で中立化した順位を比べるモード（`--size-neutral`・#970）
 
-M-2 / M-6 は毎期、小型株を実際より高く・大型株を低く置く（#957）。予測そのまま（`raw`・本番・分母）と、
-月ごとの断面で予測を log(時価総額) へ OLS で回帰した残差（`size_neutral`）を比べる。**予測の後処理で条件を
+M-2 / M-6 は毎期、小型株を実際より高く・大型株を低く置く（#957）。予測そのまま（`raw`・分母）と、
+月ごとの断面で予測を log(時価総額) へ OLS で回帰した残差（`size_neutral`）を比べる。**本番は M-2 が `raw`、
+M-6 が `size_neutral`**（2026-10-18 の判定で M-6 だけ採った・#995）。分母は両モデルとも `raw` のままなので、
+M-6 では差の符号を反転して「中立化を外すと悪くなるか」と読む。**予測の後処理で条件を
 作る**のでリスク軸と同じく `Cond` は2条件で同一で、パネルも CV も1回（M-2 の種ごとの幅は `rescore_seeds` で
 条件の変換を当てて測り直す）。時価総額は `financial_metrics` VIEW（分割補正済み）の通期の行から引き、その月の
 断面が使う行と同じ選び方（`_find_applicable_fin` を月末で）で当てる＝先を読まない（`log_market_cap_by_ym`）。
 **時価総額の無い行は変換の前に両条件から落とし**、落とした行数を出す（`size_common_keys`）。対象は M-2 / M-6・
 4検定・α 0.0125。規模の十分位ごとの placement bias（#947 と同じ定義）を両条件で並べて出す（検定はしない）。
 時価総額が1行も取れなければ CV の前に止める。日中キューの名前は `gate:size-neutral`（**積むのは人**・採否は #957）。
+
+## M-6 は本番の規模の中立化を当てて測る（#995）
+
+M-6 の本番（`macro_enet._SIZE_NEUTRAL`）は、予測から断面ごとに log(時価総額) の線形の効果を除いた μ̂ を使う。
+`--size-neutral` 以外で M-6 を測る軸は、CV の後（全月の段と共通月の段の2か所）で M-6 の残差へ本番と同じ後処理
+（`macro_snapshots.neutralize_size_by_ym`・時価総額の無い行は補正せず落とさない）を当ててから、共通域・検定・内訳へ
+進む（`m6_production_post`）。当てないと、M-6 を本番と違う予測で測る（#815 の「ゲートの本番構成が本番に追随しない」と
+同型）。条件ごとの時価総額の取れたパネルの行数を `[size] M-6 is scored after ...` の行と JSON に出し、取れない条件が
+あれば止める。
 
 ## M-2 の行の抽出の割合を比べるモード（`--subsample`・#989）
 
@@ -443,7 +454,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from database import (  # noqa: E402
     DE_RATIO_EXCLUSION_CANDIDATES,
-    FinancialMetric,
     FinancialRecord,
     SessionLocal,
 )
@@ -455,19 +465,25 @@ from plugins.macro_snapshots import (  # noqa: E402
     FIN_ROW_SOURCES,
     _avg_ranks,
     _find_applicable_fin,
+    _month_end_bound,
     _realized_vol,
     _spearman,
     build_snapshots,
     fill_fin_blanks,
     get_producer_scores,
     load_fill_sources,
+    load_market_caps,
+    log_market_cap_by_ym,
+    neutralize_size_by_ym,
     oof_backtest,
     preload_macro,
     quantile_period_ok,
+    size_slope,
     use_fin_rows,
 )
 from plugins.macro_snapshots import FIN_FILL as _M2M6_FIN_FILL  # noqa: E402
 from plugins.macro_enet import _INNER_CV as _M6_INNER_CV  # noqa: E402
+from plugins.macro_enet import _SIZE_NEUTRAL as _M6_SIZE_NEUTRAL  # noqa: E402
 from plugins.macro_gbdt import _VALID_SPLIT as _M2_VALID_SPLIT  # noqa: E402
 from plugins.macro_gbdt import _VALID_SPLIT_CHOICES, _VALID_SPLIT_DEFAULT  # noqa: E402
 from plugins.macro_gbdt import _SUBSAMPLE as _M2_SUBSAMPLE  # noqa: E402
@@ -676,7 +692,8 @@ SUBSAMPLE_CONDS: dict[str, float] = {"subsample_0.8": 0.8, "subsample_1.0": 1.0}
 SUBSAMPLE_BASE_COND = f"subsample_{float(_M2_SUBSAMPLE)}"
 SUBSAMPLE_MODELS = ["xgb_m2"]
 
-# 規模で中立化した順位を比べるモード（`--size-neutral`・#970）。**基準は本番の構成（予測そのまま `raw`）**。
+# 規模で中立化した順位を比べるモード（`--size-neutral`・#970）。**基準は予測そのまま（`raw`）**＝M-2 の本番。
+# M-6 の本番は 2026-10-18 から `size_neutral`（#995）で、M-6 では差の符号を反転して読む。
 # 予測の後処理で条件を作る（リスク軸と同じ形）＝2条件は同じ `Cond` を共有し、CV は1回。`size_neutral` は
 # 月ごとの断面で予測を log(時価総額) へ OLS で回帰した残差を予測として使う（#957 の 10/16 の試算の形）。
 # 対象は M-2 / M-6（#957 の偏りはこの2つ）。M-1 はパネルが別物（strict）なので測らない。
@@ -1957,39 +1974,18 @@ def subsample_reach_problems(diags: dict[str, dict], conds: dict[str, Cond]) -> 
 
 
 # ── 規模で中立化した順位（`--size-neutral`・#970）──────────────────────────────
+# 時価総額の読み込み（`load_market_caps`）と各 (ym, ec) への当て方（`log_market_cap_by_ym`）、回帰の核
+# （`size_slope`）は M-6 の本番と共有するので `plugins.macro_snapshots` に置く（#995）。ここでは import し直して
+# 使う（テストと他のスクリプトは従来どおりこのモジュールから引ける）。
 
-def load_market_caps(db) -> dict[tuple[str, str], float]:
-    """通期の行の時価総額を {(edinet_code, period_end の ISO): 時価総額} で返す（#970・読み取りのみ）。
+def m6_production_post(model: str, mode: str | None) -> bool:
+    """M-6 の OOF に本番の規模の中立化（`macro_enet._SIZE_NEUTRAL`・#995）を当てるか。
 
-    出どころは `financial_metrics` VIEW（パネルの財務の出どころと同じ通期の行）。**`financial_records` の
-    生の値は使わない**——分割のあった年は遡及調整済みの株価 × 提出当時の株数で 1/F ずれ、VIEW が ×F で
-    直している（ADR-0055）。`_FinRow` に列を足さないのは、本番の読み込みとキャッシュの形を計測の
-    ために変えないため（`load_standards` と同じ）。
+    M-6 の本番は規模を中立化した予測なので、M-6 を測るどの軸でも本番と同じ後処理を当てる（ゲートの「本番の
+    構成」を書き写さない・#983 / #968 と同じ）。**`--size-neutral` 軸だけは当てない**——raw / size_neutral を
+    両モデルで自前で作る軸で、raw 側まで中立化すると両条件が同じ予測になる。行は落とさない（本番と同じ）。
     """
-    rows = db.query(FinancialMetric.edinet_code, FinancialMetric.period_end,
-                    FinancialMetric.market_cap).all()
-    return {(ec, _iso(pe)): float(mc) for ec, pe, mc in rows if pe and mc is not None}
-
-
-def log_market_cap_by_ym(ids_by_ym: dict, fin_by_co: dict,
-                         caps: dict[tuple[str, str], float]) -> dict[tuple[str, str], float]:
-    """各 (ym, ec) に、その月の断面が使う通期の行の log(時価総額) を当てる（#970）。
-
-    行の選び方は `build_snapshots` と同じ `_find_applicable_fin` を月末の上限（`_month_end_bound`）で
-    呼ぶ＝**「決算日 + FINANCIAL_LAG_DAYS ≦ 月末」の最新の行だけ**を使い、先を読まない（会計基準の群の
-    `standard_labels` と同じ手順）。その行の時価総額が無い・0 以下なら当てない（両条件から落ちる）。
-    """
-    out: dict[tuple[str, str], float] = {}
-    for ym, ids in ids_by_ym.items():
-        snap = _month_end_bound(ym)
-        for ec in ids:
-            rec = _find_applicable_fin(fin_by_co.get(ec, []), snap)
-            if rec is None:
-                continue
-            mc = caps.get((ec, _iso(rec.period_end)))
-            if mc is not None and mc > 0:
-                out[(ym, ec)] = math.log(mc)
-    return out
+    return bool(_M6_SIZE_NEUTRAL) and model == "elasticnet" and mode != "size_neutral"
 
 
 def size_common_keys(keys: set, logcap: dict) -> set:
@@ -2008,6 +2004,7 @@ def size_neutralize(resid_by_ym: dict, meta_by_ym: dict, logcap: dict) -> tuple[
     直交するので、変換後の予測と log 時価総額の月内の相関は（数値誤差を除いて）0 になる。社が3社未満か
     log 時価総額が月内で全社同じ月は傾きを推定できないので、平均を引くだけにする（順位は変わらない）。
     残差の月平均は 0 になるが、判定の指標は月の中で完結する（月ごとの平行移動で変わらない）。
+    M-6 の本番（`macro_snapshots.neutralize_size`）は同じ傾きで月平均を足し戻した形で、月内の順位は同一（#995）。
     """
     out_r: dict[str, list] = {}
     out_m: dict[str, list] = {}
@@ -2024,12 +2021,7 @@ def size_neutralize(resid_by_ym: dict, meta_by_ym: dict, logcap: dict) -> tuple[
             rows.append((yh, y, meta, x))
         if not rows:
             continue
-        n = len(rows)
-        mx = sum(r[3] for r in rows) / n
-        my = sum(r[0] for r in rows) / n
-        sxx = sum((r[3] - mx) ** 2 for r in rows)
-        slope = (sum((r[3] - mx) * (r[0] - my) for r in rows) / sxx
-                 if n >= 3 and sxx > 0 else 0.0)
+        slope, mx, my = size_slope([r[0] for r in rows], [r[3] for r in rows])
         out_r[ym] = [(yh - my - slope * (x - mx), y) for yh, y, _m, x in rows]
         out_m[ym] = [m for _yh, _y, m, _x in rows]
     return out_r, out_m, dropped
@@ -2067,14 +2059,7 @@ def aligned_from(resid_by_ym: dict, meta_by_ym: dict) -> dict:
 
 # ── リスク軸（`--risk-axis`・#709）─────────────────────────────────────────────
 
-def _month_end_bound(ym: str) -> str:
-    """`"2019-08"` → `"2019-08-31"`。**日付ではなく ISO 文字列の上限**として使う。
-
-    `_realized_vol` の絞り込みは `trade_date <= ref_date` の文字列比較なので、月の実日数を
-    知らなくても「その月までの全行」を取れる（`"2019-02-28" <= "2019-02-31"` は真）。
-    `calendar` を持ち込んで月末を計算すると、閏年の分岐が1つ増えるだけで結果は同じ。
-    """
-    return f"{ym}-31"
+# `_month_end_bound`（月の ISO 文字列の上限）は規模の中立化と共有するので `plugins.macro_snapshots` に置く（#995）。
 
 
 def normalize_lambdas(lambdas: list[float]) -> list[float]:
@@ -2581,8 +2566,9 @@ def main() -> None:
         ttm_rows = ttm_row_count(fins)
         # 財務の空欄の内訳（#916）の会計基準。CPU 計算の前に読み、読取トランザクションを残さない
         std_by_pe = load_standards(db) if mode == "fin_nan" else {}
-        # 規模の中立化（#970）の時価総額。同じく CPU 計算の前に読む
-        market_caps = load_market_caps(db) if mode == "size_neutral" else {}
+        # 規模の中立化（#970）の時価総額。M-6 を本番の後処理（#995）で測る軸でも要る。同じく CPU 計算の前に読む
+        m6_post = any(m6_production_post(m, mode) for m in models)
+        market_caps = load_market_caps(db) if (mode == "size_neutral" or m6_post) else {}
         # 「無い」空欄を 0 で埋める判定の生の値（#950・#983）。M-2 / M-6 を埋める条件があるときだけ、CPU 計算の前に読む
         fill_sources = (load_fill_sources(db)
                         if any(fin_source_key(c, MODEL_SPECS[m][2])[2]
@@ -2761,6 +2747,23 @@ def main() -> None:
                 raise SystemExit(
                     "中止: 時価総額が1行も取れません（両条件が同じ予測になる）。"
                     "financial_metrics の market_cap と、断面が使う通期の行を確認してください")
+        # M-6 の本番の後処理（規模の中立化・#995）に使う log 時価総額。条件ごとにパネルと財務の行の基準が
+        # 違いうるので条件ごとに作る。時価総額の無い行は本番と同じく補正しない（落とさない）。
+        prod_logcap: dict[str, dict] = {}
+        if m6_post:
+            kind6 = MODEL_SPECS["elasticnet"][2]
+            for cond in conds:
+                prod_logcap[cond] = log_market_cap_by_ym(
+                    panels[(cond, kind6)][2], fins[conds[cond].fin_rows], market_caps)
+            print("[size] M-6 is scored after the production size neutralization (#995): "
+                  "panel rows with market cap "
+                  + " ".join(f"{c}={len(v)}/{sum(len(x) for x in panels[(c, kind6)][2].values())}"
+                             for c, v in prod_logcap.items()), flush=True)
+            if not all(prod_logcap.values()):
+                raise SystemExit(
+                    "中止: M-6 の本番の後処理（規模の中立化・#995）に使う時価総額が1行も取れない条件があります。"
+                    "このまま測ると M-6 を本番と違う予測（無補正）で測る。financial_metrics の market_cap を"
+                    "確認してください")
 
         # ── 2. 各条件 × 各モデルを走らせる（残差も受け取る）────────────────────
         results: dict[str, dict] = {}
@@ -2769,6 +2772,9 @@ def main() -> None:
         # （この段の残差は raw 水準の表示にしか使わない。主判定が読むのは共通月で走らせ
         #  直した `cparts` のほう。）
         ran: dict[tuple, tuple] = {}
+        # 全月の段の残差（M-6 は本番の後処理の後・#995）。後段の内訳と OOF の CSV はここから読む
+        # （memo の `ran` は後処理の前の残差なので、直接読むと M-6 を本番と違う予測で数える）。
+        full_parts: dict[str, tuple] = {}
         for cond in conds:
             for model in models:
                 estimator, kind = MODEL_SPECS[model][1], MODEL_SPECS[model][2]
@@ -2783,6 +2789,14 @@ def main() -> None:
                                       opts=cv_opts(conds[cond], model))
                     ran[memo] = (fresh, fresh.pop("_parts"), fresh.pop("_seed_parts", None))
                 out, part, seed_parts = ran[memo]
+                if m6_production_post(model, mode):
+                    # M-6 の本番は規模を中立化した予測（#995）。同じ CV の残差へ本番の後処理を当て、oof を
+                    # 作り直す。`out` は下のリスク軸と同じ理由で複製し、memo の `part` は書き換えない。後段の
+                    # 変換（リスク軸の U）も中立化した予測に掛かる（画面の U = μ − λR と同じ）。
+                    part = (neutralize_size_by_ym(part[0], part[1], prod_logcap[cond])[0], part[1])
+                    out = {**out, "oof": oof_backtest(part[0], n_quantiles=RISK_QUANTILES,
+                                                      meta_by_ym=part[1], rebalance_per_year=4)}
+                full_parts[f"{cond}|{model}"] = part
                 if mode == "risk_axis":
                     # 同じ CV の残差へ条件ごとの U 変換を当て、oof を作り直す。**`out` を
                     # 複製する**——memo は3条件で共有しているので、その場で書き換えると
@@ -2895,6 +2909,12 @@ def main() -> None:
                                   return_parts=True, opts=cv_opts(conds[cond], model))
                 cran[memo] = (fresh, fresh.pop("_parts"))
             out, part = cran[memo]
+            if m6_production_post(model, mode):
+                # 主判定が読む共通月の run にも本番の後処理を当てる（#995・上と同じ）。共通域・検定・内訳・
+                # OOF の CSV はすべて `cparts` から読むので、ここで当てれば下流は M-6 の本番の予測を測る。
+                part = (neutralize_size_by_ym(part[0], part[1], prod_logcap[cond])[0], part[1])
+                out = {**out, "oof": oof_backtest(part[0], n_quantiles=RISK_QUANTILES,
+                                                  meta_by_ym=part[1], rebalance_per_year=4)}
             cparts[f"{cond}|{model}"] = part
             cruns[f"{cond}|{model}"] = out
             if out.get("error"):
@@ -3077,7 +3097,7 @@ def main() -> None:
                                                     std_by_pe).items():
                         labels.setdefault(key, []).append(std)
                     group_labels[(cond, kind)] = labels
-                part = ran[(conds[cond], kind, model)][1]
+                part = full_parts[f"{cond}|{model}"]
                 aligned_run = _align(part[0], ids)
                 bd = blank_group_breakdown(aligned_run, group_labels[(cond, kind)])
                 fin_blank_breakdown[f"{cond}|{model}"] = bd
@@ -3159,6 +3179,10 @@ def main() -> None:
         # 規模の十分位ごとの {モデル: {条件: {size_d<k>: 指標}}}。他モードでは 0 / 空。
         "size_neutral": {"panel_rows_with_cap": len(logcap), "dropped_rows": size_dropped,
                          "deciles": size_deciles},
+        # M-6 を本番の後処理（規模の中立化・#995）で測ったか、と条件ごとの時価総額の取れたパネルの行数。
+        # `--size-neutral` 軸と M-6 を測らない軸では false / 空。
+        "m6_production_size_neutral": {"applied": m6_post,
+                                       "panel_rows_with_cap": {c: len(v) for c, v in prod_logcap.items()}},
         # 0 で埋めた財務の行数は {行の基準: {列: 行数}}（#983 で本番になり、ほぼ全モードで埋める）。
         "fin_fill": {"filled_rows": fin_filled_by_rows, "samples": fin_fill_samples},
         # 目的変数モードの健全性（#615）。{"条件|種別": 月平均の絶対値の最大}。他モードでは空。

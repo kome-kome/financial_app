@@ -222,9 +222,68 @@ class TestSizeNeutralMode:
         src = inspect.getsource(momentum_gate.main)
         assert src.count("size_neutral=args.size_neutral") == 2      # build_conditions / mode_of
         assert "SIZE_NEUTRAL_MODELS" in src
-        assert 'market_caps = load_market_caps(db) if mode == "size_neutral"' in src
+        assert 'market_caps = load_market_caps(db) if (mode == "size_neutral" or m6_post)' in src
         assert "log_market_cap_by_ym(ids0, fins[conds[base].fin_rows], market_caps)" in src
         # 条件の変換は分母以外にだけ当てる（全月の段と共通月の段の両方）
         assert src.count("size_neutralize(") == 3
         assert 'lambda r, mt: size_neutralize(r, mt, logcap)[:2], "size_neutral"' in src
         assert "args.size_neutral and len(set(conds.values())) != 1" in src
+
+
+# ── M-6 は本番の規模の中立化を当てて測る（#995）──────────────────────────────────
+
+class TestM6ProductionPost:
+    def test_only_m6_outside_the_size_neutral_axis(self):
+        """M-6 だけ・`--size-neutral` 軸以外だけで当てる（その軸は raw / size_neutral を自前で作る）。"""
+        from scripts.momentum_gate import m6_production_post
+        assert momentum_gate._M6_SIZE_NEUTRAL is True      # 本番は中立化（macro_enet._SIZE_NEUTRAL）
+        for mode in (None, "fin_fill", "risk_axis", "inner_cv_purge", "ttm"):
+            assert m6_production_post("elasticnet", mode)
+            assert not m6_production_post("xgb_m2", mode)
+            assert not m6_production_post("risk_return", mode)
+        assert not m6_production_post("elasticnet", "size_neutral")
+
+    def test_follows_the_production_constant(self, monkeypatch):
+        """本番の定数を読む（書き写さない）。本番で外したら、ゲートも当てない。"""
+        from scripts.momentum_gate import m6_production_post
+        monkeypatch.setattr(momentum_gate, "_M6_SIZE_NEUTRAL", False)
+        assert not m6_production_post("elasticnet", None)
+
+    def test_constant_is_imported_from_the_plugin(self):
+        import plugins.macro_enet as me
+        assert momentum_gate._M6_SIZE_NEUTRAL is me._SIZE_NEUTRAL
+
+    def test_same_order_as_the_measured_residual_and_keeps_the_level(self):
+        """本番の形（月平均を足し戻す）は、測った残差（`size_neutralize`）と月内の順位が同一で、平均だけが違う。"""
+        from plugins.macro_snapshots import neutralize_size_by_ym
+        resid, meta, logcap = _month(200, slope=0.8)
+        measured = [yh for yh, _y in size_neutralize(resid, meta, logcap)[0][YM]]
+        prod_out, missing = neutralize_size_by_ym(resid, meta, logcap)
+        prod = [yh for yh, _y in prod_out[YM]]
+        before = [yh for yh, _y in resid[YM]]
+        assert missing == 0
+        assert _spearman(measured, prod) == pytest.approx(1.0, abs=1e-12)
+        shift = sum(before) / len(before)
+        assert prod == pytest.approx([m + shift for m in measured], abs=1e-9)
+        assert sum(prod) / len(prod) == pytest.approx(shift, abs=1e-12)
+
+    def test_main_applies_it_in_both_stages_before_the_downstream(self):
+        """全月の段（リスク軸の変換の前）と共通月の段（`cparts` へ入れる前）の2か所で当てる。
+        **当て忘れても例外は出ない**（M-6 を本番と違う予測で測り、もっともらしい数字だけが残る・#815）。"""
+        src = inspect.getsource(momentum_gate.main)
+        call = "neutralize_size_by_ym(part[0], part[1], prod_logcap[cond])"
+        assert src.count(call) == 2
+        first = src.index(call)
+        assert src.index("out, part, seed_parts = ran[memo]") < first < src.index(
+            'if mode == "risk_axis":\n                    # 同じ CV の残差へ条件ごとの U 変換')
+        second = src.index(call, first + 1)
+        assert src.index("out, part = cran[memo]") < second < src.index('cparts[f"{cond}|{model}"] = part')
+        assert src.count("if m6_production_post(model, mode):") == 2
+        # 全月の段の内訳と OOF の CSV（`--fin-nan`）も後処理の後の残差を読む（memo の `ran` を直接読まない）
+        keep = src.index('full_parts[f"{cond}|{model}"] = part')
+        assert first < keep < src.index('if mode == "risk_axis":\n                    # 同じ CV の残差へ条件ごとの U 変換')
+        assert 'part = full_parts[f"{cond}|{model}"]' in src
+        assert "ran[(conds[cond], kind, model)]" not in src
+        assert "prod_logcap[cond] = log_market_cap_by_ym(" in src
+        assert "M-6 is scored after the production size neutralization (#995)" in src
+        assert '"m6_production_size_neutral": {"applied": m6_post' in src

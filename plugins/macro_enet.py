@@ -37,6 +37,9 @@ M-2（macro_gbdt・XGBoost）の**線形兄弟**。Issue #372 の候補メニュ
     `sell_ranking` の `mu_source="macro_enet"` へ供給する。#372 の昇格時は DDL を避けて
     切り出していた残タスク。既定 `mu_source` は M-2 のまま（切替は要バックテスト事後検証）。
     順位スコアで水準を持たない M-5 とは異なり、M-6 は水準を持つため統合できる。
+  - **規模の中立化（#957・#995）**: 予測から断面ごとに log(時価総額) の線形の効果を除く後処理
+    （`_SIZE_NEUTRAL`）。CV の OOF と現断面の μ̂ の両方に掛け、社ごとの補正量を内訳の行に出す。
+    採否の根拠は `_SIZE_NEUTRAL` のコメントと ADR-0050 の 2026-10-18 の追記。
 """
 import math
 import statistics
@@ -67,6 +70,11 @@ from .macro_snapshots import (
     conformal_halfwidth_for,
     get_producer_scores,
     load_data,
+    load_market_caps,
+    log_market_cap_by_ym,
+    log_market_caps_current,
+    neutralize_size,
+    neutralize_size_by_ym,
     oof_backtest,
     to_date_str,
     tradable_results,
@@ -96,6 +104,16 @@ from .model_candidates import _EN_N_ALPHAS as _N_ALPHAS
 # ので切り替えた。M-4（退役済み）と候補メニューは関数の既定（`rows`）のままで、ここに追随しない。
 # `momentum_gate` の分母と M-6 の既定の条件はこの値から取る（ゲートの「本番の構成」を書き写さない）。
 _INNER_CV = "months_purged"
+
+# 予測の後処理として、断面ごとに log(時価総額) の線形の効果を除く（#957・#995）。`μ̂' = μ̂ − b·(x − x̄)`
+# （`macro_snapshots.neutralize_size`・x のある社の平均は保つ・時価総額の無い社は補正しない）。M-6 は大型株を
+# 実際より低く置いていた（規模の最大の十分位の bias −0.069）。2026-10-18 の `momentum_gate --size-neutral`
+# （#983 の後の本番パネル・3,338 社・共通域 19 期間）で、測る前に固定した3条件（rank-IC の差が補正後 α 0.0125 で
+# 有意に正・short_side_spread の差の 95%CI が丸ごと負でない・規模の十分位の |d9−d0| が縮む）をすべて満たした
+# （rank-IC +0.0041・p=0.001・|d9−d0| 0.047 → 0.011）。M-2 は rank-IC の差が有意でなく入れない（ADR-0050 の同日の追記）。
+# **CV の OOF（評価・r3・conformal）と現断面の μ̂ の両方に掛ける**（片方だけだと、評価した予測と画面・永続化の
+# μ̂ が割れる）。`momentum_gate` は M-6 を測る軸でこの値を読み、本番と同じ後処理を当てる（書き写さない）。
+_SIZE_NEUTRAL = True
 
 
 def _final_training_rows(samples_by_ym: dict, inner_cv: str) -> tuple[list, list[int] | None]:
@@ -329,6 +347,8 @@ class MacroEnetPlugin(AnalysisPlugin):
         # 「無い」と確かめた空欄（無配・R&D の無い社）を 0 で埋める（#983・M-2 と同じ値を共有）
         fin_by_co, fin_filled = apply_fin_fill(db, fin_by_co)
         macro_cache = preload_macro(db, prices_by_co, macro_names) if macro_names else {}
+        # 規模の中立化（#995）の時価総額。CPU 計算の前に読む
+        market_caps = load_market_caps(db) if _SIZE_NEUTRAL else {}
 
         samples_by_ym, sample_meta_by_ym, current_snaps, all_feat_names, stock_ids_by_ym = build_snapshots(
             prices_by_co, fin_by_co, companies, macro_cache,
@@ -364,6 +384,13 @@ class MacroEnetPlugin(AnalysisPlugin):
         )
 
         oof_meta = build_oof_meta(stock_ids_by_ym, sample_meta_by_ym, cv_residuals.keys())
+        # 規模の中立化（#995）: OOF の予測にも本番と同じ後処理を掛ける＝評価（oof_bt）・r3・conformal を、
+        # 画面と永続化に出す μ̂ と同じ形の予測から作る。行は落とさない（r3・conformal は index で突合する）。
+        oof_without_cap = None
+        if _SIZE_NEUTRAL:
+            cv_residuals, oof_without_cap = neutralize_size_by_ym(
+                cv_residuals, oof_meta,
+                log_market_cap_by_ym(stock_ids_by_ym, fin_by_co, market_caps))
         oof_bt = oof_backtest(cv_residuals, n_quantiles=5,
                               meta_by_ym=oof_meta, rebalance_per_year=4)
 
@@ -406,6 +433,22 @@ class MacroEnetPlugin(AnalysisPlugin):
         coefs, mu_preds, final_meta, breakdown = self._fit_final_and_score(
             all_samples, current_rows, l1_ratios, return_breakdown=True,
             inner_cv=_INNER_CV, train_groups=train_groups)
+        # 規模の中立化（#995）。母集団は永続化する全社（今買えない社も含む）を1つの断面として回す。
+        # 社ごとの補正量は内訳の行（`contrib_size`）に出し、「基準＋寄与＝μ̂」を保つ。
+        size_adj = [0.0] * len(codes_ordered)
+        size_info = None
+        if _SIZE_NEUTRAL:
+            cur_logcap = log_market_caps_current(current_snaps, fin_by_co, market_caps)
+            neutral, slope, n_without = neutralize_size(
+                mu_preds, [cur_logcap.get(c) for c in codes_ordered])
+            size_adj = [a - m for a, m in zip(neutral, mu_preds)]
+            mu_preds = neutral
+            size_info = {
+                "slope":                 round(float(slope), 6),
+                "n_companies":           len(codes_ordered),
+                "n_without_cap":         n_without,
+                "oof_rows_without_cap":  oof_without_cap,
+            }
         feature_coefs = {name: round(float(c), 6)
                          for name, c in zip(model_feat_names, coefs)}
         # 内訳の列（#807）: マクロ列は同じ日付なら全社同一＝順位を動かさないので1行に合算する。
@@ -444,10 +487,13 @@ class MacroEnetPlugin(AnalysisPlugin):
                 "r3":           round(r3, 6) if r3 is not None else None,
                 "r_macro":      (round(float(prod["r_macro"]), 6)
                                  if (prod and prod.get("r_macro") is not None) else None),
-                # 予測の内訳（基準は応答の `breakdown_base`）。合計 = mu_raw（丸め誤差の範囲）
+                # 予測の内訳（基準は応答の `breakdown_base`）。基準＋contrib＋contrib_macro＋contrib_size
+                # = mu_raw（丸め誤差の範囲）
                 "contrib":       {model_feat_names[i]: round(float(contrib_mat[j, i]), 6)
                                   for i in own_idx},
                 "contrib_macro": round(float(contrib_mat[j, macro_idx].sum()), 6) if macro_idx else 0.0,
+                # 規模の中立化の補正量（#995・`_SIZE_NEUTRAL` が偽なら 0）
+                "contrib_size":  round(float(size_adj[j]), 6),
             })
         raw_items.sort(key=lambda x: x.get("mu_raw") or -1e18, reverse=True)
         r_macro_available = any(it["r_macro"] is not None for it in raw_items)
@@ -482,6 +528,8 @@ class MacroEnetPlugin(AnalysisPlugin):
             "n_train_samples":   total_samples,
             # 0 で埋めた財務の行数（列ごと・#983）。0 が続けば埋める判定の生の値が読めていない
             "fin_filled_rows":   fin_filled,
+            # 規模の中立化（#995）: 現断面の傾き・時価総額の無い社の数（補正しない）・OOF で無かった行数
+            "size_neutral":      size_info,
             "n_companies":       len(raw_items),
             # 表示だけのパラメータ（計算には使わない・画面が全社から描き直す・M-2 と同じ）
             "lambda_risk":       params["lambda_risk"],

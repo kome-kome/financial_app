@@ -331,6 +331,9 @@ def _extract_macro_enet(result: dict) -> dict:
                               if k != "coef"},
         "cv_metrics":        (result.get("cv_metrics") or {}).get("enet"),
         "oof": {k: oof.get(k) for k in _OOF_SCALAR_KEYS + _OOF_NESTED_KEYS if k in oof},
+        # 規模の中立化（#995）の傾きと、時価総額が無くて補正しなかった社・OOF の行数。
+        # 時価総額の読み込みが壊れると全社が無補正になり、例外は出ない（n_without_cap が社数に張り付く）。
+        "size_neutral":      dict(result.get("size_neutral") or {}),
     }
 
 
