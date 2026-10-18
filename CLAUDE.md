@@ -52,7 +52,7 @@
 
 | ファイル | 役割 |
 |---|---|
-| `database.py` | テーブル定義・upsert・成長率/Zスコア計算 |
+| `database.py` | テーブル定義・upsert・派生指標（成長率・Zスコア等）を都度算出する `financial_metrics` VIEW の定義 |
 | `db_egress.py` | Egress 台帳＋サーキットブレーカ（ADR-0034/0037）。**歯止めはプロセス予算と請求サイクル累計の2軸**（片方へ戻さない）。集計は `python -m scripts.egress_report`。詳細は [ARCHITECTURE.md](docs/ARCHITECTURE.md) |
 | `scripts/batch_common.py` | ローカル駆動バッチの共通骨格＝**「走らなかったことを検知する」仕組みの唯一の源**。**子の出力はログへ直結する／生の接続文字列は出さない／Σ予算＋マージン ≤ 窓／予算は締切（`FINAPP_STEP_DEADLINE_UTC`）として子へ渡し、予算の無いステップでは消す**（ADR-0054）。詳細は [SCRIPTS_REFERENCE.md](docs/SCRIPTS_REFERENCE.md#scriptsbatch_commonpy) |
 | `batch_freshness.py` | 足跡（`*_last_run`）と成果物の前進（`PRODUCERS`）を**測る**層。watchdog と `/api/morning` が共有する。**producer は watchdog の起票にだけ出す**（`collect()` / `summarize()` を触らない）。`macro_beta` は **live の行だけ**数える。**API から `scripts/check_batch_freshness.py` を import しない**（import 時に接続先を書き換える）。詳細は [ARCHITECTURE.md](docs/ARCHITECTURE.md) |

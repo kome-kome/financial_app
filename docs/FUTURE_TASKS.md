@@ -81,4 +81,4 @@ Start-Process python -ArgumentList '-c "import time; time.sleep(60)" scripts.run
 
 ## 注意事項（設計制約）
 
-変更・実装時の設計制約（次元整合性・`winsorize(p1-p99)`・Zスコア年度別計算・科学計算ライブラリ採用基準・`docs/ARCHITECTURE.md` 同時更新・Render デプロイ前提）の**正本は [CLAUDE.md](../CLAUDE.md) の「設計制約」セクション**を参照する。二重記載が乖離源になるため、本書では再掲しない（残タスクの正本＝GitHub Issues と同じ方針）。
+変更・実装時の設計制約の**正本は [CLAUDE.md](../CLAUDE.md) の「設計制約」セクション**（ドキュメントの同時更新は同書の「ドキュメント更新ルール」）を参照する。二重記載が乖離源になるため、本書では再掲しない（残タスクの正本＝GitHub Issues と同じ方針）。
