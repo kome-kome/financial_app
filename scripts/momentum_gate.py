@@ -330,16 +330,21 @@ blank_groups`（`OOF_CSV_COLUMNS`）で、`standard` は会計基準、`blank_gr
 
 ## 空欄を 0 で埋めるモード（`--fin-fill`・#950）
 
-財務の空欄のうち、書類の実物で「無い」と確かめたものだけを 0 で埋める（`fill`）か、本番どおり空欄の行を
-捨てる（`drop`・分母）かを比べる。無配の社は 1 株配当を「−」で載せ、R&D の無い社は「研究開発活動 該当事項は
-ありません」と書く（2026-10-15 に 8 社ずつ確認・#950 のコメント）。埋めるのは `rd_intensity`（`pl_rd_expenses` が
-空欄で売上 > 0）と `div_yield`（`dps` が空欄か 0 で株価 > 0）だけで、**株価が空欄の行は埋めない**（赤字・無配と
-関係の無い欠けで、0 にすると別の意味になる）。差し替えは読み込んだ財務の行の写しだけで、VIEW は変えない
-（`fill_fin_blanks`・判定の生の値は `load_fill_sources` が通期の行から引く）。`drop` 側は `fill` 側に含まれるので、
-共通域で測れるのは「埋めた行を学習に足すと財務が揃った社の予測がどう変わるか」で、広がった社の効果は raw で
-読む（`--fin-nan` と同じ形）。埋めた行が0、または `fill` 側のサンプルが増えないときは CV の前に止める
+財務の空欄のうち、書類の実物で「無い」と確かめたものだけを 0 で埋める（`fill`）か、空欄の行を捨てる（`drop`）
+かを比べる。**#983 で本番の M-2 / M-6 が埋める側になった**ので、分母は `fill`（`plugins.macro_snapshots.FIN_FILL`
+から取る）で、差は「埋めるのをやめたら」の向きに読む。無配の社は 1 株配当を「−」で載せ、R&D の無い社は
+「研究開発活動 該当事項はありません」と書く（2026-10-15 に 8 社ずつ確認・#950 のコメント）。埋めるのは
+`rd_intensity`（`pl_rd_expenses` が空欄で売上 > 0）と `div_yield`（`dps` が空欄か 0 で株価 > 0）だけで、**株価が
+空欄の行は埋めない**（赤字・無配と関係の無い欠けで、0 にすると別の意味になる）。差し替えは読み込んだ財務の行の
+写しだけで、VIEW は変えない（`fill_fin_blanks`・判定の生の値は `load_fill_sources` が通期の行から引く。どちらも
+本番の `plugins.macro_snapshots` から import する）。`drop` 側は `fill` 側に含まれるので、共通域で測れるのは
+「埋めた行を学習に足すと財務が揃った社の予測がどう変わるか」で、広がった社の効果は raw で読む（`--fin-nan` と
+同じ形）。埋めた行が0、または `fill` 側のサンプルが `drop` 側より多くないときは CV の前に止める
 （`fin_fill_reach_problems`）。日中キューの名前は `gate:fin-fill`。PER → 益利回りの置き換えは入れていない
 （`per` は分割補正係数 F を掛けた値で `stock_price` は補正しない列なので、赤字の行の E/P を作ると基準が食い違う）。
+
+**他のモードの M-2 / M-6 も埋めた財務で回る**（`Cond.fin_fill` の既定が本番の値・#983）。M-1 のパネルには
+埋めた財務を渡さない（`fin_source_key`）。#983 より前の結果とは raw の水準を比べられない。
 
 ## M-6 の内側 CV の区切り方（`Cond.inner_cv`・#971）
 
@@ -453,12 +458,15 @@ from plugins.macro_snapshots import (  # noqa: E402
     _realized_vol,
     _spearman,
     build_snapshots,
+    fill_fin_blanks,
     get_producer_scores,
+    load_fill_sources,
     oof_backtest,
     preload_macro,
     quantile_period_ok,
     use_fin_rows,
 )
+from plugins.macro_snapshots import FIN_FILL as _M2M6_FIN_FILL  # noqa: E402
 from plugins.macro_enet import _INNER_CV as _M6_INNER_CV  # noqa: E402
 from plugins.macro_gbdt import _VALID_SPLIT as _M2_VALID_SPLIT  # noqa: E402
 from plugins.macro_gbdt import _VALID_SPLIT_CHOICES, _VALID_SPLIT_DEFAULT  # noqa: E402
@@ -521,8 +529,10 @@ class Cond(NamedTuple):
     だけで行い、VIEW は変えない（`null_de_ratio`）。
 
     `fin_fill`（#950）は「無い」と確かめた空欄（無配の配当利回り・R&D の無い社の R&D 集約度）を 0 で
-    埋めるか。既定 False は本番の構成（空欄の行を捨てる）で、既存モードの測定条件はやはり動かない。
-    差し替えは読み込んだ財務の行だけで行い、VIEW は変えない（`fill_fin_blanks`）。
+    埋めるか。既定は本番の構成（`plugins.macro_snapshots.FIN_FILL`・#983 で True）から取る＝どのモードでも
+    M-2 / M-6 は本番の財務で回る。**M-1 のパネルには効かせない**（M-1 の本番は埋めない・`fin_source_key`）。
+    差し替えは読み込んだ財務の行だけで行い、VIEW は変えない（`fill_fin_blanks`）。#983 より前の
+    ゲートの結果（M-2 / M-6 の 1,820 社のパネル）とは水準を比べられない。
 
     `inner_cv`（#971）は M-6 の α・l1_ratio を選ぶ内側 CV の区切り方。既定は本番の構成
     （`macro_enet._INNER_CV`・#968 で `months_purged`）から取る＝どのモードでも M-6 は本番の区切り方で回る。
@@ -546,7 +556,7 @@ class Cond(NamedTuple):
     demean_target: bool = False
     fin_nan_ok: bool = False
     de_null_industries: tuple[str, ...] = ()
-    fin_fill: bool = False
+    fin_fill: bool = _M2M6_FIN_FILL
     inner_cv: str = _M6_INNER_CV
     valid_split: str = _M2_VALID_SPLIT
     subsample: float = _M2_SUBSAMPLE
@@ -625,17 +635,17 @@ DE_EXCLUDE_CONDS: dict[str, tuple[str, ...]] = {"keep": (), "exclude": DE_RATIO_
 DE_EXCLUDE_BASE_COND = "keep"
 DE_EXCLUDE_MODELS = ["xgb_m2", "elasticnet"]
 
-# 空欄を 0 で埋めるモード（`--fin-fill`・#950）。**基準は本番の構成（空欄の行を捨てる `drop`）**。
+# 空欄を 0 で埋めるモード（`--fin-fill`・#950）。**基準は本番の構成**で、#983 で本番が埋める側（`fill`）に
+# なった（`plugins.macro_snapshots.FIN_FILL` から取る＝書き写さない）。
 # 埋めるのは書類の実物で「無い」と確かめた空欄だけ（#950 のコメント・2026-10-15）: 無配の社は 1 株配当を
 # 「−」で載せ、R&D の無い社は「研究開発活動 該当事項はありません」と書く。**株価が空欄の行は埋めない**
 # （赤字・無配とは関係のない欠けで、0 にすると別の意味になる）。`drop` 側のパネルは `fill` 側に含まれる
 # ので、共通域で測れるのは「埋めた行を学習に足すと、財務が揃った社の予測がどう変わるか」。広がった社の
-# 予測が当たるかは raw の水準で読む（`--fin-nan` と同じ形）。
+# 予測が当たるかは raw の水準で読む（`--fin-nan` と同じ形）。分母が `fill` のときは、差は「埋めるのを
+# やめたら」の向きになる。
 FIN_FILL_CONDS: dict[str, bool] = {"drop": False, "fill": True}
-FIN_FILL_BASE_COND = "drop"
+FIN_FILL_BASE_COND = next(name for name, flag in FIN_FILL_CONDS.items() if flag == _M2M6_FIN_FILL)
 FIN_FILL_MODELS = ["xgb_m2", "elasticnet"]
-# 埋める判定に使う列（VIEW の生の値）。財務の行（`_FIN_FIELDS`）には入っていないので別に引く。
-FIN_FILL_SOURCE_FIELDS = ("dps", "stock_price", "pl_rd_expenses", "pl_revenue")
 
 # M-6 の内側 CV に空白を入れるかを比べるモード（`--inner-cv-purge`・#979）。条件名は {名前: 区切り方}。
 # `gap` は `months_purged`（#968 で本番＝分母）、`nogap` は空白を入れない `months`（#968 の前の本番）。
@@ -955,7 +965,9 @@ def base_of(conds: dict[str, Cond], default_max_features: int | None = None) -> 
     財務の空欄モードの分母も**本番の構成**（`drop`）。こちらは母集団を広げる側が本番ではないが、
     `drop` 側は `nan` 側に含まれる＝分母に置いた側が「母集団の狭い側」になる点に注意（共通域で揃える）。
     D/E の業種除外モードの分母も**本番の構成**（`keep`）。こちらは本番が母集団の広い側。
-    空欄を 0 で埋めるモードの分母も**本番の構成**（`drop`）。`--fin-nan` と同じく分母が母集団の狭い側。
+    空欄を 0 で埋めるモードの分母も**本番の構成**（#983 で `fill`・`plugins.macro_snapshots.FIN_FILL` から取る）。
+    分母は母集団の広い側になった。条件名 `drop` は `--fin-nan` の分母と同じ名前なので、`FIN_FILL_BASE_COND` を
+    `FIN_NAN_BASE_COND` より先に引く（後に置くと、`--fin-fill` の分母が黙って `drop` になる）。
     検証集合のモードの分母も**本番の構成**（`valid_` ＋ `macro_gbdt._VALID_SPLIT`）。この軸はパネルを動かさない。
     内側 CV の空白のモードの分母も**本番の構成**（`gap`＝`months_purged`・#968）。この軸もパネルを動かさない。
     行の抽出の割合のモードの分母も**本番の構成**（`subsample_` ＋ `macro_gbdt._SUBSAMPLE`・#989）。この軸もパネルを動かさない。
@@ -964,8 +976,8 @@ def base_of(conds: dict[str, Cond], default_max_features: int | None = None) -> 
     ここでは決めない。`main` はリスク軸モードでは `risk_base_cond` を使う（#808）。
     """
     for cand in (BASE_COND, MACRO_BASE_COND, INTERACTION_BASE_COND, FIN_ROWS_BASE_COND,
-                 DEMEAN_BASE_COND, RISK_BASE_COND, FIN_NAN_BASE_COND, DE_EXCLUDE_BASE_COND,
-                 FIN_FILL_BASE_COND, SIZE_NEUTRAL_BASE_COND,
+                 DEMEAN_BASE_COND, RISK_BASE_COND, FIN_FILL_BASE_COND, FIN_NAN_BASE_COND,
+                 DE_EXCLUDE_BASE_COND, SIZE_NEUTRAL_BASE_COND,
                  VALID_SPLIT_BASE_COND, INNER_CV_PURGE_BASE_COND, SUBSAMPLE_BASE_COND):
         if cand in conds:
             return cand
@@ -1070,8 +1082,10 @@ _AXIS_VERDICTS: dict[str, tuple[str, str]] = {
     "de_exclude": ("DE EXCLUDE AXIS",
                    "blanking D/E for the candidate industries did not beat keeping it"),
     # 共通域は埋める前から財務が揃っていた行だけ（drop 側 ⊂ fill 側）。広がった社の効果は raw で読む（#950）。
+    # 分母は本番（#983 で `fill`）。分母が入れ替わったので、`subsample` と同じくどちらの向きでも読める形にした。
     "fin_fill": ("FIN FILL AXIS [common domain = rows complete before filling; read raw for filled rows]",
-                 "filling no-dividend / no-R&D blanks with 0 did not beat dropping those rows"),
+                 "the other handling of no-dividend / no-R&D blanks (fill with 0 vs drop the rows) "
+                 "did not beat the production one"),
     # 分母は本番（#987 で `valid_months`）。パネルは2条件で同一で、差は M-2 の early stopping の検証集合だけ
     # （#976）。分母が入れ替わったので、`subsample` と同じくどちらの向きでも読める形にした。
     "valid_split": ("VALID SPLIT AXIS [M-2 only; same panel on both sides]",
@@ -1777,72 +1791,84 @@ def de_exclude_reach_problems(nulled_rows: int, samples: dict[str, int],
     return problems
 
 
-def load_fill_sources(db) -> dict[tuple[str, str], tuple]:
-    """埋める判定に使う生の値を {(edinet_code, period_end の ISO): FIN_FILL_SOURCE_FIELDS の順} で返す
-    （#950・読み取りのみ）。
-
-    `load_standards` と同じく通期の行で突き合わせる。`_FinRow` に列を足さないのは、本番の読み込みと
-    キャッシュの形を計測のために変えないため。
-    """
-    cols = [getattr(FinancialRecord, f) for f in FIN_FILL_SOURCE_FIELDS]
-    rows = (db.query(FinancialRecord.edinet_code, FinancialRecord.period_end, *cols)
-            .filter(FinancialRecord.period_type == "annual").all())
-    return {(r[0], _iso(r[1])): tuple(r[2:]) for r in rows if r[1]}
-
-
-def fill_fin_blanks(fin_by_co: dict, sources: dict) -> tuple[dict, dict[str, int]]:
-    """「無い」と確かめた空欄を 0 で埋めた財務の写しと、列ごとに埋めた行数を返す（#950）。
-
-    - `rd_intensity`: 空欄で、`pl_rd_expenses` が空欄かつ売上 > 0 の行（R&D の無い社）
-    - `div_yield`: 空欄で、`dps` が空欄か 0 かつ株価 > 0 の行（無配の社）
-
-    **株価が空欄の行・売上が空欄か 0 の行は埋めない**（別の理由の欠けで、0 にすると意味が変わる）。
-    **元の dict と行は書き換えない**（`drop` 側が同じ財務を読む）。突き合わせる生の値が無い行も埋めない。
-    """
-    out: dict = {}
-    n = {"rd_intensity": 0, "div_yield": 0}
-    for ec, recs in fin_by_co.items():
-        new_recs = []
-        for rec in recs:
-            src = sources.get((ec, _iso(rec.period_end)))
-            if src is not None:
-                dps, price, rd, revenue = src
-                upd = {}
-                if rec.rd_intensity is None and rd is None and revenue is not None and revenue > 0:
-                    upd["rd_intensity"] = 0.0
-                if (rec.div_yield is None and (dps is None or dps == 0)
-                        and price is not None and price > 0):
-                    upd["div_yield"] = 0.0
-                if upd:
-                    rec = rec._replace(**upd)
-                    for k in upd:
-                        n[k] += 1
-            new_recs.append(rec)
-        out[ec] = new_recs
-    return out, n
+# 「無い」空欄を 0 で埋める純関数（`fill_fin_blanks`）と判定の生の値の読み込み（`load_fill_sources`）は、
+# #983 で本番（`plugins.macro_snapshots`）へ移した。ここは import して使う（書き写さない）。
 
 
 def fin_fill_reach_problems(filled: dict[str, int], samples: dict[str, int],
                             kinds: list[str]) -> list[str]:
     """空欄を 0 で埋める切り替えが断面に届いていない理由を列挙する（#950）。空リストなら健全。
 
-    埋めた行が0なら両条件は同じ財務で組まれる。`fill` 側のサンプル数が `drop` 側より多くなければ、
-    埋めた行が断面に入っていない（他の列も空欄の行だけを埋めた、など）。どちらもエラーを出さずに
-    「差なし」だけが残る。
+    埋めた行が0なら両条件は同じ財務で組まれる。埋める側（`FIN_FILL_CONDS` が True の条件）のサンプル数が
+    埋めない側より多くなければ、埋めた行が断面に入っていない（他の列も空欄の行だけを埋めた、など）。
+    どちらもエラーを出さずに「差なし」だけが残る。分母（本番）がどちらの側でも同じ向きで確かめる（#983 で
+    本番が埋める側になった）。
     """
     problems = []
     if sum(filled.values()) <= 0:
         problems.append("0 で埋めた財務の行が0（突き合わせる生の値が読めていない可能性）")
+    fill_conds = [c for c, flag in FIN_FILL_CONDS.items() if flag]
+    drop_conds = [c for c, flag in FIN_FILL_CONDS.items() if not flag]
     for kind in kinds:
-        n_drop = samples.get(f"{FIN_FILL_BASE_COND}|{kind}", 0)
-        for cond in FIN_FILL_CONDS:
-            if cond == FIN_FILL_BASE_COND:
-                continue
-            n_fill = samples.get(f"{cond}|{kind}", 0)
-            if n_fill <= n_drop:
-                problems.append(f"{cond}|{kind}: サンプル数 {n_fill} が {FIN_FILL_BASE_COND} 側の "
-                                f"{n_drop} より多くない（埋めた行が断面に入っていない）")
+        for fc in fill_conds:
+            n_fill = samples.get(f"{fc}|{kind}", 0)
+            for dc in drop_conds:
+                n_drop = samples.get(f"{dc}|{kind}", 0)
+                if n_fill <= n_drop:
+                    problems.append(f"{fc}|{kind}: サンプル数 {n_fill} が {dc} 側の "
+                                    f"{n_drop} より多くない（埋めた行が断面に入っていない）")
     return problems
+
+
+def fin_source_key(c: Cond, kind: str) -> tuple:
+    """パネルへ渡す財務の写しの鍵 `(行の基準, D/E を空欄にする業種, 0 で埋めるか)`（#983）。
+
+    **0 で埋めるのは M-2 / M-6 の種別だけ**（`kind != "m1"`）。M-1 の本番は埋めない（`macro_risk_return` は
+    `apply_fin_fill` を通らない）ので、`Cond.fin_fill` の既定（本番の M-2 / M-6 の値）をそのまま M-1 へ効かせると、
+    M-1 を本番と別の財務で測る。D/E の空欄化と 0 埋めは別々の列に効くので、掛ける順で結果は変わらない。
+    """
+    return (c.fin_rows, c.de_null_industries, c.fin_fill and kind != "m1")
+
+
+def build_fin_sources(conds: dict[str, Cond], kinds: list[str], fins: dict[str, dict],
+                      fill_sources: dict) -> tuple[dict[tuple, dict], int, dict[str, dict[str, int]]]:
+    """パネルへ渡す財務の写しを `fin_source_key` ごとに1回だけ作る（#940・#950・#983）。
+
+    戻り値は ({鍵: 財務}, D/E を空欄にした行数, {行の基準: {列: 0 で埋めた行数}})。元の `fins` は書き換えない
+    （他の条件が同じ財務を読む）。
+
+    - D/E の業種除外（#940）: 条件が指定した業種の `de_ratio` だけを空欄にする（(行の基準, 業種) ごとに1回）
+    - 空欄を 0 で埋める（#950・#983）: M-2 / M-6 の種別だけ。#983 で本番になったので、ほぼ全モードで掛かる。
+
+    **行の基準と D/E の空欄化を保ったまま重ねる。** #983 の前は、埋めた写し（`annual` の財務から作る）が両方を
+    上書きしていた——`--fin-fill` の中だけで使う間は表に出なかったが、既定を本番の値（埋める）にすると、
+    `--fin-rows` の TTM 側と `--de-exclude` の空欄化が黙って消え、両条件が同じ財務で組まれる。
+    埋めた行数は行の基準ごとに1つ（D/E の空欄化は埋める列に触れない）。
+    """
+    srcs: dict[tuple, dict] = {}
+    de_nulled: dict[tuple, dict] = {}
+    de_nulled_rows = 0
+    filled_by_rows: dict[str, dict[str, int]] = {}
+    for c in conds.values():
+        for kind in kinds:
+            key = fin_source_key(c, kind)
+            if key in srcs:
+                continue
+            rows_src, inds, fill = key
+            src = fins[rows_src]
+            if inds:
+                if (rows_src, inds) not in de_nulled:
+                    de_nulled[(rows_src, inds)], n_null = null_de_ratio(src, inds)
+                    de_nulled_rows += n_null
+                    print(f"[de_exclude] financial rows whose de_ratio was blanked: {n_null}", flush=True)
+                src = de_nulled[(rows_src, inds)]
+            if fill:
+                src, n_fill = fill_fin_blanks(src, fill_sources)
+                if rows_src not in filled_by_rows:
+                    filled_by_rows[rows_src] = n_fill
+                    print(f"[fin_fill] rows={rows_src} financial rows filled with 0: {n_fill}", flush=True)
+            srcs[key] = src
+    return srcs, de_nulled_rows, filled_by_rows
 
 
 # ── CV だけに効く欄（M-6 の内側 CV・#971／M-2 の検証集合・#976）───────────────────
@@ -2362,7 +2388,8 @@ def main() -> None:
                          "VIEW は変えず、読み込んだ財務の行だけを差し替える。他モードと併用不可")
     ap.add_argument("--fin-fill", dest="fin_fill", action="store_true",
                     help="空欄を 0 で埋めるモード（無配の配当利回りと R&D の無い社の R&D 集約度を 0 にする "
-                         f"fill と、空欄の行を捨てる drop を共通域で比べる・#950）。モデル既定は {','.join(FIN_FILL_MODELS)}。"
+                         f"fill と、空欄の行を捨てる drop を共通域で比べる・#950。分母は本番の {FIN_FILL_BASE_COND}・#983）。"
+                         f"モデル既定は {','.join(FIN_FILL_MODELS)}。"
                          "株価が空欄の行は埋めない。VIEW は変えず、読み込んだ財務の行だけを差し替える。他モードと併用不可")
     ap.add_argument("--valid-split", dest="valid_split", action="store_true",
                     help="M-2 の early stopping の検証集合のモード（末尾の月を丸ごと取る valid_months＝本番（#987）と、"
@@ -2556,6 +2583,10 @@ def main() -> None:
         std_by_pe = load_standards(db) if mode == "fin_nan" else {}
         # 規模の中立化（#970）の時価総額。同じく CPU 計算の前に読む
         market_caps = load_market_caps(db) if mode == "size_neutral" else {}
+        # 「無い」空欄を 0 で埋める判定の生の値（#950・#983）。M-2 / M-6 を埋める条件があるときだけ、CPU 計算の前に読む
+        fill_sources = (load_fill_sources(db)
+                        if any(fin_source_key(c, MODEL_SPECS[m][2])[2]
+                               for c in conds.values() for m in models) else {})
         if mode == "fin_rows":
             if not ttm_rows or ttm_rows <= 0:
                 raise SystemExit(
@@ -2584,32 +2615,16 @@ def main() -> None:
         # 同一 `Cond` なので、畳まないと同じ構築を3回払ううえ、**μ̂ が3条件で完全一致する保証が
         # 無くなる**——わずかでもずれると軸の差と混ざる（#697 と同型）。他モードは条件ごとに
         # `Cond` が違うので、この畳み込みは1件も当たらず挙動が変わらない。
-        # D/E の業種除外モード（#940）: 条件が指定した業種の `de_ratio` だけを空欄にした財務の写しを、
-        # (行の基準, 業種) ごとに1回だけ作る。元の `fins` は書き換えない（他の条件が同じ財務を読む）。
-        de_nulled: dict[tuple, dict] = {}
-        de_nulled_rows = 0
-        # 空欄を 0 で埋めるモード（#950）: 埋めた財務の写しを1回だけ作る。元の `fins` は書き換えない。
-        filled_fins: dict | None = None
-        fin_filled: dict[str, int] = {}
-        if any(c.fin_fill for c in conds.values()):
-            filled_fins, fin_filled = fill_fin_blanks(fins[FIN_ROWS_BASE_COND], load_fill_sources(db))
-            print(f"[fin_fill] financial rows filled with 0: {fin_filled}", flush=True)
-        for c in conds.values():
-            dkey = (c.fin_rows, c.de_null_industries)
-            if c.de_null_industries and dkey not in de_nulled:
-                de_nulled[dkey], n_null = null_de_ratio(fins[c.fin_rows], c.de_null_industries)
-                de_nulled_rows += n_null
-                print(f"[de_exclude] financial rows whose de_ratio was blanked: {n_null}", flush=True)
+        # パネルへ渡す財務の写しを `fin_source_key`（行の基準, D/E を空欄にする業種, 0 で埋めるか）ごとに1回だけ
+        # 作る（`build_fin_sources`）。元の `fins` は書き換えない（他の条件が同じ財務を読む）。
+        fin_srcs, de_nulled_rows, fin_filled_by_rows = build_fin_sources(conds, kinds, fins, fill_sources)
         built: dict[tuple, tuple] = {}
         for cond, c in conds.items():
             # 鍵は CV だけに効く欄を外した `Cond`（#971）。内側 CV のモードは2条件で1枚を共有する。
             pc = panel_cond(c)
             for kind in kinds:
                 if (pc, kind) not in built:
-                    fin_src = (de_nulled[(c.fin_rows, c.de_null_industries)]
-                               if c.de_null_industries else fins[c.fin_rows])
-                    if c.fin_fill:
-                        fin_src = filled_fins
+                    fin_src = fin_srcs[fin_source_key(c, kind)]
                     built[(pc, kind)] = _build(
                         kind, args, prices_by_co, fin_src, companies,
                         macro_cache, c.use_momentum, c.momentum_window,
@@ -2705,7 +2720,9 @@ def main() -> None:
             fin_fill_samples = {key: st["samples"] for key, st in stats.items()}
             for key, n in fin_fill_samples.items():
                 print(f"[{key}] samples={n}", flush=True)
-            problems = fin_fill_reach_problems(fin_filled, fin_fill_samples, kinds)
+            # `--fin-fill` の条件はどちらも通期のみ（`build_conditions`）
+            problems = fin_fill_reach_problems(fin_filled_by_rows.get(FIN_ROWS_BASE_COND, {}),
+                                               fin_fill_samples, kinds)
             if problems:
                 raise SystemExit("中止: 空欄の 0 埋めが断面に届いていません: " + " / ".join(problems))
 
@@ -3142,7 +3159,8 @@ def main() -> None:
         # 規模の十分位ごとの {モデル: {条件: {size_d<k>: 指標}}}。他モードでは 0 / 空。
         "size_neutral": {"panel_rows_with_cap": len(logcap), "dropped_rows": size_dropped,
                          "deciles": size_deciles},
-        "fin_fill": {"filled_rows": fin_filled, "samples": fin_fill_samples},
+        # 0 で埋めた財務の行数は {行の基準: {列: 行数}}（#983 で本番になり、ほぼ全モードで埋める）。
+        "fin_fill": {"filled_rows": fin_filled_by_rows, "samples": fin_fill_samples},
         # 目的変数モードの健全性（#615）。{"条件|種別": 月平均の絶対値の最大}。他モードでは空。
         "target_month_mean": target_month_mean,
         # リスク軸モード（#709）。他モードでは None / 空。

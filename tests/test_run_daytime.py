@@ -697,7 +697,7 @@ class TestSizeNeutralGateMeasuresM2AndM6:
 
 
 class TestFinFillGateMeasuresM2AndM6:
-    """空欄を 0 で埋めるジョブ（#950）は M-2 / M-6 を、間引かずに、本番（drop）を分母に測る。"""
+    """空欄を 0 で埋めるジョブ（#950）は M-2 / M-6 を、間引かずに、本番（#983 で fill）を分母に測る。"""
 
     KEY = "gate:fin-fill"
 
@@ -714,7 +714,7 @@ class TestFinFillGateMeasuresM2AndM6:
             FIN_FILL_MODELS, base_of, bonferroni_alpha, build_conditions)
 
         conds = build_conditions(fin_fill=True)
-        assert base_of(conds) == "drop"                      # 本番の構成
+        assert base_of(conds) == "fill"                      # 本番の構成（#983）
         assert bonferroni_alpha(len(FIN_FILL_MODELS), len(conds)) == pytest.approx(0.0125)
 
     def test_the_job_measures_at_full_resolution(self):

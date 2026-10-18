@@ -60,6 +60,7 @@ from .macro_snapshots import (
     MACRO_FEATURE_OPTIONS,
     PRICE_FEATURE_OPTIONS,
     _realized_vol,
+    apply_fin_fill,
     build_oof_meta,
     build_snapshots,
     conformal_bucket_halfwidths,
@@ -185,6 +186,8 @@ class MacroEnetPlugin(AnalysisPlugin):
                 "description": (
                     "サンプル採用に必要な非欠損特徴量の最低割合。マクロ欠損は学習 fold 内の"
                     "列平均で補完する（線形モデルは NaN をネイティブ処理できないため）。"
+                    "財務特徴量が欠損した行は除外する（無配の配当利回り・R&D の無い社の R&D 集約度は"
+                    " 0 で埋めてから判定・M-2 と同じ）。"
                 ),
                 "default": 0.5,
                 "min": 0.1,
@@ -323,6 +326,8 @@ class MacroEnetPlugin(AnalysisPlugin):
             db, with_volume="px_volz" in price_features)
         if not prices_by_co:
             raise ValueError("株価週次履歴がありません。先に収集を実行してください。")
+        # 「無い」と確かめた空欄（無配・R&D の無い社）を 0 で埋める（#983・M-2 と同じ値を共有）
+        fin_by_co, fin_filled = apply_fin_fill(db, fin_by_co)
         macro_cache = preload_macro(db, prices_by_co, macro_names) if macro_names else {}
 
         samples_by_ym, sample_meta_by_ym, current_snaps, all_feat_names, stock_ids_by_ym = build_snapshots(
@@ -475,6 +480,8 @@ class MacroEnetPlugin(AnalysisPlugin):
             "cv_diagnostics":    cv_diag,
             "final_model":       final_meta,
             "n_train_samples":   total_samples,
+            # 0 で埋めた財務の行数（列ごと・#983）。0 が続けば埋める判定の生の値が読めていない
+            "fin_filled_rows":   fin_filled,
             "n_companies":       len(raw_items),
             # 表示だけのパラメータ（計算には使わない・画面が全社から描き直す・M-2 と同じ）
             "lambda_risk":       params["lambda_risk"],
