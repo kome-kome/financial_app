@@ -78,7 +78,10 @@ class TestMainWiring:
     def test_each_condition_builds_from_its_own_rows(self):
         """**渡し忘れても例外は出ない**（両条件が同じ財務で組まれ、差なしになる）。"""
         src = inspect.getsource(momentum_gate.main)
-        assert "fins[c.fin_rows]" in src
+        # 財務の写しは `build_fin_sources` が条件の行の基準から作る（#983。TTM 側が埋めた annual の財務に
+        # 置き換わらない形は tests/test_momentum_gate_fin_fill.py::TestBuildFinSources が縛る）
+        assert "src = fins[rows_src]" in inspect.getsource(momentum_gate.build_fin_sources)
+        assert "fin_src = fin_srcs[fin_source_key(c, kind)]" in src
         assert "use_fin_rows(src)" in src
         # 行の基準モードでは両方をキャッシュせずに読む（片方だけ古い世代になる事故を構造で防ぐ）
         assert 'use_cache=(mode != "fin_rows")' in src

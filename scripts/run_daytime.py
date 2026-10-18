@@ -315,8 +315,8 @@ JOBS: dict[str, Job] = {
         name="gate_fin_fill",
         argv=("{python}", "-m", "scripts.momentum_gate", "--fin-fill",
               "--stride", "1", "--allow-full-pull", "--refresh-cache"),
-        why="無配の配当利回りと R&D の無い社の R&D 集約度を 0 で埋める（fill）か、空欄の行を捨てる"
-            "（本番・drop）かを共通 (ym,ec) 域で比べる（#950）。対象は M-2 / M-6・4検定・alpha 0.0125。"
+        why="無配の配当利回りと R&D の無い社の R&D 集約度を 0 で埋める（本番・fill・#983）か、空欄の行を捨てる"
+            "（drop）かを共通 (ym,ec) 域で比べる（#950）。対象は M-2 / M-6・4検定・alpha 0.0125。"
             "株価が空欄の行は埋めない。埋めた行が0、または fill 側のサンプルが増えないときは非0で止まる。",
         # 2026-10-17 朝の実測（土曜に -Now -Force で消化・並走なし・M-2 は 5 個の種）。見積り 40.0 から差し替えた。
         # fill 側の M-2 の CV が 440.9秒（171,997 行）。

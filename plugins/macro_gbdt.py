@@ -37,6 +37,7 @@ from .macro_snapshots import (
     MACRO_FEATURE_OPTIONS,
     PRICE_FEATURE_OPTIONS,
     _realized_vol,
+    apply_fin_fill,
     load_data,
     preload_macro,
     build_snapshots,
@@ -512,7 +513,8 @@ class MacroGbdtPlugin(AnalysisPlugin):
                 "description": (
                     "サンプル採用に必要な非欠損特徴量の最低割合。マクロ欠損は NaN として保持し"
                     "（XGBoost が処理）、本下限が表示可否を制御する。薄いマクロ系列を足しても"
-                    "下限を割らなければ企業は脱落しない。財務特徴量は欠損時に常に除外。"
+                    "下限を割らなければ企業は脱落しない。財務特徴量が欠損した行は除外する"
+                    "（無配の配当利回り・R&D の無い社の R&D 集約度は 0 で埋めてから判定）。"
                 ),
                 "default": 0.5,
                 "min": 0.1,
@@ -806,6 +808,8 @@ class MacroGbdtPlugin(AnalysisPlugin):
             db, with_volume="px_volz" in price_features)
         if not prices_by_co:
             raise ValueError("株価週次履歴がありません。先に収集を実行してください。")
+        # 「無い」と確かめた空欄（無配・R&D の無い社）を 0 で埋める（#983・M-6 と同じ値を共有）
+        fin_by_co, fin_filled = apply_fin_fill(db, fin_by_co)
 
         macro_cache = preload_macro(db, prices_by_co, macro_names) if macro_names else {}
 
@@ -1094,6 +1098,8 @@ class MacroGbdtPlugin(AnalysisPlugin):
             "feature_interactions": feature_interactions,    # 上位特徴量ペアの交互作用強度
             "shap_interactions_available": shap_interactions_available,
             "n_train_samples":   total_samples,
+            # 0 で埋めた財務の行数（列ごと・#983）。0 が続けば埋める判定の生の値が読めていない
+            "fin_filled_rows":   fin_filled,
             "n_companies":       len(raw_items),
             "risk_axis":         risk_axis,
             "lambda_risk":       lambda_risk,

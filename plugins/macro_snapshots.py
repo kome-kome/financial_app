@@ -744,10 +744,11 @@ class _BoundedCache:
 # 専用ラッパー（下記）が直接 _shared_cache から引く。load_prices/load_macro_levels
 # （M-3・plugins/macro_dlm.py）と cv_by_selected_features（M-1・plugins/macro_risk_return.py）
 # は `shared_cache_get_or_compute` 経由で他モジュールから使う汎用名前空間（Issue #304）。
+# fin_fill は M-2 / M-6 の空欄を 0 で埋めた財務の写し（`apply_fin_fill`・#983）。
 _CACHE_NAMESPACES = (
     "load_data", "preload_macro", "build_snapshots",
     "load_prices", "load_macro_levels",
-    "cv_by_selected_features",
+    "cv_by_selected_features", "fin_fill",
 )
 
 
@@ -1020,6 +1021,93 @@ def _load_data_impl(db, with_volume: bool = True) -> tuple:
 
     companies = {c.edinet_code: c for c in db.query(Company).all()}
     return prices_by_co, fin_by_co, companies
+
+
+# ── 「無い」と確かめた財務の空欄を 0 で埋める（#950・#983）───────────────────────
+# M-2 / M-6 の本番は、書類の実物で「無い」と確かめた空欄だけを 0 で埋めてから `build_snapshots` へ渡す。
+# 無配の社は 1 株配当を「−」で載せ、R&D の無い社は「研究開発活動 該当事項はありません」と書く（2026-10-15 に
+# 8 社ずつ確認・#950）。財務特徴量が 1 つでも空欄の行は捨てる規則なので、埋めないと無配・R&D の無い社が
+# 丸ごと学習と予測から外れる（2026-10-17 の `momentum_gate --fin-fill` で 1,820 → 3,338 社・共通域で害なし）。
+#
+# **M-2 / M-6 で 1 つの値を共有する**（同じ断面・同じ fold で並べる契約・`macro_enet` の docstring）。
+# M-1（`macro_risk_return`）は母集団が別物なので埋めない。`financial_metrics` VIEW は変えない＝factor premia・
+# sector_ols など他の読み手には効かない（`PREPROCESS_VERSION` は上げない）。
+# `scripts/momentum_gate` の分母と `Cond.fin_fill` の既定はこの値から取る（ゲートの「本番の構成」を書き写さない）。
+FIN_FILL = True
+# 埋める判定に使う生の値（`financial_records` の通期の行）。`_FinRow` には入っていないので別に引く。
+# `FIN_LOAD_FIELDS` に足さないのは、検証スクリプトのキャッシュ（`_FinRow` の形）を変えないため。
+FIN_FILL_SOURCE_FIELDS = ("dps", "stock_price", "pl_rd_expenses", "pl_revenue")
+# 埋める列（`fill_fin_blanks` が数える列）。
+FIN_FILL_COLUMNS = ("rd_intensity", "div_yield")
+
+
+def load_fill_sources(db) -> dict[tuple[str, str], tuple]:
+    """埋める判定に使う生の値を {(edinet_code, period_end の ISO): FIN_FILL_SOURCE_FIELDS の順} で返す
+    （#950・読み取りのみ）。
+
+    通期の行で突き合わせる。TTM 行（`use_fin_rows("with_ttm")`）は period_end が通期と重ならないので
+    突き合わず、埋まらない（今と同じく空欄の行は外れる）。
+    """
+    from database import FinancialRecord
+    cols = [getattr(FinancialRecord, f) for f in FIN_FILL_SOURCE_FIELDS]
+    rows = (db.query(FinancialRecord.edinet_code, FinancialRecord.period_end, *cols)
+            .filter(FinancialRecord.period_type == "annual").all())
+    return {(r[0], to_date_str(r[1])): tuple(r[2:]) for r in rows if r[1]}
+
+
+def fill_fin_blanks(fin_by_co: dict, sources: dict) -> tuple[dict, dict[str, int]]:
+    """「無い」と確かめた空欄を 0 で埋めた財務の写しと、列ごとに埋めた行数を返す（#950）。
+
+    - `rd_intensity`: 空欄で、`pl_rd_expenses` が空欄かつ売上 > 0 の行（R&D の無い社）
+    - `div_yield`: 空欄で、`dps` が空欄か 0 かつ株価 > 0 の行（無配の社）
+
+    **株価が空欄の行・売上が空欄か 0 の行は埋めない**（別の理由の欠けで、0 にすると意味が変わる）。
+    **元の dict と行は書き換えない**（`load_data` のキャッシュや、埋めない条件が同じ財務を読む）。
+    突き合わせる生の値が無い行も埋めない。
+    """
+    out: dict = {}
+    n = {c: 0 for c in FIN_FILL_COLUMNS}
+    for ec, recs in fin_by_co.items():
+        new_recs = []
+        for rec in recs:
+            src = sources.get((ec, to_date_str(rec.period_end)))
+            if src is not None:
+                dps, price, rd, revenue = src
+                upd = {}
+                if rec.rd_intensity is None and rd is None and revenue is not None and revenue > 0:
+                    upd["rd_intensity"] = 0.0
+                if (rec.div_yield is None and (dps is None or dps == 0)
+                        and price is not None and price > 0):
+                    upd["div_yield"] = 0.0
+                if upd:
+                    rec = rec._replace(**upd)
+                    for k in upd:
+                        n[k] += 1
+            new_recs.append(rec)
+        out[ec] = new_recs
+    return out, n
+
+
+def apply_fin_fill(db, fin_by_co: dict) -> tuple[dict, dict[str, int]]:
+    """M-2 / M-6 の execute が `build_snapshots` へ渡す前の財務に掛ける入口（#983）。
+
+    `FIN_FILL` が False なら `fin_by_co` をそのまま返す（埋めた行数は全列 0）。
+
+    `shared_snapshot_cache()` の内側では (id(db), id(fin_by_co)) で結果を持つ。**写しを毎回作ると、id で
+    鍵を作る `build_snapshots` のキャッシュが M-2 と M-6・探索の候補ごとに外れ**、夜間と探索で断面を作り直す。
+    値には元の `fin_by_co` も入れて生かしておく（解放されると id が別の dict に再利用され、別の財務の写しが
+    返りうる）。
+    """
+    if not FIN_FILL:
+        return fin_by_co, {c: 0 for c in FIN_FILL_COLUMNS}
+
+    def _compute():
+        progress.emit("財務の空欄（無配・R&D なし）を 0 で埋める")
+        filled, n = fill_fin_blanks(fin_by_co, load_fill_sources(db))
+        return fin_by_co, filled, n
+
+    _src, filled, n = shared_cache_get_or_compute("fin_fill", (id(db), id(fin_by_co)), _compute)
+    return filled, dict(n)
 
 
 def preload_macro(db, prices_by_co: dict, macro_names: list[str] | None = None) -> dict:
