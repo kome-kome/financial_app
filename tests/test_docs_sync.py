@@ -146,10 +146,13 @@ USER_CLAUDE_HOME_ENV = "FINAPP_TEST_CLAUDE_HOME"
 # **「呼べることを人が確認した印」**であって、在否を証明できないものの掃きだめではない。
 # 2026-09-01 に、セッションが提示するスキル一覧へ実際に載っていることを確認して並べた。
 # （`/review` は一覧にも `~/.claude/{skills,commands}` にも無かったので索引から削除した）
+# `deep-research` は `anthropic-skills` プラグインの同期スキル（`~/.claude/skills/synced/<id>/` 配下で
+# 1段の走査に掛からない）。2026-10-19 にセッションのスキル一覧へ載っていることを確認して足した。
 BUILTIN_SKILLS = frozenset(
     {
         "claude-api",
         "code-review",
+        "deep-research",
         "fewer-permission-prompts",
         "init",
         "keybindings-help",

@@ -75,7 +75,7 @@ Claude Code で使える **スキル（Skill）** と **エージェント（Age
 | `/to-issues` | 計画を独立 Issue に分解 | PRD を実装単位に落とす |
 | `/triage` | Issue を選別・整理 | バックログ整備 |
 | `/handoff` | 別エージェントに引き継ぐ要約を作成 | コンテキスト圧迫時 |
-| `/deep-research` † | Web 検索で多角的に調査・レポート化 | 技術選定・最新情報 |
+| `/deep-research` | Web 検索で多角的に調査・レポート化（`anthropic-skills:deep-research`） | 技術選定・最新情報 |
 
 ### ⚙️ Claude Code 設定
 
@@ -168,7 +168,7 @@ Claude Code で使える **スキル（Skill）** と **エージェント（Age
 | PR レビュー | `/code-review` → `/security-review` |
 | 後片付け | `/tidy` → `/simplify` |
 | 設定を変えたい | `/update-config` / `/fewer-permission-prompts` |
-| 技術調査 | `/deep-research` †（未収録。`WebSearch` で代替） |
+| 技術調査 | `/deep-research` |
 | 短く話して | `/caveman`（戻すときは「normal mode」） |
 
 ---
