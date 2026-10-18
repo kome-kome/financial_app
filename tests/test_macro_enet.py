@@ -507,7 +507,7 @@ class TestBreakdown:
         res = _run(_params(use_macro=False), n_companies=8)
         base = res["breakdown_base"]
         for r in res["results"]:
-            total = base + r["contrib_macro"] + sum(r["contrib"].values())
+            total = base + r["contrib_macro"] + sum(r["contrib"].values()) + r["contrib_size"]
             assert total == pytest.approx(r["mu_raw"], abs=1e-4)
 
     def test_macro_columns_fold_into_one_row_and_zero_coefs_dropped(self):
@@ -534,12 +534,209 @@ class TestBreakdown:
             assert not (macro & set(r["contrib"]))
             assert feats[0] not in r["contrib"]
             assert r["contrib_macro"] != 0.0
-            total = res["breakdown_base"] + r["contrib_macro"] + sum(r["contrib"].values())
+            total = (res["breakdown_base"] + r["contrib_macro"] + sum(r["contrib"].values())
+                     + r["contrib_size"])
             assert total == pytest.approx(r["mu_raw"], abs=1e-4)
 
     def test_no_macro_means_zero_macro_row(self):
         for r in _run(_params(use_macro=False))["results"]:
             assert r["contrib_macro"] == 0.0
+
+
+# ── 4.6 規模の中立化（#957・#995）──────────────────────────────────────────────
+
+def _pearson(a, b) -> float:
+    return float(np.corrcoef(np.asarray(a, float), np.asarray(b, float))[0, 1])
+
+
+def _sized(n=200, slope=0.8, seed=995):
+    """予測 = slope × log 時価総額 ＋ ノイズ。補間で一致が空振りしないようノイズを入れる。"""
+    rng = np.random.default_rng(seed)
+    xs = rng.normal(10.0, 1.5, size=n)
+    preds = slope * xs + rng.normal(0.0, 0.3, size=n)
+    return preds.tolist(), xs.tolist()
+
+
+class TestNeutralizeSize:
+    """`macro_snapshots.neutralize_size`（本番の形: 傾きの分を除き、x のある行の平均は保つ）。"""
+
+    def test_removes_the_size_slope_and_keeps_the_level(self):
+        from plugins.macro_snapshots import neutralize_size
+        preds, xs = _sized()
+        assert _pearson(preds, xs) > 0.9                     # 検体は実際に規模と強く相関している
+        out, slope, n_missing = neutralize_size(preds, xs)
+        assert n_missing == 0
+        assert slope == pytest.approx(0.8, abs=0.1)
+        assert abs(_pearson(out, xs)) < 1e-10
+        assert statistics.mean(out) == pytest.approx(statistics.mean(preds), abs=1e-12)
+        # 補正なしとは違う（空振りしていない）
+        assert max(abs(a - b) for a, b in zip(out, preds)) > 0.5
+
+    def test_rows_without_cap_are_left_as_they_are(self):
+        from plugins.macro_snapshots import neutralize_size
+        preds, xs = _sized(n=40)
+        missing = {0, 7, 19}
+        xs_m = [None if j in missing else x for j, x in enumerate(xs)]
+        out, slope, n_missing = neutralize_size(preds, xs_m)
+        assert n_missing == 3
+        for j in missing:
+            assert out[j] == preds[j]
+        kept = [j for j in range(len(preds)) if j not in missing]
+        # 傾きと平均は x のある行だけで取る
+        assert abs(_pearson([out[j] for j in kept], [xs[j] for j in kept])) < 1e-10
+        assert statistics.mean(out[j] for j in kept) == pytest.approx(
+            statistics.mean(preds[j] for j in kept), abs=1e-12)
+        assert slope != 0.0
+
+    @pytest.mark.parametrize("n, same_size", [(2, False), (5, True)])
+    def test_no_usable_slope_leaves_values_unchanged(self, n, same_size):
+        """3社未満・x が全社同じなら傾きは 0 で、値は変わらない（ゲートの残差と違い平均も引かない）。"""
+        from plugins.macro_snapshots import neutralize_size
+        preds, xs = _sized(n=n)
+        if same_size:
+            xs = [9.0] * n
+        out, slope, _m = neutralize_size(preds, xs)
+        assert slope == 0.0
+        assert out == pytest.approx(preds, abs=0)
+
+    def test_no_cap_at_all_is_a_no_op(self):
+        from plugins.macro_snapshots import neutralize_size
+        out, slope, n_missing = neutralize_size([0.1, 0.2, 0.3], [None, None, None])
+        assert out == [0.1, 0.2, 0.3] and slope == 0.0 and n_missing == 3
+
+    def test_by_ym_keeps_rows_order_and_realized_values(self):
+        """OOF 版は行を落とさず並びも保つ（r3・conformal は index で突合する）。実現値は触らない。"""
+        from plugins.macro_snapshots import neutralize_size_by_ym
+        preds, xs = _sized(n=30)
+        ecs = [f"E{k:05d}" for k in range(30)]
+        resid = {"2024-06": [(p, float(k)) for k, p in enumerate(preds)]}
+        meta = {"2024-06": [(ec, "業種") for ec in ecs]}
+        logcap = {("2024-06", ec): x for ec, x in zip(ecs, xs) if ec != "E00004"}
+        out, missing = neutralize_size_by_ym(resid, meta, logcap)
+        assert missing == 1
+        assert len(out["2024-06"]) == 30
+        assert [y for _p, y in out["2024-06"]] == [float(k) for k in range(30)]
+        assert out["2024-06"][4][0] == preds[4]
+        assert out["2024-06"][5][0] != preds[5]
+
+
+class TestCurrentMarketCaps:
+    """現断面の時価総額は、その社の μ̂ が使った通期の行（社ごとの snap_date で選ぶ）から取る。"""
+
+    def test_uses_the_row_the_current_snapshot_used(self):
+        import math
+        from collections import namedtuple
+        from plugins.macro_snapshots import log_market_caps_current
+        Fin = namedtuple("Fin", ("period_end",))
+        fins = {"E1": [Fin("2025-03-31"), Fin("2026-03-31")], "E2": [Fin("2026-03-31")]}
+        caps = {("E1", "2025-03-31"): 1000.0, ("E1", "2026-03-31"): 5000.0,
+                ("E2", "2026-03-31"): 0.0}
+        current = {"E1": ([], {"snap_date": "2026-05-01"}),     # 2026-03-31 は 5/15 まで使えない
+                   "E2": ([], {"snap_date": "2026-06-01"}),     # 時価総額 0 は当てない
+                   "E3": ([], {"snap_date": "2026-06-01"})}     # 財務の行が無い
+        got = log_market_caps_current(current, fins, caps)
+        assert got == {"E1": pytest.approx(math.log(1000.0))}
+
+
+def _run_sized(params, n_companies=8, caps_for=None, size_neutral=True, spies=None):
+    """時価総額を差し替えて execute を回す。最終モデルは規模と相関した μ̂ を返す偽物に替える
+    （スモーク DB の価格は完全な線形列で、本物の μ̂ はほぼ全社同じ＝傾きが空振りする）。"""
+    db, prices_by_co, fin_by_co, companies = _M2Smoke()._make_db(n_companies=n_companies)
+    codes = sorted(fin_by_co)
+    caps_for = caps_for or {ec: float(np.exp(8.0 + k)) for k, ec in enumerate(codes)}
+    caps = {(ec, str(fin_by_co[ec][0].period_end)[:10]): mc for ec, mc in caps_for.items()}
+
+    def _fake_fit(all_samples, current_rows, l1_ratios, return_breakdown=False, **_inner_cv):
+        n, k = len(current_rows), len(current_rows[0])
+        rng = np.random.default_rng(3)
+        contrib = rng.normal(scale=0.001, size=(n, k))
+        contrib[:, 0] = -0.05 * np.arange(n)      # 大きい社ほど低い（#957 の向き・社は edinet_code 順）
+        base = 0.05
+        mu = (base + contrib.sum(axis=1)).tolist()
+        return [1.0] * k, mu, {}, {"base": base, "contrib": contrib}
+
+    with patch("plugins.macro_enet.load_data", return_value=(prices_by_co, fin_by_co, companies)), \
+         patch("plugins.macro_enet.preload_macro", return_value={}), \
+         patch("plugins.macro_enet.get_producer_scores", return_value={}), \
+         patch("plugins.macro_enet.load_market_caps", return_value=caps), \
+         patch("plugins.macro_enet._SIZE_NEUTRAL", size_neutral), \
+         patch.object(MacroEnetPlugin, "_fit_final_and_score", staticmethod(_fake_fit)), \
+         patch("database.non_tradable_codes", return_value=set()):
+        if spies:
+            with spies:
+                return plugin.execute(params, db), caps_for
+        return plugin.execute(params, db), caps_for
+
+
+class TestSizeNeutralInExecute:
+    def test_current_mu_loses_the_size_slope_and_breakdown_still_sums(self):
+        import math
+        res, caps = _run_sized(_params(use_macro=False))
+        off, _ = _run_sized(_params(use_macro=False), size_neutral=False)
+        rows = {r["edinet_code"]: r for r in res["results"]}
+        raw = {r["edinet_code"]: r["mu_raw"] for r in off["results"]}
+        xs = [math.log(caps[ec]) for ec in rows]
+        assert _pearson([raw[ec] for ec in rows], xs) < -0.9          # 補正前は規模と強く負に相関
+        assert abs(_pearson([rows[ec]["mu_raw"] for ec in rows], xs)) < 1e-3
+        # 水準（平均）は保つ・補正なしとは違う
+        assert statistics.mean(r["mu_raw"] for r in rows.values()) == pytest.approx(
+            statistics.mean(raw.values()), abs=1e-5)
+        assert max(abs(rows[ec]["mu_raw"] - raw[ec]) for ec in rows) > 0.05
+        for r in rows.values():
+            total = (res["breakdown_base"] + r["contrib_macro"] + sum(r["contrib"].values())
+                     + r["contrib_size"])
+            assert total == pytest.approx(r["mu_raw"], abs=1e-4)
+            assert r["contrib_size"] == pytest.approx(r["mu_raw"] - raw[r["edinet_code"]], abs=1e-5)
+        info = res["size_neutral"]
+        assert info["n_companies"] == 8 and info["n_without_cap"] == 0
+        assert info["slope"] < 0
+        assert off["size_neutral"] is None
+        assert all(r["contrib_size"] == 0.0 for r in off["results"])
+
+    def test_company_without_cap_is_kept_unadjusted(self):
+        caps = {f"E{k:05d}": float(np.exp(8.0 + k)) for k in range(8) if k != 3}
+        res, _ = _run_sized(_params(use_macro=False), caps_for=caps)
+        off, _ = _run_sized(_params(use_macro=False), size_neutral=False)
+        row = next(r for r in res["results"] if r["edinet_code"] == "E00003")
+        raw = next(r for r in off["results"] if r["edinet_code"] == "E00003")
+        assert row["mu_raw"] == pytest.approx(raw["mu_raw"], abs=1e-9)
+        assert row["contrib_size"] == 0.0
+        assert res["size_neutral"]["n_without_cap"] == 1
+        assert len(res["results"]) == 8                               # 社を落とさない
+
+    def test_oof_r3_and_conformal_read_the_neutralized_residuals(self):
+        """評価（oof_bt）・r3・conformal は、中立化した同じ OOF の予測から作る（片方だけだと割れる）。"""
+        from contextlib import ExitStack
+        import plugins.macro_enet as me
+
+        seen: dict = {}
+        real_neutralize, real_oof = me.neutralize_size_by_ym, me.oof_backtest
+        real_conf = me.conformal_bucket_halfwidths
+
+        def _spy_neutralize(resid, meta, logcap):
+            out = real_neutralize(resid, meta, logcap)
+            seen["neutral"] = out[0]
+            seen["raw"] = resid
+            return out
+
+        def _spy_oof(resid, **kw):
+            seen["oof_in"] = resid
+            return real_oof(resid, **kw)
+
+        def _spy_conf(resid, meta, *a, **kw):
+            seen["conf_in"] = resid
+            return real_conf(resid, meta, *a, **kw)
+
+        stack = ExitStack()
+        stack.enter_context(patch("plugins.macro_enet.neutralize_size_by_ym", _spy_neutralize))
+        stack.enter_context(patch("plugins.macro_enet.oof_backtest", _spy_oof))
+        stack.enter_context(patch("plugins.macro_enet.conformal_bucket_halfwidths", _spy_conf))
+        res, _ = _run_sized(_params(use_macro=False), spies=stack)
+        assert seen["neutral"], "OOF が空（検体が CV を1回も回していない）"
+        assert seen["oof_in"] is seen["neutral"]
+        assert seen["conf_in"] is seen["neutral"]
+        assert res["size_neutral"]["oof_rows_without_cap"] == 0
+        assert sum(len(v) for v in seen["neutral"].values()) == sum(len(v) for v in seen["raw"].values())
 
 
 # ── 5. tuning 早期 return（model_comparison 高速化）───────────────────────────

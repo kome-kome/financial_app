@@ -583,6 +583,9 @@ class TestDiagnosticsExtraction:
         assert "rank_ic" in diag["oof"]
         assert diag["final_model"]["l1_ratio_grid"] == [0.1, 0.5, 0.9]
         assert isinstance(diag["final_model"]["l1_ratio_at_grid_edge"], bool)
+        # 規模の中立化（#995）は件数と傾きだけ（社別の補正量は入れない）
+        assert set(diag["size_neutral"]) == {"slope", "n_companies", "n_without_cap",
+                                             "oof_rows_without_cap"}
 
     def test_macro_enet_drops_unlisted_oof_keys(self):
         diag = _extract_macro_enet({"oof_backtest": {"rank_ic": {"mean": 0.1}, "unlisted": 1}})

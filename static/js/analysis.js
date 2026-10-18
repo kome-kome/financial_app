@@ -2807,11 +2807,14 @@ function _enetHeaderHTML(data) {
   </div>`;
 }
 
-// 予測の内訳（行クリックで展開）。線形なので 基準 + マクロ環境 + Σ銘柄ごとの寄与 = μ̂（近似なし）。
+// 予測の内訳（行クリックで展開）。線形なので 基準 + マクロ環境 + Σ銘柄ごとの寄与 + 規模の中立化 = μ̂（近似なし）。
+// 規模の中立化（#995）は予測の後処理で、log(時価総額) の効果を除いた補正量（大型株は＋・小型株は−になりやすい）。
 function _enetBreakdownHTML(item, data) {
   if (!item.contrib) return null;
   const base = data.breakdown_base ?? 0;
   const macro = item.contrib_macro ?? 0;
+  const size = item.contrib_size ?? 0;
+  const hasSize = data.size_neutral != null;
   const entries = Object.entries(item.contrib)
     .sort((a, b) => Math.abs(b[1]) - Math.abs(a[1]))
     .map(([name, v]) => [MRR_FEAT_LABELS[name] || name, v]);
@@ -2823,13 +2826,14 @@ function _enetBreakdownHTML(item, data) {
       予測の内訳: ${esc(item.company_name||item.edinet_code)}（${esc(item.sec_code||'')}）
     </div>
     <div style="font-size:11px;color:var(--text-muted);margin-bottom:8px">
-      μ̂ = 基準 ＋ マクロ環境 ＋ 銘柄ごとの寄与（線形モデルなので近似なしで足し上がる）。基準とマクロ環境は同じ日付の社では全社同じ値で、順位を決めているのは銘柄ごとの寄与です。
+      μ̂ = 基準 ＋ マクロ環境 ＋ 銘柄ごとの寄与${hasSize ? ' ＋ 規模の中立化' : ''}（線形モデルなので近似なしで足し上がる）。基準とマクロ環境は同じ日付の社では全社同じ値で、順位を決めているのは銘柄ごとの寄与${hasSize ? 'と規模の中立化' : ''}です。${hasSize ? '規模の中立化は、μ̂ が時価総額の大小に沿って傾いている分を断面ごとに取り除く補正です（検証では大型株を実際より低く置く偏りが縮んだ・時価総額の無い社は 0）。' : ''}
     </div>
     <div style="display:grid;grid-template-columns:auto auto;gap:2px 16px;font-size:12px;margin-bottom:10px;width:max-content">
       ${row('基準（全社共通）', _rrPct(base, true))}
       ${row('マクロ環境（全社共通）', _rrPct(macro, true))}
       ${row('銘柄ごとの寄与の合計', _rrPct(own, true))}
-      ${row('合計 = μ̂', `${_rrPct(base + macro + own)}（相対 μ̂ ${_rrPct(item.mu_rel, true)}）`, true)}
+      ${hasSize ? row('規模の中立化', _rrPct(size, true)) : ''}
+      ${row('合計 = μ̂', `${_rrPct(base + macro + own + size)}（相対 μ̂ ${_rrPct(item.mu_rel, true)}）`, true)}
     </div>
     <div style="font-size:11px;color:var(--text-muted);margin-bottom:6px">銘柄ごとの寄与（正＝予測リターン↑・負＝↓・係数 0 の列は省略）</div>
     ${entries.length

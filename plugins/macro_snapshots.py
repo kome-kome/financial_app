@@ -1110,6 +1110,133 @@ def apply_fin_fill(db, fin_by_co: dict) -> tuple[dict, dict[str, int]]:
     return filled, dict(n)
 
 
+# ── 規模の中立化（#957・#995）──────────────────────────────────────────────
+# 予測から、断面ごとに log(時価総額) の線形の効果を除く後処理の部品。M-6 の本番（`macro_enet._SIZE_NEUTRAL`）と
+# `scripts/momentum_gate`（`--size-neutral` 軸と、M-6 を本番の構成で測る全軸）が共有する＝回帰の式を書き写さない。
+# M-2 には掛けない（2026-10-18 の判定で rank-IC の改善が有意でなかった・ADR-0050 の同日の追記）。
+
+def _month_end_bound(ym: str) -> str:
+    """`"2019-08"` → `"2019-08-31"`。**日付ではなく ISO 文字列の上限**として使う。
+
+    `_realized_vol` の絞り込みや `_find_applicable_fin` は文字列比較なので、月の実日数を
+    知らなくても「その月までの全行」を取れる（`"2019-02-28" <= "2019-02-31"` は真）。
+    `calendar` を持ち込んで月末を計算すると、閏年の分岐が1つ増えるだけで結果は同じ。
+    """
+    return f"{ym}-31"
+
+
+def load_market_caps(db) -> dict[tuple[str, str], float]:
+    """通期の行の時価総額を {(edinet_code, period_end の ISO): 時価総額} で返す（#970・#995・読み取りのみ）。
+
+    出どころは `financial_metrics` VIEW（パネルの財務の出どころと同じ通期の行）。**`financial_records` の
+    生の値は使わない**——分割のあった年は遡及調整済みの株価 × 提出当時の株数で 1/F ずれ、VIEW が ×F で
+    直している（ADR-0055）。`_FinRow` に列を足さないのは、本番の読み込みと検証スクリプトのキャッシュの形を
+    変えないため（`load_fill_sources` と同じ）。
+    """
+    from database import FinancialMetric
+    rows = db.query(FinancialMetric.edinet_code, FinancialMetric.period_end,
+                    FinancialMetric.market_cap).all()
+    return {(ec, to_date_str(pe)): float(mc) for ec, pe, mc in rows if pe and mc is not None}
+
+
+def _log_cap_for(fin_recs: list, snap_date: str, ec: str,
+                 caps: dict[tuple[str, str], float]) -> float | None:
+    """その時点の断面が使う通期の行（`_find_applicable_fin`）の log(時価総額)。行が無い・0 以下なら None。"""
+    rec = _find_applicable_fin(fin_recs, snap_date)
+    if rec is None:
+        return None
+    mc = caps.get((ec, to_date_str(rec.period_end)))
+    return math.log(mc) if mc is not None and mc > 0 else None
+
+
+def log_market_cap_by_ym(ids_by_ym: dict, fin_by_co: dict,
+                         caps: dict[tuple[str, str], float]) -> dict[tuple[str, str], float]:
+    """各 (ym, ec) に、その月の断面が使う通期の行の log(時価総額) を当てる（#970）。
+
+    行の選び方は `build_snapshots` と同じ `_find_applicable_fin` を月末の上限（`_month_end_bound`）で
+    呼ぶ＝**「決算日 + FINANCIAL_LAG_DAYS ≦ 月末」の最新の行だけ**を使い、先を読まない。その行の
+    時価総額が無い・0 以下なら当てない。
+    """
+    out: dict[tuple[str, str], float] = {}
+    for ym, ids in ids_by_ym.items():
+        snap = _month_end_bound(ym)
+        for ec in ids:
+            x = _log_cap_for(fin_by_co.get(ec, []), snap, ec, caps)
+            if x is not None:
+                out[(ym, ec)] = x
+    return out
+
+
+def log_market_caps_current(current_snaps: dict, fin_by_co: dict,
+                            caps: dict[tuple[str, str], float]) -> dict[str, float]:
+    """現断面の各社に、その社の μ̂ が使う通期の行の log(時価総額) を当てる（#995）。
+
+    行は `build_snapshots` が現断面の特徴量に使ったのと同じ `_find_applicable_fin(…, snap_date)`
+    （社ごとの最終週次バーの日付）で選ぶ。時価総額が無い・0 以下の社は当てない。
+    """
+    out: dict[str, float] = {}
+    for ec, (_row, info) in current_snaps.items():
+        snap = to_date_str(info.get("snap_date"))
+        if not snap:
+            continue
+        x = _log_cap_for(fin_by_co.get(ec, []), snap, ec, caps)
+        if x is not None:
+            out[ec] = x
+    return out
+
+
+def size_slope(values: list[float], logcaps: list[float]) -> tuple[float, float, float]:
+    """`values` を [定数, `logcaps`] へ OLS で回帰した傾きと、x・y の平均 `(slope, mean_x, mean_y)` を返す。
+
+    3点未満か、x が全て同じなら傾きは推定できないので 0 にする。入力は x の欠けていない行だけ。
+    """
+    n = len(values)
+    mx = sum(logcaps) / n
+    my = sum(values) / n
+    sxx = sum((x - mx) ** 2 for x in logcaps)
+    slope = (sum((x - mx) * (v - my) for x, v in zip(logcaps, values)) / sxx
+             if n >= 3 and sxx > 0 else 0.0)
+    return slope, mx, my
+
+
+def neutralize_size(values: list[float], logcaps: list) -> tuple[list[float], float, int]:
+    """断面の予測から log(時価総額) の線形の効果を除く（#957・#995）。`(補正後, 傾き, x の無い行数)` を返す。
+
+    `μ̂' = μ̂ − b·(x − x̄)`。b と x̄ は x のある行だけで取る（`size_slope`）。
+      - **水準を保つ**: x のある行の平均は変わらない＝52 週先対数リターンの単位のまま（`mu_rel_center`・
+        画面の % 表示・λR との足し算の意味を変えない）。x のある行どうしの順位は `momentum_gate` の
+        `size_neutralize`（月平均を引いた残差）と同一。
+      - **x の無い行（None）は補正しない**（x = x̄ とみなすのと同値）。社を落とさない。
+    """
+    out = [float(v) for v in values]
+    idx = [j for j, x in enumerate(logcaps) if x is not None]
+    if not idx:
+        return out, 0.0, len(out)
+    slope, mx, _my = size_slope([out[j] for j in idx], [logcaps[j] for j in idx])
+    for j in idx:
+        out[j] = out[j] - slope * (logcaps[j] - mx)
+    return out, slope, len(out) - len(idx)
+
+
+def neutralize_size_by_ym(resid_by_ym: dict, meta_by_ym: dict,
+                          logcap: dict[tuple[str, str], float]) -> tuple[dict, int]:
+    """OOF の残差 {ym: [(yhat, y), ...]} の予測を、月ごとに `neutralize_size` で補正する（#995）。
+
+    `meta_by_ym` は `build_oof_meta` の形（[0] が edinet_code）、`logcap` は `log_market_cap_by_ym` の形。
+    **行は落とさず並びも保つ**（`_compute_r3_buckets`・`conformal_bucket_halfwidths` は残差と
+    `sample_meta_by_ym` を index で突合する）。実現値は触らない。戻り値は `(補正後の残差, x の無い行数の合計)`。
+    """
+    out: dict[str, list] = {}
+    missing = 0
+    for ym, pairs in resid_by_ym.items():
+        metas = meta_by_ym.get(ym, [])
+        xs = [logcap.get((ym, metas[j][0])) if j < len(metas) else None for j in range(len(pairs))]
+        adj, _slope, n_miss = neutralize_size([yh for yh, _y in pairs], xs)
+        out[ym] = [(a, y) for a, (_yh, y) in zip(adj, pairs)]
+        missing += n_miss
+    return out, missing
+
+
 def preload_macro(db, prices_by_co: dict, macro_names: list[str] | None = None) -> dict:
     """MacroData を一括プリロードしキャッシュ dict を返す。
 
