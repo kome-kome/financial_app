@@ -308,3 +308,94 @@ def monotonicity_summary(quantile_spearmans: list[float], adj_increasing: int,
         "p_value": p_value,
         "n_periods": n,
     }
+
+
+# 群逐次（途中で何度も検定する）監視の境界（#1007・#1011）。前向き監視の確証は Lan-DeMets の
+# O'Brien-Fleming 型 α 消費で、境界表は事前登録文書（docs/prereg/）へ凍結する。表の数値は
+# 書き写さず、この関数の出力と文書の表を tests/test_prereg.py が照合する。
+#
+# 参考:
+#   - Lan, K.K.G. & DeMets, D.L. (1983) "Discrete sequential boundaries for clinical trials"
+#     Biometrika 70(3), 659-663. DOI:10.1093/biomet/70.3.659
+#   - Armitage, P., McPherson, C.K. & Rowe, B.C. (1969) "Repeated significance tests on
+#     accumulating data" J. R. Statist. Soc. A 132(2), 235-244. DOI:10.2307/2343787
+OBF_GRID = 400          # 1 回の数値積分の区間数（Simpson・偶数）
+_OBF_TAIL_SD = 8.0      # 下側をこの標準偏差で打ち切る（それより下の確率は 1e-15 未満）
+
+
+def obf_spending(t: float, alpha: float) -> float:
+    """O'Brien-Fleming 型の α 消費関数 α(t) = 2 − 2Φ(z_{1−α/2} / √t)（片側の全体 α）。
+
+    t は情報割合（0 < t ≤ 1）。t=1 でちょうど alpha を使い切る。
+    """
+    if not 0.0 < t <= 1.0:
+        raise ValueError(f"情報割合 t は 0 < t <= 1: {t}")
+    nd = statistics.NormalDist()
+    return 2.0 - 2.0 * nd.cdf(nd.inv_cdf(1.0 - alpha / 2.0) / math.sqrt(t))
+
+
+def _simpson(values: list[float], h: float) -> float:
+    n = len(values) - 1
+    return h / 3.0 * (values[0] + values[n] + 4.0 * sum(values[1:n:2]) + 2.0 * sum(values[2:n:2]))
+
+
+def ld_obf_boundaries(n_looks: int, alpha: float = 0.05, *, grid: int = OBF_GRID) -> list[float]:
+    """等間隔 n_looks 回の検定の片側（上側）境界 z_1..z_K を返す（情報割合 t_k = k/K）。
+
+    k 回目の検定で Z_k >= z_k なら棄却。帰無仮説の下で「k 回目までのどこかで初めて越える」確率が
+    `obf_spending(k/K, alpha)` に一致するよう、k 回目の境界を逐次に解く。S_k = Z_k √t_k は
+    独立増分を持つので、越えずに残った S_{k-1} の部分密度を数値積分で運ぶ
+    （Armitage-McPherson-Rowe の再帰）。標準ライブラリだけで計算する。
+
+    下側の検定（Z_k <= −z_k で棄却）は符号を反転してそのまま使う。
+    """
+    if isinstance(n_looks, bool) or not isinstance(n_looks, int) or n_looks < 1:
+        raise ValueError(f"n_looks は 1 以上の整数: {n_looks!r}")
+    if not 0.0 < alpha < 0.5:
+        raise ValueError(f"alpha は 0 < alpha < 0.5: {alpha}")
+    if grid < 2 or grid % 2:
+        raise ValueError(f"grid は 2 以上の偶数: {grid}")
+    nd = statistics.NormalDist()
+    sqrt2 = math.sqrt(2.0)
+    inv_sqrt2pi = 1.0 / math.sqrt(2.0 * math.pi)
+
+    ts = [k / n_looks for k in range(1, n_looks + 1)]
+    spent = [obf_spending(t, alpha) for t in ts]
+    bounds = [nd.inv_cdf(1.0 - spent[0])]
+    # 1 回目を越えずに残った S_1 の部分密度（格子は [下端, 境界] を grid 等分）
+    sd = math.sqrt(ts[0])
+    lo, hi = -_OBF_TAIL_SD * sd, bounds[0] * sd
+    h = (hi - lo) / grid
+    xs = [lo + i * h for i in range(grid + 1)]
+    dens = [inv_sqrt2pi / sd * math.exp(-0.5 * (x / sd) ** 2) for x in xs]
+
+    for k in range(1, n_looks):
+        step_sd = math.sqrt(ts[k] - ts[k - 1])
+        target = spent[k] - spent[k - 1]
+
+        def cross_prob(b: float) -> float:     # k 回目で初めて S_k >= b となる確率
+            return _simpson([d * 0.5 * math.erfc((b - x) / step_sd / sqrt2)
+                             for x, d in zip(xs, dens)], h)
+
+        # cross_prob は b について単調減少。S_k の境界 b = z √t_k を二分法で解く
+        b_lo, b_hi = hi - 10.0 * step_sd, hi + 10.0 * step_sd
+        for _ in range(100):
+            mid = 0.5 * (b_lo + b_hi)
+            if cross_prob(mid) > target:
+                b_lo = mid
+            else:
+                b_hi = mid
+        b = 0.5 * (b_lo + b_hi)
+        bounds.append(b / math.sqrt(ts[k]))
+        # 越えずに残った S_k の部分密度へ運ぶ
+        new_lo = -_OBF_TAIL_SD * math.sqrt(ts[k])
+        new_h = (b - new_lo) / grid
+        new_xs = [new_lo + i * new_h for i in range(grid + 1)]
+        coef = inv_sqrt2pi / step_sd
+        new_dens = [
+            _simpson([d * coef * math.exp(-0.5 * ((y - x) / step_sd) ** 2)
+                      for x, d in zip(xs, dens)], h)
+            for y in new_xs
+        ]
+        xs, dens, h, hi = new_xs, new_dens, new_h, b
+    return bounds

@@ -324,3 +324,54 @@ class TestSignificanceMatrixCorrection:
         assert strict["pairs"]["A|B"]["better"] is None
         loose = ms.significance_matrix({"A": a, "B": b}, alpha=0.05, correction="none")
         assert loose["pairs"]["A|B"]["significant"] is True
+
+
+class TestOBFBoundaries:
+    """Lan-DeMets の O'Brien-Fleming 型 α 消費の境界（#1007）。"""
+
+    def test_known_values_five_looks(self):
+        # 等間隔 5 回・片側 0.025（両側 0.05 と同じ水準）で広く引用される値（R の gsDesign の sfLDOF と同じ）
+        known = [4.8769, 3.3570, 2.6803, 2.2898, 2.0310]
+        assert ms.ld_obf_boundaries(5, 0.025) == pytest.approx(known, abs=5e-4)
+
+    def test_single_look_is_the_plain_one_sided_z(self):
+        assert ms.ld_obf_boundaries(1, 0.05) == pytest.approx([1.6449], abs=1e-4)
+
+    def test_spending_uses_up_alpha_at_the_end(self):
+        assert ms.obf_spending(1.0, 0.05) == pytest.approx(0.05)
+        spent = [ms.obf_spending(k / 8, 0.05) for k in range(1, 9)]
+        assert spent == sorted(spent)
+
+    def test_boundaries_decrease_and_stay_above_the_fixed_z(self):
+        b = ms.ld_obf_boundaries(8, 0.05)
+        assert all(x > y for x, y in zip(b, b[1:]))
+        assert b[-1] > 1.6449
+
+    def test_grid_refinement_does_not_move_the_table(self):
+        coarse = ms.ld_obf_boundaries(8, 0.05)
+        fine = ms.ld_obf_boundaries(8, 0.05, grid=800)
+        assert coarse == pytest.approx(fine, abs=1e-4)
+
+    def test_simulated_crossing_rate_matches_alpha(self):
+        # 独立の基準: 帰無仮説の下で経路を作り、どこかで越える割合が alpha に合う（seed 固定で決定的）
+        import math
+        import random
+        b = ms.ld_obf_boundaries(8, 0.05)
+        rng = random.Random(7)
+        n, hits = 60000, 0
+        for _ in range(n):
+            s = 0.0
+            for k in range(8):
+                s += rng.gauss(0.0, math.sqrt(1 / 8))
+                if s / math.sqrt((k + 1) / 8) >= b[k]:
+                    hits += 1
+                    break
+        assert hits / n == pytest.approx(0.05, abs=0.005)
+
+    @pytest.mark.parametrize("n_looks, alpha, grid", [
+        (0, 0.05, 400), (True, 0.05, 400), (2.0, 0.05, 400),
+        (4, 0.0, 400), (4, 0.5, 400), (4, 0.05, 401),
+    ])
+    def test_rejects_bad_arguments(self, n_looks, alpha, grid):
+        with pytest.raises(ValueError):
+            ms.ld_obf_boundaries(n_looks, alpha, grid=grid)
