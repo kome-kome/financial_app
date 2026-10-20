@@ -14,17 +14,18 @@ Render の制約と運用形態に合わせて設計すること。
 > **⚠ GitHub Actions の定時実行は #503 で全て止まった。** 生きている cron は
 > `egress-health` と、DB へ接続しない週次の `dependency-audit`（#723）の2本だけで、月次3本（`tune-hyperparameters` / `macro-beta-inference` /
 > `recommend-factor-premia`）は **#504 でファイル自体を削除した**。下表の「実行場所」は
-> **現在の駆動元**を示す。
+> **現在の駆動元**を示す。**ローカルのタスクの時刻と窓の正本は下の「バッチ暦」**で、この表には種別だけを書く
+> （時刻を2か所に書くと、片方だけ直して食い違う）。
 
 | 種別 | 処理内容 | 実行タイミング | 実行場所 |
 |---|---|---|---|
-| **自動（毎日）** | 差分収集（新規書類 + 株価更新）→ 夜間スコア更新（`sector_ols` → `regression_results`、M-6 → `macro_enet_scores`） | **毎日 JST 17:20**（窓6時間） | ローカル `run_nightly.ps1` → `scripts/run_nightly.py` |
-| **自動（毎月）** | M-2/M-3 ハイパーパラメータ探索・永続化 ＋ Fama-MacBeth ファクタープレミアム（producer）＋ VACUUM | 毎月1日 JST 01:00（窓16時間） | ローカル `run_monthly.ps1` → `scripts/run_monthly.py` |
-| **自動（毎月）** | M-1 per-stock 階層マクロβ推論・永続化（producer） | 毎月2日 JST 01:00（#579・実測 360〜419分） | ローカル `run_monthly_beta.ps1` |
-| **自動（毎月）** | M-1 ハイパーパラメータ探索・永続化 | 毎月3日 JST 01:00（#584・[ADR-0046](adr/0046-steps-that-cannot-finish-get-their-own-task.md)・実測 約752分） | ローカル `run_monthly_m1.ps1` |
-| **自動（平日）** | 重い計算をキューから**窓に収まるだけ**（`beta` / `tune:*` / `interim` / `disclosures` / `gate:*`）。短い仕事が並ぶ日は1回で複数件進む（#707・ADR-0060） | 平日 JST 08:00（窓8時間・#618） | ローカル `run_daytime.ps1` |
+| **自動（毎日）** | 差分収集（新規書類 + 株価更新）→ 夜間スコア更新（`sector_ols` → `regression_results`、M-6 → `macro_enet_scores`） | 毎日（夜間） | ローカル `run_nightly.ps1` → `scripts/run_nightly.py` |
+| **自動（毎月）** | M-2/M-3 ハイパーパラメータ探索・永続化 ＋ Fama-MacBeth ファクタープレミアム（producer）＋ VACUUM | 毎月（月初） | ローカル `run_monthly.ps1` → `scripts/run_monthly.py` |
+| **自動（毎月）** | M-1 per-stock 階層マクロβ推論・永続化（producer） | 毎月（月初・本体の翌日） | ローカル `run_monthly_beta.ps1` |
+| **自動（毎月）** | M-1 ハイパーパラメータ探索・永続化 | 毎月（月初・β推論の翌日＝その出力を入力に使う） | ローカル `run_monthly_m1.ps1` |
+| **自動（平日）** | 重い計算をキューから**窓に収まるだけ**（`beta` / `tune:*` / `interim` / `disclosures` / `gate:*`）。短い仕事が並ぶ日は1回で複数件進む（#707・ADR-0060） | 平日（日中） | ローカル `run_daytime.ps1` |
 | **手動（前倒し）** | 上記の次の回ぶんを枠を待たずに消化（休暇などで平日昼に PC を触れる日） | 随時。**タスク経由で起動＝セッション0** | ローカル `run_daytime.ps1 -Now`（並走に敏感な仕事は `-Force` が要る） |
-| **自動（毎月）** | `stock_price_daily` / `stock_price_weekly` の VACUUM FULL（index bloat 対策・#290） | 毎月1日 JST 01:00 の月次バッチの**先頭ステップ** | ローカル `run_monthly.ps1` → `_pipeline_vacuum.py` |
+| **自動（毎月）** | `stock_price_daily` / `stock_price_weekly` の VACUUM FULL（index bloat 対策・#290） | 毎月（月初）の月次バッチの**先頭ステップ** | ローカル `run_monthly.ps1` → `_pipeline_vacuum.py` |
 | **手動のみ** | 全件収集（全社 × 5年分） | workflow_dispatch で起動 | GitHub Actions `full-pipeline.yml` |
 | **手動のみ** | マクロのみ収集（為替・金利等） | workflow_dispatch で起動 | GitHub Actions `collect-macro.yml` |
 | **手動のみ** | 会社予想開示収集（J-Quants /fins/summary） | workflow_dispatch で起動 | GitHub Actions `collect-disclosures.yml` |
@@ -50,7 +51,7 @@ Render の制約と運用形態に合わせて設計すること。
 |---|---|---|---|---|
 | **17:20** | `financial_app-nightly`（`run_nightly.ps1` → `scripts/run_nightly.py`） | 毎日 | `_pipeline_incremental.py`（XBRL 差分＋マクロ＋市場データ）→ `scripts/check_macro_health.py`（マクロ鮮度ゲート・#876）→ `nightly_scores.py` | 大引 15:30・J-Quants 四本値 16:30・EDINET 受付終了 17:15 の後（#476 の確定時刻表）。`StartWhenAvailable` で停止していた日は次回起動時に追いつく。上限6時間（最悪 23:20 終了）。**窓はステップ予算へ分割**（pipeline 240分 / macro_health 10分 / scores 60分・#530・ADR-0040）＝超過は `exit=124` で起票され、後続ステップは走る。既定モデルが使うマクロ系列が古ければ `macro_health` が exit 2 で起票される（`scores` は走る） |
 | **1日 01:00** | `financial_app-monthly`（`run_monthly.ps1` → `scripts/run_monthly.py`） | 毎月 | `_pipeline_vacuum.py` → `scripts/check_heavy_imports` → `scripts/resolve_price_suffix` → `recommend_factor_premia.py` → `hyperparameter_search.py` ×2（M-3/M-2）。**macro_beta は 2日・M-1 探索は 3日の別タスク**（#579・#584） | 日次の最悪ケース（23:20）の後で、翌日の日次 17:20 までの**16時間の窓**。上限もその幅（`PT16H`）。GHA 時代の4本（vacuum / tune / macro-beta / factor-premia）の移設先（#504・#290）。**窓はステップ予算へ分割**（値の正本は `scripts/run_monthly.py` の `BUDGET_MIN`・Σ＋マージン ≤ 窓・#530・ADR-0040）。ステップを足すときは必ず `window_problem()` を通すこと。予算が無いと1ステップが窓を食い尽くし後続が**一度も起動しない**（打ち切りは failure として現れないので気づけない。#579 以前は `macro_beta` がこれを起こした） |
-| **2日 01:00** | `financial_app-monthly-beta`（`run_monthly_beta.ps1` → `scripts/run_monthly_beta.py`） | 毎月 | `scripts/check_heavy_imports` → `macro_beta_inference.py`（M-1 の入力 `macro_beta_loadings` を作る） | 窓16時間。所要が本体の予算に収まらず切り出した（#579）。**M-1 探索（3日）より前**でなければならない＝日付の順序がそのまま依存順 |
+| **2日 01:00** | `financial_app-monthly-beta`（`run_monthly_beta.ps1` → `scripts/run_monthly_beta.py`） | 毎月 | `scripts/check_heavy_imports` → `macro_beta_inference.py`（M-1 の入力 `macro_beta_loadings` を作る） | 窓16時間。所要（実測 360〜419分）が本体の予算に収まらず切り出した（#579）。**M-1 探索（3日）より前**でなければならない＝日付の順序がそのまま依存順 |
 | **3日 01:00** | `financial_app-monthly-m1`（`run_monthly_m1.ps1` → `scripts/run_monthly_m1.py`） | 毎月 | `scripts/check_heavy_imports` → `hyperparameter_search.py --model macro_risk_return` | 窓16時間。所要が本体の窓に入らず切り出した（#584・[ADR-0046](adr/0046-steps-that-cannot-finish-get-their-own-task.md)）。2日に作られた `macro_beta_loadings` を入力に使う |
 | **平日 08:00** | `financial_app-daytime`（`run_daytime.ps1` → `scripts/run_daytime.py`） | 月〜金 | 重い計算のキュー（`beta` / `tune:*` / `interim` / `disclosures` / `gate:*`）を窓に収まるだけ消化（#618・#707・ADR-0060） | 窓8時間。**走っている間は何も並走させない**（並走は MCMC の結論そのものを変える）。月次系の起動日（1〜3日は 01:00 から16時間の窓と重なる）と祝日・年末年始は、並走に敏感な仕事を取り出さない（#681・#684・`run_daytime.MONTHLY_BATCHES` / `HOLIDAYS`） |
 | **20:00** | `financial_app-watchdog`（`run_watchdog.ps1` → `scripts/check_batch_freshness.py`） | 毎日 | `app_settings` の `*_last_run` を読み、閾値超過なら Issue へ起票（既存 open があればコメント追記） | **走らなかったことを検知する唯一の役**（#515 手順3・ADR-0042）。バッチが起動前に死ぬと failure が出ないので `batch_common.notify` は発火しない。上限15分。時刻は判定に影響しない（閾値が観測時刻に依存しない導出）ので、選ぶ基準は**その時刻に PC が点いている確率**だけ |
@@ -167,9 +168,9 @@ python -m scripts.backup_restore --source storage --apply --create-schema `
 > ステップへ移したので下表にも無い。
 > 月次3本（`macro-beta-inference` / `tune-hyperparameters` /
 > `recommend-factor-premia`）は **#504 でファイルごと削除した**ので下表にも無い。
-> **現在の駆動は `scripts/run_nightly.py`（日次 JST 17:20）・`scripts/run_monthly.py`
-> （月次 毎月1日 JST 01:00）・`run_monthly_beta.ps1`（2日）・`run_monthly_m1.ps1`（3日）・
-> `run_daytime.ps1`（平日 08:00）**で、停止と代替の対応は上の「GitHub Actions（#503 で停止したもの）」が
+> **現在の駆動は `scripts/run_nightly.py`（日次）・`scripts/run_monthly.py`
+> （月次）・`run_monthly_beta.ps1`・`run_monthly_m1.ps1`（月次の別タスク）・
+> `run_daytime.ps1`（平日）**（時刻は上の「バッチ暦」）で、停止と代替の対応は上の「GitHub Actions（#503 で停止したもの）」が
 > 正本。残っているファイルは `workflow_dispatch` の口が生きているが、**GHA からはローカル正本の DB へは
 > 書けない**（書けるのは Supabase 断面だけ＝走らせると正本と分岐する）。定時（cron）で生きているのは
 > `egress-health`（毎日）と `dependency-audit`（毎週・#723）の**2本**で、`ci` / `notify-failure` はイベント駆動
@@ -287,7 +288,7 @@ PYTHONUTF8=1 "$TEMP/audit-venv/Scripts/pip-audit" --strict -r requirements.txt -
 
 ### daily-incremental の動作詳細
 
-`_pipeline_incremental.py`（**現在はローカルの夜間バッチ `scripts/run_nightly.py` が毎日 JST 17:20 に呼ぶ**。GHA の `schedule` は #503 で停止しており、下の JST 17:17 は停止時点の設定値＝起動時刻の根拠としてだけ残す）は:
+`_pipeline_incremental.py`（**現在はローカルの夜間バッチ `scripts/run_nightly.py` が毎晩呼ぶ**（時刻は「バッチ暦」）。GHA の `schedule` は #503 で停止しており、下の JST 17:17 は停止時点の設定値＝起動時刻の根拠としてだけ残す）は:
 
 > **⏰ 起動時刻の根拠（#476・2026-08-09 に JST 03:00 から移動）**
 >
@@ -327,7 +328,7 @@ M-1（`macro_risk_return`）・M-2（`macro_gbdt`）・M-3（`macro_dlm`）の�
 （`tune-hyperparameters.yml`）が回していた。現在はローカルのタスクスケジューラが回し、
 **yml は #504 で削除した**。GUI からの手動トリガーは Issue #293 で廃止済み。
 
-- **実行**: M-2/M-3 は月次本体（`run_monthly.ps1`・毎月1日 JST 01:00）の `tune:<model>`
+- **実行**: M-2/M-3 は月次本体（`run_monthly.ps1`・時刻は「バッチ暦」）の `tune:<model>`
   ステップ。M-1 は実測 約752分で本体の窓（960分）に入らないため専用タスク
   （`run_monthly_m1.ps1`・毎月3日・#584・[ADR-0046](adr/0046-steps-that-cannot-finish-get-their-own-task.md)）。
   ステップ予算は `scripts/run_monthly.py::BUDGET_MIN` が持ち、**Σ予算＋マージン ≤ 窓** を CI が照合する。
@@ -522,7 +523,7 @@ Render ダッシュボードで管理。
 - 15 分間アクセスがないとインスタンスが停止する
 - 次回アクセス時に **コールドスタート**（数秒〜数十秒）が発生
 - 自動収集は Render の外で回るため Render の常時稼働は不要:
-  - 差分収集: **ローカルの `scripts/run_nightly.py`（タスクスケジューラ・JST 17:20）**。`.github/workflows/daily-incremental.yml` の `schedule:` は #503 で恒久停止（正本がローカル PostgreSQL へ移り、動かすと Supabase だけが前進して分岐する）
+  - 差分収集: **ローカルの `scripts/run_nightly.py`（タスクスケジューラ・時刻は「バッチ暦」）**。`.github/workflows/daily-incremental.yml` の `schedule:` は #503 で恒久停止（正本がローカル PostgreSQL へ移り、動かすと Supabase だけが前進して分岐する）
   - 全件収集: `.github/workflows/full-pipeline.yml` を `workflow_dispatch` で手動起動（**起動すると Supabase へ書く**＝正本と分岐する点は同じ）
   - Render 側の `_daily_scheduler` / `_startup_catchup` および keepalive ワークフローは廃止済み
   - ユーザーが Web UI を開いたときのコールドスタートは許容する設計
@@ -653,7 +654,7 @@ python -m scripts.mirror_verify --level counts --bytes --warn-only   # 表ごと
 
 旧 `stock_price_history`（日次OHLCV全履歴）が約 359MB / 全体80% を占め、年約220MB で増加して 500MB 上限の主犯だった。**close-only の2本立て**へ移行して恒久対策とする：
 
-- **`stock_price_daily`**：直近 `DAILY_WINDOW_DAYS`（≒6か月）の日次終値のみ。収集のたびにローリング削除（trim）でサイズが頭打ち……のはずだが、DELETE ベースの trim は btree インデックス（`pk_stock_price_daily`/`ix_spd_trade_date`）を bloat させ続け、autovacuum は死領域をテーブル内で再利用するのみでファイルサイズは縮まない（**Issue #290**・実測: 2026-07-09 VACUUM FULL 直後 48MB→3日後 72MB）。**月次バッチの `vacuum` ステップ**（`_pipeline_vacuum.py`・毎月1日 JST 01:00・#504）で物理サイズを頭打ちにする（GHA の `vacuum-maintenance.yml` は 2026-08-25 に停止＝正本がローカルへ移り、断面は凍結して bloat が増えないため・#290 / #505）。チャートの日次ズーム・短期バックテスト用。**VACUUM 本体の所要は伸びている**（43〜92MB で 7.6〜10.4秒／2026-07-18〜08-01 → **79MB で 37.4秒**／2026-08-09 手動実行・79MB→49MB・DB 426MB→395MB）。`statement_timeout` に固定の上限は置かない（#471）。**時間の歯止めは起動元で違う（#868）**: 月次バッチからは親の締切（`vacuum` の予算15分）から「残り − 60秒」を `statement_timeout` に入れる＝サーバー側の VACUUM FULL も締切で打ち切られロックが外れる（予算超過の `kill_tree` が止めるのはクライアントだけ）。締切の無い手動の `vacuum-maintenance.yml` は無制限で、`timeout-minutes: 30` が止めるのはクライアントだけ。
+- **`stock_price_daily`**：直近 `DAILY_WINDOW_DAYS`（≒6か月）の日次終値のみ。収集のたびにローリング削除（trim）でサイズが頭打ち……のはずだが、DELETE ベースの trim は btree インデックス（`pk_stock_price_daily`/`ix_spd_trade_date`）を bloat させ続け、autovacuum は死領域をテーブル内で再利用するのみでファイルサイズは縮まない（**Issue #290**・実測: 2026-07-09 VACUUM FULL 直後 48MB→3日後 72MB）。**月次バッチの `vacuum` ステップ**（`_pipeline_vacuum.py`・月次本体の先頭・#504）で物理サイズを頭打ちにする（GHA の `vacuum-maintenance.yml` は 2026-08-25 に停止＝正本がローカルへ移り、断面は凍結して bloat が増えないため・#290 / #505）。チャートの日次ズーム・短期バックテスト用。**VACUUM 本体の所要は伸びている**（43〜92MB で 7.6〜10.4秒／2026-07-18〜08-01 → **79MB で 37.4秒**／2026-08-09 手動実行・79MB→49MB・DB 426MB→395MB）。`statement_timeout` に固定の上限は置かない（#471）。**時間の歯止めは起動元で違う（#868）**: 月次バッチからは親の締切（`vacuum` の予算15分）から「残り − 60秒」を `statement_timeout` に入れる＝サーバー側の VACUUM FULL も締切で打ち切られロックが外れる（予算超過の `kill_tree` が止めるのはクライアントだけ）。締切の無い手動の `vacuum-maintenance.yml` は無制限で、`timeout-minutes: 30` が止めるのはクライアントだけ。
 - **`stock_price_weekly`**：全履歴の週次集約（追記専用・trim しない）。`close_last`＋生集約 `volume_sum`/`turnover_sum`/`n_days` のみ保持し、**VWAP・相対流動性は派生**（保存しない）。チャート全期間・長期バックテスト・将来の予測モデル用。
 - 書き込みは単一チョークポイント `record_prices_batch`（daily upsert→触れた週を weekly 再集約→trim）。
 
