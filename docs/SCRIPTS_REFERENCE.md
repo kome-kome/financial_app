@@ -27,6 +27,7 @@
 | [`scripts/mirror_rehearse.py`](#scriptsmirror_rehearsepy) | ユーティリティ |
 | [`scripts/egress_report.py`](#scriptsegress_reportpy) | ユーティリティ |
 | [`scripts/_cache.py`](#scripts_cachepy) | ユーティリティ |
+| [`scripts/prereg.py`](#scriptspreregpy) | ユーティリティ |
 | [`scripts/event_study_disclosure_surprise.py`](#scriptsevent_study_disclosure_surprisepy) | 検証（実験） |
 | [`scripts/event_study_multivariate_xgboost.py`](#scriptsevent_study_multivariate_xgboostpy) | 検証（実験） |
 | [`scripts/measure_embargo_impact.py`](#scriptsmeasure_embargo_impactpy) | 検証（実験） |
@@ -138,6 +139,12 @@
 `scripts/` 検証系の共通 pickle キャッシュ（Issue #355）。本番 Supabase へのフルロード反復が Egress を枯渇させた実例への恒久対策で、同一キーを各スクリプトが共有し `--refresh-cache` で明示無効化する
 
 種別: ユーティリティ ／ 依存先: —
+
+## `scripts/prereg.py`
+
+事前登録文書（`docs/prereg/*.md`・用語は CONTEXT.md「事前登録」）の凍結と照合（#1007・親 #1001）。`python -m scripts.prereg <文書>` で本文（マーカー行より上）の sha256 を出し、`--check <sha256>` で照合する（不一致・追記節の凍結値との食い違いは終了コード 2）。計測道具は `add_arguments(parser)` で `--prereg` / `--prereg-sha` を必須にし、`stamp_from_args(args)` が返す印（本文の sha256・HEAD SHA・事前登録の Issue の URL）を出力 JSON へそのまま入れる。守ること: **sha256 は改行を LF にそろえ BOM を外してから取る**（`core.autocrlf=true` で `.gitattributes` が無いので、そろえないと手元の CRLF と CI の LF で指紋が食い違う）／**マーカー行は 1 行だけ**（0・2 行以上は失敗）／**HEAD SHA は `nightly_scores._code_version` を使い書き写さない**／**本文を変えたら追記節の凍結値も同じ PR で更新する**（`tests/test_prereg.py` の凍結ガードが落ちる。開封＝stage B の後は変えない）。前向き監視の境界表は `model_stats.ld_obf_boundaries` の出力で、文書の表との一致も同じテストが照合する
+
+種別: ユーティリティ ／ 依存先: nightly_scores.py（`_code_version`）
 
 ## `scripts/event_study_disclosure_surprise.py`
 
