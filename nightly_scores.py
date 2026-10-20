@@ -32,6 +32,9 @@ M-2（`macro_gbdt`）は載せていない。既定 mu_source ではなく、月
     `nightly_model_diagnostics` へ1モデル1行で積む。μ̂ の永続化と検証が済んだ後に書き、
     書けたかを直接クエリで確かめ、書けなければ非ゼロ終了する（μ̂ は巻き戻さない）。
     入れるのは `DIAG_EXTRACTORS` が許可したキーだけ——結果を丸ごと入れない（社別の行・社名）。
+  - **本番予測を月に1回写す**（#1005）。全モデルの後に `prediction_snapshots.snapshot_month` が、
+    当月分が無い源（全 mu_source と sector_ols の gap）だけを `prediction_snapshots` へ写す。
+    空・読めない源は非ゼロ終了として数える（μ̂ は巻き戻さない）。接続先がローカルでなければ写さない。
 """
 from __future__ import annotations
 
@@ -544,6 +547,32 @@ def failed_labels(entries: list[dict]) -> list[str]:
     return out
 
 
+def snapshot_predictions(db, code_version: str | None = None) -> dict:
+    """モデルを回した後に、当月分が無い源だけ本番予測を写す（#1005・`prediction_snapshots`）。
+
+    モデルが失敗していても、その時点の表を写す（写しは「その月に本番が出していた予測」の記録）。
+    写しの失敗は μ̂ / gap の永続化を巻き戻さず、失敗として数えるだけにする。
+    """
+    import prediction_snapshots as PS
+    from plugins.utils import PREPROCESS_VERSION
+
+    try:
+        return PS.snapshot_month(db, today=PS.jst_today(),
+                                 code_version=code_version if code_version is not None else _code_version(),
+                                 preprocess_version=PREPROCESS_VERSION)
+    except Exception as e:   # noqa: BLE001 — 表を作れない等。失敗として数え、μ̂ は巻き戻さない
+        db.rollback()
+        logger.exception("予測の写しに失敗")
+        return {"*": (PS.STATUS_ERROR, _redact(f"{type(e).__name__}: {e}"))}
+
+
+def snapshot_failed_labels(snapshot: dict) -> list[str]:
+    """非ゼロ終了の理由になる写しのラベル（空・読めない・行数が合わない源）。"""
+    import prediction_snapshots as PS
+
+    return [f"prediction_snapshots:{s}" for s in PS.failed_sources(snapshot)]
+
+
 async def _run(args: argparse.Namespace) -> None:
     from database import SessionLocal, _is_local
 
@@ -557,6 +586,7 @@ async def _run(args: argparse.Namespace) -> None:
     db = SessionLocal()
     try:
         entries = await run_models(models, db)
+        snapshot = snapshot_predictions(db)
     finally:
         db.close()
 
@@ -567,10 +597,12 @@ async def _run(args: argparse.Namespace) -> None:
                     e["verified"] or e["error"] or e["summary"] or "")
         if e.get("diagnostics_error"):
             logger.info("%-8s %-14s        診断値: %s", "FAILED", e["model"], e["diagnostics_error"])
+    for source, (status, detail) in snapshot.items():
+        logger.info("%-8s 予測の写し %-17s %s", status, source, detail)
     logger.info("総所要時間: %.1f分", (time.time() - t0) / 60)
     logger.info("=" * 60)
 
-    failed = failed_labels(entries)
+    failed = failed_labels(entries) + snapshot_failed_labels(snapshot)
     if failed:
         raise SystemExit(f"失敗したモデル: {', '.join(failed)}")
 
