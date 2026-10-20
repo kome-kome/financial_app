@@ -103,6 +103,13 @@ class TestSnapshotMonth:
         assert PS.failed_sources(result) == []
         assert stored(db) == []
 
+    def test_all_empty_values_are_an_error(self, db):
+        """社の行があるのに μ̂ が全部空＝読み方の誤り。書かずに失敗にする（#1005 の初回の M-1）。"""
+        rows = [dict(r, mu=None) for r in ROWS["macro_enet"]]
+        result = run(db, sources=("macro_enet",), reader=lambda db, s: rows)
+        assert result["macro_enet"][0] == PS.STATUS_ERROR and "全部空" in result["macro_enet"][1]
+        assert stored(db) == []
+
     def test_dry_run_context_writes_nothing_and_fails_loudly(self, db):
         """`tuning_dry_run()` の内側では書かない＝行数の照合が合わず失敗として返る（黙って成功にしない）。"""
         with database.tuning_dry_run():
@@ -125,6 +132,26 @@ class TestReadSource:
         got = {r.edinet_code: (r.mu, r.r1_prime, r.data_asof) for r in stored(db, "macro_enet")}
         assert got == {ec: (v["mu"], v["r1_prime"], "2026-10-20") for ec, v in table.items()}
 
+    def test_mu_sources_get_the_current_macro_snapshot(self, db, monkeypatch):
+        """M-1 は当日のマクロ値が無いと μ̂ を返さない。売りランキングと同じ値を渡す。"""
+        import plugins
+        import plugins.utils as U
+
+        seen = []
+
+        class FakeM1:
+            def read_producer_scores(self, db, macro_snapshot=None):
+                seen.append(macro_snapshot)
+                if macro_snapshot is None:
+                    return {"E0001": {"r_macro": 0.2}}
+                return {"E0001": {"mu": 0.07, "r_macro": 0.2, "r1_prime": 0.01}}
+
+        monkeypatch.setattr(plugins, "get_plugin", lambda name: FakeM1())
+        monkeypatch.setattr(U, "current_macro_snapshot", lambda db: {"FACTOR": 1.5})
+        rows = PS.read_source(db, "macro_risk_return")
+        assert seen == [{"FACTOR": 1.5}]
+        assert [(r["edinet_code"], r["mu"], r["r1_prime"]) for r in rows] == [("E0001", 0.07, 0.01)]
+
     def test_gap_takes_each_companys_latest_year(self, db):
         db.add_all([
             FinancialMetric(edinet_code="E0001", year=2024, period_end=date(2025, 3, 31), gap_ratio=5.0),
@@ -146,6 +173,35 @@ def test_sources_cover_every_live_mu_source():
     """写す源は永続化している全ての mu_source と sector_ols。退役した M-4 は入れない。"""
     assert set(PS.MU_SOURCES) == set(database._PRODUCER_SCORE_MODELS) - {"macro_ensemble"} | {"macro_risk_return"}
     assert PS.GAP_SOURCE in PS.SOURCES
+
+
+class TestCurrentMacroSnapshot:
+    """`plugins.utils.current_macro_snapshot`（売りランキング・買い推奨・写しが共有する）。"""
+
+    def test_selected_factors_only_and_drops_missing(self, monkeypatch):
+        import plugins.utils as U
+
+        calls = []
+        monkeypatch.setattr(database, "get_macro_beta",
+                            lambda db, with_loadings=True: ({"selected_factors": ["A", "B"]}, None))
+
+        def features(db, ref_date, names):
+            calls.append((ref_date, names))
+            return {"A": 1.0, "B": None}
+
+        monkeypatch.setattr(U, "get_macro_features", features)
+        assert U.current_macro_snapshot(None, "2026-10-21") == {"A": 1.0}
+        assert calls == [("2026-10-21", ["A", "B"])]
+
+    def test_none_without_factors_or_values(self, monkeypatch):
+        import plugins.utils as U
+
+        monkeypatch.setattr(database, "get_macro_beta", lambda db, with_loadings=True: (None, None))
+        assert U.current_macro_snapshot(None) is None
+        monkeypatch.setattr(database, "get_macro_beta",
+                            lambda db, with_loadings=True: ({"selected_factors": ["A"]}, None))
+        monkeypatch.setattr(U, "get_macro_features", lambda db, d, names: {"A": None})
+        assert U.current_macro_snapshot(None) is None
 
 
 def test_jst_today_uses_the_japanese_date():

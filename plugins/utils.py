@@ -1019,6 +1019,26 @@ def get_macro_features(
     return result
 
 
+def current_macro_snapshot(db, ref_date: str | None = None) -> dict | None:
+    """`read_producer_scores(db, macro_snapshot)` へ渡す当日のマクロ値（ADR-0004）。
+
+    共有 macro_beta の `selected_factors` の分だけを `ref_date`（既定は今日）の値で返す。M-1 の μ̂ は
+    これが無いと再構成されない（`producer_scores` が r_macro しか返さない）。他のモデルは無視する。
+    選ばれた因子が無い・値が全部欠けているときは None。読み手（`sell_ranking` / `recommend` /
+    `prediction_snapshots`）はこれ1つを使う——組み立てを写すと、1か所だけ渡し忘れても例外が出ず
+    M-1 の μ̂ だけが黙って空になる（#1005 で実際に起きた）。
+    """
+    from datetime import date as _date
+    from database import get_macro_beta
+
+    meta, _ = get_macro_beta(db, with_loadings=False)   # 因子名だけ（#482）
+    factors = (meta or {}).get("selected_factors") or []
+    if not factors:
+        return None
+    raw = get_macro_features(db, ref_date or _date.today().isoformat(), factors)
+    return {k: v for k, v in raw.items() if v is not None} or None
+
+
 def momentum_cutoffs(ref_date: str, long_months: int = 12,
                      short_months: int = 1) -> tuple[str, str]:
     """モメンタム2脚の基準日 `(short_cutoff, long_cutoff)` を返す。

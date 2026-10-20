@@ -354,15 +354,8 @@ class SellRankingPlugin(AnalysisPlugin):
         mu_scores: dict = {}
         if _producer and _producer.produced_output(db):
             try:
-                from database import get_macro_beta
-                from plugins.utils import get_macro_features
-                _meta_m1, _ = get_macro_beta(db, with_loadings=False)   # 因子名だけ（#482）
-                _sel_factors = (_meta_m1 or {}).get("selected_factors") or []
-                _macro_snap: dict | None = None
-                if _sel_factors:
-                    _raw_snap = get_macro_features(db, _dt.date.today().isoformat(), _sel_factors)
-                    _macro_snap = {k: v for k, v in _raw_snap.items() if v is not None} or None
-                mu_scores = _producer.read_producer_scores(db, _macro_snap)
+                from plugins.utils import current_macro_snapshot
+                mu_scores = _producer.read_producer_scores(db, current_macro_snapshot(db))
             except Exception:
                 pass
         mu_available = bool(mu_scores)
