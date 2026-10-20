@@ -593,6 +593,25 @@ class TestScreenEndpoint:
         assert body["count"] == 1
         assert body["results"][0]["edinet_code"] == "E00001"
 
+    def test_market_filter_reads_companies_market(self, db, make_fin, make_metric, make_company):
+        """市場は companies.market で絞る（#1015）。VIEW の market（年度の行）は常に NULL で、
+        以前はそれで絞っていたので市場を指定すると黙って 0 件になっていた。"""
+        self._setup(db, make_fin, make_metric, [
+            {"edinet_code": "E00001", "year": 2023},
+            {"edinet_code": "E00002", "year": 2023},
+        ])
+        db.add_all([make_company(edinet_code="E00001", sec_code="1001"),
+                    make_company(edinet_code="E00002", sec_code="1002")])
+        db.commit()
+        from database import Company
+        db.query(Company).filter(Company.edinet_code == "E00001").update({"market": "プライム"})
+        db.query(Company).filter(Company.edinet_code == "E00002").update({"market": "グロース"})
+        db.commit()
+        api.app.dependency_overrides[api.get_db] = lambda: db
+        r = client.post("/api/screen", json={"market": "プライム"})
+        assert r.status_code == 200
+        assert [x["edinet_code"] for x in r.json()["results"]] == ["E00001"]
+
     def test_no_match_returns_empty(self, db, make_fin, make_metric):
         self._setup(db, make_fin, make_metric, [
             {"edinet_code": "E00001", "year": 2023, "roe": 0.05},
