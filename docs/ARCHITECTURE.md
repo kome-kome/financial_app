@@ -633,48 +633,22 @@ erDiagram
 > 同じ列を読む。**銀行業・保険業の行は `de_ratio` が NULL**（借入金の区分を持たず 0＝無借金に見えるため・
 > `database.DE_RATIO_EXCLUDED_INDUSTRIES`・ADR-0067）。
 >
-> **株価由来の列はここで基準を揃える（#655・ADR-0055）**: `split_adjustment_factors` を
-> LEFT JOIN し、`per` / `pbr` / `market_cap` に `× F`、`div_yield` に `÷ F` を当てる。
-> `financial_records` の生値は「遡及調整済み株価 ÷ 提出当時の1株指標」で分子と分母の基準が
-> 食い違っており（[[バリュエーション基準の不一致]]・実測 1,948行/451社＝全 annual 行の 6.41%。
-> 分割に加え、株数の動かない登録済みの株式分配型スピンオフも F に入る・#740）、
-> **この壊れ方はエラーを出さない**——どの値も妥当な株価指標で、最新行は基準が揃うので既定の
-> 画面には出ない（例外は期末後分割の年の行で、生値では最新行でも market_cap / div_yield / nc_ratio が歪む・#753）。
-> **期末後分割の年の行は F ではなく基準の遅れで直す**（#753・ADR-0055 決定4-11）: その行は1株指標が分割後の
-> 基準なのに期末の発行済株式数（と多くの社で1株配当）が分割前のままなので、係数表の `shares_lag` を
-> `market_cap` に掛け、`dps_lag` で `div_yield` を割る（per / pbr には当てない・どの列がどの遅れを使うかの
-> 唯一の源は `corporate_actions.BASIS_LAG_COLUMN`）。`regression_results` の `predicted_market_cap` にも
-> `shares_lag` だけを掛ける（`sector_ols` が生の `market_cap` から作るので、掛けないと補正後の実績と大小が
-> 逆転する）。**VIEW を通らない `sector_ols` は読込（`_load_records`）で同じ遅れを当てる**（#758・決定4-12）:
-> 係数表を LEFT JOIN し、XBRL の期末株数に `shares_lag` を掛け（マスタ値・純資産÷BPS の経路には掛けない）、
-> `dps` を `dps_lag` で割る。`market_cap` は生のまま読む（上の `predicted_market_cap` の補正と二重にしない）。
-> `nc_ratio` / `z_nc_ratio` は VIEW 内で**補正後の** `market_cap` から計算される
-> ので別途何もしない。適用した F と遅れは `split_factor` / `split_shares_lag` / `split_dps_lag` 列として
-> 露出する（消費側が重ねて掛けてはいけない）。**`stock_price` は補正しない**ので、補正された行では
-> `per <> stock_price / pl_eps` になる（意図した非対称・[GOTCHAS.md](GOTCHAS.md) 参照）。
-> 係数表は毎晩の `_pipeline_incremental.py` の Phase 4 直後、および手動の全件実行
-> `_pipeline_gh.py` の `point_in_time=True` 版の直後で全置換される（ADR-0055 決定5。入口を2本とも
-> 揃えないと、全件実行のあとだけ係数が古いまま VIEW に残る）——**F は行の固有値ではなく
-> 「その行の年より後に起きたイベントの累積積」**なので、新しい分割1件で過去全行の値が変わる。
-> 第2経路（株数が翌年に追随する社）で**翌年の決算がまだ無い最新年**の倍率は、
-> `jquants_adj_factor_events`（J-Quants catchup が受け取った行から残す公式 `AdjFactor`・#661）の
-> イベント窓内の値から取る。作り直しはこの表を読むだけで J-Quants を叩かず、表に値が無ければ
-> そのイベントは採らない（ADR-0055 決定4-5）。
-> 第2経路の存在の確認（交差検証）は2通りある。`pl_eps` 比が `bs_bps` 比と揃うこと（EPS 照合）と、
-> 「純資産総額 ÷ bps」で逆算した株数と発行済株式数の比の年次変化（整合度・`consistency_ratio`）が
-> bps と同じ向きに動くこと（整合度照合・`DEFAULT_CONSISTENCY_CROSSCHECK`・既定 ON・#751・ADR-0055 決定4-10）。
-> 後者は利益が大きく動いた年の期末後分割を拾うためのもので、倍率には使わず、倍率（翌年の株数・公式）と
-> 15% 以内で一致するときだけ採る。どちらで認めたかは `ShareEvent.cross_check` に残る。
-> 同じ年に期中の分割も重なった組（当年の株数も動き、整合度が倍率と一致する組）は、期中の分を別のイベント
-> （`source="in_period"`）として足し、F を「期中 × 期末後」にする（`DEFAULT_IN_PERIOD_DECOMPOSE`・既定 ON・
-> #756・ADR-0055 決定4-13）。倍率を公式から決めた組は分けない（公式の積に期中の分も入っている）。
-> 作り直しは `stock_price_weekly` から社ごとの系列の開始日と 365 日以上の空白も読み、ペアの期間の中に
-> 価格の空白がある欠損年またぎのペア（上場廃止→再上場で旧社と新社の行が隣り合ったもの）を比べない
-> （`corporate_actions.load_price_series`・#672・ADR-0055 決定4-7）。
-> 第1経路のイベントは、`jquants_adj_factor_coverage`（取り込み CLI が社単位で公式の日次バーを受け取った
-> 区間）がイベント窓を覆い、かつ窓の中に公式イベントが無いときだけ採らない＝公式に分割が無いと
-> **確かめられた**偽陽性だけを外す（#668・ADR-0055 決定4-8）。区間は要求した期間ではなく受け取った
-> バーで持ち、0 本の社（J-Quants が扱わない社）は記録しないので今日までどおり採る。
+> **株価由来の列はここで基準を揃える（#655・[ADR-0055](adr/0055-valuation-basis-mismatch-is-corrected-in-the-view.md)）**:
+> `split_adjustment_factors` を LEFT JOIN し、`per` / `pbr` / `market_cap` に `× F`、`div_yield` に `÷ F` を当てる。
+> `financial_records` の生値は[[バリュエーション基準の不一致]]を抱えたまま書き換えない（F には登録済みの
+> 株式分配型スピンオフも入る・#740）。期末後分割の年の行は F ではなく基準の遅れで直し、`market_cap` に
+> `shares_lag` を掛け、`div_yield` を `dps_lag` で割る（列と遅れの対応の唯一の源は `corporate_actions.BASIS_LAG_COLUMN`・
+> #753・決定4-11）。`regression_results` の `predicted_market_cap` にも `shares_lag` だけを掛ける。VIEW を通らない
+> `sector_ols` は読込（`_load_records`）で同じ遅れを当て、`market_cap` は生のまま読む（#758・決定4-12）。
+> `nc_ratio` / `z_nc_ratio` は補正後の `market_cap` から計算される。適用した F と遅れは `split_factor` /
+> `split_shares_lag` / `split_dps_lag` 列で露出する（消費側が重ねて掛けない）。`stock_price` は補正しない（意図した非対称）。
+> 係数表は毎晩の `_pipeline_incremental.py` の Phase 4 直後と、手動の全件実行 `_pipeline_gh.py` の
+> `point_in_time=True` 版の直後で全置換される（決定5）。F は「その行の年より後に起きたイベントの累積積」なので、
+> 新しい分割1件で過去全行の値が変わる。検出（第1経路・第2経路とその交差検証・期中と期末後の分解・欠損年またぎの
+> ペアの除外・公式の不在による除外）は企業イベント台帳 `corporate_actions.py`（ADR-0062）が持ち、
+> `jquants_adj_factor_events`（最新年の倍率）・`jquants_adj_factor_coverage`（公式の日次バーを受け取った区間）・
+> `stock_price_weekly`（系列の空白）を読む。作り直しは J-Quants を叩かない。各経路の規則と理由は ADR-0055 の
+> 決定4-5・4-7・4-8・4-10・4-13、症状と実測は [GOTCHAS.md](GOTCHAS.md)「per / pbr の分割補正」。
 > **通期のみを露出（`WHERE period_type='annual'`・Issue #219② フェーズA）**: 半期(H1)等の非通期行を
 > `financial_records` に同居させても、年度単位の Zスコア（`PARTITION BY year`）・成長率 LAG
 > （`ORDER BY year, period_end`）が期間混在で壊れないよう VIEW 段でソースを通期に限定する。
@@ -813,23 +787,21 @@ Yahoo gap-fill が直近セッションを、J-Quants catchup が `today-90 〜 
 `(edinet_code, start, end, 往き比, 戻り比)` で、帯の値が書き換われば再び警告される。判定不能の帯は
 記録しない。保持窓（`DAILY_WINDOW_DAYS`）の外へ出た帯は書き込み時に掃除する。
 
-判定済みの除外の**前に**、開始日が `collector_utils.OFFICIAL_SCALE_WRITABLE_UNTIL` より後の帯を
-`exclude_unmixable_bands` で落とす（#773）。境界は「#620 の反映日 `SCALE_FILTER_SINCE`（2026-09-08）−
-当時の catchup の右端の遅れ `PRE_FILTER_CATCHUP_LAG_DAYS`（80日）」= 2026-06-20 で、#620 以降は
-`AdjC != C` の行を誰も書かないので、それより後に始まる帯は公式スケールで書かれようがない（J-Quants の値を
-日次へ渡すのは `collect_stock_price_history_jquants` の1本だけで、3つの入口がすべて選別を通る）。80日は
-過去の事実なので、今の catchup 窓を変えても動かさない。状態を持たないので、分割の波で `AdjC != C` の社が
-急増した晩も突合なしで黙る（実測: #770 の13帯のうち9帯）。ログの往復段差の行は「2026-06-20 より後に
-始まる帯 N帯を除外・判定済みの非該当 M帯を除外」をどちらも 0 でも出し、`check_nightly_collect` は前者を
-「往復段差 構造除外」の列で読む。**2026-12-21 に境界以前の行が保持窓から消え、以後この検知は構造上
-鳴らない**ので、退役を #775 で扱う。
+判定済みの除外の**前に**、開始日が `collector_utils.OFFICIAL_SCALE_WRITABLE_UNTIL`（2026-06-20）より後の帯を
+`exclude_unmixable_bands` で落とす（#773）。#620 以降は J-Quants の値を日次へ渡す唯一の経路
+（`collect_stock_price_history_jquants`）が選別を通るので、それより後に始まる帯は公式スケールで書かれようがない
+（境界の導き方と、今の catchup 窓を変えても動かさない理由は ADR-0053）。状態を持たないので、分割の波で
+`AdjC != C` の社が急増した晩も突合なしで黙る。ログの往復段差の行は「2026-06-20 より後に始まる帯 N帯を除外・
+判定済みの非該当 M帯を除外」をどちらも 0 でも出し、`check_nightly_collect` は前者を「往復段差 構造除外」の列で
+読む。境界以前の行が保持窓から消えるとこの検知は構造上鳴らなくなるので、退役を #775 で扱う（時期と事例は
+[GOTCHAS.md](GOTCHAS.md)「株価のスケール（1）」）。
 
 ### 取引では起こりえない段差を書かない（#765・ADR-0053 追記）
 
-Yahoo は TOB 後のスクイーズアウトの株式併合を split として登録し、比率倍の終値を返す
-（1909.T の 3,700 → 16,278,046,720）。上場廃止で系列が止まるので、書くと異常値が「最新株価」として
-固定される。そこで **Yahoo の株価の書き手は、DB の直前値と `SCALE_BREAK_RATIO`（100倍・東証の
-制限値幅から導いた値）以上離れた値を書かない**。J-Quants の経路には掛けない（`record_prices_batch`
+Yahoo は TOB 後のスクイーズアウトの株式併合を split として登録し、比率倍の終値を返す（事例と値の正体は
+[GOTCHAS.md](GOTCHAS.md)「株価のスケール（2）」）。上場廃止で系列が止まるので、書くと異常値が「最新株価」として
+固定される。そこで **Yahoo の株価の書き手は、DB の直前値と `SCALE_BREAK_RATIO`（100倍・導き方は ADR-0053 の追記）
+以上離れた値を書かない**。J-Quants の経路には掛けない（`record_prices_batch`
 に置くと、DB の直前値が汚れているとき公式値まで弾く）。DB の値は「書かない判断」にだけ使い、
 何を書くかは決めない。
 
@@ -840,7 +812,7 @@ Yahoo は TOB 後のスクイーズアウトの株式併合を split として�
 | `repair_price_scale_breaks`・`repair_scale_mixture`（手動） | `latest_prices` | 社ごと書かない（範囲をまとめて書き換える道具なので一部だけ書かない） |
 
 gap-fill が社ごと捨てないのは、捨てた社は最終日付が進まず毎晩同じ直近数日を取り直すから
-（数日だけ比率倍だった E02305 が、J-Quants が追いつく約80日後まで止まる）。弾いた社は
+（実例は ADR-0053 の追記）。弾いた社は
 `app_settings.yahoo_scale_rejections`（`database.KEY_YAHOO_SCALE_REJECTIONS`）に「社＋基準日」で記録し、
 **新しく起きたときだけ WARNING**（`classify_scale_rejections`）。弾いた社が無い晩は設定表に触らない。
 記録が読めない・書けないときは全社を新規として扱い、株価の収集は止めない。
