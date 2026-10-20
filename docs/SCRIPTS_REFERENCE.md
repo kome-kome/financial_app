@@ -27,6 +27,7 @@
 | [`scripts/mirror_rehearse.py`](#scriptsmirror_rehearsepy) | ユーティリティ |
 | [`scripts/egress_report.py`](#scriptsegress_reportpy) | ユーティリティ |
 | [`scripts/_cache.py`](#scripts_cachepy) | ユーティリティ |
+| [`scripts/import_index_list.py`](#scriptsimport_index_listpy) | ユーティリティ |
 | [`scripts/prereg.py`](#scriptspreregpy) | ユーティリティ |
 | [`scripts/event_study_disclosure_surprise.py`](#scriptsevent_study_disclosure_surprisepy) | 検証（実験） |
 | [`scripts/event_study_multivariate_xgboost.py`](#scriptsevent_study_multivariate_xgboostpy) | 検証（実験） |
@@ -139,6 +140,12 @@
 `scripts/` 検証系の共通 pickle キャッシュ（Issue #355）。本番 Supabase へのフルロード反復が Egress を枯渇させた実例への恒久対策で、同一キーを各スクリプトが共有し `--refresh-cache` で明示無効化する
 
 種別: ユーティリティ ／ 依存先: —
+
+## `scripts/import_index_list.py`
+
+指数イベント台帳（`index_events.py`・用語は CONTEXT.md「指数イベント台帳」・#1003・ADR-0068）の一覧を取り込む。`python -I scripts/import_index_list.py --all`（またはキーを並べる。`--root` で一覧の置き場・`--pdftotext` で実行ファイルを指定）で、`.index_lists/raw/` の JPX の一覧 PDF を `pdftotext -enc UTF-8 -table` で取り出し、`sec_code,kind` の正規化 CSV（`.index_lists/<公表>.csv`）を書く。新しい公表は、資料を置いて登録表（`index_events.REVIEWS`）へ 1 項目足し、出た sha256 を書き込んでから取り込み直す。守ること: **元資料の sha256 を先に照合する**（どの資料かを固定する）／**節ごとの通し番号の連続・件数・新規追加の市場区分を登録表と照合する**（取り出しの崩れを止める）／**正規化 CSV の sha256 が登録表と違えば書かない**（既存の CSV を壊さない）／**資料のフォルダの中から実行しない**（cwd が `--root` の中なら終了コード 2）／**一覧も CSV もコミットしない**（無断転載不可・`.gitignore`）。`python -I` でも `index_events` を読めるよう、先頭で自分のリポジトリを `sys.path` に足す。poppler 版の `pdftotext` は `-table` を持たないので失敗として止まる。実測（2026-10-21）: 3 本で 2,387 / 493 / 482 行が公表値と完全一致、所要は数秒
+
+種別: ユーティリティ ／ 依存先: index_events.py、pdftotext（Git for Windows 同梱・Xpdf 4.00）
 
 ## `scripts/prereg.py`
 
