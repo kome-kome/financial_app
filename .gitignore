@@ -62,3 +62,6 @@ build/
 # ローカル夜間バッチのログ（#503・scripts/run_nightly.py が日次ローテートで書く）
 .logs/
 .backups/
+
+# JPX の指数の一覧と、その正規化 CSV（無断転載不可・リポジトリは PUBLIC・#1003・ADR-0068）
+/.index_lists/

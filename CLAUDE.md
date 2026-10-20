@@ -60,6 +60,7 @@
 | `scripts/mirror_*.py` | ミラーの pull / sync / verify（共有基盤 `mirror_common.py`）。**pull / sync は定常運転では使わない**（`verify` はバックアップ復元先の突合用）。規則は設計制約、詳細は [SCRIPTS_REFERENCE.md](docs/SCRIPTS_REFERENCE.md#scriptsmirror_commonpy) |
 | `weekly_price_cache.py` | 週次株価の run 間差分ロードキャッシュ（規則は設計制約）。緊急停止は `FINAPP_WEEKLY_CACHE=0`。詳細は [ARCHITECTURE.md](docs/ARCHITECTURE.md) |
 | `corporate_actions.py` | 企業イベント台帳（F の検出器・登録表・TTM の分割窓・ADR-0062）。**一晩1回作り F の表と TTM へ同じものを渡す／本番から `scripts/` を import しない** |
+| `index_events.py` | 指数イベント台帳（TOPIX の移行措置・新規採用を公表日 as-of で時点再現・ADR-0068）。**F・TTM・`tradable_filters` へ流さない／一覧はリポジトリへ入れない（`.index_lists/`）** |
 | `ttm_composite.py` | TTM 行（直近12か月）の合成（ADR-0051）。夜間に `ttm_financial_records` を全置換し、`financial_metrics_with_ttm` VIEW が通期と並べる（規則は設計制約）。**純関数ブロックは database・scripts を import しない**。詳細は [ARCHITECTURE.md](docs/ARCHITECTURE.md) |
 | `sector_gap_asof.py` | 学習パネル用の**時点再現の gap_ratio**（ADR-0057）。`build_period_panel(with_gap_ratio=True)` だけが使う。**`regression_results` へ書かない／株価は `financial_records.stock_price` を読まず月末の週次終値×F／回帰の設定は `NIGHTLY_PARAMS` を借りる／ridge の α は LOO で選ぶ（KFold へ戻さない・ADR-0058）**。詳細は [ARCHITECTURE.md](docs/ARCHITECTURE.md) |
 | `sysmem.py` | 常駐メモリ／物理メモリ実測の**唯一の源**。**ctypes を書き写さない／psutil は入れない／測るのはプロセスツリーの合計**（単体 pid は静かに誤る）。詳細は [ARCHITECTURE.md](docs/ARCHITECTURE.md) |
