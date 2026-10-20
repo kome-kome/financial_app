@@ -2403,6 +2403,48 @@ def insert_nightly_model_diagnostic(db, *, run_id: str, model: str,
     return 1
 
 
+# ── 8.10 本番予測の月次の写し（#1005・親 #1001）───────────────────────────────
+# `*_scores` と `regression_results` は全置換・最新だけで、過去の予測が残らない。「予測が通用しなく
+# なった」を直接確かめる唯一の方法は、固定した予測と 52 週後の実現値を突き合わせる本当の OOS なので、
+# 月に1回その時点の予測を**写すだけ**で積む（新しい推定はしない＝ADR-0061 決定1）。
+# 書くのは `prediction_snapshots.snapshot_month`（夜間バッチの最後・源ごとに当月分が無いときだけ）。
+#
+# **追記のみ**（更新も削除もしない）。行はローカル正本だけに積む（本番の断面へは書かない）。
+
+class PredictionSnapshot(Base):
+    """予測の写し（写した日 × 源 × 社で1行・追記のみ）。"""
+    __tablename__ = "prediction_snapshots"
+    __table_args__ = (
+        PrimaryKeyConstraint("snapshot_date", "source", "edinet_code", name="pk_prediction_snapshots"),
+    )
+
+    snapshot_date      = Column(String(10), nullable=False)   # 写した日（JST・"YYYY-MM-DD"）
+    source             = Column(String(40), nullable=False)   # mu_source（プラグイン名）か "sector_ols"
+    edinet_code        = Column(String(10), nullable=False)
+    mu                 = Column(Float)     # 52週先の予測（`*_scores.mu`＝各モデルの mu_raw）。gap の行は NULL
+    r1_prime           = Column(Float)     # コンフォーマル区間半幅（持つモデルだけ）
+    gap_ratio          = Column(Float)     # 乖離率 %（sector_ols の行だけ）
+    # 予測が使ったデータの時点。μ̂ は源の代表 as-of（`get_producer_asof`）、gap はその行の決算期末。
+    # 月次で回るモデルは写した日より古い＝突き合わせる 52 週の起点はこちら。
+    data_asof          = Column(String(10))
+    code_version       = Column(String(48))   # 写した夜の作業ツリー（`nightly_scores._code_version`）
+    preprocess_version = Column(String(20))   # plugins.utils.PREPROCESS_VERSION
+    created_at         = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+
+def insert_prediction_snapshots(db, rows: list) -> int:
+    """写しをまとめて追記して commit する。戻り値は渡した行数。
+
+    `tuning_dry_run()` の内側では no-op（`insert_nightly_model_diagnostic` と同じ作法）。
+    書けたことの証明にはしない——呼び出し側が直接数えて確かめる。
+    """
+    if _tuning_dry_run.get() or not rows:
+        return 0
+    db.bulk_insert_mappings(PredictionSnapshot, rows)
+    db.commit()
+    return len(rows)
+
+
 # ── 9. 読み取りモデル: financial_metrics VIEW ──────────────────────────────
 # financial_records（ソース列）から軽い派生（比率・Zスコア・成長率）を「都度SQL算出」し、
 # regression_results を LEFT JOIN して予測値も合成する読み取り専用 VIEW。

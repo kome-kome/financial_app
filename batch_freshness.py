@@ -370,6 +370,24 @@ def _edinet_codelist_at(db):
     return _parse(_get_setting(db, KEY_EDINET_CODELIST_LAST_SUCCESS))
 
 
+def _prediction_snapshots_at(db):
+    """源ごとの最新の写しのうち**最も古いもの**（#1005）。1 つの源でも止まれば固着として現れる。
+
+    写しの無い源が 1 つでもあれば None（missing）。源の一覧は `prediction_snapshots.SOURCES`
+    から取る（書き写さない）。
+    """
+    from sqlalchemy import func, select
+    from database import PredictionSnapshot
+    from prediction_snapshots import SOURCES
+
+    latest = dict(db.execute(
+        select(PredictionSnapshot.source, func.max(PredictionSnapshot.created_at))
+        .group_by(PredictionSnapshot.source)).all())
+    if any(latest.get(s) is None for s in SOURCES):
+        return None
+    return min(latest[s] for s in SOURCES)
+
+
 def _scheduled(job: str):
     """日中バッチの暦の1行。読み手と読む場所は暦側が持つ（書き写さない・#681）。"""
     return next(s for s in run_daytime.SCHEDULE if s.job == job)
@@ -455,6 +473,18 @@ PRODUCERS: tuple[Produced, ...] = (
         task_name="financial_app-nightly",
         source="app_settings.edinet_codelist_last_success",
         read=_edinet_codelist_at,
+    ),
+    Produced(
+        # 夜間バッチの最後が、当月分の無い源だけ本番予測を写す（#1005）。月に1回しか前進しないので
+        # cadence は月の最長31日。1 晩の失敗は翌晩に取り直されるので窓は夜間バッチのもの。
+        label="本番予測の月次の写し",
+        issue_title="[ops] 本番予測の月次の写しが前進していない",
+        cadence_h=31 * 24.0,
+        window_min=run_nightly.WINDOW_MIN,
+        batch_label="夜間バッチ（当月分が無い源だけ写す）",
+        task_name="financial_app-nightly",
+        source="min over source of max(prediction_snapshots.created_at)",
+        read=_prediction_snapshots_at,
     ),
     # ── 日中バッチの暦が積む収集（#681・ADR-0056）─────────────────────────────
     # 積み忘れ・暦の故障・収集の失敗のどれでも「新しい行が入らない」として現れる。読み手は
