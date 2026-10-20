@@ -405,6 +405,81 @@ def compute_mu_z(db: Any, mu_source: str, edinet_codes: list) -> dict:
     return {ec: normalize_transform(v, mean_, sd, "zscore") for ec, v in raw.items()}
 
 
+CandidateScores = namedtuple("CandidateScores", "scored skipped_low_coverage mu_z mu_asof")
+
+
+def score_candidates(db: Any, weights: dict, *, min_coverage: float, year=None, industry=None,
+                     min_market_cap=None, mu_source=None) -> CandidateScores:
+    """買い推奨の候補を集めて**全社を採点**する（`RecommendPlugin.execute` と露出τの道具 #1006 が共有）。
+
+    `scored` は `(score, coverage, row, detail)` を点数の高い順に並べたもの（上位 N に切らない）。
+    候補の条件（各社の最新年度・`tradable_filters`・年度／業種／時価総額の絞り込み）と採点
+    （`weighted_score`）は画面と同じ1か所にある——道具の側で書き写すと、採点だけが黙ってずれる。
+    """
+    # Zスコア・gap_ratio・派生指標は financial_metrics VIEW が都度算出/合成する。
+    # z_momentum のみ VIEW 外の実行時計算（compute_momentum_z）。
+    from database import FinancialMetric, latest_year_subq, tradable_filters
+    from datetime import date
+
+    subq = latest_year_subq(db, FinancialMetric)
+    # SELECT は SELECT_COLS だけ（Issue #441）。is_active は WHERE でしか使わないので
+    # 転送しない。戻りは ORM インスタンスではなく Row タプル＝絞っていない列を後から
+    # 読むことが構造的に起きない。
+    query = (db.query(*[getattr(FinancialMetric, c) for c in SELECT_COLS])
+               .join(subq, (FinancialMetric.edinet_code == subq.c.edinet_code) &
+                           (FinancialMetric.year == subq.c.max_year))
+               # 買えない銘柄は対象外＝上場廃止（#315）と、価格が止まって12週の廃止
+               # 待ち行列に居る社（#605）。条件は tradable_filters が唯一の源で、
+               # gap_analysis / net_cash_analysis / sell_ranking と共有する。
+               .filter(*tradable_filters(db)))
+    if year:
+        query = query.filter(FinancialMetric.year == int(year))
+    if industry:
+        query = query.filter(FinancialMetric.industry == industry)
+    if min_market_cap is not None:
+        query = query.filter(FinancialMetric.market_cap >= float(min_market_cap))
+
+    records = query.all()
+
+    candidate_codes = [r.edinet_code for r in records if r.edinet_code]
+
+    momentum_z = {}
+    if "z_momentum" in weights:
+        momentum_z = compute_momentum_z(db, candidate_codes, date.today().isoformat())
+
+    # μ̂（producer スコア）。mu へ重みが無ければ producer を読まない＝既定経路のコストは 0。
+    mu_z = {}
+    mu_asof = None
+    if weights.get("mu") and mu_source:
+        mu_z = compute_mu_z(db, mu_source, candidate_codes)
+        if mu_z:
+            # μ̂ の as-of（銘柄ごとの最終週次バー基準・#417）。UI の鮮度表示と /api/morning が読む。
+            try:
+                from database import get_producer_asof
+                mu_asof = get_producer_asof(db, mu_source)
+            except Exception:
+                mu_asof = None
+
+    # VIEW 由来指標を断面内で winsorize→標準化する（Issue #509）。これを通さないと
+    # 「重み 1.0」の実効的な影響力が列間で最大 73倍違う（詳細は fit_view_metric_stats）。
+    view_stats = fit_view_metric_stats(records, weights)
+
+    # 採点は `weighted_score`（/api/backtest・昇格ゲートと共有する唯一の実体・#745）。
+    runtime = {"z_momentum": momentum_z, "mu": mu_z}
+    scored = []
+    skipped_low_coverage = 0
+    for r in records:
+        ws = weighted_score(r, weights, view_stats, runtime=runtime,
+                            min_coverage=min_coverage)
+        if ws.score is None:
+            if ws.coverage < min_coverage:
+                skipped_low_coverage += 1
+            continue
+        scored.append((ws.score, ws.coverage, r, ws.detail))
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return CandidateScores(scored, skipped_low_coverage, mu_z, mu_asof)
+
+
 class RecommendPlugin(AnalysisPlugin):
     name = "recommend"
     label = "おすすめ銘柄"
@@ -494,9 +569,7 @@ class RecommendPlugin(AnalysisPlugin):
         """
         # Zスコア・gap_ratio・派生指標は financial_metrics VIEW が都度算出/合成する。
         # z_momentum のみ VIEW 外の実行時計算（compute_momentum_z）。
-        from database import (FinancialMetric, latest_year_subq,
-                              price_asof_by_code, price_freshness, tradable_filters)
-        from datetime import date
+        from database import price_asof_by_code, price_freshness
 
         # params はパラメータ契約に従い coerce 済み。weights 未指定時は preset の重みへ。
         preset       = params["preset"]
@@ -527,61 +600,11 @@ class RecommendPlugin(AnalysisPlugin):
                     "metrics": METRICS, "results": [],
                     "mu_source": mu_source, "mu_available": False, "mu_asof": None}
 
-        subq = latest_year_subq(db, FinancialMetric)
-        # SELECT は SELECT_COLS だけ（Issue #441）。is_active は WHERE でしか使わないので
-        # 転送しない。戻りは ORM インスタンスではなく Row タプル＝絞っていない列を後から
-        # 読むことが構造的に起きない。
-        query = (db.query(*[getattr(FinancialMetric, c) for c in SELECT_COLS])
-                   .join(subq, (FinancialMetric.edinet_code == subq.c.edinet_code) &
-                               (FinancialMetric.year == subq.c.max_year))
-                   # 買えない銘柄は対象外＝上場廃止（#315）と、価格が止まって12週の廃止
-                   # 待ち行列に居る社（#605）。条件は tradable_filters が唯一の源で、
-                   # gap_analysis / net_cash_analysis / sell_ranking と共有する。
-                   .filter(*tradable_filters(db)))
-        if year:
-            query = query.filter(FinancialMetric.year == int(year))
-        if industry:
-            query = query.filter(FinancialMetric.industry == industry)
-        if min_market_cap is not None:
-            query = query.filter(FinancialMetric.market_cap >= float(min_market_cap))
-
-        records = query.all()
-
-        candidate_codes = [r.edinet_code for r in records if r.edinet_code]
-
-        momentum_z = {}
-        if "z_momentum" in weights:
-            momentum_z = compute_momentum_z(db, candidate_codes, date.today().isoformat())
-
-        # μ̂（producer スコア）。mu へ重みが無ければ producer を読まない＝既定経路のコストは 0。
-        mu_z = {}
-        mu_asof = None
-        if weights.get("mu") and mu_source:
-            mu_z = compute_mu_z(db, mu_source, candidate_codes)
-            if mu_z:
-                # μ̂ の as-of（銘柄ごとの最終週次バー基準・#417）。UI の鮮度表示と /api/morning が読む。
-                try:
-                    from database import get_producer_asof
-                    mu_asof = get_producer_asof(db, mu_source)
-                except Exception:
-                    mu_asof = None
-
-        # VIEW 由来指標を断面内で winsorize→標準化する（Issue #509）。これを通さないと
-        # 「重み 1.0」の実効的な影響力が列間で最大 73倍違う（詳細は fit_view_metric_stats）。
-        view_stats = fit_view_metric_stats(records, weights)
-
-        # 採点は `weighted_score`（/api/backtest・昇格ゲートと共有する唯一の実体・#745）。
-        runtime = {"z_momentum": momentum_z, "mu": mu_z}
-        scored = []
-        skipped_low_coverage = 0
-        for r in records:
-            ws = weighted_score(r, weights, view_stats, runtime=runtime,
-                                min_coverage=min_coverage)
-            if ws.score is None:
-                if ws.coverage < min_coverage:
-                    skipped_low_coverage += 1
-                continue
-            scored.append((ws.score, ws.coverage, r, ws.detail))
+        cand = score_candidates(db, weights, min_coverage=min_coverage, year=year,
+                                industry=industry, min_market_cap=min_market_cap,
+                                mu_source=mu_source)
+        scored, skipped_low_coverage = cand.scored, cand.skipped_low_coverage
+        mu_z, mu_asof = cand.mu_z, cand.mu_asof
 
         # 株価 as-of（Issue #416）。z_momentum も PER/PBR も株価由来なので、株価が
         # 止まっていればスコア全体が静かに古くなる。行ごとの齢を返して UI で見せる。
@@ -589,7 +612,6 @@ class RecommendPlugin(AnalysisPlugin):
         # 行ごとの as-of は画面に出る上位 top_n 社だけ引く（Issue #441）。
         price = price_freshness(db)
 
-        scored.sort(key=lambda x: x[0], reverse=True)
         top = scored[:top_n]
         asof_by_code = price_asof_by_code(
             db, [r.edinet_code for _, _, r, _ in top if r.edinet_code])

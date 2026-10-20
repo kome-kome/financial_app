@@ -256,7 +256,8 @@ def query_sites(scan_result):
 # 「その関数が現に query を呼んでいること」も見る。関数がリネーム・削除されると
 # 前者だけでは黙って通る（空振りするメタ検査になる）。
 SCOPED_SITES = {
-    "plugins/recommend.py::RecommendPlugin.execute": "FinancialMetric",
+    # #1006 で execute の候補集めを score_candidates へ切り出した（execute はこれを呼ぶだけ）
+    "plugins/recommend.py::score_candidates": "FinancialMetric",
     "plugins/macro_snapshots.py::_load_data_impl": "FinancialMetric",
     # #480 で差分ロードへ変えた週次ローダー。SQL の所有権をここに残すこと自体が担保対象
     # ——マージ層へ query を追い出すと列指定の歴史（#446/#459/#482）が検査から外れる。
