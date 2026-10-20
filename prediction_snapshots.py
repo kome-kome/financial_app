@@ -14,7 +14,9 @@
 - **源ごとに、当月分が無いときだけ書く**。定常では「月初の最初の夜間」と同じで、その夜に失敗しても
   翌晩に取り直せる。同じ月の 2 回目は書かない（追記のみ・更新も削除もしない）。
 - **空の源は書かずに失敗として返す**。`get_producer_scores` は例外を空の dict にするので、
-  空を「予測が無い月」として黙って通すと全件失敗が隠れる。
+  空を「予測が無い月」として黙って通すと全件失敗が隠れる。社の行があるのに予測の値（μ̂ / gap）が
+  全部空のときも同じ——M-1 は当日のマクロ値（`plugins.utils.current_macro_snapshot`）を渡さないと
+  r_macro しか返さない（#1005 の初回で 3,839 行が μ̂ 無しで書かれた）。
 - **行はローカル正本だけに積む**。接続先がローカルでなければ書かない（本番の断面へ写さない）。
 
 実行（今月分を手で写す。夜間バッチ `nightly_scores.py` も最後に同じ関数を呼ぶ）:
@@ -66,11 +68,14 @@ def _num(value) -> Optional[float]:
 def _read_mu(db, source: str) -> list:
     from database import get_producer_asof
     from plugins import get_plugin
+    from plugins.utils import current_macro_snapshot
 
     plugin = get_plugin(source)
     if plugin is None:
         raise ValueError(f"プラグイン '{source}' が見つからない")
-    scores = plugin.read_producer_scores(db) or {}
+    # 当日のマクロ値を渡す（売りランキング・買い推奨と同じ）。渡さないと M-1 は r_macro しか返さず
+    # μ̂ が全行で空になる（#1005 の初回で実際に起きた）。
+    scores = plugin.read_producer_scores(db, current_macro_snapshot(db)) or {}
     asof = (get_producer_asof(db, source) or {}).get("snapshot_date")
     return [{"edinet_code": ec, "mu": _num(rec.get("mu")), "r1_prime": _num(rec.get("r1_prime")),
              "gap_ratio": None, "data_asof": asof}
@@ -96,6 +101,11 @@ def _read_gap(db) -> list:
     return [{"edinet_code": ec, "mu": None, "r1_prime": None, "gap_ratio": _num(gap),
              "data_asof": period_end.isoformat() if period_end else None}
             for ec, (gap, period_end) in sorted(best.items())]
+
+
+def value_column(source: str) -> str:
+    """その源の予測の値の列（μ̂ の源は `mu`・sector_ols は `gap_ratio`）。"""
+    return "gap_ratio" if source == GAP_SOURCE else "mu"
 
 
 def read_source(db, source: str) -> list:
@@ -146,6 +156,11 @@ def snapshot_month(db, *, today: date, code_version: Optional[str], preprocess_v
             rows = reader(db, source)
             if not rows:
                 out[source] = (STATUS_EMPTY, "源に予測が無い（読み出しの失敗かもしれない）")
+                continue
+            # 社の行はあるのに予測の値が全部空＝読み方の誤り（M-1 にマクロ値を渡し忘れる等）。書かない
+            col = value_column(source)
+            if all(r[col] is None for r in rows):
+                out[source] = (STATUS_ERROR, f"{len(rows)} 社の行があるのに {col} が全部空（読み方の誤り）")
                 continue
             payload = [dict(row, snapshot_date=snapshot_date, source=source,
                             code_version=code_version, preprocess_version=preprocess_version)

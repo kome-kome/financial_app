@@ -360,22 +360,14 @@ def load_producer_mu(db: Any, mu_source: str) -> dict:
     （M-1 の μ̂ 再構成に必要・他モデルは無視する）。producer 未実行・DB 未 migration・
     マクロ欠測はいずれも graceful-degrade（空 dict → μ̂ 抜きでスコアリング継続）。
     """
-    import datetime as _dt
     from plugins import get_plugin as _get_plugin
 
     producer = _get_plugin(mu_source)
     if producer is None or not producer.produced_output(db):
         return {}
     try:
-        from database import get_macro_beta
-        from .utils import get_macro_features
-        _meta_m1, _ = get_macro_beta(db, with_loadings=False)   # selected_factors だけ（#482）
-        sel_factors = (_meta_m1 or {}).get("selected_factors") or []
-        macro_snap: dict | None = None
-        if sel_factors:
-            raw_snap = get_macro_features(db, _dt.date.today().isoformat(), sel_factors)
-            macro_snap = {k: v for k, v in raw_snap.items() if v is not None} or None
-        scores = producer.read_producer_scores(db, macro_snap)
+        from .utils import current_macro_snapshot
+        scores = producer.read_producer_scores(db, current_macro_snapshot(db))
     except Exception:
         return {}
     return {ec: float(ps["mu"]) for ec, ps in (scores or {}).items()
