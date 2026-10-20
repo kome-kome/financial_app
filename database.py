@@ -2432,6 +2432,53 @@ class PredictionSnapshot(Base):
     created_at         = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
 
+class JpxListingSnapshot(Base):
+    """上場銘柄一覧（data_j）の月次断面（源 × 時点 × 証券コードで1行・#1004）。
+
+    JPX は過去版を配らないので、夜間 Phase 5 が業種用に取った data_j から毎月の断面を積む。
+    可視判定は `first_seen_at`（観測時刻）で行う——`as_of_date` で判定すると公表遅れの分だけ先読みになる。
+    """
+    __tablename__ = "jpx_listing_snapshots"
+    __table_args__ = (
+        PrimaryKeyConstraint("source", "as_of_date", "sec_code", name="pk_jpx_listing_snapshots"),
+    )
+
+    source         = Column(String(20), nullable=False)    # "data_j"
+    as_of_date     = Column(Date, nullable=False)          # data_j の「日付」（月末時点）
+    sec_code       = Column(String(6), nullable=False)
+    edinet_code    = Column(String(10))                    # 書き込み時点の企業表で解決（ETF 等は NULL）
+    market_segment = Column(String(100))                   # 市場・商品区分（生値）
+    industry33     = Column(String(100))                   # 33業種区分（生値）
+    size_code      = Column(String(10))                    # 規模コード（生値）
+    size_class     = Column(String(40))                    # 規模区分（生値）
+    file_sha256    = Column(String(64))
+    first_seen_at  = Column(DateTime, nullable=False)
+    last_seen_at   = Column(DateTime, nullable=False)
+
+
+def jpx_listing_snapshot_at(db, known_at: datetime, source: str = "data_j") -> tuple:
+    """`known_at` の時点で**観測済み**だった最新の断面 `(時点, {sec_code: 行})` を返す（#1004）。
+
+    可視判定は `first_seen_at`（こちらが初めて取得した時刻）。`as_of_date` で選ぶと、月末時点の版が
+    翌月の初めに出るまでの数日ぶん先読みになる。観測済みの断面が無ければ `(None, {})`。
+    `known_at` は UTC の aware / naive どちらでもよい（naive は UTC として扱う）。
+    """
+    if known_at.tzinfo is not None:
+        known_at = known_at.astimezone(timezone.utc).replace(tzinfo=None)
+    as_of = (db.query(func.max(JpxListingSnapshot.as_of_date))
+             .filter(JpxListingSnapshot.source == source,
+                     JpxListingSnapshot.first_seen_at <= known_at)
+             .scalar())
+    if as_of is None:
+        return None, {}
+    S = JpxListingSnapshot
+    rows = (db.query(S.sec_code, S.edinet_code, S.market_segment, S.industry33, S.size_code,
+                     S.size_class, S.first_seen_at)
+            .filter(S.source == source, S.as_of_date == as_of)
+            .all())
+    return as_of, {r.sec_code: r for r in rows}
+
+
 def insert_prediction_snapshots(db, rows: list) -> int:
     """写しをまとめて追記して commit する。戻り値は渡した行数。
 

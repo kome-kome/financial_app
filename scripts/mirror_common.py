@@ -151,6 +151,10 @@ SYNC_PLAN: dict[str, TableSync] = {
     "prediction_snapshots": TableSync(
         MODE_WATERMARK, "created_at", 1,
         note="月に1回・源ごとの追記のみ（#1005）。既存行の更新も削除も無い"),
+    "jpx_listing_snapshots": TableSync(
+        MODE_WATERMARK, "last_seen_at", 1,
+        note="行の追加は月に1回（#1004）。同じ時点を見直すたびに last_seen_at だけ進むので、"
+             "created_at ではなくこちらを高水位にする（値は上書きしない）"),
     "collection_logs": TableSync(
         MODE_WATERMARK, "started_at", 1, extra_where="finished_at IS NULL",
         note="running -> done の後追い UPDATE があるため、未完了行は高水位に関わらず毎回取り直す"),
