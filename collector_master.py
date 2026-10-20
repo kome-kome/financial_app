@@ -20,8 +20,12 @@ from database import (
 from collector_utils import (
     API_KEY, EDINET_BASE, EDINET_CODELIST_COLUMNS, EDINET_CODELIST_LISTED,
     EDINET_CODELIST_URL, EDINET_INDUSTRY_ALIASES, EDINET_MAX_CONSECUTIVE_FAILURES,
-    EdinetAccessError, EdinetCodelistError, JPX_CODE_DROP_LIMIT, JPX_EXCEL_LINK_RE,
-    JPX_EXCEL_URL, JPX_LISTING_URL, JpxIndustryError, RATE_SLEEP, log, redact_secrets,
+    EdinetAccessError, EdinetCodelistError, JPX_CODE_DROP_LIMIT, JPX_COL_CODE, JPX_COL_DATE,
+    JPX_COL_INDUSTRY33, JPX_COL_MARKET, JPX_COL_SIZE_CLASS, JPX_COL_SIZE_CODE, JPX_EXCEL_LINK_RE,
+    JPX_EXCEL_URL, JPX_INDUSTRY_COLUMNS, JPX_LISTING_SOURCE, JPX_LISTING_URL, JPX_SIZE_CLASSES,
+    JPX_SNAPSHOT_COLUMNS, JPX_SNAPSHOT_MAX_UNKNOWN_SIZE, JPX_SNAPSHOT_MIN_ROWS,
+    JPX_SNAPSHOT_SIZED_RANGE, JpxIndustryError, JpxListingSnapshotError, RATE_SLEEP, log,
+    redact_secrets,
 )
 
 
@@ -72,21 +76,12 @@ async def fetch_edinet_code_list(client: httpx.AsyncClient) -> pd.DataFrame:
     return df
 
 
-def _read_jpx_excel(content: bytes) -> dict:
-    """JPX 上場会社一覧 Excel（バイト列）を `{sec_code(4桁ゼロ埋め): 業種名}` に変換する純粋関数。
+def read_jpx_listing(content: bytes) -> tuple:
+    """JPX 上場銘柄一覧（data_j）のバイト列を `(見出し, データ行)` にする純関数（#1004）。
 
     xlrd（.xls 専用）を優先し、JPX が .xlsx に移行した場合は openpyxl へフォールバックする。
-    業種列（6列目）・コード列（2列目）を欠く行や、業種が空（'-'/''/None）の行はスキップする。
-    DB 反映は呼び出し側（update_industry_from_jpx）が担う。
-
-    **コード列の型は読み手によって違う**（#632）: xlrd は数値を `float` で返すが、
-    openpyxl は `int` で返す。`float`/`str` しか受けていなかった旧実装は、xlsx へ移行した
-    2026-09-03 以降**業種を持つ 3,899行のうち 3,606行を黙って捨てて 293件を返していた**
-    （拾えたのは `130A` のような英字混じり＝文字列で返る新形式のコードだけ）。件数が減るだけで
-    例外は出ないので、URL を直しても「正常終了しているのに 93% 欠落」に化ける。
-
-    そこで**捨てた行を数え**、`JPX_CODE_DROP_LIMIT` を超えたら `JpxIndustryError` を送出する。
-    正常なファイルではこの数は 0 なので、閾値をどこに置いても誤検知しない。
+    見出しは1行目の各セルを文字列にしたもの、データ行は2行目以降のセルのリスト。列の意味は
+    **呼び出し側が見出しの名前で引く**（位置で読まない）。
     """
     import xlrd
     import openpyxl
@@ -95,36 +90,68 @@ def _read_jpx_excel(content: bytes) -> dict:
     try:
         wb = xlrd.open_workbook(file_contents=content, encoding_override='cp932')
         ws = wb.sheet_by_index(0)
-        def _cell(row, col):
-            return ws.cell_value(row, col)
-        nrows = ws.nrows
+        rows = [list(ws.row_values(i)) for i in range(ws.nrows)]
     except xlrd.XLRDError:
         log.info("xlrd で読み込み失敗。openpyxl（xlsx）でリトライします")
         wb_xlsx = openpyxl.load_workbook(_io.BytesIO(content), read_only=True, data_only=True)
-        ws_xlsx = wb_xlsx.active
-        _rows = list(ws_xlsx.iter_rows(values_only=True))
-        def _cell(row, col):
-            return _rows[row][col]
-        nrows = len(_rows)
+        rows = [list(r) for r in wb_xlsx.active.iter_rows(values_only=True)]
+    if not rows:
+        return [], []
+    header = ["" if v is None else str(v).strip() for v in rows[0]]
+    return header, rows[1:]
+
+
+def _jpx_sec_code(value) -> Optional[str]:
+    """data_j のコードのセルを証券コード（4桁ゼロ埋め・英字入りはそのまま）にする。読めなければ None。
+
+    **コード列の型は読み手によって違う**（#632）: xlrd は数値を `float` で返すが、openpyxl は `int`
+    で返す。英字混じりの新形式（`130A`）はどちらでも文字列。
+    """
+    # bool は int の派生。True/False がコードに化けないよう先に除く。
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return str(int(value)).zfill(4)
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return None
+
+
+def _jpx_columns(header: list, names: tuple, error: type) -> dict:
+    """見出しから列の位置を名前で引く。足りなければ `error` を送出する（位置へ倒さない）。"""
+    missing = [c for c in names if c not in header]
+    if missing:
+        raise error(f"data_j の見出しに {missing} が無い（列構成が変わった疑い・見出し {header}）")
+    return {c: header.index(c) for c in names}
+
+
+def _read_jpx_excel(content: bytes) -> dict:
+    """JPX 上場会社一覧 Excel（バイト列）を `{sec_code(4桁ゼロ埋め): 業種名}` に変換する純粋関数。
+
+    `read_jpx_listing` の上の薄い窓口で、戻り値は従来どおり。列は見出しの名前（`JPX_INDUSTRY_COLUMNS`）
+    で引き、見つからなければ `JpxIndustryError`——**位置へのフォールバックは作らない**（#1004）。
+    業種が空（'-'/''/None）の行はスキップする。DB 反映は呼び出し側（update_industry_from_jpx）が担う。
+
+    コード列を解釈できない行は**数え**、`JPX_CODE_DROP_LIMIT` を超えたら `JpxIndustryError` を送出する
+    （#632: xlsx へ移行した 2026-09-03 以降、旧実装は業種を持つ 3,899行のうち 3,606行を黙って捨てて
+    293件を返していた）。正常なファイルではこの数は 0 なので、閾値をどこに置いても誤検知しない。
+    """
+    header, rows = read_jpx_listing(content)
+    if not header:
+        return {}
+    col = _jpx_columns(header, JPX_INDUSTRY_COLUMNS, JpxIndustryError)
+    i_code, i_ind = col[JPX_COL_CODE], col[JPX_COL_INDUSTRY33]
 
     industry_map: dict = {}
     candidates = 0      # 業種が埋まっている行＝本来は採用されるはずの行
     dropped    = 0      # そのうちコード列を解釈できなかった行
-    for row_idx in range(1, nrows):
-        try:
-            code_val = _cell(row_idx, 1)
-            ind_val  = _cell(row_idx, 5)
-        except IndexError:
-            continue   # 必須列を欠く行はスキップ
+    for row in rows:
+        if len(row) <= max(i_code, i_ind):
+            continue   # 必須列を欠く行（脚注等）はスキップ
+        ind_val = row[i_ind]
         if ind_val in ('-', '', None):
             continue
         candidates += 1
-        # bool は int の派生。True/False がコードに化けないよう先に除く。
-        if isinstance(code_val, (int, float)) and not isinstance(code_val, bool):
-            sec = str(int(code_val)).zfill(4)
-        elif isinstance(code_val, str) and code_val.strip():
-            sec = code_val.strip()
-        else:
+        sec = _jpx_sec_code(row[i_code])
+        if sec is None:
             dropped += 1
             continue
         industry_map[sec] = str(ind_val)
@@ -134,6 +161,125 @@ def _read_jpx_excel(content: bytes) -> dict:
             f"業種はあるがコード列を解釈できない行が多すぎる（{dropped}/{candidates}行）。"
             "JPX の列構成かセルの型が変わった疑いがあるので、件数が減ったまま通さない")
     return industry_map
+
+
+def _jpx_as_of(value) -> Optional[date]:
+    """data_j の「日付」セル（20260930 の整数・xlrd では float・文字列）を日付にする。"""
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    try:
+        return datetime.strptime(str(int(float(str(value).strip()))), "%Y%m%d").date()
+    except (TypeError, ValueError):
+        return None
+
+
+def _jpx_raw(value) -> Optional[str]:
+    """生値を文字列で残す（xlrd の float の整数は '6.0' ではなく '6' にする）。空は None。"""
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return None
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return str(value).strip()
+
+
+def parse_jpx_snapshot(content: bytes) -> tuple:
+    """data_j を上場銘柄一覧の月次断面 `(時点, [{sec_code, market_segment, industry33, size_code,
+    size_class}, ...])` にする純関数（#1004）。書く前の健全性をここで確かめる。
+
+    見出しの欠落・日付が1種類でない・行数の不足・規模区分の語彙外・'-' 以外の件数の外れ・コードの
+    重複は `JpxListingSnapshotError`（書かない）。閾値の根拠は `collector_utils` の定数のコメント。
+    """
+    header, rows = read_jpx_listing(content)
+    col = _jpx_columns(header, JPX_SNAPSHOT_COLUMNS, JpxListingSnapshotError)
+    width = max(col.values())
+    out: list = []
+    dates: set = set()
+    dropped = 0
+    for row in rows:
+        if len(row) <= width or all(v in (None, "") for v in row):
+            continue
+        sec = _jpx_sec_code(row[col[JPX_COL_CODE]])
+        if sec is None:
+            dropped += 1
+            continue
+        dates.add(_jpx_as_of(row[col[JPX_COL_DATE]]))
+        out.append({"sec_code": sec,
+                    "market_segment": _jpx_raw(row[col[JPX_COL_MARKET]]),
+                    "industry33": _jpx_raw(row[col[JPX_COL_INDUSTRY33]]),
+                    "size_code": _jpx_raw(row[col[JPX_COL_SIZE_CODE]]),
+                    "size_class": _jpx_raw(row[col[JPX_COL_SIZE_CLASS]])})
+
+    def fail(msg: str):
+        raise JpxListingSnapshotError(f"上場銘柄一覧の断面を書かない: {msg}")
+
+    if len(out) < JPX_SNAPSHOT_MIN_ROWS:
+        fail(f"行数 {len(out)} < {JPX_SNAPSHOT_MIN_ROWS}")
+    if dropped / (len(out) + dropped) > JPX_CODE_DROP_LIMIT:
+        fail(f"コードを解釈できない行が多すぎる（{dropped}行）")
+    if len(dates) != 1 or None in dates:
+        fail(f"日付が1種類でない・読めない（{sorted(map(str, dates))[:5]}）")
+    dup = [s for s, n in Counter(r["sec_code"] for r in out).items() if n > 1]
+    if dup:
+        fail(f"コードが重複している（{dup[:10]}）")
+    unknown = [r["size_class"] for r in out if r["size_class"] not in JPX_SIZE_CLASSES]
+    if len(unknown) / len(out) > JPX_SNAPSHOT_MAX_UNKNOWN_SIZE:
+        fail(f"規模区分の語彙外が多すぎる（{len(unknown)}行・例 {sorted(set(map(str, unknown)))[:5]}）")
+    sized = sum(1 for r in out if r["size_class"] not in ("-", None))
+    lo, hi = JPX_SNAPSHOT_SIZED_RANGE
+    if not lo <= sized <= hi:
+        fail(f"規模区分が '-' 以外の件数 {sized} が [{lo}, {hi}] の外")
+    return dates.pop(), out
+
+
+def record_jpx_listing_snapshot(db, content: bytes, *, now: Optional[datetime] = None) -> dict:
+    """data_j の断面を `jpx_listing_snapshots` へ積む（#1004）。戻り値はログ用の要約。
+
+    - **同じダウンロードから書く**（`update_industry_from_jpx` が業種用に取った中身をそのまま渡す）
+    - 健全性が外れたら `JpxListingSnapshotError`（何も書かない・既存の行は変えない）
+    - 同じ時点が登録済みなら**上書きしない**。`last_seen_at` だけ進め、中身（sha256）が違えば
+      WARNING と差の件数を出す
+    - `edinet_code` は書き込み時点の企業表で解決する（ETF 等の企業表に無い社は NULL のまま残す）
+    - 表は `init_db()`（API 起動時だけ）を待たず `checkfirst` で作る（夜間バッチが先に走るため）
+    """
+    import hashlib
+
+    from database import JpxListingSnapshot
+
+    as_of, rows = parse_jpx_snapshot(content)
+    sha = hashlib.sha256(content).hexdigest()
+    now = now or datetime.now(timezone.utc)
+    JpxListingSnapshot.__table__.create(bind=db.get_bind(), checkfirst=True)
+    key = (JpxListingSnapshot.source == JPX_LISTING_SOURCE) & (JpxListingSnapshot.as_of_date == as_of)
+    S = JpxListingSnapshot
+    existing = db.query(S.sec_code, S.market_segment, S.industry33, S.size_code, S.size_class,
+                        S.file_sha256).filter(key).all()
+    if existing:
+        if sha not in {r.file_sha256 for r in existing}:
+            old = {r.sec_code: (r.market_segment, r.industry33, r.size_code, r.size_class) for r in existing}
+            new = {r["sec_code"]: (r["market_segment"], r["industry33"], r["size_code"], r["size_class"])
+                   for r in rows}
+            log.warning(
+                f"上場銘柄一覧 {as_of} は登録済みだが中身が違う（上書きしない）: "
+                f"追加 {len(set(new) - set(old))}・消えた {len(set(old) - set(new))}・"
+                f"値が違う {sum(1 for s in set(new) & set(old) if new[s] != old[s])}")
+        db.query(JpxListingSnapshot).filter(key).update(
+            {JpxListingSnapshot.last_seen_at: now}, synchronize_session=False)
+        db.commit()
+        return {"status": "seen", "as_of": as_of.isoformat(), "rows": len(existing)}
+
+    sec_to_ec = {sec.strip(): ec for sec, ec in db.query(Company.sec_code, Company.edinet_code)
+                 if sec and sec.strip()}
+    db.bulk_insert_mappings(JpxListingSnapshot, [
+        dict(r, source=JPX_LISTING_SOURCE, as_of_date=as_of, edinet_code=sec_to_ec.get(r["sec_code"]),
+             file_sha256=sha, first_seen_at=now, last_seen_at=now) for r in rows])
+    db.commit()
+    written = db.query(JpxListingSnapshot).filter(key).count()
+    if written != len(rows):
+        raise JpxListingSnapshotError(f"{len(rows)} 行を書いたはずが DB には {written} 行")
+    return {"status": "wrote", "as_of": as_of.isoformat(), "rows": written,
+            "resolved": sum(1 for r in rows if r["sec_code"] in sec_to_ec)}
 
 
 async def resolve_jpx_excel_url(client: httpx.AsyncClient) -> str:
@@ -178,10 +324,10 @@ async def update_industry_from_jpx(client: httpx.AsyncClient, db,
         if on_progress:
             on_progress(0, 1, "[業種更新] JPX上場会社一覧をダウンロード中...")
         excel_url = await resolve_jpx_excel_url(client)
-        r = await client.get(excel_url, timeout=60,
-                             headers={"User-Agent": "Mozilla/5.0"})
-        r.raise_for_status()
-        industry_map = _read_jpx_excel(r.content)
+        r_excel = await client.get(excel_url, timeout=60,
+                                   headers={"User-Agent": "Mozilla/5.0"})
+        r_excel.raise_for_status()
+        industry_map = _read_jpx_excel(r_excel.content)
         log.info(f"JPX業種マップ: {len(industry_map)}件")
         if not industry_map:
             raise JpxIndustryError(f"業種マップが空（{excel_url}）。"
@@ -232,6 +378,16 @@ async def update_industry_from_jpx(client: httpx.AsyncClient, db,
         # 書式は `scripts/batch_common.utc_now_iso()` と揃える（`batch_freshness._parse` が読む）。
         upsert_setting(db, KEY_JPX_INDUSTRY_LAST_SUCCESS,
                        datetime.now(timezone.utc).isoformat(timespec="seconds"))
+
+        # 同じダウンロードから上場銘柄一覧の月次断面を積む（#1004・取り直さない）。**業種の更新の後**に
+        # 回し、失敗は WARNING にとどめる——断面が前進しないことは `batch_freshness.PRODUCERS` が現す。
+        try:
+            snap = record_jpx_listing_snapshot(db, r_excel.content)
+            log.info(f"上場銘柄一覧の断面: {snap}")
+        except Exception as e:      # noqa: BLE001 — 断面の失敗で業種の更新を失敗にしない
+            db.rollback()
+            log.warning(f"上場銘柄一覧の断面を記録できなかった（業種の更新は済んでいる）: "
+                        f"{redact_secrets(f'{type(e).__name__}: {e}')}")
 
         log.info(f"業種更新完了: Company {updated_co}件, FinancialRecord {updated_fr}件")
         if on_progress:

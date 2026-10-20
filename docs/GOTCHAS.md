@@ -22,7 +22,8 @@ SSEエンドポイント（進捗のリアルタイム配信・全5本）: 収�
 ## 業種データの取得方法
 
 - **業種はXBRLから取得できない**。EDINETのXBRLに TSE 33業種コードは含まれていない。
-- **正規ソース**: JPX上場会社一覧Excel（`data_j.xlsx`、33業種コード列=col4/col5）。JPX に載らない社の空欄だけ EDINET コードリストの「提出者業種」で補う（#784・上場区分によらない #797・下記）。
+- **正規ソース**: JPX上場会社一覧Excel（`data_j.xlsx`）。列は**見出しの名前で引く**（「コード」「33業種区分」・`collector_utils.JPX_INDUSTRY_COLUMNS`・#1004）。以前は列の位置（コード=2列目・業種=6列目）で読んでいて、JPX が列を足すと例外も出ずに別の列を業種として読む形だった。見出しが見つからなければ `JpxIndustryError`（位置へは倒さない）。JPX に載らない社の空欄だけ EDINET コードリストの「提出者業種」で補う（#784・上場区分によらない #797・下記）。
+- **同じダウンロードから上場銘柄一覧の月次断面を積む（#1004）**: 「市場・商品区分」「規模コード」「規模区分」も見出し名で引き、`jpx_listing_snapshots` へ時点（「日付」列・月末）ごとに積む。JPX は過去版を配らないので、取り逃した月は永久に欠ける。書く前の健全性（行数 3,000 以上・規模区分の語彙外 1% 以下・'-' 以外 900〜2,300 件・日付が1種類）が外れたら書かずに WARNING——**業種の更新は止めない**（断面が前進しないことは `batch_freshness.PRODUCERS` が現す）。同じ時点は上書きせず `last_seen_at` だけ進める。可視判定は `first_seen_at`（`database.jpx_listing_snapshot_at`）で、`as_of_date` で選ぶと公表遅れ（月末の版が翌月の初めに出る）の分だけ先読みになる。
 - `update_industry_from_jpx(client, db)` → `fill_industry_from_edinet_codelist(client, db)` の順に `run_full_collection` の末尾（Phase 5）で自動実行される。
 - 証券コードは4桁数字（`1301`）とアルファベット混在（`350A`）の両形式に対応済み。
 - **URL は一覧ページから解決する。定数で持つと変わった晩から静かに 404 になる（#632・2026-09-03）**: JPX は `data_j.xls` を `data_j.xlsx` へ切り替えた。ディレクトリ（`tvdivq0000001vg2-att`）は変わっておらず、変わったのは拡張子だけ。6晩連続で 404 になったが、`update_industry_from_jpx` が `except Exception: return 0, 0` で握っていたため **WARNING 止まりで `exit=0`**、足跡（`nightly_last_run`）も入るので watchdog（#515）にも引っかからなかった。既存の業種は DB に残るので画面も壊れず（実測で業種が空なのは 3,725社中2社）、現れるのは「新規上場社の業種が入らない」という静かな陳腐化だけ。解決は `resolve_jpx_excel_url()` が `JPX_LISTING_URL`（一覧ページ）から `href="...data_j.xls|xlsx"` を拾う。ページを読めない／リンクが無いときは `JPX_EXCEL_URL` へ倒す（解決の失敗を致命傷にしない）。

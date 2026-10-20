@@ -33,13 +33,25 @@ RESOLVED_URL = ("https://www.jpx.co.jp/markets/statistics-equities/misc/"
                 "tvdivq0000001vg2-att/data_j.xlsx")
 
 
-def _make_jpx_xlsx(rows: list) -> bytes:
-    """テスト用 JPX 業種マスタ xlsx を生成（col1=sec_code, col5=industry）"""
+# data_j の見出し。**実物から写す**（2026-10-21 に `.index_lists/raw/data_j_20261020.xlsx`・
+# sha256 a26fdf44…2c82 の1行目を写した。全角・中黒・括弧はそのまま）。列は名前で引くので、
+# 写し間違えると読めずに失敗する＝見出しの検体そのものが照合になる。
+JPX_HEADER = ["日付", "コード", "銘柄名", "市場・商品区分", "33業種コード", "33業種区分",
+              "17業種コード", "17業種区分", "規模コード", "規模区分"]
+
+
+def _jpx_row(sec, ind) -> list:
+    """実物と同じ並びの1行（コード=2列目・33業種区分=6列目）。"""
+    return [20260930, sec, "", "", "", ind, "", "", "", ""]
+
+
+def _make_jpx_xlsx(rows: list, header: list = JPX_HEADER) -> bytes:
+    """テスト用 data_j xlsx を生成（見出しは実物の写し）。"""
     wb = openpyxl.Workbook()
     ws = wb.active
-    ws.append(["col0", "sec_code", "col2", "col3", "col4", "industry_name"])
+    ws.append(header)
     for sec, ind in rows:
-        ws.append(["", sec, "", "", "", ind])
+        ws.append(_jpx_row(sec, ind))
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()
@@ -66,6 +78,8 @@ class _FakeXlsSheet:
         return len(self._rows)
     def cell_value(self, row, col):
         return self._rows[row][col]   # 列不足は IndexError（実 xlrd と同挙動）
+    def row_values(self, row):
+        return list(self._rows[row])
 
 
 class _FakeXlsBook:
@@ -86,39 +100,43 @@ class TestReadJpxExcel:
 
     def test_xlsx_skips_blank_industry_rows(self):
         """業種が空（'-'/None）の行はスキップされる。"""
-        wb = openpyxl.Workbook()
-        ws = wb.active
-        ws.append(["col0", "sec_code", "c2", "c3", "c4", "industry"])
-        ws.append(["", "2001", "", "", "", "小売業"])   # 採用
-        ws.append(["", "3001", "", "", "", "-"])        # 業種 '-' → スキップ
-        ws.append(["", "4001", "", "", "", None])       # 業種 None → スキップ
-        buf = io.BytesIO(); wb.save(buf)
-        result = _read_jpx_excel(buf.getvalue())
-        assert result == {"2001": "小売業"}
+        content = _make_jpx_xlsx([("2001", "小売業"),    # 採用
+                                  ("3001", "-"),         # 業種 '-' → スキップ
+                                  ("4001", None)])       # 業種 None → スキップ
+        assert _read_jpx_excel(content) == {"2001": "小売業"}
 
     def test_empty_sheet_returns_empty_dict(self):
         """ヘッダのみ（データ行なし）の空シートは空辞書を返す。"""
-        wb = openpyxl.Workbook()
-        wb.active.append(["col0", "sec_code", "c2", "c3", "c4", "industry"])
-        buf = io.BytesIO(); wb.save(buf)
-        assert _read_jpx_excel(buf.getvalue()) == {}
+        assert _read_jpx_excel(_make_jpx_xlsx([])) == {}
 
-    def test_missing_required_columns_skipped(self):
-        """業種列（6列目）を欠く行は IndexError をスキップして空辞書になる。"""
+    def test_missing_industry_header_raises(self):
+        """業種に要る見出し（33業種区分）が無ければ送出する。位置へ倒さない（#1004）。"""
+        content = _make_jpx_xlsx([("1001", "情報・通信業")], header=JPX_HEADER[:5])
+        with pytest.raises(JpxIndustryError, match="33業種区分"):
+            _read_jpx_excel(content)
+
+    def test_synthetic_header_is_rejected(self):
+        """位置で読んでいた頃の合成の見出しでは読めない＝位置へのフォールバックが無いことの証明。"""
+        header = ["col0", "sec_code", "col2", "col3", "col4", "industry_name"]
+        with pytest.raises(JpxIndustryError, match="見出し"):
+            _read_jpx_excel(_make_jpx_xlsx([("1001", "情報・通信業")], header=header))
+
+    def test_columns_are_read_by_name_not_position(self):
+        """JPX が列を足しても、見出しの名前で引くので業種を取り違えない。"""
         wb = openpyxl.Workbook()
         ws = wb.active
-        ws.append(["col0", "sec_code"])      # 2列しかない
-        ws.append(["", "1001"])              # 業種列なし → スキップ
+        ws.append(["追加の列"] + JPX_HEADER)
+        ws.append(["ノイズ"] + _jpx_row("1001", "情報・通信業"))
         buf = io.BytesIO(); wb.save(buf)
-        assert _read_jpx_excel(buf.getvalue()) == {}
+        assert _read_jpx_excel(buf.getvalue()) == {"1001": "情報・通信業"}
 
     def test_parses_xls_via_xlrd(self, monkeypatch):
         """.xls 形式（xlrd 成功経路）を、xlrd.open_workbook をスタブ化して検証。"""
         rows = [
-            ["col0", "sec_code", "c2", "c3", "c4", "industry"],  # ヘッダ
-            ["", 1001.0, "", "", "", "情報・通信業"],            # xls は数値が float
-            ["", 101.0, "", "", "", "建設業"],                   # float → 4桁ゼロ埋め "0101"
-            ["", "9999", "", "", "", "サービス業"],
+            JPX_HEADER,
+            _jpx_row(1001.0, "情報・通信業"),            # xls は数値が float
+            _jpx_row(101.0, "建設業"),                   # float → 4桁ゼロ埋め "0101"
+            _jpx_row("9999", "サービス業"),
         ]
         import xlrd
         monkeypatch.setattr(xlrd, "open_workbook",

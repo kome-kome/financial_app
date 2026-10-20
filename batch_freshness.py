@@ -388,6 +388,28 @@ def _prediction_snapshots_at(db):
     return min(latest[s] for s in SOURCES)
 
 
+# data_j の公表遅れ（日・#1004）。月末時点の版が翌月の初めに出る（2026-09-30 版の最終更新は
+# 2026-10-05＝5日）。年末年始・GW の連休で 1 週間ほど延びても起票しないよう余裕を足した値。
+# 断面の時点の前進を見る閾値は「月の最長31日＋これ」。ここに置くのは読み手がここだけだから
+# （`collector_utils` は import 時に `.env` とログ設定を読むので、この module からは import しない）。
+JPX_LISTING_PUBLICATION_LAG_DAYS = 10
+
+
+def _jpx_listing_seen_at(db):
+    """上場銘柄一覧の断面を最後に取得できた時刻（#1004）。同じ時点を見直すたびに `last_seen_at` が進む。"""
+    from sqlalchemy import func, select
+    from database import JpxListingSnapshot
+    return db.execute(select(func.max(JpxListingSnapshot.last_seen_at))).scalar()
+
+
+def _jpx_listing_as_of(db):
+    """上場銘柄一覧の断面の最新の時点（#1004）。JPX が版を更新しない・取り損ねると前進しない。"""
+    from sqlalchemy import func, select
+    from database import JpxListingSnapshot
+    as_of = db.execute(select(func.max(JpxListingSnapshot.as_of_date))).scalar()
+    return None if as_of is None else datetime(as_of.year, as_of.month, as_of.day, tzinfo=timezone.utc)
+
+
 def _scheduled(job: str):
     """日中バッチの暦の1行。読み手と読む場所は暦側が持つ（書き写さない・#681）。"""
     return next(s for s in run_daytime.SCHEDULE if s.job == job)
@@ -473,6 +495,30 @@ PRODUCERS: tuple[Produced, ...] = (
         task_name="financial_app-nightly",
         source="app_settings.edinet_codelist_last_success",
         read=_edinet_codelist_at,
+    ),
+    Produced(
+        # 業種と同じダウンロードから積む上場銘柄一覧の断面（#1004）。業種が更新できていても、
+        # 健全性の外れ・見出しの欠落で断面だけ止まりうる（WARNING 止まり）ので別に見る。
+        label="上場銘柄一覧の月次断面（取得）",
+        issue_title="[ops] 上場銘柄一覧の月次断面を記録できていない",
+        cadence_h=24.0,
+        window_min=run_nightly.WINDOW_MIN,
+        batch_label="夜間バッチ（Phase 5 の業種補完と同じダウンロード）",
+        task_name="financial_app-nightly",
+        source="max(jpx_listing_snapshots.last_seen_at)",
+        read=_jpx_listing_seen_at,
+    ),
+    Produced(
+        # JPX は過去版を配らない＝時点が前進しない月は永久に欠ける。取得は毎晩成功していても、
+        # 版が更新されない・新しい版だけ健全性で弾かれると、ここで初めて現れる。
+        label="上場銘柄一覧の月次断面（時点の前進）",
+        issue_title="[ops] 上場銘柄一覧の月次断面の時点が前進していない",
+        cadence_h=(31 + JPX_LISTING_PUBLICATION_LAG_DAYS) * 24.0,
+        window_min=run_nightly.WINDOW_MIN,
+        batch_label="夜間バッチ（Phase 5 の業種補完と同じダウンロード）",
+        task_name="financial_app-nightly",
+        source="max(jpx_listing_snapshots.as_of_date)",
+        read=_jpx_listing_as_of,
     ),
     Produced(
         # 夜間バッチの最後が、当月分の無い源だけ本番予測を写す（#1005）。月に1回しか前進しないので

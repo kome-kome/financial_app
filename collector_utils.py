@@ -71,6 +71,29 @@ JPX_EXCEL_LINK_RE = re.compile(r'href="([^"]*data_j\.xlsx?)"')
 # それでも例外を出さずに「293件」を返していた。5% は「一桁違う」を分ける位置で、
 # 端数行（脚注・小計）で誤爆しない程度の余裕を持たせた値。
 JPX_CODE_DROP_LIMIT = 0.05
+# data_j の見出し（#1004）。**列は位置ではなく名前で引く**——位置で読むと列の追加でも例外が出ず、
+# 別の列を業種として読む（#632 と同型）。名前は 2026-10-20 版の実物から写した（全角・中黒・括弧そのまま）。
+# 業種の更新に要る列と、上場銘柄一覧の月次断面に要る列は分けて検査する（断面の列が欠けても業種は止めない）。
+JPX_COL_DATE, JPX_COL_CODE, JPX_COL_MARKET = "日付", "コード", "市場・商品区分"
+JPX_COL_INDUSTRY33, JPX_COL_SIZE_CODE, JPX_COL_SIZE_CLASS = "33業種区分", "規模コード", "規模区分"
+JPX_INDUSTRY_COLUMNS = (JPX_COL_CODE, JPX_COL_INDUSTRY33)
+JPX_SNAPSHOT_COLUMNS = (JPX_COL_DATE, JPX_COL_CODE, JPX_COL_MARKET, JPX_COL_INDUSTRY33,
+                        JPX_COL_SIZE_CODE, JPX_COL_SIZE_CLASS)
+# 月次断面の源の名前（`jpx_listing_snapshots.source`）。
+JPX_LISTING_SOURCE = "data_j"
+# 規模区分の語彙（2026-10-20 版の実物で全件）。列ずれはここで捕まえる——規模区分の列に別の列の値が
+# 入れば語彙外になる。'-' は TOPIX の規模別指数に入らない社（ETF・REIT・PRO Market 等を含む）。
+JPX_SIZE_CLASSES = ("TOPIX Core30", "TOPIX Large70", "TOPIX Mid400",
+                    "TOPIX Small 1", "TOPIX Small 2", "-")
+# 書く前の健全性（外れたら書かずに失敗し、既存の行は変えない）。
+#   行数: 2026-10-20 版は 4,447 行。3,000 は「配布物が途中で切れた・別のシートを読んだ」を分ける位置
+#   語彙外の割合: 正常な版では 0。1% は脚注・注記の行で誤爆しない程度の余裕
+#   '-' 以外の件数: 2026-10-20 版は 1,633。TOPIX 初回定期入替（2026-10-30）の後に移行措置 683 社が
+#     '-' 表示になっても 1,669 − 683 ≈ 986 なので、下限 900 で誤失敗しない。上限 2,300 は全社が
+#     規模区分を持つような列ずれを分ける
+JPX_SNAPSHOT_MIN_ROWS = 3000
+JPX_SNAPSHOT_MAX_UNKNOWN_SIZE = 0.01
+JPX_SNAPSHOT_SIZED_RANGE = (900, 2300)
 
 # EDINET コードリスト（金融庁の配布物・日次更新・API キー不要・約570KB の ZIP＝cp932 の CSV 1本）。
 # **JPX に載らない社の業種の空欄だけを「提出者業種」で埋める**（#784・上場区分によらない・#797）。
@@ -560,6 +583,14 @@ class JpxIndustryError(Exception):
 
     「走らなかったこと」の検知（#515・ADR-0042）はこれを拾わない——**走ってはいる**からで、
     現すのは `batch_freshness.PRODUCERS`（成果物が前進したか）の側になる。
+    """
+
+
+class JpxListingSnapshotError(Exception):
+    """data_j から上場銘柄一覧の月次断面を作れない（見出しの欠落・健全性の外れ・#1004）。
+
+    **業種の更新は止めない**——呼び出し側（`update_industry_from_jpx`）は WARNING にとどめ、
+    断面が前進しないことを `batch_freshness.PRODUCERS` が現す（#632 と同じ扱い）。
     """
 
 
