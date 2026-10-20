@@ -54,6 +54,7 @@
 | [`scripts/bench_macro_beta_report.py`](#scriptsbench_macro_beta_reportpy) | 検証（計測） |
 | [`scripts/grid_macro_beta.py`](#scriptsgrid_macro_betapy) | 検証（計測） |
 | [`scripts/macro_beta_gate_history.py`](#scriptsmacro_beta_gate_historypy) | 検証（計測） |
+| [`scripts/index_exposure.py`](#scriptsindex_exposurepy) | 検証（計測） |
 | [`scripts/nightly_diag_report.py`](#scriptsnightly_diag_reportpy) | 検証（計測） |
 | [`run_local.ps1`](#run_localps1) | ユーティリティ |
 | [`scripts/run_nightly.py`](#scriptsrun_nightlypy) | ユーティリティ |
@@ -302,6 +303,12 @@ NUTS 軌道長（`max_tree_depth`）× `target_accept` の格子ドライバ（I
 収束ゲートの余裕を **run 横断**で読む読み取り専用 CLI（Issue #612）。`macro_beta_meta.hyperparams.diagnostics.by_param` を古い順に並べ、変数別の `r_hat` p99・閾値までの余裕・`gate_verdict` の合否・`n_stock`・`n_divergences` を表へ出す。**判定は `macro_beta_inference` の `gate_values` / `gate_verdict` / `MONTHLY_RHAT_THRESHOLD` / `PERSIST_MARGIN_WARN` を import して共有**し、p99 の比較を書き写さない（本番と別基準の表を見ても設定を選べない＝#613 と同じ作法）。**`n_divergences > 0` の run と `by_param` を持たない旧 run には印を付ける**——前者を余裕の推移へ混ぜると「規模とともに縮んでいる」と誤読し（2026-09-07 の並走回は発散344回で `alpha` の p99 が 1.1843 まで悪化したが、並走を止めたら 0 に戻った）、後者は `r_hat_max` が#356 の丸め値なので生値と並べられない。集計は純関数 `summarize_runs` に切り出してテスト可能にし、出力は **ASCII の区切りだけ**（cp932 の標準出力でリダイレクト時に落ちないため）。**余裕の推移を溜める手段が無かったため、#612 では健全な2点を比べるだけで毎回 DB を手で引き直していた**
 
 種別: 検証（計測） ／ 依存先: macro_beta_inference.py, database.py (macro_beta_meta), scripts/_textwidth.py
+
+## `scripts/index_exposure.py`
+
+露出τ（#1006・親 #1001）: 本番予測の上位・下位に TOPIX 移行措置・新規採用の銘柄がどれだけ並ぶかを、モデル（M-1 / M-2 / M-3 / M-6 / gap / 推奨プリセット）ごとに母集団比率と比べる読み取り専用 CLI。`python -m scripts.index_exposure [--asof YYYY-MM-DD] [--snapshot-date YYYY-MM-DD] [--out <json>] [--lists-dir <.index_lists>]`。群は指数イベント台帳の `group_labels`（transition / new_add / other / unknown）、モデルの予測は `prediction_snapshots.read_source`（`--snapshot-date` なら積んだ写しの表）、プリセットは `plugins.recommend.score_candidates`（画面と同じ候補の条件と採点・全社）。出すのは群の件数・上位／下位 5 分位の占有率と対比（lift）・平均順位分位（1 に近いほど上位）。守ること: **最初に重なりの件数を出し、移行措置がどの母集団にも入らなければ終了コード 2**（黙って空の表を出さない）／**台帳が使えなければ終了コード 2**／**群の日は `on` と `known_at` に同じ日を使う**（先読みしない）／**DB へは書かない**（バックアップを一時スキーマへ復元する経路は作らず、過去の予測は `prediction_snapshots` から読む）／**夜間には入れない**（ADR-0061 決定1・手で回す）。事前登録では記述（§6.3）で、採否の根拠にしない。実測（2026-10-21・現行値）: 移行措置 681 社のうち M-2 / M-6 の母集団に 623 社。M-6 は上位 5 分位の 27.2% が移行措置（母集団比 19.7%）、所要は数十秒
+
+種別: 検証（計測） ／ 依存先: index_events.py、prediction_snapshots.py、plugins/recommend.py（`score_candidates`）、database.py（`tradable_filters`）
 
 ## `scripts/nightly_diag_report.py`
 
