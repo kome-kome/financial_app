@@ -22,7 +22,8 @@ from collector_utils import (
     EDINET_CODELIST_URL, EDINET_INDUSTRY_ALIASES, EDINET_MAX_CONSECUTIVE_FAILURES,
     EdinetAccessError, EdinetCodelistError, JPX_CODE_DROP_LIMIT, JPX_COL_CODE, JPX_COL_DATE,
     JPX_COL_INDUSTRY33, JPX_COL_MARKET, JPX_COL_SIZE_CLASS, JPX_COL_SIZE_CODE, JPX_EXCEL_LINK_RE,
-    JPX_EXCEL_URL, JPX_INDUSTRY_COLUMNS, JPX_LISTING_SOURCE, JPX_LISTING_URL, JPX_SIZE_CLASSES,
+    JPX_EXCEL_URL, JPX_INDUSTRY_COLUMNS, JPX_LISTING_SOURCE, JPX_LISTING_URL, JPX_MARKET_ALIASES,
+    JPX_NON_MARKET_SEGMENTS, JPX_SIZE_CLASSES,
     JPX_SNAPSHOT_COLUMNS, JPX_SNAPSHOT_MAX_UNKNOWN_SIZE, JPX_SNAPSHOT_MIN_ROWS,
     JPX_SNAPSHOT_SIZED_RANGE, JpxIndustryError, JpxListingSnapshotError, RATE_SLEEP, log,
     redact_secrets,
@@ -282,6 +283,65 @@ def record_jpx_listing_snapshot(db, content: bytes, *, now: Optional[datetime] =
             "resolved": sum(1 for r in rows if r["sec_code"] in sec_to_ec)}
 
 
+def plan_company_market(snapshot: dict, companies) -> tuple:
+    """`companies.market` の更新の計画（純関数・#1015）。
+
+    `snapshot` は最新の断面の `{sec_code: 市場・商品区分}`、`companies` は `[(edinet_code, sec_code, 今の
+    market), ...]`。戻り値は `({edinet_code: 新しい market}, Counter(表に無い区分))`。
+    - 別名表（`JPX_MARKET_ALIASES`）で短い名前にし、今の値と違う社だけ返す
+    - 株式の市場ではない既知の区分（`JPX_NON_MARKET_SEGMENTS`）は空（None）にする
+    - 表に無い区分は数えるだけで返さない（書かない）
+    - 断面に載っていない社は触らない（載っていないことを「市場が無い」と決めつけない）
+    """
+    updates: dict = {}
+    unknown: Counter = Counter()
+    for ec, sec, current in companies:
+        sec = (sec or "").strip()
+        if not sec or sec not in snapshot:
+            continue
+        segment = snapshot[sec]
+        if segment in JPX_MARKET_ALIASES:
+            new = JPX_MARKET_ALIASES[segment]
+        elif segment in JPX_NON_MARKET_SEGMENTS:
+            new = None
+        else:
+            unknown[str(segment)] += 1
+            continue
+        if new != current:
+            updates[ec] = new
+    return updates, unknown
+
+
+def update_company_market(db, *, known_at: Optional[datetime] = None) -> dict:
+    """最新の上場銘柄一覧の断面から `companies.market` を変わった社だけ一括更新する（#1015）。
+
+    `companies.market` は**最新の表示用**。時点が要る用途は断面表（`jpx_listing_snapshots`・
+    `database.jpx_listing_snapshot_at`）を使う。年度の行（`financial_records.market`）は埋めない——
+    過去の年度に現在の市場を付けると先読みになる。表に無い区分は WARNING で数えて書かない。
+    """
+    from sqlalchemy import update as sa_update
+
+    from database import jpx_listing_snapshot_at
+
+    as_of, rows = jpx_listing_snapshot_at(db, known_at or datetime.now(timezone.utc))
+    if as_of is None:
+        return {"status": "no_snapshot"}
+    snapshot = {sec: r.market_segment for sec, r in rows.items()}
+    companies = db.query(Company.edinet_code, Company.sec_code, Company.market).all()
+    updates, unknown = plan_company_market(snapshot, companies)
+    if unknown:
+        log.warning(f"市場・商品区分に別名表に無い値がある（書かない）: {dict(unknown)}")
+    by_market: dict = defaultdict(list)
+    for ec, market in updates.items():
+        by_market[market].append(ec)
+    for market, codes in by_market.items():
+        db.execute(sa_update(Company).where(Company.edinet_code.in_(codes))
+                   .values(market=market).execution_options(synchronize_session=False))
+    db.commit()
+    return {"status": "updated", "as_of": as_of.isoformat(), "updated": len(updates),
+            "by_market": {str(m): len(c) for m, c in by_market.items()}, "unknown": dict(unknown)}
+
+
 async def resolve_jpx_excel_url(client: httpx.AsyncClient) -> str:
     """JPX 上場会社一覧ページから Excel の現行 URL を解決する（#632）。
 
@@ -387,6 +447,15 @@ async def update_industry_from_jpx(client: httpx.AsyncClient, db,
         except Exception as e:      # noqa: BLE001 — 断面の失敗で業種の更新を失敗にしない
             db.rollback()
             log.warning(f"上場銘柄一覧の断面を記録できなかった（業種の更新は済んでいる）: "
+                        f"{redact_secrets(f'{type(e).__name__}: {e}')}")
+        # 最新の断面から companies.market を埋める（#1015）。断面の記録が今夜失敗しても、前の晩までの
+        # 最新の断面から埋める。失敗は WARNING（業種の更新は済んでいる）。
+        try:
+            mk = update_company_market(db)
+            log.info(f"市場の更新: {mk}")
+        except Exception as e:      # noqa: BLE001 — 市場の失敗で業種の更新を失敗にしない
+            db.rollback()
+            log.warning(f"市場を更新できなかった（業種の更新は済んでいる）: "
                         f"{redact_secrets(f'{type(e).__name__}: {e}')}")
 
         log.info(f"業種更新完了: Company {updated_co}件, FinancialRecord {updated_fr}件")

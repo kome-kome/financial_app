@@ -291,7 +291,7 @@ class Company(Base):
     name         = Column(String(200), nullable=False)
     name_en      = Column(String(200))
     industry     = Column(String(100))                     # 業種（東証33業種。JPX が正本・JPX に無い上場社の空欄だけ EDINET 提出者業種で補完・#784）
-    market       = Column(String(50))                      # プライム/スタンダード/グロース
+    market       = Column(String(50))                      # プライム/スタンダード/グロース/PRO Market。**最新の表示用**（夜間に data_j の断面から埋める・#1015）。時点が要る用途は jpx_listing_snapshots
     fiscal_month = Column(Integer)                         # 決算月
     accounting_standard = Column(String(20))               # JGAAP/IFRS/US-GAAP
     issued_shares = Column(Float, nullable=True)           # 発行済株式数（J-Quants 取得・最新値）

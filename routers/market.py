@@ -474,7 +474,10 @@ async def screening(request: Request, req: ScreenRequest, db: Session = Depends(
     if req.industry:
         query = query.filter(FinancialMetric.industry == req.industry)
     if req.market:
-        query = query.filter(FinancialMetric.market == req.market)
+        # 市場は companies.market（最新の表示用・data_j の断面から毎晩埋める・#1015）で絞る。
+        # VIEW の market（年度の行）は埋めない＝常に NULL で、ここで絞ると黙って 0 件になっていた。
+        query = query.filter(FinancialMetric.edinet_code.in_(
+            db.query(Company.edinet_code).filter(Company.market == req.market)))
     if req.min_rev_growth is not None:
         query = query.filter(FinancialMetric.rev_growth >= req.min_rev_growth)
     if req.min_op_margin is not None:
