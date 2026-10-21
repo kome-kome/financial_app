@@ -76,6 +76,8 @@ a{color:inherit}
 .co-meta{font-size:12px;color:var(--text-muted);display:flex;gap:10px;flex-wrap:wrap}
 .co-meta .tag{background:var(--bg-hover);color:var(--text-secondary);padding:2px 8px;border-radius:10px}
 .co-meta .tag.code{color:var(--status-info);font-family:'Consolas','Menlo',monospace}
+/* TOPIX 移行措置・新規採用の事実の印（#1013）。警告系で、赤は使わない */
+.co-meta .tag.tag-amber{background:var(--status-warn-bg);color:var(--status-warn-text)}
 
 /* summary cards */
 .stats-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:24px}
@@ -189,6 +191,7 @@ table.cmp tbody tr:hover td{background:var(--border-subtle)}
     <div class="co-head">
       <div class="co-name" id="co-name">—</div>
       <div class="co-meta" id="co-meta"></div>
+      <div id="co-index-event"></div>
     </div>
 
     <div class="stats-grid s10" id="summary-cards"></div>

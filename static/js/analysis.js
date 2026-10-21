@@ -394,6 +394,8 @@ async function runRecommend() {
     recResults = d.results;
     document.getElementById('rec-result-title').textContent =
       `分析結果：上位${d.count}社（候補${d.total_candidates}社中）`;
+    // TOPIX 移行措置・新規採用の件数と母集団比率、台帳が無いときのバナー（#1013）
+    document.getElementById('rec-notes').innerHTML = indexEventsNote(d.index_events);
     // μ̂ に重みを付けたのに producer 未実行で落ちたケースを明示する（黙って
     // カバレッジだけ下がると「効いていない」ことが画面から分からない・Issue #423 子4）。
     if (weights.mu && d.mu_available === false) {
@@ -421,7 +423,7 @@ async function runRecommend() {
         <tr>
           <td style="font-weight:700;color:${rankColor};font-size:15px">${Number(r.rank)}</td>
           <td style="color:${cssVar('--status-info')};font-weight:600">${esc(r.sec_code || '-')}</td>
-          <td>${r.edinet_code ? `<a href="/company/${esc(r.edinet_code)}" class="co-link" target="_blank" rel="noopener" style="font-weight:600">${esc(r.company_name)}</a>` : esc(r.company_name)}</td>
+          <td>${r.edinet_code ? `<a href="/company/${esc(r.edinet_code)}" class="co-link" target="_blank" rel="noopener" style="font-weight:600">${esc(r.company_name)}</a>` : esc(r.company_name)}${indexEventBadge(r.index_event)}</td>
           <td style="color:var(--text-secondary);font-size:11px">${esc(r.industry || '-')}</td>
           <td style="font-weight:700;color:${scoreColor}">${r.score.toFixed(2)}</td>
           <td>${r.roe != null ? r.roe.toFixed(1) + '%' : '-'}</td>
@@ -564,6 +566,9 @@ function renderSellRanking(d) {
     `判定結果：${d.count}社（売却 ${d.n_sell} / 一部売却 ${d.n_reduce} / 保有継続 ${d.n_hold}）`;
 
   const notes = [];
+  // TOPIX 移行措置・新規採用の件数と母集団比率、台帳が無いときのバナー（#1013）
+  const idxNote = indexEventsNote(d.index_events);
+  if (idxNote) notes.push(idxNote);
   if (d.not_found && d.not_found.length)
     notes.push(`<span class="text-amber">⚠ DBに無い銘柄（未収録/ETF/外国株等）: ${esc(d.not_found.join('、'))}</span>`);
   if (d.invalid && d.invalid.length)
@@ -613,7 +618,7 @@ function renderSellRanking(d) {
       <td style="font-weight:700;color:var(--text)">${Number(r.rank)}</td>
       <td><span class="tag" style="background:${aColor}22;color:${aColor};font-weight:700">${esc(aLabel)}</span></td>
       <td style="color:${cssVar('--status-info')};font-weight:600">${esc(r.sec_code || '-')}</td>
-      <td>${r.edinet_code ? `<a href="/company/${esc(r.edinet_code)}" class="co-link" target="_blank" rel="noopener" style="font-weight:600">${esc(r.company_name)}</a>` : esc(r.company_name)}</td>
+      <td>${r.edinet_code ? `<a href="/company/${esc(r.edinet_code)}" class="co-link" target="_blank" rel="noopener" style="font-weight:600">${esc(r.company_name)}</a>` : esc(r.company_name)}${indexEventBadge(r.index_event)}</td>
       <td style="color:var(--text-secondary);font-size:11px">${esc(r.industry || '-')}</td>
       <td style="font-weight:700;color:${scoreColor}">${r.score == null ? '-' : Number(r.score).toFixed(2)}</td>
       <td style="color:${tColor};font-weight:600">${esc(r.trend)}</td>

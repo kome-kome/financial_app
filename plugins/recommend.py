@@ -638,6 +638,15 @@ class RecommendPlugin(AnalysisPlugin):
                 "detail":       detail,
             })
 
+        # TOPIX 移行措置・新規採用の事実の注記（#1013）。並べ終えた後に付けるだけで順位は変えない。
+        # 比率の分母は採点できた候補全体。
+        from index_event_notes import annotate
+        notes, index_events = annotate(
+            db, [row["edinet_code"] for row in results],
+            [r.edinet_code for _, _, r, _ in scored], what="上位")
+        for row in results:
+            row["index_event"] = notes.get(row["edinet_code"])
+
         return {
             "count":            len(results),
             "total_candidates": len(scored),
@@ -652,6 +661,8 @@ class RecommendPlugin(AnalysisPlugin):
             "mu_available":     bool(mu_z),
             "mu_asof":          mu_asof,
             "results":          results,
+            # 台帳の有無・表示した社のうちの件数・母集団での比率・表の上の 1 行・バナー（#1013）
+            "index_events":     index_events,
         }
 
 
