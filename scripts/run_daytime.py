@@ -414,6 +414,22 @@ JOBS: dict[str, Job] = {
         # 読み手（夜間・API）を待たせる。手動キックで PC を触っている時間帯に走らせない。
         parallel_sensitive=True,
     ),
+    # 事前登録 docs/prereg/index-event-2026.md の stage A（盲検）。凍結値は追記節の値と同じ
+    # （tests/test_measure_index_event.py が照合する。凍結し直したらここも直す）。
+    "measure:index-event-a": Job(
+        name="measure_index_event_a",
+        argv=("{python}", "-m", "scripts.measure_index_event", "stage-a",
+              "--prereg", "docs/prereg/index-event-2026.md",
+              "--prereg-sha", "82ae38b19755d1e436b2c0cc9e0c75cda2731929041218b4b6adfd8d573494d5"),
+        why="2022 前例（TOPIX の段階的ウエイト低減 493 社）の stage A＝処置群の事象窓のリターンを"
+            "見ない下調べ（#1031・親 #1008・#1001）。暦・マッチング・バランス・first stage・MDE・"
+            "placebo の誤検出率・R0 を出し、結果は事前登録の追記節へ書き足す。stage B（開封）はその後。",
+        # 見積り（週次株価の差分ロードと通期行の全年度読み込みが大半）。実走ログで差し替える。
+        measured_min=10.0,
+        # 事前登録 L8「日中キューで単独に回す」。placebo は固定 seed だが、並走で読み込みの途中に
+        # 夜間の書き込みが入ると、同じ入力から違うマッチ対が出る。
+        parallel_sensitive=True,
+    ),
     # 9/18 の列数上限の本測定で「上限が財務の列を締め出している」は否定された（上限 40 でも財務は
     # 2列）。残った見立ては「M-1 の目的変数は素の52週先リターンなので、BIC（二乗誤差）は相場全体の
     # 変動を説明するマクロ列を選ぶ。評価は月内の順位」＝学習と評価のずれ（ADR-0050 の 9/18 追記）。
