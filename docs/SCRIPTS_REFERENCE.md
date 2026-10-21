@@ -55,6 +55,7 @@
 | [`scripts/grid_macro_beta.py`](#scriptsgrid_macro_betapy) | 検証（計測） |
 | [`scripts/macro_beta_gate_history.py`](#scriptsmacro_beta_gate_historypy) | 検証（計測） |
 | [`scripts/index_exposure.py`](#scriptsindex_exposurepy) | 検証（計測） |
+| [`scripts/measure_index_event.py`](#scriptsmeasure_index_eventpy) | 検証（計測） |
 | [`scripts/nightly_diag_report.py`](#scriptsnightly_diag_reportpy) | 検証（計測） |
 | [`run_local.ps1`](#run_localps1) | ユーティリティ |
 | [`scripts/run_nightly.py`](#scriptsrun_nightlypy) | ユーティリティ |
@@ -310,6 +311,12 @@ NUTS 軌道長（`max_tree_depth`）× `target_accept` の格子ドライバ（I
 
 種別: 検証（計測） ／ 依存先: index_events.py、prediction_snapshots.py、plugins/recommend.py（`score_candidates`）、database.py（`tradable_filters`）
 
+## `scripts/measure_index_event.py`
+
+指数イベントのイベントスタディ（2022 前例＝TOPIX の段階的ウエイト低減 493 社・#1031・親 #1008 → #1001）を、事前登録 `docs/prereg/index-event-2026.md`（#1007）どおりに測る CLI。段は事前登録の開封の順序で分ける: `python -m scripts.measure_index_event stage-a --prereg docs/prereg/index-event-2026.md --prereg-sha <凍結値> [--out <json>] [--pairs-out <json>] [--lists-dir <.index_lists>]`（stage B は #1032 で足す）。部品は `index_event_study.py`（純関数）で、stage A は暦（D_m・P_m・w_m）・対照（C1＝data_j の規模区分 '-'・内国株式・台帳外／C2＝2026-10 の継続銘柄から 2022 の群を除いたもの）・マッチング（マッチ日 2022-03-31 / 2022-09-30・17 業種の完全一致・caliper 0.25SD・Mahalanobis の k=5 最近傍・復元あり）・SMD・first stage（圧力週の異常売買代金の t ≥ 3）・σ / SE(δ̂) / MDE・placebo の誤検出率・R0 を出す。守ること: **処置群の事象窓のリターンを読まない**（`stage_a` が入口で公表週以降の終値を落とす・テストは「書き換えても出力が変わらない」で固定）／**`--prereg-sha` が本文の sha256 と違えば終了コード 2**／**要約の JSON（既定 `scripts/.cache/index_event_stage_a.json`）に銘柄コードを入れない**——マッチ対は公開しない `.index_lists/derived/index_event_2022_pairs.json` へ別に書き、stage B と #1009 が読む（data_j の断面は毎月増えるので計算し直すと同じ対にならない）／**終値は学習ラベルと同じ `load_weekly_prices_chunked`、売買代金だけ対象の社と週に絞って読む**（週次ローダの SELECT へ列を足さない）／**R0 が不成立なら JSON を書いてから終了コード 3**。日中枠（`measure:index-event-a`・並走に敏感）で単独に回す。**週次株価は 2019-07-29 からなので、事前登録が 2014〜2018 年から取る σ・SE(δ̂)・MDE と placebo は「測定不能（理由付き）」になる**（本文を変えて凍結し直すかは方針の判断・別 Issue）
+
+種別: 検証（計測） ／ 依存先: index_event_study.py、index_events.py、sector_gap_asof.py（`load_inputs` / `asof_records`）、plugins/macro_snapshots.py（`load_weekly_prices_chunked`）、scripts/prereg.py
+
 ## `scripts/nightly_diag_report.py`
 
 夜間 producer の診断値を**夜をまたいで**読む読み取り専用 CLI（#726・[ADR-0061](adr/0061-nightly-keeps-the-diagnostics-it-already-computes.md)）。`--view timeline`（既定）は追っている値（sector_ols: 業種別 α・端の業種数／macro_enet: α・l1_ratio・非ゼロ係数数・OOF rank-IC など）が**前の夜から動いた夜だけ**を出し、同時に何が変わっていたか（`code` / `code?`＝unknown か dirty / `preprocess` / `data`＝断面日か件数）を添える。**どれも変わらずに動いた夜は `no-context-change`**＝#697 型の並び依存の候補（入力ハッシュは持たないので断定ではない）。`--view edges` は α が候補の端に張り付いた夜（下端＝罰なし同等・上端＝特徴量が効いていない、の読み方つき）、`--view sectors` は業種ごとの ridge α の推移。集計は純関数に切り出し、出力は ASCII の区切りだけ（cp932）。接続文字列は出さない
@@ -537,7 +544,7 @@ M-1 探索専用タスクの登録（既定 毎月3日 JST 01:00・16時間）�
 - **`--peek`・`--queue`・ドライランは中断の回収を見込んだ計画を出す**（#742）。回収の判断は純関数 `plan_reclaim` に置き、実走の `reclaim_inflight` はその結果を書くだけ。読み手は `apply_schedule(write=False, preview_reclaim=True)` で同じ並びを見る（以前は `--peek` が回収予定の敏感な仕事を見落とし、`-Now` が人の作業中に実走を起動した）。
 - **キューが空の日は exit 0**（平日毎日走るので、起票すると鳴りっぱなしになる）。
 - **引数はキューに触る前に全部解析する**（#692・`build_parser` は共通パーサにキュー操作を足した上位集合）。以前は `"--x" in args` の手書き判定のあと `bc.run_batch` の中で初めて解析していたため、`--help` や打ち間違いが `take` の後で `SystemExit` になり、先頭の仕事が exit 0 のまま黙って消えた（in-flight マーカーも `finally` で消えるので回収にも掛からない）。`--steps` の検証も `take` の前。**キュー操作は互いに排他**（2つ渡すと exit 2）。`--steps` で絞った日は生き残ったステップの仕事だけを `take` する。
-- **`Job.parallel_sensitive` は「裏で作業されると同じ入力から違う答えが出るか」**を表す（所要が延びるかではない）。`beta` / `tune:*` / `gate:*` / `bench:rhat-scale` は True、`interim` / `disclosures` / `wf:preset-weights` / `refetch:financials` は False。**既定値を持たせない必須フィールド**（足し忘れを `TypeError` で落とす）。分岐するのは `-Now` の手動キックだけ。
+- **`Job.parallel_sensitive` は「裏で作業されると同じ入力から違う答えが出るか」**を表す（所要が延びるかではない）。`beta` / `tune:*` / `gate:*` / `measure:*` / `bench:rhat-scale` は True、`interim` / `disclosures` / `wf:preset-weights` / `refetch:financials` は False。**既定値を持たせない必須フィールド**（足し忘れを `TypeError` で落とす）。分岐するのは `-Now` の手動キックだけ。
 - **`JOBS` に無い名前と予算超過の仕事は `enqueue` の時点で弾く**（M-1 探索 752分は積めない＝[ADR-0046](adr/0046-steps-that-cannot-finish-get-their-own-task.md) の専用タスク）。引数は `run_monthly*.py` と同一であることをテストが照合する。
 - **仕事は手で作ったキャッシュに依存させない**（#674）。`--refresh-cache` を渡し、入力を毎回ローカル DB から作り直す。書き忘れは `tests/test_run_daytime.py::TestJobsBuildTheirOwnInputs` が落とす（経緯は [GOTCHAS.md](GOTCHAS.md)）。
 - **暦**（#681・[ADR-0056](adr/0056-the-daytime-queue-follows-a-calendar.md)）: 日付で決まる仕事は `SCHEDULE` が積む（`disclosures` は毎月1日以降、`interim` は毎月16日以降の最初の実走で**キュー先頭へ1回だけ**。判定した月は `app_settings.daytime_schedule`）。今月ぶんが入っているかは成果物の `created_at`（`h1_created_at` / `disclosure_created_at`＝`batch_freshness.PRODUCERS` と同じ読み手）で判定し、`updated_at` は使わない。測れなければ積む側へ倒す。
