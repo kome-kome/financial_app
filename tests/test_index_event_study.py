@@ -473,6 +473,140 @@ class TestStageA:
         assert summary["r0"]["status"] == "fail"
 
 
+# ── M 族（§6.2・#1009）────────────────────────────────────────────────────────
+
+CAL = S.pressure_calendar(IE.STEPS_2022)
+
+
+class TestExposure:
+    @pytest.mark.parametrize("ym,e,p", [
+        ("2022-09", 1.0, 0.0),                       # 2022-10〜2023-07 の 4 回が窓に入る
+        ("2024-12", 0.25, 333 / 364),                # 最後の 1 回（2025-01-30）と除外後 333 日
+        ("2025-06", 0.0, 1.0),                       # 窓のすべてが除外の後
+        ("2021-06", 0.0, 0.0),
+    ])
+    def test_hand_values(self, ym, e, p):
+        assert S.label_window_exposure(ym, CAL) == (pytest.approx(e), pytest.approx(p))
+
+    def test_month_end(self):
+        assert S.month_end("2024-02") == date(2024, 2, 29)
+        assert S.month_end("2024-12") == date(2024, 12, 31)
+
+
+def _random_aligned(seed: int = 0, n: int = 30, yms=("2024-01", "2024-02", "2024-03")) -> dict:
+    rng = np.random.default_rng(seed)
+    out = {}
+    for ym in yms:
+        for i in range(n):
+            y = float(rng.normal())
+            out[(ym, f"E{i:02d}")] = (float(np.round(y + rng.normal(), 1)), y)   # 予測に同点を混ぜる
+    return out
+
+
+class TestPlacement:
+    def test_group_bias_equals_blank_group_breakdown(self):
+        """M 族の偏りは momentum_gate の群の内訳と同じ定義（期ごとの値まで一致する）。"""
+        from scripts import momentum_gate
+
+        aligned = _random_aligned()
+        group = {f"E{i:02d}" for i in range(0, 30, 3)}
+        labels = {k: ["g"] for k in aligned if k[1] in group}
+        want = momentum_gate.blank_group_breakdown(aligned, labels)["g"]["bias_by_period"]
+        got = S.group_bias(S.placements(aligned), {ym: group for ym in ("2024-01", "2024-02", "2024-03")})
+        assert got == pytest.approx(want)
+
+    def test_tiny_period_is_left_out(self):
+        df = S.placements({("2024-01", "E1"): (0.1, 0.2), ("2024-01", "E2"): (0.2, 0.1)})
+        assert df.empty
+
+    def test_paired_domain(self):
+        pairs = {"T1": ("C1", "C2"), "T2": ("C3",), "T3": ("C1",)}
+        got = S.paired_domain({"2024-01": {"T1", "T2", "C2", "T3"}}, pairs)
+        # T2 は対照がいない・T3 の対照 C1 もいない → T は T1 だけ、C はそのそろった対照 C2 だけ
+        assert got == {"2024-01": ({"T1"}, {"C2"})}
+
+
+class TestRegression:
+    def test_lead_year_is_left_out(self):
+        exposure = {f"{y}-01": (float(y - 2019), 0.0) for y in range(2019, 2026)}
+        exposure.update({f"{y}-07": (0.0, float(y > 2023)) for y in range(2019, 2026)})
+        d = {ym: 0.1 + 0.02 * e + 0.05 * p for ym, (e, p) in exposure.items()}
+        d["2021-01"] = 99.0                                  # 2021 年の期は回帰に入らない
+        fit = S.fit_m_regression(d, exposure)
+        assert (fit["a"], fit["b"], fit["c"]) == (pytest.approx(0.1), pytest.approx(0.02), pytest.approx(0.05))
+        assert fit["n_periods"] == 12
+
+    def test_unidentified_coefficients_are_none(self):
+        exposure = {f"2019-{m:02d}": (0.0, 0.0) for m in range(1, 13)}
+        fit = S.fit_m_regression({ym: 0.1 for ym in exposure}, exposure)
+        assert fit["b"] is None and fit["c"] is None
+
+
+class TestStrataAndPseudo:
+    def test_strata_bins(self):
+        v = pd.DataFrame({"logcap": [float(i) for i in range(20)],
+                          "log_turnover_ratio": [float(-i) for i in range(20)],
+                          "sector17": ["A"] * 19 + [None]},
+                         index=[f"E{i:02d}" for i in range(20)])
+        st = S.strata(v)
+        assert "E19" not in st                                # 業種の無い社は層に入らない
+        assert st["E00"][:2] == (0, 2) and st["E18"][:2] == (9, 0)
+
+    def test_pseudo_groups_keep_the_strata_counts(self):
+        st = {**{f"T{i}": (0, 0, "A") for i in range(3)}, "T9": (1, 0, "A"),
+              **{f"P{i}": (0, 0, "A") for i in range(10)}, "Q0": (2, 0, "A")}
+        groups, shortfall = S.pseudo_groups(st, ["T0", "T1", "T2", "T9"],
+                                            [f"P{i}" for i in range(10)] + ["Q0"], n=50, seed=0)
+        assert all(len(g) == 3 and g <= {f"P{i}" for i in range(10)} for g in groups)
+        assert shortfall == {"size1|liq0|A": 1}                # 層 (1,0,A) に引ける社が無い
+        again, _ = S.pseudo_groups(st, ["T0", "T1", "T2", "T9"],
+                                   [f"P{i}" for i in range(10)] + ["Q0"], n=50, seed=0)
+        assert groups == again and len({frozenset(g) for g in groups}) > 1
+
+
+def _m_panel(shift: float, seed: int = 0) -> tuple:
+    """2019-01〜2025-10 の月次 OOF。処置 20 社（対照 2 社ずつ）＋他 200 社。処置の予測だけ shift × E_t 上げる。"""
+    rng = np.random.default_rng(seed)
+    yms = [f"{y}-{m:02d}" for y in range(2019, 2026) for m in range(1, 13)][:82]
+    pairs = {f"T{i:02d}": (f"C{i:02d}a", f"C{i:02d}b") for i in range(20)}
+    others = [f"O{i:03d}" for i in range(200)]
+    firms = list(pairs) + [c for cs in pairs.values() for c in cs] + others
+    aligned = {}
+    for ym in yms:
+        e, _p = S.label_window_exposure(ym, CAL)
+        for ec in firms:
+            y = float(rng.normal())
+            aligned[(ym, ec)] = (y + float(rng.normal()) + (shift * e if ec in pairs else 0.0), y)
+    return aligned, pairs, {ec: (0, 0, "A") for ec in firms}, set(others)
+
+
+class TestMFamily:
+    def test_planted_effect_is_recovered(self):
+        aligned, pairs, st, eligible = _m_panel(shift=1.5)
+        r = S.m_family_test(aligned, pairs, CAL, st, eligible, permutations=200)
+        assert r["fit"]["b"] > 0.1
+        assert r["permutation"]["p"]["b"] < S.M_ALPHA
+        assert r["permutation"]["n_valid"] == 200 and r["permutation"]["pseudo_size"] == 20
+        assert set(r["lead_periods"]) == {f"2021-{m:02d}" for m in range(1, 13)}
+        assert r["fit"]["n_periods"] == 82 - 12
+        verdict = S.m_family_verdict({"xgb_m2": r})
+        assert verdict["xgb_m2"]["b"]["significant"] is True
+
+    def test_null_is_not_significant(self):
+        aligned, pairs, st, eligible = _m_panel(shift=0.0, seed=3)
+        r = S.m_family_test(aligned, pairs, CAL, st, eligible, permutations=200)
+        assert r["permutation"]["p"]["b"] > S.M_ALPHA and r["permutation"]["p"]["c"] > S.M_ALPHA
+
+    def test_result_carries_no_codes(self):
+        aligned, pairs, st, eligible = _m_panel(shift=0.5)
+        r = S.m_family_test(aligned, pairs, CAL, st, eligible, permutations=20)
+        assert not re.search(r'"(T\d\d|C\d\d[ab]|O\d{3})"', json.dumps(r, default=str))
+
+    def test_alpha_is_bonferroni_over_four(self):
+        assert S.M_ALPHA == pytest.approx(0.0125)
+        assert S.M_MODELS == {"xgb_m2": "raw", "elasticnet": "size_neutral"}
+
+
 def test_pure_module_does_not_import_database_or_scripts():
     src = (ROOT / "index_event_study.py").read_text(encoding="utf-8")
     for bad in ("\nimport database", "\nfrom database", "\nfrom scripts", "\nimport scripts",

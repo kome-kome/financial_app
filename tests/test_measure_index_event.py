@@ -40,17 +40,20 @@ def _fixed_head_sha(monkeypatch):
 
 
 class TestDaytimeJob:
-    def test_frozen_value_matches_the_prereg_appendix(self):
-        argv = rd.JOBS["measure:index-event-a"].argv
+    @pytest.mark.parametrize("key", ["measure:index-event-a", "measure:index-event-m"])
+    def test_frozen_value_matches_the_prereg_appendix(self, key):
+        argv = rd.JOBS[key].argv
         doc = ROOT / argv[argv.index("--prereg") + 1]
         sha = argv[argv.index("--prereg-sha") + 1]
         text = doc.read_text(encoding="utf-8")
         # 凍結し直したら（本文と追記節の凍結値を変えたら）日中キューの引数も直す
         assert sha == prereg.recorded_sha(text) == prereg.body_sha256(text)
 
-    def test_runs_stage_a_alone(self):
-        job = rd.JOBS["measure:index-event-a"]
-        assert job.argv[1:5] == ("-m", "scripts.measure_index_event", "stage-a", "--prereg")
+    @pytest.mark.parametrize("key,stage", [("measure:index-event-a", "stage-a"),
+                                           ("measure:index-event-m", "m-family")])
+    def test_runs_alone(self, key, stage):
+        job = rd.JOBS[key]
+        assert job.argv[1:5] == ("-m", "scripts.measure_index_event", stage, "--prereg")
         assert job.parallel_sensitive is True
 
 
@@ -173,6 +176,120 @@ def test_load_turnover_reads_only_the_window(db, make_weekly):
     db.commit()
     got = X.load_turnover(db, {"E1"}, date(2022, 1, 1), date(2022, 12, 31))
     assert got == {"E1": {date(2022, 1, 3): 5.0}}
+
+
+# ── M 族（m-family・#1009）────────────────────────────────────────────────────────
+
+OTHERS = [f"E8{i:03d}" for i in range(40)]
+
+
+def _m_inputs(tmp_path, *, shift: float = 1.0, pairs_sha: str = FROZEN, runs=None):
+    """M-2 raw / M-6 size_neutral の OOF の CSV と stage A のマッチ対を tmp に書く。処置の予測だけ上げる。"""
+    from scripts.momentum_gate import SIZE_OOF_CSV_COLUMNS, write_oof_csv
+
+    rng = np.random.default_rng(0)
+    pairs = {t: [c for c in CONTROLS if c.startswith(t[:4])] for t in TREATED}
+    firms = TREATED + CONTROLS + OTHERS
+    cal = S.pressure_calendar(IE.STEPS_2022)
+    yms = [f"{y}-{m:02d}" for y in range(2019, 2026) for m in range(1, 13)][:82]
+    rows = {}
+    for run in runs or ("raw|xgb_m2", "size_neutral|elasticnet"):
+        out = []
+        for ym in yms:
+            e, _p = S.label_window_exposure(ym, cal)
+            for ec in firms:
+                y = float(rng.normal())
+                out.append((ym, ec, y + float(rng.normal()) + (shift * e if ec in pairs else 0.0), y,
+                            10.0, "size_d0"))
+        rows[run] = out
+    csv_path = tmp_path / "oof.csv"
+    write_oof_csv(csv_path, rows, columns=SIZE_OOF_CSV_COLUMNS)
+    pairs_path = tmp_path / "pairs.json"
+    pairs_path.write_text(json.dumps({"prereg_sha256": pairs_sha, "generated_at": "2026-10-22T00:00:00+00:00",
+                                      "data": {"snapshot_as_of": "2026-09-30"},
+                                      "pairs": {"C1@2022-03-31": pairs}}), encoding="utf-8")
+    return csv_path, pairs_path
+
+
+@pytest.fixture
+def m_wired(db, monkeypatch):
+    import collector_utils
+    import database
+    import pandas as pd
+
+    monkeypatch.setattr(collector_utils, "force_utf8_stdout", lambda: None)
+    monkeypatch.setattr(database, "SessionLocal", lambda: contextlib.nullcontext(db))
+    monkeypatch.setattr(IE, "load_ledger", lambda db, root=None: _ledger())
+    firms = TREATED + CONTROLS + OTHERS + [NO_FIN]
+    variables = pd.DataFrame({"logcap": [10.0 + (i % 5) for i in range(len(firms))],
+                              "log_turnover_ratio": [-3.0 + (i % 3) for i in range(len(firms))],
+                              "log_pbr": 0.0, "ret_52w": 0.0, "sector17": "情報通信・サービスその他"},
+                             index=firms)
+    monkeypatch.setattr(X, "load_strata_variables", lambda db: variables)
+    return db
+
+
+def _run_m(tmp_path, csv_path, pairs_path, sha=FROZEN):
+    out = tmp_path / "m.json"
+    code = X.main(["m-family", "--prereg", str(PREREG), "--prereg-sha", sha, "--oof-csv", str(csv_path),
+                   "--pairs", str(pairs_path), "--out", str(out)])
+    return code, out
+
+
+class TestMFamily:
+    def test_end_to_end(self, m_wired, tmp_path, capsys):
+        csv_path, pairs_path = _m_inputs(tmp_path, shift=1.5)
+        code, out = _run_m(tmp_path, csv_path, pairs_path)
+        assert code == 0
+        data = json.loads(out.read_text(encoding="utf-8"))
+        assert data["stage"] == "M" and data["prereg_sha256"] == FROZEN
+        assert set(data["verdict"]) == {"xgb_m2", "elasticnet"}
+        assert data["verdict"]["xgb_m2"]["b"]["coef"] > 0
+        assert data["inputs"]["n_treated_itt"] == 5 and data["inputs"]["n_controls_used"] == 12
+        # 擬似群は処置（ITT）と使った対照以外から引く
+        assert data["inputs"]["n_eligible"] == len(OTHERS)
+        assert data["models"]["xgb_m2"]["permutation"]["n"] == S.M_PERMUTATIONS
+        assert not re.search(r"E[89]\d{3}", out.read_text(encoding="utf-8"))
+        assert "[m-family]" in capsys.readouterr().out
+
+    def test_pairs_from_another_freeze_stop_with_2(self, m_wired, tmp_path):
+        csv_path, pairs_path = _m_inputs(tmp_path, pairs_sha="0" * 64)
+        code, out = _run_m(tmp_path, csv_path, pairs_path)
+        assert code == X.EXIT_FAILED and not out.exists()
+
+    def test_missing_inputs_stop_with_2(self, m_wired, tmp_path):
+        csv_path, pairs_path = _m_inputs(tmp_path, runs=("raw|xgb_m2",))     # M-6 の行が無い
+        assert _run_m(tmp_path, csv_path, pairs_path)[0] == X.EXIT_FAILED
+        assert _run_m(tmp_path, tmp_path / "none.csv", pairs_path)[0] == X.EXIT_FAILED
+        assert _run_m(tmp_path, csv_path, tmp_path / "none.json")[0] == X.EXIT_FAILED
+
+    def test_prereg_mismatch_stops_with_2(self, m_wired, tmp_path):
+        csv_path, pairs_path = _m_inputs(tmp_path)
+        with pytest.raises(SystemExit) as e:
+            _run_m(tmp_path, csv_path, pairs_path, sha="0" * 64)
+        assert e.value.code == prereg.EXIT_MISMATCH
+
+    def test_reads_only_the_production_runs(self, tmp_path):
+        from scripts.momentum_gate import SIZE_OOF_CSV_COLUMNS, write_oof_csv
+
+        path = tmp_path / "x.csv"
+        write_oof_csv(path, {"raw|xgb_m2": [("2024-01", "E1", 0.1, 0.2, 1.0, "size_d0")],
+                             "size_neutral|xgb_m2": [("2024-01", "E1", 9.0, 0.2, 1.0, "size_d0")],
+                             "raw|elasticnet": [("2024-01", "E1", 8.0, 0.2, 1.0, "size_d0")],
+                             "size_neutral|elasticnet": [("2024-01", "E1", 0.3, 0.2, 1.0, "size_d0")]},
+                      columns=SIZE_OOF_CSV_COLUMNS)
+        assert X.read_oof_csv(path, S.M_MODELS) == {"xgb_m2": {("2024-01", "E1"): (0.1, 0.2)},
+                                                    "elasticnet": {("2024-01", "E1"): (0.3, 0.2)}}
+
+
+def test_load_strata_variables_on_sqlite(db):
+    """層の変数は stage A と同じ読み込みとマッチ日の計算を全社へ当てたもの（通期行の無い社は欠ける）。"""
+    _seed(db)
+    v = X.load_strata_variables(db)
+    assert set(TREATED + CONTROLS) <= set(v.index) and NO_FIN not in v.index
+    assert v.loc[TREATED, ["logcap", "log_turnover_ratio"]].notna().all().all()
+    assert set(v["sector17"]) == {"情報通信・サービスその他"}
+    assert len(S.strata(v)) == len(TREATED + CONTROLS)
 
 
 def test_jsonable_drops_nan():

@@ -26,9 +26,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from plugins.macro_snapshots import FINANCIAL_LAG_DAYS, _spearman  # noqa: E402
 from scripts import momentum_gate  # noqa: E402
 from scripts.momentum_gate import (  # noqa: E402
-    MOM_WINDOW, SIZE_NEUTRAL_BASE_COND, SIZE_NEUTRAL_CONDS, SIZE_NEUTRAL_MODELS, Cond,
-    aligned_from, base_of, bonferroni_alpha, build_conditions, log_market_cap_by_ym,
-    size_common_keys, size_decile_labels, size_neutralize,
+    MOM_WINDOW, SIZE_NEUTRAL_BASE_COND, SIZE_NEUTRAL_CONDS, SIZE_NEUTRAL_MODELS, SIZE_OOF_CSV_COLUMNS,
+    Cond, aligned_from, base_of, bonferroni_alpha, build_conditions, log_market_cap_by_ym,
+    size_common_keys, size_decile_labels, size_neutralize, size_oof_rows, write_oof_csv,
 )
 
 YM = "2024-06"
@@ -192,6 +192,70 @@ class TestDecilesAndAlignment:
         neutral = momentum_gate.blank_group_breakdown(aligned_from(out, out_meta), labels)
         assert raw["size_d9"]["placement_bias"] > 0.2
         assert abs(neutral["size_d9"]["placement_bias"]) < abs(raw["size_d9"]["placement_bias"]) / 2
+
+    def test_breakdown_keeps_the_per_period_series(self):
+        """M 族（#1009）は期ごとの群の差を回帰するので、期ごとの値もキーで残す（既存のキーは変えない）。"""
+        resid, meta, logcap = _month(60, slope=0.5)
+        r2, m2, l2 = _month(60, slope=-0.5, seed=2)
+        resid["2024-07"] = r2[YM]
+        meta["2024-07"] = m2[YM]
+        logcap.update({("2024-07", ec): x for (_ym, ec), x in l2.items()})
+        bd = momentum_gate.blank_group_breakdown(aligned_from(resid, meta),
+                                                 size_decile_labels(logcap, set(logcap)))
+        d9 = bd["size_d9"]
+        assert set(d9["bias_by_period"]) == {YM, "2024-07"}
+        assert d9["placement_bias"] == pytest.approx(sum(d9["bias_by_period"].values()) / 2)
+        assert d9["bias_by_period"][YM] > 0 > d9["bias_by_period"]["2024-07"]
+        assert set(d9["ic_by_period"]) == {YM, "2024-07"}
+        assert {"samples", "rank_ic", "rank_ic_std", "ic_periods", "placement_bias",
+                "placement_bias_t", "bias_periods"} <= set(d9)
+
+
+# ── 行ごとの OOF の CSV（#1009）──────────────────────────────────────────────────
+
+class TestRowLevelOof:
+    def test_breakdown_is_reproducible_from_the_csv(self, tmp_path):
+        """十分位の内訳と同じ行を書くので、CSV だけから内訳を計算し直して JSON と一致する（#951 と同型）。"""
+        import csv
+
+        resid, meta, logcap = _month(80, slope=0.6)
+        aligned = aligned_from(resid, meta)
+        labels = size_decile_labels(logcap, set(logcap))
+        want = momentum_gate.blank_group_breakdown(aligned, labels)
+        path = tmp_path / "sub" / "x_oof.csv"
+        n = write_oof_csv(path, {"size_neutral|elasticnet": size_oof_rows(aligned, labels, logcap)},
+                          columns=SIZE_OOF_CSV_COLUMNS)
+        assert n == 80
+        with path.open(encoding="utf-8", newline="") as f:
+            rows = list(csv.DictReader(f))
+        assert tuple(rows[0]) == SIZE_OOF_CSV_COLUMNS
+        back = {(r["ym"], r["edinet_code"]): (float(r["yhat"]), float(r["y"])) for r in rows}
+        back_labels = {(r["ym"], r["edinet_code"]): [r["size_decile"]] for r in rows}
+        assert back == aligned
+        assert {(r["ym"], r["edinet_code"]): float(r["logcap"]) for r in rows} == logcap
+        assert momentum_gate.blank_group_breakdown(back, back_labels) == want
+
+    def test_missing_market_cap_is_an_empty_cell(self, tmp_path):
+        rows = size_oof_rows({(YM, "E1"): (0.1, 0.2)}, {}, {})
+        assert rows == [(YM, "E1", 0.1, 0.2, None, "")]
+        path = tmp_path / "x.csv"
+        write_oof_csv(path, {"raw|xgb_m2": rows}, columns=SIZE_OOF_CSV_COLUMNS)
+        assert path.read_text(encoding="utf-8").splitlines()[1] == "raw,xgb_m2,2024-06,E1,0.1,0.2,,"
+
+    def test_main_writes_the_same_rows_as_the_deciles(self):
+        src = inspect.getsource(momentum_gate.main)
+        assert "blank_group_breakdown(aligned_sn, size_labels)" in src
+        assert "size_oof_rows(aligned_sn, size_labels, logcap)" in src
+        assert "write_oof_csv(size_oof_path, size_oof, columns=SIZE_OOF_CSV_COLUMNS)" in src
+        assert 'size_oof_path = out_path.with_name(out_path.stem + "_oof.csv")' in src
+        assert '"oof_rows": size_oof_n' in src
+
+    def test_default_path_is_what_m_family_reads(self):
+        from scripts import measure_index_event as X
+
+        name = f"momentum_gate{momentum_gate.MODE_SUFFIX['size_neutral']}"
+        assert X.DEFAULT_M_OOF.name == f"{name}_oof.csv"
+        assert X.DEFAULT_M_OOF.parent == momentum_gate._OUT_DIR
 
 
 # ── モードの条件・分母・対象モデル・配線 ──────────────────────────────────────
