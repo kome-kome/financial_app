@@ -6,6 +6,10 @@
 Newey-West（§5.2）・σ / SE(δ̂) / MDE（§7）・placebo の誤検出率（§5.2）・R0 の照合（§2）。事象窓の量と
 検定（E 族・κ・δ̂・ρ）は stage B（#1032）で足す。
 
+**M 族（§6.2・#1009）** も持つ: 本番の OOF（M-2 は raw・M-6 は size_neutral）で、期ごとの処置群と対照の
+placement bias の差 d_t を E_t・P_t へ回帰し、層別に引いて全期で固定した擬似処置群の順列で p を出す。
+OOF は `scripts.momentum_gate --size-neutral` が書く CSV から読む。
+
 ## 盲検を構造で守る
 
 `stage_a` は入口で終値の表から**公表週（公表日を含む ISO 週）以降の行を落としてから**計算する。
@@ -629,3 +633,249 @@ def stage_a(*, closes: pd.DataFrame, turnover: pd.DataFrame,
         "definitions": DEFINITIONS,
     }
     return summary, pairs
+
+
+# ── M 族（§6.2）: 本番の OOF が処置群を対照より上や下へ置いていたか ─────────────────────
+
+# 本番の構成でそろえる（ADR-0041 / ADR-0047）: M-2 は raw、M-6 は size_neutral の OOF。
+M_MODELS = {"xgb_m2": "raw", "elasticnet": "size_neutral"}
+M_COEFS = ("b", "c")                     # d_t = a + b·E_t + c·P_t の検定する係数
+M_ALPHA = 0.05 / (len(M_MODELS) * len(M_COEFS))   # Bonferroni（各 0.0125）
+M_PERMUTATIONS = 1000
+M_NW_LAG = 3                             # 併記するだけ（判定は順列の p）
+M_LEAD_YEAR = "2021"                     # 先回りが混じる期（回帰に入れず記述する）
+M_LABEL_DAYS = 364                       # ラベル窓（月末の足から 52 週）
+SIZE_BINS = 10                           # 擬似処置群の層: 規模十分位 × 流動性三分位 × 17 業種
+LIQUIDITY_BINS = 3
+M_DEFINITIONS = {
+    "E_t": f"月末から {M_LABEL_DAYS} 日の窓に圧力日 P_m が入る回数 ÷ 4",
+    "P_t": "同じ窓のうち除外（最後の指数修正日）より後の日数の割合",
+    "paired_domain": "期ごとに、処置社とその対照が 1 社以上そろう処置社を T、そのそろった対照を C（重複は 1 社）",
+    "bias": "期ごとの、全体の中での予測の順位分位 − 実現の順位分位の群平均（blank_group_breakdown と同じ）",
+    "strata": f"マッチ日（主）の logcap の {SIZE_BINS} 分位 × log(52 週の売買代金 ÷ 時価総額) の "
+              f"{LIQUIDITY_BINS} 分位 × 17 業種。分位は値の順・同じ値はコード順",
+    "pseudo": "層ごとに、マッチした処置社と同じ社数を処置群（ITT）・使った対照以外から非復元で引く。"
+              "足りない層はその層の全社を使い、不足数を出す。全期で固定",
+    "p_permutation": f"(#{{|b*| >= |b|}} + 1) / (有効な回数 + 1)。c も同じ。既定 {M_PERMUTATIONS} 回",
+}
+
+
+def month_end(ym: str) -> date:
+    y, m = int(ym[:4]), int(ym[5:7])
+    return date(y + m // 12, m % 12 + 1, 1) - timedelta(days=1)
+
+
+def label_window_exposure(ym: str, calendar: Sequence[PressureWeek], *,
+                          days: int = M_LABEL_DAYS) -> tuple:
+    """(E_t, P_t)。窓は月末 (ym) の翌日から `days` 日。除外日は暦の最後の指数修正日。"""
+    start = month_end(ym)
+    end = start + timedelta(days=days)
+    e = sum(1 for pw in calendar if start < pw.pressure_day <= end) / 4
+    p = min(max((end - calendar[-1].effective_on).days, 0), days) / days
+    return e, p
+
+
+def placements(aligned: Mapping[tuple, tuple]) -> pd.DataFrame:
+    """{(ym, 社): (予測, 実現)} → 行ごとの placement（予測の順位分位 − 実現の順位分位）の表。
+
+    順位は期の断面全体での平均順位（1 始まり）を社数で割ったもの。全体が 3 社未満の期は外す
+    （`scripts.momentum_gate.blank_group_breakdown` と同じ）。
+    """
+    if not aligned:
+        return pd.DataFrame(columns=["ym", "ec", "yhat", "y", "p"])
+    keys = sorted(aligned)
+    df = pd.DataFrame({"ym": [k[0] for k in keys], "ec": [k[1] for k in keys],
+                       "yhat": [float(aligned[k][0]) for k in keys],
+                       "y": [float(aligned[k][1]) for k in keys]})
+    g = df.groupby("ym")
+    n = g["ec"].transform("size")
+    df["p"] = (g["yhat"].rank(method="average") - g["y"].rank(method="average")) / n
+    return df[n >= 3].reset_index(drop=True)
+
+
+def paired_domain(present_by_ym: Mapping[str, set], pairs: Mapping[str, Sequence[str]]) -> dict:
+    """{期: (T, C)}。T は対照が 1 社以上そろう処置社、C はそのそろった対照（ADR-0045）。"""
+    out = {}
+    for ym, present in present_by_ym.items():
+        t = {i for i, cs in pairs.items() if i in present and any(c in present for c in cs)}
+        c = {j for i in t for j in pairs[i] if j in present}
+        out[ym] = (t, c)
+    return out
+
+
+def _member_rows(df: pd.DataFrame, members_by_ym: Mapping[str, set]) -> pd.DataFrame:
+    return df[[ec in members_by_ym.get(ym, ()) for ym, ec in zip(df["ym"], df["ec"])]]
+
+
+def group_bias(df: pd.DataFrame, members_by_ym: Mapping[str, set]) -> dict:
+    """{期: 群の placement の平均}（群の社が 1 社以上いる期だけ）。"""
+    return {ym: float(v) for ym, v in _member_rows(df, members_by_ym).groupby("ym")["p"].mean().items()}
+
+
+def _group_rank_ic(df: pd.DataFrame, members_by_ym: Mapping[str, set]) -> dict:
+    out = {}
+    for ym, sub in _member_rows(df, members_by_ym).groupby("ym"):
+        if len(sub) >= 3 and sub["yhat"].nunique() > 1 and sub["y"].nunique() > 1:
+            out[ym] = float(sub["yhat"].rank().corr(sub["y"].rank()))
+    return out
+
+
+def _regression_periods(d: Mapping[str, Optional[float]]) -> list:
+    return sorted(ym for ym, v in d.items()
+                  if not ym.startswith(M_LEAD_YEAR) and v is not None and math.isfinite(v))
+
+
+def fit_m_regression(d: Mapping[str, float], exposure: Mapping[str, tuple]) -> dict:
+    """d_t = a + b·E_t + c·P_t の最小二乗（先回りの年の期は外す）。係数が識別できなければ None。"""
+    yms = _regression_periods(d)
+    out = {"n_periods": len(yms), "first": yms[0] if yms else None, "last": yms[-1] if yms else None,
+           "a": None, "b": None, "c": None}
+    if len(yms) < 4:
+        return out
+    x = np.array([[1.0, *exposure[ym]] for ym in yms])
+    if np.linalg.matrix_rank(x) < x.shape[1]:
+        return out
+    a, b, c = np.linalg.lstsq(x, np.array([d[ym] for ym in yms]), rcond=None)[0]
+    out.update(a=float(a), b=float(b), c=float(c))
+    return out
+
+
+def nw_regression_p(d: Mapping[str, float], exposure: Mapping[str, tuple], *, lag: int = M_NW_LAG) -> dict:
+    """同じ回帰の Newey-West（lag 3）の両側 p（併記用・判定には使わない）。"""
+    import statsmodels.api as sm
+
+    yms = _regression_periods(d)
+    out = {"lag": lag, "se": None, "p": None}
+    if len(yms) < 5:
+        return out
+    x = np.array([[1.0, *exposure[ym]] for ym in yms])
+    if np.linalg.matrix_rank(x) < x.shape[1]:
+        return out
+    fit = sm.OLS(np.array([d[ym] for ym in yms]), x).fit(
+        cov_type="HAC", cov_kwds={"maxlags": min(lag, len(yms) - 1)})
+    out.update(se={"b": float(fit.bse[1]), "c": float(fit.bse[2])},
+               p={"b": float(fit.pvalues[1]), "c": float(fit.pvalues[2])})
+    return out
+
+
+def _bins(values: Mapping[str, float], n_bins: int) -> dict:
+    ordered = sorted(values, key=lambda ec: (values[ec], ec))
+    m = len(ordered)
+    return {ec: j * n_bins // m for j, ec in enumerate(ordered)}
+
+
+def strata(variables: pd.DataFrame) -> dict:
+    """{社: (規模十分位, 流動性三分位, 17 業種)}。3 つがそろう社だけ（分位はその集団で切る）。"""
+    ok = variables["logcap"].notna() & variables["log_turnover_ratio"].notna()
+    ok &= variables["sector17"].map(lambda s: isinstance(s, str))
+    v = variables[ok]
+    if v.empty:
+        return {}
+    size = _bins(v["logcap"].to_dict(), SIZE_BINS)
+    liq = _bins(v["log_turnover_ratio"].to_dict(), LIQUIDITY_BINS)
+    return {ec: (size[ec], liq[ec], v.at[ec, "sector17"]) for ec in v.index}
+
+
+def stratum_name(s: tuple) -> str:
+    return f"size{s[0]}|liq{s[1]}|{s[2]}"
+
+
+def pseudo_groups(strata_by_ec: Mapping[str, tuple], treated: Iterable[str], eligible: Iterable[str], *,
+                  n: int = M_PERMUTATIONS, seed: int = SEED) -> tuple:
+    """層ごとに処置社と同じ社数を `eligible` から非復元で引いた擬似処置群を `n` 個。戻り値は (群のリスト, 不足)。"""
+    need = Counter(strata_by_ec[t] for t in treated if t in strata_by_ec)
+    pool: dict = {}
+    for ec in sorted(set(eligible)):
+        if ec in strata_by_ec:
+            pool.setdefault(strata_by_ec[ec], []).append(ec)
+    shortfall = {stratum_name(s): k - len(pool.get(s, [])) for s, k in sorted(need.items())
+                 if len(pool.get(s, [])) < k}
+    rng = np.random.default_rng(seed)
+    groups = []
+    for _ in range(n):
+        g: set = set()
+        for s, k in sorted(need.items()):
+            cand = pool.get(s, [])
+            take = min(k, len(cand))
+            if take:
+                g.update(cand[i] for i in rng.choice(len(cand), size=take, replace=False))
+        groups.append(g)
+    return groups, shortfall
+
+
+def m_family_test(aligned: Mapping[tuple, tuple], pairs: Mapping[str, Sequence[str]],
+                  calendar: Sequence[PressureWeek], strata_by_ec: Mapping[str, tuple],
+                  eligible: Iterable[str], *, permutations: int = M_PERMUTATIONS,
+                  seed: int = SEED) -> dict:
+    """1 モデルの M 族: d_t = bias_T(t) − bias_C(t) を E_t・P_t へ回帰し、固定した擬似処置群の順列で p を出す。
+
+    要約は件数と統計だけで、銘柄コードを含めない。
+    """
+    df = placements(aligned)
+    present = {ym: set(sub["ec"]) for ym, sub in df.groupby("ym")}
+    domain = paired_domain(present, pairs)
+    t_by_ym = {ym: t for ym, (t, _c) in domain.items() if t}
+    c_by_ym = {ym: c for ym, (t, c) in domain.items() if t}
+    bias_t, bias_c = group_bias(df, t_by_ym), group_bias(df, c_by_ym)
+    d = {ym: bias_t[ym] - bias_c[ym] for ym in sorted(bias_t) if ym in bias_c}
+    exposure = {ym: label_window_exposure(ym, calendar) for ym in present}
+    fit = fit_m_regression(d, exposure)
+    # 順列: 行ごとの placement を 1 回だけ配列にし、擬似群ごとの期の平均を bincount で取る
+    yms = sorted(present)
+    ym_idx = {ym: i for i, ym in enumerate(yms)}
+    codes = sorted(set(df["ec"]))
+    ec_idx = {ec: i for i, ec in enumerate(codes)}
+    row_ym = df["ym"].map(ym_idx).to_numpy(dtype=int)
+    row_ec = df["ec"].map(ec_idx).to_numpy(dtype=int)
+    row_p = df["p"].to_numpy(float)
+    matched = [t for t in sorted(pairs) if t in strata_by_ec]
+    groups, shortfall = pseudo_groups(strata_by_ec, matched, eligible, n=permutations, seed=seed)
+    exceed = dict.fromkeys(M_COEFS, 0)
+    n_valid = 0
+    if fit["b"] is not None:
+        for g in groups:
+            member = np.zeros(len(codes), dtype=bool)
+            member[[ec_idx[ec] for ec in g if ec in ec_idx]] = True
+            rows = member[row_ec]
+            cnt = np.bincount(row_ym[rows], minlength=len(yms))
+            tot = np.bincount(row_ym[rows], weights=row_p[rows], minlength=len(yms))
+            d_star = {ym: tot[i] / cnt[i] - bias_c[ym] for ym, i in ym_idx.items()
+                      if cnt[i] and ym in bias_c}
+            f = fit_m_regression(d_star, exposure)
+            if f["b"] is None:
+                continue
+            n_valid += 1
+            for k in M_COEFS:
+                exceed[k] += abs(f[k]) >= abs(fit[k])
+    p_perm = ({k: (exceed[k] + 1) / (n_valid + 1) for k in M_COEFS} if n_valid
+              else dict.fromkeys(M_COEFS))
+    ic_t, ic_c = _group_rank_ic(df, t_by_ym), _group_rank_ic(df, c_by_ym)
+    return {
+        "n_rows": int(len(df)),
+        "n_matched_treated": len(matched),
+        "fit": fit,
+        "newey_west": nw_regression_p(d, exposure),
+        "permutation": {"n": permutations, "n_valid": n_valid, "seed": seed, "p": p_perm,
+                        "pseudo_size": len(groups[0]) if groups else 0, "shortfall": shortfall},
+        "d_by_period": d,
+        "exposure": {ym: list(v) for ym, v in sorted(exposure.items())},
+        "lead_periods": {ym: v for ym, v in d.items() if ym.startswith(M_LEAD_YEAR)},
+        "groups": {
+            "n_treated_by_period": {ym: len(t) for ym, t in sorted(t_by_ym.items())},
+            "n_control_by_period": {ym: len(c) for ym, c in sorted(c_by_ym.items())},
+            "treated_rank_ic": float(np.mean(list(ic_t.values()))) if ic_t else None,
+            "control_rank_ic": float(np.mean(list(ic_c.values()))) if ic_c else None,
+        },
+    }
+
+
+def m_family_verdict(results: Mapping[str, dict]) -> dict:
+    """{モデル: {係数: {coef, p, significant}}}。Bonferroni（各 α = 0.0125・両側）。"""
+    out = {}
+    for model, r in results.items():
+        out[model] = {}
+        for k in M_COEFS:
+            p = r["permutation"]["p"][k]
+            out[model][k] = {"coef": r["fit"][k], "p": p,
+                             "significant": None if p is None else p < M_ALPHA}
+    return out

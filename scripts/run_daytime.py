@@ -430,6 +430,21 @@ JOBS: dict[str, Job] = {
         # 夜間の書き込みが入ると、同じ入力から違うマッチ対が出る。
         parallel_sensitive=True,
     ),
+    # 事前登録の M 族（§6.2・#1009）。凍結値は stage A と同じく追記節の値（テストが照合する）。
+    "measure:index-event-m": Job(
+        name="measure_index_event_m",
+        argv=("{python}", "-m", "scripts.measure_index_event", "m-family",
+              "--prereg", "docs/prereg/index-event-2026.md",
+              "--prereg-sha", "82ae38b19755d1e436b2c0cc9e0c75cda2731929041218b4b6adfd8d573494d5"),
+        why="M 族＝本番の OOF（M-2 raw・M-6 size_neutral）が 2022 前例の処置群を対照より上や下へ置いて"
+            "いたかを、層別の擬似処置群の順列（1,000 回）で検定する（#1009・#1001）。**前提が 2 つある**: "
+            "stage A の実走（`measure:index-event-a` がマッチ対を書く）と `gate:size-neutral` の実走"
+            "（OOF の CSV を書く）。確証の検定なので、事前登録の方針（#1033）が決まる前に積まない。",
+        # 見積り（全社の週次株価と通期行の読み込みが大半。順列は数秒）。実走ログで差し替える。
+        measured_min=5.0,
+        # 順列は固定 seed だが、層を決める変数の読み込みの途中に夜間の書き込みが入ると擬似群が変わる。
+        parallel_sensitive=True,
+    ),
     # 9/18 の列数上限の本測定で「上限が財務の列を締め出している」は否定された（上限 40 でも財務は
     # 2列）。残った見立ては「M-1 の目的変数は素の52週先リターンなので、BIC（二乗誤差）は相場全体の
     # 変動を説明するマクロ列を選ぶ。評価は月内の順位」＝学習と評価のずれ（ADR-0050 の 9/18 追記）。

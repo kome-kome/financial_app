@@ -6,6 +6,11 @@
   **処置群の事象窓のリターンを読まない**（部品 `index_event_study.stage_a` が入口で公表週以降の終値を
   落とす）。結果は事前登録の追記節「stage A（盲検）の結果」へ書き足す。
 - `stage-b`（開封）: #1032 で足す。
+- `m-family`（M 族・§6.2・#1009）: 本番の OOF（`momentum_gate --size-neutral` が書く CSV の M-2 raw と
+  M-6 size_neutral）で、処置群と対照の placement bias の差 d_t を E_t・P_t へ回帰し、層別に引いて全期で
+  固定した擬似処置群の順列（1,000 回）で p を出す。マッチ対は stage A が書いたファイルを読み、その凍結値が
+  今回の `--prereg-sha` と違えば終了コード 2。**確証の検定なので、事前登録の方針（#1033）が決まる前に
+  回さない**。
 
 ## 守ること
 
@@ -32,6 +37,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import math
 import sys
@@ -48,6 +54,8 @@ from scripts import prereg  # noqa: E402
 
 DEFAULT_OUT = ROOT / "scripts" / ".cache" / "index_event_stage_a.json"
 DEFAULT_PAIRS_OUT = ROOT / ".index_lists" / "derived" / "index_event_2022_pairs.json"
+DEFAULT_M_OOF = ROOT / "scripts" / ".cache" / "momentum_gate_size_neutral_oof.csv"
+DEFAULT_M_OUT = ROOT / "scripts" / ".cache" / "index_event_m_family.json"
 EXIT_FAILED = 2
 EXIT_R0_FAILED = 3
 CHUNK = 500
@@ -99,6 +107,24 @@ def report(summary: dict) -> list[str]:
                      f" switch_to_empirical_p={pl['switch_to_empirical_p']}")
     for name, item in summary["r0"]["items"].items():
         lines.append(f"  R0 {name}: pass={item['pass']}")
+    return lines
+
+
+def m_report(verdict: dict, results: dict) -> list[str]:
+    """M 族の標準出力の行（ASCII 記号のみ）。"""
+    import index_event_study as S
+
+    lines = [f"[m-family] Bonferroni alpha={S.M_ALPHA:.4f} (two-sided, permutation p)"]
+    for model, coefs in verdict.items():
+        r = results[model]
+        fit = r["fit"]
+        lines.append(f"  {model}: periods={fit['n_periods']} ({fit['first']}..{fit['last']})"
+                     f" matched_treated={r['n_matched_treated']}"
+                     f" pseudo_size={r['permutation']['pseudo_size']}"
+                     f" shortfall={sum(r['permutation']['shortfall'].values())}")
+        for k, v in coefs.items():
+            lines.append(f"    {k}={_fmt(v['coef'], '+.4f')} p_perm={_fmt(v['p'], '.4f')}"
+                         f" significant={v['significant']}")
     return lines
 
 
@@ -218,6 +244,35 @@ def load_stage_a_inputs(db, ledger, *, known_at: datetime) -> dict:
     }
 
 
+def read_oof_csv(path: Path, runs: dict) -> dict:
+    """規模の中立化モードの OOF の CSV → {モデル: {(ym, 社): (予測, 実現)}}。`runs` は {モデル: 条件}。"""
+    want = {(cond, model): model for model, cond in runs.items()}
+    out: dict = {model: {} for model in runs}
+    with path.open(encoding="utf-8", newline="") as f:
+        for row in csv.DictReader(f):
+            model = want.get((row["cond"], row["model"]))
+            if model is not None:
+                out[model][(row["ym"], row["edinet_code"])] = (float(row["yhat"]), float(row["y"]))
+    return out
+
+
+def load_strata_variables(db):
+    """全社のマッチ日（主）の変数（logcap・流動性・17 業種）。stage A と同じ読み込みと計算を全社へ当てる。"""
+    import index_event_study as S
+    from plugins.macro_snapshots import load_weekly_prices_chunked
+
+    prices = {ec: rows for ec, rows in load_weekly_prices_chunked(db, with_volume=False).items() if rows}
+    codes = set(prices)
+    closes = S.weekly_frame({
+        ec: {S.iso_monday(date.fromisoformat(p.trade_date[:10])): p.close_last for p in rows}
+        for ec, rows in prices.items()})
+    match_week = S.iso_monday(S.MATCH_DATES_2022["main"])
+    turnover = S.weekly_frame(
+        load_turnover(db, codes, match_week - S.WEEK * TURNOVER_LEAD_WEEKS, match_week))
+    firms = load_firms(db, prices, codes)["main"]
+    return S.match_variables(firms, closes, turnover)
+
+
 def write_json(path: Path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(jsonable(payload), ensure_ascii=False, indent=2), encoding="utf-8")
@@ -252,6 +307,60 @@ def run_stage_a(args) -> int:
     return EXIT_R0_FAILED if summary["r0"]["status"] == "fail" else 0
 
 
+def _fail(msg: str) -> int:
+    print(f"[measure_index_event] NG: {msg}", file=sys.stderr)
+    return EXIT_FAILED
+
+
+def run_m_family(args) -> int:
+    import index_event_study as S
+    import index_events as IE
+    from database import SessionLocal
+
+    stamp = prereg.stamp_from_args(args)
+    pairs_path, oof_path = Path(args.pairs), Path(args.oof_csv)
+    if not pairs_path.is_file():
+        return _fail(f"マッチ対が無い: {pairs_path}（先に stage-a を回す）")
+    pairs_doc = json.loads(pairs_path.read_text(encoding="utf-8"))
+    if pairs_doc.get("prereg_sha256") != stamp["prereg_sha256"]:
+        return _fail(f"マッチ対は別の凍結値で作られた（{pairs_doc.get('prereg_sha256')}）。stage-a を回し直す")
+    pairs = pairs_doc.get("pairs", {}).get(S.spec_key(*S.MAIN_SPEC))
+    if not pairs:
+        return _fail(f"マッチ対に主の仕様 {S.spec_key(*S.MAIN_SPEC)} が無い")
+    if not oof_path.is_file():
+        return _fail(f"OOF の CSV が無い: {oof_path}（先に momentum_gate --size-neutral を回す）")
+    oof = read_oof_csv(oof_path, S.M_MODELS)
+    empty = [f"{cond}|{model}" for model, cond in S.M_MODELS.items() if not oof[model]]
+    if empty:
+        return _fail(f"OOF の CSV に {empty} の行が無い")
+    known_at = datetime.now(timezone.utc)
+    with SessionLocal() as db:
+        ledger = IE.load_ledger(db, root=Path(args.lists_dir) if args.lists_dir else None)
+        if not ledger.ok:
+            return _fail(f"指数イベント台帳が使えない（{ledger.reason}）")
+        treated = set(IE.members(ledger, S.REVIEW_2022, "transition"))
+        variables = load_strata_variables(db)
+    strata_by_ec = S.strata(variables)
+    used_controls = {c for cs in pairs.values() for c in cs}
+    eligible = set(strata_by_ec) - treated - used_controls
+    calendar = S.pressure_calendar(IE.STEPS_2022)
+    results = {model: S.m_family_test(oof[model], pairs, calendar, strata_by_ec, eligible)
+               for model in S.M_MODELS}
+    verdict = S.m_family_verdict(results)
+    write_json(Path(args.out), {
+        "stage": "M", **stamp, "generated_at": known_at.isoformat(timespec="seconds"),
+        "inputs": {"oof_csv": str(oof_path), "runs": S.M_MODELS, "pairs": str(pairs_path),
+                   "pairs_generated_at": pairs_doc.get("generated_at"),
+                   "pairs_snapshot_as_of": (pairs_doc.get("data") or {}).get("snapshot_as_of"),
+                   "n_strata_firms": len(strata_by_ec), "n_eligible": len(eligible),
+                   "n_treated_itt": len(treated), "n_controls_used": len(used_controls)},
+        "alpha": S.M_ALPHA, "verdict": verdict, "models": results, "definitions": S.M_DEFINITIONS})
+    for line in m_report(verdict, results):
+        print(line)
+    print(f"wrote {args.out}")
+    return 0
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     ap = argparse.ArgumentParser(
         prog="python -m scripts.measure_index_event",
@@ -263,11 +372,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     a.add_argument("--pairs-out", default=str(DEFAULT_PAIRS_OUT),
                    help="マッチ対の JSON（銘柄コードを含む・公開しない置き場）")
     a.add_argument("--lists-dir", help="指数の一覧の置き場（既定はリポジトリの .index_lists）")
+    m = sub.add_parser("m-family", help="M 族（本番の OOF が処置群をどこへ置いていたか・順列検定）")
+    prereg.add_arguments(m)
+    m.add_argument("--oof-csv", default=str(DEFAULT_M_OOF),
+                   help="momentum_gate --size-neutral が書く行ごとの OOF の CSV")
+    m.add_argument("--pairs", default=str(DEFAULT_PAIRS_OUT), help="stage-a が書いたマッチ対の JSON")
+    m.add_argument("--out", default=str(DEFAULT_M_OUT), help="結果の JSON（銘柄コードを含めない）")
+    m.add_argument("--lists-dir", help="指数の一覧の置き場（既定はリポジトリの .index_lists）")
     args = ap.parse_args(argv)
 
     from collector_utils import force_utf8_stdout
     force_utf8_stdout()
-    return run_stage_a(args)
+    return run_m_family(args) if args.stage == "m-family" else run_stage_a(args)
 
 
 if __name__ == "__main__":

@@ -1678,6 +1678,8 @@ def blank_group_breakdown(aligned: dict, labels: dict) -> dict[str, dict]:
     - `placement_bias`: 期ごとに、全体の中での予測の順位分位 − 実現の順位分位を群で平均し、その期平均。
       **正なら群を実際より上（買い側）に置いている**。空欄そのものが効いて群ごと持ち上げる・沈める形は
       群の中の rank-IC には出ず、ここに出る。`placement_bias_t` は期をまたいだ平均 ÷ 標準誤差（参考値）
+    - `bias_by_period` / `ic_by_period`: 上の 2 つの期ごとの値 `{ym: 値}`（#1009）。M 族の検定は期ごとの
+      群の差を回帰するので、平均だけでは足りない
 
     全体が 3 社未満の期は読まない。群の中が 3 社未満の期は rank-IC から外す（`oof_backtest` と同じ下限）。
     """
@@ -1686,6 +1688,8 @@ def blank_group_breakdown(aligned: dict, labels: dict) -> dict[str, dict]:
         by_ym[ym].append((ec, yh, y))
     ics: dict[str, list] = defaultdict(list)
     bias: dict[str, list] = defaultdict(list)
+    bias_by_ym: dict[str, dict] = defaultdict(dict)
+    ic_by_ym: dict[str, dict] = defaultdict(dict)
     n_samples: dict[str, int] = defaultdict(int)
     for ym in sorted(by_ym):
         rows = by_ym[ym]
@@ -1701,9 +1705,11 @@ def blank_group_breakdown(aligned: dict, labels: dict) -> dict[str, dict]:
         for g, js in members.items():
             n_samples[g] += len(js)
             bias[g].append(sum(r_pred[j] - r_real[j] for j in js) / (len(js) * n))
+            bias_by_ym[g][ym] = bias[g][-1]
             ic = _spearman([rows[j][1] for j in js], [rows[j][2] for j in js])
             if ic is not None:
                 ics[g].append(ic)
+                ic_by_ym[g][ym] = ic
     out: dict[str, dict] = {}
     for g in sorted(n_samples):
         b, ic = bias[g], ics[g]
@@ -1717,6 +1723,8 @@ def blank_group_breakdown(aligned: dict, labels: dict) -> dict[str, dict]:
             "placement_bias": b_mean,
             "placement_bias_t": (b_mean / se) if se else None,
             "bias_periods": len(b),
+            "bias_by_period": dict(bias_by_ym[g]),
+            "ic_by_period": dict(ic_by_ym[g]),
         }
     return out
 
@@ -1745,22 +1753,42 @@ def oof_rows(aligned: dict, labels: dict) -> list[tuple]:
     return rows
 
 
-def write_oof_csv(path: Path, rows_by_run: dict[str, list[tuple]]) -> int:
+def write_oof_csv(path: Path, rows_by_run: dict[str, list[tuple]],
+                  columns: tuple = OOF_CSV_COLUMNS) -> int:
     """`{"条件|モデル": oof_rows の戻り値}` を CSV へ書き、書いた行数を返す（#951）。
 
     浮動小数は `repr` で書く——丸めると順位が同点に化け、CSV から群の集計が再現しなくなる。
+    行の 5 列目以降は、浮動小数なら `repr`・None なら空欄・それ以外はそのまま書く（`columns` は
+    規模の中立化モードが `SIZE_OOF_CSV_COLUMNS` を渡す・#1009）。
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     n = 0
     with path.open("w", encoding="utf-8", newline="") as f:
         w = csv.writer(f)
-        w.writerow(OOF_CSV_COLUMNS)
+        w.writerow(columns)
         for run, rows in rows_by_run.items():
             cond, model = run.split("|", 1)
-            for ym, ec, yh, y, std, groups in rows:
-                w.writerow((cond, model, ym, ec, repr(float(yh)), repr(float(y)), std, groups))
+            for ym, ec, yh, y, *rest in rows:
+                w.writerow((cond, model, ym, ec, repr(float(yh)), repr(float(y)),
+                            *(repr(v) if isinstance(v, float) else ("" if v is None else v)
+                              for v in rest)))
                 n += 1
     return n
+
+
+# 規模の中立化モードの行ごとの OOF の CSV の列（#1009）。十分位の内訳（`size_neutral.deciles`）と同じ
+# 共通域の行・同じ予測（size_neutral は中立化した後）で、この CSV だけから内訳を計算し直せる。
+# M 族の検定（`scripts.measure_index_event m-family`）が読む。
+SIZE_OOF_CSV_COLUMNS = ("cond", "model", "ym", "edinet_code", "yhat", "y", "logcap", "size_decile")
+
+
+def size_oof_rows(aligned: dict, labels: dict, logcap: dict) -> list[tuple]:
+    """十分位の内訳と同じ入力を、行ごとの OOF `(ym, ec, yhat, y, logcap, size_decile)` にして返す。"""
+    rows: list[tuple] = []
+    for (ym, ec) in sorted(aligned):
+        yh, y = aligned[(ym, ec)]
+        rows.append((ym, ec, yh, y, logcap.get((ym, ec)), next(iter(labels.get((ym, ec), ())), "")))
+    return rows
 
 
 def null_de_ratio(fin_by_co: dict, industries: tuple[str, ...]) -> tuple[dict, int]:
@@ -2950,6 +2978,8 @@ def main() -> None:
     # placement bias（#947 と同じ定義）。他モードでは空のまま。
     size_dropped: dict[str, int] = {}
     size_deciles: dict[str, dict] = {}
+    # 十分位の内訳と同じ行の OOF（#1009）。ループの後で JSON の隣の CSV へ書く。
+    size_oof: dict[str, list[tuple]] = {}
     for model in models:
         kind = MODEL_SPECS[model][2]
         aligned = {cond: _align(cparts[f"{cond}|{model}"][0], cpanels[(cond, kind)][2])
@@ -3006,8 +3036,9 @@ def main() -> None:
             if mode == "size_neutral":
                 if cond != base:
                     r2, m2, _d = size_neutralize(r2, m2, logcap)
-                size_deciles.setdefault(model, {})[cond] = blank_group_breakdown(
-                    aligned_from(r2, m2), size_labels)
+                aligned_sn = aligned_from(r2, m2)
+                size_deciles.setdefault(model, {})[cond] = blank_group_breakdown(aligned_sn, size_labels)
+                size_oof[f"{cond}|{model}"] = size_oof_rows(aligned_sn, size_labels, logcap)
             bt = oof_backtest(r2, n_quantiles=5, meta_by_ym=m2, rebalance_per_year=4)
             common_results[f"{cond}|{model}"] = bt
             print(f"    [{cond}] rank-IC={_num(bt['rank_ic']['mean'])} "
@@ -3024,6 +3055,14 @@ def main() -> None:
                     f"{c}={_num((size_deciles[model][c].get(g) or {}).get('placement_bias'))}"
                     for c in conds)
                 print(f"      {g:<8} {cells}", flush=True)
+
+    # 規模の中立化モードの行ごとの OOF（#1009）。JSON の隣に置く（`--json` で出力先を変えても対になる）。
+    size_oof_path: Path | None = None
+    size_oof_n = 0
+    if mode == "size_neutral":
+        size_oof_path = out_path.with_name(out_path.stem + "_oof.csv")
+        size_oof_n = write_oof_csv(size_oof_path, size_oof, columns=SIZE_OOF_CSV_COLUMNS)
+        print(f"wrote {size_oof_path} ({size_oof_n} rows)", flush=True)
 
     # ── 4. 昇格ゲート判定 ──────────────────────────────────────────────────
     # 検定は common スコープだけで行う。**raw では差を検定できない**——条件ごとに
@@ -3177,8 +3216,11 @@ def main() -> None:
         "de_exclude": {"nulled_rows": de_nulled_rows, "samples": de_exclude_samples},
         # 規模の中立化モード（#970）。時価総額の取れたパネルの行数・共通域で両条件から落とした行数・
         # 規模の十分位ごとの {モデル: {条件: {size_d<k>: 指標}}}。他モードでは 0 / 空。
+        # 行ごとの OOF の CSV（#1009・列は `SIZE_OOF_CSV_COLUMNS`）。他モードでは None / 0。
         "size_neutral": {"panel_rows_with_cap": len(logcap), "dropped_rows": size_dropped,
-                         "deciles": size_deciles},
+                         "deciles": size_deciles,
+                         "oof_path": str(size_oof_path) if size_oof_path else None,
+                         "oof_rows": size_oof_n},
         # M-6 を本番の後処理（規模の中立化・#995）で測ったか、と条件ごとの時価総額の取れたパネルの行数。
         # `--size-neutral` 軸と M-6 を測らない軸では false / 空。
         "m6_production_size_neutral": {"applied": m6_post,
