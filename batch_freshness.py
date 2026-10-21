@@ -43,7 +43,7 @@ from __future__ import annotations
 
 import sys
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -581,6 +581,58 @@ PRODUCER_COVERAGE: dict[str, str] = {
 }
 
 PRODUCER_EXEMPT_PREFIX = "exempt:"
+
+
+# ── 指数イベント台帳の見直しの登録（#1014）───────────────────────────────────
+# TOPIX の見直し（定期入替・移行措置の再評価）は今後も来るが、台帳（`index_events`）への登録を忘れても
+# 失敗は出ない——画面の注記と計測が黙って古いまま使われる。期限は台帳の `EXPECTED_REVIEWS`
+# （公表見込み日）から導き、**月を定数で持たない**（2027-10 は再評価だけ・2028-10 から毎年の定期入替と、
+# 見直しの種類と時期が年で違う）。DB は読まない（台帳の登録表はコード）。
+#
+# 猶予（日）。公表（10 月第 5 営業日）から反映（10 月最終営業日）までは約 3 週間あるので、公表見込みの
+# 1 週間後に起票しても、DL・取り込み・マージに 2 週間残る。
+INDEX_REVIEW_GRACE_DAYS = 7
+_JST = timezone(timedelta(hours=9))
+
+
+def index_registration_title(key: str) -> str:
+    return f"[ops] TOPIX の見直しが指数イベント台帳に未登録: {key}"
+
+
+def index_confirmation_title(key: str) -> str:
+    return f"[ops] 指数イベント台帳の見直しが未確認のまま反映日を迎えた: {key}"
+
+
+def collect_index_reviews(now: datetime, *, reviews=None, expected=None) -> list[dict]:
+    """見直しごとの状態（`ok` / `overdue` / `unconfirmed`）。起票と自動クローズの両方がこれを読む。
+
+    - 未登録の見直し（`EXPECTED_REVIEWS` にあって `REVIEWS` に無い）: 公表見込み日 + 猶予を過ぎたら `overdue`
+    - 登録済みの見直し: 登録の検査は常に `ok`（**登録すると `EXPECTED_REVIEWS` から消える**ので、ここで
+      ok と言わないと開いた起票を閉じる相手を見失う）。確度が未確認（`confirmed=False`）のまま反映日を
+      迎えたら `unconfirmed`
+    精度（台帳の中身の正しさ）は起票しない（ADR-0061）。日付は JST で判定する。
+    """
+    import index_events as IE
+
+    reviews = IE.REVIEWS if reviews is None else reviews
+    expected = IE.EXPECTED_REVIEWS if expected is None else expected
+    today = now.astimezone(_JST).date()
+    rows: list = []
+    for key, exp in sorted(expected.items(), key=lambda kv: kv[1].announce_expected):
+        if key in reviews:
+            continue
+        due = exp.announce_expected + timedelta(days=INDEX_REVIEW_GRACE_DAYS)
+        rows.append({"key": key, "check": "registration", "title": index_registration_title(key),
+                     "status": "overdue" if today > due else "ok", "due": due,
+                     "detail": f"公表見込み {exp.announce_expected}・反映 {exp.effective}・{exp.basis}"})
+    for key, review in sorted(reviews.items(), key=lambda kv: kv[1].announced):
+        rows.append({"key": key, "check": "registration", "title": index_registration_title(key),
+                     "status": "ok", "due": None, "detail": f"登録済み（公表 {review.announced}）"})
+        unconfirmed = not review.confirmed and today >= review.effective
+        rows.append({"key": key, "check": "confirmation", "title": index_confirmation_title(key),
+                     "status": "unconfirmed" if unconfirmed else "ok", "due": review.effective,
+                     "detail": f"反映 {review.effective}・確度 {'確認済み' if review.confirmed else '未確認'}"})
+    return rows
 
 
 def _as_utc(value):

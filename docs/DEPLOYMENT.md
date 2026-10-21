@@ -57,6 +57,12 @@ Render の制約と運用形態に合わせて設計すること。
 | **20:00** | `financial_app-watchdog`（`run_watchdog.ps1` → `scripts/check_batch_freshness.py`） | 毎日 | `app_settings` の `*_last_run` を読み、閾値超過なら Issue へ起票（既存 open があればコメント追記） | **走らなかったことを検知する唯一の役**（#515 手順3・ADR-0042）。バッチが起動前に死ぬと failure が出ないので `batch_common.notify` は発火しない。上限15分。時刻は判定に影響しない（閾値が観測時刻に依存しない導出）ので、選ぶ基準は**その時刻に PC が点いている確率**だけ |
 | **日曜 21:00** | `financial_app-backup`（`run_backup.ps1` → `scripts/run_backup.py`） | 毎週 | `scripts/backup_push.py --apply --dest storage`（17表を `--compress=9` でダンプ → Storage へ） | 夜間バッチと**別タスク**にする（遅延が道連れにならない）。実測 38.1MB/世代・所要は数分規模だが、窓2時間・ステップ予算90分は**窓から導出**する（ADR-0040・実測へ寄せると伸びた週に打ち切られて世代が残らない）。自動化前は手動 CLI で、実効 RPO が「最後に人が思い出した日」だった（#606）。夜間バッチ（17:20 開始・実測約70分）とは時間帯が重ならない |
 
+**年次（手作業・Issue テンプレート `topix-annual-review`・#1014）**
+
+| 時期 | 作業 | 期限の出どころ | 見張り |
+|---|---|---|---|
+| 毎年 10 月（2027-10 は移行措置の再評価だけ・2028-10 から定期入替） | TOPIX の見直しを指数イベント台帳（`index_events.py`）へ登録し、一覧を取り込む（DL → 登録表 → `python -I scripts/import_index_list.py` → 件数照合 → 反映日の前営業日までにマージ） | 台帳の `EXPECTED_REVIEWS` の公表見込み日（月を定数で持たない） | watchdog（20:00）が公表見込み + 7 日を過ぎて未登録なら起票し、登録で自動クローズ |
+
 - **名目時刻は「これより前には走らせない」下限であって、実起動時刻の予測ではない（#551）。** 実起動を決めるのは **PC の電源オン窓**で、実測（2026-08-26〜28 の System ログ 6005/6006）は **~17:40 → 翌 ~08:00**。窓の外にある nightly 17:20 は `StartWhenAvailable` で電源投入後に追いつく。`WakeToRun` を足しても直らず、名目を電源投入後へ寄せるのも遅くなるだけなので、**この環境では 17:20 のままが最速**。根拠（タスクごとの実起動・`WakeToRun` が効かない理由）は [ADR-0042 の #551 追補](adr/0042-batch-footprints-need-a-reader.md) と [DEPLOYMENT_HISTORY.md](archive/DEPLOYMENT_HISTORY.md#バッチ暦-電源オン窓の実測551)。
 
 - **PC が止まっていた場合の回復経路**（#551 で整理。新しい仕組みは無く、既にあるものの一覧）:
