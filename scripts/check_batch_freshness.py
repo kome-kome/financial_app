@@ -142,8 +142,8 @@ from scripts._textwidth import pad                           # noqa: E402
 # `FINAPP_DB_TARGET` を書き換える**ので、API プロセスからは import させない——接続先の
 # 食い違いは #508 と同型で静かに壊れる。ここは起票・CLI・ログだけを担う。
 from batch_freshness import (                                # noqa: E402,F401
-    KEY_LAST_RUN, PRODUCERS, SELF_WINDOW_MIN, WATCHED, Produced, Watched, _parse,
-    collect, collect_producers, db_label, producer_status_of, status_of,
+    INDEX_REVIEW_GRACE_DAYS, KEY_LAST_RUN, PRODUCERS, SELF_WINDOW_MIN, WATCHED, Produced, Watched,
+    _parse, collect, collect_index_reviews, collect_producers, db_label, producer_status_of, status_of,
 )
 # 夜間ログの判定（#767）。ファイルを読むだけで DB にもネットワークにも触らない。
 from scripts.check_nightly_collect import (                   # noqa: E402
@@ -164,6 +164,7 @@ GH_TIMEOUT_SEC = 20.0
 
 DB_ERROR_TITLE = "[ops] watchdog がローカル DB を読めない"
 GH_ERROR_TITLE = "[ops] watchdog が gh を使えない（通知経路が死んでいる）"
+INDEX_REVIEWS_ERROR_TITLE = "[ops] watchdog が指数イベント台帳の登録表を読めない"
 
 # watchdog が書いた本文の目印（#635）。起票も人のコメントも同じ gh アカウントから出るので、
 # **投稿者では見分けられない**。HTML コメントなので画面には出ない。目印の無い本文は
@@ -263,12 +264,40 @@ def nightly_recoveries(snap: dict) -> list[dict]:
             if kind not in warned and spec.known(night)]
 
 
+def index_review_problems(snap: dict) -> list[dict]:
+    """指数イベント台帳の見直しの起票（#1014）。DB を読まないので DB の生死と独立に言える。"""
+    found = []
+    if snap.get("index_reviews_error"):
+        found.append({"title": INDEX_REVIEWS_ERROR_TITLE, "row": None, "status": "index_reviews_error",
+                      "message": f"指数イベント台帳の登録表を読めない: {snap['index_reviews_error']}"})
+    for row in snap.get("index_reviews") or []:
+        if row["status"] == "ok":
+            continue
+        if row["status"] == "overdue":
+            message = (f"TOPIX の見直し `{row['key']}` が指数イベント台帳に未登録のまま、期限 {row['due']}"
+                       f"（公表見込み + {INDEX_REVIEW_GRACE_DAYS}日）を過ぎた")
+        else:
+            message = (f"指数イベント台帳の見直し `{row['key']}` が未確認（confirmed=False）のまま"
+                       f"反映日 {row['due']} を迎えた")
+        found.append({"title": row["title"], "row": None, "index_review": row,
+                      "status": row["status"], "message": message})
+    return found
+
+
+def index_review_recoveries(snap: dict) -> list[dict]:
+    if snap.get("index_reviews_error") or "index_reviews" not in snap:
+        return []
+    return [{"title": INDEX_REVIEWS_ERROR_TITLE, "row": None, "index_review": None}] + [
+        {"title": row["title"], "row": None, "index_review": row}
+        for row in snap["index_reviews"] if row["status"] == "ok"]
+
+
 def problems(snap: dict) -> list[dict]:
     """起票に値する事象だけを返す（空なら健全）。対象ごとに1件＝Issue も対象ごとに1本。"""
     if snap["db_error"]:
         return [{"title": DB_ERROR_TITLE, "row": None, "status": "db_error",
                  "message": f"ローカル DB を読めない: {snap['db_error']}"}] \
-            + nightly_problems(snap)
+            + nightly_problems(snap) + index_review_problems(snap)
     found = []
     if snap.get("gh_error"):
         # **これ自体は起票できない**（起票の手段が死んでいる）。notify が失敗して exit 3 になり、
@@ -313,7 +342,7 @@ def problems(snap: dict) -> list[dict]:
                        f"{prod.batch_label}が走っていても成果物は前進していない")
         found.append({"title": prod.issue_title, "row": None, "producer": row,
                       "status": status, "message": message})
-    return found + nightly_problems(snap)
+    return found + nightly_problems(snap) + index_review_problems(snap)
 
 
 def recoveries(snap: dict) -> list[dict]:
@@ -325,7 +354,8 @@ def recoveries(snap: dict) -> list[dict]:
     原理的に自動起票されない）。
     """
     if snap["db_error"]:
-        return nightly_recoveries(snap)     # 夜間ログはファイルなので DB と独立に言える
+        # 夜間ログ（ファイル）と指数の見直し（台帳の登録表＝コード）は DB と独立に言える
+        return nightly_recoveries(snap) + index_review_recoveries(snap)
     found = [{"title": DB_ERROR_TITLE, "row": None}]
     for row in snap["rows"]:
         w, status = row["watched"], row["status"]
@@ -335,7 +365,7 @@ def recoveries(snap: dict) -> list[dict]:
     for row in snap.get("producers") or []:
         if row["status"] == "ok":
             found.append({"title": row["produced"].issue_title, "row": None, "producer": row})
-    return found + nightly_recoveries(snap)
+    return found + nightly_recoveries(snap) + index_review_recoveries(snap)
 
 
 def _pad(text: str, width: int) -> str:
@@ -365,7 +395,7 @@ def format_report(snap: dict) -> list[str]:
     ]
     if snap["db_error"]:
         lines.append(f"DB を読めない: {snap['db_error']}")
-        return lines + _nightly_report(snap)
+        return lines + _nightly_report(snap) + _index_review_report(snap)
     for row in snap["rows"]:
         w = row["watched"]
         success = "-" if w.key_success is None else _fmt_age(row["success_age_h"])
@@ -380,7 +410,20 @@ def format_report(snap: dict) -> list[str]:
             lines.append(
                 f"{_pad(prod.label, 30)}: 更新 {_pad(_fmt_age(row['age_h']), 12)}"
                 f"[閾値 {prod.stale_h / 24.0:.1f}日]")
-    return lines + _nightly_report(snap)
+    return lines + _nightly_report(snap) + _index_review_report(snap)
+
+
+def _index_review_report(snap: dict) -> list[str]:
+    """指数イベント台帳の見直しの節（#1014）。次に来る未登録の見直しと、ok でない検査だけを出す。"""
+    if "index_reviews" not in snap:
+        return []
+    if snap.get("index_reviews_error"):
+        return ["-- 指数イベント台帳の見直し --", f"登録表を読めない: {snap['index_reviews_error']}"]
+    rows = [r for r in snap["index_reviews"]
+            if r["status"] != "ok" or (r["check"] == "registration" and r["due"] is not None)]
+    return ["-- 指数イベント台帳の見直し --"] + (
+        [f"{r['key']}: {r['status']}（期限 {r['due']}・{r['detail'][:60]}）" for r in rows]
+        or ["未登録の見直しも未確認の反映も無い"])
 
 
 def _nightly_report(snap: dict) -> list[str]:
@@ -445,6 +488,25 @@ def issue_body(problem: dict, snap: dict) -> str:
             "3. **バッチ自体は走っていることがある**ので、「走っていない」と"
             "「走ったが値が書けていない」を混同しない（上の実行鮮度の表を参照）",
         ]
+    elif problem.get("index_review") is not None:
+        r = problem["index_review"]
+        body = head + [
+            "| 項目 | 値 |",
+            "|---|---|",
+            f"| 見直し | `{r['key']}` |",
+            f"| 検査 | {'台帳への登録' if r['check'] == 'registration' else '確度（confirmed）'} |",
+            f"| 期限・反映日 | {r['due']} |",
+            f"| 台帳の記述 | {r['detail']} |",
+            f"| 検出 | {problem['status']} |",
+            "",
+            "### 確認すること",
+            "",
+            "1. 年次の手順（Issue テンプレート `topix-annual-review`）に沿って、資料の DL → 登録表"
+            "（`index_events.REVIEWS`）への登録 → `python -I scripts/import_index_list.py <キー>` → 件数照合 を進める",
+            "2. 公表が見込みより遅れているなら、`index_events.EXPECTED_REVIEWS` の公表見込み日を根拠付きで直す"
+            "（期限は公表見込み日から導く・月を定数で持たない）",
+            "3. 未確認（confirmed=False）なら、一次資料で日程を確かめて `confirmed=True` にする",
+        ]
     elif problem.get("nightly") is not None:
         n = problem["nightly"]
         body = head + [
@@ -466,6 +528,11 @@ def issue_body(problem: dict, snap: dict) -> str:
             "3. **警告の内容が前回と同じ晩は追記しない**（内容が変わった晩だけ追記される・#767）",
             "",
             NIGHTLY_SIGNATURE.format(nightly_signature(n["messages"])),
+        ]
+    elif problem["status"] == "index_reviews_error":
+        body = head + [
+            "指数イベント台帳（`index_events.py`）の登録表を読めなかった。登録表はコードなので、"
+            "import の失敗か登録表の形の崩れを疑う。この間は見直しの登録の期限を見られない。",
         ]
     elif row is None:
         body = head + [
@@ -527,6 +594,19 @@ def recovery_body(target: dict, snap: dict, human_touched: bool) -> str:
             f" {prod.cadence_h / 24.0:.0f}日 + 窓 {prod.window_min / 60.0:.1f}時間） |",
             "| 判定 | ok |",
         ]
+    elif target.get("index_review") is not None:
+        r = target["index_review"]
+        body = head + [
+            f"**復旧: 指数イベント台帳の見直し `{r['key']}` の検査が ok に戻った**",
+            "",
+            "| 項目 | 値 |",
+            "|---|---|",
+            f"| 検査 | {'台帳への登録' if r['check'] == 'registration' else '確度（confirmed）'} |",
+            f"| 台帳の記述 | {r['detail']} |",
+            "| 判定 | ok |",
+        ]
+    elif target["title"] == INDEX_REVIEWS_ERROR_TITLE:
+        body = head + ["**復旧: 指数イベント台帳の登録表を読めた**"]
     elif target.get("nightly") is not None:
         n = target["nightly"]
         label = WARNING_KINDS[n["kind"]].label
@@ -788,6 +868,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             if db is not None:
                 db.close()
         snap["nightly_log"] = _read_nightly(say)
+        # 指数イベント台帳の見直し（#1014）。台帳の登録表（コード）だけを読む＝DB と独立。
+        try:
+            snap["index_reviews"] = collect_index_reviews(now)
+        except Exception as e:      # noqa: BLE001 — 読めないことも起票する（黙って飛ばさない）
+            snap["index_reviews"] = []
+            snap["index_reviews_error"] = str(e)[:300]
 
         # 通知経路は**健全な回にも**確かめる（--dry-run は gh を叩かないので見送る）。
         # ここを異常検出時だけにすると、通知が死んでいることは一番届いてほしい回に判明する。

@@ -344,7 +344,8 @@ NUTS 軌道長（`max_tree_depth`）× `target_accept` の格子ドライバ（I
 
 **バッチ鮮度 watchdog**（`python -m scripts.check_batch_freshness`・#515 手順3・[ADR-0042](adr/0042-batch-footprints-need-a-reader.md)）。判定ロジック（`Watched` / `WATCHED` / `collect`）は `batch_freshness.py` にあり `/api/morning` と共有する（#561）。ここが持つのは起票・CLI・ログ。exit 0/2/3（3＝検出したが起票できなかった、または復旧を伝えられなかった＝最も静かな故障）。
 
-- **起票は事実ごとに別の Issue にする**: 「走っていない」（`app_settings` の `*_last_run`）／「走ったが値が書けていない」（`collect_producers()` を `problems()` へ合流・#504）／「走ったが中身がおかしい」（夜間ログの警告・#767）。原因も対処も違うので混ぜない。同一タイトルの open があればコメント追記（毎日走っても積み上がらない）。
+- **起票は事実ごとに別の Issue にする**: 「走っていない」（`app_settings` の `*_last_run`）／「走ったが値が書けていない」（`collect_producers()` を `problems()` へ合流・#504）／「走ったが中身がおかしい」（夜間ログの警告・#767）／「TOPIX の見直しが指数イベント台帳に未登録のまま期限を過ぎた・未確認のまま反映日を迎えた」（`batch_freshness.collect_index_reviews`・#1014）。
+- **指数の見直しの期限は台帳から導く**（#1014）: `index_events.EXPECTED_REVIEWS` の公表見込み日 + `INDEX_REVIEW_GRACE_DAYS`（7日）を JST で判定し、月を定数で持たない（2027-10 は再評価だけ・2028-10 から毎年の定期入替）。登録すると `EXPECTED_REVIEWS` から消えるので、`REVIEWS` の見直しも登録の検査は ok と言い、開いた起票を閉じる。DB は読まない（DB が落ちていても言える）。登録の手順は Issue テンプレート `topix-annual-review`。原因も対処も違うので混ぜない。同一タイトルの open があればコメント追記（毎日走っても積み上がらない）。
 - **閾値は `cadence + 窓` から導出する**（`run_nightly.WINDOW_MIN` / `run_monthly.WINDOW_MIN` から引く）。窓を広げれば閾値も広がり、「実行中は鳴らない」が構造的に成立する。
 - **判定は `*_last_run` のみ**（`monthly_last_success` は使わない・理由は ADR-0042）。自分も監視対象に含め、**読んでから書く**（次回に自分の沈黙期間を検出できる）。
 - **通知経路（`shutil.which("gh")` ＋ `gh auth status`）は健全な回にも確かめ**、レポートへ `通知経路: gh 到達可` を出す（異常時にしか `gh` を叩かないと、通知の死は一番届いてほしい回に判明する。S4U のセッション0では PATH と `hosts.yml` の解決が対話セッションと変わりうる）。到達不能なら起票を試さず exit 3 とログにだけ痕跡を残す。
