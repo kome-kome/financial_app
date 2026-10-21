@@ -17,6 +17,7 @@ from sqlalchemy import func, text
 from sqlalchemy.orm import Session
 
 import api
+import index_event_notes
 import serializers
 from database import (
     Company, FinancialRecord, FinancialMetric, RegressionResult,
@@ -429,7 +430,10 @@ async def get_financials(edinet_code: str, db: Session = Depends(api.get_db)):
                .all())
     if not records:
         raise HTTPException(404, "データが見つかりません")
-    return {"edinet_code": edinet_code, "records": [serializers.record_to_dict(r) for r in records]}
+    # TOPIX 移行措置・新規採用の事実と日程（#1013）。台帳が無ければ None とバナー
+    note, index_events = index_event_notes.company_note(db, edinet_code)
+    return {"edinet_code": edinet_code, "records": [serializers.record_to_dict(r) for r in records],
+            "index_event": note, "index_events": index_events}
 
 
 # ── スクリーニング ─────────────────────────────────────────────────────────

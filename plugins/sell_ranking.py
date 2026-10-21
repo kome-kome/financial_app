@@ -504,6 +504,14 @@ class SellRankingPlugin(AnalysisPlugin):
         for rank, item in enumerate(scored, 1):
             item["rank"] = rank
 
+        # TOPIX 移行措置・新規採用の事実の注記（#1013）。判定と順位を決めた後に付けるだけ。
+        # 保有だけでは比率の分母にならないので、分母は標準化に使う母集団（universe）。
+        from index_event_notes import annotate
+        notes, index_events = annotate(
+            db, [s["edinet_code"] for s in scored], [r.edinet_code for r in universe], what="保有")
+        for s in scored:
+            s["index_event"] = notes.get(s["edinet_code"])
+
         n_sell   = sum(1 for s in scored if s["action"] == "SELL")
         n_reduce = sum(1 for s in scored if s["action"] == "REDUCE")
         return {
@@ -520,6 +528,8 @@ class SellRankingPlugin(AnalysisPlugin):
             "results":       scored,
             "not_found":     not_found,
             "invalid":       invalid,
+            # 台帳の有無・保有のうちの件数・母集団での比率・表の上の 1 行・バナー（#1013）
+            "index_events":  index_events,
         }
 
 

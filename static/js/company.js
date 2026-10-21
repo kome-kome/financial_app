@@ -7,6 +7,17 @@ function fmtNum(v, digits=1){ return (v==null || isNaN(v)) ? '—' : Number(v).t
 function fmtPct(v){ return (v==null || isNaN(v)) ? '—' : Number(v).toFixed(1) + '%'; }
 function fmtX(v){ return (v==null || isNaN(v)) ? '—' : Number(v).toFixed(2) + '倍'; }
 
+// ── TOPIX 移行措置・新規採用の事実と日程（#1013）──────────────────────────────
+// 注記の文言と日付の欄（確定していない回は「公式資料で確認中」）はサーバが作る。ここは並べるだけ。
+// 台帳が読めなければバナー、対象の社でなければ何も出さない。
+function indexEventDetail(ev, meta){
+  if (!ev) return indexEventsNote(meta);
+  const steps = (ev.schedule || []).map(s =>
+    `<span class="tag">第${Number(s.m)}回 ${esc(s.date_text)} 係数 ${Number(s.coefficient).toFixed(3)}</span>`).join('');
+  return `<div class="chart-note warn">${esc(ev.note)}</div>`
+    + (steps ? `<div class="co-meta" style="margin-top:6px">${steps}</div>` : '');
+}
+
 // ── Chart.js ダークテーマ既定 ────────────────────────────────
 if (window.Chart){
   Chart.defaults.color = cssVar('--text-secondary');
@@ -220,7 +231,9 @@ async function loadCompany(code){
     latest.sec_code ? `<span class="tag code">${esc(latest.sec_code)}</span>` : '',
     `<span class="tag code">${esc(code)}</span>`,
     latest.industry ? `<span class="tag">${esc(latest.industry)}</span>` : '',
+    indexEventBadge(d.index_event).trim(),
   ].join('');
+  document.getElementById('co-index-event').innerHTML = indexEventDetail(d.index_event, d.index_events);
 
   // サマリーカード（最新年度）
   const _emp = latest.nonfin?.employees;

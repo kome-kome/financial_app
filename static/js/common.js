@@ -7,6 +7,20 @@ function esc(s) {
   return String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
+// ── TOPIX 移行措置・新規採用の事実の印（#1013）──────────────────────────────
+// 文言（印・注記・表の上の 1 行・バナー）はサーバ（index_event_notes.py）が作る。ここは表示だけ
+// （禁止語の検査をサーバの 1 か所でかけるため・ここで文言を足さない）。色は警告系で、赤は使わない。
+function indexEventBadge(ev) {
+  if (!ev) return '';
+  return ` <span class="tag tag-amber" title="${esc(ev.note)}">${esc(ev.label)}</span>`;
+}
+
+function indexEventsNote(meta) {
+  if (!meta) return '';
+  const text = meta.ledger_ok === false ? meta.banner : meta.summary;
+  return text ? `<span style="color:var(--text-muted)">※ ${esc(text)}</span>` : '';
+}
+
 // ── 金額の単位換算（億） ──────────────────────────────────────────────
 // API は財務の金額を「円」、時価総額（market_cap 系）だけを「百万円」で返す（収集が
 // 株価×株数/1e6 で作る）。億への換算はここだけに置き、ページ側で書き写さない（#911:
