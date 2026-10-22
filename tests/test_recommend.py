@@ -72,6 +72,25 @@ class TestConstants:
                 assert lo <= d <= hi, f"{name} の {metric}={w} がスライダーの範囲 [{lo}, {hi}] の外"
                 assert d % step == 0, f"{name} の {metric}={w} がスライダーの刻み {step} に乗らない"
 
+    def test_slider_defaults_are_the_balanced_preset(self):
+        """分析画面のスライダーの初期値＝バランス型（無い指標は 0）（#1046）。
+
+        実行ボタンは 0 でないスライダーの値だけを重みとして送るので、初期値がずれていると
+        プリセットを押さずに実行した並びが、昇格ゲート（preset_ic_gate）・/api/backtest・朝の画面が
+        測っているバランス型と黙って別物になる。初期値は analysis.js の WEIGHT_LABELS から読む（書き写さない）。
+        """
+        import re
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        with open(os.path.join(root, "static", "js", "analysis.js"), encoding="utf-8") as f:
+            js = f.read()
+        body = js[js.index("const WEIGHT_LABELS"):js.index("let recResults")]
+        defaults = {k: float(v) for k, v in re.findall(r"'(\w+)':\s*\['[^']*',\s*(-?[\d.]+)\]", body)}
+        assert len(defaults) >= len(PRESETS["バランス型"]), "WEIGHT_LABELS の初期値を読み取れていない"
+        missing = set(PRESETS["バランス型"]) - set(defaults)
+        assert not missing, f"バランス型の {missing} にスライダーが無い（画面から表せない）"
+        expected = {k: float(PRESETS["バランス型"].get(k, 0.0)) for k in defaults}
+        assert defaults == expected, "スライダーの初期値がバランス型と違う（何も押さずに実行すると別の並びになる）"
+
 
 # ── 転送列の契約（Issue #441）────────────────────────────────────────────────
 #
