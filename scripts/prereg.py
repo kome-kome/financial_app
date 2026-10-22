@@ -94,6 +94,28 @@ def issue_url(text: str) -> str:
     return found[0]
 
 
+# 追記節で「まだ書いていない」を表す書き出し（開封の順序を守る判定に使う・#1032）
+PLACEHOLDER = "未記入"
+
+
+def appendix_section(text: str, heading: str) -> str:
+    """追記節の見出し行 `heading` の下（次の見出し行の手前まで）の中身。見出しが無ければ空文字。"""
+    _, appendix = split_document(text)
+    lines = appendix.split("\n")
+    try:
+        start = next(i for i, line in enumerate(lines) if line.strip() == heading) + 1
+    except StopIteration:
+        return ""
+    end = next((i for i in range(start, len(lines)) if lines[i].startswith("#")), len(lines))
+    return "\n".join(lines[start:end]).strip()
+
+
+def section_recorded(text: str, heading: str) -> bool:
+    """追記節のその見出しに結果が書かれているか（空・`PLACEHOLDER` で始まるものは書かれていない）。"""
+    body = appendix_section(text, heading)
+    return bool(body) and not body.startswith(PLACEHOLDER)
+
+
 def read_document(path: str | Path) -> str:
     p = Path(path)
     if not p.is_file():
