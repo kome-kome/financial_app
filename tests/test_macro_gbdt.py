@@ -931,6 +931,41 @@ class TestObjectiveOnlyMode:
 
         assert result_full["oof_backtest"] == result_skip["oof_backtest"]
 
+    def test_display_ordering_scoring_follows_the_switch(self):
+        """画面の並びの採点（#1042）: 通常の実行は出し、探索中は出さず、モデル比較のスイッチで出す。"""
+        import database
+
+        from contextlib import ExitStack
+
+        _db, prices_by_co, fin_by_co, companies = self._make_db()
+        params = self._make_params(use_macro=False)
+
+        def run(*contexts):
+            with patch("plugins.macro_gbdt.load_data", return_value=(prices_by_co, fin_by_co, companies)), \
+                 patch("plugins.macro_gbdt.preload_macro", return_value={}), \
+                 patch("plugins.macro_gbdt.get_producer_scores", return_value={}), \
+                 ExitStack() as stack:
+                for ctx in contexts:
+                    stack.enter_context(ctx)
+                return plugin.execute(params, MagicMock())
+
+        result_full = run()
+        result_skip = run(database.tuning_objective_only())
+        result_cmp = run(database.tuning_objective_only(), database.display_scoring())
+
+        disp = result_full["oof_backtest_display"]
+        assert disp["ordering"]["lambda"] == 1.0 and disp["ordering"]["risk_axis"] == "r2"
+        assert disp["n_oof_samples"] > 0
+        assert result_skip["oof_backtest_display"] is None
+        assert result_cmp["oof_backtest_display"] == disp
+
+    def test_rank_scores_have_no_display_ordering(self):
+        """M-5 の予測は順位スコアでリターンの単位を持たない＝ μ̂ − λR を作らない（#1042・ADR-0017）。"""
+        from plugins.macro_gbdt_rank import MacroGbdtRankPlugin
+
+        assert plugin._scores_in_return_units() is True
+        assert MacroGbdtRankPlugin()._scores_in_return_units() is False
+
     def test_normal_mode_still_returns_full_results_outside_context(self):
         """コンテキスト外（通常の /api/plugins/{name}/run 相当）は従来通りフルスコアリングする。"""
         import database

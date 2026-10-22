@@ -187,6 +187,8 @@ from .macro_snapshots import (  # noqa: E402
     PRICE_FEATURE_OPTIONS,
     DEFAULT_PRICE_FEATURES,
     build_price_features as _build_price_features,
+    display_ordering_defaults,
+    display_ordering_oof,
     tradable_results,
     tradable_snapshot_asof,
     # テストが plugins.macro_dlm から参照する再エクスポート（`X as X`＝ruff F401 の対象外・#825）
@@ -345,6 +347,24 @@ def _r(x: float, nd: int = 6) -> float | None:
     if x is None or not math.isfinite(x):
         return None
     return round(float(x), nd)
+
+
+def _r_macro_of(X: list, beta_T: list, k: int) -> float | None:
+    """系統的マクロリスク R_macro（年率・表示の副産物で、画面の U = µ̂ − λR の横軸）。
+
+    := sqrt(βᵀ cov(Δm) β)。β は最終週の推定値、cov は全期間の説明変数から取る。価格行動系特徴量
+    （末尾 len(price_features) 列）は銘柄固有の遅行特徴量であり「マクロリスク」ではないため、
+    列を macro 部分（1:1+k）に限定する（Issue #317）。画面の並びの採点（#1042）も同じ値を使う。
+    """
+    try:
+        Xm = np.asarray([r[1:1 + k] for r in X], dtype=float)
+        if Xm.shape[0] > k:
+            cov = np.cov(Xm, rowvar=False)
+            cov = np.atleast_2d(cov)
+            return macro_risk_exposure(beta_T, cov) * math.sqrt(WEEKS_PER_YEAR)
+    except Exception:
+        return None
+    return None
 
 
 # ── プラグイン本体 ───────────────────────────────────────────────────────────
@@ -649,8 +669,12 @@ class MacroDlmPlugin(AnalysisPlugin):
         # R_macro計算・診断集計）を省略する（Issue #299）。OOF 残差の収集は dlm_filter の
         # 呼び出し自体（1銘柄1フォワードパス）に由来し、この省略では削れない
         # （M-1/M-2 と異なり dlm_filter が OOF 残差と最終推定値を同一パスで生成するため）。
-        from database import is_tuning_objective_only
+        from database import is_tuning_objective_only, wants_display_scoring
         objective_only = is_tuning_objective_only()
+        # 画面の並びの採点（#1042）を出すか。探索中は出さない（モデル比較は display_scoring() で出す）。
+        # 出すときは社ごとの R_macro が要るので、早期 return の経路でもそれだけは計算する。
+        want_display = wants_display_scoring()
+        r_macro_by_ec: dict[str, float | None] = {}
 
         rows: list[dict] = []
         agg_se2: list[float] = []     # 標準化予測誤差²（校正＝平均が1なら整合）
@@ -701,6 +725,9 @@ class MacroDlmPlugin(AnalysisPlugin):
                 # oof_backtest 算出に不要な全社スコアリングをスキップ（rows は
                 # 「推定可能な銘柄が0件」判定・件数カウントのためだけに残す）。
                 rows.append({"edinet_code": ec})
+                if want_display:
+                    r_macro_by_ec[ec] = _r_macro_of(
+                        X, [float(m_path[-1, j + 1]) for j in range(k)], k)
                 continue
 
             alpha_w = float(m_path[-1, 0])
@@ -738,18 +765,9 @@ class MacroDlmPlugin(AnalysisPlugin):
             if pred_rmse is not None:
                 agg_rmse.append(pred_rmse)
 
-            # 系統的マクロリスク R_macro（副産物・表示の:= sqrt(βᵀ cov(Δm) β)）
-            # 価格行動系特徴量（末尾 len(price_features) 列）は銘柄固有の遅行特徴量であり
-            # 「マクロリスク」ではないため、列を macro 部分（1:1+k）に限定する（Issue #317）。
-            r_macro = None
-            try:
-                Xm = np.asarray([r[1:1 + k] for r in X], dtype=float)
-                if Xm.shape[0] > k:
-                    cov = np.cov(Xm, rowvar=False)
-                    cov = np.atleast_2d(cov)
-                    r_macro = macro_risk_exposure(beta_T, cov) * math.sqrt(WEEKS_PER_YEAR)
-            except Exception:
-                r_macro = None
+            # 系統的マクロリスク R_macro（副産物・表示の:= sqrt(βᵀ cov(Δm) β)・`_r_macro_of`）
+            r_macro = _r_macro_of(X, beta_T, k)
+            r_macro_by_ec[ec] = r_macro
 
             comp = companies.get(ec)
             rows.append({
@@ -785,6 +803,18 @@ class MacroDlmPlugin(AnalysisPlugin):
         oof_bt = _oof_backtest(oof_residuals, n_quantiles=5,
                                meta_by_ym=oof_meta, rebalance_per_year=12)
 
+        # ── 画面の並びの採点（#1042・ADR-0069）: 同じ OOF を画面の既定の λ で U = µ̂ − λR_macro の順に
+        # 採点し直す（参考）。R_macro は最終週の β を全期間に当てた社ごとの定数で、過去の月の時点では
+        # 作れない＝未来情報込みの上限（#709 と同じ扱い・time_reproducible=False）。
+        oof_display = None
+        if want_display:
+            lam_d, _axis = display_ordering_defaults(self.params_schema(), default_axis="r_macro")
+            rmap = {(ym, ec): r_macro_by_ec[ec]
+                    for ym, metas in oof_meta.items() for ec, _ind in metas
+                    if r_macro_by_ec.get(ec) is not None}
+            oof_display = display_ordering_oof(oof_residuals, oof_meta, rmap, lam_d, "r_macro",
+                                               time_reproducible=False, rebalance_per_year=12)
+
         # ── ハイパーパラメータ探索中は oof_backtest 算出後に早期return（Issue #299）───
         # plugins/tuning.py::search() が読むのは oof_backtest のみで、以降の β経路構築・
         # 診断集計・producer 永続化は探索候補の評価には不要（oof_backtest の値には
@@ -806,6 +836,7 @@ class MacroDlmPlugin(AnalysisPlugin):
                 "n_companies": 0,
                 "diagnostics": None,
                 "oof_backtest": oof_bt,
+                "oof_backtest_display": oof_display,
                 "results": [],
                 "r_macro_available": False,
             }
@@ -902,6 +933,7 @@ class MacroDlmPlugin(AnalysisPlugin):
             "n_companies": n_companies,
             "diagnostics": diagnostics,
             "oof_backtest": oof_bt,
+            "oof_backtest_display": oof_display,
             "results": shown[:top_n],
             "untradable_excluded": untradable,
             # #273: r_macro は自前計算だが分散不足等で全社 None になり得る（β推論と別要因）。

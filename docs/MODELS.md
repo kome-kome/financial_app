@@ -1280,6 +1280,28 @@ R2 は月末までの52週だけで計算する＝時点再現できている。
 （日中枠 `gate:risk-axis-m2`・分母は画面の既定に追随する）と、分母を上書きする
 `--lambdas 1.0 --risk-base mu_only`（日中枠 `gate:risk-axis-m2-mu`）。
 
+**画面の並びの採点（#1042・ADR-0069）**: 上の2段階はゲート専用の手続きで、毎回の OOF には出なかった。
+いまは M-1 / M-2 / M-3 の `execute()` が、`oof_backtest`（**予想の採点**＝μ̂ の順・値も判定も不変）に加えて
+`oof_backtest_display`（**画面の並びの採点**＝同じ OOF 予測を U の順で採点し直したもの）を返す。中身は
+`oof_backtest` と同じ形（#1041 の上位K社の参考指標も U の順で入る）に `ordering`
+（`lambda`・`risk_axis`・`time_reproducible`・`n_dropped_rows`）を足したもの。**参考で、昇格・退役・探索・
+モデル比較の ▲▼ には使わない**。
+
+- λ と横軸は各プラグインの `params_schema` の既定（`plugins/macro_snapshots.py::display_ordering_defaults`。
+  `momentum_gate.production_risk` も同じ関数を通る）。利用者が画面で動かした λ ではない
+- R は画面と同じ生の値（`standardize=False`・#815）。R が取れない行は落とし、その数を `n_dropped_rows` に返す
+- λ=0 のモデル（M-6）は出さない（予想の採点と同じになる）。予測がリターンの単位を持たない M-5（順位スコア・
+  ADR-0017）も出さない。M-4 は λ を持たない
+- **M-3 の R_macro は時点再現できない**（最終週の β を全期間に当てた社ごとの定数）ので、
+  `time_reproducible=false`＝未来情報込みの上限として扱う（#709 と同じ）。M-1 / M-2 の R2 は月末までの
+  52週だけで計算する＝時点再現できる
+- 探索（`tuning_objective_only()`）の中では計算しない。モデル比較だけが `database.display_scoring()` で
+  出させ、比較のカードに参考の欄として並べる。R2 は社ごとに一度だけ下ごしらえして月末ごとに直近の行だけを
+  `_realized_vol` へ渡す（値は同じ。全期間を毎回走査するより約2倍速いが、`statistics.stdev` の分は残るので
+  M-1 / M-2 の実行は OOF の社×月の数に比例して重くなる）
+- 部品（`risk_by_ym`・`apply_risk_axis`）の正本は `plugins/macro_snapshots.py`。`momentum_gate` はそこから
+  import する（本番コードから `scripts/` を import しない）
+
 #### 11.7.4 上位K社の参考指標（#1041・ADR-0069）
 
 上の指標はどれも全断面（1 か月約 1,350 社・5 分位なら 1 分位約 270 社）が単位で、**上位数社の成績を測る指標が

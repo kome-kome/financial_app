@@ -150,6 +150,11 @@ class MacroGbdtRankPlugin(MacroGbdtPlugin):
     def _model_type(self) -> str:
         return "xgboost_ranker"
 
+    def _scores_in_return_units(self) -> bool:
+        # 順位スコアはリターンの単位を持たない（ADR-0017）＝ μ̂ − λR が意味を持たないので
+        # 画面の並びの採点（#1042）は出さない
+        return False
+
     def _make_cv_callback(self, xgb_params: dict, best_iterations: list) -> tuple:
         """XGBRanker コールバック＋ pass_train_groups=True（月クエリグループ境界の受渡）。"""
         return _make_xgb_rank_fit_predict(xgb_params, best_iterations), {"pass_train_groups": True}

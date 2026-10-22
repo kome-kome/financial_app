@@ -49,6 +49,7 @@ from .macro_snapshots import (
     get_producer_scores,
     oof_backtest,
     build_oof_meta,
+    display_ordering_for,
     shared_cache_get_or_compute,
     tradable_results,
 )
@@ -432,16 +433,23 @@ class MacroRiskReturnPlugin(AnalysisPlugin):
         oof_bt = oof_backtest(cv_residuals_by_ym, n_quantiles=5,
                               meta_by_ym=oof_meta, rebalance_per_year=4)
 
+        # --- 画面の並びの採点（#1042・ADR-0069）: 同じ OOF を画面の既定の λ・横軸の U の順で
+        #     採点し直す（参考・判定には使わない）。探索中は読まれないので計算しない（モデル比較は出す）。
+        from database import is_tuning_objective_only, wants_display_scoring
+        oof_display = (display_ordering_for(self.params_schema(), cv_residuals_by_ym, oof_meta,
+                                            prices_by_co, db, rebalance_per_year=4)
+                       if wants_display_scoring() else None)
+
         # --- ハイパーパラメータ探索中は oof_backtest 算出後に早期return（Issue #299）───
         # plugins/tuning.py::search() が読むのは oof_backtest のみで、以降の最終 OLS
         # 再学習（_fit_final）・全社スコアリング（_score_companies）は探索候補の
         # 評価には不要（かつ oof_backtest の値には一切影響しない）。通常の API 実行
         # （/api/plugins/{name}/run）ではこのモードは無効のため、常に従来通りフル実行する。
-        from database import is_tuning_objective_only
         if is_tuning_objective_only():
             return {
                 "cv_metrics":       cv_metrics,
                 "oof_backtest":     oof_bt,
+                "oof_backtest_display": oof_display,
                 "selected_features": selected_names,
                 "feature_coefs":    {},
                 "n_train_samples":  total_samples,
@@ -503,6 +511,7 @@ class MacroRiskReturnPlugin(AnalysisPlugin):
         return {
             "cv_metrics":       cv_metrics,
             "oof_backtest":     oof_bt,
+            "oof_backtest_display": oof_display,
             "selected_features": selected_names,
             "feature_coefs":    feature_coefs,
             "n_train_samples":  total_samples,

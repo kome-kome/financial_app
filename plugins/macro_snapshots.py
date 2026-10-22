@@ -12,6 +12,7 @@ M-1（macro_risk_return）と M-2（macro_gbdt）の共通面を集約し、M-2�
   - リーク感応 helpers（_find_applicable_fin / _macro_from_cache / _realized_vol）
   - producer スコア（producer_scores / get_producer_scores）
 """
+import bisect
 import contextvars
 import logging
 import math
@@ -26,7 +27,7 @@ import numpy as np
 import pandas as pd
 
 from . import progress
-from .utils import macro_risk_exposure, normalize, winsorize
+from .utils import coerce_params, macro_risk_exposure, normalize, winsorize
 
 logger = logging.getLogger(__name__)
 
@@ -681,6 +682,30 @@ def _realized_vol(price_rows: list, ref_date: str, weeks: int = 52) -> float | N
     if len(log_rets) < 3:
         return None
     return statistics.stdev(log_rets) * math.sqrt(52)
+
+
+def _vol_index(price_rows: list) -> tuple[list, list] | None:
+    """同じ社の `_realized_vol` を多くの ref_date で呼ぶための下ごしらえ（#1042）。
+
+    株価が正の行と、その日付の列を返す。日付順でなければ None（呼び出し側は素の
+    `_realized_vol` へ倒す——`_realized_vol` は並びの順で直近の行を取るので、並べ直すと値が変わりうる）。
+    """
+    eligible = [r for r in price_rows if r.close_last and r.close_last > 0]
+    dates = [r.trade_date for r in eligible]
+    if any(a > b for a, b in zip(dates, dates[1:])):
+        return None
+    return eligible, dates
+
+
+def _realized_vol_indexed(index: tuple[list, list], ref_date: str, weeks: int = 52) -> float | None:
+    """`_realized_vol` と同じ値を、ref_date 以前の直近 weeks+1 行だけを渡して速く得る（#1042）。
+
+    式は `_realized_vol` のまま（書き写さない）。日付順の行では ref_date 以前の行が先頭からの連続になるので、
+    二分探索で切り出した直近の行を渡せば、全期間を走査したときと同じ行が使われる。
+    """
+    eligible, dates = index
+    hi = bisect.bisect_right(dates, ref_date)
+    return _realized_vol(eligible[max(0, hi - weeks - 1):hi], ref_date, weeks)
 
 
 # ── 1プロセス内で execute を複数回まわすときの共有スナップショットキャッシュ（Issue #298）──
@@ -2200,3 +2225,165 @@ def oof_backtest(residuals_by_ym: dict, n_quantiles: int = 5, cost_bps: float = 
             "n":    len(top_decile_ics),
         },
     }
+
+
+# ── 画面の並びの採点（U = μ̂ − λR・#1042・ADR-0069）──────────────────────────────
+# M-1 / M-2 / M-3 の画面は U = μ̂ − λR の順に並ぶが、`oof_backtest` は μ̂ の順で採点する（予想の採点）。
+# ここは同じ OOF 予測を、画面の既定の λ・横軸で U へ置き換えて採点し直す（画面の並びの採点）。
+# **参考で、判定（昇格・退役・探索・▲▼）には使わない**。部品は `scripts/momentum_gate.py` の
+# `--risk-axis` と共有する（本番コードから scripts を import しないので、正本をこちらに置く）。
+
+RISK_AXES = ("r2", "r_macro")
+
+
+def display_ordering_defaults(schema: dict, default_axis: str = "r2") -> tuple[float, str]:
+    """画面が既定で出す並びの `(λ, 横軸)`。プラグインの `params_schema` の既定だけから取る。
+
+    利用者が画面で動かした λ ではなく既定を使う（λ は好みのつまみで、モデルの成績を λ に依存させない・
+    ADR-0069）。横軸の選択肢を持たないプラグイン（M-3 は R_macro 固定）は `default_axis` を返す。
+    `momentum_gate.production_risk` もここを通る（λ の源を2つにしない・#808）。
+    """
+    params = coerce_params(schema, {})
+    return float(params.get("lambda_risk") or 0.0), str(params.get("risk_axis") or default_axis)
+
+
+def risk_by_ym(axis: str | None, prices_by_co: dict, ids_by_ym: dict,
+               producer: dict) -> dict[tuple, float]:
+    """`{(ym, edinet_code): R}` を返す。`axis` は `RISK_AXES` の値（`None` は軸なし）。
+
+    **`r2` は時点再現できる。** `_realized_vol` を月末を `ref_date` として呼ぶので、見るのは
+    その月までの52週だけ＝未来を見ない。本番の M-1 と同じ関数を呼び、ボラの計算を書き写さない。
+    社ごとに `_vol_index` で一度だけ下ごしらえし、月末ごとの呼び出しを直近の行だけにする（#1042）。
+    値は素の呼び出しと同じで、合成データ（1,000社×800週・28期）では約2倍速い。残りの大半は
+    `_realized_vol` の `statistics.stdev` で、式を変えると本番の R2 が動くので削らない。
+
+    **`r_macro` は時点再現できない。** `get_producer_scores` が返すのは
+    `r_macro = √(βᵀΣ_macroβ)` で、β も Σ_macro も**単一 run のスナップショット**である
+    （`macro_beta_loadings` に時点列が無く、run は 2026-07 以降の数本しかない）。したがって
+    過去のどの月に当てても「その月より後のデータで推定した β」になる。#709 はこれを
+    **未来情報を与えた場合の上限**として測ると決めた——ここで負ければ採用しないと結論できる。
+
+    副作用として `r_macro` は**銘柄ごとの定数**（月で変わらない）になる。つまりこの軸は
+    「マクロか実現ボラか」と「静的か動的か」を同時に動かす。分離には3つ目の条件が要り、
+    #709 のスコープ外（判定文と JSON に注意書きを出す）。
+    """
+    if axis is None:
+        return {}
+    out: dict[tuple, float] = {}
+    if axis == "r_macro":
+        for ym, ids in ids_by_ym.items():
+            for ec in ids:
+                v = (producer.get(ec) or {}).get("r_macro")
+                if v is not None:
+                    out[(ym, ec)] = float(v)
+        return out
+    if axis != "r2":
+        raise ValueError(f"未知のリスク軸: {axis}（{', '.join(RISK_AXES)}）")
+    indexes: dict = {}
+    for ym, ids in ids_by_ym.items():
+        bound = _month_end_bound(ym)
+        for ec in ids:
+            rows = prices_by_co.get(ec) or []
+            if ec not in indexes:
+                indexes[ec] = _vol_index(rows)
+            index = indexes[ec]
+            v = (_realized_vol_indexed(index, bound) if index is not None
+                 else _realized_vol(rows, bound))
+            if v is not None:
+                out[(ym, ec)] = float(v)
+    return out
+
+
+def apply_risk_axis(resid_by_ym: dict, meta_by_ym: dict, rmap: dict,
+                    lam: float, standardize: bool = True) -> tuple[dict, dict, int]:
+    """`yhat` を `U = yhat − λ·z(R)` へ置き換える。戻り値は `(resid, meta, 落とした行数)`。
+
+    **R は月内で z-score 標準化する。** `r2`（年率ボラ）と `r_macro`（√(βᵀΣβ)）はスケールが
+    違うので、同じ λ で比べると軸の差ではなく**スケールの差**を測ることになる。月内で揃える
+    のは M-1 が月内の順位で評価されるからで、月をまたいだ水準は順位に影響しない。
+
+    月内の R が全て同じ値なら標準偏差が 0 になる。そのときは傾けない（`z=0`）——`r_macro` は
+    銘柄ごとの定数なので、1銘柄しか残らない月でこれが起きる。
+
+    `standardize=False` は**画面と同じ生の R**で `U = yhat − λR` を作る（`--risk-scale raw`・#808）。
+    λ がスライダーの値と同じ意味になる代わりに、軸の間で同じ λ を比べる意味は無くなる
+    （各軸を分母と比べるだけ）。z の λ=1.0 は画面の λ≈1/sd(R) に当たり、M-6 では約 4.7。
+
+    `rmap` が空なら恒等変換（`mu_only`）。
+    """
+    if not rmap:
+        return resid_by_ym, meta_by_ym, 0
+    out_r: dict[str, list] = {}
+    out_m: dict[str, list] = {}
+    dropped = 0
+    for ym, pairs in resid_by_ym.items():
+        metas = meta_by_ym.get(ym, [])
+        rows = []
+        for j, (yh, y) in enumerate(pairs):
+            meta = metas[j] if j < len(metas) else (None, None)
+            r = rmap.get((ym, meta[0]))
+            if r is None:
+                dropped += 1
+                continue
+            rows.append((yh, y, meta, r))
+        if not rows:
+            continue
+        if standardize:
+            rs = [r for _yh, _y, _m, r in rows]
+            mu = sum(rs) / len(rs)
+            sd = statistics.stdev(rs) if len(rs) > 1 else 0.0
+            out_r[ym] = [(yh - lam * ((r - mu) / sd if sd else 0.0), y)
+                         for yh, y, _m, r in rows]
+        else:
+            out_r[ym] = [(yh - lam * r, y) for yh, y, _m, r in rows]
+        out_m[ym] = [m for _yh, _y, m, _r in rows]
+    return out_r, out_m, dropped
+
+
+def display_ordering_oof(residuals_by_ym: dict, meta_by_ym: dict, rmap: dict, lam: float,
+                         risk_axis: str, time_reproducible: bool, n_quantiles: int = 5,
+                         rebalance_per_year: float | None = None) -> dict | None:
+    """画面の並びの採点（#1042・ADR-0069）。λ=0 なら None（予想の採点と構造的に同じなので出さない）。
+
+    yhat を U = yhat − λR へ置き換えて `oof_backtest` を当て直し、`ordering` を付けて返す。R は画面と
+    同じ生の値（`standardize=False`）——z-score の λ は画面の λ と意味が違う（#815）。R が取れない行は
+    落とし、その数を `ordering.n_dropped_rows` に返す（予想の採点との母集団の差が見えるように）。
+    `rmap` が空なら全行を落とす（`apply_risk_axis` の空は「軸なし」の恒等変換なので、そのまま通すと
+    R が1社も無いのに予想の採点と同じ値が出る）。`time_reproducible=False` は R を過去の時点で
+    作り直せない（R_macro は単一 run のスナップショット・#709）＝未来情報込みの上限。
+    """
+    if not lam > 0:
+        return None
+    if rmap:
+        u_res, u_meta, dropped = apply_risk_axis(residuals_by_ym, meta_by_ym, rmap, lam,
+                                                 standardize=False)
+    else:
+        u_res, u_meta, dropped = {}, {}, sum(len(v) for v in residuals_by_ym.values())
+    out = oof_backtest(u_res, n_quantiles=n_quantiles, meta_by_ym=u_meta,
+                       rebalance_per_year=rebalance_per_year)
+    out["ordering"] = {
+        "lambda":            lam,
+        "risk_axis":         risk_axis,
+        "time_reproducible": time_reproducible,
+        "n_dropped_rows":    dropped,
+    }
+    return out
+
+
+def display_ordering_for(schema: dict, residuals_by_ym: dict, meta_by_ym: dict,
+                         prices_by_co: dict, db: Any,
+                         rebalance_per_year: float | None = None) -> dict | None:
+    """M-1 / M-2 の画面の並びの採点。λ・横軸は `schema` の既定、R は OOF の (ym, 社) ごとに引く。
+
+    meta_by_ym は `build_oof_meta` の `{ym: [(stock_id, industry), ...]}`。R_macro の横軸のときだけ
+    macro_beta を読む（既定の R2 では DB を読まない）。
+    """
+    lam, axis = display_ordering_defaults(schema)
+    if not lam > 0:
+        return None
+    producer = get_producer_scores(db) if axis == "r_macro" else {}
+    ids_by_ym = {ym: [m[0] for m in metas] for ym, metas in meta_by_ym.items()}
+    rmap = risk_by_ym(axis, prices_by_co, ids_by_ym, producer)
+    return display_ordering_oof(residuals_by_ym, meta_by_ym, rmap, lam, axis,
+                                time_reproducible=(axis == "r2"),
+                                rebalance_per_year=rebalance_per_year)

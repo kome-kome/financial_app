@@ -466,9 +466,10 @@ from plugins.macro_snapshots import (  # noqa: E402
     _avg_ranks,
     _find_applicable_fin,
     _month_end_bound,
-    _realized_vol,
     _spearman,
+    apply_risk_axis,
     build_snapshots,
+    display_ordering_defaults,
     fill_fin_blanks,
     get_producer_scores,
     load_fill_sources,
@@ -478,6 +479,7 @@ from plugins.macro_snapshots import (  # noqa: E402
     oof_backtest,
     preload_macro,
     quantile_period_ok,
+    risk_by_ym,
     size_slope,
     use_fin_rows,
 )
@@ -2135,11 +2137,13 @@ def risk_specs(lambdas: list[float] | None = None,
 
 
 def production_risk(model: str) -> tuple[float, str]:
-    """モデルの画面が既定で出す並びの `(λ, 横軸)`。**`RISK_LAMBDA_PLUGIN` からだけ取る**。"""
+    """モデルの画面が既定で出す並びの `(λ, 横軸)`。**`RISK_LAMBDA_PLUGIN` からだけ取る**。
+
+    読み方はプラグインの画面の並びの採点（#1042）と同じ `display_ordering_defaults` を通す。
+    """
     if model not in RISK_LAMBDA_PLUGIN:
         raise ValueError(f"{model} は U を画面に出すプラグインが登録されていません（RISK_LAMBDA_PLUGIN）")
-    params = coerce_params(get_plugin(RISK_LAMBDA_PLUGIN[model]).params_schema(), {})
-    return float(params.get("lambda_risk") or 0.0), str(params.get("risk_axis") or "r2")
+    return display_ordering_defaults(get_plugin(RISK_LAMBDA_PLUGIN[model]).params_schema())
 
 
 def resolve_risk_lambda(models: list[str]) -> float:
@@ -2206,42 +2210,8 @@ def resolve_risk_base(models: list[str], specs: dict[str, tuple[str | None, floa
     return override, production
 
 
-def risk_by_ym(axis: str | None, prices_by_co: dict, ids_by_ym: dict,
-               producer: dict) -> dict[tuple, float]:
-    """`{(ym, edinet_code): R}` を返す。`axis` は `RISK_CONDS` の値（`None` は軸なし）。
-
-    **`r2` は時点再現できる。** `_realized_vol` を月末を `ref_date` として呼ぶので、見るのは
-    その月までの52週だけ＝未来を見ない。本番の M-1 と同じ関数を呼び、ボラの計算を書き写さない。
-
-    **`r_macro` は時点再現できない。** `get_producer_scores` が返すのは
-    `r_macro = √(βᵀΣ_macroβ)` で、β も Σ_macro も**単一 run のスナップショット**である
-    （`macro_beta_loadings` に時点列が無く、run は 2026-07 以降の数本しかない）。したがって
-    過去のどの月に当てても「その月より後のデータで推定した β」になる。#709 はこれを
-    **未来情報を与えた場合の上限**として測ると決めた——ここで負ければ採用しないと結論できる。
-
-    副作用として `r_macro` は**銘柄ごとの定数**（月で変わらない）になる。つまりこの軸は
-    「マクロか実現ボラか」と「静的か動的か」を同時に動かす。分離には3つ目の条件が要り、
-    #709 のスコープ外（判定文と JSON に注意書きを出す）。
-    """
-    if axis is None:
-        return {}
-    out: dict[tuple, float] = {}
-    if axis == "r_macro":
-        for ym, ids in ids_by_ym.items():
-            for ec in ids:
-                v = (producer.get(ec) or {}).get("r_macro")
-                if v is not None:
-                    out[(ym, ec)] = float(v)
-        return out
-    if axis != "r2":
-        raise ValueError(f"未知のリスク軸: {axis}（{', '.join(str(a) for a in RISK_CONDS.values())}）")
-    for ym, ids in ids_by_ym.items():
-        bound = _month_end_bound(ym)
-        for ec in ids:
-            v = _realized_vol(prices_by_co.get(ec) or [], bound)
-            if v is not None:
-                out[(ym, ec)] = float(v)
-    return out
+# `risk_by_ym`（R の表）と `apply_risk_axis`（yhat → U）は、プラグインの画面の並びの採点（#1042）と
+# 共有するので `plugins.macro_snapshots` に置く（本番コードから scripts を import しない）。
 
 
 def risk_common_keys(risk_maps: dict[str, dict], keys: set) -> set:
@@ -2257,52 +2227,6 @@ def risk_common_keys(risk_maps: dict[str, dict], keys: set) -> set:
             continue        # 軸なし（`mu_only`）は誰も落とさない
         out &= set(rmap)
     return out
-
-
-def apply_risk_axis(resid_by_ym: dict, meta_by_ym: dict, rmap: dict,
-                    lam: float, standardize: bool = True) -> tuple[dict, dict, int]:
-    """`yhat` を `U = yhat − λ·z(R)` へ置き換える。戻り値は `(resid, meta, 落とした行数)`。
-
-    **R は月内で z-score 標準化する。** `r2`（年率ボラ）と `r_macro`（√(βᵀΣβ)）はスケールが
-    違うので、同じ λ で比べると軸の差ではなく**スケールの差**を測ることになる。月内で揃える
-    のは M-1 が月内の順位で評価されるからで、月をまたいだ水準は順位に影響しない。
-
-    月内の R が全て同じ値なら標準偏差が 0 になる。そのときは傾けない（`z=0`）——`r_macro` は
-    銘柄ごとの定数なので、1銘柄しか残らない月でこれが起きる。
-
-    `standardize=False` は**画面と同じ生の R**で `U = yhat − λR` を作る（`--risk-scale raw`・#808）。
-    λ がスライダーの値と同じ意味になる代わりに、軸の間で同じ λ を比べる意味は無くなる
-    （各軸を分母と比べるだけ）。z の λ=1.0 は画面の λ≈1/sd(R) に当たり、M-6 では約 4.7。
-
-    `rmap` が空なら恒等変換（`mu_only`）。
-    """
-    if not rmap:
-        return resid_by_ym, meta_by_ym, 0
-    out_r: dict[str, list] = {}
-    out_m: dict[str, list] = {}
-    dropped = 0
-    for ym, pairs in resid_by_ym.items():
-        metas = meta_by_ym.get(ym, [])
-        rows = []
-        for j, (yh, y) in enumerate(pairs):
-            meta = metas[j] if j < len(metas) else (None, None)
-            r = rmap.get((ym, meta[0]))
-            if r is None:
-                dropped += 1
-                continue
-            rows.append((yh, y, meta, r))
-        if not rows:
-            continue
-        if standardize:
-            rs = [r for _yh, _y, _m, r in rows]
-            mu = sum(rs) / len(rs)
-            sd = statistics.stdev(rs) if len(rs) > 1 else 0.0
-            out_r[ym] = [(yh - lam * ((r - mu) / sd if sd else 0.0), y)
-                         for yh, y, _m, r in rows]
-        else:
-            out_r[ym] = [(yh - lam * r, y) for yh, y, _m, r in rows]
-        out_m[ym] = [m for _yh, _y, m, _r in rows]
-    return out_r, out_m, dropped
 
 
 def quantile_risk_profile(resid_by_ym: dict, n_quantiles: int = RISK_QUANTILES) -> list[dict]:

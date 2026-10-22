@@ -1102,7 +1102,28 @@ function _mcModelCard(m) {
     </div>`
     : `<div style="font-size:11px;color:var(--text-muted)">OOF サンプルが期内 ${(oof.n_quantiles||5)*2} 銘柄未満のため分位を表示できません。rank-IC は ${ic.n||0} fold で算出。</div>`;
   return `<div style="padding:12px 14px;background:var(--bg-sunken);border-radius:8px;border:1px solid var(--border-muted)">
-    ${head}${metrics}${bars}
+    ${head}${metrics}${bars}${_mcDisplayOrderingHTML(m.oof_backtest_display)}
+  </div>`;
+}
+
+// 画面の並びの採点（#1042・ADR-0069）。同じ OOF を画面の既定の λ・横軸の U = μ̂ − λR の順で
+// 採点し直した参考値。▲▼（有意差の判定）は上の予想の採点（μ̂ の順）のまま。λ=0 のモデルと
+// 順位スコアのモデルはサーバーが null を返すので何も出さない。
+function _mcDisplayOrderingHTML(d) {
+  if (!d || !d.ordering) return '';
+  const o = d.ordering;
+  const ic = d.rank_ic || {};
+  const ss = d.short_side_spread;
+  const axis = o.risk_axis === 'r_macro' ? 'R_macro' : 'R2';
+  const lam = Number(o.lambda);
+  const upper = o.time_reproducible === false
+    ? '<div style="font-size:11px;color:var(--status-warn-text)">未来情報込みの上限（R_macro は最新の β を過去の全ての月に当てている）</div>'
+    : '';
+  return `<div style="margin-top:10px;padding:6px 8px;border:1px dashed var(--border-muted);border-radius:6px" title="画面が既定で出す並び（U = μ̂ − λR・R は画面と同じ生の値）で同じ OOF を採点し直した値。利用者が上から買う並びの成績で、判定には使わない（ADR-0069）。">
+    <div style="font-size:11px;color:var(--text-muted)">画面の並びの採点（参考・U = μ̂ − ${Number.isFinite(lam) ? lam.toFixed(1) : '-'}×${axis}）</div>
+    <div style="font-size:13px;font-weight:700">rank-IC ${ic.mean!=null?ic.mean.toFixed(3):'-'} ／ 売り側 spread ${ss!=null?(ss*100).toFixed(2)+'%':'-'}</div>
+    <div style="font-size:11px;color:var(--text-muted)">${ic.n||0} fold ／ R が取れず除外 ${o.n_dropped_rows||0} 行</div>
+    ${upper}
   </div>`;
 }
 
