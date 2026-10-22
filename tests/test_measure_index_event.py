@@ -1,8 +1,9 @@
 """イベントスタディの計測 CLI（scripts/measure_index_event.py・#1031）のテスト。
 
 CLI は共通の `db` fixture（in-memory SQLite）に合成の週次株価・通期行・data_j の断面を入れ、台帳だけを
-差し替えて、読み込みから JSON の書き出しまでを通す（本物の DB・JPX の一覧には触れない）。週次株価は
-2021 年からなので、本物と同じく事前期間（2014〜2018）が無く、MDE と placebo は「測定不能」になる。
+差し替えて、読み込みから JSON の書き出しまでを通す（本物の DB・JPX の一覧には触れない）。合成の週次株価は
+2021 年からなので、事前期間（2019-07-29〜2021-02-21）のうち 2021 年の 6 週だけが使え、placebo は下限の 15 個に
+届かず「測定不能」になる。
 """
 from __future__ import annotations
 
@@ -135,8 +136,8 @@ class TestStageA:
         assert main["unmatched"]["by_reason"] == {"no_data": 1}
         assert main["balance_ok"] is True
         assert data["first_stage"]["pass"] is True
-        assert data["power"]["mde"] is None and data["power"]["n_weeks"] == 0
-        assert data["placebo"]["fpr"] is None and data["placebo"]["n_usable"] == 0
+        assert data["power"]["n_weeks"] == 6 and data["power"]["mde"] is not None
+        assert data["placebo"]["fpr"] is None and data["placebo"]["n_usable"] == 1
         assert data["r0"]["status"] == "pending"
         # 要約には銘柄コードを入れない。マッチ対は別のファイルに書く
         assert not re.search(r"E9\d{3}", out.read_text(encoding="utf-8"))

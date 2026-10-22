@@ -70,20 +70,43 @@ class TestCalendar:
         # 2024-04-30（火）の前営業日は 4/29（月・昭和の日）を飛ばして 4/26（金）
         assert S.previous_business_day(date(2024, 4, 30)) == date(2024, 4, 26)
 
-    def test_substitute_holiday_2018(self):
-        # 2018-04-29 は日曜なので 4/30（月）が振替休日＝4 月の最終営業日は 4/27（金）
-        assert S.last_business_day(2018, 4) == date(2018, 4, 27)
+    def test_golden_week_2019(self):
+        # 2019-04-29（昭和の日）と 4/30（国民の休日）が続けて休み＝4 月の最終営業日は 4/26（金）
+        assert S.last_business_day(2019, 4) == date(2019, 4, 26)
+
+    def test_year_end_is_closed(self):
+        # 東証は 12/31 が休み＝2019 年 12 月の最終営業日は 12/30（月）、前営業日は 12/27（金）
+        assert S.last_business_day(2019, 12) == date(2019, 12, 30)
+        assert S.previous_business_day(date(2019, 12, 30)) == date(2019, 12, 27)
 
     def test_placebo_weeks(self):
+        """事前期間の各月の月末の週（#1033）。四半期末だけでは 6 個で下限の 15 個に届かない。"""
         weeks = S.placebo_pressure_weeks()
-        assert len(weeks) == 20
-        assert weeks[0] == date(2014, 1, 27)        # 1/31（金）の前営業日 1/30（木）の週
-        assert weeks[1] == date(2014, 4, 28)        # 4/30（水）の前営業日は 4/28（月・4/29 は祝日）
-        assert date(2018, 4, 23) in weeks           # 最終営業日 4/27（金）の前営業日 4/26（木）の週
-        assert weeks[-1] == date(2018, 10, 29)      # 10/31（水）の前営業日 10/30（火）の週
+        assert len(weeks) == 18 >= S.PLACEBO_MIN_WEEKS
+        assert weeks[0] == date(2019, 8, 26)        # 8/30（金）の前営業日 8/29（木）の週
+        assert date(2019, 12, 23) in weeks          # 年末: 12/30（月）の前営業日 12/27（金）の週
+        assert date(2020, 3, 30) in weeks           # 3/31（火）の前営業日 3/30（月）の週
+        assert weeks[-1] == date(2021, 1, 25)       # 1/29（金）の前営業日 1/28（木）の週
         assert all(w.weekday() == 0 for w in weeks)
+        quarterly = S.placebo_pressure_weeks(months=S.REVIEW_MONTHS)
+        assert len(quarterly) == 6 < S.PLACEBO_MIN_WEEKS
 
-    @pytest.mark.parametrize("d", [date(2014, 3, 31), date(2020, 4, 30), date(2022, 4, 21)])
+    def test_placebo_windows_sit_inside_the_pre_period(self):
+        lo, hi = S.PRE_PERIOD
+        assert all(lo < w - W and w <= hi for w in S.placebo_pressure_weeks())
+
+    def test_pre_period_ends_before_the_matching_window(self):
+        """事前期間はマッチ日の 52 週リターンの窓（基準の足は最大 56 週前）に入らない（#1033）。
+
+        窓の中では処置と対照のリターンをそろえているので、AR̄ のばらつきが作りとして小さくなる。
+        マッチ日の足はその週か前の週（週の最後の取引日がマッチ日より後なら前の週の足）。
+        """
+        bar_week = S.iso_monday(S.MATCH_DATES_2022["main"]) - W
+        first_matched_return = bar_week - W * (52 + S.RET_BASE_SLACK_WEEKS) + W
+        assert S.PRE_PERIOD[1] < first_matched_return
+        assert S.PRE_PERIOD[0] == date(2019, 7, 29)          # 週次株価の最古の週
+
+    @pytest.mark.parametrize("d", [date(2018, 4, 30), date(2022, 3, 31), date(2022, 4, 21), date(2029, 1, 31)])
     def test_outside_the_table_raises(self, d):
         with pytest.raises(S.CalendarError):
             S.is_business_day(d)
@@ -319,7 +342,7 @@ def _pre_series(rng, drift: float = 0.0) -> pd.Series:
 
 class TestPlacebo:
     def test_null_false_positive_rate_is_near_nominal(self):
-        # 系列ごとの誤検出率は 20 個の擬似 CAR の偶然に引きずられるので、多数の系列で平均する
+        # 系列ごとの誤検出率は 18 個の擬似 CAR の偶然に引きずられるので、多数の系列で平均する
         rng = np.random.default_rng(0)
         weeks = S.placebo_pressure_weeks()
         rates = []
@@ -335,15 +358,15 @@ class TestPlacebo:
         rng = np.random.default_rng(5)
         ar = _pre_series(rng, drift=-0.01)
         res = S.placebo_test(ar, S.placebo_pressure_weeks(), S.nw_autocovariances(ar), draws=500)
-        assert res["n_usable"] == 20
+        assert res["n_usable"] == 18
         assert res["fpr"] > 0.10 and res["switch_to_empirical_p"] is True
 
     def test_too_few_usable_weeks(self):
         rng = np.random.default_rng(2)
         ar = _pre_series(rng)
-        ar[[w >= date(2017, 1, 1) for w in ar.index]] = np.nan     # 使えるのは 2014〜2016 の 12 個
+        ar[[w >= date(2020, 7, 1) for w in ar.index]] = np.nan     # 使えるのは 2019-08〜2020-06 の 11 個
         res = S.placebo_test(ar, S.placebo_pressure_weeks(), S.nw_autocovariances(ar))
-        assert res["n_usable"] == 12
+        assert res["n_usable"] == 11
         assert res["fpr"] is None and res["switch_to_empirical_p"] is False
 
     def test_deterministic_with_the_seed(self):
@@ -400,9 +423,10 @@ def test_c1_and_c2_controls():
 # ── stage A（合成）──────────────────────────────────────────────────────────────
 
 def _synthetic(seed: int = 0, spike: float = 4.0):
-    """2014〜2025 の週次。処置 6 社・対照 18 社（処置ごとに値の近い 3 社）。圧力週に処置の売買代金の山。"""
+    """2019-07〜2025 の週次（本物と同じ始まり）。処置 6 社・対照 18 社（処置ごとに値の近い 3 社）。
+    圧力週に処置の売買代金の山。"""
     rng = np.random.default_rng(seed)
-    weeks = [date(2013, 12, 30) + W * k for k in range(((date(2025, 2, 24) - date(2013, 12, 30)).days // 7) + 1)]
+    weeks = [date(2019, 7, 29) + W * k for k in range(((date(2025, 2, 24) - date(2019, 7, 29)).days // 7) + 1)]
     calendar = S.pressure_calendar(IE.STEPS_2022)
     pressure = {pw.week for pw in calendar}
     closes, turnover, firms = {}, {}, {"main": {}, "robust": {}}
@@ -443,7 +467,8 @@ class TestStageA:
         assert main["main"] is True and main["n_matched"] == 6 and main["balance_ok"] is True
         assert summary["first_stage"]["pass"] is True
         assert summary["power"]["mde"] is not None
-        assert summary["placebo"]["n_usable"] == 20
+        assert summary["power"]["period"] == ["2019-07-29", "2021-02-21"]
+        assert summary["placebo"]["n_usable"] == 18
         assert summary["r0"]["status"] == "pending"               # d2 が未登録
         assert set(pairs) == {"C1@2022-03-31", "C1@2022-09-30", "C2@2022-03-31", "C2@2022-09-30"}
 

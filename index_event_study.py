@@ -34,8 +34,9 @@ OOF は `scripts.momentum_gate --size-neutral` が書く CSV から読む。
 ## 祝日
 
 圧力日 P_m（D_m の前営業日）と placebo の週は営業日で決まる。祝日は計算で導かず手で入れる
-（ADR-0068 決定 5）。持つのは 1・4・7・10 月の 22 日以降にかかる東証の休業日だけで、それ以外の月日・
-年を聞かれたら `CalendarError`（黙って誤った日を返さない）。
+（ADR-0068 決定 5）。持つのは月末（22 日以降）にかかる東証の休業日だけで、対象は 2019〜2021 年の全月
+（placebo の月末の週・#1033）と 2022〜2028 年の 1・4・7・10 月（指数修正日）。それ以外の月日・年を聞かれたら
+`CalendarError`（黙って誤った日を返さない）。
 
 純関数だけで、database・scripts を import しない（テストで固定）。
 """
@@ -63,17 +64,22 @@ MATCH_VARS = ("logcap", "log_turnover_ratio", "log_pbr", "ret_52w")   # §4.3
 FIRST_STAGE_BASE_WEEKS = 26              # §5.3 直前 26 週の売買代金の中央値
 FIRST_STAGE_T_MIN = 3.0                  # §5.3 全 m で t ≥ 3
 NW_LAG = 4                               # §5.2 Bartlett 核・lag 4
-PRE_PERIOD = (date(2014, 1, 1), date(2018, 12, 31))   # §7 MDE の Ω を推定する事前期間
-PLACEBO_FIRST = (2014, 1)                # §5.2 擬似の圧力週の範囲（年, 月）
-PLACEBO_LAST = (2018, 10)
+# §7 MDE の Ω を推定する事前期間（#1033 で改訂）。始まりは週次株価の最古の週、終わりは主のマッチ日の
+# 変数の窓（52 週リターンの基準の足は最大 56 週前）より前——窓の中では処置と対照のリターンをそろえて
+# いるので、AR̄ のばらつきが作りとして小さくなり MDE を楽観側へ誤る。2020 年の新型コロナ期は残す。
+PRE_PERIOD = (date(2019, 7, 29), date(2021, 2, 21))
+PLACEBO_FIRST = (2019, 8)                # §5.2 擬似の圧力週の範囲（年, 月）。事前期間の各月の月末の週
+PLACEBO_LAST = (2021, 1)
+PLACEBO_MONTHS = tuple(range(1, 13))     # 月末の週（四半期末だけでは 6 個で下限 15 個に届かない・#1033）
 PLACEBO_PICK = 10                        # 10 個を非復元で引く
 PLACEBO_DRAWS = 10_000
 PLACEBO_MIN_WEEKS = 15                   # 未満なら誤検出率も経験 p も出さない（切り替えも起きない）
-PLACEBO_FPR_BAND = (0.0, 0.10)           # 名目 5% ± 5pt。外れたら E1・E4 の p を経験 p へ切り替える
+# 名目 5% ± 5pt。外れたら E1 の p を経験 p へ切り替え、E4 は確証から外す（擬似の 52 週窓がそろわない）
+PLACEBO_FPR_BAND = (0.0, 0.10)
 ALPHA = 0.05                             # E1 と同じ片側 5%
 POWER = 0.80                             # §7 MDE の検出力
 SEED = 0
-REVIEW_MONTHS = (1, 4, 7, 10)            # 定期の係数変更の月（擬似の圧力週もこの月）
+REVIEW_MONTHS = (1, 4, 7, 10)            # 定期の係数変更の月（指数修正日）
 
 # ── ここで決めた値（docstring の「事前登録が決めていなかった点」）──────────────────────
 
@@ -124,15 +130,22 @@ SECTOR17 = {
 
 # ── 暦（§3.1・§5.2）───────────────────────────────────────────────────────────────
 
-# 1・4・7・10 月の 22 日以降にかかる国民の祝日・振替休日（内閣府「国民の祝日について」
-# https://www8.cao.go.jp/chosei/shukujitsu/gaiyou.html）。この範囲には昭和の日（4/29）と、4/29 が日曜の
-# 年の振替休日（2018-04-30）しか無い——成人の日は 1 月第 2 月曜、海の日は 7 月第 3 月曜（21 日以前）、
-# スポーツの日は 10 月第 2 月曜で、2019〜2021 年の特例は対象年に無い。
-CALENDAR_YEARS = frozenset(range(2014, 2019)) | frozenset(range(2022, 2029))
+# 表が覆う月: 2019〜2021 年は全月（placebo の月末の週・#1033）、2022〜2028 年は 1・4・7・10 月（指数修正日）。
+CALENDAR_MONTHS = {**{y: tuple(range(1, 13)) for y in range(2019, 2022)},
+                   **{y: REVIEW_MONTHS for y in range(2022, 2029)}}
+CALENDAR_YEARS = frozenset(CALENDAR_MONTHS)
 CALENDAR_FROM_DAY = 22
+# 上の月の 22 日以降にかかる国民の祝日・振替休日・国民の休日（内閣府「国民の祝日について」
+# https://www8.cao.go.jp/chosei/shukujitsu/gaiyou.html）と東証の年末の休業日（12-31）。2019〜2021 年は
+# 即位礼正殿の儀（2019-10-22）と東京大会の祝日の移動（2020・2021 年の 7 月）を含む。2022〜2028 年の
+# 1・4・7・10 月の 22 日以降は昭和の日（4/29）だけ（成人の日・海の日・スポーツの日は 21 日以前）。
 CLOSED_DAYS = frozenset({
-    date(2014, 4, 29), date(2015, 4, 29), date(2016, 4, 29), date(2017, 4, 29),
-    date(2018, 4, 29), date(2018, 4, 30),
+    date(2019, 4, 29), date(2019, 4, 30), date(2019, 9, 23), date(2019, 10, 22), date(2019, 11, 23),
+    date(2019, 12, 31),
+    date(2020, 2, 23), date(2020, 2, 24), date(2020, 4, 29), date(2020, 7, 23), date(2020, 7, 24),
+    date(2020, 9, 22), date(2020, 11, 23), date(2020, 12, 31),
+    date(2021, 2, 23), date(2021, 4, 29), date(2021, 7, 22), date(2021, 7, 23), date(2021, 9, 23),
+    date(2021, 11, 23), date(2021, 12, 31),
     date(2022, 4, 29), date(2023, 4, 29), date(2024, 4, 29), date(2025, 4, 29),
     date(2026, 4, 29), date(2027, 4, 29), date(2028, 4, 29),
 })
@@ -155,10 +168,10 @@ def iso_monday(d: date) -> date:
 
 
 def is_business_day(d: date) -> bool:
-    if d.year not in CALENDAR_YEARS or d.month not in REVIEW_MONTHS or d.day < CALENDAR_FROM_DAY:
+    if d.month not in CALENDAR_MONTHS.get(d.year, ()) or d.day < CALENDAR_FROM_DAY:
         raise CalendarError(
-            f"{d} は休業日の表の範囲外（{list(REVIEW_MONTHS)} 月の {CALENDAR_FROM_DAY} 日以降・"
-            f"{min(CALENDAR_YEARS)}〜{max(CALENDAR_YEARS)} 年の対象年だけ）")
+            f"{d} は休業日の表の範囲外（2019〜2021 年の全月・2022〜2028 年の {list(REVIEW_MONTHS)} 月の"
+            f" {CALENDAR_FROM_DAY} 日以降だけ）")
     return d.weekday() < 5 and d not in CLOSED_DAYS
 
 
@@ -185,12 +198,13 @@ def pressure_calendar(steps: Iterable) -> tuple:
     return tuple(out)
 
 
-def placebo_pressure_weeks(first: tuple = PLACEBO_FIRST, last: tuple = PLACEBO_LAST) -> list:
-    """1・4・7・10 月の最終営業日の前営業日を含む週（§5.2 の擬似の圧力週）。"""
+def placebo_pressure_weeks(first: tuple = PLACEBO_FIRST, last: tuple = PLACEBO_LAST,
+                           months: tuple = PLACEBO_MONTHS) -> list:
+    """各月（`months`）の最終営業日の前営業日を含む週（§5.2 の擬似の圧力週）。"""
     out = []
     y, m = first
     while (y, m) <= tuple(last):
-        if m in REVIEW_MONTHS:
+        if m in months:
             out.append(iso_monday(previous_business_day(last_business_day(y, m))))
         y, m = (y + 1, 1) if m == 12 else (y, m + 1)
     return out

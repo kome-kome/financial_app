@@ -420,7 +420,7 @@ JOBS: dict[str, Job] = {
         name="measure_index_event_a",
         argv=("{python}", "-m", "scripts.measure_index_event", "stage-a",
               "--prereg", "docs/prereg/index-event-2026.md",
-              "--prereg-sha", "82ae38b19755d1e436b2c0cc9e0c75cda2731929041218b4b6adfd8d573494d5"),
+              "--prereg-sha", "72c57412ea4663fab8806032ad09e0b90ab8dc6a4260b15721c158e8a75cb300"),
         why="2022 前例（TOPIX の段階的ウエイト低減 493 社）の stage A＝処置群の事象窓のリターンを"
             "見ない下調べ（#1031・親 #1008・#1001）。暦・マッチング・バランス・first stage・MDE・"
             "placebo の誤検出率・R0 を出し、結果は事前登録の追記節へ書き足す。stage B（開封）はその後。",
@@ -435,7 +435,7 @@ JOBS: dict[str, Job] = {
         name="measure_index_event_m",
         argv=("{python}", "-m", "scripts.measure_index_event", "m-family",
               "--prereg", "docs/prereg/index-event-2026.md",
-              "--prereg-sha", "82ae38b19755d1e436b2c0cc9e0c75cda2731929041218b4b6adfd8d573494d5"),
+              "--prereg-sha", "72c57412ea4663fab8806032ad09e0b90ab8dc6a4260b15721c158e8a75cb300"),
         why="M 族＝本番の OOF（M-2 raw・M-6 size_neutral）が 2022 前例の処置群を対照より上や下へ置いて"
             "いたかを、層別の擬似処置群の順列（1,000 回）で検定する（#1009・#1001）。**前提が 2 つある**: "
             "stage A の実走（`measure:index-event-a` がマッチ対を書く）と `gate:size-neutral` の実走"
