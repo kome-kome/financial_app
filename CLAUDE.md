@@ -93,7 +93,7 @@ Issue は `/next-issue` が優先度順に回す（人は計画承認だけ。PR
 
 タスク実体をメモリや docs に二重記載しない（過去はこの二重記載が乖離源になった）。
 
-- **起票**: `gh issue create`（`priority:high|medium|low`、コード変更なしは `ops`）。粒度は「該当／問題／改善案／検証」。`ops`・`triage` は自動選定の対象外。
+- **起票**: `gh issue create`（`priority:high|medium|low`、コード変更なしは `ops`）。粒度は「該当／問題／改善案／検証」。`ops`・`help wanted` は自動選定の対象外。
 - **完了の同期**: PR 本文に `Closes #N`。**main マージで自動クローズ**。
 
 **セッション開始時**: `./run_daytime.ps1 -Queue` と `.logs/daytime_*.log` の最新を見る。実測待ちの Issue は日中枠（#618）が平日に窓へ収まるだけ進めており（#707）、**前回セッション以降に結果が出ている**ことがある。見ないまま同じ実測を手で回すと、並走で結果を汚したうえに丸1日ぶんの計算を捨てる。見積りで置いた `measured_min` は実走ログの `END <step>: exit=0 (N.N分)` から**実測へ差し替える**。

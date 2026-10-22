@@ -17,7 +17,7 @@ gh issue create --label "priority:low,ops" # 新タスク起票
 ```
 
 - **優先度ラベル**: `priority:high` / `priority:medium` / `priority:low`
-- **種別**: `ops`（本番運用・インフラ＝コード変更なし）／ `enhancement`・`refactor`・`docs`・`ci`・`bug`（コード）／ `triage`（自動起票・人の確認待ち。下の「自動解決の流れ」を参照）
+- **種別**: `ops`（本番運用・インフラ＝コード変更なし）／ `enhancement`・`refactor`・`docs`・`ci`・`bug`（コード）／ `task`（エージェントが処理してよい）・`help wanted`（実測・日付待ち・人の判断が要る）／ `triage`（未分類。`/next-issue` が中身で判定する。下の「自動解決の流れ」を参照）
 - **着手→完了の同期**: PR 本文に `Closes #N` を書く。**main マージで Issue が自動クローズ**され、コード状態と残タスクが構造的に一致する。
 - 各 Issue は「該当（`ファイル:行`）／問題／改善案／検証」の粒度で記述する（旧 FUTURE_TASKS.md の凡例を踏襲）。
 - **ADR の「スコープ外」「将来エンハンス」は prose だけで終わらせず、同一 PR 内で `gh issue create` により追跡 Issue を起票する**。ADR に書いただけの未起票タスクは検索対象にならず放置されやすい（ADR-0004 が「M-1 にも OOF ヘルパを1行で結線可能（今回スコープ外）」と記録したが Issue 化されず、後続の Issue #240 の記述でも「M-1 は対応済み」という誤前提のまま伝播し、実際には Issue #272 まで未実装で残っていた実例）。ADR/PR レビュー時に「本文中の将来対応の記述に対応する Issue 番号があるか」を確認する。
@@ -30,9 +30,11 @@ gh issue create --label "priority:low,ops" # 新タスク起票
 
 ### 自動選定から外れる Issue
 
-- **ラベル**: `ops`（コード変更なし）・`triage`（自動起票・人の確認待ち）・`help wanted`・`wontfix`・`duplicate`・`invalid`・`question`
+- **ラベル**: `ops`（コード変更なし）・`help wanted`・`wontfix`・`duplicate`・`invalid`・`question`
 - **内容**: 実測や重いバッチが要るもの（日中枠のキューへ積む＝CLAUDE.md「セッション開始時」）、未来の日付を待つもの、人の方針判断が要るもの
-- `/next-issue` が範囲外として起票した Issue には `triage` が付く。中身を確かめて `triage` を外すと、次から自動選定の対象になる。
+- **`/next-issue` が範囲外として起票する Issue は、起票の時点で上の「内容」に当てて振り分ける**: 当たらなければ `task`（次から自動選定の対象）、当たれば `help wanted`（本文に理由を1行）。`triage` は付けない——2026-10-23 まで付けていたが、外す手順がどの流れにも無く、自動で処理できる Issue まで溜まった（#1018・#1020 は `task`、#1022・#1023 は `help wanted` へ付け替えた）。
+- **`triage` はラベルでは除外しない**。`/triage` スキルや手作業で付いた Issue も、`/next-issue` が「内容」で判定して拾い、計画の中で `triage` を外す。当たるものは `help wanted` への付け替えを計画（または終了報告）に載せる。
+- **全自動の連鎖は、その連鎖で起票した Issue を拾わない**（次の起動で拾う）。人が一度も見ないまま、AI が書いた Issue を AI が実装する鎖が伸び続けるのを防ぐ。
 
 ### Issue 外の変更も PR 経由にする
 
