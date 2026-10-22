@@ -39,6 +39,14 @@ HORIZON_WEEKS = 52
 # へ M-1/M-2 双方が渡す（HORIZON_WEEKS の月換算の単一情報源）。
 LABEL_HORIZON_MONTHS = math.ceil(HORIZON_WEEKS * 12 / 52)  # = 12
 
+# ── OOF の上位K社の参考指標（#1041・ADR-0069）──────────────────────────────
+# `oof_backtest` が上位K社超過リターン・precision@K・NDCG@K を出す K。参考（判定には使わない）で、
+# 主審は rank-IC のまま。拒否権に使う K は #1044 の事前登録した規則で別に決める。
+TOP_K_REFERENCE = (5, 10, 30)
+# 上位10%内 rank-IC の「上位」＝期内社数の 1/TOP_DECILE_DIVISOR（切り上げ・整数で割る）。
+# `m * 0.1` を切り上げると 30*0.1=3.0000000000000004 が 4 社になる。
+TOP_DECILE_DIVISOR = 10
+
 # ── 低頻度マクロ系列の変換パラメータ（Issue #379）─────────────────────────
 # `_macro_from_cache` の既定窓は日次/月次（median gap 1〜31日）前提で、四半期(92日)や
 # 年2回(183日)の系列では変換が構造的に None になり、strict（macro_nan_ok=False）の M-1 が
@@ -1836,12 +1844,55 @@ def quantile_period_ok(pairs: list, n_quantiles: int) -> bool:
 
     pairs = [(yhat, y_true), ...]。期内サンプルが n_quantiles*2 未満の期と、yhat が全行同じ期を外す。
     後者は安定ソートで入力の順（＝社の順）のまま分位へ切られ、値が社の順で決まるため（#977）。
-    rank-IC（`_spearman`）が無分散で外す期と揃う。
+    rank-IC（`_spearman`）が無分散で外す期と揃う。上位K社の参考指標（#1041）は n_quantiles=K で
+    呼ぶ（期内サンプルが 2K 未満の期をその K から外す）。
     """
     if len(pairs) < n_quantiles * 2:
         return False
     yhats = [p[0] for p in pairs]
     return min(yhats) != max(yhats)
+
+
+def _top_k_shares(yhats: list, desc: list, k: int) -> tuple[dict, dict]:
+    """yhat 降順の上位 k 枠に各行が入る取り分と、NDCG の割引の取り分（#1041）。
+
+    desc = yhat 降順の index 列。予測が同じ行のかたまりは、そのかたまりが占める順位の枠を均等に
+    分ける＝同点を無作為に並べたときの期待値（McSherry & Najork 2008）。境目の社が入力の順
+    （＝社の順）で決まらない（#977 と同じ理由）。割引は 1/log2(順位+1)（Järvelin & Kekäläinen 2002）。
+    戻り値は {index: 枠の取り分（0〜1）} と {index: 割引の取り分}。上位 k 枠に掛からない行は入らない。
+    """
+    shares: dict[int, float] = {}
+    discounts: dict[int, float] = {}
+    n = len(desc)
+    pos = 0
+    while pos < min(k, n):
+        end = pos
+        while end + 1 < n and yhats[desc[end + 1]] == yhats[desc[pos]]:
+            end += 1
+        size = end - pos + 1
+        last = min(end, k - 1)   # かたまりのうち上位 k 枠に掛かる最後の順位（0始まり）
+        share = (last - pos + 1) / size
+        disc = sum(1.0 / math.log2(p + 2) for p in range(pos, last + 1)) / size
+        for i in desc[pos:end + 1]:
+            shares[i] = share
+            discounts[i] = disc
+        pos = end + 1
+    return shares, discounts
+
+
+def _top_k_period(ytrues: list, shares: dict, discounts: dict, gains: list, mean_y: float,
+                  k: int) -> tuple[float, float, float]:
+    """1 期の上位 k 社の (超過リターン, precision, NDCG)（#1041）。期の選別は呼び出し側が行う。
+
+    gains は y_true の期内順位を 0〜1 に正規化したもの（最下位 0・最上位 1）。理想の並び（gains の
+    降順）の DCG で割る。期内サンプルが 2 以上なら最上位の gain が正なので分母は 0 にならない。
+    """
+    top_mean = sum(w * ytrues[i] for i, w in shares.items()) / k
+    precision = sum(w for i, w in shares.items() if ytrues[i] > mean_y) / k
+    dcg = sum(d * gains[i] for i, d in discounts.items())
+    ideal = sorted(gains, reverse=True)[:k]
+    idcg = sum(g / math.log2(p + 2) for p, g in enumerate(ideal))
+    return top_mean - mean_y, precision, dcg / idcg
 
 
 def oof_backtest(residuals_by_ym: dict, n_quantiles: int = 5, cost_bps: float = 0.0,
@@ -1887,6 +1938,17 @@ def oof_backtest(residuals_by_ym: dict, n_quantiles: int = 5, cost_bps: float = 
         100%回転固定版 long_short_spread_net の一般化）。
     rebalance_per_year（任意）: 年間リバランス回数。渡すと annual_turnover（＝実効回転×頻度）を
     参考値として併記する（breakeven_cost_bps 自体は頻度不変）。
+
+    上位K社の参考指標（#1041・ADR-0069・**判定には使わない**＝主審は rank-IC のまま）。K は
+    `TOP_K_REFERENCE`。各期で yhat の上位 K 社を取り、予測が同じ社が境目をまたぐときは枠を均等に
+    分ける（`_top_k_shares`）。期内サンプルが 2K 未満の期と yhat が全行同じ期はその K から外す
+    （`quantile_period_ok(pairs, K)`）。いずれも期間平均で、top_k[str(K)] に入る:
+      - excess_return: 上位 K 社の y_true 平均 − 期内全体平均。期別系列は
+        top_k_excess_return_by_period[str(K)]（拒否権の対比較・#1044 が読む）。
+      - precision: 上位 K 社のうち y_true が期内平均を上回った社の割合。
+      - ndcg: gain＝y_true の期内順位を 0〜1 に正規化、割引 1/log2(順位+1) の NDCG@K。
+    top_decile_rank_ic: yhat 上位 1/`TOP_DECILE_DIVISOR`（切り上げ・境目の同点は全部入れる）の中だけの
+      Spearman の期間平均。3 社未満・無分散の期は外す（`_spearman`）。
     """
     yms = sorted(residuals_by_ym.keys())
     n_oof = sum(len(residuals_by_ym[y]) for y in yms)
@@ -2053,6 +2115,43 @@ def oof_backtest(residuals_by_ym: dict, n_quantiles: int = 5, cost_bps: float = 
     from model_stats import monotonicity_summary
     monotonicity = monotonicity_summary(mono_spearmans, adj_increasing, adj_total)
 
+    # ── 上位K社の参考指標（#1041・ADR-0069）──────────────────────────────────
+    # 参考（判定には使わない）。上の分位系とは別のループで、既存の値には触れない。
+    top_k_rows: dict[int, dict[str, tuple[float, float, float]]] = {k: {} for k in TOP_K_REFERENCE}
+    top_decile_ics: list[float] = []
+    for ym in yms:
+        pairs = residuals_by_ym[ym]
+        m = len(pairs)
+        if m == 0:
+            continue
+        yhats = [p[0] for p in pairs]
+        ytrues = [p[1] for p in pairs]
+        desc = sorted(range(m), key=lambda i: yhats[i], reverse=True)   # yhat 降順（index）
+        n_top = -(-m // TOP_DECILE_DIVISOR)
+        top = [i for i in desc if yhats[i] >= yhats[desc[n_top - 1]]]   # 境目の同点は全部入れる
+        dic = _spearman([yhats[i] for i in top], [ytrues[i] for i in top])
+        if dic is not None:
+            top_decile_ics.append(dic)
+        valid_k = [k for k in TOP_K_REFERENCE if quantile_period_ok(pairs, k)]
+        if not valid_k:
+            continue
+        mean_y = sum(ytrues) / m
+        gains = [(r - 1.0) / (m - 1) for r in _avg_ranks(ytrues)]
+        for k in valid_k:
+            shares, discounts = _top_k_shares(yhats, desc, k)
+            top_k_rows[k][ym] = _top_k_period(ytrues, shares, discounts, gains, mean_y, k)
+    top_k: dict[str, dict] = {}
+    top_k_excess_return_by_period: dict[str, dict] = {}
+    for k, rows in top_k_rows.items():
+        vals = list(rows.values())
+        top_k[str(k)] = {
+            "n_periods":     len(vals),
+            "excess_return": round(statistics.mean(v[0] for v in vals), 6) if vals else None,
+            "precision":     round(statistics.mean(v[1] for v in vals), 4) if vals else None,
+            "ndcg":          round(statistics.mean(v[2] for v in vals), 4) if vals else None,
+        }
+        top_k_excess_return_by_period[str(k)] = {ym: round(v[0], 6) for ym, v in rows.items()}
+
     return {
         "n_quantiles":        n_quantiles,
         "n_periods":          len(yms),
@@ -2093,4 +2192,11 @@ def oof_backtest(residuals_by_ym: dict, n_quantiles: int = 5, cost_bps: float = 
         "interval_tau":        tau,
         "interval_halfwidth":  interval_halfwidth,
         "n_interval_calib":    cov_total,
+        # 上位K社の参考指標（#1041・ADR-0069・判定には使わない）。キーは str(K)（JSON へ出しても同じ形）。
+        "top_k":                         top_k,
+        "top_k_excess_return_by_period": top_k_excess_return_by_period,
+        "top_decile_rank_ic": {
+            "mean": round(statistics.mean(top_decile_ics), 4) if top_decile_ics else None,
+            "n":    len(top_decile_ics),
+        },
     }

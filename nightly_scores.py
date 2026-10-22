@@ -237,9 +237,12 @@ _OOF_SCALAR_KEYS: tuple[str, ...] = (
     "interval_coverage", "interval_tau", "n_interval_calib",
 )
 # OOF 成績のうち小さな dict / 系列で持つもの（期別の系列は「どの期が動いたか」を読むのに要る）。
+# 上位K社の参考指標（#1041）は K ごとの期間平均と上位10%内 rank-IC だけを持ち、
+# 期別系列（`top_k_excess_return_by_period`）は持たない。
 _OOF_NESTED_KEYS: tuple[str, ...] = (
     "rank_ic", "rank_ic_industry_neutral", "monotonicity", "quantile_returns",
     "rank_ic_by_period", "short_side_spread_by_period",
+    "top_k", "top_decile_rank_ic",
 )
 
 

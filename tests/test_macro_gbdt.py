@@ -1247,9 +1247,13 @@ class TestOofBacktest:
         """全期に予測のばらつきがある入力では #977 の前と1ビットも変わらない。
 
         期待値は修正前の `oof_backtest` に同じ入力を通した実出力を写したもの。
+        後から足した上位K社の参考指標（#1041）は照合から外す（中身は tests/test_oof_top_k.py が持つ）。
         """
         r, meta = self._varied()
         o = oof_backtest(r, n_quantiles=5, cost_bps=10.0, meta_by_ym=meta, rebalance_per_year=4)
+        added = {"top_k", "top_k_excess_return_by_period", "top_decile_rank_ic"}
+        assert added <= set(o)
+        o = {k: v for k, v in o.items() if k not in added}
         assert o == {
             "n_quantiles": 5,
             "n_periods": 4,

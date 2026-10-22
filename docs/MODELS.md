@@ -1224,7 +1224,7 @@ M-1（§9）と同一形式で散布図・効用・フロンティアの client 
 
 ### 11.7 アウトオブサンプル検証（OOF）と売り推奨連携（ADR-0004）
 
-M-2 の `execute()` は walk-forward CV の**無リーク OOF 予測**（`{test_ym:[(yhat,y_true),…]}`）から、**再学習・追加価格取得なしで** `oof_backtest` を返す。指標は ① **分位リターン**（各期で μ̂ を横断ランク→分位→分位平均実現リターン→期間平均＝per-period cross-sectional・μ̂ 水準の時系列ドリフトに頑健）、② **rank-IC**（Spearman(μ̂, y) を fold 毎→平均±std）、③ **ロングショート spread**（top−bottom 分位）、④ **hit-rate**（top>bottom だった期の割合）、⑤ **区間被覆率**（`interval_coverage`＝コンフォーマル区間の honest walk-forward 実測被覆率・§11.7.1）、⑥ **売り側 spread**（`short_side_spread`＝期内全体平均−最低 μ̂ 分位平均・§11.7.2）。**既存「バックテスト」（§7・preset/as-of のポートフォリオ模擬）とは別概念**で「予測 μ̂ が将来リターンを順序付けるか」を測る（用語は CONTEXT.md「[[アウトオブサンプル検証]]」）。共有ヘルパ `plugins/macro_snapshots.py::oof_backtest`。
+M-2 の `execute()` は walk-forward CV の**無リーク OOF 予測**（`{test_ym:[(yhat,y_true),…]}`）から、**再学習・追加価格取得なしで** `oof_backtest` を返す。指標は ① **分位リターン**（各期で μ̂ を横断ランク→分位→分位平均実現リターン→期間平均＝per-period cross-sectional・μ̂ 水準の時系列ドリフトに頑健）、② **rank-IC**（Spearman(μ̂, y) を fold 毎→平均±std）、③ **ロングショート spread**（top−bottom 分位）、④ **hit-rate**（top>bottom だった期の割合）、⑤ **区間被覆率**（`interval_coverage`＝コンフォーマル区間の honest walk-forward 実測被覆率・§11.7.1）、⑥ **売り側 spread**（`short_side_spread`＝期内全体平均−最低 μ̂ 分位平均・§11.7.2）、⑦ **上位K社の参考指標**（`top_k`・`top_decile_rank_ic`＝判定には使わない・§11.7.4）。**既存「バックテスト」（§7・preset/as-of のポートフォリオ模擬）とは別概念**で「予測 μ̂ が将来リターンを順序付けるか」を測る（用語は CONTEXT.md「[[アウトオブサンプル検証]]」）。共有ヘルパ `plugins/macro_snapshots.py::oof_backtest`。
 
 あわせて per-stock μ̂ と `r1_prime` を `macro_gbdt_scores` テーブルへ**全置換で永続化**する（`sector_ols`→`regression_results` と同型・producer.execute 直書き）。かつては**売り候補ランキング（§10）が `mu_source` トグル**で M-2 を選べたが、**2026-09-07 に供給者から降ろした**（#572・ADR-0052）＝トグルの選択肢は M-1／M-3／M-6 のみになった。永続化自体は続く（M-4 が基底として読むため）。M-2 の `read_producer_scores` は M-1 と同一形 `{mu, r_macro, r1_prime}` を返す（`r_macro` は共有 `macro_beta`）。**`r1_prime` は §11.7.1 のコンフォーマル区間半幅**で埋め、**R3 足切りゲートは M-2 選択時も機能する**（#365・ADR-0020。列未 migration / 旧スナップショットの `r1_prime=None` はゲート素通り）。
 
@@ -1279,6 +1279,45 @@ R2 は月末までの52週だけで計算する＝時点再現できている。
 入口は `python -m scripts.momentum_gate --risk-axis --models xgb_m2 --lambdas 0.1,0.3,1.0 --risk-scale raw`
 （日中枠 `gate:risk-axis-m2`・分母は画面の既定に追随する）と、分母を上書きする
 `--lambdas 1.0 --risk-base mu_only`（日中枠 `gate:risk-axis-m2-mu`）。
+
+#### 11.7.4 上位K社の参考指標（#1041・ADR-0069）
+
+上の指標はどれも全断面（1 か月約 1,350 社・5 分位なら 1 分位約 270 社）が単位で、**上位数社の成績を測る指標が
+無かった**。実運用は画面の上位数社を買うので、端だけが壊れても rank-IC は全体の平均に薄める（#806 では M-6 の
+画面の上位 30 社中 23 社が廃止・価格停止の社だった）。そこで `oof_backtest` に**参考**の指標を足した
+（[ADR-0069](adr/0069-evaluation-metrics-have-roles.md) の「指標の役割」・**判定には使わない**）。昇格・退役・探索・
+モデル比較の ▲▼ は rank-IC のまま。K の値の正本はコード（`plugins/macro_snapshots.py` の `TOP_K_REFERENCE`）で、
+各期で μ̂ の上位 K 社を取り、期ごとに計算して期間平均する。
+
+| キー | 定義 |
+|---|---|
+| `top_k[K].excess_return` | 上位 K 社の実現リターンの平均 − 期内全体平均（CONTEXT.md「[[上位K社超過リターン]]」）。期別系列は `top_k_excess_return_by_period[K]`（拒否権の対比較・#1044 が読む） |
+| `top_k[K].precision` | 上位 K 社のうち、実現リターンが期内平均を上回った社の割合（外れ値に強い） |
+| `top_k[K].ndcg` | NDCG@K（下の式）。上位ほど重く採点する |
+| `top_decile_rank_ic` | μ̂ の上位 1/`TOP_DECILE_DIVISOR` の社だけで取った Spearman（端の中での並びの質） |
+
+$$
+\mathrm{NDCG@K}_t = \frac{\sum_{p=1}^{K} g_{t,(p)} \,/\, \log_2(p+1)}{\sum_{p=1}^{K} g^{*}_{t,(p)} \,/\, \log_2(p+1)}
+$$
+
+$g_{t,(p)}$ は μ̂ の順で $p$ 位の社の gain＝実現リターンの期内順位を 0〜1 に正規化した値（最下位 0・最上位 1）、
+$g^{*}_{t,(p)}$ は gain を降順に並べた理想の並びの $p$ 位（Järvelin & Kekäläinen 2002）。
+
+- **同順位**: μ̂ が同じ社のかたまりが K 位の境目をまたぐときは、そのかたまりが占める順位の枠を均等に分ける
+  （同点を無作為に並べたときの期待値と一致する・McSherry & Najork 2008）。そうしないと境目の社が入力の順＝社の順で
+  決まる（#977 と同じ理由）。上位 1/10 は切り上げた社数（整数で割る）で、境目の同点は全部入れる
+- **期の選別**: 期内サンプルが 2K 未満の期と μ̂ が全社同じ期はその K から外す（`quantile_period_ok(pairs, K)`＝
+  分位系と同じ判定）。上位 1/10 が 3 社未満の期は上位10%内 rank-IC から外す
+- **夜間の診断値**（ADR-0061）には K ごとの期間平均と `top_decile_rank_ic` だけを残し、期別系列は残さない
+- 追加学習・Egress ゼロの純後処理で、`oof_backtest` を呼ぶ全モデルへ自動的に波及する。画面への表示は #1049。
+  画面の並び（U = μ̂ − λR）での採点は #1042、拒否権に使う K は #1044 の事前登録した規則で決める
+
+参考文献:
+
+- **Järvelin, K. & Kekäläinen, J. (2002)**. "Cumulated gain-based evaluation of IR techniques." *ACM Transactions on Information Systems*, 20(4), 422–446.
+  → https://doi.org/10.1145/582415.582418
+- **McSherry, F. & Najork, M. (2008)**. "Computing Information Retrieval Performance Measures Efficiently in the Presence of Tied Scores." *ECIR 2008*, LNCS 4956, 414–421.
+  → https://doi.org/10.1007/978-3-540-78646-7_38
 
 ### 11.8 将来エンハンス
 
