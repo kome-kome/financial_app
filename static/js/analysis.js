@@ -1105,13 +1105,50 @@ function _mcModelCard(m) {
     </div>`
     : `<div style="font-size:11px;color:var(--text-muted)">OOF サンプルが期内 ${(oof.n_quantiles||5)*2} 銘柄未満のため分位を表示できません。rank-IC は ${ic.n||0} fold で算出。</div>`;
   return `<div style="padding:12px 14px;background:var(--bg-sunken);border-radius:8px;border:1px solid var(--border-muted)">
-    ${head}${metrics}${bars}${_mcDisplayOrderingHTML(m.oof_backtest_display)}
+    ${head}${metrics}${bars}${_oofTopKHTML(oof, '上位K社の参考指標（μ̂ の順）')}${_mcDisplayOrderingHTML(m.oof_backtest_display)}
+  </div>`;
+}
+
+// 上位K社の参考指標（#1041・#1049・ADR-0069）。oof_backtest の top_k（K ごとの期間平均）と
+// top_decile_rank_ic を小さな表で並べる。**参考で、判定（▲▼・色分け）には使わない**。K は返ってきた
+// top_k のキーから並べる（plugins/macro_snapshots.py の TOP_K_REFERENCE を書き写さない）。
+// キー名は tests/test_oof_top_k.py が oof_backtest の戻りと照合する。古い応答（top_k が無い）は出さない。
+function _oofTopKHTML(oof, title) {
+  const tk = (oof || {}).top_k;
+  if (!tk || typeof tk !== 'object') return '';
+  const ks = Object.keys(tk).sort((a, b) => Number(a) - Number(b));
+  if (!ks.length) return '';
+  const pct = (v, d) => v != null ? (v * 100).toFixed(d) + '%' : '-';
+  const num = (v) => v != null ? v.toFixed(3) : '-';
+  const rows = ks.map(k => {
+    const r = tk[k] || {};
+    if (!r.n_periods) {
+      return `<tr><td style="padding:2px 6px">上位${esc(k)}社</td><td colspan="4" style="padding:2px 6px;color:var(--text-muted)">—（期内の社数が ${Number(k) * 2} 社未満）</td></tr>`;
+    }
+    return `<tr><td style="padding:2px 6px">上位${esc(k)}社</td>
+      <td style="padding:2px 6px;text-align:right">${pct(r.excess_return, 2)}</td>
+      <td style="padding:2px 6px;text-align:right">${pct(r.precision, 0)}</td>
+      <td style="padding:2px 6px;text-align:right">${num(r.ndcg)}</td>
+      <td style="padding:2px 6px;text-align:right;color:var(--text-muted)">${r.n_periods}期</td></tr>`;
+  }).join('');
+  const dic = (oof || {}).top_decile_rank_ic || {};
+  return `<div style="margin-top:10px" title="上位K社超過リターン＝上位K社の実現リターン平均 − 期内全社平均。precision@K＝そのうち期内平均を上回った社の割合。NDCG@K＝上位ほど重く採点し理想の並びで割った値（1 が満点）。判定には使わない（ADR-0069）。">
+    <div style="font-size:11px;color:var(--text-muted);margin-bottom:4px">${esc(title)}（参考・判定には使わない）</div>
+    <table style="width:100%;font-size:11px;border-collapse:collapse">
+      <thead><tr style="color:var(--text-muted)"><th style="padding:2px 6px;text-align:left;font-weight:400"></th>
+        <th style="padding:2px 6px;text-align:right;font-weight:400">超過リターン</th>
+        <th style="padding:2px 6px;text-align:right;font-weight:400">precision</th>
+        <th style="padding:2px 6px;text-align:right;font-weight:400">NDCG</th>
+        <th style="padding:2px 6px;text-align:right;font-weight:400">期数</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+    <div style="font-size:11px;color:var(--text-muted);margin-top:2px">上位10%内の rank-IC ${num(dic.mean)}（${dic.n || 0}期）</div>
   </div>`;
 }
 
 // 画面の並びの採点（#1042・ADR-0069）。同じ OOF を画面の既定の λ・横軸の U = μ̂ − λR の順で
 // 採点し直した参考値。▲▼（有意差の判定）は上の予想の採点（μ̂ の順）のまま。λ=0 のモデルと
-// 順位スコアのモデルはサーバーが null を返すので何も出さない。
+// 順位スコアのモデルはサーバーが null を返すので何も出さない。上位K社は U の順（#1049）。
 function _mcDisplayOrderingHTML(d) {
   if (!d || !d.ordering) return '';
   const o = d.ordering;
@@ -1127,6 +1164,7 @@ function _mcDisplayOrderingHTML(d) {
     <div style="font-size:13px;font-weight:700">rank-IC ${ic.mean!=null?ic.mean.toFixed(3):'-'} ／ 売り側 spread ${ss!=null?(ss*100).toFixed(2)+'%':'-'}</div>
     <div style="font-size:11px;color:var(--text-muted)">${ic.n||0} fold ／ R が取れず除外 ${o.n_dropped_rows||0} 行</div>
     ${upper}
+    ${_oofTopKHTML(d, '上位K社の参考指標（U の順）')}
   </div>`;
 }
 
@@ -2123,6 +2161,7 @@ function _mrrOofHTML(data) {
         }).join('');
       })()}
     </div>` : `<div style="font-size:11px;color:var(--text-muted)">OOF サンプルが期内 ${(oof.n_quantiles||5)*2} 銘柄未満のため分位を表示できません（データ蓄積後に再実行）。rank-IC は ${ic.n||0} fold で算出。</div>`}
+    ${_oofTopKHTML(oof, '上位K社の参考指標（μ̂ の順）')}${_mcDisplayOrderingHTML(data.oof_backtest_display)}
   </div>`;
 }
 
@@ -3059,6 +3098,7 @@ function _dlmOofHTML(data) {
         }).join('');
       })()}
     </div>` : `<div style="font-size:11px;color:var(--text-muted)">OOF サンプルが期内 ${(oof.n_quantiles||5)*2} 銘柄未満のため分位を表示できません。rank-IC は ${ic.n||0} fold で算出。</div>`}
+    ${_oofTopKHTML(oof, '上位K社の参考指標（α の順）')}${_mcDisplayOrderingHTML(data.oof_backtest_display)}
   </div>`;
 }
 
