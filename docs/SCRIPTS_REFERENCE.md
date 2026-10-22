@@ -56,6 +56,7 @@
 | [`scripts/macro_beta_gate_history.py`](#scriptsmacro_beta_gate_historypy) | 検証（計測） |
 | [`scripts/index_exposure.py`](#scriptsindex_exposurepy) | 検証（計測） |
 | [`scripts/measure_index_event.py`](#scriptsmeasure_index_eventpy) | 検証（計測） |
+| [`scripts/measure_top_k_veto.py`](#scriptsmeasure_top_k_vetopy) | 検証（計測） |
 | [`scripts/nightly_diag_report.py`](#scriptsnightly_diag_reportpy) | 検証（計測） |
 | [`run_local.ps1`](#run_localps1) | ユーティリティ |
 | [`scripts/run_nightly.py`](#scriptsrun_nightlypy) | ユーティリティ |
@@ -316,6 +317,12 @@ NUTS 軌道長（`max_tree_depth`）× `target_accept` の格子ドライバ（I
 指数イベントのイベントスタディ（2022 前例＝TOPIX の段階的ウエイト低減 493 社・#1031・親 #1008 → #1001）を、事前登録 `docs/prereg/index-event-2026.md`（#1007）どおりに測る CLI。段は事前登録の開封の順序で分ける: `python -m scripts.measure_index_event stage-a --prereg docs/prereg/index-event-2026.md --prereg-sha <凍結値> [--out <json>] [--pairs-out <json>] [--lists-dir <.index_lists>]`。`stage-b`（開封・#1032）は、事象窓の CAR と I・R・κ・δ̂・CAR_post・ρ、E族の確証（E1・E2・E4・Holm）、δ̂・κ・ρ の 90% CI（窓の種類ごとの平均と残差に分けた残差の定常ブートストラップ・2,000 回）、生存バイアス（検定の窓の群別の残存率・差が 5pt 超なら Lee bounds）、記述の量（公表・回間ドリフト・除外後の他の窓・2023-10 に解除された社・ラベル水準の DiD・時点再現の gap_ratio）を出す。**事前登録の追記節「stage A（盲検）の結果」が未記入なら終了コード 2**（`prereg.section_recorded`・開封の順序）。stage A の placebo が名目を外れたら E1 は経験 pへ切り替え、E4 は確証から外す（日中枠 `measure:index-event-b`）。`m-family`（M 族・§6.2・#1009）は、`momentum_gate --size-neutral` の OOF の CSV（M-2 は raw・M-6 は size_neutral）と stage A のマッチ対から、期ごとの処置群と対照の placement bias の差 d_t を E_t（ラベル窓に入る低減の回数 ÷ 4）と P_t（窓のうち除外より後の割合）へ回帰し、規模十分位 × 流動性三分位 × 17 業種で層別に引いて全期で固定した擬似処置群の順列（1,000 回・seed 0）で b・c の p を出す（Bonferroni 各 0.0125・Newey-West lag 3 の p は併記だけ・2021 年の期は記述だけ）。マッチ対の凍結値が `--prereg-sha` と違えば終了コード 2。確証の検定なので事前登録の方針（#1033）が決まる前に回さない（日中枠 `measure:index-event-m`）。部品は `index_event_study.py`（純関数）で、stage A は暦（D_m・P_m・w_m）・対照（C1＝data_j の規模区分 '-'・内国株式・台帳外／C2＝2026-10 の継続銘柄から 2022 の群を除いたもの）・マッチング（マッチ日 2022-03-31 / 2022-09-30・17 業種の完全一致・caliper 0.25SD・Mahalanobis の k=5 最近傍・復元あり）・SMD・first stage（圧力週の異常売買代金の t ≥ 3）・σ / SE(δ̂) / MDE・placebo の誤検出率・R0 を出す。守ること: **処置群の事象窓のリターンを読まない**（`stage_a` が入口で公表週以降の終値を落とす・テストは「書き換えても出力が変わらない」で固定）／**`--prereg-sha` が本文の sha256 と違えば終了コード 2**／**要約の JSON（既定 `scripts/.cache/index_event_stage_a.json`）に銘柄コードを入れない**——マッチ対は公開しない `.index_lists/derived/index_event_2022_pairs.json` へ別に書き、stage B と #1009 が読む（data_j の断面は毎月増えるので計算し直すと同じ対にならない）／**終値は学習ラベルと同じ `load_weekly_prices_chunked`、売買代金だけ対象の社と週に絞って読む**（週次ローダの SELECT へ列を足さない）／**R0 が不成立なら JSON を書いてから終了コード 3**。日中枠（`measure:index-event-a`・並走に敏感）で単独に回す。**事前期間（σ・SE(δ̂)・MDE と placebo の Ω）は 2019-07-29〜2021-02-21**——週次株価の最古の週から、主のマッチ日の 52 週リターンの窓（基準の足は最大 56 週前）より前まで。placebo は同じ期間の月末の週（最大 18 個）。事前登録を #1033 で改訂した（2014〜2018 年の週次株価が無い・E3 は記述へ・E族の確証は E1・E2・E4 の 3 本）
 
 種別: 検証（計測） ／ 依存先: index_event_study.py、index_events.py、sector_gap_asof.py（`load_inputs` / `asof_records`）、plugins/macro_snapshots.py（`load_weekly_prices_chunked`）、scripts/prereg.py
+
+## `scripts/measure_top_k_veto.py`
+
+拒否権に使う K（上位何社で測るか）を、事前登録 `docs/prereg/top-k-veto.md`（#1044・親 #1040・ADR-0069）の規則で決める CLI: `python -m scripts.measure_top_k_veto --prereg docs/prereg/top-k-veto.md --prereg-sha <凍結値> [--from-json <model_comparison_run の --json>] [--out <json>]`。M-1・M-2・M-6 の上位K社超過リターンの期別系列（`top_k_excess_return_by_period`・#1041）ごとに平均・SE（`model_stats.bootstrap_mean_se`）・MDE＝(z₀.₉₅＋z₀.₈₀)×√2×SE を出し、**全モデルで MDE ≤ 0.5×|平均| を満たす最小の K** を返す（無ければ「該当なし」＝拒否権は導入しない）。系列は `model_comparison.run_comparison` を対象の 3 本で回して取り、**画面の並びの採点（`oof_backtest_display`・#1042）があればそれ、無ければ予想の採点**（λ>0 の M-1 / M-2 は前者、λ=0 の M-6 は後者。モデルごとの指定を書き写さない）。守ること: **規則の入力は各モデル自身の系列のぶれだけ**（モデル間の差を見ない）／**`--prereg-sha` が本文の sha256 と違えば終了コード 2**／**1 モデルでも系列がそろわなければ K を決めずに終了コード 3**（#1041 より前の結果も止める）。結果は既定 `scripts/.cache/top_k_veto.json`。日中枠（`measure:top-k-veto`・並走に敏感）で単独に回し、表と K を事前登録の追記節「結果」へ書き写す
+
+種別: 検証（計測） ／ 依存先: model_comparison.py、model_stats.py、scripts/prereg.py ／ テスト: tests/test_measure_top_k_veto.py
 
 ## `scripts/nightly_diag_report.py`
 

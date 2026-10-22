@@ -80,6 +80,15 @@ def _stationary_bootstrap_sample(series: list[float], rng: random.Random,
     return out
 
 
+def _bootstrap_means(series: list[float], n_boot: int, avg_block: float, seed: int) -> list[float]:
+    """定常ブートストラップで抜き直した系列平均を n_boot 個、昇順で返す（CI と SE が共有する）。"""
+    rng = random.Random(seed)
+    return sorted(
+        statistics.mean(_stationary_bootstrap_sample(series, rng, avg_block))
+        for _ in range(n_boot)
+    )
+
+
 def bootstrap_mean_ci(series: list[float], *, n_boot: int = DEFAULT_N_BOOT,
                       avg_block: float = DEFAULT_AVG_BLOCK, seed: int = DEFAULT_SEED,
                       alpha: float = 0.05) -> dict | None:
@@ -97,11 +106,7 @@ def bootstrap_mean_ci(series: list[float], *, n_boot: int = DEFAULT_N_BOOT,
     if n < 2:
         return None
     obs = statistics.mean(series)
-    rng = random.Random(seed)
-    boot_means = sorted(
-        statistics.mean(_stationary_bootstrap_sample(series, rng, avg_block))
-        for _ in range(n_boot)
-    )
+    boot_means = _bootstrap_means(series, n_boot, avg_block, seed)
     ci_lo = _percentile(boot_means, 100 * (alpha / 2))
     ci_hi = _percentile(boot_means, 100 * (1 - alpha / 2))
     # 両側 p: 帰無 H0=平均0。観測平均の符号と逆側の裾確率×2。
@@ -124,6 +129,19 @@ def bootstrap_mean_ci(series: list[float], *, n_boot: int = DEFAULT_N_BOOT,
         "n": n,
         "n_boot": n_boot,
     }
+
+
+def bootstrap_mean_se(series: list[float], *, n_boot: int = DEFAULT_N_BOOT,
+                      avg_block: float = DEFAULT_AVG_BLOCK, seed: int = DEFAULT_SEED) -> float | None:
+    """系列平均の定常ブートストラップ SE（抜き直した平均の標準偏差）。n<2 で None。
+
+    `bootstrap_mean_ci` と同じ抜き直し（同じ seed なら同じ標本）から取る。拒否権に使う K の規則
+    （#1044・`docs/prereg/top-k-veto.md`）が MDE の入力に使う。`bootstrap_mean_ci` の返り値に足さないのは、
+    それを包む有意差の検定（`paired_ic_significance` 等）の出力まで変わるため。
+    """
+    if len(series) < 2:
+        return None
+    return statistics.stdev(_bootstrap_means(series, n_boot, avg_block, seed))
 
 
 def p_floor(n_boot: int = DEFAULT_N_BOOT) -> float:
