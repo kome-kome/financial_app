@@ -690,6 +690,10 @@ conv_score₁₂ₘ = max(<span class="val">5</span>, min(<span class="val">95</
   <p>表の並び順を決める <code>lambda_risk</code>（既定 1.0）と <code>risk_axis</code>（既定 <strong>R2</strong>・#816 で R_macro から変更）は<strong>表示だけのパラメータ</strong>で、上の OOF の rank-IC は μ̂ だけの順位を測ったもの。画面が既定で出す並びは測定の外にあったので、同一 fold・同一銘柄集合で2段階に測った（ADR-0050）。まず旧既定（R_macro・λ=1.0）を基準に、μ̂ だけの並びと λ=0.1/0.3/1.0 × R2/R_macro を比べ（#814・12検定）、次に候補の R2・λ=1.0 を μ̂ だけの並びと比べた（#816・4検定）。</p>
   <div class="warn-box"><strong>旧既定の並び（R_macro・λ=1.0）は、測った7つの並びで rank-IC が最も低かった（−0.048）。</strong>横軸を <strong>R2 にした λ=0.3 / 1.0 の並びは、rank-IC・売り側スプレッドとも旧既定より有意に良く</strong>、R2・λ=1.0 は μ̂ だけの並びとも有意な差がなかった（rank-IC 差 −0.010・p=0.83）。旧既定に勝った候補が μ̂ だけの並びにも負けなかったので、<strong>横軸の既定を R2 へ変えた</strong>（λ=1.0 は据え置き）。R_macro は λ を上げるほど悪化し、λ=1.0 では μ̂ だけの並びより売り側で有意に劣り、分位の並びも逆転した（M-6 と同じ現象）。λ&gt;1.0 は未測定。</div>
 
+  <h3>上位K社の参考指標（#1041）</h3>
+  <p>上の指標はどれも 1 か月約 1,350 社の並び全体（5 分位なら 1 分位約 270 社）で測っていて、<strong>上位数社だけの成績を測る指標が無かった</strong>。実際の運用は画面の上位数社を買うので、端の数社だけが壊れていても全体の相関では気づけない。そこで OOF に、各期で μ̂ の上位 K 社を取って測る 4 つの<strong>参考値</strong>を足した：<strong>上位K社超過リターン</strong>（上位 K 社の実現リターンの平均 − その期の全社の平均）、<strong>precision@K</strong>（上位 K 社のうち平均を上回った社の割合）、<strong>NDCG@K</strong>（上位ほど重く採点し、理想の並びで割った値。1 が満点）、<strong>上位10%内の rank-IC</strong>（上位 10% の社だけで取った順位相関）。</p>
+  <p>これらは<strong>判定には使わない</strong>（モデルの昇格・退役・探索は今までどおり rank-IC で決める・ADR-0069）。予測が同じ社が K 位の境目をまたぐときは、その社たちで残りの枠を均等に分けるので、値が社の並び順で変わらない。期内の社数が 2K 未満の期は、その K の計算から外す。K の値と式は MODELS.md §11.7.4。画面への表示は #1049 で行う。</p>
+
   <h3 id="model-comparison">モデル比較の統計的厳密化（#369）</h3>
   <p>「モデル比較」タブは <code>model_comparison.COMPARISON_MODELS</code> に並ぶモデル（退役したモデルも比較の基準線として残す）の <code>oof_backtest</code> を横並びにするが、mean 値の目視だけでは「あるモデルが他より<strong>本当に</strong>有効か」は言えない。walk-forward の各 fold は学習窓が重複し per-fold の rank-IC 系列は iid でないため、素朴な paired-t は分散を過小評価する。そこで #369 では<strong>純後処理</strong>（追加学習・Egress ゼロ・stdlib のみ・実装は <code>model_stats.py</code>）で2点を補強する：</p>
   <ul>

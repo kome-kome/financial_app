@@ -581,6 +581,9 @@ class TestDiagnosticsExtraction:
             assert row["company_name"] not in text
         assert "coef" not in diag["cv_diagnostics"], "最終 fold の係数ベクトルは feature_coefs と重複する"
         assert "rank_ic" in diag["oof"]
+        from plugins.macro_snapshots import TOP_K_REFERENCE
+        assert set(diag["oof"]["top_k"]) == {str(k) for k in TOP_K_REFERENCE}
+        assert "top_k_excess_return_by_period" not in diag["oof"]
         assert diag["final_model"]["l1_ratio_grid"] == [0.1, 0.5, 0.9]
         assert isinstance(diag["final_model"]["l1_ratio_at_grid_edge"], bool)
         # 規模の中立化（#995）は件数と傾きだけ（社別の補正量は入れない）
@@ -590,6 +593,16 @@ class TestDiagnosticsExtraction:
     def test_macro_enet_drops_unlisted_oof_keys(self):
         diag = _extract_macro_enet({"oof_backtest": {"rank_ic": {"mean": 0.1}, "unlisted": 1}})
         assert diag["oof"] == {"rank_ic": {"mean": 0.1}}
+
+    def test_macro_enet_keeps_top_k_means_but_not_their_series(self):
+        """上位K社の参考指標は K ごとの平均だけを持ち、期別系列は持たない（#1041）。"""
+        top_k = {"5": {"n_periods": 2, "excess_return": 0.01, "precision": 0.6, "ndcg": 0.7}}
+        diag = _extract_macro_enet({"oof_backtest": {
+            "top_k": top_k,
+            "top_k_excess_return_by_period": {"5": {"2020-01": 0.01, "2020-04": 0.01}},
+            "top_decile_rank_ic": {"mean": 0.05, "n": 2},
+        }})
+        assert diag["oof"] == {"top_k": top_k, "top_decile_rank_ic": {"mean": 0.05, "n": 2}}
 
     def test_json_safe_makes_postgres_json_acceptable(self):
         """PostgreSQL の JSON は NaN を受け付けない。numpy の数・tuple・非文字列キーも揃える。"""
