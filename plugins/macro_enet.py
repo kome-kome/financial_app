@@ -2,7 +2,8 @@
 M-6 マクロ×財務 正則化線形（ElasticNet）推奨プラグイン（Issue #372 / ADR-0021）
 
 M-2（macro_gbdt・XGBoost）の**線形兄弟**。Issue #372 の候補メニューで実測した結果、
-本番パネル（57,955 サンプル・43ヶ月・71 特徴量・honest OOF・embargo=12）で
+当時（2026-07-26・ADR-0021）の本番パネル（57,955 サンプル・43ヶ月・71 特徴量・honest OOF・embargo=12。
+その後の学習窓の延伸と先読みの是正より前で、現行の規模・性能ではない）で
 
     OOF rank-IC  M-6 ElasticNet 0.1713  >  M-2 XGBoost 0.1419
     差 +0.0294（定常ブートストラップ 95%CI [+0.0116, +0.0469]・p=0.002・ADR-0018）
@@ -142,7 +143,7 @@ class MacroEnetPlugin(AnalysisPlugin):
     description = (
         "M-2 と同一データ・同一 fold で、L1+L2 正則化した線形モデル（ElasticNet）を学習します。"
         "金利カーブや信用スプレッドのようなグループ共線性に強く、符号付き係数がそのまま読めます。"
-        "本番パネルの honest OOF rank-IC で M-2（XGBoost）を有意に上回った兄弟です（ADR-0021）。"
+        "2026-07 の本番パネルの honest OOF rank-IC で M-2（XGBoost）を有意に上回った兄弟です（ADR-0021）。"
         "【注意】株価週次履歴とマクロデータ5年分の蓄積が必要です。"
     )
     depends_on: list[str] = []
