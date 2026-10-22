@@ -168,6 +168,32 @@ class TestPeriodSelection:
             assert json.loads(json.dumps(o[key])) == o[key]
 
 
+class TestAnalysisPageReadsTheSameKeys:
+    """分析画面の `_oofTopKHTML`（static/js/analysis.js・#1049）が読むキーと `oof_backtest` の戻りが一致する。
+
+    Python 側でキーの名前を変えると、画面の表は例外を出さずに空欄（'-'）になる＝失敗として現れない。
+    """
+
+    @staticmethod
+    def _js_body():
+        import pathlib
+        js = (pathlib.Path(__file__).resolve().parents[1] / "static" / "js" / "analysis.js").read_text(
+            encoding="utf-8")
+        start = js.index("function _oofTopKHTML")
+        return js[start:js.index("\n}\n", start)]
+
+    def test_every_key_the_page_reads_is_returned(self):
+        body = self._js_body()
+        o = oof_backtest({"m": _ramp(60)}, n_quantiles=5)
+        assert ".top_k" in body and ".top_decile_rank_ic" in body
+        for field in ("excess_return", "precision", "ndcg", "n_periods"):
+            assert f"r.{field}" in body, f"画面が {field} を読んでいない"
+            assert field in o["top_k"]["5"], f"oof_backtest の top_k に {field} が無い"
+        for field in ("mean", "n"):
+            assert f"dic.{field}" in body
+            assert field in o["top_decile_rank_ic"]
+
+
 class TestExistingKeysUnchanged:
     def test_existing_keys_do_not_move(self, monkeypatch):
         """上位K社を測らないとき（K が空）と、既存のキーの値が同じ。"""
