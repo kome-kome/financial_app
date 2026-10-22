@@ -1333,6 +1333,8 @@ $g^{*}_{t,(p)}$ は gain を降順に並べた理想の並びの $p$ 位（Järv
 - **夜間の診断値**（ADR-0061）には K ごとの期間平均と `top_decile_rank_ic` だけを残し、期別系列は残さない
 - 追加学習・Egress ゼロの純後処理で、`oof_backtest` を呼ぶ全モデルへ自動的に波及する。画面への表示は #1049。
   画面の並び（U = μ̂ − λR）での採点は #1042、拒否権に使う K は #1044 の事前登録した規則で決める
+  （[`prereg/top-k-veto.md`](prereg/top-k-veto.md)・各モデル自身の系列のぶれだけから MDE を出し、全モデルで
+  MDE ≤ 0.5×|平均| を満たす最小の K。計測は `scripts/measure_top_k_veto.py`・日中枠 `measure:top-k-veto`）
 
 参考文献:
 

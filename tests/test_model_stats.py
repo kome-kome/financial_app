@@ -77,6 +77,40 @@ class TestBootstrapMeanCI:
         assert pos["p_value"] == neg["p_value"]
         assert pos["p_value"] > 0.05 and neg["p_value"] > 0.05
 
+    def test_values_are_pinned(self):
+        """抜き直しを `_bootstrap_means` へ切り出した前（#1044 より前）の出力と1ビットも変わらない。
+
+        期待値は切り出す前の main の `bootstrap_mean_ci` に同じ入力を通した実出力を写したもの。
+        """
+        s = [0.012, -0.004, 0.031, 0.008, 0.019, -0.011, 0.025, 0.006, 0.014, 0.002]
+        assert ms.bootstrap_mean_ci(s, seed=0) == {
+            "mean": 0.0102, "ci_lo": 0.006, "ci_hi": 0.015, "p_value": 0.001, "n": 10, "n_boot": 2000}
+
+
+class TestBootstrapMeanSE:
+    """拒否権の K の規則（#1044）が MDE の入力に使う SE。"""
+
+    def test_too_short(self):
+        assert ms.bootstrap_mean_se([0.1]) is None
+        assert ms.bootstrap_mean_se([]) is None
+
+    def test_is_the_spread_of_the_same_resamples_as_the_ci(self):
+        import random
+        import statistics
+        s = [0.012, -0.004, 0.031, 0.008, 0.019, -0.011, 0.025, 0.006, 0.014, 0.002]
+        rng = random.Random(3)
+        means = [statistics.mean(ms._stationary_bootstrap_sample(s, rng, ms.DEFAULT_AVG_BLOCK))
+                 for _ in range(ms.DEFAULT_N_BOOT)]
+        assert ms.bootstrap_mean_se(s, seed=3) == pytest.approx(statistics.stdev(means), rel=1e-12)
+
+    def test_constant_series_has_no_spread(self):
+        assert ms.bootstrap_mean_se([0.05] * 8) == 0.0
+
+    def test_noisier_series_has_larger_se(self):
+        calm = [0.05, 0.051, 0.049, 0.05, 0.052, 0.048, 0.05, 0.051]
+        wild = [0.05 + 10 * (x - 0.05) for x in calm]
+        assert ms.bootstrap_mean_se(wild) == pytest.approx(10 * ms.bootstrap_mean_se(calm), rel=1e-9)
+
 
 class TestPairedICSignificance:
     def test_no_common_periods_returns_none(self):
