@@ -445,6 +445,20 @@ JOBS: dict[str, Job] = {
         # 順列は固定 seed だが、層を決める変数の読み込みの途中に夜間の書き込みが入ると擬似群が変わる。
         parallel_sensitive=True,
     ),
+    # 事前登録の stage B（開封・#1032）。凍結値は stage A と同じく追記節の値（テストが照合する）。
+    "measure:index-event-b": Job(
+        name="measure_index_event_b",
+        argv=("{python}", "-m", "scripts.measure_index_event", "stage-b",
+              "--prereg", "docs/prereg/index-event-2026.md",
+              "--prereg-sha", "72c57412ea4663fab8806032ad09e0b90ab8dc6a4260b15721c158e8a75cb300"),
+        why="2022 前例の開封＝事象窓の CAR・I・R・κ・δ̂・CAR_post・ρ と E族の確証（E1・E2・E4・Holm）・"
+            "Lee bounds・記述の量（#1032・#1001）。**事前登録の追記節に stage A の結果を書き足した後にだけ"
+            "動く**（未記入なら終了コード 2）。前提は stage A の実走（マッチ対）。",
+        # 見積り（全社の週次株価の読み込みと、gap_ratio の月ごとの業種別回帰 28 か月が大半）。実走ログで差し替える。
+        measured_min=15.0,
+        # ブートストラップは固定 seed だが、読み込みの途中に夜間の書き込みが入ると同じ入力にならない。
+        parallel_sensitive=True,
+    ),
     # 9/18 の列数上限の本測定で「上限が財務の列を締め出している」は否定された（上限 40 でも財務は
     # 2列）。残った見立ては「M-1 の目的変数は素の52週先リターンなので、BIC（二乗誤差）は相場全体の
     # 変動を説明するマクロ列を選ぶ。評価は月内の順位」＝学習と評価のずれ（ADR-0050 の 9/18 追記）。

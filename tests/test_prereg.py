@@ -211,3 +211,28 @@ class TestBoundaryTable:
         expected = [(f"{k / n:.3f}", f"{z[k - 1]:.3f}", f"{ms.obf_spending(k / n, 0.05):.6f}")
                     for k in range(1, n + 1)]
         assert [tuple(r[1:]) for r in rows] == expected
+
+
+class TestAppendixSection:
+    """開封の順序を守る判定（#1032）: 追記節のその見出しに結果が書かれているか。"""
+
+    HEADING = "### stage A"
+
+    def test_placeholder_is_not_recorded(self):
+        assert prereg.section_recorded(_doc(), self.HEADING) is False      # 「未記入」で始まる
+
+    def test_written_result_is_recorded(self):
+        text = _doc(appendix="\n## 追記節\n\n### stage A\nバランス: 全変数 |SMD| < 0.1\n\n### 次\n未記入\n")
+        assert prereg.appendix_section(text, self.HEADING) == "バランス: 全変数 |SMD| < 0.1"
+        assert prereg.section_recorded(text, self.HEADING) is True
+        assert prereg.section_recorded(text, "### 次") is False
+
+    def test_missing_or_empty_heading_is_not_recorded(self):
+        assert prereg.section_recorded(_doc(), "### 無い見出し") is False
+        assert prereg.section_recorded(_doc(appendix="\n### stage A\n\n### 次\n書いた\n"), self.HEADING) is False
+
+    def test_the_index_event_document_is_not_recorded_yet(self):
+        # 本物の文書は stage A を回す前なので、stage B は開封できない（未記入）
+        from scripts.measure_index_event import STAGE_A_HEADING
+        text = INDEX_EVENT_DOC.read_text(encoding="utf-8")
+        assert prereg.appendix_section(text, STAGE_A_HEADING).startswith(prereg.PLACEHOLDER)

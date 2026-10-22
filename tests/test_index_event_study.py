@@ -12,6 +12,7 @@ import re
 import sys
 from datetime import date, timedelta
 from pathlib import Path
+from statistics import NormalDist
 
 import numpy as np
 import pandas as pd
@@ -630,6 +631,166 @@ class TestMFamily:
     def test_alpha_is_bonferroni_over_four(self):
         assert S.M_ALPHA == pytest.approx(0.0125)
         assert S.M_MODELS == {"xgb_m2": "raw", "elasticnet": "size_neutral"}
+
+
+# ── stage B（開封・#1032）─────────────────────────────────────────────────────────
+
+def _weekly(lo: date, hi: date, value: float = 0.0) -> pd.Series:
+    idx = [lo + W * k for k in range(((hi - lo).days // 7) + 1)]
+    return pd.Series(value, index=idx, dtype=float)
+
+
+def _planted(series: pd.Series, pressure: float, reversal: float, post: float) -> pd.Series:
+    """圧力窓の各週に pressure、戻り窓の各週に reversal、除外後 [+1, +52] の各週に post を足す。"""
+    s = series.copy()
+    for pw in CAL:
+        for w in (pw.week - W, pw.week):
+            s[w] += pressure
+        for k in range(1, 5):
+            s[pw.week + W * k] += reversal
+    for k in range(1, S.POST_WEEKS + 1):
+        s[CAL[-1].week + W * k] += post
+    return s
+
+
+class TestStageBQuantities:
+    def test_announcement_week(self):
+        # 2022-10-07（金）引け後 → 翌平日 10-10（月・祝日だが同じ週の 10-11 が最初の取引日）
+        assert S.announcement_week(date(2022, 10, 7)) == date(2022, 10, 10)
+
+    def test_hand_calculation(self):
+        ar = _planted(_weekly(date(2022, 4, 4), date(2026, 3, 30)), pressure=-0.01, reversal=0.0025, post=0.001)
+        q = S.event_quantities(ar, CAL)
+        # m = 10 の戻り窓 [w_10 + 1, w_10 + 4] は除外後の窓 [+1, +52] と重なる（§5.1）＝R に 4 週 × 0.001 / 10 が乗る
+        r = 0.01 + 4 * 0.001 / 10
+        assert q["I"] == pytest.approx(-0.02) and q["R"] == pytest.approx(r)
+        assert q["kappa"] == pytest.approx(1 + r / -0.02) and q["delta_hat"] == pytest.approx(4 * (-0.02 + r))
+        post = 0.052 + 4 * 0.0025                     # 同じ重なりで、除外後の 52 週にも m = 10 の戻りが入る
+        assert q["car_post"] == pytest.approx(post)
+        assert q["rho"] == pytest.approx(post / abs(10 * (-0.02 + r)))
+
+    def test_rho_is_left_out_when_nothing_is_lost(self):
+        ar = _planted(_weekly(date(2022, 4, 4), date(2026, 3, 30)), pressure=-0.01, reversal=0.006, post=0.001)
+        assert S.event_quantities(ar, CAL)["rho"] is None        # I + R ≥ 0
+
+    def test_missing_week_makes_the_window_unknown(self):
+        ar = _weekly(date(2022, 4, 4), date(2026, 3, 30))
+        ar[CAL[3].week] = np.nan
+        assert S.event_quantities(ar, CAL)["I"] is None
+        assert S.car(ar, [CAL[0].week]) == 0.0
+
+    def test_holm(self):
+        assert S.holm({"E1": 0.01, "E2": 0.04, "E4": 0.03}) == {"E1": True, "E4": False, "E2": False}
+        assert S.holm({"E1": 0.01, "E2": 0.02, "E4": 0.04}) == {"E1": True, "E2": True, "E4": True}
+        # p の無い検定（切り替えで外した E4）は非有意として最後に並ぶ
+        assert S.holm({"E1": 0.001, "E2": 0.2, "E4": None}) == {"E1": True, "E2": False, "E4": False}
+
+    def test_e2_is_not_significant_when_there_is_no_pressure(self):
+        assert S.e2_p(0.01, [{"I": -0.01, "kappa": 0.5}]) == 1.0
+        boot = [{"I": -0.02, "kappa": 0.4}, {"I": 0.001, "kappa": None}, {"I": -0.02, "kappa": -0.1}]
+        assert S.e2_p(-0.02, boot) == pytest.approx((2 + 1) / (3 + 1))
+
+    def test_empirical_p_and_nw_direction(self):
+        assert S.empirical_impact_p(-0.02, [-0.03, -0.01, 0.0, 0.01]) == pytest.approx(2 / 5)
+        g = [1e-4, 0.0, 0.0, 0.0, 0.0]
+        weights = {date(2022, 10, 24): 1.0}
+        assert S.nw_one_sided_p(-0.02, weights, g, lower=True) == pytest.approx(NormalDist().cdf(-2.0))
+        assert S.nw_one_sided_p(0.02, weights, g, lower=False) == pytest.approx(1 - NormalDist().cdf(2.0))
+
+    def test_lee_bounds_and_retention(self):
+        assert S.lee_bounds([float(i) for i in range(1, 11)], 0.2) == [pytest.approx(4.5), pytest.approx(6.5)]
+        idx = [date(2023, 1, 2) + W * k for k in range(10)]
+        closes = pd.DataFrame({"A": 1.0, "B": 1.0, "C": [1.0] * 5 + [np.nan] * 5, "D": np.nan}, index=idx)
+        # 最初の 4 週に足がある A・B・C のうち、最後の 4 週にも足があるのは A・B
+        assert S.retention(closes, ["A", "B", "C", "D"], idx[0], idx[-1]) == pytest.approx(2 / 3)
+
+
+class TestStageBBootstrap:
+    def test_planted_delta_is_recovered_and_covered(self):
+        rng = np.random.default_rng(11)
+        base = _weekly(date(2022, 4, 11), date(2026, 1, 26))
+        noise = pd.Series(rng.normal(0, 0.002, size=len(base)), index=base.index)
+        ar = _planted(noise, pressure=-0.0125, reversal=0.00125, post=0.0)
+        truth = 4 * (-0.025 + 0.005)
+        q = S.event_quantities(ar, CAL)
+        assert q["delta_hat"] == pytest.approx(truth, abs=0.012)
+        boot = S.residual_bootstrap(ar, CAL, reps=400)
+        lo, hi = S.percentile_ci([b["delta_hat"] for b in boot])
+        assert lo < truth < hi and lo < q["delta_hat"] < hi
+        assert S.e2_p(q["I"], boot) < 0.05                       # 戻りは一部だけ＝持続率 κ > 0
+
+    def test_deterministic_with_the_seed(self):
+        ar = _planted(_weekly(date(2022, 4, 11), date(2026, 1, 26), 0.0001), -0.01, 0.001, 0.0)
+        a = S.residual_bootstrap(ar, CAL, reps=20)
+        assert a == S.residual_bootstrap(ar, CAL, reps=20)
+
+
+def test_label_did_recovers_b():
+    rng = np.random.default_rng(3)
+    pairs = {f"T{i}": (f"C{i}",) for i in range(20)}
+    labels = {}
+    for ym in S.ym_range("2019-07", "2024-01"):
+        shift = -0.05 if "2022-10" <= ym <= "2024-01" else 0.0
+        for i in range(20):
+            y = float(rng.normal(0, 0.1))
+            labels[(ym, f"C{i}")] = y
+            labels[(ym, f"T{i}")] = y + shift + float(rng.normal(0, 0.005))
+    r = S.label_did(labels, pairs)
+    assert (r["n_event"], r["n_base"]) == (16, 27)
+    assert r["b"] == pytest.approx(-0.05, abs=0.005) and r["p_one_sided"] < 0.01
+
+
+def _stage_b_synthetic(pressure: float = -0.01, reversal: float = 0.0025, seed: int = 0) -> dict:
+    """2019-07〜2026-03 の週次。処置 6 社（対照 2 社ずつ・値の近い双子）。処置の圧力窓・戻り窓に効果を仕込む。"""
+    rng = np.random.default_rng(seed)
+    weeks = [date(2019, 7, 29) + W * k for k in range(((date(2026, 3, 30) - date(2019, 7, 29)).days // 7) + 1)]
+    pressure_weeks = {w for pw in CAL for w in (pw.week - W, pw.week)}
+    reversal_weeks = {pw.week + W * k for pw in CAL for k in range(1, 5)}
+    closes, pairs = {}, {}
+    for i in range(6):
+        market = rng.normal(0, 0.02, size=len(weeks))
+        group = [f"T{i}", f"C{i}a", f"C{i}b"]
+        pairs[group[0]] = group[1:]
+        for ec in group:
+            r = market + rng.normal(0, 0.001, size=len(weeks))
+            if ec == group[0]:
+                r = r + np.array([pressure if w in pressure_weeks else reversal if w in reversal_weeks else 0.0
+                                  for w in weeks])
+            closes[ec] = dict(zip(weeks, (100 * np.exp(np.cumsum(r))).tolist()))
+    return dict(closes=S.weekly_frame(closes), pairs=pairs, calendar=CAL,
+                announce_week=S.announcement_week(date(2022, 10, 7)), released={"T0"}, labels={}, gaps={},
+                gap_yms=[])
+
+
+class TestStageB:
+    @pytest.fixture(scope="class")
+    def result(self):
+        return S.stage_b(**_stage_b_synthetic())
+
+    def test_recovers_the_planted_pressure(self, result):
+        q = result["quantities"]
+        assert q["I"] == pytest.approx(-0.02, abs=0.002) and q["R"] == pytest.approx(0.01, abs=0.002)
+        e = result["e_family"]
+        assert e["tests"] == ["E1", "E2", "E4"] and e["significant"]["E1"] is True
+        if e["switch_to_empirical_p"]:
+            assert e["p"]["E4"] is None                          # 経験 p を持たない E4 は確証から外す
+        lo, hi = result["ci"]["delta_hat"]
+        assert lo < q["delta_hat"] < hi
+        assert result["materials"]["delta_hat_ci90"] == result["ci"]["delta_hat"]
+
+    def test_no_attrition_means_no_lee_bounds(self, result):
+        for row in result["survival_bias"].values():
+            assert row["retention_treated"] == 1.0 and row["retention_control"] == 1.0
+            assert row["lee_bounds"] is None
+
+    def test_summary_carries_no_codes(self, result):
+        assert not re.search(r'"(T\d|C\d[ab])"', json.dumps(result, default=str))
+
+    def test_descriptive_windows(self, result):
+        d = result["descriptive"]
+        assert set(d["drift"]) == set(range(1, 10))
+        assert d["announcement"] is not None and d["post_short"] is not None
+        assert d["released_after_review"] is not None
 
 
 def test_pure_module_does_not_import_database_or_scripts():

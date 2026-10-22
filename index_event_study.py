@@ -1,10 +1,13 @@
 """指数イベントのイベントスタディの部品 — 2022 前例（段階的ウエイト低減 493 社）を事前登録どおりに測る（#1031・親 #1008）。
 
 事前登録 `docs/prereg/index-event-2026.md`（#1007）が決めた測り方を、データを渡せば答えが返る純関数に
-する。CLI は `scripts/measure_index_event.py`。この module が今持つのは **stage A（盲検の下調べ）** の
-部品だけ: 暦（§3.1）・対照（§4.2）・マッチング（§4.3）・バランス・first stage（§5.3）・異常リターン（§0）・
-Newey-West（§5.2）・σ / SE(δ̂) / MDE（§7）・placebo の誤検出率（§5.2）・R0 の照合（§2）。事象窓の量と
-検定（E 族・κ・δ̂・ρ）は stage B（#1032）で足す。
+する。CLI は `scripts/measure_index_event.py`。
+
+- **stage A（盲検の下調べ・#1031）**: 暦（§3.1）・対照（§4.2）・マッチング（§4.3）・バランス・first stage（§5.3）・
+  異常リターン（§0）・Newey-West（§5.2）・σ / SE(δ̂) / MDE（§7）・placebo の誤検出率（§5.2）・R0 の照合（§2）
+- **stage B（開封・#1032）**: 窓（§5.1）ごとの CAR・I・R・κ・δ̂・CAR_post・ρ（§6.1・§9）、E族の確証
+  （E1・E2・E4・Holm）、残差の定常ブートストラップ（§5.2）、生存バイアスの Lee bounds と記述の量（§9）。
+  CLI は事前登録の追記節に stage A の結果が書かれていなければ開封しない
 
 **M 族（§6.2・#1009）** も持つ: 本番の OOF（M-2 は raw・M-6 は size_neutral）で、期ごとの処置群と対照の
 placement bias の差 d_t を E_t・P_t へ回帰し、層別に引いて全期で固定した擬似処置群の順列で p を出す。
@@ -442,16 +445,22 @@ def first_stage_ok(rows: Sequence[dict]) -> Optional[bool]:
 
 # ── 異常リターン（§0）と Newey-West（§5.2）──────────────────────────────────────────
 
-def abnormal_return_series(returns: pd.DataFrame, pairs: Mapping[str, Sequence[str]]) -> pd.Series:
-    """AR̄_w = 週 w に処置社と対照（1 社以上）の両方の値がそろう処置社で AR_{i,w} を等加重平均した値。"""
+def abnormal_return_frame(returns: pd.DataFrame, pairs: Mapping[str, Sequence[str]]) -> pd.DataFrame:
+    """週 × 処置社の AR_{i,w} = r_{i,w} − mean_{j∈C(i)} r_{j,w}（値のある対照だけで平均）。"""
     cols = {}
     for t in sorted(pairs):
         cs = [c for c in pairs[t] if c in returns.columns]
         if t in returns.columns and cs:
             cols[t] = returns[t] - returns[cs].mean(axis=1, skipna=True)
-    if not cols:
+    return pd.DataFrame(cols, index=returns.index, dtype=float)
+
+
+def abnormal_return_series(returns: pd.DataFrame, pairs: Mapping[str, Sequence[str]]) -> pd.Series:
+    """AR̄_w = 週 w に処置社と対照（1 社以上）の両方の値がそろう処置社で AR_{i,w} を等加重平均した値。"""
+    frame = abnormal_return_frame(returns, pairs)
+    if frame.empty:
         return pd.Series(np.nan, index=returns.index, dtype=float)
-    return pd.DataFrame(cols, index=returns.index).mean(axis=1, skipna=True)
+    return frame.mean(axis=1, skipna=True)
 
 
 def nw_autocovariances(series: pd.Series, lag: int = NW_LAG) -> Optional[list]:
@@ -647,6 +656,328 @@ def stage_a(*, closes: pd.DataFrame, turnover: pd.DataFrame,
         "definitions": DEFINITIONS,
     }
     return summary, pairs
+
+
+# ── stage B（開封・§5.1・§5.2・§6.1・§9・#1032）───────────────────────────────────
+
+E_TESTS = ("E1", "E2", "E4")             # §6.1 E族の確証（#1033 で E3 を記述へ移した）
+HOLM_ALPHA = 0.05
+ANALYSIS_LEAD_WEEKS = 26                 # §5.2 解析期間 [A* − 26, w_10 + 52]
+POST_WEEKS = 52                          # §5.1 除外後 [+1, +52]（E4・ρ）
+POST_SHORT_WEEKS = 26                    # §5.1 除外後 [+1, +26]（記述）
+BOOT_REPS = 2000                         # §5.2 残差の定常ブートストラップ
+BOOT_BLOCK = 8
+CI_LEVEL = 0.90                          # §6.1 δ̂ の 90% CI（κ・ρ も同じ水準にそろえる）
+LEE_GAP = 0.05                           # §9 群別の脱落の差がこれを超えたら Lee bounds を付ける
+ATTRITION_TAIL_WEEKS = 4                 # 脱落＝窓の最後の 4 週に週次の足が無い（ここで決めた）
+E3_EVENT = ("2022-10", "2024-01")        # §9 ラベル水準の DiD（記述）の事象期と基準期
+E3_BASE = ("2019-07", "2021-09")
+E3_NW_LAG = 12
+GAP_PERIOD = ("2022-10", "2025-01")      # §9 2022 群の gap_ratio を記述する月（公表〜除外）
+B_DEFINITIONS = {
+    "announcement_week": "A* = 引け後の公表の翌平日を含む ISO 週（月曜の祝日は ISO 週を変えない）",
+    "analysis_period": f"[A* − {ANALYSIS_LEAD_WEEKS} 週, w_10 + {POST_WEEKS} 週]。E1・E4 の Ω とブートストラップの系列",
+    "bootstrap": f"AR̄ を窓の種類（圧力・戻り・除外後 [+1,+{POST_WEEKS}]・それ以外＝0）の平均と残差に分け、"
+                 f"残差を平均ブロック長 {BOOT_BLOCK} 週の定常ブートストラップで {BOOT_REPS} 回（seed 0）",
+    "ci": f"パーセンタイルの {int(CI_LEVEL * 100)}%（δ̂・κ・ρ）",
+    "e1_empirical_p": "stage A と同じ placebo（事前期間の月末の週・10 個の平均）の分布で (#{I* <= I} + 1) / (N + 1)",
+    "attrition": f"窓の最初の {ATTRITION_TAIL_WEEKS} 週に足があり、最後の {ATTRITION_TAIL_WEEKS} 週に足が無い社"
+                 "（企業表の廃止日は同期日で真の日付ではない・#1022）",
+    "lee_bounds": "社ごとの値（処置社の AR − 対照の平均）の分布を、両群の残存率の差 ÷ 大きい方の残存率の割合だけ"
+                  "上（下限）・下（上限）から削った平均",
+    "e3_label": "本番の学習ラベル（月末の足から 52 本先の足との log 比）",
+}
+
+
+def announcement_week(announced: date, after_close: bool = True) -> date:
+    """A*: 公表後の最初の取引日を含む週（§0）。引け後の公表なら翌平日の週。"""
+    d = announced + timedelta(days=1 if after_close else 0)
+    while d.weekday() >= 5:
+        d += timedelta(days=1)
+    return iso_monday(d)
+
+
+def _span(start: date, lo: int, hi: int) -> list:
+    return [start + WEEK * k for k in range(lo, hi + 1)]
+
+
+def car(ar: pd.Series, weeks: Iterable[date]) -> Optional[float]:
+    """CAR = 窓の週の AR̄ の和。1 週でも値が無ければ None（黙って欠けた窓を足さない）。"""
+    total = 0.0
+    for w in weeks:
+        v = ar.get(w)
+        if v is None or not np.isfinite(v):
+            return None
+        total += float(v)
+    return total
+
+
+def event_quantities(ar: pd.Series, calendar: Sequence[PressureWeek]) -> dict:
+    """§6.1・§9 の量: I・R・κ = 1 + R/I・δ̂ = 4(I + R)・CAR_post・ρ = CAR_post ÷ |n(I + R)|（I + R ≥ 0 なら None）。"""
+    n = len(calendar)
+    pres = [car(ar, _span(pw.week, -1, 0)) for pw in calendar]
+    rev = [car(ar, _span(pw.week, 1, 4)) for pw in calendar]
+    post = car(ar, _span(calendar[-1].week, 1, POST_WEEKS))
+    out = {"I": None, "R": None, "kappa": None, "delta_hat": None, "car_post": post, "rho": None}
+    if None in pres or None in rev:
+        return out
+    i_val, r_val = sum(pres) / n, sum(rev) / n
+    out.update(I=i_val, R=r_val, kappa=(1 + r_val / i_val) if i_val else None, delta_hat=4 * (i_val + r_val))
+    if post is not None and i_val + r_val < 0:
+        out["rho"] = post / abs(n * (i_val + r_val))
+    return out
+
+
+def _window_kinds(calendar: Sequence[PressureWeek]) -> dict:
+    kinds = {}
+    for pw in calendar:
+        kinds.update({w: "pressure" for w in _span(pw.week, -1, 0)})
+        kinds.update({w: "reversal" for w in _span(pw.week, 1, 4)})
+    kinds.update({w: "post" for w in _span(calendar[-1].week, 1, POST_WEEKS)})
+    return kinds
+
+
+def residual_bootstrap(ar: pd.Series, calendar: Sequence[PressureWeek], *, reps: int = BOOT_REPS,
+                       block: float = BOOT_BLOCK, seed: int = SEED) -> list:
+    """§5.2: AR̄ を窓の種類ごとの平均と残差に分け、残差を定常ブートストラップで引き直して量を計算し直す。
+
+    残差の引き直しは `model_stats._stationary_bootstrap_sample`（Politis-Romano・事前登録の指定）。
+    """
+    import random
+
+    from model_stats import _stationary_bootstrap_sample
+
+    s = ar[np.isfinite(ar.to_numpy(float))]
+    kinds = _window_kinds(calendar)
+    by_kind: dict = {}
+    for w, v in s.items():
+        if w in kinds:
+            by_kind.setdefault(kinds[w], []).append(float(v))
+    means = {k: sum(v) / len(v) for k, v in by_kind.items()}
+    mean_vec = [means.get(kinds.get(w), 0.0) for w in s.index]
+    resid = [float(v) - m for v, m in zip(s.to_numpy(float), mean_vec)]
+    rng = random.Random(seed)
+    out = []
+    for _ in range(reps):
+        drawn = _stationary_bootstrap_sample(resid, rng, block)
+        out.append(event_quantities(pd.Series([m + e for m, e in zip(mean_vec, drawn)], index=s.index),
+                                    calendar))
+    return out
+
+
+def percentile_ci(values: Iterable[Optional[float]], level: float = CI_LEVEL) -> Optional[list]:
+    from model_stats import _percentile
+
+    vals = sorted(v for v in values if v is not None and math.isfinite(v))
+    if not vals:
+        return None
+    tail = (1 - level) / 2 * 100
+    return [_percentile(vals, tail), _percentile(vals, 100 - tail)]
+
+
+def e2_p(i_val: Optional[float], boot: Sequence[dict]) -> Optional[float]:
+    """E2（κ > 0）: κ* ≤ 0（I* ≥ 0 の回も含む）となった割合 (n + 1)/(B + 1)。I ≥ 0 なら非有意（1.0）。"""
+    if i_val is None:
+        return None
+    if i_val >= 0:
+        return 1.0
+    n = sum(1 for b in boot if b["I"] is None or b["I"] >= 0 or (b["kappa"] is not None and b["kappa"] <= 0))
+    return (n + 1) / (len(boot) + 1)
+
+
+def nw_one_sided_p(value: Optional[float], weights: Mapping[date, float], gammas: Optional[Sequence[float]],
+                   *, lower: bool) -> Optional[float]:
+    """Newey-West（§5.2）の片側 p。`lower=True` は H1: 値 < 0（E1）、False は H1: 値 > 0（E4）。"""
+    if value is None or gammas is None:
+        return None
+    var = nw_variance(weights, gammas)
+    if var <= 0:
+        return None
+    z = value / math.sqrt(var)
+    return NormalDist().cdf(z) if lower else 1 - NormalDist().cdf(z)
+
+
+def holm(pvals: Mapping[str, Optional[float]], alpha: float = HOLM_ALPHA) -> dict:
+    """Holm: p を小さい順に並べ、p_(j) < α / (k − j + 1) の間だけ有意。p が無い検定は非有意（1.0）として並べる。"""
+    items = sorted(((1.0 if p is None else p), k) for k, p in pvals.items())
+    out, going = {}, True
+    for j, (p, key) in enumerate(items, 1):
+        going = going and p < alpha / (len(items) - j + 1)
+        out[key] = going
+    return out
+
+
+def empirical_impact_p(i_val: Optional[float], impacts: Sequence[float]) -> Optional[float]:
+    """E1 の経験 p: placebo の I* の分布で (#{I* ≤ I} + 1) / (N + 1)。"""
+    if i_val is None or len(impacts) == 0:
+        return None
+    return (int(np.sum(np.asarray(impacts) <= i_val)) + 1) / (len(impacts) + 1)
+
+
+def retention(closes: pd.DataFrame, codes: Iterable[str], start: date, end: date,
+              tail: int = ATTRITION_TAIL_WEEKS) -> Optional[float]:
+    """窓の最初の `tail` 週に足がある社のうち、最後の `tail` 週にも足がある社の割合。"""
+    head_weeks = [start + WEEK * k for k in range(tail)]
+    tail_weeks = [end - WEEK * k for k in range(tail)]
+    alive = [c for c in codes if c in closes.columns
+             and closes[c].reindex(head_weeks).notna().any()]
+    if not alive:
+        return None
+    return sum(1 for c in alive if closes[c].reindex(tail_weeks).notna().any()) / len(alive)
+
+
+def lee_bounds(values: Sequence[float], trim: float) -> Optional[list]:
+    """分布の上（下限）・下（上限）から `trim` の割合だけ削った平均 [下限, 上限]（Lee 2009）。"""
+    v = sorted(x for x in values if x is not None and math.isfinite(x))
+    if not v:
+        return None
+    k = min(int(round(len(v) * trim)), len(v) - 1)
+    return [float(np.mean(v[:len(v) - k])), float(np.mean(v[k:]))]
+
+
+def _firm_values(frame: pd.DataFrame, weeks_by_m: Sequence[Sequence[date]], *, per_window_mean: bool) -> list:
+    """社ごとの値: 窓ごとの CAR を（per_window_mean なら窓の数で割って）足す。欠けた社は落とす。"""
+    out = []
+    for t in frame.columns:
+        cars = [car(frame[t], ws) for ws in weeks_by_m]
+        if None not in cars:
+            out.append(sum(cars) / len(cars) if per_window_mean else sum(cars))
+    return out
+
+
+def survival_bias(closes: pd.DataFrame, frame: pd.DataFrame, pairs: Mapping[str, Sequence[str]],
+                  calendar: Sequence[PressureWeek]) -> dict:
+    """§9: 検定ごとの窓の群別の残存率と、差が 5pt を超えたときの Lee bounds（記述）。"""
+    first, last = calendar[0].week, calendar[-1].week
+    tests = {
+        "E1": ([_span(pw.week, -1, 0) for pw in calendar], first - WEEK, last + WEEK * 4),
+        "E2": ([_span(pw.week, 1, 4) for pw in calendar], first - WEEK, last + WEEK * 4),
+        "E4": ([_span(last, 1, POST_WEEKS)], last + WEEK, last + WEEK * POST_WEEKS),
+    }
+    controls = sorted({c for cs in pairs.values() for c in cs})
+    out = {}
+    for name, (weeks, start, end) in tests.items():
+        r_t, r_c = retention(closes, sorted(pairs), start, end), retention(closes, controls, start, end)
+        gap = None if r_t is None or r_c is None else r_t - r_c
+        row = {"window": [start.isoformat(), end.isoformat()], "retention_treated": r_t,
+               "retention_control": r_c, "gap": gap, "lee_bounds": None}
+        if gap is not None and abs(gap) > LEE_GAP and max(r_t, r_c) > 0:
+            row["lee_bounds"] = lee_bounds(_firm_values(frame, weeks, per_window_mean=(name != "E4")),
+                                           abs(gap) / max(r_t, r_c))
+        out[name] = row
+    return out
+
+
+def ym_range(lo: str, hi: str) -> list:
+    out, (y, m) = [], (int(lo[:4]), int(lo[5:7]))
+    while (y, m) <= (int(hi[:4]), int(hi[5:7])):
+        out.append(f"{y}-{m:02d}")
+        y, m = (y + 1, 1) if m == 12 else (y, m + 1)
+    return out
+
+
+def paired_month_diff(values: Mapping[tuple, float], pairs: Mapping[str, Sequence[str]],
+                      yms: Iterable[str]) -> dict:
+    """{ym: mean_i[ v_{i,ym} − mean_{j∈C(i)} v_{j,ym} ]}（値のある対照が 1 社以上いる処置社だけ）。"""
+    out = {}
+    for ym in yms:
+        diffs = []
+        for t, cs in pairs.items():
+            vt = values.get((ym, t))
+            vc = [values[(ym, c)] for c in cs if (ym, c) in values]
+            if vt is not None and vc:
+                diffs.append(vt - sum(vc) / len(vc))
+        if diffs:
+            out[ym] = sum(diffs) / len(diffs)
+    return out
+
+
+def label_did(labels: Mapping[tuple, float], pairs: Mapping[str, Sequence[str]]) -> dict:
+    """§9 ラベル水準の DiD（記述）: D_ym = a + b·1[事象期] の b と Newey-West（lag 12 か月）の片側 p（H1: b < 0）。"""
+    import statsmodels.api as sm
+
+    event, base = ym_range(*E3_EVENT), ym_range(*E3_BASE)
+    d = paired_month_diff(labels, pairs, base + event)
+    yms = [ym for ym in base + event if ym in d]
+    out = {"event": list(E3_EVENT), "base": list(E3_BASE), "n_event": sum(1 for ym in yms if ym in event),
+           "n_base": sum(1 for ym in yms if ym in base), "b": None, "p_one_sided": None, "d_by_period": d}
+    if out["n_event"] < 2 or out["n_base"] < 2:
+        return out
+    x = np.array([[1.0, 1.0 if ym in event else 0.0] for ym in yms])
+    fit = sm.OLS(np.array([d[ym] for ym in yms]), x).fit(
+        cov_type="HAC", cov_kwds={"maxlags": min(E3_NW_LAG, len(yms) - 1)})
+    b, p2 = float(fit.params[1]), float(fit.pvalues[1])
+    out.update(b=b, p_one_sided=p2 / 2 if b < 0 else 1 - p2 / 2)
+    return out
+
+
+def stage_b(*, closes: pd.DataFrame, pairs: Mapping[str, Sequence[str]], calendar: Sequence[PressureWeek],
+            announce_week: date, released: Iterable[str], labels: Mapping[tuple, float],
+            gaps: Mapping[tuple, float], gap_yms: Sequence[str]) -> dict:
+    """stage B（開封）。要約は件数と統計だけで、銘柄コードを含めない。"""
+    returns = weekly_log_returns(closes)
+    frame = abnormal_return_frame(returns, pairs)
+    ar = frame.mean(axis=1, skipna=True) if not frame.empty else pd.Series(np.nan, index=returns.index)
+    last = calendar[-1].week
+    analysis = rows_between(ar, announce_week - WEEK * ANALYSIS_LEAD_WEEKS, last + WEEK * POST_WEEKS)
+    gammas = nw_autocovariances(analysis)
+    q = event_quantities(ar, calendar)
+    boot = residual_bootstrap(analysis, calendar)
+    # 経験 p への切り替え（§5.2）: stage A と同じ placebo を同じ関数で回し直す
+    ar_pre = rows_between(ar, *PRE_PERIOD)
+    gammas_pre = nw_autocovariances(ar_pre)
+    weeks = placebo_pressure_weeks()
+    placebo = placebo_test(ar_pre, weeks, gammas_pre)
+    switch = placebo["switch_to_empirical_p"]
+    p_nw = {"E1": nw_one_sided_p(q["I"], impact_weights([pw.week for pw in calendar]), gammas, lower=True),
+            "E4": nw_one_sided_p(q["car_post"], {w: 1.0 for w in _span(last, 1, POST_WEEKS)}, gammas,
+                                 lower=False)}
+    p = {"E1": p_nw["E1"], "E2": e2_p(q["I"], boot), "E4": p_nw["E4"]}
+    if switch:
+        usable = [w for w in weeks if w in ar_pre.index and (w - WEEK) in ar_pre.index
+                  and np.isfinite(ar_pre[w]) and np.isfinite(ar_pre[w - WEEK])]
+        impacts, _ses = placebo_draws(ar_pre, usable, gammas_pre)
+        p["E1"] = empirical_impact_p(q["I"], impacts)
+        p["E4"] = None                   # 経験 p を持たないので確証から外す（非有意・§5.2）
+    significant = holm(p)
+    released_frame = frame[[t for t in frame.columns if t in set(released)]]
+    released_ar = released_frame.mean(axis=1, skipna=True) if not released_frame.empty else None
+    latest = max((w for w in ar.index if np.isfinite(ar[w])), default=None)
+    gap_series = paired_month_diff(gaps, pairs, gap_yms)
+    return {
+        "quantities": q,
+        "ci": {k: percentile_ci([b[k] for b in boot]) for k in ("delta_hat", "kappa", "rho")},
+        "e_family": {
+            "tests": list(E_TESTS), "alpha": HOLM_ALPHA,
+            "p": p, "p_newey_west": p_nw, "significant": significant,
+            "switch_to_empirical_p": switch, "e4_excluded_by_switch": bool(switch),
+        },
+        "placebo": placebo,
+        "analysis_period": [(announce_week - WEEK * ANALYSIS_LEAD_WEEKS).isoformat(),
+                            (last + WEEK * POST_WEEKS).isoformat()],
+        "bootstrap": {"reps": BOOT_REPS, "block": BOOT_BLOCK, "seed": SEED,
+                      "n_valid": sum(1 for b in boot if b["delta_hat"] is not None)},
+        "survival_bias": survival_bias(closes, frame, pairs, calendar),
+        "descriptive": {
+            "announcement": car(ar, _span(announce_week, 0, 1)),
+            "drift": {a.m: car(ar, _span(a.week, 5, (b.week - a.week).days // 7 - 2))
+                      for a, b in zip(calendar, calendar[1:])},
+            "post_short": car(ar, _span(last, 1, POST_SHORT_WEEKS)),
+            "post_long": (car(ar, [w for w in ar.index if last + WEEK * (POST_WEEKS + 1) <= w <= latest])
+                          if latest is not None and latest > last + WEEK * POST_WEEKS else None),
+            "released_after_review": (car(released_ar, [w for w in released_ar.index
+                                                        if calendar[4].week < w <= (latest or w)])
+                                      if released_ar is not None and len(calendar) > 4 else None),
+            "label_did": label_did(labels, pairs),
+            "gap_ratio": {"by_period": gap_series,
+                          "mean": (sum(gap_series.values()) / len(gap_series)) if gap_series else None},
+        },
+        # §8 の判定の材料（δ* は #1010 が出すので、判定そのものはここでしない）
+        "materials": {"e_family_all_non_significant": not any(significant.values()),
+                      "delta_hat_ci90": percentile_ci([b["delta_hat"] for b in boot])},
+        "n_treated_with_ar": int(frame.notna().any().sum()) if not frame.empty else 0,
+        "definitions": B_DEFINITIONS,
+    }
 
 
 # ── M 族（§6.2）: 本番の OOF が処置群を対照より上や下へ置いていたか ─────────────────────

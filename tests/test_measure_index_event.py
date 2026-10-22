@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import math
 import re
 import sys
 from datetime import date, datetime, timedelta
@@ -41,7 +42,7 @@ def _fixed_head_sha(monkeypatch):
 
 
 class TestDaytimeJob:
-    @pytest.mark.parametrize("key", ["measure:index-event-a", "measure:index-event-m"])
+    @pytest.mark.parametrize("key", ["measure:index-event-a", "measure:index-event-m", "measure:index-event-b"])
     def test_frozen_value_matches_the_prereg_appendix(self, key):
         argv = rd.JOBS[key].argv
         doc = ROOT / argv[argv.index("--prereg") + 1]
@@ -51,7 +52,8 @@ class TestDaytimeJob:
         assert sha == prereg.recorded_sha(text) == prereg.body_sha256(text)
 
     @pytest.mark.parametrize("key,stage", [("measure:index-event-a", "stage-a"),
-                                           ("measure:index-event-m", "m-family")])
+                                           ("measure:index-event-m", "m-family"),
+                                           ("measure:index-event-b", "stage-b")])
     def test_runs_alone(self, key, stage):
         job = rd.JOBS[key]
         assert job.argv[1:5] == ("-m", "scripts.measure_index_event", stage, "--prereg")
@@ -281,6 +283,69 @@ class TestMFamily:
                       columns=SIZE_OOF_CSV_COLUMNS)
         assert X.read_oof_csv(path, S.M_MODELS) == {"xgb_m2": {("2024-01", "E1"): (0.1, 0.2)},
                                                     "elasticnet": {("2024-01", "E1"): (0.3, 0.2)}}
+
+
+# ── stage B（開封・#1032）──────────────────────────────────────────────────────────
+
+def _recorded_prereg(tmp_path) -> Path:
+    """本物の文書の追記節「stage A（盲検）の結果」だけ書き足した写し（本文は同じ＝凍結値も同じ）。"""
+    text = PREREG.read_text(encoding="utf-8")
+    head, rest = text.split(X.STAGE_A_HEADING, 1)
+    path = tmp_path / "prereg.md"
+    path.write_bytes((head + X.STAGE_A_HEADING + "\n\nバランス: 全変数 |SMD| < 0.1（記録の例）\n").encode("utf-8"))
+    assert prereg.body_sha256(path.read_text(encoding="utf-8")) == FROZEN
+    return path
+
+
+def _pairs_file(tmp_path, sha: str = FROZEN) -> Path:
+    path = tmp_path / "pairs.json"
+    pairs = {t: [c for c in CONTROLS if c.startswith(t[:4])] for t in TREATED}
+    path.write_text(json.dumps({"prereg_sha256": sha, "pairs": {"C1@2022-03-31": pairs}}), encoding="utf-8")
+    return path
+
+
+def _run_b(tmp_path, doc, pairs, sha=FROZEN):
+    out = tmp_path / "b.json"
+    code = X.main(["stage-b", "--prereg", str(doc), "--prereg-sha", sha, "--pairs", str(pairs), "--out", str(out)])
+    return code, out
+
+
+class TestStageBCli:
+    def test_refuses_to_open_before_stage_a_is_recorded(self, wired, tmp_path, capsys):
+        # 本物の文書は追記節が「未記入」のまま＝開封しない
+        code, out = _run_b(tmp_path, PREREG, _pairs_file(tmp_path))
+        assert code == X.EXIT_FAILED and not out.exists()
+        assert "未記入" in capsys.readouterr().err
+
+    def test_end_to_end_on_sqlite(self, wired, tmp_path, monkeypatch):
+        _seed(wired)
+        monkeypatch.setattr(X, "load_gaps", lambda db, prices, yms: {})     # 業種別回帰は記述だけ
+        code, out = _run_b(tmp_path, _recorded_prereg(tmp_path), _pairs_file(tmp_path))
+        assert code == 0
+        data = json.loads(out.read_text(encoding="utf-8"))
+        assert data["stage"] == "B" and data["prereg_sha256"] == FROZEN
+        assert data["quantities"]["I"] is not None
+        assert data["quantities"]["car_post"] is None              # 合成の週次は 2025-02 まで
+        assert data["e_family"]["tests"] == ["E1", "E2", "E4"]
+        assert data["inputs"]["n_treated_matched"] == 4
+        assert not re.search(r"E9\d{3}", out.read_text(encoding="utf-8"))
+
+    def test_pairs_from_another_freeze_stop_with_2(self, wired, tmp_path):
+        code, out = _run_b(tmp_path, _recorded_prereg(tmp_path), _pairs_file(tmp_path, sha="0" * 64))
+        assert code == X.EXIT_FAILED and not out.exists()
+
+
+def test_month_end_labels_follow_the_production_definition():
+    from collections import namedtuple
+
+    from plugins.macro_snapshots import HORIZON_WEEKS
+
+    Bar = namedtuple("Bar", "trade_date close_last")
+    days = [date(2022, 1, 7) + W * k for k in range(70)]
+    rows = [Bar(d.isoformat(), 100.0 * (1.01 ** k)) for k, d in enumerate(days)]
+    got = X.month_end_labels({"E1": rows}, ["E1"], {"2022-01"})
+    # 2022-01 の月末の足は 1/28（4 本目）。その 52 本先の足との log 比
+    assert got == {("2022-01", "E1"): pytest.approx(HORIZON_WEEKS * math.log(1.01))}
 
 
 def test_load_strata_variables_on_sqlite(db):

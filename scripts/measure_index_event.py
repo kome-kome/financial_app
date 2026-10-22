@@ -5,7 +5,10 @@
 - `stage-a`（盲検）: 暦・マッチング・バランス・first stage・σ / SE(δ̂) / MDE・placebo の誤検出率・R0。
   **処置群の事象窓のリターンを読まない**（部品 `index_event_study.stage_a` が入口で公表週以降の終値を
   落とす）。結果は事前登録の追記節「stage A（盲検）の結果」へ書き足す。
-- `stage-b`（開封）: #1032 で足す。
+- `stage-b`（開封・#1032）: 事象窓の CAR・I・R・κ・δ̂・CAR_post・ρ、E族の確証（E1・E2・E4・Holm）、
+  δ̂・κ・ρ の 90% CI（残差の定常ブートストラップ）、生存バイアスの Lee bounds、記述の量（公表・回間ドリフト・
+  除外後の他の窓・2023-10 に解除された社・ラベル水準の DiD・gap_ratio）。**事前登録の追記節「stage A（盲検）の
+  結果」が未記入なら終了コード 2**（開封の順序）。マッチ対の凍結値が違っても 2。
 - `m-family`（M 族・§6.2・#1009）: 本番の OOF（`momentum_gate --size-neutral` が書く CSV の M-2 raw と
   M-6 size_neutral）で、処置群と対照の placement bias の差 d_t を E_t・P_t へ回帰し、層別に引いて全期で
   固定した擬似処置群の順列（1,000 回）で p を出す。マッチ対は stage A が書いたファイルを読み、その凍結値が
@@ -56,6 +59,9 @@ DEFAULT_OUT = ROOT / "scripts" / ".cache" / "index_event_stage_a.json"
 DEFAULT_PAIRS_OUT = ROOT / ".index_lists" / "derived" / "index_event_2022_pairs.json"
 DEFAULT_M_OOF = ROOT / "scripts" / ".cache" / "momentum_gate_size_neutral_oof.csv"
 DEFAULT_M_OUT = ROOT / "scripts" / ".cache" / "index_event_m_family.json"
+DEFAULT_B_OUT = ROOT / "scripts" / ".cache" / "index_event_stage_b.json"
+# 開封の前に結果が書かれていなければならない追記節の見出し（事前登録の冒頭「開封の順序」）
+STAGE_A_HEADING = "### stage A（盲検）の結果"
 EXIT_FAILED = 2
 EXIT_R0_FAILED = 3
 CHUNK = 500
@@ -107,6 +113,22 @@ def report(summary: dict) -> list[str]:
                      f" switch_to_empirical_p={pl['switch_to_empirical_p']}")
     for name, item in summary["r0"]["items"].items():
         lines.append(f"  R0 {name}: pass={item['pass']}")
+    return lines
+
+
+def b_report(summary: dict) -> list[str]:
+    """stage B の標準出力の行（ASCII 記号のみ）。"""
+    q, ci, e = summary["quantities"], summary["ci"], summary["e_family"]
+    lines = [f"[stage-b] I={_fmt(q['I'], '+.4f')} R={_fmt(q['R'], '+.4f')} kappa={_fmt(q['kappa'], '+.3f')}"
+             f" delta_hat={_fmt(q['delta_hat'], '+.4f')} CAR_post={_fmt(q['car_post'], '+.4f')}"
+             f" rho={_fmt(q['rho'], '+.3f')}",
+             f"  delta_hat 90% CI={ci['delta_hat']} kappa CI={ci['kappa']} rho CI={ci['rho']}",
+             f"  E family (Holm, alpha={e['alpha']}): "
+             + " ".join(f"{k}: p={_fmt(e['p'][k], '.4f')} sig={e['significant'][k]}" for k in e["tests"]),
+             f"  switch_to_empirical_p={e['switch_to_empirical_p']}"]
+    for name, row in summary["survival_bias"].items():
+        lines.append(f"  survival {name}: retention T={_fmt(row['retention_treated'], '.3f')}"
+                     f" C={_fmt(row['retention_control'], '.3f')} lee={row['lee_bounds']}")
     return lines
 
 
@@ -273,6 +295,46 @@ def load_strata_variables(db):
     return S.match_variables(firms, closes, turnover)
 
 
+def month_end_labels(prices: dict, codes: Iterable[str], yms: set) -> dict:
+    """{(ym, 社): 本番の学習ラベル}＝月末の足から HORIZON_WEEKS 本先の足との log 比（ラベル水準の DiD・記述）。"""
+    from plugins.macro_snapshots import HORIZON_WEEKS, month_end_indices
+
+    out = {}
+    for ec in codes:
+        rows = prices.get(ec) or []
+        dates = [r.trade_date for r in rows]
+        for i in month_end_indices(dates):
+            ym = dates[i][:7]
+            if ym in yms and i + HORIZON_WEEKS < len(rows):
+                c0, c1 = rows[i].close_last, rows[i + HORIZON_WEEKS].close_last
+                if c0 and c1 and c0 > 0 and c1 > 0:
+                    out[(ym, ec)] = math.log(c1 / c0)
+    return out
+
+
+def load_gaps(db, prices: dict, yms: list) -> dict:
+    """月末ごとの時点再現の gap_ratio {(社, ym): 値}（ADR-0057・`sector_gap_asof`）。記述にだけ使う。"""
+    import sector_gap_asof as SGA
+
+    gaps, _stats = SGA.build_asof_gaps(db, prices, yms)
+    return {(ym, ec): g for (ec, ym), g in gaps.items()}
+
+
+def load_pairs(path: Path, stamp: dict) -> tuple:
+    """stage A のマッチ対（主の仕様）。戻り値は (ファイルの中身, 対, 失敗の理由 or None)。"""
+    import index_event_study as S
+
+    if not path.is_file():
+        return None, None, f"マッチ対が無い: {path}（先に stage-a を回す）"
+    doc = json.loads(path.read_text(encoding="utf-8"))
+    if doc.get("prereg_sha256") != stamp["prereg_sha256"]:
+        return doc, None, f"マッチ対は別の凍結値で作られた（{doc.get('prereg_sha256')}）。stage-a を回し直す"
+    pairs = doc.get("pairs", {}).get(S.spec_key(*S.MAIN_SPEC))
+    if not pairs:
+        return doc, None, f"マッチ対に主の仕様 {S.spec_key(*S.MAIN_SPEC)} が無い"
+    return doc, pairs, None
+
+
 def write_json(path: Path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(jsonable(payload), ensure_ascii=False, indent=2), encoding="utf-8")
@@ -319,14 +381,9 @@ def run_m_family(args) -> int:
 
     stamp = prereg.stamp_from_args(args)
     pairs_path, oof_path = Path(args.pairs), Path(args.oof_csv)
-    if not pairs_path.is_file():
-        return _fail(f"マッチ対が無い: {pairs_path}（先に stage-a を回す）")
-    pairs_doc = json.loads(pairs_path.read_text(encoding="utf-8"))
-    if pairs_doc.get("prereg_sha256") != stamp["prereg_sha256"]:
-        return _fail(f"マッチ対は別の凍結値で作られた（{pairs_doc.get('prereg_sha256')}）。stage-a を回し直す")
-    pairs = pairs_doc.get("pairs", {}).get(S.spec_key(*S.MAIN_SPEC))
-    if not pairs:
-        return _fail(f"マッチ対に主の仕様 {S.spec_key(*S.MAIN_SPEC)} が無い")
+    pairs_doc, pairs, err = load_pairs(pairs_path, stamp)
+    if err:
+        return _fail(err)
     if not oof_path.is_file():
         return _fail(f"OOF の CSV が無い: {oof_path}（先に momentum_gate --size-neutral を回す）")
     oof = read_oof_csv(oof_path, S.M_MODELS)
@@ -361,6 +418,53 @@ def run_m_family(args) -> int:
     return 0
 
 
+def run_stage_b(args) -> int:
+    import index_event_study as S
+    import index_events as IE
+    from database import SessionLocal
+    from plugins.macro_snapshots import load_weekly_prices_chunked
+
+    stamp = prereg.stamp_from_args(args)
+    if not prereg.section_recorded(prereg.read_document(args.prereg), STAGE_A_HEADING):
+        return _fail(f"事前登録の追記節「{STAGE_A_HEADING.lstrip('# ')}」が未記入。開封（stage B）は stage A の結果を"
+                     "書き足した後（事前登録の冒頭「開封の順序」）")
+    pairs_path = Path(args.pairs)
+    pairs_doc, pairs, err = load_pairs(pairs_path, stamp)
+    if err:
+        return _fail(err)
+    known_at = datetime.now(timezone.utc)
+    review = IE.REVIEWS[S.REVIEW_2022]
+    with SessionLocal() as db:
+        ledger = IE.load_ledger(db, root=Path(args.lists_dir) if args.lists_dir else None)
+        if not ledger.ok:
+            return _fail(f"指数イベント台帳が使えない（{ledger.reason}）")
+        released = set(IE.members(ledger, "topix-2023-10-review", "released"))
+        prices = {ec: rows for ec, rows in load_weekly_prices_chunked(db, with_volume=False).items() if rows}
+        codes = set(pairs) | {c for cs in pairs.values() for c in cs}
+        closes = S.weekly_frame({
+            ec: {S.iso_monday(date.fromisoformat(p.trade_date[:10])): p.close_last for p in prices[ec]}
+            for ec in codes if ec in prices})
+        labels = month_end_labels(prices, codes, set(S.ym_range(*S.E3_BASE)) | set(S.ym_range(*S.E3_EVENT)))
+        gap_yms = S.ym_range(*S.GAP_PERIOD)
+        gaps = load_gaps(db, prices, gap_yms)
+    summary = S.stage_b(closes=closes, pairs=pairs, calendar=S.pressure_calendar(IE.STEPS_2022),
+                        announce_week=S.announcement_week(review.announced, review.after_close),
+                        released=released, labels=labels, gaps=gaps, gap_yms=gap_yms)
+    weeks = list(closes.index)
+    write_json(Path(args.out), {
+        "stage": "B", **stamp, "generated_at": known_at.isoformat(timespec="seconds"),
+        "inputs": {"pairs": str(pairs_path), "pairs_generated_at": pairs_doc.get("generated_at"),
+                   "pairs_snapshot_as_of": (pairs_doc.get("data") or {}).get("snapshot_as_of"),
+                   "n_treated_matched": len(pairs), "n_controls": len(codes) - len(pairs),
+                   "weekly_first": weeks[0].isoformat() if weeks else None,
+                   "weekly_last": weeks[-1].isoformat() if weeks else None},
+        **summary})
+    for line in b_report(summary):
+        print(line)
+    print(f"wrote {args.out}")
+    return 0
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     ap = argparse.ArgumentParser(
         prog="python -m scripts.measure_index_event",
@@ -379,11 +483,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     m.add_argument("--pairs", default=str(DEFAULT_PAIRS_OUT), help="stage-a が書いたマッチ対の JSON")
     m.add_argument("--out", default=str(DEFAULT_M_OUT), help="結果の JSON（銘柄コードを含めない）")
     m.add_argument("--lists-dir", help="指数の一覧の置き場（既定はリポジトリの .index_lists）")
+    b = sub.add_parser("stage-b", help="開封（事象窓の量と E族の確証）。追記節の stage A が未記入なら止まる")
+    prereg.add_arguments(b)
+    b.add_argument("--pairs", default=str(DEFAULT_PAIRS_OUT), help="stage-a が書いたマッチ対の JSON")
+    b.add_argument("--out", default=str(DEFAULT_B_OUT), help="結果の JSON（銘柄コードを含めない）")
+    b.add_argument("--lists-dir", help="指数の一覧の置き場（既定はリポジトリの .index_lists）")
     args = ap.parse_args(argv)
 
     from collector_utils import force_utf8_stdout
     force_utf8_stdout()
-    return run_m_family(args) if args.stage == "m-family" else run_stage_a(args)
+    return {"stage-a": run_stage_a, "m-family": run_m_family, "stage-b": run_stage_b}[args.stage](args)
 
 
 if __name__ == "__main__":
