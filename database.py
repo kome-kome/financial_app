@@ -898,6 +898,29 @@ def is_tuning_objective_only() -> bool:
     return _tuning_objective_only.get()
 
 
+# ── 画面の並びの採点を早期returnの中でも出すモード（Issue #1042・ADR-0069）─────────────
+# M-1 / M-2 / M-3 の execute() は通常の実行では「画面の並びの採点」（U = μ̂ − λR の順の OOF・
+# `plugins.macro_snapshots.display_ordering_oof`）も返す。探索・比較用の計測（tuning_objective_only）
+# では読まれないので計算しない（R2 を OOF の社×月で引くぶん候補ごとに重くなる）。モデル比較
+# （model_comparison.run_comparison）だけはそれを横に並べるので、このブロックで包んで出させる。
+_display_scoring: contextvars.ContextVar = contextvars.ContextVar("_display_scoring", default=False)
+
+
+@contextmanager
+def display_scoring():
+    """このブロック内では tuning_objective_only() の中でも画面の並びの採点を計算させる。"""
+    token = _display_scoring.set(True)
+    try:
+        yield
+    finally:
+        _display_scoring.reset(token)
+
+
+def wants_display_scoring() -> bool:
+    """画面の並びの採点を計算するか。通常の実行と display_scoring() の中で True（Issue #1042）。"""
+    return (not _tuning_objective_only.get()) or _display_scoring.get()
+
+
 # ── 5c. M-2 per-stock 勾配ブースティング予測 μ̂（ADR-0004 / Issue #234）───────────
 # M-2（macro_gbdt）プラグインが execute() 末尾で書き込み、sell_ranking（consumer）が読む。
 # XGBoost は線形 β 表現を持たないため、M-1 の macro_beta（β 縦持ち・read 時 μ 復元）と異なり

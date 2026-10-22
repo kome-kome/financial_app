@@ -1076,6 +1076,27 @@ class TestObjectiveOnlyMode:
 
         assert res_full["oof_backtest"] == res_skip["oof_backtest"]
 
+    def test_display_ordering_scoring_is_marked_future_informed(self):
+        """画面の並びの採点（#1042）: R_macro は最終週の β を全期間に当てた値＝未来情報込みの上限。
+
+        探索中は出さず、モデル比較のスイッチの中では早期 return の経路でも同じ値を出す。
+        """
+        import database
+
+        res_full = self._run(objective_only=False)
+        res_skip = self._run(objective_only=True)
+        with database.display_scoring():
+            res_cmp = self._run(objective_only=True)
+
+        disp = res_full["oof_backtest_display"]
+        assert disp["ordering"]["risk_axis"] == "r_macro"
+        assert disp["ordering"]["time_reproducible"] is False
+        assert disp["ordering"]["lambda"] == float(plugin.params_schema()["lambda_risk"]["default"])
+        assert disp["n_oof_samples"] > 0
+        assert res_skip["oof_backtest_display"] is None
+        assert res_cmp["oof_backtest_display"] == disp
+        assert res_cmp["results"] == []        # 早期 return のまま（全社スコアリングはしない）
+
     def test_normal_mode_still_returns_full_results_outside_context(self):
         """コンテキスト外（通常の /api/plugins/{name}/run 相当）は従来通りフルスコアリングする。"""
         import database

@@ -13,6 +13,9 @@ UI から降ろした後も続くため（M-2 が「無改変のベースライ�
     重い全社スコアリング（M-1 _score_companies / M-2 SHAP / M-3 全社 β 経路）を省く。
   - `tuning_dry_run()`: producer スコア（macro_gbdt_scores / macro_dlm_scores）の永続化を
     no-op にする。既定パラメータの中間予測で本番テーブルを上書きしないため。
+  - `display_scoring()`: 早期 return の中でも「画面の並びの採点」（U = μ̂ − λR の順の OOF・
+    `oof_backtest_display`・#1042）を出させる。探索は読まないので出さないが、比較は横に並べる。
+    **▲▼（significance_matrix）は予想の採点（μ̂ の順の rank_ic_by_period）のまま**（ADR-0069）。
 
 Render 軽量モードでは全モデルが heavy=True のため全てスキップ（ローカル実行専用）。
 その旨を各モデルの `reason="heavy_render"` で返し、UI が案内する。interface は
@@ -67,7 +70,7 @@ async def run_comparison(db: Session, render_light_mode: bool = False,
             raise ValueError(f"COMPARISON_MODELS に無いモデル名: {sorted(unknown)}")
         targets = [(n, s) for n, s in COMPARISON_MODELS if n in set(only_models)]
     from plugins import get_plugin, execute_plugin, DependencyError, progress
-    from database import tuning_objective_only, tuning_dry_run
+    from database import display_scoring, tuning_objective_only, tuning_dry_run
     from plugins.macro_snapshots import shared_snapshot_cache
 
     models: list[dict] = []
@@ -94,11 +97,13 @@ async def run_comparison(db: Session, render_light_mode: bool = False,
                 continue
             try:
                 # 既定パラメータ（{} → coerce_params がスキーマ既定で補完）で oof のみ取得。
-                with tuning_objective_only(), tuning_dry_run():
+                with tuning_objective_only(), tuning_dry_run(), display_scoring():
                     res = await execute_plugin(p, {}, db)
                 entry.update(
                     available=True,
                     oof_backtest=res.get("oof_backtest") or {},
+                    # 画面の並びの採点（#1042・参考）。λ=0・順位スコアのモデルは None
+                    oof_backtest_display=res.get("oof_backtest_display"),
                     macro_features=res.get("macro_features"),
                 )
             except progress.AnalysisCancelled:

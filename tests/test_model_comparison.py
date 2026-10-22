@@ -58,6 +58,34 @@ class TestRunComparison:
         assert res["models"][0]["label"] == "macro_risk_returnラベル"
         assert "computed_at" in res
 
+    def test_display_ordering_scoring_is_requested_and_kept(self, monkeypatch):
+        """各モデルを探索と同じ早期 return で回しつつ、画面の並びの採点（#1042）だけは出させて並べる。
+
+        ▲▼（significance_matrix）は予想の採点（oof_backtest の rank_ic_by_period）から作る。
+        """
+        import database
+
+        pmap = {n: _fake_plugin(n) for n in _MODELS}
+        seen = []
+
+        async def _exec(p, params, db):
+            seen.append((database.is_tuning_objective_only(), database.wants_display_scoring()))
+            display = (None if p.name == "macro_enet" else
+                       {"rank_ic": {"mean": 0.5}, "rank_ic_by_period": {"2020-01": 0.9},
+                        "ordering": {"lambda": 1.0}})
+            return {"oof_backtest": {"rank_ic": {"mean": 0.05},
+                                     "rank_ic_by_period": {"2020-01": 0.1, "2020-04": 0.2}},
+                    "oof_backtest_display": display}
+
+        _patch(monkeypatch, pmap, _exec)
+        res = _run()
+        assert seen and all(s == (True, True) for s in seen)
+        by = {m["name"]: m for m in res["models"]}
+        assert by["macro_risk_return"]["oof_backtest_display"]["ordering"] == {"lambda": 1.0}
+        assert by["macro_enet"]["oof_backtest_display"] is None
+        pair = next(iter(res["significance_matrix"]["pairs"].values()))
+        assert pair["n_common"] == 2, "▲▼ が画面の並びの採点（1期）から作られている"
+
     def test_render_light_mode_skips_all_heavy(self, monkeypatch):
         pmap = {n: _fake_plugin(n, heavy=True) for n in _MODELS}
 

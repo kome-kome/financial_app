@@ -1067,6 +1067,27 @@ class TestObjectiveOnlyMode:
         assert result_full["cv_metrics"] == result_skip["cv_metrics"]
         assert result_full["selected_features"] == result_skip["selected_features"]
 
+    def test_display_ordering_scoring_follows_the_switch(self):
+        """画面の並びの採点（#1042）: 通常の実行は出し、探索中は出さず、モデル比較のスイッチで出す。"""
+        import database
+
+        plugin = MacroRiskReturnPlugin()
+        params = self._params()
+        result_full = plugin.execute(params, TestExecuteIntegration()._build_mock_db())
+        with database.tuning_objective_only():
+            result_skip = plugin.execute(params, TestExecuteIntegration()._build_mock_db())
+        with database.tuning_objective_only(), database.display_scoring():
+            result_cmp = plugin.execute(params, TestExecuteIntegration()._build_mock_db())
+
+        disp = result_full["oof_backtest_display"]
+        assert disp["ordering"]["lambda"] == 1.0 and disp["ordering"]["risk_axis"] == "r2"
+        assert disp["ordering"]["time_reproducible"] is True
+        # R2 が引けて行が残っている（社の識別子が株価の表と噛み合っている）
+        assert disp["n_oof_samples"] > 0
+        assert disp["ordering"]["n_dropped_rows"] < result_full["oof_backtest"]["n_oof_samples"]
+        assert result_skip["oof_backtest_display"] is None
+        assert result_cmp["oof_backtest_display"] == disp
+
     def test_normal_mode_still_returns_full_results_outside_context(self):
         """コンテキスト外（通常の /api/plugins/{name}/run 相当）は従来通りフルスコアリングする。"""
         import database

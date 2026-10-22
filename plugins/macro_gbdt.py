@@ -49,6 +49,7 @@ from .macro_snapshots import (
     build_oof_meta,
     conformal_bucket_halfwidths,
     conformal_halfwidth_for,
+    display_ordering_for,
 )
 from .macro_risk_return import (
     MacroRiskReturnPlugin as _M1,
@@ -744,6 +745,10 @@ class MacroGbdtPlugin(AnalysisPlugin):
         """結果メタの model_type ラベル。M-2 は "xgboost"。"""
         return "xgboost"
 
+    def _scores_in_return_units(self) -> bool:
+        """予測がリターンの単位を持つか（画面の並びの採点で μ̂ − λR を作れるか・#1042）。M-2 は持つ。"""
+        return True
+
     def _make_cv_callback(self, xgb_params: dict, best_iterations: list) -> tuple:
         """walk-forward CV へ注入する (fit_predict, walk_forward追加kwargs) を返す。
 
@@ -898,13 +903,20 @@ class MacroGbdtPlugin(AnalysisPlugin):
         oof_bt = oof_backtest(cv_residuals_xgb, n_quantiles=5,
                               meta_by_ym=oof_meta, rebalance_per_year=4)
 
+        # ── 画面の並びの採点（#1042・ADR-0069）: 同じ OOF を画面の既定の λ・横軸の U の順で
+        # 採点し直す（参考・判定には使わない）。探索中は読まれないので計算しない（モデル比較は出す）。
+        # 予測がリターンの単位を持たないモデル（M-5 の順位スコア）では μ̂ − λR が意味を持たないので出さない。
+        from database import is_tuning_objective_only, wants_display_scoring
+        oof_display = (display_ordering_for(self.params_schema(), cv_residuals_xgb, oof_meta,
+                                            prices_by_co, db, rebalance_per_year=4)
+                       if self._scores_in_return_units() and wants_display_scoring() else None)
+
         # ── ハイパーパラメータ探索中は oof_backtest 算出後に早期return（Issue #299）───
         # plugins/tuning.py::search() が読むのは oof_backtest のみで、以降の OLS
         # ベースライン CV・最終モデル再学習・全社 raw_items 構築（SHAP 計算含む）は
         # 探索候補の評価には不要（かつ oof_backtest の値には一切影響しない）。通常の
         # API 実行（/api/plugins/{name}/run）ではこのモードは無効のため、常に従来通り
         # フル実行する。
-        from database import is_tuning_objective_only
         if is_tuning_objective_only():
             return {
                 "cv_metrics":        {"xgb": None, "ols_baseline": None},
@@ -924,6 +936,7 @@ class MacroGbdtPlugin(AnalysisPlugin):
                 "model_type":        self._model_type(),
                 "best_iteration":    None,
                 "oof_backtest":      oof_bt,
+                "oof_backtest_display": oof_display,
                 "r_macro_available": False,
             }
 
@@ -1110,6 +1123,7 @@ class MacroGbdtPlugin(AnalysisPlugin):
             "model_type":        self._model_type(),
             "best_iteration":    n_est_final,
             "oof_backtest":      oof_bt,
+            "oof_backtest_display": oof_display,
             "r_macro_available": r_macro_available,
         }
 
