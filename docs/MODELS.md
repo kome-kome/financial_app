@@ -884,6 +884,13 @@ IFRS には完全に対応する科目がないため、「非流動その他金
 
 > **設計判断（2026-06-19）**: 旧「貪欲前進BIC＋VIF」は 36,000 行規模で OLS を約1.2万回呼び、`use_macro=true`（当時の既定）で分単位を要した。LassoLarsIC への置換で特徴量選択は秒未満に短縮（実測：選択フェーズ 0.7s）。非劣位チェック（`use_macro=false` 構成）で旧/新の walk-forward CV mean R² は同値（0.0122）を確認済み。詳細は §9.10。
 
+**ハイパーパラメータ探索（共有の探索基盤は §11.4.3）**: M-1 の探索空間は**軸なしの1候補**になった。#604 でモメンタム2軸
+（`use_momentum` / `momentum_window`）を外して 72 → 12通り（BIC が `momentum_12m1` を一度も選ばないため**モデルは
+1ミリも変わらない**・[ADR-0050](adr/0050-hyperparameter-search-must-align-populations.md)。共通 (ym,ec) 域で測り直すと
++0.0039・p=0.757）、#615 で `use_macro` を外して 6、#791 で最後の `max_features` も外した——固定条件では候補列が
+財務6列だけで上限に届かず、6値すべてが同値だった（ADR-0049 の 2026-10-03 追記）。正本は `plugins/macro_risk_return.py` の
+`tuning_search_space`。
+
 ### 9.4 Walk-forward CV
 
 既存の `walk_forward_cv_monthly`（`plugins/utils.py`）で月次ロールウィンドウ CV を実施。時系列順を厳守（通常の k-fold はルックアヘッドバイアスが生じるため不可）。各フォールドの RMSE・MAE・R² を記録。**学習サンプルが要求する履歴長は特徴量構成で決まる**：52週先リターン（未来）は常に必要だが、**12ヶ月モメンタムは `use_momentum=ON` のときだけ過去履歴を要求する**。`use_momentum=OFF`（既定）なら `use_macro=ON` にしても過去履歴要件が外れ、週次株価が浅くてもフォールドが確保できる（§9.8）。**現在は週次が7年分あるので ON でも fold は立つ**（実測 15 fold）。既定が OFF のままなのは履歴不足ではなく、ON/OFF の OOF 実測で効果が無かったため（§9.8-4・ADR-0045）。
@@ -1174,6 +1181,38 @@ XGBoost は業種別の分岐や**セクター×マクロ交互作用**（素材
 - **方式選択**: (A) native categorical（`enable_categorical`＋pandas category）は `np.array(float)` パイプラインを DataFrame へ変える改修が要る（effort M）ため本 Issue では見送り、追加収集ゼロ・VIEW 列追加ゼロで実装できる (B) リークフリー target encoding を採用。`tuning_search_space` の `use_sector_features` 軸で OFF/ON を自動比較できる。
 - **検証方針**: OOF rank-IC（§11.7）の ON/OFF 前後比較＋ SHAP でセクター/サイズ特徴の寄与を確認してから既定化を判断する（`use_momentum`/`px_*`/`monotone` と同じ保守ゲート）。M-5（§14・XGBRanker）も `execute` を継承し、ラッパーは 3 引数呼び出し（`pass_train_groups`）を素通しするため同一の sector 特徴がランク学習にもそのまま効く。参考: XGBoost 公式 Categorical Data docs; ADR-0003（M-2 GBDT）。
 
+#### 11.4.3 ハイパーパラメータ探索（探索空間と選び直し）
+
+walk-forward OOF rank-IC を目的関数とする共有の探索基盤（`plugins/tuning.py` + `hyperparameter_search.py`・
+#264〜#267・ADR-0007）で M-1 / M-2 / M-3 の既定を探す。月次の回し方は `scripts/run_monthly.py` の `TUNE_MATRIX`
+（M-1 だけ `scripts/run_monthly_m1.py`）。
+
+- **劣化防止は保存値との比較ではなく、候補プールへの champion（本番の params）投入で担う**（#590・ADR-0047）。
+  永続化済みの `objective_value` は「そのとき存在したパネルでの値」で、パネルは毎晩伸びるので月をまたいだ比較が
+  成立しない（実測: 0.5068=10 fold / 0.2614=11 fold / 0.0221=55 fold＝**fold が少ない候補ほど高く出る**・
+  ADR-0045 と同型）。本番 params を投入すれば `best >= champion` が構造的に成立するので persist は常に成功し
+  （exit 0）、水準の移動は WARNING と `plugin_tuned_params` の `prev_objective_value` /
+  `champion_objective_value` / `n_periods` / `n_oof_samples` に残る。
+- **M-2 の探索空間の正本はコード**（`plugins/macro_gbdt.py` の `MacroGbdtPlugin.tuning_search_space`。軸と候補の
+  値はここへ書き写さない）。軸は木構造・正則化の XGBoost パラメータ、符号事前知識（`use_monotone_constraints`・
+  §11.4.1）、セクター/サイズ特徴（`use_sector_features`・§11.4.2）。探索は random（件数は `TUNE_MATRIX`）。
+- **固定して探索しないもの**（`base_params`。`params_schema()` からは消さないので画面では手動で動かせ、保存済みの
+  調整値に残る値は `project_tuned_params()` が固定値で上書きして画面へ出す）:
+  - **モメンタム2軸（`use_momentum` / `momentum_window`）は OFF**（#604・[ADR-0050](adr/0050-hyperparameter-search-must-align-populations.md)）。
+    窓を伸ばすほど warmup で行が落ち、当てにくい銘柄が消えてスコアが上がる＝母集団を動かす軸で、
+    `hyperparameter_search` は各候補をその候補自身の母集団で評価するため、探索は毎月 `momentum_window=18` を
+    選び続けていた。共通 (ym,ec) 域で測り直すと M-2 の窓18 は −0.0072（符号反転）、窓24 は −0.0264（p=0.001）で
+    有意に悪化（`python -m scripts.momentum_gate --models risk_return,xgb_m2 --windows 3,6,12,18,24`）。木モデルは
+    列がそのまま入るので外すと **μ̂ は変わる**（向きは実測では改善側）
+  - **行の抽出の割合 `subsample` は本番の 1.0**（#987・2026-10-18）。1.0 未満は社の順への依存を持ち込み、探索に
+    残すと選ばれうる（2026-10-01 の 1 位は 0.4）
+- **選び直しの段**（#984・2026-10-18・ADR-0047 の追記）: 探索の後に上位 5 候補（＋本番の候補）を種 5 個で回し
+  直し、種の平均で選び直す（`TUNE_MATRIX` の `--confirm-top` / `--confirm-seeds`）。M-2 は種だけで OOF rank-IC が
+  0.009〜0.019 動き、1 回の種で選ぶと上位どうしの差が種の揺れに埋もれる。
+- M-5 は M-2 を継承するので同じ探索空間になる（#570 で退役済み）。**M-6 はモメンタム2軸を探索空間に持ったまま**
+  （`plugins/macro_enet.py` の `tuning_search_space`）——#604 の窓スキャンで測っておらず外す根拠が無い。実害も無い
+  （`TUNE_MATRIX` に入っておらず探索が一度も走っていない）。M-1 の探索の経緯は §9.3。
+
 ### 11.5 SHAP による解釈（signed SHAP＋交互作用・#371）
 
 SHAP（SHapley Additive exPlanations）は個々の特徴量がモデルの予測値にどれだけ貢献するかを分解する手法。M-2 は以下 5 系統を返す:
@@ -1345,46 +1384,11 @@ $g^{*}_{t,(p)}$ は gain を降順に並べた理想の並びの $p$ 位（Järv
 
 ### 11.8 将来エンハンス
 
-- ~~同 OOF 検証を M-1 にも結線~~ → #272 で対応済み（§9.11）。線形（M-1）vs 非線形（M-2）の
-  予測力を同一指標（rank-IC 等）で直接対比可能に。
-- inner-CV グリッド / optuna によるハイパラ自動探索 → #264〜#267 でwalk-forward OOF
-  rank-IC を目的関数とする共有探索基盤（`plugins/tuning.py` + `hyperparameter_search.py`）
-  を実装（M-1/M-2/M-3 共通）。**劣化防止は保存値との比較ではなく候補プールへの champion 投入で
-  担う**（#590・ADR-0047）＝永続化済みの `objective_value` は「そのとき存在したパネルでの値」で
-  あり、パネルは毎晩伸びるので月をまたいだ比較が成立しない（実測: 0.5068=10 fold /
-  0.2614=11 fold / 0.0221=55 fold＝**fold が少ない候補ほど高く出る**・ADR-0045 と同型）。
-  本番 params を投入すれば `best >= champion` が構造的に成立するので persist は常に成功し
-  （exit 0）、水準の移動は WARNING と `plugin_tuned_params` の `prev_objective_value` /
-  `champion_objective_value` / `n_periods` / `n_oof_samples` に残る。M-2 の探索空間は XGBoost 7軸（木構造・正則化）＋
-  モメンタム2軸（`use_momentum`/`momentum_window`・候補窓 [3,6,12,18,24] は M-1 と同一・
-  `momentum_window` は `use_momentum=True` のときのみ展開）＋符号事前知識1軸
-  <br>**このモメンタム2軸は母集団を動かす軸で、目的関数の中では母集団効果と交絡している**
-  （[ADR-0050](adr/0050-hyperparameter-search-must-align-populations.md)）。窓を伸ばすほど
-  warmup で行が落ち、当てにくい銘柄が消えてスコアが上がるため、探索は毎月 `momentum_window=18`
-  を選び続ける。共通 (ym,ec) 域で測り直すと **M-1 +0.0039（p=0.757）・M-2 −0.0072（符号反転）**
-  で、20検定のうち基準を上回って補正後 α を通ったものは 0件（唯一通ったのは M-2 窓24 の
-  **悪化** −0.0264・p=0.001）。測定入口は
-  `python -m scripts.momentum_gate --models risk_return,xgb_m2 --windows 3,6,12,18,24`
-  <br>**M-1・M-2 ともこの2軸を探索空間から外した**（#604）。M-1 は 72 → **12通り**で、
-  BIC が `momentum_12m1` を一度も選ばないため**モデルは1ミリも変わらない**（その後 #615 で
-  `use_macro` を外して 6、#791 で最後の `max_features` も外して**軸なしの1候補**——固定条件では
-  候補列が財務6列だけで上限に届かず、6値すべてが同値だった・ADR-0049 の 2026-10-03 追記）。M-2 は
-  1,728,000 → **288,000通り**だが探索は random 150件固定なので**所要は変わらず**、同じ件数で
-  より良い候補に当たりやすくなる——ただし木モデルは列がそのまま入るので **μ̂ は変わる**
-  （向きは実測では改善側）。副次効果として M-2 の `build_snapshots` キャッシュが
-  momentum 構成6種から1種へ減る（`_CACHE_MAXSIZE=8` の圧迫が解消）。
-  M-5 は M-2 を継承するので同じ変更が波及する（#570 で退役済み）。
-  **M-6 は2軸を持ったまま**——今回の窓スキャンで測っておらず外す根拠が無い。実害も無い
-  （`TUNE_MATRIX` に入っておらず探索が一度も走っていない）
-  （`use_monotone_constraints`・#366・§11.4.1）の10軸。
-  <br>**#987（2026-10-18）で行の抽出の割合 `subsample` も探索から外し、本番の 1.0 に固定した**（`base_params`）。
-  1.0 未満は社の順への依存を持ち込み、探索に残すと選ばれうる（2026-10-01 の 1 位は 0.4）。保存済みの調整値の
-  `subsample` は `project_tuned_params()` が固定値で上書きして画面へ出す。M-5 も継承で同じ（退役済み）
-  <br>**#984（2026-10-18）で、探索の後に上位 5 候補（＋本番の候補）を種 5 個で回し直し、種の平均で選び直す段を足した**。
-  M-2 は種だけで OOF rank-IC が 0.009〜0.019 動き、1 回の種で選ぶと上位どうしの差が種の揺れに埋もれる（ADR-0047 の追記）
-- ~~quantile regression（`reg:quantileerror`）による予測区間（R1' 代替）~~ → #365 で**分割コンフォーマル区間**として対応済み（§11.7.1・ADR-0020）。quantile regression（再学習要）ではなく OOF 残差ベースのコンフォーマル（再学習不要・family-wide・被覆保証）を採用
-- ~~SHAP interaction values（特徴量ペアの交互作用可視化）~~ → #371 で対応済み（§11.5・`feature_interactions`）。あわせて signed SHAP（`feature_coefs_signed`）＋学習方向 corr（`feature_shap_dir`）も追加
 - M-2 初心者向けガイド（`M2_MACRO_GBDT_GUIDE.md`）
+
+対応済みの項目（M-1 への OOF 結線 #272・分割コンフォーマル区間 #365・SHAP 交互作用 #371・共有の探索基盤 #264〜#267）は
+[archive/MODELS_HISTORY.md](archive/MODELS_HISTORY.md) へ、現行のハイパーパラメータ探索の仕様は §11.4.3（M-1 の経緯は §9.3）へ
+移した（#1020）。
 
 ### 11.9 参考文献
 
