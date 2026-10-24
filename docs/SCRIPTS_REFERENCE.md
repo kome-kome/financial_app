@@ -49,6 +49,7 @@
 | [`scripts/preset_ic_gate.py`](#scriptspreset_ic_gatepy) | 検証（実験） |
 | [`scripts/preset_weight_walkforward.py`](#scriptspreset_weight_walkforwardpy) | 検証（実験） |
 | [`scripts/sell_mu_source_bakeoff.py`](#scriptssell_mu_source_bakeoffpy) | 検証（実験） |
+| [`scripts/oof_portfolio_replay.py`](#scriptsoof_portfolio_replaypy) | 検証（計測） |
 | [`scripts/experiment_pooled_rhat.py`](#scriptsexperiment_pooled_rhatpy) | 検証（実験） |
 | [`scripts/bench_macro_beta.py`](#scriptsbench_macro_betapy) | 検証（計測） |
 | [`scripts/bench_macro_beta_report.py`](#scriptsbench_macro_beta_reportpy) | 検証（計測） |
@@ -277,6 +278,12 @@ M-4 の**基底構成**（M-1+M-2 vs M-1+M-2+M-6）の OOF 横並び実測（#39
 `--in-layer`（#1043・ADR-0069 の決定 4）は同じ M-4 の共通域で**上位層の売り側spread**も出す: 1 つ前の test 期に買いの並び（M-1 / M-2 は画面の既定の U＝`display_risk_map`＋`display_scores`、λ=0 の M-6 は μ̂）で上位 20% だった社の中で、売りの並び（M-6・M-2・M-1 の μ̂ と、`sell_ranking` の既定プリセットの式 `sell_score` に今の R_macro を入れた**未来情報込みの上限**）の下位 20% が層の平均を下回った幅（`plugins.macro_snapshots.in_layer_short_side`）。社ごとの予測は `ensemble_base_bakeoff._run_config(keep_common=True)` が M-4 の `_stack_walk_forward` へ渡る引数を `wraps` で横取りして取る（M-4 の戻り値は変えない）。守ること: **比べる条件は全て同じ共通域・同じ層で測る**（共通域は全ての売りの条件と y がそろう社）／**参考で判定に使わない**（売りに拒否権を置くかは #1040）／**M-4 の基底は本番と設定が違う**（M-2・M-6 は fin_fill なし、M-6 の `_m6_cv` はさらに内側の交差検証が `rows` で規模の中立化なし）ことを出力と JSON に残す。結果は `scripts/.cache/sell_in_layer.json`。日中枠（`measure:in-layer-sell`・並走に敏感）で単独に回す
 
 種別: 検証（実験） ／ 依存先: scripts/ensemble_base_bakeoff.py, model_stats.py, scripts/_cache.py, plugins/macro_snapshots.py, plugins/sell_ranking.py ／ テスト: tests/test_sell_mu_source_bakeoff.py, tests/test_in_layer_short_side.py
+
+## `scripts/oof_portfolio_replay.py`
+
+**OOF 運用再現**（#1045・親 #1040・ADR-0069 の参考）: `python -m scripts.oof_portfolio_replay [--models ...] [--sell-source macro_enet] [--top-k 10] [--sell-k 2] [--cost-bps 10] [--smoke] [--allow-full-pull] [--refresh-cache] [--out <json>]`。画面の上位 K 社を買い、保有の中の下位 k 社を売って入れ替える運用を、`sell_mu_source_bakeoff --in-layer` と同じ M-4 の共通域の OOF（`_run_config(keep_common=True)`・`common_to_dicts`・買いの並び `buy_scores`）で test 期ごとに繰り返し、年率（コスト前・後）・最大下落・入替率・全社平均の年率・超過を出す。守ること: **出力と JSON に「過去の経路は 1 本しかなく、運とモデルの良さを区別できない。判定・ゲートには使わない」を残す**／**期間のリターンは 52 週先のラベル y を繋げず**、各社の月末の週の終値（`month_end_indices`）の比を test 期の間で取る（株価が途切れた社はその月末以前の最後の終値で手仕舞い＝楽観側・件数を出す）／名前は「OOF 運用再現」で `/api/backtest`・「模擬売買」と書かない。M-4 の基底が本番と設定が違うこと（#1058）も注意書きに出す。結果は既定 `scripts/.cache/oof_portfolio_replay.json`。日中枠（`measure:oof-replay`・並走に敏感）で単独に回す
+
+種別: 検証（計測） ／ 依存先: scripts/sell_mu_source_bakeoff.py、scripts/ensemble_base_bakeoff.py、plugins/macro_snapshots.py（`month_end_indices`） ／ テスト: tests/test_oof_portfolio_replay.py
 
 ## `scripts/experiment_pooled_rhat.py`
 
