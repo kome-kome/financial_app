@@ -2340,6 +2340,34 @@ def apply_risk_axis(resid_by_ym: dict, meta_by_ym: dict, rmap: dict,
     return out_r, out_m, dropped
 
 
+def display_scores(residuals_by_ym: dict, meta_by_ym: dict, rmap: dict,
+                   lam: float) -> tuple[dict, dict, int]:
+    """yhat を画面の並びの U = yhat − λR（画面と同じ生の R）へ置き換える。戻り値は `apply_risk_axis` と同じ。
+
+    R が取れない行は落とし、その数を返す。`rmap` が空なら全行を落とす（`apply_risk_axis` の空は「軸なし」の
+    恒等変換なので、そのまま通すと R が1社も無いのに μ̂ の並びがそのまま出る）。画面の並びの採点（#1042）と
+    上位層の売り側spread の買いの並び（#1043）が共有する。
+    """
+    if rmap:
+        return apply_risk_axis(residuals_by_ym, meta_by_ym, rmap, lam, standardize=False)
+    return {}, {}, sum(len(v) for v in residuals_by_ym.values())
+
+
+def display_risk_map(schema: dict, meta_by_ym: dict, prices_by_co: dict,
+                     db: Any) -> tuple[float, str, dict]:
+    """画面の既定の `(λ, 横軸, {(ym, 社): R})`。λ=0 なら R を引かず空の表を返す。
+
+    meta_by_ym は `build_oof_meta` の `{ym: [(stock_id, industry), ...]}`。R_macro の横軸のときだけ
+    macro_beta を読む（既定の R2 では DB を読まない）。
+    """
+    lam, axis = display_ordering_defaults(schema)
+    if not lam > 0:
+        return lam, axis, {}
+    producer = get_producer_scores(db) if axis == "r_macro" else {}
+    ids_by_ym = {ym: [m[0] for m in metas] for ym, metas in meta_by_ym.items()}
+    return lam, axis, risk_by_ym(axis, prices_by_co, ids_by_ym, producer)
+
+
 def display_ordering_oof(residuals_by_ym: dict, meta_by_ym: dict, rmap: dict, lam: float,
                          risk_axis: str, time_reproducible: bool, n_quantiles: int = 5,
                          rebalance_per_year: float | None = None) -> dict | None:
@@ -2348,17 +2376,12 @@ def display_ordering_oof(residuals_by_ym: dict, meta_by_ym: dict, rmap: dict, la
     yhat を U = yhat − λR へ置き換えて `oof_backtest` を当て直し、`ordering` を付けて返す。R は画面と
     同じ生の値（`standardize=False`）——z-score の λ は画面の λ と意味が違う（#815）。R が取れない行は
     落とし、その数を `ordering.n_dropped_rows` に返す（予想の採点との母集団の差が見えるように）。
-    `rmap` が空なら全行を落とす（`apply_risk_axis` の空は「軸なし」の恒等変換なので、そのまま通すと
-    R が1社も無いのに予想の採点と同じ値が出る）。`time_reproducible=False` は R を過去の時点で
+    `rmap` が空なら全行を落とす（`display_scores`）。`time_reproducible=False` は R を過去の時点で
     作り直せない（R_macro は単一 run のスナップショット・#709）＝未来情報込みの上限。
     """
     if not lam > 0:
         return None
-    if rmap:
-        u_res, u_meta, dropped = apply_risk_axis(residuals_by_ym, meta_by_ym, rmap, lam,
-                                                 standardize=False)
-    else:
-        u_res, u_meta, dropped = {}, {}, sum(len(v) for v in residuals_by_ym.values())
+    u_res, u_meta, dropped = display_scores(residuals_by_ym, meta_by_ym, rmap, lam)
     out = oof_backtest(u_res, n_quantiles=n_quantiles, meta_by_ym=u_meta,
                        rebalance_per_year=rebalance_per_year)
     out["ordering"] = {
@@ -2373,17 +2396,88 @@ def display_ordering_oof(residuals_by_ym: dict, meta_by_ym: dict, rmap: dict, la
 def display_ordering_for(schema: dict, residuals_by_ym: dict, meta_by_ym: dict,
                          prices_by_co: dict, db: Any,
                          rebalance_per_year: float | None = None) -> dict | None:
-    """M-1 / M-2 の画面の並びの採点。λ・横軸は `schema` の既定、R は OOF の (ym, 社) ごとに引く。
-
-    meta_by_ym は `build_oof_meta` の `{ym: [(stock_id, industry), ...]}`。R_macro の横軸のときだけ
-    macro_beta を読む（既定の R2 では DB を読まない）。
-    """
-    lam, axis = display_ordering_defaults(schema)
+    """M-1 / M-2 の画面の並びの採点。λ・横軸は `schema` の既定、R は OOF の (ym, 社) ごとに引く
+    （`display_risk_map`）。"""
+    lam, axis, rmap = display_risk_map(schema, meta_by_ym, prices_by_co, db)
     if not lam > 0:
         return None
-    producer = get_producer_scores(db) if axis == "r_macro" else {}
-    ids_by_ym = {ym: [m[0] for m in metas] for ym, metas in meta_by_ym.items()}
-    rmap = risk_by_ym(axis, prices_by_co, ids_by_ym, producer)
     return display_ordering_oof(residuals_by_ym, meta_by_ym, rmap, lam, axis,
                                 time_reproducible=(axis == "r2"),
                                 rebalance_per_year=rebalance_per_year)
+
+
+# ── 上位層の売り側spread（#1043・ADR-0069 の決定 4）──────────────────────────────
+# 保有はもともと買いの並びの上位から買った社なので、全社の下位を測る `short_side_spread` は
+# 「保有の中でどれを手放すか」を測れない。ここは 1 つ前の期の買いの並びで上位層だった社だけを母集団に、
+# 売りの並びの下位が層の平均より劣後したかを測る。**参考で、判定には使わない**（拒否権に置くかは実測後・#1040）。
+
+def upper_layers(buy: dict, domain: dict, n_quantiles: int = 5) -> dict[str, dict]:
+    """期ごとの上位層 `{ym: {"prev_ym", "n_ranked", "members"}}`。
+
+    buy = {(ym, 社): 買いのスコア}（高いほど買う）。domain = {ym: 社の集合}＝その期に測れる社（共通域）。
+    期 t の上位層は、1 つ前の期 t−1（domain の期を昇順に並べた直前）に domain[t−1] の中で買いのスコアが
+    上位 1/n_quantiles だった社のうち、domain[t] にもいる社。**t の値は見ない**。上位の切り方は
+    `oof_backtest` の最上位分位と同じ（昇順に並べた m·(n−1)//n 番目から末尾。同点は社の順で決める）。
+    t−1 の並びが `quantile_period_ok` を満たさない期と、前の期が無い最初の期は返さない。
+    n_ranked は t−1 に順位を付けた社数（買いのスコアが無い社＝R が取れない社は入らない）。
+    """
+    yms = sorted(domain)
+    out: dict[str, dict] = {}
+    for prev, ym in zip(yms, yms[1:]):
+        ranked = sorted((buy[(prev, ec)], ec) for ec in domain[prev] if (prev, ec) in buy)
+        if not quantile_period_ok(ranked, n_quantiles):
+            continue
+        m = len(ranked)
+        top = {ec for _s, ec in ranked[(n_quantiles - 1) * m // n_quantiles:]}
+        out[ym] = {"prev_ym": prev, "n_ranked": m, "members": top & domain[ym]}
+    return out
+
+
+def in_layer_short_side(buy: dict, sells: dict, y: dict, n_quantiles: int = 5) -> dict:
+    """上位層の売り側spread（#1043・ADR-0069）。
+
+    sells = {条件名: {(ym, 社): 売りのキー}}（**低いほど先に売る**＝μ̂ の昇順）。y = {(ym, 社): 実現リターン}。
+    共通域は期ごとに「全ての売りの条件と y がそろう社」で、全条件が共有する＝比べる条件どうしの母集団は
+    常に同じ（ADR-0045 の縮む側の罠を避ける）。上位層はその共通域で `upper_layers` が選ぶ。
+
+    各期の値 = 層全体の y 平均 − 層の中で売りのキーが下位 1/n_quantiles だった社の y 平均。
+    `short_side_spread` と同じ向きで、**大きいほど売りが当たった**（正なら売った社が層の平均を下回った）。
+    下位の切り方は `oof_backtest` の最下位分位と同じ（昇順の先頭 m//n 社）。層の中の売りのキーが
+    `quantile_period_ok` を満たさない期は、その条件から外す。
+
+    戻り値:
+      by_condition[名] = {mean, hit_rate（正だった期の割合）, n_periods, by_period（{ym: 値}・
+        `model_stats.paired_ic_significance` の入力形）}
+      periods[ym] = {prev_ym, n_common（共通域の社数）, n_ranked（t−1 に順位を付けた社数）, n_layer}
+      n_common_rows = 共通域の (ym, 社) の行数
+    """
+    keys = set(y)
+    for sell in sells.values():
+        keys &= set(sell)
+    domain: dict[str, set] = defaultdict(set)
+    for ym, ec in keys:
+        domain[ym].add(ec)
+    layers = upper_layers(buy, domain, n_quantiles)
+
+    by_condition: dict[str, dict] = {}
+    for name, sell in sells.items():
+        by_period: dict[str, float] = {}
+        for ym, layer in layers.items():
+            rows = sorted((sell[(ym, ec)], ec, y[(ym, ec)]) for ec in layer["members"])
+            if not quantile_period_ok(rows, n_quantiles):
+                continue
+            m = len(rows)
+            bottom = rows[:m // n_quantiles]
+            by_period[ym] = (sum(r[2] for r in rows) / m
+                             - sum(r[2] for r in bottom) / len(bottom))
+        vals = list(by_period.values())
+        by_condition[name] = {
+            "mean":      round(statistics.mean(vals), 6) if vals else None,
+            "hit_rate":  round(sum(v > 0 for v in vals) / len(vals), 4) if vals else None,
+            "n_periods": len(vals),
+            "by_period": by_period,
+        }
+    periods = {ym: {"prev_ym": layer["prev_ym"], "n_common": len(domain[ym]),
+                    "n_ranked": layer["n_ranked"], "n_layer": len(layer["members"])}
+               for ym, layer in sorted(layers.items())}
+    return {"by_condition": by_condition, "periods": periods, "n_common_rows": len(keys)}

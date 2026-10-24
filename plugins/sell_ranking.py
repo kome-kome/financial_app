@@ -191,6 +191,30 @@ def _compute_trend(weekly_rows: list) -> dict:
 _ACTIONS = ["HOLD", "REDUCE", "SELL"]
 
 
+def sell_score(raws: dict, weights: dict, stats: dict,
+               min_coverage: float) -> tuple[float | None, float]:
+    """保有1社の売りスコアと被覆率 `(score, coverage)`。score が大きいほど売る理由が大きい。
+
+    raws = {指標: 生の値 or None}（向きは SELL_METRICS のとおり「高い＝売る理由が小さい」）。stats =
+    {指標: (mean, sd)}（`fit_zscore_stats`）。値がそろった指標を母集団の z へ変換し（`normalize_transform`）、
+    Σw(−z) をそろった重みの和で割る。被覆率（そろった重み / 全重み）が min_coverage 未満なら score は
+    None（データ不足）。上位層の売り側spread の上限版（#1043）も同じ式で採点する（書き写さない）。
+    """
+    total_weight = sum(weights.values())
+    weighted_sum = 0.0
+    weight_present = 0.0
+    for m, w in weights.items():
+        raw = raws.get(m)
+        if raw is not None and m in stats:
+            mean_, sd = stats[m]
+            zstd = normalize_transform(float(raw), mean_, sd, "zscore")
+            weighted_sum += w * (-zstd)        # 平均より下＝売り側に加点
+            weight_present += w
+    coverage = weight_present / total_weight if total_weight else 0.0
+    score = weighted_sum / weight_present if weight_present > 0 and coverage >= min_coverage else None
+    return score, coverage
+
+
 def _base_action(score: float | None, sell_th: float, reduce_th: float) -> str:
     if score is None:
         return "データ不足"
@@ -427,12 +451,10 @@ class SellRankingPlugin(AnalysisPlugin):
                 not_found.append(h["sec_code"])
                 continue
 
-            weighted_sum = 0.0
-            weight_present = 0.0
-            detail: dict[str, float | None] = {}
             _ec = r.edinet_code
             _ps = mu_scores.get(_ec) if _ec else None
-            for m, w in weights.items():
+            raws: dict[str, float | None] = {}
+            for m in weights:
                 if m == "mu":
                     raw = _ps.get("mu") if _ps else None
                 elif m == "neg_r_macro":
@@ -440,17 +462,9 @@ class SellRankingPlugin(AnalysisPlugin):
                     raw = -_rm if _rm is not None else None
                 else:
                     raw = _resolve_metric(r, m)
-                if raw is not None and m in stats:
-                    mean_, sd = stats[m]
-                    zstd = normalize_transform(float(raw), mean_, sd, "zscore")
-                    weighted_sum += w * (-zstd)        # 平均より下＝売り側に加点
-                    weight_present += w
-                detail[m] = round(float(raw), 4) if raw is not None else None
-            coverage = weight_present / total_weight if total_weight else 0.0
-
-            score = None
-            if weight_present > 0 and coverage >= min_coverage:
-                score = weighted_sum / weight_present
+                raws[m] = raw
+            detail = {m: round(float(raw), 4) if raw is not None else None for m, raw in raws.items()}
+            score, coverage = sell_score(raws, weights, stats, min_coverage)
 
             mom = _compute_trend(weekly_by_ec.get(r.edinet_code, []))
             action = _base_action(score, sell_th, reduce_th)

@@ -86,8 +86,14 @@ def _load_panel(args) -> tuple[dict, dict, dict, dict]:
 
 
 def _run_config(label: str, bases: list, panel: tuple, db,
-                weight_method: str = "nnls") -> dict:
-    """BASE_MODELS を bases に差し替えて M-4 を1回実行し、OOF 指標を返す。"""
+                weight_method: str = "nnls", keep_common: bool = False) -> dict:
+    """BASE_MODELS を bases に差し替えて M-4 を1回実行し、OOF 指標を返す。
+
+    keep_common=True なら、共通域の社ごとの予測 `{ym: [(edinet_code, (基底ごとの yhat…), y)]}`
+    （yhat は bases の順）を `common` に入れて返す（#1043 の上位層の売り側spread が使う）。M-4 は
+    これを戻り値に出さない（出すと API の応答が数万行ぶん膨らむ）ので、二段目の重みの関数
+    `_stack_walk_forward` へ渡る1番目の引数を `wraps` で横取りする（関数はそのまま動く）。
+    """
     prices_by_co, fin_by_co, companies, macro_cache = panel
     plugin = macro_ensemble.plugin
     params = coerce_params(plugin.params_schema(), {"weight_method": weight_method})
@@ -99,6 +105,8 @@ def _run_config(label: str, bases: list, panel: tuple, db,
                    return_value=(prices_by_co, fin_by_co, companies)), \
              patch("plugins.macro_ensemble.preload_macro", return_value=macro_cache), \
              patch("plugins.macro_ensemble.get_producer_scores", return_value={}), \
+             patch("plugins.macro_ensemble._stack_walk_forward",
+                   wraps=macro_ensemble._stack_walk_forward) as stack_spy, \
              tuning_dry_run(), tuning_objective_only():
             res = plugin.execute(params, db)
     finally:
@@ -108,7 +116,7 @@ def _run_config(label: str, bases: list, panel: tuple, db,
     print(f"[{label}] rank-IC={oof['rank_ic']['mean']:+.4f} "
           f"periods={oof['n_periods']} pairs={res['n_common_pairs']} "
           f"weights={res['weights']} ({secs}s)", flush=True)
-    return {
+    out = {
         "label":        label,
         "bases":        list(bases),
         "seconds":      secs,
@@ -117,6 +125,11 @@ def _run_config(label: str, bases: list, panel: tuple, db,
         "weights":      res["weights"],
         "n_common":     res["n_common_pairs"],
     }
+    if keep_common:
+        if stack_spy.call_args is None:
+            raise RuntimeError("M-4 の共通域を捕まえられなかった（_stack_walk_forward が呼ばれていない）")
+        out["common"] = stack_spy.call_args.args[0]
+    return out
 
 
 def _ic_by_period(oof: dict) -> dict:
