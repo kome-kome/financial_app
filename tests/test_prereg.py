@@ -231,8 +231,10 @@ class TestAppendixSection:
         assert prereg.section_recorded(_doc(), "### 無い見出し") is False
         assert prereg.section_recorded(_doc(appendix="\n### stage A\n\n### 次\n書いた\n"), self.HEADING) is False
 
-    def test_the_index_event_document_is_not_recorded_yet(self):
-        # 本物の文書は stage A を回す前なので、stage B は開封できない（未記入）
+    def test_the_index_event_document_has_stage_a_recorded(self):
+        # 本物の文書は 2026-10-23 の stage A の結果を記録済み（#1001）＝stage B の開封の順序を満たす。
+        # 追記節は凍結値の対象外なので、記録しても本文の sha256 は変わらない
         from scripts.measure_index_event import STAGE_A_HEADING
         text = INDEX_EVENT_DOC.read_text(encoding="utf-8")
-        assert prereg.appendix_section(text, STAGE_A_HEADING).startswith(prereg.PLACEHOLDER)
+        assert prereg.section_recorded(text, STAGE_A_HEADING) is True
+        assert prereg.body_sha256(text) == prereg.recorded_sha(text)

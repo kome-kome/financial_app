@@ -287,14 +287,18 @@ class TestMFamily:
 
 # ── stage B（開封・#1032）──────────────────────────────────────────────────────────
 
-def _recorded_prereg(tmp_path) -> Path:
-    """本物の文書の追記節「stage A（盲検）の結果」だけ書き足した写し（本文は同じ＝凍結値も同じ）。"""
+def _prereg_copy(tmp_path, stage_a: str) -> Path:
+    """本物の文書の追記節「stage A（盲検）の結果」の中身だけ差し替えた写し（本文は同じ＝凍結値も同じ）。"""
     text = PREREG.read_text(encoding="utf-8")
-    head, rest = text.split(X.STAGE_A_HEADING, 1)
+    head, _rest = text.split(X.STAGE_A_HEADING, 1)
     path = tmp_path / "prereg.md"
-    path.write_bytes((head + X.STAGE_A_HEADING + "\n\nバランス: 全変数 |SMD| < 0.1（記録の例）\n").encode("utf-8"))
+    path.write_bytes((head + X.STAGE_A_HEADING + "\n\n" + stage_a + "\n").encode("utf-8"))
     assert prereg.body_sha256(path.read_text(encoding="utf-8")) == FROZEN
     return path
+
+
+def _recorded_prereg(tmp_path) -> Path:
+    return _prereg_copy(tmp_path, "バランス: 全変数 |SMD| < 0.1（記録の例）")
 
 
 def _pairs_file(tmp_path, sha: str = FROZEN) -> Path:
@@ -312,8 +316,9 @@ def _run_b(tmp_path, doc, pairs, sha=FROZEN):
 
 class TestStageBCli:
     def test_refuses_to_open_before_stage_a_is_recorded(self, wired, tmp_path, capsys):
-        # 本物の文書は追記節が「未記入」のまま＝開封しない
-        code, out = _run_b(tmp_path, PREREG, _pairs_file(tmp_path))
+        # 追記節が「未記入」のままの文書では開封しない（本物の文書は 2026-10-23 の結果を記録済み）
+        unrecorded = _prereg_copy(tmp_path, "未記入。stage A を回した後に書き足す。")
+        code, out = _run_b(tmp_path, unrecorded, _pairs_file(tmp_path))
         assert code == X.EXIT_FAILED and not out.exists()
         assert "未記入" in capsys.readouterr().err
 
