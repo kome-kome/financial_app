@@ -487,6 +487,18 @@ JOBS: dict[str, Job] = {
         # 読み込みの途中に夜間の書き込みが入ると同じ入力にならず、層の顔ぶれそのものが変わる。
         parallel_sensitive=True,
     ),
+    # OOF 運用再現（#1045・親 #1040・ADR-0069 の参考）。判定には使わない。
+    "measure:oof-replay": Job(
+        name="oof_portfolio_replay",
+        argv=("{python}", "-m", "scripts.oof_portfolio_replay", "--allow-full-pull", "--refresh-cache"),
+        why="画面の上位 K 社を買い、保有の中の下位 k 社を売って入れ替える運用を OOF 予測だけで再現し、年率・"
+            "最大下落・入替率・コスト後・全社平均に対する超過を出す（#1045・#1040）。過去の経路は 1 本しかないので"
+            "参考。結果は scripts/.cache/oof_portfolio_replay.json。",
+        # 見積り（M-4 を 3 基底で 1 回。M-2 の walk-forward CV が大半）。実走ログで差し替える。
+        measured_min=45.0,
+        # 読み込みの途中に夜間の書き込みが入ると同じ入力にならず、保有の顔ぶれそのものが変わる。
+        parallel_sensitive=True,
+    ),
     # 9/18 の列数上限の本測定で「上限が財務の列を締め出している」は否定された（上限 40 でも財務は
     # 2列）。残った見立ては「M-1 の目的変数は素の52週先リターンなので、BIC（二乗誤差）は相場全体の
     # 変動を説明するマクロ列を選ぶ。評価は月内の順位」＝学習と評価のずれ（ADR-0050 の 9/18 追記）。
