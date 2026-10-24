@@ -474,6 +474,19 @@ JOBS: dict[str, Job] = {
         # 書き込みが入ると同じ入力にならず、K の判定そのものが変わりうる（他の計測ゲートと同じ扱い）。
         parallel_sensitive=True,
     ),
+    # 上位層の売り側spread（#1043・親 #1040・ADR-0069 の決定 4）。売りにも拒否権を置くかの材料（参考）。
+    "measure:in-layer-sell": Job(
+        name="sell_in_layer",
+        argv=("{python}", "-m", "scripts.sell_mu_source_bakeoff", "--in-layer",
+              "--allow-full-pull", "--refresh-cache"),
+        why="1 つ前の期に買いの並び（M-1 / M-2 は画面の U・M-6 は μ̂）で上位 20% だった社の中で、売りの並び"
+            "（M-6・M-2・M-1 の μ̂ と −R_macro 込みの上限版）の下位 20% が層の平均を下回ったかを M-4 の共通域で"
+            "測る（#1043・#1040）。結果は scripts/.cache/sell_in_layer.json。",
+        # 見積り（M-4 を 3 基底で 1 回。M-2 の walk-forward CV が大半）。実走ログで差し替える。
+        measured_min=45.0,
+        # 読み込みの途中に夜間の書き込みが入ると同じ入力にならず、層の顔ぶれそのものが変わる。
+        parallel_sensitive=True,
+    ),
     # 9/18 の列数上限の本測定で「上限が財務の列を締め出している」は否定された（上限 40 でも財務は
     # 2列）。残った見立ては「M-1 の目的変数は素の52週先リターンなので、BIC（二乗誤差）は相場全体の
     # 変動を説明するマクロ列を選ぶ。評価は月内の順位」＝学習と評価のずれ（ADR-0050 の 9/18 追記）。

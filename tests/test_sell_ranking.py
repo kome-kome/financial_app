@@ -23,7 +23,7 @@ from plugins.sell_ranking import (
     SELL_METRICS, PRESETS, SELL_SELECT_COLS, plugin,
     _NC_RATIO_COLS, _SELL_RUNTIME_METRICS, _SELL_VIEW_METRICS, _WeeklyBar,
     _TREND_LOOKBACK_DAYS,
-    parse_holdings, _compute_trend, _apply_timing, _base_action,
+    parse_holdings, _compute_trend, _apply_timing, _base_action, sell_score,
 )
 
 
@@ -213,6 +213,29 @@ class TestActionLabels:
     def test_flat_and_unknown_no_change(self):
         assert _apply_timing("SELL", "横ばい") == "SELL"
         assert _apply_timing("REDUCE", "不明") == "REDUCE"
+
+
+class TestSellScore:
+    """売りスコアの合成（`sell_score`・#1043 で execute から切り出し、上限版の計測と共有）。"""
+    W = {"mu": 1.0, "neg_r_macro": 0.5}
+    STATS = {"mu": (0.0, 0.1), "neg_r_macro": (-0.2, 0.05)}
+
+    def test_weighted_mean_of_negative_z(self):
+        score, cov = sell_score({"mu": -0.1, "neg_r_macro": -0.25}, self.W, self.STATS, 0.4)
+        # z(mu) = −1 → +1、z(neg_r_macro) = −1 → +1。Σw(−z)/Σw = 1。
+        assert score == pytest.approx(1.0) and cov == pytest.approx(1.0)
+
+    def test_missing_metric_is_left_out_of_the_denominator(self):
+        score, cov = sell_score({"mu": -0.1, "neg_r_macro": None}, self.W, self.STATS, 0.4)
+        assert score == pytest.approx(1.0) and cov == pytest.approx(1.0 / 1.5)
+
+    def test_below_min_coverage_is_none(self):
+        score, cov = sell_score({"mu": None, "neg_r_macro": -0.25}, self.W, self.STATS, 0.4)
+        assert score is None and cov == pytest.approx(0.5 / 1.5)
+
+    def test_metric_without_stats_is_not_counted(self):
+        score, cov = sell_score({"mu": -0.1, "neg_r_macro": -0.25}, self.W, {"mu": (0.0, 0.1)}, 0.4)
+        assert score == pytest.approx(1.0) and cov == pytest.approx(1.0 / 1.5)
 
 
 # ── execute(): in-memory SQLite ──────────────────────────────────────────────

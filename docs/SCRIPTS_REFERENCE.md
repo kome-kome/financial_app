@@ -274,7 +274,9 @@ M-4 の**基底構成**（M-1+M-2 vs M-1+M-2+M-6）の OOF 横並び実測（#39
 
 `sell_ranking` の既定 μ 出所（`mu_source`）を M-2 / M-6 / M-4 から選ぶ実測（#402・ADR-0022）。**`/api/backtest` では測れない**——`source="sell"` は recommend プリセット加重和の符号反転で μ 観点を持たず、producer スコア表は現在時点のスナップショットしか持たないため as-of 再現が look-ahead になる。よって `oof_backtest` の**売り側指標**（`short_side_spread`）で比較する。**買い側 rank-IC とは順位が逆転する**ことの実証でもある。実測値の正本は [MODELS.md](MODELS.md)
 
-種別: 検証（実験） ／ 依存先: scripts/ensemble_base_bakeoff.py, model_stats.py, scripts/_cache.py
+`--in-layer`（#1043・ADR-0069 の決定 4）は同じ M-4 の共通域で**上位層の売り側spread**も出す: 1 つ前の test 期に買いの並び（M-1 / M-2 は画面の既定の U＝`display_risk_map`＋`display_scores`、λ=0 の M-6 は μ̂）で上位 20% だった社の中で、売りの並び（M-6・M-2・M-1 の μ̂ と、`sell_ranking` の既定プリセットの式 `sell_score` に今の R_macro を入れた**未来情報込みの上限**）の下位 20% が層の平均を下回った幅（`plugins.macro_snapshots.in_layer_short_side`）。社ごとの予測は `ensemble_base_bakeoff._run_config(keep_common=True)` が M-4 の `_stack_walk_forward` へ渡る引数を `wraps` で横取りして取る（M-4 の戻り値は変えない）。守ること: **比べる条件は全て同じ共通域・同じ層で測る**（共通域は全ての売りの条件と y がそろう社）／**参考で判定に使わない**（売りに拒否権を置くかは #1040）／**M-4 の基底は本番と設定が違う**（M-2・M-6 は fin_fill なし、M-6 の `_m6_cv` はさらに内側の交差検証が `rows` で規模の中立化なし）ことを出力と JSON に残す。結果は `scripts/.cache/sell_in_layer.json`。日中枠（`measure:in-layer-sell`・並走に敏感）で単独に回す
+
+種別: 検証（実験） ／ 依存先: scripts/ensemble_base_bakeoff.py, model_stats.py, scripts/_cache.py, plugins/macro_snapshots.py, plugins/sell_ranking.py ／ テスト: tests/test_sell_mu_source_bakeoff.py, tests/test_in_layer_short_side.py
 
 ## `scripts/experiment_pooled_rhat.py`
 
