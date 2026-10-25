@@ -8,6 +8,9 @@
 - **stage B（開封・#1032）**: 窓（§5.1）ごとの CAR・I・R・κ・δ̂・CAR_post・ρ（§6.1・§9）、E族の確証
   （E1・E2・E4・Holm）、残差の定常ブートストラップ（§5.2）、生存バイアスの Lee bounds と記述の量（§9）。
   CLI は事前登録の追記節に stage A の結果が書かれていなければ開封しない
+- **前向き監視（2026 群・§6.3・#1061）**: stage A と同じマッチングを 2026 のマッチ日（§3.3）へ当て、
+  低減ごとの圧力窓 CAR を O'Brien-Fleming 型の逐次検定（境界は `model_stats.ld_obf_boundaries`）にかける。
+  w_m + 2 の週の終値がそろわない回は「未到来」で検定に入れない。新規採用 35 は記述だけ
 
 **M 族（§6.2・#1009）** も持つ: 本番の OOF（M-2 は raw・M-6 は size_neutral）で、期ごとの処置群と対照の
 placement bias の差 d_t を E_t・P_t へ回帰し、層別に引いて全期で固定した擬似処置群の順列で p を出す。
@@ -33,6 +36,8 @@ OOF は `scripts.momentum_gate --size-neutral` が書く CSV から読む。
 - **placebo の Newey-West の Ω** は事前期間の系列から推定する。E1 の Ω は事象窓を含む解析期間から
   取る決まりで、stage A でそれを読むと盲検が破れる。
 - Newey-West の自己共分散は、欠けた週を積に入れず、値のある週の数で割る（平均は引かない・§5.2）。
+- 前向き監視で決めた点（マッチ対の凍結・「終値がそろった」の判定・k 回目の解析期間の終わり）は
+  `MONITOR_DEFINITIONS` に書き、出力にも残す。
 
 ## 祝日
 
@@ -589,8 +594,8 @@ def r0_summary(*, counts: Mapping[str, int], d1: int, d2: Optional[int],
 
 # ── stage A ────────────────────────────────────────────────────────────────────
 
-def spec_key(controls: str, role: str) -> str:
-    return f"{controls}@{MATCH_DATES_2022[role].isoformat()}"
+def spec_key(controls: str, role: str, match_dates: Mapping[str, date] = MATCH_DATES_2022) -> str:
+    return f"{controls}@{match_dates[role].isoformat()}"
 
 
 def _unmatched_counts(matching: Matching, subgroups: Mapping[str, set]) -> dict:
@@ -601,6 +606,36 @@ def _unmatched_counts(matching: Matching, subgroups: Mapping[str, set]) -> dict:
         "by_reason": {r: n for r, n in Counter(matching.unmatched.values()).items()},
         "by_subgroup": dict(Counter(group_of(ec) for ec in matching.unmatched)),
     }
+
+
+def match_specs(variables: Mapping[str, pd.DataFrame], treated: Iterable[str], controls: Mapping[str, set],
+                subgroups: Mapping[str, set], match_dates: Mapping[str, date]) -> tuple:
+    """対照（C1 / C2）× マッチ日（主 / 頑健性）の 4 仕様でマッチし、バランスを測る（§4.3）。
+
+    stage A と前向き監視（2026 群）が同じこの関数を呼ぶ（マッチ日だけが違う）。`variables` は
+    {役割: `match_variables` の表}。戻り値は (仕様ごとの要約, {仕様: {処置社: [対照, ...]}}, {(対照, 役割): Matching})。
+    """
+    treated = set(treated)
+    specs, pairs, matchings = {}, {}, {}
+    for c_name in CONTROL_SETS:
+        for role in match_dates:
+            m = match_controls(variables[role], treated, controls[c_name])
+            smd = balance(variables[role], m)
+            key = spec_key(c_name, role, match_dates)
+            matchings[(c_name, role)] = m
+            pairs[key] = {t: list(cs) for t, cs in sorted(m.pairs.items())}
+            specs[key] = {
+                "controls": c_name, "match_date": match_dates[role].isoformat(),
+                "main": (c_name, role) == MAIN_SPEC,
+                "n_treated": len(treated), "n_control_candidates": len(controls[c_name] - treated),
+                "n_pool_treated": m.n_pool_treated, "n_pool_controls": m.n_pool_controls,
+                "n_matched": len(m.pairs),
+                "mean_k": (sum(len(v) for v in m.pairs.values()) / len(m.pairs)) if m.pairs else None,
+                "n_controls_used": len({c for v in m.pairs.values() for c in v}),
+                "unmatched": _unmatched_counts(m, subgroups),
+                "sd": m.sd, "smd": smd, "balance_ok": balance_ok(smd),
+            }
+    return specs, pairs, matchings
 
 
 def stage_a(*, closes: pd.DataFrame, turnover: pd.DataFrame,
@@ -614,26 +649,7 @@ def stage_a(*, closes: pd.DataFrame, turnover: pd.DataFrame,
     treated = set(treated)
     closes = blind(closes, cutoff)
     variables = {role: match_variables(firms, closes, turnover) for role, firms in firms_by_role.items()}
-    specs, pairs = {}, {}
-    matchings = {}
-    for c_name in CONTROL_SETS:
-        for role in MATCH_DATES_2022:
-            m = match_controls(variables[role], treated, controls[c_name])
-            smd = balance(variables[role], m)
-            key = spec_key(c_name, role)
-            matchings[(c_name, role)] = m
-            pairs[key] = {t: list(cs) for t, cs in sorted(m.pairs.items())}
-            specs[key] = {
-                "controls": c_name, "match_date": MATCH_DATES_2022[role].isoformat(),
-                "main": (c_name, role) == MAIN_SPEC,
-                "n_treated": len(treated), "n_control_candidates": len(controls[c_name] - treated),
-                "n_pool_treated": m.n_pool_treated, "n_pool_controls": m.n_pool_controls,
-                "n_matched": len(m.pairs),
-                "mean_k": (sum(len(v) for v in m.pairs.values()) / len(m.pairs)) if m.pairs else None,
-                "n_controls_used": len({c for v in m.pairs.values() for c in v}),
-                "unmatched": _unmatched_counts(m, subgroups),
-                "sd": m.sd, "smd": smd, "balance_ok": balance_ok(smd),
-            }
+    specs, pairs, matchings = match_specs(variables, treated, controls, subgroups, MATCH_DATES_2022)
     main = matchings[MAIN_SPEC]
     fs_rows = first_stage(turnover, main.pairs, calendar)
     fs_ok = first_stage_ok(fs_rows)
@@ -679,7 +695,7 @@ B_DEFINITIONS = {
     "analysis_period": f"[A* − {ANALYSIS_LEAD_WEEKS} 週, w_10 + {POST_WEEKS} 週]。E1・E4 の Ω とブートストラップの系列",
     "bootstrap": f"AR̄ を窓の種類（圧力・戻り・除外後 [+1,+{POST_WEEKS}]・それ以外＝0）の平均と残差に分け、"
                  f"残差を平均ブロック長 {BOOT_BLOCK} 週の定常ブートストラップで {BOOT_REPS} 回（seed 0）",
-    "ci": f"パーセンタイルの {int(CI_LEVEL * 100)}%（δ̂・κ・ρ）",
+    "ci": f"パーセンタイルの {int(CI_LEVEL * 100)}%（I・δ̂・κ・ρ。I は 2026 群の予測帯の材料・#1062）",
     "e1_empirical_p": "stage A と同じ placebo（事前期間の月末の週・10 個の平均）の分布で (#{I* <= I} + 1) / (N + 1)",
     "attrition": f"窓の最初の {ATTRITION_TAIL_WEEKS} 週に足があり、最後の {ATTRITION_TAIL_WEEKS} 週に足が無い社"
                  "（企業表の廃止日は同期日で真の日付ではない・#1022）",
@@ -946,7 +962,7 @@ def stage_b(*, closes: pd.DataFrame, pairs: Mapping[str, Sequence[str]], calenda
     gap_series = paired_month_diff(gaps, pairs, gap_yms)
     return {
         "quantities": q,
-        "ci": {k: percentile_ci([b[k] for b in boot]) for k in ("delta_hat", "kappa", "rho")},
+        "ci": {k: percentile_ci([b[k] for b in boot]) for k in ("I", "delta_hat", "kappa", "rho")},
         "e_family": {
             "tests": list(E_TESTS), "alpha": HOLM_ALPHA,
             "p": p, "p_newey_west": p_nw, "significant": significant,
@@ -1224,3 +1240,148 @@ def m_family_verdict(results: Mapping[str, dict]) -> dict:
             out[model][k] = {"coef": r["fit"][k], "p": p,
                              "significant": None if p is None else p < M_ALPHA}
     return out
+
+
+# ── 前向き監視（2026 群・§6.3・#1061）: 低減ごとの圧力窓 CAR の O'Brien-Fleming 逐次検定 ──────────
+
+MATCH_DATES_2026 = {"main": date(2026, 3, 31), "robust": date(2026, 9, 30)}   # §3.3
+MONITOR_LOOKS = 8                        # §6.3 情報割合 t_k = k/8 に固定（実施が遅れても計算し直さない）
+MONITOR_ALPHA = 0.05                     # §6.3 片側・全体 α（O'Brien-Fleming 型の α 消費）
+MONITOR_TEST_LAG_WEEKS = 2               # §6.3 w_m + 2 の週の終値がそろった時点で k = m 回目の検定
+# data_j の市場区分 → 出力のキー（標準出力は ASCII だけにする）
+SEGMENT_KEYS = dict(zip(DOMESTIC_SEGMENTS, ("prime", "standard", "growth")))
+
+
+class Cohort(NamedTuple):
+    review: str                          # 台帳（index_events.REVIEWS）のキー
+    kind: str                            # 台帳の種別
+    confirmatory: bool                   # 逐次検定にかけるか（False は記述だけ）
+    anticipation_from: Optional[date]    # 先回りの窓の起点（記述）
+
+
+MONITOR_COHORTS = {
+    # §4.1 ITT の移行措置 683 社を 8 回とも（2027-10 の再評価で 0.500 停止になった社も外さない）
+    "topix-2026-10": Cohort("topix-2026-10", "transition", True, None),
+    # §4.1・R9 新規採用 35 は記述だけ。先回りは選定基準日 2026-08-31 から（§3.2）
+    "topix-2026-10-add": Cohort("topix-2026-10", "new_add", False, date(2026, 8, 31)),
+}
+MONITOR_DEFINITIONS = {
+    "pairs": "初回の実行でマッチ対を凍結し、2 回目以降は読み直す（data_j の断面は毎月変わり C1 が動くので、"
+             "計算し直すと回ごとに違う対照で Z_k を積むことになる）",
+    "due": f"w_m + {MONITOR_TEST_LAG_WEEKS} の週の終値がそろった＝週次の表に w_m + {MONITOR_TEST_LAG_WEEKS + 1} の"
+           "週の足が 1 本でも入った（休業日の表は月末だけなので、足の日付が金曜かでは判定しない）",
+    "analysis_period": f"k 回目の Ω は [A* − {ANALYSIS_LEAD_WEEKS} 週, w_k + {MONITOR_TEST_LAG_WEEKS} 週] の AR̄ から推定"
+                       "（事前登録の「その時点の最新週」を k 回目の検定の時点と読む。遅れて回しても過去の回の Z は変わらない）",
+    "z": f"Z_k = Σ_(j<=k) CAR_j[w_j − 1, w_j] ÷ √(c'Ωc)（Newey-West・Bartlett・lag {NW_LAG}・平均を引かない）。"
+         "Z_k <= −z_k で棄却",
+    "information_fraction": f"t_k = k / {MONITOR_LOOKS} に固定（日付が遅れても計算し直さない）",
+    "first_rejection": "棄却した後の回も計算して出すが、判定は最初に棄却した回で確定する",
+    "descriptive": "市場区分（実行時点の data_j）別の圧力窓 CAR は、到来した回だけ出す",
+    "anticipation": "新規採用は先回りの窓 [基準日の週, w_1 − 2] と圧力窓 [w_1 − 1, w_1] を記述する（検定しない）",
+}
+
+
+def latest_week(closes: pd.DataFrame) -> Optional[date]:
+    """終値が 1 社でもある最後の週。"""
+    has = closes.notna().any(axis=1)
+    weeks = [w for w, ok in zip(closes.index, has) if ok]
+    return weeks[-1] if weeks else None
+
+
+def week_complete(week: date, latest: Optional[date]) -> bool:
+    """`week` の終値がそろったか＝その次の週の足が入っているか（定義は `MONITOR_DEFINITIONS["due"]`）。"""
+    return latest is not None and latest >= week + WEEK
+
+
+def look_due(pw: PressureWeek, latest: Optional[date], lag: int = MONITOR_TEST_LAG_WEEKS) -> bool:
+    return week_complete(pw.week + WEEK * lag, latest)
+
+
+def sequential_looks(ar: pd.Series, calendar: Sequence[PressureWeek], announce_week: date,
+                     latest: Optional[date], *, n_looks: int = MONITOR_LOOKS, alpha: float = MONITOR_ALPHA,
+                     lag: int = NW_LAG) -> dict:
+    """§6.3 の逐次検定。到来した回 k で Z_k を出し、境界 z_k（`ld_obf_boundaries`）と比べる。
+
+    t_k と z_k は回の番号 k だけで決まり、暦の日付に依らない。到来していない回は `not_yet`、
+    窓の AR̄ が欠けて Z を出せない回は `unavailable` で、どちらも検定に入らない。
+    """
+    from model_stats import ld_obf_boundaries, obf_spending
+
+    if len(calendar) != n_looks:
+        raise ValueError(f"暦が {len(calendar)} 回（事前登録 §6.3 は {n_looks} 回で境界を決めている）")
+    bounds = ld_obf_boundaries(n_looks, alpha)
+    looks, first = [], None
+    for k, pw in enumerate(calendar, 1):
+        t = k / n_looks
+        test_week = pw.week + WEEK * MONITOR_TEST_LAG_WEEKS
+        row = {"k": k, "m": pw.m, "pressure_week": pw.week.isoformat(), "test_week": test_week.isoformat(),
+               "t": t, "z_bound": bounds[k - 1], "cum_alpha": obf_spending(t, alpha),
+               "status": "not_yet", "car": None, "cum_car": None, "se": None, "z": None, "rejected": None}
+        looks.append(row)
+        if not look_due(pw, latest):
+            continue
+        weeks = [p.week for p in calendar[:k]]
+        cars = [car(ar, _span(w, -1, 0)) for w in weeks]
+        row["car"] = cars[-1]
+        gammas = nw_autocovariances(rows_between(ar, announce_week - WEEK * ANALYSIS_LEAD_WEEKS, test_week), lag)
+        var = nw_variance(window_weights(weeks, -1, 0, 1.0), gammas, lag) if gammas is not None else 0.0
+        if None in cars or var <= 0:
+            row["status"] = "unavailable"
+            continue
+        cum, se = sum(cars), math.sqrt(var)
+        z = cum / se
+        rejected = z <= -bounds[k - 1]
+        row.update(status="tested", cum_car=cum, se=se, z=z, rejected=rejected)
+        if rejected and first is None:
+            first = k
+    return {"n_looks": n_looks, "alpha": alpha, "side": "lower", "boundaries": bounds,
+            "looks": looks, "first_rejection": first}
+
+
+def segment_pressure_cars(returns: pd.DataFrame, pairs: Mapping[str, Sequence[str]], segments: Mapping[str, str],
+                          calendar: Sequence[PressureWeek], latest: Optional[date]) -> dict:
+    """{区分: {n_treated, pressure_car: {m: CAR}}}（記述）。区分は `SEGMENT_KEYS`、無ければ other。"""
+    by: dict = {}
+    for t in sorted(pairs):
+        by.setdefault(SEGMENT_KEYS.get(segments.get(t), "other"), {})[t] = pairs[t]
+    out = {}
+    for seg, sub in sorted(by.items()):
+        ar = abnormal_return_series(returns, sub)
+        out[seg] = {"n_treated": len(sub),
+                    "pressure_car": {pw.m: car(ar, _span(pw.week, -1, 0)) for pw in calendar
+                                     if look_due(pw, latest)}}
+    return out
+
+
+def monitor(*, closes: pd.DataFrame, pairs: Mapping[str, Sequence[str]], calendar: Sequence[PressureWeek],
+            announce_week: date, segments: Mapping[str, str], confirmatory: bool,
+            anticipation_from: Optional[date] = None) -> dict:
+    """前向き監視（§6.3）。要約は件数と統計だけで、銘柄コードを含めない。
+
+    `pairs` は主の仕様（C1・主のマッチ日）の凍結したマッチ対。`confirmatory=False` の群は記述だけ。
+    """
+    returns = weekly_log_returns(closes)
+    frame = abnormal_return_frame(returns, pairs)
+    ar = frame.mean(axis=1, skipna=True) if not frame.empty else pd.Series(np.nan, index=returns.index, dtype=float)
+    latest = latest_week(closes)
+    descriptive: dict = {
+        "pressure_car": {pw.m: car(ar, _span(pw.week, -1, 0)) for pw in calendar if look_due(pw, latest)},
+        "by_segment": segment_pressure_cars(returns, pairs, segments, calendar, latest),
+    }
+    if anticipation_from is not None:
+        start, end = iso_monday(anticipation_from), calendar[0].week - WEEK * 2
+        descriptive["anticipation"] = {
+            "window": [start.isoformat(), end.isoformat()],
+            "car": car(ar, _span(start, 0, (end - start).days // 7)) if week_complete(end, latest) else None}
+    return {
+        "calendar": [{"m": pw.m, "effective_on": pw.effective_on.isoformat(),
+                      "pressure_day": pw.pressure_day.isoformat(), "week": pw.week.isoformat(),
+                      "date_basis": pw.date_basis} for pw in calendar],
+        "announce_week": announce_week.isoformat(),
+        "weekly_last": latest.isoformat() if latest else None,
+        "n_treated_matched": len(pairs),
+        "n_treated_with_ar": int(frame.notna().any().sum()) if not frame.empty else 0,
+        "sequential": sequential_looks(ar, calendar, announce_week, latest) if confirmatory else None,
+        "descriptive": descriptive,
+        "definitions": MONITOR_DEFINITIONS,
+    }

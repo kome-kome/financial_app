@@ -41,8 +41,13 @@ def _fixed_head_sha(monkeypatch):
     monkeypatch.setattr(prereg, "_head_sha", lambda: "a" * 40)
 
 
+MONITOR_JOBS = {"measure:index-event-monitor": "topix-2026-10",
+                "measure:index-event-monitor-add": "topix-2026-10-add"}
+
+
 class TestDaytimeJob:
-    @pytest.mark.parametrize("key", ["measure:index-event-a", "measure:index-event-m", "measure:index-event-b"])
+    @pytest.mark.parametrize("key", ["measure:index-event-a", "measure:index-event-m", "measure:index-event-b",
+                                     *MONITOR_JOBS])
     def test_frozen_value_matches_the_prereg_appendix(self, key):
         argv = rd.JOBS[key].argv
         doc = ROOT / argv[argv.index("--prereg") + 1]
@@ -53,11 +58,17 @@ class TestDaytimeJob:
 
     @pytest.mark.parametrize("key,stage", [("measure:index-event-a", "stage-a"),
                                            ("measure:index-event-m", "m-family"),
-                                           ("measure:index-event-b", "stage-b")])
+                                           ("measure:index-event-b", "stage-b"),
+                                           *((k, "monitor") for k in MONITOR_JOBS)])
     def test_runs_alone(self, key, stage):
         job = rd.JOBS[key]
         assert job.argv[1:5] == ("-m", "scripts.measure_index_event", stage, "--prereg")
         assert job.parallel_sensitive is True
+
+    @pytest.mark.parametrize("key,cohort", MONITOR_JOBS.items())
+    def test_monitor_jobs_name_their_cohort(self, key, cohort):
+        argv = rd.JOBS[key].argv
+        assert argv[argv.index("--cohort") + 1] == cohort and cohort in S.MONITOR_COHORTS
 
 
 def _ledger(treated=TREATED + [NO_FIN]):
@@ -70,13 +81,14 @@ def _ledger(treated=TREATED + [NO_FIN]):
         stats={"resolution": {"topix-2022-10": {"rate": 0.998}}})
 
 
-def _seed(db, *, spike: float = 4.0, seed: int = 0) -> None:
-    """2021-01〜2025-02 の週次・通期行（FY2021・FY2022）・data_j の断面（2026-09-30）を入れる。"""
+def _seed(db, *, spike: float = 4.0, seed: int = 0, start: date = date(2021, 1, 4), end: date = date(2025, 2, 24),
+          steps=IE.STEPS_2022, years=(2021, 2022)) -> None:
+    """既定は 2021-01〜2025-02 の週次・通期行（FY2021・FY2022）・data_j の断面（2026-09-30）を入れる。"""
     from database import Company, FinancialRecord, JpxListingSnapshot, StockPriceWeekly
 
     rng = np.random.default_rng(seed)
-    weeks = [date(2021, 1, 4) + W * k for k in range(((date(2025, 2, 24) - date(2021, 1, 4)).days // 7) + 1)]
-    pressure = {pw.week for pw in S.pressure_calendar(IE.STEPS_2022)}
+    weeks = [start + W * k for k in range(((end - start).days // 7) + 1)]
+    pressure = {pw.week for pw in S.pressure_calendar(steps)}
     seen = datetime(2026, 10, 1)
     for i, t in enumerate(TREATED + [NO_FIN]):
         path = 500 * (1 + i) * np.exp(np.cumsum(rng.normal(0, 0.02, size=len(weeks))))
@@ -92,7 +104,7 @@ def _seed(db, *, spike: float = 4.0, seed: int = 0) -> None:
                                         trade_date=(w + timedelta(days=4)).isoformat(), close_last=close,
                                         volume_sum=to / close, turnover_sum=to, n_days=5))
             if ec != NO_FIN:
-                for year in (2021, 2022):
+                for year in years:
                     db.add(FinancialRecord(
                         edinet_code=ec, sec_code=f"{90 + i}{j}0", company_name=ec, industry="情報・通信業",
                         year=year, period_end=date(year, 3, 31), period_type="annual",
@@ -333,11 +345,88 @@ class TestStageBCli:
         assert data["quantities"]["car_post"] is None              # 合成の週次は 2025-02 まで
         assert data["e_family"]["tests"] == ["E1", "E2", "E4"]
         assert data["inputs"]["n_treated_matched"] == 4
+        assert list(data["ci"]) == ["I", "delta_hat", "kappa", "rho"]
         assert not re.search(r"E9\d{3}", out.read_text(encoding="utf-8"))
 
     def test_pairs_from_another_freeze_stop_with_2(self, wired, tmp_path):
         code, out = _run_b(tmp_path, _recorded_prereg(tmp_path), _pairs_file(tmp_path, sha="0" * 64))
         assert code == X.EXIT_FAILED and not out.exists()
+
+
+# ── 前向き監視（monitor・§6.3・#1061）──────────────────────────────────────────────
+
+def _ledger26(treated=TREATED + [NO_FIN]):
+    return IE.IndexLedger(
+        ok=True,
+        mentions={ec: (("topix-2026-10", "transition"),) for ec in treated},
+        groups={("topix-2026-10", "transition"): frozenset(treated)},
+        stats={"resolution": {"topix-2026-10": {"rate": 0.996}}})
+
+
+@pytest.fixture
+def wired26(wired, monkeypatch):
+    """2025-01〜2026-11-23 の週次（1 回目の w_1 + 3 = 2026-11-16 まで入る）と FY2025・FY2026 の通期行。"""
+    monkeypatch.setattr(IE, "load_ledger", lambda db, root=None: _ledger26())
+    monkeypatch.setattr(X, "load_exposure", lambda db, ledger, asof: {"asof": asof.isoformat(), "tables": {}})
+    _seed(wired, start=date(2025, 1, 6), end=date(2026, 11, 23), steps=IE.STEPS_2026, years=(2025, 2026))
+    return wired
+
+
+def _run_monitor(tmp_path, sha=FROZEN, cohort="topix-2026-10"):
+    out, pairs = tmp_path / "monitor.json", tmp_path / "monitor_pairs.json"
+    code = X.main(["monitor", "--prereg", str(PREREG), "--prereg-sha", sha, "--cohort", cohort,
+                   "--out", str(out), "--pairs", str(pairs)])
+    return code, out, pairs
+
+
+class TestMonitorCli:
+    def test_freezes_the_pairs_then_reuses_them(self, wired26, tmp_path, monkeypatch, capsys):
+        calls = []
+        match_specs = S.match_specs
+        monkeypatch.setattr(S, "match_specs", lambda *a: calls.append(a[4]) or match_specs(*a))
+        code, out, pairs_path = _run_monitor(tmp_path)
+        assert code == 0
+        # stage A と同じ部品を 2026 のマッチ日（§3.3）で呼ぶ
+        assert calls == [S.MATCH_DATES_2026]
+        frozen = json.loads(pairs_path.read_text(encoding="utf-8"))
+        assert frozen["cohort"] == "topix-2026-10" and frozen["prereg_sha256"] == FROZEN
+        assert list(frozen["pairs"]) == ["C1@2026-03-31", "C1@2026-09-30", "C2@2026-03-31", "C2@2026-09-30"]
+        assert set(frozen["pairs"]["C1@2026-03-31"]) == set(TREATED)
+        data = json.loads(out.read_text(encoding="utf-8"))
+        assert data["stage"] == "monitor" and data["prereg_sha256"] == FROZEN
+        assert data["inputs"]["pairs_frozen_now"] is True and data["inputs"]["n_treated_itt"] == 5
+        assert data["matching"]["C1@2026-03-31"]["n_matched"] == 4
+        looks = data["sequential"]["looks"]
+        assert [r["status"] for r in looks] == ["tested"] + ["not_yet"] * 7
+        assert data["weekly_last"] == "2026-11-23"
+        assert set(data["descriptive"]["by_segment"]) == {"standard"}
+        assert "exposure_tau" in data["descriptive"]
+        assert not re.search(r"E9\d{3}", out.read_text(encoding="utf-8"))
+        assert "[monitor] cohort=topix-2026-10" in capsys.readouterr().out
+        # 2 回目は凍結した対を読み直す（マッチし直さない）
+        code, out, _ = _run_monitor(tmp_path)
+        again = json.loads(out.read_text(encoding="utf-8"))
+        assert code == 0 and calls == [S.MATCH_DATES_2026]
+        assert again["inputs"]["pairs_frozen_now"] is False
+        assert again["sequential"] == data["sequential"]
+
+    @pytest.mark.parametrize("field,value", [("prereg_sha256", "0" * 64), ("cohort", "topix-2026-10-add")])
+    def test_pairs_frozen_under_another_stamp_stop_with_2(self, wired26, tmp_path, field, value):
+        pairs_path = tmp_path / "monitor_pairs.json"
+        doc = {"cohort": "topix-2026-10", "prereg_sha256": FROZEN, "pairs": {}}
+        pairs_path.write_text(json.dumps({**doc, field: value}), encoding="utf-8")
+        code, out, _ = _run_monitor(tmp_path)
+        assert code == X.EXIT_FAILED and not out.exists()
+
+    def test_prereg_mismatch_stops_with_2(self, wired26, tmp_path):
+        with pytest.raises(SystemExit) as e:
+            _run_monitor(tmp_path, sha="0" * 64)
+        assert e.value.code == prereg.EXIT_MISMATCH
+
+    def test_unknown_cohort_is_rejected_by_the_parser(self, wired26, tmp_path):
+        with pytest.raises(SystemExit) as e:
+            _run_monitor(tmp_path, cohort="topix-2022-10")
+        assert e.value.code == 2
 
 
 def test_month_end_labels_follow_the_production_definition():

@@ -64,6 +64,7 @@ class TestCalendarMatchesPrereg:
     def test_match_dates_match_section_3_3(self):
         sec = _section(self.text, "### 3.3", "## 4.")
         assert f"| 2022 前例 | {S.MATCH_DATES_2022['main']} | {S.MATCH_DATES_2022['robust']} |" in sec
+        assert f"| 2026 群 | {S.MATCH_DATES_2026['main']} | {S.MATCH_DATES_2026['robust']} |" in sec
 
 
 class TestCalendar:
@@ -498,6 +499,122 @@ class TestStageA:
         assert summary["first_stage"]["pass"] is False
         assert summary["r0"]["status"] == "fail"
 
+    def test_match_specs_is_what_stage_a_runs(self, result):
+        """前向き監視は stage A と同じ `match_specs` を呼ぶ。マッチ日を 2026 にしても変わるのは仕様の名前だけ。"""
+        inputs = _synthetic()
+        closes = S.blind(inputs["closes"], inputs["cutoff"])
+        variables = {role: S.match_variables(f, closes, inputs["turnover"])
+                     for role, f in inputs["firms_by_role"].items()}
+        args = (variables, inputs["treated"], inputs["controls"], inputs["subgroups"])
+        specs, pairs, _ = S.match_specs(*args, S.MATCH_DATES_2022)
+        summary, stage_pairs = result
+        assert pairs == stage_pairs and specs == summary["matching"]
+        specs26, pairs26, _ = S.match_specs(*args, S.MATCH_DATES_2026)
+        assert list(pairs26) == ["C1@2026-03-31", "C1@2026-09-30", "C2@2026-03-31", "C2@2026-09-30"]
+        assert list(pairs26.values()) == list(pairs.values())
+        assert specs26["C1@2026-03-31"]["match_date"] == "2026-03-31" and specs26["C1@2026-03-31"]["main"] is True
+
+
+# ── 前向き監視（2026 群・§6.3・#1061）──────────────────────────────────────────────
+
+CAL26 = S.pressure_calendar(IE.STEPS_2026)
+
+
+def _monitor_synthetic(effect: float = 0.0, end: date = date(2027, 5, 31), seed: int = 0) -> dict:
+    """2026-03-30〜`end` の週次。処置 8 社（対照 2 社ずつの双子）。処置の圧力窓 [w_m − 1, w_m] に `effect` を仕込む。
+
+    既定の `end` では 1〜3 回目が到来し（w_3 + 3 = 2027-05-17）、4 回目以降は未到来。
+    """
+    rng = np.random.default_rng(seed)
+    start = date(2026, 3, 30)
+    weeks = [start + W * k for k in range((end - start).days // 7 + 1)]
+    pressure = {w for pw in CAL26 for w in (pw.week - W, pw.week)}
+    closes, pairs, segments = {}, {}, {}
+    for i in range(8):
+        market = rng.normal(0, 0.02, size=len(weeks))
+        group = [f"T{i}", f"C{i}a", f"C{i}b"]
+        pairs[group[0]] = group[1:]
+        segments[group[0]] = "プライム（内国株式）" if i < 4 else "グロース（内国株式）"
+        for ec in group:
+            r = market + rng.normal(0, 0.001, size=len(weeks))
+            if ec == group[0]:
+                r = r + np.array([effect if w in pressure else 0.0 for w in weeks])
+            closes[ec] = dict(zip(weeks, (100 * np.exp(np.cumsum(r))).tolist()))
+    return dict(closes=S.weekly_frame(closes), pairs=pairs, calendar=CAL26,
+                announce_week=S.announcement_week(date(2026, 10, 7)), segments=segments, confirmatory=True)
+
+
+class TestMonitor:
+    def test_announcement_week_matches_section_3_2(self):
+        assert S.announcement_week(date(2026, 10, 7)) == date(2026, 10, 5)
+
+    def test_planted_pressure_is_rejected(self):
+        seq = S.monitor(**_monitor_synthetic(effect=-0.01))["sequential"]
+        looks = seq["looks"]
+        assert [r["status"] for r in looks] == ["tested"] * 3 + ["not_yet"] * 5
+        assert looks[0]["cum_car"] == pytest.approx(-0.02, abs=0.002)
+        assert looks[2]["cum_car"] == pytest.approx(-0.06, abs=0.004)
+        # 1 回目は境界 5.421 にほぼ届かない: 平均を引かない Ω は事象週の値そのものを含み、解析期間が 32 週しか
+        # ないので、雑音の無い極限でも |Z_1| = 2 * sqrt(32 / 5.6) = 4.78。2 回目（45 週）からは届く
+        assert looks[0]["rejected"] is False and abs(looks[0]["z"]) < looks[0]["z_bound"]
+        assert looks[1]["rejected"] is True and looks[1]["z"] <= -looks[1]["z_bound"]
+        assert seq["first_rejection"] == 2
+
+    def test_null_is_not_rejected(self):
+        seq = S.monitor(**_monitor_synthetic(effect=0.0))["sequential"]
+        assert [r["rejected"] for r in seq["looks"][:3]] == [False] * 3
+        assert seq["first_rejection"] is None
+
+    def test_information_fraction_and_bounds_ignore_the_dates(self):
+        """実施が遅れても t_k = k/8 と z_k は回の番号だけで決まる（§6.3）。"""
+        from model_stats import ld_obf_boundaries, obf_spending
+
+        delayed = tuple(pw._replace(effective_on=pw.effective_on + 3 * W, pressure_day=pw.pressure_day + 3 * W,
+                                    week=pw.week + 3 * W) for pw in CAL26)
+        inputs = _monitor_synthetic()
+        got = {}
+        for name, cal in (("planned", CAL26), ("delayed", delayed)):
+            looks = S.monitor(**{**inputs, "calendar": cal})["sequential"]["looks"]
+            got[name] = [(r["k"], r["t"], r["z_bound"], r["cum_alpha"]) for r in looks]
+        want = [(k, k / 8, z, obf_spending(k / 8, 0.05)) for k, z in enumerate(ld_obf_boundaries(8, 0.05), 1)]
+        assert got["planned"] == got["delayed"] == want
+
+    def test_looks_without_the_w_plus_2_close_are_not_yet(self):
+        """データが w_2 + 2 の週で終わると、その週の終値はまだそろっていない＝2 回目は未到来。"""
+        inputs = _monitor_synthetic(effect=-0.01)
+        w2 = CAL26[1].week
+        short = inputs["closes"][[w <= w2 + 2 * W for w in inputs["closes"].index]]
+        summary = S.monitor(**{**inputs, "closes": short})
+        looks = summary["sequential"]["looks"]
+        assert [r["status"] for r in looks] == ["tested"] + ["not_yet"] * 7
+        assert all(r["z"] is None and r["car"] is None for r in looks[1:])
+        assert list(summary["descriptive"]["pressure_car"]) == [1]
+        # 後ろの週が増えても、1 回目の Z は変わらない（解析期間の終わりは w_1 + 2 に固定）
+        full = S.monitor(**inputs)["sequential"]["looks"][0]
+        assert looks[0] == full
+
+    def test_wrong_number_of_looks_raises(self):
+        with pytest.raises(ValueError):
+            S.monitor(**{**_monitor_synthetic(), "calendar": CAL26[:7]})
+
+    def test_descriptive_by_segment_and_no_codes(self):
+        summary = S.monitor(**_monitor_synthetic(effect=-0.01))
+        seg = summary["descriptive"]["by_segment"]
+        assert {k: v["n_treated"] for k, v in seg.items()} == {"growth": 4, "prime": 4}
+        assert list(seg["prime"]["pressure_car"]) == [1, 2, 3]
+        assert summary["n_treated_matched"] == 8 and summary["n_treated_with_ar"] == 8
+        assert not re.search(r'"(T\d|C\d[ab])"', json.dumps(summary, default=str))
+
+    def test_new_additions_are_descriptive_only(self):
+        add_cal = S.pressure_calendar(IE.SCHEDULES[("topix-2026-10", "new_add")].steps)
+        cohort = S.MONITOR_COHORTS["topix-2026-10-add"]
+        summary = S.monitor(**{**_monitor_synthetic(), "calendar": add_cal, "confirmatory": cohort.confirmatory,
+                               "anticipation_from": cohort.anticipation_from})
+        assert summary["sequential"] is None
+        a = summary["descriptive"]["anticipation"]
+        assert a["window"] == ["2026-08-31", "2026-10-12"] and a["car"] is not None
+        assert list(summary["descriptive"]["pressure_car"]) == [1]
+
 
 # ── M 族（§6.2・#1009）────────────────────────────────────────────────────────
 
@@ -777,6 +894,16 @@ class TestStageB:
         lo, hi = result["ci"]["delta_hat"]
         assert lo < q["delta_hat"] < hi
         assert result["materials"]["delta_hat_ci90"] == result["ci"]["delta_hat"]
+        lo, hi = result["ci"]["I"]                                 # 2026 群の予測帯の材料（#1062）
+        assert lo < q["I"] < hi
+
+    def test_ci_of_I_is_the_percentile_of_the_bootstrap_draws(self, monkeypatch):
+        boot = [{"I": -0.001 * k, "R": 0.0005 * k, "kappa": 0.5, "delta_hat": -0.002 * k, "car_post": None,
+                 "rho": None} for k in range(1, 41)]
+        monkeypatch.setattr(S, "residual_bootstrap", lambda ar, calendar, **kw: boot)
+        result = S.stage_b(**_stage_b_synthetic())
+        assert result["ci"]["I"] == S.percentile_ci([b["I"] for b in boot])
+        assert list(result["ci"]) == ["I", "delta_hat", "kappa", "rho"]
 
     def test_no_attrition_means_no_lee_bounds(self, result):
         for row in result["survival_bias"].values():
