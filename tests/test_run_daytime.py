@@ -832,8 +832,9 @@ class TestParallelSensitivity:
                                      "gate:risk-axis-m2-mu", "gate:macro-m6",
                                      "gate:fin-nan", "gate:de-exclude", "gate:fin-fill",
                                      "measure:de-exclusion", "measure:index-event-a", "measure:index-event-m",
-                                     "measure:index-event-b", "measure:in-layer-sell", "measure:oof-replay",
-                                     "bench:rhat-scale"])
+                                     "measure:index-event-b", "measure:index-event-monitor",
+                                     "measure:index-event-monitor-add", "measure:in-layer-sell",
+                                     "measure:oof-replay", "bench:rhat-scale"])
     def test_computations_are_sensitive(self, key):
         """MCMC も探索も昇格ゲートも、数値の揺れが**採否や重みそのもの**を変える。"""
         assert rd.JOBS[key].parallel_sensitive is True

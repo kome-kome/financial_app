@@ -459,6 +459,35 @@ JOBS: dict[str, Job] = {
         # ブートストラップは固定 seed だが、読み込みの途中に夜間の書き込みが入ると同じ入力にならない。
         parallel_sensitive=True,
     ),
+    # 事前登録の前向き監視（§6.3・#1061・親 #1011）。凍結値は stage A と同じく追記節の値（テストが照合する）。
+    # **積むのは人**: 各回の w_m + 3 の週に入ってから（初回は 2026-11-16 の週。それより前は全回「未到来」）。
+    "measure:index-event-monitor": Job(
+        name="measure_index_event_monitor",
+        argv=("{python}", "-m", "scripts.measure_index_event", "monitor",
+              "--prereg", "docs/prereg/index-event-2026.md",
+              "--prereg-sha", "72c57412ea4663fab8806032ad09e0b90ab8dc6a4260b15721c158e8a75cb300",
+              "--cohort", "topix-2026-10"),
+        why="2026 群（TOPIX の移行措置 683 社・8 回の低減）の前向き監視（#1061・#1011）。w_m + 2 の週の終値が"
+            "そろった回だけ、圧力窓 CAR の累積 Z_k を O'Brien-Fleming の境界と比べる（未到来の回は検定に入れない）。"
+            "初回の実行でマッチ対を .index_lists/derived/ へ凍結し、2 回目以降は読み直す。",
+        # 見積り（stage A と同じく通期行の全年度と週次株価の読み込みが大半）。実走ログで差し替える。
+        measured_min=10.0,
+        # 初回はマッチ対を凍結する。読み込みの途中に夜間の書き込みが入ると、同じ入力から違う対が出る。
+        parallel_sensitive=True,
+    ),
+    # 同じ監視の新規採用 35 社（記述だけ・事前登録 R9）。初回に対を凍結するので同じく単独で回す。
+    "measure:index-event-monitor-add": Job(
+        name="measure_index_event_monitor_add",
+        argv=("{python}", "-m", "scripts.measure_index_event", "monitor",
+              "--prereg", "docs/prereg/index-event-2026.md",
+              "--prereg-sha", "72c57412ea4663fab8806032ad09e0b90ab8dc6a4260b15721c158e8a75cb300",
+              "--cohort", "topix-2026-10-add"),
+        why="2026 の TOPIX 新規採用 35 社の記述（#1061・事前登録 R9）。先回りの窓（選定基準日 2026-08-31 から）と"
+            "圧力窓の CAR を出す。検定はしない。",
+        # 見積り（移行措置の監視と同じ読み込み）。実走ログで差し替える。
+        measured_min=10.0,
+        parallel_sensitive=True,
+    ),
     # 拒否権に使う K の事前登録（#1044・親 #1040・ADR-0069）。凍結値は追記節の値（テストが照合する）。
     "measure:top-k-veto": Job(
         name="measure_top_k_veto",
