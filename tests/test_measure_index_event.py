@@ -152,14 +152,16 @@ class TestStageA:
         assert data["first_stage"]["pass"] is True
         assert data["power"]["n_weeks"] == 6 and data["power"]["mde"] is not None
         assert data["placebo"]["fpr"] is None and data["placebo"]["n_usable"] == 1
-        assert data["r0"]["status"] == "pending"
+        # d2 が登録済み（#1022）なので 2025-01 の除外数が出て、合成の検体では R0 が全項目成立する
+        assert data["r0"]["status"] == "pass"
+        assert data["r0"]["items"]["excluded_2025_01"]["value"] == 424
         # 要約には銘柄コードを入れない。マッチ対は別のファイルに書く
         assert not re.search(r"E9\d{3}", out.read_text(encoding="utf-8"))
         pairs = json.loads(pairs_path.read_text(encoding="utf-8"))["pairs"]["C1@2022-03-31"]
         assert set(pairs) == set(TREATED)
         for t, cs in pairs.items():
             assert cs and all(c.startswith(t[:4]) for c in cs)
-        assert "R0: pending" in capsys.readouterr().out
+        assert "R0: pass" in capsys.readouterr().out
 
     def test_first_stage_failure_exits_3_after_writing(self, wired, tmp_path):
         _seed(wired, spike=1.0)
