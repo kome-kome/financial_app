@@ -161,7 +161,7 @@ class TestStageA:
         assert set(pairs) == set(TREATED)
         for t, cs in pairs.items():
             assert cs and all(c.startswith(t[:4]) for c in cs)
-        assert "R0: pending" in capsys.readouterr().out
+        assert "R0: pass" in capsys.readouterr().out
 
     def test_first_stage_failure_exits_3_after_writing(self, wired, tmp_path):
         _seed(wired, spike=1.0)
