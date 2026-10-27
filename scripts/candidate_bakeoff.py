@@ -242,7 +242,8 @@ def average_residuals(runs: list[dict]) -> dict:
 
 def run_seeds(name: str, samples_by_ym: dict, meta_by_ym: dict, ids_by_ym: dict,
               feat_names: list, pca: int, *, seeds: int, return_parts: bool = False,
-              return_seed_parts: bool = False, opts: dict | None = None) -> dict:
+              return_seed_parts: bool = False, opts: dict | None = None,
+              train_exclude: dict | None = None) -> dict:
     """種を変えて `seeds` 回回し、行ごとに予測を平均してから指標を出す（#955）。
 
     1 回だけの M-2 は、種（subsample の抜き方）だけで rank-IC が ±0.005〜0.01 動き、条件の差と
@@ -259,13 +260,16 @@ def run_seeds(name: str, samples_by_ym: dict, meta_by_ym: dict, ids_by_ym: dict,
     `opts` は候補の既定への上書きで、`run_one` へそのまま渡す（種の上書きはその上に重ねる）。
     `momentum_gate --inner-cv` が M-6 の内側 CV の区切り方を差し替えるために使う（#971）。
     既定 None＝既存の呼び出しと同一。
+
+    `train_exclude` も `run_one` へそのまま渡す（学習側だけの除外・#1068）。既定 None＝既存の呼び出しと同一。
     """
     if seeds <= 1 or name not in SEEDED_CANDIDATES:
         return run_one(name, samples_by_ym, meta_by_ym, ids_by_ym, feat_names, pca,
-                       opts=opts, return_parts=return_parts)
+                       opts=opts, return_parts=return_parts, train_exclude=train_exclude)
     t0 = time.time()
     runs = [run_one(name, samples_by_ym, meta_by_ym, ids_by_ym, feat_names, pca,
-                    opts={**(opts or {}), "random_state": SEED_BASE + k}, return_parts=True)
+                    opts={**(opts or {}), "random_state": SEED_BASE + k}, return_parts=True,
+                    train_exclude=train_exclude)
             for k in range(seeds)]
     failed = next((r for r in runs if r.get("error")), None)
     if failed is not None:
@@ -294,7 +298,7 @@ def run_seeds(name: str, samples_by_ym: dict, meta_by_ym: dict, ids_by_ym: dict,
 
 def run_one(name: str, samples_by_ym: dict, meta_by_ym: dict, ids_by_ym: dict,
             feat_names: list, pca: int, *, opts: dict | None = None,
-            return_parts: bool = False) -> dict:
+            return_parts: bool = False, train_exclude: dict | None = None) -> dict:
     """候補1件を walk-forward → oof_backtest まで回して指標 dict を返す。
 
     return_parts=True のとき `out["_parts"] = (residuals, oof_meta)` を添える
@@ -304,7 +308,10 @@ def run_one(name: str, samples_by_ym: dict, meta_by_ym: dict, ids_by_ym: dict,
     既存の呼び出し（本スクリプト・macro_feature_bakeoff）は一切変わらない。
 
     opts は候補の既定パラメータへの上書き（`build_candidate` へそのまま渡す）。`run_seeds` が
-    `random_state` を変えるために使う（#955）。既定 None＝候補の既定のまま。"""
+    `random_state` を変えるために使う（#955）。既定 None＝候補の既定のまま。
+
+    train_exclude は `walk_forward_cv_monthly` へそのまま渡す学習側だけの除外（{ym: {行番号}}・#1068）。
+    渡したときは fold ごとの除外行数を `out["train_excluded"]` に載せる（届いたかの確認用）。既定 None＝従来と同一。"""
     t0 = time.time()
     eff_names = pca_feature_names(feat_names, pca) if pca > 0 else feat_names
     errors: list[str] = []
@@ -330,7 +337,7 @@ def run_one(name: str, samples_by_ym: dict, meta_by_ym: dict, ids_by_ym: dict,
         samples_by_ym, eff_names,
         min_train_months=MIN_TRAIN_MONTHS, step_months=STEP_MONTHS,
         return_residuals=True, fit_predict=fit_predict,
-        embargo_months=LABEL_HORIZON_MONTHS, **wf_extra,
+        embargo_months=LABEL_HORIZON_MONTHS, train_exclude=train_exclude, **wf_extra,
     )
     meta = build_oof_meta(ids_by_ym, meta_by_ym, residuals.keys())
     bt = _backtest(residuals, meta)
@@ -342,6 +349,8 @@ def run_one(name: str, samples_by_ym: dict, meta_by_ym: dict, ids_by_ym: dict,
         "oof": bt,
         "diag": summarize_diag(diag) if diag else {},
     }
+    if train_exclude is not None:
+        out["train_excluded"] = [f.get("n_train_excluded", 0) for f in folds]
     if errors:
         # 全 fold が落ちても walk_forward は静かに [] を返すため、握った理由をここで表に出す
         # （n_folds が減っただけの「静かな縮退」を見逃さない）。

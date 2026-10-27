@@ -429,6 +429,27 @@ M-2（XGBoost）は `random_state` を固定していても、種が違えば su
 成績になる。種ごとの rank-IC と short_side_spread は `[seeds]` の行と JSON の `seeds` に残す。
 `--seeds 1` で従来（種 42 の 1 回）と同じになる。M-6・M-1 は種で結果が変わらないので 1 回のまま。
 
+## 学習 fold だけから指数群×ラベル窓の重なりを落とすモード（`--train-exclude-index`・#1068）
+
+2022 前例（TOPIX の段階的ウエイト低減・G22）の社は、ラベル窓（月末の翌日から 364 日）に圧力日 P_m が入る月の
+52 週先リターンに、指数の売り圧力が乗っている。その行を**学習 fold からだけ**落とすと予測がどう変わるかを測る
+（#1010 の (e)・#1001 の手当ての候補）:
+
+    keep_index    … 本番の構成（学習も評価も全行）＝基準
+    exclude_index … 学習側だけ、G22 × ラベル窓に圧力日が入る (ym, 社) を落とす。評価域（test 月の行）は同じ
+
+    python -m scripts.momentum_gate --train-exclude-index         # M-2 / M-6（4検定・alpha 0.0125）
+
+G22 は台帳の最初の指定どおり（ITT・`index_events.members(L, "topix-2022-10", "transition")`。2023-10 に解除された
+社も含む）。重なりの判定は E_t と同じ（`index_event_study.label_window_exposure` の E_t > 0・暦は
+`pressure_calendar(STEPS_2022)`）で、書き写さない。**パネルは2条件で同一**（`panel_cond`）で、落とすのは
+`walk_forward_cv_monthly(train_exclude=)` の学習側の連結だけ（`train_groups` も落とした後の行数で数える）。
+台帳が読めなければ止まる。CV の前にパネルの中の除外行を数えて 0 なら止め、CV の後（全月・共通月の両段）に
+`train_exclude_reach_problems` で、除外の記録が CV から返ったこと・合計が 0 より大きいこと・最後の fold（学習
+期間が最も長い）で 0 より大きいことを確かめる。**最初のほうの fold は学習期間が G22 の重なる月（2021-10 以降）
+より前で終わるので、除外 0 が正しい**（fold ごとの 0 では止めない）。G26 の扱い・事前登録の照合・実走と採否は
+#1010 に残す。日中キューには積んでいない（**積むのは人**）。
+
 ## M-1 を測るときの注意
 
 M-1 は `macro_nan_ok=False`（strict）で**母集団自体が M-2/M-6 と別物**なので、パネルを共有
@@ -457,6 +478,8 @@ from database import (  # noqa: E402
     FinancialRecord,
     SessionLocal,
 )
+import index_event_study as S  # noqa: E402
+import index_events as IE  # noqa: E402
 from model_stats import paired_ic_significance  # noqa: E402
 from plugins import get_plugin  # noqa: E402
 from plugins.macro_ensemble import _align  # noqa: E402
@@ -564,6 +587,9 @@ class Cond(NamedTuple):
     `subsample`（#989）は M-2 の XGBoost が木ごとに抽出する学習行の割合。既定は本番の構成
     （`macro_gbdt._SUBSAMPLE`・#987 で 1.0）から取る。`valid_split` と同じく**パネルを動かさず**、M-2 の CV へ渡す
     opts にだけ効く。
+
+    `train_exclude_index`（#1068）は学習 fold からだけ G22 × ラベル窓の重なりを落とすか。既定 False は本番の構成。
+    **パネルを動かさず**（`panel_cond` で鍵から外す）、CV の学習側の連結にだけ効く（`train_exclude_of`）。
     """
     use_momentum: bool
     momentum_window: int
@@ -578,6 +604,7 @@ class Cond(NamedTuple):
     inner_cv: str = _M6_INNER_CV
     valid_split: str = _M2_VALID_SPLIT
     subsample: float = _M2_SUBSAMPLE
+    train_exclude_index: bool = False
 
 
 CONDS: dict[str, bool] = {"off": False, "on": True}
@@ -694,6 +721,15 @@ SUBSAMPLE_CONDS: dict[str, float] = {"subsample_0.8": 0.8, "subsample_1.0": 1.0}
 SUBSAMPLE_BASE_COND = f"subsample_{float(_M2_SUBSAMPLE)}"
 SUBSAMPLE_MODELS = ["xgb_m2"]
 
+# 学習 fold だけから指数群×ラベル窓の重なりを落とすモード（`--train-exclude-index`・#1068）。**基準は本番の構成**
+# （全行で学習する `keep_index`）。名前に `_index` を付けるのは、分母を名前で引く `base_of` が `--de-exclude` の
+# `keep` / `exclude` と取り違えないため。パネルは2条件で同一で、違うのは CV の学習側の連結だけ。
+TRAIN_EXCLUDE_INDEX_CONDS: dict[str, bool] = {"keep_index": False, "exclude_index": True}
+TRAIN_EXCLUDE_INDEX_BASE_COND = "keep_index"
+TRAIN_EXCLUDE_INDEX_MODELS = ["xgb_m2", "elasticnet"]
+# 落とす群（台帳の公表・群の種類）。2022 前例の最初の指定どおり（ITT）。
+TRAIN_EXCLUDE_INDEX_GROUP = ("topix-2022-10", "transition")
+
 # 規模で中立化した順位を比べるモード（`--size-neutral`・#970）。**基準は予測そのまま（`raw`）**＝M-2 の本番。
 # M-6 の本番は 2026-10-18 から `size_neutral`（#995）で、M-6 では差の符号を反転して読む。
 # 予測の後処理で条件を作る（リスク軸と同じ形）＝2条件は同じ `Cond` を共有し、CV は1回。`size_neutral` は
@@ -802,10 +838,11 @@ def build_conditions(windows: list[int] | None = None,
                     size_neutral: bool = False,
                     valid_split: bool = False,
                     inner_cv_purge: bool = False,
-                    subsample: bool = False) -> dict[str, Cond]:
+                    subsample: bool = False,
+                    train_exclude_index: bool = False) -> dict[str, Cond]:
     """条件集合 {名前: Cond} を作る。
 
-    15のモードがある。**同時に使えるのは1つだけ**（下記）:
+    16のモードがある。**同時に使えるのは1つだけ**（下記）:
 
       既定           … ADR-0045 の昇格ゲートと完全に同じ2条件（`off` / `on`・マクロは ON のまま）
       `windows`      … モメンタム無し ＋ 各窓（#592・ADR-0050）
@@ -822,6 +859,7 @@ def build_conditions(windows: list[int] | None = None,
       `valid_split`  … M-2 の early stopping の検証集合を行で取る ＋ 月の塊で取る（#976）。**パネルは2条件で同一**・M-2 だけ
       `inner_cv_purge` … M-6 の内側 CV を月の塊で区切る ＋ 学習と検証の間に空白を空ける（#979）。**パネルは2条件で同一**・M-6 だけ
       `subsample`    … M-2 の行の抽出の割合 0.8 ＋ 1.0（#989）。**パネルは2条件で同一**・M-2 だけ
+      `train_exclude_index` … 全行で学習 ＋ 学習 fold だけから G22 × ラベル窓の重なりを落とす（#1068）。**パネルは2条件で同一**
 
     `inner_cv_purge` / `valid_split` / `subsample` の `Cond` は2条件で違うが、違うのは CV へ渡す opts だけで、パネルの鍵からは外す
     （`panel_cond`）。`models` を渡したときはその軸を持つモデルだけであることを確かめる。
@@ -856,7 +894,8 @@ def build_conditions(windows: list[int] | None = None,
              ("--risk-axis", risk_axis), ("--fin-nan", fin_nan), ("--de-exclude", de_exclude),
              ("--fin-fill", fin_fill),
              ("--size-neutral", size_neutral), ("--valid-split", valid_split),
-             ("--inner-cv-purge", inner_cv_purge), ("--subsample", subsample)]
+             ("--inner-cv-purge", inner_cv_purge), ("--subsample", subsample),
+             ("--train-exclude-index", train_exclude_index)]
     picked = [name for name, on in modes if on]
     if len(picked) > 1:
         raise ValueError(
@@ -937,6 +976,16 @@ def build_conditions(windows: list[int] | None = None,
                 "別物を比べるので止める（#989）")
         return {name: Cond(False, MOM_WINDOW, subsample=rate)
                 for name, rate in SUBSAMPLE_CONDS.items()}
+    if train_exclude_index:
+        # 学習 fold の行を落とすかだけを差し替える。他の軸はすべて本番構成。パネルは2条件で同一（`panel_cond`）。
+        # M-1 はパネルが別物（strict）なので測らない（#1068）。
+        others = [m for m in (models or []) if m not in TRAIN_EXCLUDE_INDEX_MODELS]
+        if others:
+            raise ValueError(
+                f"--train-exclude-index は M-2 / M-6（{', '.join(TRAIN_EXCLUDE_INDEX_MODELS)}）だけを測る。"
+                f"{', '.join(others)} はパネルが別物（#1068）")
+        return {name: Cond(False, MOM_WINDOW, train_exclude_index=flag)
+                for name, flag in TRAIN_EXCLUDE_INDEX_CONDS.items()}
     if inner_cv_purge:
         # M-6 の内側 CV に空白を入れるかだけを差し替える。他の軸はすべて本番構成。パネルは2条件で同一
         # （`panel_cond`）。M-2・M-1 にこの軸は無い（#979）。
@@ -990,6 +1039,7 @@ def base_of(conds: dict[str, Cond], default_max_features: int | None = None) -> 
     検証集合のモードの分母も**本番の構成**（`valid_` ＋ `macro_gbdt._VALID_SPLIT`）。この軸はパネルを動かさない。
     内側 CV の空白のモードの分母も**本番の構成**（`gap`＝`months_purged`・#968）。この軸もパネルを動かさない。
     行の抽出の割合のモードの分母も**本番の構成**（`subsample_` ＋ `macro_gbdt._SUBSAMPLE`・#989）。この軸もパネルを動かさない。
+    学習 fold の除外のモードの分母も**本番の構成**（全行で学習する `keep_index`・#1068）。この軸もパネルを動かさない。
     規模の中立化のモードの分母も**本番の構成**（予測そのまま `raw`）。この軸もパネルを動かさない。
     リスク軸モードの分母も**本番の構成**だが、モデルごとに違う（M-1 は `r2`・M-6 は `mu_only`）ので
     ここでは決めない。`main` はリスク軸モードでは `risk_base_cond` を使う（#808）。
@@ -997,7 +1047,8 @@ def base_of(conds: dict[str, Cond], default_max_features: int | None = None) -> 
     for cand in (BASE_COND, MACRO_BASE_COND, INTERACTION_BASE_COND, FIN_ROWS_BASE_COND,
                  DEMEAN_BASE_COND, RISK_BASE_COND, FIN_FILL_BASE_COND, FIN_NAN_BASE_COND,
                  DE_EXCLUDE_BASE_COND, SIZE_NEUTRAL_BASE_COND,
-                 VALID_SPLIT_BASE_COND, INNER_CV_PURGE_BASE_COND, SUBSAMPLE_BASE_COND):
+                 VALID_SPLIT_BASE_COND, INNER_CV_PURGE_BASE_COND, SUBSAMPLE_BASE_COND,
+                 TRAIN_EXCLUDE_INDEX_BASE_COND):
         if cand in conds:
             return cand
     prod = maxfeat_cond_name(default_max_features) if default_max_features else None
@@ -1029,7 +1080,8 @@ MODE_SUFFIX: dict[str, str] = {"default": "", "windows": "", "macro": "_macro",
                                "de_exclude": "_de_exclude", "fin_fill": "_fin_fill",
                                "size_neutral": "_size_neutral",
                                "valid_split": "_valid_split", "inner_cv_purge": "_inner_cv_purge",
-                               "subsample": "_subsample"}
+                               "subsample": "_subsample",
+                               "train_exclude_index": "_train_exclude_index"}
 
 
 def mode_of(windows: list[int] | None = None, macro: bool = False,
@@ -1038,7 +1090,7 @@ def mode_of(windows: list[int] | None = None, macro: bool = False,
             risk_axis: bool = False, fin_nan: bool = False, de_exclude: bool = False,
             fin_fill: bool = False, size_neutral: bool = False,
             valid_split: bool = False, inner_cv_purge: bool = False,
-            subsample: bool = False) -> str:
+            subsample: bool = False, train_exclude_index: bool = False) -> str:
     """測定モードの名前を返す（`build_conditions` と同じ引数から1箇所で導出する）。
 
     **#615 で足した2モードは、ここを持たないまま別モードの名前で出力されていた**——
@@ -1073,6 +1125,8 @@ def mode_of(windows: list[int] | None = None, macro: bool = False,
         return "inner_cv_purge"
     if subsample:
         return "subsample"
+    if train_exclude_index:
+        return "train_exclude_index"
     return "windows" if windows else "default"
 
 
@@ -1122,6 +1176,10 @@ _AXIS_VERDICTS: dict[str, tuple[str, str]] = {
     # CV は1回で、差は予測の変換だけ。共通域は時価総額のある行（無い行は両条件から落とす・#970）。
     "size_neutral": ("SIZE NEUTRAL AXIS [same CV; rows without market cap dropped from both sides]",
                      "removing the log market cap effect per month did not beat the raw prediction"),
+    # パネルと評価域は2条件で同一で、差は学習 fold から落とす行だけ（#1068）。
+    "train_exclude_index": ("TRAIN EXCLUDE INDEX AXIS [same panel and test rows; G22 label-window rows "
+                            "dropped from training folds only]",
+                            "dropping the G22 label-window rows from training did not beat training on all rows"),
     # 分母はモデルで違う（M-1 は r2・M-6 は mu_only・#808）ので名前を差し込む。
     "risk_axis": ("RISK AXIS",
                   "no risk condition beat the production ordering ({base})"),
@@ -1921,13 +1979,15 @@ def build_fin_sources(conds: dict[str, Cond], kinds: list[str], fins: dict[str, 
 # ── CV だけに効く欄（M-6 の内側 CV・#971／M-2 の検証集合・#976）───────────────────
 
 def panel_cond(c: Cond) -> Cond:
-    """パネルを作る鍵（#971・#976・#989）。CV だけに効く欄（`inner_cv`・`valid_split`・`subsample`）を本番の値へ戻す。
+    """パネルを作る鍵（#971・#976・#989・#1068）。CV だけに効く欄（`inner_cv`・`valid_split`・`subsample`・
+    `train_exclude_index`）を本番の値へ戻す。
 
     `inner_cv_purge` / `valid_split` / `subsample` の2条件は同じパネルを1枚だけ作って共有する——別々に作ると、構築の
     揺れが区切り方の差に混ざる（`--risk-axis` が同じ `Cond` を共有して μ̂ を揃えるのと同じ理由）。他のモードでは
     どれも既定のままなので、鍵は `c` そのものと等しく、挙動は変わらない。
     """
-    return c._replace(inner_cv=_M6_INNER_CV, valid_split=_M2_VALID_SPLIT, subsample=_M2_SUBSAMPLE)
+    return c._replace(inner_cv=_M6_INNER_CV, valid_split=_M2_VALID_SPLIT, subsample=_M2_SUBSAMPLE,
+                      train_exclude_index=False)
 
 
 def cv_opts(c: Cond, model: str) -> dict | None:
@@ -2000,6 +2060,56 @@ def subsample_reach_problems(diags: dict[str, dict], conds: dict[str, Cond]) -> 
         got = (diag or {}).get("subsample", _SUBSAMPLE_DEFAULT)
         if got is None or not math.isclose(float(got), want, abs_tol=1e-9):
             problems.append(f"{key}: 行の抽出が {got} で回った（指定は {want}）")
+    return problems
+
+
+# ── 学習 fold だけから指数群×ラベル窓の重なりを落とす（`--train-exclude-index`・#1068）──────────────
+
+def index_exclusion_rows(ids_by_ym: dict, members, calendar) -> dict[str, set[int]]:
+    """{ym: {行番号}}。ラベル窓に圧力日が入る月（E_t > 0）の、群 `members` の社の行（`ids_by_ym[ym]` の位置）。
+
+    重なりの判定は `index_event_study.label_window_exposure` をそのまま使う（窓の定義を書き写さない）。
+    該当行の無い月は載せない。
+    """
+    out: dict[str, set[int]] = {}
+    for ym, ids in ids_by_ym.items():
+        if S.label_window_exposure(ym, calendar)[0] <= 0:
+            continue
+        rows = {j for j, ec in enumerate(ids) if ec in members}
+        if rows:
+            out[ym] = rows
+    return out
+
+
+def train_exclude_of(c: Cond, ids_by_ym: dict, members, calendar) -> dict[str, set[int]] | None:
+    """条件が CV へ渡す学習側の除外（`walk_forward_cv_monthly(train_exclude=)`）。除外しない条件は None。"""
+    if not c.train_exclude_index:
+        return None
+    return index_exclusion_rows(ids_by_ym, members, calendar)
+
+
+def train_exclude_reach_problems(runs: dict[str, dict], conds: dict[str, Cond]) -> list[str]:
+    """学習側の除外が CV まで届いていない理由を列挙する（#1068）。空リストなら健全。
+
+    `runs` は {"条件|モデル": run の結果}。除外を渡した run は fold ごとの除外行数を `train_excluded` に持つ
+    （`candidate_bakeoff.run_one`）。届かないと両条件が同じ CV になり、エラーを出さずに「差なし」だけが残る。
+    **fold ごとの 0 では止めない**——最初のほうの fold は学習期間が G22 の重なる月より前で終わる。最後の fold は
+    学習期間が最も長いので、そこで 0 なら届いていない。基準側で除外が記録されたら取り違えなので止める。
+    """
+    problems = []
+    for key, out in runs.items():
+        cond = key.split("|", 1)[0]
+        got = out.get("train_excluded")
+        if not conds[cond].train_exclude_index:
+            if got and sum(got):
+                problems.append(f"{key}: 基準側なのに学習から {sum(got)} 行を落とした")
+            continue
+        if got is None:
+            problems.append(f"{key}: 除外の記録が CV から返らない（train_exclude が届いていない）")
+        elif not got or sum(got) == 0:
+            problems.append(f"{key}: 学習から落とした行が 0（fold {len(got)} 個）")
+        elif got[-1] == 0:
+            problems.append(f"{key}: 最後の fold で学習から落とした行が 0（fold ごと {got}）")
     return problems
 
 
@@ -2341,6 +2451,10 @@ def main() -> None:
                     help="M-2 の行の抽出の割合のモード（木ごとに学習行の一部を抽出する本番の割合と、抽出を止める割合を"
                          f"共通域で比べる・#989・#987。条件は {' / '.join(SUBSAMPLE_CONDS)}・分母は {SUBSAMPLE_BASE_COND}）。パネルは2条件で同一。"
                          f"モデルは {','.join(SUBSAMPLE_MODELS)} だけ。他モードと併用不可")
+    ap.add_argument("--train-exclude-index", dest="train_exclude_index", action="store_true",
+                    help="学習 fold の除外のモード（全行で学習する keep_index＝本番と、学習 fold からだけ G22 × ラベル窓に"
+                         "圧力日が入る行を落とす exclude_index を共通域で比べる・#1068・#1010 の (e)）。パネルと評価域は"
+                         f"2条件で同一。モデル既定は {','.join(TRAIN_EXCLUDE_INDEX_MODELS)}。台帳が要る。他モードと併用不可")
     ap.add_argument("--size-neutral", dest="size_neutral", action="store_true",
                     help="規模の中立化のモード（予測そのまま raw＝本番と、月ごとに予測を log 時価総額へ OLS で回帰した"
                          "残差 size_neutral を共通域で比べる・#970）。CV は1回。時価総額の無い行は両条件から落とす。"
@@ -2388,6 +2502,8 @@ def main() -> None:
         default_models = INNER_CV_PURGE_MODELS
     elif args.subsample:
         default_models = SUBSAMPLE_MODELS
+    elif args.train_exclude_index:
+        default_models = TRAIN_EXCLUDE_INDEX_MODELS
     elif args.size_neutral:
         default_models = SIZE_NEUTRAL_MODELS
     else:
@@ -2422,7 +2538,8 @@ def main() -> None:
                                  fin_fill=args.fin_fill,
                                  valid_split=args.valid_split,
                                  inner_cv_purge=args.inner_cv_purge, subsample=args.subsample,
-                                 size_neutral=args.size_neutral)
+                                 size_neutral=args.size_neutral,
+                                 train_exclude_index=args.train_exclude_index)
     except ValueError as e:
         raise SystemExit(str(e))
     # 列数モードの分母は本番値（プラグイン既定）。**ここで数値を書き写さない**。
@@ -2477,7 +2594,7 @@ def main() -> None:
                    fin_nan=args.fin_nan, de_exclude=args.de_exclude, fin_fill=args.fin_fill,
                    size_neutral=args.size_neutral,
                    valid_split=args.valid_split, inner_cv_purge=args.inner_cv_purge,
-                   subsample=args.subsample)
+                   subsample=args.subsample, train_exclude_index=args.train_exclude_index)
     default_out = f"momentum_gate{MODE_SUFFIX[mode]}.json"
     if mode == "risk_axis" and models != RISK_MODELS:
         # M-1 と M-6 は分母が違い別々に回す（#808）。同じファイルへ書くと後の run が前の結果を消す。
@@ -2491,6 +2608,10 @@ def main() -> None:
         default_out = default_out[:-len(".json")] + f"_base-{base}.json"
     out_path = Path(args.json_path) if args.json_path else _OUT_DIR / default_out
 
+    # 学習 fold の除外のモード（#1068）の群と圧力日の暦。他モードでは空のまま。
+    index_members: frozenset = frozenset()
+    index_calendar: tuple = ()
+    train_exclude_rows: dict[str, int] = {}
     db = SessionLocal()
     try:
         prices_by_co = _load_prices(args.allow_full_pull)
@@ -2525,6 +2646,17 @@ def main() -> None:
         fill_sources = (load_fill_sources(db)
                         if any(fin_source_key(c, MODEL_SPECS[m][2])[2]
                                for c in conds.values() for m in models) else {})
+        if mode == "train_exclude_index":
+            # 台帳は CPU 計算の前に読む。読めなければ止める（空の群で回ると「差なし」だけが残る）。
+            try:
+                index_members = IE.members(IE.load_ledger(db), *TRAIN_EXCLUDE_INDEX_GROUP)
+            except IE.IndexLedgerError as e:
+                raise SystemExit(f"中止: 指数イベント台帳が使えません: {e}")
+            if not index_members:
+                raise SystemExit(f"中止: 台帳に {TRAIN_EXCLUDE_INDEX_GROUP} の社が1社もいません")
+            index_calendar = S.pressure_calendar(IE.STEPS_2022)
+            print(f"[train_exclude_index] {TRAIN_EXCLUDE_INDEX_GROUP}: members={len(index_members)} "
+                  f"pressure days={len(index_calendar)}", flush=True)
         if mode == "fin_rows":
             if not ttm_rows or ttm_rows <= 0:
                 raise SystemExit(
@@ -2590,9 +2722,22 @@ def main() -> None:
                       f"inner_cv={c.inner_cv} "
                       f"valid_split={c.valid_split} "
                       f"subsample={c.subsample} "
+                      f"train_exclude_index={'on' if c.train_exclude_index else 'off'} "
                       f"months={st['months']} ({st['first_ym']}..{st['last_ym']}) "
                       f"samples={st['samples']} companies={st['companies']} "
                       f"features={st['n_features']} [{head}{more}]", flush=True)
+
+        # 学習 fold の除外のモード（#1068）では、落とす行がパネルにあるかを CV の前に数える。0 行のまま走ると
+        # 両条件が同じ CV になり「差なし」だけが残る（台帳の社コードとパネルの社コードの食い違い等）。
+        if mode == "train_exclude_index":
+            for kind in kinds:
+                rows = index_exclusion_rows(panels[(base, kind)][2], index_members, index_calendar)
+                train_exclude_rows[kind] = sum(len(v) for v in rows.values())
+                print(f"[train_exclude_index/{kind}] rows to drop from training: {train_exclude_rows[kind]} "
+                      f"over {len(rows)} months ({min(rows, default='-')}..{max(rows, default='-')})",
+                      flush=True)
+            if not all(train_exclude_rows.values()):
+                raise SystemExit(f"中止: 学習から落とす行がパネルに1行もありません {train_exclude_rows}")
 
         # 行の基準モードでは、切替が**断面まで届いたか**を確かめてから CV に入る。TTM 行が
         # 表にあっても1行も選ばれなければ両条件は同じパネルで、「差なし」だけが残る。
@@ -2738,7 +2883,9 @@ def main() -> None:
                     fresh = run_seeds(estimator, s, m, i, feats, pca=0, seeds=args.seeds,
                                       return_parts=True,
                                       return_seed_parts=(mode in SEED_RESCORED_MODES),
-                                      opts=cv_opts(conds[cond], model))
+                                      opts=cv_opts(conds[cond], model),
+                                      train_exclude=train_exclude_of(conds[cond], i, index_members,
+                                                                     index_calendar))
                     ran[memo] = (fresh, fresh.pop("_parts"), fresh.pop("_seed_parts", None))
                 out, part, seed_parts = ran[memo]
                 if m6_production_post(model, mode):
@@ -2819,6 +2966,17 @@ def main() -> None:
                 raise SystemExit("中止: 行の抽出の割合の切り替えが CV に届いていません: " + " / ".join(problems))
             print("[note] both sides share one panel; the only difference is the share of training rows "
                   "each M-2 tree samples (subsample)", flush=True)
+        # 学習 fold の除外のモード（#1068）も、除外が CV まで届いたかを確かめる。評価域は2条件で同じ。
+        if mode == "train_exclude_index":
+            problems = train_exclude_reach_problems(results, conds)
+            if problems:
+                raise SystemExit("中止: 学習 fold の除外が CV に届いていません: " + " / ".join(problems))
+            for key, out in results.items():
+                if out.get("train_excluded") is not None:
+                    print(f"[train_exclude_index] {key}: rows dropped from training per fold = "
+                          f"{out['train_excluded']}", flush=True)
+            print("[note] both sides share one panel and the same test rows; the only difference is "
+                  "which rows each training fold sees", flush=True)
     finally:
         db.close()
 
@@ -2858,7 +3016,9 @@ def main() -> None:
             if memo not in cran:
                 s, m, i, feats = cpanels[(cond, kind)]
                 fresh = run_seeds(estimator, s, m, i, feats, pca=0, seeds=args.seeds,
-                                  return_parts=True, opts=cv_opts(conds[cond], model))
+                                  return_parts=True, opts=cv_opts(conds[cond], model),
+                                  train_exclude=train_exclude_of(conds[cond], i, index_members,
+                                                                 index_calendar))
                 cran[memo] = (fresh, fresh.pop("_parts"))
             out, part = cran[memo]
             if m6_production_post(model, mode):
@@ -2890,6 +3050,10 @@ def main() -> None:
         if problems:
             raise SystemExit("中止: 行の抽出の割合の切り替えが CV に届いていません（共通月）: "
                              + " / ".join(problems))
+    if mode == "train_exclude_index":
+        problems = train_exclude_reach_problems(cruns, conds)
+        if problems:
+            raise SystemExit("中止: 学習 fold の除外が CV に届いていません（共通月）: " + " / ".join(problems))
 
     print("\n=== common (ym,ec) restriction ===", flush=True)
     common_results: dict[str, dict] = {}
@@ -3118,7 +3282,8 @@ def main() -> None:
                               "fin_fill": c.fin_fill,
                               "inner_cv": c.inner_cv,
                               "valid_split": c.valid_split,
-                              "subsample": c.subsample}
+                              "subsample": c.subsample,
+                              "train_exclude_index": c.train_exclude_index}
                        for name, c in conds.items()},
         "mode": mode,
         "base_cond": base,
@@ -3138,6 +3303,13 @@ def main() -> None:
         "fin_oof_path": str(fin_oof_path) if fin_oof_path else None,
         "fin_oof_rows": fin_oof_rows,
         "de_exclude": {"nulled_rows": de_nulled_rows, "samples": de_exclude_samples},
+        # 学習 fold の除外のモード（#1068）。群・群の社数・パネルの中の除外行数（種別ごと）・共通月の run の
+        # fold ごとの除外行数。他モードでは空 / 0。
+        "train_exclude_index": {"group": list(TRAIN_EXCLUDE_INDEX_GROUP) if mode == "train_exclude_index" else None,
+                                "members": len(index_members),
+                                "panel_rows": train_exclude_rows,
+                                "by_run": {k: v.get("train_excluded") for k, v in cruns.items()
+                                           if v.get("train_excluded") is not None}},
         # 規模の中立化モード（#970）。時価総額の取れたパネルの行数・共通域で両条件から落とした行数・
         # 規模の十分位ごとの {モデル: {条件: {size_d<k>: 指標}}}。他モードでは 0 / 空。
         # 行ごとの OOF の CSV（#1009・列は `SIZE_OOF_CSV_COLUMNS`）。他モードでは None / 0。
