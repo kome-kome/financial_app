@@ -121,8 +121,15 @@ class TestRegistry:
         assert len(IE.DELISTED_DURING["d1"]) == 11
         assert len(IE.CODE_SUCCESSIONS["d1"]) == 2
 
-    def test_d2_is_unregistered_not_empty(self):
-        assert IE.DELISTED_DURING["d2"] is None
+    def test_d2_is_registered_per_company(self):
+        """#1022: 継続 439 社のうち 2025-01 の除外より前に廃止した 15 社。2025-01 の除外数は 439 − 15。"""
+        d2 = IE.DELISTED_DURING["d2"]
+        assert len(d2) == 15
+        codes = [d.sec_code for d in d2]
+        assert len(set(codes)) == len(codes)
+        assert not set(codes) & {d.sec_code for d in IE.DELISTED_DURING["d1"]}
+        assert not set(codes) & {s.old for ss in IE.CODE_SUCCESSIONS.values() for s in ss}
+        assert IE.REVIEWS["topix-2023-10-review"].counts["transition"] - len(d2) == 424
 
     def test_coefficients_are_formulas(self):
         assert [s.coefficient for s in IE.STEPS_2026] == [1 - Fraction(m, 8) for m in range(1, 9)]

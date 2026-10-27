@@ -152,7 +152,9 @@ class TestStageA:
         assert data["first_stage"]["pass"] is True
         assert data["power"]["n_weeks"] == 6 and data["power"]["mde"] is not None
         assert data["placebo"]["fpr"] is None and data["placebo"]["n_usable"] == 1
-        assert data["r0"]["status"] == "pending"
+        # d2 が登録済み（#1022）なので 2025-01 の除外数が出て、合成の検体では R0 が全項目成立する
+        assert data["r0"]["status"] == "pass"
+        assert data["r0"]["items"]["excluded_2025_01"]["value"] == 424
         # 要約には銘柄コードを入れない。マッチ対は別のファイルに書く
         assert not re.search(r"E9\d{3}", out.read_text(encoding="utf-8"))
         pairs = json.loads(pairs_path.read_text(encoding="utf-8"))["pairs"]["C1@2022-03-31"]
