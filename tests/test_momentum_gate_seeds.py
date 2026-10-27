@@ -46,7 +46,7 @@ class TestAverageResiduals:
 
 def _fake_run_one(calls):
     """呼ばれた opts を記録し、種ごとに違う予測を返す偽の run_one。"""
-    def run_one(name, s, m, i, feats, pca, *, opts=None, return_parts=False):
+    def run_one(name, s, m, i, feats, pca, *, opts=None, return_parts=False, train_exclude=None):
         calls.append(opts)
         rs = (opts or {}).get("random_state", 42)
         resid = {"2021-01": [(float(rs), 1.0), (float(rs) + 1.0, 2.0)]}
@@ -109,7 +109,7 @@ class TestRunSeeds:
         assert got[1][0] == {"2021-01": [(43.0, 1.0), (44.0, 2.0)]}
 
     def test_failed_seed_is_reported_not_averaged(self, monkeypatch):
-        def failing(name, s, m, i, feats, pca, *, opts=None, return_parts=False):
+        def failing(name, s, m, i, feats, pca, *, opts=None, return_parts=False, train_exclude=None):
             return {"name": name, "error": "全 fold 失敗: x", "_parts": ({}, {})}
         monkeypatch.setattr(cb, "run_one", failing)
         out = cb.run_seeds("xgb_m2", {}, {}, {}, [], 0, seeds=3)

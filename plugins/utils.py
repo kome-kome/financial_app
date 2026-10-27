@@ -822,6 +822,7 @@ def walk_forward_cv_monthly(
     fit_predict=None,
     embargo_months: int = 0,
     pass_train_groups: bool = False,
+    train_exclude: dict | None = None,
 ) -> list[dict] | tuple[list[dict], dict]:
     """月次ウォークフォワードCV（FUTURE_TASKS.md 仕様）。
     samples_by_ym: {"YYYY-MM": [(feature_row: list[float], target: float), ...]}
@@ -848,6 +849,10 @@ def walk_forward_cv_monthly(
       （ADR-0014）。0 のとき従来の train_yms = all_yms[:i] と完全一致。M-1/M-2 は 52 週先
       ラベルのため LABEL_HORIZON_MONTHS(=12) を渡す。学習開始は min_train_months + embargo_months
       月目に後ろ倒しされ（案B）、embargo 後も min_train_months 分の学習期間が保証される。
+    train_exclude: {ym: {行番号, ...}}（行番号は samples_by_ym[ym] の位置）。学習側に積むときだけ該当行を
+      落とし、train_groups も落とした後の行数で数える。**テスト月の行には効かない**＝評価域は変わらない。
+      fold_results に `n_train_excluded`（その fold で落とした行数）を載せる。既定 None では従来と完全に
+      同一（`momentum_gate --train-exclude-index`・#1068）。
     """
     all_yms = sorted(samples_by_ym.keys())
     if len(all_yms) < min_train_months + embargo_months + 1:
@@ -868,8 +873,14 @@ def walk_forward_cv_monthly(
 
         train_samples: list[tuple] = []
         train_groups: list[int] = []
+        n_excluded = 0
         for ym in train_yms:
             ym_samples = samples_by_ym[ym]
+            drop = train_exclude.get(ym) if train_exclude else None
+            if drop:
+                kept = [s for j, s in enumerate(ym_samples) if j not in drop]
+                n_excluded += len(ym_samples) - len(kept)
+                ym_samples = kept
             if not ym_samples:
                 continue
             train_samples.extend(ym_samples)
@@ -899,13 +910,16 @@ def walk_forward_cv_monthly(
         r2 = 1 - sse / sst if sst > 0 else 0.0
         rmse = math.sqrt(sse / len(y_test_orig))
 
-        fold_results.append({
+        fold_row = {
             "test_ym": test_ym,
             "n_train": len(train_samples),
             "n_test":  len(test_samples),
             "r2":      round(r2, 4),
             "rmse":    round(rmse, 4),
-        })
+        }
+        if train_exclude is not None:
+            fold_row["n_train_excluded"] = n_excluded
+        fold_results.append(fold_row)
         if return_residuals:
             residuals_by_ym[test_ym] = list(zip(yhat_orig, y_test_orig))
 
