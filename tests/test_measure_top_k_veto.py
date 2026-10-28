@@ -207,6 +207,9 @@ class TestDaytimeJob:
         assert job.argv[1:4] == ("-m", "scripts.measure_top_k_veto", "--prereg")
         assert job.parallel_sensitive is True
 
-    def test_result_section_is_not_written_yet(self):
+    def test_result_section_records_the_chosen_k(self):
+        # 2026-10-28 の実走で K は該当なし（ADR-0069 accepted）。書き写した結果を消さない
         text = PREREG.read_text(encoding="utf-8")
-        assert prereg.appendix_section(text, "### 結果").startswith(prereg.PLACEHOLDER)
+        section = prereg.appendix_section(text, "### 結果")
+        assert not section.startswith(prereg.PLACEHOLDER)
+        assert "選ばれた K: 該当なし" in section
