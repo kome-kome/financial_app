@@ -125,3 +125,61 @@ class TestDaytimeJob:
 
     def test_job_is_parallel_sensitive(self):
         assert rd.JOBS[self.KEY].parallel_sensitive is True
+
+
+class TestWholeUniverse:
+    """全社の売り側spread（#1073）。M-4 の base_oof と同じ定義・同じ域で測る。"""
+    YMS = ("2020-01", "2020-04")
+
+    def _common(self):
+        common = {}
+        for k, ym in enumerate(self.YMS):
+            common[ym] = [(f"E{i}", (0.01 * i, 0.02 * ((i * 7) % 12), 0.03 * ((i * 5 + k) % 12)),
+                           0.01 * ((i * 3 + k) % 12) - 0.05) for i in range(12)]
+        return common
+
+    def _base_oof(self, common):
+        """macro_ensemble と同じ組み方の base_oof。"""
+        return {name: sb.oof_backtest({ym: [(yh[j], y) for _ec, yh, y in v] for ym, v in common.items()})
+                for j, name in enumerate(BASES)}
+
+    def test_value_is_period_mean_minus_bottom_fifth(self):
+        common = self._common()
+        preds, y = sb.common_to_dicts(common, BASES)
+        other = {k: -v for k, v in preds["macro_enet"].items()}
+        res = sb.whole_universe_short_side(common, {**preds, sb.UPPER: other}, y, self._base_oof(common))
+        for ym in self.YMS:
+            rows = sorted((other[(ym, ec)], y[(ym, ec)]) for ec, _yh, _y in common[ym])
+            bottom = rows[:len(rows) // 5]
+            want = sum(r[1] for r in rows) / len(rows) - sum(r[1] for r in bottom) / len(bottom)
+            assert res["by_condition"][sb.UPPER]["by_period"][ym] == pytest.approx(want, abs=1e-6)
+        assert res["n_common_rows"] == 24
+
+    def test_mu_conditions_match_the_m4_base_oof(self):
+        common = self._common()
+        preds, y = sb.common_to_dicts(common, BASES)
+        base = self._base_oof(common)
+        res = sb.whole_universe_short_side(common, dict(preds), y, base)
+        for name in BASES:
+            assert res["by_condition"][name]["by_period"] == base[name]["short_side_spread_by_period"]
+
+    def test_mismatch_with_base_oof_stops(self):
+        common = self._common()
+        preds, y = sb.common_to_dicts(common, BASES)
+        base = self._base_oof(common)
+        base["macro_enet"]["short_side_spread_by_period"]["2020-01"] += 0.01
+        with pytest.raises(RuntimeError):
+            sb.whole_universe_short_side(common, dict(preds), y, base)
+
+    def test_all_conditions_share_one_domain(self):
+        """どれかの条件にキーが無い社は全条件から外す（縮む側が有利に見える罠を避ける・ADR-0045）。
+        域が縮めば base_oof と合わなくなるので、照合も止まる。"""
+        common = self._common()
+        preds, y = sb.common_to_dicts(common, BASES)
+        upper = {k: v for k, v in preds["macro_enet"].items() if k != ("2020-01", "E3")}
+        sells = {**preds, sb.UPPER: upper}
+        res = sb.whole_universe_short_side(common, sells, y, base_oof={})
+        assert res["n_common_rows"] == 23
+        assert res["by_condition"]["macro_enet"]["by_period"] == res["by_condition"][sb.UPPER]["by_period"]
+        with pytest.raises(RuntimeError):
+            sb.whole_universe_short_side(common, sells, y, self._base_oof(common))

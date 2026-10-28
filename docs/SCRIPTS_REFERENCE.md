@@ -277,6 +277,8 @@ M-4 の**基底構成**（M-1+M-2 vs M-1+M-2+M-6）の OOF 横並び実測（#39
 
 `--in-layer`（#1043・ADR-0069 の決定 4）は同じ M-4 の共通域で**上位層の売り側spread**も出す: 1 つ前の test 期に買いの並び（M-1 / M-2 は画面の既定の U＝`display_risk_map`＋`display_scores`、λ=0 の M-6 は μ̂）で上位 20% だった社の中で、売りの並び（M-6・M-2・M-1 の μ̂ と、`sell_ranking` の既定プリセットの式 `sell_score` に今の R_macro を入れた**未来情報込みの上限**）の下位 20% が層の平均を下回った幅（`plugins.macro_snapshots.in_layer_short_side`）。社ごとの予測は `ensemble_base_bakeoff._run_config(keep_common=True)` が M-4 の `_stack_walk_forward` へ渡る引数を `wraps` で横取りして取る（M-4 の戻り値は変えない）。守ること: **比べる条件は全て同じ共通域・同じ層で測る**（共通域は全ての売りの条件と y がそろう社）／**参考で判定に使わない**（売りに拒否権を置くかは #1040）／**M-4 の基底は本番と設定が違う**（M-2・M-6 は fin_fill なし、M-6 の `_m6_cv` はさらに内側の交差検証が `rows` で規模の中立化なし）ことを出力と JSON に残す。結果は `scripts/.cache/sell_in_layer.json`。日中枠（`measure:in-layer-sell`・並走に敏感）で単独に回す
 
+同じ実行で**全社の売り側spread**（#1073）も同じ売りの条件（上限版を含む）で出し、JSON の `whole_universe` に書く。計算は `oof_backtest` をそのまま使い、再計算した M-6 の値が M-4 の `base_oof_backtest` と一致しなければ止める（同じ共通域を測れていることの照合）。既定プリセットの −R_macro を残すかの判定の規則は #1073 のコメントで計測の前に固定した
+
 種別: 検証（実験） ／ 依存先: scripts/ensemble_base_bakeoff.py, model_stats.py, scripts/_cache.py, plugins/macro_snapshots.py, plugins/sell_ranking.py ／ テスト: tests/test_sell_mu_source_bakeoff.py, tests/test_in_layer_short_side.py
 
 ## `scripts/oof_portfolio_replay.py`
