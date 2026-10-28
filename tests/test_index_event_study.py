@@ -694,6 +694,32 @@ class TestBandsAndPressure:
         assert not re.search(r'"(T\d|C\d[ab])"', json.dumps(summary, default=str))
 
 
+class TestConfoundGrowth250:
+    """グロース 250 の定期選定に当たった処置社を数え、除いた CAR を併記する（記述・#1065）。"""
+
+    def test_counts_and_excluded_cars(self):
+        inputs = _monitor_synthetic(effect=-0.01)
+        conf = {"g250_add": {"T4", "C4a"}, "g250_remove": {"T5", "T6"}}
+        summary = S.monitor(**inputs, confounders=conf)
+        g = summary["descriptive"]["confound_growth250"]
+        # 処置社だけを数える（対照の C4a は数えない）。T4〜T7 はグロース
+        assert g["n_treated_hit"] == {"g250_add": 1, "g250_remove": 2}
+        assert g["n_treated_hit_by_segment"] == {"g250_add": {"growth": 1}, "g250_remove": {"growth": 2}}
+        assert g["ex_all"]["n_treated"] == 5 and g["ex_remove"]["n_treated"] == 6
+        kept = {t: c for t, c in inputs["pairs"].items() if t not in {"T4", "T5", "T6"}}
+        want = S.monitor(**{**inputs, "pairs": kept})["descriptive"]["pressure_car"]
+        assert g["ex_all"]["pressure_car"] == pytest.approx(want)
+        assert set(g["ex_all"]["by_segment"]) == {"prime", "growth"}
+
+    def test_confirmatory_test_is_unchanged(self):
+        inputs = _monitor_synthetic(effect=-0.01)
+        with_conf = S.monitor(**inputs, confounders={"g250_add": {"T4"}, "g250_remove": set()})
+        assert with_conf["sequential"] == S.monitor(**inputs)["sequential"]
+
+    def test_without_the_list_it_is_none(self):
+        assert S.monitor(**_monitor_synthetic())["descriptive"]["confound_growth250"] is None
+
+
 # ── M 族（§6.2・#1009）────────────────────────────────────────────────────────
 
 CAL = S.pressure_calendar(IE.STEPS_2022)

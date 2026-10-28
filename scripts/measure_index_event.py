@@ -84,6 +84,8 @@ CHUNK = 500
 # 売買代金を読む週の範囲の余白。マッチの 52 週窓（最も早いマッチ日から）と first stage の
 # 直前 26 週の基準（最初の圧力週から）を覆う。
 TURNOVER_LEAD_WEEKS = 60
+# 監視で交絡を数える別の指数の一覧（`index_events.CONFOUNDER_LISTS` のキー・#1065）
+GROWTH250_KEY = "growth250-2026-10"
 
 
 # ── 純関数（DB に触れない）──────────────────────────────────────────────────────
@@ -174,6 +176,14 @@ def monitor_report(cohort: str, summary: dict, pairs_note: str) -> list[str]:
     for grp, row in (d.get("pressure_tercile_car") or {}).items():
         cars = " ".join(f"m{m}={_fmt(v, '+.4f')}" for m, v in row["pressure_car"].items())
         lines.append(f"  pressure {grp}: n={row['n_treated']} {cars or '(no look due yet)'}")
+    g = d.get("confound_growth250")
+    if g is None:
+        lines.append("  growth250: unavailable (no list)")
+    else:
+        lines.append(f"  growth250 hit: {g['n_treated_hit']}")
+        for name in ("ex_all", "ex_remove"):
+            cars = " ".join(f"m{m}={_fmt(v, '+.4f')}" for m, v in g[name]["pressure_car"].items())
+            lines.append(f"  growth250 {name}: n={g[name]['n_treated']} {cars or '(no look due yet)'}")
     if d.get("issue_draft"):
         lines.append("  issue_draft: written to the JSON (descriptive.issue_draft). Paste it into #1001 by hand")
     for seg, row in d["by_segment"].items():
@@ -651,6 +661,12 @@ def run_monitor(args) -> int:
             return _fail(f"マッチ対に主の仕様 {main_key} が無い（マッチした処置社が 0 社）: {pairs_path}")
         segments = {r.edinet_code: r.market_segment for r in snapshot.values() if r.edinet_code in pairs}
         exposure = load_exposure(db, ledger, PS.jst_today())
+        # グロース 250 の定期選定（#1065・記述）。台帳とは別の登録表で、一覧が無ければ併記だけ unavailable
+        g250 = IE.confounder_members(GROWTH250_KEY, IE.load_sec_to_ec(db),
+                                     root=Path(args.lists_dir) if args.lists_dir else None)
+        if g250 is None:
+            print(f"[monitor] {GROWTH250_KEY} の一覧が無い（`python -I scripts/import_index_list.py {GROWTH250_KEY}`）。"
+                  "グロース 250 の併記は unavailable")
         # 売り圧力（#1062・確証の群だけ）。2026 の三分位はマッチ対と同時に凍結し、2022 の中央値は毎回作る
         terciles, medians, pressure_note = None, {}, "not_confirmatory"
         if cohort.confirmatory:
@@ -683,7 +699,8 @@ def run_monitor(args) -> int:
                         announce_week=S.announcement_week(review.announced, review.after_close),
                         segments=segments, confirmatory=cohort.confirmatory,
                         anticipation_from=cohort.anticipation_from, i_ci=i_ci, terciles=terciles,
-                        pressure_medians=medians, cohort=args.cohort)
+                        pressure_medians=medians, cohort=args.cohort,
+                        confounders=None if g250 is None else g250["by_kind"])
     summary["descriptive"]["exposure_tau"] = exposure
     write_json(out_path, {
         "stage": "monitor", "cohort": args.cohort, **stamp, "generated_at": known_at.isoformat(timespec="seconds"),
@@ -692,7 +709,9 @@ def run_monitor(args) -> int:
                    "pairs_snapshot_as_of": (frozen.get("data") or {}).get("snapshot_as_of"),
                    "snapshot_as_of": as_of.isoformat(), "n_treated_itt": len(treated),
                    "n_controls": len(codes) - len(pairs),
-                   "stage_b": str(args.stage_b), "stage_b_ci": stage_b_note, "pressure_terciles": pressure_note},
+                   "stage_b": str(args.stage_b), "stage_b_ci": stage_b_note, "pressure_terciles": pressure_note,
+                   "growth250": None if g250 is None else {"n_codes": g250["n_codes"],
+                                                           "n_resolved": g250["n_resolved"]}},
         "matching": frozen.get("matching"), **summary})
     for line in monitor_report(args.cohort, summary, "frozen_now" if froze_now else "reused"):
         print(line)
