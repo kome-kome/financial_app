@@ -191,6 +191,40 @@ class TestCli:
         assert not out.exists()
 
 
+class TestLambdaReference:
+    """λ の参考（#1040）: 画面の並び U − 予想 μ̂ の上位K社超過リターン。K の規則には入らない。"""
+
+    def _models(self, u_mean, mu_mean):
+        def entry(name, display):
+            mu = {"top_k_excess_return_by_period": {str(k): _steady(mu_mean, seed=k) for k in X.CANDIDATE_K}}
+            u = {"top_k_excess_return_by_period": {str(k): _steady(u_mean, seed=k + 7) for k in X.CANDIDATE_K}}
+            return {"name": name, "available": True, "oof_backtest": mu, "oof_backtest_display": u if display else None}
+        return [entry(n, n != "macro_enet") for n in X.MODELS]
+
+    def test_difference_is_display_minus_forecast_and_skips_lambda_zero(self):
+        ref = X.lambda_reference(self._models(u_mean=0.01, mu_mean=0.05))
+        assert set(ref) == {"macro_risk_return", "macro_gbdt"}
+        sig = ref["macro_gbdt"][str(X.LAMBDA_MAIN_K)]
+        assert sig["mean"] == pytest.approx(-0.04, abs=0.002) and sig["significant"] is True
+
+    def test_missing_series_gives_none(self):
+        models = self._models(0.01, 0.05)
+        models[0]["oof_backtest"]["top_k_excess_return_by_period"].pop("30")
+        assert X.lambda_reference(models)["macro_risk_return"]["30"] is None
+
+    def test_written_to_the_json_without_moving_the_rule(self, tmp_path):
+        p = tmp_path / "comparison.json"
+        models = self._models(0.01, 0.05)
+        p.write_text(json.dumps({"models": models}), encoding="utf-8")
+        out = tmp_path / "out.json"
+        assert X.main(["--prereg", str(PREREG), "--prereg-sha", FROZEN, "--from-json", str(p), "--out", str(out)]) == 0
+        payload = json.loads(out.read_text(encoding="utf-8"))
+        assert payload["lambda_reference"]["main_k"] == 10
+        assert set(payload["lambda_reference"]["by_model"]) == {"macro_risk_return", "macro_gbdt"}
+        table, _src = X.build_table(models)
+        assert payload["chosen_k"] == X.choose_k(table)
+
+
 class TestDaytimeJob:
     KEY = "measure:top-k-veto"
 
