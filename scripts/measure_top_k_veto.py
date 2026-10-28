@@ -18,6 +18,13 @@
   「全モデルで満たす」を判定しない。
 - 日中キューで単独に回す（`measure:top-k-veto`・並走に敏感）。
 
+## λ の参考（#1040・規則の外）
+
+同じモデル比較の結果から、画面の並びの採点を持つモデル（λ>0 の M-1 / M-2）ごとに「画面の並び U − 予想 μ̂」の
+上位K社超過リターンの差を、期ごとに対にした定常ブートストラップ（`model_stats.paired_ic_significance`）で出し、
+JSON の `lambda_reference` に書く。**K を選ぶ規則には入れない**（事前登録の本文は変えない）。`lambda_risk` の
+既定を変えるかの判定の規則（主は K = 10・両側 α = 0.05）は #1040 のコメントで計測の前に固定した。
+
 終了コード: 0 = 完了（K が決まったか「該当なし」）/ 2 = 事前登録の不一致 / 3 = 入力がそろわない。
 
 実行:
@@ -44,7 +51,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from model_stats import bootstrap_mean_se  # noqa: E402
+from model_stats import bootstrap_mean_se, paired_ic_significance  # noqa: E402
 from scripts import prereg  # noqa: E402
 
 # 事前登録 §2 の対象と K の候補（本文と同じ値。変えるなら文書を凍結し直す）。
@@ -62,6 +69,8 @@ Z_ALPHA = NormalDist().inv_cdf(1.0 - ALPHA)
 Z_POWER = NormalDist().inv_cdf(POWER)
 
 DEFAULT_OUT = ROOT / "scripts" / ".cache" / "top_k_veto.json"
+# λ の参考（#1040）の主の K。判定の規則は #1040 のコメントで固定（K = 5 / 30 は並べるだけ）
+LAMBDA_MAIN_K = 10
 EXIT_INPUT = 3
 
 
@@ -125,6 +134,35 @@ def build_table(models: list[dict]) -> tuple[dict[str, dict[int, dict]], dict[st
     return table, sources
 
 
+def lambda_reference(models: list[dict]) -> dict:
+    """{モデル: {K: 差の検定}}＝画面の並び U − 予想 μ̂ の上位K社超過リターン（#1040・規則の外）。
+
+    画面の並びの採点を持たないモデル（λ=0）は入れない。どちらかの系列が無い K は None。
+    """
+    out: dict[str, dict] = {}
+    for m in models:
+        display = m.get("oof_backtest_display")
+        if not display or m.get("name") not in MODELS:
+            continue
+        u = display.get("top_k_excess_return_by_period") or {}
+        mu = (m.get("oof_backtest") or {}).get("top_k_excess_return_by_period") or {}
+        out[m["name"]] = {str(k): paired_ic_significance(u.get(str(k)) or {}, mu.get(str(k)) or {})
+                          for k in CANDIDATE_K}
+    return out
+
+
+def _print_lambda(ref: dict) -> None:
+    print(f"lambda reference (display U - forecast mu, top-K excess; main K = {LAMBDA_MAIN_K}, not part of the rule)")
+    for name, rows in ref.items():
+        for k, sig in rows.items():
+            if sig is None:
+                print(f"  {MODEL_SHORT[name]:<6} K={k:<3} n/a")
+                continue
+            print(f"  {MODEL_SHORT[name]:<6} K={k:<3} diff={sig['mean']:+.4f} "
+                  f"CI[{sig['ci_lo']:+.4f},{sig['ci_hi']:+.4f}] p={sig.get('p_value', float('nan')):.3f} "
+                  f"n={sig['n_common']} {'sig' if sig['significant'] else 'n.s.'}")
+
+
 def _run_comparison() -> list[dict]:
     """モデル比較を対象のモデルだけで回す（UI・`model_comparison_run` と同じ手続き）。"""
     from database import SessionLocal
@@ -183,6 +221,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return EXIT_INPUT
     chosen = choose_k(table)
     _print_table(table, sources, chosen)
+    lam = lambda_reference(models)
+    _print_lambda(lam)
 
     payload = {
         **stamp,
@@ -193,6 +233,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "sources": sources,
         "table": {name: {str(k): r for k, r in rows.items()} for name, rows in table.items()},
         "chosen_k": chosen,
+        "lambda_reference": {"main_k": LAMBDA_MAIN_K, "issue": "https://github.com/kome-kome/financial_app/issues/1040",
+                             "by_model": lam},
     }
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
