@@ -616,6 +616,84 @@ class TestMonitor:
         assert list(summary["descriptive"]["pressure_car"]) == [1]
 
 
+def _looks(*rows):
+    """(status, car) の並びから sequential_looks の行の形を作る。"""
+    return [{"k": k, "status": st, "car": c, "pressure_week": f"2026-1{k}-01"} for k, (st, c) in enumerate(rows, 1)]
+
+
+class TestBandsAndPressure:
+    """予測帯・帯の外の連続・起票文・売り圧力（§6.3・#1062）。"""
+    CI = [-0.02, -0.004]
+
+    def test_s_equal_to_one_reproduces_the_2022_ci(self):
+        assert S.prediction_bands(self.CI, {"one": 1.0})["one"] == {"s": 1.0, "lo": -0.02, "hi": -0.004}
+
+    def test_main_band_scales_by_the_step_ratio(self):
+        bands = S.prediction_bands(self.CI, S.band_scales(0.3, 0.2))
+        assert bands["step"]["lo"] == pytest.approx(-0.025) and bands["step"]["hi"] == pytest.approx(-0.005)
+        assert bands["sqrt_step"]["s"] == pytest.approx(1.25 ** 0.5)
+        assert bands["pressure"]["s"] == pytest.approx(1.5)
+
+    def test_missing_ci_or_pressure_leaves_the_band_unavailable(self):
+        assert S.prediction_bands(None, {"step": 1.25})["step"]["lo"] is None
+        assert S.prediction_bands(self.CI, S.band_scales(0.3, None))["pressure"]["lo"] is None
+
+    def _alert(self, *rows):
+        looks = _looks(*rows)
+        S.mark_band(looks, {"lo": -0.025, "hi": -0.005})
+        return looks, S.band_alert(looks)
+
+    def test_two_consecutive_outside_raise_the_alert_on_either_side(self):
+        looks, alert = self._alert(("tested", -0.01), ("tested", -0.05), ("tested", 0.01), ("not_yet", None))
+        assert alert == {"k": [2, 3], "side": ["below", "above"]}
+        draft = S.issue_draft(alert, looks, {"step": {"s": 1.25, "lo": -0.025, "hi": -0.005}}, "topix-2026-10")
+        assert "R8" in draft and "| 2 |" in draft and "| 3 |" in draft
+
+    def test_unavailable_neither_counts_nor_breaks_the_run(self):
+        _, alert = self._alert(("tested", -0.05), ("unavailable", None), ("tested", -0.06))
+        assert alert["k"] == [1, 3]
+
+    def test_a_look_inside_the_band_breaks_the_run(self):
+        _, alert = self._alert(("tested", -0.05), ("tested", -0.01), ("tested", -0.06), ("not_yet", None))
+        assert alert is None
+        assert S.issue_draft(None, [], {}, "x") is None
+
+    def test_no_alert_without_a_band(self):
+        looks = _looks(("tested", -0.05), ("tested", -0.06))
+        S.mark_band(looks, {"lo": None, "hi": None})
+        assert [r["outside"] for r in looks] == [None, None] and S.band_alert(looks) is None
+
+    def test_pressure_is_market_cap_times_step_over_median_turnover(self):
+        base_day = date(2026, 3, 31)
+        week = S.iso_monday(base_day)
+        weeks = {week - W * k: 100.0 + k for k in range(1, 27)}          # 中央値 113.5
+        short = {week - W * k: 50.0 for k in range(1, 10)}               # 足 9 本＜13 本
+        turnover = S.weekly_frame({"A": weeks, "B": short, "C": weeks})
+        firms = {"A": S.Firm(base_day, 10.0, 1000.0, None, None), "B": S.Firm(base_day, 10.0, 1000.0, None, None),
+                 "C": S.Firm(base_day, 10.0, None, None, None)}
+        got = S.pressure_scores(firms, turnover, base_day, 0.125)
+        assert got == {"A": pytest.approx(10.0 * 1000.0 * 0.125 / 113.5)}
+
+    def test_terciles_split_by_rank(self):
+        scores = {f"E{i}": float(i) for i in range(9)}
+        t = S.pressure_terciles(scores)
+        assert [t[f"E{i}"] for i in range(9)] == [1, 1, 1, 2, 2, 2, 3, 3, 3]
+
+    def test_monitor_reports_bands_terciles_and_draft(self):
+        inputs = _monitor_synthetic(effect=-0.01)
+        terciles = {f"T{i}": 1 + i % 3 for i in range(8)}
+        # 処置の圧力窓 CAR は約 −0.02。主の帯をそれより上に置くと、到来した 3 回とも帯の下に出る
+        summary = S.monitor(**inputs, i_ci=[-0.004, 0.0], terciles=terciles,
+                            pressure_medians={"2026": 0.3, "2022": 0.2}, cohort="topix-2026-10")
+        d = summary["descriptive"]
+        assert [r["outside"] for r in summary["sequential"]["looks"][:4]] == [True, True, True, None]
+        assert d["band_alert"] == {"k": [1, 2], "side": ["below", "below"]}
+        assert d["issue_draft"].startswith("## [topix-2026-10]")
+        assert set(d["pressure_tercile_car"]) == {"t1", "t2", "t3"}
+        assert d["pressure"] == {"median_2026": 0.3, "median_2022": 0.2, "n_scored": 8}
+        assert not re.search(r'"(T\d|C\d[ab])"', json.dumps(summary, default=str))
+
+
 # ── M 族（§6.2・#1009）────────────────────────────────────────────────────────
 
 CAL = S.pressure_calendar(IE.STEPS_2022)
