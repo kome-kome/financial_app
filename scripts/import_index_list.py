@@ -11,6 +11,13 @@ PDF も CSV もコミットしない（`.gitignore`）。
 3. 種別ごとの件数と、新規追加の市場区分の内訳が登録表（事前登録 §2 の照合値）と一致すること
 4. 正規化 CSV の sha256 が登録表と一致すること——一致しなければ書かない（既存の CSV を壊さない）
 
+## 2 列の一覧（#1065）
+
+TOPIX 以外の指数の一覧（`index_events.CONFOUNDER_LISTS`）のうち、1 つの表の左右の列に種別が並ぶもの
+（グロース 250 の定期選定の「追加」「除外」）は、登録表の sections を `{"left": 種別, "right": 種別}` にする。
+見出し行（`コード` が 2 回出る行）の 2 つ目の `コード` の位置より左のコードを left、右を right とし、注記
+（`*` の直後がコードでない行）か次の節（`2.`）の行で読み終える。通し番号は無いので、件数と重複だけを照合する。
+
 ## 文字の取り出し
 
 Git for Windows 同梱の `pdftotext`（Xpdf 4.x）の `-enc UTF-8 -table` を使う。新しい Python の依存を
@@ -91,6 +98,40 @@ def parse_list_text(text: str, sections: Mapping) -> list:
     return out
 
 
+TWO_COLUMN = ("left", "right")
+_CODE = re.compile(r"(?<![0-9A-Z])([0-9][0-9A-Z]{3})(?![0-9A-Z])")
+# 読み終える行: 注記（`*` の直後がコードでない行。新規上場の社の行は `*  618A` のように印が先頭に付く）か次の節
+_TWO_COLUMN_END = re.compile(r"^\s*([*＊](?!\s*[0-9][0-9A-Z]{3}(?![0-9A-Z]))|[0-9０-９]\s*[.．])")
+
+
+def parse_two_column_text(text: str, sections: Mapping) -> list:
+    """左右 2 列の一覧から `[(sec_code, kind, ""), ...]` を作る（#1065）。
+
+    見出し行が無い・1 行に 3 つ以上のコードがある・列の中でコードが重複するときは `IndexListError`。
+    """
+    lines = text.splitlines()
+    head = next((i for i, line in enumerate(lines) if line.count("コード") >= 2), None)
+    if head is None:
+        raise IndexListError("2 列の一覧の見出し行（コード が 2 回出る行）が無い")
+    split = lines[head].index("コード", lines[head].index("コード") + 1)
+    found = defaultdict(list)
+    for line in lines[head + 1:]:
+        if _TWO_COLUMN_END.match(line):
+            break
+        codes = [(m.start(), m.group(1)) for m in _CODE.finditer(line)]
+        if len(codes) > 2:
+            raise IndexListError(f"1 行に 3 つ以上のコードがある: {[c for _, c in codes]}")
+        for pos, code in codes:
+            found["left" if pos < split else "right"].append(code)
+    out = []
+    for side in TWO_COLUMN:
+        dup = sorted(c for c, n in Counter(found[side]).items() if n > 1)
+        if dup:
+            raise IndexListError(f"{side} の列でコードが重複している {dup[:10]}")
+        out.extend((code, sections[side], "") for code in found[side])
+    return out
+
+
 def check_counts(key: str, parsed: Sequence, review) -> None:
     """種別ごとの件数と市場区分の内訳を登録表と照合する。"""
     got = dict(Counter(kind for _, kind, _ in parsed))
@@ -129,7 +170,7 @@ def extract_text(pdf: Path, pdftotext: Path) -> str:
 def import_review(key: str, root: Path, pdftotext: Path, *,
                   reviews: Optional[Mapping] = None) -> tuple:
     """一覧 1 本を取り込み、`(正規化 CSV のバイト列, sha256)` を返す。ファイルは書かない。"""
-    reviews = IE.REVIEWS if reviews is None else reviews
+    reviews = registry_of(key) if reviews is None else reviews
     if key not in reviews:
         raise IndexListError(f"未登録の公表: {key}（登録済み: {sorted(reviews)}）")
     review = reviews[key]
@@ -139,10 +180,16 @@ def import_review(key: str, root: Path, pdftotext: Path, *,
     actual = IE.sha256_hex(src.read_bytes())
     if actual != review.source_sha256:
         raise IndexListError(f"{key}: 元資料の sha256 が登録表と違う（{actual} / 登録表 {review.source_sha256}）")
-    parsed = parse_list_text(extract_text(src, pdftotext), review.sections)
+    parse = parse_two_column_text if set(review.sections) == set(TWO_COLUMN) else parse_list_text
+    parsed = parse(extract_text(src, pdftotext), review.sections)
     check_counts(key, parsed, review)
     data = IE.normalized_bytes((code, kind) for code, kind, _ in parsed)
     return data, IE.sha256_hex(data)
+
+
+def registry_of(key: str) -> Mapping:
+    """キーが載っている登録表（TOPIX の `REVIEWS` か、交絡の記述用の `CONFOUNDER_LISTS`）。"""
+    return IE.CONFOUNDER_LISTS if key in IE.CONFOUNDER_LISTS else IE.REVIEWS
 
 
 def _inside(path: Path, root: Path) -> bool:
@@ -155,12 +202,12 @@ def _inside(path: Path, root: Path) -> bool:
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     ap = argparse.ArgumentParser(description="指数イベント台帳の一覧 PDF を正規化 CSV にする")
-    ap.add_argument("keys", nargs="*", help=f"公表のキー（{', '.join(IE.REVIEWS)}）")
-    ap.add_argument("--all", action="store_true", help="登録表の全部を取り込む")
+    ap.add_argument("keys", nargs="*", help=f"公表のキー（{', '.join([*IE.REVIEWS, *IE.CONFOUNDER_LISTS])}）")
+    ap.add_argument("--all", action="store_true", help="登録表の全部（REVIEWS と CONFOUNDER_LISTS）を取り込む")
     ap.add_argument("--root", default=str(IE.DEFAULT_LISTS_DIR), help="一覧の置き場（既定: リポジトリの .index_lists）")
     ap.add_argument("--pdftotext", help="pdftotext の場所（既定: PATH → Git for Windows 同梱）")
     args = ap.parse_args(argv)
-    keys = list(IE.REVIEWS) if args.all else args.keys
+    keys = [*IE.REVIEWS, *IE.CONFOUNDER_LISTS] if args.all else args.keys
     if not keys:
         ap.error("公表のキーか --all を指定する")
     root = Path(args.root)
@@ -175,7 +222,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return EXIT_MISMATCH
     rc = 0
     for key, data, sha in results:
-        want = IE.REVIEWS[key].normalized_sha256
+        want = registry_of(key)[key].normalized_sha256
         rows = IE.parse_normalized(data)
         counts = dict(Counter(kind for _, kind in rows))
         if want and want != sha:
@@ -184,7 +231,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             continue
         out = root / f"{key}.csv"
         out.write_bytes(data)
-        note = "登録表と一致" if want else "登録表が空（この値を index_events.REVIEWS へ書く）"
+        note = "登録表と一致" if want else "登録表が空（この値を index_events の登録表へ書く）"
         print(f"{key}: 件数 {counts} sha256 {sha} -> {out}（{note}）")
     return rc
 

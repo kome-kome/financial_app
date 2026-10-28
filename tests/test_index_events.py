@@ -366,3 +366,48 @@ def test_pure_blocks_do_not_import_heavy_modules_at_top_level():
     for bad in ("\nimport database", "\nfrom database import", "\nimport httpx", "\nimport pandas"):
         assert bad not in head
     assert "from scripts" not in src and "import scripts" not in src
+
+
+# ── TOPIX 以外の指数の一覧（交絡の記述用・#1065）────────────────────────────────
+
+class TestConfounderLists:
+    KEY = "growth250-2026-10"
+
+    def _write(self, tmp_path, monkeypatch, rows):
+        data = IE.normalized_bytes(rows)
+        (tmp_path / f"{self.KEY}.csv").write_bytes(data)
+        review = IE.CONFOUNDER_LISTS[self.KEY]
+        counts = {}
+        for _sec, kind in rows:
+            counts[kind] = counts.get(kind, 0) + 1
+        monkeypatch.setitem(IE.CONFOUNDER_LISTS, self.KEY,
+                            review._replace(normalized_sha256=IE.sha256_hex(data), counts=counts))
+
+    def test_keys_never_overlap_the_topix_ledger(self):
+        assert not set(IE.CONFOUNDER_LISTS) & set(IE.REVIEWS)
+        kinds = {k for r in IE.CONFOUNDER_LISTS.values() for k in r.counts}
+        assert not kinds & {k for r in IE.REVIEWS.values() for k in r.counts}
+
+    def test_registered_counts_match_the_announcement(self):
+        assert IE.CONFOUNDER_LISTS[self.KEY].counts == {"g250_add": 31, "g250_remove": 52}
+
+    def test_members_by_kind_and_unresolved_codes_are_counted(self, tmp_path, monkeypatch):
+        self._write(tmp_path, monkeypatch, [("1111", "g250_add"), ("2222", "g250_remove"), ("3333", "g250_remove")])
+        got = IE.confounder_members(self.KEY, {"1111": "E1", "2222": "E2"}, root=tmp_path)
+        assert got == {"by_kind": {"g250_add": frozenset({"E1"}), "g250_remove": frozenset({"E2"})},
+                       "n_codes": 3, "n_resolved": 2}
+
+    def test_missing_list_is_none(self, tmp_path):
+        assert IE.confounder_members(self.KEY, {}, root=tmp_path) is None
+
+    def test_sha_mismatch_raises(self, tmp_path, monkeypatch):
+        self._write(tmp_path, monkeypatch, [("1111", "g250_add")])
+        (tmp_path / f"{self.KEY}.csv").write_bytes(IE.normalized_bytes([("9999", "g250_add")]))
+        with pytest.raises(IE.IndexLedgerError):
+            IE.confounder_members(self.KEY, {}, root=tmp_path)
+
+    def test_the_topix_ledger_does_not_read_it(self, tmp_path):
+        """`read_lists` の既定は `REVIEWS` だけ＝台帳（`status_at`・C1 対照・画面のタグ）に流れない。"""
+        (tmp_path / f"{self.KEY}.csv").write_bytes(IE.normalized_bytes([("1111", "g250_add")]))
+        _lists, missing = IE.read_lists(tmp_path)
+        assert self.KEY not in missing and set(missing) == set(IE.REVIEWS)

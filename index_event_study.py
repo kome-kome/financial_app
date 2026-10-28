@@ -1288,6 +1288,9 @@ MONITOR_DEFINITIONS = {
     "pressure_tercile": f"マッチした処置社を売り圧力の昇順で {PRESSURE_TERCILES} 等分（1 = 弱い）。マッチ対と同時に凍結する",
     "bands": f"2022 の I の 90% CI（stage B）× s。step: s = {BAND_STEP_RATIO:g}（主）、sqrt_step: √{BAND_STEP_RATIO:g}、"
              "pressure: 売り圧力の中央値の比（2026 ÷ 2022・パッシブ残高の比は 1 と仮定）。stage B が無ければ unavailable",
+    "confound_growth250": "グロース 250 の定期選定（2026-10-30・#1065・事前登録 §9）に当たった処置社の数（追加・除外を"
+                          "分けて数える）と、それを除いた圧力窓 CAR（ex_all＝両方を除く / ex_remove＝除外だけ除く・全体と"
+                          "市場区分別）。記述だけで、確証の Z_k は変えない。一覧が無ければ None",
     "band_alert": f"主の帯（step）の外（上下両側）が検定済みの回で {BAND_CONSECUTIVE} 回続いたら R8 の起票文を出す。"
                   "unavailable の回は数えず連続も切らない。帯の内側の回で連続は切れる。自動では起票しない（ADR-0061）",
 }
@@ -1372,6 +1375,25 @@ def group_pressure_cars(returns: pd.DataFrame, pairs: Mapping[str, Sequence[str]
     return out
 
 
+def confound_cars(returns: pd.DataFrame, pairs: Mapping[str, Sequence[str]], segments: Mapping[str, str],
+                  confounders: Mapping[str, Iterable[str]], calendar: Sequence[PressureWeek],
+                  latest: Optional[date]) -> dict:
+    """別の指数イベントに当たった処置社を数え、除いた圧力窓 CAR を出す（記述・#1065）。銘柄コードは返さない。"""
+    hit = {kind: set(pairs) & set(codes) for kind, codes in confounders.items()}
+    removed = hit.get("g250_remove", set())
+    every = set().union(*hit.values()) if hit else set()
+    out = {"n_treated_hit": {kind: len(v) for kind, v in hit.items()},
+           "n_treated_hit_by_segment": {kind: dict(Counter(SEGMENT_KEYS.get(segments.get(t), "other") for t in v))
+                                        for kind, v in hit.items()}}
+    for name, drop in (("ex_all", every), ("ex_remove", removed)):
+        kept = {t: c for t, c in pairs.items() if t not in drop}
+        whole = group_pressure_cars(returns, kept, {t: "all" for t in kept}, calendar, latest)
+        out[name] = {"n_treated": len(kept),
+                     "pressure_car": whole["all"]["pressure_car"] if whole else {},
+                     "by_segment": segment_pressure_cars(returns, kept, segments, calendar, latest)}
+    return out
+
+
 def pressure_scores(firms: Mapping[str, "Firm"], turnover: pd.DataFrame, base_day: date, step: float) -> dict:
     """{社: 売り圧力}（#1062）= 時価総額 × 刻み ÷ 基準日の週より前の売買代金の中央値。作れない社は入れない。"""
     week = iso_monday(base_day)
@@ -1451,12 +1473,13 @@ def monitor(*, closes: pd.DataFrame, pairs: Mapping[str, Sequence[str]], calenda
             announce_week: date, segments: Mapping[str, str], confirmatory: bool,
             anticipation_from: Optional[date] = None, i_ci: Optional[Sequence[float]] = None,
             terciles: Optional[Mapping[str, int]] = None, pressure_medians: Optional[Mapping] = None,
-            cohort: str = "") -> dict:
+            cohort: str = "", confounders: Optional[Mapping[str, Iterable[str]]] = None) -> dict:
     """前向き監視（§6.3）。要約は件数と統計だけで、銘柄コードを含めない。
 
     `pairs` は主の仕様（C1・主のマッチ日）の凍結したマッチ対。`confirmatory=False` の群は記述だけ。
     `i_ci` は stage B の 2022 の I の 90% CI（無ければ帯は unavailable）、`terciles` は {処置社: 三分位}、
-    `pressure_medians` は {"2026": 中央値, "2022": 中央値}（#1062）。
+    `pressure_medians` は {"2026": 中央値, "2022": 中央値}（#1062）。`confounders` は {"g250_add": 社, "g250_remove": 社}
+    （グロース 250 の定期選定・#1065。無ければ併記は None）。
     """
     returns = weekly_log_returns(closes)
     frame = abnormal_return_frame(returns, pairs)
@@ -1480,6 +1503,8 @@ def monitor(*, closes: pd.DataFrame, pairs: Mapping[str, Sequence[str]], calenda
         scored = {t: c for t, c in pairs.items() if t in terciles}
         descriptive["pressure_tercile_car"] = group_pressure_cars(
             returns, scored, {t: f"t{terciles[t]}" for t in scored}, calendar, latest)
+    descriptive["confound_growth250"] = (None if confounders is None else
+                                         confound_cars(returns, pairs, segments, confounders, calendar, latest))
     sequential = sequential_looks(ar, calendar, announce_week, latest) if confirmatory else None
     if sequential is not None:
         mark_band(sequential["looks"], bands["step"])

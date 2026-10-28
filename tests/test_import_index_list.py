@@ -127,6 +127,59 @@ class TestParse:
             M.parse_list_text(TEXT_2022, {"1": "transition"})
 
 
+# 2 列の一覧（#1065）の検体。架空のコードで、見出し・列の位置・注記の印の付き方だけを写す
+TWO_COL = """
+         「架空の指数」の定期選定結果
+             追加（3）                       除外（4）
+
+   コード       銘柄名                    コード              銘柄名
+
+   9001      架空Ａ                         9101  架空Ｋ
+
+*  901A      架空Ｂ                         9102             架空Ｌ
+
+   9003      架空Ｃ                         9103  架空Ｍ
+
+                                            9104  架空Ｎ
+
+   *新規上場に伴い、2026年10月30日に追加される銘柄です。
+   2.指数構成銘柄
+No.  コード   銘柄名
+1    9999   構成だけの社
+"""
+TWO_SECTIONS = {"left": "x_add", "right": "x_remove"}
+
+
+class TestTwoColumn:
+    def test_left_and_right_columns_are_split_at_the_second_header(self):
+        got = M.parse_two_column_text(TWO_COL, TWO_SECTIONS)
+        assert [(c, k) for c, k, _ in got] == [("9001", "x_add"), ("901A", "x_add"), ("9003", "x_add"),
+                                                ("9101", "x_remove"), ("9102", "x_remove"),
+                                                ("9103", "x_remove"), ("9104", "x_remove")]
+
+    def test_reading_stops_at_the_note_not_at_a_marked_row(self):
+        """新規上場の印 `*  901A` の行は読み、`*新規上場…` の注記と次の節（構成銘柄）は読まない。"""
+        codes = {c for c, _, _ in M.parse_two_column_text(TWO_COL, TWO_SECTIONS)}
+        assert "901A" in codes and "9999" not in codes and "2026" not in codes
+
+    def test_three_codes_on_a_line_raise(self):
+        text = TWO_COL.replace("9103  架空Ｍ", "9103  架空Ｍ  9105  架空Ｏ")
+        with pytest.raises(M.IndexListError):
+            M.parse_two_column_text(text, TWO_SECTIONS)
+
+    def test_duplicate_in_a_column_raises(self):
+        with pytest.raises(M.IndexListError):
+            M.parse_two_column_text(TWO_COL.replace("9102", "9101"), TWO_SECTIONS)
+
+    def test_missing_header_raises(self):
+        with pytest.raises(M.IndexListError):
+            M.parse_two_column_text("9001 架空Ａ\n", TWO_SECTIONS)
+
+    def test_registry_of_routes_confounder_keys(self):
+        assert M.registry_of("growth250-2026-10") is IE.CONFOUNDER_LISTS
+        assert M.registry_of("topix-2026-10") is IE.REVIEWS
+
+
 class TestCheckCounts:
     REVIEW = IE.REVIEWS["topix-2026-10"]._replace(
         counts={"new_add": 2, "transition": 1, "constituent": 4},
@@ -189,6 +242,20 @@ def _real_inputs():
     if not all((root / r.source).is_file() for r in IE.REVIEWS.values()):
         return None
     return root, pdftotext
+
+
+@pytest.mark.parametrize("key", list(IE.CONFOUNDER_LISTS))
+def test_real_confounder_lists_match_the_registry(key):
+    """交絡の記述用の一覧（#1065）も、実ファイルの取り込み結果が登録表に一致する（手元だけ）。"""
+    try:
+        pdftotext = M.find_pdftotext()
+    except M.IndexListError:
+        pytest.skip("pdftotext が無い")
+    review = IE.CONFOUNDER_LISTS[key]
+    if not (IE.DEFAULT_LISTS_DIR / review.source).is_file():
+        pytest.skip("JPX の一覧（.index_lists/raw）が無い")
+    _data, sha = M.import_review(key, IE.DEFAULT_LISTS_DIR, pdftotext)
+    assert sha == review.normalized_sha256
 
 
 @pytest.mark.parametrize("key", list(IE.REVIEWS))

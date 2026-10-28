@@ -25,6 +25,13 @@ JPX の一覧は無断転載不可で、リポジトリは PUBLIC。一覧は `.
 - テスト: `build_ledger(lists, sec_to_ec)` ——DB にもファイルにも触らない。
 - 問い合わせ: `status_at(ledger, ec, on, known_at)` / `group_labels` / `panel_index_status` / `members`。
 
+## TOPIX 以外の指数の一覧は台帳に入れない（#1065）
+
+グロース 250 の定期選定のような別の指数のイベントは、TOPIX の監視の**交絡を数える記述**にだけ使う。
+`REVIEWS` に入れると `status_at` が最新の公表としてそちらを拾い、TOPIX の状態・C1 対照・画面のタグ・
+露出を上書きするので、別の登録表 `CONFOUNDER_LISTS` に同じ `Review` 型で持ち、`confounder_members`
+だけが読む（元資料と正規化 CSV の sha256・件数の照合は同じ）。台帳（`load_ledger`）には流れない。
+
 ## 先読みしない・無い≠無し
 
 - 公表日より前の `known_at` には、その一覧の事実が見えない。**引け後の公表は翌日から見える**
@@ -119,6 +126,25 @@ REVIEWS: dict = {
         normalized_sha256="2274bb402cc69a95e07fbc3fc16dfc744c0a86adeaa50282df11c9da8726db7b",
         confirmed=True,
         basis="TOPIX初回定期入替における選定結果及び構成銘柄一覧（2026-10-07 公表）。"
+              "#1002 でユーザーが DL・取得元 URL は未記録"),
+}
+
+
+# TOPIX 以外の指数の一覧（交絡の記述用・#1065）。`REVIEWS` とキーを共有しない（テストで固定）。
+# sections の "left" / "right" は、1 つの表の左右の列に種別が並ぶ一覧（`import_index_list` の 2 列の読み取り）。
+CONFOUNDER_LISTS: dict = {
+    "growth250-2026-10": Review(
+        announced=date(2026, 10, 7), after_close=True, effective=date(2026, 10, 30),
+        # #1002 で保存したファイル。名前は data_j だが中身はグロース 250 の定期選定（#1002 のコメント）
+        source="raw/data_j_20261020.pdf",
+        source_sha256="e3eb6a8051a2e24dc306c9fc46f258940ddd28ce39d39857f4fa71cbcf96b349",
+        source_url=None,
+        sections={"left": "g250_add", "right": "g250_remove"},
+        counts={"g250_add": 31, "g250_remove": 52},
+        market_counts={},
+        normalized_sha256="ac1d29dae14e505a5f41df8c2c6e6496cc1923dd7bcd015e77c5419945e8f2ce",
+        confirmed=True,
+        basis="「東証グロース市場250指数」の定期選定（2026-10-30 実施）結果及び構成銘柄一覧（2026-10-07 公表）。"
               "#1002 でユーザーが DL・取得元 URL は未記録"),
 }
 
@@ -610,6 +636,28 @@ def load_sec_to_ec(db) -> dict:
     if ambiguous:
         log.warning("指数イベント台帳: 複数社に同じ証券コードがあるので引かない: %s", ambiguous[:10])
     return {s: next(iter(ecs)) for s, ecs in by_sec.items() if len(ecs) == 1}
+
+
+def confounder_members(key: str, sec_to_ec: Mapping, *, root: Optional[Path] = None) -> Optional[dict]:
+    """TOPIX 以外の指数の一覧（`CONFOUNDER_LISTS`）を引く（#1065）。正規化 CSV が無ければ None。
+
+    戻り値は `{"by_kind": {種別: frozenset(edinet_code)}, "n_codes": 件数, "n_resolved": 突合できた件数}`。
+    sha256 か件数が登録表と違えば `IndexLedgerError`。突合できない社（新規上場など）は数えるだけで止めない。
+    """
+    review = CONFOUNDER_LISTS[key]
+    lists, missing = read_lists(root, reviews={key: review})
+    if missing:
+        return None
+    rows = lists[key]
+    got = Counter(kind for _, kind in rows)
+    if dict(got) != dict(review.counts):
+        raise IndexLedgerError(f"{key}: 件数が登録表と違う（一覧 {dict(got)} / 登録表 {review.counts}）")
+    by_kind: dict = defaultdict(set)
+    for sec, kind in rows:
+        if sec_to_ec.get(sec):
+            by_kind[kind].add(sec_to_ec[sec])
+    return {"by_kind": {k: frozenset(by_kind.get(k, ())) for k in review.counts},
+            "n_codes": len(rows), "n_resolved": sum(1 for sec, _ in rows if sec_to_ec.get(sec))}
 
 
 def load_ledger(db=None, *, root: Optional[Path] = None,

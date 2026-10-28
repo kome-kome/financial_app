@@ -379,7 +379,7 @@ def _run_monitor(tmp_path, sha=FROZEN, cohort="topix-2026-10"):
     out, pairs = tmp_path / "monitor.json", tmp_path / "monitor_pairs.json"
     code = X.main(["monitor", "--prereg", str(PREREG), "--prereg-sha", sha, "--cohort", cohort,
                    "--out", str(out), "--pairs", str(pairs), "--stage-b", str(tmp_path / "stage_b.json"),
-                   "--pairs-2022", str(tmp_path / "pairs_2022.json")])
+                   "--pairs-2022", str(tmp_path / "pairs_2022.json"), "--lists-dir", str(tmp_path)])
     return code, out, pairs
 
 
@@ -430,6 +430,28 @@ class TestMonitorCli:
         assert data["descriptive"]["pressure"]["n_scored"] == len(frozen["pressure"]["terciles"])
         code, out, _ = _run_monitor(tmp_path)
         assert json.loads(out.read_text(encoding="utf-8"))["inputs"]["pressure_terciles"] == "reused"
+
+    def test_growth250_is_unavailable_without_the_list(self, wired26, tmp_path, capsys):
+        code, out, _ = _run_monitor(tmp_path)
+        data = json.loads(out.read_text(encoding="utf-8"))
+        assert code == 0 and data["inputs"]["growth250"] is None
+        assert data["descriptive"]["confound_growth250"] is None
+        assert "growth250: unavailable" in capsys.readouterr().out
+
+    def test_growth250_hits_are_counted_from_the_list(self, wired26, tmp_path, monkeypatch):
+        key = X.GROWTH250_KEY
+        rows = [("9000", "g250_remove"), ("9100", "g250_add"), ("1234", "g250_add")]   # 1234 は企業表に無い
+        data = IE.normalized_bytes(rows)
+        (tmp_path / f"{key}.csv").write_bytes(data)
+        monkeypatch.setitem(IE.CONFOUNDER_LISTS, key, IE.CONFOUNDER_LISTS[key]._replace(
+            normalized_sha256=IE.sha256_hex(data), counts={"g250_add": 2, "g250_remove": 1}))
+        code, out, _ = _run_monitor(tmp_path)
+        doc = json.loads(out.read_text(encoding="utf-8"))
+        assert code == 0 and doc["inputs"]["growth250"] == {"n_codes": 3, "n_resolved": 2}
+        g = doc["descriptive"]["confound_growth250"]
+        assert g["n_treated_hit"] == {"g250_add": 1, "g250_remove": 1}
+        assert g["ex_all"]["n_treated"] == len(TREATED) - 2
+        assert not re.search(r"E9\d{3}", out.read_text(encoding="utf-8"))
 
     def test_stage_b_ci_sets_the_bands(self, wired26, tmp_path):
         (tmp_path / "stage_b.json").write_text(
