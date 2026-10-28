@@ -102,7 +102,8 @@ from .model_candidates import _EN_N_ALPHAS as _N_ALPHAS
 # 落ち、月内の社の順だけで最終モデルの α が 165 倍動く」を直したもので、`months_purged` もこの性質を保つ。
 # どちらも 2026-10-17 の `momentum_gate`（`--inner-cv` → `--inner-cv-purge`・共通域・18 期間）で、測る前に
 # 固定した規則（rank-IC か short_side_spread の差の 95%CI が丸ごと 0 より下なら採らない）に当たらなかった
-# ので切り替えた。M-4（退役済み）と候補メニューは関数の既定（`rows`）のままで、ここに追随しない。
+# ので切り替えた。M-4（退役済み）の M-6 のレグはこの値と `_SIZE_NEUTRAL` を読む（#1058・計測の道具が本番の M-6 を
+# 測るため）。候補メニューは関数の既定（`rows`）のままで、ここに追随しない。
 # `momentum_gate` の分母と M-6 の既定の条件はこの値から取る（ゲートの「本番の構成」を書き写さない）。
 _INNER_CV = "months_purged"
 

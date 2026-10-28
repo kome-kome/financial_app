@@ -44,7 +44,7 @@
   - 売りの並び: M-6・M-2・M-1 の μ̂ と、sell_ranking の既定プリセットの式（μ + −R_macro）の上限版。
     R_macro は今の推定値しかなく過去の時点で作り直せないので**未来情報込みの上限**
   - 比べる条件は全て同じ共通域・同じ層で測る（`plugins.macro_snapshots.in_layer_short_side`）
-  - **注意**: M-4 の基底は本番の M-2 / M-6 と設定が違う（`M4_BASES_CAVEAT`）。上の全社の売り側spread も
+  - M-4 の基底は #1058 で本番の M-2 / M-6 の設定にそろえた（`M4_BASES_CAVEAT`）。上の全社の売り側spread も
     同じ基底を測っている
 同じ実行で**全社の売り側spread**（#1073）も同じ売りの条件で出し、`whole_universe` に書く。上の全社の比較と
 同じ `oof_backtest` の `short_side_spread` を、M-4 の共通域の行の順のまま売りのキーで測る（定義を書き写さない）。
@@ -112,9 +112,10 @@ SHORT = {"macro_risk_return": "M-1", "macro_gbdt": "M-2", "macro_enet": "M-6",
 # 検定する対（a − b）。μ̂ の出所どうしは主判定と同じ対、上限版は「R_macro を足して層の中の売りが
 # 良くなるか」の未来情報込みの上限。
 IN_LAYER_PAIRS = [(CANDIDATE, CURRENT), (CANDIDATE, "macro_risk_return"), (UPPER, CANDIDATE)]
-# M-4 の基底のレグは本番の M-2 / M-6 と同じではない（plugins/macro_ensemble.py）。出力と JSON に残す。
-M4_BASES_CAVEAT = ("M-4 の基底は本番と設定が違う: M-2 と M-6 は財務の空欄埋め（fin_fill）なし、M-6（_m6_cv）は"
-                   "さらに内側の交差検証が rows（本番は months_purged）で規模の中立化なし")
+# M-4 の基底のレグは #1058 で本番の M-2 / M-6 の設定にそろえた（plugins/macro_ensemble.py）。何をそろえたかを
+# 出力と JSON に残す（そろえる前の結果と読み比べるときの目印）。
+M4_BASES_CAVEAT = ("M-4 の基底は本番の設定にそろえてある（#1058）: M-2 と M-6 に財務の空欄埋め（fin_fill）、M-6 に"
+                   "本番と同じ内側の交差検証（months_purged）と OOF への規模の中立化。M-4 の現断面の μ̂ は対象外")
 
 
 def _row(o: dict) -> dict:

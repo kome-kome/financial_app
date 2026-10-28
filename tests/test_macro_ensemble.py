@@ -541,3 +541,47 @@ class TestProducer:
             n = replace_macro_ensemble_scores(db, [{"edinet_code": "E1", "mu": 0.1}], None)
         assert n == 0
         assert get_macro_ensemble_scores(db) == {}
+
+
+class TestM6LegMatchesProduction:
+    """M-4 の M-6 のレグが本番の M-6 と同じ内側の CV・規模の中立化を受け取る（#1058）。"""
+
+    def _build(self):
+        yms = ["2020-01", "2020-04"]
+        return {"s": {ym: [([0.1], 0.0), ([0.2], 0.1)] for ym in yms},
+                "ids": {ym: ["E1", "E2"] for ym in yms}, "feats": ["f"], "cur": {},
+                "meta": {ym: [("情報・通信業", 1), ("情報・通信業", 2)] for ym in yms},
+                "fin_by_co": {"E1": []}, "market_caps": {("E1", "2019-03-31"): 1e9}}, yms
+
+    def test_inner_cv_train_groups_and_size_neutral_follow_macro_enet(self, monkeypatch):
+        from plugins import macro_enet, model_candidates
+
+        seen = {}
+        monkeypatch.setattr(model_candidates, "make_elasticnet_fit_predict",
+                            lambda **kw: seen.setdefault("fp", kw) and "fp")
+
+        def fake_wf(s, feats, **kw):
+            seen["wf"] = kw
+            return None, {ym: [(0.5, 0.1), (0.6, 0.2)] for ym in s}
+        monkeypatch.setattr(macro_ensemble, "walk_forward_cv_monthly", fake_wf)
+        monkeypatch.setattr(macro_ensemble, "log_market_cap_by_ym",
+                            lambda ids, fin, caps: seen.setdefault("caps", (fin, caps)) and {})
+        monkeypatch.setattr(macro_ensemble, "neutralize_size_by_ym",
+                            lambda resid, meta, logcap: ({ym: [(yh + 1.0, y) for yh, y in v]
+                                                          for ym, v in resid.items()}, 0))
+        b, yms = self._build()
+        oof, _ctx = macro_ensemble.MacroEnsemblePlugin()._m6_cv(b, {"l1_ratio": "auto"}, yms)
+        assert seen["fp"]["inner_cv"] == macro_enet._INNER_CV
+        assert seen["wf"]["pass_train_groups"] is (macro_enet._INNER_CV in model_candidates._EN_INNER_CV_BY_MONTH)
+        if macro_enet._SIZE_NEUTRAL:
+            assert seen["caps"] == (b["fin_by_co"], b["market_caps"])
+            assert oof[("2020-01", "E1")][0] == pytest.approx(1.5)      # 中立化の後の予測が OOF に入る
+
+    def test_m2_and_m6_legs_get_the_filled_financials(self):
+        """M-2 / M-6 のレグは `apply_fin_fill` 後の財務、M-1 は元の財務で組む（本番の M-1 は埋めない）。"""
+        import inspect
+
+        src = inspect.getsource(macro_ensemble.MacroEnsemblePlugin.execute)
+        assert "apply_fin_fill(db, fin_by_co)" in src
+        assert "self._m1_build(db, prices_by_co, fin_by_co," in src
+        assert "self._m2_build(db, prices_by_co, fin_filled," in src
