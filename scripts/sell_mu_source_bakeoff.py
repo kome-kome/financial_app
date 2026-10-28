@@ -46,6 +46,10 @@
   - 比べる条件は全て同じ共通域・同じ層で測る（`plugins.macro_snapshots.in_layer_short_side`）
   - **注意**: M-4 の基底は本番の M-2 / M-6 と設定が違う（`M4_BASES_CAVEAT`）。上の全社の売り側spread も
     同じ基底を測っている
+同じ実行で**全社の売り側spread**（#1073）も同じ売りの条件で出し、`whole_universe` に書く。上の全社の比較と
+同じ `oof_backtest` の `short_side_spread` を、M-4 の共通域の行の順のまま売りのキーで測る（定義を書き写さない）。
+再計算した M-6 の値が M-4 実行の `base_oof_backtest` と一致しなければ、同じ域を測れていないので止める。
+既定プリセットの −R_macro を残すかの判定の規則は #1073 のコメントで計測の前に固定した。
 結果は `scripts/.cache/sell_in_layer.json`。日中枠 `measure:in-layer-sell`（並走に敏感）で単独に回す。
 
 データは `scripts/_cache.py` 経由でローカル pickle を読む（Issue #355・本番 Egress ゼロ）。
@@ -74,7 +78,7 @@ from database import SessionLocal  # noqa: E402
 from model_stats import paired_ic_significance  # noqa: E402
 from plugins import get_plugin  # noqa: E402
 from plugins.macro_snapshots import (  # noqa: E402
-    display_risk_map, display_scores, get_producer_scores, in_layer_short_side,
+    display_risk_map, display_scores, get_producer_scores, in_layer_short_side, oof_backtest,
 )
 from plugins.sell_ranking import PRESETS as SELL_PRESETS, sell_score  # noqa: E402
 from plugins.utils import coerce_params, fit_zscore_stats  # noqa: E402
@@ -234,6 +238,54 @@ def _print_in_layer(buy_name: str, res: dict) -> None:
         print(f"  {SHORT[a]} − {SHORT[b]:<18} {_fmt_sig(sig)}", flush=True)
 
 
+def whole_universe_short_side(common: dict, sells: dict, y: dict, base_oof: dict) -> dict:
+    """全社の売り側spread（#1073）を売りの条件ごとに出す。
+
+    sells = {条件名: {(ym, 社): 売りのキー}}（低いほど先に売る）。各期は M-4 の共通域 `common` の行の順のまま、
+    全ての条件と y がそろう社だけで `oof_backtest` に `(キー, y)` を渡す＝ADR-0022 の全社の売り側spread と同じ定義・
+    同じ母集団。照合: μ̂ の出所（基底名の条件）の期ごとの値は `base_oof[基底]["short_side_spread_by_period"]`
+    （M-4 が同じ域で出した値）と一致するはずで、外れたら RuntimeError で止める（域の取り違えは例外を出さずに
+    もっともらしい値を返すため）。
+    """
+    by_ym: dict[str, list] = {}
+    for ym, rows in common.items():
+        by_ym[ym] = [ec for ec, _yhats, _y in rows
+                     if (ym, ec) in y and all((ym, ec) in s for s in sells.values())]
+    by_condition: dict[str, dict] = {}
+    for name, sell in sells.items():
+        o = oof_backtest({ym: [(sell[(ym, ec)], y[(ym, ec)]) for ec in ecs] for ym, ecs in by_ym.items()})
+        by_condition[name] = {
+            "mean":      o.get("short_side_spread"),
+            "hit_rate":  o.get("short_side_hit_rate"),
+            "n_periods": len(o.get("short_side_spread_by_period") or {}),
+            "by_period": o.get("short_side_spread_by_period") or {},
+        }
+    for name in base_oof:
+        if name not in by_condition:
+            continue
+        ref = base_oof[name].get("short_side_spread_by_period") or {}
+        got = by_condition[name]["by_period"]
+        bad = sorted(ym for ym in set(ref) | set(got)
+                     if ym not in ref or ym not in got or abs(ref[ym] - got[ym]) > 1e-9)
+        if bad:
+            raise RuntimeError(f"全社の売り側spread の再計算が M-4 の base_oof と一致しない（{name}・期 {bad[:5]}）。"
+                               "同じ共通域を測れていないので判定に使わない")
+    return {"by_condition": by_condition,
+            "n_common_rows": sum(len(ecs) for ecs in by_ym.values())}
+
+
+def _print_whole(res: dict) -> None:
+    print(f"\n--- 全社（#1073・M-4 の共通域 {res['n_common_rows']} 行・M-4 の base_oof と照合済み）---", flush=True)
+    print(f"  {'売りの並び':<20}{'全社spread':>13}{'当たり率':>10}{'期数':>6}", flush=True)
+    for name, c in res["by_condition"].items():
+        mean = f"{c['mean']:>13.4f}" if c["mean"] is not None else f"{'n/a':>13}"
+        hit = f"{c['hit_rate']:>10.4f}" if c["hit_rate"] is not None else f"{'n/a':>10}"
+        print(f"  {SHORT[name]:<20}{mean}{hit}{c['n_periods']:>6}", flush=True)
+    for key, sig in res["sig"].items():
+        a, b = key.split("|")
+        print(f"  {SHORT[a]} − {SHORT[b]:<18} {_fmt_sig(sig)}", flush=True)
+
+
 def in_layer_report(run: dict, prices_by_co: dict, db) -> dict:
     """上位層の売り側spread（#1043）を基底ごとの買いの並びで出し、JSON に書く中身を返す。"""
     bases = run["bases"]
@@ -256,7 +308,15 @@ def in_layer_report(run: dict, prices_by_co: dict, db) -> dict:
         }
         _print_in_layer(buy_name, res)
         results[buy_name] = res
-    return {"caveat": M4_BASES_CAVEAT, "upper_bound": UPPER, "results": results}
+    whole = whole_universe_short_side(run["common"], sells, y, run["base_oof"])
+    whole["sig"] = {
+        f"{a}|{b}": paired_ic_significance(whole["by_condition"][a]["by_period"],
+                                           whole["by_condition"][b]["by_period"])
+        for a, b in IN_LAYER_PAIRS
+    }
+    _print_whole(whole)
+    return {"caveat": M4_BASES_CAVEAT, "upper_bound": UPPER, "results": results,
+            "whole_universe": whole}
 
 
 def build_parser() -> argparse.ArgumentParser:
