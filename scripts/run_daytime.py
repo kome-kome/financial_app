@@ -182,6 +182,9 @@ class Job:
     needs_deps_smoke: bool = False
 
 
+# 下の「**積むのは人**」は「暦（SCHEDULE）が自動では積まない」の意味。計画の承認を得た
+# `/next-issue` のセッションが `--enqueue` してよい（前提が整うまで積まない・積む前に `--queue` を見る。
+# docs/FUTURE_TASKS.md「人の作業が要る Issue の扱い」）。
 JOBS: dict[str, Job] = {
     "beta": Job(
         name="macro_beta",

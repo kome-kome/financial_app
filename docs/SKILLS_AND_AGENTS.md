@@ -46,7 +46,7 @@ Claude Code で使える **スキル（Skill）** と **エージェント（Age
 | `/run` | プロジェクトのアプリを実起動して動作確認する | 「テストは通ったが本当に動く？」「動かしてみせて」 |
 | `/init` | `CLAUDE.md` を新規生成 | リポジトリ初期設定 |
 | `/batch-ops` | 起動・収集・各バッチ・株価修復の全コマンド | バッチ／収集／修復を実行するとき |
-| `/next-issue` | 優先度順に Issue を1件ずつ処理。人は計画を承認するだけで、実装→PR→CI→自動マージ→次の Issue の計画まで連鎖する（`manual` は PR で停止・`cleanup` は片付けのみ。本 PJ 固有の規則は [FUTURE_TASKS.md](FUTURE_TASKS.md)） | 「次の課題をやって」 |
+| `/next-issue` | 優先度順に Issue を1件ずつ処理。人は計画を承認するだけで、実装→PR→CI→自動マージ→次の Issue の計画まで連鎖する。人の作業が要る Issue も、Claude の担当分を進めて残りを手順書で渡し、待ちを Issue のコメントに残して後で再開する（`自動のみ` は人の作業が要る Issue を外す・`全自動` は無人・`manual` は PR で停止・`cleanup` は片付けのみ。本 PJ 固有の規則は [FUTURE_TASKS.md](FUTURE_TASKS.md)） | 「次の課題をやって」 |
 
 ### 🏛 設計・リファクタ
 
