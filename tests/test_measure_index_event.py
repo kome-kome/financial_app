@@ -375,9 +375,11 @@ def wired26(wired, monkeypatch):
 
 
 def _run_monitor(tmp_path, sha=FROZEN, cohort="topix-2026-10"):
+    """stage B と 2022 のマッチ対も一時フォルダを向ける（本物の scripts/.cache や .index_lists を読まない）。"""
     out, pairs = tmp_path / "monitor.json", tmp_path / "monitor_pairs.json"
     code = X.main(["monitor", "--prereg", str(PREREG), "--prereg-sha", sha, "--cohort", cohort,
-                   "--out", str(out), "--pairs", str(pairs)])
+                   "--out", str(out), "--pairs", str(pairs), "--stage-b", str(tmp_path / "stage_b.json"),
+                   "--pairs-2022", str(tmp_path / "pairs_2022.json")])
     return code, out, pairs
 
 
@@ -411,6 +413,41 @@ class TestMonitorCli:
         assert code == 0 and calls == [S.MATCH_DATES_2026]
         assert again["inputs"]["pairs_frozen_now"] is False
         assert again["sequential"] == data["sequential"]
+
+    def test_without_stage_b_the_bands_are_unavailable_and_terciles_are_frozen(self, wired26, tmp_path):
+        """stage B が無くても監視は止めない（帯だけ unavailable）。三分位はマッチ対と同時に凍結する（#1062）。"""
+        code, out, pairs_path = _run_monitor(tmp_path)
+        assert code == 0
+        data = json.loads(out.read_text(encoding="utf-8"))
+        assert data["inputs"]["stage_b_ci"] == "missing"
+        assert data["inputs"]["pressure_terciles"] == "frozen_now"
+        assert all(b["lo"] is None for b in data["descriptive"]["bands"].values())
+        assert data["sequential"]["looks"][0]["outside"] is None
+        assert data["descriptive"]["band_alert"] is None and data["descriptive"]["issue_draft"] is None
+        frozen = json.loads(pairs_path.read_text(encoding="utf-8"))
+        assert frozen["pressure"]["base_day"] == "2026-03-31"
+        assert set(frozen["pressure"]["terciles"]) == set(TREATED)                 # マッチした処置 4 社
+        assert data["descriptive"]["pressure"]["n_scored"] == len(frozen["pressure"]["terciles"])
+        code, out, _ = _run_monitor(tmp_path)
+        assert json.loads(out.read_text(encoding="utf-8"))["inputs"]["pressure_terciles"] == "reused"
+
+    def test_stage_b_ci_sets_the_bands(self, wired26, tmp_path):
+        (tmp_path / "stage_b.json").write_text(
+            json.dumps({"stage": "B", "prereg_sha256": FROZEN, "ci": {"I": [-0.02, -0.004]}}), encoding="utf-8")
+        code, out, _ = _run_monitor(tmp_path)
+        data = json.loads(out.read_text(encoding="utf-8"))
+        assert code == 0 and data["inputs"]["stage_b_ci"] == "ok"
+        step = data["descriptive"]["bands"]["step"]
+        assert step["lo"] == pytest.approx(-0.025) and step["hi"] == pytest.approx(-0.005)
+        assert data["sequential"]["looks"][0]["outside"] in (True, False)
+
+    @pytest.mark.parametrize("doc,state", [({"prereg_sha256": "0" * 64, "ci": {"I": [-0.02, -0.004]}},
+                                            "prereg_mismatch"),
+                                           ({"prereg_sha256": FROZEN, "ci": {"I": None}}, "no_ci")])
+    def test_unusable_stage_b_is_reported_not_used(self, tmp_path, doc, state):
+        path = tmp_path / "b.json"
+        path.write_text(json.dumps(doc), encoding="utf-8")
+        assert X.read_stage_b_ci(path, {"prereg_sha256": FROZEN}) == (None, state)
 
     @pytest.mark.parametrize("field,value", [("prereg_sha256", "0" * 64), ("cohort", "topix-2026-10-add")])
     def test_pairs_frozen_under_another_stamp_stop_with_2(self, wired26, tmp_path, field, value):

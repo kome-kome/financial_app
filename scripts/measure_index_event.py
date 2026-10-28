@@ -21,6 +21,9 @@
   2026 のマッチ日へ当て、**初回の実行で対を凍結して 2 回目以降は読み直す**（凍結値か群の違う対なら終了
   コード 2）。市場区分別の CAR と露出 τ（`scripts/index_exposure.py`）を記述として併記する。R0 とは独立
   （§6.3）なので追記節の記入を待たない。棄却しても終了コードは 0（結果であって失敗ではない）。
+  記述として予測帯（stage B の 2022 の I の 90% CI × s・`--stage-b`）、帯の外が 2 回続いたときの #1001 向け
+  起票文（自動では起票しない）、売り圧力（時価総額 × 刻み ÷ 売買代金）の三分位別 CAR を出す（#1062）。
+  stage B が無ければ帯は unavailable で、監視は止めない。三分位はマッチ対と同時に凍結する。
 
 ## 守ること
 
@@ -158,6 +161,21 @@ def monitor_report(cohort: str, summary: dict, pairs_note: str) -> list[str]:
                          f" rejected={r['rejected']}")
         lines.append(f"  first_rejection={seq['first_rejection']} (one-sided, alpha={seq['alpha']})")
     d = summary["descriptive"]
+    for name, b in (d.get("bands") or {}).items():
+        lines.append(f"  band {name}: s={_fmt(b['s'], '.3f')} [{_fmt(b['lo'], '+.4f')}, {_fmt(b['hi'], '+.4f')}]")
+    if seq is not None:
+        outs = " ".join(f"k{r['k']}={r['outside']}" for r in seq["looks"] if r.get("outside") is not None)
+        lines.append(f"  band step outside: {outs or '(none tested with a band)'}"
+                     f" alert={d.get('band_alert')}")
+    pr = d.get("pressure")
+    if pr:
+        lines.append(f"  pressure: median_2026={_fmt(pr['median_2026'], '.4f')}"
+                     f" median_2022={_fmt(pr['median_2022'], '.4f')} n_scored={pr['n_scored']}")
+    for grp, row in (d.get("pressure_tercile_car") or {}).items():
+        cars = " ".join(f"m{m}={_fmt(v, '+.4f')}" for m, v in row["pressure_car"].items())
+        lines.append(f"  pressure {grp}: n={row['n_treated']} {cars or '(no look due yet)'}")
+    if d.get("issue_draft"):
+        lines.append("  issue_draft: written to the JSON (descriptive.issue_draft). Paste it into #1001 by hand")
     for seg, row in d["by_segment"].items():
         cars = " ".join(f"m{m}={_fmt(v, '+.4f')}" for m, v in row["pressure_car"].items())
         lines.append(f"  segment {seg}: n={row['n_treated']} {cars or '(no look due yet)'}")
@@ -379,6 +397,41 @@ def monitor_paths(cohort: str) -> tuple:
             MONITOR_OUT_DIR / f"index_event_monitor_{cohort}.json")
 
 
+def read_stage_b_ci(path: Path, stamp: dict) -> tuple:
+    """予測帯の材料（stage B の 2022 の I の 90% CI・#1062）。戻り値は (CI or None, 状態の 1 語)。
+
+    無い・凍結値が違う・CI が無いときは None を返し、帯は unavailable になる（監視そのものは止めない）。
+    """
+    if not path.is_file():
+        return None, "missing"
+    doc = json.loads(path.read_text(encoding="utf-8"))
+    if doc.get("prereg_sha256") != stamp["prereg_sha256"]:
+        return None, "prereg_mismatch"
+    ci = (doc.get("ci") or {}).get("I")
+    if not ci or len(ci) != 2 or any(v is None for v in ci):
+        return None, "no_ci"
+    return [float(ci[0]), float(ci[1])], "ok"
+
+
+def cohort_pressure(db, prices: dict, treated: Iterable[str], base_day: date, step) -> dict:
+    """{処置社: 売り圧力}（#1062）。主のマッチ日の時価総額と、その週より前の売買代金で作る。"""
+    import index_event_study as S
+
+    codes = set(treated)
+    firms = load_firms(db, prices, codes, {"main": base_day})["main"]
+    week = S.iso_monday(base_day)
+    turnover = S.weekly_frame(load_turnover(db, codes, week - S.WEEK * (S.FIRST_STAGE_BASE_WEEKS + 1), week))
+    return S.pressure_scores(firms, turnover, base_day, float(step))
+
+
+def _median(values) -> Optional[float]:
+    vals = sorted(values)
+    if not vals:
+        return None
+    mid = len(vals) // 2
+    return vals[mid] if len(vals) % 2 else (vals[mid - 1] + vals[mid]) / 2
+
+
 def read_frozen_pairs(path: Path, stamp: dict, cohort: str) -> tuple:
     """凍結したマッチ対。戻り値は (ファイルの中身 or None＝まだ無い, 失敗の理由 or None)。"""
     if not path.is_file():
@@ -598,6 +651,28 @@ def run_monitor(args) -> int:
             return _fail(f"マッチ対に主の仕様 {main_key} が無い（マッチした処置社が 0 社）: {pairs_path}")
         segments = {r.edinet_code: r.market_segment for r in snapshot.values() if r.edinet_code in pairs}
         exposure = load_exposure(db, ledger, PS.jst_today())
+        # 売り圧力（#1062・確証の群だけ）。2026 の三分位はマッチ対と同時に凍結し、2022 の中央値は毎回作る
+        terciles, medians, pressure_note = None, {}, "not_confirmatory"
+        if cohort.confirmatory:
+            frozen_p = frozen.get("pressure")
+            if frozen_p is None:
+                scores = cohort_pressure(db, prices, pairs, S.MATCH_DATES_2026["main"], IE.STEP_2026)
+                frozen_p = {"base_day": S.MATCH_DATES_2026["main"].isoformat(), "median": _median(scores.values()),
+                            "terciles": S.pressure_terciles(scores) if scores else {}}
+                if froze_now:
+                    frozen["pressure"] = frozen_p
+                    write_json(pairs_path, frozen)
+                pressure_note = "frozen_now" if froze_now else "not_frozen"
+            else:
+                pressure_note = "reused"
+            terciles, medians["2026"] = frozen_p["terciles"], frozen_p["median"]
+            _doc22, pairs22, err22 = load_pairs(Path(args.pairs_2022), stamp)
+            if pairs22:
+                medians["2022"] = _median(cohort_pressure(
+                    db, prices, pairs22, S.MATCH_DATES_2022["main"], IE.STEP_2022).values())
+            else:
+                print(f"[monitor] 2022 の売り圧力を作れない（{err22}）。圧力比の帯は unavailable")
+    i_ci, stage_b_note = read_stage_b_ci(Path(args.stage_b), stamp)
     codes = set(pairs) | {c for cs in pairs.values() for c in cs}
     closes = S.weekly_frame({
         ec: {S.iso_monday(date.fromisoformat(p.trade_date[:10])): p.close_last for p in prices[ec]}
@@ -607,7 +682,8 @@ def run_monitor(args) -> int:
                         calendar=S.pressure_calendar(IE.SCHEDULES[(cohort.review, cohort.kind)].steps),
                         announce_week=S.announcement_week(review.announced, review.after_close),
                         segments=segments, confirmatory=cohort.confirmatory,
-                        anticipation_from=cohort.anticipation_from)
+                        anticipation_from=cohort.anticipation_from, i_ci=i_ci, terciles=terciles,
+                        pressure_medians=medians, cohort=args.cohort)
     summary["descriptive"]["exposure_tau"] = exposure
     write_json(out_path, {
         "stage": "monitor", "cohort": args.cohort, **stamp, "generated_at": known_at.isoformat(timespec="seconds"),
@@ -615,7 +691,8 @@ def run_monitor(args) -> int:
                    "pairs_generated_at": frozen.get("generated_at"),
                    "pairs_snapshot_as_of": (frozen.get("data") or {}).get("snapshot_as_of"),
                    "snapshot_as_of": as_of.isoformat(), "n_treated_itt": len(treated),
-                   "n_controls": len(codes) - len(pairs)},
+                   "n_controls": len(codes) - len(pairs),
+                   "stage_b": str(args.stage_b), "stage_b_ci": stage_b_note, "pressure_terciles": pressure_note},
         "matching": frozen.get("matching"), **summary})
     for line in monitor_report(args.cohort, summary, "frozen_now" if froze_now else "reused"):
         print(line)
@@ -658,6 +735,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                                     "・銘柄コードを含む・公開しない置き場）")
     mo.add_argument("--out", help="結果の JSON（既定は scripts/.cache/index_event_monitor_<群>.json・銘柄コードを含めない）")
     mo.add_argument("--lists-dir", help="指数の一覧の置き場（既定はリポジトリの .index_lists）")
+    mo.add_argument("--stage-b", default=str(DEFAULT_B_OUT),
+                    help="予測帯の材料（stage B の JSON の ci.I）。無ければ帯は unavailable（#1062）")
+    mo.add_argument("--pairs-2022", default=str(DEFAULT_PAIRS_OUT),
+                    help="圧力比の分母に使う 2022 前例のマッチ対（stage-a が書いたもの）")
     args = ap.parse_args(argv)
 
     from collector_utils import force_utf8_stdout

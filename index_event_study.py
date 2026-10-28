@@ -1250,6 +1250,10 @@ MONITOR_ALPHA = 0.05                     # §6.3 片側・全体 α（O'Brien-Fl
 MONITOR_TEST_LAG_WEEKS = 2               # §6.3 w_m + 2 の週の終値がそろった時点で k = m 回目の検定
 # data_j の市場区分 → 出力のキー（標準出力は ASCII だけにする）
 SEGMENT_KEYS = dict(zip(DOMESTIC_SEGMENTS, ("prime", "standard", "growth")))
+# §6.3 予測帯（記述・#1062）: 2022 の I の 90% CI × s。主の s は刻みの比 12.5/10（§10）、平方根則と圧力比は記述
+BAND_STEP_RATIO = 12.5 / 10
+BAND_CONSECUTIVE = 2                     # §6.3 帯の外が 2 四半期続いたら R8 の起票文を出す
+PRESSURE_TERCILES = 3                    # §6.3 売り圧力の三分位別 CAR（記述）
 
 
 class Cohort(NamedTuple):
@@ -1278,6 +1282,14 @@ MONITOR_DEFINITIONS = {
     "first_rejection": "棄却した後の回も計算して出すが、判定は最初に棄却した回で確定する",
     "descriptive": "市場区分（実行時点の data_j）別の圧力窓 CAR は、到来した回だけ出す",
     "anticipation": "新規採用は先回りの窓 [基準日の週, w_1 − 2] と圧力窓 [w_1 − 1, w_1] を記述する（検定しない）",
+    "pressure": "売り圧力（#1062・ユーザー判断）= 時価総額 × 係数の刻み ÷ 売買代金（turnover_sum）の中央値。時価総額と"
+                f"売買代金は主のマッチ日（2022-03-31 / 2026-03-31）の値と、その週より前の {FIRST_STAGE_BASE_WEEKS} 週"
+                f"（足 {FIRST_STAGE_MIN_BASE} 本以上）。パッシブ残高と浮動株の差は無視し、2022 と 2026 を同じ式で作る",
+    "pressure_tercile": f"マッチした処置社を売り圧力の昇順で {PRESSURE_TERCILES} 等分（1 = 弱い）。マッチ対と同時に凍結する",
+    "bands": f"2022 の I の 90% CI（stage B）× s。step: s = {BAND_STEP_RATIO:g}（主）、sqrt_step: √{BAND_STEP_RATIO:g}、"
+             "pressure: 売り圧力の中央値の比（2026 ÷ 2022・パッシブ残高の比は 1 と仮定）。stage B が無ければ unavailable",
+    "band_alert": f"主の帯（step）の外（上下両側）が検定済みの回で {BAND_CONSECUTIVE} 回続いたら R8 の起票文を出す。"
+                  "unavailable の回は数えず連続も切らない。帯の内側の回で連続は切れる。自動では起票しない（ADR-0061）",
 }
 
 
@@ -1341,9 +1353,16 @@ def sequential_looks(ar: pd.Series, calendar: Sequence[PressureWeek], announce_w
 def segment_pressure_cars(returns: pd.DataFrame, pairs: Mapping[str, Sequence[str]], segments: Mapping[str, str],
                           calendar: Sequence[PressureWeek], latest: Optional[date]) -> dict:
     """{区分: {n_treated, pressure_car: {m: CAR}}}（記述）。区分は `SEGMENT_KEYS`、無ければ other。"""
+    return group_pressure_cars(returns, pairs, {t: SEGMENT_KEYS.get(segments.get(t), "other") for t in pairs},
+                               calendar, latest)
+
+
+def group_pressure_cars(returns: pd.DataFrame, pairs: Mapping[str, Sequence[str]], groups: Mapping[str, str],
+                        calendar: Sequence[PressureWeek], latest: Optional[date]) -> dict:
+    """{群: {n_treated, pressure_car: {m: CAR}}}（記述）。`groups` は {処置社: 群の名前}。"""
     by: dict = {}
     for t in sorted(pairs):
-        by.setdefault(SEGMENT_KEYS.get(segments.get(t), "other"), {})[t] = pairs[t]
+        by.setdefault(groups[t], {})[t] = pairs[t]
     out = {}
     for seg, sub in sorted(by.items()):
         ar = abnormal_return_series(returns, sub)
@@ -1353,12 +1372,91 @@ def segment_pressure_cars(returns: pd.DataFrame, pairs: Mapping[str, Sequence[st
     return out
 
 
+def pressure_scores(firms: Mapping[str, "Firm"], turnover: pd.DataFrame, base_day: date, step: float) -> dict:
+    """{社: 売り圧力}（#1062）= 時価総額 × 刻み ÷ 基準日の週より前の売買代金の中央値。作れない社は入れない。"""
+    week = iso_monday(base_day)
+    base = turnover.reindex([week - WEEK * k for k in range(1, FIRST_STAGE_BASE_WEEKS + 1)])
+    med, n = base.median(skipna=True), base.notna().sum()
+    out = {}
+    for ec, f in firms.items():
+        if ec not in med.index or n[ec] < FIRST_STAGE_MIN_BASE or not med[ec] > 0:
+            continue
+        mcap = f.price * f.shares if f.shares else None
+        if mcap is not None and mcap > 0:
+            out[ec] = mcap * float(step) / float(med[ec])
+    return out
+
+
+def pressure_terciles(scores: Mapping[str, float], n: int = PRESSURE_TERCILES) -> dict:
+    """{社: 1..n}（昇順で n 等分・同値は社のコード順）。"""
+    order = sorted(scores, key=lambda ec: (scores[ec], ec))
+    return {ec: 1 + (n * i) // len(order) for i, ec in enumerate(order)}
+
+
+def band_scales(pressure_2026: Optional[float], pressure_2022: Optional[float]) -> dict:
+    """{帯の名前: s}。pressure は売り圧力の中央値の比で、どちらかが無ければ None。"""
+    ratio = (pressure_2026 / pressure_2022
+             if pressure_2026 is not None and pressure_2022 is not None and pressure_2022 > 0 else None)
+    return {"step": BAND_STEP_RATIO, "sqrt_step": math.sqrt(BAND_STEP_RATIO), "pressure": ratio}
+
+
+def prediction_bands(i_ci: Optional[Sequence[float]], scales: Mapping[str, Optional[float]]) -> dict:
+    """{帯の名前: {s, lo, hi}}＝2022 の I の 90% CI × s（§6.3）。CI か s が無い帯は lo・hi が None。"""
+    out = {}
+    for name, s in scales.items():
+        ok = i_ci is not None and s is not None and math.isfinite(s) and s > 0
+        lo, hi = sorted((i_ci[0] * s, i_ci[1] * s)) if ok else (None, None)
+        out[name] = {"s": s, "lo": lo, "hi": hi}
+    return out
+
+
+def mark_band(looks: Sequence[dict], band: Mapping) -> None:
+    """検定済みの回に band_lo・band_hi・outside（帯の外なら True）を付ける。帯が無い・未検定の回は None。"""
+    for r in looks:
+        has = r["status"] == "tested" and band.get("lo") is not None and r["car"] is not None
+        r["band_lo"], r["band_hi"] = (band["lo"], band["hi"]) if has else (None, None)
+        r["outside"] = (not band["lo"] <= r["car"] <= band["hi"]) if has else None
+
+
+def band_alert(looks: Sequence[dict], need: int = BAND_CONSECUTIVE) -> Optional[dict]:
+    """帯の外が検定済みの回で `need` 回続いた最初の位置。unavailable は飛ばし、帯の内側で連続は切れる。"""
+    run: list = []
+    for r in looks:
+        if r["status"] == "not_yet":
+            break
+        if r["status"] != "tested" or r.get("outside") is None:
+            continue
+        run = run + [r["k"]] if r["outside"] else []
+        if len(run) >= need:
+            ks = run[-need:]
+            return {"k": ks, "side": ["below" if looks[k - 1]["car"] < looks[k - 1]["band_lo"] else "above"
+                                      for k in ks]}
+    return None
+
+
+def issue_draft(alert: Optional[dict], looks: Sequence[dict], bands: Mapping, cohort: str) -> Optional[str]:
+    """親 #1001 へ人が貼る起票文（R8）。`alert` が無ければ None。自動では起票しない（ADR-0061）。"""
+    if alert is None:
+        return None
+    main = bands["step"]
+    rows = "\n".join(f"| {k} | {looks[k - 1]['pressure_week']} | {looks[k - 1]['car']:+.4f} | {side} |"
+                     for k, side in zip(alert["k"], alert["side"]))
+    return (f"## [{cohort}] 前向き監視: 圧力窓 CAR が予測帯の外に {len(alert['k'])} 回続いた（§6.3 → R8）\n\n"
+            f"主の予測帯（2022 の I の 90% CI × s = {main['s']:g}）: [{main['lo']:+.4f}, {main['hi']:+.4f}]\n\n"
+            "| k | 圧力週 | CAR | 帯に対して |\n|---|---|---:|---|\n" + rows + "\n\n"
+            "事前登録 R8 により、2 エピソードを併合して再推定し、R2〜R6 を判定し直す。")
+
+
 def monitor(*, closes: pd.DataFrame, pairs: Mapping[str, Sequence[str]], calendar: Sequence[PressureWeek],
             announce_week: date, segments: Mapping[str, str], confirmatory: bool,
-            anticipation_from: Optional[date] = None) -> dict:
+            anticipation_from: Optional[date] = None, i_ci: Optional[Sequence[float]] = None,
+            terciles: Optional[Mapping[str, int]] = None, pressure_medians: Optional[Mapping] = None,
+            cohort: str = "") -> dict:
     """前向き監視（§6.3）。要約は件数と統計だけで、銘柄コードを含めない。
 
     `pairs` は主の仕様（C1・主のマッチ日）の凍結したマッチ対。`confirmatory=False` の群は記述だけ。
+    `i_ci` は stage B の 2022 の I の 90% CI（無ければ帯は unavailable）、`terciles` は {処置社: 三分位}、
+    `pressure_medians` は {"2026": 中央値, "2022": 中央値}（#1062）。
     """
     returns = weekly_log_returns(closes)
     frame = abnormal_return_frame(returns, pairs)
@@ -1373,6 +1471,21 @@ def monitor(*, closes: pd.DataFrame, pairs: Mapping[str, Sequence[str]], calenda
         descriptive["anticipation"] = {
             "window": [start.isoformat(), end.isoformat()],
             "car": car(ar, _span(start, 0, (end - start).days // 7)) if week_complete(end, latest) else None}
+    medians = dict(pressure_medians or {})
+    bands = prediction_bands(i_ci, band_scales(medians.get("2026"), medians.get("2022")))
+    descriptive["bands"] = bands
+    descriptive["pressure"] = {"median_2026": medians.get("2026"), "median_2022": medians.get("2022"),
+                               "n_scored": len(terciles or {})}
+    if terciles:
+        scored = {t: c for t, c in pairs.items() if t in terciles}
+        descriptive["pressure_tercile_car"] = group_pressure_cars(
+            returns, scored, {t: f"t{terciles[t]}" for t in scored}, calendar, latest)
+    sequential = sequential_looks(ar, calendar, announce_week, latest) if confirmatory else None
+    if sequential is not None:
+        mark_band(sequential["looks"], bands["step"])
+        alert = band_alert(sequential["looks"])
+        descriptive["band_alert"] = alert
+        descriptive["issue_draft"] = issue_draft(alert, sequential["looks"], bands, cohort)
     return {
         "calendar": [{"m": pw.m, "effective_on": pw.effective_on.isoformat(),
                       "pressure_day": pw.pressure_day.isoformat(), "week": pw.week.isoformat(),
@@ -1381,7 +1494,7 @@ def monitor(*, closes: pd.DataFrame, pairs: Mapping[str, Sequence[str]], calenda
         "weekly_last": latest.isoformat() if latest else None,
         "n_treated_matched": len(pairs),
         "n_treated_with_ar": int(frame.notna().any().sum()) if not frame.empty else 0,
-        "sequential": sequential_looks(ar, calendar, announce_week, latest) if confirmatory else None,
+        "sequential": sequential,
         "descriptive": descriptive,
         "definitions": MONITOR_DEFINITIONS,
     }
