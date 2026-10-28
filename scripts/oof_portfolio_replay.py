@@ -10,7 +10,7 @@
 ## 手続き
 
 - 予測は `sell_mu_source_bakeoff --in-layer`（#1043）と同じく M-4 を 1 回回して共通域の社ごとの OOF を取る
-  （`_run_config(keep_common=True)`）。M-4 の基底は本番と設定が違う（`M4_BASES_CAVEAT`・#1058）
+  （`_run_config(keep_common=True)`）。M-4 の基底は #1058 で本番の設定にそろえた（`M4_BASES_CAVEAT`）
 - 買いの並びは各モデルの画面の既定（M-1 / M-2 は U = μ̂ − λR・生の R2、λ=0 の M-6 は μ̂＝`buy_scores`）。
   売りの並びは `--sell-source` の μ̂ の低い順（既定は sell_ranking の既定の μ の出所＝M-6）。−R_macro は
   過去の時点で作り直せないので使わない

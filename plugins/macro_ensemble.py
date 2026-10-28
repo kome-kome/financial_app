@@ -40,6 +40,11 @@ from . import progress
 from .base import AnalysisPlugin
 from .utils import coerce_params, winsorize, walk_forward_cv_monthly
 from .macro_snapshots import (
+    apply_fin_fill,
+    build_oof_meta,
+    load_market_caps,
+    log_market_cap_by_ym,
+    neutralize_size_by_ym,
     LABEL_HORIZON_MONTHS,
     load_data,
     preload_macro,
@@ -414,19 +419,28 @@ class MacroEnsemblePlugin(AnalysisPlugin):
 
         M-6 のスナップショット構成は M-2 と同値（交差項なし・macro_nan_ok）なので build は
         共有し、CV だけ ElasticNet の fit_predict へ差し替える。探索設定は macro_enet の
-        モジュール定数をそのまま参照する（M-6 単体実行と同一コードパス＝数値の二重管理を避ける）。"""
-        from .macro_enet import _CV_SPLITS, _MAX_ITER, _N_ALPHAS, MacroEnetPlugin
-        from .model_candidates import make_diag, make_elasticnet_fit_predict
+        モジュール定数をそのまま参照する（M-6 単体実行と同一コードパス＝数値の二重管理を避ける）。
+        内側の CV（`_INNER_CV`）と OOF への規模の中立化（`_SIZE_NEUTRAL`）も本番の M-6 と同じにする
+        （#1058。そろえる前は内側が `rows`・中立化なしで、売りの μ̂ の比較が本番の M-6 を測っていなかった）。"""
+        from .macro_enet import (
+            _CV_SPLITS, _INNER_CV, _MAX_ITER, _N_ALPHAS, _SIZE_NEUTRAL, MacroEnetPlugin,
+        )
+        from .model_candidates import _EN_INNER_CV_BY_MONTH, make_diag, make_elasticnet_fit_predict
 
         s, ids = self._filter_yms(b, yms)
         l1_ratios = MacroEnetPlugin._l1_ratios(m6p["l1_ratio"])
         fp = make_elasticnet_fit_predict(
             l1_ratios=l1_ratios, n_alphas=_N_ALPHAS, cv_splits=_CV_SPLITS,
-            max_iter=_MAX_ITER, diag=make_diag(),
+            max_iter=_MAX_ITER, diag=make_diag(), inner_cv=_INNER_CV,
         )
         _, resid = walk_forward_cv_monthly(
             s, b["feats"], min_train_months=6, step_months=3,
-            return_residuals=True, fit_predict=fp, embargo_months=LABEL_HORIZON_MONTHS)
+            return_residuals=True, fit_predict=fp, embargo_months=LABEL_HORIZON_MONTHS,
+            pass_train_groups=(_INNER_CV in _EN_INNER_CV_BY_MONTH))
+        if _SIZE_NEUTRAL:
+            oof_meta = build_oof_meta(ids, b["meta"], resid.keys())
+            resid, _n_nocap = neutralize_size_by_ym(
+                resid, oof_meta, log_market_cap_by_ym(ids, b["fin_by_co"], b["market_caps"]))
         return _align(resid, ids), {"s": s, "cur": b["cur"], "l1_ratios": l1_ratios}
 
     def _current_mu_m6(self, ctx) -> dict:
@@ -490,6 +504,11 @@ class MacroEnsemblePlugin(AnalysisPlugin):
         prices_by_co, fin_by_co, companies = load_data(db, with_volume=needs_volume)
         if not prices_by_co:
             raise ValueError("株価週次履歴がありません。先に収集を実行してください。")
+        # 本番の M-2 / M-6 と同じ財務（#1058）: 「無い」と確かめた空欄を埋める（#983）のは M-2 / M-6 だけで、
+        # 本番の M-1 は埋めないので M-1 のレグには元の財務を渡す。規模の中立化の時価総額は M-6 のレグが使う
+        fin_filled, _n_filled = apply_fin_fill(db, fin_by_co)
+        from .macro_enet import _SIZE_NEUTRAL
+        market_caps = load_market_caps(db) if _SIZE_NEUTRAL else {}
 
         # ── 1) 各基底のスナップショット構築 → 共通月グリッドで OOF ──────
         # fold 月は all_yms の index 基準のため、月集合を揃えてから CV する
@@ -505,8 +524,9 @@ class MacroEnsemblePlugin(AnalysisPlugin):
             shared = next((b for n, b in builds.items()
                            if n != "macro_risk_return" and _same_build_config(subp[n], subp[name])),
                           None)
-            builds[name] = shared if shared is not None else self._m2_build(
-                db, prices_by_co, fin_by_co, companies, subp[name])
+            builds[name] = shared if shared is not None else {
+                **self._m2_build(db, prices_by_co, fin_filled, companies, subp[name]),
+                "fin_by_co": fin_filled, "market_caps": market_caps}
 
         common_yms = sorted(set.intersection(*(set(b["s"]) for b in builds.values())))
         if not common_yms:
