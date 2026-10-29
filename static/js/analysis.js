@@ -1939,7 +1939,7 @@ function _mrrReadParams() {
   const g = (id) => document.getElementById('param-macro_risk_return-' + id);
   const d = _mrrData || {};
   const lamEl = g('lambda_risk'), axEl = g('risk_axis'), tnEl = g('top_n'), gEl = g('r3_gate');
-  const lambda = (lamEl && lamEl.value !== '') ? parseFloat(lamEl.value) : (d.lambda_risk ?? 1.0);
+  const lambda = (lamEl && lamEl.value !== '') ? parseFloat(lamEl.value) : (d.lambda_risk ?? 0.0);
   const axis = _MRR_VALID_AXES.includes(axEl && axEl.value)
     ? axEl.value
     : (_MRR_VALID_AXES.includes(d.risk_axis) ? d.risk_axis : 'r2');
@@ -2351,9 +2351,9 @@ function _mrrLambdaNoteHTML(v) {
     return `<div style="${warn}">R_macro で並べると、λ=1.0 では順位とその後のリターンの相関（rank-IC）がほぼ 0（+0.015）まで落ち、R2 の並び（既定）より rank-IC・売り側の成績とも有意に劣りました（#815）。過去の月にも 2026年に推定した β を当てた、未来情報を含む上限での結果です。</div>`;
   }
   if (v.lambda !== _MRR_RISK_MEASURED_LAMBDA) {
-    return `<div style="${warn}">λ=${v.lambda} の並び（U = μ − λR の順）は成績を測っていません（測ったのは既定の λ=${_MRR_RISK_MEASURED_LAMBDA.toFixed(1)} だけ・#815）。</div>`;
+    return `<div style="${warn}">λ=${v.lambda} の並び（U = μ − λR の順）は成績を測っていません（測ったのは λ=${_MRR_RISK_MEASURED_LAMBDA.toFixed(1)} だけ・#815・#1040）。既定は λ=0（μ の順）です。</div>`;
   }
-  return `<div style="font-size:11px;color:var(--text-muted);margin-bottom:8px">既定の並び（R2・λ=1.0）は、μ だけの並び（λ=0）と順位の成績に有意な差がありませんでした（#815）。リスクを引くぶん上位は低ボラ寄りになり、上位の分位は平均リターンがやや低い代わりにボラが低くシャープが高めでした。</div>`;
+  return `<div style="${warn}">R2・λ=1.0 の並びは、全体の順位では μ だけの並び（λ=0・既定）と有意な差がありませんでしたが（#815）、上位10社の超過リターンは μ の順より有意に悪くなりました（−21.6%・#1040）。リスクを引くぶん上位は低ボラ寄りになります。</div>`;
 }
 
 function _mrrTableHTML(v) {

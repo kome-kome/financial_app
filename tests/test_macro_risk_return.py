@@ -257,7 +257,7 @@ class TestParamsSchema:
 
     def test_coerce_defaults(self):
         result = coerce_params(self.schema, {})
-        assert result["lambda_risk"] == 1.0
+        assert result["lambda_risk"] == 0.0       # #1040 で 1.0 → 0（表は μ̂ の順）
         assert result["risk_axis"] == "r2"
         assert isinstance(result["fin_features"], list)
         assert result["top_n"] == 30
