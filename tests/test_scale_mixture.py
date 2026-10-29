@@ -401,6 +401,45 @@ _REAL_0930 = {
 }
 
 
+class TestClippedJudgedBands:
+    """#1086: 保持窓の端で始まりが切り詰められた帯も、判定済みとして落とす。
+
+    値は E40060 の実際の記録（2026-09-30・10-27・10-29 の夜間）。終わり 05-11 と戻り比 0.7561 は
+    変わらず、始まりと往き比だけが動いた。10/29 の表の最古の日は 04-30（04-29 は祝日）で、
+    04-30 の段差は前日が無く組めない。
+    """
+
+    _JUDGED = {("E40060", "2026-04-30", "2026-05-11", 1.1931, 0.7561)}
+    _TONIGHT = {"start": "2026-05-01", "end": "2026-05-11", "days": 11,
+                "ratio_out": 1.1618, "ratio_back": 0.7561}
+
+    def _excluded(self, band, *, judged=None, oldest="2026-04-30"):
+        found, n = exclude_judged_bands(_found({"E40060": [band]}),
+                                        self._JUDGED if judged is None else judged, oldest=oldest)
+        return n == 1 and found["companies"] == []
+
+    def test_clipped_band_is_excluded(self):
+        assert self._excluded(self._TONIGHT)
+
+    def test_without_oldest_only_exact_keys_match(self):
+        """`oldest` を渡さない呼び出し（repair_scale_mixture 等）は従来どおり。"""
+        assert not self._excluded(self._TONIGHT, oldest=None)
+
+    def test_judged_start_still_in_the_table_is_reported(self):
+        """記録の始まりが表に残っているのに始まりが動いた＝値が書き換わった。判定をやり直させる。"""
+        assert not self._excluded(self._TONIGHT, oldest="2026-04-28")
+
+    @pytest.mark.parametrize("change", [{"end": "2026-05-12"}, {"ratio_back": 0.7600},
+                                        {"start": "2026-04-28"}])
+    def test_other_bands_are_reported(self, change):
+        """終わりの日・戻り比が違う帯、記録より早く始まる帯は別の帯。"""
+        assert not self._excluded(dict(self._TONIGHT, **change))
+
+    def test_other_company_is_not_matched(self):
+        judged = {("E00001", "2026-04-30", "2026-05-11", 1.1931, 0.7561)}
+        assert not self._excluded(self._TONIGHT, judged=judged)
+
+
 class TestUnmixableBands:
     """開始日が境界日より後の帯は、突合しなくても混在ではありえない（#773）。"""
 

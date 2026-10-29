@@ -20,7 +20,8 @@ from collector import (
     load_judged_scale_bands, exclude_judged_bands, exclude_unmixable_bands, roundtrip_log_line,
 )
 from collector_prices import (
-    format_yahoo_http_stats, scale_rejection_log_line, scale_step_log_line,
+    format_yahoo_http_stats, oldest_daily_trade_date, scale_rejection_log_line,
+    scale_step_log_line,
     scan_price_scale_steps,
 )
 from corporate_actions import build_ledger, rebuild_split_adjustment_factors
@@ -261,7 +262,8 @@ async def main():
             if _susp:
                 rt = detect_roundtrip_scale_bands(db4, only_ecs=_susp)
                 rt, n_unmixable = exclude_unmixable_bands(rt)
-                rt, n_judged = exclude_judged_bands(rt, load_judged_scale_bands(db4))
+                rt, n_judged = exclude_judged_bands(rt, load_judged_scale_bands(db4),
+                                                    oldest=oldest_daily_trade_date(db4))
                 log(f"  {roundtrip_log_line(len(_susp), rt, n_judged, n_unmixable=n_unmixable)}")
             else:
                 log("  往復段差: 検査対象なし（今夜は AdjC≠C の社が無かった）")
