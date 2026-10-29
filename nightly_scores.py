@@ -349,6 +349,23 @@ DIAG_EXTRACTORS: dict[str, Callable[[dict], dict]] = {
 }
 
 
+def ridge_high_edge_log_line(diag: dict) -> str:
+    """sector_ols の ridge α が上端（1000）に張り付いた業種の1行（`scripts/check_nightly_collect.py` が読む）。
+
+    WARN ログだけでは誰にも届かないので、watchdog が種類 `ridge_high_edge` として起票する（#728）。
+    **張り付きが無い夜も必ず出す**——行が無い夜（sector_ols が走らなかった・旧書式）を
+    「不明」と読めるようにするため。下端は数えない（`_edge_warnings` の docstring）。
+    """
+    sectors = diag.get("sectors") or []
+    high = [s for s in sectors if s.get("alpha_edge") == "high"]
+    if not high:
+        return f"ridge α の上端: なし（{len(sectors)}業種を検査・#728）"
+    names = ", ".join(f"{s['industry']}(n={s['n']})" for s in high[:5])
+    return (f"**ridge α の上端 {len(high)}業種**（例: {names}）＝罰を最大にしても足りない"
+            f"＝特徴量が効いていない合図。`python -m scripts.nightly_diag_report --view edges`"
+            f" で何夜続いているかを見る（#728）")
+
+
 def _edge_warnings(model: str, diag: dict) -> list[str]:
     """選ばれた α が候補の端に張り付いた箇所のうち、人が見るべきもの（WARN ログ用・起票はしない）。
 
@@ -441,6 +458,8 @@ def _record_diagnostics(db, name: str, result: dict, run_ctx: dict,
             f" 実行開始 {started_at.isoformat()} より古い")
     for w in _edge_warnings(name, diag):
         logger.warning("[%s] alpha が候補の端: %s", name, w)
+    if name == "sector_ols":
+        logger.info("[%s] %s", name, ridge_high_edge_log_line(diag))
     low = [s["industry"] for s in diag.get("sectors") or [] if s.get("alpha_edge") == "low"]
     if low:
         logger.info("[%s] alpha が下端（罰なしと同等・対処不要・#728）: %s", name, ", ".join(low))

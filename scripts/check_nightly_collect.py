@@ -96,6 +96,10 @@ RE_SCALE_STEPS_FAIL = re.compile(r"株価スケール段差の走査に失敗")
 # 夜間バッチの開始・終了行（源は `batch_common.run_batch` の `{spec.name}開始` / `{spec.name}終了`）。
 # 同じ日のログに2回ぶん追記されることがある（手動の追いつき実行）ので、**最後の開始の後に
 # 終了がある**ときだけ完了とみなす。
+# sector_ols の ridge α の上端（#728・`nightly_scores.ridge_high_edge_log_line`）。張り付きが
+# 無い夜も「なし」の行が出る＝行の無い夜は「不明」
+RE_RIDGE_HIGH_HIT  = re.compile(r"\*\*ridge α の上端 (\d+)業種\*\*")
+RE_RIDGE_HIGH_NONE = re.compile(r"ridge α の上端: なし（")
 RE_BATCH_START = re.compile(r"^\[[^\]]+\] 夜間バッチ開始")
 RE_BATCH_END   = re.compile(r"^\[[^\]]+\] 夜間バッチ終了\s*$")
 
@@ -124,6 +128,7 @@ WARNING_KINDS: dict[str, WarningKind] = {
     "price_freshness":    WarningKind("株価鮮度の低下", ("fresh_level",)),
     "scale_rejected":     WarningKind("Yahoo のスケール段差で不採用", ("scale_rejected_new",)),
     "scale_steps":        WarningKind("株価表のスケール段差", ("scale_steps_failed",)),
+    "ridge_high_edge":    WarningKind("業種別回帰の ridge α が上端", ("ridge_high_edge",)),
 }
 
 
@@ -150,7 +155,7 @@ def parse_nightly_log(text: str) -> dict:
         "fresh_level": None, "fresh_codes": None, "fresh_stale5d": None,
         "scale_rejected": None, "scale_dropped_bars": None, "scale_rejected_new": None,
         "scale_steps": None, "scale_steps_daily": None, "scale_steps_weekly": None,
-        "scale_steps_failed": None,
+        "scale_steps_failed": None, "ridge_high_edge": None,
         "completed": False,
     }
     t_start = t_end = None
@@ -215,6 +220,10 @@ def parse_nightly_log(text: str) -> dict:
             r["scale_steps_failed"] = False
         elif RE_SCALE_STEPS_FAIL.search(line):
             r["scale_steps_failed"] = True
+        if (m := RE_RIDGE_HIGH_HIT.search(line)):
+            r["ridge_high_edge"] = int(m.group(1))
+        elif RE_RIDGE_HIGH_NONE.search(line):
+            r["ridge_high_edge"] = 0
 
     # `スケール不一致で不採用 N行` は **0 件のとき行ごと出ない**（catchup 行への条件付き連結）。
     # 行の不在を 0 と読むと、#620 以前のログ——**選別そのものが存在しない晩**——まで
@@ -280,6 +289,11 @@ def warning_items(row: dict) -> list:
                   "＝Yahoo で取り直す修復コマンドは使わない。docs/GOTCHAS.md の #765 を参照"))
     if row.get("scale_steps_failed"):
         w.append(("scale_steps", "株価スケール段差の走査が例外で落ちた（収集自体は継続している）"))
+    if row.get("ridge_high_edge"):
+        w.append(("ridge_high_edge",
+                  f"業種別回帰の ridge α が上端（1000）{row['ridge_high_edge']}業種"
+                  "＝特徴量が効いていない合図。`python -m scripts.nightly_diag_report --view edges`"
+                  " で続いているかを見る（#728）"))
     return w
 
 

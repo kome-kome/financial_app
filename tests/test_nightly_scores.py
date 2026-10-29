@@ -52,6 +52,7 @@ from nightly_scores import (  # noqa: E402
     _verify_sector_ols,
     failed_labels,
     ridge_alpha_edge,
+    ridge_high_edge_log_line,
     run_models,
 )
 from tests.test_sector_ols import _seed_sector  # noqa: E402
@@ -628,6 +629,15 @@ class TestDiagnosticsExtraction:
         enet = {"final_model": {"alpha": 0.5, "alpha_at_path_min": False, "alpha_at_path_max": True}}
         assert len(_edge_warnings("macro_enet", enet)) == 1
         assert _edge_warnings("macro_enet", {"final_model": {}}) == []
+
+    def test_ridge_high_edge_log_line(self):
+        """watchdog が読む1行（#728）。上端の業種だけを数え、無い夜も「なし」を出す。"""
+        sector = {"sectors": [{"industry": "機械", "alpha": 0.001, "alpha_edge": "low", "n": 208},
+                              {"industry": "鉄鋼", "alpha": 1000.0, "alpha_edge": "high", "n": 37}]}
+        line = ridge_high_edge_log_line(sector)
+        assert line.startswith("**ridge α の上端 1業種**（例: 鉄鋼(n=37)）")
+        assert "機械" not in line
+        assert ridge_high_edge_log_line({"sectors": sector["sectors"][:1]})             == "ridge α の上端: なし（1業種を検査・#728）"
 
 
 class TestCodeVersion:

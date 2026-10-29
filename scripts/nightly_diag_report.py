@@ -16,7 +16,8 @@
   何が変わっていたか（コード・前処理の世代・データ）を並べる。**どれも変わっていないのに
   動いた夜は `no-context-change`**——#697 型の並び依存の候補だが、件数と断面日が同じでも
   中身の値が入れ替わることはある（入力のハッシュは取っていない・ADR-0061 決定6）ので、
-  断定ではなく「調べる候補」として読む
+  断定ではなく「調べる候補」として読む。断面日を記録しないモデル（sector_ols）は、件数が同じでも
+  毎晩の株価で入力が変わるので `data?`（判定できない）を付ける（#728）
 - `edges`: α が候補の端に張り付いた夜と箇所
 - `sectors`: sector_ols の業種ごとの ridge α の推移（動いた夜だけ）
 
@@ -96,7 +97,7 @@ def timeline(rows: list[dict]) -> list[dict]:
     """モデルごとに、追っている値が前の夜から動いた夜だけを返す（最初の夜は基準として出す）。
 
     rows は古い順。各要素: run_id / model / created_at / changed（動いた値の名前）/
-    causes（同時に変わっていたもの: code / code? / preprocess / data）/ values（今夜の値）。
+    causes（同時に変わっていたもの: code / code? / preprocess / data / data?）/ values（今夜の値）。
     """
     prev_by_model: dict[str, dict] = {}
     out: list[dict] = []
@@ -123,6 +124,10 @@ def timeline(rows: list[dict]) -> list[dict]:
         if (prev["row"].get("snapshot_date") != row.get("snapshot_date")
                 or prev["size"] != cur["size"]):
             causes.append("data")
+        elif not row.get("snapshot_date"):
+            # 断面日を記録しないモデル（sector_ols は結果に asof が無い）は、件数が同じでも
+            # 毎晩の株価で入力が変わる。「変わっていない」と言えないので判定できないと出す（#728）
+            causes.append("data?")
         out.append({"run_id": row.get("run_id"), "model": model,
                     "created_at": row.get("created_at"), "changed": changed,
                     "causes": causes or ["no-context-change"], "values": cur["headline"]})
@@ -199,6 +204,7 @@ def render_timeline(items: list[dict]) -> str:
         "",
         "causes: code = コードが変わった / code? = 判定できない（unknown か未コミット変更あり）/",
         "        preprocess = 前処理の世代が変わった / data = 断面日か件数が変わった /",
+        "        data? = 判定できない（断面日を記録しないモデルで件数が同じ・#728）/",
         "        no-context-change = どれも変わっていない（並び依存などの調べる候補・断定ではない）",
     ]
     return "\n".join(lines)

@@ -2,7 +2,7 @@
 
 守るもの:
   1. timeline は追っている値が動いた夜だけを出し、同時に何が変わっていたかを添える
-     （code / code? / preprocess / data / no-context-change）
+     （code / code? / preprocess / data / data? / no-context-change）
   2. edges は α が候補の端に張り付いた夜だけを出す
   3. 出力は Windows cp932 のリダイレクトで落ちない（全角文字以外の非 ASCII 記号を使わない）
 """
@@ -59,19 +59,26 @@ class TestTimeline:
 
     def test_moved_without_context_change_is_flagged(self):
         """件数も断面日もコードも同じなのに動いた夜＝#697 型の候補として出す。"""
-        rows = [_ols_row("n1", {"機械": 0.001}), _ols_row("n2", {"機械": 10.0})]
+        rows = [_ols_row("n1", {"機械": 0.001}, snap="2026-10-20"),
+                _ols_row("n2", {"機械": 10.0}, snap="2026-10-20")]
         assert rep.timeline(rows)[1]["causes"] == ["no-context-change"]
+
+    def test_unrecorded_snapshot_is_not_called_unchanged(self):
+        """断面日を記録しないモデル（実際の sector_ols は常に None）は、件数が同じでも毎晩の
+        株価で入力が変わる。no-context-change と言わず data? を付ける（#728）。"""
+        rows = [_ols_row("n1", {"機械": 0.001}), _ols_row("n2", {"機械": 10.0})]
+        assert rep.timeline(rows)[1]["causes"] == ["data?"]
 
     def test_code_change_is_attributed(self):
         rows = [_ols_row("n1", {"機械": 0.001}), _ols_row("n2", {"機械": 10.0}, code=SHA_B)]
-        assert rep.timeline(rows)[1]["causes"] == ["code"]
+        assert rep.timeline(rows)[1]["causes"] == ["code", "data?"]
 
     @pytest.mark.parametrize("code", ["unknown", SHA_A + "+dirty"])
     def test_undecidable_code_is_not_called_unchanged(self, code):
         """unknown や未コミット変更ありは「コードは同じ」と言えない（code? を付ける）。"""
         rows = [_ols_row("n1", {"機械": 0.001}, code=code),
                 _ols_row("n2", {"機械": 10.0}, code=code)]
-        assert rep.timeline(rows)[1]["causes"] == ["code?"]
+        assert rep.timeline(rows)[1]["causes"] == ["code?", "data?"]
 
     def test_data_and_preprocess_changes_are_attributed(self):
         rows = [_ols_row("n1", {"機械": 0.001}),
