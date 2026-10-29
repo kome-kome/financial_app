@@ -1825,14 +1825,41 @@ def record_scale_band_verdicts(db, rejected: list, confirmed: list = (), *,
             "pruned": len(stale), "total": len(entries)}
 
 
-def exclude_judged_bands(found: dict, judged: set) -> tuple:
+def oldest_daily_trade_date(db) -> Optional[str]:
+    """`stock_price_daily` に残っている最古の日（保持窓の端・`exclude_judged_bands` の `oldest`）。"""
+    v = db.execute(sqla_text("SELECT MIN(trade_date) FROM stock_price_daily")).scalar()
+    return str(v)[:10] if v is not None else None
+
+
+def _is_clipped_judged_band(ec: str, band: dict, judged: set, oldest: Optional[str]) -> bool:
+    """記録の帯が保持窓の端で切り詰められたものか（#1086）。
+
+    段差は前日の終値と比べるので、前日が窓から消えるとその日の段差も組めず、帯の始まりが
+    後ろへずれる（往き比も変わる）。終わりの日と戻り比が同じで、記録の始まりが表の最古の日
+    以前＝もう組めない日なら、同じ帯とみなす。始まりが表に残っているのに値が変わった帯
+    （再取得・分割修復）は従来どおり判定をやり直させる。
+    """
+    if oldest is None:
+        return False
+    k = scale_band_key(ec, band)
+    return any(j[0] == ec and j[2] == k[2] and j[4] == k[4]
+               and j[1] < k[1] and j[1] <= oldest
+               for j in judged)
+
+
+def exclude_judged_bands(found: dict, judged: set, *, oldest: Optional[str] = None) -> tuple:
     """`detect_roundtrip_scale_bands` の結果から判定済みの帯を落とす。`(結果, 除いた帯の数)`。
 
     落とすのは**帯**であって社ではない。帯が1本も残らない社だけが一覧から消える。
+    `oldest`（`oldest_daily_trade_date`）を渡すと、保持窓の端で始まりが切り詰められた
+    判定済みの帯も落とす（#1086）。渡さなければ鍵の完全一致だけで判定する。
     """
     companies, n_excluded = [], 0
     for c in found["companies"]:
-        keep = [b for b in c["bands"] if scale_band_key(c["edinet_code"], b) not in judged]
+        ec = c["edinet_code"]
+        keep = [b for b in c["bands"]
+                if scale_band_key(ec, b) not in judged
+                and not _is_clipped_judged_band(ec, b, judged, oldest)]
         n_excluded += len(c["bands"]) - len(keep)
         if keep:
             companies.append({**c, "bands": keep})
