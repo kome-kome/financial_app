@@ -915,3 +915,32 @@ class TestViewAppliesTheDirections:
         assert "stock_price" not in C.COLUMN_DIRECTION
         line = next(l for l in VIEW_SQL.splitlines() if "fr.stock_price" in l)
         assert "saf.factor" not in line
+
+
+class TestEarningsYieldUsesTheSameFactorAsPer:
+    """益利回り E/P（#950）は per と同じ F を、EPS の符号によらず ÷F の向きで当てる（per は ×F）。
+
+    `COLUMN_DIRECTION` は `financial_records` の生の列の登録表（測定器も読む）なので、`fr` に無いこの列は
+    載せない。代わりに式の形をここで縛る（per は ×F ＝ E/P は ÷F）。
+    """
+    TTM_SQL = (ROOT / "sql" / "financial_metrics_with_ttm_view.sql").read_text(encoding="utf-8")
+
+    @staticmethod
+    def _line(sql):
+        return next(line for line in sql.splitlines() if "earnings_yield" in line and "fr.pl_eps" in line)
+
+    def test_annual_view_divides_eps_by_price_times_the_split_factor(self):
+        line = self._line(VIEW_SQL)
+        assert "(fr.pl_eps / NULLIF(fr.stock_price, 0)) / NULLIF(COALESCE(saf.factor, 1.0), 0)" in line
+        assert "lag" not in line          # per と同じく遅れを当てない（分母の EPS は分割後の基準）
+
+    def test_ttm_view_uses_the_ttm_rows_factor(self):
+        assert "(fr.pl_eps / NULLIF(fr.stock_price, 0)) / NULLIF(fr.factor, 0)" in self._line(self.TTM_SQL)
+
+    def test_not_registered_as_a_raw_distorted_column(self):
+        assert "earnings_yield" not in C.COLUMN_DIRECTION
+        assert "earnings_yield" not in C.BASIS_LAG_COLUMN
+
+    def test_orm_has_the_column(self):
+        from database import FinancialMetric
+        assert "earnings_yield" in FinancialMetric.__table__.columns

@@ -106,6 +106,10 @@ d AS (
         fr.factor AS split_factor,
         fr.shares_lag AS split_shares_lag,
         fr.dps_lag AS split_dps_lag,
+        -- 益利回り E/P（#950）= (pl_eps ÷ stock_price) ÷ F。per（×F）の逆数の向きで、同じ F を EPS の符号によらず
+        -- 当てる＝黒字の行では 1/per と同じ基準、赤字の行（per が入らない）でも分割の前後で基準がそろう。
+        -- 分母の pl_eps は per と同じく遅れを持たない（BASIS_LAG_COLUMN の per と同じ扱い）。
+        ROUND(((fr.pl_eps / NULLIF(fr.stock_price, 0)) / NULLIF(fr.factor, 0))::numeric, 6)::double precision AS earnings_yield,
         c.is_active, c.delisted_date,
         CASE WHEN COALESCE(fr.pl_revenue,0) <> 0
              THEN ROUND((fr.pl_operating_profit / fr.pl_revenue * 100)::numeric, 2) END AS op_margin,
