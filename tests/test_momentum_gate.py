@@ -364,9 +364,11 @@ class TestRiskLambdaSource:
         with pytest.raises(ValueError, match="--lambdas"):
             resolve_risk_lambda(["elasticnet"])
 
-    def test_m1_resolves_to_its_screen_default(self):
-        lam = resolve_risk_lambda(["risk_return"])
-        assert lam > 0 and lam == production_risk("risk_return")[0]
+    def test_m1_without_lambdas_stops_since_its_default_is_zero(self):
+        """#1040 で M-1 の既定 λ が 0 になった＝M-6 と同じく `--lambdas` を明示して回す。"""
+        assert production_risk("risk_return")[0] == 0.0
+        with pytest.raises(ValueError, match="--lambdas"):
+            resolve_risk_lambda(["risk_return"])
 
     def test_models_with_different_defaults_stop(self):
         with pytest.raises(ValueError, match="--lambdas"):
@@ -376,17 +378,17 @@ class TestRiskLambdaSource:
 class TestRiskBaseCond:
     """分母は各モデルの画面が既定で出す並び（#808）。M-1 は r2、M-6 は mu_only。"""
 
-    def test_m1_base_is_the_preregistered_r2(self):
-        specs = risk_specs(None, resolve_risk_lambda(["risk_return"]))
-        assert risk_base_cond(["risk_return"], specs) == RISK_BASE_COND == "r2"
+    def test_m1_base_is_mu_only_since_its_default_is_zero(self):
+        """#1040 より前は事前登録の `r2`（λ=1.0）。既定を λ=0 にしたので M-6 と同じ `mu_only`。"""
+        assert risk_base_cond(["risk_return"], risk_specs([0.3, 1.0])) == RISK_NO_AXIS
+        assert RISK_BASE_COND == "r2"          # 9/21 の事前登録の分母（記録として残す）
 
-    def test_m1_with_explicit_lambdas_uses_its_default_lambda(self):
-        assert risk_base_cond(["risk_return"], risk_specs([0.3, 1.0])) == "r2@1.0"
-
-    def test_m1_without_its_default_lambda_stops(self):
-        """分母の無い比較になる。"""
+    def test_a_positive_default_lambda_missing_from_the_conditions_stops(self):
+        """分母の無い比較になる（既定 λ>0 の M-2 で確かめる）。"""
+        lam, _axis = production_risk("xgb_m2")
+        assert lam > 0
         with pytest.raises(ValueError, match="条件に無い"):
-            risk_base_cond(["risk_return"], risk_specs([0.3]))
+            risk_base_cond(["xgb_m2"], risk_specs([lam + 0.3]))
 
     def test_m6_base_is_mu_only(self):
         assert risk_base_cond(["elasticnet"], risk_specs([0.1, 0.3, 1.0])) == RISK_NO_AXIS
@@ -404,7 +406,7 @@ class TestRiskBaseCond:
     def test_models_with_different_bases_stop(self):
         """判定の向きが1本の表で混ざる。別々に回す。"""
         with pytest.raises(ValueError, match="別々に"):
-            risk_base_cond(["risk_return", "elasticnet"], risk_specs([0.1, 1.0]))
+            risk_base_cond(["xgb_m2", "elasticnet"], risk_specs([0.1, 1.0]))
 
     def test_verdict_names_the_actual_base(self):
         assert "(mu_only)" in verdict_text("risk_axis", 7, [], [], base="mu_only")
@@ -431,11 +433,11 @@ class TestRiskBaseOverride:
             resolve_risk_base(["xgb_m2"], self.SPECS, "r2@0.3")
 
     def test_override_tolerates_a_missing_screen_default(self):
-        """上書きした run は既定を測らなくてよい（M-1 の既定 r2@1.0 が条件に無い）。"""
-        base, production = resolve_risk_base(["risk_return"], risk_specs([0.3]), RISK_NO_AXIS)
+        """上書きした run は既定を測らなくてよい（M-2 の既定 r2@1.0 が条件に無い）。"""
+        base, production = resolve_risk_base(["xgb_m2"], risk_specs([0.3]), RISK_NO_AXIS)
         assert (base, production) == (RISK_NO_AXIS, None)
         with pytest.raises(ValueError, match="条件に無い"):
-            resolve_risk_base(["risk_return"], risk_specs([0.3]))   # 上書きが無ければ止まる
+            resolve_risk_base(["xgb_m2"], risk_specs([0.3]))   # 上書きが無ければ止まる
 
     def test_verdict_says_base_not_production_when_overridden(self):
         """「production」と書くと画面の既定と取り違える。分母と画面の既定の両方を出す。"""

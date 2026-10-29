@@ -257,7 +257,7 @@ class TestParamsSchema:
 
     def test_coerce_defaults(self):
         result = coerce_params(self.schema, {})
-        assert result["lambda_risk"] == 1.0
+        assert result["lambda_risk"] == 0.0       # #1040 で 1.0 → 0（表は μ̂ の順）
         assert result["risk_axis"] == "r2"
         assert isinstance(result["fin_features"], list)
         assert result["top_n"] == 30
@@ -1067,11 +1067,24 @@ class TestObjectiveOnlyMode:
         assert result_full["cv_metrics"] == result_skip["cv_metrics"]
         assert result_full["selected_features"] == result_skip["selected_features"]
 
+    def test_display_ordering_is_skipped_at_the_zero_default(self):
+        """既定の λ=0（#1040）では U = μ̂ なので、画面の並びの採点は出さない（#1042 の λ=0 の規則）。"""
+        plugin = MacroRiskReturnPlugin()
+        assert plugin.params_schema()["lambda_risk"]["default"] == 0.0
+        result = plugin.execute(self._params(), TestExecuteIntegration()._build_mock_db())
+        assert result["oof_backtest_display"] is None
+
     def test_display_ordering_scoring_follows_the_switch(self):
-        """画面の並びの採点（#1042）: 通常の実行は出し、探索中は出さず、モデル比較のスイッチで出す。"""
+        """画面の並びの採点（#1042）: 通常の実行は出し、探索中は出さず、モデル比較のスイッチで出す。
+
+        既定の λ は 0（#1040）なので、λ>0 の画面（λ=1.0・R2）に差し替えて確かめる。
+        """
         import database
 
+        schema = MacroRiskReturnPlugin().params_schema()
+        schema["lambda_risk"] = {**schema["lambda_risk"], "default": 1.0}
         plugin = MacroRiskReturnPlugin()
+        plugin.params_schema = lambda: schema
         params = self._params()
         result_full = plugin.execute(params, TestExecuteIntegration()._build_mock_db())
         with database.tuning_objective_only():

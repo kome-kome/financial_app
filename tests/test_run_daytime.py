@@ -352,26 +352,29 @@ class TestRiskAxisM1GateMeasuresTheScreenOrdering:
         assert "--risk-axis" in argv
         assert argv[argv.index("--risk-scale") + 1] == "raw"
 
-    def test_lambda_is_derived_from_the_screen_default(self):
-        """`--lambdas` を書くと、画面の既定を変えたときに黙って古い λ を測る。"""
-        from scripts.momentum_gate import RISK_MODELS, resolve_risk_lambda
+    def test_lambda_is_explicit_because_the_screen_default_is_zero(self):
+        """#1040 で M-1 の既定 λ が 0 になった。`--lambdas` 無しだと 0 に解決されて止まる（平日1日ぶんの枠が消える）。"""
+        from scripts.momentum_gate import RISK_MODELS, production_risk, resolve_risk_lambda
 
         argv = rd.JOBS[self.KEY].argv
-        assert "--lambdas" not in argv
+        assert argv[argv.index("--lambdas") + 1] == "1.0"
         assert "--models" not in argv          # 既定のモデル（M-1）＝出力先も 9/21 と同じ
         assert RISK_MODELS == ["risk_return"]
-        assert resolve_risk_lambda(RISK_MODELS) > 0   # 0 に解決されると止まる（平日1日ぶんの枠が消える）
+        assert production_risk("risk_return")[0] == 0.0
+        with pytest.raises(ValueError, match="--lambdas"):
+            resolve_risk_lambda(RISK_MODELS)
 
     def test_the_preregistered_conditions_and_tests(self):
         from scripts.momentum_gate import (RISK_BASE_COND, RISK_MODELS, bonferroni_alpha,
-                                           resolve_risk_base, resolve_risk_lambda, risk_specs)
+                                           resolve_risk_base, risk_specs)
 
         argv = rd.JOBS[self.KEY].argv
         assert "--risk-base" not in argv       # 分母は画面の既定の並び（上書きしない）
-        specs = risk_specs(None, resolve_risk_lambda(RISK_MODELS))
-        assert set(specs) == {"mu_only", "r2", "r_macro"}
+        specs = risk_specs([float(argv[argv.index("--lambdas") + 1])])
+        assert set(specs) == {"mu_only", "r2@1.0", "r_macro@1.0"}
         base, production = resolve_risk_base(RISK_MODELS, specs)
-        assert base == production == RISK_BASE_COND == "r2"
+        assert base == production == "mu_only"            # #1040 で画面の既定が μ̂ の順になった
+        assert RISK_BASE_COND == "r2"                      # 9/21 の事前登録の分母（記録）
         assert bonferroni_alpha(1, len(specs)) == pytest.approx(0.0125)   # 4検定
 
     def test_the_job_measures_at_full_resolution(self):

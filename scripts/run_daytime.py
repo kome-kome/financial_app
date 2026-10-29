@@ -566,10 +566,12 @@ JOBS: dict[str, Job] = {
     # （`use_macro` は画面の既定から導出＝M-1 は OFF。10/07 の1回目はマクロ込みで測っていた・#815）。
     "gate:risk-axis": Job(
         name="gate_risk_axis",
-        argv=("{python}", "-m", "scripts.momentum_gate", "--risk-axis", "--risk-scale", "raw",
+        # #1040（2026-10-29）で M-1 の既定 λ が 0 になり、λ を既定から導くと 0 に解決されて止まる（`mu_only` と
+        # 同一の並びになる）。M-6 のジョブと同じく λ=1.0 を明示し、分母は画面の既定の並び（`mu_only`）になる。
+        argv=("{python}", "-m", "scripts.momentum_gate", "--risk-axis", "--lambdas", "1.0", "--risk-scale", "raw",
               "--stride", "1", "--allow-full-pull", "--refresh-cache"),
-        why="M-1 の画面の既定の並び（U = μ − λR・λ=1.0・R2＝分母）を、μ̂ だけの並び（mu_only）と"
-            "横軸を R_macro にした並びと同一パネル・同一 CV で比べる（#709・#815）。R は画面と同じ"
+        why="M-1 の U = μ − λR の並び（λ=1.0 × R2・R_macro）を、画面の既定の並び（μ̂ だけ＝mu_only・#1040 で"
+            "既定を λ=0 にした）と同一パネル・同一 CV で比べる（#709・#815）。R は画面と同じ"
             "生の値・3条件・4検定・α 0.0125。**r_macro は時点不変の 2026年スナップショット＝"
             "未来情報を含む上限**なので、負ければ採用しないと結論でき、勝っても既定を変える根拠にはならない。",
         # 2026-10-07 の実測（早朝に -Now -Force で消化・並走なし）。見積り 15.0 から差し替えた。
