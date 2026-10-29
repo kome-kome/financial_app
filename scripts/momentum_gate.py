@@ -340,8 +340,18 @@ blank_groups`（`OOF_CSV_COLUMNS`）で、`standard` は会計基準、`blank_gr
 本番の `plugins.macro_snapshots` から import する）。`drop` 側は `fill` 側に含まれるので、共通域で測れるのは
 「埋めた行を学習に足すと財務が揃った社の予測がどう変わるか」で、広がった社の効果は raw で読む（`--fin-nan` と
 同じ形）。埋めた行が0、または `fill` 側のサンプルが `drop` 側より多くないときは CV の前に止める
-（`fin_fill_reach_problems`）。日中キューの名前は `gate:fin-fill`。PER → 益利回りの置き換えは入れていない
-（`per` は分割補正係数 F を掛けた値で `stock_price` は補正しない列なので、赤字の行の E/P を作ると基準が食い違う）。
+（`fin_fill_reach_problems`）。日中キューの名前は `gate:fin-fill`。PER → 益利回りの置き換えは別のモード
+（`--earnings-yield`・下）。
+
+## PER → 益利回りのモード（`--earnings-yield`・#1082・親 #950）
+
+特徴量の `per` の列を、`financial_metrics.earnings_yield`（`(pl_eps ÷ stock_price) ÷ F`・per と同じ分割補正係数 F・
+赤字の行にも値が入る）に差し替えた `ep` と、本番の `per`（分母）を比べる。列の名前は `per` のままで、値の向きは
+逆（大きいほど割安）。E/P の無い行は `per` も空欄にする（2 つの量を混ぜない・`swap_per_for_earnings_yield`）。
+読み込みは本番の `plugins.macro_snapshots.load_earnings_yields`（`_FinRow` に列を足さない）。`per` 側は `ep` 側に
+ほぼ含まれるので、共通域で測れるのは「赤字の行を学習に足すと、per のある社の予測がどう変わるか」で、広がった
+赤字の社は raw で読む。M-1 には渡さない（`fin_source_key`）。差し替えても per の空欄が1行も埋まらなければ CV の前に
+止まる。日中キューの名前は `gate:earnings-yield`。
 
 **他のモードの M-2 / M-6 も埋めた財務で回る**（`Cond.fin_fill` の既定が本番の値・#983）。M-1 のパネルには
 埋めた財務を渡さない（`fin_source_key`）。#983 より前の結果とは raw の水準を比べられない。
@@ -507,6 +517,7 @@ from plugins.macro_snapshots import (  # noqa: E402
     use_fin_rows,
 )
 from plugins.macro_snapshots import FIN_FILL as _M2M6_FIN_FILL  # noqa: E402
+from plugins.macro_snapshots import load_earnings_yields, to_date_str  # noqa: E402
 from plugins.macro_enet import _INNER_CV as _M6_INNER_CV  # noqa: E402
 from plugins.macro_enet import _SIZE_NEUTRAL as _M6_SIZE_NEUTRAL  # noqa: E402
 from plugins.macro_gbdt import _VALID_SPLIT as _M2_VALID_SPLIT  # noqa: E402
@@ -605,6 +616,8 @@ class Cond(NamedTuple):
     valid_split: str = _M2_VALID_SPLIT
     subsample: float = _M2_SUBSAMPLE
     train_exclude_index: bool = False
+    # PER の列を益利回り E/P（`financial_metrics.earnings_yield`）に差し替えるか（#1082）。本番は False
+    earnings_yield: bool = False
 
 
 CONDS: dict[str, bool] = {"off": False, "on": True}
@@ -691,6 +704,14 @@ DE_EXCLUDE_MODELS = ["xgb_m2", "elasticnet"]
 FIN_FILL_CONDS: dict[str, bool] = {"drop": False, "fill": True}
 FIN_FILL_BASE_COND = next(name for name, flag in FIN_FILL_CONDS.items() if flag == _M2M6_FIN_FILL)
 FIN_FILL_MODELS = ["xgb_m2", "elasticnet"]
+
+# PER → 益利回り E/P のモード（`--earnings-yield`・#1082・親 #950）。**基準は本番の構成**（`per`）。`ep` は
+# 特徴量の `per` の列を `financial_metrics.earnings_yield`（`(pl_eps ÷ stock_price) ÷ F`・per と同じ F）に
+# 差し替える。赤字の行（per が入らない）にも値が入るので `ep` 側のパネルは広がる＝共通域で読み、広がった社は raw の
+# 水準で読む（`--fin-fill` と同じ形）。列の名前は `per` のままで、値の向きは逆（大きいほど割安）。
+EARNINGS_YIELD_CONDS: dict[str, bool] = {"per": False, "ep": True}
+EARNINGS_YIELD_BASE_COND = "per"
+EARNINGS_YIELD_MODELS = ["xgb_m2", "elasticnet"]
 
 # M-6 の内側 CV に空白を入れるかを比べるモード（`--inner-cv-purge`・#979）。条件名は {名前: 区切り方}。
 # `gap` は `months_purged`（#968 で本番＝分母）、`nogap` は空白を入れない `months`（#968 の前の本番）。
@@ -840,10 +861,11 @@ def build_conditions(windows: list[int] | None = None,
                     valid_split: bool = False,
                     inner_cv_purge: bool = False,
                     subsample: bool = False,
-                    train_exclude_index: bool = False) -> dict[str, Cond]:
+                    train_exclude_index: bool = False,
+                    earnings_yield: bool = False) -> dict[str, Cond]:
     """条件集合 {名前: Cond} を作る。
 
-    16のモードがある。**同時に使えるのは1つだけ**（下記）:
+    17のモードがある。**同時に使えるのは1つだけ**（下記）:
 
       既定           … ADR-0045 の昇格ゲートと完全に同じ2条件（`off` / `on`・マクロは ON のまま）
       `windows`      … モメンタム無し ＋ 各窓（#592・ADR-0050）
@@ -896,7 +918,7 @@ def build_conditions(windows: list[int] | None = None,
              ("--fin-fill", fin_fill),
              ("--size-neutral", size_neutral), ("--valid-split", valid_split),
              ("--inner-cv-purge", inner_cv_purge), ("--subsample", subsample),
-             ("--train-exclude-index", train_exclude_index)]
+             ("--train-exclude-index", train_exclude_index), ("--earnings-yield", earnings_yield)]
     picked = [name for name, on in modes if on]
     if len(picked) > 1:
         raise ValueError(
@@ -952,6 +974,10 @@ def build_conditions(windows: list[int] | None = None,
         # 無配・R&D の無い社を外さずに 0 として通したら」を問う。
         return {name: Cond(False, MOM_WINDOW, fin_fill=flag)
                 for name, flag in FIN_FILL_CONDS.items()}
+    if earnings_yield:
+        # PER の列を E/P に差し替えるかだけ。他の軸はすべて本番構成（#1082）。
+        return {name: Cond(False, MOM_WINDOW, earnings_yield=flag)
+                for name, flag in EARNINGS_YIELD_CONDS.items()}
     if valid_split:
         # M-2 の early stopping の検証集合の取り方だけを差し替える。他の軸はすべて本番構成。パネルは2条件で同一
         # （`panel_cond`）。M-6・M-1 にこの軸は無い（#976）。
@@ -1049,7 +1075,7 @@ def base_of(conds: dict[str, Cond], default_max_features: int | None = None) -> 
                  DEMEAN_BASE_COND, RISK_BASE_COND, FIN_FILL_BASE_COND, FIN_NAN_BASE_COND,
                  DE_EXCLUDE_BASE_COND, SIZE_NEUTRAL_BASE_COND,
                  VALID_SPLIT_BASE_COND, INNER_CV_PURGE_BASE_COND, SUBSAMPLE_BASE_COND,
-                 TRAIN_EXCLUDE_INDEX_BASE_COND):
+                 TRAIN_EXCLUDE_INDEX_BASE_COND, EARNINGS_YIELD_BASE_COND):
         if cand in conds:
             return cand
     prod = maxfeat_cond_name(default_max_features) if default_max_features else None
@@ -1082,7 +1108,8 @@ MODE_SUFFIX: dict[str, str] = {"default": "", "windows": "", "macro": "_macro",
                                "size_neutral": "_size_neutral",
                                "valid_split": "_valid_split", "inner_cv_purge": "_inner_cv_purge",
                                "subsample": "_subsample",
-                               "train_exclude_index": "_train_exclude_index"}
+                               "train_exclude_index": "_train_exclude_index",
+                               "earnings_yield": "_earnings_yield"}
 
 
 def mode_of(windows: list[int] | None = None, macro: bool = False,
@@ -1091,7 +1118,8 @@ def mode_of(windows: list[int] | None = None, macro: bool = False,
             risk_axis: bool = False, fin_nan: bool = False, de_exclude: bool = False,
             fin_fill: bool = False, size_neutral: bool = False,
             valid_split: bool = False, inner_cv_purge: bool = False,
-            subsample: bool = False, train_exclude_index: bool = False) -> str:
+            subsample: bool = False, train_exclude_index: bool = False,
+            earnings_yield: bool = False) -> str:
     """測定モードの名前を返す（`build_conditions` と同じ引数から1箇所で導出する）。
 
     **#615 で足した2モードは、ここを持たないまま別モードの名前で出力されていた**——
@@ -1118,6 +1146,8 @@ def mode_of(windows: list[int] | None = None, macro: bool = False,
         return "de_exclude"
     if fin_fill:
         return "fin_fill"
+    if earnings_yield:
+        return "earnings_yield"
     if size_neutral:
         return "size_neutral"
     if valid_split:
@@ -1157,6 +1187,9 @@ _AXIS_VERDICTS: dict[str, tuple[str, str]] = {
                    "blanking D/E for the candidate industries did not beat keeping it"),
     # 共通域は埋める前から財務が揃っていた行だけ（drop 側 ⊂ fill 側）。広がった社の効果は raw で読む（#950）。
     # 分母は本番（#983 で `fill`）。分母が入れ替わったので、`subsample` と同じくどちらの向きでも読める形にした。
+    # 共通域は差し替える前から per が入っていた行だけ（per 側 ⊂ ep 側）。広がった赤字の社の効果は raw で読む（#1082）。
+    "earnings_yield": ("EARNINGS YIELD AXIS [common domain = rows with per; read raw for loss-making rows]",
+                       "replacing per with the split-adjusted earnings yield did not beat per"),
     "fin_fill": ("FIN FILL AXIS [common domain = rows complete before filling; read raw for filled rows]",
                  "the other handling of no-dividend / no-R&D blanks (fill with 0 vs drop the rows) "
                  "did not beat the production one"),
@@ -1933,11 +1966,30 @@ def fin_source_key(c: Cond, kind: str) -> tuple:
     `apply_fin_fill` を通らない）ので、`Cond.fin_fill` の既定（本番の M-2 / M-6 の値）をそのまま M-1 へ効かせると、
     M-1 を本番と別の財務で測る。D/E の空欄化と 0 埋めは別々の列に効くので、掛ける順で結果は変わらない。
     """
-    return (c.fin_rows, c.de_null_industries, c.fin_fill and kind != "m1")
+    return (c.fin_rows, c.de_null_industries, c.fin_fill and kind != "m1", c.earnings_yield and kind != "m1")
+
+
+def swap_per_for_earnings_yield(fin_by_co: dict, ey: dict) -> tuple[dict, int, int]:
+    """財務の写しの `per` を益利回り E/P に差し替える（#1082）。戻り値は (写し, 差し替えた行数, per が空欄だった行のうち
+    値が入った行数)。E/P の無い行は `per` を空欄にする（per だけ残すと 2 つの量が混ざる）。元の dict と行は書き換えない。
+    """
+    out: dict = {}
+    n_swap = n_new = 0
+    for ec, recs in fin_by_co.items():
+        new_recs = []
+        for rec in recs:
+            v = ey.get((ec, to_date_str(rec.period_end)))
+            if v is not None and rec.per is None:
+                n_new += 1
+            n_swap += 1
+            new_recs.append(rec._replace(per=v))
+        out[ec] = new_recs
+    return out, n_swap, n_new
 
 
 def build_fin_sources(conds: dict[str, Cond], kinds: list[str], fins: dict[str, dict],
-                      fill_sources: dict) -> tuple[dict[tuple, dict], int, dict[str, dict[str, int]]]:
+                      fill_sources: dict, ey_sources: dict | None = None
+                      ) -> tuple[dict[tuple, dict], int, dict[str, dict[str, int]]]:
     """パネルへ渡す財務の写しを `fin_source_key` ごとに1回だけ作る（#940・#950・#983）。
 
     戻り値は ({鍵: 財務}, D/E を空欄にした行数, {行の基準: {列: 0 で埋めた行数}})。元の `fins` は書き換えない
@@ -1960,7 +2012,7 @@ def build_fin_sources(conds: dict[str, Cond], kinds: list[str], fins: dict[str, 
             key = fin_source_key(c, kind)
             if key in srcs:
                 continue
-            rows_src, inds, fill = key
+            rows_src, inds, fill, ep = key
             src = fins[rows_src]
             if inds:
                 if (rows_src, inds) not in de_nulled:
@@ -1973,6 +2025,12 @@ def build_fin_sources(conds: dict[str, Cond], kinds: list[str], fins: dict[str, 
                 if rows_src not in filled_by_rows:
                     filled_by_rows[rows_src] = n_fill
                     print(f"[fin_fill] rows={rows_src} financial rows filled with 0: {n_fill}", flush=True)
+            if ep:
+                src, n_swap, n_new = swap_per_for_earnings_yield(src, ey_sources)
+                print(f"[earnings_yield] rows={rows_src} per replaced by E/P: {n_swap} (newly present: {n_new})",
+                      flush=True)
+                if n_new == 0:
+                    raise SystemExit("中止: E/P に差し替えても per の空欄の行が1行も埋まらない（earnings_yield を読めていない）")
             srcs[key] = src
     return srcs, de_nulled_rows, filled_by_rows
 
@@ -2439,6 +2497,10 @@ def main() -> None:
                          f"fill と、空欄の行を捨てる drop を共通域で比べる・#950。分母は本番の {FIN_FILL_BASE_COND}・#983）。"
                          f"モデル既定は {','.join(FIN_FILL_MODELS)}。"
                          "株価が空欄の行は埋めない。VIEW は変えず、読み込んだ財務の行だけを差し替える。他モードと併用不可")
+    ap.add_argument("--earnings-yield", dest="earnings_yield", action="store_true",
+                    help="PER → 益利回りのモード（特徴量の per を financial_metrics.earnings_yield＝per と同じ F の E/P に"
+                         f"差し替える ep と、本番の per を共通域で比べる・#1082）。モデル既定は {','.join(EARNINGS_YIELD_MODELS)}。"
+                         "VIEW は変えず、読み込んだ財務の行だけを差し替える。他モードと併用不可")
     ap.add_argument("--valid-split", dest="valid_split", action="store_true",
                     help="M-2 の early stopping の検証集合のモード（末尾の月を丸ごと取る valid_months＝本番（#987）と、"
                          "末尾の行で取る valid_rows を共通域で比べる・#976）。パネルは2条件で同一。"
@@ -2497,6 +2559,8 @@ def main() -> None:
         default_models = DE_EXCLUDE_MODELS
     elif args.fin_fill:
         default_models = FIN_FILL_MODELS
+    elif args.earnings_yield:
+        default_models = EARNINGS_YIELD_MODELS
     elif args.valid_split:
         default_models = VALID_SPLIT_MODELS
     elif args.inner_cv_purge:
@@ -2540,7 +2604,8 @@ def main() -> None:
                                  valid_split=args.valid_split,
                                  inner_cv_purge=args.inner_cv_purge, subsample=args.subsample,
                                  size_neutral=args.size_neutral,
-                                 train_exclude_index=args.train_exclude_index)
+                                 train_exclude_index=args.train_exclude_index,
+                                 earnings_yield=args.earnings_yield)
     except ValueError as e:
         raise SystemExit(str(e))
     # 列数モードの分母は本番値（プラグイン既定）。**ここで数値を書き写さない**。
@@ -2595,7 +2660,8 @@ def main() -> None:
                    fin_nan=args.fin_nan, de_exclude=args.de_exclude, fin_fill=args.fin_fill,
                    size_neutral=args.size_neutral,
                    valid_split=args.valid_split, inner_cv_purge=args.inner_cv_purge,
-                   subsample=args.subsample, train_exclude_index=args.train_exclude_index)
+                   subsample=args.subsample, train_exclude_index=args.train_exclude_index,
+                   earnings_yield=args.earnings_yield)
     default_out = f"momentum_gate{MODE_SUFFIX[mode]}.json"
     if mode == "risk_axis" and models != RISK_MODELS:
         # M-1 と M-6 は分母が違い別々に回す（#808）。同じファイルへ書くと後の run が前の結果を消す。
@@ -2647,6 +2713,10 @@ def main() -> None:
         fill_sources = (load_fill_sources(db)
                         if any(fin_source_key(c, MODEL_SPECS[m][2])[2]
                                for c in conds.values() for m in models) else {})
+        # PER → E/P（#1082）。差し替える条件があるときだけ、CPU 計算の前に読む
+        ey_sources = (load_earnings_yields(db)
+                      if any(fin_source_key(c, MODEL_SPECS[m][2])[3]
+                             for c in conds.values() for m in models) else {})
         if mode == "train_exclude_index":
             # 台帳は CPU 計算の前に読む。読めなければ止める（空の群で回ると「差なし」だけが残る）。
             try:
@@ -2688,7 +2758,8 @@ def main() -> None:
         # `Cond` が違うので、この畳み込みは1件も当たらず挙動が変わらない。
         # パネルへ渡す財務の写しを `fin_source_key`（行の基準, D/E を空欄にする業種, 0 で埋めるか）ごとに1回だけ
         # 作る（`build_fin_sources`）。元の `fins` は書き換えない（他の条件が同じ財務を読む）。
-        fin_srcs, de_nulled_rows, fin_filled_by_rows = build_fin_sources(conds, kinds, fins, fill_sources)
+        fin_srcs, de_nulled_rows, fin_filled_by_rows = build_fin_sources(conds, kinds, fins, fill_sources,
+                                                                          ey_sources)
         built: dict[tuple, tuple] = {}
         for cond, c in conds.items():
             # 鍵は CV だけに効く欄を外した `Cond`（#971）。内側 CV のモードは2条件で1枚を共有する。
@@ -3284,7 +3355,8 @@ def main() -> None:
                               "inner_cv": c.inner_cv,
                               "valid_split": c.valid_split,
                               "subsample": c.subsample,
-                              "train_exclude_index": c.train_exclude_index}
+                              "train_exclude_index": c.train_exclude_index,
+                              "earnings_yield": c.earnings_yield}
                        for name, c in conds.items()},
         "mode": mode,
         "base_cond": base,

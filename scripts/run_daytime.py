@@ -331,6 +331,17 @@ JOBS: dict[str, Job] = {
     # M-2 の early stopping の検証集合を末尾の月の塊で取るか（#969）を測る道具（#976）。
     # **積むのは人**。2026-10-17 の結果（#969）と行の抽出の結果（#987）を合わせて、2026-10-18 に本番
     # （`macro_gbdt._VALID_SPLIT`）を `months` へ切り替えた（#987）。
+    # PER → 益利回り E/P（#1082・親 #950）。本番は per。`gate:fin-fill` と同じ形（M-2 は種の平均・共通域）。
+    "gate:earnings-yield": Job(
+        name="gate_earnings_yield",
+        argv=("{python}", "-m", "scripts.momentum_gate", "--earnings-yield",
+              "--stride", "1", "--allow-full-pull", "--refresh-cache"),
+        why="M-2 / M-6 の特徴量の per を、赤字の行にも値が入る益利回り E/P（financial_metrics.earnings_yield・"
+            "per と同じ F）へ差し替えたら良くなるかを共通域で測る（#1082・#950）。広がった赤字の社は raw で読む。",
+        # 見積り（`gate:fin-fill` の実測 36.5 分を借りる・同じ形・同じモデル）。実走ログで差し替える。
+        measured_min=36.5,
+        parallel_sensitive=True,   # 他の gate と同じ理由（採否が CI の符号で決まる）
+    ),
     "gate:valid-split": Job(
         name="gate_valid_split",
         argv=("{python}", "-m", "scripts.momentum_gate", "--valid-split",
