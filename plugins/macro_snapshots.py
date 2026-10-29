@@ -1088,6 +1088,19 @@ def load_fill_sources(db) -> dict[tuple[str, str], tuple]:
     return {(r[0], to_date_str(r[1])): tuple(r[2:]) for r in rows if r[1]}
 
 
+def load_earnings_yields(db) -> dict[tuple[str, str], float]:
+    """通期の行の益利回り E/P を {(edinet_code, period_end の ISO): earnings_yield} で返す（#1082・読み取りのみ）。
+
+    出どころは `financial_metrics` VIEW の `earnings_yield`（#950・`(pl_eps ÷ stock_price) ÷ F`＝per と同じ F・
+    赤字の行にも値が入る）。`_FinRow` に列を足さないのは `load_fill_sources` / `load_market_caps` と同じ理由
+    （検証スクリプトのキャッシュの形を変えない）。値の無い行は入れない。
+    """
+    from database import FinancialMetric as FM
+    rows = (db.query(FM.edinet_code, FM.period_end, FM.earnings_yield)
+            .filter(FM.earnings_yield.isnot(None)).all())
+    return {(r[0], to_date_str(r[1])): float(r[2]) for r in rows if r[1]}
+
+
 def fill_fin_blanks(fin_by_co: dict, sources: dict) -> tuple[dict, dict[str, int]]:
     """「無い」と確かめた空欄を 0 で埋めた財務の写しと、列ごとに埋めた行数を返す（#950）。
 

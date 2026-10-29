@@ -248,7 +248,7 @@ class TestFinSourceKey:
 
     def test_the_key_keeps_the_other_axes(self):
         c = Cond(False, MOM_WINDOW, fin_rows="with_ttm", de_null_industries=("銀行業",), fin_fill=True)
-        assert fin_source_key(c, "gbdt") == ("with_ttm", ("銀行業",), True)
+        assert fin_source_key(c, "gbdt") == ("with_ttm", ("銀行業",), True, False)
 
 
 class TestBuildFinSources:
@@ -298,7 +298,7 @@ class TestMainWiring:
     def test_the_conditions_build_from_their_own_financials(self):
         """**渡し忘れても例外は出ない**（両条件が同じ財務で組まれ、差なしになる）。"""
         src = inspect.getsource(momentum_gate.main)
-        assert "build_fin_sources(conds, kinds, fins, fill_sources)" in src
+        assert "build_fin_sources(conds, kinds, fins, fill_sources," in src
         assert "fin_src = fin_srcs[fin_source_key(c, kind)]" in src
         assert "kind, args, prices_by_co, fin_src, companies," in src
         assert "load_fill_sources(db)" in src

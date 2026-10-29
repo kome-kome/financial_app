@@ -668,7 +668,8 @@ class TestOutputNamesTheModeThatWasMeasured:
         assert set(MODE_SUFFIX) == {"default", "windows", "macro", "interactions", "max_features",
                                     "fin_rows", "demean_target", "risk_axis", "fin_nan",
                                     "de_exclude", "fin_fill", "size_neutral",
-                                    "valid_split", "inner_cv_purge", "subsample", "train_exclude_index"}
+                                    "valid_split", "inner_cv_purge", "subsample", "train_exclude_index",
+                                    "earnings_yield"}
 
     def test_demean_mode_writes_its_own_file(self):
         """既定の `momentum_gate.json` を上書きしない（どの軸の結果かがファイル名で分かる）。"""

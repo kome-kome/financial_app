@@ -95,7 +95,7 @@ class TestMainWiring:
         # 財務の写しは `build_fin_sources` が (行の基準, 業種, 0 で埋めるか) ごとに作る（#983。空欄化を埋めた写しで
         # 消さない形は tests/test_momentum_gate_fin_fill.py::TestBuildFinSources が縛る）
         assert "null_de_ratio(src, inds)" in inspect.getsource(momentum_gate.build_fin_sources)
-        assert "build_fin_sources(conds, kinds, fins, fill_sources)" in src
+        assert "build_fin_sources(conds, kinds, fins, fill_sources," in src
         assert "fin_src = fin_srcs[fin_source_key(c, kind)]" in src
         assert "kind, args, prices_by_co, fin_src, companies," in src
         assert "de_exclude=args.de_exclude" in src
