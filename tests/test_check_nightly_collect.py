@@ -10,6 +10,7 @@ from collector_prices import (
     format_yahoo_http_stats, roundtrip_log_line, scale_rejection_log_line,
     scale_step_log_line,
 )
+from nightly_scores import ridge_high_edge_log_line
 from scripts._textwidth import display_width, pad
 from scripts import run_nightly
 from scripts.check_nightly_collect import (
@@ -393,11 +394,12 @@ class TestWarningKinds:
             LOG_AFTER.replace("429=0", "429=3").replace("level=fresh", "level=stale"),
             _night_with("[17:49:05]   往復段差の検知に失敗（継続します）: RuntimeError: x"),
             guard._night(rejected=4, new=1, steps=guard._steps(2)),
+            _night_with(TestRidgeHighEdge.line(high=1)),
         )
         kinds = {k for t in logs for k, _ in warning_items(parse_nightly_log(t))}
         assert kinds <= set(WARNING_KINDS)
         assert {"collect_incomplete", "yahoo_http", "exchange_rejected", "roundtrip",
-                "price_freshness", "scale_rejected", "scale_steps"} == kinds
+                "price_freshness", "scale_rejected", "scale_steps", "ridge_high_edge"} == kinds
 
     def test_warnings_for_is_the_text_of_warning_items(self):
         r = parse_nightly_log(LOG_0929)
@@ -417,6 +419,40 @@ class TestWarningKinds:
         r = parse_nightly_log(LOG_BEFORE)
         assert not WARNING_KINDS["roundtrip"].known(r)
         assert WARNING_KINDS["roundtrip"].known(parse_nightly_log(LOG_0929))
+
+
+class TestRidgeHighEdge:
+    """#728: sector_ols の ridge α の上端は WARN ログ止まりだったので、watchdog が読める行にした。
+
+    行は `nightly_scores.ridge_high_edge_log_line` の実出力を夜間ログの書式（logger の INFO）で包む。
+    """
+
+    @staticmethod
+    def line(high: int, low: int = 2) -> str:
+        sectors = ([{"industry": f"業種{i}", "n": 30, "alpha": 1000.0, "alpha_edge": "high"}
+                    for i in range(high)]
+                   + [{"industry": f"小業種{i}", "n": 5, "alpha": 0.001, "alpha_edge": "low"}
+                      for i in range(low)])
+        return ("2026-10-29 17:50:04,946 INFO [sector_ols] "
+                + ridge_high_edge_log_line({"sectors": sectors}))
+
+    def test_high_edge_warns(self):
+        r = parse_nightly_log(_night_with(self.line(high=2)))
+        assert r["ridge_high_edge"] == 2
+        assert [k for k, _ in warning_items(r)] == ["ridge_high_edge"]
+
+    def test_none_line_is_known_and_quiet(self):
+        """上端が無い夜も行が出る＝ok と言える（low の業種は数えない）。"""
+        r = parse_nightly_log(_night_with(self.line(high=0, low=3)))
+        assert r["ridge_high_edge"] == 0
+        assert warning_items(r) == []
+        assert WARNING_KINDS["ridge_high_edge"].known(r)
+
+    def test_missing_line_is_unknown(self):
+        """sector_ols が走らなかった夜・旧書式は不明（閉じる根拠にしない）。"""
+        r = parse_nightly_log(LOG_BEFORE)
+        assert r["ridge_high_edge"] is None
+        assert not WARNING_KINDS["ridge_high_edge"].known(r)
 
 
 class TestCompleted:
