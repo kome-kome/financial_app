@@ -2581,6 +2581,8 @@ class FinancialMetric(ViewBase):
     # **既に反映済み**（split_factor と同じく、消費側が重ねて掛けてはいけない）。
     split_shares_lag = Column(Float)
     split_dps_lag = Column(Float)
+    # 益利回り E/P = (pl_eps ÷ stock_price) ÷ F（#950）。per と同じ F で、赤字の行にも値が入る
+    earnings_yield = Column(Float)
     # 軽い派生（VIEW が都度算出）
     op_margin = Column(Float); net_margin = Column(Float)
     roe = Column(Float); roa = Column(Float)
