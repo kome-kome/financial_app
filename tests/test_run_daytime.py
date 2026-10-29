@@ -366,7 +366,7 @@ class TestRiskAxisM1GateMeasuresTheScreenOrdering:
 
     def test_the_preregistered_conditions_and_tests(self):
         from scripts.momentum_gate import (RISK_BASE_COND, RISK_MODELS, bonferroni_alpha,
-                                           resolve_risk_base, resolve_risk_lambda, risk_specs)
+                                           resolve_risk_base, risk_specs)
 
         argv = rd.JOBS[self.KEY].argv
         assert "--risk-base" not in argv       # 分母は画面の既定の並び（上書きしない）
