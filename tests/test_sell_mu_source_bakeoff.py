@@ -96,10 +96,11 @@ class TestUpperBound:
         order = sorted(self.MU, key=lambda k: (keys[k], k))
         assert [self.MU[k] for k in order] == sorted(self.MU.values())
 
-    def test_preset_with_other_metrics_stops(self, monkeypatch):
-        monkeypatch.setitem(sb.SELL_PRESETS, "マクロ予測型", {"mu": 1.0, "neg_r_macro": 0.5, "roe": 1.0})
-        with pytest.raises(ValueError):
-            sb.upper_bound_keys(self.MU, {})
+    def test_upper_bound_does_not_follow_the_default_preset(self):
+        """既定プリセットが μ だけになっても（#1073）、上限版は −R_macro を足した式のまま。"""
+        from plugins.sell_ranking import PRESETS
+        assert sb.UPPER_WEIGHTS == {"mu": 1.0, "neg_r_macro": 0.5}
+        assert PRESETS["マクロ予測型"] != sb.UPPER_WEIGHTS
 
     def test_same_formula_as_the_sell_ranking(self):
         """上限版のスコアは本番の `sell_score` と同じ値（式を書き写していない）。"""
