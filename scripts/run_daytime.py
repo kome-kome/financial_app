@@ -338,8 +338,9 @@ JOBS: dict[str, Job] = {
               "--stride", "1", "--allow-full-pull", "--refresh-cache"),
         why="M-2 / M-6 の特徴量の per を、赤字の行にも値が入る益利回り E/P（financial_metrics.earnings_yield・"
             "per と同じ F）へ差し替えたら良くなるかを共通域で測る（#1082・#950）。広がった赤字の社は raw で読む。",
-        # 見積り（`gate:fin-fill` の実測 36.5 分を借りる・同じ形・同じモデル）。実走ログで差し替える。
-        measured_min=36.5,
+        # 2026-10-30 日中枠の実測（並走なし・exit=0・#950）。見積りは `gate:fin-fill` の実測 36.5 分を借りていた
+        # （E/P 側の学習行が約 17% 多い）。
+        measured_min=46.6,
         parallel_sensitive=True,   # 他の gate と同じ理由（採否が CI の符号で決まる）
     ),
     "gate:valid-split": Job(
