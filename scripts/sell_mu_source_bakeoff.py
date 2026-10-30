@@ -25,8 +25,8 @@
   有意差は per-fold 系列を共通 test 期でペアリングした定常ブートストラップ
   （`model_stats.paired_ic_significance`・ADR-0018）で見る。
 
-  μ と −R_macro の合成について: sell_ranking の既定プリセット「マクロ予測型」は
-  mu:1.0 + neg_r_macro:0.5 の加重和だが、`r_macro` は共有 macro_beta 由来で **mu_source
+  μ と −R_macro の合成について: sell_ranking の「マクロ予測型」は #1073 まで
+  mu:1.0 + neg_r_macro:0.5 の加重和だった（今は μ だけ）。`r_macro` は共有 macro_beta 由来で **mu_source
   非依存**（sell_ranking.execute のコメント参照）。したがって mu_source 間の差分は μ 成分に
   帰着し、μ 単独ランキングでの比較で優劣の向きは保たれる。
 
@@ -41,7 +41,7 @@
   - 上位層: 1 つ前の test 期 t−1 に、買いの並びで上位 20% だった社のうち t にも予測がある社。買いの並びは
     各基底の画面の既定（M-1 / M-2 は U = μ̂ − λR・生の R2、λ=0 の M-6 は μ̂）＝画面の並びの採点（#1042）と同じ
   - 値: 層全体の y 平均 − 層の中で売りの並び（μ̂ の昇順）の下位 20% の y 平均（大きいほど売りが当たった）
-  - 売りの並び: M-6・M-2・M-1 の μ̂ と、sell_ranking の既定プリセットの式（μ + −R_macro）の上限版。
+  - 売りの並び: M-6・M-2・M-1 の μ̂ と、#1073 まで既定だったプリセットの式（μ + 0.5×−R_macro）の上限版。
     R_macro は今の推定値しかなく過去の時点で作り直せないので**未来情報込みの上限**
   - 比べる条件は全て同じ共通域・同じ層で測る（`plugins.macro_snapshots.in_layer_short_side`）
   - M-4 の基底は #1058 で本番の M-2 / M-6 の設定にそろえた（`M4_BASES_CAVEAT`）。上の全社の売り側spread も
@@ -80,7 +80,7 @@ from plugins import get_plugin  # noqa: E402
 from plugins.macro_snapshots import (  # noqa: E402
     display_risk_map, display_scores, get_producer_scores, in_layer_short_side, oof_backtest,
 )
-from plugins.sell_ranking import PRESETS as SELL_PRESETS, sell_score  # noqa: E402
+from plugins.sell_ranking import sell_score  # noqa: E402
 from plugins.utils import coerce_params, fit_zscore_stats  # noqa: E402
 from scripts.ensemble_base_bakeoff import _load_panel, _run_config  # noqa: E402
 from scripts._cache import set_refresh  # noqa: E402
@@ -107,6 +107,10 @@ CANDIDATE = "macro_enet"
 # ── 上位層の売り側spread（--in-layer・#1043）────────────────────────────────────
 # 売りの条件のキー。μ̂ の出所は BASES（基底名をそのままキーにする）、上限版はこの名前。
 UPPER = "upper_bound_with_r_macro"
+# 上限版の重み。#1073 までの既定プリセット「マクロ予測型」の式で、#1073 の規則 B で既定から −R_macro を外した
+# （2026-10-31）。既定へ追随させると上限版が μ̂ だけと同じものになり比較が消えるので、ここに残す。採点は本番と
+# 同じ `sell_score`（式は書き写さない）。
+UPPER_WEIGHTS = {"mu": 1.0, "neg_r_macro": 0.5}
 SHORT = {"macro_risk_return": "M-1", "macro_gbdt": "M-2", "macro_enet": "M-6",
          UPPER: "M-6+R_macro(上限)"}
 # 検定する対（a − b）。μ̂ の出所どうしは主判定と同じ対、上限版は「R_macro を足して層の中の売りが
@@ -192,17 +196,13 @@ def buy_scores(name: str, pred: dict, y: dict, prices_by_co: dict, db) -> tuple[
 def upper_bound_keys(mu: dict, producer: dict) -> dict:
     """上限版の売りのキー `{(ym, ec): −売りスコア}`（低いほど先に売る）。
 
-    sell_ranking の既定プリセットの式（`sell_score`）で採点する。μ に M-6 の OOF μ̂、−R_macro に今の
-    producer の R_macro を入れる。**R_macro は時点再現できない**（単一 run のスナップショット・#709）ので
-    未来情報込みの上限。z の平均・標準偏差は期ごとに共通域の全社から取る（本番は今の投資可能な全社）。
-    score が None の社（被覆率が下限未満）は入れない。既定プリセットに μ と −R_macro 以外の指標が入って
-    いたら止める（財務の指標は OOF の期の値をここで作り直せない）。
+    `UPPER_WEIGHTS`（#1073 まで既定だった μ + 0.5×−R_macro）を sell_ranking の `sell_score` で採点する。
+    μ に M-6 の OOF μ̂、−R_macro に今の producer の R_macro を入れる。**R_macro は時点再現できない**（単一 run
+    のスナップショット・#709）ので未来情報込みの上限。z の平均・標準偏差は期ごとに共通域の全社から取る（本番は
+    今の投資可能な全社）。score が None の社（被覆率が下限未満・下限は sell_ranking の既定）は入れない。
     """
     params = coerce_params(get_plugin("sell_ranking").params_schema(), {})
-    weights = dict(SELL_PRESETS[params["preset"]])
-    extra = set(weights) - {"mu", "neg_r_macro"}
-    if extra:
-        raise ValueError(f"sell_ranking の既定プリセットに上限版で作れない指標がある: {sorted(extra)}")
+    weights = dict(UPPER_WEIGHTS)
     raws_by_ym: dict[str, dict] = defaultdict(dict)
     for (ym, ec), v in mu.items():
         rm = (producer.get(ec) or {}).get("r_macro")

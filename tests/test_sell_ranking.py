@@ -52,10 +52,20 @@ class TestConstants:
                 assert w >= 0
 
     def test_macro_preset_exists_and_macro_only(self):
-        # マクロ予測型は μ・−Rᴹ の2軸のみ（両キー存在・他観点を含まない）
+        # マクロ予測型は μ だけ（#1073 の規則 B で −Rᴹ を外した・他観点を含まない）
         assert "マクロ予測型" in PRESETS
         keys = set(PRESETS["マクロ予測型"])
-        assert keys == {"mu", "neg_r_macro"}
+        assert keys == {"mu"}
+
+    def test_js_presets_match_python(self):
+        # 画面の SELL_PRESETS（static/js/analysis.js）の既定プリセットが Python 側と同じ重み
+        import re
+        from pathlib import Path
+        js = (Path(__file__).resolve().parent.parent / "static" / "js" / "analysis.js").read_text(encoding="utf-8")
+        m = re.search(r"'マクロ予測型':\s*\{([^}]*)\}", js)
+        assert m, "analysis.js に マクロ予測型 が無い"
+        pairs = dict(re.findall(r"(\w+)\s*:\s*([\d.]+)", m.group(1)))
+        assert {k: float(v) for k, v in pairs.items()} == PRESETS["マクロ予測型"]
 
     def test_default_preset_is_macro(self):
         # 既定プリセットはマクロ予測型
