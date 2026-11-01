@@ -216,7 +216,23 @@ def _verify_token(token: str) -> bool:
 
 _AUTH_COOKIE   = "auth_token"
 _CSRF_COOKIE   = "csrf_token"
-_COOKIE_SECURE = os.getenv("COOKIE_SECURE", "").lower() in ("1", "true", "yes")
+
+
+def _cookie_secure() -> bool:
+    """認証 Cookie に Secure を付けるか。
+
+    ``COOKIE_SECURE`` を明示すればそれに従う。未設定なら本番相当（``_is_production_like``）で
+    付ける。render.yaml の値は Blueprint 管理外のサービスでは反映されないことがあり
+    （database.resolve_database_url の `RENDER` 検知と同じ事情）、そのとき Secure の無い
+    Cookie を平文の通信へ出さないため。
+    """
+    raw = os.getenv("COOKIE_SECURE", "").strip().lower()
+    if raw:
+        return raw in ("1", "true", "yes")
+    return _is_production_like()
+
+
+_COOKIE_SECURE = _cookie_secure()
 _CSRF_UNSAFE_METHODS = ("POST", "PUT", "DELETE", "PATCH")
 
 def _create_csrf() -> str:
@@ -330,7 +346,19 @@ async def lifespan(app: FastAPI):
                  HEARTBEAT_TIMEOUT, STARTUP_GRACE)
     yield
 
-app = FastAPI(title="EDINET Financial API", version="2.0", lifespan=lifespan)
+def _api_docs_urls() -> dict:
+    """FastAPI の /docs・/redoc・/openapi.json の出し方。本番相当では閉じる。
+
+    認証ミドルウェアは /api/ 配下だけを守るので、既定のままだと全ルートの一覧が未認証で
+    読める。ソースは公開だが、稼働中のサービスが自分で地図を配る理由は無い。ローカルでは残す。
+    """
+    if _is_production_like():
+        return {"docs_url": None, "redoc_url": None, "openapi_url": None}
+    return {}
+
+
+app = FastAPI(title="EDINET Financial API", version="2.0", lifespan=lifespan,
+              **_api_docs_urls())
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 

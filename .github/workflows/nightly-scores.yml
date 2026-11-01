@@ -38,10 +38,13 @@ jobs:
     # 手動 dispatch か、daily-incremental が success で終わったときだけ実行する。
     # 名前一致なので daily-incremental.yml の name を変えたらここも直す
     # ＝tests/test_nightly_scores.py が整合を強制する。
+    # 名前は誰でも名乗れる: fork の PR に同名の workflow を入れて成功させると、secrets 付きの
+    # この job が base の文脈で起動する。自分のリポジトリで走った run だけを見る。
     if: >-
       github.event_name == 'workflow_dispatch' ||
       (github.event.workflow_run.name == '[定常] 差分収集・毎日自動実行' &&
-      github.event.workflow_run.conclusion == 'success')
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.head_repository.full_name == github.repository)
     runs-on: ubuntu-latest
     # 実測で締めた値（Issue #446）。M-6 込みの本番実走2本:
     #   run 30954182465（2026-08-04）sector_ols 30.3分 + macro_enet 3.2分 = 総 33.5分（job 34.5分）

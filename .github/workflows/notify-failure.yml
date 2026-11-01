@@ -52,10 +52,14 @@ jobs:
     # ci.yml だけは除外（PR の pytest 失敗は PR 画面で即見え、feature ブランチの
     # 試行錯誤で Issue が乱立するため）。名前一致なので ci.yml の name を変えたら
     # ここも直す＝tests/test_workflow_failure_notification.py が整合を強制する。
+    # fork からの PR で走った run は数えない。リポジトリは PUBLIC で、fork の PR は任意の名前の
+    # workflow を足して失敗させられる＝bot 名義の priority:high Issue を作らせ、本文（WF_NAME・
+    # HEAD_BRANCH・ログ末尾）に任意の文字列を入れられる。自分のリポジトリで走った run だけを見る。
     if: >-
       (github.event.workflow_run.conclusion == 'failure' ||
       github.event.workflow_run.conclusion == 'cancelled') &&
-      github.event.workflow_run.name != '[CI] pytest 自動テスト'
+      github.event.workflow_run.name != '[CI] pytest 自動テスト' &&
+      github.event.workflow_run.head_repository.full_name == github.repository
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
@@ -164,8 +168,12 @@ jobs:
           # --- 重複起票の防止: 同一タイトルの open Issue があればコメント追記 ---
           # ラベルで絞ると誰かが ops を外したときに重複起票するため、open 全件から突き合わせる。
           # 外部 jq ではなく gh 内蔵 --jq を使う（env.TITLE 参照はローカル実測で動作確認済み）。
-          existing=$(TITLE="${TITLE}" gh issue list --state open --limit 200 --json number,title \
-                       --jq '[.[] | select(.title == env.TITLE)] | .[0].number // empty') || true
+          # 作成者も bot に限る。タイトルは公開されているので、他人が同じタイトルの Issue を先に
+          # 立てると追記がそちらへ吸われる。gh は bot の login を "app/github-actions" と出す
+          # （2026-11-01 に gh issue list --json author で実測）。外れても重複起票になるだけで
+          # 通知は消えない。
+          existing=$(TITLE="${TITLE}" gh issue list --state open --limit 200 --json number,title,author \
+                       --jq '[.[] | select(.title == env.TITLE and .author.login == "app/github-actions")] | .[0].number // empty') || true
 
           if [ -n "${existing:-}" ]; then
             gh issue comment "${existing}" --body-file "${BODY_FILE}"

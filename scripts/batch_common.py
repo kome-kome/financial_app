@@ -439,14 +439,17 @@ def run_gh(run, argv: Sequence[str]) -> subprocess.CompletedProcess:
 
 
 def list_open_issues(run) -> tuple[Optional[list], Optional[str]]:
-    """open な Issue の `[{number, title}]`。失敗なら (None, 理由)。
+    """自分が立てた open な Issue の `[{number, title}]`。失敗なら (None, 理由)。
 
     **ラベルで絞らない**——誰かが `ops` を外した瞬間に重複起票が始まる
     （`.github/workflows/notify-failure.yml:165` の理由をそのまま継ぐ）。突き合わせは
     `--jq` に任せず Python 側で行う（シェル依存を持ち込まずテストできる）。
+
+    **作成者は自分に絞る**——リポジトリは PUBLIC で、起票のタイトルはコードと docs から読める。
+    他人が同じタイトルで先に立てると、追記も自動クローズの判定もそちらへ吸われる。
     """
     proc = run_gh(run, ["gh", "issue", "list", "--state", "open", "--limit", "200",
-                        "--json", "number,title"])
+                        "--author", "@me", "--json", "number,title"])
     if proc.returncode != 0:
         return None, f"gh issue list が失敗: {(proc.stderr or '')[:200]}"
     try:
