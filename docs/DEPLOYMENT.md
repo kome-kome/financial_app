@@ -403,6 +403,7 @@ Supabase が restricted になると**アプリも分析も一切動かせない
 | サーバ | **PostgreSQL 18.6**（Windows サービス `postgresql-x64-18`・port 5432） |
 | クライアント | `C:\Program Files\PostgreSQL\18\bin`。**PATH に無い**ので `pg_dump` 等はフルパスで呼ぶ |
 | 認証 | `pg_hba.conf` は local/host とも `scram-sha-256` |
+| 待ち受け | `postgresql.conf` の `listen_addresses = 'localhost'`（`127.0.0.1` と `::1` だけ・2026-11-01・#1097。それまでは `'*'`）。`pg_hba.conf` の host も `127.0.0.1/32`・`::1/128` だけ。接続文字列（ロール・パスワード）は公開済みなので、**外へ開く変更は待ち受け・`pg_hba.conf`・ファイアウォールの3段がそろって初めて効く**ように保つ。CLAUDE.md の「`postgresql.conf` は変えない」はセッション設定（ADR-0043）の規則で、待ち受けとは別。サービスの再起動は**UAC で権限を上げた PowerShell** が要る（サービスの権限は SYSTEM と Administrators だけ。`C:\Program Files\PostgreSQL\18\data` は権限を上げずに書けるので、書き換えだけ通って再起動で `サービスを開けません` になる） |
 | 接続文字列 | `postgresql://edinet:edinet@localhost:5432/financial_db` ＝ [database.py](../database.py) の**既定フォールバックと同一**（`FINAPP_DB_TARGET` が `local`（既定）で `DATABASE_URL_LOCAL` 未設定ならここへ繋がる） |
 | encoding | **UTF8**（collate は `Japanese_Japan.932`＝並び順のみ OS 依存。Supabase と並び順が違う点は text の `ORDER BY` にのみ影響） |
 | `edinet` の権限 | **superuser でも createdb でもない**。所有する `financial_db` 内の CREATE は可 |
