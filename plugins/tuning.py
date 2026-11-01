@@ -27,6 +27,11 @@ OBJECTIVES = ("rank_ic", "ic_ir", "long_short")
 # 月次の予算（`run_monthly.BUDGET_MIN["tune:macro_gbdt"]`）はこのぶん上げてある（240 → 300 分）。
 CONFIRM_RESERVE_MIN = 60.0
 
+# 確かめ直す段の 2 段の選び方（ADR-0070・#1113）。1 段目で rank-IC の 1 位より「有意に悪い」候補を外す水準。
+# 両側 0.10 で有意かつ差が正＝片側 0.05。補正前にするのは、rank-IC が少しでも劣る証拠のある候補を外し、
+# rank-IC を厳しめに守るため（外れる候補が増えるほど 2 段目の同点決めが効く範囲は狭まる）。
+TIE_SET_ALPHA_TWO_SIDED = 0.10
+
 # 確かめ直す段の間だけ有効な種の上書き（#984）。種で結果が動くプラグイン（`tuning_seed_base` を持つもの）は
 # execute の中で `seeded(既定の種)` を使う。画面の項目にはしない＝本番の実行と最終モデルは常に既定の種。
 _SEED_OVERRIDE: ContextVar[int | None] = ContextVar("tuning_seed_override", default=None)
@@ -209,6 +214,83 @@ def _assemble(
         "champion_injected": champion_combo is not None,
         "champion_score": champion_score,
     }
+
+
+def _period_series(oof: dict) -> tuple[dict | None, dict | None]:
+    """oof_backtest から（rank-IC の期別, 運用の K の上位K社超過の期別）を取り出す。無ければ None（ADR-0070）。"""
+    from plugins.macro_snapshots import OPERATIONAL_TOP_K
+
+    def _clean(d) -> dict | None:
+        d = {p: float(v) for p, v in (d or {}).items() if v is not None}
+        return d or None
+
+    top = (oof.get("top_k_excess_return_by_period") or {}).get(str(OPERATIONAL_TOP_K))
+    return _clean(oof.get("rank_ic_by_period")), _clean(top)
+
+
+def _seed_average(per_seed: list[dict]) -> dict:
+    """種ごとの {期: 値} を、**全種にある期だけで**種平均する（ある種で欠けた期は比べない）。"""
+    common = set.intersection(*(set(d) for d in per_seed))
+    return {p: statistics.mean(d[p] for d in per_seed) for p in common}
+
+
+def _two_stage_select(cands: list[dict]) -> dict:
+    """2 段の選び方（ADR-0070・#1113）。純関数。
+
+    `cands`: `[{"ic": {期: rank-IC}, "top": {期: 上位K社超過}}, ...]`（種平均済み）。**並びは優先順**で、同値のときは
+    先の候補を採る。
+
+    - 期をそろえる: 全候補の rank-IC と上位K社超過のどちらにもある期（共通期）だけで比べる。期の欠けた候補が
+      欠けた期で得をしない（11/01 の 1 位候補は 2021-02 を欠いた 18 期で測られていた）
+    - 1 段目: 共通期の rank-IC 平均が最大の候補（rank-IC の 1 位）より有意に悪い候補を外す（`TIE_SET_ALPHA_TWO_SIDED`）。
+      残りが同点の集合
+    - 2 段目: 同点の集合の中で上位K社超過の平均が最大の候補を採る。同値は rank-IC の 1 位、次に並びの先
+
+    返り値: `{"ok": False, "reason": str}`（系列が無い候補がある・共通期が 2 未満）か、
+    `{"ok": True, "chosen", "leader", "tie_set", "n_common", "ic_mean", "top_mean", "split_half"}`（添字は `cands` の位置）。
+    `split_half` は選んだ候補が rank-IC の 1 位と違うときだけ、上位K社超過の差（選んだ − 1 位）を共通期の前半と後半で出す
+    （戻す規則の材料・ADR-0070 決定 3）。
+    """
+    from model_stats import paired_ic_significance
+
+    if not cands:
+        return {"ok": False, "reason": "比べる候補が無い"}
+    if any(not c.get("ic") or not c.get("top") for c in cands):
+        return {"ok": False, "reason": "rank-IC か上位K社超過の期別系列が無い候補がある"}
+    common = sorted(set.intersection(*(set(c["ic"]) & set(c["top"]) for c in cands)))
+    if len(common) < 2:
+        return {"ok": False, "reason": f"共通期が {len(common)} 期しか無い（2 期以上が要る）"}
+
+    ic_mean = [statistics.mean(c["ic"][p] for p in common) for c in cands]
+    top_mean = [statistics.mean(c["top"][p] for p in common) for c in cands]
+    leader = max(range(len(cands)), key=lambda i: (ic_mean[i], -i))
+    lead_ic = {p: cands[leader]["ic"][p] for p in common}
+    tie_set = []
+    for i, c in enumerate(cands):
+        if i != leader:
+            st = paired_ic_significance(lead_ic, {p: c["ic"][p] for p in common},
+                                        alpha=TIE_SET_ALPHA_TWO_SIDED)
+            if st is not None and st["significant"] and st["mean"] > 0:
+                continue                      # rank-IC の 1 位より有意に悪い
+        tie_set.append(i)
+
+    chosen = leader
+    for i in tie_set:
+        if top_mean[i] > top_mean[chosen]:
+            chosen = i
+
+    split_half = None
+    if chosen != leader:
+        half = len(common) // 2
+        first, second = common[:half], common[half:]
+
+        def _diff(ps):
+            return statistics.mean(cands[chosen]["top"][p] - cands[leader]["top"][p] for p in ps)
+
+        split_half = {"first": round(_diff(first), 6), "second": round(_diff(second), 6),
+                      "n_first": len(first), "n_second": len(second)}
+    return {"ok": True, "chosen": chosen, "leader": leader, "tie_set": tie_set, "n_common": len(common),
+            "ic_mean": ic_mean, "top_mean": top_mean, "split_half": split_half}
 
 
 def _score(oof: dict, objective: str) -> float | None:
@@ -419,11 +501,17 @@ async def _confirm_by_seeds(
     - 回し方: **種の順**（全候補を種 base+1、次に全候補を種 base+2 …）。各巡の前に、その巡が `deadline` に入るかを
       候補ごとの所要（探索での所要と、それまでの巡の最大）の合計で見積もり、入らなければ止める——どの候補も同じ数の
       種で比べるため。1 巡も回れなければ既定の種だけで比べる＝探索の選択と同じになる
-    - 選び方: 回った種の平均が最も高い候補。ある種で失敗した候補（score が None）は比べる対象から外す
-    - 書き換えるもの: `best_params` / `best_score`（**種の平均**）/ `best_oof`（既定の種の OOF）/ `champion_score`
-      （champion の種の平均）。候補の leaderboard の行に `seed_scores`（{種: score}）と `seed_mean` を足し、
-      `config["confirm"]` に段の要約を置く
+    - 選び方: **2 段の選び方**（`_two_stage_select`・ADR-0070）。各種の OOF から rank-IC と上位K社超過（運用の K）の
+      期別系列を取り、候補ごとに種平均して共通期でそろえ、rank-IC の 1 位より有意に悪い候補を外した残り（同点の集合）の
+      中で上位K社超過の平均が最も高い候補を採る。系列が取れないとき（共通期が 2 未満を含む）は、回った種の平均の
+      rank-IC が最も高い候補へ倒す（ADR-0070 の前の選び方）。ある種で失敗した候補（score が None）は比べる対象から外す
+    - 書き換えるもの: `best_params` / `best_score`（**選んだ候補の種平均 rank-IC**＝物差しは変えない）/ `best_oof`
+      （既定の種の OOF）/ `champion_score`（champion の種の平均）。候補の leaderboard の行に `seed_scores`（{種: score}）と
+      `seed_mean`、2 段で選べた回は `common_rank_ic_mean` / `top_k_mean` / `in_tie_set` を足し、`config["confirm"]` に
+      段の要約（`selection` ほか）を置く。期別系列は行に入れない（`leaderboard_json` を肥大させない）
     """
+    from plugins.macro_snapshots import OPERATIONAL_TOP_K
+
     base_seed = int(plugin.tuning_seed_base)
     scored = sorted((e for e in leaderboard if e["score"] is not None),
                     key=lambda e: e["score"], reverse=True)
@@ -449,6 +537,8 @@ async def _confirm_by_seeds(
 
     for e in picked:
         e["seed_scores"] = {str(base_seed): e["score"]}
+    # 種ごとの期別系列（rank-IC, 上位K社超過）。2 段の選び方だけが使う（行には入れない）
+    seed_series: list[list[tuple]] = [[_period_series(e.get("oof") or {})] for e in picked]
     est = [max(float(e.get("elapsed_sec") or 0.0), 1.0) for e in picked]
     rounds = 0
     truncated = False
@@ -466,6 +556,7 @@ async def _confirm_by_seeds(
                 with seed_override(s), tuning_dry_run():
                     res = await execute_plugin(plugin, {**base_params, **e["params"]}, db)
                 sc = _score(res.get("oof_backtest") or {}, objective)
+                seed_series[j].append(_period_series(res.get("oof_backtest") or {}))
             except Exception as ex:          # 1 回の失敗で段全体は止めない（その候補だけ比べる対象から外す）
                 sc = None
                 log.info("[confirm seed=%d] 失敗: %s params=%s", s, ex, e["params"])
@@ -477,9 +568,35 @@ async def _confirm_by_seeds(
     for e in picked:
         vals = list(e["seed_scores"].values())
         e["seed_mean"] = (statistics.mean(vals) if vals and all(v is not None for v in vals) else None)
-    eligible = [e for e in picked if e["seed_mean"] is not None]
+    eligible_idx = [j for j, e in enumerate(picked) if e["seed_mean"] is not None]
+    eligible = [picked[j] for j in eligible_idx]
     chosen = max(eligible, key=lambda e: e["seed_mean"]) if eligible else picked[0]
     seed_base_best = scored[0]
+
+    # 2 段の選び方（ADR-0070）。並びは種平均の rank-IC の降順＝同値のときの優先順
+    two = {"ok": False, "reason": "比べる候補が 1 件以下"}
+    order = sorted(range(len(eligible)), key=lambda i: -eligible[i]["seed_mean"])
+    if len(eligible) >= 2:
+        cands = []
+        for i in order:
+            runs = seed_series[eligible_idx[i]]
+            ics, tops = [r[0] for r in runs], [r[1] for r in runs]
+            cands.append({"ic": _seed_average(ics) if all(ics) else None,
+                          "top": _seed_average(tops) if all(tops) else None})
+        two = _two_stage_select(cands)
+    leader = chosen
+    if two["ok"]:
+        ranked = [eligible[i] for i in order]
+        chosen, leader = ranked[two["chosen"]], ranked[two["leader"]]
+        for k, e in enumerate(ranked):
+            e["common_rank_ic_mean"] = round(two["ic_mean"][k], 6)
+            e["top_k_mean"] = round(two["top_mean"][k], 6)
+            e["in_tie_set"] = k in two["tie_set"]
+        log.info("2 段の選び方（ADR-0070）: 共通 %d 期・rank-IC の 1 位=%s・同点の集合 %d/%d 件・上位%d社超過で選んだ候補=%s",
+                 two["n_common"], leader["params"], len(two["tie_set"]), len(ranked), OPERATIONAL_TOP_K,
+                 chosen["params"])
+    elif len(eligible) >= 2:
+        log.warning("2 段の選び方を使えず、種平均の rank-IC だけで選びます（ADR-0070）: %s", two["reason"])
 
     final["best_params"] = {**base_params, **chosen["params"]}
     final["best_score"] = chosen["seed_mean"] if chosen.get("seed_mean") is not None else chosen["score"]
@@ -501,11 +618,26 @@ async def _confirm_by_seeds(
         "seed_base_best_params": seed_base_best["params"],
         "seed_base_best_score": seed_base_best["score"],
         "selected_seed_base_score": chosen["score"],
+        # 2 段の選び方（ADR-0070）。`selection` が "rank_ic_only" なら以下の比較値は None（理由は selection_reason）
+        "selection": "two_stage" if two["ok"] else "rank_ic_only",
+        "selection_reason": None if two["ok"] else two["reason"],
+        "top_k": OPERATIONAL_TOP_K,
+        "n_common_periods": two.get("n_common"),
+        "rank_ic_leader_params": leader["params"],
+        "rank_ic_leader_common_mean": leader.get("common_rank_ic_mean"),
+        "tie_set_size": len(two["tie_set"]) if two["ok"] else None,
+        "chosen_top_k_mean": chosen.get("top_k_mean"),
+        "leader_top_k_mean": leader.get("top_k_mean"),
+        "changed_by_stage2": _combo_key(chosen["params"]) != _combo_key(leader["params"]),
+        "split_half": two.get("split_half"),
     }
-    log.info("確かめ直す段（#984）: %d 候補 × 種 %d 個で選び直しました。種の平均で 1 位: %s（平均 %s・"
+    log.info("確かめ直す段（#984）: %d 候補 × 種 %d 個で選び直しました（選び方=%s）。選んだ候補: %s（rank-IC の種平均 %s・"
              "種 %d では %s）。種 %d だけで選んだときの 1 位: %s（%s）。入れ替わり=%s",
-             len(picked), 1 + rounds, chosen["params"], chosen.get("seed_mean"), base_seed, chosen["score"],
+             len(picked), 1 + rounds, final["config"]["confirm"]["selection"], chosen["params"],
+             chosen.get("seed_mean"), base_seed, chosen["score"],
              base_seed, seed_base_best["params"], seed_base_best["score"],
              final["config"]["confirm"]["changed"])
     for e in picked:
-        log.info("  [confirm] mean=%s seeds=%s params=%s", e.get("seed_mean"), e["seed_scores"], e["params"])
+        log.info("  [confirm] mean=%s common_ic=%s top%d=%s tie=%s seeds=%s params=%s", e.get("seed_mean"),
+                 e.get("common_rank_ic_mean"), OPERATIONAL_TOP_K, e.get("top_k_mean"), e.get("in_tie_set"),
+                 e["seed_scores"], e["params"])

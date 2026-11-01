@@ -944,3 +944,138 @@ class TestConfirmBySeeds:
         with pytest.raises(ValueError, match="tuning_seed_base"):
             asyncio.run(search(_QuadraticPlugin(), {"y": 2}, dims, db=None, strategy="grid",
                                confirm_top=2, confirm_seeds=3))
+
+
+# ── 確かめ直す段の 2 段の選び方（#1113・ADR-0070）─────────────────────────────
+
+from plugins.macro_snapshots import OPERATIONAL_TOP_K, TOP_K_REFERENCE  # noqa: E402
+from plugins.tuning import TIE_SET_ALPHA_TWO_SIDED, _two_stage_select  # noqa: E402
+
+_PERIODS = [f"2021-{m:02d}" for m in range(1, 13)]
+# 全候補に共通の期ごとの揺れ（相場全体の当たり外れ）。対にすると打ち消し合う
+_NOISE = [0.05, -0.03, 0.08, -0.06, 0.02, 0.0, -0.04, 0.07, -0.02, 0.03, -0.05, 0.01]
+
+
+def _series(level: float, wiggle=None, periods=None) -> dict:
+    """期別の系列。`wiggle` は候補固有の揺れ（12 期ぶん）。`periods` で期を間引ける。"""
+    w = wiggle or [0.0] * 12
+    return {p: level + n + d for p, n, d in zip(_PERIODS, _NOISE, w)
+            if periods is None or p in periods}
+
+
+class _SeriesPlugin:
+    """期別の rank-IC と上位10社超過を返す、種で結果が動くプラグインの代わり（種では系列を変えない）。"""
+    name = "fake_series"
+    depends_on: list = []
+    tuning_seed_base = 42
+
+    def __init__(self, table: dict):
+        self.table = table                       # {x: (rank-IC の期別, 上位10社超過の期別)}
+
+    def params_schema(self) -> dict:
+        return {"x": {"type": "slider", "dtype": "int", "default": 1, "min": 1, "max": 4}}
+
+    def execute(self, params: dict, db) -> dict:
+        seeded(42)
+        ic, top = self.table[params["x"]]
+        return {"oof_backtest": {
+            "rank_ic": {"mean": sum(ic.values()) / len(ic), "std": 1.0, "n": len(ic)},
+            "rank_ic_by_period": ic,
+            "top_k_excess_return_by_period": {str(OPERATIONAL_TOP_K): top, "5": top},
+        }}
+
+
+# x=1 が rank-IC の 1 位、x=2 は対にすると差が揺れに埋もれる（同点）が上位10社は高い、x=3 は上位10社が最も高いが
+# rank-IC が一貫して 0.10 低い（有意に悪い）、x=4 は確かめ直す段に入らない
+_TABLE_TIE = {
+    1: (_series(0.20), _series(0.05)),
+    2: (_series(0.20, [-0.02, 0.019] * 6), _series(0.15)),
+    3: (_series(0.10, [0.01, -0.01] * 6), _series(0.40)),
+    4: (_series(0.05), _series(0.0)),
+}
+
+
+class TestTwoStageSelection:
+    """rank-IC で同点の候補の中を、運用の K の上位K社超過で選ぶ（#1113・ADR-0070）。"""
+
+    def test_operational_k_is_one_of_the_reported_ks(self):
+        assert OPERATIONAL_TOP_K == 10 and OPERATIONAL_TOP_K in TOP_K_REFERENCE
+
+    def test_alpha_is_one_sided_five_percent(self):
+        assert TIE_SET_ALPHA_TWO_SIDED == pytest.approx(0.10)
+
+    def test_picks_the_best_top_k_among_rank_ic_ties(self):
+        r = _confirm(_SeriesPlugin(_TABLE_TIE), confirm_top=3, confirm_seeds=2)
+        c = r["config"]["confirm"]
+        assert c["selection"] == "two_stage" and c["selection_reason"] is None
+        assert c["rank_ic_leader_params"] == {"x": 1}
+        assert r["best_params"] == {"x": 2}                     # 同点の集合の中で上位10社が最大
+        assert c["changed_by_stage2"] is True and c["tie_set_size"] == 2
+        assert c["top_k"] == OPERATIONAL_TOP_K and c["n_common_periods"] == 12
+        assert c["chosen_top_k_mean"] > c["leader_top_k_mean"]
+        assert c["split_half"]["first"] == pytest.approx(0.10) and c["split_half"]["second"] == pytest.approx(0.10)
+        # 保存する値の物差しは変えない＝選んだ候補の種平均 rank-IC
+        row2 = next(e for e in r["leaderboard"] if e["params"] == {"x": 2})
+        assert r["best_score"] == pytest.approx(row2["seed_mean"])
+
+    def test_a_significantly_worse_rank_ic_is_never_picked_for_its_top_k(self):
+        r = _confirm(_SeriesPlugin(_TABLE_TIE), confirm_top=3, confirm_seeds=2)
+        row3 = next(e for e in r["leaderboard"] if e["params"] == {"x": 3})
+        assert row3["in_tie_set"] is False and row3["top_k_mean"] == pytest.approx(0.40 + sum(_NOISE) / 12)
+        assert r["best_params"] != {"x": 3}
+
+    def test_rows_carry_the_comparison_but_not_the_period_series(self):
+        r = _confirm(_SeriesPlugin(_TABLE_TIE), confirm_top=3, confirm_seeds=2)
+        for x in (1, 2, 3):
+            row = next(e for e in r["leaderboard"] if e["params"] == {"x": x})
+            assert {"common_rank_ic_mean", "top_k_mean", "in_tie_set"} <= set(row)
+            assert not any("series" in k for k in row)       # 期別系列は leaderboard_json を肥大させない
+
+    def test_a_candidate_missing_a_period_does_not_gain_from_it(self):
+        """期の欠けた候補は共通期で比べる（11/01 の 1 位候補は 2021-02 を欠いた 18 期で測られていた）。"""
+        table = {
+            # x=1 は最初の期を欠く。自分の期の平均では x=2 より高く見える
+            1: (_series(0.20, periods=_PERIODS[1:]), _series(0.05)),
+            # x=2 は最初の期だけ大外れ、残りの期では x=1 より一貫して高い
+            2: (dict(_series(0.21, [0.02, -0.02] * 6), **{_PERIODS[0]: -0.30}), _series(0.05)),
+            3: (_series(0.0), _series(0.0)),
+            4: (_series(0.0), _series(0.0)),
+        }
+        r = _confirm(_SeriesPlugin(table), confirm_top=2, confirm_seeds=2)
+        c = r["config"]["confirm"]
+        assert c["seed_base_best_params"] == {"x": 1}            # 自分の期で測ると x=1 が上
+        assert c["n_common_periods"] == 11
+        assert c["rank_ic_leader_params"] == {"x": 2} and r["best_params"] == {"x": 2}
+
+    def test_without_period_series_it_falls_back_to_the_rank_ic_mean(self):
+        r = _confirm(_SeededPlugin(), confirm_top=2, confirm_seeds=5)
+        c = r["config"]["confirm"]
+        assert c["selection"] == "rank_ic_only" and "系列" in c["selection_reason"]
+        assert r["best_params"] == {"x": 2}                     # ADR-0070 の前と同じ選択
+        assert c["changed_by_stage2"] is False and c["split_half"] is None and c["tie_set_size"] is None
+
+
+class TestTwoStageSelectPure:
+    """`_two_stage_select` の規則そのもの（純関数）。"""
+
+    @staticmethod
+    def _c(ic_level, top_level, ic_wiggle=None):
+        return {"ic": _series(ic_level, ic_wiggle), "top": _series(top_level)}
+
+    def test_ties_on_top_k_keep_the_rank_ic_leader(self):
+        r = _two_stage_select([self._c(0.20, 0.10), self._c(0.199, 0.10, [-0.02, 0.018] * 6)])
+        assert r["ok"] and r["leader"] == 0 and r["chosen"] == 0 and r["split_half"] is None
+
+    def test_the_leader_is_chosen_on_common_periods_not_list_order(self):
+        r = _two_stage_select([self._c(0.10, 0.0), self._c(0.30, 0.0)])
+        assert r["leader"] == 1 and r["tie_set"] == [1]          # x=0 は一貫して 0.20 低い＝有意に悪い
+
+    def test_too_few_common_periods_is_not_ok(self):
+        a = {"ic": {"2021-01": 0.1, "2021-02": 0.2}, "top": {"2021-01": 0.0}}
+        b = {"ic": {"2021-01": 0.1, "2021-02": 0.2}, "top": {"2021-01": 0.0, "2021-02": 0.0}}
+        r = _two_stage_select([a, b])
+        assert r["ok"] is False and "共通期" in r["reason"]
+
+    def test_a_missing_series_is_not_ok(self):
+        r = _two_stage_select([self._c(0.2, 0.1), {"ic": _series(0.2), "top": None}])
+        assert r["ok"] is False and "系列" in r["reason"]
