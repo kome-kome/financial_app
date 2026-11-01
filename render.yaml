@@ -29,7 +29,7 @@ services:
       - key: ALLOWED_ORIGIN
         sync: false          # CORS 許可オリジン  例: https://<your-service>.onrender.com
       - key: APP_RATELIMIT_XFF_HOPS
-        sync: false          # X-Forwarded-For の末尾から何番目を送り手とみなすか（#1096）。未設定=0=従来どおり。値は /api/auth/status のログを見て決める
+        sync: false          # X-Forwarded-For の末尾から何番目を送り手とみなすか（#1096）。Render は 3（2026-11-01 実測）。未設定=0=偽の値ですり抜けられる。値は /api/auth/status のログを見て決める
       - key: JQUANTS_API_KEY
         sync: false          # J-Quants API キー（任意）  取得: https://jpx-jquants.com/ の「API Keys」
       - key: RENDER_LIGHT_MODE

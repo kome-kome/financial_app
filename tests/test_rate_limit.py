@@ -49,7 +49,7 @@ def test_constants_are_defined():
 
 
 # ── 送り手ごとの枠（#1096）────────────────────────────────────────────────
-# Render では接続元がいつも中継の IP。X-Forwarded-For の末尾から N 番目だけを信じる。
+# Render では uvicorn が X-Forwarded-For の先頭（偽れる値）を接続元にする。末尾から N 番目だけを信じる。
 
 from starlette.requests import Request  # noqa: E402
 
@@ -94,6 +94,14 @@ class TestRateLimitKey:
         """中継が行を分けて足しても、全行をつないだ末尾を採る。"""
         monkeypatch.setattr(api, "RATELIMIT_XFF_HOPS", 1)
         assert api._rate_limit_key(_req("203.0.113.9", "198.51.100.1")) == "198.51.100.1"
+
+    def test_render_shape_observed_2026_11_01(self, monkeypatch):
+        """Render の実測の形（送り手の IP だけ試験用の番号へ差し替え）: 偽の値の後ろへ
+        [送り手, Cloudflare の端, Render 内部の中継] の3つが足される。N=3 で送り手が採られる。"""
+        monkeypatch.setattr(api, "RATELIMIT_XFF_HOPS", 3)
+        observed = "203.0.113.7, 198.51.100.1, 104.23.160.51, 10.30.218.135"
+        assert api._rate_limit_key(_req(observed)) == "198.51.100.1"
+        assert api._rate_limit_key(_req("198.51.100.1, 104.23.160.104, 10.30.218.135")) == "198.51.100.1"
 
     def test_ipv6_is_normalized(self, monkeypatch):
         monkeypatch.setattr(api, "RATELIMIT_XFF_HOPS", 1)
