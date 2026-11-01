@@ -884,6 +884,7 @@ ADR-0006 §Decision-1 が定める CPI チャネル。
 | キー | 用途 | デフォルト |
 |---|---|---|
 | `DATABASE_URL` | Supabase PostgreSQL（2026-08-07 の閲覧用断面）の接続 URL | 手動設定（`postgresql://...?sslmode=require`） |
+| `DATABASE_MIGRATION_URL` | 起動時の書き込み（`init_db()` の DDL・パスワード移行・スタックジョブの回収）だけに使う**所有者ロール**の URL（#1100・[ADR-0038](adr/0038-local-postgres-is-the-primary.md) 追補） | 未設定＝`DATABASE_URL` で全部行う（従来どおり）。`DATABASE_URL` を SELECT 中心のロールへ絞るときに設定する（#1094）。`FINAPP_DB_TARGET=prod` のときだけ使い、ホスト・ポート・DB 名が `DATABASE_URL` と違えば起動時に止まる |
 | `EDINET_API_KEY` | 金融庁 EDINET API キー | 手動設定 |
 | `JQUANTS_API_KEY` | J-Quants API キー（任意） | 手動設定 |
 | `FRED_API_KEY` | FRED（米セントルイス連銀）API キー（任意） | 手動設定。未設定時はマクロ収集の FRED チャネルをスキップ |

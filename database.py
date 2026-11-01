@@ -131,7 +131,37 @@ def mask_url(url: str) -> str:
     return re.sub(r"://([^:/@]+):[^@]*@", r"://\1:***@", url)
 
 
+def resolve_migration_url(env, target: str, url: str) -> Optional[str]:
+    """起動時の書き込み（`init_db()` の DDL など）だけに使う接続 URL（#1100）。無ければ None。
+
+    Render の常用接続（`DATABASE_URL`）を SELECT 中心のロールへ絞れるように、所有者ロールの URL を
+    `DATABASE_MIGRATION_URL` で別に渡せるようにする。未設定なら None＝常用の接続で今までどおり。
+
+    - **prod のときだけ使う。** local では設定されていても無視する——ローカルから本番の Postgres へ
+      書く経路をコードとして持たない（ADR-0035・ADR-0038）。
+    - **接続先（ホスト・ポート・DB 名）が `url` と違えば RuntimeError。** 別の DB を移行して、
+      常用側は古いスキーマのまま読む事故を起動時に止める。ロール（ユーザー名）は違ってよい。
+    """
+    from sqlalchemy.engine import make_url
+    raw = (env.get("DATABASE_MIGRATION_URL") or "").strip()
+    if not raw:
+        return None
+    if target != "prod":
+        log.info("DATABASE_MIGRATION_URL は FINAPP_DB_TARGET=prod のときだけ使う（%s では無視）", target)
+        return None
+    if raw.startswith("postgres://"):
+        raw = raw.replace("postgres://", "postgresql://", 1)
+    a, b = make_url(raw), make_url(url)
+    if (a.host, a.port or 5432, a.database) != (b.host, b.port or 5432, b.database):
+        raise RuntimeError(
+            "DATABASE_MIGRATION_URL の接続先が DATABASE_URL と違います: "
+            f"{mask_url(raw)} / {mask_url(url)}（ロールだけを変えた同じ DB の URL を渡してください）"
+        )
+    return raw
+
+
 DB_TARGET, DATABASE_URL = resolve_database_url(os.environ)
+DATABASE_MIGRATION_URL = resolve_migration_url(os.environ, DB_TARGET, DATABASE_URL)
 
 # ローカル以外（クラウドDB）は SSL を強制し、コネクション数を抑える
 _is_local = _looks_local(DATABASE_URL)
@@ -216,6 +246,27 @@ Base = declarative_base()
 # ので既存の挙動には干渉しない。詳細と較正の由来は db_egress.py の docstring。
 import db_egress          # noqa: E402  （engine 定義後でないと張れない）
 db_egress.install(engine)
+
+
+@contextmanager
+def migration_engine():
+    """起動時の書き込み（`init_db()` と lifespan の残り2つ）に使う engine（#1100・ADR-0038 追補）。
+
+    `DATABASE_MIGRATION_URL` が無ければ常用の `engine` をそのまま渡す（今までと同じ）。あれば所有者
+    ロールの engine を作り、**セッション設定と Egress 台帳を常用と同じものを付けて**（書き写さない・
+    ADR-0043）渡し、抜けるときに閉じる。起動の後まで所有者ロールの接続を持ち続けないため。
+    """
+    if not DATABASE_MIGRATION_URL:
+        yield engine
+        return
+    eng = create_engine(DATABASE_MIGRATION_URL, pool_size=2, max_overflow=0, pool_pre_ping=True,
+                        connect_args=_connect_args, echo=False)
+    event.listen(eng, "connect", _apply_session_fixes)
+    db_egress.install(eng)
+    try:
+        yield eng
+    finally:
+        eng.dispose()
 
 
 # ── タイムアウトの局所上書き（#470 / #471）────────────────────────────────────
@@ -2751,7 +2802,7 @@ _DEBUG_ONLY_COLS = [
 ]
 
 
-def _drop_stale_derived_tables() -> None:
+def _drop_stale_derived_tables(bind=None) -> None:
     """列が ORM と食い違った**派生表**を、依存する VIEW ごと落とす（直後の create_all が作り直す）。
 
     対象は `ttm_financial_records` だけである。ここだけ「作り直してよい」のは、中身が毎晩の
@@ -2764,16 +2815,17 @@ def _drop_stale_derived_tables() -> None:
     次の `init_db()` でここが走る。
     """
     from sqlalchemy import inspect as _sa_inspect
+    eng = bind if bind is not None else engine
     table = TtmFinancialRecord.__tablename__
     try:
-        insp = _sa_inspect(engine)
+        insp = _sa_inspect(eng)
         if not insp.has_table(table):
             return
         actual = {c["name"] for c in insp.get_columns(table)}
         expected = {c.name for c in TtmFinancialRecord.__table__.columns}
         if actual == expected:
             return
-        with engine.connect() as conn, db_timeouts(conn, lock=DDL_LOCK_TIMEOUT):
+        with eng.connect() as conn, db_timeouts(conn, lock=DDL_LOCK_TIMEOUT):
             conn.execute(text("DROP VIEW IF EXISTS financial_metrics_with_ttm"))
             conn.execute(text(f"DROP TABLE IF EXISTS {table}"))
             conn.commit()
@@ -2785,14 +2837,18 @@ def _drop_stale_derived_tables() -> None:
         log.warning("%s の作り直し判定に失敗（続行）: %r", table, e)
 
 
-def _ensure_tables() -> None:
-    """Phase 1: テーブル作成・インデックス・カラムマイグレーション（すべて冪等）"""
-    _drop_stale_derived_tables()     # create_all より前（落とした表をここで作り直させる）
-    Base.metadata.create_all(bind=engine)
+def _ensure_tables(bind=None) -> None:
+    """Phase 1: テーブル作成・インデックス・カラムマイグレーション（すべて冪等）
+
+    `bind` は移行に使う engine（既定は常用の `engine`・#1100）。
+    """
+    eng = bind if bind is not None else engine
+    _drop_stale_derived_tables(eng)  # create_all より前（落とした表をここで作り直させる）
+    Base.metadata.create_all(bind=eng)
     # `db_timeouts` を同じ with 文へ並べる＝**本体を再インデントせずに**ロック上限を掛ける
     # （`with A() as a, B(a):` は後段が前段の名前を参照できる）。ACCESS EXCLUSIVE を待ち続けて
     # ハングするのを防ぐ（#597・ADR-0048）。
-    with engine.connect() as conn, db_timeouts(conn, lock=DDL_LOCK_TIMEOUT):
+    with eng.connect() as conn, db_timeouts(conn, lock=DDL_LOCK_TIMEOUT):
         conn.execute(text(
             "CREATE INDEX IF NOT EXISTS ix_companies_name_gin "
             "ON companies USING gin(to_tsvector('simple', name))"
@@ -2960,7 +3016,7 @@ def _ensure_tables() -> None:
         conn.commit()
 
 
-def _ensure_one_view(view_name: str, view_sql: str) -> None:
+def _ensure_one_view(view_name: str, view_sql: str, bind=None) -> None:
     """VIEW を DROP して作り直す（**呼ばれたら必ず再作成する**）。
 
     「定義が変わったときだけ再作成する」責務は `init_db()` の指紋ゲート（ADR-0048）が持つ。
@@ -2973,7 +3029,8 @@ def _ensure_one_view(view_name: str, view_sql: str) -> None:
     （両 VIEW とも依存オブジェクトは無く安全）。DROP は ACCESS EXCLUSIVE を取るので
     `db_timeouts(lock=...)` で囲む＝バッチと重なったとき**無言で待ち続けずに失敗する**。
     """
-    with engine.connect() as conn:
+    eng = bind if bind is not None else engine
+    with eng.connect() as conn:
         with db_timeouts(conn, lock=DDL_LOCK_TIMEOUT):
             conn.execute(text(f"DROP VIEW IF EXISTS {view_name}"))
             conn.execute(text(view_sql))
@@ -2987,7 +3044,7 @@ def _ensure_one_view(view_name: str, view_sql: str) -> None:
     # BYPASSRLS ロールのため無影響）。SQLite は VIEW の SET オプション非対応のため無視
     # （テストは postgres VIEW を生成せず本パスを通らない）。
     try:
-        with engine.connect() as conn:
+        with eng.connect() as conn:
             conn.execute(text(f"ALTER VIEW {view_name} SET (security_invoker = true)"))
             conn.commit()
     except Exception as e:
@@ -3005,7 +3062,7 @@ def _managed_views() -> tuple[tuple[str, str], ...]:
             ("financial_metrics_with_ttm", FINANCIAL_METRICS_WITH_TTM_VIEW_SQL))
 
 
-def _ensure_view() -> None:
+def _ensure_view(bind=None) -> None:
     """Phase 2: 読み取り専用 VIEW を作り直す。
 
     financial_metrics（通期）・financial_metrics_interim（非通期=半期H1等・Issue #219② フェーズC）・
@@ -3016,7 +3073,7 @@ def _ensure_view() -> None:
     LEFT JOIN / UNION は可能。呼ぶか否かは `init_db()` の指紋ゲートが決める。
     """
     for name, sql in _managed_views():
-        _ensure_one_view(name, sql)
+        _ensure_one_view(name, sql, bind)
 
 
 # ── スキーマ指紋ゲート（#597・ADR-0048）──────────────────────────────────────
@@ -3075,10 +3132,15 @@ def _schema_fingerprint() -> Optional[str]:
     return hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest()[:32]
 
 
-def _read_schema_state() -> _SchemaState:
-    """実体を読むだけの層。**AccessShare しか取らない**ので走行中のバッチと競合しない。"""
+def _read_schema_state(bind=None) -> _SchemaState:
+    """実体を読むだけの層。**AccessShare しか取らない**ので走行中のバッチと競合しない。
+
+    `information_schema.tables` は**権限のある表しか見せない**ので、移行と同じ engine で読む
+    （権限の狭い常用ロールで読むと、表が欠けて見えて移行を誤発火させる・#1100）。
+    """
     managed = [name for name, _sql in _managed_views()]
-    with engine.connect() as conn:
+    eng = bind if bind is not None else engine
+    with eng.connect() as conn:
         stored = conn.execute(
             text("SELECT value FROM app_settings WHERE key = :k")
             .bindparams(k=_SCHEMA_FINGERPRINT_KEY)
@@ -3116,10 +3178,11 @@ def _schema_is_current(state: _SchemaState, expected: str) -> bool:
             and not state.views_without_security_invoker)
 
 
-def _record_schema_fingerprint(fingerprint: str) -> None:
+def _record_schema_fingerprint(fingerprint: str, bind=None) -> None:
     """移行が**最後まで通ってから**指紋を書く（途中で落ちたら書かない）。"""
     now = datetime.now(timezone.utc)
-    with engine.connect() as conn:
+    eng = bind if bind is not None else engine
+    with eng.connect() as conn:
         conn.execute(
             pg_insert(AppSetting.__table__)
             .values(key=_SCHEMA_FINGERPRINT_KEY, value=fingerprint, updated_at=now)
@@ -3129,15 +3192,18 @@ def _record_schema_fingerprint(fingerprint: str) -> None:
         conn.commit()
 
 
-def init_db():
+def init_db(bind=None):
     """テーブル作成・インデックス構築・カラムマイグレーション。
 
     **指紋と実体が揃っているときは DDL を1本も発行しない**（ADR-0048）。
     定常状態でロックを取らなくなるので、バッチ実行中に呼んでも競合しない。
+
+    `bind` は移行に使う engine（既定は常用の `engine`）。Render の lifespan は
+    `migration_engine()` の engine を渡す（#1100）——判定の読み取りから指紋の記録まで同じ engine で行う。
     """
     expected = _schema_fingerprint()
     try:
-        state = _read_schema_state()
+        state = _read_schema_state(bind)
     except Exception as e:
         # app_settings が無い新規 DB・SQLite・接続エラー。**必ず移行を走らせる側へ倒す**。
         log.debug("スキーマ状態を読めないので移行を実行する: %r", e)
@@ -3147,10 +3213,10 @@ def init_db():
         log.debug("スキーマ指紋が一致（%s）。DDL を発行しない（ADR-0048）", expected)
         return
 
-    _ensure_tables()
-    _ensure_view()
+    _ensure_tables(bind)
+    _ensure_view(bind)
     if expected is not None:
-        _record_schema_fingerprint(expected)
+        _record_schema_fingerprint(expected, bind)
 
 
 # ── 7. Upsert 処理 ─────────────────────────────────────────────────────────

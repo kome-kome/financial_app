@@ -209,6 +209,15 @@ autovacuum 較正が入っていなかった**。#290 で Supabase へ 2026-08-1
   ——は止めない。`init_db()` は ADR-0048 の指紋が変わったデプロイの初回だけ DDL を出し、断面の
   スキーマをコードへ追随させる。止めると新しいコードが断面に無い表・列を読んで画面が壊れ、
   パスワード移行を止めると断面に平文が残る。「断面へ書いている」ように見えても塞がないこと。
+- **起動時の書き込み3つは、`DATABASE_MIGRATION_URL` があればその接続で行う**（2026-11-01・#1100・#1094）。
+  Render の常用接続（`DATABASE_URL`）を SELECT 中心のロールへ絞るための分離で、止めるのではなく
+  **通る接続を変える**。`database.migration_engine()` が所有者ロールの engine をセッション設定と
+  Egress 台帳を常用と同じに付けて作り、lifespan の終わりに閉じる。`init_db(bind=...)` は判定の
+  読み取り（`information_schema` は権限のある表しか見せない）から指紋の記録まで同じ engine を使う。
+  **使うのは `FINAPP_DB_TARGET=prod` のときだけ**（ローカルから本番の Postgres へ書く経路を持たない・
+  ADR-0035）で、接続先（ホスト・ポート・DB 名）が `DATABASE_URL` と違えば起動時に止める。未設定なら
+  常用の接続のまま＝この追補の前と同じ。常用ロールに残る書き込みは `app_settings` の `APP_PASSWORD`
+  （reset-password）と `egress_cycle_*`（`db_egress._flush_cycle`）だけ。
 
 ## Alternatives considered
 

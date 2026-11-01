@@ -26,7 +26,7 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import database
-from database import _LOCAL_DEFAULT_URL, mask_url, resolve_database_url
+from database import _LOCAL_DEFAULT_URL, mask_url, resolve_database_url, resolve_migration_url
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 
@@ -183,6 +183,45 @@ class TestMaskUrl:
     def test_host_and_database_survive(self):
         masked = mask_url(REMOTE)
         assert "pooler.supabase.com" in masked and masked.endswith("/postgres")
+
+
+class TestMigrationUrl:
+    """`DATABASE_MIGRATION_URL`（#1100）: 起動時の書き込みだけに使う所有者ロールの URL。"""
+
+    MIG = "postgresql://postgres.abc:owner@aws-1-ap-northeast-1.pooler.supabase.com:5432/postgres"
+    APP = "postgresql://render_ro.abc:ro@aws-1-ap-northeast-1.pooler.supabase.com:5432/postgres"
+
+    def test_unset_is_none(self):
+        """未設定なら None＝常用の接続のまま（本番の既定は変えない）。"""
+        assert resolve_migration_url({}, "prod", self.APP) is None
+        assert resolve_migration_url({"DATABASE_MIGRATION_URL": " "}, "prod", self.APP) is None
+
+    def test_prod_uses_it_when_only_the_role_differs(self):
+        assert resolve_migration_url(
+            {"DATABASE_MIGRATION_URL": self.MIG}, "prod", self.APP) == self.MIG
+
+    def test_local_ignores_it(self):
+        """**ローカルから本番の Postgres へ書く経路を持たない**（ADR-0035・ADR-0038）。
+        `.env` に入っていても local では使わない。"""
+        assert resolve_migration_url(
+            {"DATABASE_MIGRATION_URL": self.MIG}, "local", _LOCAL_DEFAULT_URL) is None
+
+    def test_different_database_is_rejected(self):
+        """別の DB を移行して常用側が古いスキーマを読む事故を、起動時に止める。"""
+        other = "postgresql://postgres.zzz:owner@db.other.supabase.co:5432/postgres"
+        with pytest.raises(RuntimeError, match="DATABASE_MIGRATION_URL"):
+            resolve_migration_url({"DATABASE_MIGRATION_URL": other}, "prod", self.APP)
+
+    def test_rejection_message_hides_passwords(self):
+        other = "postgresql://postgres.zzz:owner@db.other.supabase.co:5432/postgres"
+        with pytest.raises(RuntimeError) as e:
+            resolve_migration_url({"DATABASE_MIGRATION_URL": other}, "prod", self.APP)
+        assert "owner" not in str(e.value) and ":ro@" not in str(e.value)
+
+    def test_postgres_scheme_is_rewritten(self):
+        legacy = self.MIG.replace("postgresql://", "postgres://", 1)
+        assert resolve_migration_url(
+            {"DATABASE_MIGRATION_URL": legacy}, "prod", self.APP) == self.MIG
 
 
 class TestModuleState:
