@@ -892,7 +892,7 @@ ADR-0006 §Decision-1 が定める CPI チャネル。
 | `APP_RECOVERY_KEY` | パスワードリセット用 | 手動設定 |
 | `ALLOWED_ORIGIN` | CORS 許可オリジン | 手動設定（例: `https://<your-service>.onrender.com`） |
 | `RENDER_LIGHT_MODE` | heavy プラグインと収集・書き込み系 API をブロック（`"true"` 固定・#733） | `render.yaml` に設定済み |
-| `APP_RATELIMIT_XFF_HOPS` | レート制限で送り手を見分ける位置＝`X-Forwarded-For` の末尾から何番目を信じるか（#1096） | 未設定＝`0`（接続元＝中継の IP で数える＝全員で1枠）。Render の実物を見て決める（[GOTCHAS.md](GOTCHAS.md)「認証・セキュリティ実装メモ」） |
+| `APP_RATELIMIT_XFF_HOPS` | レート制限で送り手を見分ける位置＝`X-Forwarded-For` の末尾から何番目を信じるか（#1096） | **Render は `3`**（2026-11-01 に手動設定。[送り手, Cloudflare, Render 内部] の3つを Render が足す）。未設定＝`0`＝接続元で数える＝Render では uvicorn が先頭（偽れる値）を接続元にするので、偽の値で上限をすり抜けられる。決め方は [GOTCHAS.md](GOTCHAS.md)「認証・セキュリティ実装メモ」 |
 
 新規環境変数を追加するときは:
 1. `render.yaml` の `envVars` に追記

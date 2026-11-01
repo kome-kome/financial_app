@@ -267,11 +267,12 @@ RATELIMIT_ANALYSIS = "20/minute"
 RATELIMIT_REFRESH  = "10/minute"
 RATELIMIT_AUTH     = "10/minute"
 RATELIMIT_RESET    = "3/minute"
-# Render では接続元がいつも中継（ロードバランサ）の IP なので、素の get_remote_address だと
-# 全員で1枠になり、他人の誤ログインで締め出される（#1096）。中継は本当の接続元を
-# X-Forwarded-For の**末尾**へ書き足すので、末尾から N 番目だけを信じる。N は Render の実物を
-# 見て環境変数で渡す（0＝従来どおり）。**uvicorn の `--forwarded-allow-ips='*'` は入れない**——
-# 先頭（送り手が自由に書ける値）を採るので、IP を偽って制限をすり抜けられる。
+# Render では uvicorn が X-Forwarded-For の**先頭**を接続元（request.client）として採る（全部の
+# 中継を信じる設定で動いている。Environment に `FORWARDED_ALLOW_IPS` は無い・2026-11-01 実測）。
+# 先頭は送り手が自由に書けるので、素の get_remote_address だと偽の値を毎回変えるだけでレート制限を
+# すり抜けられた（#1096）。Render は受け取った値の後ろへ [送り手, Cloudflare の端, Render 内部の中継]
+# の3つを書き足すので、末尾から N=3 番目だけを信じる（Render の Environment に設定済み）。0＝従来どおり。
+# **`--forwarded-allow-ips='*'` は解決にならない**——そのとき uvicorn が採るのはまさに先頭。
 RATELIMIT_XFF_HOPS = int(os.getenv("APP_RATELIMIT_XFF_HOPS", "0"))
 
 
@@ -285,8 +286,8 @@ def _rate_limit_key(request: Request) -> str:
     """レート制限を数える単位（送り手の IP）。
 
     N（`RATELIMIT_XFF_HOPS`）が 0 以下なら従来どおり接続元。N 以上の要素があり、末尾から
-    N 番目が IP として読めればそれを採る。足りない・読めないときは接続元へ倒す
-    ——偽の値を名乗らせない側（すり抜けない側）に倒すため。
+    N 番目が IP として読めればそれを採る。足りない・読めないときは接続元へ倒す。Render では
+    中継が必ず3つ足すのでここへは来ない（要素は送り手が増やせても減らせない）。
     """
     if RATELIMIT_XFF_HOPS <= 0:
         return get_remote_address(request)
