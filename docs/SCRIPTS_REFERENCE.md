@@ -614,6 +614,6 @@ M-1 探索専用タスクの登録（既定 毎月3日 JST 01:00・16時間）�
 
 ## `scripts/check_egress_health.py`
 
-Supabase 枠消費の判定 CLI（`python -m scripts.check_egress_health`・#478/#483・[ADR-0037](adr/0037-egress-cycle-budget-is-a-second-axis.md)）。`app_settings` の Egress サイクル累計（warn 80%）と `pg_database_size`（warn 85%・**Egress より厳しい**＝超過は read-only で収集が止まるため）を突き合わせ、超過なら exit 2 → `notify-failure.yml` が Issue 起票。**印が現サイクルでなければ累計は 0 として読む**（前サイクルを繰り越すとリセット直後に必ず誤警報が出る）。Management API の PAT は不要＝判定材料は DB の中にあるので #483 のブロッカーを迂回する。`--warn-only` で常に exit 0
+Supabase 枠消費の判定 CLI（`python -m scripts.check_egress_health`・#478/#483・[ADR-0037](adr/0037-egress-cycle-budget-is-a-second-axis.md)）。`app_settings` の Egress サイクル累計（warn 80%）と Database Size（warn 85%・**Egress より厳しい**＝超過は read-only で収集が止まるため。**Usage 画面と同じ割合**＝`pg_database_size` ＋ 差 `DB_USAGE_GAP_BYTES` を 10 進の上限 500 MB で割る・#1109）を突き合わせ、超過なら exit 2 → `notify-failure.yml` が Issue 起票。**印が現サイクルでなければ累計は 0 として読む**（前サイクルを繰り越すとリセット直後に必ず誤警報が出る）。Management API の PAT は不要＝判定材料は DB の中にあるので #483 のブロッカーを迂回する。`--warn-only` で常に exit 0
 
 種別: GitHub Actions / ユーティリティ ／ 依存先: db_egress.py, database.py
