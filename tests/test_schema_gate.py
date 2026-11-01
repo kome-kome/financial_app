@@ -114,24 +114,24 @@ class TestInitDbGate:
     def test_skips_all_ddl_when_current(self, monkeypatch):
         """定常状態では DDL を1本も発行しない＝ロックを一切取らない（本修正の本体）。"""
         calls = []
-        monkeypatch.setattr(database, "_ensure_tables", lambda: calls.append("tables"))
-        monkeypatch.setattr(database, "_ensure_view", lambda: calls.append("view"))
-        monkeypatch.setattr(database, "_read_schema_state", lambda: _state())
+        monkeypatch.setattr(database, "_ensure_tables", lambda bind=None: calls.append("tables"))
+        monkeypatch.setattr(database, "_ensure_view", lambda bind=None: calls.append("view"))
+        monkeypatch.setattr(database, "_read_schema_state", lambda bind=None: _state())
         monkeypatch.setattr(database, "_schema_fingerprint", lambda: "FP")
         monkeypatch.setattr(database, "_record_schema_fingerprint",
-                            lambda fp: calls.append("record"))
+                            lambda fp, bind=None: calls.append("record"))
         database.init_db()
         assert calls == []
 
     def test_runs_and_records_when_stale(self, monkeypatch):
         calls = []
-        monkeypatch.setattr(database, "_ensure_tables", lambda: calls.append("tables"))
-        monkeypatch.setattr(database, "_ensure_view", lambda: calls.append("view"))
+        monkeypatch.setattr(database, "_ensure_tables", lambda bind=None: calls.append("tables"))
+        monkeypatch.setattr(database, "_ensure_view", lambda bind=None: calls.append("view"))
         monkeypatch.setattr(database, "_read_schema_state",
-                            lambda: _state(stored_fingerprint="OLD"))
+                            lambda bind=None: _state(stored_fingerprint="OLD"))
         monkeypatch.setattr(database, "_schema_fingerprint", lambda: "FP")
         monkeypatch.setattr(database, "_record_schema_fingerprint",
-                            lambda fp: calls.append(f"record:{fp}"))
+                            lambda fp, bind=None: calls.append(f"record:{fp}"))
         database.init_db()
         assert calls == ["tables", "view", "record:FP"]
 
@@ -139,16 +139,16 @@ class TestInitDbGate:
         """移行が途中で落ちたのに指紋を書くと、次回スキップして壊れたまま固定される。"""
         calls = []
 
-        def boom():
+        def boom(bind=None):
             raise RuntimeError("lock timeout")
 
         monkeypatch.setattr(database, "_ensure_tables", boom)
-        monkeypatch.setattr(database, "_ensure_view", lambda: calls.append("view"))
+        monkeypatch.setattr(database, "_ensure_view", lambda bind=None: calls.append("view"))
         monkeypatch.setattr(database, "_read_schema_state",
-                            lambda: _state(stored_fingerprint=None))
+                            lambda bind=None: _state(stored_fingerprint=None))
         monkeypatch.setattr(database, "_schema_fingerprint", lambda: "FP")
         monkeypatch.setattr(database, "_record_schema_fingerprint",
-                            lambda fp: calls.append("record"))
+                            lambda fp, bind=None: calls.append("record"))
         with pytest.raises(RuntimeError):
             database.init_db()
         assert "record" not in calls
@@ -156,13 +156,62 @@ class TestInitDbGate:
     def test_read_failure_falls_back_to_running(self, monkeypatch):
         """app_settings が無い/読めない場合は「一致しない」に倒して移行を走らせる。"""
         calls = []
-        monkeypatch.setattr(database, "_ensure_tables", lambda: calls.append("tables"))
-        monkeypatch.setattr(database, "_ensure_view", lambda: calls.append("view"))
-        monkeypatch.setattr(database, "_record_schema_fingerprint", lambda fp: None)
+        monkeypatch.setattr(database, "_ensure_tables", lambda bind=None: calls.append("tables"))
+        monkeypatch.setattr(database, "_ensure_view", lambda bind=None: calls.append("view"))
+        monkeypatch.setattr(database, "_record_schema_fingerprint", lambda fp, bind=None: None)
 
-        def boom():
+        def boom(bind=None):
             raise RuntimeError("relation \"app_settings\" does not exist")
 
         monkeypatch.setattr(database, "_read_schema_state", boom)
         database.init_db()
         assert calls == ["tables", "view"]
+
+    def test_bind_reaches_every_step(self, monkeypatch):
+        """移行用の engine（#1100）は、判定の読み取りから指紋の記録まで全段へ届く。
+        どこか1段でも常用の engine へ戻ると、権限の狭い常用ロールで DDL を打って起動が落ちる。"""
+        seen = []
+        mig = object()
+        monkeypatch.setattr(database, "_ensure_tables", lambda bind=None: seen.append(("tables", bind)))
+        monkeypatch.setattr(database, "_ensure_view", lambda bind=None: seen.append(("view", bind)))
+        monkeypatch.setattr(database, "_read_schema_state",
+                            lambda bind=None: seen.append(("read", bind)) or _state(stored_fingerprint="OLD"))
+        monkeypatch.setattr(database, "_schema_fingerprint", lambda: "FP")
+        monkeypatch.setattr(database, "_record_schema_fingerprint",
+                            lambda fp, bind=None: seen.append(("record", bind)))
+        database.init_db(bind=mig)
+        assert seen == [("read", mig), ("tables", mig), ("view", mig), ("record", mig)]
+
+
+class TestMigrationEngine:
+    """`migration_engine()`（#1100）: 未設定なら常用の engine、設定時は別の engine を作って閉じる。"""
+
+    def test_unset_yields_the_app_engine(self, monkeypatch):
+        monkeypatch.setattr(database, "DATABASE_MIGRATION_URL", None)
+        with database.migration_engine() as eng:
+            assert eng is database.engine
+
+    def test_set_yields_a_separate_engine_with_session_fixes_and_ledger(self, monkeypatch):
+        """所有者ロールの engine は常用と別物で、セッション設定（ADR-0043）と Egress 台帳を
+        常用と同じものが付き、抜けると閉じられる（起動の後まで強いロールの接続を持たない）。"""
+        from sqlalchemy import event
+        mig_url = "postgresql://postgres.abc:secret@pooler.example:5432/postgres"
+        monkeypatch.setattr(database, "DATABASE_MIGRATION_URL", mig_url)
+        # 実 Postgres へは繋がない。作り方（URL・小さいプール）だけ控えて SQLite の engine を返す
+        real_create = database.create_engine
+        captured = {}
+
+        def fake_create(url, **kw):
+            captured.update(kw, url=url)
+            return real_create("sqlite://")
+
+        monkeypatch.setattr(database, "create_engine", fake_create)
+        disposed = []
+        with database.migration_engine() as eng:
+            assert captured["url"] == mig_url
+            assert captured["max_overflow"] == 0
+            assert eng is not database.engine
+            assert event.contains(eng, "connect", database._apply_session_fixes)
+            assert eng in database.db_egress._installed
+            monkeypatch.setattr(eng, "dispose", lambda *a, **k: disposed.append(True))
+        assert disposed == [True]

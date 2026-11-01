@@ -250,7 +250,7 @@ def _clear_auth_cookies(response) -> None:
 
 # ── DB / コレクター インポート ──────────────────────────────────────────────
 from database import (
-    SessionLocal, init_db, db_target_info,
+    SessionLocal, init_db, migration_engine, db_target_info,
     Company, FinancialRecord, CollectionLog,
 )
 from collector import run_full_collection
@@ -342,36 +342,39 @@ def _auto_shutdown_watchdog() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global APP_PASSWORD
-    init_db()
-    db = SessionLocal()
-    try:
-        # DB に保存されたパスワードがあれば env より優先（Render ephemeral FS 対策）
-        from database import get_setting, upsert_setting
-        pw_from_db = get_setting(db, "APP_PASSWORD")
-        if pw_from_db:
-            if not _is_password_hashed(pw_from_db):
-                # 既存の平文保存値を scrypt ハッシュへ移行し、DB から平文を除去する（#345）
-                pw_from_db = _hash_password(pw_from_db)
-                upsert_setting(db, "APP_PASSWORD", pw_from_db)  # 内部で commit する
-                log.info("app_settings.APP_PASSWORD を平文から scrypt ハッシュへ移行しました")
-            APP_PASSWORD = pw_from_db
-        # 本番相当環境で認証が全開放のまま公開されるのを防ぐ（DB 復元後に判定・#345）
-        if _is_production_like() and not APP_PASSWORD:
-            raise RuntimeError(
-                "APP_PASSWORD が本番相当環境で未設定です。認証が全開放のまま公開される"
-                "ため、起動を停止します。Render の環境変数に APP_PASSWORD を設定してください。"
-            )
+    # 起動時の書き込み3つ（DDL・パスワード移行・スタックジョブの回収）は移行用の接続で行う。
+    # `DATABASE_MIGRATION_URL` が無ければ常用の engine のまま＝従来どおり（#1100・ADR-0038 追補）。
+    with migration_engine() as mig:
+        init_db(bind=mig)
+        db = SessionLocal(bind=mig)
+        try:
+            # DB に保存されたパスワードがあれば env より優先（Render ephemeral FS 対策）
+            from database import get_setting, upsert_setting
+            pw_from_db = get_setting(db, "APP_PASSWORD")
+            if pw_from_db:
+                if not _is_password_hashed(pw_from_db):
+                    # 既存の平文保存値を scrypt ハッシュへ移行し、DB から平文を除去する（#345）
+                    pw_from_db = _hash_password(pw_from_db)
+                    upsert_setting(db, "APP_PASSWORD", pw_from_db)  # 内部で commit する
+                    log.info("app_settings.APP_PASSWORD を平文から scrypt ハッシュへ移行しました")
+                APP_PASSWORD = pw_from_db
+            # 本番相当環境で認証が全開放のまま公開されるのを防ぐ（DB 復元後に判定・#345）
+            if _is_production_like() and not APP_PASSWORD:
+                raise RuntimeError(
+                    "APP_PASSWORD が本番相当環境で未設定です。認証が全開放のまま公開される"
+                    "ため、起動を停止します。Render の環境変数に APP_PASSWORD を設定してください。"
+                )
 
-        stuck = db.query(CollectionLog).filter(CollectionLog.status == "running").all()
-        for job in stuck:
-            job.status = "error"
-            job.message = "サーバー再起動により中断"
-            job.finished_at = datetime.now(timezone.utc)
-        if stuck:
-            db.commit()
-            log.warning("起動時に %d 件のスタックジョブを error にリセットしました", len(stuck))
-    finally:
-        db.close()
+            stuck = db.query(CollectionLog).filter(CollectionLog.status == "running").all()
+            for job in stuck:
+                job.status = "error"
+                job.message = "サーバー再起動により中断"
+                job.finished_at = datetime.now(timezone.utc)
+            if stuck:
+                db.commit()
+                log.warning("起動時に %d 件のスタックジョブを error にリセットしました", len(stuck))
+        finally:
+            db.close()
     if AUTO_SHUTDOWN:
         _hb["boot"] = _time.monotonic()
         threading.Thread(target=_auto_shutdown_watchdog, daemon=True).start()
