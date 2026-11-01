@@ -423,7 +423,9 @@ class _SecurityHeadersMiddleware(BaseHTTPMiddleware):
         response = await call_next(request)
         response.headers["Content-Security-Policy"] = (
             "default-src 'self'; "
-            "script-src 'self' https://cdn.jsdelivr.net; "
+            # 外部のスクリプトは許さない。Chart.js は static/vendor/ に同梱している（#1095）——
+            # CDN を許すと、CDN の乗っ取りや HTML 注入の穴が CSP の迂回路になる
+            "script-src 'self'; "
             "style-src 'self' 'unsafe-inline'; "
             "connect-src 'self'; "
             "img-src 'self' data:; "
