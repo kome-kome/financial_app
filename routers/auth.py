@@ -82,7 +82,12 @@ async def reset_password(request: Request, req: ResetPasswordRequest):
 
 
 @router.get("/api/auth/status")
-async def auth_status():
+async def auth_status(request: Request):
+    # 中継が X-Forwarded-For をどう足すかの観測口（#1096）。`APP_RATELIMIT_XFF_HOPS` を決める・
+    # Render の構成が変わったときに確かめ直すのに使う。画面の読み込み（common.js）ごとに1行だけ。
+    peer = request.client.host if request.client else None
+    log.info("auth/status 転送経路: peer=%s xff=%s hops=%d key=%s",
+             peer, api._forwarded_for(request), api.RATELIMIT_XFF_HOPS, api._rate_limit_key(request))
     return {"auth_required": bool(api.APP_PASSWORD), "recovery_available": bool(api.APP_RECOVERY_KEY)}
 
 
