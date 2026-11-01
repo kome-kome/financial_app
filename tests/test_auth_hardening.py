@@ -37,6 +37,28 @@ def test_is_production_like(monkeypatch, render, light, expected):
     assert api._is_production_like() is expected
 
 
+# ── Cookie の Secure・API ドキュメントの公開（公開リポジトリの点検・2026-11-01）──────
+@pytest.mark.parametrize("env,prod,expected", [
+    ("true",  False, True),
+    ("1",     False, True),
+    ("false", True,  False),   # 明示は本番相当でも優先する
+    ("0",     True,  False),
+    ("",      True,  True),    # 未設定なら本番相当で付ける（render.yaml 未反映のサービス）
+    ("",      False, False),
+])
+def test_cookie_secure(monkeypatch, env, prod, expected):
+    monkeypatch.setenv("COOKIE_SECURE", env)
+    monkeypatch.setattr(api, "_is_production_like", lambda: prod)
+    assert api._cookie_secure() is expected
+
+
+def test_api_docs_are_closed_in_production(monkeypatch):
+    monkeypatch.setattr(api, "_is_production_like", lambda: True)
+    assert api._api_docs_urls() == {"docs_url": None, "redoc_url": None, "openapi_url": None}
+    monkeypatch.setattr(api, "_is_production_like", lambda: False)
+    assert api._api_docs_urls() == {}
+
+
 # ── パスワードハッシュ化 ────────────────────────────────────────────────────
 def test_hash_password_roundtrip():
     h = api._hash_password("mypw-123")

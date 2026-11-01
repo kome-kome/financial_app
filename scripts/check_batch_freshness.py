@@ -659,6 +659,18 @@ def _view_issue(run, number: int) -> tuple[Optional[dict], Optional[str]]:
         return None, f"gh issue view #{number} の出力を JSON として読めない: {e}"
 
 
+def own_comments(detail: dict) -> list[str]:
+    """自分のアカウント（watchdog と本人は同じ）が書いたコメントの本文だけ。
+
+    リポジトリは PUBLIC なので誰でもコメントでき、目印も書ける。第三者のコメントまで数えると、
+    1件で自動クローズが止まり（人の手と判定）、偽の署名で追記も抑止できてしまう。
+    `viewerDidAuthor` が無いコメントは自分のものとみなさない（gh の実出力は必ず持つ・
+    2026-11-01 に `gh issue view --json body,comments` で確認）。
+    """
+    return [c.get("body") or "" for c in detail.get("comments") or []
+            if c.get("viewerDidAuthor") is True]
+
+
 def nightly_signature(messages: Sequence[str]) -> str:
     """警告文の署名。HTML コメントを閉じる `--` が混ざらないよう潰す。"""
     return " / ".join(messages).replace("--", "- -")
@@ -668,9 +680,9 @@ def last_nightly_signature(detail: dict) -> Optional[str]:
     """Issue 上で watchdog が**最後に書いた**テキストの署名（無ければ None）。
 
     人のコメントは飛ばす（目印が無い）。watchdog の最後の書き込みが復旧コメント等で署名を
-    持たなければ None＝次の警告は必ず追記される。
+    持たなければ None＝次の警告は必ず追記される。第三者のコメントは目印があっても読まない。
     """
-    texts = [detail.get("body") or ""] + [c.get("body") or "" for c in detail.get("comments") or []]
+    texts = [detail.get("body") or ""] + own_comments(detail)
     for text in reversed(texts):
         if WATCHDOG_MARKER not in text:
             continue
@@ -708,7 +720,7 @@ def close_recovered(targets: list[dict], snap: dict, say=print, run=subprocess.r
             if detail is None:
                 errors.append(warn)
                 continue
-            comments = [c.get("body") or "" for c in detail.get("comments") or []]
+            comments = own_comments(detail)
             human_touched = (WATCHDOG_MARKER not in (detail.get("body") or "")
                              or any(WATCHDOG_MARKER not in c for c in comments))
             if human_touched and comments and RECOVERY_MARKER in comments[-1]:

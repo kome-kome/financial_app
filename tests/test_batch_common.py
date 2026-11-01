@@ -60,6 +60,13 @@ class TestNotifyAppendsToTheOpenIssue:
         _notify(gh)
         assert "--label" not in gh.calls[0]
 
+    def test_the_listing_is_limited_to_own_issues(self):
+        """リポジトリは PUBLIC。他人が同じタイトルで先に立てた Issue へ追記を吸わせない。"""
+        gh = _FakeGh()
+        _notify(gh)
+        listing = gh.calls[0]
+        assert listing[listing.index("--author") + 1] == "@me"
+
     def test_a_failed_listing_falls_back_to_create(self):
         """重複より沈黙の方が悪い。倒した理由は戻り値でログへ残す。"""
         for gh in (_FakeGh(list_returncode=1), _FakeGh(issue_list="not json")):

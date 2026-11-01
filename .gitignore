@@ -55,9 +55,16 @@ build/
 .claude/worktrees/
 .claude/*.bak
 
-# デプロイ用ローカル設定
-.env.local
-.env.production
+# デプロイ用ローカル設定・秘密の派生物（リポジトリは PUBLIC。`.env.bak` 等の写しも入れない）
+.env.*
+!.env.example
+*.pem
+*.key
+.pgpass
+pwfile
+# DB のダンプ・バックアップ（中身は正本のデータそのもの）
+*.dump
+*.backup
 
 # ローカル夜間バッチのログ（#503・scripts/run_nightly.py が日次ローテートで書く）
 .logs/

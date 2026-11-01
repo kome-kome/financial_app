@@ -920,6 +920,18 @@ sequenceDiagram
 
 > `script-src` は `'unsafe-inline'` を除去済み（インライン `<script>` を `static/js/` へ外部化、インラインイベントハンドラを `data-*` 属性＋イベント委譲へ移行）。`style-src` の `'unsafe-inline'` はインライン `<style>`/`style=` 属性が残るため維持。Chart.js は jsdelivr CDN から読み込む。
 
+### 公開リポジトリ前提の守り（2026-11-01 の点検）
+
+リポジトリは PUBLIC で、ソースも docs も第三者が読める。次の3点は「コードを読まれても破れない」ことを狙う。
+
+| 対象 | 仕様 | 理由 |
+|---|---|---|
+| ログイン後の遷移先（`static/js/login.js` の `_safeNext`） | `next` をブラウザの `URL` で解釈し、**origin が自分と同じときだけ** `pathname + search + hash` を使う。それ以外と `/login` 自身は `/` | 以前の前方一致の正規表現は `/%09/evil.example` を通した（URL パーサがタブを取り除き `//evil.example`＝別 origin になる）。ログイン直後に偽サイトへ移すオープンリダイレクトになっていた |
+| Cookie の `Secure`（`api._cookie_secure`） | `COOKIE_SECURE` を明示すればそれに従い、**未設定なら本番相当（`_is_production_like`）で付ける** | render.yaml の値は Blueprint 管理外のサービスでは反映されないことがある |
+| `/docs`・`/redoc`・`/openapi.json`（`api._api_docs_urls`） | 本番相当では出さない。ローカルでは残す | 認証ミドルウェアは `/api/` 配下だけを守るので、既定のままだと全ルートの一覧が未認証で読める |
+
+GitHub 側の第三者入力（Issue・コメント・fork の PR）の扱いは [DEPLOYMENT.md](DEPLOYMENT.md)「ワークフロー失敗の通知」節と [SCRIPTS_REFERENCE.md](SCRIPTS_REFERENCE.md#scriptscheck_batch_freshnesspy) を参照。
+
 ---
 
 ## 4-4. 業種別OLS分析フロー
@@ -1667,6 +1679,6 @@ graph TB
 | `.github/workflows/backfill-price-link.yml` | GitHub Actions | `financial_records.stock_price` が NULL かつ period_end が J-Quants カバー外（730日超）の行へ、Yahoo から period_end 近傍の終値を紐付ける（workflow_dispatch・timeout 240分）。**過去年度を EDINET から収集しただけでは per/pbr が NULL のままで M-1 の既定 fin_features が揃わない**ため、財務バックフィルとセットで実行する（ADR-0025・実測 2時間45分で 2018〜2020 の充足率 82〜83%） | `_pipeline_gh.py --backfill-yahoo` |
 | `.github/workflows/experiment-pooled-rhat.yml` | GitHub Actions | Issue #341 r_hat プール仮説の read-only 実験（縮小500銘柄・workflow_dispatch 専用・本番DB非書込）。`scripts/experiment_pooled_rhat.py` を起動 | `scripts/experiment_pooled_rhat.py` |
 | `.github/workflows/bench-macro-beta.yml` | GitHub Actions | Issue #512 の**基準側**（Linux ランナーでの macro_beta 所要）を取る計測ジョブ（workflow_dispatch 専用・定期実行なし）。`scripts/bench_macro_beta.py --mode synth` を回す＝**DB も secrets も使わない**ので Egress ゼロ・`FINAPP_DB_TARGET` 非依存（実データを使うと #503 反転後は Supabase の 2026-08-07 断面とローカル正本で規模が違い、比が無意味になる）。結果 JSONL をアーティファクトで持ち帰り、ローカル実行値と突き合わせる。**#540 で `max_tree_depth` / `probe_draws` 入力を追加**＝軌道長の格子を Linux 側でも取り、ローカル実データとの**順位の一致**で結論がプラットフォームに依らないことを確かめる（幾何が違うので絶対値は比較しない） | `scripts/bench_macro_beta.py` |
-| `.github/workflows/notify-failure.yml` | GitHub Actions | 他ワークフローの `failure`／`cancelled` を Issue へ自動起票（`workflow_run`・Issue #414）。`workflows:` は列挙せず全ワークフロー対象（列挙するとフィルタパターン扱いで `[定常] …` が startup_failure を起こす）、`ci.yml` のみ job の `if` で除外。同一タイトルの open Issue があればコメント追記。`cancelled` は job の annotation で timeout 打ち切り（起票する）と手動キャンセル（起票しない・#453）を振り分ける＝denylist で、判別できないものは起票側へ倒す。不変条件は `tests/test_workflow_failure_notification.py` が強制 | GitHub Issues（`gh issue create`／`comment`） |
+| `.github/workflows/notify-failure.yml` | GitHub Actions | 他ワークフローの `failure`／`cancelled` を Issue へ自動起票（`workflow_run`・Issue #414）。`workflows:` は列挙せず全ワークフロー対象（列挙するとフィルタパターン扱いで `[定常] …` が startup_failure を起こす）、`ci.yml` のみ job の `if` で除外し、fork の PR で走った run も数えない（`head_repository.full_name == github.repository`）。同一タイトルかつ bot が立てた open Issue があればコメント追記。`cancelled` は job の annotation で timeout 打ち切り（起票する）と手動キャンセル（起票しない・#453）を振り分ける＝denylist で、判別できないものは起票側へ倒す。不変条件は `tests/test_workflow_failure_notification.py` が強制 | GitHub Issues（`gh issue create`／`comment`） |
 | `.github/workflows/notify-failure-selftest.yml` | GitHub Actions | `notify-failure.yml` の発火検証用に意図的に失敗するだけのワークフロー（`workflow_dispatch`・`mode=fail`／`cancel`・本番データ非使用） | — |
 | `.github/workflows/old/refill-pl-bs.yml` | GitHub Actions | 旧コホート PL/BS 列の一括再取得（`_pipeline_gh.py --refill-pl-bs`・完了済みアーカイブ） | `_pipeline_gh.py` |

@@ -85,6 +85,22 @@ def test_ci_is_excluded_by_exact_name(condition):
     )
 
 
+def test_runs_from_forks_are_ignored(condition):
+    """fork の PR で走った run には反応しない（リポジトリは PUBLIC）。
+
+    fork の PR は任意の名前の workflow を足して失敗させられる。数えると bot 名義の
+    priority:high Issue を第三者が作れ、本文（WF_NAME・HEAD_BRANCH・ログ末尾）に任意の
+    文字列を入れられる。
+    """
+    assert "github.event.workflow_run.head_repository.full_name == github.repository" in condition
+
+
+def test_duplicate_lookup_is_limited_to_bot_issues(script):
+    """重複判定はタイトルだけで決めない。他人が同じタイトルで先に立てた Issue へ追記を吸わせない。"""
+    assert '.author.login == "app/github-actions"' in script
+    assert "--json number,title,author" in script
+
+
 def test_no_other_workflow_is_excluded(condition):
     """ci.yml 以外を黙って除外していないこと（除外が増えるほど通知漏れが増える）。"""
     assert condition.count("!=") == 1, (

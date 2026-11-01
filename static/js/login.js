@@ -1,5 +1,16 @@
-const _nextRaw = new URLSearchParams(location.search).get('next') || '/';
-const _next = /^\/[^/\\]/.test(_nextRaw) || _nextRaw === '/' ? _nextRaw : '/';
+// next は同じ origin のパスだけ受け付ける。以前の前方一致の正規表現は、URL パーサがタブ・改行を
+// 取り除くため `/%09/evil.example` が `//evil.example`（別 origin）に化けて通り抜けた。
+// ブラウザ自身の URL パーサで解釈し、origin を比べる。/login 自身へ戻すと無限に再読込するので除く。
+function _safeNext(raw){
+  try {
+    const u = new URL(raw, location.origin);
+    if (u.origin !== location.origin || u.pathname === '/login') return '/';
+    return u.pathname + u.search + u.hash;
+  } catch(e) {
+    return '/';
+  }
+}
+const _next = _safeNext(new URLSearchParams(location.search).get('next') || '/');
 function _getCookie(name){
   const m = document.cookie.match('(^|; )' + name + '=([^;]*)');
   return m ? decodeURIComponent(m[2]) : '';

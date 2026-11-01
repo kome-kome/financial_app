@@ -839,6 +839,23 @@ def _by_watchdog(text="自動起票"):
 RECOVERY_NOTE = f"復旧\n{cbf.WATCHDOG_MARKER}\n{cbf.RECOVERY_MARKER}"
 
 
+def _comment(c):
+    """`gh issue view --json comments` の1件（2026-11-01 の実出力から写した形）。
+
+    文字列は自分のアカウントのコメント（watchdog と本人は同じアカウント）。dict はそのまま使う。
+    """
+    if isinstance(c, dict):
+        return c
+    return {"author": {"login": "kome-kome"}, "authorAssociation": "OWNER",
+            "body": c, "viewerDidAuthor": True}
+
+
+def _stranger(body):
+    """公開リポジトリへ第三者が書いたコメント。"""
+    return {"author": {"login": "someone-else"}, "authorAssociation": "NONE",
+            "body": body, "viewerDidAuthor": False}
+
+
 class _GhIssues:
     """gh の代役。open な Issue ごとに本文とコメントを持ち、呼ばれた argv を全部残す。
 
@@ -862,7 +879,7 @@ class _GhIssues:
                                  for n, (t, _b, _c) in self.issues.items()])
         elif sub == "view":
             _t, body, comments = self.issues[int(argv[3])]
-            stdout = json.dumps({"body": body, "comments": [{"body": c} for c in comments]})
+            stdout = json.dumps({"body": body, "comments": [_comment(c) for c in comments]})
         return subprocess.CompletedProcess(argv, 0, stdout=stdout, stderr="")
 
     def writes(self):
@@ -913,6 +930,21 @@ class TestRecoveredIssuesAreClosed:
         body = _arg(call, "--body")
         assert cbf.RECOVERY_MARKER in body
         assert "自動ではクローズしない" in body
+
+    def test_a_third_party_comment_does_not_stop_the_close(self, settings):
+        """リポジトリは PUBLIC。他人のコメント1件で自動クローズを止めさせない。"""
+        gh = _GhIssues({42: (NIGHTLY.issue_title, _by_watchdog(),
+                             [_stranger("原因を調べている")])})
+        assert self._close(gh, _snap(settings)) == []
+        (call,) = gh.writes()
+        assert call[:4] == ["gh", "issue", "close", "42"]
+
+    def test_the_listing_is_limited_to_own_issues(self, settings):
+        """同じタイトルで他人が先に立てた Issue を、watchdog の起票として扱わない。"""
+        gh = _GhIssues({})
+        self._close(gh, _snap(settings))
+        (listing,) = gh.calls
+        assert _arg(listing, "--author") == "@me"
 
     def test_the_note_is_left_only_once(self, settings):
         """毎日走るので、最新コメントが復旧コメントなら何もしない（積み上げない）。"""
@@ -1140,6 +1172,17 @@ class TestNightlyLogWarningsAreFiled:
         assert cbf.last_nightly_signature({"body": body, "comments": []}) \
             == cbf.nightly_signature([RT_0929])
         body.encode("cp932")
+
+    def test_a_stranger_cannot_forge_the_signature(self):
+        """他人のコメントに前回と同じ署名を書かれても、それを watchdog の書き込みとして読まない。
+
+        読むと「前回と同じ警告」と判定されて追記が止まる。
+        """
+        detail = {"body": _by_watchdog("署名の無い起票"),
+                  "comments": [_stranger(_signed_body([RT_0929]))]}
+        assert cbf.last_nightly_signature(detail) is None
+        detail["comments"] = [_comment(_signed_body([RT_0929]))]
+        assert cbf.last_nightly_signature(detail) == cbf.nightly_signature([RT_0929])
 
     def test_a_db_outage_still_files_the_log_warnings(self):
         """夜間ログはファイルなので DB と独立に読める。"""

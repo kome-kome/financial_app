@@ -217,7 +217,8 @@ python -m scripts.backup_restore --source storage --apply --create-schema `
 | トリガー | `workflow_run: types: [completed]`。**`workflows:` は列挙せず全ワークフローを対象**にし、`ci.yml` だけ job の `if` で名前一致除外する |
 | 発火条件 | `conclusion == 'failure'` **または `'cancelled'`**。timeout 打ち切りは failure ではなく **cancelled** で終わるため両方必須（実例: `tune-hyperparameters` 300分・`collect-interim` 4h）。ただし cancelled には**人が Cancel を押した run** も混ざるため、job の annotation で振り分ける（下記） |
 | 起票内容 | タイトル `[ops] ワークフロー失敗: <workflow name>`／ラベル `ops` `priority:high` `ci`／本文に run URL・発火イベント・ブランチ・**失敗ジョブ名**・**失敗ステップのログ末尾30行** |
-| 重複防止 | 同一タイトルの open Issue があれば新規起票せず**コメント追記** |
+| fork の除外 | `workflow_run.head_repository.full_name == github.repository` のときだけ起票する。リポジトリは PUBLIC で、fork の PR は任意の名前の workflow を足して失敗させられる＝数えると bot 名義の `priority:high` Issue を第三者が作れ、本文（workflow 名・ブランチ名・ログ末尾）に任意の文字列を入れられる（2026-11-01 の点検）。同じ条件を `nightly-scores.yml` にも置く（同名の workflow で secrets 付きの job を起こさせない） |
+| 重複防止 | 同一タイトル**かつ作成者が bot（`app/github-actions`）**の open Issue があれば新規起票せず**コメント追記**。タイトルは公開されているので、作成者を見ないと他人が先に立てた同名の Issue へ追記が吸われる |
 | 権限 | `issues: write` は本ワークフローのみ。収集系の `contents: read` 最小権限は崩さない。ログ取得のため `actions: read`、cancelled の annotation 取得のため `checks: read` |
 
 **`cancelled` の振り分け（#453）**: timeout 打ち切りと手動キャンセルは **conclusion も、ログ末尾（`The operation was canceled.`）も同一**で、run/job の JSON にも区別が無い。唯一の判別材料が **job の annotation**（`GET /repos/{repo}/check-runs/{job_id}/annotations`）で、2026-08-04 に両側を実測した。
@@ -924,7 +925,7 @@ ADR-0006 §Decision-1 が定める CPI チャネル。
 |---|---|
 | **G**: J-Quants IssuedShares 取得 | ✅ **実装済み（Tier2-G・PR #181・2026-06-16）**。`Company.issued_shares` 追加 + `_ensure_tables()` の冪等 ALTER + J-Quants `/v2/markets/listed/info` から取得。→ **このエンドポイントは v2 に存在しない**（#462・上の J-Quants 節の 403 分類を参照）。現在の issued_shares は `/fins/summary` の `ShOutFY` から取る（`collector_disclosures`） |
 | **H**: `period_end` を DATE 型に | ✅ **実装済み（Tier2-H・PR #182・2026-06-16）**。`init_db()` 内の冪等 DDL（`USING ...::DATE`・`SKIP_PERIOD_END_MIGRATION=1` フェールセーフ）で起動時 1 度だけ移行 |
-| **F**: HttpOnly Cookie 認証 | ✅ **実装済み（Tier3-3）**。`auth_token`（HttpOnly）＋`csrf_token` の2 Cookie + CSRF Double-Submit。本番は `COOKIE_SECURE=true` |
+| **F**: HttpOnly Cookie 認証 | ✅ **実装済み（Tier3-3）**。`auth_token`（HttpOnly）＋`csrf_token` の2 Cookie + CSRF Double-Submit。本番は `COOKIE_SECURE=true`（未設定でも本番相当なら Secure を付ける・`api._cookie_secure`） |
 | **E**: 本番デプロイ対応 | **大部分が完了済み**。バックアップは #503 で正本がローカルへ移ったあと、`scripts/run_backup.py`（週次・正本を Supabase Storage へ置く・#606）で解決した。残るのは Render の監視（Render ダッシュボード + UptimeRobot 等） |
 
 ---

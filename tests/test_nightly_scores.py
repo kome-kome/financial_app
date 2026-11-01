@@ -706,6 +706,12 @@ class TestWorkflow:
         )
         assert "workflow_dispatch" in condition, "手動実行の口が if で塞がれている"
 
+    def test_runs_from_forks_are_ignored(self, workflow):
+        """名前は誰でも名乗れる。fork の PR の同名 workflow で secrets 付きの job を起こさせない。"""
+        condition = workflow["jobs"]["scores"]["if"]
+        assert ("github.event.workflow_run.head_repository.full_name == github.repository"
+                in condition)
+
     def test_permissions_are_minimal(self, workflow):
         perms = workflow["permissions"]
         assert perms == {"contents": "read"}
