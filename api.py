@@ -10,7 +10,7 @@ FastAPI バックエンド（エントリポイント）
 このファイルは: 共有状態・認証ヘルパー・ミドルウェア・HTML配信・バックグラウンドジョブ関数を担う。
 """
 
-import logging, re, threading
+import logging, re, threading, ipaddress
 import hmac, hashlib, base64, secrets, time as _time, os
 
 # .env を「APP_PASSWORD 等の認証設定を読む前」に読み込む。
@@ -267,7 +267,39 @@ RATELIMIT_ANALYSIS = "20/minute"
 RATELIMIT_REFRESH  = "10/minute"
 RATELIMIT_AUTH     = "10/minute"
 RATELIMIT_RESET    = "3/minute"
-limiter = Limiter(key_func=get_remote_address, enabled=RATELIMIT_ENABLED)
+# Render では接続元がいつも中継（ロードバランサ）の IP なので、素の get_remote_address だと
+# 全員で1枠になり、他人の誤ログインで締め出される（#1096）。中継は本当の接続元を
+# X-Forwarded-For の**末尾**へ書き足すので、末尾から N 番目だけを信じる。N は Render の実物を
+# 見て環境変数で渡す（0＝従来どおり）。**uvicorn の `--forwarded-allow-ips='*'` は入れない**——
+# 先頭（送り手が自由に書ける値）を採るので、IP を偽って制限をすり抜けられる。
+RATELIMIT_XFF_HOPS = int(os.getenv("APP_RATELIMIT_XFF_HOPS", "0"))
+
+
+def _forwarded_for(request: Request) -> list[str]:
+    """X-Forwarded-For を全行つないで要素の一覧にする（中継が行を分けて足す場合に備える）。"""
+    joined = ",".join(request.headers.getlist("x-forwarded-for"))
+    return [h.strip() for h in joined.split(",") if h.strip()]
+
+
+def _rate_limit_key(request: Request) -> str:
+    """レート制限を数える単位（送り手の IP）。
+
+    N（`RATELIMIT_XFF_HOPS`）が 0 以下なら従来どおり接続元。N 以上の要素があり、末尾から
+    N 番目が IP として読めればそれを採る。足りない・読めないときは接続元へ倒す
+    ——偽の値を名乗らせない側（すり抜けない側）に倒すため。
+    """
+    if RATELIMIT_XFF_HOPS <= 0:
+        return get_remote_address(request)
+    hosts = _forwarded_for(request)
+    if len(hosts) >= RATELIMIT_XFF_HOPS:
+        try:
+            return str(ipaddress.ip_address(hosts[-RATELIMIT_XFF_HOPS]))
+        except ValueError:
+            pass
+    return get_remote_address(request)
+
+
+limiter = Limiter(key_func=_rate_limit_key, enabled=RATELIMIT_ENABLED)
 limiter.enabled = RATELIMIT_ENABLED
 
 # ── 収集ジョブ定数 ────────────────────────────────────────────────────────
