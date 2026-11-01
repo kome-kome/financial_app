@@ -577,7 +577,8 @@ Render ダッシュボードで管理。
 
 | 項目 | 制約値 | 設計への影響 |
 |---|---|---|
-| DB ストレージ | **500 MB** | `SKIP_XBRL_RAW=true` を維持＋株価は close-only 2本立て（下記「容量設計」） |
+| DB ストレージ | **500 MB**（Usage 画面の上限は **10 進の 0.5 GB**＝476.8 MiB） | `SKIP_XBRL_RAW=true` を維持＋株価は close-only 2本立て（下記「容量設計」）。2026-11-01 の Usage は **0.398 / 0.5 GB（80%）**で、`scripts/check_egress_health.py` は 2 進の上限と `pg_database_size` で数えるので **73.1% と甘く出る**（測り直しは #1109） |
+| **猶予期間（Fair Use）** | **2026-07-03 に終了済み**（2026-07 の Egress 超過で使い切った） | ダッシュボード上端の「Grace period is over」はこの状態の表示で、いま止まっている意味ではない。**次に上限を超えるとその場で restricted（402）になりうる**＝Render の閲覧画面が全部落ちる。2026-11-01 の使用量（#1102）: DB 80%・Storage 0.258 / 1 GB（26%）・Egress ほぼ 0・Log Ingestion 0.005 / 1 GB（Log の2項目は 2027 年初めから課金）・ほかは 0 |
 | 接続数 | **最大60接続**（pgbouncer 経由） | 並列パイプライン実行を禁止。`max-parallel: 1` を維持。枯渇時は接続確立自体が `FATAL: (ECHECKOUTTIMEOUT) unable to check out connection from the pool after 15000ms in Session mode` で失敗する（`pool_pre_ping` では救えない＝**再試行で拾う**・#470） |
 | クエリのタイムアウト | **`statement_timeout=2min`** / `lock_timeout=0`（無制限待ち）/ `idle_in_transaction_session_timeout=0`（`postgres` ロールの既定・2026-08-09 実測） | GHA↔Supabase から走る重い1文（一括 UPDATE・大量 upsert・`VACUUM FULL`）はこの 2min に当たる（#470/#471 は**同じ日に2本のワークフローを落とした**）。引き上げは `db_timeouts`（database.py）で**その文の実行中だけ**行い、ロールやプロセス全体の既定は変えない。詳細は [GOTCHAS.md](GOTCHAS.md) |
 | 一時的 read-only 移行 | トランザクションが長すぎると自動移行 | `run_full_collection` は `MASTER_BATCH=200` 件ごとに commit |
