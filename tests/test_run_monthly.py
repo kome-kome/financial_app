@@ -406,6 +406,17 @@ class TestBudgetFitsTheWindow:
 # 1.25 を採る。**パネルは毎晩伸びるので所要は据え置かず伸びる**＝余裕は据え置きでは足りない。
 MIN_BUDGET_RATIO = 1.25
 
+# 上の倍率から外すステップ（`exempt:` に理由・空理由は不可）。**どの予算でも締切で畳む**ステップは、
+# 実測が「計算に要る時間」ではなく「予算 − 取り置き」に張り付くので、比率で縛ると予算を上げるたびに
+# 次の実測も上がって際限なく積み増しを求められる。打ち切り（exit=124）は畳む仕組み（#638・ADR-0054）が
+# 先に止めるので、#633 の「その月ぶんが丸ごと消える」はこのステップでは起きない。ここでは
+# 「予算 ≥ 実測」（＝前回の所要が今の予算に収まる）だけを縛る。
+FOLDS_BY_DESIGN: dict[str, str] = {
+    "tune:macro_gbdt": (
+        "exempt: #983 で学習行が約 1.8 倍になり、151 件を回し切る所要は約 515分の計算（2026-11-01 の月次で "
+        "225分の締切に 73/151 件・#994）。窓 960分には入らないので毎回締切で畳み、実測は予算に張り付く"),
+}
+
 
 class TestTuneBudgetsMatchTheMeasurement:
     """月次の tune 予算を、日中枠が持つ**実測**（`run_daytime.JOBS[...].measured_min`）と結ぶ。
@@ -433,10 +444,11 @@ class TestTuneBudgetsMatchTheMeasurement:
                 # 日中枠に無い＝実測が無い。ここでは判定できないので別テストの領分。
                 continue
             budget = rm.BUDGET_MIN[name]
-            need = job.measured_min * MIN_BUDGET_RATIO
+            ratio = 1.0 if name in FOLDS_BY_DESIGN else MIN_BUDGET_RATIO
+            need = job.measured_min * ratio
             if budget < need:
                 thin.append(
-                    f"{name}: 予算 {budget}分 < 実測 {job.measured_min}分 × {MIN_BUDGET_RATIO} "
+                    f"{name}: 予算 {budget}分 < 実測 {job.measured_min}分 × {ratio} "
                     f"= {need:.0f}分（余裕 {budget / job.measured_min - 1:.1%}）")
         assert not thin, (
             "実測に対して予算が薄いステップがある（超過は exit=124 で打ち切られ、"
@@ -453,6 +465,16 @@ class TestTuneBudgetsMatchTheMeasurement:
         assert not missing, (
             f"日中枠に対応する Job が無い tune ステップ: {missing}"
             "（`run_daytime.JOBS` が実測の唯一の源。無いと予算の妥当性を誰も検査しない・#633）")
+
+    def test_folds_by_design_entries_are_real_and_explained(self):
+        """倍率から外す登録表（#994）は、実在する tune ステップだけを、空でない `exempt:` 理由で持つ。
+        消えたステップの登録が残ると、同じ名前で足し直したステップが黙って倍率の外へ出る。"""
+        tune_steps = {f"tune:{m}" for m, _s, _e in rm.TUNE_MATRIX}
+        stale = sorted(set(FOLDS_BY_DESIGN) - tune_steps)
+        assert not stale, f"月次に無いステップが登録されている: {stale}"
+        bad = sorted(name for name, why in FOLDS_BY_DESIGN.items()
+                     if not why.startswith("exempt:") or not why[len("exempt:"):].strip())
+        assert not bad, f"理由が `exempt: <理由>` の形でない: {bad}"
 
 
 class TestConfirmStageBudget:
