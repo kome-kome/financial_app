@@ -582,6 +582,7 @@ Render ダッシュボードで管理。
 | 一時的 read-only 移行 | トランザクションが長すぎると自動移行 | `run_full_collection` は `MASTER_BATCH=200` 件ごとに commit |
 | プロジェクト停止 | **1週間アクセスなしで自動停止** | 長期不使用時は要注意 |
 | **Egress（転送量）** | **5 GB / 月** | 超過で全サービス restricted（402）＝2026-07 に検証系のフルロード反復で 61.2GB（1224%）まで出した実績あり。**日次で回るジョブは1回あたりの転送量が月次上限に直結する**（下記「Egress 設計」） |
+| 匿名経路（Data API・RLS） | **Data API（PostgREST）は無効**。`public` の全表で RLS 有効・ポリシー無し、anon / authenticated の表・シーケンスの権限と既定の権限は外してある（2026-11-01・#1094） | アプリは Data API を使わず `postgres`（BYPASSRLS）で直結するので影響を受けない。Render の `init_db` が新しく作る表は RLS off のままだが、Data API が無効なので外からは届かない。Advisor が RLS の警告を出したら [#1094 のコメント](https://github.com/kome-kome/financial_app/issues/1094#issuecomment-6553557142)の SQL ②③ を流し直す。**BYPASSRLS もポリシーも無いロールでつなぐと、RLS の表はエラー無しで0行を返す**（最小権限ロールは #1100・#1094） |
 
 #### Egress 設計（日次ジョブ = 最大の消費者・Issue #446）
 
