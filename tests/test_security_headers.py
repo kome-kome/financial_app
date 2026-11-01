@@ -64,7 +64,35 @@ def test_script_src_has_no_unsafe_inline():
     r = client.get("/")
     script = _directive(r.headers.get("Content-Security-Policy", ""), "script-src")
     assert "'unsafe-inline'" not in script, script
-    assert "https://cdn.jsdelivr.net" in script  # Chart.js CDN は維持
+
+
+def test_script_src_allows_only_self():
+    """外部のスクリプトの出どころを1つも許さない（#1095）。Chart.js は static/vendor/ に同梱する。
+    CDN を許すと、その CDN 上の任意のパッケージが CSP を通り、HTML 注入の穴の迂回路になる。"""
+    r = client.get("/")
+    script = _directive(r.headers.get("Content-Security-Policy", ""), "script-src")
+    assert script == "script-src 'self'", script
+
+
+def test_templates_load_no_external_script():
+    """CSP を 'self' に絞ったので、外部の <script src> が残ると、その画面のグラフが黙って消える
+    （CSP 違反はコンソールにしか出ない）。テンプレート側で外部 URL を書き戻させない。"""
+    import pathlib
+    import re
+    root = pathlib.Path(__file__).resolve().parents[1] / "templates"
+    offenders = [
+        f"{p.name}: {m.group(0)}"
+        for p in sorted(root.glob("*.html"))
+        for m in re.finditer(r"<script[^>]+src=[\"'](?:https?:)?//[^\"']+", p.read_text(encoding="utf-8"))
+    ]
+    assert offenders == [], offenders
+
+
+def test_vendored_chartjs_is_served():
+    """同梱した Chart.js が /static/vendor/ から配られ、版の印（v4.4.1）を持つ。"""
+    r = client.get("/static/vendor/chart.umd.js")
+    assert r.status_code == 200
+    assert "Chart.js v4.4.1" in r.text[:200]
 
 
 def test_style_src_keeps_unsafe_inline():
