@@ -218,9 +218,10 @@ async def run_search(
 
         best_oof = result.get("best_oof") or {}
         if prev_score is not None and result["best_score"] < prev_score:
-            # persist は止めない（ADR-0047）。champion は候補プールに居るので
-            # best >= champion が成立しており、本番より悪い params を選ぶことはない。
-            # ここで下がっているのは**パネルが変わったこと**による水準の移動なので、
+            # persist は止めない（ADR-0047）。champion は候補プールに居るので、本番より rank-IC で
+            # 有意に悪い params を選ぶことはない（確かめ直す段の 2 段の選び方では、同点の集合の中で
+            # 上位10社超過が高い候補を採るので champion の再測定値をわずかに下回ることがある・ADR-0070）。
+            # ここで下がっているのは主に**パネルが変わったこと**による水準の移動なので、
             # バッチを失敗させずに履歴として残す。
             logger.warning(
                 "前回の保存値%.4f（%s・%s fold）を下回りました: 今回=%.4f（%s fold）"
@@ -278,6 +279,16 @@ async def _run(args: argparse.Namespace) -> None:
                    c["n_candidates"], c["seeds_completed"], c["seeds_planned"], c["changed"],
                    c["seeds"][0], json.dumps(c["seed_base_best_params"], ensure_ascii=False),
                    c["seed_base_best_score"])
+            if c.get("selection") == "two_stage":
+                logger.info("2 段の選び方（ADR-0070）: 共通 %s 期・rank-IC の 1 位=%s（共通期の rank-IC %s・上位%s社超過 %s）"
+                            "・同点の集合 %s 件・2 段目で入れ替わり=%s・選んだ候補の上位%s社超過 %s・前半/後半の差=%s",
+                            c["n_common_periods"], json.dumps(c["rank_ic_leader_params"], ensure_ascii=False),
+                            c["rank_ic_leader_common_mean"], c["top_k"], c["leader_top_k_mean"],
+                            c["tie_set_size"], c["changed_by_stage2"], c["top_k"], c["chosen_top_k_mean"],
+                            c["split_half"])
+            else:
+                logger.warning("2 段の選び方を使えず、種平均の rank-IC だけで選びました（ADR-0070）: %s",
+                               c.get("selection_reason"))
         if result["champion_injected"]:
             logger.info("champion 再測定スコア=%s（同一パネル上の比較・ADR-0047）",
                         result["champion_score"])

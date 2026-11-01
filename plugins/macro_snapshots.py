@@ -44,6 +44,9 @@ LABEL_HORIZON_MONTHS = math.ceil(HORIZON_WEEKS * 12 / 52)  # = 12
 # `oof_backtest` が上位K社超過リターン・precision@K・NDCG@K を出す K。参考（判定には使わない）で、
 # 主審は rank-IC のまま。拒否権に使う K は #1044 の事前登録した規則で別に決める。
 TOP_K_REFERENCE = (5, 10, 30)
+# 運用の K（利用者は 1 モデルの画面から上位 10 社前後を買う・ADR-0070）。M-2 の探索の 2 段目（同点決め）が
+# `top_k_excess_return_by_period[str(OPERATIONAL_TOP_K)]` を読むので、TOP_K_REFERENCE に含まれていること。
+OPERATIONAL_TOP_K = 10
 # 上位10%内 rank-IC の「上位」＝期内社数の 1/TOP_DECILE_DIVISOR（切り上げ・整数で割る）。
 # `m * 0.1` を切り上げると 30*0.1=3.0000000000000004 が 4 社になる。
 TOP_DECILE_DIVISOR = 10
