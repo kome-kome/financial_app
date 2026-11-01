@@ -103,7 +103,20 @@ class TestCollect:
     def test_reads_database_size(self, settings, today):
         snap = ceh.collect(_FakeDB(db_bytes=430 * MB))
         assert snap["db_bytes"] == pytest.approx(430 * MB)
-        assert snap["db_ratio"] == pytest.approx(0.86)
+        assert snap["db_usage_bytes"] == pytest.approx(430 * MB + ceh.DB_USAGE_GAP_BYTES)
+        assert snap["db_ratio"] == pytest.approx(
+            (430 * MB + ceh.DB_USAGE_GAP_BYTES) / ceh.DB_QUOTA_BYTES)
+
+    def test_quota_is_decimal_like_the_usage_page(self):
+        """Usage 画面の上限 0.5 GB は 10 進（#1109）。2 進の 500 MiB にすると約 5% 大きく見て甘く出る。"""
+        assert ceh.DB_QUOTA_BYTES == 500 * 1000 ** 2
+
+    def test_matches_the_usage_page_on_2026_11_01(self, settings, today):
+        """2026-11-01 の突き合わせ（#1102）: `pg_database_size` 365.3 MiB ↔ Usage 画面 0.398 / 0.5 GB（詳細
+        379.71 MiB＝79.6%）。Usage 換算の割合が画面と 1 ポイント以内で合う（修正前は 73.1% と出ていた）。"""
+        snap = ceh.collect(_FakeDB(db_bytes=365.3 * MB))
+        usage_page_ratio = 379.71 * MB / ceh.DB_QUOTA_BYTES
+        assert abs(snap["db_ratio"] - usage_page_ratio) < 0.01
 
 
 class TestProblems:
@@ -111,7 +124,8 @@ class TestProblems:
         return {
             "egress_bytes": db_egress.QUOTA_BYTES * egress_ratio,
             "egress_ratio": egress_ratio,
-            "db_bytes": ceh.DB_QUOTA_BYTES * db_ratio,
+            "db_bytes": ceh.DB_QUOTA_BYTES * db_ratio - ceh.DB_USAGE_GAP_BYTES,
+            "db_usage_bytes": ceh.DB_QUOTA_BYTES * db_ratio,
             "db_ratio": db_ratio,
         }
 
@@ -130,20 +144,13 @@ class TestProblems:
         assert len(ceh.problems(self._snap(0.9, 0.95))) == 2
 
     def test_current_size_does_not_fire_yet(self):
-        """2026-08-19 の `pg_database_size` は 395MB/500MB (79%)。
+        """2026-11-01 の Usage 換算は約 80%（画面 79.6%）。ここで鳴ると常時 failure になり、
+        通知そのものが信用されなくなる。断面（2026-08-07）のまま増えないので、85% は当面鳴らない。"""
+        assert ceh.problems(self._snap(db_ratio=0.80)) == []
 
-        **Usage ページの 430MB (86%) とは別の数字**——判定に使うのは `pg_database_size`
-        で、両者には約 35MB の差がある（WAL・システム領域）。ここで鳴ると初日から
-        常時 failure になり、通知そのものが信用されなくなる。
-        """
-        assert ceh.problems(self._snap(db_ratio=0.79)) == []
-
-    def test_threshold_accounts_for_the_usage_page_gap(self):
-        """`pg_database_size` 基準の閾値は、Usage 基準では約 7pt 高く出る。
-
-        0.90 に置くと Usage 基準で 97% 相当＝read-only の直前でしか鳴らない。
-        余地（40MB 以上）を残せる水準であることを固定する。
-        """
+    def test_threshold_leaves_room_before_read_only(self):
+        """割合は Usage 基準（#1109）なので、警告の線から read-only（上限）までの余地が実際の残りになる。
+        40MB 以上を残せる水準であることを固定する（0.85 なら 75MB）。"""
         fires_at = ceh.DB_QUOTA_BYTES * ceh.DB_WARN_RATIO
         assert ceh.DB_QUOTA_BYTES - fires_at >= 40 * MB
 
@@ -187,7 +194,9 @@ class TestExitCode:
         assert ceh.main() == 0
 
     def test_exits_zero_when_healthy(self, settings, today, monkeypatch):
-        monkeypatch.setattr(ceh, "SessionLocal", lambda: _FakeDB(db_bytes=395 * MB))
+        # 2026-11-01 の `pg_database_size`（365.3 MiB＝Usage 約 80%）。8/19 の 395 MiB は Usage 換算 86% で、
+        # 当時の Usage 画面（430MB）でも 86% だった＝#1109 の後は正しく警告側に入る
+        monkeypatch.setattr(ceh, "SessionLocal", lambda: _FakeDB(db_bytes=365 * MB))
         monkeypatch.setattr(sys, "argv", ["check_egress_health"])
         assert ceh.main() == 0
 

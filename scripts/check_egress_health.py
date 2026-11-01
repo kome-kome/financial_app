@@ -57,11 +57,17 @@ EXIT_UNHEALTHY = 2
 #   Usage ページ      430MB … 課金クォータの判定値。超えると read-only
 #   Infrastructure    409.8MB
 #   pg_database_size  395MB … このスクリプトが読む値
-# ここで 0.90 を使うと 450MB で発火＝Usage 基準では 485MB（97%）に相当し、
-# 気づいた時には手遅れになる。**約 35MB の差を織り込んで 0.85（425MB ≒ Usage 460MB）**
-# に置き、read-only までに 40MB の余地を残す。差の内訳（WAL・システム領域）は固定では
-# ないので、Usage 側と乖離したらこの係数を測り直すこと。
-DB_QUOTA_BYTES = 500 * 1024 ** 2
+# 当時は差（約 35MB）を係数へ織り込み、`pg_database_size` ÷ 2 進の 500MB に 0.85 を当てていた。
+#
+# **#1109（2026-11-01）で Usage 基準へ直した。** Usage 画面は「0.398 / 0.5 GB (80%)・詳細 379.71 MB」
+# で、上限 0.5 GB は **10 進**（= 476.8 MiB）、詳細の MB は 2 進（379.71 MiB ≒ 398 MB）。2 進の 500 MiB を
+# 上限にすると約 5% 大きく見て、スクリプトは 73.1%（`pg_database_size` 365.3 MiB）と出していた——
+# 0.85 は Usage 基準で約 92% にあたり、思ったより遅く鳴る。いまは「`pg_database_size` ＋ Usage との差」
+# を Usage 換算として 10 進の上限で割り、**Usage 画面と同じ割合**で判定する（2026-11-01 は 79.8% ↔ 画面 79.6%）。
+# 差の内訳（WAL・システム領域）は固定ではない（8/19 は約 35MB・11/1 は約 14.4 MiB）ので、Usage 側と
+# 割合が数ポイント以上ずれたら `DB_USAGE_GAP_BYTES` を測り直すこと。0.85 なら read-only までに 75MB 残る。
+DB_QUOTA_BYTES = 500 * 1000 ** 2
+DB_USAGE_GAP_BYTES = 15 * 1024 ** 2     # 2026-11-01 の実測 14.4 MiB（Usage 379.71 − pg 365.3）を切り上げ
 DB_WARN_RATIO = 0.85
 
 
@@ -81,6 +87,7 @@ def collect(db) -> dict:
 
     db_bytes = float(db.execute(
         text("SELECT pg_database_size(current_database())")).scalar() or 0)
+    db_usage_bytes = db_bytes + DB_USAGE_GAP_BYTES      # Usage 画面の数え方へ寄せた推定（#1109）
 
     return {
         "cycle_start": cycle_start,
@@ -88,7 +95,8 @@ def collect(db) -> dict:
         "egress_bytes": egress_bytes,
         "egress_ratio": egress_bytes / db_egress.QUOTA_BYTES,
         "db_bytes": db_bytes,
-        "db_ratio": db_bytes / DB_QUOTA_BYTES,
+        "db_usage_bytes": db_usage_bytes,
+        "db_ratio": db_usage_bytes / DB_QUOTA_BYTES,
         "ledger_is_current": saved_start == cycle_start,
     }
 
@@ -102,7 +110,7 @@ def problems(snap: dict) -> list[str]:
             f"({snap['egress_ratio']:.0%} >= {db_egress.CYCLE_WARN_RATIO:.0%})")
     if snap["db_ratio"] >= DB_WARN_RATIO:
         found.append(
-            f"Database Size {_fmt(snap['db_bytes'])} / {_fmt(DB_QUOTA_BYTES)} "
+            f"Database Size（Usage 換算）{_fmt_db(snap['db_usage_bytes'])} / {_fmt_db(DB_QUOTA_BYTES)} "
             f"({snap['db_ratio']:.0%} >= {DB_WARN_RATIO:.0%})")
     return found
 
@@ -113,6 +121,11 @@ def _fmt(n_bytes: float) -> str:
     return f"{n_bytes / 1024 ** 2:.1f}MB"
 
 
+def _fmt_db(n_bytes: float) -> str:
+    """Database Size は Usage 画面の上限と同じ **10 進**で出す（#1109）。"""
+    return f"{n_bytes / 1000 ** 2:.1f}MB"
+
+
 def format_report(snap: dict) -> list[str]:
     lines = [
         "== Supabase 枠消費 ==",
@@ -120,8 +133,9 @@ def format_report(snap: dict) -> list[str]:
         f"Egress 累計 : {_fmt(snap['egress_bytes'])} / {_fmt(db_egress.QUOTA_BYTES)} "
         f"({snap['egress_ratio']:.1%})  [warn {db_egress.CYCLE_WARN_RATIO:.0%} / "
         f"block {db_egress.CYCLE_BLOCK_RATIO:.0%}]",
-        f"Database    : {_fmt(snap['db_bytes'])} / {_fmt(DB_QUOTA_BYTES)} "
-        f"({snap['db_ratio']:.1%})  [warn {DB_WARN_RATIO:.0%}]",
+        f"Database    : Usage 換算 {_fmt_db(snap['db_usage_bytes'])} / {_fmt_db(DB_QUOTA_BYTES)} "
+        f"({snap['db_ratio']:.1%})  [warn {DB_WARN_RATIO:.0%}]  "
+        f"（pg_database_size {snap['db_bytes'] / 1024 ** 2:.1f}MiB ＋ 差 {DB_USAGE_GAP_BYTES / 1024 ** 2:.0f}MiB）",
     ]
     if not snap["ledger_is_current"]:
         # サイクル切替の直後は必ずここを通る（誰もまだ書いていない）。**このジョブ自身の
