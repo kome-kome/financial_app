@@ -157,7 +157,7 @@ WATCHED: tuple[Watched, ...] = (
         label="日中バッチ",
         key_run=run_daytime.KEY_LAST_RUN,
         key_success=run_daytime.KEY_LAST_SUCCESS,
-        # 平日 8:15 のトリガ（`install_daytime_task.ps1`）。**24 ではなく 72**——金曜に
+        # 平日 `run_daytime.TRIGGER_TIME` のトリガ（`install_daytime_task.ps1` の既定）。**24 ではなく 72**——金曜に
         # 走ると次は月曜なので、土日を挟む間隔が正常な最長になる。24 にすると毎週土曜に
         # 「走っていない」と鳴り、鳴りっぱなしの警告は読まれなくなる。
         cadence_h=run_daytime.CADENCE_H,
