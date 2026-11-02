@@ -571,6 +571,155 @@ def test_candidate_menu_asks_for_month_sizes_for_purged_too():
     assert 0 < summary["inner_cv_gap"] <= LABEL_HORIZON_MONTHS
 
 
+# ── 内側 CV で選ぶ基準（`inner_score`・#1116）──────────────────────────────────
+# `mse`（既定）は `ElasticNetCV` の二乗誤差、`rank_ic` は内側の検証月ごとの Spearman の平均が最大の組。2つの版で
+# 違うのは選ぶ基準だけ（同じ α の並び・同じ分割）にするので、並びと点数の計算を独立の参照と突き合わせる。
+
+def _rank_ic_reference(X, y, y_rank, splits, month, l1_ratios, n_alphas):
+    """rank-IC で選ぶ手順を、候補ごとに `ElasticNet` を独立に学習して書き下した参照（点数の表を返す）。
+
+    実装は split ごとに `enet_path` で並び全体を一度に解く。こちらは各候補を冷えた状態から学習し、月内の
+    Spearman は `macro_snapshots._spearman`（純 Python）で取る＝計算の経路を共有しない。
+    """
+    from sklearn.linear_model import ElasticNet
+
+    from plugins.macro_snapshots import _spearman
+    from plugins.model_candidates import enet_alpha_grid
+
+    table = []
+    for r in l1_ratios:
+        grid = enet_alpha_grid(X, y, r, n_alphas)
+        for a in grid:
+            ics = []
+            for tr, te in splits:
+                m = ElasticNet(alpha=a, l1_ratio=r, max_iter=_EN_MAX_ITER, selection="cyclic")
+                pred = m.fit(X[tr], y[tr]).predict(X[te])
+                for mo in np.unique(month[te]):
+                    rows = np.flatnonzero(month[te] == mo)
+                    ic = _spearman(pred[rows].tolist(), [y_rank[te[i]] for i in rows])
+                    if ic is not None:
+                        ics.append(ic)
+            table.append((float(a), float(r), sum(ics) / len(ics) if ics else None))
+    return table
+
+
+def _rank_ic_fixture():
+    train, _test, groups = _split(_uneven_panel(_SIZES_21, seed=1116), n_train_months=20)
+    X, y, _X_te, _mu, _sd, _y_te = _prep_matrices(train, train[:1])
+    return train, groups, X, y, np.array([s[1] for s in train])
+
+
+def test_alpha_grid_is_the_one_elasticnetcv_uses():
+    """`enet_alpha_grid` は `ElasticNetCV` が l1_ratio ごとに作る α の並びと同じ（土台がずれると比べる意味が無い）。"""
+    from sklearn.linear_model import ElasticNetCV
+
+    from plugins.model_candidates import enet_alpha_grid
+
+    _train, groups, X, y, _y_rank = _rank_ic_fixture()
+    model = ElasticNetCV(l1_ratio=list(_EN_L1_RATIOS), alphas=_EN_N_ALPHAS,
+                         cv=month_block_splits(groups, _EN_CV_SPLITS), max_iter=_EN_MAX_ITER,
+                         random_state=42, selection="cyclic").fit(X, y)
+    for k, r in enumerate(_EN_L1_RATIOS):
+        np.testing.assert_allclose(enet_alpha_grid(X, y, r), model.alphas_[k], rtol=1e-12, atol=0)
+
+
+def test_month_rank_ics_match_the_pure_python_spearman():
+    """月ごとの Spearman は `_spearman` を候補ごとに回した値と同じ。3社未満の月は返さず、定数の列は NaN。"""
+    from plugins.macro_snapshots import _spearman
+    from plugins.model_candidates import month_rank_ics
+
+    rng = np.random.default_rng(1116)
+    month = np.repeat([0, 1, 2], [9, 2, 12])            # 2 社の月は飛ばす
+    preds = rng.normal(size=(len(month), 4))
+    preds[:, 1] = np.round(preds[:, 1])                  # 同順位を作る
+    preds[:, 3] = 0.25                                   # 係数が全て 0 の候補（定数の予測）
+    labels = rng.normal(size=len(month))
+    got = month_rank_ics(preds, labels, month)
+    assert len(got) == 2
+    for ic, mo in zip(got, (0, 2)):
+        rows = np.flatnonzero(month == mo)
+        for j in range(preds.shape[1]):
+            want = _spearman(preds[rows, j].tolist(), labels[rows].tolist())
+            if want is None:
+                assert math.isnan(ic[j])
+            else:
+                assert math.isclose(ic[j], want, rel_tol=0, abs_tol=1e-12)
+    assert all(math.isnan(ic[3]) for ic in got)
+
+
+def test_rank_ic_picks_the_candidate_with_the_best_inner_rank_ic():
+    """`rank_ic` は内側の検証月の rank-IC の平均が最大の (α, l1_ratio) を選ぶ（受け入れ条件・合成データ）。
+
+    rank-IC は予測の順位しか見ないので、小さい α の側では順位が変わらず点数がぴったり同点に並ぶ。同点は
+    先に来た候補（l1_ratio は与えた順・α は大きい側＝正則化の強い側）が勝つ——参照も表の順で最初の 1 位を採る。
+    """
+    from plugins.model_candidates import fit_elasticnet
+
+    _train, groups, X, y, y_rank = _rank_ic_fixture()
+    splits = month_block_splits(groups, _EN_CV_SPLITS)
+    table = _rank_ic_reference(X, y, y_rank, splits, _month_of_row(groups), _EN_L1_RATIOS, _EN_N_ALPHAS)
+    scored = [row for row in table if row[2] is not None]
+    top = max(row[2] for row in scored)
+    best = next(row for row in scored if row[2] >= top - 1e-9)
+    assert top - min(row[2] for row in scored) > 0.05, "候補の点数に差が無い検体では、選んだ組の照合が意味を持たない"
+
+    model, chosen = fit_elasticnet(X, y, l1_ratios=_EN_L1_RATIOS, n_alphas=_EN_N_ALPHAS,
+                                   cv_splits=_EN_CV_SPLITS, max_iter=_EN_MAX_ITER, inner_cv="months",
+                                   train_groups=groups, inner_score="rank_ic", y_rank=y_rank)
+    assert (chosen["alpha"], chosen["l1_ratio"]) == best[:2]
+    assert math.isclose(chosen["inner_rank_ic"], best[2], rel_tol=0, abs_tol=1e-6)
+    assert chosen["path_min"] <= chosen["alpha"] <= chosen["path_max"]
+    # 空振り防止: 二乗誤差の版と同じ組を選ぶ検体では、基準が届いたかを確かめられない
+    _m, mse = fit_elasticnet(X, y, l1_ratios=_EN_L1_RATIOS, n_alphas=_EN_N_ALPHAS, cv_splits=_EN_CV_SPLITS,
+                             max_iter=_EN_MAX_ITER, inner_cv="months", train_groups=groups)
+    assert (mse["alpha"], mse["l1_ratio"]) != (chosen["alpha"], chosen["l1_ratio"])
+    assert "inner_rank_ic" not in mse
+
+
+def test_rank_ic_needs_month_blocks_and_raw_labels():
+    """月で区切らない内側 CV（rows）では検証の行を月へ割り戻せないので止める。未知の基準も止める。"""
+    from plugins.model_candidates import fit_elasticnet
+
+    _train, groups, X, y, _y_rank = _rank_ic_fixture()
+    with pytest.raises(ValueError, match="月で区切る"):
+        make_elasticnet_fit_predict(inner_score="rank_ic")
+    with pytest.raises(ValueError, match="未知の inner_score"):
+        make_elasticnet_fit_predict(inner_cv="months", inner_score="ndcg")
+    with pytest.raises(ValueError, match="y_rank"):
+        fit_elasticnet(X, y, l1_ratios=_EN_L1_RATIOS, n_alphas=_EN_N_ALPHAS, cv_splits=_EN_CV_SPLITS,
+                       max_iter=_EN_MAX_ITER, inner_cv="months", train_groups=groups, inner_score="rank_ic")
+
+
+def test_rank_ic_fit_predict_marks_the_diag_and_does_not_peek_at_test_labels():
+    """`rank_ic` だけ診断値に印を積む（既定の形は変えない）。テストラベルを差し替えても予測は変わらない。"""
+    train, test, groups = _split(_uneven_panel(_SIZES_21, seed=1116), n_train_months=20)
+    diag = make_diag()
+    fp = make_elasticnet_fit_predict(diag=diag, inner_cv="months_purged", inner_score="rank_ic")
+    got, _ = fp(train, test, groups)
+    again, _ = fp(train, _perturb_labels(test), groups)
+    _assert_same(got, again, "rank_ic の予測がテストラベルで動いた（リーク）")
+    assert diag["inner_score"] == ["rank_ic", "rank_ic"]
+    assert len(diag["inner_rank_ic"]) == 2
+
+    plain = make_diag()
+    make_elasticnet_fit_predict(diag=plain, inner_cv="months_purged")(train, test, groups)
+    assert "inner_score" not in plain and "inner_rank_ic" not in plain
+
+
+def test_candidate_menu_runs_rank_ic_in_the_walk_forward():
+    """候補メニューの elasticnet: `inner_score` は opts から素通しで届き、walk-forward で fold が立つ。"""
+    fp, extra, diag = build_candidate("elasticnet", FEATURE_NAMES,
+                                      {"inner_cv": "months_purged", "inner_score": "rank_ic"})
+    assert extra == {"pass_train_groups": True}
+    panel = _uneven_panel([30, 12, 25, 18, 28, 14, 22, 11, 27, 16, 24, 13, 20, 30, 15, 26,
+                           12, 23, 19, 29, 17, 21, 25, 14])
+    folds = walk_forward_cv_monthly(panel, FEATURE_NAMES, min_train_months=6, step_months=3,
+                                    fit_predict=fp, embargo_months=12, **extra)
+    assert folds, "rank_ic の fold が1つも立たなかった（全 fold が例外で飛ばされた可能性）"
+    assert summarize_diag(diag)["inner_score"] == "rank_ic"
+    assert len(diag["inner_score"]) == len(folds)
+
+
 # ── マクロ fold 内 PCA 圧縮ラッパー ────────────────────────────────────────
 
 def test_macro_pca_reduces_width_and_keeps_non_macro():

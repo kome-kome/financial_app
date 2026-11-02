@@ -394,6 +394,19 @@ CV の後、各条件の診断値の `inner_cv` が指定どおりかを `inner_
 つもりで別物を比べる。条件名を区切り方そのものにせず `nogap` / `gap` にするのは、分母を名前で引く `base_of` が
 他のモードの条件名と取り違えないため（`--valid-split` の接頭辞と同じ理由）。
 
+## M-6 の内側 CV で α・l1_ratio を選ぶ基準を比べるモード（`--inner-cv-score`・#1116）
+
+M-6 は α・l1_ratio を内側 CV の**二乗誤差**で選ぶ（`ElasticNetCV`）が、評価と探索の基準は rank-IC。内側の検証月ごとの
+Spearman の平均が最大の組を選ぶ `rank_ic`（`model_candidates.fit_elasticnet`）と、今の `mse`（本番・分母）を比べる
+（ADR-0070 決定 7）。試す α の並び・内側の区切り方（本番の `months_purged`）は両側で同じで、違うのは選ぶ基準だけ。
+`--inner-cv-purge` と同じ形で、**パネルは2条件で同一**（`panel_cond`）、差し替えるのは M-6 の CV へ渡す候補の
+opts だけ（`cv_opts`）。測るのは M-6 だけで、1モデル × 2指標 ＝2検定・α 0.025。CV の後、各条件の診断値の
+`inner_score` が指定どおりかを `inner_score_reach_problems` で確かめ、違えば止める。**判定の規則は測る前に
+`docs/prereg/m6-inner-score.md` へ凍結した**ので、このモードだけ `--prereg` と `--prereg-sha` が要り、本文の sha256 が
+一致しなければ exit 2 で止まる（`scripts/prereg.py`）。出力には凍結値と、参考の上位10社超過の差（検定しない・ADR-0069）を
+足す。日中キューの名前は `gate:inner-cv-score`（**積むのは人**＝親 #1112）。**分母は本番から取り、本番が `mse` で
+なくなったら止める**。条件名は基準そのもの（`mse` / `rank_ic`）で、他のモードの条件名と衝突しない。
+
 ## 規模で中立化した順位を比べるモード（`--size-neutral`・#970）
 
 M-2 / M-6 は毎期、小型株を実際より高く・大型株を低く置く（#957）。予測そのまま（`raw`・分母）と、
@@ -517,8 +530,10 @@ from plugins.macro_snapshots import (  # noqa: E402
     use_fin_rows,
 )
 from plugins.macro_snapshots import FIN_FILL as _M2M6_FIN_FILL  # noqa: E402
+from plugins.macro_snapshots import OPERATIONAL_TOP_K  # noqa: E402
 from plugins.macro_snapshots import load_earnings_yields, to_date_str  # noqa: E402
 from plugins.macro_enet import _INNER_CV as _M6_INNER_CV  # noqa: E402
+from plugins.macro_enet import _INNER_SCORE as _M6_INNER_SCORE  # noqa: E402
 from plugins.macro_enet import _SIZE_NEUTRAL as _M6_SIZE_NEUTRAL  # noqa: E402
 from plugins.macro_gbdt import _VALID_SPLIT as _M2_VALID_SPLIT  # noqa: E402
 from plugins.macro_gbdt import _VALID_SPLIT_CHOICES, _VALID_SPLIT_DEFAULT  # noqa: E402
@@ -527,6 +542,8 @@ from plugins.macro_gbdt import _SUBSAMPLE_DEFAULT  # noqa: E402
 from plugins.model_candidates import (  # noqa: E402
     _EN_INNER_CV_DEFAULT,
     _EN_INNER_CV_PURGED,
+    _EN_INNER_SCORE_DEFAULT,
+    _EN_INNER_SCORE_RANK_IC,
     _purge_gap_months,
 )
 from plugins.utils import coerce_params  # noqa: E402
@@ -591,6 +608,9 @@ class Cond(NamedTuple):
     **この欄はパネルを動かさない**——パネルの鍵からは外し（`panel_cond`）、M-6 の CV へ渡す opts に
     だけ効く（`cv_opts`）。`--inner-cv-purge`（#979）の空白付き `months_purged` もこの欄で渡す。
 
+    `inner_score`（#1116）は M-6 の α・l1_ratio を選ぶ基準。既定は本番の構成（`macro_enet._INNER_SCORE`・`mse`）から
+    取る。`inner_cv` と同じく**パネルを動かさず**、M-6 の CV へ渡す opts にだけ効く。
+
     `valid_split`（#976）は M-2 の early stopping の検証集合の取り方。既定は本番の構成
     （`macro_gbdt._VALID_SPLIT`・`rows`）から取る。`inner_cv` と同じく**パネルを動かさず**、M-2 の CV へ渡す
     opts にだけ効く。
@@ -613,6 +633,7 @@ class Cond(NamedTuple):
     de_null_industries: tuple[str, ...] = ()
     fin_fill: bool = _M2M6_FIN_FILL
     inner_cv: str = _M6_INNER_CV
+    inner_score: str = _M6_INNER_SCORE
     valid_split: str = _M2_VALID_SPLIT
     subsample: float = _M2_SUBSAMPLE
     train_exclude_index: bool = False
@@ -724,6 +745,17 @@ EARNINGS_YIELD_MODELS = ["xgb_m2", "elasticnet"]
 INNER_CV_PURGE_CONDS: dict[str, str] = {"nogap": "months", "gap": _EN_INNER_CV_PURGED}
 INNER_CV_PURGE_BASE_COND = "gap"
 INNER_CV_PURGE_MODELS = ["elasticnet"]
+
+# M-6 の内側 CV で α・l1_ratio を選ぶ基準を比べるモード（`--inner-cv-score`・#1116）。条件名は {名前: 基準}。
+# `mse` は今の `ElasticNetCV`（本番＝分母）、`rank_ic` は内側の検証月ごとの Spearman の平均が最大の組。**条件は事前登録
+# （`docs/prereg/m6-inner-score.md`）したこの2つに固定する**（選択肢の一覧から作らない＝基準を足した時点で黙って条件が
+# 増え、検定数と α が変わる）。本番が分母でなくなったら `build_conditions` が止める。2条件のパネルは同一で、M-6 の CV へ
+# 渡す候補の opts だけを差し替える。M-2・M-1 にこの軸は無い。
+INNER_CV_SCORE_CONDS: dict[str, str] = {"mse": _EN_INNER_SCORE_DEFAULT, "rank_ic": _EN_INNER_SCORE_RANK_IC}
+INNER_CV_SCORE_BASE_COND = "mse"
+INNER_CV_SCORE_MODELS = ["elasticnet"]
+# 事前登録の文書（リポジトリの根からの相対パス）。日中キューの argv と CLI の照合が同じ文書を指す。
+INNER_CV_SCORE_PREREG = "docs/prereg/m6-inner-score.md"
 
 # M-2 の early stopping の検証集合の取り方を比べるモード（`--valid-split`・#976）。**基準は本番の構成**（M-2 本体の
 # `macro_gbdt._VALID_SPLIT`・`rows`）で、書き写さずにそこから取る。条件名は {名前: 取り方}。取り方は関数の選択肢
@@ -862,10 +894,11 @@ def build_conditions(windows: list[int] | None = None,
                     inner_cv_purge: bool = False,
                     subsample: bool = False,
                     train_exclude_index: bool = False,
-                    earnings_yield: bool = False) -> dict[str, Cond]:
+                    earnings_yield: bool = False,
+                    inner_cv_score: bool = False) -> dict[str, Cond]:
     """条件集合 {名前: Cond} を作る。
 
-    17のモードがある。**同時に使えるのは1つだけ**（下記）:
+    18のモードがある。**同時に使えるのは1つだけ**（下記）:
 
       既定           … ADR-0045 の昇格ゲートと完全に同じ2条件（`off` / `on`・マクロは ON のまま）
       `windows`      … モメンタム無し ＋ 各窓（#592・ADR-0050）
@@ -883,10 +916,13 @@ def build_conditions(windows: list[int] | None = None,
       `inner_cv_purge` … M-6 の内側 CV を月の塊で区切る ＋ 学習と検証の間に空白を空ける（#979）。**パネルは2条件で同一**・M-6 だけ
       `subsample`    … M-2 の行の抽出の割合 0.8 ＋ 1.0（#989）。**パネルは2条件で同一**・M-2 だけ
       `train_exclude_index` … 全行で学習 ＋ 学習 fold だけから G22 × ラベル窓の重なりを落とす（#1068）。**パネルは2条件で同一**
+      `earnings_yield` … PER の列を使う ＋ 益利回り E/P へ差し替える（#1082）。他の軸は本番構成に固定
+      `inner_cv_score` … M-6 の α・l1_ratio を内側 CV の二乗誤差で選ぶ ＋ rank-IC で選ぶ（#1116）。**パネルは2条件で同一**・M-6 だけ
 
-    `inner_cv_purge` / `valid_split` / `subsample` の `Cond` は2条件で違うが、違うのは CV へ渡す opts だけで、パネルの鍵からは外す
-    （`panel_cond`）。`models` を渡したときはその軸を持つモデルだけであることを確かめる。
-    `inner_cv_purge` は本番（`macro_enet._INNER_CV`）が分母の `months_purged` でなければ止める。
+    `inner_cv_purge` / `inner_cv_score` / `valid_split` / `subsample` の `Cond` は2条件で違うが、違うのは CV へ渡す opts だけで、
+    パネルの鍵からは外す（`panel_cond`）。`models` を渡したときはその軸を持つモデルだけであることを確かめる。
+    `inner_cv_purge` は本番（`macro_enet._INNER_CV`）が分母の `months_purged` でなければ止める。`inner_cv_score` も
+    本番（`macro_enet._INNER_SCORE`）が分母の `mse` でなければ止める。
 
     `size_neutral` も `risk_axis` と同じく `Cond` を動かさない（予測の後処理で条件を作る）。`models` を
     渡したときは M-2 / M-6 だけであることを確かめる（M-1 はパネルが別物）。
@@ -918,7 +954,8 @@ def build_conditions(windows: list[int] | None = None,
              ("--fin-fill", fin_fill),
              ("--size-neutral", size_neutral), ("--valid-split", valid_split),
              ("--inner-cv-purge", inner_cv_purge), ("--subsample", subsample),
-             ("--train-exclude-index", train_exclude_index), ("--earnings-yield", earnings_yield)]
+             ("--train-exclude-index", train_exclude_index), ("--earnings-yield", earnings_yield),
+             ("--inner-cv-score", inner_cv_score)]
     picked = [name for name, on in modes if on]
     if len(picked) > 1:
         raise ValueError(
@@ -1028,6 +1065,21 @@ def build_conditions(windows: list[int] | None = None,
                 f"{_M6_INNER_CV}、分母は {base_split}。本番と比べているつもりで別物を比べるので止める（#979・#968）")
         return {name: Cond(False, MOM_WINDOW, inner_cv=split)
                 for name, split in INNER_CV_PURGE_CONDS.items()}
+    if inner_cv_score:
+        # M-6 の α・l1_ratio を選ぶ基準だけを差し替える。他の軸（内側 CV の区切り方を含む）はすべて本番構成。
+        # パネルは2条件で同一（`panel_cond`）。M-2・M-1 にこの軸は無い（#1116）。
+        others = [m for m in (models or []) if m not in INNER_CV_SCORE_MODELS]
+        if others:
+            raise ValueError(
+                f"--inner-cv-score は M-6（{', '.join(INNER_CV_SCORE_MODELS)}）だけを測る。{', '.join(others)} に"
+                "この軸は無く、同じ CV を2回回すだけになる（#1116）")
+        base_score = INNER_CV_SCORE_CONDS[INNER_CV_SCORE_BASE_COND]
+        if _M6_INNER_SCORE != base_score:
+            raise ValueError(
+                f"--inner-cv-score の分母は本番の M-6 の選ぶ基準のはずだが、本番（macro_enet._INNER_SCORE）は "
+                f"{_M6_INNER_SCORE}、分母は {base_score}。本番と比べているつもりで別物を比べるので止める（#1116）")
+        return {name: Cond(False, MOM_WINDOW, inner_score=score)
+                for name, score in INNER_CV_SCORE_CONDS.items()}
     if size_neutral:
         # 2条件とも本番構成の同一 `Cond`（パネルも CV も1回）。差は CV の後の予測の変換だけ。
         others = [m for m in (models or []) if m not in SIZE_NEUTRAL_MODELS]
@@ -1065,6 +1117,7 @@ def base_of(conds: dict[str, Cond], default_max_features: int | None = None) -> 
     `FIN_NAN_BASE_COND` より先に引く（後に置くと、`--fin-fill` の分母が黙って `drop` になる）。
     検証集合のモードの分母も**本番の構成**（`valid_` ＋ `macro_gbdt._VALID_SPLIT`）。この軸はパネルを動かさない。
     内側 CV の空白のモードの分母も**本番の構成**（`gap`＝`months_purged`・#968）。この軸もパネルを動かさない。
+    内側 CV の選ぶ基準のモードの分母も**本番の構成**（`mse`・#1116）。この軸もパネルを動かさない。
     行の抽出の割合のモードの分母も**本番の構成**（`subsample_` ＋ `macro_gbdt._SUBSAMPLE`・#989）。この軸もパネルを動かさない。
     学習 fold の除外のモードの分母も**本番の構成**（全行で学習する `keep_index`・#1068）。この軸もパネルを動かさない。
     規模の中立化のモードの分母も**本番の構成**（予測そのまま `raw`）。この軸もパネルを動かさない。
@@ -1075,7 +1128,7 @@ def base_of(conds: dict[str, Cond], default_max_features: int | None = None) -> 
                  DEMEAN_BASE_COND, RISK_BASE_COND, FIN_FILL_BASE_COND, FIN_NAN_BASE_COND,
                  DE_EXCLUDE_BASE_COND, SIZE_NEUTRAL_BASE_COND,
                  VALID_SPLIT_BASE_COND, INNER_CV_PURGE_BASE_COND, SUBSAMPLE_BASE_COND,
-                 TRAIN_EXCLUDE_INDEX_BASE_COND, EARNINGS_YIELD_BASE_COND):
+                 TRAIN_EXCLUDE_INDEX_BASE_COND, EARNINGS_YIELD_BASE_COND, INNER_CV_SCORE_BASE_COND):
         if cand in conds:
             return cand
     prod = maxfeat_cond_name(default_max_features) if default_max_features else None
@@ -1109,7 +1162,8 @@ MODE_SUFFIX: dict[str, str] = {"default": "", "windows": "", "macro": "_macro",
                                "valid_split": "_valid_split", "inner_cv_purge": "_inner_cv_purge",
                                "subsample": "_subsample",
                                "train_exclude_index": "_train_exclude_index",
-                               "earnings_yield": "_earnings_yield"}
+                               "earnings_yield": "_earnings_yield",
+                               "inner_cv_score": "_inner_cv_score"}
 
 
 def mode_of(windows: list[int] | None = None, macro: bool = False,
@@ -1119,7 +1173,7 @@ def mode_of(windows: list[int] | None = None, macro: bool = False,
             fin_fill: bool = False, size_neutral: bool = False,
             valid_split: bool = False, inner_cv_purge: bool = False,
             subsample: bool = False, train_exclude_index: bool = False,
-            earnings_yield: bool = False) -> str:
+            earnings_yield: bool = False, inner_cv_score: bool = False) -> str:
     """測定モードの名前を返す（`build_conditions` と同じ引数から1箇所で導出する）。
 
     **#615 で足した2モードは、ここを持たないまま別モードの名前で出力されていた**——
@@ -1154,6 +1208,8 @@ def mode_of(windows: list[int] | None = None, macro: bool = False,
         return "valid_split"
     if inner_cv_purge:
         return "inner_cv_purge"
+    if inner_cv_score:
+        return "inner_cv_score"
     if subsample:
         return "subsample"
     if train_exclude_index:
@@ -1207,6 +1263,10 @@ _AXIS_VERDICTS: dict[str, tuple[str, str]] = {
     "inner_cv_purge": ("INNER CV PURGE AXIS [M-6 only; same panel on both sides]",
                        "removing the label-horizon gap between the inner training and validation months "
                        "did not beat the production purged month blocks"),
+    # 分母は本番（`macro_enet._INNER_SCORE`・`mse`）。パネルは2条件で同一で、差は M-6 の α・l1_ratio を選ぶ基準だけ（#1116）。
+    # 採否は事前登録（docs/prereg/m6-inner-score.md）の規則で読む——この行は差が残ったかだけを言う。
+    "inner_cv_score": ("INNER CV SCORE AXIS [M-6 only; same panel on both sides; judged by docs/prereg/m6-inner-score.md]",
+                       "the other inner-CV selection criterion for alpha / l1_ratio did not beat the production one"),
     # CV は1回で、差は予測の変換だけ。共通域は時価総額のある行（無い行は両条件から落とす・#970）。
     "size_neutral": ("SIZE NEUTRAL AXIS [same CV; rows without market cap dropped from both sides]",
                      "removing the log market cap effect per month did not beat the raw prediction"),
@@ -2038,15 +2098,15 @@ def build_fin_sources(conds: dict[str, Cond], kinds: list[str], fins: dict[str, 
 # ── CV だけに効く欄（M-6 の内側 CV・#971／M-2 の検証集合・#976）───────────────────
 
 def panel_cond(c: Cond) -> Cond:
-    """パネルを作る鍵（#971・#976・#989・#1068）。CV だけに効く欄（`inner_cv`・`valid_split`・`subsample`・
-    `train_exclude_index`）を本番の値へ戻す。
+    """パネルを作る鍵（#971・#976・#989・#1068・#1116）。CV だけに効く欄（`inner_cv`・`inner_score`・`valid_split`・
+    `subsample`・`train_exclude_index`）を本番の値へ戻す。
 
-    `inner_cv_purge` / `valid_split` / `subsample` の2条件は同じパネルを1枚だけ作って共有する——別々に作ると、構築の
-    揺れが区切り方の差に混ざる（`--risk-axis` が同じ `Cond` を共有して μ̂ を揃えるのと同じ理由）。他のモードでは
-    どれも既定のままなので、鍵は `c` そのものと等しく、挙動は変わらない。
+    `inner_cv_purge` / `inner_cv_score` / `valid_split` / `subsample` の2条件は同じパネルを1枚だけ作って共有する——別々に
+    作ると、構築の揺れが区切り方の差に混ざる（`--risk-axis` が同じ `Cond` を共有して μ̂ を揃えるのと同じ理由）。他の
+    モードではどれも既定のままなので、鍵は `c` そのものと等しく、挙動は変わらない。
     """
-    return c._replace(inner_cv=_M6_INNER_CV, valid_split=_M2_VALID_SPLIT, subsample=_M2_SUBSAMPLE,
-                      train_exclude_index=False)
+    return c._replace(inner_cv=_M6_INNER_CV, inner_score=_M6_INNER_SCORE, valid_split=_M2_VALID_SPLIT,
+                      subsample=_M2_SUBSAMPLE, train_exclude_index=False)
 
 
 def cv_opts(c: Cond, model: str) -> dict | None:
@@ -2056,11 +2116,18 @@ def cv_opts(c: Cond, model: str) -> dict | None:
     **省けるかは本番の値（`macro_enet._INNER_CV`）ではなく候補の既定（`_EN_INNER_CV_DEFAULT`）で決める**
     （#964）。本番が `months_purged` のとき本番と比べて省くと、候補は `rows` で回り、本番の構成のつもりで
     旧い区切り方を測る——エラーは出ない。M-2 の `valid_split` / `subsample` も同じ規則で候補の既定
-    （`_VALID_SPLIT_DEFAULT` / `_SUBSAMPLE_DEFAULT`）と比べ、両方が既定から外れれば両方を渡す。
+    （`_VALID_SPLIT_DEFAULT` / `_SUBSAMPLE_DEFAULT`）と比べ、両方が既定から外れれば両方を渡す。M-6 の `inner_score`
+    （#1116）も候補の既定（`_EN_INNER_SCORE_DEFAULT`）と比べ、`inner_cv` と合わせて渡す（`rank_ic` は月で区切る
+    `inner_cv` が要るので、片方だけ渡すと候補が止める）。
     """
     kind = MODEL_SPECS[model][1]
-    if kind == "elasticnet" and c.inner_cv != _EN_INNER_CV_DEFAULT:
-        return {"inner_cv": c.inner_cv}
+    if kind == "elasticnet":
+        opts = {}
+        if c.inner_cv != _EN_INNER_CV_DEFAULT:
+            opts["inner_cv"] = c.inner_cv
+        if c.inner_score != _EN_INNER_SCORE_DEFAULT:
+            opts["inner_score"] = c.inner_score
+        return opts or None
     if kind == "xgb_m2":
         opts = {}
         if c.valid_split != _VALID_SPLIT_DEFAULT:
@@ -2086,6 +2153,79 @@ def inner_cv_reach_problems(diags: dict[str, dict], conds: dict[str, Cond]) -> l
         if got != want:
             problems.append(f"{key}: 内側 CV が {got} で回った（指定は {want}）")
     return problems
+
+
+def inner_score_reach_problems(diags: dict[str, dict], conds: dict[str, Cond]) -> list[str]:
+    """M-6 の選ぶ基準の切り替えが CV まで届いていない理由を列挙する（#1116）。空リストなら健全。
+
+    候補は既定（`mse`）以外のときだけ診断値に `inner_score` を積む（`make_elasticnet_fit_predict`）ので、積まれて
+    いなければ既定で回ったことになる。`walk_forward_cv_monthly` は fold の例外を握って捨てるので、届かないまま
+    走ると両条件が同じ CV になり、エラーを出さずに「差なし」だけが残る。
+    """
+    problems = []
+    for key, diag in diags.items():
+        cond = key.split("|", 1)[0]
+        want = conds[cond].inner_score
+        got = (diag or {}).get("inner_score", _EN_INNER_SCORE_DEFAULT)
+        if got != want:
+            problems.append(f"{key}: 選ぶ基準が {got} で回った（指定は {want}）")
+    return problems
+
+
+def inner_cv_score_decision(sigs: dict, alpha: float, model: str = "elasticnet",
+                            cond: str = "rank_ic") -> dict:
+    """事前登録（`docs/prereg/m6-inner-score.md` §4）の判定を、主判定の検定から機械的に出す（#1116）。
+
+    採用（`adopt`）は「買いの rank-IC の差（`rank_ic` − `mse`）が正で p < alpha」かつ「売り側spread の差が
+    負で p < alpha ではない」ときだけ。それ以外は据え置き（`keep`）。検定が出ない（共通の期が 2 未満）指標は
+    有意でないものとして扱う＝rank-IC が出なければ据え置き、売り側が出なければ拒否権は発動しない。
+    **規則を変えるなら文書を凍結し直す**（この関数は文書の §4 を写したもの）。
+    """
+    def _sig(metric):
+        s = sigs.get(f"common|{cond}|{model}|{metric}")
+        p = s.get("p_value") if s else None
+        return s, bool(s and p is not None and p < alpha)
+
+    ic, ic_hit = _sig("rank_ic")
+    short, short_hit = _sig("short_side_spread")
+    ic_better = ic_hit and ic["mean"] > 0
+    short_worse = short_hit and short["mean"] < 0
+    return {"decision": "adopt" if (ic_better and not short_worse) else "keep",
+            "rank_ic_better": ic_better, "short_side_spread_worse": short_worse, "alpha": alpha}
+
+
+def prereg_stamp_for(args) -> dict | None:
+    """事前登録の照合（#1116）。`--inner-cv-score` だけ `--prereg` と `--prereg-sha` を必須にし、文書がこのモードの
+    もの（`INNER_CV_SCORE_PREREG`）で、本文の sha256 が凍結値と一致するときだけ印を返す。外れたら exit 2 で
+    重い計算の前に止まる（`scripts.prereg`）。他のモードでは渡されても使わないので止める（測ったつもりの取り違え）。
+    """
+    from scripts import prereg
+
+    if not args.inner_cv_score:
+        if args.prereg or args.prereg_sha:
+            raise SystemExit("--prereg / --prereg-sha は --inner-cv-score と一緒にしか使えません")
+        return None
+    if not args.prereg or not args.prereg_sha:
+        print(f"[prereg] NG: --inner-cv-score には --prereg {INNER_CV_SCORE_PREREG} と --prereg-sha が要る",
+              file=sys.stderr)
+        raise SystemExit(prereg.EXIT_MISMATCH)
+    stamp = prereg.stamp_from_args(args)
+    if stamp["prereg_path"] != INNER_CV_SCORE_PREREG:
+        print(f"[prereg] NG: --inner-cv-score の事前登録は {INNER_CV_SCORE_PREREG}（指定: {stamp['prereg_path']}）",
+              file=sys.stderr)
+        raise SystemExit(prereg.EXIT_MISMATCH)
+    print(f"[prereg] OK: {stamp['prereg_path']} sha256={stamp['prereg_sha256']}", flush=True)
+    return stamp
+
+
+def top_k_paired_reference(a: dict, b: dict, k: int) -> dict:
+    """上位 K 社超過の差（a − b）を両側に共通する期だけで平均する（参考・検定しない・ADR-0069）。"""
+    sa = (a.get("top_k_excess_return_by_period") or {}).get(str(k)) or {}
+    sb = (b.get("top_k_excess_return_by_period") or {}).get(str(k)) or {}
+    common = sorted(p for p in sa if p in sb and sa[p] is not None and sb[p] is not None)
+    diffs = [sa[p] - sb[p] for p in common]
+    return {"k": k, "n_common": len(common),
+            "mean_diff": round(sum(diffs) / len(diffs), 6) if diffs else None}
 
 
 def valid_split_reach_problems(diags: dict[str, dict], conds: dict[str, Cond]) -> list[str]:
@@ -2510,6 +2650,13 @@ def main() -> None:
                          "外す空白を空ける gap＝本番の months_purged（#968）と、空けずに月の塊で区切る nogap＝months を"
                          f"共通域で比べる・#979）。パネルは2条件で同一。モデルは {','.join(INNER_CV_PURGE_MODELS)} だけ。"
                          "他モードと併用不可")
+    ap.add_argument("--inner-cv-score", dest="inner_cv_score", action="store_true",
+                    help="M-6 の内側 CV で α・l1_ratio を選ぶ基準のモード（二乗誤差の mse＝本番と、内側の検証月の rank-IC "
+                         "の平均で選ぶ rank_ic を共通域で比べる・#1116）。パネルは2条件で同一。モデルは "
+                         f"{','.join(INNER_CV_SCORE_MODELS)} だけ。--prereg {INNER_CV_SCORE_PREREG} と --prereg-sha が必須。"
+                         "他モードと併用不可")
+    ap.add_argument("--prereg", help=f"事前登録文書のパス（--inner-cv-score だけ・{INNER_CV_SCORE_PREREG}）")
+    ap.add_argument("--prereg-sha", help="事前登録の凍結値（本文の sha256・追記節に記録したもの）")
     ap.add_argument("--subsample", dest="subsample", action="store_true",
                     help="M-2 の行の抽出の割合のモード（木ごとに学習行の一部を抽出する本番の割合と、抽出を止める割合を"
                          f"共通域で比べる・#989・#987。条件は {' / '.join(SUBSAMPLE_CONDS)}・分母は {SUBSAMPLE_BASE_COND}）。パネルは2条件で同一。"
@@ -2537,6 +2684,7 @@ def main() -> None:
     if args.smoke and args.stride <= 1:
         args.stride = 5
     set_refresh(args.refresh_cache)
+    prereg_stamp = prereg_stamp_for(args)
 
     # M-1 専用モードの既定モデルは M-1 だけ。M-2/M-6 は交互作用も BIC の列数上限も持たない
     # （本番構成が `build_interactions=False`）＝測る動機が無い。マクロ軸は M-6 も測るが、
@@ -2565,6 +2713,8 @@ def main() -> None:
         default_models = VALID_SPLIT_MODELS
     elif args.inner_cv_purge:
         default_models = INNER_CV_PURGE_MODELS
+    elif args.inner_cv_score:
+        default_models = INNER_CV_SCORE_MODELS
     elif args.subsample:
         default_models = SUBSAMPLE_MODELS
     elif args.train_exclude_index:
@@ -2605,7 +2755,8 @@ def main() -> None:
                                  inner_cv_purge=args.inner_cv_purge, subsample=args.subsample,
                                  size_neutral=args.size_neutral,
                                  train_exclude_index=args.train_exclude_index,
-                                 earnings_yield=args.earnings_yield)
+                                 earnings_yield=args.earnings_yield,
+                                 inner_cv_score=args.inner_cv_score)
     except ValueError as e:
         raise SystemExit(str(e))
     # 列数モードの分母は本番値（プラグイン既定）。**ここで数値を書き写さない**。
@@ -2661,7 +2812,7 @@ def main() -> None:
                    size_neutral=args.size_neutral,
                    valid_split=args.valid_split, inner_cv_purge=args.inner_cv_purge,
                    subsample=args.subsample, train_exclude_index=args.train_exclude_index,
-                   earnings_yield=args.earnings_yield)
+                   earnings_yield=args.earnings_yield, inner_cv_score=args.inner_cv_score)
     default_out = f"momentum_gate{MODE_SUFFIX[mode]}.json"
     if mode == "risk_axis" and models != RISK_MODELS:
         # M-1 と M-6 は分母が違い別々に回す（#808）。同じファイルへ書くと後の run が前の結果を消す。
@@ -3014,6 +3165,14 @@ def main() -> None:
                 raise SystemExit("中止: 内側 CV の切り替えが CV に届いていません: " + " / ".join(problems))
             print("[note] both sides share one panel; the only difference is how M-6 picks "
                   "alpha / l1_ratio inside each training fold", flush=True)
+        # 選ぶ基準のモード（#1116）も同じ。届かないと両条件が同じ CV になる。
+        if mode == "inner_cv_score":
+            problems = inner_score_reach_problems(
+                {key: out.get("diag") for key, out in results.items()}, conds)
+            if problems:
+                raise SystemExit("中止: 選ぶ基準の切り替えが CV に届いていません: " + " / ".join(problems))
+            print("[note] both sides share one panel and the same inner CV splits; the only difference is "
+                  "whether M-6 picks alpha / l1_ratio by squared error or by inner rank-IC", flush=True)
         if mode == "inner_cv_purge":
             # 学習月の少ない fold では空白が縮む（`purged_month_plan`）。fold の平均を出して、どれだけ入ったかを読む。
             for key, out in results.items():
@@ -3109,6 +3268,12 @@ def main() -> None:
             {key: out.get("diag") for key, out in cruns.items()}, conds)
         if problems:
             raise SystemExit("中止: 内側 CV の切り替えが CV に届いていません（共通月）: "
+                             + " / ".join(problems))
+    if mode == "inner_cv_score":
+        problems = inner_score_reach_problems(
+            {key: out.get("diag") for key, out in cruns.items()}, conds)
+        if problems:
+            raise SystemExit("中止: 選ぶ基準の切り替えが CV に届いていません（共通月）: "
                              + " / ".join(problems))
     if mode == "valid_split":
         problems = valid_split_reach_problems(
@@ -3253,6 +3418,19 @@ def main() -> None:
                 print(f"  {MODEL_LABELS[model]:<18} {cond:<{cw}} {metric:<18} "
                       f"{_fmt_sig(sig, alpha)}", flush=True)
 
+    # 選ぶ基準のモード（#1116）: 事前登録の判定と、参考の上位10社超過（検定しない・ADR-0069）。
+    prereg_decision: dict | None = None
+    top_k_reference: dict | None = None
+    if mode == "inner_cv_score":
+        prereg_decision = inner_cv_score_decision(sigs, alpha)
+        top_k_reference = top_k_paired_reference(common_results["rank_ic|elasticnet"],
+                                                 common_results[f"{base}|elasticnet"], OPERATIONAL_TOP_K)
+        print(f"\n=== reference (not tested): top-{OPERATIONAL_TOP_K} excess return rank_ic - {base} "
+              f"= {_num(top_k_reference['mean_diff'])} (n={top_k_reference['n_common']}) ===", flush=True)
+        print(f"=== preregistered decision ({INNER_CV_SCORE_PREREG}) === {prereg_decision['decision']} "
+              f"(rank-IC better: {prereg_decision['rank_ic_better']} / "
+              f"short-side spread worse: {prereg_decision['short_side_spread_worse']})", flush=True)
+
     print("\n=== raw levels (each condition's own population; NOT testable across "
           "conditions: fold phases differ) ===", flush=True)
     print(f"  {'cond':<{cw}} {'model':<18} {'rank-IC':>9} {'IC std':>9} {'short':>9} "
@@ -3353,6 +3531,7 @@ def main() -> None:
                               "de_null_industries": list(c.de_null_industries),
                               "fin_fill": c.fin_fill,
                               "inner_cv": c.inner_cv,
+                              "inner_score": c.inner_score,
                               "valid_split": c.valid_split,
                               "subsample": c.subsample,
                               "train_exclude_index": c.train_exclude_index,
@@ -3436,6 +3615,11 @@ def main() -> None:
         "regressed": regressed,
         "verdict": verdict,
     }
+    if mode == "inner_cv_score":
+        # 凍結値と判定（#1116）。読む人が「どの規則で測った結果か」を中身だけで確かめられるようにする。
+        payload.update(prereg_stamp or {})
+        payload["prereg_decision"] = prereg_decision
+        payload["top_k_reference"] = top_k_reference
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"wrote {out_path}", flush=True)

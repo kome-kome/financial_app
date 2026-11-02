@@ -361,6 +361,75 @@ class TestInnerCv:
         assert seen["train_groups"] and all(g > 0 for g in seen["train_groups"])
 
 
+class TestInnerScore:
+    """α・l1_ratio を選ぶ基準（#1116）。本番の既定は二乗誤差のままで、rank-IC の版は計測と判定の後でしか入れない。"""
+
+    def test_production_default_is_still_mse(self):
+        """切り替えは事前登録（docs/prereg/m6-inner-score.md）の計測と判定の後（#1112）。"""
+        import plugins.macro_enet as me
+        assert me._INNER_SCORE == "mse"
+
+    def test_mse_final_model_is_unchanged(self):
+        """既定の最終モデルは修正前の手順（`ElasticNetCV`）とビット一致し、メタの形も変えない。"""
+        from plugins.macro_enet import _L1_RATIOS, _final_training_rows
+
+        by_ym, current = _noisy_months()
+        rows, groups = _final_training_rows(by_ym, "rows")
+        want_coef, want_mu = _final_reference(rows, current, _L1_RATIOS)
+        coefs, mu, meta = MacroEnetPlugin._fit_final_and_score(rows, current, _L1_RATIOS, inner_score="mse")
+        assert coefs == want_coef and mu == want_mu
+        assert "inner_score" not in meta and "inner_rank_ic" not in meta
+
+    def test_rank_ic_final_model_chooses_by_rank_ic(self):
+        """rank_ic の最終モデルは CV と同じ関数で選び、メタに基準と内側の点数を出す（二乗誤差とは別の組になる検体）。"""
+        from plugins.macro_enet import _L1_RATIOS, _final_training_rows
+
+        by_ym, current = _noisy_months()
+        rows, groups = _final_training_rows(by_ym, "months_purged")
+        _c, mu, meta = MacroEnetPlugin._fit_final_and_score(
+            rows, current, _L1_RATIOS, inner_cv="months_purged", train_groups=groups, inner_score="rank_ic")
+        _c2, mu_mse, meta_mse = MacroEnetPlugin._fit_final_and_score(
+            rows, current, _L1_RATIOS, inner_cv="months_purged", train_groups=groups)
+        assert meta["inner_score"] == "rank_ic" and meta["inner_rank_ic"] is not None
+        assert meta["alpha_path_min"] <= meta["alpha"] <= meta["alpha_path_max"]
+        assert len(mu) == len(current)
+        assert (meta["alpha"], meta["l1_ratio"]) != (meta_mse["alpha"], meta_mse["l1_ratio"])   # 空振り防止
+        with pytest.raises(ValueError, match="月で区切る"):
+            MacroEnetPlugin._fit_final_and_score(rows, current, _L1_RATIOS, inner_score="rank_ic")
+
+    def test_execute_passes_one_score_to_cv_and_final(self, monkeypatch):
+        """定数1つを `rank_ic` にすれば CV と最終モデルの両方が切り替わる（片方だけ替わると検証と本番が割れる）。"""
+        import plugins.macro_enet as me
+
+        monkeypatch.setattr(me, "_INNER_SCORE", "rank_ic")
+        seen: dict = {}
+        real = MacroEnetPlugin._fit_final_and_score
+
+        def spy(*a, **kw):
+            seen.update(kw)
+            return real(*a, **kw)
+
+        monkeypatch.setattr(MacroEnetPlugin, "_fit_final_and_score", staticmethod(spy))
+        res = _run(_params(use_macro=False))
+        assert res["cv_metrics"]["enet"]["n_folds"] > 0, "rank_ic の CV で fold が1つも立たなかった"
+        assert res["cv_diagnostics"]["inner_score"] == "rank_ic"
+        assert seen["inner_score"] == "rank_ic"
+
+    def test_execute_default_leaves_the_diagnostics_as_they_were(self, monkeypatch):
+        """既定（mse）は診断値に選ぶ基準の印を足さない（夜間の診断値の形を変えない）。"""
+        seen: dict = {}
+        real = MacroEnetPlugin._fit_final_and_score
+
+        def spy(*a, **kw):
+            seen.update(kw)
+            return real(*a, **kw)
+
+        monkeypatch.setattr(MacroEnetPlugin, "_fit_final_and_score", staticmethod(spy))
+        res = _run(_params(use_macro=False))
+        assert "inner_score" not in res["cv_diagnostics"]
+        assert seen["inner_score"] == "mse"
+
+
 # ── 4. execute スモーク ───────────────────────────────────────────────────────
 
 class TestExecuteSmoke:
