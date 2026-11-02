@@ -27,6 +27,9 @@ prev_objective_value / champion_objective_value / n_periods / n_oof_samples に�
 ②候補ごとに暫定ベストを保全する、の2本立てで途中経過を残す。畳んだかどうかは
 `plugin_tuned_params` の `n_combos < n_combos_planned` で判別できる。
 
+`--cycle`（#1114・ADR-0070 決定 4・5）は**探索の周回**の 1 日ぶん: 同じ固定の候補集合を日中枠の空き時間で
+数日に分けて回し切り、周回の終わりに 1 回だけ永続化する（`run_cycle`・状態と規則は `tuning_cycle.py`）。
+
 新規 pip 依存は不要（scikit-learn/xgboost は本番 requirements.txt に既存）。
 """
 from __future__ import annotations
@@ -126,6 +129,8 @@ async def run_search(
     deadline: datetime | None = None,
     confirm_top: int = 0,
     confirm_seeds: int = 0,
+    candidates: list[dict] | None = None,
+    checkpoint: bool = True,
 ) -> dict:
     """1モデル分の探索を実行する共有ロジック（CLI・GitHub Actionsから呼ぶ・Issue #264）。
 
@@ -145,6 +150,13 @@ async def run_search(
     `confirm_top` / `confirm_seeds`（#984）: 探索の後で上位の候補を種を変えて回し直し、種の平均で選び直す
     （`plugins.tuning.search`）。探索の本体は `CONFIRM_RESERVE_MIN` 早く畳み、残りを確かめ直す段に充てる。
     逐次永続化は探索の本体の暫定ベスト（既定の種の score）を書き、段の後で選び直した結果で上書きする。
+
+    `candidates`（#1114）: 測る候補を外から渡す（`plugins.tuning.search` へそのまま渡す）。探索の周回の最後の段
+    （`run_cycle`）が、決勝候補だけを確かめ直して本番へ反映するのに使う。
+
+    `checkpoint=False`（#1114）: 候補ごとの逐次永続化をしない＝書くのは最後の 1 回だけ。探索の周回の最後の段が使う
+    ——周回は途中で消されても状態が「確かめ直す段」のまま残り、次の日に段ごとやり直すので保険が要らず、
+    「本番への反映は周回の終わりに 1 回」（ADR-0070 決定 5）をそのまま守れる。
     """
     from database import get_tuned_params, upsert_tuned_params
     from plugins import execute_plugin, get_plugin
@@ -204,8 +216,9 @@ async def run_search(
         objective=objective, strategy=strategy, n_iter=n_iter, seed=seed,
         champion_params=prev["params"] if prev else None,
         deadline=None if deadline is None else deadline - timedelta(minutes=FINAL_RESERVE_MIN),
-        on_progress=_on_progress if persist else None,
+        on_progress=_on_progress if (persist and checkpoint) else None,
         confirm_top=confirm_top, confirm_seeds=confirm_seeds,
+        candidates=candidates,
     )
     result["persisted"] = False
 
@@ -241,6 +254,158 @@ async def run_search(
     return result
 
 
+def _remaining_min(deadline: datetime | None) -> float | None:
+    """締切までに探索へ使える残り（分）。`FINAL_RESERVE_MIN` を引いた値。締切が無ければ None。"""
+    if deadline is None:
+        return None
+    return (deadline - datetime.now(timezone.utc)).total_seconds() / 60.0 - FINAL_RESERVE_MIN
+
+
+async def run_cycle(
+    model: str,
+    strategy: str,
+    n_iter: int,
+    objective: str,
+    seed: int,
+    db,
+    *,
+    persist: bool = False,
+    persist_scores: bool = False,
+    deadline: datetime | None = None,
+    confirm_top: int,
+    confirm_seeds: int,
+    today=None,
+) -> dict:
+    """探索の周回の 1 日ぶん（#1114・ADR-0070 決定 4・5）。状態と段の規則は `tuning_cycle`。
+
+    固定の候補集合（`plugins.tuning.candidate_pool(dims, strategy, n_iter, seed)`＝月次の探索と同じ集合）を、
+    「決勝候補（前日までの上位 `confirm_top` 件）＋次の束」ずつ**その日のデータで**測る。束の段では本番の表へ何も
+    書かない（`search()` は候補ごとに `tuning_dry_run` で producer を抑止し、ここは `on_progress` を渡さない）。
+    書くのは周回の状態（`app_settings`）だけ。
+
+    回し切って、確かめ直す段（決勝候補＋本番の設定を種 `confirm_seeds` 個で・2 段の選び方）が残り時間に入れば同じ日に
+    続けて回し、`run_search` の通常の経路で**1 回だけ**本番へ反映する（`persist` / `persist_scores`）。入らなければ
+    次の取り出せる日に回す。周回の初日だけ、本番の設定を champion として束の先頭に置く（ADR-0047。以後は決勝候補に
+    残るかどうかで扱う）。
+
+    返り値の `action`: `idle`（今月は済み）/ `skip`（残り時間が足りない）/ `sweep` / `confirm` / `sweep+confirm`。
+    """
+    import tuning_cycle as tc
+    from database import get_setting, get_tuned_params, upsert_setting
+    from plugins import get_plugin
+    from plugins.tuning import candidate_pool, search
+
+    plugin = get_plugin(model)
+    if plugin is None:
+        raise ValueError(f"プラグイン '{model}' が見つかりません")
+    space_fn = getattr(plugin, "tuning_search_space", None)
+    if space_fn is None:
+        raise ValueError(f"プラグイン '{model}' は tuning_search_space() 未実装です")
+    base_params, dims = space_fn()
+    combos = candidate_pool(dims, strategy, n_iter, seed)
+    fp = tc.fingerprint(combos)
+    today = today or datetime.now(tc.JST).date()
+
+    key = tc.state_key(model)
+    raw = get_setting(db, key)
+    state = tc.load(raw)
+    if raw and state is None:
+        logger.warning("周回の記録（%s）を読めないので始め直します（#1114）", key)
+    action, why = tc.decide(state, today, fp)
+    logger.info("探索の周回（#1114）: %s", why)
+    if action == "idle":
+        return {"action": "idle", "reason": why, "state": state}
+    remaining = _remaining_min(deadline)
+    if remaining is not None and remaining < tc.MIN_RUN_MIN:
+        logger.info("残り %.0f 分では測れないので今日は測りません（%.0f 分未満・#1114）", remaining, tc.MIN_RUN_MIN)
+        return {"action": "skip", "reason": why, "state": state}
+    if action == "new":
+        state = tc.new_state(model=model, today=today, fp=fp, n_total=len(combos), prev=state)
+
+    ran: list[str] = []
+    out: dict = {}
+    if state["phase"] == tc.PHASE_SWEEP:
+        t0 = datetime.now(timezone.utc)
+        prev = get_tuned_params(db, model) if (persist and not state["days"]) else None
+        res = await search(
+            plugin, base_params, dims, db,
+            objective=objective, strategy=strategy, n_iter=n_iter, seed=seed,
+            candidates=tc.todays_candidates(state, combos),
+            champion_params=prev["params"] if prev else None,
+            deadline=None if deadline is None else deadline - timedelta(minutes=FINAL_RESERVE_MIN),
+        )
+        minutes = (datetime.now(timezone.utc) - t0).total_seconds() / 60.0
+        state = tc.advance(state, combos, res["evaluated"], res["leaderboard"], today=today, top=confirm_top,
+                           minutes=minutes, truncated=res["config"]["truncated"])
+        upsert_setting(db, key, tc.dump(state))
+        day = state["days"][-1]
+        logger.info("周回 %s の束: %d 件を評価（固定の候補 %d→%d/%d 件目・%.1f 分）・その日の 1 位 score=%s・"
+                    "決勝候補 %d 件・段=%s", state["cycle_id"], day["n_evaluated"], day["from"], day["to"],
+                    state["n_total"], minutes, day["best_score"], len(state["finalists"]), state["phase"])
+        ran.append("sweep")
+        out["sweep"] = res
+        remaining = _remaining_min(deadline)
+        if state["phase"] == tc.PHASE_CONFIRM and not tc.confirm_fits(state, remaining, confirm_seeds):
+            logger.info("固定の候補を回し切りました。確かめ直す段は残り %.0f 分に入らない見積りなので、"
+                        "次の取り出せる日に回します（1 件の最大 %.1f 分 × %d 候補 × 種 %d 個）",
+                        remaining, state["worst_min"], len(state["finalists"]) + 1, confirm_seeds)
+
+    if state["phase"] == tc.PHASE_CONFIRM and ("sweep" not in ran
+                                               or tc.confirm_fits(state, remaining, confirm_seeds)):
+        res = await run_search(model, strategy, n_iter, objective, seed, db,
+                               persist=persist, persist_scores=persist_scores, deadline=deadline,
+                               confirm_top=confirm_top, confirm_seeds=confirm_seeds,
+                               candidates=state["finalists"], checkpoint=False)
+        state = tc.finish(state, res, now=datetime.now(timezone.utc))
+        upsert_setting(db, key, tc.dump(state))
+        logger.info("周回 %s を終えました（%d 日・本番へ反映=%s）", state["cycle_id"], len(state["days"]),
+                    state["result"]["persisted"])
+        ran.append("confirm")
+        out["confirm"] = res
+    return {"action": "+".join(ran), "reason": why, "state": state, **out}
+
+
+def _log_result(result: dict, model: str, objective: str, persist_scores: bool) -> None:
+    """探索1回ぶんの結果をログへ出す（通常の探索と周回の確かめ直す段で共有）。"""
+    cfg = result["config"]
+    if cfg.get("truncated"):
+        # **「畳んだ」を成功のログに埋もれさせない**。exit は 0 のままだが、
+        # 見た候補が計画の一部であることは次回の比較条件そのもの。
+        logger.warning("予算の手前で畳みました: %s/%s 件を評価（#638）",
+                       cfg.get("n_combos"), cfg.get("n_combos_planned"))
+    logger.info("探索完了: best_score=%.4f（objective=%s）", result["best_score"], objective)
+    logger.info("best_params=%s", json.dumps(result["best_params"], ensure_ascii=False))
+    logger.info("config=%s", result["config"])
+    top5 = result["leaderboard"][:5]
+    logger.info("リーダーボード上位%d件:\n%s", len(top5),
+                json.dumps(top5, ensure_ascii=False, indent=2, default=str))
+
+    if cfg.get("confirm"):
+        c = cfg["confirm"]
+        log_fn = logger.warning if c.get("truncated") else logger.info
+        log_fn("確かめ直す段（#984）: %d 候補 × 種 %d/%d 個・入れ替わり=%s・種 %s だけで選んだ 1 位=%s（%s）",
+               c["n_candidates"], c["seeds_completed"], c["seeds_planned"], c["changed"],
+               c["seeds"][0], json.dumps(c["seed_base_best_params"], ensure_ascii=False),
+               c["seed_base_best_score"])
+        if c.get("selection") == "two_stage":
+            logger.info("2 段の選び方（ADR-0070）: 共通 %s 期・rank-IC の 1 位=%s（共通期の rank-IC %s・上位%s社超過 %s）"
+                        "・同点の集合 %s 件・2 段目で入れ替わり=%s・選んだ候補の上位%s社超過 %s・前半/後半の差=%s",
+                        c["n_common_periods"], json.dumps(c["rank_ic_leader_params"], ensure_ascii=False),
+                        c["rank_ic_leader_common_mean"], c["top_k"], c["leader_top_k_mean"],
+                        c["tie_set_size"], c["changed_by_stage2"], c["top_k"], c["chosen_top_k_mean"],
+                        c["split_half"])
+        else:
+            logger.warning("2 段の選び方を使えず、種平均の rank-IC だけで選びました（ADR-0070）: %s",
+                           c.get("selection_reason"))
+    if result["champion_injected"]:
+        logger.info("champion 再測定スコア=%s（同一パネル上の比較・ADR-0047）",
+                    result["champion_score"])
+    if result.get("persisted"):
+        logger.info("plugin_tuned_params へ永続化しました（plugin_name=%s）", model)
+        if persist_scores:
+            logger.info("best params で最終 execute を実行し、producer スコアを永続化しました")
+
+
 async def _run(args: argparse.Namespace) -> None:
     from database import SessionLocal
 
@@ -250,6 +415,21 @@ async def _run(args: argparse.Namespace) -> None:
         logger.info("締切=%s（取り置き %.0f分を引いた時刻まで探索する・#638）",
                     deadline.isoformat(), FINAL_RESERVE_MIN)
     try:
+        if getattr(args, "cycle", False):
+            try:
+                out = await run_cycle(
+                    args.model, args.strategy, args.n_iter, args.objective, args.seed, db,
+                    persist=args.persist, persist_scores=args.persist_scores, deadline=deadline,
+                    confirm_top=args.confirm_top, confirm_seeds=args.confirm_seeds,
+                )
+            except ValueError as e:
+                raise SystemExit(str(e))
+            if "confirm" in out:
+                _log_result(out["confirm"], args.model, args.objective, args.persist_scores)
+            if out.get("state"):
+                import tuning_cycle as tc
+                logger.info("探索の周回の状態: %s", tc.describe(out["state"]))
+            return
         try:
             result = await run_search(
                 args.model, args.strategy, args.n_iter, args.objective, args.seed, db,
@@ -259,43 +439,7 @@ async def _run(args: argparse.Namespace) -> None:
             )
         except ValueError as e:
             raise SystemExit(str(e))
-        cfg = result["config"]
-        if cfg.get("truncated"):
-            # **「畳んだ」を成功のログに埋もれさせない**。exit は 0 のままだが、
-            # 見た候補が計画の一部であることは次回の比較条件そのもの。
-            logger.warning("予算の手前で畳みました: %s/%s 件を評価（#638）",
-                           cfg.get("n_combos"), cfg.get("n_combos_planned"))
-        logger.info("探索完了: best_score=%.4f（objective=%s）", result["best_score"], args.objective)
-        logger.info("best_params=%s", json.dumps(result["best_params"], ensure_ascii=False))
-        logger.info("config=%s", result["config"])
-        top5 = result["leaderboard"][:5]
-        logger.info("リーダーボード上位%d件:\n%s", len(top5),
-                   json.dumps(top5, ensure_ascii=False, indent=2, default=str))
-
-        if cfg.get("confirm"):
-            c = cfg["confirm"]
-            log_fn = logger.warning if c.get("truncated") else logger.info
-            log_fn("確かめ直す段（#984）: %d 候補 × 種 %d/%d 個・入れ替わり=%s・種 %s だけで選んだ 1 位=%s（%s）",
-                   c["n_candidates"], c["seeds_completed"], c["seeds_planned"], c["changed"],
-                   c["seeds"][0], json.dumps(c["seed_base_best_params"], ensure_ascii=False),
-                   c["seed_base_best_score"])
-            if c.get("selection") == "two_stage":
-                logger.info("2 段の選び方（ADR-0070）: 共通 %s 期・rank-IC の 1 位=%s（共通期の rank-IC %s・上位%s社超過 %s）"
-                            "・同点の集合 %s 件・2 段目で入れ替わり=%s・選んだ候補の上位%s社超過 %s・前半/後半の差=%s",
-                            c["n_common_periods"], json.dumps(c["rank_ic_leader_params"], ensure_ascii=False),
-                            c["rank_ic_leader_common_mean"], c["top_k"], c["leader_top_k_mean"],
-                            c["tie_set_size"], c["changed_by_stage2"], c["top_k"], c["chosen_top_k_mean"],
-                            c["split_half"])
-            else:
-                logger.warning("2 段の選び方を使えず、種平均の rank-IC だけで選びました（ADR-0070）: %s",
-                               c.get("selection_reason"))
-        if result["champion_injected"]:
-            logger.info("champion 再測定スコア=%s（同一パネル上の比較・ADR-0047）",
-                        result["champion_score"])
-        if result["persisted"]:
-            logger.info("plugin_tuned_params へ永続化しました（plugin_name=%s）", args.model)
-            if args.persist_scores:
-                logger.info("best params で最終 execute を実行し、producer スコアを永続化しました")
+        _log_result(result, args.model, args.objective, args.persist_scores)
     finally:
         db.close()
 
@@ -324,12 +468,19 @@ def main() -> None:
                          "種の平均で選び直す（#984）。--confirm-seeds と併用。種で結果が動くモデル（M-2）だけ")
     ap.add_argument("--confirm-seeds", type=int, default=0, dest="confirm_seeds",
                     help="確かめ直す段で使う種の数（既定の種を含む・2 以上・#984）")
+    ap.add_argument("--cycle", action="store_true",
+                    help="探索の周回の 1 日ぶんを回す（#1114・ADR-0070）。--strategy / --n-iter / --seed が決める固定の"
+                         "候補集合を、決勝候補（上位 --confirm-top 件）＋次の束ずつ締切まで測り、回し切ったら確かめ直して"
+                         "1 回だけ --persist する。状態は app_settings の tuning_cycle:<model>")
     args = ap.parse_args()
 
     if args.persist_scores and not args.persist:
         ap.error("--persist-scores は --persist と併用してください")
     if (args.confirm_top or args.confirm_seeds) and (args.confirm_top < 1 or args.confirm_seeds < 2):
         ap.error("--confirm-top（1 以上）と --confirm-seeds（2 以上）は両方指定してください（#984）")
+    if args.cycle and not args.confirm_top:
+        ap.error("--cycle は --confirm-top と --confirm-seeds を指定してください（決勝候補の数と、"
+                 "回し切った後に確かめ直す種の数・#1114）")
 
     logging.basicConfig(level=logging.INFO)
     asyncio.run(_run(args))

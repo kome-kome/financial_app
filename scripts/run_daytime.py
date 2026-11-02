@@ -85,6 +85,14 @@ PC を触っている時間帯に叩かれるのが前提で、それはこの�
   `-Now -Force`（叩いたら触らないという約束）だけが、当日限りの解除印で祝日の見送りを外せる。
   月次の重なりは人の有無と関係が無いので外せない
 
+## 窓の残りで回す探索の周回（#1114・ADR-0070 決定 4・5）
+
+キューの仕事が終わった残り時間は、M-2 の固定の候補集合（月次の探索と同じ 150 件）を数日に分けて回し切るのに
+使う。キューの仕事の**後ろ**に 1 本だけ足すステップ（`CYCLE_STEP`）で、予算は窓の等分ではなく**窓の終わりまで**
+（`Step.deadline_at`）——キューの仕事の予算は今までどおりで、早く終われば残りを全部使い、窓を使い切った日は
+起動しない。足すかは周回の状態（`tuning_cycle`）が決め、月次と重なる日・祝日・今月の周回が済んだ日は足さない。
+キューの仕事ではないので、積まない・取り除かない・in-flight に載せない（中断しても周回の状態が冪等に続きを持つ）。
+
 実行:
     python -m scripts.run_daytime                       # キュー先頭から窓に収まるだけ
     python -m scripts.run_daytime --dry-run             # 実行計画だけ
@@ -107,6 +115,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Optional, Sequence
 
+import tuning_cycle
 from scripts import batch_common as bc
 from scripts import run_monthly, run_monthly_beta, run_monthly_m1
 from scripts.batch_common import LOG_DIR, ROOT, Runner, Step  # noqa: F401 （既存 import 互換）
@@ -821,6 +830,19 @@ JOBS: dict[str, Job] = {
         parallel_sensitive=False,
     ),
 }
+
+# ── 窓の残りで回す探索の周回（#1114・ADR-0070 決定 4・5）────────────────────────
+# キューの仕事の後ろに置く**最低優先の埋め草**。キューの仕事ではない（積まない・取り除かない・in-flight に
+# 載せない）——今日測るものがあるかは周回の状態（`tuning_cycle`）が決める。固定の候補集合は月次の探索と
+# キューの `tune:macro_gbdt` と同じ集合で、argv はそこから作る（`--n-iter` や種を書き写さない）。
+# 並走で結果が変わる（探索は rank-IC の大小で候補を選ぶ）ので、月次と重なる日・祝日は足さず、`--peek` の
+# `sensitive` にも含める（`-Force` の無い手動キックで走らせない）。
+CYCLE_MODEL = "macro_gbdt"
+CYCLE_STEP = "tune_cycle:macro_gbdt"
+CYCLE_ARGV = JOBS["tune:macro_gbdt"].argv + ("--cycle",)
+CYCLE_WHY = ("M-2 の探索の周回（#1114・ADR-0070）。キューの仕事が終わった窓の残りで、固定の候補 150 件を"
+             "「決勝候補＋次の束」ずつその日のデータで測る。回し切ったら確かめ直して本番へ 1 回だけ反映する。"
+             "状態は app_settings の tuning_cycle:macro_gbdt")
 
 SPEC = bc.BatchSpec(
     name="日中バッチ",
@@ -1602,6 +1624,48 @@ def steps_for_many(python: str, job_keys: Sequence[str],
     return tuple(steps), owner
 
 
+def read_cycle_state(db=None) -> Optional[dict]:
+    """探索の周回の状態（`tuning_cycle`）。無い・壊れているときは None。"""
+    from database import get_setting
+
+    own = db is None
+    db = db or _session()
+    try:
+        raw = get_setting(db, tuning_cycle.state_key(CYCLE_MODEL))
+    finally:
+        if own:
+            db.close()
+    return tuning_cycle.load(raw)
+
+
+def cycle_planned(today: date, holiday_override: bool = False, db=None) -> tuple[bool, Optional[str]]:
+    """今日、キューの仕事の後ろに探索の周回のステップを足すかと、その理由（ログ行）（#1114）。
+
+    月次と重なる日・祝日は足さない（並走に敏感な仕事と同じ規則・`blocked_by`）。今月の周回が済んでいれば足さない
+    ——済んだ日に毎日ステップを起動して「何もしない」を返すと、ログが毎日同じ行で埋まる。候補集合の定義が変わった
+    ときのやり直しは子が判定する（ここは探索空間を組み立てない）。
+    """
+    kind = blocked_by(today, holiday_override)
+    if kind is not None:
+        reason, _ = _block_reason(kind, today)
+        return False, f"[cycle] {reason}ので、探索の周回は回さない"
+    action, why = tuning_cycle.decide(read_cycle_state(db), today)
+    if action == "idle":
+        return False, f"[cycle] {why}"
+    return True, f"[cycle] キューの仕事の後、窓の残りで探索の周回を回す（{why}）"
+
+
+def cycle_step(python: str, started: datetime) -> Step:
+    """探索の周回のステップ（#1114）。
+
+    締切は**窓の終わり**（起動時刻 + 窓 − マージン）で、キューの仕事の予算（窓の等分）とは別に数える
+    （`Step.deadline_at`）。キューの仕事が早く終われば残りを全部使い、窓を使い切った日は起動しない。
+    """
+    argv = tuple(python if a == "{python}" else a for a in CYCLE_ARGV)
+    return Step(CYCLE_STEP, argv, why=CYCLE_WHY,
+                deadline_at=started + timedelta(minutes=WINDOW_MIN - MARGIN_MIN))
+
+
 def steps_for(python: str, job_key: Optional[str]) -> tuple[Step, ...]:
     """キューから取った1件ぶんのステップ列。`job_key` が None（キューが空）なら空タプル。"""
     steps, _ = steps_for_many(python, [] if job_key is None else [job_key])
@@ -1648,7 +1712,7 @@ def build_parser():
     `--steps` のヘルプに並べる名前は JOBS 全体から作る。検証は今日取り出す件数が決まってから、
     `take` の前に実際のステップ列に対して行う（`main` 参照）。
     """
-    names = ["deps_smoke"] + [j.name for j in JOBS.values()]
+    names = ["deps_smoke"] + [j.name for j in JOBS.values()] + [CYCLE_STEP]
     ap = bc.build_parser(SPEC, list(dict.fromkeys(names)))
     # 2つ渡したときに片方が黙って勝たないよう、互いに排他にする。
     ops = ap.add_mutually_exclusive_group()
@@ -1726,6 +1790,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         note = holiday_table_note(today)
         if note:
             print("  " + note)
+        # 探索の周回（#1114）。キューの外で窓の残りを使うので、キューの行とは別に出す。
+        cycle_state = read_cycle_state()
+        if cycle_state:
+            print("  [cycle] " + tuning_cycle.describe(cycle_state))
+        _, cycle_note = cycle_planned(today, override)
+        if cycle_note:
+            print("  " + cycle_note)
         return 0
     if ns.peek:
         # `run_daytime.ps1 -Now` が「今すぐ叩いてよいか」を判断するための機械可読口。
@@ -1740,14 +1811,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         key = keys[0] if keys else None
         kind = blocked_by(today, override)
         job = JOBS.get(key) if key is not None else None
+        cycle, _ = cycle_planned(today, override)
         print(json.dumps({
             "key": key,
             "name": job.name if job else None,
             "known": job is not None,
             # **未知の仕事は敏感側に倒す。** 判断材料が無いときに黙って走らせない。
             # 複数件を取り出す日（#707）は**1件でも敏感なら敏感**（安全側）。
-            "sensitive": any(
+            # 探索の周回（#1114）がキューの後ろに付く日も敏感——付けば窓の残りを全部使う探索が走る。
+            "sensitive": cycle or any(
                 JOBS[k].parallel_sensitive if k in JOBS else True for k in keys),
+            "cycle": cycle,
             "measured_min": job.measured_min if job else None,
             # 今日取り出す全件と、その合計（#707）。既存の `key` / `measured_min` は
             # 先頭1件のまま＝古い読み手を壊さない。
@@ -1786,6 +1860,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     dry = ns.dry_run
     today = _today()
+    # 窓の始まり。探索の周回の締切（窓の終わり）はここから数える（#1114）。
+    started = datetime.now(timezone.utc)
 
     # **キューを読む前に回収する**（#639）。戻した仕事がそのまま今日の1件になる。
     # ドライランは「何も実行していない」を守るので書かず、回収の見込みだけ当てる（#742）。
@@ -1793,9 +1869,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     # 暦は回収の後に当てる（#681）。期限を迎えた収集は回収した仕事よりも前に並ぶ——
     # 収集は短く、先頭で待たせないことが watchdog の閾値の前提になっている。
     items, sched_notes = apply_schedule(today, write=not dry, preview_reclaim=dry)
-    job_keys, why = select_jobs(items, today, read_holiday_override(today))
+    override = read_holiday_override(today)
+    job_keys, why = select_jobs(items, today, override)
+    cycle, cycle_note = cycle_planned(today, override)
     table_note = holiday_table_note(today)
-    notes += sched_notes + ([why] if why else []) + ([table_note] if table_note else [])
+    notes += (sched_notes + ([why] if why else []) + ([table_note] if table_note else [])
+              + ([cycle_note] if cycle_note else []))
     if notes:
         if dry:
             for line in notes:
@@ -1806,7 +1885,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 for line in notes:
                     runner.write(line)
 
-    if not job_keys:
+    if not job_keys and not cycle:
         # **空を失敗にしない**（平日毎日走るので、積んでいない日に毎回起票すると煩い）。
         # 空だったこと・見送ったことは watchdog のレポートと足跡に出る。
         if items:
@@ -1819,6 +1898,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     # `--steps` の打ち間違いも **取り除く前に** 弾く（#692）。後だと `select_steps` の
     # SystemExit で仕事が戻らない。
     steps, owner = steps_for_many(sys.executable, job_keys)
+    if cycle:
+        # キューの仕事の**後ろ**＝最低優先（#1114）。owner に載せない＝取り除く仕事でも in-flight でもない。
+        steps = (*steps, cycle_step(sys.executable, started))
     selected = bc.select_steps(steps, ns.steps)
     # `--steps` で絞られたら、**生き残ったステップの仕事だけ**を取り除く（#707）。
     # 全部取り除くと、走らせていない仕事がキューから黙って消える。

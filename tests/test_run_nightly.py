@@ -656,3 +656,68 @@ class TestBudgetDeadlineReachesTheChild:
             r.run(rn.Step("x", (sys.executable, "-c", self._probe()),
                           why="test", budget_min=None))
         assert self._read(log) == "MISSING"
+
+
+# ── 絶対時刻の締切（`Step.deadline_at`・#1114）──────────────────────────────────
+#
+# 日中枠の探索の周回は「キューの仕事が早く終わった残り」を使う。分数の予算では残りの長さを表せないので、
+# 窓の終わりを時刻で渡す。残りが無ければ走らせずに成功として扱う（残りを使うステップの正常な姿）。
+
+class TestAbsoluteDeadline:
+    # 子が受け取った締切の読み方は上と同じ（継承すると上のテストが二重に走る）
+    _probe = staticmethod(TestBudgetDeadlineReachesTheChild._probe)
+    _read = TestBudgetDeadlineReachesTheChild._read
+
+    @staticmethod
+    def _now():
+        from datetime import datetime, timezone
+        return datetime.now(timezone.utc)
+
+    def test_the_absolute_deadline_reaches_the_child(self, tmp_path):
+        from datetime import datetime, timedelta
+        log = tmp_path / "n.log"
+        at = self._now() + timedelta(minutes=20)
+        with rn.Runner(log, echo=lambda _: None) as r:
+            r.run(rn.Step("x", (sys.executable, "-c", self._probe()), why="test", deadline_at=at))
+        assert datetime.fromisoformat(self._read(log)) == at
+
+    def test_the_earlier_of_budget_and_deadline_wins(self, tmp_path):
+        from datetime import datetime, timedelta
+        log = tmp_path / "n.log"
+        before = self._now()
+        with rn.Runner(log, echo=lambda _: None) as r:
+            r.run(rn.Step("x", (sys.executable, "-c", self._probe()), why="test",
+                          budget_min=10, deadline_at=before + timedelta(minutes=60)))
+        got = datetime.fromisoformat(self._read(log))
+        assert before + timedelta(minutes=9) <= got <= before + timedelta(minutes=11)
+
+    def test_no_time_left_skips_the_step_without_failing(self, tmp_path):
+        from datetime import timedelta
+        log = tmp_path / "n.log"
+        with rn.Runner(log, echo=lambda _: None) as r:
+            code = r.run(rn.Step("x", (sys.executable, "-c", "raise SystemExit(3)"), why="test",
+                                 deadline_at=self._now() + timedelta(minutes=1)))
+        text = log.read_text(encoding="utf-8")
+        assert code == 0, "残りが無い日に失敗として起票される"
+        assert "SKIP  x" in text and "START x" not in text
+
+    def test_the_step_is_cut_at_the_deadline(self, tmp_path, monkeypatch):
+        from datetime import timedelta
+        from scripts import batch_common as bc
+        monkeypatch.setattr(bc, "DEADLINE_MIN_START_MIN", 0.0)
+        log = tmp_path / "n.log"
+        with rn.Runner(log, echo=lambda _: None, heartbeat_sec=0.05) as r:
+            code = r.run(rn.Step("x", (sys.executable, "-c", "import time; time.sleep(30)"), why="test",
+                                 deadline_at=self._now() + timedelta(seconds=1)))
+        assert code == bc.TIMEOUT_EXIT
+        assert "締切" in log.read_text(encoding="utf-8")
+
+    def test_window_check_counts_only_budgets(self):
+        """締切だけのステップは Σ予算に数えない。どちらも無いステップは今までどおり弾く。"""
+        from datetime import timedelta
+        from scripts import batch_common as bc
+        at = self._now() + timedelta(hours=1)
+        steps = [rn.Step("a", ("x",), why="t", budget_min=400),
+                 rn.Step("b", ("x",), why="t", deadline_at=at)]
+        assert bc.window_problem(steps, 480) is None
+        assert bc.window_problem([*steps, rn.Step("c", ("x",), why="t")], 480) is not None

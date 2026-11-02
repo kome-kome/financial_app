@@ -70,8 +70,13 @@ class SearchDim:
 
 
 def _combo_key(combo: dict) -> tuple:
-    """combo の同一性キー（`_random_combos` の重複排除と champion 投入で共有する）。"""
-    return tuple(sorted(combo.items()))
+    """combo の同一性キー（`_random_combos` の重複排除と champion 投入で共有する）。
+
+    規則の実体は `tuning_cycle.combo_key`（探索の周回が日をまたいで同じキーで数える・#1114）。
+    """
+    from tuning_cycle import combo_key
+
+    return combo_key(combo)
 
 
 def _grid_combos(dims: list) -> list[dict]:
@@ -115,6 +120,17 @@ def _random_combos(dims: list, n_iter: int, rng: random.Random) -> list[dict]:
         seen.add(key)
         out.append(combo)
     return out
+
+
+def candidate_pool(dims: list, strategy: str, n_iter: int, seed: int) -> list[dict]:
+    """`search()` が測る候補の並び（champion を足す前）。
+
+    データに依存せず `dims`・`strategy`・`n_iter`・`seed` だけで決まる——探索の周回（#1114）は、これを
+    **固定の候補集合**として数日に分けて測る（`hyperparameter_search.run_cycle`）。
+    """
+    if strategy == "grid":
+        return _grid_combos(dims)
+    return _random_combos(dims, n_iter, random.Random(seed))
 
 
 def _project_champion(plugin: Any, champion_params: dict, dims: list) -> dict | None:
@@ -213,6 +229,8 @@ def _assemble(
         },
         "champion_injected": champion_combo is not None,
         "champion_score": champion_score,
+        # 失敗した候補を含む評価済みの params（評価した順・#1114）。探索の周回が「どこまで測ったか」を数える
+        "evaluated": [dict(e["params"]) for e in leaderboard],
     }
 
 
@@ -322,8 +340,9 @@ async def search(
     on_progress: Callable[[dict], None] | None = None,
     confirm_top: int = 0,
     confirm_seeds: int = 0,
+    candidates: list[dict] | None = None,
 ) -> dict:
-    """探索空間を評価し {best_params, best_score, objective, leaderboard, config, ...} を返す。
+    """探索空間を評価し {best_params, best_score, objective, leaderboard, config, evaluated, ...} を返す。
 
     各候補は execute_plugin（内部で coerce_params による契約検証→ensure_dependencies→
     execute の順に実行・plugins/__init__.py の単一入口）をフル実行し、その oof_backtest
@@ -381,6 +400,13 @@ async def search(
     （`_confirm_by_seeds`）。M-2 は種だけで OOF rank-IC が 0.009〜0.019 動き、1 回の種で選ぶと上位どうしの差
     （2026-10-01 は 1 位と 2 位で 0.0003）が種の揺れに埋もれる。種で結果が動くと宣言したプラグイン
     （`tuning_seed_base`）だけが使える。有効にすると探索の本体は `deadline` より `CONFIRM_RESERVE_MIN` 早く畳む。
+
+    `candidates`（#1114）: 測る候補の並びを外から渡す（`strategy` / `n_iter` / `seed` からは作らない・それらは
+    `config` の記録にだけ残る）。探索の周回が、固定の候補集合（`candidate_pool`）のうち今日の束と決勝候補だけを
+    測るのに使う。同じ候補は 1 回だけ測り、champion を先頭へ置く規則は変わらない。
+
+    戻り値の `evaluated` は評価した全候補の params（失敗した候補を含む・評価した順）。`leaderboard` は有効な
+    スコアの行だけなので、「どこまで測ったか」を数えるにはこちらを使う（探索の周回が契約違反の候補で止まらないため）。
     """
     if objective not in OBJECTIVES:
         raise ValueError(f"objective は {OBJECTIVES} のいずれかを指定してください: {objective!r}")
@@ -400,8 +426,16 @@ async def search(
     from plugins import execute_plugin
     from plugins.macro_snapshots import shared_snapshot_cache
 
-    rng = random.Random(seed)
-    combos = _grid_combos(dims) if strategy == "grid" else _random_combos(dims, n_iter, rng)
+    if candidates is not None:
+        seen_keys: set = set()
+        combos = []
+        for c in candidates:
+            k = _combo_key(c)
+            if k not in seen_keys:
+                seen_keys.add(k)
+                combos.append(dict(c))
+    else:
+        combos = candidate_pool(dims, strategy, n_iter, seed)
     if not combos:
         raise ValueError("探索空間が空です（dims または only_if 条件を確認してください）")
 
