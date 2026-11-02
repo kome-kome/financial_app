@@ -180,7 +180,9 @@ M-1/M-2/M-3 共有ハイパーパラメータ自動探索エンジン（ADR-0007
 
 呼び出し元は CLI（`hyperparameter_search.py`）のみ（Issue #293 で GUI からの手動トリガーを廃止）。定期実行はこの CLI をローカルの月次バッチ（`scripts/run_monthly.py` / `run_monthly_m1.py`）と日中枠（`scripts/run_daytime.py` の `tune:*`）が叩く（GitHub Actions の月次実行（#292）は #503 で止まり、#504 でワークフロー自体を削除）。M-3 の `load_prices`/`load_macro_levels` キャッシュと M-1 の BIC 選択結果紐づき CV キャッシュ（いずれも Issue #304）も同じ `shared_snapshot_cache()` の名前空間拡張で自動的に有効化される（`search()` 自体の `with` 文は #298 のまま変更なし）。
 
-依存先: `plugins/utils.py`, `plugins/__init__.py`, `database.py`
+**候補リストの口（`candidates`・`candidate_pool`・#1114）**: `candidate_pool(dims, strategy, n_iter, seed)` は `search()` が測る候補の並び（champion を足す前）で、データに依存しない。探索の周回（`hyperparameter_search.run_cycle`・規則は `tuning_cycle.py`）はこれを固定の候補集合として、`search(candidates=...)` で「決勝候補＋次の束」だけを測る（同じ候補は 1 回・champion を先頭へ置く規則は同じ）。戻り値の `evaluated` は**失敗した候補を含む**評価済みの params（`leaderboard` は有効なスコアの行だけ）で、途中経過の通知にも同じ形で入る——周回が「どこまで測ったか」を数えるのに使い、契約違反で落ちる候補で周回が止まらない。`_combo_key` の規則の実体は `tuning_cycle.combo_key`（日をまたいで同じキーで数える）
+
+依存先: `plugins/utils.py`, `plugins/__init__.py`, `database.py`, `tuning_cycle.py`
 
 ---
 

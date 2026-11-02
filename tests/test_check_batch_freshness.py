@@ -581,6 +581,44 @@ class TestProducerThresholdIsDerived:
         widened = bf.Produced(**{**p.__dict__, "window_min": p.window_min + 60})
         assert widened.stale_h == p.stale_h + 1.0
 
+    def test_the_tuning_cycle_threshold_comes_from_its_promise(self):
+        """探索の周回（#1114）は「毎月始まり、始めてから猶予の日数以内に終わる」約束から導く。"""
+        import tuning_cycle as tc
+        p = _by_label(CYCLE_LABEL)
+        assert p.cadence_h == tc.CADENCE_DAYS * 24
+        assert p.window_min == tc.GRACE_DAYS * 24 * 60
+
+
+CYCLE_LABEL = "マクロ勾配ブースティング探索の周回"
+
+
+class TestTuningCycleProducer:
+    """探索の周回の producer は周回の状態の `last_finished_at` を読む（#1114）。"""
+
+    def test_before_the_first_cycle_the_clock_starts_at_introduction(self, monkeypatch):
+        """行が無いことを「止まった」と同じ顔にしない（初回の周回が終わる前に起票しない）。"""
+        import tuning_cycle as tc
+        monkeypatch.setattr(bf, "_get_setting", lambda db, key: None)
+        assert _by_label(CYCLE_LABEL).read(None) == tc.INTRODUCED_AT
+
+    def test_a_finished_cycle_is_read_from_the_state(self, monkeypatch):
+        import tuning_cycle as tc
+        st = tc.new_state(model="macro_gbdt", today=datetime(2026, 11, 4).date(), fp="f", n_total=150)
+        st["last_finished_at"] = "2026-11-05T03:00:00+00:00"
+        seen = []
+
+        def _get(db, key):
+            seen.append(key)
+            return tc.dump(st)
+
+        monkeypatch.setattr(bf, "_get_setting", _get)
+        assert _by_label(CYCLE_LABEL).read(None) == datetime(2026, 11, 5, 3, 0, tzinfo=timezone.utc)
+        assert seen == [tc.state_key("macro_gbdt")]
+
+    def test_the_monthly_search_row_does_not_count_as_a_cycle(self):
+        """`plugin_tuned_params` は月次も書くので、周回が止まっても前進して見える＝読まない。"""
+        assert "plugin_tuned_params" not in _by_label(CYCLE_LABEL).source
+
 
 class TestRunningIsNotTheSameAsProducing:
     """足跡が健全でも成果物は固着しうる（#504 で実際に起きた形）。"""

@@ -47,11 +47,16 @@ ROOT = Path(__file__).resolve().parents[1]
 REAL_SCHEDULE = rd.SCHEDULE
 QUIET_DAY = date(2026, 9, 10)      # 木曜・10日（月次系は 1〜3日、暦は 1日と16日）
 
+# 探索の周回（#1114）は周回の状態が無いと「初回」としてキューの後ろに付く。既存のテストのステップ列を
+# 変えないよう既定では止め、周回のテスト（`TestTuningCycleStep`）は本物を戻す。
+REAL_CYCLE_PLANNED = rd.cycle_planned
+
 
 @pytest.fixture(autouse=True)
 def _quiet_calendar(monkeypatch):
     monkeypatch.setattr(rd, "_today", lambda: QUIET_DAY)
     monkeypatch.setattr(rd, "SCHEDULE", ())
+    monkeypatch.setattr(rd, "cycle_planned", lambda *a, **k: (False, None))
 
 
 class _FakeDB:
@@ -2346,3 +2351,105 @@ class TestRunBatchCallsTheStepHook:
         h = bc.Hooks(**hooks)
         assert bc.run_batch(rd.SPEC, [self._step("a")], h, ["--no-issue"]) == 0
         assert "END   a" in self.log.read_text(encoding="utf-8")
+
+
+# ── 窓の残りで回す探索の周回（#1114・ADR-0070 決定 4・5）──────────────────────────
+
+class TestTuningCycleStep:
+    """キューの仕事の後ろに、窓の終わりまでを使う探索の周回を 1 本だけ足す。
+
+    - 月次と重なる日・祝日・今月の周回が済んだ日は足さない
+    - キューの仕事ではない（積まない・取り除かない・in-flight に載せない）
+    - 予算は窓の等分ではなく窓の終わりまで（`Step.deadline_at`）。キューの仕事の予算は変わらない
+    - 足す日は `--peek` が敏感と答える（`-Force` の無い手動キックで走らせない）
+    """
+
+    @pytest.fixture
+    def db(self, fake_db, monkeypatch, tmp_path):
+        monkeypatch.setattr(rd, "cycle_planned", REAL_CYCLE_PLANNED)
+        monkeypatch.setattr(rd, "_session", lambda: fake_db)
+        monkeypatch.setattr(rd, "log_path", lambda *a, **k: tmp_path / "daytime.log")
+        monkeypatch.setattr(rd, "record_footprint", lambda results: None)
+        self.ran = []
+
+        def _run_batch(spec, steps, hooks, argv):
+            self.ran.append(list(steps))
+            return 0
+
+        monkeypatch.setattr(rd.bc, "run_batch", _run_batch)
+        return fake_db
+
+    @staticmethod
+    def _done_this_month(db, day):
+        import tuning_cycle as tc
+        st = tc.new_state(model=rd.CYCLE_MODEL, today=day.replace(day=1), fp="f", n_total=150)
+        st["phase"] = tc.PHASE_DONE
+        db.store[tc.state_key(rd.CYCLE_MODEL)] = tc.dump(st)
+
+    def test_the_argv_is_the_monthly_search_plus_cycle(self):
+        """固定の候補集合は月次の探索と同じ（`--n-iter` や種を書き写さない）。"""
+        assert rd.CYCLE_ARGV == rd.JOBS["tune:macro_gbdt"].argv + ("--cycle",)
+        assert rd.bc.models_from_steps([rd.cycle_step(sys.executable, datetime.now(timezone.utc))]) \
+            == (rd.CYCLE_MODEL,)
+
+    def test_planned_without_a_state(self, db):
+        planned, note = rd.cycle_planned(QUIET_DAY, db=db)
+        assert planned and "探索の周回" in note
+
+    @pytest.mark.parametrize("day,word", [(date(2026, 10, 2), "月次"), (date(2026, 9, 21), "祝日")])
+    def test_not_planned_on_days_that_block_sensitive_work(self, db, day, word):
+        planned, note = rd.cycle_planned(day, db=db)
+        assert not planned and word in note
+
+    def test_not_planned_once_this_months_cycle_is_done(self, db):
+        self._done_this_month(db, QUIET_DAY)
+        planned, note = rd.cycle_planned(QUIET_DAY, db=db)
+        assert not planned and "済み" in note
+
+    def test_the_cycle_runs_after_the_queue(self, db):
+        rd.write_queue(["tune:macro_dlm"], db=db)
+        before = datetime.now(timezone.utc)
+        assert rd.main([]) == 0
+
+        (steps,) = self.ran
+        assert [s.name for s in steps] == ["tune:macro_dlm", rd.CYCLE_STEP]
+        queue_step, cycle = steps
+        assert queue_step.budget_min == rd.JOB_BUDGET_MIN, "周回を足したらキューの仕事の予算が削られた"
+        assert cycle.budget_min is None
+        window_end = timedelta(minutes=rd.WINDOW_MIN - rd.MARGIN_MIN)
+        assert before + window_end <= cycle.deadline_at <= datetime.now(timezone.utc) + window_end
+        assert rd.read_queue(db=db) == []
+        assert rd.read_inflight(db=db) is None
+
+    def test_an_empty_queue_runs_the_cycle_alone(self, db):
+        assert rd.main([]) == 0
+        assert [[s.name for s in steps] for steps in self.ran] == [[rd.CYCLE_STEP]]
+
+    def test_nothing_runs_when_the_cycle_is_done_and_the_queue_is_empty(self, db):
+        self._done_this_month(db, QUIET_DAY)
+        assert rd.main([]) == 0
+        assert self.ran == []
+
+    def test_the_steps_still_fit_the_window(self, db):
+        rd.write_queue(["tune:macro_dlm"], db=db)
+        rd.main([])
+        (steps,) = self.ran
+        assert bc.window_problem(steps, rd.WINDOW_MIN) is None
+
+    def test_peek_is_sensitive_on_a_cycle_day(self, db, capsys):
+        rd.write_queue(["interim"], db=db)
+        assert rd.main(["--peek"]) == 0
+        out = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+        assert out["cycle"] is True
+        assert out["sensitive"] is True, "収集だけの日でも周回が付けば、手動キックで走らせてはいけない"
+
+    def test_peek_is_not_sensitive_once_the_cycle_is_done(self, db, capsys):
+        self._done_this_month(db, QUIET_DAY)
+        rd.write_queue(["interim"], db=db)
+        rd.main(["--peek"])
+        out = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+        assert out["cycle"] is False and out["sensitive"] is False
+
+    def test_the_step_name_is_accepted_by_steps(self):
+        """`--steps tune_cycle:macro_gbdt` で周回だけを選べる（打ち間違い扱いにしない）。"""
+        rd.build_parser().parse_args(["--steps", rd.CYCLE_STEP])

@@ -51,6 +51,8 @@ ROOT = Path(__file__).resolve().parent
 if str(ROOT) not in sys.path:                      # `python -m scripts.*` からの import 用
     sys.path.insert(0, str(ROOT))
 
+import tuning_cycle  # noqa: E402 — 純関数（database も plugins も import しない）
+
 # **import 時に副作用を持つモジュールをここから呼ばない。** 参照するのは定数だけで、
 # `scripts/run_*.py` と `scripts/batch_common.py` はトップレベルが定数定義に限られている
 # （`SPEC` は純 dataclass）。この前提が崩れると API プロセスが巻き込まれる。
@@ -410,6 +412,17 @@ def _jpx_listing_as_of(db):
     return None if as_of is None else datetime(as_of.year, as_of.month, as_of.day, tzinfo=timezone.utc)
 
 
+def _tuning_cycle_finished_at(db):
+    """M-2 の探索の周回を最後に終えて本番へ反映した時刻（#1114）。
+
+    まだ 1 度も終わっていなければ仕組みを入れた日（`tuning_cycle.INTRODUCED_AT`）——行が無いことを「止まった」と
+    同じ顔にしない（初回の周回が終わる前に起票しない）。`plugin_tuned_params.tuned_at` を読まないのは、月次の
+    探索も同じ行を書くので、周回が止まっても前進して見えるから。
+    """
+    raw = _get_setting(db, tuning_cycle.state_key(run_daytime.CYCLE_MODEL))
+    return tuning_cycle.last_finished_at(tuning_cycle.load(raw))
+
+
 def _scheduled(job: str):
     """日中バッチの暦の1行。読み手と読む場所は暦側が持つ（書き写さない・#681）。"""
     return next(s for s in run_daytime.SCHEDULE if s.job == job)
@@ -556,6 +569,19 @@ PRODUCERS: tuple[Produced, ...] = (
         task_name="financial_app-daytime",
         source=_scheduled("disclosures").source,
         read=_scheduled("disclosures").produced,
+    ),
+    # ── 日中枠の残りで回す探索の周回（#1114・ADR-0070 決定 4・5）───────────────────
+    # 約束は「周回は毎月始まり、始めてから `GRACE_DAYS` 日以内に終わる」（`tuning_cycle` の定数・実測から逆算しない）。
+    # 窓の残りを数日に分けて使うので、窓は日中枠 1 回ぶんではなく猶予の日数で表す。
+    Produced(
+        label="マクロ勾配ブースティング探索の周回",
+        issue_title="[ops] マクロ勾配ブースティング探索の周回が終わっていない",
+        cadence_h=tuning_cycle.CADENCE_DAYS * 24.0,
+        window_min=tuning_cycle.GRACE_DAYS * 24 * 60.0,
+        batch_label="日中バッチ（キューの後ろの探索の周回）",
+        task_name="financial_app-daytime",
+        source="app_settings.tuning_cycle:macro_gbdt (last_finished_at)",
+        read=_tuning_cycle_finished_at,
     ),
 )
 

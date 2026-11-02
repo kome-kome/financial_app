@@ -67,6 +67,10 @@ ENV_DEADLINE = "FINAPP_STEP_DEADLINE_UTC"
 # 合わせると、起動のオーバーヘッドや1ステップの端数で最後のステップが窓から溢れる。
 WINDOW_MARGIN_MIN = 30.0
 
+# 絶対時刻の締切（`Step.deadline_at`・#1114）を持つステップを起動する最低限の残り（分）。これ未満だと、起動して
+# 「今日は測れない」と判断するだけの間に締切を踏み、打ち切り（＝失敗）として起票されうる。
+DEADLINE_MIN_START_MIN = 5.0
+
 
 def _mem_line(root_pid: Optional[int] = None) -> str:
     """heartbeat / env 行へ載せるメモリ実測。**測れなくてもバッチを止めない**。
@@ -97,11 +101,19 @@ class Step:
 
     予算で切れば、それは `TIMEOUT_EXIT` を返す**普通の失敗**になる＝足跡・起票の経路に乗り、
     後続ステップはそのまま走る。
+
+    `deadline_at` は**絶対時刻の締切**（UTC・#1114）。「前のステップが早く終わった残りを使う」ステップのためのもので、
+    分数の予算では表せない（予算は「始まってから何分」なので、残りの長さが実行するまで決まらない）。`budget_min` と
+    併せて渡せば早い方で切る。始まる時点で残りが `DEADLINE_MIN_START_MIN` 未満なら**走らせずに 0 を返す**——残りを使う
+    ステップは「残りが無ければ今日はやらない」が正常で、起動して即打ち切れば失敗として起票されてしまう。
+    `window_problem` は `deadline_at` だけのステップを Σ予算に数えない（締切が窓の内側なら、はみ出しようが無い）ので、
+    **締切を窓の終わり（起動時刻 + 窓 − マージン）より後へ置かないのは呼び出し側の責任**。
     """
     name: str
     argv: tuple[str, ...]
     why: str
     budget_min: Optional[float] = None
+    deadline_at: Optional[datetime] = None
 
 
 @dataclass(frozen=True)
@@ -261,6 +273,13 @@ class Runner:
         1ステップに食い尽くさせない**ためで、これが無いと窓の終わりにタスクスケジューラが
         黙ってプロセスを止め、後続ステップは走った形跡すら残さずに消える。
         """
+        if step.deadline_at is not None:
+            left_min = (step.deadline_at - datetime.now(timezone.utc)).total_seconds() / 60.0
+            if left_min < DEADLINE_MIN_START_MIN:
+                # 失敗にしない（`Step` の docstring）。走らなかったことはこの行と END 行の不在で読める。
+                self.write(f"[{utc_now_iso()}] SKIP  {step.name}: 締切 {step.deadline_at.isoformat()} まで"
+                           f"残り {max(left_min, 0.0):.1f}分（{DEADLINE_MIN_START_MIN:.0f}分未満）なので走らせない")
+                return 0
         self.write(f"[{utc_now_iso()}] START {step.name}: {step.why}")
         self._beat(step.name)
         started = datetime.now(timezone.utc)
@@ -284,12 +303,18 @@ class Runner:
         # であって分数ではない——子が自分の起動時刻から数え直すと、起動の遅れぶんだけ甘くなる。
         # **予算が無いステップでは明示的に消す**。継承した古い値が残ると、無期限のはずの
         # ステップが親から漏れた締切で勝手に畳む（失敗として現れない）。
-        if step.budget_min is None:
+        # 予算と絶対時刻の締切は早い方で切る（`Step` の docstring）。`limit` は打ち切りの行に出す言葉。
+        deadline: Optional[datetime] = None
+        limit = ""
+        if step.budget_min is not None:
+            deadline = started + timedelta(minutes=max(step.budget_min, 0.0))
+            limit = f"予算 {step.budget_min:.0f}分"
+        if step.deadline_at is not None and (deadline is None or step.deadline_at < deadline):
+            deadline, limit = step.deadline_at, f"締切 {step.deadline_at.isoformat()}"
+        if deadline is None:
             env.pop(ENV_DEADLINE, None)
         else:
-            env[ENV_DEADLINE] = (
-                started + timedelta(minutes=max(step.budget_min, 0.0))
-            ).isoformat()
+            env[ENV_DEADLINE] = deadline.isoformat()
         try:
             proc = subprocess.Popen(step.argv, cwd=str(ROOT), env=env,
                                     stdout=self._fh, stderr=subprocess.STDOUT)
@@ -300,7 +325,7 @@ class Runner:
             self.write(f"[{utc_now_iso()}] ERROR {step.name}: 起動できない: {e}")
             return 127
         # `if step.budget_min` にしない——0 が falsy で「無期限」へ化ける。
-        budget_sec = None if step.budget_min is None else max(step.budget_min, 0.0) * 60.0
+        budget_sec = None if deadline is None else max((deadline - started).total_seconds(), 0.0)
         killed = False
         while True:
             waited_sec = (datetime.now(timezone.utc) - started).total_seconds()
@@ -333,7 +358,7 @@ class Runner:
             # 「なぜ落ちたか」を伝えない。予算超過であることが分かる値へ翻訳する。
             returncode = TIMEOUT_EXIT
             self.write(f"[{utc_now_iso()}] TIMEOUT {step.name}: "
-                       f"予算 {step.budget_min:.0f}分を超過したのでツリーごと打ち切った")
+                       f"{limit}を超過したのでツリーごと打ち切った")
         mins = (datetime.now(timezone.utc) - started).total_seconds() / 60.0
         self.write(f"[{utc_now_iso()}] END   {step.name}: exit={returncode} "
                    f"({mins:.1f}分) | {tail[:160]}")
@@ -561,7 +586,12 @@ def run_batch(spec: BatchSpec, steps: Sequence[Step], hooks: Hooks,
         for line in env_lines():
             print(line)
         for s in selected:
-            budget = f"[予算 {s.budget_min:.0f}分] " if s.budget_min is not None else "[予算なし] "
+            if s.budget_min is not None:
+                budget = f"[予算 {s.budget_min:.0f}分] "
+            elif s.deadline_at is not None:
+                budget = f"[締切 {s.deadline_at.isoformat(timespec='minutes')}] "
+            else:
+                budget = "[予算なし] "
             print(f"  {s.name}: {budget}{' '.join(s.argv)}  # {s.why}")
         print("ドライラン（何も実行していない）")
         return 0
@@ -671,11 +701,13 @@ def window_problem(steps: Sequence[Step], window_min: float,
     失敗としては現れない**ので、CI でここを照合する。
 
     予算の無いステップを許さないのは、1本でも無期限があれば窓の保証がその時点で消えるから。
+    絶対時刻の締切（`deadline_at`）だけを持つステップは Σ に数えない——前のステップの残りしか使わないので、締切が
+    窓の内側にある限りはみ出さない（締切の置き場所は呼び出し側が照合する・#1114）。
     """
-    missing = [s.name for s in steps if s.budget_min is None]
+    missing = [s.name for s in steps if s.budget_min is None and s.deadline_at is None]
     if missing:
         return f"予算の無いステップがある（窓の保証が消える）: {', '.join(missing)}"
-    total = sum(s.budget_min for s in steps)      # type: ignore[misc]
+    total = sum(s.budget_min for s in steps if s.budget_min is not None)
     if total + margin_min > window_min:
         return (f"Σ予算 {total:.0f}分 + マージン {margin_min:.0f}分 が窓 {window_min:.0f}分 を超える")
     return None
