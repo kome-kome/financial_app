@@ -218,6 +218,11 @@ autovacuum 較正が入っていなかった**。#290 で Supabase へ 2026-08-1
   ADR-0035）で、接続先（ホスト・ポート・DB 名）が `DATABASE_URL` と違えば起動時に止める。未設定なら
   常用の接続のまま＝この追補の前と同じ。常用ロールに残る書き込みは `app_settings` の `APP_PASSWORD`
   （reset-password）と `egress_cycle_*`（`db_egress._flush_cycle`）だけ。
+- **2026-11-02 に Render の常用接続を `finapp_web` へ切り替えた**（#1094）。権限は `public` の全表・VIEW の
+  SELECT と `app_settings` の INSERT / UPDATE だけで、BYPASSRLS を持つ（全表の RLS がポリシー無しで有効なので、
+  無いとエラー無しで 0 行になる）。`init_db` の VIEW 作り直しで GRANT が消えないよう、`postgres` の既定の権限で
+  今後作る表・VIEW に SELECT を付ける。ポリシーで RLS を越える案は、新しい表の RLS を有効にしたときに
+  `finapp_web` だけ 0 行になる罠が残るので採らなかった。
 
 ## Alternatives considered
 

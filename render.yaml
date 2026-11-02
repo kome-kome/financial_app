@@ -17,9 +17,9 @@ services:
                              # 起動はするが空の DB を掴む＝「接続失敗」ではなく「0件」に化ける。
                              # Render は Supabase の断面を読む閲覧専用の窓（書込は行わない）。
       - key: DATABASE_URL
-        sync: false          # Supabase の接続URL  例: postgresql://postgres:[PW]@db.[PROJ].supabase.co:5432/postgres?sslmode=require
+        sync: false          # Supabase の接続URL。最小権限ロール finapp_web（読み取り＋app_settings だけ・#1094）  例: postgresql://finapp_web.[PROJ]:[PW]@aws-1-ap-northeast-1.pooler.supabase.com:5432/postgres?sslmode=require
       - key: DATABASE_MIGRATION_URL
-        sync: false          # 起動時の書き込み（init_db の DDL 等）だけに使う所有者ロールの URL（#1100）。未設定=DATABASE_URL で全部行う。DATABASE_URL と同じ DB でロールだけ違うこと
+        sync: false          # 起動時の書き込み（init_db の DDL 等）だけに使う所有者ロールの URL（#1100）。未設定=DATABASE_URL で全部行う。DATABASE_URL と同じ DB でロールだけ違うこと  例: postgresql://postgres.[PROJ]:[PW]@（DATABASE_URL と同じホスト以降）
       - key: EDINET_API_KEY
         sync: false          # 金融庁 EDINET API キー  取得: https://disclosure.edinet-fsa.go.jp/
       - key: APP_PASSWORD

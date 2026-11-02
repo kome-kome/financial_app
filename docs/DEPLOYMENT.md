@@ -584,7 +584,8 @@ Render ダッシュボードで管理。
 | 一時的 read-only 移行 | トランザクションが長すぎると自動移行 | `run_full_collection` は `MASTER_BATCH=200` 件ごとに commit |
 | プロジェクト停止 | **1週間アクセスなしで自動停止** | 長期不使用時は要注意 |
 | **Egress（転送量）** | **5 GB / 月** | 超過で全サービス restricted（402）＝2026-07 に検証系のフルロード反復で 61.2GB（1224%）まで出した実績あり。**日次で回るジョブは1回あたりの転送量が月次上限に直結する**（下記「Egress 設計」） |
-| 匿名経路（Data API・RLS） | **Data API（PostgREST）は無効**。`public` の全表で RLS 有効・ポリシー無し、anon / authenticated の表・シーケンスの権限と既定の権限は外してある（2026-11-01・#1094） | アプリは Data API を使わず `postgres`（BYPASSRLS）で直結するので影響を受けない。Render の `init_db` が新しく作る表は RLS off のままだが、Data API が無効なので外からは届かない。Advisor が RLS の警告を出したら [#1094 のコメント](https://github.com/kome-kome/financial_app/issues/1094#issuecomment-6553557142)の SQL ②③ を流し直す。**BYPASSRLS もポリシーも無いロールでつなぐと、RLS の表はエラー無しで0行を返す**（最小権限ロールは #1100・#1094） |
+| 匿名経路（Data API・RLS） | **Data API（PostgREST）は無効**。`public` の全表で RLS 有効・ポリシー無し、anon / authenticated の表・シーケンスの権限と既定の権限は外してある（2026-11-01・#1094） | アプリは Data API を使わず BYPASSRLS のロールで直結するので影響を受けない。Render の `init_db` が新しく作る表は RLS off のままだが、Data API が無効なので外からは届かない。Advisor が RLS の警告を出したら [#1094 のコメント](https://github.com/kome-kome/financial_app/issues/1094#issuecomment-6553557142)の SQL ②③ を流し直す。**BYPASSRLS もポリシーも無いロールでつなぐと、RLS の表はエラー無しで0行を返す** |
+| Render の接続ロール | **常用は `finapp_web`**（2026-11-02・#1094）: ログイン可・BYPASSRLS・`public` の全表と VIEW に SELECT・書けるのは `app_settings` の INSERT / UPDATE だけ（本番で書くのは `APP_PASSWORD` と `egress_cycle_*` の 3 キー）。`postgres` は `DATABASE_MIGRATION_URL` で起動時の書き込みにだけ使う | `alter default privileges for role postgres ... grant select on tables to finapp_web` を入れてあるので、`init_db` が VIEW を作り直しても・表を足しても SELECT は自動で付く（**`postgres` 以外のロールで表を作ると付かない**）。作り方・確認・戻し方は [#1094 のコメント](https://github.com/kome-kome/financial_app/issues/1094#issuecomment-6575980435) |
 
 #### Egress 設計（日次ジョブ = 最大の消費者・Issue #446）
 
@@ -884,8 +885,8 @@ ADR-0006 §Decision-1 が定める CPI チャネル。
 
 | キー | 用途 | デフォルト |
 |---|---|---|
-| `DATABASE_URL` | Supabase PostgreSQL（2026-08-07 の閲覧用断面）の接続 URL | 手動設定（`postgresql://...?sslmode=require`） |
-| `DATABASE_MIGRATION_URL` | 起動時の書き込み（`init_db()` の DDL・パスワード移行・スタックジョブの回収）だけに使う**所有者ロール**の URL（#1100・[ADR-0038](adr/0038-local-postgres-is-the-primary.md) 追補） | 未設定＝`DATABASE_URL` で全部行う（従来どおり）。`DATABASE_URL` を SELECT 中心のロールへ絞るときに設定する（#1094）。`FINAPP_DB_TARGET=prod` のときだけ使い、ホスト・ポート・DB 名が `DATABASE_URL` と違えば起動時に止まる |
+| `DATABASE_URL` | Supabase PostgreSQL（2026-08-07 の閲覧用断面）の接続 URL。**Render は最小権限ロール `finapp_web`**（2026-11-02・#1094・上の「Render の接続ロール」） | 手動設定（`postgresql://finapp_web.<ref>:...@<pooler>:5432/postgres?sslmode=require`） |
+| `DATABASE_MIGRATION_URL` | 起動時の書き込み（`init_db()` の DDL・パスワード移行・スタックジョブの回収）だけに使う**所有者ロール**の URL（#1100・[ADR-0038](adr/0038-local-postgres-is-the-primary.md) 追補）。**Render は `postgres`**（#1094） | 未設定＝`DATABASE_URL` で全部行う（従来どおり）。`FINAPP_DB_TARGET=prod` のときだけ使い、ホスト・ポート・DB 名が `DATABASE_URL` と違えば起動時に止まる。**起動ログの `password authentication failed for user "postgres"` はまずこの値を疑う**（起動時に最初に繋ぐのはこちら・プーラーは `postgres.<ref>` を `postgres` と表示する。2026-11-02 の切り替えの 1 回目はこれで起動失敗し、Render は前の版を動かし続けた） |
 | `EDINET_API_KEY` | 金融庁 EDINET API キー | 手動設定 |
 | `JQUANTS_API_KEY` | J-Quants API キー（任意） | 手動設定 |
 | `FRED_API_KEY` | FRED（米セントルイス連銀）API キー（任意） | 手動設定。未設定時はマクロ収集の FRED チャネルをスキップ |
