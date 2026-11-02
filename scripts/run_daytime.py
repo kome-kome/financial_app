@@ -394,6 +394,24 @@ JOBS: dict[str, Job] = {
         measured_min=13.6,
         parallel_sensitive=True,   # 他の gate と同じ理由（採否が CI の符号で決まる）
     ),
+    # M-6 の α・l1_ratio を内側 CV の二乗誤差で選ぶか rank-IC で選ぶか（#1116・親 #1112・ADR-0070 決定 7）を測る道具。
+    # **積むのは人**（親 #1112）。判定の規則は事前登録（docs/prereg/m6-inner-score.md）に凍結した。凍結値は追記節の値
+    # （テストが照合する）。
+    "gate:inner-cv-score": Job(
+        name="gate_inner_cv_score",
+        argv=("{python}", "-m", "scripts.momentum_gate", "--inner-cv-score",
+              "--stride", "1", "--allow-full-pull", "--refresh-cache",
+              "--prereg", "docs/prereg/m6-inner-score.md",
+              "--prereg-sha", "11266083b9ac5bd7f4ac3443f6823766171ca84e4a4573cdb6e3a4656595e876"),
+        why="M-6 の α・l1_ratio を内側 CV の二乗誤差で選ぶ（本番・mse）か、内側の検証月の rank-IC の平均で選ぶ"
+            "（rank_ic）かを共通 (ym,ec) 域で比べる（#1116）。パネルと内側の区切り方は2条件で同一で、違うのは選ぶ"
+            "基準だけ。対象は M-6 だけ・2検定・alpha 0.025。判定は事前登録の規則（rank-IC が有意に正で、売り側"
+            "spread が有意に負でなければ採用）。凍結値が合わなければ exit 2、切り替えが CV に届かなければ非0で止まる。",
+        # 見積り（未実走）。`gate:inner-cv-purge` の実測 13.6分に、rank_ic 側の候補ごとの Spearman の計算分を足した。
+        # 実走の後に `END gate_inner_cv_score: exit=0 (N.N分)` から差し替える。
+        measured_min=20.0,
+        parallel_sensitive=True,   # 他の gate と同じ理由（採否が CI の符号で決まる）
+    ),
     # M-2 / M-6 が小型株を高く置く偏り（#957）を、予測から log 時価総額の効果を月ごとに除いた順位で
     # 測る道具（#970）。**積むのは人**。#957 は 2026-10-18 の結果で M-6 だけ本番（`macro_enet._SIZE_NEUTRAL`）へ
     # 入れた（#995）＝本番は M-2 が raw、M-6 が size_neutral。

@@ -671,6 +671,53 @@ class TestInnerCvPurgeGateMeasuresM6:
         assert rd.JOBS[self.KEY].parallel_sensitive is True
 
 
+class TestInnerCvScoreGateMeasuresM6:
+    """M-6 の選ぶ基準のジョブ（#1116・親 #1112）は M-6 だけを、間引かずに、本番（mse）を分母に、事前登録の凍結値で測る。
+
+    事前登録（docs/prereg/m6-inner-score.md）は「M-6 だけ・mse / rank_ic・2検定・α 0.025」。
+    """
+
+    KEY = "gate:inner-cv-score"
+
+    def test_the_job_runs_the_score_axis_with_the_default_models(self):
+        from scripts.momentum_gate import INNER_CV_SCORE_MODELS
+
+        argv = rd.JOBS[self.KEY].argv
+        assert "--inner-cv-score" in argv
+        assert "--models" not in argv
+        assert INNER_CV_SCORE_MODELS == ["elasticnet"]
+
+    def test_the_preregistered_base_and_tests(self):
+        import plugins.macro_enet as me
+        from scripts.momentum_gate import (
+            INNER_CV_SCORE_CONDS, INNER_CV_SCORE_MODELS, base_of, bonferroni_alpha, build_conditions)
+
+        conds = build_conditions(inner_cv_score=True, models=INNER_CV_SCORE_MODELS)
+        assert base_of(conds) == "mse"
+        assert INNER_CV_SCORE_CONDS["mse"] == me._INNER_SCORE == "mse"            # 本番の構成
+        assert bonferroni_alpha(len(INNER_CV_SCORE_MODELS), len(conds)) == pytest.approx(0.025)
+
+    def test_frozen_value_matches_the_prereg_appendix(self):
+        """凍結し直したら（本文と追記節の凍結値を変えたら）日中キューの引数も直す。"""
+        from pathlib import Path
+
+        from scripts import prereg
+        from scripts.momentum_gate import INNER_CV_SCORE_PREREG
+
+        argv = rd.JOBS[self.KEY].argv
+        assert argv[argv.index("--prereg") + 1] == INNER_CV_SCORE_PREREG
+        text = (Path(__file__).resolve().parent.parent / INNER_CV_SCORE_PREREG).read_text(encoding="utf-8")
+        assert argv[argv.index("--prereg-sha") + 1] == prereg.recorded_sha(text) == prereg.body_sha256(text)
+
+    def test_the_job_measures_at_full_resolution(self):
+        argv = rd.JOBS[self.KEY].argv
+        assert "--smoke" not in argv
+        assert argv[argv.index("--stride") + 1] == "1"
+
+    def test_the_result_changes_with_background_work(self):
+        assert rd.JOBS[self.KEY].parallel_sensitive is True
+
+
 class TestSizeNeutralGateMeasuresM2AndM6:
     """規模の中立化のジョブ（#970・#957）は M-2 / M-6 を、間引かずに、予測そのまま（raw）を分母に測る。
 

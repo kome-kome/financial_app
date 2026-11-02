@@ -170,6 +170,18 @@ _EN_INNER_CV_CHOICES = ("rows", "months", _EN_INNER_CV_PURGED)
 _EN_INNER_CV_DEFAULT = "rows"
 # 月の境界で区切る方式＝各学習月の行数（`train_groups`）が要る方式。
 _EN_INNER_CV_BY_MONTH = ("months", _EN_INNER_CV_PURGED)
+# α・l1_ratio を内側 CV で選ぶ**基準**（#1116・ADR-0070 決定 7）。`mse` は `ElasticNetCV` の二乗誤差（今の版）、
+# `rank_ic` は内側の検証月ごとの Spearman（予測 × 生のラベル）の平均が最大の組。評価と探索の基準は rank-IC なのに、
+# 選ぶ基準だけが二乗誤差になっている——その差を測るための版で、**既定は `mse` のまま**（M-6 本体の基準は
+# `macro_enet._INNER_SCORE`。切り替えは事前登録 `docs/prereg/m6-inner-score.md` の計測と判定の後・#1112）。
+# `rank_ic` は検証の行を月へ割り戻すので、月で区切る `_EN_INNER_CV_BY_MONTH` でしか使えない。
+_EN_INNER_SCORE_DEFAULT = "mse"
+_EN_INNER_SCORE_RANK_IC = "rank_ic"
+_EN_INNER_SCORE_CHOICES = (_EN_INNER_SCORE_DEFAULT, _EN_INNER_SCORE_RANK_IC)
+# α パスの下限の比（`ElasticNetCV` の既定 `eps`）。`rank_ic` も同じ並びを試す＝2つの版で違うのは選ぶ基準だけ。
+_EN_ALPHA_EPS = 1e-3
+# 期内の Spearman を取る最小の社数（`macro_snapshots._spearman`・M-4 の `rank_ic_grid` と同じ）。
+_EN_RANK_IC_MIN_N = 3
 
 
 def _purge_gap_months() -> int:
@@ -276,12 +288,144 @@ def alpha_path_bounds(model, l1_ratios) -> tuple[float, float]:
     return float(path.min()), float(path.max())
 
 
+def enet_alpha_grid(X: np.ndarray, y: np.ndarray, l1_ratio: float,
+                    n_alphas: int = _EN_N_ALPHAS, eps: float = _EN_ALPHA_EPS) -> np.ndarray:
+    """`ElasticNetCV(fit_intercept=True)` が l1_ratio ごとに作る α パスと同じ並び（降順）を返す（#1116）。
+
+    sklearn は学習データ全体で1回だけ作り、全内側 fold で共有する（非公開の `_alpha_grid`）。式は
+    α_max = max_j |Σ_i (x_ij − x̄_j)(y_i − ȳ)| / (n · l1_ratio) から α_max·eps まで等比で n_alphas 点。
+    非公開関数には頼らず同じ手順で書き、`ElasticNetCV().alphas_` との一致をテストで縛る。退化
+    （α_max が分解能以下）も sklearn と同じく分解能の値で埋める。
+    """
+    X = np.asarray(X, dtype=float)
+    yc = np.asarray(y, dtype=float) - np.average(y, axis=0)
+    Xyw = (X.T @ yc - np.average(X, axis=0) * np.sum(yc, axis=0))[:, np.newaxis]
+    alpha_max = np.sqrt(np.max(np.abs(np.sum(Xyw ** 2, axis=1)))) / (X.shape[0] * l1_ratio)
+    if alpha_max <= np.finfo(np.float64).resolution:
+        return np.full(n_alphas, np.finfo(np.float64).resolution)
+    return np.geomspace(alpha_max, alpha_max * eps, num=n_alphas)
+
+
+def month_rank_ics(preds: np.ndarray, labels, month_of_row) -> list[np.ndarray]:
+    """月ごとの Spearman（予測の各列 × ラベル）を、月の数だけの (列数,) 配列で返す（#1116）。
+
+    `preds` は (行数, 候補数)。各月で順位（同順位は平均順位・`macro_snapshots._avg_ranks` と同じ）の Pearson を
+    取る＝`_spearman` を候補ごとに回したものと同じ値。`_EN_RANK_IC_MIN_N` 社未満の月は返さず、予測が月内で
+    すべて同じ値の列（係数が全て 0 等）とラベルが無分散の月は NaN（`_spearman` の None）にする。
+    """
+    from scipy.stats import rankdata
+
+    preds = np.asarray(preds, dtype=float)
+    labels = np.asarray(labels, dtype=float)
+    month_of_row = np.asarray(month_of_row)
+    out = []
+    for m in np.unique(month_of_row):
+        rows = np.flatnonzero(month_of_row == m)
+        if len(rows) < _EN_RANK_IC_MIN_N:
+            continue
+        rp = rankdata(preds[rows], axis=0)
+        ry = rankdata(labels[rows])
+        dp = rp - rp.mean(axis=0)
+        dy = ry - ry.mean()
+        vp = np.sum(dp ** 2, axis=0)
+        vy = float(np.sum(dy ** 2))
+        with np.errstate(invalid="ignore", divide="ignore"):
+            ic = (dp.T @ dy) / np.sqrt(vp * vy)
+        ic[(vp <= 0) | (vy <= 0)] = np.nan
+        out.append(ic)
+    return out
+
+
+def _select_by_rank_ic(X: np.ndarray, y: np.ndarray, y_rank, splits, month_of_row, l1_ratios: tuple,
+                       n_alphas: int, max_iter: int) -> tuple[float, float, np.ndarray, float | None]:
+    """内側の検証月の rank-IC の平均が最大の (α, l1_ratio) を選ぶ（#1116）。
+
+    α の並びは `enet_alpha_grid`（学習全体で l1_ratio ごとに1回・`ElasticNetCV` と同じ）。各 split では学習行を
+    中心化して `enet_path` で並び全体の係数を出し（`ElasticNetCV` の `_path_residuals` と同じ手順。切片は月内の
+    順位に効かないので足さない）、検証行の予測と**生のラベル** `y_rank` の月ごとの Spearman を取る。点数は全 split の
+    検証月を1つに並べた単純平均（NaN の月は除く）。規約は M-4 の `rank_ic_grid` と同じ: 先に来た候補が勝つ
+    （`>` で比べる＝α は大きい側・l1_ratio は与えた順）。全候補の点数が出なければ最初の l1_ratio の最大の α
+    （係数が全て 0＝定数の予測）にする。返り値は (α, l1_ratio, その l1_ratio の並び, 点数 or None)。
+    """
+    from sklearn.linear_model import enet_path
+
+    grids = [enet_alpha_grid(X, y, r, n_alphas) for r in l1_ratios]
+    ics_by_ratio = [[[] for _ in range(n_alphas)] for _ in l1_ratios]
+    for tr, te in splits:
+        X_tr, y_tr = X[tr], y[tr]
+        X_c = X_tr - X_tr.mean(axis=0)
+        y_c = y_tr - y_tr.mean()
+        for k, r in enumerate(l1_ratios):
+            _alphas, coefs, _gaps = enet_path(X_c, y_c, l1_ratio=r, alphas=grids[k],
+                                              max_iter=max_iter, selection="cyclic")
+            for ic in month_rank_ics(X[te] @ coefs, np.asarray(y_rank)[te], month_of_row[te]):
+                for j in range(n_alphas):
+                    if not math.isnan(ic[j]):
+                        ics_by_ratio[k][j].append(float(ic[j]))
+    best = None
+    for k, r in enumerate(l1_ratios):
+        for j in range(n_alphas):
+            ics = ics_by_ratio[k][j]
+            if ics:
+                score = sum(ics) / len(ics)
+                if best is None or score > best[0]:
+                    best = (score, k, j)
+    if best is None:
+        return float(grids[0][0]), float(l1_ratios[0]), grids[0], None
+    score, k, j = best
+    return float(grids[k][j]), float(l1_ratios[k]), grids[k], score
+
+
+def fit_elasticnet(X: np.ndarray, y: np.ndarray, *, l1_ratios: tuple, n_alphas: int, cv_splits: int,
+                   max_iter: int, inner_cv: str = _EN_INNER_CV_DEFAULT, train_groups=None,
+                   inner_score: str = _EN_INNER_SCORE_DEFAULT, y_rank=None) -> tuple:
+    """α・l1_ratio を内側 CV で選んで学習した `(model, chosen)` を返す（#1116）。CV の fit_predict と最終モデルが共有する。
+
+    `model` は `predict`・`coef_`・`intercept_` を持つ。`chosen` は `{"alpha", "l1_ratio", "path_min", "path_max"}`
+    （path_* は選んだ l1_ratio の α パスの端・#726）で、`rank_ic` のときだけ内側の点数 `inner_rank_ic` を足す。
+    `mse`（既定）は修正前と同じ引数で組んだ `ElasticNetCV` そのもの（予測はビット一致）。`rank_ic` は
+    `_select_by_rank_ic` で選び、全学習行で `ElasticNet` を学習し直す（`ElasticNetCV` の最後の refit と同じ）。
+    `y_rank` は月内の順位を取る生のラベル（winsorize 前）、`train_groups` は各学習月の行数（月の昇順）。
+    """
+    from sklearn.linear_model import ElasticNet, ElasticNetCV
+
+    if inner_score not in _EN_INNER_SCORE_CHOICES:
+        raise ValueError(f"未知の inner_score: {inner_score}（{', '.join(_EN_INNER_SCORE_CHOICES)} のみ）")
+    cv = elasticnet_inner_cv(len(X), cv_splits, inner_cv, train_groups)
+    if inner_score == _EN_INNER_SCORE_DEFAULT:
+        model = ElasticNetCV(
+            l1_ratio=list(l1_ratios),
+            alphas=n_alphas,        # sklearn>=1.7: 整数を渡すと自動生成する α パス本数
+            cv=cv,
+            max_iter=max_iter,
+            random_state=42,
+            selection="cyclic",     # 決定的（random は seed 依存の座標選択順）
+        )
+        model.fit(X, y)
+        lo, hi = alpha_path_bounds(model, l1_ratios)
+        return model, {"alpha": float(model.alpha_), "l1_ratio": float(model.l1_ratio_),
+                       "path_min": lo, "path_max": hi}
+    if inner_cv not in _EN_INNER_CV_BY_MONTH:
+        raise ValueError(f"inner_score='{inner_score}' は月で区切る内側 CV（{', '.join(_EN_INNER_CV_BY_MONTH)}）"
+                         f"でしか使えない（受け取った inner_cv: {inner_cv}）")
+    if y_rank is None or len(y_rank) != len(X):
+        raise ValueError(f"inner_score='{inner_score}' には学習行と同じ長さの生のラベル（y_rank）が要る")
+    month_of_row = np.repeat(np.arange(len(train_groups)), [int(g) for g in train_groups])
+    alpha, l1_ratio, grid, score = _select_by_rank_ic(
+        X, y, y_rank, cv, month_of_row, l1_ratios, n_alphas, max_iter)
+    model = ElasticNet(alpha=alpha, l1_ratio=l1_ratio, max_iter=max_iter, random_state=42, selection="cyclic")
+    model.fit(X, y)
+    return model, {"alpha": alpha, "l1_ratio": l1_ratio, "path_min": float(grid.min()),
+                   "path_max": float(grid.max()), "inner_rank_ic": score}
+
+
 def make_elasticnet_fit_predict(l1_ratios: tuple = _EN_L1_RATIOS,
                                 n_alphas: int = _EN_N_ALPHAS,
                                 cv_splits: int = _EN_CV_SPLITS,
                                 max_iter: int = _EN_MAX_ITER,
                                 diag: dict | None = None,
-                                inner_cv: str = _EN_INNER_CV_DEFAULT) -> Callable:
+                                inner_cv: str = _EN_INNER_CV_DEFAULT,
+                                inner_score: str = _EN_INNER_SCORE_DEFAULT) -> Callable:
     """ElasticNet（L1+L2）の fit_predict を返す（Zou & Hastie 2005）。
 
     M-1(OLS・BIC 特徴選択) と M-2(XGBoost 非線形) の中間に位置づく「頑健な正則化線形」。
@@ -301,40 +445,44 @@ def make_elasticnet_fit_predict(l1_ratios: tuple = _EN_L1_RATIOS,
     `inner_cv` を積む（`rows` では何も足さない＝夜間の診断値の形は変わらない）。
     `months_purged`（#979）も `train_groups` を使い、診断値には `inner_cv` に加えて、その fold で実際に空けた月数
     `inner_cv_gap` を積む（学習月の少ない fold では縮む・`purged_month_plan`）。`months` では積まない。
+    `inner_score`（#1116）は α・l1_ratio を選ぶ基準（`fit_elasticnet`）。既定 `mse` は修正前と同一で、`rank_ic`
+    のときだけ診断値に `inner_score` と選んだ組の内側の点数 `inner_rank_ic` を積む。`rank_ic` は月で区切る `inner_cv` が要る。
     """
-    from sklearn.linear_model import ElasticNetCV
-
     if inner_cv not in _EN_INNER_CV_CHOICES:
         raise ValueError(f"未知の inner_cv: {inner_cv}（{', '.join(_EN_INNER_CV_CHOICES)} のみ）")
+    if inner_score not in _EN_INNER_SCORE_CHOICES:
+        raise ValueError(f"未知の inner_score: {inner_score}（{', '.join(_EN_INNER_SCORE_CHOICES)} のみ）")
+    if inner_score != _EN_INNER_SCORE_DEFAULT and inner_cv not in _EN_INNER_CV_BY_MONTH:
+        raise ValueError(f"inner_score='{inner_score}' は月で区切る内側 CV（{', '.join(_EN_INNER_CV_BY_MONTH)}）"
+                         f"でしか使えない（受け取った inner_cv: {inner_cv}）")
 
     def fit_predict(train_samples, test_samples, train_groups=None):
         X_tr, y_tr, X_te, y_mu, y_sd, y_te = _prep_matrices(train_samples, test_samples)
-        model = ElasticNetCV(
-            l1_ratio=list(l1_ratios),
-            alphas=n_alphas,        # sklearn>=1.7: 整数を渡すと自動生成する α パス本数
-            cv=elasticnet_inner_cv(len(X_tr), cv_splits, inner_cv, train_groups),
-            max_iter=max_iter,
-            random_state=42,
-            selection="cyclic",     # 決定的（random は seed 依存の座標選択順）
-        )
-        model.fit(X_tr, y_tr)
+        model, chosen = fit_elasticnet(
+            X_tr, y_tr, l1_ratios=l1_ratios, n_alphas=n_alphas, cv_splits=cv_splits, max_iter=max_iter,
+            inner_cv=inner_cv, train_groups=train_groups, inner_score=inner_score,
+            y_rank=[s[1] for s in train_samples])
         yhat = (model.predict(X_te) * y_sd + y_mu).tolist()
 
         if diag is not None:
-            diag["alpha"].append(float(model.alpha_))
-            diag["l1_ratio"].append(float(model.l1_ratio_))
+            diag["alpha"].append(chosen["alpha"])
+            diag["l1_ratio"].append(chosen["l1_ratio"])
             diag["n_nonzero"].append(int(np.count_nonzero(model.coef_)))
             diag["coef"].append([float(c) for c in model.coef_])
             # 0/1 で積む＝`summarize_diag` の平均が「α パスの端に張り付いた fold の割合」になる（#726）
-            lo, hi = alpha_path_bounds(model, l1_ratios)
-            diag["alpha_at_path_min"].append(int(math.isclose(model.alpha_, lo, rel_tol=1e-9)))
-            diag["alpha_at_path_max"].append(int(math.isclose(model.alpha_, hi, rel_tol=1e-9)))
+            diag["alpha_at_path_min"].append(int(math.isclose(chosen["alpha"], chosen["path_min"], rel_tol=1e-9)))
+            diag["alpha_at_path_max"].append(int(math.isclose(chosen["alpha"], chosen["path_max"], rel_tol=1e-9)))
             if inner_cv != _EN_INNER_CV_DEFAULT:
                 # 切り替えが CV まで届いたかを呼び出し側が確かめる印（`momentum_gate --inner-cv`）
                 diag["inner_cv"].append(inner_cv)
             if inner_cv == _EN_INNER_CV_PURGED:
                 diag["inner_cv_gap"].append(
                     purged_month_plan(len(train_groups), cv_splits, _purge_gap_months())[2])
+            if inner_score != _EN_INNER_SCORE_DEFAULT:
+                # 選ぶ基準の切り替えが CV まで届いたかの印（`momentum_gate --inner-cv-score`・#1116）
+                diag["inner_score"].append(inner_score)
+                if chosen["inner_rank_ic"] is not None:
+                    diag["inner_rank_ic"].append(chosen["inner_rank_ic"])
         return yhat, y_te
 
     return fit_predict

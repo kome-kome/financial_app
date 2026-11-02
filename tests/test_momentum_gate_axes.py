@@ -139,6 +139,16 @@ class TestModesAreMutuallyExclusive:
         (dict(size_neutral=True, subsample=True)),
         (dict(valid_split=True, subsample=True)),
         (dict(inner_cv_purge=True, subsample=True)),
+        # M-6 の選ぶ基準のモード（#1116）もパネルを動かさないが、軸を2つ振ると分離できない点は同じ。
+        (dict(windows=[3], inner_cv_score=True)),
+        (dict(macro=True, inner_cv_score=True)),
+        (dict(risk_axis=True, inner_cv_score=True)),
+        (dict(fin_fill=True, inner_cv_score=True)),
+        (dict(size_neutral=True, inner_cv_score=True)),
+        (dict(valid_split=True, inner_cv_score=True)),
+        (dict(inner_cv_purge=True, inner_cv_score=True)),
+        (dict(subsample=True, inner_cv_score=True)),
+        (dict(earnings_yield=True, inner_cv_score=True)),
     ]
 
     @pytest.mark.parametrize("kwargs", PAIRS)
@@ -659,6 +669,7 @@ class TestOutputNamesTheModeThatWasMeasured:
         (dict(size_neutral=True), "size_neutral"),
         (dict(valid_split=True), "valid_split"),
         (dict(inner_cv_purge=True), "inner_cv_purge"),
+        (dict(inner_cv_score=True), "inner_cv_score"),
         (dict(subsample=True), "subsample"),
     ])
     def test_mode_follows_the_flag(self, kwargs, want):
@@ -669,7 +680,7 @@ class TestOutputNamesTheModeThatWasMeasured:
                                     "fin_rows", "demean_target", "risk_axis", "fin_nan",
                                     "de_exclude", "fin_fill", "size_neutral",
                                     "valid_split", "inner_cv_purge", "subsample", "train_exclude_index",
-                                    "earnings_yield"}
+                                    "earnings_yield", "inner_cv_score"}
 
     def test_demean_mode_writes_its_own_file(self):
         """既定の `momentum_gate.json` を上書きしない（どの軸の結果かがファイル名で分かる）。"""
@@ -693,6 +704,8 @@ class TestOutputNamesTheModeThatWasMeasured:
          "FIN NAN AXIS [common domain = complete-financials rows only; read raw for blank rows]"),
         ("de_exclude", 2, "DE EXCLUDE AXIS"),
         ("inner_cv_purge", 2, "INNER CV PURGE AXIS [M-6 only; same panel on both sides]"),
+        ("inner_cv_score", 2,
+         "INNER CV SCORE AXIS [M-6 only; same panel on both sides; judged by docs/prereg/m6-inner-score.md]"),
         ("subsample", 2, "SUBSAMPLE AXIS [M-2 only; same panel on both sides]"),
         ("size_neutral", 2,
          "SIZE NEUTRAL AXIS [same CV; rows without market cap dropped from both sides]"),

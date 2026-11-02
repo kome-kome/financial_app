@@ -52,8 +52,8 @@ from . import progress
 from .base import AnalysisPlugin
 from .model_candidates import (
     _EN_INNER_CV_BY_MONTH,
-    alpha_path_bounds,
-    elasticnet_inner_cv,
+    _EN_INNER_SCORE_DEFAULT,
+    fit_elasticnet,
     make_diag,
     make_elasticnet_fit_predict,
     summarize_diag,
@@ -106,6 +106,13 @@ from .model_candidates import _EN_N_ALPHAS as _N_ALPHAS
 # 測るため）。候補メニューは関数の既定（`rows`）のままで、ここに追随しない。
 # `momentum_gate` の分母と M-6 の既定の条件はこの値から取る（ゲートの「本番の構成」を書き写さない）。
 _INNER_CV = "months_purged"
+
+# α・l1_ratio を内側 CV で選ぶ基準（#1116・`model_candidates.fit_elasticnet`）。`_INNER_CV` と同じく **CV と最終モデルの
+# 両方へこの1つを渡す**。既定は二乗誤差（`ElasticNetCV`）。評価と探索の基準は rank-IC なので、内側を rank-IC で選ぶ版
+# （`rank_ic`）を `momentum_gate --inner-cv-score` で比べる（ADR-0070 決定 7）。判定の規則は測る前に
+# `docs/prereg/m6-inner-score.md` へ凍結した。切り替えるかは親 #1112 でその結果を読んでから決める（ここは測る前の値）。
+# `momentum_gate` の分母はこの値から取る（ゲートの「本番の構成」を書き写さない）。
+_INNER_SCORE = _EN_INNER_SCORE_DEFAULT
 
 # 予測の後処理として、断面ごとに log(時価総額) の線形の効果を除く（#957・#995）。`μ̂' = μ̂ − b·(x − x̄)`
 # （`macro_snapshots.neutralize_size`・x のある社の平均は保つ・時価総額の無い社は補正しない）。M-6 は大型株を
@@ -372,7 +379,7 @@ class MacroEnetPlugin(AnalysisPlugin):
         diag = make_diag()
         fit_predict = make_elasticnet_fit_predict(
             l1_ratios=l1_ratios, n_alphas=_N_ALPHAS, cv_splits=_CV_SPLITS,
-            max_iter=_MAX_ITER, diag=diag, inner_cv=_INNER_CV,
+            max_iter=_MAX_ITER, diag=diag, inner_cv=_INNER_CV, inner_score=_INNER_SCORE,
         )
 
         cv_folds, cv_residuals = walk_forward_cv_monthly(
@@ -434,7 +441,7 @@ class MacroEnetPlugin(AnalysisPlugin):
         current_rows = [current_snaps[c][0] for c in codes_ordered]
         coefs, mu_preds, final_meta, breakdown = self._fit_final_and_score(
             all_samples, current_rows, l1_ratios, return_breakdown=True,
-            inner_cv=_INNER_CV, train_groups=train_groups)
+            inner_cv=_INNER_CV, train_groups=train_groups, inner_score=_INNER_SCORE)
         # 規模の中立化（#995）。母集団は永続化する全社（今買えない社も含む）を1つの断面として回す。
         # 社ごとの補正量は内訳の行（`contrib_size`）に出し、「基準＋寄与＝μ̂」を保つ。
         size_adj = [0.0] * len(codes_ordered)
@@ -571,7 +578,8 @@ class MacroEnetPlugin(AnalysisPlugin):
     @staticmethod
     def _fit_final_and_score(all_samples: list, current_rows: list, l1_ratios: tuple,
                              return_breakdown: bool = False, *, inner_cv: str = "rows",
-                             train_groups: list[int] | None = None) -> tuple:
+                             train_groups: list[int] | None = None,
+                             inner_score: str = _EN_INNER_SCORE_DEFAULT) -> tuple:
         """全学習データで ElasticNet を再学習し、現在断面 μ̂ と係数・メタを返す。
 
         CV の fit_predict（`make_elasticnet_fit_predict`）と同じ前処理・同じ探索設定を使う。
@@ -587,9 +595,9 @@ class MacroEnetPlugin(AnalysisPlugin):
         `inner_cv` / `train_groups`（#971）は CV の fit_predict と同じ内側 CV の区切り方
         （`elasticnet_inner_cv`）。`months`・`months_purged` では `all_samples` が月の昇順に連結され、`train_groups` が
         その各月の行数であること（`_final_training_rows` が作る）。既定 `rows` は修正前と同一。
+        `inner_score`（#1116）も CV の fit_predict と同じ選ぶ基準（`fit_elasticnet`）。既定 `mse` は修正前と同一で、
+        `rank_ic` のときだけメタに `inner_score` と選んだ組の内側の点数 `inner_rank_ic` を足す。
         """
-        from sklearn.linear_model import ElasticNetCV
-
         train = list(all_samples)
         test = [(row, 0.0) for row in current_rows]   # ラベルは未知（予測には一切使わない）
 
@@ -599,29 +607,30 @@ class MacroEnetPlugin(AnalysisPlugin):
         y_z, y_mu, y_sd = normalize(y_w, "zscore")
         X_te = [transform_feature_row(s[0], win_p, norm_p) for s in test]
 
-        model = ElasticNetCV(
-            l1_ratio=list(l1_ratios), alphas=_N_ALPHAS,
-            cv=elasticnet_inner_cv(len(X_tr), _CV_SPLITS, inner_cv, train_groups),
-            max_iter=_MAX_ITER,
-            random_state=42, selection="cyclic",
-        )
-        model.fit(np.asarray(X_tr, dtype=float)[:, 1:], np.asarray(y_z, dtype=float))
+        model, chosen = fit_elasticnet(
+            np.asarray(X_tr, dtype=float)[:, 1:], np.asarray(y_z, dtype=float),
+            l1_ratios=l1_ratios, n_alphas=_N_ALPHAS, cv_splits=_CV_SPLITS, max_iter=_MAX_ITER,
+            inner_cv=inner_cv, train_groups=train_groups, inner_score=inner_score,
+            y_rank=[s[1] for s in train])
         X_cur = np.asarray(X_te, dtype=float)[:, 1:]
         mu = model.predict(X_cur) * y_sd + y_mu
-        path_min, path_max = alpha_path_bounds(model, l1_ratios)
+        path_min, path_max = chosen["path_min"], chosen["path_max"]
         meta = {
-            "alpha":     round(float(model.alpha_), 6),
-            "l1_ratio":  round(float(model.l1_ratio_), 4),
+            "alpha":     round(chosen["alpha"], 6),
+            "l1_ratio":  round(chosen["l1_ratio"], 4),
             "n_nonzero": int(np.count_nonzero(model.coef_)),
             "n_features": n_feat,
             # 選ばれた α / l1_ratio が候補の端かを後から読むための値（夜間の診断・#726）。
             # 端の判定は丸める前の値で行う（丸めた α と比べると一致を取り逃す）。
             "alpha_path_min": path_min,
             "alpha_path_max": path_max,
-            "alpha_at_path_min": math.isclose(model.alpha_, path_min, rel_tol=1e-9),
-            "alpha_at_path_max": math.isclose(model.alpha_, path_max, rel_tol=1e-9),
+            "alpha_at_path_min": math.isclose(chosen["alpha"], path_min, rel_tol=1e-9),
+            "alpha_at_path_max": math.isclose(chosen["alpha"], path_max, rel_tol=1e-9),
             "l1_ratio_grid": [float(r) for r in l1_ratios],
         }
+        if inner_score != _EN_INNER_SCORE_DEFAULT:
+            meta["inner_score"] = inner_score
+            meta["inner_rank_ic"] = chosen["inner_rank_ic"]
         if return_breakdown:
             breakdown = {
                 "base":    float(model.intercept_) * y_sd + y_mu,

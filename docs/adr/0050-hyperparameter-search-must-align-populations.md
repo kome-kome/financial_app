@@ -1647,3 +1647,23 @@ M-2 の XGBoost は木ごとに学習行の `subsample`（0.8）割を抽出す�
   （M-6 では差の符号を反転して「中立化を外すと悪くなるか」と読む）
 - M-2 は入れない。M-2 の `use_sector_features`（log 総資産を特徴量に入れる）の形は測っていない
 - `PREPROCESS_VERSION` は上げない（断面の前処理ではなく予測の後処理で、`financial_metrics` VIEW も factor premia の重みも変えない）
+
+## 追記（2026-11-03・その11）: M-6 の α・l1_ratio を選ぶ基準（二乗誤差 か rank-IC か）を比べる軸を足す——道具だけ（#1116・#1112）
+
+M-6 は α・l1_ratio を内側 CV の**二乗誤差**で選ぶ（`ElasticNetCV`）が、評価と探索の基準は rank-IC で、選ぶ基準だけが
+食い違っていた（ADR-0070 の Context）。内側の検証月ごとの Spearman の平均が最大の組を選ぶ方式
+（`inner_score="rank_ic"`・`model_candidates.fit_elasticnet`）を選べるようにし、本番の `mse` と比べる軸（`--inner-cv-score`・
+日中キューの `gate:inner-cv-score`）を足した。**本番は変えていない**（`macro_enet._INNER_SCORE = "mse"`）。
+
+- **違うのは選ぶ基準だけ。** 試す候補（l1_ratio 3 × α 20 点）の α の並びは `ElasticNetCV` と同じ式で作り（`enet_alpha_grid`・
+  `ElasticNetCV().alphas_` との一致をテストで縛る）、内側の区切り方は両側とも本番の `months_purged`。`rank_ic` は検証の行を
+  月へ割り戻すので、月で区切る内側 CV でしか使えない（`rows` では止める）。CV と最終モデルは同じ関数で選ぶ
+- **点数の規約は M-4 の `rank_ic_grid`（ADR-0015）と同じ**: 3 社未満の月・予測が月内で全て同じ値の月は除き、同点は先に来た
+  候補（α は大きい側）。rank-IC は順位しか見ないので、小さい α の側では点数がぴったり同点に並ぶ——同点は正則化の強い側を採る
+- **母集団は動かない。** パネルは2条件で1枚を共有し（`panel_cond`）、差し替えるのは M-6 の CV へ渡す候補の opts だけ
+- **対象は M-6 だけ**（`INNER_CV_SCORE_MODELS`）。検定数 1モデル × 2指標 ＝ **2**、補正後 α ＝ **0.025**
+- **分母は本番の `mse` で、本番が `mse` でなくなったら止める**（`build_conditions`）
+- **判定の規則は ADR の追記ではなく `docs/prereg/m6-inner-score.md` に凍結した**（`scripts/prereg.py`・#1007 の形式）。採用は
+  「rank-IC の差が正で p < 0.025」かつ「売り側spread の差が負で p < 0.025 ではない」（売り側は拒否権・ユーザー判断 2026-11-03）。
+  このモードだけ `--prereg` と `--prereg-sha` が必須で、凍結値が合わなければ exit 2。判定は道具が `prereg_decision` に出す
+- **既定を切り替えるかは親 #1112 で、この run を読んでから決める**

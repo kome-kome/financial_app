@@ -141,6 +141,8 @@ ADR-0047 の「プールに champion を置くので best ≥ champion」は、*
 
 内側の α・l1_ratio を rank-IC で選ぶ版と今の版（二乗誤差）を、共通域で比べる計測を事前登録してから回す。
 前例は両方向にある（M-4 の重みは NNLS → `rank_ic_grid` で効いた・ADR-0015／M-5 は学習の目的を順位にして負けた・ADR-0017）。
+事前登録は [docs/prereg/m6-inner-score.md](../prereg/m6-inner-score.md)、道具は `momentum_gate --inner-cv-score`（日中キューの
+`gate:inner-cv-score`・ADR-0050 その11）。本番の既定（`macro_enet._INNER_SCORE`）はその結果を読むまで `mse` のまま。
 
 ## Consequences
 
