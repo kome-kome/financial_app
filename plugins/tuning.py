@@ -542,7 +542,8 @@ async def _confirm_by_seeds(
     - 書き換えるもの: `best_params` / `best_score`（**選んだ候補の種平均 rank-IC**＝物差しは変えない）/ `best_oof`
       （既定の種の OOF）/ `champion_score`（champion の種の平均）。候補の leaderboard の行に `seed_scores`（{種: score}）と
       `seed_mean`、2 段で選べた回は `common_rank_ic_mean` / `top_k_mean` / `in_tie_set` を足し、`config["confirm"]` に
-      段の要約（`selection` ほか）を置く。期別系列は行に入れない（`leaderboard_json` を肥大させない）
+      段の要約（`selection` ほか）を置く。この段が測る種ごとの期別系列は行に入れない（`leaderboard_json` を肥大させない）。
+      既定の種の期別系列は、探索の本体が各行に入れる `oof`（`oof_backtest` の辞書そのもの）として `leaderboard_json` に入る
     """
     from plugins.macro_snapshots import OPERATIONAL_TOP_K
 
