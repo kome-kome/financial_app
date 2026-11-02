@@ -1021,6 +1021,16 @@ paired-t は系列相関を無視して分散を過小評価し、有意差を�
 > ADR-0004 が確立した OOF-first 哲学を「差の有意性」まで押し進める補強であり非矛盾。
 > 参考: Politis & Romano (1994) DOI:10.1080/01621459.1994.10476870 / Nadeau & Bengio (2003) DOI:10.1023/A:1024068626366。
 
+**本番の設定の行（#1115・[ADR-0070](adr/0070-search-selects-in-two-stages-for-top-k-buying.md) 決定 6）**: 比較はどのモデルも
+スキーマ既定の設定で回すが、M-2 は本番で探索の 1 位の設定が動いていて、既定の行は実際に買っている M-2 ではない。
+そこで比較の画面と `measure_top_k_veto` の λ の参考に、`plugin_tuned_params` を画面と同じ射影
+（`plugins.tuning.project_tuned_params`）で写した設定の行「M-2（本番）」を既定の行の直後に足す
+（`run_comparison(include_production=True)`・行は `variant="production"`）。本番の設定は採点と同じ期で選ばれているので
+成績は実力より良く出る（**選択の楽観**）——行に `selection_optimism` を付け、**▲▼ にも Bonferroni の組数にも入れない**
+（判定は既定の行どうしのまま）。データが探索した日から変わっていても行は出し、`panel_changed` で注記する（指紋は毎晩の
+収集で変わるので、変わったら出さないと探索した当日しか出ない）。本番の設定が無いときは理由だけの行になる。偏りの無い
+比較は `prediction_snapshots`（#1005）が 52 週たまってから本当の OOS で行う。OOF 運用再現への本番の行は #1123。
+
 ### 9.13 OOF の現実性強化：業種中立rank-IC＋ネットターンオーバーコスト（#368・ADR-0018）
 
 生 rank-IC と 100%回転固定のネット spread だけでは、**業種ベットと真の銘柄選択力**／**低回転な安定モデルと高回転モデル**を区別できない。#368 は `oof_backtest` に `meta_by_ym`（残差と同順の `{ym:[(stock_id, industry)]}`・`build_oof_meta` が build_snapshots 出力から組む）を渡したときのみ算出する2指標を**純後処理・追加学習/Egress ゼロ・numpy 不要**で足す（無印キーは不変＝後方互換）。

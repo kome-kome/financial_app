@@ -177,6 +177,71 @@ def _project_champion(plugin: Any, champion_params: dict, dims: list) -> dict | 
     return combo
 
 
+def project_tuned_params(plugin, params: dict) -> tuple[dict, list[str]]:
+    """保存済みの調整値を**現在の探索空間へ射影**する（#604）。
+
+    `plugin_tuned_params` は「そのとき探索した空間」の記録なので、**軸を外すと古い値が
+    残り続ける**。画面はこれを「🔧 自動調整済み」としてフォームへプリフィルするため、
+    探索をやめた設定が推奨値として出続ける——実際 M-1 は 2026-09-04 に
+    `use_momentum`/`momentum_window` を軸から外したが、保存値は
+    `use_momentum=True, momentum_window=18`（2026-09-02 の探索）のままで、
+    次の月次探索（毎月3日・#579 で2日から移動）まで画面に出続ける状態だった。
+
+    射影の規則:
+      - `base_params` にあるキー … **その値で上書き**（探索が固定した測定条件そのもの）
+      - dims にある軸           … 保存値をそのまま使う（探索で選ばれた値）
+      - どちらにも無いキー       … 落とす（`coerce_params` が `params_schema` の既定を補完）
+
+    第2要素は「保存値と違う扱いになったキー」。画面はこれを注記に使う。**黙って値を
+    変えると、今度は「調整済みと言いながら別の値」という逆の混乱になる。**
+
+    `tuning_search_space()` を持たないプラグインは射影せずそのまま返す。
+
+    置き場所はここ（#1115 で `routers/analysis.py` から移した）。モデル比較（`model_comparison`）が
+    「本番の設定」の行を作るのに同じ射影を使い、`routers` を import すると循環するため。
+    """
+    space_fn = getattr(plugin, "tuning_search_space", None)
+    if space_fn is None:
+        return dict(params), []
+    try:
+        base, dims = space_fn()
+    except Exception:                                  # 探索空間が壊れていても表示は殺さない
+        log.warning("tuning_search_space() の取得に失敗（射影せず生値を返す）", exc_info=True)
+        return dict(params), []
+
+    dim_names = {d.name for d in dims}
+    out: dict = {}
+    changed: list[str] = []
+    for k, v in (params or {}).items():
+        if k in base:
+            out[k] = base[k]
+            if base[k] != v:
+                changed.append(k)
+        elif k in dim_names:
+            out[k] = v
+        else:
+            changed.append(k)                          # 空間から消えた＝落として既定へ
+    for k, v in base.items():                          # 保存値に無い固定値も足す
+        out.setdefault(k, v)
+    return out, sorted(changed)
+
+
+def panel_changed(tuned_fp: str | None, current_fp: str | None) -> bool | None:
+    """保存時のパネルと現在のパネルが違うか。True=違う / False=同じ / None=判定不能。
+
+    **`stale_params` へ混ぜない。** 「探索空間から軸が消えた」と「パネルが動いた」は別の
+    事実で、同じ顔にすると読む人が原因を選べない（`batch_freshness.status_of` が missing と
+    stale を分けているのと同じ）。
+
+    どちらかが欠けていれば None ＝**「同じ」と積極的に言えたときだけ False** を返す。
+    指紋を持たない古い行と、指紋を読めなかった回を、「一致した」と同じ扱いにしない
+    （`check_batch_freshness.recovered()` が ok を積極的に言えた対象だけ返すのと同じ向き）。
+    """
+    if not tuned_fp or not current_fp:
+        return None
+    return tuned_fp != current_fp
+
+
 def _assemble(
     base_params: dict,
     leaderboard: list[dict],

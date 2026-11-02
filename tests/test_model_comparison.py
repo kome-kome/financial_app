@@ -227,3 +227,120 @@ class TestSignificanceCorrection:
         sm = _run(only_models=list(two))["significance_matrix"]
         assert sm["n_tests"] == 1
         assert sm["alpha"] == pytest.approx(0.05)
+
+
+# ── 本番の設定の行（#1115・ADR-0070 決定 6）────────────────────────────────────
+
+class TestProductionVariant:
+    """M-2 は本番で探索の 1 位の設定が動いている。既定の行の直後に本番の設定の行を足す。
+
+    - 本番の行は選択の楽観を含むので ▲▼ と Bonferroni の組数には入れない（判定は既定の行だけ）
+    - 本番の設定が無ければ行は理由だけを持つ（数値は出さない）
+    - データが探索した日から変わっていても行は出し、`panel_changed` で注記する（#1115 でユーザー判断）
+    """
+
+    TUNED = {"params": {"learning_rate": 0.01, "use_momentum": True, "gone_axis": 3},
+             "data_fingerprint": "fp-at-tuning", "tuned_at": "2026-11-01T05:00:00+00:00"}
+
+    @staticmethod
+    def _gbdt():
+        from plugins.tuning import SearchDim
+
+        def space():
+            return {"use_momentum": False}, [SearchDim("learning_rate", [0.01, 0.05])]
+        return SimpleNamespace(name="macro_gbdt", label="M-2", heavy=True, tuning_search_space=space)
+
+    def _setup(self, monkeypatch, tuned=TUNED, current_fp="fp-now"):
+        import database
+        import hyperparameter_search
+
+        pmap = {n: _fake_plugin(n) for n in _MODELS}
+        pmap["macro_gbdt"] = self._gbdt()
+        self.calls = []
+
+        async def _exec(p, params, db):
+            self.calls.append((p.name, dict(params), database.is_tuning_objective_only(),
+                               database._tuning_dry_run.get()))
+            return {"oof_backtest": {"rank_ic": {"mean": 0.1},
+                                     "rank_ic_by_period": {"2020-01": 0.1, "2020-04": 0.2, "2020-07": 0.15}}}
+
+        _patch(monkeypatch, pmap, _exec)
+        monkeypatch.setattr(database, "get_tuned_params",
+                            lambda db, name: tuned if name == "macro_gbdt" else None)
+        monkeypatch.setattr(hyperparameter_search, "_data_fingerprint", lambda db: current_fp)
+
+    @staticmethod
+    def _prod(res):
+        return next(m for m in res["models"] if model_comparison.is_production(m))
+
+    def test_the_production_row_follows_the_default_row(self, monkeypatch):
+        self._setup(monkeypatch)
+        res = _run(include_production=True)
+        assert [m["short"] for m in res["models"]] == ["M-1", "M-2", "M-2（本番）", "M-3", "M-4", "M-5", "M-6"]
+        prod = res["models"][2]
+        assert prod["name"] == "macro_gbdt" and prod["selection_optimism"] is True
+        assert prod["available"] is True
+        # 画面と同じ射影: base は上書き・軸は保存値・空間から消えたキーは落とす
+        assert prod["params"] == {"learning_rate": 0.01, "use_momentum": False}
+        assert prod["stale_params"] == ["gone_axis", "use_momentum"]
+        assert prod["tuned_at"] == self.TUNED["tuned_at"]
+        gbdt = [c for c in self.calls if c[0] == "macro_gbdt"]
+        assert [c[1] for c in gbdt] == [{}, prod["params"]], "既定の行は {}・本番の行は射影した設定で回す"
+        assert all(c[2] and c[3] for c in gbdt), "本番の行も objective_only と dry_run の内側（本番の μ̂ を上書きしない）"
+
+    def test_the_production_row_is_kept_out_of_the_verdicts(self, monkeypatch):
+        """▲▼ の組にも Bonferroni の組数にも入れない（入れると既定の行どうしの基準まで変わる）。"""
+        self._setup(monkeypatch)
+        with_prod = _run(include_production=True)["significance_matrix"]
+        without = _run()["significance_matrix"]
+        assert with_prod["models"] == without["models"] == _SHORTS
+        assert with_prod["n_tests"] == without["n_tests"] == 15
+
+    def test_without_a_tuned_row_only_the_reason_is_shown(self, monkeypatch):
+        self._setup(monkeypatch, tuned=None)
+        prod = self._prod(_run(include_production=True))
+        assert prod["available"] is False and prod["reason"] == "no_production_config"
+        assert "oof_backtest" not in prod
+        assert [c[1] for c in self.calls if c[0] == "macro_gbdt"] == [{}], "本番の設定が無いのに回した"
+
+    def test_a_changed_panel_is_noted_not_hidden(self, monkeypatch):
+        self._setup(monkeypatch, current_fp="fp-now")
+        prod = self._prod(_run(include_production=True))
+        assert prod["available"] is True and prod["panel_changed"] is True
+
+    def test_the_same_panel_and_an_unreadable_panel(self, monkeypatch):
+        import hyperparameter_search
+        self._setup(monkeypatch, current_fp="fp-at-tuning")
+        assert self._prod(_run(include_production=True))["panel_changed"] is False
+
+        def _boom(db):
+            raise RuntimeError("count(*) に失敗")
+        monkeypatch.setattr(hyperparameter_search, "_data_fingerprint", _boom)
+        prod = self._prod(_run(include_production=True))
+        assert prod["available"] is True and prod["panel_changed"] is None, "指紋が取れなくても行は出す"
+
+    def test_render_skips_the_production_row_too(self, monkeypatch):
+        self._setup(monkeypatch)
+        prod = self._prod(_run(include_production=True, render_light_mode=True))
+        assert prod["reason"] == "heavy_render"
+        assert self.calls == []
+
+    def test_the_default_call_has_no_production_row(self, monkeypatch):
+        """既定は False＝既存の呼び出し（CLI・テスト）の行の集合を変えない。"""
+        self._setup(monkeypatch)
+        assert not any(model_comparison.is_production(m) for m in _run()["models"])
+
+    def test_a_failing_production_run_does_not_stop_the_comparison(self, monkeypatch):
+        self._setup(monkeypatch)
+        real = plugin_registry.execute_plugin
+
+        async def _exec(p, params, db):
+            if p.name == "macro_gbdt" and params:
+                raise ValueError("本番の設定が契約を満たさない")
+            return await real(p, params, db)
+
+        monkeypatch.setattr(plugin_registry, "execute_plugin", _exec)
+        res = _run(include_production=True)
+        prod = self._prod(res)
+        assert prod["available"] is False and prod["reason"] == "value_error"
+        assert res["models"][-1]["available"] is True, "後続のモデルまで止まった"

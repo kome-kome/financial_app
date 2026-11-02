@@ -228,7 +228,7 @@ class TestCancelledRunIsA409:
         assert r.json()["detail"] == analysis.CANCELLED_MESSAGE
 
     def test_model_comparison(self, local_db, monkeypatch):
-        async def cancelled(db, render_light_mode=False, only_models=None):
+        async def cancelled(db, render_light_mode=False, only_models=None, include_production=False):
             raise progress.AnalysisCancelled("取消しました")
 
         monkeypatch.setattr(model_comparison, "run_comparison", cancelled)

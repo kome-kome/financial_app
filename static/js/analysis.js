@@ -1024,11 +1024,33 @@ const MC_REASON_LABEL = {
   value_error:    'データ不足のため実行できませんでした',
   not_registered: 'モデルが登録されていません',
   error:          '実行エラー',
+  no_production_config: '本番の設定（探索の結果）がまだ保存されていません',
 };
+
+// 本番の設定の行（#1115・ADR-0070 決定 6）。探索の 1 位を採点と同じ期で測った値なので実力より良く出る
+// （選択の楽観）。サーバーは ▲▼ の組に入れない（model_comparison.is_production）ので、画面も印で分ける。
+function _mcProductionHTML(m) {
+  if (m.variant !== 'production' || !m.available) return '';
+  const when = m.tuned_at ? new Date(m.tuned_at).toLocaleDateString('ja-JP') : '-';
+  const panel = m.panel_changed === true
+    ? `<div style="font-size:11px;color:var(--status-warn-text)">探索した日（${esc(when)}）からパネルが変わっている（いまのデータで測り直した値）</div>`
+    : m.panel_changed == null
+      ? '<div style="font-size:11px;color:var(--text-muted)">探索した日のパネルと同じかは確かめられない</div>'
+      : '';
+  const stale = (m.stale_params || []).length
+    ? `<div style="font-size:11px;color:var(--text-muted)">探索空間から外れて既定へ戻した設定: ${esc(m.stale_params.join(', '))}</div>`
+    : '';
+  return `<div style="margin-bottom:8px;padding:6px 8px;border:1px dashed var(--status-warn-text);border-radius:6px" title="本番は探索で選んだ設定で動いている。その設定は採点と同じ期で選ばれているので、成績は実力より良く出る（選択の楽観）。昇格・退役・▲▼の判定はスキーマ既定の行で行う（ADR-0070）。">
+    <div style="font-size:11px;font-weight:700;color:var(--status-warn-text)">本番の設定（${esc(when)} の探索）・選択の楽観を含む</div>
+    <div style="font-size:11px;color:var(--text-muted)">採点と同じ期で選んだ設定なので実力より良く出る。判定（▲▼）には入れない</div>
+    ${panel}${stale}
+  </div>`;
+}
 
 function _mcModelCard(m) {
   const head = `<div style="font-size:13px;font-weight:700;color:var(--accent-text)">${esc(m.short)}</div>
-    <div style="font-size:11px;color:var(--text-muted);margin-bottom:8px">${esc(m.label || m.name)}</div>`;
+    <div style="font-size:11px;color:var(--text-muted);margin-bottom:8px">${esc(m.label || m.name)}</div>
+    ${_mcProductionHTML(m)}`;
   if (!m.available) {
     const msg = MC_REASON_LABEL[m.reason] || '実行できませんでした';
     const detail = m.error ? `<div style="font-size:11px;color:var(--text-muted);margin-top:6px">${esc(m.error)}</div>` : '';
@@ -1234,7 +1256,11 @@ function _renderModelComparison(data) {
   document.getElementById('mc-computed-at').textContent =
     `実行時刻: ${ca}　｜　rank-IC・ロングショート spread が高いほど μ̂ の予測力が高い（無リーク OOF）`;
   document.getElementById('mc-grid').innerHTML = models.map(_mcModelCard).join('');
-  document.getElementById('mc-matrix').innerHTML = _mcMatrixHTML(data.significance_matrix);
+  // 本番の設定の行は ▲▼ の組に入っていない（#1115）。表だけ見て「本番の M-2 の判定」と読まれないよう添える
+  const prod = models.some(m => m.variant === 'production' && m.available)
+    ? '<div style="font-size:11px;color:var(--text-muted);margin-top:6px">本番の設定の行（選択の楽観を含む）はこの表に入れていない。判定はスキーマ既定の行どうしで行う（ADR-0070）。</div>'
+    : '';
+  document.getElementById('mc-matrix').innerHTML = _mcMatrixHTML(data.significance_matrix) + prod;
 }
 
 // ── ユーティリティ ───────────────────────────────────────────────────
