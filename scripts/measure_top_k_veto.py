@@ -51,6 +51,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from model_comparison import VARIANT_PRODUCTION, is_production  # noqa: E402
 from model_stats import bootstrap_mean_se, paired_ic_significance  # noqa: E402
 from scripts import prereg  # noqa: E402
 
@@ -116,8 +117,12 @@ def series_of(entry: dict) -> tuple[str, dict]:
 
 
 def build_table(models: list[dict]) -> tuple[dict[str, dict[int, dict]], dict[str, str]]:
-    """モデル比較の `models` から `(table, sources)` を作る。対象のモデルが欠けていれば ValueError。"""
-    by_name = {m.get("name"): m for m in models}
+    """モデル比較の `models` から `(table, sources)` を作る。対象のモデルが欠けていれば ValueError。
+
+    事前登録の規則はスキーマ既定の行だけで判定する（本番の設定の行は選択の楽観を含む・#1115）。同じ名前の
+    本番の行で既定の行を上書きしないよう、本番の行は先に外す。
+    """
+    by_name = {m.get("name"): m for m in models if not is_production(m)}
     missing = [n for n in MODELS if not (by_name.get(n) or {}).get("available")]
     if missing:
         detail = ", ".join(f"{n}({(by_name.get(n) or {}).get('reason', 'absent')})" for n in missing)
@@ -134,10 +139,21 @@ def build_table(models: list[dict]) -> tuple[dict[str, dict[int, dict]], dict[st
     return table, sources
 
 
+def ref_key(entry: dict) -> str:
+    """`lambda_reference` のキー。本番の設定の行は `<name>:production`（既定の行を上書きしない・#1115）。"""
+    return f"{entry['name']}:{VARIANT_PRODUCTION}" if is_production(entry) else entry["name"]
+
+
+def _ref_label(key: str) -> str:
+    name, _, variant = key.partition(":")
+    return MODEL_SHORT[name] + ("*" if variant else "")
+
+
 def lambda_reference(models: list[dict]) -> dict:
     """{モデル: {K: 差の検定}}＝画面の並び U − 予想 μ̂ の上位K社超過リターン（#1040・規則の外）。
 
     画面の並びの採点を持たないモデル（λ=0）は入れない。どちらかの系列が無い K は None。
+    本番の設定の行（M-2・#1115）は `<name>:production` のキーで並べる（選択の楽観を含む参考）。
     """
     out: dict[str, dict] = {}
     for m in models:
@@ -146,19 +162,22 @@ def lambda_reference(models: list[dict]) -> dict:
             continue
         u = display.get("top_k_excess_return_by_period") or {}
         mu = (m.get("oof_backtest") or {}).get("top_k_excess_return_by_period") or {}
-        out[m["name"]] = {str(k): paired_ic_significance(u.get(str(k)) or {}, mu.get(str(k)) or {})
-                          for k in CANDIDATE_K}
+        out[ref_key(m)] = {str(k): paired_ic_significance(u.get(str(k)) or {}, mu.get(str(k)) or {})
+                           for k in CANDIDATE_K}
     return out
 
 
 def _print_lambda(ref: dict) -> None:
     print(f"lambda reference (display U - forecast mu, top-K excess; main K = {LAMBDA_MAIN_K}, not part of the rule)")
-    for name, rows in ref.items():
+    if any(":" in key for key in ref):
+        print("  * = production configuration (tuned on the same periods: includes selection optimism)")
+    for key, rows in ref.items():
+        label = _ref_label(key)
         for k, sig in rows.items():
             if sig is None:
-                print(f"  {MODEL_SHORT[name]:<6} K={k:<3} n/a")
+                print(f"  {label:<6} K={k:<3} n/a")
                 continue
-            print(f"  {MODEL_SHORT[name]:<6} K={k:<3} diff={sig['mean']:+.4f} "
+            print(f"  {label:<6} K={k:<3} diff={sig['mean']:+.4f} "
                   f"CI[{sig['ci_lo']:+.4f},{sig['ci_hi']:+.4f}] p={sig.get('p_value', float('nan')):.3f} "
                   f"n={sig['n_common']} {'sig' if sig['significant'] else 'n.s.'}")
 
@@ -170,7 +189,9 @@ def _run_comparison() -> list[dict]:
 
     db = SessionLocal()
     try:
-        res = asyncio.run(run_comparison(db, render_light_mode=False, only_models=list(MODELS)))
+        # 本番の設定の行は λ の参考にだけ使う（規則の判定は既定の行・`build_table`・#1115）
+        res = asyncio.run(run_comparison(db, render_light_mode=False, only_models=list(MODELS),
+                                         include_production=True))
     finally:
         db.close()
     return res.get("models") or []
@@ -234,7 +255,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "table": {name: {str(k): r for k, r in rows.items()} for name, rows in table.items()},
         "chosen_k": chosen,
         "lambda_reference": {"main_k": LAMBDA_MAIN_K, "issue": "https://github.com/kome-kome/financial_app/issues/1040",
-                             "by_model": lam},
+                             "by_model": lam,
+                             # 本番の設定の行（#1115）: 採点と同じ期で選んだ設定＝選択の楽観を含む
+                             "selection_optimism": [k for k in lam if ":" in k]},
     }
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)

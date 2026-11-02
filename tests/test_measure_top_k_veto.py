@@ -225,6 +225,46 @@ class TestLambdaReference:
         assert payload["chosen_k"] == X.choose_k(table)
 
 
+class TestProductionRow:
+    """本番の設定の行（M-2・#1115）: λ の参考には印付きで並べ、事前登録の規則（K の選び方）には入れない。"""
+
+    @staticmethod
+    def _production(name="macro_gbdt", passing=True):
+        by_k = {k: (_steady(0.08, seed=k + 20) if passing else _noisy()) for k in X.CANDIDATE_K}
+        e = _entry(name, by_k, display=True)
+        e.update(variant=model_comparison.VARIANT_PRODUCTION, selection_optimism=True)
+        return e
+
+    def test_the_rule_reads_only_the_default_rows(self):
+        """同じ名前の本番の行で既定の行を上書きしない（M-2 の既定は不合格・本番は合格でも K は動かない）。"""
+        base = {"macro_risk_return": {k: _steady(0.05, seed=k) for k in X.CANDIDATE_K},
+                "macro_gbdt": {k: _noisy() for k in X.CANDIDATE_K},
+                "macro_enet": {k: _steady(0.05, seed=k + 3) for k in X.CANDIDATE_K}}
+        models = _models(base)
+        table_default, _ = X.build_table(models)
+        table_mixed, _ = X.build_table(models[:2] + [self._production()] + models[2:])
+        assert table_mixed == table_default
+        assert X.choose_k(table_mixed) is None
+
+    def test_lambda_reference_lists_the_production_row_under_its_own_key(self, capsys):
+        models = TestLambdaReference()._models(u_mean=0.01, mu_mean=0.05) + [self._production()]
+        ref = X.lambda_reference(models)
+        assert set(ref) == {"macro_risk_return", "macro_gbdt", "macro_gbdt:production"}
+        X._print_lambda(ref)
+        out = capsys.readouterr().out
+        assert "M-2*" in out and "selection optimism" in out
+
+    def test_the_json_marks_selection_optimism(self, tmp_path):
+        models = TestLambdaReference()._models(u_mean=0.01, mu_mean=0.05) + [self._production()]
+        p = tmp_path / "comparison.json"
+        p.write_text(json.dumps({"models": models}), encoding="utf-8")
+        out = tmp_path / "out.json"
+        assert X.main(["--prereg", str(PREREG), "--prereg-sha", FROZEN, "--from-json", str(p), "--out", str(out)]) == 0
+        lam = json.loads(out.read_text(encoding="utf-8"))["lambda_reference"]
+        assert lam["selection_optimism"] == ["macro_gbdt:production"]
+        assert "macro_gbdt:production" in lam["by_model"]
+
+
 class TestDaytimeJob:
     KEY = "measure:top-k-veto"
 

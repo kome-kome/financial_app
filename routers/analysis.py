@@ -16,6 +16,9 @@ import model_comparison
 import plugins as plugin_registry
 from collection_jobs import jobs
 from plugins import progress
+# 調整値の射影とパネルの照合の判定。モデル比較（`model_comparison`）と共有するので `plugins.tuning` に置く
+# （#1115。model_comparison から routers を import すると循環する）。既存の呼び出しとテストは同じ名前で読む。
+from plugins.tuning import panel_changed, project_tuned_params
 
 router = APIRouter()
 log = logging.getLogger(__name__)
@@ -374,52 +377,6 @@ async def cancel_plugin(plugin_name: str):
     return {"accepted": True, "running": True, "saving": False, "message": msg}
 
 
-def project_tuned_params(plugin, params: dict) -> tuple[dict, list[str]]:
-    """保存済みの調整値を**現在の探索空間へ射影**する（#604）。
-
-    `plugin_tuned_params` は「そのとき探索した空間」の記録なので、**軸を外すと古い値が
-    残り続ける**。画面はこれを「🔧 自動調整済み」としてフォームへプリフィルするため、
-    探索をやめた設定が推奨値として出続ける——実際 M-1 は 2026-09-04 に
-    `use_momentum`/`momentum_window` を軸から外したが、保存値は
-    `use_momentum=True, momentum_window=18`（2026-09-02 の探索）のままで、
-    次の月次探索（毎月3日・#579 で2日から移動）まで画面に出続ける状態だった。
-
-    射影の規則:
-      - `base_params` にあるキー … **その値で上書き**（探索が固定した測定条件そのもの）
-      - dims にある軸           … 保存値をそのまま使う（探索で選ばれた値）
-      - どちらにも無いキー       … 落とす（`coerce_params` が `params_schema` の既定を補完）
-
-    第2要素は「保存値と違う扱いになったキー」。画面はこれを注記に使う。**黙って値を
-    変えると、今度は「調整済みと言いながら別の値」という逆の混乱になる。**
-
-    `tuning_search_space()` を持たないプラグインは射影せずそのまま返す。
-    """
-    space_fn = getattr(plugin, "tuning_search_space", None)
-    if space_fn is None:
-        return dict(params), []
-    try:
-        base, dims = space_fn()
-    except Exception:                                  # 探索空間が壊れていても表示は殺さない
-        log.warning("tuning_search_space() の取得に失敗（射影せず生値を返す）", exc_info=True)
-        return dict(params), []
-
-    dim_names = {d.name for d in dims}
-    out: dict = {}
-    changed: list[str] = []
-    for k, v in (params or {}).items():
-        if k in base:
-            out[k] = base[k]
-            if base[k] != v:
-                changed.append(k)
-        elif k in dim_names:
-            out[k] = v
-        else:
-            changed.append(k)                          # 空間から消えた＝落として既定へ
-    for k, v in base.items():                          # 保存値に無い固定値も足す
-        out.setdefault(k, v)
-    return out, sorted(changed)
-
-
 # ── 測ったパネルの照合（#711・ADR-0047）──────────────────────────────────────
 # 保存値は「そのとき存在したパネルで測った結果」で、パネルが動けば根拠は消える。射影
 # （`project_tuned_params`）が見るのは**探索空間の形だけ**なので、いま探索中の軸に残った
@@ -464,22 +421,6 @@ def current_panel_fingerprint(db) -> Optional[str]:
         fp = None
     _panel_fp_cache["v"] = (now + PANEL_FP_TTL_SEC, fp)
     return fp
-
-
-def panel_changed(tuned_fp: Optional[str], current_fp: Optional[str]) -> Optional[bool]:
-    """保存時のパネルと現在のパネルが違うか。True=違う / False=同じ / None=判定不能。
-
-    **`stale_params` へ混ぜない。** 「探索空間から軸が消えた」と「パネルが動いた」は別の
-    事実で、同じ顔にすると読む人が原因を選べない（`batch_freshness.status_of` が missing と
-    stale を分けているのと同じ）。
-
-    どちらかが欠けていれば None ＝**「同じ」と積極的に言えたときだけ False** を返す。
-    指紋を持たない古い行と、指紋を読めなかった回を、「一致した」と同じ扱いにしない
-    （`check_batch_freshness.recovered()` が ok を積極的に言えた対象だけ返すのと同じ向き）。
-    """
-    if not tuned_fp or not current_fp:
-        return None
-    return tuned_fp != current_fp
 
 
 @router.get("/api/plugins/{plugin_name}/tuned")
@@ -631,8 +572,9 @@ async def backtest_model_comparison(request: Request, db: Session = Depends(api.
     try:
         return await _run_with_progress(
             "model_comparison", label,
+            # 本番の設定の行（M-2・選択の楽観を含む・判定に入れない）も並べる（#1115・ADR-0070 決定 6）
             lambda: model_comparison.run_comparison(
-                db, render_light_mode=api.writes_blocked()), db=db)
+                db, render_light_mode=api.writes_blocked(), include_production=True), db=db)
     except progress.AnalysisCancelled:
         raise HTTPException(409, CANCELLED_MESSAGE)
     except Exception as e:

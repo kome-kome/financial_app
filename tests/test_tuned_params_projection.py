@@ -312,3 +312,16 @@ class TestRealM2Space:
         base, dims = p.tuning_search_space()
         assert base.get("use_momentum") is False
         assert "use_momentum" not in {d.name for d in dims}
+
+
+class TestOneProjectionForTheScreenAndTheComparison:
+    """画面（`/api/plugins/{name}/tuned`）とモデル比較の本番の行（#1115）は同じ射影を使う。
+
+    実体は `plugins.tuning`（model_comparison から routers を import すると循環する）。routers 側は同じ関数を
+    読むだけ——書き写すと、片方だけ直したときに「画面の本番の設定」と「比較の本番の行」が別物になる。
+    """
+
+    def test_routers_reexport_the_same_functions(self):
+        import plugins.tuning as tuning
+        assert project_tuned_params is tuning.project_tuned_params
+        assert panel_changed is tuning.panel_changed
