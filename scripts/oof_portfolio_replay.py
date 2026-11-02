@@ -23,6 +23,22 @@
   たびに次の区間のリターンから引く（値動きの比率のずれを直す売買のコストは数えない）
 - 全社平均＝各区間の始めの期に予測がある全社を等金額で持った場合（コスト無し）
 
+## 本番の設定の M-2（#1123・ADR-0070 決定 6）
+
+上の M-2 は M-4 の基底（既定の設定）で、実際に買っている本番の設定（探索の 1 位）の M-2 ではない。そこで M-2 の行の
+直後に `macro_gbdt:production`（表示は `M-2*`）を足す。設定は `plugin_tuned_params` を比較画面と同じ射影
+（`model_comparison._production_config`）で写し、**単体の M-2 を本番と同じ手続き**（検証の取り方・単調制約・空欄埋め）
+で回す。M-4 の基底に設定を渡す形は採らない（M-4 の基底は単調制約を読まず、早期打ち切りの検証も `rows` で本番の
+`months` と違う＝本番の M-2 にならない）。
+
+- **test 月を共通域にそろえる**: 単体の M-2 は M-1 より早く始まるので、3 か月おきの test 月の位置が共通域とずれる
+  （2026-11 時点で単体は 2・5・8・11 月、共通域は 3・6・9・12 月＝そのままでは 1 期も重ならない）。最初の学習
+  期間だけを延ばして（`aligned_min_train`）共通域の最初の test 月から始める。学習の手続きは変わらない
+- 共通域の外の予測は落とし、件数を `coverage` に出す。そろった期の数を出し、0 なら行を出さずに理由を出す
+- `tuning_dry_run`・`tuning_objective_only` の内側で回す＝本番の μ̂（`macro_gbdt_scores`）を上書きしない
+- 本番の設定は採点と同じ期間のデータで選んでいる＝**選択の楽観を含む**（`selection_optimism`・`PRODUCTION_NOTE`）
+- 本番の設定が無い・そろえられない・回せないときは行を出さず、理由を表示と JSON の `production` に出す
+
 日中枠 `measure:oof-replay`（並走に敏感）で単独に回す。結果は `scripts/.cache/oof_portfolio_replay.json`。
 
 実行:
@@ -41,11 +57,15 @@ import statistics
 import sys
 from pathlib import Path
 from typing import Callable, Optional, Sequence
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from database import SessionLocal  # noqa: E402
-from plugins.macro_snapshots import _month_end_bound, month_end_indices  # noqa: E402
+from database import SessionLocal, tuning_dry_run, tuning_objective_only  # noqa: E402
+from model_comparison import VARIANT_PRODUCTION, _production_config, _safe_rollback  # noqa: E402
+from plugins import get_plugin  # noqa: E402
+from plugins.macro_snapshots import _month_end_bound, month_end_indices, oof_backtest  # noqa: E402
+from plugins.utils import coerce_params, walk_forward_cv_monthly  # noqa: E402
 from scripts._cache import set_refresh  # noqa: E402
 from scripts.ensemble_base_bakeoff import _load_panel, _run_config  # noqa: E402
 from scripts.sell_mu_source_bakeoff import (  # noqa: E402
@@ -64,6 +84,16 @@ DISCLAIMER = ("過去の経路は 1 本しかなく、運とモデルの良さ�
               "（ADR-0069）")
 DELIST_NOTE = ("株価が途切れた保有は、その月末以前の最後の終値で手仕舞ったとみなす（最後の取引より後の損失は"
                "捉えない＝成績は楽観側にずれる）")
+
+# 本番の設定の行（#1123）。鍵は比較画面・λ の参考と同じ `<name>:production`（model_comparison.VARIANT_PRODUCTION）
+PRODUCTION_MODEL = "macro_gbdt"
+PRODUCTION_KEY = f"{PRODUCTION_MODEL}:{VARIANT_PRODUCTION}"
+PRODUCTION_NOTE = ("M-2* は本番の設定（探索の 1 位）の M-2 を単体の手続きのまま回した予測。最初の学習期間だけを延ばして"
+                   "test 月を共通域にそろえた。設定は採点と同じ期間のデータで選んでいる＝選択の楽観を含む（#1123）")
+
+
+class NotAligned(ValueError):
+    """本番の設定の M-2 の test 月を共通域にそろえられない。"""
 
 
 class PriceBook:
@@ -208,19 +238,97 @@ def summarize(intervals: list[dict], top_k: int) -> dict:
     }
 
 
+def aligned_min_train(yms: Sequence[str], first_test: str, min_train: int, embargo: int) -> int | None:
+    """walk-forward の最初の test 月を `first_test` にする最初の学習期間（月数）。そろえられなければ None。
+
+    test 月は `yms[min_train + embargo]` から step おき（`walk_forward_cv_monthly`）。最初の学習期間を延ばすと、
+    学習の手続きはそのままで test 月だけが後ろへずれる。本番の最小より短くはしない（短くなるなら None）。
+    """
+    yms = sorted(yms)
+    if first_test not in yms:
+        return None
+    shifted = yms.index(first_test) - embargo
+    return shifted if shifted >= min_train else None
+
+
+def production_predictions(panel: tuple, db, test_yms: Sequence[str]) -> tuple[dict | None, dict]:
+    """本番の設定の M-2 の OOF 予測 `{(ym, 社): 予測}` と付記。回せなければ予測は None で付記に理由（#1123）。
+
+    単体の M-2 を本番の設定で回し、`oof_backtest` へ渡る予測と社の並び（`meta_by_ym`）を横取りする。変えるのは
+    最初の学習期間だけで、test 月を `test_yms`（M-4 の共通域）の最初の月から始める（モジュールの docstring）。
+    読み込み済みのパネルを使い回す（DB から引き直さない。空欄埋めは M-2 自身が行う）。
+    """
+    plugin = get_plugin(PRODUCTION_MODEL)
+    params, info = _production_config(db, plugin, PRODUCTION_MODEL, {})
+    if params is None:
+        return None, {"available": False, **info}
+    test_yms = sorted(test_yms)
+    if not test_yms:
+        return None, {"available": False, **info, "reason": "not_aligned", "error": "共通域に test 月が無い"}
+
+    def aligned_wf(samples_by_ym, feature_names, **kwargs):
+        m = aligned_min_train(list(samples_by_ym), test_yms[0], kwargs.get("min_train_months", 18),
+                              kwargs.get("embargo_months", 0))
+        if m is None:
+            raise NotAligned(f"test 月を共通域の最初の月（{test_yms[0]}）にそろえられない")
+        return walk_forward_cv_monthly(samples_by_ym, feature_names, **{**kwargs, "min_train_months": m})
+
+    prices_by_co, fin_by_co, companies, macro_cache = panel
+    try:
+        with patch("plugins.macro_gbdt.load_data", return_value=(prices_by_co, fin_by_co, companies)), \
+             patch("plugins.macro_gbdt.preload_macro", return_value=macro_cache), \
+             patch("plugins.macro_gbdt.walk_forward_cv_monthly", side_effect=aligned_wf), \
+             patch("plugins.macro_gbdt.oof_backtest", wraps=oof_backtest) as spy, \
+             tuning_dry_run(), tuning_objective_only():
+            plugin.execute(coerce_params(plugin.params_schema(), params), db)
+    except NotAligned as e:
+        return None, {"available": False, **info, "reason": "not_aligned", "error": str(e)}
+    except Exception as e:  # noqa: BLE001 — 本番の行が回せなくても運用再現の他の行は出す
+        _safe_rollback(db)
+        return None, {"available": False, **info, "reason": "error", "error": str(e)}
+    if spy.call_args is None:
+        return None, {"available": False, **info, "reason": "error",
+                      "error": "M-2 の OOF を捕まえられなかった（oof_backtest が呼ばれていない）"}
+    resid = spy.call_args.args[0]
+    meta = spy.call_args.kwargs.get("meta_by_ym") or {}
+    preds = {(ym, sid): float(yh) for ym, rows in resid.items()
+             for (yh, _y), (sid, _industry) in zip(rows, meta.get(ym, [])) if sid is not None}
+    matched = sorted(set(resid) & set(test_yms))
+    if not matched:
+        return None, {"available": False, **info, "reason": "not_aligned",
+                      "error": "test 月が共通域と 1 期も重ならない"}
+    return preds, {"available": True, **info,
+                   "n_periods_target": len(test_yms), "n_periods_matched": len(matched)}
+
+
 def run_replays(common: dict, bases: list, prices_by_co: dict, db, models: list[str],
-                sell_source: str, top_k: int, sell_k: int, cost_bps: float) -> dict:
-    """買いの並び（models）ごとに OOF 運用再現を回す。"""
+                sell_source: str, top_k: int, sell_k: int, cost_bps: float,
+                production: dict | None = None) -> dict:
+    """買いの並び（models）ごとに OOF 運用再現を回す。
+
+    `production`（本番の設定の M-2 の `{(ym, 社): 予測}`・#1123）があり models に M-2 が入っていれば、M-2 の行の
+    直後に `PRODUCTION_KEY` の行を足す。共通域（y がある鍵）の外の予測は落とし、件数を `coverage` に出す。
+    """
     preds, y = common_to_dicts(common, bases)
     book = PriceBook(prices_by_co)
     sell = preds[sell_source]
-    out: dict[str, dict] = {}
-    for name in models:
-        buy, ordering = buy_scores(name, preds[name], y, prices_by_co, db)
+
+    def one(name: str, pred: dict) -> dict:
+        buy, ordering = buy_scores(name, pred, y, prices_by_co, db)
         periods = sorted({ym for ym, _ec in buy.keys() & sell.keys()})
         intervals = replay(periods, buy, sell, book.period_return, top_k, sell_k, cost_bps)
-        out[name] = {"ordering": ordering, "summary": summarize(intervals, top_k),
-                     "intervals": intervals}
+        return {"ordering": ordering, "summary": summarize(intervals, top_k), "intervals": intervals}
+
+    out: dict[str, dict] = {}
+    for name in models:
+        out[name] = one(name, preds[name])
+        if name == PRODUCTION_MODEL and production is not None:
+            inside = {k: v for k, v in production.items() if k in y}
+            out[PRODUCTION_KEY] = {
+                **one(name, inside), "selection_optimism": True,
+                "coverage": {"n_rows": len(inside), "n_outside_common": len(production) - len(inside),
+                             "n_common_without_prediction": len(preds[name].keys() - inside.keys())},
+            }
     return out
 
 
@@ -228,19 +336,34 @@ def _pct(v) -> str:
     return f"{v * 100:+.2f}%" if isinstance(v, (int, float)) else "n/a"
 
 
-def _print(results: dict, sell_source: str, top_k: int, sell_k: int, cost_bps: float) -> None:
+def _label(name: str) -> str:
+    """表示名。本番の設定の行（`<name>:production`）は `M-2*`。"""
+    base, _, variant = name.partition(":")
+    return SHORT[base] + ("*" if variant else "")
+
+
+def _print(results: dict, sell_source: str, top_k: int, sell_k: int, cost_bps: float,
+           production: dict | None = None) -> None:
     print(f"\n=== OOF 運用再現（#1045・参考）K={top_k} k={sell_k} 片道 {cost_bps:g}bp・"
           f"売りの並び={SHORT[sell_source]} の mu ===", flush=True)
     print(f"注意: {DISCLAIMER}", flush=True)
     print(f"注意: {M4_BASES_CAVEAT}", flush=True)
     print(f"注意: {DELIST_NOTE}", flush=True)
+    if production and production.get("available"):
+        print(f"注意: {PRODUCTION_NOTE}", flush=True)
+        print(f"  M-2* の設定: 探索 {production.get('tuned_at')}・そろった期 {production.get('n_periods_matched')}"
+              f"/{production.get('n_periods_target')}・パネルの変化 {production.get('panel_changed')}・"
+              f"射影で既定へ戻した設定 {production.get('stale_params') or 'なし'}", flush=True)
+    elif production:
+        print(f"注意: M-2*（本番の設定）は出さない: {production.get('reason')}: {production.get('error')}",
+              flush=True)
     print(f"  {'買いの並び':<10}{'年率(前)':>10}{'年率(後)':>10}{'全社平均':>10}{'超過':>10}"
           f"{'最大下落':>10}{'入替率':>8}{'区間':>6}{'途切れ':>7}", flush=True)
     for name, res in results.items():
         s = res["summary"]
         turn = f"{s['turnover']:>8.3f}" if s.get("turnover") is not None else f"{'n/a':>8}"
         dd = f"{s['max_drawdown'] * 100:.2f}%" if s.get("max_drawdown") is not None else "n/a"
-        print(f"  {SHORT[name]:<10}{_pct(s.get('annual_gross')):>10}{_pct(s.get('annual_net')):>10}"
+        print(f"  {_label(name):<10}{_pct(s.get('annual_gross')):>10}{_pct(s.get('annual_net')):>10}"
               f"{_pct(s.get('annual_bench')):>10}{_pct(s.get('annual_excess')):>10}"
               f"{dd:>10}{turn}{s.get('n_intervals', 0):>6}"
               f"{s.get('n_stopped', 0):>7}", flush=True)
@@ -285,17 +408,24 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     try:
         run = _run_config("M-4(3基底・rank_ic_grid)", BASES, panel, db,
                           weight_method="rank_ic_grid", keep_common=True)
+        prod_preds, prod_info = None, None
+        if PRODUCTION_MODEL in args.models:
+            # 本番の設定の M-2（#1123）。test 月は M-4 の共通域にそろえる
+            prod_preds, prod_info = production_predictions(panel, db, sorted(run["common"]))
         results = run_replays(run["common"], run["bases"], panel[0], db, args.models,
-                              args.sell_source, args.top_k, args.sell_k, args.cost_bps)
+                              args.sell_source, args.top_k, args.sell_k, args.cost_bps,
+                              production=prod_preds)
     finally:
         db.close()
-    _print(results, args.sell_source, args.top_k, args.sell_k, args.cost_bps)
+    _print(results, args.sell_source, args.top_k, args.sell_k, args.cost_bps, prod_info)
 
     payload = {
         "disclaimer": DISCLAIMER,
-        "caveats":    [M4_BASES_CAVEAT, DELIST_NOTE],
+        "caveats":    [M4_BASES_CAVEAT, DELIST_NOTE] + ([PRODUCTION_NOTE] if prod_preds is not None else []),
         "params":     {"top_k": args.top_k, "sell_k": args.sell_k, "cost_bps": args.cost_bps,
                        "sell_source": args.sell_source, "models": args.models, "smoke": args.smoke},
+        # 本番の設定の M-2 の行の付記（設定・探索日・そろった期・回せなかった理由）。M-2 を選ばない回は None
+        "production": prod_info,
         "results":    results,
     }
     out = Path(args.out)

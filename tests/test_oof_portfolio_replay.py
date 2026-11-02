@@ -9,11 +9,18 @@ from collections import namedtuple
 
 import pytest
 
+import database
+import plugins.macro_gbdt as m2mod
 import scripts.oof_portfolio_replay as op
 import scripts.run_daytime as rd
 
 PX = namedtuple("PX", "trade_date close_last volume_sum")
 P1, P2, P3 = "2020-01", "2020-04", "2020-07"
+
+
+def _months(year: int, month: int, n: int) -> list[str]:
+    """year-month から n か月の "YYYY-MM"。"""
+    return [f"{year + (month - 1 + k) // 12:04d}-{(month - 1 + k) % 12 + 1:02d}" for k in range(n)]
 
 
 def _table_ret(table):
@@ -147,6 +154,141 @@ class TestPriceBook:
         assert book.period_return("A", "2020-01", "2020-02") == (pytest.approx(0.0), True)
         # 始めの月末の終値が 0（無効）なら測らない
         assert book.period_return("B", "2020-01", "2020-02") == (None, False)
+
+
+class TestAlignedMinTrain:
+    """単体の M-2 は共通域より早く始まる。最初の学習期間を延ばすと test 月が共通域とそろう（#1123）。"""
+
+    MT, EMB, STEP = 6, 12, 3
+
+    def test_shifted_test_months_match_the_common_grid(self):
+        own = _months(2019, 11, 72)                 # 単体の M-2 の月
+        common = own[1:]                            # M-1 が 1 か月遅く始まる共通域
+        common_tests = common[self.MT + self.EMB::self.STEP]
+        assert not set(common_tests) & set(own[self.MT + self.EMB::self.STEP]), \
+            "検体の前提: そろえないと 1 期も重ならない"
+        m = op.aligned_min_train(own, common_tests[0], self.MT, self.EMB)
+        assert m == self.MT + 1
+        assert own[m + self.EMB::self.STEP] == common_tests
+
+    def test_cannot_align(self):
+        own = _months(2020, 1, 40)
+        assert op.aligned_min_train(own, "2030-01", self.MT, self.EMB) is None    # 共通域の月が無い
+        assert op.aligned_min_train(own, own[10], self.MT, self.EMB) is None      # 本番の最小より短くなる
+        assert op.aligned_min_train(own, own[18], self.MT, self.EMB) == self.MT   # ずれていなければそのまま
+
+
+class TestProductionRow:
+    """本番の設定の M-2 の行（#1123）: 既定の M-2 の直後に印付きで足し、共通域の外の鍵では落ちない。"""
+
+    BASES = ["macro_risk_return", "macro_gbdt", "macro_enet"]
+    YMS = ["2021-06", "2021-09", "2021-12"]
+
+    def _common(self):
+        rng = random.Random(3)
+        return {ym: [(f"E{i:02d}", (rng.random(), rng.random(), rng.random()), rng.gauss(0, 0.1))
+                     for i in range(8)] for ym in self.YMS}
+
+    def _patch(self, monkeypatch):
+        def buy(name, pred, y, prices_by_co, db):
+            # 本物の buy_scores は y[(ym, 社)] を引く＝共通域の外の鍵が来ると KeyError で止まる
+            assert set(pred) <= set(y), "共通域の外の鍵が買いの並びへ渡った"
+            return dict(pred), {"lambda": 0.0, "risk_axis": None, "time_reproducible": True,
+                                "n_dropped_rows": 0}
+
+        class Book:
+            def __init__(self, _prices):
+                pass
+
+            def period_return(self, ec, ym0, ym1):
+                return 0.01, False
+
+        monkeypatch.setattr(op, "buy_scores", buy)
+        monkeypatch.setattr(op, "PriceBook", Book)
+
+    def _run(self, production=None):
+        return op.run_replays(self._common(), self.BASES, {}, None, list(self.BASES), "macro_enet",
+                              3, 1, 10.0, production=production)
+
+    def test_the_production_row_follows_the_default_m2(self, monkeypatch):
+        self._patch(monkeypatch)
+        prod = {(ym, f"E{i:02d}"): float(i) for ym in self.YMS for i in range(6)}
+        prod[("2021-03", "E00")] = 1.0              # 単体の M-2 にだけある月
+        prod[("2021-06", "ZZ")] = 1.0               # 共通域に無い社
+        res = self._run(prod)
+        assert list(res) == ["macro_risk_return", "macro_gbdt", op.PRODUCTION_KEY, "macro_enet"]
+        row = res[op.PRODUCTION_KEY]
+        assert row["selection_optimism"] is True
+        assert row["coverage"] == {"n_rows": 18, "n_outside_common": 2, "n_common_without_prediction": 6}
+        assert row["intervals"][0]["holdings"] == ["E03", "E04", "E05"], "本番の予測の上位 3 社を買う"
+        assert "selection_optimism" not in res["macro_gbdt"]
+        assert op._label(op.PRODUCTION_KEY) == "M-2*"
+
+    def test_the_default_rows_do_not_change(self, monkeypatch):
+        self._patch(monkeypatch)
+        prod = {(ym, f"E{i:02d}"): float(i) for ym in self.YMS for i in range(8)}
+        with_prod, without = self._run(prod), self._run()
+        assert op.PRODUCTION_KEY not in without
+        assert all(with_prod[name] == without[name] for name in self.BASES)
+
+
+class TestProductionPredictions:
+    """本番の設定の M-2 を回して予測を取り出す（#1123）。M-2 の中身は偽物で、横取りとそろえの経路を確かめる。"""
+
+    OWN = _months(2019, 11, 40)                     # 単体の M-2 の月
+    TARGET = OWN[1:][18::3]                         # 1 か月遅く始まる共通域の test 月
+    CFG = ({"learning_rate": 0.01},
+           {"params": {"learning_rate": 0.01}, "stale_params": [], "tuned_at": "2026-11-01T05:00:00+00:00",
+            "panel_changed": None})
+
+    def _setup(self, monkeypatch, tuned=True):
+        calls = self.calls = []
+        own = self.OWN
+
+        class FakeM2:
+            def params_schema(self):
+                return {}
+
+            def execute(self, params, db):
+                calls.append((dict(params), database.is_tuning_objective_only(), database._tuning_dry_run.get()))
+                rng = random.Random(0)
+                samples = {ym: [([rng.random()], rng.gauss(0, 0.1)) for _ in range(20)] for ym in own}
+                # 本番の M-2 と同じ呼び方（キーワード）。差し替えられた関数が最初の学習期間をずらす
+                _folds, resid = m2mod.walk_forward_cv_monthly(samples, ["x"], min_train_months=6, step_months=3,
+                                                              return_residuals=True, embargo_months=12)
+                meta = {ym: [(f"E{j:02d}", "ind") for j in range(len(rows))] for ym, rows in resid.items()}
+                m2mod.oof_backtest(resid, n_quantiles=5, meta_by_ym=meta, rebalance_per_year=4)
+                return {}
+
+        none = (None, {"reason": "no_production_config", "error": "本番の設定が無い"})
+        monkeypatch.setattr(op, "_production_config", lambda db, plugin, name, cache: self.CFG if tuned else none)
+        monkeypatch.setattr(op, "get_plugin", lambda name: FakeM2())
+        monkeypatch.setattr(op, "coerce_params", lambda schema, params: dict(params))
+
+    def _run(self, test_yms):
+        return op.production_predictions(({}, {}, {}, {}), None, test_yms)
+
+    def test_predictions_land_on_the_common_test_months(self, monkeypatch):
+        self._setup(monkeypatch)
+        preds, info = self._run(self.TARGET)
+        assert info["available"] is True and info["tuned_at"] == self.CFG[1]["tuned_at"]
+        assert sorted({ym for ym, _ec in preds}) == self.TARGET
+        assert info["n_periods_matched"] == info["n_periods_target"] == len(self.TARGET)
+        assert len(preds) == 20 * len(self.TARGET)
+        params, objective_only, dry_run = self.calls[0]
+        assert params == self.CFG[0]
+        assert objective_only and dry_run, "本番の μ̂ を上書きしない（objective_only・dry_run の内側で回す）"
+
+    def test_without_a_tuned_row_only_the_reason_is_returned(self, monkeypatch):
+        self._setup(monkeypatch, tuned=False)
+        preds, info = self._run(self.TARGET)
+        assert preds is None and info["available"] is False and info["reason"] == "no_production_config"
+        assert self.calls == [], "本番の設定が無いのに回した"
+
+    def test_months_that_cannot_be_aligned(self, monkeypatch):
+        self._setup(monkeypatch)
+        preds, info = self._run(["2030-03"])
+        assert preds is None and info["available"] is False and info["reason"] == "not_aligned"
 
 
 class TestCli:
