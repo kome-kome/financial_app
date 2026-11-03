@@ -305,7 +305,7 @@ class TestRepoSkillsAndAgentsAreIndexed:
 class TestUserLevelMatchesIndex:
     """`~/.claude/` のスキル／コマンド／エージェントと索引の両方向照合（**CI では skip**）。
 
-    索引はユーザーレベルの実体も案内している（genshijin 系・`implementer` など）ため、
+    索引はユーザーレベルの実体も案内している（genshijin 系・`security-auditor` など）ため、
     ここを照合しないと #575 の実害の主軸——「`/genshijin` は常時 ON なのに索引には英語版
     `/caveman` しか無く実運用と真逆の案内だった」——を拾えない。CI の checkout には
     `~/.claude/` が無いので、この層はローカルの pytest でしか走らない。

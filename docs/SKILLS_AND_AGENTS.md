@@ -138,20 +138,14 @@ Claude Code で使える **スキル（Skill）** と **エージェント（Age
 | **claude-code-guide** | Claude Code/SDK/API の質問回答 | 「フックの書き方は？」 |
 | **statusline-setup** | ステータスライン設定 | 表示カスタム |
 
-**ユーザーレベル（`~/.claude/agents/`）で追加済みのもの**——役割分担用。`implementer` 以外はすべて read-only。
+**ユーザーレベル（`~/.claude/agents/`）で追加済みのもの**——役割分担用。すべて read-only（書き込みは主会話が行う）。
 
 | エージェント | 役割 | 使い分け |
 |---|---|---|
-| **implementer** | 承認済み方針をコードに落とす | **唯一の書込担当**。最小差分で既存パターンを踏襲 |
-| **code-explorer** | 構造・データフローを把握して要約 | 実装・監査の前提として全体像が要るとき |
 | **architecture-strategist** | 複数ファイル横断の構造再設計を深考察 | 「この密結合をどうすべき」。`solution-proposer` より広く `Plan` より上流 |
 | **solution-proposer** | 解決案を複数出しトレードオフを付ける | 「どう直すべき？」。実装はせず方針まで |
 | **security-auditor** | 差分のセキュリティ監査（深刻度付き） | 認証・入力処理・依存を触ったとき |
-| **genshijin-investigator** | 圧縮出力の read-only コードロケータ | 「X の定義どこ」に `file:line` だけで答えてほしい |
-| **genshijin-builder** | 1〜2 ファイル限定の外科的編集 | typo・単関数書換・機械的 rename。3 ファイル以上は `implementer` |
-| **genshijin-reviewer** | 1指摘1行の圧縮レビュー | 主スレッドのトークンを使わずバグ指摘だけ欲しいとき |
-| **orchestrator** | 用件を解釈して実行役へ振り分ける司令役 | 「まとめて調べて」「一式やっておいて」。実装は `implementer` への指示案で止まる |
-| **redundancy-hunter** | 消せるコード・ファイルと重複を全体走査で洗い出す | 「使ってないコードを探して」。差分限定のレビューは `genshijin-reviewer` |
+| **redundancy-hunter** | 消せるコード・ファイルと重複を全体走査で洗い出す | 「使ってないコードを探して」。差分限定のレビューは `/code-review` |
 | **ux-auditor** | 画面の動線と UX を localhost の実画面とコードで辿って監査する | 「動線を監査して」。`/ux-critique` の評価役。規則での技術監査は `/ui-audit` |
 
 > 本プロジェクトでは **大規模調査は `financial-app-explorer` または `Explore` に逃がす**のがルール（`CLAUDE.md` 参照）。
