@@ -1657,8 +1657,14 @@ graph TB
 | `docs/ARCHITECTURE.md` | ドキュメント | 本ファイル。コード変更時は必ず更新する | — |
 | `docs/MODELS.md` | ドキュメント | 分析モデルの数式・パラメータ・参考文献（Markdown版）。モデル変更時は `models.html` とセットで更新する。 | — |
 | `docs/FUTURE_TASKS.md` | ドキュメント | Issue 運用ガイド＋設計制約（残タスクの正本は GitHub Issues。本書はタスク実体を持たない）。完了項目は `archive/IMPROVEMENTS.md` へ集約 | — |
-| `docs/archive/` | ドキュメント | 完了済み作業記録（REFACTORING・IMPROVEMENTS・VISUALIZATION_IMPROVEMENTS）。現行参照には使わない | — |
-| `docs/reviews/` | ドキュメント | 分析モデル等の設計レビュー記録（ADR 化前の検討メモ。`2026-06-26-m2-macro-gbdt-review.md`・`2026-06-27-web-api-auth-input-validation-review.md` 等）。現行参照には使わない | — |
+| `docs/GOTCHAS.md` | ドキュメント | 既知のハマりどころ（再現条件と回避手順）。収集・XBRL・DB・バッチの実行環境・認証・分析・CI・フロントエンド | — |
+| `docs/DEPLOYMENT.md` | ドキュメント | 運用ガイド（データ収集とバッチの暦・ローカルと Render の役割分担・外部サービスの無料プラン制約）。**ファイル名は変えない**（朝の推奨の「復旧手順」が URL で指す・`routers/morning.py` の `_RUNBOOK_URL`） | — |
+| `docs/PLUGIN_REFERENCE.md` | ドキュメント | `plugins/` 各ファイルの実装リファレンス（内部契約・producer・heavy・実測値）。理論は MODELS.md が正本 | — |
+| `docs/SCRIPTS_REFERENCE.md` | ドキュメント | `scripts/` と起動用 `*.ps1` の実装リファレンス（役割・守ること・実測値） | — |
+| `docs/M1_MACRO_MODEL_GUIDE.md` | ドキュメント | M-1 の初心者向け副読本（設計思想と章立てだけ MODELS.md §9 に追随。冒頭の `models-sync` マーカーを `tests/test_docs_sync.py` が照合） | — |
+| `docs/SKILLS_AND_AGENTS.md` | ドキュメント | スキル／エージェントの索引マニュアル（`tests/test_docs_sync.py` が実体と照合） | — |
+| `README.md` | ドキュメント | 入口。何ができるか・構成の要点・セットアップ・**読む人別の入口**・ドキュメント一覧 | — |
+| `docs/archive/` | ドキュメント | 完了済み作業記録（IMPROVEMENTS・VISUALIZATION_IMPROVEMENTS・REFACTORING・DEPLOYMENT_HISTORY・MODELS_HISTORY）と、集中コードレビューの記録（`reviews/`・2026-06 の3本。指摘は Issue 化済み）。一覧は [docs/archive/README.md](archive/README.md)。現行参照には使わない | — |
 | `docs/prereg/*.md` | ドキュメント | 計測の事前登録文書（窓・対照・検定・閾値・判定規則を測る前に固定する・#1007）。本文はマージで凍結し、凍結値を追記節に記録する。本文を変える PR は `tests/test_prereg.py` が落とす（開封前に凍結し直すときは凍結値も同じ PR で更新）。現行は `index-event-2026.md`（TOPIX 定期入替の指数効果・親 #1001） | scripts/prereg.py, model_stats.py |
 | `docs/VISION.md` | ドキュメント | プロジェクトの目的・方針 | — |
 | `CONTEXT.md` | ドキュメント | ドメイン用語集（再分類項目・分析特徴量・表示項目・パラメータ契約の用語定義）。CLAUDE.md 設計制約から参照 | — |

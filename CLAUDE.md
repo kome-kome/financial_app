@@ -9,13 +9,14 @@
 | [VISION.md](docs/VISION.md) | プロジェクト目的・ロードマップ・ライブラリ採用基準 | 方針・採用判断時 |
 | [ARCHITECTURE.md](docs/ARCHITECTURE.md) | 全体構成・ER図・各種フロー図・APIエンドポイント・ファイル役割 | 設計詳細が必要なとき |
 | [GOTCHAS.md](docs/GOTCHAS.md) | 既知のハマりどころ（XBRL / CF / capex / 時刻 / 業種 / 認証実装メモ / 進捗仕様 / **ローカルバッチの実行環境**） | 収集・分析の実装時 |
-| [DEPLOYMENT.md](docs/DEPLOYMENT.md) | Render デプロイ運用＋データ収集の自動/手動の仕組み＋外部サービス制約（GitHub Actions / Supabase / J-Quants） | デプロイ・収集・インフラ設計時 |
+| [DEPLOYMENT.md](docs/DEPLOYMENT.md) | 運用ガイド：データ収集とバッチの暦＋ローカルと Render の役割分担＋外部サービス制約（Supabase / J-Quants ほか） | デプロイ・収集・インフラ設計時 |
 | [MODELS.md](docs/MODELS.md) | 分析モデル解説＋モデル固有の制約 | 分析モデル変更時 |
 | [PLUGIN_REFERENCE.md](docs/PLUGIN_REFERENCE.md) | `plugins/` 各ファイルの実装リファレンス（内部契約・producer・heavy・実測値）。理論は MODELS.md が正本 | プラグイン実装を触るとき |
 | [SCRIPTS_REFERENCE.md](docs/SCRIPTS_REFERENCE.md) | `scripts/` と起動用 `*.ps1` の実装リファレンス（役割・守ること・実測値） | バッチ・スクリプトを触るとき |
 | [M1_MACRO_MODEL_GUIDE.md](docs/M1_MACRO_MODEL_GUIDE.md) | M-1（マクロ×リスク-リターン推奨）の初心者向け副読本。予備知識ゼロから設計思想を解説。正式版は MODELS.md §9 | M-1 の考え方を噛み砕いて把握したいとき |
 | [SKILLS_AND_AGENTS.md](docs/SKILLS_AND_AGENTS.md) | スキル／エージェントの索引マニュアル | スラッシュコマンドや調査エージェントを使うとき |
 | [FUTURE_TASKS.md](docs/FUTURE_TASKS.md) | **Issue 運用ガイド＋設計制約**（残タスクの正本は GitHub Issues。本書はタスク実体を持たない）。完了項目は `docs/archive/IMPROVEMENTS.md` へ集約 | リファクタ着手・改善項目の参照時 |
+| [adr/README.md](docs/adr/README.md)・[archive/](docs/archive/README.md) | 設計判断（ADR）の索引／完了済みの記録と過去のレビュー（現行参照に使わない） | 決定の経緯を知りたいとき |
 | [CONTEXT.md](CONTEXT.md) | ドメイン用語集（再分類項目・分析特徴量・表示項目・パラメータ契約・分析の階層等の用語定義） | 用語の定義・整合性を確認したいとき |
 | [batch-ops](.claude/skills/batch-ops/SKILL.md) | 起動・収集・各バッチ・株価修復の全コマンド | バッチ／収集／修復を実行するとき |
 

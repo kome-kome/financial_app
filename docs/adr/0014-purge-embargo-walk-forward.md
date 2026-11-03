@@ -14,7 +14,7 @@ walk-forward CV ヘルパ `walk_forward_cv_monthly`（`plugins/utils.py`）は�
 これは López de Prado (2018, Ch.7) の **purge が未実装**の状態である。テスト月 `i` のラベル窓
 `[i, i+52週]` と、テスト直前の約12ヶ月分の学習サンプルのラベル窓 `[j, j+52週]`（`i-12 < j < i`）が
 時間重複するため、学習ラベルにテスト期間の情報が混入する（前方リーク）。既存レビュー
-`docs/reviews/2026-06-26-m2-macro-gbdt-review.md` の「リーク無し」評価は「テスト月データを学習に
+`docs/reviews/2026-06-26-m2-macro-gbdt-review.md`（現在は `docs/archive/reviews/` へ移動済み）の「リーク無し」評価は「テスト月データを学習に
 入れない」観点のみを見ており、**ラベルの前方重複は見落としていた**。
 
 本番 OOF rank-IC（M-2≈0.33 / M-1≈0.23）はこの分だけ上方バイアスがかかっている可能性があり、

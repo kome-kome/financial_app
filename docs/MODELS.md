@@ -1433,7 +1433,7 @@ $g^{*}_{t,(p)}$ は gain を降順に並べた理想の並びの $p$ 位（Järv
 
 ### 11.8 将来エンハンス
 
-- M-2 初心者向けガイド（`M2_MACRO_GBDT_GUIDE.md`）
+- M-2 初心者向けの副読本は [#1129](https://github.com/kome-kome/financial_app/issues/1129) で扱う（M-3 と合わせて）
 
 対応済みの項目（M-1 への OOF 結線 #272・分割コンフォーマル区間 #365・SHAP 交互作用 #371・共有の探索基盤 #264〜#267）は
 [archive/MODELS_HISTORY.md](archive/MODELS_HISTORY.md) へ、現行のハイパーパラメータ探索の仕様は §11.4.3（M-1 の経緯は §9.3）へ
@@ -1551,7 +1551,7 @@ DLM のフォワードパスは各週 y_t を**観測前**に予測する。標�
 
 - walk-forward CV による M-1/M-2 との µ̂ ランキング横並び比較（OOF・§11.7 と同枠）
 - 系統的マクロリスク R_macro,i(t) を効用 U = µ − λR の軸へ正式組込み（現状は表示のみ）
-- M-3 初心者向けガイド（`M3_STATE_SPACE_GUIDE.md`）
+- M-3 初心者向けの副読本は [#1129](https://github.com/kome-kome/financial_app/issues/1129) で扱う（M-2 と合わせて）
 
 ### 12.9 参考文献
 

@@ -11,7 +11,7 @@
 
 ## F-1 [低] CSV エクスポートが数式インジェクションを中和していない → #257
 
-**該当**: [routers/market.py:686-693](../../routers/market.py#L686)（`/api/export/csv`）、[routers/market.py:649-658](../../routers/market.py#L649)（`/api/db/export/{table}`）
+**該当**: [routers/market.py:686-693](../../../routers/market.py#L686)（`/api/export/csv`）、[routers/market.py:649-658](../../../routers/market.py#L649)（`/api/db/export/{table}`）
 
 **問題**: セル値の先頭メタ文字（`=` `+` `-` `@` `\t` `\r`）を無害化せずに `writerow` している。出力 CSV を Excel / Google スプレッドシートで開くと `=...` 等で始まるセルが**数式として評価される**（CSV/数式インジェクション, CWE-1236）。前日レビューは CSV を CSRF/exfil の観点のみで「問題なし」とし、**コンテンツレベルの数式評価は未評価**だった。
 
@@ -25,7 +25,7 @@
 
 ## F-2 [低] CSV エクスポート 2 本がレート制限なし＋全行を一括メモリ展開 → #258
 
-**該当**: [routers/market.py:615](../../routers/market.py#L615)（`/api/db/export/{table}`、`limit` 上限 100,000・レート制限デコレータ無し・[market.py:660](../../routers/market.py#L660) で一括生成）、[routers/market.py:669](../../routers/market.py#L669)（`/api/export/csv`、同じく `@api.limiter.limit` 無し・[market.py:695](../../routers/market.py#L695) で一括生成）
+**該当**: [routers/market.py:615](../../../routers/market.py#L615)（`/api/db/export/{table}`、`limit` 上限 100,000・レート制限デコレータ無し・[market.py:660](../../../routers/market.py#L660) で一括生成）、[routers/market.py:669](../../../routers/market.py#L669)（`/api/export/csv`、同じく `@api.limiter.limit` 無し・[market.py:695](../../../routers/market.py#L695) で一括生成）
 
 **問題**: (1) 他の重い入口（`/api/screen`=`RATELIMIT_ANALYSIS`、`/api/collect/*`=`RATELIMIT_COLLECT`）と異なりレート制限が無い。(2) 応答全体を `io.StringIO` にメモリ展開してから `iter([output.getvalue()])` で返す（実ストリーミングではない）。最大行数が大きく Render Free（512MB）でメモリ圧迫・連打の余地。認証済みのみ到達可能のため**深刻度は低い**。前日の入力検証レビュー（#245）は `companies`/`screen` の limit 検証を扱ったが、エクスポート系のレート制限・一括展開は対象外だった。
 

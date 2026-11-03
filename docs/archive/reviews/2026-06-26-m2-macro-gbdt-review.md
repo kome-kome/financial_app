@@ -11,7 +11,7 @@
 
 ## F-1 [中] best_iteration のゼロ判定誤り＋フォールバック値が最終モデル木数を汚染する
 
-**該当**: [plugins/macro_gbdt.py:90-91](../../plugins/macro_gbdt.py#L90)、[plugins/macro_gbdt.py:77-80](../../plugins/macro_gbdt.py#L77)、最終モデル木数決定 [plugins/macro_gbdt.py:383-387](../../plugins/macro_gbdt.py#L383)
+**該当**: [plugins/macro_gbdt.py:90-91](../../../plugins/macro_gbdt.py#L90)、[plugins/macro_gbdt.py:77-80](../../../plugins/macro_gbdt.py#L77)、最終モデル木数決定 [plugins/macro_gbdt.py:383-387](../../../plugins/macro_gbdt.py#L383)
 
 ```python
 bi = getattr(model, "best_iteration", None)
@@ -35,10 +35,10 @@ best_iterations.append(bi if (bi and bi > 0) else n_estimators_max)
 
 ## F-2 [低] mean|SHAP|（無符号の重要度）を符号付き発散バー（OLS 係数用）で描画している
 
-**該当**: 出力 [plugins/macro_gbdt.py:457](../../plugins/macro_gbdt.py#L457)（`feature_coefs = global_shap`）／描画 [static/js/analysis.js:1584](../../static/js/analysis.js#L1584) が M-1 の `_mrrPaintCoefBars`（[static/js/analysis.js:1309](../../static/js/analysis.js#L1309)）を流用。
+**該当**: 出力 [plugins/macro_gbdt.py:457](../../../plugins/macro_gbdt.py#L457)（`feature_coefs = global_shap`）／描画 [static/js/analysis.js:1584](../../../static/js/analysis.js#L1584) が M-1 の `_mrrPaintCoefBars`（[static/js/analysis.js:1309](../../../static/js/analysis.js#L1309)）を流用。
 
-**問題**: `_mrrPaintCoefBars` は「標準化係数（ゼロ中心・正右/負左）」の発散バー。M-2 が渡す `mean|SHAP|` は常に ≥0 のため全バーが右側へ寄り、M-1（左=負）に慣れたユーザーには「全特徴量が正方向に効く」と読めてしまう。見出しは「大きさのみ・方向なし」と正しく明記している（[static/js/analysis.js:1563](../../static/js/analysis.js#L1563)）ものの、可視化コンポーネントの含意（符号）と矛盾する。
-- 付随: 描画呼び出しは `legendId='mg-coef-legend'` を渡すが、その DOM 要素は生成されていない（[static/js/analysis.js:1564](../../static/js/analysis.js#L1564) は `mg-coef-bars` のみ）。`_mrrPaintCoefBars` は `if (legend)` でガードするため**凡例は静かに省略**される（実害は無いが意図不一致）。
+**問題**: `_mrrPaintCoefBars` は「標準化係数（ゼロ中心・正右/負左）」の発散バー。M-2 が渡す `mean|SHAP|` は常に ≥0 のため全バーが右側へ寄り、M-1（左=負）に慣れたユーザーには「全特徴量が正方向に効く」と読めてしまう。見出しは「大きさのみ・方向なし」と正しく明記している（[static/js/analysis.js:1563](../../../static/js/analysis.js#L1563)）ものの、可視化コンポーネントの含意（符号）と矛盾する。
+- 付随: 描画呼び出しは `legendId='mg-coef-legend'` を渡すが、その DOM 要素は生成されていない（[static/js/analysis.js:1564](../../../static/js/analysis.js#L1564) は `mg-coef-bars` のみ）。`_mrrPaintCoefBars` は `if (legend)` でガードするため**凡例は静かに省略**される（実害は無いが意図不一致）。
 
 **推奨対応**: M-2 用に片側（0→max）の単方向重要度バーを用意するか、既存関数に「unsigned モード」を追加。凡例要素を出すなら `mg-coef-legend` を生成する。
 
@@ -49,7 +49,7 @@ best_iterations.append(bi if (bi and bi > 0) else n_estimators_max)
 
 ## F-3 [低] デッドコード（未使用 import・到達不能分岐）
 
-**該当**: [plugins/macro_gbdt.py:20](../../plugins/macro_gbdt.py#L20)（`import math` は本ファイルで未使用）／[plugins/macro_gbdt.py:77](../../plugins/macro_gbdt.py#L77)（`or early_stopping_rounds is None`）。
+**該当**: [plugins/macro_gbdt.py:20](../../../plugins/macro_gbdt.py#L20)（`import math` は本ファイルで未使用）／[plugins/macro_gbdt.py:77](../../../plugins/macro_gbdt.py#L77)（`or early_stopping_rounds is None`）。
 
 **問題**: `early_stopping_rounds` は常に params 由来の int（schema 既定 40・min 10）であり `None` にならないため、`early_stopping_rounds is None` 分岐は到達不能。`import math` も統計処理は `statistics` で行っており未使用。
 
@@ -62,7 +62,7 @@ best_iterations.append(bi if (bi and bi > 0) else n_estimators_max)
 
 ## F-4 [低] リーク防止テストが実質ノーオペで誤った安心感を与える
 
-**該当**: [tests/test_macro_gbdt.py:156-198](../../tests/test_macro_gbdt.py#L156)（`TestLeak.test_eval_set_is_subset_of_train`）。
+**該当**: [tests/test_macro_gbdt.py:156-198](../../../tests/test_macro_gbdt.py#L156)（`TestLeak.test_eval_set_is_subset_of_train`）。
 
 **問題**: テスト名は「early_stopping の eval_set が学習月に厳密包含（テスト月を含まない）」を主張するが、実体は `patch` ブロック内が `pass` で、最後に `n_fit + n_valid == n_train` の算術しか検証していない。**eval_set が実際に学習データ末尾と一致する（= リークしない）ことを一切確認していない**。`eval_sets_received` も収集されるだけで未アサート。回帰テストとして機能していない。
 
@@ -75,8 +75,8 @@ best_iterations.append(bi if (bi and bi > 0) else n_estimators_max)
 
 ## 確認できた良い点（回帰防止メモ）
 
-- **リーク無し**: `walk_forward_cv_monthly` は学習 = index<i の全月、テスト = index=i のみ（[plugins/utils.py:727-734](../../plugins/utils.py#L727)）。`train_samples` は月次昇順連結なので early_stopping の末尾分割が時系列的に妥当。
+- **リーク無し**: `walk_forward_cv_monthly` は学習 = index<i の全月、テスト = index=i のみ（[plugins/utils.py:727-734](../../../plugins/utils.py#L727)）。`train_samples` は月次昇順連結なので early_stopping の末尾分割が時系列的に妥当。
 - **公平な CV 比較**: XGB/OLS とも `(yhat_orig, y_test_orig)` を元スケールで返し、同一 `samples_by_ym`・同一 fold 境界で RMSE/R² 算出。
 - **winsorize の範囲**: 学習 y のみ（fold 内）。X は木の単調不変性により非 winsorize（設計通り）。
-- **本番安全弁**: heavy=True ＋ `RENDER_LIGHT_MODE` で本番 403 ガード（[routers/analysis.py:94](../../routers/analysis.py#L94)）。
+- **本番安全弁**: heavy=True ＋ `RENDER_LIGHT_MODE` で本番 403 ガード（[routers/analysis.py:94](../../../routers/analysis.py#L94)）。
 - **モメンタム**: M-2 は `macro_snapshots._momentum`（`close_last` 参照）を使用しており、`utils.get_momentum_return`（`r.close` 参照）の属性差異の影響を受けない。

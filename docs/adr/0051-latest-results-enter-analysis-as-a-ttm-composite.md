@@ -560,6 +560,7 @@ VIEW の窓関数が壊れる（Context 参照）。**採らない。**
 ## 参考
 
 - #424（親）・#219②（H1 収集とフェーズC の interim VIEW）・#323（wontfix・interim の元の消費者）
+- [ADR-0033](0033-h1-interim-financials-into-analysis.md)（本 ADR が supersede した比較の設計。案A＝TTM 合成を採った）
 - ADR-0038 / #503（正本のローカル反転＝GHA cron 停止でこの供給が止まった）
 - ADR-0039 / #517（`PREPROCESS_VERSION`）・ADR-0041 / #529（昇格ゲートの測り方）
 - ADR-0040 / #530（ステップ予算と窓）
