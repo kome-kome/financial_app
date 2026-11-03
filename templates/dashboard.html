@@ -39,9 +39,12 @@
 *{box-sizing:border-box;margin:0;padding:0}
 :focus-visible{outline:2px solid var(--accent-text);outline-offset:2px}
 body{font-family:'Segoe UI',sans-serif;background:var(--bg);color:var(--text);min-height:100vh}
-.header{background:var(--bg-elevated);border-bottom:1px solid var(--border);padding:14px 24px;display:flex;align-items:center;gap:14px}
+.header{background:var(--bg-elevated);border-bottom:1px solid var(--border);padding:14px 24px;display:flex;align-items:center;gap:10px 14px;flex-wrap:wrap}
 .header h1{font-size:17px;font-weight:600;color:var(--accent-text)}
 .badge{background:var(--accent-soft-bg);color:var(--accent-soft-text);font-size:11px;padding:3px 8px;border-radius:12px}
+/* 「この画面の見方」：やさしい解説（/guide）の、この画面の節へ飛ぶ入口。全画面で同じ位置（題名の右）・同じ文言 */
+.help-link{display:inline-flex;align-items:center;gap:5px;padding:4px 10px;border:1px solid var(--border-muted);border-radius:6px;font-size:12px;color:var(--status-good-text);text-decoration:none;white-space:nowrap}
+.help-link:hover{background:var(--bg-hover)}
 .theme-toggle-btn{background:transparent;border:1px solid var(--border-muted);color:var(--text);border-radius:6px;width:30px;height:30px;font-size:14px;cursor:pointer;display:flex;align-items:center;justify-content:center;flex-shrink:0}
 .theme-toggle-btn:hover{background:var(--bg-hover)}
 .dot{width:8px;height:8px;border-radius:50%;display:inline-block}
@@ -125,6 +128,7 @@ body{font-family:'Segoe UI',sans-serif;background:var(--bg);color:var(--text);mi
   </div>
   <h1>財務分析ダッシュボード</h1>
   <span class="badge">ホーム</span>
+  <a href="/guide#start" class="help-link">❓ はじめての方へ</a>
   <div class="api-status">
     <span class="dot dot-amber" id="api-dot"></span>
     <span id="api-label">接続確認中...</span>
@@ -276,7 +280,7 @@ body{font-family:'Segoe UI',sans-serif;background:var(--bg);color:var(--text);mi
       </div>
       <div>
         <div class="aux-card-title">やさしい解説</div>
-        <div class="aux-card-desc">各分析手法を数式なしで噛み砕いた初心者向け解説</div>
+        <div class="aux-card-desc">はじめに・画面の歩き方・分析手法・用語集（数式なしの初心者向け）</div>
       </div>
     </a>
     <a href="/models" class="aux-card">

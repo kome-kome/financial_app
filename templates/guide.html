@@ -39,23 +39,27 @@
 *{box-sizing:border-box;margin:0;padding:0}
 :focus-visible{outline:2px solid var(--accent-text);outline-offset:2px}
 body{font-family:'Segoe UI',sans-serif;background:var(--bg);color:var(--text);min-height:100vh;line-height:1.7}
+/* 目次や他画面のリンクで飛んできたとき、見出しが固定ヘッダーの下に隠れないようにする */
+[id]{scroll-margin-top:76px}
 .header{background:var(--bg-elevated);border-bottom:1px solid var(--border);padding:14px 24px;display:flex;align-items:center;gap:14px;position:sticky;top:0;z-index:100}
 .header h1{font-size:17px;font-weight:600;color:var(--status-good-text)}
 .badge{background:var(--status-good-bg);color:var(--status-good-text);font-size:11px;padding:3px 8px;border-radius:12px}
 .nav-link{padding:8px 14px;font-size:13px;color:var(--text-muted);text-decoration:none;display:inline-flex;align-items:center;gap:5px;border-radius:6px}
 .nav-link:first-of-type{margin-left:auto}
 .nav-link:hover{background:var(--bg-hover);color:var(--text-secondary)}
-.theme-toggle-btn{background:transparent;border:1px solid var(--border-muted);color:var(--text);border-radius:6px;width:30px;height:30px;font-size:14px;cursor:pointer;display:flex;align-items:center;justify-content:center;flex-shrink:0}
+.theme-toggle-btn{background:transparent;border:1px solid var(--border-muted);color:var(--text);border-radius:6px;width:30px;height:30px;font-size:14px;cursor:pointer;display:flex;align-items:center;justify-content:center;flex-shrink:0;margin-left:auto}
 .theme-toggle-btn:hover{background:var(--bg-hover)}
-.layout{display:flex;max-width:1400px;margin:0 auto;padding:24px;gap:28px}
+/* 読む画面なので本文の段を絞る（1行が長すぎると目が行を見失う）。目次＋本文で中央に寄せる */
+.layout{display:flex;max-width:1060px;margin:0 auto;padding:24px;gap:28px}
 .sidebar{width:240px;flex-shrink:0}
-.toc{background:var(--bg-elevated);border:1px solid var(--border);border-radius:10px;padding:16px;position:sticky;top:80px}
-.toc-title{font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:12px}
+.toc{background:var(--bg-elevated);border:1px solid var(--border);border-radius:10px;padding:16px;position:sticky;top:80px;max-height:calc(100vh - 100px);overflow-y:auto}
+.toc-title{font-size:11px;color:var(--text-muted);letter-spacing:.5px;margin-bottom:12px}
 .toc a{display:block;font-size:12px;color:var(--text-muted);text-decoration:none;padding:5px 8px;border-radius:5px;transition:all .15s;border-left:2px solid transparent}
 .toc a:hover{background:var(--bg-hover);color:var(--status-good-text);border-left-color:var(--status-good)}
 .toc a.active{background:var(--bg-hover);color:var(--status-good-text);border-left-color:var(--status-good)}
-.toc-section-title{font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px;margin:12px 0 4px 8px}
-.content{flex:1;min-width:0}
+.toc-section-title{font-size:12px;font-weight:600;color:var(--status-good-text);margin:14px 0 4px 8px}
+.toc-group{font-size:11px;color:var(--text-muted);margin:8px 0 2px 8px}
+.content{flex:1;min-width:0;max-width:760px}
 /* 狭い幅では目次を本文の上へ積む。横並びのままだと目次 240px が残り、本文が幅 59px に潰れて
    ページ全体が 655px に広がっていた（#863・375px で実測）。
    .content の clip は表示中の用語の吹き出し（.term::after・幅最大 280px）のため——狭い本文では
@@ -67,33 +71,50 @@ body{font-family:'Segoe UI',sans-serif;background:var(--bg);color:var(--text);mi
   .toc{position:static;max-height:40vh;overflow-y:auto}
   .content{overflow-x:clip}
 }
-.intro{background:var(--bg-elevated);border:1px solid var(--border);border-radius:10px;padding:20px 24px;margin-bottom:20px}
-.intro p{font-size:13px;color:var(--text-body);margin-bottom:8px}
+/* 部の扉。ページ全体の現在地（第何部か）を示す唯一の大きな見出し。番号は目次と同じ並びの情報なので
+   見出しの同じ行に置き、区切りは上の罫線で示す（見出しの上に小さなラベルを載せない） */
+.part-header{border-top:2px solid var(--status-good);padding-top:16px;margin:48px 0 20px}
+.part-header:first-child{margin-top:4px}
+.part-title{font-size:24px;font-weight:700;color:var(--text);line-height:1.4;margin:0 0 8px;display:flex;align-items:baseline;gap:12px;flex-wrap:wrap}
+.part-no{font-size:15px;font-weight:600;color:var(--status-good-text)}
+.part-header p{margin-bottom:0}
 .model-section{background:var(--bg-elevated);border:1px solid var(--border);border-radius:10px;padding:24px;margin-bottom:20px}
 .model-section:target{border-color:var(--status-good);box-shadow:0 0 0 2px rgba(16,185,129,.2)}
-h2{font-size:18px;font-weight:700;color:var(--status-good-text);margin-bottom:4px;display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+h2{font-size:19px;font-weight:700;color:var(--status-good-text);margin-bottom:4px;display:flex;align-items:center;gap:10px;flex-wrap:wrap}
 h2 .model-tag{font-size:11px;background:var(--bg-hover);border:1px solid var(--border-muted);color:var(--text-muted);padding:2px 8px;border-radius:10px;font-weight:400}
 h2 .model-tag.retired{background:var(--status-warn-bg);border-color:var(--status-warn);color:var(--status-warn-text)}
-h3{font-size:14px;font-weight:600;color:var(--status-good-text);margin:18px 0 8px;display:flex;align-items:center;gap:7px}
-p{font-size:13px;color:var(--text-body);margin-bottom:10px}
-ul{margin:6px 0 12px 20px}
-li{font-size:13px;color:var(--text-body);margin-bottom:5px}
-.analogy{background:var(--status-good-bg);border:1px solid var(--status-good);border-left:3px solid var(--status-good);border-radius:8px;padding:14px 16px;font-size:13px;color:var(--status-good-text);margin:6px 0 14px;line-height:1.7}
+h3{font-size:15px;font-weight:600;color:var(--status-good-text);margin:20px 0 8px;display:flex;align-items:center;gap:7px}
+p{font-size:15px;line-height:1.8;color:var(--text-body);margin-bottom:12px}
+ul{margin:6px 0 14px 22px}
+li{font-size:15px;line-height:1.8;color:var(--text-body);margin-bottom:6px}
+.content p a,.content li a,.content td a,.glossary dd a,.info-box a{color:var(--status-good-text)}
+.warn-box a{color:var(--status-warn-text)}
+.analogy{background:var(--status-good-bg);border:1px solid var(--status-good);border-left:3px solid var(--status-good);border-radius:8px;padding:14px 16px;font-size:14px;color:var(--status-good-text);margin:6px 0 14px;line-height:1.8}
 .analogy strong{color:var(--status-good-text)}
-.info-box{background:var(--border-subtle);border:1px solid var(--border);border-radius:8px;padding:12px 14px;font-size:12px;color:var(--text-body);margin:8px 0;border-left:3px solid var(--status-good);line-height:1.7}
-.warn-box{background:var(--status-warn-bg);border:1px solid var(--status-warn);border-radius:8px;padding:12px 14px;font-size:12px;color:var(--status-warn-text);margin:8px 0;line-height:1.7}
+.info-box{background:var(--border-subtle);border:1px solid var(--border);border-radius:8px;padding:12px 14px;font-size:14px;color:var(--text-body);margin:10px 0;border-left:3px solid var(--status-good);line-height:1.8}
+.warn-box{background:var(--status-warn-bg);border:1px solid var(--status-warn);border-radius:8px;padding:12px 14px;font-size:14px;color:var(--status-warn-text);margin:10px 0;line-height:1.8}
 .warn-box strong{color:var(--status-warn-text)}
-.steps{counter-reset:step;list-style:none;margin:6px 0 12px 0;padding:0}
-.steps li{position:relative;padding:6px 0 6px 34px;font-size:13px;color:var(--text-body);border-bottom:1px solid var(--border-subtle)}
+.warn-box ul{margin:6px 0 0 20px}
+.warn-box li{font-size:14px;color:var(--status-warn-text);margin-bottom:4px}
+.steps{counter-reset:step;list-style:none;margin:6px 0 14px 0;padding:0}
+.steps li{position:relative;padding:8px 0 8px 36px;color:var(--text-body);border-bottom:1px solid var(--border-subtle)}
 .steps li:last-child{border-bottom:none}
-.steps li::before{counter-increment:step;content:counter(step);position:absolute;left:0;top:6px;width:22px;height:22px;background:var(--status-good-bg);color:var(--status-good-text);border-radius:50%;font-size:12px;font-weight:700;display:flex;align-items:center;justify-content:center}
-table{width:100%;border-collapse:collapse;font-size:12px;margin:8px 0}
+.steps li::before{counter-increment:step;content:counter(step);position:absolute;left:0;top:10px;width:24px;height:24px;background:var(--status-good-bg);color:var(--status-good-text);border-radius:50%;font-size:12px;font-weight:700;display:flex;align-items:center;justify-content:center}
+table{width:100%;border-collapse:collapse;font-size:13px;margin:8px 0 14px}
 th{text-align:left;padding:8px 10px;color:var(--text-muted);font-weight:500;border-bottom:1px solid var(--border);background:var(--bg-sunken)}
-td{padding:8px 10px;border-bottom:1px solid var(--border-subtle);color:var(--text-body)}
-td code,p code,li code{background:var(--bg-sunken);border:1px solid var(--border-subtle);padding:1px 5px;border-radius:3px;font-size:11px;color:var(--status-info-text);font-family:monospace}
-.more{margin-top:16px;padding-top:14px;border-top:1px solid var(--border);font-size:12px}
+td{padding:8px 10px;border-bottom:1px solid var(--border-subtle);color:var(--text-body);vertical-align:top;line-height:1.7}
+td:first-child{white-space:nowrap}
+td code,p code,li code,dd code{background:var(--bg-sunken);border:1px solid var(--border-subtle);padding:1px 5px;border-radius:3px;font-size:12px;color:var(--status-info-text);font-family:monospace}
+.more{margin-top:16px;padding-top:14px;border-top:1px solid var(--border);font-size:13px}
 .more a{color:var(--accent-text);text-decoration:none;font-weight:600}
 .more a:hover{text-decoration:underline}
+.more.to-screen a{color:var(--status-good-text)}
+/* 用語集。項目ごとに id を持たせ、他の節や他画面から #term-… で直接飛べるようにする */
+.glossary{margin:4px 0 0}
+.glossary dt{font-size:15px;font-weight:600;color:var(--text);padding:12px 0 2px}
+.glossary dt:target{color:var(--status-good-text)}
+.glossary dd{font-size:15px;line-height:1.8;color:var(--text-body);padding-bottom:12px;border-bottom:1px solid var(--border-subtle)}
+.glossary dd:last-child{border-bottom:none}
 /* 用語は行をまたがせない（nowrap）。2行に割れると吹き出しの基準が1行目の始まりになり、models.js が測る
    2行を囲む箱と食い違う——幅 375px の「生存バイアス」は行末から右へ開いて本文の外で 220px 切れていた（#893） */
 .term{border-bottom:1px dotted var(--status-good);cursor:help;position:relative;color:var(--status-good-text);white-space:nowrap}
@@ -102,11 +123,12 @@ td code,p code,li code{background:var(--bg-sunken);border:1px solid var(--border
    @starting-style で保つ。本文の右端を越える用語は models.js が .tip-flip を付けて左へ開く。
    フォーカスでも開く（tabindex="0"・#893。:focus-visible ではタップで開かない）。models.js は
    --tip-room（外寸を本文の幅に収める上限）と --tip-shift（左へ開くと本文の左端を越える分だけ右へ戻す量）も入れる */
-.term::after{content:attr(data-tip);position:absolute;left:0;top:calc(100% + 7px);z-index:60;width:max-content;max-width:min(280px,var(--tip-room,280px));white-space:normal;background:var(--bg-sunken);color:var(--text-body);border:1px solid var(--border-muted);border-radius:7px;padding:9px 11px;font-size:11px;font-weight:400;line-height:1.6;box-shadow:0 10px 30px var(--shadow-color);opacity:0;display:none;transform:translateY(-4px);transition:opacity .13s,transform .13s;pointer-events:none}
+.term::after{content:attr(data-tip);position:absolute;left:0;top:calc(100% + 7px);z-index:60;width:max-content;max-width:min(280px,var(--tip-room,280px));white-space:normal;background:var(--bg-sunken);color:var(--text-body);border:1px solid var(--border-muted);border-radius:7px;padding:9px 11px;font-size:12px;font-weight:400;line-height:1.6;box-shadow:0 10px 30px var(--shadow-color);opacity:0;display:none;transform:translateY(-4px);transition:opacity .13s,transform .13s;pointer-events:none}
 .term:hover::after,.term:focus::after{display:block;opacity:1;transform:translateY(0)}
 .term.tip-flip::after{left:auto;right:calc(0px - var(--tip-shift,0px))}
 @starting-style{.term:hover::after,.term:focus::after{opacity:0;transform:translateY(-4px)}}
-.tag{display:inline-block;padding:2px 7px;border-radius:10px;font-size:11px;font-weight:500}
+@media (prefers-reduced-motion: reduce){.term::after{transition:none}}
+.tag{display:inline-block;padding:2px 7px;border-radius:10px;font-size:12px;font-weight:500}
 .tag-green{background:var(--status-good-bg);color:var(--status-good-text)}
 .tag-amber{background:var(--status-warn-bg);color:var(--status-warn-text)}
 .tag-red{background:var(--status-bad-bg);color:var(--status-bad-text)}
@@ -144,36 +166,199 @@ td code,p code,li code{background:var(--bg-sunken);border:1px solid var(--border
 <div class="layout">
 
 <aside class="sidebar">
-  <nav class="toc">
+  <nav class="toc" aria-label="もくじ">
     <div class="toc-title">もくじ</div>
-    <div class="toc-section-title">① 銘柄を探す</div>
+    <div class="toc-section-title">第1部 はじめに</div>
+    <a href="#start">このアプリでできること</a>
+    <a href="#first-steps">最初に見る順番</a>
+    <a href="#ground-rules">使う前に知っておくこと</a>
+    <div class="toc-section-title">第2部 画面の歩き方</div>
+    <a href="#screen-home">ホーム</a>
+    <a href="#screen-morning">朝の推奨</a>
+    <a href="#screen-company">企業詳細</a>
+    <a href="#screen-analysis">分析</a>
+    <a href="#screen-collection">収集 &amp; スクリーニング</a>
+    <a href="#screen-db">DB ビューア</a>
+    <div class="toc-section-title">第3部 分析手法</div>
+    <a href="#methods">この部の読み方</a>
+    <div class="toc-group">① 銘柄を探す</div>
     <a href="#recommend">おすすめ銘柄</a>
     <a href="#net_cash_analysis">ネットキャッシュ分析</a>
-    <div class="toc-section-title">② 割安度を測る</div>
+    <div class="toc-group">② 割安度を測る</div>
     <a href="#sector_ols">業種別OLS分析</a>
     <a href="#gap_analysis">バリュエーション分析</a>
-    <div class="toc-section-title">③ 将来リターンを予測</div>
-    <a href="#macro_risk_return">マクロ×リスク-リターン</a>
-    <a href="#macro_gbdt">マクロ×財務 勾配ブースティング（M-2）</a>
-    <a href="#macro_dlm">ベイズ状態空間（時変マクロβ）</a>
-    <a href="#macro_ensemble">兄弟モデルの合わせ技（M-4・退役）</a>
-    <a href="#macro_gbdt_rank">ランク学習版 勾配ブースティング（M-5・退役）</a>
+    <div class="toc-group">③ 将来リターンを予測</div>
+    <a href="#macro_risk_return">マクロ×リスク-リターン（M-1）</a>
+    <a href="#macro_gbdt">勾配ブースティング（M-2）</a>
+    <a href="#macro_dlm">ベイズ状態空間（M-3）</a>
     <a href="#macro_enet">正則化線形 ElasticNet（M-6）</a>
-    <div class="toc-section-title">④ 戦略を検証</div>
+    <div class="toc-group">④ 戦略を検証</div>
     <a href="#backtest">バックテスト</a>
-    <div class="toc-section-title">⑤ 保有を見直す</div>
+    <div class="toc-group">⑤ 保有を見直す</div>
     <a href="#sell_ranking">売り候補ランキング</a>
-    <div class="toc-section-title">共通の考え方</div>
+    <div class="toc-group">共通の考え方・退役</div>
     <a href="#zscore">Zスコアって何？</a>
+    <a href="#retired">退役したモデル（M-4・M-5）</a>
+    <div class="toc-section-title">第4部 用語集</div>
+    <a href="#glossary">財務・株価の言葉</a>
+    <a href="#glossary-stats">統計・モデルの言葉</a>
+    <div class="toc-section-title">もっと詳しく</div>
+    <a href="#further">技術版の解説と文書</a>
   </nav>
 </aside>
 
 <main class="content">
 
-<div class="intro">
-  <p>このページは、分析タブで使われている手法を<strong>数式を使わずに、たとえ話で</strong>説明するページです。各分析の画面で「❓ やさしい解説」を押すと、ここの対応する場所へ飛んできます。</p>
-  <p>もっと正確な数式・前提・参考論文を知りたくなったら、各セクション末尾の「→ もっと詳しく」から<a href="/models" style="color:var(--accent-text);text-decoration:none">モデル解説（技術版）</a>へ進めます。</p>
-  <p style="color:var(--status-warn-text);font-size:12px;margin-bottom:0">⚠ どの分析も「未来を当てる魔法」ではありません。判断を助ける<strong>参考材料</strong>として使ってください。</p>
+<!-- ═════════════ 第1部 はじめに ═════════════ -->
+<div class="part-header" id="start">
+  <h2 class="part-title"><span class="part-no">第1部</span>はじめに</h2>
+  <p>このアプリが何をしてくれるのか、どの画面から見ればよいのかを説明します。初めての方はここから順に読んでください。</p>
+</div>
+
+<div class="model-section" id="what-is-this">
+  <h2>このアプリでできること</h2>
+  <p>上場企業の決算書と株価を毎日集め、統計の手法で「割安そうな会社」「これから伸びそうな会社」を順位にして見せる道具です。やっていることは大きく3つです。</p>
+  <ul>
+    <li><strong>集める</strong>：金融庁の EDINET に出る有価証券報告書の数字、株価、為替・金利などの経済指標を、毎晩自動で集めます。</li>
+    <li><strong>分析する</strong>：集めた数字から理論上の値ごろを計算したり、将来のリターンを予測したりして、会社を順位に並べます。</li>
+    <li><strong>確かめる</strong>：その並べ方が過去に本当に効いたのかを、当時分かっていた情報だけを使って答え合わせします。</li>
+  </ul>
+  <div class="info-box">データの更新と重い計算は、このパソコンで毎晩自動で行われます。画面の多くは、その夜に計算済みの結果を読み出して表示するだけです。外出先から見る閲覧用の画面は、ある時点で更新を止めたデータを表示しているため、最新の結果は手元のパソコンで開いた画面で見てください。</div>
+</div>
+
+<div class="model-section" id="first-steps">
+  <h2>最初に見る順番</h2>
+  <p>毎日の確認は、次の順で画面を見ていくのがおすすめです。</p>
+  <ul class="steps">
+    <li><a href="/">ホーム</a>で、データが新しいかを確かめます。古いときは画面の上に知らせが出ます。（<a href="#screen-home">ホームの見方</a>）</li>
+    <li><a href="/morning">朝の推奨</a>で、一番上の判定が「発注しないでください」になっていないかを確かめてから、買い候補の順位を見ます。（<a href="#screen-morning">朝の推奨の見方</a>）</li>
+    <li>気になった会社の名前を押して<a href="/company">企業詳細</a>を開き、業績・財務・株価の推移を自分の目で確かめます。（<a href="#screen-company">企業詳細の見方</a>）</li>
+    <li>順位の理由をもっと知りたいとき、条件を変えて並べ直したいときは<a href="/analysis">分析</a>を開きます。（<a href="#screen-analysis">分析の見方</a>）</li>
+  </ul>
+</div>
+
+<div class="model-section" id="ground-rules">
+  <h2>使う前に知っておくこと</h2>
+  <div class="warn-box">
+    <ul>
+      <li><strong>投資の助言ではありません。</strong>出てくる順位は、決められた手順で計算した参考材料です。買う・売るの判断はご自身で行ってください。</li>
+      <li><strong>過去に効いたことは、将来も効くとは限りません。</strong>答え合わせ（バックテスト）が良くても、相場の環境が変われば結果は変わります。</li>
+      <li><strong>データの新しさを必ず見てください。</strong>株価や計算結果が古いまま並べた順位は、今日の判断には使えません。朝の推奨の判定とデータ鮮度の欄がその確認用です。</li>
+      <li><strong>理論株価や期待リターンは推定値です。</strong>正解の値段や約束されたリターンではなく、「同じ業種の平均と比べてどうか」「過去の傾向から見てどうか」という目安です。</li>
+    </ul>
+  </div>
+</div>
+
+<!-- ═════════════ 第2部 画面の歩き方 ═════════════ -->
+<div class="part-header" id="screens">
+  <h2 class="part-title"><span class="part-no">第2部</span>画面の歩き方</h2>
+  <p>画面ごとに、何が分かるか・どこを見るか・次にどの画面へ行くかをまとめました。各画面の上にある「この画面の見方」を押すと、ここの対応する節へ飛んできます。</p>
+</div>
+
+<div class="model-section" id="screen-home">
+  <h2>ホーム</h2>
+  <h3>📊 何が分かる？</h3>
+  <p>集めたデータの量と新しさが一目で分かります。収録企業数・財務レコード数・最新年度・データ鮮度の4つのカードが並び、その下によく使う画面への入口があります。</p>
+  <h3>👀 どこを見る？</h3>
+  <ul>
+    <li><strong>データ鮮度</strong>のカード：最後にデータが更新されてから何日たったかです。毎晩自動で更新されるので、普段は1日以内です。</li>
+    <li>画面の上に「財務データが古い可能性があります」という知らせが出たら、夜の自動更新が止まっている可能性があります。</li>
+  </ul>
+  <h3>➡ 次は</h3>
+  <p>データが新しければ<a href="#screen-morning">朝の推奨</a>へ進みます。</p>
+  <div class="more to-screen">→ 画面を開く：<a href="/">ホーム</a></div>
+</div>
+
+<div class="model-section" id="screen-morning">
+  <h2>朝の推奨</h2>
+  <h3>📊 何が分かる？</h3>
+  <p>夜の自動更新が計算した結果をもとに、今日の買い候補を順位で見せる画面です。この画面ではモデルの学習はせず、計算済みのスコアを読み出して並べ替えるだけです。</p>
+  <h3>👀 どこを見る？</h3>
+  <p>まず一番上の<strong>判定</strong>を見ます。順位の元になったデータが新しいかどうかを3段階で示しています。</p>
+  <table>
+    <thead><tr><th>判定</th><th>意味と、すること</th></tr></thead>
+    <tbody>
+      <tr><td><span class="tag tag-green">✓ 最新です</span></td><td>元データは最新です。この順位を参考にして問題ありません。</td></tr>
+      <tr><td><span class="tag tag-amber">! 一部古め</span></td><td>一部のデータが古くなっています。理由の欄を読み、内容を確かめてから使ってください。</td></tr>
+      <tr><td><span class="tag tag-red">× 発注しない</span></td><td>データが古いか欠けています。この順位で売買しないでください。「復旧手順」のリンクから原因を確かめます。</td></tr>
+    </tbody>
+  </table>
+  <p>その下の<strong>データ鮮度</strong>には、夜の自動更新・株価・乖離率・期待リターン（μ̂）・経済指標が、それぞれいつの時点のものかが並びます。</p>
+  <p>順位の表の列は次の意味です。左上の「プリセット」で、どの観点を重視して並べるかを切り替えられます（迷ったらバランス型）。</p>
+  <table>
+    <thead><tr><th>列</th><th>意味</th></tr></thead>
+    <tbody>
+      <tr><td>スコア</td><td><a href="#recommend">おすすめ銘柄</a>の総合点です。収益力・成長・割安さなどの指標を<a href="#zscore">Zスコア</a>にそろえ、プリセットの重みで足し合わせています。高いほど上位です。</td></tr>
+      <tr><td>PER</td><td>株価が1株あたり利益の何年分か。低いほど利益に対して安い（<a href="#term-per">用語集</a>）。</td></tr>
+      <tr><td>PBR</td><td>株価が1株あたり純資産の何倍か。1倍を下回ると帳簿上の純資産より安い（<a href="#term-pbr">用語集</a>）。</td></tr>
+      <tr><td>ROE</td><td>株主のお金でどれだけ利益を出したか。高いほど効率よく稼いでいる（<a href="#term-roe">用語集</a>）。</td></tr>
+      <tr><td>乖離率</td><td>同じ業種の値ごろから計算した理論上の時価総額より、実際がどれだけ安いか。<strong>プラスが割安</strong>、マイナスが割高です（<a href="#term-gap">用語集</a>）。</td></tr>
+      <tr><td>株価 as-of</td><td>その行で使った株価がいつの終値か。古いと色が変わります。</td></tr>
+    </tbody>
+  </table>
+  <h3>➡ 次は</h3>
+  <p>気になった会社の名前を押すと、その会社の<a href="#screen-company">企業詳細</a>が開きます。</p>
+  <div class="more to-screen">→ 画面を開く：<a href="/morning">朝の推奨</a></div>
+</div>
+
+<div class="model-section" id="screen-company">
+  <h2>企業詳細</h2>
+  <h3>📊 何が分かる？</h3>
+  <p>1つの会社について、決算書の数字と株価の推移をグラフで見る画面です。上の検索欄に企業名か証券コードを入れて開きます。</p>
+  <h3>👀 どこを見る？</h3>
+  <ul>
+    <li><strong>業績</strong>：売上と利益が年々伸びているか。利益率が下がっていないか。</li>
+    <li><strong>財務(BS)</strong>：<a href="#term-equity-ratio">自己資本比率</a>が極端に低くないか（借金に頼りすぎていないか）。</li>
+    <li><strong>キャッシュフロー</strong>：本業で現金を稼げているか（営業CF）、自由に使える現金が残っているか（<a href="#term-cf">フリーCF</a>）。</li>
+    <li><strong>バリュエーション</strong>と<strong>株価</strong>：PER・PBR の推移と、理論上の値ごろとのずれ。</li>
+    <li><strong>業種内</strong>と<strong>同業比較</strong>：同じ業種の会社の中で、どの指標が上位か下位か。</li>
+    <li><strong>ネットキャッシュ</strong>：手元に残る現金が、会社の値段に比べてどれくらいあるか（<a href="#net_cash_analysis">ネットキャッシュ分析</a>）。</li>
+  </ul>
+  <h3>➡ 次は</h3>
+  <p>なぜ順位が高いのかを詳しく見たいときは<a href="#screen-analysis">分析</a>へ進みます。</p>
+  <div class="more to-screen">→ 画面を開く：<a href="/company">企業詳細</a></div>
+</div>
+
+<div class="model-section" id="screen-analysis">
+  <h2>分析</h2>
+  <h3>📊 何が分かる？</h3>
+  <p>このアプリの分析手法を、条件を変えながら自分で実行できる画面です。左のメニューは目的別に「① 銘柄を探す／② 割安度を測る／③ 将来リターンを予測／④ 戦略を検証／⑤ 保有を見直す」に分かれています。</p>
+  <h3>👀 どこを見る？</h3>
+  <ul>
+    <li>各分析の見出しの右にある「❓ やさしい解説」を押すと、このページの<a href="#methods">第3部</a>の対応する節が開きます。</li>
+    <li>「モデル比較」では、将来リターンを予測するモデルどうしを、学習に使わなかった期間の成績（<a href="#term-oof">OOF</a>）で並べて比べられます。</li>
+    <li>重い分析は計算に数分かかります。夜の自動更新が動いている間は、結果が混ざらないよう実行ボタンが止まり、画面の上に知らせが出ます。</li>
+  </ul>
+  <h3>➡ 次は</h3>
+  <p>手法そのものの考え方は<a href="#methods">第3部 分析手法</a>、言葉の意味は<a href="#glossary">第4部 用語集</a>で確かめられます。</p>
+  <div class="more to-screen">→ 画面を開く：<a href="/analysis">分析</a></div>
+</div>
+
+<div class="model-section" id="screen-collection">
+  <h2>収集 &amp; スクリーニング</h2>
+  <h3>📊 何が分かる？</h3>
+  <p>データの集め具合を確かめたり、手動で集め直したりする画面です。普段のデータ収集は毎晩自動で行われるので、<strong>通常は触らなくて大丈夫</strong>です。</p>
+  <h3>👀 どこを見る？</h3>
+  <ul>
+    <li><strong>収録状況</strong>：財務データ・株価・経済指標が、どの範囲まで揃っているか。</li>
+    <li><strong>スクリーニング</strong>：PER や ROE などの条件で会社を絞り込めます。</li>
+    <li><strong>DBブラウザ・再分類ビュー</strong>：集めた決算書の数字を、表の形でそのまま確かめられます。</li>
+  </ul>
+  <div class="warn-box">「全件収集」はすべての会社の5年分を集め直す重い処理で、外部サービスの利用回数の上限にも関わります。必要なとき以外は押さないでください。</div>
+  <div class="more to-screen">→ 画面を開く：<a href="/collection">収集 &amp; スクリーニング</a></div>
+</div>
+
+<div class="model-section" id="screen-db">
+  <h2>DB ビューア</h2>
+  <h3>📊 何が分かる？</h3>
+  <p>データベースの表の一覧・表どうしのつながり・各表の中身を点検する、開発者向けの画面です。<strong>投資の判断のために見る必要はありません。</strong></p>
+  <div class="more to-screen">→ 画面を開く：<a href="/db">DB ビューア</a></div>
+</div>
+
+<!-- ═════════════ 第3部 分析手法 ═════════════ -->
+<div class="part-header" id="methods">
+  <h2 class="part-title"><span class="part-no">第3部</span>分析手法</h2>
+  <p>分析画面で使われている手法を、<strong>数式を使わずに、たとえ話で</strong>説明します。各手法は「ひとことで言うと／何が分かる？／どう使う？／注意点」の順に並んでいます。もっと正確な数式・前提・参考論文を知りたくなったら、各節の末尾の「もっと詳しく」から<a href="/models">モデル解説（技術版）</a>へ進めます。</p>
 </div>
 
 <!-- ① おすすめ銘柄 ───────────────────────────── -->
@@ -186,7 +371,7 @@ td code,p code,li code{background:var(--bg-sunken);border:1px solid var(--border
   </div>
 
   <h3>📊 何が分かる？</h3>
-  <p>たくさんの会社の中から、自分の好みの条件に合った「良さそうな会社」をまとめて見つけられます。点数の内訳も見えるので、なぜ上位なのかを確認できます。</p>
+  <p>たくさんの会社の中から、自分の好みの条件に合った「良さそうな会社」をまとめて見つけられます。点数の内訳も見えるので、なぜ上位なのかを確認できます。朝の推奨の「スコア」はこの総合点です。</p>
 
   <h3>🛠 どう使う？</h3>
   <ul class="steps">
@@ -194,11 +379,11 @@ td code,p code,li code{background:var(--bg-sunken);border:1px solid var(--border
     <li>こだわりがあれば、各指標の<strong>スライダー（ウェイト）</strong>を動かして重要度を調整する。</li>
     <li>実行すると、総合点の高い順に会社が並びます。</li>
   </ul>
-  <div class="info-box">「<strong>期待リターン μ̂</strong>」のスライダーだけは初期値が 0（＝使わない）で、下のフィルター欄で「μ̂ の出所」モデル（M-1〜M-6）を選んで初めて効きます。重要度だけ上げてモデルを選ばずに実行すると、黙って無視せずエラーで知らせます（「効いているつもり」を作らないため）。</div>
+  <div class="info-box">「<strong><span class="term" tabindex="0" data-tip="モデルが予測した、約1年先のリターンの見込み。値そのものより、会社どうしの順位として使う。">期待リターン μ̂</span></strong>」のスライダーだけは初期値が 0（＝使わない）で、下のフィルター欄で「μ̂ の出所」モデル（M-1〜M-6）を選んで初めて効きます。重要度だけ上げてモデルを選ばずに実行すると、黙って無視せずエラーで知らせます（「効いているつもり」を作らないため）。</div>
   <div class="info-box">各社は指標ごとに「平均からどれくらい良い／悪いか」を表す<span class="term" tabindex="0" data-tip="同じ年の全社の中で平均より上か下かを表す点数。平均=0、+で平均以上、−で平均以下。">Zスコア</span>に変換してから合計します。これにより、規模や業種の違う会社どうしも公平に比べられます。指標には「値上がりの勢い（12ヶ月モメンタム）」も含まれます。</div>
 
   <h3>⚠ 注意点・落とし穴</h3>
-  <div class="warn-box">「バランス型」など4つのプリセットは<strong>あなたの好みの設定</strong>で、決め方に数学的な正解はありません。「統計的最適化」プリセットのみ、過去データから統計的に計算した重みを使います。いずれも「この設定が儲かる」とは限らないので、<a href="/guide#backtest" style="color:var(--status-warn-text)">バックテスト</a>で過去の成績を確かめるのがおすすめです。</div>
+  <div class="warn-box">「バランス型」など4つのプリセットは<strong>あなたの好みの設定</strong>で、決め方に数学的な正解はありません。「統計的最適化」プリセットのみ、過去データから統計的に計算した重みを使います。いずれも「この設定が儲かる」とは限らないので、<a href="#backtest">バックテスト</a>で過去の成績を確かめるのがおすすめです。</div>
 
   <div class="more">→ もっと詳しく：<a href="/models#m6">モデル解説：Zスコア重み付けスコアリング</a></div>
 </div>
@@ -246,18 +431,18 @@ td code,p code,li code{background:var(--bg-sunken);border:1px solid var(--border
   </div>
 
   <h3>📊 何が分かる？</h3>
-  <p>業種ごとに「財務の数字 → 妥当な株価」の関係式を作ります。これが次の<a href="/guide#gap_analysis" style="color:var(--status-good-text)">バリュエーション分析</a>の土台になります。同じ業種の中で比べることで、業種ごとの値ごろ感の違い（IT は高め・銀行は低めなど）に惑わされずに済みます。</p>
+  <p>業種ごとに「財務の数字 → 妥当な株価」の関係式を作ります。これが次の<a href="#gap_analysis">バリュエーション分析</a>の土台になります。同じ業種の中で比べることで、業種ごとの値ごろ感の違い（IT は高め・銀行は低めなど）に惑わされずに済みます。</p>
 
   <h3>🛠 どう使う？</h3>
   <ul class="steps">
     <li>基本はそのまま実行でOK。説明に使う財務項目を増減させることもできます。</li>
     <li>「多重共線性の警告」（似た指標を入れすぎたサイン）が出たら、<span class="term" tabindex="0" data-tip="係数が暴れないように、ほどよく抑えながら式を作る方法。似た指標が多いときに安定する。">Ridge（リッジ）</span>に切り替えると安定します。</li>
   </ul>
-  <div class="info-box">この分析は計算が重いため、本番（Render）環境では実行できないことがあります。その場合は手元のPCで実行してください。結果は手元のデータベース（正本）に保存されます。Render は過去の時点のデータを読む閲覧専用の窓なので、手元の結果は Render には反映されません。</div>
+  <div class="info-box">計算が重いため、手元のパソコンで開いた画面で実行します（外出先から見る閲覧用の画面では実行できません）。毎晩の自動更新でも同じ計算が行われ、朝の推奨の「乖離率」になります。</div>
 
   <h3>⚠ 注意点・落とし穴</h3>
   <div class="warn-box">仲間の会社が少なすぎる業種（既定では5社未満）は計算されません。また理論株価はあくまで「業種内の平均的な値ごろ」であり、<strong>正解の株価ではありません</strong>。</div>
-  <div class="warn-box">使う財務項目が1つでも空欄の会社は計算対象から外れます。ただし「<strong>データが無い</strong>」と「<strong>そもそも存在しない</strong>」は別物です。銀行に「売上総利益」は存在しませんし、無配の会社は配当欄が空になります。これらは空欄でも計算から外さず、業種ごとに使う項目を変えたり、無配は配当0円として扱ったりしています（この対応で対象が全体の 74% → 93% に増えました）。業種によって使った項目が違う場合は、業種別サマリー表の「業種内で除外した説明変数」に出ます。</div>
+  <div class="warn-box">使う財務項目が1つでも空欄の会社は計算対象から外れます。ただし「<strong>データが無い</strong>」と「<strong>そもそも存在しない</strong>」は別物です。銀行に「売上総利益」は存在しませんし、無配の会社は配当欄が空になります。これらは空欄でも計算から外さず、業種ごとに使う項目を変えたり、無配は配当0円として扱ったりしています。業種によって使った項目が違う場合は、業種別サマリー表の「業種内で除外した説明変数」に出ます。</div>
 
   <div class="more">→ もっと詳しく：<a href="/models#m2">モデル解説：業種別OLS回帰</a></div>
 </div>
@@ -275,13 +460,13 @@ td code,p code,li code{background:var(--bg-sunken);border:1px solid var(--border
   <ul>
     <li><strong>乖離率</strong>：理論より割安か割高か（プラスが割安）。</li>
     <li><strong>期待総リターン</strong>：値上がり余地（乖離率）＋配当利回り。「ソート順」で総リターン順に並べ替えられます。</li>
-    <li><strong>implied PER / PBR</strong>：理論株価ベースの割安感の倍率。</li>
+    <li><strong><span class="term" tabindex="0" data-tip="理論株価から逆算した PER・PBR。実際の PER・PBR と比べると、どれくらい割安・割高かを倍率で読める。">implied PER / PBR</span></strong>：理論株価ベースの割安感の倍率。</li>
     <li><strong>期待乖離・収束スコア</strong>：そのズレが今後どのくらいのペースで縮みそうかの<strong>目安</strong>。</li>
   </ul>
 
   <h3>🛠 どう使う？</h3>
   <ul class="steps">
-    <li>先に<a href="/guide#sector_ols" style="color:var(--status-good-text)">業種別OLS分析</a>を実行しておく（土台が必要なので、未実行だとこのタブはロックされます）。</li>
+    <li>先に<a href="#sector_ols">業種別OLS分析</a>を実行しておく（土台が必要なので、未実行だとこのタブはロックされます）。</li>
     <li>実行すると、割安〜割高の順に会社が並びます。「ソート順」で期待総リターン順にも切り替えられます。</li>
   </ul>
 
@@ -293,7 +478,7 @@ td code,p code,li code{background:var(--bg-sunken);border:1px solid var(--border
 
 <!-- ③ マクロ×リスク-リターン ─────────────────── -->
 <div class="model-section" id="macro_risk_return">
-  <h2>マクロ×リスク-リターン推奨 <span class="model-tag">③ 将来リターンを予測</span></h2>
+  <h2>マクロ×リスク-リターン推奨（M-1） <span class="model-tag">③ 将来リターンを予測</span></h2>
 
   <h3>🟢 ひとことで言うと</h3>
   <div class="analogy">
@@ -306,14 +491,14 @@ td code,p code,li code{background:var(--bg-sunken);border:1px solid var(--border
   <h3>🛠 どう使う？</h3>
   <ul class="steps">
     <li>使いたい財務要因を選んで実行（既定のままでもOK。マクロ要因は既定 OFF で、必要なら ON にできます）。</li>
-    <li><strong>リスク回避度（λ）スライダー</strong>や<strong>横軸のリスクの種類</strong>を動かすと、再計算なしですぐに並びが変わります。安全志向なら λ を大きめに。</li>
+    <li><strong>リスク回避度（<span class="term" tabindex="0" data-tip="期待リターンからリスクをどれだけ差し引いて評価するかの強さ。大きいほどブレの小さい会社が上位に来る。">λ</span>）スライダー</strong>や<strong>横軸のリスクの種類</strong>を動かすと、再計算なしですぐに並びが変わります。安全志向なら λ を大きめに。</li>
   </ul>
   <div class="info-box">「リスク」には、予測の不確実さ・過去の値動きの荒さ・モデルの当てはまりの悪さなど数種類があり、好みで横軸を切り替えられます。</div>
 
   <h3>⚠ 注意点・落とし穴</h3>
-  <div class="warn-box">最も高度な分析で、当てはまりの精度（CVのR²）は高くありません。表示される要因の効き具合は「<strong>向き（株高/株安）と大小の目安</strong>」として読み、効果を過大に信じないでください。</div>
+  <div class="warn-box">最も高度な分析で、当てはまりの精度（<span class="term" tabindex="0" data-tip="交差検証（CV）：学習に使わなかったデータで成績を測る方法。R²：式が実際のばらつきをどれだけ説明できたかの割合（0〜1）。">CVのR²</span>）は高くありません。表示される要因の効き具合は「<strong>向き（株高/株安）と大小の目安</strong>」として読み、効果を過大に信じないでください。</div>
 
-  <div class="more">→ もっと詳しく：<a href="/models#m9">モデル解説：マクロ×リスク-リターン推奨</a></div>
+  <div class="more">→ もっと詳しく：<a href="/models#m9">モデル解説：マクロ×リスク-リターン推奨</a>（予備知識なしで読める副読本は<a href="#further">もっと詳しく</a>から）</div>
 </div>
 
 <!-- ③ マクロ×財務 勾配ブースティング（M-2）─────── -->
@@ -326,7 +511,7 @@ td code,p code,li code{background:var(--bg-sunken);border:1px solid var(--border
   </div>
 
   <h3>📊 何が分かる？</h3>
-  <p>期待リターンの高い順に銘柄が並びます。M-1 と<strong>同じ検証（ウォークフォワード）</strong>の成績（R²・誤差）を並べて表示するので、「この場面では直線（M-1）と木（M-2）のどちらが効くか」を自分で判断できます。各銘柄が「なぜ上位なのか」も、<span class="term" tabindex="0" data-tip="ある予測に対して、各要因がどれだけ効いたかを公平に分け合って示す指標。SHapley Additive exPlanations の略。">SHAP</span>という要因の内訳で確認できます。</p>
+  <p>期待リターンの高い順に銘柄が並びます。M-1 と<strong>同じ検証（<span class="term" tabindex="0" data-tip="時間の順を守る検証。過去のデータだけで学習し、その直後の期間で成績を測ることを、1歩ずつ未来へずらしながら繰り返す。">ウォークフォワード</span>）</strong>の成績（<span class="term" tabindex="0" data-tip="決定係数。式が実際のばらつきをどれだけ説明できたかの割合（0〜1）。株価の予測では低いのが普通。">R²</span>・誤差）を並べて表示するので、「この場面では直線（M-1）と木（M-2）のどちらが効くか」を自分で判断できます。各銘柄が「なぜ上位なのか」も、<span class="term" tabindex="0" data-tip="ある予測に対して、各要因がどれだけ効いたかを公平に分け合って示す指標。SHapley Additive exPlanations の略。">SHAP</span>という要因の内訳で確認できます。</p>
 
   <h3>🛠 どう使う？</h3>
   <ul class="steps">
@@ -334,18 +519,18 @@ td code,p code,li code{background:var(--bg-sunken);border:1px solid var(--border
     <li>M-1 と並んだ<strong>R²・誤差</strong>を見比べて、どちらの当てはまりが良いかを確認します。</li>
     <li>一覧の行をクリックすると、その銘柄の<strong>SHAP（要因ごとの効き具合）</strong>の内訳が見られます。</li>
   </ul>
-  <div class="info-box">SHAP は「<strong>どれだけ効いたか（大きさ）</strong>」を表し、効いた向き（株高/株安）は銘柄別のパネルで確認します。木のモデルなので外れ値をならす処理は不要ですが、計算は重いので<strong>手元のPC（ローカル）で実行</strong>するのがおすすめです。</div>
-  <div class="warn-box"><strong>「モメンタム特徴量を使用」は ON にしても成績は良くなりません（初期設定 OFF のままで大丈夫です）。</strong>「最近上がっている株は、もう少し上がり続けやすい」という有名な経験則ですが、このツールの銘柄集団・予測期間（約1年先）で実際に試したところ、<strong>当たり具合はまったく改善せず、売買する銘柄の入れ替わりだけが増えました</strong>（＝手数料に弱くなる）。M-2・M-6 の両方で同じ結果でした。<br>なお ON にすると数字が良く見えることがありますが、それは<strong>株価の履歴が短い銘柄（新しく上場した会社など、そもそも予測しにくい会社）が計算対象から外れる</strong>ためで、条件を揃えて比べ直すと差は消えます。「有名な経験則が、この場面でもそのまま効くとは限らない」ことを実際に確かめた例です。</div>
+  <div class="info-box">SHAP は「<strong>どれだけ効いたか（大きさ）</strong>」を表し、効いた向き（株高/株安）は銘柄別のパネルで確認します。木のモデルなので外れ値をならす処理は不要ですが、計算は重いので<strong>手元のパソコン</strong>で開いた画面で実行してください。</div>
+  <div class="warn-box"><strong>「モメンタム特徴量を使用」は ON にしても成績は良くなりません（初期設定 OFF のままで大丈夫です）。</strong>「最近上がっている株は、もう少し上がり続けやすい」という有名な経験則ですが、このツールの銘柄集団・予測期間（約1年先）で実際に試したところ、<strong>当たり具合はまったく改善せず、売買する銘柄の入れ替わりだけが増えました</strong>（＝手数料に弱くなる）。M-2・M-6 の両方で同じ結果でした。<br>なお ON にすると数字が良く見えることがありますが、それは<strong>株価の履歴が短い銘柄（新しく上場した会社など、そもそも予測しにくい会社）が計算対象から外れる</strong>ためで、条件を揃えて比べ直すと差は消えます（<a href="#term-common-domain">共通域</a>）。「有名な経験則が、この場面でもそのまま効くとは限らない」ことを実際に確かめた例です。</div>
 
   <h3>⚠ 注意点・落とし穴</h3>
-  <div class="warn-box">株価データは「効くサインが弱くノイズが多い」ため、木のモデルは<strong>過去に当てはめすぎる（過学習）</strong>になりがちです。そのため既定では強めのブレーキ（正則化）をかけています。当てはまりの精度（R²）は高くないので、結果は<strong>順位の目安</strong>として読み、当たる確率とは思わないでください。M-1 のような「予測の確からしさの幅（信頼区間）」は持ちません。</div>
+  <div class="warn-box">株価データは「効くサインが弱くノイズが多い」ため、木のモデルは<strong>過去に当てはめすぎる（<a href="#term-overfit">過学習</a>）</strong>になりがちです。そのため既定では強めのブレーキ（正則化）をかけています。当てはまりの精度（R²）は高くないので、結果は<strong>順位の目安</strong>として読み、当たる確率とは思わないでください。M-1 のような「予測の確からしさの幅（信頼区間）」は持ちません。</div>
 
   <div class="more">→ もっと詳しく：<a href="/models#m11">モデル解説：M-2 マクロ×財務 勾配ブースティング</a></div>
 </div>
 
 <!-- ③ ベイズ状態空間（時変マクロβ DLM）─────────── -->
 <div class="model-section" id="macro_dlm">
-  <h2>ベイズ状態空間（時変マクロβ） <span class="model-tag">③ 将来リターンを予測</span></h2>
+  <h2>ベイズ状態空間（時変マクロβ・M-3） <span class="model-tag">③ 将来リターンを予測</span></h2>
 
   <h3>🟢 ひとことで言うと</h3>
   <div class="analogy">
@@ -353,7 +538,7 @@ td code,p code,li code{background:var(--bg-sunken);border:1px solid var(--border
   </div>
 
   <h3>📊 何が分かる？</h3>
-  <p>期待リターン µ̂ の高い順に銘柄が並び、各銘柄の<strong>マクロ感応度（β）が時間とともにどう変化したか</strong>を、<span class="term" tabindex="0" data-tip="推定値がどれくらい確からしいかの幅。狭いほど自信がある推定。">信用区間</span>つきの折れ線グラフで確認できます。「円安に強くなってきた」「金利上昇に弱くなった」といった<strong>移り変わり</strong>が見えます。</p>
+  <p>期待リターン µ̂ の高い順に銘柄が並び、各銘柄の<strong>マクロ感応度（<span class="term" tabindex="0" data-tip="マクロ（為替・金利など）が動いたとき、その会社の株価がどれだけ反応するかの強さ。">β</span>）が時間とともにどう変化したか</strong>を、<span class="term" tabindex="0" data-tip="推定値がどれくらい確からしいかの幅。狭いほど自信がある推定。">信用区間</span>つきの折れ線グラフで確認できます。「円安に強くなってきた」「金利上昇に弱くなった」といった<strong>移り変わり</strong>が見えます。</p>
 
   <h3>🛠 どう使う？</h3>
   <ul class="steps">
@@ -363,67 +548,14 @@ td code,p code,li code{background:var(--bg-sunken);border:1px solid var(--border
   <div class="info-box">δ（係数がどれだけ速く動くか）を 1 に近づけると変化はゆっくり、小さくすると敏感に動きます。下に出る「校正」「カバレッジ」は、予測の不確実さの見積もりが妥当かどうかの自己チェックです。</div>
 
   <h3>⚠ 注意点・落とし穴</h3>
-  <div class="warn-box">β は「マクロが動いたときの反応の強さ」であって、<strong>マクロ自体の先読みではありません</strong>（未来の為替や金利は分かりません）。µ̂ は「世の中で説明できない持ち味」を頼りにした推定値なので、参考程度に。週次で約2年以上の株価履歴がある銘柄だけが対象です。計算が重いのでローカル環境で実行してください。</div>
+  <div class="warn-box">β は「マクロが動いたときの反応の強さ」であって、<strong>マクロ自体の先読みではありません</strong>（未来の為替や金利は分かりません）。µ̂ は「世の中で説明できない持ち味」を頼りにした推定値なので、参考程度に。週次で約2年以上の株価履歴がある銘柄だけが対象です。計算が重いので、手元のパソコンで開いた画面で実行してください。</div>
 
   <div class="more">→ もっと詳しく：<a href="/models#m12">モデル解説：M-3 ベイズ状態空間モデル</a></div>
 </div>
 
-<!-- M-4 兄弟μ̂スタッキング・アンサンブル ─────────── -->
-<div class="model-section" id="macro_ensemble">
-  <h2>兄弟モデルの合わせ技 <span class="model-tag">③ 将来リターンを予測</span> <span class="model-tag retired">退役</span></h2>
-
-  <div class="warn-box"><strong>2026-08-30 に退役しました（Issue #570）</strong>: 分析ページの一覧には出てきません。実際に混ぜて測ってみたところ、<strong>M-6（正則化した線形）1本と成績が変わらなかった</strong>ためです（差はほぼゼロで、統計的にも「違いがあるとは言えない」判定）。一方で計算は3モデル分かかります。「混ぜても単独最良を超えないなら単独で十分」というのは、このモデルを作るときにあらかじめ決めておいた判定基準で、それに素直に従った形です。<strong>考え方の説明としてこのページには残しています</strong>し、モデル自体も消していないので、混ぜる相手（基底モデル）の顔ぶれが変われば測り直せます。</div>
-
-  <h3>🟢 ひとことで言うと</h3>
-  <div class="analogy">
-    M-1（線形・素直な回帰）、M-2（非線形・勾配ブースティング）、M-6（正則化した線形）は<strong>性格の違う3人の予想屋</strong>です。この分析は、過去に誰がどれくらい当たってきたかを振り返り、<strong>3人の予想を良い塩梅でブレンド</strong>します。外し方の癖が違えば、混ぜたほうが単独より安定することがある、という考え方（<span class="term" tabindex="0" data-tip="複数モデルの予測を、それ自体を入力として別モデル（ここでは非負・和1の加重平均）に学習させて統合する手法。">スタッキング</span>）です。当たっていない予想屋の取り分は<strong>自動的にゼロ近くまで下がる</strong>ので、混ぜる相手を増やしても大崩れしにくいのが利点です。
-  </div>
-
-  <h3>📊 何が分かる？</h3>
-  <p>M-1・M-2・M-6 を統合した期待リターン µ̂ の順位が分かります。ブレンドの重みは<strong>過去の実績だけ</strong>から自動で決まり（勘や好みは入りません）、<strong>3モデルすべてが予測できた銘柄</strong>だけが対象になります。結果表には統合値のほか、各モデルが単独で出した予測も並びます。</p>
-
-  <h3>🛠 どう使う？</h3>
-  <ul class="steps">
-    <li>本分析ひとつで M-1・M-2・M-6 の3レグを内部で回すため、事前に個別実行しておく必要はありません（そのぶん実行に数分かかります）。</li>
-    <li>実行すると、過去の的中実績から重みを学習し、統合後の順位が出ます。</li>
-    <li>退役したため、売り候補ランキングの「μ の出所」からは選べません（既定は <strong>M-6</strong>）。</li>
-  </ul>
-
-  <h3>⚠ 注意点・落とし穴</h3>
-  <div class="warn-box">重みは<strong>過去の実績の振り返り</strong>なので、地合いが急に変わった直後は反応が遅れることがあります。対象銘柄は<strong>いちばん条件の厳しい M-1 が予測できた範囲</strong>に絞られます。また、<strong>混ぜたほうが必ず良いとは限りません</strong>——実測では M-6 単独と互角でした。統合が単独より本当に良いかは、画面の「同一共通域での比較」表（同じ銘柄群に揃えた成績）で必ず見比べてください。</div>
-
-  <div class="more">→ もっと詳しく：<a href="/models#m13">モデル解説：M-4 兄弟μ̂スタッキング・アンサンブル</a></div>
-</div>
-
-<!-- M-5 マクロ×財務 ランク学習 ─────────────────── -->
-<div class="model-section" id="macro_gbdt_rank">
-  <h2>ランク学習版 勾配ブースティング <span class="model-tag">③ 将来リターンを予測</span> <span class="model-tag retired">退役</span></h2>
-
-  <div class="warn-box"><strong>2026-08-30 に退役しました（Issue #570）</strong>: 分析ページの一覧には出てきません。同じデータ・同じ条件で測った結果、<strong>順位の当たり具合（rank-IC）が元の M-2 のおよそ半分</strong>にとどまったためです（0.0808 対 0.1578・統計的にもはっきりした差）。とくに弱かったのは<strong>「下がりそうな銘柄を下位に置く」ほうで</strong>、上位を当てる力より先にこちらが崩れていました。ねらい（「順位で使うなら順位で学習させたほうがいい」）自体は筋が通っていましたが、<strong>実データがそうならないと答えた</strong>ということです。ただし学習の打ち切り条件が M-2 と揃っていない実装上の差もあるため、「ランク学習という考え方がダメ」ではなく「この作りでは届かなかった」と理解してください。</div>
-
-  <h3>🟢 ひとことで言うと</h3>
-  <div class="analogy">
-    M-2 は「リターンの<strong>値そのもの</strong>の当てっこ」として学習しますが、実際に使うときに大事なのは<strong>順位が合っているか</strong>です。この分析は M-2 と同じデータ・同じ条件を使いながら、学習の段階から<strong>順位を直接当てにいく</strong>ように作り替えた、いわば<strong>双子モデル</strong>です。
-  </div>
-
-  <h3>📊 何が分かる？</h3>
-  <p>銘柄の<strong>順位スコア</strong>が分かります。数値そのものに「〇%上がる」という意味はなく、あくまで<strong>並び順の参考</strong>です。モデル比較ビューで M-2 と同じ条件の実績（順位の当たり具合）を見比べられます。</p>
-
-  <h3>🛠 どう使う？</h3>
-  <ul class="steps">
-    <li>M-2 と同じ手順で実行すると、順位スコア順の一覧が出ます。</li>
-    <li>モデル比較ビューで、M-2（値の当てっこ）と M-5（順位の当てっこ）の<strong>どちらが実際によく当たっているか</strong>を見比べるのが主な使い道です。</li>
-  </ul>
-
-  <h3>⚠ 注意点・落とし穴</h3>
-  <div class="warn-box">現時点では<strong>比較専用</strong>です。値そのものに期待リターンとしての意味がないため、売り候補ランキングなど他機能の「μ の出所」にはまだ使えません（今後の対応待ち）。</div>
-
-  <div class="more">→ もっと詳しく：<a href="/models#m14">モデル解説：M-5 マクロ×財務 ランク学習</a></div>
-</div>
-
 <!-- M-6 マクロ×財務 正則化線形（ElasticNet） ────── -->
 <div class="model-section" id="macro_enet">
-  <h2>正則化線形（ElasticNet） <span class="model-tag">③ 将来リターンを予測</span></h2>
+  <h2>正則化線形 ElasticNet（M-6） <span class="model-tag">③ 将来リターンを予測</span></h2>
 
   <h3>🟢 ひとことで言うと</h3>
   <div class="analogy">
@@ -435,13 +567,13 @@ td code,p code,li code{background:var(--bg-sunken);border:1px solid var(--border
 
   <h3>🛠 どう使う？</h3>
   <ul class="steps">
-    <li>モデル比較ビューで、ほかの M 系モデルと並べて実績（順位の当たり具合）を見比べます。</li>
+    <li>モデル比較ビューで、ほかの M 系モデルと並べて実績（順位の当たり具合＝<a href="#term-rank-ic">rank-IC</a>）を見比べます。</li>
     <li>一度実行しておくと、売り候補ランキングの「μ の出所」で <strong>M-6</strong> を選べます。</li>
   </ul>
-  <div class="warn-box"><strong>「モメンタム特徴量を使用」は ON にしても成績は良くなりません（初期設定 OFF のままで大丈夫です）。</strong>実際に試したところ当たり具合は改善せず、<strong>このモデルの長所である「銘柄の入れ替わりの少なさ」（＝売買コストへの強さ）が損なわれました</strong>。ON にすると数字が良く見えることがありますが、それは株価の履歴が短い銘柄が計算対象から外れるためで、条件を揃えると差は消えます（詳しくは<a href="/models#m11" style="color:var(--status-warn-text)">技術版の M-2 の解説</a>）。</div>
+  <div class="warn-box"><strong>「モメンタム特徴量を使用」は ON にしても成績は良くなりません（初期設定 OFF のままで大丈夫です）。</strong>実際に試したところ当たり具合は改善せず、<strong>このモデルの長所である「銘柄の入れ替わりの少なさ」（＝売買コストへの強さ）が損なわれました</strong>。ON にすると数字が良く見えることがありますが、それは株価の履歴が短い銘柄が計算対象から外れるためで、条件を揃えると差は消えます（<a href="#term-common-domain">共通域</a>）。</div>
 
   <h3>⚠ 注意点・落とし穴</h3>
-  <div class="warn-box">売り候補ランキングの<strong>既定の出所は M-6 になりました</strong>（#402）。「売り候補として当たっていたか」だけを測る指標（市場平均より、いちばん期待リターンが低いグループがどれだけ下回ったか）で M-6 が M-2 を有意に上回ったためです。従来の M-2 を使いたいときは「μ の出所」で明示的に選び直せます。</div>
+  <div class="warn-box">売り候補ランキングの<strong>既定の出所は M-6</strong> です。「売り候補として当たっていたか」だけを測る指標（市場平均より、いちばん期待リターンが低いグループがどれだけ下回ったか）で、M-6 が M-2 を統計的にはっきり上回ったためです。M-2 を使いたいときは「μ の出所」で選び直せます。</div>
 
   <div class="more">→ もっと詳しく：<a href="/models#m16">モデル解説：M-6 マクロ×財務 正則化線形（ElasticNet）</a></div>
 </div>
@@ -460,7 +592,7 @@ td code,p code,li code{background:var(--bg-sunken);border:1px solid var(--border
 
   <h3>🛠 どう使う？</h3>
   <ul class="steps">
-    <li>検証する手法（おすすめ／バリュエーション／ネットキャッシュ）・何ヶ月前から検証するか・上位何社を見るかを選んで実行。</li>
+    <li>検証する手法（おすすめ／バリュエーション／ネットキャッシュ／売り候補）・何ヶ月前から検証するか・上位何社を見るかを選んで実行。</li>
     <li>上位グループの平均リターンが、全体平均を上回っているかを確認します。手法を切り替えて勝率を比べてみましょう。</li>
   </ul>
 
@@ -488,8 +620,8 @@ td code,p code,li code{background:var(--bg-sunken);border:1px solid var(--border
     <li>「割高警戒型・業績悪化重視・バランス型」などの<strong>プリセット</strong>を選ぶか、スライダーで観点の重みを調整します。</li>
     <li>実行すると、売り点数の高い順に並び、<strong>売却 / 一部売却 / 保有継続</strong>の札が付きます。</li>
   </ul>
-  <div class="info-box">各観点は同じ年の全社の中で「平均よりどれくらい良い／悪いか」（<span class="term" tabindex="0" data-tip="平均=0、+で平均以上、−で平均以下の点数。">Zスコア</span>）に直してから合計するので、観点の単位の違いに引きずられません。「割高度」を使うには先に<a href="/guide#sector_ols" style="color:var(--status-good-text)">業種別OLS分析</a>を実行してください。</div>
-  <div class="info-box">売り判断に加味する「<strong>今後の伸びしろ（期待リターン）</strong>」の見立ては、<a href="/guide#macro_risk_return" style="color:var(--status-good-text)">M-1</a>・<a href="/guide#macro_dlm" style="color:var(--status-good-text)">M-3</a>・<a href="/guide#macro_enet" style="color:var(--status-good-text)">M-6</a> の予測モデルから「μ の出所」トグルで選べます（既定は M-6）。M-2 と M-4 はこのトグルからは外れています（M-4 は退役・M-2 は解釈と比較の基準線に役割を絞ったため）。<strong>手元（ローカル）で一度動かしたモデルだけが選択肢に出ます</strong>。未実行のモデルを選んでもその成分は自動で外れるので、まずは既定のままでも問題ありません。</div>
+  <div class="info-box">各観点は同じ年の全社の中で「平均よりどれくらい良い／悪いか」（<span class="term" tabindex="0" data-tip="平均=0、+で平均以上、−で平均以下の点数。">Zスコア</span>）に直してから合計するので、観点の単位の違いに引きずられません。「割高度」を使うには先に<a href="#sector_ols">業種別OLS分析</a>を実行してください。</div>
+  <div class="info-box">売り判断に加味する「<strong>今後の伸びしろ（期待リターン）</strong>」の見立ては、<a href="#macro_risk_return">M-1</a>・<a href="#macro_dlm">M-3</a>・<a href="#macro_enet">M-6</a> の予測モデルから「μ の出所」トグルで選べます（既定は M-6）。M-2 と M-4 はこのトグルからは外れています（M-4 は退役・M-2 は解釈と比較の基準線に役割を絞ったため）。<strong>手元で一度動かしたモデルだけが選択肢に出ます</strong>。未実行のモデルを選んでもその成分は自動で外れるので、まずは既定のままでも問題ありません。</div>
 
   <h3>⚠ 注意点・落とし穴</h3>
   <div class="warn-box">これは「いつ売れば儲かる」を当てるものではなく、<strong>持ち株を見直すきっかけ</strong>です。全部が優良なら全銘柄「保有継続」になります。ETF や外国株など未収録の銘柄は判定できません。</div>
@@ -513,6 +645,149 @@ td code,p code,li code{background:var(--bg-sunken);border:1px solid var(--border
   <div class="warn-box"><strong>まぎらわしい注意：</strong>ここでの「Zスコア」は偏差値の仲間（標準化スコア）で、倒産予測で有名な「Altman の Z スコア」とは<strong>別物</strong>です。</div>
 
   <div class="more">→ もっと詳しく：<a href="/models#m5">モデル解説：横断的Zスコア正規化</a></div>
+</div>
+
+<!-- 退役したモデル ───────────────────────────── -->
+<div class="model-section" id="retired">
+  <h2>退役したモデル <span class="model-tag retired">退役</span></h2>
+  <p>測ってみて成績が届かなかったモデルは、消さずに「退役」として分析画面の一覧から外しています。考え方の説明としてここに残し、混ぜる相手や条件が変われば測り直せるようにしています。</p>
+</div>
+
+<!-- M-4 兄弟μ̂スタッキング・アンサンブル ─────────── -->
+<div class="model-section" id="macro_ensemble">
+  <h2>兄弟モデルの合わせ技（M-4） <span class="model-tag">③ 将来リターンを予測</span> <span class="model-tag retired">退役</span></h2>
+
+  <div class="warn-box"><strong>退役しました</strong>：分析ページの一覧には出てきません。実際に混ぜて測ってみたところ、<strong>M-6（正則化した線形）1本と成績が変わらなかった</strong>ためです（統計的にも「違いがあるとは言えない」判定）。一方で計算は3モデル分かかります。「混ぜても単独最良を超えないなら単独で十分」というのは、このモデルを作るときにあらかじめ決めておいた判定基準で、それに素直に従った形です。</div>
+
+  <h3>🟢 ひとことで言うと</h3>
+  <div class="analogy">
+    M-1（線形・素直な回帰）、M-2（非線形・勾配ブースティング）、M-6（正則化した線形）は<strong>性格の違う3人の予想屋</strong>です。この分析は、過去に誰がどれくらい当たってきたかを振り返り、<strong>3人の予想を良い塩梅でブレンド</strong>します。外し方の癖が違えば、混ぜたほうが単独より安定することがある、という考え方（<span class="term" tabindex="0" data-tip="複数モデルの予測を、それ自体を入力として別モデル（ここでは非負・和1の加重平均）に学習させて統合する手法。">スタッキング</span>）です。当たっていない予想屋の取り分は<strong>自動的にゼロ近くまで下がる</strong>ので、混ぜる相手を増やしても大崩れしにくいのが利点です。
+  </div>
+
+  <h3>⚠ 注意点・落とし穴</h3>
+  <div class="warn-box">重みは<strong>過去の実績の振り返り</strong>なので、地合いが急に変わった直後は反応が遅れます。また、<strong>混ぜたほうが必ず良いとは限りません</strong>——実測では M-6 単独と互角でした。統合が単独より本当に良いかは、同じ銘柄群にそろえた成績（<a href="#term-common-domain">共通域</a>）で見比べる必要があります。</div>
+
+  <div class="more">→ もっと詳しく：<a href="/models#m13">モデル解説：M-4 兄弟μ̂スタッキング・アンサンブル</a></div>
+</div>
+
+<!-- M-5 マクロ×財務 ランク学習 ─────────────────── -->
+<div class="model-section" id="macro_gbdt_rank">
+  <h2>ランク学習版 勾配ブースティング（M-5） <span class="model-tag">③ 将来リターンを予測</span> <span class="model-tag retired">退役</span></h2>
+
+  <div class="warn-box"><strong>退役しました</strong>：分析ページの一覧には出てきません。同じデータ・同じ条件で測った結果、<strong>順位の当たり具合（<a href="#term-rank-ic">rank-IC</a>）が元の M-2 のおよそ半分</strong>にとどまったためです。とくに弱かったのは<strong>「下がりそうな銘柄を下位に置く」ほう</strong>でした。ねらい（「順位で使うなら順位で学習させたほうがいい」）自体は筋が通っていましたが、<strong>実データがそうならないと答えた</strong>ということです。ただし学習の打ち切り条件が M-2 と揃っていない実装上の差もあるため、「ランク学習という考え方がダメ」ではなく「この作りでは届かなかった」と理解してください。</div>
+
+  <h3>🟢 ひとことで言うと</h3>
+  <div class="analogy">
+    M-2 は「リターンの<strong>値そのもの</strong>の当てっこ」として学習しますが、実際に使うときに大事なのは<strong>順位が合っているか</strong>です。この分析は M-2 と同じデータ・同じ条件を使いながら、学習の段階から<strong>順位を直接当てにいく</strong>ように作り替えた、いわば<strong>双子モデル</strong>です。
+  </div>
+
+  <div class="more">→ もっと詳しく：<a href="/models#m14">モデル解説：M-5 マクロ×財務 ランク学習</a></div>
+</div>
+
+<!-- ═════════════ 第4部 用語集 ═════════════ -->
+<div class="part-header" id="part-glossary">
+  <h2 class="part-title"><span class="part-no">第4部</span>用語集</h2>
+  <p>画面と解説に出てくる言葉の意味です。投資の基本的な言葉は短く、統計やモデルの言葉は少し詳しく説明しています。</p>
+</div>
+
+<div class="model-section" id="glossary">
+  <h2>財務・株価の言葉</h2>
+  <dl class="glossary">
+    <dt id="term-per">PER（株価収益率）</dt>
+    <dd>株価 ÷ 1株あたり利益（EPS）。株価が利益の何年分にあたるかを表します。低いほど、利益に比べて安く買えます。</dd>
+    <dt id="term-pbr">PBR（株価純資産倍率）</dt>
+    <dd>株価 ÷ 1株あたり純資産（BPS）。1倍を下回ると、帳簿上の純資産より安い値段がついています。</dd>
+    <dt id="term-roe">ROE（自己資本利益率）</dt>
+    <dd>純利益 ÷ 自己資本。株主から預かったお金で、1年にどれだけ利益を出したかを表します。</dd>
+    <dt id="term-eps-bps">EPS・BPS（1株あたり利益・1株あたり純資産）</dt>
+    <dd>利益や純資産を発行済株式数で割った値です。このアプリの理論株価は「1株あたりの財務の数字 → 株価」という形で計算します。どちらも「円/株」なので、単位をそろえたまま比べられるからです。</dd>
+    <dt id="term-market-cap">時価総額</dt>
+    <dd>株価 × 発行済株式数。会社を丸ごと買うのに必要な金額の目安です。</dd>
+    <dt id="term-equity-ratio">自己資本比率</dt>
+    <dd>自己資本 ÷ 総資産。高いほど借金に頼らずに事業をしています。</dd>
+    <dt id="term-cf">営業CF・フリーCF（キャッシュフロー）</dt>
+    <dd>営業CF は本業で実際に入ってきた現金です。フリーCF は営業CF から設備投資などを引いた、会社が自由に使える現金です。利益が出ていても、現金が入ってこなければ営業CF は小さくなります。</dd>
+    <dt id="term-net-cash">ネットキャッシュ</dt>
+    <dd>現金や換金しやすい資産から借金を引いた、手元に残るお金です。時価総額との比で割安さを見るのが<a href="#net_cash_analysis">ネットキャッシュ分析</a>です。</dd>
+    <dt id="term-gap">理論時価総額・乖離率</dt>
+    <dd>理論時価総額は、<a href="#sector_ols">業種別OLS分析</a>が「同じ業種の会社の財務の数字と株価の関係」から計算した、業種内の平均的な値ごろです。乖離率は、実際の時価総額がそれよりどれだけ安いかを％で表したもので、<strong>プラスが割安</strong>、マイナスが割高です。</dd>
+    <dt id="term-dividend">配当利回り</dt>
+    <dd>1株あたり配当 ÷ 株価。<a href="#gap_analysis">バリュエーション分析</a>の期待総リターンは、乖離率（値上がり余地）にこれを足したものです。</dd>
+    <dt id="term-industry">業種</dt>
+    <dd>東京証券取引所の33業種の分類です。業種別OLS分析や、業種内での順位はこの分類ごとに計算します。</dd>
+  </dl>
+</div>
+
+<div class="model-section" id="glossary-stats">
+  <h2>統計・モデルの言葉</h2>
+  <dl class="glossary">
+    <dt id="term-regression">回帰・OLS（最小二乗法）</dt>
+    <dd>データに最もよく当てはまる式を求める方法です。OLS は、式の予測と実際の値の差（の2乗）の合計が最も小さくなるように係数を決める、もっとも基本的なやり方です。</dd>
+    <dt id="term-r2">R²（決定係数）</dt>
+    <dd>式が、実際の値のばらつきをどれだけ説明できたかを 0〜1 で表します。1 に近いほど当てはまりが良い式です。株価の予測では低い値が普通で、R² が低くても会社の<strong>順位</strong>が当たっていれば役に立ちます（<a href="#term-rank-ic">rank-IC</a> を参照）。</dd>
+    <dt id="term-overfit">過学習</dt>
+    <dd>過去のデータの細かいクセまで覚え込みすぎて、新しいデータで当たらなくなることです。株価はノイズが多いので起きやすく、このアプリでは正則化や、学習に使わなかった期間での検証で防いでいます。</dd>
+    <dt id="term-regularization">正則化（Ridge・ElasticNet）</dt>
+    <dd>式の係数が大きくなりすぎないようにブレーキをかける方法です。似た指標が多いときに式が暴れるのを防ぎ、過学習を抑えます。Ridge は係数を全体に小さくし、ElasticNet は効かない要因の係数をゼロにもします。</dd>
+    <dt id="term-cv">交差検証（CV）</dt>
+    <dd>データを分けて、学習に使わなかった部分で成績を測る方法です。学習に使ったデータで測ると、過学習したモデルほど良く見えてしまうためです。</dd>
+    <dt id="term-walk-forward">ウォークフォワード</dt>
+    <dd>時間の順を守る交差検証です。過去のデータだけで学習し、その直後の期間で成績を測ることを、1歩ずつ未来へずらしながら繰り返します。学習とテストの間には空白の期間を置き、未来の情報が学習に混ざらないようにしています。</dd>
+    <dt id="term-oof">OOF（アウトオブサンプル）</dt>
+    <dd>学習に使わなかったデータに対する予測や成績のことです。このアプリのモデル比較は、ウォークフォワードで得た OOF の予測だけを使って行います。</dd>
+    <dt id="term-mu">期待リターン μ̂</dt>
+    <dd>モデルが予測した、約1年先のリターンの見込みです。値そのものの確からしさは検証されていないモデルもあるため、主に<strong>会社どうしの順位</strong>として使います。</dd>
+    <dt id="term-rank-ic">rank-IC（順位相関）</dt>
+    <dd>予測の順位と、実際のリターンの順位がどれだけ一致したかを表す数字です。1 なら完全に一致、0 なら無関係です。株式の予測では 0.02〜0.05 程度でも良好とされます。このアプリでモデルを比べるときの主な物差しです。</dd>
+    <dt id="term-topk">上位K社の超過リターン</dt>
+    <dd>予測の上位 K 社（主に10社）を買った場合に、全体の平均をどれだけ上回ったかです。実際の使い方に近い物差しですが、少ない社数で測るので結果がぶれやすく、rank-IC と組み合わせて使います。</dd>
+    <dt id="term-common-domain">共通域（母集団をそろえる）</dt>
+    <dd>モデルを比べるときは、すべてのモデルが予測できた<strong>同じ会社・同じ期間</strong>だけで比べます。そろえないと、予測しにくい会社を対象から外したモデルが、実力以上に良く見えてしまうためです。</dd>
+    <dt id="term-beta">β（ベータ）</dt>
+    <dd>為替・金利などのマクロが動いたとき、その会社の株価がどれだけ反応するかの強さです。</dd>
+    <dt id="term-lambda">λ（リスク回避度）</dt>
+    <dd>期待リターンからリスクをどれだけ差し引いて評価するかの強さです。大きくするほど、値動きのブレが小さい会社が上位に来ます。</dd>
+    <dt id="term-backtest">バックテスト</dt>
+    <dd>過去のある時点でその選び方をしていたら、その後どうなったかを計算する答え合わせです（<a href="#backtest">第3部のバックテスト</a>）。</dd>
+    <dt id="term-survivorship">生存バイアス</dt>
+    <dd>今も残っている会社だけを集計すると、途中で消えた会社が抜け落ちるため、成績が実際より良く見えることです。</dd>
+    <dt id="term-significance">有意・p 値</dt>
+    <dd>2つのモデルの差が、偶然でも出る程度のものかどうかを確かめる考え方です。p 値が小さいほど、偶然とは考えにくい差です。たくさんの組を同時に比べると偶然の差も出やすくなるので、比べる組の数に応じて基準を厳しくしています（モデル比較の ▲▼ はこの基準での判定です）。</dd>
+    <dt id="term-gbdt">勾配ブースティング</dt>
+    <dd>小さな決定木を少しずつ継ぎ足し、前の木の間違いを次の木が補っていく学習方法です。数字の組み合わせで効き方が変わる関係を、自動で捉えられます（<a href="#macro_gbdt">M-2</a>）。</dd>
+    <dt id="term-shap">SHAP</dt>
+    <dd>ある会社の予測に、各要因がどれだけ効いたかを公平に分け合って示す数字です。</dd>
+    <dt id="term-bayes">ベイズ推定・信用区間</dt>
+    <dd>ベイズ推定は、事前の見込みをデータで更新して答えを「幅のある分布」として出す方法です。信用区間はその幅で、狭いほど自信のある推定です（<a href="#macro_risk_return">M-1</a>・<a href="#macro_dlm">M-3</a>）。</dd>
+    <dt id="term-state-space">状態空間モデル</dt>
+    <dd>観測できる値（株価）の裏にある、見えない状態（係数）が時間とともに変わると考え、新しいデータが来るたびに少しずつ推定し直す方法です（<a href="#macro_dlm">M-3</a>）。</dd>
+    <dt id="term-stacking">スタッキング</dt>
+    <dd>複数のモデルの予測を材料にして、それらの良い混ぜ方を別のモデルに学ばせる方法です（<a href="#macro_ensemble">退役した M-4</a>）。</dd>
+    <dt id="term-winsorize">winsorize（外れ値の切り詰め）</dt>
+    <dd>上下 1% の極端な値を、その境目の値に置き換える処理です。少数の極端な会社に式全体が引っぱられるのを防ぐため、回帰の前に行います。</dd>
+    <dt id="term-zscore">Zスコア</dt>
+    <dd>同じ年の全社の中で、平均よりどれだけ上か下かを表す点数です。詳しくは<a href="#zscore">第3部の「Zスコアって何？」</a>を参照してください。</dd>
+  </dl>
+</div>
+
+<!-- ═════════════ もっと詳しく ═════════════ -->
+<div class="part-header" id="part-further">
+  <h2 class="part-title">もっと詳しく知りたいとき</h2>
+  <p>数式や設計の理由まで知りたくなったときの行き先です。</p>
+</div>
+
+<div class="model-section" id="further">
+  <h2>次に読むもの</h2>
+  <table>
+    <thead><tr><th>読むもの</th><th>内容</th></tr></thead>
+    <tbody>
+      <tr><td><a href="/models">モデル解説（技術版）</a></td><td>各分析の数式・前提・パラメータ・参考論文。このアプリの中で読めます。</td></tr>
+      <tr><td><a href="https://github.com/kome-kome/financial_app/blob/main/docs/M1_MACRO_MODEL_GUIDE.md" target="_blank" rel="noopener">M-1 の副読本</a></td><td>マクロ×リスク-リターン推奨（M-1）の考え方を、金融・統計の予備知識なしで読めるように書いた解説です。</td></tr>
+      <tr><td><a href="https://github.com/kome-kome/financial_app/blob/main/docs/MODELS.md" target="_blank" rel="noopener">MODELS.md</a></td><td>分析モデルの説明の正本です。モデル解説（技術版）はこの文書を画面向けにしたものです。</td></tr>
+      <tr><td><a href="https://github.com/kome-kome/financial_app#readme" target="_blank" rel="noopener">README</a></td><td>アプリの全体像と、目的別にどの文書を読めばよいかの案内です。</td></tr>
+    </tbody>
+  </table>
+  <div class="info-box">表の下の3つは GitHub のページが新しいタブで開きます。</div>
 </div>
 
 </main>

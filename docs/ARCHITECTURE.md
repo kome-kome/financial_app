@@ -44,7 +44,7 @@ graph LR
         A["📊 分析画面\nanalysis.html\n目的別5カテゴリの左サイドバー\n（銘柄を探す/割安度/リターン予測/検証/保有を見直す・ステータスバー）"]
         CP["🏢 企業詳細\ncompany.html\n企業検索・個別企業の業績/財務/CF"]
         M["📖 モデル解説\nmodels.html\n数式・参考文献・DOIリンク"]
-        G["🔰 やさしい解説\nguide.html\n数式なし・たとえ話での説明"]
+        G["🔰 やさしい解説\nguide.html\nはじめに・画面の歩き方・分析手法・用語集"]
         DB["🗃️ DB ビューア\ndb.html\nスキーマ/プレビュー/統計/リレーション/ドリルダウン"]
     end
 
@@ -1137,7 +1137,7 @@ stateDiagram-v2
     Dashboard  --> Analysis   : メイン「分析ページを開く」
     Dashboard  --> Company    : メイン「企業を検索して開く」
     Dashboard  --> Collection : サブ「収集ページを開く」
-    Dashboard  --> Guide      : 補助「やさしい解説」
+    Dashboard  --> Guide      : ヘッダー「はじめての方へ」・補助「やさしい解説」
     Dashboard  --> Models     : 補助「モデル解説・参考文献」
     Dashboard  --> DBViewer   : 補助「DB ビューア」
 
@@ -1147,6 +1147,8 @@ stateDiagram-v2
     Analysis   --> Company    : 企業名クリック（乖離/推薦/総合/NC/BT）
     DBViewer   --> Company    : ドリルダウンの「企業ページを開く」
     Analysis   --> Guide      : 各タブ見出しの「❓ やさしい解説」
+    Morning    --> Guide      : ヘッダー「この画面の見方」・「表の見方」
+    Company    --> Guide      : ヘッダー「この画面の見方」（収集・DB・分析も同じ）
     Guide      --> Models     : 各セクション「→ もっと詳しく」
 ```
 
@@ -1560,7 +1562,7 @@ graph TB
 | `analysis.html` | フロントエンド | 分析ハブ（`/analysis`）。左サイドバーを `/api/plugins` のメタ（category/ui_order）から目的別5カテゴリ（①銘柄を探す/②割安度/③リターン予測/④検証/⑤保有を見直す）で動的生成（`buildSidebar`）。売り候補ランキング（`#tab-sell_ranking`・保有銘柄の売り時）は静的タブ＋保有入力 textarea（localStorage 記憶）。バリュエーション分析に横断分布（理論vs実績の散布図・乖離率ヒストグラム）を Chart.js で表示。スクリーニングは特例エントリとして `/collection` へリンク。動的タブの結果描画は `RESULT_RENDERERS`（plugin名→描画関数の登録制・未登録は汎用フォールバック）。リスク-リターン散布図は M-2 と M-6 が共通ビュー `_riskReturnView(cfg)`（タブごとの状態・λ/横軸/R3/件数の再実行なし再描画・行クリックは `data-click` 委譲＝インライン onclick は CSP で遮断される）を共有し、M-1・M-3 は個別実装のまま（#807。M-3 の行クリックも `data-click` 委譲へ移した・#811）。CSV出力は単一の `exportCSV(name)` ディスパッチャ（`CSV_EXPORTERS` 登録制）に統一。バリュエーション分析タブに**モデル鮮度バー**（`#model-freshness-bar`）を常設 — `/api/model/status` から computed_at/staleness_days を取得して表示し、OLSロック演出を廃止。買い推奨タブには**株価 as-of バー**（`#price-freshness-bar`・#416）を常設 — `/api/stats` の p50/p05 と齢（営業日）を表示し、5営業日超で黄・10営業日超で赤＋「この結果で発注しないでください」。赤のときは実行前に `confirm()` で確認（**実行はブロックしない**＝z_momentum を外した分析など正当な用途を殺さない）。結果テーブルとCSVに銘柄別「株価日」列 | api.py, Chart.js (CDN) |
 | `login.html` | フロントエンド | 認証ログイン画面（`/login`） | api.py |
 | `models.html` | フロントエンド | モデル解説・参考文献ページ（`/models`）。全モデルの数式・パラメータ・DOIリンクをインラインHTMLで表示（節の顔ぶれは `MODELS.md` の章と1対1で対応する・#712。節の数をここへ書き写さない＝増減しても失敗として現れない）。冒頭に**分析の3層モデル**（一次分析／双対／メタ検証・`#layers`）の枠組みを置き、本文は `guide.html` と揃えた**目的別5カテゴリ**（①銘柄を探す/②割安度/③リターン予測/④検証/⑤保有を見直す）で `cat-header` グルーピング。各モデルは `#mN` でディープリンク可能（番号表示は廃止しアンカーIDのみ維持）。旧「総合リターン予測」(`#m1`) はバリュエーション分析へ統合し削除（ADR-0001）。 | — |
-| `guide.html` | フロントエンド | 初心者向け「やさしい解説」ページ（`/guide`）。各分析を数式なし・たとえ話で説明（ひとことで言うと／何が分かる／どう使う／注意点）。セクションidはプラグイン名（`recommend`/`net_cash_analysis`/`gap_analysis`/`sector_ols`/`macro_risk_return`/`macro_dlm`/`backtest`/`sell_ranking`/`zscore`）でディープリンク可能（`gap_analysis`=バリュエーション分析、旧 total_return は統合）。分析画面の各タブの「❓ やさしい解説」リンクから該当セクションへ飛ぶ。各セクション末尾から技術版 `/models#mN` へ相互リンク。TOC追従は `models.js` を再利用（専用JSなし）。 | — |
+| `guide.html` | フロントエンド | 初心者向け「やさしい解説」ページ（`/guide`・ログイン前でも読める）。読者は「投資の基本は知っているが統計とこのアプリは初めて」の人で、数式を使わない。**第1部 はじめに**（できること・最初に見る順番・使う前の注意）／**第2部 画面の歩き方**（`#screen-<画面>`）／**第3部 分析手法**（節の id はプラグイン名。ひとことで言うと／何が分かる／どう使う／注意点、末尾から技術版 `/models#mN` へ。退役モデルは末尾の「退役したモデル」）／**第4部 用語集**（`#term-<slug>`）／もっと詳しく（`/models` と GitHub 上の M1 副読本・MODELS・README）。入口は gnav・ホームの「はじめての方へ」・各画面ヘッダーの「この画面の見方」・分析画面の「❓ やさしい解説」・朝の推奨の「表の見方」・ログイン画面。**`/guide#<id>` のリンク先の実在と、全プラグインに節があることは `tests/test_guide_links.py` が照合する**（節の id をここへ書き写さない）。TOC 追従は `models.js` を再利用（目次が指す見出しだけを見て、光った項目を目次の枠内へ寄せる） | — |
 | `db.html` | フロントエンド | DBビューア（`/db`）。4テーブルのスキーマ・プレビュー・統計サマリー・ER 風リレーション・企業ドリルダウン・CSV エクスポート。 | api.py |
 | `company.html` | フロントエンド | 企業詳細（`/company`・`/company/{edinet_code}`）。個別企業の業績・財務(BS)・CF・per-share/配当・バリュエーション（理論時価総額乖離）・日次株価・業種内Zスコアレーダー・清原式ネットキャッシュ・同業比較を Chart.js の時系列グラフで可視化。企業名・証券コード検索付き。財務(BS)タブはバフェットコード型で各年「左＝資産（借方）／右＝負債・純資産（貸方）」を並列表示し、粒度（粗/中/細）切替で内訳の細かさを変更できる（どの粒度でも資産バー＝負債純資産バー＝総資産になるよう補正）。業績(PL)タブは売上高を費用・利益に分解した積み上げ棒（最上部＝純利益）を粒度（粗/中/細）切替で表示（合計＝売上高、信頼性の低い stored gross_profit は不使用）。CFタブも粒度（粗＝フリー+財務／中＝営業/投資/財務／細＝営業/設備投資/その他投資/財務）切替に対応し、CFデータ未収集の企業には明示メッセージを表示。同業比較タブは選択企業を必ず表示し業種内時価総額順位を併記（並べるのは上場中の社だけ。廃止社は業種が付いていても古い財務のまま順位に混ざるため・#797。並べ替え・順位・母数は `/api/peers` がサーバー側で業種の全件に対して決める＝件数で切ってから画面で並べると、300社を超える業種で上位の社が漏れ母数も小さく出た・#801。廃止社のページでは順位を出さない）。**相互リンク**：理論時価総額/乖離率チャート→`/analysis?tab=gap`・Zスコアチャート→`/analysis?tab=recommend`・ネットキャッシュチャート→`/analysis?tab=net_cash`（逆方向のバリュエーション分析表→`/company/{code}` は既存） | api.py, Chart.js (CDN) |
 | `static/js/*.js` | フロントエンド | 各HTMLテンプレから外部化したページ別JS（CSP対応）。common（`esc`/`apiFetch`/`initAuth`/`logout` 等の共通ユーティリティ・全ページ読込）+ theme-init（`localStorage`/`prefers-color-scheme` から `data-theme` を描画前に適用する FOUC 防止・全ページ `<head>` 読込）+ dashboard / collection / analysis / company / db / models / login / morning の10ファイル。`/static` で配信（api.py の `StaticFiles` マウント）。`<style>` はHTML側に残置。インラインイベントハンドラ（`onclick=` 等）はテンプレートにも JS が組み立てる HTML にも置かず、`data-click` 等＋委譲（`analysis.js` の `_wireDelegate`）で書く——CSP の `script-src-attr` で黙って止まるため。`tests/test_security_headers.py` がテンプレートと `static/js/*.js` の両方を照合する（#811）。 | api.py |
