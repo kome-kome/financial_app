@@ -79,19 +79,40 @@ uvicorn api:app --reload
 
 ---
 
+## 読む人別の入口
+
+| 知りたいこと | 最初に読むもの |
+|---|---|
+| アプリの使い方・画面の読み方・分析手法のあらまし | アプリ内の「やさしい解説」（`/guide`。ローカルなら http://localhost:8000/guide ）。数式を使わずに説明している |
+| 分析モデルの数式・前提・参考文献 | アプリ内の「モデル解説」（`/models`）と [`docs/MODELS.md`](docs/MODELS.md)（正本） |
+| M-1（マクロ×リスク-リターン推奨）の考え方を予備知識なしで | [`docs/M1_MACRO_MODEL_GUIDE.md`](docs/M1_MACRO_MODEL_GUIDE.md) |
+| 言葉の定義 | [`CONTEXT.md`](CONTEXT.md)（用語集） |
+| コードの構成・データの流れ | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) |
+| バッチがいつ何を回すか・外部サービスの制約 | [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) |
+| なぜそう決めたか | [`docs/adr/`](docs/adr/README.md)（設計判断の記録） |
+| Claude Code（AI コーディングエージェント）で開発する | [`CLAUDE.md`](CLAUDE.md) と [`docs/SKILLS_AND_AGENTS.md`](docs/SKILLS_AND_AGENTS.md) |
+
+---
+
 ## ドキュメント
 
 | ファイル | 内容 |
 |---|---|
 | [`docs/VISION.md`](docs/VISION.md) | プロジェクト方針・ロードマップ・サードパーティライブラリ採用基準 |
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | コンポーネント図・ER 図・処理フロー・API エンドポイント一覧・ファイル役割表 |
-| [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) | バッチの暦・Render 運用・外部サービスの制約 |
+| [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) | バッチの暦・ローカルと Render の役割分担・外部サービスの制約 |
 | [`docs/MODELS.md`](docs/MODELS.md) | 分析モデルの数式・パラメータ・参考文献（DOI 付き） |
+| [`docs/M1_MACRO_MODEL_GUIDE.md`](docs/M1_MACRO_MODEL_GUIDE.md) | M-1 の初心者向け副読本（MODELS.md §9 の設計思想と章立てに追随） |
+| [`docs/PLUGIN_REFERENCE.md`](docs/PLUGIN_REFERENCE.md) | `plugins/` 各ファイルの実装リファレンス（理論は MODELS.md） |
+| [`docs/SCRIPTS_REFERENCE.md`](docs/SCRIPTS_REFERENCE.md) | `scripts/` と起動用 `*.ps1` の実装リファレンス |
 | [`docs/GOTCHAS.md`](docs/GOTCHAS.md) | 既知のハマりどころ（再現条件と回避手順） |
 | [`CONTEXT.md`](CONTEXT.md) | ドメイン用語集 |
 | [`docs/adr/`](docs/adr/README.md) | 設計判断の記録（ADR） |
+| `docs/prereg/` | 計測の事前登録（測る前に判定規則を固定した文書）。**本文は凍結されていて、1字でも変えると照合が落ち日中バッチが止まる** |
 | [`docs/FUTURE_TASKS.md`](docs/FUTURE_TASKS.md) | Issue 運用ガイドと設計制約（残タスクの正本は GitHub Issues） |
-| [`docs/archive/IMPROVEMENTS.md`](docs/archive/IMPROVEMENTS.md) | これまでの改善履歴と検証ノート（archive） |
+| [`docs/SKILLS_AND_AGENTS.md`](docs/SKILLS_AND_AGENTS.md) | Claude Code のスキル／エージェントの索引 |
+| [`docs/archive/`](docs/archive/README.md) | 完了済みの作業記録と過去のコードレビュー（現行の参照には使わない） |
+| [`tests/README.md`](tests/README.md) | テストの実行方法と方針 |
 | [`CLAUDE.md`](CLAUDE.md) | Claude Code（AI コーディングエージェント）向けの動作指示 |
 
 ---

@@ -1,7 +1,9 @@
 # 探索の品質ゲートは同一パネル上でしか比較しない
 
-- **状態**: 採用
-- **日付**: 2026-09-01
+## Status
+
+accepted（2026-09-01）
+
 - **関連**: #590 / #291 / #532 / #592（真因の追及）、[ADR-0045](0045-momentum-gains-vanish-when-the-population-is-aligned.md)（母集団を揃える）、[ADR-0039](0039-persisted-weights-carry-their-preprocess-generation.md)（永続値は前処理世代を背負う）、[ADR-0041](0041-preset-weight-gate-has-an-implementation.md)（rank-IC の測り方の正本）、[ADR-0010](0010-hyperparameter-tuning-github-actions-automation.md)（ゲートの導入元）
 
 ## Context

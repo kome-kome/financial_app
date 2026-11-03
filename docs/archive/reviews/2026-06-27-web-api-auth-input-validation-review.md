@@ -11,7 +11,7 @@
 
 ## F-1 [低] `/api/companies`・`/api/screen` の `limit`/`offset` 上限欠如（入力検証の不整合） → #245
 
-**該当**: [routers/market.py:232](../../routers/market.py#L232)（`/api/companies`、`limit`/`offset` 無検証・レート制限デコレータ無し）、[routers/market.py:306](../../routers/market.py#L306)（`ScreenRequest.limit` に `Field` 制約無し）
+**該当**: [routers/market.py:232](../../../routers/market.py#L232)（`/api/companies`、`limit`/`offset` 無検証・レート制限デコレータ無し）、[routers/market.py:306](../../../routers/market.py#L306)（`ScreenRequest.limit` に `Field` 制約無し）
 
 **問題**: 同じ「件数上限」を他の入口では一貫検証している（DB ビューア `db_preview`/`db_export` は `1<=limit<=500`/`<=100000`、collect ルーターは `Field(ge/le)`）のに、この 2 つだけ `limit` 無制限・`offset` 負値も非検証。認証済みクライアントが巨大 `limit` を渡すと応答サイズ・メモリ・DB 負荷が増大しうる。
 
@@ -25,7 +25,7 @@
 
 ## F-2 [低] `/api/db/stats` の生 SQL f-string 組み立て（脆いパターン・defense-in-depth） → #246
 
-**該当**: [routers/market.py:494](../../routers/market.py#L494)（`percentile_cont(...) ... FROM {table}` を f-string で組み立て）
+**該当**: [routers/market.py:494](../../../routers/market.py#L494)（`percentile_cont(...) ... FROM {table}` を f-string で組み立て）
 
 **問題**: テーブル名・カラム名を f-string で生 SQL に直接埋め込む。**現状は注入不可**（`table` はホワイトリスト検証済み・`c.name` はモデル定義由来でユーザー入力ではない）が、「カラム名に SQL メタ文字が含まれない」という暗黙の不変条件に依存しており、将来のカラム/テーブル追加で壊れやすい。
 
@@ -37,7 +37,7 @@
 
 ## F-3 [中] パスワードリセットが Render 本番では再起動で揮発する → #247
 
-**該当**: [routers/auth.py:78](../../routers/auth.py#L78)（`reset_password` → `_update_env_file`）、[api.py:22](../../api.py#L22)（`load_dotenv()` = `override=False`）
+**該当**: [routers/auth.py:78](../../../routers/auth.py#L78)（`reset_password` → `_update_env_file`）、[api.py:22](../../../api.py#L22)（`load_dotenv()` = `override=False`）
 
 **問題**: リセットは (1) プロセス内 `api.APP_PASSWORD` 更新 + (2) `.env` 書き戻し、の 2 段。だが Render Free は ephemeral FS のため `.env` 書込は再起動で消え、かつ本番 `APP_PASSWORD` は dashboard 環境変数供給で `load_dotenv(override=False)` により**次回起動時は dashboard の旧値が優先**。結果、本番でリセットしても**再起動で旧パスワードに静かに戻る**（利用者は変更済みと誤認）。ARCHITECTURE.md/DEPLOYMENT.md にも揮発性の注記が無い。
 
