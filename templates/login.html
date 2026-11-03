@@ -55,6 +55,9 @@ input[type=password]:focus{border-color:var(--accent)}
 .error{color:var(--status-bad-text);font-size:12px;margin-top:12px;text-align:center;display:none}
 .success{color:var(--status-good-text);font-size:12px;margin-top:12px;text-align:center;display:none}
 .forgot-link{display:block;text-align:center;margin-top:16px;font-size:12px;color:var(--text-muted);cursor:pointer;text-decoration:underline}
+/* ログイン前でも読める（HTML ページは認証の外）。初めて URL を受け取った人の入口 */
+.about-link{display:block;text-align:center;margin-top:20px;padding-top:16px;border-top:1px solid var(--border);font-size:12px;color:var(--status-good-text);text-decoration:none}
+.about-link:hover{text-decoration:underline}
 .forgot-link:hover{color:var(--text-secondary)}
 .panel{display:none}
 .theme-toggle-btn{background:transparent;border:1px solid var(--border-muted);color:var(--text);border-radius:6px;width:30px;height:30px;font-size:14px;cursor:pointer;display:flex;align-items:center;justify-content:center;flex-shrink:0;margin-left:auto}
@@ -93,6 +96,7 @@ input[type=password]:focus{border-color:var(--accent)}
     <div class="success" id="reset-ok">パスワードを更新しました。ログインしてください。</div>
     <button class="btn-secondary" id="back-btn">← ログインに戻る</button>
   </div>
+  <a class="about-link" href="/guide#start">このアプリについて（やさしい解説）</a>
 </div>
 
 <script src="/static/js/common.js"></script>

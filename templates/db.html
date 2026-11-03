@@ -39,11 +39,14 @@
 *{box-sizing:border-box;margin:0;padding:0}
 :focus-visible{outline:2px solid var(--accent-text);outline-offset:2px}
 body{font-family:'Segoe UI',sans-serif;background:var(--bg);color:var(--text);min-height:100vh}
-.header{background:var(--bg-elevated);border-bottom:1px solid var(--border);padding:14px 24px;display:flex;align-items:center;gap:14px}
+.header{background:var(--bg-elevated);border-bottom:1px solid var(--border);padding:14px 24px;display:flex;align-items:center;gap:10px 14px;flex-wrap:wrap}
 .header h1{font-size:17px;font-weight:600;color:var(--accent-text)}
 .header a{color:var(--text-secondary);text-decoration:none;font-size:13px;padding:5px 12px;border-radius:6px;border:1px solid var(--border-muted)}
 .header a:hover{background:var(--bg-hover);color:var(--text)}
 .badge{background:var(--accent-soft-bg);color:var(--accent-soft-text);font-size:11px;padding:3px 8px;border-radius:12px}
+/* 「この画面の見方」：やさしい解説（/guide）の、この画面の節へ飛ぶ入口。全画面で同じ位置（題名の右）・同じ文言 */
+.help-link{display:inline-flex;align-items:center;gap:5px;padding:4px 10px;border:1px solid var(--border-muted);border-radius:6px;font-size:12px;color:var(--status-good-text);text-decoration:none;white-space:nowrap}
+.help-link:hover{background:var(--bg-hover)}
 .theme-toggle-btn{background:transparent;border:1px solid var(--border-muted);color:var(--text);border-radius:6px;width:30px;height:30px;font-size:14px;cursor:pointer;display:flex;align-items:center;justify-content:center;flex-shrink:0}
 .theme-toggle-btn:hover{background:var(--bg-hover)}
 .container{padding:24px;max-width:1400px;margin:0 auto}
@@ -168,6 +171,7 @@ body{font-family:'Segoe UI',sans-serif;background:var(--bg);color:var(--text);mi
   </div>
   <h1>DB ビューア</h1>
   <span class="badge">データベース</span>
+  <a href="/guide#screen-db" class="help-link">❓ この画面の見方</a>
   <button id="theme-toggle" class="theme-toggle-btn" title="ライト/ダーク切替" aria-label="テーマ切替">🌙</button>
 </div>
 

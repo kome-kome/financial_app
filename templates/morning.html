@@ -42,6 +42,9 @@ body{font-family:'Segoe UI',sans-serif;background:var(--bg);color:var(--text);mi
 .header{background:var(--bg-elevated);border-bottom:1px solid var(--border);padding:14px 24px;display:flex;align-items:center;gap:10px 14px;flex-wrap:wrap}
 .header h1{font-size:17px;font-weight:600;color:var(--accent-text);white-space:nowrap}
 .badge{background:var(--accent-soft-bg);color:var(--accent-soft-text);font-size:11px;padding:3px 8px;border-radius:12px}
+/* 「この画面の見方」：やさしい解説（/guide）の、この画面の節へ飛ぶ入口。全画面で同じ位置（題名の右）・同じ文言 */
+.help-link{display:inline-flex;align-items:center;gap:5px;padding:4px 10px;border:1px solid var(--border-muted);border-radius:6px;font-size:12px;color:var(--status-good-text);text-decoration:none;white-space:nowrap}
+.help-link:hover{background:var(--bg-hover)}
 .theme-toggle-btn{background:transparent;border:1px solid var(--border-muted);color:var(--text);border-radius:6px;width:30px;height:30px;font-size:14px;cursor:pointer;display:flex;align-items:center;justify-content:center;flex-shrink:0}
 .theme-toggle-btn:hover{background:var(--bg-hover)}
 .dot{width:8px;height:8px;border-radius:50%;display:inline-block}
@@ -73,6 +76,14 @@ body{font-family:'Segoe UI',sans-serif;background:var(--bg);color:var(--text);mi
 .fresh-details>summary::-webkit-details-marker{display:none}
 .fresh-details>summary::before{content:'▸';color:var(--text-muted)}
 .fresh-details[open]>summary::before{content:'▾'}
+.legend{margin:0 0 12px;font-size:13px;color:var(--text-body)}
+.legend>summary{cursor:pointer;color:var(--text-secondary);display:inline-flex;gap:6px;align-items:center}
+.legend>summary::-webkit-details-marker{display:none}
+.legend>summary::before{content:'▸';color:var(--text-muted)}
+.legend[open]>summary::before{content:'▾'}
+.legend ul{margin:8px 0 6px 20px}
+.legend li{margin-bottom:4px;line-height:1.7}
+.legend a{color:var(--status-good-text);font-size:12px}
 .fresh-chips{font-weight:400;letter-spacing:0;display:flex;flex-wrap:wrap;gap:4px 10px}
 .lv-fresh{color:var(--status-good-text)}.lv-warn{color:var(--status-warn-text)}.lv-alert{color:var(--status-bad-text)}
 .fresh-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:14px}
@@ -133,6 +144,7 @@ body{font-family:'Segoe UI',sans-serif;background:var(--bg);color:var(--text);mi
   </div>
   <h1>朝の推奨</h1>
   <span class="badge">読むだけ・再計算なし</span>
+  <a href="/guide#screen-morning" class="help-link">❓ この画面の見方</a>
   <div class="api-status">
     <span class="dot dot-amber" id="api-dot"></span>
     <span id="api-label">読み込み中...</span>
@@ -184,6 +196,18 @@ body{font-family:'Segoe UI',sans-serif;background:var(--bg);color:var(--text);mi
     </select>
     <span class="muted" id="mor-generated"></span>
   </div>
+  <!-- 列の意味。見出しに吹き出しを付けないのは、横スクロールする .rank-wrap の中では切れるため -->
+  <details class="legend">
+    <summary>表の見方</summary>
+    <ul>
+      <li><strong>スコア</strong>：選んだプリセットの重みで、収益力・成長・割安さなどの Zスコアを足した総合点。高いほど上位</li>
+      <li><strong>PER / PBR</strong>：株価が1株あたり利益の何年分か／1株あたり純資産の何倍か。低いほど安い</li>
+      <li><strong>ROE</strong>：株主のお金でどれだけ利益を出したか</li>
+      <li><strong>乖離率</strong>：同じ業種の値ごろから計算した理論上の時価総額より、実際がどれだけ安いか。<strong>プラスが割安</strong></li>
+      <li><strong>株価 as-of</strong>：その行で使った株価の日付。古いと色が変わる</li>
+    </ul>
+    <a href="/guide#screen-morning">判定の読み方も含めた詳しい説明（やさしい解説）</a>
+  </details>
   <div class="rank-wrap">
     <table class="rank-table">
       <thead>
