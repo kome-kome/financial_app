@@ -280,6 +280,28 @@ class TestHttp404Breakdown:
         w = [x for x in warnings_for(r) if "404以外" in x]
         assert len(w) == 1 and "5件" in w[0]
 
+    def test_isolated_5xx_is_counted_but_not_flagged(self):
+        """#1121: 11/02・11/04 の晩と同じ形（5xx=1・404 だけ）は起票しない。
+
+        失敗した社は翌晩に社ごとの最終日から取り直され（#415）、取り直せない遅れは株価鮮度が拾う。
+        件数は読めて、表にも出ること（数えるのをやめたわけではない）。
+        """
+        from scripts.check_nightly_collect import ROWS
+
+        r = parse_nightly_log(self._night(
+            {"429": 0, "5xx": 1, "4xx": 103, "404": 103, "other": 0}))
+        assert r["http_5xx"] == 1
+        assert warning_items(r) == []
+        assert dict(ROWS)["HTTP 429 / 5xx"](r) == "0 / 1"
+
+    def test_5xx_does_not_ride_along_with_429(self):
+        """429 の晩の警告は 429 だけを言う（5xx の件数で文面＝起票の署名が変わらない）。"""
+        r = parse_nightly_log(self._night(
+            {"429": 3, "5xx": 2, "4xx": 320, "404": 320, "other": 0}))
+        items = warning_items(r)
+        assert [k for k, _ in items] == ["yahoo_http"]
+        assert "429" in items[0][1] and "5xx" not in items[0][1]
+
     def test_old_format_breakdown_is_unknown_and_not_flagged(self):
         """内訳の無い晩（9/8〜9/11）は「不明」。0 と読んで 350件すべてを拒否扱いにしない。"""
         r = parse_nightly_log(LOG_AFTER)
