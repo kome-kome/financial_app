@@ -144,10 +144,13 @@ tr:hover td{background:var(--border-subtle)}
 .info-box{background:var(--border-subtle);border-radius:8px;padding:12px;font-size:12px;color:var(--text-secondary);border-left:3px solid var(--accent);line-height:1.6}
 /* 用語ツールチップ（マウスオーバーとフォーカスで解説を表示）。隠れている間は display:none で場所ごと
    消す——visibility:hidden だと配置が残り、幅 375px のネットキャッシュのタブでページ幅を 478px に広げて
-   いた（#1132・/guide の .term と同じ #888 の型）。現れるときのフェードは @starting-style で保つ */
-.gloss{border-bottom:1px dotted var(--text-secondary);cursor:help;position:relative}
-.gloss::after{content:attr(data-tip);position:absolute;left:0;top:calc(100% + 7px);z-index:60;width:max-content;max-width:280px;white-space:normal;text-align:left;text-transform:none;letter-spacing:normal;background:var(--bg-sunken);color:var(--text-body);border:1px solid var(--border-muted);border-radius:7px;padding:9px 11px;font-size:11px;font-weight:400;line-height:1.6;box-shadow:0 10px 30px var(--shadow-color);opacity:0;display:none;transform:translateY(-4px);transition:opacity .13s ease,transform .13s ease;pointer-events:none}
+   いた（#1132・/guide の .term と同じ #888 の型）。現れるときのフェードは @starting-style で保つ。
+   右端を越える用語は common.js の placeTip が .tip-flip を付けて左へ開き、--tip-room（外寸の上限）と
+   --tip-shift（左端を越える分の戻し）を入れる（#1137）。2 行に割れると位置の基準がずれるので nowrap */
+.gloss{border-bottom:1px dotted var(--text-secondary);cursor:help;position:relative;white-space:nowrap}
+.gloss::after{content:attr(data-tip);position:absolute;left:0;top:calc(100% + 7px);z-index:60;width:max-content;max-width:min(280px,var(--tip-room,280px));white-space:normal;text-align:left;text-transform:none;letter-spacing:normal;background:var(--bg-sunken);color:var(--text-body);border:1px solid var(--border-muted);border-radius:7px;padding:9px 11px;font-size:11px;font-weight:400;line-height:1.6;box-shadow:0 10px 30px var(--shadow-color);opacity:0;display:none;transform:translateY(-4px);transition:opacity .13s ease,transform .13s ease;pointer-events:none}
 .gloss:hover::after,.gloss:focus::after{display:block;opacity:1;transform:translateY(0)}
+.gloss.tip-flip::after{left:auto;right:calc(0px - var(--tip-shift,0px))}
 @starting-style{.gloss:hover::after,.gloss:focus::after{opacity:0;transform:translateY(-4px)}}
 @media (prefers-reduced-motion: reduce){.gloss::after{transition:none}}
 .btn:disabled{opacity:.4;cursor:not-allowed}
@@ -860,7 +863,7 @@ tr:hover td{background:var(--border-subtle)}
 </div><!-- layout -->
 
 <script src="/static/vendor/chart.umd.js?v=4.4.1"></script>
-<script src="/static/js/common.js?v=20261022a"></script>
+<script src="/static/js/common.js?v=20261105a"></script>
 <script src="/static/js/analysis.js?v=20261022a"></script>
 </body>
 </html>

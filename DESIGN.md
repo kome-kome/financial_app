@@ -170,7 +170,7 @@ description: 暗色基調の業務画面に、操作と技術版は紫・入門�
 ### 用語の吹き出し（/guide の `.term`・分析画面の `.gloss`）
 - 点線の下線と `cursor: help`。説明は `data-tip` に書き、`::after` で最大 280px の吹き出しとして沈んだ面に出す。
 - **ホバーとキーボードのフォーカスの両方で開く**（`tabindex="0"` と `:focus::after`）。ホバー専用にしない。
-- 隠れている間は `display: none` で場所ごと消す（`visibility: hidden` だと見えない吹き出しがページ幅を広げる）。用語は行をまたがせない（`white-space: nowrap`）。本文の右端を越える用語は `models.js` が左へ開く。
+- 隠れている間は `display: none` で場所ごと消す（`visibility: hidden` だと見えない吹き出しがページ幅を広げる）。用語は行をまたがせない（`white-space: nowrap`）。本文（`.content` が無い画面は画面幅）の右端を越える用語は `common.js` の `placeTip` が `.tip-flip` を付けて左へ開き、外寸を `--tip-room` で本文の幅に抑える（両クラス共通・1 か所だけに置く・#1137）。
 
 ### 部の扉（`.part-header`・/guide だけ）
 - `div.part-header`（部の id を持つ）の中に `h2.part-title`。緑 2px の上罫線＋24px の部の題で、部の番号（`.part-no`「第1部」など）は題と同じ行の先頭に置く。見出しの上に小さなラベル（アイブロウ）を載せない。左の太線も使わない。
@@ -206,7 +206,7 @@ description: 暗色基調の業務画面に、操作と技術版は紫・入門�
 
 | テスト | 照合すること |
 |---|---|
-| [tests/test_templates_a11y.py](tests/test_templates_a11y.py) | 全画面が両テーマのトークンを持つ／`--text-muted` の対比が4つの面で AA 以上／`outline` を消さない／`:focus-visible` の紫の枠がある／11px の床／`.term`・`.gloss` がキーボードで開く／`showNotif` を呼ぶ画面にトーストの CSS がある／9枚のトークン2ブロックが同一（#1132） |
+| [tests/test_templates_a11y.py](tests/test_templates_a11y.py) | 全画面が両テーマのトークンを持つ／`--text-muted` の対比が4つの面で AA 以上／`outline` を消さない／`:focus-visible` の紫の枠がある／11px の床／`.term`・`.gloss` がキーボードで開き、右端では左へ開く（`placeTip` は common.js だけ）／`showNotif` を呼ぶ画面にトーストの CSS がある／9枚のトークン2ブロックが同一（#1132） |
 | [tests/test_templates_nav.py](tests/test_templates_nav.py) | 全テンプレートがナビ有り・無しに分類済み／ナビのマークアップが `.active` 以外同一／`.active` は自分だけ／`.gnav*` の CSS がある／リンク先が実在する |
 | [tests/test_guide_links.py](tests/test_guide_links.py) | `/guide#…` のリンクが全部実在する／全プラグインに /guide の節がある／各画面の「この画面の見方」が自分の節を指し、`.help-link` の CSS がある |
 | [tests/test_security_headers.py](tests/test_security_headers.py) | テンプレートと JS が組み立てる HTML にインラインのスクリプト・イベントハンドラが無い／外部の `<script src>` が無い（CSP は `script-src 'self'`、`<style>` のために `style-src` だけ `'unsafe-inline'` を残す） |

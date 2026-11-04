@@ -237,3 +237,28 @@ async function apiFetch(path, opts = {}) {
     load();
   }
 })();
+
+// ── 用語の吹き出し（/guide の .term・分析画面の .gloss）────────────────────────────
+// 吹き出し（::after）は用語の左端から右へ伸びる。本文の右端を越える用語だけ .tip-flip で右端揃えに
+// して、切れずに読めるようにする（#888）。外寸は CSS から読む——::after は * の box-sizing を受けない
+// ので、max-width に余白と枠線を足したものが最大の外寸。狭い本文では右端揃えでも左端を越えるので、
+// 外寸を本文の幅までに抑え（--tip-room）、越える分だけ右へ戻す（--tip-shift）。ホバーとフォーカス
+// （Tab・タップ）の両方で開くので両方で測る（#893）。本文の箱（.content）が無い画面は画面幅で測る。
+// 2 画面で同じ処理を使うため、ここに 1 つだけ置く（複製すると片方だけ直って食い違う・#1137）。
+const TIP_SELECTOR = '.term, .gloss';
+function placeTip(term) {
+  const box = (term.closest('.content') || document.documentElement).getBoundingClientRect();
+  const tip = getComputedStyle(term, '::after');
+  const frame = ['paddingLeft', 'paddingRight', 'borderLeftWidth', 'borderRightWidth']
+    .reduce((sum, prop) => sum + parseFloat(tip[prop]), 0);
+  term.style.setProperty('--tip-room', `${box.width - frame}px`);
+  const tipWidth = parseFloat(tip.maxWidth) + frame;  // tip は live なので --tip-room を反映した値
+  const rect = term.getBoundingClientRect();
+  const flip = rect.left + tipWidth > box.right;
+  term.classList.toggle('tip-flip', flip);
+  term.style.setProperty('--tip-shift', `${flip ? Math.max(0, box.left + tipWidth - rect.right) : 0}px`);
+}
+['mouseover', 'focusin'].forEach(type => document.addEventListener(type, e => {
+  const term = e.target.closest(TIP_SELECTOR);
+  if (term) placeTip(term);
+}));

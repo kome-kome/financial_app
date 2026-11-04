@@ -171,6 +171,34 @@ def test_glossary_tooltips_are_keyboard_reachable():
             assert not no_focus, f"{_name(path)}: `.{cls}` はフォーカスでもツールチップを出す: {no_focus}"
 
 
+def test_glossary_tooltips_flip_inside_the_page():
+    """右端の用語の吹き出しが画面の外へはみ出さない（#888・#893・#1137）。
+
+    位置合わせは common.js の placeTip が 1 つで受け持つ。どのツールチップのクラスも
+    (1) common.js の対象に入っていて、(2) CSS が --tip-room で外寸を抑え、.tip-flip で左へ開く。
+    片方だけでは効かない（JS が測っても CSS が受けなければ動かず、CSS だけでは誰も印を付けない）。
+    """
+    common = _read(next(p for p in STATIC_JS if _name(p) == "common.js"))
+    m = re.search(r"const TIP_SELECTOR = '([^']+)'", common)
+    assert m, "common.js の TIP_SELECTOR を拾えない（検出の正規表現が実体とずれた）"
+    selectors = {s.strip() for s in m.group(1).split(",")}
+    # 複製に戻さない: placeTip は common.js だけに置く
+    dup = [_name(p) for p in STATIC_JS if _name(p) != "common.js" and "function placeTip" in _read(p)]
+    assert not dup, f"placeTip が common.js 以外にもある（複製は片方だけ直って食い違う）: {dup}"
+    for cls in TOOLTIP_CLASSES:
+        assert f".{cls}" in selectors, f"`.{cls}` が common.js の TIP_SELECTOR に無い"
+        styled = [p for p in TEMPLATES if f".{cls}::after{{" in _read(p)]
+        assert styled, f"`.{cls}::after` を持つ画面を拾えない"
+        for path in styled:
+            text = _read(path)
+            assert "max-width:min(280px,var(--tip-room,280px))" in text, \
+                f"{_name(path)}: `.{cls}::after` の max-width が --tip-room を受けない"
+            assert f".{cls}.tip-flip::after{{left:auto;right:calc(0px - var(--tip-shift,0px))}}" in text, \
+                f"{_name(path)}: `.{cls}.tip-flip::after` の規則が無い（左へ開けない）"
+            script = re.search(r'<script src="/static/js/common\.js[^"]*"></script>', text)
+            assert script, f"{_name(path)}: common.js を読み込んでいない（placeTip が動かない）"
+
+
 def test_pages_that_raise_toasts_style_them():
     js = {_name(p): _read(p) for p in STATIC_JS}
     callers = []
