@@ -254,10 +254,14 @@ def warning_items(row: dict) -> list:
     if row.get("upserted") is None and row.get("gap_skip_reason") is None:
         w.append(("collect_incomplete",
                   "gap-fill の完了行もスキップ行も無い＝収集が終わっていない可能性"))
-    for key, label in (("http_429", "429（レート制限）"), ("http_5xx", "5xx")):
-        if row.get(key):
-            w.append(("yahoo_http", f"Yahoo {label} が {row[key]}件"
-                      "＝並行度を下げる（FINAPP_YAHOO_CONCURRENCY=1 で逐次）"))
+    # **5xx は単独では警告しない**（#1121）。数えて表には出し続ける（`ROWS` の「HTTP 429 / 5xx」）。
+    # 単発の 5xx で失うものは無い——gap-fill は社ごとの最終 trade_date から取りに行くので、
+    # 失敗した社は翌晩に取り直される（#415）。取り直せずに遅れ続ければ `price_freshness`
+    # （5営業日超の遅れ）が鳴る。絞りの合図は 429 と 404 以外の 4xx で、並行度 4 にした 9/8
+    # 以降の 58 晩で 429 は 0・5xx は 3 晩に 1 件ずつ（10/13・11/02・11/04）だった。
+    if row.get("http_429"):
+        w.append(("yahoo_http", f"Yahoo 429（レート制限）が {row['http_429']}件"
+                  "＝並行度を下げる（FINAPP_YAHOO_CONCURRENCY=1 で逐次）"))
     # 404 は上場廃止社が毎晩一定数返す値（#556・実測 約320件）。それ以外の 4xx は拒否
     # （401/403 等）の疑いで、429 と同じく絞られた合図になりうる。内訳が無い晩（旧書式）は
     # 判定しない——「不明」を 0 と読んで健全へ倒さない。
