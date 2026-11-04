@@ -1664,6 +1664,8 @@ graph TB
 | `docs/PLUGIN_REFERENCE.md` | ドキュメント | `plugins/` 各ファイルの実装リファレンス（内部契約・producer・heavy・実測値）。理論は MODELS.md が正本 | — |
 | `docs/SCRIPTS_REFERENCE.md` | ドキュメント | `scripts/` と起動用 `*.ps1` の実装リファレンス（役割・守ること・実測値） | — |
 | `docs/M1_MACRO_MODEL_GUIDE.md` | ドキュメント | M-1 の初心者向け副読本（設計思想と章立てだけ MODELS.md §9 に追随。冒頭の `models-sync` マーカーを `tests/test_docs_sync.py` が照合） | — |
+| `docs/M2_MACRO_GBDT_GUIDE.md` | ドキュメント | M-2 の初心者向け副読本（設計思想と章立てだけ MODELS.md §11 に追随。照合は同上・#1129） | — |
+| `docs/M3_STATE_SPACE_GUIDE.md` | ドキュメント | M-3 の初心者向け副読本（設計思想と章立てだけ MODELS.md §12 に追随。照合は同上・#1129） | — |
 | `docs/SKILLS_AND_AGENTS.md` | ドキュメント | スキル／エージェントの索引マニュアル（`tests/test_docs_sync.py` が実体と照合） | — |
 | `README.md` | ドキュメント | 入口。何ができるか・構成の要点・セットアップ・**読む人別の入口**・ドキュメント一覧 | — |
 | `docs/archive/` | ドキュメント | 完了済み作業記録（IMPROVEMENTS・VISUALIZATION_IMPROVEMENTS・REFACTORING・DEPLOYMENT_HISTORY・MODELS_HISTORY）と、集中コードレビューの記録（`reviews/`・2026-06 の3本。指摘は Issue 化済み）。一覧は [docs/archive/README.md](archive/README.md)。現行参照には使わない | — |

@@ -1106,7 +1106,8 @@ $$
 ## 11. M-2 マクロ×財務 勾配ブースティング（macro_gbdt）
 
 `plugins/macro_gbdt.py` / `MacroGbdtPlugin`  
-**カテゴリ**: ③ 将来リターンを予測（`ui_order=340`、`heavy=True`）
+**カテゴリ**: ③ 将来リターンを予測（`ui_order=340`、`heavy=True`）  
+**副読本**: 統計・機械学習が初めての人向けの噛み砕いた解説は [`M2_MACRO_GBDT_GUIDE.md`](M2_MACRO_GBDT_GUIDE.md)（本節はその正式・技術版）
 
 ### 11.1 概要
 
@@ -1433,7 +1434,7 @@ $g^{*}_{t,(p)}$ は gain を降順に並べた理想の並びの $p$ 位（Järv
 
 ### 11.8 将来エンハンス
 
-- M-2 初心者向けの副読本は [#1129](https://github.com/kome-kome/financial_app/issues/1129) で扱う（M-3 と合わせて）
+いま残っている項目は無い。初心者向けの副読本は [`M2_MACRO_GBDT_GUIDE.md`](M2_MACRO_GBDT_GUIDE.md) に書いた（#1129）。
 
 対応済みの項目（M-1 への OOF 結線 #272・分割コンフォーマル区間 #365・SHAP 交互作用 #371・共有の探索基盤 #264〜#267）は
 [archive/MODELS_HISTORY.md](archive/MODELS_HISTORY.md) へ、現行のハイパーパラメータ探索の仕様は §11.4.3（M-1 の経緯は §9.3）へ
@@ -1451,7 +1452,8 @@ $g^{*}_{t,(p)}$ は gain を降順に並べた理想の並びの $p$ 位（Järv
 ## 12. M-3 ベイズ状態空間モデル（時変マクロβ DLM・macro_dlm）
 
 `plugins/macro_dlm.py` / `MacroDlmPlugin`  
-**カテゴリ**: ③ 将来リターンを予測（`ui_order=360`、`heavy=True`）
+**カテゴリ**: ③ 将来リターンを予測（`ui_order=360`、`heavy=True`）  
+**副読本**: 統計・機械学習が初めての人向けの噛み砕いた解説は [`M3_STATE_SPACE_GUIDE.md`](M3_STATE_SPACE_GUIDE.md)（本節はその正式・技術版）
 
 ### 12.1 概要
 
@@ -1551,7 +1553,6 @@ DLM のフォワードパスは各週 y_t を**観測前**に予測する。標�
 
 - walk-forward CV による M-1/M-2 との µ̂ ランキング横並び比較（OOF・§11.7 と同枠）
 - 系統的マクロリスク R_macro,i(t) を効用 U = µ − λR の軸へ正式組込み（現状は表示のみ）
-- M-3 初心者向けの副読本は [#1129](https://github.com/kome-kome/financial_app/issues/1129) で扱う（M-2 と合わせて）
 
 ### 12.9 参考文献
 

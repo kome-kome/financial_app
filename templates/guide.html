@@ -525,7 +525,7 @@ td code,p code,li code,dd code{background:var(--bg-sunken);border:1px solid var(
   <h3>⚠ 注意点・落とし穴</h3>
   <div class="warn-box">株価データは「効くサインが弱くノイズが多い」ため、木のモデルは<strong>過去に当てはめすぎる（<a href="#term-overfit">過学習</a>）</strong>になりがちです。そのため既定では強めのブレーキ（正則化）をかけています。当てはまりの精度（R²）は高くないので、結果は<strong>順位の目安</strong>として読み、当たる確率とは思わないでください。M-1 のような「予測の確からしさの幅（信頼区間）」は持ちません。</div>
 
-  <div class="more">→ もっと詳しく：<a href="/models#m11">モデル解説：M-2 マクロ×財務 勾配ブースティング</a></div>
+  <div class="more">→ もっと詳しく：<a href="/models#m11">モデル解説：M-2 マクロ×財務 勾配ブースティング</a>（予備知識なしで読める副読本は<a href="#further">もっと詳しく</a>から）</div>
 </div>
 
 <!-- ③ ベイズ状態空間（時変マクロβ DLM）─────────── -->
@@ -550,7 +550,7 @@ td code,p code,li code,dd code{background:var(--bg-sunken);border:1px solid var(
   <h3>⚠ 注意点・落とし穴</h3>
   <div class="warn-box">β は「マクロが動いたときの反応の強さ」であって、<strong>マクロ自体の先読みではありません</strong>（未来の為替や金利は分かりません）。µ̂ は「世の中で説明できない持ち味」を頼りにした推定値なので、参考程度に。週次で約2年以上の株価履歴がある銘柄だけが対象です。計算が重いので、手元のパソコンで開いた画面で実行してください。</div>
 
-  <div class="more">→ もっと詳しく：<a href="/models#m12">モデル解説：M-3 ベイズ状態空間モデル</a></div>
+  <div class="more">→ もっと詳しく：<a href="/models#m12">モデル解説：M-3 ベイズ状態空間モデル</a>（予備知識なしで読める副読本は<a href="#further">もっと詳しく</a>から）</div>
 </div>
 
 <!-- M-6 マクロ×財務 正則化線形（ElasticNet） ────── -->
@@ -783,11 +783,13 @@ td code,p code,li code,dd code{background:var(--bg-sunken);border:1px solid var(
     <tbody>
       <tr><td><a href="/models">モデル解説（技術版）</a></td><td>各分析の数式・前提・パラメータ・参考論文。このアプリの中で読めます。</td></tr>
       <tr><td><a href="https://github.com/kome-kome/financial_app/blob/main/docs/M1_MACRO_MODEL_GUIDE.md" target="_blank" rel="noopener">M-1 の副読本</a></td><td>マクロ×リスク-リターン推奨（M-1）の考え方を、金融・統計の予備知識なしで読めるように書いた解説です。</td></tr>
+      <tr><td><a href="https://github.com/kome-kome/financial_app/blob/main/docs/M2_MACRO_GBDT_GUIDE.md" target="_blank" rel="noopener">M-2 の副読本</a></td><td>マクロ×財務 勾配ブースティング（M-2）の考え方を、統計・機械学習が初めての人にも読めるように書いた解説です。</td></tr>
+      <tr><td><a href="https://github.com/kome-kome/financial_app/blob/main/docs/M3_STATE_SPACE_GUIDE.md" target="_blank" rel="noopener">M-3 の副読本</a></td><td>ベイズ状態空間（時変マクロβ・M-3）の考え方を、統計・機械学習が初めての人にも読めるように書いた解説です。</td></tr>
       <tr><td><a href="https://github.com/kome-kome/financial_app/blob/main/docs/MODELS.md" target="_blank" rel="noopener">MODELS.md</a></td><td>分析モデルの説明の正本です。モデル解説（技術版）はこの文書を画面向けにしたものです。</td></tr>
       <tr><td><a href="https://github.com/kome-kome/financial_app#readme" target="_blank" rel="noopener">README</a></td><td>アプリの全体像と、目的別にどの文書を読めばよいかの案内です。</td></tr>
     </tbody>
   </table>
-  <div class="info-box">表の下の3つは GitHub のページが新しいタブで開きます。</div>
+  <div class="info-box">表の下の5つは GitHub のページが新しいタブで開きます。</div>
 </div>
 
 </main>
