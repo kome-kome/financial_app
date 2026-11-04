@@ -102,7 +102,6 @@ body{font-family:'Segoe UI',sans-serif;background:var(--bg);color:var(--text);mi
 .btn{padding:8px 16px;border-radius:6px;border:none;font-size:13px;cursor:pointer;display:inline-flex;align-items:center;gap:5px;transition:all .15s}
 .btn-primary{background:var(--accent);color:#fff}.btn-primary:hover{background:var(--accent-hover)}
 .btn-secondary{background:var(--bg-hover);color:var(--text-secondary);border:1px solid var(--border-muted)}.btn-secondary:hover{background:var(--border-muted);color:var(--text)}
-.btn-green{background:var(--val-up-bg);color:var(--val-up-text);border:1px solid var(--val-up)}.btn-green:hover{background:var(--val-up)}
 .btn-sm{padding:5px 10px;font-size:12px}
 input,select{background:var(--bg-sunken);border:1px solid var(--border-muted);border-radius:6px;color:var(--text);padding:8px 12px;font-size:13px;width:100%}
 input:focus,select:focus{border-color:var(--accent)}
@@ -143,10 +142,14 @@ tr:hover td{background:var(--border-subtle)}
 .stat-label{font-size:11px;color:var(--text-muted);margin-bottom:4px;text-transform:uppercase;letter-spacing:.5px}
 .stat-value{font-size:20px;font-weight:700}
 .info-box{background:var(--border-subtle);border-radius:8px;padding:12px;font-size:12px;color:var(--text-secondary);border-left:3px solid var(--accent);line-height:1.6}
-/* 用語ツールチップ（マウスオーバーで解説を表示） */
+/* 用語ツールチップ（マウスオーバーとフォーカスで解説を表示）。隠れている間は display:none で場所ごと
+   消す——visibility:hidden だと配置が残り、幅 375px のネットキャッシュのタブでページ幅を 478px に広げて
+   いた（#1132・/guide の .term と同じ #888 の型）。現れるときのフェードは @starting-style で保つ */
 .gloss{border-bottom:1px dotted var(--text-secondary);cursor:help;position:relative}
-.gloss::after{content:attr(data-tip);position:absolute;left:0;top:calc(100% + 7px);z-index:60;width:max-content;max-width:280px;white-space:normal;text-align:left;text-transform:none;letter-spacing:normal;background:var(--bg-sunken);color:var(--text-body);border:1px solid var(--border-muted);border-radius:7px;padding:9px 11px;font-size:11px;font-weight:400;line-height:1.6;box-shadow:0 10px 30px var(--shadow-color);opacity:0;visibility:hidden;transform:translateY(-4px);transition:opacity .13s ease,transform .13s ease;pointer-events:none}
-.gloss:hover::after,.gloss:focus::after{opacity:1;visibility:visible;transform:translateY(0)}
+.gloss::after{content:attr(data-tip);position:absolute;left:0;top:calc(100% + 7px);z-index:60;width:max-content;max-width:280px;white-space:normal;text-align:left;text-transform:none;letter-spacing:normal;background:var(--bg-sunken);color:var(--text-body);border:1px solid var(--border-muted);border-radius:7px;padding:9px 11px;font-size:11px;font-weight:400;line-height:1.6;box-shadow:0 10px 30px var(--shadow-color);opacity:0;display:none;transform:translateY(-4px);transition:opacity .13s ease,transform .13s ease;pointer-events:none}
+.gloss:hover::after,.gloss:focus::after{display:block;opacity:1;transform:translateY(0)}
+@starting-style{.gloss:hover::after,.gloss:focus::after{opacity:0;transform:translateY(-4px)}}
+@media (prefers-reduced-motion: reduce){.gloss::after{transition:none}}
 .btn:disabled{opacity:.4;cursor:not-allowed}
 .co-link{color:var(--accent-text);text-decoration:none}
 .co-link:hover{text-decoration:underline}
@@ -231,7 +234,7 @@ tr:hover td{background:var(--border-subtle)}
       <span class="gap-positive">正値（緑）</span>: 予測 &gt; 実際 → モデル上は割安の可能性
       &nbsp;|&nbsp;
       <span class="gap-negative">負値（赤）</span>: 予測 &lt; 実際 → モデル上は割高の可能性<br>
-      <strong style="color:var(--val-up)">期待総リターン</strong> = 乖離率 + 配当利回り&nbsp;<span style="color:var(--text-muted)">[%]</span>（「ソート順」で総リターン順に切替可）。<strong>implied PER</strong> = 予測株価 ÷ EPS。<br>
+      <strong style="color:var(--status-info-text)">期待総リターン</strong> = 乖離率 + 配当利回り&nbsp;<span style="color:var(--text-muted)">[%]</span>（「ソート順」で総リターン順に切替可）。<strong>implied PER</strong> = 予測株価 ÷ EPS。<br>
       <span style="color:var(--status-warn);font-size:11px">⚠ 期待乖離・収束スコア・期待総リターンはヒューリスティック／参考値です。統計的な予測確率ではなく、投資判断の参考にすぎません。</span>
     </div>
     <div id="params-form-gap"></div>
@@ -450,8 +453,8 @@ tr:hover td{background:var(--border-subtle)}
   <div class="card">
     <div class="section-title">ネットキャッシュ分析 — 清原達郎『わが投資術』<a class="co-link" href="/guide#net_cash_analysis" target="_blank" rel="noopener" style="float:right;font-size:12px;font-weight:400">❓ やさしい解説</a></div>
     <div class="info-box" style="margin-bottom:14px">
-      <strong style="color:var(--val-up)" class="gloss" tabindex="0" data-tip="すぐ換金できる資産から全負債を引いた、実質的な手元現金。流動資産＋投資有価証券×0.7−総負債で計算する清原達郎式の指標。">ネットキャッシュ</strong> = 流動資産 + 投資有価証券 × 0.7 − 総負債&nbsp;<span style="color:var(--text-muted)">[円]（清原式）</span><br>
-      <strong style="color:var(--val-up)" class="gloss" tabindex="0" data-tip="ネットキャッシュ÷時価総額。1.0で会社をまるごと買える現金を保有、0.5で時価総額の半分が現金。大きいほど割安。">ネットキャッシュ比率</strong> = ネットキャッシュ ÷ 時価総額&nbsp;<span style="color:var(--text-muted)">[無次元]</span><br>
+      <strong style="color:var(--status-info-text)" class="gloss" tabindex="0" data-tip="すぐ換金できる資産から全負債を引いた、実質的な手元現金。流動資産＋投資有価証券×0.7−総負債で計算する清原達郎式の指標。">ネットキャッシュ</strong> = 流動資産 + 投資有価証券 × 0.7 − 総負債&nbsp;<span style="color:var(--text-muted)">[円]（清原式）</span><br>
+      <strong style="color:var(--status-info-text)" class="gloss" tabindex="0" data-tip="ネットキャッシュ÷時価総額。1.0で会社をまるごと買える現金を保有、0.5で時価総額の半分が現金。大きいほど割安。">ネットキャッシュ比率</strong> = ネットキャッシュ ÷ 時価総額&nbsp;<span style="color:var(--text-muted)">[無次元]</span><br>
       <strong style="color:var(--status-info-text)" class="gloss" tabindex="0" data-tip="Net Current Asset Value＝純流動資産価値。流動資産−総負債。投資有価証券の0.7補正をしない、ベンジャミン・グレアム(1934)の古典的で保守的な割安指標。">NCAV</strong> = 流動資産 − 総負債&nbsp;<span style="color:var(--text-muted)">[円]（グレアム1934・より保守的）</span> &nbsp;/&nbsp; <strong style="color:var(--status-info-text)" class="gloss" tabindex="0" data-tip="NCAV÷時価総額。大きいほど割安で、1.5以上が『ネットネット』水準。">NCAV比率</strong> = NCAV ÷ 時価総額<br>
       <span style="color:var(--status-warn-text)">NC比率 ≥ 1.0</span>: 現金で買える&nbsp;|&nbsp;
       <span style="color:var(--val-up-text)">NC比率 ≥ 0.5</span>: 半額バーゲン&nbsp;|&nbsp;
