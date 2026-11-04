@@ -13,7 +13,7 @@
 | [MODELS.md](docs/MODELS.md) | 分析モデル解説＋モデル固有の制約 | 分析モデル変更時 |
 | [PLUGIN_REFERENCE.md](docs/PLUGIN_REFERENCE.md) | `plugins/` 各ファイルの実装リファレンス（内部契約・producer・heavy・実測値）。理論は MODELS.md が正本 | プラグイン実装を触るとき |
 | [SCRIPTS_REFERENCE.md](docs/SCRIPTS_REFERENCE.md) | `scripts/` と起動用 `*.ps1` の実装リファレンス（役割・守ること・実測値） | バッチ・スクリプトを触るとき |
-| [M1_MACRO_MODEL_GUIDE.md](docs/M1_MACRO_MODEL_GUIDE.md) | M-1（マクロ×リスク-リターン推奨）の初心者向け副読本。予備知識ゼロから設計思想を解説。正式版は MODELS.md §9 | M-1 の考え方を噛み砕いて把握したいとき |
+| [M-1](docs/M1_MACRO_MODEL_GUIDE.md)・[M-2](docs/M2_MACRO_GBDT_GUIDE.md)・[M-3](docs/M3_STATE_SPACE_GUIDE.md) の副読本 | M-1・M-2・M-3 の初心者向け副読本。予備知識ゼロから設計思想を解説。正式版は MODELS.md §9・§11・§12 | 各モデルの考え方を噛み砕いて把握したいとき |
 | [SKILLS_AND_AGENTS.md](docs/SKILLS_AND_AGENTS.md) | スキル／エージェントの索引マニュアル | スラッシュコマンドや調査エージェントを使うとき |
 | [FUTURE_TASKS.md](docs/FUTURE_TASKS.md) | **Issue 運用ガイド＋設計制約**（残タスクの正本は GitHub Issues。本書はタスク実体を持たない）。完了項目は `docs/archive/IMPROVEMENTS.md` へ集約 | リファクタ着手・改善項目の参照時 |
 | [adr/README.md](docs/adr/README.md)・[archive/](docs/archive/README.md) | 設計判断（ADR）の索引／完了済みの記録と過去のレビュー（現行参照に使わない） | 決定の経緯を知りたいとき |
@@ -147,7 +147,7 @@ Issue は `/next-issue` が優先度順に回す（人は計画承認と人の�
 - **どこに書くかの判定**: 「これを読まないと Claude は**別の行動をとるか**？」——とるなら CLAUDE.md（**行動を変える命令**だけ・1項目 120字目安）、とらないなら [ARCHITECTURE.md](docs/ARCHITECTURE.md)（仕組み・経緯・実測値）か [GOTCHAS.md](docs/GOTCHAS.md)（再現条件と回避手順）へ。**教訓は捨てず、命令形の1行だけ残して「なぜ」を移す**。CLAUDE.md は冒頭で宣言したとおり**索引＋必須ルール**に限る（#576）。
 - **ARCHITECTURE.md**: DBテーブル / 処理フロー / APIエンドポイント / 画面 / プラグインを追加・変更したら対応セクションを更新。
 - **MODELS.md** と `templates/models.html`: 分析モデル追加・変更時に更新。参考文献は原著論文の DOI / 公式 URL（Wikipedia不可）。**章と節の対応・`#mN` リンクの解決は CI が照合する**（`アンカー番号 = MODELS.md の章番号`・#712）が、**本文の主張が古いことは拾えない**ので、仕様を変えたら両方の本文を読み直すこと。**系列の本数・既定値をドキュメントへ書き写さず正本（コード）へのリンクに留める**（書き写すと黙って陳腐化する）。
-- **MODELS.md §9（M-1）の章立てを変えたら初心者向け副読本 `docs/M1_MACRO_MODEL_GUIDE.md` も見直す**（Issue #472）: 副読本は**設計思想・章立てのみ追随**し、マクロ系列の全リスト・既定値・実測値は正本へのリンクに留める（書き写すと黙って陳腐化する）。見直し後、副読本冒頭の `models-sync` マーカーを更新すること。`tests/test_docs_sync.py` が CI で照合し、**乖離は失敗として現れないので通知では拾えない**（ADR-0031 と同型）。
+- **MODELS.md §9・§11・§12（M-1・M-2・M-3）の章立てを変えたら初心者向け副読本 `docs/M{1,2,3}_*_GUIDE.md` も見直す**（Issue #472・#1129）: 副読本は**設計思想・章立てのみ追随**し、マクロ系列の全リスト・既定値・実測値は正本へのリンクに留める（書き写すと黙って陳腐化する）。見直し後、副読本冒頭の `models-sync` マーカーを更新すること。`tests/test_docs_sync.py` が CI で照合し、**乖離は失敗として現れないので通知では拾えない**（ADR-0031 と同型）。
 - **「増やしたら登録表へ1行足す」ルール（共通形）**: いずれも**忘れても失敗として現れない**ので、CI が実体と表を照合する。理由を書いた `exempt:` は可・空理由は不可。
 
   | 増やしたもの | 登録先 | 照合するテスト |

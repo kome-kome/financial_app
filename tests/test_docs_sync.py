@@ -3,14 +3,14 @@
 本ファイルは3つの照合を持つ。いずれも**乖離しても失敗が出ない**型の穴で、
 気づく手段が人間の定期点検（`/tidy`）しか無かったものを機械化している。
 
-1. `docs/MODELS.md` §9 ⇔ 副読本 `docs/M1_MACRO_MODEL_GUIDE.md` の章立て（#472・下記）
+1. `docs/MODELS.md` の章 ⇔ 初心者向け副読本の章立て（#472・#1129・下記の `GUIDES`）
 2. `docs/SKILLS_AND_AGENTS.md` ⇔ ディスク上のスキル／エージェント実体（#575・後半のクラス）
 3. `docs/MODELS.md` の章 ⇔ `templates/models.html` の節（#712・末尾のクラス）
 
-## 1. 副読本の章立て同期（#472）
+## 1. 副読本の章立て同期（#472・#1129）
 
-副読本 `docs/M1_MACRO_MODEL_GUIDE.md` は MODELS.md §9 を噛み砕いた読み物だが、
-更新頻度が正本と桁で違う（98 コミット vs 4 コミット・副読本は 2026-06-27 で停止）。
+副読本（M-1 は §9・M-2 は §11・M-3 は §12 を噛み砕いた読み物）は、
+更新頻度が正本と桁で違う（M-1 の副読本は 98 コミット vs 4 コミット・2026-06-27 で停止していた）。
 **乖離しても失敗が出ない**ため notify-failure でも `/tidy` のリンク検査でも拾えず、
 人間が気づくまで古い説明が残り続ける——ADR-0031 で `heavy` の自動実行登録を CI 必須に
 したのと同型の穴。
@@ -31,7 +31,26 @@ import pytest
 
 DOCS = Path(__file__).resolve().parents[1] / "docs"
 MODELS_MD = DOCS / "MODELS.md"
-GUIDE_MD = DOCS / "M1_MACRO_MODEL_GUIDE.md"
+
+
+class Guide:
+    """副読本 1 冊。`section` は追随する MODELS.md の章番号、`source_of_truth` は本文が
+    名前を挙げなければならない系列一覧の正本（書き写さずにリンクする宣言の照合用）。"""
+
+    def __init__(self, filename: str, section: str, source_of_truth: str):
+        self.path = DOCS / filename
+        self.section = section
+        self.source_of_truth = source_of_truth
+
+    def __repr__(self) -> str:      # pytest の ID に出る
+        return self.path.name
+
+
+GUIDES = (
+    Guide("M1_MACRO_MODEL_GUIDE.md", "9", "_MACRO_MAP"),       # #472
+    Guide("M2_MACRO_GBDT_GUIDE.md", "11", "_MACRO_MAP"),       # #1129
+    Guide("M3_STATE_SPACE_GUIDE.md", "12", "_DLM_MACRO_MAP"),  # #1129
+)
 
 MARKER_RE = re.compile(
     r"<!--\s*models-sync:\s*section=(?P<section>[0-9]+)\s+"
@@ -64,50 +83,65 @@ def headings_digest(headings: list[str]) -> str:
     return hashlib.sha256(joined.encode("utf-8")).hexdigest()[:DIGEST_LEN]
 
 
-def read_marker() -> re.Match:
-    text = GUIDE_MD.read_text(encoding="utf-8")
+def read_marker(guide: Guide) -> re.Match:
+    text = guide.path.read_text(encoding="utf-8")
     m = MARKER_RE.search(text)
     assert m, (
-        f"{GUIDE_MD.name} に models-sync マーカーが無い。冒頭へ "
-        "`<!-- models-sync: section=9 headings=<12桁> -->` を置くこと"
+        f"{guide.path.name} に models-sync マーカーが無い。冒頭へ "
+        f"`<!-- models-sync: section={guide.section} headings=<12桁> -->` を置くこと"
         "（値は本テストの失敗メッセージが教える）"
     )
     return m
 
 
-class TestM1GuideTracksModels:
-    """M-1 副読本が MODELS.md §9 の章立てに追随しているか。"""
+def test_every_guide_exists():
+    """副読本の表（`GUIDES`）が空振りしていないこと（ファイル名の打ち間違いで照合が消えない）。"""
+    missing = [g.path.name for g in GUIDES if not g.path.is_file()]
+    assert not missing, f"GUIDES にあるのに docs/ に無い副読本: {missing}"
 
-    def test_marker_points_at_an_existing_section(self):
-        section = read_marker().group("section")
+
+@pytest.mark.parametrize("guide", GUIDES, ids=repr)
+class TestGuideTracksModels:
+    """副読本が MODELS.md の対応する章の章立てに追随しているか。"""
+
+    def test_marker_points_at_its_own_section(self, guide):
+        """マーカーの章番号が表の章番号と一致すること（M-2 の副読本が §9 を指していても気づける）。"""
+        assert read_marker(guide).group("section") == guide.section, (
+            f"{guide.path.name} のマーカーが §{read_marker(guide).group('section')} を指している"
+            f"（追随するのは §{guide.section}）"
+        )
+
+    def test_marker_points_at_an_existing_section(self, guide):
+        section = read_marker(guide).group("section")
         headings = section_headings(MODELS_MD.read_text(encoding="utf-8"), section)
         assert headings, (
             f"models-sync マーカーが指す MODELS.md §{section} が見つからない。"
             "章番号を振り直したならマーカー側も直すこと"
         )
 
-    def test_section_has_subheadings(self):
-        """`### 9.x` を1つも拾えないなら抽出ロジックが壊れている（検査が空回りする）。"""
-        section = read_marker().group("section")
+    def test_section_has_subheadings(self, guide):
+        """`### N.x` を1つも拾えないなら抽出ロジックが壊れている（検査が空回りする）。"""
+        section = read_marker(guide).group("section")
         headings = section_headings(MODELS_MD.read_text(encoding="utf-8"), section)
         assert len(headings) >= 2, (
             f"§{section} の小見出しを抽出できていない: {headings}"
         )
 
-    def test_guide_digest_matches_models_headings(self):
-        marker = read_marker()
+    def test_guide_digest_matches_models_headings(self, guide):
+        marker = read_marker(guide)
         section = marker.group("section")
         headings = section_headings(MODELS_MD.read_text(encoding="utf-8"), section)
         expected = headings_digest(headings)
         assert marker.group("digest") == expected, (
             f"MODELS.md §{section} の章立てが変わっている（副読本は追随していない）。\n"
             f"  現在の章立て: {headings}\n"
-            f"  {GUIDE_MD.name} を読み直して噛み砕きの過不足を直したうえで、"
+            f"  {guide.path.name} を読み直して噛み砕きの過不足を直したうえで、"
             f"冒頭マーカーを headings={expected} へ更新すること。\n"
             "  （系列の増減・既定値・実測値は副読本の追随対象外＝正本へのリンクに留める）"
         )
 
 
+@pytest.mark.parametrize("guide", GUIDES, ids=repr)
 class TestGuideDeclaresItsScope:
     """副読本が「何を追随し、何を正本へ委ねるか」を本文で宣言しているか。
 
@@ -115,13 +149,13 @@ class TestGuideDeclaresItsScope:
     同じ乖離が再生産される（Issue #472 で実際に起きたのがマクロ系列表）。
     """
 
-    def test_guide_links_to_the_source_of_truth(self):
-        text = GUIDE_MD.read_text(encoding="utf-8")
-        assert "_MACRO_MAP" in text, (
-            "副読本にマクロ系列の正本（plugins/macro_snapshots.py の _MACRO_MAP）への"
-            "言及が無い。系列一覧を本書へ書き写すと必ず陳腐化する"
+    def test_guide_links_to_the_source_of_truth(self, guide):
+        text = guide.path.read_text(encoding="utf-8")
+        assert guide.source_of_truth in text, (
+            f"{guide.path.name} にマクロ系列の正本（{guide.source_of_truth}）への言及が無い。"
+            "系列一覧を本書へ書き写すと必ず陳腐化する"
         )
-        assert "MODELS.md" in text, "副読本から正本 MODELS.md への参照が消えている"
+        assert "MODELS.md" in text, f"{guide.path.name} から正本 MODELS.md への参照が消えている"
 
 
 # ---------------------------------------------------------------------------

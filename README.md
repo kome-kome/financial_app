@@ -85,7 +85,7 @@ uvicorn api:app --reload
 |---|---|
 | アプリの使い方・画面の読み方・分析手法のあらまし | アプリ内の「やさしい解説」（`/guide`。ローカルなら http://localhost:8000/guide ）。数式を使わずに説明している |
 | 分析モデルの数式・前提・参考文献 | アプリ内の「モデル解説」（`/models`）と [`docs/MODELS.md`](docs/MODELS.md)（正本） |
-| M-1（マクロ×リスク-リターン推奨）の考え方を予備知識なしで | [`docs/M1_MACRO_MODEL_GUIDE.md`](docs/M1_MACRO_MODEL_GUIDE.md) |
+| M-1（マクロ×リスク-リターン推奨）・M-2（勾配ブースティング）・M-3（状態空間）の考え方を予備知識なしで | [`docs/M1_MACRO_MODEL_GUIDE.md`](docs/M1_MACRO_MODEL_GUIDE.md)・[`docs/M2_MACRO_GBDT_GUIDE.md`](docs/M2_MACRO_GBDT_GUIDE.md)・[`docs/M3_STATE_SPACE_GUIDE.md`](docs/M3_STATE_SPACE_GUIDE.md) |
 | 言葉の定義 | [`CONTEXT.md`](CONTEXT.md)（用語集） |
 | コードの構成・データの流れ | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) |
 | バッチがいつ何を回すか・外部サービスの制約 | [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) |
@@ -103,6 +103,8 @@ uvicorn api:app --reload
 | [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) | バッチの暦・ローカルと Render の役割分担・外部サービスの制約 |
 | [`docs/MODELS.md`](docs/MODELS.md) | 分析モデルの数式・パラメータ・参考文献（DOI 付き） |
 | [`docs/M1_MACRO_MODEL_GUIDE.md`](docs/M1_MACRO_MODEL_GUIDE.md) | M-1 の初心者向け副読本（MODELS.md §9 の設計思想と章立てに追随） |
+| [`docs/M2_MACRO_GBDT_GUIDE.md`](docs/M2_MACRO_GBDT_GUIDE.md) | M-2 の初心者向け副読本（MODELS.md §11 の設計思想と章立てに追随） |
+| [`docs/M3_STATE_SPACE_GUIDE.md`](docs/M3_STATE_SPACE_GUIDE.md) | M-3 の初心者向け副読本（MODELS.md §12 の設計思想と章立てに追随） |
 | [`docs/PLUGIN_REFERENCE.md`](docs/PLUGIN_REFERENCE.md) | `plugins/` 各ファイルの実装リファレンス（理論は MODELS.md） |
 | [`docs/SCRIPTS_REFERENCE.md`](docs/SCRIPTS_REFERENCE.md) | `scripts/` と起動用 `*.ps1` の実装リファレンス |
 | [`docs/GOTCHAS.md`](docs/GOTCHAS.md) | 既知のハマりどころ（再現条件と回避手順） |
