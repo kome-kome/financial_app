@@ -293,8 +293,73 @@ class TestTheNotificationPathIsCheckedWhileHealthy:
             assert kwargs.get("timeout") == cbf.GH_TIMEOUT_SEC
             raise subprocess.TimeoutExpired(argv, cbf.GH_TIMEOUT_SEC)
 
-        assert "返らない" in cbf.check_gh(run=hang, which=lambda _n: "C:/gh.exe")
-        assert cbf.GH_TIMEOUT_SEC * 2 < cbf.SELF_WINDOW_MIN * 60
+        assert "返らない" in cbf.check_gh(run=hang, which=lambda _n: "C:/gh.exe",
+                                          sleep=lambda _s: None)
+        # 再試行込みの最悪（2回の打ち切り＋間）でも窓の半分に届かない。
+        worst = cbf.GH_TIMEOUT_SEC * 2 + cbf.GH_RETRY_PAUSE_SEC
+        assert worst * 2 < cbf.SELF_WINDOW_MIN * 60
+
+    def test_one_timeout_is_retried_and_reported(self):
+        """打ち切りは1回だけ打ち直す。通ったら None を返し、再試行で通ったことを知らせる（#1136）。"""
+        calls, pauses, retried = [], [], []
+
+        def flaky(argv, **_k):
+            calls.append(argv)
+            if len(calls) == 1:
+                raise subprocess.TimeoutExpired(argv, cbf.GH_TIMEOUT_SEC)
+            return subprocess.CompletedProcess(argv, 0, stdout="Logged in", stderr="")
+
+        assert cbf.check_gh(run=flaky, which=lambda _n: "C:/gh.exe",
+                            sleep=pauses.append, on_retry=lambda: retried.append(1)) is None
+        assert len(calls) == 2
+        assert pauses == [cbf.GH_RETRY_PAUSE_SEC]
+        assert retried == [1]
+
+    def test_two_timeouts_give_up_after_one_retry(self):
+        calls = []
+
+        def hang(argv, **_k):
+            calls.append(argv)
+            raise subprocess.TimeoutExpired(argv, cbf.GH_TIMEOUT_SEC)
+
+        msg = cbf.check_gh(run=hang, which=lambda _n: "C:/gh.exe", sleep=lambda _s: None,
+                           on_retry=lambda: pytest.fail("通っていないのに再試行の成功を知らせた"))
+        assert len(calls) == 2
+        assert "返らない" in msg and "再試行" in msg
+
+    def test_failed_auth_is_not_retried(self):
+        """認証失敗は待っても直らないので打ち直さない。"""
+        calls = []
+
+        def unauth(argv, **_k):
+            calls.append(argv)
+            return subprocess.CompletedProcess(argv, 1, stdout="", stderr="not logged in")
+
+        cbf.check_gh(run=unauth, which=lambda _n: "C:/gh.exe",
+                     sleep=lambda _s: pytest.fail("認証失敗で待ってはいけない"))
+        assert len(calls) == 1
+
+    def test_first_try_success_reports_no_retry(self):
+        def ok(argv, **_k):
+            return subprocess.CompletedProcess(argv, 0, stdout="Logged in", stderr="")
+
+        assert cbf.check_gh(run=ok, which=lambda _n: "C:/gh.exe",
+                            on_retry=lambda: pytest.fail("1回目で通った")) is None
+
+    def test_report_marks_a_night_that_needed_the_retry(self):
+        snap = _snap({})
+        snap["gh_note"] = cbf.GH_RETRY_NOTE
+        report = "\n".join(cbf.format_report(snap))
+        assert f"通知経路: gh 到達可（{cbf.GH_RETRY_NOTE}）" in report
+
+    def test_main_passes_the_retry_note_to_the_report(self, settings, monkeypatch, capsys):
+        def fake_check_gh(on_retry=None, **_k):
+            on_retry()
+            return None
+
+        monkeypatch.setattr(cbf, "check_gh", fake_check_gh)
+        cbf.main(["--now", NOW.isoformat(), "--no-footprint"])
+        assert cbf.GH_RETRY_NOTE in capsys.readouterr().out
 
     def test_the_gh_problem_cannot_be_filed_but_still_exits_nonzero(self, settings, monkeypatch):
         """起票の手段が死んでいるので Issue は立たない。痕跡は exit code とログだけ。"""
