@@ -18,6 +18,7 @@
 | [FUTURE_TASKS.md](docs/FUTURE_TASKS.md) | **Issue 運用ガイド＋設計制約**（残タスクの正本は GitHub Issues。本書はタスク実体を持たない）。完了項目は `docs/archive/IMPROVEMENTS.md` へ集約 | リファクタ着手・改善項目の参照時 |
 | [adr/README.md](docs/adr/README.md)・[archive/](docs/archive/README.md) | 設計判断（ADR）の索引／完了済みの記録と過去のレビュー（現行参照に使わない） | 決定の経緯を知りたいとき |
 | [CONTEXT.md](CONTEXT.md) | ドメイン用語集（再分類項目・分析特徴量・表示項目・パラメータ契約・分析の階層等の用語定義） | 用語の定義・整合性を確認したいとき |
+| [DESIGN.md](DESIGN.md) | 画面の見た目の約束（色トークンの役割・書体・共通部品・禁止事項）と変更時に合わせるテスト | 画面・テンプレートを触るとき |
 | [batch-ops](.claude/skills/batch-ops/SKILL.md) | 起動・収集・各バッチ・株価修復の全コマンド | バッチ／収集／修復を実行するとき |
 
 > **設計の前に [DEPLOYMENT.md](docs/DEPLOYMENT.md) の「外部サービス制約」節を必ず参照**：無料プラン制約（stooq ブロック・Supabase 500MB・J-Quants レート制限等）に違反しない方式を選ぶこと。
