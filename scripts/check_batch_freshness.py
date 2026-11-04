@@ -115,6 +115,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, Sequence
@@ -160,6 +161,12 @@ EXIT_NOTIFY_FAILED = 3
 
 # `gh auth status` の待ち時間。ネットワークが詰まっても watchdog の窓（15分）を食わない値。
 GH_TIMEOUT_SEC = 20.0
+# 打ち切りに当たったときだけ、この間を置いて1回だけ打ち直す（#1136）。打ち切った3晩は
+# いずれも python の起動自体が 29秒〜5分遅れていた＝PC 全体が一時的に重かった。
+# 固まった1回目に付き合って打ち切りを延ばすより、新しい gh を起動し直す方が詰まりに強い。
+# 最悪でも 20+10+20=50秒で、窓（15分）を食わない。
+GH_RETRY_PAUSE_SEC = 10.0
+GH_RETRY_NOTE = f"1回目は{GH_TIMEOUT_SEC:.0f}秒で返らず、再試行で通った"
 
 
 DB_ERROR_TITLE = "[ops] watchdog がローカル DB を読めない"
@@ -201,7 +208,8 @@ class _Echo:
             pass
 
 
-def check_gh(run=subprocess.run, which=None) -> Optional[str]:
+def check_gh(run=subprocess.run, which=None, sleep=time.sleep,
+             on_retry=None) -> Optional[str]:
     """通知経路の到達性。使えるなら None、駄目なら理由を返す。
 
     **健全なときこそ確かめる必要がある。** 異常を検出したときにしか `gh` を呼ばない設計だと、
@@ -212,17 +220,29 @@ def check_gh(run=subprocess.run, which=None) -> Optional[str]:
     S4U はセッション0で走るので PATH も `hosts.yml` の解決も対話セッションと変わりうる。
     実際、2026-08-26 の初回疎通では健全だったために `gh` が1度も起動されず、
     通知経路は未検証のまま残った。
+
+    **打ち切りのときだけ1回再試行する**（#1136）。認証が通らない・PATH に無い、は待っても
+    直らないので打ち直さない。再試行で通ったら `on_retry()` を呼ぶ——その晩を数えられるように
+    レポートへ残すため（戻り値の形は変えない＝None が「使える」のまま）。
     """
     which = which or shutil.which
     if which("gh") is None:
         return "PATH から gh が見つからない（S4U はセッション0で走るので環境が対話時と違う）"
-    try:
-        proc = run(["gh", "auth", "status"], capture_output=True, text=True,
-                   encoding="utf-8", errors="replace", timeout=GH_TIMEOUT_SEC)
-    except OSError as e:
-        return f"gh を起動できない: {e}"
-    except subprocess.TimeoutExpired:
-        return f"gh auth status が {GH_TIMEOUT_SEC:.0f}秒で返らない"
+    for attempt in (1, 2):
+        try:
+            proc = run(["gh", "auth", "status"], capture_output=True, text=True,
+                       encoding="utf-8", errors="replace", timeout=GH_TIMEOUT_SEC)
+        except OSError as e:
+            return f"gh を起動できない: {e}"
+        except subprocess.TimeoutExpired:
+            if attempt == 1:
+                sleep(GH_RETRY_PAUSE_SEC)
+                continue
+            return (f"gh auth status が {GH_TIMEOUT_SEC:.0f}秒で返らない"
+                    f"（{GH_RETRY_PAUSE_SEC:.0f}秒おいた再試行でも同じ）")
+        break
+    if attempt == 2 and proc.returncode == 0 and on_retry is not None:
+        on_retry()
     if proc.returncode != 0:
         return f"gh の認証が通っていない: {((proc.stderr or '') + (proc.stdout or ''))[:200]}"
     return None
@@ -391,7 +411,9 @@ def format_report(snap: dict) -> list[str]:
         f"== バッチ鮮度（判定時刻 {snap['now'].isoformat(timespec='seconds')}） ==",
         f"接続先: {snap['db_label']}",
         # **健全な回にも必ず出す。** 通知経路の生死は、異常が起きた日に初めて分かるのでは遅い。
-        "通知経路: " + ("gh 到達可" if not snap.get("gh_error") else f"使えない（{snap['gh_error']}）"),
+        # 再試行で通った晩は注記を付ける（#1136・1か月ためて数える）。
+        "通知経路: " + (("gh 到達可" + (f"（{snap['gh_note']}）" if snap.get("gh_note") else ""))
+                       if not snap.get("gh_error") else f"使えない（{snap['gh_error']}）"),
     ]
     if snap["db_error"]:
         lines.append(f"DB を読めない: {snap['db_error']}")
@@ -889,7 +911,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
         # 通知経路は**健全な回にも**確かめる（--dry-run は gh を叩かないので見送る）。
         # ここを異常検出時だけにすると、通知が死んでいることは一番届いてほしい回に判明する。
-        snap["gh_error"] = None if args.dry_run else check_gh()
+        snap["gh_error"] = None if args.dry_run else check_gh(
+            on_retry=lambda: snap.__setitem__("gh_note", GH_RETRY_NOTE))
 
         if args.now:
             say(f"[鮮度] --now で判定時刻を差し替えている: {args.now}")
