@@ -37,7 +37,7 @@ description: 暗色基調の業務画面に、操作と技術版は紫・入門�
 
 灰青の暗色の地に、紫1色の操作色と、意味ごとに固定した状態色を載せる。
 
-値は各テンプレートの `:root`（ダーク）と `:root[data-theme="light"]`（ライト）の2ブロックにあり、**9枚とも同一のコピー**になっている。トークンは `X`（線・点・塗りボタンの色）／`X-bg`（淡い面）／`X-text`（その面の上や地の上で読ませる文字）の3つ組が基本形。
+値は各テンプレートの `:root`（ダーク）と `:root[data-theme="light"]`（ライト）の2ブロックにあり、**9枚とも同一のコピー**になっている（1枚だけ変えると `tests/test_templates_a11y.py` が落ちる・#1132）。トークンは `X`（線・点・塗りボタンの色）／`X-bg`（淡い面）／`X-text`（その面の上や地の上で読ませる文字）の3つ組が基本形。
 
 | 系統 | トークン | 役割 |
 |---|---|---|
@@ -206,9 +206,9 @@ description: 暗色基調の業務画面に、操作と技術版は紫・入門�
 
 | テスト | 照合すること |
 |---|---|
-| [tests/test_templates_a11y.py](tests/test_templates_a11y.py) | 全画面が両テーマのトークンを持つ／`--text-muted` の対比が4つの面で AA 以上／`outline` を消さない／`:focus-visible` の紫の枠がある／11px の床／`.term`・`.gloss` がキーボードで開く／`showNotif` を呼ぶ画面にトーストの CSS がある |
+| [tests/test_templates_a11y.py](tests/test_templates_a11y.py) | 全画面が両テーマのトークンを持つ／`--text-muted` の対比が4つの面で AA 以上／`outline` を消さない／`:focus-visible` の紫の枠がある／11px の床／`.term`・`.gloss` がキーボードで開く／`showNotif` を呼ぶ画面にトーストの CSS がある／9枚のトークン2ブロックが同一（#1132） |
 | [tests/test_templates_nav.py](tests/test_templates_nav.py) | 全テンプレートがナビ有り・無しに分類済み／ナビのマークアップが `.active` 以外同一／`.active` は自分だけ／`.gnav*` の CSS がある／リンク先が実在する |
 | [tests/test_guide_links.py](tests/test_guide_links.py) | `/guide#…` のリンクが全部実在する／全プラグインに /guide の節がある／各画面の「この画面の見方」が自分の節を指し、`.help-link` の CSS がある |
 | [tests/test_security_headers.py](tests/test_security_headers.py) | テンプレートと JS が組み立てる HTML にインラインのスクリプト・イベントハンドラが無い／外部の `<script src>` が無い（CSP は `script-src 'self'`、`<style>` のために `style-src` だけ `'unsafe-inline'` を残す） |
 
-**照合されていないこと**: 9枚のトークンの値が同一であること、部品の CSS が画面間で同じであることは、どのテストも見ていない。トークンを変えるときは全ファイルを並べて差分が無いことを自分で確かめる。
+**照合されていないこと**: 部品の CSS が画面間で同じであることは、どのテストも見ていない。トークンを変えるときは9枚すべてを同じように直す（同一性はテストが照合する）。

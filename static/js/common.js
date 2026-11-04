@@ -31,8 +31,9 @@ function toOku(v){ return (v==null || isNaN(v)) ? null : v/OKU; }       // 円 �
 function mnToOku(v){ return (v==null || isNaN(v)) ? null : v/100; }     // 百万円 → 億円（market_cap 系）
 
 // ── テーマ（ライト/ダーク） ──────────────────────────────────────────
-// data-theme 属性の初期値は各テンプレート <head> 先頭のインラインスクリプトが
-// ペイント前に同期設定する（FOUC防止のため common.js より前に確定させる必要がある）。
+// data-theme 属性の初期値は各テンプレートの <head> が先に読む static/js/theme-init.js が
+// ペイント前に同期設定する（FOUC防止のため common.js より前に確定させる必要がある。
+// CSP でインラインスクリプトを禁じているので外部ファイルにしてある）。
 
 function currentTheme() {
   return document.documentElement.dataset.theme === 'light' ? 'light' : 'dark';

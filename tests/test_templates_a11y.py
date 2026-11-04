@@ -75,6 +75,37 @@ def test_every_template_defines_both_themes():
         assert set(blocks) == {":root", ':root[data-theme="light"]'}, _name(path)
 
 
+# 2026-11 時点のテンプレートの枚数。**これより少なく拾えたら空振り**（glob やパターンが外れても、
+# 比べる相手が 1 枚だけなら同一性の照合は必ず通る）。増えるのは構わない。
+MIN_TEMPLATES_WITH_TOKENS = 9
+
+
+def _raw_root_blocks(text):
+    """`:root` と `:root[data-theme="light"]` の本文を、空白を除いた生の文字列で返す。
+
+    `_root_blocks` は `#rrggbb` の値しか拾わないので、rgba や var() のトークンの食い違いを見落とす。
+    """
+    return {sel: re.sub(r"\s+", "", body) for sel, body in _ROOT_RE.findall(text)}
+
+
+def test_token_blocks_are_identical_in_every_template():
+    """#1132: 9 枚のトークン 2 ブロックは同一のコピー（DESIGN.md「トークン」）。1 枚だけ値を変えても
+    画面は壊れず、テーマを切り替えた先でだけ色がずれる。"""
+    blocks = {_name(p): _raw_root_blocks(_read(p)) for p in TEMPLATES}
+    blocks = {name: b for name, b in blocks.items() if len(b) == 2}
+    assert len(blocks) >= MIN_TEMPLATES_WITH_TOKENS, sorted(blocks)
+    (ref_name, ref), *rest = sorted(blocks.items())
+    failures = []
+    for name, b in rest:
+        for sel in ref:
+            if b.get(sel) != ref[sel]:
+                theirs = dict(_TOKEN_RE.findall(b.get(sel, "")))
+                mine = dict(_TOKEN_RE.findall(ref[sel]))
+                diff = sorted(k for k in set(mine) | set(theirs) if mine.get(k) != theirs.get(k))
+                failures.append(f"{name} {sel} が {ref_name} と違う（#rrggbb の差: {diff or 'それ以外の値'}）")
+    assert not failures, "\n".join(failures)
+
+
 def test_muted_text_meets_aa_on_every_background():
     failures = []
     for path in TEMPLATES:
