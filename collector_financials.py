@@ -394,7 +394,9 @@ def _context_priority(ctx: str) -> int:
 # 同じ文脈で数値を付ける。BS の「受取手形及び売掛金」「受取手形、売掛金及び契約資産」と注記の
 # 「売掛金」が並び、CSV の並び順で値が決まっていた（標本 200件中 58件・実測 S100W4DK / S100W5BJ）。
 # BS に「売掛金」だけを載せる会社（受取手形・契約資産と別建て）は他のタグが無いので従来どおり採る。
-_TAGS_LOSING_TIES = frozenset({"AccountsReceivableTrade"})
+# `DepreciationExpenseOpeCFIFRS`（減価償却費だけ）は、無形資産の償却を別の行に分ける会社がある（日立建機
+# S100YIBR: 682億＋償却 96億）。償却を含む合計のタグが同じ書類にあればそちらを採る（#1145）。
+_TAGS_LOSING_TIES = frozenset({"AccountsReceivableTrade", "DepreciationExpenseOpeCFIFRS"})
 
 
 def _tag_rank(elem: str) -> int:
