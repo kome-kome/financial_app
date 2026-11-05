@@ -351,78 +351,39 @@ tr:hover td{background:var(--border-subtle)}
 
 </div>
 
-<!-- 売り候補ランキング（保有銘柄の売り時） -->
+<!-- 売り候補ランキング（保有銘柄の中から売る銘柄を選ぶ・手法は 1 つだけ＝ADR-0071） -->
 <div id="tab-sell_ranking" class="hidden">
 
   <div class="card">
-    <div class="section-title">保有銘柄を入力<a class="co-link" href="/guide#sell_ranking" target="_blank" rel="noopener" style="float:right;font-size:12px;font-weight:400">❓ やさしい解説</a></div>
-    <div class="info-box" style="margin-bottom:14px">
-      すでに保有している銘柄を 1 行ずつ入力してください（証券コードのみでも可）。<br>
-      書式: <code>証券コード[, @取得単価][, 購入日]</code>　例: <code>7203, @1500, 2024-03-10</code> / <code>6758 @12000</code> / <code>9984</code><br>
-      取得単価を入れると損益（PnL）も表示します。入力内容はこのブラウザに自動保存されます。<br>
-      ★ 業種別OLS分析を先に実行すると「割高度」が売り判定に使われます。
+    <div class="section-title">使い方<a class="co-link" href="/guide#sell_ranking" target="_blank" rel="noopener" style="float:right;font-size:12px;font-weight:400">❓ やさしい解説</a></div>
+    <div class="info-box" style="margin-bottom:12px">
+      <strong>何をするか:</strong> 持っている銘柄を、<strong>M-6 の期待リターン（μ̂＝今後 52 週で見込まれるリターン）の低い順</strong>に並べ、
+      <strong>下から 1/5 に「売却」</strong>、残りに「保有継続」を付けます。設定はありません。
     </div>
-    <textarea id="param-sell_ranking-holdings" rows="6" placeholder="7203, @1500, 2024-03-10&#10;6758 @12000&#10;9984"
-      style="width:100%;font-family:monospace;font-size:13px;resize:vertical;background:var(--bg-sunken);color:var(--text);border:1px solid var(--border-subtle);border-radius:6px;padding:8px"></textarea>
+    <ol style="margin:0 0 12px 18px;padding:0;font-size:12px;color:var(--text-secondary);line-height:1.8">
+      <li>下の欄に持っている銘柄を 1 行ずつ入れて「売り候補を判定」を押します。</li>
+      <li>「売却」が付いた銘柄を売ります。10 銘柄なら 2 銘柄、15 銘柄なら 3 銘柄です（端数は切り捨て）。</li>
+      <li>売った分は、M-6 の画面の上位から買い直します。過去の検証は「上位から買い、保有の下位を入れ替える」この組み合わせで測っています。</li>
+      <li>次に見直すのは μ̂ が更新されてからです（毎晩の夜間バッチで更新・判定結果の上に日付が出ます）。</li>
+    </ol>
+    <div class="text-sm" style="line-height:1.7">
+      ※ <strong>5 銘柄未満だと「売却」は付きません</strong>（下位 1/5 が 1 銘柄に満たないため）。並び順だけを参考にしてください。<br>
+      ※ μ̂ が無い銘柄（M-6 の計算対象に入っていない銘柄。上場して間もない銘柄のほか、一部の大企業も含みます）は「データ不足」として末尾に並び、売却の数にも数えません。<br>
+      ※ トレンド・損益の列は参考表示です。判定には使いません。<br>
+      ※ <strong>手法を 1 つにしている理由:</strong> 「売った銘柄がその後、市場平均をどれだけ下回ったか」で比べると、M-6 の μ̂ だけで並べる方法が最も良く、
+      財務指標の組み合わせ（割高度・ROE など）や別モデルの μ̂、マクロリスクを足す方法は劣るか、売りとして測られていませんでした。そのため選択肢から外しています。
+      投資助言ではなく、保有を見直すための材料です。
+    </div>
   </div>
 
   <div class="card">
-    <div class="section-title">売り判定のウェイト</div>
+    <div class="section-title">保有銘柄を入力</div>
     <div class="info-box" style="margin-bottom:14px">
-      プリセットを選ぶか、各観点を「売り判断でどれだけ重視するか（0〜3）」をスライダーで調整します。
+      書式: <code>証券コード[, @取得単価][, 購入日]</code>（証券コードだけでも可）　例: <code>7203, @1500, 2024-03-10</code> / <code>6758 @12000</code> / <code>9984</code><br>
+      取得単価を入れると損益も表示します。入力内容はこのブラウザに自動保存されます。
     </div>
-    <div class="flex" style="margin-bottom:16px">
-      <button class="btn btn-secondary" data-click="applySellPreset" data-arg="マクロ予測型">📈 マクロ予測型</button>
-      <button class="btn btn-secondary" data-click="applySellPreset" data-arg="バランス型">⚖ バランス型</button>
-      <button class="btn btn-secondary" data-click="applySellPreset" data-arg="割高警戒型">◆ 割高警戒型</button>
-      <button class="btn btn-secondary" data-click="applySellPreset" data-arg="業績悪化重視">▼ 業績悪化重視</button>
-    </div>
-    <details style="margin-top:4px">
-      <summary style="cursor:pointer;font-size:12px;color:var(--text-secondary);user-select:none">▸ 詳細：観点ウェイトを手動調整</summary>
-      <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:8px;margin-top:10px" id="sell-weight-grid"></div>
-    </details>
-
-    <div class="section-title" style="font-size:12px;margin:16px 0 10px">アクション閾値・タイミング</div>
-    <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:12px">
-      <div>
-        <label style="font-size:11px;color:var(--text-muted)">SELL 閾値（売りスコア）</label>
-        <div style="display:flex;align-items:center;gap:8px">
-          <input type="range" id="sell-th" min="0" max="2" step="0.1" value="0.8"
-            data-input="syncVal" data-target="sell-th-val" style="flex:1;accent-color:var(--val-down)">
-          <span id="sell-th-val" style="color:var(--val-down-text);font-weight:600;min-width:30px">0.8</span>
-        </div>
-      </div>
-      <div>
-        <label style="font-size:11px;color:var(--text-muted)">REDUCE 閾値（売りスコア）</label>
-        <div style="display:flex;align-items:center;gap:8px">
-          <input type="range" id="reduce-th" min="0" max="2" step="0.1" value="0.3"
-            data-input="syncVal" data-target="reduce-th-val" style="flex:1;accent-color:var(--status-warn)">
-          <span id="reduce-th-val" style="color:var(--status-warn-text);font-weight:600;min-width:30px">0.3</span>
-        </div>
-      </div>
-    </div>
-    <label style="display:flex;align-items:center;gap:8px;margin-top:12px;font-size:12px;color:var(--text-secondary)">
-      <input type="checkbox" id="sell-timing-adjust" checked style="width:auto;accent-color:var(--accent)">
-      価格トレンドでラベル補正（下落＝売り圧力↑ / 上昇＝即売り回避）
-    </label>
-
-    <div style="margin-top:14px">
-      <label style="font-size:11px;color:var(--text-muted);display:block;margin-bottom:4px">期待リターン μ の出所（推奨モデル）</label>
-      <select id="sell-mu-source" style="width:100%;background:var(--bg-sunken);color:var(--text);border:1px solid var(--border-subtle);border-radius:6px;padding:6px 8px;font-size:12px">
-        <option value="macro_risk_return">M-1: マクロ×リスク-リターン（OLS）</option>
-        <option value="macro_dlm">M-3: ベイズ状態空間（時変マクロβ DLM）</option>
-        <!-- M-4（macro_ensemble）は退役につき除去（ADR-0044）。M-2（macro_gbdt）は退役では
-             ないが供給者から降ろしたので除去（ADR-0052）＝分析タブと SHAP はそのまま残る。
-             この select は params_schema から動的注入されず sell_ranking.py と二重管理なので、
-             増減は必ず両方を直す（tests/test_analysis_meta.py::TestHiddenPlugins
-             ::test_static_select_matches_sell_ranking_options が CI で照合する）。 -->
-        <option value="macro_enet" selected>M-6: マクロ×財務 正則化線形（ElasticNet）</option>
-      </select>
-      <div style="font-size:11px;color:var(--text-muted);margin-top:4px">
-        μ 観点に使う推奨モデル。既定は <strong>M-6</strong>（売り側 OOF 指標で M-2 を有意に上回るため・Issue #402）。選択モデルが未実行ならその成分を自動除外します（M-3・M-6 は分析タブで要ローカル実行）。−Rᴹ は共有マクロβ由来でモデル非依存。
-      </div>
-    </div>
-
+    <textarea id="param-sell_ranking-holdings" rows="6" placeholder="7203, @1500, 2024-03-10&#10;6758 @12000&#10;9984"
+      style="width:100%;font-family:monospace;font-size:13px;resize:vertical;background:var(--bg-sunken);color:var(--text);border:1px solid var(--border-subtle);border-radius:6px;padding:8px"></textarea>
     <button class="btn btn-primary" id="btn-sell-ranking" data-click="runSellRanking" style="margin-top:16px">
       <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="2 12 6 12 9 3 15 21 18 12 22 12"/></svg>
       売り候補を判定
@@ -440,8 +401,7 @@ tr:hover td{background:var(--border-subtle)}
         <thead>
           <tr>
             <th>順位</th><th>判定</th><th>証券コード</th><th>企業名</th><th>業種</th>
-            <th>売りスコア</th><th>トレンド</th><th>13週<br>リターン</th><th>52週高値<br>からの下落</th>
-            <th>割高度%</th><th>ROE%</th><th>売上成長%</th><th>損益</th>
+            <th>期待リターン<br>μ̂（52週）</th><th>トレンド<br>（参考）</th><th>13週<br>リターン</th><th>52週高値<br>からの下落</th><th>損益</th>
           </tr>
         </thead>
         <tbody id="sell-tbody"></tbody>
@@ -449,7 +409,7 @@ tr:hover td{background:var(--border-subtle)}
     </div>
   </div>
 
-</div>
+</div><!-- /tab-sell_ranking -->
 
 <!-- ネットキャッシュ分析（清原達郎『わが投資術』） -->
 <div id="tab-net_cash" class="hidden">
@@ -549,9 +509,7 @@ tr:hover td{background:var(--border-subtle)}
         <select id="bt-source">
           <option value="recommend" selected>おすすめ（複合スコア）</option>
           <option value="valuation">バリュエーション（期待総リターン）</option>
-          <option value="net_cash">ネットキャッシュ（清原式）</option>
-          <option value="sell">売り候補（おすすめの逆・超過収益が負なら有効）</option>
-        </select>
+          <option value="net_cash">ネットキャッシュ（清原式）</option>        </select>
       </div>
       <div class="form-group">
         <label>プリセット（おすすめ手法のみ）</label>

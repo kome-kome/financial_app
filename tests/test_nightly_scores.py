@@ -112,17 +112,15 @@ class TestRegistration:
         assert NIGHTLY_PARAMS["sector_ols"]["regularization"] == "ridge"
 
     def test_default_mu_source_producer_is_registered(self):
-        """`sell_ranking` の既定 mu_source を出す producer が夜間バッチに載っていること。
+        """`sell_ranking` の μ̂ の出所（唯一・ADR-0071）を出す producer が夜間バッチに載っていること。
 
-        既定 μ̂ の生成元が自動実行されていないと、朝の画面には「いつのものか分からない μ̂」
-        が出る（#443）。既定を切り替えたら（#402 で M-2→M-6 のように）ここも追随させる。
+        μ̂ の生成元が自動実行されていないと、朝の画面には「いつのものか分からない μ̂」
+        が出る（#443）。出所を切り替えたら（#402 で M-2→M-6 のように）ここも追随させる。
         """
-        from plugins import get_plugin
+        from plugins.sell_ranking import MU_SOURCE as default_source
 
-        schema = get_plugin("sell_ranking").params_schema()
-        default_source = schema["mu_source"]["default"]
         assert default_source in NIGHTLY_MODELS, (
-            f"sell_ranking の既定 mu_source '{default_source}' を更新する producer が "
+            f"sell_ranking の μ̂ の出所 '{default_source}' を更新する producer が "
             f"NIGHTLY_MODELS（{NIGHTLY_MODELS}）に無い"
         )
 

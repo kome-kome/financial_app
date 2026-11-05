@@ -1,14 +1,16 @@
 """plugins/sell_ranking.py のユニットテスト。
 
-純粋: parse_holdings / _compute_trend / _apply_timing / PRESETS 整合。
-execute(): ユニバース標準化による売りスコアの符号・ランキング・アクションラベル・
-not_found / invalid 集約（in-memory SQLite）。依存ゲート（sector_ols）は execute を
-直接呼んでバイパスし、execute_plugin 経由のゲート挙動は別途検証する。
+手法は 1 つだけ（ADR-0071）: M-6 の μ̂ の低い順に並べ、下位 1/5 が「売却」。
+純粋: parse_holdings / _compute_trend / n_to_sell / assign_actions / 外した手法が戻っていないこと。
+execute(): μ̂ の並び・札・データ不足・not_found / invalid・損益・トレンド（参考）（in-memory SQLite）。
+依存ゲート（M-6 の μ̂）は execute_plugin 経由で確かめる。
 """
 import asyncio
 import os
+import re
 import sys
 from datetime import date, timedelta
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -17,120 +19,90 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from database import FinancialMetric, iso_week_start
 from plugins import execute_plugin
+from plugins import sell_ranking as sr
 from plugins.base import DependencyError
 from plugins.utils import coerce_params
 from plugins.sell_ranking import (
-    SELL_METRICS, PRESETS, SELL_SELECT_COLS, plugin,
-    _NC_RATIO_COLS, _SELL_RUNTIME_METRICS, _SELL_VIEW_METRICS, _WeeklyBar,
-    _TREND_LOOKBACK_DAYS,
-    parse_holdings, _compute_trend, _apply_timing, _base_action, sell_score,
+    MU_SOURCE, SELL_QUANTILES, SELL_SELECT_COLS, plugin, _WeeklyBar, _TREND_LOOKBACK_DAYS,
+    parse_holdings, _compute_trend, n_to_sell, assign_actions,
 )
+
+ROOT = Path(__file__).resolve().parent.parent
 
 
 def _run(raw, db):
     """依存ゲートをバイパスして execute を直接実行（coerce 済み params を渡す）。"""
-    typed = coerce_params(plugin.params_schema(), raw)
-    return plugin.execute(typed, db)
+    return plugin.execute(coerce_params(plugin.params_schema(), raw), db)
 
 
 def _wk(week_start, close):
     return SimpleNamespace(week_start=week_start, close_last=close)
 
 
-# ── 純粋: 定数 ───────────────────────────────────────────────────────────────
+def _universe(make_metric, n, **kw):
+    """最新年度の会社を n 社（sec_code=1001.., edinet=E0001..）。"""
+    return [make_metric(edinet_code=f"E{i:04d}", sec_code=f"{1000 + i}",
+                        company_name=f"会社{i}", year=2023, **kw) for i in range(1, n + 1)]
 
-class TestConstants:
-    def test_presets_reference_valid_metrics(self):
-        for name, weights in PRESETS.items():
-            for metric in weights:
-                assert metric in SELL_METRICS, f"{name} の {metric} が SELL_METRICS に無い"
 
-    def test_presets_weights_nonnegative(self):
-        # 売り重視度は非負（execute で負はクリップするが、定義段階で守る）
-        for weights in PRESETS.values():
-            for w in weights.values():
-                assert w >= 0
+def _seed_m6(db, mus, r1_primes=None):
+    from database import replace_macro_enet_scores
+    r1_primes = r1_primes or {}
+    replace_macro_enet_scores(
+        db, [{"edinet_code": ec, "mu": v, "r1_prime": r1_primes.get(ec)} for ec, v in mus.items()],
+        "2026-07-29")
 
-    def test_macro_preset_exists_and_macro_only(self):
-        # マクロ予測型は μ だけ（#1073 の規則 B で −Rᴹ を外した・他観点を含まない）
-        assert "マクロ予測型" in PRESETS
-        keys = set(PRESETS["マクロ予測型"])
-        assert keys == {"mu"}
 
-    def test_js_presets_match_python(self):
-        # 画面の SELL_PRESETS（static/js/analysis.js）の既定プリセットが Python 側と同じ重み
-        import re
-        from pathlib import Path
-        js = (Path(__file__).resolve().parent.parent / "static" / "js" / "analysis.js").read_text(encoding="utf-8")
-        m = re.search(r"'マクロ予測型':\s*\{([^}]*)\}", js)
-        assert m, "analysis.js に マクロ予測型 が無い"
-        pairs = dict(re.findall(r"(\w+)\s*:\s*([\d.]+)", m.group(1)))
-        assert {k: float(v) for k, v in pairs.items()} == PRESETS["マクロ予測型"]
+# ── 手法は 1 つだけ（ADR-0071）──────────────────────────────────────────────
 
-    def test_default_preset_is_macro(self):
-        # 既定プリセットはマクロ予測型
-        assert plugin.params_schema()["preset"]["default"] == "マクロ予測型"
+class TestSingleMethod:
+    def test_mu_source_is_m6(self):
+        assert MU_SOURCE == "macro_enet"
+        assert plugin.depends_on == ["macro_enet"]
+
+    def test_only_holdings_is_a_parameter(self):
+        """プリセット・ウェイト・閾値・トレンド補正・μ の出所・R3 足切りは選べない。"""
+        assert set(plugin.params_schema()) == {"holdings"}
+
+    def test_retired_parameters_have_no_effect(self):
+        """外した手法の値を送っても execute へ届かない（coerce_params は schema に無いキーを捨てる）。
+        並びが μ̂ だけで決まることは下の TestExecute が確かめる。"""
+        typed = coerce_params(plugin.params_schema(),
+                              {"holdings": "1001", "preset": "バランス型", "mu_source": "macro_dlm"})
+        assert set(typed) == {"holdings"}
+
+    def test_retired_names_are_gone_from_the_module(self):
+        for name in ("PRESETS", "SELL_METRICS", "sell_score", "_apply_timing", "_base_action"):
+            assert not hasattr(sr, name), f"{name} が sell_ranking に残っている"
+
+    def test_screen_offers_no_alternative(self):
+        """画面にプリセットのボタン・ウェイト・閾値・μ の出所の選択が残っていない。"""
+        html = (ROOT / "templates" / "analysis.html").read_text(encoding="utf-8")
+        tab = re.search(r'<div id="tab-sell_ranking".*?<!-- /tab-sell_ranking -->', html, re.S)
+        assert tab, "売り候補タブの終端コメントが無い"
+        body = tab.group(0)
+        for gone in ("applySellPreset", "sell-weight-grid", 'id="sell-th"', 'id="reduce-th"',
+                     "sell-timing-adjust", "sell-mu-source"):
+            assert gone not in body, f"{gone} が売り候補タブに残っている"
+        js = (ROOT / "static" / "js" / "analysis.js").read_text(encoding="utf-8")
+        for gone in ("SELL_PRESETS", "SELL_WEIGHT_LABELS", "applySellPreset"):
+            assert gone not in js, f"{gone} が analysis.js に残っている"
 
 
 # ── 転送列の契約（Issue #482）───────────────────────────────────────────────
 
 class TestSellSelectCols:
-    """SELL_SELECT_COLS が「消費する列ちょうど」であることを固定する。
-
-    列が足りないと Row に無い属性を getattr(..., None) が黙って None にし、指標が
-    全社欠測＝「データ不足」に化ける（failure では出ない・#459 と同型）。逆に増えすぎ
-    たら列絞りの意味が無いので、両側から締める。
-    """
-
-    def test_view_metrics_are_derived_from_sell_metrics(self):
-        # 手書きリストではなく SELL_METRICS − ランタイム指標。指標を足せば自動追従する。
-        assert _SELL_VIEW_METRICS == tuple(
-            m for m in SELL_METRICS if m not in _SELL_RUNTIME_METRICS)
-
-    def test_every_view_metric_is_selected(self):
-        for m in _SELL_VIEW_METRICS:
-            assert m in SELL_SELECT_COLS, f"{m} が転送列に無い＝全社欠測になる"
-
-    def test_runtime_metrics_are_not_transferred(self):
-        view_cols = set(FinancialMetric.__table__.columns.keys())
-        for m in _SELL_RUNTIME_METRICS:
-            assert m not in SELL_SELECT_COLS
-        # mu / neg_r_macro は producer 由来で VIEW に列そのものが無い。
-        assert "mu" not in view_cols
-        assert "neg_r_macro" not in view_cols
-        # nc_ratio は VIEW にも同名列があるが、_resolve_metric は BS3列から実行時計算する
-        # （VIEW 側は ROUND(...,4) 付きで式が一致しない）。「列は在るが使わない」を固定する。
-        assert "nc_ratio" in view_cols
-        assert "nc_ratio" not in SELL_SELECT_COLS
-
-    def test_nc_ratio_inputs_are_selected(self):
-        # _resolve_metric が nc_ratio を組み立てる材料（BS3列＋market_cap）
-        for c in _NC_RATIO_COLS + ("market_cap",):
-            assert c in SELL_SELECT_COLS
-
-    def test_display_columns_used_by_result_are_selected(self):
-        # execute の結果 dict と last_close フォールバックが読む列
-        for c in ("sec_code", "edinet_code", "company_name", "industry", "year",
-                  "gap_ratio", "roe", "op_margin", "rev_growth", "market_cap",
-                  "stock_price", "is_active", "delisted_date"):
-            assert c in SELL_SELECT_COLS
-
     def test_all_columns_exist_on_the_view(self):
         view_cols = set(FinancialMetric.__table__.columns.keys())
-        missing = [c for c in SELL_SELECT_COLS if c not in view_cols]
-        assert not missing, f"financial_metrics に無い列: {missing}"
+        assert not [c for c in SELL_SELECT_COLS if c not in view_cols]
 
-    def test_selection_is_a_proper_subset_and_no_duplicates(self):
-        view_cols = set(FinancialMetric.__table__.columns.keys())
-        assert set(SELL_SELECT_COLS) < view_cols
-        assert len(SELL_SELECT_COLS) < len(view_cols) / 2
-        assert len(SELL_SELECT_COLS) == len(set(SELL_SELECT_COLS))
+    def test_only_display_columns(self):
+        assert set(SELL_SELECT_COLS) == {"edinet_code", "sec_code", "company_name", "industry",
+                                         "year", "stock_price", "is_active", "delisted_date"}
 
     def test_weekly_bar_carries_only_what_compute_trend_reads(self):
-        # 本番は2フィールドしか渡らない。_compute_trend がこれ以外を読み始めたら落ちる。
         assert _WeeklyBar._fields == ("week_start", "close_last")
-        out = _compute_trend([_WeeklyBar("2026-01-05", 100.0),
-                              _WeeklyBar("2026-01-12", 90.0)])
+        out = _compute_trend([_WeeklyBar("2026-01-05", 100.0), _WeeklyBar("2026-01-12", 90.0)])
         assert out["last_close"] == 90.0
 
 
@@ -169,7 +141,7 @@ class TestParseHoldings:
         assert invalid == []
 
 
-# ── 純粋: _compute_trend ─────────────────────────────────────────────────────
+# ── 純粋: _compute_trend（参考表示）─────────────────────────────────────────
 
 class TestComputeTrend:
     def _series(self, prices):
@@ -177,437 +149,173 @@ class TestComputeTrend:
                 for i, p in enumerate(prices)]
 
     def test_uptrend(self):
-        rows = self._series([1000 + i * 25 for i in range(14)])   # 単調増 +>10%
-        res = _compute_trend(rows)
-        assert res["trend"] == "上昇"
-        assert res["ret_13w"] > 10
+        res = _compute_trend(self._series([1000 + i * 25 for i in range(14)]))
+        assert res["trend"] == "上昇" and res["ret_13w"] > 10
 
     def test_downtrend(self):
-        rows = self._series([1000 - i * 25 for i in range(14)])   # 単調減 -<-10%
-        res = _compute_trend(rows)
-        assert res["trend"] == "下落"
-        assert res["ret_13w"] < -10
+        res = _compute_trend(self._series([1000 - i * 25 for i in range(14)]))
+        assert res["trend"] == "下落" and res["ret_13w"] < -10
 
     def test_flat(self):
-        rows = self._series([1000 + (i % 2) for i in range(14)])  # ほぼ横ばい
-        res = _compute_trend(rows)
-        assert res["trend"] == "横ばい"
+        assert _compute_trend(self._series([1000 + (i % 2) for i in range(14)]))["trend"] == "横ばい"
 
     def test_insufficient_weeks(self):
-        rows = self._series([1000, 1100, 1200])   # < 8 週 → 不明
-        res = _compute_trend(rows)
-        assert res["trend"] == "不明"
-        assert res["ret_13w"] is None
-        assert res["last_close"] == 1200
+        res = _compute_trend(self._series([1000, 1100, 1200]))
+        assert res["trend"] == "不明" and res["ret_13w"] is None and res["last_close"] == 1200
 
 
-# ── 純粋: タイミング補正 / 閾値ラベル ─────────────────────────────────────────
+# ── 純粋: 下位 1/5 の切り方 ──────────────────────────────────────────────────
 
-class TestActionLabels:
-    def test_base_action_thresholds(self):
-        assert _base_action(1.0, 0.8, 0.3) == "SELL"
-        assert _base_action(0.5, 0.8, 0.3) == "REDUCE"
-        assert _base_action(0.0, 0.8, 0.3) == "HOLD"
-        assert _base_action(None, 0.8, 0.3) == "データ不足"
+class TestBottomFifth:
+    def test_same_cut_as_the_measurement(self):
+        """`in_layer_short_side` の下位（昇順の先頭 m // n_quantiles 社）と同じ。"""
+        assert SELL_QUANTILES == 5
+        assert [n_to_sell(m) for m in (0, 1, 4, 5, 9, 10, 14, 15, 23)] == [0, 0, 0, 1, 1, 2, 2, 3, 4]
 
-    def test_downtrend_escalates(self):
-        assert _apply_timing("HOLD", "下落") == "REDUCE"
-        assert _apply_timing("REDUCE", "下落") == "SELL"
-        assert _apply_timing("SELL", "下落") == "SELL"   # 上限
+    def test_lowest_mu_is_sold(self):
+        mus = {f"C{i}": 0.01 * i for i in range(10)}
+        order, actions = assign_actions(mus)
+        assert order == [f"C{i}" for i in range(10)]
+        assert [k for k in order if actions[k] == "SELL"] == ["C0", "C1"]
+        assert all(actions[f"C{i}"] == "HOLD" for i in range(2, 10))
 
-    def test_uptrend_softens_sell_only(self):
-        assert _apply_timing("SELL", "上昇") == "REDUCE"
-        assert _apply_timing("REDUCE", "上昇") == "REDUCE"
-        assert _apply_timing("HOLD", "上昇") == "HOLD"
+    def test_missing_mu_goes_last_and_does_not_count(self):
+        mus = {"A": None, **{f"C{i}": -0.01 * i for i in range(5)}, "B": None}
+        order, actions = assign_actions(mus)
+        assert order[-2:] == ["A", "B"]
+        assert actions["A"] == actions["B"] == "データ不足"
+        # μ̂ がそろった 5 社のうち 1 社（最も低い C4）
+        assert [k for k in order if actions[k] == "SELL"] == ["C4"]
 
-    def test_flat_and_unknown_no_change(self):
-        assert _apply_timing("SELL", "横ばい") == "SELL"
-        assert _apply_timing("REDUCE", "不明") == "REDUCE"
+    def test_ties_break_by_key(self):
+        order, _ = assign_actions({"B": 0.0, "A": 0.0, "C": -0.1})
+        assert order == ["C", "A", "B"]
 
-
-class TestSellScore:
-    """売りスコアの合成（`sell_score`・#1043 で execute から切り出し、上限版の計測と共有）。"""
-    W = {"mu": 1.0, "neg_r_macro": 0.5}
-    STATS = {"mu": (0.0, 0.1), "neg_r_macro": (-0.2, 0.05)}
-
-    def test_weighted_mean_of_negative_z(self):
-        score, cov = sell_score({"mu": -0.1, "neg_r_macro": -0.25}, self.W, self.STATS, 0.4)
-        # z(mu) = −1 → +1、z(neg_r_macro) = −1 → +1。Σw(−z)/Σw = 1。
-        assert score == pytest.approx(1.0) and cov == pytest.approx(1.0)
-
-    def test_missing_metric_is_left_out_of_the_denominator(self):
-        score, cov = sell_score({"mu": -0.1, "neg_r_macro": None}, self.W, self.STATS, 0.4)
-        assert score == pytest.approx(1.0) and cov == pytest.approx(1.0 / 1.5)
-
-    def test_below_min_coverage_is_none(self):
-        score, cov = sell_score({"mu": None, "neg_r_macro": -0.25}, self.W, self.STATS, 0.4)
-        assert score is None and cov == pytest.approx(0.5 / 1.5)
-
-    def test_metric_without_stats_is_not_counted(self):
-        score, cov = sell_score({"mu": -0.1, "neg_r_macro": -0.25}, self.W, {"mu": (0.0, 0.1)}, 0.4)
-        assert score == pytest.approx(1.0) and cov == pytest.approx(1.0 / 1.5)
+    def test_fewer_than_five_sells_nothing(self):
+        _, actions = assign_actions({"A": -0.5, "B": 0.1, "C": 0.2})
+        assert set(actions.values()) == {"HOLD"}
 
 
 # ── execute(): in-memory SQLite ──────────────────────────────────────────────
 
-def _universe(make_metric, roes):
-    """roe を変えた最新年度ユニバースを構築（sec_code=1001.., edinet=E0001..）。"""
-    rows = []
-    for i, roe in enumerate(roes, 1):
-        rows.append(make_metric(edinet_code=f"E{i:04d}", sec_code=f"{1000 + i}",
-                                company_name=f"会社{i}", year=2023, roe=roe))
-    return rows
-
-
 class TestExecute:
-    def test_weak_stock_scores_higher_than_strong(self, db, make_metric):
-        # roe が低い（割高/業績不振側）ほど売りスコアが高くなる
-        db.add_all(_universe(make_metric, [-5.0, 0.0, 5.0, 10.0, 15.0]))
+    def test_ranks_by_mu_and_sells_bottom_fifth(self, db, make_metric):
+        db.add_all(_universe(make_metric, 10, roe=10.0))
         db.commit()
-        res = _run({"holdings": "1001\n1005", "weights": {"roe": 1.0},
-                    "min_coverage": 0.0}, db)
-        assert res["count"] == 2
-        # ランキング先頭は roe 最低の 1001
-        assert res["results"][0]["sec_code"] == "1001"
-        assert res["results"][1]["sec_code"] == "1005"
-        assert res["results"][0]["score"] > res["results"][1]["score"]
-        assert res["results"][0]["score"] > 0    # 平均より下＝売り側
-        assert res["results"][1]["score"] < 0    # 平均より上＝売らない側
+        # 財務（roe）が全社同じでも、並びは μ̂ だけで決まる
+        _seed_m6(db, {f"E{i:04d}": 0.02 * i - 0.1 for i in range(1, 11)})
+        res = _run({"holdings": "\n".join(str(1000 + i) for i in range(10, 0, -1))}, db)
+        assert res["count"] == 10 and res["mu_available"] is True
+        assert [r["sec_code"] for r in res["results"]] == [str(1000 + i) for i in range(1, 11)]
+        assert [r["action"] for r in res["results"]] == ["SELL"] * 2 + ["HOLD"] * 8
+        assert (res["n_sell"], res["n_hold"], res["n_no_data"]) == (2, 8, 0)
+        assert res["results"][0]["mu"] == pytest.approx(-0.08)
+        assert res["results"][0]["rank"] == 1 and res["mu_source"] == "macro_enet"
 
-    def test_action_labels_from_score(self, db, make_metric):
-        db.add_all(_universe(make_metric, [-5.0, 0.0, 5.0, 10.0, 15.0]))
+    def test_holding_without_mu_is_no_data(self, db, make_metric):
+        db.add_all(_universe(make_metric, 6))
         db.commit()
-        res = _run({"holdings": "1001\n1005", "weights": {"roe": 1.0},
-                    "min_coverage": 0.0, "sell_threshold": 0.8,
-                    "reduce_threshold": 0.3}, db)
-        by_code = {r["sec_code"]: r for r in res["results"]}
-        assert by_code["1001"]["action"] == "SELL"   # zstd≈-1.27 → score≈+1.27
-        assert by_code["1005"]["action"] == "HOLD"   # zstd≈+1.27 → score≈-1.27
+        _seed_m6(db, {f"E{i:04d}": 0.01 * i for i in range(1, 6)})   # E0006 は μ̂ なし
+        res = _run({"holdings": "1006\n1001\n1002\n1003\n1004\n1005"}, db)
+        assert res["results"][-1]["sec_code"] == "1006"
+        assert res["results"][-1]["action"] == "データ不足"
+        assert res["results"][0]["sec_code"] == "1001" and res["results"][0]["action"] == "SELL"
+        assert res["n_no_data"] == 1
 
-    def test_not_found_collected(self, db, make_metric):
-        db.add_all(_universe(make_metric, [1.0, 2.0, 3.0, 4.0]))
+    def test_without_mu_everything_is_no_data(self, db, make_metric):
+        db.add_all(_universe(make_metric, 3))
         db.commit()
-        res = _run({"holdings": "1001\n9999", "weights": {"roe": 1.0},
-                    "min_coverage": 0.0}, db)
-        assert res["not_found"] == ["9999"]
-        assert res["count"] == 1
+        res = _run({"holdings": "1001\n1002"}, db)
+        assert res["mu_available"] is False
+        assert {r["action"] for r in res["results"]} == {"データ不足"}
 
-    def test_invalid_passthrough(self, db, make_metric):
-        db.add_all(_universe(make_metric, [1.0, 2.0, 3.0, 4.0]))
-        db.commit()
-        res = _run({"holdings": "1001\nNOPE", "weights": {"roe": 1.0},
-                    "min_coverage": 0.0}, db)
-        assert res["invalid"] == ["NOPE"]
-
-    def test_pnl_from_avg_cost(self, db, make_metric):
-        db.add_all([
-            make_metric(edinet_code="E0001", sec_code="1001", roe=1.0, stock_price=1200.0),
-            make_metric(edinet_code="E0002", sec_code="1002", roe=2.0),
-            make_metric(edinet_code="E0003", sec_code="1003", roe=3.0),
-            make_metric(edinet_code="E0004", sec_code="1004", roe=4.0),
-            make_metric(edinet_code="E0005", sec_code="1005", roe=5.0),
-        ])
-        db.commit()
-        res = _run({"holdings": "1001, @1000", "weights": {"roe": 1.0},
-                    "min_coverage": 0.0}, db)
-        row = res["results"][0]
-        # last_close は週次が無いので stock_price(1200) にフォールバック → +20%
-        assert row["pnl_pct"] == 20.0
-
-    def test_timing_escalates_with_downtrend(self, db, make_metric, make_weekly):
-        # roe=平均並みで base=HOLD/REDUCE 付近の銘柄が、下落トレンドで一段上がる
-        db.add_all(_universe(make_metric, [0.0, 5.0, 10.0, 15.0, 20.0]))
-        # sec_code 1003 (roe=10, ほぼ平均) に下落週次を付与。
-        # 週次ロードは week_start >= today-_TREND_LOOKBACK_DAYS で絞る（#482）ので、
-        # 固定年の日付を撒くと窓の外へ落ちて trend="不明" になる。today 相対で置く。
-        _today = date.today()
+    def test_trend_does_not_change_the_action(self, db, make_metric, make_weekly):
+        """下落トレンドでも札は μ̂ だけで決まる（トレンド補正は外した）。"""
+        db.add_all(_universe(make_metric, 5))
+        today = date.today()
         for i in range(14):
-            db.add(make_weekly(edinet_code="E0003",
-                               week_start=iso_week_start(
-                                   (_today - timedelta(weeks=13 - i)).isoformat()),
+            db.add(make_weekly(edinet_code="E0005",
+                               week_start=iso_week_start((today - timedelta(weeks=13 - i)).isoformat()),
                                close_last=1000 - i * 30))
         db.commit()
-        res = _run({"holdings": "1003", "weights": {"roe": 1.0}, "min_coverage": 0.0,
-                    "sell_threshold": 0.8, "reduce_threshold": 0.0,
-                    "timing_adjust": True}, db)
-        row = res["results"][0]
-        assert row["trend"] == "下落"
-        # roe=10 はユニバース平均 → score≈0 → base REDUCE（reduce_th=0.0）→ 下落補正で SELL
-        assert row["action"] == "SELL"
+        _seed_m6(db, {f"E{i:04d}": 0.01 * i for i in range(1, 6)})
+        by = {r["sec_code"]: r for r in _run({"holdings": "1001\n1002\n1003\n1004\n1005"}, db)["results"]}
+        assert by["1005"]["trend"] == "下落"
+        assert by["1005"]["action"] == "HOLD"     # μ̂ が最も高い
+        assert by["1001"]["action"] == "SELL"
+
+    def test_not_found_and_invalid(self, db, make_metric):
+        db.add_all(_universe(make_metric, 3))
+        db.commit()
+        res = _run({"holdings": "1001\n9999\nNOPE"}, db)
+        assert res["not_found"] == ["9999"]
+        assert res["invalid"] == ["NOPE"]
+        assert res["count"] == 1
+
+    def test_pnl_from_avg_cost(self, db, make_metric):
+        db.add(make_metric(edinet_code="E0001", sec_code="1001", stock_price=1200.0))
+        db.commit()
+        row = _run({"holdings": "1001, @1000"}, db)["results"][0]
+        # 週次が無いので stock_price(1200) にフォールバック → +20%
+        assert row["pnl_pct"] == 20.0
 
     def test_empty_holdings_returns_empty(self, db, make_metric):
-        db.add_all(_universe(make_metric, [1.0, 2.0, 3.0, 4.0]))
-        db.commit()
-        res = _run({"holdings": "", "weights": {"roe": 1.0}}, db)
-        assert res["count"] == 0
-        assert res["results"] == []
+        res = _run({"holdings": ""}, db)
+        assert res["count"] == 0 and res["results"] == []
 
     def test_delisted_holding_surfaces_flag_but_not_excluded(self, db, make_metric):
-        # 保有銘柄はユーザー入力のため is_active=False でも not_found にしない。
-        # 上場廃止済みであることは情報表示（is_active/delisted_date）で気付けるようにする（Issue #315）。
-        from datetime import date
-        db.add_all([
-            make_metric(edinet_code="E9001", sec_code="9001", roe=1.0,
-                       is_active=False, delisted_date=date(2024, 6, 1)),
-            *_universe(make_metric, [2.0, 3.0, 4.0, 5.0]),
-        ])
+        db.add_all([make_metric(edinet_code="E9001", sec_code="9001",
+                                is_active=False, delisted_date=date(2024, 6, 1)),
+                    *_universe(make_metric, 4)])
         db.commit()
-        res = _run({"holdings": "9001", "weights": {"roe": 1.0}, "min_coverage": 0.0}, db)
+        res = _run({"holdings": "9001"}, db)
         assert res["not_found"] == []
         row = res["results"][0]
-        assert row["is_active"] is False
-        assert row["delisted_date"] == "2024-06-01"
-
-    def test_active_holding_reports_is_active_true(self, db, make_metric):
-        db.add_all(_universe(make_metric, [1.0, 2.0, 3.0, 4.0]))
-        db.commit()
-        res = _run({"holdings": "1001", "weights": {"roe": 1.0}, "min_coverage": 0.0}, db)
-        row = res["results"][0]
-        assert row["is_active"] is True
-        assert row["delisted_date"] is None
-
-    def test_universe_excludes_delisted_from_standardization(self, db, make_metric):
-        # 標準化ユニバース（uni_q）に delisted 銘柄が混ざると極端値が mean/sd を歪める。
-        # is_active フィルタが効いていれば、追加後もスコアは変わらないはず（Issue #315）。
-        db.add_all(_universe(make_metric, [-5.0, 0.0, 5.0, 10.0, 15.0]))
-        db.commit()
-        baseline = _run({"holdings": "1001", "weights": {"roe": 1.0}, "min_coverage": 0.0}, db)
-
-        db.add(make_metric(edinet_code="E9999", sec_code="9999", company_name="廃止企業",
-                           year=2023, roe=1000.0, is_active=False))
-        db.commit()
-        after = _run({"holdings": "1001", "weights": {"roe": 1.0}, "min_coverage": 0.0}, db)
-
-        assert after["results"][0]["score"] == pytest.approx(baseline["results"][0]["score"])
-
-    def test_net_cash_cushion_loss_scores_higher(self, db, make_metric):
-        # ネットキャッシュ余力（nc_ratio）の毀損＝クッション消失ほど売りスコアが高い（#208）。
-        # market_cap=1000(百万円)=1e9円。nc = 流動資産 − 総負債（投資有価証券=0）。
-        specs = [
-            ("1001", 2.0e8),   # nc=-3e8 → ratio -0.3（最も毀損）
-            ("1002", 5.0e8),   # 0
-            ("1003", 1.0e9),   # 0.5
-            ("1004", 1.5e9),   # 1.0
-            ("1005", 2.0e9),   # 1.5（最も厚い）
-        ]
-        for i, (sec, ca) in enumerate(specs, 1):
-            db.add(make_metric(edinet_code=f"E{i:04d}", sec_code=sec, company_name=f"会社{i}",
-                               year=2023, market_cap=1000.0,
-                               bs_current_assets=ca, bs_investment_securities=0.0,
-                               bs_total_liabilities=5.0e8))
-        db.commit()
-        res = _run({"holdings": "1001\n1005", "weights": {"nc_ratio": 1.0},
-                    "min_coverage": 0.0}, db)
-        assert res["count"] == 2
-        assert res["results"][0]["sec_code"] == "1001"   # クッション毀損 → 売り上位
-        assert res["results"][1]["sec_code"] == "1005"
-        assert res["results"][0]["score"] > 0
-        assert res["results"][1]["score"] < 0
+        assert row["is_active"] is False and row["delisted_date"] == "2024-06-01"
 
 
 # ── 週次ロードの窓とチャンク（Issue #482）───────────────────────────────────
 
 class TestWeeklyLoadWindow:
     def test_bars_older_than_lookback_are_not_loaded(self, db, make_metric, make_weekly):
-        """窓の外の週次は転送しない＝trend は '不明' になる（欠測と同じ扱い）。
-
-        13週ぶんの下落バーを _TREND_LOOKBACK_DAYS より古い位置へ置く。全期間ロード
-        だった頃は '下落' が出ていたので、この差がそのまま窓が効いている証拠になる。
-        """
-        db.add_all(_universe(make_metric, [0.0, 5.0, 10.0, 15.0, 20.0]))
+        db.add_all(_universe(make_metric, 5))
         old = date.today() - timedelta(days=_TREND_LOOKBACK_DAYS + 30)
         for i in range(14):
             db.add(make_weekly(edinet_code="E0003",
-                               week_start=iso_week_start(
-                                   (old - timedelta(weeks=13 - i)).isoformat()),
+                               week_start=iso_week_start((old - timedelta(weeks=13 - i)).isoformat()),
                                close_last=1000 - i * 30))
         db.commit()
-        res = _run({"holdings": "1003", "weights": {"roe": 1.0}, "min_coverage": 0.0}, db)
-        assert res["results"][0]["trend"] == "不明"
-        assert res["results"][0]["ret_13w"] is None
+        row = _run({"holdings": "1003"}, db)["results"][0]
+        assert row["trend"] == "不明" and row["ret_13w"] is None
 
-    def test_all_holdings_are_loaded_across_chunk_boundary(
-            self, db, make_metric, make_weekly, monkeypatch):
-        """IN 句を分割しても全保有ぶんのバーが揃う（境界で取り落とさない）。
-
-        本番の _TREND_CODE_BATCH=500 を素直に検証すると 501社の seed が要るので、
-        定数を 2 に差し替えて 5社＝3チャンクで同じ境界を通す。
-        """
-        from plugins import sell_ranking as _sr
-        monkeypatch.setattr(_sr, "_TREND_CODE_BATCH", 2)
-        db.add_all(_universe(make_metric, [0.0, 5.0, 10.0, 15.0, 20.0]))
+    def test_all_holdings_are_loaded_across_chunk_boundary(self, db, make_metric, make_weekly, monkeypatch):
+        monkeypatch.setattr(sr, "_TREND_CODE_BATCH", 2)
+        db.add_all(_universe(make_metric, 5))
         today = date.today()
         for i in range(1, 6):
             for w in range(14):
                 db.add(make_weekly(edinet_code=f"E{i:04d}",
-                                   week_start=iso_week_start(
-                                       (today - timedelta(weeks=13 - w)).isoformat()),
+                                   week_start=iso_week_start((today - timedelta(weeks=13 - w)).isoformat()),
                                    close_last=1000 - w * 30))
         db.commit()
-        res = _run({"holdings": "1001\n1002\n1003\n1004\n1005",
-                    "weights": {"roe": 1.0}, "min_coverage": 0.0}, db)
+        res = _run({"holdings": "1001\n1002\n1003\n1004\n1005"}, db)
         assert res["count"] == 5
-        # 5社とも週次が届いている＝どのチャンクも取り落としていない
         assert all(r["trend"] == "下落" for r in res["results"])
         assert all(r["last_close"] == 610.0 for r in res["results"])
 
 
-# ── 依存ゲート（sector_ols）─────────────────────────────────────────────────
+# ── 依存ゲート（M-6 の μ̂）────────────────────────────────────────────────────
 
 class TestDependencyGate:
-    def test_blocks_without_regression(self, db, make_metric):
-        db.add_all(_universe(make_metric, [1.0, 2.0, 3.0, 4.0]))
+    def test_blocks_without_m6(self, db, make_metric):
+        db.add_all(_universe(make_metric, 3))
         db.commit()
         with pytest.raises(DependencyError):
             asyncio.run(execute_plugin(plugin, {"holdings": "1001"}, db))
 
-    def test_runs_with_regression(self, db, make_metric):
-        from database import RegressionResult
-        from datetime import date
-        db.add_all(_universe(make_metric, [1.0, 2.0, 3.0, 4.0]))
-        db.add(RegressionResult(edinet_code="E0001", year=2023,
-                                period_end=date(2023, 3, 31),
-                                predicted_market_cap=12000.0, gap_ratio=-15.0,
-                                model="ols", sector="情報・通信業"))
+    def test_runs_with_m6(self, db, make_metric):
+        db.add_all(_universe(make_metric, 3))
         db.commit()
-        res = asyncio.run(execute_plugin(plugin,
-            {"holdings": "1001", "weights": {"roe": 1.0}, "min_coverage": 0.0}, db))
-        assert res["count"] == 1
-
-
-# ── μ 出所トグル（M-1/M-3/M-6・ADR-0004／M-2 は ADR-0052 で降格）──────────────
-
-class TestMuSource:
-    def _seed_universe(self, db, make_metric):
-        db.add_all(_universe(make_metric, [1.0, 2.0, 3.0, 4.0, 5.0]))
-        db.commit()
-
-    def _seed_m2(self, db, mus, r1_primes=None):
-        from database import replace_macro_gbdt_scores
-        r1_primes = r1_primes or {}
-        replace_macro_gbdt_scores(
-            db,
-            [{"edinet_code": ec, "mu": v, "r1_prime": r1_primes.get(ec)}
-             for ec, v in mus.items()],
-            "2026-06-26",
-        )
-
-    def test_macro_gbdt_is_rejected_as_mu_source(self, db, make_metric):
-        """M-2 は供給者から降ろした（#572・ADR-0052）＝options に無い値は reject する。
-
-        **黙って既定へ倒さない**——倒すと「M-2 を選んだのに M-6 の μ̂ が効いていた」が
-        画面から分からなくなる（ADR-0030 と同じ作法）。M-2 自体は退役ではないので
-        分析タブ・SHAP・COMPARISON_MODELS は生きている（tests/test_analysis_meta.py が縛る）。
-        """
-        self._seed_universe(db, make_metric)
-        # 永続化は続いている（M-4 の基底として読まれるため・ADR-0052）＝
-        # 「スコアはあるのに供給者としては選べない」ことを確かめている。
-        self._seed_m2(db, {"E0001": -0.10, "E0002": -0.05, "E0003": 0.0,
-                           "E0004": 0.05, "E0005": 0.10})
-        with pytest.raises(ValueError):
-            _run({"holdings": "1001", "weights": {"mu": 1.0},
-                  "min_coverage": 0.0, "mu_source": "macro_gbdt"}, db)
-
-    def test_default_mu_source_is_m6(self, db, make_metric):
-        """既定 μ 出所は M-6（#402・ADR-0022）。売り側 OOF 指標で M-2 を有意に上回るため
-        切替済み。M-2 は #572（ADR-0052）で選択肢からも外れた。"""
-        self._seed_universe(db, make_metric)
-        # mu_source 未指定 → coerce が default=macro_enet（M-6）補完
-        res = _run({"holdings": "1001", "weights": {"roe": 1.0},
-                    "min_coverage": 0.0}, db)
-        assert res["mu_source"] == "macro_enet"
-
-    def _seed_m6(self, db, mus, r1_primes=None):
-        from database import replace_macro_enet_scores
-        r1_primes = r1_primes or {}
-        replace_macro_enet_scores(
-            db,
-            [{"edinet_code": ec, "mu": v, "r1_prime": r1_primes.get(ec)}
-             for ec, v in mus.items()],
-            "2026-07-29",
-        )
-
-    def test_macro_enet_mu_used_when_available(self, db, make_metric):
-        """M-6（ElasticNet）を mu_source に選べる（Issue #396）。μ は M-1/M-2 と同一単位。"""
-        self._seed_universe(db, make_metric)
-        self._seed_m6(db, {"E0001": -0.10, "E0002": -0.05, "E0003": 0.0,
-                           "E0004": 0.05, "E0005": 0.10})
-        res = _run({"holdings": "1001\n1005", "weights": {"mu": 1.0},
-                    "min_coverage": 0.0, "mu_source": "macro_enet",
-                    "timing_adjust": False}, db)
-        assert res["mu_available"] is True
-        assert res["mu_source"] == "macro_enet"
-        by = {r["sec_code"]: r for r in res["results"]}
-        assert by["1001"]["score"] > by["1005"]["score"]   # 低μ → 売り上位
-
-    def test_mu_standardized_over_tradable_universe_only(self, db, make_metric):
-        """μ̂ の標準化基準は universe（tradable）にいる社だけ（#780）。
-
-        producer は廃止社にも「現在の」μ̂ を付けて保存する。全行を基準にすると、#605 が
-        表示から外した社が平均・標準偏差へ戻り、保有銘柄の z 値が動く。
-        """
-        from plugins.utils import fit_zscore_stats, normalize_transform
-        self._seed_universe(db, make_metric)
-        # 廃止社（universe から tradable_filters で落ちる）に極端な μ̂ を持たせる
-        db.add(make_metric(edinet_code="E0099", sec_code="1099", company_name="廃止社",
-                           year=2023, roe=1.0, is_active=False))
-        db.commit()
-        mus = {"E0001": -0.10, "E0002": -0.05, "E0003": 0.0, "E0004": 0.05, "E0005": 0.10}
-        self._seed_m6(db, {**mus, "E0099": 3.0})
-
-        res = _run({"holdings": "1001", "weights": {"mu": 1.0}, "min_coverage": 0.0,
-                    "mu_source": "macro_enet", "timing_adjust": False}, db)
-
-        mean_, sd = fit_zscore_stats(list(mus.values()))
-        expected = round(-normalize_transform(-0.10, mean_, sd, "zscore"), 4)
-        assert res["results"][0]["score"] == expected
-        # 廃止社を基準に入れた値とは違う（このテストが区別できていることの確認）
-        mean_all, sd_all = fit_zscore_stats([*mus.values(), 3.0])
-        assert expected != round(-normalize_transform(-0.10, mean_all, sd_all, "zscore"), 4)
-
-    def test_macro_enet_graceful_when_not_run(self, db, make_metric):
-        """M-6 未実行（macro_enet_scores 空）でも μ を除外して判定継続（ADR-0004）。"""
-        self._seed_universe(db, make_metric)
-        res = _run({"holdings": "1001", "weights": {"mu": 1.0, "roe": 0.5},
-                    "min_coverage": 0.0, "mu_source": "macro_enet"}, db)
-        assert res["mu_available"] is False
-        assert res["mu_source"] == "macro_enet"
-        assert res["count"] == 1
-
-    def test_r3_gate_active_under_macro_enet(self, db, make_metric):
-        """M-6 は r1_prime（コンフォーマル区間半幅）を持つため R3 ゲートが効く（M-3/M-4 と違う）。"""
-        self._seed_universe(db, make_metric)
-        self._seed_m6(db, {"E0001": -0.20, "E0002": -0.05, "E0003": 0.0,
-                           "E0004": 0.05, "E0005": 0.10},
-                      r1_primes={"E0001": 0.30})
-        res = _run({"holdings": "1001", "weights": {"mu": 1.0}, "min_coverage": 0.0,
-                    "sell_threshold": 0.8, "reduce_threshold": 0.3,
-                    "r3_gate": 0.1, "mu_source": "macro_enet", "timing_adjust": False}, db)
-        assert res["results"][0]["action"] == "REDUCE"
-
-    def test_r3_gate_passes_low_uncertainty_under_macro_enet(self, db, make_metric):
-        self._seed_universe(db, make_metric)
-        self._seed_m6(db, {"E0001": -0.20, "E0002": -0.05, "E0003": 0.0,
-                           "E0004": 0.05, "E0005": 0.10},
-                      r1_primes={"E0001": 0.05})
-        res = _run({"holdings": "1001", "weights": {"mu": 1.0}, "min_coverage": 0.0,
-                    "sell_threshold": 0.8, "reduce_threshold": 0.3,
-                    "r3_gate": 0.1, "mu_source": "macro_enet", "timing_adjust": False}, db)
-        assert res["results"][0]["action"] == "SELL"
-
-    def test_r3_gate_noop_when_r1_prime_missing_macro_enet(self, db, make_metric):
-        """r1_prime=None（列未 migration / 旧スナップショット）はゲート素通り（graceful）。
-
-        #572 以前は M-2 で測っていたが、M-2 は mu_source から外れた（ADR-0052）ので
-        同じ r1_prime を持つ M-6 へ移した。**確かめているのは「値が無いときの挙動」**で、
-        どの producer かではない。
-        """
-        self._seed_universe(db, make_metric)
-        self._seed_m6(db, {"E0001": -0.20, "E0002": -0.05, "E0003": 0.0,
-                           "E0004": 0.05, "E0005": 0.10})   # r1_prime 全 None
-        res = _run({"holdings": "1001", "weights": {"mu": 1.0}, "min_coverage": 0.0,
-                    "sell_threshold": 0.8, "reduce_threshold": 0.3,
-                    "r3_gate": 0.1, "mu_source": "macro_enet", "timing_adjust": False}, db)
-        row = res["results"][0]
-        assert row["sec_code"] == "1001"
-        assert row["action"] == "SELL"
+        _seed_m6(db, {"E0001": 0.01})
+        res = asyncio.run(execute_plugin(plugin, {"holdings": "1001"}, db))
+        assert res["count"] == 1 and res["results"][0]["mu"] == pytest.approx(0.01)

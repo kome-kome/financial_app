@@ -151,11 +151,10 @@ class TestFreshnessBlock:
 def _mu_sources() -> set[str]:
     """`mu_source` に渡りうる producer 名の全部（正本から読む＝足したら追随する）。"""
     from database import _PRODUCER_SCORE_MODELS
-    from plugins import get_plugin
     from plugins.recommend import MU_SOURCE_OPTIONS
+    from plugins.sell_ranking import MU_SOURCE
 
-    sell = get_plugin("sell_ranking").params_schema()["mu_source"]["options"]
-    names = {o["value"] for o in MU_SOURCE_OPTIONS + sell} | set(_PRODUCER_SCORE_MODELS)
+    names = {o["value"] for o in MU_SOURCE_OPTIONS} | {MU_SOURCE} | set(_PRODUCER_SCORE_MODELS)
     return names - {""}
 
 

@@ -128,20 +128,14 @@ sink は **ContextVar**。`execute` のシグネチャは `(params, db)` に固�
 
 ## `plugins/sell_ranking.py`
 
-売り候補ランキング（保有銘柄の売り時）。買い系の逆観点（割高度 gap_ratio 反転・業績悪化・**ネットキャッシュ余力 nc_ratio 毀損**・価格モメンタム）を最新年度ユニバースで winsorize+z 標準化して合成し、相対ランキング＋SELL/REDUCE/HOLD 絶対ラベル（トレンド補正）を付与。
+売り候補ランキング。**手法は 1 つだけ**（ADR-0071）: 保有を M-6（`MU_SOURCE="macro_enet"`）の現在μ̂ の昇順に並べ、μ̂ がそろった m 社の先頭 `m // SELL_QUANTILES`（=5）社に `SELL`、残りに `HOLD`、μ̂ 無しは「データ不足」で末尾（`assign_actions`）。パラメータは `holdings` だけ。
 
-- `nc_ratio` は VIEW にも同名列があるが `_resolve_metric` が BS3列から実行時計算する（VIEW 側は `ROUND(...,4)` 付きで式が一致しないため・net_cash_analysis の `compute_*` を再利用）。保有は都度入力（サーバ非保存）・購入単価は損益表示のみ。`depends_on=["sector_ols"]`（gap_ratio 用）。価格モメンタムは `stock_price_weekly`。
-- **転送列は `SELL_SELECT_COLS`（97列 → 18列＝表示9＋VIEW指標6＋`nc_ratio` の入力3）**（#482）。`recommend.SELECT_COLS` と同じく `SELL_METRICS` から導出するので、指標を足せば転送列が自動追従する（列リストの二重管理をしない）。
-- **週次は `week_start >= today − 400日`＋500社チャンク＋3列**（#482）。400日は 52週ドローダウン（`closes[-52:]`＝364日）に余裕1ヶ月を足した値で情報損失ゼロ。下限は PK 第2列の `week_start` へ掛けて範囲スキャンにする（`trade_date` は非インデックス列）。
-  - `recommend.compute_momentum_z` の `row_number() OVER`（各社最終バー1本）は**流用できない**——`_compute_trend` は13週前と52週高値を見るので系列そのものが要る。
-  - `macro_snapshots.load_weekly_prices_chunked` も**流用できない**：①対象が `Company` 全社固定で保有20銘柄には過剰 ②戻り値は常に全履歴（#480 で DB からは差分だけ引くようになったが、キャッシュとマージして**返す形は全履歴のまま**＝学習用ローダーの契約は不変） ③`week_start` を返さない（#480 後も意図的にそのまま。差分の切り出しは ISO 週の不変条件を使って `trade_date` で行う） ④`_VOLUME_NOT_LOADED` 番兵は volume 用で不要。
-- **μ／−R_macro 観点の出所は `mu_source` トグル**（M-1 `macro_risk_return`／M-3 `macro_dlm`／M-6 `macro_enet`＝**既定**・#396/#402。M-4 は退役・ADR-0044／M-2 は供給者から降ろした・ADR-0052）で切替——選択 producer の `read_producer_scores` を読み、未実行なら graceful-degrade（`mu_available=false`）。
-- **R3 足切りゲートは `r1_prime`（M-1=予測SE／M-2・M-6=コンフォーマル区間半幅・ADR-0020/#365）で M-1・M-2・M-6 とも機能**（M-3/M-4 は r1_prime 不在で無効・`r1_prime=None` はゲート素通り）。
-- **`mu_asof`（producer スコアの代表 as-of・最古・古い銘柄数）を返却**（`database.get_producer_asof`・#417。M-1 は `macro_beta_meta.hyperparams.data_asof`＝推論時の最終週次バーから・#781。スコアはあるが日付の記録が無いときは日付が None の dict を返し、画面は「as-of 不明」と出す）。
-
-依存先: `plugins/utils.py`, `database.py`, `plugins.net_cash_analysis`
-
----
+- 下位の切り方は `macro_snapshots.in_layer_short_side` と同じ（昇順の先頭 m // 5）。m < 5 は売りなし（切り上げ規則は未測定なので足さない）。
+- `depends_on=["macro_enet"]`。μ̂ が永続化されていなければ runner が 400。μ̂ の as-of は `get_producer_asof`。
+- **転送列は `SELL_SELECT_COLS`（表示と損益フォールバックの 8 列）**（#482）。指標は読まない。
+- **週次は `week_start >= today − 400日`＋500社チャンク＋3列**（#482）。トレンド（13週リターン・52週高値からの下落）と損益は**参考表示のみ**で並びにも札にも使わない。
+  - `recommend.compute_momentum_z` の `row_number() OVER` と `macro_snapshots.load_weekly_prices_chunked` は流用できない（系列そのものが要る・対象が全社固定）。
+- 外したもの: 財務指標のプリセットと観点ウェイト（`PRESETS`/`SELL_METRICS`）、`mu_source`（M-1/M-3）、絶対閾値と `REDUCE`、タイミング補正、R3 足切り。採点式 `sell_score` は上限版の計測のため `scripts/sell_mu_source_bakeoff.py` へ移した。
 
 ## `plugins/macro_snapshots.py`
 
