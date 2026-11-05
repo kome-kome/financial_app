@@ -167,6 +167,15 @@ ADR-0047 の「プールに champion を置くので best ≥ champion」は、*
 - 2 段の選び方の初回: 共通 18 期の rank-IC の 1 位と上位10社超過の最大が同じ候補（今の本番の設定）で、2 段目の入れ替わりは
   無かった（同点の集合 4/5 件）。決定 3 の戻す規則は「2 段目が入れ替えた周回」だけを数えるので、0/3 のまま
 
+## 追記（2026-11-05・#1112）: M-6 の内側の基準は据え置き、探索の周回の初回は 2 日で反映
+
+- 決定 7: 事前登録どおりの計測（日中枠・15.8 分）で、内側を rank-IC で選ぶ版は共通域の買いの rank-IC が −0.0050（p=0.254）で
+  有意に上がらず、売り側spread は −0.0041（p=0.004）で有意に悪かった。判定は**据え置き**で、`macro_enet._INNER_SCORE` は `mse` のまま。
+  参考の上位10社超過 +0.0483 は検定しない値なので覆さない。数値と出典は [docs/prereg/m6-inner-score.md](../prereg/m6-inner-score.md) の「結果」
+- 決定 4・5: 周回の初回（2026-11-04 開始）は 2 日目（11/05）に 150/150 件を回し切り、確かめ直してから本番へ 1 回反映した
+  （`tuning_cycle:macro_gbdt` の `last_finished_at` と `result.persisted=true`・`plugin_tuned_params` の `tuned_at` を DB で確認）。
+  選ばれたのは今の本番と同じ設定で、2 段目の入れ替わりは無かった（戻す規則は 0/3 のまま）。月次の M-2 ステップの撤去は #1118
+
 ## 関連
 
 - [ADR-0007](0007-hyperparameter-tuning-shared-engine.md)（探索の目的関数）・[ADR-0047](0047-tuning-gate-compares-on-one-panel.md)（champion・種で確かめ直す段）・
